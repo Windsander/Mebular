@@ -2,13 +2,39 @@
   "name": "mebular",
   "version": "0.1.0",
   "private": true,
-  "description": "",
+  "description": "分布式存储的跨广域网记忆系统",
   "license": "MIT",
+  "type": "module",
   "scripts": {
-    "dev": "echo \"No dev script configured\" && exit 1",
-    "build": "echo \"No build script configured\" && exit 1",
-    "lint": "echo \"No lint script configured\" && exit 1"
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
+    "lint": "eslint src --ext .ts",
+    "dev": "node --loader ts-node/esm src/index.ts"
   },
-  "dependencies": {},
-  "devDependencies": {}
+  "dependencies": {
+    "ulid": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.11.24",
+    "@typescript-eslint/eslint-plugin": "^7.0.2",
+    "@typescript-eslint/parser": "^7.0.2",
+    "eslint": "^8.57.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "transform": {
+      "^.+\\.tsx?$": "ts-jest"
+    },
+    "moduleFileExtensions": ["ts", "tsx", "js", "jsx", "json", "node"],
+    "testMatch": ["**/tests/**/*.test.ts"],
+    "collectCoverageFrom": ["src/**/*.ts", "!src/**/*.d.ts"]
+  }
 }

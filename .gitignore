@@ -46,7 +46,7 @@ Thumbs.db
 coverage
 .nyc_output
 
-# Misc
-*.tsbuildinfo
-.timeout
-ureport
+# Mebular 設計文件（本地留存，不進遠端）
+docs/
+design-notes/
+docs.design/

@@ -1,0 +1,296 @@
+// GraphStore - 图存储核心实现
+
+import type { StorageAdapter } from '../storage/StorageAdapter.js';
+import type { Node, Edge, NodeFilter, EdgeFilter } from '../types/index.js';
+import { VectorClock } from '../sync/vectorclock/VectorClock.js';
+import { ulid } from 'ulid';
+
+export interface GraphStoreConfig {
+  storage: StorageAdapter;
+  author: string;
+  signatureManager?: any;
+}
+
+export class GraphStore {
+  private storage: StorageAdapter;
+  private author: string;
+  private clock: VectorClock;
+  private signatureManager?: any;
+
+  constructor(config: GraphStoreConfig) {
+    this.storage = config.storage;
+    this.author = config.author;
+    this.clock = new VectorClock();
+    this.signatureManager = config.signatureManager;
+  }
+
+  async createNode(type: string, content: Record<string, unknown>, labels?: string[]): Promise<Node> {
+    const now = Date.now();
+    const node: Node = {
+      id: ulid(),
+      type,
+      content,
+      labels: labels || [],
+      validFrom: now,
+      validTo: 9999999999999,
+      createdBy: this.author,
+    };
+
+    this.clock.increment(this.author);
+    node.clocks = this.clock.toJSON();
+    node.vectorClock = this.clock.toJSON();
+
+    if (this.signatureManager) {
+      node.signature = await this.signatureManager.sign(JSON.stringify(node));
+    } else {
+      node.signature = '';
+    }
+
+    await this.storage.putNode(node);
+    return node;
+  }
+
+  async updateNode(id: string, updates: Partial<Node>): Promise<Node | null> {
+    const existing = await this.storage.getNode(id);
+    if (!existing) {
+      return null;
+    }
+
+    const updated: Node = {
+      ...existing,
+      ...updates,
+      id,
+      updatedAt: Date.now(),
+      updatedBy: this.author,
+      vectorClock: this.clock.toJSON(),
+    };
+
+    this.clock.increment(this.author);
+    updated.clocks = this.clock.toJSON();
+    updated.vectorClock = this.clock.toJSON();
+
+    if (this.signatureManager) {
+      updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
+    }
+
+    await this.storage.putNode(updated);
+    return updated;
+  }
+
+  async deleteNode(id: string): Promise<boolean> {
+    const existing = await this.storage.getNode(id);
+    if (!existing) {
+      return false;
+    }
+
+    const deleted: Node = {
+      ...existing,
+      deletedAt: Date.now(),
+      deletedBy: this.author,
+      validTo: Date.now(),
+    };
+
+    this.clock.increment(this.author);
+    deleted.clocks = this.clock.toJSON();
+
+    if (this.signatureManager) {
+      deleted.signature = await this.signatureManager.sign(JSON.stringify(deleted));
+    }
+
+    await this.storage.putNode(deleted);
+    return true;
+  }
+
+  async getNode(id: string): Promise<Node | null> {
+    return this.storage.getNode(id);
+  }
+
+  async listNodes(filter?: NodeFilter): Promise<Node[]> {
+    return this.storage.listNodes(filter || {});
+  }
+
+  async createEdge(source: string, target: string, relation: string, labels?: string[]): Promise<Edge> {
+    const now = Date.now();
+    const edge: Edge = {
+      id: ulid(),
+      source,
+      target,
+      relation,
+      labels: labels || [],
+      createdBy: this.author,
+      validFrom: now,
+      validTo: 9999999999999,
+    };
+
+    this.clock.increment(this.author);
+    edge.clocks = this.clock.toJSON();
+    edge.vectorClock = this.clock.toJSON();
+
+    if (this.signatureManager) {
+      edge.signature = await this.signatureManager.sign(JSON.stringify(edge));
+    } else {
+      edge.signature = '';
+    }
+
+    await this.storage.putEdge(edge);
+    return edge;
+  }
+
+  async updateEdge(id: string, updates: Partial<Edge>): Promise<Edge | null> {
+    const existing = await this.storage.getEdge(id);
+    if (!existing) {
+      return null;
+    }
+
+    const updated: Edge = {
+      ...existing,
+      ...updates,
+      id,
+      updatedAt: Date.now(),
+      updatedBy: this.author,
+      vectorClock: this.clock.toJSON(),
+    };
+
+    this.clock.increment(this.author);
+    updated.clocks = this.clock.toJSON();
+
+    if (this.signatureManager) {
+      updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
+    }
+
+    await this.storage.putEdge(updated);
+    return updated;
+  }
+
+  async deleteEdge(id: string): Promise<boolean> {
+    const existing = await this.storage.getEdge(id);
+    if (!existing) {
+      return false;
+    }
+
+    const deleted: Edge = {
+      ...existing,
+      deletedAt: Date.now(),
+      deletedBy: this.author,
+      validTo: Date.now(),
+    };
+
+    this.clock.increment(this.author);
+    deleted.clocks = this.clock.toJSON();
+
+    if (this.signatureManager) {
+      deleted.signature = await this.signatureManager.sign(JSON.stringify(deleted));
+    }
+
+    await this.storage.putEdge(deleted);
+    return true;
+  }
+
+  async getEdge(id: string): Promise<Edge | null> {
+    return this.storage.getEdge(id);
+  }
+
+  async listEdges(filter?: EdgeFilter): Promise<Edge[]> {
+    return this.storage.listEdges(filter || {});
+  }
+
+  async getNeighbors(nodeId: string, direction?: 'incoming' | 'outgoing', relation?: string): Promise<Edge[]> {
+    const filter: EdgeFilter = {};
+    if (direction === 'incoming') {
+      filter.target = nodeId;
+    } else if (direction === 'outgoing') {
+      filter.source = nodeId;
+    } else {
+      // Both directions
+      const incoming = await this.storage.listEdges({ target: nodeId, ...(relation ? { relation } : {}) });
+      const outgoing = await this.storage.listEdges({ source: nodeId, ...(relation ? { relation } : {}) });
+      return [...incoming, ...outgoing];
+    }
+
+    if (relation) {
+      filter.relation = relation;
+    }
+
+    return this.storage.listEdges(filter);
+  }
+
+  async batchAddNodes(nodes: Array<{ type: string; content: Record<string, unknown>; labels?: string[] }>): Promise<Node[]> {
+    const created: Node[] = [];
+    for (const nodeData of nodes) {
+      const node = await this.createNode(nodeData.type, nodeData.content, nodeData.labels);
+      created.push(node);
+    }
+    return created;
+  }
+
+  async batchAddEdges(edges: Array<{ source: string; target: string; relation: string; labels?: string[] }>): Promise<Edge[]> {
+    const created: Edge[] = [];
+    for (const edgeData of edges) {
+      const edge = await this.createEdge(edgeData.source, edgeData.target, edgeData.relation, edgeData.labels);
+      created.push(edge);
+    }
+    return created;
+  }
+
+  async snapshot(): Promise<{ nodes: Node[]; edges: Edge[]; clock: Record<string, number> }> {
+    const nodes = await this.storage.listNodes({});
+    const edges = await this.storage.listEdges({});
+    return {
+      nodes,
+      edges,
+      clock: this.clock.toJSON(),
+    };
+  }
+
+  async merge(snapshot: { nodes: Node[]; edges: Edge[]; clock: Record<string, number> }): Promise<void> {
+    const existingNodes = await this.storage.listNodes({});
+    const existingEdges = await this.storage.listEdges({});
+    const existingNodeIds = new Set(existingNodes.map(n => n.id));
+    const existingEdgeIds = new Set(existingEdges.map(e => e.id));
+
+    const incomingNodeIds = new Set(snapshot.nodes.map(n => n.id));
+    const incomingEdgeIds = new Set(snapshot.edges.map(e => e.id));
+
+    // Handle deleted nodes/edges
+    for (const existingNode of existingNodes) {
+      if (!incomingNodeIds.has(existingNode.id) && existingNode.deletedAt === undefined) {
+        await this.deleteNode(existingNode.id);
+      }
+    }
+
+    for (const existingEdge of existingEdges) {
+      if (!incomingEdgeIds.has(existingEdge.id) && existingEdge.deletedAt === undefined) {
+        await this.deleteEdge(existingEdge.id);
+      }
+    }
+
+    // Add/update nodes
+    for (const incomingNode of snapshot.nodes) {
+      if (existingNodeIds.has(incomingNode.id)) {
+        await this.updateNode(incomingNode.id, incomingNode);
+      } else {
+        await this.storage.putNode(incomingNode);
+      }
+    }
+
+    // Add/update edges
+    for (const incomingEdge of snapshot.edges) {
+      if (existingEdgeIds.has(incomingEdge.id)) {
+        await this.updateEdge(incomingEdge.id, incomingEdge);
+      } else {
+        await this.storage.putEdge(incomingEdge);
+      }
+    }
+
+    // Merge clocks
+    this.clock.merge(VectorClock.fromJSON(snapshot.clock));
+  }
+
+  getCurrentClock(): VectorClock {
+    return this.clock;
+  }
+
+  async close(): Promise<void> {
+    // nothing to do
+  }
+}

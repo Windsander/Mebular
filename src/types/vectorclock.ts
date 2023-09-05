@@ -1,4 +1,4 @@
-// 向量时钟类型
+// 向量时钟接口 - 供 VectorClock 类实现
 
 export interface VectorClockShape {
   clocks: Record<string, number>;

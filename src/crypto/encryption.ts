@@ -1,50 +1,50 @@
 // 加密模块 - 使用标准 Web Crypto API
 
 export class EncryptionManager {
+  private algorithm = 'AES-GCM';
+  private key?: CryptoKey;
+
   constructor() {}
 
-  async encrypt(plaintext: string, key: Uint8Array): Promise<{ ciphertext: ArrayBuffer; iv: Uint8Array }> {
+  async generateKey(): Promise<CryptoKey> {
+    this.key = await crypto.subtle.generateKey(
+      { name: this.algorithm, length: 256 },
+      true,
+      ['encrypt', 'decrypt']
+    );
+    return this.key;
+  }
+
+  async encrypt(plaintext: string): Promise<{ ciphertext: ArrayBuffer; iv: Uint8Array }> {
+    if (!this.key) {
+      throw new Error('Key not initialized. Call generateKey() first.');
+    }
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const encoded = new TextEncoder().encode(plaintext);
-    const rawKey = new Uint8Array(key.buffer, key.byteOffset, key.byteLength);
-
-    const cryptoKey = await crypto.subtle.importKey(
-      'raw', rawKey,
-      { name: 'AES-GCM' },
-      false,
-      ['encrypt']
+    const cipher = await crypto.subtle.encrypt(
+      { name: this.algorithm, iv: iv as unknown as BufferSource },
+      this.key,
+      encoded.buffer as ArrayBuffer
     );
-
-    const ciphertext = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv },
-      cryptoKey,
-      encoded
-    );
-
-    return { ciphertext, iv };
+    return { ciphertext: cipher, iv };
   }
 
-  async decrypt(ciphertext: ArrayBuffer, iv: Uint8Array, key: Uint8Array): Promise<string> {
-    const rawKey = new Uint8Array(key.buffer, key.byteOffset, key.byteLength);
-
-    const cryptoKey = await crypto.subtle.importKey(
-      'raw', rawKey,
-      { name: 'AES-GCM' },
-      false,
-      ['decrypt']
-    );
-
-    const decrypted = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv },
-      cryptoKey,
+  async decrypt(ciphertext: ArrayBuffer, iv: Uint8Array): Promise<string> {
+    if (!this.key) {
+      throw new Error('Key not initialized. Call generateKey() first.');
+    }
+    const plainBuf = await crypto.subtle.decrypt(
+      { name: this.algorithm, iv: iv as unknown as BufferSource },
+      this.key,
       ciphertext
     );
-
-    return new TextDecoder().decode(decrypted);
+    return new TextDecoder().decode(plainBuf);
   }
 
-  generateKey(): Promise<Uint8Array> {
-    const key = crypto.getRandomValues(new Uint8Array(32));
-    return Promise.resolve(key);
+  async exportKey(): Promise<ArrayBuffer> {
+    if (!this.key) {
+      throw new Error('Key not initialized. Call generateKey() first.');
+    }
+    return crypto.subtle.exportKey('raw', this.key);
   }
 }

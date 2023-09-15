@@ -1,7 +1,5 @@
 // 签名模块 - 使用 Web Crypto API 实现 Ed25519 签名
 
-import type { Signature } from '../types/common.js';
-
 export class SignatureManager {
   private keyPair: { publicKey: CryptoKey; privateKey: CryptoKey } | null = null;
 
@@ -11,12 +9,10 @@ export class SignatureManager {
     const keyPair = await crypto.subtle.generateKey(
       {
         name: 'Ed25519',
-        namedCurve: 'Ed25519',
       },
       true,
       ['sign', 'verify']
     );
-
     this.keyPair = keyPair;
     return keyPair;
   }

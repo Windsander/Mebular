@@ -1,6 +1,6 @@
 // 内存存储实现
 
-import type { StorageAdapter, NodeFilter, EdgeFilter, EventFilter, StorageSnapshot } from './StorageAdapter.js';
+import type { StorageAdapter, NodeFilter, EdgeFilter, EventFilter } from './StorageAdapter.js';
 import type { Node, Edge, Event } from '../types/index.js';
 import { ulid } from 'ulid';
 
@@ -34,19 +34,24 @@ export class MemoryStorage implements StorageAdapter {
       if (filter.type) {
         result = result.filter(n => n.type === filter.type);
       }
-      if (filter.author) {
-        result = result.filter(n => n.author === filter.author);
+      if (filter.createdBy) {
+        result = result.filter(n => n.createdBy === filter.createdBy);
       }
-      if (filter.fromTime) {
+      if (filter.author) {
+        result = result.filter(n => n.createdBy === filter.author);
+      }
+      if (filter.validFrom !== undefined) {
+        const validFrom = filter.validFrom;
         result = result.filter(n => {
-          const vf = n.validFromBigInt || BigInt(n.validFrom || 0);
-          return vf >= BigInt(filter.fromTime);
+          const vf = n.validFrom ?? 0;
+          return vf >= validFrom;
         });
       }
-      if (filter.toTime) {
+      if (filter.validTo !== undefined) {
+        const validTo = filter.validTo;
         result = result.filter(n => {
-          const vt = n.validToBigInt || n.validTo ? BigInt(n.validTo) : BigInt('9999999999999');
-          return vt <= BigInt(filter.toTime);
+          const vt = n.validTo ?? 9999999999999;
+          return vt <= validTo;
         });
       }
       if (filter.limit) {
@@ -105,9 +110,12 @@ export class MemoryStorage implements StorageAdapter {
     }
     this.events.push(event);
 
-    const clocks = event.vectorClock.clocks;
-    if (clocks[event.author]) {
-      this.latestClock[event.author] = Math.max(this.latestClock[event.author] || 0, clocks[event.author]);
+    const clocks = event.vectorClock;
+    if (clocks && event.author && event.author in clocks) {
+      const clockVal = clocks[event.author];
+      if (clockVal !== undefined) {
+        this.latestClock[event.author] = Math.max(this.latestClock[event.author] || 0, clockVal);
+      }
     }
   }
 
@@ -138,11 +146,13 @@ export class MemoryStorage implements StorageAdapter {
       if (filter.author) {
         result = result.filter(e => e.author === filter.author);
       }
-      if (filter.fromTime) {
-        result = result.filter(e => e.timestamp >= filter.fromTime!);
+      if (filter.fromTime !== undefined) {
+        const fromTime = filter.fromTime;
+        result = result.filter(e => e.timestamp >= fromTime);
       }
-      if (filter.toTime) {
-        result = result.filter(e => e.timestamp <= filter.toTime!);
+      if (filter.toTime !== undefined) {
+        const toTime = filter.toTime;
+        result = result.filter(e => e.timestamp <= toTime);
       }
       if (filter.limit) {
         result = result.slice(filter.offset ?? 0, (filter.offset ?? 0) + filter.limit);

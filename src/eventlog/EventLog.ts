@@ -5,7 +5,7 @@ import { VectorClock } from '../sync/vectorclock/index.js';
 import type { StorageAdapter } from '../storage/StorageAdapter.js';
 import { ulid } from 'ulid';
 
-export type { Event, EventFilter, EventData, EventType };
+export type { Event, EventFilter, EventType } from '../types/event.js';
 
 export class EventLog {
   private storage: StorageAdapter;

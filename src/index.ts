@@ -1,7 +1,7 @@
 // Mebular 模块入口 - 统一导出
 
 export * from './types/index.js';
-export { SignatureManager, type Signature } from './crypto/signature.js';
+export { SignatureManager } from './crypto/signature.js';
 export { EncryptionManager } from './crypto/encryption.js';
 export { EventLog } from './eventlog/index.js';
 export { SyncManager } from './sync/index.js';

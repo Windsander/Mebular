@@ -31,9 +31,13 @@ export class GraphStore {
       type,
       content,
       labels: labels || [],
+      createdBy: this.author,
+      signature: '',
+      createdAt: now,
+      updatedAt: now,
       validFrom: now,
       validTo: 9999999999999,
-      createdBy: this.author,
+      tags: [],
     };
 
     this.clock.increment(this.author);
@@ -42,8 +46,6 @@ export class GraphStore {
 
     if (this.signatureManager) {
       node.signature = await this.signatureManager.sign(JSON.stringify(node));
-    } else {
-      node.signature = '';
     }
 
     await this.storage.putNode(node);
@@ -56,12 +58,17 @@ export class GraphStore {
       return null;
     }
 
-    const updated: Node = {
+    const now = Date.now();
+    const updated = {
       ...existing,
       ...updates,
       id,
-      updatedAt: Date.now(),
+      updatedAt: now,
       updatedBy: this.author,
+      createdAt: existing.createdAt,
+      validFrom: existing.validFrom,
+      validTo: existing.validTo,
+      tags: existing.tags,
       vectorClock: this.clock.toJSON(),
     };
 
@@ -83,15 +90,18 @@ export class GraphStore {
       return false;
     }
 
-    const deleted: Node = {
+    const now = Date.now();
+    const deleted = {
       ...existing,
-      deletedAt: Date.now(),
+      deletedAt: now,
       deletedBy: this.author,
-      validTo: Date.now(),
+      validTo: now,
+      updatedAt: now,
     };
 
     this.clock.increment(this.author);
     deleted.clocks = this.clock.toJSON();
+    deleted.vectorClock = this.clock.toJSON();
 
     if (this.signatureManager) {
       deleted.signature = await this.signatureManager.sign(JSON.stringify(deleted));
@@ -113,11 +123,15 @@ export class GraphStore {
     const now = Date.now();
     const edge: Edge = {
       id: ulid(),
+      type: 'edge',
       source,
       target,
       relation,
-      labels: labels || [],
       createdBy: this.author,
+      signature: '',
+      createdAt: now,
+      updatedAt: now,
+      labels: labels || [],
       validFrom: now,
       validTo: 9999999999999,
     };
@@ -128,8 +142,6 @@ export class GraphStore {
 
     if (this.signatureManager) {
       edge.signature = await this.signatureManager.sign(JSON.stringify(edge));
-    } else {
-      edge.signature = '';
     }
 
     await this.storage.putEdge(edge);
@@ -142,17 +154,22 @@ export class GraphStore {
       return null;
     }
 
-    const updated: Edge = {
+    const now = Date.now();
+    const updated = {
       ...existing,
       ...updates,
       id,
-      updatedAt: Date.now(),
+      updatedAt: now,
       updatedBy: this.author,
+      createdAt: existing.createdAt,
+      validFrom: existing.validFrom,
+      validTo: existing.validTo,
       vectorClock: this.clock.toJSON(),
     };
 
     this.clock.increment(this.author);
     updated.clocks = this.clock.toJSON();
+    updated.vectorClock = this.clock.toJSON();
 
     if (this.signatureManager) {
       updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
@@ -168,15 +185,18 @@ export class GraphStore {
       return false;
     }
 
-    const deleted: Edge = {
+    const now = Date.now();
+    const deleted = {
       ...existing,
-      deletedAt: Date.now(),
+      deletedAt: now,
       deletedBy: this.author,
-      validTo: Date.now(),
+      validTo: now,
+      updatedAt: now,
     };
 
     this.clock.increment(this.author);
     deleted.clocks = this.clock.toJSON();
+    deleted.vectorClock = this.clock.toJSON();
 
     if (this.signatureManager) {
       deleted.signature = await this.signatureManager.sign(JSON.stringify(deleted));
@@ -194,23 +214,17 @@ export class GraphStore {
     return this.storage.listEdges(filter || {});
   }
 
-  async getNeighbors(nodeId: string, direction?: 'incoming' | 'outgoing', relation?: string): Promise<Edge[]> {
-    const filter: EdgeFilter = {};
+  async getNeighbors(nodeId: string, direction?: 'incoming' | 'outgoing' | 'both'): Promise<Edge[]> {
+    const filter: EdgeFilter = { limit: 100 };
     if (direction === 'incoming') {
       filter.target = nodeId;
     } else if (direction === 'outgoing') {
       filter.source = nodeId;
     } else {
-      // Both directions
-      const incoming = await this.storage.listEdges({ target: nodeId, ...(relation ? { relation } : {}) });
-      const outgoing = await this.storage.listEdges({ source: nodeId, ...(relation ? { relation } : {}) });
+      const incoming = await this.storage.listEdges({ target: nodeId });
+      const outgoing = await this.storage.listEdges({ source: nodeId });
       return [...incoming, ...outgoing];
     }
-
-    if (relation) {
-      filter.relation = relation;
-    }
-
     return this.storage.listEdges(filter);
   }
 
@@ -248,49 +262,23 @@ export class GraphStore {
     const existingNodeIds = new Set(existingNodes.map(n => n.id));
     const existingEdgeIds = new Set(existingEdges.map(e => e.id));
 
-    const incomingNodeIds = new Set(snapshot.nodes.map(n => n.id));
-    const incomingEdgeIds = new Set(snapshot.edges.map(e => e.id));
-
-    // Handle deleted nodes/edges
-    for (const existingNode of existingNodes) {
-      if (!incomingNodeIds.has(existingNode.id) && existingNode.deletedAt === undefined) {
-        await this.deleteNode(existingNode.id);
-      }
-    }
-
-    for (const existingEdge of existingEdges) {
-      if (!incomingEdgeIds.has(existingEdge.id) && existingEdge.deletedAt === undefined) {
-        await this.deleteEdge(existingEdge.id);
-      }
-    }
-
-    // Add/update nodes
-    for (const incomingNode of snapshot.nodes) {
-      if (existingNodeIds.has(incomingNode.id)) {
-        await this.updateNode(incomingNode.id, incomingNode);
+    for (const node of snapshot.nodes) {
+      if (!existingNodeIds.has(node.id)) {
+        await this.storage.putNode(node);
       } else {
-        await this.storage.putNode(incomingNode);
+        const existing = await this.storage.getNode(node.id);
+        if (existing && node.updatedAt > existing.updatedAt) {
+          await this.storage.putNode(node);
+        }
       }
     }
 
-    // Add/update edges
-    for (const incomingEdge of snapshot.edges) {
-      if (existingEdgeIds.has(incomingEdge.id)) {
-        await this.updateEdge(incomingEdge.id, incomingEdge);
-      } else {
-        await this.storage.putEdge(incomingEdge);
+    for (const edge of snapshot.edges) {
+      if (!existingEdgeIds.has(edge.id)) {
+        await this.storage.putEdge(edge);
       }
     }
 
-    // Merge clocks
-    this.clock.merge(VectorClock.fromJSON(snapshot.clock));
-  }
-
-  getCurrentClock(): VectorClock {
-    return this.clock;
-  }
-
-  async close(): Promise<void> {
-    // nothing to do
+    this.clock.merge(new VectorClock(this.clock.toJSON()));
   }
 }

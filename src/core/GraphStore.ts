@@ -2,7 +2,7 @@
 
 import type { StorageAdapter } from '../storage/StorageAdapter.js';
 import type { Node, Edge, NodeFilter, EdgeFilter } from '../types/index.js';
-import { VectorClock } from '../sync/vectorclock/VectorClock.js';
+import { VectorClock } from '../sync/index.js';
 import { ulid } from 'ulid';
 
 export interface GraphStoreConfig {

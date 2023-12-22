@@ -34,6 +34,11 @@
       "^.+\\.tsx?$": "ts-jest"
     },
     "moduleFileExtensions": ["ts", "tsx", "js", "jsx", "json", "node"],
+    "moduleNameMapper": {
+      "^src/(.*)\\.js$": "<rootDir>/src/$1.ts",
+      "^tests/(.*)\\.js$": "<rootDir>/tests/$1.ts",
+      "^(.*)\\.js$": "$1"
+    },
     "testMatch": ["**/tests/**/*.test.ts"],
     "collectCoverageFrom": ["src/**/*.ts", "!src/**/*.d.ts"]
   }

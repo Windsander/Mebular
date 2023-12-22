@@ -3,6 +3,7 @@
 export * from './types/index.js';
 export { SignatureManager } from './crypto/signature.js';
 export { EncryptionManager } from './crypto/encryption.js';
+export { IdentityManager } from './crypto/IdentityManager.js';
 export { EventLog } from './eventlog/index.js';
 export { SyncManager } from './sync/index.js';
 export { VectorClock } from './sync/index.js';

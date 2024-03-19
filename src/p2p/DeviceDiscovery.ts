@@ -10,7 +10,7 @@ export interface DiscoveryOptions {
 }
 
 export class DeviceDiscovery extends EventEmitter {
-  private options: DiscoveryOptions;
+  private options: Required<DiscoveryOptions>;
   private running = false;
   private discoveredPeers: Map<string, PeerInfo> = new Map();
   private discoveryInterval: NodeJS.Timeout | null = null;
@@ -18,9 +18,9 @@ export class DeviceDiscovery extends EventEmitter {
   constructor(options: DiscoveryOptions = {}) {
     super();
     this.options = {
-      timeout: 30000,
-      interval: 5000,
-      maxPeers: 100,
+      timeout: options.timeout ?? 30000,
+      interval: options.interval ?? 5000,
+      maxPeers: options.maxPeers ?? 100,
     };
   }
 
@@ -32,7 +32,7 @@ export class DeviceDiscovery extends EventEmitter {
 
     this.discoveryInterval = setInterval(() => {
       this.discoverPeers();
-    }, this.options.interval ?? 5000);
+    }, this.options.interval);
   }
 
   async stop(): Promise<void> {
@@ -52,27 +52,20 @@ export class DeviceDiscovery extends EventEmitter {
       return;
     }
 
-    const peers = await this.findPeers();
-    for (const peer of peers) {
-      const key = peer.peerId.id;
-      if (!this.discoveredPeers.has(key)) {
-        this.discoveredPeers.set(key, peer);
-        this.emit('peer-discovered', peer);
-      }
-    }
-
-    const maxPeers = this.options.maxPeers ?? 100;
+    const maxPeers = this.options.maxPeers;
     if (this.discoveredPeers.size > maxPeers) {
       const peersToRemove = this.discoveredPeers.size - maxPeers;
       const entries = Array.from(this.discoveredPeers.entries());
-      entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
+      if (entries.length > 0) {
+        entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
 
-      for (let i = 0; i < peersToRemove; i++) {
-        const entry = entries[i];
-        if (entry !== undefined) {
-          const key = entry[0];
-          if (key !== undefined) {
-            this.discoveredPeers.delete(key);
+        for (let i = 0; i < peersToRemove; i++) {
+          const entry = entries[i];
+          if (entry !== undefined) {
+            const key = entry[0];
+            if (key !== undefined) {
+              this.discoveredPeers.delete(key);
+            }
           }
         }
       }
@@ -84,7 +77,7 @@ export class DeviceDiscovery extends EventEmitter {
   }
 
   getPeer(peerId: PeerId): PeerInfo | null {
-    return this.discoveredPeers.get(peerId.id) || null;
+    return this.discoveredPeers.get(peerId.id) ?? null;
   }
 
   getAllPeers(): PeerInfo[] {

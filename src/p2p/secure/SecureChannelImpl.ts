@@ -32,15 +32,15 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
   constructor(connection: Connection, options: SecureChannelOptions = {}) {
     super();
     this.connection = connection;
-    this.options = {
-      encryption: 'TLS',
-      keyExchange: 'X25519',
-      sessionKeyRotation: true,
-      sessionKeyLifetime: 3600000,
-      ...options,
-    };
-    this.sessionKeyLifetime = this.options.sessionKeyLifetime;
-    this.sessionKeyRotation = this.options.sessionKeyRotation;
+    this.options = options;
+
+    // irectly use user-provided values with defaults
+    if (options.sessionKeyLifetime !== undefined) {
+      this.sessionKeyLifetime = options.sessionKeyLifetime;
+    }
+    if (options.sessionKeyRotation !== undefined) {
+      this.sessionKeyRotation = options.sessionKeyRotation;
+    }
   }
 
   async start(): Promise<SecureChannel> {

@@ -1,4 +1,4 @@
-// 连接管理器
+// 連接管理器
 
 import { PeerId, Connection, ConnectionState } from '../index.js';
 import { EventEmitter } from 'events';
@@ -17,7 +17,12 @@ export class ConnectionManager extends EventEmitter {
 
   constructor(options: ConnectionManagerOptions = {}) {
     super();
-    this.options = options;
+    this.options = {
+      maxConnections: 100,
+      connectTimeout: 30000,
+      keepAliveInterval: 30000,
+      ...options,
+    };
   }
 
   async start(): Promise<void> {

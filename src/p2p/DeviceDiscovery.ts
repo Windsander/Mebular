@@ -21,7 +21,6 @@ export class DeviceDiscovery extends EventEmitter {
       timeout: 30000,
       interval: 5000,
       maxPeers: 100,
-      ...options,
     };
   }
 
@@ -33,7 +32,7 @@ export class DeviceDiscovery extends EventEmitter {
 
     this.discoveryInterval = setInterval(() => {
       this.discoverPeers();
-    }, this.options.interval);
+    }, this.options.interval ?? 5000);
   }
 
   async stop(): Promise<void> {
@@ -62,8 +61,9 @@ export class DeviceDiscovery extends EventEmitter {
       }
     }
 
-    if (this.discoveredPeers.size > this.options.maxPeers) {
-      const peersToRemove = this.discoveredPeers.size - this.options.maxPeers;
+    const maxPeers = this.options.maxPeers ?? 100;
+    if (this.discoveredPeers.size > maxPeers) {
+      const peersToRemove = this.discoveredPeers.size - maxPeers;
       const entries = Array.from(this.discoveredPeers.entries());
       entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
 

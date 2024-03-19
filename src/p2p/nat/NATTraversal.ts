@@ -22,7 +22,7 @@ export interface RelayServer {
 }
 
 export class NATTraversal extends EventEmitter {
-  private options: NATTraversalOptions;
+  private options: Required<NATTraversalOptions>;
   private running = false;
   private natType: NATType = 'unknown';
   private relayServers: RelayServer[] = [];

@@ -21,6 +21,7 @@ export interface PeerInfo {
   peerId: PeerId;
   name: string;
   addresses: string[];
+  port: number;
   timestamp: number;
 }
 

@@ -1,6 +1,6 @@
 // 加密通信信道
 
-import { Connection, PeerId } from '../index.js';
+import { Connection } from '../index.js';
 import { EventEmitter } from 'events';
 
 export interface SecureChannelOptions {
@@ -20,27 +20,42 @@ export interface SecureChannel {
   rotateSessionKey(): Promise<void>;
 }
 
+export interface SecureChannelKeyConfig {
+  localPrivateKey: CryptoKey;
+  remotePublicKey: Uint8Array;
+}
+
+function bufferSourceFromUint8Array(data: Uint8Array): ArrayBuffer {
+  return data.buffer as ArrayBuffer;
+}
+
 export class SecureChannelImpl extends EventEmitter implements SecureChannel {
   readonly connection: Connection;
   readonly isEncrypted: boolean = true;
-  private options: SecureChannelOptions;
+  private options: Required<SecureChannelOptions>;
   private running = false;
-  private sessionKey: Uint8Array | null = null;
-  private sessionKeyLifetime: number = 3600000;
-  private sessionKeyRotation: boolean = true;
+  private sessionKey: CryptoKey | null = null;
+  private sessionKeyBytes: Uint8Array | null = null;
+  private localPrivateKey: CryptoKey | null = null;
+  private remotePublicKey: Uint8Array | null = null;
+  private remotePublicKeyCrypto: CryptoKey | null = null;
 
   constructor(connection: Connection, options: SecureChannelOptions = {}) {
     super();
     this.connection = connection;
-    this.options = options;
+    this.options = {
+      encryption: 'Noise',
+      keyExchange: 'X25519',
+      sessionKeyRotation: true,
+      sessionKeyLifetime: 3600000,
+      ...options,
+    };
+  }
 
-    // irectly use user-provided values with defaults
-    if (options.sessionKeyLifetime !== undefined) {
-      this.sessionKeyLifetime = options.sessionKeyLifetime;
-    }
-    if (options.sessionKeyRotation !== undefined) {
-      this.sessionKeyRotation = options.sessionKeyRotation;
-    }
+  setKeyConfig(config: SecureChannelKeyConfig): void {
+    this.localPrivateKey = config.localPrivateKey;
+    this.remotePublicKey = config.remotePublicKey;
+    this.emit('key-configured');
   }
 
   async start(): Promise<SecureChannel> {
@@ -48,10 +63,24 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
       throw new Error('SecureChannel already running');
     }
 
+    if (!this.localPrivateKey || !this.remotePublicKey) {
+      throw new Error('Key configuration not set. Call setKeyConfig() first.');
+    }
+
+    // 確保遠程公钥已匯入為 CryptoKey
+    if (!this.remotePublicKeyCrypto) {
+      this.remotePublicKeyCrypto = await crypto.subtle.importKey(
+        'raw',
+        bufferSourceFromUint8Array(this.remotePublicKey),
+        { name: 'X25519' },
+        false,
+        ['deriveKey']
+      );
+    }
+
     await this.negotiateSessionKey();
 
     this.running = true;
-
     return this;
   }
 
@@ -61,6 +90,7 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
     }
 
     this.sessionKey = null;
+    this.sessionKeyBytes = null;
     this.running = false;
 
     await this.connection.close();
@@ -91,7 +121,7 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
   }
 
   getSessionKey(): Uint8Array | null {
-    return this.sessionKey;
+    return this.sessionKeyBytes;
   }
 
   async rotateSessionKey(): Promise<void> {
@@ -103,14 +133,71 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
   }
 
   private async negotiateSessionKey(): Promise<void> {
-    throw new Error('Not implemented');
+    if (!this.localPrivateKey || !this.remotePublicKeyCrypto) {
+      throw new Error('Key configuration not set');
+    }
+
+    // 使用 X25519 推導共享密钥
+    const sharedSecret = await crypto.subtle.deriveKey(
+      {
+        name: 'X25519',
+        public: this.remotePublicKeyCrypto,
+      },
+      this.localPrivateKey,
+      { name: 'AES-GCM', length: 256 },
+      true,
+      ['encrypt', 'decrypt']
+    );
+
+    this.sessionKey = sharedSecret;
+
+    // 匯出密钥字節以便同步訪問
+    const exported = await crypto.subtle.exportKey('raw', sharedSecret);
+    this.sessionKeyBytes = new Uint8Array(exported);
+
+    this.emit('session-established', {
+      keyLength: this.sessionKeyBytes.length * 8,
+    });
   }
 
   private async encrypt(data: Uint8Array): Promise<Uint8Array> {
-    throw new Error('Not implemented');
+    if (!this.sessionKey) {
+      throw new Error('Session key not established');
+    }
+
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv },
+      this.sessionKey,
+      bufferSourceFromUint8Array(data)
+    );
+
+    // 組合 IV + 密文以便傳輸
+    const result = new Uint8Array(iv.length + ciphertext.byteLength);
+    result.set(iv, 0);
+    result.set(new Uint8Array(ciphertext), iv.length);
+    return result;
   }
 
   private async decrypt(data: Uint8Array): Promise<Uint8Array> {
-    throw new Error('Not implemented');
+    if (!this.sessionKey) {
+      throw new Error('Session key not established');
+    }
+
+    if (data.length < 12) {
+      throw new Error('Encrypted message too short');
+    }
+
+    // 從消息開頭提取 IV
+    const iv = data.slice(0, 12);
+    const ciphertext = data.slice(12);
+
+    const plaintext = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv },
+      this.sessionKey,
+      bufferSourceFromUint8Array(ciphertext)
+    );
+
+    return new Uint8Array(plaintext);
   }
 }

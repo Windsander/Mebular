@@ -1,13 +1,29 @@
 // 加密通信信道
+//
+// 在已认证的连接上提供端到端加密。相对初版的三处安全修复：
+//
+// 1. 前向保密的真轮换：每个密钥世代（epoch）都使用全新的临时 X25519
+//    密钥对协商，旧密钥随即销毁；轮换产生的是真正不同的密钥。
+// 2. 重放保护：每个数据帧带 (epoch, counter)，接收方拒绝计数器不递增
+//    的帧；帧头作为 AES-GCM 的 AAD，篡改帧头会导致解密失败。
+// 3. 会话密钥不可导出：AES 密钥以 extractable=false 导入，
+//    getSessionKey() 返回的是密钥指纹（SHA-256），用于双端核对，
+//    而不是密钥本体。
+//
+// 线格式：
+//   数据帧  [type=0:1][epoch:4 BE][counter:8 BE][iv:12][ciphertext+tag]
+//   密钥帧  [type=1:1][epoch:4 BE][ephemeral X25519 public key:32]
 
-import { Connection } from '../index.js';
 import { EventEmitter } from 'events';
+import type { Connection } from '../P2PNetwork.js';
+import { MessageQueue } from '../transport/InMemoryTransport.js';
 
 export interface SecureChannelOptions {
   encryption?: 'TLS' | 'Noise';
   keyExchange?: 'X25519';
   sessionKeyRotation?: boolean;
   sessionKeyLifetime?: number;
+  keyExchangeTimeout?: number;
 }
 
 export interface SecureChannel {
@@ -20,25 +36,44 @@ export interface SecureChannel {
   rotateSessionKey(): Promise<void>;
 }
 
-export interface SecureChannelKeyConfig {
-  localPrivateKey: CryptoKey;
-  remotePublicKey: Uint8Array;
+const FRAME_DATA = 0;
+const FRAME_KEY_EXCHANGE = 1;
+const HEADER_LENGTH = 13; // type(1) + epoch(4) + counter(8)
+const IV_LENGTH = 12;
+const X25519_PUBLIC_KEY_LENGTH = 32;
+
+interface EpochState {
+  key: CryptoKey;
+  fingerprint: Uint8Array;
 }
 
-function bufferSourceFromUint8Array(data: Uint8Array): ArrayBuffer {
-  return data.buffer as ArrayBuffer;
+interface EphemeralKeyPair {
+  privateKey: CryptoKey;
+  publicKeyBytes: Uint8Array;
 }
 
 export class SecureChannelImpl extends EventEmitter implements SecureChannel {
   readonly connection: Connection;
   readonly isEncrypted: boolean = true;
+
   private options: Required<SecureChannelOptions>;
   private running = false;
-  private sessionKey: CryptoKey | null = null;
-  private sessionKeyBytes: Uint8Array | null = null;
-  private localPrivateKey: CryptoKey | null = null;
-  private remotePublicKey: Uint8Array | null = null;
-  private remotePublicKeyCrypto: CryptoKey | null = null;
+
+  /** 发送侧：当前世代与计数器 */
+  private sendEpoch = 0;
+  private sendCounter = 0n;
+  private currentKey: EpochState | null = null;
+
+  /** 接收侧：每个已建立世代的密钥与已见最大计数器 */
+  private recvStates = new Map<number, EpochState>();
+  private recvCounters = new Map<number, bigint>();
+
+  /** 本端为每个世代生成的临时密钥对（存 Promise，防止并发重复生成） */
+  private ephemeralByEpoch = new Map<number, Promise<EphemeralKeyPair>>();
+
+  private plaintextQueue = new MessageQueue<Uint8Array>();
+  private pumpStarted = false;
+  private rotationTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor(connection: Connection, options: SecureChannelOptions = {}) {
     super();
@@ -48,39 +83,30 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
       keyExchange: 'X25519',
       sessionKeyRotation: true,
       sessionKeyLifetime: 3600000,
+      keyExchangeTimeout: 10000,
       ...options,
     };
   }
 
-  setKeyConfig(config: SecureChannelKeyConfig): void {
-    this.localPrivateKey = config.localPrivateKey;
-    this.remotePublicKey = config.remotePublicKey;
-    this.emit('key-configured');
-  }
-
+  /** 建立首个密钥世代并启动帧处理泵；双端的 start() 需并发调用 */
   async start(): Promise<SecureChannel> {
     if (this.running) {
       throw new Error('SecureChannel already running');
     }
 
-    if (!this.localPrivateKey || !this.remotePublicKey) {
-      throw new Error('Key configuration not set. Call setKeyConfig() first.');
-    }
-
-    // 確保遠程公钥已匯入為 CryptoKey
-    if (!this.remotePublicKeyCrypto) {
-      this.remotePublicKeyCrypto = await crypto.subtle.importKey(
-        'raw',
-        bufferSourceFromUint8Array(this.remotePublicKey),
-        { name: 'X25519' },
-        false,
-        ['deriveKey']
-      );
-    }
-
-    await this.negotiateSessionKey();
+    this.startPump();
+    await this.negotiateEpoch(1);
 
     this.running = true;
+
+    if (this.options.sessionKeyRotation && this.options.sessionKeyLifetime > 0) {
+      this.rotationTimer = setInterval(() => {
+        this.rotateSessionKey().catch((error) => this.emit('channel-error', error));
+      }, this.options.sessionKeyLifetime);
+      // 不让轮换计时器阻止进程退出 / 测试结束
+      (this.rotationTimer as { unref?: () => void }).unref?.();
+    }
+
     return this;
   }
 
@@ -88,116 +114,288 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
     if (!this.running) {
       throw new Error('SecureChannel not running');
     }
-
-    this.sessionKey = null;
-    this.sessionKeyBytes = null;
     this.running = false;
+
+    if (this.rotationTimer) {
+      clearInterval(this.rotationTimer);
+      this.rotationTimer = null;
+    }
+
+    this.plaintextQueue.close();
+    this.currentKey = null;
+    this.recvStates.clear();
+    this.recvCounters.clear();
+    this.ephemeralByEpoch.clear();
 
     await this.connection.close();
   }
+
+  async close(): Promise<void> {
+    if (this.running) {
+      await this.stop();
+    }
+  }
+
+  /**
+   * 返回当前世代密钥的指纹（SHA-256），而非密钥本体。
+   * 双端指纹一致即说明协商出了同一把密钥。
+   */
+  getSessionKey(): Uint8Array | null {
+    return this.currentKey ? new Uint8Array(this.currentKey.fingerprint) : null;
+  }
+
+  getCurrentEpoch(): number {
+    return this.sendEpoch;
+  }
+
+  isRunning(): boolean {
+    return this.running;
+  }
+
+  // ---------- 数据收发 ----------
 
   async send(message: Uint8Array): Promise<void> {
     if (!this.running) {
       throw new Error('SecureChannel not running');
     }
+    const state = this.currentKey;
+    if (!state) {
+      throw new Error('Session key not established');
+    }
 
-    const encrypted = await this.encrypt(message);
-    await this.connection.send(encrypted);
+    const header = new Uint8Array(HEADER_LENGTH);
+    const view = new DataView(header.buffer);
+    view.setUint8(0, FRAME_DATA);
+    view.setUint32(1, this.sendEpoch, false);
+    view.setBigUint64(5, this.sendCounter, false);
+    this.sendCounter += 1n;
+
+    const iv = crypto.getRandomValues(new Uint8Array(IV_LENGTH));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: header },
+      state.key,
+      message.buffer as ArrayBuffer,
+    );
+
+    const frame = new Uint8Array(HEADER_LENGTH + IV_LENGTH + ciphertext.byteLength);
+    frame.set(header, 0);
+    frame.set(iv, HEADER_LENGTH);
+    frame.set(new Uint8Array(ciphertext), HEADER_LENGTH + IV_LENGTH);
+
+    await this.connection.send(frame);
   }
 
-  async *receive(): AsyncIterable<Uint8Array> {
-    if (!this.running) {
+  receive(): AsyncIterable<Uint8Array> {
+    if (!this.running && !this.pumpStarted) {
       throw new Error('SecureChannel not running');
     }
-
-    for await (const encrypted of this.connection.receive()) {
-      const decrypted = await this.decrypt(encrypted);
-      yield decrypted;
-    }
+    return this.plaintextQueue.iterate();
   }
 
-  async close(): Promise<void> {
-    await this.stop();
-  }
+  // ---------- 密钥协商与轮换 ----------
 
-  getSessionKey(): Uint8Array | null {
-    return this.sessionKeyBytes;
-  }
-
+  /** 发起一次密钥轮换：使用全新的临时密钥对，产生真正不同的密钥 */
   async rotateSessionKey(): Promise<void> {
     if (!this.running) {
       throw new Error('SecureChannel not running');
     }
-
-    await this.negotiateSessionKey();
+    await this.negotiateEpoch(this.sendEpoch + 1);
   }
 
-  private async negotiateSessionKey(): Promise<void> {
-    if (!this.localPrivateKey || !this.remotePublicKeyCrypto) {
-      throw new Error('Key configuration not set');
-    }
+  /** 发送本端临时公钥并等待对端公钥，为新世代推导密钥 */
+  private async negotiateEpoch(epoch: number): Promise<void> {
+    const established = this.waitForEpoch(epoch);
+    await this.sendKeyExchange(epoch);
+    await established;
+  }
 
-    // 使用 X25519 推導共享密钥
-    const sharedSecret = await crypto.subtle.deriveKey(
-      {
-        name: 'X25519',
-        public: this.remotePublicKeyCrypto,
-      },
-      this.localPrivateKey,
-      { name: 'AES-GCM', length: 256 },
-      true,
-      ['encrypt', 'decrypt']
-    );
+  private waitForEpoch(epoch: number): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(`Key exchange for epoch ${epoch} timed out`));
+      }, this.options.keyExchangeTimeout);
+      (timer as { unref?: () => void }).unref?.();
 
-    this.sessionKey = sharedSecret;
-
-    // 匯出密钥字節以便同步訪問
-    const exported = await crypto.subtle.exportKey('raw', sharedSecret);
-    this.sessionKeyBytes = new Uint8Array(exported);
-
-    this.emit('session-established', {
-      keyLength: this.sessionKeyBytes.length * 8,
+      this.once(`epoch-${epoch}`, () => {
+        clearTimeout(timer);
+        resolve();
+      });
     });
   }
 
-  private async encrypt(data: Uint8Array): Promise<Uint8Array> {
-    if (!this.sessionKey) {
-      throw new Error('Session key not established');
-    }
+  private async sendKeyExchange(epoch: number): Promise<void> {
+    const ephemeral = await this.ensureEphemeral(epoch);
 
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv },
-      this.sessionKey,
-      bufferSourceFromUint8Array(data)
-    );
+    const frame = new Uint8Array(1 + 4 + X25519_PUBLIC_KEY_LENGTH);
+    const view = new DataView(frame.buffer);
+    view.setUint8(0, FRAME_KEY_EXCHANGE);
+    view.setUint32(1, epoch, false);
+    frame.set(ephemeral.publicKeyBytes, 5);
 
-    // 組合 IV + 密文以便傳輸
-    const result = new Uint8Array(iv.length + ciphertext.byteLength);
-    result.set(iv, 0);
-    result.set(new Uint8Array(ciphertext), iv.length);
-    return result;
+    await this.connection.send(frame);
   }
 
-  private async decrypt(data: Uint8Array): Promise<Uint8Array> {
-    if (!this.sessionKey) {
-      throw new Error('Session key not established');
+  /**
+   * 取当前世代的临时密钥对；不存在则生成。
+   * Promise 同步占位：generateKey 的 await 期间对端密钥帧到达时，
+   * 不会触发第二次生成（否则双端持有的密钥对会错位）。
+   */
+  private ensureEphemeral(epoch: number): Promise<EphemeralKeyPair> {
+    let entry = this.ephemeralByEpoch.get(epoch);
+    if (!entry) {
+      entry = generateEphemeralKeyPair();
+      this.ephemeralByEpoch.set(epoch, entry);
+    }
+    return entry;
+  }
+
+  /** 收到对端临时公钥：若本端尚未为该世代发公钥则补发，随后推导密钥 */
+  private async handleKeyExchange(frame: Uint8Array): Promise<void> {
+    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+    const epoch = view.getUint32(1, false);
+    const remotePublicKeyBytes = frame.slice(5, 5 + X25519_PUBLIC_KEY_LENGTH);
+
+    if (epoch <= 0 || (this.currentKey && epoch <= this.sendEpoch && this.recvStates.has(epoch))) {
+      return; // 重复或过时的密钥帧
+    }
+    if (!this.ephemeralByEpoch.has(epoch)) {
+      await this.sendKeyExchange(epoch);
     }
 
-    if (data.length < 12) {
-      throw new Error('Encrypted message too short');
+    const ephemeral = await this.ensureEphemeral(epoch);
+    const state = await deriveEpochState(ephemeral, remotePublicKeyBytes);
+
+    this.recvStates.set(epoch, state);
+    this.recvCounters.set(epoch, -1n);
+
+    // 剪枝：只保留当前与上一个世代
+    for (const known of this.recvStates.keys()) {
+      if (known < epoch - 1) {
+        this.recvStates.delete(known);
+        this.recvCounters.delete(known);
+        this.ephemeralByEpoch.delete(known);
+      }
     }
 
-    // 從消息開頭提取 IV
-    const iv = data.slice(0, 12);
-    const ciphertext = data.slice(12);
+    // 切换到新世代：发送侧从 0 重新计数
+    if (epoch > this.sendEpoch || !this.currentKey) {
+      this.sendEpoch = epoch;
+      this.sendCounter = 0n;
+      this.currentKey = state;
+    }
 
-    const plaintext = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv },
-      this.sessionKey,
-      bufferSourceFromUint8Array(ciphertext)
-    );
+    this.emit(`epoch-${epoch}`);
+    this.emit('session-established', { epoch, keyLength: 256 });
+  }
 
+  // ---------- 帧处理泵 ----------
+
+  /**
+   * 独立读取连接上的所有帧：密钥帧就地处理，数据帧校验后解密入队。
+   * 泵独立于 receive() 的消费进度，保证轮换随时可以进行。
+   */
+  private startPump(): void {
+    if (this.pumpStarted) return;
+    this.pumpStarted = true;
+
+    void (async () => {
+      try {
+        for await (const frame of this.connection.receive()) {
+          if (frame.length < 1) continue;
+          const type = frame[0];
+          if (type === FRAME_KEY_EXCHANGE) {
+            await this.handleKeyExchange(frame);
+          } else if (type === FRAME_DATA) {
+            const plaintext = await this.decryptFrame(frame);
+            this.plaintextQueue.push(plaintext);
+          }
+        }
+        this.plaintextQueue.close();
+      } catch (error) {
+        this.plaintextQueue.fail(error instanceof Error ? error : new Error(String(error)));
+      }
+    })();
+  }
+
+  private async decryptFrame(frame: Uint8Array): Promise<Uint8Array> {
+    if (frame.length < HEADER_LENGTH + IV_LENGTH + 16) {
+      throw new Error('Encrypted frame too short');
+    }
+
+    const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
+    const epoch = view.getUint32(1, false);
+    const counter = view.getBigUint64(5, false);
+
+    const state = this.recvStates.get(epoch);
+    if (!state) {
+      throw new Error(`Frame for unknown key epoch ${epoch}`);
+    }
+
+    const lastCounter = this.recvCounters.get(epoch) ?? -1n;
+    if (counter <= lastCounter) {
+      throw new Error(
+        `Possible replay attack: counter ${counter} not after ${lastCounter} in epoch ${epoch}`,
+      );
+    }
+
+    const header = frame.slice(0, HEADER_LENGTH);
+    const iv = frame.slice(HEADER_LENGTH, HEADER_LENGTH + IV_LENGTH);
+    const ciphertext = frame.slice(HEADER_LENGTH + IV_LENGTH);
+
+    let plaintext: ArrayBuffer;
+    try {
+      plaintext = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv, additionalData: header },
+        state.key,
+        ciphertext,
+      );
+    } catch {
+      throw new Error('Frame decryption failed (tampered or wrong key)');
+    }
+
+    this.recvCounters.set(epoch, counter);
     return new Uint8Array(plaintext);
+  }
+}
+
+// ---------- 密钥推导 ----------
+
+async function generateEphemeralKeyPair(): Promise<EphemeralKeyPair> {
+  const keyPair = (await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits'])) as CryptoKeyPair;
+  const publicKeyBytes = new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey));
+  return { privateKey: keyPair.privateKey, publicKeyBytes };
+}
+
+/**
+ * X25519 共享密钥 → AES-256-GCM（不可导出）+ 指纹（SHA-256）。
+ * 原始密钥材料在导入与哈希后立即清零。
+ */
+async function deriveEpochState(
+  ephemeral: EphemeralKeyPair,
+  remotePublicKeyBytes: Uint8Array,
+): Promise<EpochState> {
+  const remotePublicKey = await crypto.subtle.importKey(
+    'raw',
+    remotePublicKeyBytes.buffer as ArrayBuffer,
+    { name: 'X25519' },
+    false,
+    [],
+  );
+
+  const sharedBits = await crypto.subtle.deriveBits(
+    { name: 'X25519', public: remotePublicKey },
+    ephemeral.privateKey,
+    256,
+  );
+  const bits = new Uint8Array(sharedBits);
+
+  try {
+    const [key, fingerprint] = await Promise.all([
+      crypto.subtle.importKey('raw', bits, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']),
+      crypto.subtle.digest('SHA-256', bits),
+    ]);
+    return { key, fingerprint: new Uint8Array(fingerprint) };
+  } finally {
+    bits.fill(0);
   }
 }

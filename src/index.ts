@@ -10,3 +10,4 @@ export { VectorClock } from './sync/index.js';
 export { MemoryStorage } from './storage/MemoryStorage.js';
 export { GraphStore } from './core/GraphStore.js';
 export type { GraphStoreConfig } from './core/GraphStore.js';
+export * from './p2p/index.js';

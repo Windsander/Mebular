@@ -62,7 +62,7 @@ try {
   console.log('  输出:', output.substring(0, 200) + '...');
 } catch (error) {
   console.log('  ✗ 编译失败');
-  console.log('  错误:', (error as Error).message.substring(0, 500));
+  console.log('  错误:', error.message.substring(0, 500));
   allPassed = false;
 }
 
@@ -79,7 +79,7 @@ if (allPassed) {
     console.log('  输出:', output.substring(0, 300) + '...');
   } catch (error) {
     console.log('  ✗ 测试失败');
-    console.log('  错误:', (error as Error).message.substring(0, 500));
+    console.log('  错误:', error.message.substring(0, 500));
     allPassed = false;
   }
 } else {

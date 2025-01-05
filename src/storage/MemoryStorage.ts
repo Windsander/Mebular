@@ -108,7 +108,13 @@ export class MemoryStorage implements StorageAdapter {
     if (!event.id) {
       event.id = ulid();
     }
-    this.events.push(event);
+    // 幂等：同 ID 覆盖而非重复追加（同步重放/重传的前提）
+    const existingIdx = this.events.findIndex(e => e.id === event.id);
+    if (existingIdx !== -1) {
+      this.events[existingIdx] = event;
+    } else {
+      this.events.push(event);
+    }
 
     const clocks = event.vectorClock;
     if (clocks && event.author && event.author in clocks) {

@@ -2,6 +2,7 @@
 
 import type { StorageAdapter } from '../storage/StorageAdapter.js';
 import type { Node, Edge, NodeFilter, EdgeFilter } from '../types/index.js';
+import type { EventLog } from '../eventlog/EventLog.js';
 import { VectorClock } from '../sync/index.js';
 import { ulid } from 'ulid';
 
@@ -9,6 +10,8 @@ export interface GraphStoreConfig {
   storage: StorageAdapter;
   author: string;
   signatureManager?: any;
+  /** 配置后，所有图变更自动写入带签名的事件日志（Phase 3 同步的前提） */
+  eventLog?: EventLog;
 }
 
 export class GraphStore {
@@ -16,12 +19,14 @@ export class GraphStore {
   private author: string;
   private clock: VectorClock;
   private signatureManager?: any;
+  private eventLog?: EventLog;
 
   constructor(config: GraphStoreConfig) {
     this.storage = config.storage;
     this.author = config.author;
     this.clock = new VectorClock();
     this.signatureManager = config.signatureManager;
+    this.eventLog = config.eventLog;
   }
 
   async createNode(type: string, content: Record<string, unknown>, labels?: string[]): Promise<Node> {
@@ -49,6 +54,7 @@ export class GraphStore {
     }
 
     await this.storage.putNode(node);
+    await this.eventLog?.append({ type: 'node_created', data: { node } });
     return node;
   }
 
@@ -81,6 +87,7 @@ export class GraphStore {
     }
 
     await this.storage.putNode(updated);
+    await this.eventLog?.append({ type: 'node_updated', data: { nodeId: id, newVersion: updated } });
     return updated;
   }
 
@@ -108,6 +115,7 @@ export class GraphStore {
     }
 
     await this.storage.putNode(deleted);
+    await this.eventLog?.append({ type: 'node_deleted', data: { nodeId: id, deletionTime: now } });
     return true;
   }
 
@@ -145,6 +153,7 @@ export class GraphStore {
     }
 
     await this.storage.putEdge(edge);
+    await this.eventLog?.append({ type: 'edge_created', data: { edge } });
     return edge;
   }
 
@@ -176,6 +185,7 @@ export class GraphStore {
     }
 
     await this.storage.putEdge(updated);
+    await this.eventLog?.append({ type: 'edge_updated', data: { edgeId: id, newVersion: updated } });
     return updated;
   }
 
@@ -203,7 +213,70 @@ export class GraphStore {
     }
 
     await this.storage.putEdge(deleted);
+    await this.eventLog?.append({ type: 'edge_deleted', data: { edgeId: id, deletionTime: now } });
     return true;
+  }
+
+  /** 为节点添加标签（spec-003 AddTag；幂等） */
+  async addTag(nodeId: string, tag: string): Promise<Node | null> {
+    const existing = await this.storage.getNode(nodeId);
+    if (!existing) {
+      return null;
+    }
+    if ((existing.tags ?? []).includes(tag)) {
+      return existing;
+    }
+
+    const now = Date.now();
+    const updated: Node = {
+      ...existing,
+      tags: [...(existing.tags ?? []), tag],
+      updatedAt: now,
+      updatedBy: this.author,
+    };
+
+    this.clock.increment(this.author);
+    updated.clocks = this.clock.toJSON();
+    updated.vectorClock = this.clock.toJSON();
+
+    if (this.signatureManager) {
+      updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
+    }
+
+    await this.storage.putNode(updated);
+    await this.eventLog?.append({ type: 'tag_added', data: { nodeId, tag } });
+    return updated;
+  }
+
+  /** 移除节点标签（spec-003 RemoveTag；幂等） */
+  async removeTag(nodeId: string, tag: string): Promise<Node | null> {
+    const existing = await this.storage.getNode(nodeId);
+    if (!existing) {
+      return null;
+    }
+    if (!(existing.tags ?? []).includes(tag)) {
+      return existing;
+    }
+
+    const now = Date.now();
+    const updated: Node = {
+      ...existing,
+      tags: (existing.tags ?? []).filter((t) => t !== tag),
+      updatedAt: now,
+      updatedBy: this.author,
+    };
+
+    this.clock.increment(this.author);
+    updated.clocks = this.clock.toJSON();
+    updated.vectorClock = this.clock.toJSON();
+
+    if (this.signatureManager) {
+      updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
+    }
+
+    await this.storage.putNode(updated);
+    await this.eventLog?.append({ type: 'tag_removed', data: { nodeId, tag } });
+    return updated;
   }
 
   async getEdge(id: string): Promise<Edge | null> {

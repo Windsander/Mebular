@@ -390,6 +390,28 @@ export class P2PNode implements P2PNetwork {
     return this.handshake;
   }
 
+  /**
+   * 取得到对端的加密信道。认证完成时信道异步建立，
+   * timeoutMs 内轮询等待其就绪（默认 5s），超时返回 null。
+   */
+  async getChannel(peerId: PeerId, timeoutMs = 5000): Promise<SecureChannel | null> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const pending = this.channels.get(peerId.id);
+      if (pending) {
+        try {
+          return await pending;
+        } catch {
+          // 建信道失败的条目会被移除，继续轮询等待重建
+        }
+      }
+      if (Date.now() >= deadline) {
+        return null;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+
   getDiscovery(): DeviceDiscovery | null {
     return this.discovery;
   }

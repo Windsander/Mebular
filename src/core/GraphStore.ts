@@ -53,8 +53,15 @@ export class GraphStore {
       node.signature = await this.signatureManager.sign(JSON.stringify(node));
     }
 
+    // 单一时钟源（D10 收口）：事件日志存在时，实体时钟以事件时钟为准；
+    // 载荷用快照拷贝，避免随后的时钟盖写突变已被内容寻址的事件内容
+    if (this.eventLog) {
+      const event = await this.eventLog.append({ type: 'node_created', data: { node: { ...node } } });
+      node.clocks = { ...event.vectorClock };
+      node.vectorClock = { ...event.vectorClock };
+    }
+
     await this.storage.putNode(node);
-    await this.eventLog?.append({ type: 'node_created', data: { node } });
     return node;
   }
 
@@ -86,8 +93,16 @@ export class GraphStore {
       updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
     }
 
+    if (this.eventLog) {
+      const event = await this.eventLog.append({
+        type: 'node_updated',
+        data: { nodeId: id, newVersion: { ...updated } },
+      });
+      updated.clocks = { ...event.vectorClock };
+      updated.vectorClock = { ...event.vectorClock };
+    }
+
     await this.storage.putNode(updated);
-    await this.eventLog?.append({ type: 'node_updated', data: { nodeId: id, newVersion: updated } });
     return updated;
   }
 
@@ -114,8 +129,13 @@ export class GraphStore {
       deleted.signature = await this.signatureManager.sign(JSON.stringify(deleted));
     }
 
+    if (this.eventLog) {
+      const event = await this.eventLog.append({ type: 'node_deleted', data: { nodeId: id, deletionTime: now } });
+      deleted.clocks = { ...event.vectorClock };
+      deleted.vectorClock = { ...event.vectorClock };
+    }
+
     await this.storage.putNode(deleted);
-    await this.eventLog?.append({ type: 'node_deleted', data: { nodeId: id, deletionTime: now } });
     return true;
   }
 
@@ -152,8 +172,13 @@ export class GraphStore {
       edge.signature = await this.signatureManager.sign(JSON.stringify(edge));
     }
 
+    if (this.eventLog) {
+      const event = await this.eventLog.append({ type: 'edge_created', data: { edge: { ...edge } } });
+      edge.clocks = { ...event.vectorClock };
+      edge.vectorClock = { ...event.vectorClock };
+    }
+
     await this.storage.putEdge(edge);
-    await this.eventLog?.append({ type: 'edge_created', data: { edge } });
     return edge;
   }
 
@@ -184,8 +209,16 @@ export class GraphStore {
       updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
     }
 
+    if (this.eventLog) {
+      const event = await this.eventLog.append({
+        type: 'edge_updated',
+        data: { edgeId: id, newVersion: { ...updated } },
+      });
+      updated.clocks = { ...event.vectorClock };
+      updated.vectorClock = { ...event.vectorClock };
+    }
+
     await this.storage.putEdge(updated);
-    await this.eventLog?.append({ type: 'edge_updated', data: { edgeId: id, newVersion: updated } });
     return updated;
   }
 
@@ -212,8 +245,13 @@ export class GraphStore {
       deleted.signature = await this.signatureManager.sign(JSON.stringify(deleted));
     }
 
+    if (this.eventLog) {
+      const event = await this.eventLog.append({ type: 'edge_deleted', data: { edgeId: id, deletionTime: now } });
+      deleted.clocks = { ...event.vectorClock };
+      deleted.vectorClock = { ...event.vectorClock };
+    }
+
     await this.storage.putEdge(deleted);
-    await this.eventLog?.append({ type: 'edge_deleted', data: { edgeId: id, deletionTime: now } });
     return true;
   }
 
@@ -243,8 +281,13 @@ export class GraphStore {
       updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
     }
 
+    if (this.eventLog) {
+      const event = await this.eventLog.append({ type: 'tag_added', data: { nodeId, tag } });
+      updated.clocks = { ...event.vectorClock };
+      updated.vectorClock = { ...event.vectorClock };
+    }
+
     await this.storage.putNode(updated);
-    await this.eventLog?.append({ type: 'tag_added', data: { nodeId, tag } });
     return updated;
   }
 
@@ -274,8 +317,13 @@ export class GraphStore {
       updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
     }
 
+    if (this.eventLog) {
+      const event = await this.eventLog.append({ type: 'tag_removed', data: { nodeId, tag } });
+      updated.clocks = { ...event.vectorClock };
+      updated.vectorClock = { ...event.vectorClock };
+    }
+
     await this.storage.putNode(updated);
-    await this.eventLog?.append({ type: 'tag_removed', data: { nodeId, tag } });
     return updated;
   }
 

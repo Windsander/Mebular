@@ -363,7 +363,7 @@ async function applyTagRemoved(storage: StorageAdapter, event: Event): Promise<A
 // ---------- 工具 ----------
 
 function withEventClock<T extends Node | Edge>(entity: T, event: Event): T {
-  return { ...entity, vectorClock: { ...event.vectorClock } };
+  return { ...entity, clocks: { ...event.vectorClock }, vectorClock: { ...event.vectorClock } };
 }
 
 function markNodeDeleted(node: Node, deletionTime: number, clock: Clock): Node {

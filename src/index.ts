@@ -1,9 +1,15 @@
 // Mebular 模块入口 - 统一导出
 
 export * from './types/index.js';
+export * from './errors.js';
 export { SignatureManager } from './crypto/signature.js';
 export { EncryptionManager } from './crypto/encryption.js';
-export { IdentityManager } from './crypto/IdentityManager.js';
+export {
+  IdentityManager,
+  type DeviceIdentity,
+  type UserMasterKeyPair,
+} from './crypto/IdentityManager.js';
+export { Mebular, type MebularConfig } from './mebular.js';
 export {
   EventLog,
   canonicalize,

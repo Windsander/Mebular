@@ -29,7 +29,12 @@ export class GraphStore {
     this.eventLog = config.eventLog;
   }
 
-  async createNode(type: string, content: Record<string, unknown>, labels?: string[]): Promise<Node> {
+  async createNode(
+    type: string,
+    content: Record<string, unknown>,
+    labels?: string[],
+    options?: { validFrom?: number; validTo?: number },
+  ): Promise<Node> {
     const now = Date.now();
     const node: Node = {
       id: ulid(),
@@ -40,8 +45,8 @@ export class GraphStore {
       signature: '',
       createdAt: now,
       updatedAt: now,
-      validFrom: now,
-      validTo: 9999999999999,
+      validFrom: options?.validFrom ?? now,
+      validTo: options?.validTo ?? 9999999999999,
       tags: [],
     };
 

@@ -6,3 +6,4 @@ export * from './edge.js';
 export * from './event.js';
 export * from './vectorclock.js';
 export * from './config.js';
+export * from './traverse.js';

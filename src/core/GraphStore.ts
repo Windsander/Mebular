@@ -1,7 +1,7 @@
 // GraphStore - 图存储核心实现
 
 import type { StorageAdapter } from '../storage/StorageAdapter.js';
-import type { Node, Edge, NodeFilter, EdgeFilter } from '../types/index.js';
+import type { Node, Edge, NodeFilter, EdgeFilter, TraverseOptions, TraverseResult } from '../types/index.js';
 import type { EventLog } from '../eventlog/EventLog.js';
 import { VectorClock } from '../sync/index.js';
 import { ulid } from 'ulid';
@@ -352,6 +352,63 @@ export class GraphStore {
       return [...incoming, ...outgoing];
     }
     return this.storage.listEdges(filter);
+  }
+
+  /**
+   * 图遍历（spec-004 TraverseOptions）：从起点 BFS，
+   * 支持深度/边类型/方向/删除过滤，visited 集合防环。
+   */
+  async traverse(startId: string, options: TraverseOptions = {}): Promise<TraverseResult> {
+    const maxDepth = options.maxDepth ?? 3;
+    const direction = options.direction ?? 'both';
+    const includeDeleted = options.includeDeleted ?? false;
+    const visited = options.visited ?? new Set<string>();
+
+    const result: TraverseResult = { visitedNodes: [], visitedEdges: [], path: [] };
+
+    const start = await this.storage.getNode(startId);
+    if (!start || (!includeDeleted && start.deletedAt) || visited.has(startId)) {
+      return result;
+    }
+
+    visited.add(startId);
+    result.visitedNodes.push(start);
+    result.path.push({ nodeId: startId });
+
+    let frontier: Array<{ nodeId: string; depth: number }> = [{ nodeId: startId, depth: 0 }];
+    while (frontier.length > 0) {
+      const next: Array<{ nodeId: string; depth: number }> = [];
+      for (const { nodeId, depth } of frontier) {
+        if (depth >= maxDepth) {
+          continue;
+        }
+        const edges = await this.getNeighbors(nodeId, direction);
+        for (const edge of edges) {
+          if (!includeDeleted && edge.deletedAt) {
+            continue;
+          }
+          if (options.edgeTypes && !options.edgeTypes.includes(edge.relation)) {
+            continue;
+          }
+          const otherId = edge.source === nodeId ? edge.target : edge.source;
+          if (visited.has(otherId)) {
+            continue;
+          }
+          const other = await this.storage.getNode(otherId);
+          if (!other || (!includeDeleted && other.deletedAt)) {
+            continue;
+          }
+          visited.add(otherId);
+          result.visitedEdges.push(edge);
+          result.visitedNodes.push(other);
+          result.path.push({ nodeId: otherId, edgeId: edge.id });
+          next.push({ nodeId: otherId, depth: depth + 1 });
+        }
+      }
+      frontier = next;
+    }
+
+    return result;
   }
 
   async batchAddNodes(nodes: Array<{ type: string; content: Record<string, unknown>; labels?: string[] }>): Promise<Node[]> {

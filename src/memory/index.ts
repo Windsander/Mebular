@@ -1,6 +1,7 @@
 // memory 模块入口
 
 export { MemoryStore, type MemoryListFilter } from './MemoryStore.js';
+export { type VectorIndex, type VectorIndexHit } from './VectorIndex.js';
 export {
   EdgeTypes,
   ENTITY_TYPES,

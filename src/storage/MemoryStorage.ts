@@ -31,8 +31,19 @@ export class MemoryStorage implements StorageAdapter {
     let result = Array.from(this.nodes.values());
 
     if (filter) {
+      if (filter.id) {
+        result = result.filter(n => n.id === filter.id);
+      }
       if (filter.type) {
         result = result.filter(n => n.type === filter.type);
+      }
+      if (filter.tags?.length) {
+        const tags = filter.tags;
+        result = result.filter(n => tags.every(t => (n.tags ?? []).includes(t)));
+      }
+      if (filter.labels?.length) {
+        const labels = filter.labels;
+        result = result.filter(n => labels.every(l => (n.labels ?? []).includes(l)));
       }
       if (filter.createdBy) {
         result = result.filter(n => n.createdBy === filter.createdBy);

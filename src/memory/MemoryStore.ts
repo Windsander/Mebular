@@ -99,7 +99,7 @@ export class MemoryStore {
     if (input.confidence !== undefined) content.confidence = input.confidence;
     if (input.source !== undefined) content.source = input.source;
 
-    const node = await this.graph.createNode('fact', content, undefined, { validFrom, validTo });
+    const node = await this.graph.createNode('fact', content, input.labels, { validFrom, validTo });
     if (input.tags?.length) {
       for (const tag of input.tags) {
         await this.graph.addTag(node.id, tag);

@@ -90,6 +90,7 @@ export interface FactInput {
   confidence?: number;
   source?: string;
   tags?: string[];
+  labels?: string[];
 }
 
 export type EpisodeInput = EpisodeContent & { tags?: string[]; labels?: string[] };

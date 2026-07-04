@@ -23,3 +23,10 @@ export type {
   ConversationFilters,
   ConversationHistory,
 } from './types.js';
+export {
+  HermesImporter,
+  type HermesImporterOptions,
+  type ImportItem,
+  type ImportReport,
+} from './import/index.js';
+export { parseMarkdown, type ParsedMarkdown, type MarkdownSection } from './import/markdown.js';

@@ -88,6 +88,18 @@ describe('MemoryStore', () => {
     expect(byTag.map((n) => n.id)).toEqual([entity.id]);
   });
 
+  it('tags/labels 过滤在存储层生效（回归：多节点时只回匹配项）', async () => {
+    const a = await memory.addEntity({ entityType: 'project', name: 'A', tags: ['p0'] });
+    await memory.addEntity({ entityType: 'project', name: 'B', tags: ['p1'] });
+
+    const byTag = await memory.listByType('entity', { tags: ['p0'] });
+    expect(byTag.map((n) => n.id)).toEqual([a.id]);
+
+    const labeled = await memory.addEntity({ entityType: 'concept', name: 'C', labels: ['import:x'] });
+    const byLabel = await graph.listNodes({ labels: ['import:x'] });
+    expect(byLabel.map((n) => n.id)).toEqual([labeled.id]);
+  });
+
   it('listByType 支持时间窗与删除过滤', async () => {
     const a = await memory.addEntity({ entityType: 'concept', name: 'A' });
     const b = await memory.addEntity({ entityType: 'concept', name: 'B' });

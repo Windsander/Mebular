@@ -1,0 +1,14 @@
+{
+  "name": "mebular",
+  "version": "0.1.0",
+  "private": true,
+  "description": "",
+  "license": "MIT",
+  "scripts": {
+    "dev": "echo \"No dev script configured\" && exit 1",
+    "build": "echo \"No build script configured\" && exit 1",
+    "lint": "echo \"No lint script configured\" && exit 1"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

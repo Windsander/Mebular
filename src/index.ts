@@ -38,6 +38,13 @@ export { MemoryStorage } from './storage/MemoryStorage.js';
 export { JsonFileStorage } from './storage/JsonFileStorage.js';
 export * from './memory/index.js';
 export * from './hermes/index.js';
+export * from './exchange/index.js';
+export {
+  encryptPrivateKeyPkcs8,
+  decryptPrivateKeyPkcs8,
+  DEFAULT_PBKDF2_ITERATIONS,
+  type EncryptedKeyMaterial,
+} from './crypto/KeyProtector.js';
 export { GraphStore } from './core/GraphStore.js';
 export type { GraphStoreConfig } from './core/GraphStore.js';
 export * from './p2p/index.js';

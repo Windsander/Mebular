@@ -57,3 +57,16 @@ export {
   type ActivityTrackingConnection,
   type PingCapableConnection,
 } from './transport/InMemoryTransport.js';
+export {
+  Libp2pProvider,
+  Libp2pConnection,
+  createLibp2pProvider,
+  loadLibp2pModules,
+  encodeFrame,
+  FrameDecoder,
+  peerIdFromDevicePublicKey,
+  MEBULAR_PROTOCOL,
+  MAX_FRAME_BYTES,
+  type Libp2pProviderOptions,
+  type ModuleImporter,
+} from './transport/Libp2pProvider.js';

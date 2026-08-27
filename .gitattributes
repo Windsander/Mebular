@@ -1,0 +1,8 @@
+# 跨平台换行符归一化
+* text=auto eol=lf
+
+# 二进制显式标注（本仓库暂无，保留接缝）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary

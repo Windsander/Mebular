@@ -2,15 +2,36 @@
   "name": "mebular",
   "version": "0.1.0",
   "private": true,
-  "description": "分布式存储的跨广域网记忆系统",
+  "description": "本地优先的图式记忆系统：为 Hermes 等 Agent 提供跨设备、可离线、可验证的记忆共享层",
   "license": "MIT",
+  "author": "Windsander",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Windsander/Mebular.git"
+  },
+  "keywords": [
+    "local-first",
+    "memory",
+    "graph",
+    "p2p",
+    "crdt",
+    "vector-clock",
+    "ed25519",
+    "event-sourcing",
+    "hermes",
+    "agent"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "scripts": {
     "build": "tsc",
     "build:watch": "tsc --watch",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
-    "lint": "eslint src --ext .ts",
+    "lint": "eslint src tests scripts --ext .ts,.mjs",
+    "verify": "node scripts/verify-phase4.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "dependencies": {

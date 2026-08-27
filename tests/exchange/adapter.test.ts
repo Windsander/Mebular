@@ -20,7 +20,6 @@ import {
   createBuiltinAdapterRegistry,
 } from '../../src/exchange/builtin-adapters.js';
 import { exportGraphToCmf, parseCmfDocument } from '../../src/exchange/cmf.js';
-import type { CmfDocument } from '../../src/exchange/cmf.js';
 
 function freshMemory(author = 'device-test'): MemoryStore {
   return new MemoryStore(new GraphStore({ storage: new MemoryStorage(), author }));

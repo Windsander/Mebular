@@ -22,6 +22,7 @@ import { IdentityManager, type DeviceIdentity } from './crypto/IdentityManager.j
 import { P2PNode } from './p2p/P2PNetwork.js';
 import type { BonjourServiceFactory } from './p2p/DeviceDiscovery.js';
 import type { ConnectionProvider } from './p2p/transport/InMemoryTransport.js';
+import { Libp2pProvider } from './p2p/transport/Libp2pProvider.js';
 import {
   bytesToHex,
   hexToBytes,
@@ -44,12 +45,12 @@ export interface MebularConfig {
   };
   network?: {
     enabled: boolean;
-    /** 拨号/监听抽象（InMemoryHub 等）；libp2p 适配器落地前经此注入 */
+    /** 拨号/监听抽象（InMemoryHub 等）；配置 libp2p 时以 libp2p 装配为准 */
     provider?: ConnectionProvider;
     bonjourFactory?: BonjourServiceFactory;
     listenPort?: number;
-    /** 占位：libp2p 适配器未落地，配置了即报错（诚实失败） */
-    libp2p?: { peerId?: string; bootstrapPeers?: string[] };
+    /** libp2p 真实网络栈（可选依赖；缺包时报 NETWORK_LIBP2P_NOT_AVAILABLE） */
+    libp2p?: { listen?: string[]; protocol?: string };
   };
   sync?: {
     autoSync: boolean;
@@ -77,6 +78,7 @@ export class Mebular {
   private graphImpl: GraphStore | null = null;
   private syncImpl: SyncManager | null = null;
   private nodeImpl: P2PNode | null = null;
+  private libp2pProvider: Libp2pProvider | null = null;
 
   constructor(config: MebularConfig) {
     this.config = config;
@@ -134,11 +136,19 @@ export class Mebular {
 
     // 6. 网络（可选）
     if (this.config.network?.enabled) {
+      // libp2p 配置优先：真实网络栈装配（可选依赖，缺包时诚实报错）
+      let provider = this.config.network.provider;
       if (this.config.network.libp2p) {
-        throw new MebularError(
-          'libp2p 适配器尚未落地，请通过 network.provider 注入传输实现',
-          'NETWORK_LIBP2P_NOT_AVAILABLE',
-        );
+        this.libp2pProvider = await Libp2pProvider.create({
+          deviceKey: {
+            publicKey: deviceIdentity.publicKey,
+            privateKey: deviceIdentity.privateKey,
+          },
+          listen: this.config.network.libp2p.listen,
+          protocol: this.config.network.libp2p.protocol,
+        });
+        await this.libp2pProvider.start();
+        provider = this.libp2pProvider;
       }
       const masterPublicKey = this.identity.getUserMasterPublicKey();
       const node = new P2PNode({
@@ -149,7 +159,7 @@ export class Mebular {
           certificate: deviceIdentity.certificate!,
         },
         userMasterPublicKey: masterPublicKey ?? undefined,
-        provider: this.config.network.provider,
+        provider,
         bonjourFactory: this.config.network.bonjourFactory,
         config: { listenPort: this.config.network.listenPort },
       });
@@ -169,6 +179,10 @@ export class Mebular {
       await this.nodeImpl.stop();
     }
     this.nodeImpl = null;
+    if (this.libp2pProvider) {
+      await this.libp2pProvider.stop();
+      this.libp2pProvider = null;
+    }
     this.syncImpl = null;
     this.graphImpl = null;
     this.eventLogImpl = null;

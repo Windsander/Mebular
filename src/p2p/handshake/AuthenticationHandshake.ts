@@ -169,21 +169,7 @@ export class AuthenticationHandshake extends EventEmitter {
     if (!certificate || certificate.deviceId !== deviceId) {
       return false;
     }
-    if (!certificate.signature || !certificate.devicePublicKey) {
-      return false;
-    }
-
-    try {
-      const publicKey = await importEd25519PublicKey(this.userMasterPublicKey);
-      return await crypto.subtle.verify(
-        { name: 'Ed25519' },
-        publicKey,
-        asArrayBuffer(base64ToBytes(certificate.signature)),
-        new TextEncoder().encode(canonicalCertificateData(certificate)),
-      );
-    } catch {
-      return false;
-    }
+    return verifyCertificateSignature(certificate, this.userMasterPublicKey);
   }
 
   // ---------- 线上握手协议 ----------
@@ -474,6 +460,31 @@ export function canonicalCertificateData(certificate: DeviceCertificate): string
     createdAt: certificate.createdAt,
     metadata: certificate.metadata ?? {},
   });
+}
+
+/**
+ * 纯密码学证书验签：签名须由给定用户主公钥对应的主密钥签署。
+ * 不含 deviceId 一致性检查（由调用方按场景校验）；
+ * 供握手实例方法与同步层的证书链验签共用（Phase 5.1，D9 收口）。
+ */
+export async function verifyCertificateSignature(
+  certificate: DeviceCertificate,
+  userMasterPublicKey: Uint8Array,
+): Promise<boolean> {
+  if (!certificate.signature || !certificate.devicePublicKey) {
+    return false;
+  }
+  try {
+    const publicKey = await importEd25519PublicKey(userMasterPublicKey);
+    return await crypto.subtle.verify(
+      { name: 'Ed25519' },
+      publicKey,
+      asArrayBuffer(base64ToBytes(certificate.signature)),
+      new TextEncoder().encode(canonicalCertificateData(certificate)),
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function importEd25519PublicKey(raw: Uint8Array): Promise<CryptoKey> {

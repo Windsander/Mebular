@@ -13,10 +13,12 @@ import { bytesToHex, hexToBytes, bytesToBase64, base64ToBytes } from '../p2p/han
 
 export type { Event, EventFilter, EventType } from '../types/event.js';
 
-/** 事件签名者：本机设备身份 */
+/** 事件签名者：本机设备身份；携带证书时事件附带信任链字段 */
 export interface EventSigner {
   deviceId: string;
   privateKey: CryptoKey; // Ed25519 私钥（sign）
+  /** 本机设备证书（用户主密钥签发）；提供则写入事件的 authorCertificate */
+  certificate?: import('../p2p/handshake/AuthenticationHandshake.js').DeviceCertificate;
 }
 
 export interface EventLogOptions {
@@ -84,6 +86,8 @@ export class EventLog {
       ...unsigned,
       id: await computeEventId(unsigned),
       signature: this.signer ? await signEvent(unsigned, this.signer.privateKey) : '',
+      // 证书链字段不参与内容寻址与签名（canonicalEventData 字段集固定）
+      ...(this.signer?.certificate ? { authorCertificate: this.signer.certificate } : {}),
     };
 
     await this.storage.putEvent(fullEvent);

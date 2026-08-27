@@ -20,7 +20,7 @@ import { EventLog } from '../../eventlog/EventLog.js';
 import { VectorClock } from '../vectorclock/index.js';
 import type { Event } from '../../types/event.js';
 import { applyRemoteEvent, type SyncConflict } from '../apply.js';
-import { hexToBytes, type AuthSession } from '../../p2p/handshake/AuthenticationHandshake.js';
+import { hexToBytes, verifyCertificateSignature, type AuthSession } from '../../p2p/handshake/AuthenticationHandshake.js';
 import {
   SecureChannelSyncTransport,
   nextSyncMessage,
@@ -71,6 +71,12 @@ export interface SyncManagerOptions {
   peerWhitelist?: string[];
   /** 单条协议消息等待超时（默认 30s） */
   syncTimeout?: number;
+  /**
+   * 用户主公钥（Phase 5.1 信任链）：提供后，非直连对端签发的事件
+   * 可经 authorCertificate 证书链验签（中继/多跳场景）；未提供时
+   * 只接受直连对端直签事件（Phase 3 行为）。
+   */
+  userMasterPublicKey?: Uint8Array;
 }
 
 const DEFAULT_SYNC_TIMEOUT = 30_000;
@@ -82,6 +88,7 @@ export class SyncManager extends EventEmitter {
   private readonly autoSync: boolean;
   private readonly peerWhitelist: string[] | undefined;
   private readonly syncTimeout: number;
+  private readonly userMasterPublicKey: Uint8Array | null;
 
   /** 每个对端已确认（ack）的事件 ID 集合——离线队列的持久依据 */
   private readonly syncedByPeer = new Map<string, Set<string>>();
@@ -99,6 +106,7 @@ export class SyncManager extends EventEmitter {
     this.autoSync = options.autoSync ?? true;
     this.peerWhitelist = options.peerWhitelist;
     this.syncTimeout = options.syncTimeout ?? DEFAULT_SYNC_TIMEOUT;
+    this.userMasterPublicKey = options.userMasterPublicKey ?? null;
   }
 
   // ---------- spec-004 查询面 ----------
@@ -298,7 +306,7 @@ export class SyncManager extends EventEmitter {
     let duplicates = 0;
 
     for (const event of events) {
-      const valid = await EventLog.verifyEvent(event, peer.publicKey);
+      const valid = await this.verifyEventTrust(event, peer);
       if (!valid) {
         throw new Error(`Event signature verification failed: ${event.id}`);
       }
@@ -323,6 +331,33 @@ export class SyncManager extends EventEmitter {
     }
 
     return { ackedIds, received, duplicates, conflicts };
+  }
+
+  /**
+   * 事件信任链验签（Phase 5.1，收口 D9）：
+   * - 直连对端直签：author 即对端设备 → 用对端公钥验签（快路径）；
+   * - 中继/多跳：author 是第三设备 → 事件须携带 authorCertificate，
+   *   且证书 deviceId 与 author 一致、证书经用户主密钥验签后，
+   *   用证书中的设备公钥验事件签名；
+   * - 其余形态（无证书、证书不匹配、未配置主公钥）一律拒绝。
+   */
+  private async verifyEventTrust(event: Event, peer: SyncPeer): Promise<boolean> {
+    if (event.author === peer.deviceId) {
+      return EventLog.verifyEvent(event, peer.publicKey);
+    }
+    const certificate = event.authorCertificate;
+    if (!certificate || certificate.deviceId !== event.author || !this.userMasterPublicKey) {
+      return false;
+    }
+    const certValid = await verifyCertificateSignature(certificate, this.userMasterPublicKey);
+    if (!certValid) {
+      return false;
+    }
+    try {
+      return await EventLog.verifyEvent(event, hexToBytes(certificate.devicePublicKey));
+    } catch {
+      return false;
+    }
   }
 
   private buildResult(

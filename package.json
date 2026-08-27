@@ -38,6 +38,15 @@
     "bonjour": "^3.5.1",
     "ulid": "^2.3.0"
   },
+  "optionalDependencies": {
+    "@chainsafe/libp2p-noise": "^17.0.0",
+    "@chainsafe/libp2p-yamux": "^8.0.1",
+    "@libp2p/crypto": "^5.1.23",
+    "@libp2p/peer-id": "^6.0.15",
+    "@libp2p/tcp": "^11.0.27",
+    "@multiformats/multiaddr": "^13.0.3",
+    "libp2p": "^3.3.9"
+  },
   "devDependencies": {
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.24",
@@ -66,7 +75,7 @@
     "moduleNameMapper": {
       "^src/(.*)\\.js$": "<rootDir>/src/$1.ts",
       "^tests/(.*)\\.js$": "<rootDir>/tests/$1.ts",
-      "^(.*)\\.js$": "$1"
+      "^(\\.{1,2}/.*)\\.js$": "$1"
     },
     "testMatch": [
       "**/tests/**/*.test.ts"

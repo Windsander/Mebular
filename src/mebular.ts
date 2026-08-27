@@ -26,9 +26,24 @@ import { Libp2pProvider } from './p2p/transport/Libp2pProvider.js';
 import {
   bytesToHex,
   hexToBytes,
+  base64ToBytes,
+  bytesToBase64,
   type DeviceCertificate,
 } from './p2p/handshake/AuthenticationHandshake.js';
 import { IdentityError, MebularError, StorageError, ErrorCodes } from './errors.js';
+import {
+  decryptPrivateKeyPkcs8,
+  encryptPrivateKeyPkcs8,
+  type EncryptedKeyMaterial,
+} from './crypto/KeyProtector.js';
+
+/**
+ * 口令提供者接缝（操作系统 keychain / 用户交互等）：
+ * 门面未直接配置 passphrase 时，经此按需取口令；返回 null 表示无法提供。
+ */
+export interface KeychainProvider {
+  getPassphrase(deviceId: string): Promise<string | null>;
+}
 
 export interface MebularConfig {
   /** 存储文件路径（JSONL）；身份文件落在同路径加 .identity.json 后缀 */
@@ -42,6 +57,13 @@ export interface MebularConfig {
     userMasterKey?: Uint8Array;
     /** 用户主私钥：为本机签发设备证书所需（首次初始化；仅主设备持有） */
     userMasterPrivateKey?: CryptoKey;
+    /**
+     * 身份文件解锁口令（Phase 5.1）：配置后设备私钥以 PBKDF2+AES-GCM
+     * 加密存放；已有的明文身份文件在首次带口令初始化时自动迁移。
+     */
+    passphrase?: string;
+    /** 口令提供者接缝：未直接配置 passphrase 时经此获取（如系统 keychain） */
+    keychain?: KeychainProvider;
   };
   network?: {
     enabled: boolean;
@@ -63,7 +85,10 @@ interface IdentityFileRecord {
   deviceId: string;
   deviceName: string;
   publicKeyHex: string;
-  privateKeyPkcs8: string;
+  /** 明文 PKCS8（旧格式；配置口令后首次初始化自动迁移为加密封套） */
+  privateKeyPkcs8?: string;
+  /** 加密封套（Phase 5.1 起的目标格式） */
+  privateKeyEncrypted?: EncryptedKeyMaterial;
   certificate: DeviceCertificate;
   createdAt: number;
 }
@@ -112,9 +137,13 @@ export class Mebular {
     // 2. 身份
     const deviceIdentity = await this.loadOrCreateIdentity();
 
-    // 3. 事件日志（从存储恢复时钟，重启后计数器不回退）
+    // 3. 事件日志（从存储恢复时钟，重启后计数器不回退；签名者携带证书链字段）
     this.eventLogImpl = await EventLog.restore(this.storageImpl, this.config.deviceId, {
-      signer: { deviceId: this.config.deviceId, privateKey: deviceIdentity.privateKey },
+      signer: {
+        deviceId: this.config.deviceId,
+        privateKey: deviceIdentity.privateKey,
+        certificate: deviceIdentity.certificate,
+      },
     });
 
     // 4. 图存储（事件化接线；实体时钟由事件时钟驱动）
@@ -124,7 +153,7 @@ export class Mebular {
       eventLog: this.eventLogImpl,
     });
 
-    // 5. 同步管理器
+    // 5. 同步管理器（携带用户主公钥：信任链验签，收口 D9）
     this.syncImpl = new SyncManager({
       eventLog: this.eventLogImpl,
       storage: this.storageImpl,
@@ -132,6 +161,7 @@ export class Mebular {
       autoSync: this.config.sync?.autoSync ?? true,
       peerWhitelist: this.config.sync?.peerWhitelist,
       syncTimeout: this.config.sync?.syncTimeout,
+      userMasterPublicKey: this.identity.getUserMasterPublicKey() ?? undefined,
     });
 
     // 6. 网络（可选）
@@ -250,15 +280,50 @@ export class Mebular {
           `身份文件与 deviceId 不匹配：${record.deviceId} != ${this.config.deviceId}`,
         );
       }
+
+      // 私钥材料：加密封套优先；明文 + 已配置口令时自动迁移为加密存放
+      let privateKeyPkcs8: string;
+      if (record.privateKeyEncrypted) {
+        const passphrase = await this.resolvePassphrase();
+        if (!passphrase) {
+          throw new IdentityError(
+            '身份文件已加密，但未提供解锁口令（config.encryption.passphrase 或 keychain）',
+            ErrorCodes.IDENTITY_LOCKED,
+          );
+        }
+        try {
+          const pkcs8 = await decryptPrivateKeyPkcs8(record.privateKeyEncrypted, passphrase);
+          privateKeyPkcs8 = bytesToBase64(pkcs8);
+        } catch (error) {
+          throw new IdentityError(
+            '身份文件解锁失败：口令错误或文件已损坏',
+            ErrorCodes.IDENTITY_UNLOCK_FAILED,
+            error as Error,
+          );
+        }
+      } else if (record.privateKeyPkcs8) {
+        privateKeyPkcs8 = record.privateKeyPkcs8;
+      } else {
+        throw new IdentityError(`身份文件缺少私钥材料：${path}`);
+      }
+
       const identity: DeviceIdentity = {
         deviceId: record.deviceId,
         name: record.deviceName,
         publicKey: hexToBytes(record.publicKeyHex),
-        privateKey: await IdentityManager.importPrivateKey(record.privateKeyPkcs8),
+        privateKey: await IdentityManager.importPrivateKey(privateKeyPkcs8),
         createdAt: record.createdAt,
         certificate: record.certificate,
       };
       this.identity.registerDeviceKey(identity);
+
+      // 明文→加密迁移：配置口令后重写身份文件，去掉明文字段
+      if (!record.privateKeyEncrypted && record.privateKeyPkcs8) {
+        const passphrase = await this.resolvePassphrase();
+        if (passphrase) {
+          await this.persistIdentity(identity, passphrase);
+        }
+      }
       return identity;
     }
 
@@ -273,18 +338,36 @@ export class Mebular {
       this.config.deviceName ?? this.config.deviceId,
     );
     identity.certificate = await this.identity.issueDeviceCertificate(this.config.deviceId);
+    await this.persistIdentity(identity, await this.resolvePassphrase());
+    return identity;
+  }
 
+  /** 口令解析：直接配置优先，其次 keychain 接缝 */
+  private async resolvePassphrase(): Promise<string | null> {
+    if (this.config.encryption?.passphrase) {
+      return this.config.encryption.passphrase;
+    }
+    return this.config.encryption?.keychain?.getPassphrase(this.config.deviceId) ?? null;
+  }
+
+  /** 身份文件落盘：有口令存加密封套，无口令存明文 PKCS8（本地信任假设不变） */
+  private async persistIdentity(identity: DeviceIdentity, passphrase: string | null): Promise<void> {
+    const path = this.identityFilePath();
     const record: IdentityFileRecord = {
       deviceId: identity.deviceId,
       deviceName: identity.name,
       publicKeyHex: bytesToHex(identity.publicKey),
-      privateKeyPkcs8: await IdentityManager.exportPrivateKey(identity.privateKey),
-      certificate: identity.certificate,
+      certificate: identity.certificate!,
       createdAt: identity.createdAt,
     };
+    const pkcs8 = base64ToBytes(await IdentityManager.exportPrivateKey(identity.privateKey));
+    if (passphrase) {
+      record.privateKeyEncrypted = await encryptPrivateKeyPkcs8(pkcs8, passphrase);
+    } else {
+      record.privateKeyPkcs8 = await IdentityManager.exportPrivateKey(identity.privateKey);
+    }
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, JSON.stringify(record, null, 2), 'utf-8');
-    return identity;
   }
 
   private assertReady<T>(value: T | null, name: string): T {

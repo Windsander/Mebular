@@ -26,7 +26,7 @@ export class KvJsonAdapter implements MemoryAdapter {
     return 0;
   }
 
-  async import(source: AdapterSource): Promise<CmfDocument> {
+  async import(source: AdapterSource, _ctx?: import("./adapter.js").AdapterContext): Promise<CmfDocument> {
     if (!isFlatScalarObject(source.data)) {
       throw new TypeError('kv-json 适配器只接受值均为标量的扁平对象');
     }
@@ -55,7 +55,7 @@ export class MarkdownDocAdapter implements MemoryAdapter {
     return 0;
   }
 
-  async import(source: AdapterSource): Promise<CmfDocument> {
+  async import(source: AdapterSource, _ctx?: import("./adapter.js").AdapterContext): Promise<CmfDocument> {
     if (typeof source.data !== 'string') {
       throw new TypeError('markdown-doc 适配器只接受字符串');
     }

@@ -1,0 +1,9 @@
+{
+  "sessionId": "s-001",
+  "startTime": 1756300000000,
+  "endTime": 1756300600000,
+  "messages": [
+    { "role": "user", "content": "帮我整理本周备忘" },
+    { "role": "assistant", "content": "已按主题分为三组" }
+  ]
+}

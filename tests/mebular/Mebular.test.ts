@@ -179,13 +179,18 @@ describe('Mebular 门面', () => {
     await b.shutdown();
   });
 
-  it('配置 libp2p 占位时诚实报错', async () => {
+  it('配置 libp2p 时真实装配真实网络栈（Phase 5 起；缺包才抛 NETWORK_LIBP2P_NOT_AVAILABLE）', async () => {
     const m = new Mebular({
       storagePath,
       deviceId: 'device-A',
       encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
-      network: { enabled: true, libp2p: {} },
+      network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
     });
-    await expect(m.initialize()).rejects.toMatchObject({ code: 'NETWORK_LIBP2P_NOT_AVAILABLE' });
+    try {
+      await m.initialize();
+      expect(m.node?.isRunning()).toBe(true);
+    } finally {
+      await m.shutdown();
+    }
   });
 });

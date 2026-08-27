@@ -6,7 +6,7 @@
 // - 事件由创建设备的 Ed25519 私钥签名，接收方验签后才可应用；
 // - missingEvents 按向量时钟计算对端缺失的增量集合。
 
-import type { Event, EventFilter, EventType } from '../types/event.js';
+import type { Event, EventFilter } from '../types/event.js';
 import { VectorClock } from '../sync/vectorclock/index.js';
 import type { StorageAdapter } from '../storage/StorageAdapter.js';
 import { bytesToHex, hexToBytes, bytesToBase64, base64ToBytes } from '../p2p/handshake/AuthenticationHandshake.js';

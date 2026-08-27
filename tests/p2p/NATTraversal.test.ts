@@ -1,6 +1,6 @@
 // NAT 穿透单元测试：注入式探测与信令通道
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach } from '@jest/globals';
 import {
   NATTraversal,
   isPublicIPv4,

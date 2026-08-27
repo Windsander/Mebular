@@ -11,7 +11,6 @@
 import { appendFile, mkdir, readFile, rename, writeFile } from 'fs/promises';
 import { dirname } from 'path';
 import type { Node, Edge, Event } from '../types/index.js';
-import type { NodeFilter, EdgeFilter, EventFilter } from './StorageAdapter.js';
 import { MemoryStorage } from './MemoryStorage.js';
 
 type StorageOp =

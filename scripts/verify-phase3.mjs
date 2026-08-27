@@ -114,7 +114,7 @@ try {
   const { InMemoryHub } = await import(join(rootDir, 'dist', 'p2p', 'transport', 'InMemoryTransport.js'));
   const { SecureChannelImpl } = await import(join(rootDir, 'dist', 'p2p', 'secure', 'SecureChannelImpl.js'));
 
-  async function createDevice(deviceId) {
+  const createDevice = async (deviceId) => {
     const keyPair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
     const publicKey = new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey));
     const storage = new MemoryStorage();
@@ -125,7 +125,7 @@ try {
     const syncManager = new SyncManager({ eventLog, storage, deviceId });
     const peerId = { multihash: publicKey, pubKey: publicKey, id: deviceId };
     return { deviceId, storage, eventLog, store, syncManager, publicKey, peerId };
-  }
+  };
 
   const a = await createDevice('device-A');
   const b = await createDevice('device-B');

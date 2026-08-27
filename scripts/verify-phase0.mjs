@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Phase 0 验证脚本（纯 JS，无类型标注）
 
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 

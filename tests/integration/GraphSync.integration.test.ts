@@ -33,9 +33,8 @@ class MockBonjourBus {
   private finders: Array<(svc: BonjourService) => void> = [];
 
   createInstance(): BonjourServiceInstance {
-    const bus = this;
     return {
-      publish(options) {
+      publish: (options) => {
         const service: BonjourService = {
           name: options.name,
           type: options.type,
@@ -43,23 +42,23 @@ class MockBonjourBus {
           txt: options.txt ?? {},
           addresses: ['memory://local'],
         };
-        bus.services.push(service);
-        for (const finder of [...bus.finders]) {
+        this.services.push(service);
+        for (const finder of [...this.finders]) {
           finder(service);
         }
       },
-      find(_query, callback) {
-        bus.finders.push(callback);
-        for (const service of bus.services) {
+      find: (_query, callback) => {
+        this.finders.push(callback);
+        for (const service of this.services) {
           callback(service);
         }
         return {
           stop: () => {
-            bus.finders = bus.finders.filter((f) => f !== callback);
+            this.finders = this.finders.filter((f) => f !== callback);
           },
         };
       },
-      destroy() {},
+      destroy: () => {},
     };
   }
 }

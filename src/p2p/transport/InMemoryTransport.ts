@@ -200,10 +200,9 @@ export class InMemoryHub implements ConnectionProvider {
     if (!this.nodes.has(peerId.id)) {
       this.register(peerId);
     }
-    const hub = this;
     return {
-      dial: (target, address) => hub.dialFrom(peerId, target, address),
-      onIncomingConnection: (callback) => hub.setIncomingHandler(peerId, callback),
+      dial: (target, address) => this.dialFrom(peerId, target, address),
+      onIncomingConnection: (callback) => this.setIncomingHandler(peerId, callback),
     };
   }
 

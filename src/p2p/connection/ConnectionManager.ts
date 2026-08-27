@@ -1,6 +1,6 @@
 // 连接管理器
 
-import { PeerId, Connection, ConnectionState } from '../index.js';
+import { PeerId, Connection } from '../index.js';
 import type {
   ActivityTrackingConnection,
   ConnectionProvider,
@@ -268,7 +268,7 @@ export class ConnectionManager extends EventEmitter {
   }
 
   async closeAll(): Promise<void> {
-    const promises = Array.from(this.connections.entries()).map(([peerId, conn]) => {
+    const promises = Array.from(this.connections.entries()).map(([, conn]) => {
       try {
         return conn.close();
       } catch (error) {

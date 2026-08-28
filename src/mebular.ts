@@ -11,7 +11,7 @@
 // 身份文件（<storagePath>.identity.json）保存设备私钥（PKCS8 base64）与证书，
 // 与 ~/.ssh 同级的本地信任假设；不入事件日志、不参与同步。
 
-import { mkdir, readFile, writeFile } from 'fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'fs/promises';
 import { dirname } from 'path';
 import { GraphStore } from './core/GraphStore.js';
 import { EventLog } from './eventlog/EventLog.js';
@@ -123,82 +123,107 @@ export class Mebular {
       return;
     }
 
-    // 1. 存储
     try {
-      this.storageImpl = await JsonFileStorage.open(this.config.storagePath);
-    } catch (error) {
-      throw new StorageError(
-        `存储打开失败：${this.config.storagePath}`,
-        ErrorCodes.STORAGE_INIT_FAILED,
-        error as Error,
-      );
-    }
-
-    // 2. 身份
-    const deviceIdentity = await this.loadOrCreateIdentity();
-
-    // 3. 事件日志（从存储恢复时钟，重启后计数器不回退；签名者携带证书链字段）
-    this.eventLogImpl = await EventLog.restore(this.storageImpl, this.config.deviceId, {
-      signer: {
-        deviceId: this.config.deviceId,
-        privateKey: deviceIdentity.privateKey,
-        certificate: deviceIdentity.certificate,
-      },
-    });
-
-    // 4. 图存储（事件化接线；实体时钟由事件时钟驱动）
-    this.graphImpl = new GraphStore({
-      storage: this.storageImpl,
-      author: this.config.deviceId,
-      eventLog: this.eventLogImpl,
-    });
-
-    // 5. 同步管理器（携带用户主公钥：信任链验签，收口 D9）
-    this.syncImpl = new SyncManager({
-      eventLog: this.eventLogImpl,
-      storage: this.storageImpl,
-      deviceId: this.config.deviceId,
-      autoSync: this.config.sync?.autoSync ?? true,
-      peerWhitelist: this.config.sync?.peerWhitelist,
-      syncTimeout: this.config.sync?.syncTimeout,
-      userMasterPublicKey: this.identity.getUserMasterPublicKey() ?? undefined,
-    });
-
-    // 6. 网络（可选）
-    if (this.config.network?.enabled) {
-      // libp2p 配置优先：真实网络栈装配（可选依赖，缺包时诚实报错）
-      let provider = this.config.network.provider;
-      if (this.config.network.libp2p) {
-        this.libp2pProvider = await Libp2pProvider.create({
-          deviceKey: {
-            publicKey: deviceIdentity.publicKey,
-            privateKey: deviceIdentity.privateKey,
-          },
-          listen: this.config.network.libp2p.listen,
-          protocol: this.config.network.libp2p.protocol,
-        });
-        await this.libp2pProvider.start();
-        provider = this.libp2pProvider;
+      // 1. 存储
+      try {
+        this.storageImpl = await JsonFileStorage.open(this.config.storagePath);
+      } catch (error) {
+        throw new StorageError(
+          `存储打开失败：${this.config.storagePath}`,
+          ErrorCodes.STORAGE_INIT_FAILED,
+          error as Error,
+        );
       }
-      const masterPublicKey = this.identity.getUserMasterPublicKey();
-      const node = new P2PNode({
-        identity: {
-          deviceId: deviceIdentity.deviceId,
-          devicePublicKey: deviceIdentity.publicKey,
-          devicePrivateKey: deviceIdentity.privateKey,
-          certificate: deviceIdentity.certificate!,
-        },
-        userMasterPublicKey: masterPublicKey ?? undefined,
-        provider,
-        bonjourFactory: this.config.network.bonjourFactory,
-        config: { listenPort: this.config.network.listenPort },
-      });
-      this.syncImpl.attachToNode(node);
-      await node.start();
-      this.nodeImpl = node;
-    }
 
-    this.initialized = true;
+      // 2. 身份
+      const deviceIdentity = await this.loadOrCreateIdentity();
+
+      // 3. 事件日志（从存储恢复时钟，重启后计数器不回退；签名者携带证书链字段）
+      this.eventLogImpl = await EventLog.restore(this.storageImpl, this.config.deviceId, {
+        signer: {
+          deviceId: this.config.deviceId,
+          privateKey: deviceIdentity.privateKey,
+          certificate: deviceIdentity.certificate,
+        },
+      });
+
+      // 4. 图存储（事件化接线；实体时钟由事件时钟驱动）
+      this.graphImpl = new GraphStore({
+        storage: this.storageImpl,
+        author: this.config.deviceId,
+        eventLog: this.eventLogImpl,
+      });
+
+      // 5. 同步管理器（携带用户主公钥：信任链验签，收口 D9）
+      this.syncImpl = new SyncManager({
+        eventLog: this.eventLogImpl,
+        storage: this.storageImpl,
+        deviceId: this.config.deviceId,
+        autoSync: this.config.sync?.autoSync ?? true,
+        peerWhitelist: this.config.sync?.peerWhitelist,
+        syncTimeout: this.config.sync?.syncTimeout,
+        userMasterPublicKey: this.identity.getUserMasterPublicKey() ?? undefined,
+      });
+
+      // 6. 网络（可选）
+      if (this.config.network?.enabled) {
+        // libp2p 配置优先：真实网络栈装配（可选依赖，缺包时诚实报错）
+        let provider = this.config.network.provider;
+        if (this.config.network.libp2p) {
+          this.libp2pProvider = await Libp2pProvider.create({
+            deviceKey: {
+              publicKey: deviceIdentity.publicKey,
+              privateKey: deviceIdentity.privateKey,
+            },
+            listen: this.config.network.libp2p.listen,
+            protocol: this.config.network.libp2p.protocol,
+          });
+          await this.libp2pProvider.start();
+          provider = this.libp2pProvider;
+        }
+        const masterPublicKey = this.identity.getUserMasterPublicKey();
+        const node = new P2PNode({
+          identity: {
+            deviceId: deviceIdentity.deviceId,
+            devicePublicKey: deviceIdentity.publicKey,
+            devicePrivateKey: deviceIdentity.privateKey,
+            certificate: deviceIdentity.certificate!,
+          },
+          userMasterPublicKey: masterPublicKey ?? undefined,
+          provider,
+          bonjourFactory: this.config.network.bonjourFactory,
+          config: { listenPort: this.config.network.listenPort },
+        });
+        this.syncImpl.attachToNode(node);
+        await node.start();
+        this.nodeImpl = node;
+      }
+
+      this.initialized = true;
+    } catch (error) {
+      // 部分初始化回滚：已打开的资源全部收拢，允许修正配置后重试
+      await this.rollbackPartialInit();
+      throw error;
+    }
+  }
+
+  /** 初始化失败的清理：与 shutdown 同等收拢，但吞掉清理错误以保留原始错误 */
+  private async rollbackPartialInit(): Promise<void> {
+    if (this.nodeImpl?.isRunning()) {
+      await this.nodeImpl.stop().catch(() => undefined);
+    }
+    this.nodeImpl = null;
+    if (this.libp2pProvider) {
+      await this.libp2pProvider.stop().catch(() => undefined);
+      this.libp2pProvider = null;
+    }
+    this.syncImpl = null;
+    this.graphImpl = null;
+    this.eventLogImpl = null;
+    if (this.storageImpl) {
+      await this.storageImpl.close().catch(() => undefined);
+      this.storageImpl = null;
+    }
   }
 
   async shutdown(): Promise<void> {
@@ -368,6 +393,8 @@ export class Mebular {
     }
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, JSON.stringify(record, null, 2), 'utf-8');
+    // 私钥材料入文件：权限收紧到仅属主可读写（对齐 ~/.ssh 信任假设）
+    await chmod(path, 0o600);
   }
 
   private assertReady<T>(value: T | null, name: string): T {

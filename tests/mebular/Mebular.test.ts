@@ -5,7 +5,7 @@
 // 以及 network.enabled 时双门面实例经 InMemoryHub 的自动同步。
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtemp, rm, readFile } from 'fs/promises';
+import { mkdtemp, rm, readFile, stat } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Mebular } from '../../src/mebular.js';
@@ -192,5 +192,53 @@ describe('Mebular 门面', () => {
     } finally {
       await m.shutdown();
     }
+  });
+
+  it('initialize 中途失败回滚：资源收拢、实例可安全 shutdown，修正配置后新实例可重试', async () => {
+    // 注入一个在 onIncomingConnection 抛错的 provider，让网络装配阶段必然失败
+    const brokenProvider = {
+      dial: async () => {
+        throw new Error('unreachable');
+      },
+      onIncomingConnection: () => {
+        throw new Error('provider registration boom');
+      },
+    };
+    const failing = new Mebular({
+      storagePath,
+      deviceId: 'device-A',
+      encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
+      network: { enabled: true, provider: brokenProvider },
+    });
+
+    await expect(failing.initialize()).rejects.toThrow('boom');
+    expect(failing.isInitialized()).toBe(false);
+    // 回滚后子系统仍不可访问；shutdown 幂等不抛
+    expect(() => failing.graph).toThrow(MebularError);
+    await failing.shutdown();
+
+    // 同一存储路径换新实例（正常 provider）可干净初始化——证明存储已被回滚收拢
+    const retry = new Mebular({
+      storagePath,
+      deviceId: 'device-A',
+      encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
+      network: { enabled: true, provider: new InMemoryHub() },
+    });
+    await retry.initialize();
+    expect(retry.isInitialized()).toBe(true);
+    expect(retry.node?.isRunning()).toBe(true);
+    await retry.shutdown();
+  });
+
+  it('身份文件权限收紧为 0600（仅属主可读写）', async () => {
+    const m = new Mebular({
+      storagePath,
+      deviceId: 'device-A',
+      encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
+    });
+    await m.initialize();
+    const mode = (await stat(`${storagePath}.identity.json`)).mode & 0o777;
+    expect(mode).toBe(0o600);
+    await m.shutdown();
   });
 });

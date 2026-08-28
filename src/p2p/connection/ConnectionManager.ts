@@ -56,10 +56,13 @@ export class ConnectionManager extends EventEmitter {
     this.keepAliveInterval = setInterval(() => {
       this.sendHeartbeat();
     }, this.options.keepAliveInterval);
+    // 库不应凭心跳计时器拖住宿主进程退出
+    this.keepAliveInterval.unref();
 
     this.heartbeatCheckInterval = setInterval(() => {
       this.checkHeartbeatTimeout();
     }, this.options.heartbeatTimeout);
+    this.heartbeatCheckInterval.unref();
   }
 
   async stop(): Promise<void> {
@@ -157,6 +160,8 @@ export class ConnectionManager extends EventEmitter {
       const pending = this.pendingConnections.get(peerId.id);
       if (pending) {
         this.pendingConnections.delete(peerId.id);
+        // 挂起连接也要真正关闭，只删表会泄漏底层资源
+        await pending.close().catch(() => undefined);
       }
       return;
     }

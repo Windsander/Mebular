@@ -22,7 +22,6 @@ export type SyncDirection = 'push' | 'pull' | 'bidirectional';
 export type SyncMessage =
   | { type: 'sync-hello'; vectorClock: Record<string, number>; direction?: SyncDirection }
   | { type: 'sync-offer'; events: Event[] }
-  | { type: 'sync-request'; vectorClock: Record<string, number> }
   | { type: 'sync-ack'; appliedEventIds: string[] }
   | { type: 'sync-done'; finalVectorClock: Record<string, number> }
   | { type: 'sync-error'; message: string };

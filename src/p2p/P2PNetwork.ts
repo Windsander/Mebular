@@ -39,6 +39,7 @@ export interface PeerId {
 }
 
 export interface PeerInfo {
+  /** 发现层来源的 PeerId 只有 id 可信；multihash/pubKey 为占位值，公钥以握手证书为准 */
   peerId: PeerId;
   name: string;
   addresses: string[];

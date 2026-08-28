@@ -117,6 +117,8 @@ export class DeviceDiscovery extends EventEmitter {
     this.discoveryInterval = setInterval(() => {
       this.discoverPeers();
     }, this.options.interval);
+    // 发现扫描计时器不拖住宿主进程退出
+    this.discoveryInterval.unref();
   }
 
   async stop(): Promise<void> {
@@ -165,6 +167,8 @@ export class DeviceDiscovery extends EventEmitter {
       return;
     }
 
+    // 注意：mDNS 只携带 peer id 字符串，multihash/pubKey 是占位值——
+    // 安全决策（验签）必须使用握手证书中的公钥，绝不能用这里的占位 pubKey。
     const peerInfo: PeerInfo = {
       peerId: {
         id: peerId,

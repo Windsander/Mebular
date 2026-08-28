@@ -28,7 +28,7 @@ const requiredFiles = [
   'src/sync/vectorclock/index.ts',
   'src/sync/vectorclock/VectorClock.ts',
   'src/index.ts',
-  'README-src.md',
+  'README.md',
   'docs.design/project-status.md',
 ];
 

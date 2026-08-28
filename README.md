@@ -8,7 +8,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-212%20passed-brightgreen)](#验证与质量)
+[![Tests](https://img.shields.io/badge/Tests-222%20passed-brightgreen)](#验证与质量)
 [![Phases](https://img.shields.io/badge/Phases-0%E2%80%935%20%E5%AE%8C%E6%88%90-blueviolet)](#路线图)
 
 </div>
@@ -77,7 +77,7 @@ graph TD
 ```bash
 npm install
 npm run build    # TypeScript strict → dist/
-npm test         # Jest 全量：28 套件 / 212 用例
+npm test         # Jest 全量：28 套件 / 222 用例
 npm run lint     # ESLint（src + tests + scripts）
 ```
 
@@ -152,7 +152,7 @@ node scripts/verify-phase2.mjs   # P2P 网络
 
 | 指标 | 状态 |
 |---|---|
-| 测试 | **28 套件 / 212 用例**全绿（单元 + 双设备端到端 + 跨端互通 + 故障注入） |
+| 测试 | **28 套件 / 222 用例**全绿（单元 + 双设备端到端 + 跨端互通 + 故障注入） |
 | 类型 | `tsc --noEmit` strict + `noUncheckedIndexedAccess` 零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |
 | 质量门禁 | 每个阶段以 verify 脚本 + 构建产物冒烟收尾 |

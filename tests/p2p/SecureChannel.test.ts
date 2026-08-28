@@ -146,3 +146,116 @@ describe('SecureChannelImpl', () => {
     await expect(cold.send(new Uint8Array([1]))).rejects.toThrow('not running');
   });
 });
+
+// 身份绑定（防握手后 MITM）：密钥交换帧附设备签名，验签失败一律拒绝
+describe('SecureChannelImpl 身份绑定', () => {
+  let hub: InMemoryHub;
+  let alice: TestIdentity;
+  let bob: TestIdentity;
+
+  beforeEach(async () => {
+    hub = new InMemoryHub();
+    alice = await createTestIdentity('device-alice');
+    bob = await createTestIdentity('device-bob');
+  });
+
+  function boundChannels(): {
+    connA: InMemoryConnection;
+    connB: InMemoryConnection;
+    chA: SecureChannelImpl;
+    chB: SecureChannelImpl;
+  } {
+    const [connA, connB] = hub.createLinkedPair(alice.peerId, bob.peerId);
+    const chA = new SecureChannelImpl(connA, {
+      sessionKeyRotation: false,
+      devicePrivateKey: alice.identity.devicePrivateKey,
+      peerDevicePublicKey: bob.identity.devicePublicKey,
+    });
+    const chB = new SecureChannelImpl(connB, {
+      sessionKeyRotation: false,
+      devicePrivateKey: bob.identity.devicePrivateKey,
+      peerDevicePublicKey: alice.identity.devicePublicKey,
+    });
+    return { connA, connB, chA, chB };
+  }
+
+  /** 手工构造一帧密钥交换消息（可指定签名密钥与是否带签名） */
+  async function forgeKeyFrame(
+    epoch: number,
+    x25519Public: Uint8Array,
+    signingKey: CryptoKey | null,
+  ): Promise<Uint8Array> {
+    const base = new Uint8Array(5 + 32);
+    new DataView(base.buffer).setUint8(0, 1);
+    new DataView(base.buffer).setUint32(1, epoch, false);
+    base.set(x25519Public, 5);
+    if (!signingKey) {
+      return base;
+    }
+    const payload = new Uint8Array(4 + 32);
+    new DataView(payload.buffer).setUint32(0, epoch, false);
+    payload.set(x25519Public, 4);
+    const sig = new Uint8Array(
+      await crypto.subtle.sign({ name: 'Ed25519' }, signingKey, payload),
+    );
+    const frame = new Uint8Array(base.length + sig.length);
+    frame.set(base, 0);
+    frame.set(sig, base.length);
+    return frame;
+  }
+
+  it('带签名的密钥交换正常协商，收发与轮换不受影响', async () => {
+    const { chA, chB } = boundChannels();
+    await Promise.all([chA.start(), chB.start()]);
+    try {
+      // 指纹一致
+      expect(Buffer.from(chA.getSessionKey()!).equals(Buffer.from(chB.getSessionKey()!))).toBe(true);
+
+      const iter = chB.receive()[Symbol.asyncIterator]();
+      await chA.send(new TextEncoder().encode('bound channel'));
+      expect(new TextDecoder().decode((await iter.next()).value)).toBe('bound channel');
+
+      // 轮换同样走签名帧
+      await chA.rotateSessionKey();
+      await waitFor(() => chB.getCurrentEpoch() === 2);
+      expect(Buffer.from(chA.getSessionKey()!).equals(Buffer.from(chB.getSessionKey()!))).toBe(true);
+    } finally {
+      await Promise.all([chA.close(), chB.close()]);
+    }
+  });
+
+  it('攻击者私钥签名的密钥帧被拒绝（验签失败）', async () => {
+    const eve = await createTestIdentity('device-eve');
+    const { connB, chA, chB } = boundChannels();
+    await Promise.all([chA.start(), chB.start()]);
+    try {
+      const iter = chB.receive()[Symbol.asyncIterator]();
+
+      // eve 伪造 epoch 2 密钥帧：自己的 X25519 公钥 + 自己的 Ed25519 签名
+      const forgedX = (await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits'])) as CryptoKeyPair;
+      const forgedPub = new Uint8Array(await crypto.subtle.exportKey('raw', forgedX.publicKey));
+      connB.deliver(await forgeKeyFrame(2, forgedPub, eve.identity.devicePrivateKey));
+
+      await expect(iter.next()).rejects.toThrow(/signature/i);
+    } finally {
+      await Promise.all([chA.close(), chB.close()]);
+    }
+  });
+
+  it('要求验签时，未签名的密钥帧被拒绝', async () => {
+    const { connB, chA, chB } = boundChannels();
+    await Promise.all([chA.start(), chB.start()]);
+    try {
+      const iter = chB.receive()[Symbol.asyncIterator]();
+
+      // 无签名的 epoch 2 密钥帧（旧格式）
+      const x = (await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits'])) as CryptoKeyPair;
+      const pub = new Uint8Array(await crypto.subtle.exportKey('raw', x.publicKey));
+      connB.deliver(await forgeKeyFrame(2, pub, null));
+
+      await expect(iter.next()).rejects.toThrow(/signature/i);
+    } finally {
+      await Promise.all([chA.close(), chB.close()]);
+    }
+  });
+});

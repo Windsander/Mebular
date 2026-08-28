@@ -12,7 +12,13 @@
 //
 // 线格式：
 //   数据帧  [type=0:1][epoch:4 BE][counter:8 BE][iv:12][ciphertext+tag]
-//   密钥帧  [type=1:1][epoch:4 BE][ephemeral X25519 public key:32]
+//   密钥帧  [type=1:1][epoch:4 BE][ephemeral X25519 public key:32][signature:64]?
+//
+// 身份绑定（防握手后 MITM）：配置 devicePrivateKey 后，密钥帧附本端对
+// (epoch ‖ 临时公钥) 的 Ed25519 签名；配置 peerDevicePublicKey 后，未签名
+// 或验签失败的密钥帧一律拒绝。两者均由 P2PNode 在认证完成后自动装配——
+// 临时密钥由此绑定到握手已验证的设备身份。未配置时保持旧的无签名格式
+//（匿名连接/测试路径）。
 
 import { EventEmitter } from 'events';
 import type { Connection } from '../P2PNetwork.js';
@@ -24,7 +30,17 @@ export interface SecureChannelOptions {
   sessionKeyRotation?: boolean;
   sessionKeyLifetime?: number;
   keyExchangeTimeout?: number;
+  /** 本机设备私钥：提供后密钥交换帧附 Ed25519 签名（身份绑定） */
+  devicePrivateKey?: CryptoKey;
+  /** 对端设备公钥（握手已验证）：提供后强制验证密钥帧签名，否则拒绝 */
+  peerDevicePublicKey?: Uint8Array;
 }
+
+/** 构造期解析后的配置：基础项齐全，身份绑定项可选 */
+type ResolvedSecureChannelOptions = Required<
+  Omit<SecureChannelOptions, 'devicePrivateKey' | 'peerDevicePublicKey'>
+> &
+  Pick<SecureChannelOptions, 'devicePrivateKey' | 'peerDevicePublicKey'>;
 
 export interface SecureChannel {
   readonly connection: Connection;
@@ -41,6 +57,10 @@ const FRAME_KEY_EXCHANGE = 1;
 const HEADER_LENGTH = 13; // type(1) + epoch(4) + counter(8)
 const IV_LENGTH = 12;
 const X25519_PUBLIC_KEY_LENGTH = 32;
+const ED25519_SIGNATURE_LENGTH = 64;
+/** 密钥帧长度：无签名 / 带 Ed25519 签名（身份绑定） */
+const KEY_FRAME_UNSIGNED = 1 + 4 + X25519_PUBLIC_KEY_LENGTH;
+const KEY_FRAME_SIGNED = KEY_FRAME_UNSIGNED + ED25519_SIGNATURE_LENGTH;
 
 interface EpochState {
   key: CryptoKey;
@@ -56,7 +76,7 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
   readonly connection: Connection;
   readonly isEncrypted: boolean = true;
 
-  private options: Required<SecureChannelOptions>;
+  private options: ResolvedSecureChannelOptions;
   private running = false;
 
   /** 发送侧：当前世代与计数器 */
@@ -226,11 +246,26 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
   private async sendKeyExchange(epoch: number): Promise<void> {
     const ephemeral = await this.ensureEphemeral(epoch);
 
-    const frame = new Uint8Array(1 + 4 + X25519_PUBLIC_KEY_LENGTH);
+    let frame = new Uint8Array(KEY_FRAME_UNSIGNED);
     const view = new DataView(frame.buffer);
     view.setUint8(0, FRAME_KEY_EXCHANGE);
     view.setUint32(1, epoch, false);
     frame.set(ephemeral.publicKeyBytes, 5);
+
+    // 身份绑定：签名 (epoch ‖ 临时公钥)，把临时密钥锚定到握手已验证的设备身份
+    if (this.options.devicePrivateKey) {
+      const signature = new Uint8Array(
+        await crypto.subtle.sign(
+          { name: 'Ed25519' },
+          this.options.devicePrivateKey,
+          keyExchangeSignPayload(epoch, ephemeral.publicKeyBytes),
+        ),
+      );
+      const signed = new Uint8Array(KEY_FRAME_SIGNED);
+      signed.set(frame, 0);
+      signed.set(signature, KEY_FRAME_UNSIGNED);
+      frame = signed;
+    }
 
     await this.connection.send(frame);
   }
@@ -249,11 +284,28 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
     return entry;
   }
 
-  /** 收到对端临时公钥：若本端尚未为该世代发公钥则补发，随后推导密钥 */
+  /** 收到对端临时公钥：先身份绑定校验，若本端尚未为该世代发公钥则补发，随后推导密钥 */
   private async handleKeyExchange(frame: Uint8Array): Promise<void> {
     const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
     const epoch = view.getUint32(1, false);
     const remotePublicKeyBytes = frame.slice(5, 5 + X25519_PUBLIC_KEY_LENGTH);
+
+    // 身份绑定校验：配置了对端设备公钥时，未签名/验签失败的密钥帧一律拒绝
+    if (this.options.peerDevicePublicKey) {
+      if (frame.byteLength !== KEY_FRAME_SIGNED) {
+        throw new Error('Key exchange frame missing identity signature');
+      }
+      const signature = frame.slice(KEY_FRAME_UNSIGNED, KEY_FRAME_SIGNED);
+      const valid = await verifyKeyExchangeSignature(
+        this.options.peerDevicePublicKey,
+        epoch,
+        remotePublicKeyBytes,
+        signature,
+      );
+      if (!valid) {
+        throw new Error('Key exchange signature verification failed (possible MITM)');
+      }
+    }
 
     if (epoch <= 0 || (this.currentKey && epoch <= this.sendEpoch && this.recvStates.has(epoch))) {
       return; // 重复或过时的密钥帧
@@ -359,6 +411,40 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
 }
 
 // ---------- 密钥推导 ----------
+
+/** 密钥交换签名载荷：epoch（4 字节 BE）‖ 临时公钥，把世代与密钥共同绑定 */
+function keyExchangeSignPayload(epoch: number, publicKeyBytes: Uint8Array): ArrayBuffer {
+  const payload = new Uint8Array(4 + publicKeyBytes.byteLength);
+  new DataView(payload.buffer).setUint32(0, epoch, false);
+  payload.set(publicKeyBytes, 4);
+  return payload.buffer;
+}
+
+/** 用对端设备公钥验证密钥交换帧签名 */
+async function verifyKeyExchangeSignature(
+  peerDevicePublicKey: Uint8Array,
+  epoch: number,
+  remotePublicKeyBytes: Uint8Array,
+  signature: Uint8Array,
+): Promise<boolean> {
+  try {
+    const key = await crypto.subtle.importKey(
+      'raw',
+      peerDevicePublicKey.buffer as ArrayBuffer,
+      { name: 'Ed25519' },
+      false,
+      ['verify'],
+    );
+    return await crypto.subtle.verify(
+      { name: 'Ed25519' },
+      key,
+      signature.buffer as ArrayBuffer,
+      keyExchangeSignPayload(epoch, remotePublicKeyBytes),
+    );
+  } catch {
+    return false;
+  }
+}
 
 async function generateEphemeralKeyPair(): Promise<EphemeralKeyPair> {
   const keyPair = (await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits'])) as CryptoKeyPair;

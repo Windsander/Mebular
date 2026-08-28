@@ -13,6 +13,7 @@ import { DeviceDiscovery, type BonjourServiceFactory } from './DeviceDiscovery.j
 import { ConnectionManager } from './connection/ConnectionManager.js';
 import {
   AuthenticationHandshake,
+  hexToBytes,
   type DeviceCertificate,
 } from './handshake/AuthenticationHandshake.js';
 import { SecureChannelImpl, type SecureChannel } from './secure/SecureChannelImpl.js';
@@ -178,34 +179,49 @@ export class P2PNode implements P2PNetwork {
       throw new Error('P2P node already running');
     }
 
-    if (this.identity && !this.identity.certificate) {
-      // 主设备场景：持有用户主私钥时可即时自签发
-      this.identity.certificate = await this.handshake.createCertificate(this.peerId);
+    try {
+      if (this.identity && !this.identity.certificate) {
+        // 主设备场景：持有用户主私钥时可即时自签发
+        this.identity.certificate = await this.handshake.createCertificate(this.peerId);
+      }
+
+      await this.handshake.start();
+
+      if (this.provider) {
+        const bound = bindProvider(this.provider, this.peerId);
+        this.connectionManager.setConnectionProvider(bound);
+        bound.onIncomingConnection((conn) => {
+          void this.handleIncomingConnection(conn);
+        });
+      }
+      await this.connectionManager.start();
+
+      // 设备发现：显式注入优先，其次按 bonjourFactory 装配，都没有则跳过
+      this.discovery = this.injectedDiscovery
+        ?? (this.bonjourFactory
+          ? new DeviceDiscovery({ createBonjourService: this.bonjourFactory })
+          : null);
+      if (this.discovery) {
+        this.discovery.setLocalInfo(this.peerId, this.config.listenPort ?? 0);
+        await this.discovery.start();
+      }
+
+      this.attachComponentListeners();
+      this.running = true;
+    } catch (error) {
+      // 部分启动回滚：已启动组件逆序收拢，不留下泄漏的计时器/监听器
+      if (this.discovery?.isRunning()) {
+        await this.discovery.stop().catch(() => undefined);
+      }
+      this.discovery = null;
+      if (this.connectionManager.isRunning()) {
+        await this.connectionManager.stop().catch(() => undefined);
+      }
+      if (this.handshake.isRunning()) {
+        await this.handshake.stop().catch(() => undefined);
+      }
+      throw error;
     }
-
-    await this.handshake.start();
-
-    if (this.provider) {
-      const bound = bindProvider(this.provider, this.peerId);
-      this.connectionManager.setConnectionProvider(bound);
-      bound.onIncomingConnection((conn) => {
-        void this.handleIncomingConnection(conn);
-      });
-    }
-    await this.connectionManager.start();
-
-    // 设备发现：显式注入优先，其次按 bonjourFactory 装配，都没有则跳过
-    this.discovery = this.injectedDiscovery
-      ?? (this.bonjourFactory
-        ? new DeviceDiscovery({ createBonjourService: this.bonjourFactory })
-        : null);
-    if (this.discovery) {
-      this.discovery.setLocalInfo(this.peerId, this.config.listenPort ?? 0);
-      await this.discovery.start();
-    }
-
-    this.attachComponentListeners();
-    this.running = true;
   }
 
   async stop(): Promise<void> {
@@ -316,7 +332,15 @@ export class P2PNode implements P2PNetwork {
     if (this.channels.has(key)) {
       return;
     }
-    const channel = new SecureChannelImpl(connection);
+    // 身份绑定：密钥交换帧由本机设备私钥签名，并用握手已验证的对端证书公钥验签
+    const session = this.handshake.getSession(connection.peerId);
+    const peerDevicePublicKey = session?.certificate
+      ? hexToBytes(session.certificate.devicePublicKey)
+      : undefined;
+    const channel = new SecureChannelImpl(connection, {
+      ...(this.identity ? { devicePrivateKey: this.identity.devicePrivateKey } : {}),
+      ...(peerDevicePublicKey ? { peerDevicePublicKey } : {}),
+    });
     const started = channel.start().then(() => channel);
     started.catch(() => {
       // 建信道失败不阻塞连接本身；首次收发时会再暴露错误

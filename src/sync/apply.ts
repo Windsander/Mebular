@@ -9,7 +9,9 @@
 //    b. 带时间有效性的事实：validFrom 较晚者胜（新事实作废旧事实）；
 //    c. 其余走 LWW：updatedAt 较新者胜，平局按作者 ID 字典序大者胜；
 // 3. 删除事件在目标缺失时也要落墓碑，防止乱序到达的创建事件复活数据；
-// 4. 标签操作幂等；并发的增/删同一标签 → 删优先，记录冲突。
+// 4. 标签操作遵循同样的时钟纪律（落后/相同直接跳过，只推进时钟不改内容），
+//    并发的增/删同一标签按 OR-set 语义「增优先」——删除方重发即可生效，
+//    保证任意到达顺序下双端终态一致；时钟一律合并推进，绝不回退。
 
 import type { StorageAdapter } from '../storage/StorageAdapter.js';
 import type { Event } from '../types/event.js';
@@ -318,11 +320,30 @@ async function applyTagAdded(storage: StorageAdapter, event: Event): Promise<App
     // 节点缺失时标签操作无处安放；节点创建事件携带全量标签，最终状态以创建/更新事件为准
     return { status: 'stale' };
   }
+  if (local.deletedAt) {
+    // 删除优先：不给墓碑补标签
+    return { status: 'stale' };
+  }
+
+  // 时钟纪律：落后/相同的事件不改变内容，只推进时钟（防 stale 事件回退时钟）
+  const cmp = compareClocks(event.vectorClock, local.vectorClock ?? {});
+  if (cmp === 'less' || cmp === 'equal') {
+    return { status: cmp === 'equal' ? 'duplicate' : 'stale' };
+  }
+
+  const merged = mergeEntityClock(local, event);
   const tags = local.tags ?? [];
   if (tags.includes(tag)) {
+    // 已持有该标签：状态不变，仅推进因果前沿
+    await storage.putNode({ ...local, clocks: { ...merged }, vectorClock: { ...merged } });
     return { status: 'duplicate' };
   }
-  await storage.putNode({ ...local, tags: [...tags, tag], vectorClock: { ...event.vectorClock } });
+  await storage.putNode({
+    ...local,
+    tags: [...tags, tag],
+    clocks: { ...merged },
+    vectorClock: { ...merged },
+  });
   return { status: 'applied' };
 }
 
@@ -334,36 +355,62 @@ async function applyTagRemoved(storage: StorageAdapter, event: Event): Promise<A
   if (!local) {
     return { status: 'stale' };
   }
+  if (local.deletedAt) {
+    return { status: 'stale' };
+  }
+
+  const cmp = compareClocks(event.vectorClock, local.vectorClock ?? {});
+  if (cmp === 'less' || cmp === 'equal') {
+    return { status: cmp === 'equal' ? 'duplicate' : 'stale' };
+  }
+
+  const merged = mergeEntityClock(local, event);
   const tags = local.tags ?? [];
   if (!tags.includes(tag)) {
+    // 本地已无该标签（可能从未见对应 add，或已被删）：推进时钟即可
+    await storage.putNode({ ...local, clocks: { ...merged }, vectorClock: { ...merged } });
     return { status: 'duplicate' };
   }
 
-  // 并发检测：本地有未被我方观测的并发操作时记录冲突（删除优先）
-  const cmp = compareClocks(event.vectorClock, local.vectorClock ?? {});
-  const conflict: SyncConflict | undefined = cmp === 'concurrent'
-    ? {
+  if (cmp === 'concurrent') {
+    // OR-set 语义：并发的添加获胜，删除被击败——推进时钟、保留标签、上报冲突
+    // （删除方可重发：因果在后的删除按 greater 路径正常生效）
+    const resolved: Node = { ...local, clocks: { ...merged }, vectorClock: { ...merged } };
+    await storage.putNode(resolved);
+    return {
+      status: 'stale',
+      conflict: {
         eventType: event.type,
         nodeId,
         localVersion: local,
         remoteEvent: event,
         resolution: 'auto',
-        resolvedVersion: { ...local, tags: tags.filter((t) => t !== tag) },
-      }
-    : undefined;
+        resolvedVersion: resolved,
+      },
+    };
+  }
 
+  // greater：因果在后的删除正常生效
   await storage.putNode({
     ...local,
     tags: tags.filter((t) => t !== tag),
-    vectorClock: { ...event.vectorClock },
+    clocks: { ...merged },
+    vectorClock: { ...merged },
   });
-  return { status: 'applied', conflict };
+  return { status: 'applied' };
 }
 
 // ---------- 工具 ----------
 
 function withEventClock<T extends Node | Edge>(entity: T, event: Event): T {
   return { ...entity, clocks: { ...event.vectorClock }, vectorClock: { ...event.vectorClock } };
+}
+
+/** 因果前沿合并推进（标签操作用）：取本地与事件时钟的逐作者最大值，绝不回退 */
+function mergeEntityClock(entity: Node | Edge, event: Event): Clock {
+  const merged = VectorClock.fromJSON((entity.vectorClock ?? {}) as Clock);
+  merged.merge(VectorClock.fromJSON(event.vectorClock ?? {}));
+  return merged.toJSON();
 }
 
 function markNodeDeleted(node: Node, deletionTime: number, clock: Clock): Node {

@@ -167,21 +167,73 @@ describe('applyRemoteEvent', () => {
     expect((await storage.getNode('n1'))?.content).toEqual({ text: 'new-fact' });
   });
 
-  it('标签增删幂等；并发增删同标签删除优先', async () => {
+  it('标签增删幂等：重放只推进时钟，不改内容', async () => {
     await storage.putNode(makeNode('n1', { tags: ['keep'], vectorClock: { 'device-A': 1 } }));
 
-    // 增标签幂等
+    // 增标签幂等：首次应用，重放判 stale（事件时钟已并入实体时钟）
     const add = makeEvent('tag_added', { nodeId: 'n1', tag: 'x' }, 'device-B', { 'device-B': 1 });
     expect((await applyRemoteEvent(storage, add)).status).toBe('applied');
-    expect((await applyRemoteEvent(storage, add)).status).toBe('duplicate');
+    expect((await applyRemoteEvent(storage, add)).status).toBe('stale');
     expect((await storage.getNode('n1'))?.tags).toEqual(['keep', 'x']);
 
-    // 并发删标签：本地时钟 {A:1}（落后事件时钟 {B:1}? 不并发）→ 直接应用；
-    // 重放到已删除状态 → duplicate
-    const remove = makeEvent('tag_removed', { nodeId: 'n1', tag: 'x' }, 'device-B', { 'device-B': 2 });
+    // 因果在后的删除生效：B 发出删除时已观测到节点创建（A:1）与自己的添加（B:1），
+    // 故事件时钟为 {A:1, B:2} ⊃ 本地 {A:1, B:1} → greater；重放判 duplicate
+    const remove = makeEvent('tag_removed', { nodeId: 'n1', tag: 'x' }, 'device-B', { 'device-A': 1, 'device-B': 2 });
     expect((await applyRemoteEvent(storage, remove)).status).toBe('applied');
     expect((await applyRemoteEvent(storage, remove)).status).toBe('duplicate');
     expect((await storage.getNode('n1'))?.tags).toEqual(['keep']);
+  });
+
+  it('并发增删同一标签：OR-set 增优先，任意到达顺序双端终态一致', async () => {
+    // 场景：A 本地加过标签 x；B 未见该添加，并发发出删除 x
+    const addByA = makeEvent('tag_added', { nodeId: 'n1', tag: 'x' }, 'device-A', { 'device-A': 1 });
+    const removeByB = makeEvent('tag_removed', { nodeId: 'n1', tag: 'x' }, 'device-B', { 'device-B': 1 });
+
+    // 顺序一（A 视角）：add 先落地，remove 并发到达 → 增优先，删除被击败并记录冲突
+    const s1 = new MemoryStorage();
+    await s1.putNode(makeNode('n1', { vectorClock: {} }));
+    expect((await applyRemoteEvent(s1, addByA)).status).toBe('applied');
+    const defeated = await applyRemoteEvent(s1, removeByB);
+    expect(defeated.status).toBe('stale');
+    expect(defeated.conflict).toBeDefined();
+    expect(defeated.conflict?.resolution).toBe('auto');
+
+    // 顺序二（B 视角）：remove 先到（本地无此标签 → 推进时钟），add 并发到达 → 仍然加上
+    const s2 = new MemoryStorage();
+    await s2.putNode(makeNode('n1', { vectorClock: {} }));
+    expect((await applyRemoteEvent(s2, removeByB)).status).toBe('duplicate');
+    expect((await applyRemoteEvent(s2, addByA)).status).toBe('applied');
+
+    // 两种顺序终态一致：标签存在，时钟同为 {A:1, B:1}
+    const n1 = await s1.getNode('n1');
+    const n2 = await s2.getNode('n1');
+    expect(n1?.tags).toEqual(['x']);
+    expect(n2?.tags).toEqual(['x']);
+    expect(n1?.vectorClock).toEqual({ 'device-A': 1, 'device-B': 1 });
+    expect(n2?.vectorClock).toEqual({ 'device-A': 1, 'device-B': 1 });
+  });
+
+  it('stale 标签事件不回退节点时钟', async () => {
+    await storage.putNode(makeNode('n1', { tags: ['x'], vectorClock: { 'device-A': 5, 'device-B': 3 } }));
+
+    // 明显落后的事件（时钟 {B:2} ⊂ 本地）到达：不改内容也不回退时钟
+    const staleAdd = makeEvent('tag_added', { nodeId: 'n1', tag: 'y' }, 'device-B', { 'device-B': 2 });
+    expect((await applyRemoteEvent(storage, staleAdd)).status).toBe('stale');
+
+    const stored = await storage.getNode('n1');
+    expect(stored?.tags).toEqual(['x']);
+    expect(stored?.vectorClock).toEqual({ 'device-A': 5, 'device-B': 3 });
+  });
+
+  it('墓碑节点拒绝标签操作（删除优先）', async () => {
+    await storage.putNode(makeNode('n1', { deletedAt: 3000, vectorClock: { 'device-B': 2 } }));
+
+    const add = makeEvent('tag_added', { nodeId: 'n1', tag: 'x' }, 'device-A', { 'device-A': 1 });
+    expect((await applyRemoteEvent(storage, add)).status).toBe('stale');
+    expect((await storage.getNode('n1'))?.tags).toEqual([]);
+
+    const remove = makeEvent('tag_removed', { nodeId: 'n1', tag: 'x' }, 'device-A', { 'device-A': 2 });
+    expect((await applyRemoteEvent(storage, remove)).status).toBe('stale');
   });
 
   it('缺失节点的更新事件修复性应用，标签事件则跳过', async () => {

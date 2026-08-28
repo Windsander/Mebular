@@ -51,10 +51,25 @@ export class JsonFileStorage extends MemoryStorage {
       throw error;
     }
 
-    for (const line of content.split('\n')) {
-      const trimmed = line.trim();
-      if (!trimmed) continue;
-      const record = JSON.parse(trimmed) as StorageOp;
+    const lines = content.split('\n').filter((line) => line.trim() !== '');
+    for (let i = 0; i < lines.length; i++) {
+      let record: StorageOp;
+      try {
+        record = JSON.parse(lines[i]!) as StorageOp;
+      } catch (error) {
+        // 追加式日志的崩溃半行写只可能出现在末尾：容忍并截断最后一条坏行；
+        // 中间行损坏说明文件已被意外破坏，诚实报错并给出行号
+        if (i === lines.length - 1) {
+          console.warn(
+            `[JsonFileStorage] 末尾 ${lines.length - i} 行损坏（疑似崩溃半行写），已略过：${this.filePath}`,
+          );
+          break;
+        }
+        throw new Error(
+          `存储文件第 ${i + 1} 行损坏（非末尾，无法安全恢复）：${this.filePath}`,
+          { cause: error },
+        );
+      }
       await this.applyOp(record);
     }
   }

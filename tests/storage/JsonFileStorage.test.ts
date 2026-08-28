@@ -4,7 +4,7 @@
 // compact 后文件收紧且状态不变；事件写入幂等。
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtemp, readFile, rm } from 'fs/promises';
+import { appendFile, mkdtemp, readFile, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { JsonFileStorage } from '../../src/storage/JsonFileStorage.js';
@@ -128,5 +128,37 @@ describe('JsonFileStorage', () => {
     const storage = await JsonFileStorage.open(file);
     await storage.close();
     await expect(storage.putNode(makeNode('n1'))).rejects.toThrow('closed');
+  });
+
+  it('末尾撕裂行（崩溃半行写）被容忍，前文完整恢复', async () => {
+    const first = await JsonFileStorage.open(file);
+    await first.putNode(makeNode('n1'));
+    await first.putNode(makeNode('n2'));
+    await first.close();
+
+    // 模拟崩溃时的半行写：文件尾部追加一段不完整的 JSON
+    await appendFile(file, '{"op":"putNode","value":{"id":"n3","typ', 'utf-8');
+
+    const reopened = await JsonFileStorage.open(file);
+    expect((await reopened.getNode('n1'))?.content).toEqual({ text: 'node-n1' });
+    expect(await reopened.getNode('n2')).not.toBeNull();
+    expect(await reopened.getNode('n3')).toBeNull();
+    await reopened.close();
+  });
+
+  it('中间行损坏（非末尾）诚实报错，不静默截断', async () => {
+    const first = await JsonFileStorage.open(file);
+    await first.putNode(makeNode('n1'));
+    await first.putNode(makeNode('n2'));
+    await first.close();
+
+    // 把第一行弄坏（保留第二行完好）：中间行损坏不可安全恢复
+    const content = await readFile(file, 'utf-8');
+    const lines = content.split('\n');
+    lines[0] = '{"op":"putNode","value":###}';
+    await rm(file);
+    await writeFile(file, lines.join('\n'), 'utf-8');
+
+    await expect(JsonFileStorage.open(file)).rejects.toThrow('第 1 行损坏');
   });
 });

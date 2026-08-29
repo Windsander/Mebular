@@ -111,6 +111,9 @@ export class MemoryStorage implements StorageAdapter {
     let result = Array.from(this.edges.values());
 
     if (filter) {
+      if (filter.id) {
+        result = result.filter(e => e.id === filter.id);
+      }
       if (filter.source) {
         result = result.filter(e => e.source === filter.source);
       }
@@ -119,6 +122,10 @@ export class MemoryStorage implements StorageAdapter {
       }
       if (filter.relation) {
         result = result.filter(e => e.relation === filter.relation);
+      }
+      if (filter.labels?.length) {
+        const labels = filter.labels;
+        result = result.filter(e => labels.every(l => (e.labels ?? []).includes(l)));
       }
       if (filter.limit) {
         result = result.slice(filter.offset ?? 0, (filter.offset ?? 0) + filter.limit);

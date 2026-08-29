@@ -29,6 +29,7 @@
     "build": "tsc",
     "build:watch": "tsc --watch",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
     "lint": "eslint src tests scripts --ext .ts,.mjs",
     "verify": "node scripts/verify-phase5.mjs",
@@ -83,6 +84,10 @@
     "collectCoverageFrom": [
       "src/**/*.ts",
       "!src/**/*.d.ts"
+    ],
+    "coveragePathIgnorePatterns": [
+      "/node_modules/",
+      "src/p2p/transport/Libp2pProvider.ts"
     ]
   }
 }

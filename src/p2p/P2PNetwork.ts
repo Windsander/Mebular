@@ -204,7 +204,12 @@ export class P2PNode implements P2PNetwork {
           ? new DeviceDiscovery({ createBonjourService: this.bonjourFactory })
           : null);
       if (this.discovery) {
-        this.discovery.setLocalInfo(this.peerId, this.config.listenPort ?? 0);
+        // multiaddr 桥接（6.4，解除 D19 限制）：provider 暴露本机监听
+        // multiaddr（Libp2pProvider.getMultiaddrs，含 /p2p/<id> 后缀）时
+        // 随 mDNS TXT 发布，对端发现后可直接按 multiaddr 拨号；
+        // provider 无此能力（InMemoryHub 等）时传空，行为与此前一致
+        const addrs = this.getProviderMultiaddrs();
+        this.discovery.setLocalInfo(this.peerId, this.config.listenPort ?? 0, addrs);
         await this.discovery.start();
       }
 
@@ -440,6 +445,18 @@ export class P2PNode implements P2PNetwork {
 
   getDiscovery(): DeviceDiscovery | null {
     return this.discovery;
+  }
+
+  /**
+   * provider 具备 multiaddr 暴露能力（Libp2pProvider）时取本机监听地址；
+   * 鸭子类型探测保持 ConnectionProvider 接缝不变，异常向上传递不静默
+   */
+  private getProviderMultiaddrs(): string[] {
+    const provider = this.provider as { getMultiaddrs?: () => string[] } | null;
+    if (provider && typeof provider.getMultiaddrs === 'function') {
+      return provider.getMultiaddrs();
+    }
+    return [];
   }
 
   isRunning(): boolean {

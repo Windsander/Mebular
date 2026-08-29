@@ -78,6 +78,8 @@ export interface MebularConfig {
     autoSync: boolean;
     peerWhitelist?: string[];
     syncTimeout?: number;
+    /** 已确认集合持久化文件路径（6.4）；缺省派生为 <storagePath 去 .json>.sync-state.json */
+    syncStatePath?: string;
   };
 }
 
@@ -154,7 +156,8 @@ export class Mebular {
         eventLog: this.eventLogImpl,
       });
 
-      // 5. 同步管理器（携带用户主公钥：信任链验签，收口 D9）
+      // 5. 同步管理器（携带用户主公钥：信任链验签，收口 D9；
+      //    已确认集合持久化到存储旁路文件，重启后首帧不再冗余，6.4）
       this.syncImpl = new SyncManager({
         eventLog: this.eventLogImpl,
         storage: this.storageImpl,
@@ -163,6 +166,9 @@ export class Mebular {
         peerWhitelist: this.config.sync?.peerWhitelist,
         syncTimeout: this.config.sync?.syncTimeout,
         userMasterPublicKey: this.identity.getUserMasterPublicKey() ?? undefined,
+        syncStatePath:
+          this.config.sync?.syncStatePath ??
+          `${this.config.storagePath.replace(/\.json$/i, '')}.sync-state.json`,
       });
 
       // 6. 网络（可选）

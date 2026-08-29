@@ -47,6 +47,8 @@ export class DeviceDiscovery extends EventEmitter {
   private bonjourBrowser: { stop: () => void } | null = null;
   private localPeerId: PeerId | null = null;
   private localPort: number = 0;
+  /** 本机监听 multiaddr（libp2p 场景，含 /p2p/<id> 后缀）；空数组=无端网络栈地址可发布 */
+  private localAddrs: string[] = [];
   private createBonjourService?: BonjourServiceFactory;
 
   constructor(options: DeviceDiscoveryOptions = {}) {
@@ -61,9 +63,15 @@ export class DeviceDiscovery extends EventEmitter {
     this.createBonjourService = options.createBonjourService;
   }
 
-  setLocalInfo(peerId: PeerId, port: number): void {
+  /**
+   * 设置本机身份与监听端口；addrs 为可选的本机 multiaddr 列表
+   * （6.4 multiaddr 桥接：libp2p 传输时发布真实拨号地址，解除 D19
+   * 「发现层仅 memory:///端口语义」的限制；无 libp2p 时传空维持现状）
+   */
+  setLocalInfo(peerId: PeerId, port: number, addrs: string[] = []): void {
     this.localPeerId = peerId;
     this.localPort = port;
+    this.localAddrs = [...addrs];
   }
 
   async start(): Promise<void> {
@@ -103,6 +111,9 @@ export class DeviceDiscovery extends EventEmitter {
       txt: {
         id: this.localPeerId.id,
         name: serviceName,
+        // multiaddr 以逗号分隔进 TXT（multiaddr 字符集不含逗号）；
+        // 无地址可发布时省略该键，保持 legacy 消费方兼容
+        ...(this.localAddrs.length > 0 ? { addrs: this.localAddrs.join(',') } : {}),
       },
     });
 
@@ -158,11 +169,20 @@ export class DeviceDiscovery extends EventEmitter {
       return;
     }
 
+    // multiaddr 桥接（6.4）：TXT addrs 携带的 multiaddr 优先于
+    // mDNS 自带的裸 IP 地址——前者是传输层可直接 dial 的完整地址
+    const txtAddrs = service.txt?.addrs
+      ?.split(',')
+      .map((a) => a.trim())
+      .filter((a) => a !== '');
+    const addresses = txtAddrs && txtAddrs.length > 0 ? txtAddrs : (service.addresses ?? []);
+
     if (this.discoveredPeers.has(peerId)) {
       const existing = this.discoveredPeers.get(peerId);
       if (existing) {
         existing.port = service.port;
         existing.name = service.name;
+        existing.addresses = addresses;
         existing.timestamp = Date.now();
       }
       return;
@@ -177,7 +197,7 @@ export class DeviceDiscovery extends EventEmitter {
         pubKey: new TextEncoder().encode(peerId),
       },
       name: service.name,
-      addresses: service.addresses ?? [],
+      addresses,
       port: service.port,
       timestamp: Date.now(),
     };

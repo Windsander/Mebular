@@ -8,6 +8,9 @@
 //   'conflict' 事件上报；
 // - 离线队列：待同步集合 = 本地事件 − 对端已确认集合，按对端分桶持久，
 //   重连后续传天然幂等（内容寻址 ID 去重）；
+// - 已确认集合持久化（6.4）：配置 syncStatePath 后按对端已确认集合落盘
+//   （原子写：tmp+rename），重启后首帧不再多带一轮冗余事件；
+//   状态文件损坏诚实报 STORAGE_READ_FAILED，不静默重置。
 // - 自动同步：attachToNode 后在握手 'authenticated' 上触发，
 //   设备 ID 字典序小者发起，大者响应，避免双发死锁。
 //
@@ -15,10 +18,12 @@
 // 避免共享信道上的帧序交错。
 
 import { EventEmitter } from 'events';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import type { StorageAdapter } from '../../storage/StorageAdapter.js';
 import { EventLog } from '../../eventlog/EventLog.js';
 import { VectorClock } from '../vectorclock/index.js';
-import { ErrorCodes, SyncError } from '../../errors.js';
+import { ErrorCodes, StorageError, SyncError } from '../../errors.js';
 import type { Event } from '../../types/event.js';
 import { applyRemoteEvent, type SyncConflict } from '../apply.js';
 import { hexToBytes, verifyCertificateSignature, type AuthSession } from '../../p2p/handshake/AuthenticationHandshake.js';
@@ -78,6 +83,12 @@ export interface SyncManagerOptions {
    * 只接受直连对端直签事件（Phase 3 行为）。
    */
   userMasterPublicKey?: Uint8Array;
+  /**
+   * 已确认集合持久化文件路径（6.4）：提供后，markEventsSynced 确认的
+   * 事件 ID 集合随会话落盘（JSON，原子写），重启后懒加载恢复，
+   * 首帧 offer 不再携带对端早已确认的冗余事件。
+   */
+  syncStatePath?: string;
 }
 
 const DEFAULT_SYNC_TIMEOUT = 30_000;
@@ -93,6 +104,10 @@ export class SyncManager extends EventEmitter {
 
   /** 每个对端已确认（ack）的事件 ID 集合——离线队列的持久依据 */
   private readonly syncedByPeer = new Map<string, Set<string>>();
+  /** 已确认集合持久化路径；null 则维持纯内存（6.4 前行为） */
+  private readonly syncStatePath: string | null;
+  /** 懒加载在途 Promise（去重并发首次访问） */
+  private syncStateLoading: Promise<void> | null = null;
 
   private queue: Promise<unknown> = Promise.resolve();
   private syncing = false;
@@ -108,6 +123,7 @@ export class SyncManager extends EventEmitter {
     this.peerWhitelist = options.peerWhitelist;
     this.syncTimeout = options.syncTimeout ?? DEFAULT_SYNC_TIMEOUT;
     this.userMasterPublicKey = options.userMasterPublicKey ?? null;
+    this.syncStatePath = options.syncStatePath ?? null;
   }
 
   // ---------- spec-004 查询面 ----------
@@ -118,6 +134,7 @@ export class SyncManager extends EventEmitter {
 
   /** 待同步事件：未被（指定对端 / 任一已知对端中的某一个）确认过的本地事件 */
   async getPendingEvents(peerDeviceId?: string): Promise<Event[]> {
+    await this.ensureSyncStateLoaded();
     const all = await this.eventLog.listEvents();
     if (peerDeviceId) {
       const acked = this.syncedByPeer.get(peerDeviceId);
@@ -132,7 +149,8 @@ export class SyncManager extends EventEmitter {
     );
   }
 
-  markEventsSynced(peerDeviceId: string, eventIds: string[]): void {
+  async markEventsSynced(peerDeviceId: string, eventIds: string[]): Promise<void> {
+    await this.ensureSyncStateLoaded();
     let acked = this.syncedByPeer.get(peerDeviceId);
     if (!acked) {
       acked = new Set();
@@ -140,6 +158,78 @@ export class SyncManager extends EventEmitter {
     }
     for (const id of eventIds) {
       acked.add(id);
+    }
+    await this.persistSyncState();
+  }
+
+  // ---------- 已确认集合持久化（6.4） ----------
+
+  /** 懒加载持久化的已确认集合；无配置路径时为空操作（纯内存行为不变） */
+  private ensureSyncStateLoaded(): Promise<void> {
+    if (!this.syncStatePath) return Promise.resolve();
+    this.syncStateLoading ??= this.loadSyncState(this.syncStatePath);
+    return this.syncStateLoading;
+  }
+
+  private async loadSyncState(filePath: string): Promise<void> {
+    let content: string;
+    try {
+      content = await readFile(filePath, 'utf-8');
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; // 首次运行：无状态文件正常
+      throw new StorageError(
+        `同步状态读取失败：${filePath}`,
+        ErrorCodes.STORAGE_READ_FAILED,
+        error as Error,
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(content);
+    } catch (error) {
+      throw new StorageError(
+        `同步状态文件损坏：${filePath}`,
+        ErrorCodes.STORAGE_READ_FAILED,
+        error as Error,
+      );
+    }
+    const peers = (parsed as { peers?: unknown } | null)?.peers;
+    if (!peers || typeof peers !== 'object') {
+      throw new StorageError(
+        `同步状态文件缺少 peers 字段：${filePath}`,
+        ErrorCodes.STORAGE_READ_FAILED,
+      );
+    }
+    for (const [peerId, ids] of Object.entries(peers)) {
+      if (!Array.isArray(ids) || ids.some((id) => typeof id !== 'string')) {
+        throw new StorageError(
+          `同步状态文件 peers.${peerId} 不是字符串数组：${filePath}`,
+          ErrorCodes.STORAGE_READ_FAILED,
+        );
+      }
+      this.syncedByPeer.set(peerId, new Set(ids as string[]));
+    }
+  }
+
+  /** 原子落盘：tmp + rename，避免半写状态文件 */
+  private async persistSyncState(): Promise<void> {
+    if (!this.syncStatePath) return;
+    const filePath = this.syncStatePath;
+    const peers: Record<string, string[]> = {};
+    for (const [peerId, ids] of this.syncedByPeer) {
+      peers[peerId] = [...ids].sort(); // 排序保证输出确定，便于审计与测试
+    }
+    const tmpPath = `${filePath}.tmp`;
+    try {
+      await mkdir(dirname(filePath), { recursive: true });
+      await writeFile(tmpPath, JSON.stringify({ version: 1, peers }), 'utf-8');
+      await rename(tmpPath, filePath);
+    } catch (error) {
+      throw new StorageError(
+        `同步状态写入失败：${filePath}`,
+        ErrorCodes.STORAGE_WRITE_FAILED,
+        error as Error,
+      );
     }
   }
 
@@ -186,7 +276,7 @@ export class SyncManager extends EventEmitter {
             : await this.eventLog.missingEvents(hello.vectorClock);
           await transport.send({ type: 'sync-offer', events: outgoing });
           const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
-          this.markEventsSynced(peer.deviceId, ack.appliedEventIds);
+          await this.markEventsSynced(peer.deviceId, ack.appliedEventIds);
 
           // 3. 对端 offer：验签 + 幂等入库 + 冲突感知应用
           const offer = await nextSyncMessage(iterator, 'sync-offer', timeout);
@@ -233,7 +323,7 @@ export class SyncManager extends EventEmitter {
             : await this.eventLog.missingEvents(hello.vectorClock);
           await transport.send({ type: 'sync-offer', events: outgoing });
           const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
-          this.markEventsSynced(peer.deviceId, ack.appliedEventIds);
+          await this.markEventsSynced(peer.deviceId, ack.appliedEventIds);
 
           await nextSyncMessage(iterator, 'sync-done', timeout);
           const finalVectorClock = this.eventLog.getClock().toJSON();

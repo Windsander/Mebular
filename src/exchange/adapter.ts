@@ -8,7 +8,7 @@
 // 作为节点 label 随图同步，同内容经不同端/不同格式导入零重复。
 
 import { createHash } from 'crypto';
-import { MebularError } from '../errors.js';
+import { ErrorCodes, MebularError } from '../errors.js';
 import type { MemoryStore } from '../memory/MemoryStore.js';
 import {
   canonicalCmfNode,
@@ -101,7 +101,7 @@ export class AdapterRegistry {
 
   register(adapter: MemoryAdapter): void {
     if (this.adapters.some((a) => a.name === adapter.name)) {
-      throw new MebularError(`适配器重复注册：${adapter.name}`, 'ADAPTER_DUPLICATE');
+      throw new MebularError(`适配器重复注册：${adapter.name}`, ErrorCodes.ADAPTER_DUPLICATE);
     }
     this.adapters.push(adapter);
   }
@@ -119,7 +119,7 @@ export class AdapterRegistry {
     if (!best) {
       throw new MebularError(
         `没有适配器认领该来源（kind=${source.kind ?? '未标注'}）`,
-        'ADAPTER_NOT_FOUND',
+        ErrorCodes.ADAPTER_NOT_FOUND,
       );
     }
     return best;

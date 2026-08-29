@@ -14,7 +14,7 @@
 // 幂等键（import:<sha256> 标签）由适配器框架（5.3）统一负责；
 // 本模块提供 cmfNodeFingerprint 作为跨端稳定指纹的输入。
 
-import { MebularError } from '../errors.js';
+import { ErrorCodes, MebularError } from '../errors.js';
 import { canonicalize } from '../eventlog/EventLog.js';
 import type { GraphStore } from '../core/GraphStore.js';
 import type { MemoryStore } from '../memory/MemoryStore.js';
@@ -101,29 +101,29 @@ export function parseCmfDocument(input: string | unknown): CmfDocument {
     try {
       raw = JSON.parse(input);
     } catch (error) {
-      throw new MebularError('CMF 文档不是合法 JSON', 'CMF_FORMAT_INVALID', error as Error);
+      throw new MebularError('CMF 文档不是合法 JSON', ErrorCodes.CMF_FORMAT_INVALID, error as Error);
     }
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    throw new MebularError('CMF 文档必须是 JSON 对象', 'CMF_FORMAT_INVALID');
+    throw new MebularError('CMF 文档必须是 JSON 对象', ErrorCodes.CMF_FORMAT_INVALID);
   }
   const doc = raw as Record<string, unknown>;
   if (doc.format !== CMF_FORMAT) {
-    throw new MebularError(`缺少 CMF 格式标记（format !== '${CMF_FORMAT}'）`, 'CMF_FORMAT_INVALID');
+    throw new MebularError(`缺少 CMF 格式标记（format !== '${CMF_FORMAT}'）`, ErrorCodes.CMF_FORMAT_INVALID);
   }
   if (typeof doc.version !== 'number' || !Number.isInteger(doc.version) || doc.version < 1) {
-    throw new MebularError('CMF 版本号缺失或非法', 'CMF_FORMAT_INVALID');
+    throw new MebularError('CMF 版本号缺失或非法', ErrorCodes.CMF_FORMAT_INVALID);
   }
   if (doc.version > CMF_VERSION) {
     throw new MebularError(
       `CMF 版本 ${doc.version} 高于本端支持的 ${CMF_VERSION}，请升级后再导入`,
-      'CMF_VERSION_UNSUPPORTED',
+      ErrorCodes.CMF_VERSION_UNSUPPORTED,
     );
   }
 
   const nodes: CmfNode[] = [];
   if (!Array.isArray(doc.nodes)) {
-    throw new MebularError('CMF 文档缺少 nodes 数组', 'CMF_FORMAT_INVALID');
+    throw new MebularError('CMF 文档缺少 nodes 数组', ErrorCodes.CMF_FORMAT_INVALID);
   }
   for (const item of doc.nodes) {
     nodes.push(parseCmfNode(item));
@@ -132,7 +132,7 @@ export function parseCmfDocument(input: string | unknown): CmfDocument {
   const edges: CmfEdge[] = [];
   if (doc.edges !== undefined) {
     if (!Array.isArray(doc.edges)) {
-      throw new MebularError('CMF 文档 edges 必须是数组', 'CMF_FORMAT_INVALID');
+      throw new MebularError('CMF 文档 edges 必须是数组', ErrorCodes.CMF_FORMAT_INVALID);
     }
     for (const edge of doc.edges) {
       edges.push(parseCmfEdge(edge));
@@ -156,11 +156,11 @@ export function parseCmfDocument(input: string | unknown): CmfDocument {
 
 function parseCmfNode(input: unknown): CmfNode {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw new MebularError('CMF 节点必须是对象', 'CMF_FORMAT_INVALID');
+    throw new MebularError('CMF 节点必须是对象', ErrorCodes.CMF_FORMAT_INVALID);
   }
   const record = input as Record<string, unknown>;
   if (typeof record.id !== 'string' || !record.id) {
-    throw new MebularError('CMF 节点缺少 id', 'CMF_FORMAT_INVALID');
+    throw new MebularError('CMF 节点缺少 id', ErrorCodes.CMF_FORMAT_INVALID);
   }
 
   // 未知类型降级 other + originalType 保留（不静默丢字段）
@@ -186,11 +186,11 @@ function parseCmfNode(input: unknown): CmfNode {
 
 function parseCmfEdge(input: unknown): CmfEdge {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
-    throw new MebularError('CMF 边必须是对象', 'CMF_FORMAT_INVALID');
+    throw new MebularError('CMF 边必须是对象', ErrorCodes.CMF_FORMAT_INVALID);
   }
   const record = input as Record<string, unknown>;
   if (typeof record.source !== 'string' || typeof record.target !== 'string' || typeof record.relation !== 'string') {
-    throw new MebularError('CMF 边缺少 source/target/relation', 'CMF_FORMAT_INVALID');
+    throw new MebularError('CMF 边缺少 source/target/relation', ErrorCodes.CMF_FORMAT_INVALID);
   }
   const edge: CmfEdge = { source: record.source, target: record.target, relation: record.relation };
   if (Array.isArray(record.labels)) edge.labels = record.labels as string[];

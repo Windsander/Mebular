@@ -5,7 +5,7 @@
 // 映射规则：带 title 的条目 → Episode(episodeType='observation')；
 // 纯文本条目 → Fact(subject=来源端名, predicate='memo')。
 
-import { MebularError } from '../errors.js';
+import { ErrorCodes, MebularError } from '../errors.js';
 import type { AdapterSource, MemoryAdapter } from './adapter.js';
 import type { CmfDocument, CmfNode } from './cmf.js';
 
@@ -22,11 +22,11 @@ export interface JsonMemoFile {
 export function parseJsonMemo(data: unknown): JsonMemoFile {
   const raw = typeof data === 'string' ? JSON.parse(data) : data;
   if (!raw || typeof raw !== 'object' || !Array.isArray((raw as JsonMemoFile).memos)) {
-    throw new MebularError('JSON 备忘录必须是含 memos 数组的对象', 'CMF_FORMAT_INVALID');
+    throw new MebularError('JSON 备忘录必须是含 memos 数组的对象', ErrorCodes.CMF_FORMAT_INVALID);
   }
   for (const memo of (raw as JsonMemoFile).memos) {
     if (!memo || typeof memo.text !== 'string') {
-      throw new MebularError('JSON 备忘录条目缺少 text 字段', 'CMF_FORMAT_INVALID');
+      throw new MebularError('JSON 备忘录条目缺少 text 字段', ErrorCodes.CMF_FORMAT_INVALID);
     }
   }
   return raw as JsonMemoFile;

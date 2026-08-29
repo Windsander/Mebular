@@ -18,7 +18,7 @@ import { basename, join } from 'node:path';
 import { parseMarkdown } from '../hermes/import/markdown.js';
 import type { HermesSessionData } from '../hermes/types.js';
 import { EdgeTypes } from '../memory/types.js';
-import { MebularError } from '../errors.js';
+import { ErrorCodes, MebularError } from '../errors.js';
 import type { AdapterSource, MemoryAdapter } from './adapter.js';
 import type { CmfDocument, CmfEdge, CmfNode } from './cmf.js';
 
@@ -150,10 +150,10 @@ export class HermesAdapter implements MemoryAdapter {
       try {
         session = JSON.parse(await readFile(filePath, 'utf-8')) as HermesSessionData;
       } catch (error) {
-        throw new MebularError(`会话文件解析失败：${filePath}`, 'CMF_FORMAT_INVALID', error as Error);
+        throw new MebularError(`会话文件解析失败：${filePath}`, ErrorCodes.CMF_FORMAT_INVALID, error as Error);
       }
       if (typeof session.sessionId !== 'string' || !Array.isArray(session.messages)) {
-        throw new MebularError(`会话文件缺少 sessionId/messages：${filePath}`, 'CMF_FORMAT_INVALID');
+        throw new MebularError(`会话文件缺少 sessionId/messages：${filePath}`, ErrorCodes.CMF_FORMAT_INVALID);
       }
       const transcript = session.messages.map((m) => `${m.role}: ${m.content}`).join('\n');
       nodes.push({

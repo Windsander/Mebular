@@ -3,8 +3,8 @@
 // Phase 4 重写（phase-4-plan 4.0，收口已知差距）：
 // 证书签发与验证统一走握手层（AuthenticationHandshake）的证书格式与
 // 规范化数据（canonicalCertificateData）——设备公钥 hex 编码、
-// 签名 base64 编码、由用户主私钥签发。旧版以 SignatureManager 自签、
-// base64 混用的路径废弃（无消费方，见 project-status 决策记录）。
+// 签名 base64 编码、由用户主私钥签发。旧版自签/base64 混用路径
+// 已随 D11 死代码清偿移除（Phase 6.0，见 project-status 决策记录）。
 
 import {
   canonicalCertificateData,

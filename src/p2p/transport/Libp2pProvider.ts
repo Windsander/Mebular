@@ -16,7 +16,7 @@
 //   ping() 只刷新本端活动时间，不注入任何应用层字节。
 
 import { createHash } from 'crypto';
-import { MebularError } from '../../errors.js';
+import { ErrorCodes, NetworkError } from '../../errors.js';
 import type { Connection, ConnectionState, PeerId } from '../P2PNetwork.js';
 import type {
   ActivityTrackingConnection,
@@ -113,11 +113,11 @@ export async function loadLibp2pModules(
     try {
       loaded[spec] = await importer(spec);
     } catch (error) {
-      throw new MebularError(
+      throw new NetworkError(
         `libp2p 可选依赖缺失（${spec}）。安装：npm install libp2p @libp2p/tcp ` +
           '@chainsafe/libp2p-noise @chainsafe/libp2p-yamux @libp2p/crypto @libp2p/peer-id ' +
           '@multiformats/multiaddr；或使用 network.provider 注入自建传输。',
-        'NETWORK_LIBP2P_NOT_AVAILABLE',
+        ErrorCodes.NETWORK_LIBP2P_NOT_AVAILABLE,
         error as Error,
       );
     }
@@ -142,7 +142,7 @@ export async function loadLibp2pModules(
 /** 编码一帧：4 字节大端长度 + 载荷 */
 export function encodeFrame(payload: Uint8Array): Uint8Array {
   if (payload.byteLength > MAX_FRAME_BYTES) {
-    throw new MebularError(`帧载荷超限：${payload.byteLength} > ${MAX_FRAME_BYTES}`, 'NETWORK_FRAME_TOO_LARGE');
+    throw new NetworkError(`帧载荷超限：${payload.byteLength} > ${MAX_FRAME_BYTES}`, ErrorCodes.NETWORK_FRAME_TOO_LARGE);
   }
   const frame = new Uint8Array(4 + payload.byteLength);
   new DataView(frame.buffer).setUint32(0, payload.byteLength, false);
@@ -165,7 +165,7 @@ export class FrameDecoder {
       if (this.buffer.byteLength < 4) break;
       const length = new DataView(this.buffer.buffer, this.buffer.byteOffset).getUint32(0, false);
       if (length > MAX_FRAME_BYTES) {
-        throw new MebularError(`帧长度前缀越界：${length} > ${MAX_FRAME_BYTES}`, 'NETWORK_FRAME_TOO_LARGE');
+        throw new NetworkError(`帧长度前缀越界：${length} > ${MAX_FRAME_BYTES}`, ErrorCodes.NETWORK_FRAME_TOO_LARGE);
       }
       if (this.buffer.byteLength < 4 + length) break;
       frames.push(this.buffer.slice(4, 4 + length));
@@ -200,9 +200,9 @@ export function toLibp2pPeerId(peerId: PeerId, modules: Libp2pModules): Libp2pPe
 export function fromLibp2pPeerId(peerId: Libp2pPeerIdLike): PeerId {
   const publicKey = peerId.publicKey;
   if (!publicKey || publicKey.type !== 'Ed25519' || publicKey.raw.byteLength !== 32) {
-    throw new MebularError(
+    throw new NetworkError(
       `对端 peer id 未内嵌 Ed25519 公钥，无法映射：${peerId.toString()}`,
-      'NETWORK_PEER_IDENTITY_UNSUPPORTED',
+      ErrorCodes.NETWORK_PEER_IDENTITY_UNSUPPORTED,
     );
   }
   return peerIdFromDevicePublicKey(new Uint8Array(publicKey.raw));

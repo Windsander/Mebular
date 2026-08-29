@@ -399,7 +399,7 @@ export class Mebular {
 
   private assertReady<T>(value: T | null, name: string): T {
     if (!this.initialized || value === null) {
-      throw new MebularError(`Mebular 尚未初始化（访问 ${name}）`, 'MEBULAR_NOT_INITIALIZED');
+      throw new MebularError(`Mebular 尚未初始化（访问 ${name}）`, ErrorCodes.MEBULAR_NOT_INITIALIZED);
     }
     return value;
   }

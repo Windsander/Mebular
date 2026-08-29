@@ -1,4 +1,8 @@
 // GraphStore - 图存储核心实现
+//
+// 签名语义（D11，Phase 6.0 收口）：实体不逐条签名（signature 字段保留
+// 为空串），真实性由事件日志的内容寻址 ID + 事件级签名承载（Phase 3+）。
+// 旧版 signatureManager 缝隙与 snapshot()/merge() 遗留已移除。
 
 import type { StorageAdapter } from '../storage/StorageAdapter.js';
 import type { Node, Edge, NodeFilter, EdgeFilter, TraverseOptions, TraverseResult } from '../types/index.js';
@@ -9,7 +13,6 @@ import { ulid } from 'ulid';
 export interface GraphStoreConfig {
   storage: StorageAdapter;
   author: string;
-  signatureManager?: any;
   /** 配置后，所有图变更自动写入带签名的事件日志（Phase 3 同步的前提） */
   eventLog?: EventLog;
 }
@@ -18,14 +21,12 @@ export class GraphStore {
   private storage: StorageAdapter;
   private author: string;
   private clock: VectorClock;
-  private signatureManager?: any;
   private eventLog?: EventLog;
 
   constructor(config: GraphStoreConfig) {
     this.storage = config.storage;
     this.author = config.author;
     this.clock = new VectorClock();
-    this.signatureManager = config.signatureManager;
     this.eventLog = config.eventLog;
   }
 
@@ -53,10 +54,6 @@ export class GraphStore {
     this.clock.increment(this.author);
     node.clocks = this.clock.toJSON();
     node.vectorClock = this.clock.toJSON();
-
-    if (this.signatureManager) {
-      node.signature = await this.signatureManager.sign(JSON.stringify(node));
-    }
 
     // 单一时钟源（D10 收口）：事件日志存在时，实体时钟以事件时钟为准；
     // 载荷用快照拷贝，避免随后的时钟盖写突变已被内容寻址的事件内容
@@ -94,10 +91,6 @@ export class GraphStore {
     updated.clocks = this.clock.toJSON();
     updated.vectorClock = this.clock.toJSON();
 
-    if (this.signatureManager) {
-      updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
-    }
-
     if (this.eventLog) {
       const event = await this.eventLog.append({
         type: 'node_updated',
@@ -129,10 +122,6 @@ export class GraphStore {
     this.clock.increment(this.author);
     deleted.clocks = this.clock.toJSON();
     deleted.vectorClock = this.clock.toJSON();
-
-    if (this.signatureManager) {
-      deleted.signature = await this.signatureManager.sign(JSON.stringify(deleted));
-    }
 
     if (this.eventLog) {
       const event = await this.eventLog.append({ type: 'node_deleted', data: { nodeId: id, deletionTime: now } });
@@ -173,10 +162,6 @@ export class GraphStore {
     edge.clocks = this.clock.toJSON();
     edge.vectorClock = this.clock.toJSON();
 
-    if (this.signatureManager) {
-      edge.signature = await this.signatureManager.sign(JSON.stringify(edge));
-    }
-
     if (this.eventLog) {
       const event = await this.eventLog.append({ type: 'edge_created', data: { edge: { ...edge } } });
       edge.clocks = { ...event.vectorClock };
@@ -210,10 +195,6 @@ export class GraphStore {
     updated.clocks = this.clock.toJSON();
     updated.vectorClock = this.clock.toJSON();
 
-    if (this.signatureManager) {
-      updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
-    }
-
     if (this.eventLog) {
       const event = await this.eventLog.append({
         type: 'edge_updated',
@@ -245,10 +226,6 @@ export class GraphStore {
     this.clock.increment(this.author);
     deleted.clocks = this.clock.toJSON();
     deleted.vectorClock = this.clock.toJSON();
-
-    if (this.signatureManager) {
-      deleted.signature = await this.signatureManager.sign(JSON.stringify(deleted));
-    }
 
     if (this.eventLog) {
       const event = await this.eventLog.append({ type: 'edge_deleted', data: { edgeId: id, deletionTime: now } });
@@ -282,10 +259,6 @@ export class GraphStore {
     updated.clocks = this.clock.toJSON();
     updated.vectorClock = this.clock.toJSON();
 
-    if (this.signatureManager) {
-      updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
-    }
-
     if (this.eventLog) {
       const event = await this.eventLog.append({ type: 'tag_added', data: { nodeId, tag } });
       updated.clocks = { ...event.vectorClock };
@@ -317,10 +290,6 @@ export class GraphStore {
     this.clock.increment(this.author);
     updated.clocks = this.clock.toJSON();
     updated.vectorClock = this.clock.toJSON();
-
-    if (this.signatureManager) {
-      updated.signature = await this.signatureManager.sign(JSON.stringify(updated));
-    }
 
     if (this.eventLog) {
       const event = await this.eventLog.append({ type: 'tag_removed', data: { nodeId, tag } });
@@ -427,41 +396,5 @@ export class GraphStore {
       created.push(edge);
     }
     return created;
-  }
-
-  async snapshot(): Promise<{ nodes: Node[]; edges: Edge[]; clock: Record<string, number> }> {
-    const nodes = await this.storage.listNodes({});
-    const edges = await this.storage.listEdges({});
-    return {
-      nodes,
-      edges,
-      clock: this.clock.toJSON(),
-    };
-  }
-
-  async merge(snapshot: { nodes: Node[]; edges: Edge[]; clock: Record<string, number> }): Promise<void> {
-    const existingNodes = await this.storage.listNodes({});
-    const existingEdges = await this.storage.listEdges({});
-    const existingNodeIds = new Set(existingNodes.map(n => n.id));
-    const existingEdgeIds = new Set(existingEdges.map(e => e.id));
-
-    for (const node of snapshot.nodes) {
-      if (!existingNodeIds.has(node.id)) {
-        await this.storage.putNode(node);
-      } else {
-        const existing = await this.storage.getNode(node.id);
-        if (existing && node.updatedAt > existing.updatedAt) {
-          await this.storage.putNode(node);
-        }
-      }
-    }
-
-    for (const edge of snapshot.edges) {
-      if (!existingEdgeIds.has(edge.id)) {
-        await this.storage.putEdge(edge);
-      }
-    }
-
-    this.clock.merge(new VectorClock(this.clock.toJSON()));
   }
 }

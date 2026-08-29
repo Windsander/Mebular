@@ -16,6 +16,7 @@
 
 import type { Event } from '../types/event.js';
 import type { SecureChannel } from '../p2p/secure/SecureChannelImpl.js';
+import { ErrorCodes, SyncError } from '../errors.js';
 
 export type SyncDirection = 'push' | 'pull' | 'bidirectional';
 
@@ -71,14 +72,14 @@ export async function nextSyncMessage<T extends SyncMessage['type']>(
       }),
     ]);
     if (result.done) {
-      throw new Error(`Sync channel closed while waiting for ${expected}`);
+      throw new SyncError(`Sync channel closed while waiting for ${expected}`, ErrorCodes.SYNC_CONNECTION_FAILED);
     }
     const message = result.value;
     if (message.type === 'sync-error') {
-      throw new Error(`Remote sync error: ${message.message}`);
+      throw new SyncError(`Remote sync error: ${message.message}`, ErrorCodes.SYNC_REMOTE_ERROR);
     }
     if (message.type !== expected) {
-      throw new Error(`Protocol violation: expected ${expected}, got ${message.type}`);
+      throw new SyncError(`Protocol violation: expected ${expected}, got ${message.type}`, ErrorCodes.SYNC_PROTOCOL_VIOLATION);
     }
     return message as Extract<SyncMessage, { type: T }>;
   } finally {

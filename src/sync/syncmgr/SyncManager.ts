@@ -18,6 +18,7 @@ import { EventEmitter } from 'events';
 import type { StorageAdapter } from '../../storage/StorageAdapter.js';
 import { EventLog } from '../../eventlog/EventLog.js';
 import { VectorClock } from '../vectorclock/index.js';
+import { ErrorCodes, SyncError } from '../../errors.js';
 import type { Event } from '../../types/event.js';
 import { applyRemoteEvent, type SyncConflict } from '../apply.js';
 import { hexToBytes, verifyCertificateSignature, type AuthSession } from '../../p2p/handshake/AuthenticationHandshake.js';
@@ -283,7 +284,7 @@ export class SyncManager extends EventEmitter {
     // 信道在认证完成后异步建立，轮询等待其就绪
     const channel = await node.getChannel(peerId);
     if (!channel) {
-      throw new Error(`Secure channel to ${peer.deviceId} not ready`);
+      throw new SyncError(`Secure channel to ${peer.deviceId} not ready`, ErrorCodes.SYNC_CONNECTION_FAILED);
     }
     const transport = new SecureChannelSyncTransport(channel);
     if (initiate) {
@@ -308,7 +309,7 @@ export class SyncManager extends EventEmitter {
     for (const event of events) {
       const valid = await this.verifyEventTrust(event, peer);
       if (!valid) {
-        throw new Error(`Event signature verification failed: ${event.id}`);
+        throw new SyncError(`Event signature verification failed: ${event.id}`, ErrorCodes.SYNC_INVALID_EVENT);
       }
 
       // 验签通过即确认（重复/冲突落败也已入日志，重收时为幂等重复）

@@ -1,5 +1,6 @@
 import { PeerId, PeerInfo } from './index.js';
 import { EventEmitter } from 'events';
+import { ErrorCodes, NetworkError } from '../errors.js';
 
 export interface DiscoveryOptions {
   timeout?: number;
@@ -67,11 +68,11 @@ export class DeviceDiscovery extends EventEmitter {
 
   async start(): Promise<void> {
     if (this.running) {
-      throw new Error('Discovery already running');
+      throw new NetworkError('Discovery already running', ErrorCodes.NETWORK_ALREADY_RUNNING);
     }
 
     if (!this.localPeerId) {
-      throw new Error('Local peer ID not set. Call setLocalInfo() first.');
+      throw new NetworkError('Local peer ID not set. Call setLocalInfo() first.', ErrorCodes.NETWORK_DISCOVERY_FAILED);
     }
 
     if (!this.bonjourService) {
@@ -79,17 +80,17 @@ export class DeviceDiscovery extends EventEmitter {
       if (factory) {
         const svc = factory();
         if (!svc) {
-          throw new Error('Failed to create bonjour service');
+          throw new NetworkError('Failed to create bonjour service', ErrorCodes.NETWORK_DISCOVERY_FAILED);
         }
         this.bonjourService = svc;
       } else {
-        throw new Error('Bonjour service factory not provided');
+        throw new NetworkError('Bonjour service factory not provided', ErrorCodes.NETWORK_DISCOVERY_FAILED);
       }
     }
 
     const bonjourSvc = this.bonjourService;
     if (!bonjourSvc) {
-      throw new Error('Failed to initialize bonjour service');
+      throw new NetworkError('Failed to initialize bonjour service', ErrorCodes.NETWORK_DISCOVERY_FAILED);
     }
 
     const serviceName =
@@ -123,7 +124,7 @@ export class DeviceDiscovery extends EventEmitter {
 
   async stop(): Promise<void> {
     if (!this.running) {
-      throw new Error('Discovery not running');
+      throw new NetworkError('Discovery not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
 
     const browser = this.bonjourBrowser;

@@ -275,7 +275,7 @@ export class Libp2pConnection
 
   async send(data: Uint8Array): Promise<void> {
     if (this.state === 'closed' || this.state === 'disconnecting') {
-      throw new Error('Connection closed');
+      throw new NetworkError('Connection closed', ErrorCodes.NETWORK_CONNECTION_CLOSED);
     }
     this.activityAt = Date.now();
     const writable = this.stream.send(encodeFrame(data));
@@ -304,7 +304,7 @@ export class Libp2pConnection
   /** libp2p 的连接存活由传输层保证；ping 只刷新本端活动时间，不产生字节 */
   async ping(): Promise<void> {
     if (this.state === 'closed') {
-      throw new Error('Connection closed');
+      throw new NetworkError('Connection closed', ErrorCodes.NETWORK_CONNECTION_CLOSED);
     }
     this.activityAt = Date.now();
   }
@@ -384,7 +384,7 @@ export class Libp2pProvider implements ConnectionProvider {
 
   async start(): Promise<void> {
     if (this.running) {
-      throw new Error('Libp2pProvider already running');
+      throw new NetworkError('Libp2pProvider already running', ErrorCodes.NETWORK_ALREADY_RUNNING);
     }
     await this.node.handle(this.protocol, (stream, connection) => {
       const handler = this.incomingHandler;
@@ -412,7 +412,7 @@ export class Libp2pProvider implements ConnectionProvider {
 
   async dial(peerId: PeerId, address?: string): Promise<Connection> {
     if (!this.running) {
-      throw new Error('Libp2pProvider not running');
+      throw new NetworkError('Libp2pProvider not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     const target = toLibp2pPeerId(peerId, this.modules);
     // 有显式 multiaddr 优先直连；否则按 peer id 拨号（依赖 peerStore/路由已知地址）

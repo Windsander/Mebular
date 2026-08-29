@@ -7,6 +7,7 @@ import type {
   PingCapableConnection,
 } from '../transport/InMemoryTransport.js';
 import { EventEmitter } from 'events';
+import { ErrorCodes, NetworkError } from '../../errors.js';
 
 export interface ConnectionManagerOptions {
   maxConnections?: number;
@@ -49,7 +50,7 @@ export class ConnectionManager extends EventEmitter {
 
   async start(): Promise<void> {
     if (this.running) {
-      throw new Error('ConnectionManager already running');
+      throw new NetworkError('ConnectionManager already running', ErrorCodes.NETWORK_ALREADY_RUNNING);
     }
     this.running = true;
 
@@ -67,7 +68,7 @@ export class ConnectionManager extends EventEmitter {
 
   async stop(): Promise<void> {
     if (!this.running) {
-      throw new Error('ConnectionManager not running');
+      throw new NetworkError('ConnectionManager not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
 
     this.running = false;
@@ -87,7 +88,7 @@ export class ConnectionManager extends EventEmitter {
 
   async connect(peerId: PeerId, address?: string): Promise<Connection> {
     if (!this.running) {
-      throw new Error('ConnectionManager not running');
+      throw new NetworkError('ConnectionManager not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
 
     const existing = this.connections.get(peerId.id);
@@ -107,11 +108,11 @@ export class ConnectionManager extends EventEmitter {
     }
 
     if (this.connections.size >= this.options.maxConnections) {
-      throw new Error('Max connections reached');
+      throw new NetworkError('Max connections reached', ErrorCodes.NETWORK_MAX_CONNECTIONS);
     }
 
     if (!this.provider) {
-      throw new Error('Connection provider not set. Call setConnectionProvider() first.');
+      throw new NetworkError('Connection provider not set. Call setConnectionProvider() first.', ErrorCodes.NETWORK_PROVIDER_NOT_SET);
     }
 
     const dialPromise = this.dialWithTimeout(peerId, address);
@@ -129,7 +130,7 @@ export class ConnectionManager extends EventEmitter {
   private async dialWithTimeout(peerId: PeerId, address?: string): Promise<Connection> {
     const provider = this.provider;
     if (!provider) {
-      throw new Error('Connection provider not set');
+      throw new NetworkError('Connection provider not set', ErrorCodes.NETWORK_PROVIDER_NOT_SET);
     }
 
     return new Promise<Connection>((resolve, reject) => {
@@ -152,7 +153,7 @@ export class ConnectionManager extends EventEmitter {
 
   async disconnect(peerId: PeerId): Promise<void> {
     if (!this.running) {
-      throw new Error('ConnectionManager not running');
+      throw new NetworkError('ConnectionManager not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
 
     const connection = this.connections.get(peerId.id);

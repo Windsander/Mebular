@@ -11,6 +11,7 @@
 import os from 'os';
 import { EventEmitter } from 'events';
 import type { PeerId } from '../P2PNetwork.js';
+import { ErrorCodes, NetworkError } from '../../errors.js';
 
 export interface NATTraversalOptions {
   timeout?: number;
@@ -82,14 +83,14 @@ export class NATTraversal extends EventEmitter {
 
   async start(): Promise<void> {
     if (this.running) {
-      throw new Error('NATTraversal already running');
+      throw new NetworkError('NATTraversal already running', ErrorCodes.NETWORK_ALREADY_RUNNING);
     }
     this.running = true;
   }
 
   async stop(): Promise<void> {
     if (!this.running) {
-      throw new Error('NATTraversal not running');
+      throw new NetworkError('NATTraversal not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     this.running = false;
     this.establishedRoute = null;
@@ -99,7 +100,7 @@ export class NATTraversal extends EventEmitter {
 
   async detectNATType(_localPeerId: PeerId): Promise<NATType> {
     if (!this.running) {
-      throw new Error('NATTraversal not running');
+      throw new NetworkError('NATTraversal not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
 
     try {
@@ -188,14 +189,14 @@ export class NATTraversal extends EventEmitter {
 
   async startHolePunching(localPeerId: PeerId, remotePeerId: PeerId): Promise<string> {
     if (!this.running) {
-      throw new Error('NATTraversal not running');
+      throw new NetworkError('NATTraversal not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     if (this.holePunchingInProgress) {
-      throw new Error('Hole punching already in progress');
+      throw new NetworkError('Hole punching already in progress', ErrorCodes.NETWORK_NAT_FAILED);
     }
     const channel = this.options.channel;
     if (!channel) {
-      throw new Error('Hole punch channel not configured');
+      throw new NetworkError('Hole punch channel not configured', ErrorCodes.NETWORK_NAT_FAILED);
     }
 
     this.holePunchingInProgress = true;
@@ -228,7 +229,7 @@ export class NATTraversal extends EventEmitter {
       }
     }
 
-    throw new Error('Hole punching timed out or failed');
+    throw new NetworkError('Hole punching timed out or failed', ErrorCodes.NETWORK_NAT_FAILED);
   }
 
   /** 打洞成功后建立的直达路由 */

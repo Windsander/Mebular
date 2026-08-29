@@ -23,6 +23,7 @@
 import { EventEmitter } from 'events';
 import type { Connection } from '../P2PNetwork.js';
 import { MessageQueue } from '../transport/InMemoryTransport.js';
+import { ErrorCodes, NetworkError } from '../../errors.js';
 
 export interface SecureChannelOptions {
   encryption?: 'TLS' | 'Noise';
@@ -111,7 +112,7 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
   /** 建立首个密钥世代并启动帧处理泵；双端的 start() 需并发调用 */
   async start(): Promise<SecureChannel> {
     if (this.running) {
-      throw new Error('SecureChannel already running');
+      throw new NetworkError('SecureChannel already running', ErrorCodes.NETWORK_ALREADY_RUNNING);
     }
 
     this.startPump();
@@ -132,7 +133,7 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
 
   async stop(): Promise<void> {
     if (!this.running) {
-      throw new Error('SecureChannel not running');
+      throw new NetworkError('SecureChannel not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     this.running = false;
 
@@ -176,11 +177,11 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
 
   async send(message: Uint8Array): Promise<void> {
     if (!this.running) {
-      throw new Error('SecureChannel not running');
+      throw new NetworkError('SecureChannel not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     const state = this.currentKey;
     if (!state) {
-      throw new Error('Session key not established');
+      throw new NetworkError('Session key not established', ErrorCodes.NETWORK_SESSION_NOT_ESTABLISHED);
     }
 
     const header = new Uint8Array(HEADER_LENGTH);
@@ -207,7 +208,7 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
 
   receive(): AsyncIterable<Uint8Array> {
     if (!this.running && !this.pumpStarted) {
-      throw new Error('SecureChannel not running');
+      throw new NetworkError('SecureChannel not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     return this.plaintextQueue.iterate();
   }
@@ -217,7 +218,7 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
   /** 发起一次密钥轮换：使用全新的临时密钥对，产生真正不同的密钥 */
   async rotateSessionKey(): Promise<void> {
     if (!this.running) {
-      throw new Error('SecureChannel not running');
+      throw new NetworkError('SecureChannel not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     await this.negotiateEpoch(this.sendEpoch + 1);
   }
@@ -293,7 +294,7 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
     // 身份绑定校验：配置了对端设备公钥时，未签名/验签失败的密钥帧一律拒绝
     if (this.options.peerDevicePublicKey) {
       if (frame.byteLength !== KEY_FRAME_SIGNED) {
-        throw new Error('Key exchange frame missing identity signature');
+        throw new NetworkError('Key exchange frame missing identity signature', ErrorCodes.NETWORK_KEY_EXCHANGE_UNSIGNED);
       }
       const signature = frame.slice(KEY_FRAME_UNSIGNED, KEY_FRAME_SIGNED);
       const valid = await verifyKeyExchangeSignature(
@@ -303,7 +304,7 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
         signature,
       );
       if (!valid) {
-        throw new Error('Key exchange signature verification failed (possible MITM)');
+        throw new NetworkError('Key exchange signature verification failed (possible MITM)', ErrorCodes.NETWORK_KEY_EXCHANGE_REJECTED);
       }
     }
 
@@ -371,7 +372,7 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
 
   private async decryptFrame(frame: Uint8Array): Promise<Uint8Array> {
     if (frame.length < HEADER_LENGTH + IV_LENGTH + 16) {
-      throw new Error('Encrypted frame too short');
+      throw new NetworkError('Encrypted frame too short', ErrorCodes.NETWORK_FRAME_INVALID);
     }
 
     const view = new DataView(frame.buffer, frame.byteOffset, frame.byteLength);
@@ -380,13 +381,14 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
 
     const state = this.recvStates.get(epoch);
     if (!state) {
-      throw new Error(`Frame for unknown key epoch ${epoch}`);
+      throw new NetworkError(`Frame for unknown key epoch ${epoch}`, ErrorCodes.NETWORK_FRAME_INVALID);
     }
 
     const lastCounter = this.recvCounters.get(epoch) ?? -1n;
     if (counter <= lastCounter) {
-      throw new Error(
+      throw new NetworkError(
         `Possible replay attack: counter ${counter} not after ${lastCounter} in epoch ${epoch}`,
+        ErrorCodes.NETWORK_FRAME_INVALID,
       );
     }
 
@@ -402,7 +404,7 @@ export class SecureChannelImpl extends EventEmitter implements SecureChannel {
         ciphertext,
       );
     } catch {
-      throw new Error('Frame decryption failed (tampered or wrong key)');
+      throw new NetworkError('Frame decryption failed (tampered or wrong key)', ErrorCodes.CRYPTO_DECRYPT_FAILED);
     }
 
     this.recvCounters.set(epoch, counter);

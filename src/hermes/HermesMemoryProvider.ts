@@ -13,6 +13,7 @@ import type { Mebular } from '../mebular.js';
 import { MemoryStore } from '../memory/MemoryStore.js';
 import { EdgeTypes, type EpisodeNode, type FactNode, type SkillNode } from '../memory/types.js';
 import type { VectorIndex } from '../memory/VectorIndex.js';
+import { ValidationError } from '../errors.js';
 import type { Node } from '../types/index.js';
 import type {
   ConversationFilters,
@@ -189,7 +190,7 @@ export class HermesMemoryProvider {
         });
         break;
       default:
-        throw new Error(`Unknown memory type: ${input.type as string}`);
+        throw new ValidationError(`Unknown memory type: ${input.type as string}`);
     }
 
     // relatedTo：只链接已存在的目标节点（诚实失败，不造悬空边）

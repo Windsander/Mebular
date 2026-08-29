@@ -6,6 +6,7 @@
 // 可以真实地完成 发现 → 连接 → 认证 → 加密通信 的完整链路。
 
 import type { Connection, ConnectionState, PeerId } from '../P2PNetwork.js';
+import { ErrorCodes, NetworkError } from '../../errors.js';
 
 /** 拨号抽象：由具体网络栈实现（libp2p 适配器、InMemoryHub 等） */
 export interface ConnectionProvider {
@@ -125,7 +126,7 @@ export class InMemoryConnection implements Connection, MutableAuthenticationConn
   /** 传输层探活：刷新双端活动时间，不注入任何字节 */
   async ping(): Promise<void> {
     if (this.currentState === 'closed') {
-      throw new Error('Connection closed');
+      throw new NetworkError('Connection closed', ErrorCodes.NETWORK_CONNECTION_CLOSED);
     }
     this.touchActivity();
     this.peerActivityHook?.();
@@ -139,10 +140,10 @@ export class InMemoryConnection implements Connection, MutableAuthenticationConn
 
   async send(data: Uint8Array): Promise<void> {
     if (this.currentState === 'closed') {
-      throw new Error('Connection closed');
+      throw new NetworkError('Connection closed', ErrorCodes.NETWORK_CONNECTION_CLOSED);
     }
     if (!this.peerInbox) {
-      throw new Error('Connection not linked');
+      throw new NetworkError('Connection not linked', ErrorCodes.NETWORK_CONNECTION_CLOSED);
     }
     this.activityAt = Date.now();
     this.peerInbox.push(new Uint8Array(data));
@@ -209,7 +210,7 @@ export class InMemoryHub implements ConnectionProvider {
   /** ConnectionProvider 接口：使用 forPeer 之前需先 bindDialer，或直接走 dialFrom */
   async dial(peerId: PeerId, address?: string): Promise<Connection> {
     if (!this.dialerPeerId) {
-      throw new Error('Dialer identity not bound. Use forPeer() or dialFrom().');
+      throw new NetworkError('Dialer identity not bound. Use forPeer() or dialFrom().', ErrorCodes.NETWORK_DIAL_FAILED);
     }
     return this.dialFrom(this.dialerPeerId, peerId, address);
   }
@@ -248,7 +249,7 @@ export class InMemoryHub implements ConnectionProvider {
     const targetNode = this.nodes.get(target.id)
       ?? (address ? this.nodes.get(address.replace(/^memory:\/\//, '')) : undefined);
     if (!targetNode) {
-      throw new Error(`Peer not reachable: ${target.id}`);
+      throw new NetworkError(`Peer not reachable: ${target.id}`, ErrorCodes.NETWORK_PEER_UNREACHABLE);
     }
 
     const local = new InMemoryConnection(fromPeerId, targetNode.peerId, targetNode.address);

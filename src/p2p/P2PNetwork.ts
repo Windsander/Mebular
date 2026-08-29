@@ -18,6 +18,7 @@ import {
 } from './handshake/AuthenticationHandshake.js';
 import { SecureChannelImpl, type SecureChannel } from './secure/SecureChannelImpl.js';
 import type { ConnectionProvider } from './transport/InMemoryTransport.js';
+import { ErrorCodes, NetworkError } from '../errors.js';
 
 export interface P2PConfig {
   transports?: ('tcp' | 'QUIC' | 'WebSocket')[];
@@ -177,7 +178,7 @@ export class P2PNode implements P2PNetwork {
 
   async start(): Promise<void> {
     if (this.running) {
-      throw new Error('P2P node already running');
+      throw new NetworkError('P2P node already running', ErrorCodes.NETWORK_ALREADY_RUNNING);
     }
 
     try {
@@ -227,7 +228,7 @@ export class P2PNode implements P2PNetwork {
 
   async stop(): Promise<void> {
     if (!this.running) {
-      throw new Error('P2P node not running');
+      throw new NetworkError('P2P node not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     this.running = false;
 
@@ -256,14 +257,14 @@ export class P2PNode implements P2PNetwork {
 
   async discoverPeer(peerId: PeerId): Promise<PeerInfo | null> {
     if (!this.running) {
-      throw new Error('P2P node not running');
+      throw new NetworkError('P2P node not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     return this.discovery?.getPeer(peerId) ?? null;
   }
 
   async connectToPeer(peerId: PeerId): Promise<Connection> {
     if (!this.running) {
-      throw new Error('P2P node not running');
+      throw new NetworkError('P2P node not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
 
     const peerInfo = await this.discoverPeer(peerId);
@@ -273,7 +274,7 @@ export class P2PNode implements P2PNetwork {
     try {
       const authenticated = await this.authenticatePeer(connection);
       if (!authenticated) {
-        throw new Error(`Authentication failed for peer ${peerId.id}`);
+        throw new NetworkError(`Authentication failed for peer ${peerId.id}`, ErrorCodes.NETWORK_AUTH_FAILED);
       }
       return connection;
     } catch (error) {
@@ -285,7 +286,7 @@ export class P2PNode implements P2PNetwork {
 
   async authenticatePeer(connection: Connection): Promise<boolean> {
     if (!this.running) {
-      throw new Error('P2P node not running');
+      throw new NetworkError('P2P node not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     const session = await this.handshake.initiateAuth(connection);
     if (session.state === 'authenticated') {
@@ -313,10 +314,10 @@ export class P2PNode implements P2PNetwork {
 
   async sendMessage(connection: Connection, message: Uint8Array): Promise<void> {
     if (!this.running) {
-      throw new Error('P2P node not running');
+      throw new NetworkError('P2P node not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     if (!connection.isAuthenticated()) {
-      throw new Error('Connection not authenticated');
+      throw new NetworkError('Connection not authenticated', ErrorCodes.NETWORK_NOT_AUTHENTICATED);
     }
     const channel = await this.channelFor(connection);
     await channel.send(message);

@@ -18,6 +18,7 @@
 import { EventEmitter } from 'events';
 import type { Connection, PeerId } from '../P2PNetwork.js';
 import type { MutableAuthenticationConnection } from '../transport/InMemoryTransport.js';
+import { ErrorCodes, NetworkError } from '../../errors.js';
 
 // 设备证书接口
 export interface DeviceCertificate {
@@ -87,14 +88,14 @@ export class AuthenticationHandshake extends EventEmitter {
 
   async start(): Promise<void> {
     if (this.running) {
-      throw new Error('AuthenticationHandshake already running');
+      throw new NetworkError('AuthenticationHandshake already running', ErrorCodes.NETWORK_ALREADY_RUNNING);
     }
     this.running = true;
   }
 
   async stop(): Promise<void> {
     if (!this.running) {
-      throw new Error('AuthenticationHandshake not running');
+      throw new NetworkError('AuthenticationHandshake not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     this.running = false;
 
@@ -137,13 +138,13 @@ export class AuthenticationHandshake extends EventEmitter {
    */
   async createCertificate(peerId: PeerId): Promise<DeviceCertificate> {
     if (!this.identity) {
-      throw new Error('Local identity not set. Call setIdentity() first.');
+      throw new NetworkError('Local identity not set. Call setIdentity() first.', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
     if (this.identity.certificate && this.identity.certificate.deviceId === this.identity.deviceId) {
       return this.identity.certificate;
     }
     if (!this.userMasterPrivateKey) {
-      throw new Error('User master private key not set. Certificate issuance requires the master device.');
+      throw new NetworkError('User master private key not set. Certificate issuance requires the master device.', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
 
     const certificate: DeviceCertificate = {
@@ -164,7 +165,7 @@ export class AuthenticationHandshake extends EventEmitter {
    */
   async verifyCertificate(deviceId: string, certificate: DeviceCertificate): Promise<boolean> {
     if (!this.userMasterPublicKey) {
-      throw new Error('User master public key not set');
+      throw new NetworkError('User master public key not set', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
     if (!certificate || certificate.deviceId !== deviceId) {
       return false;
@@ -179,10 +180,10 @@ export class AuthenticationHandshake extends EventEmitter {
     this.assertRunning();
     const identity = this.requireIdentity();
     if (!this.userMasterPublicKey) {
-      throw new Error('User master public key not set');
+      throw new NetworkError('User master public key not set', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
     if (!identity.certificate) {
-      throw new Error('Local certificate missing. Call createCertificate() first.');
+      throw new NetworkError('Local certificate missing. Call createCertificate() first.', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
 
     const existing = this.sessions.get(connection.peerId.id);
@@ -208,16 +209,16 @@ export class AuthenticationHandshake extends EventEmitter {
       // Step 2：等待响应方证书、挑战 nonceB 与 nonceA 的签名
       const reply = await this.readWireMessage(iter, this.options.timeout);
       if (reply.type === 'auth-error') {
-        throw new Error(`Peer rejected authentication: ${reply.error}`);
+        throw new NetworkError(`Peer rejected authentication: ${reply.error}`, ErrorCodes.NETWORK_AUTH_FAILED);
       }
       if (reply.type !== 'auth-reply') {
-        throw new Error(`Unexpected message during handshake: ${reply.type}`);
+        throw new NetworkError(`Unexpected message during handshake: ${reply.type}`, ErrorCodes.NETWORK_HANDSHAKE_FAILED);
       }
 
       // 验证响应方证书（归属）与 nonceA 签名（私钥持有）
       const certValid = await this.verifyCertificate(reply.certificate.deviceId, reply.certificate);
       if (!certValid) {
-        throw new Error('Peer certificate verification failed');
+        throw new NetworkError('Peer certificate verification failed', ErrorCodes.NETWORK_AUTH_FAILED);
       }
       const responseValid = await this.verifyDeviceSignature(
         reply.certificate,
@@ -225,7 +226,7 @@ export class AuthenticationHandshake extends EventEmitter {
         base64ToBytes(reply.response),
       );
       if (!responseValid) {
-        throw new Error('Peer failed challenge-response (nonceA signature invalid)');
+        throw new NetworkError('Peer failed challenge-response (nonceA signature invalid)', ErrorCodes.NETWORK_AUTH_FAILED);
       }
 
       // Step 3：回应对方的挑战 nonceB
@@ -240,10 +241,10 @@ export class AuthenticationHandshake extends EventEmitter {
       // Step 4：等待响应方确认——冒名者会在此收到 auth-error
       const ack = await this.readWireMessage(iter, this.options.timeout);
       if (ack.type === 'auth-error') {
-        throw new Error(`Peer rejected authentication: ${ack.error}`);
+        throw new NetworkError(`Peer rejected authentication: ${ack.error}`, ErrorCodes.NETWORK_AUTH_FAILED);
       }
       if (ack.type !== 'auth-ok') {
-        throw new Error(`Unexpected message during handshake: ${ack.type}`);
+        throw new NetworkError(`Unexpected message during handshake: ${ack.type}`, ErrorCodes.NETWORK_HANDSHAKE_FAILED);
       }
 
       session.state = 'authenticated';
@@ -264,10 +265,10 @@ export class AuthenticationHandshake extends EventEmitter {
     this.assertRunning();
     const identity = this.requireIdentity();
     if (!this.userMasterPublicKey) {
-      throw new Error('User master public key not set');
+      throw new NetworkError('User master public key not set', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
     if (!identity.certificate) {
-      throw new Error('Local certificate missing. Call createCertificate() first.');
+      throw new NetworkError('Local certificate missing. Call createCertificate() first.', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
 
     const session: AuthSession = { peerId: connection.peerId, state: 'pending' };
@@ -279,12 +280,12 @@ export class AuthenticationHandshake extends EventEmitter {
       // 等待 hello：对端证书 + nonceA
       const hello = await this.readWireMessage(iter, this.options.timeout);
       if (hello.type !== 'auth-hello') {
-        throw new Error(`Unexpected message during handshake: ${hello.type}`);
+        throw new NetworkError(`Unexpected message during handshake: ${hello.type}`, ErrorCodes.NETWORK_HANDSHAKE_FAILED);
       }
 
       const certValid = await this.verifyCertificate(hello.certificate.deviceId, hello.certificate);
       if (!certValid) {
-        throw new Error('Peer certificate verification failed');
+        throw new NetworkError('Peer certificate verification failed', ErrorCodes.NETWORK_AUTH_FAILED);
       }
 
       // 回应：本机证书 + 新挑战 nonceB + nonceA 的签名
@@ -305,10 +306,10 @@ export class AuthenticationHandshake extends EventEmitter {
       // 等待 final：nonceB 的签名
       const finalMsg = await this.readWireMessage(iter, this.options.timeout);
       if (finalMsg.type === 'auth-error') {
-        throw new Error(`Peer reported authentication error: ${finalMsg.error}`);
+        throw new NetworkError(`Peer reported authentication error: ${finalMsg.error}`, ErrorCodes.NETWORK_AUTH_FAILED);
       }
       if (finalMsg.type !== 'auth-final') {
-        throw new Error(`Unexpected message during handshake: ${finalMsg.type}`);
+        throw new NetworkError(`Unexpected message during handshake: ${finalMsg.type}`, ErrorCodes.NETWORK_HANDSHAKE_FAILED);
       }
 
       const finalValid = await this.verifyDeviceSignature(
@@ -317,7 +318,7 @@ export class AuthenticationHandshake extends EventEmitter {
         base64ToBytes(finalMsg.response),
       );
       if (!finalValid) {
-        throw new Error('Peer failed challenge-response (nonceB signature invalid)');
+        throw new NetworkError('Peer failed challenge-response (nonceB signature invalid)', ErrorCodes.NETWORK_AUTH_FAILED);
       }
 
       // 确认认证完成，让发起方收敛到一致状态
@@ -360,13 +361,13 @@ export class AuthenticationHandshake extends EventEmitter {
 
   private assertRunning(): void {
     if (!this.running) {
-      throw new Error('AuthenticationHandshake not running');
+      throw new NetworkError('AuthenticationHandshake not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
   }
 
   private requireIdentity(): LocalIdentity {
     if (!this.identity) {
-      throw new Error('Local identity not set. Call setIdentity() first.');
+      throw new NetworkError('Local identity not set. Call setIdentity() first.', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
     return this.identity;
   }
@@ -399,7 +400,7 @@ export class AuthenticationHandshake extends EventEmitter {
 
   private async signWithMasterKey(data: string): Promise<string> {
     if (!this.userMasterPrivateKey) {
-      throw new Error('User master private key not set');
+      throw new NetworkError('User master private key not set', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
     const signature = await crypto.subtle.sign(
       { name: 'Ed25519' },
@@ -420,7 +421,7 @@ export class AuthenticationHandshake extends EventEmitter {
     const next = await withTimeout(
       iter.next().then((result) => {
         if (result.done) {
-          throw new Error('Connection closed during handshake');
+          throw new NetworkError('Connection closed during handshake', ErrorCodes.NETWORK_CONNECTION_CLOSED);
         }
         return result.value;
       }),
@@ -432,10 +433,10 @@ export class AuthenticationHandshake extends EventEmitter {
     try {
       parsed = JSON.parse(new TextDecoder().decode(next)) as AuthWireMessage;
     } catch {
-      throw new Error('Malformed handshake message');
+      throw new NetworkError('Malformed handshake message', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
     if (!parsed || typeof parsed.type !== 'string') {
-      throw new Error('Malformed handshake message');
+      throw new NetworkError('Malformed handshake message', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
     return parsed;
   }
@@ -539,7 +540,7 @@ export function bytesToHex(bytes: Uint8Array): string {
 
 export function hexToBytes(hex: string): Uint8Array {
   if (hex.length % 2 !== 0) {
-    throw new Error('Invalid hex string');
+    throw new NetworkError('Invalid hex string', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
   }
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < bytes.length; i++) {

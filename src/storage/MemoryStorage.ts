@@ -2,6 +2,7 @@
 
 import type { StorageAdapter, NodeFilter, EdgeFilter, EventFilter } from './StorageAdapter.js';
 import type { Node, Edge, Event } from '../types/index.js';
+import { ErrorCodes, StorageError } from '../errors.js';
 import { ulid } from 'ulid';
 
 export class MemoryStorage implements StorageAdapter {
@@ -12,22 +13,22 @@ export class MemoryStorage implements StorageAdapter {
   private closed = false;
 
   async putNode(node: Node): Promise<void> {
-    if (this.closed) throw new Error('Storage closed');
+    if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
     this.nodes.set(node.id, node);
   }
 
   async getNode(id: string): Promise<Node | null> {
-    if (this.closed) throw new Error('Storage closed');
+    if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
     return this.nodes.get(id) ?? null;
   }
 
   async deleteNode(id: string): Promise<void> {
-    if (this.closed) throw new Error('Storage closed');
+    if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
     this.nodes.delete(id);
   }
 
   async listNodes(filter?: NodeFilter): Promise<Node[]> {
-    if (this.closed) throw new Error('Storage closed');
+    if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
     let result = Array.from(this.nodes.values());
 
     if (filter) {
@@ -76,22 +77,22 @@ export class MemoryStorage implements StorageAdapter {
   }
 
   async putEdge(edge: Edge): Promise<void> {
-    if (this.closed) throw new Error('Storage closed');
+    if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
     this.edges.set(edge.id, edge);
   }
 
   async getEdge(id: string): Promise<Edge | null> {
-    if (this.closed) throw new Error('Storage closed');
+    if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
     return this.edges.get(id) ?? null;
   }
 
   async deleteEdge(id: string): Promise<void> {
-    if (this.closed) throw new Error('Storage closed');
+    if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
     this.edges.delete(id);
   }
 
   async listEdges(filter?: EdgeFilter): Promise<Edge[]> {
-    if (this.closed) throw new Error('Storage closed');
+    if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
     let result = Array.from(this.edges.values());
 
     if (filter) {
@@ -115,7 +116,7 @@ export class MemoryStorage implements StorageAdapter {
   }
 
   async putEvent(event: Event): Promise<void> {
-    if (this.closed) throw new Error('Storage closed');
+    if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
     if (!event.id) {
       event.id = ulid();
     }
@@ -137,12 +138,12 @@ export class MemoryStorage implements StorageAdapter {
   }
 
   async getEvent(id: string): Promise<Event | null> {
-    if (this.closed) throw new Error('Storage closed');
+    if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
     return this.events.find(e => e.id === id) ?? null;
   }
 
   async deleteEvent(id: string): Promise<void> {
-    if (this.closed) throw new Error('Storage closed');
+    if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
     const idx = this.events.findIndex(e => e.id === id);
     if (idx !== -1) {
       this.events.splice(idx, 1);
@@ -150,7 +151,7 @@ export class MemoryStorage implements StorageAdapter {
   }
 
   async listEvents(filter?: EventFilter): Promise<Event[]> {
-    if (this.closed) throw new Error('Storage closed');
+    if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
     let result = [...this.events];
 
     if (filter) {

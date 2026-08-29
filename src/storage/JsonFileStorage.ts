@@ -12,6 +12,7 @@ import { appendFile, mkdir, readFile, rename, writeFile } from 'fs/promises';
 import { dirname } from 'path';
 import type { Node, Edge, Event } from '../types/index.js';
 import { MemoryStorage } from './MemoryStorage.js';
+import { ErrorCodes, StorageError } from '../errors.js';
 
 type StorageOp =
   | { op: 'putNode'; value: Node }
@@ -65,9 +66,10 @@ export class JsonFileStorage extends MemoryStorage {
           );
           break;
         }
-        throw new Error(
+        throw new StorageError(
           `存储文件第 ${i + 1} 行损坏（非末尾，无法安全恢复）：${this.filePath}`,
-          { cause: error },
+          ErrorCodes.STORAGE_READ_FAILED,
+          error as Error,
         );
       }
       await this.applyOp(record);
@@ -92,7 +94,7 @@ export class JsonFileStorage extends MemoryStorage {
   }
 
   private assertWritable(): void {
-    if (this.fileClosed) throw new Error('Storage closed');
+    if (this.fileClosed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
   }
 
   private async persist(record: StorageOp): Promise<void> {

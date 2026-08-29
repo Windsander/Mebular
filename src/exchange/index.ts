@@ -43,3 +43,15 @@ export {
   type JsonMemoEntry,
   type JsonMemoFile,
 } from './json-memo-adapter.js';
+export {
+  ObsidianVaultAdapter,
+  extractWikiLinks,
+  stripFrontmatter,
+  OBSIDIAN_IMPORT_TAG,
+} from './obsidian-adapter.js';
+export {
+  LogJournalAdapter,
+  parseLogJournal,
+  LOG_JOURNAL_IMPORT_TAG,
+  type LogEntry,
+} from './log-journal-adapter.js';

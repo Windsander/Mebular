@@ -4,8 +4,10 @@
 // 再由框架统一走幂等键 + importCmfToMemory 落图——图仍是唯一权威模型，
 // CMF 是交换投影，适配器只负责「异构 → 投影」的映射判断。
 //
-// 幂等：去重键 = import:<sha256(适配器名 + 来源端标识 + 节点指纹)>，
-// 作为节点 label 随图同步，同内容经不同端/不同格式导入零重复。
+// 幂等：去重键 = import:<适配器名>:<sha256(适配器名 + 来源端标识 + 节点指纹)>
+// （Phase 6.1 层级规范，见 import-keys.ts），作为节点 label 随图同步，
+// 同内容经不同端/不同格式导入零重复；读取侧兼容既有图的旧格式
+// import:<sha256> 键（双读过渡，不迁移、自然老化）。
 
 import { createHash } from 'crypto';
 import { ErrorCodes, MebularError } from '../errors.js';
@@ -16,6 +18,7 @@ import {
   type CmfDocument,
   type CmfImportReport,
 } from './cmf.js';
+import { importLabel, legacyImportLabel } from './import-keys.js';
 
 // ---------- 接口 ----------
 
@@ -50,19 +53,31 @@ export interface AdapterImportReport extends CmfImportReport {
 
 // ---------- 幂等键 ----------
 
-/** 跨端稳定去重键：适配器名 + 来源端 + 节点内容指纹 */
-export function adapterDedupKey(adapterName: string, origin: string, node: Parameters<typeof canonicalCmfNode>[0]): string {
-  const digest = createHash('sha256')
+/** 跨端稳定去重摘要：适配器名 + 来源端 + 节点内容指纹 */
+export function adapterDedupDigest(
+  adapterName: string,
+  origin: string,
+  node: Parameters<typeof canonicalCmfNode>[0],
+): string {
+  return createHash('sha256')
     .update(`${adapterName}\n${origin}\n${canonicalCmfNode(node)}`)
     .digest('hex');
-  return `import:${digest}`;
+}
+
+/** 跨端稳定去重键（Phase 6.1 新格式）：import:<适配器名>:<digest> */
+export function adapterDedupKey(
+  adapterName: string,
+  origin: string,
+  node: Parameters<typeof canonicalCmfNode>[0],
+): string {
+  return importLabel(adapterName, adapterDedupDigest(adapterName, origin, node));
 }
 
 // ---------- 框架 ----------
 
 /**
- * 经适配器导入：投影为 CMF → 逐节点算幂等键（已存在则跳过）→
- * 未命中集合走 importCmfToMemory（MemoryStore 校验路径不变）。
+ * 经适配器导入：投影为 CMF → 逐节点算幂等键（已存在则跳过，新旧两格式
+ * 键都认）→ 未命中集合走 importCmfToMemory（MemoryStore 校验路径不变）。
  */
 export async function importWithAdapter(
   adapter: MemoryAdapter,
@@ -76,8 +91,12 @@ export async function importWithAdapter(
   let skipped = 0;
   const existingIdMap: Record<string, string> = {};
   for (const node of doc.nodes) {
-    const key = adapterDedupKey(adapter.name, origin, node);
-    const existing = await memory.getGraph().listNodes({ labels: [key], limit: 1 });
+    const digest = adapterDedupDigest(adapter.name, origin, node);
+    let existing = await memory.getGraph().listNodes({ labels: [importLabel(adapter.name, digest)], limit: 1 });
+    if (existing.length === 0) {
+      // 双读兼容（Phase 6.1）：既有图上的旧格式 import:<digest> 键仍然有效
+      existing = await memory.getGraph().listNodes({ labels: [legacyImportLabel(digest)], limit: 1 });
+    }
     if (existing.length > 0) {
       skipped += 1;
       // 幂等命中的节点同样参与边端点映射（Phase 6.1 修复）：
@@ -85,7 +104,7 @@ export async function importWithAdapter(
       existingIdMap[node.id] = existing[0]!.id;
       continue;
     }
-    fresh.nodes.push({ ...node, labels: [...(node.labels ?? []), key] });
+    fresh.nodes.push({ ...node, labels: [...(node.labels ?? []), importLabel(adapter.name, digest)] });
   }
 
   const inner = await importCmfToMemory(memory, fresh, { existingIdMap });

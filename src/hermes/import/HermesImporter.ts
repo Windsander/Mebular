@@ -5,8 +5,9 @@
 // - skills/<dir>/SKILL.md → Skill（名称/描述/步骤/命令）
 // - sessions/*.json（HermesSessionData）→ Episode(conversation)
 //
-// 幂等设计：每条导入产物带 `import:<sha256>` 标签作为去重键，随图同步——
-// 重复导入、跨设备导入均不产生重复节点。文档/技能节点以「路径」为身份
+// 幂等设计：每条导入产物带 `import:hermes:<sha256>` 标签作为去重键（Phase 6.1
+// 层级规范），随图同步——重复导入、跨设备导入均不产生重复节点；读取侧兼容
+// 既有图的旧格式 `import:<sha256>` 键（双读过渡）。文档/技能节点以「路径」为身份
 // （内容变化不新建节点，导入器不做更新语义）；条目/会话以「内容」为身份
 // （新增条目可增量导入，删除的条目按 append-only 记忆语义保留）。
 // 文档实体与条目/技能/会话之间接 source_of 边，保留出处链路。
@@ -18,6 +19,7 @@ import type { MemoryStore } from '../../memory/MemoryStore.js';
 import { EdgeTypes, type EntityType } from '../../memory/types.js';
 import type { Node } from '../../types/index.js';
 import { ValidationError } from '../../errors.js';
+import { importLabel, toLegacyImportLabel } from '../../exchange/import-keys.js';
 import type { HermesSessionData } from '../types.js';
 import { parseMarkdown } from './markdown.js';
 
@@ -259,13 +261,22 @@ export class HermesImporter {
 
   // ---------- 内部 ----------
 
-  /** 去重键：source + 内容 的 sha256，作为节点 label 随图同步（跨设备幂等） */
+  /** 去重键（新格式）：import:hermes:<sha256(source + 内容)>，作为节点 label 随图同步 */
   private importKey(source: string, content: string): string {
-    return `import:${sha256(`${source}\n${content}`)}`;
+    return importLabel('hermes', sha256(`${source}\n${content}`));
   }
 
+  /** 双读（Phase 6.1）：先查新格式键，miss 时回退既有图上的旧格式 import:<digest> */
   private async findByLabel(label: string): Promise<Node | null> {
-    const hits = await this.memory.getGraph().listNodes({ labels: [label], limit: 1 });
+    const direct = await this.memory.getGraph().listNodes({ labels: [label], limit: 1 });
+    if (direct[0]) {
+      return direct[0];
+    }
+    const legacy = toLegacyImportLabel(label);
+    if (!legacy) {
+      return null;
+    }
+    const hits = await this.memory.getGraph().listNodes({ labels: [legacy], limit: 1 });
     return hits[0] ?? null;
   }
 }

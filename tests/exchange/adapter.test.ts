@@ -101,7 +101,7 @@ describe('KV 型映射与幂等', () => {
     const k1 = adapterDedupKey('kv-json', 'appA', node);
     const k2 = adapterDedupKey('kv-json', 'appB', node);
     const k3 = adapterDedupKey('kv-json', 'appA', { ...node, content: { ...node.content, object: 'light' } });
-    expect(k1).toMatch(/^import:[0-9a-f]{64}$/);
+    expect(k1).toMatch(/^import:kv-json:[0-9a-f]{64}$/);
     expect(k1).not.toBe(k2);
     expect(k1).not.toBe(k3);
   });

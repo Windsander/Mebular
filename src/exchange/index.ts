@@ -22,6 +22,7 @@ export {
 export {
   AdapterRegistry,
   adapterDedupKey,
+  adapterDedupDigest,
   importWithAdapter,
   type MemoryAdapter,
   type AdapterSource,
@@ -29,6 +30,7 @@ export {
   type AdapterImportReport,
   type AdapterRoute,
 } from './adapter.js';
+export { importLabel, legacyImportLabel, toLegacyImportLabel } from './import-keys.js';
 export {
   KvJsonAdapter,
   MarkdownDocAdapter,

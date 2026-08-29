@@ -88,6 +88,28 @@
     "coveragePathIgnorePatterns": [
       "/node_modules/",
       "src/p2p/transport/Libp2pProvider.ts"
-    ]
+    ],
+    "coverageThreshold": {
+      "global": {
+        "lines": 85,
+        "branches": 65
+      },
+      "src/p2p/connection/ConnectionManager.ts": {
+        "lines": 85,
+        "branches": 60
+      },
+      "src/p2p/handshake/AuthenticationHandshake.ts": {
+        "lines": 90,
+        "branches": 85
+      },
+      "src/storage/MemoryStorage.ts": {
+        "lines": 80,
+        "branches": 60
+      },
+      "src/sync/apply.ts": {
+        "lines": 95,
+        "branches": 70
+      }
+    }
   }
 }

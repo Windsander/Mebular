@@ -238,17 +238,31 @@ export class ConnectionManager extends EventEmitter {
 
     // 心跳只通过连接自带的 ping() 探活；绝不向字节流注入原始字节——
     // 上层协议（如加密信道）对帧格式有所有权，裸字节会破坏其帧边界。
-    const promises = Array.from(this.connections.values()).map((conn) => {
+    const promises = Array.from(this.connections.entries()).map(async ([peerId, conn]) => {
       if (conn && conn.isAuthenticated()) {
         const pingable = conn as Partial<PingCapableConnection>;
         if (typeof pingable.ping === 'function') {
-          return pingable.ping()!.catch(() => undefined);
+          try {
+            await pingable.ping();
+          } catch {
+            // ping 探活失败即连接已死：收割并广播（Phase 6.1 修复，原为静默吞掉）
+            this.reap(peerId, conn);
+          }
         }
       }
-      return Promise.resolve();
     });
 
     await Promise.all(promises);
+  }
+
+  /** 从连接表收割死连接：尽力关闭并广播超时/关闭事件；幂等（重复收割无副作用） */
+  private reap(peerId: string, conn: Connection): void {
+    if (!this.connections.delete(peerId)) {
+      return;
+    }
+    conn.close().catch(() => undefined);
+    this.emit('connection-timeout', conn.peerId);
+    this.emit('connection-closed', conn.peerId);
   }
 
   private checkHeartbeatTimeout(): void {
@@ -258,17 +272,20 @@ export class ConnectionManager extends EventEmitter {
 
     const now = Date.now();
     for (const [peerId, conn] of this.connections.entries()) {
-      // 只对暴露活动时间的连接做超时判断；无法观测的连接保持原状
+      // 已关闭/关闭中的连接无论能否观测活动都直接收割（Phase 6.1 修复）
+      if (conn.state === 'closed' || conn.state === 'disconnecting') {
+        this.reap(peerId, conn);
+        continue;
+      }
+      // 只对暴露活动时间的连接做静默超时判断；无法观测的开放连接保持原状
+      //（残余限制：此类连接的探活依赖 ping 失败收割路径，见上 sendHeartbeat）
       const tracked = conn as Partial<ActivityTrackingConnection>;
       const lastActivity = typeof tracked.lastActivityAt === 'number' ? tracked.lastActivityAt : null;
       if (lastActivity === null) {
         continue;
       }
       if (now - lastActivity > this.options.heartbeatTimeout) {
-        this.connections.delete(peerId);
-        conn.close().catch(() => undefined);
-        this.emit('connection-timeout', conn.peerId);
-        this.emit('connection-closed', conn.peerId);
+        this.reap(peerId, conn);
       }
     }
   }

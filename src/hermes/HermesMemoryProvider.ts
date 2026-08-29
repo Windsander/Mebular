@@ -213,7 +213,10 @@ export class HermesMemoryProvider {
 
     if (query.query && this.memory.hasVectorIndex()) {
       const hits = await this.memory.vectorQuery(query.query, query.limit ?? 10);
-      nodes = hits.map(({ node, score }) => ({ node, relevance: score }));
+      // 向量路径同样按 types 收窄（与关键词路径行为对齐，Phase 6.1 修复）
+      nodes = hits
+        .filter(({ node }) => candidateTypes.includes(node.type))
+        .map(({ node, score }) => ({ node, relevance: score }));
     } else if (query.query) {
       const hits = await this.memory.search(query.query, { types: candidateTypes });
       nodes = hits.map((node) => ({ node }));

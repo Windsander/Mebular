@@ -74,18 +74,21 @@ export async function importWithAdapter(
 
   const fresh: CmfDocument = { ...doc, nodes: [], edges: [...doc.edges] };
   let skipped = 0;
+  const existingIdMap: Record<string, string> = {};
   for (const node of doc.nodes) {
     const key = adapterDedupKey(adapter.name, origin, node);
     const existing = await memory.getGraph().listNodes({ labels: [key], limit: 1 });
     if (existing.length > 0) {
       skipped += 1;
+      // 幂等命中的节点同样参与边端点映射（Phase 6.1 修复）：
+      // 重复导入含边场景下边端点解析到已有本地 ID，不再落入 errors
+      existingIdMap[node.id] = existing[0]!.id;
       continue;
     }
     fresh.nodes.push({ ...node, labels: [...(node.labels ?? []), key] });
   }
 
-  // 边端点若被跳过，importCmfToMemory 会诚实上报并略过
-  const inner = await importCmfToMemory(memory, fresh);
+  const inner = await importCmfToMemory(memory, fresh, { existingIdMap });
   return { ...inner, skipped, adapter: adapter.name };
 }
 

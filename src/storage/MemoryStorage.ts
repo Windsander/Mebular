@@ -52,6 +52,21 @@ export class MemoryStorage implements StorageAdapter {
       if (filter.author) {
         result = result.filter(n => n.createdBy === filter.author);
       }
+      if (filter.updatedBy) {
+        result = result.filter(n => n.updatedBy === filter.updatedBy);
+      }
+      if (filter.deletedBy) {
+        result = result.filter(n => n.deletedBy === filter.deletedBy);
+      }
+      // fromTime/toTime 作用于 createdAt（与 EventFilter 作用于 timestamp 一致）
+      if (filter.fromTime !== undefined) {
+        const fromTime = filter.fromTime;
+        result = result.filter(n => n.createdAt >= fromTime);
+      }
+      if (filter.toTime !== undefined) {
+        const toTime = filter.toTime;
+        result = result.filter(n => n.createdAt <= toTime);
+      }
       if (filter.validFrom !== undefined) {
         const validFrom = filter.validFrom;
         result = result.filter(n => {

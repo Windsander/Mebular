@@ -277,7 +277,8 @@ export class MemoryStore {
 
   private async getTyped<T extends Node>(id: string, type: Node['type']): Promise<T | null> {
     const node = await this.graph.getNode(id);
-    if (!node || node.type !== type) {
+    // 排除墓碑：与 listByType 默认（includeDeleted=false）行为一致（Phase 6.1 修复）
+    if (!node || node.type !== type || node.deletedAt) {
       return null;
     }
     return node as T;

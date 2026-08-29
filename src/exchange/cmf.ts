@@ -262,11 +262,15 @@ export interface CmfExportOptions {
 }
 
 function defaultNodeProjection(node: Node): CmfNode {
-  const type = (KNOWN_NODE_TYPES as readonly string[]).includes(node.type)
-    ? (node.type as KnownNodeType)
-    : 'other';
+  const known = (KNOWN_NODE_TYPES as readonly string[]).includes(node.type);
+  const type = known ? (node.type as KnownNodeType) : 'other';
   const out: CmfNode = { id: node.id, type };
-  if (type === 'other') out.originalType = node.type;
+  if (!known) {
+    // 图级往返（Phase 6.1）：CMF 导入的降级节点把原类型存在节点顶层
+    // metadata.originalType，优先取用；否则回退图内原始 type
+    const metaOriginal = node.metadata?.originalType;
+    out.originalType = typeof metaOriginal === 'string' && metaOriginal ? metaOriginal : node.type;
+  }
   if (node.content !== undefined) {
     out.content = typeof node.content === 'string'
       ? node.content
@@ -334,12 +338,23 @@ export interface CmfImportReport {
   errors: CmfImportError[];
 }
 
+export interface CmfImportOptions {
+  /** 幂等命中节点的 来源ID→本地ID 映射：节点不新建，但边端点可解析（Phase 6.1） */
+  existingIdMap?: Record<string, string>;
+}
+
 /** 把 CMF 文档导入记忆库：五类走 MemoryStore 校验路径，other 直通图层 */
 export async function importCmfToMemory(
   memory: MemoryStore,
   doc: CmfDocument,
+  options: CmfImportOptions = {},
 ): Promise<CmfImportReport> {
-  const report: CmfImportReport = { nodesCreated: 0, edgesCreated: 0, idMap: {}, errors: [] };
+  const report: CmfImportReport = {
+    nodesCreated: 0,
+    edgesCreated: 0,
+    idMap: { ...options.existingIdMap },
+    errors: [],
+  };
 
   for (const node of doc.nodes) {
     try {
@@ -365,6 +380,12 @@ export async function importCmfToMemory(
       continue;
     }
     try {
+      // 边幂等（Phase 6.1）：同 source/target/relation 的活跃边已存在则跳过，
+      // 重复导入不累积重复边
+      const existing = await memory.getGraph().listEdges({ source, target });
+      if (existing.some((e) => e.relation === edge.relation && !e.deletedAt)) {
+        continue;
+      }
       await memory.getGraph().createEdge(source, target, edge.relation, edge.labels);
       report.edgesCreated += 1;
     } catch (error) {

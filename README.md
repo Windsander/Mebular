@@ -8,8 +8,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-222%20passed-brightgreen)](#验证与质量)
-[![Phases](https://img.shields.io/badge/Phases-0%E2%80%935%20%E5%AE%8C%E6%88%90-blueviolet)](#路线图)
+[![Tests](https://img.shields.io/badge/Tests-313%20passed-brightgreen)](#验证与质量)
+[![Phases](https://img.shields.io/badge/Phases-0%E2%80%936%20%E5%AE%8C%E6%88%90-blueviolet)](#路线图)
 
 </div>
 
@@ -28,6 +28,8 @@
 | 🔍 **可插拔召回** | BFS 图遍历 + 零依赖关键词基线；向量索引接口预留，缺省关闭、不伪造相关度 |
 | 🌐 **真实网络传输** | libp2p 可选适配器（TCP + Noise + yamux），与 InMemoryHub 同接缝互换；缺包时诚实报错 |
 | 🔗 **信任链与跨端互通** | 设备证书链验签收口信任模型 v1；CMF v1 规范交换格式 + 适配器框架，跨端导入幂等 |
+| 🧩 **生态适配** | Obsidian vault（wiki-link → 关系边，未解析降级成文）与日志型端（append-only → Episode 序列）开箱即通；四端收敛同视图 |
+| 🛰 **广域网就绪** | multiaddr 发现桥接（mDNS TXT 发布真实拨号地址）；已确认同步集合持久化，重启后续传零冗余 |
 | 🪶 **轻依赖** | 运行时仅 `bonjour` + `ulid`；libp2p 栈为可选依赖，按需安装 |
 
 ## 🏗 架构总览
@@ -77,7 +79,8 @@ graph TD
 ```bash
 npm install
 npm run build    # TypeScript strict → dist/
-npm test         # Jest 全量：28 套件 / 222 用例
+npm test         # Jest 全量：42 套件 / 313 用例
+npm run test:coverage  # 覆盖率（门槛：全库 ≥85% 行 / ≥65% 分支 + 关键文件底线）
 npm run lint     # ESLint（src + tests + scripts）
 ```
 
@@ -133,10 +136,10 @@ src/
 ├── sync/           # 线协议 · 冲突收敛 · SyncManager（事件信任验签）
 ├── p2p/            # 握手 · 加密信道 · 连接管理 · NAT · 发现 · 传输抽象 · Libp2pProvider
 ├── memory/         # MemoryStore 五类节点 + VectorIndex 接口
-├── exchange/       # CMF v1 交换格式 + 适配器框架（Hermes / json-memo）
+├── exchange/       # CMF v1 交换格式 + 适配器框架（Hermes / json-memo / Obsidian / 日志型）
 └── hermes/         # HermesMemoryProvider + import/ 既有记忆导入器
-tests/              # Jest：单元 + 集成（双设备端到端 · 跨端互通 · 故障注入）
-scripts/            # verify-phase0~5 分阶段验证脚本
+tests/              # Jest：单元 + 集成（双设备端到端 · 四端互通 · 故障注入）
+scripts/            # verify-phase0~6 分阶段验证脚本
 ```
 
 ## ✅ 验证与质量
@@ -144,7 +147,8 @@ scripts/            # verify-phase0~5 分阶段验证脚本
 分阶段验证脚本：文件检查 + 编译 + 全量测试 + 实现点抽查 + 构建产物冒烟。
 
 ```bash
-node scripts/verify-phase5.mjs   # 跨端互通（最新）
+node scripts/verify-phase6.mjs   # 质量收口 · 生态适配 · 广域网桥接（最新）
+node scripts/verify-phase5.mjs   # 跨端互通
 node scripts/verify-phase4.mjs   # Hermes 集成
 node scripts/verify-phase3.mjs   # 图同步
 node scripts/verify-phase2.mjs   # P2P 网络
@@ -152,10 +156,11 @@ node scripts/verify-phase2.mjs   # P2P 网络
 
 | 指标 | 状态 |
 |---|---|
-| 测试 | **28 套件 / 222 用例**全绿（单元 + 双设备端到端 + 跨端互通 + 故障注入） |
+| 测试 | **42 套件 / 313 用例**全绿（单元 + 双设备端到端 + 四端互通 + 故障注入） |
+| 覆盖率 | **90.5% 行 / 77.6% 分支**；门槛化守护（全库 85/65 + 关键文件独立底线） |
 | 类型 | `tsc --noEmit` strict + `noUncheckedIndexedAccess` 零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |
-| 质量门禁 | 每个阶段以 verify 脚本 + 构建产物冒烟收尾 |
+| 质量门禁 | 每个阶段以 verify 脚本 + 构建产物冒烟收尾；src 内裸 `throw new Error` 清零 |
 
 ## 🗺 路线图
 
@@ -166,7 +171,8 @@ node scripts/verify-phase2.mjs   # P2P 网络
 | Phase 3 | 图同步（签名事件增量同步 / 冲突收敛 / 离线恢复） | ✅ 完成 |
 | Phase 4 | Hermes 集成（门面 / 记忆模型 / Provider / 导入器） | ✅ 完成 |
 | Phase 5 | 跨端互通（libp2p 真实网络 / 证书链信任 / CMF 交换格式 / 适配器框架 / 故障注入） | ✅ 完成 |
-| Phase 6 | 更多异构端适配（Obsidian / 日志型）· 广域网实测 | 📐 规划中 |
+| Phase 6 | 质量收口（死代码清零 / 错误体系注册 / 覆盖门槛）· 生态适配（Obsidian / 日志型）· 广域网桥接（multiaddr 发现 / 同步状态持久化） | ✅ 完成 |
+| Phase 7+ | 信任模型 v2（证书吊销）· 本地 embedding 向量召回 · 跨 NAT 双机实测回填 | 📐 候选 |
 
 ## 🤝 贡献
 

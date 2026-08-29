@@ -9,7 +9,6 @@ import {
   hexToBytes,
   verifyCertificateSignature,
 } from '../../src/p2p/handshake/AuthenticationHandshake.js';
-import type { Connection } from '../../src/p2p/P2PNetwork.js';
 import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
 import {
   createTestIdentity,

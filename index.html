@@ -3,89 +3,1019 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Mebular · 分布式存储的跨广域网记忆系统</title>
+  <title>Mebular · 分布式记忆网络</title>
   <style>
-    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; font-family: system-ui, -apple-system, 'Apple LiGothic', 'Noto Sans CJK SC', sans-serif; background: #05050a; color: #e0e0e0; }
-    .hero { padding: 60px 20px 40px; text-align: center; position: relative; }
-    .hero h1 { font-size: clamp(2.2rem, 6vw, 3.5rem); margin: 0 0 12px; letter-spacing: 0.3em; }
-    .hero p { font-size: clamp(1rem, 2.5vw, 1.2rem); max-width: 720px; margin: 0 auto 40px; line-height: 1.6; opacity: 0.8; }
-    .hero .nebula-hint { font-size: 0.75rem; opacity: 0.5; margin-top: 20px; }
-    nav { position: fixed; top: 20px; left: 50%; transform: translateX(-50%); background: rgba(5,5,10,0.7); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.08); padding: 12px 24px; }
-    nav a { margin-left: 24px; color: #a0a0ff; text-decoration: none; font-size: 0.85rem; }
-    nav a:hover { color: #c0c0ff; }
-    .nav-scrolled { background: rgba(5,5,10,0.5); transition: background 0.3s; }
-    .content { max-width: 860px; margin: 120px auto 40px; padding: 0 20px; }
-    .card { background: rgba(255,255,255,0.03); backdrop-filter: blur(8px); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; padding: 32px 24px; margin: 24px 0; }
-    .card h2 { font-size: 1.3rem; margin: 0 0 16px; letter-spacing: 0.15em; }
-    .card p { line-height: 1.8; opacity: 0.8; }
-    .section { margin: 80px 0; }
-    .node-area { position: relative; min-height: 300px; background: rgba(5,5,20,0.6); border-radius 12px; margin: 32px 0; }
-    .node-area canvas { display: block; width: 100%; height: 100%; border-radius: 10px; }
-    footer { padding: 32px 20px; text-align: center; font-size: 0.8rem; opacity: 0.5; }
-    footer a { color: #6ab0ff; text-decoration: none; }
+    /* ===== 基础 ===== */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html {
+      background: #03050a;
+      scroll-snap-type: y mandatory;
+      overflow-y: scroll;
+    }
+    body {
+      font-family: 'SF Mono', 'Cascadia Code', 'Source Code Pro', 'Consolas', monospace;
+      background: #03050a;
+      color: #c8d0e0;
+      overflow-x: hidden;
+      min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ===== 星空画布（全屏铺底，始终存在） ===== */
+    #bg-canvas {
+      position: fixed; top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      display: block; z-index: 0; pointer-events: none;
+    }
+    #net-canvas {
+      position: fixed; top: 0; left: 0;
+      width: 100vw; height: 100vh;
+      display: block; z-index: 1; pointer-events: auto; cursor: crosshair;
+    }
+
+    /* ===== 导航 ===== */
+    nav {
+      position: fixed; top: 0; left: 0; right: 0;
+      z-index: 11;
+      display: flex; align-items: center; justify-content: center;
+      padding: 18px 24px;
+      background: rgba(3,5,10,0.4);
+      backdrop-filter: blur(10px);
+      -webkit-backdrop-filter: blur(10px);
+      border-bottom: 1px solid rgba(80,160,255,0.12);
+      transition: background 0.3s ease;
+    }
+    nav .brand {
+      font-size: 0.7rem; letter-spacing: 0.4em;
+      color: #5a7a9a; text-transform: uppercase;
+      margin-right: 32px; user-select: none;
+    }
+    nav .links { display: flex; gap: 28px; }
+    nav a {
+      color: #6a8aaa; text-decoration: none;
+      font-size: 0.72rem; letter-spacing: 0.15em;
+      text-transform: uppercase;
+      transition: color 0.2s, text-shadow 0.2s;
+      position: relative;
+    }
+    nav a:hover { color: #8ac8ff; text-shadow: 0 0 12px rgba(80,180,255,0.3); }
+    nav a::after {
+      content: ''; position: absolute;
+      bottom: -3px; left: 0;
+      width: 0; height: 1px;
+      background: #4a8acf;
+      transition: width 0.25s ease;
+      box-shadow: 0 0 6px #4a8acf;
+    }
+    nav a:hover::after { width: 100%; }
+
+    /* ===== 分页基础 ===== */
+    section.page {
+      scroll-snap-align: start;
+      position: relative;
+      z-index: 10;
+      min-height: 100vh;
+    }
+
+    /* 第一页：内容 */
+    section.page-hero {
+      display: flex; flex-direction: column;
+      justify-content: center; align-items: center;
+      padding: 120px 24px 80px;
+    }
+
+    section.page-hero .page-inner {
+      width: 100%;
+      max-width: 720px;
+      text-align: center;
+    }
+
+    /* 第二页：网络舞台（充分展示星空） */
+    section.page-network {
+      display: flex; flex-direction: column;
+      justify-content: flex-end; align-items: flex-end;
+      padding: 40px;
+    }
+    section.page-network .page-inner {
+      width: 100%;
+      max-width: 1100px;
+      text-align: right;
+    }
+
+    /* ===== Hero ===== */
+    .hero { padding: 80px 0 56px; position: relative; }
+    .hero::before {
+      content: ''; position: absolute;
+      top: 0; left: 50%; transform: translate(-50%, -100%);
+      width: 600px; height: 240px;
+      background: radial-gradient(ellipse at center, rgba(60,140,220,0.09) 0%, transparent 70%);
+      pointer-events: none;
+    }
+    .hero .tag {
+      display: inline-block;
+      font-size: 0.65rem; letter-spacing: 0.5em;
+      text-transform: uppercase;
+      color: #4a7a9a;
+      border: 1px solid rgba(80,160,255,0.15);
+      padding: 6px 16px; border-radius: 20px;
+      margin-bottom: 24px;
+      background: rgba(20,40,80,0.25);
+      backdrop-filter: blur(4px);
+    }
+    .hero h1 {
+      font-size: clamp(2.8rem, 8vw, 4.5rem);
+      font-weight: 300; letter-spacing: 0.35em;
+      text-transform: uppercase;
+      background: linear-gradient(135deg, #8ac8ff 0%, #c8a0ff 40%, #8ac8ff 80%);
+      background-size: 200% 200%;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: shimmer 6s ease-in-out infinite;
+      filter: drop-shadow(0 0 18px rgba(80,180,255,0.2));
+    }
+    @keyframes shimmer {
+      0%, 100% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+    }
+    .hero p {
+      max-width: 680px; margin: 20px auto 0;
+      font-size: clamp(1rem, 2vw, 1.15rem);
+      line-height: 1.9; color: #8898b0; letter-spacing: 0.05em;
+    }
+    .hero .mission {
+      margin-top: 28px;
+      padding: 16px 24px;
+      border-left: 2px solid rgba(80,180,255,0.3);
+      background: rgba(10,20,50,0.4);
+      border-radius: 0 8px 8px 0;
+      font-size: 0.88rem; color: #8ab0d0; line-height: 1.7;
+      max-width: 640px;
+      margin-left: auto; margin-right: auto;
+    }
+    .hero .mission strong { color: #aec8f0; font-weight: 400; }
+
+    /* ===== 卡片 ===== */
+    .card {
+      width: 100%; max-width: 680px;
+      background: rgba(8,12,28,0.55);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border: 1px solid rgba(80,160,255,0.12);
+      border-radius: 12px;
+      padding: 36px 32px;
+      margin: 48px 0;
+      position: relative; overflow: hidden;
+      box-shadow: 0 4px 32px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.04);
+    }
+    .card::before {
+      content: ''; position: absolute;
+      top: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(80,180,255,0.25), rgba(160,120,255,0.2), transparent);
+    }
+    .card h2 {
+      font-size: 0.75rem; letter-spacing: 0.4em;
+      text-transform: uppercase; color: #5a8aaa;
+      margin-bottom: 20px;
+      display: flex; align-items: center; gap: 12px;
+    }
+    .card h2::before {
+      content: ''; width: 20px; height: 1px;
+      background: rgba(80,180,255,0.3);
+    }
+    .card p {
+      font-size: 0.92rem; line-height: 1.9; color: #8898b0;
+    }
+    .card ul { list-style: none; padding: 0; }
+    .card ul li {
+      padding: 8px 0 8px 24px;
+      position: relative;
+      border-bottom: 1px dashed rgba(80,160,255,0.06);
+    }
+    .card ul li::before {
+      content: '·'; position: absolute;
+      left: 4px; color: rgba(80,180,255,0.4);
+      font-size: 1.2rem; line-height: 1;
+    }
+    .card ul li:last-child { border-bottom: none; }
+
+    /* ===== 概念网格 ===== */
+    .concept-grid {
+      display: flex; flex-direction: column; gap: 16px;
+    }
+    .concept-item {
+      padding: 18px 20px;
+      border-left: 2px solid rgba(80,160,255,0.15);
+      background: rgba(10,20,50,0.2);
+      border-radius: 0 8px 8px 0;
+    }
+    .concept-item .label {
+      font-size: 0.62rem; letter-spacing: 0.4em;
+      text-transform: uppercase; color: #4a8aaa; margin-bottom: 8px;
+    }
+    .concept-item .desc {
+      font-size: 0.88rem; line-height: 1.7; color: #7888a0;
+    }
+    .concept-item .desc strong { color: #8ab0d0; font-weight: 400; }
+    .concept-item.accent {
+      border-left-color: rgba(160,120,255,0.2);
+    }
+    .concept-item.accent .label { color: #7a6aaa; }
+    .concept-item.accent .desc { color: #5a6a8a; }
+
+    /* ===== 第二页：网络舞台面板 ===== */
+    .net-stage-panel {
+      width: 280px;
+      background: rgba(8,12,28,0.50);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      border: 1px solid rgba(80,160,255,0.12);
+      border-radius: 12px;
+      padding: 20px 22px;
+      box-shadow: 0 4px 32px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.04);
+      text-align: left;
+    }
+    .net-stage-panel::before {
+      content: ''; position: absolute;
+      top: 0; left: 0; right: 0; height: 1px;
+      background: linear-gradient(90deg, transparent, rgba(80,180,255,0.25), rgba(160,120,255,0.2), transparent);
+    }
+    .net-panel-title {
+      font-size: 0.65rem; letter-spacing: 0.5em;
+      text-transform: uppercase; color: #5a8aaa;
+      margin-bottom: 18px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(80,160,255,0.06);
+    }
+    .net-panel-stats {
+      display: grid; grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px; margin-bottom: 14px;
+    }
+    .net-panel-stat {
+      text-align: center; padding: 8px 4px;
+      border: 1px solid rgba(80,160,255,0.06);
+      border-radius: 6px; background: rgba(10,20,50,0.2);
+    }
+    .net-stat-value {
+      font-size: 1.4rem; font-weight: 300;
+      color: #8ac8ff;
+      text-shadow: 0 0 8px rgba(80,180,255,0.12);
+      letter-spacing: 0.05em;
+    }
+    .net-stat-label {
+      font-size: 0.55rem; letter-spacing: 0.3em;
+      text-transform: uppercase; color: #4a7a9a; margin-top: 4px;
+    }
+    .net-panel-divider {
+      height: 1px; background: rgba(80,160,255,0.08); margin: 12px 0;
+    }
+    .net-panel-devices {
+      max-height: 160px; overflow-y: auto;
+      margin-bottom: 14px;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(80,160,255,0.1) transparent;
+    }
+    .net-panel-devices::-webkit-scrollbar { width: 4px; }
+    .net-panel-devices::-webkit-scrollbar-track { background: transparent; }
+    .net-panel-devices::-webkit-scrollbar-thumb {
+      background: rgba(80,160,255,0.15); border-radius: 4px;
+    }
+    .net-device-row {
+      display: flex; align-items: center; gap: 10px;
+      padding: 7px 4px;
+      font-size: 0.72rem;
+      border-bottom: 1px solid rgba(80,160,255,0.04);
+    }
+    .net-device-row:last-child { border-bottom: none; }
+    .net-device-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      flex-shrink: 0;
+      background: #4a8acf; box-shadow: 0 0 6px rgba(80,180,255,0.3);
+    }
+    .net-device-dot.syncing {
+      background: #c8a0ff; box-shadow: 0 0 10px rgba(180,120,255,0.5);
+      animation: dotPulse 1s ease-in-out infinite;
+    }
+    .net-device-dot.idle { background: #3a5a7a; box-shadow: none; animation: none; }
+    @keyframes dotPulse {
+      0%, 100% { opacity: 0.7; transform: scale(1); }
+      50% { opacity: 1; transform: scale(1.4); }
+    }
+    .net-device-name {
+      flex: 1; color: #8ab0d0; letter-spacing: 0.08em;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .net-device-status {
+      font-size: 0.6rem; color: #4a7a9a; letter-spacing: 0.1em;
+      text-transform: uppercase; flex-shrink: 0;
+    }
+    .net-device-status.synced { color: #4a9a7a; }
+    .net-device-status.syncing { color: #9a7acc; }
+    .net-add-btn {
+      width: 100%; padding: 9px 12px;
+      background: rgba(20,40,80,0.3);
+      border: 1px solid rgba(80,160,255,0.12);
+      border-radius: 6px; color: #6a8aaa;
+      font-size: 0.68rem; letter-spacing: 0.15em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: background 0.2s, border-color 0.2s, color 0.2s;
+      font-family: inherit; text-align: center;
+    }
+    .net-add-btn:hover {
+      background: rgba(30,60,120,0.35);
+      border-color: rgba(80,160,255,0.2);
+      color: #8ac8ff;
+    }
+    .net-empty-hint {
+      font-size: 0.72rem; color: #4a6a8a;
+      text-align: center; padding: 14px 4px; line-height: 1.6;
+    }
+
+    /* 分页分界提示（仅用于两个页面切换之间的停顿感） */
+    .page-divider {
+      min-height: 24vh;
+      border-top: 1px solid rgba(80,160,255,0.05);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .page-divider span {
+      font-size: 0.55rem; letter-spacing: 0.8em;
+      text-transform: uppercase; color: #2a4a6a;
+      opacity: 0.6;
+    }
+
+    /* ===== 页脚 ===== */
+    footer {
+      text-align: center; padding: 40px 24px 32px;
+      color: #3a4a6a; font-size: 0.7rem; letter-spacing: 0.15em;
+      border-top: 1px solid rgba(80,160,255,0.06); margin-top: 40px;
+    }
+    footer a { color: #5a8aaa; text-decoration: none; transition: color 0.2s; }
     footer a:hover { color: #8ac8ff; }
-    .scroll-hint { position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%); animation: bounce 2s infinite; font-size: 0.7rem; opacity: 0.4; }
-    @keyframes bounce { 0%, 20%, 50%, 80%, 100% { transform: translateX(-50%) translateY(0); } 40% { transform: translateX(-50%) translateY(-8px); } 60% { transform: translateX(-50%) translateY(-4px); } }
-    .controls { position: fixed; top: 80px; right: 24px; }
-    .controls button { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); color: #e0e0e0; padding: 8px 12px; font-size: 0.75rem; border-radius: 6px; cursor: pointer; backdrop-filter: blur(5px); }
-    .controls button:hover { background: rgba(255,255,255,0.1); }
+    footer .foot-brand {
+      font-size: 0.65rem; letter-spacing: 0.4em;
+      text-transform: uppercase; margin-bottom: 6px; color: #3a5a7a;
+    }
+
+    /* 滚动提示 */
+    .scroll-indicator {
+      position: fixed; bottom: 24px; left: 50%;
+      transform: translateX(-50%);
+      font-size: 0.62rem; letter-spacing: 0.3em;
+      text-transform: uppercase; color: #2a4a6a;
+      animation: scrollBounce 3s ease-in-out infinite;
+      z-index: 10; pointer-events: none; opacity: 0.5;
+    }
+    @keyframes scrollBounce {
+      0%, 100% { transform: translateX(-50%) translateY(0); opacity: 0.3; }
+      50% { transform: translateX(-50%) translateY(-6px); opacity: 0.6; }
+    }
+
+    /* 响应式 */
+    @media (max-width: 640px) {
+      .net-stage-panel { width: 220px; padding: 16px 14px; }
+      .net-panel-stats { gap: 4px; }
+      .net-stat-value { font-size: 1.2rem; }
+      .net-panel-title { font-size: 0.6rem; }
+      .card { padding: 24px 16px; }
+      .hero h1 { letter-spacing: 0.2em; }
+      nav .links { gap: 14px; }
+      nav a { font-size: 0.65rem; }
+      section.page-network { padding: 20px; align-items: center; justify-content: center; }
+      .net-stage-panel { width: 90%; max-width: 320px; }
+      .page-divider { min-height: 16vh; }
+    }
   </style>
 </head>
 <body>
-  <!-- Nebula canvas -->
-  <canvas id="nebula" style="display:block; width:100%; height:100%;"></canvas>
 
-  <div class="hero">
-    <h1>Mebular</h1>
-    <p>分布式存储的跨广域网记忆系统</p>
-    <div class="nebula-hint">星云背景由自适应噪声、有机核心与分层视差渲染</div>
-  </div>
+  <!-- 星空铺底画布（始终存在） -->
+  <canvas id="bg-canvas"></canvas>
+  <!-- 网络叠加画布（节点/连线/粒子/ burst） -->
+  <canvas id="net-canvas"></canvas>
 
+  <!-- 导航 -->
   <nav>
-    <a href="#about">关于</a>
-    <a href="#features">特性</a>
-    <a href="#contact">联系</a>
+    <span class="brand">Mebular</span>
+    <div class="links">
+      <a href="#page-hero">系统</a>
+      <a href="#page-network">网络</a>
+      <a href="#concept">设计</a>
+      <a href="#github">GitHub</a>
+    </div>
   </nav>
 
-  <div class="content">
-    <div class="card">
-      <h2>系统概览</h2>
-      <p>Mebular 是一个基于分布式存储的跨广域网记忆系统，旨在通过关联性图记忆组织跨域知识，同时提供安全、本地化的数据设计。项目设计文档保留本地，不提交远端。</p>
-    </div>
+  <!-- ====== 第一页：内容 ====== -->
+  <section class="page page-hero" id="page-hero">
+    <div class="page-inner">
 
-    <div class="card">
-      <h2>背景渲染技术</h2>
-      <p>nebula.js 使用 Canvas 2D 实现真实星云背景：各向异性噪声丝状结构、尘埃吸收带、连续色温场（HSV 梯度）、有机核心辉光、四层视差（体积云→核心→星星→粒子），并配有鼠标视差与独立星星时漂移。</p>
-    </div>
-  </div>
+      <section class="hero">
+        <span class="tag">v1.0 · early design</span>
+        <h1>Mebular</h1>
+        <p>
+          分布式存储的跨广域网记忆系统<br>
+          所有设备拥有相同的记忆，共同构造一张共享的知识图谱。
+        </p>
+        <div class="mission">
+          <strong>没有中心服务器。</strong> 每一个节点都是对等的，
+          记忆在它们之间分散存储、保持同步。
+          星空中的每一颗星，都可以成为网络中的一个记忆节点。
+        </div>
+      </section>
 
-  <footer>
-    <p>Mebular · <a href="https://github.com/Windsander/Mebular">GitHub</a> · MIT 协议</p>
+      <section class="card" id="overview">
+        <h2>系统概览</h2>
+        <p>
+          Mebular 是一个<strong>分布式记忆存储系统</strong>，旨在通过关联性图记忆组织跨域知识。
+          每个设备（节点）存储相同的记忆集，系统确保它们保持同步。
+          设计文档保留本地，不提交远端。
+        </p>
+        <p style="margin-top:16px; color:#5a7a9a; font-size:0.82rem;">
+          背景渲染基于 Canvas 2D 的正交投影星云模型（nebula.js）与 10 层指数视差星星系统（stars.js），
+          零依赖、单文件、原生 JS。
+        </p>
+      </section>
+
+      <section class="card" id="concept">
+        <h2>设计理念</h2>
+        <div class="concept-grid">
+          <div class="concept-item">
+            <div class="label">分布式存储</div>
+            <div class="desc">
+              没有中心服务器。每一个节点独立存储完整的记忆集，
+              系统通过对等同步协议保持各节点之间的一致性。
+            </div>
+          </div>
+          <div class="concept-item">
+            <div class="label">共享记忆</div>
+            <div class="desc">
+              所有设备拥有相同的记忆。任一节点添加或更新记忆，
+              该变更会传播到网络中的所有其他节点，
+              使整个记忆图谱保持一致。
+            </div>
+          </div>
+          <div class="concept-item">
+            <div class="label">跨广域网</div>
+            <div class="desc">
+              节点可以分布在广域网的不同位置，通过星空般的拓扑结构
+              互相连接。距离不影响记忆的一致性。
+            </div>
+          </div>
+          <div class="concept-item">
+            <div class="label">关联性图记忆</div>
+            <div class="desc">
+              记忆以图的形式组织，节点之间的关联定义了知识的结构。
+              类似 Griphify 等以代码为目标的关联记忆方式。
+            </div>
+          </div>
+          <div class="concept-item accent">
+            <div class="label">未回答的问题</div>
+            <div class="desc">
+              跨域记忆互通、各端记忆系统可能存在差异的问题尚未解决。
+              向量化更新成本较大，未来可能转向图记忆方式。
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </section>
+
+  <!-- 分界空档（加强页间切换的停顿感） -->
+  <section class="page-divider" aria-hidden="true">
+    <span>· · ·</span>
+  </section>
+
+  <!-- ====== 第二页：网络舞台 ====== -->
+  <section class="page page-network" id="page-network">
+    <div class="page-inner">
+      <div class="net-stage-panel">
+        <div class="net-panel-title">✦ 网络舞台 · 点击星空注册节点</div>
+        <div class="net-panel-stats">
+          <div class="net-panel-stat">
+            <div class="net-stat-value" id="stat-nodes">0</div>
+            <div class="net-stat-label">节点</div>
+          </div>
+          <div class="net-panel-stat">
+            <div class="net-stat-value" id="stat-links">0</div>
+            <div class="net-stat-label">链路</div>
+          </div>
+          <div class="net-panel-stat">
+            <div class="net-stat-value" id="stat-memory">—</div>
+            <div class="net-stat-label" id="stat-memory-label">等待节点</div>
+          </div>
+        </div>
+        <div class="net-panel-divider"></div>
+        <div class="net-panel-devices" id="net-devices-list"></div>
+        <button class="net-add-btn" id="net-add-btn">✦ 添加节点</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 滚动提示 -->
+  <div class="scroll-indicator">↓ 滚动探索</div>
+
+  <!-- 页脚 -->
+  <footer id="github">
+    <div class="foot-brand">Mebular · 分布式记忆网络</div>
+    <a href="https://github.com/Windsander/Mebular" target="_blank" rel="noopener">GitHub →</a>
+    &ensp;·&ensp;MIT 协议&ensp;·&ensp;早期设计阶段
   </footer>
 
-  <div class="scroll-hint">滚动查看更多</div>
-
-  <div class="controls">
-    <button id="resetBtn">重置背景</button>
-  </div>
-
+  <!-- ===== 核心脚本 ===== -->
   <script src="nebula.js"></script>
+  <script src="stars.js"></script>
   <script>
-    // 初始化：在页面加载后确保 canvas 已准备就绪
-    document.addEventListener('DOMContentLoaded', function() {
-      // 调用 nebula.js 的自动初始化
-      // 如果需要额外控制，可在此处添加
-    });
+  (function(){
+    'use strict';
 
-    // 重置背景按钮
-    document.getElementById('resetBtn').addEventListener('click', function() {
-      // 重新 seedStars 和 seedParticles，重置视图
-      if (window.nebulaReset) {
-        window.nebulaReset();
-      } else {
-        location.reload();
+    var DEBUG = false;
+
+    var bgCanvas = document.getElementById('bg-canvas');
+    var netCanvas = document.getElementById('net-canvas');
+    var bgCtx = bgCanvas.getContext('2d');
+    var netCtx = netCanvas.getContext('2d');
+
+    var COLORS = {
+      nodeLine:     [80, 180, 255],
+      nodeLineAlt:  [160, 120, 255],
+      nodeGlow:     [60, 160, 255],
+      nodeRing:     [160, 200, 255],
+      dataParticle: [220, 235, 255],
+      syncFlash:    [160, 140, 255],
+      burst:        [180, 220, 255]
+    };
+
+    // UI 引用（第二页舞台面板）
+    var statNodesEl = document.getElementById('stat-nodes');
+    var statLinksEl = document.getElementById('stat-links');
+    var statMemoryEl = document.getElementById('stat-memory');
+    var statMemoryLabelEl = document.getElementById('stat-memory-label');
+    var netDevicesListEl = document.getElementById('net-devices-list');
+    var netAddBtnEl = document.getElementById('net-add-btn');
+
+    var nebula, stars;
+
+    var net = {
+      nodes: [],
+      particles: [],
+      syncFlashes: [],
+      bursts: [],       // 点击选星时的视觉 burst
+      mouseX: 0.5, mouseY: 0.5,
+      targetMouseX: 0.5, targetMouseY: 0.5,
+      time: 0, linkPulse: 0,
+      W: 0, H: 0, bgW: 0, bgH: 0,
+      nextDeviceId: 1, syncTimer: 0, autoSelectTimer: 0
+    };
+
+    function resizeAll() {
+      net.W = netCanvas.width  = window.innerWidth;
+      net.H = netCanvas.height = window.innerHeight;
+      net.bgW = bgCanvas.width  = window.innerWidth;
+      net.bgH = bgCanvas.height = window.innerHeight;
+    }
+
+    function starScreenPos(s) {
+      var mx = net.mouseX - 0.5, my = net.mouseY - 0.5;
+      var px = s.x * net.bgW + mx * net.bgW * s.parallaxFactor * 1.0;
+      var py = s.y * net.bgH + my * net.bgH * s.parallaxFactor * 1.0;
+      var drift = Math.sin(net.time * s.driftSpeed + s.driftPhase) * s.driftAmp * 0.5 * s.depth;
+      px += drift * 0.012; py += drift * 0.012;
+      return { x: px, y: py };
+    }
+
+    function dist(x1, y1, x2, y2) {
+      var dx = x1 - x2, dy = y1 - y2;
+      return Math.sqrt(dx*dx + dy*dy);
+    }
+
+    function findNearestStar(cx, cy, maxDist) {
+      maxDist = maxDist || 80;
+      var best = null, bestD = maxDist;
+      for (var i = 0; i < stars.stars.length; i++) {
+        var s = stars.stars[i];
+        var p = starScreenPos(s);
+        var d = dist(cx, cy, p.x, p.y);
+        if (d < bestD) {
+          var used = false;
+          for (var j = 0; j < net.nodes.length; j++) {
+            if (net.nodes[j].starRef === s) { used = true; break; }
+          }
+          if (!used) { best = s; bestD = d; }
+        }
       }
-    });
+      return best;
+    }
+
+    // 从星星位置记录一次 burst（点击选星反馈）
+    function spawnBurstAt(starRef) {
+      var p = starScreenPos(starRef);
+      net.bursts.push({
+        x: p.x, y: p.y,
+        radius: 0,
+        maxRadius: 50 + Math.random() * 30,
+        alpha: 1,
+        born: net.time,
+        duration: 420 // ms
+      });
+    }
+
+    function registerNode(starRef) {
+      if (!starRef) return false;
+      for (var i = 0; i < net.nodes.length; i++) {
+        if (net.nodes[i].starRef === starRef) return false;
+      }
+      if (net.nodes.length >= 8) return false;
+
+      var id = net.nextDeviceId++;
+      var names = ['扬旸', '辰星', '启明', '摄提', '娄宿', '天津', '太一', '玄祖'];
+      var name = names[(id - 1) % names.length] + '-' + String(id).padStart(2, '0');
+
+      net.nodes.push({
+        starRef: starRef,
+        deviceId: id, name: name,
+        syncedAt: 0, lastSyncAt: 0,
+        syncStatus: 'idle'
+      });
+
+      spawnBurstAt(starRef);  // 选星反馈
+
+      updateUI();
+      return true;
+    }
+
+    function autoSelectNode() {
+      var available = [];
+      for (var i = 0; i < stars.stars.length; i++) {
+        var used = false;
+        for (var j = 0; j < net.nodes.length; j++) {
+          if (net.nodes[j].starRef === stars.stars[i]) { used = true; break; }
+        }
+        if (!used) available.push(stars.stars[i]);
+      }
+      if (available.length === 0) return false;
+      return registerNode(available[Math.floor(Math.random() * available.length)]);
+    }
+
+    function triggerSync() {
+      if (net.nodes.length < 2) return;
+      // 随机挑一对节点发信号（而非全体对全）
+      var srcIdx, tgtIdx;
+      do {
+        srcIdx = Math.floor(Math.random() * net.nodes.length);
+        tgtIdx = Math.floor(Math.random() * net.nodes.length);
+      } while (tgtIdx === srcIdx);
+      var src = net.nodes[srcIdx];
+      var tgt = net.nodes[tgtIdx];
+      var srcPos = starScreenPos(src.starRef);
+      var tgtPos = starScreenPos(tgt.starRef);
+      net.particles.push({
+        src: src, tgt: tgt,
+        sx: srcPos.x, sy: srcPos.y,
+        tx: tgtPos.x, ty: tgtPos.y,
+        progress: 0,
+        speed: 3.0 + Math.random() * 2.0,
+        speedFactor: 0.7 + Math.random() * 0.5,
+        alive: true
+      });
+      src.syncStatus = 'syncing';
+      src.lastSyncAt = performance.now();
+    }
+
+    function updateNetwork(dt) {
+      net.time += dt;
+
+      var damping = 0.04;
+      net.mouseX += (net.targetMouseX - net.mouseX) * damping;
+      net.mouseY += (net.targetMouseY - net.mouseY) * damping;
+
+      net.syncTimer -= dt;
+      if (net.syncTimer <= 0 && net.nodes.length >= 2) {
+        triggerSync();
+        net.syncTimer = 4000 + Math.random() * 3000;
+      } else if (net.nodes.length < 2) {
+        net.syncTimer = 1000;
+      }
+
+      net.autoSelectTimer += dt;
+      net.linkPulse += dt * 0.001;
+
+      for (var i = net.particles.length - 1; i >= 0; i--) {
+        var p = net.particles[i];
+        if (!p.alive) { net.particles.splice(i, 1); continue; }
+        p.progress += p.speed * p.speedFactor * 0.016;
+        if (p.progress >= 1) {
+          p.alive = false;
+          p.tgt.syncStatus = 'synced';
+          p.tgt.syncedAt = performance.now();
+          p.tgt.lastSyncAt = performance.now();
+          var pos = starScreenPos(p.tgt.starRef);
+          net.syncFlashes.push({
+            x: pos.x, y: pos.y,
+            radius: 0, maxRadius: 30 + Math.random() * 20,
+            alpha: 1, born: net.time
+          });
+          net.particles.splice(i, 1);
+        }
+      }
+
+      for (var i = net.syncFlashes.length - 1; i >= 0; i--) {
+        var f = net.syncFlashes[i];
+        var age = net.time - f.born;
+        if (age > 600) { net.syncFlashes.splice(i, 1); continue; }
+        f.radius = f.maxRadius * (age / 600);
+        f.alpha = 1 - (age / 600);
+      }
+
+      for (var i = net.bursts.length - 1; i >= 0; i--) {
+        var b = net.bursts[i];
+        var age = net.time - b.born;
+        if (age > b.duration) { net.bursts.splice(i, 1); continue; }
+        b.radius = b.maxRadius * (age / b.duration);
+        b.alpha = 1 - (age / b.duration);
+      }
+
+      var now = performance.now();
+      for (var i = 0; i < net.nodes.length; i++) {
+        var n = net.nodes[i];
+        if (n.syncStatus === 'syncing' && now - n.lastSyncAt > 2000) n.syncStatus = 'synced';
+        if (n.syncStatus === 'synced' && now - n.syncedAt > 8000) n.syncStatus = 'idle';
+      }
+    }
+
+    function renderNetwork() {
+      var ctx = netCtx;
+      var W = net.W, H = net.H;
+      ctx.clearRect(0, 0, W, H);
+
+      var nodes = net.nodes;
+
+      // 连线
+      for (var i = 0; i < nodes.length; i++) {
+        var ni = nodes[i];
+        var pi = starScreenPos(ni.starRef);
+        for (var j = i + 1; j < nodes.length; j++) {
+          var nj = nodes[j];
+          var pj = starScreenPos(nj.starRef);
+          var d = dist(pi.x, pi.y, pj.x, pj.y);
+          var maxDist = Math.max(W, H) * 0.9;
+          var norm = Math.min(1, d / maxDist);
+          var alphaBase = (1 - norm * norm) * 0.4;
+          var pulse = Math.sin(net.linkPulse * 1.5 + i + j) * 0.15 + 0.85;
+          var alpha = alphaBase * pulse;
+          if (alpha < 0.02) continue;
+          var lineW = (1 - norm * 0.7) * 1.2;
+
+          ctx.beginPath();
+          ctx.moveTo(pi.x, pi.y); ctx.lineTo(pj.x, pj.y);
+          ctx.strokeStyle = 'rgba(' + COLORS.nodeLine[0] + ',' + COLORS.nodeLine[1] + ',' + COLORS.nodeLine[2] + ',' + alpha + ')';
+          ctx.lineWidth = lineW;
+          ctx.stroke();
+
+          ctx.beginPath();
+          ctx.moveTo(pi.x, pi.y); ctx.lineTo(pj.x, pj.y);
+          ctx.strokeStyle = 'rgba(' + COLORS.nodeLineAlt[0] + ',' + COLORS.nodeLineAlt[1] + ',' + COLORS.nodeLineAlt[2] + ',' + (alpha * 0.35) + ')';
+          ctx.lineWidth = lineW * 3.5;
+          ctx.stroke();
+        }
+      }
+
+      // 数据流粒子
+      for (var p = 0; p < net.particles.length; p++) {
+        var pt = net.particles[p];
+        var prog = pt.progress;
+        var cx = pt.sx + (pt.tx - pt.sx) * prog;
+        var cy = pt.sy + (pt.ty - pt.sy) * prog;
+        var radius = 2.5 + prog * 1.5;
+        var glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 4);
+        glow.addColorStop(0, 'rgba(' + COLORS.dataParticle[0] + ',' + COLORS.dataParticle[1] + ',' + COLORS.dataParticle[2] + ',0.8)');
+        glow.addColorStop(0.3, 'rgba(' + COLORS.dataParticle[0] + ',' + COLORS.dataParticle[1] + ',' + COLORS.dataParticle[2] + ',0.3)');
+        glow.addColorStop(1, 'rgba(' + COLORS.dataParticle[0] + ',' + COLORS.dataParticle[1] + ',' + COLORS.dataParticle[2] + ',0)');
+        ctx.fillStyle = glow;
+        ctx.beginPath(); ctx.arc(cx, cy, radius * 4, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(240,245,255,0.95)';
+        ctx.beginPath(); ctx.arc(cx, cy, radius * 0.7, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // 同步反馈闪光
+      for (var f = 0; f < net.syncFlashes.length; f++) {
+        var flash = net.syncFlashes[f];
+        var grd = ctx.createRadialGradient(flash.x, flash.y, 0, flash.x, flash.y, flash.radius);
+        grd.addColorStop(0, 'rgba(' + COLORS.syncFlash[0] + ',' + COLORS.syncFlash[1] + ',' + COLORS.syncFlash[2] + ',' + (flash.alpha * 0.8) + ')');
+        grd.addColorStop(0.5, 'rgba(' + COLORS.syncFlash[0] + ',' + COLORS.syncFlash[1] + ',' + COLORS.syncFlash[2] + ',' + (flash.alpha * 0.25) + ')');
+        grd.addColorStop(1, 'rgba(' + COLORS.syncFlash[0] + ',' + COLORS.syncFlash[1] + ',' + COLORS.syncFlash[2] + ',0)');
+        ctx.fillStyle = grd;
+        ctx.beginPath(); ctx.arc(flash.x, flash.y, flash.radius, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // burst（选星反馈光晕）
+      for (var b = 0; b < net.bursts.length; b++) {
+        var burst = net.bursts[b];
+        var grd = ctx.createRadialGradient(burst.x, burst.y, 0, burst.x, burst.y, burst.radius);
+        grd.addColorStop(0, 'rgba(' + COLORS.burst[0] + ',' + COLORS.burst[1] + ',' + COLORS.burst[2] + ',' + (burst.alpha * 0.55) + ')');
+        grd.addColorStop(0.4, 'rgba(' + COLORS.burst[0] + ',' + COLORS.burst[1] + ',' + COLORS.burst[2] + ',' + (burst.alpha * 0.18) + ')');
+        grd.addColorStop(1, 'rgba(' + COLORS.burst[0] + ',' + COLORS.burst[1] + ',' + COLORS.burst[2] + ',0)');
+        ctx.fillStyle = grd;
+        ctx.beginPath(); ctx.arc(burst.x, burst.y, burst.radius, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // 节点环（已选星星高亮）
+      for (var n = 0; n < nodes.length; n++) {
+        var node = nodes[n];
+        var pos = starScreenPos(node.starRef);
+        var x = pos.x, y = pos.y;
+        var glowR = 22;
+        var grd = ctx.createRadialGradient(x, y, 0, x, y, glowR);
+        grd.addColorStop(0, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0.25)');
+        grd.addColorStop(0.5, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0.08)');
+        grd.addColorStop(1, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0)');
+        ctx.fillStyle = grd;
+        ctx.beginPath(); ctx.arc(x, y, glowR, 0, Math.PI * 2); ctx.fill();
+
+        var coreGrd = ctx.createRadialGradient(x, y, 0, x, y, 6);
+        coreGrd.addColorStop(0, 'rgba(220,235,255,0.9)');
+        coreGrd.addColorStop(0.4, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0.5)');
+        coreGrd.addColorStop(1, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0)');
+        ctx.fillStyle = coreGrd;
+        ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.fill();
+
+        var ringPulse = Math.sin(net.time * 0.003 + n * 1.2) * 0.25 + 0.75;
+        var ringR = 10 + ringPulse * 3;
+        ctx.beginPath(); ctx.arc(x, y, ringR, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(' + COLORS.nodeRing[0] + ',' + COLORS.nodeRing[1] + ',' + COLORS.nodeRing[2] + ',' + (0.3 * ringPulse) + ')';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      }
+
+      // 空闲提示
+      if (nodes.length === 0) {
+        var pulse = Math.sin(net.autoSelectTimer * 0.004) * 0.3 + 0.7;
+        var cx = W / 2, cy = H / 2 + 80;
+        var grd = ctx.createRadialGradient(cx, cy, 0, cx, cy, 40);
+        grd.addColorStop(0, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',' + (0.15 * pulse) + ')');
+        grd.addColorStop(1, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0)');
+        ctx.fillStyle = grd;
+        ctx.beginPath(); ctx.arc(cx, cy, 40, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(' + COLORS.nodeRing[0] + ',' + COLORS.nodeRing[1] + ',' + COLORS.nodeRing[2] + ',' + (0.4 * pulse) + ')';
+        ctx.font = '16px monospace';
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillText('✦', cx, cy);
+      }
+
+      if (DEBUG) {
+        ctx.fillStyle = 'rgba(255,200,200,0.6)';
+        ctx.font = '10px monospace';
+        for (var d = 0; d < nodes.length; d++) {
+          var dp = starScreenPos(nodes[d].starRef);
+          ctx.fillText(nodes[d].name, dp.x + 14, dp.y - 6);
+        }
+      }
+    }
+
+    function updateUI() {
+      var n = net.nodes.length;
+      statNodesEl.textContent = n;
+      var links = n >= 2 ? (n * (n - 1) / 2) : 0;
+      statLinksEl.textContent = links;
+
+      if (n === 0) {
+        statMemoryEl.textContent = '—';
+        statMemoryLabelEl.textContent = '等待节点';
+        netDevicesListEl.innerHTML = '<div class="net-empty-hint">点击星空中的星星<br>注册一个节点</div>';
+        return;
+      }
+
+      var syncedCount = 0;
+      var now = performance.now();
+      var html = '';
+      for (var i = 0; i < n; i++) {
+        var node = net.nodes[i];
+        var dotClass = 'net-device-dot';
+        var statusText = '已同步';
+        var statusClass = 'synced';
+        if (node.syncStatus === 'syncing') {
+          dotClass += ' syncing';
+          statusText = '同步中';
+          statusClass = 'syncing';
+        } else if (node.syncStatus === 'idle') {
+          dotClass += ' idle';
+          statusText = '已同步·休眠';
+          statusClass = '';
+        } else {
+          syncedCount++;
+        }
+        html += '<div class="net-device-row">' +
+          '<div class="' + dotClass + '"></div>' +
+          '<div class="net-device-name">' + node.name + '</div>' +
+          '<div class="net-device-status ' + statusClass + '">' + statusText + '</div>' +
+          '</div>';
+      }
+      netDevicesListEl.innerHTML = html;
+
+      var memText = (syncedCount === n && n > 0) ? '全部同步' : (n > 0 ? syncedCount + '/' + n : '—');
+      statMemoryEl.textContent = memText;
+      statMemoryLabelEl.textContent = (syncedCount === n && n > 0) ? '✓ 一致' : (n > 0 ? '同步中...' : '等待节点');
+    }
+
+    function bindEvents() {
+      // 鼠标追踪绑在 window 上（捕获阶段），保证无论指针落在页面哪一层都能更新位置
+      window.addEventListener('mousemove', function(e) {
+        net.targetMouseX = e.clientX / net.W;
+        net.targetMouseY = e.clientY / net.H;
+      }, true);
+      window.addEventListener('touchmove', function(e) {
+        if (e.touches.length) {
+          net.targetMouseX = e.touches[0].clientX / net.W;
+          net.targetMouseY = e.touches[0].clientY / net.H;
+        }
+      }, { passive: true, capture: true });
+
+      // 点击注册节点 —— 绑在 window 上（覆盖整个页面），但排除按钮点击
+      window.addEventListener('click', function(e) {
+        if (e.target.closest('#net-add-btn')) return;
+        var star = findNearestStar(e.clientX, e.clientY);
+        if (star && registerNode(star)) {
+          if (net.nodes.length >= 2) {
+            triggerSync();
+            net.syncTimer = 800;
+          }
+        }
+      }, true);
+
+      netAddBtnEl.addEventListener('click', function(e) {
+        e.stopPropagation();
+        if (autoSelectNode()) {
+          if (net.nodes.length >= 2) {
+            triggerSync();
+            net.syncTimer = 800;
+          }
+        }
+      });
+
+      window.addEventListener('resize', resizeAll);
+    }
+
+    function loop(now) {
+      var dt = now - lastTime;
+      lastTime = now;
+      if (dt > 100 || dt < 0) dt = 16;
+
+      if (nebula) nebula.update(dt);
+
+      // 星星使用目标鼠标（未经网络阻尼），获得即时视差响应
+      if (stars) {
+        if (stars.update) stars.update(dt);
+        stars.time = net.time;
+        stars.mouseX = net.targetMouseX;
+        stars.mouseY = net.targetMouseY;
+      }
+
+      // 再更新网络状态（使用经平滑的鼠标，用于节点环/连线/粒子）
+      updateNetwork(dt);
+
+      bgCtx.fillStyle = '#03050a';
+      bgCtx.fillRect(0, 0, net.bgW, net.bgH);
+      if (nebula) nebula.render(bgCtx);
+      if (stars) stars.render(bgCtx);
+
+      renderNetwork();
+
+      requestAnimationFrame(loop);
+    }
+
+    var lastTime = 0;
+    function init() {
+      resizeAll();
+      bindEvents();
+
+      nebula = new Nebula(bgCanvas, {
+        baseParallax: 0.03, mouseInfluence: 1.0,
+        viewLon: 0.5, viewTilt: 0.6, viewScale: 0.7,
+        mistEnabled: true, mistAlpha: 0.08, mistParallax: 0.5,
+        seed: Date.now()
+      });
+
+      stars = new Starfield(bgCanvas, {
+        mouseInfluence: 1.0, maxStars: 220, seed: Date.now() + 1
+      });
+
+      net.syncTimer = 2000;
+      requestAnimationFrame(loop);
+      updateUI();
+      if (DEBUG) console.log('[Mebular] 初始化 · 星星:', stars.stars.length);
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init);
+    } else {
+      init();
+    }
+
+    window.__mebularNet = net;
+    window.__mebularDebug = function() {
+      console.log('[Mebular Debug] 节点:', net.nodes.length, ' 粒子:', net.particles.length, ' 闪光:', net.syncFlashes.length, ' burst:', net.bursts.length, ' 星星总数:', stars.stars.length);
+    };
+  })();
   </script>
 </body>
 </html>

@@ -1,0 +1,48 @@
+name: Deploy Mebular site to GitHub Pages
+
+on:
+  push:
+    branches: [site/v*]
+  workflow_dispatch:
+
+permissions:
+  pages: write
+  id-token: write
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      
+      # For Mebular site, files are already in the repo on site branch
+      # No npm build needed - vanilla HTML/CSS/JS
+      - name: Verify site files
+        run: |
+          ls -la
+          test -f index.html && echo "index.html found"
+          test -f nebula.js && echo "nebula.js found"
+          test -f stars.js && echo "stars.js found"
+          test -f style.css && echo "style.css found"
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

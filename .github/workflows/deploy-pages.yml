@@ -2,7 +2,7 @@ name: Deploy Mebular site to GitHub Pages
 
 on:
   push:
-    branches: [site/v*]
+    branches: [site-*]
   workflow_dispatch:
 
 permissions:
@@ -30,7 +30,6 @@ jobs:
           test -f index.html && echo "index.html found"
           test -f nebula.js && echo "nebula.js found"
           test -f stars.js && echo "stars.js found"
-          test -f style.css && echo "style.css found"
 
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

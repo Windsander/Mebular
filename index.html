@@ -750,9 +750,8 @@
     }
 
     function spawnBurstAt(starRef) {
-      var p = starScreenPos(starRef);
       net.bursts.push({
-        x: p.x, y: p.y,
+        starRef: starRef,
         radius: 0,
         maxRadius: 50 + Math.random() * 30,
         alpha: 1,
@@ -850,6 +849,7 @@
           p.tgt.lastSyncAt = performance.now();
           var pos = starScreenPos(p.tgt.starRef);
           net.syncFlashes.push({
+            starRef: p.tgt.starRef,
             x: pos.x, y: pos.y,
             radius: 0, maxRadius: 30 + Math.random() * 20,
             alpha: 1, born: net.time
@@ -919,12 +919,14 @@
         }
       }
 
-      // 数据流粒子
+      // 数据流粒子——每帧从节点当前星位置重算轨道，随视差一起走，不会飞出去
       for (var p = 0; p < net.particles.length; p++) {
         var pt = net.particles[p];
         var prog = pt.progress;
-        var cx = pt.sx + (pt.tx - pt.sx) * prog;
-        var cy = pt.sy + (pt.ty - pt.sy) * prog;
+        var srcPos = starScreenPos(pt.src.starRef);
+        var tgtPos = starScreenPos(pt.tgt.starRef);
+        var cx = srcPos.x + (tgtPos.x - srcPos.x) * prog;
+        var cy = srcPos.y + (tgtPos.y - srcPos.y) * prog;
         var radius = 2.5 + prog * 1.5;
         var glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, radius * 4);
         glow.addColorStop(0, 'rgba(' + COLORS.dataParticle[0] + ',' + COLORS.dataParticle[1] + ',' + COLORS.dataParticle[2] + ',0.8)');
@@ -936,26 +938,28 @@
         ctx.beginPath(); ctx.arc(cx, cy, radius * 0.7, 0, Math.PI * 2); ctx.fill();
       }
 
-      // 同步反馈闪光
+      // 同步反馈闪光——绑定到目标节点，每帧从节点当前星位置重算，随视差一起更新
       for (var f = 0; f < net.syncFlashes.length; f++) {
         var flash = net.syncFlashes[f];
-        var grd = ctx.createRadialGradient(flash.x, flash.y, 0, flash.x, flash.y, flash.radius);
+        var pos = starScreenPos(flash.starRef);
+        var grd = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, flash.radius);
         grd.addColorStop(0, 'rgba(' + COLORS.syncFlash[0] + ',' + COLORS.syncFlash[1] + ',' + COLORS.syncFlash[2] + ',' + (flash.alpha * 0.8) + ')');
         grd.addColorStop(0.5, 'rgba(' + COLORS.syncFlash[0] + ',' + COLORS.syncFlash[1] + ',' + COLORS.syncFlash[2] + ',' + (flash.alpha * 0.25) + ')');
         grd.addColorStop(1, 'rgba(' + COLORS.syncFlash[0] + ',' + COLORS.syncFlash[1] + ',' + COLORS.syncFlash[2] + ',0)');
         ctx.fillStyle = grd;
-        ctx.beginPath(); ctx.arc(flash.x, flash.y, flash.radius, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(pos.x, pos.y, flash.radius, 0, Math.PI * 2); ctx.fill();
       }
 
-      // burst（选星反馈光晕）
+      // burst（选星反馈光晕）——绑定到注册星，每帧从该星当前位置重算，随视差更新
       for (var b = 0; b < net.bursts.length; b++) {
         var burst = net.bursts[b];
-        var grd = ctx.createRadialGradient(burst.x, burst.y, 0, burst.x, burst.y, burst.radius);
+        var pos = starScreenPos(burst.starRef);
+        var grd = ctx.createRadialGradient(pos.x, pos.y, 0, pos.x, pos.y, burst.radius);
         grd.addColorStop(0, 'rgba(' + COLORS.burst[0] + ',' + COLORS.burst[1] + ',' + COLORS.burst[2] + ',' + (burst.alpha * 0.55) + ')');
         grd.addColorStop(0.4, 'rgba(' + COLORS.burst[0] + ',' + COLORS.burst[1] + ',' + COLORS.burst[2] + ',' + (burst.alpha * 0.18) + ')');
         grd.addColorStop(1, 'rgba(' + COLORS.burst[0] + ',' + COLORS.burst[1] + ',' + COLORS.burst[2] + ',0)');
         ctx.fillStyle = grd;
-        ctx.beginPath(); ctx.arc(burst.x, burst.y, burst.radius, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(pos.x, pos.y, burst.radius, 0, Math.PI * 2); ctx.fill();
       }
 
       // 节点圈圈紧贴星星核心——不是独立圈，看起来是星自带的节点标记。

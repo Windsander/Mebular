@@ -132,14 +132,15 @@
 
     /* 第三页：网络舞台 */
     #page-network {
-      justify-content:flex-end;
-      align-items:flex-end;
-      padding:40px 40px 60px;
+      justify-content:flex-start;
+      align-items:flex-start;
+      padding:60px 40px 60px;
+      overflow-y:auto;
     }
     #page-network .page-inner {
       width:100%;
       max-width:1100px;
-      text-align:right;
+      text-align:left;
     }
 
     /* ===== Hero ===== */
@@ -195,15 +196,27 @@
       letter-spacing:0.05em;
     }
     .hero .mission {
-      margin-top:24px;
-      padding:16px 24px;
-      border-left:2px solid rgba(80,180,255,0.3);
-      background:rgba(10,20,50,0.4);
-      border-radius:0 8px 8px 0;
+      margin:24px auto 0;
+      width:100%;
+      max-width:680px;
+      padding:34px 32px;
+      border:1px solid rgba(80,180,255,0.12);
+      background:rgba(8,12,28,0.55);
+      backdrop-filter:blur(8px);
+      -webkit-backdrop-filter:blur(8px);
+      border-radius:12px;
       font-size:0.86rem;
       color:#8ab0d0;
       line-height:1.7;
-      max-width:640px;
+      position:relative;
+      box-shadow:0 0 20px rgba(60,140,220,0.06), inset 0 0 30px rgba(60,140,220,0.03);
+    }
+    .hero .mission::before {
+      content:'';
+      position:absolute;
+      top:0; left:10%; right:10%;
+      height:1px;
+      background:linear-gradient(90deg, transparent, rgba(80,180,255,0.3), transparent);
     }
     .hero .mission strong { color:#aec8f0; font-weight:400; }
 
@@ -217,7 +230,7 @@
       border:1px solid rgba(80,160,255,0.12);
       border-radius:12px;
       padding:34px 32px;
-      margin:42px 0;
+      margin:42px auto;
       position:relative;
       overflow:hidden;
       box-shadow:0 4px 32px rgba(0,0,0,0.5),
@@ -371,6 +384,28 @@
       border-bottom:1px solid rgba(80,160,255,0.04);
     }
     .net-device-row:last-child { border-bottom:none; }
+    .net-device-remove-btn {
+      width:18px; height:18px;
+      border:1px solid rgba(120,80,160,0.25);
+      border-radius:50%;
+      background:rgba(30,20,50,0.3);
+      color:#9a7acc;
+      font-size:0.72rem;
+      line-height:1;
+      cursor:pointer;
+      flex-shrink:0;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      transition:background 0.15s, border-color 0.15s, color 0.15s;
+      font-family:inherit;
+      padding:0;
+    }
+    .net-device-remove-btn:hover {
+      background:rgba(120,60,180,0.25);
+      border-color:rgba(160,120,255,0.4);
+      color:#c8a0ff;
+    }
     .net-device-dot {
       width:6px; height:6px;
       border-radius:50%;
@@ -502,8 +537,8 @@
     <span class="brand">Mebular</span>
     <div class="links">
       <a href="#" data-page="page-hero">系统</a>
-      <a href="#" data-page="page-design">设计</a>
       <a href="#" data-page="page-network">网络</a>
+      <a href="#" data-page="page-design">设计</a>
       <a href="https://github.com/Windsander/Mebular" target="_blank" rel="noopener" class="github-link">GitHub</a>
     </div>
   </nav>
@@ -531,19 +566,42 @@
         <section class="card" id="overview">
           <h2>系统概览</h2>
           <p>
-            Mebular 是一个<strong>分布式记忆存储系统</strong>，旨在通过关联性图记忆组织跨域知识。<br>
-            每个设备（节点）存储相同的记忆集，系统确保它们保持同步。<br>
-            设计文档保留本地，不提交远端。
-          </p>
-          <p style="margin-top:14px; color:#5a7a9a; font-size:0.8rem;">
-            背景渲染基于 Canvas 2D 的正交投影星云模型（nebula.js）与 10 层指数视差星星系统（stars.js），<br>
-            零依赖、单文件、原生 JS。
+            Mebular 是一个<strong>分布式记忆存储系统</strong>，通过关联性图记忆组织跨域知识。<br>
+            每个设备（节点）存储相同的记忆集，系统在它们之间保持同步。<br>
+            记忆以图的形式组织：节点之间怎么关联，决定了知识的结构长什么样。<br>
+            目前还在早期设计阶段，设计文档保留本地。
           </p>
         </section>
       </div>
     </section>
 
-    <!-- ====== 第二页：设计理念 ====== -->
+    <!-- ====== 第二页：网络舞台 ====== -->
+    <section class="page" id="page-network" data-page-name="网络">
+      <div class="page-inner">
+        <div class="net-stage-panel">
+          <div class="net-panel-title">✦ 网络舞台 · 点击星空注册节点</div>
+          <div class="net-panel-stats">
+            <div class="net-panel-stat">
+              <div class="net-stat-value" id="stat-nodes">0</div>
+              <div class="net-stat-label">节点</div>
+            </div>
+            <div class="net-panel-stat">
+              <div class="net-stat-value" id="stat-links">0</div>
+              <div class="net-stat-label">链路</div>
+            </div>
+            <div class="net-panel-stat">
+              <div class="net-stat-value" id="stat-memory">—</div>
+              <div class="net-stat-label" id="stat-memory-label">等待节点</div>
+            </div>
+          </div>
+          <div class="net-panel-divider"></div>
+          <div class="net-panel-devices" id="net-devices-list"></div>
+          <button class="net-add-btn" id="net-add-btn">✦ 添加节点</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- ====== 第三页：设计理念 ====== -->
     <section class="page" id="page-design" data-page-name="设计">
       <div class="page-inner">
         <section class="card">
@@ -587,32 +645,6 @@
             </div>
           </div>
         </section>
-      </div>
-    </section>
-
-    <!-- ====== 第三页：网络舞台 ====== -->
-    <section class="page" id="page-network" data-page-name="网络">
-      <div class="page-inner">
-        <div class="net-stage-panel">
-          <div class="net-panel-title">✦ 网络舞台 · 点击星空注册节点</div>
-          <div class="net-panel-stats">
-            <div class="net-panel-stat">
-              <div class="net-stat-value" id="stat-nodes">0</div>
-              <div class="net-stat-label">节点</div>
-            </div>
-            <div class="net-panel-stat">
-              <div class="net-stat-value" id="stat-links">0</div>
-              <div class="net-stat-label">链路</div>
-            </div>
-            <div class="net-panel-stat">
-              <div class="net-stat-value" id="stat-memory">—</div>
-              <div class="net-stat-label" id="stat-memory-label">等待节点</div>
-            </div>
-          </div>
-          <div class="net-panel-divider"></div>
-          <div class="net-panel-devices" id="net-devices-list"></div>
-          <button class="net-add-btn" id="net-add-btn">✦ 添加节点</button>
-        </div>
       </div>
     </section>
 
@@ -1013,13 +1045,32 @@
           '<div class="' + dotClass + '"></div>' +
           '<div class="net-device-name">' + node.name + '</div>' +
           '<div class="net-device-status ' + statusClass + '">' + statusText + '</div>' +
+          '<button class="net-device-remove-btn" aria-label="移除 ' + node.name + '" title="移除">−</button>' +
           '</div>';
       }
       netDevicesListEl.innerHTML = html;
 
       var memText = (syncedCount === n && n > 0) ? '全部同步' : (n > 0 ? syncedCount + '/' + n : '—');
       statMemoryEl.textContent = memText;
-      statMemoryLabelEl.textContent = (syncedCount === n && n > 0) ? '✓ 一致' : (n > 0 ? '同步中...' : '等待节点');
+      statMemoryLabelEl.textContent = (syncedCount === n && n > 0) ? '✓ 一致' : (n > 0 ? '同步中...' : '未连接');
+    }
+
+    // ======================= 节点删除 =======================
+
+    function removeNode(node) {
+      if (!node) return;
+      for (var i = 0; i < net.nodes.length; i++) {
+        if (net.nodes[i] === node) {
+          net.nodes.splice(i, 1);
+          break;
+        }
+      }
+      // 删掉该节点相关的未完成粒子、闪光、 burst
+      net.particles = net.particles.filter(function(p){ return p.src !== node && p.tgt !== node; });
+      net.syncFlashes = net.syncFlashes.filter(function(){ return true; }); // kept for now
+      // 清除所有同步闪光，避免已删节点的闪光继续显示
+      net.syncFlashes.length = 0;
+      updateUI();
     }
 
     // ======================= 分页切换逻辑 =======================
@@ -1031,9 +1082,14 @@
 
     var pageEls = [
       document.getElementById('page-hero'),
-      document.getElementById('page-design'),
-      document.getElementById('page-network')
+      document.getElementById('page-network'),
+      document.getElementById('page-design')
     ];
+
+    // 每页指针（供点击/导航使用）
+    var pageHeroEl     = document.getElementById('page-hero');
+    var pageNetworkEl  = document.getElementById('page-network');
+    var pageDesignEl   = document.getElementById('page-design');
     pages = pageEls.filter(function(el){ return el; });
 
     // 初始化
@@ -1048,34 +1104,49 @@
     /** 切换到目标页面 */
     function switchToPage(targetIndex, userInitiated) {
       if (isAnimating) return;
+      if (!pages || pages.length === 0) return;
       if (targetIndex < 0 || targetIndex >= pages.length) return;
       if (targetIndex === currentPageIndex) return;
 
-      isAnimating = true;
-
       var currentEl = pages[currentPageIndex];
       var targetEl = pages[targetIndex];
+
+      // 任意一侧元素丢失，就把动画锁打开并退出，免得卡死翻页
+      if (!currentEl || !targetEl) {
+        isAnimating = false;
+        return;
+      }
+
+      isAnimating = true;
 
       // 旧页去掉 active（CSS transition 负责 fade-out + scale 放大）
       currentEl.classList.remove('active');
 
       // 确保浏览器先记录下旧页的离场起点，再触发新页入场
       requestAnimationFrame(function() {
-        targetEl.classList.add('active');
+        try {
+          targetEl.classList.add('active');
+        } catch (e) {
+          // 出错时順便解鎖，避免翻頁終生卡死
+          isAnimating = false;
+        }
       });
 
       // 滚动指示器：在最后一页隐藏
-      if (targetIndex === pages.length - 1) {
-        scrollIndicator.classList.add('hide');
-      } else {
-        scrollIndicator.classList.remove('hide');
-      }
+      try {
+        if (targetIndex === pages.length - 1) {
+          scrollIndicator.classList.add('hide');
+        } else {
+          scrollIndicator.classList.remove('hide');
+        }
+      } catch (e) {}
 
       currentPageIndex = targetIndex;
 
+      // 超时兜底：避免個别意外讓 isAnimating 長期鎖死
       setTimeout(function() {
         isAnimating = false;
-      }, PAGE_TRANSITION_MS);
+      }, Math.max(PAGE_TRANSITION_MS, 600));
     }
 
     /** 向前翻页（下一页） */
@@ -1138,13 +1209,22 @@
         }
       }, { passive: false });
 
-      // 点击注册节点（排除按钮点击）
+      // 点击星空：点未注册的星则注册节点；点已注册的星则删除该节点
       window.addEventListener('click', function(e) {
         if (e.target.closest('#net-add-btn')) return;
-        // 防止在非网络页误触发
-        if (currentPageIndex !== 2) return;
+        if (e.target.closest('.net-device-remove-btn')) return;
+        // 只在网络舞台页响应星空点击
+        if (currentPageIndex !== 1) return;
         var star = findNearestStar(e.clientX, e.clientY);
-        if (star && registerNode(star)) {
+        if (!star) return;
+        // 若该星已被注册，则删除
+        for (var i = 0; i < net.nodes.length; i++) {
+          if (net.nodes[i].starRef === star) {
+            removeNode(net.nodes[i]);
+            return;
+          }
+        }
+        if (registerNode(star)) {
           if (net.nodes.length >= 2) {
             triggerSync();
             net.syncTimer = 800;
@@ -1152,16 +1232,27 @@
         }
       }, true);
 
-      // 「添加节点」按钮
+      // 「添加节点」按钮：随机选一颗未注册的星注册
       netAddBtnEl.addEventListener('click', function(e) {
         e.stopPropagation();
-        if (currentPageIndex !== 2) return;
+        if (currentPageIndex !== 1) return;
         if (autoSelectNode()) {
           if (net.nodes.length >= 2) {
             triggerSync();
             net.syncTimer = 800;
           }
         }
+      });
+
+      // 设备列表的删除按钮（事件委托）
+      netDevicesListEl.addEventListener('click', function(e) {
+        var removeBtn = e.target.closest('.net-device-remove-btn');
+        if (!removeBtn) return;
+        var row = removeBtn.closest('.net-device-row');
+        if (!row) return;
+        var idx = Array.prototype.indexOf.call(row.parentNode.children, row);
+        if (idx === -1 || idx >= net.nodes.length) return;
+        removeNode(net.nodes[idx]);
       });
 
       // 导航链接

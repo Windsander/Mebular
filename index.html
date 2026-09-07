@@ -969,11 +969,12 @@
         ctx.fillStyle = grd;
         ctx.beginPath(); ctx.arc(x, y, glowR, 0, Math.PI * 2); ctx.fill();
 
-        // 内核光晕（白色实心小圆 → 紧致 glow，不再像一颗独立的星）
-        var coreGlowR = 3.5;
+        // 内核光晕——不画接近白色的星状亮点，而是节点色调的紧致高光
+        // 这样标记看起来是选中标识，而不是又多了一颗星
+        var coreGlowR = 3.0;
         var coreGrd = ctx.createRadialGradient(x, y, 0, x, y, coreGlowR);
-        coreGrd.addColorStop(0, 'rgba(220,235,255,0.95)');
-        coreGrd.addColorStop(0.5, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0.35)');
+        coreGrd.addColorStop(0, 'rgba(196,222,255,0.55)');
+        coreGrd.addColorStop(0.5, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0.25)');
         coreGrd.addColorStop(1, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0)');
         ctx.fillStyle = coreGrd;
         ctx.beginPath(); ctx.arc(x, y, coreGlowR, 0, Math.PI * 2); ctx.fill();

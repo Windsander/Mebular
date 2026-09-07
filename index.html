@@ -716,7 +716,9 @@
     }
 
     function starScreenPos(s) {
-      var mx = net.mouseX - 0.5, my = net.mouseY - 0.5;
+      // 背景星场（stars.js）画星时用的是 targetMouseX（无衰减、直接响应），
+      // 节点标记也用同一个 targetMouseX，避免星与标记之间出现响应延迟感。
+      var mx = net.targetMouseX - 0.5, my = net.targetMouseY - 0.5;
       var px = s.x * net.bgW + mx * net.bgW * s.parallaxFactor * 1.0;
       var py = s.y * net.bgH + my * net.bgH * s.parallaxFactor * 1.0;
       var drift = Math.sin(net.time * s.driftSpeed + s.driftPhase) * s.driftAmp * 0.5 * s.depth;
@@ -956,34 +958,19 @@
         ctx.beginPath(); ctx.arc(burst.x, burst.y, burst.radius, 0, Math.PI * 2); ctx.fill();
       }
 
-      // 节点环（已选星星高亮）
+      // 节点圈圈紧贴星星核心——不是独立圈，看起来是星自带的节点标记。
+      // 继承星自带光晕内部的小环，不额外叠光晕（避免制造“又多一个亮点”的感觉）。
       for (var n = 0; n < nodes.length; n++) {
         var node = nodes[n];
         var pos = starScreenPos(node.starRef);
         var x = pos.x, y = pos.y;
-        var glowR = 22;
-        var grd = ctx.createRadialGradient(x, y, 0, x, y, glowR);
-        grd.addColorStop(0, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0.25)');
-        grd.addColorStop(0.5, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0.08)');
-        grd.addColorStop(1, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0)');
-        ctx.fillStyle = grd;
-        ctx.beginPath(); ctx.arc(x, y, glowR, 0, Math.PI * 2); ctx.fill();
 
-        // 内核光晕——不画接近白色的星状亮点，而是节点色调的紧致高光
-        // 这样标记看起来是选中标识，而不是又多了一颗星
-        var coreGlowR = 3.0;
-        var coreGrd = ctx.createRadialGradient(x, y, 0, x, y, coreGlowR);
-        coreGrd.addColorStop(0, 'rgba(196,222,255,0.55)');
-        coreGrd.addColorStop(0.5, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0.25)');
-        coreGrd.addColorStop(1, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0)');
-        ctx.fillStyle = coreGrd;
-        ctx.beginPath(); ctx.arc(x, y, coreGlowR, 0, Math.PI * 2); ctx.fill();
-
+        // 闭合色环（星星自带标记氛围）
         var ringPulse = Math.sin(net.time * 0.003 + n * 1.2) * 0.25 + 0.75;
-        var ringR = 10 + ringPulse * 3;
+        var ringR = 2.5 + ringPulse * 1.0;     // 紧贴星核心，明显小于星半径
         ctx.beginPath(); ctx.arc(x, y, ringR, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(' + COLORS.nodeRing[0] + ',' + COLORS.nodeRing[1] + ',' + COLORS.nodeRing[2] + ',' + (0.3 * ringPulse) + ')';
-        ctx.lineWidth = 1;
+        ctx.strokeStyle = 'rgba(' + COLORS.nodeRing[0] + ',' + COLORS.nodeRing[1] + ',' + COLORS.nodeRing[2] + ',' + (0.75 * ringPulse) + ')';
+        ctx.lineWidth = 1.2;
         ctx.stroke();
       }
 

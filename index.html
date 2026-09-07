@@ -969,12 +969,14 @@
         ctx.fillStyle = grd;
         ctx.beginPath(); ctx.arc(x, y, glowR, 0, Math.PI * 2); ctx.fill();
 
-        var coreGrd = ctx.createRadialGradient(x, y, 0, x, y, 6);
-        coreGrd.addColorStop(0, 'rgba(220,235,255,0.9)');
-        coreGrd.addColorStop(0.4, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0.5)');
+        // 内核光晕（白色实心小圆 → 紧致 glow，不再像一颗独立的星）
+        var coreGlowR = 3.5;
+        var coreGrd = ctx.createRadialGradient(x, y, 0, x, y, coreGlowR);
+        coreGrd.addColorStop(0, 'rgba(220,235,255,0.95)');
+        coreGrd.addColorStop(0.5, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0.35)');
         coreGrd.addColorStop(1, 'rgba(' + COLORS.nodeGlow[0] + ',' + COLORS.nodeGlow[1] + ',' + COLORS.nodeGlow[2] + ',0)');
         ctx.fillStyle = coreGrd;
-        ctx.beginPath(); ctx.arc(x, y, 6, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(x, y, coreGlowR, 0, Math.PI * 2); ctx.fill();
 
         var ringPulse = Math.sin(net.time * 0.003 + n * 1.2) * 0.25 + 0.75;
         var ringR = 10 + ringPulse * 3;
@@ -1067,8 +1069,6 @@
       }
       // 删掉该节点相关的未完成粒子、闪光、 burst
       net.particles = net.particles.filter(function(p){ return p.src !== node && p.tgt !== node; });
-      net.syncFlashes = net.syncFlashes.filter(function(){ return true; }); // kept for now
-      // 清除所有同步闪光，避免已删节点的闪光继续显示
       net.syncFlashes.length = 0;
       updateUI();
     }
@@ -1215,16 +1215,26 @@
         if (e.target.closest('.net-device-remove-btn')) return;
         // 只在网络舞台页响应星空点击
         if (currentPageIndex !== 1) return;
-        var star = findNearestStar(e.clientX, e.clientY);
-        if (!star) return;
-        // 若该星已被注册，则删除
+        // 找到鼠标位置最近的星（不管是否已注册），
+        // 已注册就删掉、未注册就用它注册一个新节点
+        var nearest = null, nearestD = Infinity;
+        for (var i = 0; i < stars.stars.length; i++) {
+          var s = stars.stars[i];
+          var p = starScreenPos(s);
+          var d = dist(e.clientX, e.clientY, p.x, p.y);
+          if (d < nearestD) { nearestD = d; nearest = s; }
+        }
+        if (!nearest || nearestD > 90) return;
+
+        // 若该星已被注册 → 删掉
         for (var i = 0; i < net.nodes.length; i++) {
-          if (net.nodes[i].starRef === star) {
+          if (net.nodes[i].starRef === nearest) {
             removeNode(net.nodes[i]);
             return;
           }
         }
-        if (registerNode(star)) {
+        // 否则注册一个新节点
+        if (registerNode(nearest)) {
           if (net.nodes.length >= 2) {
             triggerSync();
             net.syncTimer = 800;

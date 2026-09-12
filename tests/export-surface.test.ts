@@ -26,6 +26,7 @@ describe('公共导出表面', () => {
       'HermesMemoryProvider',
       'MebularError',
       'ErrorCodes',
+      'StorageCipher',
     ];
     for (const key of core) {
       expect(surface[key]).toBeDefined();

@@ -40,6 +40,7 @@ import {
   encryptPrivateKeyPkcs8,
   type EncryptedKeyMaterial,
 } from './crypto/KeyProtector.js';
+import { StorageCipher } from './crypto/StorageCipher.js';
 
 /**
  * 口令提供者接缝（操作系统 keychain / 用户交互等）：
@@ -56,11 +57,22 @@ export interface MebularConfig {
   deviceId: string;
   deviceName?: string;
   encryption?: {
+    /**
+     * 静态加密作用域（G1）：
+     * - `none` / 缺省：明文落盘（向后兼容）；
+     * - `user`：以用户主私钥经 HKDF 派生对称密钥，落盘密文（Level 3）。
+     * `device` / `fine-grained` 暂未实现，配置即诚实报错。
+     */
     level?: 'none' | 'device' | 'user' | 'fine-grained';
     /** 用户主公钥：验证对端证书与设备证书所需 */
     userMasterKey?: Uint8Array;
     /** 用户主私钥：为本机签发设备证书所需（首次初始化；仅主设备持有） */
     userMasterPrivateKey?: CryptoKey;
+    /**
+     * 显式静态加密密钥（32 字节，keychain / 身份文件分发接缝）。
+     * 配置后即启用静态加密，优先于 `level: 'user'` 的派生路径。
+     */
+    storageKey?: Uint8Array;
     /**
      * 身份文件解锁口令（Phase 5.1）：配置后设备私钥以 PBKDF2+AES-GCM
      * 加密存放；已有的明文身份文件在首次带口令初始化时自动迁移。
@@ -142,9 +154,12 @@ export class Mebular {
     }
 
     try {
-      // 1. 存储
+      // 1. 存储（先解析静态加密密钥：缺失/错误在此如实报错，不包装成 INIT_FAILED）
+      const storageCipher = await this.createStorageCipher();
       try {
-        this.storageImpl = await JsonFileStorage.open(this.config.storagePath);
+        this.storageImpl = await JsonFileStorage.open(this.config.storagePath, {
+          cipher: storageCipher,
+        });
       } catch (error) {
         throw new StorageError(
           `存储打开失败：${this.config.storagePath}`,
@@ -295,6 +310,39 @@ export class Mebular {
   /** 网络未启用时为 null */
   get node(): P2PNode | null {
     return this.nodeImpl;
+  }
+
+  // ---------- 静态加密（G1） ----------
+
+  /**
+   * 解析静态加密器：
+   * - 显式 `storageKey` 优先（keychain / 身份文件分发接缝）；
+   * - `level: 'user'` 由用户主私钥经 HKDF 派生；
+   * - `none` / 缺省为明文（向后兼容）；
+   * - `device` / `fine-grained` 暂未实现，诚实报错。
+   */
+  private async createStorageCipher(): Promise<StorageCipher | null> {
+    const encryption = this.config.encryption;
+    if (encryption?.storageKey) {
+      return StorageCipher.fromRawKey(encryption.storageKey);
+    }
+    const level = encryption?.level ?? 'none';
+    if (level === 'none') {
+      return null;
+    }
+    if (level !== 'user') {
+      throw new StorageError(
+        `暂不支持的静态加密作用域：${level}（当前支持 none / user）`,
+        ErrorCodes.STORAGE_INIT_FAILED,
+      );
+    }
+    if (!encryption?.userMasterPrivateKey) {
+      throw new StorageError(
+        '已启用 user 作用域静态加密，但缺少派生密钥的用户主私钥（config.encryption.userMasterPrivateKey 或 storageKey）',
+        ErrorCodes.STORAGE_KEY_MISSING,
+      );
+    }
+    return StorageCipher.fromUserMasterPrivateKey(encryption.userMasterPrivateKey);
   }
 
   // ---------- 身份文件 ----------

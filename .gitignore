@@ -53,3 +53,6 @@ docs.design/
 
 # 示例執行時產物（本地留存）
 examples/quickstart/.data/
+
+# 廣域網同步證據（本地留存）
+.wan-evidence/

@@ -16,6 +16,7 @@ import {
   encodeFrame,
   fromLibp2pPeerId,
   loadLibp2pModules,
+  loadRelayModules,
   peerIdFromDevicePublicKey,
   toLibp2pPeerId,
   type ModuleImporter,
@@ -46,6 +47,29 @@ function libp2pPackagesInstalled(): boolean {
 }
 const LIBP2P_INSTALLED = libp2pPackagesInstalled();
 const itIfAvailable = LIBP2P_INSTALLED ? it : it.skip;
+
+// relay 可选依赖（G3）：缺失时 relay 集成用例 skip，降级路径用例仍跑
+function relayPackagesInstalled(): boolean {
+  const specs = ['@libp2p/circuit-relay-v2', '@libp2p/identify'];
+  const root = join(process.cwd(), 'node_modules');
+  return specs.every((spec) => existsSync(join(root, spec)));
+}
+const itIfRelay = LIBP2P_INSTALLED && relayPackagesInstalled() ? it : it.skip;
+
+async function makeDeviceKey(): Promise<{ publicKey: Uint8Array; privateKey: CryptoKey }> {
+  const keyPair = (await crypto.subtle.generateKey(
+    { name: 'Ed25519' },
+    true,
+    ['sign', 'verify'],
+  )) as CryptoKeyPair;
+  return {
+    publicKey: new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey)),
+    privateKey: keyPair.privateKey,
+  };
+}
+
+/** 绕开转译器 import 改写的真实动态导入（与 Libp2pProvider 内部一致） */
+const realDynamicImport = new Function('specifier', 'return import(specifier);') as ModuleImporter;
 
 // ---------- 帧编解码（纯函数） ----------
 
@@ -131,6 +155,104 @@ describe('可选依赖加载', () => {
     expect(typeof modules.createLibp2p).toBe('function');
     expect(typeof modules.generateKeyPairFromSeed).toBe('function');
   }, 30000);
+});
+
+// ---------- circuit relay（G3） ----------
+
+describe('circuit relay', () => {
+  it('relay 模块缺失时抛 NETWORK_RELAY_NOT_AVAILABLE（降级手动 multiaddr 的依据）', async () => {
+    const failing: ModuleImporter = (specifier) =>
+      Promise.reject(new Error(`Cannot find module ${specifier}`));
+    const failure = loadRelayModules(failing).then(
+      () => null,
+      (error: unknown) => error,
+    );
+    const error = (await failure) as MebularError;
+    expect(error).toBeInstanceOf(MebularError);
+    expect(error.code).toBe('NETWORK_RELAY_NOT_AVAILABLE');
+    expect(error.message).toContain('@libp2p/circuit-relay-v2');
+  });
+
+  itIfAvailable(
+    '核心包在、relay 包缺：create(relayServer) 诚实报 NETWORK_RELAY_NOT_AVAILABLE',
+    async () => {
+      const selective: ModuleImporter = (specifier) => {
+        if (specifier.startsWith('@libp2p/circuit-relay-v2') || specifier.startsWith('@libp2p/identify')) {
+          return Promise.reject(new Error('Cannot find module'));
+        }
+        return realDynamicImport(specifier);
+      };
+      await expect(
+        Libp2pProvider.create(
+          { deviceKey: await makeDeviceKey(), listen: ['/ip4/127.0.0.1/tcp/0'], relayServer: true },
+          selective,
+        ),
+      ).rejects.toMatchObject({ code: 'NETWORK_RELAY_NOT_AVAILABLE' });
+    },
+    30000,
+  );
+
+  itIfRelay(
+    'relay 回环：两客户端预约 circuit 地址并经 relay 互发带帧报文',
+    async () => {
+      const relay = await Libp2pProvider.create({
+        deviceKey: await makeDeviceKey(),
+        listen: ['/ip4/127.0.0.1/tcp/0'],
+        relayServer: true,
+      });
+      await relay.start();
+      let a: Libp2pProvider | null = null;
+      let b: Libp2pProvider | null = null;
+      try {
+        const relayAddr = relay.getMultiaddrs().find((addr) => addr.includes('/tcp/'));
+        expect(relayAddr).toBeTruthy();
+        a = await Libp2pProvider.create({
+          deviceKey: await makeDeviceKey(),
+          listen: ['/ip4/127.0.0.1/tcp/0'],
+          relayServers: [relayAddr!],
+        });
+        b = await Libp2pProvider.create({
+          deviceKey: await makeDeviceKey(),
+          listen: ['/ip4/127.0.0.1/tcp/0'],
+          relayServers: [relayAddr!],
+        });
+        await a.start();
+        await b.start();
+
+        // 等待 circuit 预约地址出现
+        let circuit: string | null = null;
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline) {
+          circuit = a.getMultiaddrs().find((addr) => addr.includes('p2p-circuit')) ?? null;
+          if (circuit) break;
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        expect(circuit).toBeTruthy();
+
+        const echoed = new Promise<Uint8Array>((resolve) => {
+          a!.onIncomingConnection((conn) => {
+            void (async () => {
+              for await (const message of conn.receive()) {
+                await conn.send(message);
+                resolve(message);
+              }
+            })();
+          });
+        });
+        const conn = await b.dial(a.getLocalPeerId(), circuit!);
+        await conn.send(new TextEncoder().encode('relay-echo'));
+        const reply = await conn.receive()[Symbol.asyncIterator]().next();
+        expect(new TextDecoder().decode(reply.value)).toBe('relay-echo');
+        await conn.close();
+        await echoed;
+      } finally {
+        if (a) await a.stop();
+        if (b) await b.stop();
+        await relay.stop();
+      }
+    },
+    30000,
+  );
 });
 
 // ---------- 身份映射 ----------

@@ -62,6 +62,7 @@ export {
   Libp2pConnection,
   createLibp2pProvider,
   loadLibp2pModules,
+  loadRelayModules,
   encodeFrame,
   FrameDecoder,
   peerIdFromDevicePublicKey,

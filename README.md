@@ -14,7 +14,7 @@ Mebular 把记忆存成一张带签名事件的知识图谱，每条事实都记
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-313%20passed-brightgreen)](#项目状态)
+[![Tests](https://img.shields.io/badge/Tests-314%20passed-brightgreen)](#项目状态)
 [![Coverage](https://img.shields.io/badge/Coverage-90.5%25-brightgreen)](#项目状态)
 
 [官网](https://mebular.cyberfederal.io) · [快速上手](#30-秒上手) · [系统架构](#系统架构) · [项目状态](#项目状态) · [贡献](#贡献)
@@ -47,7 +47,7 @@ git clone https://github.com/Windsander/Mebular.git
 cd Mebular
 npm install
 npm run build          # TypeScript strict → dist/
-npm test               # 42 套件 / 313 用例全绿
+npm test               # 42 套件 / 314 用例全绿
 ```
 
 ### 最简例子（复制即跑）
@@ -144,7 +144,7 @@ Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API
 
 | 项目 | 情况 |
 |------|------|
-| 测试 | 42 个套件、313 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
+| 测试 | 42 个套件、314 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
 | 覆盖率 | 行 90.5%、分支 77.6%，全库门槛 85/65，关键文件另有底线 |
 | 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |

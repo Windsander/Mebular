@@ -139,6 +139,12 @@ export const ErrorCodes = {
   /** 对端 PeerId 无法反解出 Ed25519 公钥 */
   NETWORK_PEER_IDENTITY_UNSUPPORTED: 'NETWORK_PEER_IDENTITY_UNSUPPORTED',
 
+  // 语义检索错误（G2）
+  /** 可选 embedding 套件缺失（默认降级关键词；required 模式下抛此码） */
+  SEMANTIC_EMBEDDING_NOT_AVAILABLE: 'SEMANTIC_EMBEDDING_NOT_AVAILABLE',
+  /** embedding 运行期失败（模型加载/推理异常） */
+  SEMANTIC_EMBEDDING_FAILED: 'SEMANTIC_EMBEDDING_FAILED',
+
   // 交换格式 / 适配器错误（Phase 5）
   CMF_FORMAT_INVALID: 'CMF_FORMAT_INVALID',
   CMF_VERSION_UNSUPPORTED: 'CMF_VERSION_UNSUPPORTED',

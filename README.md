@@ -14,7 +14,7 @@ Mebular 把记忆存成一张带签名事件的知识图谱，每条事实都记
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-314%20passed-brightgreen)](#项目状态)
+[![Tests](https://img.shields.io/badge/Tests-333%20passed-brightgreen)](#项目状态)
 [![Coverage](https://img.shields.io/badge/Coverage-90.5%25-brightgreen)](#项目状态)
 
 [官网](https://mebular.cyberfederal.io) · [快速上手](#30-秒上手) · [系统架构](#系统架构) · [项目状态](#项目状态) · [贡献](#贡献)
@@ -34,7 +34,7 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 | 同步依赖中心服务 | 必须在线，还要信任中间商 | 向量时钟做增量同步，冲突按「删除优先 > 时间窗 > LWW」裁决，离线可用 |
 | 生态各自为政 | Hermes、mem0、Zep、Graphiti 之间不互通 | CMF v1 交换格式加适配器，Obsidian、日志型端、json-memo 都能接 |
 
-除这四点之外，还带了 X25519 + AES-256-GCM 的加密信道、可用用户主密钥静态加密落盘（HKDF 派生 + AES-256-GCM，落盘密文、内存明文）、Hermes 的七方法 Provider 和幂等导入、可选的 libp2p 真实网络，以及一套带覆盖率门槛的测试。
+除这四点之外，还带了 X25519 + AES-256-GCM 的加密信道、可用用户主密钥静态加密落盘（HKDF 派生 + AES-256-GCM，落盘密文、内存明文）、可选本地 embedding 语义召回（缺包自动降级关键词并告警）、Hermes 的七方法 Provider 和幂等导入、可选的 libp2p 真实网络，以及一套带覆盖率门槛的测试。
 
 ---
 
@@ -47,7 +47,7 @@ git clone https://github.com/Windsander/Mebular.git
 cd Mebular
 npm install
 npm run build          # TypeScript strict → dist/
-npm test               # 42 套件 / 314 用例全绿
+npm test               # 44 套件 / 333 用例全绿
 ```
 
 ### 最简例子（复制即跑）
@@ -138,14 +138,14 @@ Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API
 | Hermes 集成（门面 / Provider / 导入器） | 完成 |
 | 跨端互通（证书链 / CMF / 适配器 / 故障注入） | 完成 |
 | 质量收口、生态适配、广域网桥接 | 完成 |
-| 信任模型 v2（证书吊销）、本地 embedding 召回、跨 NAT 实测回填 | 规划中 |
+| 信任模型 v2（证书吊销）、跨 NAT 实测回填 | 规划中 |
 
 测试和质量方面：
 
 | 项目 | 情况 |
 |------|------|
-| 测试 | 42 个套件、314 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
-| 覆盖率 | 行 90.5%、分支 77.6%，全库门槛 85/65，关键文件另有底线 |
+| 测试 | 44 个套件、333 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
+| 覆盖率 | 行 90.4%、分支 77.1%，全库门槛 85/65，关键文件另有底线 |
 | 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |
 | 质量门禁 | 每个阶段跑 verify 脚本加构建产物冒烟，`src` 里不留裸的 `throw new Error` |

@@ -34,6 +34,7 @@
     "lint": "eslint src tests scripts --ext .ts,.mjs",
     "verify": "node scripts/verify.mjs",
     "verify:at-rest": "node scripts/scan-at-rest.mjs",
+    "verify:semantic": "node scripts/verify-semantic.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "dependencies": {
@@ -48,6 +49,14 @@
     "@libp2p/tcp": "^11.0.27",
     "@multiformats/multiaddr": "^13.0.3",
     "libp2p": "^3.3.9"
+  },
+  "peerDependencies": {
+    "@huggingface/transformers": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@huggingface/transformers": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/jest": "^29.5.12",

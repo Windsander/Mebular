@@ -8,6 +8,7 @@ import type { GraphStore } from '../core/GraphStore.js';
 import type { Node, NodeFilter } from '../types/index.js';
 import { ValidationError } from '../errors.js';
 import type { VectorIndex } from './VectorIndex.js';
+import { nodeMatchesKeyword } from './text.js';
 import {
   ENTITY_TYPES,
   EPISODE_TYPES,
@@ -273,6 +274,30 @@ export class MemoryStore {
     return results;
   }
 
+  /**
+   * 用当前图中全部（未删除）节点重建向量索引，返回重建数量。
+   * 向量索引是进程内状态：重开存储后需调用一次以恢复对既有记忆的语义召回。
+   */
+  async reindexVectorIndex(): Promise<number> {
+    if (!this.vectorIndex) {
+      return 0;
+    }
+    const types: Array<Node['type']> = ['entity', 'fact', 'episode', 'skill', 'meta'];
+    const seen = new Set<string>();
+    let count = 0;
+    for (const type of types) {
+      for (const node of await this.listByType(type)) {
+        if (seen.has(node.id)) {
+          continue;
+        }
+        seen.add(node.id);
+        await this.vectorIndex.index(node);
+        count++;
+      }
+    }
+    return count;
+  }
+
   // ---------- 内部 ----------
 
   private async getTyped<T extends Node>(id: string, type: Node['type']): Promise<T | null> {
@@ -295,24 +320,6 @@ export class MemoryStore {
     }
     return node as T;
   }
-}
-
-/** 关键词匹配：节点的可读文本字段 + 标签 */
-function nodeMatchesKeyword(node: Node, needle: string): boolean {
-  const fields: string[] = [];
-  const content = node.content;
-  if (typeof content === 'string') {
-    fields.push(content);
-  } else if (content && typeof content === 'object') {
-    for (const key of ['name', 'description', 'subject', 'predicate', 'object', 'content', 'title', 'category']) {
-      const value = (content as Record<string, unknown>)[key];
-      if (typeof value === 'string') {
-        fields.push(value);
-      }
-    }
-  }
-  fields.push(...(node.tags ?? []));
-  return fields.some((field) => field.toLowerCase().includes(needle));
 }
 
 function requireNonEmpty(value: string, field: string): void {

@@ -54,7 +54,11 @@ export class HermesMemoryProvider {
 
   constructor(mebular: Mebular, options: HermesMemoryProviderOptions = {}) {
     this.mebular = mebular;
-    this.memory = new MemoryStore(mebular.graph, options.vectorIndex);
+    // 未显式注入时回落到门面配置的语义向量索引（G2）；门面未启用则为 null
+    this.memory = new MemoryStore(
+      mebular.graph,
+      options.vectorIndex ?? mebular.semanticVectorIndex ?? undefined,
+    );
     this.userId = options.userId ?? 'user';
     this.extractor = options.extractor ?? null;
   }

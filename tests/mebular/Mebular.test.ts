@@ -5,6 +5,7 @@
 // 以及 network.enabled 时双门面实例经 InMemoryHub 的自动同步。
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { existsSync } from 'fs';
 import { mkdtemp, rm, readFile, stat } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
@@ -14,6 +15,24 @@ import { IdentityError, MebularError, ErrorCodes } from '../../src/errors.js';
 import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
 import { bytesToHex } from '../../src/p2p/handshake/AuthenticationHandshake.js';
 import type { SyncResult } from '../../src/sync/syncmgr/SyncManager.js';
+
+// 可选依赖探测：libp2p 系缺失时（npm 未安装可选依赖）真实装配用例记为 skip，
+// 与 tests/p2p/Libp2pProvider.test.ts 同一策略，避免 CI 可选依赖缺失时误报失败。
+function libp2pPackagesInstalled(): boolean {
+  const specs = [
+    'libp2p',
+    '@libp2p/tcp',
+    '@chainsafe/libp2p-noise',
+    '@chainsafe/libp2p-yamux',
+    '@libp2p/crypto',
+    '@libp2p/peer-id',
+    '@multiformats/multiaddr',
+  ];
+  const root = join(process.cwd(), 'node_modules');
+  return specs.every((spec) => existsSync(join(root, spec)));
+}
+
+const itIfLibp2p = libp2pPackagesInstalled() ? it : it.skip;
 
 describe('Mebular 门面', () => {
   let dir: string;
@@ -179,7 +198,7 @@ describe('Mebular 门面', () => {
     await b.shutdown();
   });
 
-  it('配置 libp2p 时真实装配真实网络栈（Phase 5 起；缺包才抛 NETWORK_LIBP2P_NOT_AVAILABLE）', async () => {
+  itIfLibp2p('配置 libp2p 时真实装配真实网络栈（Phase 5 起；缺包才抛 NETWORK_LIBP2P_NOT_AVAILABLE）', async () => {
     const m = new Mebular({
       storagePath,
       deviceId: 'device-A',

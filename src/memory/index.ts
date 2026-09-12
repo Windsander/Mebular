@@ -2,6 +2,18 @@
 
 export { MemoryStore, type MemoryListFilter } from './MemoryStore.js';
 export { type VectorIndex, type VectorIndexHit } from './VectorIndex.js';
+export { LocalVectorIndex, type EmbeddingProvider } from './embedding.js';
+export {
+  TransformersEmbeddingProvider,
+  createTransformersEmbeddingProvider,
+  resolveVectorIndex,
+  DEFAULT_EMBEDDING_MODEL,
+  TRANSFORMERS_PACKAGE,
+  type EmbeddingModuleImporter,
+  type TransformersEmbeddingOptions,
+  type ResolveVectorIndexOptions,
+} from './transformers.js';
+export { nodeSearchText, nodeMatchesKeyword } from './text.js';
 export {
   EdgeTypes,
   ENTITY_TYPES,

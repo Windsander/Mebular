@@ -24,6 +24,9 @@ import {
   type UserMasterKeyPair,
 } from './crypto/IdentityManager.js';
 import { P2PNode } from './p2p/P2PNetwork.js';
+import { resolveVectorIndex, type EmbeddingModuleImporter } from './memory/transformers.js';
+import type { EmbeddingProvider } from './memory/embedding.js';
+import type { VectorIndex } from './memory/VectorIndex.js';
 import type { BonjourServiceFactory } from './p2p/DeviceDiscovery.js';
 import type { ConnectionProvider } from './p2p/transport/InMemoryTransport.js';
 import { Libp2pProvider } from './p2p/transport/Libp2pProvider.js';
@@ -97,6 +100,22 @@ export interface MebularConfig {
     /** 已确认集合持久化文件路径（6.4）；缺省派生为 <storagePath 去 .json>.sync-state.json */
     syncStatePath?: string;
   };
+  /** 语义召回（G2，可选依赖；缺包降级关键词并告警） */
+  semantic?: {
+    enabled: boolean;
+    /** embedding 模型 ID（缺省 Xenova/all-MiniLM-L6-v2） */
+    model?: string;
+    /** 模型缓存目录 */
+    cacheDir?: string;
+    /** 权重精度/后端（如 'q8'） */
+    dtype?: string;
+    /** 注入自定义 EmbeddingProvider（测试/替代实现） */
+    provider?: EmbeddingProvider;
+    /** 动态导入器（测试用；缺省运行时 import） */
+    importer?: EmbeddingModuleImporter;
+    /** true：缺包时初始化失败而非降级；缺省 false */
+    required?: boolean;
+  };
 }
 
 interface IdentityFileRecord {
@@ -122,6 +141,7 @@ export class Mebular {
   private syncImpl: SyncManager | null = null;
   private nodeImpl: P2PNode | null = null;
   private libp2pProvider: Libp2pProvider | null = null;
+  private semanticVectorIndexImpl: VectorIndex | null = null;
 
   /**
    * 便捷身份自举（G0）：生成用户主密钥对（同一用户所有设备的信任根），
@@ -202,6 +222,18 @@ export class Mebular {
           `${this.config.storagePath.replace(/\.json$/i, '')}.sync-state.json`,
       });
 
+      // 5.5 语义向量索引（可选依赖；缺包降级关键词并告警）
+      if (this.config.semantic?.enabled) {
+        this.semanticVectorIndexImpl = await resolveVectorIndex({
+          model: this.config.semantic.model,
+          cacheDir: this.config.semantic.cacheDir,
+          dtype: this.config.semantic.dtype,
+          provider: this.config.semantic.provider,
+          importer: this.config.semantic.importer,
+          required: this.config.semantic.required,
+        });
+      }
+
       // 6. 网络（可选）
       if (this.config.network?.enabled) {
         // libp2p 配置优先：真实网络栈装配（可选依赖，缺包时诚实报错）
@@ -257,6 +289,7 @@ export class Mebular {
     this.syncImpl = null;
     this.graphImpl = null;
     this.eventLogImpl = null;
+    this.semanticVectorIndexImpl = null;
     if (this.storageImpl) {
       await this.storageImpl.close().catch(() => undefined);
       this.storageImpl = null;
@@ -278,6 +311,7 @@ export class Mebular {
     this.syncImpl = null;
     this.graphImpl = null;
     this.eventLogImpl = null;
+    this.semanticVectorIndexImpl = null;
     if (this.storageImpl) {
       await this.storageImpl.close();
       this.storageImpl = null;
@@ -310,6 +344,11 @@ export class Mebular {
   /** 网络未启用时为 null */
   get node(): P2PNode | null {
     return this.nodeImpl;
+  }
+
+  /** 语义向量索引（G2）；未启用或缺 embedding 包降级时为 null */
+  get semanticVectorIndex(): VectorIndex | null {
+    return this.semanticVectorIndexImpl;
   }
 
   // ---------- 静态加密（G1） ----------

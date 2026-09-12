@@ -13,6 +13,7 @@ import { execSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkFiles } from './verify-lib.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
@@ -38,13 +39,8 @@ const phase3Files = [
   'docs.design/phase-3-plan.md',
 ];
 
-for (const file of phase3Files) {
-  if (!existsSync(join(rootDir, file))) {
-    console.log(`  ✗ 缺失: ${file}`);
-    allPassed = false;
-  } else {
-    console.log(`  ✓ ${file}`);
-  }
+if (!checkFiles(phase3Files)) {
+  allPassed = false;
 }
 
 // 2. TypeScript 编译

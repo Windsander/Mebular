@@ -16,6 +16,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkFiles } from './verify-lib.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
@@ -48,13 +49,8 @@ const phase6Files = [
   'tests/sync/sync-state-persistence.test.ts',
   'docs.design/phase-6-plan.md',
 ];
-for (const file of phase6Files) {
-  if (!existsSync(join(rootDir, file))) {
-    console.log(`  ✗ 缺失: ${file}`);
-    allPassed = false;
-  } else {
-    console.log(`  ✓ ${file}`);
-  }
+if (!checkFiles(phase6Files)) {
+  allPassed = false;
 }
 // 6.0 死代码反向检查：这些文件必须不存在
 for (const dead of ['src/crypto/signature.ts', 'src/crypto/encryption.ts', 'src/crypto/index.ts']) {

@@ -52,12 +52,20 @@ npm test               # 42 套件 / 313 用例全绿
 
 ### 最简例子（复制即跑）
 
+首次初始化需要用户主密钥为本机签发设备证书。用 `Mebular.generateUserMasterKey()` 生成后，**请自行持久化主私钥**（信任根，示例见 [`examples/quickstart/index.mjs`](examples/quickstart/index.mjs)）。
+
 ```ts
 import { Mebular, HermesMemoryProvider } from 'mebular';
+
+const master = await Mebular.generateUserMasterKey();
 
 const mebular = new Mebular({
   storagePath: './store.jsonl',
   deviceId: 'device-A',
+  encryption: {
+    userMasterKey: master.publicKey,
+    userMasterPrivateKey: master.privateKey,
+  },
   network: { enabled: false }, // 单设备先从这里开始
 });
 
@@ -78,7 +86,14 @@ await mebular.shutdown();
 
 把 `network.enabled` 改成 `true` 并配置传输，同一段代码就能跑在两台设备上，断线重连后自己收敛。
 
-`examples/` 里还有三个能直接跑的：`obsidian-vault`、`log-journal`、`json-memo`。
+上面这段的可执行版本在 [`examples/quickstart/index.mjs`](examples/quickstart/index.mjs)（含主密钥持久化），`npm run build` 之后直接 `node examples/quickstart/index.mjs` 即可：
+
+```bash
+npm run build
+node examples/quickstart/index.mjs
+```
+
+`examples/` 下另有 `obsidian-vault`、`log-journal`、`json-memo` 三份带 README 的示例数据，供对应适配器导入，本身不是可执行脚本。
 
 ---
 

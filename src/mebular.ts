@@ -18,7 +18,11 @@ import { EventLog } from './eventlog/EventLog.js';
 import { JsonFileStorage } from './storage/JsonFileStorage.js';
 import type { StorageAdapter } from './storage/StorageAdapter.js';
 import { SyncManager } from './sync/syncmgr/SyncManager.js';
-import { IdentityManager, type DeviceIdentity } from './crypto/IdentityManager.js';
+import {
+  IdentityManager,
+  type DeviceIdentity,
+  type UserMasterKeyPair,
+} from './crypto/IdentityManager.js';
 import { P2PNode } from './p2p/P2PNetwork.js';
 import type { BonjourServiceFactory } from './p2p/DeviceDiscovery.js';
 import type { ConnectionProvider } from './p2p/transport/InMemoryTransport.js';
@@ -106,6 +110,18 @@ export class Mebular {
   private syncImpl: SyncManager | null = null;
   private nodeImpl: P2PNode | null = null;
   private libp2pProvider: Libp2pProvider | null = null;
+
+  /**
+   * 便捷身份自举（G0）：生成用户主密钥对（同一用户所有设备的信任根），
+   * 供首次初始化签发设备证书。
+   *
+   * 安全默认：本方法只生成并返回密钥对，**不落盘**；主私钥的持久化与
+   * 保管由调用方负责（例如导出 PKCS8 存入受保护的位置），随后经
+   * `config.encryption.userMasterPrivateKey` 传回。
+   */
+  static async generateUserMasterKey(name?: string): Promise<UserMasterKeyPair> {
+    return new IdentityManager().generateUserMasterKey(name);
+  }
 
   constructor(config: MebularConfig) {
     this.config = config;

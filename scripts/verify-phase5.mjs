@@ -16,6 +16,7 @@ import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkFiles } from './verify-lib.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
@@ -49,13 +50,8 @@ const phase5Files = [
   'tests/helpers/faulty-transport.ts',
   'docs.design/phase-5-plan.md',
 ];
-for (const file of phase5Files) {
-  if (!existsSync(join(rootDir, file))) {
-    console.log(`  ✗ 缺失: ${file}`);
-    allPassed = false;
-  } else {
-    console.log(`  ✓ ${file}`);
-  }
+if (!checkFiles(phase5Files)) {
+  allPassed = false;
 }
 
 // 2. TypeScript 编译

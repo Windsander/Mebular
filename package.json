@@ -32,7 +32,7 @@
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
     "lint": "eslint src tests scripts --ext .ts,.mjs",
-    "verify": "node scripts/verify-phase5.mjs",
+    "verify": "node scripts/verify.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "dependencies": {

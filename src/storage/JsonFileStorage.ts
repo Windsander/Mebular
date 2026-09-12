@@ -12,6 +12,7 @@ import { appendFile, mkdir, readFile, rename, writeFile } from 'fs/promises';
 import { dirname } from 'path';
 import type { Node, Edge, Event } from '../types/index.js';
 import { MemoryStorage } from './MemoryStorage.js';
+import { StorageCipher } from '../crypto/StorageCipher.js';
 import { ErrorCodes, StorageError } from '../errors.js';
 
 type StorageOp =
@@ -22,20 +23,34 @@ type StorageOp =
   | { op: 'putEvent'; value: Event }
   | { op: 'deleteEvent'; id: string };
 
+export interface JsonFileStorageOptions {
+  /**
+   * 静态加密器（G1）：配置后每行落盘为 `enc:v1:` 信封，重放时解密；
+   * 不配置则维持明文 JSONL（向后兼容）。
+   */
+  cipher?: StorageCipher | null;
+}
+
 export class JsonFileStorage extends MemoryStorage {
   private readonly filePath: string;
+  /** 静态加密器；null 表示明文落盘（默认，向后兼容） */
+  private readonly cipher: StorageCipher | null;
   /** 串行化追加写，保证文件行序与调用序一致 */
   private writeChain: Promise<void> = Promise.resolve();
   private fileClosed = false;
 
-  private constructor(filePath: string) {
+  private constructor(filePath: string, cipher: StorageCipher | null) {
     super();
     this.filePath = filePath;
+    this.cipher = cipher;
   }
 
   /** 打开（必要时创建）一个 JSONL 存储文件 */
-  static async open(filePath: string): Promise<JsonFileStorage> {
-    const storage = new JsonFileStorage(filePath);
+  static async open(
+    filePath: string,
+    options: JsonFileStorageOptions = {},
+  ): Promise<JsonFileStorage> {
+    const storage = new JsonFileStorage(filePath, options.cipher ?? null);
     await mkdir(dirname(filePath), { recursive: true });
     await storage.replay();
     return storage;
@@ -54,9 +69,22 @@ export class JsonFileStorage extends MemoryStorage {
 
     const lines = content.split('\n').filter((line) => line.trim() !== '');
     for (let i = 0; i < lines.length; i++) {
+      const line = lines[i]!;
+      // 密文行必须先解密（缺密钥/错密钥在 StorageCipher 内诚实报错，不静默吞掉）
+      let jsonText = line;
+      if (StorageCipher.isEnvelope(line)) {
+        if (!this.cipher) {
+          throw new StorageError(
+            `存储文件已加密，但未提供静态加密密钥：${this.filePath}`,
+            ErrorCodes.STORAGE_KEY_MISSING,
+          );
+        }
+        jsonText = await this.cipher.decrypt(line);
+      }
+
       let record: StorageOp;
       try {
-        record = JSON.parse(lines[i]!) as StorageOp;
+        record = JSON.parse(jsonText) as StorageOp;
       } catch (error) {
         // 追加式日志的崩溃半行写只可能出现在末尾：容忍并截断最后一条坏行；
         // 中间行损坏说明文件已被意外破坏，诚实报错并给出行号
@@ -97,10 +125,17 @@ export class JsonFileStorage extends MemoryStorage {
     if (this.fileClosed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
   }
 
+  /** 落盘序列化：配置静态加密时输出信封，否则输出明文 JSON */
+  private async serialize(record: StorageOp): Promise<string> {
+    const json = JSON.stringify(record);
+    return this.cipher ? this.cipher.encrypt(json) : json;
+  }
+
   private async persist(record: StorageOp): Promise<void> {
     this.assertWritable();
+    const line = await this.serialize(record);
     this.writeChain = this.writeChain.then(() =>
-      appendFile(this.filePath, JSON.stringify(record) + '\n', 'utf-8'),
+      appendFile(this.filePath, line + '\n', 'utf-8'),
     );
     await this.writeChain;
   }
@@ -151,7 +186,11 @@ export class JsonFileStorage extends MemoryStorage {
       ops.push({ op: 'putEvent', value: event });
     }
 
-    const body = ops.map((o) => JSON.stringify(o)).join('\n');
+    const lines: string[] = [];
+    for (const op of ops) {
+      lines.push(await this.serialize(op));
+    }
+    const body = lines.join('\n');
     const tmpPath = this.filePath + '.tmp';
     await this.writeChain; // 先排干待写
     await writeFile(tmpPath, body ? body + '\n' : '', 'utf-8');

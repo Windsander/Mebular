@@ -81,6 +81,10 @@ export const ErrorCodes = {
   STORAGE_READ_FAILED: 'STORAGE_READ_FAILED',
   /** 存储已关闭后的访问 */
   STORAGE_CLOSED: 'STORAGE_CLOSED',
+  /** 静态加密已启用但缺少密钥（用户主私钥 / storageKey） */
+  STORAGE_KEY_MISSING: 'STORAGE_KEY_MISSING',
+  /** 静态解密失败：密钥错误或密文损坏（不返回垃圾数据） */
+  STORAGE_DECRYPT_FAILED: 'STORAGE_DECRYPT_FAILED',
 
   // 同步错误
   SYNC_PEER_UNAUTHORIZED: 'SYNC_PEER_UNAUTHORIZED',

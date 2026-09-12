@@ -43,6 +43,7 @@ export {
   DEFAULT_PBKDF2_ITERATIONS,
   type EncryptedKeyMaterial,
 } from './crypto/KeyProtector.js';
+export { StorageCipher, AT_REST_PREFIX } from './crypto/StorageCipher.js';
 export { GraphStore } from './core/GraphStore.js';
 export type { GraphStoreConfig } from './core/GraphStore.js';
 export * from './p2p/index.js';

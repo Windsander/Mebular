@@ -241,4 +241,29 @@ describe('Mebular 门面', () => {
     expect(mode).toBe(0o600);
     await m.shutdown();
   });
+
+  it('generateUserMasterKey 便捷自举：产出可签发并验证设备证书的主密钥对，且不落盘（G0）', async () => {
+    const pair = await Mebular.generateUserMasterKey('quickstart-user');
+    expect(pair.publicKey).toHaveLength(32);
+    expect(pair.privateKey).toBeDefined();
+
+    // 主密钥对可直接驱动门面完成首次初始化（README 快速上手路径）
+    const bootstrapped = new Mebular({
+      storagePath,
+      deviceId: 'device-A',
+      encryption: {
+        userMasterKey: pair.publicKey,
+        userMasterPrivateKey: pair.privateKey,
+      },
+    });
+    await bootstrapped.initialize();
+    const cert = bootstrapped.identity.getDeviceKey('device-A')!.certificate!;
+    bootstrapped.identity.setUserMasterPublicKey(pair.publicKey);
+    await expect(bootstrapped.identity.verifyDeviceCertificate(cert)).resolves.toBe(true);
+    await bootstrapped.shutdown();
+
+    // 便捷 API 只生成、不落盘：目录内除身份/存储文件外无主密钥文件
+    const entries = await readFile(`${storagePath}.identity.json`, 'utf-8');
+    expect(entries).not.toContain('master');
+  });
 });

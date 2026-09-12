@@ -5,6 +5,7 @@ import { execSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkFiles } from './verify-lib.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
@@ -112,14 +113,8 @@ const designDocs = [
   'docs.design/spec-004-api.md',
 ];
 
-for (const doc of designDocs) {
-  const fullPath = join(rootDir, doc);
-  if (!existsSync(fullPath)) {
-    console.log(`  ✗ 缺失: ${doc}`);
-    allPassed = false;
-  } else {
-    console.log(`  ✓ ${doc}`);
-  }
+if (!checkFiles(designDocs)) {
+  allPassed = false;
 }
 
 console.log('\n' + '='.repeat(60));

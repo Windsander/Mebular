@@ -50,3 +50,6 @@ coverage
 docs/
 design-notes/
 docs.design/
+
+# 示例執行時產物（本地留存）
+examples/quickstart/.data/

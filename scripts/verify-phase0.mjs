@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // Phase 0 验证脚本（纯 JS，无类型标注）
 
-import { existsSync, statSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { checkFiles } from './verify-lib.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
@@ -40,19 +41,6 @@ const requiredDirs = [
   'tests/storage',
 ];
 
-function checkFile(relPath) {
-  const fullPath = join(rootDir, relPath);
-  if (!existsSync(fullPath)) {
-    return { ok: false, error: 'Missing file: ' + relPath };
-  }
-  try {
-    const stat = statSync(fullPath);
-    return { ok: true, size: stat.size };
-  } catch (e) {
-    return { ok: false, error: 'Cannot stat ' + relPath + ': ' + e };
-  }
-}
-
 function checkDir(relPath) {
   const fullPath = join(rootDir, relPath);
   if (!existsSync(fullPath)) {
@@ -67,14 +55,8 @@ console.log('==========');
 let allValid = true;
 
 console.log('\n检查文件:');
-for (const file of requiredFiles) {
-  const result = checkFile(file);
-  if (result.ok) {
-    console.log('✓ ' + file + ' (' + result.size + ' 字节)');
-  } else {
-    console.log('✗ ' + file + ': ' + result.error);
-    allValid = false;
-  }
+if (!checkFiles(requiredFiles, { indent: '', showSize: true })) {
+  allValid = false;
 }
 
 console.log('\n检查目录:');

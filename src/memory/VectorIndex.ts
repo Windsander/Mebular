@@ -15,6 +15,12 @@ export interface VectorIndex {
   index(node: Node): Promise<void>;
   /** 移除节点的向量索引 */
   remove(nodeId: string): Promise<void>;
-  /** 语义检索：返回按相关度降序的命中 */
+  /** 语义检索：返回按相关度降序的命中（低于实现阈值的不返回） */
   query(text: string, k: number): Promise<VectorIndexHit[]>;
+  /** 是否已索引指定节点（可选；用于惰性增量回填） */
+  has?(nodeId: string): boolean;
+  /** 已索引节点 ID（可选；用于删除/墓碑剪枝） */
+  ids?(): string[];
+  /** 已索引节点数（可选；诊断/惰性重建判定） */
+  readonly size?: number;
 }

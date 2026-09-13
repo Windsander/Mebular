@@ -41,6 +41,8 @@ export interface MemoryListFilter {
 export class MemoryStore {
   private graph: GraphStore;
   private vectorIndex: VectorIndex | null;
+  /** 索引可能落后于图（初始化/同步后）；true 时下次向量查询先增量回填 */
+  private vectorIndexStale = true;
 
   constructor(graph: GraphStore, vectorIndex?: VectorIndex) {
     this.graph = graph;
@@ -256,19 +258,33 @@ export class MemoryStore {
   }
 
   /**
+   * 标记向量索引可能落后于图（同步应用远端事件、外部写入后调用）。
+   * 下一次向量查询会增量回填并剪枝墓碑。
+   */
+  markVectorIndexStale(): void {
+    this.vectorIndexStale = true;
+  }
+
+  /**
    * 向量检索：配置了 VectorIndex 时返回带分数的命中；
    * 未配置时返回空数组（调用方据此退回关键词基线）。
+   * 查询前确保索引与图一致（惰性增量回填 + 墓碑剪枝）——
+   * 覆盖「重启后索引为空」与「同步入库节点未索引」两种静默失效场景。
    */
   async vectorQuery(text: string, k = 10): Promise<Array<{ node: Node; score: number }>> {
     if (!this.vectorIndex) {
       return [];
     }
+    await this.ensureVectorIndex();
     const hits = await this.vectorIndex.query(text, k);
     const results: Array<{ node: Node; score: number }> = [];
     for (const hit of hits) {
       const node = await this.graph.getNode(hit.nodeId);
       if (node && !node.deletedAt) {
         results.push({ node, score: hit.score });
+      } else {
+        // 墓碑/缺失节点：从索引移除，避免陈旧向量驻留（G2-R）
+        await this.vectorIndex.remove(hit.nodeId);
       }
     }
     return results;
@@ -276,26 +292,66 @@ export class MemoryStore {
 
   /**
    * 用当前图中全部（未删除）节点重建向量索引，返回重建数量。
-   * 向量索引是进程内状态：重开存储后需调用一次以恢复对既有记忆的语义召回。
+   * 显式 API；常规路径由 vectorQuery 惰性触发（见 ensureVectorIndex）。
    */
   async reindexVectorIndex(): Promise<number> {
     if (!this.vectorIndex) {
       return 0;
     }
+    const nodes = await this.listAllNodes();
+    for (const node of nodes) {
+      await this.vectorIndex.index(node);
+    }
+    this.vectorIndexStale = false;
+    return nodes.length;
+  }
+
+  /** 列出全部未删除的记忆节点（去重） */
+  private async listAllNodes(): Promise<Node[]> {
     const types: Array<Node['type']> = ['entity', 'fact', 'episode', 'skill', 'meta'];
     const seen = new Set<string>();
-    let count = 0;
+    const nodes: Node[] = [];
     for (const type of types) {
       for (const node of await this.listByType(type)) {
         if (seen.has(node.id)) {
           continue;
         }
         seen.add(node.id);
-        await this.vectorIndex.index(node);
-        count++;
+        nodes.push(node);
       }
     }
-    return count;
+    return nodes;
+  }
+
+  /**
+   * 惰性确保索引与图一致：回填缺失节点、剪除已删除/墓碑条目。
+   * 有 has/ids 能力的索引走增量；否则退化为整图重建。
+   */
+  private async ensureVectorIndex(): Promise<void> {
+    const index = this.vectorIndex;
+    if (!index || !this.vectorIndexStale) {
+      return;
+    }
+    const nodes = await this.listAllNodes();
+    if (typeof index.has === 'function' && typeof index.ids === 'function') {
+      const active = new Set<string>();
+      for (const node of nodes) {
+        active.add(node.id);
+        if (!index.has(node.id)) {
+          await index.index(node);
+        }
+      }
+      for (const id of index.ids()) {
+        if (!active.has(id)) {
+          await index.remove(id);
+        }
+      }
+    } else {
+      for (const node of nodes) {
+        await index.index(node);
+      }
+    }
+    this.vectorIndexStale = false;
   }
 
   // ---------- 内部 ----------

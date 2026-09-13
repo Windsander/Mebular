@@ -391,6 +391,13 @@ export interface Libp2pProviderOptions {
   relayServer?: boolean;
   /** 向这些 relay multiaddr 预约中转地址；缺包抛 `NETWORK_RELAY_NOT_AVAILABLE` */
   relayServers?: string[];
+  /**
+   * relay 服务器是否放开预约限额（G3-R 安全 opt-in）。
+   * 缺省 false：应用默认限额，circuit 上只允许受限协议（安全，但 Mebular 同步流
+   * 会被 LimitedConnectionError 拒绝）；显式 true 才允许任意协议在 circuit 上跑——
+   * 需调用方承担开放 relay 的滥用风险（无限流量/连接）。
+   */
+  relayUnlimited?: boolean;
 }
 
 /**
@@ -453,10 +460,13 @@ export class Libp2pProvider implements ConnectionProvider {
       }
       if (options.relayServer) {
         // 服务名须为 circuitRelay（与包内默认服务名一致）。
-        // applyDefaultLimit:false → 预约不受限，允许在 circuit 上跑任意协议
-        // （Mebular 同步流即在此之上）；v0.1 暂不做 relay 限额，属已知限制。
+        // 默认可限额（applyDefaultLimit:true）：circuit 只允许受限协议；
+        // 需显式 relayUnlimited 才放开，允许 Mebular 同步流在 circuit 上跑。
         services['circuitRelay'] = relayModules.circuitRelayServer({
-          reservations: { maxReservations: 128, applyDefaultLimit: false },
+          reservations: {
+            maxReservations: 128,
+            applyDefaultLimit: options.relayUnlimited !== true,
+          },
         });
       }
     }

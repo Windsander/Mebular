@@ -14,8 +14,11 @@ import { ErrorCodes, MebularError } from '../errors.js';
 import { LocalVectorIndex, type EmbeddingProvider } from './embedding.js';
 import type { VectorIndex } from './VectorIndex.js';
 
-/** 默認 embedding 模型（MiniLM 多語言小模型，約 23MB 量化） */
-export const DEFAULT_EMBEDDING_MODEL = 'Xenova/all-MiniLM-L6-v2';
+/**
+ * 默認 embedding 模型：多語言 MiniLM（覆蓋中文；384 維，q8 權重約 120MB）。
+ * 相對於英文 all-MiniLM-L6-v2，多語言版對中文語義召回是硬需求（G2-R）。
+ */
+export const DEFAULT_EMBEDDING_MODEL = 'Xenova/paraphrase-multilingual-MiniLM-L12-v2';
 
 /** 可選包名 */
 export const TRANSFORMERS_PACKAGE = '@huggingface/transformers';
@@ -145,6 +148,8 @@ export interface ResolveVectorIndexOptions extends TransformersEmbeddingOptions 
   required?: boolean;
   /** 告警輸出（缺省 console.warn） */
   warn?: (message: string) => void;
+  /** 最低餘弦相似度（低相關不返回）；缺省 {@link DEFAULT_MIN_SCORE} */
+  minScore?: number;
 }
 
 /**
@@ -158,12 +163,12 @@ export async function resolveVectorIndex(
   options: ResolveVectorIndexOptions = {},
 ): Promise<VectorIndex | null> {
   if (options.provider) {
-    return new LocalVectorIndex(options.provider);
+    return new LocalVectorIndex(options.provider, { minScore: options.minScore });
   }
   const warn = options.warn ?? ((message: string) => console.warn(message));
   try {
     const provider = await createTransformersEmbeddingProvider(options);
-    return new LocalVectorIndex(provider);
+    return new LocalVectorIndex(provider, { minScore: options.minScore });
   } catch (error) {
     if (options.required) {
       throw error;

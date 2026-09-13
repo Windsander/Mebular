@@ -56,3 +56,7 @@ examples/quickstart/.data/
 
 # 廣域網同步證據（本地留存）
 .wan-evidence/
+
+# 語義召回證據與模型快取（本地留存）
+.semantic-evidence/
+.cache/

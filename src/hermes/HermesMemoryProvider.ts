@@ -61,6 +61,13 @@ export class HermesMemoryProvider {
     );
     this.userId = options.userId ?? 'user';
     this.extractor = options.extractor ?? null;
+
+    // 同步应用远端事件后索引可能落后：标记失效，下次向量查询增量回填（G2-R）
+    try {
+      mebular.sync.on('sync-completed', () => this.memory.markVectorIndexStale());
+    } catch {
+      // 门面未初始化时 sync 不可访问；调用方应先 initialize 再构造 provider
+    }
   }
 
   // ---------- 抽取 ----------
@@ -218,9 +225,17 @@ export class HermesMemoryProvider {
     if (query.query && this.memory.hasVectorIndex()) {
       const hits = await this.memory.vectorQuery(query.query, query.limit ?? 10);
       // 向量路径同样按 types 收窄（与关键词路径行为对齐，Phase 6.1 修复）
-      nodes = hits
+      const vectorNodes = hits
         .filter(({ node }) => candidateTypes.includes(node.type))
         .map(({ node, score }) => ({ node, relevance: score }));
+      if (vectorNodes.length > 0) {
+        nodes = vectorNodes;
+      } else {
+        // 向量无命中（索引尚空 / 低相关被阈值过滤）：诚实回退关键词基线，
+        // 不再静默返回空（G2-R 反模式修复）
+        const keywordHits = await this.memory.search(query.query, { types: candidateTypes });
+        nodes = keywordHits.map((node) => ({ node }));
+      }
     } else if (query.query) {
       const hits = await this.memory.search(query.query, { types: candidateTypes });
       nodes = hits.map((node) => ({ node }));

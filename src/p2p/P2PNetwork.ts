@@ -75,6 +75,8 @@ export interface P2PNetwork {
    * 否则用发现层地址。
    */
   connectToPeer(peerId: PeerId, address?: string): Promise<Connection>;
+  /** 主动断开与某对端的连接（重连触发新会话） */
+  disconnectPeer(peerId: PeerId): Promise<void>;
   authenticatePeer(connection: Connection): Promise<boolean>;
   sendMessage(connection: Connection, message: Uint8Array): Promise<void>;
   receiveMessage(connection: Connection): AsyncIterable<Uint8Array>;
@@ -294,12 +296,25 @@ export class P2PNode implements P2PNetwork {
     }
   }
 
+  /**
+   * 主动断开与某对端的连接（G3-R 两阶段重连用）。
+   * 断开后可用 connectToPeer 重新拨号触发新的握手与同步会话。
+   */
+  async disconnectPeer(peerId: PeerId): Promise<void> {
+    if (!this.running) {
+      throw new NetworkError('P2P node not running', ErrorCodes.NETWORK_NOT_RUNNING);
+    }
+    await this.connectionManager.disconnect(peerId);
+  }
+
   async authenticatePeer(connection: Connection): Promise<boolean> {
     if (!this.running) {
       throw new NetworkError('P2P node not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
     const session = await this.handshake.initiateAuth(connection);
     if (session.state === 'authenticated') {
+      // 重连时会话可能复用同一 peerId：丢弃旧信道，基于新连接重建（G3-R）
+      this.channels.delete(connection.peerId.id);
       this.prepareChannel(connection);
       return true;
     }
@@ -312,6 +327,8 @@ export class P2PNode implements P2PNetwork {
       const session = await this.handshake.acceptAuth(connection);
       if (session.state === 'authenticated') {
         this.connectionManager.setConnection(connection.peerId, connection);
+        // 重连时会话可能复用同一 peerId：丢弃旧信道，基于新连接重建（G3-R）
+        this.channels.delete(connection.peerId.id);
         this.prepareChannel(connection);
       }
     } catch (error) {
@@ -355,8 +372,11 @@ export class P2PNode implements P2PNetwork {
     });
     const started = channel.start().then(() => channel);
     started.catch(() => {
-      // 建信道失败不阻塞连接本身；首次收发时会再暴露错误
-      this.channels.delete(key);
+      // 建信道失败不阻塞连接本身；仅当表项仍是本信道时才移除——
+      // 否则旧连接信道的延迟失败会误删重连后的新信道（G3-R 两阶段重连）
+      if (this.channels.get(key) === started) {
+        this.channels.delete(key);
+      }
     });
     this.channels.set(key, started);
   }
@@ -395,6 +415,12 @@ export class P2PNode implements P2PNetwork {
   }
 
   private attachComponentListeners(): void {
+    // 连接关闭即释放对应加密信道与认证会话，避免重连命中过期状态
+    // （否则 initiateAuth 命中已认证会话而跳过握手，对端读到信道帧报 malformed）（G3-R）
+    this.connectionManager.on('connection-closed', (peerId: PeerId) => {
+      this.channels.delete(peerId.id);
+      this.handshake.removeSession(peerId);
+    });
     if (this.discovery) {
       for (const cb of this.peerDiscoveredCallbacks) {
         this.discovery.onPeerDiscovered(cb);

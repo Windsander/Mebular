@@ -102,22 +102,26 @@ node examples/quickstart/index.mjs
 `scripts/wan-sync.mjs` 把「两主机增量同步 + 冲突收敛」脚本化，并接上 circuit relay 与手动 multiaddr 两条寻址路径。
 
 ```bash
-# 本机复现（真实 libp2p TCP，手动 multiaddr）
-npm run verify:wan
+# 本地编排自测（共享身份 + 两阶段 + relay 密文；non-evidence，退出码 0）
+npm run verify:wan:cross:selftest
 
-# 本机复现（内嵌 circuit relay v2，经 /p2p-circuit 地址）
-npm run verify:wan:relay
+# 本地回归（loopback，非证据）
+npm run verify:wan         # 手动 multiaddr 直连
+npm run verify:wan:relay   # 内嵌 circuit relay
 
-# 跨机（异网段）：先启 relay（--unlimited 才承载同步流，见下），再两端 host/cross
-node scripts/wan-sync.mjs relay --port 4000 --unlimited
-node scripts/wan-sync.mjs host --role a --port 4001 --relay <relay> --write "from A"
-MEBULAR_WAN_PEER_STATE_HASH=<A的stateHash> \
-  npm run verify:wan:cross -- --peer <A-multiaddr> --peer-id <A-deviceId> --relay <relay> --write "from B"
+# 跨机两阶段（异网段）：先共享用户主密钥，再 A=peer / B=cross 读共享 ready
+node scripts/wan-sync.mjs user-keygen --out /shared/key.json
+node scripts/wan-sync.mjs relay --port 4000 --unlimited            # 可选，异网段需要
+node scripts/wan-sync.mjs peer  --role a --user-master-key-file /shared/key.json \
+  --ready-out /shared/A-ready.json --bind /ip4/0.0.0.0/tcp/4001 --relay <relay>
+node scripts/wan-sync.mjs cross --user-master-key-file /shared/key.json \
+  --peer-ready /shared/A-ready.json --out /shared/B-evidence.json --relay <relay>
+# 判定：cross 退出码 0 且 B-evidence.json 的 stateMatches=true、differentPublicNetwork=true
 ```
 
-- 依赖可选包 `@libp2p/circuit-relay-v2` + `@libp2p/identify`；**缺包时自动降级为手动 multiaddr** 并告警（错误码 `NETWORK_RELAY_NOT_AVAILABLE`）。
-- relay 默认**限额**；需显式 `--unlimited`（`Libp2pProvider.relayUnlimited`）才允许任意协议过 circuit，调用方承担开放 relay 的滥用风险。
-- 诚实边界：`verify:wan` / `verify:wan:relay` 是本机协议语义验证，**不是跨 NAT 实测**；`npm run verify:wan:cross` 无两台真实主机地址时**必红**并打印所需环境——真实跨网 KR 未达成（见 `docs.design/g3r-blocker-2026-09-13.md`）。
+- 用户主密钥：`user-keygen` 生成，A/B 用同一把（否则设备证书互验失败）；也可用 `MEBULAR_USER_MASTER_KEY`。
+- relay 默认**限额**；需显式 `--unlimited`（`Libp2pProvider.relayUnlimited`）才允许任意协议过 circuit，调用方承担开放 relay 的滥用风险；`relay --capture <path>` 可捕获线上字节供「只见密文」取证。
+- 诚实边界：`verify:wan`/`verify:wan:relay`/`verify:wan:cross:selftest` 都是**本机**验证，**不是跨 NAT 实测**；真实 G3-E 需两台不同公网主机 + 可达 relay + 共享 `ready.json`，当前**未达成**（阻塞报告 `docs.design/g3r-blocker-2026-09-13.md`）。`npm run verify:wan:cross` 无环境时退出码 1 并打印所需环境。
 
 ---
 

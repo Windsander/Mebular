@@ -535,11 +535,17 @@ export class Libp2pProvider implements ConnectionProvider {
     if (!this.running) {
       throw new NetworkError('Libp2pProvider not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
+    // 有显式 multiaddr 时直接按地址拨号（地址内含 /p2p/<id>），
+    // 避免用对端 pubKey 反解 libp2p PeerId——手动寻址场景只有 deviceId，
+    // 无对端原始公钥（否则会误当 RSA DER 解析）。
+    if (address) {
+      const stream = await this.node.dialProtocol(this.modules.multiaddr(address), this.protocol);
+      return new Libp2pConnection(stream, peerId, address);
+    }
+    // 无显式地址时按 peer id 拨号（依赖 peerStore/路由已知地址）
     const target = toLibp2pPeerId(peerId, this.modules);
-    // 有显式 multiaddr 优先直连；否则按 peer id 拨号（依赖 peerStore/路由已知地址）
-    const dialTarget = address ? this.modules.multiaddr(address) : target;
-    const stream = await this.node.dialProtocol(dialTarget, this.protocol);
-    return new Libp2pConnection(stream, peerId, address ?? `/p2p/${target.toString()}`);
+    const stream = await this.node.dialProtocol(target, this.protocol);
+    return new Libp2pConnection(stream, peerId, `/p2p/${target.toString()}`);
   }
 
   onIncomingConnection(callback: (conn: Connection) => void): void {

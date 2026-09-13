@@ -18,6 +18,7 @@ describe('公共导出表面', () => {
       'GraphStore',
       'MemoryStorage',
       'JsonFileStorage',
+      'SqliteStorage',
       'EventLog',
       'SyncManager',
       'VectorClock',

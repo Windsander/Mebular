@@ -37,6 +37,7 @@
     "verify:semantic": "node scripts/verify-semantic.mjs",
     "verify:wan": "node scripts/wan-sync.mjs",
     "verify:wan:relay": "node scripts/wan-sync.mjs --relay",
+    "bench:snapshot": "node scripts/bench-snapshot.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "dependencies": {

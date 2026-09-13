@@ -16,6 +16,7 @@ import { dirname } from 'path';
 import { GraphStore } from './core/GraphStore.js';
 import { EventLog } from './eventlog/EventLog.js';
 import { JsonFileStorage } from './storage/JsonFileStorage.js';
+import { SqliteStorage } from './storage/SqliteStorage.js';
 import type { StorageAdapter } from './storage/StorageAdapter.js';
 import { SyncManager } from './sync/syncmgr/SyncManager.js';
 import {
@@ -54,11 +55,13 @@ export interface KeychainProvider {
 }
 
 export interface MebularConfig {
-  /** 存储文件路径（JSONL）；身份文件落在同路径加 .identity.json 后缀 */
+  /** 存储文件路径（JSONL / SQLite）；身份文件落在同路径加 .identity.json 后缀 */
   storagePath: string;
   /** 本机设备 ID */
   deviceId: string;
   deviceName?: string;
+  /** 存储适配器（G4）：'json'（缺省，JSONL）或 'sqlite'（node:sqlite，Node ≥ 22.5） */
+  storageAdapter?: 'json' | 'sqlite';
   encryption?: {
     /**
      * 静态加密作用域（G1）：
@@ -108,6 +111,11 @@ export interface MebularConfig {
     syncTimeout?: number;
     /** 已确认集合持久化文件路径（6.4）；缺省派生为 <storagePath 去 .json>.sync-state.json */
     syncStatePath?: string;
+    /**
+     * 初始同步快照阈值（G4）：对端空时钟且本地缺失事件数 ≥ 阈值时，
+     * 以物化快照替代全量事件重放。缺省不启用。
+     */
+    snapshotThreshold?: number;
   };
   /** 语义召回（G2，可选依赖；缺包降级关键词并告警） */
   semantic?: {
@@ -185,11 +193,15 @@ export class Mebular {
     try {
       // 1. 存储（先解析静态加密密钥：缺失/错误在此如实报错，不包装成 INIT_FAILED）
       const storageCipher = await this.createStorageCipher();
+      const storageAdapter = this.config.storageAdapter ?? 'json';
       try {
-        this.storageImpl = await JsonFileStorage.open(this.config.storagePath, {
-          cipher: storageCipher,
-        });
+        this.storageImpl =
+          storageAdapter === 'sqlite'
+            ? await SqliteStorage.open(this.config.storagePath, { cipher: storageCipher })
+            : await JsonFileStorage.open(this.config.storagePath, { cipher: storageCipher });
       } catch (error) {
+        // 适配器自身抛出的结构化错误（如 SQLite 不可用）原样上抛，不糊成 INIT_FAILED
+        if (error instanceof MebularError) throw error;
         throw new StorageError(
           `存储打开失败：${this.config.storagePath}`,
           ErrorCodes.STORAGE_INIT_FAILED,
@@ -225,6 +237,7 @@ export class Mebular {
         autoSync: this.config.sync?.autoSync ?? true,
         peerWhitelist: this.config.sync?.peerWhitelist,
         syncTimeout: this.config.sync?.syncTimeout,
+        snapshotThreshold: this.config.sync?.snapshotThreshold,
         userMasterPublicKey: this.identity.getUserMasterPublicKey() ?? undefined,
         syncStatePath:
           this.config.sync?.syncStatePath ??

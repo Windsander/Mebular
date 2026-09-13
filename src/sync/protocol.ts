@@ -15,14 +15,29 @@
 // 任一方发现验签失败或协议违例时发送 sync-error 并中止会话。
 
 import type { Event } from '../types/event.js';
+import type { Node, Edge } from '../types/index.js';
 import type { SecureChannel } from '../p2p/secure/SecureChannelImpl.js';
 import { ErrorCodes, SyncError } from '../errors.js';
 
 export type SyncDirection = 'push' | 'pull' | 'bidirectional';
 
+/**
+ * 初始同步快照（G4）：大图下用「物化状态 + 时钟」替代全量事件重放。
+ * 仅用于**空时钟**的新对端；应用后时钟推进，后续走增量事件。
+ *
+ * 信任边界：快照只在已认证（用户证书验签）的对端会话上使用；
+ * 接收方直接采纳物化节点/边（不再逐事件验签）——这是 fast-start 的
+ * 明确取舍：换取初始同步不再重放全部事件流。事件历史不随快照转移。
+ */
+export interface SyncSnapshot {
+  nodes: Node[];
+  edges: Edge[];
+  clock: Record<string, number>;
+}
+
 export type SyncMessage =
   | { type: 'sync-hello'; vectorClock: Record<string, number>; direction?: SyncDirection }
-  | { type: 'sync-offer'; events: Event[] }
+  | { type: 'sync-offer'; events: Event[]; snapshot?: SyncSnapshot }
   | { type: 'sync-ack'; appliedEventIds: string[] }
   | { type: 'sync-done'; finalVectorClock: Record<string, number> }
   | { type: 'sync-error'; message: string };

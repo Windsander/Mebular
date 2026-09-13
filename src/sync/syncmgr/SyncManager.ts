@@ -31,6 +31,7 @@ import {
   SecureChannelSyncTransport,
   nextSyncMessage,
   type SyncDirection,
+  type SyncSnapshot,
   type SyncTransport,
 } from '../protocol.js';
 import type { P2PNode, PeerId } from '../../p2p/P2PNetwork.js';
@@ -44,6 +45,11 @@ export interface SyncPeer {
 export interface SyncOptions {
   direction?: SyncDirection;
   timeoutMs?: number;
+  /**
+   * 初始同步快照阈值（G4）：对端向量时钟为空且本地缺失事件数 ≥ 阈值时，
+   * 发送物化快照（nodes+edges+clock）替代全量事件重放。缺省不启用（保持旧行为）。
+   */
+  snapshotThreshold?: number;
 }
 
 export interface SyncResult {
@@ -58,6 +64,10 @@ export interface SyncResult {
   conflicts: SyncConflict[];
   durationMs: number;
   finalVectorClock: Record<string, number>;
+  /** 本会话以快照发出的物化实体数（nodes+edges）；0/undefined 表示未走快照 */
+  snapshotSent?: number;
+  /** 本会话以快照应用的对端物化实体数（nodes+edges） */
+  snapshotApplied?: number;
 }
 
 export interface SyncStatus {
@@ -87,8 +97,13 @@ export interface SyncManagerOptions {
    * 已确认集合持久化文件路径（6.4）：提供后，markEventsSynced 确认的
    * 事件 ID 集合随会话落盘（JSON，原子写），重启后懒加载恢复，
    * 首帧 offer 不再携带对端早已确认的冗余事件。
-   */
+    */
   syncStatePath?: string;
+  /**
+   * 初始同步快照阈值（G4）：对端空时钟且缺失事件数 ≥ 阈值时以物化快照替代
+   * 全量事件重放；缺省不启用。可由单次 SyncOptions.snapshotThreshold 覆盖。
+   */
+  snapshotThreshold?: number;
 }
 
 const DEFAULT_SYNC_TIMEOUT = 30_000;
@@ -106,6 +121,8 @@ export class SyncManager extends EventEmitter {
   private readonly syncedByPeer = new Map<string, Set<string>>();
   /** 已确认集合持久化路径；null 则维持纯内存（6.4 前行为） */
   private readonly syncStatePath: string | null;
+  /** 初始同步快照阈值（G4）；undefined 不启用 */
+  private readonly snapshotThreshold: number | undefined;
   /** 懒加载在途 Promise（去重并发首次访问） */
   private syncStateLoading: Promise<void> | null = null;
 
@@ -124,6 +141,7 @@ export class SyncManager extends EventEmitter {
     this.syncTimeout = options.syncTimeout ?? DEFAULT_SYNC_TIMEOUT;
     this.userMasterPublicKey = options.userMasterPublicKey ?? null;
     this.syncStatePath = options.syncStatePath ?? null;
+    this.snapshotThreshold = options.snapshotThreshold;
   }
 
   // ---------- spec-004 查询面 ----------
@@ -270,17 +288,40 @@ export class SyncManager extends EventEmitter {
           });
           const hello = await nextSyncMessage(iterator, 'sync-hello', timeout);
 
-          // 2. 我方 offer：按对端时钟计算缺失集；pull 模式只收不发
-          const outgoing = direction === 'pull'
+          // 2. 我方 offer：按对端时钟计算缺失集；pull 模式只收不发。
+          //    对端空时钟且缺失集达阈值时改发物化快照（G4：初始同步不全量重放）
+          let outgoing = direction === 'pull'
             ? []
             : await this.eventLog.missingEvents(hello.vectorClock);
-          await transport.send({ type: 'sync-offer', events: outgoing });
+          const snapshotThreshold = options.snapshotThreshold ?? this.snapshotThreshold;
+          let snapshot: SyncSnapshot | undefined;
+          if (
+            direction !== 'pull' &&
+            snapshotThreshold !== undefined &&
+            Object.keys(hello.vectorClock).length === 0 &&
+            outgoing.length >= snapshotThreshold
+          ) {
+            snapshot = await this.buildSnapshot();
+            outgoing = [];
+          }
+          await transport.send(
+            snapshot
+              ? { type: 'sync-offer', events: [], snapshot }
+              : { type: 'sync-offer', events: outgoing },
+          );
           const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
           await this.markEventsSynced(peer.deviceId, ack.appliedEventIds);
 
-          // 3. 对端 offer：验签 + 幂等入库 + 冲突感知应用
+          // 3. 对端 offer：快照直接采纳（已认证对端）；事件走验签 + 幂等入库 + 冲突应用
           const offer = await nextSyncMessage(iterator, 'sync-offer', timeout);
-          const applied = await this.applyOffer(offer.events, peer);
+          let snapshotApplied = 0;
+          let applied: { ackedIds: string[]; received: number; duplicates: number; conflicts: SyncConflict[] };
+          if (offer.snapshot) {
+            snapshotApplied = await this.applySnapshot(offer.snapshot);
+            applied = { ackedIds: [], received: 0, duplicates: 0, conflicts: [] };
+          } else {
+            applied = await this.applyOffer(offer.events, peer);
+          }
           await transport.send({ type: 'sync-ack', appliedEventIds: applied.ackedIds });
 
           // 4. 交换最终时钟，收尾
@@ -288,7 +329,14 @@ export class SyncManager extends EventEmitter {
           await transport.send({ type: 'sync-done', finalVectorClock });
           await nextSyncMessage(iterator, 'sync-done', timeout);
 
-          return this.buildResult(peer, direction, outgoing.length, applied);
+          const result = this.buildResult(peer, direction, outgoing.length, applied);
+          if (snapshot) {
+            result.snapshotSent = snapshot.nodes.length + snapshot.edges.length;
+          }
+          if (snapshotApplied > 0) {
+            result.snapshotApplied = snapshotApplied;
+          }
+          return result;
         } catch (error) {
           await this.trySendError(transport, error);
           throw error;
@@ -314,7 +362,15 @@ export class SyncManager extends EventEmitter {
           });
 
           const offer = await nextSyncMessage(iterator, 'sync-offer', timeout);
-          const applied = await this.applyOffer(offer.events, peer);
+          let snapshotApplied = 0;
+          let applied: { ackedIds: string[]; received: number; duplicates: number; conflicts: SyncConflict[] };
+          if (offer.snapshot) {
+            // 初始快照：已认证对端直接采纳物化状态并推进时钟（G4）
+            snapshotApplied = await this.applySnapshot(offer.snapshot);
+            applied = { ackedIds: [], received: 0, duplicates: 0, conflicts: [] };
+          } else {
+            applied = await this.applyOffer(offer.events, peer);
+          }
           await transport.send({ type: 'sync-ack', appliedEventIds: applied.ackedIds });
 
           // push 模式只对端发，我方回空 offer
@@ -329,7 +385,11 @@ export class SyncManager extends EventEmitter {
           const finalVectorClock = this.eventLog.getClock().toJSON();
           await transport.send({ type: 'sync-done', finalVectorClock });
 
-          return this.buildResult(peer, direction, outgoing.length, applied);
+          const result = this.buildResult(peer, direction, outgoing.length, applied);
+          if (snapshotApplied > 0) {
+            result.snapshotApplied = snapshotApplied;
+          }
+          return result;
         } catch (error) {
           await this.trySendError(transport, error);
           throw error;
@@ -449,6 +509,30 @@ export class SyncManager extends EventEmitter {
     } catch {
       return false;
     }
+  }
+
+  /** 构造物化快照（G4）：当前全部节点/边 + 本机向量时钟 */
+  private async buildSnapshot(): Promise<SyncSnapshot> {
+    return {
+      nodes: await this.storage.listNodes(),
+      edges: await this.storage.listEdges(),
+      clock: this.eventLog.getClock().toJSON(),
+    };
+  }
+
+  /**
+   * 采纳快照：物化节点/边写入存储，时钟合并推进，返回实体数。
+   * 快照仅来自已认证对端；不做逐事件验签（fast-start 取舍，见 protocol.ts）。
+   */
+  private async applySnapshot(snapshot: SyncSnapshot): Promise<number> {
+    for (const node of snapshot.nodes) {
+      await this.storage.putNode(node);
+    }
+    for (const edge of snapshot.edges) {
+      await this.storage.putEdge(edge);
+    }
+    this.eventLog.getClock().merge(VectorClock.fromJSON(snapshot.clock));
+    return snapshot.nodes.length + snapshot.edges.length;
   }
 
   private buildResult(

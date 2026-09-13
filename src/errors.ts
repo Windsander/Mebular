@@ -85,6 +85,10 @@ export const ErrorCodes = {
   STORAGE_KEY_MISSING: 'STORAGE_KEY_MISSING',
   /** 静态解密失败：密钥错误或密文损坏（不返回垃圾数据） */
   STORAGE_DECRYPT_FAILED: 'STORAGE_DECRYPT_FAILED',
+  /** SQLite 适配器不可用：运行环境无 node:sqlite（Node < 22.5） */
+  STORAGE_SQLITE_NOT_AVAILABLE: 'STORAGE_SQLITE_NOT_AVAILABLE',
+  /** SQLite 运行期失败（建表/读写语句异常） */
+  STORAGE_SQLITE_FAILED: 'STORAGE_SQLITE_FAILED',
 
   // 同步错误
   SYNC_PEER_UNAUTHORIZED: 'SYNC_PEER_UNAUTHORIZED',

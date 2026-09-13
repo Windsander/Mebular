@@ -69,7 +69,16 @@ interface Libp2pNodeLike {
     handler: (stream: Libp2pStreamLike, connection: Libp2pConnectionLike) => void,
   ): Promise<void>;
   dialProtocol(target: unknown, protocol: string): Promise<Libp2pStreamLike>;
+  /** 拨号（relay 预约用） */
+  dial(target: unknown): Promise<unknown>;
   getMultiaddrs(): Array<{ toString(): string }>;
+}
+
+/** relay 可选依赖集合（@libp2p/circuit-relay-v2 + @libp2p/identify） */
+interface RelayModules {
+  circuitRelayTransport(options?: Record<string, unknown>): unknown;
+  circuitRelayServer(options?: Record<string, unknown>): unknown;
+  identify(): unknown;
 }
 
 /** 动态导入得到的模块集合 */
@@ -134,6 +143,49 @@ export async function loadLibp2pModules(
     publicKeyFromRaw: keys.publicKeyFromRaw as Libp2pModules['publicKeyFromRaw'],
     peerIdFromPublicKey: peerIdModule.peerIdFromPublicKey as Libp2pModules['peerIdFromPublicKey'],
     multiaddr: loaded['@multiformats/multiaddr']!.multiaddr as Libp2pModules['multiaddr'],
+  };
+}
+
+/**
+ * 加载 circuit relay 可选依赖（`@libp2p/circuit-relay-v2` + `@libp2p/identify`）；
+ * 任一缺失即抛 `NETWORK_RELAY_NOT_AVAILABLE`，调用方可据此降级手动 multiaddr。
+ */
+export async function loadRelayModules(
+  importer: ModuleImporter = defaultImporter,
+): Promise<RelayModules> {
+  const specs = ['@libp2p/circuit-relay-v2', '@libp2p/identify'];
+  const loaded: Record<string, Record<string, unknown>> = {};
+  for (const spec of specs) {
+    try {
+      loaded[spec] = await importer(spec);
+    } catch (error) {
+      throw new NetworkError(
+        `中继可选依赖缺失（${spec}）。安装：npm install @libp2p/circuit-relay-v2 @libp2p/identify；` +
+          '或改用手动 multiaddr（network.libp2p.relayServers 留空）。',
+        ErrorCodes.NETWORK_RELAY_NOT_AVAILABLE,
+        error as Error,
+      );
+    }
+  }
+  const relay = loaded['@libp2p/circuit-relay-v2']!;
+  const identify = loaded['@libp2p/identify']!;
+  const circuitRelayTransport = relay['circuitRelayTransport'];
+  const circuitRelayServer = relay['circuitRelayServer'];
+  const identifyFn = identify['identify'];
+  if (
+    typeof circuitRelayTransport !== 'function' ||
+    typeof circuitRelayServer !== 'function' ||
+    typeof identifyFn !== 'function'
+  ) {
+    throw new NetworkError(
+      'circuit relay 可选依赖导出的表面不符（版本不兼容）',
+      ErrorCodes.NETWORK_RELAY_NOT_AVAILABLE,
+    );
+  }
+  return {
+    circuitRelayTransport: circuitRelayTransport as RelayModules['circuitRelayTransport'],
+    circuitRelayServer: circuitRelayServer as RelayModules['circuitRelayServer'],
+    identify: identifyFn as RelayModules['identify'],
   };
 }
 
@@ -331,6 +383,14 @@ export interface Libp2pProviderOptions {
   listen?: string[];
   /** 应用协议标识，默认 /mebular/1.0.0 */
   protocol?: string;
+  /**
+   * 作为 circuit relay 服务器运行（供异网段主机预约中转）；
+   * 需可选依赖 `@libp2p/circuit-relay-v2` + `@libp2p/identify`，缺包抛
+   * `NETWORK_RELAY_NOT_AVAILABLE`。
+   */
+  relayServer?: boolean;
+  /** 向这些 relay multiaddr 预约中转地址；缺包抛 `NETWORK_RELAY_NOT_AVAILABLE` */
+  relayServers?: string[];
 }
 
 /**
@@ -342,14 +402,22 @@ export class Libp2pProvider implements ConnectionProvider {
   private readonly node: Libp2pNodeLike;
   private readonly protocol: string;
   private readonly localPeerId: PeerId;
+  private readonly relayServers: string[];
   private incomingHandler: ((conn: Connection) => void) | null = null;
   private running = false;
 
-  private constructor(modules: Libp2pModules, node: Libp2pNodeLike, protocol: string, localPeerId: PeerId) {
+  private constructor(
+    modules: Libp2pModules,
+    node: Libp2pNodeLike,
+    protocol: string,
+    localPeerId: PeerId,
+    relayServers: string[],
+  ) {
     this.modules = modules;
     this.node = node;
     this.protocol = protocol;
     this.localPeerId = localPeerId;
+    this.relayServers = relayServers;
   }
 
   /**
@@ -366,19 +434,52 @@ export class Libp2pProvider implements ConnectionProvider {
     const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', options.deviceKey.privateKey));
     const privateKey = await modules.generateKeyPairFromSeed('Ed25519', pkcs8.slice(-32));
 
-    const node = await modules.createLibp2p({
+    // 中继为可选能力：仅在被请求时动态加载；缺包抛 NETWORK_RELAY_NOT_AVAILABLE
+    const relayRequested = options.relayServer === true || (options.relayServers?.length ?? 0) > 0;
+    const relayModules = relayRequested ? await loadRelayModules(importer) : null;
+
+    const transports: unknown[] = [modules.tcp()];
+    const services: Record<string, unknown> = {};
+    const listen = [...(options.listen ?? ['/ip4/0.0.0.0/tcp/0'])];
+    if (relayModules) {
+      services['identify'] = relayModules.identify();
+      if (options.relayServers?.length) {
+        transports.push(relayModules.circuitRelayTransport());
+        // circuit relay 通过 /p2p-circuit 监听地址请求预约；
+        // 预约成功后 getMultiaddrs() 会包含 <relay>/p2p-circuit/p2p/<self>
+        if (!listen.includes('/p2p-circuit')) {
+          listen.push('/p2p-circuit');
+        }
+      }
+      if (options.relayServer) {
+        // 服务名须为 circuitRelay（与包内默认服务名一致）。
+        // applyDefaultLimit:false → 预约不受限，允许在 circuit 上跑任意协议
+        // （Mebular 同步流即在此之上）；v0.1 暂不做 relay 限额，属已知限制。
+        services['circuitRelay'] = relayModules.circuitRelayServer({
+          reservations: { maxReservations: 128, applyDefaultLimit: false },
+        });
+      }
+    }
+
+    const libp2pOptions: Record<string, unknown> = {
       privateKey,
-      addresses: { listen: options.listen ?? ['/ip4/0.0.0.0/tcp/0'] },
-      transports: [modules.tcp()],
+      addresses: { listen },
+      transports,
       connectionEncrypters: [modules.noise()],
       streamMuxers: [modules.yamux()],
-    });
+    };
+    if (Object.keys(services).length > 0) {
+      libp2pOptions['services'] = services;
+    }
+
+    const node = await modules.createLibp2p(libp2pOptions);
 
     return new Libp2pProvider(
       modules,
       node,
       options.protocol ?? MEBULAR_PROTOCOL,
       peerIdFromDevicePublicKey(options.deviceKey.publicKey),
+      options.relayServers ?? [],
     );
   }
 
@@ -402,6 +503,16 @@ export class Libp2pProvider implements ConnectionProvider {
     });
     await this.node.start();
     this.running = true;
+
+    // 向中继预约（best-effort）：拨号触发 circuit 预约，
+    // 预约成功后 getMultiaddrs() 会包含 <relay>/p2p-circuit 地址。
+    for (const relay of this.relayServers) {
+      try {
+        await this.node.dial(this.modules.multiaddr(relay));
+      } catch {
+        // 预约失败不阻塞启动：上层据 getMultiaddrs 是否含 /p2p-circuit 判断
+      }
+    }
   }
 
   async stop(): Promise<void> {

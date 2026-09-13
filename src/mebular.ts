@@ -90,8 +90,17 @@ export interface MebularConfig {
     provider?: ConnectionProvider;
     bonjourFactory?: BonjourServiceFactory;
     listenPort?: number;
-    /** libp2p 真实网络栈（可选依赖；缺包时报 NETWORK_LIBP2P_NOT_AVAILABLE） */
-    libp2p?: { listen?: string[]; protocol?: string };
+    /**
+     * libp2p 真实网络栈（可选依赖；缺包时报 NETWORK_LIBP2P_NOT_AVAILABLE）。
+     * `relayServer`/`relayServers` 启用 circuit relay（G3；需额外可选依赖，
+     * 缺包抛 NETWORK_RELAY_NOT_AVAILABLE）。
+     */
+    libp2p?: {
+      listen?: string[];
+      protocol?: string;
+      relayServer?: boolean;
+      relayServers?: string[];
+    };
   };
   sync?: {
     autoSync: boolean;
@@ -246,6 +255,8 @@ export class Mebular {
             },
             listen: this.config.network.libp2p.listen,
             protocol: this.config.network.libp2p.protocol,
+            relayServer: this.config.network.libp2p.relayServer,
+            relayServers: this.config.network.libp2p.relayServers,
           });
           await this.libp2pProvider.start();
           provider = this.libp2pProvider;

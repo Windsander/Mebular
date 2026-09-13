@@ -14,7 +14,7 @@ Mebular 把记忆存成一张带签名事件的知识图谱，每条事实都记
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-333%20passed-brightgreen)](#项目状态)
+[![Tests](https://img.shields.io/badge/Tests-336%20passed-brightgreen)](#项目状态)
 [![Coverage](https://img.shields.io/badge/Coverage-90.5%25-brightgreen)](#项目状态)
 
 [官网](https://mebular.cyberfederal.io) · [快速上手](#30-秒上手) · [系统架构](#系统架构) · [项目状态](#项目状态) · [贡献](#贡献)
@@ -34,7 +34,7 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 | 同步依赖中心服务 | 必须在线，还要信任中间商 | 向量时钟做增量同步，冲突按「删除优先 > 时间窗 > LWW」裁决，离线可用 |
 | 生态各自为政 | Hermes、mem0、Zep、Graphiti 之间不互通 | CMF v1 交换格式加适配器，Obsidian、日志型端、json-memo 都能接 |
 
-除这四点之外，还带了 X25519 + AES-256-GCM 的加密信道、可用用户主密钥静态加密落盘（HKDF 派生 + AES-256-GCM，落盘密文、内存明文）、可选本地 embedding 语义召回（缺包自动降级关键词并告警）、Hermes 的七方法 Provider 和幂等导入、可选的 libp2p 真实网络，以及一套带覆盖率门槛的测试。
+除这四点之外，还带了 X25519 + AES-256-GCM 的加密信道、可用用户主密钥静态加密落盘（HKDF 派生 + AES-256-GCM，落盘密文、内存明文）、可选本地 embedding 语义召回（缺包自动降级关键词并告警）、Hermes 的七方法 Provider 和幂等导入、可选的 libp2p 真实网络（含 circuit relay v2 跨网段寻址与手动 multiaddr 降级），以及一套带覆盖率门槛的测试。
 
 ---
 
@@ -47,7 +47,7 @@ git clone https://github.com/Windsander/Mebular.git
 cd Mebular
 npm install
 npm run build          # TypeScript strict → dist/
-npm test               # 44 套件 / 333 用例全绿
+npm test               # 44 套件 / 336 用例全绿
 ```
 
 ### 最简例子（复制即跑）
@@ -94,6 +94,29 @@ node examples/quickstart/index.mjs
 ```
 
 `examples/` 下另有 `obsidian-vault`、`log-journal`、`json-memo` 三份带 README 的示例数据，供对应适配器导入，本身不是可执行脚本。
+
+---
+
+## 广域网同步（实验）
+
+`scripts/wan-sync.mjs` 把「两主机增量同步 + 冲突收敛」脚本化，并接上 circuit relay 与手动 multiaddr 两条寻址路径。
+
+```bash
+# 本机复现（真实 libp2p TCP，手动 multiaddr）
+npm run verify:wan
+
+# 本机复现（内嵌 circuit relay v2，经 /p2p-circuit 地址）
+npm run verify:wan:relay
+
+# 跨机：先启中继，再两端 host 模式（异网段）
+node scripts/wan-sync.mjs relay --port 4000
+node scripts/wan-sync.mjs host --role a --port 4001 --write "from A"
+node scripts/wan-sync.mjs host --role b --port 4002 \
+  --relay <relay-multiaddr> --peer <peer-multiaddr> --peer-id device-A --write "from B"
+```
+
+- 依赖可选包 `@libp2p/circuit-relay-v2` + `@libp2p/identify`；**缺包时自动降级为手动 multiaddr** 并告警（错误码 `NETWORK_RELAY_NOT_AVAILABLE`）。
+- 诚实边界：本机模式验证的是协议语义与 relay 链路，**不是跨 NAT 实测**；跨网段需两台真实主机与可达 relay/地址，步骤已脚本化、结果待回填。
 
 ---
 
@@ -144,7 +167,7 @@ Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API
 
 | 项目 | 情况 |
 |------|------|
-| 测试 | 44 个套件、333 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
+| 测试 | 44 个套件、336 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
 | 覆盖率 | 行 90.4%、分支 77.1%，全库门槛 85/65，关键文件另有底线 |
 | 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |

@@ -70,7 +70,11 @@ export interface P2PNetwork {
   readonly peerId: PeerId;
   readonly config: P2PConfig;
   discoverPeer(peerId: PeerId): Promise<PeerInfo | null>;
-  connectToPeer(peerId: PeerId): Promise<Connection>;
+  /**
+   * 连接对端。`address` 提供时按显式地址拨号（手动 multiaddr / relay），
+   * 否则用发现层地址。
+   */
+  connectToPeer(peerId: PeerId, address?: string): Promise<Connection>;
   authenticatePeer(connection: Connection): Promise<boolean>;
   sendMessage(connection: Connection, message: Uint8Array): Promise<void>;
   receiveMessage(connection: Connection): AsyncIterable<Uint8Array>;
@@ -267,15 +271,16 @@ export class P2PNode implements P2PNetwork {
     return this.discovery?.getPeer(peerId) ?? null;
   }
 
-  async connectToPeer(peerId: PeerId): Promise<Connection> {
+  async connectToPeer(peerId: PeerId, address?: string): Promise<Connection> {
     if (!this.running) {
       throw new NetworkError('P2P node not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
 
-    const peerInfo = await this.discoverPeer(peerId);
-    const address = peerInfo?.addresses[0];
+    // 显式地址优先（手动 multiaddr / relay）；否则用发现层地址
+    const peerInfo = address ? null : await this.discoverPeer(peerId);
+    const targetAddress = address ?? peerInfo?.addresses[0];
 
-    const connection = await this.connectionManager.connect(peerId, address);
+    const connection = await this.connectionManager.connect(peerId, targetAddress);
     try {
       const authenticated = await this.authenticatePeer(connection);
       if (!authenticated) {
@@ -445,6 +450,14 @@ export class P2PNode implements P2PNetwork {
 
   getDiscovery(): DeviceDiscovery | null {
     return this.discovery;
+  }
+
+  /**
+   * 本机可拨 multiaddr（libp2p 场景，含 relay 预约地址）；无 multiaddr
+   * 能力（InMemoryHub 等）时返回空数组。供手动寻址 / 跨网测试交换。
+   */
+  getLocalMultiaddrs(): string[] {
+    return this.getProviderMultiaddrs();
   }
 
   /**

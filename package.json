@@ -35,6 +35,8 @@
     "verify": "node scripts/verify.mjs",
     "verify:at-rest": "node scripts/scan-at-rest.mjs",
     "verify:semantic": "node scripts/verify-semantic.mjs",
+    "verify:wan": "node scripts/wan-sync.mjs",
+    "verify:wan:relay": "node scripts/wan-sync.mjs --relay",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "dependencies": {
@@ -44,7 +46,9 @@
   "optionalDependencies": {
     "@chainsafe/libp2p-noise": "^17.0.0",
     "@chainsafe/libp2p-yamux": "^8.0.1",
+    "@libp2p/circuit-relay-v2": "^4.2.13",
     "@libp2p/crypto": "^5.1.23",
+    "@libp2p/identify": "^4.1.14",
     "@libp2p/peer-id": "^6.0.15",
     "@libp2p/tcp": "^11.0.27",
     "@multiformats/multiaddr": "^13.0.3",

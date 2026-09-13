@@ -40,6 +40,7 @@
     "verify:wan:relay": "node scripts/wan-sync.mjs --relay",
     "verify:wan:cross": "node scripts/wan-sync.mjs cross",
     "verify:wan:cross:selftest": "node scripts/wan-sync.mjs selftest",
+    "verify:wan:cross:selftest:isolated": "node scripts/wan-sync.mjs selftest-isolated",
     "bench:snapshot": "node scripts/bench-snapshot.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },

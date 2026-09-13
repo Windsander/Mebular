@@ -126,6 +126,8 @@ export interface MebularConfig {
     cacheDir?: string;
     /** 权重精度/后端（如 'q8'） */
     dtype?: string;
+    /** 最低余弦相似度（低相关不返回）；缺省 0.2 */
+    minScore?: number;
     /** 注入自定义 EmbeddingProvider（测试/替代实现） */
     provider?: EmbeddingProvider;
     /** 动态导入器（测试用；缺省运行时 import） */
@@ -250,6 +252,7 @@ export class Mebular {
           model: this.config.semantic.model,
           cacheDir: this.config.semantic.cacheDir,
           dtype: this.config.semantic.dtype,
+          minScore: this.config.semantic.minScore,
           provider: this.config.semantic.provider,
           importer: this.config.semantic.importer,
           required: this.config.semantic.required,

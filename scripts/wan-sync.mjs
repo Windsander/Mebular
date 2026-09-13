@@ -18,8 +18,9 @@
 //   - relay 模式在单机内嵌 relay 上验证 circuit 链路，**不等于**真实公网 relay；
 //   - 跨网段实测需 host 模式 + 两台真实主机 + 可达 relay/地址，结果需回填文档。
 
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -167,6 +168,7 @@ async function runLocal() {
         deviceKey: await generateDeviceKey(),
         listen: ['/ip4/127.0.0.1/tcp/0'],
         relayServer: true,
+        relayUnlimited: true, // 本地复现需任意协议过 circuit；已在输出中标注风险
       });
       await relayProvider.start();
       relayAddress = relayProvider.getMultiaddrs().find((a) => a.includes('/tcp/'));
@@ -269,10 +271,12 @@ async function runLocal() {
 
 async function runRelay() {
   const port = Number(args.port ?? 4000);
+  const unlimited = args.unlimited === true;
   const provider = await Libp2pProvider.create({
     deviceKey: await generateDeviceKey(),
     listen: [`/ip4/0.0.0.0/tcp/${port}`],
     relayServer: true,
+    relayUnlimited: unlimited,
   });
   try {
     await provider.start();
@@ -280,7 +284,8 @@ async function runRelay() {
     log(`✗ relay 启动失败（${error?.code ?? error?.message}）。安装：npm i @libp2p/circuit-relay-v2 @libp2p/identify`);
     process.exit(1);
   }
-  log('中继节点已启动。把下列 multiaddr 作为 relayServers 交给两端主机：');
+  log(`中继节点已启动（${unlimited ? 'UNLIMITED：允许任意协议，存在滥用风险' : 'LIMITED：默认限额，Mebular 同步流需 --unlimited'}）。`);
+  log('把下列 multiaddr 作为 relayServers 交给两端主机：');
   for (const addr of provider.getMultiaddrs()) {
     log(`  ${addr}`);
   }
@@ -343,15 +348,108 @@ async function runHost() {
   process.exit(0);
 }
 
+// ---------- cross：两真实主机跨网（G3-R，缺环境即红） ----------
+
+function publicIPv4s() {
+  const out = [];
+  for (const infos of Object.values(networkInterfaces())) {
+    for (const info of infos ?? []) {
+      if (info.family === 'IPv4' && !info.internal) out.push(info.address);
+    }
+  }
+  return out;
+}
+
+function stateHash(nodes, edges) {
+  const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+  const canon = JSON.stringify({
+    nodes: [...nodes].sort(byId).map((n) => ({ id: n.id, content: n.content, deletedAt: n.deletedAt ?? null })),
+    edges: [...edges].sort(byId).map((e) => ({ id: e.id, source: e.source, target: e.target, relation: e.relation })),
+  });
+  return createHash('sha256').update(canon).digest('hex');
+}
+
+async function runCross() {
+  const peer = typeof args.peer === 'string' ? args.peer : process.env.MEBULAR_WAN_PEER;
+  const peerId = typeof args['peer-id'] === 'string' ? args['peer-id'] : process.env.MEBULAR_WAN_PEER_ID;
+  const relay = typeof args.relay === 'string' ? args.relay : process.env.MEBULAR_WAN_RELAY;
+  if (!peer || !peerId) {
+    log('✗ G3-R 跨机模式缺少环境：需要两台真实主机（不同网络）与可达地址。');
+    log('  必需：--peer <对端 multiaddr> --peer-id <对端 deviceId>');
+    log('  可选：--relay <relay multiaddr>（异网段经 circuit relay；relay 需 --unlimited）');
+    log('  或设 MEBULAR_WAN_PEER / MEBULAR_WAN_PEER_ID / MEBULAR_WAN_RELAY');
+    log('  对端（机器 A）：node scripts/wan-sync.mjs host --role a --port 4001 --write "from A"');
+    log('  本机（机器 B）：node scripts/wan-sync.mjs cross --peer <A-multiaddr> --peer-id <A-deviceId> [--relay <relay>] --write "from B"');
+    log('  两端的 stateHash 应一致：把对端输出的 stateHash 设到 MEBULAR_WAN_PEER_STATE_HASH 自校验。');
+    process.exit(1);
+  }
+
+  const master = await new IdentityManager().generateUserMasterKey();
+  const masterKeys = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
+  const dir = await mkdtemp(join(tmpdir(), 'mebular-cross-'));
+  const port = Number(args.port ?? 0);
+  const app = new Mebular({
+    storagePath: join(dir, `device-${process.pid}.jsonl`),
+    deviceId: `device-${process.pid}`,
+    encryption: masterKeys,
+    network: {
+      enabled: true,
+      libp2p: { listen: [`/ip4/0.0.0.0/tcp/${port}`], ...(relay ? { relayServers: [relay] } : {}) },
+    },
+    sync: { autoSync: true },
+  });
+  await app.initialize();
+  if (typeof args.write === 'string') {
+    await app.graph.createNode('fact', { text: args.write });
+  }
+
+  const startedAt = new Date().toISOString();
+  const synced = waitForSync(app, Number(args.timeout ?? 30000));
+  await app.node.connectToPeer(peerIdFromString(peerId), peer);
+  const result = await synced;
+
+  const nodes = await app.graph.listNodes();
+  const edges = await app.graph.listEdges();
+  const hash = stateHash(nodes, edges);
+  const peerHash = process.env.MEBULAR_WAN_PEER_STATE_HASH ?? null;
+  const evidence = {
+    mode: 'cross',
+    startedAt,
+    completedAt: new Date().toISOString(),
+    localPublicIPs: publicIPv4s(),
+    localMultiaddrs: app.node.getLocalMultiaddrs(),
+    peer,
+    peerDeviceId: peerId,
+    relay: relay ?? null,
+    sentEvents: result.sentEvents,
+    receivedEvents: result.receivedEvents,
+    nodeCount: nodes.length,
+    edgeCount: edges.length,
+    stateHash: hash,
+    peerStateHash: peerHash,
+    stateMatches: peerHash ? peerHash === hash : null,
+    limitations: ['relay 需显式 --unlimited 才能承载 Mebular 同步流（限额 relay 只允许受限协议）。'],
+  };
+  const outPath = await writeEvidence(evidence);
+  log(`stateHash=${hash}`);
+  if (peerHash) log(`peerStateHash=${peerHash} → ${peerHash === hash ? '✓ 一致' : '✗ 不一致'}`);
+  log(`证据写入：${outPath}`);
+  await app.shutdown();
+  await rm(dir, { recursive: true, force: true });
+  process.exit(peerHash && peerHash !== hash ? 1 : 0);
+}
+
 // ---------- 分发 ----------
 
 if (command === 'relay') {
   await runRelay();
 } else if (command === 'host') {
   await runHost();
+} else if (command === 'cross') {
+  await runCross();
 } else if (command === 'local') {
   await runLocal();
 } else {
-  console.log(`未知子命令：${command}（支持 local | relay | host）`);
+  console.log(`未知子命令：${command}（支持 local | relay | host | cross）`);
   process.exit(1);
 }

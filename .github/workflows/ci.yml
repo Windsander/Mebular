@@ -40,3 +40,41 @@ jobs:
 
       - name: Lint
         run: npm run lint
+
+  semantic-real:
+    name: semantic recall (real model)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      MEBULAR_EMBEDDING_REAL: '1'
+      MEBULAR_EMBEDDING_CACHE_DIR: ${{ github.workspace }}/.cache/transformers
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install optional embedding package (real)
+        run: npm install --save-dev @huggingface/transformers
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: .cache/transformers
+          key: transformers-paraphrase-multilingual-MiniLM-L12-v2-v1
+
+      - name: Build
+        run: npm run build
+
+      - name: Real semantic verification (product path, exit 0)
+        run: npm run verify:semantic:real
+
+      - name: Real semantic lifecycle + distributed tests (node:test)
+        run: node --test tests-semantic/real-semantic.test.mjs

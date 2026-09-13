@@ -199,6 +199,7 @@ describe('circuit relay', () => {
         deviceKey: await makeDeviceKey(),
         listen: ['/ip4/127.0.0.1/tcp/0'],
         relayServer: true,
+        relayUnlimited: true, // 测试需任意协议过 circuit；生产默认限额
       });
       await relay.start();
       let a: Libp2pProvider | null = null;

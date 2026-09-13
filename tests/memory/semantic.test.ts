@@ -18,6 +18,7 @@ import { GraphStore } from '../../src/core/GraphStore.js';
 import { MemoryStorage } from '../../src/storage/MemoryStorage.js';
 import { MemoryStore } from '../../src/memory/MemoryStore.js';
 import { LocalVectorIndex, type EmbeddingProvider } from '../../src/memory/embedding.js';
+import type { VectorIndex } from '../../src/memory/VectorIndex.js';
 import {
   createTransformersEmbeddingProvider,
   resolveVectorIndex,
@@ -196,5 +197,73 @@ describe('门面 semantic 配置', () => {
     } finally {
       warnSpy.mockRestore();
     }
+  });
+
+  it('向量无命中时诚实回退关键词基线（不静默返回空）', async () => {
+    const emptyIndex: VectorIndex = {
+      async index() {},
+      async remove() {},
+      async query() {
+        return [];
+      },
+    };
+    const m = new Mebular({
+      storagePath,
+      deviceId: 'device-A',
+      encryption: masterKeys,
+      semantic: { enabled: true, provider: fakeProvider },
+      sync: { autoSync: false },
+    });
+    await m.initialize();
+    const provider = new HermesMemoryProvider(m, { vectorIndex: emptyIndex });
+    await provider.storeMemory({ type: 'fact', content: '夜間模式' });
+
+    expect(await new MemoryStore(m.graph, emptyIndex).vectorQuery('夜間模式')).toHaveLength(0);
+    const result = await provider.retrieveMemory({ query: '夜間模式' });
+    expect(result.totalMatches).toBe(1); // 回退关键词命中
+    await m.shutdown();
+  });
+});
+
+// ---------- 索引生命周期：重启回填、删除剪枝、低相关阈值（G2-R） ----------
+
+describe('G2-R 向量索引生命周期', () => {
+  function makeStore(index?: VectorIndex) {
+    const graph = new GraphStore({ storage: new MemoryStorage(), author: 'device-A' });
+    return { graph, memory: new MemoryStore(graph, index) };
+  }
+
+  it('新会话索引为空时，首次向量查询自动回填既有节点（重启恢复）', async () => {
+    const { graph } = makeStore();
+    const writer = new MemoryStore(graph, new LocalVectorIndex(fakeProvider));
+    await writer.addFact({ subject: 'user', predicate: 'prefers', object: '深色主題' });
+
+    const freshIndex = new LocalVectorIndex(fakeProvider);
+    const reopened = new MemoryStore(graph, freshIndex);
+    expect(freshIndex.size).toBe(0);
+    const hits = await reopened.vectorQuery('夜間模式', 5);
+    expect(hits).toHaveLength(1);
+    expect(freshIndex.size).toBe(1);
+  });
+
+  it('墓碑节点不被召回，并从索引移除', async () => {
+    const graph = new GraphStore({ storage: new MemoryStorage(), author: 'device-A' });
+    const index = new LocalVectorIndex(fakeProvider);
+    const memory = new MemoryStore(graph, index);
+    const node = await memory.addFact({ subject: 'user', predicate: 'prefers', object: '深色主題' });
+    expect(await memory.vectorQuery('夜間模式')).toHaveLength(1);
+
+    await graph.deleteNode(node.id);
+    expect(await memory.vectorQuery('夜間模式')).toHaveLength(0);
+    expect(index.ids()).not.toContain(node.id);
+  });
+
+  it('低于 minScore 的命中被过滤（低相关返回空）', async () => {
+    const graph = new GraphStore({ storage: new MemoryStorage(), author: 'device-A' });
+    const index = new LocalVectorIndex(fakeProvider, { minScore: 0.5 });
+    const memory = new MemoryStore(graph, index);
+    await memory.addFact({ subject: 'user', predicate: 'drinks', object: '咖啡' });
+
+    expect(await memory.vectorQuery('夜間模式')).toHaveLength(0);
   });
 });

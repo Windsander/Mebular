@@ -62,6 +62,7 @@
     "bench:snapshot": "node scripts/bench-snapshot.mjs",
     "verify:mcp:stdio": "node scripts/verify-mcp-stdio.mjs",
     "verify:mcp:http": "node scripts/verify-mcp-http.mjs",
+    "verify:mcp:oauth": "node scripts/verify-mcp-oauth-hardening.mjs",
     "verify:mcp:skill": "node scripts/verify-mcp-skill.mjs",
     "verify:mcp:publish": "node scripts/verify-mcp-publish.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"

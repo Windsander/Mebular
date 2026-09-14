@@ -5,7 +5,7 @@
 // - fail closed：非环回必须 TLS 且 auth != none，否则拒绝启动。
 // - 单实例：<home>/lock O_EXCL + PID 存活检测 + 陈旧回收。
 
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
@@ -16,8 +16,99 @@ import { TOOL_SCOPES } from './tools.mjs';
 
 const SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
 const SCOPE_RANK = { 'memory.read': 0, 'memory.write': 1, 'memory.admin': 2 };
+const DEFAULT_SCOPES = ['memory.read'];
 const ACCESS_TTL = 900; // 15min
 const REFRESH_TTL = 30 * 24 * 3600; // 30d
+const RATE_WINDOW_MS = 60_000;
+
+function safeEqual(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
+function basicPassword(header) {
+  if (typeof header !== 'string' || !header.startsWith('Basic ')) return null;
+  try {
+    const decoded = Buffer.from(header.slice('Basic '.length), 'base64').toString('utf-8');
+    const idx = decoded.indexOf(':');
+    return idx === -1 ? null : decoded.slice(idx + 1);
+  } catch {
+    return null;
+  }
+}
+
+function makeRateLimiter(max) {
+  const hits = new Map();
+  return (key) => {
+    const now = Date.now();
+    const list = (hits.get(key) ?? []).filter((t) => now - t < RATE_WINDOW_MS);
+    list.push(now);
+    hits.set(key, list);
+    if (list.length > max) {
+      return { limited: true, retryAfter: Math.max(1, Math.ceil((RATE_WINDOW_MS - (now - list[0])) / 1000)) };
+    }
+    return { limited: false };
+  };
+}
+
+// ---------- 客户端注册 / 同意码 / 撤销持久（D45） ----------
+
+async function loadClientRegistry(clientsFile) {
+  if (!existsSync(clientsFile)) return [];
+  try {
+    const data = JSON.parse(await readFile(clientsFile, 'utf-8'));
+    return Array.isArray(data.clients) ? data.clients : [];
+  } catch (error) {
+    throw new Error(`clientsFile 损坏：${clientsFile}（${error.message}）`);
+  }
+}
+
+async function findClient(clientsFile, clientId) {
+  if (!clientId) return null;
+  return (await loadClientRegistry(clientsFile)).find((c) => c.clientId === clientId) ?? null;
+}
+
+async function saveClientRegistry(clientsFile, clients) {
+  await mkdir(dirname(clientsFile), { recursive: true });
+  await writeFile(clientsFile, JSON.stringify({ clients }, null, 2), 'utf-8');
+  await chmod(clientsFile, 0o600);
+}
+
+async function consumeConsent(consentFile, code) {
+  if (!code || !existsSync(consentFile)) return null;
+  let data;
+  try {
+    data = JSON.parse(await readFile(consentFile, 'utf-8'));
+  } catch {
+    return null;
+  }
+  const codes = Array.isArray(data.codes) ? data.codes : [];
+  const idx = codes.findIndex((c) => c.code === code && !c.usedAt && c.exp > Date.now());
+  if (idx === -1) return null;
+  codes[idx].usedAt = new Date().toISOString();
+  await writeFile(consentFile, JSON.stringify({ codes }, null, 2), 'utf-8');
+  await chmod(consentFile, 0o600);
+  return codes[idx];
+}
+
+async function loadRevoked(revokedFile) {
+  if (!existsSync(revokedFile)) return new Set();
+  try {
+    const data = JSON.parse(await readFile(revokedFile, 'utf-8'));
+    return new Set(Array.isArray(data.jti) ? data.jti : []);
+  } catch {
+    return new Set();
+  }
+}
+
+async function persistRevoked(revokedFile, revoked) {
+  await mkdir(dirname(revokedFile), { recursive: true });
+  await writeFile(revokedFile, JSON.stringify({ jti: [...revoked], updatedAt: new Date().toISOString() }, null, 2), 'utf-8');
+  await chmod(revokedFile, 0o600);
+}
 
 // ---------- 单实例锁 ----------
 
@@ -141,7 +232,7 @@ async function verifyJwt(signingKey, token, { issuer, resource, revoked }) {
   return payload;
 }
 
-function metadataFor(issuer) {
+function metadataFor(issuer, { registrationEnabled = false } = {}) {
   const resource = `${issuer}/mcp`;
   return {
     protectedResource: {
@@ -154,10 +245,10 @@ function metadataFor(issuer) {
       issuer,
       authorization_endpoint: `${issuer}/authorize`,
       token_endpoint: `${issuer}/token`,
-      registration_endpoint: `${issuer}/register`,
+      ...(registrationEnabled ? { registration_endpoint: `${issuer}/register` } : {}),
       jwks_uri: `${issuer}/jwks`,
       response_types_supported: ['code'],
-      grant_types_supported: ['authorization_code', 'refresh_token', 'client_credentials'],
+      grant_types_supported: ['authorization_code', 'refresh_token'],
       code_challenge_methods_supported: ['S256'],
       token_endpoint_auth_methods_supported: ['none'],
       scopes_supported: SCOPES,
@@ -258,13 +349,22 @@ export async function startHttpServer({ home, service, buildServer, host = '127.
   }
 
   const scheme = tls ? 'https' : 'http';
+  // D45：OAuth 硬化配置（密钥/secret 不落 config，仅 env）
+  const adminSecret = process.env.MEBULAR_OAUTH_ADMIN_SECRET ?? null;
+  const registerSecret = process.env.MEBULAR_OAUTH_REGISTER_SECRET ?? null;
+  const registrationEnabled = Boolean(registerSecret);
+  const clientsFile = process.env.MEBULAR_OAUTH_CLIENTS_FILE ?? join(home, 'auth', 'clients.json');
+  const consentFile = process.env.MEBULAR_OAUTH_CONSENT_FILE ?? join(home, 'auth', 'consent.json');
+  const revokedFile = process.env.MEBULAR_OAUTH_REVOKED_FILE ?? join(home, 'auth', 'revoked.json');
+  const rateLimit = makeRateLimiter(Number(process.env.MEBULAR_OAUTH_RATE_LIMIT ?? 60));
+
   // origin/issuer 在 listen 后按实际端口重算（支持 --port 0）
   let origin = `${scheme}://${isLoopback ? '127.0.0.1' : host}:${port}`;
   let issuer = process.env.MEBULAR_OAUTH_ISSUER ?? origin;
-  let metadata = metadataFor(issuer);
+  let metadata = metadataFor(issuer, { registrationEnabled });
   const signingKey = auth === 'oauth' ? await loadOrCreateSigningKey(home) : null;
   const codes = new Map();
-  const revoked = new Set();
+  const revoked = await loadRevoked(revokedFile);
 
   // 单实例 transport（stateful + JSON 响应）
   const mcpServer = buildServer(service);
@@ -320,55 +420,130 @@ export async function startHttpServer({ home, service, buildServer, host = '127.
           });
         }
         if (path === '/register' && req.method === 'POST') {
-          return sendJson(res, 201, { client_id: randomUUID(), token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] });
+          // D45：默认禁用；仅 bootstrap secret 匹配时允许，且 scope 上限 memory.read
+          if (!registrationEnabled) return sendJson(res, 404, { error: 'not_found' });
+          const provided = req.headers['x-mebular-register-secret'];
+          const bearer = typeof req.headers['authorization'] === 'string' && req.headers['authorization'].startsWith('Bearer ')
+            ? req.headers['authorization'].slice('Bearer '.length)
+            : null;
+          if (!safeEqual(typeof provided === 'string' ? provided : '', registerSecret) && !safeEqual(bearer ?? '', registerSecret)) {
+            return sendJson(res, 401, { error: 'invalid_client' });
+          }
+          let meta = {};
+          try {
+            meta = JSON.parse(body.toString('utf-8') || '{}');
+          } catch {
+            meta = {};
+          }
+          const redirectUris = Array.isArray(meta.redirect_uris) ? meta.redirect_uris.filter((s) => typeof s === 'string') : [];
+          if (redirectUris.length === 0) return sendJson(res, 400, { error: 'invalid_redirect_uri' });
+          const clientId = randomUUID();
+          const clients = await loadClientRegistry(clientsFile);
+          clients.push({ clientId, redirectUris, allowedScopes: [...DEFAULT_SCOPES], source: 'dcr', createdAt: new Date().toISOString() });
+          await saveClientRegistry(clientsFile, clients);
+          return sendJson(res, 201, { client_id: clientId, redirect_uris: redirectUris, scope: DEFAULT_SCOPES.join(' '), token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'] });
         }
         if (path === '/authorize' && (req.method === 'GET' || req.method === 'POST')) {
+          const ip = req.socket?.remoteAddress ?? 'unknown';
+          const rl = rateLimit(ip);
+          if (rl.limited) {
+            res.setHeader('retry-after', String(rl.retryAfter));
+            return sendJson(res, 429, { error: 'too_many_requests' });
+          }
           const params = req.method === 'GET' ? url.searchParams : new URLSearchParams(body.toString('utf-8'));
+          if (params.get('response_type') !== 'code') {
+            return sendJson(res, 400, { error: 'unsupported_response_type' });
+          }
+          const client = await findClient(clientsFile, params.get('client_id'));
+          if (!client) return sendJson(res, 401, { error: 'invalid_client', error_description: 'client_id 未注册' });
           const redirectUri = params.get('redirect_uri');
+          if (!redirectUri || !client.redirectUris.includes(redirectUri)) {
+            return sendJson(res, 400, { error: 'invalid_request', error_description: 'redirect_uri 未注册（需精确匹配）' });
+          }
           const codeChallenge = params.get('code_challenge');
-          const method = params.get('code_challenge_method');
-          const state = params.get('state');
-          if (!redirectUri || !codeChallenge || method !== 'S256') {
+          if (!codeChallenge || params.get('code_challenge_method') !== 'S256') {
             return sendJson(res, 400, { error: 'invalid_request', error_description: 'PKCE S256 required' });
           }
+          // 用户认证/同意：管理员口令 或 一次性本地同意码，二者缺一即拒（绝不 302）
+          const headerSecret = req.headers['x-mebular-admin-secret'];
+          const suppliedSecret =
+            params.get('admin_secret') ??
+            (typeof headerSecret === 'string' ? headerSecret : null) ??
+            basicPassword(req.headers['authorization']);
+          let userAuthorized = false;
+          let consentScopes = null;
+          if (adminSecret && suppliedSecret && safeEqual(String(suppliedSecret), adminSecret)) {
+            userAuthorized = true;
+          } else {
+            const consent = await consumeConsent(consentFile, params.get('consent_code'));
+            if (consent) {
+              userAuthorized = true;
+              consentScopes = Array.isArray(consent.scopes) ? consent.scopes : DEFAULT_SCOPES;
+            }
+          }
+          if (!userAuthorized) {
+            return sendJson(res, 401, { error: 'access_denied', error_description: '需要管理员口令或本地同意码' });
+          }
+          const requested = (params.get('scope') ?? '').split(/\s+/).filter(Boolean);
+          const requestedScopes = requested.length > 0 ? requested : [...DEFAULT_SCOPES];
+          const unknown = requestedScopes.filter((s) => !SCOPES.includes(s));
+          if (unknown.length > 0) return sendJson(res, 400, { error: 'invalid_scope', error_description: unknown.join(' ') });
+          const notAllowed = requestedScopes.filter((s) => !client.allowedScopes.includes(s));
+          if (notAllowed.length > 0) {
+            return sendJson(res, 403, { error: 'insufficient_scope', error_description: `超出客户端 allowed_scopes: ${notAllowed.join(' ')}` });
+          }
+          const granted = consentScopes ? requestedScopes.filter((s) => consentScopes.includes(s)) : requestedScopes;
+          if (granted.length === 0) return sendJson(res, 403, { error: 'insufficient_scope', error_description: '同意范围不含请求 scope' });
           const code = randomUUID();
-          codes.set(code, {
-            redirectUri,
-            codeChallenge,
-            scope: (params.get('scope') ?? 'memory.read').split(/\s+/).filter(Boolean),
-            exp: Date.now() + 300_000,
-          });
+          const state = params.get('state');
+          codes.set(code, { clientId: client.clientId, redirectUri, codeChallenge, scope: granted, exp: Date.now() + 300_000 });
           const location = `${redirectUri}?code=${encodeURIComponent(code)}${state ? `&state=${encodeURIComponent(state)}` : ''}`;
           res.statusCode = 302;
           res.setHeader('location', location);
           return res.end();
         }
         if (path === '/token' && req.method === 'POST') {
+          const ip = req.socket?.remoteAddress ?? 'unknown';
+          const rl = rateLimit(ip);
+          if (rl.limited) {
+            res.setHeader('retry-after', String(rl.retryAfter));
+            return sendJson(res, 429, { error: 'too_many_requests' });
+          }
           const params = new URLSearchParams(body.toString('utf-8'));
           const grantType = params.get('grant_type');
           const now = Math.floor(Date.now() / 1000);
-          let scope = ['memory.read'];
+          let scope = [...DEFAULT_SCOPES];
+          let clientId = params.get('client_id');
           if (grantType === 'authorization_code') {
-            const record = codes.get(params.get('code') ?? '');
+            const code = params.get('code') ?? '';
+            const record = codes.get(code);
             if (!record || record.exp < Date.now()) return sendJson(res, 400, { error: 'invalid_grant' });
+            const client = await findClient(clientsFile, clientId);
+            if (!client || client.clientId !== record.clientId) return sendJson(res, 400, { error: 'invalid_client' });
+            if (params.get('redirect_uri') !== record.redirectUri) {
+              return sendJson(res, 400, { error: 'invalid_grant', error_description: 'redirect_uri mismatch' });
+            }
             const verifier = params.get('code_verifier') ?? '';
             const challenge = b64url(createHash('sha256').update(verifier).digest());
             if (challenge !== record.codeChallenge) return sendJson(res, 400, { error: 'invalid_grant', error_description: 'PKCE verification failed' });
-            codes.delete(params.get('code'));
+            codes.delete(code);
             scope = record.scope;
+            clientId = record.clientId;
           } else if (grantType === 'refresh_token') {
             const payload = await verifyJwt(signingKey, params.get('refresh_token') ?? '', { issuer, resource: `${issuer}/mcp`, revoked });
             if (!payload || payload.type !== 'refresh') return sendJson(res, 400, { error: 'invalid_grant' });
-            revoked.add(payload.jti); // 轮换：旧 refresh 失效
-            scope = payload.scope ?? ['memory.read'];
-          } else if (grantType === 'client_credentials') {
-            scope = (params.get('scope') ?? 'memory.read').split(/\s+/).filter((s) => SCOPES.includes(s));
-            if (scope.length === 0) return sendJson(res, 400, { error: 'invalid_scope' });
+            if (clientId && payload.client_id && clientId !== payload.client_id) return sendJson(res, 400, { error: 'invalid_grant' });
+            revoked.add(payload.jti); // 轮换：旧 refresh 失效，持久化
+            await persistRevoked(revokedFile, revoked);
+            scope = Array.isArray(payload.scope) ? payload.scope : DEFAULT_SCOPES;
+            clientId = payload.client_id ?? clientId;
           } else {
+            // D45：client_credentials 已移除
             return sendJson(res, 400, { error: 'unsupported_grant_type' });
           }
-          const access = await signJwt(signingKey, { iss: issuer, aud: `${issuer}/mcp`, sub: 'user', scope, type: 'access', jti: randomUUID(), iat: now, exp: now + ACCESS_TTL });
-          const refresh = await signJwt(signingKey, { iss: issuer, aud: `${issuer}/mcp`, sub: 'user', scope, type: 'refresh', jti: randomUUID(), iat: now, exp: now + REFRESH_TTL });
+          const claims = { iss: issuer, aud: `${issuer}/mcp`, sub: 'user', client_id: clientId ?? null, scope };
+          const access = await signJwt(signingKey, { ...claims, type: 'access', jti: randomUUID(), iat: now, exp: now + ACCESS_TTL });
+          const refresh = await signJwt(signingKey, { ...claims, type: 'refresh', jti: randomUUID(), iat: now, exp: now + REFRESH_TTL });
           return sendJson(res, 200, { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL, refresh_token: refresh, scope: scope.join(' ') });
         }
         if (path === '/token/revoke' && req.method === 'POST') {
@@ -378,7 +553,10 @@ export async function startHttpServer({ home, service, buildServer, host = '127.
           if (parts.length === 3) {
             try {
               const payload = JSON.parse(Buffer.from(b64urlToBytes(parts[1]), 'utf8').toString('utf-8'));
-              if (payload.jti) revoked.add(payload.jti);
+              if (payload.jti) {
+                revoked.add(payload.jti);
+                await persistRevoked(revokedFile, revoked);
+              }
             } catch {
               // ignore malformed
             }
@@ -417,7 +595,7 @@ export async function startHttpServer({ home, service, buildServer, host = '127.
   const actualPort = server.address().port;
   origin = `${scheme}://${isLoopback ? '127.0.0.1' : host}:${actualPort}`;
   issuer = process.env.MEBULAR_OAUTH_ISSUER ?? origin;
-  metadata = metadataFor(issuer);
+  metadata = metadataFor(issuer, { registrationEnabled });
   const close = async () => {
     await new Promise((resolve) => server.close(() => resolve()));
     await mcpServer.close().catch(() => undefined);

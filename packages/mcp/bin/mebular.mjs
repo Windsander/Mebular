@@ -34,8 +34,91 @@ function homeDir() {
 function tokensPath(flagValue) {
   return flagValue ?? process.env.MEBULAR_TOKENS_FILE ?? join(homeDir(), 'auth', 'tokens.json');
 }
+function clientsPath(flagValue) {
+  return flagValue ?? process.env.MEBULAR_OAUTH_CLIENTS_FILE ?? join(homeDir(), 'auth', 'clients.json');
+}
+function consentPath(flagValue) {
+  return flagValue ?? process.env.MEBULAR_OAUTH_CONSENT_FILE ?? join(homeDir(), 'auth', 'consent.json');
+}
 
-async function runToken(action, flags) {
+function parseScopes(value, fallback = 'memory.read') {
+  return String(value ?? fallback).split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+async function readJsonFile(file, shape) {
+  if (!existsSync(file)) return shape;
+  try {
+    const data = JSON.parse(await readFile(file, 'utf-8'));
+    return data;
+  } catch (error) {
+    console.error(`✗ JSON 文件损坏：${file}（${error.message}）`);
+    process.exit(2);
+  }
+}
+
+async function runTokenClient(sub, flags) {
+  const file = clientsPath(typeof flags['clients-file'] === 'string' ? flags['clients-file'] : undefined);
+  const data = await readJsonFile(file, { clients: [] });
+  if (!Array.isArray(data.clients)) data.clients = [];
+
+  if (sub === 'add') {
+    const redirect = flags.redirect;
+    if (typeof redirect !== 'string' || redirect.length === 0) {
+      console.error('用法：mebular token client add --redirect <uri> [--scope memory.read,memory.write]');
+      process.exit(2);
+    }
+    const record = { clientId: randomUUID(), redirectUris: [redirect], allowedScopes: parseScopes(flags.scope), createdAt: new Date().toISOString() };
+    data.clients.push(record);
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, JSON.stringify(data, null, 2), 'utf-8');
+    await chmod(file, 0o600);
+    console.log(JSON.stringify(record, null, 2));
+    return;
+  }
+  if (sub === 'list') {
+    console.log(JSON.stringify(data.clients, null, 2));
+    return;
+  }
+  if (sub === 'remove') {
+    const before = data.clients.length;
+    data.clients = data.clients.filter((c) => c.clientId !== flags.id);
+    if (data.clients.length === before) {
+      console.error(`✗ 未找到 client：${flags.id}`);
+      process.exit(2);
+    }
+    await writeFile(file, JSON.stringify(data, null, 2), 'utf-8');
+    console.log(`已移除 client ${flags.id}`);
+    return;
+  }
+  console.error('用法：mebular token client <add|list|remove> [--redirect uri] [--scope a,b] [--id x]');
+  process.exit(2);
+}
+
+async function runTokenConsent(flags) {
+  const ttl = flags.ttl !== undefined ? Number(flags.ttl) : 300;
+  const scopes = parseScopes(flags.scope);
+  const file = consentPath(typeof flags['consent-file'] === 'string' ? flags['consent-file'] : undefined);
+  const data = await readJsonFile(file, { codes: [] });
+  const now = Date.now();
+  const codes = (Array.isArray(data.codes) ? data.codes : []).filter((c) => c.exp > now && !c.usedAt);
+  const code = `meb_consent_${randomUUID().replace(/-/g, '')}`;
+  codes.push({ code, scopes, createdAt: new Date(now).toISOString(), exp: now + ttl * 1000 });
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, JSON.stringify({ codes }, null, 2), 'utf-8');
+  await chmod(file, 0o600);
+  console.log(JSON.stringify({ code, scopes, expiresAt: new Date(now + ttl * 1000).toISOString(), consentFile: file }, null, 2));
+  console.error('（将同意码提交到 /authorize 表示授权；一次性、短时有效）');
+}
+
+async function runToken(action, flags, subArg) {
+  if (action === 'consent') {
+    await runTokenConsent(flags);
+    return;
+  }
+  if (action === 'client') {
+    await runTokenClient(subArg, flags);
+    return;
+  }
   const path = tokensPath(typeof flags['tokens-file'] === 'string' ? flags['tokens-file'] : undefined);
   let data = { tokens: [] };
   if (existsSync(path)) {
@@ -197,7 +280,7 @@ async function main() {
       return;
     }
     case 'token': {
-      await runToken(argv[1], flags);
+      await runToken(argv[1], flags, argv[2]);
       return;
     }
     case '--help':
@@ -210,8 +293,10 @@ async function main() {
           '命令：',
           '  mcp                          启动 stdio MCP server',
           '  serve [--host --port --auth --tls-key --tls-cert --tokens-file]   Streamable HTTP server',
-          '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   访问令牌管理',
-          '  init / keygen / print-config / status   （G6.4+ 计划）',
+          '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
+          '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
+          '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',
+          '  init / keygen / print-config / status   初始化与状态',
         ].join('\n'),
       );
       process.exit(0);

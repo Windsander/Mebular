@@ -47,6 +47,9 @@ jobs:
       - name: HTTP MCP (auth / PKCE / lock / fail-closed)
         run: npm run verify:mcp:http
 
+      - name: OAuth hardening (no anonymous admin token)
+        run: npm run verify:mcp:oauth
+
       - name: Skill package + CLI (init/keygen/print-config/status)
         run: npm run verify:mcp:skill
 

@@ -6,7 +6,7 @@
 // 干净环境退出码 0。前置：npm run build（core dist）。
 
 import { createHash, randomUUID } from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -169,31 +169,46 @@ try {
     const jwks = await httpJson(`${base}/jwks`);
     check('/jwks 提供 EdDSA 公钥', jwks.status === 200 && jwks.json?.keys?.[0]?.alg === 'EdDSA' && jwks.json.keys[0].crv === 'Ed25519');
 
+    // D45：预注册客户端 + 本地同意码（不再有匿名 DCR / client_credentials）
+    const redirectUri = 'http://127.0.0.1/callback';
+    const cliEnv = { ...process.env, MEBULAR_HOME: oauthHome, MEBULAR_STORAGE_PATH: join(oauthHome, 's.jsonl') };
+    const addClient = JSON.parse(
+      execFileSync(process.execPath, [bin, 'token', 'client', 'add', '--redirect', redirectUri, '--scope', 'memory.read,memory.write'], { env: cliEnv, encoding: 'utf-8' }),
+    );
+    const clientId = addClient.clientId;
+    check('token client add 预注册客户端', typeof clientId === 'string' && clientId.length > 0);
+    const consent = JSON.parse(
+      execFileSync(process.execPath, [bin, 'token', 'consent', '--scope', 'memory.read,memory.write', '--ttl', '600'], { env: cliEnv, encoding: 'utf-8' }),
+    );
+
+    // 匿名 /authorize 不得颁发 code
+    const anon = await fetch(`${base}/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge=x&code_challenge_method=S256&scope=memory.read`, { redirect: 'manual' });
+    check('匿名 /authorize 被拒且无 code', anon.status === 401 && !anon.headers.get('location'), `status=${anon.status}`);
+
     // PKCE 授权码流程
     const verifier = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '');
     const challenge = base64url(createHash('sha256').update(verifier).digest());
-    const redirectUri = 'http://127.0.0.1/callback';
     const authzRes = await fetch(
-      `${base}/authorize?response_type=code&client_id=verify-client&redirect_uri=${encodeURIComponent(redirectUri)}` +
-        `&code_challenge=${challenge}&code_challenge_method=S256&scope=${encodeURIComponent('memory.read memory.write')}&state=xyz`,
+      `${base}/authorize?response_type=code&client_id=${clientId}&redirect_uri=${encodeURIComponent(redirectUri)}` +
+        `&code_challenge=${challenge}&code_challenge_method=S256&scope=${encodeURIComponent('memory.read memory.write')}&state=xyz&consent_code=${consent.code}`,
       { redirect: 'manual' },
     );
     const location = authzRes.headers.get('location') ?? '';
     const code = new URL(location).searchParams.get('code');
     const state = new URL(location).searchParams.get('state');
-    check('PKCE /authorize 302 带 code', authzRes.status === 302 && !!code && state === 'xyz', `status=${authzRes.status}`);
+    check('PKCE /authorize（同意码）302 带 code', authzRes.status === 302 && !!code && state === 'xyz', `status=${authzRes.status}`);
 
     const badVerifier = await httpJson(`${base}/token`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: redirectUri, client_id: 'verify-client', code_verifier: 'wrong' }).toString(),
+      body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: redirectUri, client_id: clientId, code_verifier: 'wrong' }).toString(),
     });
     check('PKCE 错误 verifier → invalid_grant', badVerifier.status === 400 && badVerifier.json?.error === 'invalid_grant');
 
     const tokenRes = await httpJson(`${base}/token`, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
-      body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: redirectUri, client_id: 'verify-client', code_verifier: verifier }).toString(),
+      body: new URLSearchParams({ grant_type: 'authorization_code', code, redirect_uri: redirectUri, client_id: clientId, code_verifier: verifier }).toString(),
     });
     check('PKCE /token 颁发 access_token', tokenRes.status === 200 && typeof tokenRes.json?.access_token === 'string' && tokenRes.json?.token_type === 'Bearer');
 

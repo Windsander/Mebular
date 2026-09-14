@@ -6,7 +6,7 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { describe, it, expect } from '@jest/globals';
-import { checkCrossEnv, judgeCrossEvidence, REQUIRED_ENV } from '../../scripts/mcp-cross-lib.mjs';
+import { checkCrossEnv, judgeCrossEvidence, judgeSelftest, REQUIRED_ENV } from '../../scripts/mcp-cross-lib.mjs';
 import { judgeDifferentNetwork, isPrivateIp } from '../../scripts/wan-egress.mjs';
 
 const gateScript = fileURLToPath(new URL('../../scripts/verify-mcp-cross.mjs', import.meta.url));
@@ -63,17 +63,53 @@ describe('mcp-cross.judgeCrossEvidence', () => {
     ['stateMatches', false, 'stateMatches'],
     ['identityShared', false, 'identityShared'],
     ['differentPublicNetwork', null, 'differentPublicNetwork'],
-    ['pendingPeers', 3, 'pendingPeers'],
   ])('单项不达标 %s → passed=false 且点名', (key, value, needle) => {
     const v = judgeCrossEvidence({ ...green, [key]: value });
     expect(v.passed).toBe(false);
     expect(v.failures.join('\n')).toContain(needle);
   });
 
+  it('pendingPeers 非 0 不判失败（其为待发事件数，非达成判据）', () => {
+    const v = judgeCrossEvidence({ ...green, pendingPeers: 5 });
+    expect(v.passed).toBe(true);
+  });
+
   it('缺字段（undefined）视为不达标', () => {
     const v = judgeCrossEvidence({});
     expect(v.passed).toBe(false);
-    expect(v.failures.length).toBe(5);
+    expect(v.failures.length).toBe(4);
+  });
+});
+
+describe('mcp-cross.judgeSelftest（本地夹具判定）', () => {
+  const chainOk = {
+    markerFound: true,
+    stateMatches: true,
+    identityShared: true,
+    differentPublicNetwork: null,
+    differentPublicNetworkBasis: 'egress-unknown',
+    pendingPeers: 1,
+  };
+
+  it('链路全过且因异网缺失而被门禁正确拦下 → ok=true（non-evidence）', () => {
+    const v = judgeSelftest(chainOk);
+    expect(v.ok).toBe(true);
+    expect(v.chainFailures).toEqual([]);
+    expect(v.blockedByEgress).toBe(true);
+    expect(v.gatePassed).toBe(false);
+  });
+
+  it('链路断言未过 → ok=false 且点名', () => {
+    const v = judgeSelftest({ ...chainOk, stateMatches: false });
+    expect(v.ok).toBe(false);
+    expect(v.chainFailures).toContain('stateMatches');
+  });
+
+  it('环回却判 differentPublicNetwork=true（逻辑错误）→ ok=false', () => {
+    const v = judgeSelftest({ ...chainOk, differentPublicNetwork: true });
+    expect(v.ok).toBe(false);
+    expect(v.blockedByEgress).toBe(false);
+    expect(v.gatePassed).toBe(true);
   });
 });
 

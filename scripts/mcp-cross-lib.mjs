@@ -54,7 +54,11 @@ export function printCrossGuidance(log = console.log) {
   log('  门禁：本脚本无上述环境时退出码 1（红），环境齐备且断言全过才退出码 0。');
 }
 
-/** 判定跨网证据是否达成 G6.6（全部为 true / 0 才算通过）。 */
+/**
+ * 判定跨网证据是否达成 G6.6（四项全 true 才算通过）。
+ * 注：`MemoryStatus.pendingPeers` 实为 SyncManager 的**待发事件数**（命名历史遗留），
+ * 成功同步后不保证为 0，故**不作为**达成判据，仅在证据里记录。
+ */
 export function judgeCrossEvidence(evidence) {
   const failures = [];
   if (evidence?.markerFound !== true) failures.push('markerFound !== true（B 未召回 A 的写入）');
@@ -63,6 +67,25 @@ export function judgeCrossEvidence(evidence) {
   if (evidence?.differentPublicNetwork !== true) {
     failures.push(`differentPublicNetwork !== true（${evidence?.differentPublicNetworkBasis ?? 'unknown'}）`);
   }
-  if (evidence?.pendingPeers !== 0) failures.push('pendingPeers !== 0');
   return { passed: failures.length === 0, failures };
+}
+
+/**
+ * 本地双节点夹具（non-evidence）判定：链路断言必须全过，且门禁必须因缺少真实异网出口
+ * （`differentPublicNetwork !== true`）而**正确地不通过**——否则说明判定逻辑有误。
+ */
+export function judgeSelftest(evidence) {
+  const chainFailures = [];
+  if (evidence?.markerFound !== true) chainFailures.push('markerFound');
+  if (evidence?.stateMatches !== true) chainFailures.push('stateMatches');
+  if (evidence?.identityShared !== true) chainFailures.push('identityShared');
+  const gate = judgeCrossEvidence(evidence);
+  const blockedByEgress = evidence?.differentPublicNetwork !== true;
+  return {
+    ok: chainFailures.length === 0 && blockedByEgress && gate.passed === false,
+    chainFailures,
+    blockedByEgress,
+    gatePassed: gate.passed,
+    gateFailures: gate.failures,
+  };
 }

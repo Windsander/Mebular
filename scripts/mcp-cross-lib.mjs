@@ -56,8 +56,8 @@ export function printCrossGuidance(log = console.log) {
 
 /**
  * 判定跨网证据是否达成 G6.6（四项全 true 才算通过）。
- * 注：`MemoryStatus.pendingPeers` 实为 SyncManager 的**待发事件数**（命名历史遗留），
- * 成功同步后不保证为 0，故**不作为**达成判据，仅在证据里记录。
+ * 注：`MemoryStatus.pendingEventCount` 为 SyncManager 的**待发事件数**（原字段名 `pendingPeers`
+ * 语义误导，已更名），成功同步后不保证为 0，故**不作为**达成判据，仅在证据里记录。
  */
 export function judgeCrossEvidence(evidence) {
   const failures = [];

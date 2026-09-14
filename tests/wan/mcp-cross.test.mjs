@@ -49,7 +49,7 @@ describe('mcp-cross.judgeCrossEvidence', () => {
     identityShared: true,
     differentPublicNetwork: true,
     differentPublicNetworkBasis: 'distinct-public-egress',
-    pendingPeers: 0,
+    pendingEventCount: 0,
   };
 
   it('全绿 → passed=true 无失败项', () => {
@@ -69,8 +69,8 @@ describe('mcp-cross.judgeCrossEvidence', () => {
     expect(v.failures.join('\n')).toContain(needle);
   });
 
-  it('pendingPeers 非 0 不判失败（其为待发事件数，非达成判据）', () => {
-    const v = judgeCrossEvidence({ ...green, pendingPeers: 5 });
+  it('pendingEventCount 非 0 不判失败（其为待发事件数，非达成判据）', () => {
+    const v = judgeCrossEvidence({ ...green, pendingEventCount: 5 });
     expect(v.passed).toBe(true);
   });
 
@@ -88,7 +88,7 @@ describe('mcp-cross.judgeSelftest（本地夹具判定）', () => {
     identityShared: true,
     differentPublicNetwork: null,
     differentPublicNetworkBasis: 'egress-unknown',
-    pendingPeers: 1,
+    pendingEventCount: 1,
   };
 
   it('链路全过且因异网缺失而被门禁正确拦下 → ok=true（non-evidence）', () => {

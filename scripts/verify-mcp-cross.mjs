@@ -9,7 +9,7 @@
 //
 // 本地夹具（--selftest）：无真实公网时，起两个**独立进程/独立存储**的 `mebular serve`
 //   （环回直连 libp2p、共享同一用户主密钥），走**同一条链**，验证判定逻辑：
-//   链路断言（markerFound/stateMatches/identityShared/pendingPeers）全过，
+//   链路断言（markerFound/stateMatches/identityShared）全过，
 //   且门禁因 `differentPublicNetwork !== true`（环回）而正确判**不达成**——仅作 non-evidence，
 //   **绝不**冒充 G6.6 达成。
 //
@@ -112,8 +112,8 @@ async function runChain(cfg, { requirePeerMatch = false } = {}) {
     evidence.A.stateHash = statusA1?.stateHash;
     evidence.B.nodeCount = statusB1?.nodeCount;
     evidence.B.stateHash = statusB1?.stateHash;
-    evidence.B.pendingPeers = statusB1?.pendingPeers;
-    evidence.pendingPeers = statusB1?.pendingPeers;
+    evidence.B.pendingEventCount = statusB1?.pendingEventCount;
+    evidence.pendingEventCount = statusB1?.pendingEventCount;
     evidence.stateMatches = Boolean(statusA1?.stateHash) && statusA1?.stateHash === statusB1?.stateHash;
     evidence.identityShared = syncError === null && evidence.markerFound === true;
     if (syncError) evidence.syncError = syncError;
@@ -159,7 +159,7 @@ async function runReal() {
     await writeFile(config.out, `${JSON.stringify(evidence, null, 2)}\n`, 'utf-8');
 
     log(`  A deviceId=${evidence.A.deviceId} nodeCount=${evidence.A.nodeCount} stateHash=${evidence.A.stateHash}`);
-    log(`  B nodeCount=${evidence.B.nodeCount} stateHash=${evidence.B.stateHash} pendingPeers=${evidence.B.pendingPeers}`);
+    log(`  B nodeCount=${evidence.B.nodeCount} stateHash=${evidence.B.stateHash} pendingEventCount=${evidence.B.pendingEventCount}`);
     log(`  markerFound=${evidence.markerFound} stateMatches=${evidence.stateMatches} identityShared=${evidence.identityShared}`);
     log(`  egress(local/peer)=${evidence.localEgress.ip ?? 'unknown'}/${config.peerEgress ?? 'unset'} basis=${evidence.differentPublicNetworkBasis}`);
     log(`  证据写入 ${config.out}`);
@@ -271,7 +271,7 @@ async function runSelftest() {
     await writeFile(out, `${JSON.stringify(evidence, null, 2)}\n`, 'utf-8');
 
     log(`  A deviceId=${evidence.A.deviceId} nodeCount=${evidence.A.nodeCount} stateHash=${evidence.A.stateHash}`);
-    log(`  B nodeCount=${evidence.B.nodeCount} stateHash=${evidence.B.stateHash} pendingPeers=${evidence.B.pendingPeers}`);
+    log(`  B nodeCount=${evidence.B.nodeCount} stateHash=${evidence.B.stateHash} pendingEventCount=${evidence.B.pendingEventCount}`);
     log(`  markerFound=${evidence.markerFound} stateMatches=${evidence.stateMatches} identityShared=${evidence.identityShared}`);
     log(`  differentPublicNetwork=${evidence.differentPublicNetwork}（${evidence.differentPublicNetworkBasis}；环回预期不为 true）`);
     log(`  门禁判定 gatePassed=${gate.passed}（因无真实异网出口，应对 G6.6 判不达成）`);

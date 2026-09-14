@@ -47,6 +47,9 @@ jobs:
       - name: HTTP MCP (auth / PKCE / lock / fail-closed)
         run: npm run verify:mcp:http
 
+      - name: Skill package + CLI (init/keygen/print-config/status)
+        run: npm run verify:mcp:skill
+
   semantic-real:
     name: semantic recall (real model)
     runs-on: ubuntu-latest

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mebular": {
+      "command": "mebular",
+      "args": ["mcp"]
+    }
+  }
+}

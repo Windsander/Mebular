@@ -89,6 +89,7 @@
       "tsx",
       "js",
       "jsx",
+      "mjs",
       "json",
       "node"
     ],
@@ -98,7 +99,8 @@
       "^(\\.{1,2}/.*)\\.js$": "$1"
     },
     "testMatch": [
-      "**/tests/**/*.test.ts"
+      "**/tests/**/*.test.ts",
+      "**/tests/**/*.test.mjs"
     ],
     "collectCoverageFrom": [
       "src/**/*.ts",

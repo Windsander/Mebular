@@ -134,6 +134,7 @@ describe('MemoryService', () => {
     expect(status.running).toBe(false);
     expect(status.atRest).toBe(false);
     expect(status.semantic).toBe(false);
+    expect(Number.isInteger(status.pendingEventCount)).toBe(true);
     await app.shutdown();
   });
 

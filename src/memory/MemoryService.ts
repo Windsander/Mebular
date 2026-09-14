@@ -51,7 +51,8 @@ export interface MemoryStatus {
   stateHash: string;
   atRest: boolean;
   semantic: boolean;
-  pendingPeers: number;
+  /** 待发事件数（尚未送达对端的事件；源自 SyncManager.getSyncStatus().pendingCount） */
+  pendingEventCount: number;
 }
 
 export type ImportInput = AdapterSource;
@@ -309,10 +310,10 @@ export class MemoryService {
     const nodes = await this.mebular.storage.listNodes();
     const edges = await this.mebular.storage.listEdges();
     const node = this.mebular.node;
-    let pendingPeers = 0;
+    let pendingEventCount = 0;
     try {
       const syncStatus = await this.mebular.sync.getSyncStatus();
-      pendingPeers = syncStatus.pendingCount;
+      pendingEventCount = syncStatus.pendingCount;
     } catch {
       // 门面未初始化时 sync 不可访问
     }
@@ -327,7 +328,7 @@ export class MemoryService {
       stateHash: computeStateHash(nodes, edges),
       atRest: this.mebular.atRestEncryption,
       semantic: this.mebular.semanticVectorIndex !== null,
-      pendingPeers,
+      pendingEventCount,
     };
   }
 

@@ -124,22 +124,6 @@ async function readJson(path) {
   return JSON.parse(await readFile(path, 'utf-8'));
 }
 
-async function waitForFile(path, timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (existsSync(path)) {
-      // 等待写入完成（JSON 可解析）
-      try {
-        return await readJson(path);
-      } catch {
-        // 半写状态，继续等
-      }
-    }
-    await sleep(150);
-  }
-  throw new Error(`等待文件超时：${path}`);
-}
-
 // ---------- 共享用户主密钥 ----------
 
 async function loadMasterKeys(source) {
@@ -231,12 +215,23 @@ async function makeApp({ dir, deviceId, masterKeys, relayServers, listen }) {
 
 // ---------- 阶段一：local 回归（loopback，非证据） ----------
 
-async function connectAndSync(dialer, listener, address) {
-  const dialerSynced = waitForSync(dialer);
-  const listenerSynced = waitForSync(listener);
-  await dialer.node.connectToPeer(listener.node.peerId, address);
-  const [a, b] = await Promise.all([dialerSynced, listenerSynced]);
-  return { dialer: a, listener: b };
+/** 连接并同步，直到 predicate 成立（重试并断开重连，规避会话半交换） */
+async function connectUntil(dialer, listener, address, predicate, attempts = 4, timeoutMs = 15000) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const dialerSynced = waitForSync(dialer, timeoutMs);
+      const listenerSynced = waitForSync(listener, timeoutMs);
+      await dialer.node.connectToPeer(listener.node.peerId, address);
+      const [a, b] = await Promise.all([dialerSynced, listenerSynced]);
+      if (await predicate()) return { dialer: a, listener: b };
+    } catch {
+      // 半交换/超时，重试
+    }
+    await dialer.node.disconnectPeer(listener.node.peerId).catch(() => undefined);
+    await listener.node.disconnectPeer(dialer.node.peerId).catch(() => undefined);
+    await sleep(500);
+  }
+  return null;
 }
 
 async function runLocal() {
@@ -277,10 +272,9 @@ async function runLocal() {
     let b = await makeApp({ dir, deviceId: 'device-B', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null });
     const addressA = mode === 'relay' ? await waitForRelayReservation(a) : pickDirectAddress(a);
     const node = await a.graph.createNode('fact', { text: 'base-memory' });
-    const sync1 = await connectAndSync(b, a, addressA);
-    const bGotBase = memoryText(await b.graph.getNode(node.id));
-    evidence.phases.push({ phase: 'incremental-sync', bHasBase: bGotBase === 'base-memory', ...sync1.dialer });
-    if (bGotBase !== 'base-memory') throw new Error('增量同步未收敛');
+    const sync1 = await connectUntil(b, a, addressA, async () => memoryText(await b.graph.getNode(node.id)) === 'base-memory');
+    if (!sync1) throw new Error('增量同步未收敛');
+    evidence.phases.push({ phase: 'incremental-sync', bHasBase: true, ...sync1.dialer });
     await a.shutdown();
     await b.shutdown();
 
@@ -289,12 +283,18 @@ async function runLocal() {
     const addressA2 = mode === 'relay' ? await waitForRelayReservation(a) : pickDirectAddress(a);
     await a.graph.updateNode(node.id, { content: { text: 'from-A' } });
     await b.graph.updateNode(node.id, { content: { text: 'from-B' } });
-    const sync2 = await connectAndSync(b, a, addressA2);
+    const sync2 = await connectUntil(
+      b, a, addressA2,
+      async () => {
+        const av = memoryText(await a.graph.getNode(node.id));
+        const bv = memoryText(await b.graph.getNode(node.id));
+        return av === bv && (av === 'from-A' || av === 'from-B');
+      },
+    );
+    if (!sync2) throw new Error('冲突未收敛');
     const aWins = memoryText(await a.graph.getNode(node.id));
     const bWins = memoryText(await b.graph.getNode(node.id));
-    const converged = aWins === bWins;
-    evidence.phases.push({ phase: 'conflict-convergence', aResult: aWins, bResult: bWins, converged, ...sync2.dialer });
-    if (!converged) throw new Error('冲突未收敛');
+    evidence.phases.push({ phase: 'conflict-convergence', aResult: aWins, bResult: bWins, converged: true, ...sync2.dialer });
     await a.shutdown();
     await b.shutdown();
     evidence.ok = true;
@@ -415,47 +415,77 @@ async function runRelay() {
   process.on('SIGTERM', shutdown);
 }
 
-// ---------- peer：单端两阶段（role a：监听方，阶段间重启以模拟离线） ----------
+// ---------- 出口 IP 判据（P2-3：公网出口，非网卡接口） ----------
+
+const DEFAULT_IP_ECHO = 'https://api.ipify.org?format=json';
+
+async function lookupEgress(timeoutMs = 4000) {
+  const source = process.env.MEBULAR_WAN_IP_ECHO || DEFAULT_IP_ECHO;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(source, { signal: controller.signal });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = (await res.text()).trim();
+    let ip = null;
+    let org = null;
+    try {
+      const j = JSON.parse(text);
+      ip = typeof j.ip === 'string' ? j.ip : null;
+      org = typeof j.org === 'string' ? j.org : null;
+    } catch {
+      ip = text;
+    }
+    if (!ip || !/^[0-9a-fA-F:.]+$/.test(ip)) throw new Error('unexpected egress payload');
+    return { ip, org, asn: org ? org.split(/\s+/)[0] : null, source, error: null };
+  } catch (error) {
+    return { ip: null, org: null, asn: null, source, error: String(error?.message ?? error) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isPrivateIp(ip) {
+  if (!ip) return true;
+  const lower = ip.toLowerCase();
+  if (lower === '::1' || lower.startsWith('fe80') || lower.startsWith('fc') || lower.startsWith('fd')) return true;
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
+  if (!m) return true; // 非 IPv4 且非已知公网 v6 → 保守判私网/未知
+  const a = Number(m[1]);
+  const b = Number(m[2]);
+  if (a === 10 || a === 127) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  return false;
+}
+
+/** 出口 IP 判据：任一未知/私网 → false/未知；均公网且不同 → true（绝不基于接口 IP） */
+function judgeDifferentNetwork(localIp, peerIp) {
+  if (!localIp || !peerIp) return { value: null, basis: 'egress-unknown' };
+  if (isPrivateIp(localIp) || isPrivateIp(peerIp)) return { value: false, basis: 'private-or-loopback' };
+  if (localIp === peerIp) return { value: false, basis: 'same-egress-ip' };
+  return { value: true, basis: 'distinct-public-egress' };
+}
+
+// ---------- peer：单端三阶段（稳定地址，无共享文件） ----------
 
 function b64(bytes) {
   return Buffer.from(bytes).toString('base64');
 }
 
-function readyRecord(role, runId, app, baseNodeId, phase, masterKeys) {
-  return {
-    role,
-    runId,
-    phase,
-    deviceId: app.node.peerId.id,
-    userMasterPublicKey: b64(masterKeys.userMasterKey),
-    multiaddrs: app.node.getLocalMultiaddrs(),
-    baseNodeId,
-    publicIPs: publicIPv4s(),
-    at: new Date().toISOString(),
-  };
-}
-
-function dialable(ready) {
-  return (
-    ready.multiaddrs?.find((a) => a.includes('/ip4/127.0.0.1/')) ??
-    ready.multiaddrs?.find((a) => a.includes('/tcp/'))
-  );
-}
-
-async function readReadyPhase(path, phase, timeoutMs) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (existsSync(path)) {
-      try {
-        const data = JSON.parse(await readFile(path, 'utf-8'));
-        if (data.phase === phase) return data;
-      } catch {
-        // 半写状态，继续等
-      }
+async function startWithRetry(start, attempts = 12) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await start();
+    } catch (error) {
+      lastError = error;
+      await sleep(500);
     }
-    await sleep(150);
   }
-  throw new Error(`等待对端 ready phase=${phase} 超时：${path}`);
+  throw lastError ?? new Error('startWithRetry 失败');
 }
 
 async function runPeer() {
@@ -465,59 +495,55 @@ async function runPeer() {
   const storageDir = typeof args.dir === 'string' ? args.dir : await mkdtemp(join(tmpdir(), 'mebular-peer-'));
   const relayServers = typeof args.relay === 'string' ? [args.relay] : null;
   const timeout = Number(args.timeout ?? 60000);
-  const listen = typeof args.bind === 'string' ? [args.bind] : ['/ip4/0.0.0.0/tcp/0'];
-  const readyOut = typeof args['ready-out'] === 'string' ? args['ready-out'] : null;
-  const evidenceOut = typeof args['evidence-out'] === 'string' ? args['evidence-out'] : null;
-  const start = () => makeApp({ dir: storageDir, deviceId: `device-${role.toUpperCase()}`, masterKeys, relayServers, listen });
+  const bind = typeof args.bind === 'string' ? args.bind : '/ip4/0.0.0.0/tcp/4001';
+  const start = () => makeApp({ dir: storageDir, deviceId: `device-${role.toUpperCase()}`, masterKeys, relayServers, listen: [bind] });
+  const egress = await lookupEgress();
 
   let app = null;
   let baseId = null;
   try {
-    // 阶段 1：写入 base，等待对端首次同步
-    app = await start();
+    // 阶段 1
+    app = await startWithRetry(start);
     const base = await app.graph.createNode('fact', { text: `base-${runId}` });
     baseId = base.id;
-    const s1 = waitForSync(app, timeout);
-    if (readyOut) await writeJson(readyOut, readyRecord(role, runId, app, baseId, 1, masterKeys));
-    await s1;
+    const stableAddress = pickRelayAddress(app) ?? pickDirectAddress(app);
+    log(`PEER_READY ${JSON.stringify({ role, runId, deviceId: app.node.peerId.id, multiaddrs: app.node.getLocalMultiaddrs(), stableAddress, bind, at: new Date().toISOString() })}`);
+    await waitForSync(app, timeout);
     log('[phase1] 增量同步完成');
     await app.shutdown();
+    app = null;
 
-    // 阶段 2：重启（离线）后并发写，等待对端第二次同步
-    app = await start();
+    // 阶段 2
+    app = await startWithRetry(start);
     await app.graph.updateNode(baseId, { content: { text: `${role.toUpperCase()}-offline` } });
-    const s2 = waitForSync(app, timeout);
-    if (readyOut) await writeJson(readyOut, readyRecord(role, runId, app, baseId, 2, masterKeys));
-    await s2;
+    log('PEER_PHASE 2');
+    await waitForSync(app, timeout);
     const data = await collectData(app);
     const dataHash = dataStateHash(data.nodes, data.edges);
     log(`[phase2] 收敛 dataHash=${dataHash}`);
     await app.shutdown();
+    app = null;
 
-    // 阶段 3：重启后发布证据 meta，等待对端拉取
-    app = await start();
+    // 阶段 3
+    app = await startWithRetry(start);
     const evidence = {
       kind: 'wan-peer-evidence',
       role,
       runId,
       deviceId: app.node.peerId.id,
       userMasterPublicKey: b64(masterKeys.userMasterKey),
-      publicIPs: publicIPv4s(),
+      egress: { ip: egress.ip, asn: egress.asn, org: egress.org, source: egress.source, error: egress.error },
+      interfaceIPv4s: publicIPv4s(),
       multiaddrs: app.node.getLocalMultiaddrs(),
       baseNodeId: baseId,
       baseValue: memoryText(await app.graph.getNode(baseId)),
       dataHash,
       publishedAt: new Date().toISOString(),
     };
-    await app.graph.createNode('meta', {
-      metaType: 'other',
-      name: `wan-evidence-${runId}`,
-      value: JSON.stringify(evidence),
-    });
-    const s3 = waitForSync(app, timeout);
-    if (readyOut) await writeJson(readyOut, readyRecord(role, runId, app, baseId, 3, masterKeys));
-    await s3;
-    if (evidenceOut) await writeJson(evidenceOut, { ...evidence, syncSessions: 3 });
+    await app.graph.createNode('meta', { metaType: 'other', name: `wan-evidence-${runId}`, value: JSON.stringify(evidence) });
+    log('PEER_PHASE 3');
+    await waitForSync(app, timeout);
+    if (typeof args['evidence-out'] === 'string') await writeJson(args['evidence-out'], { ...evidence, syncSessions: 3 });
     log('✓ peer 三阶段完成（两阶段 + 证据交换）');
     await app.shutdown();
     process.exit(0);
@@ -528,16 +554,105 @@ async function runPeer() {
   }
 }
 
-// ---------- cross：对端编排 + 自校验（阶段间重启，地址经 ready 文件刷新） ----------
+// ---------- cross：稳定地址编排 + 自校验（无共享文件） ----------
+
+async function tryPhase(app, remote, addr, predicate, attempts, timeoutMs, gapMs = 800) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      await app.node.disconnectPeer(remote).catch(() => undefined);
+      const synced = waitForSync(app, timeoutMs);
+      await app.node.connectToPeer(remote, addr);
+      const result = await synced;
+      if (await predicate()) return result;
+    } catch {
+      // 对端阶段未就绪或图上状态不符，重试
+    }
+    await sleep(gapMs);
+  }
+  return null;
+}
+
+// ---------- 跨机前置预检（缺配置/不可达时立即报错，不跑到中途才失败） ----------
+
+function parseTcpTarget(multiaddr) {
+  if (typeof multiaddr !== 'string') return null;
+  const m = /(?:\/ip4\/([^/]+)|\/ip6\/([^/]+)|\/dns4\/([^/]+)|\/dns6\/([^/]+))\/tcp\/(\d+)/.exec(multiaddr);
+  if (!m) return null;
+  return { host: m[1] ?? m[2] ?? m[3] ?? m[4], port: Number(m[5]) };
+}
+
+function probeTcp(host, port, timeoutMs) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    let settled = false;
+    const finish = (ok, error) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve({ ok, error: error ? String(error.message ?? error) : null });
+    };
+    const timer = setTimeout(() => finish(false, new Error(`TCP 连接超时 ${timeoutMs}ms`)), timeoutMs);
+    socket.on('connect', () => {
+      clearTimeout(timer);
+      finish(true);
+    });
+    socket.on('error', (e) => {
+      clearTimeout(timer);
+      finish(false, e);
+    });
+  });
+}
+
+function printCrossGuidance() {
+  log('');
+  log('补齐指引：');
+  log('  1) 生成并分发用户主密钥（两机同一把）：node scripts/wan-sync.mjs user-keygen --out key.json');
+  log('  2) A 机：node scripts/wan-sync.mjs peer --role a --user-master-key-file key.json \\');
+  log('             --bind /ip4/0.0.0.0/tcp/4001 [--relay <relay-multiaddr>]   # 启动后打印 PEER_READY');
+  log('  3) 可选 relay：node scripts/wan-sync.mjs relay --port 4000 --unlimited   # 打印 relay multiaddr');
+  log('  4) B 机：node scripts/wan-sync.mjs cross --user-master-key-file key.json \\');
+  log('             --peer <A 稳定 multiaddr> --peer-id <A deviceId> [--relay <relay-multiaddr>] --out B-evidence.json');
+  log('  或经 env：MEBULAR_WAN_PEER / MEBULAR_WAN_PEER_ID / MEBULAR_WAN_RELAY');
+  log('  不可达常见原因：地址/端口填错、防火墙/NAT 未放行、relay 未以 --unlimited 运行、A 未先启动。');
+  log('  预检超时可用 MEBULAR_WAN_PREFLIGHT_TIMEOUT_MS 调整（默认 3000ms）。');
+}
+
+async function preflightCross({ peer, peerId, relay }) {
+  const problems = [];
+  if (!peer) problems.push('缺少 HOST_A 地址（--peer 或 MEBULAR_WAN_PEER）');
+  if (!peerId) problems.push('缺少 HOST_A deviceId（--peer-id 或 MEBULAR_WAN_PEER_ID）');
+  const peerTarget = peer ? parseTcpTarget(peer) : null;
+  if (peer && !peerTarget) problems.push(`HOST_A 地址解析不出 TCP 目标：${peer}`);
+  const relayTarget = relay ? parseTcpTarget(relay) : null;
+  if (relay && !relayTarget) problems.push(`RELAY 地址解析不出 TCP 目标：${relay}`);
+
+  if (problems.length === 0) {
+    const timeoutMs = Number(process.env.MEBULAR_WAN_PREFLIGHT_TIMEOUT_MS ?? 3000);
+    const targets = [{ name: 'HOST_A', target: peerTarget }];
+    if (relayTarget) targets.push({ name: 'RELAY', target: relayTarget });
+    for (const { name, target } of targets) {
+      const r = await probeTcp(target.host, target.port, timeoutMs);
+      if (!r.ok) problems.push(`${name} 不可达：${target.host}:${target.port}（${r.error}）`);
+    }
+  }
+
+  if (problems.length > 0) {
+    log('✗ G3-R 跨机前置预检未通过（尚未开始同步）：');
+    for (const p of problems) log(`  - ${p}`);
+    printCrossGuidance();
+    return false;
+  }
+  log(`[preflight] 通过：HOST_A=${peerTarget.host}:${peerTarget.port}${relayTarget ? `  RELAY=${relayTarget.host}:${relayTarget.port}` : ''}`);
+  return true;
+}
 
 async function runCross() {
-  const peerReady = typeof args['peer-ready'] === 'string' ? args['peer-ready'] : null;
+  const peer = typeof args.peer === 'string' ? args.peer : process.env.MEBULAR_WAN_PEER;
+  const peerId = typeof args['peer-id'] === 'string' ? args['peer-id'] : process.env.MEBULAR_WAN_PEER_ID;
   const relay = typeof args.relay === 'string' ? args.relay : process.env.MEBULAR_WAN_RELAY;
-  if (!peerReady) {
-    log('✗ G3-R 跨机两阶段编排需要 --peer-ready <对端持续刷新的 ready.json>（两端共享该文件）。');
-    log('  对端（A）：node scripts/wan-sync.mjs peer --role a --user-master-key-file key.json --ready-out <共享路径>/A-ready.json --bind /ip4/0.0.0.0/tcp/0');
-    log('  本机（B）：node scripts/wan-sync.mjs cross --user-master-key-file key.json --peer-ready <共享路径>/A-ready.json --out <共享路径>/B-evidence.json');
-    log('  可选：--relay <relay multiaddr>（relay 需 --unlimited）。当前环境无两主机，判为阻塞（见 docs.design/g3r-blocker）。');
+
+  // 前置预检：缺配置/不可达直接明确报错并给指引，不跑到中途才失败
+  if (!(await preflightCross({ peer, peerId, relay }))) {
     process.exit(1);
   }
 
@@ -545,73 +660,77 @@ async function runCross() {
   const masterKeys = await resolveMasterKeys(masterKeyArgs());
   const storageDir = await mkdtemp(join(tmpdir(), 'mebular-cross-'));
   const timeout = Number(args.timeout ?? 60000);
+  const attempts = Number(args['phase-attempts'] ?? 30);
   const listen = typeof args.bind === 'string' ? [args.bind] : ['/ip4/0.0.0.0/tcp/0'];
   const deviceId = `device-B-${process.pid}`;
   const start = () => makeApp({ dir: storageDir, deviceId, masterKeys, relayServers: relay ? [relay] : null, listen });
+  const egress = await lookupEgress();
+  const remote = peerIdFromString(peerId);
+  const startedAt = new Date().toISOString();
 
   let app = null;
-  const startedAt = new Date().toISOString();
   try {
-    // 阶段 1：增量同步
-    const r1 = await readReadyPhase(peerReady, 1, timeout);
-    const runId = r1.runId;
     app = await start();
-    let synced = waitForSync(app, timeout);
-    await app.node.connectToPeer(peerIdFromString(r1.deviceId), dialable(r1));
-    const s1 = await synced;
-    const base = (await app.graph.listNodes({ type: 'fact' })).find((n) =>
-      String(n.content?.text ?? '').startsWith('base-'),
+
+    // 阶段 1：增量同步
+    const r1 = await tryPhase(
+      app, remote, peer,
+      async () => (await app.graph.listNodes({ type: 'fact' })).some((n) => String(n.content?.text ?? '').startsWith('base-')),
+      attempts, timeout,
     );
-    if (!base) throw new Error('未在同步结果中找到 base 节点');
-    await app.shutdown();
+    if (!r1) throw new Error('阶段 1 未完成（增量同步）');
+    const base = (await app.graph.listNodes({ type: 'fact' })).find((n) => String(n.content?.text ?? '').startsWith('base-'));
+    const runId = String(base.content.text).slice('base-'.length);
     log(`[phase1] 增量同步完成（base=${base.id}）`);
 
     // 阶段 2：离线并发写 → 重连收敛
-    const r2 = await readReadyPhase(peerReady, 2, timeout);
-    app = await start();
     await app.graph.updateNode(base.id, { content: { text: 'B-offline' } });
-    synced = waitForSync(app, timeout);
-    await app.node.connectToPeer(peerIdFromString(r2.deviceId), dialable(r2));
-    await synced;
+    const r2 = await tryPhase(
+      app, remote, peer,
+      async () => {
+        const t = memoryText(await app.graph.getNode(base.id));
+        return t === 'A-offline' || t === 'B-offline';
+      },
+      attempts, timeout,
+    );
+    if (!r2) throw new Error('阶段 2 未完成（冲突收敛）');
     const converged = memoryText(await app.graph.getNode(base.id));
+    log(`[phase2] 收敛=${converged}`);
+
+    // 阶段 3：拉取对端证据 meta
+    const r3 = await tryPhase(
+      app, remote, peer,
+      async () => (await app.graph.listNodes({ type: 'meta' })).some((n) => String(n.content?.name ?? '') === `wan-evidence-${runId}`),
+      attempts, timeout,
+    );
+    if (!r3) throw new Error('阶段 3 未完成（证据交换）');
+    const evNode = (await app.graph.listNodes({ type: 'meta' })).find((n) => String(n.content?.name ?? '') === `wan-evidence-${runId}`);
+    const peerEvidence = JSON.parse(String(evNode.content.value));
+
     const local = await collectData(app);
     const localHash = dataStateHash(local.nodes, local.edges);
-    await app.shutdown();
-    log(`[phase2] 收敛=${converged} dataHash=${localHash}`);
-
-    // 阶段 3：拉取对端证据 meta 并自校验
-    const r3 = await readReadyPhase(peerReady, 3, timeout);
-    app = await start();
-    synced = waitForSync(app, timeout);
-    await app.node.connectToPeer(peerIdFromString(r3.deviceId), dialable(r3));
-    await synced;
-    const evNode = (await app.graph.listNodes({ type: 'meta' })).find(
-      (n) => String(n.content?.name ?? '') === `wan-evidence-${runId}`,
-    );
-    const peerEvidence = evNode ? JSON.parse(String(evNode.content.value)) : null;
-
-    const myIPs = publicIPv4s();
-    const peerIPs = peerEvidence?.publicIPs ?? [];
-    const differentNetwork =
-      myIPs.length > 0 && peerIPs.length > 0 && !peerIPs.some((ip) => myIPs.includes(ip));
+    const judge = judgeDifferentNetwork(egress.ip, peerEvidence?.egress?.ip ?? null);
     const stateMatches = peerEvidence?.dataHash === localHash;
     const identityShared = peerEvidence?.userMasterPublicKey === b64(masterKeys.userMasterKey);
+    const sameAsn = egress.asn && peerEvidence?.egress?.asn ? egress.asn === peerEvidence.egress.asn : null;
 
     const evidence = {
       mode: 'cross',
       evidenceLevel: allowSameNetwork
         ? 'non-evidence (loopback orchestration; --allow-same-network)'
         : 'evidence (requires two hosts on different public networks)',
+      coordination: 'stable-address + graph-state phase check (no shared filesystem)',
       runId,
       startedAt,
       completedAt: new Date().toISOString(),
-      localPublicIPs: myIPs,
-      peerPublicIPs: peerIPs,
-      peerDeviceId: r3.deviceId,
+      localEgress: { ip: egress.ip, asn: egress.asn, org: egress.org, source: egress.source, error: egress.error },
+      peerEgress: peerEvidence?.egress ?? null,
+      interfaceIPv4s: publicIPv4s(),
+      peerDeviceId: peerId,
       relay: relay ?? null,
       identityShared,
       phases: {
-        incrementalSync: { sentEvents: s1.sentEvents, receivedEvents: s1.receivedEvents },
+        incrementalSync: { sentEvents: r1.sentEvents, receivedEvents: r1.receivedEvents },
         conflictConvergence: { value: converged },
         evidenceExchange: true,
       },
@@ -620,13 +739,15 @@ async function runCross() {
       stateHash: localHash,
       peerStateHash: peerEvidence?.dataHash ?? null,
       stateMatches,
-      differentPublicNetwork: differentNetwork,
-      ok: stateMatches && identityShared && !!converged && (differentNetwork || allowSameNetwork),
+      differentPublicNetwork: judge.value,
+      differentPublicNetworkBasis: judge.basis,
+      egressService: egress.source,
+      sameAsn,
+      ok: stateMatches && identityShared && !!converged && (allowSameNetwork || judge.value === true),
     };
-    const outPath =
-      typeof args.out === 'string' ? args.out : join(rootDir, '.wan-evidence', `wan-cross-${Date.now()}.json`);
+    const outPath = typeof args.out === 'string' ? args.out : join(rootDir, '.wan-evidence', `wan-cross-${Date.now()}.json`);
     await writeJson(outPath, evidence);
-    log(`stateMatches=${stateMatches} differentPublicNetwork=${differentNetwork} identityShared=${identityShared}`);
+    log(`stateMatches=${stateMatches} differentPublicNetwork=${judge.value} (${judge.basis}) identityShared=${identityShared}`);
     log(`证据写入：${outPath}`);
     await app.shutdown();
     process.exit(evidence.ok ? 0 : 1);
@@ -640,20 +761,58 @@ async function runCross() {
   }
 }
 
-// ---------- selftest：本机编排自测（non-evidence） ----------
+// ---------- selftest：独立进程 + 独立存储 + 无共享路径（non-evidence） ----------
 
-function runChild(extraArgs) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [selfPath, ...extraArgs], { cwd: rootDir, stdio: ['ignore', 'pipe', 'pipe'] });
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (d) => {
-      out += d;
+function spawnChild(extraArgs, extraEnv = {}) {
+  const child = spawn(process.execPath, [selfPath, ...extraArgs], {
+    cwd: rootDir,
+    env: { ...process.env, ...extraEnv },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  let err = '';
+  let lineBuf = '';
+  const waiters = [];
+  const feed = (line) => {
+    out += line + '\n';
+    for (const w of [...waiters]) {
+      if (line.includes(w.marker)) {
+        waiters.splice(waiters.indexOf(w), 1);
+        w.resolve(line);
+      }
+    }
+  };
+  child.stdout.on('data', (d) => {
+    lineBuf += d.toString();
+    let idx;
+    while ((idx = lineBuf.indexOf('\n')) >= 0) {
+      feed(lineBuf.slice(0, idx));
+      lineBuf = lineBuf.slice(idx + 1);
+    }
+  });
+  child.stderr.on('data', (d) => {
+    err += d.toString();
+  });
+  const done = new Promise((resolve) => child.on('close', (code) => resolve({ code, out, err })));
+  const waitLine = (marker, timeoutMs) => {
+    const existing = out.split('\n').find((l) => l.includes(marker));
+    if (existing) return Promise.resolve(existing);
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`等待子进程输出「${marker}」超时`)), timeoutMs);
+      waiters.push({ marker, resolve: (line) => { clearTimeout(timer); resolve(line); } });
     });
-    child.stderr.on('data', (d) => {
-      err += d;
+  };
+  return { child, done, waitLine };
+}
+
+async function freeTcpPort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.listen(0, '127.0.0.1', () => {
+      const port = server.address().port;
+      server.close(() => resolve(port));
     });
-    child.on('close', (code) => resolve({ code, out, err }));
+    server.on('error', reject);
   });
 }
 
@@ -663,8 +822,8 @@ function collectCaptureMarker(buf, marker) {
   return latin.includes(marker) || latin.includes(markerLatin);
 }
 
-async function relayCipherSelfCheck(keyFile, dir) {
-  const masterKeys = await resolveMasterKeys(keyFile);
+async function relayCipherSelfCheck(keySource, dir) {
+  const masterKeys = await resolveMasterKeys(keySource);
   const relay = await Libp2pProvider.create({
     deviceKey: await generateDeviceKey(),
     listen: ['/ip4/127.0.0.1/tcp/0'],
@@ -678,7 +837,6 @@ async function relayCipherSelfCheck(keyFile, dir) {
   const capture = createCapture();
   const proxy = await createCaptureProxy(relayPort, capture);
   const proxyAddr = `/ip4/127.0.0.1/tcp/${proxy.port}/p2p/${relayPeerId}`;
-
   const marker = `RELAY-CIPHER-MARKER-${crypto.randomUUID()}`;
   const a = await makeApp({ dir, deviceId: 'device-CA', masterKeys, relayServers: [proxyAddr] });
   const b = await makeApp({ dir, deviceId: 'device-CB', masterKeys, relayServers: [proxyAddr] });
@@ -708,86 +866,74 @@ async function relayCipherSelfCheck(keyFile, dir) {
 }
 
 async function runSelftest() {
-  const dir = await mkdtemp(join(tmpdir(), 'mebular-selftest-'));
-  const keyFile = join(dir, 'user-master-key.json');
-  const aReady = join(dir, 'a-ready.json');
-  const bEvidence = join(dir, 'b-evidence.json');
+  const outDir = await mkdtemp(join(tmpdir(), 'mebular-selftest-'));
   const runId = `selftest-${Date.now().toString(36)}`;
   const master = await new IdentityManager().generateUserMasterKey();
-  await writeJson(keyFile, {
-    publicKey: Buffer.from(master.publicKey).toString('base64'),
+  const keyJson = JSON.stringify({
+    publicKey: b64(master.publicKey),
     privateKeyPkcs8: await IdentityManager.exportPrivateKey(master.privateKey),
   });
-
-  const result = { mode: 'selftest', evidenceLevel: 'non-evidence (loopback orchestration)', startedAt: new Date().toISOString() };
+  const env = { MEBULAR_USER_MASTER_KEY: keyJson };
+  const port = await freeTcpPort();
+  const result = {
+    mode: 'selftest',
+    evidenceLevel: 'non-evidence (loopback; two independent processes/storage, no shared path)',
+    startedAt: new Date().toISOString(),
+  };
   try {
-    log('[selftest] 启动 A（peer 两阶段）…');
-    const aProc = runChild([
-      'peer',
-      '--role',
-      'a',
-      '--run-id',
-      runId,
-      '--user-master-key-file',
-      keyFile,
-      '--ready-out',
-      aReady,
-      '--bind',
-      '/ip4/127.0.0.1/tcp/0',
-      '--timeout',
-      '60000',
-    ]);
-    const ready = await waitForFile(aReady, 30000);
-    log(`[selftest] A ready：${ready.deviceId} @ ${ready.multiaddrs?.[0]}`);
+    log('[selftest] 启动 A（独立进程/独立存储，稳定地址，无共享文件）…');
+    const a = spawnChild(
+      ['peer', '--role', 'a', '--run-id', runId, '--bind', `/ip4/127.0.0.1/tcp/${port}`, '--timeout', '60000'],
+      env,
+    );
+    const readyLine = await a.waitLine('PEER_READY', 30000);
+    const ready = JSON.parse(readyLine.slice(readyLine.indexOf('PEER_READY') + 'PEER_READY'.length).trim());
+    const peerAddr = ready.multiaddrs.find((x) => x.includes('/ip4/127.0.0.1/')) ?? ready.stableAddress;
+    log(`[selftest] A ready：${ready.deviceId} @ ${peerAddr}`);
 
-    log('[selftest] 启动 B（cross 编排）…');
-    const bProc = await runChild([
-      'cross',
-      '--user-master-key-file',
-      keyFile,
-      '--peer-ready',
-      aReady,
-      '--out',
-      bEvidence,
-      '--allow-same-network',
-      '--timeout',
-      '60000',
-    ]);
-    const a = await aProc;
-    if (bProc.code !== 0) {
-      log(bProc.out);
-      log(bProc.err);
-      throw new Error(`cross 退出码 ${bProc.code}`);
+    log('[selftest] 启动 B（独立进程/独立存储，无共享路径）…');
+    const bEvidence = join(outDir, 'b-evidence.json'); // 父↔B，A 不接触
+    const b = spawnChild(
+      ['cross', '--peer', peerAddr, '--peer-id', ready.deviceId, '--out', bEvidence, '--allow-same-network', '--timeout', '60000'],
+      env,
+    );
+    const [aRes, bRes] = await Promise.all([a.done, b.done]);
+    if (bRes.code !== 0) {
+      log(bRes.out);
+      log(bRes.err);
+      throw new Error(`cross 退出码 ${bRes.code}`);
     }
-    if (a.code !== 0) throw new Error(`peer 退出码 ${a.code}`);
+    if (aRes.code !== 0) throw new Error(`peer 退出码 ${aRes.code}`);
 
     const evidence = await readJson(bEvidence);
     result.orchestration = {
-      crossExitCode: bProc.code,
-      peerExitCode: a.code,
+      crossExitCode: bRes.code,
+      peerExitCode: aRes.code,
       stateMatches: evidence.stateMatches,
       identityShared: evidence.identityShared,
       convergedValue: evidence.convergedValue,
-      phases: evidence.phases,
-      peerPublicIPs: evidence.peerPublicIPs,
-      localPublicIPs: evidence.localPublicIPs,
       differentPublicNetwork: evidence.differentPublicNetwork,
-      note: 'loopback：differentPublicNetwork=false 属预期；跨网判定不在此自测范围',
+      differentPublicNetworkBasis: evidence.differentPublicNetworkBasis,
+      localEgress: evidence.localEgress,
+      peerEgress: evidence.peerEgress,
+      coordination: evidence.coordination,
+      note: '同机：出口 IP 相同/私网 → differentPublicNetwork 预期 false；跨网判定不在此自测范围',
     };
     if (!evidence.stateMatches) throw new Error('双端 dataHash 不一致');
     if (!evidence.identityShared) throw new Error('共享用户身份未生效');
-    if (evidence.convergedValue !== 'from-A' && evidence.convergedValue !== 'B-offline') {
+    if (evidence.convergedValue !== 'A-offline' && evidence.convergedValue !== 'B-offline') {
       throw new Error(`两阶段未收敛：${evidence.convergedValue}`);
     }
 
     log('[selftest] relay 密文自检…');
-    result.relayCipher = await relayCipherSelfCheck(keyFile, dir);
+    result.relayCipher = await relayCipherSelfCheck(keyJson, outDir);
     if (!result.relayCipher.ok) throw new Error('relay 密文自检失败（捕获到明文或未捕获流量）');
 
     result.ok = true;
     result.completedAt = new Date().toISOString();
-    log('✓ G3-P selftest 通过（non-evidence）');
-    log(`  orchestration.stateMatches=${evidence.stateMatches} identityShared=${evidence.identityShared} converged=${evidence.convergedValue}`);
+    log('✓ G3-P2 selftest 通过（non-evidence；两独立进程/存储，无共享路径）');
+    log(`  stateMatches=${evidence.stateMatches} identityShared=${evidence.identityShared} converged=${evidence.convergedValue}`);
+    log(`  egress(local/peer)=${evidence.localEgress?.ip ?? 'unknown'}/${evidence.peerEgress?.ip ?? 'unknown'} basis=${evidence.differentPublicNetworkBasis}`);
     log(`  relayCipher.capturedBytes=${result.relayCipher.capturedBytes} plaintextMarkerFound=${result.relayCipher.plaintextMarkerFound}`);
   } catch (error) {
     result.ok = false;
@@ -797,7 +943,7 @@ async function runSelftest() {
     const outPath = join(rootDir, '.wan-evidence', `wan-selftest-${Date.now()}.json`);
     await writeJson(outPath, result).catch(() => undefined);
     log(`证据（non-evidence）：${outPath}`);
-    if (!args.keep) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    if (!args.keep) await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
   }
   process.exit(result.ok ? 0 : 1);
 }
@@ -809,8 +955,9 @@ else if (command === 'user-keygen') await runUserKeygen();
 else if (command === 'peer') await runPeer();
 else if (command === 'cross') await runCross();
 else if (command === 'selftest') await runSelftest();
+else if (command === 'selftest-isolated') await runSelftest();
 else if (command === 'local') await runLocal();
 else {
-  console.log(`未知子命令：${command}（支持 local | relay | user-keygen | peer | cross | selftest）`);
+  console.log(`未知子命令：${command}（支持 local | relay | user-keygen | peer | cross | selftest | selftest-isolated）`);
   process.exit(1);
 }

@@ -104,24 +104,29 @@ node examples/quickstart/index.mjs
 ```bash
 # 本地编排自测（共享身份 + 两阶段 + relay 密文；non-evidence，退出码 0）
 npm run verify:wan:cross:selftest
+# 隔离自测：两个独立进程 + 各自独立存储 + 无共享路径（non-evidence）
+npm run verify:wan:cross:selftest:isolated
 
 # 本地回归（loopback，非证据）
 npm run verify:wan         # 手动 multiaddr 直连
 npm run verify:wan:relay   # 内嵌 circuit relay
 
-# 跨机两阶段（异网段）：先共享用户主密钥，再 A=peer / B=cross 读共享 ready
-node scripts/wan-sync.mjs user-keygen --out /shared/key.json
+# 跨机两阶段（异网段，无需共享文件系统）：先分发用户主密钥，再 A=peer / B=cross
+node scripts/wan-sync.mjs user-keygen --out key.json
 node scripts/wan-sync.mjs relay --port 4000 --unlimited            # 可选，异网段需要
-node scripts/wan-sync.mjs peer  --role a --user-master-key-file /shared/key.json \
-  --ready-out /shared/A-ready.json --bind /ip4/0.0.0.0/tcp/4001 --relay <relay>
-node scripts/wan-sync.mjs cross --user-master-key-file /shared/key.json \
-  --peer-ready /shared/A-ready.json --out /shared/B-evidence.json --relay <relay>
-# 判定：cross 退出码 0 且 B-evidence.json 的 stateMatches=true、differentPublicNetwork=true
+node scripts/wan-sync.mjs peer  --role a --user-master-key-file key.json \
+  --bind /ip4/0.0.0.0/tcp/4001 --relay <relay>     # 固定地址+持久身份 → 地址稳定；打印 PEER_READY
+node scripts/wan-sync.mjs cross --user-master-key-file key.json \
+  --peer <A-stable-multiaddr> --peer-id <A-deviceId> --relay <relay> --out B-evidence.json
+# 判定：cross 退出码 0 且 B-evidence.json 的 stateMatches=true、differentPublicNetwork=true、identityShared=true
 ```
 
-- 用户主密钥：`user-keygen` 生成，A/B 用同一把（否则设备证书互验失败）；也可用 `MEBULAR_USER_MASTER_KEY`。
+- 用户主密钥：`user-keygen` 生成，A/B 用同一把（否则设备证书互验失败）；也可用 `MEBULAR_USER_MASTER_KEY`（内联 JSON）。
+- 协调无需共享文件：B 用 `--peer/--peer-id` 一次给定 A 的稳定地址，按图上阶段状态重试连接完成三阶段。
+- 前置预检：`cross` 启动前先检查 `--peer/--peer-id/--relay` 是否齐全且 **TCP 可达**；缺失/不可达立即报错并打印补齐指引，不跑到中途才失败（超时可用 `MEBULAR_WAN_PREFLIGHT_TIMEOUT_MS` 调整，默认 3000ms）。
+- 出口判据：`MEBULAR_WAN_IP_ECHO`（缺省 `https://api.ipify.org?format=json`）取公网出口 IP；任一私网/回环 → false，取不到 → 未知（绝不误判 true）。
 - relay 默认**限额**；需显式 `--unlimited`（`Libp2pProvider.relayUnlimited`）才允许任意协议过 circuit，调用方承担开放 relay 的滥用风险；`relay --capture <path>` 可捕获线上字节供「只见密文」取证。
-- 诚实边界：`verify:wan`/`verify:wan:relay`/`verify:wan:cross:selftest` 都是**本机**验证，**不是跨 NAT 实测**；真实 G3-E 需两台不同公网主机 + 可达 relay + 共享 `ready.json`，当前**未达成**（阻塞报告 `docs.design/g3r-blocker-2026-09-13.md`）。`npm run verify:wan:cross` 无环境时退出码 1 并打印所需环境。
+- 诚实边界：上述本机命令都是 **non-evidence**；真实 G3-E 需两台不同公网主机 + 可达 relay，当前**未达成**（阻塞报告 `docs.design/g3r-blocker-2026-09-13.md`）。`npm run verify:wan:cross` 无环境时退出码 1 并打印所需环境。
 
 ---
 

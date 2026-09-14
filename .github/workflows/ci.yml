@@ -50,6 +50,9 @@ jobs:
       - name: Skill package + CLI (init/keygen/print-config/status)
         run: npm run verify:mcp:skill
 
+      - name: Publish (npm pack + tarball smoke, D41)
+        run: npm run verify:mcp:publish
+
   semantic-real:
     name: semantic recall (real model)
     runs-on: ubuntu-latest

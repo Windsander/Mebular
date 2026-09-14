@@ -51,6 +51,10 @@ docs/
 design-notes/
 docs.design/
 
+# npm pack 發布期備份（transient）
+packages/*/package.json.packbak
+*.tgz
+
 # 示例執行時產物（本地留存）
 examples/quickstart/.data/
 

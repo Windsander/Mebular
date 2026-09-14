@@ -1,0 +1,26 @@
+{
+  "name": "@mebular/mcp",
+  "version": "0.1.0",
+  "description": "Mebular MCP server（stdio + Streamable HTTP）：把 Mebular 记忆能力暴露给任意 MCP client",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "bin": {
+    "mebular": "./bin/mebular.mjs"
+  },
+  "files": [
+    "bin",
+    "src"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@mebular/core": "file:../..",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.6.5"
+  }
+}

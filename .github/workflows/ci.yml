@@ -41,6 +41,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: stdio MCP (real client)
+        run: npm run verify:mcp:stdio
+
   semantic-real:
     name: semantic recall (real model)
     runs-on: ubuntu-latest

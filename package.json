@@ -64,6 +64,7 @@
     "verify:mcp:http": "node scripts/verify-mcp-http.mjs",
     "verify:mcp:oauth": "node scripts/verify-mcp-oauth-hardening.mjs",
     "verify:mcp:cross": "node scripts/verify-mcp-cross.mjs",
+    "verify:mcp:cross:selftest": "node scripts/verify-mcp-cross.mjs --selftest",
     "verify:mcp:skill": "node scripts/verify-mcp-skill.mjs",
     "verify:mcp:publish": "node scripts/verify-mcp-publish.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"

@@ -1,10 +1,20 @@
 {
-  "name": "mebular",
+  "name": "@mebular/core",
   "version": "0.1.0",
-  "private": true,
   "description": "本地优先的图式记忆系统：为 Hermes 等 Agent 提供跨设备、可离线、可验证的记忆共享层",
   "license": "MIT",
   "author": "Windsander",
+  "workspaces": [
+    "packages/*"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/Windsander/Mebular.git"
@@ -25,13 +35,21 @@
     "node": ">=20"
   },
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "build:watch": "tsc --watch",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
-    "lint": "eslint src tests tests-semantic scripts --ext .ts,.mjs",
+    "lint": "eslint src tests tests-semantic scripts packages/mcp --ext .ts,.mjs",
     "verify": "node scripts/verify.mjs",
     "verify:at-rest": "node scripts/scan-at-rest.mjs",
     "verify:semantic": "node scripts/verify-semantic.mjs",
@@ -42,6 +60,7 @@
     "verify:wan:cross:selftest": "node scripts/wan-sync.mjs selftest",
     "verify:wan:cross:selftest:isolated": "node scripts/wan-sync.mjs selftest-isolated",
     "bench:snapshot": "node scripts/bench-snapshot.mjs",
+    "verify:mcp:stdio": "node scripts/verify-mcp-stdio.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "dependencies": {
@@ -68,6 +87,9 @@
     }
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.6.5",
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.24",
     "@typescript-eslint/eslint-plugin": "^7.0.2",

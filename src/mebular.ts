@@ -378,6 +378,21 @@ export class Mebular {
     return this.semanticVectorIndexImpl;
   }
 
+  /** 本机设备 ID（G6.1 MemoryService.status 用） */
+  get deviceId(): string {
+    return this.config.deviceId;
+  }
+
+  /** 是否启用静态加密（G6.1） */
+  get atRestEncryption(): boolean {
+    return Boolean(this.config.encryption?.storageKey) || this.config.encryption?.level === 'user';
+  }
+
+  /** 配置的 relay 地址列表（G6.1） */
+  get relayServers(): string[] {
+    return this.config.network?.libp2p?.relayServers ?? [];
+  }
+
   // ---------- 静态加密（G1） ----------
 
   /**

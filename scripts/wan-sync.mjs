@@ -165,15 +165,7 @@ async function runUserKeygen() {
   process.exit(0);
 }
 
-// ---------- 图状态哈希（排除证据 meta 节点） ----------
-
-function isEvidenceNode(node) {
-  return (
-    node.type === 'meta' &&
-    typeof node.content?.name === 'string' &&
-    node.content.name.startsWith('wan-evidence-')
-  );
-}
+// ---------- 图状态哈希：复用 core 的 computeStateHash（G6.1） ----------
 
 async function collectData(app) {
   const nodes = [];
@@ -185,13 +177,7 @@ async function collectData(app) {
 }
 
 function dataStateHash(nodes, edges) {
-  const byId = (a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-  const dataNodes = nodes.filter((n) => !isEvidenceNode(n));
-  const canon = JSON.stringify({
-    nodes: [...dataNodes].sort(byId).map((n) => ({ id: n.id, content: n.content, deletedAt: n.deletedAt ?? null })),
-    edges: [...edges].sort(byId).map((e) => ({ id: e.id, source: e.source, target: e.target, relation: e.relation })),
-  });
-  return createHash('sha256').update(canon).digest('hex');
+  return mebular.computeStateHash(nodes, edges);
 }
 
 // ---------- App 工厂 ----------

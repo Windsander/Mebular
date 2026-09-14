@@ -36,6 +36,14 @@ export { MemoryStorage } from './storage/MemoryStorage.js';
 export { JsonFileStorage, type JsonFileStorageOptions } from './storage/JsonFileStorage.js';
 export { SqliteStorage, type SqliteStorageOptions } from './storage/SqliteStorage.js';
 export * from './memory/index.js';
+export {
+  MemoryService,
+  type MemoryServiceOptions,
+  type MemoryStatus,
+  type ImportInput,
+  type ImportResult,
+} from './memory/MemoryService.js';
+export { computeStateHash, isEvidenceNode } from './core/stateHash.js';
 export * from './hermes/index.js';
 export * from './exchange/index.js';
 export {

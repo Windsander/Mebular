@@ -61,6 +61,7 @@
     "verify:wan:cross:selftest:isolated": "node scripts/wan-sync.mjs selftest-isolated",
     "bench:snapshot": "node scripts/bench-snapshot.mjs",
     "verify:mcp:stdio": "node scripts/verify-mcp-stdio.mjs",
+    "verify:mcp:http": "node scripts/verify-mcp-http.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "dependencies": {

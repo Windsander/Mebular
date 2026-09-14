@@ -572,17 +572,87 @@ async function tryPhase(app, remote, addr, predicate, attempts, timeoutMs, gapMs
   return null;
 }
 
+// ---------- 跨机前置预检（缺配置/不可达时立即报错，不跑到中途才失败） ----------
+
+function parseTcpTarget(multiaddr) {
+  if (typeof multiaddr !== 'string') return null;
+  const m = /(?:\/ip4\/([^/]+)|\/ip6\/([^/]+)|\/dns4\/([^/]+)|\/dns6\/([^/]+))\/tcp\/(\d+)/.exec(multiaddr);
+  if (!m) return null;
+  return { host: m[1] ?? m[2] ?? m[3] ?? m[4], port: Number(m[5]) };
+}
+
+function probeTcp(host, port, timeoutMs) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    let settled = false;
+    const finish = (ok, error) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve({ ok, error: error ? String(error.message ?? error) : null });
+    };
+    const timer = setTimeout(() => finish(false, new Error(`TCP 连接超时 ${timeoutMs}ms`)), timeoutMs);
+    socket.on('connect', () => {
+      clearTimeout(timer);
+      finish(true);
+    });
+    socket.on('error', (e) => {
+      clearTimeout(timer);
+      finish(false, e);
+    });
+  });
+}
+
+function printCrossGuidance() {
+  log('');
+  log('补齐指引：');
+  log('  1) 生成并分发用户主密钥（两机同一把）：node scripts/wan-sync.mjs user-keygen --out key.json');
+  log('  2) A 机：node scripts/wan-sync.mjs peer --role a --user-master-key-file key.json \\');
+  log('             --bind /ip4/0.0.0.0/tcp/4001 [--relay <relay-multiaddr>]   # 启动后打印 PEER_READY');
+  log('  3) 可选 relay：node scripts/wan-sync.mjs relay --port 4000 --unlimited   # 打印 relay multiaddr');
+  log('  4) B 机：node scripts/wan-sync.mjs cross --user-master-key-file key.json \\');
+  log('             --peer <A 稳定 multiaddr> --peer-id <A deviceId> [--relay <relay-multiaddr>] --out B-evidence.json');
+  log('  或经 env：MEBULAR_WAN_PEER / MEBULAR_WAN_PEER_ID / MEBULAR_WAN_RELAY');
+  log('  不可达常见原因：地址/端口填错、防火墙/NAT 未放行、relay 未以 --unlimited 运行、A 未先启动。');
+  log('  预检超时可用 MEBULAR_WAN_PREFLIGHT_TIMEOUT_MS 调整（默认 3000ms）。');
+}
+
+async function preflightCross({ peer, peerId, relay }) {
+  const problems = [];
+  if (!peer) problems.push('缺少 HOST_A 地址（--peer 或 MEBULAR_WAN_PEER）');
+  if (!peerId) problems.push('缺少 HOST_A deviceId（--peer-id 或 MEBULAR_WAN_PEER_ID）');
+  const peerTarget = peer ? parseTcpTarget(peer) : null;
+  if (peer && !peerTarget) problems.push(`HOST_A 地址解析不出 TCP 目标：${peer}`);
+  const relayTarget = relay ? parseTcpTarget(relay) : null;
+  if (relay && !relayTarget) problems.push(`RELAY 地址解析不出 TCP 目标：${relay}`);
+
+  if (problems.length === 0) {
+    const timeoutMs = Number(process.env.MEBULAR_WAN_PREFLIGHT_TIMEOUT_MS ?? 3000);
+    const targets = [{ name: 'HOST_A', target: peerTarget }];
+    if (relayTarget) targets.push({ name: 'RELAY', target: relayTarget });
+    for (const { name, target } of targets) {
+      const r = await probeTcp(target.host, target.port, timeoutMs);
+      if (!r.ok) problems.push(`${name} 不可达：${target.host}:${target.port}（${r.error}）`);
+    }
+  }
+
+  if (problems.length > 0) {
+    log('✗ G3-R 跨机前置预检未通过（尚未开始同步）：');
+    for (const p of problems) log(`  - ${p}`);
+    printCrossGuidance();
+    return false;
+  }
+  log(`[preflight] 通过：HOST_A=${peerTarget.host}:${peerTarget.port}${relayTarget ? `  RELAY=${relayTarget.host}:${relayTarget.port}` : ''}`);
+  return true;
+}
+
 async function runCross() {
   const peer = typeof args.peer === 'string' ? args.peer : process.env.MEBULAR_WAN_PEER;
   const peerId = typeof args['peer-id'] === 'string' ? args['peer-id'] : process.env.MEBULAR_WAN_PEER_ID;
   const relay = typeof args.relay === 'string' ? args.relay : process.env.MEBULAR_WAN_RELAY;
-  if (!peer || !peerId) {
-    log('✗ G3-R 跨机模式缺少环境：需要两台真实主机（不同网络）与可达稳定地址。');
-    log('  必需：--peer <A 稳定 multiaddr> --peer-id <A deviceId>（或 MEBULAR_WAN_PEER / MEBULAR_WAN_PEER_ID）');
-    log('  可选：--relay <relay multiaddr>；出口 IP 服务 MEBULAR_WAN_IP_ECHO（缺省 api.ipify.org）');
-    log('  A：node scripts/wan-sync.mjs peer --role a --bind /ip4/0.0.0.0/tcp/4001 --user-master-key-file key.json');
-    log('  B：node scripts/wan-sync.mjs cross --peer <A-multiaddr> --peer-id <A-deviceId> --out evidence.json');
-    log('  B 以稳定地址重试连接、按图上阶段状态判定；无需共享 ready 文件。');
+
+  // 前置预检：缺配置/不可达直接明确报错并给指引，不跑到中途才失败
+  if (!(await preflightCross({ peer, peerId, relay }))) {
     process.exit(1);
   }
 

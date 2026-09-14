@@ -123,6 +123,7 @@ node scripts/wan-sync.mjs cross --user-master-key-file key.json \
 
 - 用户主密钥：`user-keygen` 生成，A/B 用同一把（否则设备证书互验失败）；也可用 `MEBULAR_USER_MASTER_KEY`（内联 JSON）。
 - 协调无需共享文件：B 用 `--peer/--peer-id` 一次给定 A 的稳定地址，按图上阶段状态重试连接完成三阶段。
+- 前置预检：`cross` 启动前先检查 `--peer/--peer-id/--relay` 是否齐全且 **TCP 可达**；缺失/不可达立即报错并打印补齐指引，不跑到中途才失败（超时可用 `MEBULAR_WAN_PREFLIGHT_TIMEOUT_MS` 调整，默认 3000ms）。
 - 出口判据：`MEBULAR_WAN_IP_ECHO`（缺省 `https://api.ipify.org?format=json`）取公网出口 IP；任一私网/回环 → false，取不到 → 未知（绝不误判 true）。
 - relay 默认**限额**；需显式 `--unlimited`（`Libp2pProvider.relayUnlimited`）才允许任意协议过 circuit，调用方承担开放 relay 的滥用风险；`relay --capture <path>` 可捕获线上字节供「只见密文」取证。
 - 诚实边界：上述本机命令都是 **non-evidence**；真实 G3-E 需两台不同公网主机 + 可达 relay，当前**未达成**（阻塞报告 `docs.design/g3r-blocker-2026-09-13.md`）。`npm run verify:wan:cross` 无环境时退出码 1 并打印所需环境。

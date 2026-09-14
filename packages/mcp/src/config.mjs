@@ -118,7 +118,7 @@ export async function createMebular() {
     },
   });
   await app.initialize();
-  return { app, home, config };
+  return { app, home, config, storagePath, deviceId };
 }
 
 export { homedir };

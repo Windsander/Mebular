@@ -44,6 +44,9 @@ jobs:
       - name: stdio MCP (real client)
         run: npm run verify:mcp:stdio
 
+      - name: HTTP MCP (auth / PKCE / lock / fail-closed)
+        run: npm run verify:mcp:http
+
   semantic-real:
     name: semantic recall (real model)
     runs-on: ubuntu-latest

@@ -5,6 +5,21 @@
 
 import { z } from 'zod';
 
+/** 每个工具所需的 OAuth scope（D36） */
+export const TOOL_SCOPES = {
+  memory_write: 'memory.write',
+  memory_write_batch: 'memory.write',
+  memory_query: 'memory.read',
+  memory_search: 'memory.read',
+  memory_profile: 'memory.read',
+  memory_skills: 'memory.read',
+  memory_history: 'memory.read',
+  memory_graph: 'memory.read',
+  memory_import: 'memory.admin',
+  memory_status: 'memory.read',
+  memory_sync: 'memory.admin',
+};
+
 export const TOOL_NAMES = [
   'memory_write',
   'memory_write_batch',

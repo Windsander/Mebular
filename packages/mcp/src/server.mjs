@@ -6,6 +6,7 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { MemoryService } from '@mebular/core';
 import { createMebular } from './config.mjs';
 import { registerTools } from './tools.mjs';
+import { startHttpServer, acquireLock } from './serve.mjs';
 
 const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
 1. 先查后写：写入前先用 memory_query/memory_search 查重，避免重复。
@@ -15,7 +16,7 @@ const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
 5. 隐私：不要写入密钥、口令、完整身份证件等高敏感信息。
 6. 无结果别编：召回为空就如实说明，不要臆造记忆。`;
 
-function buildServer(service) {
+export function buildServer(service) {
   const server = new McpServer({ name: 'mebular', version: '0.1.0' });
   registerTools(server, service);
   server.registerPrompt(
@@ -50,4 +51,42 @@ export async function startStdioServer() {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
   return { handle, app, service };
+}
+
+/**
+ * 启动 Streamable HTTP server（G6.3）。
+ * 单实例：先取 <home>/lock；被占抛 MCP_STORAGE_LOCKED。
+ */
+export async function startServeServer(options = {}) {
+  const { app, home, storagePath } = await createMebular();
+  const lock = await acquireLock(home, storagePath);
+  try {
+    const service = new MemoryService(app);
+    const http = await startHttpServer({
+      home,
+      app,
+      service,
+      buildServer,
+      host: options.host,
+      port: options.port,
+      auth: options.auth,
+      tls: Boolean(options.tlsKey),
+      tlsKey: options.tlsKey,
+      tlsCert: options.tlsCert,
+      tokensFile: options.tokensFile,
+    });
+    const shutdown = async () => {
+      await http.close().catch(() => undefined);
+      await lock.release();
+      await app.shutdown().catch(() => undefined);
+      process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+    return { ...http, lock, app, service };
+  } catch (error) {
+    await lock.release();
+    await app.shutdown().catch(() => undefined);
+    throw error;
+  }
 }

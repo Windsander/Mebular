@@ -29,6 +29,7 @@ const selfPath = fileURLToPath(import.meta.url);
 const mebular = await import(join(rootDir, 'dist', 'index.js'));
 const { Mebular, IdentityManager, Libp2pProvider } = mebular;
 import { preflightCross } from './wan-preflight.mjs';
+import { lookupEgress, judgeDifferentNetwork } from './wan-egress.mjs';
 
 const TYPES = ['entity', 'fact', 'episode', 'skill', 'meta'];
 
@@ -400,60 +401,6 @@ async function runRelay() {
   };
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
-}
-
-// ---------- 出口 IP 判据（P2-3：公网出口，非网卡接口） ----------
-
-const DEFAULT_IP_ECHO = 'https://api.ipify.org?format=json';
-
-async function lookupEgress(timeoutMs = 4000) {
-  const source = process.env.MEBULAR_WAN_IP_ECHO || DEFAULT_IP_ECHO;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(source, { signal: controller.signal });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const text = (await res.text()).trim();
-    let ip = null;
-    let org = null;
-    try {
-      const j = JSON.parse(text);
-      ip = typeof j.ip === 'string' ? j.ip : null;
-      org = typeof j.org === 'string' ? j.org : null;
-    } catch {
-      ip = text;
-    }
-    if (!ip || !/^[0-9a-fA-F:.]+$/.test(ip)) throw new Error('unexpected egress payload');
-    return { ip, org, asn: org ? org.split(/\s+/)[0] : null, source, error: null };
-  } catch (error) {
-    return { ip: null, org: null, asn: null, source, error: String(error?.message ?? error) };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function isPrivateIp(ip) {
-  if (!ip) return true;
-  const lower = ip.toLowerCase();
-  if (lower === '::1' || lower.startsWith('fe80') || lower.startsWith('fc') || lower.startsWith('fd')) return true;
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
-  if (!m) return true; // 非 IPv4 且非已知公网 v6 → 保守判私网/未知
-  const a = Number(m[1]);
-  const b = Number(m[2]);
-  if (a === 10 || a === 127) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && b === 168) return true;
-  if (a === 169 && b === 254) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-  return false;
-}
-
-/** 出口 IP 判据：任一未知/私网 → false/未知；均公网且不同 → true（绝不基于接口 IP） */
-function judgeDifferentNetwork(localIp, peerIp) {
-  if (!localIp || !peerIp) return { value: null, basis: 'egress-unknown' };
-  if (isPrivateIp(localIp) || isPrivateIp(peerIp)) return { value: false, basis: 'private-or-loopback' };
-  if (localIp === peerIp) return { value: false, basis: 'same-egress-ip' };
-  return { value: true, basis: 'distinct-public-egress' };
 }
 
 // ---------- peer：单端三阶段（稳定地址，无共享文件） ----------

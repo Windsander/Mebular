@@ -1,0 +1,13 @@
+# DeepSeek Harness（Cordis）— 只桥接 Tools（不桥接 prompts）
+# 行为规约以 SKILL.md + MEMORY_POLICY.md 为主通道。
+plugins:
+  - name: '@deepseek-ai/dsh-mcp-client'
+    config:
+      serverName: mebular
+      transport: stdio
+      command: mebular
+      args: ['mcp']
+
+# 远程（Streamable HTTP）用：
+#      transport: streamable-http
+#      url: http://127.0.0.1:7331/mcp

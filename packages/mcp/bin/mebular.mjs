@@ -80,6 +80,96 @@ async function runToken(action, flags) {
   process.exit(2);
 }
 
+async function runKeygen(flags) {
+  const { IdentityManager } = await import('@mebular/core');
+  const out = typeof flags.out === 'string' ? flags.out : join(homeDir(), 'user-master-key.json');
+  const master = await new IdentityManager().generateUserMasterKey();
+  const record = {
+    publicKey: Buffer.from(master.publicKey).toString('base64'),
+    privateKeyPkcs8: await IdentityManager.exportPrivateKey(master.privateKey),
+    createdAt: new Date().toISOString(),
+  };
+  await mkdir(dirname(out), { recursive: true });
+  await writeFile(out, JSON.stringify(record, null, 2), 'utf-8');
+  await chmod(out, 0o600);
+  console.log(JSON.stringify({ keyFile: out, publicKey: record.publicKey }, null, 2));
+  console.error('（主私钥是信任根，请妥善保管；权限 0600）');
+}
+
+async function runInit(flags) {
+  const home = homeDir();
+  const configFile = join(home, 'config.json');
+  const keyFile = join(home, 'user-master-key.json');
+  await mkdir(home, { recursive: true });
+
+  if (!existsSync(keyFile)) await runKeygen({ out: keyFile });
+
+  if (existsSync(configFile)) {
+    console.log(`配置已存在，未覆盖：${configFile}`);
+  } else {
+    const config = {
+      storagePath: typeof flags['storage'] === 'string' ? flags['storage'] : join(home, 'store.jsonl'),
+      storageAdapter: 'json',
+      deviceId: typeof flags['device-id'] === 'string' ? flags['device-id'] : `device-${process.env.HOSTNAME ?? 'local'}`,
+      encryption: { level: 'none', keyFile },
+      network: { enabled: false, libp2p: { listen: [], relayServers: [], relayUnlimited: false } },
+      sync: { autoSync: true },
+      semantic: { enabled: false, minScore: 0.2 },
+      mcp: { http: { host: '127.0.0.1', port: 7331, auth: 'none', tls: false, tokensFile: join(home, 'auth', 'tokens.json') } },
+    };
+    await writeFile(configFile, JSON.stringify(config, null, 2), 'utf-8');
+    console.log(`已写入配置：${configFile}`);
+  }
+  console.log(
+    [
+      '',
+      '下一步：',
+      '  node packages/mcp/bin/mebular.mjs mcp      # stdio 接入（各 MCP client）',
+      '  node packages/mcp/bin/mebular.mjs serve    # Streamable HTTP',
+      '  node packages/mcp/bin/mebular.mjs status   # 查看状态',
+      '  node packages/skill/scripts/install.mjs    # 安装行为层 Skill',
+    ].join('\n'),
+  );
+}
+
+function runPrintConfig(flags) {
+  const client = typeof flags.client === 'string' ? flags.client : 'generic';
+  const url = typeof flags.url === 'string' ? flags.url : null;
+  const local = { command: 'mebular', args: ['mcp'] };
+
+  const snippets = {
+    opencode: JSON.stringify(
+      { $schema: 'https://opencode.ai/config.json', mcp: { mebular: url ? { type: 'remote', url } : { type: 'local', command: ['mebular', 'mcp'] } } },
+      null,
+      2,
+    ),
+    claude: JSON.stringify({ mcpServers: { mebular: url ? { url } : local } }, null, 2),
+    cursor: JSON.stringify({ mcpServers: { mebular: url ? { url } : local } }, null, 2),
+    generic: JSON.stringify({ mcpServers: { mebular: url ? { url } : local } }, null, 2),
+    dsh: url
+      ? `plugins:\n  - name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: mebular\n      transport: streamable-http\n      url: ${url}`
+      : "plugins:\n  - name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: mebular\n      transport: stdio\n      command: mebular\n      args: ['mcp']",
+  };
+  const output = snippets[client];
+  if (!output) {
+    console.error(`未知 client：${client}（opencode/claude/cursor/dsh/generic）`);
+    process.exit(2);
+  }
+  console.log(output);
+}
+
+async function runStatus() {
+  const { createMebular } = await import('../src/config.mjs');
+  const { MemoryService } = await import('@mebular/core');
+  const { app, home, storagePath } = await createMebular();
+  try {
+    const status = await new MemoryService(app).status();
+    console.log(JSON.stringify({ ...status, home, storagePath }, null, 2));
+  } finally {
+    await app.shutdown().catch(() => undefined);
+  }
+}
+
 async function main() {
   const flags = parseFlags(argv.slice(1));
   switch (command) {
@@ -127,11 +217,16 @@ async function main() {
       process.exit(0);
       return;
     case 'init':
+      await runInit(flags);
+      return;
     case 'keygen':
+      await runKeygen(flags);
+      return;
     case 'print-config':
+      runPrintConfig(flags);
+      return;
     case 'status':
-      console.error(`mebular ${command}：尚未实现（按 G6 计划补齐）`);
-      process.exit(2);
+      await runStatus();
       return;
     default:
       console.error(`未知命令：${command ?? '(空)'}`);

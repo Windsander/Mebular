@@ -1,0 +1,20 @@
+{
+  "name": "@mebular/skill",
+  "version": "0.1.0",
+  "description": "Mebular 行为层：可移植的 SKILL.md + MEMORY_POLICY.md 与各 MCP client 接入片段",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "files": [
+    "SKILL.md",
+    "MEMORY_POLICY.md",
+    "mcp",
+    "scripts"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

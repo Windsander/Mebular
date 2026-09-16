@@ -133,6 +133,20 @@ export function assertValidSnapshot(snapshot: SyncSnapshot): void {
   if (!Array.isArray(snapshot.namespaces) || snapshot.namespaces.some((ns) => typeof ns !== 'string')) {
     violation('namespaces 必须为字符串数组');
   }
+  // 轻量元素级校验（R4）：每项须为含字符串 id 的对象——`applySnapshot` 会按
+  // id 去重/比较，缺 id 的项无法安全应用。不做逐字段全验。
+  snapshot.nodes.forEach((node, index) => {
+    const record = node as { id?: unknown } | null;
+    if (record === null || typeof record !== 'object' || typeof record.id !== 'string') {
+      violation(`nodes[${index}] 必须为含字符串 id 的对象`);
+    }
+  });
+  snapshot.edges.forEach((edge, index) => {
+    const record = edge as { id?: unknown } | null;
+    if (record === null || typeof record !== 'object' || typeof record.id !== 'string') {
+      violation(`edges[${index}] 必须为含字符串 id 的对象`);
+    }
+  });
   assertNamespaceClocksShape(snapshot.namespaceClocks, 'namespaceClocks', violation);
 }
 

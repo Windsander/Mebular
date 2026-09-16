@@ -101,6 +101,12 @@ export interface SyncResult {
   snapshotSent?: number;
   /** 本会话以快照应用的对端物化实体数（nodes+edges） */
   snapshotApplied?: number;
+  /**
+   * 诊断信号（R1）：对端 hello 自报的分区水位**高于**本机记录（ack/已确认
+   * 快照）的部分，仅用于发现「对端有问题」。自报**不参与**水位推进，因此
+   * 该信号非空也不会影响本会话的发送集合。无差异时为 undefined。
+   */
+  reportedAhead?: NamespaceClocks;
 }
 
 export interface SyncStatus {
@@ -171,6 +177,23 @@ interface AppliedOffer {
   received: number;
   duplicates: number;
   conflicts: SyncConflict[];
+}
+
+/**
+ * 快照应用的回退保护（R3）：仅当本地不存在、或快照版本时钟**严格更新**时才写入。
+ * 并发（互不因果）时保留本地版本——宁可少应用，绝不回退。这不是完整冲突解决；
+ * 快照只发给空对端的前提（R2）仍然成立，见 `applySnapshot`。
+ */
+function shouldApplySnapshotEntity(
+  local: { vectorClock?: Record<string, number> } | null,
+  incoming: { vectorClock?: Record<string, number> },
+): boolean {
+  if (!local) return true;
+  return (
+    VectorClock.fromJSON(incoming.vectorClock ?? {}).compare(
+      VectorClock.fromJSON(local.vectorClock ?? {}),
+    ) === 'greater'
+  );
 }
 
 /** 分区时钟的确定性排序输出（namespace / author 键排序，便于审计与测试） */
@@ -566,7 +589,7 @@ export class SyncManager extends EventEmitter {
           });
           const hello = await nextSyncMessage(iterator, 'sync-hello', timeout);
           assertValidHello(hello);
-          await this.recordPeerHello(peer.deviceId, hello);
+          const reportedAhead = await this.recordPeerHello(peer.deviceId, hello);
 
           // 2. 我方 offer：按 per-(对端, 分区) 水位计算缺失集；pull 模式只收不发。
           //    先按「对端授权 ∩ 对端订阅 ∩ 本机订阅」裁剪（T2 供给端强制），
@@ -577,6 +600,9 @@ export class SyncManager extends EventEmitter {
             : this.filterEventsForAllow(await this.missingEventsForPeer(peer.deviceId), allow);
           const snapshotThreshold = options.snapshotThreshold ?? this.snapshotThreshold;
           let snapshot: SyncSnapshot | undefined;
+          // R2：快照**只发给自报分区水位为空的对端**——`applySnapshot` 是物化
+          // 状态覆盖（虽有 R3 回退保护，仍非完整冲突合并），对已有数据的对端
+          // 发快照会覆盖其更新。放宽此条件前必须先让快照应用冲突感知。
           if (
             direction !== 'pull' &&
             snapshotThreshold !== undefined &&
@@ -622,7 +648,7 @@ export class SyncManager extends EventEmitter {
           await transport.send({ type: 'sync-done', finalVectorClock });
           await nextSyncMessage(iterator, 'sync-done', timeout);
 
-          const result = this.buildResult(peer, direction, outgoing.length, applied, allow);
+          const result = this.buildResult(peer, direction, outgoing.length, applied, allow, reportedAhead);
           if (snapshot) {
             result.snapshotSent = snapshot.nodes.length + snapshot.edges.length;
           }
@@ -667,7 +693,7 @@ export class SyncManager extends EventEmitter {
     try {
       const hello = await nextSyncMessage(iterator, 'sync-hello', firstHelloTimeout);
       assertValidHello(hello);
-      await this.recordPeerHello(peer.deviceId, hello);
+      const reportedAhead = await this.recordPeerHello(peer.deviceId, hello);
       const direction: SyncDirection = hello.direction ?? 'bidirectional';
       await transport.send({
         type: 'sync-hello',
@@ -692,11 +718,15 @@ export class SyncManager extends EventEmitter {
         ...(offer.snapshot ? { snapshotApplied: true } : {}),
       });
 
-      // push 模式只对端发；否则按「对端授权 ∩ 对端订阅 ∩ 本机订阅」裁剪后回供（T2）
+      // push 模式只对端发；否则按「对端授权 ∩ 对端订阅 ∩ 本机订阅」裁剪后回供（T2）。
+      // 排除本会话刚从对端收到的事件：对端既然发来就已持有，回弹纯属冗余
+      // （这是「已观测传输」的事实，不是对端自报，与 R1 的水位不变量不冲突）。
       const allow = await this.resolveOutgoingAllowList(peer, hello);
+      const justReceived = new Set(applied.ackedIds);
       const outgoing = direction === 'push'
         ? []
-        : this.filterEventsForAllow(await this.missingEventsForPeer(peer.deviceId), allow);
+        : this.filterEventsForAllow(await this.missingEventsForPeer(peer.deviceId), allow)
+            .filter((event) => !justReceived.has(event.id));
       await transport.send({ type: 'sync-offer', events: outgoing });
       const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
       assertValidAck(ack);
@@ -706,7 +736,7 @@ export class SyncManager extends EventEmitter {
       const finalVectorClock = this.eventLog.getClock().toJSON();
       await transport.send({ type: 'sync-done', finalVectorClock });
 
-      const result = this.buildResult(peer, direction, outgoing.length, applied, allow);
+      const result = this.buildResult(peer, direction, outgoing.length, applied, allow, reportedAhead);
       if (snapshotApplied > 0) {
         result.snapshotApplied = snapshotApplied;
       }
@@ -816,11 +846,22 @@ export class SyncManager extends EventEmitter {
     }
   }
 
-  /** 记录对端 hello：订阅声明回填在线登记 + 分区水位并入 peerWatermarks（持久化） */
+  /**
+   * 记录对端 hello：订阅声明回填在线登记（供 push-on-write），并计算诊断信号。
+   *
+   * **不变量：`peerWatermarks` 只由我们掌握的两个事实推进——对端 ack
+   * （`markEventsSynced`）与已确认快照（`confirmSnapshotWatermark`）。**
+   * 对端 hello 的**自报水位绝不抬升**本机记录：自报是对方单方面的声明，
+   * 抬升它会让本机误判「对端已有」而永久静默不发（F1 的对端版本）。
+   * 自报同时仍用于：
+   *   ① 快照触发（`applySnapshot` 非冲突感知，快照只发给自报为空的对端）；
+   *   ② 诊断——自报高于本机记录时返回差额，供 `sync-completed.reportedAhead`
+   *      暴露「对端有问题」。自报低于/等于本机记录时维持现状（不抬高也不下调）。
+   */
   private async recordPeerHello(
     peerDeviceId: string,
     hello: Extract<SyncMessage, { type: 'sync-hello' }>,
-  ): Promise<void> {
+  ): Promise<NamespaceClocks> {
     const namespaces = normalizeNamespaceList(hello.namespaces);
     for (const entry of this.onlinePeers.values()) {
       if (entry.peer.deviceId === peerDeviceId) {
@@ -829,10 +870,17 @@ export class SyncManager extends EventEmitter {
       }
     }
     await this.ensureSyncStateLoaded();
-    const existing = this.peerWatermarks.get(peerDeviceId) ?? {};
-    // assertValidHello 已保证 namespaceClocks 为对象，无需再兜底
-    this.peerWatermarks.set(peerDeviceId, mergeNamespaceClocks(existing, hello.namespaceClocks));
-    await this.persistSyncState();
+    const watermarks = this.peerWatermarks.get(peerDeviceId) ?? {};
+    const ahead: NamespaceClocks = {};
+    for (const [ns, clock] of Object.entries(hello.namespaceClocks)) {
+      for (const [author, reported] of Object.entries(clock)) {
+        const known = watermarks[ns]?.[author] ?? 0;
+        if (reported > known) {
+          (ahead[ns] ??= {})[author] = reported - known;
+        }
+      }
+    }
+    return ahead;
   }
 
   /** 本机 hello：订阅声明（subscribeAll + namespaces）+ 分区水位 */
@@ -913,7 +961,10 @@ export class SyncManager extends EventEmitter {
 
   // ---------- 内部 ----------
 
-  /** 应用管线：验签 → 幂等入库 → 冲突感知应用；验签失败即中止会话 */
+  /**
+   * 应用管线：已持有则去重（免验签）→ 验签 → 幂等入库 → 冲突感知应用；
+   * 验签失败即中止会话。去重优先是安全的：ID 为内容寻址，同 ID 即同内容。
+   */
   private async applyOffer(events: Event[], peer: SyncPeer): Promise<AppliedOffer> {
     const ackedIds: string[] = [];
     const appliedIds: string[] = [];
@@ -923,6 +974,16 @@ export class SyncManager extends EventEmitter {
     let duplicates = 0;
 
     for (const event of events) {
+      // 已持有 = 幂等重复：内容寻址 ID 已绑定内容，收到同 ID 即同一事件，
+      // 无需再次验签。R1 起对端不再据自报抑制发送，会把本机已有事件（含回弹
+      // 的本机事件）作为反熵冗余重发；此处去重即可，绝不能因此中止会话。
+      if (await this.eventLog.getEvent(event.id)) {
+        await this.eventLog.appendRemote(event); // 仍合并/推进时钟
+        ackedIds.push(event.id);
+        duplicates += 1;
+        continue;
+      }
+
       const valid = await this.verifyEventTrust(event, peer);
       if (!valid) {
         throw new SyncError(`Event signature verification failed: ${event.id}`, ErrorCodes.SYNC_INVALID_EVENT);
@@ -1014,16 +1075,30 @@ export class SyncManager extends EventEmitter {
   }
 
   /**
-   * 采纳快照：物化节点/边写入存储，分区水位合并推进（供本机 hello 上报，
-   * 使发送方不再重发已覆盖分区），返回实体数。
+   * 采纳快照：物化节点/边写入存储（**回退保护的保守 upsert**），分区水位合并
+   * 推进（供本机 hello 上报，使发送方不再重发已覆盖分区），返回**实际写入**的
+   * 实体数。
+   *
+   * 前提（R2）：快照**只发给自报分区水位为空的对端**（触发条件见
+   * `syncWithDevice`）。放宽该前提之前**必须先**让快照应用具备完整的冲突/
+   * 合并语义；否则快照的「物化状态」会覆盖对端更新的事实。
+   * 防护（R3）：即使有上述前提，这里也**不做无条件 upsert**——仅当本地缺失、
+   * 或快照版本时钟**严格更新**时才写入；并发（互不因果）时保留本地版本。
+   * 这是回退保护，**不是**完整冲突解决：它宁可少应用，也绝不回退。
+   *
    * 快照仅来自已认证对端；不做逐事件验签（fast-start 取舍，见 protocol.ts）。
    */
   private async applySnapshot(snapshot: SyncSnapshot): Promise<number> {
+    let applied = 0;
     for (const node of snapshot.nodes) {
+      if (!shouldApplySnapshotEntity(await this.storage.getNode(node.id), node)) continue;
       await this.storage.putNode(node);
+      applied += 1;
     }
     for (const edge of snapshot.edges) {
+      if (!shouldApplySnapshotEntity(await this.storage.getEdge(edge.id), edge)) continue;
       await this.storage.putEdge(edge);
+      applied += 1;
     }
     const clocks = snapshot.namespaceClocks ?? {};
     for (const [ns, clock] of Object.entries(clocks)) {
@@ -1035,7 +1110,7 @@ export class SyncManager extends EventEmitter {
       global.merge(VectorClock.fromJSON(clock));
     }
     await this.persistSyncState();
-    return snapshot.nodes.length + snapshot.edges.length;
+    return applied;
   }
 
   private buildResult(
@@ -1044,8 +1119,9 @@ export class SyncManager extends EventEmitter {
     sent: number,
     applied: AppliedOffer,
     allow: string[],
+    reportedAhead?: NamespaceClocks,
   ): SyncResult {
-    return {
+    const result: SyncResult = {
       peerDeviceId: peer.deviceId,
       direction,
       sentEvents: sent,
@@ -1059,6 +1135,11 @@ export class SyncManager extends EventEmitter {
       // 拒绝不静默：allow 解析为 [] 时明确指出「未授权任何分区」
       denied: allow.length === 0,
     };
+    // 诊断信号（R1）：对端自报高于本机记录的部分；仅诊断，不影响发送集合
+    if (reportedAhead && Object.keys(reportedAhead).length > 0) {
+      result.reportedAhead = reportedAhead;
+    }
+    return result;
   }
 
   /** 会话串行化：共享信道不允许多会话帧序交错 */

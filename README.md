@@ -14,8 +14,8 @@ Mebular 把记忆存成一张带签名事件的知识图谱，每条事实都记
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-465%20passed-brightgreen)](#项目状态)
-[![Coverage](https://img.shields.io/badge/Coverage-91.4%25-brightgreen)](#项目状态)
+[![Tests](https://img.shields.io/badge/Tests-473%20passed-brightgreen)](#项目状态)
+[![Coverage](https://img.shields.io/badge/Coverage-91.5%25-brightgreen)](#项目状态)
 
 [官网](https://mebular.cyberfederal.io) · [快速上手](#30-秒上手) · [系统架构](#系统架构) · [项目状态](#项目状态) · [贡献](#贡献)
 
@@ -47,7 +47,7 @@ git clone https://github.com/Windsander/Mebular.git
 cd Mebular
 npm install
 npm run build          # TypeScript strict → dist/
-npm test               # 61 套件 / 465 用例全绿
+npm test               # 61 套件 / 473 用例全绿
 ```
 
 ### 最简例子（复制即跑）
@@ -151,8 +151,9 @@ node scripts/wan-sync.mjs cross --user-master-key-file key.json \
 - **分区隔离**：`query` / `search` / `graph` 都接受可选 `namespace`（单个或数组）；指定分区时不会串到别的分区。CMF 导入导出与 SQLite 存储（namespace 列 + 索引）同样贯通。
 - **默认拒绝 + 显式授权**：数据持有者只把记忆发给**被显式授权**的对端。`sync.peerNamespacePolicy` 是 `peerDeviceId → 允许的分区` 白名单；**未列出的对端拿不到任何分区**（空数组 = 明确不允许），必须显式写入才能同步。裁剪链为「对端授权 ∩ 对端订阅声明 ∩ 本机订阅声明」，同时作用于 offer 与初始快照——未授权分区不会离开数据持有者，空水位走快照也绕不过。拒绝不是静默的：`sync-completed` 带 `denied` 标记。
 - **本机订阅**：`sync.namespaces` 声明本机订阅的分区；未配置 / 空 = 参与全部。订阅声明随 `sync-hello` 以 `subscribeAll` + `namespaces` **必填**下发（缺字段/类型错视为协议违例并中止会话）；`subscribeAll=false` + 空清单 = 明确不订阅任何分区。
-- **分区同步水位**：缺失判定按 `per-(对端, 分区, 作者)` 水位进行——只在同一分区内比较作者计数，而不是拿对端累积全局时钟；本机上报（hello）与快照水位同样**只取作者自身计数**，绝不把累积时钟当成「对方已有」。这样某分区因未授权被跳过后，日后**扩权即可回补**历史事件，不会永久缺失；水位随 ack 与对端 hello 推进并持久化（`.sync-state.json` v2），重启后不重发、不遗漏。撤销后再授予同样从正确水位续传。快照覆盖分区的对端水位**只在收到「快照已应用」确认后**才推进（禁止乐观推进）。
+- **分区同步水位**：缺失判定按 `per-(对端, 分区, 作者)` 水位进行——只在同一分区内比较作者计数，而不是拿对端累积全局时钟；本机上报（hello）与快照水位同样**只取作者自身计数**，绝不把累积时钟当成「对方已有」。这样某分区因未授权被跳过后，日后**扩权即可回补**历史事件，不会永久缺失。**水位只由我们掌握的两个事实推进：对端 ack 与「已确认快照」**（快照覆盖分区须收到 `snapshotApplied` 确认才推进，禁止乐观推进）；对端 hello 的自报水位**不抬升**本机记录（仅用于快照触发与诊断，差异以 `sync-completed.reportedAhead` 暴露）。水位持久化于 `.sync-state.json` v2，重启后不重发、不遗漏；撤销后再授予同样从正确水位续传。
 - **水位修复入口**：`mebular.resetPeerWatermarks(peerDeviceId?)`（省略 = 全部）清空对端水位并持久化，是对端水位被污染时**被认可的修复路径**：只清水位、不动 per-event ack 集合，方向安全（最多让已确认事件冗余重发一次，不会漏发）。
+- **快照前提与回退保护**：初始快照**只发给自报分区水位为空的对端**（快照直接写入物化状态）；即便有此前提，接受侧也做回退保护——仅当本地缺失或快照版本时钟**严格更新**时才写入，旧快照不会回退本地更新的实体。放宽「只发空对端」这一前提之前，必须先让快照应用具备完整的冲突/合并语义。
 - **变更可订阅**：`sync-completed` 事件带 `appliedEventIds`，另有 `events-applied` 事件报告刚应用了哪些远端事件、涉及哪些分区，供常驻消费者判断「是否有我关心的新记忆」。
 - **push-on-write**（可选，默认关闭）：本地写入后向订阅相关分区的在线对端即时推送，带节流合并，避免写风暴；授权裁剪仍由会话内的 offer 计算兜底。
 
@@ -194,8 +195,8 @@ Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API
 
 | 项目 | 情况 |
 |------|------|
-| 测试 | 61 个套件、465 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
-| 覆盖率 | 行 91.4%、分支 77.9%，全库门槛 85/65，关键文件另有底线 |
+| 测试 | 61 个套件、473 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
+| 覆盖率 | 行 91.5%、分支 78.2%，全库门槛 85/65，关键文件另有底线 |
 | 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |
 | 质量门禁 | 每个阶段跑 verify 脚本加构建产物冒烟，`src` 里不留裸的 `throw new Error` |

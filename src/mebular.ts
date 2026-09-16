@@ -12,14 +12,27 @@
 // 与 ~/.ssh 同级的本地信任假设；不入事件日志、不参与同步。
 
 import { chmod, mkdir, readFile, writeFile } from 'fs/promises';
+import { randomUUID } from 'node:crypto';
 import { dirname } from 'path';
+import { normalizeNamespaceList } from './core/namespace.js';
+import type { Event } from './types/event.js';
 import { GraphStore } from './core/GraphStore.js';
 import { EventLog } from './eventlog/EventLog.js';
 import { JsonFileStorage } from './storage/JsonFileStorage.js';
 import { SqliteStorage } from './storage/SqliteStorage.js';
 import type { StorageAdapter } from './storage/StorageAdapter.js';
 import { SyncManager } from './sync/syncmgr/SyncManager.js';
-import { ConfigNamespacePolicy } from './sync/namespacePolicy.js';
+import { ConfigNamespacePolicy, CompositeNamespacePolicy } from './sync/namespacePolicy.js';
+import {
+  GraphNamespacePolicy,
+  POLICY_NAMESPACE,
+  NAMESPACE_GRANT_EVENT,
+  NAMESPACE_REVOKE_EVENT,
+  DEVICE_REVOKE_EVENT,
+  type NamespaceGrantRecord,
+  type NamespaceRevokeRecord,
+  type DeviceRevokeRecord,
+} from './sync/grantPolicy.js';
 import {
   IdentityManager,
   type DeviceIdentity,
@@ -172,6 +185,8 @@ export class Mebular {
   private eventLogImpl: EventLog | null = null;
   private graphImpl: GraphStore | null = null;
   private syncImpl: SyncManager | null = null;
+  private graphPolicyImpl: GraphNamespacePolicy | null = null;
+  private namespacePolicyImpl: CompositeNamespacePolicy | null = null;
   private nodeImpl: P2PNode | null = null;
   private libp2pProvider: Libp2pProvider | null = null;
   private semanticVectorIndexImpl: VectorIndex | null = null;
@@ -244,7 +259,20 @@ export class Mebular {
         eventLog: this.eventLogImpl,
       });
 
-      // 5. 同步管理器（携带用户主公钥：信任链验签，收口 D9；
+      // 5. 供给侧授权策略（Phase 2 · D/E）：图上授权（grant-as-memory）+ 配置引导。
+      //    - GraphNamespacePolicy 只采纳「链到用户主密钥」的签发者记录；
+      //    - 配置白名单作为 bootstrap 路径；两者并集，任一为空都不会放松默认拒绝；
+      //    - 设备被吊销时读侧一律 []（配置白名单也绕不过）。
+      this.graphPolicyImpl = new GraphNamespacePolicy({
+        eventLog: this.eventLogImpl,
+        userMasterPublicKey: this.identity.getUserMasterPublicKey(),
+      });
+      this.namespacePolicyImpl = new CompositeNamespacePolicy([
+        this.graphPolicyImpl,
+        new ConfigNamespacePolicy(this.config.sync?.peerNamespacePolicy ?? {}),
+      ]);
+
+      // 5.5 同步管理器（携带用户主公钥：信任链验签，收口 D9；
       //    已确认集合持久化到存储旁路文件，重启后首帧不再冗余，6.4）
       this.syncImpl = new SyncManager({
         eventLog: this.eventLogImpl,
@@ -255,8 +283,8 @@ export class Mebular {
         syncTimeout: this.config.sync?.syncTimeout,
         snapshotThreshold: this.config.sync?.snapshotThreshold,
         subscriptionNamespaces: this.config.sync?.namespaces,
-        // 默认拒绝：即使未配置 peerNamespacePolicy，也用一个空策略拒绝所有对端
-        namespacePolicy: new ConfigNamespacePolicy(this.config.sync?.peerNamespacePolicy ?? {}),
+        // 默认拒绝：图上与配置任一为空都不会放松；两者都空 = 拒绝所有对端
+        namespacePolicy: this.namespacePolicyImpl,
         pushOnWrite: this.config.sync?.pushOnWrite,
         pushOnWriteThrottleMs: this.config.sync?.pushOnWriteThrottleMs,
         userMasterPublicKey: this.identity.getUserMasterPublicKey() ?? undefined,
@@ -333,6 +361,8 @@ export class Mebular {
       this.libp2pProvider = null;
     }
     this.syncImpl = null;
+    this.namespacePolicyImpl = null;
+    this.graphPolicyImpl = null;
     this.graphImpl = null;
     this.eventLogImpl = null;
     this.semanticVectorIndexImpl = null;
@@ -355,6 +385,8 @@ export class Mebular {
       this.libp2pProvider = null;
     }
     this.syncImpl = null;
+    this.namespacePolicyImpl = null;
+    this.graphPolicyImpl = null;
     this.graphImpl = null;
     this.eventLogImpl = null;
     this.semanticVectorIndexImpl = null;
@@ -394,6 +426,83 @@ export class Mebular {
    */
   async resetPeerWatermarks(peerDeviceId?: string): Promise<void> {
     await this.sync.resetPeerWatermarks(peerDeviceId);
+  }
+
+  // ---------- 授权作为记忆（Phase 2 · D）与身份吊销（E） ----------
+
+  /**
+   * 授予某设备若干分区（写入**本机签名**的策略记录，落保留命名空间 `__policy__`）。
+   * 只有链到用户主密钥的设备签发的记录才会被其他设备采纳；本机需配置主密钥
+   * （即拥有设备证书）才有签发资格。
+   */
+  async grantNamespaces(input: {
+    subject: string;
+    namespaces: string[];
+    expiresAt?: number;
+    note?: string;
+  }): Promise<Event> {
+    const grant: NamespaceGrantRecord = {
+      grantId: randomUUID(),
+      subject: input.subject,
+      namespaces: normalizeNamespaceList(input.namespaces),
+      issuedAt: Date.now(),
+      ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    };
+    return this.eventLog.append({
+      type: NAMESPACE_GRANT_EVENT,
+      data: { grant },
+      namespace: POLICY_NAMESPACE,
+    });
+  }
+
+  /** 按 grantId 撤销一条授权（签发者签名；立即反映到裁剪链）。 */
+  async revokeGrant(input: { grantId: string; subject?: string; note?: string }): Promise<Event> {
+    const revoke: NamespaceRevokeRecord = {
+      grantId: input.grantId,
+      ...(input.subject !== undefined ? { subject: input.subject } : {}),
+      issuedAt: Date.now(),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    };
+    return this.eventLog.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke },
+      namespace: POLICY_NAMESPACE,
+    });
+  }
+
+  /**
+   * 吊销某设备身份：读侧立即 `[]`，且其署名的事件在入站写入处被隔离。
+   * 非终态——之后对该设备再写一条 grant 即恢复。
+   */
+  async revokeDevice(input: { subject: string; note?: string }): Promise<Event> {
+    const deviceRevoke: DeviceRevokeRecord = {
+      subject: input.subject,
+      issuedAt: Date.now(),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    };
+    return this.eventLog.append({
+      type: DEVICE_REVOKE_EVENT,
+      data: { deviceRevoke },
+      namespace: POLICY_NAMESPACE,
+    });
+  }
+
+  /**
+   * 只读审计入口：某对端当前**生效**的授权分区（图上 grant ∪ 配置白名单，吊销
+   * 优先）。便于排障与审计，不改变任何状态。
+   */
+  async getEffectiveNamespaces(peerDeviceId: string): Promise<string[]> {
+    return this.assertReady(this.namespacePolicyImpl, 'namespacePolicy').getAuthorizedNamespaces(
+      peerDeviceId,
+    );
+  }
+
+  /** 只读审计入口：当前被吊销的设备集合。 */
+  async getRevokedDevices(): Promise<string[]> {
+    return [
+      ...(await this.assertReady(this.namespacePolicyImpl, 'namespacePolicy').getRevokedDevices()),
+    ];
   }
 
   /** 网络未启用时为 null */

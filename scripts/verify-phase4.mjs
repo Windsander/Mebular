@@ -128,7 +128,11 @@ try {
     deviceId,
     encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
     network: { enabled: true, provider: hub },
-    sync: { autoSync: true },
+    // 默认拒绝：显式授权对端默认分区，冒烟才能收敛
+    sync: {
+      autoSync: true,
+      peerNamespacePolicy: { [deviceId === 'device-A' ? 'device-B' : 'device-A']: ['default'] },
+    },
   });
   const a = makeFacade(join(smokeDir, 'a.jsonl'), 'device-A');
   const b = makeFacade(join(smokeDir, 'b.jsonl'), 'device-B');

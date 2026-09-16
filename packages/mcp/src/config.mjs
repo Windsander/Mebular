@@ -109,6 +109,11 @@ export async function createMebular() {
       ...(config.sync?.snapshotThreshold !== undefined
         ? { snapshotThreshold: config.sync.snapshotThreshold }
         : {}),
+      // 默认拒绝：对端白名单未配置 = 拒绝所有对端。跨机部署必须显式填写。
+      ...(config.sync?.peerNamespacePolicy
+        ? { peerNamespacePolicy: config.sync.peerNamespacePolicy }
+        : {}),
+      ...(Array.isArray(config.sync?.namespaces) ? { namespaces: config.sync.namespaces } : {}),
     },
     semantic: {
       enabled: truthy(process.env.MEBULAR_SEMANTIC_ENABLED, config.semantic?.enabled ?? false),

@@ -115,11 +115,15 @@ npm run verify:wan:relay   # 内嵌 circuit relay
 node scripts/wan-sync.mjs user-keygen --out key.json
 node scripts/wan-sync.mjs relay --port 4000 --unlimited            # 可选，异网段需要
 node scripts/wan-sync.mjs peer  --role a --user-master-key-file key.json \
-  --bind /ip4/0.0.0.0/tcp/4001 --relay <relay>     # 固定地址+持久身份 → 地址稳定；打印 PEER_READY
-node scripts/wan-sync.mjs cross --user-master-key-file key.json \
-  --peer <A-stable-multiaddr> --peer-id <A-deviceId> --relay <relay> --out B-evidence.json
+  --bind /ip4/0.0.0.0/tcp/4001 --relay <relay> \
+  --authorize device-B                             # 显式授权对端；否则默认拒绝，什么都不发
+node scripts/wan-sync.mjs cross --device-id device-B --user-master-key-file key.json \
+  --peer <A-stable-multiaddr> --peer-id <A-deviceId> --relay <relay> \
+  --authorize device-A --out B-evidence.json       # cross 固定自身 deviceId，A 才能授权它
 # 判定：cross 退出码 0 且 B-evidence.json 的 stateMatches=true、differentPublicNetwork=true、identityShared=true
 ```
+
+- **默认拒绝是硬边界**：`sync.peerNamespacePolicy` 未列出的对端拿不到任何分区，跨机脚本必须显式 `--authorize <对端 deviceId>`；`cross` 用 `--device-id` 固定自身设备名，A 侧才能预先授权。
 
 - 用户主密钥：`user-keygen` 生成，A/B 用同一把（否则设备证书互验失败）；也可用 `MEBULAR_USER_MASTER_KEY`（内联 JSON）。
 - 协调无需共享文件：B 用 `--peer/--peer-id` 一次给定 A 的稳定地址，按图上阶段状态重试连接完成三阶段。

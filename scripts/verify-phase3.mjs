@@ -106,6 +106,7 @@ try {
     MemoryStorage,
     SyncManager,
     SecureChannelSyncTransport,
+    ConfigNamespacePolicy,
   } = mebular;
   const { InMemoryHub } = await import(join(rootDir, 'dist', 'p2p', 'transport', 'InMemoryTransport.js'));
   const { SecureChannelImpl } = await import(join(rootDir, 'dist', 'p2p', 'secure', 'SecureChannelImpl.js'));
@@ -118,7 +119,14 @@ try {
       signer: { deviceId, privateKey: keyPair.privateKey },
     });
     const store = new GraphStore({ storage, author: deviceId, eventLog });
-    const syncManager = new SyncManager({ eventLog, storage, deviceId });
+    // 默认拒绝：显式授权对端默认分区，冒烟才能收敛
+    const peerDeviceId = deviceId === 'device-A' ? 'device-B' : 'device-A';
+    const syncManager = new SyncManager({
+      eventLog,
+      storage,
+      deviceId,
+      namespacePolicy: new ConfigNamespacePolicy({ [peerDeviceId]: ['default'] }),
+    });
     const peerId = { multihash: publicKey, pubKey: publicKey, id: deviceId };
     return { deviceId, storage, eventLog, store, syncManager, publicKey, peerId };
   };

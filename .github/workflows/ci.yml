@@ -56,6 +56,12 @@ jobs:
       - name: Publish (npm pack + tarball smoke, D41)
         run: npm run verify:mcp:publish
 
+      - name: WAN two-node local fixture (default-deny authorization)
+        run: npm run verify:wan:cross:selftest
+
+      - name: MCP cross-node local fixture (default-deny authorization)
+        run: npm run verify:mcp:cross:selftest
+
   semantic-real:
     name: semantic recall (real model)
     runs-on: ubuntu-latest

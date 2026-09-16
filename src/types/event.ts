@@ -22,6 +22,11 @@ export interface Event {
   author: string;
   signature: string;
   /**
+   * 记忆分区：同步 offer / 快照按分区裁剪的依据；缺失一律视为 'default'。
+   * 出现在规范化签名内容中（新事件），因此不可被篡改路由。
+   */
+  namespace?: string;
+  /**
    * 签发设备的证书（可选）：中继/多跳路径上验证「事件签发设备 → 用户主密钥」
    * 信任链的依据。不参与内容寻址 ID 与签名（canonicalEventData 字段集固定），
    * 旧事件无此字段时退化为直连对端验签。
@@ -35,6 +40,8 @@ export interface EventFilter {
   fromTime?: number;
   toTime?: number;
   author?: string;
+  /** 单分区或分区列表；undefined/空数组 = 不过滤 */
+  namespace?: string | string[];
   limit?: number;
   offset?: number;
 }

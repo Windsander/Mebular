@@ -31,4 +31,19 @@ export interface SyncConfig {
     maxRetries?: number;
     initialDelayMs?: number;
   };
+  /**
+   * 本机订阅的 namespace 集合：空数组 / 未配置 = 全部（保持现状语义）。
+   * 只影响「组织维度」下的同步范围，不改变一致性模型。
+   */
+  namespaces?: string[];
+  /**
+   * 对端授权策略（配置驱动）：peerDeviceId → 允许接收的 namespace。
+   * 未列出的对端 = 未声明授权（不过滤，向后兼容旧对端）。
+   * 该接缝为将来「授权来自图上的 grant 记忆」预留实现位（本期不实现）。
+   */
+  peerNamespacePolicy?: Record<string, string[]>;
+  /** 本地写入后向订阅对端即时推送（默认关闭，保持既有行为） */
+  pushOnWrite?: boolean;
+  /** push-on-write 节流窗口（ms，默认 50）：连续写入合并为一次推送 */
+  pushOnWriteThrottleMs?: number;
 }

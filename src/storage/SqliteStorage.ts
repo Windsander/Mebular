@@ -17,6 +17,7 @@ import { dirname } from 'path';
 import type { Node, Edge, Event } from '../types/index.js';
 import { MemoryStorage } from './MemoryStorage.js';
 import { StorageCipher } from '../crypto/StorageCipher.js';
+import { normalizeNamespace } from '../core/namespace.js';
 import { ErrorCodes, StorageError } from '../errors.js';
 
 /** node:sqlite 的最小结构表面（避免依赖特定 @types/node 版本） */
@@ -52,14 +53,14 @@ const defaultModuleProvider: SqliteModuleProvider = () => {
 };
 
 const SQLITE_UPSERT_NODE =
-  'INSERT INTO nodes(id, payload) VALUES(?, ?) ' +
-  'ON CONFLICT(id) DO UPDATE SET payload=excluded.payload';
+  'INSERT INTO nodes(id, payload, namespace) VALUES(?, ?, ?) ' +
+  'ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, namespace=excluded.namespace';
 const SQLITE_UPSERT_EDGE =
   'INSERT INTO edges(id, payload) VALUES(?, ?) ' +
   'ON CONFLICT(id) DO UPDATE SET payload=excluded.payload';
 const SQLITE_UPSERT_EVENT =
-  'INSERT INTO events(id, payload, timestamp) VALUES(?, ?, ?) ' +
-  'ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, timestamp=excluded.timestamp';
+  'INSERT INTO events(id, payload, timestamp, namespace) VALUES(?, ?, ?, ?) ' +
+  'ON CONFLICT(id) DO UPDATE SET payload=excluded.payload, timestamp=excluded.timestamp, namespace=excluded.namespace';
 
 export interface SqliteStorageOptions {
   /** 静态加密器（G1 复用）：配置后 payload 以 enc:v1: 密文落盘 */
@@ -116,10 +117,24 @@ export class SqliteStorage extends MemoryStorage {
 
   private initSchema(): void {
     this.db.exec(
-      'CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, payload TEXT NOT NULL);' +
+      'CREATE TABLE IF NOT EXISTS nodes (id TEXT PRIMARY KEY, payload TEXT NOT NULL, namespace TEXT);' +
         'CREATE TABLE IF NOT EXISTS edges (id TEXT PRIMARY KEY, payload TEXT NOT NULL);' +
-        'CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, payload TEXT NOT NULL, timestamp INTEGER);',
+        'CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY, payload TEXT NOT NULL, timestamp INTEGER, namespace TEXT);',
     );
+    // 旧库迁移：既有表没有 namespace 列时补列（不重写 payload，重放时回填）
+    this.addColumnIfMissing('nodes', 'namespace', 'TEXT');
+    this.addColumnIfMissing('events', 'namespace', 'TEXT');
+    // namespace 二级索引：从 payload 抽出的列上建索引，支持按分区检索
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_nodes_namespace ON nodes(namespace);' +
+        'CREATE INDEX IF NOT EXISTS idx_events_namespace ON events(namespace);',
+    );
+  }
+
+  private addColumnIfMissing(table: string, column: string, type: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name?: unknown }>;
+    if (columns.some((entry) => entry.name === column)) return;
+    this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type};`);
   }
 
   private async serialize(value: unknown): Promise<string> {
@@ -172,7 +187,7 @@ export class SqliteStorage extends MemoryStorage {
   override async putNode(node: Node): Promise<void> {
     this.assertOpen();
     const payload = await this.serialize(node);
-    this.exec(SQLITE_UPSERT_NODE, node.id, payload);
+    this.exec(SQLITE_UPSERT_NODE, node.id, payload, normalizeNamespace(node.namespace));
     await super.putNode(node);
   }
 
@@ -198,7 +213,13 @@ export class SqliteStorage extends MemoryStorage {
   override async putEvent(event: Event): Promise<void> {
     this.assertOpen();
     const payload = await this.serialize(event);
-    this.exec(SQLITE_UPSERT_EVENT, event.id, payload, event.timestamp ?? null);
+    this.exec(
+      SQLITE_UPSERT_EVENT,
+      event.id,
+      payload,
+      event.timestamp ?? null,
+      normalizeNamespace(event.namespace),
+    );
     await super.putEvent(event);
   }
 

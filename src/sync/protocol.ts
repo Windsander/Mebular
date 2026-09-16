@@ -33,10 +33,21 @@ export interface SyncSnapshot {
   nodes: Node[];
   edges: Edge[];
   clock: Record<string, number>;
+  /** 本快照覆盖的 namespace（裁剪后的组织维度标记；缺失视为 'default'） */
+  namespaces?: string[];
 }
 
 export type SyncMessage =
-  | { type: 'sync-hello'; vectorClock: Record<string, number>; direction?: SyncDirection }
+  | {
+      type: 'sync-hello';
+      vectorClock: Record<string, number>;
+      direction?: SyncDirection;
+      /**
+       * 本机订阅的 namespace（可选）：请求方声明「我只订阅这些分区」，
+       * 供数据持有者裁剪 offer。未声明（旧版本）= 不过滤，行为保持现状。
+       */
+      namespaces?: string[];
+    }
   | { type: 'sync-offer'; events: Event[]; snapshot?: SyncSnapshot }
   | { type: 'sync-ack'; appliedEventIds: string[] }
   | { type: 'sync-done'; finalVectorClock: Record<string, number> }
@@ -72,20 +83,27 @@ export class SecureChannelSyncTransport implements SyncTransport {
   }
 }
 
-/** 协议辅助：从消息迭代器取下一条特定类型的消息，带超时与错误帧处理 */
+/**
+ * 协议辅助：从消息迭代器取下一条特定类型的消息，带超时与错误帧处理。
+ * `timeoutMs` 省略时不设超时（供常驻会话监听等待首个 hello；连接关闭时
+ * 迭代器自然结束并抛 SYNC_CONNECTION_FAILED，不会留下悬挂的 `.next()`）。
+ */
 export async function nextSyncMessage<T extends SyncMessage['type']>(
   iterator: AsyncIterator<SyncMessage>,
   expected: T,
-  timeoutMs: number,
+  timeoutMs?: number,
 ): Promise<Extract<SyncMessage, { type: T }>> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    const result = await Promise.race([
-      iterator.next(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`Sync timeout waiting for ${expected}`)), timeoutMs);
-      }),
-    ]);
+    const next = iterator.next();
+    const result = timeoutMs === undefined
+      ? await next
+      : await Promise.race([
+          next,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`Sync timeout waiting for ${expected}`)), timeoutMs);
+          }),
+        ]);
     if (result.done) {
       throw new SyncError(`Sync channel closed while waiting for ${expected}`, ErrorCodes.SYNC_CONNECTION_FAILED);
     }

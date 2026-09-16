@@ -8,6 +8,7 @@ import type { StorageAdapter } from '../storage/StorageAdapter.js';
 import type { Node, Edge, NodeFilter, EdgeFilter, TraverseOptions, TraverseResult } from '../types/index.js';
 import type { EventLog } from '../eventlog/EventLog.js';
 import { VectorClock } from '../sync/index.js';
+import { matchesNamespace, normalizeNamespace } from './namespace.js';
 import { ulid } from 'ulid';
 
 export interface GraphStoreConfig {
@@ -34,7 +35,7 @@ export class GraphStore {
     type: string,
     content: Record<string, unknown>,
     labels?: string[],
-    options?: { validFrom?: number; validTo?: number },
+    options?: { validFrom?: number; validTo?: number; namespace?: string },
   ): Promise<Node> {
     const now = Date.now();
     const node: Node = {
@@ -49,6 +50,7 @@ export class GraphStore {
       validFrom: options?.validFrom ?? now,
       validTo: options?.validTo ?? 9999999999999,
       tags: [],
+      namespace: normalizeNamespace(options?.namespace),
     };
 
     this.clock.increment(this.author);
@@ -58,7 +60,11 @@ export class GraphStore {
     // 单一时钟源（D10 收口）：事件日志存在时，实体时钟以事件时钟为准；
     // 载荷用快照拷贝，避免随后的时钟盖写突变已被内容寻址的事件内容
     if (this.eventLog) {
-      const event = await this.eventLog.append({ type: 'node_created', data: { node: { ...node } } });
+      const event = await this.eventLog.append({
+        type: 'node_created',
+        data: { node: { ...node } },
+        namespace: node.namespace,
+      });
       node.clocks = { ...event.vectorClock };
       node.vectorClock = { ...event.vectorClock };
     }
@@ -95,6 +101,7 @@ export class GraphStore {
       const event = await this.eventLog.append({
         type: 'node_updated',
         data: { nodeId: id, newVersion: { ...updated } },
+        namespace: updated.namespace,
       });
       updated.clocks = { ...event.vectorClock };
       updated.vectorClock = { ...event.vectorClock };
@@ -124,7 +131,11 @@ export class GraphStore {
     deleted.vectorClock = this.clock.toJSON();
 
     if (this.eventLog) {
-      const event = await this.eventLog.append({ type: 'node_deleted', data: { nodeId: id, deletionTime: now } });
+      const event = await this.eventLog.append({
+        type: 'node_deleted',
+        data: { nodeId: id, deletionTime: now },
+        namespace: deleted.namespace,
+      });
       deleted.clocks = { ...event.vectorClock };
       deleted.vectorClock = { ...event.vectorClock };
     }
@@ -141,8 +152,17 @@ export class GraphStore {
     return this.storage.listNodes(filter || {});
   }
 
-  async createEdge(source: string, target: string, relation: string, labels?: string[]): Promise<Edge> {
+  async createEdge(
+    source: string,
+    target: string,
+    relation: string,
+    labels?: string[],
+    options?: { namespace?: string },
+  ): Promise<Edge> {
     const now = Date.now();
+    // 边归属其源节点分区（未指定时）：保证边事件与快照按分区裁剪时一致
+    const sourceNode = await this.storage.getNode(source);
+    const namespace = normalizeNamespace(options?.namespace ?? sourceNode?.namespace);
     const edge: Edge = {
       id: ulid(),
       type: 'edge',
@@ -156,6 +176,7 @@ export class GraphStore {
       labels: labels || [],
       validFrom: now,
       validTo: 9999999999999,
+      namespace,
     };
 
     this.clock.increment(this.author);
@@ -163,7 +184,11 @@ export class GraphStore {
     edge.vectorClock = this.clock.toJSON();
 
     if (this.eventLog) {
-      const event = await this.eventLog.append({ type: 'edge_created', data: { edge: { ...edge } } });
+      const event = await this.eventLog.append({
+        type: 'edge_created',
+        data: { edge: { ...edge } },
+        namespace: edge.namespace,
+      });
       edge.clocks = { ...event.vectorClock };
       edge.vectorClock = { ...event.vectorClock };
     }
@@ -199,6 +224,7 @@ export class GraphStore {
       const event = await this.eventLog.append({
         type: 'edge_updated',
         data: { edgeId: id, newVersion: { ...updated } },
+        namespace: updated.namespace,
       });
       updated.clocks = { ...event.vectorClock };
       updated.vectorClock = { ...event.vectorClock };
@@ -228,7 +254,11 @@ export class GraphStore {
     deleted.vectorClock = this.clock.toJSON();
 
     if (this.eventLog) {
-      const event = await this.eventLog.append({ type: 'edge_deleted', data: { edgeId: id, deletionTime: now } });
+      const event = await this.eventLog.append({
+        type: 'edge_deleted',
+        data: { edgeId: id, deletionTime: now },
+        namespace: deleted.namespace,
+      });
       deleted.clocks = { ...event.vectorClock };
       deleted.vectorClock = { ...event.vectorClock };
     }
@@ -260,7 +290,11 @@ export class GraphStore {
     updated.vectorClock = this.clock.toJSON();
 
     if (this.eventLog) {
-      const event = await this.eventLog.append({ type: 'tag_added', data: { nodeId, tag } });
+      const event = await this.eventLog.append({
+        type: 'tag_added',
+        data: { nodeId, tag },
+        namespace: updated.namespace,
+      });
       updated.clocks = { ...event.vectorClock };
       updated.vectorClock = { ...event.vectorClock };
     }
@@ -292,7 +326,11 @@ export class GraphStore {
     updated.vectorClock = this.clock.toJSON();
 
     if (this.eventLog) {
-      const event = await this.eventLog.append({ type: 'tag_removed', data: { nodeId, tag } });
+      const event = await this.eventLog.append({
+        type: 'tag_removed',
+        data: { nodeId, tag },
+        namespace: updated.namespace,
+      });
       updated.clocks = { ...event.vectorClock };
       updated.vectorClock = { ...event.vectorClock };
     }
@@ -332,11 +370,18 @@ export class GraphStore {
     const direction = options.direction ?? 'both';
     const includeDeleted = options.includeDeleted ?? false;
     const visited = options.visited ?? new Set<string>();
+    // 分区隔离：指定 namespace 时，起点、邻居与边都必须落在该分区内
+    const namespaceFilter = options.namespace;
 
     const result: TraverseResult = { visitedNodes: [], visitedEdges: [], path: [] };
 
     const start = await this.storage.getNode(startId);
-    if (!start || (!includeDeleted && start.deletedAt) || visited.has(startId)) {
+    if (
+      !start ||
+      (!includeDeleted && start.deletedAt) ||
+      !matchesNamespace(start.namespace, namespaceFilter) ||
+      visited.has(startId)
+    ) {
       return result;
     }
 
@@ -359,12 +404,15 @@ export class GraphStore {
           if (options.edgeTypes && !options.edgeTypes.includes(edge.relation)) {
             continue;
           }
+          if (!matchesNamespace(edge.namespace, namespaceFilter)) {
+            continue;
+          }
           const otherId = edge.source === nodeId ? edge.target : edge.source;
           if (visited.has(otherId)) {
             continue;
           }
           const other = await this.storage.getNode(otherId);
-          if (!other || (!includeDeleted && other.deletedAt)) {
+          if (!other || (!includeDeleted && other.deletedAt) || !matchesNamespace(other.namespace, namespaceFilter)) {
             continue;
           }
           visited.add(otherId);

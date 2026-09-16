@@ -19,6 +19,7 @@ import { JsonFileStorage } from './storage/JsonFileStorage.js';
 import { SqliteStorage } from './storage/SqliteStorage.js';
 import type { StorageAdapter } from './storage/StorageAdapter.js';
 import { SyncManager } from './sync/syncmgr/SyncManager.js';
+import { ConfigNamespacePolicy } from './sync/namespacePolicy.js';
 import {
   IdentityManager,
   type DeviceIdentity,
@@ -116,6 +117,18 @@ export interface MebularConfig {
      * 以物化快照替代全量事件重放。缺省不启用。
      */
     snapshotThreshold?: number;
+    /** 本机订阅的 namespace：空/缺省 = 全部（保持现状语义） */
+    namespaces?: string[];
+    /**
+     * 对端授权策略（配置驱动）：peerDeviceId → 允许接收的 namespace。
+     * 未列出 = 未声明授权（不过滤，向后兼容旧对端）。该接缝为将来
+     * 「授权来自图上的 grant 记忆」预留实现位（本期不实现）。
+     */
+    peerNamespacePolicy?: Record<string, string[]>;
+    /** 本地写入后向订阅对端即时推送（默认关闭，保持既有行为） */
+    pushOnWrite?: boolean;
+    /** push-on-write 节流窗口（ms，默认 50） */
+    pushOnWriteThrottleMs?: number;
   };
   /** 语义召回（G2，可选依赖；缺包降级关键词并告警） */
   semantic?: {
@@ -240,6 +253,12 @@ export class Mebular {
         peerWhitelist: this.config.sync?.peerWhitelist,
         syncTimeout: this.config.sync?.syncTimeout,
         snapshotThreshold: this.config.sync?.snapshotThreshold,
+        subscriptionNamespaces: this.config.sync?.namespaces,
+        namespacePolicy: this.config.sync?.peerNamespacePolicy
+          ? new ConfigNamespacePolicy(this.config.sync.peerNamespacePolicy)
+          : undefined,
+        pushOnWrite: this.config.sync?.pushOnWrite,
+        pushOnWriteThrottleMs: this.config.sync?.pushOnWriteThrottleMs,
         userMasterPublicKey: this.identity.getUserMasterPublicKey() ?? undefined,
         syncStatePath:
           this.config.sync?.syncStatePath ??

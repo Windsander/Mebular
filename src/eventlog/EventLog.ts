@@ -6,6 +6,7 @@
 // - 事件由创建设备的 Ed25519 私钥签名，接收方验签后才可应用；
 // - missingEvents 按向量时钟计算对端缺失的增量集合。
 
+import { EventEmitter } from 'events';
 import type { Event, EventFilter } from '../types/event.js';
 import { VectorClock } from '../sync/vectorclock/index.js';
 import type { StorageAdapter } from '../storage/StorageAdapter.js';
@@ -26,7 +27,7 @@ export interface EventLogOptions {
   initialClock?: Record<string, number>;
 }
 
-export class EventLog {
+export class EventLog extends EventEmitter {
   private storage: StorageAdapter;
   private clock: VectorClock;
   private deviceId: string;
@@ -40,6 +41,7 @@ export class EventLog {
     deviceId: string,
     optionsOrClock?: EventLogOptions | Record<string, number>,
   ) {
+    super();
     this.storage = storage;
     this.deviceId = deviceId;
 
@@ -91,6 +93,9 @@ export class EventLog {
     };
 
     await this.storage.putEvent(fullEvent);
+    // 本地写入即广播（push-on-write 的信号源）：仅本地 append 触发，
+    // appendRemote 不触发，避免收到远端事件后回弹造成风暴。
+    this.emit('event-appended', fullEvent);
     return fullEvent;
   }
 
@@ -139,6 +144,8 @@ export class EventLog {
       timestamp: event.timestamp,
       vectorClock: event.vectorClock,
       author: event.author,
+      // namespace 参与内容寻址（新事件）；旧事件无此字段时保持原字节
+      ...(event.namespace !== undefined ? { namespace: event.namespace } : {}),
     };
     try {
       // ID 必须与内容绑定，防止内容被改而沿用原 ID
@@ -203,13 +210,19 @@ export function canonicalize(value: unknown): string {
 
 /** 事件的规范化签名/哈希内容：固定字段集合，排除 id 与 signature */
 export function canonicalEventData(event: Omit<Event, 'id' | 'signature'>): string {
-  return canonicalize({
+  const payload: Record<string, unknown> = {
     type: event.type,
     data: event.data ?? {},
     timestamp: event.timestamp,
     vectorClock: event.vectorClock ?? {},
     author: event.author,
-  });
+  };
+  // namespace 参与内容寻址与签名（新事件）；旧事件无此字段时字节完全不变，
+  // 保证旧事件 ID/签名的向后兼容。
+  if (event.namespace !== undefined) {
+    payload.namespace = event.namespace;
+  }
+  return canonicalize(payload);
 }
 
 /** 内容寻址事件 ID：sha256(规范化内容) 的 hex */

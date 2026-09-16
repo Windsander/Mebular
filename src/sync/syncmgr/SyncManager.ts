@@ -26,11 +26,21 @@ import { VectorClock } from '../vectorclock/index.js';
 import { ErrorCodes, StorageError, SyncError } from '../../errors.js';
 import type { Event } from '../../types/event.js';
 import { applyRemoteEvent, type SyncConflict } from '../apply.js';
+import type { NamespaceGrantPolicy } from '../namespacePolicy.js';
+import {
+  normalizeNamespace,
+  normalizeNamespaceList,
+  subscriptionToAllowList,
+  intersectNamespaceAllowLists,
+  isNamespaceAllowed,
+  type NamespaceAllowList,
+} from '../../core/namespace.js';
 import { hexToBytes, verifyCertificateSignature, type AuthSession } from '../../p2p/handshake/AuthenticationHandshake.js';
 import {
   SecureChannelSyncTransport,
   nextSyncMessage,
   type SyncDirection,
+  type SyncMessage,
   type SyncSnapshot,
   type SyncTransport,
 } from '../protocol.js';
@@ -64,6 +74,12 @@ export interface SyncResult {
   conflicts: SyncConflict[];
   durationMs: number;
   finalVectorClock: Record<string, number>;
+  /**
+   * 本会话从对端 offer 中确认应用的事件 ID（复用 ApplyResult.ackedIds，
+   * 含验签通过但为幂等重复的事件；快照路径为空）。「变更可订阅」据此判断
+   * 是否有我关心的新记忆。
+   */
+  appliedEventIds?: string[];
   /** 本会话以快照发出的物化实体数（nodes+edges）；0/undefined 表示未走快照 */
   snapshotSent?: number;
   /** 本会话以快照应用的对端物化实体数（nodes+edges） */
@@ -104,9 +120,36 @@ export interface SyncManagerOptions {
    * 全量事件重放；缺省不启用。可由单次 SyncOptions.snapshotThreshold 覆盖。
    */
   snapshotThreshold?: number;
+  /** 本机订阅的 namespace：空/缺省 = 全部（保持现状语义） */
+  subscriptionNamespaces?: string[];
+  /** 对端授权策略（T2 供给端裁剪）；缺省不过滤（向后兼容） */
+  namespacePolicy?: NamespaceGrantPolicy;
+  /** 本地写入后向订阅对端即时推送（默认关闭） */
+  pushOnWrite?: boolean;
+  /** push-on-write 节流窗口（ms，默认 50）：连续写入合并为一次推送 */
+  pushOnWriteThrottleMs?: number;
 }
 
 const DEFAULT_SYNC_TIMEOUT = 30_000;
+const DEFAULT_PUSH_ON_WRITE_THROTTLE_MS = 50;
+
+/** 已认证在线对端（push-on-write 的定向目标） */
+interface OnlinePeer {
+  peerId: PeerId;
+  peer: SyncPeer;
+  /** 对端 hello 中声明的订阅；undefined = 未声明（不过滤，兼容旧对端） */
+  namespaces?: string[];
+  /** 本机在该对端会话中的角色（设备 ID 字典序小者发起） */
+  initiate: boolean;
+}
+
+/** 一次 offer 应用的结果（含 ack 集合与对端事件命名空间） */
+interface AppliedOffer {
+  ackedIds: string[];
+  received: number;
+  duplicates: number;
+  conflicts: SyncConflict[];
+}
 
 export class SyncManager extends EventEmitter {
   private readonly eventLog: EventLog;
@@ -116,6 +159,17 @@ export class SyncManager extends EventEmitter {
   private readonly peerWhitelist: string[] | undefined;
   private readonly syncTimeout: number;
   private readonly userMasterPublicKey: Uint8Array | null;
+  private readonly subscriptionNamespaces: string[];
+  private readonly namespacePolicy: NamespaceGrantPolicy | null;
+  private readonly pushOnWrite: boolean;
+  private readonly pushOnWriteThrottleMs: number;
+
+  /** attachToNode 后的网络节点引用（push-on-write 取信道用） */
+  private node: P2PNode | null = null;
+  /** 已认证在线对端（push-on-write 定向目标），key = peerId.id */
+  private readonly onlinePeers = new Map<string, OnlinePeer>();
+  /** push-on-write 节流计时器，key = peerId.id（连续写入合并为一次推送） */
+  private readonly pushTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   /** 每个对端已确认（ack）的事件 ID 集合——离线队列的持久依据 */
   private readonly syncedByPeer = new Map<string, Set<string>>();
@@ -142,6 +196,51 @@ export class SyncManager extends EventEmitter {
     this.userMasterPublicKey = options.userMasterPublicKey ?? null;
     this.syncStatePath = options.syncStatePath ?? null;
     this.snapshotThreshold = options.snapshotThreshold;
+    this.subscriptionNamespaces = normalizeNamespaceList(options.subscriptionNamespaces);
+    this.namespacePolicy = options.namespacePolicy ?? null;
+    this.pushOnWrite = options.pushOnWrite ?? false;
+    this.pushOnWriteThrottleMs = options.pushOnWriteThrottleMs ?? DEFAULT_PUSH_ON_WRITE_THROTTLE_MS;
+    if (this.pushOnWrite) {
+      // 本地写入即触发定向推送；远端 appendRemote 不触发，避免回弹风暴
+      this.eventLog.on('event-appended', this.handleLocalAppend);
+    }
+  }
+
+  /** 本地写入信号：对订阅了相关 namespace 的在线对端安排一次节流推送 */
+  private readonly handleLocalAppend = (event: Event): void => {
+    const namespace = normalizeNamespace(event.namespace);
+    for (const entry of this.onlinePeers.values()) {
+      if (!entry.initiate) continue; // 仅发起方角色可主动推送
+      if (entry.namespaces && entry.namespaces.length > 0 && !entry.namespaces.includes(namespace)) {
+        continue; // 对端未订阅该分区
+      }
+      this.schedulePush(entry);
+    }
+  };
+
+  private schedulePush(entry: OnlinePeer): void {
+    const key = entry.peerId.id;
+    if (this.pushTimers.has(key)) return; // 节流窗口内：合并
+    const timer = setTimeout(() => {
+      this.pushTimers.delete(key);
+      void this.runPush(entry);
+    }, this.pushOnWriteThrottleMs);
+    (timer as { unref?: () => void }).unref?.();
+    this.pushTimers.set(key, timer);
+  }
+
+  private async runPush(entry: OnlinePeer): Promise<void> {
+    // 对端已离线 / 会话被替换：跳过本次推送
+    if (this.onlinePeers.get(entry.peerId.id) !== entry) return;
+    try {
+      const channel = await this.node?.getChannel(entry.peerId);
+      if (!channel) return;
+      const transport = new SecureChannelSyncTransport(channel);
+      await this.syncWithDevice(transport, entry.peer, { direction: 'push' });
+    } catch (error) {
+      // 推送失败不阻断本地写入：保留待同步队列，等待下次 autoSync / 手动同步
+      this.emit('sync-failed', { peerDeviceId: entry.peer.deviceId, error });
+    }
   }
 
   // ---------- spec-004 查询面 ----------
@@ -150,7 +249,13 @@ export class SyncManager extends EventEmitter {
     return this.eventLog.getClock();
   }
 
-  /** 待同步事件：未被（指定对端 / 任一已知对端中的某一个）确认过的本地事件 */
+  /**
+   * 待同步事件：未被（指定对端 / 任一已知对端中的某一个）确认过的本地事件。
+   *
+   * 保留策略约束（PLAN 1.5，本期只落约束不做裁剪）：无参调用返回「尚未被
+   * 所有已知对端 ack 的事件」，正是将来任何自动事件裁剪**必须排除**的集合。
+   * 丢弃这些事件会让对端永久缺失该记忆，直接违背「所有记忆一致」。
+   */
   async getPendingEvents(peerDeviceId?: string): Promise<Event[]> {
     await this.ensureSyncStateLoaded();
     const all = await this.eventLog.listEvents();
@@ -280,19 +385,23 @@ export class SyncManager extends EventEmitter {
         try {
           const iterator = transport.receive()[Symbol.asyncIterator]();
 
-          // 1. 交换向量时钟（发起方 hello 携带方向，响应方据此决定回供集合）
+          // 1. 交换向量时钟（发起方 hello 携带方向与本机订阅，响应方据此裁剪回供集合）
           await transport.send({
             type: 'sync-hello',
             vectorClock: this.eventLog.getClock().toJSON(),
             direction,
+            ...this.localHelloNamespaces(),
           });
           const hello = await nextSyncMessage(iterator, 'sync-hello', timeout);
+          this.recordPeerNamespaces(peer.deviceId, hello.namespaces);
 
           // 2. 我方 offer：按对端时钟计算缺失集；pull 模式只收不发。
-          //    对端空时钟且缺失集达阈值时改发物化快照（G4：初始同步不全量重放）
+          //    先按「对端授权 ∩ 对端订阅 ∩ 本机订阅」裁剪（T2 供给端强制），
+          //    对端空时钟且裁剪后缺失集达阈值时改发物化快照（G4；同样裁剪）
+          const allow = await this.resolveOutgoingAllowList(peer, hello.namespaces);
           let outgoing = direction === 'pull'
             ? []
-            : await this.eventLog.missingEvents(hello.vectorClock);
+            : this.filterEventsForAllow(await this.eventLog.missingEvents(hello.vectorClock), allow);
           const snapshotThreshold = options.snapshotThreshold ?? this.snapshotThreshold;
           let snapshot: SyncSnapshot | undefined;
           if (
@@ -301,7 +410,7 @@ export class SyncManager extends EventEmitter {
             Object.keys(hello.vectorClock).length === 0 &&
             outgoing.length >= snapshotThreshold
           ) {
-            snapshot = await this.buildSnapshot();
+            snapshot = await this.buildSnapshot(allow);
             outgoing = [];
           }
           await transport.send(
@@ -315,7 +424,7 @@ export class SyncManager extends EventEmitter {
           // 3. 对端 offer：快照直接采纳（已认证对端）；事件走验签 + 幂等入库 + 冲突应用
           const offer = await nextSyncMessage(iterator, 'sync-offer', timeout);
           let snapshotApplied = 0;
-          let applied: { ackedIds: string[]; received: number; duplicates: number; conflicts: SyncConflict[] };
+          let applied: AppliedOffer;
           if (offer.snapshot) {
             snapshotApplied = await this.applySnapshot(offer.snapshot);
             applied = { ackedIds: [], received: 0, duplicates: 0, conflicts: [] };
@@ -347,55 +456,96 @@ export class SyncManager extends EventEmitter {
 
   /** 响应方：接受对端发起的同步会话（帧序与 syncWithDevice 镜像） */
   async acceptSync(transport: SyncTransport, peer: SyncPeer): Promise<SyncResult> {
-    const timeout = this.syncTimeout;
-
     return this.enqueue(() =>
-      this.runSession(peer, async () => {
-        try {
-          const iterator = transport.receive()[Symbol.asyncIterator]();
-
-          const hello = await nextSyncMessage(iterator, 'sync-hello', timeout);
-          const direction: SyncDirection = hello.direction ?? 'bidirectional';
-          await transport.send({
-            type: 'sync-hello',
-            vectorClock: this.eventLog.getClock().toJSON(),
-          });
-
-          const offer = await nextSyncMessage(iterator, 'sync-offer', timeout);
-          let snapshotApplied = 0;
-          let applied: { ackedIds: string[]; received: number; duplicates: number; conflicts: SyncConflict[] };
-          if (offer.snapshot) {
-            // 初始快照：已认证对端直接采纳物化状态并推进时钟（G4）
-            snapshotApplied = await this.applySnapshot(offer.snapshot);
-            applied = { ackedIds: [], received: 0, duplicates: 0, conflicts: [] };
-          } else {
-            applied = await this.applyOffer(offer.events, peer);
-          }
-          await transport.send({ type: 'sync-ack', appliedEventIds: applied.ackedIds });
-
-          // push 模式只对端发，我方回空 offer
-          const outgoing = direction === 'push'
-            ? []
-            : await this.eventLog.missingEvents(hello.vectorClock);
-          await transport.send({ type: 'sync-offer', events: outgoing });
-          const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
-          await this.markEventsSynced(peer.deviceId, ack.appliedEventIds);
-
-          await nextSyncMessage(iterator, 'sync-done', timeout);
-          const finalVectorClock = this.eventLog.getClock().toJSON();
-          await transport.send({ type: 'sync-done', finalVectorClock });
-
-          const result = this.buildResult(peer, direction, outgoing.length, applied);
-          if (snapshotApplied > 0) {
-            result.snapshotApplied = snapshotApplied;
-          }
-          return result;
-        } catch (error) {
-          await this.trySendError(transport, error);
-          throw error;
-        }
-      }),
+      this.runSession(peer, () =>
+        this.runResponder(
+          transport,
+          peer,
+          transport.receive()[Symbol.asyncIterator](),
+          this.syncTimeout,
+        ),
+      ),
     );
+  }
+
+  /**
+   * 响应方会话主体：首个 hello 的超时由 firstHelloTimeout 控制。
+   * 常驻监听（push-on-write）传 undefined 表示无限等待——连接关闭时迭代器
+   * 自然结束并抛 SYNC_CONNECTION_FAILED，不会留下悬挂的 `.next()`。
+   */
+  private async runResponder(
+    transport: SyncTransport,
+    peer: SyncPeer,
+    iterator: AsyncIterator<SyncMessage>,
+    firstHelloTimeout: number | undefined,
+  ): Promise<SyncResult> {
+    const timeout = this.syncTimeout;
+    try {
+      const hello = await nextSyncMessage(iterator, 'sync-hello', firstHelloTimeout);
+      this.recordPeerNamespaces(peer.deviceId, hello.namespaces);
+      const direction: SyncDirection = hello.direction ?? 'bidirectional';
+      await transport.send({
+        type: 'sync-hello',
+        vectorClock: this.eventLog.getClock().toJSON(),
+        ...this.localHelloNamespaces(),
+      });
+
+      const offer = await nextSyncMessage(iterator, 'sync-offer', timeout);
+      let snapshotApplied = 0;
+      let applied: AppliedOffer;
+      if (offer.snapshot) {
+        // 初始快照：已认证对端直接采纳物化状态并推进时钟（G4）
+        snapshotApplied = await this.applySnapshot(offer.snapshot);
+        applied = { ackedIds: [], received: 0, duplicates: 0, conflicts: [] };
+      } else {
+        applied = await this.applyOffer(offer.events, peer);
+      }
+      await transport.send({ type: 'sync-ack', appliedEventIds: applied.ackedIds });
+
+      // push 模式只对端发；否则按「对端授权 ∩ 对端订阅 ∩ 本机订阅」裁剪后回供（T2）
+      const allow = await this.resolveOutgoingAllowList(peer, hello.namespaces);
+      const outgoing = direction === 'push'
+        ? []
+        : this.filterEventsForAllow(await this.eventLog.missingEvents(hello.vectorClock), allow);
+      await transport.send({ type: 'sync-offer', events: outgoing });
+      const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
+      await this.markEventsSynced(peer.deviceId, ack.appliedEventIds);
+
+      await nextSyncMessage(iterator, 'sync-done', timeout);
+      const finalVectorClock = this.eventLog.getClock().toJSON();
+      await transport.send({ type: 'sync-done', finalVectorClock });
+
+      const result = this.buildResult(peer, direction, outgoing.length, applied);
+      if (snapshotApplied > 0) {
+        result.snapshotApplied = snapshotApplied;
+      }
+      return result;
+    } catch (error) {
+      await this.trySendError(transport, error);
+      throw error;
+    }
+  }
+
+  /**
+   * 常驻监听对端发起的同步会话（响应方角色；push-on-write 用）。
+   * 单次会话失败不终止监听（除连接关闭外），保证后续推送仍可被接受。
+   */
+  private async runIncomingLoop(node: P2PNode, entry: OnlinePeer): Promise<void> {
+    const channel = await node.getChannel(entry.peerId);
+    if (!channel) return;
+    const transport = new SecureChannelSyncTransport(channel);
+    const iterator = transport.receive()[Symbol.asyncIterator]();
+    for (;;) {
+      if (this.onlinePeers.get(entry.peerId.id) !== entry) return;
+      try {
+        await this.enqueue(() =>
+          this.runSession(entry.peer, () => this.runResponder(transport, entry.peer, iterator, undefined)),
+        );
+      } catch (error) {
+        if ((error as { code?: string }).code === ErrorCodes.SYNC_CONNECTION_FAILED) return;
+        // 单次会话失败（验签/协议）：已尽力通知对端，继续等待下一次会话
+      }
+    }
   }
 
   // ---------- 自动同步（phase-3-plan 3.4） ----------
@@ -405,10 +555,11 @@ export class SyncManager extends EventEmitter {
    * 角色仲裁：设备 ID 字典序小者发起，大者响应（双端各触发一次，角色互补）。
    */
   attachToNode(node: P2PNode): void {
+    this.node = node;
+    // 连接关闭：清理在线登记与推送节流计时器
+    node.onConnectionClosed((peerId: PeerId) => this.removeOnlinePeer(peerId));
+
     node.getHandshake().on('authenticated', (session: AuthSession) => {
-      if (!this.autoSync) {
-        return;
-      }
       const peerDeviceId = session.certificate?.deviceId ?? session.peerId.id;
       if (this.peerWhitelist && !this.peerWhitelist.includes(peerDeviceId)) {
         return;
@@ -418,40 +569,111 @@ export class SyncManager extends EventEmitter {
         : session.peerId.pubKey;
       const peer: SyncPeer = { deviceId: peerDeviceId, publicKey };
       const initiate = this.deviceId < peerDeviceId;
+      const entry: OnlinePeer = { peerId: session.peerId, peer, initiate };
+      this.onlinePeers.set(session.peerId.id, entry);
 
-      this.runAutoSync(node, session.peerId, peer, initiate).catch((error) => {
-        this.emit('sync-failed', { peerDeviceId, error });
-      });
+      if (!this.autoSync) {
+        // autoSync 关闭：仅 push-on-write 时以常驻监听接收定向推送
+        if (this.pushOnWrite && !initiate) {
+          this.runIncomingLoop(node, entry).catch((error) => {
+            this.emit('sync-failed', { peerDeviceId, error });
+          });
+        }
+        return;
+      }
+
+      void (async () => {
+        try {
+          if (initiate) {
+            const channel = await node.getChannel(session.peerId);
+            if (!channel) {
+              throw new SyncError(
+                `Secure channel to ${peer.deviceId} not ready`,
+                ErrorCodes.SYNC_CONNECTION_FAILED,
+              );
+            }
+            await this.syncWithDevice(new SecureChannelSyncTransport(channel), peer, {
+              direction: 'bidirectional',
+            });
+          } else if (this.pushOnWrite) {
+            // 响应方常驻监听：既完成首次同步，也接收后续定向推送
+            await this.runIncomingLoop(node, entry);
+          } else {
+            const channel = await node.getChannel(session.peerId);
+            if (!channel) {
+              throw new SyncError(
+                `Secure channel to ${peer.deviceId} not ready`,
+                ErrorCodes.SYNC_CONNECTION_FAILED,
+              );
+            }
+            await this.acceptSync(new SecureChannelSyncTransport(channel), peer);
+          }
+        } catch (error) {
+          this.emit('sync-failed', { peerDeviceId, error });
+        }
+      })();
     });
   }
 
-  private async runAutoSync(
-    node: P2PNode,
-    peerId: PeerId,
+  private removeOnlinePeer(peerId: PeerId): void {
+    this.onlinePeers.delete(peerId.id);
+    const timer = this.pushTimers.get(peerId.id);
+    if (timer) {
+      clearTimeout(timer);
+      this.pushTimers.delete(peerId.id);
+    }
+  }
+
+  /** 对端 hello 声明的订阅回填到在线登记（供 push-on-write 定向判断） */
+  private recordPeerNamespaces(peerDeviceId: string, namespaces?: string[]): void {
+    const normalized = namespaces === undefined ? undefined : normalizeNamespaceList(namespaces);
+    const value = normalized && normalized.length > 0 ? normalized : undefined;
+    for (const entry of this.onlinePeers.values()) {
+      if (entry.peer.deviceId === peerDeviceId) {
+        entry.namespaces = value;
+      }
+    }
+  }
+
+  /** 本机 hello 携带的订阅字段：未配置/空 = 不声明（旧对端行为不变） */
+  private localHelloNamespaces(): { namespaces?: string[] } {
+    return this.subscriptionNamespaces.length > 0
+      ? { namespaces: [...this.subscriptionNamespaces] }
+      : {};
+  }
+
+  /**
+   * 供给端裁剪链：本机订阅 ∩ 对端声明订阅 ∩ 对端被授权集合。
+   * 三者任一「未声明」= 不过滤；任一为空白名单 = 不供任何分区。
+   */
+  private async resolveOutgoingAllowList(
     peer: SyncPeer,
-    initiate: boolean,
-  ): Promise<void> {
-    // 信道在认证完成后异步建立，轮询等待其就绪
-    const channel = await node.getChannel(peerId);
-    if (!channel) {
-      throw new SyncError(`Secure channel to ${peer.deviceId} not ready`, ErrorCodes.SYNC_CONNECTION_FAILED);
-    }
-    const transport = new SecureChannelSyncTransport(channel);
-    if (initiate) {
-      await this.syncWithDevice(transport, peer, { direction: 'bidirectional' });
-    } else {
-      await this.acceptSync(transport, peer);
-    }
+    remoteNamespaces?: string[],
+  ): Promise<NamespaceAllowList> {
+    const declared = remoteNamespaces === undefined ? null : normalizeNamespaceList(remoteNamespaces);
+    const declaredAllow = declared && declared.length > 0 ? declared : null;
+    const peerAuthorized = this.namespacePolicy
+      ? await this.namespacePolicy.getAuthorizedNamespaces(peer.deviceId)
+      : null;
+    return intersectNamespaceAllowLists(
+      subscriptionToAllowList(this.subscriptionNamespaces),
+      declaredAllow,
+      peerAuthorized,
+    );
+  }
+
+  private filterEventsForAllow(events: Event[], allow: NamespaceAllowList): Event[] {
+    if (allow === null) return events;
+    return events.filter((event) => isNamespaceAllowed(event.namespace, allow));
   }
 
   // ---------- 内部 ----------
 
   /** 应用管线：验签 → 幂等入库 → 冲突感知应用；验签失败即中止会话 */
-  private async applyOffer(
-    events: Event[],
-    peer: SyncPeer,
-  ): Promise<{ ackedIds: string[]; received: number; duplicates: number; conflicts: SyncConflict[] }> {
+  private async applyOffer(events: Event[], peer: SyncPeer): Promise<AppliedOffer> {
     const ackedIds: string[] = [];
+    const appliedIds: string[] = [];
+    const appliedNamespaces = new Set<string>();
     const conflicts: SyncConflict[] = [];
     let received = 0;
     let duplicates = 0;
@@ -474,11 +696,22 @@ export class SyncManager extends EventEmitter {
       const result = await applyRemoteEvent(this.storage, event);
       if (result.status === 'applied') {
         received += 1;
+        appliedIds.push(event.id);
+        appliedNamespaces.add(normalizeNamespace(event.namespace));
       }
       if (result.conflict) {
         conflicts.push(result.conflict);
         this.emit('conflict', result.conflict);
       }
+    }
+
+    // 变更可订阅（一致性的可观测性）：本机刚应用了哪些远端事件、涉及哪些分区
+    if (appliedIds.length > 0) {
+      this.emit('events-applied', {
+        peerDeviceId: peer.deviceId,
+        eventIds: appliedIds,
+        namespaces: [...appliedNamespaces],
+      });
     }
 
     return { ackedIds, received, duplicates, conflicts };
@@ -511,12 +744,30 @@ export class SyncManager extends EventEmitter {
     }
   }
 
-  /** 构造物化快照（G4）：当前全部节点/边 + 本机向量时钟 */
-  private async buildSnapshot(): Promise<SyncSnapshot> {
+  /**
+   * 构造物化快照（G4）：按 allow list 裁剪节点/边（未授权分区不进快照，
+   * 堵住「空时钟走快照通道绕过授权」的洞）。
+   *
+   * 时钟处理：裁剪时用「被允许事件」的向量时钟合并值，而不是本机全量时钟——
+   * 否则对端会把未收到的分区也记为已同步，之后即便授权变化也永久缺失。
+   */
+  private async buildSnapshot(allow: NamespaceAllowList): Promise<SyncSnapshot> {
+    const nodes = await this.storage.listNodes();
+    const edges = await this.storage.listEdges();
+    if (allow === null) {
+      return { nodes, edges, clock: this.eventLog.getClock().toJSON() };
+    }
+    const clock = new VectorClock();
+    for (const event of await this.eventLog.listEvents()) {
+      if (isNamespaceAllowed(event.namespace, allow)) {
+        clock.merge(VectorClock.fromJSON(event.vectorClock ?? {}));
+      }
+    }
     return {
-      nodes: await this.storage.listNodes(),
-      edges: await this.storage.listEdges(),
-      clock: this.eventLog.getClock().toJSON(),
+      nodes: nodes.filter((node) => isNamespaceAllowed(node.namespace, allow)),
+      edges: edges.filter((edge) => isNamespaceAllowed(edge.namespace, allow)),
+      clock: clock.toJSON(),
+      namespaces: [...allow],
     };
   }
 
@@ -539,7 +790,7 @@ export class SyncManager extends EventEmitter {
     peer: SyncPeer,
     direction: SyncDirection,
     sent: number,
-    applied: { received: number; duplicates: number; conflicts: SyncConflict[] },
+    applied: AppliedOffer,
   ): SyncResult {
     return {
       peerDeviceId: peer.deviceId,
@@ -550,6 +801,8 @@ export class SyncManager extends EventEmitter {
       conflicts: applied.conflicts,
       durationMs: 0, // 由 runSession 填充
       finalVectorClock: this.eventLog.getClock().toJSON(),
+      // 变更可订阅：复用 ApplyResult.ackedIds（不新造来源），快照路径为空
+      appliedEventIds: [...applied.ackedIds],
     };
   }
 

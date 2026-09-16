@@ -81,6 +81,8 @@ export interface MemoryInput {
     name?: string;
     /** preference 专用：偏好类型（缺省 'general'） */
     preferenceType?: string;
+    /** 记忆分区（缺省 'default'）；可选，向后兼容 */
+    namespace?: string;
   };
 }
 
@@ -103,6 +105,8 @@ export interface MemoryQuery {
     createdBefore?: number;
     entity?: string;
     minConfidence?: number;
+    /** 单分区或分区列表；缺省不过滤 */
+    namespace?: string | string[];
   };
   limit?: number;
   offset?: number;
@@ -121,6 +125,8 @@ export interface Memory {
     source?: string;
     validFrom?: number;
     validTo?: number;
+    /** 记忆分区（缺失按 'default' 理解） */
+    namespace?: string;
   };
   /** 向量检索相关度；未启用向量索引时缺省（不伪造） */
   relevance?: number;
@@ -185,6 +191,8 @@ export interface SearchQuery {
     tags?: string[];
     createdAfter?: number;
     createdBefore?: number;
+    /** 单分区或分区列表；缺省不过滤 */
+    namespace?: string | string[];
   };
   limit?: number;
   /** 是否包含命中节点的相关关系（traverse 一跳） */

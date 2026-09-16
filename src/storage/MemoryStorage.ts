@@ -3,17 +3,77 @@
 import type { StorageAdapter, NodeFilter, EdgeFilter, EventFilter } from './StorageAdapter.js';
 import type { Node, Edge, Event } from '../types/index.js';
 import { ErrorCodes, StorageError } from '../errors.js';
+import { matchesNamespace, normalizeNamespace, normalizeNamespaceList } from '../core/namespace.js';
 import { ulid } from 'ulid';
+
+/** namespace 过滤 → 归一化集合；undefined/空数组返回 null（= 不过滤） */
+function namespaceFilterSet(filter: string | string[] | undefined): Set<string> | null {
+  if (filter === undefined) return null;
+  const list = Array.isArray(filter) ? normalizeNamespaceList(filter) : [normalizeNamespace(filter)];
+  return list.length === 0 ? null : new Set(list);
+}
 
 export class MemoryStorage implements StorageAdapter {
   private nodes = new Map<string, Node>();
   private edges = new Map<string, Edge>();
+  /**
+   * 事件只增不减：listEvents 返回全部事件，deleteEvent 仅在显式调用时生效。
+   * 保留策略约束（PLAN 1.5）：任何自动裁剪必须排除「尚未被所有已授权对端 ack
+   * 的事件」，否则对端永久缺失该记忆（约束与测试见 SyncManager.getPendingEvents）。
+   */
   private events: Event[] = [];
   private latestClock: Record<string, number> = {};
   private closed = false;
 
+  /**
+   * namespace 二级索引：ns → 实体 ID 集合。listNodes/listEvents 按分区过滤时
+   * 先取候选集合再叠加其余条件，避免全表扫描。SqliteStorage 另有落盘索引。
+   */
+  private nodeNamespaces = new Map<string, Set<string>>();
+  private eventNamespaces = new Map<string, Set<string>>();
+
+  /** 维护节点分区索引（含分区变更时从旧分区移除） */
+  private indexNodeNamespace(node: Node): void {
+    const ns = normalizeNamespace(node.namespace);
+    for (const [knownNs, ids] of this.nodeNamespaces) {
+      if (knownNs !== ns) ids.delete(node.id);
+    }
+    let ids = this.nodeNamespaces.get(ns);
+    if (!ids) {
+      ids = new Set();
+      this.nodeNamespaces.set(ns, ids);
+    }
+    ids.add(node.id);
+  }
+
+  private unindexNodeNamespace(id: string): void {
+    for (const ids of this.nodeNamespaces.values()) {
+      ids.delete(id);
+    }
+  }
+
+  private indexEventNamespace(event: Event): void {
+    const ns = normalizeNamespace(event.namespace);
+    for (const [knownNs, ids] of this.eventNamespaces) {
+      if (knownNs !== ns) ids.delete(event.id);
+    }
+    let ids = this.eventNamespaces.get(ns);
+    if (!ids) {
+      ids = new Set();
+      this.eventNamespaces.set(ns, ids);
+    }
+    ids.add(event.id);
+  }
+
+  private unindexEventNamespace(id: string): void {
+    for (const ids of this.eventNamespaces.values()) {
+      ids.delete(id);
+    }
+  }
+
   async putNode(node: Node): Promise<void> {
     if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
+    this.indexNodeNamespace(node);
     this.nodes.set(node.id, node);
   }
 
@@ -24,6 +84,7 @@ export class MemoryStorage implements StorageAdapter {
 
   async deleteNode(id: string): Promise<void> {
     if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
+    this.unindexNodeNamespace(id);
     this.nodes.delete(id);
   }
 
@@ -32,6 +93,14 @@ export class MemoryStorage implements StorageAdapter {
     let result = Array.from(this.nodes.values());
 
     if (filter) {
+      const nsSet = namespaceFilterSet(filter.namespace);
+      if (nsSet) {
+        const ids = new Set<string>();
+        for (const ns of nsSet) {
+          for (const id of this.nodeNamespaces.get(ns) ?? []) ids.add(id);
+        }
+        result = result.filter(n => ids.has(n.id));
+      }
       if (filter.id) {
         result = result.filter(n => n.id === filter.id);
       }
@@ -123,6 +192,10 @@ export class MemoryStorage implements StorageAdapter {
       if (filter.relation) {
         result = result.filter(e => e.relation === filter.relation);
       }
+      if (filter.namespace !== undefined) {
+        const ns = filter.namespace;
+        result = result.filter(e => matchesNamespace(e.namespace, ns));
+      }
       if (filter.labels?.length) {
         const labels = filter.labels;
         result = result.filter(e => labels.every(l => (e.labels ?? []).includes(l)));
@@ -142,6 +215,7 @@ export class MemoryStorage implements StorageAdapter {
     if (!event.id) {
       event.id = ulid();
     }
+    this.indexEventNamespace(event);
     // 幂等：同 ID 覆盖而非重复追加（同步重放/重传的前提）
     const existingIdx = this.events.findIndex(e => e.id === event.id);
     if (existingIdx !== -1) {
@@ -166,6 +240,7 @@ export class MemoryStorage implements StorageAdapter {
 
   async deleteEvent(id: string): Promise<void> {
     if (this.closed) throw new StorageError('Storage closed', ErrorCodes.STORAGE_CLOSED);
+    this.unindexEventNamespace(id);
     const idx = this.events.findIndex(e => e.id === id);
     if (idx !== -1) {
       this.events.splice(idx, 1);
@@ -177,6 +252,14 @@ export class MemoryStorage implements StorageAdapter {
     let result = [...this.events];
 
     if (filter) {
+      const nsSet = namespaceFilterSet(filter.namespace);
+      if (nsSet) {
+        const ids = new Set<string>();
+        for (const ns of nsSet) {
+          for (const id of this.eventNamespaces.get(ns) ?? []) ids.add(id);
+        }
+        result = result.filter(e => ids.has(e.id));
+      }
       if (filter.id) {
         result = result.filter(e => e.id === filter.id);
       }

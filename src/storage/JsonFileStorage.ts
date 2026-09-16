@@ -172,7 +172,15 @@ export class JsonFileStorage extends MemoryStorage {
     await super.deleteEvent(id);
   }
 
-  /** 把日志压缩为当前全量状态（原子替换） */
+  /**
+   * 把日志压缩为当前全量状态（原子替换）。
+   *
+   * 保留策略约束（PLAN 1.5，只落约束不做裁剪）：compact 只把多条操作行合并为
+   * 当前全量状态（节点/边/事件都写出），**不丢事件**。任何将来引入的自动事件
+   * 裁剪，必须排除「尚未被所有已授权对端 ack 的事件」（见
+   * SyncManager.getPendingEvents 与 tests/sync/retention-constraint.test.ts），
+   * 否则对端将永久缺失该记忆，直接违背「所有记忆一致」。
+   */
   async compact(): Promise<void> {
     this.assertWritable();
     const ops: StorageOp[] = [];

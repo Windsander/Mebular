@@ -21,6 +21,8 @@ export {
   VectorClock,
   SecureChannelSyncTransport,
   applyRemoteEvent,
+  ConfigNamespacePolicy,
+  type NamespaceGrantPolicy,
   type SyncPeer,
   type SyncOptions,
   type SyncResult,
@@ -32,6 +34,17 @@ export {
   type ApplyResult,
   type SyncConflict,
 } from './sync/index.js';
+export {
+  DEFAULT_NAMESPACE,
+  normalizeNamespace,
+  normalizeNamespaceList,
+  matchesNamespace,
+  intersectNamespaceAllowLists,
+  subscriptionToAllowList,
+  isNamespaceAllowed,
+  type NamespaceFilter,
+  type NamespaceAllowList,
+} from './core/namespace.js';
 export { MemoryStorage } from './storage/MemoryStorage.js';
 export { JsonFileStorage, type JsonFileStorageOptions } from './storage/JsonFileStorage.js';
 export { SqliteStorage, type SqliteStorageOptions } from './storage/SqliteStorage.js';

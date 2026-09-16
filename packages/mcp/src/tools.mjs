@@ -61,9 +61,13 @@ const memoryInputSchema = z.object({
       category: z.string().optional(),
       name: z.string().optional(),
       preferenceType: z.string().optional(),
+      namespace: z.string().optional(),
     })
     .optional(),
 });
+
+/** namespace 过滤：单分区或分区列表，均可选（缺省不过滤） */
+const namespaceFilter = z.union([z.string(), z.array(z.string())]).optional();
 
 const internalTypes = z.array(z.enum(['fact', 'episode', 'skill', 'preference', 'observation']));
 
@@ -130,6 +134,7 @@ export function registerTools(server, service) {
             createdBefore: z.number().optional(),
             entity: z.string().optional(),
             minConfidence: z.number().optional(),
+            namespace: namespaceFilter,
           })
           .optional(),
       }),
@@ -165,6 +170,7 @@ export function registerTools(server, service) {
             tags: z.array(z.string()).optional(),
             createdAfter: z.number().optional(),
             createdBefore: z.number().optional(),
+            namespace: namespaceFilter,
           })
           .optional(),
       }),
@@ -261,6 +267,7 @@ export function registerTools(server, service) {
         direction: z.enum(['outgoing', 'incoming', 'both']).optional(),
         maxDepth: z.number().optional(),
         edgeTypes: z.array(z.string()).optional(),
+        namespace: namespaceFilter,
       }),
     },
     async (args) => {
@@ -269,6 +276,7 @@ export function registerTools(server, service) {
           ...(args.direction ? { direction: args.direction } : {}),
           maxDepth: clampDepth(args.maxDepth),
           ...(args.edgeTypes ? { edgeTypes: args.edgeTypes } : {}),
+          ...(args.namespace !== undefined ? { namespace: args.namespace } : {}),
         }));
       } catch (error) {
         return fail(String(error?.message ?? error));

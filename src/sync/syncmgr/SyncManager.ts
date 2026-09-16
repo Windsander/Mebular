@@ -49,6 +49,8 @@ import {
   SecureChannelSyncTransport,
   nextSyncMessage,
   assertValidHello,
+  assertValidSnapshot,
+  assertValidAck,
   type SyncDirection,
   type SyncMessage,
   type SyncSnapshot,
@@ -383,6 +385,40 @@ export class SyncManager extends EventEmitter {
     await this.persistSyncState();
   }
 
+  /**
+   * 收到「快照已应用」确认后，才用该次快照的分区水位推进对端水位（F4）。
+   * 这是快照覆盖分区推进对端水位的**唯一**路径，绝不发完就乐观推进。
+   */
+  private async confirmSnapshotWatermark(
+    peerDeviceId: string,
+    clocks: NamespaceClocks,
+  ): Promise<void> {
+    await this.ensureSyncStateLoaded();
+    const watermarks = this.peerWatermarks.get(peerDeviceId) ?? {};
+    for (const [ns, clock] of Object.entries(clocks)) {
+      mergeClockInto(watermarks, ns, clock);
+    }
+    this.peerWatermarks.set(peerDeviceId, watermarks);
+    await this.persistSyncState();
+  }
+
+  /**
+   * 清空 per-(对端, 分区) 水位（省略对端 = 全部）并持久化（F3）。
+   *
+   * 当对端水位被污染时（例如历史 F1 的累积时钟上报），这是**被认可的修复
+   * 路径**：只清水位、**不动 per-event ack 集合**——方向安全，最多让已确认
+   * 事件冗余重发一次，绝不会漏发。
+   */
+  async resetPeerWatermarks(peerDeviceId?: string): Promise<void> {
+    await this.ensureSyncStateLoaded();
+    if (peerDeviceId === undefined) {
+      this.peerWatermarks.clear();
+    } else {
+      this.peerWatermarks.delete(peerDeviceId);
+    }
+    await this.persistSyncState();
+  }
+
   // ---------- 已确认集合持久化（6.4） ----------
 
   /** 懒加载持久化的已确认集合；无配置路径时为空操作（纯内存行为不变） */
@@ -556,19 +592,30 @@ export class SyncManager extends EventEmitter {
               : { type: 'sync-offer', events: outgoing },
           );
           const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
+          assertValidAck(ack);
           await this.markEventsSynced(peer.deviceId, ack.appliedEventIds, outgoing);
+          // F4：**只在**对端确认已应用快照后，才按快照分区水位推进对端水位。
+          // 发完就乐观推进会在此前把对端标记为「已有」，一旦应用失败即永久丢失。
+          if (snapshot && ack.snapshotApplied === true) {
+            await this.confirmSnapshotWatermark(peer.deviceId, snapshot.namespaceClocks);
+          }
 
           // 3. 对端 offer：快照直接采纳（已认证对端）；事件走验签 + 幂等入库 + 冲突应用
           const offer = await nextSyncMessage(iterator, 'sync-offer', timeout);
           let snapshotApplied = 0;
           let applied: AppliedOffer;
           if (offer.snapshot) {
+            assertValidSnapshot(offer.snapshot);
             snapshotApplied = await this.applySnapshot(offer.snapshot);
             applied = { ackedIds: [], received: 0, duplicates: 0, conflicts: [] };
           } else {
             applied = await this.applyOffer(offer.events, peer);
           }
-          await transport.send({ type: 'sync-ack', appliedEventIds: applied.ackedIds });
+          await transport.send({
+            type: 'sync-ack',
+            appliedEventIds: applied.ackedIds,
+            ...(offer.snapshot ? { snapshotApplied: true } : {}),
+          });
 
           // 4. 交换最终时钟，收尾
           const finalVectorClock = this.eventLog.getClock().toJSON();
@@ -632,12 +679,18 @@ export class SyncManager extends EventEmitter {
       let applied: AppliedOffer;
       if (offer.snapshot) {
         // 初始快照：已认证对端直接采纳物化状态并推进时钟（G4）
+        assertValidSnapshot(offer.snapshot);
         snapshotApplied = await this.applySnapshot(offer.snapshot);
         applied = { ackedIds: [], received: 0, duplicates: 0, conflicts: [] };
       } else {
         applied = await this.applyOffer(offer.events, peer);
       }
-      await transport.send({ type: 'sync-ack', appliedEventIds: applied.ackedIds });
+      // 确认「快照已应用」，供发送方（仅在收到该确认时）推进对端水位（F4）
+      await transport.send({
+        type: 'sync-ack',
+        appliedEventIds: applied.ackedIds,
+        ...(offer.snapshot ? { snapshotApplied: true } : {}),
+      });
 
       // push 模式只对端发；否则按「对端授权 ∩ 对端订阅 ∩ 本机订阅」裁剪后回供（T2）
       const allow = await this.resolveOutgoingAllowList(peer, hello);
@@ -646,6 +699,7 @@ export class SyncManager extends EventEmitter {
         : this.filterEventsForAllow(await this.missingEventsForPeer(peer.deviceId), allow);
       await transport.send({ type: 'sync-offer', events: outgoing });
       const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
+      assertValidAck(ack);
       await this.markEventsSynced(peer.deviceId, ack.appliedEventIds, outgoing);
 
       await nextSyncMessage(iterator, 'sync-done', timeout);
@@ -795,11 +849,20 @@ export class SyncManager extends EventEmitter {
     };
   }
 
-  /** 本机分区水位 = 事件日志按分区推导值 ∪ 快照推进值（后者无对应事件） */
+  /**
+   * 本机分区水位 = 事件日志按分区推导值 ∪ 快照推进值（后者无对应事件）。
+   *
+   * **只取作者自身计数**：`event.vectorClock` 是累积时钟，会带上其他作者
+   * （乃至其他分区）的计数；若整体并入，本机可能谎称「已有 C 在 ns1 的前 n 条」，
+   * 而实际只有 C 在其他分区的事件。对端把该自报并入水位并持久化后，便会
+   * 永久不再发送 → 静默丢失。与 ack 推进水位处保持同一纪律。
+   */
   private async buildLocalNamespaceClocks(): Promise<NamespaceClocks> {
     const derived: NamespaceClocks = {};
     for (const event of await this.eventLog.listEvents()) {
-      mergeClockInto(derived, normalizeNamespace(event.namespace), event.vectorClock ?? {});
+      mergeClockInto(derived, normalizeNamespace(event.namespace), {
+        [event.author]: event.vectorClock?.[event.author] ?? 0,
+      });
     }
     return mergeNamespaceClocks(derived, this.localSnapshotClocks);
   }
@@ -929,8 +992,9 @@ export class SyncManager extends EventEmitter {
    * 构造物化快照（G4）：按 allow list 裁剪节点/边（未授权分区不进快照，
    * 堵住「空水位走快照通道绕过授权」的洞），并按分区给出水位。
    *
-   * 分区水位只统计**被允许分区**的事件时钟合并值，绝不用本机全量时钟——
-   * 否则对端会把未收到的分区记为已同步，之后即便扩权也永久缺失。
+   * 分区水位只统计**被允许分区**的事件，且**每个作者只取自身计数**（不是
+   * 累积时钟），绝不用本机全量时钟——否则对端会把未收到的分区/作者记为
+   * 已同步，之后即便扩权也永久缺失。
    */
   private async buildSnapshot(allow: string[]): Promise<SyncSnapshot> {
     const nodes = (await this.storage.listNodes()).filter((node) =>
@@ -942,7 +1006,9 @@ export class SyncManager extends EventEmitter {
     const namespaceClocks: NamespaceClocks = {};
     for (const event of await this.eventLog.listEvents()) {
       if (!isNamespaceAllowed(event.namespace, allow)) continue;
-      mergeClockInto(namespaceClocks, normalizeNamespace(event.namespace), event.vectorClock ?? {});
+      mergeClockInto(namespaceClocks, normalizeNamespace(event.namespace), {
+        [event.author]: event.vectorClock?.[event.author] ?? 0,
+      });
     }
     return { nodes, edges, namespaceClocks, namespaces: [...allow] };
   }

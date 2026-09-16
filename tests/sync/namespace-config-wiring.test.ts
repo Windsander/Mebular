@@ -103,4 +103,20 @@ describe('namespace 配置装配', () => {
     await a.shutdown();
     await b.shutdown();
   });
+
+  it('facade.resetPeerWatermarks 暴露：可按对端 / 全部清空水位（F3）', async () => {
+    const hub = new InMemoryHub();
+    const a = makeFacade('device-A', hub, { peerNamespacePolicy: { 'device-B': ['default'] } });
+    const b = makeFacade('device-B', hub, { peerNamespacePolicy: { 'device-A': ['default'] } });
+    await a.initialize();
+    await b.initialize();
+    await a.graph.createNode('fact', { text: 'x' });
+    await syncBetween(a, b);
+
+    await expect(a.resetPeerWatermarks('device-B')).resolves.toBeUndefined();
+    await expect(a.resetPeerWatermarks()).resolves.toBeUndefined();
+
+    await a.shutdown();
+    await b.shutdown();
+  });
 });

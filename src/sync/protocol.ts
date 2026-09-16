@@ -59,9 +59,38 @@ export type SyncMessage =
       namespaceClocks: NamespaceClocks;
     }
   | { type: 'sync-offer'; events: Event[]; snapshot?: SyncSnapshot }
-  | { type: 'sync-ack'; appliedEventIds: string[] }
+  | {
+      type: 'sync-ack';
+      appliedEventIds: string[];
+      /**
+       * 接收方**已应用**发送方本次 offer 中的快照（F4）。发送方据此才用快照的
+       * 分区水位推进 `peerWatermarks`；缺失/false 一律不推进（禁止乐观推进）。
+       */
+      snapshotApplied?: boolean;
+    }
   | { type: 'sync-done'; finalVectorClock: Record<string, number> }
   | { type: 'sync-error'; message: string };
+
+/** 分区水位形状的共享校验（hello 与快照同一套规则） */
+function assertNamespaceClocksShape(
+  clocks: unknown,
+  label: string,
+  violation: (detail: string) => never,
+): void {
+  if (clocks === null || typeof clocks !== 'object' || Array.isArray(clocks)) {
+    violation(`${label} 必须为对象`);
+  }
+  for (const [ns, clock] of Object.entries(clocks as Record<string, unknown>)) {
+    if (clock === null || typeof clock !== 'object' || Array.isArray(clock)) {
+      violation(`${label}.${ns} 必须为对象`);
+    }
+    for (const [author, value] of Object.entries(clock as Record<string, unknown>)) {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        violation(`${label}.${ns}.${author} 必须为非负有限数`);
+      }
+    }
+  }
+}
 
 /**
  * 校验 hello 的订阅声明与分区水位：**必填且类型正确**，否则视为协议违例。
@@ -80,19 +109,46 @@ export function assertValidHello(hello: Extract<SyncMessage, { type: 'sync-hello
   if (!Array.isArray(hello.namespaces) || hello.namespaces.some((ns) => typeof ns !== 'string')) {
     violation('namespaces 必须为字符串数组');
   }
-  const clocks = hello.namespaceClocks;
-  if (clocks === null || typeof clocks !== 'object' || Array.isArray(clocks)) {
-    violation('namespaceClocks 必须为对象');
+  assertNamespaceClocksShape(hello.namespaceClocks, 'namespaceClocks', violation);
+}
+
+/**
+ * 校验快照的实体列表与分区水位：**必填且类型正确**，否则视为协议违例。
+ * 与 `assertValidHello` 同级；协议已声明这些字段必填，且无 legacy 对端，
+ * 因此缺失/类型错宁可响亮失败，也不容忍半成品快照。
+ */
+export function assertValidSnapshot(snapshot: SyncSnapshot): void {
+  const violation = (detail: string): never => {
+    throw new SyncError(
+      `Protocol violation: sync-offer snapshot ${detail}`,
+      ErrorCodes.SYNC_PROTOCOL_VIOLATION,
+    );
+  };
+  if (!Array.isArray(snapshot.nodes)) {
+    violation('nodes 必须为数组');
   }
-  for (const [ns, clock] of Object.entries(clocks as Record<string, unknown>)) {
-    if (clock === null || typeof clock !== 'object' || Array.isArray(clock)) {
-      violation(`namespaceClocks.${ns} 必须为对象`);
-    }
-    for (const [author, value] of Object.entries(clock as Record<string, unknown>)) {
-      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-        violation(`namespaceClocks.${ns}.${author} 必须为非负有限数`);
-      }
-    }
+  if (!Array.isArray(snapshot.edges)) {
+    violation('edges 必须为数组');
+  }
+  if (!Array.isArray(snapshot.namespaces) || snapshot.namespaces.some((ns) => typeof ns !== 'string')) {
+    violation('namespaces 必须为字符串数组');
+  }
+  assertNamespaceClocksShape(snapshot.namespaceClocks, 'namespaceClocks', violation);
+}
+
+/** 校验 sync-ack：`appliedEventIds` 必为字符串数组；`snapshotApplied` 若出现必为 boolean */
+export function assertValidAck(ack: Extract<SyncMessage, { type: 'sync-ack' }>): void {
+  const violation = (detail: string): never => {
+    throw new SyncError(
+      `Protocol violation: sync-ack ${detail}`,
+      ErrorCodes.SYNC_PROTOCOL_VIOLATION,
+    );
+  };
+  if (!Array.isArray(ack.appliedEventIds) || ack.appliedEventIds.some((id) => typeof id !== 'string')) {
+    violation('appliedEventIds 必须为字符串数组');
+  }
+  if (ack.snapshotApplied !== undefined && typeof ack.snapshotApplied !== 'boolean') {
+    violation('snapshotApplied 必须为 boolean');
   }
 }
 

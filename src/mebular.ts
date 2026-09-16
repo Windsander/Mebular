@@ -387,6 +387,15 @@ export class Mebular {
     return this.assertReady(this.syncImpl, 'sync');
   }
 
+  /**
+   * 清空 per-(对端, 分区) 同步水位（省略对端 = 全部）——对端水位被污染时的
+   * **被认可修复路径**：只清水位、不动 per-event ack 集合，方向安全（最多让
+   * 已确认事件冗余重发一次，不会漏发）。
+   */
+  async resetPeerWatermarks(peerDeviceId?: string): Promise<void> {
+    await this.sync.resetPeerWatermarks(peerDeviceId);
+  }
+
   /** 网络未启用时为 null */
   get node(): P2PNode | null {
     return this.nodeImpl;

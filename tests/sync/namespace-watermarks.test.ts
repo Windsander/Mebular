@@ -9,7 +9,7 @@
 // - 重启持久化：per-(peer, ns) 水位落盘，重启后不重发、不遗漏。
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GraphStore } from '../../src/core/GraphStore.js';
@@ -18,7 +18,13 @@ import { MemoryStorage } from '../../src/storage/MemoryStorage.js';
 import { SyncManager, type SyncPeer, type SyncResult } from '../../src/sync/syncmgr/SyncManager.js';
 import type { NamespaceGrantPolicy } from '../../src/sync/namespacePolicy.js';
 import { grant } from '../helpers/namespace.js';
-import { assertValidHello, SecureChannelSyncTransport, type SyncMessage } from '../../src/sync/protocol.js';
+import {
+  assertValidAck,
+  assertValidHello,
+  assertValidSnapshot,
+  SecureChannelSyncTransport,
+  type SyncMessage,
+} from '../../src/sync/protocol.js';
 import { SecureChannelImpl } from '../../src/p2p/secure/SecureChannelImpl.js';
 import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
 import type { PeerId } from '../../src/p2p/P2PNetwork.js';
@@ -206,11 +212,10 @@ describe('授权边界与协议声明', () => {
     expect(result.denied).toBe(true);
   });
 
-  it('响应方发来快照（缺省 namespaceClocks）：发起方直接采纳，不因缺字段崩溃', async () => {
+  it('响应方发来缺 namespaceClocks 的快照 → 协议违例，会话被拒绝（F2）', async () => {
     const a = await createDevice('device-A', { namespacePolicy: grant('default') });
     const b = await createDevice('device-B');
     const [tA, tB] = await linkedTransports(a, b);
-    const seeded = await b.store.createNode('fact', { text: 'snapshot-node' }, [], { namespace: 'default' });
 
     const script = (async () => {
       const it = tB.receive()[Symbol.asyncIterator]();
@@ -218,21 +223,50 @@ describe('授权边界与协议声明', () => {
       await tB.send({ type: 'sync-hello', direction: 'bidirectional', subscribeAll: true, namespaces: [], namespaceClocks: {} });
       const offer = (await it.next()).value as Extract<SyncMessage, { type: 'sync-offer' }>;
       await tB.send({ type: 'sync-ack', appliedEventIds: (offer.events ?? []).map((e) => e.id) });
-      // 故意不带 namespaceClocks：发起方应兜底为空，不崩溃
+      // 缺 namespaceClocks：快照已声明必填，缺失即协议违例（不再容忍）
       await tB.send({
         type: 'sync-offer',
         events: [],
-        snapshot: { nodes: [seeded], edges: [], namespaces: ['default'] } as never,
+        snapshot: { nodes: [], edges: [], namespaces: ['default'] } as never,
       });
-      await it.next(); // A 的 ack
-      await it.next(); // A 的 done
-      await tB.send({ type: 'sync-done', finalVectorClock: {} });
+      return it.next(); // A 的 sync-error
     })();
 
-    const result = await a.syncManager.syncWithDevice(tA, peerOf(b));
-    await script;
-    expect(result.snapshotApplied).toBe(1);
-    expect((await a.store.getNode(seeded.id))?.content).toEqual({ text: 'snapshot-node' });
+    await expect(
+      a.syncManager.syncWithDevice(tA, peerOf(b)),
+    ).rejects.toMatchObject({ code: 'SYNC_PROTOCOL_VIOLATION' });
+    const reply = await script;
+    expect((reply.value as SyncMessage).type).toBe('sync-error');
+  });
+});
+
+describe('assertValidSnapshot / assertValidAck', () => {
+  const validSnapshot = { nodes: [], edges: [], namespaceClocks: {}, namespaces: ['default'] };
+
+  it('合法快照通过', () => {
+    expect(() => assertValidSnapshot(validSnapshot)).not.toThrow();
+  });
+
+  it.each([
+    ['nodes 非数组', { ...validSnapshot, nodes: null }],
+    ['edges 非数组', { ...validSnapshot, edges: 3 }],
+    ['namespaces 非数组', { ...validSnapshot, namespaces: 'default' }],
+    ['namespaces 含非字符串', { ...validSnapshot, namespaces: [1] }],
+    ['namespaceClocks 缺失', { nodes: [], edges: [], namespaces: ['default'] }],
+    ['namespaceClocks 非对象', { ...validSnapshot, namespaceClocks: 1 }],
+    ['分区时钟非对象', { ...validSnapshot, namespaceClocks: { nsA: 1 } }],
+    ['作者计数非数值', { ...validSnapshot, namespaceClocks: { nsA: { a: 'x' } } }],
+    ['作者计数为负', { ...validSnapshot, namespaceClocks: { nsA: { a: -1 } } }],
+  ])('快照 %s → 协议违例', (_label, snapshot) => {
+    expect(() => assertValidSnapshot(snapshot as never)).toThrow(/sync-offer snapshot/);
+  });
+
+  it('合法 ack 通过；appliedEventIds 非数组/含非字符串 → 违例', () => {
+    expect(() => assertValidAck({ type: 'sync-ack', appliedEventIds: [] })).not.toThrow();
+    expect(() => assertValidAck({ type: 'sync-ack', appliedEventIds: [], snapshotApplied: true })).not.toThrow();
+    expect(() => assertValidAck({ type: 'sync-ack', appliedEventIds: 'x' } as never)).toThrow(/sync-ack/);
+    expect(() => assertValidAck({ type: 'sync-ack', appliedEventIds: [1] } as never)).toThrow(/sync-ack/);
+    expect(() => assertValidAck({ type: 'sync-ack', appliedEventIds: [], snapshotApplied: 'yes' } as never)).toThrow(/sync-ack/);
   });
 });
 
@@ -366,6 +400,38 @@ describe('分区同步水位（缺失判定 per-(对端, 分区)）', () => {
   });
 });
 
+describe('上报水位只用作者自身计数（F1）', () => {
+  it('B 的事件携带 C 的计数、但 B 没有 C 在该分区的事件时，C 仍发送该分区历史', async () => {
+    // 三设备：C 在 nsB 有一条事件；D 同步拿到 C 的计数后在 nsA 写入；
+    // B 只从 D 拿到 nsA（于是 clock 含 C 的计数，但没有 C 的 nsB 事件）；
+    // B 在 nsB 写入，其 vectorClock 因而携带 C 的计数。
+    const cPolicy = new MutablePolicy({ 'device-B': ['nsA', 'nsB'], 'device-D': ['nsA', 'nsB'] });
+    // B→C 只供 nsB：避免 B 把从 D 收到的第三方（D）事件中继给 C（夹具无证书链，中继会验签失败）
+    const bPolicy = new MutablePolicy({ 'device-C': ['nsB'], 'device-D': ['nsA', 'nsB'] });
+    const dPolicy = new MutablePolicy({ 'device-B': ['nsA'], 'device-C': ['nsA', 'nsB'] });
+
+    const c = await createDevice('device-C', { namespacePolicy: cPolicy });
+    const d = await createDevice('device-D', { namespacePolicy: dPolicy });
+    const b = await createDevice('device-B', { namespacePolicy: bPolicy });
+
+    const cNsB = await c.store.createNode('fact', { text: 'c-nsB' }, [], { namespace: 'nsB' });
+    await runSync(c, d); // D 拿到 C 的 nsB 事件与其计数
+    expect(await d.store.getNode(cNsB.id)).not.toBeNull();
+
+    await d.store.createNode('fact', { text: 'd-nsA' }, [], { namespace: 'nsA' });
+    await runSync(d, b); // D 只授权 B 接收 nsA：B 的 clock 含 C 的计数，但没有 C 的 nsB 事件
+    expect(await b.store.getNode(cNsB.id)).toBeNull();
+
+    const bNsB = await b.store.createNode('fact', { text: 'b-nsB' }, [], { namespace: 'nsB' });
+
+    // C 与 B 同步：C 必须把 nsB 的历史事件（cNsB）发给 B
+    await runSync(c, b);
+
+    expect(await b.store.getNode(cNsB.id)).not.toBeNull(); // 修复前：上报水位被 C 的累积计数污染 → 永久不发送
+    expect(await b.store.getNode(bNsB.id)).not.toBeNull();
+  });
+});
+
 describe('同步查询面与传输收尾', () => {
   it('getLocalVectorClock 与事件日志一致；传输可关闭', async () => {
     const a = await createDevice('device-A', { namespacePolicy: grant('default') });
@@ -422,5 +488,97 @@ describe('同步水位持久化', () => {
     const [thirdA] = await runSyncWith(restarted, b.syncManager, a1, b);
     expect(thirdA.sentEvents).toBe(1);
     expect(await b.store.getNode(b2.id)).not.toBeNull();
+  });
+
+  it('快照同步：确认 snapshotApplied 后按快照水位推进 peerWatermarks（F4）', async () => {
+    const statePath = join(dir, 'a-f4.sync-state.json');
+    const a = await createDevice('device-A', {
+      namespacePolicy: grant('nsA'),
+      snapshotThreshold: 1,
+      syncStatePath: statePath,
+    });
+    const b = await createDevice('device-B', { namespacePolicy: grant('nsA') });
+    await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
+    await a.store.createNode('fact', { text: 'a2' }, [], { namespace: 'nsA' });
+
+    const [resultA, resultB] = await runSync(a, b);
+    expect(resultA.snapshotSent).toBe(2);
+    expect(resultB.snapshotApplied).toBe(2);
+
+    const saved = await loadState(statePath);
+    // 发送方水位已由「快照已应用」确认推进，不再依赖对端下次 hello 自报
+    expect(saved.peerWatermarks['device-B']?.nsA).toEqual({ 'device-A': 2 });
+  });
+
+  it('未确认 snapshotApplied：不乐观推进对端水位（F4）', async () => {
+    const statePath = join(dir, 'a-f4-neg.sync-state.json');
+    const a = await createDevice('device-A', {
+      namespacePolicy: grant('nsA'),
+      snapshotThreshold: 1,
+      syncStatePath: statePath,
+    });
+    const b = await createDevice('device-B');
+    await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
+    await a.store.createNode('fact', { text: 'a2' }, [], { namespace: 'nsA' });
+
+    const [tA, tB] = await linkedTransports(a, b);
+    const script = (async () => {
+      const it = tB.receive()[Symbol.asyncIterator]();
+      await it.next(); // A 的 hello
+      await tB.send({ type: 'sync-hello', direction: 'bidirectional', subscribeAll: true, namespaces: [], namespaceClocks: {} });
+      await it.next(); // A 的 offer（快照）
+      await tB.send({ type: 'sync-ack', appliedEventIds: [] }); // 故意不带 snapshotApplied
+      await tB.send({ type: 'sync-offer', events: [] });
+      await it.next(); // A 的 ack
+      await it.next(); // A 的 done
+      await tB.send({ type: 'sync-done', finalVectorClock: {} });
+    })();
+
+    const resultA = await a.syncManager.syncWithDevice(tA, peerOf(b));
+    await script;
+    expect(resultA.snapshotSent).toBe(2);
+    const saved = await loadState(statePath);
+    expect(saved.peerWatermarks['device-B']?.nsA).toBeUndefined(); // 未确认 → 不推进
+  });
+
+  it('resetPeerWatermarks：清水位但保留 per-event ack；被污染水位重置后事件会重发（F3）', async () => {
+    const statePath = join(dir, 'a-f3.sync-state.json');
+    const a0 = await createDevice('device-A', { namespacePolicy: grant('nsA') });
+    const b = await createDevice('device-B', { namespacePolicy: grant('nsA') });
+    const a1 = await a0.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
+    await runSync(a0, b); // B 拿到 a1
+
+    // 模拟被污染的水位：A 声称 B 在 nsA 已有 device-A:9（远高于实际），并沿用已确认集合
+    await writeFile(
+      statePath,
+      JSON.stringify({
+        version: 2,
+        peers: { 'device-B': [a1.id] },
+        peerWatermarks: { 'device-B': { nsA: { 'device-A': 9 } } },
+        localSnapshotClocks: {},
+      }),
+      'utf-8',
+    );
+    const a = newSyncManager(a0, { namespacePolicy: grant('nsA'), syncStatePath: statePath });
+
+    // 新增一条 nsA 事件（A:2）：被污染水位（9）覆盖 → 静默不发（正是要修的缺陷）
+    const a2 = await a0.store.createNode('fact', { text: 'a2' }, [], { namespace: 'nsA' });
+    const [before] = await runSyncWith(a, b.syncManager, a0, b);
+    expect(before.sentEvents).toBe(0);
+
+    // 修复路径：重置该对端水位 → 水位回落到对端自报（A:1），a2 被补发
+    await a.resetPeerWatermarks('device-B');
+    const saved = await loadState(statePath);
+    expect(saved.peerWatermarks['device-B']).toBeUndefined();
+    expect(saved.peers['device-B']).toEqual([a1.id]); // per-event ack 集合未被清
+
+    const [after] = await runSyncWith(a, b.syncManager, a0, b);
+    expect(after.sentEvents).toBe(1);
+    expect(await b.store.getNode(a2.id)).not.toBeNull();
+
+    // 全部重置
+    await a.resetPeerWatermarks();
+    const cleared = await loadState(statePath);
+    expect(Object.keys(cleared.peerWatermarks)).toHaveLength(0);
   });
 });

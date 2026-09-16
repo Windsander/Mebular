@@ -36,7 +36,17 @@ describe('push-on-write', () => {
       deviceId,
       encryption: masterKeys,
       network: { enabled: true, provider: hub },
-      sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 20, ...sync },
+      sync: {
+        autoSync: true,
+        pushOnWrite: true,
+        pushOnWriteThrottleMs: 20,
+        // 默认拒绝：显式授权对端；具体订阅由各用例的 namespaces 决定
+        peerNamespacePolicy: {
+          'device-A': ['default', 'task', 'taskA', 'taskB'],
+          'device-B': ['default', 'task', 'taskA', 'taskB'],
+        },
+        ...sync,
+      },
     });
   }
 

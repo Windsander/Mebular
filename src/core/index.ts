@@ -9,7 +9,12 @@ export {
   matchesNamespace,
   intersectNamespaceAllowLists,
   subscriptionToAllowList,
+  declarationToAllowList,
   isNamespaceAllowed,
+  mergeClockInto,
+  mergeNamespaceClocks,
+  namespaceClockOf,
   type NamespaceFilter,
   type NamespaceAllowList,
+  type NamespaceClocks,
 } from './namespace.js';

@@ -6,11 +6,17 @@
 // - 应用管线：逐条验签（EventLog.verifyEvent）→ 事件日志幂等入库
 //   （appendRemote）→ 冲突感知应用（applyRemoteEvent），冲突随结果与
 //   'conflict' 事件上报；
+// - 授权姿态：**默认拒绝**。对端必须被 NamespaceGrantPolicy 显式授权才能
+//   收到任何分区；未配置策略 = 拒绝全部。裁剪链同时作用于 offer 与快照。
+// - 分区水位（per-(peer, namespace) watermark）：缺失判定只在同一分区内
+//   比较（event.author 计数 > 该 (peer, ns) 水位才算缺失），而不是拿对端的
+//   累积全局时钟比对。这样未授权分区被跳过后，日后扩权仍能从正确起点回补。
 // - 离线队列：待同步集合 = 本地事件 − 对端已确认集合，按对端分桶持久，
 //   重连后续传天然幂等（内容寻址 ID 去重）；
-// - 已确认集合持久化（6.4）：配置 syncStatePath 后按对端已确认集合落盘
-//   （原子写：tmp+rename），重启后首帧不再多带一轮冗余事件；
-//   状态文件损坏诚实报 STORAGE_READ_FAILED，不静默重置。
+// - 同步状态持久化（6.4 / 本轮 v2）：配置 syncStatePath 后落盘 per-event ack
+//   集合 + per-(peer, namespace) 水位 + 快照推进的分区水位（原子写 tmp+rename），
+//   重启后首帧不重发已确认事件、也不遗漏未发送分区；状态文件损坏诚实报
+//   STORAGE_READ_FAILED，不静默重置。
 // - 自动同步：attachToNode 后在握手 'authenticated' 上触发，
 //   设备 ID 字典序小者发起，大者响应，避免双发死锁。
 //
@@ -26,19 +32,23 @@ import { VectorClock } from '../vectorclock/index.js';
 import { ErrorCodes, StorageError, SyncError } from '../../errors.js';
 import type { Event } from '../../types/event.js';
 import { applyRemoteEvent, type SyncConflict } from '../apply.js';
-import type { NamespaceGrantPolicy } from '../namespacePolicy.js';
+import { ConfigNamespacePolicy, type NamespaceGrantPolicy } from '../namespacePolicy.js';
 import {
   normalizeNamespace,
   normalizeNamespaceList,
-  subscriptionToAllowList,
+  declarationToAllowList,
   intersectNamespaceAllowLists,
   isNamespaceAllowed,
-  type NamespaceAllowList,
+  mergeClockInto,
+  mergeNamespaceClocks,
+  namespaceClockOf,
+  type NamespaceClocks,
 } from '../../core/namespace.js';
 import { hexToBytes, verifyCertificateSignature, type AuthSession } from '../../p2p/handshake/AuthenticationHandshake.js';
 import {
   SecureChannelSyncTransport,
   nextSyncMessage,
+  assertValidHello,
   type SyncDirection,
   type SyncMessage,
   type SyncSnapshot,
@@ -80,6 +90,11 @@ export interface SyncResult {
    * 是否有我关心的新记忆。
    */
   appliedEventIds?: string[];
+  /**
+   * 本会话是否「未授权任何分区」（裁剪链解析为 `[]`）：拒绝不再静默，
+   * 订阅方据此把「没数据」与「没被授权」区分开。
+   */
+  denied?: boolean;
   /** 本会话以快照发出的物化实体数（nodes+edges）；0/undefined 表示未走快照 */
   snapshotSent?: number;
   /** 本会话以快照应用的对端物化实体数（nodes+edges） */
@@ -122,7 +137,10 @@ export interface SyncManagerOptions {
   snapshotThreshold?: number;
   /** 本机订阅的 namespace：空/缺省 = 全部（保持现状语义） */
   subscriptionNamespaces?: string[];
-  /** 对端授权策略（T2 供给端裁剪）；缺省不过滤（向后兼容） */
+  /**
+   * 对端授权策略（T2 供给端裁剪，默认拒绝）。
+   * 缺省 = `ConfigNamespacePolicy({})`：**不授权任何对端**，没有对端能收到数据。
+   */
   namespacePolicy?: NamespaceGrantPolicy;
   /** 本地写入后向订阅对端即时推送（默认关闭） */
   pushOnWrite?: boolean;
@@ -137,8 +155,10 @@ const DEFAULT_PUSH_ON_WRITE_THROTTLE_MS = 50;
 interface OnlinePeer {
   peerId: PeerId;
   peer: SyncPeer;
-  /** 对端 hello 中声明的订阅；undefined = 未声明（不过滤，兼容旧对端） */
-  namespaces?: string[];
+  /** 对端 hello 的订阅声明：true = 全部分区；false = 只订阅 namespaces */
+  subscribeAll: boolean;
+  /** 对端 hello 中声明的显式订阅清单（subscribeAll=true 时忽略） */
+  namespaces: string[];
   /** 本机在该对端会话中的角色（设备 ID 字典序小者发起） */
   initiate: boolean;
 }
@@ -151,6 +171,51 @@ interface AppliedOffer {
   conflicts: SyncConflict[];
 }
 
+/** 分区时钟的确定性排序输出（namespace / author 键排序，便于审计与测试） */
+function sortNamespaceClocks(clocks: NamespaceClocks): NamespaceClocks {
+  const out: NamespaceClocks = {};
+  for (const ns of Object.keys(clocks).sort()) {
+    const clock = clocks[ns]!;
+    const sorted: Record<string, number> = {};
+    for (const author of Object.keys(clock).sort()) {
+      sorted[author] = clock[author]!;
+    }
+    out[ns] = sorted;
+  }
+  return out;
+}
+
+/** 解析并校验持久化的分区时钟（loadSyncState 用） */
+function parseNamespaceClocks(value: unknown, label: string, filePath: string): NamespaceClocks {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new StorageError(
+      `同步状态文件 ${label} 形状非法：${filePath}`,
+      ErrorCodes.STORAGE_READ_FAILED,
+    );
+  }
+  const result: NamespaceClocks = {};
+  for (const [ns, clock] of Object.entries(value as Record<string, unknown>)) {
+    if (clock === null || typeof clock !== 'object' || Array.isArray(clock)) {
+      throw new StorageError(
+        `同步状态文件 ${label}.${ns} 形状非法：${filePath}`,
+        ErrorCodes.STORAGE_READ_FAILED,
+      );
+    }
+    const parsed: Record<string, number> = {};
+    for (const [author, count] of Object.entries(clock as Record<string, unknown>)) {
+      if (typeof count !== 'number' || !Number.isFinite(count)) {
+        throw new StorageError(
+          `同步状态文件 ${label}.${ns}.${author} 非数值：${filePath}`,
+          ErrorCodes.STORAGE_READ_FAILED,
+        );
+      }
+      parsed[author] = count;
+    }
+    result[ns] = parsed;
+  }
+  return result;
+}
+
 export class SyncManager extends EventEmitter {
   private readonly eventLog: EventLog;
   private readonly storage: StorageAdapter;
@@ -160,7 +225,8 @@ export class SyncManager extends EventEmitter {
   private readonly syncTimeout: number;
   private readonly userMasterPublicKey: Uint8Array | null;
   private readonly subscriptionNamespaces: string[];
-  private readonly namespacePolicy: NamespaceGrantPolicy | null;
+  /** 对端授权策略：永不缺省为「不过滤」——未配置即拒绝全部（默认拒绝） */
+  private readonly namespacePolicy: NamespaceGrantPolicy;
   private readonly pushOnWrite: boolean;
   private readonly pushOnWriteThrottleMs: number;
 
@@ -173,6 +239,16 @@ export class SyncManager extends EventEmitter {
 
   /** 每个对端已确认（ack）的事件 ID 集合——离线队列的持久依据 */
   private readonly syncedByPeer = new Map<string, Set<string>>();
+  /**
+   * per-(对端, 分区) 同步水位：对端在各分区已收到的最大作者计数。
+   * 缺失判定据此进行，并在 ack / 对端 hello 时推进；持久化（v2）。
+   */
+  private readonly peerWatermarks = new Map<string, NamespaceClocks>();
+  /**
+   * 本机经快照推进的分区水位（快照不带事件，无法从事件日志推导）。
+   * hello 上报本机分区水位时与「事件日志推导值」合并；持久化（v2）。
+   */
+  private localSnapshotClocks: NamespaceClocks = {};
   /** 已确认集合持久化路径；null 则维持纯内存（6.4 前行为） */
   private readonly syncStatePath: string | null;
   /** 初始同步快照阈值（G4）；undefined 不启用 */
@@ -197,7 +273,8 @@ export class SyncManager extends EventEmitter {
     this.syncStatePath = options.syncStatePath ?? null;
     this.snapshotThreshold = options.snapshotThreshold;
     this.subscriptionNamespaces = normalizeNamespaceList(options.subscriptionNamespaces);
-    this.namespacePolicy = options.namespacePolicy ?? null;
+    // 默认拒绝：未配置策略时用空配置策略，任何对端都未获授权
+    this.namespacePolicy = options.namespacePolicy ?? new ConfigNamespacePolicy({});
     this.pushOnWrite = options.pushOnWrite ?? false;
     this.pushOnWriteThrottleMs = options.pushOnWriteThrottleMs ?? DEFAULT_PUSH_ON_WRITE_THROTTLE_MS;
     if (this.pushOnWrite) {
@@ -211,7 +288,8 @@ export class SyncManager extends EventEmitter {
     const namespace = normalizeNamespace(event.namespace);
     for (const entry of this.onlinePeers.values()) {
       if (!entry.initiate) continue; // 仅发起方角色可主动推送
-      if (entry.namespaces && entry.namespaces.length > 0 && !entry.namespaces.includes(namespace)) {
+      // 是否推送只看订阅声明；授权裁剪仍由会话内的 offer 计算兜底
+      if (!entry.subscribeAll && !entry.namespaces.includes(namespace)) {
         continue; // 对端未订阅该分区
       }
       this.schedulePush(entry);
@@ -272,7 +350,16 @@ export class SyncManager extends EventEmitter {
     );
   }
 
-  async markEventsSynced(peerDeviceId: string, eventIds: string[]): Promise<void> {
+  /**
+   * 记录对端已确认的事件，并据此推进 per-(对端, 分区) 水位。
+   * `sentEvents` 为本轮实际发出的候选事件（用于把 ack 映射回分区/作者）；
+   * 只推进已被 ack 的事件，且只在本轮 allow 之内（调用方已过滤）。
+   */
+  async markEventsSynced(
+    peerDeviceId: string,
+    eventIds: string[],
+    sentEvents?: Event[],
+  ): Promise<void> {
     await this.ensureSyncStateLoaded();
     let acked = this.syncedByPeer.get(peerDeviceId);
     if (!acked) {
@@ -281,6 +368,17 @@ export class SyncManager extends EventEmitter {
     }
     for (const id of eventIds) {
       acked.add(id);
+    }
+    if (sentEvents && sentEvents.length > 0) {
+      const ackedSet = new Set(eventIds);
+      const watermarks = this.peerWatermarks.get(peerDeviceId) ?? {};
+      for (const event of sentEvents) {
+        if (!ackedSet.has(event.id)) continue;
+        mergeClockInto(watermarks, normalizeNamespace(event.namespace), {
+          [event.author]: event.vectorClock?.[event.author] ?? 0,
+        });
+      }
+      this.peerWatermarks.set(peerDeviceId, watermarks);
     }
     await this.persistSyncState();
   }
@@ -316,7 +414,12 @@ export class SyncManager extends EventEmitter {
         error as Error,
       );
     }
-    const peers = (parsed as { peers?: unknown } | null)?.peers;
+    const record = parsed as {
+      peers?: unknown;
+      peerWatermarks?: unknown;
+      localSnapshotClocks?: unknown;
+    } | null;
+    const peers = record?.peers;
     if (!peers || typeof peers !== 'object') {
       throw new StorageError(
         `同步状态文件缺少 peers 字段：${filePath}`,
@@ -332,20 +435,54 @@ export class SyncManager extends EventEmitter {
       }
       this.syncedByPeer.set(peerId, new Set(ids as string[]));
     }
+    // v2 增补：per-(对端, 分区) 水位 + 快照推进的本机分区水位
+    if (record?.peerWatermarks !== undefined) {
+      const watermarks = record.peerWatermarks;
+      if (watermarks === null || typeof watermarks !== 'object' || Array.isArray(watermarks)) {
+        throw new StorageError(
+          `同步状态文件 peerWatermarks 形状非法：${filePath}`,
+          ErrorCodes.STORAGE_READ_FAILED,
+        );
+      }
+      for (const [peerId, clocks] of Object.entries(watermarks)) {
+        this.peerWatermarks.set(peerId, parseNamespaceClocks(clocks, `peerWatermarks.${peerId}`, filePath));
+      }
+    }
+    if (record?.localSnapshotClocks !== undefined) {
+      this.localSnapshotClocks = parseNamespaceClocks(
+        record.localSnapshotClocks,
+        'localSnapshotClocks',
+        filePath,
+      );
+    }
   }
 
-  /** 原子落盘：tmp + rename，避免半写状态文件 */
+  /** 原子落盘：tmp + rename，避免半写状态文件（v2：ack 集合 + 分区水位） */
   private async persistSyncState(): Promise<void> {
     if (!this.syncStatePath) return;
+    await this.ensureSyncStateLoaded(); // 避免部分加载时覆盖其他对端的状态
     const filePath = this.syncStatePath;
     const peers: Record<string, string[]> = {};
     for (const [peerId, ids] of this.syncedByPeer) {
       peers[peerId] = [...ids].sort(); // 排序保证输出确定，便于审计与测试
     }
+    const peerWatermarks: Record<string, NamespaceClocks> = {};
+    for (const [peerId, clocks] of this.peerWatermarks) {
+      peerWatermarks[peerId] = sortNamespaceClocks(clocks);
+    }
     const tmpPath = `${filePath}.tmp`;
     try {
       await mkdir(dirname(filePath), { recursive: true });
-      await writeFile(tmpPath, JSON.stringify({ version: 1, peers }), 'utf-8');
+      await writeFile(
+        tmpPath,
+        JSON.stringify({
+          version: 2,
+          peers,
+          peerWatermarks,
+          localSnapshotClocks: sortNamespaceClocks(this.localSnapshotClocks),
+        }),
+        'utf-8',
+      );
       await rename(tmpPath, filePath);
     } catch (error) {
       throw new StorageError(
@@ -385,29 +522,29 @@ export class SyncManager extends EventEmitter {
         try {
           const iterator = transport.receive()[Symbol.asyncIterator]();
 
-          // 1. 交换向量时钟（发起方 hello 携带方向与本机订阅，响应方据此裁剪回供集合）
+          // 1. hello：本机订阅声明（subscribeAll + namespaces）+ 分区水位
           await transport.send({
             type: 'sync-hello',
-            vectorClock: this.eventLog.getClock().toJSON(),
             direction,
-            ...this.localHelloNamespaces(),
+            ...(await this.localHello()),
           });
           const hello = await nextSyncMessage(iterator, 'sync-hello', timeout);
-          this.recordPeerNamespaces(peer.deviceId, hello.namespaces);
+          assertValidHello(hello);
+          await this.recordPeerHello(peer.deviceId, hello);
 
-          // 2. 我方 offer：按对端时钟计算缺失集；pull 模式只收不发。
+          // 2. 我方 offer：按 per-(对端, 分区) 水位计算缺失集；pull 模式只收不发。
           //    先按「对端授权 ∩ 对端订阅 ∩ 本机订阅」裁剪（T2 供给端强制），
-          //    对端空时钟且裁剪后缺失集达阈值时改发物化快照（G4；同样裁剪）
-          const allow = await this.resolveOutgoingAllowList(peer, hello.namespaces);
+          //    对端分区水位为空且裁剪后缺失集达阈值时改发物化快照（G4；同样裁剪）
+          const allow = await this.resolveOutgoingAllowList(peer, hello);
           let outgoing = direction === 'pull'
             ? []
-            : this.filterEventsForAllow(await this.eventLog.missingEvents(hello.vectorClock), allow);
+            : this.filterEventsForAllow(await this.missingEventsForPeer(peer.deviceId), allow);
           const snapshotThreshold = options.snapshotThreshold ?? this.snapshotThreshold;
           let snapshot: SyncSnapshot | undefined;
           if (
             direction !== 'pull' &&
             snapshotThreshold !== undefined &&
-            Object.keys(hello.vectorClock).length === 0 &&
+            Object.keys(hello.namespaceClocks).length === 0 &&
             outgoing.length >= snapshotThreshold
           ) {
             snapshot = await this.buildSnapshot(allow);
@@ -419,7 +556,7 @@ export class SyncManager extends EventEmitter {
               : { type: 'sync-offer', events: outgoing },
           );
           const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
-          await this.markEventsSynced(peer.deviceId, ack.appliedEventIds);
+          await this.markEventsSynced(peer.deviceId, ack.appliedEventIds, outgoing);
 
           // 3. 对端 offer：快照直接采纳（已认证对端）；事件走验签 + 幂等入库 + 冲突应用
           const offer = await nextSyncMessage(iterator, 'sync-offer', timeout);
@@ -438,7 +575,7 @@ export class SyncManager extends EventEmitter {
           await transport.send({ type: 'sync-done', finalVectorClock });
           await nextSyncMessage(iterator, 'sync-done', timeout);
 
-          const result = this.buildResult(peer, direction, outgoing.length, applied);
+          const result = this.buildResult(peer, direction, outgoing.length, applied, allow);
           if (snapshot) {
             result.snapshotSent = snapshot.nodes.length + snapshot.edges.length;
           }
@@ -482,12 +619,12 @@ export class SyncManager extends EventEmitter {
     const timeout = this.syncTimeout;
     try {
       const hello = await nextSyncMessage(iterator, 'sync-hello', firstHelloTimeout);
-      this.recordPeerNamespaces(peer.deviceId, hello.namespaces);
+      assertValidHello(hello);
+      await this.recordPeerHello(peer.deviceId, hello);
       const direction: SyncDirection = hello.direction ?? 'bidirectional';
       await transport.send({
         type: 'sync-hello',
-        vectorClock: this.eventLog.getClock().toJSON(),
-        ...this.localHelloNamespaces(),
+        ...(await this.localHello()),
       });
 
       const offer = await nextSyncMessage(iterator, 'sync-offer', timeout);
@@ -503,19 +640,19 @@ export class SyncManager extends EventEmitter {
       await transport.send({ type: 'sync-ack', appliedEventIds: applied.ackedIds });
 
       // push 模式只对端发；否则按「对端授权 ∩ 对端订阅 ∩ 本机订阅」裁剪后回供（T2）
-      const allow = await this.resolveOutgoingAllowList(peer, hello.namespaces);
+      const allow = await this.resolveOutgoingAllowList(peer, hello);
       const outgoing = direction === 'push'
         ? []
-        : this.filterEventsForAllow(await this.eventLog.missingEvents(hello.vectorClock), allow);
+        : this.filterEventsForAllow(await this.missingEventsForPeer(peer.deviceId), allow);
       await transport.send({ type: 'sync-offer', events: outgoing });
       const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
-      await this.markEventsSynced(peer.deviceId, ack.appliedEventIds);
+      await this.markEventsSynced(peer.deviceId, ack.appliedEventIds, outgoing);
 
       await nextSyncMessage(iterator, 'sync-done', timeout);
       const finalVectorClock = this.eventLog.getClock().toJSON();
       await transport.send({ type: 'sync-done', finalVectorClock });
 
-      const result = this.buildResult(peer, direction, outgoing.length, applied);
+      const result = this.buildResult(peer, direction, outgoing.length, applied, allow);
       if (snapshotApplied > 0) {
         result.snapshotApplied = snapshotApplied;
       }
@@ -569,7 +706,8 @@ export class SyncManager extends EventEmitter {
         : session.peerId.pubKey;
       const peer: SyncPeer = { deviceId: peerDeviceId, publicKey };
       const initiate = this.deviceId < peerDeviceId;
-      const entry: OnlinePeer = { peerId: session.peerId, peer, initiate };
+      // hello 到达前保守取「不订阅任何分区」，避免过早推送；首次会话即回填
+      const entry: OnlinePeer = { peerId: session.peerId, peer, initiate, subscribeAll: false, namespaces: [] };
       this.onlinePeers.set(session.peerId.id, entry);
 
       if (!this.autoSync) {
@@ -624,47 +762,90 @@ export class SyncManager extends EventEmitter {
     }
   }
 
-  /** 对端 hello 声明的订阅回填到在线登记（供 push-on-write 定向判断） */
-  private recordPeerNamespaces(peerDeviceId: string, namespaces?: string[]): void {
-    const normalized = namespaces === undefined ? undefined : normalizeNamespaceList(namespaces);
-    const value = normalized && normalized.length > 0 ? normalized : undefined;
+  /** 记录对端 hello：订阅声明回填在线登记 + 分区水位并入 peerWatermarks（持久化） */
+  private async recordPeerHello(
+    peerDeviceId: string,
+    hello: Extract<SyncMessage, { type: 'sync-hello' }>,
+  ): Promise<void> {
+    const namespaces = normalizeNamespaceList(hello.namespaces);
     for (const entry of this.onlinePeers.values()) {
       if (entry.peer.deviceId === peerDeviceId) {
-        entry.namespaces = value;
+        entry.subscribeAll = hello.subscribeAll;
+        entry.namespaces = namespaces;
       }
     }
+    await this.ensureSyncStateLoaded();
+    const existing = this.peerWatermarks.get(peerDeviceId) ?? {};
+    // assertValidHello 已保证 namespaceClocks 为对象，无需再兜底
+    this.peerWatermarks.set(peerDeviceId, mergeNamespaceClocks(existing, hello.namespaceClocks));
+    await this.persistSyncState();
   }
 
-  /** 本机 hello 携带的订阅字段：未配置/空 = 不声明（旧对端行为不变） */
-  private localHelloNamespaces(): { namespaces?: string[] } {
-    return this.subscriptionNamespaces.length > 0
-      ? { namespaces: [...this.subscriptionNamespaces] }
-      : {};
+  /** 本机 hello：订阅声明（subscribeAll + namespaces）+ 分区水位 */
+  private async localHello(): Promise<{
+    subscribeAll: boolean;
+    namespaces: string[];
+    namespaceClocks: NamespaceClocks;
+  }> {
+    return {
+      // 本机订阅未配置/空 = 参与全部（保留语义）；否则为显式清单
+      subscribeAll: this.subscriptionNamespaces.length === 0,
+      namespaces: [...this.subscriptionNamespaces],
+      namespaceClocks: await this.buildLocalNamespaceClocks(),
+    };
+  }
+
+  /** 本机分区水位 = 事件日志按分区推导值 ∪ 快照推进值（后者无对应事件） */
+  private async buildLocalNamespaceClocks(): Promise<NamespaceClocks> {
+    const derived: NamespaceClocks = {};
+    for (const event of await this.eventLog.listEvents()) {
+      mergeClockInto(derived, normalizeNamespace(event.namespace), event.vectorClock ?? {});
+    }
+    return mergeNamespaceClocks(derived, this.localSnapshotClocks);
   }
 
   /**
-   * 供给端裁剪链：本机订阅 ∩ 对端声明订阅 ∩ 对端被授权集合。
-   * 三者任一「未声明」= 不过滤；任一为空白名单 = 不供任何分区。
+   * 供给端裁剪链（默认拒绝）：
+   * 对端授权（必填，`[]` = 拒绝）∩ 对端订阅声明 ∩ 本机订阅声明。
+   * 授权槽永不为 null，因此结果一定是具体白名单——未授权对端解析为 `[]`。
    */
   private async resolveOutgoingAllowList(
     peer: SyncPeer,
-    remoteNamespaces?: string[],
-  ): Promise<NamespaceAllowList> {
-    const declared = remoteNamespaces === undefined ? null : normalizeNamespaceList(remoteNamespaces);
-    const declaredAllow = declared && declared.length > 0 ? declared : null;
-    const peerAuthorized = this.namespacePolicy
-      ? await this.namespacePolicy.getAuthorizedNamespaces(peer.deviceId)
-      : null;
-    return intersectNamespaceAllowLists(
-      subscriptionToAllowList(this.subscriptionNamespaces),
-      declaredAllow,
-      peerAuthorized,
+    hello: Extract<SyncMessage, { type: 'sync-hello' }>,
+  ): Promise<string[]> {
+    const peerAuthorized = await this.namespacePolicy.getAuthorizedNamespaces(peer.deviceId);
+    return (
+      intersectNamespaceAllowLists(
+        peerAuthorized,
+        declarationToAllowList(hello.subscribeAll, hello.namespaces),
+        declarationToAllowList(this.subscriptionNamespaces.length === 0, this.subscriptionNamespaces),
+      ) ?? []
     );
   }
 
-  private filterEventsForAllow(events: Event[], allow: NamespaceAllowList): Event[] {
-    if (allow === null) return events;
+  private filterEventsForAllow(events: Event[], allow: string[]): Event[] {
     return events.filter((event) => isNamespaceAllowed(event.namespace, allow));
+  }
+
+  /**
+   * 按 per-(对端, 分区) 水位计算缺失集：只在同一分区内比较该作者的计数。
+   * **不用**对端累积全局时钟——那会把「因未授权被跳过的分区」误判为已同步，
+   * 导致扩权后也无法回补。
+   */
+  private async missingEventsForPeer(peerDeviceId: string): Promise<Event[]> {
+    const watermarks = this.peerWatermarks.get(peerDeviceId) ?? {};
+    const all = await this.eventLog.listEvents();
+    const missing = all.filter((event) => {
+      const remoteHas = namespaceClockOf(watermarks, normalizeNamespace(event.namespace))[event.author] ?? 0;
+      return (event.vectorClock?.[event.author] ?? 0) > remoteHas;
+    });
+    // 因果序：作者计数器为主键，时间戳与 ID 兜底，保证确定性
+    return missing.sort((a, b) => {
+      const counterDiff = (a.vectorClock?.[a.author] ?? 0) - (b.vectorClock?.[b.author] ?? 0);
+      if (counterDiff !== 0) return counterDiff;
+      if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
+      return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+    });
   }
 
   // ---------- 内部 ----------
@@ -746,33 +927,29 @@ export class SyncManager extends EventEmitter {
 
   /**
    * 构造物化快照（G4）：按 allow list 裁剪节点/边（未授权分区不进快照，
-   * 堵住「空时钟走快照通道绕过授权」的洞）。
+   * 堵住「空水位走快照通道绕过授权」的洞），并按分区给出水位。
    *
-   * 时钟处理：裁剪时用「被允许事件」的向量时钟合并值，而不是本机全量时钟——
-   * 否则对端会把未收到的分区也记为已同步，之后即便授权变化也永久缺失。
+   * 分区水位只统计**被允许分区**的事件时钟合并值，绝不用本机全量时钟——
+   * 否则对端会把未收到的分区记为已同步，之后即便扩权也永久缺失。
    */
-  private async buildSnapshot(allow: NamespaceAllowList): Promise<SyncSnapshot> {
-    const nodes = await this.storage.listNodes();
-    const edges = await this.storage.listEdges();
-    if (allow === null) {
-      return { nodes, edges, clock: this.eventLog.getClock().toJSON() };
-    }
-    const clock = new VectorClock();
+  private async buildSnapshot(allow: string[]): Promise<SyncSnapshot> {
+    const nodes = (await this.storage.listNodes()).filter((node) =>
+      isNamespaceAllowed(node.namespace, allow),
+    );
+    const edges = (await this.storage.listEdges()).filter((edge) =>
+      isNamespaceAllowed(edge.namespace, allow),
+    );
+    const namespaceClocks: NamespaceClocks = {};
     for (const event of await this.eventLog.listEvents()) {
-      if (isNamespaceAllowed(event.namespace, allow)) {
-        clock.merge(VectorClock.fromJSON(event.vectorClock ?? {}));
-      }
+      if (!isNamespaceAllowed(event.namespace, allow)) continue;
+      mergeClockInto(namespaceClocks, normalizeNamespace(event.namespace), event.vectorClock ?? {});
     }
-    return {
-      nodes: nodes.filter((node) => isNamespaceAllowed(node.namespace, allow)),
-      edges: edges.filter((edge) => isNamespaceAllowed(edge.namespace, allow)),
-      clock: clock.toJSON(),
-      namespaces: [...allow],
-    };
+    return { nodes, edges, namespaceClocks, namespaces: [...allow] };
   }
 
   /**
-   * 采纳快照：物化节点/边写入存储，时钟合并推进，返回实体数。
+   * 采纳快照：物化节点/边写入存储，分区水位合并推进（供本机 hello 上报，
+   * 使发送方不再重发已覆盖分区），返回实体数。
    * 快照仅来自已认证对端；不做逐事件验签（fast-start 取舍，见 protocol.ts）。
    */
   private async applySnapshot(snapshot: SyncSnapshot): Promise<number> {
@@ -782,7 +959,16 @@ export class SyncManager extends EventEmitter {
     for (const edge of snapshot.edges) {
       await this.storage.putEdge(edge);
     }
-    this.eventLog.getClock().merge(VectorClock.fromJSON(snapshot.clock));
+    const clocks = snapshot.namespaceClocks ?? {};
+    for (const [ns, clock] of Object.entries(clocks)) {
+      mergeClockInto(this.localSnapshotClocks, ns, clock);
+    }
+    // 全局时钟合流：sync-done 与既有「双端时钟一致」断言依赖
+    const global = this.eventLog.getClock();
+    for (const clock of Object.values(clocks)) {
+      global.merge(VectorClock.fromJSON(clock));
+    }
+    await this.persistSyncState();
     return snapshot.nodes.length + snapshot.edges.length;
   }
 
@@ -791,6 +977,7 @@ export class SyncManager extends EventEmitter {
     direction: SyncDirection,
     sent: number,
     applied: AppliedOffer,
+    allow: string[],
   ): SyncResult {
     return {
       peerDeviceId: peer.deviceId,
@@ -803,6 +990,8 @@ export class SyncManager extends EventEmitter {
       finalVectorClock: this.eventLog.getClock().toJSON(),
       // 变更可订阅：复用 ApplyResult.ackedIds（不新造来源），快照路径为空
       appliedEventIds: [...applied.ackedIds],
+      // 拒绝不静默：allow 解析为 [] 时明确指出「未授权任何分区」
+      denied: allow.length === 0,
     };
   }
 

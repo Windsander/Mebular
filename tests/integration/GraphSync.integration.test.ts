@@ -26,6 +26,7 @@ import {
   waitFor,
   type TestIdentity,
 } from '../p2p/helpers.js';
+import { grant } from '../helpers/namespace.js';
 
 /** 共享 mDNS 总线（与 P2PNetwork 集成测试同款模拟） */
 class MockBonjourBus {
@@ -106,7 +107,7 @@ async function createSyncDevice(
 
   let syncManager: SyncManager | null = null;
   if (options.attach ?? true) {
-    syncManager = new SyncManager({ eventLog, storage, deviceId });
+    syncManager = new SyncManager({ eventLog, storage, deviceId, namespacePolicy: grant() });
     syncManager.attachToNode(node);
   }
 
@@ -222,6 +223,7 @@ describe('GraphSync Integration', () => {
         eventLog: restoredLog,
         storage: reopened,
         deviceId: 'device-A',
+        namespacePolicy: grant(),
       });
       syncManager.attachToNode(deviceA.node);
       deviceA = { ...deviceA, storage: reopened, eventLog: restoredLog, store, syncManager };
@@ -286,7 +288,13 @@ describe('GraphSync Integration', () => {
     const responderExpectation = expect(responderPromise).rejects.toThrow(/signature verification failed/);
 
     const iterator = hostile.receive()[Symbol.asyncIterator]();
-    await hostile.send({ type: 'sync-hello', vectorClock: {}, direction: 'bidirectional' });
+    await hostile.send({
+      type: 'sync-hello',
+      direction: 'bidirectional',
+      subscribeAll: true,
+      namespaces: [],
+      namespaceClocks: {},
+    });
     await iterator.next(); // B 的 hello
     await hostile.send({ type: 'sync-offer', events: [forgedEvent] });
 

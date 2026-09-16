@@ -152,19 +152,20 @@ describe('静态加密（at-rest encryption, G1）', () => {
     const pathB = join(dir, 'b.jsonl');
     const masterKey = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
 
+    // 默认拒绝：显式授权对端（用例数据都在 default 分区）
     const a = new Mebular({
       storagePath: pathA,
       deviceId: 'device-A',
       encryption: { level: 'user', ...masterKey },
       network: { enabled: true, provider: hub },
-      sync: { autoSync: true },
+      sync: { autoSync: true, peerNamespacePolicy: { 'device-B': ['default'] } },
     });
     const b = new Mebular({
       storagePath: pathB,
       deviceId: 'device-B',
       encryption: { level: 'user', ...masterKey },
       network: { enabled: true, provider: hub },
-      sync: { autoSync: true },
+      sync: { autoSync: true, peerNamespacePolicy: { 'device-A': ['default'] } },
     });
     await a.initialize();
     await b.initialize();

@@ -16,14 +16,15 @@
 
 import type { Event } from '../types/event.js';
 import type { Node, Edge } from '../types/index.js';
+import type { NamespaceClocks } from '../core/namespace.js';
 import type { SecureChannel } from '../p2p/secure/SecureChannelImpl.js';
 import { ErrorCodes, SyncError } from '../errors.js';
 
 export type SyncDirection = 'push' | 'pull' | 'bidirectional';
 
 /**
- * 初始同步快照（G4）：大图下用「物化状态 + 时钟」替代全量事件重放。
- * 仅用于**空时钟**的新对端；应用后时钟推进，后续走增量事件。
+ * 初始同步快照（G4）：大图下用「物化状态 + 水位」替代全量事件重放。
+ * 仅用于**空分区水位**的新对端；应用后分区水位推进，后续走增量事件。
  *
  * 信任边界：快照只在已认证（用户证书验签）的对端会话上使用；
  * 接收方直接采纳物化节点/边（不再逐事件验签）——这是 fast-start 的
@@ -32,26 +33,68 @@ export type SyncDirection = 'push' | 'pull' | 'bidirectional';
 export interface SyncSnapshot {
   nodes: Node[];
   edges: Edge[];
-  clock: Record<string, number>;
-  /** 本快照覆盖的 namespace（裁剪后的组织维度标记；缺失视为 'default'） */
-  namespaces?: string[];
+  /**
+   * 每个被允许分区的合并时钟（分区水位）：接收方据此推进自己的分区水位，
+   * 使发送方不会因「快照未带事件」而重发已覆盖分区。**只含被允许的分区**，
+   * 绝不用本机累积时钟把未发送的分区标记为已同步。
+   */
+  namespaceClocks: NamespaceClocks;
+  /** 本快照覆盖的 namespace（裁剪后的组织维度标记） */
+  namespaces: string[];
 }
 
 export type SyncMessage =
   | {
       type: 'sync-hello';
-      vectorClock: Record<string, number>;
       direction?: SyncDirection;
       /**
-       * 本机订阅的 namespace（可选）：请求方声明「我只订阅这些分区」，
-       * 供数据持有者裁剪 offer。未声明（旧版本）= 不过滤，行为保持现状。
+       * 订阅声明（必填、无歧义）：
+       * - `true` = 参与全部分区（含将来新增），此时 `namespaces` 被忽略；
+       * - `false` = 只订阅 `namespaces` 中的显式清单（`[]` = 不订阅任何分区）。
        */
-      namespaces?: string[];
+      subscribeAll: boolean;
+      /** 显式订阅清单；subscribeAll=true 时忽略（但仍须为字符串数组） */
+      namespaces: string[];
+      /** 本机收到的每个分区的合并向量时钟（分区水位，供对端做缺失判定） */
+      namespaceClocks: NamespaceClocks;
     }
   | { type: 'sync-offer'; events: Event[]; snapshot?: SyncSnapshot }
   | { type: 'sync-ack'; appliedEventIds: string[] }
   | { type: 'sync-done'; finalVectorClock: Record<string, number> }
   | { type: 'sync-error'; message: string };
+
+/**
+ * 校验 hello 的订阅声明与分区水位：**必填且类型正确**，否则视为协议违例。
+ * 缺失/类型错不再被解释为「不过滤」——配合默认拒绝，订阅声明必须无歧义。
+ */
+export function assertValidHello(hello: Extract<SyncMessage, { type: 'sync-hello' }>): void {
+  const violation = (detail: string): never => {
+    throw new SyncError(
+      `Protocol violation: sync-hello ${detail}`,
+      ErrorCodes.SYNC_PROTOCOL_VIOLATION,
+    );
+  };
+  if (typeof hello.subscribeAll !== 'boolean') {
+    violation('subscribeAll 必须为 boolean');
+  }
+  if (!Array.isArray(hello.namespaces) || hello.namespaces.some((ns) => typeof ns !== 'string')) {
+    violation('namespaces 必须为字符串数组');
+  }
+  const clocks = hello.namespaceClocks;
+  if (clocks === null || typeof clocks !== 'object' || Array.isArray(clocks)) {
+    violation('namespaceClocks 必须为对象');
+  }
+  for (const [ns, clock] of Object.entries(clocks as Record<string, unknown>)) {
+    if (clock === null || typeof clock !== 'object' || Array.isArray(clock)) {
+      violation(`namespaceClocks.${ns} 必须为对象`);
+    }
+    for (const [author, value] of Object.entries(clock as Record<string, unknown>)) {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+        violation(`namespaceClocks.${ns}.${author} 必须为非负有限数`);
+      }
+    }
+  }
+}
 
 /** 同步消息的传输抽象：SecureChannel 之上的一层薄封装，便于测试替换 */
 export interface SyncTransport {

@@ -21,6 +21,7 @@ import {
   issueCertificate,
   masterPublicKeyBytes,
 } from '../p2p/helpers.js';
+import { grant } from '../helpers/namespace.js';
 
 interface End {
   deviceId: string;
@@ -90,7 +91,7 @@ describe('syncedByPeer 持久化（6.4）', () => {
       version: number;
       peers: Record<string, string[]>;
     };
-    expect(parsed.version).toBe(1);
+    expect(parsed.version).toBe(2); // v2：ack 集合 + per-(peer, ns) 水位
     expect(parsed.peers['dev-b']).toEqual(['evt-1', 'evt-2']); // 排序输出确定
 
     // 幂等合并：同一对端追加确认
@@ -137,6 +138,7 @@ describe('syncedByPeer 持久化（6.4）', () => {
         storage: end.storage,
         deviceId: end.deviceId,
         userMasterPublicKey: masterPub,
+        namespacePolicy: grant(), // 默认拒绝：显式授权对端
         ...(path !== undefined ? { syncStatePath: path } : {}),
       });
 
@@ -175,6 +177,79 @@ describe('syncedByPeer 持久化（6.4）', () => {
       syncStatePath: badShape,
     });
     await expect(sm2.getPendingEvents()).rejects.toThrow('不是字符串数组');
+  });
+
+  it('v2 状态文件：分区水位形状非法 → 诚实 STORAGE_READ_FAILED', async () => {
+    const end = await createEnd('dev-a', master);
+    const mk = (path: string): SyncManager =>
+      new SyncManager({
+        eventLog: end.eventLog,
+        storage: end.storage,
+        deviceId: end.deviceId,
+        syncStatePath: path,
+      });
+
+    const topNotObject = join(dir, 'wm-top.json');
+    await writeFile(topNotObject, JSON.stringify({ version: 2, peers: {}, peerWatermarks: 42 }), 'utf-8');
+    await expect(mk(topNotObject).getPendingEvents()).rejects.toThrow('peerWatermarks 形状非法');
+
+    const notObject = join(dir, 'wm-not-object.json');
+    await writeFile(notObject, JSON.stringify({ version: 2, peers: {}, peerWatermarks: { 'dev-b': 42 } }), 'utf-8');
+    await expect(mk(notObject).getPendingEvents()).rejects.toThrow('peerWatermarks.dev-b');
+
+    const clockNotObject = join(dir, 'wm-clock.json');
+    await writeFile(
+      clockNotObject,
+      JSON.stringify({ version: 2, peers: {}, peerWatermarks: { 'dev-b': { nsA: 1 } } }),
+      'utf-8',
+    );
+    await expect(mk(clockNotObject).getPendingEvents()).rejects.toThrow('nsA 形状非法');
+
+    const countNotNumber = join(dir, 'wm-count.json');
+    await writeFile(
+      countNotNumber,
+      JSON.stringify({ version: 2, peers: {}, peerWatermarks: { 'dev-b': { nsA: { a: 'x' } } } }),
+      'utf-8',
+    );
+    await expect(mk(countNotNumber).getPendingEvents()).rejects.toThrow('非数值');
+
+    const localTop = join(dir, 'wm-local-top.json');
+    await writeFile(localTop, JSON.stringify({ version: 2, peers: {}, localSnapshotClocks: 7 }), 'utf-8');
+    await expect(mk(localTop).getPendingEvents()).rejects.toThrow('localSnapshotClocks 形状非法');
+
+    const localBad = join(dir, 'wm-local.json');
+    await writeFile(localBad, JSON.stringify({ version: 2, peers: {}, localSnapshotClocks: { nsA: 1 } }), 'utf-8');
+    await expect(mk(localBad).getPendingEvents()).rejects.toThrow('localSnapshotClocks.nsA 形状非法');
+  });
+
+  it('v2 状态文件：分区水位可往返读回并在再持久化时保留', async () => {
+    const path = join(dir, 'wm-roundtrip.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 2,
+        peers: { 'dev-b': [] },
+        peerWatermarks: { 'dev-b': { nsA: { 'dev-c': 3 } } },
+        localSnapshotClocks: { nsB: { 'dev-b': 1 } },
+      }),
+      'utf-8',
+    );
+    const end = await createEnd('dev-a', master);
+    const sm = new SyncManager({
+      eventLog: end.eventLog,
+      storage: end.storage,
+      deviceId: end.deviceId,
+      syncStatePath: path,
+    });
+
+    await sm.getPendingEvents();
+    await sm.markEventsSynced('dev-b', []);
+    const saved = JSON.parse(await readFile(path, 'utf-8')) as {
+      peerWatermarks: Record<string, unknown>;
+      localSnapshotClocks: Record<string, unknown>;
+    };
+    expect(saved.peerWatermarks['dev-b']).toEqual({ nsA: { 'dev-c': 3 } });
+    expect(saved.localSnapshotClocks).toEqual({ nsB: { 'dev-b': 1 } });
   });
 
   it('无 syncStatePath：纯内存行为不变，不落任何文件', async () => {

@@ -20,6 +20,7 @@ import {
   issueCertificate,
   masterPublicKeyBytes,
 } from '../p2p/helpers.js';
+import { grant } from '../helpers/namespace.js';
 
 interface TrustDevice {
   deviceId: string;
@@ -54,6 +55,7 @@ async function createTrustDevice(
     deviceId,
     userMasterPublicKey:
       options.withMasterKey === false ? undefined : await masterPublicKeyBytes(master),
+    namespacePolicy: grant(), // 默认拒绝：显式授权对端（用例只关心验签）
   });
   return {
     deviceId,

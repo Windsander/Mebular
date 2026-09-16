@@ -120,9 +120,10 @@ export interface MebularConfig {
     /** 本机订阅的 namespace：空/缺省 = 全部（保持现状语义） */
     namespaces?: string[];
     /**
-     * 对端授权策略（配置驱动）：peerDeviceId → 允许接收的 namespace。
-     * 未列出 = 未声明授权（不过滤，向后兼容旧对端）。该接缝为将来
-     * 「授权来自图上的 grant 记忆」预留实现位（本期不实现）。
+     * 对端授权策略（配置驱动，**默认拒绝**）：peerDeviceId → 允许接收的
+     * namespace 白名单。未列出的对端拿不到任何分区，必须显式写入才能同步；
+     * 空数组 = 明确不允许。该接缝为将来「授权来自图上的 grant 记忆」预留
+     * 实现位（本期不实现）。
      */
     peerNamespacePolicy?: Record<string, string[]>;
     /** 本地写入后向订阅对端即时推送（默认关闭，保持既有行为） */
@@ -254,9 +255,8 @@ export class Mebular {
         syncTimeout: this.config.sync?.syncTimeout,
         snapshotThreshold: this.config.sync?.snapshotThreshold,
         subscriptionNamespaces: this.config.sync?.namespaces,
-        namespacePolicy: this.config.sync?.peerNamespacePolicy
-          ? new ConfigNamespacePolicy(this.config.sync.peerNamespacePolicy)
-          : undefined,
+        // 默认拒绝：即使未配置 peerNamespacePolicy，也用一个空策略拒绝所有对端
+        namespacePolicy: new ConfigNamespacePolicy(this.config.sync?.peerNamespacePolicy ?? {}),
         pushOnWrite: this.config.sync?.pushOnWrite,
         pushOnWriteThrottleMs: this.config.sync?.pushOnWriteThrottleMs,
         userMasterPublicKey: this.identity.getUserMasterPublicKey() ?? undefined,

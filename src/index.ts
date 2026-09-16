@@ -41,9 +41,14 @@ export {
   matchesNamespace,
   intersectNamespaceAllowLists,
   subscriptionToAllowList,
+  declarationToAllowList,
   isNamespaceAllowed,
+  mergeClockInto,
+  mergeNamespaceClocks,
+  namespaceClockOf,
   type NamespaceFilter,
   type NamespaceAllowList,
+  type NamespaceClocks,
 } from './core/namespace.js';
 export { MemoryStorage } from './storage/MemoryStorage.js';
 export { JsonFileStorage, type JsonFileStorageOptions } from './storage/JsonFileStorage.js';

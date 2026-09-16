@@ -44,7 +44,8 @@ describe('namespace 配置装配', () => {
 
   it('sync.namespaces：对端订阅只影响收到的分区', async () => {
     const hub = new InMemoryHub();
-    const a = makeFacade('device-A', hub);
+    // 默认拒绝：A 必须显式授权 B；B 再按自己的订阅声明裁剪
+    const a = makeFacade('device-A', hub, { peerNamespacePolicy: { 'device-B': ['nsA', 'nsB'] } });
     const b = makeFacade('device-B', hub, { namespaces: ['nsA'] });
     await a.initialize();
     await b.initialize();
@@ -70,6 +71,35 @@ describe('namespace 配置装配', () => {
     await syncBetween(a, b);
 
     expect((await b.graph.listNodes()).map((n) => n.namespace)).toEqual(['nsA']);
+    await a.shutdown();
+    await b.shutdown();
+  });
+
+  it('同版本两端在显式授权 + 显式订阅下正常同步（端到端互通）', async () => {
+    const hub = new InMemoryHub();
+    const a = makeFacade('device-A', hub, {
+      namespaces: ['nsA', 'nsB'],
+      peerNamespacePolicy: { 'device-B': ['nsA', 'nsB'] },
+    });
+    const b = makeFacade('device-B', hub, {
+      namespaces: ['nsA', 'nsB'],
+      peerNamespacePolicy: { 'device-A': ['nsA', 'nsB'] },
+    });
+    await a.initialize();
+    await b.initialize();
+    await a.graph.createNode('fact', { text: 'a-nsA' }, [], { namespace: 'nsA' });
+    await a.graph.createNode('fact', { text: 'a-nsB' }, [], { namespace: 'nsB' });
+    await b.graph.createNode('fact', { text: 'b-nsA' }, [], { namespace: 'nsA' });
+
+    const [resultA, resultB] = await syncBetween(a, b);
+
+    const bNamespaces = (await b.graph.listNodes()).map((n) => n.namespace).sort();
+    const aNamespaces = (await a.graph.listNodes()).map((n) => n.namespace).sort();
+    expect(bNamespaces).toEqual(['nsA', 'nsA', 'nsB']);
+    expect(aNamespaces).toEqual(bNamespaces);
+    expect(resultA.denied).toBe(false);
+    expect(resultB.denied).toBe(false);
+
     await a.shutdown();
     await b.shutdown();
   });

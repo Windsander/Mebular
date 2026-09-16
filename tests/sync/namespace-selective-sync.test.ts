@@ -1,9 +1,9 @@
-// 选择性同步（T2：供给端强制）与变更可观测性。
+// 选择性同步（默认拒绝：供给端强制）与变更可观测性。
 //
-// 覆盖验收 2 / 3：
+// 覆盖：
 // - 对端只订阅 A 分区 → 只收到 A 分区事件；未授权分区不进 offer；
-// - 快照路径同样被裁剪（空时钟 + 未授权分区绕不过授权）；
-// - 对端未声明订阅时行为与改动前一致（全量）；
+// - 快照路径同样被裁剪（空水位 + 未授权分区绕不过授权）；
+// - 默认拒绝：未列出对端 → 0 分区 + sync-completed.denied 信号（不静默）；
 // - sync-completed.appliedEventIds 与实际应用集合一致、events-applied 触发。
 
 import { describe, it, expect } from '@jest/globals';
@@ -14,6 +14,7 @@ import { SyncManager, type SyncPeer, type SyncResult } from '../../src/sync/sync
 import { applyRemoteEvent } from '../../src/sync/apply.js';
 import { ConfigNamespacePolicy, type NamespaceGrantPolicy } from '../../src/sync/namespacePolicy.js';
 import type { Event } from '../../src/types/event.js';
+import { grant } from '../helpers/namespace.js';
 import { SecureChannelSyncTransport } from '../../src/sync/protocol.js';
 import { SecureChannelImpl } from '../../src/p2p/secure/SecureChannelImpl.js';
 import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
@@ -48,8 +49,9 @@ async function createDevice(deviceId: string, options: DeviceOptions = {}): Prom
     eventLog,
     storage,
     deviceId,
+    // 默认拒绝：未显式给策略时授予本文件用到的分区（授权边界用例自行覆盖）
+    namespacePolicy: options.namespacePolicy ?? grant('default', 'nsA', 'nsB'),
     ...(options.subscriptionNamespaces ? { subscriptionNamespaces: options.subscriptionNamespaces } : {}),
-    ...(options.namespacePolicy ? { namespacePolicy: options.namespacePolicy } : {}),
     ...(options.snapshotThreshold !== undefined ? { snapshotThreshold: options.snapshotThreshold } : {}),
   });
   const peerId: PeerId = { multihash: publicKey, pubKey: publicKey, id: deviceId };
@@ -143,7 +145,7 @@ describe('选择性同步（供给端强制）', () => {
     expect(await namespacesOn(b)).toEqual(['nsA', 'nsA', 'nsA']);
   });
 
-  it('对端未声明订阅（旧版本）：行为与改动前一致（全量同步）', async () => {
+  it('对端声明 subscribeAll=true：接收全部已授权分区', async () => {
     const a = await createDevice('device-A');
     const b = await createDevice('device-B');
 
@@ -168,6 +170,22 @@ describe('选择性同步（供给端强制）', () => {
     const [resultA] = await runSync(a, b);
 
     expect(resultA.sentEvents).toBe(0);
+    expect(resultA.denied).toBe(true); // 拒绝不再静默
+    expect(await namespacesOn(b)).toEqual([]);
+  });
+
+  it('默认拒绝：未列出任何对端 → 0 分区 + denied 信号（不是「碰巧没数据」）', async () => {
+    const a = await createDevice('device-A', { namespacePolicy: new ConfigNamespacePolicy() });
+    const b = await createDevice('device-B');
+
+    await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
+    await a.store.createNode('fact', { text: 'b1' }, [], { namespace: 'nsB' });
+
+    const [resultA, resultB] = await runSync(a, b);
+
+    expect(resultA.sentEvents).toBe(0);
+    expect(resultA.denied).toBe(true);
+    expect(resultB.receivedEvents).toBe(0);
     expect(await namespacesOn(b)).toEqual([]);
   });
 

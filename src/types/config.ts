@@ -37,9 +37,10 @@ export interface SyncConfig {
    */
   namespaces?: string[];
   /**
-   * 对端授权策略（配置驱动）：peerDeviceId → 允许接收的 namespace。
-   * 未列出的对端 = 未声明授权（不过滤，向后兼容旧对端）。
-   * 该接缝为将来「授权来自图上的 grant 记忆」预留实现位（本期不实现）。
+   * 对端授权策略（配置驱动，**默认拒绝**）：peerDeviceId → 允许接收的
+   * namespace 白名单。未列出的对端拿不到任何分区，必须显式写入才能同步；
+   * 空数组 = 明确不允许。该接缝为将来「授权来自图上的 grant 记忆」预留
+   * 实现位（本期不实现）。
    */
   peerNamespacePolicy?: Record<string, string[]>;
   /** 本地写入后向订阅对端即时推送（默认关闭，保持既有行为） */

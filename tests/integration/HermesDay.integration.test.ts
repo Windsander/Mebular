@@ -78,7 +78,11 @@ describe('Hermes 的一天（端到端）', () => {
       deviceId,
       encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
       network: { enabled: true, provider: hub },
-      sync: { autoSync: true },
+      sync: {
+        autoSync: true,
+        // 默认拒绝：显式授权对端（用例数据都在 default 分区）
+        peerNamespacePolicy: { 'device-A': ['default'], 'device-B': ['default'] },
+      },
     });
     facades.push(m);
     return m;

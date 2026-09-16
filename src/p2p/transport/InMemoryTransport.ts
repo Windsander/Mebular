@@ -110,7 +110,9 @@ export class InMemoryConnection implements Connection, MutableAuthenticationConn
     this.peerActivityHook = () => {
       peer.touchActivity();
     };
-    this.onPeerClose = () => {
+    // 对端关闭 → 本端随之标记关闭。回调必须挂在**对端**上并作用于本端：
+    // 旧实现挂在自己身上、闭包也操作自己，导致一方关闭后另一方永远停在 connected（F4）
+    peer.onPeerClose = () => {
       if (this.currentState !== 'closed') {
         this.currentState = 'closed';
         this.inbox.close();

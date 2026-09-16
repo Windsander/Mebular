@@ -187,7 +187,15 @@ export class AuthenticationHandshake extends EventEmitter {
     }
 
     const existing = this.sessions.get(connection.peerId.id);
-    if (existing && existing.state === 'authenticated') {
+    // 仅当复用的是同一条「活着且已认证」的连接时才跳过握手；
+    // 旧会话残留 + 新连接对象必须重走握手，否则对端会一直等 auth-hello（F4）
+    if (
+      existing &&
+      existing.state === 'authenticated' &&
+      connection.isAuthenticated() &&
+      connection.state !== 'closed' &&
+      connection.state !== 'disconnecting'
+    ) {
       return existing;
     }
 

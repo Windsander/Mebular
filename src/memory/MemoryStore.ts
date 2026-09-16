@@ -6,6 +6,7 @@
 
 import type { GraphStore } from '../core/GraphStore.js';
 import type { Node, NodeFilter } from '../types/index.js';
+import type { NamespaceFilter } from '../core/namespace.js';
 import { ValidationError } from '../errors.js';
 import type { VectorIndex } from './VectorIndex.js';
 import { nodeMatchesKeyword } from './text.js';
@@ -35,6 +36,8 @@ export interface MemoryListFilter {
   createdAfter?: number;
   createdBefore?: number;
   includeDeleted?: boolean;
+  /** 单分区或分区列表；缺省不过滤 */
+  namespace?: NamespaceFilter;
   limit?: number;
 }
 
@@ -72,7 +75,9 @@ export class MemoryStore {
     };
     if (input.description !== undefined) content.description = input.description;
     if (input.properties !== undefined) content.properties = input.properties;
-    const node = await this.graph.createNode('entity', content, input.labels);
+    const node = await this.graph.createNode('entity', content, input.labels, {
+      ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
+    });
     if (input.tags?.length) {
       for (const tag of input.tags) {
         await this.graph.addTag(node.id, tag);
@@ -102,7 +107,11 @@ export class MemoryStore {
     if (input.confidence !== undefined) content.confidence = input.confidence;
     if (input.source !== undefined) content.source = input.source;
 
-    const node = await this.graph.createNode('fact', content, input.labels, { validFrom, validTo });
+    const node = await this.graph.createNode('fact', content, input.labels, {
+      validFrom,
+      validTo,
+      ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
+    });
     if (input.tags?.length) {
       for (const tag of input.tags) {
         await this.graph.addTag(node.id, tag);
@@ -125,7 +134,9 @@ export class MemoryStore {
     if (input.startTime !== undefined) content.startTime = input.startTime;
     if (input.endTime !== undefined) content.endTime = input.endTime;
     if (input.context !== undefined) content.context = input.context;
-    const node = await this.graph.createNode('episode', content, input.labels);
+    const node = await this.graph.createNode('episode', content, input.labels, {
+      ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
+    });
     if (input.tags?.length) {
       for (const tag of input.tags) {
         await this.graph.addTag(node.id, tag);
@@ -148,7 +159,9 @@ export class MemoryStore {
     if (input.toolReferences !== undefined) content.toolReferences = input.toolReferences;
     if (input.prerequisites !== undefined) content.prerequisites = input.prerequisites;
     if (input.relatedEntities !== undefined) content.relatedEntities = input.relatedEntities;
-    const node = await this.graph.createNode('skill', content, input.labels);
+    const node = await this.graph.createNode('skill', content, input.labels, {
+      ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
+    });
     if (input.tags?.length) {
       for (const tag of input.tags) {
         await this.graph.addTag(node.id, tag);
@@ -164,7 +177,9 @@ export class MemoryStore {
     }
     const content: MetaContent = { metaType: input.metaType, name: input.name };
     if (input.value !== undefined) content.value = input.value;
-    const node = await this.graph.createNode('meta', content, input.labels);
+    const node = await this.graph.createNode('meta', content, input.labels, {
+      ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
+    });
     if (input.tags?.length) {
       for (const tag of input.tags) {
         await this.graph.addTag(node.id, tag);
@@ -200,6 +215,9 @@ export class MemoryStore {
     const nodeFilter: NodeFilter = { type };
     if (filter.tags?.length) {
       nodeFilter.tags = filter.tags;
+    }
+    if (filter.namespace !== undefined) {
+      nodeFilter.namespace = filter.namespace;
     }
     if (filter.limit !== undefined) {
       nodeFilter.limit = filter.limit;

@@ -21,3 +21,7 @@ export {
   type SyncStatus,
   type SyncManagerOptions,
 } from './syncmgr/SyncManager.js';
+export {
+  ConfigNamespacePolicy,
+  type NamespaceGrantPolicy,
+} from './namespacePolicy.js';

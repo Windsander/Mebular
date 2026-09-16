@@ -35,7 +35,12 @@ describe('G4 初始同步快照', () => {
       deviceId,
       encryption: masterKeys,
       network: { enabled: true, provider: hub },
-      sync: { autoSync: true, ...(snapshotThreshold !== undefined ? { snapshotThreshold } : {}) },
+      sync: {
+        autoSync: true,
+        // 默认拒绝：显式授权对端；用例数据都在 default 分区
+        peerNamespacePolicy: { 'device-A': ['default'], 'device-B': ['default'], 'device-C': ['default'] },
+        ...(snapshotThreshold !== undefined ? { snapshotThreshold } : {}),
+      },
     });
   }
 

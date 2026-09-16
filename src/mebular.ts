@@ -19,6 +19,7 @@ import { JsonFileStorage } from './storage/JsonFileStorage.js';
 import { SqliteStorage } from './storage/SqliteStorage.js';
 import type { StorageAdapter } from './storage/StorageAdapter.js';
 import { SyncManager } from './sync/syncmgr/SyncManager.js';
+import { ConfigNamespacePolicy } from './sync/namespacePolicy.js';
 import {
   IdentityManager,
   type DeviceIdentity,
@@ -116,6 +117,19 @@ export interface MebularConfig {
      * 以物化快照替代全量事件重放。缺省不启用。
      */
     snapshotThreshold?: number;
+    /** 本机订阅的 namespace：空/缺省 = 全部（保持现状语义） */
+    namespaces?: string[];
+    /**
+     * 对端授权策略（配置驱动，**默认拒绝**）：peerDeviceId → 允许接收的
+     * namespace 白名单。未列出的对端拿不到任何分区，必须显式写入才能同步；
+     * 空数组 = 明确不允许。该接缝为将来「授权来自图上的 grant 记忆」预留
+     * 实现位（本期不实现）。
+     */
+    peerNamespacePolicy?: Record<string, string[]>;
+    /** 本地写入后向订阅对端即时推送（默认关闭，保持既有行为） */
+    pushOnWrite?: boolean;
+    /** push-on-write 节流窗口（ms，默认 50） */
+    pushOnWriteThrottleMs?: number;
   };
   /** 语义召回（G2，可选依赖；缺包降级关键词并告警） */
   semantic?: {
@@ -240,6 +254,11 @@ export class Mebular {
         peerWhitelist: this.config.sync?.peerWhitelist,
         syncTimeout: this.config.sync?.syncTimeout,
         snapshotThreshold: this.config.sync?.snapshotThreshold,
+        subscriptionNamespaces: this.config.sync?.namespaces,
+        // 默认拒绝：即使未配置 peerNamespacePolicy，也用一个空策略拒绝所有对端
+        namespacePolicy: new ConfigNamespacePolicy(this.config.sync?.peerNamespacePolicy ?? {}),
+        pushOnWrite: this.config.sync?.pushOnWrite,
+        pushOnWriteThrottleMs: this.config.sync?.pushOnWriteThrottleMs,
         userMasterPublicKey: this.identity.getUserMasterPublicKey() ?? undefined,
         syncStatePath:
           this.config.sync?.syncStatePath ??
@@ -366,6 +385,15 @@ export class Mebular {
 
   get sync(): SyncManager {
     return this.assertReady(this.syncImpl, 'sync');
+  }
+
+  /**
+   * 清空 per-(对端, 分区) 同步水位（省略对端 = 全部）——对端水位被污染时的
+   * **被认可修复路径**：只清水位、不动 per-event ack 集合，方向安全（最多让
+   * 已确认事件冗余重发一次，不会漏发）。
+   */
+  async resetPeerWatermarks(peerDeviceId?: string): Promise<void> {
+    await this.sync.resetPeerWatermarks(peerDeviceId);
   }
 
   /** 网络未启用时为 null */

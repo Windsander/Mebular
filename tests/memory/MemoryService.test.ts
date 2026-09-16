@@ -145,14 +145,20 @@ describe('MemoryService', () => {
       deviceId: 'device-A',
       encryption: masterKeys,
       network: { enabled: true, provider: hub },
-      sync: { autoSync: true },
+      sync: {
+        autoSync: true,
+        peerNamespacePolicy: { 'device-B': ['default'] },
+      },
     });
     const b = new Mebular({
       storagePath: join(dir, 'b.jsonl'),
       deviceId: 'device-B',
       encryption: masterKeys,
       network: { enabled: true, provider: hub },
-      sync: { autoSync: true },
+      sync: {
+        autoSync: true,
+        peerNamespacePolicy: { 'device-A': ['default'] },
+      },
     });
     await a.initialize();
     await b.initialize();

@@ -9,6 +9,7 @@ import { EdgeTypes, type EpisodeNode, type FactNode, type SkillNode } from './ty
 import type { VectorIndex } from './VectorIndex.js';
 import { ValidationError, ErrorCodes, MebularError, SyncError } from '../errors.js';
 import type { Node, TraverseOptions, TraverseResult } from '../types/index.js';
+import { matchesNamespace } from '../core/namespace.js';
 import { computeStateHash } from '../core/stateHash.js';
 import { createBuiltinAdapterRegistry } from '../exchange/index.js';
 import type { AdapterImportReport, AdapterSource } from '../exchange/adapter.js';
@@ -139,25 +140,31 @@ export class MemoryService {
 
     let nodes: Array<{ node: Node; relevance?: number }>;
 
+    const namespace = query.filters?.namespace;
+    const inNamespace = (node: Node): boolean => matchesNamespace(node.namespace, namespace);
+
     if (query.query && this.memory.hasVectorIndex()) {
       const hits = await this.memory.vectorQuery(query.query, query.limit ?? 10);
       const vectorNodes = hits
-        .filter(({ node }) => candidateTypes.includes(node.type))
+        .filter(({ node }) => candidateTypes.includes(node.type) && inNamespace(node))
         .map(({ node, score }) => ({ node, relevance: score }));
       if (vectorNodes.length > 0) {
         nodes = vectorNodes;
       } else {
         // 向量无命中：诚实回退关键词基线（G2-R）
-        const keywordHits = await this.memory.search(query.query, { types: candidateTypes });
+        const keywordHits = await this.memory.search(query.query, { types: candidateTypes, namespace });
         nodes = keywordHits.map((node) => ({ node }));
       }
     } else if (query.query) {
-      const hits = await this.memory.search(query.query, { types: candidateTypes });
+      const hits = await this.memory.search(query.query, { types: candidateTypes, namespace });
       nodes = hits.map((node) => ({ node }));
     } else {
       const collected: Node[] = [];
       for (const type of candidateTypes) {
-        collected.push(...(await this.memory.listByType(type, { includeDeleted: query.includeHistory })));
+        collected.push(...(await this.memory.listByType(type, {
+          includeDeleted: query.includeHistory,
+          ...(namespace !== undefined ? { namespace } : {}),
+        })));
       }
       nodes = collected.map((node) => ({ node }));
     }
@@ -188,6 +195,7 @@ export class MemoryService {
       tags: query.filters?.tags,
       createdAfter: query.filters?.createdAfter,
       createdBefore: query.filters?.createdBefore,
+      namespace: query.filters?.namespace,
     });
     const limited = query.limit !== undefined ? hits.slice(0, query.limit) : hits;
 
@@ -371,6 +379,7 @@ export class MemoryService {
           validFrom,
           validTo,
           tags,
+          namespace: input.metadata?.namespace,
         });
         break;
       case 'preference':
@@ -383,6 +392,7 @@ export class MemoryService {
           validFrom,
           validTo,
           tags: [...(tags ?? []), PREFERENCE_TAG],
+          namespace: input.metadata?.namespace,
         });
         break;
       case 'episode':
@@ -390,6 +400,7 @@ export class MemoryService {
           episodeType: input.metadata?.episodeType ?? 'other',
           content: input.content,
           tags,
+          namespace: input.metadata?.namespace,
         });
         break;
       case 'observation':
@@ -397,6 +408,7 @@ export class MemoryService {
           episodeType: 'observation',
           content: input.content,
           tags,
+          namespace: input.metadata?.namespace,
         });
         break;
       case 'skill':
@@ -405,6 +417,7 @@ export class MemoryService {
           description: input.content,
           category: input.metadata?.category ?? 'general',
           tags,
+          namespace: input.metadata?.namespace,
         });
         break;
       default:
@@ -424,6 +437,9 @@ export class MemoryService {
   private passFilters(node: Node, query: MemoryQuery): boolean {
     const filters = query.filters;
     if (!filters) return true;
+    if (!matchesNamespace(node.namespace, filters.namespace)) {
+      return false;
+    }
     if (filters.tags?.length && !filters.tags.every((tag) => (node.tags ?? []).includes(tag))) {
       return false;
     }
@@ -477,6 +493,7 @@ function toMemory(node: Node, relevance?: number): Memory {
       source: content?.source as string | undefined,
       validFrom: node.validFrom,
       validTo: node.validTo === 9999999999999 ? undefined : node.validTo,
+      namespace: node.namespace,
     },
   };
   if (relevance !== undefined) {

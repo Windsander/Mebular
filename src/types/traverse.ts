@@ -11,6 +11,8 @@ export interface TraverseOptions {
   includeDeleted?: boolean;
   /** 已访问节点 ID（防环；传入可跨多次遍历累积） */
   visited?: Set<string>;
+  /** 记忆分区过滤：单分区或列表；undefined/空数组 = 不过滤 */
+  namespace?: string | string[];
 }
 
 export interface TraverseResult {

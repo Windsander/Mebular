@@ -16,6 +16,7 @@
 
 import { ErrorCodes, MebularError } from '../errors.js';
 import { canonicalize } from '../eventlog/EventLog.js';
+import { normalizeNamespace } from '../core/namespace.js';
 import type { GraphStore } from '../core/GraphStore.js';
 import type { MemoryStore } from '../memory/MemoryStore.js';
 import type { Edge, Node } from '../types/index.js';
@@ -45,6 +46,8 @@ export interface CmfNode {
   validTo?: number;
   createdAt?: number;
   createdBy?: string;
+  /** 记忆分区（缺失按 'default' 处理；不破坏既有格式版本） */
+  namespace?: string;
   /** 降级为 other 时的原类型 */
   originalType?: string;
   /** 未知字段保留袋（前向兼容） */
@@ -73,7 +76,7 @@ export interface CmfDocument {
 
 const KNOWN_NODE_FIELDS = new Set([
   'id', 'type', 'content', 'labels', 'tags', 'validFrom', 'validTo',
-  'createdAt', 'createdBy', 'originalType', 'extensions',
+  'createdAt', 'createdBy', 'namespace', 'originalType', 'extensions',
 ]);
 const KNOWN_EDGE_FIELDS = new Set(['source', 'target', 'relation', 'labels', 'extensions']);
 const KNOWN_DOC_FIELDS = new Set(['format', 'version', 'exportedAt', 'source', 'nodes', 'edges', 'extensions']);
@@ -178,6 +181,7 @@ function parseCmfNode(input: unknown): CmfNode {
   if (typeof record.validTo === 'number') node.validTo = record.validTo;
   if (typeof record.createdAt === 'number') node.createdAt = record.createdAt;
   if (typeof record.createdBy === 'string') node.createdBy = record.createdBy;
+  if (typeof record.namespace === 'string' && record.namespace) node.namespace = record.namespace;
   if (typeof record.originalType === 'string' && known) node.originalType = record.originalType;
   const extensions = collectExtensions(record, KNOWN_NODE_FIELDS);
   if (extensions) node.extensions = extensions;
@@ -248,6 +252,8 @@ export function canonicalCmfNode(node: CmfNode): string {
     labels: [...(node.labels ?? [])].sort(),
     validFrom: node.validFrom ?? null,
     validTo: node.validTo ?? null,
+    // 缺失归一为 default：旧节点与显式 default 节点得到同一指纹，幂等不破
+    namespace: normalizeNamespace(node.namespace),
   });
 }
 
@@ -282,6 +288,7 @@ function defaultNodeProjection(node: Node): CmfNode {
   if (node.validTo !== undefined) out.validTo = node.validTo;
   out.createdAt = node.createdAt;
   if (node.createdBy) out.createdBy = node.createdBy;
+  out.namespace = normalizeNamespace(node.namespace);
   return out;
 }
 
@@ -405,6 +412,7 @@ async function importOneNode(memory: MemoryStore, node: CmfNode): Promise<Node> 
     : {}) as Record<string, unknown>;
   const labels = node.labels;
   const tags = node.tags;
+  const namespaceClause = node.namespace !== undefined ? { namespace: node.namespace } : {};
 
   switch (node.type) {
     case 'entity':
@@ -417,6 +425,7 @@ async function importOneNode(memory: MemoryStore, node: CmfNode): Promise<Node> 
           : {}),
         ...(tags ? { tags } : {}),
         ...(labels ? { labels } : {}),
+        ...namespaceClause,
       });
     case 'fact':
       return memory.addFact({
@@ -429,6 +438,7 @@ async function importOneNode(memory: MemoryStore, node: CmfNode): Promise<Node> 
         ...(content.source !== undefined ? { source: content.source as string } : {}),
         ...(tags ? { tags } : {}),
         ...(labels ? { labels } : {}),
+        ...namespaceClause,
       });
     case 'episode':
       return memory.addEpisode({
@@ -441,6 +451,7 @@ async function importOneNode(memory: MemoryStore, node: CmfNode): Promise<Node> 
         ...(content.context !== undefined ? { context: content.context as string } : {}),
         ...(tags ? { tags } : {}),
         ...(labels ? { labels } : {}),
+        ...namespaceClause,
       });
     case 'skill':
       return memory.addSkill({
@@ -460,6 +471,7 @@ async function importOneNode(memory: MemoryStore, node: CmfNode): Promise<Node> 
           : {}),
         ...(tags ? { tags } : {}),
         ...(labels ? { labels } : {}),
+        ...namespaceClause,
       });
     case 'meta':
       return memory.addMeta({
@@ -468,6 +480,7 @@ async function importOneNode(memory: MemoryStore, node: CmfNode): Promise<Node> 
         ...(content.value !== undefined ? { value: content.value } : {}),
         ...(tags ? { tags } : {}),
         ...(labels ? { labels } : {}),
+        ...namespaceClause,
       });
     case 'other': {
       // 降级节点直通图层，originalType 进 metadata 保留
@@ -478,6 +491,7 @@ async function importOneNode(memory: MemoryStore, node: CmfNode): Promise<Node> 
       const created = await memory.getGraph().createNode('other', withOrigin, labels, {
         ...(node.validFrom !== undefined ? { validFrom: node.validFrom } : {}),
         ...(node.validTo !== undefined ? { validTo: node.validTo } : {}),
+        ...namespaceClause,
       });
       if (node.originalType) {
         await memory.getGraph().updateNode(created.id, {

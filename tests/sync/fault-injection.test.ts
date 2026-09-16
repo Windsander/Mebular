@@ -22,6 +22,7 @@ import {
   issueCertificate,
   masterPublicKeyBytes,
 } from '../p2p/helpers.js';
+import { grant } from '../helpers/namespace.js';
 
 interface Device {
   deviceId: string;
@@ -48,6 +49,7 @@ async function createDevice(deviceId: string, master: CryptoKeyPair): Promise<De
     storage,
     deviceId,
     userMasterPublicKey: await masterPublicKeyBytes(master),
+    namespacePolicy: grant(), // 默认拒绝：显式授权对端（用例只关心故障注入）
   });
   return { deviceId, storage, eventLog, store, syncManager, publicKey: identity.identity.devicePublicKey };
 }

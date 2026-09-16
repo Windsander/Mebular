@@ -14,6 +14,7 @@ import { SecureChannelImpl } from '../../src/p2p/secure/SecureChannelImpl.js';
 import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
 import type { PeerId } from '../../src/p2p/P2PNetwork.js';
 import type { Event } from '../../src/types/event.js';
+import { grant } from '../helpers/namespace.js';
 
 interface TestDevice {
   deviceId: string;
@@ -33,7 +34,12 @@ async function createDevice(deviceId: string): Promise<TestDevice> {
   const storage = new MemoryStorage();
   const eventLog = new EventLog(storage, deviceId, { signer });
   const store = new GraphStore({ storage, author: deviceId, eventLog });
-  const syncManager = new SyncManager({ eventLog, storage, deviceId });
+  const syncManager = new SyncManager({
+    eventLog,
+    storage,
+    deviceId,
+    namespacePolicy: grant(), // 默认拒绝：显式授权对端（用例只关心同步语义）
+  });
   const peerId: PeerId = { multihash: publicKey, pubKey: publicKey, id: deviceId };
 
   return { deviceId, storage, eventLog, store, syncManager, publicKey, peerId };
@@ -184,7 +190,7 @@ describe('SyncManager', () => {
     const scriptB = (async () => {
       const it = tB.receive()[Symbol.asyncIterator]();
       const helloA = (await it.next()).value as Extract<SyncMessage, { type: 'sync-hello' }>;
-      await tB.send({ type: 'sync-hello', vectorClock: {} });
+      await tB.send({ type: 'sync-hello', subscribeAll: true, namespaces: [], namespaceClocks: {} });
       const offerA = (await it.next()).value as Extract<SyncMessage, { type: 'sync-offer' }>;
       await tB.send({ type: 'sync-ack', appliedEventIds: offerA.events.map((e) => e.id) });
       await tB.send({ type: 'sync-offer', events: [forgedEvent] });
@@ -237,7 +243,7 @@ describe('SyncManager', () => {
       const scriptB = (async () => {
         const it = tB.receive()[Symbol.asyncIterator]();
         await it.next(); // hello
-        await tB.send({ type: 'sync-hello', vectorClock: {} });
+        await tB.send({ type: 'sync-hello', subscribeAll: true, namespaces: [], namespaceClocks: {} });
         await it.next(); // offer
         await chB.close(); // 不回 ack，模拟断线
       })();

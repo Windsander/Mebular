@@ -17,6 +17,7 @@ import type { StorageAdapter } from '../storage/StorageAdapter.js';
 import type { Event } from '../types/event.js';
 import type { Node, Edge } from '../types/index.js';
 import { VectorClock } from './vectorclock/index.js';
+import { normalizeNamespace } from '../core/namespace.js';
 
 /** 与 spec-004 的 SyncConflict 对齐；localEvent 以本地版本状态代替（实现侧无事件索引） */
 export interface SyncConflict {
@@ -437,6 +438,7 @@ function makeNodeTombstone(nodeId: string, event: Event, deletionTime: number): 
     validTo: deletionTime,
     deletedAt: deletionTime,
     tags: [],
+    namespace: normalizeNamespace(event.namespace),
     vectorClock: { ...event.vectorClock },
   };
 }
@@ -456,6 +458,7 @@ function makeEdgeTombstone(edgeId: string, event: Event, deletionTime: number): 
     validFrom: 0,
     validTo: deletionTime,
     deletedAt: deletionTime,
+    namespace: normalizeNamespace(event.namespace),
     vectorClock: { ...event.vectorClock },
   };
 }

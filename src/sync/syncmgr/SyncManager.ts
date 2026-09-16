@@ -33,6 +33,8 @@ import { ErrorCodes, StorageError, SyncError } from '../../errors.js';
 import type { Event } from '../../types/event.js';
 import { applyRemoteEvent, type SyncConflict } from '../apply.js';
 import { ConfigNamespacePolicy, type NamespaceGrantPolicy } from '../namespacePolicy.js';
+import { POLICY_NAMESPACE } from '../grantPolicy.js';
+import { verifyIssuedByUser } from '../trust.js';
 import {
   normalizeNamespace,
   normalizeNamespaceList,
@@ -44,7 +46,7 @@ import {
   namespaceClockOf,
   type NamespaceClocks,
 } from '../../core/namespace.js';
-import { hexToBytes, verifyCertificateSignature, type AuthSession } from '../../p2p/handshake/AuthenticationHandshake.js';
+import { hexToBytes, type AuthSession } from '../../p2p/handshake/AuthenticationHandshake.js';
 import {
   SecureChannelSyncTransport,
   nextSyncMessage,
@@ -610,11 +612,13 @@ export class SyncManager extends EventEmitter {
             outgoing.length >= snapshotThreshold
           ) {
             snapshot = await this.buildSnapshot(allow);
-            outgoing = [];
+            // 快照只带物化实体；策略事件（__policy__）仍需随本会话发出，供对端
+            // bootstrap 授权视图（否则空对端拿不到策略）。
+            outgoing = outgoing.filter((event) => normalizeNamespace(event.namespace) === POLICY_NAMESPACE);
           }
           await transport.send(
             snapshot
-              ? { type: 'sync-offer', events: [], snapshot }
+              ? { type: 'sync-offer', events: outgoing, snapshot }
               : { type: 'sync-offer', events: outgoing },
           );
           const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
@@ -934,8 +938,17 @@ export class SyncManager extends EventEmitter {
     );
   }
 
+  /**
+   * 供给端分区裁剪。，**保留策略命名空间（`__policy__`）始终放行**：授权/吊销
+   * 记录是签发者签名的元数据，不是用户数据；让已认证设备总能读到它，才能解开
+   * 「默认拒绝 + 策略在图上」的 bootstrap 鸡生蛋（写入/生效仍只认签发者）。
+   */
   private filterEventsForAllow(events: Event[], allow: string[]): Event[] {
-    return events.filter((event) => isNamespaceAllowed(event.namespace, allow));
+    return events.filter(
+      (event) =>
+        normalizeNamespace(event.namespace) === POLICY_NAMESPACE ||
+        isNamespaceAllowed(event.namespace, allow),
+    );
   }
 
   /**
@@ -973,6 +986,13 @@ export class SyncManager extends EventEmitter {
     let received = 0;
     let duplicates = 0;
 
+    // E · 入站吊销：默认拒绝只挡「我们发给它」，挡不住被吊销设备把事件推进我们
+    // 的图。这里按当前吊销集合隔离其**署名的**事件（不验签就谈不上凭据，故放在
+    // 验签之后判定；本批只取一次吊销快照）。
+    const revoked = this.namespacePolicy.getRevokedDevices
+      ? await this.namespacePolicy.getRevokedDevices()
+      : undefined;
+
     for (const event of events) {
       // 已持有 = 幂等重复：内容寻址 ID 已绑定内容，收到同 ID 即同一事件，
       // 无需再次验签。R1 起对端不再据自报抑制发送，会把本机已有事件（含回弹
@@ -987,6 +1007,11 @@ export class SyncManager extends EventEmitter {
       const valid = await this.verifyEventTrust(event, peer);
       if (!valid) {
         throw new SyncError(`Event signature verification failed: ${event.id}`, ErrorCodes.SYNC_INVALID_EVENT);
+      }
+
+      // 被吊销设备署名的事件：不应用、不入库、不 ack（隔离；发送方重试亦无效）
+      if (revoked?.has(event.author)) {
+        continue;
       }
 
       // 验签通过即确认（重复/冲突落败也已入日志，重收时为幂等重复）
@@ -1034,19 +1059,8 @@ export class SyncManager extends EventEmitter {
     if (event.author === peer.deviceId) {
       return EventLog.verifyEvent(event, peer.publicKey);
     }
-    const certificate = event.authorCertificate;
-    if (!certificate || certificate.deviceId !== event.author || !this.userMasterPublicKey) {
-      return false;
-    }
-    const certValid = await verifyCertificateSignature(certificate, this.userMasterPublicKey);
-    if (!certValid) {
-      return false;
-    }
-    try {
-      return await EventLog.verifyEvent(event, hexToBytes(certificate.devicePublicKey));
-    } catch {
-      return false;
-    }
+    // 中继/多跳：与 `GraphNamespacePolicy` 的签发者判定共用同一套证书链校验
+    return verifyIssuedByUser(event, this.userMasterPublicKey);
   }
 
   /**

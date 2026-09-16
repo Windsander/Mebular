@@ -14,8 +14,8 @@ Mebular 把记忆存成一张带签名事件的知识图谱，每条事实都记
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-423%20passed-brightgreen)](#项目状态)
-[![Coverage](https://img.shields.io/badge/Coverage-91.2%25-brightgreen)](#项目状态)
+[![Tests](https://img.shields.io/badge/Tests-449%20passed-brightgreen)](#项目状态)
+[![Coverage](https://img.shields.io/badge/Coverage-91.4%25-brightgreen)](#项目状态)
 
 [官网](https://mebular.cyberfederal.io) · [快速上手](#30-秒上手) · [系统架构](#系统架构) · [项目状态](#项目状态) · [贡献](#贡献)
 
@@ -47,7 +47,7 @@ git clone https://github.com/Windsander/Mebular.git
 cd Mebular
 npm install
 npm run build          # TypeScript strict → dist/
-npm test               # 60 套件 / 423 用例全绿
+npm test               # 61 套件 / 449 用例全绿
 ```
 
 ### 最简例子（复制即跑）
@@ -144,14 +144,16 @@ node scripts/wan-sync.mjs cross --user-master-key-file key.json \
 
 ---
 
-## 记忆分区与选择性同步
+## 记忆分区与选择性同步（默认拒绝 + 显式授权 + 分区水位）
 
-记忆可以打上 `namespace`（分区）标记：协作产生的高频短命记忆与用户长期记忆隔离，召回与同步都能按分区限定范围。不带分区的旧数据、旧对端、旧快照一律按 `default` 处理，不需要迁移；分区只增加一个组织维度，不改变一致性模型本身。
+记忆可以打上 `namespace`（分区）标记：协作产生的高频短命记忆与用户长期记忆隔离，召回与同步都能按分区限定范围。不带分区的实体一律按 `default` 处理；分区只增加一个组织维度，不改变一致性模型本身。
 
 - **分区隔离**：`query` / `search` / `graph` 都接受可选 `namespace`（单个或数组）；指定分区时不会串到别的分区。CMF 导入导出与 SQLite 存储（namespace 列 + 索引）同样贯通。
-- **选择性同步**：配置 `sync.namespaces` 声明本机订阅的分区（空 = 全部，保持旧语义）；`sync.peerNamespacePolicy` 配置「每个对端被授权接收哪些分区」。计算 offer 和初始快照时都按「本机订阅 ∩ 对端声明订阅 ∩ 对端授权」裁剪，未授权分区不会离开数据持有者——空时钟走快照也绕不过。对端未声明时行为与改动前一致。
+- **默认拒绝 + 显式授权**：数据持有者只把记忆发给**被显式授权**的对端。`sync.peerNamespacePolicy` 是 `peerDeviceId → 允许的分区` 白名单；**未列出的对端拿不到任何分区**（空数组 = 明确不允许），必须显式写入才能同步。裁剪链为「对端授权 ∩ 对端订阅声明 ∩ 本机订阅声明」，同时作用于 offer 与初始快照——未授权分区不会离开数据持有者，空水位走快照也绕不过。拒绝不是静默的：`sync-completed` 带 `denied` 标记。
+- **本机订阅**：`sync.namespaces` 声明本机订阅的分区；未配置 / 空 = 参与全部。订阅声明随 `sync-hello` 以 `subscribeAll` + `namespaces` **必填**下发（缺字段/类型错视为协议违例并中止会话）；`subscribeAll=false` + 空清单 = 明确不订阅任何分区。
+- **分区同步水位**：缺失判定按 `per-(对端, 分区, 作者)` 水位进行——只在同一分区内比较作者计数，而不是拿对端累积全局时钟。这样某分区因未授权被跳过后，日后**扩权即可回补**历史事件，不会永久缺失；水位随 ack 与对端 hello 推进并持久化（`.sync-state.json` v2），重启后不重发、不遗漏。撤销后再授予同样从正确水位续传。
 - **变更可订阅**：`sync-completed` 事件带 `appliedEventIds`，另有 `events-applied` 事件报告刚应用了哪些远端事件、涉及哪些分区，供常驻消费者判断「是否有我关心的新记忆」。
-- **push-on-write**（可选，默认关闭）：本地写入后向订阅相关分区的在线对端即时推送，带节流合并，避免写风暴。
+- **push-on-write**（可选，默认关闭）：本地写入后向订阅相关分区的在线对端即时推送，带节流合并，避免写风暴；授权裁剪仍由会话内的 offer 计算兜底。
 
 保留策略约束：任何将来引入的自动事件裁剪，**必须排除尚未被所有已授权对端 ack 的事件**，否则对端将永久缺失该记忆、违背「所有记忆一致」。本期只固化此约束与测试，不实现裁剪。
 
@@ -191,8 +193,8 @@ Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API
 
 | 项目 | 情况 |
 |------|------|
-| 测试 | 60 个套件、423 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
-| 覆盖率 | 行 91.2%、分支 77.8%，全库门槛 85/65，关键文件另有底线 |
+| 测试 | 61 个套件、449 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
+| 覆盖率 | 行 91.4%、分支 77.8%，全库门槛 85/65，关键文件另有底线 |
 | 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |
 | 质量门禁 | 每个阶段跑 verify 脚本加构建产物冒烟，`src` 里不留裸的 `throw new Error` |

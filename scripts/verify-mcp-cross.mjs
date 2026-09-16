@@ -226,6 +226,7 @@ async function runSelftest() {
       [homeB, 'device-B-local'],
     ];
     for (const [home, deviceId] of writes) {
+      const peerDeviceId = deviceId === 'device-A-local' ? 'device-B-local' : 'device-A-local';
       await mkdir(home, { recursive: true });
       await writeFile(
         join(home, 'config.json'),
@@ -235,6 +236,7 @@ async function runSelftest() {
             deviceId,
             encryption: { level: 'none', keyFile },
             network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
+            sync: { peerNamespacePolicy: { [peerDeviceId]: ['default'] } },
           },
           null,
           2,

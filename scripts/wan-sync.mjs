@@ -70,11 +70,16 @@ async function generateDeviceKey() {
 
 function waitForSync(app, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`同步超时（${timeoutMs}ms）`)), timeoutMs);
-    app.sync.once('sync-completed', (result) => {
+    const onSync = (result) => {
       clearTimeout(timer);
       resolve(result);
-    });
+    };
+    const timer = setTimeout(() => {
+      // 重试循环会多次调用 waitForSync：超时必须摘掉监听，避免监听器累积
+      app.sync.removeListener('sync-completed', onSync);
+      reject(new Error(`同步超时（${timeoutMs}ms）`));
+    }, timeoutMs);
+    app.sync.once('sync-completed', onSync);
   });
 }
 
@@ -183,7 +188,17 @@ function dataStateHash(nodes, edges) {
 
 // ---------- App 工厂 ----------
 
-async function makeApp({ dir, deviceId, masterKeys, relayServers, listen }) {
+/**
+ * 解析 `--authorize`：逗号分隔的 deviceId 列表 → 默认拒绝策略下的对端白名单。
+ * 未提供/空 = null（调用方应据此 fail fast 并给出指引）。
+ */
+function parseAuthorize(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return null;
+  const ids = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  return ids.length ? Object.fromEntries(ids.map((id) => [id, ['default']])) : null;
+}
+
+async function makeApp({ dir, deviceId, masterKeys, relayServers, listen, peerNamespacePolicy }) {
   const app = new Mebular({
     storagePath: join(dir, `${deviceId}.jsonl`),
     deviceId,
@@ -195,7 +210,11 @@ async function makeApp({ dir, deviceId, masterKeys, relayServers, listen }) {
         ...(relayServers?.length ? { relayServers } : {}),
       },
     },
-    sync: { autoSync: true },
+    // 默认拒绝：只有显式传入的对端授权映射才可能同步；未配置 = 谁都不发
+    sync: {
+      autoSync: true,
+      ...(peerNamespacePolicy ? { peerNamespacePolicy } : {}),
+    },
   });
   await app.initialize();
   return app;
@@ -256,8 +275,8 @@ async function runLocal() {
   };
 
   try {
-    let a = await makeApp({ dir, deviceId: 'device-A', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null });
-    let b = await makeApp({ dir, deviceId: 'device-B', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null });
+    let a = await makeApp({ dir, deviceId: 'device-A', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null, peerNamespacePolicy: { 'device-B': ['default'] } });
+    let b = await makeApp({ dir, deviceId: 'device-B', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null, peerNamespacePolicy: { 'device-A': ['default'] } });
     const addressA = mode === 'relay' ? await waitForRelayReservation(a) : pickDirectAddress(a);
     const node = await a.graph.createNode('fact', { text: 'base-memory' });
     const sync1 = await connectUntil(b, a, addressA, async () => memoryText(await b.graph.getNode(node.id)) === 'base-memory');
@@ -266,8 +285,8 @@ async function runLocal() {
     await a.shutdown();
     await b.shutdown();
 
-    a = await makeApp({ dir, deviceId: 'device-A', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null });
-    b = await makeApp({ dir, deviceId: 'device-B', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null });
+    a = await makeApp({ dir, deviceId: 'device-A', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null, peerNamespacePolicy: { 'device-B': ['default'] } });
+    b = await makeApp({ dir, deviceId: 'device-B', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null, peerNamespacePolicy: { 'device-A': ['default'] } });
     const addressA2 = mode === 'relay' ? await waitForRelayReservation(a) : pickDirectAddress(a);
     await a.graph.updateNode(node.id, { content: { text: 'from-A' } });
     await b.graph.updateNode(node.id, { content: { text: 'from-B' } });
@@ -430,7 +449,14 @@ async function runPeer() {
   const relayServers = typeof args.relay === 'string' ? [args.relay] : null;
   const timeout = Number(args.timeout ?? 60000);
   const bind = typeof args.bind === 'string' ? args.bind : '/ip4/0.0.0.0/tcp/4001';
-  const start = () => makeApp({ dir: storageDir, deviceId: `device-${role.toUpperCase()}`, masterKeys, relayServers, listen: [bind] });
+  const authorize = parseAuthorize(args.authorize);
+  if (!authorize) {
+    log('✗ 默认拒绝：必须显式授权对端才能同步。');
+    log(`  用法：node scripts/wan-sync.mjs peer --role ${role} --authorize <对端 deviceId>[,<...>] ...`);
+    log('  对端（cross）用 --device-id <同一 deviceId> 固定自身设备名，例如 --authorize device-B。');
+    process.exit(1);
+  }
+  const start = () => makeApp({ dir: storageDir, deviceId: `device-${role.toUpperCase()}`, masterKeys, relayServers, listen: [bind], peerNamespacePolicy: authorize });
   const egress = await lookupEgress();
 
   let app = null;
@@ -441,7 +467,7 @@ async function runPeer() {
     const base = await app.graph.createNode('fact', { text: `base-${runId}` });
     baseId = base.id;
     const stableAddress = pickRelayAddress(app) ?? pickDirectAddress(app);
-    log(`PEER_READY ${JSON.stringify({ role, runId, deviceId: app.node.peerId.id, multiaddrs: app.node.getLocalMultiaddrs(), stableAddress, bind, at: new Date().toISOString() })}`);
+    log(`PEER_READY ${JSON.stringify({ role, runId, deviceId: app.node.peerId.id, authorized: Object.keys(authorize), multiaddrs: app.node.getLocalMultiaddrs(), stableAddress, bind, at: new Date().toISOString() })}`);
     await waitForSync(app, timeout);
     log('[phase1] 增量同步完成');
     await app.shutdown();
@@ -524,8 +550,15 @@ async function runCross() {
   const timeout = Number(args.timeout ?? 60000);
   const attempts = Number(args['phase-attempts'] ?? 30);
   const listen = typeof args.bind === 'string' ? [args.bind] : ['/ip4/0.0.0.0/tcp/0'];
-  const deviceId = `device-B-${process.pid}`;
-  const start = () => makeApp({ dir: storageDir, deviceId, masterKeys, relayServers: relay ? [relay] : null, listen });
+  const deviceId = typeof args['device-id'] === 'string' ? args['device-id'] : `device-B-${process.pid}`;
+  const authorize = parseAuthorize(args.authorize);
+  if (!authorize) {
+    log('✗ 默认拒绝：必须显式授权对端才能同步。');
+    log(`  用法：node scripts/wan-sync.mjs cross --device-id ${deviceId} --authorize <A 的 deviceId> ...`);
+    log('  A（peer）默认 deviceId 为 device-A（即此处 --authorize 的值）；A 侧需 --authorize 授权本命令 --device-id。');
+    process.exit(1);
+  }
+  const start = () => makeApp({ dir: storageDir, deviceId, masterKeys, relayServers: relay ? [relay] : null, listen, peerNamespacePolicy: authorize });
   const egress = await lookupEgress();
   const remote = peerIdFromString(peerId);
   const startedAt = new Date().toISOString();
@@ -700,8 +733,8 @@ async function relayCipherSelfCheck(keySource, dir) {
   const proxy = await createCaptureProxy(relayPort, capture);
   const proxyAddr = `/ip4/127.0.0.1/tcp/${proxy.port}/p2p/${relayPeerId}`;
   const marker = `RELAY-CIPHER-MARKER-${crypto.randomUUID()}`;
-  const a = await makeApp({ dir, deviceId: 'device-CA', masterKeys, relayServers: [proxyAddr] });
-  const b = await makeApp({ dir, deviceId: 'device-CB', masterKeys, relayServers: [proxyAddr] });
+  const a = await makeApp({ dir, deviceId: 'device-CA', masterKeys, relayServers: [proxyAddr], peerNamespacePolicy: { 'device-CB': ['default'] } });
+  const b = await makeApp({ dir, deviceId: 'device-CB', masterKeys, relayServers: [proxyAddr], peerNamespacePolicy: { 'device-CA': ['default'] } });
   try {
     const circuitA = await waitForRelayReservation(a);
     if (!circuitA) throw new Error('A 未取得 circuit 预约');
@@ -745,7 +778,7 @@ async function runSelftest() {
   try {
     log('[selftest] 启动 A（独立进程/独立存储，稳定地址，无共享文件）…');
     const a = spawnChild(
-      ['peer', '--role', 'a', '--run-id', runId, '--bind', `/ip4/127.0.0.1/tcp/${port}`, '--timeout', '60000'],
+      ['peer', '--role', 'a', '--run-id', runId, '--bind', `/ip4/127.0.0.1/tcp/${port}`, '--authorize', 'device-B-selftest', '--timeout', '60000'],
       env,
     );
     const readyLine = await a.waitLine('PEER_READY', 30000);
@@ -756,7 +789,7 @@ async function runSelftest() {
     log('[selftest] 启动 B（独立进程/独立存储，无共享路径）…');
     const bEvidence = join(outDir, 'b-evidence.json'); // 父↔B，A 不接触
     const b = spawnChild(
-      ['cross', '--peer', peerAddr, '--peer-id', ready.deviceId, '--out', bEvidence, '--allow-same-network', '--timeout', '60000'],
+      ['cross', '--peer', peerAddr, '--peer-id', ready.deviceId, '--device-id', 'device-B-selftest', '--authorize', 'device-A', '--out', bEvidence, '--allow-same-network', '--timeout', '60000'],
       env,
     );
     const [aRes, bRes] = await Promise.all([a.done, b.done]);

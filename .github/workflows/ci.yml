@@ -47,6 +47,9 @@ jobs:
       - name: Fleet real transport (M3, loopback libp2p)
         run: npm run verify:fleet:remote
 
+      - name: Fleet agent routing (M4, fake agents)
+        run: npm run verify:fleet:agents
+
       - name: stdio MCP (real client)
         run: npm run verify:mcp:stdio
 

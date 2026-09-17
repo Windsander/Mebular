@@ -57,7 +57,8 @@
 - **会话多路复用**。
 - **quorum / 阈值签名**（多签发者已有，但无门限）。
 - **`expiresAt` 强制生效**（字段已预留，不引入跨端时钟依赖；移入 fleet MVP 范围）。
-- **`packages/fleet`**（下一轮）。
+- **fleet（`@mebular/fleet`）已落地 M0–M4**（**不改 core/SEALING 语义**）：M0 骨架/边界、M1 协议模型（事件/状态机/本地配额 + 不变量 harness）、M2 单机双进程（spool）、M3 真实 libp2p + 记忆同步、M4 **agent 路由**（注册表 + Command/Hermes 适配器）与**三种协作形态模型**（审查 DAG / 有限协商 / 配额制闲聊 + 矩阵 + 随机 harness）。
+  入口见 `packages/fleet/DESIGN.md`、`PROTOCOL-INVARIANTS.md`、`RUNBOOK.md`。**剩余推迟**：真实 OpenChamber 会话接缝（见 `packages/fleet/OPENCHAMBER-SEAM.md`，需 OpenChamber 侧改动）、协作形态的 live 通道接线与执行器适配器生产化。
 - **自动事件裁剪**：本期只固化约束与测试——**任何裁剪必须排除尚未被所有已授权对端 ack 的事件**，不实现裁剪。
 - **信任模型 v2（证书吊销）**、**跨 NAT 实测回填**（README「项目状态」标注规划中）。
 

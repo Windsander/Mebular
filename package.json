@@ -70,6 +70,7 @@
     "verify:mcp:publish": "node scripts/verify-mcp-publish.mjs",
     "verify:fleet:local": "node scripts/verify-fleet-local.mjs",
     "verify:fleet:remote": "node scripts/verify-fleet-remote.mjs",
+    "verify:fleet:agents": "node scripts/verify-fleet-agents.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "dependencies": {

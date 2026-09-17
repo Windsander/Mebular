@@ -101,4 +101,17 @@ describe('computeStateHashByNamespace（① 一致性口径按域）', () => {
     expect(Object.keys(byNs)).toEqual(['nsB']);
     expect(byNs.nsB).toBe(computeStateHash([], [e]));
   });
+
+  it('按分区哈希排除证据节点：仅含证据的分区不产生条目', () => {
+    const evidence = node('m1', 'x', 'meta');
+    evidence.content = { name: 'wan-evidence-ns' };
+    evidence.namespace = 'evidenceOnly';
+    const alpha = { ...node('a1', 'a'), namespace: 'alpha' };
+    const inDefault = node('d1', 'd');
+
+    const byNs = computeStateHashByNamespace([evidence, alpha, inDefault], []);
+    expect(Object.keys(byNs).sort()).toEqual(['alpha', 'default']);
+    expect(byNs.default).toBe(computeStateHash([inDefault], []));
+    expect(byNs.alpha).toBe(computeStateHash([alpha], []));
+  });
 });

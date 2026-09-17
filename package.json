@@ -69,6 +69,7 @@
     "verify:mcp:skill": "node scripts/verify-mcp-skill.mjs",
     "verify:mcp:publish": "node scripts/verify-mcp-publish.mjs",
     "verify:fleet:local": "node scripts/verify-fleet-local.mjs",
+    "verify:fleet:remote": "node scripts/verify-fleet-remote.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "dependencies": {
@@ -126,6 +127,7 @@
     "moduleNameMapper": {
       "^src/(.*)\\.js$": "<rootDir>/src/$1.ts",
       "^tests/(.*)\\.js$": "<rootDir>/tests/$1.ts",
+      "^@mebular/core$": "<rootDir>/src/index.ts",
       "^(\\.{1,2}/.*)\\.js$": "$1"
     },
     "testMatch": [

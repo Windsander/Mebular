@@ -68,6 +68,14 @@ export interface PolicyState {
 
 interface ParsedEntry {
   kind: 'grant' | 'revoke' | 'device';
+  /** 签发者设备 ID（= event.author） */
+  author: string;
+  /**
+   * 签发者自身的单调序列 = `event.vectorClock[event.author]`。它随该作者的
+   * 每次签发递增，**不受墙钟影响**，是同一签发者内事件真实先后（F-2）。
+   */
+  seq: number;
+  /** 签发者墙钟；仅作跨签发者兑底与同 seq 的 tie-break */
   issuedAt: number;
   id: string;
   grant?: NamespaceGrantRecord;
@@ -81,30 +89,41 @@ function isPolicyType(type: string): boolean {
   );
 }
 
-/** 同主体内的确定性排序：先 issuedAt，再内容寻址 ID（防平局不定） */
-function compareEntries(a: { issuedAt: number; id: string }, b: { issuedAt: number; id: string }): number {
+/**
+ * 确定性排序（F-2）：**同一签发者内以单调序列 seq 为准**（不受墙钟偏移影响），
+ * 跨签发者（seq 不可比）回退到 issuedAt；仍平局时用内容寻址 ID 兜底。
+ */
+function compareEntries(a: ParsedEntry, b: ParsedEntry): number {
+  if (a.author === b.author && a.seq !== b.seq) return a.seq - b.seq;
   if (a.issuedAt !== b.issuedAt) return a.issuedAt - b.issuedAt;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/** 事件作者自身的单调计数器（缺失回退 0） */
+function eventSeq(event: Event): number {
+  return event.vectorClock?.[event.author] ?? 0;
 }
 
 function parseEntries(events: Event[]): ParsedEntry[] {
   const entries: ParsedEntry[] = [];
   for (const event of events) {
     if (!isPolicyType(event.type)) continue;
+    const author = event.author;
+    const seq = eventSeq(event);
     if (event.type === NAMESPACE_GRANT_EVENT) {
       const grant = (event.data as { grant?: NamespaceGrantRecord }).grant;
       if (grant && typeof grant.grantId === 'string' && typeof grant.subject === 'string') {
-        entries.push({ kind: 'grant', issuedAt: grant.issuedAt ?? event.timestamp, id: event.id, grant });
+        entries.push({ kind: 'grant', author, seq, issuedAt: grant.issuedAt ?? event.timestamp, id: event.id, grant });
       }
     } else if (event.type === NAMESPACE_REVOKE_EVENT) {
       const revoke = (event.data as { revoke?: NamespaceRevokeRecord }).revoke;
       if (revoke && typeof revoke.grantId === 'string') {
-        entries.push({ kind: 'revoke', issuedAt: revoke.issuedAt ?? event.timestamp, id: event.id, revoke });
+        entries.push({ kind: 'revoke', author, seq, issuedAt: revoke.issuedAt ?? event.timestamp, id: event.id, revoke });
       }
     } else {
       const device = (event.data as { deviceRevoke?: DeviceRevokeRecord }).deviceRevoke;
       if (device && typeof device.subject === 'string') {
-        entries.push({ kind: 'device', issuedAt: device.issuedAt ?? event.timestamp, id: event.id, device });
+        entries.push({ kind: 'device', author, seq, issuedAt: device.issuedAt ?? event.timestamp, id: event.id, device });
       }
     }
   }
@@ -116,9 +135,12 @@ function parseEntries(events: Event[]): ParsedEntry[] {
  *
  * 语义：
  * - 只采纳「链到用户主密钥」的事件（由调用方先行过滤 / 或在此逐条校验）；
+ * - 事件排序以签发者自身的**单调序列**（`event.vectorClock[author]`）为准，
+ *   issuedAt 仅作跨签发者兑底与 tie-break（F-2：不依赖墙钟）；
  * - `namespace_revoke` 按 grantId 精确失效；
- * - `device_revoke` 使该主体在**其签发时间之前**的授权全部失效，且状态为吊销；
- *   之后再签发新的 grant 即恢复（吊销不是终态）；
+ * - `device_revoke` 使该主体在**序列上位于其之前**的授权全部失效，状态为吊销；
+ * - **恢复必须使用新的 grantId**（F-3）：被撤销的 grantId 永久失效，复用它再
+ *   授予不会恢复；吊销本身也不是终态——之后签发**新的** grant 即恢复；
  * - 主体从未出现 = 拒绝（默认拒绝不放松）。
  */
 export function derivePolicyState(entries: ParsedEntry[]): PolicyState {
@@ -126,22 +148,22 @@ export function derivePolicyState(entries: ParsedEntry[]): PolicyState {
   // grantId → 该授予的 entry（保留 issuedAt/id 以便与撤销做确定性排序）
   const grants = new Map<string, ParsedEntry>();
   const revokedGrantIds = new Set<string>();
-  const latestDeviceRevoke = new Map<string, { issuedAt: number; id: string }>();
-  const latestGrant = new Map<string, { issuedAt: number; id: string }>();
+  const latestDeviceRevoke = new Map<string, ParsedEntry>();
+  const latestGrant = new Map<string, ParsedEntry>();
 
   for (const entry of sorted) {
     if (entry.kind === 'grant' && entry.grant) {
       grants.set(entry.grant.grantId, entry);
       const cur = latestGrant.get(entry.grant.subject);
       if (!cur || compareEntries(entry, cur) > 0) {
-        latestGrant.set(entry.grant.subject, { issuedAt: entry.issuedAt, id: entry.id });
+        latestGrant.set(entry.grant.subject, entry);
       }
     } else if (entry.kind === 'revoke' && entry.revoke) {
       revokedGrantIds.add(entry.revoke.grantId);
     } else if (entry.kind === 'device' && entry.device) {
       const cur = latestDeviceRevoke.get(entry.device.subject);
       if (!cur || compareEntries(entry, cur) > 0) {
-        latestDeviceRevoke.set(entry.device.subject, { issuedAt: entry.issuedAt, id: entry.id });
+        latestDeviceRevoke.set(entry.device.subject, entry);
       }
     }
   }

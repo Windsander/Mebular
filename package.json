@@ -44,7 +44,8 @@
     }
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && tsc -p packages/fleet/tsconfig.json",
+    "build:fleet": "tsc -p packages/fleet/tsconfig.json",
     "build:watch": "tsc --watch",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
@@ -67,6 +68,8 @@
     "verify:mcp:cross:selftest": "node scripts/verify-mcp-cross.mjs --selftest",
     "verify:mcp:skill": "node scripts/verify-mcp-skill.mjs",
     "verify:mcp:publish": "node scripts/verify-mcp-publish.mjs",
+    "verify:fleet:local": "node scripts/verify-fleet-local.mjs",
+    "verify:fleet:remote": "node scripts/verify-fleet-remote.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "dependencies": {
@@ -124,6 +127,7 @@
     "moduleNameMapper": {
       "^src/(.*)\\.js$": "<rootDir>/src/$1.ts",
       "^tests/(.*)\\.js$": "<rootDir>/tests/$1.ts",
+      "^@mebular/core$": "<rootDir>/src/index.ts",
       "^(\\.{1,2}/.*)\\.js$": "$1"
     },
     "testMatch": [
@@ -132,11 +136,14 @@
     ],
     "collectCoverageFrom": [
       "src/**/*.ts",
-      "!src/**/*.d.ts"
+      "!src/**/*.d.ts",
+      "packages/fleet/src/**/*.ts",
+      "!packages/fleet/src/**/*.d.ts"
     ],
     "coveragePathIgnorePatterns": [
       "/node_modules/",
-      "src/p2p/transport/Libp2pProvider.ts"
+      "src/p2p/transport/Libp2pProvider.ts",
+      "packages/fleet/src/cli.ts"
     ],
     "coverageThreshold": {
       "global": {
@@ -158,6 +165,10 @@
       "src/sync/apply.ts": {
         "lines": 95,
         "branches": 70
+      },
+      "packages/fleet/src/**/*.ts": {
+        "lines": 85,
+        "branches": 65
       }
     }
   }

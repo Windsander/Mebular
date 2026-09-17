@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "taskId": "task-0001",
+  "from": { "device": "device-A", "agent": "planner" },
+  "to": { "device": "device-B", "agent": "*" },
+  "intent": "summarize",
+  "payloadRef": "node-abc123",
+  "status": "queued",
+  "attempts": 0,
+  "expiresAt": 1735689600000,
+  "trace": { "causedBy": "task-0000", "chain": ["task-0000"] }
+}

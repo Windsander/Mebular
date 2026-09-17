@@ -41,6 +41,12 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Fleet local two-process (M2)
+        run: npm run verify:fleet:local
+
+      - name: Fleet real transport (M3, loopback libp2p)
+        run: npm run verify:fleet:remote
+
       - name: stdio MCP (real client)
         run: npm run verify:mcp:stdio
 

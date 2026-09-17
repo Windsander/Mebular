@@ -58,11 +58,45 @@ async function appendGrant(
   return grant;
 }
 
+/** 造一个链到给定主密钥的可信签发设备（同一用户的多台设备） */
+async function makeTrustedLog(
+  storage: MemoryStorage,
+  master: CryptoKeyPair,
+  deviceId: string,
+  options: { restore?: boolean } = {},
+): Promise<EventLog> {
+  const identity = await createTestIdentity(deviceId);
+  await issueCertificate(master.privateKey, identity);
+  const signer = {
+    deviceId,
+    privateKey: identity.identity.devicePrivateKey,
+    certificate: identity.identity.certificate,
+  };
+  // restore：合并存储中已有事件的时钟 → 之后 append 的事件在逻辑序上因果在后
+  return options.restore
+    ? EventLog.restore(storage, deviceId, { signer })
+    : new EventLog(storage, deviceId, { signer });
+}
+
+async function appendDeviceRevoke(
+  log: EventLog,
+  subject: string,
+  issuedAt: number,
+): Promise<void> {
+  await log.append({
+    type: DEVICE_REVOKE_EVENT,
+    data: { deviceRevoke: { subject, issuedAt } },
+    namespace: POLICY_NAMESPACE,
+  });
+}
+
 describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
   let master: CryptoKeyPair;
   let masterPub: Uint8Array;
   let storage: MemoryStorage;
   let trusted: EventLog;
+  let trusted2: EventLog;
+  let deviceX: EventLog;
   let outsider: EventLog;
   let noCert: EventLog;
   let policy: GraphNamespacePolicy;
@@ -100,7 +134,15 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
       signer: { deviceId: 'nocert', privateKey: noCertId.identity.devicePrivateKey },
     });
 
-    policy = new GraphNamespacePolicy({ eventLog: new EventLog(storage, 'reader'), userMasterPublicKey: masterPub });
+    trusted2 = await makeTrustedLog(storage, master, 'issuer2');
+    deviceX = await makeTrustedLog(storage, master, 'device-X');
+
+    // 引导期签发者：issuer（可为任意 namespace 签发）
+    policy = new GraphNamespacePolicy({
+      eventLog: new EventLog(storage, 'reader'),
+      userMasterPublicKey: masterPub,
+      policyIssuers: ['issuer'],
+    });
   });
 
   it('签发者的 grant 被采纳；多个 grant 取并集', async () => {
@@ -182,6 +224,102 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
     await appendGrant(trusted, 'device-B', ['nsA'], 4000);
     expect(await policy.getAuthorizedNamespaces('device-B')).toEqual(['nsA']);
   });
+
+  it('【洞1 red→green】未授权设备自授提权：grant(自己, nsX) 不得生效', async () => {
+    // device-X 是可信设备（证书链到主密钥），但未被授权任何分区、也不在引导白名单。
+    await appendGrant(deviceX, 'device-X', ['nsX'], 1000);
+    expect(await policy.getAuthorizedNamespaces('device-X')).toEqual([]);
+  });
+
+  it('【洞2 red→green】被吊销签发者的记录不再被采纳（含其历史 grant）', async () => {
+    await appendGrant(trusted, 'device-B', ['nsA'], 1000); // issuer 授 B
+    await trusted2.append({
+      type: DEVICE_REVOKE_EVENT,
+      data: { deviceRevoke: { subject: 'issuer', issuedAt: 2000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    // issuer 已被吊销 → 其历史 grant 失效
+    expect(await policy.getAuthorizedNamespaces('device-B')).toEqual([]);
+    expect([...(await policy.getRevokedDevices())]).toContain('issuer');
+  });
+
+  // ---- 多签发者与授权委托（R-a / R-b / R-c） ----
+
+  const policyWith = (issuers: string[]): GraphNamespacePolicy =>
+    new GraphNamespacePolicy({
+      eventLog: new EventLog(storage, 'reader'),
+      userMasterPublicKey: masterPub,
+      policyIssuers: issuers,
+    });
+
+  it('R-a 授权转授：已获授权的非引导设备可把权限转授出去（多签发者）', async () => {
+    await appendGrant(trusted, 'device-X', ['nsX'], 1000); // 引导签发者授 device-X
+    const xLog = await makeTrustedLog(storage, master, 'device-X', { restore: true }); // 因果在 issuer 之后
+    await appendGrant(xLog, 'device-B', ['nsX'], 2000); // device-X 转授
+    expect(await policyWith(['issuer']).getAuthorizedNamespaces('device-B')).toEqual(['nsX']);
+  });
+
+  it('R-a 引导白名单：白名单设备可为未被授权的 namespace 授权', async () => {
+    await appendGrant(deviceX, 'device-B', ['nsY'], 1000);
+    expect(await policyWith(['device-X']).getAuthorizedNamespaces('device-B')).toEqual(['nsY']);
+  });
+
+  it('R-a 越权转授：只能给出自己已有的 namespace', async () => {
+    await appendGrant(trusted, 'device-X', ['nsX'], 1000);
+    const xLog = await makeTrustedLog(storage, master, 'device-X', { restore: true });
+    await appendGrant(xLog, 'device-B', ['nsX'], 2000); // 合法
+    await appendGrant(xLog, 'device-B', ['nsY'], 3000); // 越权（device-X 没有 nsY）
+    expect(await policyWith(['issuer']).getAuthorizedNamespaces('device-B')).toEqual(['nsX']);
+  });
+
+  it('R-b 吊销连坐：被吊销签发者的 device_revoke 不再生效，也不能自复活', async () => {
+    await appendDeviceRevoke(trusted2, 'device-X', 1000); // 引导 issuer2 吊销 device-X
+    const xLog = await makeTrustedLog(storage, master, 'device-X', { restore: true }); // 因果在后
+    await appendDeviceRevoke(xLog, 'device-B', 2000); // device-X 已吊销 → 无效
+    await appendGrant(xLog, 'device-X', ['nsX'], 3000); // 自复活 → 无效
+    const p = policyWith(['issuer', 'issuer2']);
+    expect([...(await p.getRevokedDevices())].sort()).toEqual(['device-X']); // B 未被连带吊销
+    expect(await p.getAuthorizedNamespaces('device-X')).toEqual([]);
+  });
+
+  it('R-b 互吊销：逻辑序在先者胜，结果确定且与写入顺序无关', async () => {
+    const build = async (order: 'ab' | 'ba'): Promise<string[]> => {
+      const s = new MemoryStorage();
+      const aLog = await makeTrustedLog(s, master, 'issuer');
+      const bLog = await makeTrustedLog(s, master, 'issuer2');
+      const revoke = (log: EventLog, subject: string) => appendDeviceRevoke(log, subject, 1);
+      if (order === 'ab') {
+        await revoke(aLog, 'issuer2');
+        await revoke(bLog, 'issuer');
+      } else {
+        await revoke(bLog, 'issuer');
+        await revoke(aLog, 'issuer2');
+      }
+      const p = new GraphNamespacePolicy({
+        eventLog: new EventLog(s, 'reader'),
+        userMasterPublicKey: masterPub,
+        policyIssuers: ['issuer', 'issuer2'],
+      });
+      return [...(await p.getRevokedDevices())].sort();
+    };
+    const ab = await build('ab');
+    const ba = await build('ba');
+    expect(ab).toEqual(ba); // 与写入顺序无关
+    // ('issuer' < 'issuer2') 逻辑时间相同 → author 兜底：issuer 先处理 → issuer2 被吊销，
+    // 而 issuer2 对 issuer 的吊销记录因其本人已吊销而不被采纳。
+    expect(ab).toEqual(['issuer2']);
+  });
+
+  it('R-c 时钟偏移：跨签发者按逻辑时间定序，不看墙钟', async () => {
+    // issuer 授 device-B（issuedAt 9999）；issuer2 吊销 device-B（issuedAt 1）但**因果在后**
+    await appendGrant(trusted, 'device-B', ['nsX'], 9999);
+    const bLog = await makeTrustedLog(storage, master, 'issuer2', { restore: true });
+    await appendDeviceRevoke(bLog, 'device-B', 1);
+    const p = policyWith(['issuer', 'issuer2']);
+    // 若按墙钟：revoke(1) 排在 grant(9999) 之前 → 不吊销；按逻辑序：revoke 在后 → 吊销
+    expect(await p.getAuthorizedNamespaces('device-B')).toEqual([]);
+    expect([...(await p.getRevokedDevices())]).toContain('device-B');
+  });
 });
 
 describe('CompositeNamespacePolicy（图上 ∪ 配置；吊销优先）', () => {
@@ -214,11 +352,14 @@ interface TestDevice {
   peerId: PeerId;
 }
 
+/** 端到端夹具里所有设备都可作引导签发者（这些用例关注吊销/水位/快照，不关注越权边界） */
+const E2E_POLICY_ISSUERS = ['device-A', 'device-B', 'device-C', 'device-D'];
+
 async function createDevice(
   deviceId: string,
   master: CryptoKeyPair,
   masterPub: Uint8Array,
-  options: { snapshotThreshold?: number } = {},
+  options: { snapshotThreshold?: number; policyIssuers?: string[] } = {},
 ): Promise<TestDevice> {
   const identity = await createTestIdentity(deviceId);
   const certificate = await issueCertificate(master.privateKey, identity);
@@ -230,7 +371,11 @@ async function createDevice(
   const storage = new MemoryStorage();
   const eventLog = new EventLog(storage, deviceId, { signer });
   const store = new GraphStore({ storage, author: deviceId, eventLog });
-  const policy = new GraphNamespacePolicy({ eventLog, userMasterPublicKey: masterPub });
+  const policy = new GraphNamespacePolicy({
+    eventLog,
+    userMasterPublicKey: masterPub,
+    policyIssuers: options.policyIssuers ?? E2E_POLICY_ISSUERS,
+  });
   const syncManager = new SyncManager({
     eventLog,
     storage,
@@ -414,7 +559,8 @@ describe('Mebular facade：grant/revoke 记录与审计入口', () => {
       storagePath: join(dir, 'a.jsonl'),
       deviceId: 'device-A',
       encryption: masterKeys,
-      sync: { autoSync: false },
+      // 引导期签发者：本机（device-A）可签发
+      sync: { autoSync: false, policyIssuers: ['device-A'] },
     });
     await a.initialize();
 

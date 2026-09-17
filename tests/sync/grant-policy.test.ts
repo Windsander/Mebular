@@ -320,6 +320,42 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
     expect(await p.getAuthorizedNamespaces('device-B')).toEqual([]);
     expect([...(await p.getRevokedDevices())]).toContain('device-B');
   });
+
+  it('F-A：被 namespace_revoke 撤销过的 grantId 不能用来清除吊销状态', async () => {
+    const g1 = await appendGrant(trusted, 'device-D', ['nsA'], 1000); // g1
+    await trusted.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke: { grantId: g1.grantId, subject: 'device-D', issuedAt: 2000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    await appendDeviceRevoke(trusted, 'device-D', 3000); // 吊销 D
+    // 复用已被撤销的 g1 为 D 再授予
+    await trusted.append({
+      type: NAMESPACE_GRANT_EVENT,
+      data: { grant: { ...g1, namespaces: ['nsA'], issuedAt: 4000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    const p = policyWith(['issuer']);
+    // D 必须仍在吊销集合里（当前实现会把它错误清除）
+    expect([...(await p.getRevokedDevices())]).toContain('device-D');
+    expect(await p.getAuthorizedNamespaces('device-D')).toEqual([]);
+
+    // R-b 仍生效：D 发出的 device_revoke 不被采纳
+    const dLog = await makeTrustedLog(storage, master, 'device-D', { restore: true });
+    await appendDeviceRevoke(dLog, 'device-E', 5000);
+    expect([...(await p.getRevokedDevices())]).not.toContain('device-E');
+  });
+
+  it('F-A 正例：全新 grantId 的有效授权仍可正常恢复被吊销设备', async () => {
+    await appendGrant(trusted, 'device-D', ['nsA'], 1000);
+    await appendDeviceRevoke(trusted, 'device-D', 2000);
+    expect([...(await policyWith(['issuer']).getRevokedDevices())]).toContain('device-D');
+
+    await appendGrant(trusted, 'device-D', ['nsA'], 3000); // 全新 grantId
+    const p = policyWith(['issuer']);
+    expect([...(await p.getRevokedDevices())]).not.toContain('device-D');
+    expect(await p.getAuthorizedNamespaces('device-D')).toEqual(['nsA']);
+  });
 });
 
 describe('CompositeNamespacePolicy（图上 ∪ 配置；吊销优先）', () => {

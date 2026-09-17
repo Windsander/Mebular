@@ -168,92 +168,112 @@ export interface DerivePolicyOptions {
  * - **R-d**：`namespace_revoke` 按 grantId 精确失效；恢复必须用新 grantId。
  * - 主体从未出现 = 拒绝（默认拒绝不放松）。
  *
- * 实现：**按逻辑序的单遍扫描**。
- * - Phase 1 先扫出吊销集合：`device_revoke` 的签发者只要求「可信 + 未被吊销」
- *   （不要求 namespace 授权）——否则 revocation 会依赖 authorization，互吊销时
- *   会非单调振荡（PLAN 明确避免）；逻辑序在先的 revoke 胜出。
- * - Phase 2 再用**最终**吊销集合排除其签发者的全部记录（含历史），并逐条做 R-a。
- *   越权/依赖已吊销授权的下游转授会因 R-a 自然失效（级联）。
+ * 实现（F-A：`authorized` 与 `revoked` 用同一套 grant 采纳判定）：
+ * - **R-a 只有一处权威实现**（`isAuthorizedFor`），三个小步共用；
+ * - grantId 撤销集合（`revokedGrantIds`）**与顺序无关**，也全局共用；
+ * - 三次小步：
+ *   1) 时间线种子：逐条推进求一个「当前吊销集合」（含恢复），用于第 2 步的 R-b 过滤；
+ *   2) 权威授权：按该种子过滤 R-b，逐条做 R-a，产出 `authorized` 并记录**被采纳的
+ *      grantId**；
+ *   3) **重算吊销**：只用「有效 device_revoke（未被吊销的签发者发出）」与**同一批
+ *      被采纳 grant** 的清除效果，得到最终 `revoked`。
+ *
+ * 关键（F-A）：第 1、2 步在采纳/清除前都检查 `revokedGrantIds`，因此一个**已被
+ * `namespace_revoke` 撤销过的 grantId** 既不会重建授权，也**不会把设备从吊销集合里清除**；
+ * 被采纳的 grant 必须是「通过 R-a 且 grantId 未被撤销」的，故两处输出同源。
+ *
+ * 局限（已知）：第 1 步作为 R-b 过滤种子，与第 3 步的最终 `revoked` 在极端场景
+ * （恢复后又被吊销、且涉及已撤销 grantId 的链式转授）可能不同；第 2 步目前用种子过滤。
+ * 若要严格对齐，可把第 2/3 步迭代到不动点（暂不做）。
+ * 另：吊销 A 只回溯移除 A 的 grant；A 授权过的 B 再转授给 C 的那条不会被回溯移除
+ * （C 是 A 被吊销**之前**被合法转授的），B 的后续转授会因 R-a 失败。强级联需不动点。
  */
 function namespacesOf(grant: NamespaceGrantRecord): Set<string> {
   return new Set(normalizeNamespaceList(grant.namespaces));
+}
+
+/** R-a 的唯一权威判定：签发者是引导白名单成员，或其**当时**已被授权全部被授予分区 */
+function isAuthorizedFor(
+  author: string,
+  granted: Set<string>,
+  authorized: Map<string, Set<string>>,
+  bootstrap: Set<string>,
+): boolean {
+  if (bootstrap.has(author)) return true;
+  const own = authorized.get(author);
+  return own !== undefined && [...granted].every((ns) => own.has(ns));
 }
 
 export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyOptions = {}): PolicyState {
   const bootstrap = new Set(options.policyIssuers ?? []);
   const sorted = [...entries].sort(compareEntries);
 
-  // ---- Pass A：时间线（逻辑序单遍）——求「当前吊销集合」并支持恢复 ----
-  // 被吊销者的记录在线性推进中即被忽略（R-b）；一条**有效**的新 grant 会清除
-  // 其主体的吊销状态（R-d 恢复）。device_revoke 的签发者只要求可信 + 未被吊销
-  // （不要求 namespace 授权，以免 revocation 依赖 authorization 而互吊销振荡）。
-  const revoked = new Set<string>();
-  const provisional = new Map<string, Set<string>>(); // 时间线上的主体授权（供 R-a 判定）
-  const activeGrants = new Map<string, Map<string, Set<string>>>(); // subject -> grantId -> ns
-  const grantSubject = new Map<string, string>(); // grantId -> subject
-  const recompute = (subject: string): void => {
-    const set = new Set<string>();
-    const grants = activeGrants.get(subject);
-    if (grants) for (const ns of grants.values()) for (const x of ns) set.add(x);
-    if (set.size > 0) provisional.set(subject, set);
-    else provisional.delete(subject);
-  };
-
+  // grantId 撤销集合（R-d，与顺序无关）：三处共用。
+  const revokedGrantIds = new Set<string>();
   for (const entry of sorted) {
-    if (revoked.has(entry.author)) continue; // R-b：被吊销者的记录不再采纳
+    if (entry.kind === 'revoke' && entry.revoke) revokedGrantIds.add(entry.revoke.grantId);
+  }
+
+  // ---- 第 1 步：时间线种子吊销集合（含恢复），供第 2 步 R-b 过滤 ----
+  // 被撤销的 grantId 在本步永不采纳，因此无需处理 `namespace_revoke`（撤销集合已全局预收集）。
+  const seedRevoked = new Set<string>();
+  const provisional = new Map<string, Set<string>>();
+  const seedGrants = new Map<string, Map<string, Set<string>>>(); // subject -> grantId -> ns
+  for (const entry of sorted) {
+    if (seedRevoked.has(entry.author)) continue; // R-b（时间线上）
     if (entry.kind === 'grant' && entry.grant) {
+      const grantId = entry.grant.grantId;
+      if (revokedGrantIds.has(grantId)) continue; // 被撤销的 grantId 不能清除吊销（F-A）
       const granted = namespacesOf(entry.grant);
-      const own = provisional.get(entry.author);
-      const issuerOk = bootstrap.has(entry.author) || (own !== undefined && [...granted].every((ns) => own.has(ns)));
-      if (!issuerOk) continue; // R-a：不可越权授予
-      let grants = activeGrants.get(entry.grant.subject);
+      if (!isAuthorizedFor(entry.author, granted, provisional, bootstrap)) continue; // R-a
+      let grants = seedGrants.get(entry.grant.subject);
       if (!grants) {
         grants = new Map();
-        activeGrants.set(entry.grant.subject, grants);
+        seedGrants.set(entry.grant.subject, grants);
       }
-      grants.set(entry.grant.grantId, granted);
-      grantSubject.set(entry.grant.grantId, entry.grant.subject);
-      recompute(entry.grant.subject);
-      revoked.delete(entry.grant.subject); // R-d：吊销后有效新 grant → 恢复
-    } else if (entry.kind === 'revoke' && entry.revoke) {
-      const subject = grantSubject.get(entry.revoke.grantId);
-      if (subject !== undefined) {
-        activeGrants.get(subject)?.delete(entry.revoke.grantId);
-        grantSubject.delete(entry.revoke.grantId);
-        recompute(subject);
+      grants.set(grantId, granted);
+      let union = provisional.get(entry.grant.subject);
+      if (!union) {
+        union = new Set();
+        provisional.set(entry.grant.subject, union);
       }
+      for (const ns of granted) union.add(ns);
+      seedRevoked.delete(entry.grant.subject); // 被采纳的 grant → 恢复
     } else if (entry.kind === 'device' && entry.device) {
-      revoked.add(entry.device.subject);
-      activeGrants.delete(entry.device.subject);
+      seedRevoked.add(entry.device.subject);
+      seedGrants.get(entry.device.subject)?.clear();
       provisional.delete(entry.device.subject);
     }
   }
 
-  // ---- Pass B：读侧授权（权威结果）----
-  // 用**最终**吊销集合排除其签发者的**全部**记录（含历史 grant），再逐条做 R-a。
-  // 依赖已吊销权威的下游转授会因 R-a 自然失效（级联）。
-  const revokedGrantIds = new Set<string>();
-  for (const entry of sorted) {
-    if (entry.kind === 'revoke' && entry.revoke && !revoked.has(entry.author)) {
-      revokedGrantIds.add(entry.revoke.grantId); // R-d：grantId 精确撤销（与顺序无关）
-    }
-  }
+  // ---- 第 2 步：权威授权（`authorized`），并记录被采纳的 grantId ----
   const authorized = new Map<string, Set<string>>();
+  const adoptedGrantIds = new Set<string>();
   for (const entry of sorted) {
-    if (revoked.has(entry.author)) continue; // R-b：被吊销签发者的记录（含历史）不采纳
+    if (seedRevoked.has(entry.author)) continue; // R-b（按最终候选集合过滤）
     if (entry.kind !== 'grant' || !entry.grant) continue;
-    if (revokedGrantIds.has(entry.grant.grantId)) continue;
+    if (revokedGrantIds.has(entry.grant.grantId)) continue; // R-d
     const granted = namespacesOf(entry.grant);
-    if (!bootstrap.has(entry.author)) {
-      const own = authorized.get(entry.author);
-      if (!own || ![...granted].every((ns) => own.has(ns))) continue; // R-a
-    }
+    if (!isAuthorizedFor(entry.author, granted, authorized, bootstrap)) continue; // R-a
+    adoptedGrantIds.add(entry.grant.grantId);
     let set = authorized.get(entry.grant.subject);
     if (!set) {
       set = new Set();
       authorized.set(entry.grant.subject, set);
     }
     for (const ns of granted) set.add(ns);
+  }
+
+  // ---- 第 3 步：重算吊销（同一批被采纳 grant + 有效 device_revoke）----
+  // 被采纳 grant 才能清除吊销 → 被撤销的 grantId 无法“恢复”（F-A）。
+  const revoked = new Set<string>();
+  for (const entry of sorted) {
+    if (revoked.has(entry.author)) continue; // R-b（时间线上）
+    if (entry.kind === 'device' && entry.device) {
+      revoked.add(entry.device.subject);
+    } else if (entry.kind === 'grant' && entry.grant && adoptedGrantIds.has(entry.grant.grantId)) {
+      revoked.delete(entry.grant.subject);
+    }
   }
   for (const device of revoked) authorized.delete(device); // 被吊销设备读侧 []
 

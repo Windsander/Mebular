@@ -282,6 +282,21 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
     expect(await p.getAuthorizedNamespaces('device-X')).toEqual([]);
   });
 
+  it('R-b 历史连坐（F-1）：被吊销者更早发出的 device_revoke 不生效', async () => {
+    const d0Log = await makeTrustedLog(storage, master, 'device-D0');
+    await appendDeviceRevoke(d0Log, 'device-D3', 1000); // D0（当时有效）吊销 D3
+    const d4Log = await makeTrustedLog(storage, master, 'device-D4', { restore: true });
+    await appendDeviceRevoke(d4Log, 'device-D0', 2000); // 之后 D4 吊销 D0
+    // D0 已被吊销 → 其**历史** device_revoke 不采纳 → D3 不应被连带吊销
+    expect([...(await policyWith(['issuer']).getRevokedDevices())].sort()).toEqual(['device-D0']);
+  });
+
+  it('device_revoke 自吊销不采纳（语义未定义，吊销须由其他设备发起）', async () => {
+    const d0Log = await makeTrustedLog(storage, master, 'device-D0');
+    await appendDeviceRevoke(d0Log, 'device-D0', 1000); // 自指
+    expect([...(await policyWith(['issuer']).getRevokedDevices())]).not.toContain('device-D0');
+  });
+
   it('R-b 互吊销：逻辑序在先者胜，结果确定且与写入顺序无关', async () => {
     const build = async (order: 'ab' | 'ba'): Promise<string[]> => {
       const s = new MemoryStorage();
@@ -479,28 +494,27 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
     expect(await p.getAuthorizedNamespaces('device-B')).toEqual(['nsA']);
   });
 
-  it('F-C 回退综合 fail-closed：排除曾判吊销的签发者（其 grant 亦不采纳）', async () => {
-    const g = await appendGrant(deviceX, 'device-B', ['nsX'], 1000); // device-X（引导签发者）授 B
-    await trusted.append({
-      type: NAMESPACE_REVOKE_EVENT,
-      data: { revoke: { grantId: g.grantId, subject: 'device-B', issuedAt: 2000 } },
-      namespace: POLICY_NAMESPACE,
-    }); // 有效 revoke（触发未收敛）
-    await trusted.append({
-      type: DEVICE_REVOKE_EVENT,
-      data: { deviceRevoke: { subject: 'device-X', issuedAt: 3000 } },
-      namespace: POLICY_NAMESPACE,
-    }); // 吊销 device-X
+  it('F-C 回退综合 fail-closed：设备本会因 grant 而恢复（排除曾判吊销的签发者）', async () => {
+    // device-V 先吊销引导签发者 device-G；device-R 吊销 device-V；device-G 再授 device-V。
+    // 收敛到第 3 轮时 G 不在吊销集 → G 的 grant 会**恢复** V；上限 2 于第 2 轮截断 →
+    // 回退排除曾判吊销的 G（其 grant 不采纳）→ V 仍被吊销。
+    const vLog = await makeTrustedLog(storage, master, 'device-V');
+    await appendDeviceRevoke(vLog, 'device-G', 1000); // V 吊销 G
+    const rLog = await makeTrustedLog(storage, master, 'device-R', { restore: true });
+    await appendDeviceRevoke(rLog, 'device-V', 2000); // R 吊销 V
+    const gLog = await makeTrustedLog(storage, master, 'device-G', { restore: true });
+    await appendGrant(gLog, 'device-V', ['nsB'], 3000); // G 授 V（恢复）
     const p = new GraphNamespacePolicy({
       eventLog: new EventLog(storage, 'reader'),
       userMasterPublicKey: masterPub,
-      policyIssuers: ['device-X'],
-      maxIterations: 1,
+      policyIssuers: ['device-G'],
+      maxIterations: 2,
     });
     const state = await p.snapshot();
     expect(state.converged).toBe(false);
-    // 综合回退排除「曾判吊销」的 device-X → 其 grant 也不采纳（R-b 不放宽）
-    expect(await p.getAuthorizedNamespaces('device-B')).toEqual([]);
+    // 屏蔽回退时 V 会恢复（revoked 不含 V、且授权 ['nsB']）；回退下 V 仍被吊销、无授权。
+    expect([...state.revoked]).toContain('device-V');
+    expect(await p.getAuthorizedNamespaces('device-V')).toEqual([]);
   });
 
   it('未被授权但未被吊销的 namespace_revoke 仍被采纳（有意语义：撤销只受 R-b 约束）', async () => {

@@ -92,8 +92,13 @@ export class ConnectionManager extends EventEmitter {
     }
 
     const existing = this.connections.get(peerId.id);
-    if (existing) {
+    if (existing && existing.state !== 'closed' && existing.state !== 'disconnecting') {
       return existing;
+    }
+    if (existing) {
+      // 残留的死连接不得复用：先按关闭处理（触发上层清信道/会话），再拨新连接（F4）
+      this.connections.delete(peerId.id);
+      this.emit('connection-closed', existing.peerId);
     }
 
     const pending = this.pendingConnections.get(peerId.id);
@@ -257,9 +262,12 @@ export class ConnectionManager extends EventEmitter {
 
   /** 从连接表收割死连接：尽力关闭并广播超时/关闭事件；幂等（重复收割无副作用） */
   private reap(peerId: string, conn: Connection): void {
-    if (!this.connections.delete(peerId)) {
+    // 表中已换成新连接（重连）时，旧连接的迟到 ping 失败不得误删新连接（F4）
+    if (this.connections.get(peerId) !== conn) {
+      conn.close().catch(() => undefined);
       return;
     }
+    this.connections.delete(peerId);
     conn.close().catch(() => undefined);
     this.emit('connection-timeout', conn.peerId);
     this.emit('connection-closed', conn.peerId);

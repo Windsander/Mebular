@@ -307,4 +307,53 @@ describe('GraphSync Integration', () => {
     expect(await deviceB.store.getNode('forged-node')).toBeNull();
     expect(await deviceB.eventLog.getEvent(forgedEvent.id)).toBeNull();
   });
+
+  it('对端静默重启后由它拨号：存活方不命中旧信道（F4）', async () => {
+    deviceA = await createSyncDevice(hub, bus, 'device-A', master);
+    deviceB = await createSyncDevice(hub, bus, 'device-B', master);
+
+    const synced0 = awaitAutoSync(deviceA, deviceB);
+    await deviceA.node.start();
+    await deviceB.node.start();
+    await waitFor(() => deviceA.node.getDiscovery()?.getPeer(deviceB.node.peerId) != null);
+    await deviceA.node.connectToPeer(deviceB.node.peerId);
+    await synced0;
+
+    // B 静默下线（不触发 A 的 connection-closed），A 保持在线并写入
+    await deviceB.node.stop();
+    const n = await deviceA.store.createNode('fact', { text: 'B 离线期间的写入' });
+
+    // B 重启（同身份）并主动拨号 A：存活方是发起方（device-A）
+    await deviceB.node.start();
+    const synced = awaitAutoSync(deviceA, deviceB);
+    await waitFor(() => deviceB.node.getDiscovery()?.getPeer(deviceA.node.peerId) != null);
+    await deviceB.node.connectToPeer(deviceA.node.peerId);
+    await synced;
+
+    expect((await deviceB.store.getNode(n.id))?.content).toEqual({ text: 'B 离线期间的写入' });
+  });
+
+  it('存活方为拨号方：对端重启后重拨不被旧连接/会话挡住（F4）', async () => {
+    deviceA = await createSyncDevice(hub, bus, 'device-A', master);
+    deviceB = await createSyncDevice(hub, bus, 'device-B', master);
+
+    const synced0 = awaitAutoSync(deviceA, deviceB);
+    await deviceA.node.start();
+    await deviceB.node.start();
+    await waitFor(() => deviceA.node.getDiscovery()?.getPeer(deviceB.node.peerId) != null);
+    await deviceA.node.connectToPeer(deviceB.node.peerId);
+    await synced0;
+
+    // A 静默下线，B 保持在线并写入；随后 A 重启，由 B 主动重拨
+    await deviceA.node.stop();
+    const n = await deviceB.store.createNode('fact', { text: 'A 离线期间的写入' });
+
+    await deviceA.node.start();
+    const synced = awaitAutoSync(deviceA, deviceB);
+    await waitFor(() => deviceB.node.getDiscovery()?.getPeer(deviceA.node.peerId) != null);
+    await deviceB.node.connectToPeer(deviceA.node.peerId);
+    await synced;
+
+    expect((await deviceA.store.getNode(n.id))?.content).toEqual({ text: 'A 离线期间的写入' });
+  });
 });

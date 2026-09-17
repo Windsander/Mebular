@@ -311,10 +311,21 @@ export class P2PNode implements P2PNetwork {
     if (!this.running) {
       throw new NetworkError('P2P node not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
+    // 活连接上已认证：复用现有信道，不重复握手
+    const existingSession = this.handshake.getSession(connection.peerId);
+    if (
+      existingSession?.state === 'authenticated' &&
+      connection.isAuthenticated() &&
+      connection.state !== 'closed' &&
+      connection.state !== 'disconnecting'
+    ) {
+      return true;
+    }
+    // 重连：在握手完成（authenticated 事件）前作废旧信道——
+    // 消费者在 getChannel 中会等待基于新连接的信道，而不是命中死信道（F4）
+    this.channels.delete(connection.peerId.id);
     const session = await this.handshake.initiateAuth(connection);
     if (session.state === 'authenticated') {
-      // 重连时会话可能复用同一 peerId：丢弃旧信道，基于新连接重建（G3-R）
-      this.channels.delete(connection.peerId.id);
       this.prepareChannel(connection);
       return true;
     }
@@ -324,11 +335,11 @@ export class P2PNode implements P2PNetwork {
   /** 被动接入：完成对端发起的认证，认证成功后登记连接并准备信道 */
   private async handleIncomingConnection(connection: Connection): Promise<void> {
     try {
+      // 重连：acceptAuth 完成即触发 authenticated 事件，必须在事件前清掉旧信道（F4）
+      this.channels.delete(connection.peerId.id);
       const session = await this.handshake.acceptAuth(connection);
       if (session.state === 'authenticated') {
         this.connectionManager.setConnection(connection.peerId, connection);
-        // 重连时会话可能复用同一 peerId：丢弃旧信道，基于新连接重建（G3-R）
-        this.channels.delete(connection.peerId.id);
         this.prepareChannel(connection);
       }
     } catch (error) {
@@ -453,8 +464,9 @@ export class P2PNode implements P2PNetwork {
   }
 
   /**
-   * 取得到对端的加密信道。认证完成时信道异步建立，
+   * 取得到端的加密信道。认证完成时信道异步建立，
    * timeoutMs 内轮询等待其就绪（默认 5s），超时返回 null。
+   * 绑定已关闭连接的残留信道不返回：继续等待重连后的新信道（F4）。
    */
   async getChannel(peerId: PeerId, timeoutMs = 5000): Promise<SecureChannel | null> {
     const deadline = Date.now() + timeoutMs;
@@ -462,7 +474,10 @@ export class P2PNode implements P2PNetwork {
       const pending = this.channels.get(peerId.id);
       if (pending) {
         try {
-          return await pending;
+          const channel = await pending;
+          if (channel.connection.state !== 'closed' && channel.connection.state !== 'disconnecting') {
+            return channel;
+          }
         } catch {
           // 建信道失败的条目会被移除，继续轮询等待重建
         }

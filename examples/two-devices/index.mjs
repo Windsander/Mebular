@@ -56,12 +56,9 @@ await b.shutdown();
 const offline = await a.graph.createNode('fact', { text: 'A 在 B 离线期间写入' });
 console.log('· B 已停机；A 在离线期间写入一条记忆');
 
-// 3. B 重启（同一存储与身份），重连后自动补同步。
-//    注意：存活侧（A）需先断开旧连接——否则旧的会话/信道状态会挡住新握手
-//    （已知重连缺陷 F4，见 docs.design/local-verify-namespace-2026-09-16.md）。
+// 3. B 重启（同一存储与身份），重连后自动补同步
 b = makeDevice('device-B', 'device-A');
 await b.initialize();
-await a.node.disconnectPeer(b.node.peerId);
 await b.node.connectToPeer(a.node.peerId);
 if (!(await waitForNode(b, offline.id))) throw new Error('重连后未补同步离线期间的写入');
 console.log('✓ 重连补同步：B 重启后拿到离线期间的写入');

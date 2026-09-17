@@ -42,6 +42,9 @@ Thumbs.db
 .parcel-cache/
 .eslintcache
 
+# OpenChamber 浏览器面板产物（截图等）
+.openchamber/
+
 # Testing
 coverage
 .nyc_output

@@ -58,7 +58,7 @@ export async function startStdioServer() {
  * 单实例：先取 <home>/lock；被占抛 MCP_STORAGE_LOCKED。
  */
 export async function startServeServer(options = {}) {
-  const { app, home, storagePath } = await createMebular();
+  const { app, home, storagePath, config } = await createMebular();
   const lock = await acquireLock(home, storagePath);
   try {
     const service = new MemoryService(app);
@@ -66,6 +66,7 @@ export async function startServeServer(options = {}) {
       home,
       app,
       service,
+      config,
       buildServer,
       host: options.host,
       port: options.port,

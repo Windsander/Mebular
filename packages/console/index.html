@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Mebular 控制台</title>
+  <link rel="stylesheet" href="./console.css" />
+</head>
+<body>
+  <div id="app" class="app">
+    <header class="topbar">
+      <div class="brand"><span class="brand-star">✦</span> Mebular 控制台</div>
+      <div class="topbar-identity">
+        <span id="self-badge" class="badge badge-self">本机 · …</span>
+        <span id="online-badge" class="badge badge-muted">○ 未知</span>
+        <span id="memory-badge" class="badge badge-muted">记忆 …</span>
+      </div>
+      <div class="topbar-actions">
+        <button id="add-device" class="btn btn-primary" type="button">＋ 添加设备</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav class="sidebar">
+        <ul id="view-nav" class="view-nav">
+          <li><button class="view-btn is-active" data-view="map" type="button">● 星图</button></li>
+          <li><button class="view-btn" data-view="domains" type="button">○ 域视图</button></li>
+          <li><button class="view-btn" data-view="audit" type="button">○ 审计</button></li>
+        </ul>
+        <div class="legend">
+          <h2>域图例</h2>
+          <ul id="namespace-legend" class="legend-list"></ul>
+          <h2>边</h2>
+          <ul class="legend-list legend-edges">
+            <li><span class="edge-swatch edge-mine"></span>我授权它</li>
+            <li><span class="edge-swatch edge-theirs"></span>它授权我</li>
+            <li><span class="edge-swatch edge-offline"></span>离线 / 待接通</li>
+            <li><span class="edge-swatch edge-revoked"></span>已撤销</li>
+          </ul>
+        </div>
+      </nav>
+
+      <main class="stage-wrap">
+        <div id="banner" class="banner" hidden></div>
+        <canvas id="stage" class="stage" aria-label="网络星图"></canvas>
+        <div id="tooltip" class="tooltip" hidden></div>
+        <div id="empty-state" class="empty-state" hidden></div>
+        <section id="domains-view" class="panel-view" hidden>
+          <h2>域视图</h2>
+          <table class="table">
+            <thead><tr><th>分区</th><th>记忆数</th><th>最近更新</th><th>状态哈希</th></tr></thead>
+            <tbody id="domains-body"></tbody>
+          </table>
+        </section>
+        <section id="audit-view" class="panel-view" hidden>
+          <div class="audit-toolbar">
+            <h2>审计时间线</h2>
+            <div class="audit-filters">
+              <select id="audit-filter-action" aria-label="按动作过滤">
+                <option value="">全部动作</option>
+                <option value="namespace_grant">授权</option>
+                <option value="namespace_revoke">撤销域</option>
+                <option value="device_revoke">吊销设备</option>
+              </select>
+              <select id="audit-filter-device" aria-label="按设备过滤"><option value="">全部设备</option></select>
+              <select id="audit-filter-namespace" aria-label="按域过滤"><option value="">全部域</option></select>
+              <button id="audit-export" class="btn" type="button">导出 JSON</button>
+            </div>
+          </div>
+          <ol id="audit-list" class="audit-list"></ol>
+        </section>
+      </main>
+
+      <aside class="aside">
+        <section id="device-card" class="card">
+          <h2>设备卡</h2>
+          <p class="muted" id="device-card-empty">点击星图上的设备查看详情。</p>
+          <div id="device-card-body" hidden></div>
+        </section>
+      </aside>
+    </div>
+  </div>
+
+  <div id="modal" class="modal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <h2 id="modal-title"></h2>
+      <p id="modal-body"></p>
+      <div class="modal-actions">
+        <button id="modal-cancel" class="btn" type="button">取消</button>
+        <button id="modal-confirm" class="btn btn-danger" type="button">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="./starfield.js"></script>
+  <script type="module" src="./console.js"></script>
+</body>
+</html>

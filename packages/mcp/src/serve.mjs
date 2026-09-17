@@ -11,8 +11,10 @@ import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { TOOL_SCOPES } from './tools.mjs';
+import { READ_ROUTES } from './admin.mjs';
 
 const SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
 const SCOPE_RANK = { 'memory.read': 0, 'memory.write': 1, 'memory.admin': 2 };
@@ -20,6 +22,84 @@ const DEFAULT_SCOPES = ['memory.read'];
 const ACCESS_TTL = 900; // 15min
 const REFRESH_TTL = 30 * 24 * 3600; // 30d
 const RATE_WINDOW_MS = 60_000;
+
+// ---------- 控制台静态托管（D1） ----------
+// 路径白名单：只认识这几个确切文件名，天然防目录穿越。允许 MEBULAR_CONSOLE_DIR 覆盖。
+const CONSOLE_DIR =
+  process.env.MEBULAR_CONSOLE_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'console');
+const CONSOLE_FILES = {
+  'index.html': 'text/html; charset=utf-8',
+  'console.css': 'text/css; charset=utf-8',
+  'console.js': 'text/javascript; charset=utf-8',
+  'starfield.js': 'text/javascript; charset=utf-8',
+};
+
+// CSRF：页面加载签发（SameSite=Strict cookie + 响应头），写请求要求头与 cookie 双提交且 token 在签发集合内。
+const CSRF_COOKIE = 'mebular_csrf';
+const CSRF_TTL_MS = 12 * 3600_000;
+const issuedCsrf = new Map(); // token -> expiresAt
+
+function issueCsrf() {
+  const token = randomUUID().replace(/-/g, '');
+  issuedCsrf.set(token, Date.now() + CSRF_TTL_MS);
+  if (issuedCsrf.size > 512) {
+    const now = Date.now();
+    for (const [key, exp] of issuedCsrf) if (exp < now) issuedCsrf.delete(key);
+  }
+  return token;
+}
+
+function parseCookies(header) {
+  const out = {};
+  if (typeof header !== 'string') return out;
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return out;
+}
+
+function csrfValid(req) {
+  const header = req.headers['x-mebular-csrf'];
+  const token = typeof header === 'string' ? header : '';
+  if (!token || !issuedCsrf.has(token)) return false;
+  if ((issuedCsrf.get(token) ?? 0) < Date.now()) {
+    issuedCsrf.delete(token);
+    return false;
+  }
+  const cookie = parseCookies(req.headers['cookie'])[CSRF_COOKIE];
+  return cookie === token;
+}
+
+function consoleSecurityHeaders(res, { tls = false } = {}) {
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('referrer-policy', 'no-referrer');
+  res.setHeader('x-frame-options', 'DENY');
+  res.setHeader(
+    'content-security-policy',
+    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+  );
+  void tls;
+}
+
+async function sendConsoleFile(res, file) {
+  const resolved = join(CONSOLE_DIR, file);
+  let content;
+  try {
+    content = await readFile(resolved);
+  } catch {
+    return sendJson(res, 404, {
+      error: 'console_not_found',
+      message: `未找到控制台资源 ${file}（${resolved}）。请确认 packages/console 存在，或用 MEBULAR_CONSOLE_DIR 指定。`,
+    });
+  }
+  res.statusCode = 200;
+  res.setHeader('content-type', CONSOLE_FILES[file]);
+  res.setHeader('cache-control', file === 'index.html' ? 'no-store' : 'no-cache');
+  consoleSecurityHeaders(res);
+  res.end(content);
+}
 
 function safeEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -333,7 +413,22 @@ function hasScope(granted, required) {
  * 启动 HTTP MCP server。
  * @returns {Promise<{ server: import('node:http').Server, host: string, port: number, auth: string, close: () => Promise<void> }>}
  */
-export async function startHttpServer({ home, service, buildServer, host = '127.0.0.1', port = 7331, auth = 'none', tls = false, tlsKey, tlsCert, tokensFile }) {
+export async function startHttpServer({
+  home,
+  app,
+  service,
+  config,
+  buildServer,
+  host = '127.0.0.1',
+  port = 7331,
+  auth = 'none',
+  tls = false,
+  tlsKey,
+  tlsCert,
+  tokensFile,
+  // D1 只读；D2 打开写端点（仍需 memory.admin scope + CSRF）
+  writesEnabled = false,
+}) {
   const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
   if (!isLoopback && (auth === 'none' || !tls)) {
     const error = new Error(
@@ -374,7 +469,7 @@ export async function startHttpServer({ home, service, buildServer, host = '127.
   });
   await mcpServer.connect(transport);
 
-  async function authenticate(req, body) {
+  async function authenticate(req, body, requiredScope = null) {
     if (auth === 'none') return { ok: true };
     const header = req.headers['authorization'];
     if (typeof header !== 'string' || !header.startsWith('Bearer ')) {
@@ -391,11 +486,90 @@ export async function startHttpServer({ home, service, buildServer, host = '127.
     if (!grant) {
       return { ok: false, status: 401, message: 'invalid token', challenge: 'Bearer error="invalid_token"' };
     }
-    const required = requiredScopeForBody(body);
+    const required = requiredScope ?? requiredScopeForBody(body);
     if (!hasScope(grant.scopes, required)) {
       return { ok: false, status: 403, message: `insufficient scope: need ${required}`, challenge: `Bearer error="insufficient_scope", scope="${required}"`, tokenId: grant.tokenId };
     }
     return { ok: true, tokenId: grant.tokenId, scopes: grant.scopes };
+  }
+
+  // ---------- 控制台路由（D1 只读 + 写端点 CSRF/scope 门） ----------
+
+  function setCsrfCookie(res, token) {
+    const attrs = [`${CSRF_COOKIE}=${token}`, 'Path=/', 'SameSite=Strict', `Max-Age=${Math.floor(CSRF_TTL_MS / 1000)}`];
+    if (tls) attrs.push('Secure');
+    res.setHeader('set-cookie', attrs.join('; '));
+  }
+
+  async function handleConsole(req, res, url) {
+    const path = url.pathname;
+    if (path === '/console' || path === '/console/' || path === '/console/index.html') {
+      const token = issueCsrf();
+      setCsrfCookie(res, token);
+      res.setHeader('x-mebular-csrf', token);
+      return sendConsoleFile(res, 'index.html');
+    }
+    if (path.startsWith('/console/')) {
+      const file = path.slice('/console/'.length);
+      if (Object.prototype.hasOwnProperty.call(CONSOLE_FILES, file)) {
+        return sendConsoleFile(res, file);
+      }
+      return sendJson(res, 404, { error: 'console_not_found', path });
+    }
+    return sendJson(res, 404, { error: 'not_found', path });
+  }
+
+  async function handleAdminRead(req, res, path) {
+    const builder = READ_ROUTES[path];
+    if (!builder) return false;
+    if (!app || !service) {
+      return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
+    }
+    const check = await authenticate(req, Buffer.alloc(0), 'memory.read');
+    if (!check.ok) {
+      res.statusCode = check.status;
+      if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+      return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
+    }
+    if (path === '/admin/api/overview') {
+      const token = issueCsrf();
+      setCsrfCookie(res, token);
+      res.setHeader('x-mebular-csrf', token);
+    }
+    const payload = await builder({ app, service, config });
+    if (path === '/admin/api/overview') {
+      payload.features = { writes: Boolean(writesEnabled) };
+    }
+    return sendJson(res, 200, payload);
+  }
+
+  // D2 注入写实现；D1 保持 null（写端点恒 403 console_read_only）
+  let applyAdminWrite = null;
+
+  const WRITE_PATTERNS = [
+    /^\/admin\/api\/grants$/,
+    /^\/admin\/api\/grants\/[^/]+\/revoke$/,
+    /^\/admin\/api\/devices\/[^/]+\/(revoke|connect|disconnect|sync|reset-watermarks)$/,
+  ];
+
+  async function handleAdminWrite(req, res, path, body) {
+    if (!WRITE_PATTERNS.some((re) => re.test(path))) return false;
+    // 1) 鉴权（写操作要求 memory.admin）
+    const check = await authenticate(req, Buffer.alloc(0), 'memory.admin');
+    if (!check.ok) {
+      res.statusCode = check.status;
+      if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+      return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
+    }
+    // 2) CSRF 双提交
+    if (!csrfValid(req)) {
+      return sendJson(res, 403, { error: 'forbidden', message: 'CSRF token 缺失或无效' });
+    }
+    // 3) D1：只读降级；D2 起由 applyAdminWrite 处理
+    if (!writesEnabled || typeof applyAdminWrite !== 'function') {
+      return sendJson(res, 403, { error: 'forbidden', reason: 'console_read_only' });
+    }
+    return applyAdminWrite(req, res, path, body);
   }
 
   const handler = async (req, res) => {
@@ -563,6 +737,17 @@ export async function startHttpServer({ home, service, buildServer, host = '127.
           }
           return sendJson(res, 200, {});
         }
+      }
+      if (path === '/console' || path.startsWith('/console/')) {
+        return handleConsole(req, res, url);
+      }
+      if (path.startsWith('/admin/api/')) {
+        if (req.method === 'GET' && READ_ROUTES[path]) return handleAdminRead(req, res, path);
+        if (req.method === 'POST') {
+          const done = await handleAdminWrite(req, res, path, body);
+          if (done !== false) return;
+        }
+        return sendJson(res, 404, { error: 'not_found', path });
       }
       if (path === '/mcp') {
         const check = await authenticate(req, body);

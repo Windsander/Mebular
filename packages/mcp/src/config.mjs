@@ -118,6 +118,9 @@ export async function createMebular() {
         ? { peerNamespacePolicy: config.sync.peerNamespacePolicy }
         : {}),
       ...(Array.isArray(config.sync?.namespaces) ? { namespaces: config.sync.namespaces } : {}),
+      // 引导期策略签发者白名单（R-a）：图上 grant-as-memory 的 bootstrap 路径，
+      // 未透传会让本机签发的 grant 无法被采纳（控制台域开关会显示为空）。
+      ...(Array.isArray(config.sync?.policyIssuers) ? { policyIssuers: config.sync.policyIssuers } : {}),
     },
     semantic: {
       enabled: truthy(process.env.MEBULAR_SEMANTIC_ENABLED, config.semantic?.enabled ?? false),

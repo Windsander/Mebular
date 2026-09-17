@@ -168,25 +168,22 @@ export interface DerivePolicyOptions {
  * - **R-d**：`namespace_revoke` 按 grantId 精确失效；恢复必须用新 grantId。
  * - 主体从未出现 = 拒绝（默认拒绝不放松）。
  *
- * 实现（F-A：`authorized` 与 `revoked` 用同一套 grant 采纳判定）：
- * - **R-a 只有一处权威实现**（`isAuthorizedFor`），三个小步共用；
- * - grantId 撤销集合（`revokedGrantIds`）**与顺序无关**，也全局共用；
- * - 三次小步：
- *   1) 时间线种子：逐条推进求一个「当前吊销集合」（含恢复），用于第 2 步的 R-b 过滤；
- *   2) 权威授权：按该种子过滤 R-b，逐条做 R-a，产出 `authorized` 并记录**被采纳的
- *      grantId**；
- *   3) **重算吊销**：只用「有效 device_revoke（未被吊销的签发者发出）」与**同一批
- *      被采纳 grant** 的清除效果，得到最终 `revoked`。
+ * 实现：**有界不动点**。R-a 只有一处权威实现（`isAuthorizedFor`）；单轮 `deriveOnce`
+ * 由三步组成：①时间线种子吊销 → ②权威授权并记录**被采纳的 grantId** → ③用同一批被采纳
+ * grant 重算吊销。故 `authorized` 与 `revoked` 同源（F-A）。
  *
- * 关键（F-A）：第 1、2 步在采纳/清除前都检查 `revokedGrantIds`，因此一个**已被
- * `namespace_revoke` 撤销过的 grantId** 既不会重建授权，也**不会把设备从吊销集合里清除**；
- * 被采纳的 grant 必须是「通过 R-a 且 grantId 未被撤销」的，故两处输出同源。
+ * **为何需要不动点（循环依赖）**：`revokedGrantIds` 必须**排除被吊销签发者发出的
+ * `namespace_revoke`**（R-b，F-B），而“某签发者是否被吊销”又依赖 grant 采纳，grant 采纳
+ * 又依赖 `revokedGrantIds`。于是以「全部 revoke」为种子迭代：每轮用**权威 `revoked`**
+ * 重新过滤 `revokedGrantIds`，直到同输入产出同结果（稳定）或到达上限。
  *
- * 局限（已知）：第 1 步作为 R-b 过滤种子，与第 3 步的最终 `revoked` 在极端场景
- * （恢复后又被吊销、且涉及已撤销 grantId 的链式转授）可能不同；第 2 步目前用种子过滤。
- * 若要严格对齐，可把第 2/3 步迭代到不动点（暂不做）。
- * 另：吊销 A 只回溯移除 A 的 grant；A 授权过的 B 再转授给 C 的那条不会被回溯移除
- * （C 是 A 被吊销**之前**被合法转授的），B 的后续转授会因 R-a 失败。强级联需不动点。
+ * **终止条件与回退**：迭代次数有固定上限 `FIXPOINT_MAX_ITERATIONS`，绝不接受无法收敛的
+ * 链路；若上限内未稳定，**回退到种子结果**（第一轮，等价于不按签发者吊销过滤 revoke），
+ * 作为已知的系统边界。全过程仅由 `compareEntries` 的确定序驱动，故同一输入在任何端得到
+ * 同一结果（`revokedGrantIds` 与 `revoked` 都是确定集合）。
+ *
+ * 级联：吊销 A → A 的 grant 失效 → 依赖它的 B 在权威授权步因 R-a 失去授权 → B 的转授
+ * 也随之不生效（无需额外回溯，见测试）。
  */
 function namespacesOf(grant: NamespaceGrantRecord): Set<string> {
   return new Set(normalizeNamespaceList(grant.namespaces));
@@ -197,25 +194,30 @@ function isAuthorizedFor(
   author: string,
   granted: Set<string>,
   authorized: Map<string, Set<string>>,
-  bootstrap: Set<string>,
+  bootstrap: ReadonlySet<string>,
 ): boolean {
   if (bootstrap.has(author)) return true;
   const own = authorized.get(author);
   return own !== undefined && [...granted].every((ns) => own.has(ns));
 }
 
-export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyOptions = {}): PolicyState {
-  const bootstrap = new Set(options.policyIssuers ?? []);
-  const sorted = [...entries].sort(compareEntries);
+/** 不动点迭代上限（有界，防死循环） */
+const FIXPOINT_MAX_ITERATIONS = 3;
 
-  // grantId 撤销集合（R-d，与顺序无关）：三处共用。
-  const revokedGrantIds = new Set<string>();
-  for (const entry of sorted) {
-    if (entry.kind === 'revoke' && entry.revoke) revokedGrantIds.add(entry.revoke.grantId);
-  }
+function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const value of a) if (!b.has(value)) return false;
+  return true;
+}
 
+/** 单轮推导：给定 grantId 撤销集合，产出 `authorized` 与 `revoked`（同源采纳判定） */
+function deriveOnce(
+  sorted: ParsedEntry[],
+  bootstrap: ReadonlySet<string>,
+  revokedGrantIds: ReadonlySet<string>,
+): PolicyState {
   // ---- 第 1 步：时间线种子吊销集合（含恢复），供第 2 步 R-b 过滤 ----
-  // 被撤销的 grantId 在本步永不采纳，因此无需处理 `namespace_revoke`（撤销集合已全局预收集）。
+  // 被撤销的 grantId 在本步永不采纳，因此无需处理 `namespace_revoke`（撤销集合已给定）。
   const seedRevoked = new Set<string>();
   const provisional = new Map<string, Set<string>>();
   const seedGrants = new Map<string, Map<string, Set<string>>>(); // subject -> grantId -> ns
@@ -280,6 +282,40 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
   const out = new Map<string, string[]>();
   for (const [subject, set] of authorized) out.set(subject, [...set]);
   return { authorized: out, revoked };
+}
+
+/**
+ * 推导入口：以「全部 revoke」为种子做**有界不动点**（见文件顶部说明）。
+ * 每轮用权威 `revoked` 过滤掉被吊销签发者发出的 revoke（R-b），重新单轮推导，
+ * 直到稳定或到达上限；未稳定则回退种子结果。
+ */
+export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyOptions = {}): PolicyState {
+  const bootstrap = new Set(options.policyIssuers ?? []);
+  // 排序唯一确定迭代顺序，保证同一输入在任何端得到同一结果。
+  const sorted = [...entries].sort(compareEntries);
+
+  const allRevokeIds = new Set<string>();
+  for (const entry of sorted) {
+    if (entry.kind === 'revoke' && entry.revoke) allRevokeIds.add(entry.revoke.grantId);
+  }
+
+  const seed = deriveOnce(sorted, bootstrap, allRevokeIds);
+  let revokedGrantIds = allRevokeIds;
+  let current = seed;
+  for (let i = 0; i < FIXPOINT_MAX_ITERATIONS; i++) {
+    const next = new Set<string>();
+    for (const entry of sorted) {
+      // R-b：被吊销签发者发出的 namespace_revoke 不采纳（F-B）
+      if (entry.kind === 'revoke' && entry.revoke && !current.revoked.has(entry.author)) {
+        next.add(entry.revoke.grantId);
+      }
+    }
+    if (setsEqual(next, revokedGrantIds)) return current; // 稳定
+    revokedGrantIds = next;
+    current = deriveOnce(sorted, bootstrap, revokedGrantIds);
+  }
+  // 到达上限仍未稳定 → 回退种子结果（有界、确定）
+  return seed;
 }
 
 /**

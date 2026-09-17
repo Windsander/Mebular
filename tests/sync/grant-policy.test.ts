@@ -356,6 +356,79 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
     expect([...(await p.getRevokedDevices())]).not.toContain('device-D');
     expect(await p.getAuthorizedNamespaces('device-D')).toEqual(['nsA']);
   });
+
+  it('F-B：被吊销签发者发出的 namespace_revoke 不得生效（R-b）', async () => {
+    const g = await appendGrant(trusted, 'device-B', ['nsA'], 1000); // 有效授权
+    await appendDeviceRevoke(trusted, 'device-D', 2000); // 吊销 D
+    const dLog = await makeTrustedLog(storage, master, 'device-D', { restore: true });
+    await dLog.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke: { grantId: g.grantId, subject: 'device-B', issuedAt: 3000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    // D 已被吊销 → 它发出的 revoke 不采纳：B 的授权仍在
+    expect(await policyWith(['issuer']).getAuthorizedNamespaces('device-B')).toEqual(['nsA']);
+  });
+
+  it('F-B 正例：有效签发者的 namespace_revoke 仍生效', async () => {
+    const g = await appendGrant(trusted, 'device-B', ['nsA'], 1000);
+    await trusted.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke: { grantId: g.grantId, subject: 'device-B', issuedAt: 2000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    expect(await policyWith(['issuer']).getAuthorizedNamespaces('device-B')).toEqual([]);
+  });
+
+  it('F-B 确定性：条目顺序打乱不影响结果（含被吊销者的 revoke）；重复读稳定', async () => {
+    // 用同一批（签名/向量时钟固定）事件，按不同顺序写入两个存储
+    const src = new MemoryStorage();
+    const issuerLog = await makeTrustedLog(src, master, 'issuer');
+    const issuer2Log = await makeTrustedLog(src, master, 'issuer2');
+    const g = await appendGrant(issuerLog, 'device-B', ['nsA'], 1000);
+    await appendDeviceRevoke(issuerLog, 'device-D', 2000);
+    const dLog = await makeTrustedLog(src, master, 'device-D', { restore: true });
+    await dLog.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke: { grantId: g.grantId, subject: 'device-B', issuedAt: 3000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    await appendDeviceRevoke(issuer2Log, 'device-E', 4000);
+    const events = await src.listEvents();
+
+    const build = async (list: typeof events): Promise<GraphNamespacePolicy> => {
+      const s = new MemoryStorage();
+      for (const e of list) await s.putEvent(e);
+      return new GraphNamespacePolicy({
+        eventLog: new EventLog(s, 'reader'),
+        userMasterPublicKey: masterPub,
+        policyIssuers: ['issuer', 'issuer2'],
+      });
+    };
+    const p1 = await build(events);
+    const p2 = await build([...events].reverse());
+    const snap = async (p: GraphNamespacePolicy) => ({
+      b: await p.getAuthorizedNamespaces('device-B'),
+      revoked: [...(await p.getRevokedDevices())].sort(),
+    });
+    const r1 = await snap(p1);
+    expect(await snap(p2)).toEqual(r1); // 顺序无关
+    expect(await snap(p1)).toEqual(r1); // 重复读稳定（不动点不振荡）
+    // 被吊销者 D 的 revoke 不生效：B 仍授权
+    expect(r1.b).toEqual(['nsA']);
+  });
+
+  it('强级联确认：A 被吊销 → B 失去授权 → B 转授给 C 的那条也不生效（R-a 已足够）', async () => {
+    await appendGrant(trusted, 'device-B', ['nsX'], 1000); // A=issuer 授 B
+    const bLog = await makeTrustedLog(storage, master, 'device-B', { restore: true }); // 因果在后
+    await appendGrant(bLog, 'device-C', ['nsX'], 2000); // B 转授 C
+    expect(await policyWith(['issuer']).getAuthorizedNamespaces('device-C')).toEqual(['nsX']);
+
+    await appendDeviceRevoke(trusted2, 'issuer', 3000); // A 被 issuer2 吊销
+    const p = policyWith(['issuer', 'issuer2']);
+    expect(await p.getAuthorizedNamespaces('device-B')).toEqual([]);
+    expect(await p.getAuthorizedNamespaces('device-C')).toEqual([]); // 级联生效
+  });
 });
 
 describe('CompositeNamespacePolicy（图上 ∪ 配置；吊销优先）', () => {

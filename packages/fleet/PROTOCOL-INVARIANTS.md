@@ -47,7 +47,23 @@
 
 `anomalies` 必须为 0（断言），任何性质破坏都会以 `fail(...)` 抛出并计数。
 
-## 4. 准入与回归纪律
+## 4. M4：Agent 路由与适配器（目标一）
+
+| 单元 | 期望 | 覆盖测试 |
+|---|---|---|
+| Agent 路由 | 按 `to.agent` **精确**选择执行器；`'*'` 仅匹配 `to.agent === '*'` | `ExecutorRegistry：按 agent 名字路由` · `通配 "*" 只在 to.agent 为 "*" 时命中` · verify `agent=echo/fake` |
+| 未知 agent | **显式失败**（`failed`，`reason = UNKNOWN_AGENT: <name>`），**不静默回退**到 echo | `FleetWorker：注册表 + 未知 agent 显式失败` · verify `agent=nope` |
+| 适配器超时 | `failed`，`reason = TIMEOUT after <ms>ms`；进程被 kill | `超时：failed 带 TIMEOUT 原因` · verify `agent=slow` |
+| 适配器非零退出 | `failed`，`reason = EXIT_<code>: <stderr 尾巴>` | `非零退出：failed 带 exit code 与 stderr 尾巴` · verify `agent=fail` |
+| stdout 截断 | 按**字节**截断并附 `…[truncated N bytes]`；成功结果 = 截断后 stdout | `输出超限：按字节截断并附标记` · `成功：结果为 stdout（截断）` · verify `agent=big` |
+| 参数数组传参 | prompt 作为**单个参数**、无 shell 求值（防注入） | `参数数组传参：prompt 作为单个参数、无 shell 解释（防注入）` |
+| 并发上限 | 可配；同一执行器实例内 FIFO 串行 | `并发上限可配：concurrency=1 串行、=2 并行` |
+| Hermes argv | `[-p P][-t T][-m M][--in DIR] -z <prompt> --usage-file <tmp>`；成功解析 `usage.session_id` | `拼出 hermes 参数（-p/-t/-m/--in/-z/--usage-file）` · `成功解析 usage.session_id` |
+| 不安全面 | 不打印/不落盘 env 值；`CommandAgent` 以 `spawn(command, args)` 传参（无 shell） | `参数数组传参…`（断言无 shell 求值） |
+
+真实验收：`npm run verify:fleet:agents`（真实 libp2p loopback + 确定性 fake agent，9/9）；真实 Hermes 一次性调用见阶段报告（`hermes -z` 返回约定 token）。
+
+## 5. 准入与回归纪律
 
 - 改动 `packages/fleet/src/**` 或 `packages/fleet/protocol/**`：先更新本矩阵对应格 + 加/改测试；
   并跑 harness（上）与 `tests/fleet/*` 全绿。

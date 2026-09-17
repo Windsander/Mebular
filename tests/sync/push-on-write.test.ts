@@ -3,14 +3,16 @@
 // 覆盖验收 4：写入后对端在阈值内收到（InMemoryHub 单进程双节点夹具）。
 // 开关缺省关闭；节流把连续写入合并为一次推送；对端未订阅的分区不推送。
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { mkdtemp, rm } from 'fs/promises';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { Mebular } from '../../src/mebular.js';
 import { IdentityManager } from '../../src/crypto/IdentityManager.js';
 import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
-import type { SyncResult } from '../../src/sync/syncmgr/SyncManager.js';
+import { SyncManager, type SyncResult } from '../../src/sync/syncmgr/SyncManager.js';
+import { EventLog } from '../../src/eventlog/EventLog.js';
+import { MemoryStorage } from '../../src/storage/MemoryStorage.js';
 
 describe('push-on-write', () => {
   let dir: string;
@@ -134,5 +136,75 @@ describe('push-on-write', () => {
 
     await a.shutdown();
     await b.shutdown();
+  });
+
+  it('双向（H）：响应方（device-B）写入，发起方（device-A）经 nudge 在阈值内收到', async () => {
+    const hub = new InMemoryHub();
+    const a = makeFacade('device-A', hub);
+    const b = makeFacade('device-B', hub);
+    await a.initialize();
+    await b.initialize();
+    await connectAndSettle(a, b);
+
+    // 发起方 A 上的下一轮 sync-completed 只能是 B 发起 nudge 触发的会话
+    const applied = new Promise<SyncResult>((resolve) => a.sync.once('sync-completed', resolve));
+    const node = await b.graph.createNode('fact', { text: 'from-responder' }, [], { namespace: 'task' });
+    await applied;
+
+    expect(await a.graph.getNode(node.id)).not.toBeNull();
+
+    await a.shutdown();
+    await b.shutdown();
+  });
+
+  it('未授权不发（H）：本机写入未授权分区不触发对端同步', async () => {
+    const hub = new InMemoryHub();
+    // A 只授权 B 接收 taskA；写入 taskB 不应触发任何同步
+    const a = makeFacade('device-A', hub, { peerNamespacePolicy: { 'device-B': ['taskA'] } });
+    const b = makeFacade('device-B', hub);
+    await a.initialize();
+    await b.initialize();
+    await connectAndSettle(a, b);
+
+    const node = await a.graph.createNode('fact', { text: 'secret' }, [], { namespace: 'taskB' });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await b.graph.getNode(node.id)).toBeNull();
+
+    await a.shutdown();
+    await b.shutdown();
+  });
+
+  it('per-peer 在途上限 / 节流合并：同一窗口多次触发只投递一次', () => {
+    jest.useFakeTimers();
+    try {
+      const storage = new MemoryStorage();
+      const eventLog = new EventLog(storage, 'device-A');
+      const sm = new SyncManager({
+        eventLog,
+        storage,
+        deviceId: 'device-A',
+        pushOnWrite: true,
+        pushOnWriteThrottleMs: 50,
+      });
+      const entry = {
+        peerId: { id: 'p1' },
+        peer: { deviceId: 'device-B' },
+        initiate: true,
+        subscribeAll: true,
+        namespaces: [],
+        transport: { send: async () => undefined },
+      };
+      const deliver = jest
+        .spyOn(sm as unknown as { deliverTrigger: () => void }, 'deliverTrigger')
+        .mockImplementation(() => undefined);
+
+      (sm as unknown as { scheduleSyncTrigger: (e: unknown) => void }).scheduleSyncTrigger(entry);
+      (sm as unknown as { scheduleSyncTrigger: (e: unknown) => void }).scheduleSyncTrigger(entry);
+      (sm as unknown as { scheduleSyncTrigger: (e: unknown) => void }).scheduleSyncTrigger(entry);
+      jest.advanceTimersByTime(50);
+      expect(deliver).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

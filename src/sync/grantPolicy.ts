@@ -163,8 +163,11 @@ export interface DerivePolicyOptions {
    */
   policyIssuers?: readonly string[];
   /**
-   * 不动点迭代上限（默认 `FIXPOINT_MAX_ITERATIONS`）。仅对边界/测试开放；
-   * 便于构造「必然落入回退」的输入以固化 fail-closed 行为。
+   * 不动点迭代上限**覆盖**（测试专用注入；**生产路径不得使用**）。
+   * 缺省 = 输入的确定性函数 `2·|entries| + 2`（见 `iterationBound`）——该默认值是**协议语义**，
+   * 改它会破坏跨端一致性，需全端同版本。本选项仅用于构造「必然落入回退」或「慢收敛」的边界用例。
+   *
+   * @internal
    */
   maxIterations?: number;
 }
@@ -193,13 +196,15 @@ export interface DerivePolicyOptions {
  * 的 `revoked` 过滤 `revokedGrantIds` 并作为 R-b 作者排除，直到同输入产出同结果（稳定）
  * 或到达上限。种子取 `(∅, ∅)`——**天然 fail-closed**。
  *
- * **终止条件与回退**：迭代次数有固定上限 `FIXPOINT_MAX_ITERATIONS`（可由 `maxIterations`
- * 覆盖，供边界/测试），绝不接受无法收敛的链路。若上限内未稳定，回退到一个**综合 fail-closed**
- * 结果：不采纳任何 `namespace_revoke`（`revokedGrantIds=∅`），且排除**各轮出现过的全部吊销设备
- * 的并集**（`revokedIn=并集`）作为签发者。两条轴的取舍不同（有意）：`revokedGrantIds=∅` 使
- * **grant 撤销轴偏宽松**（已生效的授权可能来不及撤销），换取绝不误采信被吊销签发者的 revoke；
- * 排除并集使**设备吊销轴偏保守**（少授权）。整体仍绝不放宽 R-b。全过程仅由确定序驱动，故同一
- * 输入在任何端得到同一结果。收敛情况由 `PolicyState.converged` / `iterations` 暴露。
+ * **终止条件与回退**：迭代上限是**输入的确定性函数** `2·|entries| + 2`（`iterationBound`；
+ * 属协议语义，见 `POLICY-INVARIANTS.md` §2.4），绝不接受无法收敛的链路。若上限内未稳定，
+ * 回退到一个**两轴皆保守**的闭包：以各轮吊销并集为初始排除集 `excluded`，**只增不减**地迭代，每轮以
+ * `filterRevokes(excluded)` 为被采纳 revoke 集、`excluded` 为签发者排除集，直到
+ * `revoked ⊆ excluded`——即输出里每个被吊销设备的记录都不被采纳，**R-b 在回退路径上字面成立**。
+ * `excluded` 单调增长且有上界（设备全集）→ 必终止；另设硬上限 `2·|entries|+1` 兜底。
+ * 两轴皆偏保守：设备吊销轴排除更多签发者；撤销轴只采纳**非排除**签发者的 revoke（少 grant
+ * → 少授权/少恢复），**绝不放宽 R-b、绝不 fail-open**。全过程仅由确定序驱动，故同一输入在
+ * 任何端得到同一结果。收敛情况由 `PolicyState.converged` / `iterations` 暴露。
  *
  * 级联：吊销 A → A 的 grant 失效 → 依赖它的 B 在权威授权步因 R-a 失去授权 → B 的转授
  * 也随之不生效（无需额外回溯，见测试）。
@@ -220,8 +225,19 @@ function isAuthorizedFor(
   return own !== undefined && [...granted].every((ns) => own.has(ns));
 }
 
-/** 不动点迭代上限（有界，防死循环）。取值需覆盖常见「慢收敛」链（实测多为 ≤5 轮）。 */
-const FIXPOINT_MAX_ITERATIONS = 8;
+/**
+ * 不动点迭代上限 = **输入的确定性纯函数**：`2·|entries| + 2`。
+ *
+ * 只用输入规模，不依赖配置 / 环境变量 / 时钟 → **同一输入在任何端得到同一上限**（协议语义，
+ * 见 `POLICY-INVARIANTS.md` §2.4；改它属破坏性协议变更，需全端同版本）。
+ * 依据：慢收敛链的轮数随记录数近线性增长（实测最大 ≈1.3·|entries|）；仅 `|entries|+1` 不足
+ * （存在 7 条记录需 9 轮的确定性反例），此处取 ~2× 余量。
+ *
+ * （历史：曾为常量 8；该值会让合法的「慢收敛」链误入回退，已移除。）
+ */
+function iterationBound(entries: ParsedEntry[]): number {
+  return 2 * entries.length + 2;
+}
 
 function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   if (a.size !== b.size) return false;
@@ -296,13 +312,13 @@ function filterRevokes(sorted: ParsedEntry[], revoked: ReadonlySet<string>): Set
  * `R = ∅` 且 `revokedIn = ∅`：**天然 fail-closed**（绝不采纳被吊销签发者的 revoke），
  * 随后迭代把「未被吊销签发者发出的 revoke」纳入。每轮迭代均由确定序驱动。
  *
- * **终止与回退**：迭代上限 `maxIterations`；未收敛时回退到**综合 fail-closed** 结果
- * （`revokedGrantIds=∅` 且 `revokedIn=各轮吊销并集`）：grant 撤销轴偏宽松、设备吊销轴偏保守
- * （见文件顶部说明），整体绝不放宽 R-b。
+ * **终止与回退**：迭代上限 `maxIterations`；未收敛时回退到**两轴皆保守**的闭包
+ * （每轮用 `filterRevokes(excluded)` 与排除集 `excluded`，直到 `revoked ⊆ excluded`；
+ * 见文件顶部说明），整体绝不放宽 R-b、绝不 fail-open。
  */
 export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyOptions = {}): PolicyState {
   const bootstrap = new Set(options.policyIssuers ?? []);
-  const maxIterations = options.maxIterations ?? FIXPOINT_MAX_ITERATIONS;
+  const maxIterations = options.maxIterations ?? iterationBound(entries);
   // 排序唯一确定迭代顺序，保证同一输入在任何端得到同一结果。
   const sorted = [...entries].sort(compareEntries);
 
@@ -328,17 +344,29 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
     rounds.push({ revokedGrantIds, state: current });
   }
 
-  // 未收敛 → fail-closed 综合结果（确定）。两条轴取舍**不同**（有意）：
-  //  - `revokedGrantIds = ∅`（**不采纳任何 revoke**）：grant 撤销轴**偏宽松**——已生效的授权
-  //    可能来不及撤销；换来绝不误采信被吊销签发者的 revoke。
-  //  - `revokedIn = 各轮吊销并集`：设备吊销轴**偏保守**——曾判吊销设备的记录（含 grant）不采纳。
+  // 未收敛 → 两轴皆保守的闭包。从各轮吊销并集出发，只增不减地迭代，每轮：
+  //  - 被采纳 revoke 集 = `filterRevokes(sorted, excluded)`（非排除签发者的 revoke 仍生效）；
+  //  - 签发者排除集 = `excluded`；
+  // 直到输出 `revoked ⊆ excluded`（R-b 字面成立：输出里每个被吊销设备的记录都不被采纳）。
+  // 终止性：`excluded` 单调增长、上界为设备全集 → ≤|devices| 轮；硬上限 `2·|entries|+1` 兜底
+  // （超出则取最后一轮，`converged=false` 保持不变）。
   let chosen = current;
   if (!converged) {
-    // 排除集取各轮吊销的并集：其输出 revoked 必为并集的子集（r0 以 ∅ 为排除集已采纳所有
-    // 「作者不在并集内」的 device_revoke），故 F-1 检查 a 在回退路径上亦自洽。
     const excluded = new Set<string>();
     for (const round of rounds) for (const device of round.state.revoked) excluded.add(device);
-    chosen = deriveOnce(sorted, bootstrap, new Set<string>(), excluded);
+    const hardCap = 2 * sorted.length + 1;
+    for (let guard = 0; guard < hardCap; guard += 1) {
+      const candidate = deriveOnce(sorted, bootstrap, filterRevokes(sorted, excluded), excluded);
+      chosen = candidate;
+      let grew = false;
+      for (const device of candidate.revoked) {
+        if (!excluded.has(device)) {
+          excluded.add(device);
+          grew = true;
+        }
+      }
+      if (!grew) break;
+    }
   }
 
   return { authorized: chosen.authorized, revoked: chosen.revoked, converged, iterations };
@@ -354,20 +382,16 @@ export class GraphNamespacePolicy implements NamespaceGrantPolicy {
   private readonly eventLog: EventLog;
   private readonly userMasterPublicKey: Uint8Array | null;
   private readonly policyIssuers: string[];
-  private readonly maxIterations: number | undefined;
 
   constructor(options: {
     eventLog: EventLog;
     userMasterPublicKey?: Uint8Array | null;
     /** 引导期签发者白名单（R-a ①），可多台；缺省空 = 只能转授 */
     policyIssuers?: readonly string[];
-    /** 不动点迭代上限（边界/测试用）；缺省 `FIXPOINT_MAX_ITERATIONS` */
-    maxIterations?: number;
   }) {
     this.eventLog = options.eventLog;
     this.userMasterPublicKey = options.userMasterPublicKey ?? null;
     this.policyIssuers = [...(options.policyIssuers ?? [])];
-    this.maxIterations = options.maxIterations;
   }
 
   /** 读取策略事件（保留命名空间）并只保留签发者可信者，再推导状态。 */
@@ -378,10 +402,9 @@ export class GraphNamespacePolicy implements NamespaceGrantPolicy {
       if (!isPolicyType(event.type)) continue;
       if (await verifyIssuedByUser(event, this.userMasterPublicKey)) trusted.push(event);
     }
-    return derivePolicyState(parseEntries(trusted), {
-      policyIssuers: this.policyIssuers,
-      ...(this.maxIterations !== undefined ? { maxIterations: this.maxIterations } : {}),
-    });
+    // 生产路径恒用输入的确定性上限 `iterationBound(entries)`（不可由构造选项注入，
+    // 避免各端上限不同导致权威集不一致）。
+    return derivePolicyState(parseEntries(trusted), { policyIssuers: this.policyIssuers });
   }
 
   async getAuthorizedNamespaces(peerDeviceId: string): Promise<string[]> {

@@ -160,6 +160,10 @@ describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', (
           // 回退路径（非不动点）：只记录残差，由 F-2 断言上界
           if (name === 'a') residualA += 1;
           else residualB += 1;
+          // eslint-disable-next-line no-console
+          console.log(
+            `[residual] ${name} @scenario ${scenario} actualConverged=${actual.converged} perturbedConverged=${perturbed.converged} actual=${JSON.stringify(actualKey)} perturbed=${JSON.stringify(key(perturbed))}`,
+          );
         }
       }
     }

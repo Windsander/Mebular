@@ -14,7 +14,7 @@ Mebular 把记忆存成一张带签名事件的知识图谱，每条事实都记
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-523%20passed-brightgreen)](#项目状态)
+[![Tests](https://img.shields.io/badge/Tests-542%20passed-brightgreen)](#项目状态)
 [![Coverage](https://img.shields.io/badge/Coverage-92.4%25-brightgreen)](#项目状态)
 
 [官网](https://mebular.cyberfederal.io) · [快速上手](#30-秒上手) · [系统架构](#系统架构) · [项目状态](#项目状态) · [贡献](#贡献)
@@ -47,10 +47,29 @@ git clone https://github.com/Windsander/Mebular.git
 cd Mebular
 npm install
 npm run build          # TypeScript strict → dist/
-npm test               # 66 套件 / 523 用例全绿
+npm test               # 67 套件 / 542 用例全绿
 ```
 
-### 最简例子（复制即跑）
+### 路径一（推荐）· Agent 用（skill + MCP）
+
+把 Mebular 作为跨设备长期记忆接进支持 MCP 的 Agent（Claude / Cursor / OpenCode / DeepSeek Harness 等）。以下用法基于 `packages/skill` 实测：
+
+1. **装 Skill**（`scripts/install.mjs` 把 `SKILL.md` + `MEMORY_POLICY.md` 复制到目标目录下的 `mebular-memory/`）：
+
+   ```bash
+   node packages/skill/scripts/install.mjs                 # cwd 的 .agents/skills、.dsh/skills（若存在 .opencode 则另装 .opencode/skills）
+   node packages/skill/scripts/install.mjs --global        # 另装到 ~/.agents/skills
+   node packages/skill/scripts/install.mjs --target <dir>  # 只装到指定目录
+   ```
+
+2. **接 MCP**：从 `packages/skill/mcp/` 取对应片段并入客户端配置——`claude.json` / `cursor.json` / `generic.json`（`mcpServers.mebular` → `command: "mebular", args: ["mcp"]`）、`opencode.json`（`mcp.mebular`，`type: "local"`，`command: ["mebular","mcp"]`）、`dsh.cordis.yml`（`@deepseek-ai/dsh-mcp-client` 插件，transport `stdio`）。`npm install` 后工作区已把 `@mebular/mcp` 的 `mebular` 命令链接到 `node_modules/.bin/`；未链接时可直接用 `node packages/mcp/bin/mebular.mjs mcp`。
+
+   - `mebular mcp`：**stdio** 服务（本机 Agent；stdio 不做鉴权）。
+   - `mebular serve`：**常驻 Streamable HTTP**（`/mcp`、`/healthz`，单实例锁；鉴权可选 `none` / `bearer` / 内置 OAuth 最小 AS+RS；scope 为 `memory.read` / `memory.write` / `memory.admin`，默认 `memory.read`）。远程接法见 `dsh.cordis.yml` 注释中的 `streamable-http` + `http://127.0.0.1:7331/mcp`。
+
+3. **常驻默认实时**：`serve`/MCP 形态默认开启**写入即推**（`pushOnWrite`）与**周期 anti-entropy**（默认 `intervalMs 600000` = 10 分钟、`jitterRatio 0.2`）——实时性依赖常驻进程；库/嵌入式默认关闭（见「同步触发时机」）。可用 `MEBULAR_HOME` / `MEBULAR_STORAGE_PATH` / `MEBULAR_DEVICE_ID` / `MEBULAR_USER_MASTER_KEY(_FILE)` / `MEBULAR_PUSH_ON_WRITE` 等环境变量配置。
+
+### 路径二 · 库/嵌入式（复制即跑）
 
 首次初始化需要用户主密钥为本机签发设备证书。用 `Mebular.generateUserMasterKey()` 生成后，**请自行持久化主私钥**（信任根，示例见 [`examples/quickstart/index.mjs`](examples/quickstart/index.mjs)）。
 
@@ -154,7 +173,7 @@ node scripts/wan-sync.mjs cross --device-id device-B --user-master-key-file key.
 
 - **分区隔离**：`query` / `search` / `graph` 都接受可选 `namespace`（单个或数组）；指定分区时不会串到别的分区。CMF 导入导出与 SQLite 存储（namespace 列 + 索引）同样贯通。
 - **默认拒绝 + 显式授权**：数据持有者只把记忆发给**被显式授权**的对端。`sync.peerNamespacePolicy` 是 `peerDeviceId → 允许的分区` 白名单；**未列出的对端拿不到任何分区**（空数组 = 明确不允许），必须显式写入才能同步。裁剪链为「对端授权 ∩ 对端订阅声明 ∩ 本机订阅声明」，同时作用于 offer 与初始快照——未授权分区不会离开数据持有者，空水位走快照也绕不过。拒绝不是静默的：`sync-completed` 带 `denied` 标记。
-- **授权作为记忆（grant-as-memory）**：授权可由**链到用户主密钥**的设备签发为图上记录（`namespace_grant` / `namespace_revoke`，落在保留命名空间 `__policy__`），全 fleet 可见、可审计、可撤销，且**不可被被授权方自授**（自授 / 别家用户 / 无证书者签的记录一律忽略）。生效授权 = 图上 grant ∪ `sync.peerNamespacePolicy` 配置，两者都是白名单，任一为空都不会把「未授权」变成「不限」。保留命名空间不受 allow 链约束、已认证设备总能读到（解开「默认拒绝 + 策略在图上」的 bootstrap 死锁）；写入与生效只认签发者。签署与审计入口：`mebular.grantNamespaces` / `revokeGrant` / `getEffectiveNamespaces`。**恢复必须使用新的 `grantId`**——被撤销的 grantId 永久失效，复用它再授予不会恢复。`expiresAt` 为预留字段，本轮**不强制生效**（避免引入跨端时钟依赖），见「未做项」。
+- **授权作为记忆（grant-as-memory）**：授权可由**链到用户主密钥**的设备签发为图上记录（`namespace_grant` / `namespace_revoke`，落在保留命名空间 `__policy__`），全 fleet 可见、可审计、可撤销，且**不可被被授权方自授**（自授 / 别家用户 / 无证书者签的记录一律忽略）。生效授权 = 图上 grant ∪ `sync.peerNamespacePolicy` 配置，两者都是白名单，任一为空都不会把「未授权」变成「不限」。保留命名空间不受 allow 链约束、已认证设备总能读到（解开「默认拒绝 + 策略在图上」的 bootstrap 死锁）；写入与生效只认签发者。签署与审计入口：`mebular.grantNamespaces` / `revokeGrant` / `getEffectiveNamespaces`。**恢复必须使用新的 `grantId`**——被撤销的 grantId 永久失效，复用它再授予不会恢复。`expiresAt` 为预留字段，本轮**不强制生效**（避免引入跨端时钟依赖），见 [`SEALING.md`](SEALING.md) §4「推迟项」。
 - **身份吊销**：`mebular.revokeDevice({ subject })` 写一条签发者签名的 `device_revoke`：读侧立刻返回 `[]`，且该设备**署名的事件在入站写入处被隔离**、**其署名实体也不得经对端快照进入**（默认拒绝只挡「我们发给它」，挡不住它把事件推进我们的图，故吊销必须在入站与快照两条路都生效）。吊销**非终态**——之后再对该设备写一条**新 grantId** 的 grant 即恢复；撤销/恢复期间水位不被污染（从正确水位续传）。
 - **两条明确取舍**：① 保留命名空间 `__policy__` 对**所有已认证设备可读（含被吊销者）**——这是解开 bootstrap 与支持恢复所必需的取舍，代价是授权图（谁能读什么、谁被吊销）对已入网设备可见；② 吊销**只阻止后续摄入**，不回撤**已经入图**的数据，且被吊销设备**仍可建立会话**（否则无从得知恢复），只是读侧为 `[]`、其入站事件被隔离。
 - **本机订阅**：`sync.namespaces` 声明本机订阅的分区；未配置 / 空 = 参与全部。订阅声明随 `sync-hello` 以 `subscribeAll` + `namespaces` **必填**下发（缺字段/类型错视为协议违例并中止会话）；`subscribeAll=false` + 空清单 = 明确不订阅任何分区。
@@ -177,7 +196,7 @@ node scripts/wan-sync.mjs cross --device-id device-B --user-master-key-file key.
 |---|---|---|---|
 | 连接即收敛 | 握手认证后自动跑一次双向会话 | `autoSync = true` | `sync.autoSync` |
 | 写入即推送 | 本地写入后向「订阅且已授权」的在线对端触发：发起方起会话、响应方发 `sync-nudge` | 库/嵌入式 **关**；常驻（serve/MCP）**开** | `sync.pushOnWrite`、`sync.pushOnWriteThrottleMs`（默认 50ms） |
-| 周期兜底（anti-entropy） | 每隔 5–15 分钟（±20% jitter）对在线、已授权、且确有 pending 的对端兜底同步；无 pending **短路跳过**；会话在途跳过；失败指数退避 | 库/嵌入式 **关**；常驻（serve/MCP）**开** | `sync.antiEntropy.{enabled, intervalMs, jitterRatio}` |
+| 周期兜底（anti-entropy） | 每隔（默认）10 分钟（`intervalMs 600000`，±20% jitter）对在线、已授权、且确有 pending 的对端兜底同步；无 pending **短路跳过**；会话在途跳过；失败指数退避 | 库/嵌入式 **关**；常驻（serve/MCP）**开** | `sync.antiEntropy.{enabled, intervalMs, jitterRatio}` |
 
 **连接 ≠ 持续同步**：一次连接只保证一次收敛（在 `autoSync` 时）。之后的实时性来自「写入即推送」，长连兜底来自 anti-entropy。**实时性依赖常驻进程**——库/嵌入式形态默认关闭推送与兜底，需要显式开启或自行触发；只有常驻形态（`serve` / MCP）默认两者皆开。跨会话重复发送是预期行为（见上）。
 
@@ -216,6 +235,8 @@ Mebular 没走云端记忆 SaaS 那条路，也就有相应的代价。
 
 Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API 还没稳定，也没发 npm 包，放到生产环境前请自己评估。
 
+记忆层已**封板**：契约（去中心化红线 / 一致性口径 / 协议语义 / 推迟项 / 已知边界）见 [`SEALING.md`](SEALING.md)，基线 `main=0d78486`、67 套件 / 542 用例、覆盖 ~92.4% / ~79.4%。**下一阶段是 `packages/fleet`（尚未开始）。**
+
 | 里程碑 | 状态 |
 |--------|------|
 | 核心引擎（图存储 / 加密身份 / 事件日志） | 完成 |
@@ -231,8 +252,8 @@ Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API
 
 | 项目 | 情况 |
 |------|------|
-| 测试 | 66 个套件、523 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
-| 覆盖率 | 行 92.4%、分支 79.1%，全库门槛 85/65，关键文件另有底线 |
+| 测试 | 67 个套件、542 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
+| 覆盖率 | 行 92.4%、分支 ~79.4%（运行间抖动），全库门槛 85/65，关键文件另有底线 |
 | 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |
 | 质量门禁 | 每个阶段跑 verify 脚本加构建产物冒烟，`src` 里不留裸的 `throw new Error` |
@@ -262,6 +283,10 @@ node scripts/verify-phase2.mjs   # P2P 网络
 | P2P 网络和同步 | [`src/p2p/`](src/p2p) · [`src/sync/`](src/sync) · [`src/eventlog/`](src/eventlog) |
 | CMF 交换和适配器 | [`src/exchange/`](src/exchange) |
 | Hermes 集成 | [`src/hermes/`](src/hermes) |
+| 封板契约 | [`SEALING.md`](SEALING.md) |
+| 策略不变量矩阵 | [`src/sync/POLICY-INVARIANTS.md`](src/sync/POLICY-INVARIANTS.md) |
+| Agent 技能 | [`packages/skill`](packages/skill) |
+| MCP 服务 | [`packages/mcp`](packages/mcp) |
 | 可运行示例 | [`examples/`](examples) |
 | 贡献指南 | [CONTRIBUTING.md](CONTRIBUTING.md) |
 

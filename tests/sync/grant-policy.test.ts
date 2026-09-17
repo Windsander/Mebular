@@ -479,6 +479,30 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
     expect(await p.getAuthorizedNamespaces('device-B')).toEqual(['nsA']);
   });
 
+  it('F-C 回退综合 fail-closed：排除曾判吊销的签发者（其 grant 亦不采纳）', async () => {
+    const g = await appendGrant(deviceX, 'device-B', ['nsX'], 1000); // device-X（引导签发者）授 B
+    await trusted.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke: { grantId: g.grantId, subject: 'device-B', issuedAt: 2000 } },
+      namespace: POLICY_NAMESPACE,
+    }); // 有效 revoke（触发未收敛）
+    await trusted.append({
+      type: DEVICE_REVOKE_EVENT,
+      data: { deviceRevoke: { subject: 'device-X', issuedAt: 3000 } },
+      namespace: POLICY_NAMESPACE,
+    }); // 吊销 device-X
+    const p = new GraphNamespacePolicy({
+      eventLog: new EventLog(storage, 'reader'),
+      userMasterPublicKey: masterPub,
+      policyIssuers: ['device-X'],
+      maxIterations: 1,
+    });
+    const state = await p.snapshot();
+    expect(state.converged).toBe(false);
+    // 综合回退排除「曾判吊销」的 device-X → 其 grant 也不采纳（R-b 不放宽）
+    expect(await p.getAuthorizedNamespaces('device-B')).toEqual([]);
+  });
+
   it('未被授权但未被吊销的 namespace_revoke 仍被采纳（有意语义：撤销只受 R-b 约束）', async () => {
     const g = await appendGrant(trusted, 'device-B', ['nsA'], 1000);
     await deviceX.append({

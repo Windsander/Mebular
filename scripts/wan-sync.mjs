@@ -186,6 +186,17 @@ function dataStateHash(nodes, edges) {
   return mebular.computeStateHash(nodes, edges);
 }
 
+/** 按分区状态哈希（①）：跨端自检只比共同授权域 */
+function dataStateHashByNamespace(nodes, edges) {
+  return mebular.computeStateHashByNamespace(nodes, edges);
+}
+
+/** 只比双方共同拥有的分区；无共同域视为不满足（避免空真） */
+function commonDomainMatch(localByNs, peerByNs) {
+  const common = Object.keys(localByNs).filter((ns) => peerByNs && Object.hasOwn(peerByNs, ns));
+  return { common, matched: common.length > 0 && common.every((ns) => localByNs[ns] === peerByNs[ns]) };
+}
+
 // ---------- App 工厂 ----------
 
 /**
@@ -498,6 +509,7 @@ async function runPeer() {
       baseNodeId: baseId,
       baseValue: memoryText(await app.graph.getNode(baseId)),
       dataHash,
+      dataHashByNamespace: dataStateHashByNamespace(data.nodes, data.edges),
       publishedAt: new Date().toISOString(),
     };
     await app.graph.createNode('meta', { metaType: 'other', name: `wan-evidence-${runId}`, value: JSON.stringify(evidence) });
@@ -604,8 +616,12 @@ async function runCross() {
 
     const local = await collectData(app);
     const localHash = dataStateHash(local.nodes, local.edges);
+    const localByNs = dataStateHashByNamespace(local.nodes, local.edges);
     const judge = judgeDifferentNetwork(egress.ip, peerEvidence?.egress?.ip ?? null);
     const stateMatches = peerEvidence?.dataHash === localHash;
+    // 跨端一致性自检只比共同授权域（①）：两端合法持有不同分区时全局哈希天然不同
+    const domain = commonDomainMatch(localByNs, peerEvidence?.dataHashByNamespace);
+    const stateMatchesCommon = domain.matched;
     const identityShared = peerEvidence?.userMasterPublicKey === b64(masterKeys.userMasterKey);
     const sameAsn = egress.asn && peerEvidence?.egress?.asn ? egress.asn === peerEvidence.egress.asn : null;
 
@@ -634,15 +650,20 @@ async function runCross() {
       stateHash: localHash,
       peerStateHash: peerEvidence?.dataHash ?? null,
       stateMatches,
+      // ① 一致性口径按域：只比共同授权域
+      stateHashByNamespace: localByNs,
+      peerStateHashByNamespace: peerEvidence?.dataHashByNamespace ?? null,
+      commonDomains: domain.common,
+      stateMatchesCommon,
       differentPublicNetwork: judge.value,
       differentPublicNetworkBasis: judge.basis,
       egressService: egress.source,
       sameAsn,
-      ok: stateMatches && identityShared && !!converged && (allowSameNetwork || judge.value === true),
+      ok: stateMatchesCommon && identityShared && !!converged && (allowSameNetwork || judge.value === true),
     };
     const outPath = typeof args.out === 'string' ? args.out : join(rootDir, '.wan-evidence', `wan-cross-${Date.now()}.json`);
     await writeJson(outPath, evidence);
-    log(`stateMatches=${stateMatches} differentPublicNetwork=${judge.value} (${judge.basis}) identityShared=${identityShared}`);
+    log(`stateMatches=${stateMatches} stateMatchesCommon=${stateMatchesCommon} commonDomains=[${domain.common.join(',')}] differentPublicNetwork=${judge.value} (${judge.basis}) identityShared=${identityShared}`);
     log(`证据写入：${outPath}`);
     await app.shutdown();
     process.exit(evidence.ok ? 0 : 1);
@@ -805,6 +826,8 @@ async function runSelftest() {
       crossExitCode: bRes.code,
       peerExitCode: aRes.code,
       stateMatches: evidence.stateMatches,
+      stateMatchesCommon: evidence.stateMatchesCommon,
+      commonDomains: evidence.commonDomains,
       identityShared: evidence.identityShared,
       convergedValue: evidence.convergedValue,
       differentPublicNetwork: evidence.differentPublicNetwork,
@@ -814,7 +837,7 @@ async function runSelftest() {
       coordination: evidence.coordination,
       note: '同机：出口 IP 相同/私网 → differentPublicNetwork 预期 false；跨网判定不在此自测范围',
     };
-    if (!evidence.stateMatches) throw new Error('双端 dataHash 不一致');
+    if (!evidence.stateMatchesCommon) throw new Error('双端共同域 dataHash 不一致');
     if (!evidence.identityShared) throw new Error('共享用户身份未生效');
     if (evidence.convergedValue !== 'A-offline' && evidence.convergedValue !== 'B-offline') {
       throw new Error(`两阶段未收敛：${evidence.convergedValue}`);

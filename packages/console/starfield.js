@@ -281,14 +281,24 @@ export class StarStage {
       const dist = Math.hypot(dx, dy) || 1;
       const ux = dx / dist;
       const uy = dy / dist;
-      // 双向授权时向法线偏移，避免两条边重合
+      // 双向授权时向法线偏移，避免两条边重合。
+      // 偏移必须基于**规范方向**（按 id 排序），否则正反两向各自按自身方向取
+      // 法线会算出同一个偏移量，两条线仍完全重合、后画的盖住先画的。
       const bothWays = this.scene.edges.some(
         (other) => other.from === edge.to && other.to === edge.from && other.kind !== edge.kind,
       );
       const side = edge.kind === 'theirs' ? 1 : -1;
-      const off = bothWays ? 7 * side : 0;
-      const nx = -uy * off;
-      const ny = ux * off;
+      let nx = 0;
+      let ny = 0;
+      if (bothWays) {
+        const forward = edge.from <= edge.to;
+        const cdx = forward ? dx : -dx;
+        const cdy = forward ? dy : -dy;
+        const cdist = Math.hypot(cdx, cdy) || 1;
+        const off = 7 * side;
+        nx = (-cdy / cdist) * off;
+        ny = (cdx / cdist) * off;
+      }
       const startX = from.x + ux * 20 + nx;
       const startY = from.y + uy * 20 + ny;
       const endX = to.x - ux * 20 + nx;

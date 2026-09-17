@@ -342,6 +342,20 @@ try {
   });
   check('缺 namespaces → 400', badBody.status === 400, `status=${badBody.status}`);
 
+  // 防回归：sync 端点对未运行网络/未连接设备必须给结构化 4xx，而不是 500
+  //（此前实现对已连接设备在裸信道上另起 syncWithDevice，与会话循环抢帧 →
+  //  "Sync timeout waiting for sync-hello" 被兜底成 500）
+  const syncOffline = await fetch(`http://127.0.0.1:${port}/admin/api/devices/device-offline/sync`, {
+    method: 'POST',
+    headers: writeHeaders,
+  });
+  const syncOfflineJson = await syncOffline.json().catch(() => null);
+  check(
+    'sync 未连接设备 → 409 结构化错误（非 500）',
+    syncOffline.status === 409 && ['not_connected', 'network_not_running'].includes(syncOfflineJson?.error),
+    `status=${syncOffline.status} error=${syncOfflineJson?.error}`,
+  );
+
   // ---------- SSE ----------
   const sse = await openSse(port, '/admin/events', 8000);
   check(

@@ -216,6 +216,7 @@ select {
 .toggle input:checked + .slider { background: var(--ok); }
 .toggle input:checked + .slider::before { transform: translateX(18px); background: #fff; }
 .toggle input:disabled + .slider { opacity: 0.4; }
+.toggle input:focus-visible + .slider { outline: 2px solid #56b4e9; outline-offset: 2px; }
 
 /* ---------- 按钮 ---------- */
 .btn {

@@ -13,9 +13,8 @@ import https from 'node:https';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
-import { SecureChannelSyncTransport } from '@mebular/core';
 import { TOOL_SCOPES } from './tools.mjs';
-import { READ_ROUTES, hexToBytes } from './admin.mjs';
+import { READ_ROUTES } from './admin.mjs';
 
 const SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
 const SCOPE_RANK = { 'memory.read': 0, 'memory.write': 1, 'memory.admin': 2 };
@@ -753,18 +752,19 @@ export async function startHttpServer({
       }
 
       if (action === 'sync') {
-        const certificate = found.session.certificate;
-        const publicKey = hexToBytes(certificate?.devicePublicKey ?? '');
-        if (publicKey.length === 0) {
-          return sendJson(res, 502, { error: 'channel_unavailable', message: '缺少对端设备公钥，无法发起同步' });
-        }
-        const channel = await node.getChannel(found.connection.peerId, 5000);
-        if (!channel) {
-          return sendJson(res, 502, { error: 'channel_unavailable', message: '加密信道未就绪，请稍后重试' });
-        }
-        const transport = new SecureChannelSyncTransport(channel);
-        const result = await app.sync.syncWithDevice(transport, { deviceId, publicKey }, { direction: 'bidirectional' });
-        return sendJson(res, 200, { ok: true, deviceId, result });
+        // v1.1 起会话由 SyncManager 常驻循环统一编排（PeerFrames 单消费者）。
+        // 不能在裸信道上另起 syncWithDevice：会与会话循环抢帧，导致
+        // "Sync timeout waiting for sync-hello" 并抛 500。
+        // runAntiEntropyCycle 是公共触发路径：对在线且确有 pending 的对端
+        // 唤醒发起方循环（响应方角色由 nudge 机制覆盖）。
+        const before = await app.sync.getSyncStatus();
+        await app.sync.runAntiEntropyCycle();
+        return sendJson(res, 200, {
+          ok: true,
+          deviceId,
+          triggered: before.pendingCount > 0,
+          pendingBefore: before.pendingCount,
+        });
       }
     }
 

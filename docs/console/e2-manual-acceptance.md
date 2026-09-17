@@ -78,8 +78,8 @@ node packages/mcp/bin/mebular.mjs console --port 7332
 
 ## 已知边界
 
-- 「立即同步」使用 `node.getChannel` + `SecureChannelSyncTransport` +
-  `sync.syncWithDevice`；当同步管理器的常驻 push-on-write 会话已占用同一信道的
-  接收迭代器时，手工同步可能与之交错，建议在无并发写入时使用。
+- 「立即同步」通过 `sync.runAntiEntropyCycle()` 触发（v1.1 常驻循环统一编排），
+  只对**确有 pending** 的在线对端立即开会话；无 pending 时返回 `triggered:false`
+  （正常——没有待发数据，接收侧由对端 push/anti-entropy 驱动）。
 - 单条 grant 含多个域时，关闭其中一个域会撤销整条 grant（core 语义：按 grantId
   精确失效）；控制台「开」始终按单域签发 grant，以避免误伤其他域。

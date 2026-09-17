@@ -423,7 +423,7 @@ function renderDeviceCard() {
         <span><span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
           ${theirsOn && !mineOn ? '<span class="muted" style="margin-left:6px">它授权我</span>' : ''}</span>
         <label class="toggle" title="${mineOn ? '关闭：撤销我对该域的授权' : '打开：签发新授权'}">
-          <input type="checkbox" data-ns="${escapeHtml(ns)}" ${mineOn ? 'checked' : ''} ${writes ? '' : 'disabled'}>
+          <input type="checkbox" data-ns="${escapeHtml(ns)}" aria-label="共享域 ${escapeHtml(ns)}（当前${mineOn ? '已授权' : '未授权'}）" ${mineOn ? 'checked' : ''} ${writes ? '' : 'disabled'}>
           <span class="slider"></span>
         </label>
       </li>`;
@@ -582,7 +582,7 @@ async function handleDomainToggle(device, ns, on, input) {
 
 async function handleDeviceAction(action, device) {
   if (action === 'sync') {
-    await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/sync`, {}, '同步完成');
+    await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/sync`, {}, '已触发同步（有 pending 时立即开会话）');
   } else if (action === 'connect') {
     const address = window.prompt('对方的 multiaddr（含 /p2p/…）：', '');
     if (!address) return;

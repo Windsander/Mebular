@@ -106,6 +106,10 @@ export async function createMebular() {
     },
     sync: {
       autoSync: config.sync?.autoSync ?? true,
+      // 常驻入口（MCP serve）默认实时：写入即推（含反向 nudge）+ 周期 anti-entropy。
+      // 库形态默认关闭（见 README「同步触发时机」）；可显式置 false 关闭。
+      pushOnWrite: truthy(process.env.MEBULAR_PUSH_ON_WRITE, config.sync?.pushOnWrite ?? true),
+      antiEntropy: config.sync?.antiEntropy ?? { enabled: true, intervalMs: 600000, jitterRatio: 0.2 },
       ...(config.sync?.snapshotThreshold !== undefined
         ? { snapshotThreshold: config.sync.snapshotThreshold }
         : {}),

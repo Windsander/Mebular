@@ -233,12 +233,24 @@ export async function buildDevices({ app, config }) {
   const devices = [];
   for (const deviceId of known) {
     const connection = online.byDeviceId.get(deviceId) ?? null;
-    let grantedByMe = [];
-    try {
-      grantedByMe = await app.getEffectiveNamespaces(deviceId);
-    } catch {
-      grantedByMe = [];
-    }
+    // 「我授权它」= 本机（含配置引导）签发的有效 grant 覆盖的域。
+    // 不能直接用 getEffectiveNamespaces(peer)：那是「该对端被任何人授权」的并集，
+    // 多签发者场景会把别人给它的授权误显示成我授权；对「本机」行更是无意义。
+    const grantedByMe = unique([
+      ...policy.grants
+        .filter(
+          (g) =>
+            g.issuer === self
+            && g.subject === deviceId
+            && !policy.revokedGrantIds.has(g.grantId)
+            && !policy.revokedSet.has(self),
+        )
+        .flatMap((g) => g.namespaces),
+      ...((Array.isArray(config?.sync?.peerNamespacePolicy?.[deviceId])
+        ? config.sync.peerNamespacePolicy[deviceId]
+        : []
+      ).map(nsOf)),
+    ]);
     const grantedToMe = unique(
       policy.grants
         .filter(

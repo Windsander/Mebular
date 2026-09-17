@@ -318,8 +318,18 @@ try {
     headers: writeHeaders,
     body: JSON.stringify({ subject: 'device-new', namespaces: ['notes'] }),
   });
-  const createdJson = await created.json().catch(() => null);
+  const createdJson = (await created.json().catch(() => null));
   check('CSRF 完整 → 签发 grant 201', created.status === 201 && typeof createdJson?.grantId === 'string', `status=${created.status}`);
+
+  // grantedByMe 语义：只算本机签发；本机行的 grantedByMe 不得出现刚签发的域
+  const devicesAfterGrant = await getJson(port, '/admin/api/devices');
+  const peerRow = (devicesAfterGrant.json ?? []).find((d) => d.deviceId === 'device-new');
+  const selfRow = (devicesAfterGrant.json ?? []).find((d) => d.deviceId === 'device-console');
+  check(
+    'grantedByMe 仅算本机签发（peer 行含 notes、self 行不含）',
+    peerRow?.grantedByMe?.includes('notes') === true && selfRow?.grantedByMe?.includes('notes') !== true,
+    `peer=${JSON.stringify(peerRow?.grantedByMe)} self=${JSON.stringify(selfRow?.grantedByMe)}`,
+  );
 
   const revoked = await fetch(`http://127.0.0.1:${port}/admin/api/grants/${encodeURIComponent(createdJson?.grantId ?? '')}/revoke`, {
     method: 'POST',

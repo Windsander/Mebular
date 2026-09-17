@@ -1,0 +1,90 @@
+# Mebular 封板（SEALING）
+
+> **封板基线**：`main = 0d78486`（PR #34 合并；含 Phase 2 D/E（A）、实时同步（B）、多签发者策略权威（C））。
+> 根 tree = `d1eb7d2c5ffa87eed6c64d70ce8aed3a6ceeb333`。验收基线：**67 个测试套件 / 542 条用例全绿**；
+> 覆盖率 **行 92.4% / 分支 ~79.3–79.5%**（运行间抖动），门槛 lines 85 / branches 65。
+>
+> 本文是**契约**：下列被钉住的红线、口径与协议语义，改动前**必须先更新本文并配回归**，否则不予合入。
+> 策略推导的不变量矩阵与准入条件另见 [`src/sync/POLICY-INVARIANTS.md`](src/sync/POLICY-INVARIANTS.md)。
+
+---
+
+## 1. 去中心化红线（不可越界）
+
+1. **无中心服务 / 协调者**：同步是设备直连，传输层可换（libp2p / InMemoryHub / 自建 Provider）；核心层纯 TS、不依赖网络，库/嵌入式形态可离线运行。不做云端记忆 SaaS。
+2. **无全局时钟**：定序**不看墙钟**。同一签发者内按**单调序列**（`event.vectorClock[author]`）；跨签发者按**逻辑时间** `sum(vectorClock)`；并发（互不因果）以 `(作者, 内容寻址 id)` 兜底 → 完全确定、两端收敛一致（含 A/B 互吊销：逻辑序在先者胜）。
+3. **权威来自用户主密钥证书链**：政策记录只有**链到用户主密钥**的设备签发才被采纳；自授、别家用户、无证书伪造一律忽略。被授权方**不可自授**。
+4. **授权可传递、无单一主设备在线要求**：引导签发者（`sync.policyIssuers`，可多台）之外，已被授权者可**转授**自己当时已获授权的分区（"不能给出自己没有的"）。
+5. **数据本地持有、默认拒绝**：写入先本地签名 + 内容寻址哈希，不 phone-home；供给端只把记忆发给**被显式授权**的对端（`sync.peerNamespacePolicy`，未列出 = 不给任何分区）。
+6. **传输/集成不构成权威**：P2P、relay、MCP、OAuth 等只管**字节通道与访问控制**，不参与政策判定，也不改变授权结果。
+7. **保留命名空间 `__policy__` 对全部已认证设备可读（含被吊销者）**：这是解开「默认拒绝 + 策略在图上」bootstrap 与支持恢复所必需的**有意取舍**，代价是授权图（谁能读什么、谁被吊销）对已入网设备可见。
+
+## 2. 一致性口径
+
+1. **最终收敛（eventual），非强一致**：在双方**共同授权（且实际传输）**的分区集合内，任意两端最终收敛到同一图状态（事件内容寻址 + 向量时钟 + 确定性冲突裁决）。分区只改变「谁在何时收到哪些字节」与召回组织方式，**不改变一致性模型本身**。
+2. **水位是 `per-(对端, 分区, 作者)`**：只在**同一分区内**比较作者计数，绝不拿对端累积全局时钟当「已有」；本机上报（hello）与快照水位同样只取作者自身计数。某分区因未授权被跳过后，**扩权即可回补**历史事件。
+3. **水位只由本机掌握的两个事实推进**：对端 **ack** 与**已确认快照**（`snapshotApplied`）。对端 hello 的自报水位**不抬升**本机记录（仅供快照触发与诊断，差异经 `sync-completed.reportedAhead` 暴露）。
+4. **跨会话重复发送是预期行为**（方向安全：只多发、不缺发）：对端已从别处获得、本机无 ack 的事件可能被再发一次；接收端按内容寻址 id 幂等去重，**重复事件跳过验签与重放但仍 ack**，下次不再发（自愈）。`duplicates` 非零通常不是 bug。
+5. **跨端一致性自检只比共同授权域**：`status().stateHash` 是**全局**哈希，两个合法持有不同分区集合的设备全局哈希必然不同（不是 bug）；请比 `status().stateHashByNamespace`，只对**双方共同拥有的域**逐一比较。
+6. **快照前提与回退保护**：初始快照**只发给自报分区水位为空的对端**；接受侧仍做回退保护——仅当本地缺失或快照版本时钟**严格更新**时才写入。放宽「只发空对端」前必须先补齐快照的冲突/合并语义。
+7. **连接 ≠ 持续同步**：一次连接只保证一次收敛（`autoSync`）。实时性来自**写入即推（push-on-write）**，长连兜底来自**周期 anti-entropy**；实时性依赖常驻进程，库/嵌入式默认不推送/不兜底。
+
+## 3. 协议语义清单（改动 = 破坏性协议变更，需全端同版本）
+
+> 以下任一项变化都必须**全端一致升级**；两端不一致可能对同一批记录/事件得出不同结论。
+
+- **策略事件类型与命名空间**：保留命名空间 `__policy__`；事件类型 `namespace_grant` / `namespace_revoke` / `device_revoke`。
+- **规则 R-a/R-b/R-c/R-d**：
+  - **R-a 不可越权授予**：签发者须为引导白名单，或**当时**已获授权其声明的**全部**分区。
+  - **R-b 吊销连坐（含历史）**：被吊销签发者的记录**一律不采纳**——其历史 `grant`、它发出的 `device_revoke` / `namespace_revoke`。**自吊销（`subject === author`）不采纳**（语义未定义；吊销须由其他设备发起）。
+  - **R-c 逻辑时间定序**（见红线 2），不看墙钟。
+  - **R-d grantId 精确撤销**：被 `namespace_revoke` 撤销过的 grantId **永久失效**；恢复必须用**全新 grantId**（复用旧 grantId 的「伪恢复」无效）。吊销**非终态**。
+- **`derivePolicyState` 迭代上限 = 输入的确定纯函数** `iterationBound(entries) = 2·|entries| + 2`。**这是协议语义**：只用输入规模，不依赖配置/环境/时钟 → 同一输入在任何端得到同一上限。
+- **未收敛 = fail-closed 两轴保守回退**：`revokedGrantIds = ∅`（不采纳任何 revoke）且 `revokedIn = 各轮吊销并集的闭包`，迭代直到输出 **`revoked ⊆ excluded`**（R-b 在回退路径**字面成立**）；绝不 fail-open。`PolicyState.converged = false` 可观测（含 `iterations`）。
+- **`maxIterations` 不可由生产注入**：`GraphNamespacePolicy` 构造**无**该选项，生产恒用 `iterationBound`；`DerivePolicyOptions.maxIterations` 标注 `@internal`，**仅测试专用**。
+- **水位持久化格式 v2**：`.sync-state.json`（`namespaceClocks` 分区水位 + per-event ack 集合 + `snapshotApplied`）。
+- **默认拒绝与裁剪链**：`sync.peerNamespacePolicy` 未列出 = 拒绝（空数组 = 明确不允许）；裁剪链 = **对端授权 ∩ 对端订阅声明 ∩ 本机订阅声明**，同时作用于 **offer 与初始快照**。拒绝非静默（`sync-completed.denied`）。
+- **订阅声明**：`sync.namespaces` 声明本机订阅；未配置/空 = 参与全部。声明随 `sync-hello` 以 `subscribeAll` + `namespaces` **必填**下发；**缺字段/类型错视为协议违例并中止会话**；`subscribeAll=false` + 空清单 = 明确不订阅任何分区。
+- **`sync-nudge` 帧无载荷**；携带业务载荷视为协议违例。
+- **推送/兜底默认值**：`pushOnWrite` 与 `antiEntropy`——库/嵌入式 **关**，常驻（`serve` / MCP）**开**。anti-entropy 默认 `intervalMs = 10min`、`jitterRatio = 0.2`（±20%）；无 pending **短路跳过**、会话在途跳过、失败指数退避、jitter 防齐步走。push-on-write 节流 50ms 合并。
+- **`sync.policyIssuers` 为本地配置**：缺省空；**各端应保持一致**（否则对同一设备是否为引导签发者判断不同 → 结论可能不同）。
+
+## 4. 推迟项（本轮封板明确不做）
+
+- **引导签发者声明上图化**（让 `policyIssuers` 各端一致，替代本地配置）——现为已知取舍（见 §5）。
+- **订阅 = 成员资格**、**退订交接**、**重订阅恢复**。
+- **F/G 剩余**：策略导出的其余边界族与治理项。
+- **会话多路复用**。
+- **quorum / 阈值签名**（多签发者已有，但无门限）。
+- **`expiresAt` 强制生效**（字段已预留，不引入跨端时钟依赖；移入 fleet MVP 范围）。
+- **`packages/fleet`**（下一轮）。
+- **自动事件裁剪**：本期只固化约束与测试——**任何裁剪必须排除尚未被所有已授权对端 ack 的事件**，不实现裁剪。
+- **信任模型 v2（证书吊销）**、**跨 NAT 实测回填**（README「项目状态」标注规划中）。
+
+## 5. 已知边界（有意取舍 / 需人工关注）
+
+- **回退残差 ≤2%（非安全缺陷）**：harness 的非收敛回退路径上，扰动检查残差实测全部为「原世界回退（`converged=false`）、扰动后世界收敛（`true`）」——**世界不同**，而非回退结果里存在被采纳的被吊销者记录；回退本身由闭包不变量 `revoked ⊆ excluded` 保证 R-b 字面成立。harness 逐条打印 `[residual] …` 供复核。
+- **设备吊销轴偏保守**：回退会排除更多签发者 → 可能**少授权**（安全方向，非放宽）。
+- **不动点成本**：主循环最坏 `O(iterations · |entries|)`，`iterations ≤ 2·|entries|+2` → 对输入规模最坏近似 `O(n²)`；策略事件通常很少。
+- **吊销是域收缩**：不回撤**已入图**数据，也无法强制远端停止；它阻止的是**后续摄入**（读侧 `[]` + 入站事件隔离 + 快照过滤）。被吊销设备**仍可建立会话**（否则无从得知恢复）。
+- **保留命名空间可见性代价**：`__policy__` 对已认证设备（含被吊销者）可读，授权图可见（见 §1.7）。
+- **跨会话重复发送**是设计（见 §2.4）；`duplicates` 接近 `sentEvents` 且量很大时，多半是本机同步状态被重置/丢失过——用 `mebular.resetPeerWatermarks(peerDeviceId?)` 修复（只清水位、不动 per-event ack，方向安全）。
+- **文档一致性待修（低风险）**：
+  - README「项目状态」的测试/覆盖数字滞后（现为 **67 套件 / 542 用例**；行 ~92.4%、分支 ~79.3–79.5%）。
+  - README「同步触发时机」写 anti-entropy「5–15 分钟」，代码默认 `10min ±20%`（即 8–12 分钟）——待统一口径。
+  - README 记忆分区一节引用的「未做项」小节当前不存在（应指向本文 §4）。
+
+## 6. 复现封板基线（可复核）
+
+```bash
+git rev-parse origin/main^{tree}        # d1eb7d2c5ffa87eed6c64d70ce8aed3a6ceeb333
+npm run build && npm run lint           # 无输出
+npm test                                # 67 suites / 542 tests 全绿
+npm run test:coverage                   # All files 行 ~92.4% / 分支 ~79.3–79.5%（门槛 85/65）
+node --experimental-vm-modules node_modules/jest/bin/jest.js tests/sync/policy-invariants.test.ts
+# [policy-invariants] scenarios=300 nonConverged=6 residualA=4 residualB=0
+```
+
+**红→绿抽验（R-b 历史连坐）**：临时把 `src/sync/grantPolicy.ts` 的
+`revokedIn.has(entry.author) || ` 去掉 → `jest tests/sync/grant-policy.test.ts -t "R-b 历史连坐"` 应 **✕**；
+`git checkout -- src/sync/grantPolicy.ts` 还原后应 **✓**。完成后工作区必须干净。

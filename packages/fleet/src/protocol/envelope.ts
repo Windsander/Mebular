@@ -79,7 +79,8 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
 }
 
-function isEndpoint(value: unknown): value is FleetEndpoint {
+/** 端标识守卫（`{device,agent}` 均为非空字符串）。 */
+export function isFleetEndpoint(value: unknown): value is FleetEndpoint {
   if (typeof value !== 'object' || value === null) return false;
   const e = value as Record<string, unknown>;
   return isNonEmptyString(e.device) && isNonEmptyString(e.agent);
@@ -134,8 +135,8 @@ export function validateEnvelope(input: unknown): EnvelopeValidation {
   const e = input as Record<string, unknown>;
   if (e.v !== FLEET_PROTOCOL_VERSION) errors.push(`v 必须为 ${FLEET_PROTOCOL_VERSION}`);
   if (!isNonEmptyString(e.taskId)) errors.push('taskId 必须为非空字符串');
-  if (!isEndpoint(e.from)) errors.push('from 必须为 {device,agent} 非空字符串');
-  if (!isEndpoint(e.to)) errors.push('to 必须为 {device,agent} 非空字符串');
+  if (!isFleetEndpoint(e.from)) errors.push('from 必须为 {device,agent} 非空字符串');
+  if (!isFleetEndpoint(e.to)) errors.push('to 必须为 {device,agent} 非空字符串');
   if (!isNonEmptyString(e.intent)) errors.push('intent 必须为非空字符串');
   if (e.payloadRef !== undefined && !isNonEmptyString(e.payloadRef)) {
     errors.push('payloadRef 若存在须为非空字符串');

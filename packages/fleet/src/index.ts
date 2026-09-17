@@ -6,3 +6,6 @@
 // - core 不得反向依赖本包（`tests/fleet/boundary.test.ts` 强制）；
 // - 墙钟（`expiresAt`）不进一致性判定。
 export * from './protocol/envelope.js';
+export * from './protocol/events.js';
+export * from './model.js';
+export * from './quota.js';

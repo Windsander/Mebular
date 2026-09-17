@@ -196,7 +196,8 @@ async function runInit(flags) {
       deviceId: typeof flags['device-id'] === 'string' ? flags['device-id'] : `device-${process.env.HOSTNAME ?? 'local'}`,
       encryption: { level: 'none', keyFile },
       network: { enabled: false, libp2p: { listen: [], relayServers: [], relayUnlimited: false } },
-      sync: { autoSync: true },
+      // 常驻入口默认实时（写入即推 + 周期 anti-entropy）；可显式关闭
+      sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: true } },
       semantic: { enabled: false, minScore: 0.2 },
       mcp: { http: { host: '127.0.0.1', port: 7331, auth: 'none', tls: false, tokensFile: join(home, 'auth', 'tokens.json') } },
     };

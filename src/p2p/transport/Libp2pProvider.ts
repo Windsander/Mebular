@@ -96,9 +96,15 @@ interface Libp2pModules {
 /** 动态导入器：可注入以便测试「缺包」路径；默认实现绕开转译器的 import 改写 */
 export type ModuleImporter = (specifier: string) => Promise<Record<string, unknown>>;
 
+// V8 会按**函数体源码字符串**缓存 `new Function` 的编译结果。jest 同一 worker 进程会跨
+// 测试文件复用该缓存，而缓存的函数仍绑定在**先编译它**的那个测试环境上；当该环境已销毁、
+// 另一个文件再调用同一源码时，动态 `import()` 会以 "Test environment has been torn down"
+// 拒绝（表现为 `Mebular.test.ts` 里真实装配 libp2p 的用例随机失败）。
+// 给函数体附加一个每次**模块加载**唯一的注释，令源码不同以避开该缓存；不影响导入语义。
+const importerSourceNonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
 const defaultImporter: ModuleImporter = new Function(
   'specifier',
-  'return import(specifier);',
+  `return import(specifier); //#${importerSourceNonce}`,
 ) as ModuleImporter;
 
 /**

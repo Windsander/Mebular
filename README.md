@@ -14,8 +14,8 @@ Mebular 把记忆存成一张带签名事件的知识图谱，每条事实都记
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-473%20passed-brightgreen)](#项目状态)
-[![Coverage](https://img.shields.io/badge/Coverage-91.5%25-brightgreen)](#项目状态)
+[![Tests](https://img.shields.io/badge/Tests-484%20passed-brightgreen)](#项目状态)
+[![Coverage](https://img.shields.io/badge/Coverage-91.9%25-brightgreen)](#项目状态)
 
 [官网](https://mebular.cyberfederal.io) · [快速上手](#30-秒上手) · [系统架构](#系统架构) · [项目状态](#项目状态) · [贡献](#贡献)
 
@@ -47,7 +47,7 @@ git clone https://github.com/Windsander/Mebular.git
 cd Mebular
 npm install
 npm run build          # TypeScript strict → dist/
-npm test               # 61 套件 / 473 用例全绿
+npm test               # 62 套件 / 484 用例全绿
 ```
 
 ### 最简例子（复制即跑）
@@ -154,6 +154,9 @@ node scripts/wan-sync.mjs cross --device-id device-B --user-master-key-file key.
 
 - **分区隔离**：`query` / `search` / `graph` 都接受可选 `namespace`（单个或数组）；指定分区时不会串到别的分区。CMF 导入导出与 SQLite 存储（namespace 列 + 索引）同样贯通。
 - **默认拒绝 + 显式授权**：数据持有者只把记忆发给**被显式授权**的对端。`sync.peerNamespacePolicy` 是 `peerDeviceId → 允许的分区` 白名单；**未列出的对端拿不到任何分区**（空数组 = 明确不允许），必须显式写入才能同步。裁剪链为「对端授权 ∩ 对端订阅声明 ∩ 本机订阅声明」，同时作用于 offer 与初始快照——未授权分区不会离开数据持有者，空水位走快照也绕不过。拒绝不是静默的：`sync-completed` 带 `denied` 标记。
+- **授权作为记忆（grant-as-memory）**：授权可由**链到用户主密钥**的设备签发为图上记录（`namespace_grant` / `namespace_revoke`，落在保留命名空间 `__policy__`），全 fleet 可见、可审计、可撤销，且**不可被被授权方自授**（自授 / 别家用户 / 无证书者签的记录一律忽略）。生效授权 = 图上 grant ∪ `sync.peerNamespacePolicy` 配置，两者都是白名单，任一为空都不会把「未授权」变成「不限」。保留命名空间不受 allow 链约束、已认证设备总能读到（解开「默认拒绝 + 策略在图上」的 bootstrap 死锁）；写入与生效只认签发者。签署与审计入口：`mebular.grantNamespaces` / `revokeGrant` / `getEffectiveNamespaces`。**恢复必须使用新的 `grantId`**——被撤销的 grantId 永久失效，复用它再授予不会恢复。`expiresAt` 为预留字段，本轮**不强制生效**（避免引入跨端时钟依赖），见「未做项」。
+- **身份吊销**：`mebular.revokeDevice({ subject })` 写一条签发者签名的 `device_revoke`：读侧立刻返回 `[]`，且该设备**署名的事件在入站写入处被隔离**、**其署名实体也不得经对端快照进入**（默认拒绝只挡「我们发给它」，挡不住它把事件推进我们的图，故吊销必须在入站与快照两条路都生效）。吊销**非终态**——之后再对该设备写一条**新 grantId** 的 grant 即恢复；撤销/恢复期间水位不被污染（从正确水位续传）。
+- **两条明确取舍**：① 保留命名空间 `__policy__` 对**所有已认证设备可读（含被吊销者）**——这是解开 bootstrap 与支持恢复所必需的取舍，代价是授权图（谁能读什么、谁被吊销）对已入网设备可见；② 吊销**只阻止后续摄入**，不回撤**已经入图**的数据，且被吊销设备**仍可建立会话**（否则无从得知恢复），只是读侧为 `[]`、其入站事件被隔离。
 - **本机订阅**：`sync.namespaces` 声明本机订阅的分区；未配置 / 空 = 参与全部。订阅声明随 `sync-hello` 以 `subscribeAll` + `namespaces` **必填**下发（缺字段/类型错视为协议违例并中止会话）；`subscribeAll=false` + 空清单 = 明确不订阅任何分区。
 - **分区同步水位**：缺失判定按 `per-(对端, 分区, 作者)` 水位进行——只在同一分区内比较作者计数，而不是拿对端累积全局时钟；本机上报（hello）与快照水位同样**只取作者自身计数**，绝不把累积时钟当成「对方已有」。这样某分区因未授权被跳过后，日后**扩权即可回补**历史事件，不会永久缺失。**水位只由我们掌握的两个事实推进：对端 ack 与「已确认快照」**（快照覆盖分区须收到 `snapshotApplied` 确认才推进，禁止乐观推进）；对端 hello 的自报水位**不抬升**本机记录（仅用于快照触发与诊断，差异以 `sync-completed.reportedAhead` 暴露）。水位持久化于 `.sync-state.json` v2，重启后不重发、不遗漏；撤销后再授予同样从正确水位续传。
 - **水位修复入口**：`mebular.resetPeerWatermarks(peerDeviceId?)`（省略 = 全部）清空对端水位并持久化，是对端水位被污染时**被认可的修复路径**：只清水位、不动 per-event ack 集合，方向安全（最多让已确认事件冗余重发一次，不会漏发）。
@@ -200,8 +203,8 @@ Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API
 
 | 项目 | 情况 |
 |------|------|
-| 测试 | 61 个套件、473 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
-| 覆盖率 | 行 91.5%、分支 78.2%，全库门槛 85/65，关键文件另有底线 |
+| 测试 | 62 个套件、484 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
+| 覆盖率 | 行 91.9%、分支 78.8%，全库门槛 85/65，关键文件另有底线 |
 | 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |
 | 质量门禁 | 每个阶段跑 verify 脚本加构建产物冒烟，`src` 里不留裸的 `throw new Error` |

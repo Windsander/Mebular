@@ -34,6 +34,16 @@ export {
   type ApplyResult,
   type SyncConflict,
 } from './sync/index.js';
+// Phase 2 · D/E：授权作为记忆与身份吊销（公共面保持在最小集合；其余经 Mebular facade）
+export {
+  GraphNamespacePolicy,
+  POLICY_NAMESPACE,
+  type NamespaceGrantRecord,
+  type NamespaceRevokeRecord,
+  type DeviceRevokeRecord,
+  type PolicyState,
+} from './sync/grantPolicy.js';
+export { CompositeNamespacePolicy } from './sync/namespacePolicy.js';
 export {
   DEFAULT_NAMESPACE,
   normalizeNamespace,

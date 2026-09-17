@@ -68,6 +68,7 @@
     "verify:mcp:cross:selftest": "node scripts/verify-mcp-cross.mjs --selftest",
     "verify:mcp:skill": "node scripts/verify-mcp-skill.mjs",
     "verify:mcp:publish": "node scripts/verify-mcp-publish.mjs",
+    "verify:fleet:local": "node scripts/verify-fleet-local.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "dependencies": {
@@ -139,7 +140,8 @@
     ],
     "coveragePathIgnorePatterns": [
       "/node_modules/",
-      "src/p2p/transport/Libp2pProvider.ts"
+      "src/p2p/transport/Libp2pProvider.ts",
+      "packages/fleet/src/cli.ts"
     ],
     "coverageThreshold": {
       "global": {

@@ -7,6 +7,7 @@
 // `?mock=1` 使用内置演示数据，便于无网络验收。
 
 import { StarStage, namespaceColor, shortId } from './starfield.js';
+import { createWizardState, wizardReduce, selectedMemoryCount, WIZARD_STEPS } from './wizard.js';
 
 const $ = (selector) => document.querySelector(selector);
 const params = new URLSearchParams(location.search);
@@ -651,13 +652,189 @@ $('#modal-confirm').addEventListener('click', () => {
   modalResolve = null;
 });
 
-$('#add-device').addEventListener('click', () => {
-  confirmModal({
-    title: '添加设备',
-    body: '添加设备向导（展示本机地址 → 粘贴对端 multiaddr → 选择共享域并签发授权）将在后续版本提供。\n\n当前可手动使用 mebular serve 与对端交换 multiaddr，并在设备卡中管理授权。',
-    confirmLabel: '知道了',
+$('#add-device').addEventListener('click', openWizard);
+$('#wizard-close').addEventListener('click', closeWizard);
+$('#wizard-back').addEventListener('click', () => wizardSet({ type: 'BACK' }));
+$('#wizard-next').addEventListener('click', wizardNext);
+
+// ---------- 添加设备向导 ----------
+
+const STEP_LABELS = {
+  local: '① 本机信息 / 对端地址',
+  connect: '② 建立连接',
+  domains: '③ 选择共享域',
+  done: '④ 完成',
+};
+
+let wizardState = createWizardState();
+
+function openWizard() {
+  wizardState = createWizardState();
+  $('#wizard').hidden = false;
+  renderWizard();
+}
+
+function closeWizard() {
+  $('#wizard').hidden = true;
+}
+
+function wizardSet(action) {
+  wizardState = wizardReduce(wizardState, action);
+  renderWizard();
+}
+
+function renderWizard() {
+  const order = [...WIZARD_STEPS, 'done'];
+  const index = order.indexOf(wizardState.step);
+  $('#wizard-steps').innerHTML = order
+    .map((step, i) => `<span class="${i === index ? 'active' : ''}">${STEP_LABELS[step]}</span>`)
+    .join(' › ');
+  const error = $('#wizard-error');
+  error.hidden = !wizardState.error;
+  error.textContent = wizardState.error ?? '';
+  const body = $('#wizard-body');
+  const next = $('#wizard-next');
+  const back = $('#wizard-back');
+
+  if (wizardState.step === 'local') {
+    const device = state.overview?.device ?? {};
+    const multiaddrs = device.multiaddrs ?? [];
+    body.innerHTML = `
+      <p class="wizard-note">把本机地址给对面，并粘贴对面的 deviceId 与 multiaddr。</p>
+      <div class="field"><label>本机 deviceId</label><div class="copyable"><code>${escapeHtml(device.deviceId ?? '—')}</code><button class="btn btn-small" data-copy="${escapeHtml(device.deviceId ?? '')}">复制</button></div></div>
+      <div class="field"><label>本机 peerId</label><div class="copyable"><code>${escapeHtml(device.peerId ?? '—')}</code>${device.peerId ? `<button class="btn btn-small" data-copy="${escapeHtml(device.peerId)}">复制</button>` : ''}</div></div>
+      <div class="field"><label>本机 multiaddrs</label>${multiaddrs.length
+        ? multiaddrs.map((addr) => `<div class="copyable"><code>${escapeHtml(addr)}</code><button class="btn btn-small" data-copy="${escapeHtml(addr)}">复制</button></div>`).join('')
+        : '<code class="muted">（网络未启用，无监听地址）</code>'}</div>
+      <div class="field"><label>relay（可选）</label><code>${escapeHtml((device.relays ?? []).join(', ') || '—')}</code></div>
+      <div class="field"><label>对方 deviceId</label><input id="wizard-device" type="text" value="${escapeHtml(wizardState.deviceId)}" placeholder="device-B" /></div>
+      <div class="field"><label>对方 multiaddr</label><textarea id="wizard-address" placeholder="/ip4/…/tcp/…/p2p/…">${escapeHtml(wizardState.address)}</textarea></div>
+    `;
+    next.textContent = '连接';
+    next.disabled = false;
+    back.disabled = true;
+    bindWizardFields();
+  } else if (wizardState.step === 'connect') {
+    const status = wizardState.connection === 'connected'
+      ? '● 已连接并完成认证'
+      : wizardState.connection === 'connecting'
+        ? '◌ 连接中…'
+        : wizardState.connection === 'failed' ? '✗ 连接失败' : '○ 待连接';
+    body.innerHTML = `
+      <p class="wizard-note">目标：<code>${escapeHtml(wizardState.deviceId)}</code> @ <code>${escapeHtml(wizardState.address)}</code></p>
+      <p><b>${status}</b></p>
+      ${wizardState.connection === 'failed'
+        ? '<p class="wizard-note">可行动建议：确认对面已运行 serve、multiaddr 含 /p2p/&lt;peerId&gt;、端口可达；修正后重试。</p>'
+        : ''}
+    `;
+    next.textContent = wizardState.connection === 'connected' ? '下一步' : '重试';
+    next.disabled = wizardState.connection === 'connecting';
+    back.disabled = wizardState.connection === 'connecting';
+  } else if (wizardState.step === 'domains') {
+    const entries = state.namespaces;
+    body.innerHTML = `
+      <p class="wizard-note">选择要共享给 <code>${escapeHtml(wizardState.deviceId)}</code> 的域（默认全不选）。将共享约 ${selectedMemoryCount(entries, wizardState.selected)} 条记忆。</p>
+      <ul class="wizard-list">${entries.length
+        ? entries.map((entry) => {
+          const checked = wizardState.selected.includes(entry.namespace);
+          return `<li><label><input type="checkbox" data-wizard-ns="${escapeHtml(entry.namespace)}" ${checked ? 'checked' : ''}> <span class="ns-chip" style="background:${namespaceColor(entry.namespace)}">${escapeHtml(entry.namespace)}</span> <span class="muted">${entry.count} 条</span></label></li>`;
+        }).join('')
+        : '<li class="muted">暂无分区</li>'}</ul>
+    `;
+    next.textContent = wizardState.granting ? '签发中…' : '签发授权';
+    next.disabled = wizardState.granting || wizardState.selected.length === 0;
+    back.disabled = wizardState.granting;
+    body.querySelectorAll('input[data-wizard-ns]').forEach((input) => {
+      input.addEventListener('change', () => wizardSet({ type: 'TOGGLE_NAMESPACE', namespace: input.dataset.wizardNs }));
+    });
+  } else if (wizardState.step === 'done') {
+    body.innerHTML = `
+      <p class="wizard-note">已向 <code>${escapeHtml(wizardState.deviceId)}</code> 签发授权。</p>
+      <div class="field"><label>grantId</label><div class="copyable"><code>${escapeHtml(wizardState.grantId ?? '')}</code><button class="btn btn-small" data-copy="${escapeHtml(wizardState.grantId ?? '')}">复制</button></div></div>
+      <p class="wizard-note">之后可在设备卡继续调整域开关。</p>
+    `;
+    next.textContent = '完成';
+    next.disabled = false;
+    back.disabled = true;
+  }
+  body.querySelectorAll('[data-copy]').forEach((button) => {
+    button.addEventListener('click', () => copyText(button.dataset.copy, button));
   });
-});
+}
+
+function bindWizardFields() {
+  const deviceInput = $('#wizard-device');
+  const addressInput = $('#wizard-address');
+  if (deviceInput) deviceInput.addEventListener('input', () => {
+    wizardState = wizardReduce(wizardState, { type: 'PEER_INPUT', deviceId: deviceInput.value });
+  });
+  if (addressInput) addressInput.addEventListener('input', () => {
+    wizardState = wizardReduce(wizardState, { type: 'PEER_INPUT', address: addressInput.value });
+  });
+}
+
+async function copyText(text, button) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    if (button) {
+      const old = button.textContent;
+      button.textContent = '已复制';
+      setTimeout(() => { button.textContent = old; }, 1200);
+    }
+  } catch {
+    window.prompt('复制：', text);
+  }
+}
+
+async function doWizardConnect() {
+  if (MOCK) {
+    wizardSet({ type: 'CONNECT_FAILURE', message: 'mock 模式不执行连接' });
+    return;
+  }
+  try {
+    await api(`/admin/api/devices/${encodeURIComponent(wizardState.deviceId)}/connect`, {
+      method: 'POST',
+      body: { address: wizardState.address },
+    });
+    wizardSet({ type: 'CONNECT_SUCCESS' });
+    await refresh();
+  } catch (error) {
+    wizardSet({ type: 'CONNECT_FAILURE', message: error.message });
+  }
+}
+
+async function wizardNext() {
+  if (wizardState.step === 'local') {
+    wizardState = wizardReduce(wizardState, { type: 'GO_CONNECT' });
+    renderWizard();
+    if (wizardState.step !== 'connect') return;
+    await doWizardConnect();
+  } else if (wizardState.step === 'connect') {
+    if (wizardState.connection === 'connected') wizardSet({ type: 'GO_DOMAINS' });
+    else await doWizardConnect();
+  } else if (wizardState.step === 'domains') {
+    wizardState = wizardReduce(wizardState, { type: 'GRANT_START' });
+    renderWizard();
+    if (wizardState.granting !== true) return;
+    if (MOCK) {
+      wizardSet({ type: 'GRANT_FAILURE', message: 'mock 模式不执行签发' });
+      return;
+    }
+    try {
+      const result = await api('/admin/api/grants', {
+        method: 'POST',
+        body: { subject: wizardState.deviceId, namespaces: wizardState.selected },
+      });
+      wizardSet({ type: 'GRANT_SUCCESS', grantId: result.grantId });
+      await refresh();
+    } catch (error) {
+      wizardSet({ type: 'GRANT_FAILURE', message: error.message });
+    }
+  } else if (wizardState.step === 'done') {
+    closeWizard();
+  }
+}
 
 // ---------- 工具 ----------
 

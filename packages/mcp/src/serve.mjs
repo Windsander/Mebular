@@ -33,6 +33,7 @@ const CONSOLE_FILES = {
   'console.css': 'text/css; charset=utf-8',
   'console.js': 'text/javascript; charset=utf-8',
   'starfield.js': 'text/javascript; charset=utf-8',
+  'wizard.js': 'text/javascript; charset=utf-8',
 };
 
 // CSRF：页面加载签发（SameSite=Strict cookie + 响应头），写请求要求头与 cookie 双提交且 token 在签发集合内。

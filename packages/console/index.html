@@ -82,6 +82,20 @@
     </div>
   </div>
 
+  <div id="wizard" class="modal" hidden>
+    <div class="modal-box modal-box-wide" role="dialog" aria-modal="true" aria-label="添加设备向导">
+      <h2>添加设备</h2>
+      <div id="wizard-steps" class="wizard-steps"></div>
+      <div id="wizard-body"></div>
+      <p id="wizard-error" class="wizard-error" hidden></p>
+      <div class="modal-actions">
+        <button id="wizard-close" class="btn" type="button">关闭</button>
+        <button id="wizard-back" class="btn" type="button">上一步</button>
+        <button id="wizard-next" class="btn btn-primary" type="button">下一步</button>
+      </div>
+    </div>
+  </div>
+
   <div id="modal" class="modal" hidden>
     <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <h2 id="modal-title"></h2>

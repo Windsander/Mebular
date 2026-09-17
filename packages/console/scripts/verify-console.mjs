@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import { createWizardState, wizardReduce, selectedMemoryCount } from '../wizard.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const consoleDir = join(__dirname, '..');
@@ -172,8 +173,46 @@ function openSse(port, path, timeoutMs = 8000) {
   });
 }
 
-console.log('Mebular 控制台 E1 验证（D1）');
+console.log('Mebular 控制台 E1 验证（D1+D2，含 D3 向导状态机）');
 console.log('===============================');
+
+// ---------- D3 添加设备向导状态机（纯函数，无需起服务） ----------
+{
+  let s = createWizardState();
+  check('向导初始 step=local', s.step === 'local');
+  s = wizardReduce(s, { type: 'GO_CONNECT' });
+  check('缺 deviceId/address → 拦截', s.step === 'local' && Boolean(s.error));
+  s = wizardReduce(s, { type: 'PEER_INPUT', deviceId: 'device-B', address: '/ip4/127.0.0.1/tcp/4011/p2p/xyz' });
+  s = wizardReduce(s, { type: 'GO_CONNECT' });
+  check('输入齐全 → step=connect/connecting', s.step === 'connect' && s.connection === 'connecting');
+  s = wizardReduce(s, { type: 'GO_DOMAINS' });
+  check('未连接 → 不能进入 domains', s.step === 'connect' && Boolean(s.error));
+  s = wizardReduce(s, { type: 'CONNECT_SUCCESS' });
+  s = wizardReduce(s, { type: 'GO_DOMAINS' });
+  check('已连接 → step=domains', s.step === 'domains');
+  s = wizardReduce(s, { type: 'GRANT_START' });
+  check('未选域 → GRANT_START 被拦', s.granting !== true && Boolean(s.error));
+  s = wizardReduce(s, { type: 'TOGGLE_NAMESPACE', namespace: 'notes' });
+  check('选择域 notes', s.selected.includes('notes'));
+  check(
+    'selectedMemoryCount 汇总所选域记忆数',
+    selectedMemoryCount([{ namespace: 'notes', count: 2 }, { namespace: 'work', count: 3 }], s.selected) === 2,
+  );
+  s = wizardReduce(s, { type: 'GRANT_START' });
+  check('已选域 → granting', s.granting === true);
+  s = wizardReduce(s, { type: 'GRANT_SUCCESS', grantId: 'g-1' });
+  check('签发成功 → step=done + grantId', s.step === 'done' && s.grantId === 'g-1');
+  s = wizardReduce(s, { type: 'BACK' });
+  check('done 不可后退（保持）', s.step === 'done');
+  const reset = wizardReduce(s, { type: 'RESET' });
+  check('RESET 回到初始', reset.step === 'local' && reset.selected.length === 0);
+  let f = wizardReduce(createWizardState(), { type: 'PEER_INPUT', deviceId: 'd', address: 'a' });
+  f = wizardReduce(f, { type: 'GO_CONNECT' });
+  f = wizardReduce(f, { type: 'CONNECT_FAILURE', message: 'refused' });
+  check('连接失败可重试', f.connection === 'failed' && f.error === 'refused');
+  f = wizardReduce(f, { type: 'BACK' });
+  check('connect → BACK 回 local', f.step === 'local');
+}
 
 const home = await mkdtemp(join(tmpdir(), 'mebular-console-'));
 const servers = [];
@@ -193,7 +232,7 @@ try {
   check('/console 返回控制台页面', indexText.includes('Mebular 控制台'));
   check('/console 下发 CSRF cookie 与响应头', (index.headers.get('set-cookie') ?? '').includes('mebular_csrf=') && Boolean(index.headers.get('x-mebular-csrf')));
 
-  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['starfield.js', 'text/javascript']]) {
+  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript']]) {
     const res = await fetch(`http://127.0.0.1:${port}/console/${file}`);
     check(`静态资源 /console/${file} 200`, res.status === 200 && (res.headers.get('content-type') ?? '').includes(mime), `status=${res.status}`);
   }

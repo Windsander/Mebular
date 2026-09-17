@@ -9,7 +9,8 @@
     "index.html",
     "console.css",
     "console.js",
-    "starfield.js"
+    "starfield.js",
+    "wizard.js"
   ],
   "engines": {
     "node": ">=20"

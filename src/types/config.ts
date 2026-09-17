@@ -43,8 +43,13 @@ export interface SyncConfig {
    * 实现位（本期不实现）。
    */
   peerNamespacePolicy?: Record<string, string[]>;
-  /** 本地写入后向订阅对端即时推送（默认关闭，保持既有行为） */
+  /** 本地写入后向订阅对端即时推送（默认关闭，保持既有行为；常驻入口默认开启） */
   pushOnWrite?: boolean;
-  /** push-on-write 节流窗口（ms，默认 50）：连续写入合并为一次推送 */
+  /** push-on-write 节流窗口（ms，默认 50）：连续写入合并为一次推送/nudge */
   pushOnWriteThrottleMs?: number;
+  /**
+   * 周期 anti-entropy（C）：core/库默认关闭；常驻入口（serve/MCP）默认开启。
+   * `intervalMs` 缺省 10 分钟（建议 5–15 分钟），`jitterRatio` 缺省 0.2（±20%）。
+   */
+  antiEntropy?: { enabled?: boolean; intervalMs?: number; jitterRatio?: number };
 }

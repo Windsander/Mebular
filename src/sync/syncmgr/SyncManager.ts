@@ -182,6 +182,20 @@ interface AppliedOffer {
 }
 
 /**
+ * 实体是否由当前被吊销的设备署名（F-1）：`createdBy` 或 `updatedBy` 命中即拒绝。
+ * 堵住「被吊销设备的事件在入站写入处被隔离，但其署名实体仍可经已授权对端的
+ * 快照进入本图」的旁路。
+ */
+function isEntityAuthoredByRevoked(
+  entity: { createdBy?: string; updatedBy?: string },
+  revoked: ReadonlySet<string> | undefined,
+): boolean {
+  if (!revoked || revoked.size === 0) return false;
+  if (entity.createdBy !== undefined && revoked.has(entity.createdBy)) return true;
+  return entity.updatedBy !== undefined && revoked.has(entity.updatedBy);
+}
+
+/**
  * 快照应用的回退保护（R3）：仅当本地不存在、或快照版本时钟**严格更新**时才写入。
  * 并发（互不因果）时保留本地版本——宁可少应用，绝不回退。这不是完整冲突解决；
  * 快照只发给空对端的前提（R2）仍然成立，见 `applySnapshot`。
@@ -636,8 +650,12 @@ export class SyncManager extends EventEmitter {
           let applied: AppliedOffer;
           if (offer.snapshot) {
             assertValidSnapshot(offer.snapshot);
+            // F-1：快照随行的策略事件先入库（刷新授权/吊销视图），再做物化采纳；
+            // 否则接收方拿不到吊销记录，快照的按作者过滤无从谈起。
+            applied = offer.events.length > 0
+              ? await this.applyOffer(offer.events, peer)
+              : { ackedIds: [], received: 0, duplicates: 0, conflicts: [] };
             snapshotApplied = await this.applySnapshot(offer.snapshot);
-            applied = { ackedIds: [], received: 0, duplicates: 0, conflicts: [] };
           } else {
             applied = await this.applyOffer(offer.events, peer);
           }
@@ -708,10 +726,13 @@ export class SyncManager extends EventEmitter {
       let snapshotApplied = 0;
       let applied: AppliedOffer;
       if (offer.snapshot) {
-        // 初始快照：已认证对端直接采纳物化状态并推进时钟（G4）
+        // 初始快照：已认证对端直接采纳物化状态并推进时钟（G4）。
+        // F-1：先应用随行的策略事件（刷新吊销视图），再采纳快照并按作者过滤。
         assertValidSnapshot(offer.snapshot);
+        applied = offer.events.length > 0
+          ? await this.applyOffer(offer.events, peer)
+          : { ackedIds: [], received: 0, duplicates: 0, conflicts: [] };
         snapshotApplied = await this.applySnapshot(offer.snapshot);
-        applied = { ackedIds: [], received: 0, duplicates: 0, conflicts: [] };
       } else {
         applied = await this.applyOffer(offer.events, peer);
       }
@@ -1103,13 +1124,20 @@ export class SyncManager extends EventEmitter {
    * 快照仅来自已认证对端；不做逐事件验签（fast-start 取舍，见 protocol.ts）。
    */
   private async applySnapshot(snapshot: SyncSnapshot): Promise<number> {
+    // E/F-1：按当前吊销集合过滤实体（createdBy/updatedBy 命中即拒绝）。
+    // 快照是旁路——直接推送的事件已在 applyOffer 被隔离，这里必须补上同样的边界。
+    const revoked = this.namespacePolicy.getRevokedDevices
+      ? await this.namespacePolicy.getRevokedDevices()
+      : undefined;
     let applied = 0;
     for (const node of snapshot.nodes) {
+      if (isEntityAuthoredByRevoked(node, revoked)) continue;
       if (!shouldApplySnapshotEntity(await this.storage.getNode(node.id), node)) continue;
       await this.storage.putNode(node);
       applied += 1;
     }
     for (const edge of snapshot.edges) {
+      if (isEntityAuthoredByRevoked(edge, revoked)) continue;
       if (!shouldApplySnapshotEntity(await this.storage.getEdge(edge.id), edge)) continue;
       await this.storage.putEdge(edge);
       applied += 1;

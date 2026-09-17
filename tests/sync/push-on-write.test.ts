@@ -25,7 +25,9 @@ describe('push-on-write', () => {
   });
 
   afterEach(async () => {
-    await rm(dir, { recursive: true, force: true });
+    // 后台推送/节流可能在本用例结束后仍落一次盘；rm 在并发遍历下可能 ENOTEMPTY，
+    // 用 maxRetries 重试（Node 对 ENOTEMPTY 会线性退避重试）。仅测试清理，不涉语义。
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   function makeFacade(

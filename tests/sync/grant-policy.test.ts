@@ -429,6 +429,35 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
     expect(await p.getAuthorizedNamespaces('device-B')).toEqual([]);
     expect(await p.getAuthorizedNamespaces('device-C')).toEqual([]); // 级联生效
   });
+
+  it('F-C：上限内未收敛时 fail-closed 回退（最保守，不放宽 R-b）', async () => {
+    const g = await appendGrant(trusted, 'device-B', ['nsA'], 1000);
+    await appendDeviceRevoke(trusted, 'device-D', 2000);
+    const dLog = await makeTrustedLog(storage, master, 'device-D', { restore: true });
+    await dLog.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke: { grantId: g.grantId, subject: 'device-B', issuedAt: 3000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    // 上限 1 → 必然落入回退路径
+    const p = new GraphNamespacePolicy({
+      eventLog: new EventLog(storage, 'reader'),
+      userMasterPublicKey: masterPub,
+      policyIssuers: ['issuer'],
+      maxIterations: 1,
+    });
+    const state = await p.snapshot();
+    expect(state.converged).toBe(false); // 诊断可见
+    // fail-closed：不采纳被吊销签发者 D 的 revoke → B 仍授权
+    expect(await p.getAuthorizedNamespaces('device-B')).toEqual(['nsA']);
+  });
+
+  it('F-C 诊断：正常输入 converged=true 且 iterations≥1', async () => {
+    await appendGrant(trusted, 'device-B', ['nsA'], 1000);
+    const state = await policyWith(['issuer']).snapshot();
+    expect(state.converged).toBe(true);
+    expect(state.iterations).toBeGreaterThanOrEqual(1);
+  });
 });
 
 describe('CompositeNamespacePolicy（图上 ∪ 配置；吊销优先）', () => {

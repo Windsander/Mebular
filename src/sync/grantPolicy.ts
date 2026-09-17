@@ -64,6 +64,16 @@ export interface PolicyState {
   authorized: Map<string, string[]>;
   /** 当前处于吊销状态的设备 */
   revoked: Set<string>;
+  /** 不动点是否在迭代上限内**收敛**（false = 到达上限，回退到最保守结果，可观测） */
+  converged: boolean;
+  /** 实际执行的迭代轮数（诊断） */
+  iterations: number;
+}
+
+/** 单轮推导的结果（不含不动点诊断字段） */
+interface Authority {
+  authorized: Map<string, string[]>;
+  revoked: Set<string>;
 }
 
 interface ParsedEntry {
@@ -152,6 +162,11 @@ export interface DerivePolicyOptions {
    * 若谁都还没被授权，则图上政策不可签发 → 回退到配置白名单（不放松默认拒绝）。
    */
   policyIssuers?: readonly string[];
+  /**
+   * 不动点迭代上限（默认 `FIXPOINT_MAX_ITERATIONS`）。仅对边界/测试开放；
+   * 便于构造「必然落入回退」的输入以固化 fail-closed 行为。
+   */
+  maxIterations?: number;
 }
 
 /**
@@ -178,9 +193,10 @@ export interface DerivePolicyOptions {
  * 重新过滤 `revokedGrantIds`，直到同输入产出同结果（稳定）或到达上限。
  *
  * **终止条件与回退**：迭代次数有固定上限 `FIXPOINT_MAX_ITERATIONS`，绝不接受无法收敛的
- * 链路；若上限内未稳定，**回退到种子结果**（第一轮，等价于不按签发者吊销过滤 revoke），
- * 作为已知的系统边界。全过程仅由 `compareEntries` 的确定序驱动，故同一输入在任何端得到
- * 同一结果（`revokedGrantIds` 与 `revoked` 都是确定集合）。
+ * 链路。若上限内未稳定，**fail-closed 回退到已算出各轮中「被采纳 revoke 集合最小」的结果**
+ * （对 R-b 最保守，即尽量不采纳被吊销签发者的 revoke）；并列时按字典序最小确定性 tie-break。
+ * 全过程仅由 `compareEntries` 的确定序驱动，故同一输入在任何端得到同一结果。收敛情况由
+ * `PolicyState.converged` / `PolicyState.iterations` 暴露，供日志/告警。
  *
  * 级联：吊销 A → A 的 grant 失效 → 依赖它的 B 在权威授权步因 R-a 失去授权 → B 的转授
  * 也随之不生效（无需额外回溯，见测试）。
@@ -215,7 +231,7 @@ function deriveOnce(
   sorted: ParsedEntry[],
   bootstrap: ReadonlySet<string>,
   revokedGrantIds: ReadonlySet<string>,
-): PolicyState {
+): Authority {
   // ---- 第 1 步：时间线种子吊销集合（含恢复），供第 2 步 R-b 过滤 ----
   // 被撤销的 grantId 在本步永不采纳，因此无需处理 `namespace_revoke`（撤销集合已给定）。
   const seedRevoked = new Set<string>();
@@ -285,12 +301,33 @@ function deriveOnce(
 }
 
 /**
+ * 比较两个「被采纳 revoke 集合」的保守程度：**集合越小越保守**（越少采纳 revoke，
+ * 对 R-b 越安全：不会采纳被吊销签发者的 revoke）；同大小时按**字典序最小**兜底
+ * （对排序后的 id 列表逐位比较）→ 完全确定，无关迭代顺序。
+ */
+function compareRevokeSets(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
+  if (a.size !== b.size) return a.size - b.size;
+  const av = [...a].sort();
+  const bv = [...b].sort();
+  for (let i = 0; i < av.length; i++) {
+    if (av[i] !== bv[i]) return av[i]! < bv[i]! ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
  * 推导入口：以「全部 revoke」为种子做**有界不动点**（见文件顶部说明）。
  * 每轮用权威 `revoked` 过滤掉被吊销签发者发出的 revoke（R-b），重新单轮推导，
- * 直到稳定或到达上限；未稳定则回退种子结果。
+ * 直到稳定或到达上限。
+ *
+ * **回退（fail-closed）**：未在 `maxIterations` 内收敛时，在已算出的各轮里选
+ * 「被采纳 revoke 集合最小」的结果（对 R-b 最保守），而不是回到「全部 revoke 都
+ * 采纳」的种子——后者正是被吊销者可以吊销他人的漏洞姿态。选择规则由
+ * `compareRevokeSets`（越小越保守；并列取字典序最小）确定，故有界且确定。
  */
 export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyOptions = {}): PolicyState {
   const bootstrap = new Set(options.policyIssuers ?? []);
+  const maxIterations = options.maxIterations ?? FIXPOINT_MAX_ITERATIONS;
   // 排序唯一确定迭代顺序，保证同一输入在任何端得到同一结果。
   const sorted = [...entries].sort(compareEntries);
 
@@ -299,10 +336,16 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
     if (entry.kind === 'revoke' && entry.revoke) allRevokeIds.add(entry.revoke.grantId);
   }
 
-  const seed = deriveOnce(sorted, bootstrap, allRevokeIds);
   let revokedGrantIds = allRevokeIds;
-  let current = seed;
-  for (let i = 0; i < FIXPOINT_MAX_ITERATIONS; i++) {
+  let current = deriveOnce(sorted, bootstrap, revokedGrantIds);
+  const rounds: Array<{ revokedGrantIds: Set<string>; state: Authority }> = [
+    { revokedGrantIds, state: current },
+  ];
+
+  let converged = false;
+  let iterations = 0;
+  while (iterations < maxIterations) {
+    iterations += 1;
     const next = new Set<string>();
     for (const entry of sorted) {
       // R-b：被吊销签发者发出的 namespace_revoke 不采纳（F-B）
@@ -310,12 +353,22 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
         next.add(entry.revoke.grantId);
       }
     }
-    if (setsEqual(next, revokedGrantIds)) return current; // 稳定
+    if (setsEqual(next, revokedGrantIds)) {
+      converged = true;
+      break;
+    }
     revokedGrantIds = next;
     current = deriveOnce(sorted, bootstrap, revokedGrantIds);
+    rounds.push({ revokedGrantIds, state: current });
   }
-  // 到达上限仍未稳定 → 回退种子结果（有界、确定）
-  return seed;
+
+  const chosen = converged
+    ? current
+    : rounds.reduce((best, round) =>
+        compareRevokeSets(round.revokedGrantIds, best.revokedGrantIds) < 0 ? round : best,
+      ).state;
+
+  return { authorized: chosen.authorized, revoked: chosen.revoked, converged, iterations };
 }
 
 /**
@@ -328,16 +381,20 @@ export class GraphNamespacePolicy implements NamespaceGrantPolicy {
   private readonly eventLog: EventLog;
   private readonly userMasterPublicKey: Uint8Array | null;
   private readonly policyIssuers: string[];
+  private readonly maxIterations: number | undefined;
 
   constructor(options: {
     eventLog: EventLog;
     userMasterPublicKey?: Uint8Array | null;
     /** 引导期签发者白名单（R-a ①），可多台；缺省空 = 只能转授 */
     policyIssuers?: readonly string[];
+    /** 不动点迭代上限（边界/测试用）；缺省 `FIXPOINT_MAX_ITERATIONS` */
+    maxIterations?: number;
   }) {
     this.eventLog = options.eventLog;
     this.userMasterPublicKey = options.userMasterPublicKey ?? null;
     this.policyIssuers = [...(options.policyIssuers ?? [])];
+    this.maxIterations = options.maxIterations;
   }
 
   /** 读取策略事件（保留命名空间）并只保留签发者可信者，再推导状态。 */
@@ -348,7 +405,10 @@ export class GraphNamespacePolicy implements NamespaceGrantPolicy {
       if (!isPolicyType(event.type)) continue;
       if (await verifyIssuedByUser(event, this.userMasterPublicKey)) trusted.push(event);
     }
-    return derivePolicyState(parseEntries(trusted), { policyIssuers: this.policyIssuers });
+    return derivePolicyState(parseEntries(trusted), {
+      policyIssuers: this.policyIssuers,
+      ...(this.maxIterations !== undefined ? { maxIterations: this.maxIterations } : {}),
+    });
   }
 
   async getAuthorizedNamespaces(peerDeviceId: string): Promise<string[]> {

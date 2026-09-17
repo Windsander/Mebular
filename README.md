@@ -14,7 +14,7 @@ Mebular 把记忆存成一张带签名事件的知识图谱，每条事实都记
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-515%20passed-brightgreen)](#项目状态)
+[![Tests](https://img.shields.io/badge/Tests-523%20passed-brightgreen)](#项目状态)
 [![Coverage](https://img.shields.io/badge/Coverage-92.4%25-brightgreen)](#项目状态)
 
 [官网](https://mebular.cyberfederal.io) · [快速上手](#30-秒上手) · [系统架构](#系统架构) · [项目状态](#项目状态) · [贡献](#贡献)
@@ -47,7 +47,7 @@ git clone https://github.com/Windsander/Mebular.git
 cd Mebular
 npm install
 npm run build          # TypeScript strict → dist/
-npm test               # 66 套件 / 515 用例全绿
+npm test               # 66 套件 / 523 用例全绿
 ```
 
 ### 最简例子（复制即跑）
@@ -188,9 +188,12 @@ node scripts/wan-sync.mjs cross --device-id device-B --user-master-key-file key.
 
 ## 去中心化口径
 
-- 授权策略由**链到用户主密钥**的设备签发，**不可自授**；多签发者并存时，同一主体内按签发者的**单调序列**排序，**跨签发者的先后为尽力而为（墙钟兜底）**——若要严格支持多签发者，需引入按签发者的序列合并规则（列为未来决策）。
+- **政策模型**：授权由**链到用户主密钥**的设备签发；**引导期签发者**由 `sync.policyIssuers` 显式列出（可多台，缺省空）。**不可越权授予**——非引导签发者只能签发/撤销**自己当时已获授权**的 namespaces（"不能给出自己没有的"）；因此授权可**传递**（被授权者可转授），无需单一主设备在线。所谓"自授提权"（未被授权却给自己或他人签发）一律无效。
+- **吊销连坐**：签发者被吊销 → 它签发的政策记录**一律不再生效**（含其**历史** grant、以及它发出的 `device_revoke`）→ 被吊销设备既不能自复活、也不能吊销别人。
+- **确定性定序（不看墙钟）**：同一签发者内按单调序列；跨签发者按**逻辑时间** `sum(event.vectorClock)`；并发（互不因果）以 `(签发者, 内容寻址 id)` 兜底 → 完全确定、两端收敛一致（含 A/B 互吊销：逻辑序在先者胜）。
 - 保留命名空间 `__policy__` 对**所有已认证设备可读（含被吊销者）**，是为解开 bootstrap 与支持恢复所做的取舍；代价是授权图（谁能读什么、谁被吊销）对已入网设备可见。
 - **吊销是域收缩**：不回撤已经入图的数据，也无法强制远端停止；它阻止的是**后续摄入**（读侧 `[]` + 入站事件隔离 + 快照过滤）。
+- **已知取舍（需人工关注）**：`policyIssuers` 是**本地配置**，各端应保持一致；若两端对同一设备是否为引导签发者判断不同，可能对同一批记录得出不同结论。缺省为空时不放松默认拒绝（回退到 `sync.peerNamespacePolicy` 配置白名单作 bootstrap）。
 
 ---
 
@@ -228,7 +231,7 @@ Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API
 
 | 项目 | 情况 |
 |------|------|
-| 测试 | 66 个套件、515 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
+| 测试 | 66 个套件、523 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
 | 覆盖率 | 行 92.4%、分支 79.1%，全库门槛 85/65，关键文件另有底线 |
 | 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |

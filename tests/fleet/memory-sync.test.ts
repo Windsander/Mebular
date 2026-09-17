@@ -19,7 +19,9 @@ import {
   EchoExecutor,
   ExecutionLog,
   echoResultFor,
+  dedupeEvents,
 } from '../../packages/fleet/src/index.js';
+import { mkEvent } from './helpers.js';
 
 let dir: string;
 beforeEach(async () => {
@@ -99,4 +101,48 @@ describe('M3 任务经记忆同步（两节点 + 授权）', () => {
     await b.shutdown();
     await c.shutdown();
   }, 30000);
+
+  it('MebularTaskEventStore：噪音节点过滤 + 同 eventId 冲突与 reducer 同语义去重', async () => {
+    const master = await Mebular.generateUserMasterKey();
+    const m = new Mebular({
+      storagePath: join(dir, 'store-only.jsonl'),
+      deviceId: 'device-S',
+      encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
+      network: { enabled: false },
+    });
+    await m.initialize();
+    const store = new MebularTaskEventStore(m);
+
+    const valid = mkEvent('created', 't-store');
+    expect(await store.append(valid)).toBe(true);
+    expect(await store.append(valid)).toBe(false); // 同 eventId 重复 append 拒绝
+
+    // 噪音：非同分区 / 非对象内容 / schema 不合法 → 一律忽略
+    await m.graph.createNode('task_event', valid as unknown as Record<string, unknown>, [], {
+      namespace: 'other',
+    });
+    await m.graph.createNode('task_event', 'not-an-object' as unknown as Record<string, unknown>, [], {
+      namespace: 'tasks',
+    });
+    await m.graph.createNode('task_event', { nonsense: true }, [], { namespace: 'tasks' });
+    expect(await store.all()).toHaveLength(1);
+
+    // 同 eventId 冲突但内容不同：store 复用 reducer 的确定性裁决（稳定序列化较大者胜）
+    const t = 't-store-dup';
+    const doneA = mkEvent('done', t, { eventId: `${t}#dup`, payloadRef: 'payload-A' });
+    const doneB = mkEvent('done', t, { eventId: `${t}#dup`, payloadRef: 'payload-B' });
+    await m.graph.createNode('task_event', doneA as unknown as Record<string, unknown>, [], {
+      namespace: 'tasks',
+    });
+    await m.graph.createNode('task_event', doneB as unknown as Record<string, unknown>, [], {
+      namespace: 'tasks',
+    });
+
+    const dup = (await store.all()).filter((e) => e.eventId === `${t}#dup`);
+    expect(dup).toHaveLength(1);
+    expect(dup[0]).toEqual(dedupeEvents([doneA, doneB])[0]);
+    expect((dup[0] as { payloadRef?: string }).payloadRef).toBe('payload-B');
+
+    await m.shutdown();
+  }, 20000);
 });

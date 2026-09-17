@@ -62,10 +62,36 @@ function isStronger(a: TaskEvent, b: TaskEvent): boolean {
   return a.eventId > b.eventId;
 }
 
-/** 去重（按 `eventId`）。 */
+/** 确定性序列化：对象键递归排序，保证结果与对象构造/解析顺序无关。 */
+function stableStringify(value: unknown): string {
+  if (value === undefined) return 'null';
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`).join(',')}}`;
+}
+
+/**
+ * 去重（按 `eventId`）。同一 `eventId` 对应**不同内容**时（违约/对抗输入），
+ * 按稳定序列化取字典序较大者做**确定性裁决**——使「去重后的集合」本身与输入
+ * 顺序无关，堵住同一 id 不同内容造成的顺序相关分叉（§2.1 顺序无关收敛）。
+ * 契约上 `eventId` 仍应内容寻址或全局唯一；本裁决只是兜底，不改变正常路径。
+ */
 export function dedupeEvents(events: readonly TaskEvent[]): TaskEvent[] {
   const byId = new Map<string, TaskEvent>();
-  for (const event of events) if (!byId.has(event.eventId)) byId.set(event.eventId, event);
+  for (const event of events) {
+    const existing = byId.get(event.eventId);
+    if (existing === undefined) {
+      byId.set(event.eventId, event);
+      continue;
+    }
+    if (stableStringify(event) > stableStringify(existing)) {
+      byId.set(event.eventId, event);
+    }
+  }
   return [...byId.values()];
 }
 

@@ -6,6 +6,7 @@
 import type { Mebular } from '@mebular/core';
 import type { TaskEvent } from '../protocol/events.js';
 import { validateTaskEvent } from '../protocol/events.js';
+import { dedupeEvents } from '../model.js';
 import type { TaskEventStore } from './file-store.js';
 
 export interface MebularTaskEventStoreOptions {
@@ -30,16 +31,16 @@ export class MebularTaskEventStore implements TaskEventStore {
   private async events(): Promise<TaskEvent[]> {
     // NodeFilter 无 namespace 字段：按 type 取回后在本层过滤 namespace。
     const nodes = await this.mebular.graph.listNodes({ type: this.type });
-    const byId = new Map<string, TaskEvent>();
+    const valid: TaskEvent[] = [];
     for (const node of nodes) {
       if (node.namespace !== this.namespace) continue;
       const candidate = node.content;
       if (typeof candidate !== 'object' || candidate === null) continue;
       if (!validateTaskEvent(candidate).ok) continue; // 忽略非任务事件节点
-      const event = candidate as unknown as TaskEvent;
-      if (!byId.has(event.eventId)) byId.set(event.eventId, event);
+      valid.push(candidate as unknown as TaskEvent);
     }
-    return [...byId.values()];
+    // 与 reducer 同一去重语义（同 id 冲突的确定性裁决），避免 store/reducer 漂移
+    return dedupeEvents(valid);
   }
 
   async append(event: TaskEvent): Promise<boolean> {

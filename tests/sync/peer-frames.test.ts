@@ -104,4 +104,56 @@ describe('PeerFrames', () => {
     expect(frames.isClosed).toBe(true);
     expect(closed).toBe(1);
   });
+
+  it('无等待者时非 nudge 帧进入缓冲，随后 reader 读取', async () => {
+    const it0 = fakeIterator();
+    const frames = new PeerFrames(it0.iterator, { onNudge: () => {} });
+
+    const hello: SyncMessage = { type: 'sync-hello', subscribeAll: true, namespaces: [], namespaceClocks: {} };
+    it0.push(hello);
+    await tick(); // pump 先于 reader 处理 → 无等待者，进入缓冲
+
+    const result = await frames.reader().next();
+    expect(result).toEqual({ value: hello, done: false });
+  });
+
+  it('底层迭代器异常：reader 以 Error 拒绝，onClosed 仍回调一次', async () => {
+    let rejectNext: ((error: unknown) => void) | null = null;
+    const failing: AsyncIterator<SyncMessage> = {
+      next: () => new Promise((_resolve, reject) => { rejectNext = reject; }),
+    };
+    let closed = 0;
+    const frames = new PeerFrames(failing, { onNudge: () => {}, onClosed: () => { closed += 1; } });
+
+    await tick();
+    (rejectNext as ((error: unknown) => void) | null)?.(new Error('transport reset'));
+    await tick();
+
+    expect(frames.isClosed).toBe(true);
+    expect(closed).toBe(1);
+    await expect(frames.reader().next()).rejects.toThrow('transport reset');
+  });
+
+  it('非 Error 抛出值规范化为 Error；已关闭且无等待者时读取返回 done', async () => {
+    let rejectNext: ((error: unknown) => void) | null = null;
+    const failing: AsyncIterator<SyncMessage> = {
+      next: () => new Promise((_resolve, reject) => { rejectNext = reject; }),
+    };
+    const frames = new PeerFrames(failing, { onNudge: () => {} });
+    await tick();
+    (rejectNext as ((error: unknown) => void) | null)?.('string failure');
+    await tick();
+
+    const rejection = await frames.reader().next().catch((error: unknown) => error);
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toContain('string failure');
+
+    // 正常关闭后（无等待者/无缓冲）再次读取 → 立即 done
+    const it0 = fakeIterator();
+    const frames2 = new PeerFrames(it0.iterator, { onNudge: () => {} });
+    it0.close();
+    await tick();
+    const result = await frames2.reader().next();
+    expect(result.done).toBe(true);
+  });
 });

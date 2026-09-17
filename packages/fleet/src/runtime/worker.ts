@@ -11,14 +11,19 @@ import type { TaskEvent } from '../protocol/events.js';
 import { reduceTaskEvents, type TaskState } from '../model.js';
 import type { TaskEventStore } from '../store/file-store.js';
 import type { TaskTransport } from '../transport/types.js';
+import type { ExecutorRegistry } from './agent.js';
 import { executeOnce, type ExecutionLog, type TaskExecutor } from './executor.js';
 
 export interface FleetWorkerOptions {
   device: string;
+  /** 本 worker 标识（注册表模式下作为端标识；单执行器模式下用于 agent 匹配） */
   agent: string;
   store: TaskEventStore;
   transport: TaskTransport;
-  executor: TaskExecutor;
+  /** 单执行器模式（旧）：本 worker 只服务该 agent 名 / `'*'` */
+  executor?: TaskExecutor;
+  /** 注册表模式：按 `to.agent` 选执行器；未知 agent → 任务 `failed`（UNKNOWN_AGENT） */
+  registry?: ExecutorRegistry;
   log: ExecutionLog;
 }
 
@@ -33,7 +38,8 @@ export class FleetWorker {
   readonly endpoint: FleetEndpoint;
   private readonly store: TaskEventStore;
   private readonly transport: TaskTransport;
-  private readonly executor: TaskExecutor;
+  private readonly executor: TaskExecutor | null;
+  private readonly registry: ExecutorRegistry | null;
   private readonly log: ExecutionLog;
   private stopped = false;
 
@@ -41,15 +47,25 @@ export class FleetWorker {
     this.endpoint = { device: options.device, agent: options.agent };
     this.store = options.store;
     this.transport = options.transport;
-    this.executor = options.executor;
+    this.executor = options.executor ?? null;
+    this.registry = options.registry ?? null;
+    if (this.executor === null && this.registry === null) {
+      throw new Error('FleetWorker 需要 executor（单执行器）或 registry（按 agent 路由）之一');
+    }
     this.log = options.log;
   }
 
+  /** 注册表模式：按设备职责认领（agent 由注册表解析）；单执行器模式：设备 + agent 匹配。 */
   private targetsMe(state: TaskState): boolean {
-    return (
-      state.to.device === this.endpoint.device &&
-      (state.to.agent === this.endpoint.agent || state.to.agent === '*')
-    );
+    if (state.to.device !== this.endpoint.device) return false;
+    if (this.registry !== null) return true;
+    return state.to.agent === this.endpoint.agent || state.to.agent === '*';
+  }
+
+  /** 解析执行器；注册表模式下未知 agent 返回 null（须显式失败）。 */
+  private executorFor(state: TaskState): TaskExecutor | null {
+    if (this.registry !== null) return this.registry.resolve(state.to.agent);
+    return this.executor;
   }
 
   private async emit(event: TaskEvent, to: FleetEndpoint): Promise<void> {
@@ -100,8 +116,14 @@ export class FleetWorker {
       const state = reduceTaskEvents(byTask.get(taskId)!);
       if (state === null || state.terminal || !this.targetsMe(state)) continue;
 
+      const executor = this.executorFor(state);
+      if (executor === null) {
+        // 未知 agent：显式失败（绝不静默回退）。
+        await this.complete(state, undefined, false, `UNKNOWN_AGENT: ${state.to.agent}`);
+        continue;
+      }
       const before = this.log.size();
-      const outcome = await executeOnce(state, this.executor, this.log);
+      const outcome = await executeOnce(state, executor, this.log);
       if (this.log.size() > before) executed += 1;
       await this.complete(state, outcome.resultRef, outcome.ok, outcome.reason);
     }

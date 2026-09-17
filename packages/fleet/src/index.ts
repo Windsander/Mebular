@@ -15,5 +15,7 @@ export * from './transport/null.js';
 export * from './store/file-store.js';
 export * from './store/mebular-store.js';
 export * from './runtime/executor.js';
+export * from './runtime/agent.js';
+export * from './runtime/openchamber.js';
 export * from './runtime/node.js';
 export * from './runtime/worker.js';

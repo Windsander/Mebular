@@ -69,11 +69,9 @@ if (await b.graph.getNode(secret.id)) throw new Error('未授权分区竟然泄�
 console.log('✓ private 分区被拒绝：B 侧不存在该记忆（默认拒绝生效）');
 
 // 2. 扩权回补：A 授权 private 并重启（水位落盘，重启后按正确水位续传）。
-//    存活侧（B）先断开旧连接——已知重连缺陷 F4（见 docs.design/local-verify-namespace-2026-09-16.md）。
 await a.shutdown();
 a = makeA(['default', 'private']);
 await a.initialize();
-await b.node.disconnectPeer(a.node.peerId);
 await b.node.connectToPeer(a.node.peerId);
 
 if (!(await waitForNode(b, secret.id))) throw new Error('扩权后历史事件未回补');

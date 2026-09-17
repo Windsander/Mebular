@@ -63,7 +63,23 @@
 
 真实验收：`npm run verify:fleet:agents`（真实 libp2p loopback + 确定性 fake agent，9/9）；真实 Hermes 一次性调用见阶段报告（`hermes -z` 返回约定 token）。
 
-## 5. 准入与回归纪律
+## 5. M4：三种协作形态（目标二）
+
+| 形态 | 单元 | 期望 | 覆盖测试 |
+|---|---|---|---|
+| 审查 DAG | 父子边 | 由 `trace.causedBy` 推导，确定序 | `由 trace.causedBy 推导边（确定序）` · harness `DAG 边顺序无关失败` |
+| 审查 DAG | **禁环** | `detectCycle` 检出；新增成环边由守卫**拒绝** | `禁环：检测 + 创建守卫（负例）` · harness `构造的森林不应有环` |
+| 审查 DAG | 完成判定 | 从 root 可达的**全部**节点终态才 `complete` | `完成判定：全部可达节点终态才算完成` · harness `reachable 与独立可达性不一致` |
+| 审查 DAG | 扰动 | 删叶子子树不改变**不含该叶子**的 root 判定 | harness `删叶子 … 改变了 root` |
+| 有限协商 | 幂等 / 顺序无关 | 按 `messageId` 去重；结果与到达顺序无关 | `幂等 + 顺序无关 + 超限失败` · harness `协商顺序无关/幂等失败` |
+| 有限协商 | **步数上限** | `rounds > maxRounds` → `fail`，`reason = NEGOTIATION_LIMIT: r>N`；`accept`→proceed、`reject`→fail | `幂等 + 顺序无关 + 超限失败` · `accept → proceed；reject → fail` |
+| 有限协商 | 校验 | 非法 `kind`/`round`/`from` 拒绝 | `校验与非法输入（负例）` |
+| 配额制闲聊 | 本地配额 | 发送对 `from.device` 本地记账；超额按策略 queue/reject | `发送走本地配额、超额排队…` · `reject 策略 + 校验负例` · harness `闲聊账本不守恒` |
+| 配额制闲聊 | 幂等 / 顺序无关 | 收件按 `messageId` 去重；`inbox()` 确定序 | `发送走本地配额…` · harness `闲聊收件顺序无关/幂等失败` |
+
+harness：`tests/fleet/collab-invariants.test.ts`（固定种子，`scenarios=200`），含独立可达性交叉检查与删叶子/删重复的 oracle-free 扰动。协议线格式**未变**（协商/闲聊为独立消息类型，不进 `TaskEvent`）。
+
+## 6. 准入与回归纪律
 
 - 改动 `packages/fleet/src/**` 或 `packages/fleet/protocol/**`：先更新本矩阵对应格 + 加/改测试；
   并跑 harness（上）与 `tests/fleet/*` 全绿。

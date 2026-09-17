@@ -35,6 +35,7 @@ import { applyRemoteEvent, type SyncConflict } from '../apply.js';
 import { ConfigNamespacePolicy, type NamespaceGrantPolicy } from '../namespacePolicy.js';
 import { POLICY_NAMESPACE } from '../grantPolicy.js';
 import { verifyIssuedByUser } from '../trust.js';
+import { PeerFrames } from './PeerFrames.js';
 import {
   normalizeNamespace,
   normalizeNamespaceList,
@@ -152,16 +153,47 @@ export interface SyncManagerOptions {
    * 缺省 = `ConfigNamespacePolicy({})`：**不授权任何对端**，没有对端能收到数据。
    */
   namespacePolicy?: NamespaceGrantPolicy;
-  /** 本地写入后向订阅对端即时推送（默认关闭） */
+  /** 本地写入后向订阅对端即时推送（默认关闭；常驻入口由门面/MCP 打开） */
   pushOnWrite?: boolean;
-  /** push-on-write 节流窗口（ms，默认 50）：连续写入合并为一次推送 */
+  /** push-on-write 节流窗口（ms，默认 50）：连续写入合并为一次推送/nudge */
   pushOnWriteThrottleMs?: number;
+  /**
+   * 周期 anti-entropy（C）：每隔 intervalMs（带 jitter）对在线且已授权、且确有
+   * pending 的对端兜底同步一次。**core 默认关闭**（不藏定时器）；常驻入口默认开启。
+   */
+  antiEntropy?: AntiEntropyConfig;
+}
+
+/** 周期 anti-entropy 配置（core 默认 disabled） */
+export interface AntiEntropyConfig {
+  enabled?: boolean;
+  /** 基础间隔（ms，默认 10 分钟；常驻入口建议 5–15 分钟） */
+  intervalMs?: number;
+  /** 抖动比例（默认 0.2 = ±20%），防多端齐步走 */
+  jitterRatio?: number;
 }
 
 const DEFAULT_SYNC_TIMEOUT = 30_000;
 const DEFAULT_PUSH_ON_WRITE_THROTTLE_MS = 50;
+const DEFAULT_ANTI_ENTROPY_INTERVAL_MS = 10 * 60_000;
+const DEFAULT_ANTI_ENTROPY_JITTER_RATIO = 0.2;
+/** anti-entropy 连续失败退避上限 */
+const ANTI_ENTROPY_MAX_BACKOFF_MS = 60 * 60_000;
 
-/** 已认证在线对端（push-on-write 的定向目标） */
+/**
+ * 计算 anti-entropy 的下次延迟：`intervalMs ± intervalMs*jitterRatio`（落界 ≥ 0）。
+ * 纯函数，便于测试 jitter 界内。
+ */
+export function computeAntiEntropyDelay(
+  intervalMs: number,
+  jitterRatio: number,
+  random: () => number = Math.random,
+): number {
+  const jitter = intervalMs * jitterRatio;
+  return Math.max(0, intervalMs + (random() * 2 - 1) * jitter);
+}
+
+/** 已认证在线对端（push-on-write / nudge / anti-entropy 的定向目标） */
 interface OnlinePeer {
   peerId: PeerId;
   peer: SyncPeer;
@@ -171,6 +203,14 @@ interface OnlinePeer {
   namespaces: string[];
   /** 本机在该对端会话中的角色（设备 ID 字典序小者发起） */
   initiate: boolean;
+  /** 常驻形态的传输（非常驻一次性会话为 undefined） */
+  transport?: SyncTransport;
+  /** 常驻形态的帧路由（唯一读取者） */
+  frames?: PeerFrames;
+  /** 发起方常驻循环：待处理触发（本地写入 / 收到 nudge），布尔合并 = per-peer 在途上限 1 */
+  triggerPending?: boolean;
+  /** 发起方常驻循环：等待中的触发唤醒器 */
+  triggerResolve?: () => void;
 }
 
 /** 一次 offer 应用的结果（含 ack 集合与对端事件命名空间） */
@@ -270,6 +310,10 @@ export class SyncManager extends EventEmitter {
   private readonly namespacePolicy: NamespaceGrantPolicy;
   private readonly pushOnWrite: boolean;
   private readonly pushOnWriteThrottleMs: number;
+  private readonly antiEntropy: { enabled: boolean; intervalMs: number; jitterRatio: number };
+  private antiEntropyTimer: ReturnType<typeof setTimeout> | null = null;
+  /** per-peer anti-entropy 退避状态（连续失败指数退避，成功复位） */
+  private readonly antiEntropyBackoff = new Map<string, { failures: number; nextAttemptAt: number }>();
 
   /** attachToNode 后的网络节点引用（push-on-write 取信道用） */
   private node: P2PNode | null = null;
@@ -318,48 +362,94 @@ export class SyncManager extends EventEmitter {
     this.namespacePolicy = options.namespacePolicy ?? new ConfigNamespacePolicy({});
     this.pushOnWrite = options.pushOnWrite ?? false;
     this.pushOnWriteThrottleMs = options.pushOnWriteThrottleMs ?? DEFAULT_PUSH_ON_WRITE_THROTTLE_MS;
+    this.antiEntropy = {
+      enabled: options.antiEntropy?.enabled ?? false,
+      intervalMs: options.antiEntropy?.intervalMs ?? DEFAULT_ANTI_ENTROPY_INTERVAL_MS,
+      jitterRatio: options.antiEntropy?.jitterRatio ?? DEFAULT_ANTI_ENTROPY_JITTER_RATIO,
+    };
     if (this.pushOnWrite) {
       // 本地写入即触发定向推送；远端 appendRemote 不触发，避免回弹风暴
       this.eventLog.on('event-appended', this.handleLocalAppend);
     }
+    if (this.antiEntropy.enabled) {
+      this.scheduleAntiEntropy();
+    }
   }
 
-  /** 本地写入信号：对订阅了相关 namespace 的在线对端安排一次节流推送 */
+  /**
+   * 本地写入信号：对「已订阅该分区 **且** 我们对该对端已授权该分区」的在线
+   * 对端安排一次节流触发。方向相反时（本机为响应方角色）发 `sync-nudge`
+   * 请发起方开一轮；本机为发起方时直接起一轮。**未授权不发**。
+   */
   private readonly handleLocalAppend = (event: Event): void => {
     const namespace = normalizeNamespace(event.namespace);
     for (const entry of this.onlinePeers.values()) {
-      if (!entry.initiate) continue; // 仅发起方角色可主动推送
-      // 是否推送只看订阅声明；授权裁剪仍由会话内的 offer 计算兜底
-      if (!entry.subscribeAll && !entry.namespaces.includes(namespace)) {
-        continue; // 对端未订阅该分区
-      }
-      this.schedulePush(entry);
+      if (!entry.transport) continue; // 仅常驻连接
+      if (!entry.subscribeAll && !entry.namespaces.includes(namespace)) continue; // 对端未订阅
+      void this.maybeNotify(entry, namespace);
     }
   };
 
-  private schedulePush(entry: OnlinePeer): void {
+  /** 已授权 + 确有 pending 才通知（避免无意义会话 / nudge） */
+  private async maybeNotify(entry: OnlinePeer, namespace: string): Promise<void> {
+    if (namespace !== POLICY_NAMESPACE) {
+      const authorized = await this.namespacePolicy.getAuthorizedNamespaces(entry.peer.deviceId);
+      if (!authorized.includes(namespace)) return; // 默认拒绝：未授权不发
+    }
+    if (!(await this.hasPendingForPeer(entry.peer.deviceId, [namespace]))) return;
+    this.scheduleSyncTrigger(entry);
+  }
+
+  /** 节流合并触发（50ms）；同一对端同一时刻只有一个计时器 = per-peer 在途上限 1 */
+  private scheduleSyncTrigger(entry: OnlinePeer): void {
     const key = entry.peerId.id;
     if (this.pushTimers.has(key)) return; // 节流窗口内：合并
     const timer = setTimeout(() => {
       this.pushTimers.delete(key);
-      void this.runPush(entry);
+      this.deliverTrigger(entry);
     }, this.pushOnWriteThrottleMs);
     (timer as { unref?: () => void }).unref?.();
     this.pushTimers.set(key, timer);
   }
 
-  private async runPush(entry: OnlinePeer): Promise<void> {
-    // 对端已离线 / 会话被替换：跳过本次推送
+  private deliverTrigger(entry: OnlinePeer): void {
     if (this.onlinePeers.get(entry.peerId.id) !== entry) return;
-    try {
-      const channel = await this.node?.getChannel(entry.peerId);
-      if (!channel) return;
-      const transport = new SecureChannelSyncTransport(channel);
-      await this.syncWithDevice(transport, entry.peer, { direction: 'push' });
-    } catch (error) {
-      // 推送失败不阻断本地写入：保留待同步队列，等待下次 autoSync / 手动同步
-      this.emit('sync-failed', { peerDeviceId: entry.peer.deviceId, error });
+    if (entry.initiate) {
+      // 本机是发起方：唤醒常驻循环起一轮
+      this.wakeInitiator(entry);
+    } else {
+      // 本机是响应方（不能自行发起）：在现有信道上发 nudge，请发起方开一轮
+      void entry.transport?.send({ type: 'sync-nudge' }).catch((error) => {
+        this.emit('sync-failed', { peerDeviceId: entry.peer.deviceId, error });
+      });
     }
+  }
+
+  private wakeInitiator(entry: OnlinePeer): void {
+    if (entry.triggerResolve) {
+      const resolve = entry.triggerResolve;
+      entry.triggerResolve = undefined;
+      resolve();
+    } else {
+      entry.triggerPending = true;
+    }
+  }
+
+  private waitInitiatorTrigger(entry: OnlinePeer): Promise<void> {
+    if (entry.triggerPending) {
+      entry.triggerPending = false;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      entry.triggerResolve = resolve;
+    });
+  }
+
+  /** 收到对端 nudge（仅发起方角色响应）：节流后起一轮 */
+  private onPeerNudge(entry: OnlinePeer): void {
+    if (this.onlinePeers.get(entry.peerId.id) !== entry) return;
+    if (!entry.initiate) return; // 只有发起方响应 nudge
+    this.scheduleSyncTrigger(entry);
   }
 
   // ---------- spec-004 查询面 ----------
@@ -583,11 +673,16 @@ export class SyncManager extends EventEmitter {
 
   // ---------- 同步会话 ----------
 
-  /** 发起方：向对端发起一次同步会话 */
+  /**
+   * 发起方：向对端发起一次同步会话。
+   * `existingIterator` 供**常驻循环**复用同一读取者（一个连接只允许一个消费者，
+   * 见 `PeerFrames`）；一次性调用省略即可。
+   */
   async syncWithDevice(
     transport: SyncTransport,
     peer: SyncPeer,
     options: SyncOptions = {},
+    existingIterator?: AsyncIterator<SyncMessage>,
   ): Promise<SyncResult> {
     const direction = options.direction ?? 'bidirectional';
     const timeout = options.timeoutMs ?? this.syncTimeout;
@@ -595,7 +690,7 @@ export class SyncManager extends EventEmitter {
     return this.enqueue(() =>
       this.runSession(peer, async () => {
         try {
-          const iterator = transport.receive()[Symbol.asyncIterator]();
+          const iterator = existingIterator ?? transport.receive()[Symbol.asyncIterator]();
 
           // 1. hello：本机订阅声明（subscribeAll + namespaces）+ 分区水位
           await transport.send({
@@ -773,23 +868,53 @@ export class SyncManager extends EventEmitter {
   }
 
   /**
-   * 常驻监听对端发起的同步会话（响应方角色；push-on-write 用）。
+   * 常驻响应方循环：等待对端发起的会话并处理（H/C 用）。
    * 单次会话失败不终止监听（除连接关闭外），保证后续推送仍可被接受。
    */
-  private async runIncomingLoop(node: P2PNode, entry: OnlinePeer): Promise<void> {
-    const channel = await node.getChannel(entry.peerId);
-    if (!channel) return;
-    const transport = new SecureChannelSyncTransport(channel);
-    const iterator = transport.receive()[Symbol.asyncIterator]();
+  private async runResponderLoop(
+    transport: SyncTransport,
+    entry: OnlinePeer,
+    frames: PeerFrames,
+  ): Promise<void> {
+    const reader = frames.reader();
     for (;;) {
-      if (this.onlinePeers.get(entry.peerId.id) !== entry) return;
+      if (this.onlinePeers.get(entry.peerId.id) !== entry || frames.isClosed) return;
+      frames.setSessionActive(true);
       try {
         await this.enqueue(() =>
-          this.runSession(entry.peer, () => this.runResponder(transport, entry.peer, iterator, undefined)),
+          this.runSession(entry.peer, () => this.runResponder(transport, entry.peer, reader, undefined)),
         );
       } catch (error) {
         if ((error as { code?: string }).code === ErrorCodes.SYNC_CONNECTION_FAILED) return;
         // 单次会话失败（验签/协议）：已尽力通知对端，继续等待下一次会话
+      } finally {
+        frames.setSessionActive(false);
+      }
+    }
+  }
+
+  /**
+   * 常驻发起方循环（H 双向 push）：等待触发（连接时首次 / 本地写入 / 收到对端
+   * nudge），每次触发用同一 reader 起一轮会话。触发布尔合并 = per-peer 在途上限 1。
+   */
+  private async runInitiatorLoop(
+    transport: SyncTransport,
+    entry: OnlinePeer,
+    frames: PeerFrames,
+  ): Promise<void> {
+    const reader = frames.reader();
+    for (;;) {
+      if (this.onlinePeers.get(entry.peerId.id) !== entry || frames.isClosed) return;
+      await this.waitInitiatorTrigger(entry);
+      if (this.onlinePeers.get(entry.peerId.id) !== entry || frames.isClosed) return;
+      frames.setSessionActive(true);
+      try {
+        await this.syncWithDevice(transport, entry.peer, { direction: 'bidirectional' }, reader);
+      } catch (error) {
+        if ((error as { code?: string }).code === ErrorCodes.SYNC_CONNECTION_FAILED) return;
+        // 单次失败：继续等待下一次触发
+      } finally {
+        frames.setSessionActive(false);
       }
     }
   }
@@ -797,12 +922,15 @@ export class SyncManager extends EventEmitter {
   // ---------- 自动同步（phase-3-plan 3.4） ----------
 
   /**
-   * 挂到 P2PNode：握手认证完成后自动触发一次双向同步。
+   * 挂到 P2PNode：握手认证完成后按配置进入同步。
    * 角色仲裁：设备 ID 字典序小者发起，大者响应（双端各触发一次，角色互补）。
+   *
+   * - 非实时形态（`pushOnWrite` 与 `antiEntropy` 均关）：保持旧的一次性行为；
+   * - 实时形态：建立常驻帧路由与角色循环（发起方收 nudge / 本地触发；响应方收 hello）。
    */
   attachToNode(node: P2PNode): void {
     this.node = node;
-    // 连接关闭：清理在线登记与推送节流计时器
+    // 连接关闭：清理在线登记与触发计时器
     node.onConnectionClosed((peerId: PeerId) => this.removeOnlinePeer(peerId));
 
     node.getHandshake().on('authenticated', (session: AuthSession) => {
@@ -819,41 +947,43 @@ export class SyncManager extends EventEmitter {
       const entry: OnlinePeer = { peerId: session.peerId, peer, initiate, subscribeAll: false, namespaces: [] };
       this.onlinePeers.set(session.peerId.id, entry);
 
-      if (!this.autoSync) {
-        // autoSync 关闭：仅 push-on-write 时以常驻监听接收定向推送
-        if (this.pushOnWrite && !initiate) {
-          this.runIncomingLoop(node, entry).catch((error) => {
-            this.emit('sync-failed', { peerDeviceId, error });
-          });
-        }
-        return;
-      }
+      const realtime = this.pushOnWrite || this.antiEntropy.enabled;
+      if (!this.autoSync && !realtime) return; // 旧行为：无动作
 
       void (async () => {
         try {
+          const channel = await node.getChannel(session.peerId);
+          if (!channel) {
+            throw new SyncError(
+              `Secure channel to ${peer.deviceId} not ready`,
+              ErrorCodes.SYNC_CONNECTION_FAILED,
+            );
+          }
+          const transport = new SecureChannelSyncTransport(channel);
+
+          if (!realtime) {
+            // 非实时：一次性会话（发起方主动 / 响应方接受）
+            if (initiate) {
+              await this.syncWithDevice(transport, peer, { direction: 'bidirectional' });
+            } else {
+              await this.acceptSync(transport, peer);
+            }
+            return;
+          }
+
+          const frames = new PeerFrames(transport.receive()[Symbol.asyncIterator](), {
+            onNudge: () => this.onPeerNudge(entry),
+            onInvalidNudge: (error) => this.emit('sync-failed', { peerDeviceId, error }),
+            onClosed: () => entry.triggerResolve?.(),
+          });
+          entry.transport = transport;
+          entry.frames = frames;
+
           if (initiate) {
-            const channel = await node.getChannel(session.peerId);
-            if (!channel) {
-              throw new SyncError(
-                `Secure channel to ${peer.deviceId} not ready`,
-                ErrorCodes.SYNC_CONNECTION_FAILED,
-              );
-            }
-            await this.syncWithDevice(new SecureChannelSyncTransport(channel), peer, {
-              direction: 'bidirectional',
-            });
-          } else if (this.pushOnWrite) {
-            // 响应方常驻监听：既完成首次同步，也接收后续定向推送
-            await this.runIncomingLoop(node, entry);
+            if (this.autoSync) this.wakeInitiator(entry); // 连接时先收敛一次
+            await this.runInitiatorLoop(transport, entry, frames);
           } else {
-            const channel = await node.getChannel(session.peerId);
-            if (!channel) {
-              throw new SyncError(
-                `Secure channel to ${peer.deviceId} not ready`,
-                ErrorCodes.SYNC_CONNECTION_FAILED,
-              );
-            }
-            await this.acceptSync(new SecureChannelSyncTransport(channel), peer);
+            await this.runResponderLoop(transport, entry, frames);
           }
         } catch (error) {
           this.emit('sync-failed', { peerDeviceId, error });
@@ -863,6 +993,12 @@ export class SyncManager extends EventEmitter {
   }
 
   private removeOnlinePeer(peerId: PeerId): void {
+    const entry = this.onlinePeers.get(peerId.id);
+    if (entry?.triggerResolve) {
+      const resolve = entry.triggerResolve;
+      entry.triggerResolve = undefined;
+      resolve();
+    }
     this.onlinePeers.delete(peerId.id);
     const timer = this.pushTimers.get(peerId.id);
     if (timer) {
@@ -991,6 +1127,78 @@ export class SyncManager extends EventEmitter {
       if (a.timestamp !== b.timestamp) return a.timestamp - b.timestamp;
       return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
     });
+  }
+
+  /**
+   * 该对端在给定（已授权）分区集合内是否确有 pending：我们持有、但对端水位未
+   * 覆盖的事件。策略命名空间（`__policy__`）始终可传，故始终计入。
+   */
+  private async hasPendingForPeer(peerDeviceId: string, authorizedNamespaces: string[]): Promise<boolean> {
+    const missing = await this.missingEventsForPeer(peerDeviceId);
+    return missing.some((event) => {
+      const ns = normalizeNamespace(event.namespace);
+      return ns === POLICY_NAMESPACE || authorizedNamespaces.includes(ns);
+    });
+  }
+
+  // ---------- 周期 anti-entropy（C） ----------
+
+  /** core 默认关闭；常驻入口（门面 / MCP serve）默认开启 */
+  get antiEntropyEnabled(): boolean {
+    return this.antiEntropy.enabled;
+  }
+
+  private scheduleAntiEntropy(): void {
+    if (!this.antiEntropy.enabled || this.antiEntropyTimer) return;
+    const delay = computeAntiEntropyDelay(this.antiEntropy.intervalMs, this.antiEntropy.jitterRatio);
+    const timer = setTimeout(() => {
+      this.antiEntropyTimer = null;
+      void this.runAntiEntropyCycle();
+    }, delay);
+    (timer as { unref?: () => void }).unref?.();
+    this.antiEntropyTimer = timer;
+  }
+
+  /**
+   * 一轮 anti-entropy：对每个在线对端，仅当「确实需要」（有 pending、不在退避、
+   * 无会话在途）时触发一次同步；无 pending 的对端**短路跳过**（不做 hello/offer 往返）。
+   */
+  async runAntiEntropyCycle(): Promise<void> {
+    try {
+      for (const entry of this.onlinePeers.values()) {
+        if (!entry.transport) continue;
+        if (await this.shouldAntiEntropySync(entry.peer.deviceId)) {
+          this.scheduleSyncTrigger(entry);
+        }
+      }
+    } finally {
+      this.scheduleAntiEntropy();
+    }
+  }
+
+  /** 是否应为该对端发起 anti-entropy（无 pending / 会话在途 / 退避 → false） */
+  async shouldAntiEntropySync(peerDeviceId: string): Promise<boolean> {
+    if (this.syncing) return false; // 已有会话在途 → 跳过
+    if (this.isAntiEntropyBackedOff(peerDeviceId)) return false;
+    const authorized = await this.namespacePolicy.getAuthorizedNamespaces(peerDeviceId);
+    return this.hasPendingForPeer(peerDeviceId, authorized);
+  }
+
+  private isAntiEntropyBackedOff(peerDeviceId: string): boolean {
+    const backoff = this.antiEntropyBackoff.get(peerDeviceId);
+    return backoff !== undefined && Date.now() < backoff.nextAttemptAt;
+  }
+
+  /** 会话结果反馈：失败累积指数退避（有上限），成功即复位 */
+  private recordSyncOutcome(peerDeviceId: string, ok: boolean): void {
+    if (!this.antiEntropy.enabled) return;
+    if (ok) {
+      this.antiEntropyBackoff.delete(peerDeviceId);
+      return;
+    }
+    const failures = (this.antiEntropyBackoff.get(peerDeviceId)?.failures ?? 0) + 1;
+    const delay = Math.min(this.antiEntropy.intervalMs * 2 ** failures, ANTI_ENTROPY_MAX_BACKOFF_MS);
+    this.antiEntropyBackoff.set(peerDeviceId, { failures, nextAttemptAt: Date.now() + delay });
   }
 
   // ---------- 内部 ----------
@@ -1210,9 +1418,11 @@ export class SyncManager extends EventEmitter {
       this.lastSyncAt = Date.now();
       this.lastResult = result;
       this.emit('sync-completed', result);
+      this.recordSyncOutcome(peer.deviceId, true);
       return result;
     } catch (error) {
       this.emit('sync-failed', { peerDeviceId: peer.deviceId, error });
+      this.recordSyncOutcome(peer.deviceId, false);
       throw error;
     } finally {
       this.syncing = false;

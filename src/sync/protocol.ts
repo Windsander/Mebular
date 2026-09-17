@@ -69,6 +69,12 @@ export type SyncMessage =
       snapshotApplied?: boolean;
     }
   | { type: 'sync-done'; finalVectorClock: Record<string, number> }
+  /**
+   * 反向推送提示（H）：**无业务载荷**的「请现在发起一次会话」。由响应方角色
+   * （不能自行发起会话的一方）在现有信道上发送；发起方收到后发起一次会话。
+   * 会话进行中收到的 nudge 直接丢弃（那一轮本就会同步）。
+   */
+  | { type: 'sync-nudge' }
   | { type: 'sync-error'; message: string };
 
 /** 分区水位形状的共享校验（hello 与快照同一套规则） */
@@ -148,6 +154,20 @@ export function assertValidSnapshot(snapshot: SyncSnapshot): void {
     }
   });
   assertNamespaceClocksShape(snapshot.namespaceClocks, 'namespaceClocks', violation);
+}
+
+/**
+ * 校验 sync-nudge：**无业务载荷**，除 `type` 外出现任何字段即协议违例
+ * （防止把 nudge 误用为数据通道）。与 hello/ack 同级严格。
+ */
+export function assertValidNudge(nudge: Extract<SyncMessage, { type: 'sync-nudge' }>): void {
+  const extra = Object.keys(nudge).filter((key) => key !== 'type');
+  if (extra.length > 0) {
+    throw new SyncError(
+      `Protocol violation: sync-nudge 不得携带业务载荷（${extra.join(', ')}）`,
+      ErrorCodes.SYNC_PROTOCOL_VIOLATION,
+    );
+  }
 }
 
 /** 校验 sync-ack：`appliedEventIds` 必为字符串数组；`snapshotApplied` 若出现必为 boolean */

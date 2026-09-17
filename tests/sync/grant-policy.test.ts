@@ -147,6 +147,41 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
     expect(await policy.getAuthorizedNamespaces('device-B')).toEqual(['nsA']);
     expect([...(await policy.getRevokedDevices())]).toEqual([]);
   });
+
+  it('F-2：同一签发者内以单调序列排序，墙钟偏移不影响撤销生效', async () => {
+    // 先发 grant（issuedAt 时钟超前），后发 device_revoke（issuedAt 更早，模拟时钟回拨）。
+    // 单调整序列：grant seq=1 < revoke seq=2 → 撤销在后，必须生效。
+    await appendGrant(trusted, 'device-B', ['nsA'], 2000);
+    await trusted.append({
+      type: DEVICE_REVOKE_EVENT,
+      data: { deviceRevoke: { subject: 'device-B', issuedAt: 1000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    expect(await policy.getAuthorizedNamespaces('device-B')).toEqual([]);
+    expect([...(await policy.getRevokedDevices())]).toContain('device-B');
+  });
+
+  it('F-3：恢复必须使用新的 grantId（复用被撤销的 grantId 无效）', async () => {
+    const g = await appendGrant(trusted, 'device-B', ['nsA'], 1000);
+    await trusted.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke: { grantId: g.grantId, subject: 'device-B', issuedAt: 2000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    expect(await policy.getAuthorizedNamespaces('device-B')).toEqual([]);
+
+    // 复用同一 grantId 再授予 → 仍被判为已撤销
+    await trusted.append({
+      type: NAMESPACE_GRANT_EVENT,
+      data: { grant: { ...g, namespaces: ['nsA'], issuedAt: 3000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    expect(await policy.getAuthorizedNamespaces('device-B')).toEqual([]);
+
+    // 新 grantId → 恢复
+    await appendGrant(trusted, 'device-B', ['nsA'], 4000);
+    expect(await policy.getAuthorizedNamespaces('device-B')).toEqual(['nsA']);
+  });
 });
 
 describe('CompositeNamespacePolicy（图上 ∪ 配置；吊销优先）', () => {
@@ -179,7 +214,12 @@ interface TestDevice {
   peerId: PeerId;
 }
 
-async function createDevice(deviceId: string, master: CryptoKeyPair, masterPub: Uint8Array): Promise<TestDevice> {
+async function createDevice(
+  deviceId: string,
+  master: CryptoKeyPair,
+  masterPub: Uint8Array,
+  options: { snapshotThreshold?: number } = {},
+): Promise<TestDevice> {
   const identity = await createTestIdentity(deviceId);
   const certificate = await issueCertificate(master.privateKey, identity);
   const signer: EventSigner = {
@@ -197,6 +237,7 @@ async function createDevice(deviceId: string, master: CryptoKeyPair, masterPub: 
     deviceId,
     namespacePolicy: policy,
     userMasterPublicKey: masterPub,
+    ...(options.snapshotThreshold !== undefined ? { snapshotThreshold: options.snapshotThreshold } : {}),
   });
   return { deviceId, storage, eventLog, store, syncManager, policy, publicKey: identity.identity.devicePublicKey, peerId: identity.peerId };
 }
@@ -323,6 +364,30 @@ describe('端到端：图上授权 + 身份吊销', () => {
     await writeGrant(a, 'device-B', ['nsA'], 3000);
     await runSync(a, b);
     expect(await a.store.getNode(fromB.id)).not.toBeNull(); // 恢复后应用
+  });
+
+  it('F-1：被吊销设备署名的实体不得经快照进入接收方', async () => {
+    const holder = await createDevice('device-A', master, masterPub, { snapshotThreshold: 1 });
+    const revokedDevice = await createDevice('device-B', master, masterPub);
+    const receiver = await createDevice('device-C', master, masterPub);
+
+    // holder 先（吊销前）取得被吊销设备署名的实体
+    await writeGrant(revokedDevice, 'device-A', ['nsA'], 1000);
+    await writeGrant(holder, 'device-B', ['nsA'], 1000);
+    const fromRevoked = await revokedDevice.store.createNode('fact', { text: 'from-b' }, [], { namespace: 'nsA' });
+    await runSync(holder, revokedDevice);
+    expect(await holder.store.getNode(fromRevoked.id)).not.toBeNull();
+
+    // holder 吊销 B，并授权新接收方 C 读取 nsA（走快照）
+    await writeDeviceRevoke(holder, 'device-B', 2000);
+    await writeGrant(holder, 'device-C', ['nsA'], 2000);
+    const fromHolder = await holder.store.createNode('fact', { text: 'from-a' }, [], { namespace: 'nsA' });
+
+    const [result] = await runSync(holder, receiver);
+
+    expect(result.snapshotSent).toBeGreaterThan(0);
+    expect(await receiver.store.getNode(fromHolder.id)).not.toBeNull(); // 授权实体正常进入
+    expect(await receiver.store.getNode(fromRevoked.id)).toBeNull(); // 被吊销者署名的实体被过滤
   });
 });
 

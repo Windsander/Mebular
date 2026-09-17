@@ -6,6 +6,7 @@
 //
 // 与 scripts/verify-mcp-http.mjs 同风格：spawn 子进程 + SERVE_READY 等待。
 
+import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -73,13 +74,14 @@ async function seedHome(home) {
   return storagePath;
 }
 
-function spawnServe({ home, storage }) {
-  const proc = spawn(process.execPath, [bin, 'serve', '--port', '0'], {
+function spawnServe({ home, storage, args = [], env = {}, deviceId = 'device-console' }) {
+  const proc = spawn(process.execPath, [bin, 'serve', '--port', '0', ...args], {
     env: {
       ...process.env,
       MEBULAR_HOME: home,
       MEBULAR_STORAGE_PATH: storage,
-      MEBULAR_DEVICE_ID: 'device-console',
+      MEBULAR_DEVICE_ID: deviceId,
+      ...env,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -135,15 +137,51 @@ async function getJson(port, path, init = undefined) {
   return { status: res.status, headers: res.headers, json, text };
 }
 
+function cookieFrom(res) {
+  const raw = res.headers.get('set-cookie') ?? '';
+  const match = raw.match(/mebular_csrf=([^;]+)/);
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function sha256(value) {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+/** 打开 SSE 流，收到 status 事件或超时后返回 */
+function openSse(port, path, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, path, headers: { accept: 'text/event-stream' } }, (res) => {
+      let buf = '';
+      const finish = () => {
+        clearTimeout(timer);
+        req.destroy();
+        resolve({ status: res.statusCode, headers: res.headers, body: buf });
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      res.on('data', (chunk) => {
+        buf += chunk.toString();
+        if (buf.includes('event: status')) finish();
+      });
+      res.on('end', finish);
+    });
+    req.on('error', (error) => {
+      if (error.code === 'ECONNRESET') return;
+      reject(error);
+    });
+    req.end();
+  });
+}
+
 console.log('Mebular 控制台 E1 验证（D1）');
 console.log('===============================');
 
 const home = await mkdtemp(join(tmpdir(), 'mebular-console-'));
-let handle = null;
+const servers = [];
 
 try {
   const storage = await seedHome(home);
-  handle = spawnServe({ home, storage });
+  const handle = spawnServe({ home, storage });
+  servers.push(handle);
   const ready = await waitReady(handle);
   const port = ready.port;
   check('serve 启动（SERVE_READY）', Number.isInteger(port) && port > 0, `port=${port}`);
@@ -217,6 +255,117 @@ try {
   const deviceNoCsrf = await fetch(`http://127.0.0.1:${port}/admin/api/devices/device-peer/revoke`, { method: 'POST' });
   check('POST /admin/api/devices/:id/revoke 未授权 → 403', deviceNoCsrf.status === 403, `status=${deviceNoCsrf.status}`);
 
+  // ---------- D2 写端点（CSRF 双提交 + 授权） ----------
+  const csrf = index.headers.get('x-mebular-csrf');
+  const csrfCookie = cookieFrom(index);
+  check('CSRF cookie 与响应头成对下发', Boolean(csrf) && Boolean(csrfCookie));
+  const writeHeaders = { 'content-type': 'application/json', 'x-mebular-csrf': csrf, cookie: `mebular_csrf=${csrfCookie}` };
+
+  const headerOnly = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf },
+    body: JSON.stringify({ subject: 'device-x', namespaces: ['notes'] }),
+  });
+  check('仅 CSRF 头、无 cookie → 403', headerOnly.status === 403, `status=${headerOnly.status}`);
+  const cookieOnly = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: `mebular_csrf=${csrfCookie}` },
+    body: JSON.stringify({ subject: 'device-x', namespaces: ['notes'] }),
+  });
+  check('仅 cookie、无 CSRF 头 → 403', cookieOnly.status === 403, `status=${cookieOnly.status}`);
+
+  const created = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ subject: 'device-new', namespaces: ['notes'] }),
+  });
+  const createdJson = await created.json().catch(() => null);
+  check('CSRF 完整 → 签发 grant 201', created.status === 201 && typeof createdJson?.grantId === 'string', `status=${created.status}`);
+
+  const revoked = await fetch(`http://127.0.0.1:${port}/admin/api/grants/${encodeURIComponent(createdJson?.grantId ?? '')}/revoke`, {
+    method: 'POST',
+    headers: writeHeaders,
+  });
+  const revokedJson = await revoked.json().catch(() => null);
+  check('撤销 grant → 200', revoked.status === 200 && revokedJson?.ok === true, `status=${revoked.status}`);
+
+  const policyAfter = await getJson(port, '/admin/api/policy');
+  check(
+    '新 grant 与其撤销均入审计',
+    (policyAfter.json ?? []).some((e) => e.type === 'namespace_grant' && e.grantId === createdJson?.grantId)
+      && (policyAfter.json ?? []).some((e) => e.type === 'namespace_revoke' && e.grantId === createdJson?.grantId),
+  );
+
+  const badBody = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ subject: 'device-new' }),
+  });
+  check('缺 namespaces → 400', badBody.status === 400, `status=${badBody.status}`);
+
+  // ---------- SSE ----------
+  const sse = await openSse(port, '/admin/events', 8000);
+  check(
+    'GET /admin/events 200 + text/event-stream + status 事件',
+    sse.status === 200 && (sse.headers['content-type'] ?? '').includes('text/event-stream') && sse.body.includes('event: status'),
+    `status=${sse.status}`,
+  );
+
+  // ---------- D2 bearer + scope ----------
+  {
+    const bearerHome = join(home, 'bearer');
+    const tokensFile = join(bearerHome, 'auth', 'tokens.json');
+    await mkdir(dirname(tokensFile), { recursive: true });
+    const readToken = 'meb_console_read';
+    const adminToken = 'meb_console_admin';
+    await writeFile(
+      tokensFile,
+      JSON.stringify({
+        tokens: [
+          { id: 'r', sha256: sha256(readToken), scope: ['memory.read'], revoked: false },
+          { id: 'a', sha256: sha256(adminToken), scope: ['memory.admin'], revoked: false },
+        ],
+      }),
+      'utf-8',
+    );
+    const bearerHandle = spawnServe({
+      home: bearerHome,
+      storage: join(bearerHome, 's.jsonl'),
+      args: ['--auth', 'bearer', '--tokens-file', tokensFile],
+      deviceId: 'device-bearer',
+    });
+    servers.push(bearerHandle);
+    const bearerReady = await waitReady(bearerHandle);
+    const bport = bearerReady.port;
+    const base = `http://127.0.0.1:${bport}`;
+
+    const noToken = await fetch(`${base}/admin/api/overview`);
+    check('bearer：无 token 读 → 401', noToken.status === 401, `status=${noToken.status}`);
+    const readOk = await fetch(`${base}/admin/api/overview`, { headers: { authorization: `Bearer ${readToken}` } });
+    check('bearer：read token 读 → 200', readOk.status === 200, `status=${readOk.status}`);
+
+    const consoleRes = await fetch(`${base}/console`);
+    const bcsrf = consoleRes.headers.get('x-mebular-csrf');
+    const bcookie = cookieFrom(consoleRes);
+    const bWriteHeaders = { 'content-type': 'application/json', 'x-mebular-csrf': bcsrf, cookie: `mebular_csrf=${bcookie}` };
+
+    const readWrite = await fetch(`${base}/admin/api/grants`, {
+      method: 'POST',
+      headers: { ...bWriteHeaders, authorization: `Bearer ${readToken}` },
+      body: JSON.stringify({ subject: 'device-x', namespaces: ['notes'] }),
+    });
+    check('bearer：read scope 写 → 403', readWrite.status === 403, `status=${readWrite.status}`);
+    const adminWrite = await fetch(`${base}/admin/api/grants`, {
+      method: 'POST',
+      headers: { ...bWriteHeaders, authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ subject: 'device-x', namespaces: ['notes'] }),
+    });
+    check('bearer：admin scope 写 → 201', adminWrite.status === 201, `status=${adminWrite.status}`);
+
+    const bearerSse = await openSse(bport, `/admin/events?token=${readToken}`, 8000);
+    check('bearer：SSE ?token= 200 + status', bearerSse.status === 200 && bearerSse.body.includes('event: status'), `status=${bearerSse.status}`);
+  }
+
   // ---------- CLI：mebular console ----------
   try {
     const cliOut = execFileSync(process.execPath, [bin, 'console', '--port', String(port)], {
@@ -234,7 +383,7 @@ try {
 } catch (error) {
   check('控制台端到端', false, String(error?.message ?? error).substring(0, 400));
 } finally {
-  await stop(handle);
+  for (const server of servers) await stop(server);
   await rm(home, { recursive: true, force: true }).catch(() => undefined);
 }
 

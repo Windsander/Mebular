@@ -25,6 +25,7 @@ const state = {
   degraded: null,
   error: null,
   csrf: readCookie('mebular_csrf'),
+  token: params.get('token') ?? localStorage.getItem('mebular_token') ?? null,
   features: { writes: false },
 };
 
@@ -40,6 +41,7 @@ function readCookie(name) {
 async function api(path, options = {}) {
   const headers = { accept: 'application/json', ...(options.headers ?? {}) };
   if (options.body !== undefined) headers['content-type'] = 'application/json';
+  if (state.token) headers.authorization = `Bearer ${state.token}`;
   if (options.method && options.method !== 'GET') {
     if (state.csrf) headers['x-mebular-csrf'] = state.csrf;
   }
@@ -53,6 +55,14 @@ async function api(path, options = {}) {
   if (csrfHeader) state.csrf = csrfHeader;
   const data = await res.json().catch(() => null);
   if (!res.ok) {
+    if (res.status === 401 && !state.token) {
+      const token = window.prompt('serve 需要 bearer token（读需 memory.read，写需 memory.admin）：', '');
+      if (token) {
+        state.token = token.trim();
+        localStorage.setItem('mebular_token', state.token);
+        startEvents();
+      }
+    }
     const error = new Error(data?.message ?? data?.error ?? `HTTP ${res.status}`);
     error.status = res.status;
     error.payload = data;
@@ -105,6 +115,9 @@ function computeDegraded() {
 // ---------- 渲染 ----------
 
 function render() {
+  if (!state.selected && params.get('select')) {
+    state.selected = state.devices.find((d) => d.deviceId === params.get('select')) ?? null;
+  }
   renderTopbar();
   renderLegend();
   renderStageScene();
@@ -398,18 +411,23 @@ function renderDeviceCard() {
   }
   if (device.lastSyncAt) statusChips.push(`最近同步 ${formatTime(device.lastSyncAt)}`);
 
-  const domains = [...new Set([...device.grantedByMe, ...device.grantedToMe])].sort();
-  const rows = domains.length === 0
-    ? '<li class="muted">未共享任何分区</li>'
-    : domains.map((ns) => {
-      const on = device.grantedByMe.includes(ns);
+  const allNamespaces = allNamespaceNames();
+  const writes = state.features.writes && !isSelf && !MOCK;
+  const rows = allNamespaces.length === 0
+    ? '<li class="muted">暂无已知分区</li>'
+    : allNamespaces.map((ns) => {
+      const mineOn = device.grantedByMe.includes(ns);
+      const theirsOn = device.grantedToMe.includes(ns);
       return `<li>
-        <span><span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span></span>
-        <span class="muted">${on ? '我授权它' : '它授权我'}</span>
+        <span><span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
+          ${theirsOn && !mineOn ? '<span class="muted" style="margin-left:6px">它授权我</span>' : ''}</span>
+        <label class="toggle" title="${mineOn ? '关闭：撤销我对该域的授权' : '打开：签发新授权'}">
+          <input type="checkbox" data-ns="${escapeHtml(ns)}" ${mineOn ? 'checked' : ''} ${writes ? '' : 'disabled'}>
+          <span class="slider"></span>
+        </label>
       </li>`;
     }).join('');
 
-  const writes = state.features.writes && !isSelf && !MOCK;
   const actions = isSelf ? '' : `
     <div class="card-actions">
       <button class="btn btn-small" data-action="sync" ${writes && device.online ? '' : 'disabled'}>立即同步</button>
@@ -429,13 +447,16 @@ function renderDeviceCard() {
       <dt>最近同步</dt><dd>${device.lastSyncAt ? formatTime(device.lastSyncAt) : '—'}</dd>
       <dt>待发事件</dt><dd>${device.pendingEventCount ?? '—'}</dd>
     </dl>
-    <h3>域</h3>
+    <h3>我授权的域</h3>
     <ul class="chip-list">${rows}</ul>
     ${actions}
   `;
 
   body.querySelectorAll('[data-action]').forEach((button) => {
     button.addEventListener('click', () => handleDeviceAction(button.dataset.action, device));
+  });
+  body.querySelectorAll('input[data-ns]').forEach((input) => {
+    input.addEventListener('change', () => handleDomainToggle(device, input.dataset.ns, input.checked, input));
   });
 }
 
@@ -509,6 +530,54 @@ $('#audit-export').addEventListener('click', () => {
 });
 
 // ---------- 写操作（D2；features.writes 打开后可用） ----------
+
+function grantsCovering(deviceId, ns) {
+  const selfId = state.overview?.device?.deviceId;
+  return state.policy
+    .filter((event) => event.type === 'namespace_grant'
+      && event.valid
+      && event.issuer === selfId
+      && event.subject === deviceId
+      && (event.namespaces ?? []).includes(ns))
+    .map((event) => event.grantId);
+}
+
+async function handleDomainToggle(device, ns, on, input) {
+  input.disabled = true;
+  try {
+    if (MOCK) {
+      window.alert('mock 模式不执行写操作。');
+      input.checked = !on;
+      return;
+    }
+    if (on) {
+      await api('/admin/api/grants', { method: 'POST', body: { subject: device.deviceId, namespaces: [ns] } });
+      showToast(`已授权「${ns}」给 ${device.deviceId}`);
+      await refresh();
+    } else {
+      const ok = await confirmModal({
+        title: `撤销域 ${ns}`,
+        body: `${device.deviceId} 不会再收到关于「${ns}」的新记忆；已同步内容不会撤回；可用新授权恢复。`,
+        confirmLabel: '撤销授权',
+      });
+      if (!ok) {
+        input.checked = true;
+        return;
+      }
+      const grantIds = grantsCovering(device.deviceId, ns);
+      for (const grantId of grantIds) {
+        await api(`/admin/api/grants/${encodeURIComponent(grantId)}/revoke`, { method: 'POST', body: {} });
+      }
+      showToast(grantIds.length > 0 ? `已撤销「${ns}」` : `「${ns}」没有可撤销的授权`);
+      await refresh();
+    }
+  } catch (error) {
+    window.alert(`操作失败：${error.message}`);
+    input.checked = !on;
+  } finally {
+    input.disabled = false;
+  }
+}
 
 async function handleDeviceAction(action, device) {
   if (action === 'sync') {
@@ -647,7 +716,42 @@ async function mockData() {
 
 // ---------- 启动 ----------
 
+let eventSource = null;
+let refreshTimer = null;
+function scheduleRefresh() {
+  if (refreshTimer) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    refresh();
+  }, 700);
+}
+
+function startEvents() {
+  if (MOCK || typeof window.EventSource === 'undefined') return;
+  if (eventSource) {
+    eventSource.close();
+    eventSource = null;
+  }
+  const tokenParam = state.token ? `?token=${encodeURIComponent(state.token)}` : '';
+  try {
+    eventSource = new EventSource(`/admin/events${tokenParam}`);
+  } catch {
+    return;
+  }
+  const onPulse = () => {
+    stage.pulse();
+    scheduleRefresh();
+  };
+  eventSource.addEventListener('status', onPulse);
+  eventSource.addEventListener('sync', onPulse);
+  eventSource.addEventListener('sync-failed', onPulse);
+  eventSource.onerror = () => {
+    // EventSource 会自动重连；网络关闭时保持静默
+  };
+}
+
 stage.start();
 setView('map');
 refresh();
+startEvents();
 setInterval(refresh, POLL_MS);

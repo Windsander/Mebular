@@ -71,6 +71,7 @@ export class StarStage {
     this.running = false;
     this.raf = 0;
     this.startTime = performance.now();
+    this.pulseUntil = 0;
     this.onHover = null;
     this.onSelect = null;
 
@@ -97,6 +98,11 @@ export class StarStage {
 
   setSelected(deviceId) {
     this.selectedId = deviceId ?? null;
+  }
+
+  /** 触发一次本机脉冲（SSE 状态/同步事件到达时） */
+  pulse(durationMs = 1200) {
+    this.pulseUntil = performance.now() + durationMs;
   }
 
   start() {
@@ -334,6 +340,20 @@ export class StarStage {
 
   _drawNodes(time) {
     const ctx = this.ctx;
+    const now = performance.now();
+    const pulseProgress = now < this.pulseUntil ? 1 - (this.pulseUntil - now) / 1200 : null;
+    const selfPos = this.scene.nodes.find((n) => n.self);
+    if (pulseProgress !== null && selfPos) {
+      const center = this.positions.get(selfPos.id);
+      if (center) {
+        const radius = 14 + pulseProgress * 70;
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, radius, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(255,233,168,${0.55 * (1 - pulseProgress)})`;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+      }
+    }
     for (const node of this.scene.nodes) {
       const pos = this.positions.get(node.id);
       if (!pos) continue;

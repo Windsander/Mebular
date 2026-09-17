@@ -13,8 +13,9 @@ import https from 'node:https';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
+import { SecureChannelSyncTransport } from '@mebular/core';
 import { TOOL_SCOPES } from './tools.mjs';
-import { READ_ROUTES } from './admin.mjs';
+import { READ_ROUTES, hexToBytes } from './admin.mjs';
 
 const SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
 const SCOPE_RANK = { 'memory.read': 0, 'memory.write': 1, 'memory.admin': 2 };
@@ -503,7 +504,13 @@ export async function startHttpServer({
 
   async function handleConsole(req, res, url) {
     const path = url.pathname;
-    if (path === '/console' || path === '/console/' || path === '/console/index.html') {
+    // 目录语义：无尾斜杠时补一个，保证 HTML 内相对资源（./console.css 等）解析到 /console/ 下
+    if (path === '/console') {
+      res.statusCode = 308;
+      res.setHeader('location', `/console/${url.search}`);
+      return res.end();
+    }
+    if (path === '/console/' || path === '/console/index.html') {
       const token = issueCsrf();
       setCsrfCookie(res, token);
       res.setHeader('x-mebular-csrf', token);
@@ -543,14 +550,225 @@ export async function startHttpServer({
     return sendJson(res, 200, payload);
   }
 
-  // D2 注入写实现；D1 保持 null（写端点恒 403 console_read_only）
-  let applyAdminWrite = null;
+  // ---------- /admin/events（SSE：状态与同步实时脉冲） ----------
+
+  async function handleAdminEvents(req, res, url) {
+    if (!app || !service) {
+      return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
+    }
+    if (auth !== 'none' && !req.headers['authorization']) {
+      const token = url.searchParams.get('token');
+      if (token) req.headers.authorization = `Bearer ${token}`;
+    }
+    const check = await authenticate(req, Buffer.alloc(0), 'memory.read');
+    if (!check.ok) {
+      res.statusCode = check.status;
+      if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+      return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
+    }
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    const send = (event, data) => {
+      try {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        // 连接已断开
+      }
+    };
+    send('hello', { at: Date.now() });
+
+    const onSync = (result) => send('sync', {
+      at: Date.now(),
+      peerDeviceId: result?.peerDeviceId,
+      sentEvents: result?.sentEvents,
+      receivedEvents: result?.receivedEvents,
+    });
+    const onFail = (payload) => send('sync-failed', {
+      at: Date.now(),
+      message: String(payload?.error?.message ?? payload?.error ?? ''),
+    });
+    try {
+      app.sync.on('sync-completed', onSync);
+      app.sync.on('sync-failed', onFail);
+    } catch {
+      // 门面未初始化时 sync 不可访问
+    }
+
+    let closed = false;
+    const emitStatus = async () => {
+      if (closed) return;
+      try {
+        const status = await service.status();
+        send('status', {
+          at: Date.now(),
+          running: status.running,
+          nodeCount: status.nodeCount,
+          pendingEventCount: status.pendingEventCount,
+          peerId: status.peerId,
+        });
+      } catch {
+        // 保活失败忽略
+      }
+    };
+    await emitStatus();
+    const timer = setInterval(emitStatus, 2500);
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(timer);
+      try {
+        app.sync.off('sync-completed', onSync);
+        app.sync.off('sync-failed', onFail);
+      } catch {
+        // ignore
+      }
+      try { res.end(); } catch { /* ignore */ }
+    };
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+    return undefined;
+  }
 
   const WRITE_PATTERNS = [
     /^\/admin\/api\/grants$/,
-    /^\/admin\/api\/grants\/[^/]+\/revoke$/,
-    /^\/admin\/api\/devices\/[^/]+\/(revoke|connect|disconnect|sync|reset-watermarks)$/,
+    /^\/admin\/api\/grants\/([^/]+)\/revoke$/,
+    /^\/admin\/api\/devices\/([^/]+)\/(revoke|connect|disconnect|sync|reset-watermarks)$/,
   ];
+
+  function parseJsonBody(body) {
+    try {
+      const parsed = JSON.parse(body?.toString('utf-8') || '{}');
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return null;
+    }
+  }
+
+  /** 按会话证书把 deviceId 映射到在线连接；找不到返回 null */
+  function findConnectionByDevice(deviceId) {
+    const node = app?.node;
+    if (!node || !node.isRunning()) return null;
+    for (const connection of node.getConnectionManager().getConnections()) {
+      const session = node.getHandshake().getSession(connection.peerId);
+      if (session?.state === 'authenticated' && session.certificate?.deviceId === deviceId) {
+        return { connection, session };
+      }
+    }
+    return null;
+  }
+
+  // D2 写端点实现（memory.admin scope + CSRF 已在 handleAdminWrite 校验）
+  async function applyAdminWrite(req, res, path, body) {
+    if (!app || !service) {
+      return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
+    }
+
+    const grantMatch = path.match(/^\/admin\/api\/grants$/);
+    if (grantMatch) {
+      const input = parseJsonBody(body);
+      if (!input || typeof input.subject !== 'string' || !Array.isArray(input.namespaces) || input.namespaces.length === 0) {
+        return sendJson(res, 400, { error: 'bad_request', message: '需要 { subject, namespaces[] }' });
+      }
+      const namespaces = [...new Set(input.namespaces.filter((ns) => typeof ns === 'string' && ns.length > 0))];
+      if (namespaces.length === 0) {
+        return sendJson(res, 400, { error: 'bad_request', message: 'namespaces 不能为空' });
+      }
+      const event = await app.grantNamespaces({
+        subject: input.subject,
+        namespaces,
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+        ...(typeof input.expiresAt === 'number' ? { expiresAt: input.expiresAt } : {}),
+      });
+      return sendJson(res, 201, {
+        ok: true,
+        grantId: event.data?.grant?.grantId,
+        eventId: event.id,
+        subject: input.subject,
+        namespaces,
+      });
+    }
+
+    const revokeMatch = path.match(/^\/admin\/api\/grants\/([^/]+)\/revoke$/);
+    if (revokeMatch) {
+      const grantId = decodeURIComponent(revokeMatch[1]);
+      const input = parseJsonBody(body) ?? {};
+      const event = await app.revokeGrant({
+        grantId,
+        ...(typeof input.subject === 'string' ? { subject: input.subject } : {}),
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+      });
+      return sendJson(res, 200, { ok: true, grantId, eventId: event.id });
+    }
+
+    const deviceMatch = path.match(/^\/admin\/api\/devices\/([^/]+)\/(revoke|connect|disconnect|sync|reset-watermarks)$/);
+    if (deviceMatch) {
+      const deviceId = decodeURIComponent(deviceMatch[1]);
+      const action = deviceMatch[2];
+
+      if (action === 'revoke') {
+        const input = parseJsonBody(body) ?? {};
+        const event = await app.revokeDevice({
+          subject: deviceId,
+          ...(typeof input.note === 'string' ? { note: input.note } : {}),
+        });
+        return sendJson(res, 200, { ok: true, deviceId, eventId: event.id });
+      }
+
+      if (action === 'reset-watermarks') {
+        await app.resetPeerWatermarks(deviceId);
+        return sendJson(res, 200, { ok: true, deviceId });
+      }
+
+      const node = app.node;
+      if (!node || !node.isRunning()) {
+        return sendJson(res, 409, { error: 'network_not_running', message: '网络未启用，无法连接或同步' });
+      }
+
+      if (action === 'connect') {
+        const input = parseJsonBody(body) ?? {};
+        if (typeof input.address !== 'string' || input.address.length === 0) {
+          return sendJson(res, 400, { error: 'bad_request', message: '需要 { address }（对端 multiaddr，含 /p2p/…）' });
+        }
+        const peerId = { multihash: new Uint8Array(), pubKey: new Uint8Array(), id: deviceId };
+        const connection = await node.connectToPeer(peerId, input.address);
+        return sendJson(res, 200, { ok: true, deviceId, remoteAddress: connection.remoteAddress });
+      }
+
+      const found = findConnectionByDevice(deviceId);
+      if (!found) {
+        return sendJson(res, 409, {
+          error: 'not_connected',
+          message: `${deviceId} 当前未连接；请先用 connect 提供对端 multiaddr`,
+        });
+      }
+
+      if (action === 'disconnect') {
+        await node.disconnectPeer(found.connection.peerId);
+        return sendJson(res, 200, { ok: true, deviceId });
+      }
+
+      if (action === 'sync') {
+        const certificate = found.session.certificate;
+        const publicKey = hexToBytes(certificate?.devicePublicKey ?? '');
+        if (publicKey.length === 0) {
+          return sendJson(res, 502, { error: 'channel_unavailable', message: '缺少对端设备公钥，无法发起同步' });
+        }
+        const channel = await node.getChannel(found.connection.peerId, 5000);
+        if (!channel) {
+          return sendJson(res, 502, { error: 'channel_unavailable', message: '加密信道未就绪，请稍后重试' });
+        }
+        const transport = new SecureChannelSyncTransport(channel);
+        const result = await app.sync.syncWithDevice(transport, { deviceId, publicKey }, { direction: 'bidirectional' });
+        return sendJson(res, 200, { ok: true, deviceId, result });
+      }
+    }
+
+    return sendJson(res, 404, { error: 'not_found', path });
+  }
 
   async function handleAdminWrite(req, res, path, body) {
     if (!WRITE_PATTERNS.some((re) => re.test(path))) return false;
@@ -740,6 +958,9 @@ export async function startHttpServer({
       }
       if (path === '/console' || path.startsWith('/console/')) {
         return handleConsole(req, res, url);
+      }
+      if (path === '/admin/events' && req.method === 'GET') {
+        return handleAdminEvents(req, res, url);
       }
       if (path.startsWith('/admin/api/')) {
         if (req.method === 'GET' && READ_ROUTES[path]) return handleAdminRead(req, res, path);

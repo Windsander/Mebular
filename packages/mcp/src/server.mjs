@@ -75,6 +75,8 @@ export async function startServeServer(options = {}) {
       tlsKey: options.tlsKey,
       tlsCert: options.tlsCert,
       tokensFile: options.tokensFile,
+      // D2：写端点开启（仍需 memory.admin scope + CSRF 双提交）
+      writesEnabled: true,
     });
     const shutdown = async () => {
       await http.close().catch(() => undefined);

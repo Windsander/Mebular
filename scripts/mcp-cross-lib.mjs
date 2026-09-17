@@ -55,6 +55,15 @@ export function printCrossGuidance(log = console.log) {
 }
 
 /**
+ * 一致性判据（①）：优先用**共同授权域**的哈希（`stateMatchesCommon`）；旧证据无该
+ * 字段时回退到全局 `stateMatches`。两端合法持有不同分区集合时，全局哈希天然不同。
+ */
+function stateConsistent(evidence) {
+  if (evidence?.stateMatchesCommon !== undefined) return evidence.stateMatchesCommon === true;
+  return evidence?.stateMatches === true;
+}
+
+/**
  * 判定跨网证据是否达成 G6.6（四项全 true 才算通过）。
  * 注：`MemoryStatus.pendingEventCount` 为 SyncManager 的**待发事件数**（原字段名 `pendingPeers`
  * 语义误导，已更名），成功同步后不保证为 0，故**不作为**达成判据，仅在证据里记录。
@@ -62,7 +71,7 @@ export function printCrossGuidance(log = console.log) {
 export function judgeCrossEvidence(evidence) {
   const failures = [];
   if (evidence?.markerFound !== true) failures.push('markerFound !== true（B 未召回 A 的写入）');
-  if (evidence?.stateMatches !== true) failures.push('stateMatches !== true（双端 stateHash 不一致）');
+  if (!stateConsistent(evidence)) failures.push('共同域 stateHash 不一致（stateMatchesCommon/stateMatches !== true）');
   if (evidence?.identityShared !== true) failures.push('identityShared !== true（未以同一主密钥完成握手同步）');
   if (evidence?.differentPublicNetwork !== true) {
     failures.push(`differentPublicNetwork !== true（${evidence?.differentPublicNetworkBasis ?? 'unknown'}）`);
@@ -77,7 +86,7 @@ export function judgeCrossEvidence(evidence) {
 export function judgeSelftest(evidence) {
   const chainFailures = [];
   if (evidence?.markerFound !== true) chainFailures.push('markerFound');
-  if (evidence?.stateMatches !== true) chainFailures.push('stateMatches');
+  if (!stateConsistent(evidence)) chainFailures.push('stateMatches');
   if (evidence?.identityShared !== true) chainFailures.push('identityShared');
   const gate = judgeCrossEvidence(evidence);
   const blockedByEgress = evidence?.differentPublicNetwork !== true;

@@ -41,6 +41,59 @@ describe('① 至少一次投递 + 幂等应用', () => {
     expect(dedupeEvents(withDups)).toHaveLength(events.length);
     expect(reduceTaskEvents(withDups)!.attempts).toBe(2);
   });
+
+  it('内容完全相同的重复投递：仍只保留一份（幂等不回归）', () => {
+    const events = lifecycle('t2b', { claims: 2 });
+    const triple = [...events, ...events, ...events];
+    expect(dedupeEvents(triple)).toHaveLength(events.length);
+    expect(reduceTaskEvents(triple)).toEqual(reduceTaskEvents(events));
+  });
+
+  it('同 eventId 冲突但内容不同：确定性地按稳定序列化裁决（§2.1 兜底）', () => {
+    const t = 't-collision';
+    const base = [mkEvent('created', t), mkEvent('claimed', t, { eventId: `${t}#c` })];
+    const doneA = mkEvent('done', t, { eventId: `${t}#dup`, payloadRef: 'payload-A' });
+    const doneB = mkEvent('done', t, { eventId: `${t}#dup`, payloadRef: 'payload-B' });
+    const events = [...base, doneA, doneB];
+
+    // 任意排列：reducer 结果一致，且去重后的集合长度稳定
+    const rng = mulberry32(0xc011);
+    const expected = JSON.stringify(reduceTaskEvents(events));
+    for (let i = 0; i < 24; i++) {
+      const permuted = shuffle(events, rng);
+      expect(JSON.stringify(reduceTaskEvents(permuted))).toBe(expected);
+      expect(dedupeEvents(permuted)).toHaveLength(3);
+    }
+
+    // 稳定序列化下 payload-B 的 JSON 字典序更大 → 确定性胜出
+    expect(reduceTaskEvents(events)!.resultRef).toBe('payload-B');
+    expect(dedupeEvents([doneA, doneB])[0]).toEqual(doneB);
+    expect(dedupeEvents([doneB, doneA])[0]).toEqual(doneB);
+  });
+
+  it('乱序到达（running 先于 claimed）不因状态相关校验被拒：入站按秩合并（§2.1）', () => {
+    const t = 't-out-of-order';
+    const created = mkEvent('created', t);
+    const claimed = mkEvent('claimed', t, { eventId: `${t}#c` });
+    const running = mkEvent('running', t, { eventId: `${t}#r` });
+    const events = [created, claimed, running];
+
+    const a = reduceTaskEvents([running, created, claimed])!;
+    const b = reduceTaskEvents([created, claimed, running])!;
+    expect(a).toEqual(b);
+    expect(a.status).toBe('running');
+    expect(a.attempts).toBe(1);
+
+    // 逐条应用同一事件，随机顺序下终态一致（入站不做状态相关校验）
+    const reference = new IdempotentTaskApplier();
+    for (const event of events) reference.apply(event);
+    const rng = mulberry32(0x0c0c);
+    for (let i = 0; i < 6; i++) {
+      const applier = new IdempotentTaskApplier();
+      for (const event of shuffle(events, rng)) applier.apply(event);
+      expect(applier.state(t)).toEqual(reference.state(t));
+    }
+  });
 });
 
 describe('② 因果链可追（trace/chain）', () => {

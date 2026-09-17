@@ -12,7 +12,7 @@
 
 | # | 性质 | 期望 | 覆盖测试 |
 |---|---|---|---|
-| ① | **至少一次 + 幂等应用** | 同一 事件按 `eventId` 去重；重复投递**不改变状态、不重复执行** | `reducer 对重复事件幂等（去重）` · `重复投递不改变状态、不重复执行` · harness `applier 终态不一致` / `重复投递被再次应用` |
+| ① | **至少一次 + 幂等应用** | 同一 事件按 `eventId` 去重；重复投递**不改变状态、不重复执行**；同 id **不同内容**（违约/对抗输入）按稳定序列化确定性裁决 | `reducer 对重复事件幂等（去重）` · `重复投递不改变状态、不重复执行` · `同 eventId 冲突但内容不同：确定性地按稳定序列化裁决（§2.1 兜底）` · harness `applier 终态不一致` / `重复投递被再次应用` |
 | ② | **因果链可追（trace/chain）** | `causedBy` 指向存在的父任务且被并入 `chain`（去重、排序） | `causedBy 与 chain 保留且去重排序` · harness `因果可追` |
 | ③ | **本地配额**：每设备对自己发出的量本地记账；超额本地拒绝/排队；**无全局协调** | 设备间互不影响；超额按策略 `queue`/`reject`；账本守恒 | `按设备独立记账，超额按策略排队` · `reject 策略：超额直接拒绝` · `账本守恒：accepted + queued + rejected == 请求总量` · `release / drainQueue 只在本地搬迁` · `snapshot 按 device 字典序` · `非法输入被拒绝` |
 | ④ | **`expiresAt` 只影响本机展示** | 权威状态与 `at`/`expiresAt`/`now` **无关** | `权威状态与 at / expiresAt / now 无关` · harness `墙钟无关` |
@@ -21,7 +21,12 @@
 ## 2. 横切不变量
 
 1. **顺序无关收敛**：事件数组任意排列（去重后）得到同一权威状态。`reduceTaskEvents` 顺序无关；
-   `IdempotentTaskApplier` 随机顺序应用终态一致。覆盖：`任意排列得到同一权威状态` · harness `顺序无关失败`/`applier 终态不一致`。
+   `IdempotentTaskApplier` 随机顺序应用终态一致。**同一 `eventId` 对应不同内容**（违约/对抗输入）时，
+   去重按稳定序列化（对象键递归排序）取字典序较大者**确定性裁决**——「去重后的集合」本身也与输入
+   顺序无关；`eventId` 仍应满足内容寻址或全局唯一契约，本裁决仅为兜底，不改变正常路径。
+   `MebularTaskEventStore` 复用同一 `dedupeEvents`，store 与 reducer 语义不漂移。
+   覆盖：`任意排列得到同一权威状态` · `同 eventId 冲突但内容不同：确定性地按稳定序列化裁决（§2.1 兜底）` ·
+   harness `顺序无关失败`/`applier 终态不一致`。
 2. **终态裁决确定性**：并发 `done` vs `failed`（同秩）由 `TERMINAL_PRECEDENCE` 裁决（`failed` 优先），
    与到达顺序无关。覆盖：`并发 done vs failed：终态平局裁决` · 夹具 `state-machine.json` 一致性测试。
 3. **未知任务**：无 `created` 事件 → `null`（不臆造状态）。覆盖：`缺少 created → null`。

@@ -195,8 +195,10 @@ export interface DerivePolicyOptions {
  *
  * **终止条件与回退**：迭代次数有固定上限 `FIXPOINT_MAX_ITERATIONS`（可由 `maxIterations`
  * 覆盖，供边界/测试），绝不接受无法收敛的链路。若上限内未稳定，回退到一个**综合 fail-closed**
- * 结果：不采纳任何 `namespace_revoke`（`revokedGrantIds=∅`），且排除**各轮出现过的全部吊销设备**
- * 作为签发者（`revokedIn=并集`）——即宁可少授权，也绝不放宽 R-b。全过程仅由确定序驱动，故同一
+ * 结果：不采纳任何 `namespace_revoke`（`revokedGrantIds=∅`），且排除**各轮出现过的全部吊销设备
+ * 的并集**（`revokedIn=并集`）作为签发者。两条轴的取舍不同（有意）：`revokedGrantIds=∅` 使
+ * **grant 撤销轴偏宽松**（已生效的授权可能来不及撤销），换取绝不误采信被吊销签发者的 revoke；
+ * 排除并集使**设备吊销轴偏保守**（少授权）。整体仍绝不放宽 R-b。全过程仅由确定序驱动，故同一
  * 输入在任何端得到同一结果。收敛情况由 `PolicyState.converged` / `iterations` 暴露。
  *
  * 级联：吊销 A → A 的 grant 失效 → 依赖它的 B 在权威授权步因 R-a 失去授权 → B 的转授
@@ -218,8 +220,8 @@ function isAuthorizedFor(
   return own !== undefined && [...granted].every((ns) => own.has(ns));
 }
 
-/** 不动点迭代上限（有界，防死循环） */
-const FIXPOINT_MAX_ITERATIONS = 3;
+/** 不动点迭代上限（有界，防死循环）。取值需覆盖常见「慢收敛」链（实测多为 ≤5 轮）。 */
+const FIXPOINT_MAX_ITERATIONS = 8;
 
 function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   if (a.size !== b.size) return false;
@@ -256,13 +258,16 @@ function deriveOnce(
     for (const ns of granted) set.add(ns);
   }
 
-  // 吊销：按逻辑序单遍、**在途吊销**决定 device_revoke 是否被采纳（互吊销逻辑序在先者胜）；
-  // 被采纳 grant 清除其主体的吊销（R-d 恢复）。
+  // 吊销：按逻辑序单遍；被采纳 grant 清除其主体的吊销（R-d 恢复）。
   const revoked = new Set<string>();
   for (const entry of sorted) {
-    if (revoked.has(entry.author)) continue; // R-b（在途）
+    // R-b：被吊销签发者的记录一律不采纳——既包括**权威排除集** `revokedIn`（覆盖其**历史**
+    // 记录，F-1），也包括本轮在途已判吊销者（互吊销按逻辑序确定，见「R-b 互吊销」）。
+    if (revokedIn.has(entry.author) || revoked.has(entry.author)) continue;
     if (entry.kind === 'device' && entry.device) {
-      revoked.add(entry.device.subject);
+      // 自吊销（subject === author）语义未定义，且与 R-b 自指冲突（吊销后其记录不再被采纳 →
+      // 反而无法维持吊销）。不予采纳：吊销须由**其他**设备发起。
+      if (entry.device.subject !== entry.author) revoked.add(entry.device.subject);
     } else if (entry.kind === 'grant' && entry.grant && adoptedGrantIds.has(entry.grant.grantId)) {
       revoked.delete(entry.grant.subject);
     }
@@ -292,7 +297,8 @@ function filterRevokes(sorted: ParsedEntry[], revoked: ReadonlySet<string>): Set
  * 随后迭代把「未被吊销签发者发出的 revoke」纳入。每轮迭代均由确定序驱动。
  *
  * **终止与回退**：迭代上限 `maxIterations`；未收敛时回退到**综合 fail-closed** 结果
- * （`revokedGrantIds=∅` 且 `revokedIn=各轮吊销并集`）——宁可少授权，也绝不放宽 R-b。
+ * （`revokedGrantIds=∅` 且 `revokedIn=各轮吊销并集`）：grant 撤销轴偏宽松、设备吊销轴偏保守
+ * （见文件顶部说明），整体绝不放宽 R-b。
  */
 export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyOptions = {}): PolicyState {
   const bootstrap = new Set(options.policyIssuers ?? []);
@@ -322,15 +328,17 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
     rounds.push({ revokedGrantIds, state: current });
   }
 
-  // 未收敛 → fail-closed 综合结果（比任何单轮都更保守，且确定）：
-  //  - `revokedGrantIds = ∅`：**不采纳任何 revoke**（对被吊销签发者的 revoke 最保守）；
-  //  - `revokedIn = 各轮出现过的吊销设备并集`：**排除所有曾判为吊销的设备**（对其 grant 也最保守）。
-  // 取舍：宁可少授权（含可能误伤有效 revoke/grant），也不放宽 R-b。
+  // 未收敛 → fail-closed 综合结果（确定）。两条轴取舍**不同**（有意）：
+  //  - `revokedGrantIds = ∅`（**不采纳任何 revoke**）：grant 撤销轴**偏宽松**——已生效的授权
+  //    可能来不及撤销；换来绝不误采信被吊销签发者的 revoke。
+  //  - `revokedIn = 各轮吊销并集`：设备吊销轴**偏保守**——曾判吊销设备的记录（含 grant）不采纳。
   let chosen = current;
   if (!converged) {
-    const fallbackRevoked = new Set<string>();
-    for (const round of rounds) for (const device of round.state.revoked) fallbackRevoked.add(device);
-    chosen = deriveOnce(sorted, bootstrap, new Set<string>(), fallbackRevoked);
+    // 排除集取各轮吊销的并集：其输出 revoked 必为并集的子集（r0 以 ∅ 为排除集已采纳所有
+    // 「作者不在并集内」的 device_revoke），故 F-1 检查 a 在回退路径上亦自洽。
+    const excluded = new Set<string>();
+    for (const round of rounds) for (const device of round.state.revoked) excluded.add(device);
+    chosen = deriveOnce(sorted, bootstrap, new Set<string>(), excluded);
   }
 
   return { authorized: chosen.authorized, revoked: chosen.revoked, converged, iterations };

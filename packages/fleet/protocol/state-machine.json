@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "statuses": ["queued", "claimed", "running", "done", "failed"],
+  "rank": { "queued": 0, "claimed": 1, "running": 2, "done": 3, "failed": 3 },
+  "terminal": ["done", "failed"],
+  "terminalPrecedence": { "queued": 0, "claimed": 0, "running": 0, "done": 1, "failed": 2 },
+  "transitions": {
+    "queued": ["claimed", "failed"],
+    "claimed": ["running", "failed"],
+    "running": ["done", "failed"],
+    "done": [],
+    "failed": []
+  }
+}

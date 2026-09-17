@@ -35,6 +35,9 @@
 
 ## 5. 路线（M0→M4）
 
+**状态（本 goal）**：M0–M3 已交付；`npm run verify:fleet:local`（M2，spool）与 `npm run verify:fleet:remote`
+（M3，真实 libp2p loopback）均入 CI；M4 未开始。双机操作见 [`RUNBOOK.md`](RUNBOOK.md)。
+
 - **M0（本阶段）**：骨架 + 边界测试 + CI 接线 + 设计/协议夹具先行。
 - **M1**：协议与模型（envelope / 状态机 / 配额语义）+ `PROTOCOL-INVARIANTS.md` 矩阵 + 随机化 harness（含 oracle-free 扰动检查）。
 - **M2**：单机双进程最小可用（A 派活 → B 执行 → 结果回传）+ `scripts/verify-fleet-local.mjs`。

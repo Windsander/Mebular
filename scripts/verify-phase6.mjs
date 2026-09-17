@@ -99,7 +99,28 @@ try {
   console.log('  ✓ 覆盖率门槛通过', allLine ? `(${allLine.trim().split('|').slice(0, 3).join('|').trim()})` : '');
 } catch (error) {
   console.log('  ✗ 覆盖率门槛未达标');
-  console.log('  错误:', String(error.message).substring(0, 500));
+  // execSync 失败时 stdout 仍在 error.stdout：保留诊断信息（偶发抖动时能定位是测试失败还是阈值失败）
+  const captured = [error.stdout, error.stderr].filter((chunk) => typeof chunk === 'string').join('\n');
+  const lines = captured.split('\n').filter((line) => line.trim() !== '');
+  const signals = lines.filter(
+    (line) =>
+      /^(FAIL|Tests:|Test Suites:|Jest: .*threshold)/.test(line) ||
+      /Exceeded timeout|Test environment has been torn down|Cannot find module/.test(line),
+  );
+  if (error.signal === 'SIGTERM' || error.code === 'ETIMEDOUT') {
+    console.log('  错误: 覆盖率运行超时（300s）');
+  } else {
+    console.log('  错误:', String(error.message).substring(0, 200));
+  }
+  if (signals.length > 0) {
+    console.log('  --- 关键信号 ---');
+    for (const line of signals.slice(0, 20)) console.log(`  ${line.trim()}`);
+  }
+  const tail = lines.slice(-20).join('\n');
+  if (tail) {
+    console.log('  --- jest 输出尾部（20 行） ---');
+    console.log(tail);
+  }
   allPassed = false;
 }
 // src 内裸 throw new Error 清零（6.0 纪律）

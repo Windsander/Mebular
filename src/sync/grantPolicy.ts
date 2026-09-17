@@ -189,14 +189,15 @@ export interface DerivePolicyOptions {
  *
  * **为何需要不动点（循环依赖）**：`revokedGrantIds` 必须**排除被吊销签发者发出的
  * `namespace_revoke`**（R-b，F-B），而“某签发者是否被吊销”又依赖 grant 采纳，grant 采纳
- * 又依赖 `revokedGrantIds`。于是以「全部 revoke」为种子迭代：每轮用**权威 `revoked`**
- * 重新过滤 `revokedGrantIds`，直到同输入产出同结果（稳定）或到达上限。
+ * 又依赖 `revokedGrantIds`。于是迭代未知量对 `(revokedGrantIds, revokedIn)`：每轮用上一轮
+ * 的 `revoked` 过滤 `revokedGrantIds` 并作为 R-b 作者排除，直到同输入产出同结果（稳定）
+ * 或到达上限。种子取 `(∅, ∅)`——**天然 fail-closed**。
  *
- * **终止条件与回退**：迭代次数有固定上限 `FIXPOINT_MAX_ITERATIONS`，绝不接受无法收敛的
- * 链路。若上限内未稳定，**fail-closed 回退到已算出各轮中「被采纳 revoke 集合最小」的结果**
- * （对 R-b 最保守，即尽量不采纳被吊销签发者的 revoke）；并列时按字典序最小确定性 tie-break。
- * 全过程仅由 `compareEntries` 的确定序驱动，故同一输入在任何端得到同一结果。收敛情况由
- * `PolicyState.converged` / `PolicyState.iterations` 暴露，供日志/告警。
+ * **终止条件与回退**：迭代次数有固定上限 `FIXPOINT_MAX_ITERATIONS`（可由 `maxIterations`
+ * 覆盖，供边界/测试），绝不接受无法收敛的链路。若上限内未稳定，回退到一个**综合 fail-closed**
+ * 结果：不采纳任何 `namespace_revoke`（`revokedGrantIds=∅`），且排除**各轮出现过的全部吊销设备**
+ * 作为签发者（`revokedIn=并集`）——即宁可少授权，也绝不放宽 R-b。全过程仅由确定序驱动，故同一
+ * 输入在任何端得到同一结果。收敛情况由 `PolicyState.converged` / `iterations` 暴露。
  *
  * 级联：吊销 A → A 的 grant 失效 → 依赖它的 B 在权威授权步因 R-a 失去授权 → B 的转授
  * 也随之不生效（无需额外回溯，见测试）。
@@ -226,51 +227,24 @@ function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
   return true;
 }
 
-/** 单轮推导：给定 grantId 撤销集合，产出 `authorized` 与 `revoked`（同源采纳判定） */
+/**
+ * 单轮推导：给定「被采纳 revoke 集合」`revokedGrantIds` 与「R-b 作者排除集合」
+ * `revokedIn`（上一轮输出的 `revoked`），产出 `authorized` 与 `revoked`。
+ * 两者都由**同一批被采纳 grant** 决定（F-A：只有被采纳的 grant 才清除吊销）。
+ */
 function deriveOnce(
   sorted: ParsedEntry[],
   bootstrap: ReadonlySet<string>,
   revokedGrantIds: ReadonlySet<string>,
+  revokedIn: ReadonlySet<string>,
 ): Authority {
-  // ---- 第 1 步：时间线种子吊销集合（含恢复），供第 2 步 R-b 过滤 ----
-  // 被撤销的 grantId 在本步永不采纳，因此无需处理 `namespace_revoke`（撤销集合已给定）。
-  const seedRevoked = new Set<string>();
-  const provisional = new Map<string, Set<string>>();
-  const seedGrants = new Map<string, Map<string, Set<string>>>(); // subject -> grantId -> ns
-  for (const entry of sorted) {
-    if (seedRevoked.has(entry.author)) continue; // R-b（时间线上）
-    if (entry.kind === 'grant' && entry.grant) {
-      const grantId = entry.grant.grantId;
-      if (revokedGrantIds.has(grantId)) continue; // 被撤销的 grantId 不能清除吊销（F-A）
-      const granted = namespacesOf(entry.grant);
-      if (!isAuthorizedFor(entry.author, granted, provisional, bootstrap)) continue; // R-a
-      let grants = seedGrants.get(entry.grant.subject);
-      if (!grants) {
-        grants = new Map();
-        seedGrants.set(entry.grant.subject, grants);
-      }
-      grants.set(grantId, granted);
-      let union = provisional.get(entry.grant.subject);
-      if (!union) {
-        union = new Set();
-        provisional.set(entry.grant.subject, union);
-      }
-      for (const ns of granted) union.add(ns);
-      seedRevoked.delete(entry.grant.subject); // 被采纳的 grant → 恢复
-    } else if (entry.kind === 'device' && entry.device) {
-      seedRevoked.add(entry.device.subject);
-      seedGrants.get(entry.device.subject)?.clear();
-      provisional.delete(entry.device.subject);
-    }
-  }
-
-  // ---- 第 2 步：权威授权（`authorized`），并记录被采纳的 grantId ----
+  // 权威授权：R-b（revokedIn）→ R-d（grantId 撤销）→ R-a
   const authorized = new Map<string, Set<string>>();
   const adoptedGrantIds = new Set<string>();
   for (const entry of sorted) {
-    if (seedRevoked.has(entry.author)) continue; // R-b（按最终候选集合过滤）
+    if (revokedIn.has(entry.author)) continue; // R-b：被吊销签发者的记录不采纳
     if (entry.kind !== 'grant' || !entry.grant) continue;
-    if (revokedGrantIds.has(entry.grant.grantId)) continue; // R-d
+    if (revokedGrantIds.has(entry.grant.grantId)) continue; // R-d：grantId 精确撤销
     const granted = namespacesOf(entry.grant);
     if (!isAuthorizedFor(entry.author, granted, authorized, bootstrap)) continue; // R-a
     adoptedGrantIds.add(entry.grant.grantId);
@@ -282,11 +256,11 @@ function deriveOnce(
     for (const ns of granted) set.add(ns);
   }
 
-  // ---- 第 3 步：重算吊销（同一批被采纳 grant + 有效 device_revoke）----
-  // 被采纳 grant 才能清除吊销 → 被撤销的 grantId 无法“恢复”（F-A）。
+  // 吊销：按逻辑序单遍、**在途吊销**决定 device_revoke 是否被采纳（互吊销逻辑序在先者胜）；
+  // 被采纳 grant 清除其主体的吊销（R-d 恢复）。
   const revoked = new Set<string>();
   for (const entry of sorted) {
-    if (revoked.has(entry.author)) continue; // R-b（时间线上）
+    if (revoked.has(entry.author)) continue; // R-b（在途）
     if (entry.kind === 'device' && entry.device) {
       revoked.add(entry.device.subject);
     } else if (entry.kind === 'grant' && entry.grant && adoptedGrantIds.has(entry.grant.grantId)) {
@@ -300,30 +274,25 @@ function deriveOnce(
   return { authorized: out, revoked };
 }
 
-/**
- * 比较两个「被采纳 revoke 集合」的保守程度：**集合越小越保守**（越少采纳 revoke，
- * 对 R-b 越安全：不会采纳被吊销签发者的 revoke）；同大小时按**字典序最小**兜底
- * （对排序后的 id 列表逐位比较）→ 完全确定，无关迭代顺序。
- */
-function compareRevokeSets(a: ReadonlySet<string>, b: ReadonlySet<string>): number {
-  if (a.size !== b.size) return a.size - b.size;
-  const av = [...a].sort();
-  const bv = [...b].sort();
-  for (let i = 0; i < av.length; i++) {
-    if (av[i] !== bv[i]) return av[i]! < bv[i]! ? -1 : 1;
+/** 由权威 `revoked` 过滤出应被采纳的 revoke（R-b：排除被吊销签发者发出的 revoke） */
+function filterRevokes(sorted: ParsedEntry[], revoked: ReadonlySet<string>): Set<string> {
+  const next = new Set<string>();
+  for (const entry of sorted) {
+    if (entry.kind === 'revoke' && entry.revoke && !revoked.has(entry.author)) {
+      next.add(entry.revoke.grantId);
+    }
   }
-  return 0;
+  return next;
 }
 
 /**
- * 推导入口：以「全部 revoke」为种子做**有界不动点**（见文件顶部说明）。
- * 每轮用权威 `revoked` 过滤掉被吊销签发者发出的 revoke（R-b），重新单轮推导，
- * 直到稳定或到达上限。
+ * 推导入口：**有界不动点**（见文件顶部说明）。未知量为「被采纳的 revoke 集合」`R`
+ * 与「R-b 作者排除集合」`revokedIn`（上一轮输出的 `revoked`）。种子取
+ * `R = ∅` 且 `revokedIn = ∅`：**天然 fail-closed**（绝不采纳被吊销签发者的 revoke），
+ * 随后迭代把「未被吊销签发者发出的 revoke」纳入。每轮迭代均由确定序驱动。
  *
- * **回退（fail-closed）**：未在 `maxIterations` 内收敛时，在已算出的各轮里选
- * 「被采纳 revoke 集合最小」的结果（对 R-b 最保守），而不是回到「全部 revoke 都
- * 采纳」的种子——后者正是被吊销者可以吊销他人的漏洞姿态。选择规则由
- * `compareRevokeSets`（越小越保守；并列取字典序最小）确定，故有界且确定。
+ * **终止与回退**：迭代上限 `maxIterations`；未收敛时回退到**综合 fail-closed** 结果
+ * （`revokedGrantIds=∅` 且 `revokedIn=各轮吊销并集`）——宁可少授权，也绝不放宽 R-b。
  */
 export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyOptions = {}): PolicyState {
   const bootstrap = new Set(options.policyIssuers ?? []);
@@ -331,13 +300,9 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
   // 排序唯一确定迭代顺序，保证同一输入在任何端得到同一结果。
   const sorted = [...entries].sort(compareEntries);
 
-  const allRevokeIds = new Set<string>();
-  for (const entry of sorted) {
-    if (entry.kind === 'revoke' && entry.revoke) allRevokeIds.add(entry.revoke.grantId);
-  }
-
-  let revokedGrantIds = allRevokeIds;
-  let current = deriveOnce(sorted, bootstrap, revokedGrantIds);
+  let revokedGrantIds = new Set<string>();
+  let revokedIn = new Set<string>();
+  let current = deriveOnce(sorted, bootstrap, revokedGrantIds, revokedIn);
   const rounds: Array<{ revokedGrantIds: Set<string>; state: Authority }> = [
     { revokedGrantIds, state: current },
   ];
@@ -346,27 +311,27 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
   let iterations = 0;
   while (iterations < maxIterations) {
     iterations += 1;
-    const next = new Set<string>();
-    for (const entry of sorted) {
-      // R-b：被吊销签发者发出的 namespace_revoke 不采纳（F-B）
-      if (entry.kind === 'revoke' && entry.revoke && !current.revoked.has(entry.author)) {
-        next.add(entry.revoke.grantId);
-      }
-    }
-    if (setsEqual(next, revokedGrantIds)) {
+    const nextRevokes = filterRevokes(sorted, current.revoked);
+    if (setsEqual(nextRevokes, revokedGrantIds) && setsEqual(current.revoked, revokedIn)) {
       converged = true;
       break;
     }
-    revokedGrantIds = next;
-    current = deriveOnce(sorted, bootstrap, revokedGrantIds);
+    revokedGrantIds = nextRevokes;
+    revokedIn = current.revoked;
+    current = deriveOnce(sorted, bootstrap, revokedGrantIds, revokedIn);
     rounds.push({ revokedGrantIds, state: current });
   }
 
-  const chosen = converged
-    ? current
-    : rounds.reduce((best, round) =>
-        compareRevokeSets(round.revokedGrantIds, best.revokedGrantIds) < 0 ? round : best,
-      ).state;
+  // 未收敛 → fail-closed 综合结果（比任何单轮都更保守，且确定）：
+  //  - `revokedGrantIds = ∅`：**不采纳任何 revoke**（对被吊销签发者的 revoke 最保守）；
+  //  - `revokedIn = 各轮出现过的吊销设备并集`：**排除所有曾判为吊销的设备**（对其 grant 也最保守）。
+  // 取舍：宁可少授权（含可能误伤有效 revoke/grant），也不放宽 R-b。
+  let chosen = current;
+  if (!converged) {
+    const fallbackRevoked = new Set<string>();
+    for (const round of rounds) for (const device of round.state.revoked) fallbackRevoked.add(device);
+    chosen = deriveOnce(sorted, bootstrap, new Set<string>(), fallbackRevoked);
+  }
 
   return { authorized: chosen.authorized, revoked: chosen.revoked, converged, iterations };
 }

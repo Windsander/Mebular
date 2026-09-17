@@ -56,6 +56,15 @@ async function connect(base, token) {
  * 走完整链路（真实与夹具共用）。cfg.peer/peerId 缺省时用 A 的 memory_status 值（夹具）。
  * @returns {Promise<object>} evidence
  */
+/**
+ * 跨端一致性口径按域（①）：只比双方**共同拥有**的分区哈希；无共同域视为不满足
+ * （避免空真，也避免两端合法持有不同分区时的全局哈希误报）。
+ */
+function commonDomainMatch(localByNs, peerByNs) {
+  const common = Object.keys(localByNs ?? {}).filter((ns) => peerByNs && Object.hasOwn(peerByNs, ns));
+  return { common, matched: common.length > 0 && common.every((ns) => localByNs[ns] === peerByNs[ns]) };
+}
+
 async function runChain(cfg, { requirePeerMatch = false } = {}) {
   const evidence = {
     generatedAt: new Date().toISOString(),
@@ -80,7 +89,7 @@ async function runChain(cfg, { requirePeerMatch = false } = {}) {
     evidence.relay = cfg.relay ?? null;
     evidence.mcpA = cfg.mcpA;
     evidence.mcpB = cfg.mcpB;
-    evidence.A = { deviceId: statusA0?.deviceId, peerId: statusA0?.peerId, listenAddrs: statusA0?.listenAddrs, relays: statusA0?.relays, nodeCount: statusA0?.nodeCount, stateHash: statusA0?.stateHash };
+    evidence.A = { deviceId: statusA0?.deviceId, peerId: statusA0?.peerId, listenAddrs: statusA0?.listenAddrs, relays: statusA0?.relays, nodeCount: statusA0?.nodeCount, stateHash: statusA0?.stateHash, stateHashByNamespace: statusA0?.stateHashByNamespace };
 
     // A 写入唯一标记
     const marker = `g6.6-cross-${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
@@ -110,11 +119,17 @@ async function runChain(cfg, { requirePeerMatch = false } = {}) {
     const statusA1 = structuredOf(await clientA.callTool({ name: 'memory_status', arguments: {} }));
     evidence.A.nodeCount = statusA1?.nodeCount;
     evidence.A.stateHash = statusA1?.stateHash;
+    evidence.A.stateHashByNamespace = statusA1?.stateHashByNamespace;
     evidence.B.nodeCount = statusB1?.nodeCount;
     evidence.B.stateHash = statusB1?.stateHash;
+    evidence.B.stateHashByNamespace = statusB1?.stateHashByNamespace;
     evidence.B.pendingEventCount = statusB1?.pendingEventCount;
     evidence.pendingEventCount = statusB1?.pendingEventCount;
+    // 全局哈希（兼容记录）；判据用「共同授权域」（①）
     evidence.stateMatches = Boolean(statusA1?.stateHash) && statusA1?.stateHash === statusB1?.stateHash;
+    const domain = commonDomainMatch(statusA1?.stateHashByNamespace, statusB1?.stateHashByNamespace);
+    evidence.commonDomains = domain.common;
+    evidence.stateMatchesCommon = domain.matched;
     evidence.identityShared = syncError === null && evidence.markerFound === true;
     if (syncError) evidence.syncError = syncError;
 
@@ -160,7 +175,7 @@ async function runReal() {
 
     log(`  A deviceId=${evidence.A.deviceId} nodeCount=${evidence.A.nodeCount} stateHash=${evidence.A.stateHash}`);
     log(`  B nodeCount=${evidence.B.nodeCount} stateHash=${evidence.B.stateHash} pendingEventCount=${evidence.B.pendingEventCount}`);
-    log(`  markerFound=${evidence.markerFound} stateMatches=${evidence.stateMatches} identityShared=${evidence.identityShared}`);
+    log(`  markerFound=${evidence.markerFound} stateMatchesCommon=${evidence.stateMatchesCommon} stateMatches=${evidence.stateMatches} identityShared=${evidence.identityShared}`);
     log(`  egress(local/peer)=${evidence.localEgress.ip ?? 'unknown'}/${config.peerEgress ?? 'unset'} basis=${evidence.differentPublicNetworkBasis}`);
     log(`  证据写入 ${config.out}`);
     if (verdict.passed) {
@@ -274,7 +289,7 @@ async function runSelftest() {
 
     log(`  A deviceId=${evidence.A.deviceId} nodeCount=${evidence.A.nodeCount} stateHash=${evidence.A.stateHash}`);
     log(`  B nodeCount=${evidence.B.nodeCount} stateHash=${evidence.B.stateHash} pendingEventCount=${evidence.B.pendingEventCount}`);
-    log(`  markerFound=${evidence.markerFound} stateMatches=${evidence.stateMatches} identityShared=${evidence.identityShared}`);
+    log(`  markerFound=${evidence.markerFound} stateMatchesCommon=${evidence.stateMatchesCommon} stateMatches=${evidence.stateMatches} identityShared=${evidence.identityShared}`);
     log(`  differentPublicNetwork=${evidence.differentPublicNetwork}（${evidence.differentPublicNetworkBasis}；环回预期不为 true）`);
     log(`  门禁判定 gatePassed=${gate.passed}（因无真实异网出口，应对 G6.6 判不达成）`);
     log(`  证据（non-evidence）：${out}`);

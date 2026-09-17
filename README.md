@@ -14,8 +14,8 @@ Mebular 把记忆存成一张带签名事件的知识图谱，每条事实都记
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-484%20passed-brightgreen)](#项目状态)
-[![Coverage](https://img.shields.io/badge/Coverage-91.9%25-brightgreen)](#项目状态)
+[![Tests](https://img.shields.io/badge/Tests-523%20passed-brightgreen)](#项目状态)
+[![Coverage](https://img.shields.io/badge/Coverage-92.4%25-brightgreen)](#项目状态)
 
 [官网](https://mebular.cyberfederal.io) · [快速上手](#30-秒上手) · [系统架构](#系统架构) · [项目状态](#项目状态) · [贡献](#贡献)
 
@@ -47,7 +47,7 @@ git clone https://github.com/Windsander/Mebular.git
 cd Mebular
 npm install
 npm run build          # TypeScript strict → dist/
-npm test               # 62 套件 / 484 用例全绿
+npm test               # 66 套件 / 523 用例全绿
 ```
 
 ### 最简例子（复制即跑）
@@ -163,9 +163,37 @@ node scripts/wan-sync.mjs cross --device-id device-B --user-master-key-file key.
 - **跨会话重复发送是预期行为**：水位只由 ack 与已确认快照推进、不看对端自报，因此对端已从别处获得、但本机没有 ack 记录的事件，可能被再发一次。方向安全（只多发、不缺发）；接收端按内容寻址 ID 幂等去重，重复事件**跳过验签与重放、但仍会 ack**，于是下次会话不再发（自愈）。`sync-completed.duplicates` 非零通常表示对端已从其他对端获得该数据，不是 bug；若 `duplicates` 接近 `sentEvents` 且量很大，多半是本机同步状态被重置/丢失过（参见 `resetPeerWatermarks`）。
 - **快照前提与回退保护**：初始快照**只发给自报分区水位为空的对端**（快照直接写入物化状态）；即便有此前提，接受侧也做回退保护——仅当本地缺失或快照版本时钟**严格更新**时才写入，旧快照不会回退本地更新的实体。放宽「只发空对端」这一前提之前，必须先让快照应用具备完整的冲突/合并语义。
 - **变更可订阅**：`sync-completed` 事件带 `appliedEventIds`，另有 `events-applied` 事件报告刚应用了哪些远端事件、涉及哪些分区，供常驻消费者判断「是否有我关心的新记忆」。
-- **push-on-write**（可选，默认关闭）：本地写入后向订阅相关分区的在线对端即时推送，带节流合并，避免写风暴；授权裁剪仍由会话内的 offer 计算兜底。
+- **写入即推（push-on-write）与反向 nudge（H）**：库/嵌入式默认**关闭**，常驻入口（serve/MCP）默认**开启**。本机为**发起方**角色时，本地写入后直接起一轮定向会话；本机为**响应方**角色时，在现有信道上发一个**无载荷**的 `sync-nudge`，请发起方立刻起一轮——于是**双向都实时**（不再受设备 ID 字典序限制）。50ms 节流合并、会话进行中忽略、同一对端同一时刻至多一个待处理触发；且只在「该分区对该对端**已授权**且确实有 pending」时才发（未授权不发）。
 
 保留策略约束：任何将来引入的自动事件裁剪，**必须排除尚未被所有已授权对端 ack 的事件**，否则对端将永久缺失该记忆、违背「所有记忆一致」。本期只固化此约束与测试，不实现裁剪。
+
+---
+
+## 同步触发时机
+
+同步**不是连接时的一次性动作**。三个触发点：
+
+| 触发点 | 行为 | 默认 | 可配项 |
+|---|---|---|---|
+| 连接即收敛 | 握手认证后自动跑一次双向会话 | `autoSync = true` | `sync.autoSync` |
+| 写入即推送 | 本地写入后向「订阅且已授权」的在线对端触发：发起方起会话、响应方发 `sync-nudge` | 库/嵌入式 **关**；常驻（serve/MCP）**开** | `sync.pushOnWrite`、`sync.pushOnWriteThrottleMs`（默认 50ms） |
+| 周期兜底（anti-entropy） | 每隔 5–15 分钟（±20% jitter）对在线、已授权、且确有 pending 的对端兜底同步；无 pending **短路跳过**；会话在途跳过；失败指数退避 | 库/嵌入式 **关**；常驻（serve/MCP）**开** | `sync.antiEntropy.{enabled, intervalMs, jitterRatio}` |
+
+**连接 ≠ 持续同步**：一次连接只保证一次收敛（在 `autoSync` 时）。之后的实时性来自「写入即推送」，长连兜底来自 anti-entropy。**实时性依赖常驻进程**——库/嵌入式形态默认关闭推送与兜底，需要显式开启或自行触发；只有常驻形态（`serve` / MCP）默认两者皆开。跨会话重复发送是预期行为（见上）。
+
+## 一致性口径
+
+- **授权域内必然全局收敛**：在双方共同授权（且实际传输）的分区集合内，任意两端最终收敛到同一图状态（事件内容寻址 + 向量时钟 + 确定性冲突裁决）。分区只改变「谁在何时收到哪些字节」与召回的组织方式，**不改变一致性模型本身**。
+- **跨端一致性自检只比共同授权域**：`status().stateHash` 是**全局**哈希——两个合法持有不同分区集合的设备全局哈希必然不同（不是 bug）。请改比 `status().stateHashByNamespace`（按分区的哈希），只对**双方共同拥有的域**逐一比较；域相同则与全局口径一致。`scripts/wan-sync.mjs` 已按此更新。
+
+## 去中心化口径
+
+- **政策模型**：授权由**链到用户主密钥**的设备签发；**引导期签发者**由 `sync.policyIssuers` 显式列出（可多台，缺省空）。**不可越权授予**——非引导签发者只能签发/撤销**自己当时已获授权**的 namespaces（"不能给出自己没有的"）；因此授权可**传递**（被授权者可转授），无需单一主设备在线。所谓"自授提权"（未被授权却给自己或他人签发）一律无效。
+- **吊销连坐**：签发者被吊销 → 它签发的政策记录**一律不再生效**（含其**历史** grant、以及它发出的 `device_revoke`）→ 被吊销设备既不能自复活、也不能吊销别人。
+- **确定性定序（不看墙钟）**：同一签发者内按单调序列；跨签发者按**逻辑时间** `sum(event.vectorClock)`；并发（互不因果）以 `(签发者, 内容寻址 id)` 兜底 → 完全确定、两端收敛一致（含 A/B 互吊销：逻辑序在先者胜）。
+- 保留命名空间 `__policy__` 对**所有已认证设备可读（含被吊销者）**，是为解开 bootstrap 与支持恢复所做的取舍；代价是授权图（谁能读什么、谁被吊销）对已入网设备可见。
+- **吊销是域收缩**：不回撤已经入图的数据，也无法强制远端停止；它阻止的是**后续摄入**（读侧 `[]` + 入站事件隔离 + 快照过滤）。
+- **已知取舍（需人工关注）**：`policyIssuers` 是**本地配置**，各端应保持一致；若两端对同一设备是否为引导签发者判断不同，可能对同一批记录得出不同结论。缺省为空时不放松默认拒绝（回退到 `sync.peerNamespacePolicy` 配置白名单作 bootstrap）。
 
 ---
 
@@ -203,8 +231,8 @@ Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API
 
 | 项目 | 情况 |
 |------|------|
-| 测试 | 62 个套件、484 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
-| 覆盖率 | 行 91.9%、分支 78.8%，全库门槛 85/65，关键文件另有底线 |
+| 测试 | 66 个套件、523 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
+| 覆盖率 | 行 92.4%、分支 79.1%，全库门槛 85/65，关键文件另有底线 |
 | 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |
 | 质量门禁 | 每个阶段跑 verify 脚本加构建产物冒烟，`src` 里不留裸的 `throw new Error` |

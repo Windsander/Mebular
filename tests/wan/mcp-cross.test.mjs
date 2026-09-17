@@ -74,6 +74,13 @@ describe('mcp-cross.judgeCrossEvidence', () => {
     expect(v.passed).toBe(true);
   });
 
+  it('① 一致性按域：优先 stateMatchesCommon（全局不同但共同域一致 → 通过）', () => {
+    // 两端合法持有不同分区集合：全局不同，但共同域一致 → 不应误报
+    expect(judgeCrossEvidence({ ...green, stateMatches: false, stateMatchesCommon: true }).passed).toBe(true);
+    // 共同域不一致 → 判失败，即使全局巧合相同
+    expect(judgeCrossEvidence({ ...green, stateMatches: true, stateMatchesCommon: false }).passed).toBe(false);
+  });
+
   it('缺字段（undefined）视为不达标', () => {
     const v = judgeCrossEvidence({});
     expect(v.passed).toBe(false);

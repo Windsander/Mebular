@@ -139,10 +139,17 @@ export interface MebularConfig {
      * 实现位（本期不实现）。
      */
     peerNamespacePolicy?: Record<string, string[]>;
-    /** 本地写入后向订阅对端即时推送（默认关闭，保持既有行为） */
+    /** 本地写入后向订阅对端即时推送（默认关闭，保持既有行为；常驻入口默认开启） */
     pushOnWrite?: boolean;
     /** push-on-write 节流窗口（ms，默认 50） */
     pushOnWriteThrottleMs?: number;
+    /** 周期 anti-entropy（C）：缺省关闭；常驻入口（serve/MCP）默认开启 */
+    antiEntropy?: { enabled?: boolean; intervalMs?: number; jitterRatio?: number };
+    /**
+     * 引导期策略签发者白名单（R-a，可多台）：列出的设备可为任意 namespace 签发。
+     * 未列出者只能在其自身已获授权范围内签发/撤销。缺省空。各端应保持一致。
+     */
+    policyIssuers?: string[];
   };
   /** 语义召回（G2，可选依赖；缺包降级关键词并告警） */
   semantic?: {
@@ -266,6 +273,7 @@ export class Mebular {
       this.graphPolicyImpl = new GraphNamespacePolicy({
         eventLog: this.eventLogImpl,
         userMasterPublicKey: this.identity.getUserMasterPublicKey(),
+        policyIssuers: this.config.sync?.policyIssuers,
       });
       this.namespacePolicyImpl = new CompositeNamespacePolicy([
         this.graphPolicyImpl,
@@ -287,6 +295,7 @@ export class Mebular {
         namespacePolicy: this.namespacePolicyImpl,
         pushOnWrite: this.config.sync?.pushOnWrite,
         pushOnWriteThrottleMs: this.config.sync?.pushOnWriteThrottleMs,
+        antiEntropy: this.config.sync?.antiEntropy,
         userMasterPublicKey: this.identity.getUserMasterPublicKey() ?? undefined,
         syncStatePath:
           this.config.sync?.syncStatePath ??

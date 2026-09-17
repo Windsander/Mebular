@@ -10,7 +10,7 @@ import type { VectorIndex } from './VectorIndex.js';
 import { ValidationError, ErrorCodes, MebularError, SyncError } from '../errors.js';
 import type { Node, TraverseOptions, TraverseResult } from '../types/index.js';
 import { matchesNamespace } from '../core/namespace.js';
-import { computeStateHash } from '../core/stateHash.js';
+import { computeStateHash, computeStateHashByNamespace } from '../core/stateHash.js';
 import { createBuiltinAdapterRegistry } from '../exchange/index.js';
 import type { AdapterImportReport, AdapterSource } from '../exchange/adapter.js';
 import type { SyncResult } from '../sync/syncmgr/SyncManager.js';
@@ -49,7 +49,10 @@ export interface MemoryStatus {
   relays: string[];
   nodeCount: number;
   edgeCount: number;
+  /** 全局状态哈希（兼容保留）；不同授权域的两端天然不同，跨端自检请比 `stateHashByNamespace` 的共同域 */
   stateHash: string;
+  /** 按分区的状态哈希（①）：跨端一致性自检只比共同授权域 */
+  stateHashByNamespace: Record<string, string>;
   atRest: boolean;
   semantic: boolean;
   /** 待发事件数（尚未送达对端的事件；源自 SyncManager.getSyncStatus().pendingCount） */
@@ -334,6 +337,7 @@ export class MemoryService {
       nodeCount: nodes.length,
       edgeCount: edges.length,
       stateHash: computeStateHash(nodes, edges),
+      stateHashByNamespace: computeStateHashByNamespace(nodes, edges),
       atRest: this.mebular.atRestEncryption,
       semantic: this.mebular.semanticVectorIndex !== null,
       pendingEventCount,

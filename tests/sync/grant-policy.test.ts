@@ -28,12 +28,16 @@ import {
 } from '../../src/sync/namespacePolicy.js';
 import {
   GraphNamespacePolicy,
+  derivePolicyState,
   POLICY_NAMESPACE,
   NAMESPACE_GRANT_EVENT,
   NAMESPACE_REVOKE_EVENT,
   DEVICE_REVOKE_EVENT,
   type NamespaceGrantRecord,
 } from '../../src/sync/grantPolicy.js';
+
+/** 纯函数入口的条目类型（F-C 类边界用 `derivePolicyState` 直接构造，不经生产类注入上限） */
+type PolicyEntry = Parameters<typeof derivePolicyState>[0][number];
 import { Mebular } from '../../src/mebular.js';
 import { IdentityManager } from '../../src/crypto/IdentityManager.js';
 import {
@@ -58,11 +62,45 @@ async function appendGrant(
   return grant;
 }
 
+/** 造一个链到给定主密钥的可信签发设备（同一用户的多台设备） */
+async function makeTrustedLog(
+  storage: MemoryStorage,
+  master: CryptoKeyPair,
+  deviceId: string,
+  options: { restore?: boolean } = {},
+): Promise<EventLog> {
+  const identity = await createTestIdentity(deviceId);
+  await issueCertificate(master.privateKey, identity);
+  const signer = {
+    deviceId,
+    privateKey: identity.identity.devicePrivateKey,
+    certificate: identity.identity.certificate,
+  };
+  // restore：合并存储中已有事件的时钟 → 之后 append 的事件在逻辑序上因果在后
+  return options.restore
+    ? EventLog.restore(storage, deviceId, { signer })
+    : new EventLog(storage, deviceId, { signer });
+}
+
+async function appendDeviceRevoke(
+  log: EventLog,
+  subject: string,
+  issuedAt: number,
+): Promise<void> {
+  await log.append({
+    type: DEVICE_REVOKE_EVENT,
+    data: { deviceRevoke: { subject, issuedAt } },
+    namespace: POLICY_NAMESPACE,
+  });
+}
+
 describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
   let master: CryptoKeyPair;
   let masterPub: Uint8Array;
   let storage: MemoryStorage;
   let trusted: EventLog;
+  let trusted2: EventLog;
+  let deviceX: EventLog;
   let outsider: EventLog;
   let noCert: EventLog;
   let policy: GraphNamespacePolicy;
@@ -100,7 +138,15 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
       signer: { deviceId: 'nocert', privateKey: noCertId.identity.devicePrivateKey },
     });
 
-    policy = new GraphNamespacePolicy({ eventLog: new EventLog(storage, 'reader'), userMasterPublicKey: masterPub });
+    trusted2 = await makeTrustedLog(storage, master, 'issuer2');
+    deviceX = await makeTrustedLog(storage, master, 'device-X');
+
+    // 引导期签发者：issuer（可为任意 namespace 签发）
+    policy = new GraphNamespacePolicy({
+      eventLog: new EventLog(storage, 'reader'),
+      userMasterPublicKey: masterPub,
+      policyIssuers: ['issuer'],
+    });
   });
 
   it('签发者的 grant 被采纳；多个 grant 取并集', async () => {
@@ -182,6 +228,342 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
     await appendGrant(trusted, 'device-B', ['nsA'], 4000);
     expect(await policy.getAuthorizedNamespaces('device-B')).toEqual(['nsA']);
   });
+
+  it('【洞1 red→green】未授权设备自授提权：grant(自己, nsX) 不得生效', async () => {
+    // device-X 是可信设备（证书链到主密钥），但未被授权任何分区、也不在引导白名单。
+    await appendGrant(deviceX, 'device-X', ['nsX'], 1000);
+    expect(await policy.getAuthorizedNamespaces('device-X')).toEqual([]);
+  });
+
+  it('【洞2 red→green】被吊销签发者的记录不再被采纳（含其历史 grant）', async () => {
+    await appendGrant(trusted, 'device-B', ['nsA'], 1000); // issuer 授 B
+    await trusted2.append({
+      type: DEVICE_REVOKE_EVENT,
+      data: { deviceRevoke: { subject: 'issuer', issuedAt: 2000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    // issuer 已被吊销 → 其历史 grant 失效
+    expect(await policy.getAuthorizedNamespaces('device-B')).toEqual([]);
+    expect([...(await policy.getRevokedDevices())]).toContain('issuer');
+  });
+
+  // ---- 多签发者与授权委托（R-a / R-b / R-c） ----
+
+  const policyWith = (issuers: string[]): GraphNamespacePolicy =>
+    new GraphNamespacePolicy({
+      eventLog: new EventLog(storage, 'reader'),
+      userMasterPublicKey: masterPub,
+      policyIssuers: issuers,
+    });
+
+  it('R-a 授权转授：已获授权的非引导设备可把权限转授出去（多签发者）', async () => {
+    await appendGrant(trusted, 'device-X', ['nsX'], 1000); // 引导签发者授 device-X
+    const xLog = await makeTrustedLog(storage, master, 'device-X', { restore: true }); // 因果在 issuer 之后
+    await appendGrant(xLog, 'device-B', ['nsX'], 2000); // device-X 转授
+    expect(await policyWith(['issuer']).getAuthorizedNamespaces('device-B')).toEqual(['nsX']);
+  });
+
+  it('R-a 引导白名单：白名单设备可为未被授权的 namespace 授权', async () => {
+    await appendGrant(deviceX, 'device-B', ['nsY'], 1000);
+    expect(await policyWith(['device-X']).getAuthorizedNamespaces('device-B')).toEqual(['nsY']);
+  });
+
+  it('R-a 越权转授：只能给出自己已有的 namespace', async () => {
+    await appendGrant(trusted, 'device-X', ['nsX'], 1000);
+    const xLog = await makeTrustedLog(storage, master, 'device-X', { restore: true });
+    await appendGrant(xLog, 'device-B', ['nsX'], 2000); // 合法
+    await appendGrant(xLog, 'device-B', ['nsY'], 3000); // 越权（device-X 没有 nsY）
+    expect(await policyWith(['issuer']).getAuthorizedNamespaces('device-B')).toEqual(['nsX']);
+  });
+
+  it('R-b 吊销连坐：被吊销签发者的 device_revoke 不再生效，也不能自复活', async () => {
+    await appendDeviceRevoke(trusted2, 'device-X', 1000); // 引导 issuer2 吊销 device-X
+    const xLog = await makeTrustedLog(storage, master, 'device-X', { restore: true }); // 因果在后
+    await appendDeviceRevoke(xLog, 'device-B', 2000); // device-X 已吊销 → 无效
+    await appendGrant(xLog, 'device-X', ['nsX'], 3000); // 自复活 → 无效
+    const p = policyWith(['issuer', 'issuer2']);
+    expect([...(await p.getRevokedDevices())].sort()).toEqual(['device-X']); // B 未被连带吊销
+    expect(await p.getAuthorizedNamespaces('device-X')).toEqual([]);
+  });
+
+  it('R-b 历史连坐（F-1）：被吊销者更早发出的 device_revoke 不生效', async () => {
+    const d0Log = await makeTrustedLog(storage, master, 'device-D0');
+    await appendDeviceRevoke(d0Log, 'device-D3', 1000); // D0（当时有效）吊销 D3
+    const d4Log = await makeTrustedLog(storage, master, 'device-D4', { restore: true });
+    await appendDeviceRevoke(d4Log, 'device-D0', 2000); // 之后 D4 吊销 D0
+    // D0 已被吊销 → 其**历史** device_revoke 不采纳 → D3 不应被连带吊销
+    expect([...(await policyWith(['issuer']).getRevokedDevices())].sort()).toEqual(['device-D0']);
+  });
+
+  it('device_revoke 自吊销不采纳（语义未定义，吊销须由其他设备发起）', async () => {
+    const d0Log = await makeTrustedLog(storage, master, 'device-D0');
+    await appendDeviceRevoke(d0Log, 'device-D0', 1000); // 自指
+    expect([...(await policyWith(['issuer']).getRevokedDevices())]).not.toContain('device-D0');
+  });
+
+  it('R-b 互吊销：逻辑序在先者胜，结果确定且与写入顺序无关', async () => {
+    const build = async (order: 'ab' | 'ba'): Promise<string[]> => {
+      const s = new MemoryStorage();
+      const aLog = await makeTrustedLog(s, master, 'issuer');
+      const bLog = await makeTrustedLog(s, master, 'issuer2');
+      const revoke = (log: EventLog, subject: string) => appendDeviceRevoke(log, subject, 1);
+      if (order === 'ab') {
+        await revoke(aLog, 'issuer2');
+        await revoke(bLog, 'issuer');
+      } else {
+        await revoke(bLog, 'issuer');
+        await revoke(aLog, 'issuer2');
+      }
+      const p = new GraphNamespacePolicy({
+        eventLog: new EventLog(s, 'reader'),
+        userMasterPublicKey: masterPub,
+        policyIssuers: ['issuer', 'issuer2'],
+      });
+      return [...(await p.getRevokedDevices())].sort();
+    };
+    const ab = await build('ab');
+    const ba = await build('ba');
+    expect(ab).toEqual(ba); // 与写入顺序无关
+    // ('issuer' < 'issuer2') 逻辑时间相同 → author 兜底：issuer 先处理 → issuer2 被吊销，
+    // 而 issuer2 对 issuer 的吊销记录因其本人已吊销而不被采纳。
+    expect(ab).toEqual(['issuer2']);
+  });
+
+  it('R-c 时钟偏移：跨签发者按逻辑时间定序，不看墙钟', async () => {
+    // issuer 授 device-B（issuedAt 9999）；issuer2 吊销 device-B（issuedAt 1）但**因果在后**
+    await appendGrant(trusted, 'device-B', ['nsX'], 9999);
+    const bLog = await makeTrustedLog(storage, master, 'issuer2', { restore: true });
+    await appendDeviceRevoke(bLog, 'device-B', 1);
+    const p = policyWith(['issuer', 'issuer2']);
+    // 若按墙钟：revoke(1) 排在 grant(9999) 之前 → 不吊销；按逻辑序：revoke 在后 → 吊销
+    expect(await p.getAuthorizedNamespaces('device-B')).toEqual([]);
+    expect([...(await p.getRevokedDevices())]).toContain('device-B');
+  });
+
+  it('F-A：被 namespace_revoke 撤销过的 grantId 不能用来清除吊销状态', async () => {
+    const g1 = await appendGrant(trusted, 'device-D', ['nsA'], 1000); // g1
+    await trusted.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke: { grantId: g1.grantId, subject: 'device-D', issuedAt: 2000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    await appendDeviceRevoke(trusted, 'device-D', 3000); // 吊销 D
+    // 复用已被撤销的 g1 为 D 再授予
+    await trusted.append({
+      type: NAMESPACE_GRANT_EVENT,
+      data: { grant: { ...g1, namespaces: ['nsA'], issuedAt: 4000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    const p = policyWith(['issuer']);
+    // D 必须仍在吊销集合里（当前实现会把它错误清除）
+    expect([...(await p.getRevokedDevices())]).toContain('device-D');
+    expect(await p.getAuthorizedNamespaces('device-D')).toEqual([]);
+
+    // R-b 仍生效：D 发出的 device_revoke 不被采纳
+    const dLog = await makeTrustedLog(storage, master, 'device-D', { restore: true });
+    await appendDeviceRevoke(dLog, 'device-E', 5000);
+    expect([...(await p.getRevokedDevices())]).not.toContain('device-E');
+  });
+
+  it('F-A 正例：全新 grantId 的有效授权仍可正常恢复被吊销设备', async () => {
+    await appendGrant(trusted, 'device-D', ['nsA'], 1000);
+    await appendDeviceRevoke(trusted, 'device-D', 2000);
+    expect([...(await policyWith(['issuer']).getRevokedDevices())]).toContain('device-D');
+
+    await appendGrant(trusted, 'device-D', ['nsA'], 3000); // 全新 grantId
+    const p = policyWith(['issuer']);
+    expect([...(await p.getRevokedDevices())]).not.toContain('device-D');
+    expect(await p.getAuthorizedNamespaces('device-D')).toEqual(['nsA']);
+  });
+
+  it('F-B：被吊销签发者发出的 namespace_revoke 不得生效（R-b）', async () => {
+    const g = await appendGrant(trusted, 'device-B', ['nsA'], 1000); // 有效授权
+    await appendDeviceRevoke(trusted, 'device-D', 2000); // 吊销 D
+    const dLog = await makeTrustedLog(storage, master, 'device-D', { restore: true });
+    await dLog.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke: { grantId: g.grantId, subject: 'device-B', issuedAt: 3000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    // D 已被吊销 → 它发出的 revoke 不采纳：B 的授权仍在
+    expect(await policyWith(['issuer']).getAuthorizedNamespaces('device-B')).toEqual(['nsA']);
+  });
+
+  it('F-B 正例：有效签发者的 namespace_revoke 仍生效', async () => {
+    const g = await appendGrant(trusted, 'device-B', ['nsA'], 1000);
+    await trusted.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke: { grantId: g.grantId, subject: 'device-B', issuedAt: 2000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    expect(await policyWith(['issuer']).getAuthorizedNamespaces('device-B')).toEqual([]);
+  });
+
+  it('F-B 确定性：条目顺序打乱不影响结果（含被吊销者的 revoke）；重复读稳定', async () => {
+    // 用同一批（签名/向量时钟固定）事件，按不同顺序写入两个存储
+    const src = new MemoryStorage();
+    const issuerLog = await makeTrustedLog(src, master, 'issuer');
+    const issuer2Log = await makeTrustedLog(src, master, 'issuer2');
+    const g = await appendGrant(issuerLog, 'device-B', ['nsA'], 1000);
+    await appendDeviceRevoke(issuerLog, 'device-D', 2000);
+    const dLog = await makeTrustedLog(src, master, 'device-D', { restore: true });
+    await dLog.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke: { grantId: g.grantId, subject: 'device-B', issuedAt: 3000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    await appendDeviceRevoke(issuer2Log, 'device-E', 4000);
+    const events = await src.listEvents();
+
+    const build = async (list: typeof events): Promise<GraphNamespacePolicy> => {
+      const s = new MemoryStorage();
+      for (const e of list) await s.putEvent(e);
+      return new GraphNamespacePolicy({
+        eventLog: new EventLog(s, 'reader'),
+        userMasterPublicKey: masterPub,
+        policyIssuers: ['issuer', 'issuer2'],
+      });
+    };
+    const p1 = await build(events);
+    const p2 = await build([...events].reverse());
+    const snap = async (p: GraphNamespacePolicy) => ({
+      b: await p.getAuthorizedNamespaces('device-B'),
+      revoked: [...(await p.getRevokedDevices())].sort(),
+    });
+    const r1 = await snap(p1);
+    expect(await snap(p2)).toEqual(r1); // 顺序无关
+    expect(await snap(p1)).toEqual(r1); // 重复读稳定（不动点不振荡）
+    // 被吊销者 D 的 revoke 不生效：B 仍授权
+    expect(r1.b).toEqual(['nsA']);
+  });
+
+  it('强级联确认：A 被吊销 → B 失去授权 → B 转授给 C 的那条也不生效（R-a 已足够）', async () => {
+    await appendGrant(trusted, 'device-B', ['nsX'], 1000); // A=issuer 授 B
+    const bLog = await makeTrustedLog(storage, master, 'device-B', { restore: true }); // 因果在后
+    await appendGrant(bLog, 'device-C', ['nsX'], 2000); // B 转授 C
+    expect(await policyWith(['issuer']).getAuthorizedNamespaces('device-C')).toEqual(['nsX']);
+
+    await appendDeviceRevoke(trusted2, 'issuer', 3000); // A 被 issuer2 吊销
+    const p = policyWith(['issuer', 'issuer2']);
+    expect(await p.getAuthorizedNamespaces('device-B')).toEqual([]);
+    expect(await p.getAuthorizedNamespaces('device-C')).toEqual([]); // 级联生效
+  });
+
+  it('F-C：上限内未收敛回退时，被吊销签发者的 revoke 仍不生效（R-b 字面成立）', () => {
+    const entries: PolicyEntry[] = [
+      { kind: 'grant', author: 'issuer', seq: 1, logical: 1, id: 'e1', grant: { grantId: 'g1', subject: 'device-B', namespaces: ['nsA'], issuedAt: 1000 } },
+      { kind: 'device', author: 'issuer', seq: 2, logical: 2, id: 'e2', device: { subject: 'device-D', issuedAt: 2000 } },
+      { kind: 'revoke', author: 'device-D', seq: 1, logical: 3, id: 'e3', revoke: { grantId: 'g1', issuedAt: 3000 } },
+    ];
+    // 上限 1 → 必然落入回退路径
+    const state = derivePolicyState(entries, { policyIssuers: ['issuer'], maxIterations: 1 });
+    expect(state.converged).toBe(false); // 诊断可见
+    // D 已被吊销 → 其 revoke 在回退中也不采纳 → B 仍授权
+    expect(state.authorized.get('device-B')).toEqual(['nsA']);
+  });
+
+  it('F-C 诊断：正常输入 converged=true 且 iterations≥1', async () => {
+    await appendGrant(trusted, 'device-B', ['nsA'], 1000);
+    const state = await policyWith(['issuer']).snapshot();
+    expect(state.converged).toBe(true);
+    expect(state.iterations).toBeGreaterThanOrEqual(1);
+  });
+
+  it('F-C 回退综合：撤销轴也保守——采纳非排除签发者的有效 revoke', () => {
+    const entries: PolicyEntry[] = [
+      { kind: 'grant', author: 'issuer', seq: 1, logical: 1, id: 'e1', grant: { grantId: 'g1', subject: 'device-B', namespaces: ['nsA'], issuedAt: 1000 } },
+      { kind: 'revoke', author: 'issuer', seq: 2, logical: 2, id: 'e2', revoke: { grantId: 'g1', issuedAt: 2000 } },
+      { kind: 'device', author: 'issuer', seq: 3, logical: 3, id: 'e3', device: { subject: 'device-C', issuedAt: 3000 } },
+    ];
+    const state = derivePolicyState(entries, { policyIssuers: ['issuer'], maxIterations: 1 });
+    expect(state.converged).toBe(false);
+    // issuer 不在排除集 → 其 revoke 在回退中被采纳 → B 不授权（旧语义会保留 B）
+    expect(state.authorized.get('device-B') ?? []).toEqual([]);
+  });
+
+  it('F-C 回退：有效 revoke 生效、被排除签发者的 revoke 不生效（R-b 保护）', () => {
+    const entries: PolicyEntry[] = [
+      { kind: 'grant', author: 'issuer', seq: 1, logical: 1, id: 'e1', grant: { grantId: 'g1', subject: 'device-B', namespaces: ['nsA'], issuedAt: 1000 } },
+      { kind: 'grant', author: 'issuer', seq: 2, logical: 2, id: 'e2', grant: { grantId: 'g2', subject: 'device-C', namespaces: ['nsB'], issuedAt: 1100 } },
+      { kind: 'device', author: 'issuer', seq: 3, logical: 3, id: 'e3', device: { subject: 'device-D', issuedAt: 2000 } },
+      { kind: 'revoke', author: 'device-D', seq: 1, logical: 4, id: 'e4', revoke: { grantId: 'g1', issuedAt: 3000 } },
+      { kind: 'revoke', author: 'issuer', seq: 4, logical: 5, id: 'e5', revoke: { grantId: 'g2', issuedAt: 3100 } },
+    ];
+    const state = derivePolicyState(entries, { policyIssuers: ['issuer'], maxIterations: 1 });
+    expect(state.converged).toBe(false);
+    expect(state.authorized.get('device-B')).toEqual(['nsA']); // D 被吊销 → 其 revoke 不采纳
+    expect(state.authorized.get('device-C') ?? []).toEqual([]); // issuer 的 revoke 采纳
+  });
+
+  it('F-C 回退综合：设备本会因 grant 而恢复（排除曾判吊销的签发者）', () => {
+    // device-V 吊销引导签发者 device-G；device-R 吊销 device-V；device-G 再授 device-V。
+    // 收敛到第 3 轮时 G 不在吊销集 → G 的 grant 会**恢复** V；上限 2 于第 2 轮截断 →
+    // 回退排除曾判吊销的 G（其 grant 不采纳）→ V 仍被吊销。
+    const entries: PolicyEntry[] = [
+      { kind: 'device', author: 'device-V', seq: 1, logical: 1, id: 'e1', device: { subject: 'device-G', issuedAt: 1000 } },
+      { kind: 'device', author: 'device-R', seq: 1, logical: 2, id: 'e2', device: { subject: 'device-V', issuedAt: 2000 } },
+      { kind: 'grant', author: 'device-G', seq: 1, logical: 3, id: 'e3', grant: { grantId: 'g1', subject: 'device-V', namespaces: ['nsB'], issuedAt: 3000 } },
+    ];
+    const state = derivePolicyState(entries, { policyIssuers: ['device-G'], maxIterations: 2 });
+    expect(state.converged).toBe(false);
+    // 屏蔽回退时 V 会恢复（revoked 不含 V、且授权 ['nsB']）；回退下 V 仍被吊销、无授权。
+    expect([...state.revoked]).toContain('device-V');
+    expect(state.authorized.get('device-V') ?? []).toEqual([]);
+  });
+
+  it('F-C 回退闭包：输出 revoked 里设备的记录不被采纳（R-b 字面成立）', () => {
+    // 主迭代在 r0..r2 之间振荡（不收敛）→ 回退。回退闭包把「自身输出里被吊销的 d2」加入排除集，
+    // 故 d2 的 grant（gB→d4）不再采纳 → d4 不被授权。单趟回退（无闭包）会错误授权 d4。
+    const gB = 'g-b';
+    const entries: PolicyEntry[] = [
+      { kind: 'device', author: 'd3', seq: 1, logical: 1, id: 'e1', device: { subject: 'd2', issuedAt: 1 } },
+      { kind: 'grant', author: 'd4', seq: 1, logical: 2, id: 'e2', grant: { grantId: 'g-a', subject: 'd2', namespaces: ['nA'], issuedAt: 2 } },
+      { kind: 'device', author: 'd2', seq: 1, logical: 3, id: 'e3', device: { subject: 'd4', issuedAt: 3 } },
+      { kind: 'grant', author: 'd2', seq: 2, logical: 4, id: 'e4', grant: { grantId: gB, subject: 'd4', namespaces: ['nB'], issuedAt: 4 } },
+      { kind: 'grant', author: 'd5', seq: 1, logical: 5, id: 'e5', grant: { grantId: 'g-c', subject: 'd2', namespaces: ['nA'], issuedAt: 5 } },
+      { kind: 'device', author: 'd4', seq: 2, logical: 6, id: 'e6', device: { subject: 'd5', issuedAt: 6 } },
+      { kind: 'revoke', author: 'd4', seq: 3, logical: 7, id: 'e7', revoke: { grantId: gB, issuedAt: 7 } },
+    ];
+    const state = derivePolicyState(entries, { policyIssuers: ['d2', 'd4', 'd5'], maxIterations: 2 });
+    expect(state.converged).toBe(false);
+    expect([...state.revoked]).toContain('d2');
+    // d2 ∈ 输出 revoked → 其记录（含 grant gB→d4）不采纳 → d4 不被授权
+    expect(state.authorized.get('d4') ?? []).toEqual([]);
+  });
+
+  it('迭代上限是输入的纯函数：7 条记录需 9 轮收敛（旧常量 8 会误入回退）', () => {
+    const entries: PolicyEntry[] = [
+      { kind: 'device', author: 'd5', seq: 1, logical: 1, id: 'e1', device: { subject: 'd0', issuedAt: 1 } },
+      { kind: 'device', author: 'd2', seq: 1, logical: 2, id: 'e2', device: { subject: 'd6', issuedAt: 2 } },
+      { kind: 'device', author: 'd1', seq: 1, logical: 3, id: 'e3', device: { subject: 'd3', issuedAt: 3 } },
+      { kind: 'device', author: 'd2', seq: 2, logical: 4, id: 'e4', device: { subject: 'd5', issuedAt: 4 } },
+      { kind: 'device', author: 'd6', seq: 1, logical: 5, id: 'e5', device: { subject: 'd2', issuedAt: 5 } },
+      { kind: 'device', author: 'd0', seq: 1, logical: 6, id: 'e6', device: { subject: 'd1', issuedAt: 6 } },
+      { kind: 'device', author: 'd3', seq: 1, logical: 7, id: 'e7', device: { subject: 'd2', issuedAt: 7 } },
+    ];
+    const bootstrap = ['d0', 'd4', 'd5'];
+    // 默认上限 = 2·7+2 = 16 ≥ 9 → 收敛
+    const state = derivePolicyState(entries, { policyIssuers: bootstrap });
+    expect(state.converged).toBe(true);
+    expect(state.iterations).toBeGreaterThan(8);
+    // 旧常量 8 会截断 → 误入回退（对照）
+    expect(derivePolicyState(entries, { policyIssuers: bootstrap, maxIterations: 8 }).converged).toBe(false);
+  });
+
+  it('未被授权但未被吊销的 namespace_revoke 仍被采纳（有意语义：撤销只受 R-b 约束）', async () => {
+    const g = await appendGrant(trusted, 'device-B', ['nsA'], 1000);
+    await deviceX.append({
+      type: NAMESPACE_REVOKE_EVENT,
+      data: { revoke: { grantId: g.grantId, subject: 'device-B', issuedAt: 2000 } },
+      namespace: POLICY_NAMESPACE,
+    });
+    expect(await policyWith(['issuer']).getAuthorizedNamespaces('device-B')).toEqual([]);
+  });
+
+  it('未被授权但未被吊销的 device_revoke 仍被采纳（有意语义：吊销只受 R-b 约束）', async () => {
+    await appendDeviceRevoke(deviceX, 'device-B', 1000);
+    expect([...(await policyWith(['issuer']).getRevokedDevices())]).toContain('device-B');
+  });
 });
 
 describe('CompositeNamespacePolicy（图上 ∪ 配置；吊销优先）', () => {
@@ -214,11 +596,14 @@ interface TestDevice {
   peerId: PeerId;
 }
 
+/** 端到端夹具里所有设备都可作引导签发者（这些用例关注吊销/水位/快照，不关注越权边界） */
+const E2E_POLICY_ISSUERS = ['device-A', 'device-B', 'device-C', 'device-D'];
+
 async function createDevice(
   deviceId: string,
   master: CryptoKeyPair,
   masterPub: Uint8Array,
-  options: { snapshotThreshold?: number } = {},
+  options: { snapshotThreshold?: number; policyIssuers?: string[] } = {},
 ): Promise<TestDevice> {
   const identity = await createTestIdentity(deviceId);
   const certificate = await issueCertificate(master.privateKey, identity);
@@ -230,7 +615,11 @@ async function createDevice(
   const storage = new MemoryStorage();
   const eventLog = new EventLog(storage, deviceId, { signer });
   const store = new GraphStore({ storage, author: deviceId, eventLog });
-  const policy = new GraphNamespacePolicy({ eventLog, userMasterPublicKey: masterPub });
+  const policy = new GraphNamespacePolicy({
+    eventLog,
+    userMasterPublicKey: masterPub,
+    policyIssuers: options.policyIssuers ?? E2E_POLICY_ISSUERS,
+  });
   const syncManager = new SyncManager({
     eventLog,
     storage,
@@ -414,7 +803,8 @@ describe('Mebular facade：grant/revoke 记录与审计入口', () => {
       storagePath: join(dir, 'a.jsonl'),
       deviceId: 'device-A',
       encryption: masterKeys,
-      sync: { autoSync: false },
+      // 引导期签发者：本机（device-A）可签发
+      sync: { autoSync: false, policyIssuers: ['device-A'] },
     });
     await a.initialize();
 

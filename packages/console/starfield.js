@@ -45,6 +45,10 @@ const COLORS = {
   warning: '#d55e00',
 };
 
+function hsla(h, s, l, alpha) {
+  return `hsla(${h},${s}%,${l}%,${alpha})`;
+}
+
 function rgba(hex, alpha) {
   const n = parseInt(String(hex).replace('#', ''), 16);
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
@@ -119,6 +123,7 @@ export class StarStage {
       nodes: Array.isArray(scene?.nodes) ? scene.nodes : [],
       edges: Array.isArray(scene?.edges) ? scene.edges : [],
     };
+    this.selfId = this.scene.nodes.find((n) => n.self)?.id ?? null;
     this._layout();
     if (!this.running || this.reducedMotion) this._draw(performance.now() / 1000);
   }
@@ -332,8 +337,11 @@ export class StarStage {
       const depth = this.depths.get(id) ?? 0.6;
       const px = animate ? mx * this.width * 0.07 * depth : 0;
       const py = animate ? my * this.height * 0.06 * depth : 0;
+      // 本机几乎不随波浮动（太出戏）；对端保留轻微漂浮
+      const isSelf = this.selfId && id === this.selfId;
+      const bobAmp = isSelf ? 0.7 : (1.5 + depth * 4.5);
       const bob = animate
-        ? Math.sin(time * (0.35 + depth * 0.45) + depth * 6.283) * (1.5 + depth * 4.5)
+        ? Math.sin(time * (0.35 + depth * 0.45) + depth * 6.283) * bobAmp
         : 0;
       screen.set(id, { x: pos.x + px, y: pos.y + py + bob, depth });
     }
@@ -443,18 +451,44 @@ export class StarStage {
     };
   }
 
-  /** 触发一次“舰队出航”（同步完成/手动同步时调用） */
+  /** 触发一次“舰队出航”（同步完成/手动同步时调用）；编队随机，稀有彩蛋 */
   launchFleet(fromId, toId, options = {}) {
     if (this.reducedMotion || fromId === toId) return;
     const kind = options.kind === 'theirs' ? 'theirs' : 'mine';
     const g = this._laneGeometry({ from: fromId, to: toId, kind, online: true, revoked: false, pending: 0 });
     if (!g) return;
+
+    // 彩蛋：2% 彗星、5% 彩虹信使、8% 旗舰；其余常规编队
+    const roll = Math.random();
+    const egg = roll < 0.02 ? 'comet' : roll < 0.07 ? 'rainbow' : roll < 0.15 ? 'flagship' : null;
+    const count = egg === 'comet'
+      ? 1
+      : Math.max(2, Math.min(6, options.ships ?? 2 + Math.floor(Math.random() * 5)));
+    const formation = ['line', 'wedge', 'scatter'][Math.floor(Math.random() * 3)];
+
+    const ships = Array.from({ length: count }, (_, i) => {
+      let lat;
+      if (formation === 'line') lat = (i - (count - 1) / 2) * 7.5;
+      else if (formation === 'wedge') lat = (i - (count - 1) / 2) * 11;
+      else lat = (Math.random() * 2 - 1) * 18;
+      return {
+        stagger: i * (formation === 'wedge' ? 0.045 : 0.075) * (0.8 + Math.random() * 0.4),
+        lat,
+        wiggle: Math.random() * Math.PI * 2,
+        durFactor: 0.9 + Math.random() * 0.2,
+        size: 0.85 + Math.random() * 0.4,
+        hue: (i * 47) % 360,
+      };
+    });
+
     this.fleets.push({
       geometry: g,
       kind,
+      egg,
+      formation,
       startedAt: performance.now(),
-      duration: 1700,
-      ships: Math.max(2, Math.min(5, options.ships ?? 4)),
+      duration: (egg === 'comet' ? 1150 : 1700) * (0.92 + Math.random() * 0.16),
+      ships,
     });
     if (this.fleets.length > 8) this.fleets.splice(0, this.fleets.length - 8);
   }
@@ -532,7 +566,7 @@ export class StarStage {
     }
   }
 
-  /** 舰队：沿航道出航的小编队；抵达后绽放，随后消失 */
+  /** 舰队：随机编队沿航道出航；旗舰/彩虹信使/彗星为稀有彩蛋；抵达后绽放 */
   _drawFleets(time) {
     if (this.fleets.length === 0) return;
     const ctx = this.ctx;
@@ -540,67 +574,93 @@ export class StarStage {
     for (const fleet of this.fleets) {
       const elapsed = now - fleet.startedAt;
       const g = fleet.geometry;
-      const color = fleet.kind === 'theirs' ? COLORS.theirs : COLORS.mine;
+      const baseColor = fleet.kind === 'theirs' ? COLORS.theirs : COLORS.mine;
+      const flagship = fleet.egg === 'flagship';
       const norm = { x: -(g.ey - g.sy), y: g.ex - g.sx };
       const nlen = Math.hypot(norm.x, norm.y) || 1;
       norm.x /= nlen;
       norm.y /= nlen;
 
-      const offsets = [-9, -3, 3, 9];
-      for (let i = 0; i < fleet.ships; i += 1) {
-        const stagger = i * 0.09;
-        const p = (elapsed / fleet.duration - stagger) / (1 - 0.09 * (fleet.ships - 1));
+      for (const ship of fleet.ships) {
+        const dur = fleet.duration * ship.durFactor;
+        const p = (elapsed / dur - ship.stagger) / (1 - 0.09 * (fleet.ships.length - 1));
         if (p <= 0 || p > 1.02) continue;
-        const pos = this._bezierAt(g, Math.min(1, p));
-        const tan = this._bezierTangent(g, Math.min(1, p));
+        const pc = Math.min(1, p);
+        const pos = this._bezierAt(g, pc);
+        const tan = this._bezierTangent(g, pc);
         const ang = Math.atan2(tan.y, tan.x);
-        const lat = offsets[i % offsets.length] * (1 - p * 0.25) * 0.7;
+        // 编队横向错位 + 轻微蛇形摆动（随机相位）
+        const lat = ship.lat * (1 - pc * 0.25) * 0.7 + Math.sin(pc * 9 + ship.wiggle) * 2.2;
         const px = pos.x + norm.x * lat;
         const py = pos.y + norm.y * lat;
 
-        // 尾迹
-        const tail = this._bezierAt(g, Math.max(0, p - 0.05));
+        const swim = fleet.egg === 'rainbow';
+        const paint = (alpha) => (swim
+          ? hsla((now / 7 + ship.hue) % 360, 85, 70, alpha)
+          : fleet.egg === 'comet'
+            ? `rgba(223,242,255,${alpha})`
+            : rgba(baseColor, alpha));
+
+        // 尾迹（彗星最长、旗舰更亮）
+        const tailLen = fleet.egg === 'comet' ? 0.14 : flagship ? 0.08 : 0.05;
+        const tail = this._bezierAt(g, Math.max(0, pc - tailLen));
         ctx.beginPath();
         ctx.moveTo(tail.x + norm.x * lat, tail.y + norm.y * lat);
         ctx.lineTo(px, py);
-        ctx.strokeStyle = rgba(color, 0.35 * (1 - p * 0.5));
-        ctx.lineWidth = 1.4;
+        ctx.strokeStyle = paint(0.38 * (1 - pc * 0.5));
+        ctx.lineWidth = flagship ? 2.2 : fleet.egg === 'comet' ? 2 : 1.4;
         ctx.stroke();
 
-        // 舰体：细长三角，朝向航向
+        // 舰体
+        const scale = ship.size * (flagship ? 1.6 : 1) * (fleet.egg === 'comet' ? 1.35 : 1);
         ctx.save();
         ctx.translate(px, py);
         ctx.rotate(ang);
-        ctx.fillStyle = rgba(color, 0.95);
+        ctx.fillStyle = paint(0.95);
         ctx.beginPath();
-        ctx.moveTo(5.2, 0);
-        ctx.lineTo(-2.6, -1.9);
-        ctx.lineTo(-1.2, 0);
-        ctx.lineTo(-2.6, 1.9);
+        ctx.moveTo(5.2 * scale, 0);
+        ctx.lineTo(-2.6 * scale, -1.9 * scale);
+        ctx.lineTo(-1.2 * scale, 0);
+        ctx.lineTo(-2.6 * scale, 1.9 * scale);
         ctx.closePath();
         ctx.fill();
+        if (flagship) {
+          ctx.beginPath();
+          ctx.arc(0, 0, 1.6, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(255,255,255,0.9)';
+          ctx.fill();
+        }
         ctx.restore();
       }
 
-      // 抵达绽放
-      const bp = (elapsed - fleet.duration) / 420;
+      // 抵达绽放（旗舰双环 + 更大；彗星短促闪光）
+      const bloomWindow = fleet.egg === 'comet' ? 300 : 420;
+      const bp = (elapsed - fleet.duration) / bloomWindow;
       if (bp > 0 && bp < 1) {
-        const radius = 5 + bp * 16;
+        const big = fleet.egg === 'comet' ? 1.4 : flagship ? 1.5 : 1;
+        const radius = (5 + bp * 16) * big;
         ctx.beginPath();
         ctx.arc(g.ex, g.ey, radius, 0, Math.PI * 2);
-        ctx.strokeStyle = rgba(color, 0.7 * (1 - bp));
-        ctx.lineWidth = 1.6;
+        ctx.strokeStyle = rgba(baseColor, 0.7 * (1 - bp));
+        ctx.lineWidth = flagship ? 2.2 : 1.6;
         ctx.stroke();
+        if (flagship) {
+          ctx.beginPath();
+          ctx.arc(g.ex, g.ey, radius * 1.5, 0, Math.PI * 2);
+          ctx.strokeStyle = rgba(baseColor, 0.35 * (1 - bp));
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
         const bloom = ctx.createRadialGradient(g.ex, g.ey, 0, g.ex, g.ey, radius * 1.6);
-        bloom.addColorStop(0, rgba(color, 0.35 * (1 - bp)));
-        bloom.addColorStop(1, rgba(color, 0));
+        bloom.addColorStop(0, rgba(baseColor, (fleet.egg === 'comet' ? 0.5 : 0.35) * (1 - bp)));
+        bloom.addColorStop(1, rgba(baseColor, 0));
         ctx.fillStyle = bloom;
         ctx.beginPath();
         ctx.arc(g.ex, g.ey, radius * 1.6, 0, Math.PI * 2);
         ctx.fill();
       }
     }
-    this.fleets = this.fleets.filter((f) => now - f.startedAt < f.duration + 600);
+    this.fleets = this.fleets.filter((f) => now - f.startedAt < f.duration + 700);
   }
 
   _drawNodes(time) {
@@ -722,7 +782,9 @@ export class StarStage {
 function drawSelfBeacon(ctx, x, y, radius, time, reducedMotion, online) {
   const t = reducedMotion ? 0 : time;
   const spin = t * 0.1;
-  const shimmer = reducedMotion ? 1 : 0.92 + 0.08 * Math.sin(t * 2.3);
+  // 核心微脉动 + 偶发“闪亮”（约每 20s 一次短促增亮，像恒星耀斑）
+  const spike = reducedMotion ? 0 : Math.pow(Math.max(0, Math.sin(t * 0.31)), 26);
+  const shimmer = reducedMotion ? 1 : Math.min(1.25, 0.92 + 0.08 * Math.sin(t * 2.3) + spike * 0.3);
 
   // 倾斜轨道几何：圆轨道在 45° 倾角下投影为椭圆（含平转 tilt），
   // z = sin(a) 表示深度（>0 在前，<0 在后）
@@ -760,6 +822,50 @@ function drawSelfBeacon(ctx, x, y, radius, time, reducedMotion, online) {
   ctx.beginPath();
   ctx.arc(0, 0, radius * 2.15, 0, Math.PI * 2);
   ctx.stroke();
+
+  // 科技刻度环：24 道短刻度，缓慢反向旋转（雷达/星图质感）
+  const tickR = radius * 2.45;
+  const tickSpin = -spin * 0.35;
+  ctx.rotate(tickSpin);
+  ctx.strokeStyle = 'rgba(150,200,255,0.20)';
+  ctx.lineWidth = 0.8;
+  for (let i = 0; i < 24; i += 1) {
+    const a = (Math.PI * 2 * i) / 24;
+    const long = i % 6 === 0;
+    const len = long ? radius * 0.28 : radius * 0.15;
+    ctx.beginPath();
+    ctx.moveTo(Math.cos(a) * (tickR - len), Math.sin(a) * (tickR - len));
+    ctx.lineTo(Math.cos(a) * tickR, Math.sin(a) * tickR);
+    ctx.stroke();
+  }
+  ctx.rotate(-tickSpin);
+
+  // 等离子弧：内环上三段不同速的弧光
+  if (!reducedMotion) {
+    for (let i = 0; i < 3; i += 1) {
+      const arcSpin = t * (0.5 + i * 0.22) * (i % 2 === 0 ? 1 : -1);
+      const span = 0.32 + i * 0.08;
+      const arcR = radius * (1.28 + i * 0.12);
+      ctx.strokeStyle = i === 1 ? 'rgba(255,233,168,0.30)' : 'rgba(120,200,255,0.32)';
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.arc(0, 0, arcR, arcSpin, arcSpin + span);
+      ctx.stroke();
+    }
+  }
+
+  // 心跳脉冲：约每 4.2s 一圈极淡扩散环（能量呼吸，不是同步脉冲）
+  if (!reducedMotion) {
+    const hb = (t % 4.2) / 4.2;
+    if (hb < 0.4) {
+      const k = hb / 0.4;
+      ctx.strokeStyle = `rgba(255,233,168,${0.22 * (1 - k)})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(0, 0, radius * (0.7 + k * 2.1), 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
   ctx.restore();
 
   const drawOrbitArc = (startA, endA, alpha) => {

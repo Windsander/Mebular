@@ -4,12 +4,19 @@
 // 两个命令各自使用**独立 storage 路径 + 独立设备身份**，通过共享 spool 目录交换
 // **显式状态事件**（本地最少形态；M3 换真实传输）。输出 JSON 事实供脚本断言。
 
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { Mebular } from '@mebular/core';
 import { echoResultFor, EchoExecutor, ExecutionLog } from './runtime/executor.js';
 import { FleetNode } from './runtime/node.js';
 import { FleetWorker } from './runtime/worker.js';
 import { FileTaskEventStore } from './store/file-store.js';
+import { MebularTaskEventStore } from './store/mebular-store.js';
+import { NullTransport } from './transport/null.js';
 import { SpoolTransport } from './transport/spool.js';
 import { LocalQuota } from './quota.js';
+import { fleetConfigPath, loadFleetConfig, readMasterKeyFile, type FleetAgentConfig } from './config.js';
+import { buildRegistry, doctor, mebularOptions, onboardDevice } from './onboard.js';
 
 interface Args {
   [key: string]: string | boolean | undefined;
@@ -43,6 +50,17 @@ const num = (v: string | boolean | undefined, fallback: number): number => {
   return Number.isFinite(n) ? n : fallback;
 };
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** `fleet --version`：打印包版本与**构建时的 commit SHA**（`dist/version.json`；缺失→unknown）。 */
+function versionString(): string {
+  try {
+    const raw = readFileSync(new URL('./version.json', import.meta.url), 'utf-8');
+    const v = JSON.parse(raw) as { version?: string; sha?: string };
+    return `${v.version ?? '0.0.0'} (${v.sha ?? 'unknown'})`;
+  } catch {
+    return '0.0.0 (unknown)';
+  }
+}
 
 async function runNode(args: Args): Promise<number> {
   const device = str(args.device, 'device-A');
@@ -141,14 +159,164 @@ async function runWorker(args: Args): Promise<number> {
   return 0;
 }
 
+function parseAgents(value: string | boolean | undefined, command: string | boolean | undefined): FleetAgentConfig[] | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  const cmd = typeof command === 'string' ? command : undefined;
+  return value.split(',').map((entry) => {
+    const [name, kind] = entry.split(':');
+    const agent: FleetAgentConfig = { name: name ?? 'echo', kind: (kind as FleetAgentConfig['kind']) ?? 'echo' };
+    if (agent.kind === 'command' && cmd !== undefined) agent.command = cmd;
+    return agent;
+  });
+}
+
+async function runOnboard(args: Args): Promise<number> {
+  const dir = str(args.dir, './.fleet');
+  const result = await onboardDevice({
+    dir,
+    device: str(args.device, ''),
+    ...(typeof args['master-key'] === 'string' ? { masterKeyFile: args['master-key'] } : {}),
+    ...(typeof args['peer-device'] === 'string' ? { peerDevice: args['peer-device'] } : {}),
+    ...(typeof args['peer-addr'] === 'string' ? { peerAddr: args['peer-addr'] } : {}),
+    ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
+    ...(typeof args.listen === 'string' ? { listen: args.listen } : {}),
+    ...(typeof args['policy-issuer'] === 'string' ? { policyIssuers: args['policy-issuer'].split(',') } : {}),
+    ...(parseAgents(args.agent, args['agent-command']) !== undefined ? { agents: parseAgents(args.agent, args['agent-command'])! } : {}),
+  });
+  console.log(JSON.stringify({
+    ok: true,
+    role: 'onboard',
+    device: result.config.device,
+    dir: result.config.dir,
+    alreadyOnboarded: result.alreadyOnboarded,
+    masterKeyCreated: result.masterKeyCreated,
+    masterKeyFingerprint: result.masterKeyFingerprint,
+    next: [`fleet serve --dir ${result.config.dir}`, `fleet work --dir ${result.config.dir}`, `fleet doctor --dir ${result.config.dir}`],
+  }, null, 2));
+  return 0;
+}
+
+async function runDoctor(args: Args): Promise<number> {
+  const report = await doctor(str(args.dir, './.fleet'));
+  if (args.json === true) console.log(JSON.stringify(report, null, 2));
+  else {
+    for (const c of report.checks) {
+      const hint = c.status === 'FAIL' && c.hint ? `  → ${c.hint}` : '';
+      console.log(`${c.status}  ${c.name}  ${c.detail}${hint}`);
+    }
+    console.log(`summary: ok=${report.ok} skipped=[${report.skipped.join(', ')}]`);
+  }
+  return report.ok ? 0 : 1;
+}
+
+async function runServe(args: Args): Promise<number> {
+  const dir = str(args.dir, './.fleet');
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(mebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  console.log(JSON.stringify({
+    role: 'serve', event: 'listening', device: config.device,
+    multiaddr: mebular.node!.getLocalMultiaddrs()[0] ?? null, peerId: mebular.node!.peerId.id,
+  }));
+  const store = new MebularTaskEventStore(mebular);
+  const node = new FleetNode({ device: config.device, store, transport: new NullTransport(), quota: new LocalQuota({ limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000 }) });
+  const submit = num(args.submit, 0);
+  if (submit > 0) {
+    // 先等首轮同步（对端连入）再提交，避免在无连接时提交导致事件丢失触发。
+    const waitSyncMs = num(args['wait-sync-ms'], 0);
+    if (waitSyncMs > 0) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            resolve();
+          }
+        }, waitSyncMs);
+        mebular.sync.once('sync-completed', () => {
+          if (!settled) {
+            settled = true;
+            clearTimeout(timer);
+            resolve();
+          }
+        });
+      });
+    }
+    const target = config.peers[0];
+    const ids: string[] = [];
+    for (let i = 0; i < submit; i++) {
+      const { taskId } = await node.submit({ intent: `t-${i}`, to: { device: target?.device ?? 'device-B', agent: str(args['target-agent'], 'echo') } });
+      if (taskId !== null) ids.push(taskId);
+    }
+    const ok = await node.waitForTerminal(ids, { timeoutMs: num(args['timeout-ms'], 60_000) });
+    const states = (await node.states()).filter((s) => ids.includes(s.taskId));
+    const done = states.filter((s) => s.status === 'done');
+    const expectPrefix = str(args['expect-prefix'], '');
+    const resultsMatch = states.every((s) =>
+      s.status === 'done' && (expectPrefix.length > 0 ? (s.resultRef ?? '').startsWith(expectPrefix) : (s.resultRef ?? '').length > 0),
+    );
+    console.log(JSON.stringify({ role: 'serve', submitted: ids.length, done: done.length, allTerminal: ok, resultsMatch }));
+    const lingerMs = num(args['linger-ms'], 0);
+    if (lingerMs > 0) await sleep(lingerMs); // 保持在线，便于对端 doctor 看到可达/已收敛
+    await mebular.shutdown();
+    return ok && done.length === ids.length && resultsMatch ? 0 : 1;
+  }
+  await sleep(num(args['timeout-ms'], 60_000));
+  await mebular.shutdown();
+  return 0;
+}
+
+async function runWork(args: Args): Promise<number> {
+  const dir = str(args.dir, './.fleet');
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(mebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  for (const peer of config.peers) {
+    if (peer.addr === undefined) continue;
+    const id = /\/p2p\/([^/]+)/.exec(peer.addr)?.[1] ?? peer.device;
+    try {
+      await mebular.node!.connectToPeer({ id, multihash: new Uint8Array(), pubKey: new Uint8Array() }, peer.addr);
+    } catch {
+      // 连接失败由后续收敛/doctor 暴露
+    }
+  }
+  const store = new MebularTaskEventStore(mebular);
+  const log = await ExecutionLog.open(str(args['exec-log'], join(dir, 'exec.jsonl')));
+  const worker = new FleetWorker({ device: config.device, agent: str(args.agent, 'worker'), store, transport: new NullTransport(), registry: buildRegistry(config.agents), log });
+  await worker.reconcile();
+  const deadline = Date.now() + num(args['timeout-ms'], 60_000);
+  while (Date.now() < deadline) {
+    await worker.pollOnce();
+    await sleep(num(args['interval-ms'], 10));
+  }
+  console.log(JSON.stringify({ role: 'work', device: config.device, executed: log.size() }));
+  await mebular.shutdown();
+  return 0;
+}
+
 async function main(): Promise<void> {
   const { command, args } = parseArgs(process.argv.slice(2));
   let code = 2;
+  if (args.version === true) {
+    console.log(`@mebular/fleet ${versionString()}`);
+    process.exit(0);
+  }
+  try {
   if (command === 'node') code = await runNode(args);
   else if (command === 'worker') code = await runWorker(args);
+  else if (command === 'onboard') code = await runOnboard(args);
+  else if (command === 'doctor') code = await runDoctor(args);
+  else if (command === 'serve') code = await runServe(args);
+  else if (command === 'work') code = await runWork(args);
   else {
-    console.error('用法：fleet node … | fleet worker …');
+    console.error('用法：fleet onboard|doctor|serve|work|node|worker … | fleet --version');
     code = 2;
+  }
+  } catch (error) {
+    console.error(JSON.stringify({ ok: false, error: (error as Error).message }));
+    process.exit(1);
   }
   process.exit(code);
 }

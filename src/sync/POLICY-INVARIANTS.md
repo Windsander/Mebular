@@ -8,10 +8,16 @@
 规则代号：**R-a** 不可越权授予；**R-b** 吊销连坐；**R-c** 逻辑时间定序；
 **R-d** grantId 精确撤销 / 恢复用新 grantId。实现为**有界不动点**（见文件头注释）。
 
+**C1（引导签发者上图化，破坏性协议变更）**：新增记录类型 `policy_issuer_declare`，把「谁是
+引导签发者」从**本地配置**改为**图上签名声明**。**生效引导集合 = 图上被采纳声明 ∪ 本地配置
+`policyIssuers`**（配置降级为 bootstrap/兼容回退）。采纳**不做 R-a 检查**（无条件），因此与不动点
+**无循环依赖**；但受 **R-b** 约束：**签发者**或**被声明主体**被 `device_revoke` 吊销时，该声明
+**不采纳**。R-a 改为用生效引导集合，其余 R-b/R-c/R-d、不动点与 fail-closed 回退不变。
+
 ## 1. 记录类型 × 签发者状态 × 对象状态
 
 「对象状态」对 `namespace_revoke` 指其**目标 grantId**；对 `grant` 指自身 grantId；
-对 `device_revoke` 指被吊销的目标设备。
+对 `device_revoke` 指被吊销的目标设备；对 `policy_issuer_declare` 指被声明主体。
 
 | 记录 | 签发者状态 | 对象状态 | 期望 | 覆盖测试 |
 |---|---|---|---|---|
@@ -29,6 +35,11 @@
 | `device_revoke`（恢复） | 任意有效 | 目标已吊销 → 之后有效 `grant` | 目标移出 `revoked`（R-d 恢复） | `设备吊销…之后新 grant 即恢复` · `F-A 正例…` |
 | `namespace_grant`（恢复） | 任意有效 | 目标已吊销，grantId 全新 | 恢复 | `F-A 正例：全新 grantId…` |
 | `namespace_grant`（伪恢复） | 任意有效 | 目标已吊销，但复用**已被撤销**的 grantId | **不恢复**（F-A） | `F-A：被 namespace_revoke 撤销过的 grantId 不能用来清除吊销状态` |
+| `policy_issuer_declare` | 可信（链到主密钥）、未被吊销 | 被声明主体未被吊销 | **采纳**（进入生效引导集合；不做 R-a） | `C1 仅图声明（无本地配置）→ 自动采纳并接活` · `C1 声明与配置并集` · harness `声明采纳` |
+| `policy_issuer_declare` | 已被吊销（R-b 含历史） | 任意 | **不采纳** | `C1 被吊销签发者的声明不生效` · harness `扰动 c` |
+| `policy_issuer_declare` | 可信 / 任意 | 被声明主体已被 `device_revoke` 吊销 | **不采纳**（R-b 优先级：吊销设备不得成为引导签发者） | `C1 声明了被吊销设备 → 不生效` |
+| `policy_issuer_declare`（伪造） | 非本用户主密钥链（别家/无证书） | 任意 | **忽略**（GraphNamespacePolicy 逐条信任过滤） | `C1 非主密钥链签名的声明被忽略` |
+| 声明上位的 `namespace_grant` | 因声明而进入生效引导集合 | grantId 未撤销 | 采纳（R-a 用生效引导集合） | `C1 仅图声明下 grant 生效` · `C1 声明与 R-d 撤销交互` |
 
 ## 2. 横切不变量
 
@@ -56,17 +67,30 @@
 7. **保留语义不受影响**：缺 namespace = `default`、本机订阅空 = 全部、持有者只供自己订阅分区——
    这些在 `namespacePolicy`/`SyncManager` 层，策略层只产出授权/吊销，不触碰。覆盖：既有 namespace
    与 selective-sync 套件。
+8. **生效引导集合的并集与确定性（C1）**：`issuers = 图上被采纳声明 ∪ 配置 policyIssuers`；
+   声明是无条件采纳（不做 R-a），但受 R-b 约束（签发者或主体被吊销 → 不采纳）。
+   - **无循环依赖**：采纳不依赖 `authorized`，仅是 `(entries, 配置, revokedIn)` 的纯函数 → 不动点
+     未知量仍是 `(revokedGrantIds, revokedIn)`，结构不变。
+   - **顺序无关 + 幂等**：声明按确定序（R-c）处理，`issuers`/`authorized`/`revoked` 与输入排列无关、
+     重复推导一致。覆盖：harness `排列不变性`/`幂等`、`C1 声明顺序无关且幂等`。
+   - **oracle-free 扰动 c（声明轴）**：删掉「输出 `revoked` 里设备签发的**全部**声明」后重跑，
+     `authorized`/`revoked` 在收敛不动点上必须不变；配置为空时删掉**全部**声明必须**不减授权**
+     地改变（即声明的存在只可能**增加**签发者 → 只可能增加授权，删除不会增加授权）。
+     覆盖：harness `扰动 c` 与 `C1 空配置删声明 → 授权单调不增`。
 
 ## 3. 覆盖它的 harness（`tests/sync/policy-invariants.test.ts`）
 
-固定种子（`mulberry32(0xc0ffee)`）、可复现，`scenarios=300`。对每组断言：排列不变、幂等、
-结构不变量（`authorized ∩ revoked = ∅`；被授权设备必曾是某条 `grant` 的主体）、以及**两条
-oracle-free 扰动检查**（不依赖任何参考实现）：
+固定种子（`mulberry32(0xc0ffee)`）、可复现，`scenarios=300`。**C1 起随机事件含
+`policy_issuer_declare`**。对每组断言：排列不变、幂等、结构不变量
+（`authorized ∩ revoked = ∅`；被授权设备必曾是某条 `grant` 的主体；**生效引导集合 ⊆ 被声明主体 ∪ 配置**）、
+以及**三条 oracle-free 扰动检查**（不依赖任何参考实现）：
 
 - **检查 a（R-b on grants/device_revoke）**：对输出 `revoked` 里的每个设备，删掉它签发的**全部**
   记录后重跑，`authorized`/`revoked` 必须完全不变。
 - **检查 b（R-b on revokes）**：把所有「已被吊销签发者发出的 `namespace_revoke`」删掉后重跑，
   `authorized`/`revoked` 必须完全不变。
+- **检查 c（声明轴单调，C1）**：配置为空时，删掉全部 `policy_issuer_declare` 后重跑，授权只能
+  **不增**（声明的存在只会增加签发者、从而只可能增加授权），且 `revoked` 不变。
 
 二者只用「输入记录 + 输出 `revoked`」，不读实现内部中间变量，因此与实现**独立**。
 

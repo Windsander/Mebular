@@ -39,7 +39,7 @@ for (let attempt = 1; attempt <= 4 && !circuit; attempt++) {
     deviceId,
     encryption: { userMasterKey, userMasterPrivateKey },
     network: { enabled: true, libp2p: { listen: ['/ip4/0.0.0.0/tcp/0'], relayServers: [relayAddr] } },
-    sync: { autoSync: true, peerNamespacePolicy: { [partner]: ['default'] } },
+    sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 50, antiEntropy: { enabled: true, intervalMs: 1000, jitterRatio: 0 }, peerNamespacePolicy: { [partner]: ['default'] } },
   });
   await mebular.initialize();
   circuit = await waitFor(() => pickCircuit(mebular), 10000);

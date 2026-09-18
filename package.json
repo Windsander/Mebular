@@ -49,8 +49,9 @@
     }
   },
   "scripts": {
-    "build": "tsc && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs",
+    "build": "tsc && tsc -p packages/service/tsconfig.json && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs",
     "build:fleet": "tsc -p packages/fleet/tsconfig.json",
+    "build:service": "tsc -p packages/service/tsconfig.json",
     "prepare": "npm run build",
     "build:watch": "tsc --watch",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
@@ -79,6 +80,7 @@
     "verify:fleet:agents": "node scripts/verify-fleet-agents.mjs",
     "verify:fleet:onboard": "node scripts/verify-fleet-onboard.mjs",
     "verify:fleet:grant": "node scripts/verify-fleet-grant.mjs",
+    "verify:fleet:service": "node scripts/verify-fleet-service.mjs",
     "verify:fleet:all": "node scripts/verify-fleet-all.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
@@ -138,6 +140,7 @@
       "^src/(.*)\\.js$": "<rootDir>/src/$1.ts",
       "^tests/(.*)\\.js$": "<rootDir>/tests/$1.ts",
       "^@mebular/core$": "<rootDir>/src/index.ts",
+      "^@mebular/service$": "<rootDir>/packages/service/src/index.ts",
       "^(\\.{1,2}/.*)\\.js$": "$1"
     },
     "testMatch": [
@@ -148,7 +151,9 @@
       "src/**/*.ts",
       "!src/**/*.d.ts",
       "packages/fleet/src/**/*.ts",
-      "!packages/fleet/src/**/*.d.ts"
+      "!packages/fleet/src/**/*.d.ts",
+      "packages/service/src/**/*.ts",
+      "!packages/service/src/**/*.d.ts"
     ],
     "coveragePathIgnorePatterns": [
       "/node_modules/",
@@ -177,6 +182,10 @@
         "branches": 70
       },
       "packages/fleet/src/**/*.ts": {
+        "lines": 85,
+        "branches": 65
+      },
+      "packages/service/src/**/*.ts": {
         "lines": 85,
         "branches": 65
       }

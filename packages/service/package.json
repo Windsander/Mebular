@@ -1,13 +1,10 @@
 {
-  "name": "@mebular/fleet",
+  "name": "@mebular/service",
   "version": "0.1.0",
-  "description": "Mebular 跨设备多 Agent 协作（任务=记忆）：task-as-memory 的派发与回收，无中心协调",
+  "description": "Mebular 常驻组件服务化：平台单元生成（launchd/systemd/Task Scheduler）+ install/uninstall/status/logs + 进程心跳",
   "license": "MIT",
   "private": false,
   "type": "module",
-  "bin": {
-    "fleet": "./dist/cli.js"
-  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -18,17 +15,12 @@
   },
   "files": [
     "src",
-    "dist",
-    "protocol"
+    "dist"
   ],
   "engines": {
     "node": ">=20"
   },
   "publishConfig": {
     "access": "public"
-  },
-  "dependencies": {
-    "@mebular/core": "file:../..",
-    "@mebular/service": "file:../service"
   }
 }

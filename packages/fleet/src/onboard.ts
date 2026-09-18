@@ -7,6 +7,7 @@ import { access, chmod, mkdir } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import net from 'node:net';
 import { Mebular, POLICY_NAMESPACE } from '@mebular/core';
+import { isHeartbeatFresh, readHeartbeat, registeredServicesForDir } from '@mebular/service';
 
 import {
   fileMode,
@@ -472,6 +473,24 @@ export async function doctor(dir: string): Promise<DoctorReport> {
     } catch (error) {
       add('同步已收敛', 'FAIL', `读取本地状态失败：${(error as Error).message}`);
     }
+  }
+
+  // 8) 服务已注册（D4）：是否有常驻服务**指向本目录**（读 manifest，dir-scoped，temp 目录可复现）。
+  const registered = registeredServicesForDir(dir);
+  if (registered.length === 0) {
+    add('服务已注册', 'SKIP', '未安装常驻服务', 'fleet service install fleet-node|fleet-worker（或 mebular service install）');
+  } else {
+    add('服务已注册', 'PASS', `services=[${registered.join(', ')}]`);
+  }
+
+  // 9) 心跳新鲜（D4）：process 写 `<dir>/service.heartbeat`；无文件 → SKIP，陈旧 → FAIL。
+  const heartbeat = readHeartbeat(dir);
+  if (heartbeat === null) {
+    add('心跳新鲜', 'SKIP', '无 service.heartbeat（服务未运行/未安装）');
+  } else if (isHeartbeatFresh(dir)) {
+    add('心跳新鲜', 'PASS', `role=${heartbeat.role} pid=${heartbeat.pid} age=${Date.now() - heartbeat.ts}ms sha=${heartbeat.sha}`);
+  } else {
+    add('心跳新鲜', 'FAIL', `心跳陈旧 age=${Date.now() - heartbeat.ts}ms（role=${heartbeat.role} pid=${heartbeat.pid}）`, '服务可能已崩溃：`fleet service status` / `fleet service logs`');
   }
 
   const skipped = checks.filter((c) => c.status === 'SKIP').map((c) => c.name);

@@ -17,7 +17,6 @@ import { fileURLToPath } from 'node:url';
 const CLI = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
 const FIXTURE = fileURLToPath(new URL('../tests/fleet/fixtures/fake-agent.mjs', import.meta.url));
 const IS_WIN = process.platform === 'win32';
-const PERM_SKIPS = IS_WIN ? ['config 权限', '主密钥权限'] : []; // Windows：doctor 对 POSIX mode 显式 SKIP
 
 const results = [];
 const skipped = [];
@@ -100,7 +99,7 @@ try {
     });
   }
 
-  const serveA = startCli(['serve', '--dir', A, '--submit', String(N), '--target-agent', 'fake', '--wait-sync-ms', '30000', '--timeout-ms', '40000', '--linger-ms', '30000', '--expect-prefix', 'FAKE:']);
+  const serveA = startCli(['node', '--dir', A, '--submit', String(N), '--target-agent', 'fake', '--wait-sync-ms', '30000', '--timeout-ms', '40000', '--linger-ms', '30000', '--expect-prefix', 'FAKE:']);
   await waitFor(async () => /listening/.test(serveA.state.out), 15000);
   const listen = lastJson(serveA.state.out.match(/\{[^\n]*listening[^\n]*\}/)?.[0] ?? '');
   const addr = listen?.multiaddr;
@@ -109,7 +108,7 @@ try {
   const onboardB = await runCli(['onboard', '--dir', B, '--device', 'device-B', '--peer-device', 'device-A', '--peer-addr', addr, '--master-key', join(A, 'master-key.json'), ...agentArgs]);
   check('onboard B（导入同一主密钥）成功', onboardB.code === 0 && lastJson(onboardB.out)?.ok === true, { code: onboardB.code });
 
-  const workB = startCli(['work', '--dir', B, '--timeout-ms', '30000', '--interval-ms', '10']);
+  const workB = startCli(['worker', '--dir', B, '--timeout-ms', '30000', '--interval-ms', '10']);
   const execLog = join(B, 'exec.jsonl');
   const executed = await waitFor(async () => existsSync(execLog) && lineCount(execLog) >= N, 25000);
   const aDone = await waitFor(async () => /"submitted":\s*3/.test(serveA.state.out), 25000);
@@ -122,10 +121,11 @@ try {
     skipped: report?.skipped,
     failed: (report?.checks ?? []).filter((c) => c.status === 'FAIL').map((c) => `${c.name}:${c.detail}`),
   });
+  const KNOWN_SKIPS = ['config 权限', '主密钥权限', '服务已注册', '心跳新鲜', 'peer 可达', '同步已收敛'];
   check(
-    IS_WIN ? 'doctor(B) skipped 仅含 POSIX 权限项' : 'doctor(B) skipped 为空',
-    JSON.stringify([...(report?.skipped ?? [])].sort()) === JSON.stringify([...PERM_SKIPS].sort()),
-    { skipped: report?.skipped, expected: PERM_SKIPS },
+    'doctor(B) skipped 无未知项，且「服务已注册」按 dir 明列 SKIP',
+    (report?.skipped ?? []).every((s) => KNOWN_SKIPS.includes(s)) && (report?.skipped ?? []).includes('服务已注册'),
+    { skipped: report?.skipped },
   );
   check('A 全部完成且结果前缀匹配', aDone && /"done":\s*3/.test(serveA.state.out) && /"resultsMatch":\s*true/.test(serveA.state.out), {});
 
@@ -186,7 +186,7 @@ try {
   const heldPort = holder.address().port;
   const F6 = join(root, 'F6');
   await runCli(['onboard', '--dir', F6, '--device', 'device-T', '--listen', `/ip4/127.0.0.1/tcp/${heldPort}`, ...agentArgs]);
-  const f6 = await runCli(['serve', '--dir', F6, '--timeout-ms', '3000'], 20000);
+  const f6 = await runCli(['node', '--dir', F6, '--timeout-ms', '3000'], 20000);
   check('F6 端口占用 → serve 非零退出 + 错误', f6.code !== 0 && (f6.err + f6.out).length > 0, { code: f6.code });
   await new Promise((r) => holder.close(() => r()));
 

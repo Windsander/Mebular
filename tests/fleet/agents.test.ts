@@ -74,7 +74,8 @@ describe('CommandAgent：参数数组 / 超时 / 非零退出 / 输出截断', (
     const outcome = await node(['--mode', 'large', '--bytes', '100000']).execute(task('big'));
     // CommandAgent 默认 65536 上限
     expect(outcome.ok).toBe(true);
-    expect(Buffer.byteLength(outcome.resultRef!, 'utf-8')).toBeLessThan(70000);
+    // 精确封顶：≤ maxOutputBytes(65536) + 省略号/标记开销
+    expect(Buffer.byteLength(outcome.resultRef!, 'utf-8')).toBeLessThanOrEqual(65536 + 64);
     expect(outcome.resultRef).toContain('[truncated');
     // 直接测截断函数边界
     const t = truncateOutput('abcdef', 3);

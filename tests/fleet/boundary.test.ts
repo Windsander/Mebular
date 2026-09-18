@@ -60,14 +60,27 @@ describe('fleet 边界（红线）', () => {
     expect(violations).toEqual([]);
   });
 
-  it('fleet 只声明 @mebular/core 依赖（无其它 core 内部包）', () => {
+  it('fleet 只声明 @mebular/core 与 @mebular/service（无其它内部包）', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'packages/fleet/package.json'), 'utf-8')) as {
       dependencies?: Record<string, string>;
     };
+    const allowed = ['@mebular/core', '@mebular/service'];
     const deps = Object.keys(pkg.dependencies ?? {});
     expect(deps).toContain('@mebular/core');
     for (const dep of deps) {
-      expect(dep.startsWith('@mebular/core')).toBe(true);
+      expect(allowed).toContain(dep);
     }
+  });
+
+  it('@mebular/service 不得依赖 core（服务化与记忆语义解耦）', () => {
+    const violations: string[] = [];
+    for (const file of listFiles(join(ROOT, 'packages/service/src'))) {
+      for (const spec of moduleSpecifiers(readFileSync(file, 'utf-8'))) {
+        if (spec === '@mebular/core' || spec.startsWith('@mebular/core/')) {
+          violations.push(`${relative(ROOT, file)} → ${spec}`);
+        }
+      }
+    }
+    expect(violations).toEqual([]);
   });
 });

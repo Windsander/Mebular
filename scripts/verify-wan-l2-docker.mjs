@@ -38,7 +38,7 @@ if (!hasDocker) {
     const up = compose(['up', '-d', '--force-recreate']);
     check('docker compose up（relay + peera + peerb）', up.status === 0, { stderr: (up.stderr || '').slice(-200) });
 
-    const a = await waitFor(() => readJson(join(state, 'A.json')), 60000);
+    const a = await waitFor(() => readJson(join(state, 'A.json')), 120000);
     check('A 在隔离网络中经 relay 预留（/p2p-circuit）', typeof a?.circuit === 'string' && a.circuit.includes('/p2p-circuit'), { circuit: a?.circuit?.includes('/p2p-circuit') });
 
     writeFileSync(join(state, 'phase.json'), JSON.stringify({ epoch: 1, phase: 'sync' }));

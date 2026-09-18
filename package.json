@@ -7,8 +7,13 @@
   "workspaces": [
     "packages/*"
   ],
+  "bin": {
+    "fleet": "./packages/fleet/dist/cli.js"
+  },
   "files": [
     "dist",
+    "packages/fleet/dist",
+    "packages/fleet/package.json",
     "README.md",
     "LICENSE"
   ],
@@ -44,8 +49,9 @@
     }
   },
   "scripts": {
-    "build": "tsc && tsc -p packages/fleet/tsconfig.json",
+    "build": "tsc && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs",
     "build:fleet": "tsc -p packages/fleet/tsconfig.json",
+    "prepare": "npm run build",
     "build:watch": "tsc --watch",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
@@ -71,6 +77,8 @@
     "verify:fleet:local": "node scripts/verify-fleet-local.mjs",
     "verify:fleet:remote": "node scripts/verify-fleet-remote.mjs",
     "verify:fleet:agents": "node scripts/verify-fleet-agents.mjs",
+    "verify:fleet:onboard": "node scripts/verify-fleet-onboard.mjs",
+    "verify:fleet:all": "node scripts/verify-fleet-all.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },
   "dependencies": {

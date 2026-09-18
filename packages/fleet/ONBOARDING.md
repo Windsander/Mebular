@@ -146,6 +146,7 @@ fleet doctor --dir ~/.fleet
 | `同步已收敛` | 本地见到**对端署名**的任务事件 | 无任何任务事件 → **SKIP**（附原因） |
 
 `fleet doctor --json` 输出机器可读报告（`{ok, checks[], skipped[]}`）；**只在 FAIL 时显示 hint**，SKIP 一律在 `skipped` 里明写原因，不静默跳过。
+**Windows**：`config 权限` 与 `主密钥权限` 两项为 SKIP（无 POSIX mode 语义），见 [§9](#9-windowsmacos-真双机)。
 
 ## 6. 一键验收（CI 同款）
 
@@ -179,5 +180,55 @@ npm run verify:fleet:all       # local + remote + agents + onboard + grant 汇�
 - **目录**：生产请用 `~/.fleet`；仓库内默认的 `./.fleet` 已在 `.gitignore` 忽略（内含归一化主密钥），但更安全的做法是永远放在仓库外。
 - **日志脱敏**：`serve`/`work`/`doctor` 输出只含设备名、多播地址、指纹与计数，**不含**私钥材料；`verify:fleet:onboard` 会断言日志中搜不到私钥。
 - 主密钥即身份：泄露等同身份泄露；不要提交进仓库、不要放进镜像层。
-- **Windows**：`command` agent 必须指向 Windows 可执行的入口（`.cmd`/`.ps1` 包装）；`verify:fleet:onboard` 的 fake-agent 依赖 POSIX 可执行位，Windows 上该条会 SKIP 并提示改用 `command=node` 包装。内置 `echo` agent 全平台可用。
 - 临时文件与密钥一律写在临时目录，不进仓库。
+- **Windows**：见 [§9](#9-windowsmacos-真双机)：权限语义、防火墙、`command` agent 一律经 `node` 调用。
+
+## 9. Windows（macOS 真双机）
+
+目标拓扑：一台 macOS（可跑 Hermes）+ 一台 Windows（只有 OpenChamber、无 Hermes/Python），**有线静态 IP**。fleet 侧零改动即可跑通；差异集中在权限/路径/可执行位。
+
+### 9.1 安装
+
+```powershell
+winget install OpenJS.NodeJS.LTS   # 或官网 MSI；Node.js >= 20（LTS 均可）
+node -v
+npm i -g github:Windsander/Mebular#<SHA>
+fleet --version                    # @mebular/fleet 0.1.0 (<SHA>)
+```
+
+### 9.2 权限与路径（威胁模型差异）
+
+- Windows **无 POSIX mode 语义**：`chmod`/`0o600` 不成立，`stat().mode` 恒为 `0666/0444`。因此 `fleet doctor` 在 Windows 上对 `config 权限` / `主密钥权限` **显式 SKIP**（写入 `skipped`），**绝不假 FAIL**；其余检查（配置形状、身份链、namespace、agent、同步）照常判定。
+- 等价保护来自 **用户配置目录 ACL**（`%USERPROFILE%` 默认仅本人与管理员可读）与 OS 会话边界。务必把设备目录放在 `$env:USERPROFILE\.fleet`（**不要**放共享盘/公共目录），并保证 Windows 账户本身有密码/锁屏。
+- 路径用 PowerShell 的 `"$env:USERPROFILE\.fleet"`；`fleet` 内部一律用 `os.homedir()`/`os.tmpdir()`，不硬编码 `/tmp`。
+
+### 9.3 静态 IP + 防火墙入站放行
+
+给 A（macOS）固定监听端口（如 4001），在 Windows B 上放行出站即可；若要 B 监听（两端对称），在 **B** 上放行入站：
+
+```powershell
+# 以管理员运行：允许舰队监听端口入站（示例 4001，仅私有网络）
+New-NetFirewallRule -DisplayName "fleet libp2p 4001" -Direction Inbound `
+  -Protocol TCP -LocalPort 4001 -Action Allow -Profile Private
+```
+
+A 的 `serve` 打印 `multiaddr`（`/ip4/0.0.0.0/tcp/4001/p2p/…`）后，把 `0.0.0.0` 换成 A 的**静态 LAN IP** 给 B 的 `--peer-addr`。
+
+### 9.4 `command` agent 一律经 `node` 调用（不依赖 shebang/可执行位）
+
+```powershell
+fleet onboard --dir "$env:USERPROFILE\.fleet" --device device-Win `
+  --agent mycmd:command --agent-command (Get-Command node).Source --agent-base-args "C:\path\my-agent.mjs"
+```
+
+`CommandAgent` 执行 `node C:\path\my-agent.mjs -z <prompt>`：`--agent-command` 用 `node.exe`，脚本走 `--agent-base-args`。**不要**依赖 `.mjs` 的 shebang 或可执行位（Windows 不生效）。内置 `echo` agent 全平台可用。
+
+### 9.5 信号 / 终止差异
+
+- POSIX：`SIGINT`(Ctrl-C)/`SIGTERM` 可被进程捕获做优雅收尾；Windows 无真正的 `SIGTERM`，`Ctrl-C` 走 `SIGINT`，`taskkill /F` 等同强杀。`serve`/`work` 在退出前落盘事件；强杀时未落盘的在途窗口由 core 的 anti-entropy 在下次同步补齐（至少一次）。
+- 跨机用 `--linger-ms` 保持 A 在线，避免 B 侧 `doctor` 的「peer 可达/同步已收敛」在 A 退出后抖动。
+
+### 9.6 Windows 的 OpenChamber 执行器 = provider #2（Node）
+
+Windows 常无 Hermes/Python。OpenChamber 任务执行改用 **provider #2**（Self-Skills 仓 `oc-node-provider`）：一个只需 Node 的极简 daemon，`POST /agent/run-once` 与 provider #1（`bridge.py`）**同协议**，复用现有 `oc-bridge.js` 插件（inbox/outbox）。安装/启动/替换关系见 Self-Skills `skills/oc-node-provider/README.md`；fleet 侧仅把 `--with-openchamber` 指向该 endpoint（`~/.oc-hermes-bridge/daemon.json`），**无需改 fleet 代码**。
+

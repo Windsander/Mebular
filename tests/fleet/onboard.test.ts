@@ -20,6 +20,8 @@ import {
   doctor,
   buildRegistry,
   mebularOptions,
+  parseAgentSpecs,
+  permissionsApplicable,
 } from '../../packages/fleet/src/index.js';
 
 let dir: string;
@@ -110,10 +112,45 @@ describe('doctor：逐项自检 + 权限断言（判别锚点）', () => {
     await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'echo', kind: 'echo' }] });
     await chmod(fleetMasterKeyPath(dir), 0o644);
     const report = await doctor(dir);
-    expect(report.ok).toBe(false);
     const check = report.checks.find((c) => c.name === '主密钥权限');
-    expect(check?.status).toBe('FAIL');
-    expect(check?.hint).toContain('chmod 600');
+    if (process.platform === 'win32') {
+      // Windows 无 POSIX mode 语义 → 显式 SKIP，绝不假 FAIL。
+      expect(check?.status).toBe('SKIP');
+    } else {
+      expect(report.ok).toBe(false);
+      expect(check?.status).toBe('FAIL');
+      expect(check?.hint).toContain('chmod 600');
+    }
+  });
+
+  it('平台策略：permissionsApplicable(win32)=false；posix=true', () => {
+    expect(permissionsApplicable('win32')).toBe(false);
+    expect(permissionsApplicable('darwin')).toBe(true);
+    expect(permissionsApplicable('linux')).toBe(true);
+  });
+
+  it('模拟 win32：POSIX 权限项 SKIP（不假 FAIL），ok 不因权限为 false', async () => {
+    await onboardDevice({ dir, device: 'device-A', peerDevice: 'device-B', agents: [{ name: 'echo', kind: 'echo' }] });
+    await chmod(fleetMasterKeyPath(dir), 0o644); // 若按 posix 判定会 FAIL
+    const original = process.platform;
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      const report = await doctor(dir);
+      expect(report.checks.find((c) => c.name === 'config 权限')?.status).toBe('SKIP');
+      expect(report.checks.find((c) => c.name === '主密钥权限')?.status).toBe('SKIP');
+      expect(report.checks.some((c) => c.name === '主密钥权限' && c.status === 'FAIL')).toBe(false);
+      expect(report.skipped).toEqual(expect.arrayContaining(['config 权限', '主密钥权限']));
+      expect(report.ok).toBe(true);
+    } finally {
+      Object.defineProperty(process, 'platform', { value: original, configurable: true });
+    }
+  });
+
+  it('parseAgentSpecs：command agent 经 execPath + baseArgs（不依赖 shebang）', () => {
+    const specs = parseAgentSpecs('fake:command,echo:echo', { command: process.execPath, baseArgs: ['/x/agent.mjs'] });
+    expect(specs[0]).toEqual({ name: 'fake', kind: 'command', command: process.execPath, baseArgs: ['/x/agent.mjs'] });
+    expect(specs[1]).toEqual({ name: 'echo', kind: 'echo' });
+    expect(parseAgentSpecs('   ')).toEqual([]);
   });
 
   it('配置损坏 → 清晰 FAIL', async () => {
@@ -201,7 +238,9 @@ describe('doctor：peer/同步/身份链 与注册表/选项', () => {
     await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'echo', kind: 'echo' }] });
     const cfg = await loadFleetConfig(fleetConfigPath(dir));
     await rm(cfg.masterKeyFile, { force: true });
-    expect((await doctor(dir)).checks.find((c) => c.name === '主密钥权限')?.status).toBe('FAIL');
+    expect((await doctor(dir)).checks.find((c) => c.name === '主密钥权限')?.status).toBe(
+      process.platform === 'win32' ? 'SKIP' : 'FAIL',
+    );
 
     const bad = join(dir, 'bad-key.json');
     await writeFile(bad, JSON.stringify({ v: 1 }), { mode: 0o600 });

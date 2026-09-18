@@ -7,7 +7,7 @@
 // 前置：npm run build。
 
 import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
@@ -18,7 +18,6 @@ const CLI = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.u
 const FIXTURE = fileURLToPath(new URL('../tests/fleet/fixtures/fake-agent.mjs', import.meta.url));
 const REPLAY = fileURLToPath(new URL('../tests/fleet/fixtures/replay-grant.mjs', import.meta.url));
 const READ_EFFECTIVE = fileURLToPath(new URL('../tests/fleet/fixtures/read-effective.mjs', import.meta.url));
-chmodSync(FIXTURE, 0o755);
 
 const results = [];
 const skipped = [];
@@ -30,9 +29,9 @@ function skip(name, reason) {
   skipped.push({ name, reason });
   console.log(`SKIP  ${name}  ${reason}`);
 }
-if (process.platform === 'win32') {
-  // fake-agent 依赖 POSIX shebang 可执行位；Windows 见 ONBOARDING.md caveat。
-  skip('fake-agent 可执行位', 'Windows 无 shebang 可执行位；改用 command=node + baseArgs（见 ONBOARDING.md）');
+const IS_WIN = process.platform === 'win32';
+if (IS_WIN) {
+  skip('onboard F2 0o644→FAIL 锚点', 'Windows 无 POSIX mode；doctor 对权限项 SKIP（本脚本聚焦图上授权，权限锚点在 verify:fleet:onboard）');
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -110,7 +109,8 @@ function tcpOpen(port) {
 }
 
 const root = await mkdtemp(join(tmpdir(), 'fleet-grant-verify-'));
-const agentArgs = ['--agent', 'fake:command', '--agent-command', FIXTURE];
+// fake agent 一律经 process.execPath 调用（不依赖 shebang/可执行位，Windows 亦然）。
+const agentArgs = ['--agent', 'fake:command', '--agent-command', process.execPath, '--agent-base-args', FIXTURE];
 
 try {
   console.log('== G1：图上授权为主（仅 grant / 撤销） ==');
@@ -131,7 +131,13 @@ try {
     onboardA.code === 0 && cfgA.peers?.[0]?.device === 'device-B' && Object.keys(cfgA.peerNamespacePolicy ?? {}).length === 0,
     { peers: cfgA.peers?.map((p) => p.device), policy: cfgA.peerNamespacePolicy },
   );
-  check('主密钥/配置权限 0600', mode(join(A, 'master-key.json')) === 0o600 && mode(join(A, 'fleet.config.json')) === 0o600, {});
+  check(
+    IS_WIN ? '主密钥/配置存在（Windows：ACL 边界）' : '主密钥/配置权限 0600',
+    IS_WIN
+      ? existsSync(join(A, 'master-key.json')) && existsSync(join(A, 'fleet.config.json'))
+      : mode(join(A, 'master-key.json')) === 0o600 && mode(join(A, 'fleet.config.json')) === 0o600,
+    {},
+  );
 
   // 默认拒绝：无 grant 前 doctor namespace FAIL
   const pre = lastJson((await runCli(['doctor', '--dir', A, '--json'])).out);

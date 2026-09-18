@@ -9,6 +9,20 @@ import { dirname, join } from 'node:path';
 
 const SUBTLE = globalThis.crypto.subtle;
 
+/**
+ * 平台策略：POSIX mode 位是否构成有效保护。
+ *
+ * **Windows 上不成立**（`chmod`/`mode` 只有只读位语义，`stat().mode` 恒为 0666/0444），
+ * 因此 doctor 在 win32 上对权限项**显式 SKIP**（写入 `skipped`），而不是对 0666 判 FAIL。
+ * 威胁模型差异见 `ONBOARDING.md` 的 Windows 章节：Windows 依赖用户配置目录的 ACL
+ * （`%USERPROFILE%` 默认仅本人可读）与 OS 会话边界，等价性由平台保证而非 fleet 断言。
+ *
+ * 参数可注入（默认 `process.platform`），便于在任意平台确定性地测试两种分支。
+ */
+export function permissionsApplicable(platform: string = process.platform): boolean {
+  return platform !== 'win32';
+}
+
 /** core `Mebular` 需要的加密材料（用户主密钥）。 */
 export interface FleetEncryption {
   userMasterKey: Uint8Array;
@@ -33,7 +47,7 @@ export async function writeMasterKeyFile(path: string, encryption: FleetEncrypti
   };
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(record), { mode: 0o600 });
-  await chmod(path, 0o600);
+  if (permissionsApplicable()) await chmod(path, 0o600);
 }
 
 /** 读取主密钥文件（不校验权限；权限由 doctor 断言）。 */
@@ -144,11 +158,35 @@ export function validateFleetConfig(input: unknown): string[] {
   return errors;
 }
 
+/**
+ * 解析 `--agent name:kind[,name:kind…]`（+ `--agent-command` / `--agent-base-args`）。
+ * `command` agent 一律经调用方给定的 `command`（推荐 `process.execPath`）+ `baseArgs`
+ * （如 fixture 路径）调用——**不依赖 shebang/可执行位**，Windows 亦然。
+ */
+export function parseAgentSpecs(
+  value: string,
+  options: { command?: string; baseArgs?: readonly string[] } = {},
+): FleetAgentConfig[] {
+  return value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => {
+      const [name, kind] = entry.split(':');
+      const agent: FleetAgentConfig = { name: name || 'echo', kind: (kind as FleetAgentKind) || 'echo' };
+      if (agent.kind === 'command') {
+        if (options.command !== undefined) agent.command = options.command;
+        if (options.baseArgs !== undefined && options.baseArgs.length > 0) agent.baseArgs = [...options.baseArgs];
+      }
+      return agent;
+    });
+}
+
 /** 保存配置（0600）。 */
 export async function saveFleetConfig(path: string, config: FleetConfig): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(config, null, 2), { mode: 0o600 });
-  await chmod(path, 0o600);
+  if (permissionsApplicable()) await chmod(path, 0o600);
 }
 
 /** 加载配置（形状非法即抛错）。 */

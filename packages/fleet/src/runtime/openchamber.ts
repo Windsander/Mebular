@@ -1,10 +1,10 @@
-// OpenChamber Agent 适配器（M4，次优先）：**接口先行的接缝**。
+// OpenChamber Agent 适配器（M4）：**中立接口 + 执行器**。
 //
-// 调研结论（详见 `packages/fleet/OPENCHAMBER-SEAM.md`）：当前 OpenChamber 没有可被 fleet 进程
-// 稳定调用的“运行一次会话/提示”外部接缝——in-app agent-tool 端点需要 OpenChamber 管理的
-// `OPENCHAMBER_AGENT_TOOL_TOKEN`，本地 HTTP API 需要 UI 鉴权，`oc-bridge.js` 只存在于 OpenChamber
-// 进程内。因此这里**只定义接口**：由 OpenChamber 侧提供一个 seam 实现（插件/MCP/受鉴权的会话 API），
-// fleet 侧不臆造行为、不硬编码私有 token。
+// fleet 对 provider 毫不知情：`OpenChamberAgent` 只依赖注入的 `OpenChamberSessionSeam`（prompt →
+// {text, sessionId?, error?}），选项仅 `timeoutMs/maxOutputBytes/cwd/model/agent`。具体 provider
+// 由调用方注入（字段与错误码见 `packages/fleet/OPENCHAMBER-SEAM.md`）。
+// 当前 provider #1 是 oc-hermes-bridge daemon 的 `POST /agent/run-once`（见 `openchamber-http.ts`
+// 的中立 HTTP seam）；将来换成独立 provider 或 OpenChamber 官方 API，**不改本文件**。
 
 import type { TaskState } from '../model.js';
 import type { ExecutionOutcome, TaskExecutor } from './executor.js';

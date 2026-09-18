@@ -103,6 +103,35 @@ fleet doctor --dir ~/.fleet
 - 未授权设备签发的 grant **不被采纳**（R-a：不能给出自己没有的 / 非引导签发者）；撤销过的 grantId **不能复用**（R-d）。
 - B 端只需 `--peer-device device-A`（用于 B→A 回传的 bootstrap 白名单）；结果事件由 A 的图上 grant 决定是否收下。
 
+### 完整 A→B（仅图授权，无配置白名单）
+
+```bash
+# 1) A 上车：自任引导签发者，登记 B 但不写配置白名单
+fleet onboard --dir ~/.fleet --device device-A --peer-device device-B \
+  --listen /ip4/0.0.0.0/tcp/4001 --policy-issuer device-A --no-config-grant --agent echo:echo
+
+# 2) A 为 B 签 grant（A 自检：namespace 已授权 PASS；peer 可达 SKIP）
+fleet grant --dir ~/.fleet --to device-B --namespace tasks
+# → {"ok":true,"role":"grant","grantId":"<uuid>","subject":"device-B","namespaces":["tasks"]}
+
+# 3) A 起服务（把 multiaddr 里的 0.0.0.0 换成 A 的 LAN IP 给 B）
+fleet serve --dir ~/.fleet --submit 5 --target-agent echo --expect-prefix ECHO: \
+  --wait-sync-ms 30000 --timeout-ms 40000 --linger-ms 30000
+
+# 4) B 上车并导入同一主密钥；把 A 设为引导签发者 → B 采纳 A 转授的 grant
+#    （B→A 回传走 --peer-device 的 bootstrap 白名单）
+fleet onboard --dir ~/.fleet --device device-B --peer-device device-A \
+  --peer-addr /ip4/<A_LAN_IP>/tcp/4001/p2p/<A_PEER_ID> --policy-issuer device-A \
+  --master-key /path/to/master-key.json --agent echo:echo
+
+# 5) B 同步并执行（B 已在此采纳 A 的图上 grant）
+fleet work --dir ~/.fleet --timeout-ms 30000
+# → {"role":"work","device":"device-B","executed":5}
+
+# 6) A 侧确认 done=5 / resultsMatch=true；B 在线时 B 自检 ok=true skipped=[]
+fleet doctor --dir ~/.fleet
+```
+
 ## 5. `fleet doctor` 检查项
 
 | 检查 | PASS 条件 | 不可判定时 |

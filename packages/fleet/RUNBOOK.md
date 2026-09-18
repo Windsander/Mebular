@@ -5,6 +5,7 @@
 > 隐私红线与协议语义见仓库根 [`SEALING.md`](../../SEALING.md)；fleet 只消费 `@mebular/core` 公共 API。
 >
 > **设备上车**（安装/主密钥分发/`onboard`/`doctor`）见 [`ONBOARDING.md`](./ONBOARDING.md)——本文件的手工命令是它的底层等价形态。
+> **图上授权（G1：`fleet grant`/`revoke`，配置白名单仅 bootstrap）** 见 [`ONBOARDING.md §4`](./ONBOARDING.md)。
 
 ## 0. 前置
 

@@ -45,6 +45,11 @@ const COLORS = {
   warning: '#d55e00',
 };
 
+function rgba(hex, alpha) {
+  const n = parseInt(String(hex).replace('#', ''), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
+
 function hashString(text) {
   let hash = 2166136261;
   for (let i = 0; i < String(text).length; i += 1) {
@@ -89,6 +94,7 @@ export class StarStage {
     this.starsField = null;
     this.depths = new Map();
     this.screen = new Map();
+    this.fleets = [];
     this.pointerNx = 0.5;
     this.pointerNy = 0.5;
     this.targetNx = 0.5;
@@ -342,6 +348,7 @@ export class StarStage {
     this._computeScreen(time);
     this._drawStars(time);
     this._drawEdges(time);
+    this._drawFleets(time);
     this._drawNodes(time);
   }
 
@@ -379,86 +386,221 @@ export class StarStage {
     return { color: COLORS.mine, dashed: false, width: 1.8 };
   }
 
+  /** 航道几何：端点留白 + 双向平行偏移 + 弧线（含深度差偏置） */
+  _laneGeometry(edge) {
+    const points = this._edgePoints(edge);
+    if (!points) return null;
+    const { from, to } = points;
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const ux = dx / dist;
+    const uy = dy / dist;
+    const bothWays = this.scene.edges.some(
+      (other) => other.from === edge.to && other.to === edge.from && other.kind !== edge.kind,
+    );
+    const side = edge.kind === 'theirs' ? 1 : -1;
+    let nx = 0;
+    let ny = 0;
+    if (bothWays) {
+      // 偏移按规范方向计算，双向各自平行
+      const forward = edge.from <= edge.to;
+      const cdx = forward ? dx : -dx;
+      const cdy = forward ? dy : -dy;
+      const cdist = Math.hypot(cdx, cdy) || 1;
+      const off = 7 * side;
+      nx = (-cdy / cdist) * off;
+      ny = (cdx / cdist) * off;
+    }
+    const pad = 24;
+    const sx = from.x + ux * pad + nx;
+    const sy = from.y + uy * pad + ny;
+    const ex = to.x - ux * pad + nx;
+    const ey = to.y - uy * pad + ny;
+    // 空间弧线：中点法线弓高（模拟 3D 航道）+ 深度差纵向偏置（远端更低/更高）
+    const mx = (sx + ex) / 2;
+    const my = (sy + ey) / 2;
+    const bow = Math.min(48, dist * 0.15) * side;
+    const depthBias = ((to.depth ?? 0.6) - (from.depth ?? 0.6)) * 26;
+    const cx = mx - uy * bow + nx * 0.5;
+    const cy = my + ux * bow + ny * 0.5 + depthBias;
+    return { sx, sy, ex, ey, cx, cy, ux, uy, dist, bothWays, from, to };
+  }
+
+  _bezierAt(g, p) {
+    const q = 1 - p;
+    return {
+      x: q * q * g.sx + 2 * q * p * g.cx + p * p * g.ex,
+      y: q * q * g.sy + 2 * q * p * g.cy + p * p * g.ey,
+    };
+  }
+
+  _bezierTangent(g, p) {
+    const q = 1 - p;
+    return {
+      x: 2 * q * (g.cx - g.sx) + 2 * p * (g.ex - g.cx),
+      y: 2 * q * (g.cy - g.sy) + 2 * p * (g.ey - g.cy),
+    };
+  }
+
+  /** 触发一次“舰队出航”（同步完成/手动同步时调用） */
+  launchFleet(fromId, toId, options = {}) {
+    if (this.reducedMotion || fromId === toId) return;
+    const kind = options.kind === 'theirs' ? 'theirs' : 'mine';
+    const g = this._laneGeometry({ from: fromId, to: toId, kind, online: true, revoked: false, pending: 0 });
+    if (!g) return;
+    this.fleets.push({
+      geometry: g,
+      kind,
+      startedAt: performance.now(),
+      duration: 1700,
+      ships: Math.max(2, Math.min(5, options.ships ?? 4)),
+    });
+    if (this.fleets.length > 8) this.fleets.splice(0, this.fleets.length - 8);
+  }
+
   _drawEdges(time) {
     const ctx = this.ctx;
     ctx.lineCap = 'round';
     for (const edge of this.scene.edges) {
-      const points = this._edgePoints(edge);
-      if (!points) continue;
-      const { from, to } = points;
-      const style = this._edgeStyle(edge);
-      const dx = to.x - from.x;
-      const dy = to.y - from.y;
-      const dist = Math.hypot(dx, dy) || 1;
-      const ux = dx / dist;
-      const uy = dy / dist;
-      // 双向授权时向法线偏移，避免两条边重合。
-      // 偏移必须基于**规范方向**（按 id 排序），否则正反两向各自按自身方向取
-      // 法线会算出同一个偏移量，两条线仍完全重合、后画的盖住先画的。
-      const bothWays = this.scene.edges.some(
-        (other) => other.from === edge.to && other.to === edge.from && other.kind !== edge.kind,
-      );
-      const side = edge.kind === 'theirs' ? 1 : -1;
-      let nx = 0;
-      let ny = 0;
-      if (bothWays) {
-        const forward = edge.from <= edge.to;
-        const cdx = forward ? dx : -dx;
-        const cdy = forward ? dy : -dy;
-        const cdist = Math.hypot(cdx, cdy) || 1;
-        const off = 7 * side;
-        nx = (-cdy / cdist) * off;
-        ny = (cdx / cdist) * off;
-      }
-      const startX = from.x + ux * 20 + nx;
-      const startY = from.y + uy * 20 + ny;
-      const endX = to.x - ux * 20 + nx;
-      const endY = to.y - uy * 20 + ny;
-
-      ctx.beginPath();
-      ctx.setLineDash(style.dashed ? [5, 6] : []);
-      const avgDepth = ((from.depth ?? 0.6) + (to.depth ?? 0.6)) / 2;
+      const g = this._laneGeometry(edge);
+      if (!g) continue;
+      const avgDepth = ((g.from.depth ?? 0.6) + (g.to.depth ?? 0.6)) / 2;
       const depthFade = 0.45 + avgDepth * 0.75;
-      ctx.strokeStyle = style.color;
-      ctx.globalAlpha = (edge.revoked ? 0.5 : edge.online ? 0.85 : 0.55) * depthFade;
-      ctx.lineWidth = style.width * (0.55 + avgDepth * 0.75);
-      ctx.moveTo(startX, startY);
-      ctx.lineTo(endX, endY);
+      const online = edge.online && !edge.revoked;
+      const baseColor = edge.revoked ? COLORS.revoked
+        : !edge.online ? COLORS.offline
+        : edge.kind === 'theirs' ? COLORS.theirs : COLORS.mine;
+      const alpha = (edge.revoked ? 0.45 : edge.online ? 0.85 : 0.5) * depthFade;
+      const width = (edge.revoked ? 1 : edge.online ? 1.8 : 1.2) * (0.55 + avgDepth * 0.75);
+
+      // 航道：外发光底 + 细点状航线 + 沿线渐变
+      if (online) {
+        ctx.beginPath();
+        ctx.moveTo(g.sx, g.sy);
+        ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
+        ctx.strokeStyle = rgba(baseColor, 0.07 * depthFade);
+        ctx.lineWidth = width * 3.4;
+        ctx.stroke();
+      }
+
+      const grad = ctx.createLinearGradient(g.sx, g.sy, g.ex, g.ey);
+      grad.addColorStop(0, rgba(baseColor, 0));
+      grad.addColorStop(0.12, rgba(baseColor, alpha));
+      grad.addColorStop(0.88, rgba(baseColor, alpha));
+      grad.addColorStop(1, rgba(baseColor, 0));
+      ctx.beginPath();
+      ctx.setLineDash(online ? [1.5, 6] : [5, 6]);
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = width;
+      ctx.moveTo(g.sx, g.sy);
+      ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
       ctx.stroke();
       ctx.setLineDash([]);
-      ctx.globalAlpha = 1;
 
-      // 箭头
-      const ax = endX;
-      const ay = endY;
-      const angle = Math.atan2(uy, ux);
-      ctx.fillStyle = style.color;
-      ctx.globalAlpha = edge.revoked ? 0.5 : 0.9;
+      // 航向标：小箭标（替代大箭头）
+      const tip = this._bezierAt(g, 0.93);
+      const tan = this._bezierTangent(g, 0.93);
+      const ang = Math.atan2(tan.y, tan.x);
+      const size = (edge.revoked ? 4 : 6) * (0.6 + avgDepth * 0.6);
+      ctx.globalAlpha = (edge.revoked ? 0.45 : edge.online ? 0.85 : 0.55) * depthFade;
+      ctx.fillStyle = baseColor;
       ctx.beginPath();
-      ctx.moveTo(ax, ay);
-      ctx.lineTo(ax - 8 * Math.cos(angle - 0.4), ay - 8 * Math.sin(angle - 0.4));
-      ctx.lineTo(ax - 8 * Math.cos(angle + 0.4), ay - 8 * Math.sin(angle + 0.4));
+      ctx.moveTo(tip.x, tip.y);
+      ctx.lineTo(tip.x - size * Math.cos(ang - 0.42), tip.y - size * Math.sin(ang - 0.42));
+      ctx.lineTo(tip.x - size * 0.55 * Math.cos(ang), tip.y - size * 0.55 * Math.sin(ang));
+      ctx.lineTo(tip.x - size * Math.cos(ang + 0.42), tip.y - size * Math.sin(ang + 0.42));
       ctx.closePath();
       ctx.fill();
       ctx.globalAlpha = 1;
 
-      // 同步粒子：在线且有待发事件时流动
-      if (edge.online && !edge.revoked && (edge.pending ?? 0) > 0) {
-        const speed = 0.35;
+      // 航线灯：在线且有待发事件时沿航道流动
+      if (online && (edge.pending ?? 0) > 0) {
+        const speed = 0.32;
         const count = Math.min(4, 1 + Math.floor((edge.pending ?? 0) / 4));
         for (let i = 0; i < count; i += 1) {
-          const t = ((time * speed + i / count) % 1);
-          const px = startX + (endX - startX) * t;
-          const py = startY + (endY - startY) * t;
+          const p = (time * speed + i / count) % 1;
+          const pos = this._bezierAt(g, p);
           ctx.beginPath();
-          ctx.fillStyle = style.color;
-          ctx.globalAlpha = 0.9 * Math.sin(Math.PI * t);
-          ctx.arc(px, py, 2.4, 0, Math.PI * 2);
+          ctx.fillStyle = baseColor;
+          ctx.globalAlpha = 0.85 * Math.sin(Math.PI * p) * depthFade;
+          ctx.arc(pos.x, pos.y, 2.1, 0, Math.PI * 2);
           ctx.fill();
         }
         ctx.globalAlpha = 1;
       }
     }
+  }
+
+  /** 舰队：沿航道出航的小编队；抵达后绽放，随后消失 */
+  _drawFleets(time) {
+    if (this.fleets.length === 0) return;
+    const ctx = this.ctx;
+    const now = performance.now();
+    for (const fleet of this.fleets) {
+      const elapsed = now - fleet.startedAt;
+      const g = fleet.geometry;
+      const color = fleet.kind === 'theirs' ? COLORS.theirs : COLORS.mine;
+      const norm = { x: -(g.ey - g.sy), y: g.ex - g.sx };
+      const nlen = Math.hypot(norm.x, norm.y) || 1;
+      norm.x /= nlen;
+      norm.y /= nlen;
+
+      const offsets = [-9, -3, 3, 9];
+      for (let i = 0; i < fleet.ships; i += 1) {
+        const stagger = i * 0.09;
+        const p = (elapsed / fleet.duration - stagger) / (1 - 0.09 * (fleet.ships - 1));
+        if (p <= 0 || p > 1.02) continue;
+        const pos = this._bezierAt(g, Math.min(1, p));
+        const tan = this._bezierTangent(g, Math.min(1, p));
+        const ang = Math.atan2(tan.y, tan.x);
+        const lat = offsets[i % offsets.length] * (1 - p * 0.25) * 0.7;
+        const px = pos.x + norm.x * lat;
+        const py = pos.y + norm.y * lat;
+
+        // 尾迹
+        const tail = this._bezierAt(g, Math.max(0, p - 0.05));
+        ctx.beginPath();
+        ctx.moveTo(tail.x + norm.x * lat, tail.y + norm.y * lat);
+        ctx.lineTo(px, py);
+        ctx.strokeStyle = rgba(color, 0.35 * (1 - p * 0.5));
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+
+        // 舰体：细长三角，朝向航向
+        ctx.save();
+        ctx.translate(px, py);
+        ctx.rotate(ang);
+        ctx.fillStyle = rgba(color, 0.95);
+        ctx.beginPath();
+        ctx.moveTo(5.2, 0);
+        ctx.lineTo(-2.6, -1.9);
+        ctx.lineTo(-1.2, 0);
+        ctx.lineTo(-2.6, 1.9);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // 抵达绽放
+      const bp = (elapsed - fleet.duration) / 420;
+      if (bp > 0 && bp < 1) {
+        const radius = 5 + bp * 16;
+        ctx.beginPath();
+        ctx.arc(g.ex, g.ey, radius, 0, Math.PI * 2);
+        ctx.strokeStyle = rgba(color, 0.7 * (1 - bp));
+        ctx.lineWidth = 1.6;
+        ctx.stroke();
+        const bloom = ctx.createRadialGradient(g.ex, g.ey, 0, g.ex, g.ey, radius * 1.6);
+        bloom.addColorStop(0, rgba(color, 0.35 * (1 - bp)));
+        bloom.addColorStop(1, rgba(color, 0));
+        ctx.fillStyle = bloom;
+        ctx.beginPath();
+        ctx.arc(g.ex, g.ey, radius * 1.6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    this.fleets = this.fleets.filter((f) => now - f.startedAt < f.duration + 600);
   }
 
   _drawNodes(time) {

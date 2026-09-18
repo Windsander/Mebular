@@ -599,6 +599,8 @@ async function handleDomainToggle(device, ns, on, input) {
 
 async function handleDeviceAction(action, device) {
   if (action === 'sync') {
+    const self = state.overview?.device?.deviceId;
+    if (self) stage.launchFleet(self, device.deviceId, { kind: 'mine', ships: 3 });
     await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/sync`, {}, '已触发同步（有 pending 时立即开会话）');
   } else if (action === 'connect') {
     const address = window.prompt('对方的 multiaddr（含 /p2p/…）：', '');
@@ -936,8 +938,25 @@ function startEvents() {
     stage.pulse();
     scheduleRefresh();
   };
+  // 同步完成 → 按数据流方向让舰队沿航道出航（发/收可各自成队）
+  const onSyncPulse = (event) => {
+    onPulse();
+    try {
+      const data = JSON.parse(event?.data ?? '{}');
+      const self = state.overview?.device?.deviceId;
+      const peer = data.peerDeviceId;
+      if (!self || !peer || self === peer) return;
+      const sent = Number(data.sentEvents ?? 0);
+      const received = Number(data.receivedEvents ?? 0);
+      if (sent > 0) stage.launchFleet(self, peer, { kind: 'mine', ships: Math.min(5, 2 + sent) });
+      if (received > 0) stage.launchFleet(peer, self, { kind: 'theirs', ships: Math.min(5, 2 + received) });
+      if (sent === 0 && received === 0) stage.launchFleet(self, peer, { kind: 'mine', ships: 2 });
+    } catch {
+      // 非 JSON 负载：仅做脉冲
+    }
+  };
   eventSource.addEventListener('status', onPulse);
-  eventSource.addEventListener('sync', onPulse);
+  eventSource.addEventListener('sync', onSyncPulse);
   eventSource.addEventListener('sync-failed', onPulse);
   eventSource.onerror = () => {
     // EventSource 会自动重连；网络关闭时保持静默

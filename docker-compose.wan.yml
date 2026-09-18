@@ -1,0 +1,30 @@
+# L2 · NAT 仿真（三容器）：relay 公开可达；peerA/peerB 各自隔离网络、**无入站端口**（NAT 后）。
+# 仅用于 CI/本机 docker 环境；脚本 `scripts/verify-wan-l2-docker.mjs` 驱动。
+services:
+  relay:
+    image: node:24
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: ["node", "scripts/wan-nat-relay.mjs"]
+    networks: [net-a, net-b]
+  peera:
+    image: node:24
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: ["node", "scripts/wan-nat-peer.mjs", "A"]
+    networks: [net-a]
+    depends_on: [relay]
+  peerb:
+    image: node:24
+    working_dir: /app
+    volumes:
+      - ./:/app
+    command: ["node", "scripts/wan-nat-peer.mjs", "B"]
+    networks: [net-b]
+    depends_on: [relay]
+
+networks:
+  net-a: {}
+  net-b: {}

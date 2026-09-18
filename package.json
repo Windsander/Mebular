@@ -66,6 +66,8 @@
     "verify:wan:relay": "node scripts/wan-sync.mjs --relay",
     "verify:wan:cross": "node scripts/wan-sync.mjs cross",
     "verify:wan:cross:selftest": "node scripts/wan-sync.mjs selftest",
+    "verify:wan:l2": "node scripts/verify-wan-l2.mjs",
+    "verify:wan:l2:docker": "node scripts/verify-wan-l2-docker.mjs",
     "verify:wan:cross:selftest:isolated": "node scripts/wan-sync.mjs selftest-isolated",
     "bench:snapshot": "node scripts/bench-snapshot.mjs",
     "verify:mcp:stdio": "node scripts/verify-mcp-stdio.mjs",

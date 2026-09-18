@@ -67,3 +67,6 @@ examples/quickstart/.data/
 
 # Fleet CLI 預設設備目錄（內含 0600 主密鑰；生產請用 ~/.fleet）
 .fleet/
+
+# WAN NAT 仿真临时状态
+.wan-nat/

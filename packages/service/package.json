@@ -1,0 +1,26 @@
+{
+  "name": "@mebular/service",
+  "version": "0.1.0",
+  "description": "Mebular 常驻组件服务化：平台单元生成（launchd/systemd/Task Scheduler）+ install/uninstall/status/logs + 进程心跳",
+  "license": "MIT",
+  "private": false,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

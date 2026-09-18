@@ -31,6 +31,11 @@ export const DEVICE_REVOKE_EVENT = 'device_revoke';
 export const POLICY_ISSUER_DECLARE_EVENT = 'policy_issuer_declare';
 /** M1：持久、签名的**成员资格**记录（订阅=成员资格）。 */
 export const NAMESPACE_MEMBERSHIP_EVENT = 'namespace_membership';
+/**
+ * 2b：**交接记录**（退订方签名写入 `__policy__`，可审计）。**不参与授权/成员推导**
+ * （仅审计产物），因此不改变 `derivePolicyState` 的结果。
+ */
+export const NAMESPACE_HANDOFF_EVENT = 'namespace_handoff';
 
 /** 授予记录：把 `namespaces` 授予 `subject` 设备。 */
 export interface NamespaceGrantRecord {
@@ -89,6 +94,26 @@ export interface NamespaceMembershipRecord {
   namespace: string;
   /** true=在册，false=注销 */
   active: boolean;
+  issuedAt: number;
+  note?: string;
+}
+
+/**
+ * 2b 交接记录：退订方在**本地彻底清理前**签名写入 `__policy__` 的审计产物。
+ * 记录被指定的继任者、验证结论（`forced` 与未覆盖作者明细）与时间。
+ * 仅审计：不参与 `derivePolicyState`（授权/吊销/签发者/成员）。
+ */
+export interface NamespaceHandoffRecord {
+  handoffId: string;
+  namespace: string;
+  /** 继任者设备 ID */
+  successor: string;
+  /** true = 跳过全量 ack 门禁（仅本地 CLI 可用） */
+  forced: boolean;
+  /** 校验时退订方仍持有、继任者尚未 ack 的事件数（0 = 已全量覆盖） */
+  pendingCount: number;
+  /** 未完全覆盖的作者（诊断） */
+  missingAuthors?: string[];
   issuedAt: number;
   note?: string;
 }

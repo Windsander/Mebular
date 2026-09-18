@@ -1,3 +1,6 @@
+import { Nebula } from './nebula.js';
+import { Starfield } from './stars.js';
+
 // 星图舞台（vanilla Canvas2D，零依赖）
 //
 // 视觉语言参考官网第二页『网络舞台』：视差星空 + 高亮设备星 + 方向分色连线 +
@@ -74,6 +77,16 @@ export class StarStage {
     this.pulseUntil = 0;
     this.onHover = null;
     this.onSelect = null;
+    this.reducedMotion = typeof window.matchMedia === 'function'
+      && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    this.visualQuality = 'high';
+    this.degradeStreak = 0;
+    this.lastTickAt = 0;
+    this.lastBackdropAt = 0;
+    this.bgCanvas = null;
+    this.bgCtx = null;
+    this.nebula = null;
+    this.starsField = null;
 
     this._tick = this._tick.bind(this);
     this._resize = this._resize.bind(this);
@@ -82,6 +95,7 @@ export class StarStage {
     this._click = this._click.bind(this);
 
     this._resize();
+    this._initBackdrop();
     window.addEventListener('resize', this._resize);
     canvas.addEventListener('pointermove', this._pointerMove);
     canvas.addEventListener('pointerleave', this._pointerLeave);
@@ -94,6 +108,7 @@ export class StarStage {
       edges: Array.isArray(scene?.edges) ? scene.edges : [],
     };
     this._layout();
+    if (!this.running || this.reducedMotion) this._draw(performance.now() / 1000);
   }
 
   setSelected(deviceId) {
@@ -102,12 +117,18 @@ export class StarStage {
 
   /** 触发一次本机脉冲（SSE 状态/同步事件到达时） */
   pulse(durationMs = 1200) {
+    if (this.reducedMotion) return;
     this.pulseUntil = performance.now() + durationMs;
   }
 
   start() {
     if (this.running) return;
     this.running = true;
+    if (this.reducedMotion) {
+      this._draw(performance.now() / 1000);
+      this.raf = 0;
+      return;
+    }
     this.raf = requestAnimationFrame(this._tick);
   }
 
@@ -134,6 +155,30 @@ export class StarStage {
     this.canvas.height = Math.floor(this.height * this.dpr);
     this._seedStars();
     this._layout();
+    this._resizeBackdrop();
+  }
+
+  _initBackdrop() {
+    const bg = this.canvas.parentElement?.querySelector?.('canvas.stage-bg');
+    if (!bg) return;
+    this.bgCanvas = bg;
+    this.bgCtx = bg.getContext('2d');
+    this.nebula = new Nebula(bg, {
+      baseParallax: 0.03, mouseInfluence: 1.0,
+      viewLon: 0.5, viewTilt: 0.6, viewScale: 0.7,
+      mistEnabled: !this.reducedMotion, mistAlpha: 0.08, mistParallax: 0.5,
+      seed: Date.now(),
+    });
+    this.starsField = new Starfield(bg, { mouseInfluence: 1.0, maxStars: 220, seed: Date.now() + 1 });
+    this._resizeBackdrop();
+  }
+
+  _resizeBackdrop() {
+    if (!this.bgCanvas) return;
+    this.bgCanvas.width = Math.max(1, Math.floor(this.width));
+    this.bgCanvas.height = Math.max(1, Math.floor(this.height));
+    if (this.nebula && typeof this.nebula._resize === 'function') this.nebula._resize();
+    if (this.starsField && typeof this.starsField._resize === 'function') this.starsField._resize();
   }
 
   _seedStars() {
@@ -201,6 +246,10 @@ export class StarStage {
       this.canvas.style.cursor = hit ? 'pointer' : 'crosshair';
     }
     if (this.onHover) this.onHover(hit, x, y);
+    const nx = rect.width ? x / rect.width : 0.5;
+    const ny = rect.height ? y / rect.height : 0.5;
+    if (this.nebula) { this.nebula.mouseX = nx; this.nebula.mouseY = ny; }
+    if (this.starsField) { this.starsField.mouseX = nx; this.starsField.mouseY = ny; }
   }
 
   _pointerLeave() {
@@ -216,11 +265,32 @@ export class StarStage {
 
   _tick(now) {
     if (!this.running) return;
-    const dt = Math.min(0.05, (now - this.startTime) / 1000);
-    this.startTime = now;
-    this._stepStars(dt);
+    const frameMs = this.lastTickAt ? now - this.lastTickAt : 16;
+    this.lastTickAt = now;
+    if (!this.reducedMotion) this._trackQuality(frameMs);
     this._draw(now / 1000);
+    if (this.reducedMotion) {
+      this.raf = 0;
+      return;
+    }
     this.raf = requestAnimationFrame(this._tick);
+  }
+
+  /** 帧率自适应降级：high(星云+雾) → balanced(星云无雾) → low(仅星空) */
+  _trackQuality(frameMs) {
+    if (frameMs > 22) this.degradeStreak += 1;
+    else this.degradeStreak = Math.max(0, this.degradeStreak - 1);
+    if (this.degradeStreak < 90) return;
+    this.degradeStreak = 0;
+    if (this.visualQuality === 'high') {
+      this.visualQuality = 'balanced';
+      if (this.nebula) this.nebula.options.mistEnabled = false;
+    } else if (this.visualQuality === 'balanced') {
+      this.visualQuality = 'low';
+    } else {
+      return;
+    }
+    console.info(`[console] 视觉降级：${this.visualQuality}`);
   }
 
   _stepStars(dt) {
@@ -242,16 +312,21 @@ export class StarStage {
   }
 
   _drawStars(time) {
-    const ctx = this.ctx;
-    for (const star of this.stars) {
-      const alpha = 0.25 + star.depth * 0.45 * (0.6 + 0.4 * Math.sin(time * star.twinkle + star.phase));
-      ctx.globalAlpha = Math.max(0.05, Math.min(0.9, alpha));
-      ctx.fillStyle = star.depth > 0.75 ? '#cfe2ff' : '#8fa6d8';
-      ctx.beginPath();
-      ctx.arc(star.x, star.y, star.r, 0, Math.PI * 2);
-      ctx.fill();
+    const bg = this.bgCtx;
+    if (!bg || !this.starsField) return;
+    const now = performance.now();
+    const dt = this.lastBackdropAt ? Math.min(0.05, (now - this.lastBackdropAt) / 1000) : 0.016;
+    this.lastBackdropAt = now;
+    if (this.nebula && this.visualQuality !== 'low') {
+      this.nebula.update(dt);
+      this.nebula.render(bg);
+    } else {
+      bg.fillStyle = '#03050a';
+      bg.fillRect(0, 0, bg.canvas.width, bg.canvas.height);
     }
-    ctx.globalAlpha = 1;
+    this.starsField.time = time;
+    this.starsField.update(dt);
+    this.starsField.render(bg);
   }
 
   _edgePoints(edge) {

@@ -1,7 +1,7 @@
 // Mebular 控制台前端（vanilla ES module，零依赖）
 //
 // 三个视图：星图（Canvas2D）/ 域视图（表格）/ 审计时间线。
-// 右侧设备卡；顶栏本机身份与添加设备。
+// 右侧设备卡；顶栏本机身份与连接对端（本机视角）。
 // D1 只读；写交互由服务端 features.writes 开关控制（D2 打开）。
 //
 // `?mock=1` 使用内置演示数据，便于无网络验收。
@@ -109,7 +109,7 @@ function computeDegraded() {
   if (state.error) return `无法连接本机 serve：${state.error.message}`;
   const status = state.overview?.status;
   if (!status) return '尚未取得状态';
-  if (!status.running) return '网络未启用：仅显示本地记忆与授权，连接与同步不可用';
+  if (!status.running) return '未启用 P2P：仅显示本机记忆与授权，连接与同步不可用';
   return null;
 }
 
@@ -140,7 +140,7 @@ function renderTopbar() {
     selfEl.textContent = '本机 · …';
   }
   const online = Boolean(status?.running);
-  onlineEl.textContent = online ? `${ICONS.online} 在线` : `${ICONS.offline} 网络关闭`;
+  onlineEl.textContent = online ? `${ICONS.online} P2P 已启用` : `${ICONS.offline} P2P 未启用`;
   onlineEl.className = `badge ${online ? 'badge-ok' : 'badge-muted'}`;
   memEl.textContent = status ? `记忆 ${status.nodeCount}` : '记忆 …';
   memEl.className = 'badge badge-muted';
@@ -263,8 +263,8 @@ function renderEmptyState() {
   el.hidden = !show;
   if (show) {
     el.innerHTML = '<strong>还没有其他设备</strong>'
-      + '这台设备的网络舞台目前只有你自己。<br />'
-      + '点击右上角「＋ 添加设备」接入对端，或先在对面运行 serve。';
+      + '我的关系图目前只有本机。<br />'
+      + '点击右上角「＋ 连接新对端」与对端建立连接；本视图只显示你与已知对端的关系。';
   }
 }
 
@@ -372,7 +372,10 @@ function populateAuditFilters() {
 function actionLabel(type) {
   if (type === 'namespace_grant') return '授权';
   if (type === 'namespace_revoke') return '撤销域';
-  if (type === 'device_revoke') return '吊销设备';
+  if (type === 'device_revoke') return '屏蔽设备';
+  if (type === 'policy_issuer_declare') return '声明签发者';
+  if (type === 'namespace_membership') return '成员变更';
+  if (type === 'namespace_handoff') return '退订交接';
   return type;
 }
 
@@ -387,8 +390,22 @@ function describeEvent(event) {
       + `${event.subject ? `（对象 ${escapeHtml(event.subject)}）` : ''}`;
   }
   if (event.type === 'device_revoke') {
-    return `签发者 <b>${escapeHtml(event.issuer)}</b> 吊销设备 <b>${escapeHtml(event.subject)}</b>`
-      + `${event.valid ? '' : ' · 已不再吊销'}`;
+    return `签发者 <b>${escapeHtml(event.issuer)}</b> 屏蔽设备 <b>${escapeHtml(event.subject)}</b>（本机不再采纳其政策记录）`
+      + `${event.valid ? '' : ' · 已不再屏蔽'}`;
+  }
+  if (event.type === 'policy_issuer_declare') {
+    return `签发者 <b>${escapeHtml(event.issuer)}</b> 在图上声明 <b>${escapeHtml(event.subject)}</b> 为引导签发者`
+      + `<span class="muted">${event.valid ? '' : ' · 已不再生效'}</span>`;
+  }
+  if (event.type === 'namespace_membership') {
+    const ns = `<span class="ns-chip" style="background:${namespaceColor(event.namespace ?? 'default')}">${escapeHtml(event.namespace ?? 'default')}</span>`;
+    return `签发者 <b>${escapeHtml(event.issuer)}</b> 将 <b>${escapeHtml(event.subject)}</b> ${event.active === false ? '移出' : '加入'} ${ns} 成员`
+      + `<span class="muted">${event.valid ? '' : ' · 已不再生效'}</span>`;
+  }
+  if (event.type === 'namespace_handoff') {
+    const ns = `<span class="ns-chip" style="background:${namespaceColor(event.namespace ?? 'default')}">${escapeHtml(event.namespace ?? 'default')}</span>`;
+    return `签发者 <b>${escapeHtml(event.issuer)}</b> 将 ${ns} 交接给 <b>${escapeHtml(event.subject ?? '—')}</b>`
+      + `<span class="muted">${event.forced ? ' · forced' : ''} · 未覆盖 ${event.pendingCount ?? 0}</span>`;
   }
   return '';
 }
@@ -406,7 +423,7 @@ function renderDeviceCard() {
   const device = state.devices.find((d) => d.deviceId === state.selected.deviceId) ?? state.selected;
   const isSelf = device.deviceId === state.overview?.device?.deviceId;
   const statusChips = [];
-  statusChips.push(device.revoked ? `${ICONS.revoked} 已吊销` : (device.online ? `${ICONS.online} 在线` : `${ICONS.offline} 离线`));
+  statusChips.push(device.revoked ? `${ICONS.revoked} 已被我屏蔽` : (device.online ? `${ICONS.online} 与我连接中` : `${ICONS.offline} 未连接`));
   if (device.pendingEventCount !== null && device.pendingEventCount !== undefined) {
     statusChips.push(`待发 ${device.pendingEventCount}`);
   }
@@ -433,9 +450,9 @@ function renderDeviceCard() {
     <div class="card-actions">
       <button class="btn btn-small" data-action="sync" ${writes && device.online ? '' : 'disabled'}>立即同步</button>
       <button class="btn btn-small" data-action="connect" ${writes && !device.online ? '' : 'disabled'}>连接</button>
-      <button class="btn btn-small" data-action="disconnect" ${writes && device.online ? '' : 'disabled'}>断开</button>
+      <button class="btn btn-small" data-action="disconnect" ${writes && device.online ? '' : 'disabled'}>断开连接</button>
       <button class="btn btn-small" data-action="reset-watermarks" ${writes ? '' : 'disabled'}>重置水位</button>
-      <button class="btn btn-small btn-danger" data-action="revoke-device" ${writes ? '' : 'disabled'}>吊销设备</button>
+      <button class="btn btn-small btn-danger" data-action="revoke-device" ${writes ? '' : 'disabled'}>屏蔽该设备</button>
     </div>
     ${writes ? '' : '<p class="muted" style="margin-top:10px">当前为只读模式（写操作需 memory.admin + CSRF）。</p>'}`;
 
@@ -475,7 +492,7 @@ stage.onHover = (node, x, y) => {
   tooltip.style.top = `${Math.min(y + 14, Math.max(0, stage.height - 120))}px`;
   tooltip.innerHTML = `
     <div class="tt-title">${escapeHtml(node.self ? '本机' : node.id)}</div>
-    <div class="tt-row">${node.revoked ? '已吊销' : node.online ? '在线' : '离线'}</div>
+    <div class="tt-row">${node.revoked ? '已被我屏蔽' : node.online ? '与我连接中' : '未连接'}</div>
     ${device && (device.grantedByMe.length || device.grantedToMe.length)
       ? `<div class="tt-row">我授权：${escapeHtml(device.grantedByMe.join(', ') || '—')}</div>
          <div class="tt-row">授权我：${escapeHtml(device.grantedToMe.join(', ') || '—')}</div>`
@@ -598,11 +615,11 @@ async function handleDeviceAction(action, device) {
     if (ok) await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/reset-watermarks`, {}, '水位已重置');
   } else if (action === 'revoke-device') {
     const ok = await confirmModal({
-      title: `吊销设备 ${device.deviceId}`,
-      body: `${device.deviceId} 无法再接收你的任何分区，其签发的政策记录不再被采纳；已同步数据不回撤；可重新授权恢复。`,
-      confirmLabel: '吊销设备',
+      title: `屏蔽设备 ${device.deviceId}`,
+      body: `${device.deviceId} 签发的政策记录将不再被本机采纳，本机也不再向它发送数据；已同步数据不回撤；可重新授权恢复。`,
+      confirmLabel: '屏蔽该设备',
     });
-    if (ok) await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, {}, '设备已吊销');
+    if (ok) await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, {}, '已在本地屏蔽该设备');
   }
 }
 
@@ -657,7 +674,7 @@ $('#wizard-close').addEventListener('click', closeWizard);
 $('#wizard-back').addEventListener('click', () => wizardSet({ type: 'BACK' }));
 $('#wizard-next').addEventListener('click', wizardNext);
 
-// ---------- 添加设备向导 ----------
+// ---------- 连接新对端向导 ----------
 
 const STEP_LABELS = {
   local: '① 本机信息 / 对端地址',
@@ -705,7 +722,7 @@ function renderWizard() {
       <div class="field"><label>本机 peerId</label><div class="copyable"><code>${escapeHtml(device.peerId ?? '—')}</code>${device.peerId ? `<button class="btn btn-small" data-copy="${escapeHtml(device.peerId)}">复制</button>` : ''}</div></div>
       <div class="field"><label>本机 multiaddrs</label>${multiaddrs.length
         ? multiaddrs.map((addr) => `<div class="copyable"><code>${escapeHtml(addr)}</code><button class="btn btn-small" data-copy="${escapeHtml(addr)}">复制</button></div>`).join('')
-        : '<code class="muted">（网络未启用，无监听地址）</code>'}</div>
+        : '<code class="muted">（未启用 P2P，无监听地址）</code>'}</div>
       <div class="field"><label>relay（可选）</label><code>${escapeHtml((device.relays ?? []).join(', ') || '—')}</code></div>
       <div class="field"><label>对方 deviceId</label><input id="wizard-device" type="text" value="${escapeHtml(wizardState.deviceId)}" placeholder="device-B" /></div>
       <div class="field"><label>对方 multiaddr</label><textarea id="wizard-address" placeholder="/ip4/…/tcp/…/p2p/…">${escapeHtml(wizardState.address)}</textarea></div>

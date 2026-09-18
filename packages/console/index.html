@@ -18,7 +18,7 @@
         <span id="memory-badge" class="badge badge-muted">记忆 …</span>
       </div>
       <div class="topbar-actions">
-        <button id="add-device" class="btn btn-primary" type="button">＋ 添加设备</button>
+        <button id="add-device" class="btn btn-primary" type="button">＋ 连接新对端</button>
       </div>
     </header>
 
@@ -36,15 +36,17 @@
           <ul class="legend-list legend-edges">
             <li><span class="edge-swatch edge-mine"></span>我授权它</li>
             <li><span class="edge-swatch edge-theirs"></span>它授权我</li>
-            <li><span class="edge-swatch edge-offline"></span>离线 / 待接通</li>
+            <li><span class="edge-swatch edge-offline"></span>未连接 / 待接通</li>
             <li><span class="edge-swatch edge-revoked"></span>已撤销</li>
           </ul>
+          <p class="legend-note muted">本机视角：只展示你与已知对端的关系，不代表全网拓扑。</p>
         </div>
       </nav>
 
       <main class="stage-wrap">
         <div id="banner" class="banner" hidden></div>
-        <canvas id="stage" class="stage" aria-label="网络星图"></canvas>
+        <canvas class="stage-bg" aria-hidden="true"></canvas>
+        <canvas id="stage" class="stage" aria-label="对端关系星图（本机视角）"></canvas>
         <div id="tooltip" class="tooltip" hidden></div>
         <div id="empty-state" class="empty-state" hidden></div>
         <section id="domains-view" class="panel-view" hidden>
@@ -62,7 +64,10 @@
                 <option value="">全部动作</option>
                 <option value="namespace_grant">授权</option>
                 <option value="namespace_revoke">撤销域</option>
-                <option value="device_revoke">吊销设备</option>
+                <option value="device_revoke">屏蔽设备</option>
+                <option value="policy_issuer_declare">声明签发者</option>
+                <option value="namespace_membership">成员变更</option>
+                <option value="namespace_handoff">退订交接</option>
               </select>
               <select id="audit-filter-device" aria-label="按设备过滤"><option value="">全部设备</option></select>
               <select id="audit-filter-namespace" aria-label="按域过滤"><option value="">全部域</option></select>
@@ -84,8 +89,8 @@
   </div>
 
   <div id="wizard" class="modal" hidden>
-    <div class="modal-box modal-box-wide" role="dialog" aria-modal="true" aria-label="添加设备向导">
-      <h2>添加设备</h2>
+    <div class="modal-box modal-box-wide" role="dialog" aria-modal="true" aria-label="连接新对端向导">
+      <h2>连接新对端</h2>
       <div id="wizard-steps" class="wizard-steps"></div>
       <div id="wizard-body"></div>
       <p id="wizard-error" class="wizard-error" hidden></p>

@@ -37,7 +37,7 @@ node packages/mcp/bin/mebular.mjs console --port 7332
 
 ## 1. 用向导连接并授权（D3）
 
-1. 在 A 点「＋ 添加设备」：
+1. 在 A 点「＋ 连接新对端」：
    - 第 ① 步复制 A 的 multiaddr（形如 `/ip4/127.0.0.1/tcp/14001/p2p/<peerId>`）。
    - 在 B 的控制台同样打开向导，复制 B 的 multiaddr 与 deviceId。
 2. 回到 A，填入 B 的 deviceId 与 multiaddr → 「连接」。
@@ -53,12 +53,12 @@ node packages/mcp/bin/mebular.mjs console --port 7332
   且域视图里该域记忆数增加。
 - 反向在 B 写入，A 侧同样可见（B 需对 A 授权；在 B 的控制台用向导/域开关完成）。
 
-## 3. 撤销与吊销（二次确认）
+## 3. 撤销授权与屏蔽设备（二次确认）
 
 - 在 A 的设备卡关闭某域开关：弹窗文案应为
   「B 不会再收到关于『该域』的新记忆；已同步内容不会撤回；可用新授权恢复。」
   确认后，A 再写入的新记忆不再抵达 B（已同步内容仍在 B）。
-- 在 A 点「吊销设备」：弹窗文案应为
+- 在 A 点「屏蔽该设备」：弹窗文案应为
   「B 无法再接收你的任何分区，其签发的政策记录不再被采纳；已同步数据不回撤；
   可重新授权恢复。」确认后 B 读侧为空；再对 B 签发新 grant 即恢复。
 
@@ -79,7 +79,7 @@ node packages/mcp/bin/mebular.mjs console --port 7332
 ## 已知边界
 
 - 「立即同步」通过 `sync.runAntiEntropyCycle()` 触发（v1.1 常驻循环统一编排），
-  只对**确有 pending** 的在线对端立即开会话；无 pending 时返回 `triggered:false`
+  只对**确有 pending** 的「与我连接中」对端立即开会话；无 pending 时返回 `triggered:false`
   （正常——没有待发数据，接收侧由对端 push/anti-entropy 驱动）。
 - 单条 grant 含多个域时，关闭其中一个域会撤销整条 grant（core 语义：按 grantId
   精确失效）；控制台「开」始终按单域签发 grant，以避免误伤其他域。

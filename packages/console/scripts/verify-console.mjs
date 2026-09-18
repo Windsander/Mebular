@@ -27,7 +27,7 @@ const check = (label, ok, detail = '') => {
 };
 
 async function seedHome(home) {
-  const { Mebular, IdentityManager, MemoryService } = await import('@mebular/core');
+  const { Mebular, IdentityManager, MemoryService, POLICY_NAMESPACE } = await import('@mebular/core');
   const storagePath = join(home, 'store.jsonl');
   const keyFile = join(home, 'user-master-key.json');
   await mkdir(home, { recursive: true });
@@ -71,6 +71,15 @@ async function seedHome(home) {
   const revocable = await app.grantNamespaces({ subject: 'device-other', namespaces: ['work'] });
   await app.revokeGrant({ grantId: revocable.data.grant.grantId, subject: 'device-other' });
   await app.revokeDevice({ subject: 'device-bad' });
+  // C1 / M1–M3 / 2b：预置新三类策略事件（审计渲染与 API 结构防回归）
+  await app.declarePolicyIssuer({ subject: 'device-console' });
+  await app.declareNamespaceMembership({ member: 'device-peer', namespace: 'notes', active: true });
+  await app.declareNamespaceMembership({ member: 'device-peer', namespace: 'notes', active: false });
+  await app.eventLog.append({
+    type: 'namespace_handoff',
+    data: { handoff: { handoffId: 'handoff-1', namespace: 'work', successor: 'device-peer', forced: false, pendingCount: 0, issuedAt: Date.now() } },
+    namespace: POLICY_NAMESPACE,
+  });
   await app.shutdown();
   return storagePath;
 }
@@ -232,7 +241,7 @@ try {
   check('/console 返回控制台页面', indexText.includes('Mebular 控制台'));
   check('/console 下发 CSRF cookie 与响应头', (index.headers.get('set-cookie') ?? '').includes('mebular_csrf=') && Boolean(index.headers.get('x-mebular-csrf')));
 
-  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript']]) {
+  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript'], ['nebula.js', 'text/javascript'], ['stars.js', 'text/javascript']]) {
     const res = await fetch(`http://127.0.0.1:${port}/console/${file}`);
     check(`静态资源 /console/${file} 200`, res.status === 200 && (res.headers.get('content-type') ?? '').includes(mime), `status=${res.status}`);
   }
@@ -267,6 +276,23 @@ try {
 
   const policy = await getJson(port, '/admin/api/policy');
   check('GET /admin/api/policy 200 + 数组', policy.status === 200 && Array.isArray(policy.json));
+  {
+    const types = new Set((policy.json ?? []).map((e) => e.type));
+    check(
+      '审计含 C1/M1–M3/2b 三类事件（declare/membership/handoff）',
+      ['policy_issuer_declare', 'namespace_membership', 'namespace_handoff'].every((t) => types.has(t)),
+      `types=${[...types].sort().join(',')}`,
+    );
+    const memberships = (policy.json ?? []).filter((e) => e.type === 'namespace_membership');
+    check(
+      '成员事件字段完整且含在册/注销两态',
+      memberships.length >= 2
+        && memberships.every((e) => e.subject === 'device-peer' && e.namespace === 'notes' && typeof e.active === 'boolean')
+        && memberships.some((e) => e.active === true)
+        && memberships.some((e) => e.active === false),
+      `count=${memberships.length} states=${memberships.map((e) => e.active).join(',')}`,
+    );
+  }
   const types = new Set((policy.json ?? []).map((e) => e.type));
   check('policy 含 grant/revoke/device_revoke', types.has('namespace_grant') && types.has('namespace_revoke') && types.has('device_revoke'));
   check('policy 项字段齐全', (policy.json ?? []).every((e) => typeof e.eventId === 'string' && typeof e.issuer === 'string' && typeof e.at === 'number' && typeof e.valid === 'boolean'));

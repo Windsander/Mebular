@@ -45,6 +45,9 @@ export async function collectPolicy(app) {
   const grants = [];
   const revokes = [];
   const deviceRevokes = [];
+  const policyIssuerDeclares = [];
+  const memberships = [];
+  const handoffs = [];
   const authors = [];
 
   for (const event of events) {
@@ -83,6 +86,46 @@ export async function collectPolicy(app) {
           at: event.timestamp,
           subject: deviceRevoke.subject,
           note: deviceRevoke.note,
+        });
+      }
+    } else if (event.type === 'policy_issuer_declare') {
+      const policyIssuer = event.data?.policyIssuer;
+      if (policyIssuer && typeof policyIssuer.subject === 'string') {
+        policyIssuerDeclares.push({
+          eventId: event.id,
+          issuer: event.author,
+          at: event.timestamp,
+          subject: policyIssuer.subject,
+          note: policyIssuer.note,
+        });
+      }
+    } else if (event.type === 'namespace_membership') {
+      const membership = event.data?.membership;
+      if (membership && typeof membership.member === 'string' && typeof membership.namespace === 'string') {
+        memberships.push({
+          eventId: event.id,
+          issuer: event.author,
+          at: event.timestamp,
+          member: membership.member,
+          namespace: nsOf(membership.namespace),
+          active: membership.active !== false,
+          note: membership.note,
+        });
+      }
+    } else if (event.type === 'namespace_handoff') {
+      const handoff = event.data?.handoff;
+      if (handoff && typeof handoff.namespace === 'string') {
+        handoffs.push({
+          eventId: event.id,
+          issuer: event.author,
+          at: event.timestamp,
+          handoffId: handoff.handoffId,
+          namespace: nsOf(handoff.namespace),
+          successor: handoff.successor,
+          forced: handoff.forced === true,
+          pendingCount: typeof handoff.pendingCount === 'number' ? handoff.pendingCount : 0,
+          missingAuthors: Array.isArray(handoff.missingAuthors) ? handoff.missingAuthors : [],
+          note: handoff.note,
         });
       }
     }
@@ -135,9 +178,55 @@ export async function collectPolicy(app) {
       note: d.note,
       valid: !revokedSet.has(d.issuer) && revokedSet.has(d.subject),
     })),
+    ...policyIssuerDeclares.map((d) => ({
+      eventId: d.eventId,
+      type: 'policy_issuer_declare',
+      issuer: d.issuer,
+      subject: d.subject,
+      at: d.at,
+      note: d.note,
+      valid: !revokedSet.has(d.issuer) && !revokedSet.has(d.subject),
+    })),
+    ...memberships.map((m) => ({
+      eventId: m.eventId,
+      type: 'namespace_membership',
+      issuer: m.issuer,
+      subject: m.member,
+      namespace: m.namespace,
+      active: m.active,
+      at: m.at,
+      note: m.note,
+      valid: !revokedSet.has(m.issuer) && !revokedSet.has(m.member),
+    })),
+    ...handoffs.map((h) => ({
+      eventId: h.eventId,
+      type: 'namespace_handoff',
+      issuer: h.issuer,
+      subject: h.successor,
+      namespace: h.namespace,
+      handoffId: h.handoffId,
+      forced: h.forced,
+      pendingCount: h.pendingCount,
+      missingAuthors: h.missingAuthors,
+      at: h.at,
+      note: h.note,
+      valid: true,
+    })),
   ].sort((a, b) => b.at - a.at);
 
-  return { events, grants, revokes, deviceRevokes, revokedGrantIds, revokedSet, timeline, authors: unique(authors) };
+  return {
+    events,
+    grants,
+    revokes,
+    deviceRevokes,
+    policyIssuerDeclares,
+    memberships,
+    handoffs,
+    revokedGrantIds,
+    revokedSet,
+    timeline,
+    authors: unique(authors),
+  };
 }
 
 /** 在线对端（已认证）与 deviceId 映射 */
@@ -203,6 +292,15 @@ export async function collectKnownDevices(app, policy, online) {
   }
   for (const deviceRevoke of policy.deviceRevokes) {
     known.add(deviceRevoke.subject);
+  }
+  for (const declare of policy.policyIssuerDeclares ?? []) {
+    known.add(declare.subject);
+  }
+  for (const membership of policy.memberships ?? []) {
+    known.add(membership.member);
+  }
+  for (const handoff of policy.handoffs ?? []) {
+    if (handoff.successor) known.add(handoff.successor);
   }
   for (const deviceId of online.byDeviceId.keys()) known.add(deviceId);
   // sync.policyIssuers / sync.peerNamespacePolicy 键

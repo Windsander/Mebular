@@ -349,17 +349,19 @@ export class StarStage {
     const bg = this.bgCtx;
     if (!bg || !this.starsField) return;
     const now = performance.now();
-    const dt = this.lastBackdropAt ? Math.min(0.05, (now - this.lastBackdropAt) / 1000) : 0.016;
+    const dtMs = this.lastBackdropAt ? Math.min(100, now - this.lastBackdropAt) : 16;
     this.lastBackdropAt = now;
     if (this.nebula && this.visualQuality !== 'low') {
-      this.nebula.update(dt);
+      this.nebula.update(dtMs);
       this.nebula.render(bg);
     } else {
       bg.fillStyle = '#03050a';
       bg.fillRect(0, 0, bg.canvas.width, bg.canvas.height);
     }
-    this.starsField.time = time;
-    this.starsField.update(dt);
+    // 官网 stars/nebula 的动画常量以**毫秒**计（twinkleSpeed≈0.0004/ms），
+    // 这里必须喂毫秒，否则闪烁/雾推进慢 1000 倍≈冻结
+    this.starsField.time = time * 1000;
+    this.starsField.update(dtMs);
     this.starsField.render(bg);
   }
 
@@ -510,7 +512,7 @@ export class StarStage {
       }
 
       if (node.self) {
-        drawStarShape(ctx, pos.x, pos.y, radius * 1.6, color);
+        drawSelfBeacon(ctx, pos.x, pos.y, radius * 1.7, time, this.reducedMotion, node.online);
       } else {
         ctx.beginPath();
         ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
@@ -530,6 +532,17 @@ export class StarStage {
         ctx.stroke();
       }
 
+      // 微闪烁：像恒星一样轻微明暗（不剧烈；reduced-motion 下静止）
+      if (!node.self && !node.revoked && !this.reducedMotion) {
+        const tw = 0.88 + 0.12 * Math.sin(time * (1.3 + (hashString(node.id) % 7) * 0.13) + (hashString(node.id) % 628) / 100);
+        ctx.globalAlpha = tw;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, radius * 1.9, 0, Math.PI * 2);
+        ctx.fillStyle = node.online ? 'rgba(159,208,255,0.10)' : 'rgba(159,208,255,0.05)';
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+
       // 在线脉冲环
       if (node.online && !node.self && !node.revoked) {
         const pulse = (Math.sin(time * 2 + hashString(node.id) % 6) + 1) / 2;
@@ -545,15 +558,94 @@ export class StarStage {
       ctx.font = `${labelSize}px ui-monospace, Menlo, monospace`;
       ctx.globalAlpha = 0.5 + depth * 0.5;
       ctx.textAlign = 'center';
+      const labelY = node.self ? pos.y + radius * 4.8 : pos.y + radius + 13;
+      ctx.shadowColor = 'rgba(0,0,0,0.85)';
+      ctx.shadowBlur = node.self ? 6 : 3;
       ctx.fillStyle = node.self ? '#ffe9a8' : '#c6d3f0';
-      ctx.fillText(node.label ?? shortId(node.id), pos.x, pos.y + radius + 13);
-      ctx.globalAlpha = 1;
+      ctx.fillText(node.label ?? shortId(node.id), pos.x, labelY);
       if (hovered || selected) {
         ctx.fillStyle = '#ffffff';
-        ctx.fillText(node.label ?? shortId(node.id), pos.x, pos.y + radius + 14);
+        ctx.fillText(node.label ?? shortId(node.id), pos.x, labelY + 1);
       }
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 1;
     }
   }
+}
+
+/**
+ * 本机“信标”星：白热核心 + 衍射星芒 + 缓慢旋转的虚线轨道环。
+ * 比五角星更接近科幻恒星/信标观感；reduced-motion 时静止。
+ */
+function drawSelfBeacon(ctx, x, y, radius, time, reducedMotion, online) {
+  const t = reducedMotion ? 0 : time;
+  const spin = t * 0.12;
+
+  // 外层辉光（暖白 + 冷蓝叠层）
+  const halo = ctx.createRadialGradient(x, y, 1, x, y, radius * 4.2);
+  halo.addColorStop(0, 'rgba(255,255,255,0.85)');
+  halo.addColorStop(0.25, 'rgba(255,233,168,0.5)');
+  halo.addColorStop(0.6, 'rgba(86,180,233,0.18)');
+  halo.addColorStop(1, 'rgba(86,180,233,0)');
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(x, y, radius * 4.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 衍射星芒：4 长 + 4 短，缓慢旋转
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(spin);
+  const spikes = 4;
+  for (let i = 0; i < spikes; i += 1) {
+    const long = radius * 5.2;
+    const short = radius * 2.6;
+    for (const [len, width, alpha] of [[long, 1.4, 0.55], [short, 1, 0.32]]) {
+      ctx.save();
+      ctx.rotate((Math.PI / spikes) * i);
+      const grad = ctx.createLinearGradient(0, 0, len, 0);
+      grad.addColorStop(0, `rgba(255,255,255,${alpha})`);
+      grad.addColorStop(0.35, `rgba(255,233,168,${alpha * 0.5})`);
+      grad.addColorStop(1, 'rgba(255,233,168,0)');
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = width;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(len, 0);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.lineTo(-len * 0.6, 0);
+      ctx.stroke();
+      ctx.restore();
+      if (i === 3) break;
+    }
+  }
+  ctx.restore();
+
+  // 缓转虚线轨道环
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(-spin * 0.6);
+  ctx.strokeStyle = online ? 'rgba(120,200,255,0.45)' : 'rgba(140,150,180,0.35)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 6]);
+  ctx.beginPath();
+  ctx.arc(0, 0, radius * 2.5, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.restore();
+
+  // 白热核心 + 暖色内环
+  ctx.beginPath();
+  ctx.arc(x, y, radius * 1.15, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,255,255,0.95)';
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(x, y, radius * 1.55, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,233,168,0.75)';
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
 }
 
 function drawStarShape(ctx, x, y, radius, color) {

@@ -64,17 +64,14 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     await a.initialize();
     await b.initialize();
     await b.node!.connectToPeer(a.node!.peerId);
+    // 反向也建常驻：确保 A→B 能 push（协商 accept / 子任务）；只需一次，避免会话 churn
+    await a.node!.connectToPeer(b.node!.peerId).catch(() => undefined);
     await sleep(50); // 建立常驻连接（push-on-write 目标）
     // 确定性“同步兜底”：周期触发 anti-entropy（存在 pending 才开会话）——消除 push 合并抖动
     let stop = false;
     const done = (async () => {
       while (!stop) {
         // 确定性兜底：保持常驻链路 + 触发 anti-entropy（有 pending 才开会话），消除 push 合并/断链抖动
-        try {
-          await b.node!.connectToPeer(a.node!.peerId);
-        } catch {
-          // 已连接或对端忙：忽略
-        }
         await a.sync.runAntiEntropyCycle();
         await b.sync.runAntiEntropyCycle();
         await sleep(25);

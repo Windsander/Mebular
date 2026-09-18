@@ -540,11 +540,9 @@ export async function startHttpServer({
       if (check.challenge) res.setHeader('www-authenticate', check.challenge);
       return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
     }
-    if (path === '/admin/api/overview') {
-      const token = issueCsrf();
-      setCsrfCookie(res, token);
-      res.setHeader('x-mebular-csrf', token);
-    }
+    // 注意：CSRF token 只在 /console/ 页面加载时签发。若在 overview 轮询里重新签发，
+    // cookie 会被每次轮询改写，与并发的写请求竞争（读 cookie 后、发出写之前又来一次
+    // overview）→ header 与 cookie 不一致而 403。token 12h 有效，页面加载签发一次即可。
     const payload = await builder({ app, service, config });
     if (path === '/admin/api/overview') {
       payload.features = { writes: Boolean(writesEnabled) };

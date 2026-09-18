@@ -308,6 +308,16 @@ try {
   check('namespaces 含 work（count ≥ 1）', (work?.count ?? 0) >= 1, String(work?.count));
   check('namespaces 项字段齐全', (namespaces.json ?? []).every((n) => typeof n.namespace === 'string' && typeof n.count === 'number' && 'lastUpdatedAt' in n && 'stateHash' in n));
 
+  // 防回归：overview 轮询不得重新签发/轮换 CSRF（否则与并发写请求竞争 → 403）
+  const overviewCsrfProbe = await fetch(`http://127.0.0.1:${port}/admin/api/overview`);
+  check(
+    'overview 不轮换 CSRF（无 x-mebular-csrf / set-cookie）',
+    overviewCsrfProbe.status === 200
+      && !overviewCsrfProbe.headers.get('x-mebular-csrf')
+      && !overviewCsrfProbe.headers.get('set-cookie'),
+    `status=${overviewCsrfProbe.status}`,
+  );
+
   // ---------- 写端点未授权 ----------
   const writeNoCsrf = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, {
     method: 'POST',

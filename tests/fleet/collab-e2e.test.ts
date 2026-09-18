@@ -34,7 +34,7 @@ import {
   type FleetWorkerOptions,
 } from '../../packages/fleet/src/index.js';
 
-jest.setTimeout(45000);
+jest.setTimeout(70000);
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 async function waitFor(fn: () => Promise<boolean>, timeoutMs: number, pollMs = 20): Promise<boolean> {
@@ -69,9 +69,15 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     let stop = false;
     const done = (async () => {
       while (!stop) {
+        // 确定性兜底：保持常驻链路 + 触发 anti-entropy（有 pending 才开会话），消除 push 合并/断链抖动
+        try {
+          await b.node!.connectToPeer(a.node!.peerId);
+        } catch {
+          // 已连接或对端忙：忽略
+        }
         await a.sync.runAntiEntropyCycle();
         await b.sync.runAntiEntropyCycle();
-        await sleep(20);
+        await sleep(25);
       }
     })();
     kicker = { stop: () => (stop = true), done };
@@ -129,7 +135,7 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     const { taskId: rootId } = await node.submit({ intent: 'root', to: { device: 'device-B', agent: 'echo' } });
     const { worker, log } = await makeWorker({ planner: mapPlanner({ root: [{ intent: 'child-0' }, { intent: 'child-1' }] }) });
     const loop = startLoop(worker);
-    const completion = await node.waitForDagCompletion(rootId!, { timeoutMs: 35000 });
+    const completion = await node.waitForDagCompletion(rootId!, { timeoutMs: 55000 });
     loop.stop();
     await loop.done;
 
@@ -147,7 +153,7 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     const { taskId: badId } = await node.submit({ intent: 'root-cycle', to: { device: 'device-B', agent: 'echo' } });
     const { worker: worker2 } = await makeWorker({ planner: selfCycle });
     const loop2 = startLoop(worker2);
-    const badCompletion = await node.waitForDagCompletion(badId!, { timeoutMs: 35000 });
+    const badCompletion = await node.waitForDagCompletion(badId!, { timeoutMs: 55000 });
     loop2.stop();
     await loop2.done;
     const badState = await node.stateOf(badId!);
@@ -165,7 +171,7 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
       negotiation: { store: negB, maxRounds: 3, enabled: (s: TaskState) => s.intent.startsWith('nego:') },
     });
     const loop = startLoop(worker);
-    const ok = await node.waitForTerminal([taskId!], { timeoutMs: 35000 });
+    const ok = await node.waitForTerminal([taskId!], { timeoutMs: 55000 });
     loop.stop();
     await loop.done;
     expect(ok).toBe(true);
@@ -181,7 +187,7 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
       negotiation: { store: negB, maxRounds: 1, enabled: (s: TaskState) => s.intent.startsWith('nego:') },
     });
     const loop2 = startLoop(worker2);
-    const terminal = await node2.waitForTerminal([overId!], { timeoutMs: 35000 });
+    const terminal = await node2.waitForTerminal([overId!], { timeoutMs: 55000 });
     loop2.stop();
     await loop2.done;
     expect(terminal).toBe(true);

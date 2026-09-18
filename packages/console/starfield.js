@@ -87,6 +87,10 @@ export class StarStage {
     this.bgCtx = null;
     this.nebula = null;
     this.starsField = null;
+    this.depths = new Map();
+    this.screen = new Map();
+    this.pointerNx = 0.5;
+    this.pointerNy = 0.5;
 
     this._tick = this._tick.bind(this);
     this._resize = this._resize.bind(this);
@@ -208,6 +212,8 @@ export class StarStage {
     const peers = nodes.filter((n) => !n.self).slice().sort((a, b) => (a.id < b.id ? -1 : 1));
     if (self) positions.set(self.id, { x: cx, y: cy });
     const baseRadius = Math.min(this.width, this.height) * 0.34;
+    this.depths = new Map();
+    if (self) this.depths.set(self.id, 1);
     peers.forEach((peer, index) => {
       const offset = (hashString(peer.id) % 360) * (Math.PI / 180);
       const angle = offset + index * GOLDEN_ANGLE;
@@ -217,18 +223,21 @@ export class StarStage {
         x: cx + Math.cos(angle) * radius,
         y: cy + Math.sin(angle) * radius * 0.82,
       });
+      // 稳定深度层（0.30~0.92）：近大远小、各自视差、前后遮挡
+      this.depths.set(peer.id, 0.3 + (hashString(peer.id) % 1000) / 1000 * 0.62);
     });
     this.positions = positions;
   }
 
   _hitTest(x, y) {
     let best = null;
-    let bestDist = 22;
+    let bestDist = 0;
     for (const node of this.scene.nodes) {
-      const pos = this.positions.get(node.id);
+      const pos = this.screen.get(node.id) ?? this.positions.get(node.id);
       if (!pos) continue;
+      const reach = 14 + (pos.depth ?? 0.6) * 12;
       const dist = Math.hypot(pos.x - x, pos.y - y);
-      if (dist < bestDist) {
+      if (dist < reach && (best === null || dist < bestDist)) {
         best = node;
         bestDist = dist;
       }
@@ -248,12 +257,16 @@ export class StarStage {
     if (this.onHover) this.onHover(hit, x, y);
     const nx = rect.width ? x / rect.width : 0.5;
     const ny = rect.height ? y / rect.height : 0.5;
+    this.pointerNx = nx;
+    this.pointerNy = ny;
     if (this.nebula) { this.nebula.mouseX = nx; this.nebula.mouseY = ny; }
     if (this.starsField) { this.starsField.mouseX = nx; this.starsField.mouseY = ny; }
   }
 
   _pointerLeave() {
     this.hovered = null;
+    this.pointerNx = 0.5;
+    this.pointerNy = 0.5;
     if (this.onHover) this.onHover(null, 0, 0);
   }
 
@@ -301,11 +314,29 @@ export class StarStage {
     }
   }
 
+  _computeScreen(time) {
+    const mx = (this.pointerNx ?? 0.5) - 0.5;
+    const my = (this.pointerNy ?? 0.5) - 0.5;
+    const animate = !this.reducedMotion;
+    const screen = new Map();
+    for (const [id, pos] of this.positions) {
+      const depth = this.depths.get(id) ?? 0.6;
+      const px = animate ? mx * this.width * 0.07 * depth : 0;
+      const py = animate ? my * this.height * 0.06 * depth : 0;
+      const bob = animate
+        ? Math.sin(time * (0.35 + depth * 0.45) + depth * 6.283) * (1.5 + depth * 4.5)
+        : 0;
+      screen.set(id, { x: pos.x + px, y: pos.y + py + bob, depth });
+    }
+    this.screen = screen;
+  }
+
   _draw(time) {
     const ctx = this.ctx;
     if (!ctx) return;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.width, this.height);
+    this._computeScreen(time);
     this._drawStars(time);
     this._drawEdges(time);
     this._drawNodes(time);
@@ -330,8 +361,8 @@ export class StarStage {
   }
 
   _edgePoints(edge) {
-    const from = this.positions.get(edge.from);
-    const to = this.positions.get(edge.to);
+    const from = this.screen.get(edge.from) ?? this.positions.get(edge.from);
+    const to = this.screen.get(edge.to) ?? this.positions.get(edge.to);
     if (!from || !to) return null;
     return { from, to };
   }
@@ -381,9 +412,11 @@ export class StarStage {
 
       ctx.beginPath();
       ctx.setLineDash(style.dashed ? [5, 6] : []);
+      const avgDepth = ((from.depth ?? 0.6) + (to.depth ?? 0.6)) / 2;
+      const depthFade = 0.45 + avgDepth * 0.75;
       ctx.strokeStyle = style.color;
-      ctx.globalAlpha = edge.revoked ? 0.5 : edge.online ? 0.85 : 0.55;
-      ctx.lineWidth = style.width;
+      ctx.globalAlpha = (edge.revoked ? 0.5 : edge.online ? 0.85 : 0.55) * depthFade;
+      ctx.lineWidth = style.width * (0.55 + avgDepth * 0.75);
       ctx.moveTo(startX, startY);
       ctx.lineTo(endX, endY);
       ctx.stroke();
@@ -429,7 +462,7 @@ export class StarStage {
     const pulseProgress = now < this.pulseUntil ? 1 - (this.pulseUntil - now) / 1200 : null;
     const selfPos = this.scene.nodes.find((n) => n.self);
     if (pulseProgress !== null && selfPos) {
-      const center = this.positions.get(selfPos.id);
+      const center = this.screen.get(selfPos.id) ?? this.positions.get(selfPos.id);
       if (center) {
         const radius = 14 + pulseProgress * 70;
         ctx.beginPath();
@@ -439,28 +472,37 @@ export class StarStage {
         ctx.stroke();
       }
     }
-    for (const node of this.scene.nodes) {
-      const pos = this.positions.get(node.id);
+    const ordered = this.scene.nodes.slice().sort((a, b) => {
+      const da = this.screen.get(a.id)?.depth ?? 0.6;
+      const db = this.screen.get(b.id)?.depth ?? 0.6;
+      return da - db; // 远者先画，近者覆盖
+    });
+    for (const node of ordered) {
+      const pos = this.screen.get(node.id) ?? this.positions.get(node.id);
       if (!pos) continue;
+      const depth = pos.depth ?? 0.6;
+      const scale = 0.6 + depth * 0.7;
       const hovered = this.hovered === node.id;
       const selected = this.selectedId === node.id;
-      let radius = node.self ? 9 : 6;
+      let radius = (node.self ? 9 : 6) * scale;
       let color = node.self ? '#ffe9a8' : '#9fd0ff';
       if (node.revoked) {
         color = COLORS.revokedNode;
-        radius = node.self ? 8 : 5;
+        radius = (node.self ? 8 : 5) * scale;
       } else if (!node.online) {
         color = '#6b7694';
       }
 
-      // 光晕
+      // 光晕（按深度缩放与衰减）
       if (node.self || node.online) {
-        const glow = ctx.createRadialGradient(pos.x, pos.y, 1, pos.x, pos.y, node.self ? 26 : 18);
-        glow.addColorStop(0, node.self ? 'rgba(255,233,168,0.55)' : 'rgba(86,180,233,0.4)');
+        const glowR = (node.self ? 26 : 18) * scale;
+        const glowAlpha = (node.self ? 0.55 : 0.4) * (0.45 + depth * 0.75);
+        const glow = ctx.createRadialGradient(pos.x, pos.y, 1, pos.x, pos.y, glowR);
+        glow.addColorStop(0, node.self ? `rgba(255,233,168,${glowAlpha})` : `rgba(86,180,233,${glowAlpha})`);
         glow.addColorStop(1, 'rgba(86,180,233,0)');
         ctx.fillStyle = glow;
         ctx.beginPath();
-        ctx.arc(pos.x, pos.y, node.self ? 26 : 18, 0, Math.PI * 2);
+        ctx.arc(pos.x, pos.y, glowR, 0, Math.PI * 2);
         ctx.fill();
       }
 
@@ -495,11 +537,14 @@ export class StarStage {
         ctx.stroke();
       }
 
-      // 标签（文字兜底）
-      ctx.font = '11px ui-monospace, Menlo, monospace';
+      // 标签（文字兜底；字号/亮度按深度）
+      const labelSize = Math.round(9 + depth * 3);
+      ctx.font = `${labelSize}px ui-monospace, Menlo, monospace`;
+      ctx.globalAlpha = 0.5 + depth * 0.5;
       ctx.textAlign = 'center';
       ctx.fillStyle = node.self ? '#ffe9a8' : '#c6d3f0';
-      ctx.fillText(node.label ?? shortId(node.id), pos.x, pos.y + radius + 14);
+      ctx.fillText(node.label ?? shortId(node.id), pos.x, pos.y + radius + 13);
+      ctx.globalAlpha = 1;
       if (hovered || selected) {
         ctx.fillStyle = '#ffffff';
         ctx.fillText(node.label ?? shortId(node.id), pos.x, pos.y + radius + 14);

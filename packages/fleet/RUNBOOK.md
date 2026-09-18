@@ -83,7 +83,8 @@ npm run verify:fleet:local    # M2：单机双进程（spool 传输）5 条 + �
 npm run verify:fleet:remote   # M3：真实 libp2p loopback；含 M2 正确性集 + 授权负例 + 时延 p50/p95
 npm run verify:fleet:agents   # M4：按 agent 名路由（fake agent，9/9；CI 自洽）
 npm run verify:fleet:onboard  # Step 1b：onboard→双节点派活→doctor 全绿 + 失败矩阵（16/16）
-npm run verify:fleet:all      # 以上四者汇总 → 一个 JSON 摘要（含 skipped）
+npm run verify:fleet:grant    # G1：仅图上 grant 派活 / 撤销不可见 / R-a·R-d（16/16）
+npm run verify:fleet:all      # 以上五者汇总 → 一个 JSON 摘要（含 skipped）
 # 真实 Hermes（可选，需本机 hermes；**命令行参数**，不是环境变量）：
 node scripts/verify-fleet-agents.mjs --with-hermes   # 额外派活到 hermes agent，断言哨兵 + session
 ```

@@ -64,3 +64,6 @@ examples/quickstart/.data/
 # 語義召回證據與模型快取（本地留存）
 .semantic-evidence/
 .cache/
+
+# Fleet CLI 預設設備目錄（內含 0600 主密鑰；生產請用 ~/.fleet）
+.fleet/

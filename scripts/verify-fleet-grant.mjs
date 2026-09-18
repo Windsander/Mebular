@@ -29,7 +29,8 @@ function skip(name, reason) {
   skipped.push({ name, reason });
   console.log(`SKIP  ${name}  ${reason}`);
 }
-if (process.platform === 'win32') {
+const IS_WIN = process.platform === 'win32';
+if (IS_WIN) {
   skip('onboard F2 0o644→FAIL 锚点', 'Windows 无 POSIX mode；doctor 对权限项 SKIP（本脚本聚焦图上授权，权限锚点在 verify:fleet:onboard）');
 }
 
@@ -130,7 +131,13 @@ try {
     onboardA.code === 0 && cfgA.peers?.[0]?.device === 'device-B' && Object.keys(cfgA.peerNamespacePolicy ?? {}).length === 0,
     { peers: cfgA.peers?.map((p) => p.device), policy: cfgA.peerNamespacePolicy },
   );
-  check('主密钥/配置权限 0600', mode(join(A, 'master-key.json')) === 0o600 && mode(join(A, 'fleet.config.json')) === 0o600, {});
+  check(
+    IS_WIN ? '主密钥/配置存在（Windows：ACL 边界）' : '主密钥/配置权限 0600',
+    IS_WIN
+      ? existsSync(join(A, 'master-key.json')) && existsSync(join(A, 'fleet.config.json'))
+      : mode(join(A, 'master-key.json')) === 0o600 && mode(join(A, 'fleet.config.json')) === 0o600,
+    {},
+  );
 
   // 默认拒绝：无 grant 前 doctor namespace FAIL
   const pre = lastJson((await runCli(['doctor', '--dir', A, '--json'])).out);

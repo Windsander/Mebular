@@ -90,9 +90,15 @@ try {
   const onboardA = await runCli(['onboard', '--dir', A, '--device', 'device-A', '--peer-device', 'device-B', '--namespace', 'tasks', ...agentArgs]);
   const factsA = lastJson(onboardA.out);
   check('onboard A 成功且未创建过', onboardA.code === 0 && factsA?.ok === true && factsA?.alreadyOnboarded === false, { code: onboardA.code });
-  check('主密钥/配置权限 0600', mode(join(A, 'master-key.json')) === 0o600 && mode(join(A, 'fleet.config.json')) === 0o600, {
-    key: mode(join(A, 'master-key.json'))?.toString(8), config: mode(join(A, 'fleet.config.json'))?.toString(8),
-  });
+  if (IS_WIN) {
+    check('主密钥/配置存在（Windows：ACL 边界，无 POSIX mode）', existsSync(join(A, 'master-key.json')) && existsSync(join(A, 'fleet.config.json')), {
+      key: mode(join(A, 'master-key.json'))?.toString(8), config: mode(join(A, 'fleet.config.json'))?.toString(8),
+    });
+  } else {
+    check('主密钥/配置权限 0600', mode(join(A, 'master-key.json')) === 0o600 && mode(join(A, 'fleet.config.json')) === 0o600, {
+      key: mode(join(A, 'master-key.json'))?.toString(8), config: mode(join(A, 'fleet.config.json'))?.toString(8),
+    });
+  }
 
   const serveA = startCli(['serve', '--dir', A, '--submit', String(N), '--target-agent', 'fake', '--wait-sync-ms', '30000', '--timeout-ms', '40000', '--linger-ms', '30000', '--expect-prefix', 'FAKE:']);
   await waitFor(async () => /listening/.test(serveA.state.out), 15000);

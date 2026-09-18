@@ -156,8 +156,11 @@ export async function runOnce(options: {
     child.stdout?.on('data', (chunk: Buffer) => {
       totalOutBytes += chunk.length;
       if (outBytes < limit) {
-        outChunks.push(chunk);
-        outBytes += chunk.length;
+        // 按**字节**精确封顶：大 chunk 只取剩余额度，避免截断结果超过 maxOutputBytes。
+        const remaining = limit - outBytes;
+        const piece = chunk.length <= remaining ? chunk : chunk.subarray(0, remaining);
+        outChunks.push(piece);
+        outBytes += piece.length;
       }
     });
     child.stderr?.on('data', (chunk: Buffer) => {

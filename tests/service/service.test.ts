@@ -137,9 +137,9 @@ WantedBy=default.target
   });
 
   it('unitFilePath：三平台落盘位置', () => {
-    expect(unitFilePath('darwin', spec, '/h')).toBe('/h/Library/LaunchAgents/com.mebular.fleet-node.plist');
-    expect(unitFilePath('linux', spec, '/h')).toBe('/h/.config/systemd/user/mebular-fleet-node.service');
-    expect(unitFilePath('win32', spec, '/h')).toBe('/h/.mebular/services/tasks/fleet-node.xml');
+    expect(unitFilePath('darwin', spec, '/h')).toBe(join('/h', 'Library', 'LaunchAgents', 'com.mebular.fleet-node.plist'));
+    expect(unitFilePath('linux', spec, '/h')).toBe(join('/h', '.config', 'systemd', 'user', 'mebular-fleet-node.service'));
+    expect(unitFilePath('win32', spec, '/h')).toBe(join('/h', '.mebular', 'services', 'tasks', 'fleet-node.xml'));
   });
 
   it('resolveBuildSha：env 优先，其次 git，最后 unknown', () => {
@@ -158,11 +158,11 @@ WantedBy=default.target
     expect(serviceStateDir('/h')).toBe('/x/state');
     if (saved === undefined) delete process.env.MEBULAR_SERVICE_HOME;
     else process.env.MEBULAR_SERVICE_HOME = saved;
-    expect(serviceStateDir('/h')).toBe('/h/.mebular/services');
-    expect(launchAgentsDir('/h')).toBe('/h/Library/LaunchAgents');
-    expect(systemdUserDir('/h')).toBe('/h/.config/systemd/user');
-    expect(windowsTaskDir('/h')).toBe('/h/.mebular/services/tasks');
-    expect(serviceLogsDir('/h')).toBe('/h/.mebular/services/logs');
+    expect(serviceStateDir('/h')).toBe(join('/h', '.mebular', 'services'));
+    expect(launchAgentsDir('/h')).toBe(join('/h', 'Library', 'LaunchAgents'));
+    expect(systemdUserDir('/h')).toBe(join('/h', '.config', 'systemd', 'user'));
+    expect(windowsTaskDir('/h')).toBe(join('/h', '.mebular', 'services', 'tasks'));
+    expect(serviceLogsDir('/h')).toBe(join('/h', '.mebular', 'services', 'logs'));
   });
 });
 

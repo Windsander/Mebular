@@ -69,7 +69,7 @@ jobs:
         run: npm run verify:mcp:cross:selftest
 
   wan-nat:
-    name: WAN NAT isolation (docker compose: relay + 2 NAT'd peers)
+    name: WAN NAT isolation (docker compose, relay + 2 NAT peers)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

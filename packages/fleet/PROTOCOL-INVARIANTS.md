@@ -59,9 +59,12 @@
 | 参数数组传参 | prompt 作为**单个参数**、无 shell 求值（防注入） | `参数数组传参：prompt 作为单个参数、无 shell 解释（防注入）` |
 | 并发上限 | 可配；同一执行器实例内 FIFO 串行 | `并发上限可配：concurrency=1 串行、=2 并行` |
 | Hermes argv | `[-p P][-t T][-m M][--in DIR] -z <prompt> --usage-file <tmp>`；成功解析 `usage.session_id` | `拼出 hermes 参数（-p/-t/-m/--in/-z/--usage-file）` · `成功解析 usage.session_id` |
-| 不安全面 | 不打印/不落盘 env 值；`CommandAgent` 以 `spawn(command, args)` 传参（无 shell） | `参数数组传参…`（断言无 shell 求值） |
+| 参数传参 | `spawn(command, args)` 传参，无 shell（防注入） | `参数数组传参…`（断言无 shell 求值） |
+| **env 不外流** | 子进程只继承 `ENV_ALLOWLIST`（PATH/HOME/… + `HERMES_HOME`）+ 显式 `options.env`；**不继承 daemon 全量 env**（凭据不外流）；不打印/不落盘 env 值 | `env 白名单：不继承 daemon 的任意环境变量（判别锚点）` |
 
-真实验收：`npm run verify:fleet:agents`（真实 libp2p loopback + 确定性 fake agent，9/9）；真实 Hermes 一次性调用见阶段报告（`hermes -z` 返回约定 token）。
+真实验收：`npm run verify:fleet:agents`（真实 libp2p loopback + 确定性 fake agent，9/9）。
+真实 Hermes 为**可选开关**：`node scripts/verify-fleet-agents.mjs --with-hermes`（**命令行参数**，非环境变量）；
+意图为确定性哨兵指令（只输出 `FLEET_HERMES_OK`），断言：E2E `done` 且结果包含哨兵，另**直连** `HermesAgent` 断言解析出 `session_id`；原始 `ms`/`session` 随脚本输出（11/11）。
 
 ## 5. M4：三种协作形态（目标二）
 

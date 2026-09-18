@@ -106,6 +106,23 @@ describe('CommandAgent：参数数组 / 超时 / 非零退出 / 输出截断', (
     expect(serial).toBeGreaterThanOrEqual(sleepMs * 1.2); // 两次串行（含 CI 抖动容差）
     expect(parallel).toBeLessThan(serial);
   }, 15000);
+
+  it('env 白名单：不继承 daemon 的任意环境变量（判别锚点）', async () => {
+    process.env.FLEET_TEST_SECRET = 'leak-123';
+    try {
+      const leaked = await node(['--mode', 'env', '--env-key', 'FLEET_TEST_SECRET']).execute(task('env'));
+      expect(leaked.ok).toBe(true);
+      expect(leaked.resultRef).toBe('ENV:MISSING'); // 未被透传
+
+      // 白名单项仍可用（PATH 必须存在，否则子进程无法运行/找不到可执行）
+      const path = await node(['--mode', 'env', '--env-key', 'PATH']).execute(task('env'));
+      expect(path.ok).toBe(true);
+      expect(path.resultRef).not.toBe('ENV:MISSING');
+      expect(path.resultRef).toMatch(/^ENV:.+/);
+    } finally {
+      delete process.env.FLEET_TEST_SECRET;
+    }
+  });
 });
 
 describe('HermesAgent：hermes argv 构造与结果', () => {

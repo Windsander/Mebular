@@ -55,7 +55,15 @@ describe('M3 任务经记忆同步（两节点 + 授权）', () => {
         deviceId,
         encryption,
         network: { enabled: true, provider: hub },
-        sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 20, namespaces: ['tasks'], peerNamespacePolicy: policy },
+        sync: {
+          autoSync: true,
+          pushOnWrite: true,
+          pushOnWriteThrottleMs: 20,
+          namespaces: ['tasks'],
+          peerNamespacePolicy: policy,
+          // 显式驱动 anti-entropy 轮次（见下），不依赖 push 定时器/初始同步时序假设。
+          antiEntropy: { enabled: true, intervalMs: 3_600_000, jitterRatio: 0 },
+        },
       });
 
     const a = make('device-A');
@@ -67,7 +75,6 @@ describe('M3 任务经记忆同步（两节点 + 授权）', () => {
 
     await b.node!.connectToPeer(a.node!.peerId);
     await c.node!.connectToPeer(a.node!.peerId);
-    await sleep(300); // 让首轮同步/授权协商完成
 
     const aStore = new MebularTaskEventStore(a);
     const bStore = new MebularTaskEventStore(b);
@@ -83,24 +90,33 @@ describe('M3 任务经记忆同步（两节点 + 授权）', () => {
       ids.push(taskId!);
     }
 
+    // 确定性驱动：每轮显式跑 A/B 的 anti-entropy 轮次（仅当有 pending 才发起会话），再推进
+    // worker 与读取状态。**不**依赖「初始同步 sleep + push 定时器」：若提交时初始同步尚未就绪，
+    // 轮次会在就绪后补发（这正是原 flaky 的根因）。
     const done = await waitUntil(async () => {
+      await a.sync.runAntiEntropyCycle();
+      await b.sync.runAntiEntropyCycle();
       await worker.pollOnce();
       const states = await node.states();
       return states.length === ids.length && states.every((s) => s.terminal);
-    }, 12000);
+    }, 45000, 50);
     expect(done).toBe(true);
     const states = await node.states();
     expect(states.every((s) => s.status === 'done' && s.resultRef === echoResultFor(s.intent))).toBe(true);
     expect(log.size()).toBe(3); // 每任务执行一次
 
-    // 授权负例：C 未被授权 tasks → 看不到任何任务事件
-    await sleep(300);
+    // 授权负例：显式驱动若干轮次后，未授权 C 仍看不到任何任务事件（默认拒绝）。
+    for (let i = 0; i < 10; i++) {
+      await a.sync.runAntiEntropyCycle();
+      await c.sync.runAntiEntropyCycle();
+      await sleep(20);
+    }
     expect(await cStore.all()).toHaveLength(0);
 
     await a.shutdown();
     await b.shutdown();
     await c.shutdown();
-  }, 30000);
+  }, 60000);
 
   it('MebularTaskEventStore：噪音节点过滤 + 同 eventId 冲突与 reducer 同语义去重', async () => {
     const master = await Mebular.generateUserMasterKey();

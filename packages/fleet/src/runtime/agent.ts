@@ -3,7 +3,8 @@
 // 安全与工程约束：
 // - **参数数组传参**（绝不 shell 拼接，防注入）；
 // - 超时 / 非零退出 / 输出超限 各自语义明确（超时与非零 → 任务 `failed` 带原因）；
-// - 不打印、不落盘任何 `env` 值（仅按需把调用方显式给出的 env 传给子进程）；
+// - **不继承 daemon 的全量 env**：只透传 `ENV_ALLOWLIST`（PATH/HOME/… 运行所需）+ 调用方显式
+//   给出的 `options.env`；凭据/令牌不外流。同时不打印/不落盘任何 env 值；
 // - 工作目录与并发上限可配。
 
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -77,6 +78,48 @@ export interface SpawnResult {
   timedOut: boolean;
 }
 
+/**
+ * 允许透传给被派发 Agent 的环境变量**白名单**（非私密运行所需）。
+ * 其余（尤其凭据/令牌）**一律不继承**——daemon 的 env 不外流。
+ */
+export const ENV_ALLOWLIST: readonly string[] = [
+  'PATH',
+  'HOME',
+  'LANG',
+  'LC_ALL',
+  'LC_CTYPE',
+  'TZ',
+  'SHELL',
+  'USER',
+  'LOGNAME',
+  'TMPDIR',
+  'TEMP',
+  'TMP',
+  'HERMES_HOME', // Hermes profile 解析（非密）
+  // Windows 运行所需（存在才带）
+  'SystemRoot',
+  'PATHEXT',
+  'COMSPEC',
+  'USERPROFILE',
+  'APPDATA',
+  'LOCALAPPDATA',
+  'ProgramData',
+];
+
+/** 按白名单构建子进程 env；`extra`（调用方显式给出）覆盖白名单同名项。 */
+export function buildChildEnv(
+  extra?: Readonly<Record<string, string>>,
+  source: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of ENV_ALLOWLIST) {
+    const value = source[key];
+    if (value !== undefined) env[key] = value;
+  }
+  for (const [key, value] of Object.entries(extra ?? {})) env[key] = value;
+  return env;
+}
+
 /** 以参数数组执行命令；捕获 stdout/stderr（stderr 保留尾部）；超时 kill。 */
 export async function runOnce(options: {
   command: string;
@@ -92,7 +135,8 @@ export async function runOnce(options: {
     try {
       child = spawn(options.command, [...options.args], {
         ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
-        env: { ...process.env, ...(options.env ?? {}) },
+        // 只继承白名单 + 显式 env；不把 daemon 的全量环境（含凭据）传给被派发 Agent。
+        env: buildChildEnv(options.env),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } catch (error) {

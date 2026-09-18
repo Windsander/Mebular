@@ -307,6 +307,45 @@ try {
   check('namespaces 含 notes（count ≥ 2）', (notes?.count ?? 0) >= 2, String(notes?.count));
   check('namespaces 含 work（count ≥ 1）', (work?.count ?? 0) >= 1, String(work?.count));
   check('namespaces 项字段齐全', (namespaces.json ?? []).every((n) => typeof n.namespace === 'string' && typeof n.count === 'number' && 'lastUpdatedAt' in n && 'stateHash' in n));
+  check(
+    'namespaces 含成员制/订阅/重入扩展字段',
+    (namespaces.json ?? []).every((n) => typeof n.membershipEnabled === 'boolean'
+      && Array.isArray(n.members) && Array.isArray(n.effectiveMembers) && Array.isArray(n.grantedTo)
+      && typeof n.subscribed === 'boolean' && typeof n.rejoinReset === 'boolean'
+      && typeof n.selfAuthorized === 'boolean' && (n.selfMember === null || typeof n.selfMember === 'boolean')),
+  );
+  check('notes membershipEnabled=true 且种子成员已注销', notes?.membershipEnabled === true && notes.members.includes('device-peer') === false, `members=${JSON.stringify(notes?.members)}`);
+  check('work membershipEnabled=false（未启用成员制）', work?.membershipEnabled === false, `work.membershipEnabled=${work?.membershipEnabled}`);
+
+  const settings = await getJson(port, '/admin/api/settings');
+  check('GET /admin/api/settings 200', settings.status === 200);
+  check(
+    'settings 形状（identity/storage/sync/network/mcp/semantic/签名集）',
+    settings.json?.identity?.deviceId === 'device-console'
+      && typeof settings.json?.storage?.adapter === 'string'
+      && typeof settings.json?.sync?.pushOnWrite === 'boolean'
+      && typeof settings.json?.sync?.antiEntropy?.enabled === 'boolean'
+      && Array.isArray(settings.json?.sync?.subscriptions)
+      && typeof settings.json?.network?.enabled === 'boolean'
+      && typeof settings.json?.mcp?.host === 'string'
+      && typeof settings.json?.semantic?.enabled === 'boolean'
+      && Array.isArray(settings.json?.policyIssuers)
+      && Array.isArray(settings.json?.sync?.configPolicyIssuers),
+    `issuers=${JSON.stringify(settings.json?.policyIssuers)}`,
+  );
+  check('settings.policyIssuers 含已声明的 device-console', settings.json?.policyIssuers?.includes('device-console') === true);
+  check('devices 含 memberships/declaredIssuer 字段', (devices.json ?? []).every((d) => Array.isArray(d.memberships) && typeof d.declaredIssuer === 'boolean'));
+  check('device-console declaredIssuer=true（种子声明）', byId.get('device-console')?.declaredIssuer === true);
+  check('device-peer declaredIssuer=false', byId.get('device-peer')?.declaredIssuer === false);
+
+  const plan = await getJson(port, '/admin/api/namespaces/work/handoff-plan?successor=device-peer');
+  check(
+    'GET handoff-plan 200 + 结构化（ok/namespace/successor）',
+    plan.status === 200 && typeof plan.json?.ok === 'boolean' && plan.json?.namespace === 'work' && plan.json?.successor === 'device-peer',
+    `status=${plan.status} ok=${plan.json?.ok}`,
+  );
+  const planBad = await getJson(port, '/admin/api/namespaces/work/handoff-plan');
+  check('GET handoff-plan 缺 successor → 400', planBad.status === 400, `status=${planBad.status}`);
 
   // 防回归：overview 轮询不得重新签发/轮换 CSRF（否则与并发写请求竞争 → 403）
   const overviewCsrfProbe = await fetch(`http://127.0.0.1:${port}/admin/api/overview`);
@@ -387,6 +426,61 @@ try {
     body: JSON.stringify({ subject: 'device-new' }),
   });
   check('缺 namespaces → 400', badBody.status === 400, `status=${badBody.status}`);
+
+  // ---------- 设置/成员/交接写端点 ----------
+  const issuerResp = await fetch(`http://127.0.0.1:${port}/admin/api/policy-issuers`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ subject: 'device-peer' }),
+  });
+  const issuerJson = await issuerResp.json().catch(() => null);
+  check('POST policy-issuers → 201 + eventId', issuerResp.status === 201 && issuerJson?.subject === 'device-peer' && typeof issuerJson?.eventId === 'string', `status=${issuerResp.status}`);
+  const devicesAfterIssuer = await getJson(port, '/admin/api/devices');
+  check('新声明签发者在设备卡可见', (devicesAfterIssuer.json ?? []).find((d) => d.deviceId === 'device-peer')?.declaredIssuer === true);
+
+  const memberResp = await fetch(`http://127.0.0.1:${port}/admin/api/memberships`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ member: 'device-new', namespace: 'notes', active: true }),
+  });
+  const memberJson = await memberResp.json().catch(() => null);
+  check('POST memberships → 201 + eventId', memberResp.status === 201 && typeof memberJson?.eventId === 'string', `status=${memberResp.status}`);
+  const nsAfterMember = await getJson(port, '/admin/api/namespaces');
+  const notesAfterMember = (nsAfterMember.json ?? []).find((n) => n.namespace === 'notes');
+  check(
+    '新成员在册但未生效（缺授权）',
+    notesAfterMember?.members?.includes('device-new') === true && notesAfterMember?.effectiveMembers?.includes('device-new') !== true,
+    `members=${JSON.stringify(notesAfterMember?.members)} effective=${JSON.stringify(notesAfterMember?.effectiveMembers)}`,
+  );
+  const memberBad = await fetch(`http://127.0.0.1:${port}/admin/api/memberships`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ namespace: 'notes' }),
+  });
+  check('memberships 缺 member → 400', memberBad.status === 400, `status=${memberBad.status}`);
+
+  const rejoin = await fetch(`http://127.0.0.1:${port}/admin/api/namespaces/notes/rejoin`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({}),
+  });
+  const rejoinJson = await rejoin.json().catch(() => null);
+  check('rejoin 未满足生效授权 → 409 结构化', rejoin.status === 409 && rejoinJson?.ok !== true, `status=${rejoin.status} reason=${rejoinJson?.reason ?? rejoinJson?.error}`);
+
+  const leaveForce = await fetch(`http://127.0.0.1:${port}/admin/api/namespaces/notes/leave`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ successor: 'device-peer', force: true }),
+  });
+  check('leave force → 400（force 仅本地 CLI）', leaveForce.status === 400, `status=${leaveForce.status}`);
+
+  const leave = await fetch(`http://127.0.0.1:${port}/admin/api/namespaces/notes/leave`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ successor: 'device-peer' }),
+  });
+  const leaveJson = await leave.json().catch(() => null);
+  check('leave 继任者未全量 ack → 409 结构化（不清理）', leave.status === 409 && leaveJson?.ok !== true, `status=${leave.status} reason=${leaveJson?.reason ?? leaveJson?.error}`);
 
   // 防回归：sync 端点对未运行网络/未连接设备必须给结构化 4xx，而不是 500
   //（此前实现对已连接设备在裸信道上另起 syncWithDevice，与会话循环抢帧 →

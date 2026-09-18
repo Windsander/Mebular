@@ -22,7 +22,7 @@ function spawnCli(args) {
 
 function runNodeCli(args) {
   return new Promise((resolve) => {
-    const child = spawnCli(['node', ...args]);
+    const child = spawnCli(['spool', 'node', ...args]);
     let out = '';
     let err = '';
     child.stdout.on('data', (d) => (out += d));
@@ -41,7 +41,7 @@ function runNodeCli(args) {
 }
 
 function startWorker(args) {
-  const child = spawnCli(['worker', ...args]);
+  const child = spawnCli(['spool', 'worker', ...args]);
   child.stdout.on('data', () => {});
   child.stderr.on('data', () => {});
   return child;

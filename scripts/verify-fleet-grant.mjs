@@ -166,7 +166,7 @@ try {
   check('doctor skipped 明列 peer 可达（无 addr）', Array.isArray(d1?.skipped) && d1.skipped.includes('peer 可达'), { skipped: d1?.skipped });
 
   // 启动 A serve（图上授权应让 B 收到任务）
-  const serveA = startCli(['serve', '--dir', A, '--submit', String(N), '--target-agent', 'fake', '--wait-sync-ms', '30000', '--timeout-ms', '40000', '--linger-ms', '30000', '--expect-prefix', 'FAKE:']);
+  const serveA = startCli(['node', '--dir', A, '--submit', String(N), '--target-agent', 'fake', '--wait-sync-ms', '30000', '--timeout-ms', '40000', '--linger-ms', '30000', '--expect-prefix', 'FAKE:']);
   await waitFor(async () => /listening/.test(serveA.state.out), 15000);
   const addr = lastJson(serveA.state.out.match(/\{[^\n]*listening[^\n]*\}/)?.[0] ?? '')?.multiaddr;
   check('A 已监听（multiaddr）', typeof addr === 'string' && addr.length > 0, { addr });
@@ -175,7 +175,7 @@ try {
   const onboardB = await runCli(['onboard', '--dir', B, '--device', 'device-B', '--peer-device', 'device-A', '--peer-addr', addr, '--master-key', join(A, 'master-key.json'), ...agentArgs]);
   check('onboard B（导入同一主密钥）成功', onboardB.code === 0 && lastJson(onboardB.out)?.ok === true, {});
 
-  const workB = startCli(['work', '--dir', B, '--timeout-ms', '30000', '--interval-ms', '10']);
+  const workB = startCli(['worker', '--dir', B, '--timeout-ms', '30000', '--interval-ms', '10']);
   const execLog = join(B, 'exec.jsonl');
   const gotN = await waitFor(async () => existsSync(execLog) && lineCount(execLog) >= N, 25000);
   const aDone = await waitFor(async () => /"submitted":\s*3/.test(serveA.state.out), 25000);
@@ -215,8 +215,8 @@ try {
   check('撤销后 → doctor namespace FAIL 且 hint 指向新 grantId（R-d）', ns2?.status === 'FAIL' && /新 grantId|R-d/.test(ns2?.hint ?? ''), { hint: ns2?.hint });
 
   // 第二轮回合：A 再派活，B 在线也拿不到新事件
-  const workB2 = startCli(['work', '--dir', B, '--timeout-ms', '12000', '--interval-ms', '10']);
-  const serveA2 = startCli(['serve', '--dir', A, '--submit', '2', '--target-agent', 'fake', '--wait-sync-ms', '5000', '--timeout-ms', '6000', '--expect-prefix', 'FAKE:']);
+  const workB2 = startCli(['worker', '--dir', B, '--timeout-ms', '12000', '--interval-ms', '10']);
+  const serveA2 = startCli(['node', '--dir', A, '--submit', '2', '--target-agent', 'fake', '--wait-sync-ms', '5000', '--timeout-ms', '6000', '--expect-prefix', 'FAKE:']);
   await waitFor(async () => /listening/.test(serveA2.state.out), 15000);
   await sleep(9000);
   const afterRevoke = lineCount(execLog);

@@ -1,0 +1,23 @@
+{
+  "negotiation": {
+    "v": 1,
+    "messageId": "task-A#neg#1@device-B",
+    "taskId": "task-A",
+    "round": 1,
+    "from": { "device": "device-B", "agent": "worker" },
+    "kind": "counter",
+    "text": "need more detail"
+  },
+  "chatter": {
+    "v": 1,
+    "messageId": "chat-1@device-A",
+    "from": { "device": "device-A", "agent": "board" },
+    "topic": "status",
+    "text": "hello"
+  },
+  "dagPlan": {
+    "root": [{ "intent": "child-0" }, { "intent": "child-1" }],
+    "child-0": [],
+    "child-1": []
+  }
+}

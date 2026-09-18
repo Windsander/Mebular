@@ -16,7 +16,8 @@ import { fileURLToPath } from 'node:url';
 
 const CLI = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
 const FIXTURE = fileURLToPath(new URL('../tests/fleet/fixtures/fake-agent.mjs', import.meta.url));
-chmodSync(FIXTURE, 0o755); // 让 fake agent 可作为 command agent 直接执行（Windows 见文档 caveat）
+const IS_WIN = process.platform === 'win32';
+const PERM_SKIPS = IS_WIN ? ['config 权限', '主密钥权限'] : []; // Windows：doctor 对 POSIX mode 显式 SKIP
 
 const results = [];
 const skipped = [];
@@ -28,8 +29,8 @@ function skip(name, reason) {
   skipped.push({ name, reason });
   console.log(`SKIP  ${name}  ${reason}`);
 }
-if (process.platform === 'win32') {
-  skip('fake-agent 可执行位', 'Windows 无 shebang 可执行位；改用 command=node + baseArgs（见 ONBOARDING.md）');
+if (IS_WIN) {
+  skip('F2 0o644→FAIL 锚点', 'Windows 无 POSIX mode 语义；改为断言 doctor「主密钥权限」SKIP（见 ONBOARDING Windows）');
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -82,7 +83,8 @@ try {
   const A = join(root, 'A');
   const B = join(root, 'B');
   const N = 3;
-  const agentArgs = ['--agent', 'fake:command', '--agent-command', FIXTURE];
+  // fake agent 一律经 process.execPath 调用（不依赖 shebang/可执行位，Windows 亦然）。
+  const agentArgs = ['--agent', 'fake:command', '--agent-command', process.execPath, '--agent-base-args', FIXTURE];
 
   // --- happy path ---
   const onboardA = await runCli(['onboard', '--dir', A, '--device', 'device-A', '--peer-device', 'device-B', '--namespace', 'tasks', ...agentArgs]);
@@ -109,12 +111,16 @@ try {
 
   const doctorB = await runCli(['doctor', '--dir', B, '--json']);
   const report = lastJson(doctorB.out);
-  check('doctor(B) 全绿且无 skipped', doctorB.code === 0 && report?.ok === true, {
+  check('doctor(B) 全绿', doctorB.code === 0 && report?.ok === true, {
     ok: report?.ok,
     skipped: report?.skipped,
     failed: (report?.checks ?? []).filter((c) => c.status === 'FAIL').map((c) => `${c.name}:${c.detail}`),
   });
-  check('doctor(B) skipped 为空', Array.isArray(report?.skipped) && report.skipped.length === 0, { skipped: report?.skipped });
+  check(
+    IS_WIN ? 'doctor(B) skipped 仅含 POSIX 权限项' : 'doctor(B) skipped 为空',
+    JSON.stringify([...(report?.skipped ?? [])].sort()) === JSON.stringify([...PERM_SKIPS].sort()),
+    { skipped: report?.skipped, expected: PERM_SKIPS },
+  );
   check('A 全部完成且结果前缀匹配', aDone && /"done":\s*3/.test(serveA.state.out) && /"resultsMatch":\s*true/.test(serveA.state.out), {});
 
   // S7 密钥卫生：日志里搜不到主密钥私钥材料
@@ -141,7 +147,11 @@ try {
   chmodSync(join(F2, 'master-key.json'), 0o644);
   const f2 = await runCli(['doctor', '--dir', F2, '--json']);
   const f2r = lastJson(f2.out);
-  check('F2 主密钥权限过宽 → doctor FAIL(主密钥权限) + hint', f2.code !== 0 && f2r?.checks?.some((c) => c.name === '主密钥权限' && c.status === 'FAIL' && /chmod 600/.test(c.hint ?? '')), { code: f2.code });
+  if (IS_WIN) {
+    check('F2 主密钥权限：Windows → SKIP（不假 FAIL）', f2r?.checks?.some((c) => c.name === '主密钥权限' && c.status === 'SKIP'), { code: f2.code });
+  } else {
+    check('F2 主密钥权限过宽 → doctor FAIL(主密钥权限) + hint', f2.code !== 0 && f2r?.checks?.some((c) => c.name === '主密钥权限' && c.status === 'FAIL' && /chmod 600/.test(c.hint ?? '')), { code: f2.code });
+  }
 
   // F3 主密钥文件损坏
   const F3 = join(root, 'F3');

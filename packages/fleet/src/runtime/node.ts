@@ -6,7 +6,10 @@ import type { TaskEvent } from '../protocol/events.js';
 import { reduceTaskEvents, type TaskState } from '../model.js';
 import type { LocalQuota, QuotaDecision } from '../quota.js';
 import type { TaskEventStore } from '../store/file-store.js';
+import type { MebularMessageStore } from '../store/message-store.js';
 import type { TaskTransport } from '../transport/types.js';
+import { dagCompletion, deriveEdges, type DagCompletion } from '../collab/dag.js';
+import { NegotiationTracker, validateNegotiationMessage, type NegotiationMessage } from '../collab/negotiation.js';
 
 export interface FleetNodeOptions {
   device: string;
@@ -15,6 +18,16 @@ export interface FleetNodeOptions {
   store: TaskEventStore;
   transport: TaskTransport;
   quota: LocalQuota;
+  /**
+   * 1d-b：有限协商（可选）。`respond=true` 时，发起端对未终态任务的协商消息
+   * **自动接受**（确定性策略）——使 `clarify/counter → accept → 执行` 的 E2E 可自动推进。
+   */
+  negotiation?: {
+    store: MebularMessageStore<NegotiationMessage>;
+    maxRounds: number;
+    /** 发起端策略：`accept`（默认）接受；`counter` 反提案（与 worker 交替直到超限） */
+    policy?: 'accept' | 'counter';
+  };
 }
 
 export interface SubmitRequest {
@@ -38,12 +51,79 @@ export class FleetNode {
   private readonly store: TaskEventStore;
   private readonly transport: TaskTransport;
   private readonly quota: LocalQuota;
+  private readonly negotiation: FleetNodeOptions['negotiation'] | null;
 
   constructor(options: FleetNodeOptions) {
     this.endpoint = { device: options.device, agent: options.agent ?? 'board' };
     this.store = options.store;
     this.transport = options.transport;
     this.quota = options.quota;
+    this.negotiation = options.negotiation ?? null;
+  }
+
+  /**
+   * 1d-b：对未终态任务应用发起端协商策略——未接受且未超限时**接受**
+   * （确定性；`messageId` 幂等去重保证只发一次）。
+   */
+  async applyNegotiationPolicy(): Promise<number> {
+    if (!this.negotiation) return 0;
+    const policy = this.negotiation.policy ?? 'accept';
+    const all = await this.negotiation.store.all();
+    let responded = 0;
+    for (const state of await this.states()) {
+      if (state.terminal) continue;
+      const tracker = new NegotiationTracker(state.taskId, { maxRounds: this.negotiation.maxRounds });
+      for (const message of all) {
+        if (message.taskId === state.taskId && validateNegotiationMessage(message).ok) tracker.apply(message);
+      }
+      const status = tracker.status();
+      if (status.accepted || status.rejected || status.exceeded) continue;
+      const messages = tracker.messages();
+      const last = messages[messages.length - 1];
+      // 只在对端（worker）发言后回应，避免自我循环
+      if (last === undefined || last.from.device === this.endpoint.device) continue;
+      const reply: NegotiationMessage =
+        policy === 'accept'
+          ? { v: 1, messageId: `${state.taskId}#accept@${this.endpoint.device}`, taskId: state.taskId, round: status.rounds, from: this.endpoint, kind: 'accept', text: 'accepted' }
+          : { v: 1, messageId: `${state.taskId}#neg#${status.rounds + 1}@${this.endpoint.device}`, taskId: state.taskId, round: status.rounds + 1, from: this.endpoint, kind: 'counter', text: 'counter' };
+      if (await this.negotiation.store.append(reply)) responded += 1;
+    }
+    return responded;
+  }
+
+  /**
+   * 1d-a：等待从 `rootTaskId` 可达的**全部节点终态**（dagCompletion）。
+   * 返回完成判定（含可达/待决节点），便于断言与汇总。
+   */
+  async waitForDagCompletion(
+    rootTaskId: string,
+    options: { timeoutMs: number; pollMs?: number },
+  ): Promise<DagCompletion> {
+    const pollMs = options.pollMs ?? 10;
+    const deadline = Date.now() + options.timeoutMs;
+    let completion: DagCompletion = dagCompletion([], () => false, rootTaskId);
+    for (;;) {
+      await this.pollOnce();
+      await this.applyNegotiationPolicy();
+      const states = await this.states();
+      const terminal = new Set(states.filter((s) => s.terminal).map((s) => s.taskId));
+      completion = dagCompletion(deriveEdges(states), (id) => terminal.has(id), rootTaskId);
+      if (completion.complete || Date.now() >= deadline) return completion;
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+  }
+
+  /** 1d-a：审查 DAG 汇总——从 root 可达且终态的节点结果按 taskId 确定序拼接。 */
+  async summarizeDag(rootTaskId: string): Promise<{ root: string; reachable: string[]; pending: string[]; summary: string }> {
+    const states = await this.states();
+    const terminal = new Set(states.filter((s) => s.terminal).map((s) => s.taskId));
+    const completion = dagCompletion(deriveEdges(states), (id) => terminal.has(id), rootTaskId);
+    const byId = new Map(states.map((s) => [s.taskId, s]));
+    const summary = completion.reachable
+      .filter((id) => terminal.has(id))
+      .map((id) => `${id}=${byId.get(id)?.resultRef ?? ''}`)
+      .join('|');
+    return { root: completion.root, reachable: completion.reachable, pending: completion.pending, summary };
   }
 
   private async emit(event: TaskEvent, to: FleetEndpoint, deliveries = 1): Promise<void> {
@@ -118,6 +198,7 @@ export class FleetNode {
     const pending = new Set(taskIds);
     while (Date.now() < deadline) {
       await this.pollOnce();
+      await this.applyNegotiationPolicy();
       const states = await this.states();
       for (const state of states) if (state.terminal) pending.delete(state.taskId);
       if (pending.size === 0) return true;

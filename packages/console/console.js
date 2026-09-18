@@ -906,13 +906,16 @@ stage.onOverlay = (ctx) => {
   }
   ctx.restore();
 
-  // 连线：自准星边缘 → 面板内容框左边框（静态；卡为最前层，止于边框）
+  // 连线：准星边缘 → 折点 → 面板左上角（HUD 直角引线；斜段 + 短水平段入角）
   const canvasRect = stage.canvas.getBoundingClientRect();
   const cardRect = cardEl.getBoundingClientRect();
-  const borderX = cardRect.left - canvasRect.left;
-  const anchorY = cardRect.top + cardRect.height * 0.42 - canvasRect.top;
-  const dx = borderX - node.x;
-  const dy = anchorY - node.y;
+  const cornerX = cardRect.left - canvasRect.left;
+  const cornerY = cardRect.top - canvasRect.top + 1;
+  const bendX = cornerX - 56;
+  const routed = node.x < bendX - 8;
+  const firstX = routed ? bendX : cornerX;
+  const dx = firstX - node.x;
+  const dy = cornerY - node.y;
   const len = Math.hypot(dx, dy) || 1;
   const ux = dx / len;
   const uy = dy / len;
@@ -922,26 +925,37 @@ stage.onOverlay = (ctx) => {
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
   ctx.setLineDash([4, 4]);
+  const trace = () => {
+    ctx.beginPath();
+    ctx.moveTo(sx, sy);
+    if (routed) ctx.lineTo(bendX, cornerY);
+    ctx.lineTo(cornerX, cornerY);
+    ctx.stroke();
+  };
   ctx.lineWidth = 3.5;
   ctx.strokeStyle = 'rgba(70, 255, 160, 0.10)';
   ctx.shadowColor = 'rgba(70, 255, 160, 0.65)';
   ctx.shadowBlur = 6;
-  ctx.beginPath();
-  ctx.moveTo(sx, sy);
-  ctx.lineTo(borderX, anchorY);
-  ctx.stroke();
+  trace();
   ctx.lineWidth = 1;
   ctx.strokeStyle = 'rgba(150, 255, 200, 0.85)';
   ctx.shadowBlur = 3;
-  ctx.stroke();
+  trace();
   ctx.restore();
 
-  // 面板侧接线端子（静态）
+  // 折点节点 + 面板左上角菱形接线端子（静态）
   ctx.save();
   ctx.fillStyle = 'rgba(160, 255, 205, 0.9)';
   ctx.shadowColor = 'rgba(80, 255, 170, 0.85)';
   ctx.shadowBlur = 7;
-  ctx.fillRect(borderX - 3, anchorY - 3, 6, 6);
+  if (routed) {
+    ctx.beginPath();
+    ctx.arc(bendX, cornerY, 1.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.translate(cornerX, cornerY);
+  ctx.rotate(Math.PI / 4);
+  ctx.fillRect(-2.8, -2.8, 5.6, 5.6);
   ctx.restore();
 };
 

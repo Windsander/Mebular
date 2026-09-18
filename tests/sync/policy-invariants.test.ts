@@ -67,11 +67,19 @@ function buildScenario(rng: () => number): Scenario {
         id: `rev-${i}`,
         revoke: { grantId: grantIds.length > 0 && rng() < 0.8 ? pick(grantIds) : randomUUID(), issuedAt: i },
       });
-    } else if (roll < 0.84) {
+    } else if (roll < 0.82) {
       push({ kind: 'device', author, id: `dev-${i}`, device: { subject: pick(DEVICES), issuedAt: i } });
-    } else {
+    } else if (roll < 0.92) {
       // C1：图上引导签发者声明
       push({ kind: 'issuer', author, id: `iss-${i}`, issuer: { subject: pick(DEVICES), issuedAt: i } });
+    } else {
+      // M1：成员资格（在册/注销）
+      push({
+        kind: 'membership',
+        author,
+        id: `mem-${i}`,
+        membership: { member: pick(DEVICES), namespace: pick(NAMESPACES), active: rng() < 0.7, issuedAt: i },
+      });
     }
   }
   // 注入互吊销/链式结构以提高未收敛（fail-closed）触发率
@@ -126,6 +134,7 @@ describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', (
     let residualA = 0;
     let residualB = 0;
     let residualC = 0;
+    let residualD = 0;
     let sample = '';
 
     for (let scenario = 0; scenario < SCENARIOS; scenario++) {
@@ -166,6 +175,17 @@ describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', (
         if (!declaredSubjects.has(issuer) && !configured.has(issuer)) {
           throw new Error(`引导签发者必须来自图上声明或配置 @scenario ${scenario}：${issuer}`);
         }
+      }
+      // M1：成员 ∩ 吊销 = ∅；每个成员都曾是某条成员记录的主体
+      const membershipSubjects = new Set(
+        entries.filter((e) => e.kind === 'membership' && e.membership).map((e) => e.membership!.member),
+      );
+      for (const [ns, members] of actual.members) {
+        for (const m of members) {
+          if (actual.revoked.has(m)) throw new Error(`被吊销设备不应是成员 @scenario ${scenario}：${m}`);
+          if (!membershipSubjects.has(m)) throw new Error(`成员必须曾是某条成员记录的主体 @scenario ${scenario}：${m}`);
+        }
+        if (!actual.membershipNamespaces.has(ns)) throw new Error(`有成员的分区必已启用成员资格 @scenario ${scenario}：${ns}`);
       }
 
       // 4) 扰动不变性（oracle-free，含未收敛场景）
@@ -208,11 +228,27 @@ describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', (
           `[residual] c @scenario ${scenario} actualConverged=${actual.converged} perturbedConverged=${dropDeclares.converged} actual=${JSON.stringify(actualKey)} perturbed=${JSON.stringify(key(dropDeclares))}`,
         );
       }
+
+      //    d) M1 成员轴独立：删掉全部成员记录后 authorized/revoked 必须不变，且成员集合清空。
+      const dropMembership = derivePolicyState(entries.filter((e) => e.kind !== 'membership'), options);
+      if (dropMembership.members.size !== 0 || dropMembership.membershipNamespaces.size !== 0) {
+        throw new Error(`扰动 d：删除全部成员记录后成员集合应为空 @scenario ${scenario}`);
+      }
+      const independent = JSON.stringify(key(dropMembership)) === JSON.stringify(actualKey);
+      if (actual.converged && dropMembership.converged) {
+        if (!independent) throw new Error(`扰动 d（成员轴独立）改变了 authorized/revoked @scenario ${scenario}`);
+      } else if (!independent) {
+        residualD += 1;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[residual] d @scenario ${scenario} actualConverged=${actual.converged} perturbedConverged=${dropMembership.converged}`,
+        );
+      }
     }
 
     // eslint-disable-next-line no-console
     console.log(
-      `[policy-invariants] scenarios=${SCENARIOS} nonConverged=${nonConverged} residualA=${residualA} residualB=${residualB} residualC=${residualC}`,
+      `[policy-invariants] scenarios=${SCENARIOS} nonConverged=${nonConverged} residualA=${residualA} residualB=${residualB} residualC=${residualC} residualD=${residualD}`,
     );
 
     // F-2：未收敛必须被真实探到（非空），但仍是少数，且扰动在回退路径的残差有界。
@@ -221,6 +257,7 @@ describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', (
     expect(residualA).toBeLessThanOrEqual(Math.ceil(SCENARIOS * 0.02));
     expect(residualB).toBeLessThanOrEqual(Math.ceil(SCENARIOS * 0.02));
     expect(residualC).toBeLessThanOrEqual(Math.ceil(SCENARIOS * 0.02));
+    expect(residualD).toBeLessThanOrEqual(Math.ceil(SCENARIOS * 0.02));
     if (nonConverged > 0) {
       // eslint-disable-next-line no-console
       console.log(`[policy-invariants] nonConverged sample=${sample}`);

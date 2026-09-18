@@ -14,6 +14,18 @@
 **无循环依赖**；但受 **R-b** 约束：**签发者**或**被声明主体**被 `device_revoke` 吊销时，该声明
 **不采纳**。R-a 改为用生效引导集合，其余 R-b/R-c/R-d、不动点与 fail-closed 回退不变。
 
+**M1–M3（订阅 = 成员资格，破坏性协议变更）**：新增记录类型 `namespace_membership`（`__policy__`，
+`{ member, namespace, active, issuedAt }`），把「订阅」从**瞬时 hello 声明**升格为**持久、签名的
+成员资格**。采纳**不做 R-a**（无条件，故与不动点无循环依赖），受 **R-b**（签发者/成员被吊销 →
+不采纳）。每个 `(namespace, member)` 取 **R-c 定序下最新记录**的 `active`（在册/注销），确定、
+顺序无关、幂等。**生效成员 = 被采纳的 active 成员 ∧ 该设备对该分区的生效授权**（授权默认拒绝
+不变；成员记录**不得**放宽授权）。裁剪链（M3）：`对端授权 ∩ 对端成员资格 ∩ 本机订阅声明`；
+hello 订阅声明降级为**活跃性/一致性校验**，与实际成员资格不一致时**显式拒绝/告警**。
+**兼容规则（legacy-empty）**：某分区**没有任何被采纳成员记录**时视为「未启用成员资格」，沿用
+既有 hello 订阅裁剪（不放松授权默认拒绝）；一旦出现该分区的成员记录，成员资格即成为该分区
+**强制闸门**（非成员收不到）。旧节点（不含 M1）不识别 `namespace_membership`，只会看到
+「对端未启用成员资格」→ **行为不变/少收**（安全方向，不 fail-open）；全端升级后启用严格成员资格。
+
 ## 1. 记录类型 × 签发者状态 × 对象状态
 
 「对象状态」对 `namespace_revoke` 指其**目标 grantId**；对 `grant` 指自身 grantId；
@@ -40,6 +52,12 @@
 | `policy_issuer_declare` | 可信 / 任意 | 被声明主体已被 `device_revoke` 吊销 | **不采纳**（R-b 优先级：吊销设备不得成为引导签发者） | `C1 声明了被吊销设备 → 不生效` |
 | `policy_issuer_declare`（伪造） | 非本用户主密钥链（别家/无证书） | 任意 | **忽略**（GraphNamespacePolicy 逐条信任过滤） | `C1 非主密钥链签名的声明被忽略` |
 | 声明上位的 `namespace_grant` | 因声明而进入生效引导集合 | grantId 未撤销 | 采纳（R-a 用生效引导集合） | `C1 仅图声明下 grant 生效` · `C1 声明与 R-d 撤销交互` |
+| `namespace_membership`(active) | 可信、未被吊销 | 成员未被吊销 | **采纳**：成员进入该分区成员集合；该分区进入「已启用成员资格」 | `M1 成员采纳` · 锚点① · harness `成员轴独立` |
+| `namespace_membership`(注销) | 可信、未被吊销 | 成员未被吊销 | **采纳**：按 R-c 最新记录，成员移出集合（`active=false`） | `M1 注销后不再到达` · 锚点④ |
+| `namespace_membership`(旧) | 可信、未被吊销 | 成员未被吊销 | 被同 `(ns,member)` 的**更晚**记录覆盖（确定序） | `M1 同键最新胜出（R-c）` |
+| `namespace_membership` | 已被吊销（R-b 含历史） | 任意 | **不采纳** | harness `扰动 d` |
+| `namespace_membership` | 可信/任意 | 成员已被 `device_revoke` 吊销 | **不采纳** | `M1 被吊销成员的记录不采纳` |
+| `namespace_membership`（伪造） | 非本用户主密钥链 | 任意 | **忽略**（信任过滤） | 锚点⑤ |
 
 ## 2. 横切不变量
 
@@ -77,6 +95,20 @@
      `authorized`/`revoked` 在收敛不动点上必须不变；配置为空时删掉**全部**声明必须**不减授权**
      地改变（即声明的存在只可能**增加**签发者 → 只可能增加授权，删除不会增加授权）。
      覆盖：harness `扰动 c` 与 `C1 空配置删声明 → 授权单调不增`。
+9. **成员资格（M1–M3）**：
+   - **持久 + 签名 + 无循环**：`namespace_membership` 与 grant/declare 同在 `__policy__`，只采纳链到
+     主密钥、且签发者/成员未被吊销的记录；采纳不做 R-a（纯函数于 `revokedIn`）→ 不动点结构不变。
+   - **确定 + 顺序无关 + 幂等**：每个 `(namespace, member)` 取 R-c 序最新记录的 `active`；打乱输入一致。
+   - **生效成员 = 成员 ∧ 授权**：`getNamespaceMembers(ns) = active成员 ∩ { d : ns ∈ 生效授权(d) }`；
+     成员记录**不得**改变 `authorized`/`revoked`（信息不回流授权）——独立轴。
+   - **默认拒绝不放松**：无授权则无数据流动，即使有成员记录。
+   - **legacy-empty**：无成员记录的分区沿用 hello 订阅裁剪；有记录则成员资格强制（非成员收不到）。
+   - **oracle-free 扰动 d（成员轴独立）**：删掉**全部**成员记录后重跑，`authorized`/`revoked` 必须
+     **完全不变**（成员不参与授权推导）；且 `members`/`membershipNamespaces` 清空。
+     覆盖：harness `扰动 d` · `M1 成员轴独立于授权`。
+   - **显式拒绝（M3）**：对端 hello 声明订阅了「它并非成员」的分区时，发送侧必须**显式**记录
+     `membershipRejected`（非静默）；`sync-completed` 对其可见。
+     覆盖：`M3 非成员声明订阅 → 显式拒绝` · `M3 成员但 hello 未声明 → 仍按成员发送`。
 
 ## 3. 覆盖它的 harness（`tests/sync/policy-invariants.test.ts`）
 

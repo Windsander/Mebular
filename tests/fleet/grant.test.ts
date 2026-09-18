@@ -13,6 +13,9 @@ import {
   onboardDevice,
   readMasterKeyFile,
   revokeNamespaceGrant,
+  setNamespaceMembership,
+  namespaceMembers,
+  namespaceMembership,
   validateFleetConfig,
 } from '../../packages/fleet/src/index.js';
 
@@ -151,5 +154,44 @@ describe('G1：图上授权为主（默认拒绝；配置白名单仅 bootstrap�
         e.includes('peerNamespacePolicy'),
       ),
     ).toBe(true);
+  });
+});
+
+describe('M1–M3：fleet 成员资格 API 与 doctor', () => {
+  let root: string;
+  let dir: string;
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'fleet-mem-'));
+    dir = join(root, 'A');
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  it('setNamespaceMembership / namespaceMembership / namespaceMembers（含默认拒绝与注销）', async () => {
+    await onboardDevice({ dir, device: 'device-A', peerDevice: 'device-B', policyIssuers: ['device-A'], configGrant: false, agents: echoAgent });
+    expect((await namespaceMembership(dir)).active).toBe(false);
+    const add = await setNamespaceMembership(dir, { to: 'device-B' });
+    expect(add).toMatchObject({ member: 'device-B', namespace: 'tasks', active: true });
+    expect((await namespaceMembership(dir)).members).toEqual(['device-B']);
+    // 未授权 → 生效成员为空（默认拒绝不变）
+    expect(await namespaceMembers(dir)).toEqual([]);
+    // 授权后成为生效成员
+    await grantNamespace(dir, { to: 'device-B' });
+    expect(await namespaceMembers(dir)).toEqual(['device-B']);
+    // 注销
+    await setNamespaceMembership(dir, { to: 'device-B', active: false });
+    expect((await namespaceMembership(dir)).members).toEqual([]);
+    expect(await namespaceMembers(dir)).toEqual([]);
+  });
+
+  it('doctor：成员资格启用但本机不在册 → FAIL；自证在册 → PASS', async () => {
+    await onboardDevice({ dir, device: 'device-A', peerDevice: 'device-B', policyIssuers: ['device-A'], configGrant: false, agents: echoAgent });
+    await setNamespaceMembership(dir, { to: 'device-B' });
+    let report = await doctor(dir);
+    expect(report.checks.find((c) => c.name === 'namespace 成员资格')?.status).toBe('FAIL');
+    await setNamespaceMembership(dir, { to: 'device-A' });
+    report = await doctor(dir);
+    expect(report.checks.find((c) => c.name === 'namespace 成员资格')?.status).toBe('PASS');
   });
 });

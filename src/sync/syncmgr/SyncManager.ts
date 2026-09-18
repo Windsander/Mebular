@@ -32,7 +32,11 @@ import { VectorClock } from '../vectorclock/index.js';
 import { ErrorCodes, StorageError, SyncError } from '../../errors.js';
 import type { Event } from '../../types/event.js';
 import { applyRemoteEvent, type SyncConflict } from '../apply.js';
-import { ConfigNamespacePolicy, type NamespaceGrantPolicy } from '../namespacePolicy.js';
+import {
+  ConfigNamespacePolicy,
+  type NamespaceGrantPolicy,
+  type NamespaceMembershipPolicy,
+} from '../namespacePolicy.js';
 import { POLICY_NAMESPACE } from '../grantPolicy.js';
 import { verifyIssuedByUser } from '../trust.js';
 import { PeerFrames } from './PeerFrames.js';
@@ -100,6 +104,11 @@ export interface SyncResult {
    * 订阅方据此把「没数据」与「没被授权」区分开。
    */
   denied?: boolean;
+  /**
+   * M3：本会话中「对端 hello 自称订阅、但它并非成员」而被**显式拒绝**的分区。
+   * 非空即表示拒绝不再静默（成员资格不一致的可观测信号）。无此类分区时 undefined。
+   */
+  membershipRejected?: string[];
   /** 本会话以快照发出的物化实体数（nodes+edges）；0/undefined 表示未走快照 */
   snapshotSent?: number;
   /** 本会话以快照应用的对端物化实体数（nodes+edges） */
@@ -153,6 +162,12 @@ export interface SyncManagerOptions {
    * 缺省 = `ConfigNamespacePolicy({})`：**不授权任何对端**，没有对端能收到数据。
    */
   namespacePolicy?: NamespaceGrantPolicy;
+  /**
+   * M1–M3 成员资格策略（可选）。配置后：对某分区**已启用成员资格**（存在被采纳成员记录）时，
+   * 裁剪链用「对端成员资格」替代「对端订阅声明」；未启用则沿用订阅声明（legacy-empty）。
+   * 缺省（未配置）= 完全沿用旧链（对端订阅声明）。
+   */
+  membershipPolicy?: NamespaceMembershipPolicy;
   /** 本地写入后向订阅对端即时推送（默认关闭；常驻入口由门面/MCP 打开） */
   pushOnWrite?: boolean;
   /** push-on-write 节流窗口（ms，默认 50）：连续写入合并为一次推送/nudge */
@@ -308,6 +323,10 @@ export class SyncManager extends EventEmitter {
   private readonly subscriptionNamespaces: string[];
   /** 对端授权策略：永不缺省为「不过滤」——未配置即拒绝全部（默认拒绝） */
   private readonly namespacePolicy: NamespaceGrantPolicy;
+  /** M1–M3 成员资格策略；undefined = 未启用（沿用对端订阅声明） */
+  private readonly membershipPolicy: NamespaceMembershipPolicy | undefined;
+  /** 最近一次解析中「对端自称订阅但并非成员」的分区（显式拒绝，供 SyncResult 暴露） */
+  private lastMembershipRejected: string[] = [];
   private readonly pushOnWrite: boolean;
   private readonly pushOnWriteThrottleMs: number;
   private readonly antiEntropy: { enabled: boolean; intervalMs: number; jitterRatio: number };
@@ -360,6 +379,7 @@ export class SyncManager extends EventEmitter {
     this.subscriptionNamespaces = normalizeNamespaceList(options.subscriptionNamespaces);
     // 默认拒绝：未配置策略时用空配置策略，任何对端都未获授权
     this.namespacePolicy = options.namespacePolicy ?? new ConfigNamespacePolicy({});
+    this.membershipPolicy = options.membershipPolicy;
     this.pushOnWrite = options.pushOnWrite ?? false;
     this.pushOnWriteThrottleMs = options.pushOnWriteThrottleMs ?? DEFAULT_PUSH_ON_WRITE_THROTTLE_MS;
     this.antiEntropy = {
@@ -1086,13 +1106,35 @@ export class SyncManager extends EventEmitter {
     hello: Extract<SyncMessage, { type: 'sync-hello' }>,
   ): Promise<string[]> {
     const peerAuthorized = await this.namespacePolicy.getAuthorizedNamespaces(peer.deviceId);
-    return (
-      intersectNamespaceAllowLists(
-        peerAuthorized,
-        declarationToAllowList(hello.subscribeAll, hello.namespaces),
-        declarationToAllowList(this.subscriptionNamespaces.length === 0, this.subscriptionNamespaces),
-      ) ?? []
-    );
+    const localSub = declarationToAllowList(this.subscriptionNamespaces.length === 0, this.subscriptionNamespaces);
+    const helloSub = declarationToAllowList(hello.subscribeAll, hello.namespaces);
+    // 基础链：对端授权 ∩ 本机订阅声明（授权永为具体白名单 → base 恒为数组）
+    const base = intersectNamespaceAllowLists(peerAuthorized, localSub) ?? [];
+    this.lastMembershipRejected = [];
+    if (!this.membershipPolicy) {
+      // 未配置成员策略（库/直连 SyncManager）：沿用旧链（再 ∩ 对端订阅声明）
+      return intersectNamespaceAllowLists(base, helloSub) ?? [];
+    }
+    // M3：对每个候选分区，若已启用成员资格 → 用**对端成员资格**替代对端订阅声明；
+    // 否则（legacy-empty）沿用对端订阅声明。hello 声明仅作一致性校验。
+    const allowed: string[] = [];
+    const rejected: string[] = [];
+    for (const ns of base) {
+      const membership = await this.membershipPolicy.getNamespaceMembership(ns);
+      const helloWants = helloSub === null || helloSub.includes(ns);
+      if (!membership.active) {
+        if (helloWants) allowed.push(ns);
+      } else if (membership.members.includes(peer.deviceId)) {
+        allowed.push(ns); // 成员：按成员资格发送（hello 是否声明不影响）
+      } else if (helloWants) {
+        rejected.push(ns); // 对端自称订阅却非成员 → 显式拒绝（非静默）
+      }
+    }
+    this.lastMembershipRejected = rejected;
+    if (rejected.length > 0) {
+      this.emit('sync-membership-rejected', { peerDeviceId: peer.deviceId, namespaces: rejected });
+    }
+    return allowed;
   }
 
   /**
@@ -1385,6 +1427,10 @@ export class SyncManager extends EventEmitter {
       // 拒绝不静默：allow 解析为 [] 时明确指出「未授权任何分区」
       denied: allow.length === 0,
     };
+    // M3：成员资格一致性——对端自称订阅却非成员的分区，显式暴露（非静默）
+    if (this.lastMembershipRejected.length > 0) {
+      result.membershipRejected = [...this.lastMembershipRejected];
+    }
     // 诊断信号（R1）：对端自报高于本机记录的部分；仅诊断，不影响发送集合
     if (reportedAhead && Object.keys(reportedAhead).length > 0) {
       result.reportedAhead = reportedAhead;

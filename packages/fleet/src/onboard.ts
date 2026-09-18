@@ -220,6 +220,63 @@ export async function revokeNamespaceGrant(
 }
 
 /**
+ * M1：声明/注销某设备在某分区的**成员资格**（写 `namespace_membership` 到 `__policy__`）。
+ * `active=false` = 注销（本轮只改成员集合，不做数据清理——2b）。
+ */
+export async function setNamespaceMembership(
+  dir: string,
+  input: { to: string; namespace?: string; active?: boolean; note?: string },
+): Promise<{ member: string; namespace: string; active: boolean; eventId: string }> {
+  if (typeof input.to !== 'string' || input.to.length === 0) throw new Error('member 需要 --to <deviceId>');
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const namespace = input.namespace ?? config.namespace;
+  const active = input.active ?? true;
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    const event = await mebular.declareNamespaceMembership({
+      member: input.to,
+      namespace,
+      active,
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    });
+    return { member: input.to, namespace, active, eventId: event.id };
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/** M2：某分区的**生效成员集合**（图上在册成员 ∩ 生效授权）。只读。 */
+export async function namespaceMembers(dir: string, namespace?: string): Promise<string[]> {
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    return await mebular.getNamespaceMembers(namespace ?? config.namespace);
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/** M1：某分区成员资格（`active=false` = 未启用成员资格；`members` = 图上在册）。只读。 */
+export async function namespaceMembership(
+  dir: string,
+  namespace?: string,
+): Promise<{ active: boolean; members: string[] }> {
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    return await mebular.getNamespaceMembership(namespace ?? config.namespace);
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/**
  * C1：把某设备声明为**引导签发者**（写 `policy_issuer_declare` 到 `__policy__`）。
  * 新设备同步到该声明后即可采纳其授权，**无需本地 `--policy-issuer` 配置一致**。
  */
@@ -416,6 +473,7 @@ export async function doctor(dir: string): Promise<DoctorReport> {
         }
       }
       const issuers = await m.getPolicyIssuers();
+      const membership = await m.getNamespaceMembership(config.namespace);
       await m.shutdown();
       add(
         'namespace 已授权',
@@ -433,6 +491,18 @@ export async function doctor(dir: string): Promise<DoctorReport> {
         'PASS',
         `issuers=[${issuers.join(', ')}]${issuers.length === 0 ? '（空：fleet declare-issuer --to <self> 或 onboard --policy-issuer）' : ''}`,
       );
+      // M1–M3：本机在该分区的成员资格（未启用成员资格 → SKIP 明列）。
+      if (!membership.active) {
+        add('namespace 成员资格', 'SKIP', '未启用成员资格（无成员记录）', `fleet member --to ${config.device} --namespace ${config.namespace}`);
+      } else {
+        const isMember = membership.members.includes(config.device);
+        add(
+          'namespace 成员资格',
+          isMember ? 'PASS' : 'FAIL',
+          `namespace=${config.namespace} members=[${membership.members.join(', ')}] self=${config.device}`,
+          isMember ? undefined : '用 `fleet member` 将本机加入该分区',
+        );
+      }
     } catch (error) {
       add('namespace 已授权', 'FAIL', `读取本地授权失败：${(error as Error).message}`, '确认存储/主密钥可用');
     }

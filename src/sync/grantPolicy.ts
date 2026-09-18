@@ -29,6 +29,8 @@ export const NAMESPACE_REVOKE_EVENT = 'namespace_revoke';
 export const DEVICE_REVOKE_EVENT = 'device_revoke';
 /** C1：把「谁是引导签发者」声明上图（与 `namespace_grant` 等同在 `__policy__`）。 */
 export const POLICY_ISSUER_DECLARE_EVENT = 'policy_issuer_declare';
+/** M1：持久、签名的**成员资格**记录（订阅=成员资格）。 */
+export const NAMESPACE_MEMBERSHIP_EVENT = 'namespace_membership';
 
 /** 授予记录：把 `namespaces` 授予 `subject` 设备。 */
 export interface NamespaceGrantRecord {
@@ -73,6 +75,24 @@ export interface PolicyIssuerDeclareRecord {
   note?: string;
 }
 
+/**
+ * M1 成员资格记录：设备 `member` 在分区 `namespace` 的成员状态。
+ *
+ * 采纳**不做 R-a**（无条件，仅要求签发者与成员可信且未被吊销）→ 与不动点无循环依赖。
+ * 同一 `(namespace, member)` 取 R-c 定序下**最新记录**的 `active`（在册/注销）。
+ * 生效成员集合还需 ∩ 该设备对该分区的**生效授权**（授权默认拒绝不变）。
+ */
+export interface NamespaceMembershipRecord {
+  /** 成员设备 ID */
+  member: string;
+  /** 分区 */
+  namespace: string;
+  /** true=在册，false=注销 */
+  active: boolean;
+  issuedAt: number;
+  note?: string;
+}
+
 /** 从图上推导出的策略快照：每个主体的生效授权 + 被吊销设备集合。 */
 export interface PolicyState {
   /** subject → 生效分区白名单（未出现 = 拒绝） */
@@ -81,6 +101,10 @@ export interface PolicyState {
   revoked: Set<string>;
   /** C1：生效引导签发者集合（图上被采纳声明 ∪ 配置 bootstrap） */
   issuers: Set<string>;
+  /** M1：`namespace → 在册成员集合`（采纳且 active；尚未 ∩ 授权） */
+  members: Map<string, Set<string>>;
+  /** M1：出现≥1 条被采纳成员记录的分区（= 已启用成员资格，须强制闸门） */
+  membershipNamespaces: Set<string>;
   /** 不动点是否在迭代上限内**收敛**（false = 到达上限，回退到最保守结果，可观测） */
   converged: boolean;
   /** 实际执行的迭代轮数（诊断） */
@@ -92,10 +116,12 @@ interface Authority {
   authorized: Map<string, string[]>;
   revoked: Set<string>;
   issuers: Set<string>;
+  members: Map<string, Set<string>>;
+  membershipNamespaces: Set<string>;
 }
 
 interface ParsedEntry {
-  kind: 'grant' | 'revoke' | 'device' | 'issuer';
+  kind: 'grant' | 'revoke' | 'device' | 'issuer' | 'membership';
   /** 签发者设备 ID（= event.author） */
   author: string;
   /**
@@ -113,6 +139,7 @@ interface ParsedEntry {
   revoke?: NamespaceRevokeRecord;
   device?: DeviceRevokeRecord;
   issuer?: PolicyIssuerDeclareRecord;
+  membership?: NamespaceMembershipRecord;
 }
 
 function isPolicyType(type: string): boolean {
@@ -120,7 +147,8 @@ function isPolicyType(type: string): boolean {
     type === NAMESPACE_GRANT_EVENT ||
     type === NAMESPACE_REVOKE_EVENT ||
     type === DEVICE_REVOKE_EVENT ||
-    type === POLICY_ISSUER_DECLARE_EVENT
+    type === POLICY_ISSUER_DECLARE_EVENT ||
+    type === NAMESPACE_MEMBERSHIP_EVENT
   );
 }
 
@@ -170,6 +198,16 @@ function parseEntries(events: Event[]): ParsedEntry[] {
       const issuer = (event.data as { policyIssuer?: PolicyIssuerDeclareRecord }).policyIssuer;
       if (issuer && typeof issuer.subject === 'string') {
         entries.push({ kind: 'issuer', author, seq, logical, id: event.id, issuer });
+      }
+    } else if (event.type === NAMESPACE_MEMBERSHIP_EVENT) {
+      const membership = (event.data as { membership?: NamespaceMembershipRecord }).membership;
+      if (
+        membership &&
+        typeof membership.member === 'string' &&
+        typeof membership.namespace === 'string' &&
+        typeof membership.active === 'boolean'
+      ) {
+        entries.push({ kind: 'membership', author, seq, logical, id: event.id, membership });
       }
     } else {
       const device = (event.data as { deviceRevoke?: DeviceRevokeRecord }).deviceRevoke;
@@ -298,6 +336,42 @@ function effectiveIssuers(
   return issuers;
 }
 
+/**
+ * M1：从成员记录推导「分区 → 在册成员集合」与「已启用成员资格的分区」。
+ *
+ * 纯函数于 `(sorted, revokedIn)`（不做 R-a）→ 不引入新不动点未知量。R-b：签发者或成员被吊销
+ * 的记录不采纳。`sorted` 已是 R-c 确定序，故同一 `(namespace, member)` **后者胜**（最新记录）。
+ */
+function deriveMembership(
+  sorted: ParsedEntry[],
+  revokedIn: ReadonlySet<string>,
+): { members: Map<string, Set<string>>; namespaces: Set<string> } {
+  const latest = new Map<string, boolean>();
+  const namespaces = new Set<string>();
+  for (const entry of sorted) {
+    if (entry.kind !== 'membership' || !entry.membership) continue;
+    if (revokedIn.has(entry.author)) continue; // R-b：被吊销签发者的记录不采纳
+    if (revokedIn.has(entry.membership.member)) continue; // R-b：被吊销成员不采纳
+    const { namespace, member, active } = entry.membership;
+    namespaces.add(namespace);
+    latest.set(`${namespace}\u0000${member}`, active);
+  }
+  const members = new Map<string, Set<string>>();
+  for (const [key, active] of latest) {
+    if (!active) continue;
+    const sep = key.indexOf('\u0000');
+    const namespace = key.slice(0, sep);
+    const member = key.slice(sep + 1);
+    let set = members.get(namespace);
+    if (!set) {
+      set = new Set();
+      members.set(namespace, set);
+    }
+    set.add(member);
+  }
+  return { members, namespaces };
+}
+
 function deriveOnce(
   sorted: ParsedEntry[],
   bootstrap: ReadonlySet<string>,
@@ -342,7 +416,8 @@ function deriveOnce(
 
   const out = new Map<string, string[]>();
   for (const [subject, set] of authorized) out.set(subject, [...set]);
-  return { authorized: out, revoked, issuers };
+  const membership = deriveMembership(sorted, revokedIn);
+  return { authorized: out, revoked, issuers, members: membership.members, membershipNamespaces: membership.namespaces };
 }
 
 /** 由权威 `revoked` 过滤出应被采纳的 revoke（R-b：排除被吊销签发者发出的 revoke） */
@@ -419,7 +494,15 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
     }
   }
 
-  return { authorized: chosen.authorized, revoked: chosen.revoked, issuers: chosen.issuers, converged, iterations };
+  return {
+    authorized: chosen.authorized,
+    revoked: chosen.revoked,
+    issuers: chosen.issuers,
+    members: chosen.members,
+    membershipNamespaces: chosen.membershipNamespaces,
+    converged,
+    iterations,
+  };
 }
 
 /**
@@ -464,6 +547,18 @@ export class GraphNamespacePolicy implements NamespaceGrantPolicy {
   /** C1：当前生效引导签发者集合（图上被采纳声明 ∪ 构造时配置的 bootstrap）。 */
   async getPolicyIssuers(): Promise<string[]> {
     return [...(await this.snapshot()).issuers].sort();
+  }
+
+  /**
+   * M1：某分区的成员资格。`active=false` 表示**该分区尚无被采纳的成员记录**（未启用成员资格，
+   * 调用方沿用旧行为）；`active=true` 时 `members` 为在册成员（已 ∩ 授权由上层完成）。
+   */
+  async getNamespaceMembership(namespace: string): Promise<{ active: boolean; members: string[] }> {
+    const state = await this.snapshot();
+    return {
+      active: state.membershipNamespaces.has(namespace),
+      members: [...(state.members.get(namespace) ?? [])].sort(),
+    };
   }
 
   async getRevokedDevices(): Promise<ReadonlySet<string>> {

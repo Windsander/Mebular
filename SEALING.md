@@ -38,8 +38,17 @@
 > 把 `policy_issuer_declare` 视为未知类型而忽略：若新旧混跑且旧节点**未**在本地配置该签发者，则旧
 > 节点不承认该签发者的授权、**可能少授权/不收敛**（安全方向：少授权，不 fail-open）。**同一集群须
 > 全端升级到含 C1 的版本**；跨版本互通仅在「旧端仍用 `sync.policyIssuers` 本地配置」时成立。
+>
+> **⚠️ 破坏性协议变更 · M1–M3（订阅 = 成员资格）**：新增事件类型 `namespace_membership`，把「订阅」
+> 从**瞬时 hello 声明**升格为**持久、签名的图上成员资格**；裁剪链改为
+> `对端授权 ∩ 对端成员资格 ∩ 本机订阅声明`，hello 订阅声明降级为**活跃性/一致性校验**（不一致 →
+> **显式拒绝/告警**，不静默）。**兼容规则（legacy-empty）**：某分区**没有任何被采纳成员记录**时视为
+> 未启用成员资格，沿用既有 hello 订阅裁剪（**不放松授权默认拒绝**）；一旦该分区出现成员记录，即成
+> 强制闸门。**旧节点**忽略 `namespace_membership`：对旧端而言该分区始终「未启用成员资格」→ 行为
+> 不变或**少收**（安全方向，不 fail-open）；**退订的数据清理/继任者 ack 门禁属 2b，本轮不做**。
 
-- **策略事件类型与命名空间**：保留命名空间 `__policy__`；事件类型 `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare`。
+- **策略事件类型与命名空间**：保留命名空间 `__policy__`；事件类型 `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare` / `namespace_membership`。
+- **M1–M3 成员资格（`namespace_membership`）**：`{ member, namespace, active, issuedAt, note? }`；只采纳链到主密钥且签发者/成员未被 `device_revoke` 吊销的记录（**无条件采纳，不做 R-a**）；`(namespace, member)` 取 **R-c 最新**记录的 `active`（在册/注销）。**生效成员 = active 成员 ∩ 该设备对该分区的生效授权**；成员记录**不得**放宽授权（默认拒绝不变）。**裁剪链**：对端授权 ∩ 对端成员资格 ∩ 本机订阅声明；hello 订阅声明仅作活跃性/一致性校验，不一致 **显式拒绝/告警**（`sync-completed.membershipRejected`）。**legacy-empty**：分区无成员记录时按 hello 订阅裁剪（兼容）。
 - **规则 R-a/R-b/R-c/R-d**：
   - **R-a 不可越权授予**：签发者须属于**生效引导集合**（图上被采纳的 `policy_issuer_declare` 主体 ∪ 本地配置 `sync.policyIssuers`），或**当时**已获授权其声明的**全部**分区。
   - **C1 引导签发者声明（`policy_issuer_declare`）**：签发者与主体均未被 `device_revoke` 吊销时，**无条件采纳**（不做 R-a，故与不动点无循环依赖）；被吊销的签发者（R-b 含历史）或被吊销的主体 → **不采纳**。伪造/非本用户主密钥链的记录在校验阶段被忽略。
@@ -50,7 +59,7 @@
 - **未收敛 = fail-closed 两轴保守回退**：`revokedGrantIds = ∅`（不采纳任何 revoke）且 `revokedIn = 各轮吊销并集的闭包`，迭代直到输出 **`revoked ⊆ excluded`**（R-b 在回退路径**字面成立**）；绝不 fail-open。`PolicyState.converged = false` 可观测（含 `iterations`）。
 - **`maxIterations` 不可由生产注入**：`GraphNamespacePolicy` 构造**无**该选项，生产恒用 `iterationBound`；`DerivePolicyOptions.maxIterations` 标注 `@internal`，**仅测试专用**。
 - **水位持久化格式 v2**：`.sync-state.json`（`namespaceClocks` 分区水位 + per-event ack 集合 + `snapshotApplied`）。
-- **默认拒绝与裁剪链**：`sync.peerNamespacePolicy` 未列出 = 拒绝（空数组 = 明确不允许）；裁剪链 = **对端授权 ∩ 对端订阅声明 ∩ 本机订阅声明**，同时作用于 **offer 与初始快照**。拒绝非静默（`sync-completed.denied`）。
+- **默认拒绝与裁剪链**：`sync.peerNamespacePolicy` 未列出 = 拒绝（空数组 = 明确不允许）；裁剪链 = **对端授权 ∩ 对端成员资格 ∩ 本机订阅声明**（M1–M3；成员资格未启用时退化为对端订阅声明），同时作用于 **offer 与初始快照**。拒绝非静默（`sync-completed.denied`；成员不一致 → `sync-completed.membershipRejected`）。
 - **订阅声明**：`sync.namespaces` 声明本机订阅；未配置/空 = 参与全部。声明随 `sync-hello` 以 `subscribeAll` + `namespaces` **必填**下发；**缺字段/类型错视为协议违例并中止会话**；`subscribeAll=false` + 空清单 = 明确不订阅任何分区。
 - **`sync-nudge` 帧无载荷**；携带业务载荷视为协议违例。
 - **推送/兜底默认值**：`pushOnWrite` 与 `antiEntropy`——库/嵌入式 **关**，常驻（`serve` / MCP）**开**。anti-entropy 默认 `intervalMs = 10min`、`jitterRatio = 0.2`（±20%）；无 pending **短路跳过**、会话在途跳过、失败指数退避、jitter 防齐步走。push-on-write 节流 50ms 合并。
@@ -60,7 +69,7 @@
 
 ## 4. 推迟项（本轮封板明确不做）
 
-- **订阅 = 成员资格**、**退订交接**、**重订阅恢复**。
+- **退订交接（成员退出时的数据清理 + 继任者全量 ack 门禁）**、**重订阅恢复**——见 2b/2c；2a 已定义成员的「在册/注销」两态与查询接口（`namespace_membership`）。
 - **F/G 剩余**：策略导出的其余边界族与治理项。
 - **会话多路复用**。
 - **quorum / 阈值签名**（多签发者已有，但无门限）。

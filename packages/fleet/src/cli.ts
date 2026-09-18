@@ -30,8 +30,11 @@ import {
   doctor,
   grantNamespace,
   mebularOptions,
+  namespaceMembers,
+  namespaceMembership,
   onboardDevice,
   revokeNamespaceGrant,
+  setNamespaceMembership,
 } from './onboard.js';
 
 interface Args {
@@ -319,6 +322,33 @@ async function runDeclareIssuer(args: Args): Promise<number> {
   return 0;
 }
 
+async function runMember(args: Args): Promise<number> {
+  const dir = str(args.dir, './.fleet');
+  const result = await setNamespaceMembership(dir, {
+    to: str(args.to, ''),
+    ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
+    active: args.leave === true ? false : true,
+    ...(typeof args.note === 'string' ? { note: args.note } : {}),
+  });
+  console.log(JSON.stringify({ ok: true, role: 'member', ...result }, null, 2));
+  return 0;
+}
+
+async function runMembers(args: Args): Promise<number> {
+  const dir = str(args.dir, './.fleet');
+  const namespace = typeof args.namespace === 'string' ? args.namespace : undefined;
+  const membership = await namespaceMembership(dir, namespace);
+  const members = await namespaceMembers(dir, namespace);
+  console.log(
+    JSON.stringify(
+      { ok: true, role: 'members', namespace: namespace ?? '(config default)', active: membership.active, members, onRecord: membership.members },
+      null,
+      2,
+    ),
+  );
+  return 0;
+}
+
 async function runDoctor(args: Args): Promise<number> {
   const report = await doctor(str(args.dir, './.fleet'));
   if (args.json === true) console.log(JSON.stringify(report, null, 2));
@@ -475,8 +505,10 @@ async function main(): Promise<void> {
   else if (command === 'grant') code = await runGrant(args);
   else if (command === 'revoke') code = await runRevoke(args);
   else if (command === 'declare-issuer') code = await runDeclareIssuer(args);
+  else if (command === 'member') code = await runMember(args);
+  else if (command === 'members') code = await runMembers(args);
   else {
-    console.error('用法：fleet onboard|doctor|grant|revoke|declare-issuer|node|worker|service|spool … | fleet --version');
+    console.error('用法：fleet onboard|doctor|grant|revoke|declare-issuer|member|members|node|worker|service|spool … | fleet --version');
     code = 2;
   }
   } catch (error) {

@@ -121,7 +121,7 @@ try {
     skipped: report?.skipped,
     failed: (report?.checks ?? []).filter((c) => c.status === 'FAIL').map((c) => `${c.name}:${c.detail}`),
   });
-  const KNOWN_SKIPS = ['config 权限', '主密钥权限', '服务已注册', '心跳新鲜', 'peer 可达', '同步已收敛'];
+  const KNOWN_SKIPS = ['config 权限', '主密钥权限', '服务已注册', '心跳新鲜', 'namespace 成员资格', 'peer 可达', '同步已收敛'];
   check(
     'doctor(B) skipped 无未知项，且「服务已注册」按 dir 明列 SKIP',
     (report?.skipped ?? []).every((s) => KNOWN_SKIPS.includes(s)) && (report?.skipped ?? []).includes('服务已注册'),

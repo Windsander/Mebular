@@ -28,6 +28,14 @@ import {
 
 const FIXTURE = fileURLToPath(new URL('../tests/fleet/fixtures/fake-agent.mjs', import.meta.url));
 const WITH_HERMES = process.argv.includes('--with-hermes');
+const HERMES_SENTINEL = 'FLEET_HERMES_OK';
+const HERMES_PROMPT = `只输出 ${HERMES_SENTINEL} 这个 token（大写、无引号、无其它字符）；不要执行任何其它动作、不要读取文件或仓库状态、不要解释。`;
+// 开关是**命令行参数** `--with-hermes`；若只设了环境变量则明确提示（不静默忽略）。
+const LEGACY_HERMES_ENV = process.env.FLEET_VERIFY_HERMES ?? process.env.WITH_HERMES;
+if (LEGACY_HERMES_ENV !== undefined && !WITH_HERMES) {
+  const name = process.env.FLEET_VERIFY_HERMES !== undefined ? 'FLEET_VERIFY_HERMES' : 'WITH_HERMES';
+  console.log(`注意：真实 Hermes 开关是命令行参数 \`--with-hermes\`；环境变量 ${name} 被忽略。`);
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitUntil(fn, timeoutMs, pollMs = 20) {
   const deadline = Date.now() + timeoutMs;
@@ -96,7 +104,11 @@ try {
   registry.register('slow', new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'sleep', '--sleep', '5000'], timeoutMs: 400 }));
   registry.register('fail', new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'fail', '--exit', '3', '--stderr', 'agent-down'] }));
   registry.register('big', new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, '--mode', 'large', '--bytes', '100000'], maxOutputBytes: 1000 }));
-  if (WITH_HERMES) registry.register('hermes', new HermesAgent({ timeoutMs: 180000, maxOutputBytes: 2000 }));
+  let hermesAgent = null;
+  if (WITH_HERMES) {
+    hermesAgent = new HermesAgent({ timeoutMs: 180000, maxOutputBytes: 2000 });
+    registry.register('hermes', hermesAgent);
+  }
 
   const aStore = new MebularTaskEventStore(A);
   const bStore = new MebularTaskEventStore(B);
@@ -113,12 +125,16 @@ try {
     { agent: 'big', expect: 'done', resultRefMatch: /\[truncated \d+ bytes\]/ },
     { agent: 'nope', expect: 'failed', reasonMatch: /^UNKNOWN_AGENT: nope$/ },
   ];
-  if (WITH_HERMES) plan.push({ agent: 'hermes', expect: 'done', resultRef: 'FLEET_HERMES_OK' });
+  if (WITH_HERMES) {
+    plan.push({ agent: 'hermes', expect: 'done', intent: HERMES_PROMPT, resultRefMatch: new RegExp(HERMES_SENTINEL), measureMs: true });
+  }
 
   const ids = [];
+  const submittedAt = new Map();
   for (const p of plan) {
-    const intent = `a-${p.agent}`;
+    const intent = p.intent ?? `a-${p.agent}`;
     const { taskId } = await node.submit({ intent, to: { device: 'device-B', agent: p.agent } });
+    submittedAt.set(taskId, Date.now());
     ids.push({ taskId, ...p, intent });
   }
 
@@ -134,12 +150,24 @@ try {
   for (const x of ids) {
     const st = byId.get(x.taskId);
     if (x.expect === 'done') {
-      const match = st?.status === 'done' && (x.resultRef !== undefined ? st.resultRef === x.resultRef : true) && (x.resultRefMatch ? x.resultRefMatch.test(st.resultRef ?? '') : true);
-      check(`agent=${x.agent} → done 且结果正确`, match, { status: st?.status, resultRef: st?.resultRef });
+      const match =
+        st?.status === 'done' &&
+        (x.resultRef !== undefined ? st.resultRef === x.resultRef : true) &&
+        (x.resultRefMatch ? x.resultRefMatch.test(st.resultRef ?? '') : true) &&
+        (x.reasonMatch ? x.reasonMatch.test(st.reason ?? '') : true);
+      const detail = { status: st?.status, resultRef: st?.resultRef };
+      if (x.measureMs) detail.ms = Date.now() - (submittedAt.get(x.taskId) ?? Date.now());
+      check(`agent=${x.agent} → done 且结果正确`, match, detail);
     } else {
       const match = st?.status === 'failed' && !!x.reasonMatch?.test(st.reason ?? '');
       check(`agent=${x.agent} → failed 语义正确`, match, { status: st?.status, reason: st?.reason });
     }
+  }
+  if (WITH_HERMES && hermesAgent !== null) {
+    const t0 = Date.now();
+    const direct = await hermesAgent.execute({ intent: HERMES_PROMPT });
+    const okDirect = direct.ok === true && /FLEET_HERMES_OK/.test(direct.resultRef ?? '') && /^session:/.test(direct.reason ?? '');
+    check('hermes 直连：结果包含哨兵且解析出 session_id', okDirect, { ms: Date.now() - t0, reason: direct.reason, resultRef: direct.resultRef });
   }
   check('未知 agent 不执行（exec log 不含 nope 任务）', log.all().every((e) => byId.get(e.taskId)?.to.agent !== 'nope'));
 } finally {

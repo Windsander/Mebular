@@ -203,6 +203,18 @@ export interface NamespaceHandoffPlan {
 }
 
 /** 2b：退订交接结果。 */
+/** 2c：重订阅恢复结果。 */
+export interface NamespaceRejoinResult {
+  ok: boolean;
+  action: 'rejoin';
+  namespace: string;
+  /** 是否已声明“本机该分区已重置/为空”（触发对端向下修正并从 0 重发） */
+  reset: boolean;
+  member: boolean;
+  authorized: boolean;
+  reason?: 'not-authorized' | 'membership-not-active';
+}
+
 export interface NamespaceHandoffResult {
   ok: boolean;
   action: 'leave';
@@ -337,6 +349,12 @@ export class Mebular {
           this.config.sync?.syncStatePath ??
           `${this.config.storagePath.replace(/\.json$/i, '')}.sync-state.json`,
       });
+
+      // 5.6 2c：依据图外「已重置」标记恢复 reset 声明（重入方 hello 以空时钟上报，
+      //     触发对端向下修正并从 0 重发）。标记不同步、不入图。
+      for (const ns of this.config.sync?.namespaces ?? []) {
+        if (await this.hasRejoinReset(ns)) this.syncImpl.noteLocalReset(ns);
+      }
 
       // 5.5 语义向量索引（可选依赖；缺包降级关键词并告警）
       if (this.config.semantic?.enabled) {
@@ -614,6 +632,57 @@ export class Mebular {
 
   private handoffIntentPath(): string {
     return `${this.config.storagePath}.handoff.json`;
+  }
+
+  /** 2c：本地「已清理/待重入」标记路径（图外、**不同步**、无 tombstone）。 */
+  private rejoinMarkerPath(namespace?: string): string {
+    return namespace === undefined
+      ? `${this.config.storagePath}.rejoin.json`
+      : `${this.config.storagePath}.rejoin.${namespace}.json`;
+  }
+
+  /** 2c：本机对某分区是否已声明重置（读图外标记，仅供本机诊断/决策）。 */
+  async hasRejoinReset(namespace: string): Promise<boolean> {
+    try {
+      const parsed = JSON.parse(await readFile(this.rejoinMarkerPath(normalizeNamespace(namespace)), 'utf-8')) as {
+        reset?: boolean;
+      };
+      return parsed.reset === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 2c：重订阅恢复——退订清理后**重新加入**该分区。
+   *
+   * 准入（R1）：①该分区对**本设备**有**生效授权**（`getEffectiveNamespaces(self)` 含该分区，
+   * 即存在签发给本机的 grant；默认拒绝不变）②本机重新声明成员在册。任一不满足 → **显式失败**。
+   *
+   * 重置（R2）：写**图外**「已清理」标记（R3，不同步），清空本机该分区本地水位；本机之后的
+   * hello 会以**空时钟**上报该（显式订阅的）分区 → 对端按「自报水位只允许向下修正」**从 0 重发**
+   * （或按既有“空水位”门禁发初始快照，**门禁不放宽**）。**不产生 tombstone、不改 `__policy__`。**
+   */
+  async rejoinNamespace(input: { namespace: string }): Promise<NamespaceRejoinResult> {
+    const ns = normalizeNamespace(input.namespace);
+    if (ns === POLICY_NAMESPACE) throw new Error('不允许对保留策略分区 __policy__ 执行重入');
+    const authorized = (await this.getEffectiveNamespaces(this.config.deviceId)).includes(ns);
+    if (!authorized) {
+      return { ok: false, action: 'rejoin', namespace: ns, reset: false, member: false, authorized: false, reason: 'not-authorized' };
+    }
+    await this.declareNamespaceMembership({ member: this.config.deviceId, namespace: ns, active: true });
+    const member = (await this.getNamespaceMembership(ns)).members.includes(this.config.deviceId);
+    if (!member) {
+      return { ok: false, action: 'rejoin', namespace: ns, reset: false, member: false, authorized: true, reason: 'membership-not-active' };
+    }
+    // R3：图外重置标记（不同步）
+    const path = this.rejoinMarkerPath(ns);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify({ namespace: ns, reset: true, at: Date.now() }), { mode: 0o600 });
+    // R2：清本机该分区本地水位（含快照水位）→ 登记 reset，使 hello 上报空时钟
+    await this.sync.forgetNamespace(ns, []);
+    this.sync.noteLocalReset(ns);
+    return { ok: true, action: 'rejoin', namespace: ns, reset: true, member: true, authorized: true };
   }
 
   private async readHandoffIntent(): Promise<{

@@ -11,6 +11,7 @@ import {
   POLICY_NAMESPACE,
   type NamespaceHandoffPlan,
   type NamespaceHandoffResult,
+  type NamespaceRejoinResult,
 } from '@mebular/core';
 import { isHeartbeatFresh, readHeartbeat, registeredServicesForDir } from '@mebular/service';
 
@@ -260,6 +261,35 @@ export async function namespaceMembers(dir: string, namespace?: string): Promise
   await mebular.initialize();
   try {
     return await mebular.getNamespaceMembers(namespace ?? config.namespace);
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/** 2c：重订阅恢复（准入：本机对该分区有生效授权 ∧ 成员在册；写图外 reset 标记）。 */
+export async function rejoinNamespace(
+  dir: string,
+  input: { namespace?: string } = {},
+): Promise<NamespaceRejoinResult> {
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    return await mebular.rejoinNamespace({ namespace: input.namespace ?? config.namespace });
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/** 2c：本机是否已声明某分区重置（读图外标记）。只读。 */
+export async function rejoinReset(dir: string, namespace?: string): Promise<boolean> {
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    return await mebular.hasRejoinReset(namespace ?? config.namespace);
   } finally {
     await mebular.shutdown();
   }
@@ -586,6 +616,14 @@ export async function doctor(dir: string): Promise<DoctorReport> {
       add('同步已收敛', 'FAIL', `读取本地状态失败：${(error as Error).message}`);
     }
   }
+
+  // 7.4) 2c 重入状态：本机是否已声明某分区重置（图外标记，不同步）。恒 PASS，供审计。
+  const rejoinMarker = `${config.storagePath}.rejoin.${config.namespace}.json`;
+  add(
+    '重入状态',
+    'PASS',
+    (await exists(rejoinMarker)) ? `namespace=${config.namespace} reset=true（已声明重置；下次同步将从零拉取）` : 'reset=false',
+  );
 
   // 7.5) 2b 交接状态：存在未完成意图（图外 sidecar）→ FAIL（重跑 `fleet leave` 幂等续跑）。
   const intentPath = `${config.storagePath}.handoff.json`;

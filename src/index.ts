@@ -12,6 +12,7 @@ export {
   type MebularConfig,
   type NamespaceHandoffPlan,
   type NamespaceHandoffResult,
+  type NamespaceRejoinResult,
 } from './mebular.js';
 export {
   EventLog,

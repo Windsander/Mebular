@@ -473,7 +473,7 @@ describe('对端自报不得抬升水位（R1）', () => {
     expect(result.reportedAhead).toEqual({ nsA: { 'device-A': 99 } }); // 诊断信号
   });
 
-  it('对端自报低于/等于本机记录：水位不抬升也不下降，无 divergence 信号', async () => {
+  it('对端自报空对象（不含分区）：不触发向下修正；水位不抬升，无 divergence 信号', async () => {
     const a = await createDevice('device-A', { namespacePolicy: grant('nsA') });
     const b = await createDevice('device-B', { namespacePolicy: grant('nsA') });
     await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
@@ -665,7 +665,7 @@ describe('同步水位持久化', () => {
     expect(saved.peerWatermarks['device-B']?.nsA).toBeUndefined(); // 未确认 → 不推进
   });
 
-  it('resetPeerWatermarks：清水位但保留 per-event ack；被污染水位重置后事件会重发（F3）', async () => {
+  it('2c：对端自报向下修正自动解污染；resetPeerWatermarks 仍可显式修复（F3）', async () => {
     const statePath = join(dir, 'a-f3.sync-state.json');
     const a0 = await createDevice('device-A', { namespacePolicy: grant('nsA') });
     const b = await createDevice('device-B', { namespacePolicy: grant('nsA') });
@@ -685,16 +685,20 @@ describe('同步水位持久化', () => {
     );
     const a = newSyncManager(a0, { namespacePolicy: grant('nsA'), syncStatePath: statePath });
 
-    // 新增一条 nsA 事件（A:2）：被污染水位（9）覆盖 → 静默不发（正是要修的缺陷）
+    // 新增一条 nsA 事件（A:2）：污染水位（9）本会静默不发——但 2c 起，对端 hello 自报真实
+    // 水位（A:1）会**向下修正**本机水位到 1，于是 A:2 被补发（安全方向；自报只可向下）。
     const a2 = await a0.store.createNode('fact', { text: 'a2' }, [], { namespace: 'nsA' });
     const [before] = await runSyncWith(a, b.syncManager, a0, b);
-    expect(before.sentEvents).toBe(0);
+    expect(before.sentEvents).toBe(1);
 
     // 修复路径：重置该对端水位 → 水位回落到对端自报（A:1），a2 被补发
     await a.resetPeerWatermarks('device-B');
     const saved = await loadState(statePath);
     expect(saved.peerWatermarks['device-B']).toBeUndefined();
-    expect(saved.peers['device-B']).toEqual([a1.id]); // per-event ack 集合未被清
+    // per-event ack 集合未被清（2c：a2 已随向下修正补发并被 ack → 集合含 a1 与 a2 两条事件）
+    expect(saved.peers['device-B']).toHaveLength(2);
+    expect(saved.peers['device-B']).toContain(a1.id);
+    void a2;
 
     const [after] = await runSyncWith(a, b.syncManager, a0, b);
     // 水位清空后不再被污染值抑制：a1、a2 都会重发（安全方向，最多冗余）

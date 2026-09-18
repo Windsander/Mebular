@@ -16,7 +16,15 @@ import { NullTransport } from './transport/null.js';
 import { SpoolTransport } from './transport/spool.js';
 import { LocalQuota } from './quota.js';
 import { fleetConfigPath, loadFleetConfig, parseAgentSpecs, readMasterKeyFile } from './config.js';
-import { buildRegistry, doctor, grantNamespace, mebularOptions, onboardDevice, revokeNamespaceGrant } from './onboard.js';
+import {
+  buildRegistry,
+  declarePolicyIssuer,
+  doctor,
+  grantNamespace,
+  mebularOptions,
+  onboardDevice,
+  revokeNamespaceGrant,
+} from './onboard.js';
 
 interface Args {
   [key: string]: string | boolean | undefined;
@@ -232,6 +240,16 @@ async function runRevoke(args: Args): Promise<number> {
   return 0;
 }
 
+async function runDeclareIssuer(args: Args): Promise<number> {
+  const dir = str(args.dir, './.fleet');
+  const result = await declarePolicyIssuer(dir, {
+    to: str(args.to, ''),
+    ...(typeof args.note === 'string' ? { note: args.note } : {}),
+  });
+  console.log(JSON.stringify({ ok: true, role: 'declare-issuer', ...result }, null, 2));
+  return 0;
+}
+
 async function runDoctor(args: Args): Promise<number> {
   const report = await doctor(str(args.dir, './.fleet'));
   if (args.json === true) console.log(JSON.stringify(report, null, 2));
@@ -346,10 +364,11 @@ async function main(): Promise<void> {
   else if (command === 'doctor') code = await runDoctor(args);
   else if (command === 'grant') code = await runGrant(args);
   else if (command === 'revoke') code = await runRevoke(args);
+  else if (command === 'declare-issuer') code = await runDeclareIssuer(args);
   else if (command === 'serve') code = await runServe(args);
   else if (command === 'work') code = await runWork(args);
   else {
-    console.error('用法：fleet onboard|doctor|grant|revoke|serve|work|node|worker … | fleet --version');
+    console.error('用法：fleet onboard|doctor|grant|revoke|declare-issuer|serve|work|node|worker … | fleet --version');
     code = 2;
   }
   } catch (error) {

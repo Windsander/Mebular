@@ -218,6 +218,43 @@ export async function revokeNamespaceGrant(
   }
 }
 
+/**
+ * C1：把某设备声明为**引导签发者**（写 `policy_issuer_declare` 到 `__policy__`）。
+ * 新设备同步到该声明后即可采纳其授权，**无需本地 `--policy-issuer` 配置一致**。
+ */
+export async function declarePolicyIssuer(
+  dir: string,
+  input: { to: string; note?: string },
+): Promise<{ subject: string; eventId: string }> {
+  if (typeof input.to !== 'string' || input.to.length === 0) throw new Error('declare-issuer 需要 --to <deviceId>');
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    const event = await mebular.declarePolicyIssuer({
+      subject: input.to,
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    });
+    return { subject: input.to, eventId: event.id };
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/** C1：本机当前生效的引导签发者集合（图上声明 ∪ 本地配置）。只读。 */
+export async function effectivePolicyIssuers(dir: string): Promise<string[]> {
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    return await mebular.getPolicyIssuers();
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
 export type DoctorStatus = 'PASS' | 'FAIL' | 'SKIP';
 export interface DoctorCheck {
   name: string;
@@ -377,6 +414,7 @@ export async function doctor(dir: string): Promise<DoctorReport> {
           if (wasNamespaceGrantRevoked(policyEvents, device, config.namespace)) revokedHint = true;
         }
       }
+      const issuers = await m.getPolicyIssuers();
       await m.shutdown();
       add(
         'namespace 已授权',
@@ -387,6 +425,12 @@ export async function doctor(dir: string): Promise<DoctorReport> {
           : revokedHint
             ? '曾被 namespace_revoke 撤销；必须用新的 grantId 恢复（R-d）'
             : '为对端签发 grant（fleet grant --to <peer>）或配置白名单',
+      );
+      // C1 信息项：生效引导签发者集合（图上声明 ∪ 本地配置）。恒 PASS，供审计。
+      add(
+        '策略签发者',
+        'PASS',
+        `issuers=[${issuers.join(', ')}]${issuers.length === 0 ? '（空：fleet declare-issuer --to <self> 或 onboard --policy-issuer）' : ''}`,
       );
     } catch (error) {
       add('namespace 已授权', 'FAIL', `读取本地授权失败：${(error as Error).message}`, '确认存储/主密钥可用');

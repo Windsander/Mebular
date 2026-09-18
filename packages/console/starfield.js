@@ -345,7 +345,9 @@ export class StarStage {
       const bob = animate
         ? Math.sin(time * (0.35 + depth * 0.45) + depth * 6.283) * bobAmp
         : 0;
-      screen.set(id, { x: pos.x + px, y: pos.y + py + bob, depth });
+      // 视觉半径（与 _drawNodes 一致）：外部连线/标注据此精确贴合星体边缘
+      const r = (isSelf ? 9 : 6) * (0.6 + depth * 0.7);
+      screen.set(id, { x: pos.x + px, y: pos.y + py + bob, depth, r });
     }
     this.screen = screen;
   }

@@ -820,8 +820,8 @@ stage.onSelect = (node) => {
   stage.redraw();
 };
 
-// 选中节点的绿色虚线荧光条：从星体连到设备卡左缘
-stage.onOverlay = (ctx, time) => {
+// 选中节点的绿色虚线荧光条：星体边缘 → 设备卡左边框（静态，无动效）
+stage.onOverlay = (ctx) => {
   if (!state.selected || state.view !== 'map') return;
   const asideEl = document.querySelector('.aside');
   const cardEl = $('#device-card');
@@ -830,44 +830,45 @@ stage.onOverlay = (ctx, time) => {
   if (!node) return;
   const canvasRect = stage.canvas.getBoundingClientRect();
   const cardRect = cardEl.getBoundingClientRect();
-  const end = { x: cardRect.left - canvasRect.left + 2, y: cardRect.top + 30 };
-  const dx = end.x - node.x;
-  const dy = end.y - node.y;
+  // 卡为最前层：线段终止于面板边框（面板遮挡住内侧延伸），锚点取左侧略高于中线处
+  const borderX = cardRect.left - canvasRect.left;
+  const anchorY = cardRect.top + cardRect.height * 0.42 - canvasRect.top;
+  const dx = borderX - node.x;
+  const dy = anchorY - node.y;
   const len = Math.hypot(dx, dy) || 1;
   const ux = dx / len;
   const uy = dy / len;
-  const start = { x: node.x + ux * 16, y: node.y + uy * 16 };
-  const stop = { x: end.x - ux * 6, y: end.y - uy * 6 };
+  // 起点贴合星体视觉半径（含光晕余量），此前固定 16px 偏离导致「接不上」
+  const startR = (node.r ?? 8) + 4;
+  const sx = node.x + ux * startR;
+  const sy = node.y + uy * startR;
 
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  ctx.setLineDash([9, 7]);
-  ctx.lineDashOffset = -((time * 46) % 16);
-  // 荧光晕层
-  ctx.lineWidth = 4.5;
-  ctx.strokeStyle = 'rgba(70, 255, 160, 0.16)';
-  ctx.shadowColor = 'rgba(70, 255, 160, 0.9)';
-  ctx.shadowBlur = 10;
-  ctx.beginPath();
-  ctx.moveTo(start.x, start.y);
-  ctx.lineTo(stop.x, stop.y);
-  ctx.stroke();
-  // 亮线层
-  ctx.lineWidth = 1.2;
-  ctx.strokeStyle = 'rgba(150, 255, 200, 0.92)';
+  ctx.setLineDash([5, 5]);
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = 'rgba(70, 255, 160, 0.10)';
+  ctx.shadowColor = 'rgba(70, 255, 160, 0.65)';
   ctx.shadowBlur = 6;
+  ctx.beginPath();
+  ctx.moveTo(sx, sy);
+  ctx.lineTo(borderX, anchorY);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(150, 255, 200, 0.85)';
+  ctx.shadowBlur = 3;
   ctx.stroke();
   ctx.restore();
 
-  // 星体侧端点脉冲
-  const pulse = 0.5 + 0.5 * Math.sin(time * 3.4);
+  // 星体侧端点与面板侧接线端子（静态）
   ctx.save();
-  ctx.fillStyle = `rgba(160, 255, 205, ${0.4 + pulse * 0.4})`;
-  ctx.shadowColor = 'rgba(80, 255, 170, 0.95)';
-  ctx.shadowBlur = 12;
+  ctx.fillStyle = 'rgba(160, 255, 205, 0.85)';
+  ctx.shadowColor = 'rgba(80, 255, 170, 0.8)';
+  ctx.shadowBlur = 6;
   ctx.beginPath();
-  ctx.arc(start.x, start.y, 2.6 + pulse * 0.9, 0, Math.PI * 2);
+  ctx.arc(sx, sy, 1.8, 0, Math.PI * 2);
   ctx.fill();
+  ctx.fillRect(borderX - 3, anchorY - 3, 6, 6);
   ctx.restore();
 };
 

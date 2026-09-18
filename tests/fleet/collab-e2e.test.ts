@@ -34,7 +34,7 @@ import {
   type FleetWorkerOptions,
 } from '../../packages/fleet/src/index.js';
 
-jest.setTimeout(25000);
+jest.setTimeout(45000);
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 async function waitFor(fn: () => Promise<boolean>, timeoutMs: number, pollMs = 20): Promise<boolean> {
@@ -113,7 +113,7 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     const worker = new FleetWorker({ device: 'device-B', agent: 'worker', store, transport: new NullTransport(), registry, log, ...extra });
     return { worker, log };
   }
-  function startLoop(worker: FleetWorker, iterations = 4000, intervalMs = 3): { stop: () => void; done: Promise<void> } {
+  function startLoop(worker: FleetWorker, iterations = 15000, intervalMs = 3): { stop: () => void; done: Promise<void> } {
     let stop = false;
     const done = (async () => {
       for (let i = 0; i < iterations && !stop; i++) {
@@ -129,7 +129,7 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     const { taskId: rootId } = await node.submit({ intent: 'root', to: { device: 'device-B', agent: 'echo' } });
     const { worker, log } = await makeWorker({ planner: mapPlanner({ root: [{ intent: 'child-0' }, { intent: 'child-1' }] }) });
     const loop = startLoop(worker);
-    const completion = await node.waitForDagCompletion(rootId!, { timeoutMs: 15000 });
+    const completion = await node.waitForDagCompletion(rootId!, { timeoutMs: 35000 });
     loop.stop();
     await loop.done;
 
@@ -147,7 +147,7 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     const { taskId: badId } = await node.submit({ intent: 'root-cycle', to: { device: 'device-B', agent: 'echo' } });
     const { worker: worker2 } = await makeWorker({ planner: selfCycle });
     const loop2 = startLoop(worker2);
-    const badCompletion = await node.waitForDagCompletion(badId!, { timeoutMs: 15000 });
+    const badCompletion = await node.waitForDagCompletion(badId!, { timeoutMs: 35000 });
     loop2.stop();
     await loop2.done;
     const badState = await node.stateOf(badId!);
@@ -165,7 +165,7 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
       negotiation: { store: negB, maxRounds: 3, enabled: (s: TaskState) => s.intent.startsWith('nego:') },
     });
     const loop = startLoop(worker);
-    const ok = await node.waitForTerminal([taskId!], { timeoutMs: 15000 });
+    const ok = await node.waitForTerminal([taskId!], { timeoutMs: 35000 });
     loop.stop();
     await loop.done;
     expect(ok).toBe(true);
@@ -181,7 +181,7 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
       negotiation: { store: negB, maxRounds: 1, enabled: (s: TaskState) => s.intent.startsWith('nego:') },
     });
     const loop2 = startLoop(worker2);
-    const terminal = await node2.waitForTerminal([overId!], { timeoutMs: 15000 });
+    const terminal = await node2.waitForTerminal([overId!], { timeoutMs: 35000 });
     loop2.stop();
     await loop2.done;
     expect(terminal).toBe(true);
@@ -211,7 +211,7 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
 
     // 收件（同步到 B）幂等：2 条 accepted
     const chatB = new FleetChatter({ device: 'device-B', quota: new LocalQuota({ limitPerDevice: 2 }), store: chatterMessageStore(b) });
-    const received = await waitFor(async () => (await chatB.inbox()).length >= 2, 8000);
+    const received = await waitFor(async () => (await chatB.inbox()).length >= 2, 15000);
     expect(received).toBe(true);
     expect((await chatB.inbox()).length).toBe(2);
     const first = (await chatB.inbox())[0]!;

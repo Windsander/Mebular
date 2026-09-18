@@ -367,6 +367,7 @@ select {
   .legend-list { margin: 0; }
   .legend-note { margin: 8px 0 0; }
 
+  /* 设备卡 = 传统示波器绿光显示框 */
   .aside {
     position: absolute;
     right: 12px;
@@ -374,18 +375,92 @@ select {
     bottom: 12px;
     z-index: 6;
     width: 340px;
-    padding: 10px;
-    background: linear-gradient(165deg, rgba(14, 20, 40, 0.62), rgba(7, 11, 24, 0.46));
-    border: 1px solid rgba(120, 150, 220, 0.16);
-    border-radius: 14px;
-    backdrop-filter: blur(16px) saturate(1.15);
-    -webkit-backdrop-filter: blur(16px) saturate(1.15);
-    box-shadow: 0 10px 34px rgba(0, 0, 0, 0.42);
+    padding: 12px;
+    background:
+      radial-gradient(120% 55% at 18% 0%, rgba(26, 96, 64, 0.30), transparent 62%),
+      linear-gradient(180deg, rgba(3, 22, 15, 0.80), rgba(1, 12, 9, 0.70));
+    border: 1px solid rgba(80, 255, 170, 0.38);
+    border-radius: 8px;
+    backdrop-filter: blur(10px) saturate(1.2);
+    -webkit-backdrop-filter: blur(10px) saturate(1.2);
+    box-shadow:
+      0 0 0 1px rgba(80, 255, 170, 0.08),
+      0 0 26px rgba(60, 255, 160, 0.20),
+      inset 0 0 48px rgba(60, 255, 160, 0.07);
+    color: #9dffcf;
+    text-shadow: 0 0 6px rgba(90, 255, 180, 0.35);
     transform: translateX(calc(100% + 24px));
     transition: transform 0.26s ease;
   }
-  .aside.is-open { transform: translateX(0); }
-  .aside .card { background: transparent; border: none; padding: 4px; }
+  .aside.is-open { transform: translateX(0); animation: crt-in 0.4s steps(7, end) 1; }
+  /* 扫描线 */
+  .aside::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background: repeating-linear-gradient(180deg, rgba(140, 255, 200, 0.06) 0 1px, transparent 1px 3px);
+  }
+  /* 闪现扫掠 */
+  .aside::after {
+    content: "";
+    position: absolute;
+    left: 10px;
+    right: 10px;
+    top: 0;
+    height: 2px;
+    border-radius: 2px;
+    pointer-events: none;
+    background: linear-gradient(90deg, transparent, rgba(150, 255, 205, 0.9), transparent);
+    opacity: 0;
+  }
+  .aside.is-open::after { animation: crt-sweep 0.55s ease-out 1; }
+  @keyframes crt-in {
+    0% { opacity: 0; }
+    20% { opacity: 0.35; }
+    35% { opacity: 0.1; }
+    55% { opacity: 0.85; }
+    70% { opacity: 0.45; }
+    100% { opacity: 1; }
+  }
+  @keyframes crt-sweep {
+    0% { top: 4%; opacity: 0.95; }
+    100% { top: 96%; opacity: 0; }
+  }
+  /* 四角框线 */
+  #device-card {
+    position: relative;
+    background-image:
+      linear-gradient(#6dffb8, #6dffb8), linear-gradient(#6dffb8, #6dffb8),
+      linear-gradient(#6dffb8, #6dffb8), linear-gradient(#6dffb8, #6dffb8),
+      linear-gradient(#6dffb8, #6dffb8), linear-gradient(#6dffb8, #6dffb8),
+      linear-gradient(#6dffb8, #6dffb8), linear-gradient(#6dffb8, #6dffb8);
+    background-repeat: no-repeat;
+    background-size: 12px 1px, 1px 12px, 12px 1px, 1px 12px, 12px 1px, 1px 12px, 12px 1px, 1px 12px;
+    background-position:
+      left top, left top,
+      right top, right top,
+      left bottom, left bottom,
+      right bottom, right bottom;
+  }
+  .aside .card { background: transparent; border: none; padding: 6px; }
+  #device-card h2 { color: #c8ffe3; letter-spacing: 3px; font-size: 12px; text-transform: uppercase; }
+  #device-card h3 { color: rgba(150, 255, 205, 0.72); }
+  .aside .kv dt { color: rgba(140, 255, 200, 0.52); }
+  .aside .kv dd { color: #d6ffea; }
+  .aside .muted { color: rgba(140, 255, 200, 0.45); }
+  .aside .badge, .aside .ns-chip, .aside .member-chip { text-shadow: none; }
+  .aside .card-actions .btn {
+    background: rgba(8, 38, 26, 0.6);
+    border: 1px solid rgba(80, 255, 170, 0.32);
+    color: #a9ffd4;
+    text-shadow: 0 0 5px rgba(90, 255, 180, 0.3);
+  }
+  .aside .card-actions .btn:hover:not(:disabled) { border-color: rgba(120, 255, 190, 0.6); background: rgba(12, 52, 36, 0.75); }
+  .aside .card-actions .btn:disabled { opacity: 0.35; }
+  .aside .card-actions .btn-danger { border-color: rgba(255, 120, 120, 0.45); color: #ffb9b9; text-shadow: 0 0 5px rgba(255, 110, 110, 0.3); }
+  .aside .icon-btn { border-color: rgba(80, 255, 170, 0.3); color: #9dffcf; }
 
   .panel-view { padding-left: calc(var(--rail-w) + 28px); padding-right: 28px; transition: padding-left 0.22s ease; }
 }

@@ -794,7 +794,18 @@ stage.onHover = (node, x, y) => {
 };
 
 stage.onSelect = (node) => {
-  if (!node) return;
+  if (!node) {
+    // 点击星图空白 → 取消选中，设备卡（绿色显示框）收起
+    if (!state.selected) return;
+    state.selected = null;
+    const url = new URL(location.href);
+    url.searchParams.delete('select');
+    history.replaceState(null, '', url);
+    renderStageScene();
+    renderDeviceCard();
+    stage.redraw();
+    return;
+  }
   const device = state.devices.find((d) => d.deviceId === node.id);
   state.selected = device ?? {
     deviceId: node.id,
@@ -806,6 +817,58 @@ stage.onSelect = (node) => {
   };
   renderStageScene();
   renderDeviceCard();
+  stage.redraw();
+};
+
+// 选中节点的绿色虚线荧光条：从星体连到设备卡左缘
+stage.onOverlay = (ctx, time) => {
+  if (!state.selected || state.view !== 'map') return;
+  const asideEl = document.querySelector('.aside');
+  const cardEl = $('#device-card');
+  if (!asideEl || !cardEl || !asideEl.classList.contains('is-open')) return;
+  const node = stage.screen?.get(state.selected.deviceId);
+  if (!node) return;
+  const canvasRect = stage.canvas.getBoundingClientRect();
+  const cardRect = cardEl.getBoundingClientRect();
+  const end = { x: cardRect.left - canvasRect.left + 2, y: cardRect.top + 30 };
+  const dx = end.x - node.x;
+  const dy = end.y - node.y;
+  const len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len;
+  const uy = dy / len;
+  const start = { x: node.x + ux * 16, y: node.y + uy * 16 };
+  const stop = { x: end.x - ux * 6, y: end.y - uy * 6 };
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.setLineDash([9, 7]);
+  ctx.lineDashOffset = -((time * 46) % 16);
+  // 荧光晕层
+  ctx.lineWidth = 4.5;
+  ctx.strokeStyle = 'rgba(70, 255, 160, 0.16)';
+  ctx.shadowColor = 'rgba(70, 255, 160, 0.9)';
+  ctx.shadowBlur = 10;
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y);
+  ctx.lineTo(stop.x, stop.y);
+  ctx.stroke();
+  // 亮线层
+  ctx.lineWidth = 1.2;
+  ctx.strokeStyle = 'rgba(150, 255, 200, 0.92)';
+  ctx.shadowBlur = 6;
+  ctx.stroke();
+  ctx.restore();
+
+  // 星体侧端点脉冲
+  const pulse = 0.5 + 0.5 * Math.sin(time * 3.4);
+  ctx.save();
+  ctx.fillStyle = `rgba(160, 255, 205, ${0.4 + pulse * 0.4})`;
+  ctx.shadowColor = 'rgba(80, 255, 170, 0.95)';
+  ctx.shadowBlur = 12;
+  ctx.beginPath();
+  ctx.arc(start.x, start.y, 2.6 + pulse * 0.9, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
 };
 
 $('#view-nav').addEventListener('click', (event) => {
@@ -986,6 +1049,7 @@ $('#device-card-close').addEventListener('click', () => {
   url.searchParams.delete('select');
   history.replaceState(null, '', url);
   render();
+  stage.redraw();
 });
 
 // 侧栏收起（桌面玻璃浮层的图标条形态；移动端不生效）

@@ -86,6 +86,8 @@ export class StarStage {
     this.pulseUntil = 0;
     this.onHover = null;
     this.onSelect = null;
+    // 每帧最后调用（ctx, time）：供外部叠加连线/标注等交互层
+    this.onOverlay = null;
     this.reducedMotion = typeof window.matchMedia === 'function'
       && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.visualQuality = 'high';
@@ -358,6 +360,12 @@ export class StarStage {
     this._drawEdges(time);
     this._drawFleets(time);
     this._drawNodes(time);
+    if (this.onOverlay) this.onOverlay(ctx, time);
+  }
+
+  /** 立即重绘一帧（reducedMotion 暂停循环或外部状态变化时使用） */
+  redraw() {
+    this._draw(performance.now() / 1000);
   }
 
   _drawStars(time) {

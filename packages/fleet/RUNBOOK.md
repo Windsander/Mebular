@@ -79,6 +79,9 @@ node scripts/fleet-remote-peer.mjs --role worker \
 ```bash
 npm run verify:fleet:local    # M2：单机双进程（spool 传输）5 条 + 重启韧性
 npm run verify:fleet:remote   # M3：真实 libp2p loopback；含 M2 正确性集 + 授权负例 + 时延 p50/p95
+npm run verify:fleet:agents   # M4：按 agent 名路由（fake agent，9/9；CI 自洽）
+# 真实 Hermes（可选，需本机 hermes；**命令行参数**，不是环境变量）：
+node scripts/verify-fleet-agents.mjs --with-hermes   # 额外派活到 hermes agent，断言哨兵 + session
 ```
 `verify:fleet:remote` 会打印原始时延样本与 p50/p95（loopback 典型 p50≈30ms、p95≈36ms），并断言：
 N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本守恒、`expiresAt` 仅本机展示、重启不丢不重、未授权设备看不到 tasks。

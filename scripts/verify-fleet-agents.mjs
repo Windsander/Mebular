@@ -3,13 +3,16 @@
 //
 // B 注册多个 agent 执行器（echo / fake / slow / fail / big），A 派活到**指定 agent 名**，
 // 校验每类语义：成功结果 / 超时 / 非零退出 / 输出截断 / 未知 agent 显式失败。
-// 默认用确定性 fake agent（CI 自洽）；`--with-hermes` 额外注册真实 Hermes agent 并派活。
+// 默认用确定性 fake agent（CI 自洽）；`--with-hermes` / `--with-openchamber` 额外注册真实
+// Hermes / OpenChamber（经桥 daemon 的中立 seam）并派活。
 //
 // 前置：npm run build。
 
 import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { Mebular } from '@mebular/core';
 import {
@@ -23,6 +26,8 @@ import {
   ExecutorRegistry,
   CommandAgent,
   HermesAgent,
+  HttpOpenChamberSeam,
+  OpenChamberAgent,
   echoResultFor,
 } from '../packages/fleet/dist/index.js';
 
@@ -36,6 +41,37 @@ if (LEGACY_HERMES_ENV !== undefined && !WITH_HERMES) {
   const name = process.env.FLEET_VERIFY_HERMES !== undefined ? 'FLEET_VERIFY_HERMES' : 'WITH_HERMES';
   console.log(`注意：真实 Hermes 开关是命令行参数 \`--with-hermes\`；环境变量 ${name} 被忽略。`);
 }
+const WITH_OPENCHAMBER = process.argv.includes('--with-openchamber');
+const OC_SENTINEL = 'FLEET_OC_OK';
+const OC_PROMPT = `只输出 ${OC_SENTINEL} 这个 token（大写、无引号、无其它字符）；不要执行任何其它动作、不要读取文件、不要解释。`;
+
+// provider 接线（桥专有）留在脚本侧；fleet 的 client 是中立的（见 packages/fleet/OPENCHAMBER-SEAM.md）。
+function openChamberProvider() {
+  const bridgeDir = process.env.OC_HERMES_BRIDGE_DIR ?? join(homedir(), '.oc-hermes-bridge');
+  const tokenFile = join(bridgeDir, 'daemon.json');
+  const info = JSON.parse(readFileSync(tokenFile, 'utf-8'));
+  return {
+    endpoint: `http://127.0.0.1:${info.port}/agent/run-once`,
+    tokenFile,
+    tokenJsonPath: 'token',
+    authHeader: 'X-Bridge-Token',
+  };
+}
+
+async function startFakeProvider() {
+  const server = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      if (req.url === '/slow') return; // 从不响应 → 客户端超时
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify({ ok: false, error: 'session failed' }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', () => r()));
+  const port = server.address().port;
+  return { base: `http://127.0.0.1:${port}`, close: () => new Promise((r) => server.close(() => r())) };
+}
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function waitUntil(fn, timeoutMs, pollMs = 20) {
   const deadline = Date.now() + timeoutMs;
@@ -109,6 +145,11 @@ try {
     hermesAgent = new HermesAgent({ timeoutMs: 180000, maxOutputBytes: 2000 });
     registry.register('hermes', hermesAgent);
   }
+  let openChamberSeam = null;
+  if (WITH_OPENCHAMBER) {
+    openChamberSeam = new HttpOpenChamberSeam({ ...openChamberProvider(), timeoutMs: 180000 });
+    registry.register('openchamber', new OpenChamberAgent(openChamberSeam));
+  }
 
   const aStore = new MebularTaskEventStore(A);
   const bStore = new MebularTaskEventStore(B);
@@ -127,6 +168,9 @@ try {
   ];
   if (WITH_HERMES) {
     plan.push({ agent: 'hermes', expect: 'done', intent: HERMES_PROMPT, resultRefMatch: new RegExp(HERMES_SENTINEL), measureMs: true });
+  }
+  if (WITH_OPENCHAMBER) {
+    plan.push({ agent: 'openchamber', expect: 'done', intent: OC_PROMPT, resultRefMatch: new RegExp(OC_SENTINEL), measureMs: true });
   }
 
   const ids = [];
@@ -168,6 +212,27 @@ try {
     const direct = await hermesAgent.execute({ intent: HERMES_PROMPT });
     const okDirect = direct.ok === true && /FLEET_HERMES_OK/.test(direct.resultRef ?? '') && /^session:/.test(direct.reason ?? '');
     check('hermes 直连：结果包含哨兵且解析出 session_id', okDirect, { ms: Date.now() - t0, reason: direct.reason, resultRef: direct.resultRef });
+  }
+  if (WITH_OPENCHAMBER && openChamberSeam !== null) {
+    const provider = openChamberProvider();
+    const t0 = Date.now();
+    const direct = await openChamberSeam.prompt({ prompt: OC_PROMPT });
+    check('openchamber 直连：文本包含哨兵且解析出 session', /FLEET_OC_OK/.test(direct.text) && typeof direct.sessionId === 'string' && direct.sessionId.length > 0, {
+      ms: Date.now() - t0, sessionId: direct.sessionId, text: direct.text,
+    });
+
+    const wrong = await new HttpOpenChamberSeam({ endpoint: provider.endpoint, token: 'definitely-wrong-token' }).prompt({ prompt: OC_PROMPT });
+    check('openchamber 负例：错误 token → 清晰错误', /unauthorized/.test(wrong.error ?? ''), { error: wrong.error });
+
+    const noEndpoint = await new HttpOpenChamberSeam({ token: 'x' }).prompt({ prompt: 'x' });
+    check('openchamber 负例：缺 endpoint → 清晰错误', /endpoint not configured/.test(noEndpoint.error ?? ''), { error: noEndpoint.error });
+
+    const fake = await startFakeProvider();
+    const timed = await new HttpOpenChamberSeam({ endpoint: `${fake.base}/slow`, token: 't', timeoutMs: 200 }).prompt({ prompt: 'x' });
+    check('openchamber 负例：超时 → 清晰错误', /unavailable or timed out/.test(timed.error ?? ''), { error: timed.error });
+    const sessionErr = await new HttpOpenChamberSeam({ endpoint: `${fake.base}/err`, token: 't' }).prompt({ prompt: 'x' });
+    check('openchamber 负例：会话错误 → 清晰错误', sessionErr.error === 'session failed', { error: sessionErr.error });
+    await fake.close();
   }
   check('未知 agent 不执行（exec log 不含 nope 任务）', log.all().every((e) => byId.get(e.taskId)?.to.agent !== 'nope'));
 } finally {

@@ -582,6 +582,23 @@ function drawSelfBeacon(ctx, x, y, radius, time, reducedMotion, online) {
   const spin = t * 0.1;
   const shimmer = reducedMotion ? 1 : 0.92 + 0.08 * Math.sin(t * 2.3);
 
+  // 倾斜轨道几何：圆轨道在 45° 倾角下投影为椭圆（含平转 tilt），
+  // z = sin(a) 表示深度（>0 在前，<0 在后）
+  const ORBIT_R = radius * 1.75;
+  const INC = Math.SQRT1_2;            // ≈0.707（45° 倾角投影）
+  const TILT = -0.5;                   // 轨道面在屏幕上的平转角
+  const cosT = Math.cos(TILT);
+  const sinT = Math.sin(TILT);
+  const orbitLocal = (a) => {
+    const lx = Math.cos(a) * ORBIT_R;
+    const ly = Math.sin(a) * ORBIT_R * INC;
+    return {
+      x: lx * cosT - ly * sinT,
+      y: lx * sinT + ly * cosT,
+      z: Math.sin(a),
+    };
+  };
+
   // 外层柔光（收小、低对比）
   const halo = ctx.createRadialGradient(x, y, 1, x, y, radius * 3.2);
   halo.addColorStop(0, `rgba(255,255,255,${0.75 * shimmer})`);
@@ -593,7 +610,7 @@ function drawSelfBeacon(ctx, x, y, radius, time, reducedMotion, online) {
   ctx.arc(x, y, radius * 3.2, 0, Math.PI * 2);
   ctx.fill();
 
-  // 外圈：极淡实线环 + 缓转虚线轨道环（双环层次）
+  // 极淡外环（平面参考环）
   ctx.save();
   ctx.translate(x, y);
   ctx.strokeStyle = 'rgba(140,190,255,0.14)';
@@ -601,33 +618,53 @@ function drawSelfBeacon(ctx, x, y, radius, time, reducedMotion, online) {
   ctx.beginPath();
   ctx.arc(0, 0, radius * 2.15, 0, Math.PI * 2);
   ctx.stroke();
-
-  ctx.rotate(spin);
-  ctx.strokeStyle = online ? 'rgba(120,200,255,0.42)' : 'rgba(140,150,180,0.3)';
-  ctx.lineWidth = 0.9;
-  ctx.setLineDash([2, 5]);
-  ctx.beginPath();
-  ctx.arc(0, 0, radius * 1.75, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // 伴星：沿轨道缓行的小光点（信号/卫星意象）
-  if (online) {
-    const sat = spin * 2.4;
-    const sx = Math.cos(sat) * radius * 1.75;
-    const sy = Math.sin(sat) * radius * 1.75;
-    const satGlow = ctx.createRadialGradient(sx, sy, 0, sx, sy, radius * 0.5);
-    satGlow.addColorStop(0, 'rgba(255,255,255,0.95)');
-    satGlow.addColorStop(0.4, 'rgba(120,200,255,0.5)');
-    satGlow.addColorStop(1, 'rgba(120,200,255,0)');
-    ctx.fillStyle = satGlow;
-    ctx.beginPath();
-    ctx.arc(sx, sy, radius * 0.5, 0, Math.PI * 2);
-    ctx.fill();
-  }
   ctx.restore();
 
-  // 衍射星芒：4 长 + 4 短（更细、更短、带渐变衰减）
+  const drawOrbitArc = (startA, endA, alpha) => {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(TILT);
+    ctx.strokeStyle = online ? `rgba(120,200,255,${alpha})` : `rgba(140,150,180,${alpha * 0.75})`;
+    ctx.lineWidth = 0.9;
+    ctx.setLineDash([2, 5]);
+    ctx.beginPath();
+    ctx.ellipse(0, 0, ORBIT_R, ORBIT_R * INC, 0, startA, endA);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  };
+
+  const drawSatellite = (a) => {
+    const p = orbitLocal(a);
+    const z = p.z;
+    const satR = radius * 0.34 * (1 + z * 0.3);
+    const satAlpha = online ? 0.55 + 0.45 * ((z + 1) / 2) : 0.3;
+    const sx = x + p.x;
+    const sy = y + p.y;
+    const glow = ctx.createRadialGradient(sx, sy, 0, sx, sy, satR * 2.1);
+    glow.addColorStop(0, `rgba(255,255,255,${0.95 * satAlpha})`);
+    glow.addColorStop(0.4, `rgba(120,200,255,${0.5 * satAlpha})`);
+    glow.addColorStop(1, 'rgba(120,200,255,0)');
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(sx, sy, satR * 2.1, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(sx, sy, satR, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${0.95 * satAlpha})`;
+    ctx.fill();
+  };
+
+  // 伴星相位（约 14s 一圈）
+  const satA = t * 0.45;
+  const sat = orbitLocal(satA);
+  const behind = sat.z < 0;
+
+  // 后半个轨道 + 伴星（在星体之后：先画，之后被核心/光晕遮挡）
+  drawOrbitArc(Math.PI, Math.PI * 2, 0.18);
+  if (behind) drawSatellite(satA);
+
+  // 衍射星芒（4 长 + 4 短；细、渐变衰减）
   ctx.save();
   ctx.translate(x, y);
   ctx.rotate(spin * 0.5);
@@ -671,6 +708,10 @@ function drawSelfBeacon(ctx, x, y, radius, time, reducedMotion, online) {
   ctx.arc(x, y, radius * 0.32, 0, Math.PI * 2);
   ctx.fillStyle = '#ffffff';
   ctx.fill();
+
+  // 前半个轨道 + 伴星（在星体之前：后画，更大更亮）
+  drawOrbitArc(0, Math.PI, 0.46);
+  if (!behind) drawSatellite(satA);
 }
 
 function drawStarShape(ctx, x, y, radius, color) {

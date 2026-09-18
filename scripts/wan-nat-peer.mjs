@@ -10,7 +10,7 @@ const role = process.argv[2] === 'B' ? 'B' : 'A';
 const state = process.env.WAN_NAT_STATE ?? '/app/.wan-nat';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const readJson = (f, d = null) => { try { return JSON.parse(readFileSync(f, 'utf8')); } catch { return d; } };
-const writeJson = (f, v) => writeFileSync(f, JSON.stringify(v), { mode: 0o600 });
+const writeJson = (f, v) => writeFileSync(f, JSON.stringify(v), { mode: 0o644 });
 const writeState = (patch) => writeJson(join(state, `${role}.json`), { ...(readJson(join(state, `${role}.json`), {}) ?? {}), ...patch });
 const waitFor = async (fn, ms, poll = 100) => { const end = Date.now() + ms; while (Date.now() < end) { const v = await fn(); if (v) return v; await sleep(poll); } return fn(); };
 

@@ -14,6 +14,6 @@ const internal = (provider.getMultiaddrs() ?? []).find((a) => a.includes('/tcp/'
 if (!internal) { console.error('relay 未监听'); process.exit(2); }
 const peerId = internal.match(/\/p2p\/([^/]+)/)[1];
 const addr = `/dns4/relay/tcp/4001/p2p/${peerId}`;
-writeFileSync(join(state, 'relay.json'), JSON.stringify({ peerId, addr }));
+writeFileSync(join(state, 'relay.json'), JSON.stringify({ peerId, addr }), { mode: 0o644 });
 console.log(`WAN_RELAY ${JSON.stringify({ peerId, addr })}`);
 setInterval(() => {}, 1 << 30);

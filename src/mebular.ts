@@ -14,7 +14,7 @@
 import { chmod, mkdir, readFile, writeFile } from 'fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'path';
-import { normalizeNamespaceList } from './core/namespace.js';
+import { normalizeNamespace, normalizeNamespaceList } from './core/namespace.js';
 import type { Event } from './types/event.js';
 import { GraphStore } from './core/GraphStore.js';
 import { EventLog } from './eventlog/EventLog.js';
@@ -30,10 +30,12 @@ import {
   NAMESPACE_REVOKE_EVENT,
   DEVICE_REVOKE_EVENT,
   POLICY_ISSUER_DECLARE_EVENT,
+  NAMESPACE_MEMBERSHIP_EVENT,
   type NamespaceGrantRecord,
   type NamespaceRevokeRecord,
   type DeviceRevokeRecord,
   type PolicyIssuerDeclareRecord,
+  type NamespaceMembershipRecord,
 } from './sync/grantPolicy.js';
 import {
   IdentityManager,
@@ -295,6 +297,8 @@ export class Mebular {
         subscriptionNamespaces: this.config.sync?.namespaces,
         // 默认拒绝：图上与配置任一为空都不会放松；两者都空 = 拒绝所有对端
         namespacePolicy: this.namespacePolicyImpl,
+        // M1–M3：成员资格（来自图上成员记录；未启用分区沿用对端订阅声明）
+        membershipPolicy: this.graphPolicyImpl,
         pushOnWrite: this.config.sync?.pushOnWrite,
         pushOnWriteThrottleMs: this.config.sync?.pushOnWriteThrottleMs,
         antiEntropy: this.config.sync?.antiEntropy,
@@ -525,6 +529,55 @@ export class Mebular {
    */
   async getPolicyIssuers(): Promise<string[]> {
     return this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getPolicyIssuers();
+  }
+
+  /**
+   * M1：声明/注销某设备在某分区的**成员资格**（写本机签名 `namespace_membership` 到 `__policy__`）。
+   * 采纳无条件（不做 R-a），受 R-b 约束。`active=false` 即**注销**（本轮只改成员集合，不做数据清理）。
+   */
+  async declareNamespaceMembership(input: {
+    member: string;
+    namespace: string;
+    active?: boolean;
+    note?: string;
+  }): Promise<Event> {
+    const membership: NamespaceMembershipRecord = {
+      member: input.member,
+      namespace: normalizeNamespace(input.namespace),
+      active: input.active ?? true,
+      issuedAt: Date.now(),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    };
+    return this.eventLog.append({
+      type: NAMESPACE_MEMBERSHIP_EVENT,
+      data: { membership },
+      namespace: POLICY_NAMESPACE,
+    });
+  }
+
+  /**
+   * M1：某分区的**成员资格**（`active=false` = 该分区尚无被采纳成员记录，未启用成员资格）。
+   * `members` 为图上在册成员（未 ∩ 授权）；生效成员请用 `getNamespaceMembers`。
+   */
+  async getNamespaceMembership(namespace: string): Promise<{ active: boolean; members: string[] }> {
+    return this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getNamespaceMembership(
+      normalizeNamespace(namespace),
+    );
+  }
+
+  /**
+   * M2：某分区的**生效成员集合** = 图上在册成员 ∩ 各成员对该分区的**生效授权**（默认拒绝不变）。
+   * 供 2b 的退订/继任者门禁使用。
+   */
+  async getNamespaceMembers(namespace: string): Promise<string[]> {
+    const ns = normalizeNamespace(namespace);
+    const adopted = await this.getNamespaceMembership(ns);
+    if (!adopted.active) return [];
+    const effective: string[] = [];
+    for (const member of adopted.members) {
+      if ((await this.getEffectiveNamespaces(member)).includes(ns)) effective.push(member);
+    }
+    return effective.sort();
   }
 
   /**

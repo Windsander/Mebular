@@ -39,13 +39,15 @@ export {
   GraphNamespacePolicy,
   POLICY_NAMESPACE,
   POLICY_ISSUER_DECLARE_EVENT,
+  NAMESPACE_MEMBERSHIP_EVENT,
   type NamespaceGrantRecord,
   type NamespaceRevokeRecord,
   type DeviceRevokeRecord,
   type PolicyIssuerDeclareRecord,
+  type NamespaceMembershipRecord,
   type PolicyState,
 } from './sync/grantPolicy.js';
-export { CompositeNamespacePolicy } from './sync/namespacePolicy.js';
+export { CompositeNamespacePolicy, type NamespaceMembershipPolicy } from './sync/namespacePolicy.js';
 export {
   DEFAULT_NAMESPACE,
   normalizeNamespace,

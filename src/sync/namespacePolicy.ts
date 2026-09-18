@@ -27,6 +27,17 @@ export interface NamespaceGrantPolicy {
   getRevokedDevices?(): Promise<ReadonlySet<string>>;
 }
 
+/**
+ * M1–M3：成员资格策略（持久、签名的图上成员记录）。与授权正交：本接口只回答
+ * 「该分区是否已启用成员资格」与「在册成员」，**不**参与授权判定。
+ *
+ * 兼容语义：`active=false` = 该分区**尚无**被采纳成员记录 → 调用方沿用既有订阅声明裁剪
+ * （不放松授权默认拒绝）；`active=true` = 成员资格为强制闸门。
+ */
+export interface NamespaceMembershipPolicy {
+  getNamespaceMembership(namespace: string): Promise<{ active: boolean; members: string[] }>;
+}
+
 /** 配置驱动的实现：peerDeviceId → 允许的 namespace 列表；未列出 = 拒绝 */
 export class ConfigNamespacePolicy implements NamespaceGrantPolicy {
   private readonly mapping: Record<string, string[]>;

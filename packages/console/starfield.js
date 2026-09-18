@@ -522,15 +522,15 @@ export class StarStage {
       // 形成“由近及远”的纵深；两端极短渐隐仅用于软化接点
       const fromDepth = g.from.depth ?? 0.6;
       const toDepth = g.to.depth ?? 0.6;
-      const endAlpha = (d) => alpha * (0.5 + d * 0.9);
-      // 较远（深度更低）的一端再按航道长度衰减，强化“由近及远”
-      const dimEnd = Math.max(0.32, 1 - Math.min(0.5, g.dist / ((Math.min(this.width, this.height) || 720) * 1.15)));
+      const endAlpha = (d) => alpha * (0.4 + d * 1.0);
+      // 较远（深度更低）的一端再按航道长度衰减，强化“由近及远”（更狠）
+      const dimEnd = Math.max(0.12, 1 - Math.min(0.68, g.dist / ((Math.min(this.width, this.height) || 720) * 0.8)));
       let aFrom = endAlpha(fromDepth);
       let aTo = endAlpha(toDepth);
       if (fromDepth >= toDepth) aTo *= dimEnd;
       else aFrom *= dimEnd;
       const breathe = online && !this.reducedMotion
-        ? 0.92 + 0.08 * Math.sin(time * 1.6 + (hashString(`${edge.from}->${edge.to}`) % 628) / 100)
+        ? 0.95 + 0.05 * Math.sin(time * 0.9 + (hashString(`${edge.from}->${edge.to}`) % 628) / 100)
         : 1;
       const grad = ctx.createLinearGradient(g.sx, g.sy, g.ex, g.ey);
       grad.addColorStop(0, rgba(baseColor, aFrom * 0.55 * breathe));
@@ -543,7 +543,7 @@ export class StarStage {
       // 航线持续流动：虚线沿航道方向缓移（在线时；reduced-motion 静止）
       if (online && !this.reducedMotion) {
         const period = 7.5; // 与 [1.5,6] 的点距一致，保证无缝
-        ctx.lineDashOffset = -((time * 20) % period);
+        ctx.lineDashOffset = -((time * 6) % period);
       } else {
         ctx.lineDashOffset = 0;
       }
@@ -573,7 +573,7 @@ export class StarStage {
 
       // 航线灯：在线且有待发事件时沿航道流动
       if (online && (edge.pending ?? 0) > 0) {
-        const speed = 0.32;
+        const speed = 0.18;
         const count = Math.min(4, 1 + Math.floor((edge.pending ?? 0) / 4));
         for (let i = 0; i < count; i += 1) {
           const p = (time * speed + i / count) % 1;

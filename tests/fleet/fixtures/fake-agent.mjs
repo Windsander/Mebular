@@ -41,6 +41,10 @@ if (mode === 'sleep') {
 } else if (mode === 'args') {
   // 回显收到的参数（用于断言数组传参、无 shell 解释）。
   process.stdout.write(JSON.stringify(process.argv.slice(2)));
+} else if (mode === 'env') {
+  // 回显某个环境变量（用于断言 env 白名单：不该看到的变量应为 MISSING）。
+  const key = typeof flags['--env-key'] === 'string' ? flags['--env-key'] : 'PATH';
+  process.stdout.write(`ENV:${process.env[key] ?? 'MISSING'}`);
 } else {
   process.stdout.write(`FAKE:${prompt}`);
 }

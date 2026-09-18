@@ -306,3 +306,26 @@ fleet members --dir ~/.fleet --namespace tasks
 
 > 破坏性协议变更：旧节点忽略 `namespace_membership`，对旧端该分区始终「未启用成员资格」→ 行为不变或**少收**
 > （安全方向，不 fail-open）。详见仓库根 `SEALING.md` §3 M1–M3。
+
+## 12. 退订交接（2b）：继任者全量 ack 门禁 + 本地彻底清理
+
+退订 = **成员资格退出**（`namespace_membership(active:false)`）+ **本机彻底清理**该分区数据。**绝不产生 tombstone**（不写任何“已删除”事件）。
+
+```bash
+# 先看交接计划（只读，不删）：继任者是否在册、还差哪些作者/多少条
+fleet leave --dir ~/.fleet --namespace tasks --successor device-B --dry-run
+# → {"ok":false,"successorIsMember":true,"pendingTotal":1,"pendingByAuthor":[{"author":"device-A","count":1}]}
+
+# 默认：继任者已全量 ack 才清理；否则中止且数据原封不动
+fleet leave --dir ~/.fleet --namespace tasks --successor device-B
+# → {"ok":true,"deleted":{"events":12,"nodes":12,"edges":0},"handoffEventId":"…"}
+
+# 本地应急（跳过门禁；仍如实记录 forced:true + 缺失明细）；**不经 MCP/远程暴露**
+fleet leave --dir ~/.fleet --namespace tasks --successor device-B --force
+```
+
+- **全量 ack 判定（H1）**：复用既有 per-event ack（`getPendingEvents(successor)`）——退订方校验继任者已 ack 其在该分区持有的**他人署名**事件（继任者自证事件其本就拥有）；**不新增同步协议、不放宽快照门禁**（SEALING §4 快照门禁仍不放宽）。
+- **验前不删**：校验通过 → 写成员注销 + 交接记录（`namespace_handoff`，`__policy__`，含 `forced`/缺失明细）→ 写**图外**意图（`<storagePath>.handoff.json`）→ 物理删除事件/节点/边 → 清本地水位 → 移除意图。崩溃后重跑 `fleet leave` **幂等续跑**。
+- **`__policy__` 永不清理**：策略/成员/交接记录保留 → 清理**不改变**策略推导（oracle-free）；legacy-empty 不退化（**清理后成员闸门仍在**，非成员仍收不到）。
+- **可观测**：`fleet leave --dry-run` 给验证明细；`doctor` 增 `交接状态`（有未完成意图 → FAIL，提示续跑）。
+- **重入/重订阅恢复未支持（2c）**：清理后本机不再持有该分区；如需重新加入，需 2c 的恢复语义。

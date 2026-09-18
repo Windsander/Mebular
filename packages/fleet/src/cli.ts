@@ -32,6 +32,8 @@ import {
   mebularOptions,
   namespaceMembers,
   namespaceMembership,
+  leaveNamespace,
+  planHandoff,
   onboardDevice,
   revokeNamespaceGrant,
   setNamespaceMembership,
@@ -349,6 +351,25 @@ async function runMembers(args: Args): Promise<number> {
   return 0;
 }
 
+async function runLeave(args: Args): Promise<number> {
+  const dir = str(args.dir, './.fleet');
+  const namespace = typeof args.namespace === 'string' ? args.namespace : undefined;
+  const successor = str(args.successor, '');
+  if (args['dry-run'] === true) {
+    const plan = await planHandoff(dir, { successor, ...(namespace !== undefined ? { namespace } : {}) });
+    console.log(JSON.stringify({ role: 'leave', dryRun: true, ...plan }, null, 2));
+    return plan.ok ? 0 : 1;
+  }
+  const result = await leaveNamespace(dir, {
+    successor,
+    ...(namespace !== undefined ? { namespace } : {}),
+    ...(args.force === true ? { force: true } : {}),
+    ...(typeof args.note === 'string' ? { note: args.note } : {}),
+  });
+  console.log(JSON.stringify({ role: 'leave', ...result }, null, 2));
+  return result.ok ? 0 : 1;
+}
+
 async function runDoctor(args: Args): Promise<number> {
   const report = await doctor(str(args.dir, './.fleet'));
   if (args.json === true) console.log(JSON.stringify(report, null, 2));
@@ -507,8 +528,9 @@ async function main(): Promise<void> {
   else if (command === 'declare-issuer') code = await runDeclareIssuer(args);
   else if (command === 'member') code = await runMember(args);
   else if (command === 'members') code = await runMembers(args);
+  else if (command === 'leave') code = await runLeave(args);
   else {
-    console.error('用法：fleet onboard|doctor|grant|revoke|declare-issuer|member|members|node|worker|service|spool … | fleet --version');
+    console.error('用法：fleet onboard|doctor|grant|revoke|declare-issuer|member|members|leave|node|worker|service|spool … | fleet --version');
     code = 2;
   }
   } catch (error) {

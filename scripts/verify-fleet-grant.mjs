@@ -17,6 +17,7 @@ import { fileURLToPath } from 'node:url';
 const CLI = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
 const FIXTURE = fileURLToPath(new URL('../tests/fleet/fixtures/fake-agent.mjs', import.meta.url));
 const REPLAY = fileURLToPath(new URL('../tests/fleet/fixtures/replay-grant.mjs', import.meta.url));
+const READ_EFFECTIVE = fileURLToPath(new URL('../tests/fleet/fixtures/read-effective.mjs', import.meta.url));
 chmodSync(FIXTURE, 0o755);
 
 const results = [];
@@ -72,6 +73,20 @@ function startCli(args) {
   child.stdout.on('data', (d) => (state.out += d));
   child.stderr.on('data', (d) => (state.err += d));
   return { child, state };
+}
+function runScript(script, args, timeoutMs = 30000) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [script, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (err += d));
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      resolve({ code, out, err });
+    });
+  });
 }
 async function freePort() {
   const server = net.createServer();
@@ -139,7 +154,8 @@ try {
   const addr = lastJson(serveA.state.out.match(/\{[^\n]*listening[^\n]*\}/)?.[0] ?? '')?.multiaddr;
   check('A 已监听（multiaddr）', typeof addr === 'string' && addr.length > 0, { addr });
 
-  const onboardB = await runCli(['onboard', '--dir', B, '--device', 'device-B', '--peer-device', 'device-A', '--peer-addr', addr, '--master-key', join(A, 'master-key.json'), ...agentArgs]);
+  // B 把 A 设为引导签发者（bootstrap），从而**采纳** A 转授的 grant（R-a ②/①）——证明「B 同步→B 获授权」。
+  const onboardB = await runCli(['onboard', '--dir', B, '--device', 'device-B', '--peer-device', 'device-A', '--peer-addr', addr, '--policy-issuer', 'device-A', '--master-key', join(A, 'master-key.json'), ...agentArgs]);
   check('onboard B（导入同一主密钥）成功', onboardB.code === 0 && lastJson(onboardB.out)?.ok === true, {});
 
   const workB = startCli(['work', '--dir', B, '--timeout-ms', '30000', '--interval-ms', '10']);
@@ -157,6 +173,14 @@ try {
   serveA.child.kill('SIGKILL');
   workB.child.kill('SIGKILL');
   await waitFor(async () => !(await tcpOpen(port)), 5000);
+
+  // 「B 同步 → B 获授权」：B 端对 device-B **无**配置白名单；effective 含 tasks 只能来自图上 grant。
+  const beff = lastJson((await runScript(READ_EFFECTIVE, ['--dir', B, '--subject', 'device-B'])).out);
+  check(
+    'B 已同步并采纳 A 的 grant（B 端 device-B:ok，仅图来源）',
+    Array.isArray(beff?.effective) && beff.effective.includes('tasks'),
+    { effective: beff?.effective },
+  );
 
   // 撤销（A 离线执行；R-d 恢复必须用新 grantId）
   const beforeRevoke = lineCount(execLog);

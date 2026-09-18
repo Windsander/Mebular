@@ -111,6 +111,32 @@ describe('G1：图上授权为主（默认拒绝；配置白名单仅 bootstrap�
     expect((await namespaceCheck(dir))?.status).toBe('FAIL');
   });
 
+  it('grant 携带 --expires-at：事件记录该字段（本轮不强制生效，仍 PASS）', async () => {
+    await onboardDevice({
+      dir,
+      device: 'device-A',
+      peerDevice: 'device-B',
+      policyIssuers: ['device-A'],
+      configGrant: false,
+      agents: echoAgent,
+    });
+    const expiresAt = Date.now() + 3_600_000;
+    const grant = await grantNamespace(dir, { to: 'device-B', expiresAt });
+
+    const cfg = await loadFleetConfig(fleetConfigPath(dir));
+    const enc = await readMasterKeyFile(cfg.masterKeyFile);
+    const mebular = new Mebular(offlineMebularOptions(cfg, enc) as never);
+    await mebular.initialize();
+    const events = (await mebular.eventLog.listEvents({ namespace: POLICY_NAMESPACE })) as unknown as Array<{
+      data?: { grant?: { grantId?: string; expiresAt?: number } };
+    }>;
+    await mebular.shutdown();
+
+    const record = events.find((e) => e.data?.grant?.grantId === grant.grantId)?.data?.grant;
+    expect(record?.expiresAt).toBe(expiresAt);
+    expect((await namespaceCheck(dir))?.status).toBe('PASS');
+  });
+
   it('校验/组合：peerNamespacePolicy 形状；显式 {} 覆盖 peers 推导', async () => {
     expect(validateFleetConfig(baseConfig)).toEqual([]);
     expect(validateFleetConfig({ ...baseConfig, peerNamespacePolicy: {} })).toEqual([]);

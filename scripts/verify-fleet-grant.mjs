@@ -123,13 +123,24 @@ try {
   // A：登记对端 B 的地址路径，但**不给配置白名单**；A 自任 bootstrap 签发者（配置白名单=bootstrap）。
   const onboardA = await runCli([
     'onboard', '--dir', A, '--device', 'device-A', '--peer-device', 'device-B',
-    '--listen', listen, '--no-config-grant', '--policy-issuer', 'device-A', ...agentArgs,
+    '--listen', listen, '--no-config-grant', ...agentArgs,
   ]);
   const cfgA = JSON.parse(readFileSync(join(A, 'fleet.config.json'), 'utf-8'));
   check(
-    'onboard A：登记对端 B 但无配置白名单（peerNamespacePolicy={}）',
-    onboardA.code === 0 && cfgA.peers?.[0]?.device === 'device-B' && Object.keys(cfgA.peerNamespacePolicy ?? {}).length === 0,
-    { peers: cfgA.peers?.map((p) => p.device), policy: cfgA.peerNamespacePolicy },
+    'onboard A：登记对端 B 但无配置白名单、无本地 policyIssuers',
+    onboardA.code === 0 &&
+      cfgA.peers?.[0]?.device === 'device-B' &&
+      Object.keys(cfgA.peerNamespacePolicy ?? {}).length === 0 &&
+      (cfgA.policyIssuers ?? []).length === 0,
+    { peers: cfgA.peers?.map((p) => p.device), policy: cfgA.peerNamespacePolicy, issuers: cfgA.policyIssuers },
+  );
+
+  // C1：A 把**自己**声明为引导签发者（图上），不再用本地 --policy-issuer
+  const declA = await runCli(['declare-issuer', '--dir', A, '--to', 'device-A']);
+  check(
+    'A 图上声明自己为引导签发者（无本地 --policy-issuer）',
+    declA.code === 0 && lastJson(declA.out)?.subject === 'device-A',
+    { subject: lastJson(declA.out)?.subject },
   );
   check(
     IS_WIN ? '主密钥/配置存在（Windows：ACL 边界）' : '主密钥/配置权限 0600',
@@ -160,8 +171,8 @@ try {
   const addr = lastJson(serveA.state.out.match(/\{[^\n]*listening[^\n]*\}/)?.[0] ?? '')?.multiaddr;
   check('A 已监听（multiaddr）', typeof addr === 'string' && addr.length > 0, { addr });
 
-  // B 把 A 设为引导签发者（bootstrap），从而**采纳** A 转授的 grant（R-a ②/①）——证明「B 同步→B 获授权」。
-  const onboardB = await runCli(['onboard', '--dir', B, '--device', 'device-B', '--peer-device', 'device-A', '--peer-addr', addr, '--policy-issuer', 'device-A', '--master-key', join(A, 'master-key.json'), ...agentArgs]);
+  // C1 核心：B **不带** --policy-issuer 本地配置，仅凭**图上声明**同步并采纳 A（去中心化 bootstrap）。
+  const onboardB = await runCli(['onboard', '--dir', B, '--device', 'device-B', '--peer-device', 'device-A', '--peer-addr', addr, '--master-key', join(A, 'master-key.json'), ...agentArgs]);
   check('onboard B（导入同一主密钥）成功', onboardB.code === 0 && lastJson(onboardB.out)?.ok === true, {});
 
   const workB = startCli(['work', '--dir', B, '--timeout-ms', '30000', '--interval-ms', '10']);
@@ -180,8 +191,14 @@ try {
   workB.child.kill('SIGKILL');
   await waitFor(async () => !(await tcpOpen(port)), 5000);
 
-  // 「B 同步 → B 获授权」：B 端对 device-B **无**配置白名单；effective 含 tasks 只能来自图上 grant。
+  // 「B 同步 → B 获授权」：B 端无本地 policyIssuers、对 device-B 无配置白名单；
+  // issuers 含 device-A 与 effective 含 tasks 都只能来自图上声明/授权（C1）。
   const beff = lastJson((await runScript(READ_EFFECTIVE, ['--dir', B, '--subject', 'device-B'])).out);
+  check(
+    'B 仅凭图上声明采纳 A（issuers 含 device-A，无本地配置）',
+    Array.isArray(beff?.issuers) && beff.issuers.includes('device-A'),
+    { issuers: beff?.issuers },
+  );
   check(
     'B 已同步并采纳 A 的 grant（B 端 device-B:ok，仅图来源）',
     Array.isArray(beff?.effective) && beff.effective.includes('tasks'),

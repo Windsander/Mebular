@@ -327,6 +327,12 @@ export class SyncManager extends EventEmitter {
   private readonly membershipPolicy: NamespaceMembershipPolicy | undefined;
   /** 最近一次解析中「对端自称订阅但并非成员」的分区（显式拒绝，供 SyncResult 暴露） */
   private lastMembershipRejected: string[] = [];
+  /**
+   * 2c：本机已**显式声明重置**的分区（由门面依据图外标记注入）。这些分区即使为空，
+   * 也会以**空时钟**随 hello 上报，触发对端向下修正并从头重发——这是**显式**降水位信号
+   * （普通空订阅不上报，避免无谓的向下修正）。
+   */
+  private readonly resetNamespaces = new Set<string>();
   private readonly pushOnWrite: boolean;
   private readonly pushOnWriteThrottleMs: number;
   private readonly antiEntropy: { enabled: boolean; intervalMs: number; jitterRatio: number };
@@ -505,6 +511,11 @@ export class SyncManager extends EventEmitter {
    * 2b：分区**彻底清理后**丢弃本地同步状态——该分区的 per-(对端,分区) 水位、本机快照水位，
    * 以及被删除事件的 per-event ack。**只删本地状态，不产生任何事件**（无 tombstone）。
    */
+  /** 2c：登记本机已显式重置的分区（随 hello 以空时钟上报，触发对端向下修正）。 */
+  noteLocalReset(namespace: string): void {
+    this.resetNamespaces.add(normalizeNamespace(namespace));
+  }
+
   async forgetNamespace(namespace: string, eventIds: readonly string[] = []): Promise<void> {
     await this.ensureSyncStateLoaded();
     const ns = normalizeNamespace(namespace);
@@ -755,7 +766,9 @@ export class SyncManager extends EventEmitter {
           if (
             direction !== 'pull' &&
             snapshotThreshold !== undefined &&
-            Object.keys(hello.namespaceClocks).length === 0 &&
+            // 「自报分区水位为空」= 每个分区时钟都没有作者计数（空对象亦算空；
+            // 再订阅恢复会显式上报空的已订阅分区以触发向下修正）
+            Object.values(hello.namespaceClocks).every((clock) => Object.keys(clock).length === 0) &&
             outgoing.length >= snapshotThreshold
           ) {
             snapshot = await this.buildSnapshot(allow);
@@ -1055,7 +1068,12 @@ export class SyncManager extends EventEmitter {
    * 自报同时仍用于：
    *   ① 快照触发（`applySnapshot` 非冲突感知，快照只发给自报为空的对端）；
    *   ② 诊断——自报高于本机记录时返回差额，供 `sync-completed.reportedAhead`
-   *      暴露「对端有问题」。自报低于/等于本机记录时维持现状（不抬高也不下调）。
+   *      暴露「对端有问题」。
+   *
+   * **R2 再订阅恢复（2c）：自报水位只允许向下修正**。对端自报某作者计数**低于**本机
+   * 记录时，把本机水位**下调**到自报值（作者自报缺失 = 0）——这样退订方清理后重入、
+   * 上报空的已订阅分区，对端会**从 0 重新 offer**（含快照，若符合既有的“空水位”门禁）。
+   * **绝不向上修正**（不抬高），因此不会把「对端没有」误判为「已有」而静默不发。
    */
   private async recordPeerHello(
     peerDeviceId: string,
@@ -1071,13 +1089,30 @@ export class SyncManager extends EventEmitter {
     await this.ensureSyncStateLoaded();
     const watermarks = this.peerWatermarks.get(peerDeviceId) ?? {};
     const ahead: NamespaceClocks = {};
+    let changed = false;
     for (const [ns, clock] of Object.entries(hello.namespaceClocks)) {
+      const knownNs = watermarks[ns] ?? {};
+      // ② 诊断：自报高于本机记录 → 差额（不抬高本机水位）
       for (const [author, reported] of Object.entries(clock)) {
-        const known = watermarks[ns]?.[author] ?? 0;
-        if (reported > known) {
-          (ahead[ns] ??= {})[author] = reported - known;
+        const known = knownNs[author] ?? 0;
+        if (reported > known) (ahead[ns] ??= {})[author] = reported - known;
+      }
+      // R2：向下修正（自报作者缺失 = 0）
+      const authors = new Set([...Object.keys(knownNs), ...Object.keys(clock)]);
+      for (const author of authors) {
+        const known = knownNs[author] ?? 0;
+        const reported = clock[author] ?? 0;
+        if (reported < known) {
+          if (!watermarks[ns]) watermarks[ns] = {};
+          if (reported === 0) delete watermarks[ns][author];
+          else watermarks[ns][author] = reported;
+          changed = true;
         }
       }
+    }
+    if (changed) {
+      this.peerWatermarks.set(peerDeviceId, watermarks);
+      await this.persistSyncState();
     }
     return ahead;
   }
@@ -1111,6 +1146,9 @@ export class SyncManager extends EventEmitter {
         [event.author]: event.vectorClock?.[event.author] ?? 0,
       });
     }
+    // R2：**显式声明重置**的分区即使为空也上报（空时钟）——据此触发对端**向下修正**与从 0
+    // 重新 offer。普通空订阅不上报（避免无谓修正）；该集合由门面依据图外标记注入。
+    for (const ns of this.resetNamespaces) derived[normalizeNamespace(ns)] ??= {};
     return mergeNamespaceClocks(derived, this.localSnapshotClocks);
   }
 

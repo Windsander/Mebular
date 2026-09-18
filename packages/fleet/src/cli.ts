@@ -15,7 +15,7 @@ import { MebularTaskEventStore } from './store/mebular-store.js';
 import { NullTransport } from './transport/null.js';
 import { SpoolTransport } from './transport/spool.js';
 import { LocalQuota } from './quota.js';
-import { fleetConfigPath, loadFleetConfig, readMasterKeyFile, type FleetAgentConfig } from './config.js';
+import { fleetConfigPath, loadFleetConfig, parseAgentSpecs, readMasterKeyFile } from './config.js';
 import { buildRegistry, doctor, grantNamespace, mebularOptions, onboardDevice, revokeNamespaceGrant } from './onboard.js';
 
 interface Args {
@@ -159,14 +159,20 @@ async function runWorker(args: Args): Promise<number> {
   return 0;
 }
 
-function parseAgents(value: string | boolean | undefined, command: string | boolean | undefined): FleetAgentConfig[] | undefined {
+function parseAgents(
+  value: string | boolean | undefined,
+  command: string | boolean | undefined,
+  baseArgs: string | boolean | undefined,
+): ReturnType<typeof parseAgentSpecs> | undefined {
   if (typeof value !== 'string' || value.length === 0) return undefined;
-  const cmd = typeof command === 'string' ? command : undefined;
-  return value.split(',').map((entry) => {
-    const [name, kind] = entry.split(':');
-    const agent: FleetAgentConfig = { name: name ?? 'echo', kind: (kind as FleetAgentConfig['kind']) ?? 'echo' };
-    if (agent.kind === 'command' && cmd !== undefined) agent.command = cmd;
-    return agent;
+  const commandValue = typeof command === 'string' ? command : undefined;
+  const baseArgsValue =
+    typeof baseArgs === 'string' && baseArgs.length > 0
+      ? baseArgs.split(',').map((s) => s.trim()).filter((s) => s.length > 0)
+      : undefined;
+  return parseAgentSpecs(value, {
+    ...(commandValue !== undefined ? { command: commandValue } : {}),
+    ...(baseArgsValue !== undefined ? { baseArgs: baseArgsValue } : {}),
   });
 }
 
@@ -181,7 +187,9 @@ async function runOnboard(args: Args): Promise<number> {
     ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
     ...(typeof args.listen === 'string' ? { listen: args.listen } : {}),
     ...(typeof args['policy-issuer'] === 'string' ? { policyIssuers: args['policy-issuer'].split(',') } : {}),
-    ...(parseAgents(args.agent, args['agent-command']) !== undefined ? { agents: parseAgents(args.agent, args['agent-command'])! } : {}),
+    ...(parseAgents(args.agent, args['agent-command'], args['agent-base-args']) !== undefined
+      ? { agents: parseAgents(args.agent, args['agent-command'], args['agent-base-args'])! }
+      : {}),
     ...(args['no-config-grant'] === true ? { configGrant: false } : {}),
   });
   console.log(JSON.stringify({

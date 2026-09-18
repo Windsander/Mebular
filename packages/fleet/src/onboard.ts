@@ -10,6 +10,7 @@ import { Mebular, POLICY_NAMESPACE } from '@mebular/core';
 
 import {
   fileMode,
+  permissionsApplicable,
   fleetConfigPath,
   fleetMasterKeyPath,
   fleetStoragePath,
@@ -116,7 +117,7 @@ export function offlineMebularOptions(config: FleetConfig, encryption: FleetEncr
 export async function onboardDevice(input: OnboardInput): Promise<OnboardResult> {
   if (typeof input.device !== 'string' || input.device.length === 0) throw new Error('onboard 需要 --device');
   await mkdir(input.dir, { recursive: true });
-  await chmod(input.dir, 0o700);
+  if (permissionsApplicable()) await chmod(input.dir, 0o700);
 
   const keyPath = fleetMasterKeyPath(input.dir);
   let masterKeyCreated = false;
@@ -295,21 +296,32 @@ export async function doctor(dir: string): Promise<DoctorReport> {
     return { ok: false, device: '<unknown>', checks, skipped: [] };
   }
 
-  // 1) 配置权限
-  const cfgMode = await fileMode(cfgPath).catch(() => -1);
-  add('config 权限', cfgMode === 0o600 ? 'PASS' : 'FAIL', `mode=${cfgMode.toString(8)}`, cfgMode === 0o600 ? undefined : `chmod 600 ${cfgPath}`);
+  // 1) 配置权限（POSIX mode；Windows 无该语义 → SKIP，依赖用户目录 ACL）
+  const posix = permissionsApplicable();
+  if (posix) {
+    const cfgMode = await fileMode(cfgPath).catch(() => -1);
+    add('config 权限', cfgMode === 0o600 ? 'PASS' : 'FAIL', `mode=${cfgMode.toString(8)}`, cfgMode === 0o600 ? undefined : `chmod 600 ${cfgPath}`);
+  } else {
+    add('config 权限', 'SKIP', 'Windows 无 POSIX mode；依赖用户目录 ACL（见 ONBOARDING Windows 章节）');
+  }
 
   // 2) 主密钥（存在 + 权限 + 可加载）
-  const keyMode = await fileMode(config.masterKeyFile).catch(() => -1);
   let encryption: FleetEncryption | null = null;
   try {
     encryption = await readMasterKeyFile(config.masterKeyFile);
   } catch {
     encryption = null;
   }
-  if (keyMode !== 0o600) add('主密钥权限', 'FAIL', `mode=${keyMode.toString(8)}`, `chmod 600 ${config.masterKeyFile}`);
-  else if (encryption === null) add('主密钥', 'FAIL', '无法加载主密钥文件', '重新生成或导入（--master-key）');
-  else add('主密钥', 'PASS', `fingerprint=${masterKeyFingerprint(encryption.userMasterKey)}`);
+  if (!posix) {
+    add('主密钥权限', 'SKIP', 'Windows 无 POSIX mode；依赖用户目录 ACL（见 ONBOARDING Windows 章节）');
+    if (encryption === null) add('主密钥', 'FAIL', '无法加载主密钥文件', '重新生成或导入（--master-key）');
+    else add('主密钥', 'PASS', `fingerprint=${masterKeyFingerprint(encryption.userMasterKey)}`);
+  } else {
+    const keyMode = await fileMode(config.masterKeyFile).catch(() => -1);
+    if (keyMode !== 0o600) add('主密钥权限', 'FAIL', `mode=${keyMode.toString(8)}`, `chmod 600 ${config.masterKeyFile}`);
+    else if (encryption === null) add('主密钥', 'FAIL', '无法加载主密钥文件', '重新生成或导入（--master-key）');
+    else add('主密钥', 'PASS', `fingerprint=${masterKeyFingerprint(encryption.userMasterKey)}`);
+  }
 
   // 3) 设备身份 + 主密钥链（core 验签设备证书）
   const identityPath = `${config.storagePath}.identity.json`;

@@ -40,13 +40,13 @@ fleet onboard --dir ~/.fleet \
 启动（`--submit` 派 N 个任务给 B 的 `echo` agent；等待首轮同步后再提交）：
 
 ```bash
-fleet serve --dir ~/.fleet \
+fleet node --dir ~/.fleet \
   --submit 5 --target-agent echo \
   --expect-prefix ECHO: \
   --wait-sync-ms 30000 --timeout-ms 40000 --linger-ms 30000
 ```
 
-首行打印 `{"role":"serve","event":"listening","multiaddr":"/ip4/…/p2p/…","peerId":"…"}`；把 `multiaddr` 里的
+首行打印 `{"role":"node","event":"listening","multiaddr":"/ip4/…/p2p/…","peerId":"…"}`；把 `multiaddr` 里的
 `0.0.0.0` 换成 A 的 LAN IP 即得对端可拨地址。
 
 ## 3. 机器 B：导入同一主密钥并上车
@@ -65,8 +65,8 @@ fleet onboard --dir ~/.fleet \
 运行执行端：
 
 ```bash
-fleet work --dir ~/.fleet --timeout-ms 30000
-# 期望：{"role":"work","device":"device-B","executed":5}
+fleet worker --dir ~/.fleet --timeout-ms 30000
+# 期望：{"role":"worker","device":"device-B","executed":5}
 ```
 
 A 在线时，B 自检应全绿：
@@ -124,7 +124,7 @@ fleet grant --dir ~/.fleet --to device-B --namespace tasks
 # → {"ok":true,"role":"grant","grantId":"<uuid>","subject":"device-B","namespaces":["tasks"]}
 
 # 3) A 起服务（把 multiaddr 里的 0.0.0.0 换成 A 的 LAN IP 给 B）
-fleet serve --dir ~/.fleet --submit 5 --target-agent echo --expect-prefix ECHO: \
+fleet node --dir ~/.fleet --submit 5 --target-agent echo --expect-prefix ECHO: \
   --wait-sync-ms 30000 --timeout-ms 40000 --linger-ms 30000
 
 # 4) B 上车并导入同一主密钥：**无需** --policy-issuer（图上声明会同步过来）
@@ -133,8 +133,8 @@ fleet onboard --dir ~/.fleet --device device-B --peer-device device-A \
   --master-key /path/to/master-key.json --agent echo:echo
 
 # 5) B 同步并执行（B 已采纳 A 的图上声明，进而采纳其 grant）
-fleet work --dir ~/.fleet --timeout-ms 30000
-# → {"role":"work","device":"device-B","executed":5}
+fleet worker --dir ~/.fleet --timeout-ms 30000
+# → {"role":"worker","device":"device-B","executed":5}
 
 # 6) A 侧确认 done=5 / resultsMatch=true；B 在线时 B 自检 ok=true skipped=[]
 fleet doctor --dir ~/.fleet
@@ -193,7 +193,7 @@ npm run verify:fleet:all       # local + remote + agents + onboard + grant 汇�
 | 授权被撤销 | `doctor` FAIL 且 hint「新 grantId（R-d）」 | 用**全新** grantId 重新 `fleet grant`；旧 grantId 不可复用（R-d） |
 | 未授权设备自授 | grant 命令成功但不生效（`doctor` 仍 FAIL） | 只有引导签发者（`--policy-issuer`）或已获授权者能签发（R-a）；别在被隔离设备上自授 |
 | peer 不可达 | `doctor` FAIL `peer 可达` | 核对 A 的监听端口/LAN IP、防火墙；确认 `--peer-addr` 的 `multiaddr` |
-| 监听端口被占用 | `serve` 非零退出 | 换 `--listen /ip4/…/tcp/<空闲端口>` 重新 `onboard` |
+| 监听端口被占用 | `fleet node` 非零退出 | 换 `--listen /ip4/…/tcp/<空闲端口>` 重新 `onboard` |
 | 配置损坏 | `doctor` FAIL `config` | 删除后重新 `onboard`（主密钥可复用） |
 | 两端主密钥不一致 | 握手失败、`doctor` 的 `同步已收敛` 恒为 SKIP/FAIL | 两端必须导入**同一把**主密钥 |
 
@@ -201,7 +201,7 @@ npm run verify:fleet:all       # local + remote + agents + onboard + grant 汇�
 
 - **权限**：主密钥/配置必须 0600，设备目录建议 0700；`doctor` 会断言主密钥权限。
 - **目录**：生产请用 `~/.fleet`；仓库内默认的 `./.fleet` 已在 `.gitignore` 忽略（内含归一化主密钥），但更安全的做法是永远放在仓库外。
-- **日志脱敏**：`serve`/`work`/`doctor` 输出只含设备名、多播地址、指纹与计数，**不含**私钥材料；`verify:fleet:onboard` 会断言日志中搜不到私钥。
+- **日志脱敏**：`fleet node`/`fleet worker`/`doctor` 输出只含设备名、多播地址、指纹与计数，**不含**私钥材料；`verify:fleet:onboard` 会断言日志中搜不到私钥。
 - 主密钥即身份：泄露等同身份泄露；不要提交进仓库、不要放进镜像层。
 - 临时文件与密钥一律写在临时目录，不进仓库。
 - **Windows**：见 [§9](#9-windowsmacos-真双机)：权限语义、防火墙、`command` agent 一律经 `node` 调用。
@@ -235,7 +235,7 @@ New-NetFirewallRule -DisplayName "fleet libp2p 4001" -Direction Inbound `
   -Protocol TCP -LocalPort 4001 -Action Allow -Profile Private
 ```
 
-A 的 `serve` 打印 `multiaddr`（`/ip4/0.0.0.0/tcp/4001/p2p/…`）后，把 `0.0.0.0` 换成 A 的**静态 LAN IP** 给 B 的 `--peer-addr`。
+A 的 `fleet node` 打印 `multiaddr`（`/ip4/0.0.0.0/tcp/4001/p2p/…`）后，把 `0.0.0.0` 换成 A 的**静态 LAN IP** 给 B 的 `--peer-addr`。
 
 ### 9.4 `command` agent 一律经 `node` 调用（不依赖 shebang/可执行位）
 
@@ -248,10 +248,35 @@ fleet onboard --dir "$env:USERPROFILE\.fleet" --device device-Win `
 
 ### 9.5 信号 / 终止差异
 
-- POSIX：`SIGINT`(Ctrl-C)/`SIGTERM` 可被进程捕获做优雅收尾；Windows 无真正的 `SIGTERM`，`Ctrl-C` 走 `SIGINT`，`taskkill /F` 等同强杀。`serve`/`work` 在退出前落盘事件；强杀时未落盘的在途窗口由 core 的 anti-entropy 在下次同步补齐（至少一次）。
+- POSIX：`SIGINT`(Ctrl-C)/`SIGTERM` 可被进程捕获做优雅收尾；Windows 无真正的 `SIGTERM`，`Ctrl-C` 走 `SIGINT`，`taskkill /F` 等同强杀。`fleet node`/`fleet worker` 在退出前落盘事件；强杀时未落盘的在途窗口由 core 的 anti-entropy 在下次同步补齐（至少一次）。
 - 跨机用 `--linger-ms` 保持 A 在线，避免 B 侧 `doctor` 的「peer 可达/同步已收敛」在 A 退出后抖动。
 
 ### 9.6 Windows 的 OpenChamber 执行器 = provider #2（Node）
 
 Windows 常无 Hermes/Python。OpenChamber 任务执行改用 **provider #2**（Self-Skills 仓 `oc-node-provider`）：一个只需 Node 的极简 daemon，`POST /agent/run-once` 与 provider #1（`bridge.py`）**同协议**，复用现有 `oc-bridge.js` 插件（inbox/outbox）。安装/启动/替换关系见 Self-Skills `skills/oc-node-provider/README.md`；fleet 侧仅把 `--with-openchamber` 指向该 endpoint（`~/.oc-hermes-bridge/daemon.json`），**无需改 fleet 代码**。
 
+
+## 10. 常驻服务（D1–D4）：开机自启 + 崩溃自拉 + 日志/状态
+
+三个常驻组件由 `@mebular/service` 统一服务化（**零 core 改动**）：`fleet-node`（任务板/发起端）、`fleet-worker`（执行端）、`mebular-serve`（记忆/同步/MCP 底座）。
+
+```bash
+# 安装并启动（默认登录/开机自启）；--no-autostart 只安装不自启
+fleet service install fleet-node   --dir ~/.fleet
+fleet service install fleet-worker --dir ~/.fleet
+mebular service install            # mebular-serve
+
+fleet service status          # 注册/运行/心跳新鲜度/SHA
+fleet service logs fleet-node --tail 50
+fleet service uninstall fleet-node
+
+fleet node   --dir ~/.fleet --run-forever   # 旧名 `fleet serve`（deprecated alias）
+fleet worker --dir ~/.fleet --run-forever   # 旧名 `fleet work`（deprecated alias）
+```
+
+- **平台**：macOS = launchd 用户级 LaunchAgent（`~/Library/LaunchAgents`，RunAtLoad + KeepAlive + ThrottleInterval）；Linux = `systemd --user`（`Restart=on-failure`，`WantedBy=default.target`）；Windows = **Task Scheduler onlogon**（`schtasks`，无需管理员）。
+- **心跳**：常驻进程写 `<设备目录>/service.heartbeat` `{pid,ts,role,sha}`（0600）；`doctor` 增两项——`服务已注册`（dir-scoped，未安装 → SKIP 明列原因）与 `心跳新鲜`（陈旧 → FAIL）。
+- **幂等**：重复 `install` = 更新单元并重启；`uninstall` 未安装 = 清晰提示（`removed:false`）。单元/manifest 记录**构建 SHA**，`service status` 输出。
+- **Windows 边界**：Task Scheduler 为登录级、非真 Windows Service（后者需管理员，记为后续可选项）；`--no-autostart` 下任务注册后立即 `schtasks /End`（已注册但停止）。
+
+> 改名（D5）：`fleet serve → fleet node`、`fleet work → fleet worker`（与 `FleetNode`/`FleetWorker` 对齐）；旧动词保留为 **deprecated alias**（行为等价，stderr 提示）。JSON `role` 字段同步为 `node`/`worker`；M2 单机双进程（spool）命令改为 `fleet spool node|worker`。

@@ -264,6 +264,13 @@ async function main() {
     }
     case 'serve': {
       const { startServeServer } = await import('../src/server.mjs');
+      // D4：常驻进程写 service.heartbeat（role=mebular-serve），供 `service status`/doctor 判定。
+      try {
+        const { startHeartbeat, resolveBuildSha } = await import('@mebular/service');
+        startHeartbeat(homeDir(), { role: 'mebular-serve', sha: resolveBuildSha() });
+      } catch {
+        // service 包缺失不应阻止 serve。
+      }
       try {
         const result = await startServeServer({
           host: typeof flags.host === 'string' ? flags.host : undefined,
@@ -280,6 +287,20 @@ async function main() {
       }
       return;
     }
+    case 'service': {
+      const { runServiceCli } = await import('@mebular/service');
+      const home = homeDir();
+      const bin = process.argv[1];
+      const descriptor = {
+        kind: 'mebular-serve',
+        args: [bin, 'serve'],
+        heartbeatDir: home,
+        workingDir: home,
+        env: { MEBULAR_HOME: home },
+      };
+      process.exit(runServiceCli({ descriptors: [descriptor], argv: argv.slice(1) }));
+      return;
+    }
     case 'token': {
       await runToken(argv[1], flags, argv[2]);
       return;
@@ -294,6 +315,7 @@ async function main() {
           '命令：',
           '  mcp                          启动 stdio MCP server',
           '  serve [--host --port --auth --tls-key --tls-cert --tokens-file]   Streamable HTTP server',
+          '  service install|uninstall|status|logs [--no-autostart --label L]  常驻服务管理（mebular-serve）',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
           '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',

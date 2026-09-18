@@ -258,7 +258,11 @@ describe('Mebular 门面', () => {
     });
     await m.initialize();
     const mode = (await stat(`${storagePath}.identity.json`)).mode & 0o777;
-    expect(mode).toBe(0o600);
+    if (process.platform !== 'win32') {
+      // POSIX: identity file must be owner-only. Windows has no POSIX mode (chmod is a
+      // no-op; the user-profile ACL is the boundary) — see fleet ONBOARDING §9.
+      expect(mode).toBe(0o600);
+    }
     await m.shutdown();
   });
 

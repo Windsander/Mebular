@@ -238,7 +238,9 @@ describe('doctor：peer/同步/身份链 与注册表/选项', () => {
     await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'echo', kind: 'echo' }] });
     const cfg = await loadFleetConfig(fleetConfigPath(dir));
     await rm(cfg.masterKeyFile, { force: true });
-    expect((await doctor(dir)).checks.find((c) => c.name === '主密钥权限')?.status).toBe('FAIL');
+    expect((await doctor(dir)).checks.find((c) => c.name === '主密钥权限')?.status).toBe(
+      process.platform === 'win32' ? 'SKIP' : 'FAIL',
+    );
 
     const bad = join(dir, 'bad-key.json');
     await writeFile(bad, JSON.stringify({ v: 1 }), { mode: 0o600 });

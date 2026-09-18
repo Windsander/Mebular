@@ -10,7 +10,10 @@ const kp = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', '
 const deviceKey = { publicKey: new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey)), privateKey: kp.privateKey };
 const provider = await Libp2pProvider.create({ deviceKey, listen: ['/ip4/0.0.0.0/tcp/4001'], relayServer: true, relayUnlimited: true });
 await provider.start();
-const peerId = provider.peerId.id;
-writeFileSync(join(state, 'relay.json'), JSON.stringify({ peerId, addr: `/dns4/relay/tcp/4001/p2p/${peerId}` }));
-console.log(`WAN_RELAY ${JSON.stringify({ peerId, addr: `/dns4/relay/tcp/4001/p2p/${peerId}` })}`);
+const internal = (provider.getMultiaddrs() ?? []).find((a) => a.includes('/tcp/'));
+if (!internal) { console.error('relay 未监听'); process.exit(2); }
+const peerId = internal.match(/\/p2p\/([^/]+)/)[1];
+const addr = `/dns4/relay/tcp/4001/p2p/${peerId}`;
+writeFileSync(join(state, 'relay.json'), JSON.stringify({ peerId, addr }));
+console.log(`WAN_RELAY ${JSON.stringify({ peerId, addr })}`);
 setInterval(() => {}, 1 << 30);

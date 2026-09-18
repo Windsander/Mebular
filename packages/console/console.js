@@ -22,6 +22,8 @@ const state = {
   devices: [],
   policy: [],
   namespaces: [],
+  selectedNamespace: null,
+  memberDraft: '',
   settings: null,
   selected: null,
   degraded: null,
@@ -275,81 +277,132 @@ function renderEmptyState() {
 
 function renderDomains() {
   const list = $('#domains-list');
+  const detail = $('#domain-detail');
+  const stats = $('#domains-stats');
   const items = state.namespaces ?? [];
+
+  if (stats) {
+    const memberEnabled = items.filter((n) => n.membershipEnabled).length;
+    stats.innerHTML = `<span class="crt-tag">分区 ${items.length}</span><span class="crt-tag">成员制 ${memberEnabled}</span>`;
+  }
   if (items.length === 0) {
-    list.innerHTML = '<p class="muted">暂无分区记忆。</p>';
+    list.innerHTML = '<p class="muted" style="padding:8px">暂无分区记忆。</p>';
+    detail.innerHTML = '';
+    return;
+  }
+  // 选中保持：默认第一个；轮询刷新不丢选择
+  if (!items.some((n) => n.namespace === state.selectedNamespace)) {
+    state.selectedNamespace = items[0].namespace;
+    state.memberDraft = '';
+  }
+  const selected = items.find((n) => n.namespace === state.selectedNamespace);
+  list.innerHTML = items.map((n) => {
+    const active = n.namespace === state.selectedNamespace;
+    const memberLabel = n.membershipEnabled ? `${n.effectiveMembers.length}/${n.members.length}` : '仅授权';
+    return `<button class="sector-item${active ? ' is-active' : ''}" data-sector="${escapeHtml(n.namespace)}" type="button">
+      <span class="sector-dot${n.membershipEnabled ? ' is-on' : ''}"></span>
+      <span class="sector-name"><span class="ns-chip" style="background:${namespaceColor(n.namespace)}">${escapeHtml(n.namespace)}</span>
+        <span class="sector-meta">${n.count} 条${n.rejoinReset ? ' · 待恢复' : ''}</span></span>
+      <span class="sector-meta" title="生效/在册成员">${memberLabel}</span>
+    </button>`;
+  }).join('');
+  renderDomainDetail(selected);
+
+  list.querySelectorAll('[data-sector]').forEach((button) => {
+    button.addEventListener('click', () => {
+      state.selectedNamespace = button.dataset.sector;
+      state.memberDraft = '';
+      renderDomains();
+    });
+  });
+}
+
+function renderDomainDetail(n) {
+  const detail = $('#domain-detail');
+  if (!n) {
+    detail.innerHTML = '';
     return;
   }
   const writes = state.features.writes && !MOCK;
-  list.innerHTML = items.map((n) => {
-    const ns = n.namespace;
-    const badges = [
-      n.membershipEnabled
-        ? `成员制：已启用（${n.members.length} 在册 / ${n.effectiveMembers.length} 生效）`
-        : '成员制：未启用（仅授权）',
-      `我的订阅：${n.subscribed ? '是' : '否'}`,
-    ];
-    if (n.rejoinReset) badges.push('已清理 · 待恢复');
-    const granted = (n.grantedTo ?? []).length
-      ? n.grantedTo.map((g) => `<span class="member-chip" title="grantId=${escapeHtml(g.grantId)}">${escapeHtml(g.deviceId)}</span>`).join(' ')
-      : '<span class="muted">—</span>';
-    const members = n.membershipEnabled
-      ? (n.members.length
-        ? n.members.map((m) => {
-          const eff = n.effectiveMembers.includes(m);
-          const remove = writes
-            ? `<button class="chip-x" data-member-remove="${escapeHtml(m)}" data-ns="${escapeHtml(ns)}" title="移出成员（不清理数据）">×</button>`
-            : '';
-          return `<span class="member-chip ${eff ? 'is-effective' : ''}" title="${eff ? '在册且已授权（生效）' : '在册但缺授权（不生效）'}">${escapeHtml(m)}${eff ? ' ✓' : ''}${remove}</span>`;
-        }).join(' ')
-        : '<span class="muted">暂无在册成员</span>')
-        + (writes
-          ? `<input class="member-input" data-member-input="${escapeHtml(ns)}" placeholder="deviceId" aria-label="添加成员" /><button class="btn btn-small" data-member-add="${escapeHtml(ns)}">添加</button>`
-          : '')
-      : '<span class="muted">未启用成员制（只需授权）</span>';
-    const rejoinTitle = !writes
-      ? '只读模式'
-      : n.selfAuthorized
-        ? '清空本机该分区水位，请对端从 0 重发（或发初始快照）'
-        : '需本机对该分区有生效授权（默认拒绝）';
-    const rejoin = n.rejoinReset
-      ? `<button class="btn btn-small" data-rejoin="${escapeHtml(ns)}" ${(writes && n.selfAuthorized) ? '' : 'disabled'} title="${escapeHtml(rejoinTitle)}">重入恢复</button>`
-      : '';
-    return `<article class="domain-card">
-      <header>
-        <span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
-        <span class="muted">${n.count} 条 · 最近更新 ${n.lastUpdatedAt ? formatTime(n.lastUpdatedAt) : '—'} · hash ${n.stateHash ? escapeHtml(n.stateHash.slice(0, 10)) : '—'}</span>
-      </header>
-      <div class="domain-badges">${badges.map((b) => `<span class="badge badge-muted">${escapeHtml(b)}</span>`).join('')}</div>
-      <div class="domain-row"><span class="domain-label">我授权给</span><div class="chip-wrap">${granted}</div></div>
-      <div class="domain-row"><span class="domain-label">成员</span><div class="chip-wrap">${members}</div></div>
-      <div class="domain-actions">
-        ${rejoin}
-        <button class="btn btn-small" data-handoff="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="退订交接：继任者全量 ack 后才清理本机数据">退订交接…</button>
-      </div>
-    </article>`;
-  }).join('');
+  const ns = n.namespace;
+  const focused = document.activeElement?.dataset?.memberInput === ns;
+  const draft = focused ? document.activeElement.value : state.memberDraft;
+
+  const granted = (n.grantedTo ?? []).length
+    ? n.grantedTo.map((g) => `<span class="member-chip" title="grantId=${escapeHtml(g.grantId)}">${escapeHtml(g.deviceId)}</span>`).join(' ')
+    : '<span class="muted">—</span>';
+  const members = n.membershipEnabled
+    ? (n.members.length
+      ? n.members.map((m) => {
+        const eff = n.effectiveMembers.includes(m);
+        const remove = writes
+          ? `<button class="chip-x" data-member-remove="${escapeHtml(m)}" data-ns="${escapeHtml(ns)}" title="移出成员（不清理数据）">×</button>`
+          : '';
+        return `<span class="member-chip ${eff ? 'is-effective' : ''}" title="${eff ? '在册且已授权（生效）' : '在册但缺授权（不生效）'}">${escapeHtml(m)}${eff ? ' ✓' : ''}${remove}</span>`;
+      }).join(' ')
+      : '<span class="muted">暂无在册成员</span>')
+      + (writes
+        ? `<input class="member-input crt-input" data-member-input="${escapeHtml(ns)}" placeholder="deviceId" aria-label="添加成员" /><button class="btn btn-small btn-crt" data-member-add="${escapeHtml(ns)}">添加</button>`
+        : '')
+    : '<span class="muted">未启用成员制（只需授权）</span>';
+  const rejoinTitle = !writes
+    ? '只读模式'
+    : n.selfAuthorized
+      ? '清空本机该分区水位，请对端从 0 重发（或发初始快照）'
+      : '需本机对该分区有生效授权（默认拒绝）';
+  const rejoin = n.rejoinReset
+    ? `<button class="btn btn-small btn-crt" data-rejoin="${escapeHtml(ns)}" ${(writes && n.selfAuthorized) ? '' : 'disabled'} title="${escapeHtml(rejoinTitle)}">重入恢复</button>`
+    : '';
+
+  detail.innerHTML = `<article class="sector-readout crt-surface crt-corners">
+    <header class="readout-head">
+      <span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
+      <span class="readout-meta">${n.count} 条 · 最近更新 ${n.lastUpdatedAt ? formatTime(n.lastUpdatedAt) : '—'}</span>
+      <span class="readout-meta">HASH ${n.stateHash ? escapeHtml(n.stateHash.slice(0, 10)) : '—'}</span>
+      <span class="crt-tag${n.membershipEnabled ? '' : ' is-off'}">${n.membershipEnabled ? '成员制 ACTIVE' : '成员制 OFF'}</span>
+      <span class="crt-tag${n.subscribed ? '' : ' is-off'}">${n.subscribed ? '已订阅' : '未订阅'}</span>
+      ${n.rejoinReset ? '<span class="crt-tag">待重入</span>' : ''}
+    </header>
+    <div class="readout-block"><span class="domain-label">AUTH →</span><div class="chip-wrap">${granted}</div></div>
+    <div class="readout-block"><span class="domain-label">MEMBERS →</span><div class="chip-wrap">${members}</div></div>
+    <div class="readout-block readout-actions">
+      ${rejoin}
+      <button class="btn btn-small btn-crt btn-crt-danger" data-handoff="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="退订交接：继任者全量 ack 后才清理本机数据">退订交接…</button>
+    </div>
+  </article>`;
+
+  const input = detail.querySelector(`[data-member-input="${CSS.escape(ns)}"]`);
+  if (input) {
+    input.value = draft;
+    input.addEventListener('input', () => { state.memberDraft = input.value; });
+    if (focused) {
+      input.focus();
+      const end = input.value.length;
+      input.setSelectionRange(end, end);
+    }
+  }
   bindDomainActions();
 }
 
 function bindDomainActions() {
-  const list = $('#domains-list');
-  list.querySelectorAll('[data-member-add]').forEach((button) => {
+  const detail = $('#domain-detail');
+  detail.querySelectorAll('[data-member-add]').forEach((button) => {
     button.addEventListener('click', () => {
       const ns = button.dataset.memberAdd;
-      const input = list.querySelector(`[data-member-input="${CSS.escape(ns)}"]`);
+      const input = detail.querySelector(`[data-member-input="${CSS.escape(ns)}"]`);
       const member = (input?.value ?? '').trim();
       if (!member) return;
+      state.memberDraft = '';
       declareMembership(member, ns, true);
     });
   });
-  list.querySelectorAll('[data-member-remove]').forEach((button) => {
+  detail.querySelectorAll('[data-member-remove]').forEach((button) => {
     button.addEventListener('click', () => declareMembership(button.dataset.memberRemove, button.dataset.ns, false));
   });
-  list.querySelectorAll('[data-rejoin]').forEach((button) => {
+  detail.querySelectorAll('[data-rejoin]').forEach((button) => {
     button.addEventListener('click', () => doRejoin(button.dataset.rejoin));
   });
-  list.querySelectorAll('[data-handoff]').forEach((button) => {
+  detail.querySelectorAll('[data-handoff]').forEach((button) => {
     button.addEventListener('click', () => openHandoff(button.dataset.handoff));
   });
 }
@@ -454,7 +507,7 @@ function renderSettings() {
   const self = s.identity.deviceId;
   const isIssuer = Array.isArray(s.policyIssuers) && s.policyIssuers.includes(self);
   const kv = (pairs) => `<dl class="settings-kv">${pairs.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${v}</dd>`).join('')}</dl>`;
-  const copyRow = (label, value) => [label, `<div class="copyable"><code>${escapeHtml(value)}</code><button class="btn btn-small" data-copy="${escapeHtml(value)}">复制</button></div>`];
+  const copyRow = (label, value) => [label, `<div class="copyable"><code>${escapeHtml(value)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(value)}">复制</button></div>`];
   const snippet = (obj) => `<pre class="snippet">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`;
 
   const addrRows = s.identity.multiaddrs.length
@@ -482,7 +535,7 @@ function renderSettings() {
         ['配置 bootstrap', escapeHtml(s.sync.configPolicyIssuers.join(', ') || '—')],
       ])}
       <div class="domain-actions">
-        <button id="declare-issuer" class="btn btn-small" ${state.features.writes && !isIssuer && !MOCK ? '' : 'disabled'}>声明本机为引导签发者</button>
+        <button id="declare-issuer" class="btn btn-small btn-crt" ${state.features.writes && !isIssuer && !MOCK ? '' : 'disabled'}>声明本机为引导签发者</button>
       </div>
       <p class="muted" style="font-size:11px">图上声明（签名事件，随 __policy__ 同步；受 device_revoke 排斥）。需改配置并重启的等价片段：</p>
       ${snippet({ sync: { policyIssuers: [self] } })}
@@ -580,8 +633,14 @@ function renderAudit() {
     time.className = 'audit-time';
     time.textContent = formatTime(event.at);
     const action = document.createElement('span');
-    const actionClass = event.type === 'namespace_grant' ? 'grant'
-      : event.type === 'namespace_revoke' ? 'revoke' : 'device';
+    const actionClass = {
+      namespace_grant: 'grant',
+      namespace_revoke: 'revoke',
+      device_revoke: 'device',
+      policy_issuer_declare: 'declare',
+      namespace_membership: 'membership',
+      namespace_handoff: 'handoff',
+    }[event.type] ?? 'device';
     action.className = `audit-action ${actionClass}`;
     action.textContent = actionLabel(event.type);
     const detail = document.createElement('span');
@@ -715,11 +774,11 @@ function renderDeviceCard() {
 
   const actions = isSelf ? '' : `
     <div class="card-actions">
-      <button class="btn btn-small" data-action="sync" ${writes && device.online ? '' : 'disabled'}>立即同步</button>
-      <button class="btn btn-small" data-action="connect" ${writes && !device.online ? '' : 'disabled'}>连接</button>
-      <button class="btn btn-small" data-action="disconnect" ${writes && device.online ? '' : 'disabled'}>断开连接</button>
-      <button class="btn btn-small" data-action="reset-watermarks" ${writes ? '' : 'disabled'}>重置水位</button>
-      <button class="btn btn-small btn-danger" data-action="revoke-device" ${writes ? '' : 'disabled'}>屏蔽该设备</button>
+      <button class="btn btn-small btn-crt" data-action="sync" ${writes && device.online ? '' : 'disabled'}>立即同步</button>
+      <button class="btn btn-small btn-crt" data-action="connect" ${writes && !device.online ? '' : 'disabled'}>连接</button>
+      <button class="btn btn-small btn-crt" data-action="disconnect" ${writes && device.online ? '' : 'disabled'}>断开连接</button>
+      <button class="btn btn-small btn-crt" data-action="reset-watermarks" ${writes ? '' : 'disabled'}>重置水位</button>
+      <button class="btn btn-small btn-crt btn-crt-danger" data-action="revoke-device" ${writes ? '' : 'disabled'}>屏蔽该设备</button>
     </div>
     ${writes ? '' : '<p class="muted" style="margin-top:10px">当前为只读模式（写操作需 memory.admin + CSRF）。</p>'}`;
 

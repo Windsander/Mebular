@@ -30,7 +30,7 @@
           <li><button class="view-btn" data-view="domains" type="button"><span class="view-icon">○</span><span class="view-label">域视图</span></button></li>
           <li><button class="view-btn" data-view="audit" type="button"><span class="view-icon">○</span><span class="view-label">审计</span></button></li>
         </ul>
-        <section id="legend-panel" class="legend-panel">
+        <section id="legend-panel" class="legend-panel crt-surface crt-corners">
           <button id="legend-toggle" class="legend-head" type="button" aria-expanded="true" aria-controls="legend-body">
             <span>图例</span>
             <span class="legend-chevron">▾</span>
@@ -55,14 +55,24 @@
         <canvas id="stage" class="stage" aria-label="对端关系星图（本机视角）"></canvas>
         <div id="tooltip" class="tooltip" hidden></div>
         <div id="empty-state" class="empty-state" hidden></div>
-        <section id="domains-view" class="panel-view" hidden>
-          <h2>域视图</h2>
+        <section id="domains-view" class="panel-view crt-screen" hidden>
+          <div class="view-head">
+            <h2>域视图</h2>
+            <span class="view-head-sub">SECTOR SCAN</span>
+            <div id="domains-stats" class="view-head-stats"></div>
+          </div>
           <p class="panel-note muted">以分区为中心。生效共享 = 我授权 ∩（启用成员制时）对端在册 ∩ 我的订阅。成员声明不放宽授权；退订交接需继任者全量 ack。</p>
-          <div id="domains-list" class="domain-list"></div>
+          <div class="domains-layout">
+            <div id="domains-list" class="sector-list crt-surface crt-corners"></div>
+            <div id="domain-detail" class="sector-detail"></div>
+          </div>
         </section>
-        <section id="audit-view" class="panel-view" hidden>
+        <section id="audit-view" class="panel-view crt-screen" hidden>
           <div class="audit-toolbar">
-            <h2>审计时间线</h2>
+            <div class="view-head">
+              <h2>审计时间线</h2>
+              <span class="view-head-sub">SIGNAL LOG</span>
+            </div>
             <div class="audit-filters">
               <select id="audit-filter-action" aria-label="按动作过滤">
                 <option value="">全部动作</option>
@@ -75,18 +85,18 @@
               </select>
               <select id="audit-filter-device" aria-label="按设备过滤"><option value="">全部设备</option></select>
               <select id="audit-filter-namespace" aria-label="按域过滤"><option value="">全部域</option></select>
-              <button id="audit-export" class="btn" type="button">导出 JSON</button>
+              <button id="audit-export" class="btn btn-crt" type="button">导出 JSON</button>
             </div>
           </div>
           <ol id="audit-list" class="audit-list"></ol>
         </section>
       </main>
 
-      <aside class="aside">
-        <section id="device-card" class="card">
+      <aside class="aside crt-surface">
+        <section id="device-card" class="card crt-corners">
           <div class="card-head">
             <h2>设备卡</h2>
-            <span class="lock-tag"><span class="lock-dot"></span>目标锁定</span>
+            <span class="crt-tag"><span class="crt-tag-dot"></span>目标锁定</span>
             <button id="device-card-close" class="icon-btn" type="button" title="关闭" aria-label="关闭设备卡">✕</button>
           </div>
           <p class="muted" id="device-card-empty">点击星图上的设备查看详情。</p>
@@ -111,25 +121,25 @@
   </div>
 
   <div id="settings" class="modal" hidden>
-    <div class="modal-box modal-box-wide" role="dialog" aria-modal="true" aria-label="本机设置">
+    <div class="modal-box modal-box-wide crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="本机设置">
       <h2>本机设置</h2>
       <p class="modal-note muted">运行时可用项可直接操作（写签名事件）；标注「需改配置并重启」的项为构造期配置，仅展示与复制片段。</p>
       <div id="settings-body"></div>
       <div class="modal-actions">
-        <button id="settings-close" class="btn" type="button">关闭</button>
+        <button id="settings-close" class="btn btn-crt" type="button">关闭</button>
       </div>
     </div>
   </div>
 
   <div id="handoff" class="modal" hidden>
-    <div class="modal-box" role="dialog" aria-modal="true" aria-label="退订交接">
+    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="退订交接">
       <h2 id="handoff-title">退订交接</h2>
       <p id="handoff-desc" class="modal-note muted"></p>
-      <div class="field"><label>继任者 deviceId</label><input id="handoff-successor" type="text" placeholder="device-B" /></div>
+      <div class="field"><label>继任者 deviceId</label><input id="handoff-successor" class="crt-input" type="text" placeholder="device-B" /></div>
       <div class="modal-actions">
-        <button id="handoff-close" class="btn" type="button">关闭</button>
-        <button id="handoff-plan" class="btn" type="button">预检</button>
-        <button id="handoff-confirm" class="btn btn-danger" type="button" disabled>退订并清理</button>
+        <button id="handoff-close" class="btn btn-crt" type="button">关闭</button>
+        <button id="handoff-plan" class="btn btn-crt" type="button">预检</button>
+        <button id="handoff-confirm" class="btn btn-crt btn-crt-danger" type="button" disabled>退订并清理</button>
       </div>
       <pre id="handoff-result" class="snippet" hidden></pre>
     </div>

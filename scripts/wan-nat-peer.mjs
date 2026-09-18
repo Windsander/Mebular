@@ -2,6 +2,7 @@
 // L2 容器角色：NAT 后的 peer（A 驱动 / B 响应）。文件协议与宿主脚本协调（phase.json / <role>.json）。
 // A 在 net-a、B 在 net-b，**无入站端口、无对方直连地址** → 只能经 relay（/p2p-circuit）。
 import { readFileSync, writeFileSync } from 'node:fs';
+import dns from 'node:dns';
 import { join } from 'node:path';
 import { Mebular } from '../dist/index.js';
 
@@ -15,6 +16,9 @@ const waitFor = async (fn, ms, poll = 100) => { const end = Date.now() + ms; whi
 
 const relay = await waitFor(() => readJson(join(state, 'relay.json')), 60000);
 if (!relay) { console.error(`[${role}] relay.json 缺失`); process.exit(2); }
+// 在本容器所在网络内解析 relay 服务名 → 该网络的 relay IP（每个 peer 只看到自己网络上的 relay）
+const relayIp = (await dns.promises.lookup('relay', { family: 4 })).address;
+const relayAddr = `/ip4/${relayIp}/tcp/4001/p2p/${relay.peerId}`;
 const master = readJson(join(state, 'master-key.json'));
 if (!master) { console.error(`[${role}] master-key.json 缺失`); process.exit(2); }
 const userMasterKey = new Uint8Array(Buffer.from(master.publicKey, 'base64'));
@@ -26,7 +30,7 @@ const mebular = new Mebular({
   storagePath: join(state, `${role}.jsonl`),
   deviceId,
   encryption: { userMasterKey, userMasterPrivateKey },
-  network: { enabled: true, libp2p: { listen: ['/ip4/0.0.0.0/tcp/0'], relayServers: [relay.addr] } },
+  network: { enabled: true, libp2p: { listen: ['/ip4/0.0.0.0/tcp/0'], relayServers: [relayAddr] } },
   sync: { autoSync: true, peerNamespacePolicy: { [partner]: ['default'] } },
 });
 await mebular.initialize();

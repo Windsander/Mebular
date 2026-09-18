@@ -820,7 +820,8 @@ stage.onSelect = (node) => {
   stage.redraw();
 };
 
-// 选中节点的绿色虚线荧光条：星体边缘 → 设备卡左边框（静态，无动效）
+// 选中节点的军事扫描仪准星 + 绿色虚线荧光条（星体 → 设备卡左边框）
+const reticleState = { id: null, lockAt: 0 };
 stage.onOverlay = (ctx) => {
   if (!state.selected || state.view !== 'map') return;
   const asideEl = document.querySelector('.aside');
@@ -828,9 +829,86 @@ stage.onOverlay = (ctx) => {
   if (!asideEl || !cardEl || !asideEl.classList.contains('is-open')) return;
   const node = stage.screen?.get(state.selected.deviceId);
   if (!node) return;
+  const time = performance.now() / 1000;
+  if (reticleState.id !== state.selected.deviceId) {
+    reticleState.id = state.selected.deviceId;
+    reticleState.lockAt = time;
+  }
+  const elapsed = time - reticleState.lockAt;
+  const r = node.r ?? 8;
+  // 锁定收缩：准星从远处收拢到星体（0.55s），到位后轻微呼吸
+  const lockT = Math.min(1, elapsed / 0.55);
+  const ease = 1 - Math.pow(1 - lockT, 3);
+  const focus = r * 2.6 * (1 + (1 - ease) * 1.1);
+  const alpha = (0.32 + 0.48 * ease) * (0.85 + 0.15 * Math.sin(time * 2.4));
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  // 中心磷光晕
+  const bloom = ctx.createRadialGradient(node.x, node.y, r * 0.4, node.x, node.y, focus * 1.7);
+  bloom.addColorStop(0, `rgba(80, 255, 170, ${(0.10 * ease).toFixed(3)})`);
+  bloom.addColorStop(1, 'rgba(80, 255, 170, 0)');
+  ctx.fillStyle = bloom;
+  ctx.beginPath();
+  ctx.arc(node.x, node.y, focus * 1.7, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.strokeStyle = `rgba(120, 255, 185, ${alpha.toFixed(3)})`;
+  ctx.shadowColor = 'rgba(70, 255, 160, 0.8)';
+  ctx.shadowBlur = 6;
+  ctx.lineWidth = 1;
+  const rot = time * 0.85;
+  const gap = Math.PI / 4.5;
+  // 外锁定环（旋转双弧）
+  ctx.beginPath();
+  ctx.arc(node.x, node.y, focus, rot, rot + Math.PI - gap);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(node.x, node.y, focus, rot + Math.PI, rot + 2 * Math.PI - gap);
+  ctx.stroke();
+  // 内虚环（反向旋转）
+  ctx.setLineDash([3, 5]);
+  ctx.lineDashOffset = time * 9;
+  ctx.globalAlpha = 0.7;
+  ctx.beginPath();
+  ctx.arc(node.x, node.y, r * 1.45, -time * 1.2, -time * 1.2 + Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+  // 雷达扫线
+  const ray = rot + Math.PI * 0.75;
+  ctx.globalAlpha = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(node.x + Math.cos(ray) * focus * 0.35, node.y + Math.sin(ray) * focus * 0.35);
+  ctx.lineTo(node.x + Math.cos(ray) * focus, node.y + Math.sin(ray) * focus);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  // 四角括线
+  const tick = Math.max(5, focus * 0.34);
+  ctx.lineWidth = 1.6;
+  for (const [sx, sy] of [[-1, -1], [1, -1], [-1, 1], [1, 1]]) {
+    const cx = node.x + sx * focus;
+    const cy = node.y + sy * focus;
+    ctx.beginPath();
+    ctx.moveTo(cx - sx * tick, cy);
+    ctx.lineTo(cx, cy);
+    ctx.lineTo(cx, cy - sy * tick);
+    ctx.stroke();
+  }
+  // 锁定脉冲环
+  if (elapsed < 0.85) {
+    const ping = elapsed / 0.85;
+    ctx.globalAlpha = 0.55 * (1 - ping);
+    ctx.beginPath();
+    ctx.arc(node.x, node.y, r + ping * r * 3.4, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  ctx.restore();
+
+  // 连线：自准星边缘 → 面板内容框左边框（静态；卡为最前层，止于边框）
   const canvasRect = stage.canvas.getBoundingClientRect();
   const cardRect = cardEl.getBoundingClientRect();
-  // 卡为最前层：线段终止于面板边框（面板遮挡住内侧延伸），锚点取左侧略高于中线处
   const borderX = cardRect.left - canvasRect.left;
   const anchorY = cardRect.top + cardRect.height * 0.42 - canvasRect.top;
   const dx = borderX - node.x;
@@ -838,15 +916,13 @@ stage.onOverlay = (ctx) => {
   const len = Math.hypot(dx, dy) || 1;
   const ux = dx / len;
   const uy = dy / len;
-  // 起点贴合星体视觉半径（含光晕余量），此前固定 16px 偏离导致「接不上」
-  const startR = (node.r ?? 8) + 4;
-  const sx = node.x + ux * startR;
-  const sy = node.y + uy * startR;
+  const sx = node.x + ux * (focus + 4);
+  const sy = node.y + uy * (focus + 4);
 
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
-  ctx.setLineDash([5, 5]);
-  ctx.lineWidth = 4;
+  ctx.setLineDash([4, 4]);
+  ctx.lineWidth = 3.5;
   ctx.strokeStyle = 'rgba(70, 255, 160, 0.10)';
   ctx.shadowColor = 'rgba(70, 255, 160, 0.65)';
   ctx.shadowBlur = 6;
@@ -860,14 +936,11 @@ stage.onOverlay = (ctx) => {
   ctx.stroke();
   ctx.restore();
 
-  // 星体侧端点与面板侧接线端子（静态）
+  // 面板侧接线端子（静态）
   ctx.save();
-  ctx.fillStyle = 'rgba(160, 255, 205, 0.85)';
-  ctx.shadowColor = 'rgba(80, 255, 170, 0.8)';
-  ctx.shadowBlur = 6;
-  ctx.beginPath();
-  ctx.arc(sx, sy, 1.8, 0, Math.PI * 2);
-  ctx.fill();
+  ctx.fillStyle = 'rgba(160, 255, 205, 0.9)';
+  ctx.shadowColor = 'rgba(80, 255, 170, 0.85)';
+  ctx.shadowBlur = 7;
   ctx.fillRect(borderX - 3, anchorY - 3, 6, 6);
   ctx.restore();
 };

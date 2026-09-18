@@ -372,9 +372,10 @@ select {
     position: absolute;
     right: 12px;
     top: 12px;
-    bottom: 12px;
+    bottom: auto;
     z-index: 6;
     width: 340px;
+    max-height: calc(100% - 24px);
     padding: 12px;
     background:
       radial-gradient(120% 55% at 18% 0%, rgba(26, 96, 64, 0.30), transparent 62%),
@@ -464,3 +465,29 @@ select {
 
   .panel-view { padding-left: calc(var(--rail-w) + 28px); padding-right: 28px; transition: padding-left 0.22s ease; }
 }
+
+/* ---------- 目标锁定标签（军事扫描仪观感） ---------- */
+.card-head { display: flex; align-items: center; gap: 8px; }
+.card-head h2 { margin: 0; }
+.lock-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: rgba(160, 255, 210, 0.85);
+  border: 1px solid rgba(80, 255, 170, 0.35);
+  border-radius: 3px;
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+.lock-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: #6dffb8;
+  box-shadow: 0 0 6px #6dffb8;
+  animation: lock-blink 1.6s steps(2, end) infinite;
+}
+@keyframes lock-blink { 50% { opacity: 0.2; } }

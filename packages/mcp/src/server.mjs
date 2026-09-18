@@ -58,26 +58,45 @@ export async function startStdioServer() {
  * 单实例：先取 <home>/lock；被占抛 MCP_STORAGE_LOCKED。
  */
 export async function startServeServer(options = {}) {
-  const { app, home, storagePath, config } = await createMebular();
+  const { app, home, storagePath, config, effective } = await createMebular();
   const lock = await acquireLock(home, storagePath);
   try {
     const service = new MemoryService(app);
+    // 参与配置：CLI 优先，其次 config.mcp.http（此前 serve 完全忽略 config，设置卡会失真）
+    const httpCfg = config?.mcp?.http ?? {};
+    const tlsKey = options.tlsKey ?? httpCfg.tlsKey;
+    const tlsCert = options.tlsCert ?? httpCfg.tlsCert;
+    const runtime = {
+      ...effective,
+      storagePath,
+      mcp: {
+        host: options.host ?? httpCfg.host ?? '127.0.0.1',
+        port: options.port ?? httpCfg.port ?? 7331,
+        auth: options.auth ?? httpCfg.auth ?? 'none',
+        tls: Boolean(tlsKey && tlsCert),
+      },
+    };
     const http = await startHttpServer({
       home,
       app,
       service,
       config,
       buildServer,
-      host: options.host,
-      port: options.port,
-      auth: options.auth,
-      tls: Boolean(options.tlsKey),
-      tlsKey: options.tlsKey,
-      tlsCert: options.tlsCert,
-      tokensFile: options.tokensFile,
+      host: runtime.mcp.host,
+      port: runtime.mcp.port,
+      auth: runtime.mcp.auth,
+      tls: runtime.mcp.tls,
+      tlsKey,
+      tlsCert,
+      tokensFile: options.tokensFile ?? httpCfg.tokensFile,
+      runtime,
       // D2：写端点开启（仍需 memory.admin scope + CSRF 双提交）
       writesEnabled: true,
     });
+    // 监听端口 0 / 默认值时以实际绑定为准
+    runtime.mcp.host = http.host;
+    runtime.mcp.port = http.port;
+    runtime.mcp.auth = http.auth;
     const shutdown = async () => {
       await http.close().catch(() => undefined);
       await lock.release();

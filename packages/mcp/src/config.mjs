@@ -75,6 +75,18 @@ export async function createMebular() {
   const storagePath = process.env.MEBULAR_STORAGE_PATH ?? config.storagePath ?? join(home, 'store.jsonl');
   const deviceId = process.env.MEBULAR_DEVICE_ID ?? config.deviceId ?? `device-${process.env.HOSTNAME ?? 'local'}`;
   const deviceName = process.env.MEBULAR_DEVICE_NAME ?? config.deviceName;
+  // 生效值快照（console 设置卡应展示这些，而不是静态 config，否则 CLI/env 覆盖后卡片会失真）
+  const effective = {
+    deviceName: deviceName ?? null,
+    storageAdapter: config.storageAdapter ?? 'json',
+    encryptionLevel: config.encryption?.level ?? 'none',
+    networkEnabled: truthy(process.env.MEBULAR_NETWORK_ENABLED, config.network?.enabled ?? false),
+    autoSync: config.sync?.autoSync ?? true,
+    pushOnWrite: truthy(process.env.MEBULAR_PUSH_ON_WRITE, config.sync?.pushOnWrite ?? true),
+    pushOnWriteThrottleMs: config.sync?.pushOnWriteThrottleMs ?? null,
+    semanticEnabled: truthy(process.env.MEBULAR_SEMANTIC_ENABLED, config.semantic?.enabled ?? false),
+    semanticMinScore: config.semantic?.minScore ?? 0.2,
+  };
   const masterKeys = await resolveMasterKeys(home, config);
 
   const app = new Mebular({
@@ -83,7 +95,7 @@ export async function createMebular() {
     ...(deviceName ? { deviceName } : {}),
     ...(config.storageAdapter ? { storageAdapter: config.storageAdapter } : {}),
     encryption: {
-      level: config.encryption?.level ?? 'none',
+      level: effective.encryptionLevel,
       userMasterKey: masterKeys.userMasterKey,
       userMasterPrivateKey: masterKeys.userMasterPrivateKey,
       ...(process.env[config.encryption?.passphraseEnv ?? 'MEBULAR_PASSPHRASE']
@@ -91,7 +103,7 @@ export async function createMebular() {
         : {}),
     },
     network: {
-      enabled: truthy(process.env.MEBULAR_NETWORK_ENABLED, config.network?.enabled ?? false),
+      enabled: effective.networkEnabled,
       ...(config.network?.libp2p
         ? {
             libp2p: {
@@ -108,7 +120,8 @@ export async function createMebular() {
       autoSync: config.sync?.autoSync ?? true,
       // 常驻入口（MCP serve）默认实时：写入即推（含反向 nudge）+ 周期 anti-entropy。
       // 库形态默认关闭（见 README「同步触发时机」）；可显式置 false 关闭。
-      pushOnWrite: truthy(process.env.MEBULAR_PUSH_ON_WRITE, config.sync?.pushOnWrite ?? true),
+      pushOnWrite: effective.pushOnWrite,
+      ...(effective.pushOnWriteThrottleMs !== null ? { pushOnWriteThrottleMs: effective.pushOnWriteThrottleMs } : {}),
       antiEntropy: config.sync?.antiEntropy ?? { enabled: true, intervalMs: 600000, jitterRatio: 0.2 },
       ...(config.sync?.snapshotThreshold !== undefined
         ? { snapshotThreshold: config.sync.snapshotThreshold }
@@ -123,14 +136,14 @@ export async function createMebular() {
       ...(Array.isArray(config.sync?.policyIssuers) ? { policyIssuers: config.sync.policyIssuers } : {}),
     },
     semantic: {
-      enabled: truthy(process.env.MEBULAR_SEMANTIC_ENABLED, config.semantic?.enabled ?? false),
+      enabled: effective.semanticEnabled,
       ...(config.semantic?.model ? { model: config.semantic.model } : {}),
       ...(config.semantic?.cacheDir ? { cacheDir: config.semantic.cacheDir } : {}),
       ...(config.semantic?.minScore !== undefined ? { minScore: config.semantic.minScore } : {}),
     },
   });
   await app.initialize();
-  return { app, home, config, storagePath, deviceId };
+  return { app, home, config, storagePath, deviceId, effective };
 }
 
 export { homedir };

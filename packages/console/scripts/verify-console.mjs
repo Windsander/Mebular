@@ -43,7 +43,8 @@ async function seedHome(home) {
     'utf-8',
   );
   const config = {
-    storagePath,
+    // 故意与 env MEBULAR_STORAGE_PATH 不同：设置卡必须展示 env 覆盖后的生效值
+    storagePath: join(home, 'config-should-not-win.jsonl'),
     storageAdapter: 'json',
     deviceId: 'device-console',
     encryption: { level: 'none', keyFile },
@@ -84,8 +85,9 @@ async function seedHome(home) {
   return storagePath;
 }
 
-function spawnServe({ home, storage, args = [], env = {}, deviceId = 'device-console' }) {
-  const proc = spawn(process.execPath, [bin, 'serve', '--port', '0', ...args], {
+function spawnServe({ home, storage, args = [], env = {}, deviceId = 'device-console', portFlag = '0' }) {
+  const serveArgs = ['serve', ...(portFlag === null ? [] : ['--port', String(portFlag)]), ...args];
+  const proc = spawn(process.execPath, [bin, ...serveArgs], {
     env: {
       ...process.env,
       MEBULAR_HOME: home,
@@ -228,7 +230,7 @@ const servers = [];
 
 try {
   const storage = await seedHome(home);
-  const handle = spawnServe({ home, storage });
+  const handle = spawnServe({ home, storage, env: { MEBULAR_PUSH_ON_WRITE: 'true' } });
   servers.push(handle);
   const ready = await waitReady(handle);
   const port = ready.port;
@@ -319,6 +321,10 @@ try {
 
   const settings = await getJson(port, '/admin/api/settings');
   check('GET /admin/api/settings 200', settings.status === 200);
+  check('settings.storage.path 反映 env 覆盖（非 config）', settings.json?.storage?.path === storage, `path=${settings.json?.storage?.path}`);
+  check('settings.sync.pushOnWrite 反映 env 覆盖（config=false）', settings.json?.sync?.pushOnWrite === true, `pushOnWrite=${settings.json?.sync?.pushOnWrite}`);
+  check('settings.mcp.port 反映实际监听端口（--port 0）', settings.json?.mcp?.port === port, `settings=${settings.json?.mcp?.port} actual=${port}`);
+  check('settings.mcp.host 反映实际监听地址', settings.json?.mcp?.host === '127.0.0.1', `host=${settings.json?.mcp?.host}`);
   check(
     'settings 形状（identity/storage/sync/network/mcp/semantic/签名集）',
     settings.json?.identity?.deviceId === 'device-console'
@@ -521,16 +527,25 @@ try {
       }),
       'utf-8',
     );
+    // 配置参与：不传 --port/--auth/--tokens-file，全部由 config.mcp.http 提供
+    await writeFile(
+      join(bearerHome, 'config.json'),
+      JSON.stringify({ mcp: { http: { host: '127.0.0.1', port: 0, auth: 'bearer', tokensFile } } }, null, 2),
+      'utf-8',
+    );
     const bearerHandle = spawnServe({
       home: bearerHome,
       storage: join(bearerHome, 's.jsonl'),
-      args: ['--auth', 'bearer', '--tokens-file', tokensFile],
       deviceId: 'device-bearer',
+      portFlag: null,
     });
     servers.push(bearerHandle);
     const bearerReady = await waitReady(bearerHandle);
     const bport = bearerReady.port;
     const base = `http://127.0.0.1:${bport}`;
+
+    const bearerSettings = await (await fetch(`${base}/admin/api/settings`, { headers: { authorization: `Bearer ${readToken}` } })).json();
+    check('serve 读取 config.mcp.http.port/auth（无 CLI 标志）', Number.isInteger(bport) && bport > 0 && bearerSettings?.mcp?.port === bport && bearerSettings?.mcp?.auth === 'bearer', `port=${bport} settings.port=${bearerSettings?.mcp?.port} auth=${bearerSettings?.mcp?.auth}`);
 
     const noToken = await fetch(`${base}/admin/api/overview`);
     check('bearer：无 token 读 → 401', noToken.status === 401, `status=${noToken.status}`);

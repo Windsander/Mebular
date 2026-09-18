@@ -503,7 +503,7 @@ export async function buildNamespaces({ app, service, config }) {
 }
 
 /** GET /admin/api/settings（只读、脱敏；不含任何密钥/token） */
-export async function buildSettings({ app, service, config }) {
+export async function buildSettings({ app, service, config, runtime }) {
   const status = await service.status();
   let policyIssuers = [];
   let revokedCount = 0;
@@ -518,16 +518,17 @@ export async function buildSettings({ app, service, config }) {
   return {
     identity: {
       deviceId: app.deviceId,
+      name: runtime?.deviceName ?? config?.deviceName ?? null,
       peerId: status.peerId,
       multiaddrs: status.listenAddrs,
       relays: status.relays,
     },
     storage: {
-      path: config?.storagePath ?? null,
-      adapter: config?.storageAdapter ?? 'json',
+      path: runtime?.storagePath ?? config?.storagePath ?? null,
+      adapter: runtime?.storageAdapter ?? config?.storageAdapter ?? 'json',
     },
     encryption: {
-      level: config?.encryption?.level ?? 'none',
+      level: runtime?.encryptionLevel ?? config?.encryption?.level ?? 'none',
       atRest: app.atRestEncryption,
     },
     network: {
@@ -537,9 +538,9 @@ export async function buildSettings({ app, service, config }) {
       relayUnlimited: config?.network?.libp2p?.relayUnlimited === true,
     },
     sync: {
-      autoSync: sync.autoSync ?? true,
-      pushOnWrite: sync.pushOnWrite ?? true, // serve/MCP 常驻默认开；环境变量可覆盖
-      pushOnWriteThrottleMs: sync.pushOnWriteThrottleMs ?? 50,
+      autoSync: runtime?.autoSync ?? sync.autoSync ?? true,
+      pushOnWrite: runtime?.pushOnWrite ?? sync.pushOnWrite ?? true, // serve/MCP 常驻默认开；环境变量可覆盖
+      pushOnWriteThrottleMs: runtime?.pushOnWriteThrottleMs ?? sync.pushOnWriteThrottleMs ?? 50,
       antiEntropy,
       snapshotThreshold: sync.snapshotThreshold ?? null,
       subscriptions: Array.isArray(sync.namespaces) ? sync.namespaces : [],
@@ -550,13 +551,13 @@ export async function buildSettings({ app, service, config }) {
     revokedCount,
     semantic: {
       enabled: app.semanticVectorIndex !== null,
-      minScore: config?.semantic?.minScore ?? 0.2,
+      minScore: runtime?.semanticMinScore ?? config?.semantic?.minScore ?? 0.2,
     },
     mcp: {
-      host: config?.mcp?.http?.host ?? '127.0.0.1',
-      port: config?.mcp?.http?.port ?? 7331,
-      auth: config?.mcp?.http?.auth ?? 'none',
-      tls: config?.mcp?.http?.tls === true,
+      host: runtime?.mcp?.host ?? config?.mcp?.http?.host ?? '127.0.0.1',
+      port: runtime?.mcp?.port ?? config?.mcp?.http?.port ?? 7331,
+      auth: runtime?.mcp?.auth ?? config?.mcp?.http?.auth ?? 'none',
+      tls: runtime?.mcp?.tls ?? config?.mcp?.http?.tls === true,
     },
   };
 }

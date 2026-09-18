@@ -26,4 +26,5 @@ writeFileSync(
   JSON.stringify({ name: fleetPkg.name, version: fleetPkg.version, sha: gitSha(), builtAt: new Date().toISOString() }, null, 2),
   'utf-8',
 );
-console.log(`wrote ${out} (sha ${gitSha()})`);
+// 必须走 stderr：build 会作为 `prepare` 在 `npm pack --json` 时执行，stdout 必须是纯 JSON。
+process.stderr.write(`wrote ${out} (sha ${gitSha()})\n`);

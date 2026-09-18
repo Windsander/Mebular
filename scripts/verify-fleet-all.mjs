@@ -12,6 +12,7 @@ const SUITES = [
   { name: 'remote', script: fileURLToPath(new URL('./verify-fleet-remote.mjs', import.meta.url)) },
   { name: 'agents', script: fileURLToPath(new URL('./verify-fleet-agents.mjs', import.meta.url)) },
   { name: 'onboard', script: fileURLToPath(new URL('./verify-fleet-onboard.mjs', import.meta.url)) },
+  { name: 'grant', script: fileURLToPath(new URL('./verify-fleet-grant.mjs', import.meta.url)) },
 ];
 
 function run(script) {

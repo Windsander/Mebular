@@ -1,7 +1,7 @@
 // Fleet 节点（M2）：任务板 + 发起端。写入任务（created 事件）→ 投递 → 收集结果事件 → 观察收敛。
 
 import { randomUUID } from 'node:crypto';
-import type { FleetEndpoint } from '../protocol/envelope.js';
+import type { FleetEndpoint, FleetTrace } from '../protocol/envelope.js';
 import type { TaskEvent } from '../protocol/events.js';
 import { reduceTaskEvents, type TaskState } from '../model.js';
 import type { LocalQuota, QuotaDecision } from '../quota.js';
@@ -22,6 +22,8 @@ export interface SubmitRequest {
   to: FleetEndpoint;
   payloadRef?: string;
   expiresAt?: number;
+  /** 因果链（默认空；用于 DAG 派生：`causedBy` 指向父任务） */
+  trace?: FleetTrace;
   /** 重复投递该 created 事件（同 eventId、不同 msgId）以验证幂等（默认 1） */
   deliveries?: number;
 }
@@ -65,7 +67,7 @@ export class FleetNode {
       actor: this.endpoint,
       at: Date.now(),
       toStatus: 'queued',
-      trace: { chain: [] },
+      trace: request.trace ?? { chain: [] },
       to: request.to,
       intent: request.intent,
     };

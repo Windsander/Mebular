@@ -47,7 +47,8 @@
 > 强制闸门。**旧节点**忽略 `namespace_membership`：对旧端而言该分区始终「未启用成员资格」→ 行为
 > 不变或**少收**（安全方向，不 fail-open）；**退订的数据清理/继任者 ack 门禁属 2b，本轮不做**。
 
-- **策略事件类型与命名空间**：保留命名空间 `__policy__`；事件类型 `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare` / `namespace_membership`。
+- **策略事件类型与命名空间**：保留命名空间 `__policy__`；事件类型 `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare` / `namespace_membership` / `namespace_handoff`。
+- **2b 退订交接（`namespace_handoff`）**：退订 = 成员资格退出（`namespace_membership(active:false)`）+ **本地彻底清理**该分区事件/节点/边与本地水位。**绝不产生 tombstone**（无任何“已删除”事件）。**清理前必须**继任者全量 ack（复用 per-event ack `getPendingEvents`，含退订方作者计数；**不新增同步协议、不放宽快照门禁**）；门禁不过 → **保持原状**。**`__policy__` 永不清理**（策略/成员/交接记录保留 → 清理不改变策略推导，legacy-empty 不退化）。`force` **仅本地 CLI**（不经 MCP/远程），仍**如实**记录 `forced:true` 与缺失明细。意图记录落在**图外**（`<storagePath>.handoff.json`）以保证崩溃后可**幂等续跑**。**重入/重订阅恢复未支持（2c）**。
 - **M1–M3 成员资格（`namespace_membership`）**：`{ member, namespace, active, issuedAt, note? }`；只采纳链到主密钥且签发者/成员未被 `device_revoke` 吊销的记录（**无条件采纳，不做 R-a**）；`(namespace, member)` 取 **R-c 最新**记录的 `active`（在册/注销）。**生效成员 = active 成员 ∩ 该设备对该分区的生效授权**；成员记录**不得**放宽授权（默认拒绝不变）。**裁剪链**：对端授权 ∩ 对端成员资格 ∩ 本机订阅声明；hello 订阅声明仅作活跃性/一致性校验，不一致 **显式拒绝/告警**（`sync-completed.membershipRejected`）。**legacy-empty**：分区无成员记录时按 hello 订阅裁剪（兼容）。
 - **规则 R-a/R-b/R-c/R-d**：
   - **R-a 不可越权授予**：签发者须属于**生效引导集合**（图上被采纳的 `policy_issuer_declare` 主体 ∪ 本地配置 `sync.policyIssuers`），或**当时**已获授权其声明的**全部**分区。
@@ -69,7 +70,7 @@
 
 ## 4. 推迟项（本轮封板明确不做）
 
-- **退订交接（成员退出时的数据清理 + 继任者全量 ack 门禁）**、**重订阅恢复**——见 2b/2c；2a 已定义成员的「在册/注销」两态与查询接口（`namespace_membership`）。
+- **重订阅恢复**（清理后的重入语义）——属 2c；2a 已定义成员「在册/注销」两态与查询接口，**2b 已实现退订交接**（成员退出 + 继任者全量 ack 门禁 + 本地彻底清理 + `namespace_handoff` 审计）。
 - **F/G 剩余**：策略导出的其余边界族与治理项。
 - **会话多路复用**。
 - **quorum / 阈值签名**（多签发者已有，但无门限）。

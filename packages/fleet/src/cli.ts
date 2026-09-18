@@ -34,6 +34,7 @@ import {
   namespaceMembership,
   leaveNamespace,
   planHandoff,
+  rejoinNamespace,
   onboardDevice,
   revokeNamespaceGrant,
   setNamespaceMembership,
@@ -370,6 +371,13 @@ async function runLeave(args: Args): Promise<number> {
   return result.ok ? 0 : 1;
 }
 
+async function runRejoin(args: Args): Promise<number> {
+  const dir = str(args.dir, './.fleet');
+  const result = await rejoinNamespace(dir, typeof args.namespace === 'string' ? { namespace: args.namespace } : {});
+  console.log(JSON.stringify({ role: 'rejoin', ...result }, null, 2));
+  return result.ok ? 0 : 1;
+}
+
 async function runDoctor(args: Args): Promise<number> {
   const report = await doctor(str(args.dir, './.fleet'));
   if (args.json === true) console.log(JSON.stringify(report, null, 2));
@@ -529,8 +537,9 @@ async function main(): Promise<void> {
   else if (command === 'member') code = await runMember(args);
   else if (command === 'members') code = await runMembers(args);
   else if (command === 'leave') code = await runLeave(args);
+  else if (command === 'rejoin') code = await runRejoin(args);
   else {
-    console.error('用法：fleet onboard|doctor|grant|revoke|declare-issuer|member|members|leave|node|worker|service|spool … | fleet --version');
+    console.error('用法：fleet onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|node|worker|service|spool … | fleet --version');
     code = 2;
   }
   } catch (error) {

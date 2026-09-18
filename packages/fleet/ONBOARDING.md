@@ -329,3 +329,22 @@ fleet leave --dir ~/.fleet --namespace tasks --successor device-B --force
 - **`__policy__` 永不清理**：策略/成员/交接记录保留 → 清理**不改变**策略推导（oracle-free）；legacy-empty 不退化（**清理后成员闸门仍在**，非成员仍收不到）。
 - **可观测**：`fleet leave --dry-run` 给验证明细；`doctor` 增 `交接状态`（有未完成意图 → FAIL，提示续跑）。
 - **重入/重订阅恢复未支持（2c）**：清理后本机不再持有该分区；如需重新加入，需 2c 的恢复语义。
+
+## 13. 重订阅恢复（2c）：显式降水位
+
+退订清理后重新加入：`fleet rejoin` 重新声明成员在册，并**显式降水位**（对端从 0 重新发送历史）。**不新增同步协议、不放宽快照门禁、无 tombstone。**
+
+```bash
+# 重入（准入：①本机对该分区有生效授权 ②成员在册；任一不满足 → 显式失败）
+fleet rejoin --dir ~/.fleet --namespace tasks
+# 成功 → {"ok":true,"reset":true,"member":true,"authorized":true}
+# 未授权 → {"ok":false,"reason":"not-authorized"}
+
+# doctor 显示重入/重置状态
+fleet doctor --dir ~/.fleet   # PASS 重入状态  reset=true（已声明重置；下次同步将从零拉取）
+```
+
+- **准入（R1）**：`getEffectiveNamespaces(self)` 含该分区（存在签发给本机的 grant；默认拒绝不变）**且**成员在册；否则显式失败（`not-authorized` / `membership-not-active`），不静默。
+- **显式降水位（R2）**：重入写**图外**标记 `<storagePath>.rejoin.<ns>.json`（R3，**不同步/无 tombstone**）并清本机该分区本地水位；本机 hello 以**空时钟**上报该分区 → 对端按「自报水位**只允许向下修正**」从 0 重发（或按既有“空水位”门禁发初始快照；**门禁不放宽**）。**只允许向下、绝不向上**（不会把“对端没有”误判为“已有”）。
+- **确定/幂等（R4）**：重复 `rejoin` 安全；rejoin/reset **不改变** `__policy__` 推导（oracle-free）。
+- 前置：重入方需已被授权（例如对端 `fleet grant --to <rejoin设备>`），否则拉不到（显式失败）。

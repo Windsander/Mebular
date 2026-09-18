@@ -218,5 +218,7 @@ try {
 
 const failed = results.filter((r) => !r.ok);
 console.log('== 摘要 ==');
-console.log(JSON.stringify({ total: results.length, passed: results.length - failed.length, failed: failed.map((f) => f.name) }, null, 2));
+const summary = { total: results.length, passed: results.length - failed.length, failed: failed.map((f) => f.name), skipped: [] };
+console.log(JSON.stringify(summary, null, 2));
+console.log(`FLEET_SUMMARY ${JSON.stringify(summary)}`);
 process.exit(failed.length === 0 ? 0 : 1);

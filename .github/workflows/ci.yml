@@ -41,14 +41,8 @@ jobs:
       - name: Lint
         run: npm run lint
 
-      - name: Fleet local two-process (M2)
-        run: npm run verify:fleet:local
-
-      - name: Fleet real transport (M3, loopback libp2p)
-        run: npm run verify:fleet:remote
-
-      - name: Fleet agent routing (M4, fake agents)
-        run: npm run verify:fleet:agents
+      - name: Fleet acceptance (M2 local / M3 remote / M4 agents / Step 1b onboard)
+        run: npm run verify:fleet:all
 
       - name: stdio MCP (real client)
         run: npm run verify:mcp:stdio

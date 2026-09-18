@@ -92,4 +92,7 @@ harness：`tests/fleet/collab-invariants.test.ts`（固定种子，`scenarios=20
 - 改动 `packages/fleet/src/**` 或 `packages/fleet/protocol/**`：先更新本矩阵对应格 + 加/改测试；
   并跑 harness（上）与 `tests/fleet/*` 全绿。
 - **红→绿证据**：每条修复/新增性质须给出「临时破坏该性质 → 对应测试变红 → 还原 → 变绿」的原始输出。
+- **红→绿必须重建 dist（A2）**：`verify:*` 类脚本跑的是 **`packages/fleet/dist` 产物**，所以对
+  `packages/fleet/src/**`（或 core `src/**`）打补丁后，**必须先 `npm run build` 再跑**，否则红是假的
+  （脚本仍在用旧 dist）。jest 直编 TS（`tests/**`）不受此影响，可直接跑。
 - **不得**触碰 core 语义或 `SEALING.md` 协议语义；触及 → 停下报告。

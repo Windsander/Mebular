@@ -17,9 +17,6 @@ import { fileURLToPath } from 'node:url';
 const CLI = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
 const FIXTURE = fileURLToPath(new URL('../tests/fleet/fixtures/fake-agent.mjs', import.meta.url));
 chmodSync(FIXTURE, 0o755); // 让 fake agent 可作为 command agent 直接执行（Windows 见文档 caveat）
-if (process.platform === 'win32') {
-  skip('fake-agent 可执行位', 'Windows 无 shebang 可执行位；改用 command=node + baseArgs（见 ONBOARDING.md）');
-}
 
 const results = [];
 const skipped = [];
@@ -30,6 +27,9 @@ function check(name, cond, detail) {
 function skip(name, reason) {
   skipped.push({ name, reason });
   console.log(`SKIP  ${name}  ${reason}`);
+}
+if (process.platform === 'win32') {
+  skip('fake-agent 可执行位', 'Windows 无 shebang 可执行位；改用 command=node + baseArgs（见 ONBOARDING.md）');
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -109,7 +109,11 @@ try {
 
   const doctorB = await runCli(['doctor', '--dir', B, '--json']);
   const report = lastJson(doctorB.out);
-  check('doctor(B) 全绿且无 skipped', doctorB.code === 0 && report?.ok === true, { ok: report?.ok, skipped: report?.skipped });
+  check('doctor(B) 全绿且无 skipped', doctorB.code === 0 && report?.ok === true, {
+    ok: report?.ok,
+    skipped: report?.skipped,
+    failed: (report?.checks ?? []).filter((c) => c.status === 'FAIL').map((c) => `${c.name}:${c.detail}`),
+  });
   check('doctor(B) skipped 为空', Array.isArray(report?.skipped) && report.skipped.length === 0, { skipped: report?.skipped });
   check('A 全部完成且结果前缀匹配', aDone && /"done":\s*3/.test(serveA.state.out) && /"resultsMatch":\s*true/.test(serveA.state.out), {});
 

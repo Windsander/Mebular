@@ -6,7 +6,7 @@
 import { access, chmod, mkdir } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import net from 'node:net';
-import { Mebular } from '@mebular/core';
+import { Mebular, POLICY_NAMESPACE } from '@mebular/core';
 
 import {
   fileMode,
@@ -67,12 +67,14 @@ export function buildRegistry(agents: readonly FleetAgentConfig[]): ExecutorRegi
   return registry;
 }
 
-/** 由配置 + 加密材料构造 core `Mebular` 选项（默认拒绝：仅授权 peers）。 */
+/**
+ * 由配置 + 加密材料构造 core `Mebular` 选项（默认拒绝：仅授权 peers）。
+ *
+ * `peerNamespacePolicy`：显式给出（含 `{}`）→ **以它为准**（G1：可只留图上 grant）；
+ * 缺省 → 由 `peers` 推导（每个对端 `[namespace]`，Step 1b bootstrap 行为）。
+ */
 export function mebularOptions(config: FleetConfig, encryption: FleetEncryption): Record<string, unknown> {
-  const peerNamespacePolicy: Record<string, string[]> = {};
-  for (const peer of config.peers) {
-    peerNamespacePolicy[peer.device] = [config.namespace];
-  }
+  const peerNamespacePolicy = derivedPeerNamespacePolicy(config);
   return {
     storagePath: config.storagePath,
     deviceId: config.device,
@@ -87,6 +89,26 @@ export function mebularOptions(config: FleetConfig, encryption: FleetEncryption)
       policyIssuers: config.policyIssuers,
       antiEntropy: { enabled: true, intervalMs: 600_000, jitterRatio: 0.2 },
     },
+  };
+}
+
+/**
+ * bootstrap 配置白名单：显式 `peerNamespacePolicy`（含 `{}`）优先；缺省由 `peers` 推导。
+ * 联网与离线路径**必须同源**，否则 doctor 与 serve/work 的生效授权会漂移。
+ */
+function derivedPeerNamespacePolicy(config: FleetConfig): Record<string, string[]> {
+  return config.peerNamespacePolicy ?? Object.fromEntries(config.peers.map((peer) => [peer.device, [config.namespace]]));
+}
+
+/** 离线（不启网络）`Mebular` 选项：onboard/doctor/grant/revoke 用，只读写本地存储。 */
+export function offlineMebularOptions(config: FleetConfig, encryption: FleetEncryption): Record<string, unknown> {
+  return {
+    storagePath: config.storagePath,
+    deviceId: config.device,
+    encryption,
+    network: { enabled: false },
+    // 策略（bootstrap 白名单 + R-a 签发者）与联网路径同源，否则离线 doctor 判定会漂移。
+    sync: { policyIssuers: config.policyIssuers, peerNamespacePolicy: derivedPeerNamespacePolicy(config) },
   };
 }
 
@@ -119,6 +141,7 @@ export async function onboardDevice(input: OnboardInput): Promise<OnboardResult>
     namespace: input.namespace ?? 'tasks',
     listen: input.listen ?? '/ip4/0.0.0.0/tcp/0',
     peers: input.peerDevice !== undefined ? [{ device: input.peerDevice, ...(input.peerAddr !== undefined ? { addr: input.peerAddr } : {}) }] : [],
+    ...(input.configGrant === false ? { peerNamespacePolicy: {} } : {}),
     policyIssuers: input.policyIssuers ?? [],
     agents: input.agents ?? [{ name: 'echo', kind: 'echo' }],
     ...(input.quotaLimitPerDevice !== undefined ? { quotaLimitPerDevice: input.quotaLimitPerDevice } : {}),
@@ -140,6 +163,58 @@ export async function onboardDevice(input: OnboardInput): Promise<OnboardResult>
   await mebular.shutdown();
 
   return { config, alreadyOnboarded, masterKeyCreated, masterKeyFingerprint: masterKeyFingerprint(encryption.userMasterKey) };
+}
+
+/**
+ * G1：本机签发 namespace grant（落保留命名空间 `__policy__`）。只有链到用户主密钥的
+ * 设备签发的记录才被采纳；**不可自授**（core 的 R-a 保证），且 `grantNamespaces` 不接受
+ * 指定 grantId（R-d 的恢复必须产生新 id）。只消费 core 公共 API。
+ */
+export async function grantNamespace(
+  dir: string,
+  input: { to: string; namespaces?: string[]; expiresAt?: number; note?: string },
+): Promise<{ grantId: string; eventId: string; subject: string; namespaces: string[] }> {
+  if (typeof input.to !== 'string' || input.to.length === 0) throw new Error('grant 需要 --to <peerDevice>');
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const namespaces = input.namespaces ?? [config.namespace];
+  if (namespaces.length === 0) throw new Error('grant 需要至少一个 namespace');
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    const event = await mebular.grantNamespaces({
+      subject: input.to,
+      namespaces,
+      ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    });
+    const grant = (event.data as { grant: { grantId: string } }).grant;
+    return { grantId: grant.grantId, eventId: event.id, subject: input.to, namespaces };
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/** G1：按 grantId 撤销授权（R-d：恢复必须用**新** grantId）。 */
+export async function revokeNamespaceGrant(
+  dir: string,
+  input: { grantId: string; subject?: string; note?: string },
+): Promise<{ grantId: string; eventId: string }> {
+  if (typeof input.grantId !== 'string' || input.grantId.length === 0) throw new Error('revoke 需要 --grant-id <id>');
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    const event = await mebular.revokeGrant({
+      grantId: input.grantId,
+      ...(input.subject !== undefined ? { subject: input.subject } : {}),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    });
+    return { grantId: input.grantId, eventId: event.id };
+  } finally {
+    await mebular.shutdown();
+  }
 }
 
 export type DoctorStatus = 'PASS' | 'FAIL' | 'SKIP';
@@ -173,6 +248,35 @@ function tcpReachable(host: string, port: number, timeoutMs = 1500): Promise<boo
     socket.once('timeout', () => done(false));
     socket.once('error', () => done(false));
   });
+}
+
+/** 医生用的最小策略事件形状（只读 `__policy__`；不重造授权语义）。 */
+interface PolicyEventLike {
+  type: string;
+  data?: {
+    grant?: { grantId?: string; subject?: string; namespaces?: string[] };
+    revoke?: { grantId?: string };
+  };
+}
+
+/**
+ * 是否「曾有 grant、现被 namespace_revoke 撤销」——仅用于给出 R-d 修复 hint。
+ * 生效与否一律以 `getEffectiveNamespaces`（core）为准，此处不参与判定。
+ */
+function wasNamespaceGrantRevoked(events: readonly PolicyEventLike[], subject: string, namespace: string): boolean {
+  const grants = events
+    .filter((e) => e.type === 'namespace_grant')
+    .map((e) => e.data?.grant)
+    .filter(
+      (g): g is { grantId: string; subject: string; namespaces: string[] } =>
+        typeof g?.grantId === 'string' &&
+        g.subject === subject &&
+        Array.isArray(g.namespaces) &&
+        g.namespaces.includes(namespace),
+    );
+  if (grants.length === 0) return false;
+  const revoked = new Set(events.filter((e) => e.type === 'namespace_revoke').map((e) => e.data?.revoke?.grantId));
+  return grants.every((g) => revoked.has(g.grantId));
 }
 
 /** 逐项自检；默认脱敏（不含任何密钥材料）。 */
@@ -235,13 +339,47 @@ export async function doctor(dir: string): Promise<DoctorReport> {
     }
   }
 
-  // 5) namespace 已授权
-  add(
-    'namespace 已授权',
-    config.peers.length > 0 && config.namespace.length > 0 ? 'PASS' : 'FAIL',
-    `namespace=${config.namespace} peers=${config.peers.length}`,
-    '至少授权一个对端（--peer-device）',
-  );
+  // 5) namespace 已授权：生效授权 = **图上 grant ∪ 配置白名单**（吊销优先，默认拒绝）。
+  const peerDevices = config.peers.map((p) => p.device);
+  if (peerDevices.length === 0) {
+    add('namespace 已授权', 'FAIL', '未配置任何对端（默认拒绝）', 'fleet onboard … --peer-device <id>');
+  } else if (encryption === null) {
+    const cfgPolicy =
+      config.peerNamespacePolicy ?? Object.fromEntries(peerDevices.map((d) => [d, [config.namespace]]));
+    const ok = peerDevices.every((d) => (cfgPolicy[d] ?? []).includes(config.namespace));
+    add('namespace 已授权', ok ? 'PASS' : 'FAIL', `仅配置（主密钥不可用）namespace=${config.namespace}`, ok ? undefined : '导入主密钥后重试（--master-key）');
+  } else {
+    try {
+      const m = new Mebular(offlineMebularOptions(config, encryption) as never);
+      await m.initialize();
+      const policyEvents = (await m.eventLog.listEvents({ namespace: POLICY_NAMESPACE })) as unknown as PolicyEventLike[];
+      const parts: string[] = [];
+      let allOk = true;
+      let revokedHint = false;
+      for (const device of peerDevices) {
+        const effective = await m.getEffectiveNamespaces(device);
+        const ok = effective.includes(config.namespace);
+        parts.push(`${device}:${ok ? 'ok' : 'deny'}`);
+        if (!ok) {
+          allOk = false;
+          if (wasNamespaceGrantRevoked(policyEvents, device, config.namespace)) revokedHint = true;
+        }
+      }
+      await m.shutdown();
+      add(
+        'namespace 已授权',
+        allOk ? 'PASS' : 'FAIL',
+        `namespace=${config.namespace} peers=[${parts.join(', ')}]`,
+        allOk
+          ? undefined
+          : revokedHint
+            ? '曾被 namespace_revoke 撤销；必须用新的 grantId 恢复（R-d）'
+            : '为对端签发 grant（fleet grant --to <peer>）或配置白名单',
+      );
+    } catch (error) {
+      add('namespace 已授权', 'FAIL', `读取本地授权失败：${(error as Error).message}`, '确认存储/主密钥可用');
+    }
+  }
 
   // 6) agent 注册表可解析
   const agentErrors = validateFleetConfig({ ...config, agents: config.agents }).filter((e) => e.startsWith('agent'));

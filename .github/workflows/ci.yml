@@ -65,6 +65,41 @@ jobs:
       - name: MCP cross-node local fixture (default-deny authorization)
         run: npm run verify:mcp:cross:selftest
 
+  windows:
+    name: windows build / test / lint (fleet local + onboard)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      # Windows 上只跑 local + onboard：两者覆盖 spool 传输与真实 libp2p serve/work/doctor 全路径。
+      # 跳过 remote / agents / grant 的显式原因：它们的 loopback 时延 p50/p95 断言与多次进程起停
+      # 在共享 runner 上易抖动，且不新增平台覆盖面；这些套件由 ubuntu job 的 verify:fleet:all 覆盖。
+      - name: Fleet local two-process (M2, spool)
+        run: npm run verify:fleet:local
+
+      - name: Fleet onboard (Step 1b, libp2p + doctor; Windows 权限项 SKIP)
+        run: npm run verify:fleet:onboard
+
   semantic-real:
     name: semantic recall (real model)
     runs-on: ubuntu-latest

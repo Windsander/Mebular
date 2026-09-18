@@ -16,7 +16,7 @@ import { NullTransport } from './transport/null.js';
 import { SpoolTransport } from './transport/spool.js';
 import { LocalQuota } from './quota.js';
 import { fleetConfigPath, loadFleetConfig, readMasterKeyFile, type FleetAgentConfig } from './config.js';
-import { buildRegistry, doctor, mebularOptions, onboardDevice } from './onboard.js';
+import { buildRegistry, doctor, grantNamespace, mebularOptions, onboardDevice, revokeNamespaceGrant } from './onboard.js';
 
 interface Args {
   [key: string]: string | boolean | undefined;
@@ -182,6 +182,7 @@ async function runOnboard(args: Args): Promise<number> {
     ...(typeof args.listen === 'string' ? { listen: args.listen } : {}),
     ...(typeof args['policy-issuer'] === 'string' ? { policyIssuers: args['policy-issuer'].split(',') } : {}),
     ...(parseAgents(args.agent, args['agent-command']) !== undefined ? { agents: parseAgents(args.agent, args['agent-command'])! } : {}),
+    ...(args['no-config-grant'] === true ? { configGrant: false } : {}),
   });
   console.log(JSON.stringify({
     ok: true,
@@ -193,6 +194,33 @@ async function runOnboard(args: Args): Promise<number> {
     masterKeyFingerprint: result.masterKeyFingerprint,
     next: [`fleet serve --dir ${result.config.dir}`, `fleet work --dir ${result.config.dir}`, `fleet doctor --dir ${result.config.dir}`],
   }, null, 2));
+  return 0;
+}
+
+async function runGrant(args: Args): Promise<number> {
+  const dir = str(args.dir, './.fleet');
+  const namespaces = str(args.namespace, '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const result = await grantNamespace(dir, {
+    to: str(args.to, ''),
+    ...(namespaces.length > 0 ? { namespaces } : {}),
+    ...(typeof args['expires-at'] === 'string' ? { expiresAt: num(args['expires-at'], 0) } : {}),
+    ...(typeof args.note === 'string' ? { note: args.note } : {}),
+  });
+  console.log(JSON.stringify({ ok: true, role: 'grant', ...result }, null, 2));
+  return 0;
+}
+
+async function runRevoke(args: Args): Promise<number> {
+  const dir = str(args.dir, './.fleet');
+  const result = await revokeNamespaceGrant(dir, {
+    grantId: str(args['grant-id'], ''),
+    ...(typeof args.subject === 'string' ? { subject: args.subject } : {}),
+    ...(typeof args.note === 'string' ? { note: args.note } : {}),
+  });
+  console.log(JSON.stringify({ ok: true, role: 'revoke', ...result }, null, 2));
   return 0;
 }
 
@@ -308,10 +336,12 @@ async function main(): Promise<void> {
   else if (command === 'worker') code = await runWorker(args);
   else if (command === 'onboard') code = await runOnboard(args);
   else if (command === 'doctor') code = await runDoctor(args);
+  else if (command === 'grant') code = await runGrant(args);
+  else if (command === 'revoke') code = await runRevoke(args);
   else if (command === 'serve') code = await runServe(args);
   else if (command === 'work') code = await runWork(args);
   else {
-    console.error('用法：fleet onboard|doctor|serve|work|node|worker … | fleet --version');
+    console.error('用法：fleet onboard|doctor|grant|revoke|serve|work|node|worker … | fleet --version');
     code = 2;
   }
   } catch (error) {

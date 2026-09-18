@@ -91,6 +91,12 @@ export interface FleetConfig {
   listen: string;
   /** 已授权对端（默认拒绝：未列出 = 不发送任何分区） */
   peers: FleetPeerConfig[];
+  /**
+   * bootstrap 用配置白名单（可审计的图上 grant 是正路）。**缺省** = 由 `peers` 推导
+   * （每个对端 → `[namespace]`，Step 1b 行为）；显式给出（含 `{}`）则**以它为准**，
+   * 从而支持「对端已登记地址但只有图上 grant、无配置白名单」的 G1 形态。
+   */
+  peerNamespacePolicy?: Record<string, string[]>;
   /** 引导签发者白名单（R-a） */
   policyIssuers: string[];
   /** 本机 agent 注册表（按 to.agent 名路由） */
@@ -112,6 +118,18 @@ export function validateFleetConfig(input: unknown): string[] {
     if (typeof c[key] !== 'string' || (c[key] as string).length === 0) errors.push(`${key} 必须为非空字符串`);
   }
   if (!Array.isArray(c.peers)) errors.push('peers 必须为数组');
+  if (c.peerNamespacePolicy !== undefined) {
+    const policy = c.peerNamespacePolicy;
+    if (typeof policy !== 'object' || policy === null || Array.isArray(policy)) {
+      errors.push('peerNamespacePolicy 必须为对象');
+    } else {
+      for (const [device, namespaces] of Object.entries(policy as Record<string, unknown>)) {
+        if (!Array.isArray(namespaces) || namespaces.some((ns) => typeof ns !== 'string')) {
+          errors.push(`peerNamespacePolicy.${device} 必须为字符串数组`);
+        }
+      }
+    }
+  }
   if (!Array.isArray(c.policyIssuers)) errors.push('policyIssuers 必须为数组');
   if (!Array.isArray(c.agents) || (c.agents as unknown[]).length === 0) errors.push('agents 必须为非空数组');
   for (const agent of (Array.isArray(c.agents) ? c.agents : []) as Array<Record<string, unknown>>) {
@@ -153,6 +171,12 @@ export interface OnboardInput {
   policyIssuers?: string[];
   agents?: FleetAgentConfig[];
   quotaLimitPerDevice?: number;
+  /**
+   * 是否写 bootstrap 配置白名单（缺省 true = Step 1b 行为）。
+   * `false` → `peerNamespacePolicy = {}`：对端仍登记（地址可用于拨号），但**不**给配置授权，
+   * 授权完全走图上 grant（G1 的「图上授权为主」形态）。
+   */
+  configGrant?: boolean;
 }
 
 export interface OnboardResult {

@@ -5,6 +5,24 @@
 
 import type { FleetEndpoint } from '../protocol/envelope.js';
 import { isFleetEndpoint } from '../protocol/envelope.js';
+import type { Mebular } from '@mebular/core';
+import { MebularMessageStore } from '../store/message-store.js';
+
+/** 协商消息的节点类型（与任务事件同分区、不同类型，随既有授权同步）。 */
+export const NEGOTIATION_MESSAGE_TYPE = 'negotiation_message';
+
+/** 构造协商消息存储（校验 + messageId 幂等）。 */
+export function negotiationMessageStore(
+  mebular: Mebular,
+  namespace = 'tasks',
+): MebularMessageStore<NegotiationMessage> {
+  return new MebularMessageStore<NegotiationMessage>(mebular, {
+    type: NEGOTIATION_MESSAGE_TYPE,
+    namespace,
+    validate: validateNegotiationMessage,
+    idOf: (m) => m.messageId,
+  });
+}
 
 /** 协商消息类型。 */
 export const NEGOTIATION_KINDS = ['clarify', 'counter', 'accept', 'reject'] as const;

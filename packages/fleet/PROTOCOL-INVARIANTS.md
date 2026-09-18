@@ -96,3 +96,21 @@ harness：`tests/fleet/collab-invariants.test.ts`（固定种子，`scenarios=20
   `packages/fleet/src/**`（或 core `src/**`）打补丁后，**必须先 `npm run build` 再跑**，否则红是假的
   （脚本仍在用旧 dist）。jest 直编 TS（`tests/**`）不受此影响，可直接跑。
 - **不得**触碰 core 语义或 `SEALING.md` 协议语义；触及 → 停下报告。
+
+## 7. 1d：三种协作形态接 live 通道（任务协议/worker 接线；线格式**未变**）
+
+> 协商/闲聊消息是**独立节点类型**（`negotiation_message` / `chatter_message`），落在既有已授权
+> `tasks` 分区、**不进 `TaskEvent`**；DAG 子任务用既有 `created` 事件（`trace.causedBy`/`chain`）。
+> 夹具：[`protocol/collab.example.json`](./protocol/collab.example.json)（先落夹具，再由实现/测试匹配）。
+
+| 形态 | 单元 | 期望 | 覆盖测试 |
+|---|---|---|---|
+| 审查 DAG | 派生 | worker 执行成功后可**按计划派生**子任务（`created` + `causedBy`/`chain`） | `1d-a DAG：root → 2 子任务 → 汇总…` · `DAG 计划夹具…` |
+| 审查 DAG | 禁环 | 真实提交路径 `assertAcyclicParent` 生效；成环 → 父任务 `failed`（`DAG_CYCLE: p→c`），不静默 | `1d-a …禁环负例` |
+| 审查 DAG | 完成判定 | `dagCompletion`：从 root **全部可达节点终态**才完成；`summarizeDag` 汇总 | `1d-a …DAG 完成` · `1d-a 汇总含 3 条结果` |
+| 审查 DAG | 恰好一次 | 每任务恰好执行一次（`ExecutionLog`） | `1d-a 每任务恰好一次` |
+| 有限协商 | 消息 | `negotiation_message` 校验 + `messageId` 幂等 + 顺序无关（`NegotiationTracker`） | `1d-b … messageId 幂等` · `协商消息夹具…` |
+| 有限协商 | 轮次 | **轮替**（对端发言后才回）→ `counter`→`accept`→完成；无接受且超 `maxRounds` → `failed (NEGOTIATION_LIMIT: r>N)` | `1d-b 协商…完成` · `1d-b 超限…` |
+| 配额制闲聊 | 配额 | 发送对 `from.device` 走 `LocalQuota`；`accepted/queued/rejected` 两策略确定；账本守恒 | `1d-c …reject/queue 两策略…账本守恒` · `闲聊消息夹具…` |
+| 配额制闲聊 | 幂等 | 收件按 `messageId` 去重 | `1d-c …收件幂等` |
+| 通用 | live E2E | 三种形态在**真实 libp2p loopback** 双端上确定性通过（fake executor） | `verify:fleet:collab`（12/12） |

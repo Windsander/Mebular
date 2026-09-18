@@ -348,3 +348,13 @@ fleet doctor --dir ~/.fleet   # PASS 重入状态  reset=true（已声明重置�
 - **显式降水位（R2）**：重入写**图外**标记 `<storagePath>.rejoin.<ns>.json`（R3，**不同步/无 tombstone**）并清本机该分区本地水位；本机 hello 以**空时钟**上报该分区 → 对端按「自报水位**只允许向下修正**」从 0 重发（或按既有“空水位”门禁发初始快照；**门禁不放宽**）。**只允许向下、绝不向上**（不会把“对端没有”误判为“已有”）。
 - **确定/幂等（R4）**：重复 `rejoin` 安全；rejoin/reset **不改变** `__policy__` 推导（oracle-free）。
 - 前置：重入方需已被授权（例如对端 `fleet grant --to <rejoin设备>`），否则拉不到（显式失败）。
+
+## 14. 协作形态（1d）：审查 DAG / 有限协商 / 配额制闲聊（已接 live）
+
+三形态的纯模型已接到**真实节点**（任务协议/worker 接线，**线格式未变**：协商/闲聊是同分区内的独立节点类型，DAG 用既有 `created` + `trace`）。
+
+- **审查 DAG**：worker 执行成功后按**计划**派生直接子任务（`causedBy`/`chain`）；**禁环守卫**在真实提交路径生效（成环 → 父任务 `failed`，原因 `DAG_CYCLE: p→c`）；发起端用 `dagCompletion` 判定**全部可达节点终态**才完成，`summarizeDag` 产出汇总。计划可用 `mapPlanner({ <intent>: [{intent:…}, …] })` 或自定义 `TaskPlanner`。
+- **有限协商**：worker 对启用协商的任务在执行前发 `counter`（轮次 r），发起端 `policy: 'accept'` 接受或 `'counter'` 反提案；**轮替**（对端发言后才回），超 `maxRounds` → `failed`（`NEGOTIATION_LIMIT: r>N`）。消息 `messageId` 幂等、顺序无关。
+- **配额制闲聊**：`FleetChatter.send` 对 `from.device` 走 `LocalQuota`（`accepted`/`queued`/`rejected`，无全局协调）；落图消息随记忆同步，收件按 `messageId` 幂等。
+- **验收**：`npm run verify:fleet:collab`（真实 libp2p loopback 双端，12/12）；夹具 `packages/fleet/protocol/collab.example.json`；矩阵见 `PROTOCOL-INVARIANTS.md §7`。
+- **限制**：自动化用确定性 fake executor（`EchoExecutor`）；真实执行器（Hermes/OpenChamber）沿用既有适配器，本轮未新增真实 Agent 验收。

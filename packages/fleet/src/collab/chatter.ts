@@ -4,7 +4,22 @@
 // 无全局协调。收件按 `messageId` 幂等去重，顺序无关。
 
 import { isFleetEndpoint, type FleetEndpoint } from '../protocol/envelope.js';
-import type { LocalQuota, QuotaDecision } from '../quota.js';
+import type { LocalQuota, QuotaDecision, QuotaSnapshot } from '../quota.js';
+import type { Mebular } from '@mebular/core';
+import { MebularMessageStore } from '../store/message-store.js';
+
+/** 闲聊消息的节点类型（与任务事件同分区、不同类型，随既有授权同步）。 */
+export const CHATTER_MESSAGE_TYPE = 'chatter_message';
+
+/** 构造闲聊消息存储（校验 + messageId 幂等）。 */
+export function chatterMessageStore(mebular: Mebular, namespace = 'tasks'): MebularMessageStore<ChatterMessage> {
+  return new MebularMessageStore<ChatterMessage>(mebular, {
+    type: CHATTER_MESSAGE_TYPE,
+    namespace,
+    validate: validateChatterMessage,
+    idOf: (m) => m.messageId,
+  });
+}
 
 /** 一条闲聊消息（幂等键 = `messageId`）。 */
 export interface ChatterMessage {
@@ -65,5 +80,37 @@ export class ChatterBox {
 
   size(): number {
     return this.byId.size;
+  }
+}
+
+/**
+ * 1d-c：**live** 配额制闲聊——消息经 `MebularMessageStore`（随记忆同步）传递；发送对
+ * `from.device` 走**本地配额**（accepted/queued/rejected），无全局协调。收件幂等。
+ */
+export class FleetChatter {
+  private readonly quota: LocalQuota;
+  private readonly store: MebularMessageStore<ChatterMessage>;
+
+  constructor(options: { device: string; quota: LocalQuota; store: MebularMessageStore<ChatterMessage> }) {
+    this.quota = options.quota;
+    this.store = options.store;
+  }
+
+  /** 发送：本地配额判定；`accepted` 才真正落图（其余按策略进本地队列/拒绝计数）。 */
+  async send(message: ChatterMessage): Promise<QuotaDecision> {
+    if (!validateChatterMessage(message).ok) return 'rejected';
+    const decision = this.quota.decide(message.from.device);
+    if (decision === 'accepted') await this.store.append(message);
+    return decision;
+  }
+
+  /** 收件箱（幂等去重；确定序）。 */
+  async inbox(): Promise<ChatterMessage[]> {
+    return this.store.all();
+  }
+
+  /** 本地账本快照（按 device 字典序；用于账本守恒断言）。 */
+  ledger(): QuotaSnapshot[] {
+    return this.quota.snapshot();
   }
 }

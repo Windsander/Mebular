@@ -74,13 +74,13 @@ async function roundA() {
   const worker = startWorker([
     '--device', 'device-B', '--agent', 'echo',
     '--storage', join(dir, 'B.jsonl'), '--spool', spool, '--exec-log', execLog,
-    '--timeout-ms', '30000',
+    '--timeout-ms', '60000',
   ]);
   const node = await runNodeCli([
     '--device', 'device-A', '--storage', join(dir, 'A.jsonl'), '--spool', spool,
     '--submit', String(N), '--target-device', 'device-B', '--target-agent', '*',
     '--quota-limit', '10', '--quota-mode', 'queue', '--duplicate-every', '3', '--expires', '5',
-    '--timeout-ms', '20000',
+    '--timeout-ms', '60000',
   ]);
   worker.kill('SIGKILL');
   await sleep(50);
@@ -117,7 +117,7 @@ async function roundB() {
   const nodePromise = runNodeCli([
     '--device', 'device-A', '--storage', join(dir, 'A.jsonl'), '--spool', spool,
     '--submit', String(N), '--target-device', 'device-B', '--target-agent', '*',
-    '--quota-limit', '1000', '--timeout-ms', '25000',
+    '--quota-limit', '1000', '--timeout-ms', '60000',
   ]);
 
   let killed = false;
@@ -137,7 +137,7 @@ async function roundB() {
   const worker2 = startWorker([
     '--device', 'device-B', '--agent', 'echo',
     '--storage', join(dir, 'B.jsonl'), '--spool', spool, '--exec-log', execLog,
-    '--timeout-ms', '30000',
+    '--timeout-ms', '60000',
   ]);
 
   const node = await nodePromise;

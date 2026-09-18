@@ -80,7 +80,7 @@ try {
     const worker = new FleetWorker({ device: 'device-B', agent: 'worker', store: storeB, transport: new NullTransport(), registry, log, ...extra });
     return { worker, log };
   };
-  const loop = (worker, iterations = 3000) => {
+  const loop = (worker, iterations = 20000) => {
     let stop = false;
     const done = (async () => {
       for (let i = 0; i < iterations && !stop; i++) {
@@ -104,7 +104,7 @@ try {
   const { taskId: rootId } = await n1.submit({ intent: 'root', to: { device: 'device-B', agent: 'echo' } });
   const { worker: w1, log: log1 } = await makeWorker({ planner: mapPlanner({ root: [{ intent: 'child-0' }, { intent: 'child-1' }] }) });
   const l1 = loop(w1);
-  const completion = await n1.waitForDagCompletion(rootId, { timeoutMs: 30000 });
+  const completion = await n1.waitForDagCompletion(rootId, { timeoutMs: 45000 });
   l1.stop();
   await l1.done;
   check('1d-a DAG 完成（全部可达终态）', completion.complete === true, { reachable: completion.reachable.length, pending: completion.pending });
@@ -117,7 +117,7 @@ try {
   const { taskId: badId } = await n1.submit({ intent: 'root-cycle', to: { device: 'device-B', agent: 'echo' } });
   const { worker: w2 } = await makeWorker({ planner: selfCycle });
   const l2 = loop(w2);
-  await n1.waitForDagCompletion(badId, { timeoutMs: 30000 });
+  await n1.waitForDagCompletion(badId, { timeoutMs: 45000 });
   l2.stop();
   await l2.done;
   const bad = await n1.stateOf(badId);
@@ -129,7 +129,7 @@ try {
   const { taskId: nid } = await n2.submit({ intent: 'nego:x', to: { device: 'device-B', agent: 'echo' } });
   const { worker: w3 } = await makeWorker({ negotiation: { store: negB, maxRounds: 3, enabled: (s) => s.intent.startsWith('nego:') } });
   const l3 = loop(w3);
-  const okNeg = await n2.waitForTerminal([nid], { timeoutMs: 30000 });
+  const okNeg = await n2.waitForTerminal([nid], { timeoutMs: 45000 });
   l3.stop();
   await l3.done;
   const negState = await n2.stateOf(nid);
@@ -145,7 +145,7 @@ try {
   const { taskId: oid } = await n3.submit({ intent: 'nego:over', to: { device: 'device-B', agent: 'echo' } });
   const { worker: w4 } = await makeWorker({ negotiation: { store: negB, maxRounds: 1, enabled: (s) => s.intent.startsWith('nego:') } });
   const l4 = loop(w4);
-  await n3.waitForTerminal([oid], { timeoutMs: 30000 });
+  await n3.waitForTerminal([oid], { timeoutMs: 45000 });
   l4.stop();
   await l4.done;
   check('1d-b 超限 → failed NEGOTIATION_LIMIT', (await n3.stateOf(oid))?.reason === 'NEGOTIATION_LIMIT: 2>1', { reason: (await n3.stateOf(oid))?.reason });

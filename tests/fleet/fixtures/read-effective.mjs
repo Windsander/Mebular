@@ -25,7 +25,8 @@ const mebular = new Mebular(offlineMebularOptions(config, encryption));
 await mebular.initialize();
 try {
   const effective = await mebular.getEffectiveNamespaces(args.subject);
-  process.stdout.write(`${JSON.stringify({ ok: true, subject: args.subject, effective })}\n`);
+  const issuers = await mebular.getPolicyIssuers();
+  process.stdout.write(`${JSON.stringify({ ok: true, subject: args.subject, effective, issuers })}\n`);
 } finally {
   await mebular.shutdown();
 }

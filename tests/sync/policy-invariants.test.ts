@@ -55,20 +55,23 @@ function buildScenario(rng: () => number): Scenario {
   for (let i = 0; i < n; i++) {
     const author = pick(DEVICES);
     const roll = rng();
-    if (roll < 0.45) {
+    if (roll < 0.4) {
       const grantId = randomUUID();
       grantIds.push(grantId);
       const namespaces = rng() < 0.3 ? [pick(NAMESPACES), pick(NAMESPACES)] : [pick(NAMESPACES)];
       push({ kind: 'grant', author, id: grantId, grant: { grantId, subject: pick(DEVICES), namespaces, issuedAt: i } });
-    } else if (roll < 0.72) {
+    } else if (roll < 0.64) {
       push({
         kind: 'revoke',
         author,
         id: `rev-${i}`,
         revoke: { grantId: grantIds.length > 0 && rng() < 0.8 ? pick(grantIds) : randomUUID(), issuedAt: i },
       });
-    } else {
+    } else if (roll < 0.84) {
       push({ kind: 'device', author, id: `dev-${i}`, device: { subject: pick(DEVICES), issuedAt: i } });
+    } else {
+      // C1：图上引导签发者声明
+      push({ kind: 'issuer', author, id: `iss-${i}`, issuer: { subject: pick(DEVICES), issuedAt: i } });
     }
   }
   // 注入互吊销/链式结构以提高未收敛（fail-closed）触发率
@@ -84,12 +87,29 @@ function buildScenario(rng: () => number): Scenario {
   return { entries, bootstrap };
 }
 
-function key(state: ReturnType<typeof derivePolicyState>): { authorized: Record<string, string[]>; revoked: string[] } {
+function key(state: ReturnType<typeof derivePolicyState>): {
+  authorized: Record<string, string[]>;
+  revoked: string[];
+  issuers: string[];
+} {
   const authorized: Record<string, string[]> = {};
   for (const name of [...state.authorized.keys()].sort()) {
     authorized[name] = [...state.authorized.get(name)!].sort();
   }
-  return { authorized, revoked: [...state.revoked].sort() };
+  return { authorized, revoked: [...state.revoked].sort(), issuers: [...state.issuers].sort() };
+}
+
+/** dropDeclares 的授权是 actual 的子集（声明只可能增加签发者 → 只可能增加授权）。 */
+function authorizedSubset(
+  sub: ReturnType<typeof derivePolicyState>,
+  full: ReturnType<typeof derivePolicyState>,
+): boolean {
+  for (const [subject, nss] of sub.authorized) {
+    const superset = full.authorized.get(subject);
+    if (!superset || !nss.every((ns) => superset.includes(ns))) return false;
+  }
+  for (const issuer of sub.issuers) if (!full.issuers.has(issuer)) return false;
+  return true;
 }
 
 describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', () => {
@@ -105,6 +125,7 @@ describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', (
     let nonConverged = 0;
     let residualA = 0;
     let residualB = 0;
+    let residualC = 0;
     let sample = '';
 
     for (let scenario = 0; scenario < SCENARIOS; scenario++) {
@@ -138,6 +159,14 @@ describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', (
         if (actual.revoked.has(name)) throw new Error(`被吊销设备不应有授权 @scenario ${scenario}：${name}`);
         if (!grantedSubjects.has(name)) throw new Error(`授权设备必须曾是某条 grant 的主体 @scenario ${scenario}：${name}`);
       }
+      // C1：生效引导集合 ⊆ 被声明主体 ∪ 配置 bootstrap
+      const declaredSubjects = new Set(entries.filter((e) => e.kind === 'issuer' && e.issuer).map((e) => e.issuer!.subject));
+      const configured = new Set(bootstrap);
+      for (const issuer of actual.issuers) {
+        if (!declaredSubjects.has(issuer) && !configured.has(issuer)) {
+          throw new Error(`引导签发者必须来自图上声明或配置 @scenario ${scenario}：${issuer}`);
+        }
+      }
 
       // 4) 扰动不变性（oracle-free，含未收敛场景）
       //    a) 删掉输出 revoked 里设备的全部记录
@@ -147,7 +176,8 @@ describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', (
         entries.filter((e) => !(e.kind === 'revoke' && actual.revoked.has(e.author))),
         options,
       );
-
+      //    c) C1 声明轴：删掉全部 policy_issuer_declare → 授权单调不增
+      const dropDeclares = derivePolicyState(entries.filter((e) => e.kind !== 'issuer'), options);
       for (const [perturbed, name] of [
         [dropAuthors, 'a'] as const,
         [dropRevokes, 'b'] as const,
@@ -166,11 +196,23 @@ describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', (
           );
         }
       }
+
+      //    c) 声明轴单调：删掉全部声明后授权只能不增（含 issuers 子集）。
+      const monotone = authorizedSubset(dropDeclares, actual);
+      if (actual.converged && dropDeclares.converged) {
+        if (!monotone) throw new Error(`扰动 c（声明轴）违反单调性 @scenario ${scenario}`);
+      } else if (!monotone) {
+        residualC += 1;
+        // eslint-disable-next-line no-console
+        console.log(
+          `[residual] c @scenario ${scenario} actualConverged=${actual.converged} perturbedConverged=${dropDeclares.converged} actual=${JSON.stringify(actualKey)} perturbed=${JSON.stringify(key(dropDeclares))}`,
+        );
+      }
     }
 
     // eslint-disable-next-line no-console
     console.log(
-      `[policy-invariants] scenarios=${SCENARIOS} nonConverged=${nonConverged} residualA=${residualA} residualB=${residualB}`,
+      `[policy-invariants] scenarios=${SCENARIOS} nonConverged=${nonConverged} residualA=${residualA} residualB=${residualB} residualC=${residualC}`,
     );
 
     // F-2：未收敛必须被真实探到（非空），但仍是少数，且扰动在回退路径的残差有界。
@@ -178,6 +220,7 @@ describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', (
     expect(nonConverged).toBeLessThanOrEqual(Math.ceil(SCENARIOS * 0.05));
     expect(residualA).toBeLessThanOrEqual(Math.ceil(SCENARIOS * 0.02));
     expect(residualB).toBeLessThanOrEqual(Math.ceil(SCENARIOS * 0.02));
+    expect(residualC).toBeLessThanOrEqual(Math.ceil(SCENARIOS * 0.02));
     if (nonConverged > 0) {
       // eslint-disable-next-line no-console
       console.log(`[policy-invariants] nonConverged sample=${sample}`);

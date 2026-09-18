@@ -27,6 +27,8 @@ export const POLICY_NAMESPACE = '__policy__';
 export const NAMESPACE_GRANT_EVENT = 'namespace_grant';
 export const NAMESPACE_REVOKE_EVENT = 'namespace_revoke';
 export const DEVICE_REVOKE_EVENT = 'device_revoke';
+/** C1：把「谁是引导签发者」声明上图（与 `namespace_grant` 等同在 `__policy__`）。 */
+export const POLICY_ISSUER_DECLARE_EVENT = 'policy_issuer_declare';
 
 /** 授予记录：把 `namespaces` 授予 `subject` 设备。 */
 export interface NamespaceGrantRecord {
@@ -58,12 +60,27 @@ export interface DeviceRevokeRecord {
   note?: string;
 }
 
+/**
+ * C1 引导签发者声明：把 `subject` 声明为引导签发者（bootstrap issuer）。
+ *
+ * 采纳**不做 R-a**（无条件，仅要求签发者可信且未被吊销、主体未被吊销）——因此与不动点无循环依赖；
+ * 生效集合 = 图上被采纳声明 ∪ 本地配置 `sync.policyIssuers`。
+ */
+export interface PolicyIssuerDeclareRecord {
+  /** 被声明为引导签发者的设备 ID */
+  subject: string;
+  issuedAt: number;
+  note?: string;
+}
+
 /** 从图上推导出的策略快照：每个主体的生效授权 + 被吊销设备集合。 */
 export interface PolicyState {
   /** subject → 生效分区白名单（未出现 = 拒绝） */
   authorized: Map<string, string[]>;
   /** 当前处于吊销状态的设备 */
   revoked: Set<string>;
+  /** C1：生效引导签发者集合（图上被采纳声明 ∪ 配置 bootstrap） */
+  issuers: Set<string>;
   /** 不动点是否在迭代上限内**收敛**（false = 到达上限，回退到最保守结果，可观测） */
   converged: boolean;
   /** 实际执行的迭代轮数（诊断） */
@@ -74,10 +91,11 @@ export interface PolicyState {
 interface Authority {
   authorized: Map<string, string[]>;
   revoked: Set<string>;
+  issuers: Set<string>;
 }
 
 interface ParsedEntry {
-  kind: 'grant' | 'revoke' | 'device';
+  kind: 'grant' | 'revoke' | 'device' | 'issuer';
   /** 签发者设备 ID（= event.author） */
   author: string;
   /**
@@ -94,11 +112,15 @@ interface ParsedEntry {
   grant?: NamespaceGrantRecord;
   revoke?: NamespaceRevokeRecord;
   device?: DeviceRevokeRecord;
+  issuer?: PolicyIssuerDeclareRecord;
 }
 
 function isPolicyType(type: string): boolean {
   return (
-    type === NAMESPACE_GRANT_EVENT || type === NAMESPACE_REVOKE_EVENT || type === DEVICE_REVOKE_EVENT
+    type === NAMESPACE_GRANT_EVENT ||
+    type === NAMESPACE_REVOKE_EVENT ||
+    type === DEVICE_REVOKE_EVENT ||
+    type === POLICY_ISSUER_DECLARE_EVENT
   );
 }
 
@@ -143,6 +165,11 @@ function parseEntries(events: Event[]): ParsedEntry[] {
       const revoke = (event.data as { revoke?: NamespaceRevokeRecord }).revoke;
       if (revoke && typeof revoke.grantId === 'string') {
         entries.push({ kind: 'revoke', author, seq, logical, id: event.id, revoke });
+      }
+    } else if (event.type === POLICY_ISSUER_DECLARE_EVENT) {
+      const issuer = (event.data as { policyIssuer?: PolicyIssuerDeclareRecord }).policyIssuer;
+      if (issuer && typeof issuer.subject === 'string') {
+        entries.push({ kind: 'issuer', author, seq, logical, id: event.id, issuer });
       }
     } else {
       const device = (event.data as { deviceRevoke?: DeviceRevokeRecord }).deviceRevoke;
@@ -250,12 +277,35 @@ function setsEqual(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
  * `revokedIn`（上一轮输出的 `revoked`），产出 `authorized` 与 `revoked`。
  * 两者都由**同一批被采纳 grant** 决定（F-A：只有被采纳的 grant 才清除吊销）。
  */
+/**
+ * C1：生效引导集合 = 配置 bootstrap ∪ 图上**被采纳**的 `policy_issuer_declare` 主体。
+ *
+ * 采纳**不做 R-a**（无条件），因此只是 `(sorted, configured, revokedIn)` 的纯函数、不引入新的
+ * 不动点未知量；但受 R-b 约束：**签发者**（其记录不采纳）或**被声明主体**被吊销 → 不采纳。
+ */
+function effectiveIssuers(
+  sorted: ParsedEntry[],
+  configured: ReadonlySet<string>,
+  revokedIn: ReadonlySet<string>,
+): Set<string> {
+  const issuers = new Set(configured);
+  for (const entry of sorted) {
+    if (entry.kind !== 'issuer' || !entry.issuer) continue;
+    if (revokedIn.has(entry.author)) continue; // R-b：被吊销签发者的记录不采纳
+    if (revokedIn.has(entry.issuer.subject)) continue; // R-b：被吊销设备不得因声明成为签发者
+    issuers.add(entry.issuer.subject);
+  }
+  return issuers;
+}
+
 function deriveOnce(
   sorted: ParsedEntry[],
   bootstrap: ReadonlySet<string>,
   revokedGrantIds: ReadonlySet<string>,
   revokedIn: ReadonlySet<string>,
 ): Authority {
+  // C1：R-a 的引导白名单改为「生效引导集合」（图上声明 ∪ 配置）。
+  const issuers = effectiveIssuers(sorted, bootstrap, revokedIn);
   // 权威授权：R-b（revokedIn）→ R-d（grantId 撤销）→ R-a
   const authorized = new Map<string, Set<string>>();
   const adoptedGrantIds = new Set<string>();
@@ -264,7 +314,7 @@ function deriveOnce(
     if (entry.kind !== 'grant' || !entry.grant) continue;
     if (revokedGrantIds.has(entry.grant.grantId)) continue; // R-d：grantId 精确撤销
     const granted = namespacesOf(entry.grant);
-    if (!isAuthorizedFor(entry.author, granted, authorized, bootstrap)) continue; // R-a
+    if (!isAuthorizedFor(entry.author, granted, authorized, issuers)) continue; // R-a
     adoptedGrantIds.add(entry.grant.grantId);
     let set = authorized.get(entry.grant.subject);
     if (!set) {
@@ -292,7 +342,7 @@ function deriveOnce(
 
   const out = new Map<string, string[]>();
   for (const [subject, set] of authorized) out.set(subject, [...set]);
-  return { authorized: out, revoked };
+  return { authorized: out, revoked, issuers };
 }
 
 /** 由权威 `revoked` 过滤出应被采纳的 revoke（R-b：排除被吊销签发者发出的 revoke） */
@@ -369,7 +419,7 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
     }
   }
 
-  return { authorized: chosen.authorized, revoked: chosen.revoked, converged, iterations };
+  return { authorized: chosen.authorized, revoked: chosen.revoked, issuers: chosen.issuers, converged, iterations };
 }
 
 /**
@@ -409,6 +459,11 @@ export class GraphNamespacePolicy implements NamespaceGrantPolicy {
 
   async getAuthorizedNamespaces(peerDeviceId: string): Promise<string[]> {
     return (await this.snapshot()).authorized.get(peerDeviceId) ?? [];
+  }
+
+  /** C1：当前生效引导签发者集合（图上被采纳声明 ∪ 构造时配置的 bootstrap）。 */
+  async getPolicyIssuers(): Promise<string[]> {
+    return [...(await this.snapshot()).issuers].sort();
   }
 
   async getRevokedDevices(): Promise<ReadonlySet<string>> {

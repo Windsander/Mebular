@@ -60,7 +60,7 @@ fleet onboard --dir ~/.fleet \
   --agent echo:echo
 ```
 
-`--master-key` 指向从 A 分发来的主密钥；`--peer-device/--peer-addr` 登记 A 并写入 **bootstrap 配置白名单**（默认拒绝，未见者看不到 `tasks`）。若要用「图上授权为主」而不写配置白名单，加 `--no-config-grant`（见 §4）。
+`--master-key` 指向从 A 分发来的主密钥；`--peer-device/--peer-addr` 登记 A 并写入 **bootstrap 配置白名单**（默认拒绝，未见者看不到 `tasks`）。若要用「图上授权为主」而不写配置白名单，加 `--no-config-grant`（见 §4）。**C1 起新设备无需 `--policy-issuer`**：引导签发者以图上 `policy_issuer_declare` 同步（旧配置写法仍兼容）。
 
 运行执行端：
 
@@ -76,22 +76,28 @@ fleet doctor --dir ~/.fleet
 # summary: ok=true skipped=[]
 ```
 
-## 4. 图上授权为主（G1，推荐）
+## 4. 图上授权为主（G1）+ 引导签发者上图（C1，推荐）
 
-**配置白名单 = bootstrap；图上 `namespace_grant` = 正路**（可审计、可撤销、可转授、无需改配置重启）。
+**配置白名单 = bootstrap；图上 `namespace_grant` = 正路**；**引导签发者也在图上声明**
+（`policy_issuer_declare`）——各端同步即自动采纳，**无需本地 `--policy-issuer` 一致**。
 
 ```bash
-# A 自任引导签发者（配置白名单=bootstrap；只有它才能为任意 namespace 签发）
+# A 上车：登记 B 但不写配置白名单、不写本地 policyIssuers
 fleet onboard --dir ~/.fleet --device device-A --peer-device device-B \
-  --policy-issuer device-A --no-config-grant --agent echo:echo
+  --no-config-grant --agent echo:echo
+
+# A 在图上把自己声明为引导签发者（去中心化 bootstrap；受信任链约束、可被 device_revoke 排斥）
+fleet declare-issuer --dir ~/.fleet --to device-A
+# 期望：{"ok":true,"role":"declare-issuer","subject":"device-A","eventId":"…"}
 
 # A 为 B 签发 grant（落保留命名空间 __policy__，由 core 保证必须链到主密钥、不可自授）
 fleet grant --dir ~/.fleet --to device-B --namespace tasks
 # 期望：{"ok":true,"role":"grant","grantId":"<uuid>","subject":"device-B","namespaces":["tasks"]}
 
-# A 自检：仅图上 grant（无配置白名单）也应授权通过
+# A 自检：图上 grant（无配置白名单）授权通过；策略签发者来自图上声明
 fleet doctor --dir ~/.fleet
 #   PASS  namespace 已授权  namespace=tasks peers=[device-B:ok]
+#   PASS  策略签发者       issuers=[device-A]
 
 # 撤销（按 grantId 精确失效；R-d：恢复必须用**新的** grantId）
 fleet revoke --dir ~/.fleet --grant-id <uuid>
@@ -100,17 +106,20 @@ fleet doctor --dir ~/.fleet
 ```
 
 - `getEffectiveNamespaces(peer) = 图上 grant ∪ 配置白名单`；**两者皆空 = 拒绝**（默认拒绝不变）；吊销优先。
-- 未授权设备签发的 grant **不被采纳**（R-a：不能给出自己没有的 / 非引导签发者）；撤销过的 grantId **不能复用**（R-d）。
+- **生效引导签发者集合 = 图上声明 ∪ 本地配置**（配置降级为兼容回退）。声明**无条件采纳**（只要求链到主密钥），
+  但**签发者或主体被 `device_revoke` 吊销 → 不采纳**（R-b 优先）。
+- 未授权设备签发的 grant **不被采纳**（R-a：不能给出自己没有的 / 非生效签发者）；撤销过的 grantId **不能复用**（R-d）。
 - B 端只需 `--peer-device device-A`（用于 B→A 回传的 bootstrap 白名单）；结果事件由 A 的图上 grant 决定是否收下。
 
-### 完整 A→B（仅图授权，无配置白名单）
+### 完整 A→B（仅图授权 + 图上声明，无本地配置）
 
 ```bash
-# 1) A 上车：自任引导签发者，登记 B 但不写配置白名单
+# 1) A 上车：登记 B，但不写配置白名单/policyIssuers
 fleet onboard --dir ~/.fleet --device device-A --peer-device device-B \
-  --listen /ip4/0.0.0.0/tcp/4001 --policy-issuer device-A --no-config-grant --agent echo:echo
+  --listen /ip4/0.0.0.0/tcp/4001 --no-config-grant --agent echo:echo
 
-# 2) A 为 B 签 grant（A 自检：namespace 已授权 PASS；peer 可达 SKIP）
+# 2) A 图上声明自己为引导签发者；再为 B 签 grant
+fleet declare-issuer --dir ~/.fleet --to device-A
 fleet grant --dir ~/.fleet --to device-B --namespace tasks
 # → {"ok":true,"role":"grant","grantId":"<uuid>","subject":"device-B","namespaces":["tasks"]}
 
@@ -118,19 +127,32 @@ fleet grant --dir ~/.fleet --to device-B --namespace tasks
 fleet serve --dir ~/.fleet --submit 5 --target-agent echo --expect-prefix ECHO: \
   --wait-sync-ms 30000 --timeout-ms 40000 --linger-ms 30000
 
-# 4) B 上车并导入同一主密钥；把 A 设为引导签发者 → B 采纳 A 转授的 grant
-#    （B→A 回传走 --peer-device 的 bootstrap 白名单）
+# 4) B 上车并导入同一主密钥：**无需** --policy-issuer（图上声明会同步过来）
 fleet onboard --dir ~/.fleet --device device-B --peer-device device-A \
-  --peer-addr /ip4/<A_LAN_IP>/tcp/4001/p2p/<A_PEER_ID> --policy-issuer device-A \
+  --peer-addr /ip4/<A_LAN_IP>/tcp/4001/p2p/<A_PEER_ID> \
   --master-key /path/to/master-key.json --agent echo:echo
 
-# 5) B 同步并执行（B 已在此采纳 A 的图上 grant）
+# 5) B 同步并执行（B 已采纳 A 的图上声明，进而采纳其 grant）
 fleet work --dir ~/.fleet --timeout-ms 30000
 # → {"role":"work","device":"device-B","executed":5}
 
 # 6) A 侧确认 done=5 / resultsMatch=true；B 在线时 B 自检 ok=true skipped=[]
 fleet doctor --dir ~/.fleet
 ```
+
+> 兼容：旧写法 `onboard --policy-issuer device-A` 仍可用（配置作为 bootstrap 回退）；新部署推荐只用 `declare-issuer`。
+> **破坏性协议变更**：旧节点（不含 C1）会忽略 `policy_issuer_declare`；新旧混跑时旧节点仍需本地 `--policy-issuer`，否则会**少授权**（安全方向）。详见仓库根 `SEALING.md` §3 C1。
+
+### FAQ：信任根 / 引导白名单 / 图上授权 的角色与边界
+
+| 概念 | 是什么 | 存哪 | 谁签 | 能否撤销 | 变更影响 |
+| --- | --- | --- | --- | --- | --- |
+| **信任根**（用户主密钥） | 整个用户身份的根；设备证书链到它 | 本地 `master-key.json`（0600），**安全分发** | — | 换根 = 换身份体系 | 全端信任边界 |
+| **引导白名单**（C1） | 「可为任意 `namespace` 签发」的设备集合 = 图上声明 ∪ 本地配置 | `__policy__`（`policy_issuer_declare`）+ 兼容配置 `sync.policyIssuers` | 任一可信且未被吊销的设备均可声明 | `device_revoke` 主体即失效 | 同步即生效，多端一致（无需本地配置） |
+| **图上授权**（G1） | 「某设备可被授予哪些分区」的白名单 | `__policy__`（`namespace_grant`） | 生效引导集合成员，或已获授权者的转授 | `namespace_revoke`（按 grantId，R-d） | 同步即生效 |
+
+边界：引导白名单**只决定「谁能签发」**，不直接授予任何分区；实际能读哪些分区由 `namespace_grant`（图上授权）与
+配置白名单的**并集**、按默认拒绝决定。三者都以**主密钥证书链**为唯一信任来源，别家用户/无证书的声明与授权一律忽略。
 
 ## 5. `fleet doctor` 检查项
 
@@ -143,6 +165,7 @@ fleet doctor --dir ~/.fleet
 | `peer 可达(device)` | peer 有 addr 时 TCP 可连 | 无 peers 或无 addr → **SKIP**（附原因） |
 | `namespace 已授权` | 每个已配置对端在 **图上 grant ∪ 配置白名单** 里含 `namespace`（默认拒绝、吊销优先） | FAIL：既无 grant 也无白名单 → hint `fleet grant`；曾 grant 但被撤销 → hint 用**新 grantId**（R-d）；无对端 → FAIL |
 | `agent 注册表` | `config.agents` 全部可解析 | FAIL |
+| `策略签发者` | 信息项：列出**生效引导签发者**（图上声明 ∪ 配置）；恒 PASS | —（空时 detail 提示 `declare-issuer`） |
 | `同步已收敛` | 本地见到**对端署名**的任务事件 | 无任何任务事件 → **SKIP**（附原因） |
 
 `fleet doctor --json` 输出机器可读报告（`{ok, checks[], skipped[]}`）；**只在 FAIL 时显示 hint**，SKIP 一律在 `skipped` 里明写原因，不静默跳过。

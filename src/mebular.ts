@@ -29,9 +29,11 @@ import {
   NAMESPACE_GRANT_EVENT,
   NAMESPACE_REVOKE_EVENT,
   DEVICE_REVOKE_EVENT,
+  POLICY_ISSUER_DECLARE_EVENT,
   type NamespaceGrantRecord,
   type NamespaceRevokeRecord,
   type DeviceRevokeRecord,
+  type PolicyIssuerDeclareRecord,
 } from './sync/grantPolicy.js';
 import {
   IdentityManager,
@@ -495,6 +497,34 @@ export class Mebular {
       data: { deviceRevoke },
       namespace: POLICY_NAMESPACE,
     });
+  }
+
+  /**
+   * C1：把某设备声明为**引导签发者**（写入本机签名记录 `policy_issuer_declare`，落 `__policy__`）。
+   *
+   * 采纳**不做 R-a**（无条件），但受 R-b 约束（签发者/主体被吊销则不采纳）；生效集合
+   * = 图上被采纳声明 ∪ 本地配置 `sync.policyIssuers`。用于去中心化 bootstrap：新设备同步到
+   * 声明后即可采纳该签发者的授权，**无需本地配置一致**。
+   */
+  async declarePolicyIssuer(input: { subject: string; note?: string }): Promise<Event> {
+    const policyIssuer: PolicyIssuerDeclareRecord = {
+      subject: input.subject,
+      issuedAt: Date.now(),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    };
+    return this.eventLog.append({
+      type: POLICY_ISSUER_DECLARE_EVENT,
+      data: { policyIssuer },
+      namespace: POLICY_NAMESPACE,
+    });
+  }
+
+  /**
+   * 只读审计入口：当前**生效引导签发者集合**（图上被采纳声明 ∪ 配置 `sync.policyIssuers`，
+   * 吊销优先）。不改变任何状态。
+   */
+  async getPolicyIssuers(): Promise<string[]> {
+    return this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getPolicyIssuers();
   }
 
   /**

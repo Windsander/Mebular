@@ -38,9 +38,11 @@ export {
 export {
   GraphNamespacePolicy,
   POLICY_NAMESPACE,
+  POLICY_ISSUER_DECLARE_EVENT,
   type NamespaceGrantRecord,
   type NamespaceRevokeRecord,
   type DeviceRevokeRecord,
+  type PolicyIssuerDeclareRecord,
   type PolicyState,
 } from './sync/grantPolicy.js';
 export { CompositeNamespacePolicy } from './sync/namespacePolicy.js';

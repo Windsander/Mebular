@@ -62,9 +62,13 @@
 | 参数传参 | `spawn(command, args)` 传参，无 shell（防注入） | `参数数组传参…`（断言无 shell 求值） |
 | **env 不外流** | 子进程只继承 `ENV_ALLOWLIST`（PATH/HOME/… + `HERMES_HOME`）+ 显式 `options.env`；**不继承 daemon 全量 env**（凭据不外流）；不打印/不落盘 env 值 | `env 白名单：不继承 daemon 的任意环境变量（判别锚点）` |
 
+| OpenChamber（中立 client） | `HttpOpenChamberSeam`：POST `endpoint` + token（内联/文件+`tokenJsonPath`）+ 可配 `authHeader` + timeout；成功→`{text,sessionId}`；错误/超时→清晰错误；**错误不夹带 token** | `成功：返回 text/sessionId…` · `token 从文件读取…` · `可配 authHeader` · `负例：错误/未授权/超时/非 JSON…` · `负例：缺 endpoint / 缺 token` · `OpenChamberAgent 归一…` |
+| OpenChamber（provider #1） | 桥 daemon `POST /agent/run-once`（可替换：替换只改 provider 侧，不改 fleet 代码；契约见 `OPENCHAMBER-SEAM.md`） | verify `--with-openchamber`（E2E + 直连 session + 负例） |
+
 真实验收：`npm run verify:fleet:agents`（真实 libp2p loopback + 确定性 fake agent，9/9）。
 真实 Hermes 为**可选开关**：`node scripts/verify-fleet-agents.mjs --with-hermes`（**命令行参数**，非环境变量）；
 意图为确定性哨兵指令（只输出 `FLEET_HERMES_OK`），断言：E2E `done` 且结果包含哨兵，另**直连** `HermesAgent` 断言解析出 `session_id`；原始 `ms`/`session` 随脚本输出（11/11）。
+真实 OpenChamber 同模式：`node scripts/verify-fleet-agents.mjs --with-openchamber`（provider 接线在脚本侧；E2E `done` 含 `FLEET_OC_OK` + 直连 session + 负例；无桥环境缺省关、CI 用 fake provider）。
 
 ## 5. M4：三种协作形态（目标二）
 
@@ -74,6 +78,7 @@
 | 审查 DAG | **禁环** | `detectCycle` 检出；新增成环边由守卫**拒绝** | `禁环：检测 + 创建守卫（负例）` · harness `构造的森林不应有环` |
 | 审查 DAG | 完成判定 | 从 root 可达的**全部**节点终态才 `complete` | `完成判定：全部可达节点终态才算完成` · harness `reachable 与独立可达性不一致` |
 | 审查 DAG | 扰动 | 删叶子子树不改变**不含该叶子**的 root 判定 | harness `删叶子 … 改变了 root` |
+| 审查 DAG | **E2E（两节点）** | root→子任务→汇总：**全部可达节点终态**才 `complete`；结果正确；每任务恰好执行一次；非终态子任务 → 未完成 | `F-1 审查 DAG E2E（两节点）` |
 | 有限协商 | 幂等 / 顺序无关 | 按 `messageId` 去重；结果与到达顺序无关 | `幂等 + 顺序无关 + 超限失败` · harness `协商顺序无关/幂等失败` |
 | 有限协商 | **步数上限** | `rounds > maxRounds` → `fail`，`reason = NEGOTIATION_LIMIT: r>N`；`accept`→proceed、`reject`→fail | `幂等 + 顺序无关 + 超限失败` · `accept → proceed；reject → fail` |
 | 有限协商 | 校验 | 非法 `kind`/`round`/`from` 拒绝 | `校验与非法输入（负例）` |

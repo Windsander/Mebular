@@ -970,6 +970,8 @@ function setView(view) {
   document.querySelectorAll('.view-btn').forEach((b) => {
     b.classList.toggle('is-active', b.dataset.view === view);
   });
+  // 图例只属于星图视图：域/审计视图隐藏，避免遮挡卡片操作
+  document.querySelector('.sidebar')?.classList.toggle('is-map', view === 'map');
   $('#domains-view').hidden = view !== 'domains';
   $('#audit-view').hidden = view !== 'audit';
   $('#stage').style.visibility = view === 'map' ? 'visible' : 'hidden';
@@ -1140,20 +1142,33 @@ $('#device-card-close').addEventListener('click', () => {
   stage.redraw();
 });
 
-// 侧栏收起（桌面玻璃浮层的图标条形态；移动端不生效）
+// 图例展开/折叠：首次进入展示后自动收纳；用户手动切换后尊重其选择
 {
-  const layoutEl = document.querySelector('.layout');
-  const toggle = $('#sidebar-toggle');
-  const applyRail = (collapsed) => {
-    layoutEl.classList.toggle('rail-collapsed', collapsed);
-    toggle.textContent = collapsed ? '›' : '‹';
-    toggle.title = collapsed ? '展开侧栏' : '收起侧栏';
+  const panel = $('#legend-panel');
+  const toggle = $('#legend-toggle');
+  const apply = (collapsed) => {
+    panel.classList.toggle('is-collapsed', collapsed);
+    toggle.setAttribute('aria-expanded', String(!collapsed));
   };
-  applyRail(localStorage.getItem('mebular_rail_collapsed') === '1');
+  const stored = localStorage.getItem('mebular_legend_collapsed');
+  apply(stored === '1');
+  let autoTimer = 0;
+  const cancelAuto = () => {
+    if (autoTimer) {
+      clearTimeout(autoTimer);
+      autoTimer = 0;
+    }
+  };
+  if (stored === null) {
+    // 首次进入：展示一小段时间后自动收纳（悬停阅读则取消）
+    autoTimer = window.setTimeout(() => apply(true), 7000);
+  }
+  panel.addEventListener('pointerenter', cancelAuto);
   toggle.addEventListener('click', () => {
-    const next = !layoutEl.classList.contains('rail-collapsed');
-    localStorage.setItem('mebular_rail_collapsed', next ? '1' : '0');
-    applyRail(next);
+    cancelAuto();
+    const next = !panel.classList.contains('is-collapsed');
+    localStorage.setItem('mebular_legend_collapsed', next ? '1' : '0');
+    apply(next);
   });
 }
 $('#wizard-close').addEventListener('click', closeWizard);

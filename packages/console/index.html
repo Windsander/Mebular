@@ -25,24 +25,28 @@
 
     <div class="layout">
       <nav class="sidebar">
-        <button id="sidebar-toggle" class="rail-toggle" type="button" title="收起 / 展开侧栏" aria-label="收起 / 展开侧栏">‹</button>
-        <ul id="view-nav" class="view-nav">
+        <ul id="view-nav" class="view-tabs">
           <li><button class="view-btn is-active" data-view="map" type="button"><span class="view-icon">●</span><span class="view-label">星图</span></button></li>
           <li><button class="view-btn" data-view="domains" type="button"><span class="view-icon">○</span><span class="view-label">域视图</span></button></li>
           <li><button class="view-btn" data-view="audit" type="button"><span class="view-icon">○</span><span class="view-label">审计</span></button></li>
         </ul>
-        <details class="legend">
-          <summary>图例</summary>
-          <ul id="namespace-legend" class="legend-list"></ul>
-          <h2>边</h2>
-          <ul class="legend-list legend-edges">
-            <li><span class="edge-swatch edge-mine"></span>我授权它</li>
-            <li><span class="edge-swatch edge-theirs"></span>它授权我</li>
-            <li><span class="edge-swatch edge-offline"></span>未连接 / 待接通</li>
-            <li><span class="edge-swatch edge-revoked"></span>已撤销</li>
-          </ul>
-          <p class="legend-note muted">本机视角：只展示你与已知对端的关系，不代表全网拓扑。</p>
-        </details>
+        <section id="legend-panel" class="legend-panel">
+          <button id="legend-toggle" class="legend-head" type="button" aria-expanded="true" aria-controls="legend-body">
+            <span>图例</span>
+            <span class="legend-chevron">▾</span>
+          </button>
+          <div id="legend-body" class="legend-body">
+            <ul id="namespace-legend" class="legend-list"></ul>
+            <h2>边</h2>
+            <ul class="legend-list legend-edges">
+              <li><span class="edge-swatch edge-mine"></span>我授权它</li>
+              <li><span class="edge-swatch edge-theirs"></span>它授权我</li>
+              <li><span class="edge-swatch edge-offline"></span>未连接 / 待接通</li>
+              <li><span class="edge-swatch edge-revoked"></span>已撤销</li>
+            </ul>
+            <p class="legend-note muted">本机视角：只展示你与已知对端的关系，不代表全网拓扑。</p>
+          </div>
+        </section>
       </nav>
 
       <main class="stage-wrap">

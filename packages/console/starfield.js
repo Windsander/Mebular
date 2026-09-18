@@ -518,18 +518,41 @@ export class StarStage {
         ctx.stroke();
       }
 
+      // 远近明暗过渡：两端亮度按各自深度取值（本机端亮、远端暗），
+      // 形成“由近及远”的纵深；两端极短渐隐仅用于软化接点
+      const fromDepth = g.from.depth ?? 0.6;
+      const toDepth = g.to.depth ?? 0.6;
+      const endAlpha = (d) => alpha * (0.5 + d * 0.9);
+      // 较远（深度更低）的一端再按航道长度衰减，强化“由近及远”
+      const dimEnd = Math.max(0.32, 1 - Math.min(0.5, g.dist / ((Math.min(this.width, this.height) || 720) * 1.15)));
+      let aFrom = endAlpha(fromDepth);
+      let aTo = endAlpha(toDepth);
+      if (fromDepth >= toDepth) aTo *= dimEnd;
+      else aFrom *= dimEnd;
+      const breathe = online && !this.reducedMotion
+        ? 0.92 + 0.08 * Math.sin(time * 1.6 + (hashString(`${edge.from}->${edge.to}`) % 628) / 100)
+        : 1;
       const grad = ctx.createLinearGradient(g.sx, g.sy, g.ex, g.ey);
-      grad.addColorStop(0, rgba(baseColor, 0));
-      grad.addColorStop(0.12, rgba(baseColor, alpha));
-      grad.addColorStop(0.88, rgba(baseColor, alpha));
-      grad.addColorStop(1, rgba(baseColor, 0));
+      grad.addColorStop(0, rgba(baseColor, aFrom * 0.55 * breathe));
+      grad.addColorStop(0.08, rgba(baseColor, aFrom * breathe));
+      grad.addColorStop(0.5, rgba(baseColor, ((aFrom + aTo) / 2) * breathe));
+      grad.addColorStop(0.92, rgba(baseColor, aTo * breathe));
+      grad.addColorStop(1, rgba(baseColor, aTo * 0.55 * breathe));
       ctx.beginPath();
       ctx.setLineDash(online ? [1.5, 6] : [5, 6]);
+      // 航线持续流动：虚线沿航道方向缓移（在线时；reduced-motion 静止）
+      if (online && !this.reducedMotion) {
+        const period = 7.5; // 与 [1.5,6] 的点距一致，保证无缝
+        ctx.lineDashOffset = -((time * 20) % period);
+      } else {
+        ctx.lineDashOffset = 0;
+      }
       ctx.strokeStyle = grad;
       ctx.lineWidth = width;
       ctx.moveTo(g.sx, g.sy);
       ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
       ctx.stroke();
+      ctx.lineDashOffset = 0;
       ctx.setLineDash([]);
 
       // 航向标：小箭标（替代大箭头）

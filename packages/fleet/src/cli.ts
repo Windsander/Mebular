@@ -383,7 +383,7 @@ async function runDoctor(args: Args): Promise<number> {
   if (args.json === true) console.log(JSON.stringify(report, null, 2));
   else {
     for (const c of report.checks) {
-      const hint = c.status === 'FAIL' && c.hint ? `  → ${c.hint}` : '';
+      const hint = (c.status === 'FAIL' || c.status === 'WARN') && c.hint ? `  → ${c.hint}` : '';
       console.log(`${c.status}  ${c.name}  ${c.detail}${hint}`);
     }
     console.log(`summary: ok=${report.ok} skipped=[${report.skipped.join(', ')}]`);

@@ -11,7 +11,7 @@
 // 身份文件（<storagePath>.identity.json）保存设备私钥（PKCS8 base64）与证书，
 // 与 ~/.ssh 同级的本地信任假设；不入事件日志、不参与同步。
 
-import { chmod, mkdir, readFile, writeFile } from 'fs/promises';
+import { chmod, mkdir, readFile, rename, rm, writeFile } from 'fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'path';
 import { normalizeNamespace, normalizeNamespaceList } from './core/namespace.js';
@@ -31,11 +31,13 @@ import {
   DEVICE_REVOKE_EVENT,
   POLICY_ISSUER_DECLARE_EVENT,
   NAMESPACE_MEMBERSHIP_EVENT,
+  NAMESPACE_HANDOFF_EVENT,
   type NamespaceGrantRecord,
   type NamespaceRevokeRecord,
   type DeviceRevokeRecord,
   type PolicyIssuerDeclareRecord,
   type NamespaceMembershipRecord,
+  type NamespaceHandoffRecord,
 } from './sync/grantPolicy.js';
 import {
   IdentityManager,
@@ -185,6 +187,34 @@ interface IdentityFileRecord {
   privateKeyEncrypted?: EncryptedKeyMaterial;
   certificate: DeviceCertificate;
   createdAt: number;
+}
+
+/** 2b：交接前置校验结果（退订方视角）。 */
+export interface NamespaceHandoffPlan {
+  ok: boolean;
+  namespace: string;
+  successor: string;
+  /** 继任者是否为该分区的**生效成员** */
+  successorIsMember: boolean;
+  /** 退订方仍持有、继任者尚未 ack 的事件总数（0 = 已全量覆盖） */
+  pendingTotal: number;
+  /** 未完全覆盖的作者明细（诊断：缺哪些作者/多少条） */
+  pendingByAuthor: Array<{ author: string; count: number }>;
+}
+
+/** 2b：退订交接结果。 */
+export interface NamespaceHandoffResult {
+  ok: boolean;
+  action: 'leave';
+  namespace: string;
+  successor: string;
+  forced: boolean;
+  aborted?: boolean;
+  reason?: 'successor-not-member' | 'successor-incomplete';
+  deleted?: { events: number; nodes: number; edges: number };
+  handoffEventId?: string;
+  resumed?: boolean;
+  missing?: Array<{ author: string; count: number }>;
 }
 
 export class Mebular {
@@ -578,6 +608,180 @@ export class Mebular {
       if ((await this.getEffectiveNamespaces(member)).includes(ns)) effective.push(member);
     }
     return effective.sort();
+  }
+
+  // ---------- 2b：退订交接（继任者全量 ack 门禁 + 本地彻底清理） ----------
+
+  private handoffIntentPath(): string {
+    return `${this.config.storagePath}.handoff.json`;
+  }
+
+  private async readHandoffIntent(): Promise<{
+    namespace: string;
+    successor: string;
+    forced: boolean;
+    handoffEventId: string;
+    startedAt: number;
+  } | null> {
+    try {
+      const parsed = JSON.parse(await readFile(this.handoffIntentPath(), 'utf-8')) as Record<string, unknown>;
+      if (typeof parsed.namespace === 'string' && typeof parsed.handoffEventId === 'string') {
+        return {
+          namespace: parsed.namespace,
+          successor: String(parsed.successor ?? ''),
+          forced: parsed.forced === true,
+          handoffEventId: parsed.handoffEventId,
+          startedAt: Number(parsed.startedAt ?? 0),
+        };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async writeHandoffIntent(intent: {
+    namespace: string;
+    successor: string;
+    forced: boolean;
+    handoffEventId: string;
+    startedAt: number;
+  }): Promise<void> {
+    const path = this.handoffIntentPath();
+    await mkdir(dirname(path), { recursive: true });
+    const tmp = `${path}.tmp-${process.pid}`;
+    await writeFile(tmp, JSON.stringify(intent), { mode: 0o600 });
+    try {
+      await chmod(tmp, 0o600);
+    } catch {
+      // Windows 无 POSIX mode
+    }
+    await rename(tmp, path);
+  }
+
+  private async clearHandoffIntent(): Promise<void> {
+    await rm(this.handoffIntentPath(), { force: true });
+  }
+
+  /** 2b：物理删除某分区的全部事件/节点/边（**绝不触碰 `__policy__`**）；幂等可续跑。 */
+  private async purgeNamespace(ns: string): Promise<{ events: number; nodes: number; edges: number; eventIds: string[] }> {
+    if (ns === POLICY_NAMESPACE) throw new Error('拒绝清理保留策略分区 __policy__');
+    const events = await this.storage.listEvents({ namespace: ns });
+    const nodes = await this.storage.listNodes({ namespace: ns });
+    const edges = await this.storage.listEdges({ namespace: ns });
+    for (const event of events) await this.storage.deleteEvent(event.id);
+    for (const node of nodes) await this.storage.deleteNode(node.id);
+    for (const edge of edges) await this.storage.deleteEdge(edge.id);
+    return { events: events.length, nodes: nodes.length, edges: edges.length, eventIds: events.map((e) => e.id) };
+  }
+
+  /**
+   * 2b：交接**前置校验**（只读）——继任者是否为该分区生效成员，且是否已 ack 退订方在该分区的
+   * 全部事件（含退订方自己作为作者的事件）。复用既有 per-event ack（`getPendingEvents`），
+   * **不新增同步协议**、**不放宽快照门禁**。
+   */
+  async planNamespaceHandoff(input: { namespace: string; successor: string }): Promise<NamespaceHandoffPlan> {
+    const ns = normalizeNamespace(input.namespace);
+    if (ns === POLICY_NAMESPACE) throw new Error('不允许对保留策略分区 __policy__ 执行交接');
+    if (typeof input.successor !== 'string' || input.successor.length === 0) {
+      throw new Error('交接需要显式继任者（--successor <deviceId>）');
+    }
+    const members = await this.getNamespaceMembers(ns);
+    const successorIsMember = members.includes(input.successor);
+    // 覆盖要求：继任者已 ack 退订方在该分区持有的、**由他人署名**的事件。
+    // 继任者**自己署名**的事件它本就拥有（无需 ack），排除以免误判“未覆盖”。
+    const pending = (await this.sync.getPendingEvents(input.successor)).filter(
+      (event) => normalizeNamespace(event.namespace) === ns && event.author !== input.successor,
+    );
+    const counts = new Map<string, number>();
+    for (const event of pending) counts.set(event.author, (counts.get(event.author) ?? 0) + 1);
+    const pendingByAuthor = [...counts.entries()]
+      .map(([author, count]) => ({ author, count }))
+      .sort((a, b) => (a.author < b.author ? -1 : a.author > b.author ? 1 : 0));
+    return { ok: successorIsMember && pending.length === 0, namespace: ns, successor: input.successor, successorIsMember, pendingTotal: pending.length, pendingByAuthor };
+  }
+
+  /**
+   * 2b：退订交接——**验前不删**：先校验继任者全量 ack（`force` 跳过门禁但**如实记录**），
+   * 再写交接记录（`__policy__`，含 `forced` 与缺失明细），再**物理清理**本分区数据与本地水位。
+   *
+   * **绝不产生 tombstone**（无删除事件）；**保留 `__policy__`**；崩溃中途可重跑续完。
+   * 重入/重订阅恢复**未支持**（属 2c）。
+   */
+  async leaveNamespace(input: {
+    namespace: string;
+    successor: string;
+    force?: boolean;
+    note?: string;
+  }): Promise<NamespaceHandoffResult> {
+    const ns = normalizeNamespace(input.namespace);
+    if (ns === POLICY_NAMESPACE) throw new Error('不允许对保留策略分区 __policy__ 执行交接');
+    if (typeof input.successor !== 'string' || input.successor.length === 0) {
+      throw new Error('交接需要显式继任者（--successor <deviceId>）');
+    }
+
+    // 续跑：存在同一分区的未完成意图 → 直接继续删除（幂等）
+    const intent = await this.readHandoffIntent();
+    if (intent && intent.namespace === ns) {
+      const purged = await this.purgeNamespace(ns);
+      await this.sync.forgetNamespace(ns, purged.eventIds);
+      await this.clearHandoffIntent();
+      return {
+        ok: true,
+        action: 'leave',
+        namespace: ns,
+        successor: intent.successor,
+        forced: intent.forced,
+        deleted: { events: purged.events, nodes: purged.nodes, edges: purged.edges },
+        handoffEventId: intent.handoffEventId,
+        resumed: true,
+      };
+    }
+
+    const force = input.force === true;
+    // 始终如实计算覆盖明细（force 也记录真相）
+    const plan = await this.planNamespaceHandoff({ namespace: ns, successor: input.successor });
+    if (!force) {
+      if (!plan.successorIsMember) {
+        return { ok: false, action: 'leave', namespace: ns, successor: input.successor, forced: false, aborted: true, reason: 'successor-not-member', missing: plan.pendingByAuthor };
+      }
+      if (plan.pendingTotal > 0) {
+        return { ok: false, action: 'leave', namespace: ns, successor: input.successor, forced: false, aborted: true, reason: 'successor-incomplete', missing: plan.pendingByAuthor };
+      }
+    }
+
+    // 退订 = 成员资格退出（本机在该分区注销）
+    await this.declareNamespaceMembership({ member: this.config.deviceId, namespace: ns, active: false });
+    // 交接记录（审计；不参与策略推导）
+    const handoff: NamespaceHandoffRecord = {
+      handoffId: randomUUID(),
+      namespace: ns,
+      successor: input.successor,
+      forced: force,
+      pendingCount: plan.pendingTotal,
+      ...(plan.pendingByAuthor.length > 0 ? { missingAuthors: plan.pendingByAuthor.map((m) => m.author) } : {}),
+      issuedAt: Date.now(),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    };
+    const event = await this.eventLog.append({
+      type: NAMESPACE_HANDOFF_EVENT,
+      data: { handoff },
+      namespace: POLICY_NAMESPACE,
+    });
+    // 意图记录（图外，崩溃安全）：写下后才开始删除；重跑据此续完
+    await this.writeHandoffIntent({ namespace: ns, successor: input.successor, forced: force, handoffEventId: event.id, startedAt: Date.now() });
+    const purged = await this.purgeNamespace(ns);
+    await this.sync.forgetNamespace(ns, purged.eventIds);
+    await this.clearHandoffIntent();
+    return {
+      ok: true,
+      action: 'leave',
+      namespace: ns,
+      successor: input.successor,
+      forced: force,
+      deleted: { events: purged.events, nodes: purged.nodes, edges: purged.edges },
+      handoffEventId: event.id,
+    };
   }
 
   /**

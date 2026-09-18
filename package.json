@@ -82,6 +82,7 @@
     "verify:fleet:grant": "node scripts/verify-fleet-grant.mjs",
     "verify:fleet:service": "node scripts/verify-fleet-service.mjs",
     "verify:fleet:membership": "node scripts/verify-fleet-membership.mjs",
+    "verify:fleet:handoff": "node scripts/verify-fleet-handoff.mjs",
     "verify:fleet:all": "node scripts/verify-fleet-all.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },

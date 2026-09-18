@@ -7,7 +7,12 @@ export {
   type DeviceIdentity,
   type UserMasterKeyPair,
 } from './crypto/IdentityManager.js';
-export { Mebular, type MebularConfig } from './mebular.js';
+export {
+  Mebular,
+  type MebularConfig,
+  type NamespaceHandoffPlan,
+  type NamespaceHandoffResult,
+} from './mebular.js';
 export {
   EventLog,
   canonicalize,
@@ -40,11 +45,13 @@ export {
   POLICY_NAMESPACE,
   POLICY_ISSUER_DECLARE_EVENT,
   NAMESPACE_MEMBERSHIP_EVENT,
+  NAMESPACE_HANDOFF_EVENT,
   type NamespaceGrantRecord,
   type NamespaceRevokeRecord,
   type DeviceRevokeRecord,
   type PolicyIssuerDeclareRecord,
   type NamespaceMembershipRecord,
+  type NamespaceHandoffRecord,
   type PolicyState,
 } from './sync/grantPolicy.js';
 export { CompositeNamespacePolicy, type NamespaceMembershipPolicy } from './sync/namespacePolicy.js';

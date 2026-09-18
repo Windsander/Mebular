@@ -502,6 +502,24 @@ export class SyncManager extends EventEmitter {
   }
 
   /**
+   * 2b：分区**彻底清理后**丢弃本地同步状态——该分区的 per-(对端,分区) 水位、本机快照水位，
+   * 以及被删除事件的 per-event ack。**只删本地状态，不产生任何事件**（无 tombstone）。
+   */
+  async forgetNamespace(namespace: string, eventIds: readonly string[] = []): Promise<void> {
+    await this.ensureSyncStateLoaded();
+    const ns = normalizeNamespace(namespace);
+    if (eventIds.length > 0) {
+      const ids = new Set(eventIds);
+      for (const acked of this.syncedByPeer.values()) {
+        for (const id of ids) acked.delete(id);
+      }
+    }
+    for (const watermarks of this.peerWatermarks.values()) delete watermarks[ns];
+    delete this.localSnapshotClocks[ns];
+    await this.persistSyncState();
+  }
+
+  /**
    * 记录对端已确认的事件，并据此推进 per-(对端, 分区) 水位。
    * `sentEvents` 为本轮实际发出的候选事件（用于把 ack 映射回分区/作者）；
    * 只推进已被 ack 的事件，且只在本轮 allow 之内（调用方已过滤）。

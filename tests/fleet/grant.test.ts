@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Mebular, POLICY_NAMESPACE } from '@mebular/core';
@@ -14,6 +14,8 @@ import {
   readMasterKeyFile,
   revokeNamespaceGrant,
   setNamespaceMembership,
+  planHandoff,
+  leaveNamespace,
   namespaceMembers,
   namespaceMembership,
   validateFleetConfig,
@@ -193,5 +195,57 @@ describe('M1–M3：fleet 成员资格 API 与 doctor', () => {
     await setNamespaceMembership(dir, { to: 'device-A' });
     report = await doctor(dir);
     expect(report.checks.find((c) => c.name === 'namespace 成员资格')?.status).toBe('PASS');
+  });
+});
+
+describe('2b：fleet 交接 API 与 doctor', () => {
+  let root: string;
+  let dir: string;
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'fleet-handoff-'));
+    dir = join(root, 'A');
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  it('planHandoff 非成员 / 覆盖不足；leaveNamespace force 成功；doctor 交接状态', async () => {
+    await onboardDevice({ dir, device: 'device-A', peerDevice: 'device-B', policyIssuers: ['device-A'], agents: echoAgent });
+    await setNamespaceMembership(dir, { to: 'device-A' });
+    await setNamespaceMembership(dir, { to: 'device-B' });
+
+    // A 造 1 条该分区事件；B 未 ack
+    const cfg = await loadFleetConfig(fleetConfigPath(dir));
+    const enc = await readMasterKeyFile(cfg.masterKeyFile);
+    const m = new Mebular(offlineMebularOptions(cfg, enc) as never);
+    await m.initialize();
+    await m.graph.createNode('fact', { text: 'x' }, [], { namespace: cfg.namespace });
+    await m.shutdown();
+
+    await expect(planHandoff(dir, { successor: 'device-Z' })).resolves.toMatchObject({ successorIsMember: false, ok: false });
+    const plan = await planHandoff(dir, { successor: 'device-B' });
+    expect(plan.ok).toBe(false);
+    expect(plan.pendingByAuthor).toEqual([{ author: 'device-A', count: 1 }]);
+
+    const blocked = await leaveNamespace(dir, { successor: 'device-B' });
+    expect(blocked).toMatchObject({ ok: false, aborted: true, reason: 'successor-incomplete' });
+
+    let report = await doctor(dir);
+    expect(report.checks.find((c) => c.name === '交接状态')?.status).toBe('PASS');
+
+    const forced = await leaveNamespace(dir, { successor: 'device-B', force: true, note: 'test' });
+    expect(forced).toMatchObject({ ok: true, forced: true });
+    expect(forced.deleted?.events).toBe(1);
+    report = await doctor(dir);
+    expect(report.checks.find((c) => c.name === '交接状态')?.status).toBe('PASS'); // 意图已清除
+    expect((await namespaceMembership(dir)).members).not.toContain('device-A'); // 退订=成员退出
+  });
+
+  it('doctor 交接状态：存在意图文件 → FAIL', async () => {
+    await onboardDevice({ dir, device: 'device-A', agents: echoAgent });
+    const cfg = await loadFleetConfig(fleetConfigPath(dir));
+    await writeFile(`${cfg.storagePath}.handoff.json`, JSON.stringify({ namespace: 'tasks', successor: 'device-B', handoffEventId: 'x', startedAt: 1 }), { mode: 0o600 });
+    const report = await doctor(dir);
+    expect(report.checks.find((c) => c.name === '交接状态')?.status).toBe('FAIL');
   });
 });

@@ -6,7 +6,12 @@
 import { access, chmod, mkdir } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import net from 'node:net';
-import { Mebular, POLICY_NAMESPACE } from '@mebular/core';
+import {
+  Mebular,
+  POLICY_NAMESPACE,
+  type NamespaceHandoffPlan,
+  type NamespaceHandoffResult,
+} from '@mebular/core';
 import { isHeartbeatFresh, readHeartbeat, registeredServicesForDir } from '@mebular/service';
 
 import {
@@ -255,6 +260,43 @@ export async function namespaceMembers(dir: string, namespace?: string): Promise
   await mebular.initialize();
   try {
     return await mebular.getNamespaceMembers(namespace ?? config.namespace);
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/** 2b：交接前置校验（只读）——继任者是否在册且已 ack 本机在该分区的全部事件。 */
+export async function planHandoff(
+  dir: string,
+  input: { namespace?: string; successor: string },
+): Promise<NamespaceHandoffPlan> {
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    return await mebular.planNamespaceHandoff({ namespace: input.namespace ?? config.namespace, successor: input.successor });
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/** 2b：退订交接（默认要求继任者全量 ack；`force` 仅本地 CLI，仍如实记录）。 */
+export async function leaveNamespace(
+  dir: string,
+  input: { namespace?: string; successor: string; force?: boolean; note?: string },
+): Promise<NamespaceHandoffResult> {
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    return await mebular.leaveNamespace({
+      namespace: input.namespace ?? config.namespace,
+      successor: input.successor,
+      ...(input.force !== undefined ? { force: input.force } : {}),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    });
   } finally {
     await mebular.shutdown();
   }
@@ -543,6 +585,14 @@ export async function doctor(dir: string): Promise<DoctorReport> {
     } catch (error) {
       add('同步已收敛', 'FAIL', `读取本地状态失败：${(error as Error).message}`);
     }
+  }
+
+  // 7.5) 2b 交接状态：存在未完成意图（图外 sidecar）→ FAIL（重跑 `fleet leave` 幂等续跑）。
+  const intentPath = `${config.storagePath}.handoff.json`;
+  if (await exists(intentPath)) {
+    add('交接状态', 'FAIL', `存在未完成交接意图：${intentPath}`, '重跑 `fleet leave --successor <id>`（幂等续跑）');
+  } else {
+    add('交接状态', 'PASS', '无未完成交接');
   }
 
   // 8) 服务已注册（D4）：是否有常驻服务**指向本目录**（读 manifest，dir-scoped，temp 目录可复现）。

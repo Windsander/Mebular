@@ -28,6 +28,7 @@
     "access": "public"
   },
   "dependencies": {
-    "@mebular/core": "file:../.."
+    "@mebular/core": "file:../..",
+    "@mebular/service": "file:../service"
   }
 }

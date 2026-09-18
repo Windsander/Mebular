@@ -6,7 +6,15 @@
 
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Mebular } from '@mebular/core';
+import {
+  runServiceCli,
+  resolveBuildSha,
+  startHeartbeat,
+  type ServiceDescriptor,
+  type ServicePlatform,
+} from '@mebular/service';
 import { echoResultFor, EchoExecutor, ExecutionLog } from './runtime/executor.js';
 import { FleetNode } from './runtime/node.js';
 import { FleetWorker } from './runtime/worker.js';
@@ -30,8 +38,9 @@ interface Args {
   [key: string]: string | boolean | undefined;
 }
 
-function parseArgs(argv: string[]): { command: string | undefined; args: Args } {
+function parseArgs(argv: string[]): { command: string | undefined; args: Args; positionals: string[] } {
   const args: Args = {};
+  const positionals: string[] = [];
   let command: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
@@ -45,9 +54,11 @@ function parseArgs(argv: string[]): { command: string | undefined; args: Args } 
       }
     } else if (command === undefined) {
       command = token;
+    } else {
+      positionals.push(token);
     }
   }
-  return { command, args };
+  return { command, args, positionals };
 }
 
 const str = (v: string | boolean | undefined, fallback: string): string =>
@@ -58,6 +69,64 @@ const num = (v: string | boolean | undefined, fallback: number): number => {
   return Number.isFinite(n) ? n : fallback;
 };
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** 构建 SHA（心跳/服务单元用）：version.json → env → git → unknown。 */
+function buildSha(): string {
+  try {
+    const v = JSON.parse(readFileSync(new URL('./version.json', import.meta.url), 'utf-8')) as { sha?: string };
+    if (v.sha && v.sha !== 'unknown') return v.sha;
+  } catch {
+    // fall through
+  }
+  return resolveBuildSha();
+}
+
+/** 常驻模式（`--run-forever`）：注册终止信号，返回 `isStopping` 与注销函数。 */
+function installShutdownHandlers(): { isStopping: () => boolean; dispose: () => void } {
+  let stopping = false;
+  const onSignal = (): void => {
+    stopping = true;
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  process.on('SIGBREAK', onSignal);
+  return {
+    isStopping: () => stopping,
+    dispose: () => {
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
+      process.off('SIGBREAK', onSignal);
+    },
+  };
+}
+
+/** 服务描述子（fleet-node / fleet-worker），供 `fleet service` 与单元生成复用。 */
+function fleetServiceDescriptors(dir: string): ServiceDescriptor[] {
+  const cliPath = fileURLToPath(import.meta.url);
+  const common = { execPath: process.execPath, heartbeatDir: dir, workingDir: dir, env: { MEBULAR_FLEET_DIR: dir } };
+  return [
+    { kind: 'fleet-node', args: [cliPath, 'node', '--dir', dir, '--run-forever'], ...common },
+    { kind: 'fleet-worker', args: [cliPath, 'worker', '--dir', dir, '--run-forever'], ...common },
+  ];
+}
+
+function flagValue(argv: readonly string[], name: string): string | undefined {
+  const i = argv.indexOf(name);
+  return i >= 0 && argv[i + 1] !== undefined && !argv[i + 1]!.startsWith('--') ? argv[i + 1] : undefined;
+}
+
+/** `fleet service …`：raw argv（保留 service 自身 flags，如 --no-autostart/--label/--extra）。 */
+function runFleetService(argv: readonly string[]): number {
+  const dir = flagValue(argv, '--dir') ?? './.fleet';
+  return runServiceCli({
+    descriptors: fleetServiceDescriptors(dir),
+    argv,
+    ...(flagValue(argv, '--home') !== undefined ? { home: flagValue(argv, '--home')! } : {}),
+    ...(flagValue(argv, '--platform') !== undefined
+      ? { platform: flagValue(argv, '--platform')! as ServicePlatform }
+      : {}),
+  });
+}
 
 /** `fleet --version`：打印包版本与**构建时的 commit SHA**（`dist/version.json`；缺失→unknown）。 */
 function versionString(): string {
@@ -263,19 +332,27 @@ async function runDoctor(args: Args): Promise<number> {
   return report.ok ? 0 : 1;
 }
 
-async function runServe(args: Args): Promise<number> {
+/**
+ * `fleet node`（任务板/发起端）。旧名 `fleet serve`（deprecated alias）。
+ * `--run-forever`：常驻（服务模式），直到收到 SIGINT/SIGTERM；写 `service.heartbeat`（role=node）。
+ */
+async function runFleetNode(args: Args): Promise<number> {
   const dir = str(args.dir, './.fleet');
+  const runForever = args['run-forever'] === true;
   const config = await loadFleetConfig(fleetConfigPath(dir));
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(mebularOptions(config, encryption) as never);
   await mebular.initialize();
+  const stopHeartbeat = startHeartbeat(dir, { role: 'node', sha: buildSha() });
+  const shutdown = installShutdownHandlers();
   console.log(JSON.stringify({
-    role: 'serve', event: 'listening', device: config.device,
+    role: 'node', event: 'listening', device: config.device,
     multiaddr: mebular.node!.getLocalMultiaddrs()[0] ?? null, peerId: mebular.node!.peerId.id,
   }));
   const store = new MebularTaskEventStore(mebular);
   const node = new FleetNode({ device: config.device, store, transport: new NullTransport(), quota: new LocalQuota({ limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000 }) });
   const submit = num(args.submit, 0);
+  let code = 0;
   if (submit > 0) {
     // 先等首轮同步（对端连入）再提交，避免在无连接时提交导致事件丢失触发。
     const waitSyncMs = num(args['wait-sync-ms'], 0);
@@ -310,23 +387,38 @@ async function runServe(args: Args): Promise<number> {
     const resultsMatch = states.every((s) =>
       s.status === 'done' && (expectPrefix.length > 0 ? (s.resultRef ?? '').startsWith(expectPrefix) : (s.resultRef ?? '').length > 0),
     );
-    console.log(JSON.stringify({ role: 'serve', submitted: ids.length, done: done.length, allTerminal: ok, resultsMatch }));
-    const lingerMs = num(args['linger-ms'], 0);
-    if (lingerMs > 0) await sleep(lingerMs); // 保持在线，便于对端 doctor 看到可达/已收敛
-    await mebular.shutdown();
-    return ok && done.length === ids.length && resultsMatch ? 0 : 1;
+    console.log(JSON.stringify({ role: 'node', submitted: ids.length, done: done.length, allTerminal: ok, resultsMatch }));
+    code = ok && done.length === ids.length && resultsMatch ? 0 : 1;
+    if (runForever) {
+      while (!shutdown.isStopping()) await sleep(200); // 常驻：保持在线供对端同步
+    } else {
+      const lingerMs = num(args['linger-ms'], 0);
+      if (lingerMs > 0) await sleep(lingerMs);
+    }
+  } else if (runForever) {
+    while (!shutdown.isStopping()) await sleep(200);
+  } else {
+    await sleep(num(args['timeout-ms'], 60_000));
   }
-  await sleep(num(args['timeout-ms'], 60_000));
+  stopHeartbeat();
+  shutdown.dispose();
   await mebular.shutdown();
-  return 0;
+  return code;
 }
 
-async function runWork(args: Args): Promise<number> {
+/**
+ * `fleet worker`（执行端）。旧名 `fleet work`（deprecated alias）。
+ * `--run-forever`：常驻（服务模式）；写 `service.heartbeat`（role=worker）。
+ */
+async function runFleetWorker(args: Args): Promise<number> {
   const dir = str(args.dir, './.fleet');
+  const runForever = args['run-forever'] === true;
   const config = await loadFleetConfig(fleetConfigPath(dir));
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(mebularOptions(config, encryption) as never);
   await mebular.initialize();
+  const stopHeartbeat = startHeartbeat(dir, { role: 'worker', sha: buildSha() });
+  const shutdown = installShutdownHandlers();
   for (const peer of config.peers) {
     if (peer.addr === undefined) continue;
     const id = /\/p2p\/([^/]+)/.exec(peer.addr)?.[1] ?? peer.device;
@@ -341,34 +433,50 @@ async function runWork(args: Args): Promise<number> {
   const worker = new FleetWorker({ device: config.device, agent: str(args.agent, 'worker'), store, transport: new NullTransport(), registry: buildRegistry(config.agents), log });
   await worker.reconcile();
   const deadline = Date.now() + num(args['timeout-ms'], 60_000);
-  while (Date.now() < deadline) {
+  while (runForever ? !shutdown.isStopping() : Date.now() < deadline) {
     await worker.pollOnce();
     await sleep(num(args['interval-ms'], 10));
   }
-  console.log(JSON.stringify({ role: 'work', device: config.device, executed: log.size() }));
+  console.log(JSON.stringify({ role: 'worker', device: config.device, executed: log.size() }));
+  stopHeartbeat();
+  shutdown.dispose();
   await mebular.shutdown();
   return 0;
 }
 
 async function main(): Promise<void> {
-  const { command, args } = parseArgs(process.argv.slice(2));
+  const raw = process.argv.slice(2);
+  // `service` 有自身 flags（--no-autostart/--label/--extra），走 raw argv，不经通用解析。
+  if (raw[0] === 'service') {
+    process.exit(runFleetService(raw.slice(1)));
+  }
+  const { command, args, positionals } = parseArgs(raw);
   let code = 2;
   if (args.version === true) {
     console.log(`@mebular/fleet ${versionString()}`);
     process.exit(0);
   }
   try {
-  if (command === 'node') code = await runNode(args);
-  else if (command === 'worker') code = await runWorker(args);
+  if (command === 'spool') {
+    const sub = positionals[0];
+    if (sub === 'node') code = await runNode(args);
+    else if (sub === 'worker') code = await runWorker(args);
+    else {
+      console.error('用法：fleet spool node|worker …（M2 单机双进程，spool 传输）');
+      code = 2;
+    }
+  }
+  else if (command === 'node') code = await runFleetNode(args);
+  else if (command === 'worker') code = await runFleetWorker(args);
+  else if (command === 'serve') { console.error('[deprecated] `fleet serve` → `fleet node`'); code = await runFleetNode(args); }
+  else if (command === 'work') { console.error('[deprecated] `fleet work` → `fleet worker`'); code = await runFleetWorker(args); }
   else if (command === 'onboard') code = await runOnboard(args);
   else if (command === 'doctor') code = await runDoctor(args);
   else if (command === 'grant') code = await runGrant(args);
   else if (command === 'revoke') code = await runRevoke(args);
   else if (command === 'declare-issuer') code = await runDeclareIssuer(args);
-  else if (command === 'serve') code = await runServe(args);
-  else if (command === 'work') code = await runWork(args);
   else {
-    console.error('用法：fleet onboard|doctor|grant|revoke|declare-issuer|serve|work|node|worker … | fleet --version');
+    console.error('用法：fleet onboard|doctor|grant|revoke|declare-issuer|node|worker|service|spool … | fleet --version');
     code = 2;
   }
   } catch (error) {

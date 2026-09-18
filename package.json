@@ -84,6 +84,7 @@
     "verify:fleet:membership": "node scripts/verify-fleet-membership.mjs",
     "verify:fleet:handoff": "node scripts/verify-fleet-handoff.mjs",
     "verify:fleet:rejoin": "node scripts/verify-fleet-rejoin.mjs",
+    "verify:fleet:collab": "node scripts/verify-fleet-collab.mjs",
     "verify:fleet:all": "node scripts/verify-fleet-all.mjs",
     "dev": "node --loader ts-node/esm src/index.ts"
   },

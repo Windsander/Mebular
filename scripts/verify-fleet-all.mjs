@@ -17,6 +17,7 @@ const SUITES = [
   { name: 'membership', script: fileURLToPath(new URL('./verify-fleet-membership.mjs', import.meta.url)) },
   { name: 'handoff', script: fileURLToPath(new URL('./verify-fleet-handoff.mjs', import.meta.url)) },
   { name: 'rejoin', script: fileURLToPath(new URL('./verify-fleet-rejoin.mjs', import.meta.url)) },
+  { name: 'collab', script: fileURLToPath(new URL('./verify-fleet-collab.mjs', import.meta.url)) },
 ];
 
 function run(script) {

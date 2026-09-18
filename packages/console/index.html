@@ -25,13 +25,14 @@
 
     <div class="layout">
       <nav class="sidebar">
+        <button id="sidebar-toggle" class="rail-toggle" type="button" title="收起 / 展开侧栏" aria-label="收起 / 展开侧栏">‹</button>
         <ul id="view-nav" class="view-nav">
-          <li><button class="view-btn is-active" data-view="map" type="button">● 星图</button></li>
-          <li><button class="view-btn" data-view="domains" type="button">○ 域视图</button></li>
-          <li><button class="view-btn" data-view="audit" type="button">○ 审计</button></li>
+          <li><button class="view-btn is-active" data-view="map" type="button"><span class="view-icon">●</span><span class="view-label">星图</span></button></li>
+          <li><button class="view-btn" data-view="domains" type="button"><span class="view-icon">○</span><span class="view-label">域视图</span></button></li>
+          <li><button class="view-btn" data-view="audit" type="button"><span class="view-icon">○</span><span class="view-label">审计</span></button></li>
         </ul>
-        <div class="legend">
-          <h2>域图例</h2>
+        <details class="legend">
+          <summary>图例</summary>
           <ul id="namespace-legend" class="legend-list"></ul>
           <h2>边</h2>
           <ul class="legend-list legend-edges">
@@ -41,7 +42,7 @@
             <li><span class="edge-swatch edge-revoked"></span>已撤销</li>
           </ul>
           <p class="legend-note muted">本机视角：只展示你与已知对端的关系，不代表全网拓扑。</p>
-        </div>
+        </details>
       </nav>
 
       <main class="stage-wrap">
@@ -79,7 +80,10 @@
 
       <aside class="aside">
         <section id="device-card" class="card">
-          <h2>设备卡</h2>
+          <div class="card-head">
+            <h2>设备卡</h2>
+            <button id="device-card-close" class="icon-btn" type="button" title="关闭" aria-label="关闭设备卡">✕</button>
+          </div>
           <p class="muted" id="device-card-empty">点击星图上的设备查看详情。</p>
           <div id="device-card-body" hidden></div>
         </section>

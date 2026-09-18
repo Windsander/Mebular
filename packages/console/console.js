@@ -119,8 +119,9 @@ function computeDegraded() {
 // ---------- 渲染 ----------
 
 function render() {
-  if (!state.selected && params.get('select')) {
-    state.selected = state.devices.find((d) => d.deviceId === params.get('select')) ?? null;
+  const selectParam = new URLSearchParams(location.search).get('select');
+  if (!state.selected && selectParam) {
+    state.selected = state.devices.find((d) => d.deviceId === selectParam) ?? null;
   }
   renderTopbar();
   renderLegend();
@@ -465,6 +466,7 @@ function renderSettings() {
       <h3>身份与存储 <span class="badge badge-muted">只读</span></h3>
       ${kv([
         copyRow('deviceId', s.identity.deviceId),
+        ...(s.identity.name ? [['名称', escapeHtml(s.identity.name)]] : []),
         ...(s.identity.peerId ? [copyRow('peerId', s.identity.peerId)] : []),
         ...addrRows,
         copyRow('storagePath', s.storage.path ?? '—'),
@@ -658,6 +660,8 @@ function describeEvent(event) {
 }
 
 function renderDeviceCard() {
+  const asideEl = document.querySelector('.aside');
+  if (asideEl) asideEl.classList.toggle('is-open', Boolean(state.selected) && state.view === 'map');
   const empty = $('#device-card-empty');
   const body = $('#device-card-body');
   if (!state.selected) {
@@ -819,6 +823,8 @@ function setView(view) {
   $('#audit-view').hidden = view !== 'audit';
   $('#stage').style.visibility = view === 'map' ? 'visible' : 'hidden';
   $('#empty-state').hidden = true;
+  const asideEl = document.querySelector('.aside');
+  if (asideEl) asideEl.classList.toggle('is-open', view === 'map' && Boolean(state.selected));
   renderEmptyState();
 }
 
@@ -973,6 +979,31 @@ $('#handoff-close').addEventListener('click', () => {
 });
 $('#handoff-plan').addEventListener('click', runHandoffPlan);
 $('#handoff-confirm').addEventListener('click', confirmHandoff);
+
+$('#device-card-close').addEventListener('click', () => {
+  state.selected = null;
+  const url = new URL(location.href);
+  url.searchParams.delete('select');
+  history.replaceState(null, '', url);
+  render();
+});
+
+// 侧栏收起（桌面玻璃浮层的图标条形态；移动端不生效）
+{
+  const layoutEl = document.querySelector('.layout');
+  const toggle = $('#sidebar-toggle');
+  const applyRail = (collapsed) => {
+    layoutEl.classList.toggle('rail-collapsed', collapsed);
+    toggle.textContent = collapsed ? '›' : '‹';
+    toggle.title = collapsed ? '展开侧栏' : '收起侧栏';
+  };
+  applyRail(localStorage.getItem('mebular_rail_collapsed') === '1');
+  toggle.addEventListener('click', () => {
+    const next = !layoutEl.classList.contains('rail-collapsed');
+    localStorage.setItem('mebular_rail_collapsed', next ? '1' : '0');
+    applyRail(next);
+  });
+}
 $('#wizard-close').addEventListener('click', closeWizard);
 $('#wizard-back').addEventListener('click', () => wizardSet({ type: 'BACK' }));
 $('#wizard-next').addEventListener('click', wizardNext);

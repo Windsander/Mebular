@@ -280,3 +280,29 @@ fleet worker --dir ~/.fleet --run-forever   # 旧名 `fleet work`（deprecated a
 - **Windows 边界**：Task Scheduler 为登录级、非真 Windows Service（后者需管理员，记为后续可选项）；`--no-autostart` 下任务注册后立即 `schtasks /End`（已注册但停止）。
 
 > 改名（D5）：`fleet serve → fleet node`、`fleet work → fleet worker`（与 `FleetNode`/`FleetWorker` 对齐）；旧动词保留为 **deprecated alias**（行为等价，stderr 提示）。JSON `role` 字段同步为 `node`/`worker`；M2 单机双进程（spool）命令改为 `fleet spool node|worker`。
+
+## 11. 成员资格（M1–M3）：订阅 = 持久、签名的图上记录
+
+订阅从「瞬时 hello 声明」升格为**图上持久成员资格**（`namespace_membership`，落 `__policy__`）。裁剪链变为
+`对端授权 ∩ 对端成员资格 ∩ 本机订阅声明`；hello 订阅声明仅作**活跃性/一致性校验**，不一致时**显式拒绝/告警**
+（`sync-completed.membershipRejected`），不静默。
+
+```bash
+# 把 device-B 声明为 tasks 分区的成员（在册）；--leave 注销
+fleet member --dir ~/.fleet --to device-B --namespace tasks
+fleet member --dir ~/.fleet --to device-B --namespace tasks --leave
+
+# 查询：生效成员 = 图上在册成员 ∩ 该成员对该分区的生效授权（默认拒绝不变）
+fleet members --dir ~/.fleet --namespace tasks
+# → {"ok":true,"active":true,"members":["device-A","device-B"],"onRecord":["device-A","device-B"]}
+```
+
+- **生效成员 = 成员记录 ∧ 授权**：`getNamespaceMembers(ns)`；**成员记录不放宽授权**（无 grant 仍不流动，默认拒绝不变）。
+- **兼容（legacy-empty）**：某分区**没有任何成员记录**时视为未启用成员资格，沿用 hello 订阅裁剪（不破坏既有部署）；
+  一旦出现成员记录，即成为该分区**强制闸门**（非成员收不到）。
+- `doctor` 增 `namespace 成员资格`：未启用 → **SKIP**（明列原因）；启用后本机在册 → PASS，否则 FAIL。
+- **A→B 与 B→A 都需要对方“在册”**：A 发任务要 A 视图里 B 是成员；B 回传结果要 B 视图里 A 是成员。
+- **2b 未做**：注销（`--leave`）只改成员集合；**数据清理/继任者全量 ack 门禁属 2b**，本轮不声称已实现退订交接。
+
+> 破坏性协议变更：旧节点忽略 `namespace_membership`，对旧端该分区始终「未启用成员资格」→ 行为不变或**少收**
+> （安全方向，不 fail-open）。详见仓库根 `SEALING.md` §3 M1–M3。

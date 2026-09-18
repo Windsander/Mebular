@@ -91,6 +91,8 @@ export class StarStage {
     this.screen = new Map();
     this.pointerNx = 0.5;
     this.pointerNy = 0.5;
+    this.targetNx = 0.5;
+    this.targetNy = 0.5;
 
     this._tick = this._tick.bind(this);
     this._resize = this._resize.bind(this);
@@ -257,16 +259,12 @@ export class StarStage {
     if (this.onHover) this.onHover(hit, x, y);
     const nx = rect.width ? x / rect.width : 0.5;
     const ny = rect.height ? y / rect.height : 0.5;
-    this.pointerNx = nx;
-    this.pointerNy = ny;
-    if (this.nebula) { this.nebula.mouseX = nx; this.nebula.mouseY = ny; }
-    if (this.starsField) { this.starsField.mouseX = nx; this.starsField.mouseY = ny; }
+    this.targetNx = nx;
+    this.targetNy = ny;
   }
 
   _pointerLeave() {
     this.hovered = null;
-    this.pointerNx = 0.5;
-    this.pointerNy = 0.5;
     if (this.onHover) this.onHover(null, 0, 0);
   }
 
@@ -315,6 +313,11 @@ export class StarStage {
   }
 
   _computeScreen(time) {
+    const ease = this.reducedMotion ? 1 : 0.12;
+    this.pointerNx += (this.targetNx - this.pointerNx) * ease;
+    this.pointerNy += (this.targetNy - this.pointerNy) * ease;
+    if (this.nebula) { this.nebula.mouseX = this.pointerNx; this.nebula.mouseY = this.pointerNy; }
+    if (this.starsField) { this.starsField.mouseX = this.pointerNx; this.starsField.mouseY = this.pointerNy; }
     const mx = (this.pointerNx ?? 0.5) - 0.5;
     const my = (this.pointerNy ?? 0.5) - 0.5;
     const animate = !this.reducedMotion;

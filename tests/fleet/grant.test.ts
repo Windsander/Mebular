@@ -16,6 +16,8 @@ import {
   setNamespaceMembership,
   planHandoff,
   leaveNamespace,
+  rejoinNamespace,
+  rejoinReset,
   namespaceMembers,
   namespaceMembership,
   validateFleetConfig,
@@ -247,5 +249,34 @@ describe('2b：fleet 交接 API 与 doctor', () => {
     await writeFile(`${cfg.storagePath}.handoff.json`, JSON.stringify({ namespace: 'tasks', successor: 'device-B', handoffEventId: 'x', startedAt: 1 }), { mode: 0o600 });
     const report = await doctor(dir);
     expect(report.checks.find((c) => c.name === '交接状态')?.status).toBe('FAIL');
+  });
+});
+
+describe('2c：fleet 重入 API 与 doctor', () => {
+  let root: string;
+  let dir: string;
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'fleet-rejoin-'));
+    dir = join(root, 'A');
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  it('rejoinNamespace 准入：授权自己才可；写 reset 标记；幂等', async () => {
+    await onboardDevice({ dir, device: 'device-A', peerDevice: 'device-B', agents: echoAgent });
+    // 无对 device-A 的授权 → not-authorized
+    expect(await rejoinNamespace(dir, { namespace: 'tasks' })).toMatchObject({ ok: false, reason: 'not-authorized' });
+    expect(await rejoinReset(dir, 'tasks')).toBe(false);
+  });
+
+  it('doctor：重入状态 PASS（reset=false / true）', async () => {
+    await onboardDevice({ dir, device: 'device-A', agents: echoAgent });
+    let report = await doctor(dir);
+    expect(report.checks.find((c) => c.name === '重入状态')?.status).toBe('PASS');
+    const cfg = await loadFleetConfig(fleetConfigPath(dir));
+    await writeFile(`${cfg.storagePath}.rejoin.${cfg.namespace}.json`, JSON.stringify({ namespace: cfg.namespace, reset: true, at: 1 }), { mode: 0o600 });
+    report = await doctor(dir);
+    expect(report.checks.find((c) => c.name === '重入状态')?.detail).toMatch(/reset=true/);
   });
 });

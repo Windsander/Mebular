@@ -500,8 +500,8 @@ export class StarStage {
 
       // 光晕（按深度缩放与衰减）
       if (node.self || node.online) {
-        const glowR = (node.self ? 26 : 18) * scale;
-        const glowAlpha = (node.self ? 0.55 : 0.4) * (0.45 + depth * 0.75);
+        const glowR = (node.self ? 18 : 18) * scale;
+        const glowAlpha = (node.self ? 0.3 : 0.4) * (0.45 + depth * 0.75);
         const glow = ctx.createRadialGradient(pos.x, pos.y, 1, pos.x, pos.y, glowR);
         glow.addColorStop(0, node.self ? `rgba(255,233,168,${glowAlpha})` : `rgba(86,180,233,${glowAlpha})`);
         glow.addColorStop(1, 'rgba(86,180,233,0)');
@@ -512,7 +512,7 @@ export class StarStage {
       }
 
       if (node.self) {
-        drawSelfBeacon(ctx, pos.x, pos.y, radius * 1.7, time, this.reducedMotion, node.online);
+        drawSelfBeacon(ctx, pos.x, pos.y, radius * 1.15, time, this.reducedMotion, node.online);
       } else {
         ctx.beginPath();
         ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
@@ -558,7 +558,7 @@ export class StarStage {
       ctx.font = `${labelSize}px ui-monospace, Menlo, monospace`;
       ctx.globalAlpha = 0.5 + depth * 0.5;
       ctx.textAlign = 'center';
-      const labelY = node.self ? pos.y + radius * 4.8 : pos.y + radius + 13;
+      const labelY = node.self ? pos.y + radius * 3.4 : pos.y + radius + 13;
       ctx.shadowColor = 'rgba(0,0,0,0.85)';
       ctx.shadowBlur = node.self ? 6 : 3;
       ctx.fillStyle = node.self ? '#ffe9a8' : '#c6d3f0';
@@ -579,73 +579,98 @@ export class StarStage {
  */
 function drawSelfBeacon(ctx, x, y, radius, time, reducedMotion, online) {
   const t = reducedMotion ? 0 : time;
-  const spin = t * 0.12;
+  const spin = t * 0.1;
+  const shimmer = reducedMotion ? 1 : 0.92 + 0.08 * Math.sin(t * 2.3);
 
-  // 外层辉光（暖白 + 冷蓝叠层）
-  const halo = ctx.createRadialGradient(x, y, 1, x, y, radius * 4.2);
-  halo.addColorStop(0, 'rgba(255,255,255,0.85)');
-  halo.addColorStop(0.25, 'rgba(255,233,168,0.5)');
-  halo.addColorStop(0.6, 'rgba(86,180,233,0.18)');
+  // 外层柔光（收小、低对比）
+  const halo = ctx.createRadialGradient(x, y, 1, x, y, radius * 3.2);
+  halo.addColorStop(0, `rgba(255,255,255,${0.75 * shimmer})`);
+  halo.addColorStop(0.3, `rgba(255,233,168,${0.34 * shimmer})`);
+  halo.addColorStop(0.65, 'rgba(86,180,233,0.12)');
   halo.addColorStop(1, 'rgba(86,180,233,0)');
   ctx.fillStyle = halo;
   ctx.beginPath();
-  ctx.arc(x, y, radius * 4.2, 0, Math.PI * 2);
+  ctx.arc(x, y, radius * 3.2, 0, Math.PI * 2);
   ctx.fill();
 
-  // 衍射星芒：4 长 + 4 短，缓慢旋转
+  // 外圈：极淡实线环 + 缓转虚线轨道环（双环层次）
   ctx.save();
   ctx.translate(x, y);
+  ctx.strokeStyle = 'rgba(140,190,255,0.14)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(0, 0, radius * 2.15, 0, Math.PI * 2);
+  ctx.stroke();
+
   ctx.rotate(spin);
-  const spikes = 4;
-  for (let i = 0; i < spikes; i += 1) {
-    const long = radius * 5.2;
-    const short = radius * 2.6;
-    for (const [len, width, alpha] of [[long, 1.4, 0.55], [short, 1, 0.32]]) {
-      ctx.save();
-      ctx.rotate((Math.PI / spikes) * i);
-      const grad = ctx.createLinearGradient(0, 0, len, 0);
-      grad.addColorStop(0, `rgba(255,255,255,${alpha})`);
-      grad.addColorStop(0.35, `rgba(255,233,168,${alpha * 0.5})`);
-      grad.addColorStop(1, 'rgba(255,233,168,0)');
-      ctx.strokeStyle = grad;
-      ctx.lineWidth = width;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(len, 0);
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(-len * 0.6, 0);
-      ctx.stroke();
-      ctx.restore();
-      if (i === 3) break;
-    }
+  ctx.strokeStyle = online ? 'rgba(120,200,255,0.42)' : 'rgba(140,150,180,0.3)';
+  ctx.lineWidth = 0.9;
+  ctx.setLineDash([2, 5]);
+  ctx.beginPath();
+  ctx.arc(0, 0, radius * 1.75, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // 伴星：沿轨道缓行的小光点（信号/卫星意象）
+  if (online) {
+    const sat = spin * 2.4;
+    const sx = Math.cos(sat) * radius * 1.75;
+    const sy = Math.sin(sat) * radius * 1.75;
+    const satGlow = ctx.createRadialGradient(sx, sy, 0, sx, sy, radius * 0.5);
+    satGlow.addColorStop(0, 'rgba(255,255,255,0.95)');
+    satGlow.addColorStop(0.4, 'rgba(120,200,255,0.5)');
+    satGlow.addColorStop(1, 'rgba(120,200,255,0)');
+    ctx.fillStyle = satGlow;
+    ctx.beginPath();
+    ctx.arc(sx, sy, radius * 0.5, 0, Math.PI * 2);
+    ctx.fill();
   }
   ctx.restore();
 
-  // 缓转虚线轨道环
+  // 衍射星芒：4 长 + 4 短（更细、更短、带渐变衰减）
   ctx.save();
   ctx.translate(x, y);
-  ctx.rotate(-spin * 0.6);
-  ctx.strokeStyle = online ? 'rgba(120,200,255,0.45)' : 'rgba(140,150,180,0.35)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([3, 6]);
-  ctx.beginPath();
-  ctx.arc(0, 0, radius * 2.5, 0, Math.PI * 2);
-  ctx.stroke();
-  ctx.setLineDash([]);
+  ctx.rotate(spin * 0.5);
+  for (let i = 0; i < 8; i += 1) {
+    const long = i % 2 === 0;
+    const len = radius * (long ? 3.1 : 1.7);
+    const alpha = (long ? 0.4 : 0.22) * shimmer;
+    ctx.save();
+    ctx.rotate((Math.PI / 4) * i);
+    const grad = ctx.createLinearGradient(0, 0, len, 0);
+    grad.addColorStop(0, `rgba(255,255,255,${alpha})`);
+    grad.addColorStop(0.4, `rgba(255,233,168,${alpha * 0.45})`);
+    grad.addColorStop(1, 'rgba(255,233,168,0)');
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = long ? 1 : 0.7;
+    ctx.beginPath();
+    ctx.moveTo(0, 0);
+    ctx.lineTo(len, 0);
+    ctx.stroke();
+    ctx.restore();
+  }
   ctx.restore();
 
-  // 白热核心 + 暖色内环
+  // 核心：白热小核 + 暖色内环 + 极亮中点
+  const coreGlow = ctx.createRadialGradient(x, y, 0, x, y, radius * 0.95);
+  coreGlow.addColorStop(0, `rgba(255,255,255,${0.98 * shimmer})`);
+  coreGlow.addColorStop(0.55, `rgba(255,244,210,${0.75 * shimmer})`);
+  coreGlow.addColorStop(1, 'rgba(255,233,168,0)');
+  ctx.fillStyle = coreGlow;
   ctx.beginPath();
-  ctx.arc(x, y, radius * 1.15, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(255,255,255,0.95)';
+  ctx.arc(x, y, radius * 0.95, 0, Math.PI * 2);
   ctx.fill();
+
   ctx.beginPath();
-  ctx.arc(x, y, radius * 1.55, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(255,233,168,0.75)';
-  ctx.lineWidth = 1.4;
+  ctx.arc(x, y, radius * 0.92, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(255,233,168,0.6)';
+  ctx.lineWidth = 1.1;
   ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(x, y, radius * 0.32, 0, Math.PI * 2);
+  ctx.fillStyle = '#ffffff';
+  ctx.fill();
 }
 
 function drawStarShape(ctx, x, y, radius, color) {

@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { TOOL_SCOPES } from './tools.mjs';
-import { READ_ROUTES } from './admin.mjs';
+import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 
 const SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
 const SCOPE_RANK = { 'memory.read': 0, 'memory.write': 1, 'memory.admin': 2 };
@@ -637,6 +637,9 @@ export async function startHttpServer({
     /^\/admin\/api\/grants$/,
     /^\/admin\/api\/grants\/([^/]+)\/revoke$/,
     /^\/admin\/api\/devices\/([^/]+)\/(revoke|connect|disconnect|sync|reset-watermarks)$/,
+    /^\/admin\/api\/policy-issuers$/,
+    /^\/admin\/api\/memberships$/,
+    /^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/,
   ];
 
   function parseJsonBody(body) {
@@ -766,6 +769,58 @@ export async function startHttpServer({
           pendingBefore: before.pendingCount,
         });
       }
+    }
+
+    // 引导签发者声明（C1：图上签名声明；受 R-b 吊销排斥）
+    if (path === '/admin/api/policy-issuers') {
+      const input = parseJsonBody(body) ?? {};
+      const subject = typeof input.subject === 'string' && input.subject.length > 0 ? input.subject : app.deviceId;
+      const event = await app.declarePolicyIssuer({
+        subject,
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+      });
+      return sendJson(res, 201, { ok: true, subject, eventId: event.id });
+    }
+
+    // 成员资格声明（active=false 即注销；不清理数据）
+    if (path === '/admin/api/memberships') {
+      const input = parseJsonBody(body);
+      if (!input || typeof input.member !== 'string' || typeof input.namespace !== 'string') {
+        return sendJson(res, 400, { error: 'bad_request', message: '需要 { member, namespace, active? }' });
+      }
+      const active = input.active !== false;
+      const event = await app.declareNamespaceMembership({
+        member: input.member,
+        namespace: input.namespace,
+        active,
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+      });
+      return sendJson(res, 201, { ok: true, member: input.member, namespace: input.namespace, active, eventId: event.id });
+    }
+
+    // 分区动作：rejoin（重入恢复）/ leave（退订交接；force 不走控制台）
+    const nsActionMatch = path.match(/^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/);
+    if (nsActionMatch) {
+      const namespace = decodeURIComponent(nsActionMatch[1]);
+      const action = nsActionMatch[2];
+      const input = parseJsonBody(body) ?? {};
+      if (action === 'rejoin') {
+        const result = await app.rejoinNamespace({ namespace });
+        return sendJson(res, result.ok ? 200 : 409, result);
+      }
+      if (input.force === true) {
+        // SEALING §3：force 仅限本地 CLI，不经 MCP/远程
+        return sendJson(res, 400, { error: 'bad_request', message: 'force 仅限本地 CLI（SEALING §3），控制台不提供' });
+      }
+      if (typeof input.successor !== 'string' || input.successor.length === 0) {
+        return sendJson(res, 400, { error: 'bad_request', message: '需要 { successor }（继任者 deviceId）' });
+      }
+      const result = await app.leaveNamespace({
+        namespace,
+        successor: input.successor,
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+      });
+      return sendJson(res, result.ok ? 200 : 409, result);
     }
 
     return sendJson(res, 404, { error: 'not_found', path });
@@ -964,6 +1019,21 @@ export async function startHttpServer({
         return handleAdminEvents(req, res, url);
       }
       if (path.startsWith('/admin/api/')) {
+        const planMatch = path.match(/^\/admin\/api\/namespaces\/([^/]+)\/handoff-plan$/);
+        if (req.method === 'GET' && planMatch) {
+          if (!app || !service) {
+            return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
+          }
+          const check = await authenticate(req, Buffer.alloc(0), 'memory.read');
+          if (!check.ok) {
+            res.statusCode = check.status;
+            if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+            return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
+          }
+          const successor = url.searchParams.get('successor') ?? '';
+          const out = await buildHandoffPlan({ app }, decodeURIComponent(planMatch[1]), successor);
+          return sendJson(res, out.status, out.body);
+        }
         if (req.method === 'GET' && READ_ROUTES[path]) return handleAdminRead(req, res, path);
         if (req.method === 'POST') {
           const done = await handleAdminWrite(req, res, path, body);

@@ -18,8 +18,10 @@ export type { Event, EventFilter, EventType } from '../types/event.js';
 export interface EventSigner {
   deviceId: string;
   privateKey: CryptoKey; // Ed25519 私钥（sign）
-  /** 本机设备证书（用户主密钥签发）；提供则写入事件的 authorCertificate */
+  /** 本机设备证书（用户主密钥签发，或委派证书的叶）；提供则写入事件的 authorCertificate */
   certificate?: import('../p2p/handshake/AuthenticationHandshake.js').DeviceCertificate;
+  /** 叶→根证书链（T2）；提供则写入 authorCertificateChain（缺省按 [certificate]） */
+  certificateChain?: import('../p2p/handshake/AuthenticationHandshake.js').DeviceCertificate[];
 }
 
 export interface EventLogOptions {
@@ -74,6 +76,9 @@ export class EventLog extends EventEmitter {
       signature: this.signer ? await signEvent(unsigned, this.signer.privateKey) : '',
       // 证书链字段不参与内容寻址与签名（canonicalEventData 字段集固定）
       ...(this.signer?.certificate ? { authorCertificate: this.signer.certificate } : {}),
+      ...(this.signer?.certificateChain && this.signer.certificateChain.length > 1
+        ? { authorCertificateChain: this.signer.certificateChain }
+        : {}),
     };
 
     await this.storage.putEvent(fullEvent);

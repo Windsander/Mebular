@@ -11,7 +11,7 @@
 
 import type { Event } from '../types/event.js';
 import { EventLog } from '../eventlog/EventLog.js';
-import { hexToBytes, verifyCertificateSignature } from '../p2p/handshake/AuthenticationHandshake.js';
+import { hexToBytes, verifyCertificateSignature, verifyCertificateChain } from '../p2p/handshake/AuthenticationHandshake.js';
 
 /**
  * 事件是否由「链到给定用户主公钥」的设备签发。
@@ -20,11 +20,23 @@ import { hexToBytes, verifyCertificateSignature } from '../p2p/handshake/Authent
 export async function verifyIssuedByUser(
   event: Event,
   userMasterPublicKey: Uint8Array | null | undefined,
+  opts: { isRevoked?: (deviceId: string) => boolean } = {},
 ): Promise<boolean> {
   if (!userMasterPublicKey) return false;
   const certificate = event.authorCertificate;
   if (!certificate || certificate.deviceId !== event.author) return false;
-  if (!(await verifyCertificateSignature(certificate, userMasterPublicKey))) return false;
+  // T2：带链（委派）走链式校验；否则旧主密钥直签单层校验。
+  const chain = event.authorCertificateChain;
+  if (chain !== undefined && chain.length > 1) {
+    const ok = await verifyCertificateChain(chain, userMasterPublicKey, {
+      subjectDeviceId: event.author,
+      ...(opts.isRevoked ? { isRevoked: opts.isRevoked } : {}),
+    });
+    if (!ok) return false;
+  } else {
+    if (certificate.issuer !== undefined) return false;
+    if (!(await verifyCertificateSignature(certificate, userMasterPublicKey))) return false;
+  }
   try {
     return await EventLog.verifyEvent(event, hexToBytes(certificate.devicePublicKey));
   } catch {

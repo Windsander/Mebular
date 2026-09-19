@@ -116,6 +116,11 @@ export interface FleetConfig {
   /** 本机 agent 注册表（按 to.agent 名路由） */
   agents: FleetAgentConfig[];
   quotaLimitPerDevice?: number;
+  /**
+   * `quickstart --auto-approve`（默认 false）：常驻 `fleet node` 自动批准在册未授权成员。
+   * **风险**：任何在册设备都会被授权；仅在受控信任域使用（见 ONBOARDING「一键上车」）。
+   */
+  autoApprove?: boolean;
 }
 
 export const fleetConfigPath = (dir: string): string => join(dir, 'fleet.config.json');
@@ -145,6 +150,7 @@ export function validateFleetConfig(input: unknown): string[] {
     }
   }
   if (!Array.isArray(c.policyIssuers)) errors.push('policyIssuers 必须为数组');
+  if (c.autoApprove !== undefined && typeof c.autoApprove !== 'boolean') errors.push('autoApprove 必须为布尔');
   if (!Array.isArray(c.agents) || (c.agents as unknown[]).length === 0) errors.push('agents 必须为非空数组');
   for (const agent of (Array.isArray(c.agents) ? c.agents : []) as Array<Record<string, unknown>>) {
     if (typeof agent?.name !== 'string' || agent.name.length === 0) errors.push('agent.name 非法');

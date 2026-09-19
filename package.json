@@ -81,6 +81,7 @@
     "verify:fleet:remote": "node scripts/verify-fleet-remote.mjs",
     "verify:fleet:agents": "node scripts/verify-fleet-agents.mjs",
     "verify:fleet:onboard": "node scripts/verify-fleet-onboard.mjs",
+    "verify:fleet:quickstart": "node scripts/verify-fleet-quickstart.mjs",
     "verify:fleet:grant": "node scripts/verify-fleet-grant.mjs",
     "verify:fleet:service": "node scripts/verify-fleet-service.mjs",
     "verify:fleet:membership": "node scripts/verify-fleet-membership.mjs",

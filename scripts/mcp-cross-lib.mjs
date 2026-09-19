@@ -50,7 +50,7 @@ export function printCrossGuidance(log = console.log) {
   log('      network.libp2p.listen 与 relayServers（该 relay）、relayUnlimited=true。');
   log('    · A 机 serve 若供网络访问，须 TLS 且 auth != none（D45 fail-closed）。');
   log('    · 带外交换 A 的 deviceId 与可达 multiaddr（无共享文件）。');
-  log('  执行清单：docs.design/g6.6-cross-network-blocker-2026-09-14.md');
+  log('  执行清单：见 README「跨机 / 公网」与 packages/fleet/RELAY-OPS.md。');
   log('  门禁：本脚本无上述环境时退出码 1（红），环境齐备且断言全过才退出码 0。');
 }
 

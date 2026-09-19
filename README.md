@@ -149,7 +149,7 @@ node scripts/wan-sync.mjs cross --device-id device-B --user-master-key-file key.
 - 前置预检：`cross` 启动前先检查 `--peer/--peer-id/--relay` 是否齐全且 **TCP 可达**；缺失/不可达立即报错并打印补齐指引，不跑到中途才失败（超时可用 `MEBULAR_WAN_PREFLIGHT_TIMEOUT_MS` 调整，默认 3000ms）。
 - 出口判据：`MEBULAR_WAN_IP_ECHO`（缺省 `https://api.ipify.org?format=json`）取公网出口 IP；任一私网/回环 → false，取不到 → 未知（绝不误判 true）。
 - relay 默认**限额**；需显式 `--unlimited`（`Libp2pProvider.relayUnlimited`）才允许任意协议过 circuit，调用方承担开放 relay 的滥用风险；`relay --capture <path>` 可捕获线上字节供「只见密文」取证。
-- 诚实边界：上述本机命令都是 **non-evidence**；真实 G3-E 需两台不同公网主机 + 可达 relay，当前**未达成**（阻塞报告 `docs.design/g3r-blocker-2026-09-13.md`）。`npm run verify:wan:cross` 无环境时退出码 1 并打印所需环境。
+- 诚实边界：上述本机命令都是 **non-evidence**；真实 G3-E 需两台不同公网主机 + 可达 relay，已排入**最后阶段的真机/公网验收**（本机 `verify:wan:l2` 与 `verify:wan:l2:docker` 只做 relay-only / NAT 仿真）。`npm run verify:wan:cross` 无环境时退出码 1 并打印所需环境。
 
 ---
 
@@ -253,24 +253,10 @@ Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API
 | 项目 | 情况 |
 |------|------|
 | 测试 | 94 个套件、734 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
-| 覆盖率 | 行 92.4%、分支 ~79.4%（运行间抖动），全库门槛 85/65，关键文件另有底线 |
+| 覆盖率 | 行 ~92.8%、分支 ~80.8%（运行间抖动），全库门槛 85/65，关键文件另有底线 |
 | 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |
-| 质量门禁 | 每个阶段跑 verify 脚本加构建产物冒烟，`src` 里不留裸的 `throw new Error` |
-
-<details>
-<summary>分阶段验证脚本</summary>
-
-```bash
-# 每阶段：文件检查 + 编译 + 全量测试 + 实现点抽查 + 构建产物冒烟
-node scripts/verify-phase6.mjs   # 质量收口 · 生态适配 · 广域网桥接
-node scripts/verify-phase5.mjs   # 跨端互通
-node scripts/verify-phase4.mjs   # Hermes 集成
-node scripts/verify-phase3.mjs   # 图同步
-node scripts/verify-phase2.mjs   # P2P 网络
-```
-
-</details>
+| 质量门禁 | CI 四 job（`test:coverage` 覆盖率门槛 / `verify:fleet:all` / `verify:wan:l2`+docker / Windows / 真实语义）；另有 `check:cleanliness` 防孤儿模块与失效引用复发 |
 
 ---
 

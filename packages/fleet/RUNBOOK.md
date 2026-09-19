@@ -76,7 +76,7 @@ node scripts/fleet-remote-peer.mjs --role worker \
 
 - 优先：把 A 的 4001 端口做端口转发，B 用公网地址拨号。
 - 或使用 core 的 circuit relay（`network.libp2p.relayServer` / `relayServers`）；relay 默认限额、需显式 `--unlimited`。**部署/加固/降级见 [`RELAY-OPS.md`](./RELAY-OPS.md)**（transport-only、可自托管/替换；`verify:wan:l2` 与 docker NAT 仿真）。
-- 广域网自证（non-evidence）命令见 README；真实跨公网证据当前**未达成**（`docs.design/g3r-blocker-*.md`）。
+- 广域网自证（non-evidence）命令见 README；真实跨公网证据已排入**最后阶段的真机/公网验收**（本机 `verify:wan:l2` 与 `verify:wan:l2:docker` 只做仿真）。
 
 ## 4. 一键验收脚本（CI 同款）
 

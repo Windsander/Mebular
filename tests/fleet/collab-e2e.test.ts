@@ -66,22 +66,12 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     await a.initialize();
     await b.initialize();
     await b.node!.connectToPeer(a.node!.peerId);
-    // 反向也建常驻：确保 A→B 能 push（协商 accept / 子任务）；只需一次，避免会话 churn
-    await a.node!.connectToPeer(b.node!.peerId).catch(() => undefined);
     await sleep(50); // 建立常驻连接（push-on-write 目标）
-    // 确定性“同步兜底”：周期触发 anti-entropy（存在 pending 才开会话）——消除 push 合并抖动
+    // 确定性“同步兜底”：周期触发 anti-entropy（存在 pending 才开会话）——消除 push 合并抖动。
+    // 不重复 connectToPeer：重复建连会拆掉常驻会话，反而丢推送（与稳定的 dag-e2e 同构）。
     let stop = false;
     const done = (async () => {
-      let tick = 0;
       while (!stop) {
-        tick += 1;
-        // 交替强制双向新会话：慢 runner 下常驻链路可能静默失效，
-        // A→B 的协商 accept / DAG 子任务依赖新会话送达（push + anti-entropy 双保险）
-        if (tick % 4 === 1) {
-          await b.node!.connectToPeer(a.node!.peerId).catch(() => undefined);
-        } else if (tick % 4 === 3) {
-          await a.node!.connectToPeer(b.node!.peerId).catch(() => undefined);
-        }
         await a.sync.runAntiEntropyCycle();
         await b.sync.runAntiEntropyCycle();
         await sleep(25);
@@ -103,7 +93,11 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
       deviceId,
       encryption: masterKeys,
       network: { enabled: true, provider: hub },
-      sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 5, namespaces: ['tasks'], peerNamespacePolicy },
+      sync: {
+        autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 5, namespaces: ['tasks'], peerNamespacePolicy,
+        // 与 dag-e2e 同构：启用 anti-entropy（长间隔，仅由 kicker 显式驱动），保证常驻发起方循环可用
+        antiEntropy: { enabled: true, intervalMs: 3_600_000, jitterRatio: 0 },
+      },
     });
   }
   function makeNode(negotiation?: { policy: 'accept' | 'counter'; maxRounds: number }): FleetNode {
@@ -126,10 +120,10 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     const worker = new FleetWorker({ device: 'device-B', agent: 'worker', store, transport: new NullTransport(), registry, log, ...extra });
     return { worker, log };
   }
-  function startLoop(worker: FleetWorker, iterations = 15000, intervalMs = 3): { stop: () => void; done: Promise<void> } {
+  function startLoop(worker: FleetWorker, intervalMs = 3): { stop: () => void; done: Promise<void> } {
     let stop = false;
     const done = (async () => {
-      for (let i = 0; i < iterations && !stop; i++) {
+      while (!stop) {
         await worker.pollOnce();
         await sleep(intervalMs);
       }

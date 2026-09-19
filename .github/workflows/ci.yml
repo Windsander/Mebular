@@ -41,6 +41,9 @@ jobs:
       - name: Lint
         run: npm run lint
 
+      - name: Cleanliness (orphan modules / stale refs / deprecated)
+        run: npm run check:cleanliness
+
       - name: Fleet acceptance (M2 local / M3 remote / M4 agents / Step 1b onboard)
         run: npm run verify:fleet:all
 

@@ -15,7 +15,7 @@
   ```bash
   npm run build && npm test && npm run lint
   ```
-- 阶段性改动同步运行对应验证脚本（`node scripts/verify-phaseN.mjs`）
+- 改动后运行相关验收：`npm run verify:fleet:all` / `npm run verify:wan:l2`（详见 README 与 `packages/fleet/RUNBOOK.md`）；整洁性门禁 `npm run check:cleanliness`
 
 ## 提交信息
 
@@ -25,7 +25,7 @@
 feat(sync): 同步線協議、衝突收斂應用與 SyncManager 重寫
 fix(storage): 修復 listNodes 的標籤過濾缺口
 test(integration): 圖同步端到端集成測試
-chore(scripts): 新增 verify-phase3 驗證腳本
+chore(scripts): 新增 wan-l2 relay-only 驗證腳本
 ```
 
 类型：`feat` / `fix` / `test` / `docs` / `chore` / `refactor`；范围取模块名（`core` / `sync` / `p2p` / `memory` / `hermes` …）。

@@ -6,7 +6,7 @@
 //   NAT 穿透(NATTraversal) 作为连接建立的策略辅助。
 //
 // 具体网络栈通过 ConnectionProvider 注入（当前提供 InMemoryHub；
-// libp2p 适配器在此接缝上接入，见 docs.design/project-status.md 的技术决策记录）。
+// libp2p 适配器在此接缝上接入，见 src/p2p/transport/Libp2pProvider.ts）。
 
 import { createHash } from 'crypto';
 import { DeviceDiscovery, type BonjourServiceFactory } from './DeviceDiscovery.js';

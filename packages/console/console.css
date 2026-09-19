@@ -390,8 +390,6 @@ select {
     width: 340px;
     max-height: calc(100% - 24px);
     padding: 12px;
-    backdrop-filter: blur(10px) saturate(1.2);
-    -webkit-backdrop-filter: blur(10px) saturate(1.2);
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
@@ -399,11 +397,12 @@ select {
     transform-origin: left top;
     clip-path: inset(0 100% 0 0 round 8px);
     transition:
-      clip-path 0.4s cubic-bezier(0.22, 0.8, 0.24, 1),
-      transform 0.4s cubic-bezier(0.22, 0.8, 0.24, 1),
-      opacity 0.26s ease,
-      visibility 0s linear 0.4s;
+      clip-path 0.26s cubic-bezier(0.4, 0, 0.6, 1),
+      transform 0.26s cubic-bezier(0.4, 0, 0.6, 1),
+      opacity 0.2s ease,
+      visibility 0s linear 0.26s;
   }
+  /* 打开：等连线画到角上（0.14s）再擦写，内容随擦写出现 */
   .aside.is-open {
     opacity: 1;
     visibility: visible;
@@ -411,10 +410,11 @@ select {
     transform: none;
     clip-path: inset(0 0 0 0 round 8px);
     transition:
-      clip-path 0.42s cubic-bezier(0.22, 0.8, 0.24, 1),
-      transform 0.42s cubic-bezier(0.22, 0.8, 0.24, 1),
-      opacity 0.24s ease,
-      visibility 0s;
+      clip-path 0.36s cubic-bezier(0.22, 0.8, 0.24, 1) 0.14s,
+      transform 0.36s cubic-bezier(0.22, 0.8, 0.24, 1) 0.14s,
+      opacity 0.2s ease 0.14s,
+      visibility 0s 0.14s;
+    animation: crt-arrive 0.5s ease-out 0.34s 1;
   }
   /* 导光扫线：随擦写边缘从左到右（一次性） */
   .aside::after {
@@ -429,17 +429,23 @@ select {
     background: linear-gradient(180deg, transparent, rgba(150, 255, 205, 0.9), transparent);
     opacity: 0;
   }
-  .aside.is-open::after { animation: crt-wipe 0.44s cubic-bezier(0.22, 0.8, 0.24, 1) 1; }
+  .aside.is-open::after { animation: crt-wipe 0.4s cubic-bezier(0.22, 0.8, 0.24, 1) 0.14s 1; }
   @keyframes crt-wipe {
-    0% { left: 0; opacity: 0.9; }
+    0% { transform: translateX(0); opacity: 0.9; }
     85% { opacity: 0.6; }
-    100% { left: calc(100% - 2px); opacity: 0; }
+    100% { transform: translateX(338px); opacity: 0; }
   }
-  /* 内容轻微落位，避免擦写时内容静止的割裂感 */
-  .aside.is-open #device-card { animation: crt-content 0.34s cubic-bezier(0.22, 0.8, 0.24, 1) 0.05s 1 backwards; }
+  /* 内容随擦写出现（不再滞后成"空面板"） */
+  .aside.is-open #device-card { animation: crt-content 0.24s cubic-bezier(0.22, 0.8, 0.24, 1) 0.14s 1 backwards; }
   @keyframes crt-content {
-    from { opacity: 0; transform: translateX(6px); }
+    from { opacity: 0; transform: translateX(4px); }
     to { opacity: 1; transform: none; }
+  }
+  /* 连线到位时卡框辉光脉冲（一次） */
+  @keyframes crt-arrive {
+    0% { box-shadow: 0 0 0 1px rgba(80, 255, 170, 0.08), 0 0 26px rgba(60, 255, 160, 0.20), inset 0 0 48px rgba(60, 255, 160, 0.07); }
+    28% { box-shadow: 0 0 0 1px rgba(120, 255, 190, 0.4), 0 0 46px rgba(60, 255, 160, 0.5), inset 0 0 68px rgba(60, 255, 160, 0.18); }
+    100% { box-shadow: 0 0 0 1px rgba(80, 255, 170, 0.08), 0 0 26px rgba(60, 255, 160, 0.20), inset 0 0 48px rgba(60, 255, 160, 0.07); }
   }
   @media (prefers-reduced-motion: reduce) {
     .aside,

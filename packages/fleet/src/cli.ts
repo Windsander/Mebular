@@ -34,6 +34,7 @@ import {
   namespaceMembers,
   namespaceMembership,
   leaveNamespace,
+  offlineMebularOptions,
   planHandoff,
   rejoinNamespace,
   onboardDevice,
@@ -48,10 +49,14 @@ import {
   defaultFleetDir,
   joinFleet,
   pendingDevices,
+  pickLanHost,
   quickstart,
   readJoinCode,
+  writeJoinCodeFile,
   type ServiceInstaller,
 } from './quickstart.js';
+import { buildJoinToken, startJoinService, type JoinService } from './jointoken.js';
+import { joinWithToken } from './join.js';
 
 interface Args {
   [key: string]: string | boolean | undefined;
@@ -80,6 +85,7 @@ function parseArgs(argv: string[]): { command: string | undefined; args: Args; p
   return { command, args, positionals };
 }
 
+const DEFAULT_JOIN_PORT_FALLBACK = 4002;
 const str = (v: string | boolean | undefined, fallback: string): string =>
   typeof v === 'string' ? v : fallback;
 const num = (v: string | boolean | undefined, fallback: number): number => {
@@ -452,6 +458,17 @@ async function runFleetNode(args: Args): Promise<number> {
     role: 'node', event: 'listening', device: config.device,
     multiaddr: mebular.node!.getLocalMultiaddrs()[0] ?? null, peerId: mebular.node!.peerId.id,
   }));
+  // T2：join 服务（令牌 → 委派证书）。默认由 config.joinService 控制，可用 --join-serve 临时开启。
+  let joinService: JoinService | null = null;
+  if (config.joinService?.enabled === true || args['join-serve'] === true) {
+    const port = num(args['join-port'], config.joinService?.port ?? 4002);
+    const bind = str(args['join-bind'], config.joinService?.bind ?? '0.0.0.0');
+    joinService = await startJoinService({
+      mebular, deviceId: config.device, storagePath: config.storagePath, bind, port,
+      log: (m) => console.error(m),
+    });
+    console.log(JSON.stringify({ role: 'node', event: 'join-service', endpoint: `http://${bind}:${joinService.port}`, port: joinService.port }));
+  }
   const store = new MebularTaskEventStore(mebular);
   const node = new FleetNode({ device: config.device, store, transport: new NullTransport(), quota: new LocalQuota({ limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000 }) });
   const submit = num(args.submit, 0);
@@ -522,6 +539,7 @@ async function runFleetNode(args: Args): Promise<number> {
   } else {
     await sleep(num(args['timeout-ms'], 60_000));
   }
+  if (joinService !== null) await joinService.close();
   stopHeartbeat();
   shutdown.dispose();
   await mebular.shutdown();
@@ -581,6 +599,8 @@ async function runQuickstart(args: Args): Promise<number> {
     ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
     ...(typeof args.listen === 'string' ? { listen: args.listen } : {}),
     ...(typeof args['code-file'] === 'string' ? { codeFile: args['code-file'] } : {}),
+    ...(typeof args['join-port'] === 'string' ? { joinPort: num(args['join-port'], DEFAULT_JOIN_PORT_FALLBACK) } : {}),
+    ...(typeof args['join-host'] === 'string' ? { joinHost: args['join-host'] } : {}),
     ...(agents !== undefined ? { agents } : {}),
     ...(args['auto-approve'] === true ? { autoApprove: true } : {}),
     ...(noService ? {} : { installService: fleetNodeInstaller() }),
@@ -601,6 +621,9 @@ async function runQuickstart(args: Args): Promise<number> {
     autoApprove: result.autoApprove,
     code: result.code,
     ...(result.codeFile !== undefined ? { codeFile: result.codeFile } : {}),
+    inviteToken: result.inviteToken,
+    joinEndpoint: result.joinEndpoint,
+    joinPort: result.joinPort,
     warnings: result.warnings,
     doctor: summarizeDoctor(report),
     next: [...result.joinNext, `fleet node --dir ${dir} --run-forever`],
@@ -612,11 +635,43 @@ async function runQuickstart(args: Args): Promise<number> {
 async function runJoin(args: Args): Promise<number> {
   const dir = fleetDirFrom(args);
   const noService = args['no-service'] === true;
+  const agents = parseAgents(args.agent, args['agent-command'], args['agent-base-args']);
+  // T2：令牌加入（推荐；主密钥不复制）
+  if (typeof args.token === 'string' || typeof args['token-file'] === 'string') {
+    const tokenText = await readJoinCode({
+      ...(typeof args.token === 'string' ? { code: args.token } : {}),
+      ...(typeof args['token-file'] === 'string' ? { codeFile: args['token-file'] } : {}),
+    });
+    const result = await joinWithToken({
+      dir,
+      token: tokenText,
+      device: fleetDeviceFrom(args),
+      agents: agents ?? [{ name: 'echo', kind: 'echo' }],
+      ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
+      ...(typeof args.listen === 'string' ? { listen: args.listen } : {}),
+    });
+    const report = await doctor(dir);
+    console.log(JSON.stringify({
+      ok: true,
+      role: 'join',
+      mode: 'token',
+      device: result.device,
+      dir: result.dir,
+      peer: result.peer,
+      namespace: result.namespace,
+      fingerprint: result.fingerprint,
+      alreadyJoined: result.alreadyJoined,
+      awaitingApproval: result.awaitingApproval,
+      inviterDeviceId: result.inviterDeviceId,
+      doctor: summarizeDoctor(report),
+      next: result.next,
+    }, null, 2));
+    return 0;
+  }
   const code = await readJoinCode({
     ...(typeof args.code === 'string' ? { code: args.code } : {}),
     ...(typeof args['code-file'] === 'string' ? { codeFile: args['code-file'] } : {}),
   });
-  const agents = parseAgents(args.agent, args['agent-command'], args['agent-base-args']);
   const result = await joinFleet({
     dir,
     code,
@@ -670,6 +725,44 @@ async function runApprove(args: Args): Promise<number> {
   return 0;
 }
 
+/** `fleet invite`：任一在册设备生成**加入令牌**（T2；主密钥不出本机，任意设备均可）。 */
+async function runInvite(args: Args): Promise<number> {
+  const dir = fleetDirFrom(args);
+  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    const port = num(args['join-port'], config.joinService?.port ?? 4002);
+    const endpoint = str(args.endpoint, `http://${pickLanHost()}:${port}`);
+    const ttlMs = typeof args.ttl === 'string' ? num(args.ttl, 900) * 1000 : 900_000;
+    const token = await buildJoinToken({
+      mebular,
+      deviceId: config.device,
+      namespace: str(args.namespace, config.namespace),
+      endpoint,
+      ttlMs,
+    });
+    const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
+    if (typeof args['token-file'] === 'string') await writeJoinCodeFile(args['token-file'], inline);
+    console.log(JSON.stringify({
+      ok: true,
+      role: 'invite',
+      inviter: config.device,
+      endpoint,
+      namespace: token.namespace,
+      nonce: token.nonce,
+      expiresAt: token.expiresAt,
+      token: inline,
+      ...(typeof args['token-file'] === 'string' ? { tokenFile: args['token-file'] } : {}),
+      next: [`把令牌安全传给新设备，新设备运行：fleet join --token <内联|文件>`],
+    }, null, 2));
+  } finally {
+    await mebular.shutdown();
+  }
+  return 0;
+}
+
 async function main(): Promise<void> {
   const raw = process.argv.slice(2);
   // `service` 有自身 flags（--no-autostart/--label/--extra），走 raw argv，不经通用解析。
@@ -697,6 +790,7 @@ async function main(): Promise<void> {
   else if (command === 'onboard') code = await runOnboard(args);
   else if (command === 'quickstart') code = await runQuickstart(args);
   else if (command === 'join') code = await runJoin(args);
+  else if (command === 'invite') code = await runInvite(args);
   else if (command === 'pending') code = await runPending(args);
   else if (command === 'approve') code = await runApprove(args);
   else if (command === 'doctor') code = await runDoctor(args);
@@ -708,7 +802,7 @@ async function main(): Promise<void> {
   else if (command === 'leave') code = await runLeave(args);
   else if (command === 'rejoin') code = await runRejoin(args);
   else {
-    console.error('用法：fleet quickstart|join|pending|approve|onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|node|worker|service|spool … | fleet --version');
+    console.error('用法：fleet quickstart|join|invite|pending|approve|onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|node|worker|service|spool … | fleet --version');
     code = 2;
   }
   } catch (error) {

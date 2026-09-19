@@ -544,6 +544,8 @@ export async function buildSettings({ app, service, config, runtime }) {
       antiEntropy,
       snapshotThreshold: sync.snapshotThreshold ?? null,
       subscriptions: Array.isArray(sync.namespaces) ? sync.namespaces : [],
+      // L5 对端白名单（设备级；未设置 = 按授权/成员制判定）
+      peerWhitelist: runtime?.peerWhitelist ?? (Array.isArray(sync.peerWhitelist) ? sync.peerWhitelist : []),
       legacyPeerAllowList: Object.keys(sync.peerNamespacePolicy ?? {}),
       configPolicyIssuers: Array.isArray(sync.policyIssuers) ? sync.policyIssuers : [],
     },

@@ -49,7 +49,7 @@ async function seedHome(home) {
     deviceId: 'device-console',
     encryption: { level: 'none', keyFile },
     network: { enabled: false, libp2p: { listen: [], relayServers: [] } },
-    sync: { autoSync: true, pushOnWrite: false, antiEntropy: { enabled: false }, policyIssuers: ['device-console'] },
+    sync: { autoSync: true, pushOnWrite: false, antiEntropy: { enabled: false }, policyIssuers: ['device-console'], peerWhitelist: ['device-peer'] },
     mcp: { http: { host: '127.0.0.1', port: 7331, auth: 'none', tls: false } },
   };
   await writeFile(join(home, 'config.json'), JSON.stringify(config, null, 2), 'utf-8');
@@ -333,6 +333,8 @@ try {
       && typeof settings.json?.sync?.antiEntropy?.enabled === 'boolean'
       && Array.isArray(settings.json?.sync?.subscriptions)
       && typeof settings.json?.network?.enabled === 'boolean'
+      && Array.isArray(settings.json?.network?.listen)
+      && Array.isArray(settings.json?.sync?.peerWhitelist)
       && typeof settings.json?.mcp?.host === 'string'
       && typeof settings.json?.semantic?.enabled === 'boolean'
       && Array.isArray(settings.json?.policyIssuers)
@@ -340,6 +342,7 @@ try {
     `issuers=${JSON.stringify(settings.json?.policyIssuers)}`,
   );
   check('settings.policyIssuers 含已声明的 device-console', settings.json?.policyIssuers?.includes('device-console') === true);
+  check('settings.sync.peerWhitelist 反映 config（L5 透传）', settings.json?.sync?.peerWhitelist?.length === 1 && settings.json.sync.peerWhitelist[0] === 'device-peer', `whitelist=${JSON.stringify(settings.json?.sync?.peerWhitelist)}`);
   check('devices 含 memberships/declaredIssuer 字段', (devices.json ?? []).every((d) => Array.isArray(d.memberships) && typeof d.declaredIssuer === 'boolean'));
   check('device-console declaredIssuer=true（种子声明）', byId.get('device-console')?.declaredIssuer === true);
   check('device-peer declaredIssuer=false', byId.get('device-peer')?.declaredIssuer === false);

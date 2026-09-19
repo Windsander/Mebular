@@ -510,6 +510,12 @@ function renderSettings() {
   const copyRow = (label, value) => [label, `<div class="copyable"><code>${escapeHtml(value)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(value)}">复制</button></div>`];
   const snippet = (obj) => `<pre class="snippet">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`;
 
+  const whitelist = Array.isArray(s.sync.peerWhitelist) ? s.sync.peerWhitelist : [];
+  const listenAlarm = (s.network.listen ?? []).filter((addr) => {
+    const m = addr.match(/\/(ip4|ip6|dns4|dns6|dns)\/([^/]+)/);
+    if (!m) return false;
+    return !['127.0.0.1', '::1', 'localhost'].includes(m[2]);
+  });
   const addrRows = s.identity.multiaddrs.length
     ? s.identity.multiaddrs.map((a) => copyRow('multiaddr', a))
     : [['multiaddr', '<span class="muted">（未启用 P2P，无监听地址）</span>']];
@@ -563,14 +569,20 @@ function renderSettings() {
     </section>
 
     <section class="settings-section">
-      <h3>网络与接入 <span class="badge badge-muted">需改配置并重启</span></h3>
+      <h3>网络与接入 <span class="badge badge-muted">需改配置并重启</span>${listenAlarm.length ? '<span class="crt-tag crt-tag-warn">公网监听</span>' : ''}</h3>
       ${kv([
         ['P2P', s.network.enabled ? '已启用' : '未启用'],
+        ['监听', escapeHtml(s.network.listen.join(', ') || '—')],
         ['relayUnlimited', String(s.network.relayUnlimited)],
         ['MCP 监听', `${escapeHtml(s.mcp.host)}:${s.mcp.port} · auth=${escapeHtml(s.mcp.auth)}${s.mcp.tls ? ' · TLS' : ''}`],
+        ['对端白名单', whitelist.length ? escapeHtml(whitelist.join(', ')) : '未设置（按授权 / 成员制判定）'],
         ['语义召回', `${s.semantic.enabled ? '已启用' : '未启用'}（minScore ${s.semantic.minScore}）`],
       ])}
-      ${snippet({ network: { enabled: s.network.enabled, libp2p: { listen: s.network.listen, relayServers: s.network.relays, relayUnlimited: s.network.relayUnlimited } } })}
+      ${listenAlarm.length ? `<p class="crt-warn">⚠ 监听地址含非回环（${escapeHtml(listenAlarm.join(', '))}）：建议改绑回环 / LAN，或经 relay 并仅以防火墙放行已授权对端。</p>` : ''}
+      ${snippet({
+        network: { enabled: s.network.enabled, libp2p: { listen: s.network.listen, relayServers: s.network.relays, relayUnlimited: s.network.relayUnlimited } },
+        ...(whitelist.length ? { sync: { peerWhitelist: whitelist } } : {}),
+      })}
     </section>
   `;
 

@@ -713,3 +713,13 @@ select {
 .crt-surface .snippet { background: rgba(4, 20, 14, 0.85); border-color: rgba(80, 255, 170, 0.28); color: #bfffe0; }
 .crt-surface.modal-box input.crt-input { width: 100%; margin-top: 4px; }
 .crt-surface.modal-box .field label { color: var(--crt-dim); font-size: 11px; letter-spacing: 1px; }
+
+/* ---------- 设置卡：告警提示（L5 公网监听等） ---------- */
+.crt-tag-warn { border-color: rgba(255, 210, 122, 0.5); color: #ffd27a; margin-left: 6px; }
+.crt-warn {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.7;
+  color: #ffd27a;
+  text-shadow: 0 0 6px rgba(255, 200, 100, 0.25);
+}

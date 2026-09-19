@@ -84,6 +84,8 @@ export async function createMebular() {
     autoSync: config.sync?.autoSync ?? true,
     pushOnWrite: truthy(process.env.MEBULAR_PUSH_ON_WRITE, config.sync?.pushOnWrite ?? true),
     pushOnWriteThrottleMs: config.sync?.pushOnWriteThrottleMs ?? null,
+    // L5：对端白名单（设备级）；此前未透传 → 配置写了不生效
+    peerWhitelist: Array.isArray(config.sync?.peerWhitelist) ? [...config.sync.peerWhitelist] : [],
     semanticEnabled: truthy(process.env.MEBULAR_SEMANTIC_ENABLED, config.semantic?.enabled ?? false),
     semanticMinScore: config.semantic?.minScore ?? 0.2,
   };
@@ -131,6 +133,7 @@ export async function createMebular() {
         ? { peerNamespacePolicy: config.sync.peerNamespacePolicy }
         : {}),
       ...(Array.isArray(config.sync?.namespaces) ? { namespaces: config.sync.namespaces } : {}),
+      ...(Array.isArray(config.sync?.peerWhitelist) ? { peerWhitelist: config.sync.peerWhitelist } : {}),
       // 引导期策略签发者白名单（R-a）：图上 grant-as-memory 的 bootstrap 路径，
       // 未透传会让本机签发的 grant 无法被采纳（控制台域开关会显示为空）。
       ...(Array.isArray(config.sync?.policyIssuers) ? { policyIssuers: config.sync.policyIssuers } : {}),

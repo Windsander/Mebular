@@ -9,7 +9,7 @@
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import net from 'node:net';
-import { hostname } from 'node:os';
+import { hostname, networkInterfaces } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
 import { Mebular, type Event } from '@mebular/core';
 
@@ -27,6 +27,7 @@ import {
   type FleetEncryption,
 } from './config.js';
 import { mebularOptions, offlineMebularOptions, onboardDevice } from './onboard.js';
+import { buildJoinToken } from './jointoken.js';
 
 /** 加入码内信任材料的记录形状（Stage 2 将由令牌取代）。 */
 export interface JoinTrustMaterial {
@@ -241,6 +242,8 @@ export interface QuickstartInput {
   namespace?: string;
   listen?: string;
   codeFile?: string;
+  joinPort?: number;
+  joinHost?: string;
   agents?: FleetAgentConfig[];
   autoApprove?: boolean;
   /** 服务安装回调；缺省 = 不安装（CLI 传真实安装器） */
@@ -269,9 +272,25 @@ export interface QuickstartResult {
   autoApprove: boolean;
   joinNext: string[];
   warnings: string[];
+  /** T2：令牌加入（主密钥不复制）——推荐路径 */
+  inviteToken: string;
+  joinEndpoint: string;
+  joinPort: number;
 }
 
 const DEFAULT_LISTEN = '/ip4/0.0.0.0/tcp/4001';
+const DEFAULT_JOIN_PORT = 4002;
+
+/** 选一个可对外通告的 LAN IPv4（无则回环）。 */
+export function pickLanHost(): string {
+  const ifaces = networkInterfaces();
+  for (const list of Object.values(ifaces)) {
+    for (const info of list ?? []) {
+      if (info.family === 'IPv4' && !info.internal) return info.address;
+    }
+  }
+  return '127.0.0.1';
+}
 
 /** A 一条命令：onboard（默认无配置授权）+ 声明签发者(self) + 成员(self) + 自授权 + 加入码 + 服务 + doctor。 */
 export async function quickstart(input: QuickstartInput): Promise<QuickstartResult> {
@@ -308,6 +327,24 @@ export async function quickstart(input: QuickstartInput): Promise<QuickstartResu
     await mebular.grantNamespaces({ subject: input.device, namespaces: [namespace], note: 'quickstart self-grant' });
   } finally {
     await mebular.shutdown();
+  }
+
+  // T2：启用 join 服务并预生成一枚令牌（推荐路径；旧共享主密钥 code 仍保留用于兼容）。
+  const joinPort = input.joinPort ?? DEFAULT_JOIN_PORT;
+  await saveFleetConfig(fleetConfigPath(input.dir), {
+    ...config,
+    joinService: { enabled: true, bind: '0.0.0.0', port: joinPort },
+    ...(input.autoApprove === true ? { autoApprove: true } : {}),
+  });
+  const joinEndpoint = `http://${input.joinHost ?? pickLanHost()}:${joinPort}`;
+  const tokenBuilder = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await tokenBuilder.initialize();
+  let inviteToken: string;
+  try {
+    const token = await buildJoinToken({ mebular: tokenBuilder, deviceId: config.device, namespace, endpoint: joinEndpoint });
+    inviteToken = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
+  } finally {
+    await tokenBuilder.shutdown();
   }
 
   const multiaddrs = await captureMultiaddrs(config, encryption, warnings);
@@ -350,8 +387,15 @@ export async function quickstart(input: QuickstartInput): Promise<QuickstartResu
     serviceInstalled,
     ...(serviceNote !== undefined ? { serviceNote } : {}),
     autoApprove: input.autoApprove === true,
-    joinNext: ['fleet join --code <内联|文件>', 'fleet pending（A 侧查看待批准）', 'fleet approve <deviceId>（A 批准）'],
+    joinNext: [
+      'fleet join --token <内联|文件>（推荐：主密钥不复制）',
+      'fleet pending（A 侧查看待批准）',
+      'fleet approve <deviceId>（A 批准）',
+    ],
     warnings,
+    inviteToken,
+    joinEndpoint,
+    joinPort,
   };
 }
 
@@ -368,6 +412,7 @@ async function captureMultiaddrs(config: FleetConfig, encryption: FleetEncryptio
 }
 
 async function exportPkcs8(encryption: FleetEncryption): Promise<string> {
+  if (encryption.userMasterPrivateKey === undefined) throw new Error('缺少用户主私钥，无法导出加入码信任材料');
   const raw = await globalThis.crypto.subtle.exportKey('pkcs8', encryption.userMasterPrivateKey);
   return Buffer.from(raw).toString('base64');
 }

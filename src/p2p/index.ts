@@ -27,11 +27,15 @@ export {
   base64ToBytes,
   bytesToHex,
   hexToBytes,
+  verifyCertificateChain,
+  signDelegatedCertificate,
+  MAX_CERT_CHAIN_HOPS,
   type AuthHandshakeOptions,
   type AuthRequest,
   type AuthResponse,
   type AuthSession,
   type DeviceCertificate,
+  type DelegationIssuer,
   type LocalIdentity,
 } from './handshake/AuthenticationHandshake.js';
 export {

@@ -186,6 +186,8 @@ interface IdentityFileRecord {
   /** 加密封套（Phase 5.1 起的目标格式） */
   privateKeyEncrypted?: EncryptedKeyMaterial;
   certificate: DeviceCertificate;
+  /** 叶→根证书链（T2；可选，兼容旧身份文件） */
+  certificateChain?: DeviceCertificate[];
   createdAt: number;
 }
 
@@ -302,6 +304,7 @@ export class Mebular {
           deviceId: this.config.deviceId,
           privateKey: deviceIdentity.privateKey,
           certificate: deviceIdentity.certificate,
+          ...(deviceIdentity.certificateChain !== undefined ? { certificateChain: deviceIdentity.certificateChain } : {}),
         },
       });
 
@@ -394,6 +397,7 @@ export class Mebular {
             devicePublicKey: deviceIdentity.publicKey,
             devicePrivateKey: deviceIdentity.privateKey,
             certificate: deviceIdentity.certificate!,
+            ...(deviceIdentity.certificateChain !== undefined ? { certificateChain: deviceIdentity.certificateChain } : {}),
           },
           userMasterPublicKey: masterPublicKey ?? undefined,
           provider,
@@ -992,6 +996,7 @@ export class Mebular {
         privateKey: await IdentityManager.importPrivateKey(privateKeyPkcs8),
         createdAt: record.createdAt,
         certificate: record.certificate,
+        ...(record.certificateChain !== undefined ? { certificateChain: record.certificateChain } : {}),
       };
       this.identity.registerDeviceKey(identity);
 
@@ -1036,6 +1041,7 @@ export class Mebular {
       deviceName: identity.name,
       publicKeyHex: bytesToHex(identity.publicKey),
       certificate: identity.certificate!,
+      ...(identity.certificateChain !== undefined ? { certificateChain: identity.certificateChain } : {}),
       createdAt: identity.createdAt,
     };
     const pkcs8 = base64ToBytes(await IdentityManager.exportPrivateKey(identity.privateKey));

@@ -71,12 +71,16 @@
 
 ## 4. 推迟项（本轮封板明确不做）
 
-- **F/G 剩余**：策略导出的其余边界族与治理项。
+- **F/G 剩余**：
+  - **G（快照的完整冲突/合并语义）**：放宽「初始快照只发自报空水位的对端」（§2.6）前必须先补齐的部分——
+    物化快照当前只做接受侧**回退保护**与「严格更新」门禁，**不做逐事件的冲突裁决/合并**。
+  - **F（多应用协议）**：在同一记忆/传输基底上承载**多种应用级协议**（各应用自定事件类型与语义，共享同步/策略/授权基座）。
+    **⚠️ F 为候选定义、待用户确认**：仓库内 F1–F4 是修复编号，未找到 F 族的原始定义。
 - **会话多路复用**。
 - **quorum / 阈值签名**（多签发者已有，但无门限）。
 - **`expiresAt` 强制生效**（字段已预留，不引入跨端时钟依赖；移入 fleet MVP 范围）。
 - **fleet（`@mebular/fleet`）已落地 M0–M4**（**不改 core/SEALING 语义**）：M0 骨架/边界、M1 协议模型（事件/状态机/本地配额 + 不变量 harness）、M2 单机双进程（spool）、M3 真实 libp2p + 记忆同步、M4 **agent 路由**（注册表 + Command/Hermes 适配器）与**三种协作形态模型**（审查 DAG / 有限协商 / 配额制闲聊 + 矩阵 + 随机 harness）。
-  入口见 `packages/fleet/DESIGN.md`、`PROTOCOL-INVARIANTS.md`、`RUNBOOK.md`。**剩余推迟**：真实 OpenChamber 会话接缝（见 `packages/fleet/OPENCHAMBER-SEAM.md`，需 OpenChamber 侧改动）、真实执行器适配器生产化。**协作形态 live 通道接线（1d）已完成**。
+  入口见 `packages/fleet/DESIGN.md`、`PROTOCOL-INVARIANTS.md`、`RUNBOOK.md`。**OpenChamber 会话接缝：已解决**（provider #1 = 桥 daemon `POST /agent/run-once`；provider #2 = Self-Skills `skills/oc-node-provider` 的 Node 版，复用 `oc-bridge.js`，Windows 无需 Python/Hermes；fleet 侧 `HttpOpenChamberSeam` 保持中立——替换 provider 不改 fleet 代码，见 `packages/fleet/OPENCHAMBER-SEAM.md`）。**剩余推迟**：执行器生产化/运维细节（可选）。**协作形态 live 通道接线（1d）已完成**。
 - **自动事件裁剪**：本期只固化约束与测试——**任何裁剪必须排除尚未被所有已授权对端 ack 的事件**，不实现裁剪。
 - **信任模型 v2（证书吊销）**、**跨 NAT 实测回填**（README「项目状态」标注规划中）。
 
@@ -88,7 +92,8 @@
 - **吊销是域收缩**：不回撤**已入图**数据，也无法强制远端停止；它阻止的是**后续摄入**（读侧 `[]` + 入站事件隔离 + 快照过滤）。被吊销设备**仍可建立会话**（否则无从得知恢复）。
 - **保留命名空间可见性代价**：`__policy__` 对已认证设备（含被吊销者）可读，授权图可见（见 §1.7）。
 - **跨会话重复发送**是设计（见 §2.4）；`duplicates` 接近 `sentEvents` 且量很大时，多半是本机同步状态被重置/丢失过——用 `mebular.resetPeerWatermarks(peerDeviceId?)` 修复（只清水位、不动 per-event ack，方向安全）。
-- **文档一致性**：README 的测试/覆盖数字（现为 **94 套件 / 734 用例**、行 ~92.8% / 分支 ~80.8%）、anti-entropy 口径（代码默认 `10min ±20%`，即 `intervalMs 600000`）与推迟项引用（原「未做项」）均已对齐；Agent（skill + MCP）接入用法见 README「30 秒上手 · 路径一」。
+- **服务日志无自动轮转**：`fleet service logs` 读取的常驻日志**不自动截断/轮转**，长期运行需人工 `logrotate`/定时清理（后续可补内建轮转；见 `packages/fleet/ONBOARDING.md` §10）。
+- **文档一致性**：README 的测试/覆盖数字（现为 **94 套件 / 734 用例**、行 ~93% / 分支 ~81%）、anti-entropy 口径（代码默认 `10min ±20%`，即 `intervalMs 600000`）与推迟项引用（原「未做项」）均已对齐；Agent（skill + MCP）接入用法见 README「30 秒上手 · 路径一」。
 
 ## 6. 复现封板基线（可复核）
 

@@ -14,6 +14,7 @@
 1. **无中心服务 / 协调者**：同步是设备直连，传输层可换（libp2p / InMemoryHub / 自建 Provider）；核心层纯 TS、不依赖网络，库/嵌入式形态可离线运行。不做云端记忆 SaaS。
 2. **无全局时钟**：定序**不看墙钟**。同一签发者内按**单调序列**（`event.vectorClock[author]`）；跨签发者按**逻辑时间** `sum(vectorClock)`；并发（互不因果）以 `(作者, 内容寻址 id)` 兜底 → 完全确定、两端收敛一致（含 A/B 互吊销：逻辑序在先者胜）。
 3. **权威来自用户主密钥证书链**：政策记录只有**链到用户主密钥**的设备签发才被采纳；自授、别家用户、无证书伪造一律忽略。被授权方**不可自授**。
+   **委派（T2，信任模型 v2）**：**任意**持有有效证书链的设备可用**其设备密钥**为**新设备**签发**委派证书**（不要求特定设备/CA 在线，主密钥私钥可完全离线）。链为**叶→根**有序，逐跳用签发者设备公钥验签，最后一跳由用户主密钥验签；**委派跳数上界 N=4**（超长链拒绝）。**没有“指定主设备”概念**。
 4. **授权可传递、无单一主设备在线要求**：引导签发者（**图上签名声明 `policy_issuer_declare` ∪ 本地配置 `sync.policyIssuers`**，可多台；见 §3 C1）之外，已被授权者可**转授**自己当时已获授权的分区（"不能给出自己没有的"）。
 5. **数据本地持有、默认拒绝**：写入先本地签名 + 内容寻址哈希，不 phone-home；供给端只把记忆发给**被显式授权**的对端（`sync.peerNamespacePolicy`，未列出 = 不给任何分区）。
 6. **传输/集成不构成权威**：P2P、relay、MCP、OAuth 等只管**字节通道与访问控制**，不参与政策判定，也不改变授权结果。
@@ -46,6 +47,13 @@
 > 未启用成员资格，沿用既有 hello 订阅裁剪（**不放松授权默认拒绝**）；一旦该分区出现成员记录，即成
 > 强制闸门。**旧节点**忽略 `namespace_membership`：对旧端而言该分区始终「未启用成员资格」→ 行为
 > 不变或**少收**（安全方向，不 fail-open）；**退订的数据清理/继任者 ack 门禁属 2b，本轮不做**。
+
+> **⚠️ 破坏性协议变更 · T2（委派证书链 + 加入令牌，信任模型 v2）**：握手证书新增可选 `issuer` 字段与
+>   `chain`（叶→根）载荷；事件新增可选 `authorCertificateChain`。**旧节点**只做**一层**主密钥验签：
+>   收到**委派证书**（`issuer` 存在 / 链长>1）时**拒绝**（安全方向，不 fail-open）→ 新旧混跑时委派设备
+>   **无法接入**，须**全端升级**；旧“共享主密钥 + 主密钥直签证书”部署**继续有效**（`issuer` 缺省 = 与旧格式逐字节兼容）。
+>   新增 **join 令牌**（inviter 设备私钥签名，含 TTL/一次性 nonce/可撕；**不含主密钥**）与可选 libp2p
+>   `/mebular/join/1.0.0` 请求-签发协议：**任意在册设备**可作 inviter 签发委派证书。
 
 - **策略事件类型与命名空间**：保留命名空间 `__policy__`；事件类型 `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare` / `namespace_membership` / `namespace_handoff`。
 - **2c 重订阅恢复（reset）**：退订清理后重入须同时满足 ①本机对该分区有**生效授权**（`getEffectiveNamespaces(self)` 含该分区；默认拒绝不变）②成员**重新在册**；否则**显式失败**。重入写**图外** `<storagePath>.rejoin.<ns>.json` 标记（**不同步/无 tombstone**）并清本机该分区本地水位；本机 hello 以**空时钟**上报显式订阅的分区 → 对端按「自报水位**只允许向下修正**」从 0 重发（或按既有“空水位”门禁发初始快照，**门禁不放宽**）。**不新增同步协议、不产生 tombstone、不改 `__policy__`**（oracle-free）。**破坏性/前向差异**：旧节点无“向下修正”语义 → 对旧端重入只可能**少收**（安全方向），需同版本互通。
@@ -82,7 +90,7 @@
 - **fleet（`@mebular/fleet`）已落地 M0–M4**（**不改 core/SEALING 语义**）：M0 骨架/边界、M1 协议模型（事件/状态机/本地配额 + 不变量 harness）、M2 单机双进程（spool）、M3 真实 libp2p + 记忆同步、M4 **agent 路由**（注册表 + Command/Hermes 适配器）与**三种协作形态模型**（审查 DAG / 有限协商 / 配额制闲聊 + 矩阵 + 随机 harness）。
   入口见 `packages/fleet/DESIGN.md`、`PROTOCOL-INVARIANTS.md`、`RUNBOOK.md`。**OpenChamber 会话接缝：已解决**（provider #1 = 桥 daemon `POST /agent/run-once`；provider #2 = Self-Skills `skills/oc-node-provider` 的 Node 版，复用 `oc-bridge.js`，Windows 无需 Python/Hermes；fleet 侧 `HttpOpenChamberSeam` 保持中立——替换 provider 不改 fleet 代码，见 `packages/fleet/OPENCHAMBER-SEAM.md`）。**剩余推迟**：执行器生产化/运维细节（可选）。**协作形态 live 通道接线（1d）已完成**。
 - **自动事件裁剪**：本期只固化约束与测试——**任何裁剪必须排除尚未被所有已授权对端 ack 的事件**，不实现裁剪。
-- **信任模型 v2（证书吊销）**、**跨 NAT 实测回填**（README「项目状态」标注规划中）。
+- **信任模型 v2（委派证书链 + 加入令牌）已落地**（T2；契约见 §1.3、§3；验收见 S2 报告）。**剩余**：吊销的**全网传播延迟**（`device_revoke` 级联在策略层即时，但需事件同步到达各端才生效）与**跨 NAT 实测回填**。
 
 ## 5. 已知边界（有意取舍 / 需人工关注）
 

@@ -33,26 +33,10 @@ export class EventLog extends EventEmitter {
   private deviceId: string;
   private signer: EventSigner | null;
 
-  constructor(storage: StorageAdapter, deviceId: string, options?: EventLogOptions);
-  /** @deprecated 兼容旧签名：第三个参数直接传初始时钟 */
-  constructor(storage: StorageAdapter, deviceId: string, initialClock?: Record<string, number>);
-  constructor(
-    storage: StorageAdapter,
-    deviceId: string,
-    optionsOrClock?: EventLogOptions | Record<string, number>,
-  ) {
+  constructor(storage: StorageAdapter, deviceId: string, options: EventLogOptions = {}) {
     super();
     this.storage = storage;
     this.deviceId = deviceId;
-
-    let options: EventLogOptions = {};
-    if (optionsOrClock) {
-      if ('signer' in optionsOrClock || 'initialClock' in optionsOrClock) {
-        options = optionsOrClock as EventLogOptions;
-      } else {
-        options = { initialClock: optionsOrClock as Record<string, number> };
-      }
-    }
 
     this.signer = options.signer ?? null;
     this.clock = new VectorClock(options.initialClock);

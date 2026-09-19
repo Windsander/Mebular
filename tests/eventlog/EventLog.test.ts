@@ -131,8 +131,8 @@ describe('EventLog（签名与内容寻址）', () => {
     expect(next.vectorClock['device-A']).toBe(3);
   });
 
-  it('兼容旧三参签名：第三个参数直接作初始时钟', async () => {
-    const log = new EventLog(new MemoryStorage(), 'device-A', { 'device-A': 5 });
+  it('initialClock 选项直接作初始时钟', async () => {
+    const log = new EventLog(new MemoryStorage(), 'device-A', { initialClock: { 'device-A': 5 } });
     expect(log.getClock().toJSON()).toEqual({ 'device-A': 5 });
     const event = await log.append({ type: 'node_created', data: {} });
     expect(event.vectorClock['device-A']).toBe(6);

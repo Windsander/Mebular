@@ -25,6 +25,8 @@ const state = {
   selectedNamespace: null,
   memberDraft: '',
   settings: null,
+  rawConfig: null,
+  cfgDraft: {},
   selected: null,
   degraded: null,
   error: null,
@@ -94,8 +96,9 @@ async function refresh() {
     api('/admin/api/policy'),
     api('/admin/api/namespaces'),
     api('/admin/api/settings'),
+    api('/admin/api/config'),
   ]);
-  const [overview, devices, policy, namespaces, settings] = results;
+  const [overview, devices, policy, namespaces, settings, configView] = results;
   let firstError = null;
   if (overview.status === 'fulfilled') state.overview = overview.value;
   else firstError = overview.reason;
@@ -104,6 +107,7 @@ async function refresh() {
   if (policy.status === 'fulfilled') state.policy = policy.value;
   if (namespaces.status === 'fulfilled') state.namespaces = namespaces.value;
   if (settings.status === 'fulfilled') state.settings = settings.value;
+  if (configView.status === 'fulfilled') state.rawConfig = configView.value;
   state.features = { writes: Boolean(state.overview?.features?.writes) };
   state.error = firstError;
   state.degraded = computeDegraded();
@@ -497,8 +501,183 @@ async function confirmHandoff() {
 
 // ---------- 设置卡（本机；运行时 vs 需改配置重启） ----------
 
+// ---------- 设置卡：常用配置编辑器（curated；保存写入 config.json，需重启生效） ----------
+
+const CONFIG_EDITOR = [
+  { group: '同步', path: 'sync.autoSync', label: '自动同步', type: 'bool', help: '连接建立或事件到达时自动触发同步' },
+  { path: 'sync.pushOnWrite', label: '写入即推送', type: 'bool', help: '本机写入后即时推给对端（常驻模式默认开）' },
+  { path: 'sync.namespaces', label: '订阅分区', type: 'list', placeholder: 'default, notes', help: '只参与列出的分区；留空 = 全部分区' },
+  { path: 'sync.peerWhitelist', label: '对端白名单', type: 'list', placeholder: 'device-B, device-C', help: '仅接受列出的 deviceId；留空 = 不启用（按授权 / 成员制判定）' },
+  { path: 'sync.antiEntropy.enabled', label: '周期反熵', type: 'bool', help: '周期性对账，弥补推送丢失' },
+  { path: 'sync.antiEntropy.intervalMs', label: '反熵间隔（分钟）', type: 'minutes', help: '默认 10 分钟（±20% 抖动）' },
+  { path: 'sync.antiEntropy.jitterRatio', label: '反熵抖动比例', type: 'number', step: 0.05, min: 0, max: 1, help: '0 ~ 1，默认 0.2' },
+  { path: 'sync.snapshotThreshold', label: '快照阈值（事件数）', type: 'number', min: 1, placeholder: '留空 = 不启用', help: '对端空时钟且缺失事件数 ≥ 阈值时改用物化快照' },
+  { path: 'sync.policyIssuers', label: '引导签发者（配置）', type: 'list', placeholder: 'device-A', help: '可签发任意分区的引导设备；留空 = 仅图上声明' },
+  { group: '语义召回', path: 'semantic.enabled', label: '启用语义召回', type: 'bool', help: '需要本地 embedding 模型（可选依赖）' },
+  { path: 'semantic.minScore', label: '召回阈值', type: 'number', step: 0.05, min: 0, max: 1, help: '0 ~ 1，默认 0.2' },
+  { group: '网络', path: 'network.enabled', label: '启用 P2P', type: 'bool', help: '关闭后仅本机离线使用' },
+  { path: 'network.libp2p.listen', label: '监听地址', type: 'list', placeholder: '/ip4/127.0.0.1/tcp/14001', help: 'multiaddr 列表；留空 = 默认监听' },
+  { path: 'network.libp2p.relayServers', label: 'Relay 服务器', type: 'list', placeholder: '/ip4/<relay>/tcp/4001/p2p/<ID>', help: 'circuit relay，纯传输、可自托管' },
+  { path: 'network.libp2p.relayUnlimited', label: 'Relay 不做限额', type: 'bool', warn: '仅可信自托管 relay；公网暴露有风险' },
+  { group: 'MCP 接入', path: 'mcp.http.host', label: '监听地址', type: 'text', placeholder: '127.0.0.1' },
+  { path: 'mcp.http.port', label: '端口', type: 'number', min: 0, max: 65535 },
+  { path: 'mcp.http.auth', label: '鉴权模式', type: 'select', options: [['none', 'none（仅回环）'], ['bearer', 'bearer（token）'], ['oauth', 'oauth']] },
+  { path: 'mcp.http.tls', label: '启用 TLS', type: 'bool', help: '非回环监听必须 TLS + 非 none 鉴权' },
+];
+
+function cfgGet(obj, path) {
+  return path.split('.').reduce((node, key) => (node && typeof node === 'object' ? node[key] : undefined), obj);
+}
+
+function cfgSet(root, path, value) {
+  const keys = path.split('.');
+  let node = root;
+  for (const key of keys.slice(0, -1)) {
+    if (!node[key] || typeof node[key] !== 'object') node[key] = {};
+    node = node[key];
+  }
+  node[keys[keys.length - 1]] = value;
+}
+
+function currentConfigFile() {
+  return state.rawConfig?.config ?? {};
+}
+
+// 未在 config.json 中设置时的生效默认（取自运行快照；未列出的项显示为空 + 默认标记）
+const CONFIG_EFFECTIVE = {
+  'sync.autoSync': (s) => s.sync.autoSync,
+  'sync.pushOnWrite': (s) => s.sync.pushOnWrite,
+  'sync.namespaces': (s) => s.sync.subscriptions,
+  'sync.peerWhitelist': (s) => s.sync.peerWhitelist,
+  'sync.antiEntropy.enabled': (s) => s.sync.antiEntropy.enabled,
+  'sync.antiEntropy.intervalMs': (s) => s.sync.antiEntropy.intervalMs,
+  'sync.antiEntropy.jitterRatio': (s) => s.sync.antiEntropy.jitterRatio,
+  'sync.snapshotThreshold': (s) => s.sync.snapshotThreshold,
+  'sync.policyIssuers': (s) => s.sync.configPolicyIssuers,
+  'semantic.enabled': (s) => s.semantic.enabled,
+  'semantic.minScore': (s) => s.semantic.minScore,
+  'network.enabled': (s) => s.network.enabled,
+  'network.libp2p.relayUnlimited': (s) => s.network.relayUnlimited,
+  'mcp.http.host': (s) => s.mcp.host,
+  'mcp.http.port': (s) => s.mcp.port,
+  'mcp.http.auth': (s) => s.mcp.auth,
+  'mcp.http.tls': (s) => s.mcp.tls,
+};
+
+function fieldInitial(field) {
+  const raw = cfgGet(currentConfigFile(), field.path);
+  if (raw !== undefined) return { value: raw, isDefault: false };
+  const effective = state.settings ? CONFIG_EFFECTIVE[field.path]?.(state.settings) : undefined;
+  return { value: effective, isDefault: true };
+}
+
+function fieldValue(field) {
+  const v = fieldInitial(field).value;
+  if (field.type === 'bool') return Boolean(v);
+  if (field.type === 'minutes') return typeof v === 'number' ? Math.round((v / 60000) * 100) / 100 : '';
+  if (field.type === 'number') return typeof v === 'number' ? v : '';
+  if (field.type === 'list') return Array.isArray(v) ? v.join(', ') : '';
+  if (field.type === 'select') return typeof v === 'string' ? v : field.options[0][0];
+  return typeof v === 'string' ? v : '';
+}
+
+function fieldToConfig(field, formValue) {
+  if (field.type === 'bool') return Boolean(formValue);
+  if (field.type === 'minutes') {
+    const n = Number(formValue);
+    return formValue === '' || !Number.isFinite(n) || n <= 0 ? null : Math.round(n * 60000);
+  }
+  if (field.type === 'number') {
+    const n = Number(formValue);
+    return formValue === '' || !Number.isFinite(n) ? null : n;
+  }
+  if (field.type === 'list') {
+    return String(formValue ?? '').split(/[,，\n]/).map((x) => x.trim()).filter(Boolean);
+  }
+  if (field.type === 'select') return String(formValue);
+  return String(formValue ?? '').trim();
+}
+
+function normalizedFieldValue(field) {
+  const v = fieldInitial(field).value;
+  if (field.type === 'bool') return Boolean(v);
+  if (field.type === 'minutes') return typeof v === 'number' ? v : null;
+  if (field.type === 'number') return typeof v === 'number' ? v : null;
+  if (field.type === 'list') return Array.isArray(v) ? v : [];
+  if (field.type === 'select') return typeof v === 'string' ? v : field.options[0][0];
+  return typeof v === 'string' ? v : '';
+}
+
+function collectConfigChanges(root) {
+  const changes = [];
+  for (const field of CONFIG_EDITOR) {
+    const el = root.querySelector(`[data-cfg-path="${CSS.escape(field.path)}"]`);
+    if (!el) continue;
+    const next = fieldToConfig(field, field.type === 'bool' ? el.checked : el.value);
+    const current = normalizedFieldValue(field);
+    if (JSON.stringify(next) === JSON.stringify(current)) continue;
+    changes.push({ path: field.path, value: next });
+  }
+  return changes;
+}
+
+function collectConfigPatch(root) {
+  const patch = {};
+  for (const change of collectConfigChanges(root)) cfgSet(patch, change.path, change.value);
+  return patch;
+}
+
+function renderCfgField(field) {
+  const initial = fieldInitial(field);
+  const value = Object.prototype.hasOwnProperty.call(state.cfgDraft, field.path)
+    ? state.cfgDraft[field.path]
+    : (field.type === 'bool' ? Boolean(initial.value)
+      : field.type === 'minutes' ? (typeof initial.value === 'number' ? Math.round((initial.value / 60000) * 100) / 100 : '')
+      : field.type === 'number' ? (typeof initial.value === 'number' ? initial.value : '')
+      : field.type === 'list' ? (Array.isArray(initial.value) ? initial.value.join(', ') : '')
+      : field.type === 'select' ? (typeof initial.value === 'string' ? initial.value : field.options[0][0])
+      : (typeof initial.value === 'string' ? initial.value : ''));
+  const id = `cfg-${field.path.replace(/\./g, '-')}`;
+  let control;
+  if (field.type === 'bool') {
+    control = `<label class="toggle cfg-toggle"><input id="${id}" type="checkbox" data-cfg-path="${escapeHtml(field.path)}" ${value ? 'checked' : ''}><span class="slider"></span></label>`;
+  } else if (field.type === 'select') {
+    control = `<select id="${id}" class="crt-input" data-cfg-path="${escapeHtml(field.path)}">`
+      + field.options.map(([v, label]) => `<option value="${escapeHtml(v)}" ${v === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')
+      + '</select>';
+  } else {
+    const type = field.type === 'number' || field.type === 'minutes' ? 'number' : 'text';
+    const attrs = [
+      field.type === 'number' || field.type === 'minutes' ? `step="${field.step ?? 1}"` : '',
+      field.min !== undefined ? `min="${field.min}"` : '',
+      field.max !== undefined ? `max="${field.max}"` : '',
+      field.placeholder ? `placeholder="${escapeHtml(field.placeholder)}"` : '',
+    ].filter(Boolean).join(' ');
+    control = `<input id="${id}" class="crt-input cfg-input" type="${type}" data-cfg-path="${escapeHtml(field.path)}" value="${escapeHtml(String(value))}" ${attrs} />`;
+  }
+  const defaultTag = initial.isDefault ? '<span class="cfg-default">默认</span>' : '';
+  return `<div class="cfg-row">
+    <label class="cfg-label" for="${id}">${escapeHtml(field.label)}${defaultTag}</label>
+    <div class="cfg-control">${control}</div>
+    <p class="cfg-help muted">${escapeHtml(field.help ?? '')}${field.warn ? ` <span class="cfg-warn">⚠ ${escapeHtml(field.warn)}</span>` : ''}</p>
+  </div>`;
+}
+
+function renderConfigEditor() {
+  const groups = [];
+  for (const field of CONFIG_EDITOR) {
+    if (field.group) groups.push({ name: field.group, fields: [] });
+    groups[groups.length - 1].fields.push(field);
+  }
+  return groups.map((g) => `<div class="cfg-group"><h4>${escapeHtml(g.name)}</h4>${g.fields.map(renderCfgField).join('')}</div>`).join('');
+}
+
 function renderSettings() {
   const body = $('#settings-body');
+  const prevActive = document.activeElement;
+  const prevPath = prevActive?.dataset?.cfgPath ?? null;
+  const prevStart = prevActive?.selectionStart ?? null;
+  const prevEnd = prevActive?.selectionEnd ?? null;
   const s = state.settings;
   if (!s) {
     body.innerHTML = '<p class="muted">设置加载中…（若持续如此，检查 serve 是否运行）</p>';
@@ -508,9 +687,7 @@ function renderSettings() {
   const isIssuer = Array.isArray(s.policyIssuers) && s.policyIssuers.includes(self);
   const kv = (pairs) => `<dl class="settings-kv">${pairs.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${v}</dd>`).join('')}</dl>`;
   const copyRow = (label, value) => [label, `<div class="copyable"><code>${escapeHtml(value)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(value)}">复制</button></div>`];
-  const snippet = (obj) => `<pre class="snippet">${escapeHtml(JSON.stringify(obj, null, 2))}</pre>`;
 
-  const whitelist = Array.isArray(s.sync.peerWhitelist) ? s.sync.peerWhitelist : [];
   const listenAlarm = (s.network.listen ?? []).filter((addr) => {
     const m = addr.match(/\/(ip4|ip6|dns4|dns6|dns)\/([^/]+)/);
     if (!m) return false;
@@ -519,8 +696,20 @@ function renderSettings() {
   const addrRows = s.identity.multiaddrs.length
     ? s.identity.multiaddrs.map((a) => copyRow('multiaddr', a))
     : [['multiaddr', '<span class="muted">（未启用 P2P，无监听地址）</span>']];
+  const configPath = state.rawConfig?.path ?? 'config.json';
 
   body.innerHTML = `
+    <section class="settings-section">
+      <h3>常用配置 <span class="badge badge-muted">保存后需重启</span><span id="cfg-state" class="cfg-state"></span></h3>
+      <p class="cfg-path muted">修改写入 <code>${escapeHtml(configPath)}</code>（自动保留 .bak 备份）；设备身份 / 存储 / 加密等敏感项请手工编辑。</p>
+      <div id="cfg-editor">${renderConfigEditor()}</div>
+      <div class="domain-actions">
+        <button id="cfg-save" class="btn btn-small btn-crt" disabled>保存配置</button>
+        <button id="cfg-reset" class="btn btn-small btn-crt" disabled>撤销修改</button>
+      </div>
+      <p class="muted" style="font-size:11px">重启生效：重新运行 <code>mebular serve</code>；若已注册服务：<code>mebular service restart</code>。</p>
+    </section>
+
     <section class="settings-section">
       <h3>身份与存储 <span class="badge badge-muted">只读</span></h3>
       ${kv([
@@ -543,46 +732,32 @@ function renderSettings() {
       <div class="domain-actions">
         <button id="declare-issuer" class="btn btn-small btn-crt" ${state.features.writes && !isIssuer && !MOCK ? '' : 'disabled'}>声明本机为引导签发者</button>
       </div>
-      <p class="muted" style="font-size:11px">图上声明（签名事件，随 __policy__ 同步；受 device_revoke 排斥）。需改配置并重启的等价片段：</p>
-      ${snippet({ sync: { policyIssuers: [self] } })}
+      <p class="muted" style="font-size:11px">图上声明（签名事件，随 __policy__ 同步；受 device_revoke 排斥）。</p>
     </section>
 
     <section class="settings-section">
-      <h3>分区订阅 <span class="badge badge-muted">需改配置并重启</span></h3>
-      ${kv([
-        ['当前订阅', s.sync.subscriptions.length ? escapeHtml(s.sync.subscriptions.join(', ')) : '全部（空 = 参与全部）'],
-        ['本机视角', '裁剪链第三项：本机订阅声明'],
-      ])}
-      ${snippet({ sync: { namespaces: s.sync.subscriptions } })}
-    </section>
-
-    <section class="settings-section">
-      <h3>同步与实时 <span class="badge badge-muted">需改配置并重启</span></h3>
-      ${kv([
-        ['autoSync', String(s.sync.autoSync)],
-        ['pushOnWrite', `${s.sync.pushOnWrite}（常驻默认开；节流 ${s.sync.pushOnWriteThrottleMs}ms）`],
-        ['antiEntropy', `${s.sync.antiEntropy.enabled}（间隔 ${Math.round((s.sync.antiEntropy.intervalMs ?? 600000) / 1000)}s · jitter ${s.sync.antiEntropy.jitterRatio ?? 0.2}）`],
-        ['snapshotThreshold', s.sync.snapshotThreshold === null ? '未启用' : String(s.sync.snapshotThreshold)],
-        ['兼容白名单', s.sync.legacyPeerAllowList.length ? escapeHtml(s.sync.legacyPeerAllowList.join(', ')) : '空（建议迁移到图上授权）'],
-      ])}
-      ${snippet({ sync: { autoSync: s.sync.autoSync, pushOnWrite: s.sync.pushOnWrite, antiEntropy: s.sync.antiEntropy, ...(s.sync.snapshotThreshold !== null ? { snapshotThreshold: s.sync.snapshotThreshold } : {}) } })}
-    </section>
-
-    <section class="settings-section">
-      <h3>网络与接入 <span class="badge badge-muted">需改配置并重启</span>${listenAlarm.length ? '<span class="crt-tag crt-tag-warn">公网监听</span>' : ''}</h3>
+      <h3>实际运行状态 <span class="badge badge-muted">只读</span>${listenAlarm.length ? '<span class="crt-tag crt-tag-warn">公网监听</span>' : ''}</h3>
       ${kv([
         ['P2P', s.network.enabled ? '已启用' : '未启用'],
-        ['监听', escapeHtml(s.network.listen.join(', ') || '—')],
-        ['relayUnlimited', String(s.network.relayUnlimited)],
+        ['实际监听', escapeHtml(s.network.listen.join(', ') || '—')],
+        ['生效白名单', (s.sync.peerWhitelist ?? []).length ? escapeHtml(s.sync.peerWhitelist.join(', ')) : '未启用（按授权 / 成员制判定）'],
         ['MCP 监听', `${escapeHtml(s.mcp.host)}:${s.mcp.port} · auth=${escapeHtml(s.mcp.auth)}${s.mcp.tls ? ' · TLS' : ''}`],
-        ['对端白名单', whitelist.length ? escapeHtml(whitelist.join(', ')) : '未设置（按授权 / 成员制判定）'],
         ['语义召回', `${s.semantic.enabled ? '已启用' : '未启用'}（minScore ${s.semantic.minScore}）`],
+        ['兼容白名单', s.sync.legacyPeerAllowList.length ? escapeHtml(s.sync.legacyPeerAllowList.join(', ')) : '空（建议迁移到图上授权）'],
       ])}
       ${listenAlarm.length ? `<p class="crt-warn">⚠ 监听地址含非回环（${escapeHtml(listenAlarm.join(', '))}）：建议改绑回环 / LAN，或经 relay 并仅以防火墙放行已授权对端。</p>` : ''}
-      ${snippet({
-        network: { enabled: s.network.enabled, libp2p: { listen: s.network.listen, relayServers: s.network.relays, relayUnlimited: s.network.relayUnlimited } },
-        ...(whitelist.length ? { sync: { peerWhitelist: whitelist } } : {}),
-      })}
+    </section>
+
+    <section class="settings-section">
+      <h3>完整配置 <span class="badge badge-muted">只读</span></h3>
+      <p class="muted" style="font-size:11px">${escapeHtml(configPath)}${state.rawConfig?.parseError ? `（解析失败：${escapeHtml(state.rawConfig.parseError)}）` : ''}</p>
+      <details class="cfg-raw">
+        <summary>展开 / 收起</summary>
+        <pre class="snippet">${escapeHtml(JSON.stringify(currentConfigFile(), null, 2))}</pre>
+      </details>
+      <div class="domain-actions">
+        <button id="cfg-copy-all" class="btn btn-small btn-crt" type="button">复制完整配置</button>
+      </div>
     </section>
   `;
 
@@ -591,6 +766,68 @@ function renderSettings() {
   });
   const declare = $('#declare-issuer');
   if (declare) declare.addEventListener('click', declareIssuer);
+  bindConfigEditor();
+  if (prevPath) {
+    const el = body.querySelector(`[data-cfg-path="${CSS.escape(prevPath)}"]`);
+    if (el && typeof el.focus === 'function') {
+      el.focus();
+      if (prevStart !== null && typeof el.setSelectionRange === 'function' && el.type === 'text') {
+        try { el.setSelectionRange(prevStart, prevEnd ?? prevStart); } catch { /* 忽略 */ }
+      }
+    }
+  }
+}
+
+function bindConfigEditor() {
+  const editor = $('#cfg-editor');
+  if (!editor) return;
+  const saveBtn = $('#cfg-save');
+  const resetBtn = $('#cfg-reset');
+  const stateEl = $('#cfg-state');
+  const update = () => {
+    const dirty = collectConfigChanges(editor).map((c) => c.path);
+    saveBtn.disabled = dirty.length === 0;
+    resetBtn.disabled = dirty.length === 0;
+    stateEl.textContent = dirty.length === 0 ? '' : `未保存修改：${dirty.length} 项`;
+    stateEl.title = dirty.join('\n');
+  };
+  editor.querySelectorAll('[data-cfg-path]').forEach((el) => {
+    const record = () => {
+      state.cfgDraft[el.dataset.cfgPath] = el.type === 'checkbox' ? el.checked : el.value;
+      update();
+    };
+    el.addEventListener(el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input', record);
+  });
+  saveBtn.addEventListener('click', saveConfigEditor);
+  resetBtn.addEventListener('click', () => {
+    state.cfgDraft = {};
+    renderSettings();
+  });
+  const copyAll = $('#cfg-copy-all');
+  if (copyAll) copyAll.addEventListener('click', () => copyText(JSON.stringify(currentConfigFile(), null, 2), copyAll));
+  update();
+}
+
+async function saveConfigEditor() {
+  if (MOCK) {
+    window.alert('mock 模式不执行写操作。');
+    return;
+  }
+  const patch = collectConfigPatch($('#cfg-editor'));
+  if (Object.keys(patch).length === 0) return;
+  const saveBtn = $('#cfg-save');
+  saveBtn.disabled = true;
+  try {
+    const res = await api('/admin/api/config', { method: 'POST', body: { patch } });
+    state.rawConfig = { path: res.path, exists: true, parseError: null, config: res.config };
+    state.cfgDraft = {};
+    showToast(`已写入 ${res.path}${res.backup ? '（旧文件已备份为 .bak）' : ''}；重启 serve 后生效`);
+    await refresh();
+    renderSettings();
+  } catch (error) {
+    window.alert(`保存失败：${error.message}`);
+    saveBtn.disabled = false;
+  }
 }
 
 async function declareIssuer() {

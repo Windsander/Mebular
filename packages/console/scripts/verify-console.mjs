@@ -8,7 +8,7 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -334,6 +334,7 @@ try {
       && Array.isArray(settings.json?.sync?.subscriptions)
       && typeof settings.json?.network?.enabled === 'boolean'
       && Array.isArray(settings.json?.network?.listen)
+      && Array.isArray(settings.json?.network?.listenConfigured)
       && Array.isArray(settings.json?.sync?.peerWhitelist)
       && typeof settings.json?.mcp?.host === 'string'
       && typeof settings.json?.semantic?.enabled === 'boolean'
@@ -504,6 +505,50 @@ try {
     syncOffline.status === 409 && ['not_connected', 'network_not_running'].includes(syncOfflineJson?.error),
     `status=${syncOffline.status} error=${syncOfflineJson?.error}`,
   );
+
+  // ---------- 控制台配置读写（curated：白名单 + 原子写 + 备份） ----------
+  const cfgGet = await getJson(port, '/admin/api/config');
+  check('GET /admin/api/config 200 + path/config', cfgGet.status === 200 && typeof cfgGet.json?.path === 'string' && typeof cfgGet.json?.config === 'object');
+  const cfgBadKey = await fetch(`http://127.0.0.1:${port}/admin/api/config`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ patch: { deviceId: 'x' } }),
+  });
+  const cfgBadKeyJson = await cfgBadKey.json().catch(() => null);
+  check('config 改身份字段 → 400（curated 拒绝）', cfgBadKey.status === 400 && Array.isArray(cfgBadKeyJson?.details), `status=${cfgBadKey.status}`);
+  const cfgBadType = await fetch(`http://127.0.0.1:${port}/admin/api/config`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ patch: { sync: { autoSync: 'yes' } } }),
+  });
+  check('config 类型错误 → 400', cfgBadType.status === 400, `status=${cfgBadType.status}`);
+  const cfgOk = await fetch(`http://127.0.0.1:${port}/admin/api/config`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ patch: { sync: { antiEntropy: { intervalMs: 120000 }, snapshotThreshold: 4096 } } }),
+  });
+  const cfgOkJson = await cfgOk.json().catch(() => null);
+  check(
+    'config 合法补丁 → 200 + applied/备份/重启标记',
+    cfgOk.status === 200 && cfgOkJson?.ok === true && cfgOkJson.restartRequired === true
+      && cfgOkJson.applied?.includes('sync.snapshotThreshold') && Boolean(cfgOkJson.backup),
+    `status=${cfgOk.status}`,
+  );
+  const cfgOnDisk = JSON.parse(await readFile(join(home, 'config.json'), 'utf-8'));
+  check(
+    'config 写入磁盘且保留其他键',
+    cfgOnDisk.sync?.snapshotThreshold === 4096 && cfgOnDisk.sync?.antiEntropy?.intervalMs === 120000
+      && cfgOnDisk.sync?.peerWhitelist?.[0] === 'device-peer' && cfgOnDisk.deviceId === 'device-console',
+  );
+  const cfgAfterWrite = await getJson(port, '/admin/api/config');
+  check('GET config 反映写入', cfgAfterWrite.json?.config?.sync?.snapshotThreshold === 4096);
+  const cfgClear = await fetch(`http://127.0.0.1:${port}/admin/api/config`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ patch: { sync: { snapshotThreshold: null } } }),
+  });
+  const cfgAfterClear = JSON.parse(await readFile(join(home, 'config.json'), 'utf-8'));
+  check('config 置空 → 删除键', cfgClear.status === 200 && !('snapshotThreshold' in (cfgAfterClear.sync ?? {})), `status=${cfgClear.status}`);
 
   // ---------- SSE ----------
   const sse = await openSse(port, '/admin/events', 8000);

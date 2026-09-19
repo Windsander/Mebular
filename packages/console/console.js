@@ -853,6 +853,8 @@ stage.onHover = (node, x, y) => {
 };
 
 stage.onSelect = (node) => {
+  // 选中/取消时收起悬浮提示（避免被设备卡擦写边缘切断），移动鼠标后会重新出现
+  $('#tooltip').hidden = true;
   if (!node) {
     // 点击星图空白 → 取消选中，设备卡（绿色显示框）收起
     if (!state.selected) return;

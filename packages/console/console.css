@@ -379,7 +379,8 @@ select {
   .legend-list { margin: 0; }
   .legend-note { margin: 8px 0 0; }
 
-  /* 设备卡 = 传统示波器绿光显示框（皮肤见 .crt-surface） */
+  /* 设备卡 = 传统示波器绿光显示框（皮肤见 .crt-surface）
+     展开 = 自连线侧（左上）横向擦写：clip-path 展开 + 导光扫线 + 内容落位 */
   .aside {
     position: absolute;
     right: 12px;
@@ -391,35 +392,61 @@ select {
     padding: 12px;
     backdrop-filter: blur(10px) saturate(1.2);
     -webkit-backdrop-filter: blur(10px) saturate(1.2);
-    transform: translateX(calc(100% + 24px));
-    transition: transform 0.26s ease;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateX(8px) scale(0.995);
+    transform-origin: left top;
+    clip-path: inset(0 100% 0 0 round 8px);
+    transition:
+      clip-path 0.4s cubic-bezier(0.22, 0.8, 0.24, 1),
+      transform 0.4s cubic-bezier(0.22, 0.8, 0.24, 1),
+      opacity 0.26s ease,
+      visibility 0s linear 0.4s;
   }
-  .aside.is-open { transform: translateX(0); animation: crt-in 0.4s steps(7, end) 1; }
-  /* 闪现扫掠 */
+  .aside.is-open {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: none;
+    clip-path: inset(0 0 0 0 round 8px);
+    transition:
+      clip-path 0.42s cubic-bezier(0.22, 0.8, 0.24, 1),
+      transform 0.42s cubic-bezier(0.22, 0.8, 0.24, 1),
+      opacity 0.24s ease,
+      visibility 0s;
+  }
+  /* 导光扫线：随擦写边缘从左到右（一次性） */
   .aside::after {
     content: "";
     position: absolute;
-    left: 10px;
-    right: 10px;
-    top: 0;
-    height: 2px;
+    top: 10px;
+    bottom: 10px;
+    left: 0;
+    width: 2px;
     border-radius: 2px;
     pointer-events: none;
-    background: linear-gradient(90deg, transparent, rgba(150, 255, 205, 0.9), transparent);
+    background: linear-gradient(180deg, transparent, rgba(150, 255, 205, 0.9), transparent);
     opacity: 0;
   }
-  .aside.is-open::after { animation: crt-sweep 0.55s ease-out 1; }
-  @keyframes crt-in {
-    0% { opacity: 0; }
-    20% { opacity: 0.35; }
-    35% { opacity: 0.1; }
-    55% { opacity: 0.85; }
-    70% { opacity: 0.45; }
-    100% { opacity: 1; }
+  .aside.is-open::after { animation: crt-wipe 0.44s cubic-bezier(0.22, 0.8, 0.24, 1) 1; }
+  @keyframes crt-wipe {
+    0% { left: 0; opacity: 0.9; }
+    85% { opacity: 0.6; }
+    100% { left: calc(100% - 2px); opacity: 0; }
   }
-  @keyframes crt-sweep {
-    0% { top: 4%; opacity: 0.95; }
-    100% { top: 96%; opacity: 0; }
+  /* 内容轻微落位，避免擦写时内容静止的割裂感 */
+  .aside.is-open #device-card { animation: crt-content 0.34s cubic-bezier(0.22, 0.8, 0.24, 1) 0.05s 1 backwards; }
+  @keyframes crt-content {
+    from { opacity: 0; transform: translateX(6px); }
+    to { opacity: 1; transform: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .aside,
+    .aside.is-open { transition: none; animation: none; clip-path: none; transform: none; }
+    .aside::after,
+    .aside.is-open::after,
+    .aside.is-open #device-card { animation: none; }
   }
   #device-card h2 { color: #c8ffe3; letter-spacing: 3px; font-size: 12px; text-transform: uppercase; }
 

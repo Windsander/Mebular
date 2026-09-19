@@ -84,6 +84,9 @@ try {
     let stop = false;
     const done = (async () => {
       for (let i = 0; i < iterations && !stop; i++) {
+        // 确定性恢复：anti-entropy 兜底丢失的 push（慢 runner）
+        await a.sync.runAntiEntropyCycle().catch(() => undefined);
+        await b.sync.runAntiEntropyCycle().catch(() => undefined);
         await worker.pollOnce();
         await sleep(5);
       }

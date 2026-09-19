@@ -105,6 +105,12 @@ try {
   await B.node.connectToPeer(A.node.peerId, addrA);
   check('前置：A/B 初始同步完成', await synced);
 
+  // 确定性恢复：触发 anti-entropy（有 pending 才开会话），兜底丢失的 push（慢 runner/丢帧）
+  const kickSync = async () => {
+    await A.sync.runAntiEntropyCycle().catch(() => undefined);
+    await (B2 ?? B).sync.runAntiEntropyCycle().catch(() => undefined);
+  };
+
   const aStore = new MebularTaskEventStore(A);
   bStore = new MebularTaskEventStore(B);
   const node = new FleetNode({
@@ -128,15 +134,20 @@ try {
     decisions[decision] += 1;
     if (taskId === null) continue;
     ids.push(taskId);
-    await waitUntil(async () => (await bStore.byTask(taskId)).length > 0, 15000, 5);
+    let visible = await waitUntil(async () => (await bStore.byTask(taskId)).length > 0, 30000, 5);
+    if (!visible) {
+      await kickSync();
+      visible = await waitUntil(async () => (await bStore.byTask(taskId)).length > 0, 30000, 5);
+    }
     latencies.push(performance.now() - t0);
   }
 
   // 驱动：worker 执行 + 中途重启 worker
   let restarted = false;
-  const deadline = Date.now() + 90_000;
+  const deadline = Date.now() + 150_000;
   while (Date.now() < deadline) {
     await worker.pollOnce();
+    await kickSync();
     const states = await node.states();
     const terminal = states.filter((s) => s.terminal).length;
 

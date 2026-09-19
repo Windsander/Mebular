@@ -665,7 +665,7 @@ export class Mebular {
    */
   async rejoinNamespace(input: { namespace: string }): Promise<NamespaceRejoinResult> {
     const ns = normalizeNamespace(input.namespace);
-    if (ns === POLICY_NAMESPACE) throw new Error('不允许对保留策略分区 __policy__ 执行重入');
+    if (ns === POLICY_NAMESPACE) throw new MebularError('不允许对保留策略分区 __policy__ 执行重入', ErrorCodes.VALIDATION_INVALID_ARGUMENT);
     const authorized = (await this.getEffectiveNamespaces(this.config.deviceId)).includes(ns);
     if (!authorized) {
       return { ok: false, action: 'rejoin', namespace: ns, reset: false, member: false, authorized: false, reason: 'not-authorized' };
@@ -734,7 +734,7 @@ export class Mebular {
 
   /** 2b：物理删除某分区的全部事件/节点/边（**绝不触碰 `__policy__`**）；幂等可续跑。 */
   private async purgeNamespace(ns: string): Promise<{ events: number; nodes: number; edges: number; eventIds: string[] }> {
-    if (ns === POLICY_NAMESPACE) throw new Error('拒绝清理保留策略分区 __policy__');
+    if (ns === POLICY_NAMESPACE) throw new MebularError('拒绝清理保留策略分区 __policy__', ErrorCodes.VALIDATION_INVALID_ARGUMENT);
     const events = await this.storage.listEvents({ namespace: ns });
     const nodes = await this.storage.listNodes({ namespace: ns });
     const edges = await this.storage.listEdges({ namespace: ns });
@@ -751,9 +751,9 @@ export class Mebular {
    */
   async planNamespaceHandoff(input: { namespace: string; successor: string }): Promise<NamespaceHandoffPlan> {
     const ns = normalizeNamespace(input.namespace);
-    if (ns === POLICY_NAMESPACE) throw new Error('不允许对保留策略分区 __policy__ 执行交接');
+    if (ns === POLICY_NAMESPACE) throw new MebularError('不允许对保留策略分区 __policy__ 执行交接', ErrorCodes.VALIDATION_INVALID_ARGUMENT);
     if (typeof input.successor !== 'string' || input.successor.length === 0) {
-      throw new Error('交接需要显式继任者（--successor <deviceId>）');
+      throw new MebularError('交接需要显式继任者（--successor <deviceId>）', ErrorCodes.VALIDATION_INVALID_ARGUMENT);
     }
     const members = await this.getNamespaceMembers(ns);
     const successorIsMember = members.includes(input.successor);
@@ -784,9 +784,9 @@ export class Mebular {
     note?: string;
   }): Promise<NamespaceHandoffResult> {
     const ns = normalizeNamespace(input.namespace);
-    if (ns === POLICY_NAMESPACE) throw new Error('不允许对保留策略分区 __policy__ 执行交接');
+    if (ns === POLICY_NAMESPACE) throw new MebularError('不允许对保留策略分区 __policy__ 执行交接', ErrorCodes.VALIDATION_INVALID_ARGUMENT);
     if (typeof input.successor !== 'string' || input.successor.length === 0) {
-      throw new Error('交接需要显式继任者（--successor <deviceId>）');
+      throw new MebularError('交接需要显式继任者（--successor <deviceId>）', ErrorCodes.VALIDATION_INVALID_ARGUMENT);
     }
 
     // 续跑：存在同一分区的未完成意图 → 直接继续删除（幂等）

@@ -634,34 +634,88 @@ export class StarStage {
             ? `rgba(223,242,255,${alpha})`
             : rgba(baseColor, alpha));
 
-        // 尾迹（彗星最长、旗舰更亮）
+        // 尾迹（彗星最长、旗舰更亮）：宽晕 + 细亮线
         const tailLen = fleet.egg === 'comet' ? 0.14 : flagship ? 0.08 : 0.05;
         const tail = this._bezierAt(g, Math.max(0, pc - tailLen));
         ctx.beginPath();
         ctx.moveTo(tail.x + norm.x * lat, tail.y + norm.y * lat);
         ctx.lineTo(px, py);
-        ctx.strokeStyle = paint(0.38 * (1 - pc * 0.5));
-        ctx.lineWidth = flagship ? 2.2 : fleet.egg === 'comet' ? 2 : 1.4;
+        ctx.strokeStyle = paint(0.16 * (1 - pc * 0.5));
+        ctx.lineWidth = flagship ? 3.6 : fleet.egg === 'comet' ? 3 : 2.4;
+        ctx.stroke();
+        ctx.strokeStyle = paint(0.42 * (1 - pc * 0.5));
+        ctx.lineWidth = flagship ? 1.6 : fleet.egg === 'comet' ? 1.4 : 1;
         ctx.stroke();
 
-        // 舰体
+        // 舰体：流线小艇（非箭形）；彗星/彩虹信使为光点形态
         const scale = ship.size * (flagship ? 1.6 : 1) * (fleet.egg === 'comet' ? 1.35 : 1);
         ctx.save();
         ctx.translate(px, py);
         ctx.rotate(ang);
-        ctx.fillStyle = paint(0.95);
-        ctx.beginPath();
-        ctx.moveTo(5.2 * scale, 0);
-        ctx.lineTo(-2.6 * scale, -1.9 * scale);
-        ctx.lineTo(-1.2 * scale, 0);
-        ctx.lineTo(-2.6 * scale, 1.9 * scale);
-        ctx.closePath();
-        ctx.fill();
-        if (flagship) {
+        if (fleet.egg === 'comet' || fleet.egg === 'rainbow') {
+          const mote = scale * (fleet.egg === 'rainbow' ? 1.5 : 1.3);
+          const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, mote * 3.4);
+          glow.addColorStop(0, paint(0.8));
+          glow.addColorStop(1, paint(0));
+          ctx.fillStyle = glow;
           ctx.beginPath();
-          ctx.arc(0, 0, 1.6, 0, Math.PI * 2);
-          ctx.fillStyle = 'rgba(255,255,255,0.9)';
+          ctx.arc(0, 0, mote * 3.4, 0, Math.PI * 2);
           ctx.fill();
+          ctx.fillStyle = paint(0.95);
+          ctx.beginPath();
+          ctx.arc(0, 0, mote, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = 'rgba(255,255,255,0.85)';
+          ctx.beginPath();
+          ctx.arc(0, 0, mote * 0.42, 0, Math.PI * 2);
+          ctx.fill();
+        } else {
+          const s2 = scale * (flagship ? 1.35 : 1);
+          // 尾部引擎辉光
+          const engine = ctx.createRadialGradient(-2.6 * s2, 0, 0, -2.6 * s2, 0, 5.5 * s2);
+          engine.addColorStop(0, paint(0.5));
+          engine.addColorStop(1, paint(0));
+          ctx.fillStyle = engine;
+          ctx.beginPath();
+          ctx.arc(-2.6 * s2, 0, 5.5 * s2, 0, Math.PI * 2);
+          ctx.fill();
+          // 后掠翼线（manta 剪影）
+          ctx.strokeStyle = paint(0.55);
+          ctx.lineWidth = 0.9;
+          ctx.beginPath();
+          ctx.moveTo(0.7 * s2, -0.65 * s2);
+          ctx.quadraticCurveTo(-1.1 * s2, -1.85 * s2, -2.55 * s2, -2.15 * s2);
+          ctx.moveTo(0.7 * s2, 0.65 * s2);
+          ctx.quadraticCurveTo(-1.1 * s2, 1.85 * s2, -2.55 * s2, 2.15 * s2);
+          ctx.stroke();
+          // 椭圆舱体（圆头圆尾，非箭形）
+          ctx.fillStyle = paint(0.95);
+          ctx.beginPath();
+          ctx.ellipse(0.45 * s2, 0, 3.5 * s2, 1.15 * s2, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // 舰首航行灯 + 翼尖灯
+          ctx.fillStyle = 'rgba(255,255,255,0.9)';
+          ctx.beginPath();
+          ctx.arc(3.15 * s2, 0, 0.55 * s2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = paint(0.9);
+          ctx.beginPath();
+          ctx.arc(-2.55 * s2, -2.15 * s2, 0.55 * s2, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.arc(-2.55 * s2, 2.15 * s2, 0.55 * s2, 0, Math.PI * 2);
+          ctx.fill();
+          if (flagship) {
+            // 旗舰：舰桥核心 + 尾翼灯
+            ctx.fillStyle = 'rgba(255,255,255,0.9)';
+            ctx.beginPath();
+            ctx.arc(0.2 * s2, 0, 1.1, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = paint(0.85);
+            ctx.beginPath();
+            ctx.arc(-2.2 * s2, 0, 0.6, 0, Math.PI * 2);
+            ctx.fill();
+          }
         }
         ctx.restore();
       }

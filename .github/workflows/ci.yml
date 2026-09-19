@@ -62,8 +62,34 @@ jobs:
       - name: WAN two-node local fixture (default-deny authorization)
         run: npm run verify:wan:cross:selftest
 
+      - name: WAN L2 relay-only simulation (libp2p circuit relay)
+        run: npm run verify:wan:l2
+
       - name: MCP cross-node local fixture (default-deny authorization)
         run: npm run verify:mcp:cross:selftest
+
+  wan-nat:
+    name: WAN NAT isolation (docker compose, relay + 2 NAT peers)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: WAN L2 NAT isolation (three containers; SKIP if docker unavailable)
+        run: npm run verify:wan:l2:docker
 
   windows:
     name: windows build / test / lint (fleet local + onboard)

@@ -21,6 +21,7 @@ import {
   namespaceMembers,
   namespaceMembership,
   validateFleetConfig,
+  saveFleetConfig,
 } from '../../packages/fleet/src/index.js';
 
 const echoAgent = [{ name: 'echo', kind: 'echo' as const }];
@@ -278,5 +279,31 @@ describe('2c：fleet 重入 API 与 doctor', () => {
     await writeFile(`${cfg.storagePath}.rejoin.${cfg.namespace}.json`, JSON.stringify({ namespace: cfg.namespace, reset: true, at: 1 }), { mode: 0o600 });
     report = await doctor(dir);
     expect(report.checks.find((c) => c.name === '重入状态')?.detail).toMatch(/reset=true/);
+  });
+});
+
+describe('L5：doctor 监听地址告警（不静默）', () => {
+  let root: string;
+  let dir: string;
+  beforeEach(async () => {
+    root = await mkdtemp(join(tmpdir(), 'fleet-listen-'));
+    dir = join(root, 'A');
+  });
+  afterEach(async () => {
+    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  it('0.0.0.0 → WARN（含修复建议，不使 ok=false）；127.0.0.1 → PASS', async () => {
+    await onboardDevice({ dir, device: 'device-A', peerDevice: 'device-B', listen: '/ip4/0.0.0.0/tcp/4001', agents: echoAgent });
+    let report = await doctor(dir);
+    const warn = report.checks.find((c) => c.name === '监听地址');
+    expect(warn?.status).toBe('WARN');
+    expect(warn?.hint ?? '').toMatch(/RELAY-OPS|回环|LAN/);
+    expect(report.ok).toBe(true); // WARN 不致命
+
+    const cfg = await loadFleetConfig(fleetConfigPath(dir));
+    await saveFleetConfig(fleetConfigPath(dir), { ...cfg, listen: '/ip4/127.0.0.1/tcp/4001' });
+    report = await doctor(dir);
+    expect(report.checks.find((c) => c.name === '监听地址')?.status).toBe('PASS');
   });
 });

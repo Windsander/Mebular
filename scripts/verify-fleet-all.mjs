@@ -58,8 +58,15 @@ for (const suite of SUITES) {
   aggregate.passed += s.passed;
   for (const f of s.failed) aggregate.failed.push(`${suite.name}:${f}`);
   for (const sk of s.skipped ?? []) aggregate.skipped.push({ suite: suite.name, ...(typeof sk === 'string' ? { name: sk } : sk) });
-  if (res.code !== 0 || (s.failed?.length ?? 0) > 0) aggregate.ok = false;
-  console.log(`${res.code === 0 && (s.failed?.length ?? 0) === 0 ? 'PASS' : 'FAIL'}  ${suite.name}  total=${s.total} passed=${s.passed} failed=${s.failed?.length ?? 0} skipped=${(s.skipped ?? []).length}  (exit ${res.code})`);
+  const suiteOk = res.code === 0 && (s.failed?.length ?? 0) === 0;
+  if (!suiteOk) aggregate.ok = false;
+  if (!suiteOk) {
+    console.log(`\n--- ${suite.name} 输出（失败诊断） ---`);
+    console.log(res.out.split('\n').filter((l) => /PASS|FAIL|SKIP|FLEET_SUMMARY/.test(l)).slice(-40).join('\n'));
+    if (res.err) console.log(res.err.split('\n').slice(-20).join('\n'));
+    console.log(`--- ${suite.name} 输出结束 ---\n`);
+  }
+  console.log(`${suiteOk ? 'PASS' : 'FAIL'}  ${suite.name}  total=${s.total} passed=${s.passed} failed=${s.failed?.length ?? 0} skipped=${(s.skipped ?? []).length}  (exit ${res.code})`);
 }
 
 console.log('== verify:fleet:all ==');

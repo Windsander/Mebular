@@ -385,7 +385,8 @@ export async function effectivePolicyIssuers(dir: string): Promise<string[]> {
   }
 }
 
-export type DoctorStatus = 'PASS' | 'FAIL' | 'SKIP';
+/** `WARN` = 非致命告警（不使 `ok=false`），用于暴露加固/运维风险。 */
+export type DoctorStatus = 'PASS' | 'FAIL' | 'SKIP' | 'WARN';
 export interface DoctorCheck {
   name: string;
   status: DoctorStatus;
@@ -447,6 +448,23 @@ function wasNamespaceGrantRevoked(events: readonly PolicyEventLike[], subject: s
   return grants.every((g) => revoked.has(g.grantId));
 }
 
+/** 从 multiaddr 取监听主机（`/ip4|ip6/<host>/tcp/<port>`）；无法解析 → null。 */
+function listenHostOf(multiaddr: string): string | null {
+  const m = /^\/(?:ip4|ip6)\/([^/]+)\/tcp\/\d+/.exec(multiaddr);
+  return m ? m[1]! : null;
+}
+
+/** 回环/私有/链路本地/ULA 视为“非公网”；`0.0.0.0`/`::`/全局地址 → false。 */
+function isPrivateListenHost(host: string): boolean {
+  if (host === '127.0.0.1' || host === '::1' || host === 'localhost') return true;
+  if (/^10\./.test(host) || /^192\.168\./.test(host)) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(host)) return true;
+  if (/^169\.254\./.test(host)) return true;
+  if (/^fe80:/i.test(host)) return true;
+  if (/^f[cd]/i.test(host)) return true; // IPv6 ULA
+  return false;
+}
+
 /** 逐项自检；默认脱敏（不含任何密钥材料）。 */
 export async function doctor(dir: string): Promise<DoctorReport> {
   const checks: DoctorCheck[] = [];
@@ -470,6 +488,21 @@ export async function doctor(dir: string): Promise<DoctorReport> {
     add('config 权限', cfgMode === 0o600 ? 'PASS' : 'FAIL', `mode=${cfgMode.toString(8)}`, cfgMode === 0o600 ? undefined : `chmod 600 ${cfgPath}`);
   } else {
     add('config 权限', 'SKIP', 'Windows 无 POSIX mode；依赖用户目录 ACL（见 ONBOARDING Windows 章节）');
+  }
+
+  // 1.5) 监听地址：绑定全接口/公网 → **WARN**（不静默；给加固建议）。不使 ok=false。
+  const listenHost = listenHostOf(config.listen);
+  if (listenHost === null) {
+    add('监听地址', 'SKIP', `无法解析 listen：${config.listen}`);
+  } else if (isPrivateListenHost(listenHost)) {
+    add('监听地址', 'PASS', config.listen);
+  } else {
+    add(
+      '监听地址',
+      'WARN',
+      `${config.listen} 绑定到全接口/公网地址（${listenHost}）`,
+      '改绑回环或 LAN 地址（/ip4/127.0.0.1 或内网 IP）+ 经 relay 互联，或仅放行已授权对端（见 RELAY-OPS.md）',
+    );
   }
 
   // 2) 主密钥（存在 + 权限 + 可加载）

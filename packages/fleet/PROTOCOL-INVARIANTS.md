@@ -114,3 +114,19 @@ harness：`tests/fleet/collab-invariants.test.ts`（固定种子，`scenarios=20
 | 配额制闲聊 | 配额 | 发送对 `from.device` 走 `LocalQuota`；`accepted/queued/rejected` 两策略确定；账本守恒 | `1d-c …reject/queue 两策略…账本守恒` · `闲聊消息夹具…` |
 | 配额制闲聊 | 幂等 | 收件按 `messageId` 去重 | `1d-c …收件幂等` |
 | 通用 | live E2E | 三种形态在**真实 libp2p loopback** 双端上确定性通过（fake executor） | `verify:fleet:collab`（12/12） |
+
+## 8. WAN 准备（L2/L4/L5）：网络行为（**不改 core 语义/线格式**）
+
+> relay 是**纯传输**：按 `SEALING.md §1.6`（传输/集成不构成权威）——relay 只转发密文字节，
+> 不参与授权/一致性判定，可自托管、可替换。加固只加**边界**（连接数/帧大小/白名单），不改协议语义。
+
+| 域 | 性质 | 期望 | 覆盖 |
+|---|---|---|---|
+| L2 | relay-only 连通 | 只交换 `/p2p-circuit` 地址即可连通并收敛 | `verify:wan:l2` ①（本机）+ `verify:wan:l2:docker` ①（隔离网络） |
+| L2 | 授权负例 | 未授权分区经 relay 亦不可见（默认拒绝） | `verify:wan:l2` ② · docker ② |
+| L2 | relay 重启恢复 | 同端口重启 relay 后重预留、恢复同步 | `verify:wan:l2` ③ |
+| L2 | 地址变更恢复 | 对端换监听端口后经新 circuit 地址恢复 | `verify:wan:l2` ④ |
+| L4 | 确定性故障注入 | 拨号丢包/延迟下有界收敛，丢包可观测（不静默） | `tests/sync/wan-hardening.test.ts`（L4） |
+| L4 | relay 不可达降级 | 手动 multiaddr 直连可用（`direct-degraded`） | `verify:wan:l2` ⑤ |
+| L5 | 加固 | 连接数上限 / 帧大小上限 / 对端白名单；不改线格式 | `tests/p2p/ConnectionManager.test.ts` · `Libp2pProvider.test.ts` · `wan-hardening` 白名单 |
+| L5 | doctor 公网监听告警 | `0.0.0.0`/公网监听 → `WARN` + 修复建议（不静默，不致命） | `tests/fleet/grant.test.ts` 监听地址 |

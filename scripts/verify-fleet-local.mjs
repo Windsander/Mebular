@@ -47,6 +47,25 @@ function startWorker(args) {
   return child;
 }
 
+/** A 端已观测到的 done 事件数（文件存储 JSONL；用于把“杀 worker1”对齐到已发布之后）。 */
+async function doneEventCount(path) {
+  try {
+    const raw = await readFile(path, 'utf-8');
+    let n = 0;
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        if (JSON.parse(line).type === 'done') n += 1;
+      } catch {
+        // ignore
+      }
+    }
+    return n;
+  } catch {
+    return 0;
+  }
+}
+
 async function execTaskIds(path) {
   try {
     const raw = await readFile(path, 'utf-8');
@@ -122,9 +141,11 @@ async function roundB() {
 
   let killed = false;
   const start = Date.now();
-  while (Date.now() - start < 15000) {
-    const t = await execTaskIds(execLog);
-    if (t.length >= 8) {
+  const nodeStorage = join(dir, 'A.jsonl');
+  // 仅当 **A 已观测到 ≥8 条 done**（即 worker1 已发布）才杀 worker1：
+  // 避免 worker1 在“执行已记录、done 未发布”窗口被杀导致永久丢失（历史偶发假红根因）。
+  while (Date.now() - start < 30000) {
+    if ((await doneEventCount(nodeStorage)) >= 8) {
       worker1.kill('SIGKILL');
       killed = true;
       break;

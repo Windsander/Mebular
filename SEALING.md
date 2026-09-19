@@ -49,7 +49,7 @@
 
 - **策略事件类型与命名空间**：保留命名空间 `__policy__`；事件类型 `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare` / `namespace_membership` / `namespace_handoff`。
 - **2c 重订阅恢复（reset）**：退订清理后重入须同时满足 ①本机对该分区有**生效授权**（`getEffectiveNamespaces(self)` 含该分区；默认拒绝不变）②成员**重新在册**；否则**显式失败**。重入写**图外** `<storagePath>.rejoin.<ns>.json` 标记（**不同步/无 tombstone**）并清本机该分区本地水位；本机 hello 以**空时钟**上报显式订阅的分区 → 对端按「自报水位**只允许向下修正**」从 0 重发（或按既有“空水位”门禁发初始快照，**门禁不放宽**）。**不新增同步协议、不产生 tombstone、不改 `__policy__`**（oracle-free）。**破坏性/前向差异**：旧节点无“向下修正”语义 → 对旧端重入只可能**少收**（安全方向），需同版本互通。
-- **2b 退订交接（`namespace_handoff`）**：退订 = 成员资格退出（`namespace_membership(active:false)`）+ **本地彻底清理**该分区事件/节点/边与本地水位。**绝不产生 tombstone**（无任何“已删除”事件）。**清理前必须**继任者全量 ack（复用 per-event ack `getPendingEvents`，含退订方作者计数；**不新增同步协议、不放宽快照门禁**）；门禁不过 → **保持原状**。**`__policy__` 永不清理**（策略/成员/交接记录保留 → 清理不改变策略推导，legacy-empty 不退化）。`force` **仅本地 CLI**（不经 MCP/远程），仍**如实**记录 `forced:true` 与缺失明细。意图记录落在**图外**（`<storagePath>.handoff.json`）以保证崩溃后可**幂等续跑**。**重入/重订阅恢复未支持（2c）**。
+- **2b 退订交接（`namespace_handoff`）**：退订 = 成员资格退出（`namespace_membership(active:false)`）+ **本地彻底清理**该分区事件/节点/边与本地水位。**绝不产生 tombstone**（无任何“已删除”事件）。**清理前必须**继任者全量 ack（复用 per-event ack `getPendingEvents`，含退订方作者计数；**不新增同步协议、不放宽快照门禁**）；门禁不过 → **保持原状**。**`__policy__` 永不清理**（策略/成员/交接记录保留 → 清理不改变策略推导，legacy-empty 不退化）。`force` **仅本地 CLI**（不经 MCP/远程），仍**如实**记录 `forced:true` 与缺失明细。意图记录落在**图外**（`<storagePath>.handoff.json`）以保证崩溃后可**幂等续跑**。
 - **M1–M3 成员资格（`namespace_membership`）**：`{ member, namespace, active, issuedAt, note? }`；只采纳链到主密钥且签发者/成员未被 `device_revoke` 吊销的记录（**无条件采纳，不做 R-a**）；`(namespace, member)` 取 **R-c 最新**记录的 `active`（在册/注销）。**生效成员 = active 成员 ∩ 该设备对该分区的生效授权**；成员记录**不得**放宽授权（默认拒绝不变）。**裁剪链**：对端授权 ∩ 对端成员资格 ∩ 本机订阅声明；hello 订阅声明仅作活跃性/一致性校验，不一致 **显式拒绝/告警**（`sync-completed.membershipRejected`）。**legacy-empty**：分区无成员记录时按 hello 订阅裁剪（兼容）。
 - **规则 R-a/R-b/R-c/R-d**：
   - **R-a 不可越权授予**：签发者须属于**生效引导集合**（图上被采纳的 `policy_issuer_declare` 主体 ∪ 本地配置 `sync.policyIssuers`），或**当时**已获授权其声明的**全部**分区。
@@ -71,13 +71,12 @@
 
 ## 4. 推迟项（本轮封板明确不做）
 
-- **重订阅恢复**（清理后的重入语义）——属 2c；2a 已定义成员「在册/注销」两态与查询接口，**2b 已实现退订交接**（成员退出 + 继任者全量 ack 门禁 + 本地彻底清理 + `namespace_handoff` 审计）。
 - **F/G 剩余**：策略导出的其余边界族与治理项。
 - **会话多路复用**。
 - **quorum / 阈值签名**（多签发者已有，但无门限）。
 - **`expiresAt` 强制生效**（字段已预留，不引入跨端时钟依赖；移入 fleet MVP 范围）。
 - **fleet（`@mebular/fleet`）已落地 M0–M4**（**不改 core/SEALING 语义**）：M0 骨架/边界、M1 协议模型（事件/状态机/本地配额 + 不变量 harness）、M2 单机双进程（spool）、M3 真实 libp2p + 记忆同步、M4 **agent 路由**（注册表 + Command/Hermes 适配器）与**三种协作形态模型**（审查 DAG / 有限协商 / 配额制闲聊 + 矩阵 + 随机 harness）。
-  入口见 `packages/fleet/DESIGN.md`、`PROTOCOL-INVARIANTS.md`、`RUNBOOK.md`。**剩余推迟**：真实 OpenChamber 会话接缝（见 `packages/fleet/OPENCHAMBER-SEAM.md`，需 OpenChamber 侧改动）、协作形态的 live 通道接线与执行器适配器生产化。
+  入口见 `packages/fleet/DESIGN.md`、`PROTOCOL-INVARIANTS.md`、`RUNBOOK.md`。**剩余推迟**：真实 OpenChamber 会话接缝（见 `packages/fleet/OPENCHAMBER-SEAM.md`，需 OpenChamber 侧改动）、真实执行器适配器生产化。**协作形态 live 通道接线（1d）已完成**。
 - **自动事件裁剪**：本期只固化约束与测试——**任何裁剪必须排除尚未被所有已授权对端 ack 的事件**，不实现裁剪。
 - **信任模型 v2（证书吊销）**、**跨 NAT 实测回填**（README「项目状态」标注规划中）。
 
@@ -89,7 +88,7 @@
 - **吊销是域收缩**：不回撤**已入图**数据，也无法强制远端停止；它阻止的是**后续摄入**（读侧 `[]` + 入站事件隔离 + 快照过滤）。被吊销设备**仍可建立会话**（否则无从得知恢复）。
 - **保留命名空间可见性代价**：`__policy__` 对已认证设备（含被吊销者）可读，授权图可见（见 §1.7）。
 - **跨会话重复发送**是设计（见 §2.4）；`duplicates` 接近 `sentEvents` 且量很大时，多半是本机同步状态被重置/丢失过——用 `mebular.resetPeerWatermarks(peerDeviceId?)` 修复（只清水位、不动 per-event ack，方向安全）。
-- **文档一致性**：README 的测试/覆盖数字（现为 **86 套件 / 671 用例**、行 ~92% / 分支 ~80%）、anti-entropy 口径（代码默认 `10min ±20%`，即 `intervalMs 600000`）与推迟项引用（原「未做项」）均已对齐；Agent（skill + MCP）接入用法见 README「30 秒上手 · 路径一」。
+- **文档一致性**：README 的测试/覆盖数字（现为 **94 套件 / 734 用例**、行 ~92.8% / 分支 ~80.8%）、anti-entropy 口径（代码默认 `10min ±20%`，即 `intervalMs 600000`）与推迟项引用（原「未做项」）均已对齐；Agent（skill + MCP）接入用法见 README「30 秒上手 · 路径一」。
 
 ## 6. 复现封板基线（可复核）
 

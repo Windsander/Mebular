@@ -14,7 +14,7 @@ Mebular 把记忆存成一张带签名事件的知识图谱，每条事实都记
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-671%20passed-brightgreen)](#项目状态)
+[![Tests](https://img.shields.io/badge/Tests-734%20passed-brightgreen)](#项目状态)
 [![Coverage](https://img.shields.io/badge/Coverage-92.4%25-brightgreen)](#项目状态)
 
 [官网](https://mebular.cyberfederal.io) · [快速上手](#30-秒上手) · [系统架构](#系统架构) · [项目状态](#项目状态) · [贡献](#贡献)
@@ -47,7 +47,7 @@ git clone https://github.com/Windsander/Mebular.git
 cd Mebular
 npm install
 npm run build          # TypeScript strict → dist/
-npm test               # 86 套件 / 671 用例全绿
+npm test               # 94 套件 / 734 用例全绿
 ```
 
 ### 路径一（推荐）· Agent 用（skill + MCP）
@@ -235,7 +235,7 @@ Mebular 没走云端记忆 SaaS 那条路，也就有相应的代价。
 
 Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API 还没稳定，也没发 npm 包，放到生产环境前请自己评估。
 
-记忆层已**封板**：契约（去中心化红线 / 一致性口径 / 协议语义 / 推迟项 / 已知边界）见 [`SEALING.md`](SEALING.md)，基线 `main=0d78486`、67 套件 / 542 用例、覆盖 ~92.4% / ~79.4%。**下一阶段是 `packages/fleet`（尚未开始）。**
+记忆层已**封板**：契约（去中心化红线 / 一致性口径 / 协议语义 / 推迟项 / 已知边界）见 [`SEALING.md`](SEALING.md)，基线 `main=0d78486`。`packages/fleet` 已落地 M0–1d（记忆同步传输、agent 路由、三形态 live、服务化、成员/交接/重入、WAN 仿真）。
 
 | 里程碑 | 状态 |
 |--------|------|
@@ -252,7 +252,7 @@ Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API
 
 | 项目 | 情况 |
 |------|------|
-| 测试 | 86 个套件、671 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
+| 测试 | 94 个套件、734 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
 | 覆盖率 | 行 92.4%、分支 ~79.4%（运行间抖动），全库门槛 85/65，关键文件另有底线 |
 | 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |

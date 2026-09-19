@@ -270,8 +270,8 @@ fleet service status          # 注册/运行/心跳新鲜度/SHA
 fleet service logs fleet-node --tail 50
 fleet service uninstall fleet-node
 
-fleet node   --dir ~/.fleet --run-forever   # 旧名 `fleet serve`（deprecated alias）
-fleet worker --dir ~/.fleet --run-forever   # 旧名 `fleet work`（deprecated alias）
+fleet node   --dir ~/.fleet --run-forever
+fleet worker --dir ~/.fleet --run-forever
 ```
 
 - **平台**：macOS = launchd 用户级 LaunchAgent（`~/Library/LaunchAgents`，RunAtLoad + KeepAlive + ThrottleInterval）；Linux = `systemd --user`（`Restart=on-failure`，`WantedBy=default.target`）；Windows = **Task Scheduler onlogon**（`schtasks`，无需管理员）。
@@ -279,7 +279,7 @@ fleet worker --dir ~/.fleet --run-forever   # 旧名 `fleet work`（deprecated a
 - **幂等**：重复 `install` = 更新单元并重启；`uninstall` 未安装 = 清晰提示（`removed:false`）。单元/manifest 记录**构建 SHA**，`service status` 输出。
 - **Windows 边界**：Task Scheduler 为登录级、非真 Windows Service（后者需管理员，记为后续可选项）；`--no-autostart` 下任务注册后立即 `schtasks /End`（已注册但停止）。
 
-> 改名（D5）：`fleet serve → fleet node`、`fleet work → fleet worker`（与 `FleetNode`/`FleetWorker` 对齐）；旧动词保留为 **deprecated alias**（行为等价，stderr 提示）。JSON `role` 字段同步为 `node`/`worker`；M2 单机双进程（spool）命令改为 `fleet spool node|worker`。
+> 命令名（D5）：`fleet node`（任务板/发起端）/ `fleet worker`（执行端），与 `FleetNode`/`FleetWorker` 对齐；JSON `role` 字段为 `node`/`worker`；M2 单机双进程（spool）命令为 `fleet spool node|worker`。（历史别名 `serve`/`work` 已移除。）
 
 ## 11. 成员资格（M1–M3）：订阅 = 持久、签名的图上记录
 
@@ -302,7 +302,7 @@ fleet members --dir ~/.fleet --namespace tasks
   一旦出现成员记录，即成为该分区**强制闸门**（非成员收不到）。
 - `doctor` 增 `namespace 成员资格`：未启用 → **SKIP**（明列原因）；启用后本机在册 → PASS，否则 FAIL。
 - **A→B 与 B→A 都需要对方“在册”**：A 发任务要 A 视图里 B 是成员；B 回传结果要 B 视图里 A 是成员。
-- **2b 未做**：注销（`--leave`）只改成员集合；**数据清理/继任者全量 ack 门禁属 2b**，本轮不声称已实现退订交接。
+- **退订交接（2b）**：注销（`--leave`）会做**继任者全量 ack 门禁 + 本地彻底清理**（见 §12）。
 
 > 破坏性协议变更：旧节点忽略 `namespace_membership`，对旧端该分区始终「未启用成员资格」→ 行为不变或**少收**
 > （安全方向，不 fail-open）。详见仓库根 `SEALING.md` §3 M1–M3。
@@ -328,7 +328,7 @@ fleet leave --dir ~/.fleet --namespace tasks --successor device-B --force
 - **验前不删**：校验通过 → 写成员注销 + 交接记录（`namespace_handoff`，`__policy__`，含 `forced`/缺失明细）→ 写**图外**意图（`<storagePath>.handoff.json`）→ 物理删除事件/节点/边 → 清本地水位 → 移除意图。崩溃后重跑 `fleet leave` **幂等续跑**。
 - **`__policy__` 永不清理**：策略/成员/交接记录保留 → 清理**不改变**策略推导（oracle-free）；legacy-empty 不退化（**清理后成员闸门仍在**，非成员仍收不到）。
 - **可观测**：`fleet leave --dry-run` 给验证明细；`doctor` 增 `交接状态`（有未完成意图 → FAIL，提示续跑）。
-- **重入/重订阅恢复未支持（2c）**：清理后本机不再持有该分区；如需重新加入，需 2c 的恢复语义。
+- **重入/重订阅恢复（2c）**：清理后可用 `fleet rejoin` 重新加入并从对端拉回历史（见 §13）。
 
 ## 13. 重订阅恢复（2c）：显式降水位
 

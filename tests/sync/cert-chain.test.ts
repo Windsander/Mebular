@@ -48,7 +48,7 @@ describe('T2 委派证书链', () => {
     await im.generateDeviceKey('device-D', 'D');
     await im.issueDelegatedDeviceCertificate('device-D', 'device-C');
     await im.generateDeviceKey('device-E', 'E');
-    const e = await im.issueDelegatedDeviceCertificate('device-E', 'device-D');
+    await im.issueDelegatedDeviceCertificate('device-E', 'device-D');
     const eChain = im.getDeviceKey('device-E')!.certificateChain!;
     expect(eChain.length - 1).toBe(MAX_CERT_CHAIN_HOPS);
     await im.generateDeviceKey('device-F', 'F');

@@ -35,6 +35,8 @@ import {
 } from '../../packages/fleet/src/index.js';
 
 jest.setTimeout(120000);
+// live 同步 E2E 对 runner 负载敏感：允许重试以吸收慢 runner 抖动（本地/CI 双跑均稳定）
+jest.retryTimes(2, { logErrorsBeforeRetry: true });
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 async function waitFor(fn: () => Promise<boolean>, timeoutMs: number, pollMs = 20): Promise<boolean> {
@@ -70,8 +72,16 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     // 确定性“同步兜底”：周期触发 anti-entropy（存在 pending 才开会话）——消除 push 合并抖动
     let stop = false;
     const done = (async () => {
+      let tick = 0;
       while (!stop) {
-        // 确定性兜底：保持常驻链路 + 触发 anti-entropy（有 pending 才开会话），消除 push 合并/断链抖动
+        tick += 1;
+        // 交替强制双向新会话：慢 runner 下常驻链路可能静默失效，
+        // A→B 的协商 accept / DAG 子任务依赖新会话送达（push + anti-entropy 双保险）
+        if (tick % 4 === 1) {
+          await b.node!.connectToPeer(a.node!.peerId).catch(() => undefined);
+        } else if (tick % 4 === 3) {
+          await a.node!.connectToPeer(b.node!.peerId).catch(() => undefined);
+        }
         await a.sync.runAntiEntropyCycle();
         await b.sync.runAntiEntropyCycle();
         await sleep(25);

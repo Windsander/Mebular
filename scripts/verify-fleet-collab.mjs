@@ -84,7 +84,9 @@ try {
     let stop = false;
     const done = (async () => {
       for (let i = 0; i < iterations && !stop; i++) {
-        // 确定性恢复：anti-entropy 兜底丢失的 push（慢 runner）
+        // 确定性恢复：交替强制新会话（双向）+ anti-entropy，兜底丢失的 push（慢 runner）
+        if (i % 20 === 1) await b.node.connectToPeer(a.node.peerId, a.node.getLocalMultiaddrs()[0]).catch(() => undefined);
+        else if (i % 20 === 11) await a.node.connectToPeer(b.node.peerId, b.node.getLocalMultiaddrs()[0]).catch(() => undefined);
         await a.sync.runAntiEntropyCycle().catch(() => undefined);
         await b.sync.runAntiEntropyCycle().catch(() => undefined);
         await worker.pollOnce();

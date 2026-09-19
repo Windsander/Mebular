@@ -283,7 +283,7 @@ async function runOnboard(args: Args): Promise<number> {
     alreadyOnboarded: result.alreadyOnboarded,
     masterKeyCreated: result.masterKeyCreated,
     masterKeyFingerprint: result.masterKeyFingerprint,
-    next: [`fleet serve --dir ${result.config.dir}`, `fleet work --dir ${result.config.dir}`, `fleet doctor --dir ${result.config.dir}`],
+    next: [`fleet node --dir ${result.config.dir}`, `fleet worker --dir ${result.config.dir}`, `fleet doctor --dir ${result.config.dir}`],
   }, null, 2));
   return 0;
 }
@@ -392,7 +392,7 @@ async function runDoctor(args: Args): Promise<number> {
 }
 
 /**
- * `fleet node`（任务板/发起端）。旧名 `fleet serve`（deprecated alias）。
+ * `fleet node`（任务板/发起端）。
  * `--run-forever`：常驻（服务模式），直到收到 SIGINT/SIGTERM；写 `service.heartbeat`（role=node）。
  */
 async function runFleetNode(args: Args): Promise<number> {
@@ -466,7 +466,7 @@ async function runFleetNode(args: Args): Promise<number> {
 }
 
 /**
- * `fleet worker`（执行端）。旧名 `fleet work`（deprecated alias）。
+ * `fleet worker`（执行端）。
  * `--run-forever`：常驻（服务模式）；写 `service.heartbeat`（role=worker）。
  */
 async function runFleetWorker(args: Args): Promise<number> {
@@ -527,8 +527,6 @@ async function main(): Promise<void> {
   }
   else if (command === 'node') code = await runFleetNode(args);
   else if (command === 'worker') code = await runFleetWorker(args);
-  else if (command === 'serve') { console.error('[deprecated] `fleet serve` → `fleet node`'); code = await runFleetNode(args); }
-  else if (command === 'work') { console.error('[deprecated] `fleet work` → `fleet worker`'); code = await runFleetWorker(args); }
   else if (command === 'onboard') code = await runOnboard(args);
   else if (command === 'doctor') code = await runDoctor(args);
   else if (command === 'grant') code = await runGrant(args);

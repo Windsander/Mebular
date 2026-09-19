@@ -7,7 +7,7 @@
 
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import { dirname, join } from 'node:path';
@@ -15,6 +15,123 @@ import { fileURLToPath } from 'node:url';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { TOOL_SCOPES } from './tools.mjs';
 import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
+import { configPath } from './config.mjs';
+
+// ---------- 控制台配置写入（curated：只允许安全子集，需重启生效） ----------
+// 语义：PATCH 合并进 config.json（原子写 + .bak 备份）；其余字段需手工编辑。
+const CONFIG_PATCH_SPECS = new Map([
+  ['sync.namespaces', { kind: 'list', empty: 'set' }],
+  ['sync.peerWhitelist', { kind: 'list', empty: 'delete' }],
+  ['sync.autoSync', { kind: 'bool' }],
+  ['sync.pushOnWrite', { kind: 'bool' }],
+  ['sync.snapshotThreshold', { kind: 'int', min: 1, nullable: true }],
+  ['sync.antiEntropy.enabled', { kind: 'bool' }],
+  ['sync.antiEntropy.intervalMs', { kind: 'int', min: 1000, nullable: true }],
+  ['sync.antiEntropy.jitterRatio', { kind: 'num', min: 0, max: 1, nullable: true }],
+  ['sync.policyIssuers', { kind: 'list', empty: 'delete' }],
+  ['semantic.enabled', { kind: 'bool' }],
+  ['semantic.minScore', { kind: 'num', min: 0, max: 1, nullable: true }],
+  ['network.enabled', { kind: 'bool' }],
+  ['network.libp2p.listen', { kind: 'list', empty: 'delete', prefix: '/' }],
+  ['network.libp2p.relayServers', { kind: 'list', empty: 'delete', prefix: '/' }],
+  ['network.libp2p.relayUnlimited', { kind: 'bool' }],
+  ['mcp.http.host', { kind: 'string', nonEmpty: true, empty: 'delete' }],
+  ['mcp.http.port', { kind: 'int', min: 0, max: 65535, nullable: true }],
+  ['mcp.http.auth', { kind: 'enum', values: ['none', 'bearer', 'oauth'] }],
+  ['mcp.http.tls', { kind: 'bool' }],
+]);
+
+function flattenPatch(patch, prefix = '') {
+  const out = [];
+  for (const [key, value] of Object.entries(patch ?? {})) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      out.push(...flattenPatch(value, path));
+    } else {
+      out.push([path, value]);
+    }
+  }
+  return out;
+}
+
+function validateConfigPatch(patch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    return { errors: ['patch 必须是对象'] };
+  }
+  const errors = [];
+  const entries = [];
+  for (const [path, raw] of flattenPatch(patch)) {
+    const spec = CONFIG_PATCH_SPECS.get(path);
+    if (!spec) {
+      errors.push(`不允许修改 ${path}（设备身份 / 存储 / 加密等请手工编辑 config.json）`);
+      continue;
+    }
+    if (spec.kind === 'bool') {
+      if (typeof raw !== 'boolean') errors.push(`${path} 需要布尔值`);
+      else entries.push({ path, value: raw });
+    } else if (spec.kind === 'int' || spec.kind === 'num') {
+      if (raw === null && spec.nullable) {
+        entries.push({ path, value: null });
+      } else if (typeof raw !== 'number' || !Number.isFinite(raw) || (spec.kind === 'int' && !Number.isInteger(raw))) {
+        errors.push(`${path} 需要${spec.kind === 'int' ? '整数' : '数字'}`);
+      } else if ((spec.min !== undefined && raw < spec.min) || (spec.max !== undefined && raw > spec.max)) {
+        errors.push(`${path} 超出范围（${spec.min ?? '-∞'} ~ ${spec.max ?? '∞'}）`);
+      } else {
+        entries.push({ path, value: raw });
+      }
+    } else if (spec.kind === 'string') {
+      if (typeof raw !== 'string') errors.push(`${path} 需要字符串`);
+      else if (raw.trim().length === 0 && spec.empty === 'delete') entries.push({ path, value: null });
+      else if (spec.nonEmpty && raw.trim().length === 0) errors.push(`${path} 需要非空字符串`);
+      else entries.push({ path, value: raw.trim() });
+    } else if (spec.kind === 'enum') {
+      if (!spec.values.includes(raw)) errors.push(`${path} 必须是 ${spec.values.join(' | ')}`);
+      else entries.push({ path, value: raw });
+    } else if (spec.kind === 'list') {
+      if (!Array.isArray(raw) || raw.some((v) => typeof v !== 'string')) {
+        errors.push(`${path} 需要字符串数组`);
+      } else {
+        const list = [...new Set(raw.map((v) => v.trim()).filter(Boolean))];
+        if (spec.prefix && list.some((v) => !v.startsWith(spec.prefix))) {
+          errors.push(`${path} 每项需以 ${spec.prefix} 开头的 multiaddr`);
+        } else if (list.length === 0 && spec.empty === 'delete') {
+          entries.push({ path, value: null });
+        } else {
+          entries.push({ path, value: list });
+        }
+      }
+    }
+  }
+  if (entries.length === 0 && errors.length === 0) errors.push('patch 为空');
+  return { errors, entries };
+}
+
+function setAtPath(root, path, value) {
+  const keys = path.split('.');
+  let node = root;
+  for (const key of keys.slice(0, -1)) {
+    if (node[key] === null || typeof node[key] !== 'object' || Array.isArray(node[key])) node[key] = {};
+    node = node[key];
+  }
+  node[keys[keys.length - 1]] = value;
+}
+
+function deleteAtPath(root, path) {
+  const keys = path.split('.');
+  const chain = [root];
+  let node = root;
+  for (const key of keys.slice(0, -1)) {
+    if (node[key] === null || typeof node[key] !== 'object' || Array.isArray(node[key])) return;
+    node = node[key];
+    chain.push(node);
+  }
+  delete node[keys[keys.length - 1]];
+  // 修剪残留的空对象（如删除 intervalMs 后 sync.antiEntropy 变空）
+  for (let i = chain.length - 1; i > 0; i -= 1) {
+    if (Object.keys(chain[i]).length === 0) delete chain[i - 1][keys[i - 1]];
+    else break;
+  }
+}
 
 const SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
 const SCOPE_RANK = { 'memory.read': 0, 'memory.write': 1, 'memory.admin': 2 };
@@ -545,7 +662,7 @@ export async function startHttpServer({
     // 注意：CSRF token 只在 /console/ 页面加载时签发。若在 overview 轮询里重新签发，
     // cookie 会被每次轮询改写，与并发的写请求竞争（读 cookie 后、发出写之前又来一次
     // overview）→ header 与 cookie 不一致而 403。token 12h 有效，页面加载签发一次即可。
-    const payload = await builder({ app, service, config, runtime });
+    const payload = await builder({ app, service, config, runtime, home });
     if (path === '/admin/api/overview') {
       payload.features = { writes: Boolean(writesEnabled) };
     }
@@ -639,6 +756,7 @@ export async function startHttpServer({
     /^\/admin\/api\/grants$/,
     /^\/admin\/api\/grants\/([^/]+)\/revoke$/,
     /^\/admin\/api\/devices\/([^/]+)\/(revoke|connect|disconnect|sync|reset-watermarks)$/,
+    /^\/admin\/api\/config$/,
     /^\/admin\/api\/policy-issuers$/,
     /^\/admin\/api\/memberships$/,
     /^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/,
@@ -670,6 +788,42 @@ export async function startHttpServer({
   async function applyAdminWrite(req, res, path, body) {
     if (!app || !service) {
       return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
+    }
+
+    // 控制台配置写入：curated 合并 + 原子写 + .bak 备份（全部需重启生效）
+    if (path === '/admin/api/config') {
+      const input = parseJsonBody(body);
+      if (!input || typeof input.patch !== 'object') {
+        return sendJson(res, 400, { error: 'bad_request', message: '需要 { patch: { ... } }' });
+      }
+      const { errors, entries } = validateConfigPatch(input.patch);
+      if (errors.length > 0) {
+        return sendJson(res, 400, { error: 'bad_request', message: errors.join('；'), details: errors });
+      }
+      const cfgFile = configPath(home);
+      let current = {};
+      try {
+        current = JSON.parse(await readFile(cfgFile, 'utf-8'));
+      } catch {
+        current = {};
+      }
+      const merged = JSON.parse(JSON.stringify(current));
+      for (const entry of entries) {
+        if (entry.value === null) deleteAtPath(merged, entry.path);
+        else setAtPath(merged, entry.path, entry.value);
+      }
+      const tmp = `${cfgFile}.tmp-${process.pid}`;
+      await writeFile(tmp, JSON.stringify(merged, null, 2), 'utf-8');
+      if (existsSync(cfgFile)) await copyFile(cfgFile, `${cfgFile}.bak`);
+      await rename(tmp, cfgFile);
+      return sendJson(res, 200, {
+        ok: true,
+        applied: entries.map((e) => e.path),
+        restartRequired: true,
+        backup: existsSync(`${cfgFile}.bak`) ? `${cfgFile}.bak` : null,
+        path: cfgFile,
+        config: merged,
+      });
     }
 
     const grantMatch = path.match(/^\/admin\/api\/grants$/);

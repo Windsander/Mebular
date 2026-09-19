@@ -72,13 +72,16 @@ export async function resolveMasterKeys(home, config) {
 export async function createMebular() {
   const home = homeDir();
   const config = await loadConfigFile(home);
-  const storagePath = process.env.MEBULAR_STORAGE_PATH ?? config.storagePath ?? join(home, 'store.jsonl');
+  const storageAdapter = config.storageAdapter ?? 'json';
+  const storagePath = process.env.MEBULAR_STORAGE_PATH
+    ?? config.storagePath
+    ?? join(home, storageAdapter === 'sqlite' ? 'store.sqlite' : 'store.jsonl');
   const deviceId = process.env.MEBULAR_DEVICE_ID ?? config.deviceId ?? `device-${process.env.HOSTNAME ?? 'local'}`;
   const deviceName = process.env.MEBULAR_DEVICE_NAME ?? config.deviceName;
   // 生效值快照（console 设置卡应展示这些，而不是静态 config，否则 CLI/env 覆盖后卡片会失真）
   const effective = {
     deviceName: deviceName ?? null,
-    storageAdapter: config.storageAdapter ?? 'json',
+    storageAdapter,
     encryptionLevel: config.encryption?.level ?? 'none',
     networkEnabled: truthy(process.env.MEBULAR_NETWORK_ENABLED, config.network?.enabled ?? false),
     autoSync: config.sync?.autoSync ?? true,

@@ -11,7 +11,10 @@
 //   GET /admin/api/policy     [{ eventId, type, issuer, subject, namespaces?, grantId?, at, valid }]
 //   GET /admin/api/namespaces [{ namespace, count, lastUpdatedAt, stateHash }]
 
+import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { POLICY_NAMESPACE, normalizeNamespace } from '@mebular/core';
+import { configPath } from './config.mjs';
 
 export const POLICY_NS = POLICY_NAMESPACE;
 
@@ -533,7 +536,9 @@ export async function buildSettings({ app, service, config, runtime }) {
     },
     network: {
       enabled: Boolean(status.running),
+      // listen = 实际监听（含 /p2p/、0.0.0.0 展开）；listenConfigured = config 原始值（供编辑/复制）
       listen: status.listenAddrs,
+      listenConfigured: Array.isArray(config?.network?.libp2p?.listen) ? config.network.libp2p.listen : [],
       relays: status.relays,
       relayUnlimited: config?.network?.libp2p?.relayUnlimited === true,
     },
@@ -577,6 +582,24 @@ export async function buildHandoffPlan({ app }, namespace, successor) {
   }
 }
 
+/** GET /admin/api/config：磁盘上的原始配置（只读；供查看与复制） */
+export async function buildConfigView({ config, home }) {
+  const path = configPath(home);
+  let raw = null;
+  let parseError = null;
+  try {
+    raw = JSON.parse(await readFile(path, 'utf-8'));
+  } catch (error) {
+    parseError = String(error?.message ?? error);
+  }
+  return {
+    path,
+    exists: existsSync(path),
+    parseError,
+    config: raw ?? config ?? {},
+  };
+}
+
 /** 只读 API 路由表：路径 → 构造器 */
 export const READ_ROUTES = {
   '/admin/api/overview': buildOverview,
@@ -584,4 +607,5 @@ export const READ_ROUTES = {
   '/admin/api/policy': buildPolicy,
   '/admin/api/namespaces': buildNamespaces,
   '/admin/api/settings': buildSettings,
+  '/admin/api/config': buildConfigView,
 };

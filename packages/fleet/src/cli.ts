@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Mebular } from '@mebular/core';
 import {
+  installService,
   runServiceCli,
   resolveBuildSha,
   startHeartbeat,
@@ -38,7 +39,19 @@ import {
   onboardDevice,
   revokeNamespaceGrant,
   setNamespaceMembership,
+  type DoctorReport,
 } from './onboard.js';
+import {
+  approveDevice,
+  autoApproveOnce,
+  defaultDeviceName,
+  defaultFleetDir,
+  joinFleet,
+  pendingDevices,
+  quickstart,
+  readJoinCode,
+  type ServiceInstaller,
+} from './quickstart.js';
 
 interface Args {
   [key: string]: string | boolean | undefined;
@@ -75,6 +88,37 @@ const num = (v: string | boolean | undefined, fallback: number): number => {
   return Number.isFinite(n) ? n : fallback;
 };
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/** 默认设备目录：`--dir` → `FLEET_DIR` → `~/.fleet`。 */
+function fleetDirFrom(args: Args): string {
+  return str(args.dir, defaultFleetDir());
+}
+/** 默认设备名：`--device` → `FLEET_DEVICE` → 主机名（清洗）。 */
+function fleetDeviceFrom(args: Args): string {
+  return str(args.device, process.env.FLEET_DEVICE ?? defaultDeviceName());
+}
+/** 医生报告的**脱敏摘要**（只含状态与检查名，不含任何材料）。 */
+function summarizeDoctor(report: DoctorReport): Record<string, unknown> {
+  return {
+    ok: report.ok,
+    skipped: report.skipped,
+    failed: report.checks.filter((c) => c.status === 'FAIL').map((c) => c.name),
+    warn: report.checks.filter((c) => c.status === 'WARN').map((c) => c.name),
+  };
+}
+/** 服务安装器：安装 `fleet-node`（监听方/任务板），失败不致命（doctor 会明列 SKIP/FAIL）。 */
+function fleetNodeInstaller(): ServiceInstaller {
+  return async (dir: string) => {
+    try {
+      const node = fleetServiceDescriptors(dir).find((d) => d.kind === 'fleet-node');
+      if (!node) return { installed: false, note: '无 fleet-node 描述子' };
+      const result = installService(node, { sha: buildSha() });
+      return result.ok ? { installed: true } : { installed: false, note: 'install 返回非 ok' };
+    } catch (error) {
+      return { installed: false, note: (error as Error).message };
+    }
+  };
+}
 
 /** 构建 SHA（心跳/服务单元用）：version.json → env → git → unknown。 */
 function buildSha(): string {
@@ -123,7 +167,7 @@ function flagValue(argv: readonly string[], name: string): string | undefined {
 
 /** `fleet service …`：raw argv（保留 service 自身 flags，如 --no-autostart/--label/--extra）。 */
 function runFleetService(argv: readonly string[]): number {
-  const dir = flagValue(argv, '--dir') ?? './.fleet';
+  const dir = flagValue(argv, '--dir') ?? defaultFleetDir();
   return runServiceCli({
     descriptors: fleetServiceDescriptors(dir),
     argv,
@@ -260,10 +304,10 @@ function parseAgents(
 }
 
 async function runOnboard(args: Args): Promise<number> {
-  const dir = str(args.dir, './.fleet');
+  const dir = fleetDirFrom(args);
   const result = await onboardDevice({
     dir,
-    device: str(args.device, ''),
+    device: fleetDeviceFrom(args),
     ...(typeof args['master-key'] === 'string' ? { masterKeyFile: args['master-key'] } : {}),
     ...(typeof args['peer-device'] === 'string' ? { peerDevice: args['peer-device'] } : {}),
     ...(typeof args['peer-addr'] === 'string' ? { peerAddr: args['peer-addr'] } : {}),
@@ -289,7 +333,7 @@ async function runOnboard(args: Args): Promise<number> {
 }
 
 async function runGrant(args: Args): Promise<number> {
-  const dir = str(args.dir, './.fleet');
+  const dir = fleetDirFrom(args);
   const namespaces = str(args.namespace, '')
     .split(',')
     .map((s) => s.trim())
@@ -305,7 +349,7 @@ async function runGrant(args: Args): Promise<number> {
 }
 
 async function runRevoke(args: Args): Promise<number> {
-  const dir = str(args.dir, './.fleet');
+  const dir = fleetDirFrom(args);
   const result = await revokeNamespaceGrant(dir, {
     grantId: str(args['grant-id'], ''),
     ...(typeof args.subject === 'string' ? { subject: args.subject } : {}),
@@ -316,7 +360,7 @@ async function runRevoke(args: Args): Promise<number> {
 }
 
 async function runDeclareIssuer(args: Args): Promise<number> {
-  const dir = str(args.dir, './.fleet');
+  const dir = fleetDirFrom(args);
   const result = await declarePolicyIssuer(dir, {
     to: str(args.to, ''),
     ...(typeof args.note === 'string' ? { note: args.note } : {}),
@@ -326,7 +370,7 @@ async function runDeclareIssuer(args: Args): Promise<number> {
 }
 
 async function runMember(args: Args): Promise<number> {
-  const dir = str(args.dir, './.fleet');
+  const dir = fleetDirFrom(args);
   const result = await setNamespaceMembership(dir, {
     to: str(args.to, ''),
     ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
@@ -338,7 +382,7 @@ async function runMember(args: Args): Promise<number> {
 }
 
 async function runMembers(args: Args): Promise<number> {
-  const dir = str(args.dir, './.fleet');
+  const dir = fleetDirFrom(args);
   const namespace = typeof args.namespace === 'string' ? args.namespace : undefined;
   const membership = await namespaceMembership(dir, namespace);
   const members = await namespaceMembers(dir, namespace);
@@ -353,7 +397,7 @@ async function runMembers(args: Args): Promise<number> {
 }
 
 async function runLeave(args: Args): Promise<number> {
-  const dir = str(args.dir, './.fleet');
+  const dir = fleetDirFrom(args);
   const namespace = typeof args.namespace === 'string' ? args.namespace : undefined;
   const successor = str(args.successor, '');
   if (args['dry-run'] === true) {
@@ -372,14 +416,14 @@ async function runLeave(args: Args): Promise<number> {
 }
 
 async function runRejoin(args: Args): Promise<number> {
-  const dir = str(args.dir, './.fleet');
+  const dir = fleetDirFrom(args);
   const result = await rejoinNamespace(dir, typeof args.namespace === 'string' ? { namespace: args.namespace } : {});
   console.log(JSON.stringify({ role: 'rejoin', ...result }, null, 2));
   return result.ok ? 0 : 1;
 }
 
 async function runDoctor(args: Args): Promise<number> {
-  const report = await doctor(str(args.dir, './.fleet'));
+  const report = await doctor(fleetDirFrom(args));
   if (args.json === true) console.log(JSON.stringify(report, null, 2));
   else {
     for (const c of report.checks) {
@@ -396,7 +440,7 @@ async function runDoctor(args: Args): Promise<number> {
  * `--run-forever`：常驻（服务模式），直到收到 SIGINT/SIGTERM；写 `service.heartbeat`（role=node）。
  */
 async function runFleetNode(args: Args): Promise<number> {
-  const dir = str(args.dir, './.fleet');
+  const dir = fleetDirFrom(args);
   const runForever = args['run-forever'] === true;
   const config = await loadFleetConfig(fleetConfigPath(dir));
   const encryption = await readMasterKeyFile(config.masterKeyFile);
@@ -411,6 +455,19 @@ async function runFleetNode(args: Args): Promise<number> {
   const store = new MebularTaskEventStore(mebular);
   const node = new FleetNode({ device: config.device, store, transport: new NullTransport(), quota: new LocalQuota({ limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000 }) });
   const submit = num(args.submit, 0);
+  const autoApprove = config.autoApprove === true;
+  let lastAutoApprove = 0;
+  const tickAutoApprove = async (): Promise<void> => {
+    if (!autoApprove) return;
+    const now = Date.now();
+    if (now - lastAutoApprove < 2000) return;
+    lastAutoApprove = now;
+    try {
+      await autoApproveOnce(mebular, config.device, config.namespace);
+    } catch {
+      // 下轮重试；doctor 会暴露未授权项
+    }
+  };
   let code = 0;
   if (submit > 0) {
     // 先等首轮同步（对端连入）再提交，避免在无连接时提交导致事件丢失触发。
@@ -449,13 +506,19 @@ async function runFleetNode(args: Args): Promise<number> {
     console.log(JSON.stringify({ role: 'node', submitted: ids.length, done: done.length, allTerminal: ok, resultsMatch }));
     code = ok && done.length === ids.length && resultsMatch ? 0 : 1;
     if (runForever) {
-      while (!shutdown.isStopping()) await sleep(200); // 常驻：保持在线供对端同步
+      while (!shutdown.isStopping()) {
+        await tickAutoApprove();
+        await sleep(200); // 常驻：保持在线供对端同步
+      }
     } else {
       const lingerMs = num(args['linger-ms'], 0);
       if (lingerMs > 0) await sleep(lingerMs);
     }
   } else if (runForever) {
-    while (!shutdown.isStopping()) await sleep(200);
+    while (!shutdown.isStopping()) {
+      await tickAutoApprove();
+      await sleep(200);
+    }
   } else {
     await sleep(num(args['timeout-ms'], 60_000));
   }
@@ -470,13 +533,16 @@ async function runFleetNode(args: Args): Promise<number> {
  * `--run-forever`：常驻（服务模式）；写 `service.heartbeat`（role=worker）。
  */
 async function runFleetWorker(args: Args): Promise<number> {
-  const dir = str(args.dir, './.fleet');
+  const dir = fleetDirFrom(args);
   const runForever = args['run-forever'] === true;
   const config = await loadFleetConfig(fleetConfigPath(dir));
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(mebularOptions(config, encryption) as never);
   await mebular.initialize();
   const stopHeartbeat = startHeartbeat(dir, { role: 'worker', sha: buildSha() });
+  if (args['print-listen'] === true) {
+    console.log(JSON.stringify({ role: 'worker', event: 'listening', device: config.device, multiaddrs: mebular.node!.getLocalMultiaddrs() }));
+  }
   const shutdown = installShutdownHandlers();
   for (const peer of config.peers) {
     if (peer.addr === undefined) continue;
@@ -500,6 +566,107 @@ async function runFleetWorker(args: Args): Promise<number> {
   stopHeartbeat();
   shutdown.dispose();
   await mebular.shutdown();
+  return 0;
+}
+
+/** `fleet quickstart`：A 一条命令上车（onboard + 声明签发者/成员/自授权 + 加入码 + 服务 + doctor）。 */
+async function runQuickstart(args: Args): Promise<number> {
+  const dir = fleetDirFrom(args);
+  const noService = args['no-service'] === true;
+  const agents = parseAgents(args.agent, args['agent-command'], args['agent-base-args']);
+  const result = await quickstart({
+    dir,
+    device: fleetDeviceFrom(args),
+    buildSha: buildSha(),
+    ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
+    ...(typeof args.listen === 'string' ? { listen: args.listen } : {}),
+    ...(typeof args['code-file'] === 'string' ? { codeFile: args['code-file'] } : {}),
+    ...(agents !== undefined ? { agents } : {}),
+    ...(args['auto-approve'] === true ? { autoApprove: true } : {}),
+    ...(noService ? {} : { installService: fleetNodeInstaller() }),
+  });
+  const report = await doctor(dir);
+  console.log(JSON.stringify({
+    ok: true,
+    role: 'quickstart',
+    device: result.device,
+    dir: result.dir,
+    namespace: result.namespace,
+    fingerprint: result.fingerprint,
+    multiaddrs: result.multiaddrs,
+    agents: result.agents,
+    agentSources: result.agentSources,
+    serviceInstalled: result.serviceInstalled,
+    ...(result.serviceNote !== undefined ? { serviceNote: result.serviceNote } : {}),
+    autoApprove: result.autoApprove,
+    code: result.code,
+    ...(result.codeFile !== undefined ? { codeFile: result.codeFile } : {}),
+    warnings: result.warnings,
+    doctor: summarizeDoctor(report),
+    next: [...result.joinNext, `fleet node --dir ${dir} --run-forever`],
+  }, null, 2));
+  return 0;
+}
+
+/** `fleet join`：B 一条命令上车（版本核对 + 导入信任材料/地址 + onboard + 声明成员 + 服务 + doctor）。 */
+async function runJoin(args: Args): Promise<number> {
+  const dir = fleetDirFrom(args);
+  const noService = args['no-service'] === true;
+  const code = await readJoinCode({
+    ...(typeof args.code === 'string' ? { code: args.code } : {}),
+    ...(typeof args['code-file'] === 'string' ? { codeFile: args['code-file'] } : {}),
+  });
+  const agents = parseAgents(args.agent, args['agent-command'], args['agent-base-args']);
+  const result = await joinFleet({
+    dir,
+    code,
+    device: fleetDeviceFrom(args),
+    buildSha: buildSha(),
+    ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
+    ...(typeof args.listen === 'string' ? { listen: args.listen } : {}),
+    ...(agents !== undefined ? { agents } : {}),
+    ...(noService ? {} : { installService: fleetNodeInstaller() }),
+  });
+  const report = await doctor(dir);
+  console.log(JSON.stringify({
+    ok: true,
+    role: 'join',
+    device: result.device,
+    dir: result.dir,
+    peer: result.peer,
+    namespace: result.namespace,
+    fingerprint: result.fingerprint,
+    alreadyJoined: result.alreadyJoined,
+    awaitingApproval: result.awaitingApproval,
+    serviceInstalled: result.serviceInstalled,
+    ...(result.serviceNote !== undefined ? { serviceNote: result.serviceNote } : {}),
+    agents: result.agents,
+    agentSources: result.agentSources,
+    doctor: summarizeDoctor(report),
+    next: result.next,
+  }, null, 2));
+  return 0;
+}
+
+/** `fleet pending`：A 侧列出在册但未授权的设备（待批准）。 */
+async function runPending(args: Args): Promise<number> {
+  const result = await pendingDevices(fleetDirFrom(args), typeof args.namespace === 'string' ? args.namespace : undefined);
+  console.log(JSON.stringify({ ok: true, role: 'pending', ...result }, null, 2));
+  return 0;
+}
+
+/** `fleet approve <deviceId>`：A 侧图上门授权 + 成员在册（+ 登记地址）。 */
+async function runApprove(args: Args): Promise<number> {
+  const dir = fleetDirFrom(args);
+  const device = str(args.device, '');
+  if (device.length === 0) throw new Error('approve 需要 --device <deviceId>');
+  const result = await approveDevice(dir, {
+    device,
+    ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
+    ...(typeof args.addr === 'string' ? { addr: args.addr } : {}),
+  });
+  const report = await doctor(dir);
+  console.log(JSON.stringify({ ok: true, role: 'approve', ...result, doctor: summarizeDoctor(report) }, null, 2));
   return 0;
 }
 
@@ -528,6 +695,10 @@ async function main(): Promise<void> {
   else if (command === 'node') code = await runFleetNode(args);
   else if (command === 'worker') code = await runFleetWorker(args);
   else if (command === 'onboard') code = await runOnboard(args);
+  else if (command === 'quickstart') code = await runQuickstart(args);
+  else if (command === 'join') code = await runJoin(args);
+  else if (command === 'pending') code = await runPending(args);
+  else if (command === 'approve') code = await runApprove(args);
   else if (command === 'doctor') code = await runDoctor(args);
   else if (command === 'grant') code = await runGrant(args);
   else if (command === 'revoke') code = await runRevoke(args);
@@ -537,7 +708,7 @@ async function main(): Promise<void> {
   else if (command === 'leave') code = await runLeave(args);
   else if (command === 'rejoin') code = await runRejoin(args);
   else {
-    console.error('用法：fleet onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|node|worker|service|spool … | fleet --version');
+    console.error('用法：fleet quickstart|join|pending|approve|onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|node|worker|service|spool … | fleet --version');
     code = 2;
   }
   } catch (error) {

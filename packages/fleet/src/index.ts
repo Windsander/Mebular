@@ -11,6 +11,7 @@ export * from './model.js';
 export * from './quota.js';
 export * from './config.js';
 export * from './onboard.js';
+export * from './quickstart.js';
 export * from './collab/dag.js';
 export * from './collab/negotiation.js';
 export * from './collab/chatter.js';

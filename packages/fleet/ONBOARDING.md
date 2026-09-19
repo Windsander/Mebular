@@ -10,6 +10,30 @@
 - 两台机器可互相 TCP 可达（同一 LAN 即可；跨 NAT 见 RUNBOOK §3）。
 - 信任根 = **同一把用户主密钥**：所有共享它的设备同属一个用户。新设备必须**导入**已有设备的主密钥，否则设备证书互不信任、握手失败、永不收敛。
 
+## 0.5 一键上车（Stage 1）：每台一条命令
+
+两端跑**同一构建 SHA**（`fleet --version` 一致）。A 先出码，B 用码加入，A 再批准：
+
+```bash
+# A（第一条命令）：建根 + 声明签发者/成员 + 自授权 + 产出加入码 +（默认）服务 + doctor
+fleet quickstart --dir ~/.fleet --device device-A \
+  --listen /ip4/0.0.0.0/tcp/4001 \
+  --code-file ~/.fleet/join-code.txt        # 0600；内联 base64 同时打到 stdout
+
+# B（第一条命令）：版本核对 → 导入信任材料与 A 的地址 → 声明成员 →（默认）服务 → doctor
+fleet join --dir ~/.fleet --code-file <把 join-code.txt 安全传到 B> --device device-B
+
+# A（批准）：pending 列出「在册但未授权」设备；approve 发图上 grant（并登记 B 的地址）
+fleet pending --dir ~/.fleet
+fleet approve --dir ~/.fleet --device device-B --addr <B 的 multiaddr>
+```
+
+- **默认值**：`--dir` = `$FLEET_DIR` 或 `~/.fleet`；`--device` = `$FLEET_DEVICE` 或主机名（清洗）；quickstart/join 的 `--listen` = `/ip4/0.0.0.0/tcp/4001`（端口占用会带修复建议报错）。
+- **agent 自动探测**：PATH 有 `hermes` → `hermes`；存在 `MEBULAR_FLEET_OPENCHAMBER_*` → `openchamber`；否则 `echo`（结果见 JSON 的 `agentSources`，可用 `--agent` 覆盖）。
+- **加入码含信任材料**（Stage 1 为共享主密钥，Stage 2 将改为短时效令牌）：`--code-file` 以 **0600** 落盘；不写日志、不回显密钥材料；务必经安全通道传输。
+- **`quickstart --auto-approve`（⚠️ 有风险）**：常驻 `fleet node` 会对**任何在册未授权设备自动授权**。仅在受控信任域使用（默认关闭）。
+- **LAN 自动发现**：core 的 mDNS 发现是**注入式**（`network.bonjourFactory`）且**不自动拨号**，Stage 1 未启用（不做半成品）；加入码内的 multiaddr 即**跨网回退**路径。真·同网零地址发现需 core 支持自动拨号（后续）。
+
 ## 1. 安装（DTO）
 
 版本钉死到某个 commit，安装即构建（无需 clone、无需发布 npm）：

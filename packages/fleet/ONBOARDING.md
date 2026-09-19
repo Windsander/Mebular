@@ -30,9 +30,27 @@ fleet approve --dir ~/.fleet --device device-B --addr <B 的 multiaddr>
 
 - **默认值**：`--dir` = `$FLEET_DIR` 或 `~/.fleet`；`--device` = `$FLEET_DEVICE` 或主机名（清洗）；quickstart/join 的 `--listen` = `/ip4/0.0.0.0/tcp/4001`（端口占用会带修复建议报错）。
 - **agent 自动探测**：PATH 有 `hermes` → `hermes`；存在 `MEBULAR_FLEET_OPENCHAMBER_*` → `openchamber`；否则 `echo`（结果见 JSON 的 `agentSources`，可用 `--agent` 覆盖）。
-- **加入码含信任材料**（Stage 1 为共享主密钥，Stage 2 将改为短时效令牌）：`--code-file` 以 **0600** 落盘；不写日志、不回显密钥材料；务必经安全通道传输。
+- **加入码含信任材料**（共享主密钥）：`--code-file` 以 **0600** 落盘；不写日志、不回显密钥材料；务必经安全通道传输。**Stage 2 起推荐令牌路径（主密钥不复制，见 §0.6）**。
 - **`quickstart --auto-approve`（⚠️ 有风险）**：常驻 `fleet node` 会对**任何在册未授权设备自动授权**。仅在受控信任域使用（默认关闭）。
 - **LAN 自动发现**：core 的 mDNS 发现是**注入式**（`network.bonjourFactory`）且**不自动拨号**，Stage 1 未启用（不做半成品）；加入码内的 multiaddr 即**跨网回退**路径。真·同网零地址发现需 core 支持自动拨号（后续）。
+
+## 0.6 信任模型 v2（T2）：令牌加入 —— 主密钥不再复制
+
+推荐路径：inviter（**任意在册设备**，不要求某台特定设备）出**短时效令牌**，新设备用令牌换取**委派证书**。
+
+```bash
+# inviter（任意已入网设备；需其 `fleet node` 在跑以提供 join 端点）
+fleet invite --dir ~/.fleet                       # 输出令牌（内联 base64）+ join 端点
+# 新设备（不导入主密钥；只看令牌）
+fleet join --token <内联|--token-file> --dir ~/.fleet --device device-B
+```
+
+- **委派证书链**：`master → inviter → 新设备`（叶→根；**跳数上界 4**，超长拒绝）。链逐跳用设备公钥验签、末跳由用户主密钥验签；**没有任何“指定主设备/CA”**，任意在册设备都可签发下级证书。
+- **主密钥可离线**：日常扩容不需要主私钥参与；新设备只保留**主公钥**（`master-key.json` 无 `privateKeyPkcs8`），无静态加密/主密钥私钥材料。
+- **令牌三态吊销**（与设备证书吊销**分开**）：**过期**（inviter 时钟为准）/ **一次性**（nonce 已用，本地 `<store>.join-tokens.json`）/ **被撕**（显式撤销）。
+- **设备证书吊销级联**：`device_revoke` 后，被吊销设备**及其签发的下级证书**一并失效（与策略层 R-b 同源；需吊销事件同步到达各端才生效 → 有传播延迟）。
+- **兼容**：Stage 1 的 `quickstart` 仍产出**共享主密钥加入码**（`fleet join --code`），旧部署继续可用；含主密钥私钥的加入码不落日志、`--code-file` 0600。
+- **同版本要求**：委派证书是**破坏性协议变更**（旧节点只做一层主密钥验签，收到委派证书会**拒绝**，安全方向）→ 集群须全端升级；共享主密钥 + 主密钥直签证书的旧部署与新端互通。
 
 ## 1. 安装（DTO）
 

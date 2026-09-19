@@ -278,6 +278,7 @@ fleet worker --dir ~/.fleet --run-forever
 - **心跳**：常驻进程写 `<设备目录>/service.heartbeat` `{pid,ts,role,sha}`（0600）；`doctor` 增两项——`服务已注册`（dir-scoped，未安装 → SKIP 明列原因）与 `心跳新鲜`（陈旧 → FAIL）。
 - **幂等**：重复 `install` = 更新单元并重启；`uninstall` 未安装 = 清晰提示（`removed:false`）。单元/manifest 记录**构建 SHA**，`service status` 输出。
 - **Windows 边界**：Task Scheduler 为登录级、非真 Windows Service（后者需管理员，记为后续可选项）；`--no-autostart` 下任务注册后立即 `schtasks /End`（已注册但停止）。
+- **已知限制（日志轮转）**：服务日志按平台写入各自日志目录，**无自动轮转/上限**；长期常驻请自行 `logrotate`/定时清理（或后续补内建轮转）。
 
 > 命令名（D5）：`fleet node`（任务板/发起端）/ `fleet worker`（执行端），与 `FleetNode`/`FleetWorker` 对齐；JSON `role` 字段为 `node`/`worker`；M2 单机双进程（spool）命令为 `fleet spool node|worker`。（历史别名 `serve`/`work` 已移除。）
 

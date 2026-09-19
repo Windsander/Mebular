@@ -35,6 +35,8 @@ describe('公共导出表面', () => {
   });
 
   it('Phase 5 遗留裸字符串错误码全部入册', () => {
+    // 门面参数校验（D6）新增并注册：保留分区守卫 / 缺必填参数
+    expect(ErrorCodes.VALIDATION_INVALID_ARGUMENT).toBe('VALIDATION_INVALID_ARGUMENT');
     const phase5Codes = [
       'NETWORK_LIBP2P_NOT_AVAILABLE',
       'NETWORK_FRAME_TOO_LARGE',

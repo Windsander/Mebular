@@ -4,8 +4,8 @@
 // 报错项（errors，退出码 1）：
 //   1) 孤儿模块：src/**/*.ts 无任何入引用，且非入口 / ambient（*.d.ts）。
 //   2) 失效引用：*.md 中出现 `docs.design/<path>`（该目录被 gitignore、不随仓库分发）。
+//   3) src 内裸 `throw new Error(`（阶段 6.0 纪律；D6 后升为 error，须用类型化错误）。
 // 警告项（warnings，不阻断）：
-//   3) src 内裸 `throw new Error(`（阶段 6.0 纪律，保留为可见警告）。
 //   4) `@deprecated` 标记的符号在仓库内无调用者。
 //
 // 例外清单（见下 EXCEPTIONS / ENTRY_FILES）：只有明确列出的路径才豁免，避免误报。
@@ -106,12 +106,12 @@ for (const file of allFiles) {
   });
 }
 
-// 规则 3：裸 throw new Error（警告）
+// 规则 3：裸 throw new Error（报错；须用类型化错误，如 MebularError + ErrorCodes）
 const BARE_THROW = /throw new Error\(/;
 for (const file of srcTs) {
   const lines = readFileSync(file, 'utf-8').split('\n');
   lines.forEach((line, i) => {
-    if (BARE_THROW.test(line)) warnings.push(`裸 throw new Error: ${rel(file)}:${i + 1}`);
+    if (BARE_THROW.test(line)) errors.push(`裸 throw new Error（须用类型化错误）: ${rel(file)}:${i + 1}`);
   });
 }
 

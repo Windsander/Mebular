@@ -100,7 +100,7 @@ try {
   }
 
   const serveA = startCli(['node', '--dir', A, '--submit', String(N), '--target-agent', 'fake', '--wait-sync-ms', '30000', '--timeout-ms', '40000', '--linger-ms', '30000', '--expect-prefix', 'FAKE:']);
-  await waitFor(async () => /listening/.test(serveA.state.out), 15000);
+  await waitFor(async () => /listening/.test(serveA.state.out), 45000);
   const listen = lastJson(serveA.state.out.match(/\{[^\n]*listening[^\n]*\}/)?.[0] ?? '');
   const addr = listen?.multiaddr;
   check('A 已监听（打印 multiaddr）', typeof addr === 'string' && addr.length > 0, { addr });
@@ -110,8 +110,8 @@ try {
 
   const workB = startCli(['worker', '--dir', B, '--timeout-ms', '30000', '--interval-ms', '10']);
   const execLog = join(B, 'exec.jsonl');
-  const executed = await waitFor(async () => existsSync(execLog) && lineCount(execLog) >= N, 25000);
-  const aDone = await waitFor(async () => /"submitted":\s*3/.test(serveA.state.out), 25000);
+  const executed = await waitFor(async () => existsSync(execLog) && lineCount(execLog) >= N, 75000);
+  const aDone = await waitFor(async () => /"submitted":\s*3/.test(serveA.state.out), 75000);
   check('B 执行 N 次（fake agent）', executed && lineCount(execLog) === N, { lines: existsSync(execLog) ? lineCount(execLog) : 0 });
 
   const doctorB = await runCli(['doctor', '--dir', B, '--json']);

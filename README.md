@@ -15,7 +15,7 @@ Mebular 把记忆存成一张带签名事件的知识图谱，每条事实都记
 [![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Tests](https://img.shields.io/badge/Tests-734%20passed-brightgreen)](#项目状态)
-[![Coverage](https://img.shields.io/badge/Coverage-92.4%25-brightgreen)](#项目状态)
+[![Coverage](https://img.shields.io/badge/Coverage-93%25-brightgreen)](#项目状态)
 
 [官网](https://mebular.cyberfederal.io) · [快速上手](#30-秒上手) · [系统架构](#系统架构) · [项目状态](#项目状态) · [贡献](#贡献)
 
@@ -253,7 +253,7 @@ Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API
 | 项目 | 情况 |
 |------|------|
 | 测试 | 94 个套件、734 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
-| 覆盖率 | 行 ~92.8%、分支 ~80.8%（运行间抖动），全库门槛 85/65，关键文件另有底线 |
+| 覆盖率 | 行 ~93%、分支 ~81%（运行间抖动），全库门槛 85/65，关键文件另有底线 |
 | 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
 | Lint | ESLint（typescript-eslint）零告警 |
 | 质量门禁 | CI 四 job（`test:coverage` 覆盖率门槛 / `verify:fleet:all` / `verify:wan:l2`+docker / Windows / 真实语义）；另有 `check:cleanliness` 防孤儿模块与失效引用复发 |

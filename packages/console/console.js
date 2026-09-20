@@ -972,6 +972,8 @@ function describeEvent(event) {
   return '';
 }
 
+let lastCardSignature = null;
+
 function renderDeviceCard() {
   const asideEl = document.querySelector('.aside');
   if (asideEl) asideEl.classList.toggle('is-open', Boolean(state.selected) && state.view === 'map');
@@ -980,6 +982,7 @@ function renderDeviceCard() {
   if (!state.selected) {
     empty.hidden = false;
     body.hidden = true;
+    lastCardSignature = null;
     return;
   }
   empty.hidden = true;
@@ -1005,14 +1008,21 @@ function renderDeviceCard() {
 
   const allNamespaces = allNamespaceNames();
   const writes = state.features.writes && !MOCK;
+  const selfRow0 = state.devices.find((d) => d.deviceId === state.overview?.device?.deviceId);
+  // 轮询每 3s 触发 render；内容未变时跳过重渲染，避免冲掉「更多操作」展开态与点击
+  const cardSignature = JSON.stringify([
+    device.deviceId, device.online, device.revoked, device.pendingEventCount ?? null,
+    device.lastSyncAt ?? null, device.grantedByMe, device.grantedToMe, device.authorizedFor ?? [],
+    (device.memberships ?? []).map((m) => [m.namespace, m.effective]),
+    Boolean(device.declaredIssuer), isSelf, writes,
+    state.settings?.sync?.subscriptions ?? [], state.settings?.fleet?.namespace ?? null,
+    allNamespaces,
+    (selfRow0?.memberships ?? []).map((m) => m.namespace),
+  ]);
+  if (cardSignature === lastCardSignature) return;
+  lastCardSignature = cardSignature;
   const peerWrites = writes && !isSelf;
 
-  // 头部标签：对端显示「目标锁定」；本机卡已有状态标签，隐藏避免重复
-  const headTag = document.querySelector('#device-card .card-head .crt-tag');
-  if (headTag) {
-    headTag.hidden = isSelf;
-    headTag.innerHTML = '<span class="crt-tag-dot"></span>目标锁定';
-  }
   const selfRow = state.devices.find((d) => d.deviceId === state.overview?.device?.deviceId);
   const selfFollowSet = new Set((selfRow?.memberships ?? []).map((m) => m.namespace));
   const subs = state.settings?.sync?.subscriptions ?? [];
@@ -1092,6 +1102,7 @@ function renderDeviceCard() {
     </details>
     ${writes ? '' : '<p class="muted" style="margin-top:10px">当前为只读模式（写操作需 memory.admin + CSRF）。</p>'}`;
 
+  const advancedOpen = body.querySelector('.card-advanced')?.open === true;
   body.innerHTML = `
     <div class="card-identity">
       <span class="card-id">${escapeHtml(device.deviceId)}</span>
@@ -1111,6 +1122,8 @@ function renderDeviceCard() {
     ${actions}
   `;
 
+  const advancedEl = body.querySelector('.card-advanced');
+  if (advancedEl && advancedOpen) advancedEl.open = true;
   body.querySelectorAll('[data-action]').forEach((button) => {
     button.addEventListener('click', () => handleDeviceAction(button.dataset.action, device));
   });

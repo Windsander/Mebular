@@ -771,6 +771,24 @@ select {
 #device-card .card-help { font-size: 10.5px; line-height: 1.6; margin: 0 0 6px; }
 #device-card .chip-list { gap: 5px; }
 #device-card .chip-list li { min-height: 22px; }
-#device-card .card-advanced { margin-top: 10px; }
-#device-card .card-advanced summary { cursor: pointer; font-size: 11px; color: var(--crt-dim); }
-#device-card .card-advanced .card-actions { margin-top: 8px; }
+#device-card .card-advanced { margin-top: 12px; border-top: 1px dashed rgba(80, 255, 170, 0.2); }
+#device-card .card-advanced summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  list-style: none;
+  cursor: pointer;
+  padding: 8px 2px 4px;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: var(--crt-dim);
+}
+#device-card .card-advanced summary::-webkit-details-marker { display: none; }
+#device-card .card-advanced summary::before {
+  content: "▸";
+  font-size: 9px;
+  transition: transform 0.15s ease;
+}
+#device-card .card-advanced[open] summary::before { transform: rotate(90deg); }
+#device-card .card-advanced summary:hover { color: #9dffcf; }
+#device-card .card-advanced .card-actions { margin-top: 4px; padding-bottom: 2px; }

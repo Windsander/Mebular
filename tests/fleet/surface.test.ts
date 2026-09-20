@@ -29,8 +29,8 @@ describe('W1 工具面（CLI/MCP 同一 handler）', () => {
     expect(table).toHaveLength(16);
     expect(new Set(table.map((t) => t.tool)).size).toBe(16);
     expect(new Set(table.map((t) => t.cli)).size).toBe(16);
-    expect(toolByName('task_submit')?.cli).toBe('task-submit');
-    expect(toolByCli('board-create')?.name).toBe('board_create');
+    expect(toolByName('task_submit')?.cli).toBe('task_submit');
+    expect(toolByCli('board_create')?.name).toBe('board_create');
   });
 
   it('核心 handler：submit/list/status/history/children/summarize/subscribe/cancel/retry/batch/negotiate/chatter/quota/targets/board', async () => {

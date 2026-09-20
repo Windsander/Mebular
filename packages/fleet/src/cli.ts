@@ -932,7 +932,7 @@ async function main(): Promise<void> {
   else if (command === 'leave') code = await runLeave(args);
   else if (command === 'rejoin') code = await runRejoin(args);
   else {
-    console.error('用法：fleet quickstart|join|invite|pending|approve|tools|mcp|task-submit|task-submit-batch|task-cancel|task-retry|task-status|task-list|task-history|task-children|task-summarize|task-subscribe|task-negotiate|chatter-send|chatter-inbox|task-quota|task-targets|board-create|onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|node|worker|service|spool … | fleet --version');
+    console.error('用法：fleet quickstart|join|invite|pending|approve|tools|mcp|task_submit|task_submit_batch|task_cancel|task_retry|task_status|task_list|task_history|task_children|task_summarize|task_subscribe|task_negotiate|chatter_send|chatter_inbox|task_quota|task_targets|board_create|onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|node|worker|service|spool … | fleet --version');
     code = 2;
   }
   } catch (error) {

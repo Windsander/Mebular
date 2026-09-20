@@ -141,6 +141,28 @@ try {
       await m.shutdown();
     }
   }
+  // S5：**隐式**身份模式判定（无 identity.mode 字段）
+  const homeI = join(root, 'I');
+  await mkdir(homeI, { recursive: true });
+  const cfgI = JSON.parse(readFileSync(join(homeB, 'config.json'), 'utf-8'));
+  delete cfgI.identity; // 去掉显式 mode → 走隐式判定
+  cfgI.storagePath = join(homeI, 'store.jsonl');
+  await writeFile(join(homeI, 'config.json'), JSON.stringify(cfgI, null, 2), { mode: 0o600 });
+  await writeFile(`${join(homeI, 'store.jsonl')}.identity.json`, readFileSync(`${join(homeB, 'store.jsonl')}.identity.json`), { mode: 0o600 });
+  await writeFile(join(homeI, 'user-master-key.json'), readFileSync(join(homeB, 'user-master-key.json')), { mode: 0o600 });
+  const stI = await runCli({ ...process.env, MEBULAR_HOME: homeI }, ['status']);
+  const stIJson = firstJson(stI.out) ?? {};
+  check('隐式委派：无 identity.mode + 身份文件 + 无主私钥 → delegated', stI.code === 0 && stIJson.identityMode === 'delegated', { identityMode: stIJson.identityMode });
+  const homeRr = join(root, 'R');
+  await mkdir(homeRr, { recursive: true });
+  const imR = new IdentityManager();
+  const mr = await imR.generateUserMasterKey();
+  await writeFile(join(homeRr, 'master-key.json'), JSON.stringify({ publicKey: Buffer.from(mr.publicKey).toString('base64'), privateKeyPkcs8: await IdentityManager.exportPrivateKey(mr.privateKey) }, null, 2), { mode: 0o600 });
+  await writeFile(join(homeRr, 'config.json'), JSON.stringify({ storagePath: join(homeRr, 'store.jsonl'), deviceId: 'device-R', encryption: { level: 'none', keyFile: join(homeRr, 'master-key.json') }, network: { enabled: false }, sync: { autoSync: false } }, null, 2), { mode: 0o600 });
+  const stR = await runCli({ ...process.env, MEBULAR_HOME: homeRr }, ['status']);
+  const stRJson = firstJson(stR.out) ?? {};
+  check('隐式 root：有主私钥且无身份文件 → root', stR.code === 0 && stRJson.identityMode === 'root', { identityMode: stRJson.identityMode });
+
   const envB = { ...process.env, MEBULAR_HOME: homeB };
   const st = await runCli(envB, ['status']);
   const stJson = firstJson(st.out) ?? {};

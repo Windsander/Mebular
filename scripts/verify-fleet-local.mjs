@@ -15,6 +15,15 @@ import { fileURLToPath } from 'node:url';
 const CLI = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function waitFor(fn, timeoutMs, pollMs = 20) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await fn()) return true;
+    await sleep(pollMs);
+  }
+  return fn();
+}
+
 
 function spawnCli(args) {
   return spawn(process.execPath, [CLI, ...args], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -160,6 +169,11 @@ async function roundB() {
     '--storage', join(dir, 'B.jsonl'), '--spool', spool, '--exec-log', execLog,
     '--timeout-ms', '120000',
   ]);
+
+  // 确定性等待（S4）：先等 **node 端已观测到全部 N 条 done**（A.jsonl），再取 node 最终 facts；
+  // 消除「node 退出 facts」与「worker2 对账→跑完剩余」的赛跑（断言不放宽）。
+  const allDoneSeen = await waitFor(async () => (await doneEventCount(nodeStorage)) >= N, 120000, 20);
+  check('B⑤ node 端观测到全部 N 条 done（确定性等待）', allDoneSeen, { doneEvents: await doneEventCount(nodeStorage) });
 
   const node = await nodePromise;
   worker2.kill('SIGKILL');

@@ -42,22 +42,22 @@
 
 | MCP 工具 | CLI 子命令 |
 |---|---|
-| `task_submit` | `fleet task-submit` |
-| `task_submit_batch` | `fleet task-submit-batch` |
-| `task_cancel` | `fleet task-cancel` |
-| `task_retry` | `fleet task-retry` |
-| `task_status` | `fleet task-status` |
-| `task_list` | `fleet task-list` |
-| `task_history` | `fleet task-history` |
-| `task_children` | `fleet task-children` |
-| `task_summarize` | `fleet task-summarize` |
-| `task_subscribe` | `fleet task-subscribe` |
-| `task_negotiate` | `fleet task-negotiate` |
-| `chatter_send` | `fleet chatter-send` |
-| `chatter_inbox` | `fleet chatter-inbox` |
-| `task_quota` | `fleet task-quota` |
-| `task_targets` | `fleet task-targets` |
-| `board_create` | `fleet board-create` |
+| `task_submit` | `fleet task_submit` |
+| `task_submit_batch` | `fleet task_submit_batch` |
+| `task_cancel` | `fleet task_cancel` |
+| `task_retry` | `fleet task_retry` |
+| `task_status` | `fleet task_status` |
+| `task_list` | `fleet task_list` |
+| `task_history` | `fleet task_history` |
+| `task_children` | `fleet task_children` |
+| `task_summarize` | `fleet task_summarize` |
+| `task_subscribe` | `fleet task_subscribe` |
+| `task_negotiate` | `fleet task_negotiate` |
+| `chatter_send` | `fleet chatter_send` |
+| `chatter_inbox` | `fleet chatter_inbox` |
+| `task_quota` | `fleet task_quota` |
+| `task_targets` | `fleet task_targets` |
+| `board_create` | `fleet board_create` |
 
 CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--dir/--namespace/--agent`；输出为同一结构化 JSON。
 

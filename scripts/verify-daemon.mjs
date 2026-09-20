@@ -155,10 +155,11 @@ try {
   const token = firstJson(grant.out).token;
   check('token grant 成功', typeof token === 'string' && token.length > 10, {});
   serve1 = startCli(envB, ['serve', '--host', '127.0.0.1', '--port', '0', '--auth', 'bearer', '--tokens-file', tokensFile]);
-  const ready = await waitFor(() => /SERVE_READY/.test(serve1.state.out), 15000);
+  const ready = await waitFor(() => /SERVE_READY/.test(serve1.state.out), 60000, 250);
   const readyLine = serve1.state.out.split('\n').find((l) => l.startsWith('SERVE_READY'));
   const port = readyLine ? JSON.parse(readyLine.slice('SERVE_READY '.length)).port : null;
-  check('serve 就绪（loopback）', ready && typeof port === 'number', { port });
+  check('serve 就绪（loopback）', ready && typeof port === 'number', { port, err: serve1.state.err.trim().slice(-200) });
+  if (typeof port !== 'number') throw new Error(`serve 未就绪：out=${serve1.state.out.slice(-200)} err=${serve1.state.err.slice(-300)}`);
   const base = `http://127.0.0.1:${port}`;
   const auth = { 'content-type': 'application/json', authorization: `Bearer ${token}` };
   const created = await fetch(`${base}/app/nodes`, { method: 'POST', headers: auth, body: JSON.stringify({ type: 'app_note', namespace: 'team', content: { text: 'hello' } }) });

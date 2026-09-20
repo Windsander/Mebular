@@ -986,26 +986,33 @@ function renderDeviceCard() {
   body.hidden = false;
   const device = state.devices.find((d) => d.deviceId === state.selected.deviceId) ?? state.selected;
   const isSelf = device.deviceId === state.overview?.device?.deviceId;
-  const statusChips = [];
-  if (isSelf) {
-    statusChips.push(`${ICONS.online} 本机`);
-    if (device.declaredIssuer) statusChips.push('◈ 引导签发者');
-  } else {
-    statusChips.push(device.revoked ? `${ICONS.revoked} 已被我屏蔽` : (device.online ? `${ICONS.online} 与我连接中` : `${ICONS.offline} 未连接`));
-    if (device.pendingEventCount !== null && device.pendingEventCount !== undefined) {
-      statusChips.push(`待发 ${device.pendingEventCount}`);
-    }
-    if (device.lastSyncAt) statusChips.push(`最近同步 ${formatTime(device.lastSyncAt)}`);
-    if (device.declaredIssuer) statusChips.push('◈ 引导签发者');
-  }
+  const status = isSelf
+    ? { text: `${ICONS.online} 本机`, cls: 'is-ok' }
+    : device.revoked
+      ? { text: `${ICONS.revoked} 已屏蔽`, cls: 'is-danger' }
+      : device.online
+        ? { text: `${ICONS.online} 在线`, cls: 'is-ok' }
+        : { text: `${ICONS.offline} 离线`, cls: 'is-off' };
+  const shortTime = (at) => {
+    const d = new Date(at);
+    const p2 = (n) => String(n).padStart(2, '0');
+    return `${p2(d.getHours())}:${p2(d.getMinutes())}`;
+  };
+  const metaParts = [];
+  if (!isSelf && device.pendingEventCount) metaParts.push(`待发 ${device.pendingEventCount}`);
+  if (!isSelf && device.lastSyncAt) metaParts.push(`最近同步 ${shortTime(device.lastSyncAt)}`);
+  if (device.declaredIssuer) metaParts.push('◈ 引导签发者');
 
   const allNamespaces = allNamespaceNames();
   const writes = state.features.writes && !MOCK;
   const peerWrites = writes && !isSelf;
 
-  // 卡片标签：本机 / 目标锁定
+  // 头部标签：对端显示「目标锁定」；本机卡已有状态标签，隐藏避免重复
   const headTag = document.querySelector('#device-card .card-head .crt-tag');
-  if (headTag) headTag.innerHTML = `<span class="crt-tag-dot"></span>${isSelf ? '本机' : '目标锁定'}`;
+  if (headTag) {
+    headTag.hidden = isSelf;
+    headTag.innerHTML = '<span class="crt-tag-dot"></span>目标锁定';
+  }
   const selfRow = state.devices.find((d) => d.deviceId === state.overview?.device?.deviceId);
   const selfFollowSet = new Set((selfRow?.memberships ?? []).map((m) => m.namespace));
   const subs = state.settings?.sync?.subscriptions ?? [];
@@ -1043,51 +1050,62 @@ function renderDeviceCard() {
   const authorizedSet = new Set(device.authorizedFor ?? []);
   const peerFollowSet = new Set((device.memberships ?? []).map((m) => m.namespace));
   const domains = [...new Set([...allNamespaces, ...peerFollowSet, ...authorizedSet])].sort();
-  const interopRows = domains.length === 0
-    ? '<li class="muted">暂无已知分区</li>'
-    : domains.map((ns) => {
-      const peerFollows = peerFollowSet.has(ns);
-      const authorized = authorizedSet.has(ns);
-      const mutual = peerFollows && authorized && iFollow(ns);
-      const state = mutual ? '✓ 可互通'
-        : peerFollows && !authorized ? '待你批准'
-          : !peerFollows && authorized ? '已授权 · 待对端关注'
-            : '未互通';
-      const action = peerFollows && !authorized
-        ? `<button class="btn btn-small btn-crt" data-approve="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="批准对端准入：签发授权（已同步内容不回撤）">批准</button>`
-        : authorized
-          ? `<button class="btn btn-small btn-crt btn-crt-danger" data-revoke-ns="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="撤回该域的授权">撤回</button>`
-          : '';
-      return `<li>
-        <span><span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
-          <span class="muted" style="margin-left:6px">${state}</span></span>
-        ${action}
-      </li>`;
-    }).join('');
+  const interop = domains.map((ns) => {
+    const peerFollows = peerFollowSet.has(ns);
+    const authorized = authorizedSet.has(ns);
+    const mutual = peerFollows && authorized && iFollow(ns);
+    const state = mutual ? '✓ 可互通'
+      : peerFollows && !authorized ? '待你批准'
+        : !peerFollows && authorized ? '已授权 · 待对端关注'
+          : '未互通';
+    const action = peerFollows && !authorized
+      ? `<button class="btn btn-small btn-crt" data-approve="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="批准对端准入：签发授权（已同步内容不回撤）">批准</button>`
+      : authorized
+        ? `<button class="btn btn-small btn-crt btn-crt-danger" data-revoke-ns="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="撤回该域的授权">撤回</button>`
+        : '';
+    return { ns, state, action };
+  });
+  const visibleInterop = interop.filter((row) => row.state !== '未互通');
+  const hiddenCount = interop.length - visibleInterop.length;
+  const interopRows = (visibleInterop.length > 0
+    ? visibleInterop.map((row) => `<li>
+        <span><span class="ns-chip" style="background:${namespaceColor(row.ns)}">${escapeHtml(row.ns)}</span>
+          <span class="muted" style="margin-left:6px">${row.state}</span></span>
+        ${row.action}
+      </li>`).join('')
+    : '<li class="muted">暂无需处理的域</li>')
+    + (hiddenCount > 0 ? `<li class="muted">另有 ${hiddenCount} 个域未互通（双方均未关注/授权）</li>` : '');
 
   const actions = isSelf ? '' : `
     <div class="card-actions">
       <button class="btn btn-small btn-crt" data-action="sync" ${writes && device.online ? '' : 'disabled'}>立即同步</button>
-      <button class="btn btn-small btn-crt" data-action="connect" ${writes && !device.online ? '' : 'disabled'}>连接</button>
-      <button class="btn btn-small btn-crt" data-action="disconnect" ${writes && device.online ? '' : 'disabled'}>断开连接</button>
-      <button class="btn btn-small btn-crt" data-action="reset-watermarks" ${writes ? '' : 'disabled'}>重置水位</button>
-      <button class="btn btn-small btn-crt btn-crt-danger" data-action="revoke-device" ${writes ? '' : 'disabled'}>屏蔽该设备</button>
+      ${device.online
+        ? `<button class="btn btn-small btn-crt" data-action="disconnect" ${writes ? '' : 'disabled'}>断开连接</button>`
+        : `<button class="btn btn-small btn-crt" data-action="connect" ${writes ? '' : 'disabled'}>连接</button>`}
     </div>
+    <details class="card-advanced">
+      <summary>更多操作</summary>
+      <div class="card-actions">
+        <button class="btn btn-small btn-crt" data-action="reset-watermarks" ${writes ? '' : 'disabled'}>重置水位</button>
+        <button class="btn btn-small btn-crt btn-crt-danger" data-action="revoke-device" ${writes ? '' : 'disabled'}>屏蔽该设备</button>
+      </div>
+    </details>
     ${writes ? '' : '<p class="muted" style="margin-top:10px">当前为只读模式（写操作需 memory.admin + CSRF）。</p>'}`;
 
   body.innerHTML = `
-    <dl class="kv">
-      <dt>deviceId</dt><dd>${escapeHtml(device.deviceId)}</dd>
-      <dt>状态</dt><dd>${escapeHtml(statusChips.join(' · '))}</dd>
-    </dl>
+    <div class="card-identity">
+      <span class="card-id">${escapeHtml(device.deviceId)}</span>
+      <span class="crt-tag card-status ${status.cls}">${status.text}</span>
+    </div>
+    ${metaParts.length > 0 ? `<p class="card-meta muted">${escapeHtml(metaParts.join(' · '))}</p>` : '<p class="card-meta muted"></p>'}
     ${isSelf ? `
-    <h3>我关注的域 <span class="muted" style="text-transform:none;letter-spacing:0">（M 记忆域）</span></h3>
-    <p class="muted" style="font-size:11px;margin:0 0 6px">订阅即数据义务：关注后①有权从其他设备接收该域变更；②本机在该域产生新记忆时，会同步给在册成员 / 已授权且关注的对端。关注写入图上在册（立即生效）；订阅声明未含该域时，保存配置并重启后传输层才收发。</p>
+    <h3>我关注的域 <span class="h3-note">M 记忆域 · 订阅即数据义务</span></h3>
+    <p class="card-help muted">关注后①有权接收该域对端变更；②本机该域新记忆同步给在册成员 / 已授权且关注的对端。图上在册即时生效；订阅声明需重启传输层。</p>
     <ul class="chip-list">${followRows}</ul>
     ` : `
-    <h3>它关注的域 <span class="muted" style="text-transform:none;letter-spacing:0">（对端自声明；权利与义务跟你对等）</span></h3>
+    <h3>它关注的域 <span class="h3-note">对端自声明</span></h3>
     <ul class="chip-list">${peerFollowRows}</ul>
-    <h3>互通状态 <span class="muted" style="text-transform:none;letter-spacing:0">（你关注 ∩ 它关注 ∩ 它已获授权）</span></h3>
+    <h3>互通状态 <span class="h3-note">需你关注 + 它关注 + 已获授权</span></h3>
     <ul class="chip-list">${interopRows}</ul>
     `}
     ${actions}

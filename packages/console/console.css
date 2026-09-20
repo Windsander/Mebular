@@ -751,3 +751,26 @@ select {
   border-radius: 3px;
   padding: 0 4px;
 }
+
+/* ---------- 设备卡排版（紧凑身份头 + 短说明） ---------- */
+#device-card .card-identity { display: flex; align-items: center; gap: 8px; }
+#device-card .card-id { font-size: 15px; font-weight: 700; color: #d9ffec; letter-spacing: 0.5px; }
+#device-card .card-status.is-ok { border-color: rgba(80, 255, 170, 0.45); color: #9dffcf; }
+#device-card .card-status.is-off { border-color: rgba(140, 255, 200, 0.25); color: rgba(140, 255, 200, 0.5); }
+#device-card .card-status.is-danger { border-color: rgba(255, 120, 120, 0.5); color: #ffb9b9; }
+#device-card .card-meta { font-size: 11px; margin: 4px 0 12px; min-height: 14px; }
+#device-card h3 { margin: 12px 0 6px; }
+#device-card h3:first-of-type { margin-top: 4px; }
+#device-card .h3-note {
+  margin-left: 6px;
+  font-size: 10px;
+  letter-spacing: 0;
+  text-transform: none;
+  color: rgba(140, 255, 200, 0.45);
+}
+#device-card .card-help { font-size: 10.5px; line-height: 1.6; margin: 0 0 6px; }
+#device-card .chip-list { gap: 5px; }
+#device-card .chip-list li { min-height: 22px; }
+#device-card .card-advanced { margin-top: 10px; }
+#device-card .card-advanced summary { cursor: pointer; font-size: 11px; color: var(--crt-dim); }
+#device-card .card-advanced .card-actions { margin-top: 8px; }

@@ -1,0 +1,70 @@
+{
+  "note": "W2 一机一节点：统一 home 的守护 config 与 fleet 客户端 config 样例（identity/store 模式字段先行）。",
+  "daemonConfig": {
+    "storagePath": "~/.mebular/store.jsonl",
+    "deviceId": "device-A",
+    "identity": {
+      "mode": "root"
+    },
+    "encryption": {
+      "level": "none",
+      "keyFile": "~/.mebular/master-key.json"
+    },
+    "network": {
+      "enabled": true,
+      "libp2p": {
+        "listen": [
+          "/ip4/0.0.0.0/tcp/4001"
+        ]
+      }
+    },
+    "sync": {
+      "namespaces": [
+        "tasks"
+      ],
+      "policyIssuers": [
+        "device-A"
+      ],
+      "peerNamespacePolicy": {}
+    },
+    "joinService": {
+      "enabled": true,
+      "bind": "0.0.0.0",
+      "port": 4002
+    },
+    "mcp": {
+      "http": {
+        "host": "127.0.0.1",
+        "port": 7331,
+        "auth": "bearer",
+        "tokensFile": "~/.mebular/auth/tokens.json"
+      }
+    }
+  },
+  "delegatedDaemonConfig": {
+    "identity": {
+      "mode": "delegated"
+    },
+    "encryption": {
+      "level": "none",
+      "userMasterPublicKeyFile": "~/.mebular/user-master-key.json"
+    }
+  },
+  "fleetClientConfig": {
+    "store": "daemon",
+    "daemon": {
+      "endpoint": "http://127.0.0.1:7331",
+      "token": "meb_<secret>"
+    }
+  },
+  "modes": {
+    "identity": [
+      "root",
+      "delegated"
+    ],
+    "store": [
+      "daemon",
+      "embedded"
+    ]
+  }
+}

@@ -1,4 +1,7 @@
-// 信任模型 v2（T2）：加入令牌 + join 请求-签发（可选的最小监听端点）。
+// 信任模型 v2（T2）：加入令牌 + join 请求-签发（**embedded / test-only**）。
+//
+// W2 起：**生产 join 由守护托管**（`mebular serve` 的 `/mebular/join`，见 packages/mcp/src/jointoken.mjs）；
+// 本文件仅供 **embedded 模式**（`--store embedded`，测试/CI）与 `fleet node --join-serve` 自托管使用。
 //
 // 设计（含用户修正：去中心化）：
 // - **任意**在册设备都可作 inviter（无“指定主设备/CA”）；令牌由**inviter 设备私钥**签名。

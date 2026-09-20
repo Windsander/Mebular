@@ -245,10 +245,32 @@ function runPrintConfig(flags) {
 async function runStatus() {
   const { createMebular } = await import('../src/config.mjs');
   const { MemoryService } = await import('@mebular/core');
-  const { app, home, storagePath } = await createMebular();
+  const { app, home, storagePath, deviceId, identityMode, config } = await createMebular();
   try {
     const status = await new MemoryService(app).status();
-    console.log(JSON.stringify({ ...status, home, storagePath }, null, 2));
+    // store 锁持有者（单写者证据）
+    let storeLock = null;
+    const lockPath = join(home, 'lock');
+    if (existsSync(lockPath)) {
+      try {
+        storeLock = JSON.parse(await readFile(lockPath, 'utf-8'));
+      } catch {
+        storeLock = { path: lockPath, corrupt: true };
+      }
+    }
+    const nodes = await app.graph.listNodes({});
+    const namespaces = [...new Set(nodes.map((n) => n.namespace ?? 'default'))].sort();
+    console.log(JSON.stringify({
+      ...status,
+      home,
+      storagePath,
+      deviceId,
+      identityMode,
+      network: { enabled: config.network?.enabled ?? false, listen: config.network?.libp2p?.listen ?? [] },
+      storeLock,
+      namespaces,
+      joinService: config.joinService ?? null,
+    }, null, 2));
   } finally {
     await app.shutdown().catch(() => undefined);
   }
@@ -264,6 +286,10 @@ async function main() {
     }
     case 'serve': {
       const { startServeServer } = await import('../src/server.mjs');
+      const { loadConfigFile } = await import('../src/config.mjs');
+      const home = homeDir();
+      const fileConfig = await loadConfigFile(home).catch(() => ({}));
+      const httpConf = fileConfig.mcp?.http ?? {};
       // D4：常驻进程写 service.heartbeat（role=mebular-serve），供 `service status`/doctor 判定。
       try {
         const { startHeartbeat, resolveBuildSha } = await import('@mebular/service');
@@ -273,12 +299,12 @@ async function main() {
       }
       try {
         const result = await startServeServer({
-          host: typeof flags.host === 'string' ? flags.host : undefined,
-          port: flags.port !== undefined ? Number(flags.port) : undefined,
-          auth: typeof flags.auth === 'string' ? flags.auth : undefined,
+          host: typeof flags.host === 'string' ? flags.host : httpConf.host,
+          port: flags.port !== undefined ? Number(flags.port) : httpConf.port,
+          auth: typeof flags.auth === 'string' ? flags.auth : httpConf.auth,
           tlsKey: typeof flags['tls-key'] === 'string' ? flags['tls-key'] : undefined,
           tlsCert: typeof flags['tls-cert'] === 'string' ? flags['tls-cert'] : undefined,
-          tokensFile: typeof flags['tokens-file'] === 'string' ? flags['tokens-file'] : undefined,
+          tokensFile: typeof flags['tokens-file'] === 'string' ? flags['tokens-file'] : httpConf.tokensFile,
         });
         console.log(`SERVE_READY ${JSON.stringify({ host: result.host, port: result.port, auth: result.auth, issuer: result.issuer })}`);
       } catch (error) {
@@ -319,7 +345,7 @@ async function main() {
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
           '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',
-          '  init / keygen / print-config / status   初始化与状态',
+          '  init / keygen / print-config / status|doctor   初始化、状态与自检（身份模式/网络/锁/域/join）',
         ].join('\n'),
       );
       process.exit(0);
@@ -334,6 +360,7 @@ async function main() {
       runPrintConfig(flags);
       return;
     case 'status':
+    case 'doctor':
       await runStatus();
       return;
     default:

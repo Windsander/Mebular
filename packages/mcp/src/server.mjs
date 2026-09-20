@@ -7,6 +7,7 @@ import { MemoryService } from '@mebular/core';
 import { createMebular } from './config.mjs';
 import { registerTools } from './tools.mjs';
 import { startHttpServer, acquireLock } from './serve.mjs';
+import { createJoinServer } from './jointoken.mjs';
 
 const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
 1. 先查后写：写入前先用 memory_query/memory_search 查重，避免重复。
@@ -58,10 +59,15 @@ export async function startStdioServer() {
  * 单实例：先取 <home>/lock；被占抛 MCP_STORAGE_LOCKED。
  */
 export async function startServeServer(options = {}) {
-  const { app, home, storagePath } = await createMebular();
+  const { app, home, storagePath, deviceId, config } = await createMebular();
   const lock = await acquireLock(home, storagePath);
+  let joinServer = null;
   try {
     const service = new MemoryService(app);
+    const joinConf = config.joinService;
+    const joinEndpointDemo = joinConf?.enabled
+      ? `http://${joinConf.bind && joinConf.bind !== '0.0.0.0' ? joinConf.bind : '127.0.0.1'}:${joinConf.port ?? 4002}`
+      : undefined;
     const http = await startHttpServer({
       home,
       app,
@@ -74,8 +80,24 @@ export async function startServeServer(options = {}) {
       tlsKey: options.tlsKey,
       tlsCert: options.tlsCert,
       tokensFile: options.tokensFile,
+      deviceId,
+      namespace: config.sync?.namespaces?.[0] ?? 'tasks',
+      ...(joinEndpointDemo !== undefined ? { joinEndpoint: joinEndpointDemo } : {}),
     });
+    // W2 A4：join 服务由守护托管（令牌 → 委派证书）。fleet 不再托管生产 join。
+    if (joinConf?.enabled) {
+      joinServer = await createJoinServer({
+        mebular: app,
+        deviceId,
+        storagePath,
+        bind: joinConf.bind ?? '0.0.0.0',
+        port: joinConf.port ?? 4002,
+        log: (m) => console.error(m),
+      });
+      console.error(`JOIN_READY ${JSON.stringify({ endpoint: joinEndpointDemo, port: joinServer.port })}`);
+    }
     const shutdown = async () => {
+      await joinServer?.close().catch(() => undefined);
       await http.close().catch(() => undefined);
       await lock.release();
       await app.shutdown().catch(() => undefined);
@@ -83,8 +105,9 @@ export async function startServeServer(options = {}) {
     };
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
-    return { ...http, lock, app, service };
+    return { ...http, lock, app, service, joinServer, joinPort: joinServer?.port ?? null };
   } catch (error) {
+    await joinServer?.close().catch(() => undefined);
     await lock.release();
     await app.shutdown().catch(() => undefined);
     throw error;

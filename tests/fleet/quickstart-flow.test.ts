@@ -121,10 +121,25 @@ describe('一键上车（Stage 1）库级流程', () => {
         await a2.shutdown();
       }
 
+      // W2：quickstart --daemon 写守护 home + fleet 客户端（store=daemon）
+      const D = join(root, 'D');
+      const qd = await quickstart({ dir: D, device: 'device-D', listen: '/ip4/127.0.0.1/tcp/0', skipPortCheck: true, agents: AGENTS, buildSha: 'TESTSHA', daemon: true, daemonPort: 7901 });
+      expect(qd.daemon?.endpoint).toBe('http://127.0.0.1:7901');
+      const fleetCfg = JSON.parse(await (await import('node:fs/promises')).readFile(fleetConfigPath(D), 'utf-8'));
+      const daemonCfg = JSON.parse(await (await import('node:fs/promises')).readFile(join(D, 'config.json'), 'utf-8'));
+      expect(fleetCfg.store).toBe('daemon');
+      expect(fleetCfg.daemon.endpoint).toBe('http://127.0.0.1:7901');
+      expect(typeof fleetCfg.daemon.token).toBe('string');
+      expect(daemonCfg.identity.mode).toBe('root');
+      expect(daemonCfg.joinService.enabled).toBe(true);
+      expect(daemonCfg.mcp.http.auth).toBe('bearer');
+
       // 默认值工具
+      expect(defaultFleetDir({ HOME: '/home/x' })).toBe(join('/home/x', '.mebular'));
+      expect(defaultFleetDir({ MEBULAR_HOME: '/m' })).toBe('/m');
       expect(defaultDeviceName('My-Host.local')).toBe('my-host.local');
       expect(typeof defaultFleetDir({ HOME: '/home/x' })).toBe('string');
-      expect(defaultFleetDir({ HOME: '/home/x' })).toBe(join('/home/x', '.fleet'));
+      expect(defaultFleetDir({ HOME: '/home/x' })).toBe(join('/home/x', '.mebular'));
     } finally {
       await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }

@@ -67,6 +67,11 @@ describe('config：主密钥与配置 IO', () => {
     expect(validateFleetConfig({ ...base, agents: [{ name: 'x', kind: 'command' }] }).some((e) => e.includes('需要 command'))).toBe(true);
     expect(validateFleetConfig({ ...base, agents: [{ name: 'x', kind: 'command', command: '' }] }).some((e) => e.includes('需要 command'))).toBe(true);
     expect(validateFleetConfig(null)).toEqual(['config 必须是对象']);
+    // W2：store/daemon 字段校验
+    expect(validateFleetConfig({ ...base, store: 'nope' }).some((e) => e.includes('store'))).toBe(true);
+    expect(validateFleetConfig({ ...base, store: 'daemon', daemon: { endpoint: 'http://127.0.0.1:1', token: 't' } })).toEqual([]);
+    expect(validateFleetConfig({ ...base, daemon: { endpoint: '' } }).some((e) => e.includes('daemon.endpoint'))).toBe(true);
+    expect(validateFleetConfig({ ...base, daemon: { endpoint: 'http://x', token: 1 } }).some((e) => e.includes('daemon.token'))).toBe(true);
   });
 });
 

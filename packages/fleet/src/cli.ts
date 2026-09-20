@@ -5,7 +5,7 @@
 // **显式状态事件**（本地最少形态；M3 换真实传输）。输出 JSON 事实供脚本断言。
 
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Mebular } from '@mebular/core';
 import {
@@ -21,10 +21,12 @@ import { FleetNode } from './runtime/node.js';
 import { FleetWorker } from './runtime/worker.js';
 import { FileTaskEventStore } from './store/file-store.js';
 import { MebularTaskEventStore } from './store/mebular-store.js';
+import { DaemonTaskEventStore } from './store/daemon-store.js';
+import type { TaskEventStore } from './store/file-store.js';
 import { NullTransport } from './transport/null.js';
 import { SpoolTransport } from './transport/spool.js';
 import { LocalQuota } from './quota.js';
-import { fleetConfigPath, loadFleetConfig, parseAgentSpecs, readMasterKeyFile } from './config.js';
+import { fleetConfigPath, loadFleetConfig, parseAgentSpecs, readMasterKeyFile, type FleetConfig } from './config.js';
 import {
   buildRegistry,
   declarePolicyIssuer,
@@ -50,12 +52,14 @@ import {
   joinFleet,
   pendingDevices,
   pickLanHost,
+  agentMcpConfig,
   quickstart,
   readJoinCode,
   writeJoinCodeFile,
   type ServiceInstaller,
 } from './quickstart.js';
 import { buildJoinToken, startJoinService, type JoinService } from './jointoken.js';
+import { createRequire } from 'node:module';
 import { joinWithToken } from './join.js';
 import { toolByCli, toolCliTable } from './surface.js';
 import { runFleetMcp } from './mcp.js';
@@ -443,6 +447,39 @@ async function runDoctor(args: Args): Promise<number> {
   return report.ok ? 0 : 1;
 }
 
+
+/** W2：存储模式（`--store` 覆盖 config.store；缺省 embedded 以保持既有验收）。 */
+function storeMode(config: FleetConfig, args: Args): 'daemon' | 'embedded' {
+  const flag = str(args.store, '');
+  if (flag === 'daemon' || flag === 'embedded') return flag;
+  return config.store ?? 'embedded';
+}
+
+/**
+ * W2：打开任务存储。`daemon` 模式走守护 app 接口（fleet 客户端化：**不监听 libp2p、不托管 join**）；
+ * `embedded` 模式保留本地 Mebular（**测试/CI**）。
+ */
+async function openTaskStore(config: FleetConfig, args: Args): Promise<{ store: TaskEventStore; mebular: Mebular | null }> {
+  if (storeMode(config, args) === 'daemon') {
+    if (config.daemon?.endpoint === undefined) {
+      throw new Error('daemon 模式需要 config.daemon.endpoint（请用统一上车 quickstart/join 配置守护）');
+    }
+    return {
+      store: new DaemonTaskEventStore({
+        endpoint: config.daemon.endpoint,
+        namespace: config.namespace,
+        ...(config.daemon.token !== undefined ? { token: config.daemon.token } : {}),
+        ...(config.daemon.tokenFile !== undefined ? { tokenFile: config.daemon.tokenFile } : {}),
+      }),
+      mebular: null,
+    };
+  }
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(mebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  return { store: new MebularTaskEventStore(mebular), mebular };
+}
+
 /**
  * `fleet node`（任务板/发起端）。
  * `--run-forever`：常驻（服务模式），直到收到 SIGINT/SIGTERM；写 `service.heartbeat`（role=node）。
@@ -451,18 +488,24 @@ async function runFleetNode(args: Args): Promise<number> {
   const dir = fleetDirFrom(args);
   const runForever = args['run-forever'] === true;
   const config = await loadFleetConfig(fleetConfigPath(dir));
-  const encryption = await readMasterKeyFile(config.masterKeyFile);
-  const mebular = new Mebular(mebularOptions(config, encryption) as never);
-  await mebular.initialize();
+  if (storeMode(config, args) === 'embedded') {
+    console.error('[embedded] 本地 Mebular 模式（test/dev only；生产请用 --store daemon + mebular serve 守护）');
+  }
+  const { store, mebular } = await openTaskStore(config, args);
   const stopHeartbeat = startHeartbeat(dir, { role: 'node', sha: buildSha() });
   const shutdown = installShutdownHandlers();
-  console.log(JSON.stringify({
-    role: 'node', event: 'listening', device: config.device,
-    multiaddr: mebular.node!.getLocalMultiaddrs()[0] ?? null, peerId: mebular.node!.peerId.id,
-  }));
+  if (mebular !== null) {
+    console.log(JSON.stringify({
+      role: 'node', event: 'listening', device: config.device, mode: 'embedded',
+      multiaddr: mebular.node!.getLocalMultiaddrs()[0] ?? null, peerId: mebular.node!.peerId.id,
+    }));
+  } else {
+    console.log(JSON.stringify({ role: 'node', event: 'listening', device: config.device, mode: 'daemon', daemon: config.daemon?.endpoint ?? null }));
+  }
   // T2：join 服务（令牌 → 委派证书）。默认由 config.joinService 控制，可用 --join-serve 临时开启。
+  // W2：daemon 模式下 join 由**守护**托管（此处不启动）。
   let joinService: JoinService | null = null;
-  if (config.joinService?.enabled === true || args['join-serve'] === true) {
+  if (mebular !== null && (config.joinService?.enabled === true || args['join-serve'] === true)) {
     const port = num(args['join-port'], config.joinService?.port ?? 4002);
     const bind = str(args['join-bind'], config.joinService?.bind ?? '0.0.0.0');
     joinService = await startJoinService({
@@ -471,7 +514,6 @@ async function runFleetNode(args: Args): Promise<number> {
     });
     console.log(JSON.stringify({ role: 'node', event: 'join-service', endpoint: `http://${bind}:${joinService.port}`, port: joinService.port }));
   }
-  const store = new MebularTaskEventStore(mebular);
   const node = new FleetNode({ device: config.device, store, transport: new NullTransport(), quota: new LocalQuota({ limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000 }) });
   const submit = num(args.submit, 0);
   const autoApprove = config.autoApprove === true;
@@ -481,6 +523,7 @@ async function runFleetNode(args: Args): Promise<number> {
     const now = Date.now();
     if (now - lastAutoApprove < 2000) return;
     lastAutoApprove = now;
+    if (mebular === null) return;
     try {
       await autoApproveOnce(mebular, config.device, config.namespace);
     } catch {
@@ -491,7 +534,7 @@ async function runFleetNode(args: Args): Promise<number> {
   if (submit > 0) {
     // 先等首轮同步（对端连入）再提交，避免在无连接时提交导致事件丢失触发。
     const waitSyncMs = num(args['wait-sync-ms'], 0);
-    if (waitSyncMs > 0) {
+    if (waitSyncMs > 0 && mebular !== null) {
       await new Promise<void>((resolve) => {
         let settled = false;
         const timer = setTimeout(() => {
@@ -500,7 +543,7 @@ async function runFleetNode(args: Args): Promise<number> {
             resolve();
           }
         }, waitSyncMs);
-        mebular.sync.once('sync-completed', () => {
+        mebular!.sync.once('sync-completed', () => {
           if (!settled) {
             settled = true;
             clearTimeout(timer);
@@ -544,7 +587,7 @@ async function runFleetNode(args: Args): Promise<number> {
   if (joinService !== null) await joinService.close();
   stopHeartbeat();
   shutdown.dispose();
-  await mebular.shutdown();
+  await mebular?.shutdown();
   return code;
 }
 
@@ -556,24 +599,26 @@ async function runFleetWorker(args: Args): Promise<number> {
   const dir = fleetDirFrom(args);
   const runForever = args['run-forever'] === true;
   const config = await loadFleetConfig(fleetConfigPath(dir));
-  const encryption = await readMasterKeyFile(config.masterKeyFile);
-  const mebular = new Mebular(mebularOptions(config, encryption) as never);
-  await mebular.initialize();
+  if (storeMode(config, args) === 'embedded') {
+    console.error('[embedded] 本地 Mebular 模式（test/dev only；生产请用 --store daemon + mebular serve 守护）');
+  }
+  const { store, mebular } = await openTaskStore(config, args);
   const stopHeartbeat = startHeartbeat(dir, { role: 'worker', sha: buildSha() });
-  if (args['print-listen'] === true) {
+  if (args['print-listen'] === true && mebular !== null) {
     console.log(JSON.stringify({ role: 'worker', event: 'listening', device: config.device, multiaddrs: mebular.node!.getLocalMultiaddrs() }));
   }
   const shutdown = installShutdownHandlers();
-  for (const peer of config.peers) {
-    if (peer.addr === undefined) continue;
-    const id = /\/p2p\/([^/]+)/.exec(peer.addr)?.[1] ?? peer.device;
-    try {
-      await mebular.node!.connectToPeer({ id, multihash: new Uint8Array(), pubKey: new Uint8Array() }, peer.addr);
-    } catch {
-      // 连接失败由后续收敛/doctor 暴露
+  if (mebular !== null) {
+    for (const peer of config.peers) {
+      if (peer.addr === undefined) continue;
+      const id = /\/p2p\/([^/]+)/.exec(peer.addr)?.[1] ?? peer.device;
+      try {
+        await mebular.node!.connectToPeer({ id, multihash: new Uint8Array(), pubKey: new Uint8Array() }, peer.addr);
+      } catch {
+        // 连接失败由后续收敛/doctor 暴露
+      }
     }
   }
-  const store = new MebularTaskEventStore(mebular);
   const log = await ExecutionLog.open(str(args['exec-log'], join(dir, 'exec.jsonl')));
   const worker = new FleetWorker({ device: config.device, agent: str(args.agent, 'worker'), store, transport: new NullTransport(), registry: buildRegistry(config.agents), log });
   await worker.reconcile();
@@ -585,8 +630,30 @@ async function runFleetWorker(args: Args): Promise<number> {
   console.log(JSON.stringify({ role: 'worker', device: config.device, executed: log.size() }));
   stopHeartbeat();
   shutdown.dispose();
-  await mebular.shutdown();
+  await mebular?.shutdown();
   return 0;
+}
+
+/** W2 B2：守护服务安装器（`mebular-serve`，同一 home）。 */
+function daemonInstaller(): ServiceInstaller {
+  return async (dir: string) => {
+    try {
+      const require = createRequire(import.meta.url);
+      const mcpPkg = require.resolve('@mebular/mcp/package.json');
+      const mcpBin = join(dirname(mcpPkg), 'bin', 'mebular.mjs');
+      const descriptor: ServiceDescriptor = {
+        kind: 'mebular-serve',
+        args: [mcpBin, 'serve'],
+        heartbeatDir: dir,
+        workingDir: dir,
+        env: { MEBULAR_HOME: dir },
+      };
+      const result = installService(descriptor, { sha: buildSha() });
+      return result.ok ? { installed: true } : { installed: false, note: 'install 返回非 ok' };
+    } catch (error) {
+      return { installed: false, note: (error as Error).message };
+    }
+  };
 }
 
 /** `fleet quickstart`：A 一条命令上车（onboard + 声明签发者/成员/自授权 + 加入码 + 服务 + doctor）。 */
@@ -605,6 +672,9 @@ async function runQuickstart(args: Args): Promise<number> {
     ...(typeof args['join-host'] === 'string' ? { joinHost: args['join-host'] } : {}),
     ...(agents !== undefined ? { agents } : {}),
     ...(args['auto-approve'] === true ? { autoApprove: true } : {}),
+    ...(args.daemon === true ? { daemon: true } : {}),
+    ...(typeof args['daemon-port'] === 'string' ? { daemonPort: num(args['daemon-port'], 7331) } : {}),
+    ...(args.daemon === true && !noService ? { installDaemon: daemonInstaller() } : {}),
     ...(noService ? {} : { installService: fleetNodeInstaller() }),
   });
   const report = await doctor(dir);
@@ -626,6 +696,8 @@ async function runQuickstart(args: Args): Promise<number> {
     inviteToken: result.inviteToken,
     joinEndpoint: result.joinEndpoint,
     joinPort: result.joinPort,
+    ...(result.daemon !== undefined ? { daemon: result.daemon } : {}),
+    agentMcp: agentMcpConfig(),
     warnings: result.warnings,
     doctor: summarizeDoctor(report),
     next: [...result.joinNext, `fleet node --dir ${dir} --run-forever`],
@@ -651,6 +723,10 @@ async function runJoin(args: Args): Promise<number> {
       agents: agents ?? [{ name: 'echo', kind: 'echo' }],
       ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
       ...(typeof args.listen === 'string' ? { listen: args.listen } : {}),
+      ...(args.daemon === true ? { daemon: true } : {}),
+      ...(typeof args['daemon-port'] === 'string' ? { daemonPort: num(args['daemon-port'], 7331) } : {}),
+      ...(typeof args['join-port'] === 'string' ? { joinPort: num(args['join-port'], 4002) } : {}),
+      ...(args.daemon === true && noService !== true ? { installDaemon: daemonInstaller() } : {}),
     });
     const report = await doctor(dir);
     console.log(JSON.stringify({
@@ -665,6 +741,8 @@ async function runJoin(args: Args): Promise<number> {
       alreadyJoined: result.alreadyJoined,
       awaitingApproval: result.awaitingApproval,
       inviterDeviceId: result.inviterDeviceId,
+      ...(result.daemon !== undefined ? { daemon: result.daemon } : {}),
+      agentMcp: result.agentMcp,
       doctor: summarizeDoctor(report),
       next: result.next,
     }, null, 2));

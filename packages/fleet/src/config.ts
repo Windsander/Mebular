@@ -132,6 +132,13 @@ export interface FleetConfig {
    * 令牌是 bearer 凭据（短 TTL + 一次性 nonce）；建议仅在 LAN 绑定。
    */
   joinService?: { enabled: boolean; bind?: string; port?: number };
+  /**
+   * W2 存储模式：`daemon`（默认于统一上车；走守护 app 接口，fleet 客户端化）/ `embedded`（**仅测试/CI**）。
+   * 缺省（未设）= `embedded`，以保持既有测试/验收不变；`quickstart` 会写 `daemon`。
+   */
+  store?: 'daemon' | 'embedded';
+  /** W2 守护 app 端点与令牌（daemon 模式必需） */
+  daemon?: { endpoint: string; token?: string; tokenFile?: string };
 }
 
 export const fleetConfigPath = (dir: string): string => join(dir, 'fleet.config.json');
@@ -162,6 +169,13 @@ export function validateFleetConfig(input: unknown): string[] {
   }
   if (!Array.isArray(c.policyIssuers)) errors.push('policyIssuers 必须为数组');
   if (c.autoApprove !== undefined && typeof c.autoApprove !== 'boolean') errors.push('autoApprove 必须为布尔');
+  if (c.store !== undefined && c.store !== 'daemon' && c.store !== 'embedded') errors.push('store 必须为 daemon|embedded');
+  if (c.daemon !== undefined) {
+    const d = c.daemon as Record<string, unknown>;
+    if (typeof d !== 'object' || d === null || typeof d.endpoint !== 'string' || d.endpoint.length === 0) errors.push('daemon.endpoint 必填');
+    else if (d.token !== undefined && typeof d.token !== 'string') errors.push('daemon.token 非法');
+    else if (d.tokenFile !== undefined && typeof d.tokenFile !== 'string') errors.push('daemon.tokenFile 非法');
+  }
   if (c.joinService !== undefined) {
     const js = c.joinService as Record<string, unknown>;
     if (typeof js !== 'object' || js === null || typeof js.enabled !== 'boolean') errors.push('joinService 形状非法');

@@ -488,6 +488,9 @@ async function runFleetNode(args: Args): Promise<number> {
   const dir = fleetDirFrom(args);
   const runForever = args['run-forever'] === true;
   const config = await loadFleetConfig(fleetConfigPath(dir));
+  if (storeMode(config, args) === 'embedded') {
+    console.error('[embedded] 本地 Mebular 模式（test/dev only；生产请用 --store daemon + mebular serve 守护）');
+  }
   const { store, mebular } = await openTaskStore(config, args);
   const stopHeartbeat = startHeartbeat(dir, { role: 'node', sha: buildSha() });
   const shutdown = installShutdownHandlers();
@@ -596,6 +599,9 @@ async function runFleetWorker(args: Args): Promise<number> {
   const dir = fleetDirFrom(args);
   const runForever = args['run-forever'] === true;
   const config = await loadFleetConfig(fleetConfigPath(dir));
+  if (storeMode(config, args) === 'embedded') {
+    console.error('[embedded] 本地 Mebular 模式（test/dev only；生产请用 --store daemon + mebular serve 守护）');
+  }
   const { store, mebular } = await openTaskStore(config, args);
   const stopHeartbeat = startHeartbeat(dir, { role: 'worker', sha: buildSha() });
   if (args['print-listen'] === true && mebular !== null) {

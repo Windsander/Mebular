@@ -322,13 +322,14 @@ export async function ensureDaemonToken(dir: string): Promise<{ token: string; t
  * W2 B2：把统一守护配置写进同一 home（`<dir>/config.json`），并让 fleet 走 daemon 客户端：
  * fleet.config.json 增 `store:'daemon'` + `daemon:{endpoint,token}`。**不动** embedded 配置字段。
  */
-async function configureDaemonHome(
+export async function configureDaemonHome(
   dir: string,
   config: FleetConfig,
   namespace: string,
   joinPort: number,
   daemonPort: number,
   delegated: { userMasterPublicKeyFile: string } | null,
+  peers: Array<{ device: string; addr?: string }> = [],
 ): Promise<{ token: string; endpoint: string }> {
   const { token, tokensFile } = await ensureDaemonToken(dir);
   const daemonConfig = {
@@ -338,7 +339,7 @@ async function configureDaemonHome(
     encryption: delegated
       ? { level: 'none', userMasterPublicKeyFile: delegated.userMasterPublicKeyFile }
       : { level: 'none', keyFile: config.masterKeyFile },
-    network: { enabled: true, libp2p: { listen: [config.listen] } },
+    network: { enabled: true, libp2p: { listen: [config.listen] }, ...(peers.length > 0 ? { peers } : {}) },
     sync: {
       autoSync: true,
       pushOnWrite: true,
@@ -357,6 +358,11 @@ async function configureDaemonHome(
   const current = await loadFleetConfig(fleetPath);
   await saveFleetConfig(fleetPath, { ...current, store: 'daemon', daemon: { endpoint, token } });
   return { token, endpoint };
+}
+
+/** W2：Agent 侧 MCP 配置片段（守护 MCP stdio）。 */
+export function agentMcpConfig(): Record<string, unknown> {
+  return { mcp: { mebular: { type: 'local', command: ['mebular', 'mcp'] } } };
 }
 
 const DEFAULT_LISTEN = '/ip4/0.0.0.0/tcp/4001';

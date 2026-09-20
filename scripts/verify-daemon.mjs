@@ -14,6 +14,18 @@ import * as fleetJt from '@mebular/fleet';
 import * as mcpJt from '../packages/mcp/src/jointoken.mjs';
 
 const BIN = fileURLToPath(new URL('../packages/mcp/bin/mebular.mjs', import.meta.url));
+const FLEET_CLI = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
+function runFleet(args, timeoutMs = 60000) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [FLEET_CLI, ...args], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (err += d));
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, out, err }); });
+  });
+}
 const results = [];
 const skipped = [];
 function check(name, cond, detail) {
@@ -217,13 +229,28 @@ try {
   const cJson = firstJson(cStatus.out) ?? {};
   check('委派设备（C）能跑守护且 identityMode=delegated', cStatus.code === 0 && cJson.identityMode === 'delegated', { code: cStatus.code, identityMode: cJson.identityMode });
 
+  console.log('== B2 fleet join --daemon（B 一条命令 → 完整 delegated 节点）==');
+  const invite2 = await fetch(`${base}/app/join/invite`, { method: 'POST', headers: auth, body: JSON.stringify({ namespace: 'tasks', ttlMs: 120000 }) });
+  const invite2Json = await invite2.json();
+  const homeE = join(root, 'E');
+  const portE = await freePort();
+  const joinPortE = await freePort();
+  const joinRes = await runFleet(['join', '--token', invite2Json.token, '--dir', homeE, '--device', 'device-E', '--daemon', '--daemon-port', String(portE), '--join-port', String(joinPortE), '--no-service', '--agent', 'echo']);
+  const joinOut = firstJson(joinRes.out) ?? {};
+  const eDaemonCfg = JSON.parse(readFileSync(join(homeE, 'config.json'), 'utf-8'));
+  const eFleetCfg = JSON.parse(readFileSync(join(homeE, 'fleet.config.json'), 'utf-8'));
+  const eStatus = await runCli({ ...process.env, MEBULAR_HOME: homeE }, ['status']);
+  const eStatusJson = firstJson(eStatus.out) ?? {};
+  check('join --daemon：delegated 守护 home + fleet daemon 客户端 + 令牌', joinRes.code === 0 && eDaemonCfg.identity?.mode === 'delegated' && eFleetCfg.store === 'daemon' && typeof eFleetCfg.daemon?.token === 'string', { identity: eDaemonCfg.identity?.mode, store: eFleetCfg.store, endpoint: joinOut.daemon?.endpoint });
+  check('join --daemon：B 无主私钥且守护可跑（identityMode=delegated）', eStatus.code === 0 && eStatusJson.identityMode === 'delegated' && JSON.parse(readFileSync(join(homeE, 'user-master-key.json'), 'utf-8')).privateKeyPkcs8 === undefined, { identityMode: eStatusJson.identityMode });
+  check('join --daemon：输出 Agent MCP 配置片段', joinOut.agentMcp?.mcp?.mebular?.command?.[0] === 'mebular', { agentMcp: joinOut.agentMcp });
+
   console.log('== B2 上车统一：quickstart --daemon 写守护 home + fleet 客户端 ==');
   const homeD = join(root, 'D');
   const daemonPort = await freePort();
   const joinPort2 = await freePort();
-  const fleetCliQ = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
   const qs = await new Promise((resolve) => {
-    const child = spawn(process.execPath, [fleetCliQ, 'quickstart', '--dir', homeD, '--device', 'device-D', '--listen', '/ip4/127.0.0.1/tcp/0', '--no-service', '--daemon', '--daemon-port', String(daemonPort), '--join-port', String(joinPort2), '--agent', 'echo'], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(process.execPath, [FLEET_CLI, 'quickstart', '--dir', homeD, '--device', 'device-D', '--listen', '/ip4/127.0.0.1/tcp/0', '--no-service', '--daemon', '--daemon-port', String(daemonPort), '--join-port', String(joinPort2), '--agent', 'echo'], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let out = '';
     let err = '';
     child.stdout.on('data', (d) => (out += d));
@@ -244,7 +271,6 @@ try {
   dserve.child.kill('SIGKILL');
 
   console.log('== C3① 单机：守护 + fleet 客户端（daemon 模式）+ 任务往返 ==');
-  const fleetCli = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
   const homeFleet = join(root, 'fleet');
   await mkdir(homeFleet, { recursive: true });
   await writeFile(join(homeFleet, 'fleet.config.json'), JSON.stringify({
@@ -261,16 +287,6 @@ try {
     store: 'daemon',
     daemon: { endpoint: base, token },
   }, null, 2), { mode: 0o600 });
-  const runFleet = (args, timeoutMs = 60000) =>
-    new Promise((resolve) => {
-      const child = spawn(process.execPath, [fleetCli, ...args], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
-      let out = '';
-      let err = '';
-      child.stdout.on('data', (d) => (out += d));
-      child.stderr.on('data', (d) => (err += d));
-      const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
-      child.on('close', (code) => { clearTimeout(timer); resolve({ code, out, err }); });
-    });
   const work = runFleet(['worker', '--dir', homeFleet, '--store', 'daemon', '--timeout-ms', '20000']);
   await sleep(300);
   const nodeRes = await runFleet(['node', '--dir', homeFleet, '--store', 'daemon', '--submit', '2', '--target-agent', 'echo', '--expect-prefix', 'echo:', '--timeout-ms', '20000']);

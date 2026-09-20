@@ -52,6 +52,7 @@ import {
   joinFleet,
   pendingDevices,
   pickLanHost,
+  agentMcpConfig,
   quickstart,
   readJoinCode,
   writeJoinCodeFile,
@@ -690,6 +691,7 @@ async function runQuickstart(args: Args): Promise<number> {
     joinEndpoint: result.joinEndpoint,
     joinPort: result.joinPort,
     ...(result.daemon !== undefined ? { daemon: result.daemon } : {}),
+    agentMcp: agentMcpConfig(),
     warnings: result.warnings,
     doctor: summarizeDoctor(report),
     next: [...result.joinNext, `fleet node --dir ${dir} --run-forever`],
@@ -715,6 +717,10 @@ async function runJoin(args: Args): Promise<number> {
       agents: agents ?? [{ name: 'echo', kind: 'echo' }],
       ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
       ...(typeof args.listen === 'string' ? { listen: args.listen } : {}),
+      ...(args.daemon === true ? { daemon: true } : {}),
+      ...(typeof args['daemon-port'] === 'string' ? { daemonPort: num(args['daemon-port'], 7331) } : {}),
+      ...(typeof args['join-port'] === 'string' ? { joinPort: num(args['join-port'], 4002) } : {}),
+      ...(args.daemon === true && noService !== true ? { installDaemon: daemonInstaller() } : {}),
     });
     const report = await doctor(dir);
     console.log(JSON.stringify({
@@ -729,6 +735,8 @@ async function runJoin(args: Args): Promise<number> {
       alreadyJoined: result.alreadyJoined,
       awaitingApproval: result.awaitingApproval,
       inviterDeviceId: result.inviterDeviceId,
+      ...(result.daemon !== undefined ? { daemon: result.daemon } : {}),
+      agentMcp: result.agentMcp,
       doctor: summarizeDoctor(report),
       next: result.next,
     }, null, 2));

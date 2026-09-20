@@ -5,6 +5,7 @@
 // 主密钥私钥全程不出现；inviter 可为**任意**在册设备。
 
 import { access, mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { constants } from 'node:fs';
 import { Mebular, IdentityManager, bytesToHex, hexToBytes } from '@mebular/core';
 import {
@@ -18,7 +19,9 @@ import {
   type FleetAgentConfig,
   type FleetEncryption,
 } from './config.js';
+import type { ServiceInstaller } from './quickstart.js';
 import { offlineMebularOptions, onboardDevice } from './onboard.js';
+import { agentMcpConfig, configureDaemonHome } from './quickstart.js';
 import { decodeJoinToken, requestJoin } from './jointoken.js';
 
 export interface JoinWithTokenInput {
@@ -29,6 +32,11 @@ export interface JoinWithTokenInput {
   listen?: string;
   agents: FleetAgentConfig[];
   timeoutMs?: number;
+  /** W2：同时配置统一守护（delegated 身份 + fleet daemon 客户端 + 令牌） */
+  daemon?: boolean;
+  daemonPort?: number;
+  joinPort?: number;
+  installDaemon?: ServiceInstaller;
 }
 
 export interface JoinWithTokenResult {
@@ -41,6 +49,10 @@ export interface JoinWithTokenResult {
   inviterDeviceId: string;
   awaitingApproval: boolean;
   next: string[];
+  /** W2：统一守护配置结果 */
+  daemon?: { endpoint: string; installed: boolean; note?: string };
+  /** W2：Agent MCP 配置片段 */
+  agentMcp: Record<string, unknown>;
 }
 
 /** B：用令牌加入（**不持有主密钥私钥**）。 */
@@ -110,6 +122,32 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
     await mebular.shutdown();
   }
 
+  // W2 B2：delegated 守护 home（无主私钥）+ fleet daemon 客户端 + （可选）mebular-serve
+  let daemonInfo: { endpoint: string; installed: boolean; note?: string } | null = null;
+  if (input.daemon === true) {
+    const publicKeyFile = join(input.dir, 'user-master-key.json');
+    await writeFile(publicKeyFile, JSON.stringify({ publicKey: Buffer.from(encryption.userMasterKey).toString('base64') }, null, 2), { mode: 0o600 });
+    const peer = peerAddr ?? config.peers[0]?.addr;
+    const peers = peer !== undefined ? [{ device: token.inviterDeviceId, addr: peer }] : [{ device: token.inviterDeviceId }];
+    const { endpoint } = await configureDaemonHome(
+      input.dir,
+      config,
+      namespace,
+      input.joinPort ?? 4002,
+      input.daemonPort ?? 7331,
+      { userMasterPublicKeyFile: publicKeyFile },
+      peers,
+    );
+    let installed = false;
+    let note: string | undefined;
+    if (input.installDaemon !== undefined) {
+      const outcome = await input.installDaemon(input.dir);
+      installed = outcome.installed;
+      note = outcome.note;
+    }
+    daemonInfo = { endpoint, installed, ...(note !== undefined ? { note } : {}) };
+  }
+
   return {
     device: config.device,
     dir: config.dir,
@@ -123,6 +161,8 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
       `在 ${token.inviterDeviceId} 上运行：fleet pending`,
       `在 ${token.inviterDeviceId} 上运行：fleet approve ${config.device}`,
     ],
+    ...(daemonInfo !== null ? { daemon: daemonInfo } : {}),
+    agentMcp: agentMcpConfig(),
   };
 }
 

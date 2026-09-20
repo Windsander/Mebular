@@ -60,6 +60,7 @@
     "lint": "eslint src tests tests-semantic scripts packages --ext .ts,.mjs",
     "check:cleanliness": "node scripts/check-cleanliness.mjs",
     "check:surface-parity": "node scripts/check-surface-parity.mjs",
+    "check:docs": "node scripts/check-docs.mjs",
     "verify:at-rest": "node scripts/scan-at-rest.mjs",
     "verify:semantic": "node scripts/verify-semantic.mjs",
     "verify:semantic:real": "node scripts/verify-semantic.mjs --real",

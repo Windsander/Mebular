@@ -93,6 +93,8 @@ export interface P2PNodeIdentity {
   devicePublicKey: Uint8Array;
   devicePrivateKey: CryptoKey;
   certificate: DeviceCertificate;
+  /** 叶→根证书链（T2 委派证书）；缺省按 `[certificate]` */
+  certificateChain?: DeviceCertificate[];
 }
 
 export interface P2PNodeOptions {
@@ -160,6 +162,7 @@ export class P2PNode implements P2PNetwork {
         devicePublicKey: this.identity.devicePublicKey,
         devicePrivateKey: this.identity.devicePrivateKey,
         certificate: this.identity.certificate,
+        ...(this.identity.certificateChain !== undefined ? { certificateChain: this.identity.certificateChain } : {}),
       });
     }
   }

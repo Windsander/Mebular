@@ -21,13 +21,27 @@ import type { MutableAuthenticationConnection } from '../transport/InMemoryTrans
 import { ErrorCodes, NetworkError } from '../../errors.js';
 
 // 设备证书接口
+//
+// `issuer` 缺省 = 由**用户主密钥**直签（旧格式，逐字节兼容）；
+// `issuer` 存在 = **委派证书**，由 `issuer` 指定的**设备私钥**签署（信任模型 v2 / T2）。
+export interface DelegationIssuer {
+  deviceId: string;
+  /** 签发者设备公钥（hex，32 字节 Ed25519 raw） */
+  publicKey: string;
+}
+
 export interface DeviceCertificate {
   deviceId: string;
   devicePublicKey: string;  // hex 编码
   createdAt: number;
   metadata?: Record<string, unknown>;
-  signature: string;  // base64 编码的 Ed25519 签名（用户主密钥签署）
+  signature: string;  // base64 编码的 Ed25519 签名（用户主密钥，或 issuer 设备私钥）
+  /** 委派签发者；缺省 = 用户主密钥直签 */
+  issuer?: DelegationIssuer;
 }
+
+/** 证书链**委派跳数**上界（master→…→leaf 的中间签发次数）。超长链一律拒绝。 */
+export const MAX_CERT_CHAIN_HOPS = 4;
 
 /** 本机身份：设备私钥用于签名挑战，证书用于向对端证明归属 */
 export interface LocalIdentity {
@@ -35,6 +49,8 @@ export interface LocalIdentity {
   devicePublicKey: Uint8Array; // 原始 32 字节
   devicePrivateKey: CryptoKey; // Ed25519 私钥（sign）
   certificate?: DeviceCertificate;
+  /** 叶→根的证书链（T2）；缺省时按 `[certificate]` 处理（旧主密钥直签） */
+  certificateChain?: DeviceCertificate[];
 }
 
 export interface AuthHandshakeOptions {
@@ -59,11 +75,13 @@ export interface AuthSession {
   readonly peerId: PeerId;
   state: 'pending' | 'authenticated' | 'failed';
   certificate?: DeviceCertificate;
+  /** 对端证书链（叶→根；T2） */
+  certificateChain?: DeviceCertificate[];
 }
 
 type AuthWireMessage =
-  | { type: 'auth-hello'; certificate: DeviceCertificate; nonce: string }
-  | { type: 'auth-reply'; certificate: DeviceCertificate; nonce: string; response: string }
+  | { type: 'auth-hello'; certificate: DeviceCertificate; chain?: DeviceCertificate[]; nonce: string }
+  | { type: 'auth-reply'; certificate: DeviceCertificate; chain?: DeviceCertificate[]; nonce: string; response: string }
   | { type: 'auth-final'; response: string }
   | { type: 'auth-ok' }
   | { type: 'auth-error'; error: string };
@@ -75,6 +93,8 @@ export class AuthenticationHandshake extends EventEmitter {
   private userMasterPublicKey: Uint8Array | null = null;
   private userMasterPrivateKey: CryptoKey | null = null;
   private identity: LocalIdentity | null = null;
+  /** 吊销级联判定（T2）：链中任一设备被 `device_revoke` → 拒绝；缺省不判（握手层只做密码学）。 */
+  private revocationCheck: ((deviceId: string) => boolean) | null = null;
 
   constructor(options: AuthHandshakeOptions = {}) {
     super();
@@ -84,6 +104,11 @@ export class AuthenticationHandshake extends EventEmitter {
       maxRetries: 3,
       ...options,
     };
+  }
+
+  /** 注入吊销级联判定（T2）：由策略/同步层提供 `device_revoke` 集合。 */
+  setRevocationCheck(check: ((deviceId: string) => boolean) | null): void {
+    this.revocationCheck = check;
   }
 
   async start(): Promise<void> {
@@ -163,12 +188,26 @@ export class AuthenticationHandshake extends EventEmitter {
    * 验证设备证书：deviceId 必须一致，且签名须由用户主密钥签署。
    * 只证明归属，不证明对端持有私钥——后者由挑战-应答完成。
    */
-  async verifyCertificate(deviceId: string, certificate: DeviceCertificate): Promise<boolean> {
+  async verifyCertificate(
+    deviceId: string,
+    certificate: DeviceCertificate,
+    chain?: readonly DeviceCertificate[],
+  ): Promise<boolean> {
     if (!this.userMasterPublicKey) {
       throw new NetworkError('User master public key not set', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
     if (!certificate || certificate.deviceId !== deviceId) {
       return false;
+    }
+    // T2：带链（委派）走链式校验；否则维持旧「主密钥直签」单层校验（逐字节语义不变）。
+    if (chain !== undefined && chain.length > 1) {
+      return verifyCertificateChain(chain, this.userMasterPublicKey, {
+        subjectDeviceId: deviceId,
+        ...(this.revocationCheck ? { isRevoked: this.revocationCheck } : {}),
+      });
+    }
+    if (certificate.issuer !== undefined) {
+      return false; // 委派证书必须携带链
     }
     return verifyCertificateSignature(certificate, this.userMasterPublicKey);
   }
@@ -211,6 +250,7 @@ export class AuthenticationHandshake extends EventEmitter {
       await this.sendWireMessage(connection, {
         type: 'auth-hello',
         certificate: localCert,
+        chain: identity.certificateChain ?? [localCert],
         nonce: bytesToBase64(nonceA),
       });
 
@@ -224,7 +264,7 @@ export class AuthenticationHandshake extends EventEmitter {
       }
 
       // 验证响应方证书（归属）与 nonceA 签名（私钥持有）
-      const certValid = await this.verifyCertificate(reply.certificate.deviceId, reply.certificate);
+      const certValid = await this.verifyCertificate(reply.certificate.deviceId, reply.certificate, reply.chain);
       if (!certValid) {
         throw new NetworkError('Peer certificate verification failed', ErrorCodes.NETWORK_AUTH_FAILED);
       }
@@ -257,6 +297,7 @@ export class AuthenticationHandshake extends EventEmitter {
 
       session.state = 'authenticated';
       session.certificate = reply.certificate;
+      session.certificateChain = reply.chain ?? [reply.certificate];
       this.markAuthenticated(connection);
       this.emit('authenticated', session);
       return session;
@@ -291,7 +332,7 @@ export class AuthenticationHandshake extends EventEmitter {
         throw new NetworkError(`Unexpected message during handshake: ${hello.type}`, ErrorCodes.NETWORK_HANDSHAKE_FAILED);
       }
 
-      const certValid = await this.verifyCertificate(hello.certificate.deviceId, hello.certificate);
+      const certValid = await this.verifyCertificate(hello.certificate.deviceId, hello.certificate, hello.chain);
       if (!certValid) {
         throw new NetworkError('Peer certificate verification failed', ErrorCodes.NETWORK_AUTH_FAILED);
       }
@@ -307,6 +348,7 @@ export class AuthenticationHandshake extends EventEmitter {
       await this.sendWireMessage(connection, {
         type: 'auth-reply',
         certificate: identity.certificate,
+        chain: identity.certificateChain ?? [identity.certificate],
         nonce: bytesToBase64(nonceB),
         response: bytesToBase64(new Uint8Array(responseToA)),
       });
@@ -334,6 +376,7 @@ export class AuthenticationHandshake extends EventEmitter {
 
       session.state = 'authenticated';
       session.certificate = hello.certificate;
+      session.certificateChain = hello.chain ?? [hello.certificate];
       this.markAuthenticated(connection);
       this.emit('authenticated', session);
       return session;
@@ -463,12 +506,17 @@ export class AuthenticationHandshake extends EventEmitter {
 
 /** 证书的规范化签名内容：固定键序，metadata 缺省为 {} */
 export function canonicalCertificateData(certificate: DeviceCertificate): string {
-  return JSON.stringify({
+  const payload: Record<string, unknown> = {
     deviceId: certificate.deviceId,
     devicePublicKey: certificate.devicePublicKey,
     createdAt: certificate.createdAt,
     metadata: certificate.metadata ?? {},
-  });
+  };
+  // 委派证书把签发者绑定进签名内容；旧主密钥直签证书无此字段 → 字节与旧格式**完全一致**。
+  if (certificate.issuer !== undefined) {
+    payload.issuer = { deviceId: certificate.issuer.deviceId, publicKey: certificate.issuer.publicKey };
+  }
+  return JSON.stringify(payload);
 }
 
 /**
@@ -494,6 +542,78 @@ export async function verifyCertificateSignature(
   } catch {
     return false;
   }
+}
+
+/**
+ * 验证**设备证书链**（叶→根有序数组）：
+ * - `chain[0].deviceId` 必须等于 `subjectDeviceId`（若提供）；
+ * - 对 `i`：`chain[i].issuer` 必须存在，且其 `deviceId`/`publicKey` 与 `chain[i+1]`
+ *   的 `deviceId`/`devicePublicKey` **完全一致**，并用 `chain[i+1].devicePublicKey` 验 `chain[i]` 签名；
+ * - 末元素（根）必须**无 `issuer`**，并用 `userMasterPublicKey` 验签；
+ * - 委派跳数 = `chain.length - 1`，**超过 `MAX_CERT_CHAIN_HOPS` 拒绝**；
+ * - `opts.isRevoked(deviceId)` 为真时拒绝（**吊销级联**，与策略层 R-b 同源；握手层本身不做吊销判定）。
+ *
+ * 单元素链（`issuer` 缺省）= 旧“主密钥直签”证书，等价于 `verifyCertificateSignature`。
+ */
+export async function verifyCertificateChain(
+  chain: readonly DeviceCertificate[],
+  userMasterPublicKey: Uint8Array,
+  opts: { subjectDeviceId?: string; isRevoked?: (deviceId: string) => boolean } = {},
+): Promise<boolean> {
+  if (!Array.isArray(chain) || chain.length === 0) return false;
+  if (chain.length - 1 > MAX_CERT_CHAIN_HOPS) return false;
+  const leaf = chain[0]!;
+  if (opts.subjectDeviceId !== undefined && leaf.deviceId !== opts.subjectDeviceId) return false;
+  if (chain.length === 1) {
+    if (leaf.issuer !== undefined) return false; // 单元素必须是主密钥直签
+    if (opts.isRevoked?.(leaf.deviceId)) return false;
+    return verifyCertificateSignature(leaf, userMasterPublicKey);
+  }
+  for (let i = 0; i < chain.length; i += 1) {
+    const cert = chain[i]!;
+    if (opts.isRevoked?.(cert.deviceId)) return false;
+    if (i === chain.length - 1) {
+      if (cert.issuer !== undefined) return false; // 根不得再委派
+      if (!(await verifyCertificateSignature(cert, userMasterPublicKey))) return false;
+      continue;
+    }
+    const parent = chain[i + 1]!;
+    const issuer = cert.issuer;
+    if (!issuer || issuer.deviceId !== parent.deviceId || issuer.publicKey !== parent.devicePublicKey) return false;
+    if (!cert.signature || !parent.devicePublicKey) return false;
+    try {
+      const key = await importEd25519PublicKey(hexToBytes(parent.devicePublicKey));
+      const ok = await crypto.subtle.verify(
+        { name: 'Ed25519' },
+        key,
+        asArrayBuffer(base64ToBytes(cert.signature)),
+        new TextEncoder().encode(canonicalCertificateData(cert)),
+      );
+      if (!ok) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** 用**设备私钥**签署委派证书：填充 `issuer` 后签 `canonicalCertificateData`，返回不可变副本。 */
+export async function signDelegatedCertificate(
+  certificate: Omit<DeviceCertificate, 'signature' | 'issuer'>,
+  issuer: { deviceId: string; devicePrivateKey: CryptoKey; devicePublicKey: string },
+): Promise<DeviceCertificate> {
+  const withIssuer: DeviceCertificate = {
+    ...certificate,
+    issuer: { deviceId: issuer.deviceId, publicKey: issuer.devicePublicKey },
+    signature: '',
+  };
+  const signature = await crypto.subtle.sign(
+    { name: 'Ed25519' },
+    issuer.devicePrivateKey,
+    new TextEncoder().encode(canonicalCertificateData(withIssuer)),
+  );
+  withIssuer.signature = bytesToBase64(new Uint8Array(signature));
+  return withIssuer;
 }
 
 async function importEd25519PublicKey(raw: Uint8Array): Promise<CryptoKey> {

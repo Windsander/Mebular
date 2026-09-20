@@ -23,10 +23,10 @@ export function permissionsApplicable(platform: string = process.platform): bool
   return platform !== 'win32';
 }
 
-/** core `Mebular` 需要的加密材料（用户主密钥）。 */
+/** core `Mebular` 需要的加密材料（用户主密钥）。令牌加入的设备**只有主公钥**（无主私钥）。 */
 export interface FleetEncryption {
   userMasterKey: Uint8Array;
-  userMasterPrivateKey: CryptoKey;
+  userMasterPrivateKey?: CryptoKey;
 }
 
 /** 生成 Ed25519 用户主密钥。 */
@@ -36,15 +36,17 @@ export async function generateMasterKey(): Promise<FleetEncryption> {
   return { userMasterKey, userMasterPrivateKey: keyPair.privateKey };
 }
 
-/** 写入主密钥文件（0600）。 */
+/** 写入主密钥文件（0600）。无主私钥（令牌加入设备）时只写主公钥。 */
 export async function writeMasterKeyFile(path: string, encryption: FleetEncryption): Promise<void> {
-  const pkcs8 = new Uint8Array(await SUBTLE.exportKey('pkcs8', encryption.userMasterPrivateKey));
-  const record = {
+  const record: { v: number; alg: string; publicKey: string; privateKeyPkcs8?: string } = {
     v: 1,
     alg: 'Ed25519',
     publicKey: Buffer.from(encryption.userMasterKey).toString('base64'),
-    privateKeyPkcs8: Buffer.from(pkcs8).toString('base64'),
   };
+  if (encryption.userMasterPrivateKey !== undefined) {
+    const pkcs8 = new Uint8Array(await SUBTLE.exportKey('pkcs8', encryption.userMasterPrivateKey));
+    record.privateKeyPkcs8 = Buffer.from(pkcs8).toString('base64');
+  }
   await mkdir(dirname(path), { recursive: true });
   await writeFile(path, JSON.stringify(record), { mode: 0o600 });
   if (permissionsApplicable()) await chmod(path, 0o600);
@@ -57,8 +59,12 @@ export async function readMasterKeyFile(path: string): Promise<FleetEncryption> 
     publicKey?: string;
     privateKeyPkcs8?: string;
   };
-  if (parsed.v !== 1 || typeof parsed.publicKey !== 'string' || typeof parsed.privateKeyPkcs8 !== 'string') {
+  if (parsed.v !== 1 || typeof parsed.publicKey !== 'string') {
     throw new Error('master key file: 形状非法');
+  }
+  if (parsed.privateKeyPkcs8 === undefined) {
+    // 令牌加入设备：只有主公钥（无主私钥），用于验证对端/设备证书链。
+    return { userMasterKey: new Uint8Array(Buffer.from(parsed.publicKey, 'base64')) };
   }
   const userMasterKey = new Uint8Array(Buffer.from(parsed.publicKey, 'base64'));
   const userMasterPrivateKey = await SUBTLE.importKey(
@@ -121,6 +127,11 @@ export interface FleetConfig {
    * **风险**：任何在册设备都会被授权；仅在受控信任域使用（见 ONBOARDING「一键上车」）。
    */
   autoApprove?: boolean;
+  /**
+   * join 服务（T2）：`fleet node` 启动最小 HTTP 端点 `POST /mebular/join` 以签发委派证书。
+   * 令牌是 bearer 凭据（短 TTL + 一次性 nonce）；建议仅在 LAN 绑定。
+   */
+  joinService?: { enabled: boolean; bind?: string; port?: number };
 }
 
 export const fleetConfigPath = (dir: string): string => join(dir, 'fleet.config.json');
@@ -151,6 +162,12 @@ export function validateFleetConfig(input: unknown): string[] {
   }
   if (!Array.isArray(c.policyIssuers)) errors.push('policyIssuers 必须为数组');
   if (c.autoApprove !== undefined && typeof c.autoApprove !== 'boolean') errors.push('autoApprove 必须为布尔');
+  if (c.joinService !== undefined) {
+    const js = c.joinService as Record<string, unknown>;
+    if (typeof js !== 'object' || js === null || typeof js.enabled !== 'boolean') errors.push('joinService 形状非法');
+    else if (js.port !== undefined && (typeof js.port !== 'number' || js.port < 0 || js.port > 65535)) errors.push('joinService.port 非法');
+    else if (js.bind !== undefined && typeof js.bind !== 'string') errors.push('joinService.bind 非法');
+  }
   if (!Array.isArray(c.agents) || (c.agents as unknown[]).length === 0) errors.push('agents 必须为非空数组');
   for (const agent of (Array.isArray(c.agents) ? c.agents : []) as Array<Record<string, unknown>>) {
     if (typeof agent?.name !== 'string' || agent.name.length === 0) errors.push('agent.name 非法');

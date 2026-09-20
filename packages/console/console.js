@@ -1506,26 +1506,18 @@ async function openInvite() {
 
 async function renderInvite() {
   const body = $('#invite-body');
-  const join = state.settings?.join;
   const regenerate = $('#invite-regenerate');
   const toSettings = $('#invite-to-settings');
-  if (!join?.enabled) {
-    state.inviteToken = null;
-    regenerate.hidden = true;
-    toSettings.hidden = false;
-    body.innerHTML = `
-      <p class="modal-note muted">加入服务未启用：开启后即可在新设备上用一条命令入网（主密钥不复制，令牌一次性、默认 15 分钟有效）。</p>
-      <p class="cfg-path muted">在「设置 → 常用配置 → 设备接入」勾选 <code>joinService.enabled</code> 并保存，重启 serve 后生效。</p>
-    `;
-    return;
-  }
+  regenerate.hidden = true;
   toSettings.hidden = true;
-  regenerate.hidden = false;
   body.innerHTML = '<p class="muted">正在签发令牌…</p>';
   try {
     const res = await api('/admin/api/invite', { method: 'POST', body: {} });
     state.inviteToken = res;
+    // 令牌很长：显示截断，复制按钮携带完整值
+    const shortToken = res.token.length > 56 ? `${res.token.slice(0, 42)}…${res.token.slice(-12)}` : res.token;
     const cmd = `fleet join --token ${res.token} --daemon --dir ~/.mebular --device <新设备ID>`;
+    const shortCmd = `fleet join --token ${shortToken} --daemon --dir ~/.mebular --device <新设备ID>`;
     body.innerHTML = `
       <dl class="settings-kv">
         <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code></dd>
@@ -1534,11 +1526,11 @@ async function renderInvite() {
       </dl>
       <div class="readout-block">
         <span class="domain-label">令牌</span>
-        <div class="copyable"><code>${escapeHtml(res.token)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
+        <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
       </div>
       <div class="readout-block">
         <span class="domain-label">新设备</span>
-        <div class="copyable"><code>${escapeHtml(cmd)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(cmd)}">复制命令</button></div>
+        <div class="copyable"><code>${escapeHtml(shortCmd)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(cmd)}">复制命令</button></div>
       </div>
       <div class="readout-block">
         <span class="domain-label">本机批准</span>
@@ -1549,9 +1541,18 @@ async function renderInvite() {
     body.querySelectorAll('[data-copy]').forEach((button) => {
       button.addEventListener('click', () => copyText(button.dataset.copy, button));
     });
+    regenerate.hidden = false;
   } catch (error) {
     state.inviteToken = null;
-    body.innerHTML = `<p class="crt-warn">签发失败：${escapeHtml(error.message)}</p>`;
+    if (error.payload?.error === 'join_disabled' || error.status === 409) {
+      toSettings.hidden = false;
+      body.innerHTML = `
+        <p class="modal-note muted">加入服务未启用：开启后即可在新设备上用一条命令入网（主密钥不复制，令牌一次性、默认 15 分钟有效）。</p>
+        <p class="cfg-path muted">在「设置 → 常用配置 → 设备接入」勾选 <code>joinService.enabled</code> 并保存，重启 serve 后生效。</p>
+      `;
+    } else {
+      body.innerHTML = `<p class="crt-warn">签发失败：${escapeHtml(error.message)}</p>`;
+    }
   }
 }
 

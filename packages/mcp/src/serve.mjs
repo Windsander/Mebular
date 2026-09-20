@@ -574,6 +574,14 @@ export async function startHttpServer({ home, app, service, buildServer, host = 
           if (check.challenge) res.setHeader('www-authenticate', check.challenge);
           return sendJson(res, check.status, { ok: false, error: check.message });
         }
+        if (path === '/app/network' && req.method === 'GET') {
+          return sendJson(res, 200, {
+            ok: true,
+            deviceId: deviceId ?? null,
+            peerId: app.node?.peerId?.id ?? null,
+            multiaddrs: app.node?.getLocalMultiaddrs?.() ?? [],
+          });
+        }
         if (path === '/app/namespaces' && req.method === 'GET') {
           const nodes = await app.graph.listNodes({});
           const namespaces = [...new Set(nodes.map((n) => n.namespace ?? 'default'))].sort();

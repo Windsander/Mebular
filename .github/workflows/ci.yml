@@ -50,6 +50,9 @@ jobs:
       - name: Unified daemon (identity mode / app API / fail-closed / single-writer)
         run: npm run verify:daemon
 
+      - name: Daemon cluster (two-machine loopback sync + delegated identity)
+        run: npm run verify:daemon:cluster
+
       - name: stdio MCP (real client)
         run: npm run verify:mcp:stdio
 

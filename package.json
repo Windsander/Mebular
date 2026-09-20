@@ -84,6 +84,7 @@
     "verify:fleet:quickstart": "node scripts/verify-fleet-quickstart.mjs",
     "verify:fleet:tasks": "node scripts/verify-fleet-tasks.mjs",
     "verify:daemon": "node scripts/verify-daemon.mjs",
+    "verify:daemon:cluster": "node scripts/verify-daemon-cluster.mjs",
     "verify:fleet:grant": "node scripts/verify-fleet-grant.mjs",
     "verify:fleet:service": "node scripts/verify-fleet-service.mjs",
     "verify:fleet:membership": "node scripts/verify-fleet-membership.mjs",

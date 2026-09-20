@@ -165,6 +165,16 @@ export async function createMebular() {
     },
   });
   await app.initialize();
+  // W2：按 config.network.peers 主动拨号（daemon 形态的点对点建立；只有一方需地址）
+  for (const peer of config.network?.peers ?? []) {
+    if (typeof peer?.addr !== 'string' || peer.addr.length === 0) continue;
+    const id = /\/p2p\/([^/]+)/.exec(peer.addr)?.[1] ?? peer.device;
+    try {
+      await app.node?.connectToPeer({ id, multihash: new Uint8Array(), pubKey: new Uint8Array() }, peer.addr);
+    } catch {
+      // 由后续 anti-entropy / doctor 暴露
+    }
+  }
   return { app, home, config, storagePath, deviceId, identityMode: mode };
 }
 

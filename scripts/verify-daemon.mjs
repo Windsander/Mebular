@@ -8,7 +8,8 @@ import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { IdentityManager } from '@mebular/core';
+import net from 'node:net';
+import { IdentityManager, verifyCertificateChain, hexToBytes } from '@mebular/core';
 
 const BIN = fileURLToPath(new URL('../packages/mcp/bin/mebular.mjs', import.meta.url));
 const results = [];
@@ -18,6 +19,16 @@ function check(name, cond, detail) {
   console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${detail !== undefined ? `  ${JSON.stringify(detail)}` : ''}`);
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port;
+      srv.close(() => resolve(port));
+    });
+  });
+}
 async function waitFor(fn, timeoutMs, pollMs = 100) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -55,7 +66,7 @@ function startCli(env, args) {
 }
 
 /** 造一台**委派身份**（无主私钥）的守护 home。 */
-async function makeDelegatedHome(home) {
+async function makeDelegatedHome(home, joinPort) {
   await mkdir(home, { recursive: true });
   const im = new IdentityManager();
   await im.generateUserMasterKey();
@@ -84,8 +95,9 @@ async function makeDelegatedHome(home) {
     identity: { mode: 'delegated' },
     encryption: { level: 'none', userMasterPublicKeyFile: join(home, 'user-master-key.json') },
     network: { enabled: false },
-    sync: { autoSync: false },
+    sync: { autoSync: false, namespaces: ['tasks'], policyIssuers: ['device-B'] },
     mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
+    joinService: { enabled: true, bind: '127.0.0.1', port: joinPort },
   }, null, 2), { mode: 0o600 });
   return { masterPub, storagePath };
 }
@@ -96,7 +108,8 @@ let serve1 = null;
 let serve2 = null;
 try {
   console.log('== A1/A5 委派身份模式（无主私钥）==');
-  await makeDelegatedHome(homeB);
+  const joinPort = await freePort();
+  await makeDelegatedHome(homeB, joinPort);
   const envB = { ...process.env, MEBULAR_HOME: homeB };
   const st = await runCli(envB, ['status']);
   const stJson = firstJson(st.out) ?? {};
@@ -142,6 +155,48 @@ try {
   const dead = await waitFor(() => serve2.child.exitCode !== null, 15000) || serve2.child.exitCode !== null;
   const locked = /MCP_STORAGE_LOCKED|存储已被占用/.test(serve2.state.err + serve2.state.out);
   check('第二写者被明确拒绝（MCP_STORAGE_LOCKED）', dead && locked, { err: serve2.state.err.trim().slice(0, 120) });
+
+  console.log('== A4 join 迁回守护 + 策略 app 路由 ==');
+  const invite = await fetch(`${base}/app/join/invite`, { method: 'POST', headers: auth, body: JSON.stringify({ namespace: 'tasks', ttlMs: 120000 }) });
+  const inviteJson = await invite.json();
+  check('守护托管 invite（/app/join/invite 出令牌）', invite.status === 200 && typeof inviteJson.token === 'string' && inviteJson.endpoint === `http://127.0.0.1:${joinPort}`, { endpoint: inviteJson.endpoint });
+  // C 生成设备钥 → 直接向守护 join 端点请求委派证书（链应为 C←B←A）
+  const imC = new IdentityManager();
+  const cKey = await imC.generateDeviceKey('device-C', 'C');
+  const joined = await fetch(`http://127.0.0.1:${joinPort}/mebular/join`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ token: inviteJson.token, deviceId: 'device-C', devicePublicKey: Buffer.from(cKey.publicKey).toString('hex') }),
+  });
+  const joinedJson = await joined.json();
+  const chain = joinedJson.chain ?? [];
+  check('委派签发：C 证书链长度 3（C←B←A）且锚定主密钥', joined.status === 200 && chain.length === 3 && (await verifyCertificateChain(chain, hexToBytes(Buffer.from(JSON.parse(readFileSync(join(homeB, 'user-master-key.json'), 'utf-8')).publicKey, 'base64').toString('hex')), { subjectDeviceId: 'device-C' })), { chainLen: chain.length });
+  // 策略 app 路由：grant + effective
+  const grantRes = await fetch(`${base}/app/policy/grant`, { method: 'POST', headers: auth, body: JSON.stringify({ subject: 'device-C', namespaces: ['tasks'] }) });
+  const grantJson = await grantRes.json();
+  const effRes = await fetch(`${base}/app/policy/effective?device=device-C`, { headers: auth });
+  const effJson = await effRes.json();
+  check('策略 app 路由：grant + effective 生效', grantRes.status === 200 && grantJson.ok === true && effJson.namespaces?.includes('tasks'), { namespaces: effJson.namespaces });
+
+  console.log('== C3③ 委派加入的设备能跑守护（无主密钥）==');
+  const homeC = join(root, 'C');
+  await mkdir(homeC, { recursive: true });
+  const cStorage = join(homeC, 'store.jsonl');
+  await writeFile(`${cStorage}.identity.json`, JSON.stringify({
+    deviceId: 'device-C', deviceName: 'C',
+    publicKeyHex: Buffer.from(cKey.publicKey).toString('hex'),
+    certificate: joinedJson.certificate, certificateChain: chain, createdAt: Date.now(),
+    privateKeyPkcs8: await IdentityManager.exportPrivateKey(cKey.privateKey),
+  }, null, 2), { mode: 0o600 });
+  // C 的主公钥（继承同一用户主密钥；公开信息）
+  await writeFile(join(homeC, 'user-master-key.json'), readFileSync(join(homeB, 'user-master-key.json')), { mode: 0o600 });
+  await writeFile(join(homeC, 'config.json'), JSON.stringify({
+    storagePath: cStorage, deviceId: 'device-C', identity: { mode: 'delegated' },
+    encryption: { level: 'none', userMasterPublicKeyFile: join(homeC, 'user-master-key.json') },
+    network: { enabled: false }, sync: { autoSync: false },
+  }, null, 2), { mode: 0o600 });
+  const cStatus = await runCli({ ...process.env, MEBULAR_HOME: homeC }, ['status']);
+  const cJson = firstJson(cStatus.out) ?? {};
+  check('委派设备（C）能跑守护且 identityMode=delegated', cStatus.code === 0 && cJson.identityMode === 'delegated', { code: cStatus.code, identityMode: cJson.identityMode });
 
   console.log('== C3① 单机：守护 + fleet 客户端（daemon 模式）+ 任务往返 ==');
   const fleetCli = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));

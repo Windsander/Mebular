@@ -154,6 +154,8 @@ export async function createMebular() {
         ? { peerNamespacePolicy: config.sync.peerNamespacePolicy }
         : {}),
       ...(Array.isArray(config.sync?.namespaces) ? { namespaces: config.sync.namespaces } : {}),
+      // W2 A2：引导签发者白名单（图上声明 ∪ 本地配置）
+      ...(Array.isArray(config.sync?.policyIssuers) ? { policyIssuers: config.sync.policyIssuers } : {}),
     },
     semantic: {
       enabled: truthy(process.env.MEBULAR_SEMANTIC_ENABLED, config.semantic?.enabled ?? false),

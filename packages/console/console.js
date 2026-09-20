@@ -301,13 +301,15 @@ function renderDomains() {
     state.memberDraft = '';
   }
   const selected = items.find((n) => n.namespace === state.selectedNamespace);
+  const taskNs = state.settings?.fleet?.namespace ?? null;
   list.innerHTML = items.map((n) => {
     const active = n.namespace === state.selectedNamespace;
     const memberLabel = n.membershipEnabled ? `${n.effectiveMembers.length}/${n.members.length}` : '仅授权';
+    const isTask = taskNs !== null && n.namespace === taskNs;
     return `<button class="sector-item${active ? ' is-active' : ''}" data-sector="${escapeHtml(n.namespace)}" type="button">
       <span class="sector-dot${n.membershipEnabled ? ' is-on' : ''}"></span>
       <span class="sector-name"><span class="ns-chip" style="background:${namespaceColor(n.namespace)}">${escapeHtml(n.namespace)}</span>
-        <span class="sector-meta">${n.count} 条${n.rejoinReset ? ' · 待恢复' : ''}</span></span>
+        <span class="sector-meta">${n.count} 条${n.rejoinReset ? ' · 待恢复' : ''}${isTask ? ' · 任务域' : ''}</span></span>
       <span class="sector-meta" title="生效/在册成员">${memberLabel}</span>
     </button>`;
   }).join('');
@@ -359,15 +361,17 @@ function renderDomainDetail(n) {
     ? `<button class="btn btn-small btn-crt" data-rejoin="${escapeHtml(ns)}" ${(writes && n.selfAuthorized) ? '' : 'disabled'} title="${escapeHtml(rejoinTitle)}">重入恢复</button>`
     : '';
 
+  const isTaskNs = (state.settings?.fleet?.namespace ?? null) === ns;
   detail.innerHTML = `<article class="sector-readout crt-surface crt-corners">
     <header class="readout-head">
-      <span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
+      <span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>${isTaskNs ? '<span class="crt-tag">任务域</span>' : ''}
       <span class="readout-meta">${n.count} 条 · 最近更新 ${n.lastUpdatedAt ? formatTime(n.lastUpdatedAt) : '—'}</span>
       <span class="readout-meta">HASH ${n.stateHash ? escapeHtml(n.stateHash.slice(0, 10)) : '—'}</span>
       <span class="crt-tag${n.membershipEnabled ? '' : ' is-off'}">${n.membershipEnabled ? '成员制 ACTIVE' : '成员制 OFF'}</span>
       <span class="crt-tag${n.subscribed ? '' : ' is-off'}">${n.subscribed ? '已订阅' : '未订阅'}</span>
       ${n.rejoinReset ? '<span class="crt-tag">待重入</span>' : ''}
     </header>
+    ${isTaskNs ? '<p class="muted" style="font-size:11px;margin:6px 0 0">任务面：发起节点为根派发任务树，远端 Agent 执行后回传结果（有向无环）；成员/授权闸门同记忆域，但语义不是共享记忆池。</p>' : ''}
     <div class="readout-block"><span class="domain-label">AUTH →</span><div class="chip-wrap">${granted}</div></div>
     <div class="readout-block"><span class="domain-label">MEMBERS →</span><div class="chip-wrap">${members}</div></div>
     <div class="readout-block readout-actions">
@@ -505,10 +509,10 @@ async function confirmHandoff() {
 // ---------- 设置卡：常用配置编辑器（curated；保存写入 config.json，需重启生效） ----------
 
 const CONFIG_EDITOR = [
-  { group: '同步', path: 'sync.autoSync', label: '自动同步', type: 'bool', help: '连接建立或事件到达时自动触发同步' },
+  { group: '记忆同步（M 数据域）', path: 'sync.autoSync', label: '自动同步', type: 'bool', help: '连接建立或事件到达时自动触发一次收敛' },
   { path: 'sync.pushOnWrite', label: '写入即推送', type: 'bool', help: '本机写入后即时推给对端（常驻模式默认开）' },
-  { path: 'sync.namespaces', label: '订阅分区', type: 'list', placeholder: 'default, notes', help: '只参与列出的分区；留空 = 全部分区' },
-  { path: 'sync.peerWhitelist', label: '对端白名单', type: 'list', placeholder: 'device-B, device-C', help: '仅接受列出的 deviceId；留空 = 不启用（按授权 / 成员制判定）' },
+  { path: 'sync.namespaces', label: '订阅数据域（M）', type: 'list', placeholder: 'default, notes', help: '订阅即承担数据义务：接收该域，并同步本机新增记忆。留空 = 参与全部。生效共享 = 对端授权 ∩ 对端在册（启用成员制时）∩ 本机订阅' },
+  { path: 'sync.peerWhitelist', label: '对端白名单', type: 'list', placeholder: 'device-B, device-C', help: '记忆通道的传输闸门：仅与列出的 deviceId 建立会话；留空 = 不启用（按授权 / 成员制判定）' },
   { path: 'sync.antiEntropy.enabled', label: '周期反熵', type: 'bool', help: '周期性对账，弥补推送丢失' },
   { path: 'sync.antiEntropy.intervalMs', label: '反熵间隔（分钟）', type: 'minutes', help: '默认 10 分钟（±20% 抖动）' },
   { path: 'sync.antiEntropy.jitterRatio', label: '反熵抖动比例', type: 'number', step: 0.05, min: 0, max: 1, help: '0 ~ 1，默认 0.2' },
@@ -756,6 +760,19 @@ function renderSettings() {
         ['兼容白名单', s.sync.legacyPeerAllowList.length ? escapeHtml(s.sync.legacyPeerAllowList.join(', ')) : '空（建议迁移到图上授权）'],
       ])}
       ${listenAlarm.length ? `<p class="crt-warn">⚠ 监听地址含非回环（${escapeHtml(listenAlarm.join(', '))}）：建议改绑回环 / LAN，或经 relay 并仅以防火墙放行已授权对端。</p>` : ''}
+    </section>
+
+    <section class="settings-section">
+      <h3>任务与舰队（Fleet） <span class="badge badge-muted">只读</span></h3>
+      ${s.fleet?.configured
+        ? kv([
+          ['任务域', s.fleet.namespace ? `<code>${escapeHtml(s.fleet.namespace)}</code>` : '(未设置)'],
+          ['已登记对端', String(s.fleet.peers ?? 0)],
+          ['本机 Agent', String(s.fleet.agents ?? 0)],
+          ['配置', escapeHtml(s.fleet.path ?? 'fleet.config.json')],
+        ])
+        : '<p class="muted" style="font-size:11px">尚未配置舰队。任务面与记忆订阅是两套机制：</p>'}
+      <p class="muted" style="font-size:11px">任务 ≠ 记忆订阅：任务树以发起节点为根派发，远端 Agent 执行后回传结果（有向无环树；经记忆通道传输，但不是共享记忆池）。任务配置由 <code>fleet</code> CLI 管理（<code>fleet.config.json</code>）。${s.fleet?.configured ? '' : ' 上车：<code>fleet quickstart --daemon --dir ~/.mebular --device &lt;ID&gt;</code>'}</p>
     </section>
 
     <section class="settings-section">
@@ -1534,6 +1551,10 @@ async function renderInvite() {
       </div>
       <div class="readout-block">
         <span class="domain-label">本机批准</span>
+        <div class="copyable"><code>fleet approve --dir ~/.mebular --device &lt;新设备ID&gt; --addr &lt;其 multiaddr&gt;</code><button class="btn btn-small btn-crt" data-copy="fleet approve --dir ~/.mebular --device &lt;新设备ID&gt; --addr &lt;其 multiaddr&gt;">复制</button></div>
+      </div>
+      <div class="readout-block">
+        <span class="domain-label">查看待批</span>
         <div class="copyable"><code>fleet pending --dir ~/.mebular</code><button class="btn btn-small btn-crt" data-copy="fleet pending --dir ~/.mebular">复制</button></div>
       </div>
       <p class="crt-warn">⚠ 令牌即入网权限：一次性、短时效（默认 15 分钟），仅经可信 LAN 使用，请勿写入工单或公开日志。</p>

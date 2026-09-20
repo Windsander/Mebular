@@ -83,6 +83,22 @@ async function seedHome(home) {
     namespace: POLICY_NAMESPACE,
   });
   await app.shutdown();
+  await writeFile(
+    join(home, 'fleet.config.json'),
+    JSON.stringify({
+      v: 1,
+      device: 'device-console',
+      dir: home,
+      storagePath,
+      masterKeyFile: keyFile,
+      namespace: 'tasks',
+      listen: '',
+      peers: [{ device: 'device-peer', addr: '/ip4/127.0.0.1/tcp/4001/p2p/peerid' }],
+      policyIssuers: ['device-console'],
+      agents: [],
+    }, null, 2),
+    'utf-8',
+  );
   return storagePath;
 }
 
@@ -351,6 +367,7 @@ try {
       && (settings.json?.identity?.mode === null || typeof settings.json?.identity?.mode === 'string')
       && typeof settings.json?.join?.enabled === 'boolean'
       && typeof settings.json?.join?.port === 'number'
+      && typeof settings.json?.fleet?.configured === 'boolean'
       && typeof settings.json?.mcp?.host === 'string'
       && typeof settings.json?.semantic?.enabled === 'boolean'
       && Array.isArray(settings.json?.policyIssuers)
@@ -359,6 +376,11 @@ try {
   );
   check('settings.policyIssuers 含已声明的 device-console', settings.json?.policyIssuers?.includes('device-console') === true);
   check('settings.identity.mode = root（本地主密钥）', settings.json?.identity?.mode === 'root', `mode=${settings.json?.identity?.mode}`);
+  check(
+    'settings.fleet 反映 fleet.config.json（任务面独立配置）',
+    settings.json?.fleet?.configured === true && settings.json?.fleet?.namespace === 'tasks' && settings.json?.fleet?.peers === 1,
+    `fleet=${JSON.stringify(settings.json?.fleet)}`,
+  );
   check('settings.sync.peerWhitelist 反映 config（L5 透传）', settings.json?.sync?.peerWhitelist?.length === 1 && settings.json.sync.peerWhitelist[0] === 'device-peer', `whitelist=${JSON.stringify(settings.json?.sync?.peerWhitelist)}`);
   check('devices 含 memberships/declaredIssuer 字段', (devices.json ?? []).every((d) => Array.isArray(d.memberships) && typeof d.declaredIssuer === 'boolean'));
   check('device-console declaredIssuer=true（种子声明）', byId.get('device-console')?.declaredIssuer === true);

@@ -12,6 +12,7 @@
 //   GET /admin/api/namespaces [{ namespace, count, lastUpdatedAt, stateHash }]
 
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { POLICY_NAMESPACE, normalizeNamespace } from '@mebular/core';
 import { configPath } from './config.mjs';
@@ -506,7 +507,7 @@ export async function buildNamespaces({ app, service, config }) {
 }
 
 /** GET /admin/api/settings（只读、脱敏；不含任何密钥/token） */
-export async function buildSettings({ app, service, config, runtime }) {
+export async function buildSettings({ app, service, config, runtime, home }) {
   const status = await service.status();
   let policyIssuers = [];
   let revokedCount = 0;
@@ -574,6 +575,7 @@ export async function buildSettings({ app, service, config, runtime }) {
       bind: config?.joinService?.bind ?? '0.0.0.0',
       port: config?.joinService?.port ?? 4002,
     },
+    ...(await buildFleetView(home)),
   };
 }
 
@@ -587,6 +589,28 @@ export async function buildHandoffPlan({ app }, namespace, successor) {
     return { status: 200, body: plan };
   } catch (error) {
     return { status: 400, body: { error: 'bad_request', message: String(error?.message ?? error) } };
+  }
+}
+
+/** 任务/舰队面摘要（fleet.config.json；只读，不暴露路径细节以外的内容） */
+async function buildFleetView(home) {
+  const path = join(home, 'fleet.config.json');
+  if (!existsSync(path)) {
+    return { fleet: { configured: false, path } };
+  }
+  try {
+    const cfg = JSON.parse(await readFile(path, 'utf-8'));
+    return {
+      fleet: {
+        configured: true,
+        path,
+        namespace: typeof cfg.namespace === 'string' ? cfg.namespace : null,
+        peers: Array.isArray(cfg.peers) ? cfg.peers.length : 0,
+        agents: Array.isArray(cfg.agents) ? cfg.agents.length : 0,
+      },
+    };
+  } catch (error) {
+    return { fleet: { configured: true, path, parseError: String(error?.message ?? error) } };
   }
 }
 

@@ -276,6 +276,21 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  * 启动 join 服务：`POST /mebular/join {token, deviceId, devicePublicKey}` → 验令牌后签发**委派证书**。
  * `GET /mebular/ping` 用于就绪探测。**不接收、不返回任何主密钥材料**。
  */
+/** 每 storagePath 的非一路串行锁：令牌「先占用后签发」在**单服务进程内**原子（跨进程见文档披露）。 */
+const nonceLocks = new Map<string, Promise<unknown>>();
+function withNonceLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = nonceLocks.get(key) ?? Promise.resolve();
+  const run = prev.then(() => fn());
+  nonceLocks.set(
+    key,
+    run.then(
+      () => undefined,
+      () => undefined,
+    ),
+  );
+  return run;
+}
+
 export async function startJoinService(opts: JoinServiceOptions): Promise<JoinService> {
   const bind = opts.bind ?? '0.0.0.0';
   const server = createServer((req, res) => {
@@ -299,35 +314,42 @@ export async function startJoinService(opts: JoinServiceOptions): Promise<JoinSe
           return;
         }
         const token = decodeJoinToken(body.token);
-        const state = await readJoinNonceState(opts.storagePath);
-        const verdict = await verifyJoinToken(token, {
-          used: state.used,
-          revoked: state.revoked,
-          expectedInviter: opts.deviceId,
-        });
-        if (!verdict.ok) {
-          sendJson(res, 403, { ok: false, error: `令牌不可用：${verdict.reason}` });
-          return;
-        }
-        if (!/^[0-9a-fA-F]{64}$/.test(body.devicePublicKey)) {
+        const deviceId = body.deviceId;
+        const devicePublicKey = body.devicePublicKey;
+        if (!/^[0-9a-fA-F]{64}$/.test(devicePublicKey)) {
           sendJson(res, 400, { ok: false, error: 'devicePublicKey 必须为 32 字节 hex' });
           return;
         }
-        const issued = await opts.mebular.identity.issueDelegatedCertificateFor(
-          body.deviceId,
-          body.devicePublicKey,
-          opts.deviceId,
-        );
-        state.used.push(token.nonce);
-        await writeJoinNonceState(opts.storagePath, state);
-        opts.log?.(`join: issued delegated cert for ${body.deviceId} (nonce consumed)`);
-        sendJson(res, 200, {
-          ok: true,
-          certificate: issued.certificate,
-          chain: issued.certificateChain,
-          namespace: token.namespace,
-          inviterDeviceId: token.inviterDeviceId,
-          inviterMultiaddrs: opts.mebular.node?.getLocalMultiaddrs() ?? [],
+        // F-2：令牌「一次性」在**单服务进程内**原子（先占用后签发），并发不再重复签发。
+        await withNonceLock(opts.storagePath, async () => {
+          const state = await readJoinNonceState(opts.storagePath);
+          const verdict = await verifyJoinToken(token, {
+            used: state.used,
+            revoked: state.revoked,
+            expectedInviter: opts.deviceId,
+          });
+          if (!verdict.ok) {
+            sendJson(res, 403, { ok: false, error: `令牌不可用：${verdict.reason}` });
+            return;
+          }
+          // **先占用**（落盘 used）再签发：签发失败即 fail-closed（令牌已消费，不二次签发）。
+          state.used.push(token.nonce);
+          await writeJoinNonceState(opts.storagePath, state);
+          try {
+            const issued = await opts.mebular.identity.issueDelegatedCertificateFor(deviceId, devicePublicKey, opts.deviceId);
+            opts.log?.(`join: issued delegated cert for ${deviceId} (nonce consumed)`);
+            sendJson(res, 200, {
+              ok: true,
+              certificate: issued.certificate,
+              chain: issued.certificateChain,
+              namespace: token.namespace,
+              inviterDeviceId: token.inviterDeviceId,
+              inviterMultiaddrs: opts.mebular.node?.getLocalMultiaddrs() ?? [],
+            });
+          } catch (error) {
+            opts.log?.(`join: nonce ${token.nonce} consumed but issuance failed: ${(error as Error).message}`);
+            sendJson(res, 500, { ok: false, error: '签发失败（令牌已消费，fail-closed）' });
+          }
         });
       } catch (error) {
         sendJson(res, 500, { ok: false, error: (error as Error).message });

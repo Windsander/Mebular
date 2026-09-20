@@ -117,7 +117,37 @@ describe('T2 加入令牌与 join 服务', () => {
     }
   });
 
+  it('F-2：同一令牌**并发**请求只成功一次（先占用后签发）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fleet-join-race-'));
+    try {
+      const A = join(root, 'A');
+      const inviter = await makeInviter(A);
+      const svc = await startJoinService({ mebular: inviter, deviceId: 'device-A', storagePath: join(A, 'store.jsonl'), port: 0 });
+      const endpoint = `http://127.0.0.1:${svc.port}`;
+      try {
+        const token = encodeJoinToken(await buildJoinToken({ mebular: inviter, deviceId: 'device-A', namespace: 'tasks', endpoint, ttlMs: 60_000 }));
+        const [r1, r2] = await Promise.allSettled([
+          requestJoin({ endpoint, token, deviceId: 'device-P', devicePublicKeyHex: 'a'.repeat(64) }),
+          requestJoin({ endpoint, token, deviceId: 'device-Q', devicePublicKeyHex: 'b'.repeat(64) }),
+        ]);
+        const fulfilled = [r1, r2].filter((r) => r.status === 'fulfilled');
+        const rejected = [r1, r2].filter((r) => r.status === 'rejected');
+        expect(fulfilled).toHaveLength(1);
+        expect(rejected).toHaveLength(1);
+        expect(String((rejected[0] as PromiseRejectedResult).reason)).toMatch(/used|令牌不可用/);
+        const state = await readJoinNonceState(join(A, 'store.jsonl'));
+        expect(state.used.filter((n) => n === (JSON.parse(Buffer.from(token, 'base64').toString('utf-8')) as { nonce: string }).nonce)).toHaveLength(1);
+      } finally {
+        await svc.close();
+        await inviter.shutdown();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('decode/verify 负例 + join 服务 HTTP 分支 + 响应解析失败', async () => {
+
     const root = await mkdtemp(join(tmpdir(), 'fleet-token2-'));
     try {
       // decode 负例

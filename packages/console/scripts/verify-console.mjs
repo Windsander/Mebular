@@ -500,6 +500,30 @@ try {
     notesAfterMember?.members?.includes('device-new') === true && notesAfterMember?.effectiveMembers?.includes('device-new') !== true,
     `members=${JSON.stringify(notesAfterMember?.members)} effective=${JSON.stringify(notesAfterMember?.effectiveMembers)}`,
   );
+  const selfFollow = await fetch(`http://127.0.0.1:${port}/admin/api/memberships`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ member: 'device-console', namespace: 'notes', active: true }),
+  });
+  check('POST memberships 本机在册（关注语义）→ 201', selfFollow.status === 201, `status=${selfFollow.status}`);
+  const nsAfterSelf = await getJson(port, '/admin/api/namespaces');
+  check(
+    '本机在册反映在 namespaces.selfMember',
+    (nsAfterSelf.json ?? []).find((n) => n.namespace === 'notes')?.selfMember === true,
+    `selfMember=${(nsAfterSelf.json ?? []).find((n) => n.namespace === 'notes')?.selfMember}`,
+  );
+  await fetch(`http://127.0.0.1:${port}/admin/api/memberships`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ member: 'device-console', namespace: 'notes', active: false }),
+  });
+  const nsAfterUnfollow = await getJson(port, '/admin/api/namespaces');
+  check(
+    '取消关注 → selfMember 回落 false',
+    (nsAfterUnfollow.json ?? []).find((n) => n.namespace === 'notes')?.selfMember === false,
+    `selfMember=${(nsAfterUnfollow.json ?? []).find((n) => n.namespace === 'notes')?.selfMember}`,
+  );
+
   const memberBad = await fetch(`http://127.0.0.1:${port}/admin/api/memberships`, {
     method: 'POST',
     headers: writeHeaders,

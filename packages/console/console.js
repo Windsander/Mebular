@@ -368,7 +368,7 @@ function renderDomainDetail(n) {
       <span class="readout-meta">${n.count} 条 · 最近更新 ${n.lastUpdatedAt ? formatTime(n.lastUpdatedAt) : '—'}</span>
       <span class="readout-meta">HASH ${n.stateHash ? escapeHtml(n.stateHash.slice(0, 10)) : '—'}</span>
       <span class="crt-tag${n.membershipEnabled ? '' : ' is-off'}">${n.membershipEnabled ? '成员制 ACTIVE' : '成员制 OFF'}</span>
-      <span class="crt-tag${n.subscribed ? '' : ' is-off'}">${n.subscribed ? '已订阅' : '未订阅'}</span>
+      <span class="crt-tag${n.subscribed ? '' : ' is-off'}">${n.subscribed ? '本机关注' : '未关注'}</span>
       ${n.rejoinReset ? '<span class="crt-tag">待重入</span>' : ''}
     </header>
     ${isTaskNs ? '<p class="muted" style="font-size:11px;margin:6px 0 0">任务面：发起节点为根派发任务树，远端 Agent 执行后回传结果（有向无环）；成员/授权闸门同记忆域，但语义不是共享记忆池。</p>' : ''}
@@ -1009,31 +1009,59 @@ function renderDeviceCard() {
   const device = state.devices.find((d) => d.deviceId === state.selected.deviceId) ?? state.selected;
   const isSelf = device.deviceId === state.overview?.device?.deviceId;
   const statusChips = [];
-  statusChips.push(device.revoked ? `${ICONS.revoked} 已被我屏蔽` : (device.online ? `${ICONS.online} 与我连接中` : `${ICONS.offline} 未连接`));
-  if (device.pendingEventCount !== null && device.pendingEventCount !== undefined) {
-    statusChips.push(`待发 ${device.pendingEventCount}`);
+  if (isSelf) {
+    statusChips.push(`${ICONS.online} 本机`);
+    if (device.declaredIssuer) statusChips.push('◈ 引导签发者');
+  } else {
+    statusChips.push(device.revoked ? `${ICONS.revoked} 已被我屏蔽` : (device.online ? `${ICONS.online} 与我连接中` : `${ICONS.offline} 未连接`));
+    if (device.pendingEventCount !== null && device.pendingEventCount !== undefined) {
+      statusChips.push(`待发 ${device.pendingEventCount}`);
+    }
+    if (device.lastSyncAt) statusChips.push(`最近同步 ${formatTime(device.lastSyncAt)}`);
+    if (device.declaredIssuer) statusChips.push('◈ 引导签发者');
   }
-  if (device.lastSyncAt) statusChips.push(`最近同步 ${formatTime(device.lastSyncAt)}`);
-  if (device.declaredIssuer) statusChips.push('◈ 引导签发者');
 
   const allNamespaces = allNamespaceNames();
-  const writes = state.features.writes && !isSelf && !MOCK;
+  const writes = state.features.writes && !MOCK;
+  const peerWrites = writes && !isSelf;
+
+  // 卡片标签：本机 / 目标锁定
+  const headTag = document.querySelector('#device-card .card-head .crt-tag');
+  if (headTag) headTag.innerHTML = `<span class="crt-tag-dot"></span>${isSelf ? '本机' : '目标锁定'}`;
+  const subs = state.settings?.sync?.subscriptions ?? [];
+  const subscribedTo = (ns) => subs.length === 0 || subs.includes(ns);
   const rows = allNamespaces.length === 0
     ? '<li class="muted">暂无已知分区</li>'
     : allNamespaces.map((ns) => {
+      if (isSelf) {
+        // 本机：关注 = 图上在册（namespace_membership）；订阅声明（config）决定传输层
+        const following = Boolean((device.memberships ?? []).find((m) => m.namespace === ns));
+        const declared = subscribedTo(ns);
+        const hint = following
+          ? (declared ? '关注中' : '在册 · 订阅声明未含（重启后收发）')
+          : (declared ? '订阅声明含 · 未在册' : '未关注');
+        return `<li>
+          <span><span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
+            <span class="muted" style="margin-left:6px">${hint}</span></span>
+          <label class="toggle" title="关注 = 接收该域对端新记忆，并把本机该域新记忆同步到其他端（订阅即数据义务）">
+            <input type="checkbox" data-follow="${escapeHtml(ns)}" aria-label="关注数据域 ${escapeHtml(ns)}（当前${following ? '关注中' : '未关注'}）" ${following ? 'checked' : ''} ${writes ? '' : 'disabled'}>
+            <span class="slider"></span>
+          </label>
+        </li>`;
+      }
       const mineOn = device.grantedByMe.includes(ns);
       const theirsOn = device.grantedToMe.includes(ns);
       return `<li>
         <span><span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
           ${theirsOn && !mineOn ? '<span class="muted" style="margin-left:6px">它授权我</span>' : ''}</span>
         <label class="toggle" title="${mineOn ? '关闭：撤销我对该域的授权' : '打开：签发新授权'}">
-          <input type="checkbox" data-ns="${escapeHtml(ns)}" aria-label="共享域 ${escapeHtml(ns)}（当前${mineOn ? '已授权' : '未授权'}）" ${mineOn ? 'checked' : ''} ${writes ? '' : 'disabled'}>
+          <input type="checkbox" data-ns="${escapeHtml(ns)}" aria-label="共享域 ${escapeHtml(ns)}（当前${mineOn ? '已授权' : '未授权'}）" ${mineOn ? 'checked' : ''} ${peerWrites ? '' : 'disabled'}>
           <span class="slider"></span>
         </label>
       </li>`;
     }).join('');
 
-  const membershipNs = (state.namespaces ?? []).filter((n) => n.membershipEnabled);
+  const membershipNs = isSelf ? [] : (state.namespaces ?? []).filter((n) => n.membershipEnabled);
   const membershipRows = membershipNs.map((n) => {
     const mine = (device.memberships ?? []).find((m) => m.namespace === n.namespace) ?? null;
     const on = Boolean(mine);
@@ -1042,7 +1070,7 @@ function renderDeviceCard() {
       <span><span class="ns-chip" style="background:${namespaceColor(n.namespace)}">${escapeHtml(n.namespace)}</span>
         <span class="muted" style="margin-left:6px">${hint}</span></span>
       <label class="toggle" title="${on ? '移出该分区成员（不清理数据）' : '加入该分区成员（仍需授权才生效）'}">
-        <input type="checkbox" data-membership="${escapeHtml(n.namespace)}" aria-label="成员资格 ${escapeHtml(n.namespace)}（当前${on ? '在册' : '未在册'}）" ${on ? 'checked' : ''} ${writes ? '' : 'disabled'}>
+        <input type="checkbox" data-membership="${escapeHtml(n.namespace)}" aria-label="成员资格 ${escapeHtml(n.namespace)}（当前${on ? '在册' : '未在册'}）" ${on ? 'checked' : ''} ${peerWrites ? '' : 'disabled'}>
         <span class="slider"></span>
       </label>
     </li>`;
@@ -1062,17 +1090,20 @@ function renderDeviceCard() {
     <dl class="kv">
       <dt>deviceId</dt><dd>${escapeHtml(device.deviceId)}</dd>
       <dt>状态</dt><dd>${escapeHtml(statusChips.join(' · '))}</dd>
+      ${isSelf ? '' : `
       <dt>我授权它</dt><dd>${escapeHtml(device.grantedByMe.join(', ') || '—')}</dd>
       <dt>它授权我</dt><dd>${escapeHtml(device.grantedToMe.join(', ') || '—')}</dd>
       <dt>最近同步</dt><dd>${device.lastSyncAt ? formatTime(device.lastSyncAt) : '—'}</dd>
-      <dt>待发事件</dt><dd>${device.pendingEventCount ?? '—'}</dd>
+      <dt>待发事件</dt><dd>${device.pendingEventCount ?? '—'}</dd>`}
     </dl>
-    <h3>我授权的域</h3>
+    <h3>${isSelf ? '我关注的域' : '我授权的域'}${isSelf
+      ? ' <span class="muted" style="text-transform:none;letter-spacing:0">（订阅即数据义务：接收该域 + 同步本机新增记忆）</span>'
+      : ' <span class="muted" style="text-transform:none;letter-spacing:0">（M 记忆域：授予对端读取本机记忆）</span>'}</h3>
     <ul class="chip-list">${rows}</ul>
-    <h3>成员资格（分区协作）</h3>
+    ${isSelf ? '' : `<h3>成员资格（对端在册）</h3>
     ${membershipNs.length > 0
       ? `<ul class="chip-list">${membershipRows}</ul>`
-      : '<p class="muted">当前没有启用成员制的分区（仅授权生效）。</p>'}
+      : '<p class="muted">当前没有启用成员制的分区（仅授权生效）。</p>'}`}
     ${actions}
   `;
 
@@ -1085,6 +1116,48 @@ function renderDeviceCard() {
   body.querySelectorAll('input[data-membership]').forEach((input) => {
     input.addEventListener('change', () => handleMembershipToggle(device, input.dataset.membership, input.checked, input));
   });
+  body.querySelectorAll('input[data-follow]').forEach((input) => {
+    input.addEventListener('change', () => handleFollowToggle(device, input.dataset.follow, input.checked, input));
+  });
+}
+
+/** 本机关注（= 图上在册）＋ 需要时同步订阅声明（构造期配置，重启后传输层生效） */
+async function handleFollowToggle(device, ns, on, input) {
+  input.disabled = true;
+  try {
+    if (MOCK) {
+      window.alert('mock 模式不执行写操作。');
+      input.checked = !on;
+      return;
+    }
+    await api('/admin/api/memberships', { method: 'POST', body: { member: device.deviceId, namespace: ns, active: on } });
+    const subs = state.settings?.sync?.subscriptions ?? [];
+    let patched = false;
+    let hint = '';
+    if (on && subs.length > 0 && !subs.includes(ns)) {
+      await api('/admin/api/config', { method: 'POST', body: { patch: { sync: { namespaces: [...subs, ns] } } } });
+      patched = true;
+    } else if (!on && subs.includes(ns)) {
+      const next = subs.filter((x) => x !== ns);
+      if (next.length > 0) {
+        await api('/admin/api/config', { method: 'POST', body: { patch: { sync: { namespaces: next } } } });
+        patched = true;
+      } else {
+        hint = '；订阅声明为空 = 参与全部，如需排除请手工编辑';
+      }
+    } else if (!on && subs.length === 0) {
+      hint = '；订阅声明为「全部」，传输层仍会接收，如需排除请编辑订阅声明并重启';
+    }
+    showToast(on
+      ? `已关注「${ns}」${patched ? '：订阅声明已更新，重启 serve 后传输层生效' : ''}`
+      : `已取消关注「${ns}」${patched ? '：订阅声明已更新，重启 serve 后传输层生效' : ''}${hint}`);
+    await refresh();
+  } catch (error) {
+    window.alert(`操作失败：${error.message}`);
+    input.checked = !on;
+  } finally {
+    input.disabled = false;
+  }
 }
 
 async function handleMembershipToggle(device, ns, on, input) {

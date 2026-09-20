@@ -23,7 +23,6 @@ const state = {
   policy: [],
   namespaces: [],
   selectedNamespace: null,
-  memberDraft: '',
   settings: null,
   rawConfig: null,
   cfgDraft: {},
@@ -298,7 +297,6 @@ function renderDomains() {
   // 选中保持：默认第一个；轮询刷新不丢选择
   if (!items.some((n) => n.namespace === state.selectedNamespace)) {
     state.selectedNamespace = items[0].namespace;
-    state.memberDraft = '';
   }
   const selected = items.find((n) => n.namespace === state.selectedNamespace);
   const taskNs = state.settings?.fleet?.namespace ?? null;
@@ -318,7 +316,6 @@ function renderDomains() {
   list.querySelectorAll('[data-sector]').forEach((button) => {
     button.addEventListener('click', () => {
       state.selectedNamespace = button.dataset.sector;
-      state.memberDraft = '';
       renderDomains();
     });
   });
@@ -332,8 +329,6 @@ function renderDomainDetail(n) {
   }
   const writes = state.features.writes && !MOCK;
   const ns = n.namespace;
-  const focused = document.activeElement?.dataset?.memberInput === ns;
-  const draft = focused ? document.activeElement.value : state.memberDraft;
 
   const granted = (n.grantedTo ?? []).length
     ? n.grantedTo.map((g) => `<span class="member-chip" title="grantId=${escapeHtml(g.grantId)}">${escapeHtml(g.deviceId)}</span>`).join(' ')
@@ -342,15 +337,12 @@ function renderDomainDetail(n) {
     ? (n.members.length
       ? n.members.map((m) => {
         const eff = n.effectiveMembers.includes(m);
-        const remove = writes
-          ? `<button class="chip-x" data-member-remove="${escapeHtml(m)}" data-ns="${escapeHtml(ns)}" title="移出成员（不清理数据）">×</button>`
+        const approve = !eff && writes
+          ? `<button class="btn btn-small btn-crt" data-approve-member="${escapeHtml(m)}" data-ns="${escapeHtml(ns)}" title="批准准入：签发授权（已同步内容不回撤）">批准</button>`
           : '';
-        return `<span class="member-chip ${eff ? 'is-effective' : ''}" title="${eff ? '在册且已授权（生效）' : '在册但缺授权（不生效）'}">${escapeHtml(m)}${eff ? ' ✓' : ''}${remove}</span>`;
+        return `<span class="member-chip ${eff ? 'is-effective' : ''}" title="${eff ? '在册且已授权（生效）' : '在册但缺授权（待批准）'}">${escapeHtml(m)}${eff ? ' ✓' : ''}</span>${approve}`;
       }).join(' ')
       : '<span class="muted">暂无在册成员</span>')
-      + (writes
-        ? `<input class="member-input crt-input" data-member-input="${escapeHtml(ns)}" placeholder="deviceId" aria-label="添加成员" /><button class="btn btn-small btn-crt" data-member-add="${escapeHtml(ns)}">添加</button>`
-        : '')
     : '<span class="muted">未启用成员制（只需授权）</span>';
   const rejoinTitle = !writes
     ? '只读模式'
@@ -373,40 +365,34 @@ function renderDomainDetail(n) {
     </header>
     ${isTaskNs ? '<p class="muted" style="font-size:11px;margin:6px 0 0">任务面：发起节点为根派发任务树，远端 Agent 执行后回传结果（有向无环）；成员/授权闸门同记忆域，但语义不是共享记忆池。</p>' : ''}
     <div class="readout-block"><span class="domain-label">AUTH →</span><div class="chip-wrap">${granted}</div></div>
-    <div class="readout-block"><span class="domain-label">MEMBERS →</span><div class="chip-wrap">${members}</div></div>
+    <div class="readout-block"><span class="domain-label">MEMBERS →</span><div class="chip-wrap">${members}<span class="muted" style="font-size:10.5px;margin-left:6px">在册 = 对端自声明；本机动作 = 批准准入</span></div></div>
     <div class="readout-block readout-actions">
       ${rejoin}
       <button class="btn btn-small btn-crt btn-crt-danger" data-handoff="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="退订交接：继任者全量 ack 后才清理本机数据">退订交接…</button>
     </div>
   </article>`;
 
-  const input = detail.querySelector(`[data-member-input="${CSS.escape(ns)}"]`);
-  if (input) {
-    input.value = draft;
-    input.addEventListener('input', () => { state.memberDraft = input.value; });
-    if (focused) {
-      input.focus();
-      const end = input.value.length;
-      input.setSelectionRange(end, end);
-    }
-  }
   bindDomainActions();
 }
 
 function bindDomainActions() {
   const detail = $('#domain-detail');
-  detail.querySelectorAll('[data-member-add]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const ns = button.dataset.memberAdd;
-      const input = detail.querySelector(`[data-member-input="${CSS.escape(ns)}"]`);
-      const member = (input?.value ?? '').trim();
-      if (!member) return;
-      state.memberDraft = '';
-      declareMembership(member, ns, true);
+  detail.querySelectorAll('[data-approve-member]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      if (MOCK) {
+        window.alert('mock 模式不执行写操作。');
+        return;
+      }
+      button.disabled = true;
+      try {
+        await api('/admin/api/grants', { method: 'POST', body: { subject: button.dataset.approveMember, namespaces: [button.dataset.ns] } });
+        showToast(`已批准 ${button.dataset.approveMember} 在「${button.dataset.ns}」的准入`);
+        await refresh();
+      } catch (error) {
+        window.alert(`操作失败：${error.message}`);
+        button.disabled = false;
+      }
     });
-  });
-  detail.querySelectorAll('[data-member-remove]').forEach((button) => {
-    button.addEventListener('click', () => declareMembership(button.dataset.memberRemove, button.dataset.ns, false));
   });
   detail.querySelectorAll('[data-rejoin]').forEach((button) => {
     button.addEventListener('click', () => doRejoin(button.dataset.rejoin));
@@ -414,20 +400,6 @@ function bindDomainActions() {
   detail.querySelectorAll('[data-handoff]').forEach((button) => {
     button.addEventListener('click', () => openHandoff(button.dataset.handoff));
   });
-}
-
-async function declareMembership(member, ns, active) {
-  if (MOCK) {
-    window.alert('mock 模式不执行写操作。');
-    return;
-  }
-  try {
-    await api('/admin/api/memberships', { method: 'POST', body: { member, namespace: ns, active } });
-    showToast(active ? `已将 ${member} 加入「${ns}」成员` : `已将 ${member} 移出「${ns}」成员`);
-    await refresh();
-  } catch (error) {
-    window.alert(`操作失败：${error.message}`);
-  }
 }
 
 async function doRejoin(ns) {
@@ -1034,53 +1006,64 @@ function renderDeviceCard() {
   // 卡片标签：本机 / 目标锁定
   const headTag = document.querySelector('#device-card .card-head .crt-tag');
   if (headTag) headTag.innerHTML = `<span class="crt-tag-dot"></span>${isSelf ? '本机' : '目标锁定'}`;
+  const selfRow = state.devices.find((d) => d.deviceId === state.overview?.device?.deviceId);
+  const selfFollowSet = new Set((selfRow?.memberships ?? []).map((m) => m.namespace));
   const subs = state.settings?.sync?.subscriptions ?? [];
   const subscribedTo = (ns) => subs.length === 0 || subs.includes(ns);
-  const rows = allNamespaces.length === 0
+  const iFollow = (ns) => subscribedTo(ns) || selfFollowSet.has(ns);
+
+  // 本机：关注开关（图上在册；订阅声明决定传输层）
+  const followRows = allNamespaces.length === 0
     ? '<li class="muted">暂无已知分区</li>'
     : allNamespaces.map((ns) => {
-      if (isSelf) {
-        // 本机：关注 = 图上在册（namespace_membership）；订阅声明（config）决定传输层
-        const following = Boolean((device.memberships ?? []).find((m) => m.namespace === ns));
-        const declared = subscribedTo(ns);
-        const hint = following
-          ? (declared ? '关注中' : '在册 · 订阅声明未含（重启后收发）')
-          : (declared ? '订阅声明含 · 未在册' : '未关注');
-        return `<li>
-          <span><span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
-            <span class="muted" style="margin-left:6px">${hint}</span></span>
-          <label class="toggle" title="关注 = 接收该域对端新记忆，并把本机该域新记忆同步到其他端（订阅即数据义务）">
-            <input type="checkbox" data-follow="${escapeHtml(ns)}" aria-label="关注数据域 ${escapeHtml(ns)}（当前${following ? '关注中' : '未关注'}）" ${following ? 'checked' : ''} ${writes ? '' : 'disabled'}>
-            <span class="slider"></span>
-          </label>
-        </li>`;
-      }
-      const mineOn = device.grantedByMe.includes(ns);
-      const theirsOn = device.grantedToMe.includes(ns);
+      const following = Boolean((device.memberships ?? []).find((m) => m.namespace === ns));
+      const declared = subscribedTo(ns);
+      const hint = following
+        ? (declared ? '关注中' : '在册 · 订阅声明未含（重启后收发）')
+        : (declared ? '订阅声明含 · 未在册' : '未关注');
       return `<li>
         <span><span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
-          ${theirsOn && !mineOn ? '<span class="muted" style="margin-left:6px">它授权我</span>' : ''}</span>
-        <label class="toggle" title="${mineOn ? '关闭：撤销我对该域的授权' : '打开：签发新授权'}">
-          <input type="checkbox" data-ns="${escapeHtml(ns)}" aria-label="共享域 ${escapeHtml(ns)}（当前${mineOn ? '已授权' : '未授权'}）" ${mineOn ? 'checked' : ''} ${peerWrites ? '' : 'disabled'}>
+          <span class="muted" style="margin-left:6px">${hint}</span></span>
+        <label class="toggle" title="关注 = 接收该域对端新记忆，并把本机该域新记忆同步到其他端（订阅即数据义务）">
+          <input type="checkbox" data-follow="${escapeHtml(ns)}" aria-label="关注数据域 ${escapeHtml(ns)}（当前${following ? '关注中' : '未关注'}）" ${following ? 'checked' : ''} ${writes ? '' : 'disabled'}>
           <span class="slider"></span>
         </label>
       </li>`;
     }).join('');
 
-  const membershipNs = isSelf ? [] : (state.namespaces ?? []).filter((n) => n.membershipEnabled);
-  const membershipRows = membershipNs.map((n) => {
-    const mine = (device.memberships ?? []).find((m) => m.namespace === n.namespace) ?? null;
-    const on = Boolean(mine);
-    const hint = !mine ? '未在册' : mine.effective ? '在册 · 已生效' : '在册 · 未生效（缺授权）';
-    return `<li>
-      <span><span class="ns-chip" style="background:${namespaceColor(n.namespace)}">${escapeHtml(n.namespace)}</span>
-        <span class="muted" style="margin-left:6px">${hint}</span></span>
-      <label class="toggle" title="${on ? '移出该分区成员（不清理数据）' : '加入该分区成员（仍需授权才生效）'}">
-        <input type="checkbox" data-membership="${escapeHtml(n.namespace)}" aria-label="成员资格 ${escapeHtml(n.namespace)}（当前${on ? '在册' : '未在册'}）" ${on ? 'checked' : ''} ${peerWrites ? '' : 'disabled'}>
-        <span class="slider"></span>
-      </label>
-    </li>`;
-  }).join('');
+  // 对端：它关注的域（对端从自身出发声明的图上在册，只读）
+  const peerFollowRows = (device.memberships ?? []).length
+    ? device.memberships.map((m) => `<li>
+        <span><span class="ns-chip" style="background:${namespaceColor(m.namespace)}">${escapeHtml(m.namespace)}</span>
+          <span class="muted" style="margin-left:6px">${m.effective ? '在册 · 生效' : '在册 · 待你批准准入'}</span></span>
+      </li>`).join('')
+    : '<li class="muted">对端尚未声明关注任何域</li>';
+
+  // 对端：互通状态 = 你关注 ∩ 它关注 ∩ 它已获授权（默认拒绝的准入）
+  const authorizedSet = new Set(device.authorizedFor ?? []);
+  const peerFollowSet = new Set((device.memberships ?? []).map((m) => m.namespace));
+  const domains = [...new Set([...allNamespaces, ...peerFollowSet, ...authorizedSet])].sort();
+  const interopRows = domains.length === 0
+    ? '<li class="muted">暂无已知分区</li>'
+    : domains.map((ns) => {
+      const peerFollows = peerFollowSet.has(ns);
+      const authorized = authorizedSet.has(ns);
+      const mutual = peerFollows && authorized && iFollow(ns);
+      const state = mutual ? '✓ 可互通'
+        : peerFollows && !authorized ? '待你批准'
+          : !peerFollows && authorized ? '已授权 · 待对端关注'
+            : '未互通';
+      const action = peerFollows && !authorized
+        ? `<button class="btn btn-small btn-crt" data-approve="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="批准对端准入：签发授权（已同步内容不回撤）">批准</button>`
+        : authorized
+          ? `<button class="btn btn-small btn-crt btn-crt-danger" data-revoke-ns="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="撤回该域的授权">撤回</button>`
+          : '';
+      return `<li>
+        <span><span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
+          <span class="muted" style="margin-left:6px">${state}</span></span>
+        ${action}
+      </li>`;
+    }).join('');
 
   const actions = isSelf ? '' : `
     <div class="card-actions">
@@ -1097,29 +1080,27 @@ function renderDeviceCard() {
       <dt>deviceId</dt><dd>${escapeHtml(device.deviceId)}</dd>
       <dt>状态</dt><dd>${escapeHtml(statusChips.join(' · '))}</dd>
     </dl>
-    <h3>${isSelf ? '我关注的域' : '我授权的域'}${isSelf
-      ? ' <span class="muted" style="text-transform:none;letter-spacing:0">（M 记忆域）</span>'
-      : ' <span class="muted" style="text-transform:none;letter-spacing:0">（M 记忆域：授予对端读取本机记忆）</span>'}</h3>
-    ${isSelf ? '<p class="muted" style="font-size:11px;margin:0 0 6px">订阅即数据义务：关注后①有权从其他设备接收该域变更；②本机在该域产生新记忆时，会同步给在册成员 / 已授权且关注的对端。关注写入图上在册（立即生效）；订阅声明未含该域时，保存配置并重启后传输层才收发。</p>' : ''}
-    <ul class="chip-list">${rows}</ul>
-    ${isSelf ? '' : `<h3>成员资格（准入闸门：仅在册者收得到）</h3>
-    ${membershipNs.length > 0
-      ? `<ul class="chip-list">${membershipRows}</ul>`
-      : '<p class="muted">当前没有启用成员制的分区（仅授权生效）。</p>'}`}
+    ${isSelf ? `
+    <h3>我关注的域 <span class="muted" style="text-transform:none;letter-spacing:0">（M 记忆域）</span></h3>
+    <p class="muted" style="font-size:11px;margin:0 0 6px">订阅即数据义务：关注后①有权从其他设备接收该域变更；②本机在该域产生新记忆时，会同步给在册成员 / 已授权且关注的对端。关注写入图上在册（立即生效）；订阅声明未含该域时，保存配置并重启后传输层才收发。</p>
+    <ul class="chip-list">${followRows}</ul>
+    ` : `
+    <h3>它关注的域 <span class="muted" style="text-transform:none;letter-spacing:0">（对端自声明；权利与义务跟你对等）</span></h3>
+    <ul class="chip-list">${peerFollowRows}</ul>
+    <h3>互通状态 <span class="muted" style="text-transform:none;letter-spacing:0">（你关注 ∩ 它关注 ∩ 它已获授权）</span></h3>
+    <ul class="chip-list">${interopRows}</ul>
+    `}
     ${actions}
   `;
 
   body.querySelectorAll('[data-action]').forEach((button) => {
     button.addEventListener('click', () => handleDeviceAction(button.dataset.action, device));
   });
-  body.querySelectorAll('input[data-ns]').forEach((input) => {
-    input.addEventListener('change', () => handleDomainToggle(device, input.dataset.ns, input.checked, input));
+  body.querySelectorAll('[data-approve]').forEach((button) => {
+    button.addEventListener('click', () => handleApprove(device, button.dataset.approve, button));
   });
-  body.querySelectorAll('input[data-membership]').forEach((input) => {
-    input.addEventListener('change', () => handleMembershipToggle(device, input.dataset.membership, input.checked, input));
-  });
-  body.querySelectorAll('input[data-follow]').forEach((input) => {
-    input.addEventListener('change', () => handleFollowToggle(device, input.dataset.follow, input.checked, input));
+  body.querySelectorAll('[data-revoke-ns]').forEach((button) => {
+    button.addEventListener('click', () => handleRevokeNamespace(device, button.dataset.revokeNs, button));
   });
 }
 
@@ -1162,24 +1143,51 @@ async function handleFollowToggle(device, ns, on, input) {
   }
 }
 
-async function handleMembershipToggle(device, ns, on, input) {
-  input.disabled = true;
+/** 批准对端准入：签发授权（默认拒绝下的准入动作，对应 fleet approve） */
+async function handleApprove(device, ns, button) {
+  if (MOCK) {
+    window.alert('mock 模式不执行写操作。');
+    return;
+  }
+  button.disabled = true;
   try {
-    if (MOCK) {
-      window.alert('mock 模式不执行写操作。');
-      input.checked = !on;
-      return;
-    }
-    await api('/admin/api/memberships', { method: 'POST', body: { member: device.deviceId, namespace: ns, active: on } });
-    showToast(on ? `已将 ${device.deviceId} 加入「${ns}」成员` : `已将 ${device.deviceId} 移出「${ns}」成员`);
+    await api('/admin/api/grants', { method: 'POST', body: { subject: device.deviceId, namespaces: [ns] } });
+    showToast(`已批准 ${device.deviceId} 在「${ns}」的准入（签发授权）`);
     await refresh();
   } catch (error) {
     window.alert(`操作失败：${error.message}`);
-    input.checked = !on;
-  } finally {
-    input.disabled = false;
+    button.disabled = false;
   }
 }
+
+/** 撤回某域授权（已同步内容不回撤） */
+async function handleRevokeNamespace(device, ns, button) {
+  if (MOCK) {
+    window.alert('mock 模式不执行写操作。');
+    return;
+  }
+  const ok = await confirmModal({
+    title: `撤回授权 ${ns}`,
+    body: `${device.deviceId} 不会再收到关于「${ns}」的新记忆；已同步内容不会撤回；可用重新批准恢复。`,
+    confirmLabel: '撤回授权',
+  });
+  if (!ok) return;
+  button.disabled = true;
+  try {
+    const grantIds = grantsCovering(device.deviceId, ns);
+    for (const grantId of grantIds) {
+      await api(`/admin/api/grants/${encodeURIComponent(grantId)}/revoke`, { method: 'POST', body: {} });
+    }
+    showToast(grantIds.length > 0 ? `已撤回「${ns}」的授权` : `「${ns}」没有可撤回的授权`);
+    await refresh();
+  } catch (error) {
+    window.alert(`操作失败：${error.message}`);
+    button.disabled = false;
+  }
+}
+
+
+
 
 // ---------- 交互 ----------
 
@@ -1464,42 +1472,7 @@ function grantsCovering(deviceId, ns) {
     .map((event) => event.grantId);
 }
 
-async function handleDomainToggle(device, ns, on, input) {
-  input.disabled = true;
-  try {
-    if (MOCK) {
-      window.alert('mock 模式不执行写操作。');
-      input.checked = !on;
-      return;
-    }
-    if (on) {
-      await api('/admin/api/grants', { method: 'POST', body: { subject: device.deviceId, namespaces: [ns] } });
-      showToast(`已授权「${ns}」给 ${device.deviceId}`);
-      await refresh();
-    } else {
-      const ok = await confirmModal({
-        title: `撤销域 ${ns}`,
-        body: `${device.deviceId} 不会再收到关于「${ns}」的新记忆；已同步内容不会撤回；可用新授权恢复。`,
-        confirmLabel: '撤销授权',
-      });
-      if (!ok) {
-        input.checked = true;
-        return;
-      }
-      const grantIds = grantsCovering(device.deviceId, ns);
-      for (const grantId of grantIds) {
-        await api(`/admin/api/grants/${encodeURIComponent(grantId)}/revoke`, { method: 'POST', body: {} });
-      }
-      showToast(grantIds.length > 0 ? `已撤销「${ns}」` : `「${ns}」没有可撤销的授权`);
-      await refresh();
-    }
-  } catch (error) {
-    window.alert(`操作失败：${error.message}`);
-    input.checked = !on;
-  } finally {
-    input.disabled = false;
-  }
-}
+
 
 async function handleDeviceAction(action, device) {
   if (action === 'sync') {

@@ -394,6 +394,13 @@ export async function buildDevices({ app, config }) {
     } catch {
       pendingEventCount = null;
     }
+    // 该设备在本机视图下的生效授权（含自声明/他人签发；信任链过滤后）
+    let authorizedFor = [];
+    try {
+      authorizedFor = [...(await app.getEffectiveNamespaces(deviceId))];
+    } catch {
+      authorizedFor = [];
+    }
     // 成员资格（仅启用成员制的分区；effective = 在册 ∩ 生效授权）
     const memberships = [];
     for (const [ns, info] of membershipByNs) {
@@ -409,6 +416,7 @@ export async function buildDevices({ app, config }) {
       ...(pendingEventCount !== null ? { pendingEventCount } : {}),
       grantedByMe: unique(grantedByMe),
       grantedToMe,
+      authorizedFor,
       memberships,
       declaredIssuer: issuerSet.has(deviceId),
       revoked: policy.revokedSet.has(deviceId),

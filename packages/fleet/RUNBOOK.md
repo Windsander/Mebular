@@ -78,6 +78,42 @@ node scripts/fleet-remote-peer.mjs --role worker \
 - 或使用 core 的 circuit relay（`network.libp2p.relayServer` / `relayServers`）；relay 默认限额、需显式 `--unlimited`。**部署/加固/降级见 [`RELAY-OPS.md`](./RELAY-OPS.md)**（transport-only、可自托管/替换；`verify:wan:l2` 与 docker NAT 仿真）。
 - 广域网自证（non-evidence）命令见 README；真实跨公网证据已排入**最后阶段的真机/公网验收**（本机 `verify:wan:l2` 与 `verify:wan:l2:docker` 只做仿真）。
 
+## 3.5 广域网同步命令（自证 / 非证据）
+
+`scripts/wan-sync.mjs` 把「两主机增量同步 + 冲突收敛」脚本化，接 circuit relay 与手动 multiaddr 两条寻址路径。
+
+```bash
+# 本地编排自测（共享身份 + 两阶段 + relay 密文；non-evidence，退出码 0）
+npm run verify:wan:cross:selftest
+# 隔离自测：两个独立进程 + 各自独立存储 + 无共享路径（non-evidence）
+npm run verify:wan:cross:selftest:isolated
+# 本地回归（loopback，非证据）
+npm run verify:wan            # 手动 multiaddr 直连
+npm run verify:wan:relay      # 内嵌 circuit relay
+# relay-only / NAT 仿真（CI 同款）
+npm run verify:wan:l2
+npm run verify:wan:l2:docker
+
+# 跨机两阶段（异网段，无需共享文件系统）：先分发用户主密钥，再 A=peer / B=cross
+node scripts/wan-sync.mjs user-keygen --out key.json
+node scripts/wan-sync.mjs relay --port 4000 --unlimited            # 可选，异网段需要
+node scripts/wan-sync.mjs peer  --role a --user-master-key-file key.json \
+  --bind /ip4/0.0.0.0/tcp/4001 --relay <relay> \
+  --authorize device-B                             # 显式授权对端；否则默认拒绝，什么都不发
+node scripts/wan-sync.mjs cross --device-id device-B --user-master-key-file key.json \
+  --peer <A-stable-multiaddr> --peer-id <A-deviceId> --relay <relay> \
+  --authorize device-A --out B-evidence.json       # cross 固定自身 deviceId，A 才能授权它
+# 判定：cross 退出码 0 且 B-evidence.json 的 stateMatches=true、differentPublicNetwork=true、identityShared=true
+```
+
+- **默认拒绝是硬边界**：`sync.peerNamespacePolicy` 未列出的对端拿不到任何分区，跨机脚本必须显式 `--authorize <对端 deviceId>`；`cross` 用 `--device-id` 固定自身设备名，A 侧才能预先授权。
+- 用户主密钥：`user-keygen` 生成，A/B 用同一把（否则设备证书互验失败）；也可用 `MEBULAR_USER_MASTER_KEY`（内联 JSON）。
+- 协调无需共享文件：B 用 `--peer/--peer-id` 一次给定 A 的稳定地址，按图上阶段状态重试连接完成三阶段。
+- 前置预检：`cross` 启动前检查 `--peer/--peer-id/--relay` 是否齐全且 **TCP 可达**；缺失/不可达立即报错（超时可用 `MEBULAR_WAN_PREFLIGHT_TIMEOUT_MS` 调整，默认 3000ms）。
+- 出口判据：`MEBULAR_WAN_IP_ECHO`（缺省 `https://api.ipify.org?format=json`）取公网出口 IP；任一私网/回环 → false，取不到 → 未知（绝不误判 true）。
+- relay 默认**限额**；需显式 `--unlimited` 才允许任意协议过 circuit；`relay --capture <path>` 可捕获线上字节供「只见密文」取证。
+- 诚实边界：上述本机命令都是 **non-evidence**；真实跨公网验收已排入最后阶段（本机 `verify:wan:l2*` 只做仿真）。
+
 ## 4. 一键验收脚本（CI 同款）
 
 ```bash

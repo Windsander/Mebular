@@ -1,0 +1,99 @@
+<div align="center">
+
+![Mebular](assets/banner.svg)
+
+**面向 Agent 的分布式、可验证记忆网络。**
+
+Mebular 把记忆存成一张带签名事件的知识图谱：每条事实都记得自己什么时候有效、由谁写入。
+设备之间用向量时钟做增量同步，离线也能用，重连后自动收敛，改过什么都能查。
+
+[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node.js >=20](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![TypeScript strict ESM](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+
+[官网](https://mebular.cyberfederal.io) · [为什么](#为什么) · [是什么](#是什么) · [怎么用](#怎么用) · [带来什么](#带来什么) · [文档](#链接与文档) · [English](README.md)
+
+</div>
+
+---
+
+## 为什么
+
+Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，换台设备就断了，被谁改过也说不清，离线直接罢工。
+
+| 问题 | Mebular 的做法 |
+|---|---|
+| 扁平队列，没有实体与关系 | 图式记忆：实体 / 事实 / 情节 / 技能 / 元数据五类节点，事实带有效期 |
+| 写入不可验证 | 每次写入是一条 Ed25519 签名、内容寻址的事件——可审计 |
+| 同步依赖中心服务 | 向量时钟增量同步 + 确定性冲突裁决，离线可用 |
+| 生态各自为政 | 版本化交换格式 + 适配器（Obsidian、日志型端、json-memo…） |
+
+## 是什么
+
+- **一机 = 一节点 = 一守护。** `mebular serve` 是身份/网络/信任的唯一持有者；fleet 与 Agent 都是本机客户端，共用守护的身份与存储。
+- **域（namespace）= 记忆数据通道。** 参与即**数据义务**（收 + 及时同步本地新记忆）；不存在只读参与，域内也不含派发语义。
+- **任务 = 树。** 任务是一棵 DAG：root 是派发者，子任务由执行者派生（`causedBy`/`chain`，禁环）。唯一远程面就是记忆通道——不提供通用远程查询/调用。
+- **信任 = 链到用户主密钥的证书链。** 任意在册设备都可为新设备签发委派证书（链长有界）；短时效、一次性的加入令牌让新设备**无需复制主密钥**即可入网；吊销会级联到委派证书。
+
+![Mebular 架构图](assets/architecture-cn.svg)
+
+## 怎么用
+
+### Agent 用户
+
+把支持 MCP 的 Agent（Claude / Cursor / OpenCode / DeepSeek Harness）指向守护，用记忆工具
+（`memory_write` / `memory_query` / `memory_search` / `memory_status` …）。每个 MCP 工具都有**逐字同名**的
+`mebular` 子命令（如 `mebular memory_write`），脚本与 Agent 共用同一表面。
+
+```bash
+npm install && npm run build
+node packages/skill/scripts/install.mjs        # 安装 Skill（可选）
+mebular mcp                                    # 或以 HTTP 常驻：mebular serve
+```
+
+### 设备主运维
+
+每台机器一条命令，首台再批准一次：
+
+```bash
+fleet quickstart --daemon --dir ~/.mebular --device device-A   # 守护 home + fleet + 令牌（+ mebular-serve）
+fleet invite --dir ~/.mebular                                  # 短时效加入令牌
+# 新机器（委派身份，不复制主密钥）：
+fleet join --token <token> --daemon --dir ~/.mebular --device device-B
+fleet approve --dir ~/.mebular --device device-B               # 在图上授予域
+```
+
+### 开发者
+
+```ts
+import { Mebular, HermesMemoryProvider } from 'mebular';
+const mebular = new Mebular({ storagePath: './store.jsonl', deviceId: 'device-A', network: { enabled: false } });
+await mebular.initialize();
+```
+
+可运行示例见 [`examples/quickstart`](examples/quickstart/index.mjs)。fleet 任务树用 `fleet task_submit` 提交 root，
+`task_children` / `task_summarize` 遍历与汇总。
+
+## 带来什么
+
+- **本地优先、离线可用**：数据留在你的设备上；重连即收敛。
+- **可验证、抗篡改的历史**：签名 + 内容寻址事件，谁改了什么可审计。
+- **带时效的图结构**：关系与时间窗，而不只是扁平存储。
+- **每台机器一个真正的节点**：一个守护持有身份/网络/信任，Agent 与 fleet 共用、按域分隔。
+- **去中心化扩容**：任意在册设备都能邀请；主密钥可保持离线。
+
+## 链接与文档
+
+- **限制与取舍** — [`LIMITATIONS.md`](LIMITATIONS.md)
+- **封板契约**（红线 / 协议语义 / 推迟项） — [`SEALING.md`](SEALING.md)
+- **fleet 运维手册**（双机操作、WAN 命令、验收） — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
+- **Agent 记忆规约** — [`packages/skill/MEMORY_POLICY.md`](packages/skill/MEMORY_POLICY.md)
+- **守护 / MCP** — [`packages/mcp`](packages/mcp) · **Fleet** — [`packages/fleet`](packages/fleet)
+- **贡献与质量门禁** — [`CONTRIBUTING.md`](CONTRIBUTING.md)
+
+<div align="center">
+
+[官网](https://mebular.cyberfederal.io) · [GitHub](https://github.com/Windsander/Mebular) · © 2026 Windsander · MIT License
+
+</div>

@@ -9,7 +9,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import net from 'node:net';
-import { IdentityManager, verifyCertificateChain, hexToBytes } from '@mebular/core';
+import { Mebular, IdentityManager, verifyCertificateChain, hexToBytes } from '@mebular/core';
+import * as fleetJt from '@mebular/fleet';
+import * as mcpJt from '../packages/mcp/src/jointoken.mjs';
 
 const BIN = fileURLToPath(new URL('../packages/mcp/bin/mebular.mjs', import.meta.url));
 const results = [];
@@ -110,6 +112,23 @@ try {
   console.log('== A1/A5 委派身份模式（无主私钥）==');
   const joinPort = await freePort();
   await makeDelegatedHome(homeB, joinPort);
+  // W2 跨包一致性：fleet ↔ daemon 令牌格式双向互验（防线格式漂移）
+  {
+    const masterPub = new Uint8Array(Buffer.from(JSON.parse(readFileSync(join(homeB, 'user-master-key.json'), 'utf-8')).publicKey, 'base64'));
+    const m = new Mebular({ storagePath: join(homeB, 'store.jsonl'), deviceId: 'device-B', encryption: { userMasterKey: masterPub }, network: { enabled: false } });
+    await m.initialize();
+    try {
+      const base = { mebular: m, deviceId: 'device-B', namespace: 'tasks', endpoint: 'http://127.0.0.1:1', now: 1000, ttlMs: 60000 };
+      const tFleet = await fleetJt.buildJoinToken({ ...base, nonce: 'nf' });
+      const fleetInMcp = await mcpJt.verifyJoinToken(tFleet, { now: 2000 });
+      const tMcp = await mcpJt.buildJoinToken({ ...base, nonce: 'nd' });
+      const mcpInFleet = await fleetJt.verifyJoinToken(tMcp, { now: 2000 });
+      const same = mcpJt.canonicalJoinTokenData(tFleet) === fleetJt.canonicalJoinTokenData(tFleet);
+      check('令牌跨包互验（fleet↔daemon）+ canonical 一致', fleetInMcp.ok === true && mcpInFleet.ok === true && same, { fleetInMcp, mcpInFleet, same });
+    } finally {
+      await m.shutdown();
+    }
+  }
   const envB = { ...process.env, MEBULAR_HOME: homeB };
   const st = await runCli(envB, ['status']);
   const stJson = firstJson(st.out) ?? {};

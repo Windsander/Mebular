@@ -13,7 +13,7 @@ import https from 'node:https';
 import { dirname, join } from 'node:path';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { TOOL_SCOPES } from './tools.mjs';
-import { buildJoinToken } from '@mebular/fleet';
+import { buildJoinToken } from './jointoken.mjs';
 
 const SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
 const SCOPE_RANK = { 'memory.read': 0, 'memory.write': 1, 'memory.admin': 2 };

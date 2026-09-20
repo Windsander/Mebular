@@ -7,7 +7,7 @@ import { MemoryService } from '@mebular/core';
 import { createMebular } from './config.mjs';
 import { registerTools } from './tools.mjs';
 import { startHttpServer, acquireLock } from './serve.mjs';
-import { startJoinService } from '@mebular/fleet';
+import { createJoinServer } from './jointoken.mjs';
 
 const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
 1. 先查后写：写入前先用 memory_query/memory_search 查重，避免重复。
@@ -86,7 +86,7 @@ export async function startServeServer(options = {}) {
     });
     // W2 A4：join 服务由守护托管（令牌 → 委派证书）。fleet 不再托管生产 join。
     if (joinConf?.enabled) {
-      joinServer = await startJoinService({
+      joinServer = await createJoinServer({
         mebular: app,
         deviceId,
         storagePath,

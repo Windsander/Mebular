@@ -286,6 +286,10 @@ async function main() {
     }
     case 'serve': {
       const { startServeServer } = await import('../src/server.mjs');
+      const { loadConfigFile } = await import('../src/config.mjs');
+      const home = homeDir();
+      const fileConfig = await loadConfigFile(home).catch(() => ({}));
+      const httpConf = fileConfig.mcp?.http ?? {};
       // D4：常驻进程写 service.heartbeat（role=mebular-serve），供 `service status`/doctor 判定。
       try {
         const { startHeartbeat, resolveBuildSha } = await import('@mebular/service');
@@ -295,12 +299,12 @@ async function main() {
       }
       try {
         const result = await startServeServer({
-          host: typeof flags.host === 'string' ? flags.host : undefined,
-          port: flags.port !== undefined ? Number(flags.port) : undefined,
-          auth: typeof flags.auth === 'string' ? flags.auth : undefined,
+          host: typeof flags.host === 'string' ? flags.host : httpConf.host,
+          port: flags.port !== undefined ? Number(flags.port) : httpConf.port,
+          auth: typeof flags.auth === 'string' ? flags.auth : httpConf.auth,
           tlsKey: typeof flags['tls-key'] === 'string' ? flags['tls-key'] : undefined,
           tlsCert: typeof flags['tls-cert'] === 'string' ? flags['tls-cert'] : undefined,
-          tokensFile: typeof flags['tokens-file'] === 'string' ? flags['tokens-file'] : undefined,
+          tokensFile: typeof flags['tokens-file'] === 'string' ? flags['tokens-file'] : httpConf.tokensFile,
         });
         console.log(`SERVE_READY ${JSON.stringify({ host: result.host, port: result.port, auth: result.auth, issuer: result.issuer })}`);
       } catch (error) {

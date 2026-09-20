@@ -5,7 +5,7 @@
 // **显式状态事件**（本地最少形态；M3 换真实传输）。输出 JSON 事实供脚本断言。
 
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Mebular } from '@mebular/core';
 import {
@@ -58,6 +58,7 @@ import {
   type ServiceInstaller,
 } from './quickstart.js';
 import { buildJoinToken, startJoinService, type JoinService } from './jointoken.js';
+import { createRequire } from 'node:module';
 import { joinWithToken } from './join.js';
 import { toolByCli, toolCliTable } from './surface.js';
 import { runFleetMcp } from './mcp.js';
@@ -626,6 +627,28 @@ async function runFleetWorker(args: Args): Promise<number> {
   return 0;
 }
 
+/** W2 B2：守护服务安装器（`mebular-serve`，同一 home）。 */
+function daemonInstaller(): ServiceInstaller {
+  return async (dir: string) => {
+    try {
+      const require = createRequire(import.meta.url);
+      const mcpPkg = require.resolve('@mebular/mcp/package.json');
+      const mcpBin = join(dirname(mcpPkg), 'bin', 'mebular.mjs');
+      const descriptor: ServiceDescriptor = {
+        kind: 'mebular-serve',
+        args: [mcpBin, 'serve'],
+        heartbeatDir: dir,
+        workingDir: dir,
+        env: { MEBULAR_HOME: dir },
+      };
+      const result = installService(descriptor, { sha: buildSha() });
+      return result.ok ? { installed: true } : { installed: false, note: 'install 返回非 ok' };
+    } catch (error) {
+      return { installed: false, note: (error as Error).message };
+    }
+  };
+}
+
 /** `fleet quickstart`：A 一条命令上车（onboard + 声明签发者/成员/自授权 + 加入码 + 服务 + doctor）。 */
 async function runQuickstart(args: Args): Promise<number> {
   const dir = fleetDirFrom(args);
@@ -642,6 +665,9 @@ async function runQuickstart(args: Args): Promise<number> {
     ...(typeof args['join-host'] === 'string' ? { joinHost: args['join-host'] } : {}),
     ...(agents !== undefined ? { agents } : {}),
     ...(args['auto-approve'] === true ? { autoApprove: true } : {}),
+    ...(args.daemon === true ? { daemon: true } : {}),
+    ...(typeof args['daemon-port'] === 'string' ? { daemonPort: num(args['daemon-port'], 7331) } : {}),
+    ...(args.daemon === true && !noService ? { installDaemon: daemonInstaller() } : {}),
     ...(noService ? {} : { installService: fleetNodeInstaller() }),
   });
   const report = await doctor(dir);
@@ -663,6 +689,7 @@ async function runQuickstart(args: Args): Promise<number> {
     inviteToken: result.inviteToken,
     joinEndpoint: result.joinEndpoint,
     joinPort: result.joinPort,
+    ...(result.daemon !== undefined ? { daemon: result.daemon } : {}),
     warnings: result.warnings,
     doctor: summarizeDoctor(report),
     next: [...result.joinNext, `fleet node --dir ${dir} --run-forever`],

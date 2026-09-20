@@ -246,6 +246,12 @@ export interface QuickstartInput {
   joinHost?: string;
   agents?: FleetAgentConfig[];
   autoApprove?: boolean;
+  /** W2：同时配置**统一守护**（写 <dir>/config.json + fleet daemon 客户端 + 装 mebular-serve） */
+  daemon?: boolean;
+  /** 守护 MCP/app 端口（默认 7331） */
+  daemonPort?: number;
+  /** 守护服务安装回调（mebular-serve） */
+  installDaemon?: ServiceInstaller;
   /** 服务安装回调；缺省 = 不安装（CLI 传真实安装器） */
   installService?: ServiceInstaller;
   /** 跳过端口占用检查（测试用） */
@@ -276,6 +282,78 @@ export interface QuickstartResult {
   inviteToken: string;
   joinEndpoint: string;
   joinPort: number;
+  /** W2：统一守护（`--daemon`）时的端点/服务安装结果 */
+  daemon?: { endpoint: string; installed: boolean; note?: string };
+}
+
+
+/** W2：确保守护 bearer 令牌存在（写入 <dir>/auth/tokens.json，0600）；返回内联 token。 */
+export async function ensureDaemonToken(dir: string): Promise<{ token: string; tokensFile: string }> {
+  const { createHash, randomUUID } = await import('node:crypto');
+  const tokensFile = join(dir, 'auth', 'tokens.json');
+  let record: { tokens: Array<Record<string, unknown>> } = { tokens: [] };
+  if (existsSync(tokensFile)) {
+    try {
+      const parsed = JSON.parse(await readFile(tokensFile, 'utf-8')) as { tokens?: Array<Record<string, unknown>> };
+      if (Array.isArray(parsed.tokens)) record = { tokens: parsed.tokens };
+    } catch {
+      record = { tokens: [] };
+    }
+  }
+  const token = `meb_${randomUUID().replace(/-/g, '')}${randomUUID().replace(/-/g, '')}`;
+  record.tokens.push({
+    id: randomUUID(),
+    sha256: createHash('sha256').update(token).digest('hex'),
+    scope: ['memory.read', 'memory.write', 'memory.admin'],
+    label: 'fleet-client',
+    createdAt: new Date().toISOString(),
+    revoked: false,
+  });
+  await mkdir(dirname(tokensFile), { recursive: true });
+  await writeFile(tokensFile, JSON.stringify(record, null, 2), { mode: 0o600 });
+  if (permissionsApplicable()) await chmod(tokensFile, 0o600);
+  return { token, tokensFile };
+}
+
+/**
+ * W2 B2：把统一守护配置写进同一 home（`<dir>/config.json`），并让 fleet 走 daemon 客户端：
+ * fleet.config.json 增 `store:'daemon'` + `daemon:{endpoint,token}`。**不动** embedded 配置字段。
+ */
+async function configureDaemonHome(
+  dir: string,
+  config: FleetConfig,
+  namespace: string,
+  joinPort: number,
+  daemonPort: number,
+  delegated: { userMasterPublicKeyFile: string } | null,
+): Promise<{ token: string; endpoint: string }> {
+  const { token, tokensFile } = await ensureDaemonToken(dir);
+  const daemonConfig = {
+    storagePath: config.storagePath,
+    deviceId: config.device,
+    identity: { mode: delegated ? 'delegated' : 'root' },
+    encryption: delegated
+      ? { level: 'none', userMasterPublicKeyFile: delegated.userMasterPublicKeyFile }
+      : { level: 'none', keyFile: config.masterKeyFile },
+    network: { enabled: true, libp2p: { listen: [config.listen] } },
+    sync: {
+      autoSync: true,
+      pushOnWrite: true,
+      namespaces: [namespace],
+      peerNamespacePolicy: config.peerNamespacePolicy ?? {},
+      policyIssuers: config.policyIssuers,
+      antiEntropy: { enabled: true, intervalMs: 600000, jitterRatio: 0.2 },
+    },
+    joinService: { enabled: true, bind: '0.0.0.0', port: joinPort },
+    mcp: { http: { host: '127.0.0.1', port: daemonPort, auth: 'bearer', tokensFile } },
+  };
+  await writeFile(join(dir, 'config.json'), JSON.stringify(daemonConfig, null, 2), { mode: 0o600 });
+  if (permissionsApplicable()) await chmod(join(dir, 'config.json'), 0o600);
+  const endpoint = `http://127.0.0.1:${daemonPort}`;
+  const fleetPath = fleetConfigPath(dir);
+  const current = await loadFleetConfig(fleetPath);
+  await saveFleetConfig(fleetPath, { ...current, store: 'daemon', daemon: { endpoint, token } });
+  return { token, endpoint };
 }
 
 const DEFAULT_LISTEN = '/ip4/0.0.0.0/tcp/4001';
@@ -374,6 +452,21 @@ export async function quickstart(input: QuickstartInput): Promise<QuickstartResu
     serviceNote = outcome.note;
   }
 
+  // W2 B2：统一守护（同一 home）：写 config.json + fleet daemon 客户端 + （可选）mebular-serve 服务 + MCP 配置
+  const daemonPort = input.daemonPort ?? 7331;
+  let daemonInfo: { endpoint: string; installed: boolean; note?: string } | null = null;
+  if (input.daemon === true) {
+    const { endpoint } = await configureDaemonHome(input.dir, config, namespace, joinPort, daemonPort, null);
+    let installed = false;
+    let dialNote: string | undefined;
+    if (input.installDaemon !== undefined) {
+      const outcome = await input.installDaemon(input.dir);
+      installed = outcome.installed;
+      dialNote = outcome.note;
+    }
+    daemonInfo = { endpoint, installed, ...(dialNote !== undefined ? { note: dialNote } : {}) };
+  }
+
   return {
     device: config.device,
     dir: config.dir,
@@ -396,6 +489,7 @@ export async function quickstart(input: QuickstartInput): Promise<QuickstartResu
     inviteToken,
     joinEndpoint,
     joinPort,
+    ...(daemonInfo !== null ? { daemon: daemonInfo } : {}),
   };
 }
 

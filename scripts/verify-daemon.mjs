@@ -198,6 +198,32 @@ try {
   const cJson = firstJson(cStatus.out) ?? {};
   check('委派设备（C）能跑守护且 identityMode=delegated', cStatus.code === 0 && cJson.identityMode === 'delegated', { code: cStatus.code, identityMode: cJson.identityMode });
 
+  console.log('== B2 上车统一：quickstart --daemon 写守护 home + fleet 客户端 ==');
+  const homeD = join(root, 'D');
+  const daemonPort = await freePort();
+  const joinPort2 = await freePort();
+  const fleetCliQ = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
+  const qs = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [fleetCliQ, 'quickstart', '--dir', homeD, '--device', 'device-D', '--listen', '/ip4/127.0.0.1/tcp/0', '--no-service', '--daemon', '--daemon-port', String(daemonPort), '--join-port', String(joinPort2), '--agent', 'echo'], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (err += d));
+    const timer = setTimeout(() => child.kill('SIGKILL'), 60000);
+    child.on('close', (code) => { clearTimeout(timer); resolve({ code, out, err }); });
+  });
+  const fleetCfg = JSON.parse(readFileSync(join(homeD, 'fleet.config.json'), 'utf-8'));
+  const daemonCfg = JSON.parse(readFileSync(join(homeD, 'config.json'), 'utf-8'));
+  check('quickstart --daemon：fleet 走 daemon 客户端', qs.code === 0 && fleetCfg.store === 'daemon' && fleetCfg.daemon?.endpoint === `http://127.0.0.1:${daemonPort}`, { store: fleetCfg.store, endpoint: fleetCfg.daemon?.endpoint });
+  check('quickstart --daemon：守护 home 配置（root 身份 + joinService + policyIssuers）', daemonCfg.identity?.mode === 'root' && daemonCfg.joinService?.enabled === true && Array.isArray(daemonCfg.sync?.policyIssuers), { identity: daemonCfg.identity, joinService: daemonCfg.joinService });
+  // 用写好的 config.json 默认值启动守护（host/port/auth/tokensFile 来自配置）
+  const dserve = startCli({ ...process.env, MEBULAR_HOME: homeD }, ['serve']);
+  const dready = await waitFor(() => /SERVE_READY/.test(dserve.state.out) || /JOIN_READY/.test(dserve.state.err + dserve.state.out), 15000);
+  const dToken = fleetCfg.daemon.token;
+  const dcall = await fetch(`http://127.0.0.1:${daemonPort}/app/nodes`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${dToken}` }, body: JSON.stringify({ type: 'app_note', namespace: 'tasks', content: { text: 'unified' } }) }).catch(() => ({ status: 0 }));
+  check('写好的守护 home 可 serve（配置默认 port/auth）+ app 调用通', dready && dcall.status === 200, { ready: dready, status: dcall.status });
+  dserve.child.kill('SIGKILL');
+
   console.log('== C3① 单机：守护 + fleet 客户端（daemon 模式）+ 任务往返 ==');
   const fleetCli = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
   const homeFleet = join(root, 'fleet');

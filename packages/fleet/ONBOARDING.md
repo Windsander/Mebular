@@ -402,3 +402,35 @@ fleet doctor --dir ~/.fleet   # PASS 重入状态  reset=true（已声明重置�
 - **配额制闲聊**：`FleetChatter.send` 对 `from.device` 走 `LocalQuota`（`accepted`/`queued`/`rejected`，无全局协调）；落图消息随记忆同步，收件按 `messageId` 幂等。
 - **验收**：`npm run verify:fleet:collab`（真实 libp2p loopback 双端，12/12）；夹具 `packages/fleet/protocol/collab.example.json`；矩阵见 `PROTOCOL-INVARIANTS.md §7`。
 - **限制**：自动化用确定性 fake executor（`EchoExecutor`）；真实执行器（Hermes/OpenChamber）沿用既有适配器，本轮未新增真实 Agent 验收。
+
+## 15. Agent 如何派活（W1：域=数据通道 · 任务=树）
+
+**域（namespace）= 数据通道**（参与即收 + 及时同步本地新记忆，无派发语义）；**任务 = 树**：root 由发起 Agent 创建，子任务由执行者在预算内派生。派发权限三层：**L1 域授权（默认拒绝）→ L2 任务树（创建者即派发者）→ L3 本地执行（device/agent 过滤 + 并发/准入）**。
+
+```bash
+# 0) 建板（= 建域 + 授权 + 邀请成员，免手工 grant/member）
+fleet board-create --dir ~/.fleet --input '{"name":"team","with":["device-B"]}'
+
+# 1) 看我能派给谁（L1 授权 ∩ 对端 Agent 目录）
+fleet task-targets --dir ~/.fleet --namespace team
+
+# 2) 发起 root（带预算与派发策略；agent 由工具填 from，root 有主）
+fleet task-submit --dir ~/.fleet --namespace team --agent board --input \
+  '{"intent":"审查 root","to":{"device":"device-B","agent":"echo"},"budget":{"maxDepth":2,"maxChildren":4,"maxTasks":8},"dispatch":"children-ok"}'
+
+# 3) 跟踪 / 树 / 汇总
+fleet task-status  --dir ~/.fleet --input '{"taskId":"task-…"}'
+fleet task-children --dir ~/.fleet --input '{"taskId":"task-…"}'
+fleet task-summarize --dir ~/.fleet --input '{"taskId":"task-…"}'
+fleet task-subscribe --dir ~/.fleet --watch          # 变化推送（轮询）
+
+# 4) 运维/协作
+fleet task-quota --dir ~/.fleet
+fleet task-negotiate --dir ~/.fleet --input '{"taskId":"task-…","kind":"counter","round":1}'
+fleet chatter-send  --dir ~/.fleet --input '{"topic":"status","text":"…"}'
+fleet chatter-inbox --dir ~/.fleet
+```
+
+- **与 MCP 完全一致**：`fleet mcp`（stdio JSON-RPC）暴露同名工具（`task_submit`…`board_create`），**同一 handler**、同一结构化输出；对照表见 [`DESIGN.md`](./DESIGN.md) §2.5.2。
+- **反滥用**：子任务预算 **≤ 父剩余**（越深越小）；越预算/越链长/`root-only` 派生属**无效事件**（入口拒收 + 权威视图剔除）；worker **公平轮转**（单一发送方份额 ≤50%）、每 Agent 并发默认 2。
+- **目录**：设备在 `agents` 域发布签名目录（`name/kind/capabilities?/concurrency/capacity?`）；`task_targets` = L1 授权 ∩ 目录；`capacity` 仅建议，**不参与授权/一致性**。

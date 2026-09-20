@@ -130,3 +130,24 @@ harness：`tests/fleet/collab-invariants.test.ts`（固定种子，`scenarios=20
 | L4 | relay 不可达降级 | 手动 multiaddr 直连可用（`direct-degraded`） | `verify:wan:l2` ⑤ |
 | L5 | 加固 | 连接数上限 / 帧大小上限 / 对端白名单；不改线格式 | `tests/p2p/ConnectionManager.test.ts` · `Libp2pProvider.test.ts` · `wan-hardening` 白名单 |
 | L5 | doctor 公网监听告警 | `0.0.0.0`/公网监听 → `WARN` + 修复建议（不静默，不致命） | `tests/fleet/grant.test.ts` 监听地址 |
+
+## 9. W1：Agent 任务面 + 反滥用（预算 / 公平准入 / 目录）
+
+> **域（namespace）= 记忆数据通道**（参与 = 数据义务：收 + 及时同步本地新记忆；**无派发语义**、无只读参与）。
+> **任务 = 树/DAG**：root = 派发者；子任务由执行者派生（`trace.causedBy/chain`，禁环）。域只是运输与存储。
+> 派发三层：**L1 传输**（发送方对接收方的域授权，默认拒绝）→ **L2 任务树**（**创建者即派发者**）→ **L3 执行**（本地过滤/执行器/并发/准入）。
+> 夹具先行：[`protocol/task-tree.example.json`](./protocol/task-tree.example.json)（`budget`/`dispatch` 字段）。
+
+| # | 性质 | 期望 | 覆盖测试 |
+|---|---|---|---|
+| ⑨-a | **树预算随树单调递减** | root 声明 `budget {maxDepth≤8,maxChildren≤16,maxTasks≤256}`；子任务预算 **≤ 父剩余**（越深越小）；`child.maxDepth ≤ parent.maxDepth-1`、`child.maxTasks ≤ parent.maxTasks-1`、`child.maxChildren ≤ parent.maxChildren` | `预算递减：子预算超过父剩余 → 拒绝` · fixture `task-tree.example.json` |
+| ⑨-b | **链长越界 = 无效事件** | `chain.length > root.maxDepth`（或显式子预算上界）→ **入口拒收**（不入库）+ reducer 不变式（纯函数，全端一致） | `链长越界：创建被拒（入口 + 不变式）` · `admitCreated：越界事件不入库` |
+| ⑨-c | **root 级 dispatch 策略** | 默认 `children-ok`；root 可声明 `root-only` → 执行者**不得再派**（派生被拒） | `root-only：任何派生被拒` |
+| ⑨-d | **worker 公平准入** | 收件按 `(from.device, 逻辑序)` **轮转**；**每发送方份额 ≤50%**（有其它待处理发送方时）；`(来源设备,目标 Agent)` 准入配额；每 Agent 并发默认 2；**本地记账、无全局账本、无墙钟** | `公平轮转：单一发送方不能占满` · `准入配额/并发：超额排队` |
+| ⑨-e | **确定性摊派** | 等价目标间按 `hash(taskId) mod N` 选择（无偏好/无热点；纯函数） | `确定性摊派：同 taskId 恒定目标` |
+| ⑨-f | **每设备 Agent 目录** | 普通记忆域（默认 `agents`）中每设备一条**签名**记录 `{device,agents[],updatedAt,version}`；`task_targets = 我 L1 授权 ∩ 其目录 (device,agent)`；capacity/load **不参与授权/一致性** | `目录 → targets 推导（授权 ∩ 目录）` |
+| ⑨-g | **工具面 CLI 对等** | 每个 MCP 工具都有等价 `fleet` 子命令（同参数语义/权限/结构化输出） | `工具 ↔ CLI 对照表`（见 DESIGN.md）· `verify:fleet:tasks` |
+
+真实验收：`npm run verify:fleet:tasks`（真实 libp2p loopback 双端：root→预算内派生→汇总；负例：超链长/超预算被拒、热点被公平轮转）。
+
+**准入与回归纪律（同 §6）**：改 `packages/fleet/**` 先改本矩阵 + 配测试；红→绿须 `npm run build` 后跑 `verify:*`。

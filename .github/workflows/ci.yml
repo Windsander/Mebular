@@ -44,6 +44,9 @@ jobs:
       - name: Cleanliness (orphan modules / stale refs / deprecated)
         run: npm run check:cleanliness
 
+      - name: Surface parity (MCP tools ↔ CLI, unified tables, no orphans)
+        run: npm run check:surface-parity
+
       - name: Fleet acceptance (M2 local / M3 remote / M4 agents / Step 1b onboard)
         run: npm run verify:fleet:all
 

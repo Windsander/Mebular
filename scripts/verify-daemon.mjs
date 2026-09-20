@@ -80,7 +80,7 @@ function startCli(env, args) {
 }
 
 /** 造一台**委派身份**（无主私钥）的守护 home。 */
-async function makeDelegatedHome(home, joinPort) {
+async function makeDelegatedHome(home, joinPort, mcpPort) {
   await mkdir(home, { recursive: true });
   const im = new IdentityManager();
   await im.generateUserMasterKey();
@@ -110,7 +110,7 @@ async function makeDelegatedHome(home, joinPort) {
     encryption: { level: 'none', userMasterPublicKeyFile: join(home, 'user-master-key.json') },
     network: { enabled: false },
     sync: { autoSync: false, namespaces: ['tasks'], policyIssuers: ['device-B'] },
-    mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none' } },
+    mcp: { http: { host: '127.0.0.1', port: mcpPort, auth: 'bearer', tokensFile: join(home, 'auth', 'tokens.json') } },
     joinService: { enabled: true, bind: '127.0.0.1', port: joinPort },
   }, null, 2), { mode: 0o600 });
   return { masterPub, storagePath };
@@ -123,7 +123,8 @@ let serve2 = null;
 try {
   console.log('== A1/A5 委派身份模式（无主私钥）==');
   const joinPort = await freePort();
-  await makeDelegatedHome(homeB, joinPort);
+  const mcpPort = await freePort();
+  await makeDelegatedHome(homeB, joinPort, mcpPort);
   // W2 跨包一致性：fleet ↔ daemon 令牌格式双向互验（防线格式漂移）
   {
     const masterPub = new Uint8Array(Buffer.from(JSON.parse(readFileSync(join(homeB, 'user-master-key.json'), 'utf-8')).publicKey, 'base64'));
@@ -176,11 +177,11 @@ try {
   const grant = await runCli(envB, ['token', 'grant', '--scope', 'memory.read,memory.write', '--tokens-file', tokensFile]);
   const token = firstJson(grant.out).token;
   check('token grant 成功', typeof token === 'string' && token.length > 10, {});
-  serve1 = startCli(envB, ['serve', '--host', '127.0.0.1', '--port', '0', '--auth', 'bearer', '--tokens-file', tokensFile]);
+  serve1 = startCli(envB, ['serve']); // 缺省取 config.mcp.http（固定端口/bearer/tokensFile）
   const ready = await waitFor(() => /SERVE_READY/.test(serve1.state.out), 60000, 250);
   const readyLine = serve1.state.out.split('\n').find((l) => l.startsWith('SERVE_READY'));
   const port = readyLine ? JSON.parse(readyLine.slice('SERVE_READY '.length)).port : null;
-  check('serve 就绪（loopback）', ready && typeof port === 'number', { port, err: serve1.state.err.trim().slice(-200) });
+  check('serve 就绪（loopback，配置端口）', ready && port === mcpPort, { port, mcpPort, err: serve1.state.err.trim().slice(-200) });
   if (typeof port !== 'number') throw new Error(`serve 未就绪：out=${serve1.state.out.slice(-200)} err=${serve1.state.err.slice(-300)}`);
   const base = `http://127.0.0.1:${port}`;
   const auth = { 'content-type': 'application/json', authorization: `Bearer ${token}` };
@@ -195,6 +196,12 @@ try {
   check('GET /app/namespaces', ns.status === 200 && nsJson.namespaces.includes('team'), nsJson);
   const noauth = await fetch(`${base}/app/nodes?namespace=team`, {});
   check('无 token → 401（fail-closed 鉴权）', noauth.status === 401, { status: noauth.status });
+
+  // S2：守护持锁时 `mebular memory_*` 作为本机 MCP 客户端（/mcp + bearer，复用 token 体系）
+  const mw = await runCli({ ...envB, MEBULAR_TOKEN: token }, ['memory_write', '--input', '{"items":[{"type":"fact","content":"surface-parity"}]}']);
+  check('mebular memory_write 经守护 /mcp（单写者客户端）', mw.code === 0 && /"stored"/.test(mw.out), { out: mw.out.trim().slice(0, 120) });
+  const mst = await runCli({ ...envB, MEBULAR_TOKEN: token }, ['memory_status']);
+  check('mebular memory_status 经守护 /mcp', mst.code === 0 && mst.out.trim().startsWith('{'), { out: mst.out.trim().slice(0, 80), err: mst.err.trim().slice(-200) });
 
   console.log('== 红→绿②：非回环 fail-closed ==');
   // 用独立 home（root 身份）避免与 serve1 的 store 锁冲突

@@ -367,13 +367,30 @@ export async function startHttpServer({ home, app, service, buildServer, host = 
   const codes = new Map();
   const revoked = await loadRevoked(revokedFile);
 
-  // 单实例 transport（stateful + JSON 响应）
-  const mcpServer = buildServer(service);
-  const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-    enableJsonResponse: true,
-  });
-  await mcpServer.connect(transport);
+  // W3：**多会话** transport（每个 `mcp-session-id` 一条；CLI 每次调用可各自 initialize）。
+  // 无 session 头的请求（如 CLI initialize）新建会话；会话经 `onsessioninitialized` 登记，关闭时回收。
+  const mcpSessions = new Map(); // sessionId → { transport, server }
+  async function transportFor(sessionId) {
+    if (sessionId) return mcpSessions.get(sessionId)?.transport ?? null;
+    const server = buildServer(service);
+    const entry = { transport: null, server };
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      enableJsonResponse: true,
+      onsessioninitialized: (id) => {
+        entry.transport = transport;
+        mcpSessions.set(id, entry);
+      },
+    });
+    transport.onclose = () => {
+      const id = transport.sessionId;
+      if (id) mcpSessions.delete(id);
+      void server.close().catch(() => undefined);
+    };
+    entry.transport = transport;
+    await server.connect(transport);
+    return transport;
+  }
 
   async function authenticate(req, body, requiredOverride) {
     if (auth === 'none') return { ok: true };
@@ -688,6 +705,11 @@ export async function startHttpServer({ home, app, service, buildServer, host = 
           if (check.challenge) res.setHeader('www-authenticate', check.challenge);
           return sendJson(res, check.status, { jsonrpc: '2.0', error: { code: -32001, message: check.message }, id: null });
         }
+        const sessionId = req.headers['mcp-session-id'];
+        const transport = await transportFor(typeof sessionId === 'string' ? sessionId : undefined);
+        if (!transport) {
+          return sendJson(res, 404, { jsonrpc: '2.0', error: { code: -32001, message: 'unknown session' }, id: null });
+        }
         const webRequest = toWebRequest(req, body, origin);
         const response = await transport.handleRequest(webRequest);
         return writeWebResponse(res, response);
@@ -715,7 +737,7 @@ export async function startHttpServer({ home, app, service, buildServer, host = 
   metadata = metadataFor(issuer, { registrationEnabled });
   const close = async () => {
     await new Promise((resolve) => server.close(() => resolve()));
-    await mcpServer.close().catch(() => undefined);
+    for (const entry of mcpSessions.values()) await entry.server.close().catch(() => undefined);
   };
   return { server, host, port: actualPort, auth, issuer, close };
 }

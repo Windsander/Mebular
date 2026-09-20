@@ -1,7 +1,7 @@
 // Fleet 节点（M2）：任务板 + 发起端。写入任务（created 事件）→ 投递 → 收集结果事件 → 观察收敛。
 
 import { randomUUID } from 'node:crypto';
-import type { FleetEndpoint, FleetTrace } from '../protocol/envelope.js';
+import type { FleetEndpoint, FleetTrace, TaskBudget, TaskDispatch } from '../protocol/envelope.js';
 import type { TaskEvent } from '../protocol/events.js';
 import { reduceTaskEvents, type TaskState } from '../model.js';
 import type { LocalQuota, QuotaDecision } from '../quota.js';
@@ -10,6 +10,7 @@ import type { MebularMessageStore } from '../store/message-store.js';
 import type { TaskTransport } from '../transport/types.js';
 import { dagCompletion, deriveEdges, type DagCompletion } from '../collab/dag.js';
 import { NegotiationTracker, validateNegotiationMessage, type NegotiationMessage } from '../collab/negotiation.js';
+import { admitCreated, admissibleTaskIds } from '../collab/tree.js';
 
 export interface FleetNodeOptions {
   device: string;
@@ -39,6 +40,10 @@ export interface SubmitRequest {
   trace?: FleetTrace;
   /** 重复投递该 created 事件（同 eventId、不同 msgId）以验证幂等（默认 1） */
   deliveries?: number;
+  /** **W1**：root 子树预算（缺省=默认上界）；子任务应 ≤ 父剩余（入口不变式判定） */
+  budget?: TaskBudget;
+  /** **W1**：root 派发策略（缺省 `children-ok`） */
+  dispatch?: TaskDispatch;
 }
 
 export interface SubmitResult {
@@ -153,6 +158,8 @@ export class FleetNode {
     };
     if (request.payloadRef !== undefined) event.payloadRef = request.payloadRef;
     if (request.expiresAt !== undefined) event.expiresAt = request.expiresAt;
+    if (request.budget !== undefined) event.budget = request.budget;
+    if (request.dispatch !== undefined) event.dispatch = request.dispatch;
     await this.emit(event, request.to, request.deliveries ?? 1);
     return { taskId, decision };
   }
@@ -161,10 +168,26 @@ export class FleetNode {
   async pollOnce(): Promise<number> {
     const messages = await this.transport.drain(this.endpoint);
     let applied = 0;
+    let states = await this.states();
     for (const message of messages) {
-      if (await this.store.append(message.event)) applied += 1;
+      const event = message.event;
+      // W1 入口拒收：越预算/越链长/root-only 的 created 不入库（纯函数、全端一致）
+      if (event.type === 'created') {
+        const verdict = admitCreated(event, states, reduceTaskEvents);
+        if (!verdict.ok) continue;
+      }
+      if (await this.store.append(event)) {
+        applied += 1;
+        const reduced = reduceTaskEvents(await this.store.byTask(event.taskId));
+        if (reduced !== null) states = states.filter((s) => s.taskId !== reduced.taskId).concat(reduced);
+      }
     }
     return applied;
+  }
+
+  /** 权威任务视图（已剔除违反树不变式的任务）；供 DAG/汇总与验收读取。 */
+  async statesView(): Promise<TaskState[]> {
+    return this.states();
   }
 
   /** 当前所有任务的权威状态（按 taskId 排序）。 */
@@ -181,7 +204,9 @@ export class FleetNode {
       const state = reduceTaskEvents(byTask.get(taskId)!);
       if (state) out.push(state);
     }
-    return out;
+    // W1：权威视图剔除违反树不变式的任务（经记忆同步到达的无效 created 亦生效）
+    const admissible = admissibleTaskIds(out);
+    return out.filter((s) => admissible.has(s.taskId));
   }
 
   async stateOf(taskId: string): Promise<TaskState | null> {

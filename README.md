@@ -1,293 +1,105 @@
 <div align="center">
 
-![Mebular 分布式记忆网络](assets/banner.svg)
+![Mebular](assets/banner.svg)
 
-# Mebular
+**A distributed, verifiable memory network for agents.**
 
-**面向 Agent 的分布式图记忆网络**
+Mebular stores memory as a signed knowledge graph: every fact remembers when it is valid and who wrote it.
+Devices sync incrementally with vector clocks — offline-friendly, self-converging on reconnect, fully auditable.
 
-Mebular 把记忆存成一张带签名事件的知识图谱，每条事实都记得自己什么时候有效、由谁写入。设备之间用向量时钟做增量同步，离线也能用，重连后自动收敛，改过什么都能查。
-
-[![Website](https://img.shields.io/badge/Website-mebular.cyberfederal.io-4a8acf?style=for-the-badge&logo=googlechrome&logoColor=white)](https://mebular.cyberfederal.io)
-[![GitHub](https://img.shields.io/badge/GitHub-Windsander%2FMebular-181717?style=for-the-badge&logo=github&logoColor=white)](https://github.com/Windsander/Mebular)
-
+[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Tests](https://img.shields.io/badge/Tests-734%20passed-brightgreen)](#项目状态)
-[![Coverage](https://img.shields.io/badge/Coverage-93%25-brightgreen)](#项目状态)
+[![Node.js >=20](https://img.shields.io/badge/Node.js-%E2%89%A520-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![TypeScript strict ESM](https://img.shields.io/badge/TypeScript-strict%20ESM-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 
-[官网](https://mebular.cyberfederal.io) · [快速上手](#30-秒上手) · [系统架构](#系统架构) · [项目状态](#项目状态) · [贡献](#贡献)
+[Website](https://mebular.cyberfederal.io) · [Why](#why) · [What it is](#what-it-is) · [How to use](#how-to-use) · [What you get](#what-you-get) · [Docs](#links--docs) · [中文](README_CN.md)
 
 </div>
 
 ---
 
-## 为什么需要 Mebular？
+## Why
 
-Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，换台设备就断了，被谁改过也说不清，离线直接罢工。具体来说有四个问题。
+Agent memory usually lives inside one process: a list or a key-value store. Change machines and it is gone;
+you cannot tell who wrote what; go offline and it stops working.
 
-| 问题 | 现在的做法 | Mebular 的做法 |
-|------|-----------|----------------|
-| 记忆是扁平队列 | 用列表或键值对存，没有实体和关系 | 图式记忆模型：Entity / Fact / Episode / Skill / Meta 五类节点，事实带 `validFrom / validTo` 有效期 |
-| 写入不可验证 | 没有签名、没有内容寻址，也认不出作者 | 每次写入生成一条 Ed25519 签名、Blake3 寻址的事件，改了什么、谁改的都能查 |
-| 同步依赖中心服务 | 必须在线，还要信任中间商 | 向量时钟做增量同步，冲突按「删除优先 > 时间窗 > LWW」裁决，离线可用 |
-| 生态各自为政 | Hermes、mem0、Zep、Graphiti 之间不互通 | CMF v1 交换格式加适配器，Obsidian、日志型端、json-memo 都能接 |
+| Problem today | Mebular |
+|---|---|
+| Flat queues, no entities or relations | Graph memory: entity / fact / episode / skill / meta nodes, facts with validity windows |
+| Writes cannot be verified | Every write is an Ed25519-signed, content-addressed event — auditable |
+| Sync needs a central service | Vector-clock incremental sync, deterministic conflict resolution, offline-capable |
+| Isolated ecosystems | A versioned exchange format plus adapters (Obsidian, log journals, json-memo, …) |
 
-除这四点之外，还带了 X25519 + AES-256-GCM 的加密信道、可用用户主密钥静态加密落盘（HKDF 派生 + AES-256-GCM，落盘密文、内存明文）、可选本地 embedding 语义召回（默认多语言 MiniLM，覆盖中文；缺包自动降级关键词并告警；真实模型能力由独立 CI job `semantic-real` 以 `npm run verify:semantic:real` 验证）、Hermes 的七方法 Provider 和幂等导入、可选的 libp2p 真实网络（含 circuit relay v2 跨网段寻址与手动 multiaddr 降级）、可切换的存储后端（JSONL 或 Node 内建 SQLite，均复用静态加密）与大图初始同步快照，以及一套带覆盖率门槛的测试。
+## What it is
 
----
+- **One machine = one node = one daemon.** `mebular serve` is the sole holder of identity, network and trust;
+  fleet and agents are local clients sharing that daemon's identity and storage.
+- **Domains (namespaces) are data channels.** Joining a domain is a data obligation (receive + promptly sync your
+  new local memory). There is no read-only membership and no dispatch semantics in a domain.
+- **Tasks are trees.** A task is a DAG: the root is the dispatching agent, children are derived by executors
+  (`causedBy`/`chain`, cycle-free). The only remote surface is the memory channel — no general remote query/RPC.
+- **Trust is a certificate chain to the user master key.** Any enrolled device may delegate a certificate to a new
+  device (bounded chain length); a short-lived, single-use join token lets a new device enroll without copying the
+  master key. Revocation cascades to delegated certificates.
 
-## 30 秒上手
+![Mebular architecture](assets/architecture-en.svg)
 
-还没发 npm 包，先从源码构建。运行时只依赖 `bonjour` 和 `ulid`，libp2p 是可选的。
+## How to use
+
+### For agent users
+
+Point an MCP-capable agent (Claude / Cursor / OpenCode / DeepSeek Harness) at the daemon and use the memory tools
+(`memory_write`, `memory_query`, `memory_search`, `memory_status`, …). Every MCP tool has a **verbatim same-named**
+`mebular` CLI command (`mebular memory_write`), so scripts and agents share one surface.
 
 ```bash
-git clone https://github.com/Windsander/Mebular.git
-cd Mebular
-npm install
-npm run build          # TypeScript strict → dist/
-npm test               # 94 套件 / 734 用例全绿
+npm install && npm run build
+node packages/skill/scripts/install.mjs        # install the skill (opt-in)
+mebular mcp                                    # or connect over HTTP: mebular serve
 ```
 
-### 路径一（推荐）· Agent 用（skill + MCP）
+### For device owners
 
-把 Mebular 作为跨设备长期记忆接进支持 MCP 的 Agent（Claude / Cursor / OpenCode / DeepSeek Harness 等）。以下用法基于 `packages/skill` 实测：
+One command per machine, then approve once on the first machine:
 
-1. **装 Skill**（`scripts/install.mjs` 把 `SKILL.md` + `MEMORY_POLICY.md` 复制到目标目录下的 `mebular-memory/`）：
+```bash
+fleet quickstart --daemon --dir ~/.mebular --device device-A   # daemon home + fleet + token (+ mebular-serve)
+fleet invite --dir ~/.mebular                                  # short-lived join token
+# on the new machine (delegated identity, no master key copied):
+fleet join --token <token> --daemon --dir ~/.mebular --device device-B
+fleet approve --dir ~/.mebular --device device-B               # grant the domain on the graph
+```
 
-   ```bash
-   node packages/skill/scripts/install.mjs                 # cwd 的 .agents/skills、.dsh/skills（若存在 .opencode 则另装 .opencode/skills）
-   node packages/skill/scripts/install.mjs --global        # 另装到 ~/.agents/skills
-   node packages/skill/scripts/install.mjs --target <dir>  # 只装到指定目录
-   ```
-
-2. **接 MCP**：从 `packages/skill/mcp/` 取对应片段并入客户端配置——`claude.json` / `cursor.json` / `generic.json`（`mcpServers.mebular` → `command: "mebular", args: ["mcp"]`）、`opencode.json`（`mcp.mebular`，`type: "local"`，`command: ["mebular","mcp"]`）、`dsh.cordis.yml`（`@deepseek-ai/dsh-mcp-client` 插件，transport `stdio`）。`npm install` 后工作区已把 `@mebular/mcp` 的 `mebular` 命令链接到 `node_modules/.bin/`；未链接时可直接用 `node packages/mcp/bin/mebular.mjs mcp`。
-
-   - `mebular mcp`：**stdio** 服务（本机 Agent；stdio 不做鉴权）。
-   - `mebular serve`：**常驻 Streamable HTTP**（`/mcp`、`/healthz`，单实例锁；鉴权可选 `none` / `bearer` / 内置 OAuth 最小 AS+RS；scope 为 `memory.read` / `memory.write` / `memory.admin`，默认 `memory.read`）。远程接法见 `dsh.cordis.yml` 注释中的 `streamable-http` + `http://127.0.0.1:7331/mcp`。
-
-3. **常驻默认实时**：`serve`/MCP 形态默认开启**写入即推**（`pushOnWrite`）与**周期 anti-entropy**（默认 `intervalMs 600000` = 10 分钟、`jitterRatio 0.2`）——实时性依赖常驻进程；库/嵌入式默认关闭（见「同步触发时机」）。可用 `MEBULAR_HOME` / `MEBULAR_STORAGE_PATH` / `MEBULAR_DEVICE_ID` / `MEBULAR_USER_MASTER_KEY(_FILE)` / `MEBULAR_PUSH_ON_WRITE` 等环境变量配置。
-
-### 路径二 · 库/嵌入式（复制即跑）
-
-首次初始化需要用户主密钥为本机签发设备证书。用 `Mebular.generateUserMasterKey()` 生成后，**请自行持久化主私钥**（信任根，示例见 [`examples/quickstart/index.mjs`](examples/quickstart/index.mjs)）。
+### For developers
 
 ```ts
 import { Mebular, HermesMemoryProvider } from 'mebular';
-
-const master = await Mebular.generateUserMasterKey();
-
-const mebular = new Mebular({
-  storagePath: './store.jsonl',
-  deviceId: 'device-A',
-  encryption: {
-    userMasterKey: master.publicKey,
-    userMasterPrivateKey: master.privateKey,
-  },
-  network: { enabled: false }, // 单设备先从这里开始
-});
-
+const mebular = new Mebular({ storagePath: './store.jsonl', deviceId: 'device-A', network: { enabled: false } });
 await mebular.initialize();
-const provider = new HermesMemoryProvider(mebular);
-
-await provider.storeMemory({
-  type: 'preference',
-  content: '深色主题',
-  metadata: { preferenceType: 'theme', confidence: 0.9 },
-});
-
-const { memories } = await provider.retrieveMemory({ types: ['preference'] });
-console.log(memories); // → [ { type: 'preference', content: '深色主题', ... } ]
-
-await mebular.shutdown();
 ```
 
-把 `network.enabled` 改成 `true` 并配置传输，同一段代码就能跑在两台设备上，断线重连后自己收敛。
+See [`examples/quickstart`](examples/quickstart/index.mjs) to run it. For a fleet task tree, `fleet task_submit`
+submits a root and `task_children` / `task_summarize` walk the tree.
 
-上面这段的可执行版本在 [`examples/quickstart/index.mjs`](examples/quickstart/index.mjs)（含主密钥持久化），`npm run build` 之后直接 `node examples/quickstart/index.mjs` 即可：
+## What you get
 
-```bash
-npm run build
-node examples/quickstart/index.mjs
-```
+- **Local-first and offline-capable** — your data stays on your devices; reconnect and it converges.
+- **Verifiable, tamper-evident history** — signed, content-addressed events; who changed what is auditable.
+- **Graph structure with validity** — relations and time windows, not just a flat store.
+- **A real node per machine** — one daemon owns identity/network/trust; agents and fleet share it, split by domain.
+- **Decentralized expansion** — any enrolled device can invite; the master key may stay offline.
 
-`examples/` 下另有 `obsidian-vault`、`log-journal`、`json-memo` 三份带 README 的示例数据，供对应适配器导入，本身不是可执行脚本。
+## Links & docs
 
----
-
-## 广域网同步（实验）
-
-`scripts/wan-sync.mjs` 把「两主机增量同步 + 冲突收敛」脚本化，并接上 circuit relay 与手动 multiaddr 两条寻址路径。
-
-```bash
-# 本地编排自测（共享身份 + 两阶段 + relay 密文；non-evidence，退出码 0）
-npm run verify:wan:cross:selftest
-# 隔离自测：两个独立进程 + 各自独立存储 + 无共享路径（non-evidence）
-npm run verify:wan:cross:selftest:isolated
-
-# 本地回归（loopback，非证据）
-npm run verify:wan         # 手动 multiaddr 直连
-npm run verify:wan:relay   # 内嵌 circuit relay
-
-# 跨机两阶段（异网段，无需共享文件系统）：先分发用户主密钥，再 A=peer / B=cross
-node scripts/wan-sync.mjs user-keygen --out key.json
-node scripts/wan-sync.mjs relay --port 4000 --unlimited            # 可选，异网段需要
-node scripts/wan-sync.mjs peer  --role a --user-master-key-file key.json \
-  --bind /ip4/0.0.0.0/tcp/4001 --relay <relay> \
-  --authorize device-B                             # 显式授权对端；否则默认拒绝，什么都不发
-node scripts/wan-sync.mjs cross --device-id device-B --user-master-key-file key.json \
-  --peer <A-stable-multiaddr> --peer-id <A-deviceId> --relay <relay> \
-  --authorize device-A --out B-evidence.json       # cross 固定自身 deviceId，A 才能授权它
-# 判定：cross 退出码 0 且 B-evidence.json 的 stateMatches=true、differentPublicNetwork=true、identityShared=true
-```
-
-- **默认拒绝是硬边界**：`sync.peerNamespacePolicy` 未列出的对端拿不到任何分区，跨机脚本必须显式 `--authorize <对端 deviceId>`；`cross` 用 `--device-id` 固定自身设备名，A 侧才能预先授权。
-
-- 用户主密钥：`user-keygen` 生成，A/B 用同一把（否则设备证书互验失败）；也可用 `MEBULAR_USER_MASTER_KEY`（内联 JSON）。
-- 协调无需共享文件：B 用 `--peer/--peer-id` 一次给定 A 的稳定地址，按图上阶段状态重试连接完成三阶段。
-- 前置预检：`cross` 启动前先检查 `--peer/--peer-id/--relay` 是否齐全且 **TCP 可达**；缺失/不可达立即报错并打印补齐指引，不跑到中途才失败（超时可用 `MEBULAR_WAN_PREFLIGHT_TIMEOUT_MS` 调整，默认 3000ms）。
-- 出口判据：`MEBULAR_WAN_IP_ECHO`（缺省 `https://api.ipify.org?format=json`）取公网出口 IP；任一私网/回环 → false，取不到 → 未知（绝不误判 true）。
-- relay 默认**限额**；需显式 `--unlimited`（`Libp2pProvider.relayUnlimited`）才允许任意协议过 circuit，调用方承担开放 relay 的滥用风险；`relay --capture <path>` 可捕获线上字节供「只见密文」取证。
-- 诚实边界：上述本机命令都是 **non-evidence**；真实 G3-E 需两台不同公网主机 + 可达 relay，已排入**最后阶段的真机/公网验收**（本机 `verify:wan:l2` 与 `verify:wan:l2:docker` 只做 relay-only / NAT 仿真）。`npm run verify:wan:cross` 无环境时退出码 1 并打印所需环境。
-
----
-
-## 系统架构
-
-![Mebular 系统架构图](assets/architecture.svg)
-
-图分三层，层与层之间只靠接口耦合：
-
-- Hermes 侧只依赖 Provider 和 Importer 接口，不碰核心实现。
-- 核心层负责图存储、事件日志、同步和持久化，纯 TypeScript，不依赖网络。
-- P2P 层管握手、加密信道和传输抽象，可以换成 libp2p、InMemoryHub 或自己实现。
-
-矢量源文件在 [`assets/architecture.svg`](assets/architecture.svg)，独立页面在 [`assets/architecture.html`](assets/architecture.html)，克隆到本地直接打开就能看。
-
----
-
-## 记忆分区与选择性同步（默认拒绝 + 显式授权 + 分区水位）
-
-记忆可以打上 `namespace`（分区）标记：协作产生的高频短命记忆与用户长期记忆隔离，召回与同步都能按分区限定范围。不带分区的实体一律按 `default` 处理；分区只增加一个组织维度，不改变一致性模型本身。
-
-- **分区隔离**：`query` / `search` / `graph` 都接受可选 `namespace`（单个或数组）；指定分区时不会串到别的分区。CMF 导入导出与 SQLite 存储（namespace 列 + 索引）同样贯通。
-- **默认拒绝 + 显式授权**：数据持有者只把记忆发给**被显式授权**的对端。`sync.peerNamespacePolicy` 是 `peerDeviceId → 允许的分区` 白名单；**未列出的对端拿不到任何分区**（空数组 = 明确不允许），必须显式写入才能同步。裁剪链为「对端授权 ∩ 对端订阅声明 ∩ 本机订阅声明」，同时作用于 offer 与初始快照——未授权分区不会离开数据持有者，空水位走快照也绕不过。拒绝不是静默的：`sync-completed` 带 `denied` 标记。
-- **授权作为记忆（grant-as-memory）**：授权可由**链到用户主密钥**的设备签发为图上记录（`namespace_grant` / `namespace_revoke`，落在保留命名空间 `__policy__`），全 fleet 可见、可审计、可撤销，且**不可被被授权方自授**（自授 / 别家用户 / 无证书者签的记录一律忽略）。生效授权 = 图上 grant ∪ `sync.peerNamespacePolicy` 配置，两者都是白名单，任一为空都不会把「未授权」变成「不限」。保留命名空间不受 allow 链约束、已认证设备总能读到（解开「默认拒绝 + 策略在图上」的 bootstrap 死锁）；写入与生效只认签发者。签署与审计入口：`mebular.grantNamespaces` / `revokeGrant` / `getEffectiveNamespaces`。**恢复必须使用新的 `grantId`**——被撤销的 grantId 永久失效，复用它再授予不会恢复。`expiresAt` 为预留字段，本轮**不强制生效**（避免引入跨端时钟依赖），见 [`SEALING.md`](SEALING.md) §4「推迟项」。
-- **身份吊销**：`mebular.revokeDevice({ subject })` 写一条签发者签名的 `device_revoke`：读侧立刻返回 `[]`，且该设备**署名的事件在入站写入处被隔离**、**其署名实体也不得经对端快照进入**（默认拒绝只挡「我们发给它」，挡不住它把事件推进我们的图，故吊销必须在入站与快照两条路都生效）。吊销**非终态**——之后再对该设备写一条**新 grantId** 的 grant 即恢复；撤销/恢复期间水位不被污染（从正确水位续传）。
-- **两条明确取舍**：① 保留命名空间 `__policy__` 对**所有已认证设备可读（含被吊销者）**——这是解开 bootstrap 与支持恢复所必需的取舍，代价是授权图（谁能读什么、谁被吊销）对已入网设备可见；② 吊销**只阻止后续摄入**，不回撤**已经入图**的数据，且被吊销设备**仍可建立会话**（否则无从得知恢复），只是读侧为 `[]`、其入站事件被隔离。
-- **本机订阅**：`sync.namespaces` 声明本机订阅的分区；未配置 / 空 = 参与全部。订阅声明随 `sync-hello` 以 `subscribeAll` + `namespaces` **必填**下发（缺字段/类型错视为协议违例并中止会话）；`subscribeAll=false` + 空清单 = 明确不订阅任何分区。
-- **分区同步水位**：缺失判定按 `per-(对端, 分区, 作者)` 水位进行——只在同一分区内比较作者计数，而不是拿对端累积全局时钟；本机上报（hello）与快照水位同样**只取作者自身计数**，绝不把累积时钟当成「对方已有」。这样某分区因未授权被跳过后，日后**扩权即可回补**历史事件，不会永久缺失。**水位只由我们掌握的两个事实推进：对端 ack 与「已确认快照」**（快照覆盖分区须收到 `snapshotApplied` 确认才推进，禁止乐观推进）；对端 hello 的自报水位**不抬升**本机记录（仅用于快照触发与诊断，差异以 `sync-completed.reportedAhead` 暴露）。水位持久化于 `.sync-state.json` v2，重启后不重发、不遗漏；撤销后再授予同样从正确水位续传。
-- **水位修复入口**：`mebular.resetPeerWatermarks(peerDeviceId?)`（省略 = 全部）清空对端水位并持久化，是对端水位被污染时**被认可的修复路径**：只清水位、不动 per-event ack 集合，方向安全（最多让已确认事件冗余重发一次，不会漏发）。
-- **跨会话重复发送是预期行为**：水位只由 ack 与已确认快照推进、不看对端自报，因此对端已从别处获得、但本机没有 ack 记录的事件，可能被再发一次。方向安全（只多发、不缺发）；接收端按内容寻址 ID 幂等去重，重复事件**跳过验签与重放、但仍会 ack**，于是下次会话不再发（自愈）。`sync-completed.duplicates` 非零通常表示对端已从其他对端获得该数据，不是 bug；若 `duplicates` 接近 `sentEvents` 且量很大，多半是本机同步状态被重置/丢失过（参见 `resetPeerWatermarks`）。
-- **快照前提与回退保护**：初始快照**只发给自报分区水位为空的对端**（快照直接写入物化状态）；即便有此前提，接受侧也做回退保护——仅当本地缺失或快照版本时钟**严格更新**时才写入，旧快照不会回退本地更新的实体。放宽「只发空对端」这一前提之前，必须先让快照应用具备完整的冲突/合并语义。
-- **变更可订阅**：`sync-completed` 事件带 `appliedEventIds`，另有 `events-applied` 事件报告刚应用了哪些远端事件、涉及哪些分区，供常驻消费者判断「是否有我关心的新记忆」。
-- **写入即推（push-on-write）与反向 nudge（H）**：库/嵌入式默认**关闭**，常驻入口（serve/MCP）默认**开启**。本机为**发起方**角色时，本地写入后直接起一轮定向会话；本机为**响应方**角色时，在现有信道上发一个**无载荷**的 `sync-nudge`，请发起方立刻起一轮——于是**双向都实时**（不再受设备 ID 字典序限制）。50ms 节流合并、会话进行中忽略、同一对端同一时刻至多一个待处理触发；且只在「该分区对该对端**已授权**且确实有 pending」时才发（未授权不发）。
-
-保留策略约束：任何将来引入的自动事件裁剪，**必须排除尚未被所有已授权对端 ack 的事件**，否则对端将永久缺失该记忆、违背「所有记忆一致」。本期只固化此约束与测试，不实现裁剪。
-
----
-
-## 同步触发时机
-
-同步**不是连接时的一次性动作**。三个触发点：
-
-| 触发点 | 行为 | 默认 | 可配项 |
-|---|---|---|---|
-| 连接即收敛 | 握手认证后自动跑一次双向会话 | `autoSync = true` | `sync.autoSync` |
-| 写入即推送 | 本地写入后向「订阅且已授权」的在线对端触发：发起方起会话、响应方发 `sync-nudge` | 库/嵌入式 **关**；常驻（serve/MCP）**开** | `sync.pushOnWrite`、`sync.pushOnWriteThrottleMs`（默认 50ms） |
-| 周期兜底（anti-entropy） | 每隔（默认）10 分钟（`intervalMs 600000`，±20% jitter）对在线、已授权、且确有 pending 的对端兜底同步；无 pending **短路跳过**；会话在途跳过；失败指数退避 | 库/嵌入式 **关**；常驻（serve/MCP）**开** | `sync.antiEntropy.{enabled, intervalMs, jitterRatio}` |
-
-**连接 ≠ 持续同步**：一次连接只保证一次收敛（在 `autoSync` 时）。之后的实时性来自「写入即推送」，长连兜底来自 anti-entropy。**实时性依赖常驻进程**——库/嵌入式形态默认关闭推送与兜底，需要显式开启或自行触发；只有常驻形态（`serve` / MCP）默认两者皆开。跨会话重复发送是预期行为（见上）。
-
-## 一致性口径
-
-- **授权域内必然全局收敛**：在双方共同授权（且实际传输）的分区集合内，任意两端最终收敛到同一图状态（事件内容寻址 + 向量时钟 + 确定性冲突裁决）。分区只改变「谁在何时收到哪些字节」与召回的组织方式，**不改变一致性模型本身**。
-- **跨端一致性自检只比共同授权域**：`status().stateHash` 是**全局**哈希——两个合法持有不同分区集合的设备全局哈希必然不同（不是 bug）。请改比 `status().stateHashByNamespace`（按分区的哈希），只对**双方共同拥有的域**逐一比较；域相同则与全局口径一致。`scripts/wan-sync.mjs` 已按此更新。
-
-## 去中心化口径
-
-- **政策模型**：授权由**链到用户主密钥**的设备签发；**引导期签发者**由 `sync.policyIssuers` 显式列出（可多台，缺省空）。**不可越权授予**——非引导签发者只能签发/撤销**自己当时已获授权**的 namespaces（"不能给出自己没有的"）；因此授权可**传递**（被授权者可转授），无需单一主设备在线。所谓"自授提权"（未被授权却给自己或他人签发）一律无效。
-- **吊销连坐**：签发者被吊销 → 它签发的政策记录**一律不再生效**（含其**历史** grant、以及它发出的 `device_revoke`）→ 被吊销设备既不能自复活、也不能吊销别人。
-- **确定性定序（不看墙钟）**：同一签发者内按单调序列；跨签发者按**逻辑时间** `sum(event.vectorClock)`；并发（互不因果）以 `(签发者, 内容寻址 id)` 兜底 → 完全确定、两端收敛一致（含 A/B 互吊销：逻辑序在先者胜）。
-- 保留命名空间 `__policy__` 对**所有已认证设备可读（含被吊销者）**，是为解开 bootstrap 与支持恢复所做的取舍；代价是授权图（谁能读什么、谁被吊销）对已入网设备可见。
-- **吊销是域收缩**：不回撤已经入图的数据，也无法强制远端停止；它阻止的是**后续摄入**（读侧 `[]` + 入站事件隔离 + 快照过滤）。
-- **已知取舍（需人工关注）**：`policyIssuers` 是**本地配置**，各端应保持一致；若两端对同一设备是否为引导签发者判断不同，可能对同一批记录得出不同结论。缺省为空时不放松默认拒绝（回退到 `sync.peerNamespacePolicy` 配置白名单作 bootstrap）。
-
----
-
-## 适用与取舍
-
-Mebular 没走云端记忆 SaaS 那条路，也就有相应的代价。
-
-| 更看重 | 代价 |
-|--------|------|
-| 离线可用、数据自己拿着 | 不做 SaaS，节点要自己跑 |
-| 写入可验证、抗篡改 | 每次写入多出签名和哈希的开销 |
-| 图结构、能表达关系和时效 | 比扁平键值模型复杂，上手要花点时间 |
-| 生态互通、方便迁移 | 功能还没成熟方案全 |
-
-适合愿意自己管数据、要在多台设备或多端之间共享 Agent 记忆、也能接受早期项目的人。想开箱即用，或者要生产级 SLA 的，现在还不合适。
-
----
-
-## 项目状态
-
-Mebular 还在早期设计阶段。Phase 0 到 6 的功能都能用了，但 API 还没稳定，也没发 npm 包，放到生产环境前请自己评估。
-
-记忆层已**封板**：契约（去中心化红线 / 一致性口径 / 协议语义 / 推迟项 / 已知边界）见 [`SEALING.md`](SEALING.md)，基线 `main=0d78486`。`packages/fleet` 已落地 M0–1d（记忆同步传输、agent 路由、三形态 live、服务化、成员/交接/重入、WAN 仿真）。
-
-| 里程碑 | 状态 |
-|--------|------|
-| 核心引擎（图存储 / 加密身份 / 事件日志） | 完成 |
-| P2P 网络（握手 / 信道 / NAT / 发现） | 完成 |
-| 图同步（增量同步 / 冲突收敛 / 离线恢复） | 完成 |
-| Hermes 集成（门面 / Provider / 导入器） | 完成 |
-| 跨端互通（证书链 / CMF / 适配器 / 故障注入） | 完成 |
-| 质量收口、生态适配、广域网桥接 | 完成 |
-| 静态加密、语义召回、真实广域网、SQLite 存储与快照同步 | 完成 |
-| 信任模型 v2（证书吊销）、跨 NAT 实测回填 | 规划中 |
-
-测试和质量方面：
-
-| 项目 | 情况 |
-|------|------|
-| 测试 | 94 个套件、734 条用例全绿，覆盖单元、双设备端到端、四端互通和故障注入 |
-| 覆盖率 | 行 ~93%、分支 ~81%（运行间抖动），全库门槛 85/65，关键文件另有底线 |
-| 类型检查 | `tsc --noEmit`，strict 加 `noUncheckedIndexedAccess`，零错误 |
-| Lint | ESLint（typescript-eslint）零告警 |
-| 质量门禁 | CI 四 job（`test:coverage` 覆盖率门槛 / `verify:fleet:all` / `verify:wan:l2`+docker / Windows / 真实语义）；另有 `check:cleanliness` 防孤儿模块与失效引用复发 |
-
----
-
-## 文档导航
-
-| 方向 | 入口 |
-|------|------|
-| 核心 API | [`src/mebular.ts`](src/mebular.ts) · [`src/types/`](src/types) |
-| 记忆模型和存储 | [`src/memory/`](src/memory) · [`src/core/`](src/core) · [`src/storage/`](src/storage) |
-| P2P 网络和同步 | [`src/p2p/`](src/p2p) · [`src/sync/`](src/sync) · [`src/eventlog/`](src/eventlog) |
-| CMF 交换和适配器 | [`src/exchange/`](src/exchange) |
-| Hermes 集成 | [`src/hermes/`](src/hermes) |
-| 封板契约 | [`SEALING.md`](SEALING.md) |
-| 策略不变量矩阵 | [`src/sync/POLICY-INVARIANTS.md`](src/sync/POLICY-INVARIANTS.md) |
-| Agent 技能 | [`packages/skill`](packages/skill) |
-| MCP 服务 | [`packages/mcp`](packages/mcp) |
-| 可运行示例 | [`examples/`](examples) |
-| 贡献指南 | [CONTRIBUTING.md](CONTRIBUTING.md) |
-
----
-
-## 贡献
-
-想参与就开个 Issue 先聊聊，再发 PR，具体约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-觉得有用的话，点个 star。
-
----
+- **Limits & trade-offs** — [`LIMITATIONS.md`](LIMITATIONS.md)
+- **Sealing contract** (red lines, protocol semantics, deferrals) — [`SEALING.md`](SEALING.md)
+- **Fleet runbook** (two-machine ops, WAN commands, acceptance) — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
+- **Memory policy for agents** — [`packages/skill/MEMORY_POLICY.md`](packages/skill/MEMORY_POLICY.md)
+- **Daemon / MCP** — [`packages/mcp`](packages/mcp) · **Fleet** — [`packages/fleet`](packages/fleet)
+- **Contributing & quality gates** — [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 <div align="center">
 
-[官网](https://mebular.cyberfederal.io) · [GitHub](https://github.com/Windsander/Mebular) · © 2026 Windsander · MIT License
+[Website](https://mebular.cyberfederal.io) · [GitHub](https://github.com/Windsander/Mebular) · © 2026 Windsander · MIT License
 
 </div>

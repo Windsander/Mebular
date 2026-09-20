@@ -307,9 +307,29 @@ export class FleetWorker {
     return { applied, executed };
   }
 
-  /** 启动即对账（重启韧性）。 */
+  /**
+   * 启动对账（重启韧性）：
+   * 1) **补发终态事件**：崩溃可能发生在「已执行并本地落 done」与「已发布到对端」之间的窗口，
+   *    重启后若任务已终态则**重发**该终态事件（对端按 `eventId` 幂等去重，至少一次语义）。
+   * 2) 续跑未终态任务。
+   */
   async reconcile(): Promise<number> {
+    await this.republishTerminal();
     return this.processPending();
+  }
+
+  /** 重发本端产生的终态事件（幂等：对端按 eventId 去重）。 */
+  private async republishTerminal(): Promise<void> {
+    for (const state of await this.states()) {
+      if (!state.terminal) continue;
+      if (state.from.device === this.endpoint.device) continue; // 自派任务无需回传
+      const base = this.baseEvent(state);
+      const dev = this.endpoint.device;
+      const event: TaskEvent = state.status === 'done'
+        ? { ...base, eventId: `${state.taskId}#done@${dev}`, type: 'done', toStatus: 'done', ...(state.resultRef !== undefined ? { payloadRef: state.resultRef } : {}) }
+        : { ...base, eventId: `${state.taskId}#failed@${dev}`, type: 'failed', toStatus: 'failed', ...(state.reason !== undefined ? { reason: state.reason } : {}) };
+      await this.transport.publish({ msgId: randomUUID(), from: this.endpoint, to: state.from, event });
+    }
   }
 
   /** 持续轮询直到 `signal` 中止。 */

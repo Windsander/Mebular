@@ -409,26 +409,26 @@ fleet doctor --dir ~/.mebular   # PASS 重入状态  reset=true（已声明重�
 
 ```bash
 # 0) 建板（= 建域 + 授权 + 邀请成员，免手工 grant/member）
-fleet board-create --dir ~/.mebular --input '{"name":"team","with":["device-B"]}'
+fleet board_create --dir ~/.mebular --input '{"name":"team","with":["device-B"]}'
 
 # 1) 看我能派给谁（L1 授权 ∩ 对端 Agent 目录）
-fleet task-targets --dir ~/.mebular --namespace team
+fleet task_targets --dir ~/.mebular --namespace team
 
 # 2) 发起 root（带预算与派发策略；agent 由工具填 from，root 有主）
-fleet task-submit --dir ~/.mebular --namespace team --agent board --input \
+fleet task_submit --dir ~/.mebular --namespace team --agent board --input \
   '{"intent":"审查 root","to":{"device":"device-B","agent":"echo"},"budget":{"maxDepth":2,"maxChildren":4,"maxTasks":8},"dispatch":"children-ok"}'
 
 # 3) 跟踪 / 树 / 汇总
-fleet task-status  --dir ~/.mebular --input '{"taskId":"task-…"}'
-fleet task-children --dir ~/.mebular --input '{"taskId":"task-…"}'
-fleet task-summarize --dir ~/.mebular --input '{"taskId":"task-…"}'
-fleet task-subscribe --dir ~/.mebular --watch          # 变化推送（轮询）
+fleet task_status  --dir ~/.mebular --input '{"taskId":"task-…"}'
+fleet task_children --dir ~/.mebular --input '{"taskId":"task-…"}'
+fleet task_summarize --dir ~/.mebular --input '{"taskId":"task-…"}'
+fleet task_subscribe --dir ~/.mebular --watch          # 变化推送（轮询）
 
 # 4) 运维/协作
-fleet task-quota --dir ~/.mebular
-fleet task-negotiate --dir ~/.mebular --input '{"taskId":"task-…","kind":"counter","round":1}'
-fleet chatter-send  --dir ~/.mebular --input '{"topic":"status","text":"…"}'
-fleet chatter-inbox --dir ~/.mebular
+fleet task_quota --dir ~/.mebular
+fleet task_negotiate --dir ~/.mebular --input '{"taskId":"task-…","kind":"counter","round":1}'
+fleet chatter_send  --dir ~/.mebular --input '{"topic":"status","text":"…"}'
+fleet chatter_inbox --dir ~/.mebular
 ```
 
 - **与 MCP 完全一致**：`fleet mcp`（stdio JSON-RPC）暴露同名工具（`task_submit`…`board_create`），**同一 handler**、同一结构化输出；对照表见 [`DESIGN.md`](./DESIGN.md) §2.5.2。

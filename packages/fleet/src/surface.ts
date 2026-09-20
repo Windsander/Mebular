@@ -135,7 +135,7 @@ function dispatchInput(input: Record<string, unknown>): TaskDispatch | undefined
 export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_submit',
-    cli: 'task-submit',
+    cli: 'task_submit',
     description: '提交任务（root 或 child）；root 可带预算与派发策略',
     inputSchema: {
       type: 'object',
@@ -177,7 +177,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'task_submit_batch',
-    cli: 'task-submit-batch',
+    cli: 'task_submit_batch',
     description: '批量提交任务（同 root 语义）',
     inputSchema: { type: 'object', required: ['tasks'], properties: { tasks: { type: 'array' } } },
     handler: async (input, ctx) => {
@@ -192,7 +192,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'task_cancel',
-    cli: 'task-cancel',
+    cli: 'task_cancel',
     description: '取消未终态任务（写 failed，reason=CANCELLED）',
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' }, reason: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -223,7 +223,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'task_retry',
-    cli: 'task-retry',
+    cli: 'task_retry',
     description: '以新任务重试（链表达：新任务 causedBy 原任务）',
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -246,7 +246,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'task_status',
-    cli: 'task-status',
+    cli: 'task_status',
     description: '查询单任务权威状态',
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -262,7 +262,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'task_list',
-    cli: 'task-list',
+    cli: 'task_list',
     description: '列出任务（可按 status/from 过滤）',
     inputSchema: { type: 'object', properties: { status: { type: 'string' }, fromDevice: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -281,7 +281,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'task_history',
-    cli: 'task-history',
+    cli: 'task_history',
     description: '任务的全部事件（确定序）',
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -297,7 +297,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'task_children',
-    cli: 'task-children',
+    cli: 'task_children',
     description: '任务的直接子任务（trace.causedBy）',
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -314,7 +314,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'task_summarize',
-    cli: 'task-summarize',
+    cli: 'task_summarize',
     description: '从 root 可达子图的汇总（复用 summarizeDag）',
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -329,7 +329,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'task_subscribe',
-    cli: 'task-subscribe',
+    cli: 'task_subscribe',
     description: '变化订阅：返回自 cursor 起有变化的任务（单次）；CLI --watch 轮询',
     inputSchema: { type: 'object', properties: { cursor: { type: 'object' } } },
     handler: async (input, ctx) => {
@@ -347,7 +347,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'task_negotiate',
-    cli: 'task-negotiate',
+    cli: 'task_negotiate',
     description: '发送协商消息（clarify/counter/accept/reject；messageId 幂等）',
     inputSchema: { type: 'object', required: ['taskId', 'kind', 'round'], properties: { taskId: { type: 'string' }, kind: { type: 'string' }, round: { type: 'number' }, text: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -377,7 +377,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'chatter_send',
-    cli: 'chatter-send',
+    cli: 'chatter_send',
     description: '配额制闲聊发送（本地配额记账）',
     inputSchema: { type: 'object', required: ['topic', 'text'], properties: { topic: { type: 'string' }, text: { type: 'string' }, messageId: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -401,7 +401,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'chatter_inbox',
-    cli: 'chatter-inbox',
+    cli: 'chatter_inbox',
     description: '闲聊收件箱（幂等去重、确定序）',
     inputSchema: { type: 'object', properties: {} },
     handler: async (_input, ctx) => {
@@ -417,7 +417,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'task_quota',
-    cli: 'task-quota',
+    cli: 'task_quota',
     description: '本机配额状态（每设备对自己发出本地记账；无全局账本）',
     inputSchema: { type: 'object', properties: {} },
     handler: async (_input, ctx) => {
@@ -427,7 +427,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'task_targets',
-    cli: 'task-targets',
+    cli: 'task_targets',
     description: '我能派给谁：L1 授权对端 ∩ 其 Agent 目录（device, agent）',
     inputSchema: { type: 'object', properties: {} },
     handler: async (_input, ctx) => {
@@ -449,7 +449,7 @@ export const TASK_TOOLS: TaskTool[] = [
   },
   {
     name: 'board_create',
-    cli: 'board-create',
+    cli: 'board_create',
     description: '建板（= 建域 + 授权 + 邀请成员）；域是板的薄封装',
     inputSchema: { type: 'object', required: ['name'], properties: { name: { type: 'string' }, with: { type: 'array', items: { type: 'string' } } } },
     handler: async (input, ctx) => {

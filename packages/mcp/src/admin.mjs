@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { POLICY_NAMESPACE, normalizeNamespace } from '@mebular/core';
 import { configPath } from './config.mjs';
+import { TOOL_NAMES } from './tools.mjs';
 
 export const POLICY_NS = POLICY_NAMESPACE;
 
@@ -576,6 +577,8 @@ export async function buildSettings({ app, service, config, runtime, home }) {
       port: config?.joinService?.port ?? 4002,
     },
     ...(await buildFleetView(home)),
+    // 实际可调用面（MCP 工具 = `mebular <name>` CLI，逐字同名同 handler）
+    tools: TOOL_NAMES,
   };
 }
 

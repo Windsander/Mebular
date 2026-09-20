@@ -368,6 +368,7 @@ try {
       && typeof settings.json?.join?.enabled === 'boolean'
       && typeof settings.json?.join?.port === 'number'
       && typeof settings.json?.fleet?.configured === 'boolean'
+      && Array.isArray(settings.json?.tools)
       && typeof settings.json?.mcp?.host === 'string'
       && typeof settings.json?.semantic?.enabled === 'boolean'
       && Array.isArray(settings.json?.policyIssuers)
@@ -376,6 +377,16 @@ try {
   );
   check('settings.policyIssuers 含已声明的 device-console', settings.json?.policyIssuers?.includes('device-console') === true);
   check('settings.identity.mode = root（本地主密钥）', settings.json?.identity?.mode === 'root', `mode=${settings.json?.identity?.mode}`);
+  {
+    const { TOOL_NAMES } = await import('../../mcp/src/tools.mjs');
+    check(
+      'settings.tools = 实际 MCP/CLI 工具面（逐字一致）',
+      Array.isArray(settings.json?.tools)
+        && settings.json.tools.length === TOOL_NAMES.length
+        && TOOL_NAMES.every((t) => settings.json.tools.includes(t)),
+      `tools=${JSON.stringify(settings.json?.tools)}`,
+    );
+  }
   check(
     'settings.fleet 反映 fleet.config.json（任务面独立配置）',
     settings.json?.fleet?.configured === true && settings.json?.fleet?.namespace === 'tasks' && settings.json?.fleet?.peers === 1,

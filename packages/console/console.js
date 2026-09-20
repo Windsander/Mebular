@@ -776,6 +776,12 @@ function renderSettings() {
     </section>
 
     <section class="settings-section">
+      <h3>可用能力 <span class="badge badge-muted">MCP = CLI 同名</span></h3>
+      <p class="muted" style="font-size:11px;margin:0 0 8px">Agent 经 MCP、人类经 <code>mebular &lt;name&gt;</code> 调用同一套 handler；GUI 只做守护与参与配置，不新增操作。</p>
+      <div class="chip-wrap">${(s.tools ?? []).map((t) => `<span class="crt-tag">${escapeHtml(t)}</span>`).join(' ')}</div>
+    </section>
+
+    <section class="settings-section">
       <h3>完整配置 <span class="badge badge-muted">只读</span></h3>
       <p class="muted" style="font-size:11px">${escapeHtml(configPath)}${state.rawConfig?.parseError ? `（解析失败：${escapeHtml(state.rawConfig.parseError)}）` : ''}</p>
       <details class="cfg-raw">
@@ -1090,17 +1096,13 @@ function renderDeviceCard() {
     <dl class="kv">
       <dt>deviceId</dt><dd>${escapeHtml(device.deviceId)}</dd>
       <dt>状态</dt><dd>${escapeHtml(statusChips.join(' · '))}</dd>
-      ${isSelf ? '' : `
-      <dt>我授权它</dt><dd>${escapeHtml(device.grantedByMe.join(', ') || '—')}</dd>
-      <dt>它授权我</dt><dd>${escapeHtml(device.grantedToMe.join(', ') || '—')}</dd>
-      <dt>最近同步</dt><dd>${device.lastSyncAt ? formatTime(device.lastSyncAt) : '—'}</dd>
-      <dt>待发事件</dt><dd>${device.pendingEventCount ?? '—'}</dd>`}
     </dl>
     <h3>${isSelf ? '我关注的域' : '我授权的域'}${isSelf
-      ? ' <span class="muted" style="text-transform:none;letter-spacing:0">（订阅即数据义务：接收该域 + 同步本机新增记忆）</span>'
+      ? ' <span class="muted" style="text-transform:none;letter-spacing:0">（M 记忆域）</span>'
       : ' <span class="muted" style="text-transform:none;letter-spacing:0">（M 记忆域：授予对端读取本机记忆）</span>'}</h3>
+    ${isSelf ? '<p class="muted" style="font-size:11px;margin:0 0 6px">订阅即数据义务：关注后①有权从其他设备接收该域变更；②本机在该域产生新记忆时，会同步给在册成员 / 已授权且关注的对端。关注写入图上在册（立即生效）；订阅声明未含该域时，保存配置并重启后传输层才收发。</p>' : ''}
     <ul class="chip-list">${rows}</ul>
-    ${isSelf ? '' : `<h3>成员资格（对端在册）</h3>
+    ${isSelf ? '' : `<h3>成员资格（准入闸门：仅在册者收得到）</h3>
     ${membershipNs.length > 0
       ? `<ul class="chip-list">${membershipRows}</ul>`
       : '<p class="muted">当前没有启用成员制的分区（仅授权生效）。</p>'}`}

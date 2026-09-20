@@ -78,11 +78,14 @@ export function defaultDeviceName(host: string = hostname()): string {
   return sanitizeDeviceName(host);
 }
 
-/** 默认设备目录：`FLEET_DIR` → `~/.fleet`。 */
+/**
+ * 默认设备目录：`FLEET_DIR` → `MEBULAR_HOME` → `~/.mebular`（W2 一机一节点统一 home）。
+ * 旧 `~/.fleet` 仅作 **embedded 测试模式**（`--dir` 显式指定）。
+ */
 export function defaultFleetDir(env: NodeJS.ProcessEnv = process.env): string {
-  const fromEnv = env.FLEET_DIR;
+  const fromEnv = env.FLEET_DIR ?? env.MEBULAR_HOME;
   const home = env.HOME ?? env.USERPROFILE ?? '.';
-  return fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : join(home, '.fleet');
+  return fromEnv !== undefined && fromEnv.length > 0 ? fromEnv : join(home, '.mebular');
 }
 
 /** PATH 中是否存在可执行文件（Windows 尝试 PATHEXT 扩展）。 */

@@ -151,3 +151,18 @@ harness：`tests/fleet/collab-invariants.test.ts`（固定种子，`scenarios=20
 真实验收：`npm run verify:fleet:tasks`（真实 libp2p loopback 双端：root→预算内派生→汇总；负例：超链长/超预算被拒、热点被公平轮转）。
 
 **准入与回归纪律（同 §6）**：改 `packages/fleet/**` 先改本矩阵 + 配测试；红→绿须 `npm run build` 后跑 `verify:*`。
+
+
+## 10. W2：一机一节点（统一守护 + 客户端化 + 上车统一）
+
+> 决策：`~/.fleet` 从生产形态退役（embedded 仅 `--store embedded` 测试）；一机一身份（设备级，同机 Agent 默认可信）；本机 app 接口 loopback HTTP + token（非回环 fail-closed），守护持 store 锁（单写者）；**委派身份模式必做**（T2 加入的设备无主密钥也能跑守护）。
+
+| # | 性质 | 期望 | 覆盖 |
+|---|---|---|---|
+| ⑩-a | 委派身份模式 | 守护仅以「委派链+设备钥+主公钥」上岗；`status.identityMode=delegated`；**无主私钥** | `verify:daemon` 委派无主私钥（红→绿①）· C3③ |
+| ⑩-b | 非回环 fail-closed | 非回环 + `auth=none`/无 TLS → 拒绝启动 | `verify:daemon`（红→绿②） |
+| ⑩-c | 单写者 | 守护持 store 锁；第二写者被拒（`MCP_STORAGE_LOCKED`） | `verify:daemon`（红→绿③） |
+| ⑩-d | 客户端化 | daemon 模式 node/worker 不监听 libp2p、不托管 join；事件走 `/app/nodes` | `daemon-store.test.ts` · `verify:daemon` C3① |
+| ⑩-e | join 归守护 | `/app/join/invite` 出令牌 + `/mebular/join` 发委派证书（链锚定主密钥） | `verify:daemon` A4（C←B←A） |
+| ⑩-f | 统一上车 | `quickstart --daemon` 写守护 home + fleet daemon 客户端 + 令牌 + （可选）mebular-serve | `verify:daemon` B2 |
+| ⑩-g | 夹具 | `protocol/daemon-home.example.json`（identity/store 模式字段） | `daemon-fixture.test.ts` |

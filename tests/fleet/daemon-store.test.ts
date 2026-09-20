@@ -1,6 +1,7 @@
 // W2 B1：DaemonTaskEventStore（走守护 app 接口；无 Mebular/libp2p/身份）单元验证。
 import { describe, it, expect, jest } from '@jest/globals';
 import { createServer, type Server } from 'node:http';
+import { join } from 'node:path';
 import { DaemonTaskEventStore } from '../../packages/fleet/src/index.js';
 import type { TaskEvent } from '../../packages/fleet/src/protocol/events.js';
 
@@ -67,6 +68,29 @@ describe('W2 DaemonTaskEventStore', () => {
       expect((await store.byTask('task-1')).length).toBe(1);
       expect(seenAuth.every((h) => h === 'Bearer tok-1')).toBe(true);
       await store.close();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it('tokenFile：{token} / 纯文本 / 非法 JSON；响应非 JSON → 报错', async () => {
+    const { server, endpoint, seenAuth } = await startFakeDaemon();
+    const { mkdtemp, writeFile } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const dir = await mkdtemp(join(tmpdir(), 'daemon-store-tok-'));
+    try {
+      const jsonTok = join(dir, 'a.json');
+      await writeFile(jsonTok, JSON.stringify({ token: 'from-json' }));
+      await new DaemonTaskEventStore({ endpoint, namespace: 'tasks', tokenFile: jsonTok }).all();
+      const plainTok = join(dir, 'b.txt');
+      await writeFile(plainTok, 'from-plain');
+      await new DaemonTaskEventStore({ endpoint, namespace: 'tasks', tokenFile: plainTok }).all();
+      const badTok = join(dir, 'c.json');
+      await writeFile(badTok, '{ not json');
+      await new DaemonTaskEventStore({ endpoint, namespace: 'tasks', tokenFile: badTok }).all();
+      expect(seenAuth).toContain('Bearer from-json');
+      expect(seenAuth).toContain('Bearer from-plain');
+      expect(seenAuth).toContain(''); // 非法 token 文件 → 不带 Authorization
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }

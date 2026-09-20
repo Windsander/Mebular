@@ -61,6 +61,17 @@
 
 CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--dir/--namespace/--agent`；输出为同一结构化 JSON。
 
+## 2.6 一机一节点（W2）：统一守护 + fleet 客户端化
+
+**拓扑**：**一台机器 = 一个节点 = 一个守护**（`mebular serve`），守护是 **记忆/身份/网络/信任的唯一持有者**；fleet 与各 Agent（MCP/skill）都是**本机客户端**，共用守护的身份与存储，数据分域。
+
+- **身份模式**：`root`（持有用户主密钥私钥，首台设备）| `delegated`（仅委派证书链 + 设备钥，**无主私钥**——T2 令牌加入的设备）。`mebular status|doctor` 显示 `identityMode`。
+- **同机互信**：设备级身份，**同机 Agent 之间默认可信**（不做加密隔离）；跨机仍走"链到主密钥"的证书链 + 域授权（默认拒绝）。
+- **存储模式**（fleet）：`daemon`（默认于统一上车；fleet 只走守护本机 app 接口，**不监听 libp2p、不托管 join**）| `embedded`（**仅测试/CI**，本地 Mebular）。
+- **本机 app 接口**（loopback HTTP + bearer，非回环 fail-closed）：`createNode`/`listNodes`/`namespaces` + `policy/{grant,revoke,member,declare-issuer,effective,membership}` + `join/invite`；**单写者**（守护持 store 锁，第二写者 `MCP_STORAGE_LOCKED`）。
+- **统一 home**：`~/.mebular`（`MEBULAR_HOME` 覆盖）——守护 `config.json` 与 fleet `fleet.config.json` 同目录。
+- **join 归守护**：invite/join/委派签发由守护提供；fleet 仅作客户端。embedded 模式保留 fleet 自托管 join，**仅测试**。
+
 ## 3. 三种协作形态（**已接 live**：1d，含用法/限制）
 
 - **审查 DAG**：任务派生为有向无环图（计划 → 分派 → 审查 → 汇总）；`trace.chain` 表达父子，避免环。

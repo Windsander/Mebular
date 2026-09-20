@@ -142,6 +142,43 @@ try {
   const dead = await waitFor(() => serve2.child.exitCode !== null, 15000) || serve2.child.exitCode !== null;
   const locked = /MCP_STORAGE_LOCKED|存储已被占用/.test(serve2.state.err + serve2.state.out);
   check('第二写者被明确拒绝（MCP_STORAGE_LOCKED）', dead && locked, { err: serve2.state.err.trim().slice(0, 120) });
+
+  console.log('== C3① 单机：守护 + fleet 客户端（daemon 模式）+ 任务往返 ==');
+  const fleetCli = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
+  const homeFleet = join(root, 'fleet');
+  await mkdir(homeFleet, { recursive: true });
+  await writeFile(join(homeFleet, 'fleet.config.json'), JSON.stringify({
+    v: 1,
+    device: 'device-F',
+    dir: homeFleet,
+    storagePath: join(homeFleet, 'store.jsonl'),
+    masterKeyFile: join(homeFleet, 'master-key.json'),
+    namespace: 'tasks',
+    listen: '/ip4/127.0.0.1/tcp/0',
+    peers: [{ device: 'device-F' }],
+    policyIssuers: ['device-F'],
+    agents: [{ name: 'echo', kind: 'echo' }],
+    store: 'daemon',
+    daemon: { endpoint: base, token },
+  }, null, 2), { mode: 0o600 });
+  const runFleet = (args, timeoutMs = 60000) =>
+    new Promise((resolve) => {
+      const child = spawn(process.execPath, [fleetCli, ...args], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      let err = '';
+      child.stdout.on('data', (d) => (out += d));
+      child.stderr.on('data', (d) => (err += d));
+      const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+      child.on('close', (code) => { clearTimeout(timer); resolve({ code, out, err }); });
+    });
+  const work = runFleet(['worker', '--dir', homeFleet, '--store', 'daemon', '--timeout-ms', '20000']);
+  await sleep(300);
+  const nodeRes = await runFleet(['node', '--dir', homeFleet, '--store', 'daemon', '--submit', '2', '--target-agent', 'echo', '--expect-prefix', 'echo:', '--timeout-ms', '20000']);
+  await work;
+  const lastLine = nodeRes.out.split('\n').reverse().find((l) => l.startsWith('{') && l.includes('submitted'));
+  const summary = lastLine ? JSON.parse(lastLine) : null;
+  check('fleet node/worker daemon 模式任务往返（2/2）', summary?.submitted === 2 && summary?.done === 2 && summary?.resultsMatch === true, summary ?? { err: nodeRes.err.slice(-160) });
+  check('daemon 模式：node 不监听 libp2p（mode=daemon）', /"mode":"daemon"/.test(nodeRes.out), { listening: nodeRes.out.split('\n').find((l) => l.includes('listening')) ?? null });
 } finally {
   for (const s of [serve1, serve2]) {
     if (s) {

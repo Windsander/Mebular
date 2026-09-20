@@ -22,6 +22,45 @@
 - **`expiresAt` 软约定**：仅影响本机展示与本地排队；**不触发**跨端状态迁移，也不参与权威判定。
 - **因果链**：`trace.causedBy` / `trace.chain` 记录派生关系（如子任务由父任务触发）。
 
+## 2.5 域 vs 任务（W1 语义钉住）
+
+- **域（namespace）= 记忆数据通道**：参与 = **数据义务**（收 + 及时同步本地新记忆）；**不含派发语义**，不存在只读参与。
+- **任务 = 树/DAG**：root = 派发者（发起 Agent）；子任务由执行者派生（`trace.causedBy`/`chain`，禁环）；任务事件存放在某个域里，域只是**运输与存储**。
+- **派发权限三层**：**L1 传输**（发送方对接收方的域授权，默认拒绝）→ **L2 任务树**（**创建者即派发者**：子任务由执行者创建，预算随树递减）→ **L3 执行**（本地：`to.device`/`to.agent` 过滤、执行器、并发/准入）。
+
+### 2.5.1 反滥用（预算 + 公平准入）
+
+- **树预算**：root 声明 `budget {maxDepth≤8, maxChildren≤16, maxTasks≤256}`（`dispatch` 默认 `children-ok`，可 `root-only`）；子任务预算 **≤ 父剩余**（`maxDepth`/`maxTasks` 每层减一）。
+- **无效事件**：越预算/越链长/root-only 派生 = **无效 `created`** → **入口拒收**（传输入口 + `states()` 权威视图剔除，纯函数 `collab/tree.ts`，全端一致）。
+- **公平准入**（本地、确定性、无墙钟）：收件按 `(from.device, 逻辑序)` **轮转**；有其它待处理发送方时单一发送方**份额 ≤50%**；`(来源设备,目标 Agent)` 配额；每 Agent 并发默认 2；超额本地排队/拒绝——**本地记账、无全局账本**。
+- **确定性摊派**：等价目标间 `hash(taskId) mod N`（`deterministicTarget`；无偏好/热点）。
+
+### 2.5.2 每设备 Agent 目录 + 工具面
+
+- **目录**（普通记忆域，默认 `agents`）：每设备一条**签名**记录 `{device, agents:[{name,kind,capabilities?,concurrency,capacity?}], updatedAt, version}`；`task_targets = 我 L1 授权过的对端 ∩ 其目录 (device,agent)`；`capacity/load` 为**建议性**，不参与授权/一致性。
+- **工具面（MCP 与 CLI 能力完全一致）**：`fleet mcp`（stdio JSON-RPC）+ 等价子命令；对照见下表。
+
+| MCP 工具 | CLI 子命令 |
+|---|---|
+| `task_submit` | `fleet task-submit` |
+| `task_submit_batch` | `fleet task-submit-batch` |
+| `task_cancel` | `fleet task-cancel` |
+| `task_retry` | `fleet task-retry` |
+| `task_status` | `fleet task-status` |
+| `task_list` | `fleet task-list` |
+| `task_history` | `fleet task-history` |
+| `task_children` | `fleet task-children` |
+| `task_summarize` | `fleet task-summarize` |
+| `task_subscribe` | `fleet task-subscribe` |
+| `task_negotiate` | `fleet task-negotiate` |
+| `chatter_send` | `fleet chatter-send` |
+| `chatter_inbox` | `fleet chatter-inbox` |
+| `task_quota` | `fleet task-quota` |
+| `task_targets` | `fleet task-targets` |
+| `board_create` | `fleet board-create` |
+
+CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--dir/--namespace/--agent`；输出为同一结构化 JSON。
+
 ## 3. 三种协作形态（**已接 live**：1d，含用法/限制）
 
 - **审查 DAG**：任务派生为有向无环图（计划 → 分派 → 审查 → 汇总）；`trace.chain` 表达父子，避免环。

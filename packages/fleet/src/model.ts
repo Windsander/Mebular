@@ -12,6 +12,8 @@ import {
   canTransition,
   type FleetEndpoint,
   type FleetTrace,
+  type TaskBudget,
+  type TaskDispatch,
   type TaskStatus,
 } from './protocol/envelope.js';
 import type { TaskEvent } from './protocol/events.js';
@@ -37,6 +39,10 @@ export interface TaskState {
   resultRef?: string;
   /** `failed` 时的原因 */
   reason?: string;
+  /** **W1**：子树预算（声明值；缺省 root 用默认、子任务按父推导——见 `collab/tree.ts`） */
+  budget?: TaskBudget;
+  /** **W1**：root 派发策略（仅 root 有意义；子任务上不参与判定） */
+  dispatch?: TaskDispatch;
 }
 
 /** 状态迁移是否合法（显式迁移表；`from === to` 视为幂等自迁移）。 */
@@ -139,6 +145,8 @@ export function reduceTaskEvents(events: readonly TaskEvent[]): TaskState | null
   if (created.expiresAt !== undefined) state.expiresAt = created.expiresAt;
   if (winner.type === 'done' && winner.payloadRef !== undefined) state.resultRef = winner.payloadRef;
   if (winner.type === 'failed' && winner.reason !== undefined) state.reason = winner.reason;
+  if (created.budget !== undefined) state.budget = created.budget;
+  if (created.dispatch !== undefined) state.dispatch = created.dispatch;
   return state;
 }
 

@@ -57,6 +57,8 @@ import {
 } from './quickstart.js';
 import { buildJoinToken, startJoinService, type JoinService } from './jointoken.js';
 import { joinWithToken } from './join.js';
+import { toolByCli, toolCliTable } from './surface.js';
+import { runFleetMcp } from './mcp.js';
 
 interface Args {
   [key: string]: string | boolean | undefined;
@@ -763,6 +765,53 @@ async function runInvite(args: Args): Promise<number> {
   return 0;
 }
 
+/** 工具面 CLI：`fleet <tool-cli> --input '<json>'`（与 MCP `tools/call` 同一 handler）。 */
+async function runTaskTool(cliName: string, args: Args): Promise<number> {
+  const tool = toolByCli(cliName);
+  if (tool === undefined) throw new Error(`未知工具子命令：${cliName}`);
+  let input: Record<string, unknown> = {};
+  if (typeof args.input === 'string') {
+    const parsed: unknown = JSON.parse(args.input);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('--input 必须是 JSON 对象');
+    input = parsed as Record<string, unknown>;
+  }
+  const reserved = new Set(['input', 'dir', 'namespace', 'agent', 'version']);
+  for (const [key, value] of Object.entries(args)) {
+    if (reserved.has(key) || value === undefined) continue;
+    if (key === 'budget' || key === 'to' || key === 'cursor') {
+      input[key] = typeof value === 'string' ? JSON.parse(value) : value;
+    } else if (typeof value === 'string' && /^-?[0-9]+$/.test(value)) {
+      input[key] = Number(value);
+    } else {
+      input[key] = value;
+    }
+  }
+  const ctx = {
+    dir: fleetDirFrom(args),
+    ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
+    ...(typeof args.agent === 'string' ? { agent: args.agent } : {}),
+  };
+  const result = await tool.handler(input, ctx);
+  console.log(JSON.stringify(result, null, 2));
+  return 0;
+}
+
+/** `fleet tools`：打印工具 ↔ CLI 对照表（供 A2 核对）。 */
+function runTools(): number {
+  console.log(JSON.stringify({ ok: true, tools: toolCliTable() }, null, 2));
+  return 0;
+}
+
+/** `fleet mcp`：stdio MCP 任务面（与 CLI 同一 handler）。 */
+async function runMcpCommand(args: Args): Promise<number> {
+  await runFleetMcp({
+    dir: fleetDirFrom(args),
+    ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
+    ...(typeof args.agent === 'string' ? { agent: args.agent } : {}),
+  });
+  return 0;
+}
+
 async function main(): Promise<void> {
   const raw = process.argv.slice(2);
   // `service` 有自身 flags（--no-autostart/--label/--extra），走 raw argv，不经通用解析。
@@ -791,6 +840,9 @@ async function main(): Promise<void> {
   else if (command === 'quickstart') code = await runQuickstart(args);
   else if (command === 'join') code = await runJoin(args);
   else if (command === 'invite') code = await runInvite(args);
+  else if (command === 'tools') code = runTools();
+  else if (command === 'mcp') code = await runMcpCommand(args);
+  else if (command !== undefined && toolByCli(command) !== undefined) code = await runTaskTool(command, args);
   else if (command === 'pending') code = await runPending(args);
   else if (command === 'approve') code = await runApprove(args);
   else if (command === 'doctor') code = await runDoctor(args);
@@ -802,7 +854,7 @@ async function main(): Promise<void> {
   else if (command === 'leave') code = await runLeave(args);
   else if (command === 'rejoin') code = await runRejoin(args);
   else {
-    console.error('用法：fleet quickstart|join|invite|pending|approve|onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|node|worker|service|spool … | fleet --version');
+    console.error('用法：fleet quickstart|join|invite|pending|approve|tools|mcp|task-submit|task-submit-batch|task-cancel|task-retry|task-status|task-list|task-history|task-children|task-summarize|task-subscribe|task-negotiate|chatter-send|chatter-inbox|task-quota|task-targets|board-create|onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|node|worker|service|spool … | fleet --version');
     code = 2;
   }
   } catch (error) {

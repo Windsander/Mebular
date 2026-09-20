@@ -333,7 +333,7 @@ function hasScope(granted, required) {
  * 启动 HTTP MCP server。
  * @returns {Promise<{ server: import('node:http').Server, host: string, port: number, auth: string, close: () => Promise<void> }>}
  */
-export async function startHttpServer({ home, service, buildServer, host = '127.0.0.1', port = 7331, auth = 'none', tls = false, tlsKey, tlsCert, tokensFile }) {
+export async function startHttpServer({ home, app, service, buildServer, host = '127.0.0.1', port = 7331, auth = 'none', tls = false, tlsKey, tlsCert, tokensFile }) {
   const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
   if (!isLoopback && (auth === 'none' || !tls)) {
     const error = new Error(
@@ -374,7 +374,7 @@ export async function startHttpServer({ home, service, buildServer, host = '127.
   });
   await mcpServer.connect(transport);
 
-  async function authenticate(req, body) {
+  async function authenticate(req, body, requiredOverride) {
     if (auth === 'none') return { ok: true };
     const header = req.headers['authorization'];
     if (typeof header !== 'string' || !header.startsWith('Bearer ')) {
@@ -391,7 +391,7 @@ export async function startHttpServer({ home, service, buildServer, host = '127.
     if (!grant) {
       return { ok: false, status: 401, message: 'invalid token', challenge: 'Bearer error="invalid_token"' };
     }
-    const required = requiredScopeForBody(body);
+    const required = requiredOverride ?? requiredScopeForBody(body);
     if (!hasScope(grant.scopes, required)) {
       return { ok: false, status: 403, message: `insufficient scope: need ${required}`, challenge: `Bearer error="insufficient_scope", scope="${required}"`, tokenId: grant.tokenId };
     }
@@ -563,6 +563,54 @@ export async function startHttpServer({ home, service, buildServer, host = '127.
           }
           return sendJson(res, 200, {});
         }
+      }
+      // W2 A3：本机 app 接口（loopback + token；单写者由 serve 锁保证）
+      if (path.startsWith('/app/')) {
+        const appRequired = path === '/app/nodes' && req.method === 'POST' ? 'memory.write' : 'memory.read';
+        const check = await authenticate(req, body, appRequired);
+        if (!check.ok) {
+          res.statusCode = check.status;
+          if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+          return sendJson(res, check.status, { ok: false, error: check.message });
+        }
+        if (path === '/app/namespaces' && req.method === 'GET') {
+          const nodes = await app.graph.listNodes({});
+          const namespaces = [...new Set(nodes.map((n) => n.namespace ?? 'default'))].sort();
+          return sendJson(res, 200, { ok: true, namespaces, count: namespaces.length });
+        }
+        if (path === '/app/nodes' && req.method === 'POST') {
+          let payload;
+          try {
+            payload = JSON.parse(body.toString('utf-8') || '{}');
+          } catch {
+            return sendJson(res, 400, { ok: false, error: 'invalid json' });
+          }
+          const type = typeof payload.type === 'string' && payload.type.length > 0 ? payload.type : null;
+          if (!type) return sendJson(res, 400, { ok: false, error: 'type 必填' });
+          const node = await app.graph.createNode(
+            type,
+            typeof payload.content === 'object' && payload.content !== null ? payload.content : {},
+            Array.isArray(payload.edges) ? payload.edges : [],
+            payload.namespace ? { namespace: payload.namespace } : {},
+          );
+          return sendJson(res, 200, { ok: true, node: { id: node.id, type: node.type, namespace: node.namespace ?? 'default' } });
+        }
+        if (path === '/app/nodes' && req.method === 'GET') {
+          const filter = {};
+          const ns = url.searchParams.get('namespace');
+          const type = url.searchParams.get('type');
+          const limit = Number(url.searchParams.get('limit') ?? '0');
+          if (ns) filter.namespace = ns;
+          if (type) filter.type = type;
+          const nodes = await app.graph.listNodes(filter);
+          const trimmed = Number.isInteger(limit) && limit > 0 ? nodes.slice(0, limit) : nodes;
+          return sendJson(res, 200, {
+            ok: true,
+            count: trimmed.length,
+            nodes: trimmed.map((n) => ({ id: n.id, type: n.type, namespace: n.namespace ?? 'default', content: n.content })),
+          });
+        }
+        return sendJson(res, 404, { ok: false, error: 'not_found', path });
       }
       if (path === '/mcp') {
         const check = await authenticate(req, body);

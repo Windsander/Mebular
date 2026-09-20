@@ -245,10 +245,32 @@ function runPrintConfig(flags) {
 async function runStatus() {
   const { createMebular } = await import('../src/config.mjs');
   const { MemoryService } = await import('@mebular/core');
-  const { app, home, storagePath } = await createMebular();
+  const { app, home, storagePath, deviceId, identityMode, config } = await createMebular();
   try {
     const status = await new MemoryService(app).status();
-    console.log(JSON.stringify({ ...status, home, storagePath }, null, 2));
+    // store 锁持有者（单写者证据）
+    let storeLock = null;
+    const lockPath = join(home, 'lock');
+    if (existsSync(lockPath)) {
+      try {
+        storeLock = JSON.parse(await readFile(lockPath, 'utf-8'));
+      } catch {
+        storeLock = { path: lockPath, corrupt: true };
+      }
+    }
+    const nodes = await app.graph.listNodes({});
+    const namespaces = [...new Set(nodes.map((n) => n.namespace ?? 'default'))].sort();
+    console.log(JSON.stringify({
+      ...status,
+      home,
+      storagePath,
+      deviceId,
+      identityMode,
+      network: { enabled: config.network?.enabled ?? false, listen: config.network?.libp2p?.listen ?? [] },
+      storeLock,
+      namespaces,
+      joinService: config.joinService ?? null,
+    }, null, 2));
   } finally {
     await app.shutdown().catch(() => undefined);
   }
@@ -319,7 +341,7 @@ async function main() {
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
           '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',
-          '  init / keygen / print-config / status   初始化与状态',
+          '  init / keygen / print-config / status|doctor   初始化、状态与自检（身份模式/网络/锁/域/join）',
         ].join('\n'),
       );
       process.exit(0);
@@ -334,6 +356,7 @@ async function main() {
       runPrintConfig(flags);
       return;
     case 'status':
+    case 'doctor':
       await runStatus();
       return;
     default:

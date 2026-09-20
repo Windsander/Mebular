@@ -19,7 +19,8 @@
       </div>
       <div class="topbar-actions">
         <button id="open-settings" class="btn" type="button">⚙ 设置</button>
-        <button id="add-device" class="btn btn-primary" type="button">＋ 连接新对端</button>
+        <button id="add-device" class="btn" type="button">＋ 连接已有地址</button>
+        <button id="invite-device" class="btn btn-primary" type="button">＋ 邀请新设备</button>
       </div>
     </header>
 
@@ -127,6 +128,18 @@
       <div id="settings-body"></div>
       <div class="modal-actions">
         <button id="settings-close" class="btn btn-crt" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="invite" class="modal" hidden>
+    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="邀请新设备">
+      <h2>邀请新设备 <span class="crt-tag"><span class="crt-tag-dot"></span>一次性令牌</span></h2>
+      <div id="invite-body"></div>
+      <div class="modal-actions">
+        <button id="invite-to-settings" class="btn btn-crt" type="button" hidden>去设置启用</button>
+        <button id="invite-regenerate" class="btn btn-crt" type="button" hidden>重新生成</button>
+        <button id="invite-close" class="btn btn-crt" type="button">关闭</button>
       </div>
     </div>
   </div>

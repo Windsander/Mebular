@@ -44,8 +44,20 @@ jobs:
       - name: Cleanliness (orphan modules / stale refs / deprecated)
         run: npm run check:cleanliness
 
+      - name: Surface parity (MCP tools ↔ CLI, unified tables, no orphans)
+        run: npm run check:surface-parity
+
+      - name: Docs consistency (EN/CN structure, links, tool names, no handwritten numbers)
+        run: npm run check:docs
+
       - name: Fleet acceptance (M2 local / M3 remote / M4 agents / Step 1b onboard)
         run: npm run verify:fleet:all
+
+      - name: Unified daemon (identity mode / app API / fail-closed / single-writer)
+        run: npm run verify:daemon
+
+      - name: Daemon cluster (two-machine loopback sync + delegated identity)
+        run: npm run verify:daemon:cluster
 
       - name: stdio MCP (real client)
         run: npm run verify:mcp:stdio

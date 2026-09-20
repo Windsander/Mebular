@@ -1,0 +1,72 @@
+{
+  "v": 1,
+  "note": "W1 任务树夹具：root 声明预算与派发策略；子任务预算 ≤ 父剩余（越深越小）。",
+  "root": {
+    "v": 1,
+    "eventId": "task-A-root#created",
+    "taskId": "task-A-root",
+    "type": "created",
+    "actor": { "device": "device-A", "agent": "board" },
+    "at": 1700000000000,
+    "toStatus": "queued",
+    "trace": { "chain": [] },
+    "to": { "device": "device-B", "agent": "worker" },
+    "intent": "root",
+    "budget": { "maxDepth": 2, "maxChildren": 4, "maxTasks": 8 },
+    "dispatch": "children-ok"
+  },
+  "childWithinBudget": {
+    "v": 1,
+    "eventId": "task-A-root~c0#created",
+    "taskId": "task-A-root~c0",
+    "type": "created",
+    "actor": { "device": "device-B", "agent": "worker" },
+    "at": 1700000000001,
+    "toStatus": "queued",
+    "trace": { "causedBy": "task-A-root", "chain": ["task-A-root"] },
+    "to": { "device": "device-B", "agent": "worker" },
+    "intent": "child-0",
+    "budget": { "maxDepth": 1, "maxChildren": 4, "maxTasks": 7 }
+  },
+  "childOverBudget": {
+    "v": 1,
+    "eventId": "task-A-root~c1#created",
+    "taskId": "task-A-root~c1",
+    "type": "created",
+    "actor": { "device": "device-B", "agent": "worker" },
+    "at": 1700000000002,
+    "toStatus": "queued",
+    "trace": { "causedBy": "task-A-root", "chain": ["task-A-root"] },
+    "to": { "device": "device-B", "agent": "worker" },
+    "intent": "child-1",
+    "budget": { "maxDepth": 2, "maxChildren": 4, "maxTasks": 7 }
+  },
+  "rootOnlyChild": {
+    "v": 1,
+    "eventId": "task-A-ro#created",
+    "taskId": "task-A-ro~c0",
+    "type": "created",
+    "actor": { "device": "device-B", "agent": "worker" },
+    "at": 1700000000003,
+    "toStatus": "queued",
+    "trace": { "causedBy": "task-A-ro", "chain": ["task-A-ro"] },
+    "to": { "device": "device-B", "agent": "worker" },
+    "intent": "child",
+    "budget": { "maxDepth": 1, "maxChildren": 4, "maxTasks": 7 },
+    "note": "需与 rootOnlyRoot 同树；此处仅字段样例"
+  },
+  "rootOnlyRoot": {
+    "v": 1,
+    "eventId": "task-A-ro#created",
+    "taskId": "task-A-ro",
+    "type": "created",
+    "actor": { "device": "device-A", "agent": "board" },
+    "at": 1700000000003,
+    "toStatus": "queued",
+    "trace": { "chain": [] },
+    "to": { "device": "device-B", "agent": "worker" },
+    "intent": "root",
+    "budget": { "maxDepth": 3, "maxChildren": 4, "maxTasks": 8 },
+    "dispatch": "root-only"
+  }
+}

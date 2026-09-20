@@ -39,6 +39,9 @@ const CONFIG_PATCH_SPECS = new Map([
   ['mcp.http.port', { kind: 'int', min: 0, max: 65535, nullable: true }],
   ['mcp.http.auth', { kind: 'enum', values: ['none', 'bearer', 'oauth'] }],
   ['mcp.http.tls', { kind: 'bool' }],
+  ['joinService.enabled', { kind: 'bool' }],
+  ['joinService.bind', { kind: 'string', nonEmpty: true }],
+  ['joinService.port', { kind: 'int', min: 0, max: 65535, nullable: true }],
 ]);
 
 function flattenPatch(patch, prefix = '') {
@@ -132,6 +135,7 @@ function deleteAtPath(root, path) {
     else break;
   }
 }
+import { buildJoinToken } from './jointoken.mjs';
 
 const SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
 const SCOPE_RANK = { 'memory.read': 0, 'memory.write': 1, 'memory.admin': 2 };
@@ -546,6 +550,9 @@ export async function startHttpServer({
   tlsKey,
   tlsCert,
   tokensFile,
+  deviceId,
+  namespace = 'tasks',
+  joinEndpoint,
   // 生效运行时快照（console 设置卡展示用；含 CLI/env 覆盖后的实际值）
   runtime = null,
   // D1 只读；D2 打开写端点（仍需 memory.admin scope + CSRF）
@@ -583,15 +590,32 @@ export async function startHttpServer({
   const codes = new Map();
   const revoked = await loadRevoked(revokedFile);
 
-  // 单实例 transport（stateful + JSON 响应）
-  const mcpServer = buildServer(service);
-  const transport = new WebStandardStreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-    enableJsonResponse: true,
-  });
-  await mcpServer.connect(transport);
+  // W3：**多会话** transport（每个 `mcp-session-id` 一条；CLI 每次调用可各自 initialize）。
+  // 无 session 头的请求（如 CLI initialize）新建会话；会话经 `onsessioninitialized` 登记，关闭时回收。
+  const mcpSessions = new Map(); // sessionId → { transport, server }
+  async function transportFor(sessionId) {
+    if (sessionId) return mcpSessions.get(sessionId)?.transport ?? null;
+    const server = buildServer(service);
+    const entry = { transport: null, server };
+    const transport = new WebStandardStreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      enableJsonResponse: true,
+      onsessioninitialized: (id) => {
+        entry.transport = transport;
+        mcpSessions.set(id, entry);
+      },
+    });
+    transport.onclose = () => {
+      const id = transport.sessionId;
+      if (id) mcpSessions.delete(id);
+      void server.close().catch(() => undefined);
+    };
+    entry.transport = transport;
+    await server.connect(transport);
+    return transport;
+  }
 
-  async function authenticate(req, body, requiredScope = null) {
+  async function authenticate(req, body, requiredOverride) {
     if (auth === 'none') return { ok: true };
     const header = req.headers['authorization'];
     if (typeof header !== 'string' || !header.startsWith('Bearer ')) {
@@ -608,7 +632,7 @@ export async function startHttpServer({
     if (!grant) {
       return { ok: false, status: 401, message: 'invalid token', challenge: 'Bearer error="invalid_token"' };
     }
-    const required = requiredScope ?? requiredScopeForBody(body);
+    const required = requiredOverride ?? requiredScopeForBody(body);
     if (!hasScope(grant.scopes, required)) {
       return { ok: false, status: 403, message: `insufficient scope: need ${required}`, challenge: `Bearer error="insufficient_scope", scope="${required}"`, tokenId: grant.tokenId };
     }
@@ -757,6 +781,7 @@ export async function startHttpServer({
     /^\/admin\/api\/grants\/([^/]+)\/revoke$/,
     /^\/admin\/api\/devices\/([^/]+)\/(revoke|connect|disconnect|sync|reset-watermarks)$/,
     /^\/admin\/api\/config$/,
+    /^\/admin\/api\/invite$/,
     /^\/admin\/api\/policy-issuers$/,
     /^\/admin\/api\/memberships$/,
     /^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/,
@@ -788,6 +813,30 @@ export async function startHttpServer({
   async function applyAdminWrite(req, res, path, body) {
     if (!app || !service) {
       return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
+    }
+
+    // 新设备上车：签发一次性加入令牌（需 joinService 已启用；由守护 identity 签发）
+    if (path === '/admin/api/invite') {
+      if (typeof deviceId !== 'string' || typeof joinEndpoint !== 'string') {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'join_disabled',
+          message: '未启用加入服务：在「设置 → 常用配置」开启 joinService.enabled 并重启 serve',
+        });
+      }
+      const input = parseJsonBody(body) ?? {};
+      const ns = typeof input.namespace === 'string' && input.namespace ? input.namespace : namespace;
+      const ttlMs = Number.isInteger(input.ttlMs) && input.ttlMs > 0 ? input.ttlMs : 900_000;
+      const token = await buildJoinToken({ mebular: app, deviceId, namespace: ns, endpoint: joinEndpoint, ttlMs });
+      const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
+      return sendJson(res, 201, {
+        ok: true,
+        token: inline,
+        endpoint: joinEndpoint,
+        namespace: ns,
+        expiresAt: token.expiresAt,
+        ttlMs,
+      });
     }
 
     // 控制台配置写入：curated 合并 + 原子写 + .bak 备份（全部需重启生效）
@@ -1197,12 +1246,133 @@ export async function startHttpServer({
         }
         return sendJson(res, 404, { error: 'not_found', path });
       }
+      // W2 A3：本机 app 接口（loopback + token；单写者由 serve 锁保证）
+      if (path.startsWith('/app/')) {
+        const appRequired = req.method === 'POST' ? 'memory.write' : 'memory.read';
+        const check = await authenticate(req, body, appRequired);
+        if (!check.ok) {
+          res.statusCode = check.status;
+          if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+          return sendJson(res, check.status, { ok: false, error: check.message });
+        }
+        if (path === '/app/network' && req.method === 'GET') {
+          return sendJson(res, 200, {
+            ok: true,
+            deviceId: deviceId ?? null,
+            peerId: app.node?.peerId?.id ?? null,
+            multiaddrs: app.node?.getLocalMultiaddrs?.() ?? [],
+          });
+        }
+        if (path === '/app/namespaces' && req.method === 'GET') {
+          const nodes = await app.graph.listNodes({});
+          const namespaces = [...new Set(nodes.map((n) => n.namespace ?? 'default'))].sort();
+          return sendJson(res, 200, { ok: true, namespaces, count: namespaces.length });
+        }
+        if (path === '/app/nodes' && req.method === 'POST') {
+          let payload;
+          try {
+            payload = JSON.parse(body.toString('utf-8') || '{}');
+          } catch {
+            return sendJson(res, 400, { ok: false, error: 'invalid json' });
+          }
+          const type = typeof payload.type === 'string' && payload.type.length > 0 ? payload.type : null;
+          if (!type) return sendJson(res, 400, { ok: false, error: 'type 必填' });
+          const node = await app.graph.createNode(
+            type,
+            typeof payload.content === 'object' && payload.content !== null ? payload.content : {},
+            Array.isArray(payload.edges) ? payload.edges : [],
+            payload.namespace ? { namespace: payload.namespace } : {},
+          );
+          return sendJson(res, 200, { ok: true, node: { id: node.id, type: node.type, namespace: node.namespace ?? 'default' } });
+        }
+        if (path === '/app/nodes' && req.method === 'GET') {
+          const filter = {};
+          const ns = url.searchParams.get('namespace');
+          const type = url.searchParams.get('type');
+          const limit = Number(url.searchParams.get('limit') ?? '0');
+          if (ns) filter.namespace = ns;
+          if (type) filter.type = type;
+          const nodes = await app.graph.listNodes(filter);
+          const trimmed = Number.isInteger(limit) && limit > 0 ? nodes.slice(0, limit) : nodes;
+          return sendJson(res, 200, {
+            ok: true,
+            count: trimmed.length,
+            nodes: trimmed.map((n) => ({ id: n.id, type: n.type, namespace: n.namespace ?? 'default', content: n.content })),
+          });
+        }
+        // W2 A4：join 邀请（守护用自身身份签发令牌）
+        if (path === '/app/join/invite' && req.method === 'POST') {
+          if (typeof deviceId !== 'string' || typeof joinEndpoint !== 'string') {
+            return sendJson(res, 400, { ok: false, error: '守护未启用 joinService（缺 deviceId/joinEndpoint）' });
+          }
+          let payload;
+          try {
+            payload = JSON.parse(body.toString('utf-8') || '{}');
+          } catch {
+            payload = {};
+          }
+          const ns = typeof payload.namespace === 'string' && payload.namespace ? payload.namespace : namespace;
+          const ttlMs = Number.isInteger(payload.ttlMs) && payload.ttlMs > 0 ? payload.ttlMs : 900_000;
+          const endpoint = typeof payload.endpoint === 'string' && payload.endpoint ? payload.endpoint : joinEndpoint;
+          const token = await buildJoinToken({ mebular: app, deviceId, namespace: ns, endpoint, ttlMs });
+          const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
+          return sendJson(res, 200, { ok: true, token: inline, endpoint, namespace: ns, expiresAt: token.expiresAt, nonce: token.nonce });
+        }
+        // W2：策略/成员（守护持有图表；fleet 客户端化）
+        if (path === '/app/policy/effective' && req.method === 'GET') {
+          const device = url.searchParams.get('device');
+          if (!device) return sendJson(res, 400, { ok: false, error: 'device 必填' });
+          const namespaces = await app.getEffectiveNamespaces(device);
+          return sendJson(res, 200, { ok: true, device, namespaces });
+        }
+        if (path === '/app/policy/membership' && req.method === 'GET') {
+          const ns = url.searchParams.get('namespace') ?? namespace;
+          const membership = await app.getNamespaceMembership(ns);
+          return sendJson(res, 200, { ok: true, namespace: ns, ...membership });
+        }
+        if (path.startsWith('/app/policy/') && req.method === 'POST') {
+          let payload;
+          try {
+            payload = JSON.parse(body.toString('utf-8') || '{}');
+          } catch {
+            return sendJson(res, 400, { ok: false, error: 'invalid json' });
+          }
+          if (path === '/app/policy/grant') {
+            const namespaces = Array.isArray(payload.namespaces) ? payload.namespaces : payload.namespace ? [payload.namespace] : [];
+            if (typeof payload.subject !== 'string' || namespaces.length === 0) return sendJson(res, 400, { ok: false, error: 'subject/namespaces 必填' });
+            const event = await app.grantNamespaces({ subject: payload.subject, namespaces, ...(typeof payload.note === 'string' ? { note: payload.note } : {}) });
+            return sendJson(res, 200, { ok: true, eventId: event.id, grant: event.data?.grant ?? null });
+          }
+          if (path === '/app/policy/revoke') {
+            if (typeof payload.grantId !== 'string' || !payload.grantId) return sendJson(res, 400, { ok: false, error: 'grantId 必填' });
+            const event = await app.revokeGrant({ grantId: payload.grantId, ...(typeof payload.subject === 'string' ? { subject: payload.subject } : {}), ...(typeof payload.note === 'string' ? { note: payload.note } : {}) });
+            return sendJson(res, 200, { ok: true, eventId: event.id });
+          }
+          if (path === '/app/policy/member') {
+            const ns = typeof payload.namespace === 'string' && payload.namespace ? payload.namespace : namespace;
+            if (typeof payload.member !== 'string' || !payload.member) return sendJson(res, 400, { ok: false, error: 'member 必填' });
+            const event = await app.declareNamespaceMembership({ member: payload.member, namespace: ns, active: payload.active !== false, ...(typeof payload.note === 'string' ? { note: payload.note } : {}) });
+            return sendJson(res, 200, { ok: true, eventId: event.id });
+          }
+          if (path === '/app/policy/declare-issuer') {
+            if (typeof payload.subject !== 'string' || !payload.subject) return sendJson(res, 400, { ok: false, error: 'subject 必填' });
+            const event = await app.declarePolicyIssuer({ subject: payload.subject, ...(typeof payload.note === 'string' ? { note: payload.note } : {}) });
+            return sendJson(res, 200, { ok: true, eventId: event.id });
+          }
+        }
+        return sendJson(res, 404, { ok: false, error: 'not_found', path });
+      }
       if (path === '/mcp') {
         const check = await authenticate(req, body);
         if (!check.ok) {
           res.statusCode = check.status;
           if (check.challenge) res.setHeader('www-authenticate', check.challenge);
           return sendJson(res, check.status, { jsonrpc: '2.0', error: { code: -32001, message: check.message }, id: null });
+        }
+        const sessionId = req.headers['mcp-session-id'];
+        const transport = await transportFor(typeof sessionId === 'string' ? sessionId : undefined);
+        if (!transport) {
+          return sendJson(res, 404, { jsonrpc: '2.0', error: { code: -32001, message: 'unknown session' }, id: null });
         }
         const webRequest = toWebRequest(req, body, origin);
         const response = await transport.handleRequest(webRequest);
@@ -1231,7 +1401,7 @@ export async function startHttpServer({
   metadata = metadataFor(issuer, { registrationEnabled });
   const close = async () => {
     await new Promise((resolve) => server.close(() => resolve()));
-    await mcpServer.close().catch(() => undefined);
+    for (const entry of mcpSessions.values()) await entry.server.close().catch(() => undefined);
   };
   return { server, host, port: actualPort, auth, issuer, close };
 }

@@ -522,6 +522,8 @@ export async function buildSettings({ app, service, config, runtime }) {
     identity: {
       deviceId: app.deviceId,
       name: runtime?.deviceName ?? config?.deviceName ?? null,
+      // W2：root（持主私钥）/ delegated（仅委派链）
+      mode: runtime?.identityMode ?? config?.identity?.mode ?? null,
       peerId: status.peerId,
       multiaddrs: status.listenAddrs,
       relays: status.relays,
@@ -565,6 +567,12 @@ export async function buildSettings({ app, service, config, runtime }) {
       port: runtime?.mcp?.port ?? config?.mcp?.http?.port ?? 7331,
       auth: runtime?.mcp?.auth ?? config?.mcp?.http?.auth ?? 'none',
       tls: runtime?.mcp?.tls ?? config?.mcp?.http?.tls === true,
+    },
+    join: {
+      // 新设备上车（令牌 → 委派证书）；由 config.joinService 控制
+      enabled: config?.joinService?.enabled === true,
+      bind: config?.joinService?.bind ?? '0.0.0.0',
+      port: config?.joinService?.port ?? 4002,
     },
   };
 }

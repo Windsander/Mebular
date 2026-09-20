@@ -280,13 +280,103 @@ async function runConsole(flags) {
 async function runStatus() {
   const { createMebular } = await import('../src/config.mjs');
   const { MemoryService } = await import('@mebular/core');
-  const { app, home, storagePath } = await createMebular();
+  const { app, home, storagePath, deviceId, identityMode, config } = await createMebular();
   try {
     const status = await new MemoryService(app).status();
-    console.log(JSON.stringify({ ...status, home, storagePath }, null, 2));
+    // store 锁持有者（单写者证据）
+    let storeLock = null;
+    const lockPath = join(home, 'lock');
+    if (existsSync(lockPath)) {
+      try {
+        storeLock = JSON.parse(await readFile(lockPath, 'utf-8'));
+      } catch {
+        storeLock = { path: lockPath, corrupt: true };
+      }
+    }
+    const nodes = await app.graph.listNodes({});
+    const namespaces = [...new Set(nodes.map((n) => n.namespace ?? 'default'))].sort();
+    console.log(JSON.stringify({
+      ...status,
+      home,
+      storagePath,
+      deviceId,
+      identityMode,
+      network: { enabled: config.network?.enabled ?? false, listen: config.network?.libp2p?.listen ?? [] },
+      storeLock,
+      namespaces,
+      joinService: config.joinService ?? null,
+    }, null, 2));
   } finally {
     await app.shutdown().catch(() => undefined);
   }
+}
+
+
+/** 由 flags 组装工具入参（`--input` JSON 优先，其余 flag 直填并做整数还原）。 */
+function buildToolInput(flags) {
+  if (typeof flags.input === 'string') {
+    const parsed = JSON.parse(flags.input);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('--input 必须是 JSON 对象');
+    return parsed;
+  }
+  const reserved = new Set(['home', 'token', 'config', 'storage', 'device-id', 'device-name', 'input']);
+  const out = {};
+  for (const [k, v] of Object.entries(flags)) {
+    if (reserved.has(k)) continue;
+    out[k] = typeof v === 'string' && /^-?[0-9]+$/.test(v) ? Number(v) : v;
+  }
+  return out;
+}
+
+/**
+ * W3 表面一致性：`mebular memory_*` 与 MCP **同工具名、同 handler**。
+ * **单写者**：守护持锁时作为本机 MCP 客户端走 `/mcp`+bearer；未持锁（dev）允许直连。
+ */
+async function runMemoryTool(name, flags) {
+  const { toolByName } = await import('../src/tools.mjs');
+  const spec = toolByName(name);
+  if (!spec) {
+    console.error(`未知命令：${name}`);
+    process.exit(2);
+  }
+  const args = buildToolInput(flags);
+  const home = homeDir();
+  const lockPath = join(home, 'lock');
+  let result;
+  if (existsSync(lockPath)) {
+    const { loadConfigFile } = await import('../src/config.mjs');
+    const { callToolViaHttp } = await import('../src/client.mjs');
+    const fileConfig = await loadConfigFile(home).catch(() => ({}));
+    const httpConf = fileConfig.mcp?.http ?? {};
+    const host = httpConf.host ?? '127.0.0.1';
+    const port = httpConf.port ?? 7331;
+    const token = typeof flags.token === 'string' ? flags.token : process.env.MEBULAR_TOKEN;
+    if ((httpConf.auth ?? 'none') !== 'none' && !token) {
+      console.error('守护持锁且启用鉴权：请提供 --token 或 MEBULAR_TOKEN（`mebular token grant`）');
+      process.exit(2);
+    }
+    const mcpResult = await callToolViaHttp({ endpoint: `http://${host}:${port}`, token, name, args });
+    if (mcpResult?.isError) {
+      console.error(JSON.stringify(mcpResult.structuredContent ?? mcpResult));
+      process.exit(1);
+    }
+    result = mcpResult?.structuredContent;
+  } else {
+    const { createMebular } = await import('../src/config.mjs');
+    const { MemoryService } = await import('@mebular/core');
+    const { app } = await createMebular();
+    try {
+      const specResult = await spec.handler(new MemoryService(app), args);
+      if (specResult.isError) {
+        console.error(specResult.content[0]?.text ?? '工具失败');
+        process.exit(1);
+      }
+      result = specResult.structuredContent;
+    } finally {
+      await app.shutdown().catch(() => undefined);
+    }
+  }
+  console.log(JSON.stringify(result, null, 2));
 }
 
 async function main() {
@@ -299,6 +389,10 @@ async function main() {
     }
     case 'serve': {
       const { startServeServer } = await import('../src/server.mjs');
+      const { loadConfigFile } = await import('../src/config.mjs');
+      const home = homeDir();
+      const fileConfig = await loadConfigFile(home).catch(() => ({}));
+      const httpConf = fileConfig.mcp?.http ?? {};
       // D4：常驻进程写 service.heartbeat（role=mebular-serve），供 `service status`/doctor 判定。
       try {
         const { startHeartbeat, resolveBuildSha } = await import('@mebular/service');
@@ -308,12 +402,12 @@ async function main() {
       }
       try {
         const result = await startServeServer({
-          host: typeof flags.host === 'string' ? flags.host : undefined,
-          port: flags.port !== undefined ? Number(flags.port) : undefined,
-          auth: typeof flags.auth === 'string' ? flags.auth : undefined,
+          host: typeof flags.host === 'string' ? flags.host : httpConf.host,
+          port: flags.port !== undefined ? Number(flags.port) : httpConf.port,
+          auth: typeof flags.auth === 'string' ? flags.auth : httpConf.auth,
           tlsKey: typeof flags['tls-key'] === 'string' ? flags['tls-key'] : undefined,
           tlsCert: typeof flags['tls-cert'] === 'string' ? flags['tls-cert'] : undefined,
-          tokensFile: typeof flags['tokens-file'] === 'string' ? flags['tokens-file'] : undefined,
+          tokensFile: typeof flags['tokens-file'] === 'string' ? flags['tokens-file'] : httpConf.tokensFile,
         });
         console.log(`SERVE_READY ${JSON.stringify({ host: result.host, port: result.port, auth: result.auth, issuer: result.issuer })}`);
       } catch (error) {
@@ -359,7 +453,10 @@ async function main() {
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
           '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',
-          '  init / keygen / print-config / status   初始化与状态',
+          '  init / keygen / print-config / status|doctor   初始化、状态与自检（身份模式/网络/锁/域/join）',
+          '  tools                        打印 MCP 工具 ↔ CLI 对照表',
+          '  memory_write|memory_write_batch|memory_query|memory_search|memory_profile|memory_skills|',
+          '  memory_history|memory_graph|memory_import|memory_status|memory_sync   与 MCP 同名同 handler',
         ].join('\n'),
       );
       process.exit(0);
@@ -373,12 +470,24 @@ async function main() {
     case 'print-config':
       runPrintConfig(flags);
       return;
+    case 'tools': {
+      const { TOOL_SPECS } = await import('../src/tools.mjs');
+      console.log(JSON.stringify({ ok: true, tools: TOOL_SPECS.map((t) => ({ tool: t.name, cli: t.name })) }, null, 2));
+      return;
+    }
     case 'status':
+    case 'doctor':
       await runStatus();
       return;
-    default:
+    default: {
+      const { toolByName } = await import('../src/tools.mjs');
+      if (typeof command === 'string' && toolByName(command)) {
+        await runMemoryTool(command, flags);
+        return;
+      }
       console.error(`未知命令：${command ?? '(空)'}`);
       process.exit(2);
+    }
   }
 }
 

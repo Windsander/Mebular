@@ -27,6 +27,7 @@ const state = {
   settings: null,
   rawConfig: null,
   cfgDraft: {},
+  inviteToken: null,
   selected: null,
   degraded: null,
   error: null,
@@ -519,6 +520,9 @@ const CONFIG_EDITOR = [
   { path: 'network.libp2p.listen', label: '监听地址', type: 'list', placeholder: '/ip4/127.0.0.1/tcp/14001', help: 'multiaddr 列表；留空 = 默认监听' },
   { path: 'network.libp2p.relayServers', label: 'Relay 服务器', type: 'list', placeholder: '/ip4/<relay>/tcp/4001/p2p/<ID>', help: 'circuit relay，纯传输、可自托管' },
   { path: 'network.libp2p.relayUnlimited', label: 'Relay 不做限额', type: 'bool', warn: '仅可信自托管 relay；公网暴露有风险' },
+  { group: '设备接入（邀请新设备）', path: 'joinService.enabled', label: '启用加入服务', type: 'bool', help: '开启后可由「＋ 邀请新设备」签发一次性令牌（需重启）' },
+  { path: 'joinService.bind', label: '绑定地址', type: 'text', placeholder: '127.0.0.1', help: '令牌 join 端点绑定；仅可信 LAN 使用 0.0.0.0' },
+  { path: 'joinService.port', label: '端口', type: 'number', min: 0, max: 65535, help: '默认 4002' },
   { group: 'MCP 接入', path: 'mcp.http.host', label: '监听地址', type: 'text', placeholder: '127.0.0.1' },
   { path: 'mcp.http.port', label: '端口', type: 'number', min: 0, max: 65535 },
   { path: 'mcp.http.auth', label: '鉴权模式', type: 'select', options: [['none', 'none（仅回环）'], ['bearer', 'bearer（token）'], ['oauth', 'oauth']] },
@@ -562,6 +566,9 @@ const CONFIG_EFFECTIVE = {
   'mcp.http.port': (s) => s.mcp.port,
   'mcp.http.auth': (s) => s.mcp.auth,
   'mcp.http.tls': (s) => s.mcp.tls,
+  'joinService.enabled': (s) => s.join?.enabled,
+  'joinService.bind': (s) => s.join?.bind,
+  'joinService.port': (s) => s.join?.port,
 };
 
 function fieldInitial(field) {
@@ -715,6 +722,9 @@ function renderSettings() {
       ${kv([
         copyRow('deviceId', s.identity.deviceId),
         ...(s.identity.name ? [['名称', escapeHtml(s.identity.name)]] : []),
+        ['身份模式', s.identity.mode === 'delegated'
+          ? 'delegated（委派证书链，无主私钥）'
+          : 'root（持有用户主密钥，可签发任意设备）'],
         ...(s.identity.peerId ? [copyRow('peerId', s.identity.peerId)] : []),
         ...addrRows,
         copyRow('storagePath', s.storage.path ?? '—'),
@@ -1486,6 +1496,75 @@ $('#handoff-close').addEventListener('click', () => {
 });
 $('#handoff-plan').addEventListener('click', runHandoffPlan);
 $('#handoff-confirm').addEventListener('click', confirmHandoff);
+
+// ---------- 邀请新设备（T2 令牌加入：主密钥不复制） ----------
+
+async function openInvite() {
+  $('#invite').hidden = false;
+  await renderInvite();
+}
+
+async function renderInvite() {
+  const body = $('#invite-body');
+  const join = state.settings?.join;
+  const regenerate = $('#invite-regenerate');
+  const toSettings = $('#invite-to-settings');
+  if (!join?.enabled) {
+    state.inviteToken = null;
+    regenerate.hidden = true;
+    toSettings.hidden = false;
+    body.innerHTML = `
+      <p class="modal-note muted">加入服务未启用：开启后即可在新设备上用一条命令入网（主密钥不复制，令牌一次性、默认 15 分钟有效）。</p>
+      <p class="cfg-path muted">在「设置 → 常用配置 → 设备接入」勾选 <code>joinService.enabled</code> 并保存，重启 serve 后生效。</p>
+    `;
+    return;
+  }
+  toSettings.hidden = true;
+  regenerate.hidden = false;
+  body.innerHTML = '<p class="muted">正在签发令牌…</p>';
+  try {
+    const res = await api('/admin/api/invite', { method: 'POST', body: {} });
+    state.inviteToken = res;
+    const cmd = `fleet join --token ${res.token} --daemon --dir ~/.mebular --device <新设备ID>`;
+    body.innerHTML = `
+      <dl class="settings-kv">
+        <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code></dd>
+        <dt>默认成员分区</dt><dd><code>${escapeHtml(res.namespace)}</code></dd>
+        <dt>有效期至</dt><dd>${escapeHtml(formatTime(res.expiresAt))}（一次性）</dd>
+      </dl>
+      <div class="readout-block">
+        <span class="domain-label">令牌</span>
+        <div class="copyable"><code>${escapeHtml(res.token)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
+      </div>
+      <div class="readout-block">
+        <span class="domain-label">新设备</span>
+        <div class="copyable"><code>${escapeHtml(cmd)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(cmd)}">复制命令</button></div>
+      </div>
+      <div class="readout-block">
+        <span class="domain-label">本机批准</span>
+        <div class="copyable"><code>fleet pending --dir ~/.mebular</code><button class="btn btn-small btn-crt" data-copy="fleet pending --dir ~/.mebular">复制</button></div>
+      </div>
+      <p class="crt-warn">⚠ 令牌即入网权限：一次性、短时效（默认 15 分钟），仅经可信 LAN 使用，请勿写入工单或公开日志。</p>
+    `;
+    body.querySelectorAll('[data-copy]').forEach((button) => {
+      button.addEventListener('click', () => copyText(button.dataset.copy, button));
+    });
+  } catch (error) {
+    state.inviteToken = null;
+    body.innerHTML = `<p class="crt-warn">签发失败：${escapeHtml(error.message)}</p>`;
+  }
+}
+
+$('#invite-device').addEventListener('click', openInvite);
+$('#invite-close').addEventListener('click', () => {
+  $('#invite').hidden = true;
+});
+$('#invite-regenerate').addEventListener('click', renderInvite);
+$('#invite-to-settings').addEventListener('click', () => {
+  $('#invite').hidden = true;
+  $('#settings').hidden = false;
+  renderSettings();
+});
 
 $('#device-card-close').addEventListener('click', () => {
   state.selected = null;

@@ -33,6 +33,39 @@ export const TERMINAL_PRECEDENCE: Readonly<Record<TaskStatus, number>> = {
   done: 1,
 };
 
+/** 任务树预算（**W1**）：随树单调递减；root 声明，子任务 ≤ 父剩余。 */
+export interface TaskBudget {
+  /** 允许的最大深度（root 深度 0；链长 = 祖先数） */
+  maxDepth: number;
+  /** 每个父任务可派生的直接子任务上限 */
+  maxChildren: number;
+  /** 整个子树的任务总数上限（含 root） */
+  maxTasks: number;
+}
+
+/** root 级派发策略：`children-ok`（默认，可派生）| `root-only`（执行者只能干、不得再派）。 */
+export const DISPATCH_POLICIES = ['children-ok', 'root-only'] as const;
+export type TaskDispatch = (typeof DISPATCH_POLICIES)[number];
+
+/** root 预算默认值（W1 上界，可由 root 收紧）。 */
+export const DEFAULT_ROOT_BUDGET: Readonly<TaskBudget> = { maxDepth: 8, maxChildren: 16, maxTasks: 256 };
+
+/** 预算合法性（非负整数；越界由树不变式判定，这里只做形状）。 */
+export function isTaskBudget(value: unknown): value is TaskBudget {
+  if (typeof value !== 'object' || value === null) return false;
+  const b = value as Record<string, unknown>;
+  return (
+    Number.isInteger(b.maxDepth) && (b.maxDepth as number) >= 0 &&
+    Number.isInteger(b.maxChildren) && (b.maxChildren as number) >= 0 &&
+    Number.isInteger(b.maxTasks) && (b.maxTasks as number) >= 0
+  );
+}
+
+/** 派发策略守卫。 */
+export function isTaskDispatch(value: unknown): value is TaskDispatch {
+  return typeof value === 'string' && (DISPATCH_POLICIES as readonly string[]).includes(value);
+}
+
 /** 端标识：设备 + 该设备上的 Agent 名。 */
 export interface FleetEndpoint {
   device: string;

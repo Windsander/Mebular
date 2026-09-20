@@ -10,6 +10,49 @@
 - 两台机器可互相 TCP 可达（同一 LAN 即可；跨 NAT 见 RUNBOOK §3）。
 - 信任根 = **同一把用户主密钥**：所有共享它的设备同属一个用户。新设备必须**导入**已有设备的主密钥，否则设备证书互不信任、握手失败、永不收敛。
 
+## 0.5 一键上车（Stage 1）：每台一条命令
+
+两端跑**同一构建 SHA**（`fleet --version` 一致）。A 先出码，B 用码加入，A 再批准：
+
+```bash
+# A（第一条命令）：建根 + 声明签发者/成员 + 自授权 + 产出加入码 +（默认）服务 + doctor
+fleet quickstart --dir ~/.mebular --device device-A \
+  --listen /ip4/0.0.0.0/tcp/4001 \
+  --code-file ~/.mebular/join-code.txt        # 0600；内联 base64 同时打到 stdout
+
+# B（第一条命令）：版本核对 → 导入信任材料与 A 的地址 → 声明成员 →（默认）服务 → doctor
+fleet join --dir ~/.mebular --code-file <把 join-code.txt 安全传到 B> --device device-B
+
+# A（批准）：pending 列出「在册但未授权」设备；approve 发图上 grant（并登记 B 的地址）
+fleet pending --dir ~/.mebular
+fleet approve --dir ~/.mebular --device device-B --addr <B 的 multiaddr>
+```
+
+- **默认值**：`--dir` = `$FLEET_DIR` 或 `~/.mebular`；`--device` = `$FLEET_DEVICE` 或主机名（清洗）；quickstart/join 的 `--listen` = `/ip4/0.0.0.0/tcp/4001`（端口占用会带修复建议报错）。
+- **agent 自动探测**：PATH 有 `hermes` → `hermes`；存在 `MEBULAR_FLEET_OPENCHAMBER_*` → `openchamber`；否则 `echo`（结果见 JSON 的 `agentSources`，可用 `--agent` 覆盖）。
+- **加入码含信任材料**（共享主密钥）：`--code-file` 以 **0600** 落盘；不写日志、不回显密钥材料；务必经安全通道传输。**Stage 2 起推荐令牌路径（主密钥不复制，见 §0.6）**。
+- **`quickstart --auto-approve`（⚠️ 有风险）**：常驻 `fleet node` 会对**任何在册未授权设备自动授权**。仅在受控信任域使用（默认关闭）。
+- **LAN 自动发现**：core 的 mDNS 发现是**注入式**（`network.bonjourFactory`）且**不自动拨号**，Stage 1 未启用（不做半成品）；加入码内的 multiaddr 即**跨网回退**路径。真·同网零地址发现需 core 支持自动拨号（后续）。
+
+## 0.6 信任模型 v2（T2）：令牌加入 —— 主密钥不再复制
+
+推荐路径：inviter（**任意在册设备**，不要求某台特定设备）出**短时效令牌**，新设备用令牌换取**委派证书**。
+
+```bash
+# inviter（任意已入网设备；需其 `fleet node` 在跑以提供 join 端点）
+fleet invite --dir ~/.mebular                       # 输出令牌（内联 base64）+ join 端点
+# 新设备（不导入主密钥；只看令牌）
+fleet join --token <内联|--token-file> --dir ~/.mebular --device device-B
+```
+
+- **委派证书链**：`master → inviter → 新设备`（叶→根；**跳数上界 4**，超长拒绝）。链逐跳用设备公钥验签、末跳由用户主密钥验签；**没有任何“指定主设备/CA”**，任意在册设备都可签发下级证书。
+- **主密钥可离线**：日常扩容不需要主私钥参与；新设备只保留**主公钥**（`master-key.json` 无 `privateKeyPkcs8`），无静态加密/主密钥私钥材料。
+- **令牌三态吊销**（与设备证书吊销**分开**）：**过期**（inviter 时钟为准）/ **一次性**（nonce 已用，本地 `<store>.join-tokens.json`）/ **被撕**（显式撤销）。
+- **设备证书吊销级联**：`device_revoke` 后，被吊销设备**及其签发的下级证书**一并失效（与策略层 R-b 同源；需吊销事件同步到达各端才生效 → 有传播延迟）。
+- **兼容**：Stage 1 的 `quickstart` 仍产出**共享主密钥加入码**（`fleet join --code`），旧部署继续可用；含主密钥私钥的加入码不落日志、`--code-file` 0600。
+- **⚠️ 安全提示（join 端点）**：`fleet node` 的 join 端点是 **LAN/明文 HTTP**，令牌/加入码是**秘密**且**短时效**（默认 15 分钟、一次性）。仅建议在**可信 LAN** 使用；跨网段需经 relay/额外防护（未来可加 TLS/mTLS）。令牌可被持有者用于让**任意**设备入网，请勿写入工单/公开日志，传输后即弃；`--join-port`/`--join-host` 只控制通告地址，不改变明文性质。
+- **同版本要求**：委派证书是**破坏性协议变更**（旧节点只做一层主密钥验签，收到委派证书会**拒绝**，安全方向）→ 集群须全端升级；共享主密钥 + 主密钥直签证书的旧部署与新端互通。
+
 ## 1. 安装（DTO）
 
 版本钉死到某个 commit，安装即构建（无需 clone、无需发布 npm）：
@@ -27,20 +70,20 @@ fleet --version
 ## 2. 机器 A：建根 + 上车
 
 ```bash
-fleet onboard --dir ~/.fleet \
+fleet onboard --dir ~/.mebular \
   --device device-A \
   --peer-device device-B \
   --agent echo:echo
 ```
 
-- 生成 `~/.fleet/master-key.json`（**信任根**，0600）、`~/.fleet/fleet.config.json`（0600）与设备身份文件。
+- 生成 `~/.mebular/master-key.json`（**信任根**，0600）、`~/.mebular/fleet.config.json`（0600）与设备身份文件。
 - 输出 JSON 含 `masterKeyFingerprint`（`sha256:<12hex>`，**不是**密钥材料）与 `next` 提示。
-- **把 `~/.fleet/master-key.json` 通过安全通道（scp/密钥管理）分发给机器 B**。
+- **把 `~/.mebular/master-key.json` 通过安全通道（scp/密钥管理）分发给机器 B**。
 
 启动（`--submit` 派 N 个任务给 B 的 `echo` agent；等待首轮同步后再提交）：
 
 ```bash
-fleet node --dir ~/.fleet \
+fleet node --dir ~/.mebular \
   --submit 5 --target-agent echo \
   --expect-prefix ECHO: \
   --wait-sync-ms 30000 --timeout-ms 40000 --linger-ms 30000
@@ -52,7 +95,7 @@ fleet node --dir ~/.fleet \
 ## 3. 机器 B：导入同一主密钥并上车
 
 ```bash
-fleet onboard --dir ~/.fleet \
+fleet onboard --dir ~/.mebular \
   --device device-B \
   --peer-device device-A \
   --peer-addr /ip4/<A_LAN_IP>/tcp/<PORT>/p2p/<A_PEER_LIBP2P_ID> \
@@ -65,14 +108,14 @@ fleet onboard --dir ~/.fleet \
 运行执行端：
 
 ```bash
-fleet worker --dir ~/.fleet --timeout-ms 30000
+fleet worker --dir ~/.mebular --timeout-ms 30000
 # 期望：{"role":"worker","device":"device-B","executed":5}
 ```
 
 A 在线时，B 自检应全绿：
 
 ```bash
-fleet doctor --dir ~/.fleet
+fleet doctor --dir ~/.mebular
 # summary: ok=true skipped=[]
 ```
 
@@ -83,25 +126,25 @@ fleet doctor --dir ~/.fleet
 
 ```bash
 # A 上车：登记 B 但不写配置白名单、不写本地 policyIssuers
-fleet onboard --dir ~/.fleet --device device-A --peer-device device-B \
+fleet onboard --dir ~/.mebular --device device-A --peer-device device-B \
   --no-config-grant --agent echo:echo
 
 # A 在图上把自己声明为引导签发者（去中心化 bootstrap；受信任链约束、可被 device_revoke 排斥）
-fleet declare-issuer --dir ~/.fleet --to device-A
+fleet declare-issuer --dir ~/.mebular --to device-A
 # 期望：{"ok":true,"role":"declare-issuer","subject":"device-A","eventId":"…"}
 
 # A 为 B 签发 grant（落保留命名空间 __policy__，由 core 保证必须链到主密钥、不可自授）
-fleet grant --dir ~/.fleet --to device-B --namespace tasks
+fleet grant --dir ~/.mebular --to device-B --namespace tasks
 # 期望：{"ok":true,"role":"grant","grantId":"<uuid>","subject":"device-B","namespaces":["tasks"]}
 
 # A 自检：图上 grant（无配置白名单）授权通过；策略签发者来自图上声明
-fleet doctor --dir ~/.fleet
+fleet doctor --dir ~/.mebular
 #   PASS  namespace 已授权  namespace=tasks peers=[device-B:ok]
 #   PASS  策略签发者       issuers=[device-A]
 
 # 撤销（按 grantId 精确失效；R-d：恢复必须用**新的** grantId）
-fleet revoke --dir ~/.fleet --grant-id <uuid>
-fleet doctor --dir ~/.fleet
+fleet revoke --dir ~/.mebular --grant-id <uuid>
+fleet doctor --dir ~/.mebular
 #   FAIL  namespace 已授权  … → 曾被 namespace_revoke 撤销；必须用新的 grantId 恢复（R-d）
 ```
 
@@ -115,29 +158,29 @@ fleet doctor --dir ~/.fleet
 
 ```bash
 # 1) A 上车：登记 B，但不写配置白名单/policyIssuers
-fleet onboard --dir ~/.fleet --device device-A --peer-device device-B \
+fleet onboard --dir ~/.mebular --device device-A --peer-device device-B \
   --listen /ip4/0.0.0.0/tcp/4001 --no-config-grant --agent echo:echo
 
 # 2) A 图上声明自己为引导签发者；再为 B 签 grant
-fleet declare-issuer --dir ~/.fleet --to device-A
-fleet grant --dir ~/.fleet --to device-B --namespace tasks
+fleet declare-issuer --dir ~/.mebular --to device-A
+fleet grant --dir ~/.mebular --to device-B --namespace tasks
 # → {"ok":true,"role":"grant","grantId":"<uuid>","subject":"device-B","namespaces":["tasks"]}
 
 # 3) A 起服务（把 multiaddr 里的 0.0.0.0 换成 A 的 LAN IP 给 B）
-fleet node --dir ~/.fleet --submit 5 --target-agent echo --expect-prefix ECHO: \
+fleet node --dir ~/.mebular --submit 5 --target-agent echo --expect-prefix ECHO: \
   --wait-sync-ms 30000 --timeout-ms 40000 --linger-ms 30000
 
 # 4) B 上车并导入同一主密钥：**无需** --policy-issuer（图上声明会同步过来）
-fleet onboard --dir ~/.fleet --device device-B --peer-device device-A \
+fleet onboard --dir ~/.mebular --device device-B --peer-device device-A \
   --peer-addr /ip4/<A_LAN_IP>/tcp/4001/p2p/<A_PEER_ID> \
   --master-key /path/to/master-key.json --agent echo:echo
 
 # 5) B 同步并执行（B 已采纳 A 的图上声明，进而采纳其 grant）
-fleet worker --dir ~/.fleet --timeout-ms 30000
+fleet worker --dir ~/.mebular --timeout-ms 30000
 # → {"role":"worker","device":"device-B","executed":5}
 
 # 6) A 侧确认 done=5 / resultsMatch=true；B 在线时 B 自检 ok=true skipped=[]
-fleet doctor --dir ~/.fleet
+fleet doctor --dir ~/.mebular
 ```
 
 > 兼容：旧写法 `onboard --policy-issuer device-A` 仍可用（配置作为 bootstrap 回退）；新部署推荐只用 `declare-issuer`。
@@ -187,7 +230,7 @@ npm run verify:fleet:all       # local + remote + agents + onboard + grant 汇�
 | 场景 | 现象 | 恢复 |
 | --- | --- | --- |
 | 主密钥文件缺失 | `onboard` 非零退出，`error` 提示 master key | 从 A 重新分发，或用 `--master-key` 指对路径 |
-| 主密钥权限过宽（0644/组可读） | `doctor` FAIL `主密钥权限` + hint | `chmod 600 ~/.fleet/master-key.json` |
+| 主密钥权限过宽（0644/组可读） | `doctor` FAIL `主密钥权限` + hint | `chmod 600 ~/.mebular/master-key.json` |
 | 主密钥文件损坏 / 形状非法 | `onboard` 非零退出，`error` 提示 JSON/形状非法 | 重新分发完整文件；不要手改 |
 | 未授权 namespace | `doctor` FAIL `namespace 已授权` | 签 `fleet grant --to <peer> --namespace <name>`，或 `onboard --namespace <name>`（bootstrap） |
 | 授权被撤销 | `doctor` FAIL 且 hint「新 grantId（R-d）」 | 用**全新** grantId 重新 `fleet grant`；旧 grantId 不可复用（R-d） |
@@ -200,7 +243,7 @@ npm run verify:fleet:all       # local + remote + agents + onboard + grant 汇�
 ## 8. 安全与边界
 
 - **权限**：主密钥/配置必须 0600，设备目录建议 0700；`doctor` 会断言主密钥权限。
-- **目录**：生产请用 `~/.fleet`；仓库内默认的 `./.fleet` 已在 `.gitignore` 忽略（内含归一化主密钥），但更安全的做法是永远放在仓库外。
+- **目录**：生产请用 `~/.mebular`；仓库内默认的 `./.fleet` 已在 `.gitignore` 忽略（内含归一化主密钥），但更安全的做法是永远放在仓库外。
 - **日志脱敏**：`fleet node`/`fleet worker`/`doctor` 输出只含设备名、多播地址、指纹与计数，**不含**私钥材料；`verify:fleet:onboard` 会断言日志中搜不到私钥。
 - 主密钥即身份：泄露等同身份泄露；不要提交进仓库、不要放进镜像层。
 - 临时文件与密钥一律写在临时目录，不进仓库。
@@ -262,16 +305,16 @@ Windows 常无 Hermes/Python。OpenChamber 任务执行改用 **provider #2**（
 
 ```bash
 # 安装并启动（默认登录/开机自启）；--no-autostart 只安装不自启
-fleet service install fleet-node   --dir ~/.fleet
-fleet service install fleet-worker --dir ~/.fleet
+fleet service install fleet-node   --dir ~/.mebular
+fleet service install fleet-worker --dir ~/.mebular
 mebular service install            # mebular-serve
 
 fleet service status          # 注册/运行/心跳新鲜度/SHA
 fleet service logs fleet-node --tail 50
 fleet service uninstall fleet-node
 
-fleet node   --dir ~/.fleet --run-forever
-fleet worker --dir ~/.fleet --run-forever
+fleet node   --dir ~/.mebular --run-forever
+fleet worker --dir ~/.mebular --run-forever
 ```
 
 - **平台**：macOS = launchd 用户级 LaunchAgent（`~/Library/LaunchAgents`，RunAtLoad + KeepAlive + ThrottleInterval）；Linux = `systemd --user`（`Restart=on-failure`，`WantedBy=default.target`）；Windows = **Task Scheduler onlogon**（`schtasks`，无需管理员）。
@@ -290,11 +333,11 @@ fleet worker --dir ~/.fleet --run-forever
 
 ```bash
 # 把 device-B 声明为 tasks 分区的成员（在册）；--leave 注销
-fleet member --dir ~/.fleet --to device-B --namespace tasks
-fleet member --dir ~/.fleet --to device-B --namespace tasks --leave
+fleet member --dir ~/.mebular --to device-B --namespace tasks
+fleet member --dir ~/.mebular --to device-B --namespace tasks --leave
 
 # 查询：生效成员 = 图上在册成员 ∩ 该成员对该分区的生效授权（默认拒绝不变）
-fleet members --dir ~/.fleet --namespace tasks
+fleet members --dir ~/.mebular --namespace tasks
 # → {"ok":true,"active":true,"members":["device-A","device-B"],"onRecord":["device-A","device-B"]}
 ```
 
@@ -314,15 +357,15 @@ fleet members --dir ~/.fleet --namespace tasks
 
 ```bash
 # 先看交接计划（只读，不删）：继任者是否在册、还差哪些作者/多少条
-fleet leave --dir ~/.fleet --namespace tasks --successor device-B --dry-run
+fleet leave --dir ~/.mebular --namespace tasks --successor device-B --dry-run
 # → {"ok":false,"successorIsMember":true,"pendingTotal":1,"pendingByAuthor":[{"author":"device-A","count":1}]}
 
 # 默认：继任者已全量 ack 才清理；否则中止且数据原封不动
-fleet leave --dir ~/.fleet --namespace tasks --successor device-B
+fleet leave --dir ~/.mebular --namespace tasks --successor device-B
 # → {"ok":true,"deleted":{"events":12,"nodes":12,"edges":0},"handoffEventId":"…"}
 
 # 本地应急（跳过门禁；仍如实记录 forced:true + 缺失明细）；**不经 MCP/远程暴露**
-fleet leave --dir ~/.fleet --namespace tasks --successor device-B --force
+fleet leave --dir ~/.mebular --namespace tasks --successor device-B --force
 ```
 
 - **全量 ack 判定（H1）**：复用既有 per-event ack（`getPendingEvents(successor)`）——退订方校验继任者已 ack 其在该分区持有的**他人署名**事件（继任者自证事件其本就拥有）；**不新增同步协议、不放宽快照门禁**（SEALING §4 快照门禁仍不放宽）。
@@ -337,12 +380,12 @@ fleet leave --dir ~/.fleet --namespace tasks --successor device-B --force
 
 ```bash
 # 重入（准入：①本机对该分区有生效授权 ②成员在册；任一不满足 → 显式失败）
-fleet rejoin --dir ~/.fleet --namespace tasks
+fleet rejoin --dir ~/.mebular --namespace tasks
 # 成功 → {"ok":true,"reset":true,"member":true,"authorized":true}
 # 未授权 → {"ok":false,"reason":"not-authorized"}
 
 # doctor 显示重入/重置状态
-fleet doctor --dir ~/.fleet   # PASS 重入状态  reset=true（已声明重置；下次同步将从零拉取）
+fleet doctor --dir ~/.mebular   # PASS 重入状态  reset=true（已声明重置；下次同步将从零拉取）
 ```
 
 - **准入（R1）**：`getEffectiveNamespaces(self)` 含该分区（存在签发给本机的 grant；默认拒绝不变）**且**成员在册；否则显式失败（`not-authorized` / `membership-not-active`），不静默。
@@ -359,3 +402,65 @@ fleet doctor --dir ~/.fleet   # PASS 重入状态  reset=true（已声明重置�
 - **配额制闲聊**：`FleetChatter.send` 对 `from.device` 走 `LocalQuota`（`accepted`/`queued`/`rejected`，无全局协调）；落图消息随记忆同步，收件按 `messageId` 幂等。
 - **验收**：`npm run verify:fleet:collab`（真实 libp2p loopback 双端，12/12）；夹具 `packages/fleet/protocol/collab.example.json`；矩阵见 `PROTOCOL-INVARIANTS.md §7`。
 - **限制**：自动化用确定性 fake executor（`EchoExecutor`）；真实执行器（Hermes/OpenChamber）沿用既有适配器，本轮未新增真实 Agent 验收。
+
+## 15. Agent 如何派活（W1：域=数据通道 · 任务=树）
+
+**域（namespace）= 数据通道**（参与即收 + 及时同步本地新记忆，无派发语义）；**任务 = 树**：root 由发起 Agent 创建，子任务由执行者在预算内派生。派发权限三层：**L1 域授权（默认拒绝）→ L2 任务树（创建者即派发者）→ L3 本地执行（device/agent 过滤 + 并发/准入）**。
+
+```bash
+# 0) 建板（= 建域 + 授权 + 邀请成员，免手工 grant/member）
+fleet board_create --dir ~/.mebular --input '{"name":"team","with":["device-B"]}'
+
+# 1) 看我能派给谁（L1 授权 ∩ 对端 Agent 目录）
+fleet task_targets --dir ~/.mebular --namespace team
+
+# 2) 发起 root（带预算与派发策略；agent 由工具填 from，root 有主）
+fleet task_submit --dir ~/.mebular --namespace team --agent board --input \
+  '{"intent":"审查 root","to":{"device":"device-B","agent":"echo"},"budget":{"maxDepth":2,"maxChildren":4,"maxTasks":8},"dispatch":"children-ok"}'
+
+# 3) 跟踪 / 树 / 汇总
+fleet task_status  --dir ~/.mebular --input '{"taskId":"task-…"}'
+fleet task_children --dir ~/.mebular --input '{"taskId":"task-…"}'
+fleet task_summarize --dir ~/.mebular --input '{"taskId":"task-…"}'
+fleet task_subscribe --dir ~/.mebular --watch          # 变化推送（轮询）
+
+# 4) 运维/协作
+fleet task_quota --dir ~/.mebular
+fleet task_negotiate --dir ~/.mebular --input '{"taskId":"task-…","kind":"counter","round":1}'
+fleet chatter_send  --dir ~/.mebular --input '{"topic":"status","text":"…"}'
+fleet chatter_inbox --dir ~/.mebular
+```
+
+- **与 MCP 完全一致**：`fleet mcp`（stdio JSON-RPC）暴露同名工具（`task_submit`…`board_create`），**同一 handler**、同一结构化输出；对照表见 [`DESIGN.md`](./DESIGN.md) §2.5.2。
+- **反滥用**：子任务预算 **≤ 父剩余**（越深越小）；越预算/越链长/`root-only` 派生属**无效事件**（入口拒收 + 权威视图剔除）；worker **公平轮转**（单一发送方份额 ≤50%）、每 Agent 并发默认 2。
+- **目录**：设备在 `agents` 域发布签名目录（`name/kind/capabilities?/concurrency/capacity?`）；`task_targets` = L1 授权 ∩ 目录；`capacity` 仅建议，**不参与授权/一致性**。
+
+## 16. 一机一节点（W2 守护形态，推荐）
+
+**一台机器 = 一个守护（记忆/身份/网络/信任唯一持有者）**；fleet 与各 Agent 都是本机客户端，共用守护身份与存储（数据分域），**同机 Agent 默认可信**。统一 home = `~/.mebular`（`MEBULAR_HOME` 覆盖）。
+
+```bash
+# A（首台，root 身份）：一条命令写好守护 home + fleet 客户端 + 令牌（+ 默认装 mebular-serve）
+fleet quickstart --daemon --dir ~/.mebular --device device-A \
+  --listen /ip4/0.0.0.0/tcp/4001 --daemon-port 7331 --agent echo
+mebular service install mebular-serve      # 常驻守护（也可由 quickstart 默认安装）
+mebular status                             # identityMode=root / 网络 / 锁 / 域 / join 服务
+
+# 守护托管邀请 + 新机加入（B 无需主密钥 → delegated 身份）
+fleet invite --dir ~/.mebular                       # 出令牌（守护签发）
+fleet join  --token <内联|文件> --daemon --dir ~/.mebular --device device-B --agent echo
+fleet pending --dir ~/.mebular
+fleet approve --dir ~/.mebular --device device-B
+
+# 本机 app 接口（loopback + bearer；非回环 fail-closed；单写者）
+# GET /app/nodes?namespace=&type=&limit= · POST /app/nodes · GET /app/namespaces
+# POST /app/policy/{grant,revoke,member,declare-issuer} · GET /app/policy/{effective,membership}
+```
+
+- **身份模式**：首台 `root`（持主密钥）；令牌加入的设备 `delegated`（仅委派链+设备钥，**无主私钥**）。`mebular doctor` 一并显示。
+- **fleet 客户端化**：`fleet node|worker --store daemon` **不监听 libp2p、不托管 join**（网络/信任归守护）。
+- **完整命令序列（真机审核侧参考）**：`npm i -g <repo>` → A `fleet quickstart --daemon` → `mebular service install mebular-serve` → `fleet invite` → B `fleet join --token … --daemon` → A `fleet approve` → `mebular doctor` / `fleet doctor` 双绿。
+
+### 16.1 测试模式（embedded，**test/dev only**）
+
+`--store embedded`（或未配置 `store`）保留**本地 Mebular**运行（现有 `verify:*` 与本地开发用）；旧 `~/.fleet` 目录**已从生产形态退役**，仅在显式 `--dir` 指向时作为测试目录使用，**不要用于生产**。

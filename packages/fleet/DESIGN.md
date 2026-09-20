@@ -22,6 +22,56 @@
 - **`expiresAt` 软约定**：仅影响本机展示与本地排队；**不触发**跨端状态迁移，也不参与权威判定。
 - **因果链**：`trace.causedBy` / `trace.chain` 记录派生关系（如子任务由父任务触发）。
 
+## 2.5 域 vs 任务（W1 语义钉住）
+
+- **域（namespace）= 记忆数据通道**：参与 = **数据义务**（收 + 及时同步本地新记忆）；**不含派发语义**，不存在只读参与。
+- **任务 = 树/DAG**：root = 派发者（发起 Agent）；子任务由执行者派生（`trace.causedBy`/`chain`，禁环）；任务事件存放在某个域里，域只是**运输与存储**。
+- **派发权限三层**：**L1 传输**（发送方对接收方的域授权，默认拒绝）→ **L2 任务树**（**创建者即派发者**：子任务由执行者创建，预算随树递减）→ **L3 执行**（本地：`to.device`/`to.agent` 过滤、执行器、并发/准入）。
+
+### 2.5.1 反滥用（预算 + 公平准入）
+
+- **树预算**：root 声明 `budget {maxDepth≤8, maxChildren≤16, maxTasks≤256}`（`dispatch` 默认 `children-ok`，可 `root-only`）；子任务预算 **≤ 父剩余**（`maxDepth`/`maxTasks` 每层减一）。
+- **无效事件**：越预算/越链长/root-only 派生 = **无效 `created`** → **入口拒收**（传输入口 + `states()` 权威视图剔除，纯函数 `collab/tree.ts`，全端一致）。
+- **公平准入**（本地、确定性、无墙钟）：收件按 `(from.device, 逻辑序)` **轮转**；有其它待处理发送方时单一发送方**份额 ≤50%**；`(来源设备,目标 Agent)` 配额；每 Agent 并发默认 2；超额本地排队/拒绝——**本地记账、无全局账本**。
+- **确定性摊派**：等价目标间 `hash(taskId) mod N`（`deterministicTarget`；无偏好/热点）。
+
+### 2.5.2 每设备 Agent 目录 + 工具面
+
+- **目录**（普通记忆域，默认 `agents`）：每设备一条**签名**记录 `{device, agents:[{name,kind,capabilities?,concurrency,capacity?}], updatedAt, version}`；`task_targets = 我 L1 授权过的对端 ∩ 其目录 (device,agent)`；`capacity/load` 为**建议性**，不参与授权/一致性。
+- **工具面（MCP 与 CLI 能力完全一致）**：`fleet mcp`（stdio JSON-RPC）+ 等价子命令；对照见下表。
+
+| MCP 工具 | CLI 子命令 |
+|---|---|
+| `task_submit` | `fleet task_submit` |
+| `task_submit_batch` | `fleet task_submit_batch` |
+| `task_cancel` | `fleet task_cancel` |
+| `task_retry` | `fleet task_retry` |
+| `task_status` | `fleet task_status` |
+| `task_list` | `fleet task_list` |
+| `task_history` | `fleet task_history` |
+| `task_children` | `fleet task_children` |
+| `task_summarize` | `fleet task_summarize` |
+| `task_subscribe` | `fleet task_subscribe` |
+| `task_negotiate` | `fleet task_negotiate` |
+| `chatter_send` | `fleet chatter_send` |
+| `chatter_inbox` | `fleet chatter_inbox` |
+| `task_quota` | `fleet task_quota` |
+| `task_targets` | `fleet task_targets` |
+| `board_create` | `fleet board_create` |
+
+CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--dir/--namespace/--agent`；输出为同一结构化 JSON。
+
+## 2.6 一机一节点（W2）：统一守护 + fleet 客户端化
+
+**拓扑**：**一台机器 = 一个节点 = 一个守护**（`mebular serve`），守护是 **记忆/身份/网络/信任的唯一持有者**；fleet 与各 Agent（MCP/skill）都是**本机客户端**，共用守护的身份与存储，数据分域。
+
+- **身份模式**：`root`（持有用户主密钥私钥，首台设备）| `delegated`（仅委派证书链 + 设备钥，**无主私钥**——T2 令牌加入的设备）。`mebular status|doctor` 显示 `identityMode`。
+- **同机互信**：设备级身份，**同机 Agent 之间默认可信**（不做加密隔离）；跨机仍走"链到主密钥"的证书链 + 域授权（默认拒绝）。
+- **存储模式**（fleet）：`daemon`（默认于统一上车；fleet 只走守护本机 app 接口，**不监听 libp2p、不托管 join**）| `embedded`（**仅测试/CI**，本地 Mebular）。
+- **本机 app 接口**（loopback HTTP + bearer，非回环 fail-closed）：`createNode`/`listNodes`/`namespaces` + `policy/{grant,revoke,member,declare-issuer,effective,membership}` + `join/invite`；**单写者**（守护持 store 锁，第二写者 `MCP_STORAGE_LOCKED`）。
+- **统一 home**：`~/.mebular`（`MEBULAR_HOME` 覆盖）——守护 `config.json` 与 fleet `fleet.config.json` 同目录。
+- **join 归守护**：invite/join/委派签发由守护提供；fleet 仅作客户端。embedded 模式保留 fleet 自托管 join（`packages/fleet/src/jointoken.ts` + `fleet node --join-serve`），**仅测试/CI（test-only）**，生产不用。
+
 ## 3. 三种协作形态（**已接 live**：1d，含用法/限制）
 
 - **审查 DAG**：任务派生为有向无环图（计划 → 分派 → 审查 → 汇总）；`trace.chain` 表达父子，避免环。

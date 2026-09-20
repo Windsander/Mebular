@@ -12,6 +12,9 @@ import {
   hexToBytes,
   bytesToBase64,
   base64ToBytes,
+  signDelegatedCertificate,
+  verifyCertificateChain,
+  MAX_CERT_CHAIN_HOPS,
   type DeviceCertificate,
 } from '../p2p/handshake/AuthenticationHandshake.js';
 import { CryptoError, IdentityError } from '../errors.js';
@@ -26,6 +29,8 @@ export interface DeviceIdentity {
   privateKey: CryptoKey; // Ed25519（sign）
   createdAt: number;
   certificate?: DeviceCertificate;
+  /** 叶→根证书链（T2）；主密钥直签时 = `[certificate]` */
+  certificateChain?: DeviceCertificate[];
 }
 
 export interface UserMasterKeyPair {
@@ -153,15 +158,85 @@ export class IdentityManager {
     }
 
     device.certificate = certificate;
+    device.certificateChain = [certificate];
     this.deviceKeys.set(deviceId, device);
     return certificate;
   }
 
-  /** 用用户主公钥验证设备证书 */
-  async verifyDeviceCertificate(certificate: DeviceCertificate): Promise<boolean> {
+  /**
+   * T2：用**签发者设备私钥**为另一设备签发**委派证书**（信任模型 v2）。
+   * 签发者必须**已持有有效证书链**（即在册设备）；委派跳数不得超过 `MAX_CERT_CHAIN_HOPS`。
+   * **不需要用户主私钥**——主密钥可完全离线。
+   */
+  async issueDelegatedDeviceCertificate(subjectDeviceId: string, issuerDeviceId: string): Promise<DeviceCertificate> {
+    const subject = this.deviceKeys.get(subjectDeviceId);
+    if (!subject) throw new IdentityError(`设备密钥不存在：${subjectDeviceId}`);
+    const issuer = this.deviceKeys.get(issuerDeviceId);
+    if (!issuer) throw new IdentityError(`签发者设备密钥不存在：${issuerDeviceId}`);
+    const issuerChain = issuer.certificateChain ?? (issuer.certificate ? [issuer.certificate] : []);
+    if (issuerChain.length === 0) {
+      throw new IdentityError(`签发者 ${issuerDeviceId} 无有效证书链，不能委派`);
+    }
+    if (issuerChain.length > MAX_CERT_CHAIN_HOPS) {
+      throw new IdentityError(`证书链已达上界（${MAX_CERT_CHAIN_HOPS}），拒绝再委派`);
+    }
+    const leaf = await signDelegatedCertificate(
+      {
+        deviceId: subject.deviceId,
+        devicePublicKey: bytesToHex(subject.publicKey),
+        createdAt: Date.now(),
+        metadata: { name: subject.name },
+      },
+      { deviceId: issuer.deviceId, devicePrivateKey: issuer.privateKey, devicePublicKey: bytesToHex(issuer.publicKey) },
+    );
+    subject.certificate = leaf;
+    subject.certificateChain = [leaf, ...issuerChain];
+    this.deviceKeys.set(subjectDeviceId, subject);
+    return leaf;
+  }
+
+  /**
+   * T2：为**尚未在本机注册**的新设备（仅知其公钥）签发委派证书（join 服务用）。
+   * 返回该新设备的叶证书与完整链（叶→根）；**不持有**新设备私钥。
+   */
+  async issueDelegatedCertificateFor(
+    subjectDeviceId: string,
+    subjectPublicKeyHex: string,
+    issuerDeviceId: string,
+  ): Promise<{ certificate: DeviceCertificate; certificateChain: DeviceCertificate[] }> {
+    const issuer = this.deviceKeys.get(issuerDeviceId);
+    if (!issuer) throw new IdentityError(`签发者设备密钥不存在：${issuerDeviceId}`);
+    const issuerChain = issuer.certificateChain ?? (issuer.certificate ? [issuer.certificate] : []);
+    if (issuerChain.length === 0) throw new IdentityError(`签发者 ${issuerDeviceId} 无有效证书链，不能委派`);
+    if (issuerChain.length > MAX_CERT_CHAIN_HOPS) {
+      throw new IdentityError(`证书链已达上界（${MAX_CERT_CHAIN_HOPS}），拒绝再委派`);
+    }
+    const leaf = await signDelegatedCertificate(
+      { deviceId: subjectDeviceId, devicePublicKey: subjectPublicKeyHex, createdAt: Date.now(), metadata: {} },
+      { deviceId: issuer.deviceId, devicePrivateKey: issuer.privateKey, devicePublicKey: bytesToHex(issuer.publicKey) },
+    );
+    return { certificate: leaf, certificateChain: [leaf, ...issuerChain] };
+  }
+
+  /** 用用户主公钥验证**完整证书链**（叶→根；T2）。 */
+  async verifyDeviceCertificateChain(chain: readonly DeviceCertificate[], subjectDeviceId?: string): Promise<boolean> {
     if (!this.masterPublicKey) {
       throw new IdentityError('缺少用户主公钥，无法验证设备证书');
     }
+    return verifyCertificateChain(chain, this.masterPublicKey, {
+      ...(subjectDeviceId !== undefined ? { subjectDeviceId } : {}),
+    });
+  }
+
+  /** 用用户主公钥验证设备证书（单证书 = 旧主密钥直签；委派证书须用链式接口）。 */
+  async verifyDeviceCertificate(certificate: DeviceCertificate, chain?: readonly DeviceCertificate[]): Promise<boolean> {
+    if (!this.masterPublicKey) {
+      throw new IdentityError('缺少用户主公钥，无法验证设备证书');
+    }
+    if (chain !== undefined && chain.length > 1) {
+      return this.verifyDeviceCertificateChain(chain, certificate.deviceId);
+    }
+    if (certificate.issuer !== undefined) return false;
     try {
       const key = await crypto.subtle.importKey(
         'raw',

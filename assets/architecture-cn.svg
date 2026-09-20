@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 430" width="980" height="430" role="img" aria-label="Mebular one-machine-one-node topology">
+  <defs>
+    <style>
+      .bg{fill:#0f172a}.card{fill:#111c33;stroke:#334155;stroke-width:1.5;rx:10}
+      .daemon{fill:#122a4a;stroke:#3b82f6;stroke-width:1.8;rx:10}
+      .app{fill:#132f28;stroke:#34d399;stroke-width:1.5;rx:8}
+      .t{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial;fill:#e2e8f0;font-size:14px}
+      .h{font-size:16px;font-weight:700;fill:#ffffff}.s{font-size:12px;fill:#94a3b8}
+      .l{stroke:#94a3b8;stroke-width:1.6;fill:none;marker-end:url(#a)}
+      .lb{font-size:12px;fill:#cbd5e1}
+    </style>
+    <marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#94a3b8"/></marker>
+  </defs>
+  <rect class="bg" width="980" height="430"/>
+  <text class="h" x="24" y="34">Mebular — 一机 = 一节点 = 一守护</text>
+  <text class="s" x="24" y="54">守护是身份/网络/信任的唯一持有者；fleet 与 Agent 都是本机客户端。</text>
+
+  <!-- 机器 A -->
+  <rect class="card" x="24" y="80" width="400" height="300"/>
+  <text class="t" x="44" y="106">机器 A</text>
+  <rect class="daemon" x="44" y="120" width="360" height="120"/>
+  <text class="t" x="60" y="146">Daemon (mebular serve)</text>
+  <text class="s" x="60" y="168">身份（root | 委派证书链）· 域（namespace）</text>
+  <text class="s" x="60" y="188">libp2p 网络 · 同步 · 信任/策略</text>
+  <text class="s" x="60" y="208">本机 app API（loopback HTTP + token）</text>
+  <text class="s" x="60" y="228">MCP /mcp（bearer）· join 服务（邀请/签发证书）</text>
+
+  <rect class="app" x="44" y="256" width="170" height="52"/>
+  <text class="t" x="60" y="280">fleet（应用 #1）</text>
+  <text class="s" x="60" y="298">tasks = 树 · $MEBULAR_HOME/fleet.config.json</text>
+  <rect class="app" x="234" y="256" width="170" height="52"/>
+  <text class="t" x="250" y="280">Agent（MCP）</text>
+  <text class="s" x="250" y="298">memory_* 工具 · 共用存储、数据分域</text>
+  <path class="l" d="M129,256 L129,240"/><path class="l" d="M319,256 L319,240"/>
+
+  <!-- 机器 B -->
+  <rect class="card" x="556" y="80" width="400" height="300"/>
+  <text class="t" x="576" y="106">机器 B</text>
+  <rect class="daemon" x="576" y="120" width="360" height="120"/>
+  <text class="t" x="592" y="146">Daemon (mebular serve)</text>
+  <text class="s" x="592" y="168">身份（委派证书链，无主密钥）</text>
+  <text class="s" x="592" y="188">libp2p 网络 · 同步 · 信任/策略</text>
+  <text class="s" x="592" y="208">本机 app API（loopback HTTP + token）</text>
+  <text class="s" x="592" y="228">MCP /mcp (bearer) · join service</text>
+
+  <rect class="app" x="576" y="256" width="170" height="52"/>
+  <text class="t" x="592" y="280">fleet（应用 #1）</text>
+  <text class="s" x="592" y="298">tasks = 树</text>
+  <rect class="app" x="766" y="256" width="170" height="52"/>
+  <text class="t" x="782" y="280">Agent（MCP）</text>
+  <text class="s" x="782" y="298">memory_* 工具</text>
+  <path class="l" d="M661,256 L661,240"/><path class="l" d="M851,256 L851,240"/>
+
+  <!-- sync between daemons -->
+  <path class="l" d="M404,180 L556,180"/>
+  <text class="lb" x="424" y="172">记忆同步</text>
+  <text class="lb" x="424" y="198">（libp2p / relay；默认拒绝）</text>
+  <text class="lb" x="424" y="216">授权 ∪ 成员资格 ∩ 订阅</text>
+
+  <text class="s" x="24" y="408">跨设备通信统一走记忆（数据）通道——不提供通用远程查询/调用；同机 Agent 默认可信。</text>
+</svg>

@@ -36,3 +36,15 @@
 ## 6. 无结果别编
 
 召回为空就如实说明「没有相关记忆」，不要凭推测填充。宁可承认缺失，也不写入或返回未经验证的内容。
+
+## 7. 记忆分区与选择性同步（用户向）
+
+记忆可打 `namespace`（分区）标记：协作高频短命记忆与用户长期记忆隔离，召回/同步都能按分区限定；不带分区按 `default`。分区只加组织维度，**不改变一致性模型**。
+
+- **分区隔离**：`memory_query` / `memory_search` / `memory_graph` 接受可选 `namespace`（单个/数组）；CMF 与 SQLite（namespace 列+索引）同样贯通。
+- **默认拒绝 + 显式授权**：数据持有者只发给**被显式授权**的对端；未列出 = 不给任何分区。未授权分区不会离开持有者，空水位走快照也绕不过；拒绝非静默（`sync-completed.denied`）。
+- **授权作为记忆**：`namespace_grant` / `namespace_revoke` 落在保留分区 `__policy__`，可审计、可撤销、不可自授；恢复必须用**新 grantId**。
+- **吊销**：`device_revoke` 读侧立刻 `[]`，其署名事件在入站与快照两条路都被隔离；吊销非终态（新 grantId 即恢复）。
+- **水位**：`per-(对端, 分区, 作者)`，扩权即可回补历史；水位只由 ack 与「已确认快照」推进（自报不抬升）。
+
+**内核口径**（红线/协议语义/推迟项）见仓库根 [`SEALING.md`](../../SEALING.md)；策略不变量矩阵见 [`src/sync/POLICY-INVARIANTS.md`](../../src/sync/POLICY-INVARIANTS.md)。

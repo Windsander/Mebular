@@ -8,8 +8,12 @@ import {
   FLEET_PROTOCOL_VERSION,
   isTaskStatus,
   isFleetEndpoint,
+  isTaskBudget,
+  isTaskDispatch,
   type FleetEndpoint,
   type FleetTrace,
+  type TaskBudget,
+  type TaskDispatch,
   type TaskStatus,
 } from './envelope.js';
 
@@ -54,6 +58,10 @@ export interface TaskEvent {
   payloadRef?: string;
   /** 失败原因（`failed` 常带） */
   reason?: string;
+  /** **W1**：`created` 可声明子树预算（随树单调递减；缺省 root 用默认/子任务按父推导） */
+  budget?: TaskBudget;
+  /** **W1**：`created`（root）可声明派发策略；缺省 `children-ok` */
+  dispatch?: TaskDispatch;
 }
 
 /** 事件类型守卫。 */
@@ -111,6 +119,12 @@ export function validateTaskEvent(input: unknown): TaskEventValidation {
   }
   if (e.expiresAt !== undefined && (typeof e.expiresAt !== 'number' || !Number.isFinite(e.expiresAt))) {
     errors.push('expiresAt 若存在须为有限数字（advisory）');
+  }
+  if (e.budget !== undefined && !isTaskBudget(e.budget)) {
+    errors.push('budget 若存在须为 {maxDepth,maxChildren,maxTasks} 非负整数');
+  }
+  if (e.dispatch !== undefined && !isTaskDispatch(e.dispatch)) {
+    errors.push('dispatch 若存在须为 children-ok|root-only');
   }
   return { ok: errors.length === 0, errors };
 }

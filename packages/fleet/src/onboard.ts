@@ -613,6 +613,16 @@ export async function doctor(dir: string): Promise<DoctorReport> {
     }
   }
 
+  // 5.5) W2 守护（仅当 fleet 走 daemon 客户端时检查；embedded 不引入新 SKIP，保持既有验收不变）
+  if (config.daemon?.endpoint !== undefined) {
+    try {
+      const res = await fetch(`${config.daemon.endpoint.replace(/\/+$/, '')}/healthz`);
+      add('守护', res.ok ? 'PASS' : 'FAIL', `${config.daemon.endpoint}（HTTP ${res.status}）`, res.ok ? undefined : '确认 mebular serve 已启动（mebular service install mebular-serve）');
+    } catch (error) {
+      add('守护', 'FAIL', `${config.daemon.endpoint} 不可达`, `启动守护：mebular serve（${(error as Error).message}）`);
+    }
+  }
+
   // 6) agent 注册表可解析
   const agentErrors = validateFleetConfig({ ...config, agents: config.agents }).filter((e) => e.startsWith('agent'));
   try {

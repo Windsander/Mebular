@@ -32,6 +32,11 @@ export interface Event {
    * 旧事件无此字段时退化为直连对端验签。
    */
   authorCertificate?: DeviceCertificate;
+  /**
+   * 签发设备的**证书链**（叶→根；T2 委派证书）。与 `authorCertificate` 一样
+   * **不参与内容寻址/签名**；缺省时按 `[authorCertificate]`（旧主密钥直签）处理。
+   */
+  authorCertificateChain?: DeviceCertificate[];
 }
 
 export interface EventFilter {

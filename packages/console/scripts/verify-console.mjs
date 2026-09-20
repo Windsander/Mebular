@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
+import net from 'node:net';
 import { createWizardState, wizardReduce, selectedMemoryCount } from '../wizard.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -153,6 +154,17 @@ function cookieFrom(res) {
   const raw = res.headers.get('set-cookie') ?? '';
   const match = raw.match(/mebular_csrf=([^;]+)/);
   return match ? decodeURIComponent(match[1]) : null;
+}
+
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const p = srv.address().port;
+      srv.close(() => resolve(p));
+    });
+  });
 }
 
 function sha256(value) {
@@ -336,6 +348,9 @@ try {
       && Array.isArray(settings.json?.network?.listen)
       && Array.isArray(settings.json?.network?.listenConfigured)
       && Array.isArray(settings.json?.sync?.peerWhitelist)
+      && (settings.json?.identity?.mode === null || typeof settings.json?.identity?.mode === 'string')
+      && typeof settings.json?.join?.enabled === 'boolean'
+      && typeof settings.json?.join?.port === 'number'
       && typeof settings.json?.mcp?.host === 'string'
       && typeof settings.json?.semantic?.enabled === 'boolean'
       && Array.isArray(settings.json?.policyIssuers)
@@ -343,6 +358,7 @@ try {
     `issuers=${JSON.stringify(settings.json?.policyIssuers)}`,
   );
   check('settings.policyIssuers 含已声明的 device-console', settings.json?.policyIssuers?.includes('device-console') === true);
+  check('settings.identity.mode = root（本地主密钥）', settings.json?.identity?.mode === 'root', `mode=${settings.json?.identity?.mode}`);
   check('settings.sync.peerWhitelist 反映 config（L5 透传）', settings.json?.sync?.peerWhitelist?.length === 1 && settings.json.sync.peerWhitelist[0] === 'device-peer', `whitelist=${JSON.stringify(settings.json?.sync?.peerWhitelist)}`);
   check('devices 含 memberships/declaredIssuer 字段', (devices.json ?? []).every((d) => Array.isArray(d.memberships) && typeof d.declaredIssuer === 'boolean'));
   check('device-console declaredIssuer=true（种子声明）', byId.get('device-console')?.declaredIssuer === true);
@@ -525,7 +541,7 @@ try {
   const cfgOk = await fetch(`http://127.0.0.1:${port}/admin/api/config`, {
     method: 'POST',
     headers: writeHeaders,
-    body: JSON.stringify({ patch: { sync: { antiEntropy: { intervalMs: 120000 }, snapshotThreshold: 4096 } } }),
+    body: JSON.stringify({ patch: { sync: { antiEntropy: { intervalMs: 120000 }, snapshotThreshold: 4096 }, joinService: { enabled: false, bind: '127.0.0.1', port: 4002 } } }),
   });
   const cfgOkJson = await cfgOk.json().catch(() => null);
   check(
@@ -538,7 +554,8 @@ try {
   check(
     'config 写入磁盘且保留其他键',
     cfgOnDisk.sync?.snapshotThreshold === 4096 && cfgOnDisk.sync?.antiEntropy?.intervalMs === 120000
-      && cfgOnDisk.sync?.peerWhitelist?.[0] === 'device-peer' && cfgOnDisk.deviceId === 'device-console',
+      && cfgOnDisk.sync?.peerWhitelist?.[0] === 'device-peer' && cfgOnDisk.deviceId === 'device-console'
+      && cfgOnDisk.joinService?.bind === '127.0.0.1' && cfgOnDisk.joinService?.port === 4002,
   );
   const cfgAfterWrite = await getJson(port, '/admin/api/config');
   check('GET config 反映写入', cfgAfterWrite.json?.config?.sync?.snapshotThreshold === 4096);
@@ -549,6 +566,47 @@ try {
   });
   const cfgAfterClear = JSON.parse(await readFile(join(home, 'config.json'), 'utf-8'));
   check('config 置空 → 删除键', cfgClear.status === 200 && !('snapshotThreshold' in (cfgAfterClear.sync ?? {})), `status=${cfgClear.status}`);
+
+  // ---------- 邀请新设备（T2 令牌加入） ----------
+  const inviteDisabled = await fetch(`http://127.0.0.1:${port}/admin/api/invite`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({}),
+  });
+  const inviteDisabledJson = await inviteDisabled.json().catch(() => null);
+  check('未启用 joinService → invite 409 结构化', inviteDisabled.status === 409 && inviteDisabledJson?.error === 'join_disabled', `status=${inviteDisabled.status}`);
+
+  {
+    const inviteHome = join(home, 'invite');
+    const invitePort = await freePort();
+    await mkdir(inviteHome, { recursive: true });
+    await writeFile(join(inviteHome, 'config.json'), JSON.stringify({
+      storagePath: join(inviteHome, 'store.jsonl'),
+      deviceId: 'device-invite',
+      encryption: { level: 'none' },
+      network: { enabled: false },
+      mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
+      joinService: { enabled: true, bind: '127.0.0.1', port: invitePort },
+    }, null, 2), 'utf-8');
+    const inviteHandle = spawnServe({ home: inviteHome, storage: join(inviteHome, 'store.jsonl'), deviceId: 'device-invite' });
+    servers.push(inviteHandle);
+    const inviteReady = await waitReady(inviteHandle);
+    const invitePage = await fetch(`http://127.0.0.1:${inviteReady.port}/console/`);
+    const inviteCsrf = invitePage.headers.get('x-mebular-csrf');
+    const inviteCookie = cookieFrom(invitePage);
+    const inviteRes = await fetch(`http://127.0.0.1:${inviteReady.port}/admin/api/invite`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mebular-csrf': inviteCsrf, cookie: `mebular_csrf=${inviteCookie}` },
+      body: JSON.stringify({ ttlMs: 60000 }),
+    });
+    const inviteJson = await inviteRes.json().catch(() => null);
+    check('启用 joinService → invite 201 + 令牌', inviteRes.status === 201 && typeof inviteJson?.token === 'string' && inviteJson.token.length > 40, `status=${inviteRes.status}`);
+    const settingsInvite = await (await fetch(`http://127.0.0.1:${inviteReady.port}/admin/api/settings`)).json().catch(() => null);
+    check('settings.join 反映启用与端点', settingsInvite?.join?.enabled === true && settingsInvite?.join?.port === invitePort, `join=${JSON.stringify(settingsInvite?.join)}`);
+    const { decodeJoinToken } = await import('../../mcp/src/jointoken.mjs');
+    const decoded = decodeJoinToken(inviteJson?.token ?? '');
+    check('令牌可解码且指向本机守护', decoded?.inviterDeviceId === 'device-invite' && String(decoded?.endpoint ?? '').includes(String(invitePort)), `endpoint=${decoded?.endpoint}`);
+  }
 
   // ---------- SSE ----------
   const sse = await openSse(port, '/admin/events', 8000);

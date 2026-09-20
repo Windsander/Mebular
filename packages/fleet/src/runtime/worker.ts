@@ -15,6 +15,8 @@ import type { TaskTransport } from '../transport/types.js';
 import type { ExecutorRegistry } from './agent.js';
 import { executeOnce, type ExecutionLog, type TaskExecutor } from './executor.js';
 import { assertAcyclicParent, deriveEdges } from '../collab/dag.js';
+import { admitCreated, admissibleTaskIds } from '../collab/tree.js';
+import { fairOrder, admitByConcurrency, type AgentConcurrencyOptions } from './fairness.js';
 import { childTaskId, type PlannedChild, type TaskPlanner } from './planner.js';
 import {
   NegotiationTracker,
@@ -36,6 +38,8 @@ export interface FleetWorkerOptions {
   log: ExecutionLog;
   /** 1d-a：执行成功后的**派生计划**（审查 DAG）；缺省不派生 */
   planner?: TaskPlanner;
+  /** W1 公平准入：每 Agent 并发（默认 2）与 (来源设备,目标 Agent) 配额；本地记账、无墙钟 */
+  admission?: AgentConcurrencyOptions;
   /**
    * 1d-b：有限协商（可选）。启用判定为真的任务在**执行前**走协商：
    * 未接受则发出下一轮 `counter`，超 `maxRounds` → `failed`（NEGOTIATION_LIMIT）；
@@ -64,6 +68,7 @@ export class FleetWorker {
   private readonly log: ExecutionLog;
   private readonly planner: TaskPlanner | null;
   private readonly negotiation: FleetWorkerOptions['negotiation'] | null;
+  private readonly admission: AgentConcurrencyOptions;
   private stopped = false;
 
   constructor(options: FleetWorkerOptions) {
@@ -78,6 +83,12 @@ export class FleetWorker {
     this.log = options.log;
     this.planner = options.planner ?? null;
     this.negotiation = options.negotiation ?? null;
+    this.admission = options.admission ?? {};
+  }
+
+  /** 权威任务视图（已剔除违反树不变式的任务）；供 DAG/汇总与验收读取。 */
+  async statesView(): Promise<TaskState[]> {
+    return this.states();
   }
 
   /** 全部任务权威状态（按 taskId 排序；供 DAG 推导）。 */
@@ -93,7 +104,9 @@ export class FleetWorker {
       const state = reduceTaskEvents(byTask.get(taskId)!);
       if (state) out.push(state);
     }
-    return out;
+    // W1：权威视图剔除违反树不变式的任务（经记忆同步到达的无效 created 亦生效）
+    const admissible = admissibleTaskIds(out);
+    return out.filter((s) => admissible.has(s.taskId));
   }
 
   /**
@@ -221,9 +234,19 @@ export class FleetWorker {
   /** 处理发往本端、尚未终态的任务（幂等；可安全重复调用）。`maxTasks` 限制单轮真实执行数。 */
   async processPending(maxTasks = Number.POSITIVE_INFINITY): Promise<number> {
     let executed = 0;
-    for (const state of await this.states()) {
+    const pending = (await this.states()).filter((s) => !s.terminal && this.targetsMe(s));
+    const byId = new Map(pending.map((s) => [s.taskId, s]));
+    // W1：按 (from.device, 逻辑序) 公平轮转 + 每 Agent 并发/配额门（本地、确定性、无墙钟）
+    const ordered = fairOrder(pending);
+    // 显式配置并发/配额门时才过滤（顺序 worker 默认不因并发上限而饿死；
+    // `admitByConcurrency` 的默认 perAgent=2 适用于**并行**执行，测试见 fairness.test.ts）
+    const gate = this.admission.perAgent !== undefined || this.admission.perPair !== undefined;
+    const admitted = gate
+      ? admitByConcurrency(ordered.map((id) => byId.get(id)!), { agent: new Map(), pair: new Map() }, this.admission)
+      : ordered;
+    for (const taskId of admitted) {
+      const state = byId.get(taskId)!;
       if (executed >= maxTasks) break;
-      if (state.terminal || !this.targetsMe(state)) continue;
 
       // 1d-b：有限协商（可选）——未接受前不执行
       if (this.negotiation && this.negotiation.enabled(state)) {
@@ -264,16 +287,49 @@ export class FleetWorker {
   async pollOnce(maxTasks = Number.POSITIVE_INFINITY): Promise<PollOutcome> {
     const messages = await this.transport.drain(this.endpoint);
     let applied = 0;
+    let states = await this.states();
     for (const message of messages) {
-      if (await this.store.append(message.event)) applied += 1;
+      const event = message.event;
+      // W1 入口拒收：越预算/越链长/root-only 的 created 不入库（纯函数、全端一致）
+      if (event.type === 'created') {
+        const verdict = admitCreated(event, states, reduceTaskEvents);
+        if (!verdict.ok) continue;
+      }
+      if (await this.store.append(event)) {
+        applied += 1;
+        const reduced = reduceTaskEvents(await this.store.byTask(event.taskId));
+        if (reduced !== null) {
+          states = states.filter((s) => s.taskId !== reduced.taskId).concat(reduced);
+        }
+      }
     }
     const executed = await this.processPending(maxTasks);
     return { applied, executed };
   }
 
-  /** 启动即对账（重启韧性）。 */
+  /**
+   * 启动对账（重启韧性）：
+   * 1) **补发终态事件**：崩溃可能发生在「已执行并本地落 done」与「已发布到对端」之间的窗口，
+   *    重启后若任务已终态则**重发**该终态事件（对端按 `eventId` 幂等去重，至少一次语义）。
+   * 2) 续跑未终态任务。
+   */
   async reconcile(): Promise<number> {
+    await this.republishTerminal();
     return this.processPending();
+  }
+
+  /** 重发本端产生的终态事件（幂等：对端按 eventId 去重）。 */
+  private async republishTerminal(): Promise<void> {
+    for (const state of await this.states()) {
+      if (!state.terminal) continue;
+      if (state.from.device === this.endpoint.device) continue; // 自派任务无需回传
+      const base = this.baseEvent(state);
+      const dev = this.endpoint.device;
+      const event: TaskEvent = state.status === 'done'
+        ? { ...base, eventId: `${state.taskId}#done@${dev}`, type: 'done', toStatus: 'done', ...(state.resultRef !== undefined ? { payloadRef: state.resultRef } : {}) }
+        : { ...base, eventId: `${state.taskId}#failed@${dev}`, type: 'failed', toStatus: 'failed', ...(state.reason !== undefined ? { reason: state.reason } : {}) };
+      await this.transport.publish({ msgId: randomUUID(), from: this.endpoint, to: state.from, event });
+    }
   }
 
   /** 持续轮询直到 `signal` 中止。 */

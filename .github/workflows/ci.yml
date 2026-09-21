@@ -215,8 +215,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install optional embedding package (real, not persisted)
-        run: npm install --no-save @huggingface/transformers
+      - name: Install optional embedding package (real)
+        run: npm install --save-dev @huggingface/transformers
 
       - name: Cache embedding model
         uses: actions/cache@v4

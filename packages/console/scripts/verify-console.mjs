@@ -1174,6 +1174,46 @@ try {
       tokensC5.filter((token) => !consoleSrc5.includes(token)).join(',') || '全部命中');
   }
 
+  // ---------- C7：扫码即通（邀请响应带二维码 + 控制台渲染断言） ----------
+  {
+    const inviteHome2 = join(home, 'invite-qr');
+    const invitePort2 = await freePort();
+    await mkdir(inviteHome2, { recursive: true });
+    await writeFile(join(inviteHome2, 'config.json'), JSON.stringify({
+      storagePath: join(inviteHome2, 'store.jsonl'),
+      deviceId: 'device-qr',
+      encryption: { level: 'none' },
+      network: { enabled: false },
+      mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
+      joinService: { enabled: true, bind: '127.0.0.1', port: invitePort2 },
+    }, null, 2), 'utf-8');
+    const qrHandle = spawnServe({ home: inviteHome2, storage: join(inviteHome2, 'store.jsonl'), deviceId: 'device-qr' });
+    servers.push(qrHandle);
+    const qrReady = await waitReady(qrHandle);
+    const qrPage = await fetch(`http://127.0.0.1:${qrReady.port}/console/`);
+    const qrHeaders = {
+      'content-type': 'application/json',
+      'x-mebular-csrf': qrPage.headers.get('x-mebular-csrf'),
+      cookie: `mebular_csrf=${cookieFrom(qrPage)}`,
+    };
+    const inviteRes = await fetch(`http://127.0.0.1:${qrReady.port}/admin/api/invite`, {
+      method: 'POST', headers: qrHeaders, body: JSON.stringify({ ttlMs: 60000 }),
+    });
+    const inviteJson = await inviteRes.json().catch(() => null);
+    // 可选依赖在场 → SVG；缺包 → null（只给文本）；两者都合法，字段必须存在
+    check('C7 邀请响应提供二维码（qrSvg：SVG 字符串或缺可选依赖时为 null）+ grantOnJoin',
+      inviteRes.status === 201 && 'qrSvg' in (inviteJson ?? {}) && (inviteJson?.qrSvg === null || String(inviteJson?.qrSvg).startsWith('<svg'))
+        && inviteJson?.grantOnJoin === true,
+      { status: inviteRes.status, qr: inviteJson?.qrSvg === null ? 'null（缺可选依赖）' : 'svg', grantOnJoin: inviteJson?.grantOnJoin });
+    const consoleSrc6 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    check('C7 控制台邀请面板渲染二维码与自动授权说明',
+      ['扫码即通', 'qrSvg', '兑换后自动授权'].every((token) => consoleSrc6.includes(token)));
+    const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
+    check('C7 二维码依赖为**精确 pin** 的可选依赖（依赖政策）',
+      typeof pkg.optionalDependencies?.qrcode === 'string' && /^\d+\.\d+\.\d+$/.test(pkg.optionalDependencies.qrcode),
+      { qrcode: pkg.optionalDependencies?.qrcode });
+  }
+
   // ---------- 未知 API ----------
   const unknown = await getJson(port, '/admin/api/nope');
   check('未知 /admin/api 路径 404', unknown.status === 404);

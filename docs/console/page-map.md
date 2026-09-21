@@ -14,6 +14,8 @@ IA 单一真源在 [`packages/console/settings-ia.js`](../../packages/console/se
 
 「Agent 怎么连我」卡片保留改鉴权/端口的后果与恢复说明（bearer 可粘贴 token 自救；oauth 需 env secret，否则只能改回配置）。
 
+**邀请面板（C7 扫码即通）**：一次性令牌 + **二维码**（内容=令牌文本，服务端渲染 SVG，可选依赖缺省时只给文本）+ `fleet join` 命令 + 「兑换后自动授权（作用域=令牌分区，默认 24h 到期自动撤销）」说明。
+
 ## 高级（16 字段 + 1 动作）
 
 | 分组 | 字段 |

@@ -199,3 +199,18 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - **时效**：`expiry` 默认 24h（`ttlMs` 可配）；过期仅本机忽略，**不进一致性**（不影响 `stateHash`）。
 - **观察**：控制台「关于本机 → 运行状态」显示「地址广播」（档位 / 已发布 / 已采用 / 忽略原因）；`mebular doctor --net` 输出 `net` 段与建议。
 - 验收：`tests/sync/net-endpoints.test.ts`、`tests/p2p/net-endpoints-broadcast.test.ts`（含「注入记录不改授权」锚点）。
+
+## 11. 扫码即通（C7：令牌 + 二维码 + 兑换自动授权）
+
+- **邀请（两种产物一起给）**：`fleet invite [--namespace ns] [--ttl 分钟] [--grant-ttl 小时] [--no-grant] [--no-qr]`
+  - 打印**终端二维码**（内容 = 内联令牌文本，不引自定义 scheme）与**文本令牌**（JSON 的 `token` 字段）；
+  - 控制台「＋ 邀请新设备」面板同样给出二维码（服务端渲染 SVG → data-uri）+ 文本 + 复制命令。
+- **加入（等价入口）**：`fleet join --qr '<二维码内容>'` 与 `fleet join --token <内联|文件>` **完全等价**（`--qr` 只是先把字符串归一为 `--token`）。
+- **兑换即通**：令牌缺省携带自动授权语义（`grantOnJoin` 默认 true）：新设备兑换成功后，邀请方**立即**签发一条作用域为**令牌分区**的 `namespace_grant`（走既有授权 API，不改判定语义）。
+  - **有效期**：默认 **24h**（`grantTtlMs` / `--grant-ttl <小时>` 可配；`0` = 不自动撤销）；到期由图外台账 + 定时 `revokeGrant` 自动撤销（台账 `<storagePath>.join-autogrants.json`，0600）。
+  - **一次性 + 绑定首个兑换设备**：nonce 先占用后签发（并发安全）；二次兑换 403 `used`；过期 403 `expired`。
+  - **可 revoke**：`fleet revoke`/`mebular` 侧既有 `revokeGrant` / `revokeDevice`；撤销后该对端读侧立即为空。
+  - **关闭自动授权**：`--no-grant`（或在令牌里显式 `grantOnJoin:false`）→ 新设备仍需人工批准。
+- **依赖政策**：二维码依赖可选依赖 `qrcode`（精确 pin，见 [`THIRD-PARTY.md`](../../THIRD-PARTY.md)）；缺包时**只给文本**，不报错。门禁 `npm run check:deps`。
+- **观察**：控制台邀请面板显示二维码与「自动授权 / 24h 到期」说明；`doctor --net` 不受影响。
+- 验收：`npm run verify:invite`（令牌语义 / 渲染与降级 / 兑换即通 / TTL 撤销 / `--qr` 等价）。

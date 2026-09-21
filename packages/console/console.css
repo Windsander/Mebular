@@ -905,3 +905,7 @@ select {
 .path-kind-lan { color: #cfe6ff; border-color: #2c5c8f; }
 .path-kind-relay { color: #ffd27a; border-color: rgba(255, 210, 122, 0.5); }
 @media (max-width: 760px) { .path-row { grid-template-columns: minmax(0, 1fr); } }
+
+/* ---------- C7：邀请二维码 ---------- */
+.qr-block { display: grid; gap: 6px; justify-items: start; }
+.qr-img { width: 180px; height: 180px; background: #fff; border-radius: 8px; padding: 6px; image-rendering: pixelated; }

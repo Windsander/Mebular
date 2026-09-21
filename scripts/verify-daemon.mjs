@@ -138,6 +138,35 @@ try {
       const mcpInFleet = await fleetJt.verifyJoinToken(tMcp, { now: 2000 });
       const same = mcpJt.canonicalJoinTokenData(tFleet) === fleetJt.canonicalJoinTokenData(tFleet);
       check('令牌跨包互验（fleet↔daemon）+ canonical 一致', fleetInMcp.ok === true && mcpInFleet.ok === true && same, { fleetInMcp, mcpInFleet, same });
+
+      // C7：grantOnJoin/grantTtlMs 字段跨包一致（含显式关闭时的签名体一致）
+      const tGrantOff = await fleetJt.buildJoinToken({ ...base, nonce: 'ng', grantOnJoin: false, grantTtlMs: 3_600_000 });
+      const grantParity = mcpJt.canonicalJoinTokenData(tGrantOff) === fleetJt.canonicalJoinTokenData(tGrantOff);
+      const grantVerify = (await mcpJt.verifyJoinToken(tGrantOff, { now: 2000 })).ok === true
+        && (await fleetJt.verifyJoinToken(tGrantOff, { now: 2000 })).ok === true;
+      check('C7 令牌 grant 字段跨包一致（canonical + 双向验签）', grantParity && grantVerify, { grantParity, grantVerify });
+      check('C7 默认授权 TTL = 24h（两侧常量一致）',
+        mcpJt.DEFAULT_GRANT_TTL_MS === fleetJt.DEFAULT_GRANT_TTL_MS && fleetJt.DEFAULT_GRANT_TTL_MS === 24 * 3600_000,
+        { mcp: mcpJt.DEFAULT_GRANT_TTL_MS, fleet: fleetJt.DEFAULT_GRANT_TTL_MS });
+
+      // C7：二维码渲染跨包一致（同一可选依赖）+ 缺包降级一致（null + 告警）
+      const mcpQr = await import('../packages/mcp/src/qr.mjs');
+      const qrText = Buffer.from(JSON.stringify(tFleet), 'utf-8').toString('base64');
+      const [fFleetSvg, fMcpSvg, fFleetTerm, fMcpTerm] = await Promise.all([
+        fleetJt.renderSvgQr(qrText), mcpQr.renderSvgQr(qrText), fleetJt.renderTerminalQr(qrText), mcpQr.renderTerminalQr(qrText),
+      ]);
+      const qrSame = (!fFleetSvg && !fMcpSvg) || (fFleetSvg?.value === fMcpSvg?.value);
+      const termSame = (!fFleetTerm && !fMcpTerm) || (fFleetTerm?.value === fMcpTerm?.value);
+      check('C7 二维码渲染跨包一致（或缺包时两侧同为 null）', qrSame && termSame, { svg: Boolean(fFleetSvg), term: Boolean(fFleetTerm) });
+
+      const boom = () => { throw new Error("Cannot find module 'qrcode'"); };
+      const warns = [];
+      const [fleetNull, mcpNull] = await Promise.all([
+        fleetJt.renderSvgQr(qrText, { loadModule: boom, onWarn: () => warns.push('fleet') }),
+        mcpQr.renderSvgQr(qrText, { loadModule: boom, onWarn: () => warns.push('daemon') }),
+      ]);
+      check('C7 缺 QR 可选依赖：两侧都软降级（null + 告警，不抛错）',
+        fleetNull === null && mcpNull === null && warns.includes('fleet') && warns.includes('daemon'), { warns });
     } finally {
       await m.shutdown();
     }

@@ -1894,6 +1894,14 @@ async function renderInvite(overrideEndpoint = null) {
     const endpointWarning = res.warning
       ? `<p class="crt-warn">⚠ ${escapeHtml(res.warning)}</p>`
       : '';
+    // C7：二维码（服务端渲染 SVG → data-uri；缺可选依赖时为 null → 只显示文本）
+    const qrBlock = res.qrSvg
+      ? `<div class="readout-block qr-block">
+          <span class="domain-label">扫码即通（QR 内容 = 令牌文本）</span>
+          <img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />
+          <p class="cfg-help muted">${res.grantOnJoin === false ? '本令牌不自动授权（需对端手动批准）' : '兑换后自动授权（作用域=令牌分区；默认 24h 后自动撤销）'}</p>
+        </div>`
+      : `<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用下方文本令牌。</p>`;
     const endpointEditor = `
       <div class="readout-block">
         <span class="domain-label">join 端点（写死进令牌，须为新设备可达地址）</span>
@@ -1902,6 +1910,7 @@ async function renderInvite(overrideEndpoint = null) {
         ${endpointWarning}
       </div>`;
     body.innerHTML = `
+      ${qrBlock}
       ${endpointEditor}
       <dl class="settings-kv">
         <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>

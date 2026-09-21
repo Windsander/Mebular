@@ -71,6 +71,12 @@
      `relayService` + 地址簿白名单决定）。
   **兼容性（安全方向）**：旧节点忽略未知的 `net_endpoints` 类型 → 只是少收 hints（不 fail-open）；同集群可混跑。
   本记录**不改变同步协议骨架**（不新增握手/水位语义、不产生 tombstone）。
+- **扫码即通（C7，加入令牌可选字段 + 兑换后自动授权）**：加入令牌新增**可选**字段
+  `grantOnJoin`（显式 `false` 才写入）与 `grantTtlMs`（显式设置才写入）；**缺省不写** → 默认令牌与旧版本
+  **逐字节兼容**（旧 inviter 仍可验签，只是不自动授权）。兑换成功时邀请方按其身份签发一条**普通的
+  `namespace_grant`**（作用域 = 令牌分区；**不改变任何授权判定语义**）。授权的到期由**图外台账 + 定时
+  `revokeGrant`** 保证（`ttlMs=0` = 永久）——TTL 属**本地策略**，不进一致性、不影响 `stateHash`。
+  二维码内容 = **内联令牌文本本身**（不引自定义 scheme）；渲染依赖可选依赖 `qrcode`（缺包 → 只给文本，不报错）。
 - **2c 重订阅恢复（reset）**：退订清理后重入须同时满足 ①本机对该分区有**生效授权**（`getEffectiveNamespaces(self)` 含该分区；默认拒绝不变）②成员**重新在册**；否则**显式失败**。重入写**图外** `<storagePath>.rejoin.<ns>.json` 标记（**不同步/无 tombstone**）并清本机该分区本地水位；本机 hello 以**空时钟**上报显式订阅的分区 → 对端按「自报水位**只允许向下修正**」从 0 重发（或按既有“空水位”门禁发初始快照，**门禁不放宽**）。**不新增同步协议、不产生 tombstone、不改 `__policy__`**（oracle-free）。**破坏性/前向差异**：旧节点无“向下修正”语义 → 对旧端重入只可能**少收**（安全方向），需同版本互通。
 - **2b 退订交接（`namespace_handoff`）**：退订 = 成员资格退出（`namespace_membership(active:false)`）+ **本地彻底清理**该分区事件/节点/边与本地水位。**绝不产生 tombstone**（无任何“已删除”事件）。**清理前必须**继任者全量 ack（复用 per-event ack `getPendingEvents`，含退订方作者计数；**不新增同步协议、不放宽快照门禁**）；门禁不过 → **保持原状**。**`__policy__` 永不清理**（策略/成员/交接记录保留 → 清理不改变策略推导，legacy-empty 不退化）。`force` **仅本地 CLI**（不经 MCP/远程），仍**如实**记录 `forced:true` 与缺失明细。意图记录落在**图外**（`<storagePath>.handoff.json`）以保证崩溃后可**幂等续跑**。
 - **M1–M3 成员资格（`namespace_membership`）**：`{ member, namespace, active, issuedAt, note? }`；只采纳链到主密钥且签发者/成员未被 `device_revoke` 吊销的记录（**无条件采纳，不做 R-a**）；`(namespace, member)` 取 **R-c 最新**记录的 `active`（在册/注销）。**生效成员 = active 成员 ∩ 该设备对该分区的生效授权**；成员记录**不得**放宽授权（默认拒绝不变）。**裁剪链**：对端授权 ∩ 对端成员资格 ∩ 本机订阅声明；hello 订阅声明仅作活跃性/一致性校验，不一致 **显式拒绝/告警**（`sync-completed.membershipRejected`）。**legacy-empty**：分区无成员记录时按 hello 订阅裁剪（兼容）。

@@ -44,6 +44,7 @@
 - **Address book is app-scoped and file-based.** `<home>/net/peers.json` (0600) holds candidate endpoints; core never reads files (the app passes a store). Relay seeds live under a reserved key and are merged into `relayServers` at startup — dynamic relay capability broadcast is deferred to C5.
 - **Relaying is an internal daemon role (C6).** The separate `mebular relay` command was removed; the daemon only offers relay service when it has a publicly reachable listen address or observed inbound direct evidence (`network.relayService`: auto/off/on), and only to peers already paired/authorized in the address book, with default limits. Because default limits only allow restricted protocols, carrying Mebular sync streams over a circuit requires the internal `network.libp2p.relayUnlimited: true` switch (undocumented for end users; trusted self-hosted bridges only). The relay role stores no memory/authorization state.
 - **Relay restart invalidates reservations.** libp2p relay clients do not automatically re-reserve after a relay restart; recovery is the peer republishing hints (re-invite / refreshed token).
+- **Invite QR + auto-grant (C7).** Tokens may carry `grantOnJoin` (default on; only written when explicitly disabled) and `grantTtlMs` (default 24h; `0` = no auto-revoke). On redemption the inviter signs an ordinary `namespace_grant` scoped to the token namespace; expiry is enforced by a graph-external ledger plus scheduled `revokeGrant` (TTL is local policy, never part of consistency). QR codes encode the **inline token text**; rendering uses the optional `qrcode` dependency — when absent, only the text token is shown (no error).
 - **Address broadcast (C5) privacy matrix.** `net_endpoints` records (namespace `__net__`, opt-in via `network.broadcast` or adding `__net__` to `sync.namespaces`) are **hints only** and never affect authorization:
   | mode | what is published | who can see it |
   |---|---|---|
@@ -76,6 +77,7 @@
 - **同机 Agent 默认可信**（设备级身份、不做加密隔离）；跨机仍需证书链 + 显式分区授权。
 - **吊销是域收缩**：不回撤已入图数据、仍可建会话；级联在事件同步到达后生效（有传播延迟）；`__policy__` 对已认证设备（含被吊销者）可读。
 - **单写者**：守护持 store 锁，第二个写者明确拒绝；**配额仅本地记账**；令牌加入为 LAN 明文 HTTP+bearer。
+- **扫码即通（C7）**：令牌可选 `grantOnJoin`（默认开，显式关闭才写入=保持字节兼容）与 `grantTtlMs`（默认 24h，0=不自动撤销）；兑换自动授权经既有 `namespace_grant`（作用域=令牌分区），到期由图外台账 + 定时 revokeGrant 保证（TTL 属本地策略，不进一致性）；二维码内容=令牌文本，渲染依赖可选依赖 qrcode（缺包只给文本）。
 - **地址自动广播（C5）**：`net_endpoints`（`__net__`，opt-in，默认 full 档）**只作 hints**，不改授权；可见性沿用既有订阅/成员/授权裁剪；`expiry` 为本地墙钟策略（不进一致性）；被吊销 subject 的记录忽略；旧节点忽略该类型（安全方向）。
 - **中继内部化（C6）**：无独立 relay 命令；`network.relayService` 默认 auto（可达或见入站直连才当桥），仅服务地址簿已配对/已授权对端，默认限额，不落任何记忆/授权状态；桥的能力广播见 C5。
 - **LAN 自动发现（C3）**：mDNS 尽力而为；仅对已知/白名单对端自动拨号（陌生设备忽略）；`bonjour` 缺失时发现软降级（告警，不影响其他连接）；真 mDNS 验收为尽力而为，确定式 harness 才是门禁。

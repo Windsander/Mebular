@@ -146,6 +146,14 @@ export async function startServeServer(options = {}) {
       };
       console.error(`JOIN_READY ${JSON.stringify({ endpoint: joinEndpointDemo, port: joinServer.port, loopback: joinEndpointLoopback })}`);
     }
+    // C7：邀请自动授权的 TTL 清扫（默认 24h 到期自动撤销；走既有 revokeGrant，不改授权语义）
+    const { sweepAutoGrantRevokes } = await import('./jointoken.mjs');
+    const grantSweepInterval = setInterval(() => {
+      void sweepAutoGrantRevokes({ mebular: app, storagePath }).catch(() => undefined);
+    }, 600_000);
+    grantSweepInterval.unref?.();
+    void sweepAutoGrantRevokes({ mebular: app, storagePath }).catch(() => undefined);
+
     // C5：地址自动广播的「可达性/地址变化」复查（app 侧节奏；库不装计时器）。
     // 只在开启广播时挂载；10 分钟一次（unref，不拖住宿主退出）；地址未变时 publish 自身去抖。
     const broadcastInterval = typeof app.getNetEndpointsStatus === 'function' && app.getNetEndpointsStatus().enabled
@@ -155,6 +163,7 @@ export async function startServeServer(options = {}) {
 
     const shutdown = async () => {
       if (broadcastInterval) clearInterval(broadcastInterval);
+      clearInterval(grantSweepInterval);
       await joinServer?.close().catch(() => undefined);
       await http.close().catch(() => undefined);
       await lock.release();

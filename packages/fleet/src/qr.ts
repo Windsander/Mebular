@@ -27,11 +27,15 @@ function loadQrModule(options: QrOptions = {}): QrModuleLike | null {
   try {
     const mod = options.loadModule ? options.loadModule() : defaultLoad();
     const candidate = (mod as { default?: QrModuleLike } | undefined)?.default ?? (mod as QrModuleLike | undefined);
-    if (!candidate || typeof candidate.toString !== 'function') {
+    // 注意：普通对象的原型链上也有 toString —— 必须是「自定义的 toString」（真 qrcode 是自有实现）
+    const isCustomToString = Boolean(candidate)
+      && typeof (candidate as { toString?: unknown }).toString === 'function'
+      && (candidate as { toString: unknown }).toString !== Object.prototype.toString;
+    if (!isCustomToString) {
       options.onWarn?.('二维码：可选依赖 qrcode 不可用（只提供文本令牌）');
       return null;
     }
-    return candidate;
+    return candidate as QrModuleLike;
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     options.onWarn?.(`二维码：可选依赖 qrcode 不可用（${reason}）；只提供文本令牌`);

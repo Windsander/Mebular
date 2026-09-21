@@ -75,6 +75,22 @@ describe('C7 · 二维码渲染与降级（fleet ↔ daemon parity）', () => {
     expect(warnings.some((m) => m.startsWith('fleet:') && m.includes('qrcode'))).toBe(true);
   });
 
+  it('导出非函数 / 渲染抛错 / 默认 loader 三条分支都被覆盖且软降级', async () => {
+    const warnings: string[] = [];
+    // ① loader 返回不合形模块 → null + 告警
+    expect(await fleetSvg(token, { loadModule: () => ({ nope: true }), onWarn: (m: string) => warnings.push(m) })).toBeNull();
+    expect(warnings.some((m) => m.includes('可选依赖 qrcode 不可用'))).toBe(true);
+    // ② toString 抛错 → null + 渲染失败告警
+    const throwing = { toString: async () => { throw new Error('render boom'); } };
+    expect(await fleetSvg(token, { loadModule: () => throwing, onWarn: (m: string) => warnings.push(m) })).toBeNull();
+    expect(await fleetTerminal(token, { loadModule: () => throwing, onWarn: (m: string) => warnings.push(m) })).toBeNull();
+    expect(warnings.some((m) => m.includes('SVG 渲染失败'))).toBe(true);
+    expect(warnings.some((m) => m.includes('终端渲染失败'))).toBe(true);
+    // ③ 默认 loader（真实可选依赖）：在场 → SVG；缺包 → null + 告警（两条路径都走通，不抛错）
+    const viaDefault = await fleetSvg(token, { onWarn: (m: string) => warnings.push(m) });
+    expect(viaDefault === null || viaDefault.value.startsWith('<svg')).toBe(true);
+  });
+
   it('显式传入的 qrcode 形模块可用（注入 loader 路径）', async () => {
     const fake = { toString: async (text: string, options?: Record<string, unknown>) => `<svg data-kind="${String(options?.type)}">${text.length}</svg>` };
     const result = await fleetSvg(token, { loadModule: () => fake });

@@ -9,7 +9,8 @@ function loadQrModule(options = {}) {
   try {
     const mod = options.loadModule ? options.loadModule() : defaultLoad();
     const candidate = mod?.default ?? mod;
-    if (!candidate || typeof candidate.toString !== 'function') {
+    // 普通对象原型链上也有 toString：必须是自定义实现（真 qrcode）
+    if (!candidate || typeof candidate.toString !== 'function' || candidate.toString === Object.prototype.toString) {
       options.onWarn?.('二维码：可选依赖 qrcode 不可用（只提供文本令牌）');
       return null;
     }

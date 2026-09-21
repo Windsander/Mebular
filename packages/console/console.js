@@ -502,9 +502,9 @@ const CONFIG_EDITOR = [
   { group: 'MCP 接入', path: 'mcp.http.host', label: '监听地址', type: 'text', placeholder: '127.0.0.1', help: '仅回环可 auth=none/无 TLS', warn: '非回环（如 0.0.0.0）必须 auth≠none 且启用 TLS 并配证书，否则 serve 拒绝启动' },
   { path: 'mcp.http.port', label: '端口', type: 'number', min: 0, max: 65535 },
   { path: 'mcp.http.auth', label: '鉴权模式', type: 'select', options: [['none', 'none（仅回环）'], ['bearer', 'bearer（token）'], ['oauth', 'oauth']], warn: 'oauth 需 MEBULAR_OAUTH_ADMIN_SECRET / MEBULAR_OAUTH_REGISTER_SECRET，否则 /register 默认 404（仅本地同意码）' },
-  { path: 'mcp.http.tls', label: '启用 TLS', type: 'bool', help: '真开关：true 但缺证书时 serve 启动即报错（不静默降级）' },
-  { path: 'mcp.http.tlsKey', label: 'TLS 证书私钥路径', type: 'text', placeholder: '/path/to/key.pem', help: '仅在启用 TLS 时使用' },
-  { path: 'mcp.http.tlsCert', label: 'TLS 证书路径', type: 'text', placeholder: '/path/to/cert.pem', help: '仅在启用 TLS 时使用' },
+  { path: 'mcp.http.tls', label: '启用 TLS', type: 'bool', help: '真开关：true 但缺证书时 serve 启动即报错（不静默降级）；证书齐备即实际启用（与运行状态同一真值）' },
+  { path: 'mcp.http.tlsKey', label: 'TLS 证书私钥路径', type: 'text', placeholder: '/path/to/key.pem', help: '与证书路径同时填写即实际启用 TLS（tls=true 则强制要求）' },
+  { path: 'mcp.http.tlsCert', label: 'TLS 证书路径', type: 'text', placeholder: '/path/to/cert.pem', help: '与证书路径同时填写即实际启用 TLS（tls=true 则强制要求）' },
 ];
 
 function cfgGet(obj, path) {

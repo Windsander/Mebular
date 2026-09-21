@@ -885,6 +885,29 @@ try {
           });
         });
         check('F-C1 有证书 → https /healthz 200', httpsOk, `port=${info.port}`);
+
+        // 单一真值：证书齐备即实际启用 TLS（tls 开关只表示「必须启用」），与 server/status 定义一致
+        const nfHome = join(home, 'tls-no-flag');
+        await mkdir(nfHome, { recursive: true });
+        const nfStorage = await seedHome(nfHome);
+        const nfCfg = JSON.parse(await readFile(join(nfHome, 'config.json'), 'utf-8'));
+        nfCfg.mcp = { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false, tlsKey: keyPath, tlsCert: certPath } };
+        await writeFile(join(nfHome, 'config.json'), JSON.stringify(nfCfg, null, 2), 'utf-8');
+        const noFlagProc = spawnServe({ home: nfHome, storage: nfStorage, portFlag: null });
+        try {
+          const info2 = await waitReady(noFlagProc);
+          const https2 = await new Promise((resolve) => {
+            import('node:https').then(({ default: https }) => {
+              const req = https.get({ host: '127.0.0.1', port: info2.port, path: '/healthz', rejectUnauthorized: false }, (res) => { res.resume(); resolve(res.statusCode === 200); });
+              req.on('error', () => resolve(false));
+            });
+          });
+          check('F-C1 证书齐备但 tls 未置 true → 仍按同一真值走 https（状态与实际一致）', https2, `port=${info2.port}`);
+        } catch (error) {
+          check('F-C1 证书齐备但 tls 未置 true → 仍按同一真值走 https（状态与实际一致）', false, String(error?.message ?? error));
+        } finally {
+          noFlagProc.proc.kill('SIGKILL');
+        }
       } catch (error) {
         check('F-C1 有证书 → https /healthz 200', false, String(error?.message ?? error));
       } finally {

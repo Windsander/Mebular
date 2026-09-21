@@ -249,8 +249,11 @@ async function runConsole(flags) {
   const httpCfg = config.mcp?.http ?? {};
   const host = typeof flags.host === 'string' ? flags.host : httpCfg.host ?? '127.0.0.1';
   const port = flags.port !== undefined ? Number(flags.port) : httpCfg.port ?? 7331;
-  // F-C1：scheme 以**生效真值**为准（tls 且证书齐备才 https）；tls=true 但缺证书 → 明确警告
-  const tlsReady = httpCfg.tls === true && Boolean(httpCfg.tlsKey && httpCfg.tlsCert);
+  // F-C1：scheme 以**生效真值**为准——与 server.mjs 同一定义：证书齐备即实际启用 TLS；
+  // tls=true 是「必须启用」开关，缺证书时 serve 启动即失败（此处同步明确警告）。
+  const consoleKey = flags['tls-key'] ?? httpCfg.tlsKey;
+  const consoleCert = flags['tls-cert'] ?? httpCfg.tlsCert;
+  const tlsReady = Boolean(consoleKey && consoleCert);
   if (httpCfg.tls === true && !tlsReady) {
     console.error('⚠ mcp.http.tls=true 但缺少 tlsKey/tlsCert：serve 将启动失败（MCP_INSECURE_CONFIG）；请补证书或关闭 tls');
   }

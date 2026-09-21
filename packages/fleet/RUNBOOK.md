@@ -143,6 +143,8 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - **启动与地址**：`mebular serve` → `http://127.0.0.1:7331/console`（`mebular console` 会打印 URL）。
 - **只读 / 可写**：默认可写（写端点需 `memory.admin` scope + CSRF 双提交；仅 `POST/PUT/PATCH`，`Origin` 必须同源）；`MEBULAR_CONSOLE_WRITES=0` 降级为只读。
 - **鉴权 / TLS**：回环可 `auth=none`；**非回环必须** `auth=bearer|oauth` 且启用 TLS（配 `tlsKey`/`tlsCert`），否则 serve **拒绝启动**（`MCP_INSECURE_CONFIG`，不静默降级）。语义为**单一真值**：证书齐备即实际走 https（`tls=true` 表示「必须启用」，缺证书则启动失败）；`status`/`print-config`/控制台「实际运行状态」同此真值。控制台保存时也会做**组合校验**（非法 host/auth/tls 组合 → 400）。
+- **邀请端点（F-C6）**：令牌里写死的 `endpoint` 必须是**新设备可达**地址。默认由守护按 `joinService.bind` 计算：通配（`0.0.0.0`）时自动取本机 LAN IPv4；也可在 `joinService.endpoint` 显式固定，或在控制台「＋ 邀请新设备」面板临时填写后重新签发（令牌随之覆盖）。若无 LAN 地址会回退回环并在面板告警。
+- **auth 误切怎么恢复（F-C7）**：`mcp.http.auth` 切到 `bearer` 后控制台 API 立即 401（`/console/` 页面仍可打开，粘贴 `mebular token grant --scope memory.read,memory.admin` 生成的 token 即可自救）；切到 `oauth` 后静态 token 无效（`invalid token`）、`/register` 默认 404（未设 `MEBULAR_OAUTH_ADMIN_SECRET`/`MEBULAR_OAUTH_REGISTER_SECRET`），控制台内无法自救——编辑 `<home>/config.json` 把 `mcp.http.auth` 改回 `none`（仅回环）或补齐 env 凭证，再重启 `mebular serve`。
 - **演示种子**：`node packages/console/scripts/seed-demo.mjs --home /tmp/mebular-demo` → 按提示启动 serve 并打开 `/console`。
 - **误设后怎么救**（把 host 存成 `0.0.0.0` 且 auth=none / 缺证书导致 serve 拒绝启动）：直接编辑 `<home>/config.json`，把 `mcp.http.host` 改回 `127.0.0.1`，或补齐 `auth`+`tls`+`tlsKey`/`tlsCert`，再重启 `mebular serve`。
 - 状态脉冲经 SSE（`/admin/events`）；记忆/设备列表仍为轮询刷新（10–50ms）。

@@ -8,6 +8,7 @@ import { createMebular } from './config.mjs';
 import { registerTools } from './tools.mjs';
 import { startHttpServer, acquireLock } from './serve.mjs';
 import { createJoinServer } from './jointoken.mjs';
+import { advertiseHost, endpointHostname, isLoopbackHost } from './lan-host.mjs';
 
 const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
 1. 先查后写：写入前先用 memory_query/memory_search 查重，避免重复。
@@ -91,9 +92,17 @@ export async function startServeServer(options = {}) {
       },
     };
     const joinConf = config.joinService;
+    const joinBind = joinConf?.bind ?? '0.0.0.0';
+    // F-C6：令牌里的 endpoint 必须是新设备可直达地址——bind 通配时取本机 LAN IPv4（无则回环并告警），
+    // 也允许 joinService.endpoint 显式固定（跨网段/NAT 场景）。
+    const joinAdvertise = advertiseHost(joinBind);
     const joinEndpointDemo = joinConf?.enabled
-      ? `http://${joinConf.bind && joinConf.bind !== '0.0.0.0' ? joinConf.bind : '127.0.0.1'}:${joinConf.port ?? 4002}`
+      ? (typeof joinConf.endpoint === 'string' && joinConf.endpoint
+        ? joinConf.endpoint
+        : `http://${joinAdvertise}:${joinConf.port ?? 4002}`)
       : undefined;
+    const joinEndpointHost = joinEndpointDemo !== undefined ? endpointHostname(joinEndpointDemo) : null;
+    const joinEndpointLoopback = joinEndpointHost !== null && isLoopbackHost(joinEndpointHost);
     const http = await startHttpServer({
       home,
       app,
@@ -128,7 +137,14 @@ export async function startServeServer(options = {}) {
         port: joinConf.port ?? 4002,
         log: (m) => console.error(m),
       });
-      console.error(`JOIN_READY ${JSON.stringify({ endpoint: joinEndpointDemo, port: joinServer.port })}`);
+      runtime.join = {
+        enabled: true,
+        bind: joinBind,
+        port: joinServer.port,
+        endpoint: joinEndpointDemo,
+        endpointLoopback: joinEndpointLoopback,
+      };
+      console.error(`JOIN_READY ${JSON.stringify({ endpoint: joinEndpointDemo, port: joinServer.port, loopback: joinEndpointLoopback })}`);
     }
     const shutdown = async () => {
       await joinServer?.close().catch(() => undefined);

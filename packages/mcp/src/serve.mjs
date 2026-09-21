@@ -161,6 +161,7 @@ function deleteAtPath(root, path) {
     else break;
   }
 }
+import { endpointHostname, isLoopbackHost } from './lan-host.mjs';
 import { buildJoinToken } from './jointoken.mjs';
 
 const SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
@@ -853,15 +854,28 @@ export async function startHttpServer({
       const input = parseJsonBody(body) ?? {};
       const ns = typeof input.namespace === 'string' && input.namespace ? input.namespace : namespace;
       const ttlMs = Number.isInteger(input.ttlMs) && input.ttlMs > 0 ? input.ttlMs : 900_000;
-      const token = await buildJoinToken({ mebular: app, deviceId, namespace: ns, endpoint: joinEndpoint, ttlMs });
+      // F-C6：端点默认取守护计算的**可达**地址（通配 bind → 本机 LAN IPv4）；允许调用方显式覆盖
+      // （控制台邀请面板可填写），令牌内 endpoint 与返回 endpoint 始终一致。
+      const override = typeof input.endpoint === 'string' && input.endpoint.trim() ? input.endpoint.trim() : null;
+      if (override && endpointHostname(override) === null) {
+        return sendJson(res, 400, { error: 'bad_request', message: 'endpoint 需为 http(s) URL，例如 http://192.168.1.20:4002' });
+      }
+      const endpoint = override ?? joinEndpoint;
+      const token = await buildJoinToken({ mebular: app, deviceId, namespace: ns, endpoint, ttlMs });
       const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
+      const endpointHost = endpointHostname(endpoint);
+      const loopback = endpointHost !== null && isLoopbackHost(endpointHost);
       return sendJson(res, 201, {
         ok: true,
         token: inline,
-        endpoint: joinEndpoint,
+        endpoint,
+        endpointSource: override ? 'override' : 'daemon',
         namespace: ns,
         expiresAt: token.expiresAt,
         ttlMs,
+        ...(loopback
+          ? { warning: '该端点是回环地址，另一台机器无法访问：请把 joinService.bind 设为 0.0.0.0（自动取本机 LAN IPv4），或在本面板填写新设备可达地址（如 http://<本机LAN IP>:端口）' }
+          : {}),
       });
     }
 

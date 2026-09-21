@@ -497,11 +497,11 @@ const CONFIG_EDITOR = [
   { path: 'network.libp2p.relayServers', label: 'Relay 服务器', type: 'list', placeholder: '/ip4/<relay>/tcp/4001/p2p/<ID>', help: 'circuit relay，纯传输、可自托管' },
   { path: 'network.libp2p.relayUnlimited', label: 'Relay 不做限额', type: 'bool', warn: '仅可信自托管 relay；公网暴露有风险' },
   { group: '设备接入（邀请新设备）', path: 'joinService.enabled', label: '启用加入服务', type: 'bool', help: '开启后可由「＋ 邀请新设备」签发一次性令牌（需重启）' },
-  { path: 'joinService.bind', label: '绑定地址', type: 'text', placeholder: '0.0.0.0', help: '令牌 join 端点绑定；默认即 0.0.0.0（quickstart 依赖 LAN 可达），仅可信 LAN 使用' },
+  { path: 'joinService.bind', label: '绑定地址', type: 'text', placeholder: '0.0.0.0', help: '令牌 join 端点绑定；默认即 0.0.0.0（quickstart 依赖 LAN 可达），仅可信 LAN 使用。它同时决定邀请令牌里写死的 endpoint：通配时自动取本机 LAN IPv4（无 LAN 时回环并在邀请面板告警）' },
   { path: 'joinService.port', label: '端口', type: 'number', min: 0, max: 65535, help: '默认 4002' },
   { group: 'MCP 接入', path: 'mcp.http.host', label: '监听地址', type: 'text', placeholder: '127.0.0.1', help: '仅回环可 auth=none/无 TLS', warn: '非回环（如 0.0.0.0）必须 auth≠none 且启用 TLS 并配证书，否则 serve 拒绝启动' },
   { path: 'mcp.http.port', label: '端口', type: 'number', min: 0, max: 65535 },
-  { path: 'mcp.http.auth', label: '鉴权模式', type: 'select', options: [['none', 'none（仅回环）'], ['bearer', 'bearer（token）'], ['oauth', 'oauth']], warn: 'oauth 需 MEBULAR_OAUTH_ADMIN_SECRET / MEBULAR_OAUTH_REGISTER_SECRET，否则 /register 默认 404（仅本地同意码）' },
+  { path: 'mcp.http.auth', label: '鉴权模式', type: 'select', options: [['none', 'none（仅回环）'], ['bearer', 'bearer（token）'], ['oauth', 'oauth']], warn: '切换后控制台 API 立即需要凭证：bearer 需先 `mebular token grant --scope memory.read,memory.admin` 并在页面粘贴 token（否则 401 missing bearer token）；oauth 需在 env 提供 MEBULAR_OAUTH_ADMIN_SECRET / MEBULAR_OAUTH_REGISTER_SECRET，否则 /register 默认 404、静态 token 会 401 invalid token，控制台内无法自救。误切后恢复：编辑 config.json 把 mcp.http.auth 改回 none（仅回环），或补齐凭证后重启 mebular serve' },
   { path: 'mcp.http.tls', label: '启用 TLS', type: 'bool', help: '真开关：true 但缺证书时 serve 启动即报错（不静默降级）；证书齐备即实际启用（与运行状态同一真值）' },
   { path: 'mcp.http.tlsKey', label: 'TLS 证书私钥路径', type: 'text', placeholder: '/path/to/key.pem', help: '与证书路径同时填写即实际启用 TLS（tls=true 则强制要求）' },
   { path: 'mcp.http.tlsCert', label: 'TLS 证书路径', type: 'text', placeholder: '/path/to/cert.pem', help: '与证书路径同时填写即实际启用 TLS（tls=true 则强制要求）' },
@@ -615,6 +615,40 @@ function collectConfigPatch(root) {
   return patch;
 }
 
+// F-C8：显示口径以运行时生效值为准——raw 配置只作输入初值，凡有运行时真值的项都给出双行对照。
+const CONFIG_SHOW_EFFECTIVE = new Set([
+  'mcp.http.host',
+  'mcp.http.port',
+  'mcp.http.auth',
+  'mcp.http.tls',
+  'semantic.enabled',
+  'network.libp2p.listen',
+  'network.libp2p.relayServers',
+  'network.enabled',
+  'joinService.enabled',
+  'joinService.bind',
+  'joinService.port',
+]);
+
+function formatRuntimeValue(value) {
+  if (value === undefined || value === null) return '—';
+  if (Array.isArray(value)) return value.length ? value.join(', ') : '（空 = 默认）';
+  if (typeof value === 'boolean') return value ? '启用' : '未启用';
+  return String(value);
+}
+
+function runtimeCompareLine(field) {
+  if (!state.settings || !CONFIG_SHOW_EFFECTIVE.has(field.path)) return '';
+  const effective = CONFIG_EFFECTIVE[field.path]?.(state.settings);
+  if (effective === undefined) return '';
+  const raw = cfgGet(currentConfigFile(), field.path);
+  const same = JSON.stringify(raw ?? null) === JSON.stringify(effective ?? null);
+  const mismatch = raw !== undefined && !same;
+  return `<p class="cfg-help muted">已配置 ${escapeHtml(formatRuntimeValue(raw))} / 实际 ${escapeHtml(formatRuntimeValue(effective))}`
+    + (mismatch ? ' <span class="cfg-warn">⚠ 不一致：写入值未生效，实际以运行时为准</span>' : '')
+    + '</p>';
+}
+
 function renderCfgField(field) {
   const initial = fieldInitial(field);
   const value = Object.prototype.hasOwnProperty.call(state.cfgDraft, field.path)
@@ -648,6 +682,7 @@ function renderCfgField(field) {
     <label class="cfg-label" for="${id}">${escapeHtml(field.label)}${defaultTag}</label>
     <div class="cfg-control">${control}</div>
     <p class="cfg-help muted">${escapeHtml(field.help ?? '')}${field.warn ? ` <span class="cfg-warn">⚠ ${escapeHtml(field.warn)}</span>` : ''}</p>
+    ${runtimeCompareLine(field)}
   </div>`;
 }
 
@@ -1607,23 +1642,40 @@ async function openInvite() {
   await renderInvite();
 }
 
-async function renderInvite() {
+async function renderInvite(overrideEndpoint = null) {
   const body = $('#invite-body');
   const regenerate = $('#invite-regenerate');
   const toSettings = $('#invite-to-settings');
+  const typedEndpoint = overrideEndpoint
+    ?? $('#invite-endpoint')?.value?.trim()
+    ?? null;
   regenerate.hidden = true;
   toSettings.hidden = true;
   body.innerHTML = '<p class="muted">正在签发令牌…</p>';
   try {
-    const res = await api('/admin/api/invite', { method: 'POST', body: {} });
+    const res = await api('/admin/api/invite', {
+      method: 'POST',
+      body: typedEndpoint ? { endpoint: typedEndpoint } : {},
+    });
     state.inviteToken = res;
     // 令牌很长：显示截断，复制按钮携带完整值
     const shortToken = res.token.length > 56 ? `${res.token.slice(0, 42)}…${res.token.slice(-12)}` : res.token;
     const cmd = `fleet join --token ${res.token} --daemon --dir ~/.mebular --device <新设备ID>`;
     const shortCmd = `fleet join --token ${shortToken} --daemon --dir ~/.mebular --device <新设备ID>`;
+    const endpointWarning = res.warning
+      ? `<p class="crt-warn">⚠ ${escapeHtml(res.warning)}</p>`
+      : '';
+    const endpointEditor = `
+      <div class="readout-block">
+        <span class="domain-label">join 端点（写死进令牌，须为新设备可达地址）</span>
+        <input id="invite-endpoint" class="crt-input" type="text" value="${escapeHtml(res.endpoint)}" />
+        <p class="cfg-help muted">默认由守护按 joinService.bind 计算：通配时取本机 LAN IPv4。跨网段/NAT 时可改为新设备可达地址后重新签发。</p>
+        ${endpointWarning}
+      </div>`;
     body.innerHTML = `
+      ${endpointEditor}
       <dl class="settings-kv">
-        <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code></dd>
+        <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>
         <dt>默认成员分区</dt><dd><code>${escapeHtml(res.namespace)}</code></dd>
         <dt>有效期至</dt><dd>${escapeHtml(formatTime(res.expiresAt))}（一次性）</dd>
       </dl>
@@ -1667,7 +1719,7 @@ $('#invite-device').addEventListener('click', openInvite);
 $('#invite-close').addEventListener('click', () => {
   $('#invite').hidden = true;
 });
-$('#invite-regenerate').addEventListener('click', renderInvite);
+$('#invite-regenerate').addEventListener('click', () => renderInvite());
 $('#invite-to-settings').addEventListener('click', () => {
   $('#invite').hidden = true;
   $('#settings').hidden = false;

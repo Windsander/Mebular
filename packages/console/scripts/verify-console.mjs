@@ -666,6 +666,67 @@ try {
     check('令牌可解码且指向本机守护', decoded?.inviterDeviceId === 'device-invite' && String(decoded?.endpoint ?? '').includes(String(invitePort)), `endpoint=${decoded?.endpoint}`);
   }
 
+  // ---------- F-C6：邀请端点必须为新设备可达地址（bind=0.0.0.0 时不得写回环） ----------
+  {
+    const { pickLanHost } = await import('../../mcp/src/lan-host.mjs');
+    const reachHome = join(home, 'reach');
+    const reachPort = await freePort();
+    await mkdir(reachHome, { recursive: true });
+    await writeFile(join(reachHome, 'config.json'), JSON.stringify({
+      storagePath: join(reachHome, 'store.jsonl'),
+      deviceId: 'device-reach',
+      encryption: { level: 'none' },
+      network: { enabled: false },
+      mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
+      joinService: { enabled: true, bind: '0.0.0.0', port: reachPort },
+    }, null, 2), 'utf-8');
+    const reachHandle = spawnServe({ home: reachHome, storage: join(reachHome, 'store.jsonl'), deviceId: 'device-reach' });
+    servers.push(reachHandle);
+    const reachReady = await waitReady(reachHandle);
+    const reachPage = await fetch(`http://127.0.0.1:${reachReady.port}/console/`);
+    const reachHeaders = {
+      'content-type': 'application/json',
+      'x-mebular-csrf': reachPage.headers.get('x-mebular-csrf'),
+      cookie: `mebular_csrf=${cookieFrom(reachPage)}`,
+    };
+    const lan = pickLanHost();
+    const reachInvite = await fetch(`http://127.0.0.1:${reachReady.port}/admin/api/invite`, {
+      method: 'POST',
+      headers: reachHeaders,
+      body: JSON.stringify({ ttlMs: 60000 }),
+    });
+    const reachJson = await reachInvite.json().catch(() => null);
+    const reachHost = reachJson?.endpoint ? new URL(reachJson.endpoint).hostname : null;
+    const { decodeJoinToken: decodeReach } = await import('../../mcp/src/jointoken.mjs');
+    const reachDecoded = decodeReach(reachJson?.token ?? '');
+    check('F-C6 bind=0.0.0.0 → 邀请端点取可达地址（非回环；无 LAN 时明确告警）',
+      reachInvite.status === 201 && ((lan !== '127.0.0.1' && reachHost === lan)
+        || (lan === '127.0.0.1' && reachHost === '127.0.0.1' && typeof reachJson?.warning === 'string')),
+      `endpoint=${reachJson?.endpoint} lan=${lan} warning=${reachJson?.warning ? 'yes' : 'no'}`);
+    check('F-C6 令牌内 endpoint 与返回/设置一致',
+      Boolean(reachDecoded?.endpoint) && reachDecoded.endpoint === reachJson?.endpoint
+        && (await (await fetch(`http://127.0.0.1:${reachReady.port}/admin/api/settings`)).json())?.join?.endpoint === reachJson?.endpoint,
+      `token=${reachDecoded?.endpoint} resp=${reachJson?.endpoint}`);
+
+    const overrideEndpoint = 'http://10.20.30.40:4321';
+    const ov = await fetch(`http://127.0.0.1:${reachReady.port}/admin/api/invite`, {
+      method: 'POST',
+      headers: reachHeaders,
+      body: JSON.stringify({ endpoint: overrideEndpoint, ttlMs: 60000 }),
+    });
+    const ovJson = await ov.json().catch(() => null);
+    const ovDecoded = decodeReach(ovJson?.token ?? '');
+    check('F-C6 邀请面板可覆盖端点（令牌 endpoint 随之覆盖）',
+      ov.status === 201 && ovJson?.endpoint === overrideEndpoint && ovJson?.endpointSource === 'override' && ovDecoded?.endpoint === overrideEndpoint,
+      `status=${ov.status} endpoint=${ovJson?.endpoint} source=${ovJson?.endpointSource} token=${ovDecoded?.endpoint}`);
+    const badEndpoint = await fetch(`http://127.0.0.1:${reachReady.port}/admin/api/invite`, {
+      method: 'POST',
+      headers: reachHeaders,
+      body: JSON.stringify({ endpoint: 'not-a-url' }),
+    });
+    check('F-C6 非法 endpoint → 400（不落半截令牌）', badEndpoint.status === 400, `status=${badEndpoint.status}`);
+  }
+
   // ---------- SSE ----------
   const sse = await openSse(port, '/admin/events', 8000);
   check(
@@ -717,6 +778,7 @@ try {
     check('bearer：read token 读 → 200', readOk.status === 200, `status=${readOk.status}`);
 
     const consoleRes = await fetch(`${base}/console`);
+    check('F-C7 bearer：/console 仍 200（可粘贴 token 自救，不被自锁挡在门外）', consoleRes.status === 200, `status=${consoleRes.status}`);
     const bcsrf = consoleRes.headers.get('x-mebular-csrf');
     const bcookie = cookieFrom(consoleRes);
     const bWriteHeaders = { 'content-type': 'application/json', 'x-mebular-csrf': bcsrf, cookie: `mebular_csrf=${bcookie}` };
@@ -736,6 +798,27 @@ try {
 
     const bearerSse = await openSse(bport, `/admin/events?token=${readToken}`, 8000);
     check('bearer：SSE ?token= 200 + status', bearerSse.status === 200 && bearerSse.body.includes('event: status'), `status=${bearerSse.status}`);
+  }
+
+  // ---------- F-C7：auth=oauth 自锁（静态 token 无效、/register 默认 404、控制台内无法自救） ----------
+  {
+    const oauthHome = join(home, 'oauth');
+    await mkdir(oauthHome, { recursive: true });
+    await writeFile(join(oauthHome, 'config.json'), JSON.stringify({
+      mcp: { http: { host: '127.0.0.1', port: 0, auth: 'oauth' } },
+    }, null, 2), 'utf-8');
+    const oauthHandle = spawnServe({ home: oauthHome, storage: join(oauthHome, 's.jsonl'), deviceId: 'device-oauth', portFlag: null });
+    servers.push(oauthHandle);
+    const oauthReady = await waitReady(oauthHandle);
+    const obase = `http://127.0.0.1:${oauthReady.port}`;
+    const oNoToken = await fetch(`${obase}/admin/api/overview`);
+    const oStatic = await fetch(`${obase}/admin/api/overview`, { headers: { 'x-mebular-token': 'static-token' } });
+    const oRegister = await fetch(`${obase}/register`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    const oPage = await fetch(`${obase}/console/`);
+    check('F-C7 oauth：无凭证 401 且静态 token 401（JWT 校验，控制台内无法自救）',
+      oNoToken.status === 401 && oStatic.status === 401, `no-token=${oNoToken.status} static=${oStatic.status}`);
+    check('F-C7 oauth：/register 默认 404（未配 env secret）+ /console 仍 200（可看到恢复说明）',
+      oRegister.status === 404 && oPage.status === 200, `register=${oRegister.status} console=${oPage.status}`);
   }
 
   // ---------- CLI：mebular console ----------
@@ -922,6 +1005,23 @@ try {
     Array.isArray(settingsNow.json?.network?.listenConfigured) && Array.isArray(settingsNow.json?.network?.relays) && Array.isArray(settingsNow.json?.network?.listen),
     JSON.stringify({ listenConfigured: settingsNow.json?.network?.listenConfigured, relays: settingsNow.json?.network?.relays }));
   {
+    // F-C8：raw 配置 ≠ 运行时（本 home 的 config.port=7331，实际由 --port 0 随机）——编辑器必须双行对照
+    const cfgRaw = JSON.parse(await readFile(join(home, 'config.json'), 'utf-8'));
+    check('F-C8 设置卡 runtime 与 config 分离（编辑器据此双行对照）',
+      settingsNow.json?.mcp?.port !== cfgRaw.mcp.http.port,
+      `config.port=${cfgRaw.mcp.http.port} runtime.port=${settingsNow.json?.mcp?.port}`);
+    const semanticCfg = { ...cfgRaw, semantic: { enabled: true, minScore: 0.2 } };
+    await writeFile(join(home, 'config.json'), JSON.stringify(semanticCfg, null, 2), 'utf-8');
+    const settingsSemantic = await getJson(port, '/admin/api/settings');
+    const rawSemantic = await getJson(port, '/admin/api/config');
+    const transformersInstalled = existsSync(join(rootDir, 'node_modules', '@huggingface', 'transformers'));
+    const runtimeSemantic = settingsSemantic.json?.semantic?.enabled;
+    check('F-C8 已配置(raw) 与运行时(settings) 分离暴露：semantic.enabled config=true / runtime=false（编辑器据此双行并 ⚠ 不一致）',
+      rawSemantic.json?.config?.semantic?.enabled === true
+        && runtimeSemantic === (transformersInstalled ? true : false)
+        && (transformersInstalled || runtimeSemantic !== rawSemantic.json.config.semantic.enabled),
+      `config.enabled=${rawSemantic.json?.config?.semantic?.enabled} runtime.enabled=${runtimeSemantic} transformers=${transformersInstalled}`);
+    await writeFile(join(home, 'config.json'), JSON.stringify(cfgRaw, null, 2), 'utf-8');
     const consoleSrc = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     const needed = [
       'MEBULAR_OAUTH_ADMIN_SECRET', // auth=oauth warn
@@ -930,6 +1030,10 @@ try {
       '非回环',                      // mcp.http.host warn
       'tlsKey',                      // 证书可编辑
       'TLS',                         // 实际运行状态展示
+      '已配置',                       // F-C8 双行：已配置 X / 实际 Y
+      '实际',                         // F-C8
+      'endpoint',                    // F-C6 邀请端点可编辑/展示
+      'token grant',                 // F-C7 auth 误切恢复步骤
     ];
     check('F-C4 文案/工具面诚实化（oauth/semantic/joinService.bind/host/TLS）', needed.every((token) => consoleSrc.includes(token)), needed.filter((t) => !consoleSrc.includes(t)).join(','));
   }

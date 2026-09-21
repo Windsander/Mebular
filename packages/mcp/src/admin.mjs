@@ -580,9 +580,12 @@ export async function buildSettings({ app, service, config, runtime, home }) {
     },
     join: {
       // 新设备上车（令牌 → 委派证书）；由 config.joinService 控制
-      enabled: config?.joinService?.enabled === true,
-      bind: config?.joinService?.bind ?? '0.0.0.0',
-      port: config?.joinService?.port ?? 4002,
+      enabled: runtime?.join?.enabled ?? config?.joinService?.enabled === true,
+      bind: runtime?.join?.bind ?? config?.joinService?.bind ?? '0.0.0.0',
+      port: runtime?.join?.port ?? config?.joinService?.port ?? 4002,
+      // F-C6：令牌里写死的端点（实际值）+ 是否为回环（回环则新设备不可达）
+      endpoint: runtime?.join?.endpoint ?? null,
+      endpointLoopback: runtime?.join?.endpointLoopback ?? null,
     },
     ...(await buildFleetView(home)),
     // 实际可调用面（MCP 工具 = `mebular <name>` CLI，逐字同名同 handler）

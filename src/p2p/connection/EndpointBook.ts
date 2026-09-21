@@ -268,6 +268,18 @@ export class EndpointBook extends EventEmitter {
     return (this.book.get(key) ?? []).find((entry) => entry.address === address) ?? null;
   }
 
+  /** 删除某候选（发现层撤销/降级用）；返回删除条数并落盘。 */
+  async remove(key: string, address: string): Promise<number> {
+    const list = this.book.get(key);
+    if (!list) return 0;
+    const next = list.filter((entry) => entry.address !== address);
+    if (next.length === list.length) return 0;
+    if (next.length === 0) this.book.delete(key);
+    else this.book.set(key, next);
+    await this.persist();
+    return 1;
+  }
+
   recordSuccess(key: string, address: string): void {
     const candidate = this.getCandidate(key, address);
     if (!candidate) return;

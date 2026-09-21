@@ -65,6 +65,9 @@ jobs:
       - name: Pairing auto-connect (address book / relay degrade & recover)
         run: npm run verify:connect > verify-connect.log 2>&1 || { tail -n 200 verify-connect.log; exit 1; }
 
+      - name: LAN discovery (deterministic fake-bonjour harness + best-effort real mDNS)
+        run: npm run verify:lan > verify-lan.log 2>&1 || { tail -n 200 verify-lan.log; exit 1; }
+
       - name: Upload failure logs (flaky acceptance triage)
         if: failure()
         uses: actions/upload-artifact@v4
@@ -74,6 +77,7 @@ jobs:
             fleet-acceptance.log
             console-e1.log
             verify-connect.log
+            verify-lan.log
           if-no-files-found: ignore
 
       - name: stdio MCP (real client)
@@ -149,6 +153,8 @@ jobs:
       - name: Test
         run: npm test
 
+      # Windows 上不跑真 mDNS：mDNS 在多播受限的 runner 上不稳定，且 C3 的行为由 ubuntu 的
+      # 确定式 harness（注入假 bonjour，`npm run verify:lan`）覆盖；此处只跑构建/单测/local/onboard。
       # Windows 上只跑 local + onboard：两者覆盖 spool 传输与真实 libp2p serve/work/doctor 全路径。
       # 跳过 remote / agents / grant 的显式原因：它们的 loopback 时延 p50/p95 断言与多次进程起停
       # 在共享 runner 上易抖动，且不新增平台覆盖面；这些套件由 ubuntu job 的 verify:fleet:all 覆盖。

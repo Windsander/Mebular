@@ -31,6 +31,7 @@ export class ConnectionManager extends EventEmitter {
   private pendingDials: Map<string, Promise<Connection>> = new Map();
   private provider: ConnectionProvider | null = null;
   private endpointBook: EndpointBook | null;
+  private learnGuard: ((peerId: string, address: string) => boolean) | null = null;
   private backoffs: Map<string, { attempts: number; timer: NodeJS.Timeout | null; lastError?: string }> = new Map();
   private keepAliveInterval: NodeJS.Timeout | null = null;
   private heartbeatCheckInterval: NodeJS.Timeout | null = null;
@@ -54,6 +55,14 @@ export class ConnectionManager extends EventEmitter {
     }
     this.options = defaults;
     this.endpointBook = options.endpointBook ?? null;
+  }
+
+  /**
+   * C3：学习守卫 —— 返回 false 时该地址不入库/不作为路径（如「发现层已撤销的 LAN 地址」，
+   * 避免迟到的连接成功把已失效的候选重新学回来）。
+   */
+  setLearnGuard(guard: ((peerId: string, address: string) => boolean) | null): void {
+    this.learnGuard = guard;
   }
 
   /** C1：注入/替换候选端点簿（连接成功后学习入库、路径变化广播） */
@@ -314,7 +323,9 @@ export class ConnectionManager extends EventEmitter {
     this.connections.set(peerId.id, connection);
     // C1：学习成功地址（remoteAddress 形如 multiaddr 时才入库）
     const remote = connection.remoteAddress;
-    if (this.endpointBook && typeof remote === 'string' && remote.includes('/')) {
+    const learnable = typeof remote === 'string' && remote.includes('/')
+      && (!this.learnGuard || this.learnGuard(peerId.id, remote));
+    if (this.endpointBook && learnable) {
       void this.endpointBook.upsert(peerId.id, [remote], 'learned').catch(() => undefined);
       this.endpointBook.setPath(peerId.id, remote);
     }

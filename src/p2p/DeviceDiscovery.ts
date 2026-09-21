@@ -180,10 +180,15 @@ export class DeviceDiscovery extends EventEmitter {
     if (this.discoveredPeers.has(peerId)) {
       const existing = this.discoveredPeers.get(peerId);
       if (existing) {
+        const addressesChanged = JSON.stringify(existing.addresses) !== JSON.stringify(addresses);
         existing.port = service.port;
         existing.name = service.name;
         existing.addresses = addresses;
         existing.timestamp = Date.now();
+        // C3：地址变化需再次通知（LAN IP 变更 / 新增候选）——同地址不重复发（避免抖动）
+        if (addressesChanged) {
+          this.emit('peer-discovered', existing);
+        }
       }
       return;
     }

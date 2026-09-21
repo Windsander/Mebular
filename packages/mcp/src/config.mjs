@@ -176,6 +176,10 @@ export async function createMebular() {
     endpointsPath: endpointsPath(home),
     endpointsCount: Object.keys(networkHints(config)).length,
     relaySeeds: relaySeeds(config),
+    // C3：LAN 自动发现
+    lanEnabled: config.network?.lan?.enabled !== false,
+    lanAutoDial: config.network?.lan?.autoDial !== false,
+    lanDefaultFactory: config.network?.lan?.defaultFactory !== false,
     pushOnWrite: truthy(process.env.MEBULAR_PUSH_ON_WRITE, config.sync?.pushOnWrite ?? true),
     pushOnWriteThrottleMs: config.sync?.pushOnWriteThrottleMs ?? null,
     peerWhitelist: Array.isArray(config.sync?.peerWhitelist) ? [...config.sync.peerWhitelist] : [],
@@ -206,6 +210,12 @@ export async function createMebular() {
       enabled: effective.networkEnabled,
       // C2：无显式地址时走候选地址簿（默认开）；hints/端点簿由 app 注入，core 不读文件
       autoConnect: effective.autoConnect,
+      // 常驻入口：默认真 mDNS（策略在 app；库形态默认关闭）
+      lan: {
+        enabled: effective.lanEnabled,
+        autoDial: effective.lanAutoDial,
+        defaultFactory: effective.lanEnabled && effective.lanDefaultFactory,
+      },
       endpoints: networkHints(config),
       endpointStore: new FileEndpointStore(effective.endpointsPath),
       ...(config.network?.libp2p || bookSeeds.length > 0

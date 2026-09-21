@@ -130,6 +130,24 @@ export interface MebularConfig {
      */
     endpointStore?: EndpointStore;
     /**
+     * C3：LAN 自动发现（mDNS）。默认 `{ enabled: true, autoDial: true }`。
+     * autoDial 仅对「地址簿已知或 sync.peerWhitelist 放行」的对端生效；
+     * 陌生设备即使被发现也绝不自动拨号。network.enabled=false 时整体 no-op。
+     */
+    lan?: {
+      enabled?: boolean;
+      autoDial?: boolean;
+      /**
+       * 是否启用内置默认 mDNS factory（真 bonjour）。
+       * 默认 **false**（库形态不产生多播副作用）；常驻入口（MCP/车队）显式置 true。
+       */
+      defaultFactory?: boolean;
+    };
+    /**
+     * C3：测试/嵌入可注入 bonjour 模块 loader（缺省用内置默认 factory 加载 `bonjour`）。
+     */
+    loadBonjourModule?: () => unknown;
+    /**
      * libp2p 真实网络栈（可选依赖；缺包时报 NETWORK_LIBP2P_NOT_AVAILABLE）。
      * `relayServer`/`relayServers` 启用 circuit relay（G3；需额外可选依赖，
      * 缺包抛 NETWORK_RELAY_NOT_AVAILABLE）。
@@ -441,6 +459,16 @@ export class Mebular {
           config: { listenPort: this.config.network.listenPort },
           ...(this.endpointBookImpl !== null ? { endpointBook: this.endpointBookImpl } : {}),
           autoConnect: this.config.network.autoConnect !== false,
+          lan: {
+            enabled: this.config.network.lan?.enabled !== false,
+            autoDial: this.config.network.lan?.autoDial !== false,
+          },
+          useDefaultBonjourFactory: this.config.network.lan?.defaultFactory === true,
+          // C3：白名单（sync.peerWhitelist）是发现事件「可自动拨号」的另一条允许路径
+          peerAllowlist: this.config.sync?.peerWhitelist ?? [],
+          ...(this.config.network.loadBonjourModule !== undefined
+            ? { loadBonjourModule: this.config.network.loadBonjourModule }
+            : {}),
         });
         this.syncImpl.attachToNode(node);
         await node.start();

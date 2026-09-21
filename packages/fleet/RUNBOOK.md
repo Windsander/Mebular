@@ -135,3 +135,14 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - libp2p 是**可选依赖**；缺包时报 `NETWORK_LIBP2P_NOT_AVAILABLE`（安装见报错提示）。
 - 时延为 loopback/ LAN 实测；跨公网受 NAT/relay 影响，另行测量。
 - 执行语义为**至少一次投递 + 按 taskId 幂等执行**（`EchoExecutor` 无副作用）；自定义执行器须自身幂等。
+
+## 6. 控制台（本机 GUI）
+
+`mebular serve` 同时提供**本机控制台**（星图 / 域视图 / 审计 / 上车向导 / 设置）；静态资源来自 `packages/console`（可用 `MEBULAR_CONSOLE_DIR` 覆盖）。
+
+- **启动与地址**：`mebular serve` → `http://127.0.0.1:7331/console`（`mebular console` 会打印 URL）。
+- **只读 / 可写**：默认可写（写端点需 `memory.admin` scope + CSRF 双提交；仅 `POST/PUT/PATCH`，`Origin` 必须同源）；`MEBULAR_CONSOLE_WRITES=0` 降级为只读。
+- **鉴权 / TLS**：回环可 `auth=none`；**非回环必须** `auth=bearer|oauth` 且 `mcp.http.tls=true`（配 `tlsKey`/`tlsCert`），否则 serve **拒绝启动**（`MCP_INSECURE_CONFIG`，不静默降级）。控制台保存时也会做**组合校验**（非法 host/auth/tls 组合 → 400）。
+- **演示种子**：`node packages/console/scripts/seed-demo.mjs --home /tmp/mebular-demo` → 按提示启动 serve 并打开 `/console`。
+- **误设后怎么救**（把 host 存成 `0.0.0.0` 且 auth=none / 缺证书导致 serve 拒绝启动）：直接编辑 `<home>/config.json`，把 `mcp.http.host` 改回 `127.0.0.1`，或补齐 `auth`+`tls`+`tlsKey`/`tlsCert`，再重启 `mebular serve`。
+- 状态脉冲经 SSE（`/admin/events`）；记忆/设备列表仍为轮询刷新（10–50ms）。

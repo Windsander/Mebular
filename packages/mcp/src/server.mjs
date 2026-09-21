@@ -68,6 +68,16 @@ export async function startServeServer(options = {}) {
     const httpCfg = config?.mcp?.http ?? {};
     const tlsKey = options.tlsKey ?? httpCfg.tlsKey;
     const tlsCert = options.tlsCert ?? httpCfg.tlsCert;
+    // F-C1（A）：TLS 以**真开关**为准——config.mcp.http.tls===true，或显式提供证书；缺证书即启动报错（不静默降级）
+    const tlsRequested = options.tls === true || httpCfg.tls === true || Boolean(tlsKey && tlsCert);
+    const tlsReady = Boolean(tlsKey && tlsCert);
+    if (tlsRequested && !tlsReady) {
+      const error = new Error(
+        'MCP_INSECURE_CONFIG：mcp.http.tls=true 但缺少证书——请在 config.json 填写 mcp.http.tlsKey 与 mcp.http.tlsCert，或关闭 tls',
+      );
+      error.code = 'MCP_INSECURE_CONFIG';
+      throw error;
+    }
     const runtime = {
       ...effective,
       storagePath,
@@ -75,7 +85,9 @@ export async function startServeServer(options = {}) {
         host: options.host ?? httpCfg.host ?? '127.0.0.1',
         port: options.port ?? httpCfg.port ?? 7331,
         auth: options.auth ?? httpCfg.auth ?? 'none',
-        tls: Boolean(tlsKey && tlsCert),
+        tls: Boolean(tlsRequested && tlsReady),
+        tlsKeyConfigured: Boolean(tlsKey),
+        tlsCertConfigured: Boolean(tlsCert),
       },
     };
     const joinConf = config.joinService;
@@ -99,8 +111,8 @@ export async function startServeServer(options = {}) {
       namespace: config.sync?.namespaces?.[0] ?? 'tasks',
       ...(joinEndpointDemo !== undefined ? { joinEndpoint: joinEndpointDemo } : {}),
       runtime,
-      // D2：写端点开启（仍需 memory.admin scope + CSRF 双提交）
-      writesEnabled: true,
+      // D2：写端点默认开启（仍需 memory.admin scope + CSRF 双提交）；`MEBULAR_CONSOLE_WRITES=0` 可降级为 D1 只读
+      writesEnabled: options.writesEnabled ?? process.env.MEBULAR_CONSOLE_WRITES !== '0',
     });
     // 监听端口 0 / 默认值时以实际绑定为准
     runtime.mcp.host = http.host;

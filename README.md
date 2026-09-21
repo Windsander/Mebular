@@ -70,6 +70,9 @@ fleet join --token <token> --daemon --dir ~/.mebular --device device-B
 fleet approve --dir ~/.mebular --device device-B               # grant the domain on the graph
 ```
 
+Prefer a UI? The daemon also serves a local console: run `mebular serve` and open `http://127.0.0.1:7331/console`
+(star map / domains / audit / wizard / settings). Try it with seeded demo data via `seed-demo.mjs`.
+
 ### For developers
 
 ```ts
@@ -96,7 +99,7 @@ submits a root and `task_children` / `task_summarize` walk the tree.
 - **Fleet runbook** (two-machine ops, WAN commands, acceptance) — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
 - **Memory policy for agents** — [`packages/skill/MEMORY_POLICY.md`](packages/skill/MEMORY_POLICY.md)
 - **Daemon / MCP** — [`packages/mcp`](packages/mcp) · **Fleet** — [`packages/fleet`](packages/fleet)
-- **Contributing & quality gates** — [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- **Console GUI** — [`packages/console`](packages/console) · **Contributing & quality gates** — [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 <div align="center">
 

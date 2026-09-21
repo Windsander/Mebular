@@ -39,10 +39,36 @@ const CONFIG_PATCH_SPECS = new Map([
   ['mcp.http.port', { kind: 'int', min: 0, max: 65535, nullable: true }],
   ['mcp.http.auth', { kind: 'enum', values: ['none', 'bearer', 'oauth'] }],
   ['mcp.http.tls', { kind: 'bool' }],
+  ['mcp.http.tlsKey', { kind: 'string', nonEmpty: true, empty: 'delete' }],
+  ['mcp.http.tlsCert', { kind: 'string', nonEmpty: true, empty: 'delete' }],
   ['joinService.enabled', { kind: 'bool' }],
   ['joinService.bind', { kind: 'string', nonEmpty: true }],
   ['joinService.port', { kind: 'int', min: 0, max: 65535, nullable: true }],
 ]);
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+
+/**
+ * F-C2：**组合校验**（针对合并后的完整配置）——不允许存出「把自己搞挂」的组合。
+ * 规则：mcp.http.tls=true ⇒ 必须给出 tlsKey 与 tlsCert；非回环 host ⇒ auth != none 且 tls=true（且证书齐备）。
+ */
+function validateConfigCombination(merged) {
+  const http = merged?.mcp?.http ?? {};
+  const errors = [];
+  const host = typeof http.host === 'string' && http.host.length > 0 ? http.host : '127.0.0.1';
+  const tlsOn = http.tls === true;
+  const hasCert = typeof http.tlsKey === 'string' && http.tlsKey.length > 0 && typeof http.tlsCert === 'string' && http.tlsCert.length > 0;
+  if (tlsOn && !hasCert) {
+    errors.push('启用 TLS（mcp.http.tls=true）需要同时填写 mcp.http.tlsKey 与 mcp.http.tlsCert（证书路径）');
+  }
+  if (!LOOPBACK_HOSTS.has(host)) {
+    if ((http.auth ?? 'none') === 'none') {
+      errors.push(`非回环监听（host=${host}）不允许 auth=none：请设 mcp.http.auth=bearer/oauth`);
+    }
+    if (!tlsOn) errors.push(`非回环监听（host=${host}）要求 mcp.http.tls=true（并配 tlsKey/tlsCert）`);
+  }
+  return errors;
+}
 
 function flattenPatch(patch, prefix = '') {
   const out = [];
@@ -861,6 +887,11 @@ export async function startHttpServer({
         if (entry.value === null) deleteAtPath(merged, entry.path);
         else setAtPath(merged, entry.path, entry.value);
       }
+      // F-C2：组合校验（基于合并结果；拒绝会把自己搞挂的 host/auth/tls 组合）
+      const comboErrors = validateConfigCombination(merged);
+      if (comboErrors.length > 0) {
+        return sendJson(res, 400, { error: 'bad_request', message: comboErrors.join('；'), details: comboErrors });
+      }
       const tmp = `${cfgFile}.tmp-${process.pid}`;
       await writeFile(tmp, JSON.stringify(merged, null, 2), 'utf-8');
       if (existsSync(cfgFile)) await copyFile(cfgFile, `${cfgFile}.bak`);
@@ -1033,6 +1064,15 @@ export async function startHttpServer({
 
   async function handleAdminWrite(req, res, path, body) {
     if (!WRITE_PATTERNS.some((re) => re.test(path))) return false;
+    // H3：写请求仅允许 POST/PUT/PATCH
+    if (!['POST', 'PUT', 'PATCH'].includes(req.method ?? '')) {
+      return sendJson(res, 405, { error: 'method_not_allowed', message: '写端点仅接受 POST/PUT/PATCH' });
+    }
+    // H3：跨站点写防护——若浏览器带了 Origin，必须与本服务同源（CLI/脚本不带 Origin）
+    const reqOrigin = req.headers.origin;
+    if (typeof reqOrigin === 'string' && reqOrigin.length > 0 && reqOrigin !== origin) {
+      return sendJson(res, 403, { error: 'forbidden', message: `跨站点写被拒（Origin=${reqOrigin}）` });
+    }
     // 1) 鉴权（写操作要求 memory.admin）
     const check = await authenticate(req, Buffer.alloc(0), 'memory.admin');
     if (!check.ok) {
@@ -1240,7 +1280,8 @@ export async function startHttpServer({
           return sendJson(res, out.status, out.body);
         }
         if (req.method === 'GET' && READ_ROUTES[path]) return handleAdminRead(req, res, path);
-        if (req.method === 'POST') {
+        // 写端点路径：任何方法都交给 handleAdminWrite（非 POST/PUT/PATCH → 405；Origin/CSRF/scope 同处校验）
+        if (WRITE_PATTERNS.some((re) => re.test(path))) {
           const done = await handleAdminWrite(req, res, path, body);
           if (done !== false) return;
         }

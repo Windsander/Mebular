@@ -64,6 +64,9 @@ fleet join --token <token> --daemon --dir ~/.mebular --device device-B
 fleet approve --dir ~/.mebular --device device-B               # 在图上授予域
 ```
 
+想要界面？守护同时提供本机控制台：`mebular serve` 后打开 `http://127.0.0.1:7331/console`
+（星图 / 域视图 / 审计 / 向导 / 设置）；可用 `seed-demo.mjs` 生成演示数据。
+
 ### 开发者
 
 ```ts
@@ -90,7 +93,7 @@ await mebular.initialize();
 - **fleet 运维手册**（双机操作、WAN 命令、验收） — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
 - **Agent 记忆规约** — [`packages/skill/MEMORY_POLICY.md`](packages/skill/MEMORY_POLICY.md)
 - **守护 / MCP** — [`packages/mcp`](packages/mcp) · **Fleet** — [`packages/fleet`](packages/fleet)
-- **贡献与质量门禁** — [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- **控制台 GUI** — [`packages/console`](packages/console) · **贡献与质量门禁** — [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 <div align="center">
 

@@ -6,7 +6,8 @@
 // 摘要行 FLEET_SUMMARY。前置：npm run build。
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { TASK_TOOLS } from '../packages/fleet/dist/index.js';
 import { TOOL_SPECS } from '../packages/mcp/src/tools.mjs';
@@ -46,7 +47,24 @@ check('`mebular tools` 与记忆注册表一致', mcpTools?.tools?.length === 11
 const known = new Set([...fleetReg.map((t) => t.tool), ...mcpReg.map((t) => t.tool)].concat(['tools']));
 const TOOL_LIKE = /(?:^|[\s|'`(])((?:task|chatter|board|memory)_[a-z_]+)/g;
 const orphans = new Set();
-for (const file of ['packages/fleet/src/cli.ts', 'packages/mcp/bin/mebular.mjs']) {
+// H5：第三表面——控制台脚本与 docs/console 里的 tool-like 名也必须在注册表
+const extraFiles = [];
+{
+  const walk = (dir, filter) => {
+    let entries = [];
+    try { entries = readdirSync(dir); } catch { return; }
+    for (const name of entries) {
+      const full = join(dir, name);
+      try {
+        if (statSync(full).isDirectory()) walk(full, filter);
+        else if (filter(name)) extraFiles.push(full);
+      } catch { /* ignore */ }
+    }
+  };
+  walk('packages/console', (n) => n.endsWith('.js'));
+  walk('docs/console', (n) => n.endsWith('.md'));
+}
+for (const file of ['packages/fleet/src/cli.ts', 'packages/mcp/bin/mebular.mjs', ...extraFiles]) {
   const text = readFileSync(file, 'utf-8');
   for (const m of text.matchAll(TOOL_LIKE)) {
     if (!known.has(m[1])) orphans.add(`${file}:${m[1]}`);

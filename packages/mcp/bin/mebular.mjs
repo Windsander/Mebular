@@ -249,7 +249,12 @@ async function runConsole(flags) {
   const httpCfg = config.mcp?.http ?? {};
   const host = typeof flags.host === 'string' ? flags.host : httpCfg.host ?? '127.0.0.1';
   const port = flags.port !== undefined ? Number(flags.port) : httpCfg.port ?? 7331;
-  const scheme = httpCfg.tls ? 'https' : 'http';
+  // F-C1：scheme 以**生效真值**为准（tls 且证书齐备才 https）；tls=true 但缺证书 → 明确警告
+  const tlsReady = httpCfg.tls === true && Boolean(httpCfg.tlsKey && httpCfg.tlsCert);
+  if (httpCfg.tls === true && !tlsReady) {
+    console.error('⚠ mcp.http.tls=true 但缺少 tlsKey/tlsCert：serve 将启动失败（MCP_INSECURE_CONFIG）；请补证书或关闭 tls');
+  }
+  const scheme = tlsReady ? 'https' : 'http';
   const target = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host;
   const consoleUrl = `${scheme}://${target}:${port}/console`;
   const probe = `${scheme}://${target}:${port}/healthz`;

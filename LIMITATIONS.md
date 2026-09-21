@@ -38,6 +38,10 @@
   cross-segment joins need a relay/extra protection (TLS/mTLS is future work).
 - **No server push (SSE) yet.** Local clients poll (10–50 ms); push is deferred.
 - **No automatic log rotation** for services; run `logrotate` or clean up manually.
+- **Console is local and loopback-oriented.** The GUI (`/console`) is served by the daemon; non-loopback exposure
+  requires TLS + non-none auth (enforced at startup). Writes need `memory.admin` scope **and** CSRF; set
+  `MEBULAR_CONSOLE_WRITES=0` for a strictly read-only console. Live status uses SSE (`/admin/events`), but
+  memory/device lists refresh by polling.
 
 ## 4. Data model / sync
 
@@ -58,6 +62,7 @@
 - **同机 Agent 默认可信**（设备级身份、不做加密隔离）；跨机仍需证书链 + 显式分区授权。
 - **吊销是域收缩**：不回撤已入图数据、仍可建会话；级联在事件同步到达后生效（有传播延迟）；`__policy__` 对已认证设备（含被吊销者）可读。
 - **单写者**：守护持 store 锁，第二个写者明确拒绝；**配额仅本地记账**；令牌加入为 LAN 明文 HTTP+bearer。
-- **尚无 SSE 推送**（本地 10–50ms 轮询）；服务日志不自动轮转。
+- **控制台**：仅本机/回环（非回环需 TLS+非 none 鉴权，启动强制）；写需 `memory.admin` scope + CSRF，可 `MEBULAR_CONSOLE_WRITES=0` 只读；状态脉冲走 SSE，列表轮询刷新。
+- **尚无记忆推送**（本地 10–50ms 轮询）；服务日志不自动轮转。
 - **快照冲突/合并语义未补齐**；**不实现自动事件裁剪**（约束：必须排除未被所有已授权对端 ack 的事件）；跨会话重复发送是设计。
 - **跨 NAT 真机验收仍待**（本机 `verify:wan:l2*` 为仿真）。

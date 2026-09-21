@@ -59,6 +59,9 @@ jobs:
       - name: Daemon cluster (two-machine loopback sync + delegated identity)
         run: npm run verify:daemon:cluster
 
+      - name: Console E1 (static/CSRF/scope/config combo/TLS)
+        run: npm run verify:console
+
       - name: stdio MCP (real client)
         run: npm run verify:mcp:stdio
 

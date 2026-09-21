@@ -8,6 +8,7 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -746,6 +747,168 @@ try {
     check('mebular console 打印控制台 URL', cliOut.includes(`/console`), cliOut.trim().split('\n')[0]);
   } catch (error) {
     check('mebular console 打印控制台 URL', false, String(error?.message ?? error).substring(0, 160));
+  }
+
+
+  // ---------- H2：写端点【端点 ↔ scope ↔ 等价面】一致性（逐端点未授权 403） ----------
+  const WRITE_ENDPOINTS = [
+    ['POST', '/admin/api/grants'],
+    ['POST', '/admin/api/grants/g-1/revoke'],
+    ['POST', '/admin/api/devices/device-x/revoke'],
+    ['POST', '/admin/api/devices/device-x/connect'],
+    ['POST', '/admin/api/devices/device-x/disconnect'],
+    ['POST', '/admin/api/devices/device-x/sync'],
+    ['POST', '/admin/api/devices/device-x/reset-watermarks'],
+    ['POST', '/admin/api/config'],
+    ['POST', '/admin/api/invite'],
+    ['POST', '/admin/api/policy-issuers'],
+    ['POST', '/admin/api/memberships'],
+    ['POST', '/admin/api/namespaces/notes/rejoin'],
+    ['POST', '/admin/api/namespaces/notes/leave'],
+  ];
+  const unauthStatuses = [];
+  for (const [method, p] of WRITE_ENDPOINTS) {
+    const r = await fetch(`http://127.0.0.1:${port}${p}`, { method, headers: { 'content-type': 'application/json' }, body: method === 'GET' ? undefined : '{}' });
+    unauthStatuses.push(`${method} ${p}:${r.status}`);
+  }
+  check(`H2 写端点未授权一律 403（${WRITE_ENDPOINTS.length} 个）`, unauthStatuses.every((x) => x.endsWith(':403')), unauthStatuses.filter((x) => !x.endsWith(':403')).join(' '));
+  {
+    const serveSrc = await readFile(join(rootDir, 'packages', 'mcp', 'src', 'serve.mjs'), 'utf-8');
+    const writeBlock = serveSrc.slice(serveSrc.indexOf('async function handleAdminWrite'), serveSrc.indexOf('const handler = async (req, res)'));
+    check('H2 写端点统一要求 memory.admin scope（与工具面同一 scope 体系）', writeBlock.includes("'memory.admin'") && writeBlock.includes('csrfValid'));
+  }
+
+  // ---------- H3：CSRF/回环/写方法/只读降级 ----------
+  check('H3 CSRF cookie SameSite=Strict', /SameSite=Strict/i.test(index.headers.get('set-cookie') ?? ''), index.headers.get('set-cookie') ?? '');
+  const methodGet = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, { headers: writeHeaders });
+  check('H3 写端点 GET → 405', methodGet.status === 405, `status=${methodGet.status}`);
+  const crossOrigin = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, {
+    method: 'POST',
+    headers: { ...writeHeaders, origin: 'http://evil.example' },
+    body: JSON.stringify({ subject: 'device-x', namespaces: ['notes'] }),
+  });
+  check('H3 跨站点 Origin → 403', crossOrigin.status === 403, `status=${crossOrigin.status}`);
+  {
+    const roHome = join(home, 'readonly');
+    await mkdir(roHome, { recursive: true });
+    const roStorage = await seedHome(roHome);
+    const roProc = spawnServe({ home: roHome, storage: roStorage, env: { MEBULAR_CONSOLE_WRITES: '0' }, portFlag: null });
+    try {
+      const ro = await waitReady(roProc);
+      const csrfResp = await fetch(`http://127.0.0.1:${ro.port}/console/`);
+      const roCsrf = csrfResp.headers.get('x-mebular-csrf');
+      const roCookie = (csrfResp.headers.get('set-cookie') ?? '').match(/mebular_csrf=([^;]+)/)?.[1];
+      const roWrite = await fetch(`http://127.0.0.1:${ro.port}/admin/api/grants`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-mebular-csrf': roCsrf, cookie: `mebular_csrf=${roCookie}` },
+        body: JSON.stringify({ subject: 'device-x', namespaces: ['notes'] }),
+      });
+      const roJson = await roWrite.json().catch(() => null);
+      check('H3 MEBULAR_CONSOLE_WRITES=0 → 写降级 403 console_read_only', roWrite.status === 403 && roJson?.reason === 'console_read_only', `status=${roWrite.status} reason=${roJson?.reason}`);
+    } finally {
+      roProc.proc.kill('SIGKILL');
+    }
+  }
+
+  // ---------- H4/F：config 白名单 + 秘密不可写 + 组合校验 ----------
+  const sensitive = [
+    { storagePath: '/tmp/x.jsonl' },
+    { encryption: { passphrase: 'p' } },
+    { mcp: { http: { tokensFile: '/tmp/t.json' } } },
+    { deviceId: 'x' },
+  ];
+  const sensitiveResults = [];
+  for (const patch of sensitive) {
+    const r = await fetch(`http://127.0.0.1:${port}/admin/api/config`, { method: 'POST', headers: writeHeaders, body: JSON.stringify({ patch }) });
+    sensitiveResults.push(`${Object.keys(patch)}:${r.status}`);
+  }
+  check('H4 敏感/身份字段不可写（全部 400）', sensitiveResults.every((x) => x.endsWith(':400')), sensitiveResults.join(' '));
+
+  const combos = [
+    [{ mcp: { http: { host: '0.0.0.0' } } }, true, '非回环+auth=none'],
+    [{ mcp: { http: { host: '0.0.0.0', auth: 'bearer' } } }, true, '非回环+未启 TLS'],
+    [{ mcp: { http: { tls: true } } }, true, 'TLS 开启但缺证书'],
+    [{ mcp: { http: { host: '0.0.0.0', auth: 'bearer', tls: true, tlsKey: '/tmp/k.pem', tlsCert: '/tmp/c.pem' } } }, false, '合法组合'],
+  ];
+  const comboResults = [];
+  for (const [patch, shouldReject, label] of combos) {
+    const r = await fetch(`http://127.0.0.1:${port}/admin/api/config`, { method: 'POST', headers: writeHeaders, body: JSON.stringify({ patch }) });
+    const ok = shouldReject ? r.status === 400 : r.status === 200;
+    comboResults.push(`${label}:${r.status}${ok ? '' : '(✗)'}`);
+  }
+  check('F-C2 组合校验：非法 host/auth/tls 组合被拒、合法组合可用', comboResults.every((x) => !x.includes('(✗)')), comboResults.join(' '));
+  // 还原为回环 + 无 TLS，避免影响后续/重复运行
+  await fetch(`http://127.0.0.1:${port}/admin/api/config`, {
+    method: 'POST',
+    headers: writeHeaders,
+    body: JSON.stringify({ patch: { mcp: { http: { host: '127.0.0.1', auth: 'none', tls: false, tlsKey: null, tlsCert: null } } } }),
+  });
+  const cfgFiles = (await (await import('node:fs/promises')).readdir(home)).filter((f) => f.includes('.tmp-'));
+  check('H4 原子写：无 .tmp- 残留且 .bak 存在', cfgFiles.length === 0 && existsSync(join(home, 'config.json.bak')), `tmp=${cfgFiles.join(',')}`);
+
+  // ---------- F-C1：TLS 真开关（缺证书启动即报错；有证书 https 可用） ----------
+  {
+    const tlsHome = join(home, 'tls');
+    await mkdir(tlsHome, { recursive: true });
+    const tlsStorage = await seedHome(tlsHome);
+    const cfgPath = join(tlsHome, 'config.json');
+    const baseCfg = JSON.parse(await readFile(cfgPath, 'utf-8'));
+    baseCfg.mcp = { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: true } };
+    await writeFile(cfgPath, JSON.stringify(baseCfg, null, 2), 'utf-8');
+    const badProc = spawnServe({ home: tlsHome, storage: tlsStorage, portFlag: null });
+    const exitCode = await new Promise((resolve) => {
+      const t = setTimeout(() => { badProc.proc.kill('SIGKILL'); resolve('timeout'); }, 15000);
+      badProc.proc.on('close', (code) => { clearTimeout(t); resolve(code); });
+    });
+    check('F-C1 tls=true 缺证书 → 启动失败（MCP_INSECURE_CONFIG，不静默降级）',
+      exitCode !== 'timeout' && exitCode !== 0 && /MCP_INSECURE_CONFIG/.test(badProc.getErr() + badProc.getOut()),
+      `exit=${exitCode} err=${badProc.getErr().trim().slice(-120)}`);
+
+    let openssl = true;
+    try { execFileSync('openssl', ['version'], { stdio: 'ignore' }); } catch { openssl = false; }
+    if (!openssl) {
+      console.log('  - F-C1 有证书 https 可用：SKIP（本机无 openssl）');
+    } else {
+      const keyPath = join(tlsHome, 'key.pem');
+      const certPath = join(tlsHome, 'cert.pem');
+      execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=127.0.0.1'], { stdio: 'ignore' });
+      baseCfg.mcp.http.tlsKey = keyPath;
+      baseCfg.mcp.http.tlsCert = certPath;
+      await writeFile(cfgPath, JSON.stringify(baseCfg, null, 2), 'utf-8');
+      const goodProc = spawnServe({ home: tlsHome, storage: tlsStorage, portFlag: null });
+      try {
+        const info = await waitReady(goodProc);
+        const httpsOk = await new Promise((resolve) => {
+          import('node:https').then(({ default: https }) => {
+            const req = https.get({ host: '127.0.0.1', port: info.port, path: '/healthz', rejectUnauthorized: false }, (res) => { res.resume(); resolve(res.statusCode === 200); });
+            req.on('error', () => resolve(false));
+          });
+        });
+        check('F-C1 有证书 → https /healthz 200', httpsOk, `port=${info.port}`);
+      } catch (error) {
+        check('F-C1 有证书 → https /healthz 200', false, String(error?.message ?? error));
+      } finally {
+        goodProc.proc.kill('SIGKILL');
+      }
+    }
+  }
+
+  // ---------- F-C3/F-C4：生效值字段与文案诚实化 ----------
+  const settingsNow = await getJson(port, '/admin/api/settings');
+  check('F-C3 settings 暴露 listenConfigured / relays（区分配置值 vs 实际）',
+    Array.isArray(settingsNow.json?.network?.listenConfigured) && Array.isArray(settingsNow.json?.network?.relays) && Array.isArray(settingsNow.json?.network?.listen),
+    JSON.stringify({ listenConfigured: settingsNow.json?.network?.listenConfigured, relays: settingsNow.json?.network?.relays }));
+  {
+    const consoleSrc = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const needed = [
+      'MEBULAR_OAUTH_ADMIN_SECRET', // auth=oauth warn
+      '@huggingface/transformers',  // semantic warn
+      'quickstart 依赖 LAN 可达',    // joinService.bind 文案诚实
+      '非回环',                      // mcp.http.host warn
+      'tlsKey',                      // 证书可编辑
+      'TLS',                         // 实际运行状态展示
+    ];
+    check('F-C4 文案/工具面诚实化（oauth/semantic/joinService.bind/host/TLS）', needed.every((token) => consoleSrc.includes(token)), needed.filter((t) => !consoleSrc.includes(t)).join(','));
   }
 
   // ---------- 未知 API ----------

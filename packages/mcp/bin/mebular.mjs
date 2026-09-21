@@ -351,6 +351,45 @@ async function runNetDoctor() {
     lan = { error: error.message };
   }
 
+  // C5：地址自动广播状态（档位/已发布/已采用/忽略原因）
+  let netStatus = null;
+  try {
+    const { app } = await createMebular();
+    try {
+      netStatus = app.getNetEndpointsStatus?.() ?? null;
+    } finally {
+      await app.shutdown().catch(() => undefined);
+    }
+  } catch (error) {
+    netStatus = { error: error.message };
+  }
+
+  // C4：NAT 穿透状态（AutoNAT/DCUtR + 直连升级计数）
+  let natStatus = null;
+  try {
+    const { app } = await createMebular();
+    try {
+      natStatus = app.getNatStatus?.() ?? null;
+    } finally {
+      await app.shutdown().catch(() => undefined);
+    }
+  } catch (error) {
+    natStatus = { error: error.message };
+  }
+
+  // C6：内建 relay 角色（本机当不当桥、原因、白名单客户端数）
+  let relay = null;
+  try {
+    const { app } = await createMebular();
+    try {
+      relay = app.node?.getRelayStatus?.() ?? null;
+    } finally {
+      await app.shutdown().catch(() => undefined);
+    }
+  } catch (error) {
+    relay = { error: error.message };
+  }
+
   // relay seeds 探针（TCP 可达性）
   const seedProbes = [];
   for (const seed of seeds) {
@@ -361,12 +400,19 @@ async function runNetDoctor() {
   }
 
   const next = [];
-  if (!runtime.enabled) next.push('network.enabled=false：先开启 P2P（或 `mebular relay` 起一台自托管 relay）');
+  if (!runtime.enabled) next.push('network.enabled=false：先开启 P2P（可达设备会自动成为桥；无需手工起 relay）');
   if (runtime.listen.length === 0 && runtime.enabled) next.push('本机暂无监听地址：检查 network.libp2p.listen / 防火墙 / relay 预约');
   const totalHints = Object.values(hints).reduce((sum, list) => sum + list.length, 0);
   if (totalHints === 0) next.push('无配对 hints：用 `fleet invite`/控制台邀请，让新设备拿到可达地址（token.endpoints）');
   const failedSeeds = seedProbes.filter((p) => p.reachable === false);
   if (failedSeeds.length > 0) next.push(`relay seed 不可达（${failedSeeds.map((p) => p.seed).join(', ')}）：确认 relay 进程在跑、端口放行`);
+  if (natStatus && natStatus.loadError) next.push(`NAT 打洞不可用（${natStatus.loadError}）：安装可选依赖 @libp2p/autonat @libp2p/dcutr 可启用（缺包不影响其他连接方式）`);
+  if (natStatus && natStatus.dcutrEnabled && (natStatus.directUpgrades ?? 0) === 0 && (natStatus.relayConnections ?? 0) > 0) next.push('有 relay 连接但尚未观察到直连升级：对端/本机可能都是对称 NAT（打洞失败属预期，保留 relay）');
+  if (netStatus && !netStatus.enabled) next.push('地址自动广播未开启（opt-in）：把 `__net__` 加入 sync.namespaces 或配置 network.broadcast:{mode:"full"} 即可让可达设备互相广播地址');
+  if (netStatus && netStatus.enabled && netStatus.published === 0) next.push('已开启地址广播但尚未发布：启动/可达性变化后会自动发布（首次可能因地址未变而跳过）');
+  if (netStatus && Object.values(netStatus.ignored ?? {}).reduce((a, b) => a + b, 0) > 0) next.push(`有被忽略的广播记录（${Object.entries(netStatus.ignored).filter(([, v]) => v > 0).map(([k, v]) => `${k}:${v}`).join(' ')}）：过期/吊销/伪装 subject 属预期忽略`);
+  if (relay && relay.mode === 'auto' && !relay.serving) next.push(`本机不当桥（${relay.reason}）：如需当桥，确保有公网监听地址或已被外部直连（network.relayService=on 可强制）`);
+  if (relay && relay.serving && relay.allowedClients === 0) next.push('本机在当桥但白名单为空：先配对（地址簿 paired）后才会放行中转预约');
   if (lan && lan.enabled && !lan.running) next.push(`LAN 发现未运行${lan.lastError ? `（${lan.lastError}）` : ''}：检查 bonjour 依赖或 network.lan.enabled`);
   if (lan && lan.ignoredUnknown > 0) next.push(`发现了 ${lan.ignoredUnknown} 个未配对设备（已忽略、未拨号）：如确需连通，先用邀请令牌配对（写入地址簿）或加入 sync.peerWhitelist`);
   if (lan && lan.lanCandidates === 0 && lan.running) next.push('LAN 发现已启用但暂无 LAN 候选：确认同网段、mDNS 未被防火墙拦截（跨网段请用 relay seeds）');
@@ -386,59 +432,13 @@ async function runNetDoctor() {
       : { loaded: false, error: bookError },
     configHints: hints,
     lan,
+    net: netStatus,
+    nat: natStatus,
+    relay,
     relaySeeds: seedProbes,
     runtime,
     next,
   }, null, 2));
-}
-
-/** C2：`mebular relay` —— 一键起自托管 circuit relay（默认限额，--unlimited 显式放开）。 */
-async function runRelayHost(flags) {
-  const listen = typeof flags.listen === 'string' ? flags.listen : '/ip4/0.0.0.0/tcp/4001';
-  const unlimited = flags.unlimited === true || flags.unlimited === 'true';
-  // 一键：env 覆盖（不写磁盘配置）；relay 与 serve 的单实例锁按 home 隔离
-  process.env.MEBULAR_RELAY_HOST = '1';
-  process.env.MEBULAR_RELAY_LISTEN = listen;
-  if (unlimited) process.env.MEBULAR_RELAY_UNLIMITED = '1';
-  const { createMebular } = await import('../src/config.mjs');
-  const { app, home, deviceId } = await createMebular();
-  const node = app.node;
-  if (!node || !node.isRunning()) {
-    console.error('✗ relay 启动失败：网络未启用（network.enabled=false）。请开启网络或检查 libp2p 依赖');
-    await app.shutdown().catch(() => undefined);
-    process.exit(2);
-  }
-  const addrs = (node.getLocalMultiaddrs?.() ?? []).filter((a) => typeof a === 'string');
-  const peerId = node.peerId?.id ?? '<peerId>';
-  const printable = addrs.length > 0 ? addrs : [listen];
-  console.error(`RELAY_READY ${JSON.stringify({ deviceId, home, listen, relayUnlimited: unlimited, addrs: printable })}`);
-  console.log(JSON.stringify({
-    ok: true,
-    kind: 'relay-host',
-    deviceId,
-    home,
-    relayUnlimited: unlimited,
-    multiaddrs: printable,
-    peerConfigSnippet: {
-      'network.relaySeeds': printable.map((a) => (a.includes('/p2p/') ? a : `${a}/p2p/${peerId}`)),
-      note: '把片段写入对端 config.json；也可用 `mebular relay --print-only` 只打印不常驻',
-    },
-    service: {
-      supported: false,
-      note: 'relay 与 serve 共用一个 home 会撞单实例锁（<home>/lock），故不注册 service 单元；请用独立 home（MEBULAR_HOME=<other>）跑 relay，或用你的进程管理器托管本命令',
-    },
-  }, null, 2));
-  if (flags['print-only'] === true || flags['print-only'] === 'true') {
-    await app.shutdown().catch(() => undefined);
-    return;
-  }
-  // 常驻：等待信号，保持 relay 服务进程存活
-  await new Promise((resolve) => {
-    const stop = () => resolve();
-    process.once('SIGINT', stop);
-    process.once('SIGTERM', stop);
-  });
-  await app.shutdown().catch(() => undefined);
 }
 
 async function runStatus() {
@@ -598,10 +598,6 @@ async function main() {
       await runConsole(flags);
       return;
     }
-    case 'relay': {
-      await runRelayHost(flags);
-      return;
-    }
     case 'token': {
       await runToken(argv[1], flags, argv[2]);
       return;
@@ -618,7 +614,6 @@ async function main() {
           '  serve [--host --port --auth --tls-key --tls-cert --tokens-file]   Streamable HTTP server',
           '  service install|uninstall|status|logs [--no-autostart --label L]  常驻服务管理（mebular-serve）',
           '  console [--host --port]      打印控制台 URL（需 serve 正在运行）',
-          '  relay [--listen /ip4/0.0.0.0/tcp/4001] [--unlimited] [--print-only]  自托管 circuit relay（默认限额）',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
           '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',

@@ -11,7 +11,7 @@
 //   分开：前者是准入凭据，后者是身份失效。
 // - 服务端验令牌后，用 inviter 设备私钥为请求设备签发**委派证书**（1 跳；链上界由 core 强制）。
 
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import http, { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import https from 'node:https';
 import { createHash, randomBytes } from 'node:crypto';
@@ -51,6 +51,16 @@ export interface JoinToken {
   endpoints?: string[];
   /** C2：邀请方建议的 relay seeds（可选） */
   relaySeeds?: string[];
+  /**
+   * C7：兑换时邀请方**自动授权**该设备（作用域 = 令牌分区）。默认 true。
+   * 缺省（不写进签名体）= 默认行为；显式 false 才写入（保持旧令牌字节兼容）。
+   */
+  grantOnJoin?: boolean;
+  /**
+   * C7：自动授权有效期（ms）。默认 24h；`0` = 不自动撤销（永久）。
+   * 仅在显式设置时写入签名体（缺省 = 24h）。
+   */
+  grantTtlMs?: number;
   /** C2：邀请方是否有公网可达地址（诊断提示用；仅信息，不参与授权） */
   pubReachable?: boolean;
   /** inviter 设备私钥对 canonical 数据的签名（base64） */
@@ -75,6 +85,9 @@ export function canonicalJoinTokenData(token: Omit<JoinToken, 'signature'> & { s
     ...(token.endpoints !== undefined ? { endpoints: token.endpoints } : {}),
     ...(token.relaySeeds !== undefined ? { relaySeeds: token.relaySeeds } : {}),
     ...(token.pubReachable !== undefined ? { pubReachable: token.pubReachable } : {}),
+    // C7：仅在「非默认值」时进入签名体 → 默认令牌与旧版本逐字节兼容（旧 inviter 仍可验签）
+    ...(token.grantOnJoin === false ? { grantOnJoin: false } : {}),
+    ...(token.grantTtlMs !== undefined ? { grantTtlMs: token.grantTtlMs } : {}),
   });
 }
 
@@ -108,6 +121,12 @@ export function decodeJoinToken(text: string): JoinToken {
   }
   if (t.pubReachable !== undefined && typeof t.pubReachable !== 'boolean') {
     throw new Error('令牌 pubReachable 形状非法（应为布尔）');
+  }
+  if (t.grantOnJoin !== undefined && typeof t.grantOnJoin !== 'boolean') {
+    throw new Error('令牌 grantOnJoin 形状非法（应为布尔）');
+  }
+  if (t.grantTtlMs !== undefined && (typeof t.grantTtlMs !== 'number' || !Number.isFinite(t.grantTtlMs) || t.grantTtlMs < 0)) {
+    throw new Error('令牌 grantTtlMs 形状非法（应为非负数字）');
   }
   return t as unknown as JoinToken;
 }
@@ -168,6 +187,10 @@ export async function buildJoinToken(input: {
   endpoints?: string[];
   relaySeeds?: string[];
   pubReachable?: boolean;
+  /** C7：兑换时自动授权（默认 true；显式 false 才写入令牌） */
+  grantOnJoin?: boolean;
+  /** C7：自动授权有效期（ms；默认 24h；0 = 永久） */
+  grantTtlMs?: number;
 }): Promise<JoinToken> {
   const identity = input.mebular.identity.getDeviceKey(input.deviceId);
   if (!identity) throw new Error(`本机无设备密钥：${input.deviceId}`);
@@ -196,12 +219,28 @@ export async function buildJoinToken(input: {
   if (relaySeeds.length > 0) unsigned.relaySeeds = relaySeeds;
   const pubReachable = input.pubReachable ?? endpoints.some((addr) => !isLoopbackAddress(addr));
   if (endpoints.length > 0 || input.pubReachable !== undefined) unsigned.pubReachable = pubReachable;
+  // C7：自动授权（默认开）；仅显式关闭/显式 TTL 才进签名体（默认令牌与旧版本逐字节兼容）
+  if (input.grantOnJoin === false) unsigned.grantOnJoin = false;
+  if (input.grantTtlMs !== undefined) unsigned.grantTtlMs = input.grantTtlMs;
   const signature = await globalThis.crypto.subtle.sign(
     { name: 'Ed25519' },
     identity.privateKey,
     new TextEncoder().encode(canonicalJoinTokenData(unsigned)),
   );
   return { ...unsigned, signature: bytesToBase64(new Uint8Array(signature)) };
+}
+
+/** C7：邀请自动授权默认有效期（24h） */
+export const DEFAULT_GRANT_TTL_MS = 24 * 3600_000;
+
+/** C7：令牌是否要求兑换时自动授权（缺省 = true） */
+export function tokenGrantsOnJoin(token: { grantOnJoin?: boolean }): boolean {
+  return token.grantOnJoin !== false;
+}
+
+/** C7：自动授权有效期（缺省 24h；0 = 永久不自动撤销） */
+export function tokenGrantTtlMs(token: { grantTtlMs?: number }): number {
+  return token.grantTtlMs ?? DEFAULT_GRANT_TTL_MS;
 }
 
 /** C2：本机可达 P2P 地址（节点监听 + /p2p/<peerId>；无节点则空）。 */
@@ -358,6 +397,94 @@ function withNonceLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
+// ---------- C7：邀请自动授权 + TTL 台账（图外，幂等） ----------
+
+export interface AutoGrantEntry {
+  subject: string;
+  namespace: string;
+  grantId: string;
+  grantedAt: number;
+  /** 0 = 永久（不自动撤销） */
+  ttlMs: number;
+}
+
+export function autoGrantStatePath(storagePath: string): string {
+  return `${storagePath}.join-autogrants.json`;
+}
+
+export async function readAutoGrantState(storagePath: string): Promise<AutoGrantEntry[]> {
+  try {
+    const parsed = JSON.parse(await readFile(autoGrantStatePath(storagePath), 'utf-8')) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is AutoGrantEntry => Boolean(entry) && typeof (entry as AutoGrantEntry).subject === 'string');
+  } catch {
+    return [];
+  }
+}
+
+async function writeAutoGrantState(storagePath: string, entries: AutoGrantEntry[]): Promise<void> {
+  const path = autoGrantStatePath(storagePath);
+  await mkdir(dirname(path), { recursive: true });
+  const tmp = `${path}.tmp-${process.pid}`;
+  await writeFile(tmp, JSON.stringify(entries, null, 2), { encoding: 'utf-8', mode: 0o600 });
+  await rename(tmp, path);
+}
+
+/**
+ * C7：兑换后按令牌语义自动授权（作用域 = 令牌分区），并登记 TTL 台账。
+ * 授权走**既有** grantNamespaces（不改授权判定）；TTL 到期由 `sweepAutoGrantRevokes` 用既有 revokeGrant 撤销。
+ */
+export async function applyJoinGrant(input: {
+  mebular: Mebular;
+  storagePath: string;
+  token: { namespace: string; grantOnJoin?: boolean; grantTtlMs?: number };
+  subject: string;
+  now?: number;
+}): Promise<{ granted: boolean; grantId?: string; ttlMs?: number; error?: string }> {
+  if (!tokenGrantsOnJoin(input.token)) return { granted: false };
+  try {
+    const ttlMs = tokenGrantTtlMs(input.token);
+    const result = await input.mebular.grantNamespaces({
+      subject: input.subject,
+      namespaces: [input.token.namespace],
+      // 记录意图；注意：**授权判定当前不解释 expiresAt**（避免改授权语义），
+      // 实际到期由本文件的 TTL 台账 + sweepAutoGrantRevokes（走既有 revokeGrant）保证。
+      ...(ttlMs > 0 ? { expiresAt: (input.now ?? Date.now()) + ttlMs } : {}),
+      note: 'C7 邀请自动授权',
+    });
+    const grantId = (result?.data as { grant?: { grantId?: string } } | undefined)?.grant?.grantId;
+    if (typeof grantId === 'string' && grantId.length > 0) {
+      const entries = await readAutoGrantState(input.storagePath);
+      entries.push({ subject: input.subject, namespace: input.token.namespace, grantId, grantedAt: input.now ?? Date.now(), ttlMs });
+      await writeAutoGrantState(input.storagePath, entries);
+    }
+    return { granted: true, ...(typeof grantId === 'string' ? { grantId } : {}), ttlMs };
+  } catch (error) {
+    return { granted: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** C7：清扫到期自动授权（幂等；返回已撤销条数）。ttlMs=0 表示永久（不撤销）。 */
+export async function sweepAutoGrantRevokes(input: { mebular: Mebular; storagePath: string; now?: number }): Promise<number> {
+  const now = input.now ?? Date.now();
+  const entries = await readAutoGrantState(input.storagePath);
+  const due = entries.filter((entry) => entry.ttlMs > 0 && now >= entry.grantedAt + entry.ttlMs);
+  if (due.length === 0) return 0;
+  let revoked = 0;
+  for (const entry of due) {
+    try {
+      await input.mebular.revokeGrant({ grantId: entry.grantId, subject: entry.subject });
+      revoked += 1;
+    } catch {
+      // 已撤销/记录已被清理：按已处理计
+      revoked += 1;
+    }
+  }
+  const remaining = entries.filter((entry) => !(entry.ttlMs > 0 && now >= entry.grantedAt + entry.ttlMs));
+  await writeAutoGrantState(input.storagePath, remaining);
+  return revoked;
+}
+
 export async function startJoinService(opts: JoinServiceOptions): Promise<JoinService> {
   const bind = opts.bind ?? '0.0.0.0';
   const server = createServer((req, res) => {
@@ -405,6 +532,14 @@ export async function startJoinService(opts: JoinServiceOptions): Promise<JoinSe
           try {
             const issued = await opts.mebular.identity.issueDelegatedCertificateFor(deviceId, devicePublicKey, opts.deviceId);
             opts.log?.(`join: issued delegated cert for ${deviceId} (nonce consumed)`);
+            // C7：按令牌语义自动授权（作用域 = 令牌分区；默认开；TTL 默认 24h 后自动撤销）
+            const grant = await applyJoinGrant({
+              mebular: opts.mebular,
+              storagePath: opts.storagePath,
+              token,
+              subject: deviceId,
+            });
+            void sweepAutoGrantRevokes({ mebular: opts.mebular, storagePath: opts.storagePath }).catch(() => undefined);
             sendJson(res, 200, {
               ok: true,
               certificate: issued.certificate,
@@ -412,6 +547,11 @@ export async function startJoinService(opts: JoinServiceOptions): Promise<JoinSe
               namespace: token.namespace,
               inviterDeviceId: token.inviterDeviceId,
               inviterMultiaddrs: opts.mebular.node?.getLocalMultiaddrs() ?? [],
+              grantOnJoin: tokenGrantsOnJoin(token),
+              granted: grant.granted,
+              ...(grant.grantId !== undefined ? { grantId: grant.grantId } : {}),
+              ...(grant.ttlMs !== undefined ? { grantTtlMs: grant.ttlMs } : {}),
+              ...(grant.error !== undefined ? { grantError: grant.error } : {}),
             });
           } catch (error) {
             opts.log?.(`join: nonce ${token.nonce} consumed but issuance failed: ${(error as Error).message}`);

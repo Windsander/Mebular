@@ -58,7 +58,8 @@ import {
   writeJoinCodeFile,
   type ServiceInstaller,
 } from './quickstart.js';
-import { buildJoinToken, startJoinService, type JoinService } from './jointoken.js';
+import { buildJoinToken, startJoinService, DEFAULT_GRANT_TTL_MS, type JoinService } from './jointoken.js';
+import { renderTerminalQr, renderSvgQr } from './qr.js';
 import { createRequire } from 'node:module';
 import { joinWithToken } from './join.js';
 import { toolByCli, toolCliTable } from './surface.js';
@@ -711,6 +712,8 @@ async function runJoin(args: Args): Promise<number> {
   const noService = args['no-service'] === true;
   const agents = parseAgents(args.agent, args['agent-command'], args['agent-base-args']);
   // T2：令牌加入（推荐；主密钥不复制）
+  // C7：`--qr <字符串>` 与 `--token` **完全等价**（QR 内容就是内联令牌文本本身）
+  if (typeof args.qr === 'string') args.token = args.qr.trim();
   if (typeof args.token === 'string' || typeof args['token-file'] === 'string') {
     const tokenText = await readJoinCode({
       ...(typeof args.token === 'string' ? { code: args.token } : {}),
@@ -822,9 +825,20 @@ async function runInvite(args: Args): Promise<number> {
       namespace: str(args.namespace, config.namespace),
       endpoint,
       ttlMs,
+      // C7：自动授权（默认 true；`--no-grant` 关闭）+ 授权 TTL（默认 24h，`--grant-ttl <小时>`）
+      ...(str(args['grant'], 'on') === 'off' || args['no-grant'] === true ? { grantOnJoin: false } : {}),
+      ...(typeof args['grant-ttl'] === 'string' ? { grantTtlMs: Math.max(0, num(args['grant-ttl'], 24) * 3600_000) } : {}),
     });
     const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
     if (typeof args['token-file'] === 'string') await writeJoinCodeFile(args['token-file'], inline);
+
+    // C7：二维码 + 文本一起提供（二维码内容 = 内联令牌文本；缺可选依赖则只给文本，不报错）
+    const warnings: string[] = [];
+    const terminalQr = args['no-qr'] === true ? null : await renderTerminalQr(inline, { onWarn: (m) => warnings.push(m) });
+    const svgQr = args['no-qr'] === true ? null : await renderSvgQr(inline, { onWarn: (m) => warnings.push(m) });
+    if (terminalQr) console.log(terminalQr.value);
+
+    const grantTtlMs = token.grantTtlMs ?? DEFAULT_GRANT_TTL_MS;
     console.log(JSON.stringify({
       ok: true,
       role: 'invite',
@@ -834,8 +848,16 @@ async function runInvite(args: Args): Promise<number> {
       nonce: token.nonce,
       expiresAt: token.expiresAt,
       token: inline,
+      grantOnJoin: token.grantOnJoin !== false,
+      grantTtlMs: token.grantOnJoin === false ? null : grantTtlMs,
+      qr: terminalQr ? { kind: terminalQr.kind, value: terminalQr.value } : null,
+      qrSvg: svgQr ? svgQr.value : null,
       ...(typeof args['token-file'] === 'string' ? { tokenFile: args['token-file'] } : {}),
-      next: [`把令牌安全传给新设备，新设备运行：fleet join --token <内联|文件>`],
+      ...(warnings.length > 0 ? { warnings } : {}),
+      next: [
+        '把二维码或令牌安全传给新设备（QR 内容即令牌文本）',
+        '新设备运行：fleet join --qr \'<二维码内容>\' 或 fleet join --token <内联|文件>',
+      ],
     }, null, 2));
   } finally {
     await mebular.shutdown();

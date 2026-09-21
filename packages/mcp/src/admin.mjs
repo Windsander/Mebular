@@ -590,6 +590,12 @@ export async function buildSettings({ app, service, config, runtime, home }) {
     ...(await buildFleetView(home)),
     // C2：对端连接路径（只读；来自 core 地址簿的 path 状态）+ 地址簿元信息
     peers: buildPeerPaths(app),
+    // C6：内建 relay 角色（只读；mode/serving/reason/allowedClients + 当前经哪个桥）
+    relay: buildRelayView(app),
+    // C5：地址自动广播（只读；档位/已发布/已采用/忽略原因）
+    net: buildNetView(app),
+    // C4：NAT 穿透（只读；AutoNAT/DCUtR 是否启用、直连升级与 relay 连接计数）
+    nat: buildNatView(app),
     // 实际可调用面（MCP 工具 = `mebular <name>` CLI，逐字同名同 handler）
     tools: TOOL_NAMES,
   };
@@ -623,6 +629,65 @@ function buildPeerPaths(app) {
     return { enabled: true, paths };
   } catch {
     return { enabled: false, paths: [] };
+  }
+}
+
+/**
+ * C6：内建 relay 角色视图（只读）。`reason` 说明为何开/关；`bridge` 是当前路径为 relay 时的桥地址。
+ * 注意：relay 角色不落任何记忆/授权状态，这里只回答「本机当不当桥、我现在经谁中转」。
+ */
+function buildRelayView(app) {
+  try {
+    const status = app?.node?.getRelayStatus?.() ?? null;
+    if (!status) return { mode: 'off', serving: false, reason: '网络未启用', publicAddrs: [], allowedClients: 0, bridge: null };
+    const book = app?.endpointBook;
+    let bridge = null;
+    if (book && typeof book.keys === 'function') {
+      for (const key of book.keys()) {
+        const path = book.getPath(key);
+        if (path?.kind === 'relay') { bridge = { peer: key, address: path.address, since: path.since }; break; }
+      }
+    }
+    return { ...status, bridge };
+  } catch {
+    return { mode: 'off', serving: false, reason: 'relay 状态不可读', publicAddrs: [], allowedClients: 0, bridge: null };
+  }
+}
+
+/**
+ * C5：地址自动广播视图（只读）。
+ * 记录只作 hints（永不参与授权）；此处只回答「我广播了什么、我采用了谁的、忽略了什么」。
+ */
+function buildNetView(app) {
+  try {
+    const status = app?.getNetEndpointsStatus?.() ?? null;
+    if (!status) return { enabled: false, mode: 'off', ttlMs: 0, published: 0, applied: 0, ignored: {}, lastPublishedAt: null, lastAcceptedSubjects: [] };
+    return status;
+  } catch {
+    return { enabled: false, mode: 'off', ttlMs: 0, published: 0, applied: 0, ignored: {}, lastPublishedAt: null, lastAcceptedSubjects: [] };
+  }
+}
+
+/**
+ * C4：NAT 穿透视图（只读）。网络未启用/未装配 libp2p 时返回**固定形状**（而非缺字段），
+ * 便于控制台与门禁稳定断言。
+ */
+function buildNatView(app) {
+  const base = {
+    enabled: false,
+    autonatEnabled: false,
+    dcutrEnabled: false,
+    loadError: null,
+    directUpgrades: 0,
+    relayConnections: 0,
+    lastUpgradeAt: null,
+    lastError: null,
+  };
+  try {
+    const status = app?.getNatStatus?.();
+    return status ? { ...base, ...status } : base;
+  } catch {
+    return base;
   }
 }
 

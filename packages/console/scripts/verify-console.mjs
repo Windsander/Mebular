@@ -1138,6 +1138,96 @@ try {
       'path-row 复用 --row-label-w');
   }
 
+  // ---------- C6：内建 relay 角色（只读渲染断言，不涉行为） ----------
+  {
+    const settingsRelay = await getJson(port, '/admin/api/settings');
+    const relay = settingsRelay.json?.relay;
+    check('C6 settings.relay 暴露内建桥角色（mode/serving/reason/publicAddrs/allowedClients）',
+      relay && ['auto', 'off', 'on'].includes(relay.mode) && typeof relay.serving === 'boolean'
+        && typeof relay.reason === 'string' && Array.isArray(relay.publicAddrs) && typeof relay.allowedClients === 'number',
+      relay);
+    const consoleSrc4 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const tokensC6 = ['本机当桥', '当前经桥', '桥白名单'];
+    check('C6 控制台只读展示「本机当桥/当前经桥/桥白名单」',
+      tokensC6.every((token) => consoleSrc4.includes(token)),
+      tokensC6.filter((token) => !consoleSrc4.includes(token)).join(',') || '全部命中');
+    const binSrc = await readFile(join(rootDir, 'packages', 'mcp', 'bin', 'mebular.mjs'), 'utf-8');
+    // 注意：用拼接构造被禁字样，避免本文件自身命中「无残留引用」扫描
+    const forbidden = [['case ', "'relay'"].join(''), ['runRelay', 'Host'].join(''), ['MEBULAR_', 'RELAY_'].join('')];
+    check('C6 无独立 relay 命令（bin 无 relay 子命令 / 旧实现 / 旧环境变量）',
+      forbidden.every((token) => !binSrc.includes(token)));
+  }
+
+  // ---------- C5：地址自动广播（只读渲染断言，不涉行为） ----------
+  {
+    const settingsNet = await getJson(port, '/admin/api/settings');
+    const net = settingsNet.json?.net;
+    check('C5 settings.net 暴露广播状态（enabled/mode/ttlMs/published/applied/ignored）',
+      net && typeof net.enabled === 'boolean' && ['full', 'relay-only', 'off'].includes(net.mode)
+        && typeof net.ttlMs === 'number' && typeof net.published === 'number' && typeof net.applied === 'number'
+        && net.ignored && typeof net.ignored === 'object',
+      net);
+    const consoleSrc5 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const tokensC5 = ['地址广播', '__net__', '广播忽略'];
+    check('C5 控制台只读展示「地址广播」（档位/已发布/已采用/忽略原因）',
+      tokensC5.every((token) => consoleSrc5.includes(token)),
+      tokensC5.filter((token) => !consoleSrc5.includes(token)).join(',') || '全部命中');
+  }
+
+  // ---------- C7：扫码即通（邀请响应带二维码 + 控制台渲染断言） ----------
+  {
+    const inviteHome2 = join(home, 'invite-qr');
+    const invitePort2 = await freePort();
+    await mkdir(inviteHome2, { recursive: true });
+    await writeFile(join(inviteHome2, 'config.json'), JSON.stringify({
+      storagePath: join(inviteHome2, 'store.jsonl'),
+      deviceId: 'device-qr',
+      encryption: { level: 'none' },
+      network: { enabled: false },
+      mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
+      joinService: { enabled: true, bind: '127.0.0.1', port: invitePort2 },
+    }, null, 2), 'utf-8');
+    const qrHandle = spawnServe({ home: inviteHome2, storage: join(inviteHome2, 'store.jsonl'), deviceId: 'device-qr' });
+    servers.push(qrHandle);
+    const qrReady = await waitReady(qrHandle);
+    const qrPage = await fetch(`http://127.0.0.1:${qrReady.port}/console/`);
+    const qrHeaders = {
+      'content-type': 'application/json',
+      'x-mebular-csrf': qrPage.headers.get('x-mebular-csrf'),
+      cookie: `mebular_csrf=${cookieFrom(qrPage)}`,
+    };
+    const inviteRes = await fetch(`http://127.0.0.1:${qrReady.port}/admin/api/invite`, {
+      method: 'POST', headers: qrHeaders, body: JSON.stringify({ ttlMs: 60000 }),
+    });
+    const inviteJson = await inviteRes.json().catch(() => null);
+    // 可选依赖在场 → SVG；缺包 → null（只给文本）；两者都合法，字段必须存在
+    check('C7 邀请响应提供二维码（qrSvg：SVG 字符串或缺可选依赖时为 null）+ grantOnJoin',
+      inviteRes.status === 201 && 'qrSvg' in (inviteJson ?? {}) && (inviteJson?.qrSvg === null || String(inviteJson?.qrSvg).startsWith('<svg'))
+        && inviteJson?.grantOnJoin === true,
+      { status: inviteRes.status, qr: inviteJson?.qrSvg === null ? 'null（缺可选依赖）' : 'svg', grantOnJoin: inviteJson?.grantOnJoin });
+    const consoleSrc6 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    check('C7 控制台邀请面板渲染二维码与自动授权说明',
+      ['扫码即通', 'qrSvg', '兑换后自动授权'].every((token) => consoleSrc6.includes(token)));
+    const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
+    check('C7 二维码依赖为**精确 pin** 的可选依赖（依赖政策）',
+      typeof pkg.optionalDependencies?.qrcode === 'string' && /^\d+\.\d+\.\d+$/.test(pkg.optionalDependencies.qrcode),
+      { qrcode: pkg.optionalDependencies?.qrcode });
+  }
+
+  // ---------- C4：NAT 打洞（只读渲染断言） ----------
+  {
+    const settingsNat = await getJson(port, '/admin/api/settings');
+    const nat = settingsNat.json?.nat;
+    check('C4 settings.nat 暴露打洞状态（enabled/autonat/dcutr/directUpgrades/relayConnections/loadError）',
+      nat && typeof nat.enabled === 'boolean' && typeof nat.autonatEnabled === 'boolean'
+        && typeof nat.dcutrEnabled === 'boolean' && typeof nat.directUpgrades === 'number'
+        && typeof nat.relayConnections === 'number' && 'loadError' in nat,
+      nat);
+    const consoleSrc7 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    check('C4 控制台只读展示「NAT 打洞」（AutoNAT/DCUtR/直连升级）',
+      ['NAT 打洞', 'DCUtR', '直连升级'].every((token) => consoleSrc7.includes(token)));
+  }
+
   // ---------- 未知 API ----------
   const unknown = await getJson(port, '/admin/api/nope');
   check('未知 /admin/api 路径 404', unknown.status === 404);

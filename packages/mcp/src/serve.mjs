@@ -163,6 +163,7 @@ function deleteAtPath(root, path) {
 }
 import { endpointHostname, isLoopbackHost } from './lan-host.mjs';
 import { buildJoinToken } from './jointoken.mjs';
+import { renderSvgQr } from './qr.mjs';
 
 const SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
 const SCOPE_RANK = { 'memory.read': 0, 'memory.write': 1, 'memory.admin': 2 };
@@ -875,6 +876,7 @@ export async function startHttpServer({
 
     // 新设备上车：签发一次性加入令牌（需 joinService 已启用；由守护 identity 签发）
     if (path === '/admin/api/invite') {
+      // C7：二维码 + 文本一起给（QR 内容 = 内联令牌文本；缺可选依赖 → 只给文本，不报错）
       if (typeof deviceId !== 'string' || typeof joinEndpoint !== 'string') {
         return sendJson(res, 409, {
           ok: false,
@@ -905,9 +907,15 @@ export async function startHttpServer({
       const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
       const endpointHost = endpointHostname(endpoint);
       const loopback = endpointHost !== null && isLoopbackHost(endpointHost);
+      const qrWarnings = [];
+      const qrSvg = await renderSvgQr(inline, { onWarn: (m) => qrWarnings.push(m) });
       return sendJson(res, 201, {
         ok: true,
         token: inline,
+        // C7：服务端渲染 SVG（data-uri 由前端组装）；库不可用时为 null
+        qrSvg: qrSvg ? qrSvg.value : null,
+        grantOnJoin: true,
+        ...(qrWarnings.length > 0 ? { qrWarnings } : {}),
         endpoint,
         endpointSource: override ? 'override' : 'daemon',
         namespace: ns,

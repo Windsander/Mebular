@@ -98,7 +98,10 @@
     "verify:fleet:all": "node scripts/verify-fleet-all.mjs",
     "dev": "node --loader ts-node/esm src/index.ts",
     "verify:connect": "node scripts/verify-connect.mjs",
-    "verify:lan": "node scripts/verify-lan.mjs"
+    "verify:lan": "node scripts/verify-lan.mjs",
+    "check:deps": "node scripts/check-deps.mjs",
+    "verify:invite": "node scripts/verify-invite.mjs",
+    "verify:nat": "node scripts/verify-nat.mjs"
   },
   "dependencies": {
     "bonjour": "^3.5.1",
@@ -107,13 +110,16 @@
   "optionalDependencies": {
     "@chainsafe/libp2p-noise": "^17.0.0",
     "@chainsafe/libp2p-yamux": "^8.0.1",
+    "@libp2p/autonat": "3.0.28",
     "@libp2p/circuit-relay-v2": "^4.2.13",
     "@libp2p/crypto": "^5.1.23",
+    "@libp2p/dcutr": "3.0.28",
     "@libp2p/identify": "^4.1.14",
     "@libp2p/peer-id": "^6.0.15",
     "@libp2p/tcp": "^11.0.27",
     "@multiformats/multiaddr": "^13.0.3",
-    "libp2p": "^3.3.9"
+    "libp2p": "^3.3.9",
+    "qrcode": "1.5.4"
   },
   "peerDependencies": {
     "@huggingface/transformers": ">=3.0.0"
@@ -126,7 +132,6 @@
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
     "@modelcontextprotocol/server": "^2.0.0",
-    "zod": "^4.6.5",
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.24",
     "@typescript-eslint/eslint-plugin": "^7.0.2",
@@ -135,7 +140,8 @@
     "jest": "^29.7.0",
     "ts-jest": "^29.1.2",
     "ts-node": "^10.9.2",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "zod": "^4.6.5"
   },
   "jest": {
     "preset": "ts-jest",
@@ -192,6 +198,10 @@
       "src/p2p/P2PNetwork.ts": {
         "lines": 80,
         "branches": 65
+      },
+      "src/sync/netEndpoints.ts": {
+        "lines": 85,
+        "branches": 70
       },
       "src/p2p/handshake/AuthenticationHandshake.ts": {
         "lines": 90,

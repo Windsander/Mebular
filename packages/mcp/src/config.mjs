@@ -143,19 +143,6 @@ export async function resolveMasterPublicKey(home, config) {
 export async function createMebular() {
   const home = homeDir();
   const config = await loadConfigFile(home);
-  // C2 `mebular relay`：env 一键覆盖（不改磁盘配置）
-  const relayHostEnv = process.env.MEBULAR_RELAY_HOST === '1' || process.env.MEBULAR_RELAY_HOST === 'true';
-  if (relayHostEnv) {
-    config.network = config.network ?? {};
-    config.network.enabled = true;
-    config.network.libp2p = config.network.libp2p ?? {};
-    config.network.libp2p.relayServer = true;
-    if (process.env.MEBULAR_RELAY_LISTEN) config.network.libp2p.listen = [process.env.MEBULAR_RELAY_LISTEN];
-    else config.network.libp2p.listen = config.network.libp2p.listen ?? ['/ip4/0.0.0.0/tcp/4001'];
-    if (process.env.MEBULAR_RELAY_UNLIMITED === '1' || process.env.MEBULAR_RELAY_UNLIMITED === 'true') {
-      config.network.libp2p.relayUnlimited = true;
-    }
-  }
   const storageAdapter = config.storageAdapter ?? 'json';
   const storagePath = process.env.MEBULAR_STORAGE_PATH
     ?? config.storagePath
@@ -218,6 +205,8 @@ export async function createMebular() {
       },
       endpoints: networkHints(config),
       endpointStore: new FileEndpointStore(effective.endpointsPath),
+      // C4：NAT 穿透（AutoNAT/DCUtR）直通；未配置 = auto（依赖在场即启用）
+      ...(config.network?.nat ? { nat: config.network.nat } : {}),
       ...(config.network?.libp2p || bookSeeds.length > 0
         ? {
             libp2p: {

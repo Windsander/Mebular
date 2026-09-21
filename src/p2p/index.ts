@@ -23,6 +23,14 @@ export { ConnectionManager, type ConnectionManagerOptions } from './connection/C
 export { createDefaultBonjourFactory, type DefaultBonjourFactoryOptions } from './discovery/bonjourDefault.js';
 export { buildRelayPolicy, type RelayPolicy, type RelayPolicyOptions } from './connection/RelayPolicy.js';
 export {
+  decideRelayRole,
+  isPubliclyReachable,
+  isLoopbackEndpoint,
+  type RelayRoleDecision,
+  type RelayRoleInput,
+  type RelayServiceMode,
+} from './relay/RelayRole.js';
+export {
   EndpointBook,
   InMemoryEndpointStore,
   FileEndpointStore,

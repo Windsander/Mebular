@@ -72,6 +72,14 @@ interface Libp2pNodeLike {
   /** 拨号（relay 预约用） */
   dial(target: unknown): Promise<unknown>;
   getMultiaddrs(): Array<{ toString(): string }>;
+  /** 可选：libp2p 事件（C4 打洞后直连观测） */
+  addEventListener?(type: string, handler: (event: unknown) => void): void;
+}
+
+/** C4：AutoNAT + DCUtR 可选依赖集合 */
+interface NatModules {
+  autoNAT(options?: Record<string, unknown>): unknown;
+  dcutr(options?: Record<string, unknown>): unknown;
 }
 
 /** relay 可选依赖集合（@libp2p/circuit-relay-v2 + @libp2p/identify） */
@@ -195,6 +203,36 @@ export async function loadRelayModules(
     circuitRelayServer: circuitRelayServer as RelayModules['circuitRelayServer'],
     identify: identifyFn as RelayModules['identify'],
   };
+}
+
+/**
+ * 加载 AutoNAT + DCUtR 可选依赖（`@libp2p/autonat` + `@libp2p/dcutr`）。
+ * 缺包/导出不符/加载抛错 → 返回 null（调用方软降级：打洞禁用 + 告警，不影响其他连接方式）。
+ */
+async function loadNatModules(importer: ModuleImporter = defaultImporter): Promise<NatModules | null> {
+  try {
+    const specs = ['@libp2p/autonat', '@libp2p/dcutr'];
+    const loaded = Object.fromEntries(
+      await Promise.all(specs.map(async (spec) => [spec, await importer(spec)] as const)),
+    ) as Record<string, Record<string, unknown>>;
+    const autoNAT = loaded['@libp2p/autonat']!['autoNAT'];
+    const dcutr = loaded['@libp2p/dcutr']!['dcutr'];
+    if (typeof autoNAT !== 'function' || typeof dcutr !== 'function') return null;
+    return { autoNAT: autoNAT as NatModules['autoNAT'], dcutr: dcutr as NatModules['dcutr'] };
+  } catch {
+    return null;
+  }
+}
+
+/** C4：AutoNAT/DCUtR 依赖 identify 能力；单独加载 identify（relay 分支已加载时不重复） */
+async function loadIdentifyModule(importer: ModuleImporter = defaultImporter): Promise<(() => unknown) | null> {
+  try {
+    const mod = await importer('@libp2p/identify');
+    const identifyFn = mod['identify'];
+    return typeof identifyFn === 'function' ? (identifyFn as () => unknown) : null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------- 长度前缀帧编解码 ----------
@@ -411,6 +449,11 @@ export interface Libp2pProviderOptions {
    * 未配置时保持历史行为（开放预约 + maxReservations=128 + applyDefaultLimit）。
    */
   relayPolicy?: RelayPolicyOptions;
+  /**
+   * C4：NAT 穿透（AutoNAT 可达性 + DCUtR 打洞）。默认 **auto**（可选依赖在场即启用）。
+   * 打洞成功 → 观测到直连并上报（path 升级 direct）；失败/超时 → 保留 relay（不阻塞）。
+   */
+  nat?: { autonat?: boolean; dcutr?: boolean };
 }
 
 /**
@@ -423,6 +466,16 @@ export class Libp2pProvider implements ConnectionProvider {
   private readonly protocol: string;
   private readonly localPeerId: PeerId;
   private readonly relayServers: string[];
+  private natStatusImpl: {
+    autonatEnabled: boolean;
+    dcutrEnabled: boolean;
+    loadError: string | null;
+    directUpgrades: number;
+    relayConnections: number;
+    lastUpgradeAt: number | null;
+    lastError: string | null;
+  } = { autonatEnabled: false, dcutrEnabled: false, loadError: null, directUpgrades: 0, relayConnections: 0, lastUpgradeAt: null, lastError: null };
+  private directUpgradeCallbacks: Array<(peerId: string, address: string) => void> = [];
   private incomingHandler: ((conn: Connection) => void) | null = null;
   private running = false;
 
@@ -486,6 +539,16 @@ export class Libp2pProvider implements ConnectionProvider {
       }
     }
 
+    // C4：AutoNAT（可达性）+ DCUtR（打洞）。默认 auto（依赖在场即启用）；缺包软降级。
+    const natWanted = options.nat?.autonat !== false || options.nat?.dcutr !== false;
+    let natModules: NatModules | null = null;
+    if (natWanted) {
+      natModules = await loadNatModules(importer ?? defaultImporter);
+      if (!natModules) {
+        services['natWarn'] = null;
+      }
+    }
+
     const libp2pOptions: Record<string, unknown> = {
       privateKey,
       addresses: { listen },
@@ -493,6 +556,23 @@ export class Libp2pProvider implements ConnectionProvider {
       connectionEncrypters: [modules.noise()],
       streamMuxers: [modules.yamux()],
     };
+    delete services['natWarn'];
+    let natLoadError: string | null = null;
+    if (natModules) {
+      // AutoNAT/DCUtR 需要 identify 能力：relay 分支已装配则复用，否则单独加载
+      if (!services['identify']) {
+        const identifyFn = await loadIdentifyModule(importer ?? defaultImporter);
+        if (identifyFn) services['identify'] = identifyFn();
+        else {
+          natModules = null;
+          natLoadError = 'AutoNAT/DCUtR 需要 @libp2p/identify（缺包 → 打洞禁用）';
+        }
+      }
+    }
+    if (natModules) {
+      if (options.nat?.autonat !== false) services['autoNAT'] = natModules.autoNAT();
+      if (options.nat?.dcutr !== false) services['dcutr'] = natModules.dcutr();
+    }
     if (Object.keys(services).length > 0) {
       libp2pOptions['services'] = services;
     }
@@ -506,13 +586,47 @@ export class Libp2pProvider implements ConnectionProvider {
 
     const node = await modules.createLibp2p(libp2pOptions);
 
-    return new Libp2pProvider(
+    const provider = new Libp2pProvider(
       modules,
       node,
       options.protocol ?? MEBULAR_PROTOCOL,
       peerIdFromDevicePublicKey(options.deviceKey.publicKey),
       options.relayServers ?? [],
     );
+    provider.natStatusImpl = {
+      ...provider.natStatusImpl,
+      autonatEnabled: Boolean(natModules && options.nat?.autonat !== false),
+      dcutrEnabled: Boolean(natModules && options.nat?.dcutr !== false),
+      loadError: natWanted && !natModules ? (natLoadError ?? 'AutoNAT/DCUtR 可选依赖不可用（打洞禁用）') : null,
+    };
+    // C4：观测「直连（非 circuit）连接」→ 视为打洞/直连成功，上报升级
+    node.addEventListener?.('connection:open', (event: unknown) => {
+      try {
+        const detail = (event as { detail?: { remotePeer?: { toString(): string; publicKey?: { type: string; raw: Uint8Array } }; remoteAddr?: { toString(): string } } }).detail;
+        const remotePeer = detail?.remotePeer;
+        const address = detail?.remoteAddr?.toString?.();
+        if (!remotePeer || !address) return;
+        let peerId = remotePeer.toString();
+        try {
+          // 事件里的 peer id 内嵌 Ed25519 公钥时可映射回我方 ID（与地址簿键一致）
+          if (remotePeer.publicKey) peerId = fromLibp2pPeerId(remotePeer).id;
+        } catch {
+          // 非 Ed25519 或不可映射：保留 libp2p id 字符串（仅用于观测，不入簿）
+        }
+        if (address.includes('/p2p-circuit')) {
+          provider.natStatusImpl.relayConnections += 1;
+          return;
+        }
+        provider.natStatusImpl.directUpgrades += 1;
+        provider.natStatusImpl.lastUpgradeAt = Date.now();
+        for (const callback of provider.directUpgradeCallbacks) {
+          try { callback(peerId, address); } catch { /* 回调失败不影响连接 */ }
+        }
+      } catch (error) {
+        provider.natStatusImpl.lastError = error instanceof Error ? error.message : String(error);
+      }
+    });
+    return provider;
   }
 
   async start(): Promise<void> {
@@ -575,6 +689,24 @@ export class Libp2pProvider implements ConnectionProvider {
   }
 
   /** 本机监听地址（含 /p2p/<id> 后缀），供上层发布到设备发现 */
+  /** C4：NAT 穿透状态（只读；诊断/控制台） */
+  getNatStatus(): {
+    autonatEnabled: boolean;
+    dcutrEnabled: boolean;
+    loadError: string | null;
+    directUpgrades: number;
+    relayConnections: number;
+    lastUpgradeAt: number | null;
+    lastError: string | null;
+  } {
+    return { ...this.natStatusImpl };
+  }
+
+  /** C4：直连升级回调（打洞成功 / 直连建立时触发；供上层更新路径为 direct） */
+  onDirectUpgrade(callback: (peerId: string, address: string) => void): void {
+    this.directUpgradeCallbacks.push(callback);
+  }
+
   getMultiaddrs(): string[] {
     return this.node.getMultiaddrs().map((addr) => addr.toString());
   }

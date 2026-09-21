@@ -95,7 +95,8 @@
     "verify:fleet:rejoin": "node scripts/verify-fleet-rejoin.mjs",
     "verify:fleet:collab": "node scripts/verify-fleet-collab.mjs",
     "verify:fleet:all": "node scripts/verify-fleet-all.mjs",
-    "dev": "node --loader ts-node/esm src/index.ts"
+    "dev": "node --loader ts-node/esm src/index.ts",
+    "verify:connect": "node scripts/verify-connect.mjs"
   },
   "dependencies": {
     "bonjour": "^3.5.1",
@@ -181,6 +182,10 @@
       "src/p2p/connection/ConnectionManager.ts": {
         "lines": 85,
         "branches": 60
+      },
+      "src/p2p/connection/EndpointBook.ts": {
+        "lines": 85,
+        "branches": 65
       },
       "src/p2p/handshake/AuthenticationHandshake.ts": {
         "lines": 90,

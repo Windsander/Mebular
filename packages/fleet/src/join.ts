@@ -7,7 +7,7 @@
 import { access, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { constants } from 'node:fs';
-import { Mebular, IdentityManager, bytesToHex, hexToBytes } from '@mebular/core';
+import { Mebular, IdentityManager, bytesToHex, hexToBytes, EndpointBook, FileEndpointStore, derivePeerIdHex, RELAY_SEEDS_KEY } from '@mebular/core';
 import {
   fleetConfigPath,
   fleetMasterKeyPath,
@@ -40,6 +40,8 @@ export interface JoinWithTokenInput {
 }
 
 export interface JoinWithTokenResult {
+  /** C2：写入地址簿的 hint 条数（0 = 旧令牌无 hints） */
+  hinted: number;
   device: string;
   dir: string;
   peer: string;
@@ -53,6 +55,41 @@ export interface JoinWithTokenResult {
   daemon?: { endpoint: string; installed: boolean; note?: string };
   /** W2：Agent MCP 配置片段 */
   agentMcp: Record<string, unknown>;
+}
+
+/**
+ * C2：把邀请方 hints 落盘到 `<dir>/net/peers.json`（0600）。
+ * 同时写 **deviceId 键**（可读）与 **peerId 键**（由 inviterPublicKey 派生，首次拨号即可命中）。
+ * 返回写入条数；无 hints（旧令牌）→ 0。任何失败都不应让 join 失败。
+ */
+export async function persistInviterHints(dir: string, token: {
+  inviterDeviceId: string;
+  inviterPublicKey: string;
+  endpoints?: string[];
+  relaySeeds?: string[];
+}): Promise<number> {
+  try {
+    const hints = Array.isArray(token.endpoints) ? token.endpoints.filter((a) => typeof a === 'string' && a.length > 0) : [];
+    const seeds = Array.isArray(token.relaySeeds) ? token.relaySeeds.filter((a) => typeof a === 'string' && a.length > 0) : [];
+    if (hints.length === 0 && seeds.length === 0) return 0;
+    const book = new EndpointBook({ store: new FileEndpointStore(join(dir, 'net', 'peers.json')) });
+    await book.load();
+    let count = 0;
+    const keys = [token.inviterDeviceId];
+    try {
+      keys.push(derivePeerIdHex(hexToBytes(token.inviterPublicKey)));
+    } catch {
+      // 公钥非法：只写 deviceId 键
+    }
+    for (const key of keys) {
+      if (hints.length > 0) count += await book.upsert(key, hints, 'paired');
+    }
+    // relay seeds 存保留键（不是对端地址；app 启动时并入 libp2p.relayServers）
+    if (seeds.length > 0) await book.upsert(RELAY_SEEDS_KEY, seeds, 'config');
+    return count;
+  } catch {
+    return 0;
+  }
 }
 
 /** B：用令牌加入（**不持有主密钥私钥**）。 */
@@ -99,6 +136,10 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
     const publicOnly: FleetEncryption = { userMasterKey: hexToBytes(token.masterPublicKey) };
     await writeMasterKeyFile(keyPath, publicOnly);
   }
+
+  // C2：把邀请方 hints（token.endpoints）写入本机地址簿 <dir>/net/peers.json（0600）
+  // 机制在 core（EndpointBook/FileEndpointStore），路径由 app 决定；不改变任何授权。
+  const hinted = await persistInviterHints(input.dir, token);
 
   const onboard = await onboardDevice({
     dir: input.dir,
@@ -149,6 +190,7 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
   }
 
   return {
+    hinted,
     device: config.device,
     dir: config.dir,
     peer: token.inviterDeviceId,
@@ -160,6 +202,7 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
     next: [
       `在 ${token.inviterDeviceId} 上运行：fleet pending`,
       `在 ${token.inviterDeviceId} 上运行：fleet approve ${config.device}`,
+      ...(hinted > 0 ? [`已写入邀请方地址 hints（${hinted} 条）：本机可在无 --addr 时自动选路连通`] : ['令牌未携带地址 hints（旧令牌）：首次连接仍需显式 --addr']),
     ],
     ...(daemonInfo !== null ? { daemon: daemonInfo } : {}),
     agentMcp: agentMcpConfig(),

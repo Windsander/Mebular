@@ -939,6 +939,22 @@ function renderAbout() {
       <p class="muted" style="font-size:11px">声明动作在「设置 → 高级」；图上声明随 __policy__ 同步，受 device_revoke 排斥。</p>
     </section>
 
+    <section class="settings-section" data-info-block="paths">
+      <h3>对端连接路径 <span class="badge badge-muted">只读 · core 地址簿</span></h3>
+      ${(() => {
+        const peers = s.peers ?? { enabled: false, paths: [] };
+        if (!peers.enabled) return '<p class="muted" style="font-size:11px">地址簿未启用（network.autoConnect=false 或 network.enabled=false）。</p>';
+        if (peers.paths.length === 0) return '<p class="muted" style="font-size:11px">地址簿暂无记录：等待配对 hints（邀请令牌）或对端首次连通。</p>';
+        return `<ul class="path-list">${peers.paths.map((p) => `<li class="path-row">
+          <span class="path-key"><code>${escapeHtml(p.key)}</code></span>
+          <span class="path-value">${p.connected
+            ? `<span class="path-kind path-kind-${escapeHtml(String(p.kind ?? 'unknown'))}">${escapeHtml(String(p.kind ?? '未知'))}</span> <code>${escapeHtml(String(p.address ?? '—'))}</code> <span class="muted">${p.since ? `最近切换 ${formatTime(p.since)}` : ''}</span>`
+            : `<span class="muted">未连接</span>${p.lastError ? ` <span class="crt-warn">⚠ ${escapeHtml(String(p.lastError))}</span>` : ''}`} <span class="muted">· 候选 ${p.candidates}</span></span>
+        </li>`).join('')}</ul>`;
+      })()}
+      <p class="muted" style="font-size:11px">路径由 core 候选地址簿维护（direct &gt; lan &gt; relay，失败自动换候选并退避重试）；此处仅展示，不改变授权。</p>
+    </section>
+
     <section class="settings-section" data-info-block="fleet">
       <h3>舰队摘要（Fleet） <span class="badge badge-muted">只读</span></h3>
       ${s.fleet?.configured
@@ -1176,6 +1192,19 @@ function describeEvent(event) {
 
 let lastCardSignature = null;
 
+/** C2：某设备的当前连接路径（只读；来自 settings.peers.paths，按 deviceId / 地址匹配）。 */
+function peerPathFor(device) {
+  const paths = state.settings?.peers?.paths ?? [];
+  if (paths.length === 0) return null;
+  const peerId = device.peerId;
+  return paths.find((p) => p.key === device.deviceId)
+    ?? (peerId ? paths.find((p) => typeof p.address === 'string' && p.address.includes(peerId)) : null)
+    ?? (device.addrs ?? [])
+      .map((addr) => paths.find((p) => p.address === addr))
+      .find(Boolean)
+    ?? null;
+}
+
 function renderDeviceCard() {
   const asideEl = document.querySelector('.aside');
   if (asideEl) asideEl.classList.toggle('is-open', Boolean(state.selected) && state.view === 'map');
@@ -1207,6 +1236,15 @@ function renderDeviceCard() {
   if (!isSelf && device.pendingEventCount) metaParts.push(`待发 ${device.pendingEventCount}`);
   if (!isSelf && device.lastSyncAt) metaParts.push(`最近同步 ${shortTime(device.lastSyncAt)}`);
   if (device.declaredIssuer) metaParts.push('◈ 引导签发者');
+  // C2：连接路径（只读；核心地址簿 → settings.peers.paths）
+  const pathInfo = isSelf ? null : peerPathFor(device);
+  const pathRow = isSelf
+    ? '<li class="path-row"><span class="path-key">当前路径</span><span class="path-value">本机（无需拨号）</span></li>'
+    : pathInfo
+      ? `<li class="path-row"><span class="path-key">当前路径</span><span class="path-value">${pathInfo.connected
+          ? `<span class="path-kind path-kind-${escapeHtml(String(pathInfo.kind ?? 'unknown'))}">${escapeHtml(String(pathInfo.kind ?? '未知'))}</span> <code>${escapeHtml(String(pathInfo.address ?? '—'))}</code> <span class="muted">${pathInfo.since ? `自 ${shortTime(pathInfo.since)} 起` : ''}</span>`
+          : `<span class="muted">未连接</span>${pathInfo.lastError ? ` <span class="crt-warn">⚠ ${escapeHtml(String(pathInfo.lastError))}</span>` : ''}`}</span></li>`
+      : '<li class="path-row"><span class="path-key">当前路径</span><span class="path-value muted">地址簿未启用 / 无记录</span></li>';
 
   const allNamespaces = allNamespaceNames();
   const writes = state.features.writes && !MOCK;
@@ -1311,6 +1349,7 @@ function renderDeviceCard() {
       <span class="crt-tag card-status ${status.cls}">${status.text}</span>
     </div>
     ${metaParts.length > 0 ? `<p class="card-meta muted">${escapeHtml(metaParts.join(' · '))}</p>` : '<p class="card-meta muted"></p>'}
+    <ul class="path-list" aria-label="连接路径（只读）">${pathRow}</ul>
     ${isSelf ? `
     <h3>我关注的域 <span class="h3-note">M 记忆域 · 订阅即数据义务</span></h3>
     <p class="card-help muted">关注后①有权接收该域对端变更；②本机该域新记忆同步给在册成员 / 已授权且关注的对端。图上在册即时生效；订阅声明需重启传输层。</p>

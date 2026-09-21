@@ -285,6 +285,145 @@ async function runConsole(flags) {
   process.exit(2);
 }
 
+/** C2：`doctor --net` —— 读地址簿/路径状态 + 轻量可达性探针，输出「下一步建议」。 */
+async function runNetDoctor() {
+  const { createMebular, loadConfigFile, endpointsPath, networkHints, relaySeeds } = await import('../src/config.mjs');
+  const net = await import('node:net');
+  const home = homeDir();
+  const config = await loadConfigFile(home).catch(() => ({}));
+
+  const probe = (host, port, timeoutMs = 1500) => new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    const done = (ok, error) => { socket.destroy(); resolve({ ok, error: error ?? null }); };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false, 'timeout'));
+    socket.once('error', (error) => done(false, error.code ?? error.message));
+  });
+  const parseTcp = (multiaddr) => {
+    const m = /\/(ip4|ip6|dns4|dns6|dns)\/([^/]+)\/tcp\/(\d+)/.exec(String(multiaddr));
+    return m ? { host: m[2], port: Number(m[3]) } : null;
+  };
+
+  const peersFile = endpointsPath(home);
+  const hints = networkHints(config);
+  const seeds = relaySeeds(config);
+
+  // 地址簿（离线读；不存在 = 合法）
+  let book = null;
+  let bookError = null;
+  try {
+    const { FileEndpointStore, EndpointBook } = await import('@mebular/core');
+    const store = new FileEndpointStore(peersFile);
+    book = new EndpointBook({ store });
+    await book.load();
+  } catch (error) {
+    bookError = error.message;
+  }
+
+  // 进程内路径状态（需网络启用；失败不阻断诊断）
+  let runtime = { enabled: false, listen: [], paths: [], nodeError: null };
+  try {
+    const { app } = await createMebular();
+    try {
+      const node = app.node;
+      runtime.enabled = Boolean(node?.isRunning());
+      runtime.listen = node?.getLocalMultiaddrs?.() ?? [];
+      const bookRef = app.endpointBook;
+      runtime.paths = bookRef ? bookRef.keys().map((key) => ({ key, path: bookRef.getPath(key) })) : [];
+    } finally {
+      await app.shutdown().catch(() => undefined);
+    }
+  } catch (error) {
+    runtime.nodeError = error.message;
+  }
+
+  // relay seeds 探针（TCP 可达性）
+  const seedProbes = [];
+  for (const seed of seeds) {
+    const target = parseTcp(seed);
+    if (!target) { seedProbes.push({ seed, reachable: null, error: '非 TCP multiaddr（跳过）' }); continue; }
+    const result = await probe(target.host, target.port);
+    seedProbes.push({ seed, reachable: result.ok, error: result.error });
+  }
+
+  const next = [];
+  if (!runtime.enabled) next.push('network.enabled=false：先开启 P2P（或 `mebular relay` 起一台自托管 relay）');
+  if (runtime.listen.length === 0 && runtime.enabled) next.push('本机暂无监听地址：检查 network.libp2p.listen / 防火墙 / relay 预约');
+  const totalHints = Object.values(hints).reduce((sum, list) => sum + list.length, 0);
+  if (totalHints === 0) next.push('无配对 hints：用 `fleet invite`/控制台邀请，让新设备拿到可达地址（token.endpoints）');
+  const failedSeeds = seedProbes.filter((p) => p.reachable === false);
+  if (failedSeeds.length > 0) next.push(`relay seed 不可达（${failedSeeds.map((p) => p.seed).join(', ')}）：确认 relay 进程在跑、端口放行`);
+  const disconnected = runtime.paths.filter((p) => !p.path);
+  if (disconnected.length > 0) next.push(`有候选但未连上的对端 ${disconnected.length} 个：看 lastError，必要时把 relay 加入 network.relaySeeds`);
+
+  console.log(JSON.stringify({
+    ok: true,
+    kind: 'net-doctor',
+    home,
+    peersFile,
+    book: book
+      ? {
+          loaded: true,
+          peers: book.keys().map((key) => ({ key, candidates: book.list(key).map((c) => ({ address: c.address, kind: c.kind, source: c.source, lastError: c.lastError ?? null })) })),
+        }
+      : { loaded: false, error: bookError },
+    configHints: hints,
+    relaySeeds: seedProbes,
+    runtime,
+    next,
+  }, null, 2));
+}
+
+/** C2：`mebular relay` —— 一键起自托管 circuit relay（默认限额，--unlimited 显式放开）。 */
+async function runRelayHost(flags) {
+  const listen = typeof flags.listen === 'string' ? flags.listen : '/ip4/0.0.0.0/tcp/4001';
+  const unlimited = flags.unlimited === true || flags.unlimited === 'true';
+  // 一键：env 覆盖（不写磁盘配置）；relay 与 serve 的单实例锁按 home 隔离
+  process.env.MEBULAR_RELAY_HOST = '1';
+  process.env.MEBULAR_RELAY_LISTEN = listen;
+  if (unlimited) process.env.MEBULAR_RELAY_UNLIMITED = '1';
+  const { createMebular } = await import('../src/config.mjs');
+  const { app, home, deviceId } = await createMebular();
+  const node = app.node;
+  if (!node || !node.isRunning()) {
+    console.error('✗ relay 启动失败：网络未启用（network.enabled=false）。请开启网络或检查 libp2p 依赖');
+    await app.shutdown().catch(() => undefined);
+    process.exit(2);
+  }
+  const addrs = (node.getLocalMultiaddrs?.() ?? []).filter((a) => typeof a === 'string');
+  const peerId = node.peerId?.id ?? '<peerId>';
+  const printable = addrs.length > 0 ? addrs : [listen];
+  console.error(`RELAY_READY ${JSON.stringify({ deviceId, home, listen, relayUnlimited: unlimited, addrs: printable })}`);
+  console.log(JSON.stringify({
+    ok: true,
+    kind: 'relay-host',
+    deviceId,
+    home,
+    relayUnlimited: unlimited,
+    multiaddrs: printable,
+    peerConfigSnippet: {
+      'network.relaySeeds': printable.map((a) => (a.includes('/p2p/') ? a : `${a}/p2p/${peerId}`)),
+      note: '把片段写入对端 config.json；也可用 `mebular relay --print-only` 只打印不常驻',
+    },
+    service: {
+      supported: false,
+      note: 'relay 与 serve 共用一个 home 会撞单实例锁（<home>/lock），故不注册 service 单元；请用独立 home（MEBULAR_HOME=<other>）跑 relay，或用你的进程管理器托管本命令',
+    },
+  }, null, 2));
+  if (flags['print-only'] === true || flags['print-only'] === 'true') {
+    await app.shutdown().catch(() => undefined);
+    return;
+  }
+  // 常驻：等待信号，保持 relay 服务进程存活
+  await new Promise((resolve) => {
+    const stop = () => resolve();
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+  });
+  await app.shutdown().catch(() => undefined);
+}
+
 async function runStatus() {
   const { createMebular } = await import('../src/config.mjs');
   const { MemoryService } = await import('@mebular/core');
@@ -442,6 +581,10 @@ async function main() {
       await runConsole(flags);
       return;
     }
+    case 'relay': {
+      await runRelayHost(flags);
+      return;
+    }
     case 'token': {
       await runToken(argv[1], flags, argv[2]);
       return;
@@ -458,10 +601,12 @@ async function main() {
           '  serve [--host --port --auth --tls-key --tls-cert --tokens-file]   Streamable HTTP server',
           '  service install|uninstall|status|logs [--no-autostart --label L]  常驻服务管理（mebular-serve）',
           '  console [--host --port]      打印控制台 URL（需 serve 正在运行）',
+          '  relay [--listen /ip4/0.0.0.0/tcp/4001] [--unlimited] [--print-only]  自托管 circuit relay（默认限额）',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
           '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',
           '  init / keygen / print-config / status|doctor   初始化、状态与自检（身份模式/网络/锁/域/join）',
+          '  doctor --net                 网络排障：地址簿/路径状态 + relay 可达性 + 下一步建议',
           '  tools                        打印 MCP 工具 ↔ CLI 对照表',
           '  memory_write|memory_write_batch|memory_query|memory_search|memory_profile|memory_skills|',
           '  memory_history|memory_graph|memory_import|memory_status|memory_sync   与 MCP 同名同 handler',
@@ -484,7 +629,13 @@ async function main() {
       return;
     }
     case 'status':
+      await runStatus();
+      return;
     case 'doctor':
+      if (flags.net === true || flags.net === 'true') {
+        await runNetDoctor();
+        return;
+      }
       await runStatus();
       return;
     default: {

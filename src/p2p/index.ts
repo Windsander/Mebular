@@ -20,6 +20,23 @@ export {
   type BonjourServiceFactory,
 } from './DeviceDiscovery.js';
 export { ConnectionManager, type ConnectionManagerOptions } from './connection/ConnectionManager.js';
+export { buildRelayPolicy, type RelayPolicy, type RelayPolicyOptions } from './connection/RelayPolicy.js';
+export {
+  EndpointBook,
+  InMemoryEndpointStore,
+  FileEndpointStore,
+  classifyEndpoint,
+  derivePeerIdHex,
+  extractEndpointHost,
+  KIND_PRIORITY,
+  RELAY_SEEDS_KEY,
+  type EndpointCandidate,
+  type EndpointKind,
+  type EndpointSource,
+  type EndpointStore,
+  type EndpointBookOptions,
+  type PathState,
+} from './connection/EndpointBook.js';
 export {
   AuthenticationHandshake,
   canonicalCertificateData,

@@ -1117,6 +1117,27 @@ try {
       !/style="width/.test(jsSrc), /style="width/.test(jsSrc) ? '发现内联 width' : '无内联 width');
   }
 
+  // ---------- C2：对端连接路径（只读渲染断言，不涉行为） ----------
+  {
+    const settingsNow2 = await getJson(port, '/admin/api/settings');
+    const peers = settingsNow2.json?.peers;
+    check('C2 settings.peers 暴露路径视图（enabled + paths 数组 + 候选/错误字段）',
+      typeof peers?.enabled === 'boolean' && Array.isArray(peers?.paths)
+        && peers.paths.every((p) => 'key' in p && 'connected' in p && 'kind' in p && 'candidates' in p),
+      `enabled=${peers?.enabled} paths=${peers?.paths?.length ?? 'n/a'}`);
+
+    const consoleSrc3 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const cssSrc3 = await readFile(join(consoleDir, 'console.css'), 'utf-8');
+    const tokensC2 = ['对端连接路径', 'path-row', 'path-kind-', '最近切换', '地址簿'];
+    check('C2 控制台渲染对端路径行（设备卡 + 关于本机只读区）',
+      tokensC2.every((token) => consoleSrc3.includes(token)),
+      tokensC2.filter((token) => !consoleSrc3.includes(token)).join(',') || '全部命中');
+    check('C2 路径行沿用统一行模板（label 列宽 token + 窄屏单列）',
+      cssSrc3.includes('.path-row { display: grid; grid-template-columns: var(--row-label-w, 150px) minmax(0, 1fr);')
+        && cssSrc3.includes('@media (max-width: 760px) { .path-row { grid-template-columns: minmax(0, 1fr); } }'),
+      'path-row 复用 --row-label-w');
+  }
+
   // ---------- 未知 API ----------
   const unknown = await getJson(port, '/admin/api/nope');
   check('未知 /admin/api 路径 404', unknown.status === 404);

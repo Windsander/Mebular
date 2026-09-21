@@ -71,7 +71,7 @@ fleet approve --dir ~/.mebular --device device-B               # grant the domai
 ```
 
 Prefer a UI? The daemon also serves a local console: run `mebular serve` and open `http://127.0.0.1:7331/console`
-(star map / domains / audit / wizard / settings tabs: 常用 / 高级 / 诊断, plus an "关于本机" panel from the top-bar badge). Try it with seeded demo data via `seed-demo.mjs`.
+(star map / domains / audit / wizard / settings tabs: 常用 / 高级 / 诊断, plus an "关于本机" panel from the top-bar badge; invites carry reachable endpoints so a new device connects without being told an address). Try it with seeded demo data via `seed-demo.mjs`.
 
 ### For developers
 

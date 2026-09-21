@@ -588,9 +588,42 @@ export async function buildSettings({ app, service, config, runtime, home }) {
       endpointLoopback: runtime?.join?.endpointLoopback ?? null,
     },
     ...(await buildFleetView(home)),
+    // C2：对端连接路径（只读；来自 core 地址簿的 path 状态）+ 地址簿元信息
+    peers: buildPeerPaths(app),
     // 实际可调用面（MCP 工具 = `mebular <name>` CLI，逐字同名同 handler）
     tools: TOOL_NAMES,
   };
+}
+
+/**
+ * C2：对端路径视图（只读）。
+ * `paths` = 地址簿里每个键的当前生效路径（kind/address/since/lastError）；
+ * 授权状态不在此处暴露（由 policy API 负责），这里只回答「连得上吗、走的哪条路」。
+ */
+function buildPeerPaths(app) {
+  try {
+    const book = app?.endpointBook;
+    if (!book) return { enabled: false, paths: [] };
+    const keys = typeof book.keys === 'function' ? book.keys() : [];
+    const paths = keys
+      .map((key) => {
+        const path = book.getPath(key);
+        const candidates = typeof book.list === 'function' ? book.list(key) : [];
+        return {
+          key,
+          connected: Boolean(path),
+          kind: path?.kind ?? null,
+          address: path?.address ?? null,
+          since: path?.since ?? null,
+          lastError: path?.lastError ?? candidates.find((c) => c.lastError)?.lastError ?? null,
+          candidates: candidates.length,
+        };
+      })
+      .sort((a, b) => Number(b.connected) - Number(a.connected) || a.key.localeCompare(b.key));
+    return { enabled: true, paths };
+  } catch {
+    return { enabled: false, paths: [] };
+  }
 }
 
 /** GET /admin/api/namespaces/:ns/handoff-plan?successor=…（只读预检） */

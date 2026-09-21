@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { Mebular, IdentityManager } from '@mebular/core';
+import { Mebular, IdentityManager, FileEndpointStore, EndpointBook } from '@mebular/core';
 
 /** 统一家目录（W2）：`MEBULAR_HOME` 覆盖，缺省 `~/.mebular`。 */
 export function homeDir() {
@@ -17,6 +17,45 @@ export function homeDir() {
 
 export function configPath(home) {
   return process.env.MEBULAR_CONFIG ?? join(home, 'config.json');
+}
+
+/** C2：候选地址簿文件（0600；机制在 core，路径由 app 决定）。 */
+export function endpointsPath(home) {
+  return process.env.MEBULAR_ENDPOINTS_FILE ?? join(home, 'net', 'peers.json');
+}
+
+/** C2：配置里的配对 hints（deviceId/peerId → multiaddr 列表），形状容错。 */
+export function networkHints(config) {
+  const raw = config?.network?.endpoints;
+  const out = {};
+  if (!raw || typeof raw !== 'object') return out;
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof key !== 'string' || !Array.isArray(value)) continue;
+    const addrs = value.filter((entry) => typeof entry === 'string' && entry.length > 0);
+    if (addrs.length > 0) out[key] = addrs;
+  }
+  return out;
+}
+
+/**
+ * C2：从地址簿保留键读取 relay seeds（配对令牌随附；daemon 启动时并入 relayServers）。
+ * 读失败一律返回 []（地址簿问题不得阻断启动）。
+ */
+export async function relaySeedsFromBook(home) {
+  try {
+    const book = new EndpointBook({ store: new FileEndpointStore(endpointsPath(home)) });
+    await book.load();
+    return book.relaySeeds();
+  } catch {
+    return [];
+  }
+}
+
+/** C2：relay seeds（客户端可用于中转的 relay multiaddr；并入 libp2p.relayServers）。 */
+export function relaySeeds(config) {
+  const raw = config?.network?.relaySeeds;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((entry) => typeof entry === 'string' && entry.length > 0);
 }
 
 export async function loadConfigFile(home) {
@@ -104,6 +143,19 @@ export async function resolveMasterPublicKey(home, config) {
 export async function createMebular() {
   const home = homeDir();
   const config = await loadConfigFile(home);
+  // C2 `mebular relay`：env 一键覆盖（不改磁盘配置）
+  const relayHostEnv = process.env.MEBULAR_RELAY_HOST === '1' || process.env.MEBULAR_RELAY_HOST === 'true';
+  if (relayHostEnv) {
+    config.network = config.network ?? {};
+    config.network.enabled = true;
+    config.network.libp2p = config.network.libp2p ?? {};
+    config.network.libp2p.relayServer = true;
+    if (process.env.MEBULAR_RELAY_LISTEN) config.network.libp2p.listen = [process.env.MEBULAR_RELAY_LISTEN];
+    else config.network.libp2p.listen = config.network.libp2p.listen ?? ['/ip4/0.0.0.0/tcp/4001'];
+    if (process.env.MEBULAR_RELAY_UNLIMITED === '1' || process.env.MEBULAR_RELAY_UNLIMITED === 'true') {
+      config.network.libp2p.relayUnlimited = true;
+    }
+  }
   const storageAdapter = config.storageAdapter ?? 'json';
   const storagePath = process.env.MEBULAR_STORAGE_PATH
     ?? config.storagePath
@@ -119,6 +171,11 @@ export async function createMebular() {
     encryptionLevel: config.encryption?.level ?? 'none',
     networkEnabled: truthy(process.env.MEBULAR_NETWORK_ENABLED, config.network?.enabled ?? false),
     autoSync: config.sync?.autoSync ?? true,
+    // C2：候选地址簿（自动选路）与端点簿文件
+    autoConnect: config.network?.autoConnect !== false,
+    endpointsPath: endpointsPath(home),
+    endpointsCount: Object.keys(networkHints(config)).length,
+    relaySeeds: relaySeeds(config),
     pushOnWrite: truthy(process.env.MEBULAR_PUSH_ON_WRITE, config.sync?.pushOnWrite ?? true),
     pushOnWriteThrottleMs: config.sync?.pushOnWriteThrottleMs ?? null,
     peerWhitelist: Array.isArray(config.sync?.peerWhitelist) ? [...config.sync.peerWhitelist] : [],
@@ -130,6 +187,8 @@ export async function createMebular() {
       ? { userMasterKey: await resolveMasterPublicKey(home, config) }
       : await resolveMasterKeys(home, config);
 
+  // C2：地址簿里的 seeds（配对时随令牌写入）+ 配置 seeds → 客户端 relay 列表
+  const bookSeeds = effective.networkEnabled ? await relaySeedsFromBook(home) : [];
   const app = new Mebular({
     storagePath,
     deviceId,
@@ -145,11 +204,22 @@ export async function createMebular() {
     },
     network: {
       enabled: effective.networkEnabled,
-      ...(config.network?.libp2p
+      // C2：无显式地址时走候选地址簿（默认开）；hints/端点簿由 app 注入，core 不读文件
+      autoConnect: effective.autoConnect,
+      endpoints: networkHints(config),
+      endpointStore: new FileEndpointStore(effective.endpointsPath),
+      ...(config.network?.libp2p || bookSeeds.length > 0
         ? {
             libp2p: {
               ...(config.network.libp2p.listen ? { listen: config.network.libp2p.listen } : {}),
-              ...(config.network.libp2p.relayServers ? { relayServers: config.network.libp2p.relayServers } : {}),
+              ...(() => {
+                const seeds = [...new Set([...(config.network.libp2p.relayServers ?? []), ...effective.relaySeeds, ...bookSeeds])];
+                return seeds.length > 0 ? { relayServers: seeds } : {};
+              })(),
+              ...(config.network.libp2p.relayPolicy ? { relayPolicy: config.network.libp2p.relayPolicy } : {}),
+              ...(config.network.libp2p.relayServer !== undefined
+                ? { relayServer: config.network.libp2p.relayServer }
+                : {}),
               ...(config.network.libp2p.relayUnlimited !== undefined
                 ? { relayUnlimited: config.network.libp2p.relayUnlimited }
                 : {}),

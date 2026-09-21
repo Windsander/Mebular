@@ -894,3 +894,14 @@ select {
   .settings-kv dd, .cfg-help, .cfg-effective, .snippet { overflow-wrap: anywhere; }
   .modal-box { max-width: 100%; }
 }
+
+/* ---------- C2：对端连接路径（只读行） ---------- */
+.path-list { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: var(--row-gap-y, 6px); }
+.path-row { display: grid; grid-template-columns: var(--row-label-w, 150px) minmax(0, 1fr); gap: 0 var(--row-gap, 10px); font-size: 12px; }
+.path-key { color: var(--muted); }
+.path-value { min-width: 0; overflow-wrap: anywhere; }
+.path-kind { border: 1px solid var(--border); border-radius: 999px; padding: 0 6px; font-size: 10.5px; color: var(--muted); }
+.path-kind-direct { color: #9dffcf; border-color: rgba(80, 255, 170, 0.45); }
+.path-kind-lan { color: #cfe6ff; border-color: #2c5c8f; }
+.path-kind-relay { color: #ffd27a; border-color: rgba(255, 210, 122, 0.5); }
+@media (max-width: 760px) { .path-row { grid-template-columns: minmax(0, 1fr); } }

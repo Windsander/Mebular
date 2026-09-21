@@ -11,6 +11,7 @@
 import { createHash } from 'crypto';
 import { DeviceDiscovery, type BonjourServiceFactory } from './DeviceDiscovery.js';
 import { ConnectionManager } from './connection/ConnectionManager.js';
+import { EndpointBook, derivePeerIdHex, type EndpointCandidate, type PathState } from './connection/EndpointBook.js';
 import {
   AuthenticationHandshake,
   hexToBytes,
@@ -69,6 +70,10 @@ export interface Connection {
 export interface P2PNetwork {
   readonly peerId: PeerId;
   readonly config: P2PConfig;
+  /** C1：当前生效路径（null = 未连/未知） */
+  getPath(peerId: PeerId): PathState | null;
+  /** C1：候选端点簿（未启用时 null） */
+  getEndpointBook(): EndpointBook | null;
   discoverPeer(peerId: PeerId): Promise<PeerInfo | null>;
   /**
    * 连接对端。`address` 提供时按显式地址拨号（手动 multiaddr / relay），
@@ -114,6 +119,10 @@ export interface P2PNodeOptions {
   discovery?: DeviceDiscovery;
   connectionManager?: ConnectionManager;
   handshake?: AuthenticationHandshake;
+  /** C1：候选地址簿（app 注入存储；缺省不启用） */
+  endpointBook?: EndpointBook;
+  /** C1：无显式地址时使用地址簿自动拨号（默认 true） */
+  autoConnect?: boolean;
 }
 
 export class P2PNode implements P2PNetwork {
@@ -129,6 +138,10 @@ export class P2PNode implements P2PNetwork {
   private connectionManager: ConnectionManager;
   private handshake: AuthenticationHandshake;
   private channels = new Map<string, Promise<SecureChannel>>();
+  private endpointBook: EndpointBook | null;
+  private autoConnect: boolean;
+  /** peerId → deviceId（握手成功后建立，用于把 deviceId 键的配对 hints 归并到 peerId） */
+  private peerDeviceIds = new Map<string, string>();
 
   private running = false;
   private peerDiscoveredCallbacks: Array<(peer: PeerInfo) => void> = [];
@@ -142,12 +155,15 @@ export class P2PNode implements P2PNetwork {
     this.bonjourFactory = options.bonjourFactory;
     this.injectedDiscovery = options.discovery;
 
+    this.endpointBook = options.endpointBook ?? null;
+    this.autoConnect = options.autoConnect !== false;
     this.peerId = options.peerId ?? this.derivePeerId();
     this.connectionManager = options.connectionManager ?? new ConnectionManager({
       maxConnections: this.config.maxConnections,
       connectTimeout: this.config.connectionTimeout,
       keepAliveInterval: this.config.heartbeatInterval,
     });
+    this.connectionManagerForBook(this.connectionManager);
     this.handshake = options.handshake ?? new AuthenticationHandshake();
 
     if (options.userMasterPublicKey) {
@@ -167,6 +183,11 @@ export class P2PNode implements P2PNetwork {
     }
   }
 
+  /** 把注入的端点簿转交给连接管理器（保持单一实例） */
+  private connectionManagerForBook(manager: ConnectionManager): void {
+    if (this.endpointBook) manager.setEndpointBook(this.endpointBook);
+  }
+
   /** PeerId 从设备公钥派生（sha256），与身份绑定；无身份时退化为随机 ID */
   private derivePeerId(): PeerId {
     if (this.identity) {
@@ -174,7 +195,7 @@ export class P2PNode implements P2PNetwork {
       return {
         multihash: new Uint8Array(digest),
         pubKey: this.identity.devicePublicKey,
-        id: new Uint8Array(digest).reduce((acc, b) => acc + b.toString(16).padStart(2, '0'), ''),
+        id: derivePeerIdHex(this.identity.devicePublicKey),
       };
     }
     const id = crypto.randomUUID();
@@ -281,11 +302,27 @@ export class P2PNode implements P2PNetwork {
       throw new NetworkError('P2P node not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
 
-    // 显式地址优先（手动 multiaddr / relay）；否则用发现层地址
+    // 显式地址优先（手动 multiaddr / relay）；否则用发现层地址；两者都可进入候选簿
     const peerInfo = address ? null : await this.discoverPeer(peerId);
     const targetAddress = address ?? peerInfo?.addresses[0];
 
-    const connection = await this.connectionManager.connect(peerId, targetAddress);
+    if (this.endpointBook) {
+      if (address) {
+        await this.endpointBook.upsert(peerId.id, [address], 'config').catch(() => undefined);
+      }
+      const discovered = peerInfo?.addresses ?? [];
+      if (discovered.length > 0) {
+        await this.endpointBook.upsert(peerId.id, discovered, 'learned').catch(() => undefined);
+      }
+      // 配对 hints 以 deviceId 为键：已知映射时并入 peerId 键
+      const deviceId = this.peerDeviceIds.get(peerId.id);
+      if (deviceId) await this.endpointBook.alias(deviceId, peerId.id).catch(() => undefined);
+    }
+
+    const connection = await this.connectionManager.connect(
+      peerId,
+      this.autoConnect ? targetAddress : targetAddress,
+    );
     try {
       const authenticated = await this.authenticatePeer(connection);
       if (!authenticated) {
@@ -329,10 +366,37 @@ export class P2PNode implements P2PNetwork {
     this.channels.delete(connection.peerId.id);
     const session = await this.handshake.initiateAuth(connection);
     if (session.state === 'authenticated') {
+      this.learnPeerIdentity(connection, session.certificate?.deviceId);
       this.prepareChannel(connection);
       return true;
     }
     return false;
+  }
+
+  /** C1：学习 peerId ↔ deviceId 与可用远端地址（用于把配对 hints 归并到 peerId 键） */
+  private learnPeerIdentity(connection: Connection, deviceId?: string): void {
+    if (!this.endpointBook) return;
+    if (deviceId && deviceId.length > 0) {
+      this.peerDeviceIds.set(connection.peerId.id, deviceId);
+      void this.endpointBook.alias(deviceId, connection.peerId.id).catch(() => undefined);
+    }
+    const remote = connection.remoteAddress;
+    if (typeof remote === 'string' && remote.includes('/')) {
+      void this.endpointBook.upsert(connection.peerId.id, [remote], 'learned').catch(() => undefined);
+    }
+  }
+
+  getPath(peerId: PeerId): PathState | null {
+    return this.connectionManager.getPath(peerId);
+  }
+
+  getEndpointBook(): EndpointBook | null {
+    return this.endpointBook;
+  }
+
+  /** 测试/诊断：当前候选（按拨号顺序） */
+  getCandidates(peerId: PeerId): EndpointCandidate[] {
+    return this.endpointBook?.list(peerId.id) ?? [];
   }
 
   /** 被动接入：完成对端发起的认证，认证成功后登记连接并准备信道 */
@@ -341,6 +405,7 @@ export class P2PNode implements P2PNetwork {
       // 重连：acceptAuth 完成即触发 authenticated 事件，必须在事件前清掉旧信道（F4）
       this.channels.delete(connection.peerId.id);
       const session = await this.handshake.acceptAuth(connection);
+      if (session.state === 'authenticated') this.learnPeerIdentity(connection, session.certificate?.deviceId);
       if (session.state === 'authenticated') {
         this.connectionManager.setConnection(connection.peerId, connection);
         this.prepareChannel(connection);

@@ -11,6 +11,7 @@ import { dirname } from 'node:path';
 import { bytesToBase64, bytesToHex, base64ToBytes, hexToBytes, verifyCertificateChain } from '@mebular/core';
 
 export function canonicalJoinTokenData(token) {
+  // 键序固定；C2 可选 hints 仅在存在时进入签名体（旧令牌签名不变）——须与 fleet 侧逐字段一致。
   return JSON.stringify({
     v: token.v,
     kind: token.kind,
@@ -23,6 +24,9 @@ export function canonicalJoinTokenData(token) {
     issuedAt: token.issuedAt,
     expiresAt: token.expiresAt,
     endpoint: token.endpoint,
+    ...(token.endpoints !== undefined ? { endpoints: token.endpoints } : {}),
+    ...(token.relaySeeds !== undefined ? { relaySeeds: token.relaySeeds } : {}),
+    ...(token.pubReachable !== undefined ? { pubReachable: token.pubReachable } : {}),
   });
 }
 
@@ -42,10 +46,31 @@ export function decodeJoinToken(text) {
   }
   if (typeof parsed.issuedAt !== 'number' || typeof parsed.expiresAt !== 'number') throw new Error('令牌时间字段非法');
   if (!Array.isArray(parsed.inviterChain) || parsed.inviterChain.length === 0) throw new Error('令牌缺少 inviter 证书链');
+  // C2：可选 hints 形状校验（缺省合法；非法即拒）
+  if (parsed.endpoints !== undefined && (!Array.isArray(parsed.endpoints) || parsed.endpoints.some((e) => typeof e !== 'string'))) {
+    throw new Error('令牌 endpoints 形状非法（应为字符串数组）');
+  }
+  if (parsed.relaySeeds !== undefined && (!Array.isArray(parsed.relaySeeds) || parsed.relaySeeds.some((e) => typeof e !== 'string'))) {
+    throw new Error('令牌 relaySeeds 形状非法（应为字符串数组）');
+  }
+  if (parsed.pubReachable !== undefined && typeof parsed.pubReachable !== 'boolean') {
+    throw new Error('令牌 pubReachable 形状非法（应为布尔）');
+  }
   return parsed;
 }
 
-export async function buildJoinToken({ mebular, deviceId, namespace, endpoint, ttlMs = 900_000, now = Date.now(), nonce = randomBytes(16).toString('hex') }) {
+export async function buildJoinToken({
+  mebular,
+  deviceId,
+  namespace,
+  endpoint,
+  ttlMs = 900_000,
+  now = Date.now(),
+  nonce = randomBytes(16).toString('hex'),
+  endpoints,
+  relaySeeds,
+  pubReachable,
+}) {
   const identity = mebular.identity.getDeviceKey(deviceId);
   if (!identity) throw new Error(`本机无设备密钥：${deviceId}`);
   const chain = identity.certificateChain ?? (identity.certificate ? [identity.certificate] : []);
@@ -65,6 +90,13 @@ export async function buildJoinToken({ mebular, deviceId, namespace, endpoint, t
     expiresAt: now + ttlMs,
     endpoint,
   };
+  // C2：邀请方可达 P2P 地址（缺省自动收集）+ 可选 relay seeds + pubReachable
+  const hintEndpoints = endpoints ?? collectReachableEndpoints(mebular);
+  const hintSeeds = relaySeeds ?? collectRelaySeeds(mebular);
+  if (hintEndpoints.length > 0) unsigned.endpoints = hintEndpoints;
+  if (hintSeeds.length > 0) unsigned.relaySeeds = hintSeeds;
+  const reachable = pubReachable ?? hintEndpoints.some((addr) => !isLoopbackAddress(addr));
+  if (hintEndpoints.length > 0 || pubReachable !== undefined) unsigned.pubReachable = reachable;
   const signature = await globalThis.crypto.subtle.sign({ name: 'Ed25519' }, identity.privateKey, new TextEncoder().encode(canonicalJoinTokenData(unsigned)));
   return { ...unsigned, signature: bytesToBase64(new Uint8Array(signature)) };
 }
@@ -84,6 +116,33 @@ export async function verifyJoinToken(token, { now = Date.now(), used = [], revo
   if (used.includes(token.nonce)) return { ok: false, reason: 'used' };
   if (revoked.includes(token.nonce)) return { ok: false, reason: 'revoked' };
   return { ok: true };
+}
+
+/** C2：本机可达 P2P 地址（与 fleet 侧同实现；供守护签发令牌时携带 hints）。 */
+export function collectReachableEndpoints(mebular) {
+  const node = mebular?.node;
+  if (!node || (typeof node.isRunning === 'function' && !node.isRunning())) return [];
+  const peerId = node.peerId?.id;
+  const addrs = typeof node.getLocalMultiaddrs === 'function' ? node.getLocalMultiaddrs() : [];
+  const out = [];
+  for (const addr of addrs) {
+    if (typeof addr !== 'string' || addr.includes('/p2p-circuit')) continue;
+    const withPeer = /\/p2p\//.test(addr) || !peerId ? addr : `${addr}/p2p/${peerId}`;
+    if (!out.includes(withPeer)) out.push(withPeer);
+  }
+  return out;
+}
+
+/** C2：可共享的 relay seeds（app 已把 network.relaySeeds 并入 relayServers）。 */
+export function collectRelaySeeds(mebular) {
+  const seeds = mebular?.relayServers;
+  return Array.isArray(seeds) ? seeds.filter((entry) => typeof entry === 'string' && entry.length > 0) : [];
+}
+
+/** 地址是否为回环（pubReachable 提示用）。 */
+export function isLoopbackAddress(address) {
+  const host = /\/(?:ip4|ip6|dns4|dns6|dns)\/([^/]+)/.exec(String(address))?.[1] ?? '';
+  return ['127.0.0.1', '::1', 'localhost', ''].includes(host) || host.startsWith('127.');
 }
 
 export function joinNonceStatePath(storagePath) {

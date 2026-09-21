@@ -517,6 +517,36 @@ async function writeWebResponse(res, response) {
   res.end();
 }
 
+/**
+ * C2：邀请令牌的地址 hints —— 邀请方可达 multiaddr（含 /p2p/<peerId>）+ 可共享 relay seeds + pubReachable。
+ * 只影响「候选地址簿」，与授权/成员判定无关。缺节点（网络未启用）时返回空 hints（令牌与旧格式等价）。
+ */
+function collectInviteHints(app, config) {
+  const node = app?.node;
+  const addrs = node && typeof node.getLocalMultiaddrs === 'function' ? node.getLocalMultiaddrs() ?? [] : [];
+  const peerId = node?.peerId?.id ?? null;
+  const endpoints = [];
+  for (const addr of addrs) {
+    if (typeof addr !== 'string' || addr.includes('/p2p-circuit')) continue;
+    const withPeer = /\/p2p\//.test(addr) || !peerId ? addr : `${addr}/p2p/${peerId}`;
+    if (!endpoints.includes(withPeer)) endpoints.push(withPeer);
+  }
+  const relaySeeds = Array.isArray(config?.network?.relaySeeds)
+    ? config.network.relaySeeds.filter((entry) => typeof entry === 'string' && entry.length > 0)
+    : [];
+  return {
+    ...(endpoints.length > 0 ? { endpoints } : {}),
+    ...(relaySeeds.length > 0 ? { relaySeeds } : {}),
+    ...(endpoints.length > 0 ? { pubReachable: endpoints.some((addr) => !isLoopbackMultiaddr(addr)) } : {}),
+  };
+}
+
+/** 地址是否为回环（pubReachable 提示用）。 */
+function isLoopbackMultiaddr(address) {
+  const host = /\/(?:ip4|ip6|dns4|dns6|dns)\/([^/]+)/.exec(String(address))?.[1] ?? '';
+  return ['127.0.0.1', '::1', 'localhost', ''].includes(host) || host.startsWith('127.');
+}
+
 function sendJson(res, status, data) {
   const body = JSON.stringify(data);
   res.statusCode = status;
@@ -862,7 +892,16 @@ export async function startHttpServer({
         return sendJson(res, 400, { error: 'bad_request', message: 'endpoint 需为 http(s) URL，例如 http://192.168.1.20:4002' });
       }
       const endpoint = override ?? joinEndpoint;
-      const token = await buildJoinToken({ mebular: app, deviceId, namespace: ns, endpoint, ttlMs });
+      // C2：令牌携带邀请方可达端点（hints），新设备 join 后写入地址簿 → 自动选路
+      const hints = collectInviteHints(app, config);
+      const token = await buildJoinToken({
+        mebular: app,
+        deviceId,
+        namespace: ns,
+        endpoint,
+        ttlMs,
+        ...hints,
+      });
       const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
       const endpointHost = endpointHostname(endpoint);
       const loopback = endpointHost !== null && isLoopbackHost(endpointHost);
@@ -1370,7 +1409,14 @@ export async function startHttpServer({
           const ns = typeof payload.namespace === 'string' && payload.namespace ? payload.namespace : namespace;
           const ttlMs = Number.isInteger(payload.ttlMs) && payload.ttlMs > 0 ? payload.ttlMs : 900_000;
           const endpoint = typeof payload.endpoint === 'string' && payload.endpoint ? payload.endpoint : joinEndpoint;
-          const token = await buildJoinToken({ mebular: app, deviceId, namespace: ns, endpoint, ttlMs });
+          const token = await buildJoinToken({
+            mebular: app,
+            deviceId,
+            namespace: ns,
+            endpoint,
+            ttlMs,
+            ...collectInviteHints(app, config),
+          });
           const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
           return sendJson(res, 200, { ok: true, token: inline, endpoint, namespace: ns, expiresAt: token.expiresAt, nonce: token.nonce });
         }

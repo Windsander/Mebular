@@ -150,3 +150,17 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - **演示种子**：`node packages/console/scripts/seed-demo.mjs --home /tmp/mebular-demo` → 按提示启动 serve 并打开 `/console`。
 - **误设后怎么救**（把 host 存成 `0.0.0.0` 且 auth=none / 缺证书导致 serve 拒绝启动）：直接编辑 `<home>/config.json`，把 `mcp.http.host` 改回 `127.0.0.1`，或补齐 `auth`+`tls`+`tlsKey`/`tlsCert`，再重启 `mebular serve`。
 - 状态脉冲经 SSE（`/admin/events`）；记忆/设备列表仍为轮询刷新（10–50ms）。
+
+## 7. 配对即连（C1+C2：候选地址簿 / 自动选路 / relay seeds）
+
+**机制在 core、策略在 app**：core 只提供引擎（注入式、离线安全），文件位置与开关由 app 决定。
+
+- **地址簿**：`<home>/net/peers.json`（0600）。每对端多地址 + 分类（`direct` > `lan` > `relay`）+ 来源（`config` / `paired` / `learned`）+ 最近成功/失败；`__relay-seeds__` 是保留键（relay seeds，**不是对端候选**）。
+- **自动选路**：`network.autoConnect`（默认 true）。`connectToPeer(peerId)` 无显式地址时按簿内候选逐个尝试；失败换候选并记录 `lastError`，全失败按 `1s×2^n`（上限 30s）退避重试；成功后写入路径状态并在 `path-changed` 广播。并发上限仍走 `maxConnections`。
+- **路径查询**：`doctor --net`（排障）与控制台「关于本机 → 对端连接路径」/设备卡只读行展示 `kind/address/since/lastError`。
+- **配对 hints**：`fleet invite` / 控制台邀请签发的令牌携带 `endpoints`（邀请方可达 multiaddr）、可选 `relaySeeds`、`pubReachable`；旧令牌无这些字段仍可用（**向后兼容**）。新设备 `fleet join` 后写入本机地址簿（同时写 deviceId 键与派生 peerId 键 → 首次拨号即可命中）。
+- **relay seeds**：`network.relaySeeds`（配置）与令牌随附的 seeds 会被并入 `network.libp2p.relayServers`，使新设备能拨 circuit 地址。
+- **自托管 relay**：`mebular relay`（默认限额；`--unlimited` 显式放开，仅可信环境）打印 multiaddr 与对端配置片段；`--print-only` 只打印。注意 relay 与 serve **共用 home 会撞单实例锁**（`<home>/lock`），请用独立 `MEBULAR_HOME` 跑 relay（CLI 会提示，不自动注册 service 单元）。
+- **relay 白名单/上限**：`network.libp2p.relayPolicy`（`allowedRelayPeers` / `deniedRelayPeers` / `maxReservations` / `reservationTtlMs` / `denyOutboundRelayedConnection`）→ 组装 libp2p `connectionGater` 与 `circuitRelay.reservations`。
+- **能力共享边界**：本轮只做「配对时 hints + 配置 seeds」；relay 能力的动态广播见 C5。relay 重启会作废旧预约（libp2p 客户端不自动 re-reserve）：恢复路径是**对端重新发布 hints**（控制台/`fleet invite` 再签一次）。
+- 验收：`npm run verify:connect`（hints-only 自动连通 + 杀 relay 降级/退避 + 恢复重连 + 路径状态断言）。

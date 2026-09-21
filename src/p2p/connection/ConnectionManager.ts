@@ -8,31 +8,43 @@ import type {
 } from '../transport/InMemoryTransport.js';
 import { EventEmitter } from 'events';
 import { ErrorCodes, NetworkError } from '../../errors.js';
+import { EndpointBook, type PathState } from './EndpointBook.js';
 
 export interface ConnectionManagerOptions {
   maxConnections?: number;
   connectTimeout?: number;
   keepAliveInterval?: number;
   heartbeatTimeout?: number;
+  /** C1：候选端点簿（缺省不启用 → 行为与历史一致：单地址拨号） */
+  endpointBook?: EndpointBook;
+  /** C1：全候选失败后的退避重试基数（ms，默认 1000）；0 = 不自动重试 */
+  dialBackoffBaseMs?: number;
+  /** C1：退避上限（ms，默认 30000） */
+  dialBackoffMaxMs?: number;
 }
 
 export class ConnectionManager extends EventEmitter {
-  private options: Required<ConnectionManagerOptions>;
+  private options: Required<Omit<ConnectionManagerOptions, 'endpointBook'>>;
   private running = false;
   private connections: Map<string, Connection> = new Map();
   private pendingConnections: Map<string, Connection> = new Map();
   private pendingDials: Map<string, Promise<Connection>> = new Map();
   private provider: ConnectionProvider | null = null;
+  private endpointBook: EndpointBook | null;
+  private backoffs: Map<string, { attempts: number; timer: NodeJS.Timeout | null; lastError?: string }> = new Map();
   private keepAliveInterval: NodeJS.Timeout | null = null;
   private heartbeatCheckInterval: NodeJS.Timeout | null = null;
 
   constructor(options: ConnectionManagerOptions = {}) {
     super();
-    const defaults: Required<ConnectionManagerOptions> = {
+    const defaults: Required<Omit<ConnectionManagerOptions, 'endpointBook'>> = {
       maxConnections: 100,
       connectTimeout: 30000,
       keepAliveInterval: 30000,
       heartbeatTimeout: 60000,
+      // endpointBook 无默认值（undefined = 关闭），单独存放
+      dialBackoffBaseMs: 1000,
+      dialBackoffMaxMs: 30000,
     };
     // 显式传入的 undefined 不允许覆盖默认值
     for (const [key, value] of Object.entries(options)) {
@@ -41,6 +53,21 @@ export class ConnectionManager extends EventEmitter {
       }
     }
     this.options = defaults;
+    this.endpointBook = options.endpointBook ?? null;
+  }
+
+  /** C1：注入/替换候选端点簿（连接成功后学习入库、路径变化广播） */
+  setEndpointBook(book: EndpointBook | null): void {
+    this.endpointBook = book;
+  }
+
+  getEndpointBook(): EndpointBook | null {
+    return this.endpointBook;
+  }
+
+  /** C1：当前生效路径（含 kind/address/since/lastError） */
+  getPath(peerId: PeerId): PathState | null {
+    return this.endpointBook?.getPath(peerId.id) ?? null;
   }
 
   /** 注入拨号抽象（libp2p 适配器、内存 Hub 等） */
@@ -83,6 +110,10 @@ export class ConnectionManager extends EventEmitter {
       this.heartbeatCheckInterval = null;
     }
 
+    for (const state of this.backoffs.values()) {
+      if (state.timer) clearTimeout(state.timer);
+    }
+    this.backoffs.clear();
     await this.closeAll();
   }
 
@@ -120,16 +151,92 @@ export class ConnectionManager extends EventEmitter {
       throw new NetworkError('Connection provider not set. Call setConnectionProvider() first.', ErrorCodes.NETWORK_PROVIDER_NOT_SET);
     }
 
-    const dialPromise = this.dialWithTimeout(peerId, address);
+    const dialPromise = this.dialWithCandidates(peerId, address);
     this.pendingDials.set(peerId.id, dialPromise);
 
     try {
       const connection = await dialPromise;
       this.setConnection(peerId, connection);
+      this.clearBackoff(peerId.id);
       return connection;
     } finally {
       this.pendingDials.delete(peerId.id);
     }
+  }
+
+  /**
+   * C1：按候选顺序拨号。无端点簿时退化为历史单地址拨号（零行为变化）；
+   * 有端点簿时：显式地址优先 → 簿内候选（direct > lan > relay）逐个尝试，
+   * 成功记录路径与成功统计，失败记录错误并尝试下一候选；全失败安排指数退避重试。
+   */
+  private async dialWithCandidates(peerId: PeerId, address?: string): Promise<Connection> {
+    const book = this.endpointBook;
+    if (!book) {
+      return this.dialWithTimeout(peerId, address);
+    }
+    const candidates = this.candidateAddresses(peerId.id, address);
+    if (candidates.length === 0) {
+      // 簿内没有可用候选：沿用历史行为（由 provider/发现层决定）
+      return this.dialWithTimeout(peerId, address);
+    }
+
+    let lastError: unknown = null;
+    for (const candidate of candidates) {
+      try {
+        const connection = await this.dialWithTimeout(peerId, candidate);
+        book.recordSuccess(peerId.id, candidate);
+        book.setPath(peerId.id, candidate);
+        return connection;
+      } catch (error) {
+        lastError = error;
+        book.recordFailure(peerId.id, candidate, error);
+        book.setPath(peerId.id, candidate, error);
+      }
+    }
+    this.scheduleBackoff(peerId);
+    throw lastError instanceof Error
+      ? lastError
+      : new NetworkError(`All candidates failed for peer ${peerId.id}`, ErrorCodes.NETWORK_DIAL_FAILED);
+  }
+
+  /** 拨号候选顺序：显式地址（来自调用方/配对）在前，其后簿内候选（去重）。 */
+  private candidateAddresses(peerId: string, address?: string): string[] {
+    const fromBook = this.endpointBook?.addresses(peerId) ?? [];
+    const ordered = address ? [address, ...fromBook] : [...fromBook];
+    return [...new Set(ordered.filter((entry) => typeof entry === 'string' && entry.length > 0))];
+  }
+
+  /** 全失败后的指数退避（timer 不拖住宿主退出；重复调用只保留一个 timer）。 */
+  private scheduleBackoff(peerId: PeerId): void {
+    const base = this.options.dialBackoffBaseMs;
+    if (!base || base <= 0) return;
+    const current = this.backoffs.get(peerId.id);
+    const attempts = (current?.attempts ?? 0) + 1;
+    if (current?.timer) clearTimeout(current.timer);
+    const delay = Math.min(base * 2 ** (attempts - 1), this.options.dialBackoffMaxMs);
+    const timer = setTimeout(() => {
+      const state = this.backoffs.get(peerId.id);
+      if (state) state.timer = null;
+      if (!this.running) return;
+      this.connect(peerId).catch(() => undefined);
+    }, delay);
+    timer.unref();
+    this.backoffs.set(peerId.id, { attempts, timer, lastError: current?.lastError });
+    this.emit('dial-retry-scheduled', { peerId, attempts, delay });
+  }
+
+  private clearBackoff(peerId: string): void {
+    const state = this.backoffs.get(peerId);
+    if (!state) return;
+    if (state.timer) clearTimeout(state.timer);
+    this.backoffs.delete(peerId);
+  }
+
+  /** 退避状态（诊断/测试用） */
+  getBackoff(peerId: PeerId): { attempts: number; pending: boolean } | null {
+    const state = this.backoffs.get(peerId.id);
+    if (!state) return null;
+    return { attempts: state.attempts, pending: state.timer !== null };
   }
 
   private async dialWithTimeout(peerId: PeerId, address?: string): Promise<Connection> {
@@ -179,6 +286,7 @@ export class ConnectionManager extends EventEmitter {
     }
 
     this.connections.delete(peerId.id);
+    this.endpointBook?.clearPath(peerId.id);
     this.emit('connection-closed', peerId);
   }
 
@@ -204,6 +312,12 @@ export class ConnectionManager extends EventEmitter {
 
   setConnection(peerId: PeerId, connection: Connection): void {
     this.connections.set(peerId.id, connection);
+    // C1：学习成功地址（remoteAddress 形如 multiaddr 时才入库）
+    const remote = connection.remoteAddress;
+    if (this.endpointBook && typeof remote === 'string' && remote.includes('/')) {
+      void this.endpointBook.upsert(peerId.id, [remote], 'learned').catch(() => undefined);
+      this.endpointBook.setPath(peerId.id, remote);
+    }
     this.emit('connection-opened', connection);
   }
 
@@ -268,6 +382,7 @@ export class ConnectionManager extends EventEmitter {
       return;
     }
     this.connections.delete(peerId);
+    this.endpointBook?.clearPath(peerId);
     conn.close().catch(() => undefined);
     this.emit('connection-timeout', conn.peerId);
     this.emit('connection-closed', conn.peerId);

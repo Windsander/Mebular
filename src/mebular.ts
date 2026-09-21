@@ -45,6 +45,8 @@ import {
   type UserMasterKeyPair,
 } from './crypto/IdentityManager.js';
 import { P2PNode } from './p2p/P2PNetwork.js';
+import { EndpointBook, type EndpointSource, type EndpointStore, type PathState } from './p2p/connection/EndpointBook.js';
+import type { RelayPolicyOptions } from './p2p/connection/RelayPolicy.js';
 import { resolveVectorIndex, type EmbeddingModuleImporter } from './memory/transformers.js';
 import type { EmbeddingProvider } from './memory/embedding.js';
 import type { VectorIndex } from './memory/VectorIndex.js';
@@ -114,6 +116,20 @@ export interface MebularConfig {
     bonjourFactory?: BonjourServiceFactory;
     listenPort?: number;
     /**
+     * C1：无显式地址时使用候选地址簿自动拨号（默认 true）。
+     * 关闭后 connectToPeer 行为与历史一致（显式地址或发现层地址）。
+     */
+    autoConnect?: boolean;
+    /**
+     * C1：配对 hints（键为 deviceId 或 peerId → multiaddr 列表）。
+     * 仅作为候选地址写入地址簿；**与授权/成员无关**，不改变任何数据面判定。
+     */
+    endpoints?: Record<string, string[]>;
+    /**
+     * C1：端点簿存储接缝。core 不读文件；app 传路径（如 <home>/net/peers.json 的 FileEndpointStore）。
+     */
+    endpointStore?: EndpointStore;
+    /**
      * libp2p 真实网络栈（可选依赖；缺包时报 NETWORK_LIBP2P_NOT_AVAILABLE）。
      * `relayServer`/`relayServers` 启用 circuit relay（G3；需额外可选依赖，
      * 缺包抛 NETWORK_RELAY_NOT_AVAILABLE）。
@@ -125,6 +141,8 @@ export interface MebularConfig {
       relayServers?: string[];
       /** circuit relay 资源放开（仅可信自托管时开启；默认限额） */
       relayUnlimited?: boolean;
+      /** C2：relay 白名单/预约上限（自托管 relay 时用；见 buildRelayPolicy） */
+      relayPolicy?: RelayPolicyOptions;
     };
   };
   sync?: {
@@ -246,6 +264,7 @@ export class Mebular {
   private namespacePolicyImpl: CompositeNamespacePolicy | null = null;
   private nodeImpl: P2PNode | null = null;
   private libp2pProvider: Libp2pProvider | null = null;
+  private endpointBookImpl: EndpointBook | null = null;
   private semanticVectorIndexImpl: VectorIndex | null = null;
 
   /**
@@ -376,6 +395,17 @@ export class Mebular {
 
       // 6. 网络（可选）
       if (this.config.network?.enabled) {
+        // C1：候选地址簿（离线安全：network 关闭时完全不加载/不落盘）
+        if (this.config.network.autoConnect !== false || this.config.network.endpoints) {
+          const book = new EndpointBook({
+            ...(this.config.network.endpointStore !== undefined ? { store: this.config.network.endpointStore } : {}),
+          });
+          await book.load();
+          for (const [key, addresses] of Object.entries(this.config.network.endpoints ?? {})) {
+            await book.upsert(key, addresses, 'paired');
+          }
+          this.endpointBookImpl = book;
+        }
         // libp2p 配置优先：真实网络栈装配（可选依赖，缺包时诚实报错）
         let provider = this.config.network.provider;
         if (this.config.network.libp2p) {
@@ -389,6 +419,9 @@ export class Mebular {
             relayServer: this.config.network.libp2p.relayServer,
             relayServers: this.config.network.libp2p.relayServers,
             relayUnlimited: this.config.network.libp2p.relayUnlimited,
+            ...(this.config.network.libp2p.relayPolicy !== undefined
+              ? { relayPolicy: this.config.network.libp2p.relayPolicy }
+              : {}),
           });
           await this.libp2pProvider.start();
           provider = this.libp2pProvider;
@@ -406,6 +439,8 @@ export class Mebular {
           provider,
           bonjourFactory: this.config.network.bonjourFactory,
           config: { listenPort: this.config.network.listenPort },
+          ...(this.endpointBookImpl !== null ? { endpointBook: this.endpointBookImpl } : {}),
+          autoConnect: this.config.network.autoConnect !== false,
         });
         this.syncImpl.attachToNode(node);
         await node.start();
@@ -878,6 +913,27 @@ export class Mebular {
   }
 
   /** 网络未启用时为 null */
+  /** C1：候选端点簿（network 关闭或未启用时 null） */
+  get endpointBook(): EndpointBook | null {
+    return this.endpointBookImpl;
+  }
+
+  /** C1：某对端当前生效路径（deviceId/peerId 键都可用；未连返回 null） */
+  getPeerPath(peerKey: string): PathState | null {
+    return this.endpointBookImpl?.getPath(peerKey) ?? null;
+  }
+
+  /** C1：手动写入候选端点（app 侧配对/配置用；不改变授权） */
+  async addPeerEndpoints(key: string, addresses: string[], source: EndpointSource = 'config'): Promise<number> {
+    if (!this.endpointBookImpl) return 0;
+    return this.endpointBookImpl.upsert(key, addresses, source);
+  }
+
+  /** C1：peerId（hex）→ 当前路径（便捷封装） */
+  getPathForPeerId(peerId: string): PathState | null {
+    return this.endpointBookImpl?.getPath(peerId) ?? null;
+  }
+
   get node(): P2PNode | null {
     return this.nodeImpl;
   }

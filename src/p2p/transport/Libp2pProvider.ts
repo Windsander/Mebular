@@ -81,6 +81,8 @@ interface RelayModules {
   identify(): unknown;
 }
 
+import { buildRelayPolicy, type RelayPolicyOptions } from '../connection/RelayPolicy.js';
+
 /** 动态导入得到的模块集合 */
 interface Libp2pModules {
   createLibp2p(options: Record<string, unknown>): Promise<Libp2pNodeLike>;
@@ -404,6 +406,11 @@ export interface Libp2pProviderOptions {
    * 需调用方承担开放 relay 的滥用风险（无限流量/连接）。
    */
   relayUnlimited?: boolean;
+  /**
+   * C2：relay 白名单/预约上限（connectionGater + reservations）。
+   * 未配置时保持历史行为（开放预约 + maxReservations=128 + applyDefaultLimit）。
+   */
+  relayPolicy?: RelayPolicyOptions;
 }
 
 /**
@@ -468,10 +475,12 @@ export class Libp2pProvider implements ConnectionProvider {
         // 服务名须为 circuitRelay（与包内默认服务名一致）。
         // 默认可限额（applyDefaultLimit:true）：circuit 只允许受限协议；
         // 需显式 relayUnlimited 才放开，允许 Mebular 同步流在 circuit 上跑。
+        const policy = buildRelayPolicy(options.relayPolicy ?? {});
         services['circuitRelay'] = relayModules.circuitRelayServer({
           reservations: {
             maxReservations: 128,
             applyDefaultLimit: options.relayUnlimited !== true,
+            ...policy.reservations,
           },
         });
       }
@@ -486,6 +495,13 @@ export class Libp2pProvider implements ConnectionProvider {
     };
     if (Object.keys(services).length > 0) {
       libp2pOptions['services'] = services;
+    }
+    if (options.relayPolicy) {
+      const policy = buildRelayPolicy(options.relayPolicy);
+      libp2pOptions['connectionGater'] = {
+        denyInboundRelayReservation: (peerId: { toString(): string }) => policy.denyInboundRelayReservation(peerId),
+        denyOutboundRelayedConnection: (peerId: { toString(): string }) => policy.denyOutboundRelayedConnection(peerId),
+      };
     }
 
     const node = await modules.createLibp2p(libp2pOptions);

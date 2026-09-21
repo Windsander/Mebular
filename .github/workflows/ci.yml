@@ -62,6 +62,9 @@ jobs:
       - name: Console E1 (static/CSRF/scope/config combo/TLS)
         run: npm run verify:console > console-e1.log 2>&1 || { tail -n 200 console-e1.log; exit 1; }
 
+      - name: Pairing auto-connect (address book / relay degrade & recover)
+        run: npm run verify:connect > verify-connect.log 2>&1 || { tail -n 200 verify-connect.log; exit 1; }
+
       - name: Upload failure logs (flaky acceptance triage)
         if: failure()
         uses: actions/upload-artifact@v4
@@ -70,6 +73,7 @@ jobs:
           path: |
             fleet-acceptance.log
             console-e1.log
+            verify-connect.log
           if-no-files-found: ignore
 
       - name: stdio MCP (real client)

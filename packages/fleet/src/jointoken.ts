@@ -44,12 +44,22 @@ export interface JoinToken {
   expiresAt: number;
   /** join 服务端点（http(s)://host:port） */
   endpoint: string;
+  /**
+   * C2：邀请方可达的 P2P 地址（multiaddr，新设备 join 后写入地址簿）。
+   * 旧令牌可缺省；缺省时 join 侧不写 hints（行为与历史一致）。
+   */
+  endpoints?: string[];
+  /** C2：邀请方建议的 relay seeds（可选） */
+  relaySeeds?: string[];
+  /** C2：邀请方是否有公网可达地址（诊断提示用；仅信息，不参与授权） */
+  pubReachable?: boolean;
   /** inviter 设备私钥对 canonical 数据的签名（base64） */
   signature: string;
 }
 
 /** 令牌规范化签名内容（固定键序，排除 signature）。 */
 export function canonicalJoinTokenData(token: Omit<JoinToken, 'signature'> & { signature?: string }): string {
+  // 注意：键序固定；C2 可选 hints 仅在存在时进入签名体 → 旧令牌（无 hints）签名不变，向后兼容。
   return JSON.stringify({
     v: token.v,
     kind: token.kind,
@@ -62,6 +72,9 @@ export function canonicalJoinTokenData(token: Omit<JoinToken, 'signature'> & { s
     issuedAt: token.issuedAt,
     expiresAt: token.expiresAt,
     endpoint: token.endpoint,
+    ...(token.endpoints !== undefined ? { endpoints: token.endpoints } : {}),
+    ...(token.relaySeeds !== undefined ? { relaySeeds: token.relaySeeds } : {}),
+    ...(token.pubReachable !== undefined ? { pubReachable: token.pubReachable } : {}),
   });
 }
 
@@ -86,6 +99,16 @@ export function decodeJoinToken(text: string): JoinToken {
   }
   if (typeof t.issuedAt !== 'number' || typeof t.expiresAt !== 'number') throw new Error('令牌时间字段非法');
   if (!Array.isArray(t.inviterChain) || t.inviterChain.length === 0) throw new Error('令牌缺少 inviter 证书链');
+  // C2：可选 hints 的形状校验（缺省合法；非法即拒，避免半截数据流入地址簿）
+  if (t.endpoints !== undefined && (!Array.isArray(t.endpoints) || t.endpoints.some((e) => typeof e !== 'string'))) {
+    throw new Error('令牌 endpoints 形状非法（应为字符串数组）');
+  }
+  if (t.relaySeeds !== undefined && (!Array.isArray(t.relaySeeds) || t.relaySeeds.some((e) => typeof e !== 'string'))) {
+    throw new Error('令牌 relaySeeds 形状非法（应为字符串数组）');
+  }
+  if (t.pubReachable !== undefined && typeof t.pubReachable !== 'boolean') {
+    throw new Error('令牌 pubReachable 形状非法（应为布尔）');
+  }
   return t as unknown as JoinToken;
 }
 
@@ -141,6 +164,10 @@ export async function buildJoinToken(input: {
   ttlMs?: number;
   now?: number;
   nonce?: string;
+  /** C2：邀请方可达 P2P 地址（缺省自动从本机节点收集） */
+  endpoints?: string[];
+  relaySeeds?: string[];
+  pubReachable?: boolean;
 }): Promise<JoinToken> {
   const identity = input.mebular.identity.getDeviceKey(input.deviceId);
   if (!identity) throw new Error(`本机无设备密钥：${input.deviceId}`);
@@ -162,12 +189,49 @@ export async function buildJoinToken(input: {
     expiresAt: now + (input.ttlMs ?? 900_000),
     endpoint: input.endpoint,
   };
+  // C2：自动收集本机可达 P2P 地址（缺省），显式传入优先；空则不写字段（与旧令牌等价）
+  const endpoints = input.endpoints ?? collectReachableEndpoints(input.mebular);
+  const relaySeeds = input.relaySeeds ?? collectRelaySeeds(input.mebular);
+  if (endpoints.length > 0) unsigned.endpoints = endpoints;
+  if (relaySeeds.length > 0) unsigned.relaySeeds = relaySeeds;
+  const pubReachable = input.pubReachable ?? endpoints.some((addr) => !isLoopbackAddress(addr));
+  if (endpoints.length > 0 || input.pubReachable !== undefined) unsigned.pubReachable = pubReachable;
   const signature = await globalThis.crypto.subtle.sign(
     { name: 'Ed25519' },
     identity.privateKey,
     new TextEncoder().encode(canonicalJoinTokenData(unsigned)),
   );
   return { ...unsigned, signature: bytesToBase64(new Uint8Array(signature)) };
+}
+
+/** C2：本机可达 P2P 地址（节点监听 + /p2p/<peerId>；无节点则空）。 */
+export function collectReachableEndpoints(mebular: Mebular): string[] {
+  const node = mebular.node;
+  if (!node || !node.isRunning()) return [];
+  const peerId = node.peerId?.id;
+  const addrs = node.getLocalMultiaddrs?.() ?? [];
+  const out: string[] = [];
+  for (const addr of addrs) {
+    if (typeof addr !== 'string' || addr.includes('/p2p-circuit')) continue;
+    const withPeer = /\/p2p\//.test(addr) || !peerId ? addr : `${addr}/p2p/${peerId}`;
+    if (!out.includes(withPeer)) out.push(withPeer);
+  }
+  return out;
+}
+
+/**
+ * C2：可共享的 relay seeds（供新设备在无法直连时中转）。
+ * app 已把 `network.relaySeeds` 并入 `network.libp2p.relayServers`，此处经公开 getter 读取。
+ */
+export function collectRelaySeeds(mebular: Mebular): string[] {
+  const seeds = mebular.relayServers;
+  return Array.isArray(seeds) ? seeds.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0) : [];
+}
+
+/** 地址是否为回环（用于 pubReachable 提示；判断失败按回环处理）。 */
+export function isLoopbackAddress(address: string): boolean {
+  const host = /\/(?:ip4|ip6|dns4|dns6|dns)\/([^/]+)/.exec(address)?.[1] ?? '';
+  return ['127.0.0.1', '::1', 'localhost', ''].includes(host) || host.startsWith('127.');
 }
 
 export interface VerifyJoinTokenOptions {

@@ -932,6 +932,13 @@ function renderAbout() {
           ? `<code>${escapeHtml(String(s.relay.bridge.address))}</code> <span class="muted">· ${escapeHtml(String(s.relay.bridge.peer))}</span>`
           : '未经桥（直连 / LAN）'),
         kvRow('桥白名单', s.relay ? `${s.relay.allowedClients ?? 0} 个已配对对端` : '—'),
+        // C5：地址自动广播（只读；提示类信息，不参与授权）
+        kvRow('地址广播', s.net
+          ? `${s.net.enabled ? `${escapeHtml(String(s.net.mode))} 档` : '未开启（opt-in：把 __net__ 加入订阅或配置 network.broadcast）'} · 已发布 ${s.net.published} · 已采用 ${s.net.applied}`
+          : '—'),
+        kvRow('广播忽略', s.net && Object.values(s.net.ignored ?? {}).some((v) => v > 0)
+          ? escapeHtml(Object.entries(s.net.ignored).filter(([, v]) => v > 0).map(([k, v]) => `${k} ${v}`).join(' / '))
+          : '无'),
       ])}
       ${listenAlarm.length ? `<p class="crt-warn">⚠ 监听地址含非回环（${escapeHtml(listenAlarm.join(', '))}）：建议改绑回环 / LAN，或经 relay 并仅以防火墙放行已授权对端。</p>` : ''}
     </section>

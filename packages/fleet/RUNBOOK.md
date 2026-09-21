@@ -187,3 +187,15 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - **不变式**：relay 角色**不落任何记忆/授权状态**（不写图事件、不改策略），中继流量对双方仍是端到端加密信道。
 - **观察**：控制台「关于本机 → 运行状态」显示「本机当桥 开/关（原因）」与「当前经桥」（当前路径为 relay 时给出桥地址）；`mebular doctor --net` 输出 `relay` 段（mode/serving/reason/publicAddrs/allowedClients）。
 - **桥的广播**：可达设备自动当桥 + 地址广播属 C5（`net_endpoints` 记录），本轮只做「本机角色判定 + 白名单 + 限额」。
+
+## 10. 地址自动广播（C5：可达设备互相告知地址，自动用桥）
+
+- **开关（opt-in）**：`network.broadcast: { mode: 'full'|'relay-only'|'off', ttlMs? }`，或把 `__net__` 加入 `sync.namespaces`。
+  - `full`（默认档）：发布**实际存在**的 lan / public / relay 地址并打标；
+  - `relay-only`：只发布 relay 地址；`off`：完全不发布。
+- **语义（hints only）**：记录 `net_endpoints` 落在命名空间 `__net__`；**永不参与授权**（不改生效分区/成员/吊销，也不写 `__policy__`）。读取侧只做：subject 绑定校验 → 命名空间校验 → 过期（本地墙钟）→ 吊销级联 → 写入候选地址簿（`source=learned`）。
+- **自动用桥**：收到对端记录 → 其 relay 地址进候选池 → 后续拨号可自动经其桥（与 C1 选路、C6 桥角色协同）；`relayCapable` 只是信息（不使对端有义务，也不换取权限）。
+- **可见性**：记录只在 `__net__`，沿用既有「授权 ∩ 成员资格 ∩ 订阅」裁剪；旧版本节点忽略该类型（只少收 hints，安全方向）。
+- **时效**：`expiry` 默认 24h（`ttlMs` 可配）；过期仅本机忽略，**不进一致性**（不影响 `stateHash`）。
+- **观察**：控制台「关于本机 → 运行状态」显示「地址广播」（档位 / 已发布 / 已采用 / 忽略原因）；`mebular doctor --net` 输出 `net` 段与建议。
+- 验收：`tests/sync/net-endpoints.test.ts`、`tests/p2p/net-endpoints-broadcast.test.ts`（含「注入记录不改授权」锚点）。

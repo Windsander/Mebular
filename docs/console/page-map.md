@@ -34,7 +34,7 @@ IA 单一真源在 [`packages/console/settings-ia.js`](../../packages/console/se
 
 ## 关于本机（顶栏徽章入口，只读）
 
-身份与存储 · **同步节奏** · 运行状态 · 签发者状态 · **对端连接路径**（C2：每个键的 `kind/address/最近切换/lastError/候选数`，只读）· 舰队摘要 · 能力清单（11 工具）。
+身份与存储 · **同步节奏** · 运行状态（含 **地址广播**：`full/relay-only/off` 档位 · 已发布 · 已采用 · 忽略原因，C5）· 签发者状态 · **对端连接路径**（C2：每个键的 `kind/address/最近切换/lastError/候选数`，只读）· 舰队摘要 · 能力清单（11 工具）。
 
 > 星图设备卡同样有一行只读「当前路径」（`direct`/`lan`/`relay` + 地址 + 起始时间；未连接时显示 `lastError`）。数据来自 core 候选地址簿（`settings.peers.paths`），只展示不改变授权。
 

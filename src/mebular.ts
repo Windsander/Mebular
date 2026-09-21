@@ -15,6 +15,15 @@ import { chmod, mkdir, readFile, rename, rm, writeFile } from 'fs/promises';
 import { randomUUID } from 'node:crypto';
 import { dirname } from 'path';
 import { normalizeNamespace, normalizeNamespaceList } from './core/namespace.js';
+import {
+  NET_NAMESPACE,
+  NET_ENDPOINTS_EVENT,
+  buildNetEndpointsPayload,
+  acceptNetEndpointsEvent,
+  orderedNetEndpointAddresses,
+  type NetBroadcastMode,
+  type NetEndpointsPayload,
+} from './sync/netEndpoints.js';
 import type { Event } from './types/event.js';
 import { GraphStore } from './core/GraphStore.js';
 import { EventLog } from './eventlog/EventLog.js';
@@ -154,6 +163,13 @@ export interface MebularConfig {
      */
     relayService?: 'auto' | 'off' | 'on';
     /**
+     * C5：地址自动广播（`net_endpoints` 记录，命名空间 `__net__`）。
+     * **opt-in**：仅当显式配置本项，或 `sync.namespaces` 含 `__net__` 时才发布；
+     * 默认档 `full`（发布实际存在的 lan/public/relay 并打标）；`relay-only` / `off` 可选隐私档。
+     * 记录**只作 hints，永不参与授权**。
+     */
+    broadcast?: { mode?: NetBroadcastMode; ttlMs?: number };
+    /**
      * libp2p 真实网络栈（可选依赖；缺包时报 NETWORK_LIBP2P_NOT_AVAILABLE）。
      * `relayServer`/`relayServers` 启用 circuit relay（G3；需额外可选依赖，
      * 缺包抛 NETWORK_RELAY_NOT_AVAILABLE）。
@@ -289,6 +305,17 @@ export class Mebular {
   private nodeImpl: P2PNode | null = null;
   private libp2pProvider: Libp2pProvider | null = null;
   private endpointBookImpl: EndpointBook | null = null;
+  private netBroadcastMode: NetBroadcastMode = 'off';
+  private netBroadcastTtlMs = 24 * 3600_000;
+  private netBroadcastEnabled = false;
+  private lastBroadcastKey: string | null = null;
+  private netEndpointsStatus = {
+    published: 0,
+    applied: 0,
+    ignored: { shape: 0, subject: 0, expired: 0, empty: 0, revoked: 0 } as Record<string, number>,
+    lastPublishedAt: null as number | null,
+    lastAcceptedSubjects: [] as string[],
+  };
   private semanticVectorIndexImpl: VectorIndex | null = null;
 
   /**
@@ -493,6 +520,20 @@ export class Mebular {
         this.syncImpl.attachToNode(node);
         await node.start();
         this.nodeImpl = node;
+
+        // C5：地址自动广播（opt-in；只作 hints）。读取侧接入远端事件（不改任何授权判定）。
+        this.netBroadcastMode = this.config.network?.broadcast?.mode ?? 'full';
+        this.netBroadcastTtlMs = this.config.network?.broadcast?.ttlMs ?? 24 * 3600_000;
+        const optedIn = this.config.network?.broadcast !== undefined
+          || (this.config.sync?.namespaces ?? []).map((ns) => normalizeNamespace(ns)).includes(NET_NAMESPACE);
+        this.netBroadcastEnabled = optedIn && this.netBroadcastMode !== 'off';
+        this.syncImpl.on('events-applied', (payload: { eventIds?: string[]; namespaces?: string[] }) => {
+          void this.ingestNetEndpointsFromSync(payload);
+        });
+        this.nodeImpl.onRelayRoleChanged(() => { void this.publishNetEndpoints('relay-role-changed').catch(() => undefined); });
+        if (this.netBroadcastEnabled) {
+          await this.publishNetEndpoints('startup').catch(() => undefined);
+        }
       }
 
       this.initialized = true;
@@ -964,6 +1005,111 @@ export class Mebular {
   /** C1：候选端点簿（network 关闭或未启用时 null） */
   get endpointBook(): EndpointBook | null {
     return this.endpointBookImpl;
+  }
+
+  // ---------- C5：地址自动广播（hints only；不参与授权） ----------
+
+  /**
+   * 发布本机 `net_endpoints` 记录（命名空间 `__net__`）。
+   * 地址集合未变则不重复发布（去抖）；`off` 档或未 opt-in 时 no-op。
+   */
+  async publishNetEndpoints(reason = 'manual'): Promise<NetEndpointsPayload | null> {
+    if (!this.netBroadcastEnabled || this.netBroadcastMode === 'off') return null;
+    const node = this.assertReady(this.nodeImpl, 'network');
+    const addresses = node.getLocalMultiaddrs();
+    const relayCapable = node.getRelayStatus().serving === true;
+    const payload = buildNetEndpointsPayload({
+      subject: this.config.deviceId,
+      addresses,
+      relayCapable,
+      mode: this.netBroadcastMode,
+      ttlMs: this.netBroadcastTtlMs,
+    });
+    const key = JSON.stringify({ e: payload.endpoints, r: payload.relayCapable });
+    if (key === this.lastBroadcastKey) return null; // 无变化不重复广播
+    await this.assertReady(this.eventLogImpl, 'eventLog').append({
+      type: NET_ENDPOINTS_EVENT,
+      data: payload as unknown as Record<string, unknown>,
+      namespace: NET_NAMESPACE,
+    });
+    this.lastBroadcastKey = key;
+    this.netEndpointsStatus.published += 1;
+    this.netEndpointsStatus.lastPublishedAt = Date.now();
+    void reason;
+    return payload;
+  }
+
+  /** 读取侧：同步应用了远端事件后，抓取 `__net__` 记录入候选池（hints only） */
+  private async ingestNetEndpointsFromSync(payload: { eventIds?: string[]; namespaces?: string[] }): Promise<void> {
+    const namespaces = (payload.namespaces ?? []).map((ns) => normalizeNamespace(ns));
+    if (!namespaces.includes(NET_NAMESPACE)) return;
+    const storage = this.storageImpl;
+    if (!storage) return;
+    for (const id of payload.eventIds ?? []) {
+      try {
+        const event = await storage.getEvent(id);
+        if (event) await this.ingestNetEndpointsEvent(event);
+      } catch {
+        // 读取失败不影响同步（hints 是尽力而为）
+      }
+    }
+  }
+
+  /**
+   * 单条 `net_endpoints` 记录的读取侧过滤与采用（hints only）：
+   * subject 绑定 / 命名空间 / 过期（本地墙钟）/ 吊销级联 → 通过则写入候选地址簿（source=learned）。
+   * **绝不**触碰授权判定或策略状态。
+   */
+  async ingestNetEndpointsEvent(event: { author?: string; namespace?: string; data?: unknown }): Promise<boolean> {
+    let revoked: string[] = [];
+    try {
+      revoked = this.graphPolicyImpl ? [...(await this.graphPolicyImpl.getRevokedDevices())] : [];
+    } catch {
+      revoked = [];
+    }
+    const result = acceptNetEndpointsEvent(
+      { author: String(event.author ?? ''), namespace: event.namespace, data: event.data },
+      { isRevoked: (subject) => revoked.includes(subject) },
+    );
+    if (!result.ok) {
+      this.netEndpointsStatus.ignored[result.reason] = (this.netEndpointsStatus.ignored[result.reason] ?? 0) + 1;
+      return false;
+    }
+    const book = this.endpointBookImpl;
+    if (!book) return false;
+    const addresses = orderedNetEndpointAddresses(result.payload);
+    await book.upsert(result.payload.subject, addresses, 'learned');
+    this.netEndpointsStatus.applied += 1;
+    if (!this.netEndpointsStatus.lastAcceptedSubjects.includes(result.payload.subject)) {
+      this.netEndpointsStatus.lastAcceptedSubjects = [
+        ...this.netEndpointsStatus.lastAcceptedSubjects.slice(-4),
+        result.payload.subject,
+      ];
+    }
+    return true;
+  }
+
+  /** C5：广播/采用状态（只读；诊断与控制台展示） */
+  getNetEndpointsStatus(): {
+    enabled: boolean;
+    mode: NetBroadcastMode;
+    ttlMs: number;
+    published: number;
+    applied: number;
+    ignored: Record<string, number>;
+    lastPublishedAt: number | null;
+    lastAcceptedSubjects: string[];
+  } {
+    return {
+      enabled: this.netBroadcastEnabled,
+      mode: this.netBroadcastMode,
+      ttlMs: this.netBroadcastTtlMs,
+      published: this.netEndpointsStatus.published,
+      applied: this.netEndpointsStatus.applied,
+      ignored: { ...this.netEndpointsStatus.ignored },
+      lastPublishedAt: this.netEndpointsStatus.lastPublishedAt,
+      lastAcceptedSubjects: [...this.netEndpointsStatus.lastAcceptedSubjects],
+    };
   }
 
   /** C1：某对端当前生效路径（deviceId/peerId 键都可用；未连返回 null） */

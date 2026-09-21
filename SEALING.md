@@ -56,6 +56,21 @@
 >   `/mebular/join/1.0.0` 请求-签发协议：**任意在册设备**可作 inviter 签发委派证书。
 
 - **策略事件类型与命名空间**：保留命名空间 `__policy__`；事件类型 `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare` / `namespace_membership` / `namespace_handoff`。
+- **地址广播（C5，`net_endpoints`，命名空间 `__net__`，**opt-in**）**：新增**信息类**记录类型
+  `net_endpoints`（命名空间 `__net__`），载荷 `{subject, endpoints[{addr,kind:lan|public|relay}], relayCapable, issuedAt, expiry, sig?}`。
+  语义（8 条，红线）：
+  1. **仅 subject 签发**：读取侧要求 `event.author === payload.subject`，否则忽略（不抛错）；
+  2. **只作 hints，永不参与授权**：该记录只写入候选地址簿（`source=learned`），
+     **绝不**改变 `getEffectiveNamespaces` / 成员资格 / 吊销判定，也不写任何 `__policy__` 记录；
+  3. **默认档 `full`**：发布实际存在的 lan/public/relay 地址并打标；`relay-only` / `off` 为可选隐私档（`off` 完全不发布）；
+  4. **仅 `__net__` 成员可见**：记录只落在 `__net__`（传输侧沿用既有「授权 ∩ 成员资格 ∩ 订阅」裁剪；非 `__net__` 命名空间的同形记录一律忽略）；
+  5. **`expiry` 是本地策略**：过期记录仅在本机被忽略，**墙钟不进一致性**、不影响 `stateHash` 与冲突裁决；
+  6. **吊销级联过滤**：被吊销 subject 的记录一律忽略（含其历史记录）；
+  7. **候选排序 `public > lan > relay`**（与 `EndpointBook.KIND_PRIORITY` 一致）；
+  8. **`relayCapable` 无义务、无权限**：仅是信息（不使本机成为桥、不换取任何授权；当桥判定仍由 C6 的
+     `relayService` + 地址簿白名单决定）。
+  **兼容性（安全方向）**：旧节点忽略未知的 `net_endpoints` 类型 → 只是少收 hints（不 fail-open）；同集群可混跑。
+  本记录**不改变同步协议骨架**（不新增握手/水位语义、不产生 tombstone）。
 - **2c 重订阅恢复（reset）**：退订清理后重入须同时满足 ①本机对该分区有**生效授权**（`getEffectiveNamespaces(self)` 含该分区；默认拒绝不变）②成员**重新在册**；否则**显式失败**。重入写**图外** `<storagePath>.rejoin.<ns>.json` 标记（**不同步/无 tombstone**）并清本机该分区本地水位；本机 hello 以**空时钟**上报显式订阅的分区 → 对端按「自报水位**只允许向下修正**」从 0 重发（或按既有“空水位”门禁发初始快照，**门禁不放宽**）。**不新增同步协议、不产生 tombstone、不改 `__policy__`**（oracle-free）。**破坏性/前向差异**：旧节点无“向下修正”语义 → 对旧端重入只可能**少收**（安全方向），需同版本互通。
 - **2b 退订交接（`namespace_handoff`）**：退订 = 成员资格退出（`namespace_membership(active:false)`）+ **本地彻底清理**该分区事件/节点/边与本地水位。**绝不产生 tombstone**（无任何“已删除”事件）。**清理前必须**继任者全量 ack（复用 per-event ack `getPendingEvents`，含退订方作者计数；**不新增同步协议、不放宽快照门禁**）；门禁不过 → **保持原状**。**`__policy__` 永不清理**（策略/成员/交接记录保留 → 清理不改变策略推导，legacy-empty 不退化）。`force` **仅本地 CLI**（不经 MCP/远程），仍**如实**记录 `forced:true` 与缺失明细。意图记录落在**图外**（`<storagePath>.handoff.json`）以保证崩溃后可**幂等续跑**。
 - **M1–M3 成员资格（`namespace_membership`）**：`{ member, namespace, active, issuedAt, note? }`；只采纳链到主密钥且签发者/成员未被 `device_revoke` 吊销的记录（**无条件采纳，不做 R-a**）；`(namespace, member)` 取 **R-c 最新**记录的 `active`（在册/注销）。**生效成员 = active 成员 ∩ 该设备对该分区的生效授权**；成员记录**不得**放宽授权（默认拒绝不变）。**裁剪链**：对端授权 ∩ 对端成员资格 ∩ 本机订阅声明；hello 订阅声明仅作活跃性/一致性校验，不一致 **显式拒绝/告警**（`sync-completed.membershipRejected`）。**legacy-empty**：分区无成员记录时按 hello 订阅裁剪（兼容）。

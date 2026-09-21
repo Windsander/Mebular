@@ -146,7 +146,15 @@ export async function startServeServer(options = {}) {
       };
       console.error(`JOIN_READY ${JSON.stringify({ endpoint: joinEndpointDemo, port: joinServer.port, loopback: joinEndpointLoopback })}`);
     }
+    // C5：地址自动广播的「可达性/地址变化」复查（app 侧节奏；库不装计时器）。
+    // 只在开启广播时挂载；10 分钟一次（unref，不拖住宿主退出）；地址未变时 publish 自身去抖。
+    const broadcastInterval = typeof app.getNetEndpointsStatus === 'function' && app.getNetEndpointsStatus().enabled
+      ? setInterval(() => { void app.publishNetEndpoints?.('periodic').catch(() => undefined); }, 600_000)
+      : null;
+    broadcastInterval?.unref?.();
+
     const shutdown = async () => {
+      if (broadcastInterval) clearInterval(broadcastInterval);
       await joinServer?.close().catch(() => undefined);
       await http.close().catch(() => undefined);
       await lock.release();

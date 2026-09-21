@@ -1158,6 +1158,22 @@ try {
       forbidden.every((token) => !binSrc.includes(token)));
   }
 
+  // ---------- C5：地址自动广播（只读渲染断言，不涉行为） ----------
+  {
+    const settingsNet = await getJson(port, '/admin/api/settings');
+    const net = settingsNet.json?.net;
+    check('C5 settings.net 暴露广播状态（enabled/mode/ttlMs/published/applied/ignored）',
+      net && typeof net.enabled === 'boolean' && ['full', 'relay-only', 'off'].includes(net.mode)
+        && typeof net.ttlMs === 'number' && typeof net.published === 'number' && typeof net.applied === 'number'
+        && net.ignored && typeof net.ignored === 'object',
+      net);
+    const consoleSrc5 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const tokensC5 = ['地址广播', '__net__', '广播忽略'];
+    check('C5 控制台只读展示「地址广播」（档位/已发布/已采用/忽略原因）',
+      tokensC5.every((token) => consoleSrc5.includes(token)),
+      tokensC5.filter((token) => !consoleSrc5.includes(token)).join(',') || '全部命中');
+  }
+
   // ---------- 未知 API ----------
   const unknown = await getJson(port, '/admin/api/nope');
   check('未知 /admin/api 路径 404', unknown.status === 404);

@@ -110,6 +110,8 @@ export interface P2PNetwork {
   getLanStatus(): LanDiscoveryStatus;
   /** C6：内建 relay 角色状态（诊断/控制台只读） */
   getRelayStatus(): RelayRoleStatus;
+  /** C6/C5：relay 角色变化回调（供 app 触发地址广播等） */
+  onRelayRoleChanged(callback: (decision: RelayRoleDecision) => void): void;
   discoverPeer(peerId: PeerId): Promise<PeerInfo | null>;
   /**
    * 连接对端。`address` 提供时按显式地址拨号（手动 multiaddr / relay），
@@ -206,6 +208,7 @@ export class P2PNode implements P2PNetwork {
   private relayMode: RelayServiceMode;
   private relayDecision: RelayRoleDecision;
   private inboundDirectEvidence = false;
+  private relayRoleChangedCallbacks: Array<(decision: RelayRoleDecision) => void> = [];
   private onWarn: (message: string) => void;
   /** 发现来源的 LAN 候选（peerId → 地址集合），用于降级时精确回退 */
   private discoveryAddrs = new Map<string, Set<string>>();
@@ -635,9 +638,14 @@ export class P2PNode implements P2PNetwork {
       listenAddrs,
       inboundDirectEvidence: this.inboundDirectEvidence,
     });
-    const changed = next.serve !== this.relayDecision.serve;
+    const changed = next.serve !== this.relayDecision.serve
+      || JSON.stringify(next.publicAddrs) !== JSON.stringify(this.relayDecision.publicAddrs);
     this.relayDecision = next;
-    if (changed) this.emit('relay-role-changed', { ...next });
+    if (changed) {
+      for (const callback of this.relayRoleChangedCallbacks) {
+        try { callback({ ...next }); } catch { /* 回调失败不影响角色判定 */ }
+      }
+    }
     return { ...next };
   }
 
@@ -662,6 +670,10 @@ export class P2PNode implements P2PNetwork {
     const book = this.endpointBook;
     if (!book) return false;
     return book.list(peerId).some((candidate) => candidate.source === 'paired' || candidate.source === 'config');
+  }
+
+  onRelayRoleChanged(callback: (decision: RelayRoleDecision) => void): void {
+    this.relayRoleChangedCallbacks.push(callback);
   }
 
   /** C6：Libp2pProvider 用 —— 当前是否对外提供中转 + 是否放行该 peer */

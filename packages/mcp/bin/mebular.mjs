@@ -351,6 +351,19 @@ async function runNetDoctor() {
     lan = { error: error.message };
   }
 
+  // C5：地址自动广播状态（档位/已发布/已采用/忽略原因）
+  let netStatus = null;
+  try {
+    const { app } = await createMebular();
+    try {
+      netStatus = app.getNetEndpointsStatus?.() ?? null;
+    } finally {
+      await app.shutdown().catch(() => undefined);
+    }
+  } catch (error) {
+    netStatus = { error: error.message };
+  }
+
   // C6：内建 relay 角色（本机当不当桥、原因、白名单客户端数）
   let relay = null;
   try {
@@ -380,6 +393,9 @@ async function runNetDoctor() {
   if (totalHints === 0) next.push('无配对 hints：用 `fleet invite`/控制台邀请，让新设备拿到可达地址（token.endpoints）');
   const failedSeeds = seedProbes.filter((p) => p.reachable === false);
   if (failedSeeds.length > 0) next.push(`relay seed 不可达（${failedSeeds.map((p) => p.seed).join(', ')}）：确认 relay 进程在跑、端口放行`);
+  if (netStatus && !netStatus.enabled) next.push('地址自动广播未开启（opt-in）：把 `__net__` 加入 sync.namespaces 或配置 network.broadcast:{mode:"full"} 即可让可达设备互相广播地址');
+  if (netStatus && netStatus.enabled && netStatus.published === 0) next.push('已开启地址广播但尚未发布：启动/可达性变化后会自动发布（首次可能因地址未变而跳过）');
+  if (netStatus && Object.values(netStatus.ignored ?? {}).reduce((a, b) => a + b, 0) > 0) next.push(`有被忽略的广播记录（${Object.entries(netStatus.ignored).filter(([, v]) => v > 0).map(([k, v]) => `${k}:${v}`).join(' ')}）：过期/吊销/伪装 subject 属预期忽略`);
   if (relay && relay.mode === 'auto' && !relay.serving) next.push(`本机不当桥（${relay.reason}）：如需当桥，确保有公网监听地址或已被外部直连（network.relayService=on 可强制）`);
   if (relay && relay.serving && relay.allowedClients === 0) next.push('本机在当桥但白名单为空：先配对（地址簿 paired）后才会放行中转预约');
   if (lan && lan.enabled && !lan.running) next.push(`LAN 发现未运行${lan.lastError ? `（${lan.lastError}）` : ''}：检查 bonjour 依赖或 network.lan.enabled`);
@@ -401,6 +417,7 @@ async function runNetDoctor() {
       : { loaded: false, error: bookError },
     configHints: hints,
     lan,
+    net: netStatus,
     relay,
     relaySeeds: seedProbes,
     runtime,

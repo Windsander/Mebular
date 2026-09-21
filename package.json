@@ -192,6 +192,10 @@
         "lines": 80,
         "branches": 65
       },
+      "src/sync/netEndpoints.ts": {
+        "lines": 85,
+        "branches": 70
+      },
       "src/p2p/handshake/AuthenticationHandshake.ts": {
         "lines": 90,
         "branches": 85

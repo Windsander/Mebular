@@ -650,10 +650,12 @@ function runtimeCompareLine(field) {
   const effective = CONFIG_EFFECTIVE[field.path]?.(state.settings);
   if (effective === undefined) return '';
   const raw = cfgGet(currentConfigFile(), field.path);
-  const same = JSON.stringify(raw ?? null) === JSON.stringify(effective ?? null);
-  const mismatch = raw !== undefined && !same;
-  return `<p class="cfg-help muted">已配置 ${escapeHtml(formatRuntimeValue(raw))} / 实际 ${escapeHtml(formatRuntimeValue(effective))}`
-    + (mismatch ? ' <span class="cfg-warn">⚠ 不一致：写入值未生效，实际以运行时为准</span>' : '')
+  const mismatch = raw !== undefined && JSON.stringify(raw ?? null) !== JSON.stringify(effective ?? null);
+  return `<p class="cfg-effective${mismatch ? ' is-mismatch' : ''}">`
+    + `<span><span class="cfg-eff-key">已配置</span> ${escapeHtml(formatRuntimeValue(raw))}</span>`
+    + '<span>/</span>'
+    + `<span><span class="cfg-eff-key">实际</span> ${escapeHtml(formatRuntimeValue(effective))}</span>`
+    + (mismatch ? '<span class="cfg-warn">⚠ 不一致：写入值未生效，实际以运行时为准</span>' : '')
     + '</p>';
 }
 
@@ -688,18 +690,45 @@ function renderCfgField(field) {
   const defaultTag = initial.isDefault ? '<span class="cfg-default">默认</span>' : '';
   return `<div class="cfg-row">
     <label class="cfg-label" for="${id}">${escapeHtml(field.label)}${defaultTag}</label>
-    <div class="cfg-control">${control}</div>
-    <p class="cfg-help muted">${escapeHtml(field.help ?? '')}${field.warn ? ` <span class="cfg-warn">⚠ ${escapeHtml(field.warn)}</span>` : ''}</p>
-    ${runtimeCompareLine(field)}
+    <div class="cfg-control">${control}
+      <p class="cfg-help muted">${escapeHtml(field.help ?? '')}${field.warn ? ` <span class="cfg-warn">⚠ ${escapeHtml(field.warn)}</span>` : ''}</p>
+      ${runtimeCompareLine(field)}
+    </div>
   </div>`;
 }
 
-function kvRows(pairs) {
-  return `<dl class="settings-kv">${pairs.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${v}</dd>`).join('')}</dl>`;
+// 单一行模板：label | value | action 三列固定（动作列不撑高行；空值统一 muted 占位）
+function kvRow(label, value, copyPayload = null) {
+  return { label, value, copyPayload };
 }
 
 function copyRowOf(label, value) {
-  return [label, `<div class="copyable"><code>${escapeHtml(value)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(value)}">复制</button></div>`];
+  return kvRow(label, `<code>${escapeHtml(value)}</code>`, value);
+}
+
+function emptyRowOf(label, text) {
+  return kvRow(label, `<span class="kv-empty">${escapeHtml(text)}</span>`, null);
+}
+
+function kvRows(rows) {
+  const cells = rows.map((row) => `<dt>${escapeHtml(row.label)}</dt>`
+    + `<dd class="kv-value">${row.value}</dd>`
+    + `<dd class="kv-action">${row.copyPayload === null || row.copyPayload === undefined
+      ? ''
+      : `<button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(row.copyPayload)}">复制</button>`}</dd>`).join('');
+  return `<dl class="settings-kv">${cells}</dl>`;
+}
+
+// 主值 + 次行（已配置 / 实际）；一致=暗色，不一致=警示色；长值换行悬挂在值列
+function valueWithEffective(mainHtml, { configured, effective }) {
+  const mismatch = configured !== undefined && JSON.stringify(configured ?? null) !== JSON.stringify(effective ?? null);
+  return `<span class="kv-main">${mainHtml}</span>`
+    + `<span class="kv-sub${mismatch ? ' is-mismatch' : ''}">`
+    + `<span>已配置 ${escapeHtml(formatRuntimeValue(configured))}</span>`
+    + `<span>/</span>`
+    + `<span>实际 ${escapeHtml(formatRuntimeValue(effective))}</span>`
+    + (mismatch ? '<span class="cfg-warn">⚠ 不一致：写入值未生效，实际以运行时为准</span>' : '')
+    + '</span>';
 }
 
 function cfgActionsBlock() {
@@ -806,12 +835,12 @@ function renderDiagnostics() {
     <section class="settings-section" data-info-block="version">
       <h3>版本与服务状态 <span class="badge badge-muted">只读</span></h3>
       ${kvRows([
-        ['serve', health ? escapeHtml(`${health.name ?? 'mebular'} @ ${health.version ?? '—'}`) : '（未取到 /healthz）'],
-        ['服务状态', health?.status ? escapeHtml(String(health.status)) : '—'],
-        ['MCP 监听', `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`],
-        ['TLS', s.mcp.tls ? '已启用' : '未启用（明文 HTTP）'],
-        ['控制台写入', state.features.writes ? '可写（写需 memory.admin scope + CSRF）' : '只读（D1 / MEBULAR_CONSOLE_WRITES=0）'],
-        ['P2P', s.network.enabled ? '已启用' : '未启用'],
+        kvRow('serve', health ? escapeHtml(`${health.name ?? 'mebular'} @ ${health.version ?? '—'}`) : '（未取到 /healthz）'),
+        kvRow('服务状态', health?.status ? escapeHtml(String(health.status)) : '—'),
+        kvRow('MCP 监听', `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`),
+        kvRow('TLS', s.mcp.tls ? '已启用' : '未启用（明文 HTTP）'),
+        kvRow('控制台写入', state.features.writes ? '可写（写需 memory.admin scope + CSRF）' : '只读（D1 / MEBULAR_CONSOLE_WRITES=0）'),
+        kvRow('P2P', s.network.enabled ? '已启用' : '未启用'),
       ])}
     </section>
 
@@ -831,10 +860,10 @@ function renderDiagnostics() {
     <section class="settings-section" data-info-block="recovery">
       <h3>恢复指引 <span class="crt-tag">手改 config.json 后重启</span></h3>
       ${kvRows([
-        ['auth 误切', '<b>bearer</b>：在页面粘贴 <code>mebular token grant --scope memory.read,memory.admin</code> 的 token 即可自救；<b>oauth</b>：静态 token 会 401 invalid token、<code>/register</code> 默认 404（缺 MEBULAR_OAUTH_ADMIN_SECRET / MEBULAR_OAUTH_REGISTER_SECRET），控制台内无法自救 —— 编辑 config.json 把 <code>mcp.http.auth</code> 改回 <code>none</code>（仅回环）后重启 <code>mebular serve</code>。'],
-        ['host 误设', '把 <code>mcp.http.host</code> 设为非回环（如 0.0.0.0）时必须 <code>auth≠none</code> 且启用 TLS 并配证书，否则 serve 启动即拒绝（组合校验也会在保存前 400）：编辑 config.json 改回 <code>127.0.0.1</code>，或补齐 auth+TLS+证书三件套后重启。'],
-        ['缺证书', '<code>mcp.http.tls=true</code> 但缺 <code>tlsKey</code>/<code>tlsCert</code> → 启动即报 <code>MCP_INSECURE_CONFIG</code>（不静默降级）：补证书路径或关闭 tls。'],
-        ['控制台打不开', '先看 <code>mebular status</code> 与 serve 日志：<code>MCP_STORAGE_LOCKED</code> = 已有实例持锁（复用或停掉它）；<code>MCP_INSECURE_CONFIG</code> = host/auth/tls 组合非法。'],
+        kvRow('auth 误切', '<b>bearer</b>：在页面粘贴 <code>mebular token grant --scope memory.read,memory.admin</code> 的 token 即可自救；<b>oauth</b>：静态 token 会 401 invalid token、<code>/register</code> 默认 404（缺 MEBULAR_OAUTH_ADMIN_SECRET / MEBULAR_OAUTH_REGISTER_SECRET），控制台内无法自救 —— 编辑 config.json 把 <code>mcp.http.auth</code> 改回 <code>none</code>（仅回环）后重启 <code>mebular serve</code>。'),
+        kvRow('host 误设', '把 <code>mcp.http.host</code> 设为非回环（如 0.0.0.0）时必须 <code>auth≠none</code> 且启用 TLS 并配证书，否则 serve 启动即拒绝（组合校验也会在保存前 400）：编辑 config.json 改回 <code>127.0.0.1</code>，或补齐 auth+TLS+证书三件套后重启。'),
+        kvRow('缺证书', '<code>mcp.http.tls=true</code> 但缺 <code>tlsKey</code>/<code>tlsCert</code> → 启动即报 <code>MCP_INSECURE_CONFIG</code>（不静默降级）：补证书路径或关闭 tls。'),
+        kvRow('控制台打不开', '先看 <code>mebular status</code> 与 serve 日志：<code>MCP_STORAGE_LOCKED</code> = 已有实例持锁（复用或停掉它）；<code>MCP_INSECURE_CONFIG</code> = host/auth/tls 组合非法。'),
       ])}
     </section>
   `;
@@ -856,46 +885,47 @@ function renderAbout() {
   });
   const addrRows = s.identity.multiaddrs.length
     ? s.identity.multiaddrs.map((a) => copyRowOf('multiaddr', a))
-    : [['multiaddr', '<span class="muted">（未启用 P2P，无监听地址）</span>']];
+    : [emptyRowOf('multiaddr', '（未启用 P2P，无监听地址）')];
   body.innerHTML = `
     <section class="settings-section" data-info-block="identity">
       <h3>身份与存储 <span class="badge badge-muted">只读</span></h3>
       ${kvRows([
         copyRowOf('deviceId', s.identity.deviceId),
-        ...(s.identity.name ? [['名称', escapeHtml(s.identity.name)]] : []),
-        ['身份模式', s.identity.mode === 'delegated'
+        ...(s.identity.name ? [kvRow('名称', escapeHtml(s.identity.name))] : []),
+        kvRow('身份模式', s.identity.mode === 'delegated'
           ? 'delegated（委派证书链，无主私钥）'
-          : 'root（持有用户主密钥，可签发任意设备）'],
+          : 'root（持有用户主密钥，可签发任意设备）'),
         ...(s.identity.peerId ? [copyRowOf('peerId', s.identity.peerId)] : []),
         ...addrRows,
         copyRowOf('storagePath', s.storage.path ?? '—'),
-        ['storageAdapter', escapeHtml(s.storage.adapter)],
-        ['加密级别', `${escapeHtml(s.encryption.level)}${s.encryption.atRest ? '（静态加密生效）' : ''}`],
+        kvRow('storageAdapter', escapeHtml(s.storage.adapter)),
+        kvRow('加密级别', `${escapeHtml(s.encryption.level)}${s.encryption.atRest ? '（静态加密生效）' : ''}`),
       ])}
     </section>
 
     <section class="settings-section" data-info-block="syncRate">
       <h3>同步节奏 <span class="badge badge-muted">只读 · 默认常开，不建议关闭</span></h3>
-      ${kvRows(CONFIG_READONLY_FIELDS.map((field) => {
-        const effective = CONFIG_EFFECTIVE[field.path]?.(s);
-        const raw = cfgGet(currentConfigFile(), field.path);
-        const mismatch = raw !== undefined && JSON.stringify(raw ?? null) !== JSON.stringify(effective ?? null);
-        return [field.label, `${escapeHtml(formatRuntimeValue(effective))}<span class="cfg-help muted">（已配置 ${escapeHtml(formatRuntimeValue(raw))} / 实际 ${escapeHtml(formatRuntimeValue(effective))}${mismatch ? ' <span class="cfg-warn">⚠ 不一致</span>' : ''}）</span>`];
-      }))}
+      ${kvRows(CONFIG_READONLY_FIELDS.map((field) => kvRow(
+        field.label,
+        valueWithEffective(escapeHtml(formatRuntimeValue(CONFIG_EFFECTIVE[field.path]?.(s))), {
+          configured: cfgGet(currentConfigFile(), field.path),
+          effective: CONFIG_EFFECTIVE[field.path]?.(s),
+        }),
+      )))}
       <p class="muted" style="font-size:11px">默认常开，不建议关闭；如需改动请手工编辑 config.json 的 <code>sync.autoSync</code> / <code>sync.pushOnWrite</code>。</p>
     </section>
 
     <section class="settings-section" data-info-block="runtime">
       <h3>运行状态 <span class="badge badge-muted">只读</span>${listenAlarm.length ? '<span class="crt-tag crt-tag-warn">公网监听</span>' : ''}</h3>
       ${kvRows([
-        ['P2P', s.network.enabled ? '已启用' : '未启用'],
-        ['实际监听', escapeHtml(s.network.listen.join(', ') || '—')],
-        ['生效白名单', (s.sync.peerWhitelist ?? []).length ? escapeHtml(s.sync.peerWhitelist.join(', ')) : '未启用（按授权 / 成员制判定）'],
-        ['MCP 监听', `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`],
-        ['TLS', s.mcp.tls ? `已启用（key=${s.mcp.tlsKeyConfigured ? '有' : '缺'} / cert=${s.mcp.tlsCertConfigured ? '有' : '缺'}）` : '未启用（明文 HTTP）'],
-        ['加入服务', s.join?.enabled ? `已启用 · ${escapeHtml(String(s.join.bind))}:${escapeHtml(String(s.join.port))}` : '未启用'],
-        ['语义召回', `${s.semantic.enabled ? '已启用' : '未启用'}（minScore ${s.semantic.minScore}）`],
-        ['兼容白名单', s.sync.legacyPeerAllowList.length ? escapeHtml(s.sync.legacyPeerAllowList.join(', ')) : '空（建议迁移到图上授权）'],
+        kvRow('P2P', s.network.enabled ? '已启用' : '未启用'),
+        kvRow('实际监听', escapeHtml(s.network.listen.join(', ') || '—')),
+        kvRow('生效白名单', (s.sync.peerWhitelist ?? []).length ? escapeHtml(s.sync.peerWhitelist.join(', ')) : '未启用（按授权 / 成员制判定）'),
+        kvRow('MCP 监听', `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`),
+        kvRow('TLS', s.mcp.tls ? `已启用（key=${s.mcp.tlsKeyConfigured ? '有' : '缺'} / cert=${s.mcp.tlsCertConfigured ? '有' : '缺'}）` : '未启用（明文 HTTP）'),
+        kvRow('加入服务', s.join?.enabled ? `已启用 · ${escapeHtml(String(s.join.bind))}:${escapeHtml(String(s.join.port))}` : '未启用'),
+        kvRow('语义召回', `${s.semantic.enabled ? '已启用' : '未启用'}（minScore ${s.semantic.minScore}）`),
+        kvRow('兼容白名单', s.sync.legacyPeerAllowList.length ? escapeHtml(s.sync.legacyPeerAllowList.join(', ')) : '空（建议迁移到图上授权）'),
       ])}
       ${listenAlarm.length ? `<p class="crt-warn">⚠ 监听地址含非回环（${escapeHtml(listenAlarm.join(', '))}）：建议改绑回环 / LAN，或经 relay 并仅以防火墙放行已授权对端。</p>` : ''}
     </section>
@@ -903,8 +933,8 @@ function renderAbout() {
     <section class="settings-section" data-info-block="issuer">
       <h3>引导签发者（策略权威）<span class="badge ${isIssuer ? 'badge-issuer' : 'badge-muted'}">${isIssuer ? '本机已生效' : '本机未声明'}</span></h3>
       ${kvRows([
-        ['生效集合', escapeHtml(s.policyIssuers.join(', ') || '—')],
-        ['配置 bootstrap', escapeHtml(s.sync.configPolicyIssuers.join(', ') || '—')],
+        kvRow('生效集合', escapeHtml(s.policyIssuers.join(', ') || '—')),
+        kvRow('配置 bootstrap', escapeHtml(s.sync.configPolicyIssuers.join(', ') || '—')),
       ])}
       <p class="muted" style="font-size:11px">声明动作在「设置 → 高级」；图上声明随 __policy__ 同步，受 device_revoke 排斥。</p>
     </section>
@@ -913,10 +943,10 @@ function renderAbout() {
       <h3>舰队摘要（Fleet） <span class="badge badge-muted">只读</span></h3>
       ${s.fleet?.configured
         ? kvRows([
-          ['任务域', s.fleet.namespace ? `<code>${escapeHtml(s.fleet.namespace)}</code>` : '(未设置)'],
-          ['已登记对端', String(s.fleet.peers ?? 0)],
-          ['本机 Agent', String(s.fleet.agents ?? 0)],
-          ['配置', escapeHtml(s.fleet.path ?? 'fleet.config.json')],
+          kvRow('任务域', s.fleet.namespace ? `<code>${escapeHtml(s.fleet.namespace)}</code>` : '(未设置)'),
+          kvRow('已登记对端', String(s.fleet.peers ?? 0)),
+          kvRow('本机 Agent', String(s.fleet.agents ?? 0)),
+          kvRow('配置', escapeHtml(s.fleet.path ?? 'fleet.config.json')),
         ])
         : '<p class="muted" style="font-size:11px">尚未配置舰队。</p>'}
       <p class="muted" style="font-size:11px">任务 ≠ 记忆订阅：任务树以发起节点为根派发，远端 Agent 执行后回传结果（有向无环树；经记忆通道传输，但不是共享记忆池）。任务配置由 <code>fleet</code> CLI 管理（<code>fleet.config.json</code>）。${s.fleet?.configured ? '' : ' 上车：<code>fleet quickstart --daemon --dir ~/.mebular --device &lt;ID&gt;</code>'}</p>

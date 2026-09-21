@@ -1,4 +1,14 @@
 :root {
+  /* 排版 token（行模板 / 栅格 / 尺寸；灰阶与 CRT 绿主题不变） */
+  --row-label-w: 150px;   /* kv 与 cfg 共用同一 label 列宽 */
+  --kv-action-w: 56px;    /* 动作（复制）列固定宽，按钮不撑高行 */
+  --row-gap: 10px;        /* 列间距 */
+  --row-gap-y: 6px;       /* 行间距 */
+  --control-h: 26px;      /* 控件基准高（label 行高与控件对齐） */
+  --btn-h: 27px;
+  --section-gap: 10px;    /* section 垂直间距 */
+  --group-gap: 8px;       /* 组内间距 */
+  --field-gap: 2px;       /* label/control 与说明行之间 */
   --bg: #05070f;
   --bg-panel: #0b1020;
   --bg-panel-2: #0e1428;
@@ -339,9 +349,37 @@ select {
 .modal-note { font-size: 12px; line-height: 1.6; margin: 6px 0 10px; }
 .settings-section { border-top: 1px solid var(--border); padding: 10px 0; }
 .settings-section h3 { margin: 0 0 8px; font-size: 13px; display: flex; align-items: center; gap: 8px; }
-.settings-kv { display: grid; grid-template-columns: 140px 1fr; gap: 6px 10px; font-size: 12px; }
-.settings-kv dt { color: var(--muted); }
-.settings-kv dd { margin: 0; overflow-wrap: anywhere; }
+.settings-kv {
+  display: grid;
+  grid-template-columns: var(--row-label-w) minmax(0, 1fr) var(--kv-action-w);
+  gap: var(--row-gap-y) var(--row-gap);
+  align-items: start;
+  font-size: 12px;
+}
+.settings-kv dt {
+  color: var(--muted);
+  line-height: var(--control-h);
+  min-height: var(--control-h);
+}
+.settings-kv dd { margin: 0; overflow-wrap: anywhere; min-width: 0; }
+.settings-kv .kv-value { line-height: var(--control-h); min-height: var(--control-h); }
+.settings-kv .kv-value code { color: var(--accent); word-break: break-all; }
+.settings-kv .kv-action { display: flex; align-items: center; justify-content: flex-end; min-height: var(--control-h); }
+.settings-kv .kv-action .btn { height: var(--control-h); padding: 0 8px; line-height: 1; }
+.settings-kv .kv-empty { color: var(--muted); }
+.settings-kv .kv-main { display: block; }
+.settings-kv .kv-sub {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 6px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.settings-kv .kv-sub.is-mismatch { color: #ffd27a; }
+.settings-kv .kv-sub.is-mismatch .cfg-warn { color: #ffd27a; }
+.crt-surface .settings-kv .kv-sub { color: rgba(140, 255, 200, 0.45); }
+.crt-surface .settings-kv .kv-sub.is-mismatch { color: #ffd27a; }
 .snippet { background: rgba(5, 8, 16, 0.85); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 11px; line-height: 1.5; overflow: auto; max-height: 200px; }
 .badge-issuer { border-color: rgba(230, 159, 0, 0.55); color: #ffd27a; }
 
@@ -728,15 +766,36 @@ select {
 .cfg-path { font-size: 11px; margin: 0 0 8px; }
 .cfg-path code { color: var(--crt); }
 .cfg-state { margin-left: auto; font-size: 11px; color: #ffd27a; letter-spacing: 1px; }
-.cfg-group { margin: 10px 0 2px; }
-.cfg-group h4 { margin: 0 0 2px; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: rgba(150, 255, 205, 0.72); }
-.cfg-row { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 2px 10px; padding: 5px 0; }
-.cfg-label { color: var(--crt-dim); font-size: 12px; padding-top: 5px; }
-.cfg-control { display: flex; align-items: center; gap: 8px; }
+.cfg-group { margin: var(--section-gap) 0 var(--field-gap); }
+.cfg-group h4 { margin: 0 0 var(--field-gap); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: rgba(150, 255, 205, 0.72); }
+.cfg-row {
+  display: grid;
+  grid-template-columns: var(--row-label-w) minmax(0, 1fr);
+  gap: 0 var(--row-gap);
+  align-items: start;
+  padding: var(--row-gap-y) 0 0;
+}
+.cfg-label { color: var(--crt-dim); font-size: 12px; line-height: var(--control-h); min-height: var(--control-h); }
+.cfg-control { display: flex; flex-wrap: wrap; align-items: center; gap: var(--field-gap) 8px; min-width: 0; min-height: var(--control-h); }
 .cfg-control .cfg-input,
-.cfg-control select { width: 100%; max-width: 460px; font-size: 12px; }
-.cfg-help { grid-column: 2; margin: 0; font-size: 10.5px; line-height: 1.5; }
+.cfg-control select { width: 100%; max-width: none; font-size: 12px; }
+.cfg-control .cfg-toggle { order: 0; }
+.cfg-help { flex: 1 1 100%; margin: 0; font-size: 10.5px; line-height: 1.5; }
 .cfg-warn { color: #ffd27a; }
+/* 双值行：结构化（已配置 X / 实际 Y）；一致=暗色，不一致=警示色；优先不换行 */
+.cfg-effective {
+  flex: 1 1 100%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 8px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--crt-dim);
+  margin: 0;
+}
+.cfg-effective .cfg-eff-key { color: var(--crt-dim); opacity: 0.85; }
+.cfg-effective.is-mismatch { color: #ffd27a; }
+.cfg-effective.is-mismatch .cfg-eff-key { color: #ffd27a; }
 .cfg-raw { margin: 4px 0 8px; }
 .cfg-raw summary { cursor: pointer; color: var(--crt-dim); font-size: 11px; margin-bottom: 6px; }
 .cfg-raw .snippet { max-height: 260px; }
@@ -804,11 +863,34 @@ select {
 .settings-tab:hover { color: #dbe9ff; }
 .settings-tab.is-active { color: var(--crt-bright, #9dffcf); border-color: var(--border); background: rgba(10, 16, 32, 0.55); }
 .settings-panel[hidden] { display: none; }
-.task-cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
-.task-card { border: 1px solid var(--border); border-radius: 10px; background: rgba(10, 16, 32, 0.55); padding: 10px 12px; }
+.task-cards { display: grid; gap: var(--section-gap); grid-template-columns: minmax(0, 1fr); }
+.task-card {
+  /* 用 outline（不参与布局）代替 border：保证常用/高级两 Tab 的 control 左边界完全一致 */
+  border: none;
+  outline: 1px solid var(--border);
+  outline-offset: -1px;
+  border-radius: var(--radius);
+  background: rgba(10, 16, 32, 0.55);
+  padding: var(--section-gap) 0;
+}
 .task-card-danger { border-color: rgba(214, 90, 40, 0.5); }
 .task-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
 .task-card-head h4 { margin: 0; font-size: 13px; }
 .task-card-desc { font-size: 11px; margin: 0 0 8px; }
 .cfg-actions { align-items: center; }
 .cfg-state { color: var(--muted); font-size: 11px; }
+
+/* ---------- 响应式：≤760px 行模板转为上下布局（无横向滚动） ---------- */
+@media (max-width: 760px) {
+  .settings-kv {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--field-gap);
+  }
+  .settings-kv dt { min-height: 0; line-height: 1.4; }
+  .settings-kv .kv-value { line-height: 1.5; min-height: 0; }
+  .settings-kv .kv-action { justify-content: flex-start; min-height: 0; }
+  .cfg-row { grid-template-columns: minmax(0, 1fr); }
+  .cfg-label { line-height: 1.4; min-height: 0; }
+  .settings-kv dd, .cfg-help, .cfg-effective, .snippet { overflow-wrap: anywhere; }
+  .modal-box { max-width: 100%; }
+}

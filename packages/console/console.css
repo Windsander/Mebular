@@ -792,3 +792,23 @@ select {
 #device-card .card-advanced[open] summary::before { transform: rotate(90deg); }
 #device-card .card-advanced summary:hover { color: #9dffcf; }
 #device-card .card-advanced .card-actions { margin-top: 4px; padding-bottom: 2px; }
+
+/* ---------- 设置页 IA：Tab / 任务卡 / 关于本机 ---------- */
+.badge-button { cursor: pointer; font: inherit; background: transparent; }
+.badge-button:hover { border-color: #2c5c8f; color: #dbe9ff; }
+.settings-tabs { display: flex; gap: 6px; border-bottom: 1px solid var(--border); margin: 4px 0 10px; }
+.settings-tab {
+  background: transparent; border: 1px solid transparent; border-bottom: none;
+  color: var(--muted); font: inherit; font-size: 12px; padding: 6px 12px; cursor: pointer; border-radius: 8px 8px 0 0;
+}
+.settings-tab:hover { color: #dbe9ff; }
+.settings-tab.is-active { color: var(--crt-bright, #9dffcf); border-color: var(--border); background: rgba(10, 16, 32, 0.55); }
+.settings-panel[hidden] { display: none; }
+.task-cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+.task-card { border: 1px solid var(--border); border-radius: 10px; background: rgba(10, 16, 32, 0.55); padding: 10px 12px; }
+.task-card-danger { border-color: rgba(214, 90, 40, 0.5); }
+.task-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.task-card-head h4 { margin: 0; font-size: 13px; }
+.task-card-desc { font-size: 11px; margin: 0 0 8px; }
+.cfg-actions { align-items: center; }
+.cfg-state { color: var(--muted); font-size: 11px; }

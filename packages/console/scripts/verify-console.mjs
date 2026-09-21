@@ -272,7 +272,7 @@ try {
   check('/console 返回控制台页面', indexText.includes('Mebular 控制台'));
   check('/console 下发 CSRF cookie 与响应头', (index.headers.get('set-cookie') ?? '').includes('mebular_csrf=') && Boolean(index.headers.get('x-mebular-csrf')));
 
-  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript'], ['nebula.js', 'text/javascript'], ['stars.js', 'text/javascript']]) {
+  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['settings-ia.js', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript'], ['nebula.js', 'text/javascript'], ['stars.js', 'text/javascript']]) {
     const res = await fetch(`http://127.0.0.1:${port}/console/${file}`);
     check(`静态资源 /console/${file} 200`, res.status === 200 && (res.headers.get('content-type') ?? '').includes(mime), `status=${res.status}`);
   }
@@ -1036,6 +1036,52 @@ try {
       'token grant',                 // F-C7 auth 误切恢复步骤
     ];
     check('F-C4 文案/工具面诚实化（oauth/semantic/joinService.bind/host/TLS）', needed.every((token) => consoleSrc.includes(token)), needed.filter((t) => !consoleSrc.includes(t)).join(','));
+  }
+
+  // ---------- IA（设置页信息架构：常用/高级/诊断 + 关于本机） ----------
+  {
+    const ia = await import('../settings-ia.js');
+    const HOMES = new Set(['common', 'advanced', 'about', 'diagnostics']);
+    const commonFields = ia.IA_COMMON_FIELDS;
+    check(`IA 常用恰 6 字段（实得 ${commonFields.length}）`, commonFields.length === 6, commonFields.join(', '));
+
+    const editorFaces = new Set([...ia.IA_COMMON_FIELDS, ...ia.IA_ADVANCED_FIELDS]);
+    check('IA 同步节奏（autoSync/pushOnWrite）不在任何编辑面（只读进「关于本机」）',
+      !editorFaces.has('sync.autoSync') && !editorFaces.has('sync.pushOnWrite')
+        && ia.IA_MIGRATION['sync.autoSync'] === 'about' && ia.IA_MIGRATION['sync.pushOnWrite'] === 'about'
+        && ia.IA_INFO_BLOCKS.syncRate === 'about',
+      `编辑面命中=${[...editorFaces].filter((x) => x === 'sync.autoSync' || x === 'sync.pushOnWrite').join(',') || '无'}`);
+
+    const homesOf = (path) => [ia.IA_MIGRATION[path]].filter((home) => HOMES.has(home));
+    const pathsWithoutHome = ia.IA_EDITOR_PATHS.filter((path) => homesOf(path).length !== 1);
+    const infoWithoutHome = Object.keys(ia.IA_INFO_BLOCKS).filter((block) => homesOf(block).length !== 1);
+    const rendered = new Set([...ia.IA_COMMON_FIELDS, ...ia.IA_ADVANCED_FIELDS]);
+    const drifted = ia.IA_EDITOR_PATHS.filter((path) => (ia.IA_MIGRATION[path] === 'common' || ia.IA_MIGRATION[path] === 'advanced') !== rendered.has(path));
+    check('IA 不丢项：24 可编辑 path + 9 信息块各有且仅有唯一去处（迁移表驱动）',
+      ia.IA_EDITOR_PATHS.length === 24 && pathsWithoutHome.length === 0 && infoWithoutHome.length === 0 && drifted.length === 0,
+      `editorPaths=${ia.IA_EDITOR_PATHS.length} 无去处=${pathsWithoutHome.join(',') || '无'} 信息块无去处=${infoWithoutHome.join(',') || '无'} 编辑面漂移=${drifted.join(',') || '无'}`);
+
+    const cardFields = ia.IA_TASK_CARDS.flatMap((card) => card.fields);
+    check('IA 常用四张任务卡共 6 字段且不重复（含 agent 危险卡）',
+      ia.IA_TASK_CARDS.length === 4 && cardFields.length === 6 && new Set(cardFields).size === 6
+        && ia.IA_TASK_CARDS.some((card) => card.id === 'agent' && card.danger === true),
+      `cards=${ia.IA_TASK_CARDS.length} fields=${cardFields.join(',')}`);
+
+    const htmlSrc = await readFile(join(consoleDir, 'index.html'), 'utf-8');
+    const consoleSrc2 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const tabIds = ia.IA_TABS.map((tab) => tab.id).join(',');
+    const tabLabels = ia.IA_TABS.map((tab) => tab.label).join(',');
+    check('IA Tab 结构（常用/高级/诊断）与「关于本机」入口齐备',
+      tabIds === 'common,advanced,diagnostics' && tabLabels === '常用,高级,诊断'
+        && htmlSrc.includes('id="self-badge"') && htmlSrc.includes('id="about"') && htmlSrc.includes('关于本机')
+        && consoleSrc2.includes('data-settings-tab') && consoleSrc2.includes('IA_TASK_CARDS')
+        && consoleSrc2.includes('IA_ADVANCED_FIELDS') && consoleSrc2.includes('IA_MIGRATION'),
+      `tabs=${tabIds} labels=${tabLabels}`);
+
+    const recoveryTokens = ['auth 误切', 'host 误设', '缺证书', '控制台打不开', 'MCP_INSECURE_CONFIG', 'MCP_STORAGE_LOCKED', 'token grant'];
+    check('IA 诊断恢复指引文案完整（auth 误切 / host 误设 / 缺证书 / 控制台打不开）',
+      recoveryTokens.every((token) => consoleSrc2.includes(token)),
+      recoveryTokens.filter((token) => !consoleSrc2.includes(token)).join(',') || '全部命中');
   }
 
   // ---------- 未知 API ----------

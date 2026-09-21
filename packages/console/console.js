@@ -8,6 +8,7 @@
 
 import { StarStage, namespaceColor, shortId } from './starfield.js';
 import { createWizardState, wizardReduce, selectedMemoryCount, WIZARD_STEPS } from './wizard.js';
+import { IA_TABS, IA_TASK_CARDS, IA_ADVANCED_FIELDS, IA_MIGRATION, IA_EDITOR_PATHS, IA_INFO_BLOCKS } from './settings-ia.js';
 
 const $ = (selector) => document.querySelector(selector);
 const params = new URLSearchParams(location.search);
@@ -24,6 +25,8 @@ const state = {
   namespaces: [],
   selectedNamespace: null,
   settings: null,
+  healthz: null,
+  settingsTab: 'common',
   rawConfig: null,
   cfgDraft: {},
   inviteToken: null,
@@ -97,8 +100,10 @@ async function refresh() {
     api('/admin/api/namespaces'),
     api('/admin/api/settings'),
     api('/admin/api/config'),
+    api('/healthz'),
   ]);
-  const [overview, devices, policy, namespaces, settings, configView] = results;
+  const [overview, devices, policy, namespaces, settings, configView, healthz] = results;
+  if (healthz && healthz.status === 'fulfilled') state.healthz = healthz.value;
   let firstError = null;
   if (overview.status === 'fulfilled') state.overview = overview.value;
   else firstError = overview.reason;
@@ -136,6 +141,7 @@ function render() {
   renderDomains();
   renderAudit();
   if (!$('#settings').hidden) renderSettings();
+  if (!$('#about').hidden) renderAbout();
   renderBanner();
   renderEmptyState();
 }
@@ -147,8 +153,10 @@ function renderTopbar() {
   const memEl = $('#memory-badge');
   if (state.overview?.device) {
     selfEl.textContent = `本机 · ${state.overview.device.deviceId}`;
+    selfEl.title = `打开「关于本机」（${state.overview.device.deviceId}）`;
   } else {
     selfEl.textContent = '本机 · …';
+    selfEl.title = '打开「关于本机」';
   }
   const online = Boolean(status?.running);
   onlineEl.textContent = online ? `${ICONS.online} P2P 已启用` : `${ICONS.offline} P2P 未启用`;
@@ -480,32 +488,38 @@ async function confirmHandoff() {
 
 // ---------- 设置卡：常用配置编辑器（curated；保存写入 config.json，需重启生效） ----------
 
-const CONFIG_EDITOR = [
-  { group: '记忆同步（M 数据域）', path: 'sync.autoSync', label: '自动同步', type: 'bool', help: '连接建立或事件到达时自动触发一次收敛' },
+// 已从 GUI 移除、仅在「关于本机 · 运行状态」只读展示（决策：默认常开，不建议关闭）
+const CONFIG_READONLY_FIELDS = [
+  { path: 'sync.autoSync', label: '自动同步', type: 'bool', help: '连接建立或事件到达时自动触发一次收敛' },
   { path: 'sync.pushOnWrite', label: '写入即推送', type: 'bool', help: '本机写入后即时推给对端（常驻模式默认开）' },
-  { path: 'sync.namespaces', label: '订阅数据域（M）', type: 'list', placeholder: 'default, notes', help: '订阅即承担数据义务：接收该域，并同步本机新增记忆。留空 = 参与全部。生效共享 = 对端授权 ∩ 对端在册（启用成员制时）∩ 本机订阅' },
-  { path: 'sync.peerWhitelist', label: '对端白名单', type: 'list', placeholder: 'device-B, device-C', help: '记忆通道的传输闸门：仅与列出的 deviceId 建立会话；留空 = 不启用（按授权 / 成员制判定）' },
-  { path: 'sync.antiEntropy.enabled', label: '周期反熵', type: 'bool', help: '周期性对账，弥补推送丢失' },
+];
+
+const CONFIG_EDITOR = [
+  { group: '记忆同步（M 数据域）', path: 'sync.namespaces', label: '订阅数据域（M）', type: 'list', placeholder: 'default, notes', help: '订阅即承担数据义务：接收该域，并同步本机新增记忆。留空 = 参与全部。生效共享 = 对端授权 ∩ 对端在册（启用成员制时）∩ 本机订阅' },
+  { group: '对端与签发者', path: 'sync.peerWhitelist', label: '对端白名单', type: 'list', placeholder: 'device-B, device-C', help: '记忆通道的传输闸门：仅与列出的 deviceId 建立会话；留空 = 不启用（按授权 / 成员制判定）' },
+  { group: '反熵与快照', path: 'sync.antiEntropy.enabled', label: '周期反熵', type: 'bool', help: '周期性对账，弥补推送丢失' },
   { path: 'sync.antiEntropy.intervalMs', label: '反熵间隔（分钟）', type: 'minutes', help: '默认 10 分钟（±20% 抖动）' },
   { path: 'sync.antiEntropy.jitterRatio', label: '反熵抖动比例', type: 'number', step: 0.05, min: 0, max: 1, help: '0 ~ 1，默认 0.2' },
   { path: 'sync.snapshotThreshold', label: '快照阈值（事件数）', type: 'number', min: 1, placeholder: '留空 = 不启用', help: '对端空时钟且缺失事件数 ≥ 阈值时改用物化快照' },
   { path: 'sync.policyIssuers', label: '引导签发者（配置）', type: 'list', placeholder: 'device-A', help: '可签发任意分区的引导设备；留空 = 仅图上声明' },
-  { group: '语义召回', path: 'semantic.enabled', label: '启用语义召回', type: 'bool', help: '需要本地 embedding 模型（可选依赖）', warn: '需可选依赖 @huggingface/transformers；缺失时自动降级关键词并告警' },
+  { group: '语义召回（可选依赖）', path: 'semantic.enabled', label: '启用语义召回', type: 'bool', help: '需要本地 embedding 模型（可选依赖）', warn: '需可选依赖 @huggingface/transformers；缺失时自动降级关键词并告警' },
   { path: 'semantic.minScore', label: '召回阈值', type: 'number', step: 0.05, min: 0, max: 1, help: '0 ~ 1，默认 0.2' },
   { group: '网络', path: 'network.enabled', label: '启用 P2P', type: 'bool', help: '关闭后仅本机离线使用' },
   { path: 'network.libp2p.listen', label: '监听地址', type: 'list', placeholder: '/ip4/127.0.0.1/tcp/14001', help: 'multiaddr 列表；留空 = 默认监听' },
-  { path: 'network.libp2p.relayServers', label: 'Relay 服务器', type: 'list', placeholder: '/ip4/<relay>/tcp/4001/p2p/<ID>', help: 'circuit relay，纯传输、可自托管' },
+  { group: 'Relay 与高级网络', path: 'network.libp2p.relayServers', label: 'Relay 服务器', type: 'list', placeholder: '/ip4/<relay>/tcp/4001/p2p/<ID>', help: 'circuit relay，纯传输、可自托管' },
   { path: 'network.libp2p.relayUnlimited', label: 'Relay 不做限额', type: 'bool', warn: '仅可信自托管 relay；公网暴露有风险' },
   { group: '设备接入（邀请新设备）', path: 'joinService.enabled', label: '启用加入服务', type: 'bool', help: '开启后可由「＋ 邀请新设备」签发一次性令牌（需重启）' },
-  { path: 'joinService.bind', label: '绑定地址', type: 'text', placeholder: '0.0.0.0', help: '令牌 join 端点绑定；默认即 0.0.0.0（quickstart 依赖 LAN 可达），仅可信 LAN 使用。它同时决定邀请令牌里写死的 endpoint：通配时自动取本机 LAN IPv4（无 LAN 时回环并在邀请面板告警）' },
+  { group: '设备接入（高级）', path: 'joinService.bind', label: '绑定地址', type: 'text', placeholder: '0.0.0.0', help: '令牌 join 端点绑定；默认即 0.0.0.0（quickstart 依赖 LAN 可达），仅可信 LAN 使用。它同时决定邀请令牌里写死的 endpoint：通配时自动取本机 LAN IPv4（无 LAN 时回环并在邀请面板告警）' },
   { path: 'joinService.port', label: '端口', type: 'number', min: 0, max: 65535, help: '默认 4002' },
-  { group: 'MCP 接入', path: 'mcp.http.host', label: '监听地址', type: 'text', placeholder: '127.0.0.1', help: '仅回环可 auth=none/无 TLS', warn: '非回环（如 0.0.0.0）必须 auth≠none 且启用 TLS 并配证书，否则 serve 拒绝启动' },
+  { group: 'MCP 接入（高级）', path: 'mcp.http.host', label: '监听地址', type: 'text', placeholder: '127.0.0.1', help: '仅回环可 auth=none/无 TLS', warn: '非回环（如 0.0.0.0）必须 auth≠none 且启用 TLS 并配证书，否则 serve 拒绝启动' },
   { path: 'mcp.http.port', label: '端口', type: 'number', min: 0, max: 65535 },
   { path: 'mcp.http.auth', label: '鉴权模式', type: 'select', options: [['none', 'none（仅回环）'], ['bearer', 'bearer（token）'], ['oauth', 'oauth']], warn: '切换后控制台 API 立即需要凭证：bearer 需先 `mebular token grant --scope memory.read,memory.admin` 并在页面粘贴 token（否则 401 missing bearer token）；oauth 需在 env 提供 MEBULAR_OAUTH_ADMIN_SECRET / MEBULAR_OAUTH_REGISTER_SECRET，否则 /register 默认 404、静态 token 会 401 invalid token，控制台内无法自救。误切后恢复：编辑 config.json 把 mcp.http.auth 改回 none（仅回环），或补齐凭证后重启 mebular serve' },
   { path: 'mcp.http.tls', label: '启用 TLS', type: 'bool', help: '真开关：true 但缺证书时 serve 启动即报错（不静默降级）；证书齐备即实际启用（与运行状态同一真值）' },
   { path: 'mcp.http.tlsKey', label: 'TLS 证书私钥路径', type: 'text', placeholder: '/path/to/key.pem', help: '与证书路径同时填写即实际启用 TLS（tls=true 则强制要求）' },
   { path: 'mcp.http.tlsCert', label: 'TLS 证书路径', type: 'text', placeholder: '/path/to/cert.pem', help: '与证书路径同时填写即实际启用 TLS（tls=true 则强制要求）' },
 ];
+
+const CONFIG_FIELDS_BY_PATH = new Map(CONFIG_EDITOR.map((field) => [field.path, field]));
 
 function cfgGet(obj, path) {
   return path.split('.').reduce((node, key) => (node && typeof node === 'object' ? node[key] : undefined), obj);
@@ -609,12 +623,6 @@ function collectConfigChanges(root) {
   return changes;
 }
 
-function collectConfigPatch(root) {
-  const patch = {};
-  for (const change of collectConfigChanges(root)) cfgSet(patch, change.path, change.value);
-  return patch;
-}
-
 // F-C8：显示口径以运行时生效值为准——raw 配置只作输入初值，凡有运行时真值的项都给出双行对照。
 const CONFIG_SHOW_EFFECTIVE = new Set([
   'mcp.http.host',
@@ -686,16 +694,58 @@ function renderCfgField(field) {
   </div>`;
 }
 
-function renderConfigEditor() {
-  const groups = [];
-  for (const field of CONFIG_EDITOR) {
-    if (field.group) groups.push({ name: field.group, fields: [] });
-    groups[groups.length - 1].fields.push(field);
-  }
-  return groups.map((g) => `<div class="cfg-group"><h4>${escapeHtml(g.name)}</h4>${g.fields.map(renderCfgField).join('')}</div>`).join('');
+function kvRows(pairs) {
+  return `<dl class="settings-kv">${pairs.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${v}</dd>`).join('')}</dl>`;
 }
 
-function renderSettings() {
+function copyRowOf(label, value) {
+  return [label, `<div class="copyable"><code>${escapeHtml(value)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(value)}">复制</button></div>`];
+}
+
+function cfgActionsBlock() {
+  return `<div class="domain-actions cfg-actions">
+    <button class="btn btn-small btn-crt" data-cfg-action="save" type="button" disabled>保存配置</button>
+    <button class="btn btn-small btn-crt" data-cfg-action="reset" type="button" disabled>撤销修改</button>
+    <span class="cfg-state"></span>
+  </div>
+  <p class="muted" style="font-size:11px">重启生效：重新运行 <code>mebular serve</code>；若已注册服务：<code>mebular service restart</code>。</p>`;
+}
+
+function fieldOf(path) {
+  const field = CONFIG_FIELDS_BY_PATH.get(path);
+  if (!field) throw new Error(`未知配置项：${path}`);
+  return field;
+}
+
+function renderEditor(paths) {
+  return `<div class="cfg-editor">${paths.map((path) => renderCfgField(fieldOf(path))).join('')}</div>`;
+}
+
+function renderTaskCards() {
+  return IA_TASK_CARDS.map((card) => `
+    <article class="task-card${card.danger ? ' task-card-danger' : ''}" data-task="${escapeHtml(card.id)}">
+      <header class="task-card-head">
+        <h4>${escapeHtml(card.title)}</h4>
+        ${card.danger ? '<span class="crt-tag crt-tag-warn">危险项</span>' : ''}
+      </header>
+      <p class="muted task-card-desc">${escapeHtml(card.desc)}</p>
+      ${renderEditor(card.fields)}
+    </article>`).join('');
+}
+
+function renderAdvanced() {
+  const groups = [];
+  for (const path of IA_ADVANCED_FIELDS) {
+    const field = fieldOf(path);
+    if (field.group) groups.push({ name: field.group, fields: [] });
+    if (groups.length === 0) groups.push({ name: '高级', fields: [] });
+    groups[groups.length - 1].fields.push(field.path);
+  }
+  return groups.map((group) => `<div class="cfg-group"><h4>${escapeHtml(group.name)}</h4>${renderEditor(group.fields)}</div>`).join('');
+}
+
+function renderSettings(activeTab = state.settingsTab ?? 'common') {
+  state.settingsTab = activeTab;
   const body = $('#settings-body');
   const prevActive = document.activeElement;
   const prevPath = prevActive?.dataset?.cfgPath ?? null;
@@ -706,106 +756,29 @@ function renderSettings() {
     body.innerHTML = '<p class="muted">设置加载中…（若持续如此，检查 serve 是否运行）</p>';
     return;
   }
+  const configPath = state.rawConfig?.path ?? 'config.json';
   const self = s.identity.deviceId;
   const isIssuer = Array.isArray(s.policyIssuers) && s.policyIssuers.includes(self);
-  const kv = (pairs) => `<dl class="settings-kv">${pairs.map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${v}</dd>`).join('')}</dl>`;
-  const copyRow = (label, value) => [label, `<div class="copyable"><code>${escapeHtml(value)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(value)}">复制</button></div>`];
-
-  const listenAlarm = (s.network.listen ?? []).filter((addr) => {
-    const m = addr.match(/\/(ip4|ip6|dns4|dns6|dns)\/([^/]+)/);
-    if (!m) return false;
-    return !['127.0.0.1', '::1', 'localhost'].includes(m[2]);
-  });
-  const addrRows = s.identity.multiaddrs.length
-    ? s.identity.multiaddrs.map((a) => copyRow('multiaddr', a))
-    : [['multiaddr', '<span class="muted">（未启用 P2P，无监听地址）</span>']];
-  const configPath = state.rawConfig?.path ?? 'config.json';
+  const tabButton = (tab) => `<button id="settings-tab-${tab.id}" class="settings-tab${tab.id === activeTab ? ' is-active' : ''}"`
+    + ` data-settings-tab="${tab.id}" type="button" role="tab" aria-selected="${tab.id === activeTab}" aria-controls="settings-panel-${tab.id}">${escapeHtml(tab.label)}</button>`;
+  const panel = (id, inner) => `<section id="settings-panel-${id}" class="settings-panel" data-settings-panel="${id}" role="tabpanel"`
+    + ` aria-labelledby="settings-tab-${id}"${id === activeTab ? '' : ' hidden'}>${inner}</section>`;
 
   body.innerHTML = `
-    <section class="settings-section">
-      <h3>常用配置 <span class="badge badge-muted">保存后需重启</span><span id="cfg-state" class="cfg-state"></span></h3>
-      <p class="cfg-path muted">修改写入 <code>${escapeHtml(configPath)}</code>（自动保留 .bak 备份）；设备身份 / 存储 / 加密等敏感项请手工编辑。</p>
-      <div id="cfg-editor">${renderConfigEditor()}</div>
-      <div class="domain-actions">
-        <button id="cfg-save" class="btn btn-small btn-crt" disabled>保存配置</button>
-        <button id="cfg-reset" class="btn btn-small btn-crt" disabled>撤销修改</button>
-      </div>
-      <p class="muted" style="font-size:11px">重启生效：重新运行 <code>mebular serve</code>；若已注册服务：<code>mebular service restart</code>。</p>
-    </section>
-
-    <section class="settings-section">
-      <h3>身份与存储 <span class="badge badge-muted">只读</span></h3>
-      ${kv([
-        copyRow('deviceId', s.identity.deviceId),
-        ...(s.identity.name ? [['名称', escapeHtml(s.identity.name)]] : []),
-        ['身份模式', s.identity.mode === 'delegated'
-          ? 'delegated（委派证书链，无主私钥）'
-          : 'root（持有用户主密钥，可签发任意设备）'],
-        ...(s.identity.peerId ? [copyRow('peerId', s.identity.peerId)] : []),
-        ...addrRows,
-        copyRow('storagePath', s.storage.path ?? '—'),
-        ['storageAdapter', escapeHtml(s.storage.adapter)],
-        ['加密级别', `${escapeHtml(s.encryption.level)}${s.encryption.atRest ? '（静态加密生效）' : ''}`],
-      ])}
-    </section>
-
-    <section class="settings-section">
-      <h3>引导签发者（策略权威）<span class="badge ${isIssuer ? 'badge-issuer' : 'badge-muted'}">${isIssuer ? '本机已生效' : '本机未声明'}</span></h3>
-      ${kv([
-        ['生效集合', escapeHtml(s.policyIssuers.join(', ') || '—')],
-        ['配置 bootstrap', escapeHtml(s.sync.configPolicyIssuers.join(', ') || '—')],
-      ])}
-      <div class="domain-actions">
-        <button id="declare-issuer" class="btn btn-small btn-crt" ${state.features.writes && !isIssuer && !MOCK ? '' : 'disabled'}>声明本机为引导签发者</button>
-      </div>
+    <div class="settings-tabs" role="tablist" aria-label="设置分区">${IA_TABS.map(tabButton).join('')}</div>
+    ${panel('common', `
+      <p class="cfg-path muted">修改写入 <code>${escapeHtml(configPath)}</code>（自动保留 .bak 备份）；设备身份 / 存储 / 加密等敏感项请手工编辑。只有需要时才动「Agent 怎么连我」。</p>
+      <div class="task-cards">${renderTaskCards()}</div>
+      ${cfgActionsBlock()}
+    `)}
+    ${panel('advanced', `
+      <p class="cfg-path muted">高级项默认收起：改动前请确认理解其安全含义（尤其监听地址、TLS 与 relay）。</p>
+      ${renderAdvanced()}
+      <div class="domain-actions"><button id="declare-issuer" class="btn btn-small btn-crt" type="button" ${state.features.writes && !isIssuer && !MOCK ? '' : 'disabled'}>声明本机为引导签发者</button></div>
       <p class="muted" style="font-size:11px">图上声明（签名事件，随 __policy__ 同步；受 device_revoke 排斥）。</p>
-    </section>
-
-    <section class="settings-section">
-      <h3>实际运行状态 <span class="badge badge-muted">只读</span>${listenAlarm.length ? '<span class="crt-tag crt-tag-warn">公网监听</span>' : ''}</h3>
-      ${kv([
-        ['P2P', s.network.enabled ? '已启用' : '未启用'],
-        ['实际监听', escapeHtml(s.network.listen.join(', ') || '—')],
-        ['生效白名单', (s.sync.peerWhitelist ?? []).length ? escapeHtml(s.sync.peerWhitelist.join(', ')) : '未启用（按授权 / 成员制判定）'],
-        ['MCP 监听', `${escapeHtml(s.mcp.host)}:${s.mcp.port} · auth=${escapeHtml(s.mcp.auth)}`],
-        ['TLS', s.mcp.tls ? `已启用（key=${s.mcp.tlsKeyConfigured ? '有' : '缺'} / cert=${s.mcp.tlsCertConfigured ? '有' : '缺'}）` : '未启用（明文 HTTP）'],
-        ['加入服务', s.join?.enabled ? `已启用 · ${escapeHtml(s.join.bind)}:${s.join.port}` : '未启用'],
-        ['语义召回', `${s.semantic.enabled ? '已启用' : '未启用'}（minScore ${s.semantic.minScore}）`],
-        ['兼容白名单', s.sync.legacyPeerAllowList.length ? escapeHtml(s.sync.legacyPeerAllowList.join(', ')) : '空（建议迁移到图上授权）'],
-      ])}
-      ${listenAlarm.length ? `<p class="crt-warn">⚠ 监听地址含非回环（${escapeHtml(listenAlarm.join(', '))}）：建议改绑回环 / LAN，或经 relay 并仅以防火墙放行已授权对端。</p>` : ''}
-    </section>
-
-    <section class="settings-section">
-      <h3>任务与舰队（Fleet） <span class="badge badge-muted">只读</span></h3>
-      ${s.fleet?.configured
-        ? kv([
-          ['任务域', s.fleet.namespace ? `<code>${escapeHtml(s.fleet.namespace)}</code>` : '(未设置)'],
-          ['已登记对端', String(s.fleet.peers ?? 0)],
-          ['本机 Agent', String(s.fleet.agents ?? 0)],
-          ['配置', escapeHtml(s.fleet.path ?? 'fleet.config.json')],
-        ])
-        : '<p class="muted" style="font-size:11px">尚未配置舰队。任务面与记忆订阅是两套机制：</p>'}
-      <p class="muted" style="font-size:11px">任务 ≠ 记忆订阅：任务树以发起节点为根派发，远端 Agent 执行后回传结果（有向无环树；经记忆通道传输，但不是共享记忆池）。任务配置由 <code>fleet</code> CLI 管理（<code>fleet.config.json</code>）。${s.fleet?.configured ? '' : ' 上车：<code>fleet quickstart --daemon --dir ~/.mebular --device &lt;ID&gt;</code>'}</p>
-    </section>
-
-    <section class="settings-section">
-      <h3>可用能力 <span class="badge badge-muted">MCP = CLI 同名</span></h3>
-      <p class="muted" style="font-size:11px;margin:0 0 8px">Agent 经 MCP、人类经 <code>mebular &lt;name&gt;</code> 调用同一套 handler；GUI 只做守护与参与配置，不新增操作。</p>
-      <div class="chip-wrap">${(s.tools ?? []).map((t) => `<span class="crt-tag">${escapeHtml(t)}</span>`).join(' ')}</div>
-    </section>
-
-    <section class="settings-section">
-      <h3>完整配置 <span class="badge badge-muted">只读</span></h3>
-      <p class="muted" style="font-size:11px">${escapeHtml(configPath)}${state.rawConfig?.parseError ? `（解析失败：${escapeHtml(state.rawConfig.parseError)}）` : ''}</p>
-      <details class="cfg-raw">
-        <summary>展开 / 收起</summary>
-        <pre class="snippet">${escapeHtml(JSON.stringify(currentConfigFile(), null, 2))}</pre>
-      </details>
-      <div class="domain-actions">
-        <button id="cfg-copy-all" class="btn btn-small btn-crt" type="button">复制完整配置</button>
-      </div>
-    </section>
+      ${cfgActionsBlock()}
+    `)}
+    ${panel('diagnostics', renderDiagnostics())}
   `;
 
   body.querySelectorAll('[data-copy]').forEach((button) => {
@@ -825,34 +798,188 @@ function renderSettings() {
   }
 }
 
+function renderDiagnostics() {
+  const s = state.settings;
+  const configPath = state.rawConfig?.path ?? 'config.json';
+  const health = state.healthz ?? null;
+  return `
+    <section class="settings-section" data-info-block="version">
+      <h3>版本与服务状态 <span class="badge badge-muted">只读</span></h3>
+      ${kvRows([
+        ['serve', health ? escapeHtml(`${health.name ?? 'mebular'} @ ${health.version ?? '—'}`) : '（未取到 /healthz）'],
+        ['服务状态', health?.status ? escapeHtml(String(health.status)) : '—'],
+        ['MCP 监听', `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`],
+        ['TLS', s.mcp.tls ? '已启用' : '未启用（明文 HTTP）'],
+        ['控制台写入', state.features.writes ? '可写（写需 memory.admin scope + CSRF）' : '只读（D1 / MEBULAR_CONSOLE_WRITES=0）'],
+        ['P2P', s.network.enabled ? '已启用' : '未启用'],
+      ])}
+    </section>
+
+    <section class="settings-section" data-info-block="rawConfig">
+      <h3>完整配置 <span class="badge badge-muted">只读</span></h3>
+      <p class="muted" style="font-size:11px">${escapeHtml(configPath)}${state.rawConfig?.parseError ? `（解析失败：${escapeHtml(state.rawConfig.parseError)}）` : ''}</p>
+      <details class="cfg-raw">
+        <summary>展开 / 收起</summary>
+        <pre class="snippet">${escapeHtml(JSON.stringify(currentConfigFile(), null, 2))}</pre>
+      </details>
+      <div class="domain-actions">
+        <button id="cfg-copy-all" class="btn btn-small btn-crt" type="button">复制完整配置</button>
+        <button id="cfg-download" class="btn btn-small btn-crt" type="button">下载 config.json</button>
+      </div>
+    </section>
+
+    <section class="settings-section" data-info-block="recovery">
+      <h3>恢复指引 <span class="crt-tag">手改 config.json 后重启</span></h3>
+      ${kvRows([
+        ['auth 误切', '<b>bearer</b>：在页面粘贴 <code>mebular token grant --scope memory.read,memory.admin</code> 的 token 即可自救；<b>oauth</b>：静态 token 会 401 invalid token、<code>/register</code> 默认 404（缺 MEBULAR_OAUTH_ADMIN_SECRET / MEBULAR_OAUTH_REGISTER_SECRET），控制台内无法自救 —— 编辑 config.json 把 <code>mcp.http.auth</code> 改回 <code>none</code>（仅回环）后重启 <code>mebular serve</code>。'],
+        ['host 误设', '把 <code>mcp.http.host</code> 设为非回环（如 0.0.0.0）时必须 <code>auth≠none</code> 且启用 TLS 并配证书，否则 serve 启动即拒绝（组合校验也会在保存前 400）：编辑 config.json 改回 <code>127.0.0.1</code>，或补齐 auth+TLS+证书三件套后重启。'],
+        ['缺证书', '<code>mcp.http.tls=true</code> 但缺 <code>tlsKey</code>/<code>tlsCert</code> → 启动即报 <code>MCP_INSECURE_CONFIG</code>（不静默降级）：补证书路径或关闭 tls。'],
+        ['控制台打不开', '先看 <code>mebular status</code> 与 serve 日志：<code>MCP_STORAGE_LOCKED</code> = 已有实例持锁（复用或停掉它）；<code>MCP_INSECURE_CONFIG</code> = host/auth/tls 组合非法。'],
+      ])}
+    </section>
+  `;
+}
+
+function renderAbout() {
+  const body = $('#about-body');
+  const s = state.settings;
+  if (!s) {
+    body.innerHTML = '<p class="muted">关于本机加载中…（若持续如此，检查 serve 是否运行）</p>';
+    return;
+  }
+  const self = s.identity.deviceId;
+  const isIssuer = Array.isArray(s.policyIssuers) && s.policyIssuers.includes(self);
+  const listenAlarm = (s.network.listen ?? []).filter((addr) => {
+    const m = addr.match(/\/(ip4|ip6|dns4|dns6|dns)\/([^/]+)/);
+    if (!m) return false;
+    return !['127.0.0.1', '::1', 'localhost'].includes(m[2]);
+  });
+  const addrRows = s.identity.multiaddrs.length
+    ? s.identity.multiaddrs.map((a) => copyRowOf('multiaddr', a))
+    : [['multiaddr', '<span class="muted">（未启用 P2P，无监听地址）</span>']];
+  body.innerHTML = `
+    <section class="settings-section" data-info-block="identity">
+      <h3>身份与存储 <span class="badge badge-muted">只读</span></h3>
+      ${kvRows([
+        copyRowOf('deviceId', s.identity.deviceId),
+        ...(s.identity.name ? [['名称', escapeHtml(s.identity.name)]] : []),
+        ['身份模式', s.identity.mode === 'delegated'
+          ? 'delegated（委派证书链，无主私钥）'
+          : 'root（持有用户主密钥，可签发任意设备）'],
+        ...(s.identity.peerId ? [copyRowOf('peerId', s.identity.peerId)] : []),
+        ...addrRows,
+        copyRowOf('storagePath', s.storage.path ?? '—'),
+        ['storageAdapter', escapeHtml(s.storage.adapter)],
+        ['加密级别', `${escapeHtml(s.encryption.level)}${s.encryption.atRest ? '（静态加密生效）' : ''}`],
+      ])}
+    </section>
+
+    <section class="settings-section" data-info-block="syncRate">
+      <h3>同步节奏 <span class="badge badge-muted">只读 · 默认常开，不建议关闭</span></h3>
+      ${kvRows(CONFIG_READONLY_FIELDS.map((field) => {
+        const effective = CONFIG_EFFECTIVE[field.path]?.(s);
+        const raw = cfgGet(currentConfigFile(), field.path);
+        const mismatch = raw !== undefined && JSON.stringify(raw ?? null) !== JSON.stringify(effective ?? null);
+        return [field.label, `${escapeHtml(formatRuntimeValue(effective))}<span class="cfg-help muted">（已配置 ${escapeHtml(formatRuntimeValue(raw))} / 实际 ${escapeHtml(formatRuntimeValue(effective))}${mismatch ? ' <span class="cfg-warn">⚠ 不一致</span>' : ''}）</span>`];
+      }))}
+      <p class="muted" style="font-size:11px">默认常开，不建议关闭；如需改动请手工编辑 config.json 的 <code>sync.autoSync</code> / <code>sync.pushOnWrite</code>。</p>
+    </section>
+
+    <section class="settings-section" data-info-block="runtime">
+      <h3>运行状态 <span class="badge badge-muted">只读</span>${listenAlarm.length ? '<span class="crt-tag crt-tag-warn">公网监听</span>' : ''}</h3>
+      ${kvRows([
+        ['P2P', s.network.enabled ? '已启用' : '未启用'],
+        ['实际监听', escapeHtml(s.network.listen.join(', ') || '—')],
+        ['生效白名单', (s.sync.peerWhitelist ?? []).length ? escapeHtml(s.sync.peerWhitelist.join(', ')) : '未启用（按授权 / 成员制判定）'],
+        ['MCP 监听', `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`],
+        ['TLS', s.mcp.tls ? `已启用（key=${s.mcp.tlsKeyConfigured ? '有' : '缺'} / cert=${s.mcp.tlsCertConfigured ? '有' : '缺'}）` : '未启用（明文 HTTP）'],
+        ['加入服务', s.join?.enabled ? `已启用 · ${escapeHtml(String(s.join.bind))}:${escapeHtml(String(s.join.port))}` : '未启用'],
+        ['语义召回', `${s.semantic.enabled ? '已启用' : '未启用'}（minScore ${s.semantic.minScore}）`],
+        ['兼容白名单', s.sync.legacyPeerAllowList.length ? escapeHtml(s.sync.legacyPeerAllowList.join(', ')) : '空（建议迁移到图上授权）'],
+      ])}
+      ${listenAlarm.length ? `<p class="crt-warn">⚠ 监听地址含非回环（${escapeHtml(listenAlarm.join(', '))}）：建议改绑回环 / LAN，或经 relay 并仅以防火墙放行已授权对端。</p>` : ''}
+    </section>
+
+    <section class="settings-section" data-info-block="issuer">
+      <h3>引导签发者（策略权威）<span class="badge ${isIssuer ? 'badge-issuer' : 'badge-muted'}">${isIssuer ? '本机已生效' : '本机未声明'}</span></h3>
+      ${kvRows([
+        ['生效集合', escapeHtml(s.policyIssuers.join(', ') || '—')],
+        ['配置 bootstrap', escapeHtml(s.sync.configPolicyIssuers.join(', ') || '—')],
+      ])}
+      <p class="muted" style="font-size:11px">声明动作在「设置 → 高级」；图上声明随 __policy__ 同步，受 device_revoke 排斥。</p>
+    </section>
+
+    <section class="settings-section" data-info-block="fleet">
+      <h3>舰队摘要（Fleet） <span class="badge badge-muted">只读</span></h3>
+      ${s.fleet?.configured
+        ? kvRows([
+          ['任务域', s.fleet.namespace ? `<code>${escapeHtml(s.fleet.namespace)}</code>` : '(未设置)'],
+          ['已登记对端', String(s.fleet.peers ?? 0)],
+          ['本机 Agent', String(s.fleet.agents ?? 0)],
+          ['配置', escapeHtml(s.fleet.path ?? 'fleet.config.json')],
+        ])
+        : '<p class="muted" style="font-size:11px">尚未配置舰队。</p>'}
+      <p class="muted" style="font-size:11px">任务 ≠ 记忆订阅：任务树以发起节点为根派发，远端 Agent 执行后回传结果（有向无环树；经记忆通道传输，但不是共享记忆池）。任务配置由 <code>fleet</code> CLI 管理（<code>fleet.config.json</code>）。${s.fleet?.configured ? '' : ' 上车：<code>fleet quickstart --daemon --dir ~/.mebular --device &lt;ID&gt;</code>'}</p>
+    </section>
+
+    <section class="settings-section" data-info-block="tools">
+      <h3>能力清单 <span class="badge badge-muted">${(s.tools ?? []).length} 工具 · MCP = CLI 同名</span></h3>
+      <p class="muted" style="font-size:11px;margin:0 0 8px">Agent 经 MCP、人类经 <code>mebular &lt;name&gt;</code> 调用同一套 handler；GUI 只做守护与参与配置，不新增操作。</p>
+      <div class="chip-wrap">${(s.tools ?? []).map((t) => `<span class="crt-tag">${escapeHtml(t)}</span>`).join(' ')}</div>
+    </section>
+  `;
+  body.querySelectorAll('[data-copy]').forEach((button) => {
+    button.addEventListener('click', () => copyText(button.dataset.copy, button));
+  });
+}
+
 function bindConfigEditor() {
-  const editor = $('#cfg-editor');
-  if (!editor) return;
-  const saveBtn = $('#cfg-save');
-  const resetBtn = $('#cfg-reset');
-  const stateEl = $('#cfg-state');
+  const editors = [...document.querySelectorAll('.cfg-editor')];
+  const saveBtns = [...document.querySelectorAll('[data-cfg-action="save"]')];
+  const resetBtns = [...document.querySelectorAll('[data-cfg-action="reset"]')];
+  const stateEls = [...document.querySelectorAll('.cfg-state')];
   const update = () => {
-    const dirty = collectConfigChanges(editor).map((c) => c.path);
-    saveBtn.disabled = dirty.length === 0;
-    resetBtn.disabled = dirty.length === 0;
-    stateEl.textContent = dirty.length === 0 ? '' : `未保存修改：${dirty.length} 项`;
-    stateEl.title = dirty.join('\n');
+    const paths = [...new Set(editors.flatMap((editor) => collectConfigChanges(editor)).map((c) => c.path))];
+    for (const btn of saveBtns) btn.disabled = paths.length === 0;
+    for (const btn of resetBtns) btn.disabled = paths.length === 0;
+    for (const el of stateEls) {
+      el.textContent = paths.length === 0 ? '' : `未保存修改：${paths.length} 项`;
+      el.title = paths.join('\n');
+    }
   };
-  editor.querySelectorAll('[data-cfg-path]').forEach((el) => {
-    const record = () => {
-      state.cfgDraft[el.dataset.cfgPath] = el.type === 'checkbox' ? el.checked : el.value;
-      update();
-    };
-    el.addEventListener(el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input', record);
-  });
-  saveBtn.addEventListener('click', saveConfigEditor);
-  resetBtn.addEventListener('click', () => {
-    state.cfgDraft = {};
-    renderSettings();
-  });
+  for (const editor of editors) {
+    editor.querySelectorAll('[data-cfg-path]').forEach((el) => {
+      const record = () => {
+        state.cfgDraft[el.dataset.cfgPath] = el.type === 'checkbox' ? el.checked : el.value;
+        update();
+      };
+      el.addEventListener(el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input', record);
+    });
+  }
+  for (const btn of saveBtns) btn.addEventListener('click', saveConfigEditor);
+  for (const btn of resetBtns) {
+    btn.addEventListener('click', () => {
+      state.cfgDraft = {};
+      renderSettings();
+    });
+  }
   const copyAll = $('#cfg-copy-all');
   if (copyAll) copyAll.addEventListener('click', () => copyText(JSON.stringify(currentConfigFile(), null, 2), copyAll));
+  const download = $('#cfg-download');
+  if (download) download.addEventListener('click', downloadConfig);
   update();
+}
+
+function downloadConfig() {
+  const blob = new Blob([JSON.stringify(currentConfigFile(), null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = 'config.json';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 async function saveConfigEditor() {
@@ -860,10 +987,13 @@ async function saveConfigEditor() {
     window.alert('mock 模式不执行写操作。');
     return;
   }
-  const patch = collectConfigPatch($('#cfg-editor'));
+  const patch = {};
+  for (const editor of document.querySelectorAll('.cfg-editor')) {
+    for (const change of collectConfigChanges(editor)) cfgSet(patch, change.path, change.value);
+  }
   if (Object.keys(patch).length === 0) return;
-  const saveBtn = $('#cfg-save');
-  saveBtn.disabled = true;
+  const saveBtns = [...document.querySelectorAll('[data-cfg-action="save"]')];
+  saveBtns.forEach((btn) => { btn.disabled = true; });
   try {
     const res = await api('/admin/api/config', { method: 'POST', body: { patch } });
     state.rawConfig = { path: res.path, exists: true, parseError: null, config: res.config };
@@ -873,7 +1003,7 @@ async function saveConfigEditor() {
     renderSettings();
   } catch (error) {
     window.alert(`保存失败：${error.message}`);
-    saveBtn.disabled = false;
+    saveBtns.forEach((btn) => { btn.disabled = false; });
   }
 }
 
@@ -1624,10 +1754,27 @@ $('#modal-confirm').addEventListener('click', () => {
 $('#add-device').addEventListener('click', openWizard);
 $('#open-settings').addEventListener('click', () => {
   $('#settings').hidden = false;
-  renderSettings();
+  renderSettings(state.settingsTab ?? 'common');
 });
 $('#settings-close').addEventListener('click', () => {
   $('#settings').hidden = true;
+});
+// Tab 切换（事件委托：renderSettings 会整体替换 body）
+$('#settings-body').addEventListener('click', (event) => {
+  const tab = event.target.closest('[data-settings-tab]');
+  if (tab) renderSettings(tab.dataset.settingsTab);
+});
+$('#self-badge').addEventListener('click', () => {
+  $('#about').hidden = false;
+  renderAbout();
+});
+$('#about-close').addEventListener('click', () => {
+  $('#about').hidden = true;
+});
+$('#about-to-diagnostics').addEventListener('click', () => {
+  $('#about').hidden = true;
+  $('#settings').hidden = false;
+  renderSettings('diagnostics');
 });
 $('#handoff-close').addEventListener('click', () => {
   $('#handoff').hidden = true;
@@ -1723,7 +1870,7 @@ $('#invite-regenerate').addEventListener('click', () => renderInvite());
 $('#invite-to-settings').addEventListener('click', () => {
   $('#invite').hidden = true;
   $('#settings').hidden = false;
-  renderSettings();
+  renderSettings('common');
 });
 
 $('#device-card-close').addEventListener('click', () => {

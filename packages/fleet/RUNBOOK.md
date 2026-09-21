@@ -141,6 +141,8 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 `mebular serve` 同时提供**本机控制台**（星图 / 域视图 / 审计 / 上车向导 / 设置）；静态资源来自 `packages/console`（可用 `MEBULAR_CONSOLE_DIR` 覆盖）。
 
 - **启动与地址**：`mebular serve` → `http://127.0.0.1:7331/console`（`mebular console` 会打印 URL）。
+- **设置页分区**：设置弹层分 **常用**（默认，4 张任务卡 6 字段）/ **高级**（默认收起，16 字段 + 声明签发者）/ **诊断**（版本与服务状态、完整配置、恢复指引）；只读信息（身份与存储 / 同步节奏 / 运行状态 / 签发者 / 舰队摘要 / 能力清单）统一在 **「关于本机」**（点顶栏状态徽章打开）。页面地图见 [`docs/console/page-map.md`](../../docs/console/page-map.md)。
+- **同步节奏**：`sync.autoSync` / `sync.pushOnWrite` 默认常开、不建议关闭，已从 GUI 编辑面移除（只在「关于本机 · 运行状态」只读展示真值）；需要关闭请手工编辑 `config.json`。
 - **只读 / 可写**：默认可写（写端点需 `memory.admin` scope + CSRF 双提交；仅 `POST/PUT/PATCH`，`Origin` 必须同源）；`MEBULAR_CONSOLE_WRITES=0` 降级为只读。
 - **鉴权 / TLS**：回环可 `auth=none`；**非回环必须** `auth=bearer|oauth` 且启用 TLS（配 `tlsKey`/`tlsCert`），否则 serve **拒绝启动**（`MCP_INSECURE_CONFIG`，不静默降级）。语义为**单一真值**：证书齐备即实际走 https（`tls=true` 表示「必须启用」，缺证书则启动失败）；`status`/`print-config`/控制台「实际运行状态」同此真值。控制台保存时也会做**组合校验**（非法 host/auth/tls 组合 → 400）。
 - **邀请端点（F-C6）**：令牌里写死的 `endpoint` 必须是**新设备可达**地址。默认由守护按 `joinService.bind` 计算：通配（`0.0.0.0`）时自动取本机 LAN IPv4；也可在 `joinService.endpoint` 显式固定，或在控制台「＋ 邀请新设备」面板临时填写后重新签发（令牌随之覆盖）。若无 LAN 地址会回退回环并在面板告警。

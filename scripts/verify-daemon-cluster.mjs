@@ -139,6 +139,6 @@ try {
 
 const passed = results.filter((r) => r.ok).length;
 const failed = results.filter((r) => !r.ok).map((r) => r.name);
-console.log('== verify:daemon-cluster ==');
+console.log('== verify:daemon:cluster ==');
 console.log(`FLEET_SUMMARY ${JSON.stringify({ total: results.length, passed, failed, skipped: [] })}`);
 process.exit(failed.length === 0 ? 0 : 1);

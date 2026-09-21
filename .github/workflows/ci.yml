@@ -51,13 +51,26 @@ jobs:
         run: npm run check:docs
 
       - name: Fleet acceptance (M2 local / M3 remote / M4 agents / Step 1b onboard)
-        run: npm run verify:fleet:all
+        run: npm run verify:fleet:all > fleet-acceptance.log 2>&1 || { tail -n 200 fleet-acceptance.log; exit 1; }
 
       - name: Unified daemon (identity mode / app API / fail-closed / single-writer)
         run: npm run verify:daemon
 
       - name: Daemon cluster (two-machine loopback sync + delegated identity)
         run: npm run verify:daemon:cluster
+
+      - name: Console E1 (static/CSRF/scope/config combo/TLS)
+        run: npm run verify:console > console-e1.log 2>&1 || { tail -n 200 console-e1.log; exit 1; }
+
+      - name: Upload failure logs (flaky acceptance triage)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-failure-logs
+          path: |
+            fleet-acceptance.log
+            console-e1.log
+          if-no-files-found: ignore
 
       - name: stdio MCP (real client)
         run: npm run verify:mcp:stdio

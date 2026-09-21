@@ -7,12 +7,161 @@
 
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { TOOL_SCOPES } from './tools.mjs';
+import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
+import { configPath } from './config.mjs';
+
+// ---------- 控制台配置写入（curated：只允许安全子集，需重启生效） ----------
+// 语义：PATCH 合并进 config.json（原子写 + .bak 备份）；其余字段需手工编辑。
+const CONFIG_PATCH_SPECS = new Map([
+  ['sync.namespaces', { kind: 'list', empty: 'set' }],
+  ['sync.peerWhitelist', { kind: 'list', empty: 'delete' }],
+  ['sync.autoSync', { kind: 'bool' }],
+  ['sync.pushOnWrite', { kind: 'bool' }],
+  ['sync.snapshotThreshold', { kind: 'int', min: 1, nullable: true }],
+  ['sync.antiEntropy.enabled', { kind: 'bool' }],
+  ['sync.antiEntropy.intervalMs', { kind: 'int', min: 1000, nullable: true }],
+  ['sync.antiEntropy.jitterRatio', { kind: 'num', min: 0, max: 1, nullable: true }],
+  ['sync.policyIssuers', { kind: 'list', empty: 'delete' }],
+  ['semantic.enabled', { kind: 'bool' }],
+  ['semantic.minScore', { kind: 'num', min: 0, max: 1, nullable: true }],
+  ['network.enabled', { kind: 'bool' }],
+  ['network.libp2p.listen', { kind: 'list', empty: 'delete', prefix: '/' }],
+  ['network.libp2p.relayServers', { kind: 'list', empty: 'delete', prefix: '/' }],
+  ['network.libp2p.relayUnlimited', { kind: 'bool' }],
+  ['mcp.http.host', { kind: 'string', nonEmpty: true, empty: 'delete' }],
+  ['mcp.http.port', { kind: 'int', min: 0, max: 65535, nullable: true }],
+  ['mcp.http.auth', { kind: 'enum', values: ['none', 'bearer', 'oauth'] }],
+  ['mcp.http.tls', { kind: 'bool' }],
+  ['mcp.http.tlsKey', { kind: 'string', nonEmpty: true, empty: 'delete' }],
+  ['mcp.http.tlsCert', { kind: 'string', nonEmpty: true, empty: 'delete' }],
+  ['joinService.enabled', { kind: 'bool' }],
+  ['joinService.bind', { kind: 'string', nonEmpty: true }],
+  ['joinService.port', { kind: 'int', min: 0, max: 65535, nullable: true }],
+]);
+
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
+
+/**
+ * F-C2：**组合校验**（针对合并后的完整配置）——不允许存出「把自己搞挂」的组合。
+ * 规则：mcp.http.tls=true ⇒ 必须给出 tlsKey 与 tlsCert；非回环 host ⇒ auth != none 且 tls=true（且证书齐备）。
+ */
+function validateConfigCombination(merged) {
+  const http = merged?.mcp?.http ?? {};
+  const errors = [];
+  const host = typeof http.host === 'string' && http.host.length > 0 ? http.host : '127.0.0.1';
+  const tlsOn = http.tls === true;
+  const hasCert = typeof http.tlsKey === 'string' && http.tlsKey.length > 0 && typeof http.tlsCert === 'string' && http.tlsCert.length > 0;
+  if (tlsOn && !hasCert) {
+    errors.push('启用 TLS（mcp.http.tls=true）需要同时填写 mcp.http.tlsKey 与 mcp.http.tlsCert（证书路径）');
+  }
+  if (!LOOPBACK_HOSTS.has(host)) {
+    if ((http.auth ?? 'none') === 'none') {
+      errors.push(`非回环监听（host=${host}）不允许 auth=none：请设 mcp.http.auth=bearer/oauth`);
+    }
+    if (!tlsOn) errors.push(`非回环监听（host=${host}）要求 mcp.http.tls=true（并配 tlsKey/tlsCert）`);
+  }
+  return errors;
+}
+
+function flattenPatch(patch, prefix = '') {
+  const out = [];
+  for (const [key, value] of Object.entries(patch ?? {})) {
+    const path = prefix ? `${prefix}.${key}` : key;
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      out.push(...flattenPatch(value, path));
+    } else {
+      out.push([path, value]);
+    }
+  }
+  return out;
+}
+
+function validateConfigPatch(patch) {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+    return { errors: ['patch 必须是对象'] };
+  }
+  const errors = [];
+  const entries = [];
+  for (const [path, raw] of flattenPatch(patch)) {
+    const spec = CONFIG_PATCH_SPECS.get(path);
+    if (!spec) {
+      errors.push(`不允许修改 ${path}（设备身份 / 存储 / 加密等请手工编辑 config.json）`);
+      continue;
+    }
+    if (spec.kind === 'bool') {
+      if (typeof raw !== 'boolean') errors.push(`${path} 需要布尔值`);
+      else entries.push({ path, value: raw });
+    } else if (spec.kind === 'int' || spec.kind === 'num') {
+      if (raw === null && spec.nullable) {
+        entries.push({ path, value: null });
+      } else if (typeof raw !== 'number' || !Number.isFinite(raw) || (spec.kind === 'int' && !Number.isInteger(raw))) {
+        errors.push(`${path} 需要${spec.kind === 'int' ? '整数' : '数字'}`);
+      } else if ((spec.min !== undefined && raw < spec.min) || (spec.max !== undefined && raw > spec.max)) {
+        errors.push(`${path} 超出范围（${spec.min ?? '-∞'} ~ ${spec.max ?? '∞'}）`);
+      } else {
+        entries.push({ path, value: raw });
+      }
+    } else if (spec.kind === 'string') {
+      if (typeof raw !== 'string') errors.push(`${path} 需要字符串`);
+      else if (raw.trim().length === 0 && spec.empty === 'delete') entries.push({ path, value: null });
+      else if (spec.nonEmpty && raw.trim().length === 0) errors.push(`${path} 需要非空字符串`);
+      else entries.push({ path, value: raw.trim() });
+    } else if (spec.kind === 'enum') {
+      if (!spec.values.includes(raw)) errors.push(`${path} 必须是 ${spec.values.join(' | ')}`);
+      else entries.push({ path, value: raw });
+    } else if (spec.kind === 'list') {
+      if (!Array.isArray(raw) || raw.some((v) => typeof v !== 'string')) {
+        errors.push(`${path} 需要字符串数组`);
+      } else {
+        const list = [...new Set(raw.map((v) => v.trim()).filter(Boolean))];
+        if (spec.prefix && list.some((v) => !v.startsWith(spec.prefix))) {
+          errors.push(`${path} 每项需以 ${spec.prefix} 开头的 multiaddr`);
+        } else if (list.length === 0 && spec.empty === 'delete') {
+          entries.push({ path, value: null });
+        } else {
+          entries.push({ path, value: list });
+        }
+      }
+    }
+  }
+  if (entries.length === 0 && errors.length === 0) errors.push('patch 为空');
+  return { errors, entries };
+}
+
+function setAtPath(root, path, value) {
+  const keys = path.split('.');
+  let node = root;
+  for (const key of keys.slice(0, -1)) {
+    if (node[key] === null || typeof node[key] !== 'object' || Array.isArray(node[key])) node[key] = {};
+    node = node[key];
+  }
+  node[keys[keys.length - 1]] = value;
+}
+
+function deleteAtPath(root, path) {
+  const keys = path.split('.');
+  const chain = [root];
+  let node = root;
+  for (const key of keys.slice(0, -1)) {
+    if (node[key] === null || typeof node[key] !== 'object' || Array.isArray(node[key])) return;
+    node = node[key];
+    chain.push(node);
+  }
+  delete node[keys[keys.length - 1]];
+  // 修剪残留的空对象（如删除 intervalMs 后 sync.antiEntropy 变空）
+  for (let i = chain.length - 1; i > 0; i -= 1) {
+    if (Object.keys(chain[i]).length === 0) delete chain[i - 1][keys[i - 1]];
+    else break;
+  }
+}
+import { endpointHostname, isLoopbackHost } from './lan-host.mjs';
 import { buildJoinToken } from './jointoken.mjs';
 
 const SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
@@ -21,6 +170,87 @@ const DEFAULT_SCOPES = ['memory.read'];
 const ACCESS_TTL = 900; // 15min
 const REFRESH_TTL = 30 * 24 * 3600; // 30d
 const RATE_WINDOW_MS = 60_000;
+
+// ---------- 控制台静态托管（D1） ----------
+// 路径白名单：只认识这几个确切文件名，天然防目录穿越。允许 MEBULAR_CONSOLE_DIR 覆盖。
+const CONSOLE_DIR =
+  process.env.MEBULAR_CONSOLE_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'console');
+const CONSOLE_FILES = {
+  'index.html': 'text/html; charset=utf-8',
+  'console.css': 'text/css; charset=utf-8',
+  'console.js': 'text/javascript; charset=utf-8',
+  'starfield.js': 'text/javascript; charset=utf-8',
+  'wizard.js': 'text/javascript; charset=utf-8',
+  'nebula.js': 'text/javascript; charset=utf-8',
+  'stars.js': 'text/javascript; charset=utf-8',
+};
+
+// CSRF：页面加载签发（SameSite=Strict cookie + 响应头），写请求要求头与 cookie 双提交且 token 在签发集合内。
+const CSRF_COOKIE = 'mebular_csrf';
+const CSRF_TTL_MS = 12 * 3600_000;
+const issuedCsrf = new Map(); // token -> expiresAt
+
+function issueCsrf() {
+  const token = randomUUID().replace(/-/g, '');
+  issuedCsrf.set(token, Date.now() + CSRF_TTL_MS);
+  if (issuedCsrf.size > 512) {
+    const now = Date.now();
+    for (const [key, exp] of issuedCsrf) if (exp < now) issuedCsrf.delete(key);
+  }
+  return token;
+}
+
+function parseCookies(header) {
+  const out = {};
+  if (typeof header !== 'string') return out;
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    out[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  }
+  return out;
+}
+
+function csrfValid(req) {
+  const header = req.headers['x-mebular-csrf'];
+  const token = typeof header === 'string' ? header : '';
+  if (!token || !issuedCsrf.has(token)) return false;
+  if ((issuedCsrf.get(token) ?? 0) < Date.now()) {
+    issuedCsrf.delete(token);
+    return false;
+  }
+  const cookie = parseCookies(req.headers['cookie'])[CSRF_COOKIE];
+  return cookie === token;
+}
+
+function consoleSecurityHeaders(res, { tls = false } = {}) {
+  res.setHeader('x-content-type-options', 'nosniff');
+  res.setHeader('referrer-policy', 'no-referrer');
+  res.setHeader('x-frame-options', 'DENY');
+  res.setHeader(
+    'content-security-policy',
+    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+  );
+  void tls;
+}
+
+async function sendConsoleFile(res, file) {
+  const resolved = join(CONSOLE_DIR, file);
+  let content;
+  try {
+    content = await readFile(resolved);
+  } catch {
+    return sendJson(res, 404, {
+      error: 'console_not_found',
+      message: `未找到控制台资源 ${file}（${resolved}）。请确认 packages/console 存在，或用 MEBULAR_CONSOLE_DIR 指定。`,
+    });
+  }
+  res.statusCode = 200;
+  res.setHeader('content-type', CONSOLE_FILES[file]);
+  res.setHeader('cache-control', file === 'index.html' ? 'no-store' : 'no-cache');
+  consoleSecurityHeaders(res);
+  res.end(content);
+}
 
 function safeEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
@@ -334,7 +564,27 @@ function hasScope(granted, required) {
  * 启动 HTTP MCP server。
  * @returns {Promise<{ server: import('node:http').Server, host: string, port: number, auth: string, close: () => Promise<void> }>}
  */
-export async function startHttpServer({ home, app, service, buildServer, host = '127.0.0.1', port = 7331, auth = 'none', tls = false, tlsKey, tlsCert, tokensFile, deviceId, namespace = 'tasks', joinEndpoint }) {
+export async function startHttpServer({
+  home,
+  app,
+  service,
+  config,
+  buildServer,
+  host = '127.0.0.1',
+  port = 7331,
+  auth = 'none',
+  tls = false,
+  tlsKey,
+  tlsCert,
+  tokensFile,
+  deviceId,
+  namespace = 'tasks',
+  joinEndpoint,
+  // 生效运行时快照（console 设置卡展示用；含 CLI/env 覆盖后的实际值）
+  runtime = null,
+  // D1 只读；D2 打开写端点（仍需 memory.admin scope + CSRF）
+  writesEnabled = false,
+}) {
   const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
   if (!isLoopback && (auth === 'none' || !tls)) {
     const error = new Error(
@@ -414,6 +664,445 @@ export async function startHttpServer({ home, app, service, buildServer, host = 
       return { ok: false, status: 403, message: `insufficient scope: need ${required}`, challenge: `Bearer error="insufficient_scope", scope="${required}"`, tokenId: grant.tokenId };
     }
     return { ok: true, tokenId: grant.tokenId, scopes: grant.scopes };
+  }
+
+  // ---------- 控制台路由（D1 只读 + 写端点 CSRF/scope 门） ----------
+
+  function setCsrfCookie(res, token) {
+    const attrs = [`${CSRF_COOKIE}=${token}`, 'Path=/', 'SameSite=Strict', `Max-Age=${Math.floor(CSRF_TTL_MS / 1000)}`];
+    if (tls) attrs.push('Secure');
+    res.setHeader('set-cookie', attrs.join('; '));
+  }
+
+  async function handleConsole(req, res, url) {
+    const path = url.pathname;
+    // 目录语义：无尾斜杠时补一个，保证 HTML 内相对资源（./console.css 等）解析到 /console/ 下
+    if (path === '/console') {
+      res.statusCode = 308;
+      res.setHeader('location', `/console/${url.search}`);
+      return res.end();
+    }
+    if (path === '/console/' || path === '/console/index.html') {
+      const token = issueCsrf();
+      setCsrfCookie(res, token);
+      res.setHeader('x-mebular-csrf', token);
+      return sendConsoleFile(res, 'index.html');
+    }
+    if (path.startsWith('/console/')) {
+      const file = path.slice('/console/'.length);
+      if (Object.prototype.hasOwnProperty.call(CONSOLE_FILES, file)) {
+        return sendConsoleFile(res, file);
+      }
+      return sendJson(res, 404, { error: 'console_not_found', path });
+    }
+    return sendJson(res, 404, { error: 'not_found', path });
+  }
+
+  async function handleAdminRead(req, res, path) {
+    const builder = READ_ROUTES[path];
+    if (!builder) return false;
+    if (!app || !service) {
+      return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
+    }
+    const check = await authenticate(req, Buffer.alloc(0), 'memory.read');
+    if (!check.ok) {
+      res.statusCode = check.status;
+      if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+      return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
+    }
+    // 注意：CSRF token 只在 /console/ 页面加载时签发。若在 overview 轮询里重新签发，
+    // cookie 会被每次轮询改写，与并发的写请求竞争（读 cookie 后、发出写之前又来一次
+    // overview）→ header 与 cookie 不一致而 403。token 12h 有效，页面加载签发一次即可。
+    const payload = await builder({ app, service, config, runtime, home });
+    if (path === '/admin/api/overview') {
+      payload.features = { writes: Boolean(writesEnabled) };
+    }
+    return sendJson(res, 200, payload);
+  }
+
+  // ---------- /admin/events（SSE：状态与同步实时脉冲） ----------
+
+  async function handleAdminEvents(req, res, url) {
+    if (!app || !service) {
+      return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
+    }
+    if (auth !== 'none' && !req.headers['authorization']) {
+      const token = url.searchParams.get('token');
+      if (token) req.headers.authorization = `Bearer ${token}`;
+    }
+    const check = await authenticate(req, Buffer.alloc(0), 'memory.read');
+    if (!check.ok) {
+      res.statusCode = check.status;
+      if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+      return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
+    }
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    const send = (event, data) => {
+      try {
+        res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      } catch {
+        // 连接已断开
+      }
+    };
+    send('hello', { at: Date.now() });
+
+    const onSync = (result) => send('sync', {
+      at: Date.now(),
+      peerDeviceId: result?.peerDeviceId,
+      sentEvents: result?.sentEvents,
+      receivedEvents: result?.receivedEvents,
+    });
+    const onFail = (payload) => send('sync-failed', {
+      at: Date.now(),
+      message: String(payload?.error?.message ?? payload?.error ?? ''),
+    });
+    try {
+      app.sync.on('sync-completed', onSync);
+      app.sync.on('sync-failed', onFail);
+    } catch {
+      // 门面未初始化时 sync 不可访问
+    }
+
+    let closed = false;
+    const emitStatus = async () => {
+      if (closed) return;
+      try {
+        const status = await service.status();
+        send('status', {
+          at: Date.now(),
+          running: status.running,
+          nodeCount: status.nodeCount,
+          pendingEventCount: status.pendingEventCount,
+          peerId: status.peerId,
+        });
+      } catch {
+        // 保活失败忽略
+      }
+    };
+    await emitStatus();
+    const timer = setInterval(emitStatus, 2500);
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(timer);
+      try {
+        app.sync.off('sync-completed', onSync);
+        app.sync.off('sync-failed', onFail);
+      } catch {
+        // ignore
+      }
+      try { res.end(); } catch { /* ignore */ }
+    };
+    req.on('close', cleanup);
+    res.on('close', cleanup);
+    return undefined;
+  }
+
+  const WRITE_PATTERNS = [
+    /^\/admin\/api\/grants$/,
+    /^\/admin\/api\/grants\/([^/]+)\/revoke$/,
+    /^\/admin\/api\/devices\/([^/]+)\/(revoke|connect|disconnect|sync|reset-watermarks)$/,
+    /^\/admin\/api\/config$/,
+    /^\/admin\/api\/invite$/,
+    /^\/admin\/api\/policy-issuers$/,
+    /^\/admin\/api\/memberships$/,
+    /^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/,
+  ];
+
+  function parseJsonBody(body) {
+    try {
+      const parsed = JSON.parse(body?.toString('utf-8') || '{}');
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return null;
+    }
+  }
+
+  /** 按会话证书把 deviceId 映射到在线连接；找不到返回 null */
+  function findConnectionByDevice(deviceId) {
+    const node = app?.node;
+    if (!node || !node.isRunning()) return null;
+    for (const connection of node.getConnectionManager().getConnections()) {
+      const session = node.getHandshake().getSession(connection.peerId);
+      if (session?.state === 'authenticated' && session.certificate?.deviceId === deviceId) {
+        return { connection, session };
+      }
+    }
+    return null;
+  }
+
+  // D2 写端点实现（memory.admin scope + CSRF 已在 handleAdminWrite 校验）
+  async function applyAdminWrite(req, res, path, body) {
+    if (!app || !service) {
+      return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
+    }
+
+    // 新设备上车：签发一次性加入令牌（需 joinService 已启用；由守护 identity 签发）
+    if (path === '/admin/api/invite') {
+      if (typeof deviceId !== 'string' || typeof joinEndpoint !== 'string') {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'join_disabled',
+          message: '未启用加入服务：在「设置 → 常用配置」开启 joinService.enabled 并重启 serve',
+        });
+      }
+      const input = parseJsonBody(body) ?? {};
+      const ns = typeof input.namespace === 'string' && input.namespace ? input.namespace : namespace;
+      const ttlMs = Number.isInteger(input.ttlMs) && input.ttlMs > 0 ? input.ttlMs : 900_000;
+      // F-C6：端点默认取守护计算的**可达**地址（通配 bind → 本机 LAN IPv4）；允许调用方显式覆盖
+      // （控制台邀请面板可填写），令牌内 endpoint 与返回 endpoint 始终一致。
+      const override = typeof input.endpoint === 'string' && input.endpoint.trim() ? input.endpoint.trim() : null;
+      if (override && endpointHostname(override) === null) {
+        return sendJson(res, 400, { error: 'bad_request', message: 'endpoint 需为 http(s) URL，例如 http://192.168.1.20:4002' });
+      }
+      const endpoint = override ?? joinEndpoint;
+      const token = await buildJoinToken({ mebular: app, deviceId, namespace: ns, endpoint, ttlMs });
+      const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
+      const endpointHost = endpointHostname(endpoint);
+      const loopback = endpointHost !== null && isLoopbackHost(endpointHost);
+      return sendJson(res, 201, {
+        ok: true,
+        token: inline,
+        endpoint,
+        endpointSource: override ? 'override' : 'daemon',
+        namespace: ns,
+        expiresAt: token.expiresAt,
+        ttlMs,
+        ...(loopback
+          ? { warning: '该端点是回环地址，另一台机器无法访问：请把 joinService.bind 设为 0.0.0.0（自动取本机 LAN IPv4），或在本面板填写新设备可达地址（如 http://<本机LAN IP>:端口）' }
+          : {}),
+      });
+    }
+
+    // 控制台配置写入：curated 合并 + 原子写 + .bak 备份（全部需重启生效）
+    if (path === '/admin/api/config') {
+      const input = parseJsonBody(body);
+      if (!input || typeof input.patch !== 'object') {
+        return sendJson(res, 400, { error: 'bad_request', message: '需要 { patch: { ... } }' });
+      }
+      const { errors, entries } = validateConfigPatch(input.patch);
+      if (errors.length > 0) {
+        return sendJson(res, 400, { error: 'bad_request', message: errors.join('；'), details: errors });
+      }
+      const cfgFile = configPath(home);
+      let current = {};
+      try {
+        current = JSON.parse(await readFile(cfgFile, 'utf-8'));
+      } catch {
+        current = {};
+      }
+      const merged = JSON.parse(JSON.stringify(current));
+      for (const entry of entries) {
+        if (entry.value === null) deleteAtPath(merged, entry.path);
+        else setAtPath(merged, entry.path, entry.value);
+      }
+      // F-C2：组合校验（基于合并结果；拒绝会把自己搞挂的 host/auth/tls 组合）
+      const comboErrors = validateConfigCombination(merged);
+      if (comboErrors.length > 0) {
+        return sendJson(res, 400, { error: 'bad_request', message: comboErrors.join('；'), details: comboErrors });
+      }
+      const tmp = `${cfgFile}.tmp-${process.pid}`;
+      await writeFile(tmp, JSON.stringify(merged, null, 2), 'utf-8');
+      if (existsSync(cfgFile)) await copyFile(cfgFile, `${cfgFile}.bak`);
+      await rename(tmp, cfgFile);
+      return sendJson(res, 200, {
+        ok: true,
+        applied: entries.map((e) => e.path),
+        restartRequired: true,
+        backup: existsSync(`${cfgFile}.bak`) ? `${cfgFile}.bak` : null,
+        path: cfgFile,
+        config: merged,
+      });
+    }
+
+    const grantMatch = path.match(/^\/admin\/api\/grants$/);
+    if (grantMatch) {
+      const input = parseJsonBody(body);
+      if (!input || typeof input.subject !== 'string' || !Array.isArray(input.namespaces) || input.namespaces.length === 0) {
+        return sendJson(res, 400, { error: 'bad_request', message: '需要 { subject, namespaces[] }' });
+      }
+      const namespaces = [...new Set(input.namespaces.filter((ns) => typeof ns === 'string' && ns.length > 0))];
+      if (namespaces.length === 0) {
+        return sendJson(res, 400, { error: 'bad_request', message: 'namespaces 不能为空' });
+      }
+      const event = await app.grantNamespaces({
+        subject: input.subject,
+        namespaces,
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+        ...(typeof input.expiresAt === 'number' ? { expiresAt: input.expiresAt } : {}),
+      });
+      return sendJson(res, 201, {
+        ok: true,
+        grantId: event.data?.grant?.grantId,
+        eventId: event.id,
+        subject: input.subject,
+        namespaces,
+      });
+    }
+
+    const revokeMatch = path.match(/^\/admin\/api\/grants\/([^/]+)\/revoke$/);
+    if (revokeMatch) {
+      const grantId = decodeURIComponent(revokeMatch[1]);
+      const input = parseJsonBody(body) ?? {};
+      const event = await app.revokeGrant({
+        grantId,
+        ...(typeof input.subject === 'string' ? { subject: input.subject } : {}),
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+      });
+      return sendJson(res, 200, { ok: true, grantId, eventId: event.id });
+    }
+
+    const deviceMatch = path.match(/^\/admin\/api\/devices\/([^/]+)\/(revoke|connect|disconnect|sync|reset-watermarks)$/);
+    if (deviceMatch) {
+      const deviceId = decodeURIComponent(deviceMatch[1]);
+      const action = deviceMatch[2];
+
+      if (action === 'revoke') {
+        const input = parseJsonBody(body) ?? {};
+        const event = await app.revokeDevice({
+          subject: deviceId,
+          ...(typeof input.note === 'string' ? { note: input.note } : {}),
+        });
+        return sendJson(res, 200, { ok: true, deviceId, eventId: event.id });
+      }
+
+      if (action === 'reset-watermarks') {
+        await app.resetPeerWatermarks(deviceId);
+        return sendJson(res, 200, { ok: true, deviceId });
+      }
+
+      const node = app.node;
+      if (!node || !node.isRunning()) {
+        return sendJson(res, 409, { error: 'network_not_running', message: '网络未启用，无法连接或同步' });
+      }
+
+      if (action === 'connect') {
+        const input = parseJsonBody(body) ?? {};
+        if (typeof input.address !== 'string' || input.address.length === 0) {
+          return sendJson(res, 400, { error: 'bad_request', message: '需要 { address }（对端 multiaddr，含 /p2p/…）' });
+        }
+        const peerId = { multihash: new Uint8Array(), pubKey: new Uint8Array(), id: deviceId };
+        const connection = await node.connectToPeer(peerId, input.address);
+        return sendJson(res, 200, { ok: true, deviceId, remoteAddress: connection.remoteAddress });
+      }
+
+      const found = findConnectionByDevice(deviceId);
+      if (!found) {
+        return sendJson(res, 409, {
+          error: 'not_connected',
+          message: `${deviceId} 当前未连接；请先用 connect 提供对端 multiaddr`,
+        });
+      }
+
+      if (action === 'disconnect') {
+        await node.disconnectPeer(found.connection.peerId);
+        return sendJson(res, 200, { ok: true, deviceId });
+      }
+
+      if (action === 'sync') {
+        // v1.1 起会话由 SyncManager 常驻循环统一编排（PeerFrames 单消费者）。
+        // 不能在裸信道上另起 syncWithDevice：会与会话循环抢帧，导致
+        // "Sync timeout waiting for sync-hello" 并抛 500。
+        // runAntiEntropyCycle 是公共触发路径：对在线且确有 pending 的对端
+        // 唤醒发起方循环（响应方角色由 nudge 机制覆盖）。
+        const before = await app.sync.getSyncStatus();
+        await app.sync.runAntiEntropyCycle();
+        return sendJson(res, 200, {
+          ok: true,
+          deviceId,
+          triggered: before.pendingCount > 0,
+          pendingBefore: before.pendingCount,
+        });
+      }
+    }
+
+    // 引导签发者声明（C1：图上签名声明；受 R-b 吊销排斥）
+    if (path === '/admin/api/policy-issuers') {
+      const input = parseJsonBody(body) ?? {};
+      const subject = typeof input.subject === 'string' && input.subject.length > 0 ? input.subject : app.deviceId;
+      const event = await app.declarePolicyIssuer({
+        subject,
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+      });
+      return sendJson(res, 201, { ok: true, subject, eventId: event.id });
+    }
+
+    // 成员资格声明（active=false 即注销；不清理数据）
+    if (path === '/admin/api/memberships') {
+      const input = parseJsonBody(body);
+      if (!input || typeof input.member !== 'string' || typeof input.namespace !== 'string') {
+        return sendJson(res, 400, { error: 'bad_request', message: '需要 { member, namespace, active? }' });
+      }
+      const active = input.active !== false;
+      const event = await app.declareNamespaceMembership({
+        member: input.member,
+        namespace: input.namespace,
+        active,
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+      });
+      return sendJson(res, 201, { ok: true, member: input.member, namespace: input.namespace, active, eventId: event.id });
+    }
+
+    // 分区动作：rejoin（重入恢复）/ leave（退订交接；force 不走控制台）
+    const nsActionMatch = path.match(/^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/);
+    if (nsActionMatch) {
+      const namespace = decodeURIComponent(nsActionMatch[1]);
+      const action = nsActionMatch[2];
+      const input = parseJsonBody(body) ?? {};
+      if (action === 'rejoin') {
+        const result = await app.rejoinNamespace({ namespace });
+        return sendJson(res, result.ok ? 200 : 409, result);
+      }
+      if (input.force === true) {
+        // SEALING §3：force 仅限本地 CLI，不经 MCP/远程
+        return sendJson(res, 400, { error: 'bad_request', message: 'force 仅限本地 CLI（SEALING §3），控制台不提供' });
+      }
+      if (typeof input.successor !== 'string' || input.successor.length === 0) {
+        return sendJson(res, 400, { error: 'bad_request', message: '需要 { successor }（继任者 deviceId）' });
+      }
+      const result = await app.leaveNamespace({
+        namespace,
+        successor: input.successor,
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+      });
+      return sendJson(res, result.ok ? 200 : 409, result);
+    }
+
+    return sendJson(res, 404, { error: 'not_found', path });
+  }
+
+  async function handleAdminWrite(req, res, path, body) {
+    if (!WRITE_PATTERNS.some((re) => re.test(path))) return false;
+    // H3：写请求仅允许 POST/PUT/PATCH
+    if (!['POST', 'PUT', 'PATCH'].includes(req.method ?? '')) {
+      return sendJson(res, 405, { error: 'method_not_allowed', message: '写端点仅接受 POST/PUT/PATCH' });
+    }
+    // H3：跨站点写防护——若浏览器带了 Origin，必须与本服务同源（CLI/脚本不带 Origin）
+    const reqOrigin = req.headers.origin;
+    if (typeof reqOrigin === 'string' && reqOrigin.length > 0 && reqOrigin !== origin) {
+      return sendJson(res, 403, { error: 'forbidden', message: `跨站点写被拒（Origin=${reqOrigin}）` });
+    }
+    // 1) 鉴权（写操作要求 memory.admin）
+    const check = await authenticate(req, Buffer.alloc(0), 'memory.admin');
+    if (!check.ok) {
+      res.statusCode = check.status;
+      if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+      return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
+    }
+    // 2) CSRF 双提交
+    if (!csrfValid(req)) {
+      return sendJson(res, 403, { error: 'forbidden', message: 'CSRF token 缺失或无效' });
+    }
+    // 3) D1：只读降级；D2 起由 applyAdminWrite 处理
+    if (!writesEnabled || typeof applyAdminWrite !== 'function') {
+      return sendJson(res, 403, { error: 'forbidden', reason: 'console_read_only' });
+    }
+    return applyAdminWrite(req, res, path, body);
   }
 
   const handler = async (req, res) => {
@@ -581,6 +1270,36 @@ export async function startHttpServer({ home, app, service, buildServer, host = 
           }
           return sendJson(res, 200, {});
         }
+      }
+      if (path === '/console' || path.startsWith('/console/')) {
+        return handleConsole(req, res, url);
+      }
+      if (path === '/admin/events' && req.method === 'GET') {
+        return handleAdminEvents(req, res, url);
+      }
+      if (path.startsWith('/admin/api/')) {
+        const planMatch = path.match(/^\/admin\/api\/namespaces\/([^/]+)\/handoff-plan$/);
+        if (req.method === 'GET' && planMatch) {
+          if (!app || !service) {
+            return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
+          }
+          const check = await authenticate(req, Buffer.alloc(0), 'memory.read');
+          if (!check.ok) {
+            res.statusCode = check.status;
+            if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+            return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
+          }
+          const successor = url.searchParams.get('successor') ?? '';
+          const out = await buildHandoffPlan({ app }, decodeURIComponent(planMatch[1]), successor);
+          return sendJson(res, out.status, out.body);
+        }
+        if (req.method === 'GET' && READ_ROUTES[path]) return handleAdminRead(req, res, path);
+        // 写端点路径：任何方法都交给 handleAdminWrite（非 POST/PUT/PATCH → 405；Origin/CSRF/scope 同处校验）
+        if (WRITE_PATTERNS.some((re) => re.test(path))) {
+          const done = await handleAdminWrite(req, res, path, body);
+          if (done !== false) return;
+        }
+        return sendJson(res, 404, { error: 'not_found', path });
       }
       // W2 A3：本机 app 接口（loopback + token；单写者由 serve 锁保证）
       if (path.startsWith('/app/')) {

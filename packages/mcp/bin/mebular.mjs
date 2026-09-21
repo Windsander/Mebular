@@ -242,6 +242,49 @@ function runPrintConfig(flags) {
   console.log(output);
 }
 
+async function runConsole(flags) {
+  const { homeDir: home, loadConfigFile } = await import('../src/config.mjs');
+  const dir = home();
+  const config = await loadConfigFile(dir).catch(() => ({}));
+  const httpCfg = config.mcp?.http ?? {};
+  const host = typeof flags.host === 'string' ? flags.host : httpCfg.host ?? '127.0.0.1';
+  const port = flags.port !== undefined ? Number(flags.port) : httpCfg.port ?? 7331;
+  // F-C1：scheme 以**生效真值**为准——与 server.mjs 同一定义：证书齐备即实际启用 TLS；
+  // tls=true 是「必须启用」开关，缺证书时 serve 启动即失败（此处同步明确警告）。
+  const consoleKey = flags['tls-key'] ?? httpCfg.tlsKey;
+  const consoleCert = flags['tls-cert'] ?? httpCfg.tlsCert;
+  const tlsReady = Boolean(consoleKey && consoleCert);
+  if (httpCfg.tls === true && !tlsReady) {
+    console.error('⚠ mcp.http.tls=true 但缺少 tlsKey/tlsCert：serve 将启动失败（MCP_INSECURE_CONFIG）；请补证书或关闭 tls');
+  }
+  const scheme = tlsReady ? 'https' : 'http';
+  const target = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host;
+  const consoleUrl = `${scheme}://${target}:${port}/console`;
+  const probe = `${scheme}://${target}:${port}/healthz`;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch(probe, { signal: controller.signal });
+    clearTimeout(timer);
+    if (res.ok) {
+      console.log(`Mebular 控制台：${consoleUrl}`);
+      if (httpCfg.auth && httpCfg.auth !== 'none') {
+        console.error(`（serve 鉴权为 ${httpCfg.auth}：页面写操作需要 memory.admin scope）`);
+      }
+      return;
+    }
+    console.error(`✗ serve 已响应但 /healthz 非 200：${res.status}`);
+  } catch (error) {
+    const reason = error?.name === 'AbortError' ? '探测超时' : error?.message ?? error;
+    console.error(`✗ 未检测到运行中的 serve（${probe}）：${reason}`);
+  }
+  console.error('');
+  console.error('请先启动 serve，再打开控制台：');
+  console.error(`  node packages/mcp/bin/mebular.mjs serve --host ${host} --port ${port}`);
+  console.error(`  控制台 URL：${consoleUrl}`);
+  process.exit(2);
+}
+
 async function runStatus() {
   const { createMebular } = await import('../src/config.mjs');
   const { MemoryService } = await import('@mebular/core');
@@ -395,6 +438,10 @@ async function main() {
       process.exit(runServiceCli({ descriptors: [descriptor], argv: argv.slice(1) }));
       return;
     }
+    case 'console': {
+      await runConsole(flags);
+      return;
+    }
     case 'token': {
       await runToken(argv[1], flags, argv[2]);
       return;
@@ -410,6 +457,7 @@ async function main() {
           '  mcp                          启动 stdio MCP server',
           '  serve [--host --port --auth --tls-key --tls-cert --tokens-file]   Streamable HTTP server',
           '  service install|uninstall|status|logs [--no-autostart --label L]  常驻服务管理（mebular-serve）',
+          '  console [--host --port]      打印控制台 URL（需 serve 正在运行）',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
           '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',

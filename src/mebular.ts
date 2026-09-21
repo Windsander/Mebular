@@ -123,6 +123,8 @@ export interface MebularConfig {
       protocol?: string;
       relayServer?: boolean;
       relayServers?: string[];
+      /** circuit relay 资源放开（仅可信自托管时开启；默认限额） */
+      relayUnlimited?: boolean;
     };
   };
   sync?: {
@@ -386,6 +388,7 @@ export class Mebular {
             protocol: this.config.network.libp2p.protocol,
             relayServer: this.config.network.libp2p.relayServer,
             relayServers: this.config.network.libp2p.relayServers,
+            relayUnlimited: this.config.network.libp2p.relayUnlimited,
           });
           await this.libp2pProvider.start();
           provider = this.libp2pProvider;

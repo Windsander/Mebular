@@ -13,7 +13,7 @@
     <header class="topbar">
       <div class="brand"><span class="brand-star">✦</span> Mebular 控制台</div>
       <div class="topbar-identity">
-        <span id="self-badge" class="badge badge-self">本机 · …</span>
+        <button id="self-badge" class="badge badge-self badge-button" type="button" title="打开「关于本机」" aria-label="打开关于本机">本机 · …</button>
         <span id="online-badge" class="badge badge-muted">○ 未知</span>
         <span id="memory-badge" class="badge badge-muted">记忆 …</span>
       </div>
@@ -127,6 +127,18 @@
       <div id="settings-body"></div>
       <div class="modal-actions">
         <button id="settings-close" class="btn btn-crt" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="about" class="modal" hidden>
+    <div class="modal-box modal-box-wide crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="关于本机">
+      <h2>关于本机 <span class="crt-tag">只读</span></h2>
+      <p class="modal-note muted">身份与存储 / 同步节奏 / 运行状态 / 签发者 / 舰队摘要 / 能力清单；每行给「已配置 vs 实际」双值口径。</p>
+      <div id="about-body"></div>
+      <div class="modal-actions">
+        <button id="about-to-diagnostics" class="btn btn-crt" type="button">诊断与恢复</button>
+        <button id="about-close" class="btn btn-crt" type="button">关闭</button>
       </div>
     </div>
   </div>

@@ -65,7 +65,7 @@ fleet approve --dir ~/.mebular --device device-B               # 在图上授予
 ```
 
 想要界面？守护同时提供本机控制台：`mebular serve` 后打开 `http://127.0.0.1:7331/console`
-（星图 / 域视图 / 审计 / 向导 / 设置）；可用 `seed-demo.mjs` 生成演示数据。
+（星图 / 域视图 / 审计 / 向导 / 设置：常用 · 高级 · 诊断，顶栏徽章打开「关于本机」）；可用 `seed-demo.mjs` 生成演示数据。
 
 ### 开发者
 

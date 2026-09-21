@@ -179,6 +179,7 @@ const CONSOLE_FILES = {
   'index.html': 'text/html; charset=utf-8',
   'console.css': 'text/css; charset=utf-8',
   'console.js': 'text/javascript; charset=utf-8',
+  'settings-ia.js': 'text/javascript; charset=utf-8',
   'starfield.js': 'text/javascript; charset=utf-8',
   'wizard.js': 'text/javascript; charset=utf-8',
   'nebula.js': 'text/javascript; charset=utf-8',

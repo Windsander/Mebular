@@ -101,7 +101,8 @@
     "verify:lan": "node scripts/verify-lan.mjs",
     "check:deps": "node scripts/check-deps.mjs",
     "verify:invite": "node scripts/verify-invite.mjs",
-    "verify:nat": "node scripts/verify-nat.mjs"
+    "verify:nat": "node scripts/verify-nat.mjs",
+    "rulesets:apply": "node scripts/apply-rulesets.mjs --apply"
   },
   "dependencies": {
     "bonjour": "^3.5.1",

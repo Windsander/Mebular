@@ -63,3 +63,13 @@ Mebular 仍在早期：功能可用，API 未稳定，未发 npm 包；生产使
 | CI | 四 job：build/test/lint · WAN NAT（docker）· Windows · 真实语义（live badge 见 README） |
 
 实时数字不写进文档：README 用 CI 状态 badge（由 GitHub 计算），`check:docs` 禁止手写测试/覆盖率数字。
+
+## 分支保护（rulesets）
+
+`main` 与 `site` / `site-*` 由仓库 rulesets 保护，定义在 `.github/rulesets/*.json`（以仓库为准，可评审、可回放）：
+
+- `main`：禁止删除/强推；必须经 PR（1 个批准、需解决全部评论线程）；必须通过四个必需检查（build/test/lint · Windows · WAN NAT · 真实语义）
+- `site` / `site-*`：禁止删除/强推（站点分支允许直接推送）
+- 管理员保留 bypass，避免误锁维护者
+
+应用/更新：`npm run rulesets:apply`（dry-run 直接运行 `node scripts/apply-rulesets.mjs`；需要 `GH_TOKEN`，权限 repo admin）。

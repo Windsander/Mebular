@@ -11,8 +11,9 @@
 import { createHash } from 'crypto';
 import { DeviceDiscovery, type BonjourServiceFactory } from './DeviceDiscovery.js';
 import { ConnectionManager } from './connection/ConnectionManager.js';
-import { EndpointBook, derivePeerIdHex, classifyEndpoint, type EndpointCandidate, type PathState } from './connection/EndpointBook.js';
+import { EndpointBook, RELAY_SEEDS_KEY, derivePeerIdHex, classifyEndpoint, type EndpointCandidate, type PathState } from './connection/EndpointBook.js';
 import { createDefaultBonjourFactory } from './discovery/bonjourDefault.js';
+import { decideRelayRole, type RelayRoleDecision, type RelayServiceMode } from './relay/RelayRole.js';
 import {
   AuthenticationHandshake,
   hexToBytes,
@@ -76,6 +77,17 @@ export interface LanDiscoveryOptions {
   autoDial?: boolean;
 }
 
+/** C6：内建 relay 角色状态（诊断/控制台只读展示） */
+export interface RelayRoleStatus {
+  mode: RelayServiceMode;
+  serving: boolean;
+  reason: string;
+  publicAddrs: string[];
+  inboundDirectEvidence: boolean;
+  /** 允许预约的中转客户端（地址簿 paired/config 的 peer 键） */
+  allowedClients: number;
+}
+
 /** C3：发现层状态快照（诊断/doctor 用） */
 export interface LanDiscoveryStatus {
   enabled: boolean;
@@ -96,6 +108,12 @@ export interface P2PNetwork {
   getEndpointBook(): EndpointBook | null;
   /** C3：发现层状态（诊断用） */
   getLanStatus(): LanDiscoveryStatus;
+  /** C6：内建 relay 角色状态（诊断/控制台只读） */
+  getRelayStatus(): RelayRoleStatus;
+  /** C6/C5：relay 角色变化回调（供 app 触发地址广播等） */
+  onRelayRoleChanged(callback: (decision: RelayRoleDecision) => void): void;
+  /** C4：打洞/直连成功上报（地址簿候选 + 路径升级 direct） */
+  noteDirectConnection(peerIdHex: string, address: string): void;
   discoverPeer(peerId: PeerId): Promise<PeerInfo | null>;
   /**
    * 连接对端。`address` 提供时按显式地址拨号（手动 multiaddr / relay），
@@ -161,6 +179,12 @@ export interface P2PNodeOptions {
   useDefaultBonjourFactory?: boolean;
   /** 告警出口（发现禁用等非致命情况） */
   onWarn?: (message: string) => void;
+  /**
+   * C6：内建 relay 角色（守护内部；不再有 `mebular relay` 命令）。
+   * `auto`（默认）仅在「对外可达监听」或「入站直连证据」成立时对外提供中转；
+   * 仅服务地址簿中已配对/已授权对端；默认限额；不落任何记忆/授权状态。
+   */
+  relayService?: RelayServiceMode;
 }
 
 export class P2PNode implements P2PNetwork {
@@ -183,6 +207,10 @@ export class P2PNode implements P2PNetwork {
   private peerAllowlist: Set<string>;
   private loadBonjourModule: (() => unknown) | undefined;
   private useDefaultBonjourFactory: boolean;
+  private relayMode: RelayServiceMode;
+  private relayDecision: RelayRoleDecision;
+  private inboundDirectEvidence = false;
+  private relayRoleChangedCallbacks: Array<(decision: RelayRoleDecision) => void> = [];
   private onWarn: (message: string) => void;
   /** 发现来源的 LAN 候选（peerId → 地址集合），用于降级时精确回退 */
   private discoveryAddrs = new Map<string, Set<string>>();
@@ -214,6 +242,8 @@ export class P2PNode implements P2PNetwork {
     this.peerAllowlist = new Set(options.peerAllowlist ?? []);
     this.loadBonjourModule = options.loadBonjourModule;
     this.useDefaultBonjourFactory = options.useDefaultBonjourFactory === true;
+    this.relayMode = options.relayService ?? 'auto';
+    this.relayDecision = decideRelayRole({ mode: this.relayMode });
     this.onWarn = options.onWarn ?? (() => undefined);
     this.peerId = options.peerId ?? this.derivePeerId();
     this.connectionManager = options.connectionManager ?? new ConnectionManager({
@@ -330,6 +360,7 @@ export class P2PNode implements P2PNetwork {
 
       this.attachComponentListeners();
       this.running = true;
+      this.refreshRelayRole(); // C6：启动后按实际监听地址评估是否当桥
     } catch (error) {
       // 部分启动回滚：已启动组件逆序收拢，不留下泄漏的计时器/监听器
       if (this.discovery?.isRunning()) {
@@ -599,6 +630,75 @@ export class P2PNode implements P2PNetwork {
     this.discoveryAddrs.clear();
   }
 
+  // ---------- C6：内建 relay 角色 ----------
+
+  /** 重新评估 relay 角色（监听地址变化 / 入站直连证据出现时调用） */
+  refreshRelayRole(): RelayRoleDecision {
+    const listenAddrs = this.getLocalMultiaddrs();
+    const next = decideRelayRole({
+      mode: this.relayMode,
+      listenAddrs,
+      inboundDirectEvidence: this.inboundDirectEvidence,
+    });
+    const changed = next.serve !== this.relayDecision.serve
+      || JSON.stringify(next.publicAddrs) !== JSON.stringify(this.relayDecision.publicAddrs);
+    this.relayDecision = next;
+    if (changed) {
+      for (const callback of this.relayRoleChangedCallbacks) {
+        try { callback({ ...next }); } catch { /* 回调失败不影响角色判定 */ }
+      }
+    }
+    return { ...next };
+  }
+
+  getRelayStatus(): RelayRoleStatus {
+    const book = this.endpointBook;
+    const allowedClients = book
+      ? book.keys().filter((key) => key !== RELAY_SEEDS_KEY && book.list(key).some((c) => c.source === 'paired' || c.source === 'config')).length
+      : 0;
+    return {
+      mode: this.relayMode,
+      serving: this.relayDecision.serve,
+      reason: this.relayDecision.reason,
+      publicAddrs: [...this.relayDecision.publicAddrs],
+      inboundDirectEvidence: this.inboundDirectEvidence,
+      allowedClients,
+    };
+  }
+
+  /** C6：中转预约是否放行该 peer（仅地址簿 paired/config 键；不含纯发现学习来的对端） */
+  private isRelayReservationAllowed(peerId: string): boolean {
+    if (!this.relayDecision.serve) return false;
+    const book = this.endpointBook;
+    if (!book) return false;
+    return book.list(peerId).some((candidate) => candidate.source === 'paired' || candidate.source === 'config');
+  }
+
+  onRelayRoleChanged(callback: (decision: RelayRoleDecision) => void): void {
+    this.relayRoleChangedCallbacks.push(callback);
+  }
+
+  /**
+   * C4：观测到直连（AutoNAT/DCUtR 打洞成功或本就直接）→ 入候选池并**升级路径为 direct**。
+   * 只动地址簿/路径状态；不涉授权。
+   */
+  noteDirectConnection(peerIdHex: string, address: string): void {
+    if (!peerIdHex || !address || address.includes('/p2p-circuit')) return;
+    const book = this.endpointBook;
+    if (!book) return;
+    void book.upsert(peerIdHex, [address], 'learned').catch(() => undefined);
+    book.recordSuccess(peerIdHex, address);
+    book.setPath(peerIdHex, address);
+  }
+
+  /** C6：Libp2pProvider 用 —— 当前是否对外提供中转 + 是否放行该 peer */
+  relayGaterPredicates(): { serve: boolean; isAllowed: (peerId: string) => boolean } {
+    return {
+      serve: this.relayDecision.serve,
+      isAllowed: (peerId: string) => this.isRelayReservationAllowed(peerId),
+    };
+  }
+
   getLanStatus(): LanDiscoveryStatus {
     let lanCandidates = 0;
     for (const tracked of this.discoveryAddrs.values()) lanCandidates += tracked.size;
@@ -616,6 +716,12 @@ export class P2PNode implements P2PNetwork {
   /** 被动接入：完成对端发起的认证，认证成功后登记连接并准备信道 */
   private async handleIncomingConnection(connection: Connection): Promise<void> {
     try {
+      // C6：入站直连证据（非 circuit）→ 说明外部确实能连到本机，可作为「对外可达」的依据
+      const remote = typeof connection.remoteAddress === 'string' ? connection.remoteAddress : '';
+      if (remote.length > 0 && !remote.includes('p2p-circuit') && !this.inboundDirectEvidence) {
+        this.inboundDirectEvidence = true;
+        this.refreshRelayRole();
+      }
       // 重连：acceptAuth 完成即触发 authenticated 事件，必须在事件前清掉旧信道（F4）
       this.channels.delete(connection.peerId.id);
       const session = await this.handshake.acceptAuth(connection);

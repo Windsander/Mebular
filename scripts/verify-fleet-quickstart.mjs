@@ -193,12 +193,28 @@ try {
   await waitFor(async () => eventLine(bwork1, 'listening') !== null, 30000);
   const bAddr = eventLine(bwork1, 'listening')?.multiaddrs?.[0];
   check('B 已监听（worker --print-listen）', typeof bAddr === 'string' && bAddr.includes('/p2p/'), { bAddr });
-  const seen = await waitFor(async () => {
+  // C7：令牌默认携带自动授权 → device-B **不再**待批准；同时验证 `--no-grant` 仍走人工批准路径
+  const autoGranted = await waitFor(async () => {
     const p = await runCli(['pending', '--dir', A]);
     const j = firstJson(p.out);
-    return Array.isArray(j?.pending) && j.pending.includes('device-B');
+    return Array.isArray(j?.pending) && !j.pending.includes('device-B') ? j : null;
   }, 45000);
-  check('A pending 列出待批准的 device-B', seen, {});
+  check('C7 默认自动授权：device-B 不在待批准列表', Boolean(autoGranted), { pending: autoGranted?.pending });
+
+  const grantSeen = await runCli(['invite', '--dir', A, '--namespace', 'tasks', '--no-grant', '--no-qr']);
+  const grantJson = firstJson(grantSeen.out);
+  check('C7 invite --no-grant：令牌显式关闭自动授权（可用于人工批准流程）',
+    grantSeen.code === 0 && grantJson?.grantOnJoin === false, { grantOnJoin: grantJson?.grantOnJoin });
+  const B5 = join(root, 'B5');
+  const jNoGrant = await runCli(['join', '--token', grantJson.token, '--dir', B5, '--device', 'device-B5', '--listen', '/ip4/127.0.0.1/tcp/0', '--no-service', ...agentArgs]);
+  check('C7 无自动授权令牌：join 仍成功且进入待批准', jNoGrant.code === 0, { code: jNoGrant.code });
+  // 以 A 的事件日志断言授权事实（比 pending 更直接：pending 取决于对端是否在线被侦测）
+  const grantsOf = (subject) => readFileSync(join(A, 'store.jsonl'), 'utf-8')
+    .split('\n')
+    .filter((line) => line.includes('namespace_grant') && line.includes(`"subject":"${subject}"`))
+    .length;
+  check('C7 默认自动授权：A 的图上已有 device-B 的 namespace_grant', grantsOf('device-B') >= 1, { grants: grantsOf('device-B') });
+  check('C7 --no-grant 路径：A 的图上没有 device-B5 的 namespace_grant（人工批准仍有效）', grantsOf('device-B5') === 0, { grants: grantsOf('device-B5') });
   anode1.child.kill('SIGKILL');
   bwork1.child.kill('SIGKILL');
 

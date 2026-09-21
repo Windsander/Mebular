@@ -926,6 +926,23 @@ function renderAbout() {
         kvRow('加入服务', s.join?.enabled ? `已启用 · ${escapeHtml(String(s.join.bind))}:${escapeHtml(String(s.join.port))}` : '未启用'),
         kvRow('语义召回', `${s.semantic.enabled ? '已启用' : '未启用'}（minScore ${s.semantic.minScore}）`),
         kvRow('兼容白名单', s.sync.legacyPeerAllowList.length ? escapeHtml(s.sync.legacyPeerAllowList.join(', ')) : '空（建议迁移到图上授权）'),
+        // C6：内建 relay 角色（只读；桥的选举自动完成，此处仅展示）
+        kvRow('本机当桥', s.relay ? `${s.relay.serving ? '开' : '关'}（${escapeHtml(String(s.relay.reason ?? '—'))}）` : '—'),
+        kvRow('当前经桥', s.relay?.bridge
+          ? `<code>${escapeHtml(String(s.relay.bridge.address))}</code> <span class="muted">· ${escapeHtml(String(s.relay.bridge.peer))}</span>`
+          : '未经桥（直连 / LAN）'),
+        kvRow('桥白名单', s.relay ? `${s.relay.allowedClients ?? 0} 个已配对对端` : '—'),
+        // C5：地址自动广播（只读；提示类信息，不参与授权）
+        kvRow('地址广播', s.net
+          ? `${s.net.enabled ? `${escapeHtml(String(s.net.mode))} 档` : '未开启（opt-in：把 __net__ 加入订阅或配置 network.broadcast）'} · 已发布 ${s.net.published} · 已采用 ${s.net.applied}`
+          : '—'),
+        // C4：NAT 穿透（只读）
+        kvRow('NAT 打洞', s.nat
+          ? `${s.nat.dcutrEnabled ? 'DCUtR 开' : 'DCUtR 关'} · ${s.nat.autonatEnabled ? 'AutoNAT 开' : 'AutoNAT 关'} · 直连升级 ${s.nat.directUpgrades ?? 0} 次${s.nat.loadError ? ` ⚠ ${escapeHtml(String(s.nat.loadError))}` : ''}`
+          : '未启用（libp2p 未装配）'),
+        kvRow('广播忽略', s.net && Object.values(s.net.ignored ?? {}).some((v) => v > 0)
+          ? escapeHtml(Object.entries(s.net.ignored).filter(([, v]) => v > 0).map(([k, v]) => `${k} ${v}`).join(' / '))
+          : '无'),
       ])}
       ${listenAlarm.length ? `<p class="crt-warn">⚠ 监听地址含非回环（${escapeHtml(listenAlarm.join(', '))}）：建议改绑回环 / LAN，或经 relay 并仅以防火墙放行已授权对端。</p>` : ''}
     </section>
@@ -1881,6 +1898,14 @@ async function renderInvite(overrideEndpoint = null) {
     const endpointWarning = res.warning
       ? `<p class="crt-warn">⚠ ${escapeHtml(res.warning)}</p>`
       : '';
+    // C7：二维码（服务端渲染 SVG → data-uri；缺可选依赖时为 null → 只显示文本）
+    const qrBlock = res.qrSvg
+      ? `<div class="readout-block qr-block">
+          <span class="domain-label">扫码即通（QR 内容 = 令牌文本）</span>
+          <img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />
+          <p class="cfg-help muted">${res.grantOnJoin === false ? '本令牌不自动授权（需对端手动批准）' : '兑换后自动授权（作用域=令牌分区；默认 24h 后自动撤销）'}</p>
+        </div>`
+      : `<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用下方文本令牌。</p>`;
     const endpointEditor = `
       <div class="readout-block">
         <span class="domain-label">join 端点（写死进令牌，须为新设备可达地址）</span>
@@ -1889,6 +1914,7 @@ async function renderInvite(overrideEndpoint = null) {
         ${endpointWarning}
       </div>`;
     body.innerHTML = `
+      ${qrBlock}
       ${endpointEditor}
       <dl class="settings-kv">
         <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>

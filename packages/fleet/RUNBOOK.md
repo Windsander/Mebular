@@ -160,7 +160,7 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - **路径查询**：`doctor --net`（排障）与控制台「关于本机 → 对端连接路径」/设备卡只读行展示 `kind/address/since/lastError`。
 - **配对 hints**：`fleet invite` / 控制台邀请签发的令牌携带 `endpoints`（邀请方可达 multiaddr）、可选 `relaySeeds`、`pubReachable`；旧令牌无这些字段仍可用（**向后兼容**）。新设备 `fleet join` 后写入本机地址簿（同时写 deviceId 键与派生 peerId 键 → 首次拨号即可命中）。
 - **relay seeds**：`network.relaySeeds`（配置）与令牌随附的 seeds 会被并入 `network.libp2p.relayServers`，使新设备能拨 circuit 地址。
-- **自托管 relay**：`mebular relay`（默认限额；`--unlimited` 显式放开，仅可信环境）打印 multiaddr 与对端配置片段；`--print-only` 只打印。注意 relay 与 serve **共用 home 会撞单实例锁**（`<home>/lock`），请用独立 `MEBULAR_HOME` 跑 relay（CLI 会提示，不自动注册 service 单元）。
+- **中转（内部化，C6）**：不再有独立的 `mebular relay` 命令——守护内建 relay 角色，`network.relayService: 'auto'|'off'|'on'`（默认 auto）。见下方 §9。
 - **relay 白名单/上限**：`network.libp2p.relayPolicy`（`allowedRelayPeers` / `deniedRelayPeers` / `maxReservations` / `reservationTtlMs` / `denyOutboundRelayedConnection`）→ 组装 libp2p `connectionGater` 与 `circuitRelay.reservations`。
 - **能力共享边界**：本轮只做「配对时 hints + 配置 seeds」；relay 能力的动态广播见 C5。relay 重启会作废旧预约（libp2p 客户端不自动 re-reserve）：恢复路径是**对端重新发布 hints**（控制台/`fleet invite` 再签一次）。
 - 验收：`npm run verify:connect`（hints-only 自动连通 + 杀 relay 降级/退避 + 恢复重连 + 路径状态断言）。
@@ -174,3 +174,57 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - **观察**：`mebular doctor --net` 显示发现是否启用/在跑、LAN 候选数、忽略的陌生设备数、当前路径与 lastError；控制台「关于本机 → 对端连接路径」与设备卡显示 `kind/address/最近切换`。
 - **平台/CI**：确定式 harness 走注入的假 bonjour（不依赖真 mDNS），CI ubuntu 跑 `npm run verify:lan`；真 mDNS 为「尽力而为」（受限环境 SKIP，不判红）；Windows job 不跑真 mDNS（只构建/单测 + fleet local/onboard），mDNS 行为由 ubuntu 的确定式 harness 覆盖。
 - 验收：`npm run verify:lan`（已配对自动连通 / 陌生设备不拨号 / LAN 升级 / LAN 撤销降级 / 关闭发现 / 默认 factory 软降级）。
+
+## 9. 中继内部化（C6：桥的选举自动完成）
+
+- **没有独立 relay 命令**：`mebular relay` 已删除；中继是**守护内部角色**，与 serve 同生命周期。
+- **开关**：`network.relayService: 'auto' | 'off' | 'on'`（默认 `auto`）。
+  - `auto`：仅当存在**对外可达监听地址**（公网，非回环/私网）**或**观察到**入站直连证据**时才对外提供中转；否则静默不提供（不报错、不占资源）。
+  - `off`：从不提供；`on`：强制提供（内部/测试开关）。
+  - `network.libp2p.relayServer` 保留为**内部/测试开关**（等价 `on`），不面向用户文档。
+- **白名单**：只服务地址簿中**已配对/已授权**（`paired`/`config` 来源；C2 已写 deviceId + 派生 peerId 双键）的对端；纯发现/学习来的对端不服务。
+- **默认限额**：`applyDefaultLimit` + `maxReservations`（复用 `RelayPolicy`）。注意：限额只放行 **受限协议**——**Mebular 同步流经 circuit 需要内部开关 `network.libp2p.relayUnlimited: true`**（不面向用户文档，仅自托管可信桥使用）；不放开时桥仍可服务（identify 等），但同步流会被 `LimitedConnectionError` 拒绝。
+- **不变式**：relay 角色**不落任何记忆/授权状态**（不写图事件、不改策略），中继流量对双方仍是端到端加密信道。
+- **观察**：控制台「关于本机 → 运行状态」显示「本机当桥 开/关（原因）」与「当前经桥」（当前路径为 relay 时给出桥地址）；`mebular doctor --net` 输出 `relay` 段（mode/serving/reason/publicAddrs/allowedClients）。
+- **桥的广播**：可达设备自动当桥 + 地址广播属 C5（`net_endpoints` 记录），本轮只做「本机角色判定 + 白名单 + 限额」。
+
+## 10. 地址自动广播（C5：可达设备互相告知地址，自动用桥）
+
+- **开关（opt-in）**：`network.broadcast: { mode: 'full'|'relay-only'|'off', ttlMs? }`，或把 `__net__` 加入 `sync.namespaces`。
+  - `full`（默认档）：发布**实际存在**的 lan / public / relay 地址并打标；
+  - `relay-only`：只发布 relay 地址；`off`：完全不发布。
+- **语义（hints only）**：记录 `net_endpoints` 落在命名空间 `__net__`；**永不参与授权**（不改生效分区/成员/吊销，也不写 `__policy__`）。读取侧只做：subject 绑定校验 → 命名空间校验 → 过期（本地墙钟）→ 吊销级联 → 写入候选地址簿（`source=learned`）。
+- **自动用桥**：收到对端记录 → 其 relay 地址进候选池 → 后续拨号可自动经其桥（与 C1 选路、C6 桥角色协同）；`relayCapable` 只是信息（不使对端有义务，也不换取权限）。
+- **可见性**：记录只在 `__net__`，沿用既有「授权 ∩ 成员资格 ∩ 订阅」裁剪；旧版本节点忽略该类型（只少收 hints，安全方向）。
+- **时效**：`expiry` 默认 24h（`ttlMs` 可配）；过期仅本机忽略，**不进一致性**（不影响 `stateHash`）。
+- **观察**：控制台「关于本机 → 运行状态」显示「地址广播」（档位 / 已发布 / 已采用 / 忽略原因）；`mebular doctor --net` 输出 `net` 段与建议。
+- 验收：`tests/sync/net-endpoints.test.ts`、`tests/p2p/net-endpoints-broadcast.test.ts`（含「注入记录不改授权」锚点）。
+
+## 11. 扫码即通（C7：令牌 + 二维码 + 兑换自动授权）
+
+- **邀请（两种产物一起给）**：`fleet invite [--namespace ns] [--ttl 分钟] [--grant-ttl 小时] [--no-grant] [--no-qr]`
+  - 打印**终端二维码**（内容 = 内联令牌文本，不引自定义 scheme）与**文本令牌**（JSON 的 `token` 字段）；
+  - 控制台「＋ 邀请新设备」面板同样给出二维码（服务端渲染 SVG → data-uri）+ 文本 + 复制命令。
+- **加入（等价入口）**：`fleet join --qr '<二维码内容>'` 与 `fleet join --token <内联|文件>` **完全等价**（`--qr` 只是先把字符串归一为 `--token`）。
+- **兑换即通**：令牌缺省携带自动授权语义（`grantOnJoin` 默认 true）：新设备兑换成功后，邀请方**立即**签发一条作用域为**令牌分区**的 `namespace_grant`（走既有授权 API，不改判定语义）。
+  - **有效期**：默认 **24h**（`grantTtlMs` / `--grant-ttl <小时>` 可配；`0` = 不自动撤销）；到期由图外台账 + 定时 `revokeGrant` 自动撤销（台账 `<storagePath>.join-autogrants.json`，0600）。
+  - **一次性 + 绑定首个兑换设备**：nonce 先占用后签发（并发安全）；二次兑换 403 `used`；过期 403 `expired`。
+  - **可 revoke**：`fleet revoke`/`mebular` 侧既有 `revokeGrant` / `revokeDevice`；撤销后该对端读侧立即为空。
+  - **关闭自动授权**：`--no-grant`（或在令牌里显式 `grantOnJoin:false`）→ 新设备仍需人工批准。
+- **依赖政策**：二维码依赖可选依赖 `qrcode`（精确 pin，见 [`THIRD-PARTY.md`](../../THIRD-PARTY.md)）；缺包时**只给文本**，不报错。门禁 `npm run check:deps`。
+- **观察**：控制台邀请面板显示二维码与「自动授权 / 24h 到期」说明；`doctor --net` 不受影响。
+- 验收：`npm run verify:invite`（令牌语义 / 渲染与降级 / 兑换即通 / TTL 撤销 / `--qr` 等价）。
+
+## 12. 打洞（C4：AutoNAT + DCUtR）
+
+- **开关**：`network.nat: { autonat?: boolean, dcutr?: boolean }`（默认 **auto**：可选依赖在场即启用）。
+  可选依赖：`@libp2p/autonat` + `@libp2p/dcutr`（精确 pin，见 [`THIRD-PARTY.md`](../../THIRD-PARTY.md)）。
+- **行为**：与对端先经 relay 建立 circuit 连接 → DCUtR 协调打洞 → 成功即出现**直连**，本机观测到直连后
+  **自动把路径升级为 `direct`**（候选入库 + `path-changed`）；失败/超时**保留 relay**（不阻塞，后台按 libp2p 策略重试）。
+- **可达性**：AutoNAT 自检本机是否公网可达（与 C6 的 relay 角色、C5 的 `pubReachable` 信息一致，但**互不替代**）。
+- **降级**：缺任一依赖 → 打洞禁用 + 告警（`getNatStatus().loadError`），**不影响**其他连接方式（直连/relay 照常）。
+- **暴露面**：AutoNAT 会对本机监听地址做**外部回拨探测**；DCUtR 经已建立的 relay 连接交换协调信息（**不新增第三方**、不引公共种子）。
+  两者**都不参与授权判定**，也不改变数据面加密（端到端信道不变）。
+- **观察**：控制台「关于本机 → 运行状态」显示「NAT 打洞」（AutoNAT/DCUtR 开关、直连升级次数、loadError）；
+  `mebular doctor --net` 输出 `nat` 段与建议（如有 relay 连接但无直连升级 → 可能双方都是对称 NAT，属预期）。
+- 验收：`npm run verify:nat`（服务装配/直连观测/软降级 + 路径升级与失败保留 + 真 libp2p 两节点 DCUtR 尽力而为）。

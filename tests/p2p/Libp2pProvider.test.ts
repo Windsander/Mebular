@@ -289,6 +289,17 @@ describe('PeerId 映射', () => {
 
 // ---------- 真实 loopback 集成 ----------
 
+/** 监听地址就绪等待（C4 增加 AutoNAT/DCUtR 服务后启动路径更长，避免时序抖动） */
+async function waitForListenAddrs(provider: Libp2pProvider, timeoutMs = 10000): Promise<string[]> {
+  const started = Date.now();
+  for (;;) {
+    const addrs = provider.getMultiaddrs().filter((addr) => addr.includes('/tcp/'));
+    if (addrs.length > 0) return addrs;
+    if (Date.now() - started > timeoutMs) throw new Error('监听地址未就绪');
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
 describe('Libp2pProvider 双节点集成（真实 TCP）', () => {
   itIfAvailable('显式 multiaddr 直连，双向收发，帧边界完整', async () => {
     const identityA = await createTestIdentity('device-a');
@@ -305,6 +316,8 @@ describe('Libp2pProvider 双节点集成（真实 TCP）', () => {
     try {
       await providerA.start();
       await providerB.start();
+      await waitForListenAddrs(providerA);
+      await waitForListenAddrs(providerB);
 
       // 本机身份与监听地址
       expect(providerA.getLocalPeerId().id).toBe(identityA.peerId.id);

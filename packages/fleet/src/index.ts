@@ -15,6 +15,7 @@ export * from './config.js';
 export * from './onboard.js';
 export * from './quickstart.js';
 export * from './jointoken.js';
+export * from './qr.js';
 export * from './join.js';
 export * from './collab/dag.js';
 export * from './collab/tree.js';

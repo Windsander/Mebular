@@ -14,6 +14,16 @@ export interface RelayPolicyOptions {
   maxReservations?: number;
   /** 单次预约默认时长（ms；缺省交给 libp2p 默认） */
   reservationTtlMs?: number;
+  /**
+   * C6：动态「是否对外提供中转」谓词（守护内建 relay 角色：不可达时不提供）。
+   * 缺省视为 true（静态白名单模式的旧行为）。
+   */
+  shouldServe?: () => boolean;
+  /**
+   * C6：动态按 peer 判定谓词（地址簿 paired/config 白名单）。
+   * 提供时优先于静态 allowedRelayPeers/deniedRelayPeers。
+   */
+  isPeerAllowed?: (peerId: string) => boolean;
 }
 
 export interface RelayPolicy {
@@ -48,7 +58,12 @@ export function buildRelayPolicy(options: RelayPolicyOptions = {}): RelayPolicy 
   };
 
   return {
-    denyInboundRelayReservation: (peerId) => !isAllowed(peerId.toString()),
+    denyInboundRelayReservation: (peerId) => {
+      // C6：动态开关优先——不可达/未启用时一律拒绝预约（等价「不对外提供」）
+      if (options.shouldServe && options.shouldServe() !== true) return true;
+      if (options.isPeerAllowed) return options.isPeerAllowed(peerId.toString()) !== true;
+      return !isAllowed(peerId.toString());
+    },
     denyOutboundRelayedConnection: () => options.denyOutboundRelayedConnection === true,
     reservations,
     isDenied,

@@ -590,6 +590,8 @@ export async function buildSettings({ app, service, config, runtime, home }) {
     ...(await buildFleetView(home)),
     // C2：对端连接路径（只读；来自 core 地址簿的 path 状态）+ 地址簿元信息
     peers: buildPeerPaths(app),
+    // C6：内建 relay 角色（只读；mode/serving/reason/allowedClients + 当前经哪个桥）
+    relay: buildRelayView(app),
     // 实际可调用面（MCP 工具 = `mebular <name>` CLI，逐字同名同 handler）
     tools: TOOL_NAMES,
   };
@@ -623,6 +625,28 @@ function buildPeerPaths(app) {
     return { enabled: true, paths };
   } catch {
     return { enabled: false, paths: [] };
+  }
+}
+
+/**
+ * C6：内建 relay 角色视图（只读）。`reason` 说明为何开/关；`bridge` 是当前路径为 relay 时的桥地址。
+ * 注意：relay 角色不落任何记忆/授权状态，这里只回答「本机当不当桥、我现在经谁中转」。
+ */
+function buildRelayView(app) {
+  try {
+    const status = app?.node?.getRelayStatus?.() ?? null;
+    if (!status) return { mode: 'off', serving: false, reason: '网络未启用', publicAddrs: [], allowedClients: 0, bridge: null };
+    const book = app?.endpointBook;
+    let bridge = null;
+    if (book && typeof book.keys === 'function') {
+      for (const key of book.keys()) {
+        const path = book.getPath(key);
+        if (path?.kind === 'relay') { bridge = { peer: key, address: path.address, since: path.since }; break; }
+      }
+    }
+    return { ...status, bridge };
+  } catch {
+    return { mode: 'off', serving: false, reason: 'relay 状态不可读', publicAddrs: [], allowedClients: 0, bridge: null };
   }
 }
 

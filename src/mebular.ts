@@ -148,6 +148,12 @@ export interface MebularConfig {
      */
     loadBonjourModule?: () => unknown;
     /**
+     * C6：内建 relay 角色（守护内部；不再有 `mebular relay` 命令）。
+     * `auto`（默认）仅在「对外可达监听」或「入站直连证据」成立时对外提供中转；
+     * 仅服务地址簿中已配对/已授权对端；默认限额；**不落任何记忆/授权状态**。
+     */
+    relayService?: 'auto' | 'off' | 'on';
+    /**
      * libp2p 真实网络栈（可选依赖；缺包时报 NETWORK_LIBP2P_NOT_AVAILABLE）。
      * `relayServer`/`relayServers` 启用 circuit relay（G3；需额外可选依赖，
      * 缺包抛 NETWORK_RELAY_NOT_AVAILABLE）。
@@ -413,6 +419,11 @@ export class Mebular {
 
       // 6. 网络（可选）
       if (this.config.network?.enabled) {
+        // C6：relay 角色（守护内部）：off 不装配 circuitRelayServer；auto/on 装配并由 gater
+        // 动态决定是否放行预约（不可达时不提供），只放行地址簿 paired/config 的对端。
+        const relayMode: 'auto' | 'off' | 'on' = this.config.network.relayService
+          ?? (this.config.network.libp2p?.relayServer === true ? 'on' : 'auto');
+        const relayWanted = relayMode !== 'off';
         // C1：候选地址簿（离线安全：network 关闭时完全不加载/不落盘）
         if (this.config.network.autoConnect !== false || this.config.network.endpoints) {
           const book = new EndpointBook({
@@ -434,12 +445,20 @@ export class Mebular {
             },
             listen: this.config.network.libp2p.listen,
             protocol: this.config.network.libp2p.protocol,
-            relayServer: this.config.network.libp2p.relayServer,
+            relayServer: relayWanted,
+            ...(relayWanted
+              ? {
+                  relayPolicy: {
+                    ...(this.config.network.libp2p?.relayPolicy ?? {}),
+                    // 动态：读节点当前 relay 角色 + 地址簿白名单（节点在 provider 之后创建，惰性读取）
+                    shouldServe: () => this.nodeImpl?.relayGaterPredicates().serve === true,
+                    isPeerAllowed: (peerId: string) => this.nodeImpl?.relayGaterPredicates().isAllowed(peerId) === true,
+                  },
+                }
+              : {}),
             relayServers: this.config.network.libp2p.relayServers,
             relayUnlimited: this.config.network.libp2p.relayUnlimited,
-            ...(this.config.network.libp2p.relayPolicy !== undefined
-              ? { relayPolicy: this.config.network.libp2p.relayPolicy }
-              : {}),
+
           });
           await this.libp2pProvider.start();
           provider = this.libp2pProvider;
@@ -464,6 +483,7 @@ export class Mebular {
             autoDial: this.config.network.lan?.autoDial !== false,
           },
           useDefaultBonjourFactory: this.config.network.lan?.defaultFactory === true,
+          relayService: relayMode,
           // C3：白名单（sync.peerWhitelist）是发现事件「可自动拨号」的另一条允许路径
           peerAllowlist: this.config.sync?.peerWhitelist ?? [],
           ...(this.config.network.loadBonjourModule !== undefined

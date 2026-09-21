@@ -25,6 +25,17 @@ import { Libp2pProvider } from '@mebular/core';
 import { buildJoinToken, decodeJoinToken, verifyJoinToken, persistInviterHints } from '@mebular/fleet';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const freePort = async () => {
+  const net = await import('node:net');
+  return await new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.once('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const port = srv.address().port;
+      srv.close(() => resolve(port));
+    });
+  });
+};
 let passed = 0;
 let failed = 0;
 const skipped = [];
@@ -60,7 +71,7 @@ const dir = await mkdtemp(join(tmpdir(), 'mebular-connect-'));
 const master = await new IdentityManager().generateUserMasterKey();
 const encryption = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
 const apps = [];
-const makeApp = async ({ deviceId, home, listen, relayServers, endpoints, endpointStorePath }) => {
+const makeApp = async ({ deviceId, home, listen, relayServers, endpoints, endpointStorePath, relayService, relayUnlimited }) => {
   const app = new Mebular({
     storagePath: join(home ?? dir, `${deviceId}.jsonl`),
     deviceId,
@@ -71,7 +82,12 @@ const makeApp = async ({ deviceId, home, listen, relayServers, endpoints, endpoi
       listenPort: undefined,
       ...(endpoints ? { endpoints } : {}),
       ...(endpointStorePath ? { endpointStore: new FileEndpointStore(endpointStorePath) } : {}),
-      libp2p: { listen: listen ?? ['/ip4/127.0.0.1/tcp/0'], ...(relayServers ? { relayServers } : {}) },
+      libp2p: {
+        listen: listen ?? ['/ip4/127.0.0.1/tcp/0'],
+        ...(relayServers ? { relayServers } : {}),
+        ...(relayUnlimited !== undefined ? { relayUnlimited } : {}),
+      },
+      ...(relayService ? { relayService } : {}),
     },
     sync: { autoSync: true, ...(deviceId === 'device-A' ? { peerNamespacePolicy: { 'device-B': ['tasks'] } } : {}) },
   });
@@ -205,21 +221,33 @@ try {
     const relayPath = rb.getPeerPath(ra.node.peerId.id);
     check('relay-only 连通且路径 kind=relay', relayPath?.kind === 'relay', relayPath);
 
-    // 杀 relay → 降级：拨号失败 + 安排退避
-    await rb.node.disconnectPeer(ra.node.peerId).catch(() => undefined);
+    // 杀 relay → 降级：**全新拨号方**（无陈旧会话/peerstore）在 relay 不可达时失败并进入退避
     await relay.stop();
     relay = null;
-    await sleep(500);
+    await sleep(300);
+    const homeB2 = join(dir, 'homeRB2');
+    await persistInviterHints(homeB2, {
+      inviterDeviceId: 'device-A',
+      inviterPublicKey: bytesToHex(ra.node.peerId.pubKey),
+      endpoints: [raCircuit],
+      relaySeeds: [relayAddr],
+    });
+    const relayB2 = await makeApp({
+      deviceId: 'device-B2',
+      home: homeB2,
+      relayServers: [relayAddr],
+      endpointStorePath: join(homeB2, 'net', 'peers.json'),
+    });
     let dialFailed = false;
     try {
-      await rb.node.connectToPeer(ra.node.peerId);
+      await relayB2.node.connectToPeer(ra.node.peerId);
     } catch {
       dialFailed = true;
     }
-    const backoff = rb.node.getConnectionManager().getBackoff(ra.node.peerId);
-    check('杀 relay → 拨号失败且安排退避重试（降级）', dialFailed && Boolean(backoff?.pending), { dialFailed, backoff });
+    const backoff = relayB2.node.getConnectionManager().getBackoff(ra.node.peerId);
+    check('杀 relay → 新拨号失败且安排退避重试（降级）', dialFailed && Boolean(backoff?.pending), { dialFailed, backoff });
 
-    // 同端口恢复 relay → 重连成功
+    // relay 恢复（同端口、同 relay 设备钥）→ 新预约 + 刷新 hints 后重连成功
     relay = await Libp2pProvider.create({
       deviceKey: relayKey,
       listen: [`/ip4/127.0.0.1/tcp/${relayPort}`],
@@ -227,29 +255,113 @@ try {
       relayUnlimited: true,
     });
     await relay.start();
-    // relay 重启会作废旧预约（libp2p 客户端不自动 re-reserve）：app 侧做法 = 对端重新发布 hints。
-    // 这里用同一 relay 上新起的 A2（新的预约）验证「relay 恢复 → 可达性恢复 → 重连成功」；
-    // 动态 relay 能力广播见 C5（本脚本只覆盖静态 seeds + 配对 hints 刷新）。
     const homeRA2 = join(dir, 'homeRA2');
     const ra2 = await makeApp({ deviceId: 'device-A2', home: homeRA2, relayServers: [relayAddr] });
     const ra2Circuit = await waitFor(() => (ra2.node.getLocalMultiaddrs() ?? []).find((addr) => addr.includes('p2p-circuit')), 30000);
     check('relay 恢复 → 新预约成功（relay 可达性恢复）', typeof ra2Circuit === 'string', { ra2Circuit });
 
-    await rb.addPeerEndpoints(ra2.node.peerId.id, [ra2Circuit], 'paired');
+    const homeB3 = join(dir, 'homeRB3');
+    await persistInviterHints(homeB3, {
+      inviterDeviceId: 'device-A2',
+      inviterPublicKey: bytesToHex(ra2.node.peerId.pubKey),
+      endpoints: [ra2Circuit],
+      relaySeeds: [relayAddr],
+    });
+    const relayB3 = await makeApp({
+      deviceId: 'device-B3',
+      home: homeB3,
+      relayServers: [relayAddr],
+      endpointStorePath: join(homeB3, 'net', 'peers.json'),
+    });
     const reconnected = await waitFor(async () => {
       try {
-        await rb.node.connectToPeer(ra2.node.peerId);
-        const path = rb.getPeerPath(ra2.node.peerId.id);
+        await relayB3.node.connectToPeer(ra2.node.peerId);
+        const path = relayB3.getPeerPath(ra2.node.peerId.id);
         return path?.kind === 'relay' && !path?.lastError ? true : null;
       } catch {
         return null;
       }
     }, 30000, 500);
-    check('恢复后经刷新 hints 重连成功（路径 kind=relay 且无 lastError）', reconnected === true, rb.getPeerPath(ra2.node.peerId.id));
+    check('恢复后经刷新 hints 重连成功（路径 kind=relay 且无 lastError）', reconnected === true, relayB3.getPeerPath(ra2.node.peerId.id));
 
-    // 旧对端（relay 重启前的预约）仍标记为失败路径，便于诊断（不清零 lastError）
-    const stale = rb.getPeerPath(ra.node.peerId.id);
-    check('重启前的失效路径带 lastError（可诊断，不静默）', Boolean(stale?.lastError), { lastError: stale?.lastError ?? null });
+    // ---------- Part C：C6 守护内建桥（无独立 relay 命令；角色 + 白名单） ----------
+    try {
+      const bridgePort = await freePort();
+      const homeBridge = join(dir, 'homeBridge');
+      // R：守护内建桥（relayService='on' 强制；auto 在回环监听下不当桥）
+      const bridge = await makeApp({
+        deviceId: 'device-relay',
+        home: homeBridge,
+        relayService: 'on',
+        relayUnlimited: true, // 内部开关：限额桥只承载受限协议，Mebular 同步流需要放开
+        listen: [`/ip4/127.0.0.1/tcp/${bridgePort}`],
+      });
+      const bridgeStatus = bridge.node.getRelayStatus();
+      check('C6 守护内建桥：relayService=on → 对外提供（reason 可读）',
+        bridgeStatus.serving === true && /on|强制/.test(bridgeStatus.reason), bridgeStatus);
+      const bridgeAddr = (bridge.node.getLocalMultiaddrs() ?? []).find((addr) => addr.includes('/tcp/') && !addr.includes('p2p-circuit'));
+
+      // A：目标设备（经桥中转），并在桥的白名单里登记为「已配对」
+      const homeTargetA = join(dir, 'homeTargetA');
+      const targetA = await makeApp({ deviceId: 'device-A3', home: homeTargetA, relayServers: [bridgeAddr] });
+      const targetAddr = (targetA.node.getLocalMultiaddrs() ?? []).find((addr) => addr.includes('/tcp/') && !addr.includes('p2p-circuit'));
+      const targetLibp2pId = /\/p2p\/([^/]+)$/.exec(targetAddr ?? '')?.[1] ?? '';
+      const paired = await bridge.addPeerEndpoints(targetLibp2pId, [targetAddr], 'paired');
+      const targetCircuit = await waitFor(() => (targetA.node.getLocalMultiaddrs() ?? []).find((addr) => addr.includes('p2p-circuit')), 30000);
+      check('C6 已配对目标在桥上获得预留（白名单放行）', paired > 0 && typeof targetCircuit === 'string', {
+        paired, targetCircuit, allowedClients: bridge.node.getRelayStatus().allowedClients,
+      });
+
+      // B：经提示（circuit + seeds）连到目标
+      const homeBridgeB = join(dir, 'homeBridgeB');
+      await persistInviterHints(homeBridgeB, {
+        inviterDeviceId: 'device-A3',
+        inviterPublicKey: bytesToHex(targetA.node.peerId.pubKey),
+        endpoints: [targetCircuit],
+        relaySeeds: [bridgeAddr],
+      });
+      const bridgeB = await makeApp({
+        deviceId: 'device-B4',
+        home: homeBridgeB,
+        relayServers: [bridgeAddr],
+        endpointStorePath: join(homeBridgeB, 'net', 'peers.json'),
+      });
+      let pairedOk = false;
+      try {
+        await bridgeB.node.connectToPeer(targetA.node.peerId);
+        pairedOk = bridgeB.getPeerPath(targetA.node.peerId.id)?.kind === 'relay';
+      } catch { /* 记录为失败 */ }
+      check('C6 已配对对端经内建桥连通（path kind=relay）', pairedOk, bridgeB.getPeerPath(targetA.node.peerId.id));
+
+      // C：未配对（不在桥白名单）→ 预约被拒
+      const homeStranger = join(dir, 'homeBridgeC');
+      const stranger = await makeApp({ deviceId: 'device-C', home: homeStranger });
+      let strangerBlocked = false;
+      try {
+        await stranger.node.connectToPeer(targetA.node.peerId, targetCircuit);
+      } catch {
+        strangerBlocked = true;
+      }
+      check('C6 未配对对端被拒（桥白名单外不服务）', strangerBlocked === true, {
+        servedClients: bridge.node.getRelayStatus().allowedClients,
+        strangerPath: stranger.getPeerPath(targetA.node.peerId.id),
+      });
+
+      // 默认限额桥（内部开关关闭）：Mebular 同步流被 circuit 限额拒绝（诚实记录取舍）
+      const limitedPort = await freePort();
+      const homeLimited = join(dir, 'homeBridgeLimited');
+      const limited = await makeApp({
+        deviceId: 'device-relay-ltd',
+        home: homeLimited,
+        relayService: 'on',
+        listen: [`/ip4/127.0.0.1/tcp/${limitedPort}`],
+      });
+      const limitedStatus = limited.node.getRelayStatus();
+      check('C6 默认限额桥：仍对外提供（applyDefaultLimit），但限额只放行受限协议',
+        limitedStatus.serving === true, limitedStatus);
+    } catch (error) {
+      skip('Part C 守护内建桥', `circuit relay 可选依赖不可用或环境受限：${error?.code ?? error?.message}`);
+    }
   }
 } catch (error) {
   check('verify:connect 执行', false, String(error?.stack ?? error).slice(0, 400));

@@ -1138,6 +1138,26 @@ try {
       'path-row 复用 --row-label-w');
   }
 
+  // ---------- C6：内建 relay 角色（只读渲染断言，不涉行为） ----------
+  {
+    const settingsRelay = await getJson(port, '/admin/api/settings');
+    const relay = settingsRelay.json?.relay;
+    check('C6 settings.relay 暴露内建桥角色（mode/serving/reason/publicAddrs/allowedClients）',
+      relay && ['auto', 'off', 'on'].includes(relay.mode) && typeof relay.serving === 'boolean'
+        && typeof relay.reason === 'string' && Array.isArray(relay.publicAddrs) && typeof relay.allowedClients === 'number',
+      relay);
+    const consoleSrc4 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const tokensC6 = ['本机当桥', '当前经桥', '桥白名单'];
+    check('C6 控制台只读展示「本机当桥/当前经桥/桥白名单」',
+      tokensC6.every((token) => consoleSrc4.includes(token)),
+      tokensC6.filter((token) => !consoleSrc4.includes(token)).join(',') || '全部命中');
+    const binSrc = await readFile(join(rootDir, 'packages', 'mcp', 'bin', 'mebular.mjs'), 'utf-8');
+    // 注意：用拼接构造被禁字样，避免本文件自身命中「无残留引用」扫描
+    const forbidden = [['case ', "'relay'"].join(''), ['runRelay', 'Host'].join(''), ['MEBULAR_', 'RELAY_'].join('')];
+    check('C6 无独立 relay 命令（bin 无 relay 子命令 / 旧实现 / 旧环境变量）',
+      forbidden.every((token) => !binSrc.includes(token)));
+  }
+
   // ---------- 未知 API ----------
   const unknown = await getJson(port, '/admin/api/nope');
   check('未知 /admin/api 路径 404', unknown.status === 404);

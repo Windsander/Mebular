@@ -160,7 +160,7 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - **路径查询**：`doctor --net`（排障）与控制台「关于本机 → 对端连接路径」/设备卡只读行展示 `kind/address/since/lastError`。
 - **配对 hints**：`fleet invite` / 控制台邀请签发的令牌携带 `endpoints`（邀请方可达 multiaddr）、可选 `relaySeeds`、`pubReachable`；旧令牌无这些字段仍可用（**向后兼容**）。新设备 `fleet join` 后写入本机地址簿（同时写 deviceId 键与派生 peerId 键 → 首次拨号即可命中）。
 - **relay seeds**：`network.relaySeeds`（配置）与令牌随附的 seeds 会被并入 `network.libp2p.relayServers`，使新设备能拨 circuit 地址。
-- **自托管 relay**：`mebular relay`（默认限额；`--unlimited` 显式放开，仅可信环境）打印 multiaddr 与对端配置片段；`--print-only` 只打印。注意 relay 与 serve **共用 home 会撞单实例锁**（`<home>/lock`），请用独立 `MEBULAR_HOME` 跑 relay（CLI 会提示，不自动注册 service 单元）。
+- **中转（内部化，C6）**：不再有独立的 `mebular relay` 命令——守护内建 relay 角色，`network.relayService: 'auto'|'off'|'on'`（默认 auto）。见下方 §9。
 - **relay 白名单/上限**：`network.libp2p.relayPolicy`（`allowedRelayPeers` / `deniedRelayPeers` / `maxReservations` / `reservationTtlMs` / `denyOutboundRelayedConnection`）→ 组装 libp2p `connectionGater` 与 `circuitRelay.reservations`。
 - **能力共享边界**：本轮只做「配对时 hints + 配置 seeds」；relay 能力的动态广播见 C5。relay 重启会作废旧预约（libp2p 客户端不自动 re-reserve）：恢复路径是**对端重新发布 hints**（控制台/`fleet invite` 再签一次）。
 - 验收：`npm run verify:connect`（hints-only 自动连通 + 杀 relay 降级/退避 + 恢复重连 + 路径状态断言）。
@@ -174,3 +174,16 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - **观察**：`mebular doctor --net` 显示发现是否启用/在跑、LAN 候选数、忽略的陌生设备数、当前路径与 lastError；控制台「关于本机 → 对端连接路径」与设备卡显示 `kind/address/最近切换`。
 - **平台/CI**：确定式 harness 走注入的假 bonjour（不依赖真 mDNS），CI ubuntu 跑 `npm run verify:lan`；真 mDNS 为「尽力而为」（受限环境 SKIP，不判红）；Windows job 不跑真 mDNS（只构建/单测 + fleet local/onboard），mDNS 行为由 ubuntu 的确定式 harness 覆盖。
 - 验收：`npm run verify:lan`（已配对自动连通 / 陌生设备不拨号 / LAN 升级 / LAN 撤销降级 / 关闭发现 / 默认 factory 软降级）。
+
+## 9. 中继内部化（C6：桥的选举自动完成）
+
+- **没有独立 relay 命令**：`mebular relay` 已删除；中继是**守护内部角色**，与 serve 同生命周期。
+- **开关**：`network.relayService: 'auto' | 'off' | 'on'`（默认 `auto`）。
+  - `auto`：仅当存在**对外可达监听地址**（公网，非回环/私网）**或**观察到**入站直连证据**时才对外提供中转；否则静默不提供（不报错、不占资源）。
+  - `off`：从不提供；`on`：强制提供（内部/测试开关）。
+  - `network.libp2p.relayServer` 保留为**内部/测试开关**（等价 `on`），不面向用户文档。
+- **白名单**：只服务地址簿中**已配对/已授权**（`paired`/`config` 来源；C2 已写 deviceId + 派生 peerId 双键）的对端；纯发现/学习来的对端不服务。
+- **默认限额**：`applyDefaultLimit` + `maxReservations`（复用 `RelayPolicy`）。注意：限额只放行 **受限协议**——**Mebular 同步流经 circuit 需要内部开关 `network.libp2p.relayUnlimited: true`**（不面向用户文档，仅自托管可信桥使用）；不放开时桥仍可服务（identify 等），但同步流会被 `LimitedConnectionError` 拒绝。
+- **不变式**：relay 角色**不落任何记忆/授权状态**（不写图事件、不改策略），中继流量对双方仍是端到端加密信道。
+- **观察**：控制台「关于本机 → 运行状态」显示「本机当桥 开/关（原因）」与「当前经桥」（当前路径为 relay 时给出桥地址）；`mebular doctor --net` 输出 `relay` 段（mode/serving/reason/publicAddrs/allowedClients）。
+- **桥的广播**：可达设备自动当桥 + 地址广播属 C5（`net_endpoints` 记录），本轮只做「本机角色判定 + 白名单 + 限额」。

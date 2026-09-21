@@ -43,6 +43,7 @@
 - **Switching `mcp.http.auth` to `bearer`/`oauth` locks the console API immediately.** `bearer` is recoverable inside the UI (paste a `mebular token grant` token) and the page stays reachable; `oauth` needs env secrets and cannot be recovered from the UI — edit `config.json` back to `auth: none` (loopback only) or supply `MEBULAR_OAUTH_*` and restart.
 - **Address book is app-scoped and file-based.** `<home>/net/peers.json` (0600) holds candidate endpoints; core never reads files (the app passes a store). Relay seeds live under a reserved key and are merged into `relayServers` at startup — dynamic relay capability broadcast is deferred to C5.
 - **Relay restart invalidates reservations.** libp2p relay clients do not automatically re-reserve after a relay restart; recovery is the peer republishing hints (re-invite / refreshed token).
+- **LAN discovery is best-effort mDNS.** In the library form mDNS is off unless `Mebular.network.lan.defaultFactory` is set; the daemon (MCP) enables it by default when `network.lan.enabled` is true. It publishes/browses `_mebular._tcp`; discovery only auto-dials peers already in the address book (paired/config) or explicitly whitelisted — unknown devices are ignored. mDNS is unavailable in some sandboxes/CI, and the `bonjour` dependency is loaded defensively (fail-soft: discovery disabled + warning, other transports unaffected). Real-mDNS acceptance is best-effort; the deterministic harness (injected fake bonjour) is the gate.
 - **Console is local and loopback-oriented.** The GUI (`/console`) is served by the daemon; non-loopback exposure
   requires TLS + non-none auth (enforced at startup). Writes need `memory.admin` scope **and** CSRF; set
   `MEBULAR_CONSOLE_WRITES=0` for a strictly read-only console. Live status uses SSE (`/admin/events`), but
@@ -67,6 +68,7 @@
 - **同机 Agent 默认可信**（设备级身份、不做加密隔离）；跨机仍需证书链 + 显式分区授权。
 - **吊销是域收缩**：不回撤已入图数据、仍可建会话；级联在事件同步到达后生效（有传播延迟）；`__policy__` 对已认证设备（含被吊销者）可读。
 - **单写者**：守护持 store 锁，第二个写者明确拒绝；**配额仅本地记账**；令牌加入为 LAN 明文 HTTP+bearer。
+- **LAN 自动发现（C3）**：mDNS 尽力而为；仅对已知/白名单对端自动拨号（陌生设备忽略）；`bonjour` 缺失时发现软降级（告警，不影响其他连接）；真 mDNS 验收为尽力而为，确定式 harness 才是门禁。
 - **配对即连（C1+C2）**：候选地址簿 `<home>/net/peers.json`（0600，core 不读文件、由 app 传路径）；relay 重启会作废旧预约，靠对端重新发布 hints 恢复；relay 能力动态广播留 C5。
 - **控制台设置页**：常用/高级/诊断三 Tab + 「关于本机」只读面板；`sync.autoSync`/`sync.pushOnWrite` 默认常开且不再出现在编辑面（只读展示，改需手改 config.json）；运行时生效项一律「已配置 / 实际」双值。
 - **控制台**：仅本机/回环（非回环需 TLS+非 none 鉴权，启动强制）；写需 `memory.admin` scope + CSRF，可 `MEBULAR_CONSOLE_WRITES=0` 只读；状态脉冲走 SSE，列表轮询刷新。邀请令牌的 endpoint 由 `joinService.bind` 推导（通配取 LAN IPv4，无 LAN 则回环并告警）；`auth` 切到 bearer/oauth 会立即锁住控制台 API（oauth 只能改回配置自救）。

@@ -171,6 +171,10 @@ describe('P2PNode：provider multiaddr 自动桥接到发现层', () => {
         const published = mock._getPublishedServices();
         expect(published).toHaveLength(1);
         expect(published[0]!.txt.addrs).toBe(expected);
+        if (expected !== undefined) {
+          // C3：端口从 multiaddr 回填（真 bonjour 拒绝 0 端口）
+          expect(published[0]!.port).toBe(41001);
+        }
       } finally {
         await node.stop();
       }

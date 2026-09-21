@@ -20,6 +20,7 @@ export {
   type BonjourServiceFactory,
 } from './DeviceDiscovery.js';
 export { ConnectionManager, type ConnectionManagerOptions } from './connection/ConnectionManager.js';
+export { createDefaultBonjourFactory, type DefaultBonjourFactoryOptions } from './discovery/bonjourDefault.js';
 export { buildRelayPolicy, type RelayPolicy, type RelayPolicyOptions } from './connection/RelayPolicy.js';
 export {
   EndpointBook,

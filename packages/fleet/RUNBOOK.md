@@ -164,3 +164,13 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - **relay 白名单/上限**：`network.libp2p.relayPolicy`（`allowedRelayPeers` / `deniedRelayPeers` / `maxReservations` / `reservationTtlMs` / `denyOutboundRelayedConnection`）→ 组装 libp2p `connectionGater` 与 `circuitRelay.reservations`。
 - **能力共享边界**：本轮只做「配对时 hints + 配置 seeds」；relay 能力的动态广播见 C5。relay 重启会作废旧预约（libp2p 客户端不自动 re-reserve）：恢复路径是**对端重新发布 hints**（控制台/`fleet invite` 再签一次）。
 - 验收：`npm run verify:connect`（hints-only 自动连通 + 杀 relay 降级/退避 + 恢复重连 + 路径状态断言）。
+
+## 8. LAN 自动发现与 LAN↔WAN 无感切换（C3）
+
+- **开关**：`network.lan.enabled`（默认 true；false = 不装配 mDNS 发现层）、`network.lan.autoDial`（默认 true）。
+- **安全不变式**：发现事件只对「地址簿已知（paired/config，含 deviceId↔peerId 别名键）」或「`sync.peerWhitelist` 放行」的对端记录 LAN 候选并自动拨号；**陌生设备只忽略、绝不自动拨号**（`doctor --net` 会显示忽略计数）。
+- **路径切换**：LAN 候选按 `classifyEndpoint` 归类为 `lan`（私有 IPv4/.local/link-local），优先级 `direct > lan > relay`；发现到新 LAN 而当前走 relay/direct → **断开重连升级**；mDNS 撤销/超时 → 移除该 LAN 候选、断开现链并回退 relay/direct；同地址重报不抖动。
+- **默认 mDNS（库 vs 常驻）**：core 提供默认 bonjour factory（加载已声明依赖 `bonjour`）；**库形态默认不启用**（`Mebular.network.lan.defaultFactory` 默认 false，避免库/测试产生多播副作用），**常驻入口默认启用**（MCP 守护在 `network.lan.enabled` 为真时置 `defaultFactory: true`）。缺包/初始化失败 → **软降级**（发现禁用 + 告警，其他连接方式不受影响），可注入替代 factory。
+- **观察**：`mebular doctor --net` 显示发现是否启用/在跑、LAN 候选数、忽略的陌生设备数、当前路径与 lastError；控制台「关于本机 → 对端连接路径」与设备卡显示 `kind/address/最近切换`。
+- **平台/CI**：确定式 harness 走注入的假 bonjour（不依赖真 mDNS），CI ubuntu 跑 `npm run verify:lan`；真 mDNS 为「尽力而为」（受限环境 SKIP，不判红）；Windows job 不跑真 mDNS（只构建/单测 + fleet local/onboard），mDNS 行为由 ubuntu 的确定式 harness 覆盖。
+- 验收：`npm run verify:lan`（已配对自动连通 / 陌生设备不拨号 / LAN 升级 / LAN 撤销降级 / 关闭发现 / 默认 factory 软降级）。

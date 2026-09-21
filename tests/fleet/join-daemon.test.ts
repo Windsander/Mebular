@@ -6,7 +6,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { IdentityManager } from '@mebular/core';
+import { IdentityManager, derivePeerIdHex } from '@mebular/core';
 import {
   encodeJoinToken,
   joinWithToken,
@@ -51,15 +51,19 @@ describe('W2 joinWithToken --daemon', () => {
     });
     await new Promise<void>((r) => server.listen(0, '127.0.0.1', () => r()));
     const endpoint = `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
-    const token = encodeJoinToken({
-      v: 1, kind: 'mebular-fleet-join-token',
+    const tokenPayload = {
+      v: 1 as const, kind: 'mebular-fleet-join-token' as const,
       inviterDeviceId: 'device-A',
       inviterPublicKey: Buffer.from(im.getDeviceKey('device-A')!.publicKey).toString('hex'),
       inviterChain: aChain,
       masterPublicKey: Buffer.from(masterPub).toString('hex'),
       namespace: 'tasks', nonce: 'n1', issuedAt: 0, expiresAt: Date.now() + 60000,
       endpoint, signature: 'x',
-    });
+      // C2/C3：配对 hints（验证 joinWithToken 内的接线真的写地址簿）
+      endpoints: ['/ip4/192.168.50.20/tcp/4001/p2p/device-A-peer'],
+      relaySeeds: ['/ip4/203.0.113.9/tcp/4001/p2p/relayZ'],
+    };
+    const token = encodeJoinToken(tokenPayload);
     const dir = await mkdtemp(join(tmpdir(), 'join-daemon-'));
     const daemonPort = await freePort();
     const joinPort = await freePort();
@@ -74,6 +78,15 @@ describe('W2 joinWithToken --daemon', () => {
       expect(daemonCfg.encryption.userMasterPublicKeyFile).toBe(join(dir, 'user-master-key.json'));
       expect(daemonCfg.network.peers[0].device).toBe('device-A');
       expect(daemonCfg.joinService.enabled).toBe(true);
+      // F-C12-1：join 后地址簿必须落盘 hints（deviceId + 派生 peerId 双键 + seeds 保留键）
+      expect(res.hinted).toBeGreaterThan(0);
+      const peersFile = JSON.parse(readFileSync(join(dir, 'net', 'peers.json'), 'utf-8'));
+      const derivedKey = derivePeerIdHex(new Uint8Array(Buffer.from(tokenPayload.inviterPublicKey, 'hex')));
+      expect(peersFile['device-A'][0].address).toBe('/ip4/192.168.50.20/tcp/4001/p2p/device-A-peer');
+      expect(peersFile['device-A'][0].source).toBe('paired');
+      expect(peersFile[derivedKey][0].source).toBe('paired');
+      expect(peersFile['__relay-seeds__'][0].address).toBe('/ip4/203.0.113.9/tcp/4001/p2p/relayZ');
+
       const fleetCfg = await loadFleetConfig(fleetConfigPath(dir));
       expect(fleetCfg.store).toBe('daemon');
       expect(fleetCfg.daemon?.endpoint).toBe(`http://127.0.0.1:${daemonPort}`);

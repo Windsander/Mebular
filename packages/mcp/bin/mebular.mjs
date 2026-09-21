@@ -338,6 +338,19 @@ async function runNetDoctor() {
     runtime.nodeError = error.message;
   }
 
+  // C3：LAN 自动发现状态（发现层是否启用/在跑、LAN 候选、忽略的陌生设备）
+  let lan = null;
+  try {
+    const { app } = await createMebular();
+    try {
+      lan = app.node?.getLanStatus?.() ?? null;
+    } finally {
+      await app.shutdown().catch(() => undefined);
+    }
+  } catch (error) {
+    lan = { error: error.message };
+  }
+
   // relay seeds 探针（TCP 可达性）
   const seedProbes = [];
   for (const seed of seeds) {
@@ -354,6 +367,9 @@ async function runNetDoctor() {
   if (totalHints === 0) next.push('无配对 hints：用 `fleet invite`/控制台邀请，让新设备拿到可达地址（token.endpoints）');
   const failedSeeds = seedProbes.filter((p) => p.reachable === false);
   if (failedSeeds.length > 0) next.push(`relay seed 不可达（${failedSeeds.map((p) => p.seed).join(', ')}）：确认 relay 进程在跑、端口放行`);
+  if (lan && lan.enabled && !lan.running) next.push(`LAN 发现未运行${lan.lastError ? `（${lan.lastError}）` : ''}：检查 bonjour 依赖或 network.lan.enabled`);
+  if (lan && lan.ignoredUnknown > 0) next.push(`发现了 ${lan.ignoredUnknown} 个未配对设备（已忽略、未拨号）：如确需连通，先用邀请令牌配对（写入地址簿）或加入 sync.peerWhitelist`);
+  if (lan && lan.lanCandidates === 0 && lan.running) next.push('LAN 发现已启用但暂无 LAN 候选：确认同网段、mDNS 未被防火墙拦截（跨网段请用 relay seeds）');
   const disconnected = runtime.paths.filter((p) => !p.path);
   if (disconnected.length > 0) next.push(`有候选但未连上的对端 ${disconnected.length} 个：看 lastError，必要时把 relay 加入 network.relaySeeds`);
 
@@ -369,6 +385,7 @@ async function runNetDoctor() {
         }
       : { loaded: false, error: bookError },
     configHints: hints,
+    lan,
     relaySeeds: seedProbes,
     runtime,
     next,

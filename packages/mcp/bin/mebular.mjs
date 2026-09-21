@@ -364,6 +364,19 @@ async function runNetDoctor() {
     netStatus = { error: error.message };
   }
 
+  // C4：NAT 穿透状态（AutoNAT/DCUtR + 直连升级计数）
+  let natStatus = null;
+  try {
+    const { app } = await createMebular();
+    try {
+      natStatus = app.getNatStatus?.() ?? null;
+    } finally {
+      await app.shutdown().catch(() => undefined);
+    }
+  } catch (error) {
+    natStatus = { error: error.message };
+  }
+
   // C6：内建 relay 角色（本机当不当桥、原因、白名单客户端数）
   let relay = null;
   try {
@@ -393,6 +406,8 @@ async function runNetDoctor() {
   if (totalHints === 0) next.push('无配对 hints：用 `fleet invite`/控制台邀请，让新设备拿到可达地址（token.endpoints）');
   const failedSeeds = seedProbes.filter((p) => p.reachable === false);
   if (failedSeeds.length > 0) next.push(`relay seed 不可达（${failedSeeds.map((p) => p.seed).join(', ')}）：确认 relay 进程在跑、端口放行`);
+  if (natStatus && natStatus.loadError) next.push(`NAT 打洞不可用（${natStatus.loadError}）：安装可选依赖 @libp2p/autonat @libp2p/dcutr 可启用（缺包不影响其他连接方式）`);
+  if (natStatus && natStatus.dcutrEnabled && (natStatus.directUpgrades ?? 0) === 0 && (natStatus.relayConnections ?? 0) > 0) next.push('有 relay 连接但尚未观察到直连升级：对端/本机可能都是对称 NAT（打洞失败属预期，保留 relay）');
   if (netStatus && !netStatus.enabled) next.push('地址自动广播未开启（opt-in）：把 `__net__` 加入 sync.namespaces 或配置 network.broadcast:{mode:"full"} 即可让可达设备互相广播地址');
   if (netStatus && netStatus.enabled && netStatus.published === 0) next.push('已开启地址广播但尚未发布：启动/可达性变化后会自动发布（首次可能因地址未变而跳过）');
   if (netStatus && Object.values(netStatus.ignored ?? {}).reduce((a, b) => a + b, 0) > 0) next.push(`有被忽略的广播记录（${Object.entries(netStatus.ignored).filter(([, v]) => v > 0).map(([k, v]) => `${k}:${v}`).join(' ')}）：过期/吊销/伪装 subject 属预期忽略`);
@@ -418,6 +433,7 @@ async function runNetDoctor() {
     configHints: hints,
     lan,
     net: netStatus,
+    nat: natStatus,
     relay,
     relaySeeds: seedProbes,
     runtime,

@@ -1214,6 +1214,20 @@ try {
       { qrcode: pkg.optionalDependencies?.qrcode });
   }
 
+  // ---------- C4：NAT 打洞（只读渲染断言） ----------
+  {
+    const settingsNat = await getJson(port, '/admin/api/settings');
+    const nat = settingsNat.json?.nat;
+    check('C4 settings.nat 暴露打洞状态（enabled/autonat/dcutr/directUpgrades/relayConnections/loadError）',
+      nat && typeof nat.enabled === 'boolean' && typeof nat.autonatEnabled === 'boolean'
+        && typeof nat.dcutrEnabled === 'boolean' && typeof nat.directUpgrades === 'number'
+        && typeof nat.relayConnections === 'number' && 'loadError' in nat,
+      nat);
+    const consoleSrc7 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    check('C4 控制台只读展示「NAT 打洞」（AutoNAT/DCUtR/直连升级）',
+      ['NAT 打洞', 'DCUtR', '直连升级'].every((token) => consoleSrc7.includes(token)));
+  }
+
   // ---------- 未知 API ----------
   const unknown = await getJson(port, '/admin/api/nope');
   check('未知 /admin/api 路径 404', unknown.status === 404);

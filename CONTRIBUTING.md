@@ -55,6 +55,7 @@ Mebular 仍在早期：功能可用，API 未稳定，未发 npm 包；生产使
 | LAN 发现 | `npm run verify:lan`（LAN 自动拨号 / 陌生设备不拨号 / LAN↔WAN 切换） |
 | 扫码即通 | `npm run verify:invite`（令牌 grant 语义 / 二维码与降级 / 兑换自动授权 / TTL 撤销） |
 | 依赖政策 | `npm run check:deps`（THIRD-PARTY 登记 + 精确 pin + 无幽灵依赖） |
+| 打洞 | `npm run verify:nat`（AutoNAT/DCUtR 装配与软降级 / 直连升级 / 失败保留 relay） |
 | 表面一致性 | `npm run check:surface-parity`（MCP 工具 ↔ CLI 逐字同名、无孤儿） |
 | 整洁性 | `npm run check:cleanliness`（孤儿模块 / 失效引用 / 裸 throw） |
 | 文档一致性 | `npm run check:docs`（EN/CN 结构对齐、链接存在、工具名一致、无手写数字） |

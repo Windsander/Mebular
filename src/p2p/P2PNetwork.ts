@@ -112,6 +112,8 @@ export interface P2PNetwork {
   getRelayStatus(): RelayRoleStatus;
   /** C6/C5：relay 角色变化回调（供 app 触发地址广播等） */
   onRelayRoleChanged(callback: (decision: RelayRoleDecision) => void): void;
+  /** C4：打洞/直连成功上报（地址簿候选 + 路径升级 direct） */
+  noteDirectConnection(peerIdHex: string, address: string): void;
   discoverPeer(peerId: PeerId): Promise<PeerInfo | null>;
   /**
    * 连接对端。`address` 提供时按显式地址拨号（手动 multiaddr / relay），
@@ -674,6 +676,19 @@ export class P2PNode implements P2PNetwork {
 
   onRelayRoleChanged(callback: (decision: RelayRoleDecision) => void): void {
     this.relayRoleChangedCallbacks.push(callback);
+  }
+
+  /**
+   * C4：观测到直连（AutoNAT/DCUtR 打洞成功或本就直接）→ 入候选池并**升级路径为 direct**。
+   * 只动地址簿/路径状态；不涉授权。
+   */
+  noteDirectConnection(peerIdHex: string, address: string): void {
+    if (!peerIdHex || !address || address.includes('/p2p-circuit')) return;
+    const book = this.endpointBook;
+    if (!book) return;
+    void book.upsert(peerIdHex, [address], 'learned').catch(() => undefined);
+    book.recordSuccess(peerIdHex, address);
+    book.setPath(peerIdHex, address);
   }
 
   /** C6：Libp2pProvider 用 —— 当前是否对外提供中转 + 是否放行该 peer */

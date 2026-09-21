@@ -205,6 +205,8 @@ export async function createMebular() {
       },
       endpoints: networkHints(config),
       endpointStore: new FileEndpointStore(effective.endpointsPath),
+      // C4：NAT 穿透（AutoNAT/DCUtR）直通；未配置 = auto（依赖在场即启用）
+      ...(config.network?.nat ? { nat: config.network.nat } : {}),
       ...(config.network?.libp2p || bookSeeds.length > 0
         ? {
             libp2p: {

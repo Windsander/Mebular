@@ -936,6 +936,10 @@ function renderAbout() {
         kvRow('地址广播', s.net
           ? `${s.net.enabled ? `${escapeHtml(String(s.net.mode))} 档` : '未开启（opt-in：把 __net__ 加入订阅或配置 network.broadcast）'} · 已发布 ${s.net.published} · 已采用 ${s.net.applied}`
           : '—'),
+        // C4：NAT 穿透（只读）
+        kvRow('NAT 打洞', s.nat
+          ? `${s.nat.dcutrEnabled ? 'DCUtR 开' : 'DCUtR 关'} · ${s.nat.autonatEnabled ? 'AutoNAT 开' : 'AutoNAT 关'} · 直连升级 ${s.nat.directUpgrades ?? 0} 次${s.nat.loadError ? ` ⚠ ${escapeHtml(String(s.nat.loadError))}` : ''}`
+          : '未启用（libp2p 未装配）'),
         kvRow('广播忽略', s.net && Object.values(s.net.ignored ?? {}).some((v) => v > 0)
           ? escapeHtml(Object.entries(s.net.ignored).filter(([, v]) => v > 0).map(([k, v]) => `${k} ${v}`).join(' / '))
           : '无'),

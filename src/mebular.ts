@@ -170,6 +170,11 @@ export interface MebularConfig {
      */
     broadcast?: { mode?: NetBroadcastMode; ttlMs?: number };
     /**
+     * C4：NAT 穿透（AutoNAT 可达性 + DCUtR 打洞）。默认 auto（可选依赖在场即启用）。
+     * 打洞成功 → 直连并**升级路径为 direct**；失败/超时 → 保留 relay（不阻塞，后台重试）。
+     */
+    nat?: { autonat?: boolean; dcutr?: boolean };
+    /**
      * libp2p 真实网络栈（可选依赖；缺包时报 NETWORK_LIBP2P_NOT_AVAILABLE）。
      * `relayServer`/`relayServers` 启用 circuit relay（G3；需额外可选依赖，
      * 缺包抛 NETWORK_RELAY_NOT_AVAILABLE）。
@@ -473,6 +478,7 @@ export class Mebular {
             listen: this.config.network.libp2p.listen,
             protocol: this.config.network.libp2p.protocol,
             relayServer: relayWanted,
+            ...(this.config.network.nat !== undefined ? { nat: this.config.network.nat } : {}),
             ...(relayWanted
               ? {
                   relayPolicy: {
@@ -520,6 +526,10 @@ export class Mebular {
         this.syncImpl.attachToNode(node);
         await node.start();
         this.nodeImpl = node;
+        // C4：打洞/直连成功 → 路径升级 direct（地址簿 + path 状态）
+        this.libp2pProvider?.onDirectUpgrade?.((peerIdHex, address) => {
+          this.nodeImpl?.noteDirectConnection(peerIdHex, address);
+        });
 
         // C5：地址自动广播（opt-in；只作 hints）。读取侧接入远端事件（不改任何授权判定）。
         this.netBroadcastMode = this.config.network?.broadcast?.mode ?? 'full';
@@ -1087,6 +1097,25 @@ export class Mebular {
       ];
     }
     return true;
+  }
+
+  /** C4：NAT 穿透状态（只读；诊断与控制台展示） */
+  getNatStatus(): {
+    enabled: boolean;
+    autonatEnabled: boolean;
+    dcutrEnabled: boolean;
+    loadError: string | null;
+    directUpgrades: number;
+    relayConnections: number;
+    lastUpgradeAt: number | null;
+    lastError: string | null;
+  } | null {
+    const status = this.libp2pProvider?.getNatStatus?.();
+    if (!status) return null;
+    return {
+      enabled: this.config.network?.nat !== undefined || status.autonatEnabled || status.dcutrEnabled,
+      ...status,
+    };
   }
 
   /** C5：广播/采用状态（只读；诊断与控制台展示） */

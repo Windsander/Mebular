@@ -214,3 +214,17 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - **依赖政策**：二维码依赖可选依赖 `qrcode`（精确 pin，见 [`THIRD-PARTY.md`](../../THIRD-PARTY.md)）；缺包时**只给文本**，不报错。门禁 `npm run check:deps`。
 - **观察**：控制台邀请面板显示二维码与「自动授权 / 24h 到期」说明；`doctor --net` 不受影响。
 - 验收：`npm run verify:invite`（令牌语义 / 渲染与降级 / 兑换即通 / TTL 撤销 / `--qr` 等价）。
+
+## 12. 打洞（C4：AutoNAT + DCUtR）
+
+- **开关**：`network.nat: { autonat?: boolean, dcutr?: boolean }`（默认 **auto**：可选依赖在场即启用）。
+  可选依赖：`@libp2p/autonat` + `@libp2p/dcutr`（精确 pin，见 [`THIRD-PARTY.md`](../../THIRD-PARTY.md)）。
+- **行为**：与对端先经 relay 建立 circuit 连接 → DCUtR 协调打洞 → 成功即出现**直连**，本机观测到直连后
+  **自动把路径升级为 `direct`**（候选入库 + `path-changed`）；失败/超时**保留 relay**（不阻塞，后台按 libp2p 策略重试）。
+- **可达性**：AutoNAT 自检本机是否公网可达（与 C6 的 relay 角色、C5 的 `pubReachable` 信息一致，但**互不替代**）。
+- **降级**：缺任一依赖 → 打洞禁用 + 告警（`getNatStatus().loadError`），**不影响**其他连接方式（直连/relay 照常）。
+- **暴露面**：AutoNAT 会对本机监听地址做**外部回拨探测**；DCUtR 经已建立的 relay 连接交换协调信息（**不新增第三方**、不引公共种子）。
+  两者**都不参与授权判定**，也不改变数据面加密（端到端信道不变）。
+- **观察**：控制台「关于本机 → 运行状态」显示「NAT 打洞」（AutoNAT/DCUtR 开关、直连升级次数、loadError）；
+  `mebular doctor --net` 输出 `nat` 段与建议（如有 relay 连接但无直连升级 → 可能双方都是对称 NAT，属预期）。
+- 验收：`npm run verify:nat`（服务装配/直连观测/软降级 + 路径升级与失败保留 + 真 libp2p 两节点 DCUtR 尽力而为）。

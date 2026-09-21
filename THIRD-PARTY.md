@@ -21,6 +21,8 @@
 | `@chainsafe/libp2p-noise` | `^17.0.0`（legacy-range） | Apache-2.0 OR MIT | libp2p 连接加密 | 缺包 → `NETWORK_LIBP2P_NOT_AVAILABLE`（诚实报错，不静默降级） |
 | `@chainsafe/libp2p-yamux` | `^8.0.1`（legacy-range） | Apache-2.0 OR MIT | libp2p 流复用 | 同上 |
 | `@libp2p/circuit-relay-v2` | `^4.2.13`（legacy-range） | Apache-2.0 OR MIT | circuit relay（C6 内建桥角色 / relay 客户端） | 缺包 → `NETWORK_RELAY_NOT_AVAILABLE`；桥角色自动不装配 |
+| `@libp2p/autonat` | `3.0.28`（**精确 pin**） | Apache-2.0 OR MIT | C4：AutoNAT 可达性自检 | 缺包 → 打洞禁用 + 告警（`getNatStatus().loadError`），其他连接方式不受影响 |
+| `@libp2p/dcutr` | `3.0.28`（**精确 pin**） | Apache-2.0 OR MIT | C4：DCUtR 打洞（relay 上升级直连） | 缺包 → 保留 relay（不升级），不报错 |
 | `@libp2p/identify` | `^4.1.14`（legacy-range） | Apache-2.0 OR MIT | relay 预约/协议协商 | 同上（circuit relay 依赖它） |
 | `@libp2p/crypto` | `^5.1.23`（legacy-range） | Apache-2.0 OR MIT | 设备密钥 ↔ libp2p keypair | 缺包 → 真实网络栈不可用 |
 | `@libp2p/peer-id` | `^6.0.15`（legacy-range） | Apache-2.0 OR MIT | peerId 派生/解析 | 同上 |

@@ -125,8 +125,10 @@ describe('C1 EndpointStore · 内存与文件实现', () => {
 
     const book = new EndpointBook({ store });
     await book.upsert('device-B', ['/ip4/198.51.100.5/tcp/4001/p2p/peerB'], 'paired');
-    const mode = (await stat(path)).mode & 0o777;
-    expect(mode).toBe(0o600);
+    if (process.platform !== 'win32') {
+      const mode = (await stat(path)).mode & 0o777;
+      expect(mode).toBe(0o600);
+    }
     const written = JSON.parse(await readFile(path, 'utf-8'));
     expect(written['device-B'][0].address).toBe('/ip4/198.51.100.5/tcp/4001/p2p/peerB');
     expect(written['device-B'][0].kind).toBe('direct');

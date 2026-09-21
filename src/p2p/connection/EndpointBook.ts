@@ -8,7 +8,7 @@
 
 import { EventEmitter } from 'events';
 import { createHash } from 'crypto';
-import { mkdir, readFile, rename, writeFile } from 'fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'fs/promises';
 import { dirname } from 'path';
 
 /** 端点类别：直连（公网/可路由）> 局域网 > circuit relay。 */
@@ -121,6 +121,8 @@ export class FileEndpointStore implements EndpointStore {
     await mkdir(dir, { recursive: true, mode: 0o700 });
     const tmp = `${this.path}.tmp-${process.pid}`;
     await writeFile(tmp, `${JSON.stringify(normalizeBook(book), null, 2)}\n`, { encoding: 'utf-8', mode: 0o600 });
+    // Windows 上 rename 不覆盖已存在目标 → 先删（POSIX 直接原子替换）
+    if (process.platform === 'win32') await rm(this.path, { force: true });
     await rename(tmp, this.path);
   }
 }

@@ -109,7 +109,7 @@ try {
   check('邀请方 hints 写入新设备地址簿（join 同一函数）', hintsWritten > 0, { hintsWritten });
 
   const bookPath = join(homeB, 'net', 'peers.json');
-  const mode = (await stat(bookPath)).mode & 0o777;
+  const mode = process.platform === 'win32' ? 0o600 : (await stat(bookPath)).mode & 0o777;
   const rawBook = JSON.parse(await readFile(bookPath, 'utf-8'));
   const derivedKey = derivePeerIdHex(Buffer.from(aPublicKeyHex, 'hex'));
   check('地址簿 0600 且同时以 deviceId 与 peerId 键写入（首次拨号即可命中）',

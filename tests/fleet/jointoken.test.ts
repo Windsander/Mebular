@@ -271,8 +271,10 @@ describe('C2 配对 hints', () => {
       expect(book.addresses('device-A')).toEqual(endpoints);
       expect(book.relaySeeds()).toEqual(relaySeeds);
       expect(book.keys()).toContain(RELAY_SEEDS_KEY);
-      const { stat } = await import('node:fs/promises');
-      expect(((await stat(join(home, 'net', 'peers.json'))).mode & 0o777)).toBe(0o600);
+      if (process.platform !== 'win32') {
+        const { stat } = await import('node:fs/promises');
+        expect(((await stat(join(home, 'net', 'peers.json'))).mode & 0o777)).toBe(0o600);
+      }
 
       // 无 hints（旧令牌）→ no-op
       expect(await persistInviterHints(join(root, 'C'), { inviterDeviceId: 'device-A', inviterPublicKey: token.inviterPublicKey })).toBe(0);

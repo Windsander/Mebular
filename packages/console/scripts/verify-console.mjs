@@ -1084,6 +1084,39 @@ try {
       recoveryTokens.filter((token) => !consoleSrc2.includes(token)).join(',') || '全部命中');
   }
 
+  // ---------- 排版不变量：单一 kv 行模板 / cfg 行同构 / token 化间距 / 无内联宽 ----------
+  {
+    const cssSrc = await readFile(join(consoleDir, 'console.css'), 'utf-8');
+    const jsSrc = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const tokens = ['--row-label-w', '--kv-action-w', '--row-gap', '--row-gap-y', '--control-h', '--section-gap'];
+    check('排版 token 齐备（label 列宽 / 动作列宽 / 行距 / 控件高 / section 间距）',
+      tokens.every((t) => cssSrc.includes(`${t}:`)), tokens.filter((t) => !cssSrc.includes(`${t}:`)).join(',') || '全部命中');
+
+    check('kv 与 cfg 共用同一 label 列宽变量（不再各写一套栅格）',
+      cssSrc.includes('grid-template-columns: var(--row-label-w) minmax(0, 1fr) var(--kv-action-w)')
+        && cssSrc.includes('grid-template-columns: var(--row-label-w) minmax(0, 1fr)'),
+      'settings-kv=3 列（label/value/action），cfg-row=2 列（label/control），label 列同为 var(--row-label-w)');
+
+    check('动作列固定宽且行高统一（button 不撑高行）',
+      cssSrc.includes('.settings-kv .kv-action { display: flex; align-items: center; justify-content: flex-end; min-height: var(--control-h); }')
+        && cssSrc.includes('.settings-kv .kv-action .btn { height: var(--control-h);'),
+      'kv-action 固定列 + 按钮高 = --control-h');
+
+    check('双值行结构化 + 状态色（一致=暗色 / 不一致=警示色）',
+      cssSrc.includes('.cfg-effective.is-mismatch { color: #ffd27a; }')
+        && cssSrc.includes('.settings-kv .kv-sub.is-mismatch { color: #ffd27a; }')
+        && jsSrc.includes("class=\"cfg-effective${mismatch ? ' is-mismatch' : ''}\"")
+        && jsSrc.includes("class=\"kv-sub${mismatch ? ' is-mismatch' : ''}\""),
+      'cfg-effective / kv-sub 均按 mismatch 切换警示色');
+
+    check('响应式 ≤760px：kv 与 cfg 行转上下布局（无横向滚动）',
+      /@media \(max-width: 760px\) \{[\s\S]*?\.settings-kv \{\s*grid-template-columns: minmax\(0, 1fr\);[\s\S]*?\.cfg-row \{ grid-template-columns: minmax\(0, 1fr\); \}/.test(cssSrc),
+      '760 断点内 kv/cfg 单列');
+
+    check('渲染模板无内联 width（对齐只能来自 CSS token）',
+      !/style="width/.test(jsSrc), /style="width/.test(jsSrc) ? '发现内联 width' : '无内联 width');
+  }
+
   // ---------- 未知 API ----------
   const unknown = await getJson(port, '/admin/api/nope');
   check('未知 /admin/api 路径 404', unknown.status === 404);

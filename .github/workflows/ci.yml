@@ -6,6 +6,8 @@ on:
       - 'site'
       - 'site-*'
   pull_request:
+  merge_group:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -62,6 +64,9 @@ jobs:
       - name: Console E1 (static/CSRF/scope/config combo/TLS)
         run: npm run verify:console > console-e1.log 2>&1 || { tail -n 200 console-e1.log; exit 1; }
 
+      - name: Console UI smoke (headless Chrome via CDP; SKIP if no browser)
+        run: npm run verify:console:ui > console-ui.log 2>&1 || { tail -n 200 console-ui.log; exit 1; }
+
       - name: Pairing auto-connect (address book / relay degrade & recover)
         run: npm run verify:connect > verify-connect.log 2>&1 || { tail -n 200 verify-connect.log; exit 1; }
 
@@ -76,8 +81,10 @@ jobs:
           path: |
             fleet-acceptance.log
             console-e1.log
+            console-ui.log
             verify-connect.log
             verify-lan.log
+          retention-days: 14
           if-no-files-found: ignore
 
       - name: stdio MCP (real client)
@@ -161,8 +168,21 @@ jobs:
       - name: Fleet local two-process (M2, spool)
         run: npm run verify:fleet:local
 
+      - name: Console E1 (console static/API smoke on Windows)
+        run: npm run verify:console > console-e1.log 2>&1 || { Get-Content console-e1.log -Tail 200; exit 1; }
+
       - name: Fleet onboard (Step 1b, libp2p + doctor; Windows 权限项 SKIP)
         run: npm run verify:fleet:onboard
+
+      - name: Upload failure logs (windows)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-failure-logs
+          path: |
+            console-e1.log
+          retention-days: 14
+          if-no-files-found: ignore
 
   semantic-real:
     name: semantic recall (real model)
@@ -184,8 +204,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install optional embedding package (real)
-        run: npm install --save-dev @huggingface/transformers
+      - name: Install optional embedding package (real, not persisted)
+        run: npm install --no-save @huggingface/transformers
 
       - name: Cache embedding model
         uses: actions/cache@v4

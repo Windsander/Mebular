@@ -57,7 +57,17 @@ try {
       deviceId,
       encryption,
       network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
-      sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 20, namespaces: ['tasks'], peerNamespacePolicy: { [peer]: ['tasks'] } },
+      sync: {
+        autoSync: true,
+        pushOnWrite: true,
+        pushOnWriteThrottleMs: 20,
+        namespaces: ['tasks'],
+        peerNamespacePolicy: { [peer]: ['tasks'] },
+        // CI 偶发 flake 根因（run 287/291：`1d-b 协商` 卡在 queued，B 已回 counter 而 A 一条未收 =
+        // 回程推送丢失）：本夹具此前只靠 pushOnWrite，推送一丢就只能等默认超长反熵间隔 → 90s 窗口外。
+        // 与常驻守护默认一致地开启周期反熵做兜底，并把间隔压到秒级，让丢包在窗口内自愈（幂等重放）。
+        antiEntropy: { enabled: true, intervalMs: 2000, jitterRatio: 0 },
+      },
     });
   a = mk('device-A', 'device-B');
   b = mk('device-B', 'device-A');

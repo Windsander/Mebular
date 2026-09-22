@@ -18,11 +18,10 @@ Mebular is a decentralized memory network for your agents: the data stays on you
 ---
 
 <p align="center">
-  <img src="assets/console-starmap-about.jpg" width="320" alt="Star map with the About panel: identity, paths and bridge status at a glance">
-  <img src="assets/console-settings-common.jpg" width="320" alt="Settings, common: four task cards for the six everyday options">
-  <img src="assets/console-settings-advanced.jpg" width="320" alt="Settings, advanced: values that never took effect are flagged in amber">
+  <img src="assets/console-starmap-about.jpg" width="400" alt="Star map with the About panel: identity, paths and bridge status at a glance">
+  <img src="assets/console-settings-common.jpg" width="400" alt="Settings, common: four task cards for the six everyday options">
 </p>
-<p align="center"><sub>Star map &amp; About · Settings: Common · Settings: Advanced — the real UI</sub></p>
+<p align="center"><sub>Star map &amp; About · Settings — the real UI</sub></p>
 
 ## Why
 

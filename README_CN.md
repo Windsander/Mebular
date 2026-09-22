@@ -39,70 +39,39 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 ![Mebular 架构图](assets/architecture-cn.svg)
 
 ## 怎么用
+![配对流程：设备 A 建新并发出邀请，设备 B 扫码加入，随后连接与默认授权自动完成](assets/pairing-flow-cn.svg)
 
-### 让 Agent 帮你部署（推荐）
-
-装上 Skill，然后直接对 Agent 说你要做什么：
-
-```bash
-node packages/skill/scripts/install.mjs        # 安装 Skill（MCP 接入片段见 packages/skill/mcp/）
-mebular mcp                                    # 或以 HTTP 常驻：mebular serve
-```
-
-对 Agent 说「在这台机器上部署 Mebular」或「用这个码加入 Mebular」即可：它会按
-[`packages/skill/SETUP.md`](packages/skill/SETUP.md) 执行——钉住版本的安装、`fleet quickstart` 或
-`fleet join --qr`、用 `mebular doctor --net` 自检——然后把结果回报给你。部署完成后 Agent 也通过 MCP
-使用记忆（`memory_write`、`memory_query`、`memory_search`、`memory_status` …）；每个 MCP 工具都有**逐字同名**的
-`mebular` 子命令（如 `mebular memory_write`），脚本与 Agent 共用同一表面。
-
-### 自己用界面（GUI）
+### 开始用
+| 路径 | 怎么开始 | 适合 |
+|---|---|---|
+| **让 Agent 代劳**（推荐） | 装好 Skill，然后说“部署 Mebular”/“用这个码加入” | 不想碰命令 |
+| **GUI** | `mebular serve` → 控制台 → ＋ 邀请新设备 | 想亲眼看着 |
+| **CLI** | `fleet quickstart` → `fleet invite`；新机 `fleet join --qr` | 脚本化/批量 |
 
 ```bash
-mebular serve
+node packages/skill/scripts/install.mjs   # 然后说“部署 Mebular”/“用这个码加入”；它按 packages/skill/SETUP.md 执行，并用 `mebular doctor --net` 自检
 ```
-
-打开 `http://127.0.0.1:7331/console`，在「常用」里启用加入服务，点「＋ 邀请新设备」即可拿到二维码与令牌；
-邀请、授权、设置、诊断都在控制台里。如实说明：**让一台全新设备加入，目前仍需执行一次 `fleet join`**
-（或把它交给 Agent）——控制台暂不支持粘贴令牌加入。
-
-### 自己用命令（CLI）
-
-建一个新的 Mebular —— 这台机器就是信任根：
-
+```bash
+mebular serve   # 控制台：http://127.0.0.1:7331/console —— 先在「常用」启用加入服务
+```
 ```bash
 fleet quickstart --daemon --dir ~/.mebular --device device-A   # 身份 + 守护 + 加入服务
-fleet invite --dir ~/.mebular                                  # 打印二维码 + 令牌
-```
-
-新设备加入已有的 Mebular：
-
-```bash
+fleet invite --dir ~/.mebular                                  # 给新设备的二维码 + 令牌
 fleet join --qr "<二维码内容>" --daemon --dir ~/.mebular --device device-B   # 也可用 --token
 ```
 
-这一步就完成了：拿到委派身份（**不复制主密钥**）、自动连上、按令牌分区自动授权（可撤销，默认 24h）。
-**默认不需要 `fleet approve`**；只有用 `--no-grant` 签发的邀请才需要再人工批准一次。
+加入新设备仍需一条 `fleet join`（或交给 Agent）；默认无需 `fleet approve`；授权默认 24h、可撤销。想先看界面？用 `seed-demo.mjs`。
 
-### 角色分工：你的 Agent、你、框架
+### 谁做什么
+| 谁 | 管什么 | 代表命令 |
+|---|---|---|
+| **你的 Agent**（你不碰） | 记忆读写/检索、任务执行与结果回传 | `memory_write` …（全表见 skill 文档） |
+| **你**（很少） | 配对一次；授权/撤销/退订/重入；看状态；（可选）派活 | `fleet invite` · `fleet revoke` · `fleet task_submit` |
+| **框架**（自动） | 连接寻址、直连/中继/打洞切换、自动当桥、同步重试、证书与令牌 TTL、服务自启 | — |
 
-**你的 Agent 自己做 —— 你不用碰。** 记忆的读写与检索：`memory_write`、`memory_write_batch`、
-`memory_query`、`memory_search`、`memory_profile`、`memory_skills`、`memory_history`、`memory_graph`、
-`memory_import`、`memory_status`、`memory_sync`，以及启用后的语义召回；还包括执行任务并把结果回传。
-（同一套 handler 也提供同名 `mebular` 子命令——给脚本用，不是人的活儿。）
+唯一需你物理决定：两个网络都无公网入口时，自备一台可达设备当桥（配对进来即自动生效）。
 
-**你要做的 —— 很少，且都跟信任与边界有关。** 一次性配对：建新 `fleet quickstart`，加入
-`fleet join --qr` / `--token`。成员与授权：`fleet invite`、`fleet grant`、`fleet revoke`、`fleet leave`、
-`fleet rejoin`。观测与运维：`mebular status`、`mebular doctor --net`、控制台
-`http://127.0.0.1:7331/console`。可选派活：`fleet task_submit` 把活交给别的设备上的 Agent
-（`task_status`、`task_children`、`task_summarize` 跟踪）——你的 Agent 之间也会互相派。
-
-**谁都不用管 —— 框架自动。** LAN 自动发现与地址簿、直连/中继/打洞的自动选择与切换、可达设备自动当桥、
-地址自动更新；同步默认常开、断线自动重试；委派证书、令牌过期与授权到期自动清理；服务开机自启与重启自恢复。
-
-唯一需要你物理决定的一件事：两个网络都没有公网入口时，配一台双方都能连到的常开设备——它会自动成为桥。
-想先看看界面？用 `seed-demo.mjs` 生成演示数据。
-
-### 开发者
+### 扩展它（开发者）
 
 ```ts
 import { Mebular, HermesMemoryProvider } from 'mebular';
@@ -110,8 +79,7 @@ const mebular = new Mebular({ storagePath: './store.jsonl', deviceId: 'device-A'
 await mebular.initialize();
 ```
 
-可运行示例见 [`examples/quickstart`](examples/quickstart/index.mjs)。fleet 任务树用 `fleet task_submit` 提交 root，
-`task_children` / `task_summarize` 遍历与汇总。
+可运行示例：[`examples/quickstart`](examples/quickstart/index.mjs) —— 用 `task_submit` 提交一个根任务。
 
 ## 带来什么
 

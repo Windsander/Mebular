@@ -54,19 +54,27 @@ you cannot tell who wrote what; go offline and it stops working.
 | **GUI** | `mebular serve` → console → ＋ Invite a device | want to watch it happen |
 | **CLI** | `fleet quickstart` → `fleet invite`; new device `fleet join --qr` | scripts / bulk |
 
+**Agent** — install the skill, then say “deploy Mebular” / “join with this code”; it follows [`packages/skill/SETUP.md`](packages/skill/SETUP.md) and self-checks with `mebular doctor --net`:
+
 ```bash
-node packages/skill/scripts/install.mjs   # then say "deploy Mebular" / "join with this code"; it follows packages/skill/SETUP.md and self-checks with `mebular doctor --net`
+node packages/skill/scripts/install.mjs
 ```
+
+**GUI** — the console is at `http://127.0.0.1:7331/console` (enable the join service under common settings, then click ＋ Invite a device):
+
 ```bash
-mebular serve   # console: http://127.0.0.1:7331/console — enable the join service under common settings first
+mebular serve
 ```
+
+**CLI** — the three commands to start, invite and join:
+
 ```bash
 fleet quickstart --daemon --dir ~/.mebular --device device-A   # identity + daemon + join service
 fleet invite --dir ~/.mebular                                  # QR code + token for the new device
 fleet join --qr "<QR content>" --daemon --dir ~/.mebular --device device-B   # or --token
 ```
 
-Joining a new device still takes one `fleet join` (or hand it to an agent); no `fleet approve` is needed by default; grants last 24h and are revocable. Prefer a UI to try it? Use `seed-demo.mjs`.
+Joining a new device still takes one `fleet join` (or hand it to an agent) · no `fleet approve` is needed by default · grants last 24h and are revocable · try the UI first with `seed-demo.mjs`
 
 ### Who does what
 | Who | Manages | Typical commands |
@@ -80,7 +88,9 @@ The one thing only you decide: when two networks both lack a public entry point,
 
 ```ts
 import { Mebular, HermesMemoryProvider } from 'mebular';
-const mebular = new Mebular({ storagePath: './store.jsonl', deviceId: 'device-A', network: { enabled: false } });
+const mebular = new Mebular({
+  storagePath: './store.jsonl', deviceId: 'device-A', network: { enabled: false },
+});
 await mebular.initialize();
 ```
 
@@ -100,8 +110,10 @@ Runnable example: [`examples/quickstart`](examples/quickstart/index.mjs) — it 
 - **Sealing contract** (red lines, protocol semantics, deferrals) — [`SEALING.md`](SEALING.md)
 - **Fleet runbook** (two-machine ops, WAN commands, acceptance) — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
 - **Memory policy for agents** — [`packages/skill/MEMORY_POLICY.md`](packages/skill/MEMORY_POLICY.md)
-- **Daemon / MCP** — [`packages/mcp`](packages/mcp) · **Fleet** — [`packages/fleet`](packages/fleet)
-- **Console GUI** — [`packages/console`](packages/console) · **Contributing & quality gates** — [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- **Daemon / MCP** — [`packages/mcp`](packages/mcp)
+- **Fleet** — [`packages/fleet`](packages/fleet)
+- **Console GUI** — [`packages/console`](packages/console)
+- **Contributing & quality gates** — [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 <div align="center">
 

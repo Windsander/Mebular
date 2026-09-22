@@ -88,6 +88,7 @@
     "verify:daemon": "node scripts/verify-daemon.mjs",
     "verify:daemon:cluster": "node scripts/verify-daemon-cluster.mjs",
     "verify:console": "node packages/console/scripts/verify-console.mjs",
+    "verify:console:ui": "node packages/console/scripts/verify-console-ui.mjs",
     "verify:fleet:grant": "node scripts/verify-fleet-grant.mjs",
     "verify:fleet:service": "node scripts/verify-fleet-service.mjs",
     "verify:fleet:membership": "node scripts/verify-fleet-membership.mjs",
@@ -100,7 +101,8 @@
     "verify:lan": "node scripts/verify-lan.mjs",
     "check:deps": "node scripts/check-deps.mjs",
     "verify:invite": "node scripts/verify-invite.mjs",
-    "verify:nat": "node scripts/verify-nat.mjs"
+    "verify:nat": "node scripts/verify-nat.mjs",
+    "rulesets:apply": "node scripts/apply-rulesets.mjs --apply"
   },
   "dependencies": {
     "bonjour": "^3.5.1",

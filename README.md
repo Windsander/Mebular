@@ -91,19 +91,24 @@ That one step gives the device a delegated identity (the master key is **never c
 automatically, and authorizes it on the token's domain — revocable, valid for 24h by default.
 **No `fleet approve` is needed**; only invites created with `--no-grant` still ask for an explicit approval.
 
-### What you can do — and what you never have to manage
+### Roles: your agent, you, and the framework
 
-- **Memory** — `memory_write`, `memory_query`, `memory_search`, `memory_profile`, `memory_skills`,
-  `memory_history`, `memory_graph`, `memory_import`, `memory_status`, `memory_sync`: agents use them over MCP,
-  humans use the same-named `mebular` command.
-- **Tasks** — `fleet task_submit` dispatches work to agents on other devices; `task_status`, `task_children`
-  and `task_summarize` follow it.
-- **People and access** — `fleet invite`, `fleet grant`, `fleet revoke`, `fleet leave`, `fleet rejoin`.
-- **Observability** — `mebular status`, `mebular doctor --net`, and the local console (see the GUI path above).
+**Your agent does this — you don't touch it.** Memory in all its forms: `memory_write`, `memory_write_batch`,
+`memory_query`, `memory_search`, `memory_profile`, `memory_skills`, `memory_history`, `memory_graph`,
+`memory_import`, `memory_status`, `memory_sync`, plus semantic recall when enabled; and executing tasks and
+returning results. (The same handlers are also exposed as same-named `mebular` commands — handy for scripts,
+not a human chore.)
 
-Mebular handles the rest: LAN discovery and the address book, choosing and switching between direct / relay /
-hole-punched paths, reachable devices becoming bridges automatically, keeping endpoints fresh; always-on sync
-with automatic retry; delegated certificates, token expiry and grant expiry; service autostart and restart.
+**You do this — rarely, and only about trust and boundaries.** One-time pairing: start with `fleet quickstart`,
+join with `fleet join --qr` / `--token`. People and access: `fleet invite`, `fleet grant`, `fleet revoke`,
+`fleet leave`, `fleet rejoin`. Watching and running it: `mebular status`, `mebular doctor --net`, the console at
+`http://127.0.0.1:7331/console`. Optionally dispatch work: `fleet task_submit` hands a job to agents on other
+devices (`task_status`, `task_children`, `task_summarize` follow it) — your agents also dispatch to each other.
+
+**Nobody manages this — the framework does.** LAN discovery and the address book, choosing and switching between
+direct / relay / hole-punched paths, reachable devices becoming bridges automatically, keeping endpoints fresh;
+always-on sync with automatic retry; delegated certificates, token expiry and grant expiry; service autostart
+and restart.
 
 The one thing only you decide: when two networks both lack a public entry point, pair one always-on device the
 others can reach — it becomes their bridge automatically. Try the console with seeded demo data via `seed-demo.mjs`.

@@ -48,19 +48,27 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 | **GUI** | `mebular serve` → 控制台 → ＋ 邀请新设备 | 想亲眼看着 |
 | **CLI** | `fleet quickstart` → `fleet invite`；新机 `fleet join --qr` | 脚本化/批量 |
 
+**让 Agent 代劳** —— 装好 Skill，对它说“部署 Mebular”/“用这个码加入”；它按 [`packages/skill/SETUP.md`](packages/skill/SETUP.md) 执行并用 `mebular doctor --net` 自检：
+
 ```bash
-node packages/skill/scripts/install.mjs   # 然后说“部署 Mebular”/“用这个码加入”；它按 packages/skill/SETUP.md 执行，并用 `mebular doctor --net` 自检
+node packages/skill/scripts/install.mjs
 ```
+
+**GUI** —— 控制台在 `http://127.0.0.1:7331/console`（先在「常用」启用加入服务，再点「＋ 邀请新设备」）：
+
 ```bash
-mebular serve   # 控制台：http://127.0.0.1:7331/console —— 先在「常用」启用加入服务
+mebular serve
 ```
+
+**CLI** —— 建新 / 邀请 / 加入这三条命令：
+
 ```bash
 fleet quickstart --daemon --dir ~/.mebular --device device-A   # 身份 + 守护 + 加入服务
 fleet invite --dir ~/.mebular                                  # 给新设备的二维码 + 令牌
 fleet join --qr "<二维码内容>" --daemon --dir ~/.mebular --device device-B   # 也可用 --token
 ```
 
-加入新设备仍需一条 `fleet join`（或交给 Agent）；默认无需 `fleet approve`；授权默认 24h、可撤销。想先看界面？用 `seed-demo.mjs`。
+加入新设备仍需一条 `fleet join`（或交给 Agent） · 默认无需 `fleet approve` · 授权默认 24h、可撤销 · 想先看界面用 `seed-demo.mjs`
 
 ### 谁做什么
 | 谁 | 管什么 | 代表命令 |
@@ -75,7 +83,9 @@ fleet join --qr "<二维码内容>" --daemon --dir ~/.mebular --device device-B 
 
 ```ts
 import { Mebular, HermesMemoryProvider } from 'mebular';
-const mebular = new Mebular({ storagePath: './store.jsonl', deviceId: 'device-A', network: { enabled: false } });
+const mebular = new Mebular({
+  storagePath: './store.jsonl', deviceId: 'device-A', network: { enabled: false },
+});
 await mebular.initialize();
 ```
 
@@ -95,8 +105,10 @@ await mebular.initialize();
 - **封板契约**（红线 / 协议语义 / 推迟项） — [`SEALING.md`](SEALING.md)
 - **fleet 运维手册**（双机操作、WAN 命令、验收） — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
 - **Agent 记忆规约** — [`packages/skill/MEMORY_POLICY.md`](packages/skill/MEMORY_POLICY.md)
-- **守护 / MCP** — [`packages/mcp`](packages/mcp) · **Fleet** — [`packages/fleet`](packages/fleet)
-- **控制台 GUI** — [`packages/console`](packages/console) · **贡献与质量门禁** — [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- **守护 / MCP** — [`packages/mcp`](packages/mcp)
+- **Fleet** — [`packages/fleet`](packages/fleet)
+- **控制台 GUI** — [`packages/console`](packages/console)
+- **贡献与质量门禁** — [`CONTRIBUTING.md`](CONTRIBUTING.md)
 
 <div align="center">
 

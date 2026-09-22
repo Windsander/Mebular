@@ -9,7 +9,8 @@
     "SKILL.md",
     "MEMORY_POLICY.md",
     "mcp",
-    "scripts"
+    "scripts",
+    "SETUP.md"
   ],
   "engines": {
     "node": ">=20"

@@ -42,3 +42,9 @@ Mebular 是一个本地优先的分布式图记忆层。通过 MCP 工具读写�
 ## 接入
 
 本 Skill 目录附各客户端 MCP 接入片段（见 `mcp/`）；`scripts/install.mjs` 可将本 Skill 安装到常见 Skill 目录。
+
+## 部署 / 加入 / 邀请
+
+**部署一台新机器、加入别人的 Mebular、生成邀请（二维码 + 令牌）**：见 [`SETUP.md`](./SETUP.md)
+——面向 Agent 的可执行剧本（前置检查 → 安装 CLI（钉 SHA）→ `fleet quickstart` / `fleet join --qr` →
+`mebular doctor --net` 自检 → 失败恢复 → 安全红线）。

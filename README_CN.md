@@ -17,6 +17,13 @@ Mebular 是你 Agent 的去中心化记忆网络：数据只留在你自己的�
 
 ---
 
+<p align="center">
+  <img src="assets/console-starmap-about.jpg" width="320" alt="星图与「关于本机」：身份、路径与桥状态一览">
+  <img src="assets/console-settings-common.jpg" width="320" alt="设置 · 常用：四张任务卡覆盖 6 个常用项">
+  <img src="assets/console-settings-advanced.jpg" width="320" alt="设置 · 高级：写入未生效会显式告警">
+</p>
+<p align="center"><sub>星图与「关于本机」 · 设置·常用 · 设置·高级（均为实机界面）</sub></p>
+
 ## 为什么
 
 Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，换台设备就断了，被谁改过也说不清，离线直接罢工。

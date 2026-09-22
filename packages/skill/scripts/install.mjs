@@ -50,6 +50,8 @@ for (const target of targets) {
   await mkdir(dest, { recursive: true });
   await cp(join(pkgRoot, 'SKILL.md'), join(dest, 'SKILL.md'));
   await cp(join(pkgRoot, 'MEMORY_POLICY.md'), join(dest, 'MEMORY_POLICY.md'));
+  // A：部署手册随 Skill 一起安装（Agent 据此可自动部署/加入）
+  await cp(join(pkgRoot, 'SETUP.md'), join(dest, 'SETUP.md'));
   installed.push(dest);
   console.log(`installed ${dest}`);
 }

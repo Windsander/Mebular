@@ -40,19 +40,32 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 
 ## 怎么用
 
-### Agent 用户
+### 让 Agent 帮你部署（推荐）
 
-把支持 MCP 的 Agent（Claude / Cursor / OpenCode / DeepSeek Harness）指向守护，用记忆工具
-（`memory_write` / `memory_query` / `memory_search` / `memory_status` …）。每个 MCP 工具都有**逐字同名**的
-`mebular` 子命令（如 `mebular memory_write`），脚本与 Agent 共用同一表面。
+装上 Skill，然后直接对 Agent 说你要做什么：
 
 ```bash
-npm install && npm run build
-node packages/skill/scripts/install.mjs        # 安装 Skill（可选）
+node packages/skill/scripts/install.mjs        # 安装 Skill（MCP 接入片段见 packages/skill/mcp/）
 mebular mcp                                    # 或以 HTTP 常驻：mebular serve
 ```
 
-### 设备主运维
+对 Agent 说「在这台机器上部署 Mebular」或「用这个码加入 Mebular」即可：它会按
+[`packages/skill/SETUP.md`](packages/skill/SETUP.md) 执行——钉住版本的安装、`fleet quickstart` 或
+`fleet join --qr`、用 `mebular doctor --net` 自检——然后把结果回报给你。部署完成后 Agent 也通过 MCP
+使用记忆（`memory_write`、`memory_query`、`memory_search`、`memory_status` …）；每个 MCP 工具都有**逐字同名**的
+`mebular` 子命令（如 `mebular memory_write`），脚本与 Agent 共用同一表面。
+
+### 自己用界面（GUI）
+
+```bash
+mebular serve
+```
+
+打开 `http://127.0.0.1:7331/console`，在「常用」里启用加入服务，点「＋ 邀请新设备」即可拿到二维码与令牌；
+邀请、授权、设置、诊断都在控制台里。如实说明：**让一台全新设备加入，目前仍需执行一次 `fleet join`**
+（或把它交给 Agent）——控制台暂不支持粘贴令牌加入。
+
+### 自己用命令（CLI）
 
 建一个新的 Mebular —— 这台机器就是信任根：
 
@@ -78,8 +91,7 @@ fleet join --qr "<二维码内容>" --daemon --dir ~/.mebular --device device-B 
 - **任务** —— `fleet task_submit` 把活派给其他设备上的 Agent；`task_status`、`task_children`、
   `task_summarize` 跟踪进度。
 - **成员与授权** —— `fleet invite`、`fleet grant`、`fleet revoke`、`fleet leave`、`fleet rejoin`。
-- **观测** —— `mebular status`、`mebular doctor --net`，以及本机控制台：`mebular serve` 后打开
-  `http://127.0.0.1:7331/console`（星图、关于本机、设置、诊断、邀请二维码）。
+- **观测** —— `mebular status`、`mebular doctor --net`，以及本机控制台（见上面的 GUI 路径）。
 
 其余交给 Mebular：LAN 自动发现与地址簿、直连/中继/打洞的自动选择与切换、可达设备自动当桥、地址自动
 更新；同步默认常开、断线自动重试；委派证书、令牌过期与授权到期自动清理；服务开机自启与重启自恢复。

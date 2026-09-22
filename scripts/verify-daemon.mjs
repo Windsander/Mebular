@@ -260,12 +260,31 @@ try {
   const joinedJson = await joined.json();
   const chain = joinedJson.chain ?? [];
   check('委派签发：C 证书链长度 3（C←B←A）且锚定主密钥', joined.status === 200 && chain.length === 3 && (await verifyCertificateChain(chain, hexToBytes(Buffer.from(JSON.parse(readFileSync(join(homeB, 'user-master-key.json'), 'utf-8')).publicKey, 'base64').toString('hex')), { subjectDeviceId: 'device-C' })), { chainLen: chain.length });
-  // 策略 app 路由：grant + effective
-  const grantRes = await fetch(`${base}/app/policy/grant`, { method: 'POST', headers: auth, body: JSON.stringify({ subject: 'device-C', namespaces: ['tasks'] }) });
+  // F-FIN-1：守护侧「令牌兑换即自动授权」（C7 grantOnJoin）必须**直接**断言。
+  // 注意：只断言 granted 字段不足以发现问题（可能「谎报 200 但跳过授权」）——
+  // 必须以 policy/effective **未经显式 grant** 就含令牌分区来证明授权真的落库。
+  const autoEffRes = await fetch(`${base}/app/policy/effective?device=device-C`, { headers: auth });
+  const autoEffJson = await autoEffRes.json();
+  check('C7 守护侧自动授权：兑换响应 granted=true 且 namespace=tasks',
+    joined.status === 200 && joinedJson.granted === true && joinedJson.namespace === 'tasks',
+    { status: joined.status, granted: joinedJson.granted, namespace: joinedJson.namespace });
+  check('C7 守护侧自动授权：未经显式 grant，device-C 已生效含 tasks（effective 证明）',
+    autoEffRes.status === 200 && Array.isArray(autoEffJson.namespaces) && autoEffJson.namespaces.includes('tasks'),
+    { namespaces: autoEffJson.namespaces });
+
+  // 策略 app 路由（**独立用例**：不依赖自动授权即可成立——用另一个设备/另一个分区做显式 grant）
+  const grantRes = await fetch(`${base}/app/policy/grant`, { method: 'POST', headers: auth, body: JSON.stringify({ subject: 'device-D', namespaces: ['work'] }) });
   const grantJson = await grantRes.json();
-  const effRes = await fetch(`${base}/app/policy/effective?device=device-C`, { headers: auth });
-  const effJson = await effRes.json();
-  check('策略 app 路由：grant + effective 生效', grantRes.status === 200 && grantJson.ok === true && effJson.namespaces?.includes('tasks'), { namespaces: effJson.namespaces });
+  const effDRes = await fetch(`${base}/app/policy/effective?device=device-D`, { headers: auth });
+  const effDJson = await effDRes.json();
+  const effCRes = await fetch(`${base}/app/policy/effective?device=device-C`, { headers: auth });
+  const effCJson = await effCRes.json();
+  check('策略 app 路由：显式 grant + effective 生效（device-D/work，独立于自动授权）',
+    grantRes.status === 200 && grantJson.ok === true && effDJson.namespaces?.includes('work'),
+    { namespaces: effDJson.namespaces });
+  check('策略 app 路由：作用域隔离（device-C 不含 work；device-D 不含 tasks）',
+    !(effCJson.namespaces ?? []).includes('work') && !(effDJson.namespaces ?? []).includes('tasks'),
+    { c: effCJson.namespaces, d: effDJson.namespaces });
 
   console.log('== C3③ 委派加入的设备能跑守护（无主密钥）==');
   const homeC = join(root, 'C');

@@ -163,6 +163,12 @@ function renderTopbar() {
   onlineEl.className = `badge ${online ? 'badge-ok' : 'badge-muted'}`;
   memEl.textContent = status ? `记忆 ${status.nodeCount}` : '记忆 …';
   memEl.className = 'badge badge-muted';
+  const pendingBadge = $('#settings-pending-badge');
+  if (pendingBadge) {
+    const count = pendingRestartItems().length;
+    pendingBadge.hidden = count === 0;
+    pendingBadge.textContent = count > 0 ? `待重启 ${count} 项` : '';
+  }
 }
 
 function allNamespaceNames() {
@@ -521,6 +527,63 @@ const CONFIG_EDITOR = [
 
 const CONFIG_FIELDS_BY_PATH = new Map(CONFIG_EDITOR.map((field) => [field.path, field]));
 
+// ---------- 待重启（pendingRestart）：配置已保存，但当前实例尚未重启 ----------
+// 服务端 settings.pendingRestart 列出「磁盘值与启动快照不一致」的 curated 配置项（形如 { path, file, running }）。
+
+const RESTART_LABELS = {
+  'sync.autoSync': '自动同步',
+  'sync.pushOnWrite': '写入即推送',
+};
+
+function pendingRestartItems() {
+  return Array.isArray(state.settings?.pendingRestart) ? state.settings.pendingRestart : [];
+}
+
+function restartLabel(path) {
+  return CONFIG_FIELDS_BY_PATH.get(path)?.label ?? RESTART_LABELS[path] ?? path;
+}
+
+// 服务由 launchd/systemd/计划任务拉起（注入 MEBULAR_SERVICE_KIND/SHA）→ service restart；否则给 nohup 启动命令。
+function restartCommand() {
+  return state.settings?.restart?.serviceManaged
+    ? 'mebular service restart'
+    : 'nohup mebular serve > ~/.mebular/serve.log 2>&1 &';
+}
+
+function formatRestartValue(value) {
+  if (value === null || value === undefined) return '未设置';
+  if (Array.isArray(value)) return value.length ? value.join(', ') : '未设置';
+  if (typeof value === 'boolean') return value ? '启用' : '未启用';
+  return String(value);
+}
+
+function pendingRestartBadge() {
+  const count = pendingRestartItems().length;
+  return count > 0 ? `<span class="crt-tag crt-tag-warn">待重启 ${count} 项</span>` : '';
+}
+
+function pendingRestartBanner() {
+  const items = pendingRestartItems();
+  if (items.length === 0) return '';
+  const envOverrides = Array.isArray(state.settings?.pendingRestartEnvOverrides) ? state.settings.pendingRestartEnvOverrides : [];
+  const cmd = restartCommand();
+  const rows = items.map((item) => `<li><b>${escapeHtml(restartLabel(item.path))}</b>`
+    + ` <code>${escapeHtml(item.path)}</code>`
+    + `<span class="muted">：已配置 ${escapeHtml(formatRestartValue(item.file))} / 实际 ${escapeHtml(formatRestartValue(item.running))}</span></li>`).join('');
+  return `<div class="pending-restart" data-pending-restart="1">
+    <div class="pending-restart-head">
+      <span class="crt-tag crt-tag-warn">待重启 ${items.length} 项</span>
+      <span class="muted">配置已保存，当前实例仍按上次启动的配置工作</span>
+    </div>
+    <p class="muted pending-restart-note">守护只在启动时读取配置；保存后当前实例仍按上次启动的配置工作，重启后生效。${envOverrides.length > 0 ? `环境变量优先时以环境变量为准（当前：${escapeHtml(envOverrides.join(', '))}）。` : ''}</p>
+    <ul class="pending-restart-list">${rows}</ul>
+    <div class="pending-restart-cmd">
+      <code>${escapeHtml(cmd)}</code>
+      <button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(cmd)}">复制重启命令</button>
+    </div>
+  </div>`;
+}
+
 function cfgGet(obj, path) {
   return path.split('.').reduce((node, key) => (node && typeof node === 'object' ? node[key] : undefined), obj);
 }
@@ -794,6 +857,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     + ` aria-labelledby="settings-tab-${id}"${id === activeTab ? '' : ' hidden'}>${inner}</section>`;
 
   body.innerHTML = `
+    ${pendingRestartBanner()}
     <div class="settings-tabs" role="tablist" aria-label="设置分区">${IA_TABS.map(tabButton).join('')}</div>
     ${panel('common', `
       <p class="cfg-path muted">修改写入 <code>${escapeHtml(configPath)}</code>（自动保留 .bak 备份）；设备身份 / 存储 / 加密等敏感项请手工编辑。只有需要时才动「Agent 怎么连我」。</p>
@@ -916,8 +980,11 @@ function renderAbout() {
     </section>
 
     <section class="settings-section" data-info-block="runtime">
-      <h3>运行状态 <span class="badge badge-muted">只读</span>${listenAlarm.length ? '<span class="crt-tag crt-tag-warn">公网监听</span>' : ''}</h3>
+      <h3>运行状态 <span class="badge badge-muted">只读</span>${pendingRestartBadge()}${listenAlarm.length ? '<span class="crt-tag crt-tag-warn">公网监听</span>' : ''}</h3>
       ${kvRows([
+        ...(pendingRestartItems().length > 0
+          ? [kvRow('待重启', `${pendingRestartItems().length} 项配置改动已保存但未生效（当前实例按上次启动配置工作，重启后生效）`)]
+          : []),
         kvRow('P2P', s.network.enabled ? '已启用' : '未启用'),
         kvRow('实际监听', escapeHtml(s.network.listen.join(', ') || '—')),
         kvRow('生效白名单', (s.sync.peerWhitelist ?? []).length ? escapeHtml(s.sync.peerWhitelist.join(', ')) : '未启用（按授权 / 成员制判定）'),

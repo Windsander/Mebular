@@ -515,6 +515,82 @@ export async function buildNamespaces({ app, service, config }) {
   return result.sort((a, b) => (a.namespace < b.namespace ? -1 : 1));
 }
 
+// ---------- 待重启（pendingRestart）：磁盘 config.json 与「启动快照」不一致 ----------
+//
+// 守护只在启动时读取一次 config.json（createMebular），运行期没有热加载。设置页保存后
+// 磁盘已变，但当前实例仍按上次启动的快照工作——这里把它显式暴露给控制台。
+// 路径与 serve.mjs 的 CONFIG_PATCH_SPECS（curated）对齐；`read(配置对象)` 负责把「未设置」
+// 归一为生效默认值（空数组 = 未设置 = null），避免默认值被误报为不一致。
+// `envVar`：该路径受环境变量优先控制时列出；此时磁盘值不会被重启采纳，故不计入待重启。
+const RESTART_CONFIG_PATHS = [
+  { path: 'network.enabled', envVar: 'MEBULAR_NETWORK_ENABLED', read: (c) => c?.network?.enabled ?? false },
+  { path: 'network.libp2p.listen', read: (c) => listOrNull(c?.network?.libp2p?.listen) },
+  { path: 'network.libp2p.relayServers', read: (c) => listOrNull(c?.network?.libp2p?.relayServers) },
+  { path: 'network.libp2p.relayUnlimited', read: (c) => c?.network?.libp2p?.relayUnlimited === true },
+  { path: 'sync.autoSync', read: (c) => c?.sync?.autoSync ?? true },
+  { path: 'sync.pushOnWrite', envVar: 'MEBULAR_PUSH_ON_WRITE', read: (c) => c?.sync?.pushOnWrite ?? true },
+  { path: 'sync.namespaces', read: (c) => listOrNull(c?.sync?.namespaces) },
+  { path: 'sync.peerWhitelist', read: (c) => listOrNull(c?.sync?.peerWhitelist) },
+  { path: 'sync.policyIssuers', read: (c) => listOrNull(c?.sync?.policyIssuers) },
+  { path: 'sync.snapshotThreshold', read: (c) => c?.sync?.snapshotThreshold ?? null },
+  { path: 'sync.antiEntropy.enabled', read: (c) => c?.sync?.antiEntropy?.enabled ?? true },
+  { path: 'sync.antiEntropy.intervalMs', read: (c) => c?.sync?.antiEntropy?.intervalMs ?? 600000 },
+  { path: 'sync.antiEntropy.jitterRatio', read: (c) => c?.sync?.antiEntropy?.jitterRatio ?? 0.2 },
+  { path: 'semantic.enabled', envVar: 'MEBULAR_SEMANTIC_ENABLED', read: (c) => c?.semantic?.enabled ?? false },
+  { path: 'semantic.minScore', read: (c) => c?.semantic?.minScore ?? 0.2 },
+  { path: 'mcp.http.host', read: (c) => c?.mcp?.http?.host ?? '127.0.0.1' },
+  { path: 'mcp.http.port', read: (c) => c?.mcp?.http?.port ?? 7331 },
+  { path: 'mcp.http.auth', read: (c) => c?.mcp?.http?.auth ?? 'none' },
+  { path: 'mcp.http.tls', read: (c) => c?.mcp?.http?.tls === true },
+  { path: 'mcp.http.tlsKey', read: (c) => c?.mcp?.http?.tlsKey ?? null },
+  { path: 'mcp.http.tlsCert', read: (c) => c?.mcp?.http?.tlsCert ?? null },
+  { path: 'joinService.enabled', read: (c) => c?.joinService?.enabled === true },
+  { path: 'joinService.bind', read: (c) => c?.joinService?.bind ?? '0.0.0.0' },
+  { path: 'joinService.port', read: (c) => c?.joinService?.port ?? 4002 },
+];
+
+/** 数组值归一：非数组/全空 → null（「未设置」），否则返回去空字符串后的数组。 */
+function listOrNull(value) {
+  if (!Array.isArray(value)) return null;
+  const list = value.filter((entry) => typeof entry === 'string' && entry.length > 0);
+  return list.length > 0 ? list : null;
+}
+
+/**
+ * 比较「当前磁盘 config.json」与「本次启动快照」的 curated 重启类配置。
+ * 返回 `{ pending, envOverridden }`：pending 元素形如 `{ path, file, running }`；
+ * 受环境变量优先控制的路径跳过（重启也不会采纳磁盘值），并在 envOverridden 中列出。
+ */
+function computePendingRestart(diskConfig, startupConfig) {
+  const pending = [];
+  const envOverridden = [];
+  for (const spec of RESTART_CONFIG_PATHS) {
+    if (spec.envVar && process.env[spec.envVar] !== undefined) {
+      envOverridden.push(spec.path);
+      continue;
+    }
+    const file = spec.read(diskConfig) ?? null;
+    const running = spec.read(startupConfig) ?? null;
+    if (JSON.stringify(file) !== JSON.stringify(running)) {
+      pending.push({ path: spec.path, file, running });
+    }
+  }
+  return { pending, envOverridden };
+}
+
+/** 读取服务心跳（serve 常驻写 <home>/service.heartbeat）；供 UI 选择重启命令文案。 */
+async function readServiceHeartbeat(home) {
+  if (!home) return false;
+  try {
+    const record = JSON.parse(await readFile(join(home, 'service.heartbeat'), 'utf-8'));
+    return typeof record?.ts === 'number'
+      && Date.now() - record.ts <= 30_000
+      && record?.role === 'mebular-serve';
+  } catch {
+    return false;
+  }
+}
+
 /** GET /admin/api/settings（只读、脱敏；不含任何密钥/token） */
 export async function buildSettings({ app, service, config, runtime, home }) {
   const status = await service.status();
@@ -528,7 +604,7 @@ export async function buildSettings({ app, service, config, runtime, home }) {
   }
   const sync = config?.sync ?? {};
   const antiEntropy = sync.antiEntropy ?? { enabled: true, intervalMs: 600000, jitterRatio: 0.2 };
-  return {
+  const payload = {
     identity: {
       deviceId: app.deviceId,
       name: runtime?.deviceName ?? config?.deviceName ?? null,
@@ -598,6 +674,29 @@ export async function buildSettings({ app, service, config, runtime, home }) {
     nat: buildNatView(app),
     // 实际可调用面（MCP 工具 = `mebular <name>` CLI，逐字同名同 handler）
     tools: TOOL_NAMES,
+  };
+
+  // 待重启：读取**当前磁盘** config.json，与「本次启动快照 config」对比 curated 重启类路径。
+  // 注意：mcp.* 以启动快照为基准（`--port 0` 的实际端口由系统分配，不代表磁盘值未生效）。
+  let diskConfig = config ?? {};
+  if (home) {
+    try {
+      diskConfig = JSON.parse(await readFile(configPath(home), 'utf-8'));
+    } catch {
+      diskConfig = config ?? {};
+    }
+  }
+  const { pending, envOverridden } = computePendingRestart(diskConfig, config);
+  return {
+    ...payload,
+    pendingRestart: pending,
+    ...(envOverridden.length > 0 ? { pendingRestartEnvOverrides: envOverridden } : {}),
+    restart: {
+      // 服务心跳（serve 常驻写）：用于选择重启命令文案
+      serviceHeartbeat: await readServiceHeartbeat(home),
+      // 由 launchd/systemd/计划任务拉起时注入（见 @mebular/service buildSpec）；普通 nohup 启动无此标记
+      serviceManaged: Boolean(process.env.MEBULAR_SERVICE_KIND || process.env.MEBULAR_SERVICE_SHA),
+    },
   };
 }
 

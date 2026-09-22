@@ -247,6 +247,29 @@ async function main() {
     // 设置弹窗（IA：常用/高级/诊断 + 关于本机）
     await evalJs('document.querySelector("#open-settings").click()');
     check('设置弹窗打开（分区页签 + 常用配置编辑器）', await waitFor('document.querySelectorAll("#settings-body .settings-tab").length >= 3 && Boolean(document.querySelector("#settings-body .cfg-editor"))'));
+
+    // 待重启：页面内写配置（CSRF 取自 document.cookie）→ 设置弹窗出现「待重启」并含变更项；改回后清空
+    const applyIntervalMs = async (value) => evalJs(`(async () => {
+      const raw = document.cookie.match(/(?:^|; )mebular_csrf=([^;]*)/);
+      const csrf = raw ? decodeURIComponent(raw[1]) : '';
+      const body = JSON.stringify({ patch: { sync: { antiEntropy: { intervalMs: ${value} } } } });
+      const res = await fetch('/admin/api/config', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf }, body });
+      return res.status;
+    })()`);
+    const wrotePending = await applyIntervalMs(123456);
+    check('UI 待重启：页面内写 sync.antiEntropy.intervalMs → 200', wrotePending === 200, `status=${wrotePending}`);
+    check(
+      'UI 待重启：设置弹窗出现「待重启」并含变更项（反熵间隔）',
+      await waitFor('(() => { const el = document.querySelector("[data-pending-restart]"); return Boolean(el) && /待重启/.test(el.textContent) && /反熵间隔/.test(el.textContent) && /sync\\.antiEntropy\\.intervalMs/.test(el.textContent); })()'),
+    );
+    check(
+      'UI 待重启：设置入口徽标标注「待重启 N 项」',
+      await waitFor('/待重启/.test(document.querySelector("#settings-pending-badge")?.textContent ?? "")'),
+    );
+    const revertedPending = await applyIntervalMs(null);
+    check('UI 待重启：改回（删除 intervalMs）→ 200', revertedPending === 200, `status=${revertedPending}`);
+    check('UI 待重启：pendingRestart 清空后提示消失', await waitFor('!document.querySelector("[data-pending-restart]")'));
+
     await evalJs('document.querySelector("#settings-close").click()');
     // 关于本机（点顶栏本机徽标进入）
     await evalJs('document.querySelector("#self-badge").click()');

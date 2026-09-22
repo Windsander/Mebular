@@ -2,10 +2,9 @@
 
 ![Mebular](assets/banner.svg)
 
-**A distributed, verifiable memory network for agents.**
+**One memory, every agent, every device — decentralized, offline-first.**
 
-Mebular stores memory as a signed knowledge graph: every fact remembers when it is valid and who wrote it.
-Devices sync incrementally with vector clocks — offline-friendly, self-converging on reconnect, fully auditable.
+Mebular is a decentralized memory network for your agents: the data stays on your devices — no cloud, no coordinator, nothing central to breach. Every fact knows **when it is true and who wrote it**; devices work offline and converge on their own.
 
 [![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -26,12 +25,13 @@ you cannot tell who wrote what; go offline and it stops working.
 | Problem today | Mebular |
 |---|---|
 | Flat queues, no entities or relations | Graph memory: entity / fact / episode / skill / meta nodes, facts with validity windows |
-| Writes cannot be verified | Every write is an Ed25519-signed, content-addressed event — auditable |
-| Sync needs a central service | Vector-clock incremental sync, deterministic conflict resolution, offline-capable |
-| Isolated ecosystems | A versioned exchange format plus adapters (Obsidian, log journals, json-memo, …) |
+| Writes cannot be verified | You can always tell who changed what — every write is Ed25519-signed and content-addressed |
+| Sync needs a central service | No central service needed — vector-clock incremental sync; offline devices converge on reconnect |
+| Isolated ecosystems | Your memory is portable — a versioned exchange format plus adapters (Obsidian, log journals, json-memo, …) |
 
 ## What it is
 
+- **Pair once, then it runs itself.** A QR code (or token) enrolls a device — no master-key copying, no addresses to configure. Your agent manages memory; transport, sync and trust run in the background.
 - **One machine = one node = one daemon.** `mebular serve` is the sole holder of identity, network and trust;
   fleet and agents are local clients sharing that daemon's identity and storage.
 - **Domains (namespaces) are data channels.** Joining a domain is a data obligation (receive + promptly sync your

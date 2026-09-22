@@ -83,18 +83,21 @@ fleet join --qr "<二维码内容>" --daemon --dir ~/.mebular --device device-B 
 这一步就完成了：拿到委派身份（**不复制主密钥**）、自动连上、按令牌分区自动授权（可撤销，默认 24h）。
 **默认不需要 `fleet approve`**；只有用 `--no-grant` 签发的邀请才需要再人工批准一次。
 
-### 你能做什么 —— 以及哪些根本不用你管
+### 角色分工：你的 Agent、你、框架
 
-- **记忆** —— `memory_write`、`memory_query`、`memory_search`、`memory_profile`、`memory_skills`、
-  `memory_history`、`memory_graph`、`memory_import`、`memory_status`、`memory_sync`：Agent 走 MCP，
-  人用同名 `mebular` 子命令。
-- **任务** —— `fleet task_submit` 把活派给其他设备上的 Agent；`task_status`、`task_children`、
-  `task_summarize` 跟踪进度。
-- **成员与授权** —— `fleet invite`、`fleet grant`、`fleet revoke`、`fleet leave`、`fleet rejoin`。
-- **观测** —— `mebular status`、`mebular doctor --net`，以及本机控制台（见上面的 GUI 路径）。
+**你的 Agent 自己做 —— 你不用碰。** 记忆的读写与检索：`memory_write`、`memory_write_batch`、
+`memory_query`、`memory_search`、`memory_profile`、`memory_skills`、`memory_history`、`memory_graph`、
+`memory_import`、`memory_status`、`memory_sync`，以及启用后的语义召回；还包括执行任务并把结果回传。
+（同一套 handler 也提供同名 `mebular` 子命令——给脚本用，不是人的活儿。）
 
-其余交给 Mebular：LAN 自动发现与地址簿、直连/中继/打洞的自动选择与切换、可达设备自动当桥、地址自动
-更新；同步默认常开、断线自动重试；委派证书、令牌过期与授权到期自动清理；服务开机自启与重启自恢复。
+**你要做的 —— 很少，且都跟信任与边界有关。** 一次性配对：建新 `fleet quickstart`，加入
+`fleet join --qr` / `--token`。成员与授权：`fleet invite`、`fleet grant`、`fleet revoke`、`fleet leave`、
+`fleet rejoin`。观测与运维：`mebular status`、`mebular doctor --net`、控制台
+`http://127.0.0.1:7331/console`。可选派活：`fleet task_submit` 把活交给别的设备上的 Agent
+（`task_status`、`task_children`、`task_summarize` 跟踪）——你的 Agent 之间也会互相派。
+
+**谁都不用管 —— 框架自动。** LAN 自动发现与地址簿、直连/中继/打洞的自动选择与切换、可达设备自动当桥、
+地址自动更新；同步默认常开、断线自动重试；委派证书、令牌过期与授权到期自动清理；服务开机自启与重启自恢复。
 
 唯一需要你物理决定的一件事：两个网络都没有公网入口时，配一台双方都能连到的常开设备——它会自动成为桥。
 想先看看界面？用 `seed-demo.mjs` 生成演示数据。

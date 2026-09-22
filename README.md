@@ -2,10 +2,9 @@
 
 ![Mebular](assets/banner.svg)
 
-**A distributed, verifiable memory network for agents.**
+**One memory, every agent, every device — decentralized, offline-first.**
 
-Mebular stores memory as a signed knowledge graph: every fact remembers when it is valid and who wrote it.
-Devices sync incrementally with vector clocks — offline-friendly, self-converging on reconnect, fully auditable.
+Mebular is a decentralized memory network for your agents: the data stays on your devices — no cloud, no coordinator, nothing central to breach. Every fact knows **when it is true and who wrote it**; devices work offline and converge on their own.
 
 [![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -26,12 +25,13 @@ you cannot tell who wrote what; go offline and it stops working.
 | Problem today | Mebular |
 |---|---|
 | Flat queues, no entities or relations | Graph memory: entity / fact / episode / skill / meta nodes, facts with validity windows |
-| Writes cannot be verified | Every write is an Ed25519-signed, content-addressed event — auditable |
-| Sync needs a central service | Vector-clock incremental sync, deterministic conflict resolution, offline-capable |
-| Isolated ecosystems | A versioned exchange format plus adapters (Obsidian, log journals, json-memo, …) |
+| Writes cannot be verified | You can always tell who changed what — every write is Ed25519-signed and content-addressed |
+| Sync needs a central service | No central service needed — vector-clock incremental sync; offline devices converge on reconnect |
+| Isolated ecosystems | Your memory is portable — a versioned exchange format plus adapters (Obsidian, log journals, json-memo, …) |
 
 ## What it is
 
+- **Pair once, then it runs itself.** A QR code (or token) enrolls a device — no master-key copying, no addresses to configure. Your agent manages memory; transport, sync and trust run in the background.
 - **One machine = one node = one daemon.** `mebular serve` is the sole holder of identity, network and trust;
   fleet and agents are local clients sharing that daemon's identity and storage.
 - **Domains (namespaces) are data channels.** Joining a domain is a data obligation (receive + promptly sync your
@@ -45,75 +45,38 @@ you cannot tell who wrote what; go offline and it stops working.
 ![Mebular architecture](assets/architecture-en.svg)
 
 ## How to use
+![Pairing flow: device A starts and invites, device B joins with the QR code, connection and the default grant then happen automatically](assets/pairing-flow-en.svg)
 
-### Let an agent deploy it for you (recommended)
-
-Install the skill, then just tell your agent what you want:
-
-```bash
-node packages/skill/scripts/install.mjs        # installs the skill (MCP snippets in packages/skill/mcp/)
-mebular mcp                                    # or connect over HTTP: mebular serve
-```
-
-Say “deploy Mebular on this machine”, or “join Mebular with this code”. The agent follows
-[`packages/skill/SETUP.md`](packages/skill/SETUP.md) — pinned install, `fleet quickstart` or `fleet join --qr`,
-self-check with `mebular doctor --net` — and reports back. Agents also drive memory over MCP
-(`memory_write`, `memory_query`, `memory_search`, `memory_status`, …); every MCP tool has a **verbatim same-named**
-`mebular` CLI command (`mebular memory_write`), so scripts and agents share one surface.
-
-### Do it yourself in the GUI
+### Start it
+| Path | Get started | Best for |
+|---|---|---|
+| **Agent** (recommended) | install the skill, then say “deploy Mebular” / “join with this code” | hands-off |
+| **GUI** | `mebular serve` → console → ＋ Invite a device | want to watch it happen |
+| **CLI** | `fleet quickstart` → `fleet invite`; new device `fleet join --qr` | scripts / bulk |
 
 ```bash
-mebular serve
+node packages/skill/scripts/install.mjs   # then say "deploy Mebular" / "join with this code"; it follows packages/skill/SETUP.md and self-checks with `mebular doctor --net`
 ```
-
-Open `http://127.0.0.1:7331/console`, turn on the join service under the common settings, and click
-**＋ Invite a device** to get a QR code and a token. Invites, grants, settings and diagnostics all live in the
-console. To be honest: **joining a brand-new device still needs one `fleet join` command** (or hand the code to
-an agent) — the console cannot paste a token yet.
-
-### Do it yourself with the CLI
-
-Start your own Mebular — this machine becomes the trust root:
-
+```bash
+mebular serve   # console: http://127.0.0.1:7331/console — enable the join service under common settings first
+```
 ```bash
 fleet quickstart --daemon --dir ~/.mebular --device device-A   # identity + daemon + join service
-fleet invite --dir ~/.mebular                                  # prints a QR code and a token
-```
-
-Join an existing Mebular from a new device:
-
-```bash
+fleet invite --dir ~/.mebular                                  # QR code + token for the new device
 fleet join --qr "<QR content>" --daemon --dir ~/.mebular --device device-B   # or --token
 ```
 
-That one step gives the device a delegated identity (the master key is **never copied**), connects it
-automatically, and authorizes it on the token's domain — revocable, valid for 24h by default.
-**No `fleet approve` is needed**; only invites created with `--no-grant` still ask for an explicit approval.
+Joining a new device still takes one `fleet join` (or hand it to an agent); no `fleet approve` is needed by default; grants last 24h and are revocable. Prefer a UI to try it? Use `seed-demo.mjs`.
 
-### Roles: your agent, you, and the framework
+### Who does what
+| Who | Manages | Typical commands |
+|---|---|---|
+| **Your agent** (you never touch it) | memory read/write/search, executing tasks and returning results | `memory_write` … (full list: skill docs) |
+| **You** (rarely) | one-time pairing; grants / revoke / leave / rejoin; watching; optional dispatch | `fleet invite` · `fleet revoke` · `fleet task_submit` |
+| **The framework** (automatic) | discovery & addressing, direct/relay/hole-punch switching, auto bridges, sync retries, certificates & token TTLs, service autostart | — |
 
-**Your agent does this — you don't touch it.** Memory in all its forms: `memory_write`, `memory_write_batch`,
-`memory_query`, `memory_search`, `memory_profile`, `memory_skills`, `memory_history`, `memory_graph`,
-`memory_import`, `memory_status`, `memory_sync`, plus semantic recall when enabled; and executing tasks and
-returning results. (The same handlers are also exposed as same-named `mebular` commands — handy for scripts,
-not a human chore.)
-
-**You do this — rarely, and only about trust and boundaries.** One-time pairing: start with `fleet quickstart`,
-join with `fleet join --qr` / `--token`. People and access: `fleet invite`, `fleet grant`, `fleet revoke`,
-`fleet leave`, `fleet rejoin`. Watching and running it: `mebular status`, `mebular doctor --net`, the console at
-`http://127.0.0.1:7331/console`. Optionally dispatch work: `fleet task_submit` hands a job to agents on other
-devices (`task_status`, `task_children`, `task_summarize` follow it) — your agents also dispatch to each other.
-
-**Nobody manages this — the framework does.** LAN discovery and the address book, choosing and switching between
-direct / relay / hole-punched paths, reachable devices becoming bridges automatically, keeping endpoints fresh;
-always-on sync with automatic retry; delegated certificates, token expiry and grant expiry; service autostart
-and restart.
-
-The one thing only you decide: when two networks both lack a public entry point, pair one always-on device the
-others can reach — it becomes their bridge automatically. Try the console with seeded demo data via `seed-demo.mjs`.
-
-### For developers
+The one thing only you decide: when two networks both lack a public entry point, pair one always-on device they can reach — it becomes their bridge automatically.
+### Extend it (developers)
 
 ```ts
 import { Mebular, HermesMemoryProvider } from 'mebular';
@@ -121,8 +84,7 @@ const mebular = new Mebular({ storagePath: './store.jsonl', deviceId: 'device-A'
 await mebular.initialize();
 ```
 
-See [`examples/quickstart`](examples/quickstart/index.mjs) to run it. For a fleet task tree, `fleet task_submit`
-submits a root and `task_children` / `task_summarize` walk the tree.
+Runnable example: [`examples/quickstart`](examples/quickstart/index.mjs) — it submits a root task with `task_submit`.
 
 ## What you get
 

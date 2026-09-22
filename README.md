@@ -60,18 +60,40 @@ mebular mcp                                    # or connect over HTTP: mebular s
 
 ### For device owners
 
-One command per machine, then approve once on the first machine:
+Start your own Mebular — this machine becomes the trust root:
 
 ```bash
-fleet quickstart --daemon --dir ~/.mebular --device device-A   # daemon home + fleet + token (+ mebular-serve)
-fleet invite --dir ~/.mebular                                  # short-lived join token
-# on the new machine (delegated identity, no master key copied):
-fleet join --token <token> --daemon --dir ~/.mebular --device device-B
-fleet approve --dir ~/.mebular --device device-B               # grant the domain on the graph
+fleet quickstart --daemon --dir ~/.mebular --device device-A   # identity + daemon + join service
+fleet invite --dir ~/.mebular                                  # prints a QR code and a token
 ```
 
-Prefer a UI? The daemon also serves a local console: run `mebular serve` and open `http://127.0.0.1:7331/console`
-(star map / domains / audit / wizard / settings tabs: 常用 / 高级 / 诊断, plus an "关于本机" panel from the top-bar badge; invites carry reachable endpoints so a new device connects without being told an address). Try it with seeded demo data via `seed-demo.mjs`.
+Join an existing Mebular from a new device:
+
+```bash
+fleet join --qr "<QR content>" --daemon --dir ~/.mebular --device device-B   # or --token
+```
+
+That one step gives the device a delegated identity (the master key is **never copied**), connects it
+automatically, and authorizes it on the token's domain — revocable, valid for 24h by default.
+**No `fleet approve` is needed**; only invites created with `--no-grant` still ask for an explicit approval.
+
+### What you can do — and what you never have to manage
+
+- **Memory** — `memory_write`, `memory_query`, `memory_search`, `memory_profile`, `memory_skills`,
+  `memory_history`, `memory_graph`, `memory_import`, `memory_status`, `memory_sync`: agents use them over MCP,
+  humans use the same-named `mebular` command.
+- **Tasks** — `fleet task_submit` dispatches work to agents on other devices; `task_status`, `task_children`
+  and `task_summarize` follow it.
+- **People and access** — `fleet invite`, `fleet grant`, `fleet revoke`, `fleet leave`, `fleet rejoin`.
+- **Observability** — `mebular status`, `mebular doctor --net`, and a local console: `mebular serve`, then open
+  `http://127.0.0.1:7331/console` (star map, About this device, settings, diagnostics, invite QR code).
+
+Mebular handles the rest: LAN discovery and the address book, choosing and switching between direct / relay /
+hole-punched paths, reachable devices becoming bridges automatically, keeping endpoints fresh; always-on sync
+with automatic retry; delegated certificates, token expiry and grant expiry; service autostart and restart.
+
+The one thing only you decide: when two networks both lack a public entry point, pair one always-on device the
+others can reach — it becomes their bridge automatically. Try the console with seeded demo data via `seed-demo.mjs`.
 
 ### For developers
 

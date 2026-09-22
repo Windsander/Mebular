@@ -54,18 +54,38 @@ mebular mcp                                    # 或以 HTTP 常驻：mebular se
 
 ### 设备主运维
 
-每台机器一条命令，首台再批准一次：
+建一个新的 Mebular —— 这台机器就是信任根：
 
 ```bash
-fleet quickstart --daemon --dir ~/.mebular --device device-A   # 守护 home + fleet + 令牌（+ mebular-serve）
-fleet invite --dir ~/.mebular                                  # 短时效加入令牌
-# 新机器（委派身份，不复制主密钥）：
-fleet join --token <token> --daemon --dir ~/.mebular --device device-B
-fleet approve --dir ~/.mebular --device device-B               # 在图上授予域
+fleet quickstart --daemon --dir ~/.mebular --device device-A   # 身份 + 守护 + 加入服务
+fleet invite --dir ~/.mebular                                  # 打印二维码 + 令牌
 ```
 
-想要界面？守护同时提供本机控制台：`mebular serve` 后打开 `http://127.0.0.1:7331/console`
-（星图 / 域视图 / 审计 / 向导 / 设置：常用 · 高级 · 诊断，顶栏徽章打开「关于本机」；邀请令牌带对端可达地址，新设备无需被口头告知地址即可连通）；可用 `seed-demo.mjs` 生成演示数据。
+新设备加入已有的 Mebular：
+
+```bash
+fleet join --qr "<二维码内容>" --daemon --dir ~/.mebular --device device-B   # 也可用 --token
+```
+
+这一步就完成了：拿到委派身份（**不复制主密钥**）、自动连上、按令牌分区自动授权（可撤销，默认 24h）。
+**默认不需要 `fleet approve`**；只有用 `--no-grant` 签发的邀请才需要再人工批准一次。
+
+### 你能做什么 —— 以及哪些根本不用你管
+
+- **记忆** —— `memory_write`、`memory_query`、`memory_search`、`memory_profile`、`memory_skills`、
+  `memory_history`、`memory_graph`、`memory_import`、`memory_status`、`memory_sync`：Agent 走 MCP，
+  人用同名 `mebular` 子命令。
+- **任务** —— `fleet task_submit` 把活派给其他设备上的 Agent；`task_status`、`task_children`、
+  `task_summarize` 跟踪进度。
+- **成员与授权** —— `fleet invite`、`fleet grant`、`fleet revoke`、`fleet leave`、`fleet rejoin`。
+- **观测** —— `mebular status`、`mebular doctor --net`，以及本机控制台：`mebular serve` 后打开
+  `http://127.0.0.1:7331/console`（星图、关于本机、设置、诊断、邀请二维码）。
+
+其余交给 Mebular：LAN 自动发现与地址簿、直连/中继/打洞的自动选择与切换、可达设备自动当桥、地址自动
+更新；同步默认常开、断线自动重试；委派证书、令牌过期与授权到期自动清理；服务开机自启与重启自恢复。
+
+唯一需要你物理决定的一件事：两个网络都没有公网入口时，配一台双方都能连到的常开设备——它会自动成为桥。
+想先看看界面？用 `seed-demo.mjs` 生成演示数据。
 
 ### 开发者
 

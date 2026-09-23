@@ -107,8 +107,9 @@ await mebular.initialize();
 
 ## 链接与文档
 
-- **限制与取舍** — [`LIMITATIONS.md`](LIMITATIONS.md)
-- **封板契约**（红线 / 协议语义 / 推迟项） — [`SEALING.md`](SEALING.md)
+- **快速上手（5 分钟）** — [`QUICKSTART_CN.md`](QUICKSTART_CN.md) · [English](QUICKSTART.md)
+- **限制与取舍** — [`LIMITATIONS_CN.md`](LIMITATIONS_CN.md)
+- **封板契约**（红线 / 协议语义 / 推迟项） — [`SEALING_CN.md`](SEALING_CN.md)
 - **fleet 运维手册**（双机操作、WAN 命令、验收） — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
 - **Agent 记忆规约** — [`packages/skill/MEMORY_POLICY.md`](packages/skill/MEMORY_POLICY.md)
 - **守护 / MCP** — [`packages/mcp`](packages/mcp)

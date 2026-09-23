@@ -112,6 +112,7 @@ Runnable example: [`examples/quickstart`](examples/quickstart/index.mjs) — it 
 
 ## Links & docs
 
+- **Quickstart (5 minutes)** — [`QUICKSTART.md`](QUICKSTART.md) · [中文](QUICKSTART_CN.md)
 - **Limits & trade-offs** — [`LIMITATIONS.md`](LIMITATIONS.md)
 - **Sealing contract** (red lines, protocol semantics, deferrals) — [`SEALING.md`](SEALING.md)
 - **Fleet runbook** (two-machine ops, WAN commands, acceptance) — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)

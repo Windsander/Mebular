@@ -51,7 +51,7 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 | 路径 | 怎么开始 | 适合 |
 |---|---|---|
 | **让 Agent 代劳**（推荐） | 装好 Skill，然后说“部署 Mebular”/“用这个码加入” | 不想碰命令 |
-| **GUI** | `mebular serve` → 控制台 → ＋ 邀请新设备 | 想亲眼看着 |
+| **GUI** | `mebular serve` → 控制台 → 首次：**建新 / 加入已有**；之后：＋ 邀请新设备 | 想亲眼看着 |
 | **CLI** | `fleet quickstart` → `fleet invite`；新机 `fleet join --qr` | 脚本化/批量 |
 
 **让 Agent 代劳** —— 装好 Skill，对它说“部署 Mebular”/“用这个码加入”；它按 [`packages/skill/SETUP.md`](packages/skill/SETUP.md) 执行并用 `mebular doctor --net` 自检：
@@ -60,7 +60,7 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 node packages/skill/scripts/install.mjs
 ```
 
-**GUI** —— 控制台在 `http://127.0.0.1:7331/console`（先在「常用」启用加入服务，再点「＋ 邀请新设备」）：
+**GUI** —— 控制台在 `http://127.0.0.1:7331/console`。家目录为空时先进入**首次上手页**，两个入口：**建新 Mebular**（root 身份 + 写配置，随后自动重启）或**加入已有 Mebular**（粘贴邀请令牌，取回委派证书，**不复制主密钥**）。完成后点「＋ 邀请新设备」即可用同样方式接入下一台机器：
 
 ```bash
 mebular serve
@@ -74,7 +74,7 @@ fleet invite --dir ~/.mebular                                  # 给新设备的
 fleet join --qr "<二维码内容>" --daemon --dir ~/.mebular --device device-B   # 也可用 --token
 ```
 
-加入新设备仍需一条 `fleet join`（或交给 Agent） · 默认无需 `fleet approve` · 授权默认 24h、可撤销 · 想先看界面用 `seed-demo.mjs`
+首次上手全程 GUI（**建新** / **加入已有** —— 粘贴令牌即可，不需要命令行） · 命令行仍保留给脚本（`fleet join`） · 默认无需 `fleet approve` · 授权默认 24h、可撤销 · 想先看界面用 `seed-demo.mjs`
 
 ### 谁做什么
 | 谁 | 管什么 | 代表命令 |

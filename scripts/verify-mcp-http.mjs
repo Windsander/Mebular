@@ -27,7 +27,8 @@ const base64url = (buf) => Buffer.from(buf).toString('base64').replace(/\+/g, '-
 
 function spawnServe({ home, storage, args = [], env = {} }) {
   const proc = spawn(process.execPath, [bin, 'serve', '--port', '0', ...args], {
-    env: { ...process.env, MEBULAR_HOME: home, MEBULAR_STORAGE_PATH: storage, MEBULAR_DEVICE_ID: 'device-http', ...env },
+    // MEBULAR_PROVISION=0：本用例刻意在**空家目录**上验证自举 root 与 fail-closed 默认值（非 GUI 引导路径）
+    env: { ...process.env, MEBULAR_HOME: home, MEBULAR_STORAGE_PATH: storage, MEBULAR_DEVICE_ID: 'device-http', MEBULAR_PROVISION: '0', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';

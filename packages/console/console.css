@@ -944,3 +944,14 @@ select {
 /* ---------- C7：邀请二维码 ---------- */
 .qr-block { display: grid; gap: 6px; justify-items: start; }
 .qr-img { width: 180px; height: 180px; background: #fff; border-radius: 8px; padding: 6px; image-rendering: pixelated; }
+
+/* ---------- 引导态（首次上手）：建新 / 加入 ---------- */
+.provision-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 8px; }
+.provision-card { padding: 12px; display: grid; gap: 6px; align-content: start; }
+.provision-card h3 { margin: 0 0 2px; font-size: 14px; }
+.provision-desc { font-size: 11px; line-height: 1.6; margin: 0 0 4px; }
+.provision-actions { display: flex; justify-content: flex-end; margin-top: 4px; }
+#provision-status { min-height: 18px; margin: 10px 0 0; font-size: 12px; overflow-wrap: anywhere; }
+#provision-status.is-error { color: #ffb4b4; }
+#provision-status.is-ok { color: #9dffcf; }
+#provision-join-token { font-family: var(--crt-mono, monospace); font-size: 11px; }

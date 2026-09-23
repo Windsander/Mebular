@@ -263,3 +263,25 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
   并落 `<home>/join.error.json` 供控制台 / 诊断展示（不再是笼统「serve 起不来」）。
 - **热路径（可选，运营自管 reload 的部署）**：`MEBULAR_CONFIG_HOT_PATHS=a,b` 声明的项保存**不重启**、不进待重启，原因显示「已声明为热生效」。
 - 验收：`npm run verify:config`（schema/暴露面/自锁/自动重启/防抖/热路径/回滚/restart 接口 401·403·409·202/join 根因）+ `npm run verify:console`（E1 含收尾断言）。
+
+## 14. 首次上手（GUI：建新 / 加入；CLI 备选）
+
+- **引导态**：家目录**真正为空**（无 `config.json` / `user-master-key.json` / `<storagePath>.identity.json`）时，
+  `mebular serve` 进入引导态——**不自举 root 主密钥**，只起最小 HTTP（`/healthz` + `/console` 引导页 + `/app/provision/*`），
+  其余 admin API 返回 `409 provision_required`；**仅 loopback**（非回环直接 fail closed：`MCP_PROVISION_LOOPBACK_REQUIRED`），
+  写操作仍需 CSRF；日志打印 `PROVISION_READY`。
+  显式退出口：`MEBULAR_PROVISION=0`（脚本/测试在空家目录上验证自举 root 时用，见 `verify:mcp:http` / `verify:mcp:oauth`）。
+- **建新（GUI）**：输入设备名 → `POST /app/provision/create` → `resolveMasterKeys` 生成 root 主密钥
+  （`<home>/user-master-key.json`，含私钥，0600）+ 写 `config.json`（`joinService.enabled=true`、`mcp.http` 回环、
+  `network` 默认、`sync.policyIssuers=[self]`；join/监听端口被占则自动改用空闲端口）→ **自动重启**（复用 A 轮 apply 通道；
+  前台 nohup → 手动命令）→ 正常态。
+- **加入（GUI）**：粘贴邀请令牌 → `POST /app/provision/join` → **复用 `@mebular/fleet` 的 `joinWithToken`**
+  （令牌验签/TTL/形状 + `requestJoin` 向 `token.endpoint` 兑换委派证书 + hints 落盘；agents 用 fleet CLI 同款占位）
+  → 再写守护 `config.json`（`identity.mode='delegated'`、`encryption.userMasterPublicKeyFile=<home>/master-key.json`、
+  `network.peers` 指向 inviter、`sync.namespaces=[令牌分区]`）→ **自动重启** → 正常态（`mebular doctor --net` 正常）。
+  授权分区 = 令牌分区（inviter 侧 C7 自动授权；`grantOnJoin:false` 的令牌则待人工批准）。
+- **错误可读**：令牌过期（本地预检）/ 签名不符（inviter 403）/ 端点不可达（`ENDPOINT_UNREACHABLE`）/ 已使用 → 页面显示原因；
+  重复 provision → `409 already_provisioned`；失败**回滚本次半成品**（仍处于引导态可重试）。
+- **CLI 备选**（等价）：`fleet quickstart --daemon` 建新 · `fleet invite` 出令牌 · `fleet join --qr/--token --daemon` 加入。
+- 验收：`npm run verify:onboarding`（引导态不自举/两入口/admin 409 + 建新+重启+邀请可用 + 加入+委派无主私钥+hints+分区+doctor
+  + 过期/错签/不可达/重复/无 CSRF/缺确认/非回环）。

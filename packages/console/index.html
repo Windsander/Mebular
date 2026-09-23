@@ -180,6 +180,39 @@
     </div>
   </div>
 
+  <div id="provision" class="modal" hidden>
+    <div class="modal-box modal-box-wide crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="首次上手：建新 / 加入 Mebular">
+      <h2>首次上手 · 建新 / 加入 Mebular</h2>
+      <p class="modal-note muted" id="provision-note">家目录为空：先选一个入口完成初始化（全程 GUI，不需要命令行）。</p>
+      <div class="provision-grid">
+        <section class="provision-card crt-screen" data-provision-card="create">
+          <h3>① 建新 Mebular</h3>
+          <p class="muted provision-desc">生成 root 主密钥（本机是根），写入配置并自动重启；完成后「邀请新设备」可用。</p>
+          <label class="cfg-label" for="provision-create-name">设备名</label>
+          <input id="provision-create-name" class="crt-input" type="text" autocomplete="off" />
+          <div class="provision-actions">
+            <button id="provision-create" class="btn btn-crt" type="button">建新并重启</button>
+          </div>
+        </section>
+        <section class="provision-card crt-screen" data-provision-card="join">
+          <h3>② 加入已有 Mebular</h3>
+          <p class="muted provision-desc">粘贴邀请方「＋ 邀请新设备」生成的一次性令牌：将取得委派证书（<b>不复制主密钥</b>），自动授权令牌分区。</p>
+          <label class="cfg-label" for="provision-join-name">设备名</label>
+          <input id="provision-join-name" class="crt-input" type="text" autocomplete="off" />
+          <label class="cfg-label" for="provision-join-token">加入令牌</label>
+          <textarea id="provision-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…"></textarea>
+          <div class="provision-actions">
+            <button id="provision-join" class="btn btn-crt" type="button">加入并重启</button>
+          </div>
+        </section>
+      </div>
+      <p id="provision-status" class="muted" aria-live="polite"></p>
+      <div class="modal-actions">
+        <button id="provision-reload" class="btn" type="button">已重启？刷新页面</button>
+      </div>
+    </div>
+  </div>
+
   <script type="module" src="./starfield.js"></script>
   <script type="module" src="./console.js"></script>
 </body>

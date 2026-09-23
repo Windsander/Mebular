@@ -90,6 +90,7 @@
     "verify:console": "node packages/console/scripts/verify-console.mjs",
     "verify:console:ui": "node packages/console/scripts/verify-console-ui.mjs",
     "verify:config": "node scripts/verify-config.mjs",
+    "verify:onboarding": "node scripts/verify-onboarding.mjs",
     "verify:fleet:grant": "node scripts/verify-fleet-grant.mjs",
     "verify:fleet:service": "node scripts/verify-fleet-service.mjs",
     "verify:fleet:membership": "node scripts/verify-fleet-membership.mjs",

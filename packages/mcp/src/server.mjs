@@ -6,12 +6,13 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { MemoryService } from '@mebular/core';
-import { createMebular } from './config.mjs';
+import { createMebular, homeDir } from './config.mjs';
 import { registerTools } from './tools.mjs';
 import { startHttpServer, acquireLock } from './serve.mjs';
 import { createJoinServer } from './jointoken.mjs';
 import { clearApplyPending, readApplyPending, writeApplyResult, writeServeReady } from './config-apply.mjs';
 import { buildSettings } from './admin.mjs';
+import { isProvisionHome } from './provision.mjs';
 import { advertiseHost, endpointHostname, isLoopbackHost } from './lan-host.mjs';
 
 const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
@@ -94,10 +95,60 @@ export async function startStdioServer() {
 }
 
 /**
+ * 引导态服务器：空家目录时只服务 /healthz + /console（引导页）+ /app/provision/*（CSRF）。
+ * 仅 loopback（fail-closed）；不起 Mebular app / 网络 / store —— 待用户在 GUI 选「建新 / 加入」后再重启进入正常态。
+ */
+export async function startProvisionServer(options = {}) {
+  const home = homeDir();
+  const host = options.host ?? '127.0.0.1';
+  const port = options.port ?? 7331;
+  const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
+  if (!isLoopback) {
+    const error = new Error(`引导态仅允许 loopback（当前 host=${host}）：请用 --host 127.0.0.1 完成初始化`);
+    error.code = 'MCP_PROVISION_LOOPBACK_REQUIRED';
+    throw error;
+  }
+  const storagePath = process.env.MEBULAR_STORAGE_PATH ?? join(home, 'store.jsonl');
+  const lock = await acquireLock(home, storagePath);
+  try {
+    const http = await startHttpServer({
+      home,
+      app: null,
+      service: null,
+      config: {},
+      host,
+      port,
+      auth: 'none',
+      tls: false,
+      deviceId: null,
+      provision: true,
+      writesEnabled: true,
+      runtime: null,
+    });
+    const shutdown = async () => {
+      await http.close().catch(() => undefined);
+      await lock.release();
+      process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+    return { ...http, lock, provision: true };
+  } catch (error) {
+    await lock.release();
+    throw error;
+  }
+}
+
+/**
  * 启动 Streamable HTTP server（G6.3）。
  * 单实例：先取 <home>/lock；被占抛 MCP_STORAGE_LOCKED。
  */
 export async function startServeServer(options = {}) {
+  const provisionHome = homeDir();
+  // 引导态：真正的空家目录（无 config/主密钥/身份）→ 不自举 root；只起最小 HTTP（引导页 + provision API）
+  if (isProvisionHome(provisionHome, { storagePath: process.env.MEBULAR_STORAGE_PATH })) {
+    return await startProvisionServer(options);
+  }
   const { app, home, storagePath, deviceId, config, effective } = await createMebular();
   const lock = await acquireLock(home, storagePath);
   let joinServer = null;

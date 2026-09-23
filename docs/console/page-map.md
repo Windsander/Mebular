@@ -1,5 +1,18 @@
 # 控制台页面地图（哪个设置在哪个 Tab）
 
+## 首次上手（引导态：建新 / 加入）
+
+家目录**真正为空**（无 `config.json`、无 `user-master-key.json`、无 `<storagePath>.identity.json`）时，`mebular serve` **不自举 root**，而是进入**引导态**：只服务 `/healthz` + `/console` 引导页 + `/app/provision/*`（其余 admin API 一律 `409 provision_required`），且**仅 loopback**。
+
+引导页两个入口（全程 GUI，不需要命令行）：
+
+| 入口 | 动作 | 结果 |
+|---|---|---|
+| **建新 Mebular** | `POST /app/provision/create`（设备名可改） | 生成 root 主密钥 + 写 `config.json`（`joinService.enabled=true`、`mcp.http` 回环、`network` 默认）→ **自动重启** → 正常态（「＋ 邀请新设备」可用） |
+| **加入已有 Mebular** | `POST /app/provision/join`（粘贴邀请令牌；复用 fleet 令牌验签/兑换） | 取回**委派证书链**（delegated，**无主私钥**）+ 主公钥（仅公钥）+ inviter hints 入 `<home>/net/peers.json` → **自动重启** → 正常态（授权分区 = 令牌分区） |
+
+错误可读：令牌过期 / 签名不符 / 端点不可达 / 已使用 → 页面直接显示原因；重复调 provision → `409`；失败**不残留半成品**（仍可重试）。未以服务方式运行时给出手动重启命令（`nohup mebular serve …`）。
+
 设置弹层分三个 Tab：**常用**（默认开）· **高级**（默认收起）· **诊断**；只读信息统一在**「关于本机」**面板（点顶栏状态徽章 `本机 · <deviceId>` 打开）。
 IA 单一真源在 [`packages/console/settings-ia.js`](../../packages/console/settings-ia.js)，E1（`verify-console.mjs`）以迁移表驱动断言「不丢项：每项有且仅有唯一去处」。
 

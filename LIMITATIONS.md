@@ -1,7 +1,7 @@
 # Limits & Trade-offs
 
 > This file collects Mebular's **known limits and deliberate trade-offs** (previously scattered in the README).
-> Chinese summary at the end. Protocol contracts live in [`SEALING.md`](SEALING.md).
+> Chinese version: [`LIMITATIONS_CN.md`](LIMITATIONS_CN.md). Protocol contracts live in [`SEALING.md`](SEALING.md).
 
 ## 1. Scope / product
 
@@ -71,21 +71,6 @@
 
 ---
 
-## 中文要点
+## Chinese version
 
-- **不是云 SaaS**：节点自管，无中心服务/协调者；项目早期、API 未稳定、未发 npm。
-- **跨设备只走记忆通道**，不提供通用远程查询/调用；「应用间协议层」已退役（出现流式会话/大对象/非 Mebular 复用身份/低延迟 RPC 再立项）。
-- **同机 Agent 默认可信**（设备级身份、不做加密隔离）；跨机仍需证书链 + 显式分区授权。
-- **吊销是域收缩**：不回撤已入图数据、仍可建会话；级联在事件同步到达后生效（有传播延迟）；`__policy__` 对已认证设备（含被吊销者）可读。
-- **单写者**：守护持 store 锁，第二个写者明确拒绝；**配额仅本地记账**；令牌加入为 LAN 明文 HTTP+bearer。
-- **打洞（C4）**：`network.nat` 默认 auto（装可选依赖即启用）；AutoNAT 会请求外部回拨探测、DCUtR 经既有 relay 协调（不引第三方/公共种子，不参与授权）；对称 NAT 下打洞失败属预期，保留 relay；控制台与 `doctor --net` 展示计数。
-- **扫码即通（C7）**：令牌可选 `grantOnJoin`（默认开，显式关闭才写入=保持字节兼容）与 `grantTtlMs`（默认 24h，0=不自动撤销）；兑换自动授权经既有 `namespace_grant`（作用域=令牌分区），到期由图外台账 + 定时 revokeGrant 保证（TTL 属本地策略，不进一致性）；二维码内容=令牌文本，渲染依赖可选依赖 qrcode（缺包只给文本）。
-- **地址自动广播（C5）**：`net_endpoints`（`__net__`，opt-in，默认 full 档）**只作 hints**，不改授权；可见性沿用既有订阅/成员/授权裁剪；`expiry` 为本地墙钟策略（不进一致性）；被吊销 subject 的记录忽略；旧节点忽略该类型（安全方向）。
-- **中继内部化（C6）**：无独立 relay 命令；`network.relayService` 默认 auto（可达或见入站直连才当桥），仅服务地址簿已配对/已授权对端，默认限额，不落任何记忆/授权状态；桥的能力广播见 C5。
-- **LAN 自动发现（C3）**：mDNS 尽力而为；仅对已知/白名单对端自动拨号（陌生设备忽略）；`bonjour` 缺失时发现软降级（告警，不影响其他连接）；真 mDNS 验收为尽力而为，确定式 harness 才是门禁。
-- **配对即连（C1+C2）**：候选地址簿 `<home>/net/peers.json`（0600，core 不读文件、由 app 传路径）；relay 重启会作废旧预约，靠对端重新发布 hints 恢复；relay 能力动态广播留 C5。
-- **控制台设置页**：常用/高级/诊断三 Tab + 「关于本机」只读面板；`sync.autoSync`/`sync.pushOnWrite` 默认常开且不再出现在编辑面（只读展示，改需手改 config.json）；运行时生效项一律「已配置 / 实际」双值。
-- **控制台**：仅本机/回环（非回环需 TLS+非 none 鉴权，启动强制）；写需 `memory.admin` scope + CSRF，可 `MEBULAR_CONSOLE_WRITES=0` 只读；状态脉冲走 SSE，列表轮询刷新。邀请令牌的 endpoint 由 `joinService.bind` 推导（通配取 LAN IPv4，无 LAN 则回环并告警）；`auth` 切到 bearer/oauth 会立即锁住控制台 API（oauth 只能改回配置自救）。
-- **尚无记忆推送**（本地 10–50ms 轮询）；服务日志不自动轮转。
-- **快照冲突/合并语义未补齐**；**不实现自动事件裁剪**（约束：必须排除未被所有已授权对端 ack 的事件）；跨会话重复发送是设计。
-- **跨 NAT 真机验收仍待**（本机 `verify:wan:l2*` 为仿真）。
+The complete Chinese translation is maintained in [`LIMITATIONS_CN.md`](LIMITATIONS_CN.md).

@@ -1,6 +1,6 @@
 # Relay 部署与运维（transport-only）
 
-> **定位**：circuit relay 只做**字节转发**，是纯传输；按 [`SEALING.md`](../../SEALING.md) §1.6「传输/集成不构成权威」，
+> **定位**：circuit relay 只做**字节转发**，是纯传输；按 [`SEALING_CN.md`](../../SEALING_CN.md) §1.6「传输/集成不构成权威」，
 > relay **不参与**授权、策略、一致性判定。**可自托管、可替换**（换 relay 或改用手动 multiaddr 不影响记忆语义）。
 
 ## 1. 部署

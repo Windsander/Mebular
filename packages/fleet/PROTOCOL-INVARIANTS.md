@@ -3,7 +3,7 @@
 > 本文件随 `packages/fleet/src/**` 一起受版本控制。**任何对任务 envelope / 事件 / 状态机 /
 > 配额行为的改动，必须先在下面的矩阵里补/改一格并配一个测试**，否则不予合入。
 > 与记忆层的 [`src/sync/POLICY-INVARIANTS.md`](../../src/sync/POLICY-INVARIANTS.md) 同级；
-> 记忆层的协议语义见仓库根 [`SEALING.md`](../../SEALING.md)（fleet **不改**其语义）。
+> 记忆层的协议语义见仓库根 [`SEALING_CN.md`](../../SEALING_CN.md)（fleet **不改**其语义）。
 
 红线（不可越界）：不在 core 引入任务语义；fleet 只消费 `@mebular/core` 公共 API；墙钟不进一致性判定；
 禁中心化（配额 = 每设备对自己发出的量本地记账）。
@@ -95,7 +95,7 @@ harness：`tests/fleet/collab-invariants.test.ts`（固定种子，`scenarios=20
 - **红→绿必须重建 dist（A2）**：`verify:*` 类脚本跑的是 **`packages/fleet/dist` 产物**，所以对
   `packages/fleet/src/**`（或 core `src/**`）打补丁后，**必须先 `npm run build` 再跑**，否则红是假的
   （脚本仍在用旧 dist）。jest 直编 TS（`tests/**`）不受此影响，可直接跑。
-- **不得**触碰 core 语义或 `SEALING.md` 协议语义；触及 → 停下报告。
+- **不得**触碰 core 语义或 `SEALING_CN.md` 协议语义；触及 → 停下报告。
 
 ## 7. 1d：三种协作形态接 live 通道（任务协议/worker 接线；线格式**未变**）
 
@@ -117,7 +117,7 @@ harness：`tests/fleet/collab-invariants.test.ts`（固定种子，`scenarios=20
 
 ## 8. WAN 准备（L2/L4/L5）：网络行为（**不改 core 语义/线格式**）
 
-> relay 是**纯传输**：按 `SEALING.md §1.6`（传输/集成不构成权威）——relay 只转发密文字节，
+> relay 是**纯传输**：按 `SEALING_CN.md §1.6`（传输/集成不构成权威）——relay 只转发密文字节，
 > 不参与授权/一致性判定，可自托管、可替换。加固只加**边界**（连接数/帧大小/白名单），不改协议语义。
 
 | 域 | 性质 | 期望 | 覆盖 |

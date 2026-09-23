@@ -2,7 +2,7 @@
 
 > 目标：两台机器上各跑一个进程（node=任务板/发起端，worker=执行端），任务经 **core 记忆同步**
 > （写入即推 + anti-entropy + 变更订阅）传递，**无共享存储、无中心服务**。
-> 隐私红线与协议语义见仓库根 [`SEALING.md`](../../SEALING.md)；fleet 只消费 `@mebular/core` 公共 API。
+> 隐私红线与协议语义见仓库根 [`SEALING_CN.md`](../../SEALING_CN.md)；fleet 只消费 `@mebular/core` 公共 API。
 >
 > **设备上车**（安装/主密钥分发/`onboard`/`doctor`）见 [`ONBOARDING.md`](./ONBOARDING.md)——本文件的手工命令是它的底层等价形态。
 > **图上授权（G1：`fleet grant`/`revoke`，配置白名单仅 bootstrap）** 见 [`ONBOARDING.md §4`](./ONBOARDING.md)。

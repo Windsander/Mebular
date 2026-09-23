@@ -12,10 +12,9 @@
      0. 集中配置
      ========================================================= */
   // Buttondown 表单提交地址（唯一需要修改的地方）
-  // 注意：待用户提供真实 URL 后替换此值，填入形如
-  //   https://buttondown.email/api/emails/embed-subscribe/<username>
-  // 替换后表单即会真正提交；保持占位符则仅做前端演示（直接显示感谢态）。
-  var BUTTONDOWN_EMBED_URL = '{{BUTTONDOWN_EMBED_URL}}';
+  // 形如 https://buttondown.com/api/emails/embed-subscribe/<username>
+  // 为占位符时表单仅做前端演示（直接显示感谢态，不真实提交）。
+  var BUTTONDOWN_EMBED_URL = 'https://buttondown.com/api/emails/embed-subscribe/windsander';
 
   // 判断地址是否已从占位符替换为真实 URL
   function isConfiguredUrl(url) {
@@ -345,47 +344,47 @@
     }
 
     form.addEventListener('submit', function (e) {
-      e.preventDefault();
       setError('');
 
       var email = emailEl ? emailEl.value.trim() : '';
       var intent = intentEl ? intentEl.value : '';
 
       if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+        e.preventDefault();
         setError(t('form.err.email'));
         if (emailEl) emailEl.focus();
         return;
       }
       if (!intent) {
+        e.preventDefault();
         setError(t('form.err.intent'));
         if (intentEl) intentEl.focus();
         return;
       }
-
-      var configured = isConfiguredUrl(BUTTONDOWN_EMBED_URL);
 
       function done() {
         form.style.display = 'none';
         if (successEl) successEl.hidden = false;
       }
 
-      if (!configured) {
+      if (!isConfiguredUrl(BUTTONDOWN_EMBED_URL)) {
         // Buttondown URL 尚未配置：仅做前端演示
+        e.preventDefault();
         done();
         return;
       }
 
-      var submitBtn = form.querySelector('button[type="submit"]');
-      if (submitBtn) submitBtn.disabled = true;
-
-      fetch(BUTTONDOWN_EMBED_URL, {
-        method: 'POST',
-        body: new FormData(form),
-        mode: 'no-cors'
-      }).then(done).catch(function () {
-        if (submitBtn) submitBtn.disabled = false;
-        setError(t('form.err.network'));
-      });
+      // 已配置：按 Buttondown 官方要求使用原生 form POST（fetch 会断 CAPTCHA/验证流程）。
+      // 表单 target="popupwindow"：提交进弹出窗口，主页面留在原地显示感谢态。
+      var popup = null;
+      try { popup = window.open('', 'popupwindow'); } catch (err) {}
+      if (!popup) {
+        // 弹窗被拦截：移除 target，让表单在当前标签页正常跳转
+        form.removeAttribute('target');
+        return;
+      }
+      done();
+      // 不 preventDefault：原生提交进 popup 完成 CAPTCHA/确认
     });
   }
 

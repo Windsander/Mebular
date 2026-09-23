@@ -36,6 +36,7 @@
       <!-- Buttondown 嵌入表单：提交地址由 site.js 中的 BUTTONDOWN_EMBED_URL 统一注入 -->
       <form id="waitlist-form"
             method="post"
+            target="popupwindow"
             novalidate>
         <input type="hidden" name="embed" value="1" />
 
@@ -52,11 +53,11 @@
 
         <div class="field">
           <label for="intent" data-i18n="form.intent.label">付费意向</label>
-          <select id="intent" name="tag" required>
+          <select id="intent" name="metadata__paid-interest" required>
             <option value="" disabled selected data-i18n="form.intent.placeholder">请选择</option>
             <option value="hosted-relay" data-i18n="form.intent.relay">托管 relay</option>
             <option value="enterprise-compliance" data-i18n="form.intent.enterprise">企业合规</option>
-            <option value="consulting-integration" data-i18n="form.intent.consulting">咨询集成</option>
+            <option value="consulting" data-i18n="form.intent.consulting">咨询集成</option>
           </select>
         </div>
 

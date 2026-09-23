@@ -1,7 +1,7 @@
 # 设备上车（Step 1b）：≤15 分钟把第二台设备加入舰队
 
 > 目标：不 clone、不手写配置，在一台新机器上用**一条 `fleet onboard`** 接入，并用 `fleet doctor`
-> 自证「可达、已授权、已收敛」。传输/隐私语义见仓库根 [`SEALING.md`](../../SEALING.md)；
+> 自证「可达、已授权、已收敛」。传输/隐私语义见仓库根 [`SEALING_CN.md`](../../SEALING_CN.md)；
 > 双机任务板/执行端的完整叙事见 [`RUNBOOK.md`](./RUNBOOK.md)（本文件是它的「上车」前置）。
 
 ## 0. 前置
@@ -184,7 +184,7 @@ fleet doctor --dir ~/.mebular
 ```
 
 > 兼容：旧写法 `onboard --policy-issuer device-A` 仍可用（配置作为 bootstrap 回退）；新部署推荐只用 `declare-issuer`。
-> **破坏性协议变更**：旧节点（不含 C1）会忽略 `policy_issuer_declare`；新旧混跑时旧节点仍需本地 `--policy-issuer`，否则会**少授权**（安全方向）。详见仓库根 `SEALING.md` §3 C1。
+> **破坏性协议变更**：旧节点（不含 C1）会忽略 `policy_issuer_declare`；新旧混跑时旧节点仍需本地 `--policy-issuer`，否则会**少授权**（安全方向）。详见仓库根 `SEALING_CN.md` §3 C1。
 
 ### FAQ：信任根 / 引导白名单 / 图上授权 的角色与边界
 
@@ -349,7 +349,7 @@ fleet members --dir ~/.mebular --namespace tasks
 - **退订交接（2b）**：注销（`--leave`）会做**继任者全量 ack 门禁 + 本地彻底清理**（见 §12）。
 
 > 破坏性协议变更：旧节点忽略 `namespace_membership`，对旧端该分区始终「未启用成员资格」→ 行为不变或**少收**
-> （安全方向，不 fail-open）。详见仓库根 `SEALING.md` §3 M1–M3。
+> （安全方向，不 fail-open）。详见仓库根 `SEALING_CN.md` §3 M1–M3。
 
 ## 12. 退订交接（2b）：继任者全量 ack 门禁 + 本地彻底清理
 

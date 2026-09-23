@@ -14,8 +14,8 @@
     "scripts"
   ],
   "scripts": {
-    "prepack": "node scripts/publish-manifest.mjs set",
-    "postpack": "node scripts/publish-manifest.mjs restore"
+    "prepack": "node ../../scripts/publish-manifest.mjs set",
+    "postpack": "node ../../scripts/publish-manifest.mjs restore"
   },
   "engines": {
     "node": ">=20"

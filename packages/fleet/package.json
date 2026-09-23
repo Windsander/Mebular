@@ -27,12 +27,12 @@
   "publishConfig": {
     "access": "public"
   },
+  "scripts": {
+    "prepack": "node ../../scripts/publish-manifest.mjs set",
+    "postpack": "node ../../scripts/publish-manifest.mjs restore"
+  },
   "dependencies": {
     "@mebular/core": "file:../..",
     "@mebular/service": "file:../service"
-  },
-  "scripts": {
-    "prepack": "node scripts/publish-manifest.mjs set",
-    "postpack": "node scripts/publish-manifest.mjs restore"
   }
 }

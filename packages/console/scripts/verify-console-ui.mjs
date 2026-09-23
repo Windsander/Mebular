@@ -149,6 +149,27 @@ function launchChrome(executablePath) {
   });
 }
 
+/**
+ * Chrome 启动重试：CI runner 偶发 CDP/dbus 启动抖动（stderr 形如
+ * "Could not parse server address: Unknown address type"）——杀掉重来，最多 3 次。
+ */
+async function launchChromeRetry(executablePath, attempts = 3) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i += 1) {
+    let handle = null;
+    try {
+      handle = await launchChrome(executablePath);
+      return handle;
+    } catch (error) {
+      lastError = error;
+      try { handle?.proc?.kill('SIGKILL'); } catch { /* 已退出 */ }
+      await rm(handle?.userDataDir, { recursive: true, force: true }).catch(() => undefined);
+      await sleep(500 * (i + 1));
+    }
+  }
+  throw lastError;
+}
+
 /** 极简 CDP 客户端（依赖 Node 内建 WebSocket） */
 function connectCdp(wsUrl) {
   const ws = new WebSocket(wsUrl);
@@ -207,7 +228,7 @@ async function main() {
     const base = `http://127.0.0.1:${ready.port}`;
     check('GET /console/ 200', (await waitHttp(`${base}/console/`)) === 200);
 
-    chromeHandle = await launchChrome(chrome);
+    chromeHandle = await launchChromeRetry(chrome);
     cdp = connectCdp(chromeHandle.wsUrl);
     await cdp.ready;
     const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });

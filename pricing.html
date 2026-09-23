@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>定价 · Mebular</title>
+  <meta name="description" content="Mebular 托管 Relay 订阅：Free / Pro $8/月 / Team $12/席/月。分布式可验证的 agent 记忆网络。" />
+  <link rel="stylesheet" href="site.css" />
+</head>
+<body data-nav="pricing" data-title-i18n="doc.pricing">
+
+  <canvas id="bg-canvas"></canvas>
+
+  <nav>
+    <a class="brand" href="index.html">Mebular</a>
+    <div class="links">
+      <a href="index.html" data-i18n="nav.system">系统</a>
+      <a href="index.html#page-network" data-i18n="nav.network">网络</a>
+      <a href="index.html#page-design" data-i18n="nav.design">设计</a>
+      <a href="pricing.html" data-nav="pricing" data-i18n="nav.pricing">定价</a>
+      <a href="waitlist.html" data-nav="waitlist" data-i18n="nav.waitlist">等待名单</a>
+      <a href="https://github.com/Windsander/Mebular" target="_blank" rel="noopener" data-i18n="nav.github">GitHub</a>
+    </div>
+    <button class="lang-toggle" type="button" data-lang-toggle data-i18n-aria="lang.aria" aria-label="Switch language" data-i18n="lang.toggle">EN</button>
+  </nav>
+
+  <main class="wrap">
+
+    <header class="page-head reveal">
+      <span class="tag" data-i18n="pricing.tag">v1.0 · 定价预告</span>
+      <h1 data-i18n="pricing.title">定价</h1>
+      <p data-i18n-html="pricing.subtitle">托管 Relay 订阅。</p>
+      <div class="billing-note" data-i18n="pricing.billing">价格以美元计</div>
+    </header>
+
+    <section class="pricing-grid" aria-label="pricing plans">
+
+      <!-- Free -->
+      <article class="plan reveal d1">
+        <div class="plan-name" data-i18n="plan.free.name">Free</div>
+        <div class="price-row">
+          <span class="price" data-i18n="plan.free.price">$0</span>
+          <span class="period" data-i18n="plan.free.period">永久免费</span>
+        </div>
+        <p class="plan-desc" data-i18n="plan.free.desc">适合个人体验分布式记忆网络。</p>
+        <ul class="features">
+          <li data-i18n="plan.free.f1">公共 relay 节点</li>
+          <li data-i18n="plan.free.f2">最多 2 台设备</li>
+          <li data-i18n="plan.free.f3">公平使用限额</li>
+          <li data-i18n="plan.free.f4">基础记忆同步</li>
+        </ul>
+        <a class="btn" href="waitlist.html" data-i18n="plan.free.cta">加入等待名单</a>
+      </article>
+
+      <!-- Pro -->
+      <article class="plan featured reveal d2">
+        <span class="badge" data-i18n="plan.pro.badge">推荐</span>
+        <div class="plan-name" data-i18n="plan.pro.name">Pro</div>
+        <div class="price-row">
+          <span class="price" data-i18n="plan.pro.price">$8</span>
+          <span class="period" data-i18n="plan.pro.period">/ 月</span>
+        </div>
+        <p class="plan-desc" data-i18n="plan.pro.desc">为长期使用与多设备场景打造的专属实例。</p>
+        <ul class="features">
+          <li data-i18n="plan.pro.f1">专属 relay 实例</li>
+          <li data-i18n="plan.pro.f2">服务等级协议（SLA）</li>
+          <li data-i18n="plan.pro.f3">更多设备（最多 10 台）</li>
+          <li data-i18n="plan.pro.f4">优先同步与更低延迟</li>
+          <li data-i18n="plan.pro.f5">可验证审计日志</li>
+        </ul>
+        <a class="btn primary" href="waitlist.html" data-i18n="plan.pro.cta">加入等待名单</a>
+      </article>
+
+      <!-- Team -->
+      <article class="plan reveal d3">
+        <div class="plan-name" data-i18n="plan.team.name">Team</div>
+        <div class="price-row">
+          <span class="price" data-i18n="plan.team.price">$12</span>
+          <span class="period" data-i18n="plan.team.period">/ 席 · 月</span>
+        </div>
+        <p class="plan-desc" data-i18n="plan.team.desc">面向团队的多域记忆协作与合规审计。</p>
+        <ul class="features">
+          <li data-i18n="plan.team.f1">多域管理</li>
+          <li data-i18n="plan.team.f2">完整审计可见性</li>
+          <li data-i18n="plan.team.f3">优先支持</li>
+          <li data-i18n="plan.team.f4">席位与角色权限</li>
+          <li data-i18n="plan.team.f5">合规导出与私有部署咨询</li>
+        </ul>
+        <a class="btn" href="waitlist.html" data-i18n="plan.team.cta">加入等待名单</a>
+      </article>
+
+    </section>
+
+    <p class="form-note reveal d4" style="margin-top:28px;text-align:center;">
+      <span data-i18n="pricing.includes.title">所有套餐均包含</span> ·
+      <span data-i18n="pricing.includes.body">端到端加密 · 设备侧记忆存储 · 开源客户端 · 可验证同步</span>
+    </p>
+
+    <!-- FAQ -->
+    <section class="faq">
+      <h2 class="section-title" data-i18n="faq.title">常见问题</h2>
+      <div class="faq-list">
+        <details class="faq-item">
+          <summary data-i18n="faq.q1">什么是托管 Relay？</summary>
+          <div class="faq-body" data-i18n="faq.a1">Relay 是记忆同步的中转节点。</div>
+        </details>
+        <details class="faq-item">
+          <summary data-i18n="faq.q2">Free 和 Pro 有什么区别？</summary>
+          <div class="faq-body" data-i18n="faq.a2">Free 使用公共 relay。</div>
+        </details>
+        <details class="faq-item">
+          <summary data-i18n="faq.q3">你们能看到我的记忆数据吗？</summary>
+          <div class="faq-body" data-i18n="faq.a3">不能。</div>
+        </details>
+        <details class="faq-item">
+          <summary data-i18n="faq.q4">可以随时取消或更换套餐吗？</summary>
+          <div class="faq-body" data-i18n="faq.a4">可以。</div>
+        </details>
+        <details class="faq-item">
+          <summary data-i18n="faq.q5">企业合规与私有部署怎么支持？</summary>
+          <div class="faq-body" data-i18n="faq.a5">Team 套餐提供多域管理。</div>
+        </details>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <div class="foot-brand">Mebular · 分布式记忆网络</div>
+    <a href="https://github.com/Windsander/Mebular" target="_blank" rel="noopener">GitHub →</a>
+    &ensp;·&ensp;MIT 协议&ensp;·&ensp;<a href="waitlist.html" data-i18n="nav.waitlist">等待名单</a>
+  </footer>
+
+  <script src="nebula.js"></script>
+  <script src="stars.js"></script>
+  <script src="site.js"></script>
+</body>
+</html>

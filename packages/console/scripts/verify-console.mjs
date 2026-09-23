@@ -139,9 +139,23 @@ function waitReady(handle, timeoutMs = 20000) {
 }
 
 async function stop(handle) {
-  if (handle?.proc && handle.proc.exitCode === null) {
-    handle.proc.kill('SIGTERM');
-    await new Promise((resolve) => handle.proc.on('exit', resolve));
+  const proc = handle?.proc;
+  if (!proc) return;
+  // 已退出（正常或被信号杀死）直接返回；否则限时等待，超时 SIGKILL 兜底
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  const exited = new Promise((resolve) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) { resolve(); return; }
+    proc.once('exit', resolve);
+    proc.once('close', resolve);
+  });
+  try { proc.kill('SIGTERM'); } catch { /* 已退出 */ }
+  const timedOut = await Promise.race([
+    exited.then(() => false),
+    new Promise((resolve) => setTimeout(() => resolve(true), 8000)),
+  ]);
+  if (timedOut) {
+    try { proc.kill('SIGKILL'); } catch { /* 已退出 */ }
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))]);
   }
 }
 
@@ -970,7 +984,7 @@ try {
 
   // ---------- CLI：mebular console ----------
   try {
-    const cliOut = execFileSync(process.execPath, [bin, 'console', '--port', String(port)], {
+    const cliOut = execFileSync(process.execPath, [bin, 'console', '--port', String(port)], { timeout: 30000,
       env: { ...process.env, MEBULAR_HOME: home },
       encoding: 'utf-8',
     });
@@ -1102,13 +1116,13 @@ try {
       `exit=${exitCode} err=${badProc.getErr().trim().slice(-120)}`);
 
     let openssl = true;
-    try { execFileSync('openssl', ['version'], { stdio: 'ignore' }); } catch { openssl = false; }
+    try { execFileSync('openssl', ['version'], { stdio: 'ignore', timeout: 15000 }); } catch { openssl = false; }
     if (!openssl) {
       console.log('  - F-C1 有证书 https 可用：SKIP（本机无 openssl）');
     } else {
       const keyPath = join(tlsHome, 'key.pem');
       const certPath = join(tlsHome, 'cert.pem');
-      execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=127.0.0.1'], { stdio: 'ignore' });
+      execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=127.0.0.1'], { stdio: 'ignore', timeout: 30000 });
       baseCfg.mcp.http.tlsKey = keyPath;
       baseCfg.mcp.http.tlsCert = certPath;
       await writeFile(cfgPath, JSON.stringify(baseCfg, null, 2), 'utf-8');

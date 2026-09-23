@@ -183,7 +183,7 @@ jobs:
         run: npm run verify:fleet:local
 
       - name: Console E1 (console static/API smoke on Windows)
-        run: npm run verify:console > console-e1.log 2>&1 || { Get-Content console-e1.log -Tail 200; exit 1; }
+        run: npm run verify:console 2>&1 | Tee-Object -FilePath console-e1.log; if ($LASTEXITCODE -ne 0) { Get-Content console-e1.log -Tail 200; exit 1 }
 
       - name: Fleet onboard (Step 1b, libp2p + doctor; Windows 权限项 SKIP)
         run: npm run verify:fleet:onboard

@@ -158,6 +158,7 @@ describe('W1 工具面（CLI/MCP 同一 handler）', () => {
         { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'task_quota', arguments: {} } },
         { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'memory_status', arguments: {} } },
         { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'task_submit', arguments: { to: { device: 'device-B', agent: 'echo' } } } },
+        { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'board_create', arguments: { name: 'board-x' } } },
       ]);
       // 任务 handler 与 fleet 同源：task_quota 在守护 home 上可读
       const quota = resultOf(called, 3).structuredContent as { ok?: boolean; device?: string } | undefined;
@@ -170,6 +171,11 @@ describe('W1 工具面（CLI/MCP 同一 handler）', () => {
       expect(bad.isError).toBe(true);
       expect(bad.structuredContent?.ok).toBe(false);
       expect(bad.structuredContent?.error?.code).toBe('E_INPUT');
+      // 评审 M1：board_create 在**守护 home**（仅 config.json）上不再 ENOENT（onboard 辅助走 loadToolConfig）
+      const board = resultOf(called, 6) as { isError?: boolean; structuredContent?: { ok?: boolean; namespace?: string } };
+      expect(board.isError).toBeUndefined();
+      expect(board.structuredContent?.ok).toBe(true);
+      expect(board.structuredContent?.namespace).toBe('board-x');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

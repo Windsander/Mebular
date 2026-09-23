@@ -6,7 +6,7 @@
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 const SUBTLE = globalThis.crypto.subtle;
 
@@ -259,7 +259,7 @@ export function daemonConfigToFleet(dir: string, cfg: Record<string, unknown>): 
     : typeof encryption.keyFile === 'string' && encryption.keyFile.length > 0
       ? encryption.keyFile
       : join(dir, 'user-master-key.json');
-  const device = typeof cfg.deviceId === 'string' && cfg.deviceId.length > 0 ? cfg.deviceId : `device-${dir.split('/').pop() ?? 'local'}`;
+  const device = typeof cfg.deviceId === 'string' && cfg.deviceId.length > 0 ? cfg.deviceId : `device-${basename(dir) || 'local'}`;
   return {
     v: 1,
     device,

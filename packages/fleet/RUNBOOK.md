@@ -270,10 +270,13 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
   （记忆 11 + 任务 16）；任务 handler 直接复用 fleet 的 `TASK_TOOLS`（同 handler 不复制），
   工具上下文 = 本机 home（fleet.config.json 或守护 config.json，fleet `loadToolConfig` 适配）。
 - **`fleet mcp` 已删除**（无兼容包袱）：接入只讲 `mebular mcp` / HTTP `/mcp`；CLI 等价 `mebular task_*` 或 `fleet task_*`。
-- **scope 两轴**：`memory.read/write/admin` 与 `task.read/write`（互不蕴含）；`tools/list` 等元数据方法只要求已认证。
+- **scope 两轴**：`memory.read/write/admin` 与 `task.read/write`（互不蕴含；由 fleet surface **逐工具显式声明**，
+  禁止按名字推断）。**`board_create` 归 `task.write`**（写 + 授权——评审 H1 安全修正，避免只读令牌越权建板授权）；
+  `tools/list` 等纯元数据方法只要求已认证；`prompts/*`/`resources/*` 仍需 `memory.read`。
 - **错误信封**：`{ isError:true, content:[{type:'text',text}], structuredContent:{ ok:false, error:{ code, message } } }`
   （code：`E_INPUT`/`E_NOT_FOUND`/`E_CONFLICT`/`E_INTERNAL`）。
-- **join 令牌单一实现**：令牌原语/`applyJoinGrant`/`sweepAutoGrantRevokes`/inviter join 服务**全仓各一份定义**，
+- **join 令牌单一实现**：`encodeJoinToken`/`decodeJoinToken`/`describeJoinToken`/`buildJoinToken`/`verifyJoinToken`/
+  `applyJoinGrant`/`sweepAutoGrantRevokes`/`joinWithToken`/`requestJoin`/`startJoinService` **全仓各一份定义**，
   唯一实现在 `packages/fleet/src/jointoken.ts`；`packages/mcp/src/jointoken.mjs` 只是**薄 re-export**（无逻辑）。
   防漂移断言见 `npm run check:surface-parity`（定义数 ≠ 1 即红）。
 - **skill**：`mebular-memory`（记忆）与 `mebular-tasks`（任务）两个说明书，由 `packages/skill/scripts/install.mjs` 一并安装。

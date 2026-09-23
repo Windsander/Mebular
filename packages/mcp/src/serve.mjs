@@ -585,8 +585,12 @@ function requiredScopeForBody(body) {
     if (msg.method === 'initialize' || msg.method.startsWith('notifications/') || msg.method === 'ping') continue;
     if (msg.method === 'tools/call') {
       required.add(TOOL_ALL_SCOPES[msg.params?.name] ?? 'memory.read');
+    } else if (msg.method === 'prompts/list' || msg.method === 'prompts/get'
+      || msg.method === 'resources/list' || msg.method === 'resources/read' || msg.method === 'resources/templates/list') {
+      // 评审：prompts/resources 按声明 scope 校验（静态 memory_policy 属读面）；不得随纯元数据放宽
+      required.add('memory.read');
     }
-    // 列表/元数据方法（tools/list、resources/*、prompts/*）：只要求已认证，不再按轴要 scope
+    // 纯元数据（tools/list、initialize、ping、notifications/*）：只要求已认证
     // —— 统一入口的工具清单横跨记忆与任务两轴，按 memory.read 要求会挡住 task.read-only 令牌。
   }
   return [...required];

@@ -161,6 +161,15 @@ try {
     check('任务只读工具用 memory.read token → 403（两轴独立）', taskWithMemoryToken.status === 403, `status=${taskWithMemoryToken.status}`);
     const taskClient = await mcpClient(ready.port, { authorization: `Bearer ${taskReadToken}` });
     const taskCall = await taskClient.callTool({ name: 'task_status', arguments: {} });
+    const boardWithRead = await httpJson(`http://127.0.0.1:${ready.port}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${taskReadToken}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'board_create', arguments: { name: 'x' } } }),
+    });
+    const boardMsg = String(boardWithRead.json?.error?.message ?? boardWithRead.json?.message ?? '');
+    check('H1 回归：board_create（写+授权）用 task.read token → 403（need task.write）',
+      boardWithRead.status === 403 && /task\.write/.test(boardMsg),
+      `status=${boardWithRead.status} msg=${boardMsg.slice(0, 80)}`);
     check('task.read token → 任务工具可调用（结构化信封，非 403）',
       taskCall !== undefined && (taskCall.structuredContent?.ok === true || typeof taskCall.structuredContent?.error?.code === 'string'),
       JSON.stringify(taskCall?.structuredContent ?? {}).slice(0, 120));

@@ -8,9 +8,9 @@ import { TASK_TOOLS } from '@mebular/fleet';
 import { homeDir } from './config.mjs';
 import { json, fail, codeFor, jsonSchemaAdapter } from './tool-envelope.mjs';
 
-/** 任务工具的 OAuth scope（R1.3）。 */
+/** 任务工具的 OAuth scope（R1.3 + 评审 H1）：由 fleet surface **逐工具显式声明**，不按名字推断。 */
 export const TASK_TOOL_SCOPES = Object.fromEntries(
-  TASK_TOOLS.map((tool) => [tool.name, /^(task_(status|list|history|children|summarize|targets|quota)|board_create)$/.test(tool.name) ? 'task.read' : 'task.write']),
+  TASK_TOOLS.map((tool) => [tool.name, tool.scope]),
 );
 
 /** 任务工具规格：与记忆面同形（name/title/description/inputSchema/handler(service,args)）。 */

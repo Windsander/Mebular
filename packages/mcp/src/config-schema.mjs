@@ -128,7 +128,7 @@ export const CONFIG_SCHEMA = [
     exposure: 'editable',
     requiresRestart: true,
     default: true,
-    ui: { type: 'bool', label: '周期反熵', help: '周期性对账，弥补推送丢失' },
+    ui: { group: '反熵与快照', type: 'bool', label: '周期反熵', help: '周期性对账，弥补推送丢失' },
     effective: (s) => s?.sync?.antiEntropy?.enabled ?? true,
   },
   {
@@ -172,8 +172,7 @@ export const CONFIG_SCHEMA = [
     exposure: 'editable',
     requiresRestart: true,
     default: null,
-    ui: {
-      type: 'list',
+    ui: { group: '对端与签发者',       type: 'list',
       label: '对端白名单',
       placeholder: 'device-B, device-C',
       help: '记忆通道的传输闸门：仅与列出的 deviceId 建立会话；留空 = 不启用（按授权 / 成员制判定）',
@@ -204,8 +203,7 @@ export const CONFIG_SCHEMA = [
     requiresRestart: true,
     default: false,
     envVar: 'MEBULAR_SEMANTIC_ENABLED',
-    ui: {
-      type: 'bool',
+    ui: { group: '语义召回（可选依赖）',       type: 'bool',
       label: '启用语义召回',
       help: '需要本地 embedding 模型（可选依赖）',
       warn: '需可选依赖 @huggingface/transformers；缺失时自动降级关键词并告警',
@@ -234,8 +232,7 @@ export const CONFIG_SCHEMA = [
     exposure: 'editable',
     requiresRestart: true,
     default: '0.0.0.0',
-    ui: {
-      type: 'text',
+    ui: { group: '设备接入（高级）',       type: 'text',
       label: '绑定地址',
       placeholder: '0.0.0.0',
       help: '令牌 join 端点绑定；默认即 0.0.0.0（quickstart 依赖 LAN 可达），仅可信 LAN 使用。它同时决定邀请令牌里写死的 endpoint：通配时自动取本机 LAN IPv4（无 LAN 时回环并在邀请面板告警）',
@@ -268,8 +265,7 @@ export const CONFIG_SCHEMA = [
     exposure: 'editable',
     requiresRestart: true,
     default: '127.0.0.1',
-    ui: {
-      type: 'text',
+    ui: { group: 'MCP 接入（高级）',       type: 'text',
       label: '监听地址',
       placeholder: '127.0.0.1',
       help: '仅回环可 auth=none/无 TLS',

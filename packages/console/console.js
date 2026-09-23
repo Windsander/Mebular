@@ -651,6 +651,62 @@ function currentConfigFile() {
   return state.rawConfig?.config ?? {};
 }
 
+function formatRuntimeValue(value) {
+  if (value === undefined || value === null) return '—';
+  if (Array.isArray(value)) return value.length ? value.join(', ') : '（空 = 默认）';
+  if (typeof value === 'boolean') return value ? '启用' : '未启用';
+  return String(value);
+}
+
+function fieldInitial(field) {
+  const raw = cfgGet(currentConfigFile(), field.path);
+  if (raw !== undefined) return { value: raw, isDefault: false };
+  // 未写入 config.json：用服务端三元组的「实际」值（= 运行时生效值）作为初值，避免卡片失真
+  const row = effectiveRowOf(field.path);
+  if (row) return { value: row.actual ?? field.default ?? null, isDefault: true };
+  return { value: field.default ?? null, isDefault: true };
+}
+
+function fieldToConfig(field, formValue) {
+  if (field.type === 'bool') return Boolean(formValue);
+  if (field.type === 'minutes') {
+    const n = Number(formValue);
+    return formValue === '' || !Number.isFinite(n) || n <= 0 ? null : Math.round(n * 60000);
+  }
+  if (field.type === 'number') {
+    const n = Number(formValue);
+    return formValue === '' || !Number.isFinite(n) ? null : n;
+  }
+  if (field.type === 'list') {
+    return String(formValue ?? '').split(/[,，\n]/).map((x) => x.trim()).filter(Boolean);
+  }
+  if (field.type === 'select') return String(formValue);
+  return String(formValue ?? '').trim();
+}
+
+function normalizedFieldValue(field) {
+  const v = fieldInitial(field).value;
+  if (field.type === 'bool') return Boolean(v);
+  if (field.type === 'minutes') return typeof v === 'number' ? v : null;
+  if (field.type === 'number') return typeof v === 'number' ? v : null;
+  if (field.type === 'list') return Array.isArray(v) ? v : [];
+  if (field.type === 'select') return typeof v === 'string' ? v : (field.options?.[0]?.[0] ?? '');
+  return typeof v === 'string' ? v : '';
+}
+
+function collectConfigChanges(root) {
+  const changes = [];
+  for (const field of configFields()) {
+    const el = root.querySelector(`[data-cfg-path="${CSS.escape(field.path)}"]`);
+    if (!el) continue;
+    const next = fieldToConfig(field, field.type === 'bool' ? el.checked : el.value);
+    const current = normalizedFieldValue(field);
+    if (JSON.stringify(next) === JSON.stringify(current)) continue;
+    changes.push({ path: field.path, value: next });
+  }
+  return changes;
+}
+
 /**
  * D：三元组渲染（已配置 X / 实际 Y / **未生效原因**）。
  * configured/actual/reason 均由服务端 /admin/api/settings.effective 计算（单一真源，前端不推导）。

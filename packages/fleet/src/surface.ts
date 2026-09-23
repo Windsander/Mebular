@@ -5,8 +5,7 @@
 
 import { Mebular } from '@mebular/core';
 import {
-  fleetConfigPath,
-  loadFleetConfig,
+  loadToolConfig,
   readMasterKeyFile,
 } from './config.js';
 import { offlineMebularOptions, grantNamespace, setNamespaceMembership } from './onboard.js';
@@ -49,7 +48,8 @@ interface Session {
 }
 
 async function openSession(ctx: ToolContext): Promise<Session> {
-  const config = await loadFleetConfig(fleetConfigPath(ctx.dir));
+  // F-UNI：fleet home（fleet.config.json）或守护 home（config.json）都可作为工具上下文
+  const config = await loadToolConfig(ctx.dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const namespace = ctx.namespace ?? config.namespace;
   const agent = ctx.agent ?? 'board';
@@ -136,7 +136,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_submit',
     cli: 'task_submit',
-    description: '提交任务（root 或 child）；root 可带预算与派发策略',
+    description: '提交任务（root 或 child）；root 可带预算与派发策略。**非幂等**：重试 = 新任务（需要关联请用 causedBy/chain）',
     inputSchema: {
       type: 'object',
       required: ['intent', 'to'],
@@ -421,7 +421,7 @@ export const TASK_TOOLS: TaskTool[] = [
     description: '本机配额状态（每设备对自己发出本地记账；无全局账本）',
     inputSchema: { type: 'object', properties: {} },
     handler: async (_input, ctx) => {
-      const config = await loadFleetConfig(fleetConfigPath(ctx.dir));
+      const config = await loadToolConfig(ctx.dir);
       return { ok: true, device: config.device, limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000, note: '本地记账，无全局账本；墙钟不参与一致性判定' };
     },
   },
@@ -433,7 +433,7 @@ export const TASK_TOOLS: TaskTool[] = [
     handler: async (_input, ctx) => {
       const session = await openSession(ctx);
       try {
-        const config = await loadFleetConfig(fleetConfigPath(ctx.dir));
+        const config = await loadToolConfig(ctx.dir);
         const authorized: string[] = [];
         for (const peer of config.peers) {
           const effective = await session.mebular.getEffectiveNamespaces(peer.device);
@@ -455,7 +455,7 @@ export const TASK_TOOLS: TaskTool[] = [
     handler: async (input, ctx) => {
       const name = requiredString(input, 'name');
       const withDevices = Array.isArray(input.with) ? (input.with as string[]) : [];
-      const config = await loadFleetConfig(fleetConfigPath(ctx.dir));
+      const config = await loadToolConfig(ctx.dir);
       const granted: Array<{ device: string; grantId: string }> = [];
       // 建域 = 声明成员（本机在册）+ 对邀请设备授权 + 成员在册
       await setNamespaceMembership(ctx.dir, { namespace: name, to: config.device, active: true, note: `board ${name}` });

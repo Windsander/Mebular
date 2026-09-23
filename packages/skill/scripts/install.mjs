@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-// 安装 Mebular Skill 到常见 Skill 目录（G6.4）。
+// 安装 Mebular Skills 到常见 Skill 目录（G6.4 + R3）：**两个 skill 一起装**
+//   · mebular-memory（记忆面：SKILL.md + MEMORY_POLICY.md + SETUP.md）
+//   · mebular-tasks （任务面：tasks/SKILL.md + SETUP.md）
 //
 // 用法：
 //   node scripts/install.mjs                 # 探测并安装到 cwd 的 .agents/skills、.dsh/skills（及存在的 .opencode/skills）
 //   node scripts/install.mjs --global        # 另装到 ~/.agents/skills
-//   node scripts/install.mjs --target <dir>  # 只装到指定目录（<dir>/mebular-memory，测试/自定义用）
+//   node scripts/install.mjs --target <dir>  # 只装到指定目录（<dir>/mebular-memory 与 <dir>/mebular-tasks，测试/自定义用）
 
 import { existsSync } from 'node:fs';
 import { cp, mkdir } from 'node:fs/promises';
@@ -14,6 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const SKILL_NAME = 'mebular-memory';
+const TASK_SKILL_NAME = 'mebular-tasks';
 
 function parseFlags(argv) {
   const flags = {};
@@ -54,6 +57,14 @@ for (const target of targets) {
   await cp(join(pkgRoot, 'SETUP.md'), join(dest, 'SETUP.md'));
   installed.push(dest);
   console.log(`installed ${dest}`);
+
+  // R3：任务面 skill（与记忆面并列安装）
+  const taskDest = join(target, TASK_SKILL_NAME);
+  await mkdir(taskDest, { recursive: true });
+  await cp(join(pkgRoot, 'tasks', 'SKILL.md'), join(taskDest, 'SKILL.md'));
+  await cp(join(pkgRoot, 'SETUP.md'), join(taskDest, 'SETUP.md'));
+  installed.push(taskDest);
+  console.log(`installed ${taskDest}`);
 }
 
 if (installed.length === 0) {

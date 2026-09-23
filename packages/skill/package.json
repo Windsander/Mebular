@@ -10,7 +10,8 @@
     "MEMORY_POLICY.md",
     "mcp",
     "scripts",
-    "SETUP.md"
+    "SETUP.md",
+    "tasks"
   ],
   "engines": {
     "node": ">=20"

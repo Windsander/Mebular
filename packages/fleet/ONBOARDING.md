@@ -431,7 +431,7 @@ fleet chatter_send  --dir ~/.mebular --input '{"topic":"status","text":"…"}'
 fleet chatter_inbox --dir ~/.mebular
 ```
 
-- **与 MCP 完全一致**：`fleet mcp`（stdio JSON-RPC）暴露同名工具（`task_submit`…`board_create`），**同一 handler**、同一结构化输出；对照表见 [`DESIGN.md`](./DESIGN.md) §2.5.2。
+- **与 MCP 完全一致**：任务工具经**统一 MCP 入口**暴露（`mebular mcp` / HTTP `/mcp`；`fleet mcp` 已删除）——同名工具（`task_submit`…`board_create`）、**同一 handler**、同一结构化输出；对照表见 [`DESIGN.md`](./DESIGN.md) §2.5.2。
 - **反滥用**：子任务预算 **≤ 父剩余**（越深越小）；越预算/越链长/`root-only` 派生属**无效事件**（入口拒收 + 权威视图剔除）；worker **公平轮转**（单一发送方份额 ≤50%）、每 Agent 并发默认 2。
 - **目录**：设备在 `agents` 域发布签名目录（`name/kind/capabilities?/concurrency/capacity?`）；`task_targets` = L1 授权 ∩ 目录；`capacity` 仅建议，**不参与授权/一致性**。
 

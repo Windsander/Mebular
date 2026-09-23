@@ -1,4 +1,4 @@
-// MCP server 装配（G6.2）：stdio 传输 + 11 工具 + memory_policy prompt。
+// MCP server 装配（G6.2 + R1）：stdio 传输 + **27 工具**（记忆 11 + 任务 16）+ memory_policy prompt。
 // 全部委托 MemoryService（D33 单一实现）。
 
 import { McpServer } from '@modelcontextprotocol/server';

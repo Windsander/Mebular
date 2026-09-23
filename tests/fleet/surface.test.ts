@@ -1,4 +1,5 @@
-// W1 工具面：16 工具 handler + CLI 对等表 + MCP JSON-RPC（同一 handler）。
+// W1 工具面：16 工具 handler + CLI 对等表 + 统一 MCP 入口（`mebular mcp`，同 handler）。
+// R1：`fleet mcp` 已删除——任务工具经**统一入口**（mebular mcp / HTTP /mcp）暴露；此处用真实 CLI 覆盖。
 import { describe, it, expect, jest } from '@jest/globals';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,8 +11,10 @@ import {
   toolCliTable,
   onboardDevice,
 } from '../../packages/fleet/src/index.js';
-import { handleMcpMessage, runFleetMcp } from '../../packages/fleet/src/mcp.js';
-import { Readable, Writable } from 'node:stream';
+import { execFileSync, spawnSync } from 'node:child_process';
+
+// jest 以仓库根为 cwd
+const MCP_BIN = join(process.cwd(), 'packages', 'mcp', 'bin', 'mebular.mjs');
 
 jest.setTimeout(60000);
 
@@ -122,44 +125,45 @@ describe('W1 工具面（CLI/MCP 同一 handler）', () => {
     }
   });
 
-  it('MCP JSON-RPC：initialize / tools/list / tools/call / 负例 / 通知', async () => {
-    const dir = await setupDir();
+  it('统一 MCP 入口（mebular mcp）：27 工具 + 任务 handler 同源 + 结构化错误信封', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mebular-unified-mcp-'));
     try {
-      const ctx = { dir };
-      const init = JSON.parse((await handleMcpMessage(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }), ctx))!) as { result: { protocolVersion: string; serverInfo: { name: string } } };
-      expect(init.result.protocolVersion).toBe('2024-11-05');
-      expect(init.result.serverInfo.name).toBe('mebular-fleet');
+      // 守护 home（config.json + user-master-key.json）——记忆面与任务面都可服务
+      // 不设 MEBULAR_DEVICE_ID：init 与后续 mcp 用同一派生 deviceId（避免身份文件与 config 不一致）
+      const env = { ...process.env, MEBULAR_HOME: dir, MEBULAR_STORAGE_PATH: join(dir, 'store.jsonl') };
+      execFileSync(process.execPath, [MCP_BIN, 'init'], { env, encoding: 'utf-8' });
+      const rpc = (messages: unknown[]): Array<{ result?: { tools?: Array<{ name: string }>; content?: Array<{ text: string }>; structuredContent?: Record<string, unknown> }; error?: { code: number } }> => {
+        const input = messages.map((m) => JSON.stringify(m)).join('\n') + '\n';
+        const out = spawnSync(process.execPath, [MCP_BIN, 'mcp'], { env, input, encoding: 'utf-8', timeout: 30000 });
+        return out.stdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+      };
 
-      const list = JSON.parse((await handleMcpMessage(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }), ctx))!) as { result: { tools: Array<{ name: string }> } };
-      expect(list.result.tools).toHaveLength(16);
-
-      const call = JSON.parse((await handleMcpMessage(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'task_submit', arguments: { intent: 'x', to: { device: 'device-B', agent: 'echo' } } } }), ctx))!) as { result: { content: Array<{ text: string }> } };
-      const parsed = JSON.parse(call.result.content[0]!.text) as { ok: boolean };
-      expect(parsed.ok).toBe(true);
-
-      const unknown = JSON.parse((await handleMcpMessage(JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'nope', arguments: {} } }), ctx))!) as { error: { code: number } };
-      expect(unknown.error.code).toBe(-32602);
-
-      const bad = JSON.parse((await handleMcpMessage('not json', ctx))!) as { error: { code: number } };
-      expect(bad.error.code).toBe(-32700);
-
-      const notification = await handleMcpMessage(JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }), ctx);
-      expect(notification).toBeNull();
-
-      const notFound = JSON.parse((await handleMcpMessage(JSON.stringify({ jsonrpc: '2.0', id: 5, method: 'no/such' }), ctx))!) as { error: { code: number } };
-      expect(notFound.error.code).toBe(-32601);
-
-      // stdio 主循环（含无换行尾行）
-      let out = '';
-      const sink = new Writable({ write(chunk, _enc, cb) { out += String(chunk); cb(); } });
-      const input = Readable.from([
-        JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized' }) + '\n\n',
-        JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/list' }) + '\n',
-        JSON.stringify({ jsonrpc: '2.0', id: 10, method: 'initialize' }),
+      // 官方 client 的 initialize 握手由 verify:mcp:stdio 覆盖；此处只验统一注册表与 handler 同源
+      const [list] = rpc([
+        { jsonrpc: '2.0', id: 2, method: 'tools/list' },
       ]);
-      await runFleetMcp({ dir }, input, sink);
-      const lines = out.trim().split('\n').map((l) => JSON.parse(l) as { id: number });
-      expect(lines.map((l) => l.id)).toEqual([9, 10]);
+      const names = (list!.result?.tools ?? []).map((t) => t.name);
+      expect(names).toHaveLength(27);
+      expect(names).toContain('memory_status');
+      expect(names).toContain('task_submit');
+      expect(names).toContain('task_status');
+
+      // 任务 handler 与 fleet 同源：task_status 在守护 home 上可读
+      const [quota, memory, badInput] = rpc([
+        { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'task_quota', arguments: {} } },
+        { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'memory_status', arguments: {} } },
+        { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'task_submit', arguments: { to: { device: 'device-B', agent: 'echo' } } } },
+      ]);
+      const quotaPayload = quota!.result?.structuredContent as { ok?: boolean; device?: string } | undefined;
+      expect(quotaPayload?.ok).toBe(true);
+      expect(typeof quotaPayload?.device).toBe('string');
+      const memoryPayload = memory!.result?.structuredContent as { deviceId?: string } | undefined;
+      expect(typeof memoryPayload?.deviceId).toBe('string');
+      // R3.3：错误信封（缺必填 intent → E_INPUT）
+      const bad = badInput!.result as { isError?: boolean; structuredContent?: { ok?: boolean; error?: { code?: string; message?: string } } };
+      expect(bad.isError).toBe(true);
+      expect(bad.structuredContent?.ok).toBe(false);
+      expect(bad.structuredContent?.error?.code).toBe('E_INPUT');
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

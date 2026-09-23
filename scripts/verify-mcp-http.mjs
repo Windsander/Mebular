@@ -104,7 +104,7 @@ try {
 
     const client = await mcpClient(ready.port);
     const { tools } = await client.listTools();
-    check('POST /mcp 真实 MCP client tools/list=11', tools.length === 11, `count=${tools.length}`);
+    check('POST /mcp 真实 MCP client tools/list=27（统一入口）', tools.length === 27, `count=${tools.length}`);
     const w = await client.callTool({ name: 'memory_write', arguments: { items: [{ type: 'fact', content: 'http-smoke' }] } });
     check('POST /mcp tools/call 落图', Array.isArray(w.structuredContent?.stored));
     await client.close();
@@ -116,6 +116,7 @@ try {
     const tokensFile = join(bearerHome, 'auth', 'tokens.json');
     const readToken = 'meb_readtoken';
     const writeToken = 'meb_writetoken';
+    const taskReadToken = 'meb_taskreadtoken';
     await mkdir(dirname(tokensFile), { recursive: true });
     await writeFile(
       tokensFile,
@@ -123,6 +124,7 @@ try {
         tokens: [
           { id: 't-read', sha256: createHash('sha256').update(readToken).digest('hex'), scope: ['memory.read'], revoked: false },
           { id: 't-write', sha256: createHash('sha256').update(writeToken).digest('hex'), scope: ['memory.write'], revoked: false },
+          { id: 't-taskread', sha256: createHash('sha256').update(taskReadToken).digest('hex'), scope: ['task.read'], revoked: false },
         ],
       }),
       'utf-8',
@@ -147,8 +149,22 @@ try {
 
     const client = await mcpClient(ready.port, { authorization: `Bearer ${readToken}` });
     const { tools } = await client.listTools();
-    check('正确 read token → tools/list 成功', tools.length === 11);
+    check('正确 read token → tools/list 成功（27，含任务面）', tools.length === 27);
     await client.close();
+
+    // R1.3：任务面 scope（memory.read ≠ task.read；两轴独立）
+    const taskWithMemoryToken = await httpJson(`http://127.0.0.1:${ready.port}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${readToken}` },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'task_status', arguments: {} } }),
+    });
+    check('任务只读工具用 memory.read token → 403（两轴独立）', taskWithMemoryToken.status === 403, `status=${taskWithMemoryToken.status}`);
+    const taskClient = await mcpClient(ready.port, { authorization: `Bearer ${taskReadToken}` });
+    const taskCall = await taskClient.callTool({ name: 'task_status', arguments: {} });
+    check('task.read token → 任务工具可调用（结构化信封，非 403）',
+      taskCall !== undefined && (taskCall.structuredContent?.ok === true || typeof taskCall.structuredContent?.error?.code === 'string'),
+      JSON.stringify(taskCall?.structuredContent ?? {}).slice(0, 120));
+    await taskClient.close();
   }
 
   // ---------- 3) oauth（well-known + PKCE） ----------
@@ -215,7 +231,7 @@ try {
 
     const client = await mcpClient(ready.port, { authorization: `Bearer ${tokenRes.json.access_token}` });
     const { tools } = await client.listTools();
-    check('oauth access token → /mcp tools/list 成功', tools.length === 11);
+    check('oauth access token → /mcp tools/list 成功（27）', tools.length === 27, `count=${tools.length}`);
     await client.close();
   }
 

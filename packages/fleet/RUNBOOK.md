@@ -264,6 +264,20 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - **热路径（可选，运营自管 reload 的部署）**：`MEBULAR_CONFIG_HOT_PATHS=a,b` 声明的项保存**不重启**、不进待重启，原因显示「已声明为热生效」。
 - 验收：`npm run verify:config`（schema/暴露面/自锁/自动重启/防抖/热路径/回滚/restart 接口 401·403·409·202/join 根因）+ `npm run verify:console`（E1 含收尾断言）。
 
+## 13.5 统一 MCP 入口与任务面（F-UNI）
+
+- **一个入口、两份说明书**：`mebular mcp`（stdio）与 `mebular serve` 的 HTTP `/mcp` 注册**同一份 27 工具**
+  （记忆 11 + 任务 16）；任务 handler 直接复用 fleet 的 `TASK_TOOLS`（同 handler 不复制），
+  工具上下文 = 本机 home（fleet.config.json 或守护 config.json，fleet `loadToolConfig` 适配）。
+- **`fleet mcp` 已删除**（无兼容包袱）：接入只讲 `mebular mcp` / HTTP `/mcp`；CLI 等价 `mebular task_*` 或 `fleet task_*`。
+- **scope 两轴**：`memory.read/write/admin` 与 `task.read/write`（互不蕴含）；`tools/list` 等元数据方法只要求已认证。
+- **错误信封**：`{ isError:true, content:[{type:'text',text}], structuredContent:{ ok:false, error:{ code, message } } }`
+  （code：`E_INPUT`/`E_NOT_FOUND`/`E_CONFLICT`/`E_INTERNAL`）。
+- **join 令牌单一实现**：令牌原语/`applyJoinGrant`/`sweepAutoGrantRevokes`/inviter join 服务**全仓各一份定义**，
+  唯一实现在 `packages/fleet/src/jointoken.ts`；`packages/mcp/src/jointoken.mjs` 只是**薄 re-export**（无逻辑）。
+  防漂移断言见 `npm run check:surface-parity`（定义数 ≠ 1 即红）。
+- **skill**：`mebular-memory`（记忆）与 `mebular-tasks`（任务）两个说明书，由 `packages/skill/scripts/install.mjs` 一并安装。
+
 ## 14. 首次上手（GUI：建新 / 加入；CLI 备选）
 
 - **引导态**：家目录**真正为空**（无 `config.json` / `user-master-key.json` / `<storagePath>.identity.json`）时，

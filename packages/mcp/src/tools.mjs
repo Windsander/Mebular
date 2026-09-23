@@ -1,4 +1,5 @@
-// MCP 工具面（G6.2 / D35）：11 个 agent 中立工具，薄壳委托 MemoryService。
+// MCP 工具面（G6.2 / D35 + R1 统一入口）：**27 个** agent 中立工具 = 记忆 11（薄壳委托 MemoryService）
+// + 任务 16（复用 @mebular/fleet 的 TASK_TOOLS handler；同 handler 不复制）。
 //
 // 钳制：limit ≤ 50（默认 10）、depth ≤ 5、batch ≤ 100。
 // 输出：content:[{type:'text'}] + structuredContent（同一对象）。
@@ -6,6 +7,12 @@
 // W3 表面一致性：抽出 `TOOL_SPECS`（单一 handler 注册表），MCP 适配器与 `mebular memory_*` CLI 共用。
 
 import { z } from 'zod';
+import { json, fail } from './tool-envelope.mjs';
+import { TASK_TOOL_SPECS, TASK_TOOL_SCOPES } from './task-tools.mjs';
+
+export { TASK_TOOL_SPECS } from './task-tools.mjs';
+
+export { json, fail } from './tool-envelope.mjs';
 
 /** 每个工具所需的 OAuth scope（D36） */
 export const TOOL_SCOPES = {
@@ -22,7 +29,8 @@ export const TOOL_SCOPES = {
   memory_sync: 'memory.admin',
 };
 
-export const TOOL_NAMES = [
+/** 记忆面工具名（11）。 */
+export const MEMORY_TOOL_NAMES = [
   'memory_write',
   'memory_write_batch',
   'memory_query',
@@ -35,6 +43,9 @@ export const TOOL_NAMES = [
   'memory_status',
   'memory_sync',
 ];
+
+/** 任务面工具名（16，来自 fleet 的 TASK_TOOLS）。 */
+export const TASK_TOOL_NAMES = TASK_TOOL_SPECS.map((spec) => spec.name);
 
 const MAX_BATCH = 100;
 const MAX_LIMIT = 50;
@@ -72,16 +83,6 @@ const memoryInputSchema = z.object({
 const namespaceFilter = z.union([z.string(), z.array(z.string())]).optional();
 
 const internalTypes = z.array(z.enum(['fact', 'episode', 'skill', 'preference', 'observation']));
-
-export function json(data) {
-  return {
-    content: [{ type: 'text', text: JSON.stringify(data) }],
-    structuredContent: data,
-  };
-}
-export function fail(message) {
-  return { isError: true, content: [{ type: 'text', text: message }] };
-}
 
 /** 工具注册表：handler(service, args) → MCP 结果对象（CLI 直接取 `structuredContent`）。 */
 export const TOOL_SPECS = [
@@ -307,14 +308,23 @@ export const TOOL_SPECS = [
   },
 ];
 
-/** 工具名 → spec。 */
+/** 统一工具注册表（记忆 11 + 任务 16 = 27）：`mebular mcp`（stdio）与 HTTP `/mcp` 都注册这一份。 */
+export const ALL_TOOL_SPECS = [...TOOL_SPECS, ...TASK_TOOL_SPECS];
+
+/** 统一工具名（27）——控制台「能力清单」与 CLI `mebular tools` 同源。 */
+export const TOOL_NAMES = ALL_TOOL_SPECS.map((spec) => spec.name);
+
+/** 统一 scope 表（记忆 + 任务，27）。 */
+export const TOOL_ALL_SCOPES = { ...TOOL_SCOPES, ...TASK_TOOL_SCOPES };
+
+/** 工具名 → spec（记忆 + 任务；CLI 与 MCP 同 handler）。 */
 export function toolByName(name) {
-  return TOOL_SPECS.find((t) => t.name === name) ?? null;
+  return ALL_TOOL_SPECS.find((t) => t.name === name) ?? null;
 }
 
 /** 把工具注册到 McpServer；service 为 MemoryService 实例 */
 export function registerTools(server, service) {
-  for (const spec of TOOL_SPECS) {
+  for (const spec of ALL_TOOL_SPECS) {
     server.registerTool(
       spec.name,
       { title: spec.title, description: spec.description, inputSchema: spec.inputSchema },

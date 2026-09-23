@@ -60,7 +60,7 @@ you cannot tell who wrote what; go offline and it stops working.
 | **GUI** | `mebular serve` → console → first run: **Create new / Join existing**; later: ＋ Invite a device | want to watch it happen |
 | **CLI** | `fleet quickstart` → `fleet invite`; new device `fleet join --qr` | scripts / bulk |
 
-**Agent** — install the skill, then say “deploy Mebular” / “join with this code”; it follows [`packages/skill/SETUP.md`](packages/skill/SETUP.md) and self-checks with `mebular doctor --net`:
+**Agent** — install the skills (two: **memory** + **tasks**), then say “deploy Mebular” / “join with this code”; it follows [`packages/skill/SETUP.md`](packages/skill/SETUP.md) and self-checks with `mebular doctor --net`:
 
 ```bash
 node packages/skill/scripts/install.mjs
@@ -116,6 +116,7 @@ Runnable example: [`examples/quickstart`](examples/quickstart/index.mjs) — it 
 - **Sealing contract** (red lines, protocol semantics, deferrals) — [`SEALING.md`](SEALING.md)
 - **Fleet runbook** (two-machine ops, WAN commands, acceptance) — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
 - **Memory policy for agents** — [`packages/skill/MEMORY_POLICY.md`](packages/skill/MEMORY_POLICY.md)
+- **Task playbook for agents** — [`packages/skill/tasks/SKILL.md`](packages/skill/tasks/SKILL.md) (when to delegate, tracking, negotiation, red lines)
 - **Daemon / MCP** — [`packages/mcp`](packages/mcp)
 - **Fleet** — [`packages/fleet`](packages/fleet)
 - **Console GUI** — [`packages/console`](packages/console)

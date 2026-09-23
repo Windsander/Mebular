@@ -6,7 +6,7 @@
 // 干净环境退出码 0。前置：npm run build。
 
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -100,6 +100,24 @@ try {
   const installOut = run([join(skillDir, 'scripts', 'install.mjs'), '--target', installTarget]);
   const installedSkill = join(installTarget, 'mebular-memory', 'SKILL.md');
   check('install.mjs 安装 SKILL.md', existsSync(installedSkill), installOut.trim().split('\n')[0]);
+
+  // ---------- R3：任务面 skill（mebular-tasks，与记忆面并列） ----------
+  {
+    const tasksSkillPath = join(skillDir, 'tasks', 'SKILL.md');
+    check('任务面 skill 存在（tasks/SKILL.md）', existsSync(tasksSkillPath));
+    const tasks = existsSync(tasksSkillPath) ? readFileSync(tasksSkillPath, 'utf-8') : '';
+    check('mebular-tasks frontmatter name + whenToUse（派活/跨设备协作/协商/进度）',
+      /^---[\s\S]*?name:\s*mebular-tasks[\s\S]*?---/.test(tasks) && /whenToUse:/.test(tasks)
+        && /派给别的设备上的 Agent/.test(tasks) && /协商/.test(tasks) && /看任务进度/.test(tasks));
+    const anchors = ['task_submit', 'intent', 'payloadRef', 'causedBy', 'chain', 'budget', 'dispatch',
+      'task_status', 'task_children', 'task_summarize', 'task_subscribe', 'task_quota', 'task_targets', 'board_create',
+      'task_negotiate', 'chatter_send', 'task_retry', 'task_cancel',
+      '非幂等', '不是记忆', 'L1 授权', '预算', '链长上限', '公平准入'];
+    const missing = anchors.filter((a) => !tasks.includes(a));
+    check(`mebular-tasks 覆盖派活/字段/跟踪/协作/失败/边界/发现/红线锚点（${anchors.length} 个）`, missing.length === 0, missing.join(', ') || '全部命中');
+    const installedTasks = join(installTarget, 'mebular-tasks', 'SKILL.md');
+    check('install.mjs 一并安装 mebular-tasks', existsSync(installedTasks));
+  }
   check('install.mjs 安装 MEMORY_POLICY.md', existsSync(join(installTarget, 'mebular-memory', 'MEMORY_POLICY.md')));
   const installedSetup = join(installTarget, 'mebular-memory', 'SETUP.md');
   check('install.mjs 安装 SETUP.md（部署手册随 Skill 落地）', existsSync(installedSetup));

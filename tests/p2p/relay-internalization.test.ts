@@ -37,7 +37,8 @@ describe('C6 · 无残留 relay 命令', () => {
       for (const [index, line] of text.split('\n').entries()) {
         if (!/mebular relay\b/.test(line)) continue;
         // 「命令已删除/不再有/内部化」这类说明性提及（注释/文档）是允许的
-        const explainsRemoval = /(已删除|不再有|不再|内部化|removed|no longer)/.test(line);
+        // 「已移除」与「已删除」同义（作者侧文档用词），一并视为说明性提及；仍要求**同一行**有说明短语
+        const explainsRemoval = /(已删除|已移除|不再有|不再|内部化|removed|no longer)/.test(line);
         if (explainsRemoval) continue;
         if (isDoc) docHits.push(`${file}:${index + 1}`);
         else codeHits.push(`${file}:${index + 1}:mebular relay`);

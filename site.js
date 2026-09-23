@@ -9,6 +9,20 @@
   'use strict';
 
   /* =========================================================
+     0. 集中配置
+     ========================================================= */
+  // Buttondown 表单提交地址（唯一需要修改的地方）
+  // 注意：待用户提供真实 URL 后替换此值，填入形如
+  //   https://buttondown.email/api/emails/embed-subscribe/<username>
+  // 替换后表单即会真正提交；保持占位符则仅做前端演示（直接显示感谢态）。
+  var BUTTONDOWN_EMBED_URL = '{{BUTTONDOWN_EMBED_URL}}';
+
+  // 判断地址是否已从占位符替换为真实 URL
+  function isConfiguredUrl(url) {
+    return !!url && url.indexOf('{{') === -1 && /^https?:\/\//i.test(url);
+  }
+
+  /* =========================================================
      1. 文案字典
      ========================================================= */
   var I18N = {
@@ -311,11 +325,13 @@
   /* =========================================================
      4. 等待名单表单（Buttondown）
      ========================================================= */
-  var PLACEHOLDER = '{{BUTTONDOWN_EMBED_URL}}';
 
   function initWaitlist() {
     var form = document.getElementById('waitlist-form');
     if (!form) return;
+
+    // 表单提交地址统一由上方 BUTTONDOWN_EMBED_URL 注入，HTML 中不再硬编码
+    form.setAttribute('action', BUTTONDOWN_EMBED_URL);
 
     var statusEl = document.getElementById('form-status');
     var successEl = document.getElementById('form-success');
@@ -346,8 +362,7 @@
         return;
       }
 
-      var action = form.getAttribute('action') || '';
-      var configured = action && action.indexOf(PLACEHOLDER) === -1;
+      var configured = isConfiguredUrl(BUTTONDOWN_EMBED_URL);
 
       function done() {
         form.style.display = 'none';
@@ -363,7 +378,7 @@
       var submitBtn = form.querySelector('button[type="submit"]');
       if (submitBtn) submitBtn.disabled = true;
 
-      fetch(action, {
+      fetch(BUTTONDOWN_EMBED_URL, {
         method: 'POST',
         body: new FormData(form),
         mode: 'no-cors'

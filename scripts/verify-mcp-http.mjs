@@ -159,6 +159,51 @@ try {
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'task_status', arguments: {} } }),
     });
     check('任务只读工具用 memory.read token → 403（两轴独立）', taskWithMemoryToken.status === 403, `status=${taskWithMemoryToken.status}`);
+    // F-UNI-2：prompts/get 与 resources/* 必须按 memory.read 校验（不得随纯元数据放宽为 auth-only）
+    const mcpPost = (token, payload) => httpJson(`http://127.0.0.1:${ready.port}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        // Streamable HTTP：不带 event-stream 的 Accept 会被判 406（探针踩过）
+        accept: 'application/json, text/event-stream',
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(payload),
+    });
+    const scopeMsgOf = (res) => String(res.json?.error?.message ?? res.json?.message ?? '');
+    const promptNoRead = await mcpPost(taskReadToken, { jsonrpc: '2.0', id: 11, method: 'prompts/get', params: { name: 'memory_policy', arguments: {} } });
+    check('F-UNI-2 prompts/get 无 memory.read（task.read-only）→ 403 + 需要 memory.read',
+      promptNoRead.status === 403 && /memory\.read/.test(scopeMsgOf(promptNoRead)),
+      `status=${promptNoRead.status} msg=${scopeMsgOf(promptNoRead).slice(0, 70)}`);
+    const resourcesListNoRead = await mcpPost(taskReadToken, { jsonrpc: '2.0', id: 12, method: 'resources/list', params: {} });
+    check('F-UNI-2 resources/list 无 memory.read（task.read-only）→ 403 + 需要 memory.read',
+      resourcesListNoRead.status === 403 && /memory\.read/.test(scopeMsgOf(resourcesListNoRead)),
+      `status=${resourcesListNoRead.status} msg=${scopeMsgOf(resourcesListNoRead).slice(0, 70)}`);
+    const resourcesReadNoRead = await mcpPost(taskReadToken, { jsonrpc: '2.0', id: 13, method: 'resources/read', params: { uri: 'mebular://memory/policy' } });
+    check('F-UNI-2 resources/read 无 memory.read（task.read-only）→ 403 + 需要 memory.read',
+      resourcesReadNoRead.status === 403 && /memory\.read/.test(scopeMsgOf(resourcesReadNoRead)),
+      `status=${resourcesReadNoRead.status} msg=${scopeMsgOf(resourcesReadNoRead).slice(0, 70)}`);
+    // 正向：memory.read 令牌 → prompts/get 拿到内容；resources/* 的 scope 门开启（2xx，而非 403/406）
+    const readClient = await mcpClient(ready.port, { authorization: `Bearer ${readToken}` });
+    const promptOk = await readClient.getPrompt({ name: 'memory_policy', arguments: {} });
+    check('F-UNI-2 prompts/get 带 memory.read → 成功返回文本（非 403/406）',
+      (promptOk?.messages?.length ?? 0) >= 1, `messages=${promptOk?.messages?.length ?? 0}`);
+    // resources 正例：经真实会话（Streamable HTTP 裸请求在过门后仍会被会话校验拒 400）；
+    // 判据 = **不是 scope 错误**（未注册资源时 SDK 会抛方法/资源不存在，也说明门已开）
+    let resourcesGateOpened = false;
+    let resourcesNote = '';
+    try {
+      const list = await readClient.listResources();
+      resourcesGateOpened = Array.isArray(list?.resources);
+      resourcesNote = `resources=${list?.resources?.length ?? 0}`;
+    } catch (error) {
+      resourcesNote = String(error?.message ?? error).slice(0, 90);
+      resourcesGateOpened = !/insufficient scope|403|memory\.read/i.test(resourcesNote);
+    }
+    check('F-UNI-2 resources/* 带 memory.read → 过 scope 门（非 403/需 scope）',
+      resourcesGateOpened, resourcesNote);
+    await readClient.close();
+
     const taskClient = await mcpClient(ready.port, { authorization: `Bearer ${taskReadToken}` });
     const taskCall = await taskClient.callTool({ name: 'task_status', arguments: {} });
     const boardWithRead = await httpJson(`http://127.0.0.1:${ready.port}/mcp`, {

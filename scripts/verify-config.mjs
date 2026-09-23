@@ -164,6 +164,39 @@ async function waitFor(predicate, { timeoutMs = 30000, pollMs = 250 } = {}) {
   }
 }
 
+/**
+ * F-UNI-1：轮询 `/admin/api/settings` 直到 `predicate(json)` 为真。
+ * 禁「单次读」碰运气（读早=假绿/假红）；超时返回最后一次观测值与等待时长，由断言打印。
+ */
+async function waitForSettings(port, predicate, { timeoutMs = 30000, pollMs = 300 } = {}) {
+  const started = Date.now();
+  let attempts = 0;
+  let last = null;
+  for (;;) {
+    attempts += 1;
+    const res = await getJson(port, '/admin/api/settings');
+    last = res.json ?? null;
+    if (last && predicate(last)) return { ok: true, settings: last, waitedMs: Date.now() - started, attempts };
+    if (Date.now() - started > timeoutMs) return { ok: false, settings: last, waitedMs: Date.now() - started, attempts };
+    await sleep(pollMs);
+  }
+}
+
+/** F-UNI-1：轮询 settings 的 effective 行（禁读早；predicate(row) 为真才返回）。 */
+async function waitForEffectiveRow(port, path, predicate, { timeoutMs = 30000, pollMs = 300 } = {}) {
+  const started = Date.now();
+  let attempts = 0;
+  let lastRow = null;
+  for (;;) {
+    attempts += 1;
+    const res = await getJson(port, '/admin/api/settings');
+    lastRow = ((res.json ?? {}).effective ?? []).find((r) => r.path === path) ?? null;
+    if (lastRow && predicate(lastRow)) return { ok: true, row: lastRow, settings: res.json ?? null, waitedMs: Date.now() - started, attempts };
+    if (Date.now() - started > timeoutMs) return { ok: false, row: lastRow, settings: res.json ?? null, waitedMs: Date.now() - started, attempts };
+    await sleep(pollMs);
+  }
+}
+
 const restartCount = (home) => (existsSync(join(home, 'restart-count.log'))
   ? readFile(join(home, 'restart-count.log'), 'utf-8').then((t) => t.split('\n').filter(Boolean).length).catch(() => 0)
   : Promise.resolve(0));
@@ -301,12 +334,19 @@ async function main() {
       Boolean(result) && verify.length >= restartFields.length && verify.every((r) => r.ok !== false)
         && restartFields.every(([p]) => verify.some((r) => r.path === p && r.ok === true)),
       `verify=${JSON.stringify(verify.map((r) => `${r.path}:${r.ok}`))}`.slice(0, 220));
-    const settingsNew = (await getJson(ready.port, '/admin/api/settings')).json;
-    check('S4 新实例待重启清单清空（restartRequired 归零）', (settingsNew?.pendingRestart ?? []).length === 0);
-    const row = (settingsNew?.effective ?? []).find((r) => r.path === 'sync.antiEntropy.intervalMs');
-    check('S4 实际生效：intervalMs=保存值 且原因=已生效', row?.actual === 123456 && row?.reason === '已生效', `actual=${row?.actual}`);
+    // F-UNI-1：轮询至目标生效值（禁读早——settings 可能晚于 serve-ready 就绪）
+    const s4 = await waitForEffectiveRow(ready.port, 'sync.antiEntropy.intervalMs', (r) => r.actual === 123456, { timeoutMs: 30000 });
+    const settingsNew = s4.settings;
+    const row = s4.row;
+    check('S4 新实例待重启清单清空（restartRequired 归零）',
+      s4.ok && (settingsNew?.pendingRestart ?? []).length === 0,
+      s4.ok ? `pending=${(settingsNew?.pendingRestart ?? []).length}` : `等待 ${s4.waitedMs}ms/${s4.attempts} 次后仍未就绪`);
+    check('S4 实际生效：intervalMs=保存值 且原因=已生效',
+      s4.ok && row?.actual === 123456 && row?.reason === '已生效',
+      `actual=${row?.actual} 等待=${s4.waitedMs}ms`);
     check('S4 lastApply 暴露给控制台（状态 + 字段清单）',
-      settingsNew?.lastApply?.status === 'applied' && (settingsNew?.lastApply?.fields ?? []).includes('joinService.port'));
+      s4.ok && settingsNew?.lastApply?.status === 'applied' && (settingsNew?.lastApply?.fields ?? []).includes('joinService.port'),
+      `status=${settingsNew?.lastApply?.status}`);
   }
 
   // ---------------- S5 防抖（窗口内两次保存 → 一次重启） ----------------
@@ -314,20 +354,24 @@ async function main() {
     const portNow = (await refreshHandle())?.port ?? port;
     const csrfNow = await csrfToken(portNow);
     const before = await restartCount(home);
-    const csrfThrow = true; void csrfThrow;
+    const pidBefore = (await refreshHandle())?.pid ?? null;
     await writePatch(portNow, { sync: { antiEntropy: { intervalMs: 222222 } } }, csrfNow, { confirm: true });
     await writePatch(portNow, { sync: { antiEntropy: { jitterRatio: 0.4 } } }, csrfNow, { confirm: true });
+    // F-UNI-1：等**真正的**重启（pid 必须变化；旧谓词引用 result.pid 恒 undefined → 秒回）
     const newState = await waitFor(async () => {
       const state = await refreshHandle();
       const readyNow = await readJsonFile(join(home, 'serve-ready.json'));
-      return state && readyNow && readyNow.pid === state.pid && state.pid !== (await readJsonFile(join(home, 'config-apply.result.json')))?.pid ? state : null;
+      return state && state.pid !== pidBefore && readyNow && readyNow.pid === state.pid ? state : null;
     }, { timeoutMs: 20000, pollMs: 250 });
-    void newState;
-    await sleep(2000);
+    check('S5 重启发生（pid 变化 + serve-ready 一致）', Boolean(newState), `before=${pidBefore} after=${newState?.pid ?? '无'}`);
+    // F-UNI-1：值生效改为轮询（禁读早；超时打印最后观测值与等待时长）
+    const s5 = await waitForEffectiveRow(portNow, 'sync.antiEntropy.intervalMs', (r) => r.actual === 222222, { timeoutMs: 30000 });
+    check('S5 两次保存的值都落盘并生效（intervalMs=222222）',
+      s5.ok && s5.row?.actual === 222222,
+      s5.ok ? `actual=${s5.row.actual} 等待=${s5.waitedMs}ms` : `actual=${s5.row?.actual ?? 'undefined'} 等待=${s5.waitedMs}ms/${s5.attempts} 次`);
+    // 防抖计数**读晚**（事件锚定：值已生效说明重启窗口已过；防抖失效的第二次 restart 早在防抖窗口内计入）
     const after = await restartCount(home);
     check('S5 防抖：窗口内两次保存合并为一次重启（计数 +1）', after - before === 1, `before=${before} after=${after}`);
-    const row = ((await getJson(portNow, '/admin/api/settings')).json?.effective ?? []).find((r) => r.path === 'sync.antiEntropy.intervalMs');
-    check('S5 两次保存的值都落盘并生效（intervalMs=222222）', row?.actual === 222222, `actual=${row?.actual}`);
   }
 
   // ---------------- S6 热路径（MEBULAR_CONFIG_HOT_PATHS：不重启 + 不进待重启） ----------------
@@ -408,9 +452,11 @@ async function main() {
     }, { timeoutMs: 30000, pollMs: 400 });
     livePids.add(stateAfter?.pid);
     check('S7 回滚后旧配置实例恢复健康（serve-ready = 新 pid）', Boolean(stateAfter), `pid=${stateAfter?.pid}`);
-    const rbSettings = (await getJson(rbPort, '/admin/api/settings')).json;
+    const s7 = await waitForSettings(rbPort, (j) => j.lastApply && typeof j.lastApply === 'object', { timeoutMs: 20000 });
+    const rbSettings = s7.settings;
     check('S7 回滚结果暴露给控制台（诊断页可查原因/字段/备份）',
-      rbSettings?.lastApply?.status === 'rolled-back' && Array.isArray(rbSettings?.lastApply?.fields) && Boolean(rbSettings?.lastApply?.backup));
+      s7.ok && rbSettings?.lastApply?.status === 'rolled-back' && Array.isArray(rbSettings?.lastApply?.fields) && Boolean(rbSettings?.lastApply?.backup),
+      s7.ok ? `status=${rbSettings?.lastApply?.status}` : `等待 ${s7.waitedMs}ms 后 lastApply 仍不可读`);
     blocker.close();
     await stop(rbHandle);
   }

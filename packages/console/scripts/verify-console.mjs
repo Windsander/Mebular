@@ -786,6 +786,26 @@ try {
     );
   }
 
+  // ---------- 引导态（首次上手）：正常实例不泄漏 provision 接口 + 控制台两入口齐备 ----------
+  {
+    const provStatus = await getJson(port, '/app/provision/status');
+    check('引导接口在正常实例不可用（/app/provision/status 404，不误伤）', provStatus.status === 404, `status=${provStatus.status}`);
+    const provCreate = await fetch(`http://127.0.0.1:${port}/app/provision/create`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ confirm: true }),
+    });
+    check('正常实例 POST /app/provision/create → 404（引导路径不泄漏）', provCreate.status === 404, `status=${provCreate.status}`);
+    const consoleSrcOnboard = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const htmlSrcOnboard = await readFile(join(consoleDir, 'index.html'), 'utf-8');
+    check('GUI 首次上手接线：控制台含「建新 / 加入」两入口 + provision 客户端逻辑',
+      htmlSrcOnboard.includes('id="provision-create"') && htmlSrcOnboard.includes('id="provision-join"')
+        && htmlSrcOnboard.includes('建新 Mebular') && htmlSrcOnboard.includes('加入已有 Mebular')
+        && consoleSrcOnboard.includes('fetchProvisionStatus') && consoleSrcOnboard.includes('/app/provision/create')
+        && consoleSrcOnboard.includes('/app/provision/join') && consoleSrcOnboard.includes('renderProvision'),
+      'index.html 两入口 + console.js provision 客户端');
+  }
+
   // ---------- 邀请新设备（T2 令牌加入） ----------
   const inviteDisabled = await fetch(`http://127.0.0.1:${port}/admin/api/invite`, {
     method: 'POST',

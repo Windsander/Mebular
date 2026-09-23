@@ -2555,8 +2555,100 @@ function startEvents() {
   };
 }
 
-stage.start();
-setView('map');
-refresh();
-startEvents();
-setInterval(refresh, POLL_MS);
+
+// ---------- 引导态（首次上手）：建新 / 加入（全程 GUI，不碰 CLI） ----------
+
+async function fetchProvisionStatus() {
+  try {
+    const res = await fetch('/app/provision/status', { headers: { accept: 'application/json' }, credentials: 'same-origin' });
+    if (!res.ok) return null; // 正常态：接口 404/409
+    const data = await res.json().catch(() => null);
+    return data && data.provision === true ? data : null;
+  } catch {
+    return null;
+  }
+}
+
+function setProvisionStatus(text, kind = '') {
+  const el = $('#provision-status');
+  if (!el) return;
+  el.textContent = text;
+  el.classList.toggle('is-error', kind === 'error');
+  el.classList.toggle('is-ok', kind === 'ok');
+}
+
+/** 重启后轮询：引导接口消失（正常态）即刷新页面。 */
+async function waitProvisionRestart() {
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const still = await fetchProvisionStatus();
+    if (!still) { window.location.reload(); return; }
+    if (Date.now() > deadline) {
+      setProvisionStatus('等待重启超时：请确认服务已重启，或点下方「已重启？刷新页面」。', 'error');
+      return;
+    }
+  }
+}
+
+async function submitProvision(kind) {
+  const button = kind === 'create' ? $('#provision-create') : $('#provision-join');
+  const nameInput = kind === 'create' ? $('#provision-create-name') : $('#provision-join-name');
+  const deviceName = String(nameInput?.value ?? '').trim();
+  const body = { confirm: true, ...(deviceName ? { deviceName } : {}) };
+  if (kind === 'join') {
+    const token = String($('#provision-join-token')?.value ?? '').trim();
+    if (!token) { setProvisionStatus('请先粘贴加入令牌（邀请面板生成的一次性令牌）。', 'error'); return; }
+    body.token = token;
+  }
+  if (button) button.disabled = true;
+  setProvisionStatus(kind === 'create' ? '正在建新（生成主密钥 + 写配置）…' : '正在加入（校验令牌 + 兑换委派证书）…');
+  try {
+    const res = await api(kind === 'create' ? '/app/provision/create' : '/app/provision/join', { method: 'POST', body });
+    if (res?.restarting) {
+      setProvisionStatus(kind === 'create' ? '已建新：正在自动重启，进入正常态…' : '已加入：正在自动重启，进入正常态…', 'ok');
+      sessionStorage.setItem('mebular_provision', JSON.stringify({ kind, at: Date.now(), result: res }));
+      await waitProvisionRestart();
+      return;
+    }
+    const cmd = res?.restart?.command ?? 'nohup mebular serve > ~/.mebular/serve.log 2>&1 &';
+    setProvisionStatus(`已完成：请手动重启后刷新页面 —— ${cmd}`, 'ok');
+    if (button) button.disabled = false;
+  } catch (error) {
+    setProvisionStatus(`失败：${error.message}`, 'error');
+    if (button) button.disabled = false;
+  }
+}
+
+function renderProvision(status) {
+  const modal = $('#provision');
+  if (!modal) return;
+  modal.hidden = false;
+  // 引导态只显示引导页（隐藏常规控制台外壳）
+  const app = $('#app');
+  if (app) app.hidden = true;
+  const createName = $('#provision-create-name');
+  const joinName = $('#provision-join-name');
+  // 预填「设备名」（不是 deviceId：服务端会派生 device-<名>，避免 device-device-XXX）
+  const suggested = status.defaultDeviceName ?? status.hostname ?? '';
+  if (createName && !createName.value) createName.value = suggested;
+  if (joinName && !joinName.value) joinName.value = suggested;
+  const note = $('#provision-note');
+  if (note) {
+    note.textContent = `${status.note ?? ''}（家目录：${status.home ?? '—'}）`;
+  }
+  $('#provision-create')?.addEventListener('click', () => { void submitProvision('create'); });
+  $('#provision-join')?.addEventListener('click', () => { void submitProvision('join'); });
+  $('#provision-reload')?.addEventListener('click', () => window.location.reload());
+}
+
+const provisionStatus = await fetchProvisionStatus();
+if (provisionStatus) {
+  renderProvision(provisionStatus);
+} else {
+  stage.start();
+  setView('map');
+  refresh();
+  startEvents();
+  setInterval(refresh, POLL_MS);
+}

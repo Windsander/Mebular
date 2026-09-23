@@ -70,6 +70,9 @@ jobs:
       - name: Config pipeline (schema/exposure/restart/apply/rollback)
         run: npm run verify:config > verify-config.log 2>&1 || { tail -n 200 verify-config.log; exit 1; }
 
+      - name: Onboarding (provision mode / create / join / readable errors)
+        run: npm run verify:onboarding > verify-onboarding.log 2>&1 || { tail -n 200 verify-onboarding.log; exit 1; }
+
       - name: Console UI smoke (headless Chrome via CDP; SKIP if no browser)
         run: npm run verify:console:ui > console-ui.log 2>&1 || { tail -n 200 console-ui.log; exit 1; }
 

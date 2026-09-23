@@ -23,6 +23,13 @@ import { configPath } from './config.mjs';
 //   editable → 允许；status-only → 400（自动推导）；internal → 仅显式 writable 允许；未知 → 400。
 import { CONFIG_SCHEMA_BY_PATH, isWritable, writeRejection } from './config-schema.mjs';
 import {
+  isProvisionHome,
+  provisionCreate,
+  provisionJoin,
+  provisionStatus,
+  writeProvisionRecord,
+} from './provision.mjs';
+import {
   APPLY_HEALTH_TIMEOUT_MS,
   RESTART_DEBOUNCE_MS,
   classifyChanges,
@@ -610,6 +617,8 @@ export async function startHttpServer({
   writesEnabled = false,
   // C：一键重启执行器（可注入；verify:config 用 MEBULAR_RESTART_DRY_RUN 或注入替身）
   restartRunner = null,
+  // 引导态（空家目录）：只服务 /healthz + /console 引导页 + /app/provision/*；其余 409 provision_required
+  provision = false,
 }) {
   const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
   if (!isLoopback && (auth === 'none' || !tls)) {
@@ -749,6 +758,9 @@ export async function startHttpServer({
   // ---------- /admin/events（SSE：状态与同步实时脉冲） ----------
 
   async function handleAdminEvents(req, res, url) {
+    if (provision) {
+      return sendJson(res, 409, { error: 'provision_required', provision: true, message: '实例尚未初始化：请先在控制台完成「建新 / 加入」' });
+    }
     if (!app || !service) {
       return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
     }
@@ -868,6 +880,31 @@ export async function startHttpServer({
   let applyPendingFields = new Set();
   let applyPendingPort = null;
   let applyAttempt = 0;
+
+  /**
+   * 引导态重启计划：服务托管 → 复用 apply 通道（pending + 监督进程 + 分离触发）；
+   * 前台 nohup → 手动指引（restarting:false）。与 A 轮「保存即生效」共用同一条通道。
+   */
+  async function planProvisionRestart({ result }) {
+    const autoRestart = process.env.MEBULAR_CONFIG_AUTORESTART !== '0';
+    const serviceManaged = Boolean(process.env.MEBULAR_SERVICE_KIND) || Boolean(String(process.env.MEBULAR_RESTART_CMD ?? '').trim());
+    if (!autoRestart || !serviceManaged) {
+      return {
+        restarting: false,
+        restart: {
+          mode: 'foreground',
+          command: 'nohup mebular serve > ~/.mebular/serve.log 2>&1 &',
+          manual: '未以服务方式运行：请手动重启（nohup mebular serve > ~/.mebular/serve.log 2>&1 &），重启后控制台进入正常态',
+        },
+      };
+    }
+    const timeoutMs = Number(process.env.MEBULAR_APPLY_TIMEOUT_MS ?? '') > 0 ? Number(process.env.MEBULAR_APPLY_TIMEOUT_MS) : APPLY_HEALTH_TIMEOUT_MS;
+    return {
+      restarting: true,
+      restart: { mode: 'service', fields: [], timeoutMs },
+      trigger: () => performApplyRestart([], result?.ports?.mcp ?? null, timeoutMs),
+    };
+  }
 
   function scheduleApplyRestart({ fields, port, timeoutMs }) {
     for (const field of fields) applyPendingFields.add(field);
@@ -1494,6 +1531,75 @@ export async function startHttpServer({
       }
       if (path === '/admin/events' && req.method === 'GET') {
         return handleAdminEvents(req, res, url);
+      }
+      if (provision) {
+        // 实际绑定端口（--port 0 时 port 参数为 0，但 listen 后系统已分配）
+        const boundPort = (() => {
+          const addr = server?.address();
+          return typeof addr === 'object' && addr !== null ? addr.port : port;
+        })();
+        if (path === '/app/provision/status' && req.method === 'GET') {
+          return sendJson(res, 200, provisionStatus({ home, mcpPort: boundPort }));
+        }
+        if (path === '/app/provision/create' || path === '/app/provision/join') {
+          if (req.method !== 'POST') return sendJson(res, 405, { error: 'method_not_allowed' });
+          const reqOrigin = req.headers.origin;
+          if (typeof reqOrigin === 'string' && reqOrigin.length > 0 && reqOrigin !== origin) {
+            return sendJson(res, 403, { error: 'forbidden', message: `跨站点写被拒（Origin=${reqOrigin}）` });
+          }
+          if (!csrfValid(req)) return sendJson(res, 403, { error: 'forbidden', message: 'CSRF token 缺失或无效' });
+          if (!isProvisionHome(home)) {
+            return sendJson(res, 409, { ok: false, error: 'already_provisioned', message: '家目录已完成初始化：重复调用被拒' });
+          }
+          const input = parseJsonBody(body) ?? {};
+          if (input.confirm !== true) {
+            return sendJson(res, 400, { error: 'confirmation_required', message: '需要 { confirm: true }（写盘 + 自动重启）' });
+          }
+          try {
+            const result = path.endsWith('/create')
+              ? await provisionCreate({
+                home,
+                deviceName: typeof input.deviceName === 'string' ? input.deviceName : undefined,
+                ...(typeof input.deviceId === 'string' ? { deviceId: input.deviceId } : {}),
+                mcpPort: boundPort,
+                joinPort: input.joinPort,
+                listenPort: input.listenPort,
+              })
+              : await provisionJoin({
+                home,
+                token: typeof input.token === 'string' ? input.token : '',
+                deviceName: typeof input.deviceName === 'string' ? input.deviceName : undefined,
+                mcpPort: boundPort,
+                joinPort: input.joinPort,
+                listenPort: input.listenPort,
+                timeoutMs: Number.isFinite(input.timeoutMs) ? input.timeoutMs : undefined,
+              });
+            await writeProvisionRecord(home, { ...result, at: new Date().toISOString() });
+            const planned = await planProvisionRestart({ result });
+            sendJson(res, 202, {
+              ok: true,
+              ...result,
+              restarting: planned.restarting,
+              restart: planned.restart,
+            });
+            if (planned.restarting) {
+              setImmediate(() => { void planned.trigger().catch(() => undefined); });
+            }
+            return true;
+          } catch (error) {
+            const code = error?.code ?? 'provision_failed';
+            const status = code === 'ALREADY_PROVISIONED' ? 409 : 400;
+            return sendJson(res, status, { ok: false, error: code, message: String(error?.message ?? error) });
+          }
+        }
+        if (path.startsWith('/admin/api/') || path.startsWith('/admin/') || path === '/mcp' || path.startsWith('/app/')) {
+          return sendJson(res, 409, {
+            error: 'provision_required',
+            provision: true,
+            message: '实例尚未初始化：请打开控制台完成「建新 Mebular / 加入已有 Mebular」',
+          });
+        }
+        return sendJson(res, 404, { error: 'not_found', path });
       }
       if (path.startsWith('/admin/api/')) {
         const planMatch = path.match(/^\/admin\/api\/namespaces\/([^/]+)\/handoff-plan$/);

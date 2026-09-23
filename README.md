@@ -57,7 +57,7 @@ you cannot tell who wrote what; go offline and it stops working.
 | Path | Get started | Best for |
 |---|---|---|
 | **Agent** (recommended) | install the skill, then say “deploy Mebular” / “join with this code” | hands-off |
-| **GUI** | `mebular serve` → console → ＋ Invite a device | want to watch it happen |
+| **GUI** | `mebular serve` → console → first run: **Create new / Join existing**; later: ＋ Invite a device | want to watch it happen |
 | **CLI** | `fleet quickstart` → `fleet invite`; new device `fleet join --qr` | scripts / bulk |
 
 **Agent** — install the skill, then say “deploy Mebular” / “join with this code”; it follows [`packages/skill/SETUP.md`](packages/skill/SETUP.md) and self-checks with `mebular doctor --net`:
@@ -66,7 +66,7 @@ you cannot tell who wrote what; go offline and it stops working.
 node packages/skill/scripts/install.mjs
 ```
 
-**GUI** — the console is at `http://127.0.0.1:7331/console` (enable the join service under common settings, then click ＋ Invite a device):
+**GUI** — the console is at `http://127.0.0.1:7331/console`. On an empty home directory it opens the first-run page with two entries — **Create new Mebular** (root identity + config, then auto-restart) or **Join existing Mebular** (paste the invite token; the delegated certificate is fetched, no master key is copied). After onboarding, use ＋ Invite a device to onboard the next machine the same way:
 
 ```bash
 mebular serve
@@ -80,7 +80,7 @@ fleet invite --dir ~/.mebular                                  # QR code + token
 fleet join --qr "<QR content>" --daemon --dir ~/.mebular --device device-B   # or --token
 ```
 
-Joining a new device still takes one `fleet join` (or hand it to an agent) · no `fleet approve` is needed by default · grants last 24h and are revocable · try the UI first with `seed-demo.mjs`
+First run is fully GUI (**Create new** / **Join existing** — paste the token; no CLI needed) · the CLI stays available for scripts (`fleet join`) · no `fleet approve` is needed by default · grants last 24h and are revocable · try the UI first with `seed-demo.mjs`
 
 ### Who does what
 | Who | Manages | Typical commands |

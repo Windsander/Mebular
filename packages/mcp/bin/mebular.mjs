@@ -573,7 +573,12 @@ async function main() {
           tlsCert: typeof flags['tls-cert'] === 'string' ? flags['tls-cert'] : undefined,
           tokensFile: typeof flags['tokens-file'] === 'string' ? flags['tokens-file'] : httpConf.tokensFile,
         });
-        console.log(`SERVE_READY ${JSON.stringify({ host: result.host, port: result.port, auth: result.auth, issuer: result.issuer })}`);
+        if (result.provision) {
+          console.log(`PROVISION_READY ${JSON.stringify({ host: result.host, port: result.port, home: homeDir() })}`);
+          console.log('引导态：家目录为空。请在浏览器打开控制台完成「建新 Mebular / 加入已有 Mebular」。');
+        } else {
+          console.log(`SERVE_READY ${JSON.stringify({ host: result.host, port: result.port, auth: result.auth, issuer: result.issuer })}`);
+        }
       } catch (error) {
         console.error(`✗ serve 启动失败（${error?.code ?? 'ERROR'}）：${error?.message ?? error}`);
         process.exit(2);

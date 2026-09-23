@@ -50,7 +50,8 @@ const FIXED_ISSUER = 'https://mebular.hardening.test';
 function spawnServe({ subdir, args = [], env = {} }) {
   const h = join(home, subdir);
   const proc = spawn(process.execPath, [bin, 'serve', '--port', '0', '--auth', 'oauth', ...args], {
-    env: { ...process.env, MEBULAR_HOME: h, MEBULAR_STORAGE_PATH: join(h, 'store.jsonl'), MEBULAR_DEVICE_ID: 'device-hardening', ...env },
+    // MEBULAR_PROVISION=0：本用例依赖空家目录自举 root（验证 OAuth 硬化，与 GUI 引导无关）
+    env: { ...process.env, MEBULAR_HOME: h, MEBULAR_STORAGE_PATH: join(h, 'store.jsonl'), MEBULAR_DEVICE_ID: 'device-hardening', MEBULAR_PROVISION: '0', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';

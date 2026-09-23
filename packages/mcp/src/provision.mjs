@@ -28,6 +28,32 @@ export function isProvisionHome(home, { storagePath, env = process.env } = {}) {
 const sanitize = (value) => String(value ?? '').trim().replace(/[^0-9A-Za-z._-]+/g, '-').replace(/^-+|-+$/g, '');
 const defaultDeviceName = () => hostname() || 'mebular-device';
 
+// F-ONB-1：设备名 → deviceId 归一化（create / join / status 唯一入口）
+//   规则：先 sanitize（合法字符集 + 去首尾 '-'），再去掉**所有重复的 `device-` 前缀**（大小写不敏感，
+//   含连续重复），最后拼**一次**前缀。空名 / 只剩 `device` → `local`（保持 `device-local` 现状）。
+//   例：TestB→device-TestB · device-TestB→device-TestB · device-device-TestB→device-TestB · ''→device-local
+const DEVICE_PREFIX_RE = /^device-+/i;
+/** 去 `device-` 前缀后的「名字本体」；空或只剩 `device` → `local`。 */
+export function deviceNameCore(raw) {
+  let core = sanitize(raw);
+  while (DEVICE_PREFIX_RE.test(core)) core = core.replace(DEVICE_PREFIX_RE, '');
+  if (core.length === 0 || /^device$/i.test(core)) core = 'local';
+  return core;
+}
+
+/** 设备名 → deviceId（先 sanitize，再去重复 `device-` 前缀，再拼一次前缀）。 */
+export const deriveDeviceId = (name) => `device-${deviceNameCore(name)}`;
+
+/**
+ * 显式 `deviceId` 参数：以 `device-` 开头时按同一规则归一化（去重复前缀），否则原样保留（自定义 ID）。
+ * 返回 null 表示未提供。
+ */
+export function normalizeExplicitDeviceId(value) {
+  const raw = String(value ?? '').trim();
+  if (raw.length === 0) return null;
+  return /^device-+/i.test(raw) ? deriveDeviceId(raw) : (sanitize(raw) || null);
+}
+
 export function provisionStatus({ home, mcpPort }) {
   const name = defaultDeviceName();
   return {
@@ -35,7 +61,7 @@ export function provisionStatus({ home, mcpPort }) {
     provision: true,
     hostname: name,
     defaultDeviceName: name,
-    defaultDeviceId: `device-${sanitize(name) || 'local'}`,
+    defaultDeviceId: deriveDeviceId(name),
     home,
     configPath: configPath(home),
     mcpPort,
@@ -79,7 +105,7 @@ export async function provisionCreate({ home, deviceName, deviceId, mcpPort, joi
     throw error;
   }
   const name = String(deviceName ?? '').trim() || defaultDeviceName();
-  const id = String(deviceId ?? '').trim() || `device-${sanitize(name) || 'local'}`;
+  const id = normalizeExplicitDeviceId(deviceId) ?? deriveDeviceId(name);
   // 端口预检（避免重启即失败）：mcp 端口 = 当前引导服务端口（我们自己持有，无需探测）
   const joinChoice = await findFreePort(Number(joinPort) > 0 ? Number(joinPort) : 4002);
   const listenChoice = await findFreePort(Number(listenPort) > 0 ? Number(listenPort) : 4001);
@@ -171,7 +197,7 @@ export async function provisionJoin({
   const parsed = inspectToken(fleet.decodeJoinToken, token.trim());
 
   const name = String(deviceName ?? '').trim() || defaultDeviceName();
-  const id = `device-${sanitize(name) || 'local'}`;
+  const id = deriveDeviceId(name);
   const namespace = parsed.namespace;
 
   // 复用 fleet join（不复制第二套实现）；agents 用 fleet CLI 同款占位（fleet 要求非空）

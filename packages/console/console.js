@@ -2620,6 +2620,30 @@ async function submitProvision(kind) {
   }
 }
 
+/**
+ * 设备名 → deviceId 的**前端镜像**（仅用于实时预览；服务端 provision.mjs 为准）：
+ * 先 sanitize（合法字符集 + 去首尾 '-'），再去掉所有重复的 `device-` 前缀，最后拼一次前缀。
+ */
+function previewDeviceId(raw) {
+  let core = String(raw ?? '').trim().replace(/[^0-9A-Za-z._-]+/g, '-').replace(/^-+|-+$/g, '');
+  while (/^device-+/i.test(core)) core = core.replace(/^device-+/i, '');
+  if (core.length === 0 || /^device$/i.test(core)) core = 'local';
+  return `device-${core}`;
+}
+
+function bindProvisionPreview(inputSelector, previewSelector, status) {
+  const input = $(inputSelector);
+  const preview = $(previewSelector);
+  if (!input || !preview) return;
+  const update = () => {
+    const suggested = status?.defaultDeviceName ?? status?.hostname ?? 'local';
+    const value = input.value.trim().length > 0 ? input.value : suggested;
+    preview.textContent = `将使用 deviceId：${previewDeviceId(value)}`;
+  };
+  input.addEventListener('input', update);
+  update();
+}
+
 function renderProvision(status) {
   const modal = $('#provision');
   if (!modal) return;
@@ -2637,6 +2661,8 @@ function renderProvision(status) {
   if (note) {
     note.textContent = `${status.note ?? ''}（家目录：${status.home ?? '—'}）`;
   }
+  bindProvisionPreview('#provision-create-name', '#provision-create-preview', status);
+  bindProvisionPreview('#provision-join-name', '#provision-join-preview', status);
   $('#provision-create')?.addEventListener('click', () => { void submitProvision('create'); });
   $('#provision-join')?.addEventListener('click', () => { void submitProvision('join'); });
   $('#provision-reload')?.addEventListener('click', () => window.location.reload());

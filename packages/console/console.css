@@ -951,6 +951,7 @@ select {
 .provision-card h3 { margin: 0 0 2px; font-size: 14px; }
 .provision-desc { font-size: 11px; line-height: 1.6; margin: 0 0 4px; }
 .provision-actions { display: flex; justify-content: flex-end; margin-top: 4px; }
+.provision-preview { font-size: 11px; margin: 2px 0 0; min-height: 15px; overflow-wrap: anywhere; }
 #provision-status { min-height: 18px; margin: 10px 0 0; font-size: 12px; overflow-wrap: anywhere; }
 #provision-status.is-error { color: #ffb4b4; }
 #provision-status.is-ok { color: #9dffcf; }

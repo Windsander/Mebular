@@ -189,7 +189,9 @@
           <h3>① 建新 Mebular</h3>
           <p class="muted provision-desc">生成 root 主密钥（本机是根），写入配置并自动重启；完成后「邀请新设备」可用。</p>
           <label class="cfg-label" for="provision-create-name">设备名</label>
-          <input id="provision-create-name" class="crt-input" type="text" autocomplete="off" />
+          <input id="provision-create-name" class="crt-input" type="text" autocomplete="off"
+                 placeholder="填名字即可，如 MacBookPro；带 device- 前缀也可以" />
+          <p class="muted provision-preview" id="provision-create-preview" aria-live="polite"></p>
           <div class="provision-actions">
             <button id="provision-create" class="btn btn-crt" type="button">建新并重启</button>
           </div>
@@ -198,7 +200,9 @@
           <h3>② 加入已有 Mebular</h3>
           <p class="muted provision-desc">粘贴邀请方「＋ 邀请新设备」生成的一次性令牌：将取得委派证书（<b>不复制主密钥</b>），自动授权令牌分区。</p>
           <label class="cfg-label" for="provision-join-name">设备名</label>
-          <input id="provision-join-name" class="crt-input" type="text" autocomplete="off" />
+          <input id="provision-join-name" class="crt-input" type="text" autocomplete="off"
+                 placeholder="填名字即可，如 MacBookPro；带 device- 前缀也可以" />
+          <p class="muted provision-preview" id="provision-join-preview" aria-live="polite"></p>
           <label class="cfg-label" for="provision-join-token">加入令牌</label>
           <textarea id="provision-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…"></textarea>
           <div class="provision-actions">

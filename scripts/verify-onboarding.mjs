@@ -141,6 +141,32 @@ async function waitNormal(port, home, oldPid, timeoutMs = 30000) {
 
 async function main() {
   console.log('Mebular 首次上手验证（verify:onboarding：引导态 / 建新 / 加入 / 错误可读）\n');
+  const provision = await import('../packages/mcp/src/provision.mjs');
+
+  // ---------- F-ONB-1：设备名 → deviceId 归一化（去重复 device- 前缀；create/join 同一入口） ----------
+  {
+    const three = ['TestB', 'device-TestB', 'device-device-TestB'];
+    const ids = three.map((name) => provision.deriveDeviceId(name));
+    check('F-ONB-1 三种输入归一化到同一 deviceId（TestB / device-TestB / device-device-TestB → device-TestB）',
+      ids.every((id) => id === 'device-TestB') && new Set(ids).size === 1,
+      three.map((n, i) => `${n}→${ids[i]}`).join(' · '));
+    check('F-ONB-1 大小写不敏感 + 连续前缀（DEVICE-TestB / device-device-device-TestB → device-TestB）',
+      provision.deriveDeviceId('DEVICE-TestB') === 'device-TestB'
+        && provision.deriveDeviceId('device-device-device-TestB') === 'device-TestB',
+      `${provision.deriveDeviceId('DEVICE-TestB')} · ${provision.deriveDeviceId('device-device-device-TestB')}`);
+    check("F-ONB-1 非法字符/空名边界（MacBook Pro→device-MacBook-Pro；空名→device-local；device / device-→device-local）",
+      provision.deriveDeviceId('MacBook Pro') === 'device-MacBook-Pro'
+        && provision.deriveDeviceId('') === 'device-local'
+        && provision.deriveDeviceId('device') === 'device-local'
+        && provision.deriveDeviceId('device-') === 'device-local'
+        && provision.deriveDeviceId('device---X') === 'device-X',
+      `''→${provision.deriveDeviceId('')} · device→${provision.deriveDeviceId('device')}`);
+    check('F-ONB-1 显式 deviceId：以 device- 开头则归一化，自定义 ID 原样保留',
+      provision.normalizeExplicitDeviceId('device-device-X') === 'device-X'
+        && provision.normalizeExplicitDeviceId('my_custom.id') === 'my_custom.id'
+        && provision.normalizeExplicitDeviceId('') === null,
+      `device-device-X→${provision.normalizeExplicitDeviceId('device-device-X')} · my_custom.id→${provision.normalizeExplicitDeviceId('my_custom.id')}`);
+  }
   const workspace = await mkdtemp(join(tmpdir(), 'mebular-onboard-'));
   const livePids = new Set();
   const track = (h) => { if (h?.proc?.pid) livePids.add(h.proc.pid); return h; };
@@ -173,6 +199,9 @@ async function main() {
   check('O1 /app/provision/status 可用（含默认设备名 / 家目录 / 引导提示）',
     statusA.status === 200 && statusA.json?.provision === true && typeof statusA.json?.defaultDeviceName === 'string' && /建新|加入/.test(String(statusA.json?.note)),
     `status=${statusA.status}`);
+  check('F-ONB-1 status 默认 deviceId 同样走归一化（device-<name>，无重复前缀）',
+    statusA.json?.defaultDeviceId === provision.deriveDeviceId(statusA.json?.defaultDeviceName),
+    `defaultDeviceId=${statusA.json?.defaultDeviceId}`);
   const consoleHtml = await (await fetch(`http://127.0.0.1:${portA}/console/`)).text();
   check('O1 首屏含两入口（建新 Mebular / 加入已有 Mebular）',
     consoleHtml.includes('建新 Mebular') && consoleHtml.includes('加入已有 Mebular')
@@ -208,6 +237,8 @@ async function main() {
         && cfgA?.mcp?.http?.host === '127.0.0.1' && cfgA?.mcp?.http?.auth === 'none'
         && cfgA?.deviceId === created.json?.deviceId,
       `deviceId=${cfgA?.deviceId} joinPort=${cfgA?.joinService?.port}`);
+    check('F-ONB-1 建新（普通名 Mac-A）→ deviceId=device-Mac-A（单前缀）',
+      cfgA?.deviceId === 'device-Mac-A', `deviceId=${cfgA?.deviceId}`);
     const repeated = await post(portA, '/app/provision/create', { confirm: true });
     check('O2 重复调 provision → 409', repeated.status === 409 && repeated.json?.error === 'already_provisioned', `status=${repeated.status}`);
     const stateAfter = await waitNormal(portA, homeA, a.proc.pid);
@@ -249,7 +280,7 @@ async function main() {
     await waitReady(b, { provision: true });
     await writeFile(join(homeB, 'test-serve.json'), JSON.stringify({ pid: b.proc.pid, bin, port: portB, env: envB }), 'utf-8');
 
-    const joined = await post(portB, '/app/provision/join', { confirm: true, deviceName: 'Mac-B', token: token.token });
+    const joined = await post(portB, '/app/provision/join', { confirm: true, deviceName: 'device-Mac-B', token: token.token });
     check('O3 加入 → 202 + restarting:true + inviter/分区/hints 回报',
       joined.status === 202 && joined.json?.restarting === true && joined.json?.inviterDeviceId
         && joined.json?.namespace === 'tasks' && Number(joined.json?.hinted) > 0,
@@ -258,6 +289,9 @@ async function main() {
     const masterB = await readJson(join(homeB, 'master-key.json'));
     const identityB = await readJson(join(homeB, 'store.jsonl.identity.json'));
     const masterHome = existsSync(join(homeB, 'user-master-key.json')) ? await readJson(join(homeB, 'user-master-key.json')) : null;
+    check('F-ONB-1 加入（输入 device-Mac-B）→ deviceId=device-Mac-B（不重复前缀）',
+      joined.json?.deviceId === 'device-Mac-B' && cfgB?.deviceId === 'device-Mac-B',
+      `deviceId=${joined.json?.deviceId}`);
     check('O3 委派身份落盘：config.identity.mode=delegated + 主密钥文件**无 privateKeyPkcs8**',
       cfgB?.identity?.mode === 'delegated' && masterB?.publicKey && masterB?.privateKeyPkcs8 === undefined
         && (masterHome === null || masterHome?.privateKeyPkcs8 === undefined),

@@ -282,6 +282,11 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
   授权分区 = 令牌分区（inviter 侧 C7 自动授权；`grantOnJoin:false` 的令牌则待人工批准）。
 - **错误可读**：令牌过期（本地预检）/ 签名不符（inviter 403）/ 端点不可达（`ENDPOINT_UNREACHABLE`）/ 已使用 → 页面显示原因；
   重复 provision → `409 already_provisioned`；失败**回滚本次半成品**（仍处于引导态可重试）。
+- **设备名 → deviceId（F-ONB-1）**：先 sanitize（`[^0-9A-Za-z._-]`→`-`，去首尾 `-`），再去掉**所有重复的 `device-` 前缀**
+  （大小写不敏感、含连续重复），最后拼**一次**前缀；空名 / 只剩 `device` → `local`（即 `device-local`）。
+  例：`TestB`→`device-TestB` · `device-TestB`→`device-TestB` · `device-device-TestB`→`device-TestB` · `DEVICE-TestB`→`device-TestB`。
+  显式 `deviceId` 参数：以 `device-` 开头则同规则归一化，否则原样保留（自定义 ID）。引导页两个输入框均带
+  「将使用 deviceId: …」实时预览（前端镜像；服务端为准）。
 - **CLI 备选**（等价）：`fleet quickstart --daemon` 建新 · `fleet invite` 出令牌 · `fleet join --qr/--token --daemon` 加入。
 - 验收：`npm run verify:onboarding`（引导态不自举/两入口/admin 409 + 建新+重启+邀请可用 + 加入+委派无主私钥+hints+分区+doctor
   + 过期/错签/不可达/重复/无 CSRF/缺确认/非回环）。

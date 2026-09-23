@@ -35,6 +35,29 @@
       之后版本仅需递增。
 - [ ] **分支保护**：`main` 保持受保护；发布只走 `release/v*` 分支，勿直接向 `main` 提交版本号。
 
+### 1.1 首次发布后回滚指南
+
+发布是不可逆的，仅在版本号尚未被下游依赖时使用「删除」，否则一律「标记废弃」：
+
+- **npm unpublish（72 小时窗口）**：仅能删除**发布后 72 小时内**、且**无人依赖**的版本；
+  超时或被依赖一律 400。按包执行，lockstep 需 5 个包各跑一次：
+  ```bash
+  npm unpublish @mebular/core@0.2.0     # 重复 core → service → skill → mcp → fleet
+  ```
+  同一版本被删除后**不可再以相同版本号重新发布**，后续必须升号（重新 `bump_version.sh`）。
+- **npm deprecate（常规手段）**：标记问题版本，安装时会打印警告但不阻断：
+  ```bash
+  npm deprecate @mebular/mcp@0.2.0 "broken: use 0.2.1"
+  ```
+  lockstep 建议 5 个包同一条消息一并废弃，再发布更高修复版本走第 2 节流程。
+- **回退 GitHub Release**：
+  ```bash
+  gh release delete v0.2.0 --yes            # 仅删 Release
+  git push origin :refs/tags/v0.2.0         # 删除 tag（gh release delete 加 --cleanup-tag 可一并删）
+  ```
+  或网页端 Releases → 该版本 → Delete release；若只想隐藏，标为 **pre-release** 即可。
+  删除后重推同一 `release/v0.2.0` 分支，流水线会因 tag 缺失而重建 Release。
+
 ## 2. 发布流程（每次）
 
 ### 2.1 本地准备
@@ -119,5 +142,5 @@ push 后 GitHub Actions `Publish` 流水线自动执行：
 
 ## 6. 回滚
 
-npm 不允许覆盖已发布版本。撤销发布请 `npm deprecate @mebular/<pkg>@<version> "reason"`，
-随后发布一个更高的修复版本走同一流程。GitHub Release 可在网页端删除或标为 pre-release。
+npm 不允许覆盖已发布版本。具体步骤见 [1.1 首次发布后回滚指南](#11-首次发布后回滚指南)：
+`npm unpublish` 仅限 72 小时窗口，常规走 `npm deprecate` + 发布更高修复版本。

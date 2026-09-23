@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>等待名单 · Mebular</title>
+  <meta name="description" content="加入 Mebular 等待名单，第一时间获取托管 Relay 的开放通知。" />
+  <link rel="stylesheet" href="site.css" />
+</head>
+<body data-nav="waitlist" data-title-i18n="doc.waitlist">
+
+  <canvas id="bg-canvas"></canvas>
+
+  <nav>
+    <a class="brand" href="index.html">Mebular</a>
+    <div class="links">
+      <a href="index.html" data-i18n="nav.system">系统</a>
+      <a href="index.html#page-network" data-i18n="nav.network">网络</a>
+      <a href="index.html#page-design" data-i18n="nav.design">设计</a>
+      <a href="pricing.html" data-nav="pricing" data-i18n="nav.pricing">定价</a>
+      <a href="waitlist.html" data-nav="waitlist" data-i18n="nav.waitlist">等待名单</a>
+      <a href="https://github.com/Windsander/Mebular" target="_blank" rel="noopener" data-i18n="nav.github">GitHub</a>
+    </div>
+    <button class="lang-toggle" type="button" data-lang-toggle data-i18n-aria="lang.aria" aria-label="Switch language" data-i18n="lang.toggle">EN</button>
+  </nav>
+
+  <main class="wrap narrow">
+
+    <header class="page-head reveal">
+      <span class="tag" data-i18n="waitlist.tag">v1.0 · 等待名单</span>
+      <h1 data-i18n="waitlist.title">加入等待名单</h1>
+      <p data-i18n="waitlist.subtitle">留下邮箱，第一时间获取托管 Relay 的开放通知。</p>
+    </header>
+
+    <section class="form-card reveal d1">
+      <!-- Buttondown 嵌入表单：{{BUTTONDOWN_EMBED_URL}} 待替换为实际地址 -->
+      <form id="waitlist-form"
+            action="{{BUTTONDOWN_EMBED_URL}}"
+            method="post"
+            novalidate>
+        <input type="hidden" name="embed" value="1" />
+
+        <div class="field">
+          <label for="email" data-i18n="form.email.label">邮箱</label>
+          <input type="email"
+                 id="email"
+                 name="email"
+                 autocomplete="email"
+                 required
+                 data-i18n-placeholder="form.email.placeholder"
+                 placeholder="you@example.com" />
+        </div>
+
+        <div class="field">
+          <label for="intent" data-i18n="form.intent.label">付费意向</label>
+          <select id="intent" name="tag" required>
+            <option value="" disabled selected data-i18n="form.intent.placeholder">请选择</option>
+            <option value="hosted-relay" data-i18n="form.intent.relay">托管 relay</option>
+            <option value="enterprise-compliance" data-i18n="form.intent.enterprise">企业合规</option>
+            <option value="consulting-integration" data-i18n="form.intent.consulting">咨询集成</option>
+          </select>
+        </div>
+
+        <button class="btn primary" type="submit" data-i18n="form.submit">提交</button>
+
+        <div class="form-status" id="form-status" role="status" aria-live="polite"></div>
+        <p class="form-note" data-i18n="form.privacy">我们仅使用你的邮箱发送产品更新，不会分享给第三方。</p>
+      </form>
+
+      <div class="form-success" id="form-success" role="status" hidden>
+        <div class="check">✦</div>
+        <h2 data-i18n="form.success.title">已收到，谢谢！</h2>
+        <p data-i18n="form.success.body">我们会通过邮件与你联系。</p>
+        <a class="btn" href="pricing.html" data-i18n="form.success.back">返回定价</a>
+      </div>
+    </section>
+
+  </main>
+
+  <footer>
+    <div class="foot-brand">Mebular · 分布式记忆网络</div>
+    <a href="https://github.com/Windsander/Mebular" target="_blank" rel="noopener">GitHub →</a>
+    &ensp;·&ensp;MIT 协议&ensp;·&ensp;<a href="pricing.html" data-i18n="nav.pricing">定价</a>
+  </footer>
+
+  <script src="nebula.js"></script>
+  <script src="stars.js"></script>
+  <script src="site.js"></script>
+</body>
+</html>

@@ -47,6 +47,7 @@ coverage
 .nyc_output
 
 # Misc
+.openchamber/
 *.tsbuildinfo
 .timeout
 ureport

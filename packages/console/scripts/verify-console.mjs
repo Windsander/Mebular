@@ -625,6 +625,96 @@ try {
   const cfgAfterClear = JSON.parse(await readFile(join(home, 'config.json'), 'utf-8'));
   check('config 置空 → 删除键', cfgClear.status === 200 && !('snapshotThreshold' in (cfgAfterClear.sync ?? {})), `status=${cfgClear.status}`);
 
+  // ---------- 待重启（pendingRestart）：磁盘 config.json 与启动快照不一致 ----------
+  {
+    // 主实例：保存后磁盘值与启动快照不一致 → pendingRestart 命中刚改的键
+    const pendingWrite = await fetch(`http://127.0.0.1:${port}/admin/api/config`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ patch: { network: { enabled: true }, joinService: { enabled: true } } }),
+    });
+    check('pendingRestart：可写入 network/join 开关', pendingWrite.status === 200, `status=${pendingWrite.status}`);
+    const settingsPending = await getJson(port, '/admin/api/settings');
+    const pending = Array.isArray(settingsPending.json?.pendingRestart) ? settingsPending.json.pendingRestart : null;
+    const pendingPaths = new Set((pending ?? []).map((p) => p.path));
+    check(
+      'pendingRestart 含刚改的键（network.enabled / joinService.enabled / sync.antiEntropy.intervalMs）',
+      Array.isArray(pending)
+        && pendingPaths.has('network.enabled')
+        && pendingPaths.has('joinService.enabled')
+        && pendingPaths.has('sync.antiEntropy.intervalMs')
+        && pending.every((p) => typeof p.path === 'string' && 'file' in p && 'running' in p),
+      `pending=${[...pendingPaths].join(',')}`,
+    );
+    const networkPending = (pending ?? []).find((p) => p.path === 'network.enabled');
+    check(
+      'pendingRestart 元素含 file/running（network.enabled 磁盘 true / 启动快照 false）',
+      networkPending?.file === true && networkPending?.running === false,
+      JSON.stringify(networkPending),
+    );
+    check(
+      'pendingRestart 暴露重启元信息（restart.serviceHeartbeat / serviceManaged 为 boolean）',
+      typeof settingsPending.json?.restart?.serviceHeartbeat === 'boolean'
+        && typeof settingsPending.json?.restart?.serviceManaged === 'boolean',
+      JSON.stringify(settingsPending.json?.restart),
+    );
+  }
+
+  // 独立 home：同一实例重启后，磁盘值成为启动快照 → pendingRestart 清空
+  {
+    const restartHome = join(home, 'pending-restart');
+    const restartMcpPort = await freePort();
+    const restartJoinPort = await freePort();
+    await mkdir(restartHome, { recursive: true });
+    await writeFile(join(restartHome, 'config.json'), JSON.stringify({
+      storagePath: join(restartHome, 'store.jsonl'),
+      deviceId: 'device-pending',
+      encryption: { level: 'none' },
+      network: { enabled: false, libp2p: { listen: [], relayServers: [] } },
+      sync: { autoSync: true, pushOnWrite: false, antiEntropy: { enabled: false, intervalMs: 600000, jitterRatio: 0.2 }, namespaces: [], peerWhitelist: [], policyIssuers: [] },
+      semantic: { enabled: false, minScore: 0.2 },
+      mcp: { http: { host: '127.0.0.1', port: restartMcpPort, auth: 'none', tls: false } },
+      joinService: { enabled: false, bind: '127.0.0.1', port: restartJoinPort },
+    }, null, 2), 'utf-8');
+    const restartEnv = { MEBULAR_PUSH_ON_WRITE: 'false', MEBULAR_SEMANTIC_ENABLED: 'false', MEBULAR_NETWORK_ENABLED: 'false' };
+    const restartOpts = { home: restartHome, storage: join(restartHome, 'store.jsonl'), deviceId: 'device-pending', portFlag: null, env: restartEnv };
+    const first = spawnServe(restartOpts);
+    servers.push(first);
+    const firstReady = await waitReady(first);
+    const firstSettings = await getJson(firstReady.port, '/admin/api/settings');
+    check(
+      'pendingRestart 全新实例为空（磁盘 = 启动快照）',
+      Array.isArray(firstSettings.json?.pendingRestart) && firstSettings.json.pendingRestart.length === 0,
+      JSON.stringify(firstSettings.json?.pendingRestart),
+    );
+
+    const firstPage = await fetch(`http://127.0.0.1:${firstReady.port}/console/`);
+    const firstHeaders = { 'content-type': 'application/json', 'x-mebular-csrf': firstPage.headers.get('x-mebular-csrf'), cookie: `mebular_csrf=${cookieFrom(firstPage)}` };
+    const change = await fetch(`http://127.0.0.1:${firstReady.port}/admin/api/config`, {
+      method: 'POST',
+      headers: firstHeaders,
+      body: JSON.stringify({ patch: { joinService: { enabled: true } } }),
+    });
+    check('pendingRestart：保存重启类改动 → 200', change.status === 200, `status=${change.status}`);
+    const changedSettings = await getJson(firstReady.port, '/admin/api/settings');
+    check(
+      '保存后 pendingRestart 含 joinService.enabled',
+      (changedSettings.json?.pendingRestart ?? []).some((p) => p.path === 'joinService.enabled'),
+      JSON.stringify(changedSettings.json?.pendingRestart),
+    );
+
+    await stop(first);
+    const second = spawnServe(restartOpts);
+    servers.push(second);
+    const secondReady = await waitReady(second);
+    const secondSettings = await getJson(secondReady.port, '/admin/api/settings');
+    check(
+      '同一 home 重启后 pendingRestart 清空',
+      Array.isArray(secondSettings.json?.pendingRestart) && secondSettings.json.pendingRestart.length === 0,
+      JSON.stringify(secondSettings.json?.pendingRestart),
+    );
+  }
+
   // ---------- 邀请新设备（T2 令牌加入） ----------
   const inviteDisabled = await fetch(`http://127.0.0.1:${port}/admin/api/invite`, {
     method: 'POST',
@@ -875,6 +965,11 @@ try {
     const roHome = join(home, 'readonly');
     await mkdir(roHome, { recursive: true });
     const roStorage = await seedHome(roHome);
+    // seedHome 的 config.mcp.http.port=7331；这里改用临时端口，避免与本机已在运行的真实实例（~/.mebular）抢 7331。
+    const roCfgPath = join(roHome, 'config.json');
+    const roCfg = JSON.parse(await readFile(roCfgPath, 'utf-8'));
+    roCfg.mcp = { ...(roCfg.mcp ?? {}), http: { ...(roCfg.mcp?.http ?? {}), port: 0 } };
+    await writeFile(roCfgPath, JSON.stringify(roCfg, null, 2), 'utf-8');
     const roProc = spawnServe({ home: roHome, storage: roStorage, env: { MEBULAR_CONSOLE_WRITES: '0' }, portFlag: null });
     try {
       const ro = await waitReady(roProc);

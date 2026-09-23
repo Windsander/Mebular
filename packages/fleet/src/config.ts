@@ -3,9 +3,10 @@
 // 目录（device home）权限 0700；配置文件 `fleet.config.json`；主密钥 `master-key.json`；
 // 事件存储 `store.jsonl`（设备身份 `store.jsonl.identity.json` 由 core 落盘）。
 
+import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 const SUBTLE = globalThis.crypto.subtle;
 
@@ -59,7 +60,8 @@ export async function readMasterKeyFile(path: string): Promise<FleetEncryption> 
     publicKey?: string;
     privateKeyPkcs8?: string;
   };
-  if (parsed.v !== 1 || typeof parsed.publicKey !== 'string') {
+  // 容忍缺省 `v`：`mebular` 侧生成的主密钥文件（<home>/user-master-key.json）不带版本字段。
+  if ((parsed.v !== undefined && parsed.v !== 1) || typeof parsed.publicKey !== 'string') {
     throw new Error('master key file: 形状非法');
   }
   if (parsed.privateKeyPkcs8 === undefined) {
@@ -232,6 +234,61 @@ export async function loadFleetConfig(path: string): Promise<FleetConfig> {
   const errors = validateFleetConfig(parsed);
   if (errors.length > 0) throw new Error(`config 非法：${errors.join('; ')}`);
   return parsed as FleetConfig;
+}
+
+/**
+ * F-UNI：任务工具的 home 适配——两种布局都支持：
+ *   1) fleet home：`<dir>/fleet.config.json`（本机 fleet 设备）
+ *   2) **守护 home**：`<dir>/config.json`（`mebular serve`，含 root/delegated 两种身份）
+ * 由守护发起 `mebular mcp` 时 home 是守护 home，故这里把守护配置映射为等价 FleetConfig；
+ * 业务逻辑（session/工具 handler）保持**唯一**在 fleet 侧。
+ */
+export function daemonConfigToFleet(dir: string, cfg: Record<string, unknown>): FleetConfig {
+  const encryption = (cfg.encryption ?? {}) as Record<string, unknown>;
+  const sync = (cfg.sync ?? {}) as Record<string, unknown>;
+  const network = (cfg.network ?? {}) as Record<string, unknown>;
+  const libp2p = (network.libp2p ?? {}) as Record<string, unknown>;
+  const namespaces = Array.isArray(sync.namespaces) ? sync.namespaces.filter((s): s is string => typeof s === 'string' && s.length > 0) : [];
+  const listen = Array.isArray(libp2p.listen) && typeof libp2p.listen[0] === 'string' ? libp2p.listen[0] : '/ip4/0.0.0.0/tcp/4001';
+  const peers = (Array.isArray(network.peers) ? network.peers : [])
+    .filter((p): p is Record<string, unknown> => typeof p === 'object' && p !== null && typeof (p as Record<string, unknown>).device === 'string')
+    .map((p) => ({ device: String(p.device), ...(typeof p.addr === 'string' && p.addr.length > 0 ? { addr: p.addr } : {}) }));
+  const storagePath = typeof cfg.storagePath === 'string' && cfg.storagePath.length > 0 ? cfg.storagePath : join(dir, 'store.jsonl');
+  const masterKeyFile = typeof encryption.userMasterPublicKeyFile === 'string' && encryption.userMasterPublicKeyFile.length > 0
+    ? encryption.userMasterPublicKeyFile
+    : typeof encryption.keyFile === 'string' && encryption.keyFile.length > 0
+      ? encryption.keyFile
+      : join(dir, 'user-master-key.json');
+  const device = typeof cfg.deviceId === 'string' && cfg.deviceId.length > 0 ? cfg.deviceId : `device-${basename(dir) || 'local'}`;
+  return {
+    v: 1,
+    device,
+    dir,
+    storagePath,
+    masterKeyFile,
+    namespace: namespaces[0] ?? 'tasks',
+    listen,
+    peers,
+    ...(typeof sync.peerNamespacePolicy === 'object' && sync.peerNamespacePolicy !== null
+      ? { peerNamespacePolicy: sync.peerNamespacePolicy as Record<string, string[]> }
+      : {}),
+    policyIssuers: Array.isArray(sync.policyIssuers) ? sync.policyIssuers.filter((s): s is string => typeof s === 'string') : [],
+    // 守护侧只作任务板（board），不注册执行型 agent；占位满足校验（kind 属合法枚举）
+    agents: [{ name: 'board', kind: 'echo' }],
+    ...(typeof cfg.quotaLimitPerDevice === 'number' ? { quotaLimitPerDevice: cfg.quotaLimitPerDevice } : {}),
+  };
+}
+
+/** 读任务工具上下文配置：优先 fleet.config.json，否则按守护 config.json 适配。 */
+export async function loadToolConfig(dir: string): Promise<FleetConfig> {
+  const fleetPath = fleetConfigPath(dir);
+  if (existsSync(fleetPath)) return loadFleetConfig(fleetPath);
+  const daemonPath = join(dir, 'config.json');
+  if (!existsSync(daemonPath)) {
+    throw new Error(`缺少配置：${fleetPath} 与 ${daemonPath} 均不存在（需要 fleet.config.json 或守护 config.json）`);
+  }
+  const raw = JSON.parse(await readFile(daemonPath, 'utf-8')) as Record<string, unknown>;
+  return daemonConfigToFleet(dir, raw);
 }
 
 export interface OnboardInput {

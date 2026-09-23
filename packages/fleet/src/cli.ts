@@ -63,7 +63,6 @@ import { renderTerminalQr, renderSvgQr } from './qr.js';
 import { createRequire } from 'node:module';
 import { joinWithToken } from './join.js';
 import { toolByCli, toolCliTable } from './surface.js';
-import { runFleetMcp } from './mcp.js';
 
 interface Args {
   [key: string]: string | boolean | undefined;
@@ -902,16 +901,6 @@ function runTools(): number {
   return 0;
 }
 
-/** `fleet mcp`：stdio MCP 任务面（与 CLI 同一 handler）。 */
-async function runMcpCommand(args: Args): Promise<number> {
-  await runFleetMcp({
-    dir: fleetDirFrom(args),
-    ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
-    ...(typeof args.agent === 'string' ? { agent: args.agent } : {}),
-  });
-  return 0;
-}
-
 async function main(): Promise<void> {
   const raw = process.argv.slice(2);
   // `service` 有自身 flags（--no-autostart/--label/--extra），走 raw argv，不经通用解析。
@@ -941,7 +930,6 @@ async function main(): Promise<void> {
   else if (command === 'join') code = await runJoin(args);
   else if (command === 'invite') code = await runInvite(args);
   else if (command === 'tools') code = runTools();
-  else if (command === 'mcp') code = await runMcpCommand(args);
   else if (command !== undefined && toolByCli(command) !== undefined) code = await runTaskTool(command, args);
   else if (command === 'pending') code = await runPending(args);
   else if (command === 'approve') code = await runApprove(args);
@@ -954,7 +942,7 @@ async function main(): Promise<void> {
   else if (command === 'leave') code = await runLeave(args);
   else if (command === 'rejoin') code = await runRejoin(args);
   else {
-    console.error('用法：fleet quickstart|join|invite|pending|approve|tools|mcp|task_submit|task_submit_batch|task_cancel|task_retry|task_status|task_list|task_history|task_children|task_summarize|task_subscribe|task_negotiate|chatter_send|chatter_inbox|task_quota|task_targets|board_create|onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|node|worker|service|spool … | fleet --version');
+    console.error('用法：fleet quickstart|join|invite|pending|approve|tools|task_submit|task_submit_batch|task_cancel|task_retry|task_status|task_list|task_history|task_children|task_summarize|task_subscribe|task_negotiate|chatter_send|chatter_inbox|task_quota|task_targets|board_create|onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|node|worker|service|spool … | fleet --version');
     code = 2;
   }
   } catch (error) {

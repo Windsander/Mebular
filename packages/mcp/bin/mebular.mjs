@@ -641,8 +641,8 @@ async function main() {
       runPrintConfig(flags);
       return;
     case 'tools': {
-      const { TOOL_SPECS } = await import('../src/tools.mjs');
-      console.log(JSON.stringify({ ok: true, tools: TOOL_SPECS.map((t) => ({ tool: t.name, cli: t.name })) }, null, 2));
+      const { ALL_TOOL_SPECS } = await import('../src/tools.mjs');
+      console.log(JSON.stringify({ ok: true, tools: ALL_TOOL_SPECS.map((t) => ({ tool: t.name, cli: t.name })) }, null, 2));
       return;
     }
     case 'status':

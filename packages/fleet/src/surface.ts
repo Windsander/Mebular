@@ -5,8 +5,7 @@
 
 import { Mebular } from '@mebular/core';
 import {
-  fleetConfigPath,
-  loadFleetConfig,
+  loadToolConfig,
   readMasterKeyFile,
 } from './config.js';
 import { offlineMebularOptions, grantNamespace, setNamespaceMembership } from './onboard.js';
@@ -33,6 +32,11 @@ export interface TaskTool {
   name: string;
   /** 等价 CLI 子命令（`fleet <cli>`） */
   cli: string;
+  /**
+   * R1.3 / 评审 H1：OAuth scope **逐工具显式声明**（禁止按名字推断——`board_create` 曾因归入
+   * 只读组而被 `task.read`-only 令牌越权调用）。两轴：task.read（只读）/ task.write（写与授权）。
+   */
+  scope: 'task.read' | 'task.write';
   description: string;
   inputSchema: Record<string, unknown>;
   handler: (input: Record<string, unknown>, ctx: ToolContext) => Promise<unknown>;
@@ -49,7 +53,8 @@ interface Session {
 }
 
 async function openSession(ctx: ToolContext): Promise<Session> {
-  const config = await loadFleetConfig(fleetConfigPath(ctx.dir));
+  // F-UNI：fleet home（fleet.config.json）或守护 home（config.json）都可作为工具上下文
+  const config = await loadToolConfig(ctx.dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const namespace = ctx.namespace ?? config.namespace;
   const agent = ctx.agent ?? 'board';
@@ -136,7 +141,8 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_submit',
     cli: 'task_submit',
-    description: '提交任务（root 或 child）；root 可带预算与派发策略',
+    scope: 'task.write',
+    description: '提交任务（root 或 child）；root 可带预算与派发策略。**非幂等**：重试 = 新任务（需要关联请用 causedBy/chain）',
     inputSchema: {
       type: 'object',
       required: ['intent', 'to'],
@@ -178,6 +184,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_submit_batch',
     cli: 'task_submit_batch',
+    scope: 'task.write',
     description: '批量提交任务（同 root 语义）',
     inputSchema: { type: 'object', required: ['tasks'], properties: { tasks: { type: 'array' } } },
     handler: async (input, ctx) => {
@@ -193,6 +200,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_cancel',
     cli: 'task_cancel',
+    scope: 'task.write',
     description: '取消未终态任务（写 failed，reason=CANCELLED）',
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' }, reason: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -224,6 +232,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_retry',
     cli: 'task_retry',
+    scope: 'task.write',
     description: '以新任务重试（链表达：新任务 causedBy 原任务）',
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -247,6 +256,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_status',
     cli: 'task_status',
+    scope: 'task.read',
     description: '查询单任务权威状态',
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -263,6 +273,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_list',
     cli: 'task_list',
+    scope: 'task.read',
     description: '列出任务（可按 status/from 过滤）',
     inputSchema: { type: 'object', properties: { status: { type: 'string' }, fromDevice: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -282,6 +293,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_history',
     cli: 'task_history',
+    scope: 'task.read',
     description: '任务的全部事件（确定序）',
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -298,6 +310,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_children',
     cli: 'task_children',
+    scope: 'task.read',
     description: '任务的直接子任务（trace.causedBy）',
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -315,6 +328,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_summarize',
     cli: 'task_summarize',
+    scope: 'task.read',
     description: '从 root 可达子图的汇总（复用 summarizeDag）',
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -330,6 +344,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_subscribe',
     cli: 'task_subscribe',
+    scope: 'task.write',
     description: '变化订阅：返回自 cursor 起有变化的任务（单次）；CLI --watch 轮询',
     inputSchema: { type: 'object', properties: { cursor: { type: 'object' } } },
     handler: async (input, ctx) => {
@@ -348,6 +363,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_negotiate',
     cli: 'task_negotiate',
+    scope: 'task.write',
     description: '发送协商消息（clarify/counter/accept/reject；messageId 幂等）',
     inputSchema: { type: 'object', required: ['taskId', 'kind', 'round'], properties: { taskId: { type: 'string' }, kind: { type: 'string' }, round: { type: 'number' }, text: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -378,6 +394,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'chatter_send',
     cli: 'chatter_send',
+    scope: 'task.write',
     description: '配额制闲聊发送（本地配额记账）',
     inputSchema: { type: 'object', required: ['topic', 'text'], properties: { topic: { type: 'string' }, text: { type: 'string' }, messageId: { type: 'string' } } },
     handler: async (input, ctx) => {
@@ -402,6 +419,7 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'chatter_inbox',
     cli: 'chatter_inbox',
+    scope: 'task.write',
     description: '闲聊收件箱（幂等去重、确定序）',
     inputSchema: { type: 'object', properties: {} },
     handler: async (_input, ctx) => {
@@ -418,22 +436,24 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_quota',
     cli: 'task_quota',
+    scope: 'task.read',
     description: '本机配额状态（每设备对自己发出本地记账；无全局账本）',
     inputSchema: { type: 'object', properties: {} },
     handler: async (_input, ctx) => {
-      const config = await loadFleetConfig(fleetConfigPath(ctx.dir));
+      const config = await loadToolConfig(ctx.dir);
       return { ok: true, device: config.device, limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000, note: '本地记账，无全局账本；墙钟不参与一致性判定' };
     },
   },
   {
     name: 'task_targets',
     cli: 'task_targets',
+    scope: 'task.read',
     description: '我能派给谁：L1 授权对端 ∩ 其 Agent 目录（device, agent）',
     inputSchema: { type: 'object', properties: {} },
     handler: async (_input, ctx) => {
       const session = await openSession(ctx);
       try {
-        const config = await loadFleetConfig(fleetConfigPath(ctx.dir));
+        const config = await loadToolConfig(ctx.dir);
         const authorized: string[] = [];
         for (const peer of config.peers) {
           const effective = await session.mebular.getEffectiveNamespaces(peer.device);
@@ -450,12 +470,13 @@ export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'board_create',
     cli: 'board_create',
+    scope: 'task.write',
     description: '建板（= 建域 + 授权 + 邀请成员）；域是板的薄封装',
     inputSchema: { type: 'object', required: ['name'], properties: { name: { type: 'string' }, with: { type: 'array', items: { type: 'string' } } } },
     handler: async (input, ctx) => {
       const name = requiredString(input, 'name');
       const withDevices = Array.isArray(input.with) ? (input.with as string[]) : [];
-      const config = await loadFleetConfig(fleetConfigPath(ctx.dir));
+      const config = await loadToolConfig(ctx.dir);
       const granted: Array<{ device: string; grantId: string }> = [];
       // 建域 = 声明成员（本机在册）+ 对邀请设备授权 + 成员在册
       await setNamespaceMembership(ctx.dir, { namespace: name, to: config.device, active: true, note: `board ${name}` });

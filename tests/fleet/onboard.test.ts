@@ -23,6 +23,8 @@ import {
   parseAgentSpecs,
   permissionsApplicable,
 } from '../../packages/fleet/src/index.js';
+import { loadToolConfig } from '../../packages/fleet/src/config.js';
+import { IdentityManager } from '@mebular/core';
 
 let dir: string;
 beforeEach(async () => {
@@ -250,5 +252,92 @@ describe('doctor：peer/同步/身份链 与注册表/选项', () => {
     const bad = join(dir, 'bad-key.json');
     await writeFile(bad, JSON.stringify({ v: 1 }), { mode: 0o600 });
     await expect(readMasterKeyFile(bad)).rejects.toThrow(/形状非法/);
+  });
+});
+
+// F-UNI：任务工具上下文适配——fleet home（fleet.config.json）与**守护 home**（config.json）都可作为工具上下文。
+describe('loadToolConfig / daemonConfigToFleet（统一 MCP 入口的 home 适配）', () => {
+  it('fleet home：优先 fleet.config.json', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'fleet-toolcfg-'));
+    try {
+      await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'echo', kind: 'echo' }], configGrant: false, policyIssuers: ['device-A'] });
+      const cfg = await loadToolConfig(dir);
+      expect(cfg.device).toBe('device-A');
+      expect(cfg.namespace).toBe('tasks');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('守护 home：由 config.json 适配（device/namespace/peers/policyIssuers/agents/网络/主密钥路径）', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'daemon-toolcfg-'));
+    try {
+      await writeFile(join(dir, 'config.json'), JSON.stringify({
+        deviceId: 'device-daemon',
+        storagePath: join(dir, 'store.jsonl'),
+        encryption: { level: 'none' },
+        network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/15001'] }, peers: [{ device: 'device-peer', addr: '/ip4/1.2.3.4/tcp/1/p2p/x' }, { device: 'device-noaddr' }] },
+        sync: { namespaces: ['notes'], policyIssuers: ['device-daemon'], peerNamespacePolicy: { 'device-peer': ['notes'] } },
+        quotaLimitPerDevice: 42,
+      }), 'utf-8');
+      const cfg = await loadToolConfig(dir);
+      expect(cfg.device).toBe('device-daemon');
+      expect(cfg.namespace).toBe('notes');
+      expect(cfg.listen).toBe('/ip4/127.0.0.1/tcp/15001');
+      expect(cfg.peers).toEqual([{ device: 'device-peer', addr: '/ip4/1.2.3.4/tcp/1/p2p/x' }, { device: 'device-noaddr' }]);
+      expect(cfg.policyIssuers).toEqual(['device-daemon']);
+      expect(cfg.peerNamespacePolicy).toEqual({ 'device-peer': ['notes'] });
+      expect(cfg.quotaLimitPerDevice).toBe(42);
+      expect(cfg.agents.length).toBeGreaterThan(0);
+      expect(cfg.masterKeyFile).toBe(join(dir, 'user-master-key.json'));
+      expect(cfg.storagePath).toBe(join(dir, 'store.jsonl'));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('守护 home：encryption.userMasterPublicKeyFile（delegated）与空 hints 缺省', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'daemon-toolcfg-'));
+    try {
+      await writeFile(join(dir, 'config.json'), JSON.stringify({
+        deviceId: 'device-delegated',
+        encryption: { level: 'none', userMasterPublicKeyFile: join(dir, 'master-key.json') },
+        network: { enabled: false },
+        sync: { namespaces: [] },
+      }), 'utf-8');
+      const cfg = await loadToolConfig(dir);
+      expect(cfg.masterKeyFile).toBe(join(dir, 'master-key.json'));
+      expect(cfg.namespace).toBe('tasks');       // 无订阅 → 缺省分区
+      expect(cfg.storagePath).toBe(join(dir, 'store.jsonl'));
+      expect(cfg.peers).toEqual([]);
+      expect(cfg.policyIssuers).toEqual([]);
+      expect(cfg.agents.length).toBeGreaterThan(0); // 占位 agent（满足校验）
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('两种 home 都没有 → 明确报错', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'empty-toolcfg-'));
+    try {
+      await expect(loadToolConfig(dir)).rejects.toThrow(/缺少配置/);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('readMasterKeyFile 容忍缺省 v（守护侧 <home>/user-master-key.json 无版本字段）', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mkf-'));
+    try {
+      const im = new IdentityManager();
+      const master = await im.generateUserMasterKey();
+      const publicOnly = join(dir, 'public-only.json');
+      await writeFile(publicOnly, JSON.stringify({ publicKey: Buffer.from(master.publicKey).toString('base64') }), { mode: 0o600 });
+      const read = await readMasterKeyFile(publicOnly);
+      expect(read.userMasterKey.length).toBe(master.publicKey.length);
+      expect(read.userMasterPrivateKey).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

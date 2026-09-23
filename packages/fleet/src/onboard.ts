@@ -23,6 +23,7 @@ import {
   fleetStoragePath,
   generateMasterKey,
   loadFleetConfig,
+  loadToolConfig,
   masterKeyFingerprint,
   readMasterKeyFile,
   saveFleetConfig,
@@ -183,7 +184,8 @@ export async function grantNamespace(
   input: { to: string; namespaces?: string[]; expiresAt?: number; note?: string },
 ): Promise<{ grantId: string; eventId: string; subject: string; namespaces: string[] }> {
   if (typeof input.to !== 'string' || input.to.length === 0) throw new Error('grant 需要 --to <peerDevice>');
-  const config = await loadFleetConfig(fleetConfigPath(dir));
+  // M1：统一入口的 home 可能是守护 config.json → 走 loadToolConfig（fleet.config.json 优先）
+  const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const namespaces = input.namespaces ?? [config.namespace];
   if (namespaces.length === 0) throw new Error('grant 需要至少一个 namespace');
@@ -209,7 +211,7 @@ export async function revokeNamespaceGrant(
   input: { grantId: string; subject?: string; note?: string },
 ): Promise<{ grantId: string; eventId: string }> {
   if (typeof input.grantId !== 'string' || input.grantId.length === 0) throw new Error('revoke 需要 --grant-id <id>');
-  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
@@ -234,7 +236,7 @@ export async function setNamespaceMembership(
   input: { to: string; namespace?: string; active?: boolean; note?: string },
 ): Promise<{ member: string; namespace: string; active: boolean; eventId: string }> {
   if (typeof input.to !== 'string' || input.to.length === 0) throw new Error('member 需要 --to <deviceId>');
-  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const namespace = input.namespace ?? config.namespace;
   const active = input.active ?? true;
@@ -255,7 +257,7 @@ export async function setNamespaceMembership(
 
 /** M2：某分区的**生效成员集合**（图上在册成员 ∩ 生效授权）。只读。 */
 export async function namespaceMembers(dir: string, namespace?: string): Promise<string[]> {
-  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
@@ -271,7 +273,7 @@ export async function rejoinNamespace(
   dir: string,
   input: { namespace?: string } = {},
 ): Promise<NamespaceRejoinResult> {
-  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
@@ -284,7 +286,7 @@ export async function rejoinNamespace(
 
 /** 2c：本机是否已声明某分区重置（读图外标记）。只读。 */
 export async function rejoinReset(dir: string, namespace?: string): Promise<boolean> {
-  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
@@ -300,7 +302,7 @@ export async function planHandoff(
   dir: string,
   input: { namespace?: string; successor: string },
 ): Promise<NamespaceHandoffPlan> {
-  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
@@ -316,7 +318,7 @@ export async function leaveNamespace(
   dir: string,
   input: { namespace?: string; successor: string; force?: boolean; note?: string },
 ): Promise<NamespaceHandoffResult> {
-  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
@@ -337,7 +339,7 @@ export async function namespaceMembership(
   dir: string,
   namespace?: string,
 ): Promise<{ active: boolean; members: string[] }> {
-  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
@@ -357,7 +359,7 @@ export async function declarePolicyIssuer(
   input: { to: string; note?: string },
 ): Promise<{ subject: string; eventId: string }> {
   if (typeof input.to !== 'string' || input.to.length === 0) throw new Error('declare-issuer 需要 --to <deviceId>');
-  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
@@ -374,7 +376,7 @@ export async function declarePolicyIssuer(
 
 /** C1：本机当前生效的引导签发者集合（图上声明 ∪ 本地配置）。只读。 */
 export async function effectivePolicyIssuers(dir: string): Promise<string[]> {
-  const config = await loadFleetConfig(fleetConfigPath(dir));
+  const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();

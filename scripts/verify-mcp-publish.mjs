@@ -20,6 +20,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
 const mcpDir = join(rootDir, 'packages', 'mcp');
 const skillDir = join(rootDir, 'packages', 'skill');
+// F-UNI：统一 MCP 入口让 mcp 依赖 fleet → 发布面 = core + service + fleet + mcp + skill
+const serviceDir = join(rootDir, 'packages', 'service');
+const fleetDir = join(rootDir, 'packages', 'fleet');
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
 let passed = true;
@@ -56,13 +59,24 @@ let client = null;
 try {
   // ---------- npm pack ----------
   const core = pack(rootDir, work);
+  const service = pack(serviceDir, work);
+  const fleet = pack(fleetDir, work);
   const mcp = pack(mcpDir, work);
   const skill = pack(skillDir, work);
-  check('三包 npm pack', true, [core.meta.name, mcp.meta.name, skill.meta.name].join(' / '));
+  check('五包 npm pack（core/service/fleet/mcp/skill）', true,
+    [core.meta.name, service.meta.name, fleet.meta.name, mcp.meta.name, skill.meta.name].join(' / '));
 
   // D41：mcp tarball 內為 ^0.1.0，pack 後本地 manifest 已還原
   const mcpManifest = JSON.parse(readTarballFile(mcp.file, 'package/package.json'));
   check('mcp tarball 依賴 @mebular/core=^0.1.0', mcpManifest.dependencies?.['@mebular/core'] === '^0.1.0', mcpManifest.dependencies?.['@mebular/core']);
+  check('mcp tarball 依賴 @mebular/fleet=^0.1.0（统一入口复用任务 handler）', mcpManifest.dependencies?.['@mebular/fleet'] === '^0.1.0', mcpManifest.dependencies?.['@mebular/fleet']);
+  const fleetManifest = JSON.parse(readTarballFile(fleet.file, 'package/package.json'));
+  check('fleet tarball 依賴已改寫（core/service=^0.1.0）',
+    fleetManifest.dependencies?.['@mebular/core'] === '^0.1.0' && fleetManifest.dependencies?.['@mebular/service'] === '^0.1.0',
+    JSON.stringify(fleetManifest.dependencies));
+  const fleetLocal = JSON.parse(await readFile(join(fleetDir, 'package.json'), 'utf-8'));
+  check('fleet pack 後本地依賴還原為 file:（core/service）',
+    fleetLocal.dependencies?.['@mebular/core'] === 'file:../..' && fleetLocal.dependencies?.['@mebular/service'] === 'file:../service');
   const localManifest = JSON.parse(await readFile(join(mcpDir, 'package.json'), 'utf-8'));
   check('pack 後本地依賴還原為 file:../..', localManifest.dependencies?.['@mebular/core'] === 'file:../..', localManifest.dependencies?.['@mebular/core']);
   check('pack 備份已清除', !existsSync(join(mcpDir, 'package.json.packbak')));
@@ -81,14 +95,15 @@ try {
 
   // ---------- tarball 安裝冒煙 ----------
   await writeFile(join(work, 'package.json'), '{"name":"mebular-publish-smoke","private":true,"version":"0.0.0"}\n', 'utf-8');
-  execFileSync(npm, ['install', core.file, mcp.file, skill.file, '--omit=optional', '--no-audit', '--no-fund', '--loglevel=error'], {
+  execFileSync(npm, ['install', core.file, service.file, fleet.file, mcp.file, skill.file, '--omit=optional', '--no-audit', '--no-fund', '--loglevel=error'], {
     cwd: work,
     stdio: ['ignore', 'ignore', 'inherit'],
     env: process.env,
   });
   const installedCore = JSON.parse(await readFile(join(work, 'node_modules', '@mebular', 'core', 'package.json'), 'utf-8'));
   check('tarball 安裝：@mebular/core@0.1.0', installedCore.version === '0.1.0', installedCore.version);
-  check('tarball 安裝：@mebular/mcp 與 @mebular/skill', existsSync(join(work, 'node_modules', '@mebular', 'mcp')) && existsSync(join(work, 'node_modules', '@mebular', 'skill')));
+  check('tarball 安裝：@mebular/{service,fleet,mcp,skill}',
+    ['service', 'fleet', 'mcp', 'skill'].every((n) => existsSync(join(work, 'node_modules', '@mebular', n))));
 
   const bin = join(work, 'node_modules', '.bin', 'mebular');
   const env = { ...process.env, MEBULAR_HOME: home, MEBULAR_STORAGE_PATH: join(home, 'store.jsonl'), MEBULAR_DEVICE_ID: 'device-publish-smoke' };
@@ -101,13 +116,18 @@ try {
   const transport = new StdioClientTransport({ command: process.execPath, args: [bin, 'mcp'], env, stderr: 'pipe' });
   await client.connect(transport);
   const { tools } = await client.listTools();
-  check('安裝後 mebular mcp：tools/list=11', tools.length === 11, `count=${tools.length}`);
+  check('安裝後 mebular mcp：tools/list=27（记忆 11 + 任务 16）', tools.length === 27, `count=${tools.length}`);
   const written = await client.callTool({ name: 'memory_write', arguments: { items: [{ type: 'fact', content: 'publish-smoke' }] } });
   const parsed = written.structuredContent ?? JSON.parse(written.content?.find((c) => c.type === 'text')?.text ?? '{}');
   check('安裝後 memory_write 落圖', Array.isArray(parsed?.stored) && parsed.stored.length === 1);
   const queried = await client.callTool({ name: 'memory_query', arguments: { query: 'publish-smoke' } });
   const q = queried.structuredContent ?? JSON.parse(queried.content?.find((c) => c.type === 'text')?.text ?? '{}');
   check('安裝後 memory_query 命中', (q?.totalMatches ?? 0) >= 1, `totalMatches=${q?.totalMatches}`);
+  // 任务工具随统一入口发布（该 home 无守护配置 → 结构化失败信封，证明 handler 真的在呼叫链上）
+  const taskCall = await client.callTool({ name: 'task_status', arguments: { taskId: 'nope' } });
+  check('安裝後任务工具可用（结构化错误信封）',
+    taskCall?.isError === true && typeof taskCall?.structuredContent?.error?.code === 'string',
+    `code=${taskCall?.structuredContent?.error?.code}`);
   await client.close();
   client = null;
 

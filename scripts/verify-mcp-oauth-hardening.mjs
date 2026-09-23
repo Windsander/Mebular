@@ -220,7 +220,7 @@ try {
     refresh = tok.json?.refresh_token ?? null;
     check('6b /token 颁发 access+refresh', tok.status === 200 && typeof access === 'string' && typeof refresh === 'string', `status=${tok.status}`);
     const count = access ? await mcpListTools(base, access) : -1;
-    check('6c oauth token → /mcp tools/list=11', count === 11, `count=${count}`);
+    check('6c oauth token → /mcp tools/list=27（统一入口）', count === 27, `count=${count}`);
   }
   // 6d 管理员口令路径（与同意码并存）
   {

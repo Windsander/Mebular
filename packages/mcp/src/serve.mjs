@@ -14,7 +14,7 @@ import https from 'node:https';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
-import { TOOL_SCOPES } from './tools.mjs';
+import { TOOL_ALL_SCOPES } from './tools.mjs';
 import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 import { configPath } from './config.mjs';
 
@@ -164,8 +164,15 @@ import { endpointHostname, isLoopbackHost } from './lan-host.mjs';
 import { buildJoinToken } from './jointoken.mjs';
 import { renderSvgQr } from './qr.mjs';
 
-const SCOPES = ['memory.read', 'memory.write', 'memory.admin'];
-const SCOPE_RANK = { 'memory.read': 0, 'memory.write': 1, 'memory.admin': 2 };
+// R1.3：记忆面 memory.* + 任务面 task.*（两轴独立；同一轴内 write ⇒ read、admin ⇒ 其余）
+const SCOPES = ['memory.read', 'memory.write', 'memory.admin', 'task.read', 'task.write'];
+const SCOPE_IMPLIES = {
+  'memory.read': ['memory.read'],
+  'memory.write': ['memory.read', 'memory.write'],
+  'memory.admin': ['memory.read', 'memory.write', 'memory.admin'],
+  'task.read': ['task.read'],
+  'task.write': ['task.read', 'task.write'],
+};
 const DEFAULT_SCOPES = ['memory.read'];
 const ACCESS_TTL = 900; // 15min
 const REFRESH_TTL = 30 * 24 * 3600; // 30d
@@ -563,32 +570,37 @@ function readBody(req) {
   });
 }
 
+/** 请求体所需 scope（可多条；记忆与任务两轴互不蕴含）。 */
 function requiredScopeForBody(body) {
   let messages;
   try {
     const parsed = JSON.parse(body.toString('utf-8'));
     messages = Array.isArray(parsed) ? parsed : [parsed];
   } catch {
-    return 'memory.read';
+    return ['memory.read'];
   }
-  let required = 'memory.read';
+  const required = new Set();
   for (const msg of messages) {
     if (!msg || typeof msg.method !== 'string') continue;
     if (msg.method === 'initialize' || msg.method.startsWith('notifications/') || msg.method === 'ping') continue;
-    let scope = 'memory.read';
     if (msg.method === 'tools/call') {
-      scope = TOOL_SCOPES[msg.params?.name] ?? 'memory.read';
-    } else if (msg.method.startsWith('tools/') || msg.method.startsWith('resources/') || msg.method.startsWith('prompts/')) {
-      scope = 'memory.read';
+      required.add(TOOL_ALL_SCOPES[msg.params?.name] ?? 'memory.read');
+    } else if (msg.method === 'prompts/list' || msg.method === 'prompts/get'
+      || msg.method === 'resources/list' || msg.method === 'resources/read' || msg.method === 'resources/templates/list') {
+      // 评审：prompts/resources 按声明 scope 校验（静态 memory_policy 属读面）；不得随纯元数据放宽
+      required.add('memory.read');
     }
-    if ((SCOPE_RANK[scope] ?? 0) > (SCOPE_RANK[required] ?? 0)) required = scope;
+    // 纯元数据（tools/list、initialize、ping、notifications/*）：只要求已认证
+    // —— 统一入口的工具清单横跨记忆与任务两轴，按 memory.read 要求会挡住 task.read-only 令牌。
   }
-  return required;
+  return [...required];
 }
 
+/** 授权是否覆盖所需 scope（按轴蕴含：memory.admin ⊇ memory.write ⊇ memory.read；task.write ⊇ task.read）。 */
 function hasScope(granted, required) {
-  const rank = SCOPE_RANK[required] ?? 0;
-  return (granted ?? []).some((s) => (SCOPE_RANK[s] ?? -1) >= rank);
+  const list = Array.isArray(required) ? required : [required];
+  const grantedList = granted ?? [];
+  return list.every((req) => grantedList.some((s) => (SCOPE_IMPLIES[s] ?? []).includes(req)));
 }
 
 /**
@@ -696,7 +708,8 @@ export async function startHttpServer({
     }
     const required = requiredOverride ?? requiredScopeForBody(body);
     if (!hasScope(grant.scopes, required)) {
-      return { ok: false, status: 403, message: `insufficient scope: need ${required}`, challenge: `Bearer error="insufficient_scope", scope="${required}"`, tokenId: grant.tokenId };
+      const need = Array.isArray(required) ? required.join(' ') : required;
+      return { ok: false, status: 403, message: `insufficient scope: need ${need}`, challenge: `Bearer error="insufficient_scope", scope="${need}"`, tokenId: grant.tokenId };
     }
     return { ok: true, tokenId: grant.tokenId, scopes: grant.scopes };
   }

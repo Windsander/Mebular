@@ -38,7 +38,8 @@
 ### 2.5.2 每设备 Agent 目录 + 工具面
 
 - **目录**（普通记忆域，默认 `agents`）：每设备一条**签名**记录 `{device, agents:[{name,kind,capabilities?,concurrency,capacity?}], updatedAt, version}`；`task_targets = 我 L1 授权过的对端 ∩ 其目录 (device,agent)`；`capacity/load` 为**建议性**，不参与授权/一致性。
-- **工具面（MCP 与 CLI 能力完全一致）**：`fleet mcp`（stdio JSON-RPC）+ 等价子命令；对照见下表。
+- **工具面（MCP 与 CLI 能力完全一致）**：任务工具经**统一 MCP 入口**暴露（`mebular mcp` / HTTP `/mcp`，与记忆面同一入口；
+  `fleet mcp` 已删除）+ 等价子命令 `fleet task_*` / `mebular task_*`；对照见下表。
 
 | MCP 工具 | CLI 子命令 |
 |---|---|

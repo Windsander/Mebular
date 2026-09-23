@@ -2,7 +2,7 @@
 // G6.2 stdio MCP 验证（真实 MCP client）
 //
 // 以真实 @modelcontextprotocol/client + StdioClientTransport 启动 `mebular mcp`，
-// 断言 tools/list 为 11 个工具、逐个 tools/call、prompt memory_policy 存在。
+// 断言 tools/list 为 27 个工具（记忆 11 + 任务 16）、逐个 tools/call、任务工具结构化错误信封、prompt memory_policy 存在。
 // 干净环境退出码 0。前置：npm run build（core dist）。
 
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -16,6 +16,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
 const serverBin = join(rootDir, 'packages', 'mcp', 'bin', 'mebular.mjs');
 
+// 统一入口 27：记忆 11（冻结面）+ 任务 16（fleet TASK_TOOLS）
 const EXPECTED = [
   'memory_write',
   'memory_write_batch',
@@ -28,6 +29,11 @@ const EXPECTED = [
   'memory_import',
   'memory_status',
   'memory_sync',
+  // 任务面 16（复用 fleet TASK_TOOLS：同 handler 不复制）
+  'task_submit', 'task_submit_batch', 'task_cancel', 'task_retry',
+  'task_status', 'task_list', 'task_history', 'task_children', 'task_summarize',
+  'task_subscribe', 'task_negotiate', 'chatter_send', 'chatter_inbox',
+  'task_quota', 'task_targets', 'board_create',
 ];
 
 let passed = true;
@@ -73,11 +79,15 @@ try {
 
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
-  check('tools/list 返回 11 个工具', tools.length === 11, `count=${tools.length}`);
+  check('tools/list 返回 27 个工具（记忆 11 + 任务 16）', tools.length === 27, `count=${tools.length}`);
   check(
-    '工具名与冻结面一致',
+    '工具名与统一入口冻结面一致',
     JSON.stringify(names) === JSON.stringify([...EXPECTED].sort()),
     names.join(','),
+  );
+  check(
+    '任务工具也在统一入口（tools/list 含 task_submit 与 task_status）',
+    names.includes('task_submit') && names.includes('task_status'),
   );
 
   // 写入（单 + 批）
@@ -104,6 +114,15 @@ try {
 
   const h = structuredOf(await client.callTool({ name: 'memory_history', arguments: {} }));
   check('memory_history 返回 totalCount', typeof h?.totalCount === 'number');
+
+  // R3.3：任务工具经统一入口返回**结构化错误信封**（此 home 无 fleet/守护 config → E_NOT_FOUND）
+  const taskFail = await client.callTool({ name: 'task_status', arguments: {} });
+  check(
+    '任务工具错误信封：isError + structuredContent.error{code,message}',
+    taskFail?.isError === true && typeof taskFail?.structuredContent?.error?.code === 'string'
+      && taskFail.structuredContent.error.code === 'E_NOT_FOUND' && typeof taskFail.structuredContent.error.message === 'string',
+    `code=${taskFail?.structuredContent?.error?.code}`,
+  );
 
   // 图
   const g = structuredOf(await client.callTool({ name: 'memory_graph', arguments: { startId: idFromWrite, maxDepth: 1 } }));

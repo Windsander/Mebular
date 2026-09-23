@@ -54,7 +54,7 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 | **GUI** | `mebular serve` → 控制台 → 首次：**建新 / 加入已有**；之后：＋ 邀请新设备 | 想亲眼看着 |
 | **CLI** | `fleet quickstart` → `fleet invite`；新机 `fleet join --qr` | 脚本化/批量 |
 
-**让 Agent 代劳** —— 装好 Skill，对它说“部署 Mebular”/“用这个码加入”；它按 [`packages/skill/SETUP.md`](packages/skill/SETUP.md) 执行并用 `mebular doctor --net` 自检：
+**让 Agent 代劳** —— 装好 Skill（**两个：记忆 + 任务**），对它说“部署 Mebular”/“用这个码加入”；它按 [`packages/skill/SETUP.md`](packages/skill/SETUP.md) 执行并用 `mebular doctor --net` 自检：
 
 ```bash
 node packages/skill/scripts/install.mjs
@@ -111,6 +111,7 @@ await mebular.initialize();
 - **封板契约**（红线 / 协议语义 / 推迟项） — [`SEALING.md`](SEALING.md)
 - **fleet 运维手册**（双机操作、WAN 命令、验收） — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
 - **Agent 记忆规约** — [`packages/skill/MEMORY_POLICY.md`](packages/skill/MEMORY_POLICY.md)
+- **Agent 任务手册** — [`packages/skill/tasks/SKILL.md`](packages/skill/tasks/SKILL.md)（何时派活、跟踪、协商、红线）
 - **守护 / MCP** — [`packages/mcp`](packages/mcp)
 - **Fleet** — [`packages/fleet`](packages/fleet)
 - **控制台 GUI** — [`packages/console`](packages/console)

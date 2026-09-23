@@ -1,141 +1,143 @@
-# Mebular 封板（SEALING）
+# Mebular Sealing (SEALING)
 
-> **封板基线**：`main = 0d78486`（PR #34 合并；含 Phase 2 D/E（A）、实时同步（B）、多签发者策略权威（C））。
-> 根 tree = `d1eb7d2c5ffa87eed6c64d70ce8aed3a6ceeb333`。验收基线：**67 个测试套件 / 542 条用例全绿**；
-> 覆盖率 **行 92.4% / 分支 ~79.3–79.5%**（运行间抖动），门槛 lines 85 / branches 65。
+> Chinese version: [`SEALING_CN.md`](SEALING_CN.md). The Chinese original is authoritative; if the two versions differ, the Chinese original prevails.
+
+> **Sealing baseline**: `main = 0d78486` (PR #34 merged; includes Phase 2 D/E (A), real-time sync (B), multi-issuer policy authority (C)).
+> Root tree = `d1eb7d2c5ffa87eed6c64d70ce8aed3a6ceeb333`. Acceptance baseline: **67 test suites / 542 cases all green**;
+> coverage **lines 92.4% / branches ~79.3–79.5%** (jitter between runs), thresholds lines 85 / branches 65.
 >
-> 本文是**契约**：下列被钉住的红线、口径与协议语义，改动前**必须先更新本文并配回归**，否则不予合入。
-> 策略推导的不变量矩阵与准入条件另见 [`src/sync/POLICY-INVARIANTS.md`](src/sync/POLICY-INVARIANTS.md)。
+> This document is a **contract**: the red lines, stance and protocol semantics pinned below **must be updated here
+> and accompanied by regression tests before any change**, otherwise no merge.
+> The policy-derivation invariant matrix and admission conditions are in [`src/sync/POLICY-INVARIANTS.md`](src/sync/POLICY-INVARIANTS.md).
 
 ---
 
-## 1. 去中心化红线（不可越界）
+## 1. Decentralization red lines (never cross)
 
-1. **无中心服务 / 协调者**：同步是设备直连，传输层可换（libp2p / InMemoryHub / 自建 Provider）；核心层纯 TS、不依赖网络，库/嵌入式形态可离线运行。不做云端记忆 SaaS。
-2. **无全局时钟**：定序**不看墙钟**。同一签发者内按**单调序列**（`event.vectorClock[author]`）；跨签发者按**逻辑时间** `sum(vectorClock)`；并发（互不因果）以 `(作者, 内容寻址 id)` 兜底 → 完全确定、两端收敛一致（含 A/B 互吊销：逻辑序在先者胜）。
-3. **权威来自用户主密钥证书链**：政策记录只有**链到用户主密钥**的设备签发才被采纳；自授、别家用户、无证书伪造一律忽略。被授权方**不可自授**。
-   **委派（T2，信任模型 v2）**：**任意**持有有效证书链的设备可用**其设备密钥**为**新设备**签发**委派证书**（不要求特定设备/CA 在线，主密钥私钥可完全离线）。链为**叶→根**有序，逐跳用签发者设备公钥验签，最后一跳由用户主密钥验签；**委派跳数上界 N=4**（超长链拒绝）。**没有“指定主设备”概念**。
-4. **授权可传递、无单一主设备在线要求**：引导签发者（**图上签名声明 `policy_issuer_declare` ∪ 本地配置 `sync.policyIssuers`**，可多台；见 §3 C1）之外，已被授权者可**转授**自己当时已获授权的分区（"不能给出自己没有的"）。
-5. **数据本地持有、默认拒绝**：写入先本地签名 + 内容寻址哈希，不 phone-home；供给端只把记忆发给**被显式授权**的对端（`sync.peerNamespacePolicy`，未列出 = 不给任何分区）。
-6. **传输/集成不构成权威**：P2P、relay、MCP、OAuth 等只管**字节通道与访问控制**，不参与政策判定，也不改变授权结果。
-7. **保留命名空间 `__policy__` 对全部已认证设备可读（含被吊销者）**：这是解开「默认拒绝 + 策略在图上」bootstrap 与支持恢复所必需的**有意取舍**，代价是授权图（谁能读什么、谁被吊销）对已入网设备可见。
+1. **No central service / coordinator**: sync is device-to-device; the transport layer is replaceable (libp2p / InMemoryHub / custom Provider); the core layer is pure TS, network-independent, and runs offline in library/embedded form. We do not build a cloud memory SaaS.
+2. **No global clock**: ordering **does not look at the wall clock**. Within one issuer, by **monotonic sequence** (`event.vectorClock[author]`); across issuers by **logical time** `sum(vectorClock)`; concurrent (mutually non-causal) ties broken by `(author, content-addressed id)` → fully deterministic, both ends converge identically (including mutual A/B revocation: the earlier logical order wins).
+3. **Authority comes from a certificate chain to the user master key**: policy records are accepted only if issued by a device whose chain reaches the user master key; self-issued, other users', or uncertified forgeries are ignored. Authorized parties **cannot self-authorize**.
+   **Delegation (T2, trust model v2)**: **any** device holding a valid certificate chain may issue a **delegation certificate** for a **new device** using **its device key** (no specific device/CA required online; the master-key private key may be fully offline). The chain is ordered **leaf→root**, verified hop by hop with the issuer's device public key, with the last hop verified by the user master key; **delegation hop bound N=4** (longer chains rejected). **There is no "designated master device" concept.**
+4. **Authorization is transmissible; no single master device must be online**: besides bootstrap issuers (**graph-signed declaration `policy_issuer_declare` ∪ local config `sync.policyIssuers`**, multiple allowed; see §3 C1), already-authorized devices may **re-delegate** the namespaces they held at the time ("you cannot give what you do not have").
+5. **Data is held locally; default deny**: writes are locally signed + content-addressed first, no phone-home; the supply side only sends memory to **explicitly authorized** peers (`sync.peerNamespacePolicy`; not listed = give no namespace).
+6. **Transport/integration confers no authority**: P2P, relay, MCP, OAuth, etc. only handle **byte channels and access control**; they do not participate in policy decisions or change authorization outcomes.
+7. **Reserved namespace `__policy__` is readable by all authenticated devices (including revoked ones)**: an intentional trade-off required to bootstrap "default deny + policy on the graph" and to support recovery; the cost is that the authorization graph (who can read what, who is revoked) is visible to enrolled devices.
 
-## 2. 一致性口径
+## 2. Consistency stance
 
-1. **最终收敛（eventual），非强一致**：在双方**共同授权（且实际传输）**的分区集合内，任意两端最终收敛到同一图状态（事件内容寻址 + 向量时钟 + 确定性冲突裁决）。分区只改变「谁在何时收到哪些字节」与召回组织方式，**不改变一致性模型本身**。
-2. **水位是 `per-(对端, 分区, 作者)`**：只在**同一分区内**比较作者计数，绝不拿对端累积全局时钟当「已有」；本机上报（hello）与快照水位同样只取作者自身计数。某分区因未授权被跳过后，**扩权即可回补**历史事件。
-3. **水位只由本机掌握的两个事实推进**：对端 **ack** 与**已确认快照**（`snapshotApplied`）。对端 hello 的自报水位**不抬升**本机记录（差异经 `sync-completed.reportedAhead` 暴露）。**2c 例外——自报只允许向下修正**：对端自报某作者计数**低于**本机记录时，把本机水位**下调**到自报值（作者缺失 = 0），用于**再订阅恢复**（退订方清理后上报空时钟 → 对端从 0 重发）；**绝不向上修正**。
-4. **跨会话重复发送是预期行为**（方向安全：只多发、不缺发）：对端已从别处获得、本机无 ack 的事件可能被再发一次；接收端按内容寻址 id 幂等去重，**重复事件跳过验签与重放但仍 ack**，下次不再发（自愈）。`duplicates` 非零通常不是 bug。
-5. **跨端一致性自检只比共同授权域**：`status().stateHash` 是**全局**哈希，两个合法持有不同分区集合的设备全局哈希必然不同（不是 bug）；请比 `status().stateHashByNamespace`，只对**双方共同拥有的域**逐一比较。
-6. **快照前提与回退保护**：初始快照**只发给自报分区水位为空的对端**；接受侧仍做回退保护——仅当本地缺失或快照版本时钟**严格更新**时才写入。放宽「只发空对端」前必须先补齐快照的冲突/合并语义。
-7. **连接 ≠ 持续同步**：一次连接只保证一次收敛（`autoSync`）。实时性来自**写入即推（push-on-write）**，长连兜底来自**周期 anti-entropy**；实时性依赖常驻进程，库/嵌入式默认不推送/不兜底。
+1. **Eventual convergence, not strong consistency**: within the set of namespaces both sides **commonly authorize (and actually transmit)**, any two ends eventually converge to the same graph state (content-addressed events + vector clocks + deterministic conflict resolution). Partitions only change "who receives which bytes, and when" and how recall is organized; they **do not change the consistency model itself**.
+2. **Watermarks are `per-(peer, namespace, author)`**: compare author counts only **within the same namespace**; never treat a peer's cumulative global clock as "have". Local reporting (hello) and snapshot watermarks likewise use only the author's own count. If a namespace is skipped due to no authorization, **granting access backfills history**.
+3. **Watermarks advance only by two local facts**: peer **ack** and a **confirmed snapshot** (`snapshotApplied`). A peer's hello-reported watermark does **not** raise the local record (discrepancies surface via `sync-completed.reportedAhead`). **2c exception — self-report may only correct downward**: when a peer self-reports an author count **lower** than the local record, the local watermark is **lowered** to the reported value (missing author = 0), used for **resubscribe recovery** (after the unsubscriber cleans up and reports an empty clock, the peer resends from 0); **never corrected upward**.
+4. **Cross-session duplicate sends are expected** (safe direction: send-more-never-less): events the peer already got elsewhere but for which the local side has no ack may be sent again; the receiver dedupes by content-addressed id, **skips signature verification and replay for duplicates but still acks**, and won't resend them next time (self-healing). Non-zero `duplicates` is usually not a bug.
+5. **Cross-end consistency self-checks compare only the commonly authorized domain**: `status().stateHash` is a **global** hash; two devices legitimately holding different namespace sets will necessarily have different global hashes (not a bug); compare `status().stateHashByNamespace`, namespace by namespace, only over the domains **both hold**.
+6. **Snapshot preconditions and fallback protection**: the initial snapshot is **sent only to peers reporting an empty namespace watermark**; the accepting side still guards against regression — it writes only when the data is locally missing or the snapshot version clock is **strictly newer**. Before relaxing "empty peers only", snapshot conflict/merge semantics must be completed first.
+7. **Connection ≠ continuous sync**: one connection guarantees only one convergence (`autoSync`). Real-time comes from **push-on-write**, long-connection fallback from **periodic anti-entropy**; real-time depends on a resident process — library/embedded forms do not push or fall back by default.
 
-## 3. 协议语义清单（改动 = 破坏性协议变更，需全端同版本）
+## 3. Protocol semantics list (a change = breaking protocol change; all ends must run the same version)
 
-> 以下任一项变化都必须**全端一致升级**；两端不一致可能对同一批记录/事件得出不同结论。
+> Any change below requires a **consistent upgrade of all ends**; ends on different versions may reach different conclusions from the same set of records/events.
 >
-> **⚠️ 破坏性协议变更 · C1（引导签发者上图化）**：新增事件类型 `policy_issuer_declare`，并把 R-a 的
-> 「引导白名单」从**本地配置**改为**生效引导集合 = 图上声明 ∪ 本地配置**。**旧节点**（不含 C1）会
-> 把 `policy_issuer_declare` 视为未知类型而忽略：若新旧混跑且旧节点**未**在本地配置该签发者，则旧
-> 节点不承认该签发者的授权、**可能少授权/不收敛**（安全方向：少授权，不 fail-open）。**同一集群须
-> 全端升级到含 C1 的版本**；跨版本互通仅在「旧端仍用 `sync.policyIssuers` 本地配置」时成立。
+> **⚠️ Breaking protocol change · C1 (bootstrap issuers on-graph)**: adds the event type `policy_issuer_declare` and changes R-a's
+> "bootstrap allow-list" from **local config** to **effective bootstrap set = on-graph declarations ∪ local config**. **Old nodes** (without C1)
+> treat `policy_issuer_declare` as an unknown type and ignore it: if old and new run mixed and the old node does **not** have that issuer in local config,
+> the old node will not recognize that issuer's grants and **may under-authorize / not converge** (safe direction: under-authorize, not fail-open). **A single cluster must
+> be fully upgraded to a C1-containing version**; cross-version interop holds only when "the old end still uses `sync.policyIssuers` local config".
 >
-> **⚠️ 破坏性协议变更 · M1–M3（订阅 = 成员资格）**：新增事件类型 `namespace_membership`，把「订阅」
-> 从**瞬时 hello 声明**升格为**持久、签名的图上成员资格**；裁剪链改为
-> `对端授权 ∩ 对端成员资格 ∩ 本机订阅声明`，hello 订阅声明降级为**活跃性/一致性校验**（不一致 →
-> **显式拒绝/告警**，不静默）。**兼容规则（legacy-empty）**：某分区**没有任何被采纳成员记录**时视为
-> 未启用成员资格，沿用既有 hello 订阅裁剪（**不放松授权默认拒绝**）；一旦该分区出现成员记录，即成
-> 强制闸门。**旧节点**忽略 `namespace_membership`：对旧端而言该分区始终「未启用成员资格」→ 行为
-> 不变或**少收**（安全方向，不 fail-open）；**退订的数据清理/继任者 ack 门禁属 2b，本轮不做**。
+> **⚠️ Breaking protocol change · M1–M3 (subscription = membership)**: adds the event type `namespace_membership`, upgrading "subscription"
+> from a **transient hello declaration** to a **persistent, signed on-graph membership**; the pruning chain becomes
+> `peer authorization ∩ peer membership ∩ local subscription declaration`, and hello subscription declarations are downgraded to **liveness/consistency checks** (mismatch →
+> **explicit rejection/warning**, not silent). **Compatibility rule (legacy-empty)**: when a namespace has **no adopted membership records** it is treated as
+> membership not enabled, and the existing hello-subscription pruning stands (**default deny is not relaxed**); once membership records appear for that namespace, it becomes
+> a mandatory gate. **Old nodes** ignore `namespace_membership`: for old ends the namespace is always "membership not enabled" → behavior is
+> unchanged or **receives less** (safe direction, not fail-open); **unsubscribe data cleanup / successor ack gating belongs to 2b, not this round**.
 
-> **⚠️ 破坏性协议变更 · T2（委派证书链 + 加入令牌，信任模型 v2）**：握手证书新增可选 `issuer` 字段与
->   `chain`（叶→根）载荷；事件新增可选 `authorCertificateChain`。**旧节点**只做**一层**主密钥验签：
->   收到**委派证书**（`issuer` 存在 / 链长>1）时**拒绝**（安全方向，不 fail-open）→ 新旧混跑时委派设备
->   **无法接入**，须**全端升级**；旧“共享主密钥 + 主密钥直签证书”部署**继续有效**（`issuer` 缺省 = 与旧格式逐字节兼容）。
->   新增 **join 令牌**（inviter 设备私钥签名，含 TTL/一次性 nonce/可撕；**不含主密钥**）与可选 libp2p
->   `/mebular/join/1.0.0` 请求-签发协议：**任意在册设备**可作 inviter 签发委派证书。
+> **⚠️ Breaking protocol change · T2 (delegation cert chain + join token, trust model v2)**: the handshake certificate gains an optional `issuer` field and a
+> `chain` (leaf→root) payload; events gain an optional `authorCertificateChain`. **Old nodes** do only **one level** of master-key verification:
+> when receiving a **delegation certificate** (`issuer` present / chain length > 1) they **reject** it (safe direction, not fail-open) → when old and new run mixed, delegated devices
+> **cannot onboard**, and a **full upgrade is required**; the old "shared master key + master-key-signed certificate" deployment **remains valid** (`issuer` absent = byte-compatible with the old format).
+> Also adds a **join token** (signed by the inviter device's key, with TTL / one-time nonce / tearable; **does not contain the master key**) and an optional libp2p
+> `/mebular/join/1.0.0` request-issue protocol: **any enrolled device** can act as inviter and issue delegation certificates.
 
-- **策略事件类型与命名空间**：保留命名空间 `__policy__`；事件类型 `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare` / `namespace_membership` / `namespace_handoff`。
-- **地址广播（C5，`net_endpoints`，命名空间 `__net__`，**opt-in**）**：新增**信息类**记录类型
-  `net_endpoints`（命名空间 `__net__`），载荷 `{subject, endpoints[{addr,kind:lan|public|relay}], relayCapable, issuedAt, expiry, sig?}`。
-  语义（8 条，红线）：
-  1. **仅 subject 签发**：读取侧要求 `event.author === payload.subject`，否则忽略（不抛错）；
-  2. **只作 hints，永不参与授权**：该记录只写入候选地址簿（`source=learned`），
-     **绝不**改变 `getEffectiveNamespaces` / 成员资格 / 吊销判定，也不写任何 `__policy__` 记录；
-  3. **默认档 `full`**：发布实际存在的 lan/public/relay 地址并打标；`relay-only` / `off` 为可选隐私档（`off` 完全不发布）；
-  4. **仅 `__net__` 成员可见**：记录只落在 `__net__`（传输侧沿用既有「授权 ∩ 成员资格 ∩ 订阅」裁剪；非 `__net__` 命名空间的同形记录一律忽略）；
-  5. **`expiry` 是本地策略**：过期记录仅在本机被忽略，**墙钟不进一致性**、不影响 `stateHash` 与冲突裁决；
-  6. **吊销级联过滤**：被吊销 subject 的记录一律忽略（含其历史记录）；
-  7. **候选排序 `public > lan > relay`**（与 `EndpointBook.KIND_PRIORITY` 一致）；
-  8. **`relayCapable` 无义务、无权限**：仅是信息（不使本机成为桥、不换取任何授权；当桥判定仍由 C6 的
-     `relayService` + 地址簿白名单决定）。
-  **兼容性（安全方向）**：旧节点忽略未知的 `net_endpoints` 类型 → 只是少收 hints（不 fail-open）；同集群可混跑。
-  本记录**不改变同步协议骨架**（不新增握手/水位语义、不产生 tombstone）。
-- **扫码即通（C7，加入令牌可选字段 + 兑换后自动授权）**：加入令牌新增**可选**字段
-  `grantOnJoin`（显式 `false` 才写入）与 `grantTtlMs`（显式设置才写入）；**缺省不写** → 默认令牌与旧版本
-  **逐字节兼容**（旧 inviter 仍可验签，只是不自动授权）。兑换成功时邀请方按其身份签发一条**普通的
-  `namespace_grant`**（作用域 = 令牌分区；**不改变任何授权判定语义**）。授权的到期由**图外台账 + 定时
-  `revokeGrant`** 保证（`ttlMs=0` = 永久）——TTL 属**本地策略**，不进一致性、不影响 `stateHash`。
-  二维码内容 = **内联令牌文本本身**（不引自定义 scheme）；渲染依赖可选依赖 `qrcode`（缺包 → 只给文本，不报错）。
-- **2c 重订阅恢复（reset）**：退订清理后重入须同时满足 ①本机对该分区有**生效授权**（`getEffectiveNamespaces(self)` 含该分区；默认拒绝不变）②成员**重新在册**；否则**显式失败**。重入写**图外** `<storagePath>.rejoin.<ns>.json` 标记（**不同步/无 tombstone**）并清本机该分区本地水位；本机 hello 以**空时钟**上报显式订阅的分区 → 对端按「自报水位**只允许向下修正**」从 0 重发（或按既有“空水位”门禁发初始快照，**门禁不放宽**）。**不新增同步协议、不产生 tombstone、不改 `__policy__`**（oracle-free）。**破坏性/前向差异**：旧节点无“向下修正”语义 → 对旧端重入只可能**少收**（安全方向），需同版本互通。
-- **2b 退订交接（`namespace_handoff`）**：退订 = 成员资格退出（`namespace_membership(active:false)`）+ **本地彻底清理**该分区事件/节点/边与本地水位。**绝不产生 tombstone**（无任何“已删除”事件）。**清理前必须**继任者全量 ack（复用 per-event ack `getPendingEvents`，含退订方作者计数；**不新增同步协议、不放宽快照门禁**）；门禁不过 → **保持原状**。**`__policy__` 永不清理**（策略/成员/交接记录保留 → 清理不改变策略推导，legacy-empty 不退化）。`force` **仅本地 CLI**（不经 MCP/远程），仍**如实**记录 `forced:true` 与缺失明细。意图记录落在**图外**（`<storagePath>.handoff.json`）以保证崩溃后可**幂等续跑**。
-- **M1–M3 成员资格（`namespace_membership`）**：`{ member, namespace, active, issuedAt, note? }`；只采纳链到主密钥且签发者/成员未被 `device_revoke` 吊销的记录（**无条件采纳，不做 R-a**）；`(namespace, member)` 取 **R-c 最新**记录的 `active`（在册/注销）。**生效成员 = active 成员 ∩ 该设备对该分区的生效授权**；成员记录**不得**放宽授权（默认拒绝不变）。**裁剪链**：对端授权 ∩ 对端成员资格 ∩ 本机订阅声明；hello 订阅声明仅作活跃性/一致性校验，不一致 **显式拒绝/告警**（`sync-completed.membershipRejected`）。**legacy-empty**：分区无成员记录时按 hello 订阅裁剪（兼容）。
-- **规则 R-a/R-b/R-c/R-d**：
-  - **R-a 不可越权授予**：签发者须属于**生效引导集合**（图上被采纳的 `policy_issuer_declare` 主体 ∪ 本地配置 `sync.policyIssuers`），或**当时**已获授权其声明的**全部**分区。
-  - **C1 引导签发者声明（`policy_issuer_declare`）**：签发者与主体均未被 `device_revoke` 吊销时，**无条件采纳**（不做 R-a，故与不动点无循环依赖）；被吊销的签发者（R-b 含历史）或被吊销的主体 → **不采纳**。伪造/非本用户主密钥链的记录在校验阶段被忽略。
-  - **R-b 吊销连坐（含历史）**：被吊销签发者的记录**一律不采纳**——其历史 `grant`、它发出的 `device_revoke` / `namespace_revoke`。**自吊销（`subject === author`）不采纳**（语义未定义；吊销须由其他设备发起）。
-  - **R-c 逻辑时间定序**（见红线 2），不看墙钟。
-  - **R-d grantId 精确撤销**：被 `namespace_revoke` 撤销过的 grantId **永久失效**；恢复必须用**全新 grantId**（复用旧 grantId 的「伪恢复」无效）。吊销**非终态**。
-- **`derivePolicyState` 迭代上限 = 输入的确定纯函数** `iterationBound(entries) = 2·|entries| + 2`。**这是协议语义**：只用输入规模，不依赖配置/环境/时钟 → 同一输入在任何端得到同一上限。
-- **未收敛 = fail-closed 两轴保守回退**：`revokedGrantIds = ∅`（不采纳任何 revoke）且 `revokedIn = 各轮吊销并集的闭包`，迭代直到输出 **`revoked ⊆ excluded`**（R-b 在回退路径**字面成立**）；绝不 fail-open。`PolicyState.converged = false` 可观测（含 `iterations`）。
-- **`maxIterations` 不可由生产注入**：`GraphNamespacePolicy` 构造**无**该选项，生产恒用 `iterationBound`；`DerivePolicyOptions.maxIterations` 标注 `@internal`，**仅测试专用**。
-- **水位持久化格式 v2**：`.sync-state.json`（`namespaceClocks` 分区水位 + per-event ack 集合 + `snapshotApplied`）。
-- **默认拒绝与裁剪链**：`sync.peerNamespacePolicy` 未列出 = 拒绝（空数组 = 明确不允许）；裁剪链 = **对端授权 ∩ 对端成员资格 ∩ 本机订阅声明**（M1–M3；成员资格未启用时退化为对端订阅声明），同时作用于 **offer 与初始快照**。拒绝非静默（`sync-completed.denied`；成员不一致 → `sync-completed.membershipRejected`）。
-- **订阅声明**：`sync.namespaces` 声明本机订阅；未配置/空 = 参与全部。声明随 `sync-hello` 以 `subscribeAll` + `namespaces` **必填**下发；**缺字段/类型错视为协议违例并中止会话**；`subscribeAll=false` + 空清单 = 明确不订阅任何分区。
-- **`sync-nudge` 帧无载荷**；携带业务载荷视为协议违例。
-- **推送/兜底默认值**：`pushOnWrite` 与 `antiEntropy`——库/嵌入式 **关**，常驻（`serve` / MCP）**开**。anti-entropy 默认 `intervalMs = 10min`、`jitterRatio = 0.2`（±20%）；无 pending **短路跳过**、会话在途跳过、失败指数退避、jitter 防齐步走。push-on-write 节流 50ms 合并。
-- **生效引导集合 = 图上声明 ∪ 本地配置**（C1）：`sync.policyIssuers` 为**兼容回退/bootstrap**，缺省空；
-  **不再要求各端一致**——图上 `policy_issuer_declare` 会随 `__policy__` 同步到各端，任一端无需本地配置
-  即可采纳同一签发者。混跑旧节点时，旧节点仍需本地配置（见本 § 顶部 C1 说明）。
+- **Policy event types and namespaces**: reserved namespace `__policy__`; event types `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare` / `namespace_membership` / `namespace_handoff`.
+- **Address broadcast (C5, `net_endpoints`, namespace `__net__`, **opt-in**)**: adds an **informational** record type
+  `net_endpoints` (namespace `__net__`), payload `{subject, endpoints[{addr,kind:lan|public|relay}], relayCapable, issuedAt, expiry, sig?}`.
+  Semantics (8 items, red lines):
+  1. **Issued by subject only**: the read side requires `event.author === payload.subject`, otherwise it is ignored (no error thrown);
+  2. **Hints only, never part of authorization**: the record is written only to the candidate address book (`source=learned`),
+     and **never** changes `getEffectiveNamespaces` / membership / revocation determination, nor writes any `__policy__` record;
+  3. **Default tier `full`**: publishes actually-present lan/public/relay addresses, tagged; `relay-only` / `off` are optional privacy tiers (`off` publishes nothing);
+  4. **Visible only to `__net__` members**: the record lands only in `__net__` (the transport side reuses the existing "authorization ∩ membership ∩ subscription" pruning; same-shaped records in namespaces other than `__net__` are always ignored);
+  5. **`expiry` is local policy**: expired records are ignored only locally; **the wall clock never enters consistency**, and does not affect `stateHash` or conflict resolution;
+  6. **Revocation cascade filtering**: records of a revoked subject are always ignored (including its historical records);
+  7. **Candidate ordering `public > lan > relay`** (consistent with `EndpointBook.KIND_PRIORITY`);
+  8. **`relayCapable` carries no obligation and no permission**: it is information only (it does not make the local node a bridge and buys no authorization; the bridge decision still rests with C6's
+     `relayService` + address-book allow-list).
+  **Compatibility (safe direction)**: old nodes ignore the unknown `net_endpoints` type → they merely receive fewer hints (not fail-open); a cluster may run mixed.
+  This record **does not change the sync protocol skeleton** (adds no handshake/watermark semantics, produces no tombstone).
+- **Invite-on-scan (C7, optional join-token fields + auto-grant on redemption)**: the join token gains **optional** fields
+  `grantOnJoin` (written only when explicitly `false`) and `grantTtlMs` (written only when explicitly set); **absent by default** → a default token is
+  **byte-compatible** with older versions (an old inviter can still verify it, it just does not auto-grant). On successful redemption the inviter signs an **ordinary
+  `namespace_grant`** under its own identity (scope = the token's namespace; it **does not change any authorization determination semantics**). Expiry of the grant is ensured by an
+  **off-graph ledger + scheduled `revokeGrant`** (`ttlMs=0` = permanent) — TTL is **local policy**, does not enter consistency, and does not affect `stateHash`.
+  The QR content = **the inline token text itself** (no custom scheme); rendering depends on the optional `qrcode` dependency (missing package → text only, no error).
+- **2c resubscribe recovery (reset)**: after unsubscribe cleanup, rejoining must satisfy both ① the local node has an **effective authorization** for the namespace (`getEffectiveNamespaces(self)` includes it; default deny unchanged) and ② the member is **re-enrolled**; otherwise it **fails explicitly**. Rejoin writes an **off-graph** `<storagePath>.rejoin.<ns>.json` marker (**not synced / no tombstone**) and clears the local namespace watermark; the local hello reports explicitly subscribed namespaces with an **empty clock** → the peer resends from 0 per "self-reported watermark **may only correct downward**" (or sends an initial snapshot under the existing "empty watermark" gate, **the gate is not relaxed**). It **adds no sync protocol, produces no tombstone, does not change `__policy__`** (oracle-free). **Breaking/forward difference**: old nodes lack the "correct downward" semantics → for old ends a rejoin can only **receive less** (safe direction); same-version interop is required.
+- **2b unsubscribe handoff (`namespace_handoff`)**: unsubscribe = membership exit (`namespace_membership(active:false)`) + **full local cleanup** of that namespace's events/nodes/edges and the local watermark. It **never produces a tombstone** (no "deleted" event of any kind). **Before cleanup**, a successor must fully ack (reusing per-event ack `getPendingEvents`, including the unsubscriber's author count; **adds no sync protocol, does not relax the snapshot gate**); if the gate fails → **leave everything as is**. **`__policy__` is never cleaned** (policy/membership/handoff records are retained → cleanup does not change policy derivation, and legacy-empty does not degrade). `force` is **local CLI only** (not via MCP/remote), and still **faithfully** records `forced:true` and the missing details. The intent record lands **off-graph** (`<storagePath>.handoff.json`) so that it can **resume idempotently** after a crash.
+- **M1–M3 membership (`namespace_membership`)**: `{ member, namespace, active, issuedAt, note? }`; only records chaining to the master key whose issuer/member is not revoked by `device_revoke` are adopted (**unconditional adoption, no R-a**); `(namespace, member)` takes the `active` of the **R-c latest** record (enrolled/unenrolled). **Effective membership = active members ∩ that device's effective authorization for the namespace**; membership records **must not** relax authorization (default deny unchanged). **Pruning chain**: peer authorization ∩ peer membership ∩ local subscription declaration; the hello subscription declaration only serves as a liveness/consistency check, and a mismatch is **explicitly rejected/warned** (`sync-completed.membershipRejected`). **legacy-empty**: when a namespace has no membership records, prune by the hello subscription (compatible).
+- **Rules R-a/R-b/R-c/R-d**:
+  - **R-a cannot grant beyond one's rights**: the issuer must belong to the **effective bootstrap set** (subjects of adopted on-graph `policy_issuer_declare` ∪ local config `sync.policyIssuers`), or **at that time** already be authorized for **all** the namespaces it declares.
+  - **C1 bootstrap-issuer declaration (`policy_issuer_declare`)**: when both the issuer and the subject are not revoked by `device_revoke`, it is **unconditionally adopted** (does not do R-a, hence no cyclic dependency with the fixed point); a revoked issuer (R-b, including historical) or a revoked subject → **not adopted**. Forged records / records not chaining to this user's master key are ignored during verification.
+  - **R-b revocation contagion (including history)**: records of a revoked issuer are **never adopted** — its historical `grant`, and the `device_revoke` / `namespace_revoke` it issued. **Self-revocation (`subject === author`) is not adopted** (semantics undefined; revocation must be initiated by another device).
+  - **R-c logical-time ordering** (see red line 2), not looking at the wall clock.
+  - **R-d exact grantId revocation**: a grantId revoked by `namespace_revoke` **permanently lapses**; recovery must use a **brand-new grantId** (a "pseudo-recovery" reusing the old grantId is void). Revocation is **not terminal**.
+- **`derivePolicyState` iteration bound = a deterministic pure function of the input** `iterationBound(entries) = 2·|entries| + 2`. **This is protocol semantics**: it uses only the input size, independent of config/environment/clock → the same input yields the same bound on any end.
+- **Non-convergence = fail-closed two-axis conservative fallback**: `revokedGrantIds = ∅` (adopt no revoke) and `revokedIn = closure of the union of all rounds' revocations`, iterating until the output satisfies **`revoked ⊆ excluded`** (R-b **literally holds** on the fallback path); never fail-open. `PolicyState.converged = false` is observable (with `iterations`).
+- **`maxIterations` cannot be injected by production**: the `GraphNamespacePolicy` constructor has **no** such option, and production always uses `iterationBound`; `DerivePolicyOptions.maxIterations` is marked `@internal`, **test-only**.
+- **Watermark persistence format v2**: `.sync-state.json` (`namespaceClocks` namespace watermarks + per-event ack set + `snapshotApplied`).
+- **Default deny and pruning chain**: `sync.peerNamespacePolicy` not listed = denied (an empty array = explicitly disallowed); the pruning chain = **peer authorization ∩ peer membership ∩ local subscription declaration** (M1–M3; degrades to the peer subscription declaration when membership is not enabled), applied to **both offer and initial snapshot**. Denial is not silent (`sync-completed.denied`; membership mismatch → `sync-completed.membershipRejected`).
+- **Subscription declaration**: `sync.namespaces` declares the local subscription; unconfigured/empty = participate in all. The declaration is sent with `sync-hello` as `subscribeAll` + `namespaces` **mandatory**; **a missing field / wrong type is a protocol violation and aborts the session**; `subscribeAll=false` + empty list = explicitly subscribe to no namespace.
+- **The `sync-nudge` frame has no payload**; carrying a business payload is a protocol violation.
+- **Push/fallback defaults**: `pushOnWrite` and `antiEntropy` — library/embedded **off**, resident (`serve` / MCP) **on**. anti-entropy defaults to `intervalMs = 10min`, `jitterRatio = 0.2` (±20%); short-circuits and skips when there is no pending, skips while a session is in flight, exponential backoff on failure, jitter prevents lockstep. push-on-write throttles with 50ms coalescing.
+- **Effective bootstrap set = on-graph declarations ∪ local config** (C1): `sync.policyIssuers` is a **compatibility fallback/bootstrap**, empty by default;
+  **ends are no longer required to agree** — on-graph `policy_issuer_declare` syncs to every end with `__policy__`, so any end can adopt the same issuer without local config.
+  When running mixed with old nodes, the old nodes still need local config (see the C1 note at the top of this section).
 
-## 4. 推迟项（本轮封板明确不做）
+## 4. Deferrals (explicitly out of scope for this sealing round)
 
-- **【未做·保留】快照的完整冲突/合并语义（原 G）**：放宽「初始快照只发自报空水位的对端」（§2.6）前必须先补齐——
-  物化快照当前只做接受侧**回退保护**与「严格更新」门禁，**不做逐事件的冲突裁决/合并**。
-- **【已退役】应用间协议层（原 F）**：当前跨设备通信**统一走记忆（数据）通道**；引入条件（出现其一再立项）：
-  **流式/交互式多轮会话** · **大对象/媒体传输** · **非 Mebular 应用复用同一身份与授权** · **不落盘的低延迟 RPC**；
-  届时需一并定义：协议注册与版本协商 / 授权与配额如何绑定到应用协议。
-  边界：**跨设备通信统一走记忆通道；不提供通用远程查询/调用**。
-- **会话多路复用**。
-- **quorum / 阈值签名**（多签发者已有，但无门限）。
-- **`expiresAt` 强制生效**（字段已预留，不引入跨端时钟依赖；移入 fleet MVP 范围）。
-- **fleet（`@mebular/fleet`）已落地 M0–M4**（**不改 core/SEALING 语义**）：M0 骨架/边界、M1 协议模型（事件/状态机/本地配额 + 不变量 harness）、M2 单机双进程（spool）、M3 真实 libp2p + 记忆同步、M4 **agent 路由**（注册表 + Command/Hermes 适配器）与**三种协作形态模型**（审查 DAG / 有限协商 / 配额制闲聊 + 矩阵 + 随机 harness）。
-  入口见 `packages/fleet/DESIGN.md`、`PROTOCOL-INVARIANTS.md`、`RUNBOOK.md`。**OpenChamber 会话接缝：已解决**（provider #1 = 桥 daemon `POST /agent/run-once`；provider #2 = Self-Skills `skills/oc-node-provider` 的 Node 版，复用 `oc-bridge.js`，Windows 无需 Python/Hermes；fleet 侧 `HttpOpenChamberSeam` 保持中立——替换 provider 不改 fleet 代码，见 `packages/fleet/OPENCHAMBER-SEAM.md`）。**剩余推迟**：执行器生产化/运维细节（可选）。**协作形态 live 通道接线（1d）已完成**。
-- **自动事件裁剪**：本期只固化约束与测试——**任何裁剪必须排除尚未被所有已授权对端 ack 的事件**，不实现裁剪。
-- **信任模型 v2（委派证书链 + 加入令牌）已落地**（T2；契约见 §1.3、§3；验收见 S2 报告）。**剩余**：吊销的**全网传播延迟**（`device_revoke` 级联在策略层即时，但需事件同步到达各端才生效）与**跨 NAT 实测回填**。
+- **[Not done · retained] Full snapshot conflict/merge semantics (formerly G)**: must be completed before relaxing "the initial snapshot is only sent to peers reporting an empty watermark" (§2.6) — materialized snapshots currently do only accepting-side **fallback protection** and a "strictly newer" gate, **without per-event conflict resolution/merge**.
+- **[Retired] Application protocol layer (formerly F)**: cross-device communication **now all goes through the memory (data) channel**; the conditions to revisit it (any one appearing triggers a new project):
+  **streaming/interactive multi-turn sessions** · **large-object/media transfer** · **non-Mebular apps reusing the same identity and authorization** · **low-latency RPC that must not be persisted**;
+  at that point, define together: protocol registration and version negotiation / how authorization and quota bind to the application protocol.
+  Boundary: **cross-device communication all goes through the memory channel; no general remote query/RPC is provided**.
+- **Session multiplexing**.
+- **quorum / threshold signatures** (multi-issuer exists, but no threshold).
+- **`expiresAt` enforcement** (the field is reserved; no cross-end clock dependency is introduced; moved into the fleet MVP scope).
+- **fleet (`@mebular/fleet`) has landed M0–M4** (**without changing core/SEALING semantics**): M0 skeleton/boundary, M1 protocol model (events/state machine/local quota + invariant harness), M2 single-machine two-process (spool), M3 real libp2p + memory sync, M4 **agent routing** (registry + Command/Hermes adapters) and the **three collaboration-shape models** (review DAG / bounded negotiation / quota-based chatter + matrix + randomized harness).
+  Entry points: `packages/fleet/DESIGN.md`, `PROTOCOL-INVARIANTS.md`, `RUNBOOK.md`. **OpenChamber session seam: resolved** (provider #1 = bridge daemon `POST /agent/run-once`; provider #2 = the Node version of Self-Skills `skills/oc-node-provider`, reusing `oc-bridge.js`, no Python/Hermes needed on Windows; the fleet-side `HttpOpenChamberSeam` stays neutral — replacing the provider does not change fleet code, see `packages/fleet/OPENCHAMBER-SEAM.md`). **Remaining deferral**: executor productization/ops details (optional). **Collaboration-shape live-channel wiring (1d) is complete**.
+- **Automatic event pruning**: this round only fixes the constraint and tests — **any pruning must exclude events not yet acked by all authorized peers**; no pruning is implemented.
+- **Trust model v2 (delegation cert chain + join token) has landed** (T2; contract in §1.3, §3; acceptance in the S2 report). **Remaining**: revocation's **network-wide propagation delay** (the `device_revoke` cascade is immediate at the policy layer, but takes effect only once the event syncs to each end) and **cross-NAT measured backfill**.
 
-## 5. 已知边界（有意取舍 / 需人工关注）
+## 5. Known boundaries (deliberate trade-offs / needs human attention)
 
-- **回退残差 ≤2%（非安全缺陷）**：harness 的非收敛回退路径上，扰动检查残差实测全部为「原世界回退（`converged=false`）、扰动后世界收敛（`true`）」——**世界不同**，而非回退结果里存在被采纳的被吊销者记录；回退本身由闭包不变量 `revoked ⊆ excluded` 保证 R-b 字面成立。harness 逐条打印 `[residual] …` 供复核。
-- **设备吊销轴偏保守**：回退会排除更多签发者 → 可能**少授权**（安全方向，非放宽）。
-- **不动点成本**：主循环最坏 `O(iterations · |entries|)`，`iterations ≤ 2·|entries|+2` → 对输入规模最坏近似 `O(n²)`；策略事件通常很少。
-- **吊销是域收缩**：不回撤**已入图**数据，也无法强制远端停止；它阻止的是**后续摄入**（读侧 `[]` + 入站事件隔离 + 快照过滤）。被吊销设备**仍可建立会话**（否则无从得知恢复）。
-- **保留命名空间可见性代价**：`__policy__` 对已认证设备（含被吊销者）可读，授权图可见（见 §1.7）。
-- **跨会话重复发送**是设计（见 §2.4）；`duplicates` 接近 `sentEvents` 且量很大时，多半是本机同步状态被重置/丢失过——用 `mebular.resetPeerWatermarks(peerDeviceId?)` 修复（只清水位、不动 per-event ack，方向安全）。
-- **服务日志无自动轮转**：`fleet service logs` 读取的常驻日志**不自动截断/轮转**，长期运行需人工 `logrotate`/定时清理（后续可补内建轮转；见 `packages/fleet/ONBOARDING.md` §10）。
-- **文档一致性**：README 的测试/覆盖数字（现为 **94 套件 / 734 用例**、行 ~93% / 分支 ~81%）、anti-entropy 口径（代码默认 `10min ±20%`，即 `intervalMs 600000`）与推迟项引用（原「未做项」）均已对齐；Agent（skill + MCP）接入用法见 README「30 秒上手 · 路径一」。
+- **Fallback residual ≤2% (not a security defect)**: on the harness's non-convergent fallback path, the perturbed-check residual is measured to be entirely "original world falls back (`converged=false`), perturbed world converges (`true`)" — **different worlds**, not adopted revoked records residing in the fallback result; the fallback itself is guaranteed by the closure invariant `revoked ⊆ excluded`, making R-b literally hold. The harness prints each `[residual] …` for review.
+- **The device-revocation axis is conservative**: the fallback excludes more issuers → it may **under-authorize** (safe direction, not a relaxation).
+- **Fixed-point cost**: the main loop is worst-case `O(iterations · |entries|)`, `iterations ≤ 2·|entries|+2` → worst-case approximately `O(n²)` in the input size; policy events are usually few.
+- **Revocation is domain shrinkage**: it does not retract **already-graphed** data, nor can it force a remote to stop; what it blocks is **future ingestion** (read side `[]` + inbound event isolation + snapshot filtering). A revoked device **can still open sessions** (otherwise it could never learn about recovery).
+- **Cost of reserved-namespace visibility**: `__policy__` is readable by authenticated devices (including revoked ones), and the authorization graph is visible (see §1.7).
+- **Cross-session duplicate sends** are by design (see §2.4); when `duplicates` approaches `sentEvents` and is very large, it is most likely that the local sync state was reset/lost — repair with `mebular.resetPeerWatermarks(peerDeviceId?)` (clears watermarks only, leaves per-event acks untouched, safe direction).
+- **Service logs are not auto-rotated**: the resident log read by `fleet service logs` **is not automatically truncated/rotated**; long-running deployments need manual `logrotate`/scheduled cleanup (built-in rotation may be added later; see `packages/fleet/ONBOARDING.md` §10).
+- **Doc consistency**: README's test/coverage numbers (currently **94 suites / 734 cases**, lines ~93% / branches ~81%), the anti-entropy stance (code default `10min ±20%`, i.e. `intervalMs 600000`) and the deferral references (formerly "not-done items") are all aligned; Agent (skill + MCP) onboarding usage is in README "30-second start · path one".
 
-## 6. 复现封板基线（可复核）
+## 6. Reproduce the sealing baseline (verifiable)
 
 ```bash
 git rev-parse origin/main^{tree}        # d1eb7d2c5ffa87eed6c64d70ce8aed3a6ceeb333
-npm run build && npm run lint           # 无输出
-npm test                                # 67 suites / 542 tests 全绿
-npm run test:coverage                   # All files 行 ~92.4% / 分支 ~79.3–79.5%（门槛 85/65）
+npm run build && npm run lint           # no output
+npm test                                # 67 suites / 542 tests all green
+npm run test:coverage                   # All files lines ~92.4% / branches ~79.3–79.5% (thresholds 85/65)
 node --experimental-vm-modules node_modules/jest/bin/jest.js tests/sync/policy-invariants.test.ts
 # [policy-invariants] scenarios=300 nonConverged=6 residualA=4 residualB=0
 ```
 
-**红→绿抽验（R-b 历史连坐）**：临时把 `src/sync/grantPolicy.ts` 的
-`revokedIn.has(entry.author) || ` 去掉 → `jest tests/sync/grant-policy.test.ts -t "R-b 历史连坐"` 应 **✕**；
-`git checkout -- src/sync/grantPolicy.ts` 还原后应 **✓**。完成后工作区必须干净。
+**Red→green spot check (R-b historical contagion)**: temporarily delete
+`revokedIn.has(entry.author) || ` in `src/sync/grantPolicy.ts` → `jest tests/sync/grant-policy.test.ts -t "R-b 历史连坐"` should be **✕**;
+after `git checkout -- src/sync/grantPolicy.ts` restores it, it should be **✓**. The working tree must be clean afterwards.

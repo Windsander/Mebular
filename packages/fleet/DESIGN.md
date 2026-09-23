@@ -1,6 +1,6 @@
 # @mebular/fleet 设计（跨设备多 Agent 协作 · 任务=记忆）
 
-> 本文件是 fleet 的设计与边界说明；**协议语义**以仓库根 [`SEALING.md`](../../SEALING.md) 为准，
+> 本文件是 fleet 的设计与边界说明；**协议语义**以仓库根 [`SEALING_CN.md`](../../SEALING_CN.md) 为准，
 > 策略推导不变量以 [`src/sync/POLICY-INVARIANTS.md`](../../src/sync/POLICY-INVARIANTS.md) 为准。
 > fleet **不改 core 语义**，只消费 `@mebular/core` 的公共 API。
 
@@ -13,7 +13,7 @@
 1. **不在 core 引入任务/调度/agent 语义**；fleet 只 `import { ... } from '@mebular/core'`，**不得**深路径 `src/**`。反向依赖由 `tests/fleet/boundary.test.ts` 强制。
 2. **墙钟不进一致性判定**：`expiresAt` 只是**本机任务板**的软约定（展示/排队提示），跨端权威生命周期**只由显式状态事件**驱动。
 3. **禁中心化**：无注册服务、无全局账本；配额 = **每设备对自己发出的量本地记账**（本地拒绝/排队）。
-4. **不改 `SEALING.md` 的协议语义**（R-a..R-d / 水位 / 一致性口径 / 线格式）。若要动 → 停下报告。
+4. **不改 `SEALING_CN.md` 的协议语义**（R-a..R-d / 水位 / 一致性口径 / 线格式）。若要动 → 停下报告。
 
 ## 2. 任务 = 记忆
 

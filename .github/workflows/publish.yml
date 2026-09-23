@@ -1,0 +1,190 @@
+name: Publish
+
+# 版本 SSOT：release/vX.Y.Z 分支名即版本号（对齐 ADI-Stable-Diffusion auto-publish 模式）。
+# 仅 push 到 release/v* 分支触发；不依赖 tag。
+on:
+  push:
+    branches:
+      - 'release/v*'
+
+permissions:
+  contents: read
+
+# 同一 release 分支的重复 push 不并行发布；旧的一次跑完为止。
+# 幂等性由 npm view 已发布即跳过保证，因此无需 cancel-in-progress。
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: verify (SSOT / lint / test / pack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Extract version from branch (SSOT)
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/heads/release/}"   # v0.2.0
+          VERSION="${TAG#v}"                        # 0.2.0
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "版本 SSOT：$GITHUB_REF -> TAG=$TAG VERSION=$VERSION"
+
+      - name: Verify version consistency (branch == 5×package.json == CHANGELOG)
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const version = process.env.VERSION;
+          const tag = process.env.TAG;
+          const targets = ['.', 'packages/fleet', 'packages/mcp', 'packages/service', 'packages/skill'];
+          let ok = true;
+          for (const rel of targets) {
+            const pkg = JSON.parse(fs.readFileSync(`${rel}/package.json`, 'utf8'));
+            if (pkg.version !== version) {
+              console.error(`ERROR: ${rel}/package.json version=${pkg.version} != ${version}`);
+              ok = false;
+            }
+          }
+          const changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
+          if (!changelog.split('\n').some((line) => line.startsWith(`## [${tag}]`))) {
+            console.error(`ERROR: CHANGELOG.md 缺少 [${tag}] 章节（release notes 取自该章节）`);
+            ok = false;
+          }
+          if (!ok) {
+            console.error(`修复：在 release 分支上运行 \`bash scripts/bump_version.sh ${tag}\`，或重命名分支。`);
+            process.exit(1);
+          }
+          console.log(`version consistency OK: ${tag}（branch + 5×package.json + CHANGELOG）`);
+          NODE
+
+      - name: Build
+        run: npm run build
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test with coverage gates
+        run: npm run test:coverage
+
+      - name: Pack smoke (5 packages + tarball install)
+        run: npm run verify:mcp:publish
+
+  publish:
+    name: npm publish (core -> service/skill -> mcp -> fleet)
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Extract version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/heads/release/}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Publish packages (idempotent, skip published)
+        shell: bash
+        run: |
+          set -euo pipefail
+          publish() {
+            local dir="$1" name="$2"
+            if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
+              echo "skip   ${name}@${VERSION}（已发布）"
+            else
+              echo "publish ${name}@${VERSION}"
+              (cd "$dir" && npm publish --access public)
+            fi
+          }
+          # prepack/postpack 会把内部 file: 依赖改写为 ^$VERSION 再发布。
+          publish .                "@mebular/core"
+          publish packages/service "@mebular/service"
+          publish packages/skill   "@mebular/skill"
+          publish packages/mcp     "@mebular/mcp"
+          publish packages/fleet   "@mebular/fleet"
+
+  release:
+    name: GitHub Release (tag v*)
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF#refs/heads/release/}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Extract release notes from CHANGELOG
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const tag = process.env.TAG;
+          const lines = fs.readFileSync('CHANGELOG.md', 'utf8').split('\n');
+          const start = lines.findIndex((line) => line.startsWith(`## [${tag}]`));
+          if (start < 0) {
+            console.error(`CHANGELOG.md 缺少 [${tag}] 章节`);
+            process.exit(1);
+          }
+          const out = [];
+          for (let i = start + 1; i < lines.length; i += 1) {
+            if (lines[i].startsWith('## [')) break;
+            out.push(lines[i]);
+          }
+          fs.writeFileSync('RELEASE_NOTES.md', `${out.join('\n').trim()}\n`);
+          console.log('RELEASE_NOTES.md 已生成');
+          NODE
+
+      - name: Create GitHub Release (idempotent, tags v*)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，跳过创建"
+          else
+            gh release create "$TAG" \
+              --title "Mebular $TAG" \
+              --notes-file RELEASE_NOTES.md \
+              --target "$GITHUB_SHA"
+          fi

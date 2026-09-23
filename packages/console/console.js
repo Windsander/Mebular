@@ -836,9 +836,28 @@ function renderAdvanced() {
   return groups.map((group) => `<div class="cfg-group"><h4>${escapeHtml(group.name)}</h4>${renderEditor(group.fields)}</div>`).join('');
 }
 
+let lastSettingsSignature = null;
+
+// render() 每 3s 轮询会调用 renderSettings；内容签名用于判断是否真的需要重建 DOM。
+// 覆盖渲染依赖：activeTab（即 settingsTab）、settings、rawConfig、writes、healthz、本机 deviceId。
+function settingsSignature(activeTab) {
+  return JSON.stringify([
+    activeTab,
+    state.settings ?? null,
+    state.rawConfig ?? null,
+    state.features?.writes ?? null,
+    state.healthz ?? null,
+    state.overview?.device?.deviceId ?? null,
+  ]);
+}
+
 function renderSettings(activeTab = state.settingsTab ?? 'common') {
   state.settingsTab = activeTab;
   const body = $('#settings-body');
+  // 轮询时内容未变则跳过重建，避免原生 <select> 弹层/焦点/选择被销毁
+  const signature = settingsSignature(activeTab);
+  if (signature === lastSettingsSignature && body.childElementCount > 0) return;
+  lastSettingsSignature = signature;
   const prevActive = document.activeElement;
   const prevPath = prevActive?.dataset?.cfgPath ?? null;
   const prevStart = prevActive?.selectionStart ?? null;
@@ -933,8 +952,20 @@ function renderDiagnostics() {
   `;
 }
 
+let lastAboutSignature = null;
+
 function renderAbout() {
   const body = $('#about-body');
+  // 同一类轮询重建保护：内容未变则跳过，避免滚动位置/文本选择被冲掉
+  const signature = JSON.stringify([
+    state.settings ?? null,
+    state.rawConfig ?? null,
+    state.healthz ?? null,
+    state.features?.writes ?? null,
+    state.overview?.device?.deviceId ?? null,
+  ]);
+  if (signature === lastAboutSignature && body.childElementCount > 0) return;
+  lastAboutSignature = signature;
   const s = state.settings;
   if (!s) {
     body.innerHTML = '<p class="muted">关于本机加载中…（若持续如此，检查 serve 是否运行）</p>';
@@ -1090,6 +1121,7 @@ function bindConfigEditor() {
   for (const btn of resetBtns) {
     btn.addEventListener('click', () => {
       state.cfgDraft = {};
+      lastSettingsSignature = null;
       renderSettings();
     });
   }
@@ -1128,6 +1160,7 @@ async function saveConfigEditor() {
     const res = await api('/admin/api/config', { method: 'POST', body: { patch } });
     state.rawConfig = { path: res.path, exists: true, parseError: null, config: res.config };
     state.cfgDraft = {};
+    lastSettingsSignature = null;
     showToast(`已写入 ${res.path}${res.backup ? '（旧文件已备份为 .bak）' : ''}；重启 serve 后生效`);
     await refresh();
     renderSettings();

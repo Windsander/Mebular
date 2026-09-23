@@ -248,6 +248,25 @@ async function main() {
     await evalJs('document.querySelector("#open-settings").click()');
     check('设置弹窗打开（分区页签 + 常用配置编辑器）', await waitFor('document.querySelectorAll("#settings-body .settings-tab").length >= 3 && Boolean(document.querySelector("#settings-body .cfg-editor"))'));
 
+    // 轮询重建回归（修复前：render() 每 3s 整体重建 #settings-body → 原生 <select> 弹层被销毁、选择丢失）
+    const authSelector = '#settings-body select[data-cfg-path="mcp.http.auth"]';
+    check('设置内存在 auth 下拉', await waitFor(`Boolean(document.querySelector('${authSelector}'))`));
+    await evalJs(`window.__settingsProbe = document.querySelector('#settings-body .settings-tabs'); window.__authProbe = document.querySelector('${authSelector}');`);
+    await sleep(3600);
+    check('跨 3s 轮询设置容器节点引用不变（DOM 未重建）', await evalJs('Boolean(window.__settingsProbe) && window.__settingsProbe === document.querySelector("#settings-body .settings-tabs")'));
+    check('跨 3s 轮询 auth 下拉节点引用不变', await evalJs(`Boolean(window.__authProbe) && window.__authProbe === document.querySelector('${authSelector}')`));
+
+    // 草稿保持：改 auth 下拉 → 跨轮询值不丢；撤销复位且全程不保存
+    const authOriginal = await evalJs(`document.querySelector('${authSelector}').value`);
+    await evalJs(`(() => { const sel = document.querySelector('${authSelector}'); sel.value = sel.value === 'none' ? 'bearer' : 'none'; sel.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    const authPicked = await evalJs(`document.querySelector('${authSelector}').value`);
+    check('修改 auth 下拉后值已变更', authPicked !== authOriginal, `${authOriginal} → ${authPicked}`);
+    await sleep(3600);
+    check('跨 3s 轮询 auth 选择保持（草稿未丢）', (await evalJs(`document.querySelector('${authSelector}').value`)) === authPicked);
+    check('显示未保存修改且未自动保存', await evalJs('/未保存修改/.test(document.querySelector("#settings-body .cfg-state")?.textContent ?? "")'));
+    await evalJs('document.querySelector("#settings-body [data-cfg-action=reset]").click()');
+    check('撤销后 auth 回到原值（签名已失效强制重建）', await waitFor(`document.querySelector('${authSelector}')?.value === ${JSON.stringify(authOriginal)}`));
+
     // 待重启：页面内写配置（CSRF 取自 document.cookie）→ 设置弹窗出现「待重启」并含变更项；改回后清空
     const applyIntervalMs = async (value) => evalJs(`(async () => {
       const raw = document.cookie.match(/(?:^|; )mebular_csrf=([^;]*)/);
@@ -269,7 +288,6 @@ async function main() {
     const revertedPending = await applyIntervalMs(null);
     check('UI 待重启：改回（删除 intervalMs）→ 200', revertedPending === 200, `status=${revertedPending}`);
     check('UI 待重启：pendingRestart 清空后提示消失', await waitFor('!document.querySelector("[data-pending-restart]")'));
-
     await evalJs('document.querySelector("#settings-close").click()');
     // 关于本机（点顶栏本机徽标进入）
     await evalJs('document.querySelector("#self-badge").click()');

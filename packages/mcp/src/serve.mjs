@@ -6,6 +6,7 @@
 // - 单实例：<home>/lock O_EXCL + PID 存活检测 + 陈旧回收。
 
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, copyFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
@@ -17,34 +18,19 @@ import { TOOL_SCOPES } from './tools.mjs';
 import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 import { configPath } from './config.mjs';
 
-// ---------- 控制台配置写入（curated：只允许安全子集，需重启生效） ----------
-// 语义：PATCH 合并进 config.json（原子写 + .bak 备份）；其余字段需手工编辑。
-const CONFIG_PATCH_SPECS = new Map([
-  ['sync.namespaces', { kind: 'list', empty: 'set' }],
-  ['sync.peerWhitelist', { kind: 'list', empty: 'delete' }],
-  ['sync.autoSync', { kind: 'bool' }],
-  ['sync.pushOnWrite', { kind: 'bool' }],
-  ['sync.snapshotThreshold', { kind: 'int', min: 1, nullable: true }],
-  ['sync.antiEntropy.enabled', { kind: 'bool' }],
-  ['sync.antiEntropy.intervalMs', { kind: 'int', min: 1000, nullable: true }],
-  ['sync.antiEntropy.jitterRatio', { kind: 'num', min: 0, max: 1, nullable: true }],
-  ['sync.policyIssuers', { kind: 'list', empty: 'delete' }],
-  ['semantic.enabled', { kind: 'bool' }],
-  ['semantic.minScore', { kind: 'num', min: 0, max: 1, nullable: true }],
-  ['network.enabled', { kind: 'bool' }],
-  ['network.libp2p.listen', { kind: 'list', empty: 'delete', prefix: '/' }],
-  ['network.libp2p.relayServers', { kind: 'list', empty: 'delete', prefix: '/' }],
-  ['network.libp2p.relayUnlimited', { kind: 'bool' }],
-  ['mcp.http.host', { kind: 'string', nonEmpty: true, empty: 'delete' }],
-  ['mcp.http.port', { kind: 'int', min: 0, max: 65535, nullable: true }],
-  ['mcp.http.auth', { kind: 'enum', values: ['none', 'bearer', 'oauth'] }],
-  ['mcp.http.tls', { kind: 'bool' }],
-  ['mcp.http.tlsKey', { kind: 'string', nonEmpty: true, empty: 'delete' }],
-  ['mcp.http.tlsCert', { kind: 'string', nonEmpty: true, empty: 'delete' }],
-  ['joinService.enabled', { kind: 'bool' }],
-  ['joinService.bind', { kind: 'string', nonEmpty: true }],
-  ['joinService.port', { kind: 'int', min: 0, max: 65535, nullable: true }],
-]);
+// ---------- 控制台配置写入（schema 驱动：editable 可写 / status-only 只读 / internal 默认不可写） ----------
+// 单一真源：packages/mcp/src/config-schema.mjs。写入策略（原子写 + .bak 备份；全部需重启生效）：
+//   editable → 允许；status-only → 400（自动推导）；internal → 仅显式 writable 允许；未知 → 400。
+import { CONFIG_SCHEMA_BY_PATH, isWritable, writeRejection } from './config-schema.mjs';
+import {
+  APPLY_HEALTH_TIMEOUT_MS,
+  RESTART_DEBOUNCE_MS,
+  classifyChanges,
+  hotPaths,
+  runRestart,
+  spawnSupervisor,
+  writeApplyPending,
+} from './config-apply.mjs';
 
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
@@ -90,11 +76,17 @@ function validateConfigPatch(patch) {
   const errors = [];
   const entries = [];
   for (const [path, raw] of flattenPatch(patch)) {
-    const spec = CONFIG_PATCH_SPECS.get(path);
-    if (!spec) {
-      errors.push(`不允许修改 ${path}（设备身份 / 存储 / 加密等请手工编辑 config.json）`);
+    const entry = CONFIG_SCHEMA_BY_PATH.get(path);
+    if (!entry || !isWritable(path)) {
+      const rejection = writeRejection(path);
+      if (rejection === 'status-only') {
+        errors.push(`「${entry?.ui?.label ?? path}」为只读项（值由运行时 / 自动推导，如 relay 池、自动同步）：不能通过控制台修改；如需变更请手工编辑 config.json`);
+      } else {
+        errors.push(`不允许修改 ${path}（设备身份 / 存储 / 加密等请手工编辑 config.json）`);
+      }
       continue;
     }
+    const spec = { kind: entry.kind, ...(entry.spec ?? {}) };
     if (spec.kind === 'bool') {
       if (typeof raw !== 'boolean') errors.push(`${path} 需要布尔值`);
       else entries.push({ path, value: raw });
@@ -616,6 +608,8 @@ export async function startHttpServer({
   runtime = null,
   // D1 只读；D2 打开写端点（仍需 memory.admin scope + CSRF）
   writesEnabled = false,
+  // C：一键重启执行器（可注入；verify:config 用 MEBULAR_RESTART_DRY_RUN 或注入替身）
+  restartRunner = null,
 }) {
   const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
   if (!isLoopback && (auth === 'none' || !tls)) {
@@ -840,6 +834,7 @@ export async function startHttpServer({
     /^\/admin\/api\/grants\/([^/]+)\/revoke$/,
     /^\/admin\/api\/devices\/([^/]+)\/(revoke|connect|disconnect|sync|reset-watermarks)$/,
     /^\/admin\/api\/config$/,
+    /^\/admin\/api\/restart$/,
     /^\/admin\/api\/invite$/,
     /^\/admin\/api\/policy-issuers$/,
     /^\/admin\/api\/memberships$/,
@@ -866,6 +861,104 @@ export async function startHttpServer({
       }
     }
     return null;
+  }
+
+  // G：保存即生效——同进程防抖窗口内的多次保存合并为一次重启；supervisor 负责健康校验 / 回滚兜底。
+  let applyRestartTimer = null;
+  let applyPendingFields = new Set();
+  let applyPendingPort = null;
+  let applyAttempt = 0;
+
+  function scheduleApplyRestart({ fields, port, timeoutMs }) {
+    for (const field of fields) applyPendingFields.add(field);
+    if (typeof port === 'number' && port > 0) applyPendingPort = port;
+    if (applyRestartTimer) return { debounced: true };
+    applyRestartTimer = setTimeout(() => {
+      applyRestartTimer = null;
+      const list = [...applyPendingFields];
+      applyPendingFields = new Set();
+      const target = applyPendingPort;
+      applyPendingPort = null;
+      void performApplyRestart(list, target, timeoutMs).catch(() => undefined);
+    }, RESTART_DEBOUNCE_MS);
+    applyRestartTimer.unref?.();
+    return { debounced: false };
+  }
+
+  async function performApplyRestart(fields, port, timeoutMs) {
+    applyAttempt += 1;
+    const attempt = applyAttempt;
+    await writeApplyPending(home, {
+      attempt,
+      at: new Date().toISOString(),
+      fields,
+      attempts: 1,
+      port: port ?? null,
+      oldPid: process.pid,
+    });
+    // 先起监督进程（它等旧进程退出 → 校验新实例健康 → 不健康则回滚），再触发重启
+    const supervisorPath = join(dirname(fileURLToPath(import.meta.url)), 'apply-supervisor.mjs');
+    spawnSupervisor({
+      supervisorPath,
+      args: [
+        '--home', home,
+        '--config', configPath(home),
+        '--old-pid', String(process.pid),
+        '--port', String(port ?? 0),
+        '--fields', fields.join(','),
+        ...(timeoutMs ? ['--timeout', String(timeoutMs)] : []),
+      ],
+    });
+    await runRestart({ home, kind: process.env.MEBULAR_SERVICE_KIND });
+  }
+
+  /**
+   * 默认重启执行器（C）：由 @mebular/service 读服务计划（launchd/systemd/计划任务），
+   * 先返回 202 再**分离式**触发（守护被重启/终止后命令仍能完成）。
+   *  - 前台 nohup 运行（无 MEBULAR_SERVICE_KIND）→ registered:false → 接口给手动指引
+   *  - MEBULAR_RESTART_DRY_RUN=1 → 只回计划不执行（verify:config 用）
+   */
+  async function defaultRestartRunner() {
+    const kind = process.env.MEBULAR_SERVICE_KIND;
+    const cmdOverride = String(process.env.MEBULAR_RESTART_CMD ?? '').trim();
+    if (cmdOverride) {
+      const dryRun = process.env.MEBULAR_RESTART_DRY_RUN === '1';
+      return {
+        registered: true,
+        command: cmdOverride,
+        dryRun,
+        trigger: async () => { await runRestart({ home, kind: kind ?? undefined }); },
+      };
+    }
+    if (!kind) {
+      return {
+        registered: false,
+        command: 'nohup mebular serve > ~/.mebular/serve.log 2>&1 &',
+        manual: '未以服务方式运行（前台 nohup）：请手动重启（nohup mebular serve > ~/.mebular/serve.log 2>&1 &）',
+      };
+    }
+    let plan;
+    try {
+      const { restartPlanFor } = await import('@mebular/service');
+      plan = restartPlanFor({ kind, args: [], heartbeatDir: home, env: { MEBULAR_HOME: home } }, { home });
+    } catch (error) {
+      return { registered: false, manual: `服务管理不可用（${String(error?.message ?? error)}）：请手动重启` };
+    }
+    const command = plan.commands.map((entry) => entry.join(' ')).join(' && ') || null;
+    if (!plan.registered) return { registered: false, command, manual: plan.manual };
+    const dryRun = process.env.MEBULAR_RESTART_DRY_RUN === '1';
+    return {
+      registered: true,
+      command,
+      commands: plan.commands,
+      dryRun,
+      trigger: async () => {
+        for (const [cmd, ...args] of plan.commands) {
+          const child = spawn(cmd, args, { detached: true, stdio: 'ignore' });
+          child.unref();
+        }
+      },
+    };
   }
 
   // D2 写端点实现（memory.admin scope + CSRF 已在 handleAdminWrite 校验）
@@ -954,18 +1047,95 @@ export async function startHttpServer({
       if (comboErrors.length > 0) {
         return sendJson(res, 400, { error: 'bad_request', message: comboErrors.join('；'), details: comboErrors });
       }
+      const changedPaths = entries.map((e) => e.path);
+      const { restart: restartPaths, immediate: immediatePaths, selfLock } = classifyChanges(changedPaths, hotPaths());
+      // G4：自锁防护——命中 auth/host/tls 需显式确认（重启后控制台可能不可达）；未确认则不写不重启
+      if (selfLock.length > 0 && input.confirm !== true) {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'needs_confirmation',
+          needsConfirmation: true,
+          paths: selfLock,
+          message: `改动命中 ${selfLock.join(', ')}：保存并重启后控制台可能无法访问。如失联请手工编辑 ${cfgFile} 改回并重启。请带 { confirm: true } 重试。`,
+        });
+      }
       const tmp = `${cfgFile}.tmp-${process.pid}`;
       await writeFile(tmp, JSON.stringify(merged, null, 2), 'utf-8');
       if (existsSync(cfgFile)) await copyFile(cfgFile, `${cfgFile}.bak`);
       await rename(tmp, cfgFile);
+      const backup = existsSync(`${cfgFile}.bak`) ? `${cfgFile}.bak` : null;
+      const base = { ok: true, applied: changedPaths, backup, path: cfgFile, config: merged };
+
+      // G1：全部即时生效项 → 不重启，就地生效（前端随即刷新 effective）
+      if (restartPaths.length === 0) {
+        return sendJson(res, 200, { ...base, restartRequired: false, effectiveImmediately: true, restart: { mode: 'none' }, immediatePaths });
+      }
+
+      const autoRestart = process.env.MEBULAR_CONFIG_AUTORESTART !== '0';
+      const serviceManaged = Boolean(process.env.MEBULAR_SERVICE_KIND) || Boolean(String(process.env.MEBULAR_RESTART_CMD ?? '').trim());
+      // 前台 nohup（无服务托管）或显式关闭 → 手动指引；待重启语义保留（#80 检测仍有效）
+      if (!autoRestart || !serviceManaged) {
+        return sendJson(res, 200, {
+          ...base,
+          restartRequired: true,
+          restarting: false,
+          restart: {
+            mode: 'foreground',
+            command: 'nohup mebular serve > ~/.mebular/serve.log 2>&1 &',
+            backup,
+            manual: `未以服务方式运行：请手动重启（nohup mebular serve > ~/.mebular/serve.log 2>&1 &）；如新配置起不来，用备份回滚：cp ${backup ?? `${cfgFile}.bak`} ${cfgFile}`,
+          },
+        });
+      }
+      // 服务托管 → 自动重启（保存动作即确认；防抖窗口内多次保存合并为一次）
+      const targetPort = (() => {
+        const raw = merged?.mcp?.http?.port;
+        return typeof raw === 'number' && raw > 0 ? raw : (typeof runtime?.mcp?.port === 'number' ? runtime.mcp.port : 0);
+      })();
+      const timeoutMs = Number(process.env.MEBULAR_APPLY_TIMEOUT_MS ?? '') > 0 ? Number(process.env.MEBULAR_APPLY_TIMEOUT_MS) : APPLY_HEALTH_TIMEOUT_MS;
+      const scheduled = scheduleApplyRestart({ fields: restartPaths, port: targetPort, timeoutMs });
       return sendJson(res, 200, {
-        ok: true,
-        applied: entries.map((e) => e.path),
+        ...base,
         restartRequired: true,
-        backup: existsSync(`${cfgFile}.bak`) ? `${cfgFile}.bak` : null,
-        path: cfgFile,
-        config: merged,
+        restarting: true,
+        restart: {
+          mode: 'service',
+          debounceMs: RESTART_DEBOUNCE_MS,
+          deferred: scheduled.debounced,
+          fields: restartPaths,
+          timeoutMs,
+        },
       });
+    }
+
+    // 一键重启（C）：设置页「待重启」横幅 → 立即让保存的配置生效
+    if (path === '/admin/api/restart') {
+      const input = parseJsonBody(body) ?? {};
+      if (input.confirm !== true) {
+        return sendJson(res, 400, { error: 'confirmation_required', message: '重启需二次确认：请带 { confirm: true }' });
+      }
+      const runner = typeof restartRunner === 'function' ? restartRunner : defaultRestartRunner;
+      const plan = await runner({ home });
+      if (!plan?.registered) {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'not_service_managed',
+          message: plan?.manual ?? '未以服务方式运行：请手动重启',
+          manual: plan?.manual ?? null,
+          command: plan?.command ?? null,
+        });
+      }
+      // 先返回 202，再触发重启（避免响应被重启信号打断）
+      sendJson(res, 202, {
+        ok: true,
+        action: 'restart',
+        command: plan.command,
+        ...(plan.commands ? { commands: plan.commands } : {}),
+        ...(plan.dryRun ? { dryRun: true } : {}),
+        note: '守护正在重启；页面会在稍后轮询中自动恢复',
+      });
+      setImmediate(() => { void Promise.resolve(plan.trigger?.()).catch(() => undefined); });
+      return true;
     }
 
     const grantMatch = path.match(/^\/admin\/api\/grants$/);

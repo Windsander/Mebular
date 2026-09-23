@@ -6,7 +6,7 @@
 //   logs <name> [--tail N]
 
 import type { RunCommand, ServiceDescriptor, ServiceOptions } from './manager.js';
-import { installService, resolveBuildSha, serviceLogs, serviceStatus, uninstallService } from './manager.js';
+import { installService, resolveBuildSha, restartService, serviceLogs, serviceStatus, uninstallService } from './manager.js';
 import type { ServiceKind, ServicePlatform } from './units.js';
 
 export interface ServiceCliOptions {
@@ -47,7 +47,7 @@ const findDescriptor = (descriptors: readonly ServiceDescriptor[], name: string)
   descriptors.find((d) => d.kind === name);
 
 export const SERVICE_USAGE =
-  '用法：<cli> service install <name> [--no-autostart] [--label L] [--sha S] | uninstall <name> | status [name] | logs <name> [--tail N]';
+  '用法：<cli> service install <name> [--no-autostart] [--label L] [--sha S] | uninstall <name> | restart <name> | status [name] | logs <name> [--tail N]';
 
 /** 返回退出码；输出为单行 JSON。 */
 export function runServiceCli(opts: ServiceCliOptions): number {
@@ -101,6 +101,10 @@ export function runServiceCli(opts: ServiceCliOptions): number {
   }
   if (sub === 'uninstall') {
     return emit(uninstallService(descriptor, base));
+  }
+  if (sub === 'restart') {
+    const result = restartService(descriptor, base);
+    return emit(result, result.ok ? 0 : 1);
   }
   if (sub === 'logs') {
     const tail = typeof flags.tail === 'string' ? Number(flags.tail) : undefined;

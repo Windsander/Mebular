@@ -285,6 +285,14 @@ async function main() {
       'UI 待重启：设置入口徽标标注「待重启 N 项」',
       await waitFor('/待重启/.test(document.querySelector("#settings-pending-badge")?.textContent ?? "")'),
     );
+    check(
+      'D UI 三元组第三列：待重启横幅含「未生效原因」（服务端计算）',
+      await waitFor('/未生效原因/.test(document.querySelector("[data-pending-restart]")?.textContent ?? "")'),
+    );
+    check(
+      'C UI 一键重启按钮就位（待重启横幅内，写权限下可用）',
+      await evalJs("(() => { const b = document.querySelector('[data-pending-restart] [data-cfg-action=\"restart\"]'); return Boolean(b) && !b.disabled; })()"),
+    );
     const revertedPending = await applyIntervalMs(null);
     check('UI 待重启：改回（删除 intervalMs）→ 200', revertedPending === 200, `status=${revertedPending}`);
     check('UI 待重启：pendingRestart 清空后提示消失', await waitFor('!document.querySelector("[data-pending-restart]")'));

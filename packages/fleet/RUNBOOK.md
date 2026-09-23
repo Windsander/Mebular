@@ -228,3 +228,38 @@ N≥20 全部完成且结果匹配、重复投递不重复执行、配额账本�
 - **观察**：控制台「关于本机 → 运行状态」显示「NAT 打洞」（AutoNAT/DCUtR 开关、直连升级次数、loadError）；
   `mebular doctor --net` 输出 `nat` 段与建议（如有 relay 连接但无直连升级 → 可能双方都是对称 NAT，属预期）。
 - 验收：`npm run verify:nat`（服务装配/直连观测/软降级 + 路径升级与失败保留 + 真 libp2p 两节点 DCUtR 尽力而为）。
+
+## 13. 配置管道（单一真源 / 暴露面 / 一键重启 / 保存即生效 / 回滚）
+
+- **单一真源（A）**：`packages/mcp/src/config-schema.mjs` 声明每一项配置的
+  `{path, kind, spec, default, requiresRestart, exposure, ui, read, effective, reason}`。
+  由它**驱动**：① `POST /admin/api/config` 的写校验 ② 待重启判定（`pendingRestart`，由 schema 派生）③ 三元组的「实际值 / 未生效原因」
+  ④ 控制台编辑器元数据（`/admin/api/settings.configSchema`，控制台不再重复声明字段）⑤ `npm run verify:config` 矩阵。
+  防漂移：E1 断言 `schema.EDITABLE_PATHS == IA 渲染面` 且 `schema.STATUS_ONLY_PATHS == IA 只读面`（多/少即红）。
+- **暴露面（B）**：`editable`（20 项：常用 6 + 高级 14）可改可写；`status-only`（11 项）只读展示，写请求一律 400；
+  `internal`（28 项）GUI 不渲染，**默认不可写**（仅 `writable:true` 的 `network.libp2p.relayUnlimited` 例外，保持历史能力）。
+  收敛：`network.libp2p.relayServers` → status-only（自动 relay 池 = config seeds ∪ 令牌 hints ∪ 地址簿学习），
+  `network.libp2p.relayUnlimited` / C5–C7 新项（`network.lan.*` / `network.relayService` / `network.broadcast.*` /
+  `network.nat.*` / `network.endpointStore` / `network.autoConnect` / `sync.pushOnWriteThrottleMs` /
+  `sync.syncStatePath` / `sync.peerNamespacePolicy` / `sync.syncTimeout` / `semantic.model` / `semantic.cacheDir` /
+  `storagePath` / `storageAdapter` / `deviceId` / `deviceName` / `identity.mode` / `encryption.*` / `mcp.http.tokensFile`）
+  → internal（只入文档 / RUNBOOK；其中身份·存储·加密·凭据类显式 `writable:false`，H4「敏感字段不可写」不回归）。
+- **一键重启（C）**：`mebular service restart` → launchd `launchctl kickstart -k gui/<uid>/<label>` ·
+  systemd `systemctl --user restart mebular-<kind>.service` · Windows `schtasks /End` + `/Run`。
+  未注册为服务 → 只给手动指引（绝不盲发 kickstart）。GUI：`POST /admin/api/restart`（memory.admin + CSRF + `{confirm:true}`；
+  先返回 202/409 再分离式触发；`MEBULAR_RESTART_DRY_RUN=1` 只回计划不执行）。
+- **保存即生效（G）**：`POST /admin/api/config` 按 schema 分类——
+  含 `requiresRestart:true` 项 → `{restarting:true, restart:{mode:'service'|'foreground'}}` 并**自动重启**（保存动作即确认）；
+  全为即时项 → `{effectiveImmediately:true}` 就地生效。防抖 `RESTART_DEBOUNCE_MS=800`：同进程窗口内多次保存合并为一次重启。
+- **生效校验**：新实例在装配完成后写 `<home>/serve-ready.json`，并用自身运行时计算本次改动字段的三元组，
+  落 `<home>/config-apply.result.json`（`status:'applied'` + `verify[]`）；控制台绿色「已生效（字段清单）」或红色「未按预期生效：<字段>」。
+- **回滚兜底**：保存前先留 `config.json.bak`；分离启动的监督进程（`apply-supervisor.mjs`）等待新实例健康
+  （`serve-ready` 新 pid + 可选端口连通；`MEBULAR_APPLY_TIMEOUT_MS` 可调，默认 60s）；不健康 → 还原 `.bak` + 再重启 →
+  写 `status:'rolled-back'`（含根因，如 `joinService.port 4002 被占`）；回滚实例启动时以 `pending.rollingBack` 标记避免误写「已生效」。
+  前台 nohup（无法自拉）→ 返回手动命令 + 备份路径并保留待重启横幅。
+- **自锁防护（G4）**：改动命中 `mcp.http.auth` / `mcp.http.host` / `mcp.http.tls` → 未带 `{confirm:true}` 返回 409
+  `needsConfirmation`（**不写盘、不重启**）；确认后照常保存并重启。
+- **启动失败根因化（E）**：`joinService` 起不来（如 EADDRINUSE）→ 启动错误即 `joinService.port <p> 被占（bind=…）：改端口（如 0）或释放占用`，
+  并落 `<home>/join.error.json` 供控制台 / 诊断展示（不再是笼统「serve 起不来」）。
+- **热路径（可选，运营自管 reload 的部署）**：`MEBULAR_CONFIG_HOT_PATHS=a,b` 声明的项保存**不重启**、不进待重启，原因显示「已声明为热生效」。
+- 验收：`npm run verify:config`（schema/暴露面/自锁/自动重启/防抖/热路径/回滚/restart 接口 401·403·409·202/join 根因）+ `npm run verify:console`（E1 含收尾断言）。

@@ -3,11 +3,15 @@
 
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
+import { rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { MemoryService } from '@mebular/core';
 import { createMebular } from './config.mjs';
 import { registerTools } from './tools.mjs';
 import { startHttpServer, acquireLock } from './serve.mjs';
 import { createJoinServer } from './jointoken.mjs';
+import { clearApplyPending, readApplyPending, writeApplyResult, writeServeReady } from './config-apply.mjs';
+import { buildSettings } from './admin.mjs';
 import { advertiseHost, endpointHostname, isLoopbackHost } from './lan-host.mjs';
 
 const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
@@ -37,6 +41,40 @@ export function buildServer(service) {
     }),
   );
   return server;
+}
+
+/**
+ * G2：本次启动是否为「保存即生效」的候选实例？是 → 用**新实例的运行时**计算本次改动字段的
+ * 三元组（已配置/实际），写 <home>/config-apply.result.json（status=applied + verify[]）。
+ * 校验不一致（如环境变量优先）不影响启动，交由前端红色提示。
+ */
+async function finalizePendingApply({ home, app, service, config, runtime }) {
+  const pending = await readApplyPending(home);
+  if (!pending || !Array.isArray(pending.fields) || pending.fields.length === 0) return;
+  // 监督进程已判定回滚（新配置启动失败）：本实例是「回滚后的旧配置」——不得写 applied
+  if (pending.rollingBack === true) return;
+  let verify = [];
+  try {
+    const settings = await buildSettings({ app, service, config, runtime, home });
+    const rows = new Map((settings.effective ?? []).map((row) => [row.path, row]));
+    verify = pending.fields.map((path) => {
+      const row = rows.get(path);
+      if (!row) return { path, ok: null, note: '无三元组（非可编辑/只读项）' };
+      const ok = JSON.stringify(row.configured ?? null) === JSON.stringify(row.actual ?? null);
+      return { path, configured: row.configured ?? null, actual: row.actual ?? null, ok, reason: row.reason ?? null };
+    });
+  } catch (error) {
+    verify = [{ path: '*', ok: null, note: `校验失败：${String(error?.message ?? error)}` }];
+  }
+  await writeApplyResult(home, {
+    status: 'applied',
+    attempt: pending.attempt ?? null,
+    at: new Date().toISOString(),
+    fields: pending.fields,
+    verify,
+    waitedMs: null,
+  }).catch(() => undefined);
+  await clearApplyPending(home);
 }
 
 /** 启动 stdio MCP server；返回句柄用于收尾 */
@@ -129,14 +167,35 @@ export async function startServeServer(options = {}) {
     runtime.mcp.auth = http.auth;
     // W2 A4：join 服务由守护托管（令牌 → 委派证书）。fleet 不再托管生产 join。
     if (joinConf?.enabled) {
-      joinServer = await createJoinServer({
-        mebular: app,
-        deviceId,
-        storagePath,
-        bind: joinConf.bind ?? '0.0.0.0',
-        port: joinConf.port ?? 4002,
-        log: (m) => console.error(m),
-      });
+      try {
+        joinServer = await createJoinServer({
+          mebular: app,
+          deviceId,
+          storagePath,
+          bind: joinConf.bind ?? '0.0.0.0',
+          port: joinConf.port ?? 4002,
+          log: (m) => console.error(m),
+        });
+      } catch (error) {
+        // E：启动失败根因化——不笼统报「serve 起不来」，明确指出是可执行的修复动作
+        const bind = joinConf.bind ?? '0.0.0.0';
+        const port = joinConf.port ?? 4002;
+        const detail = {
+          at: new Date().toISOString(),
+          code: error?.code === 'EADDRINUSE' ? 'JOIN_PORT_IN_USE' : (error?.code ?? 'JOIN_START_FAILED'),
+          bind,
+          port,
+          message: error?.code === 'EADDRINUSE'
+            ? `joinService.port ${port} 被占（bind=${bind}）：改端口（如 joinService.port=0 由系统分配）或释放占用`
+            : `joinService 启动失败（${error?.code ?? 'ERROR'}，bind=${bind}:${port}）：${error?.message ?? error}`,
+        };
+        await writeFile(join(home, 'join.error.json'), JSON.stringify(detail, null, 2), 'utf-8').catch(() => undefined);
+        const wrapped = new Error(detail.message);
+        wrapped.code = detail.code;
+        wrapped.cause = error;
+        throw wrapped;
+      }
+      await rm(join(home, 'join.error.json'), { force: true }).catch(() => undefined);
       runtime.join = {
         enabled: true,
         bind: joinBind,
@@ -146,6 +205,10 @@ export async function startServeServer(options = {}) {
       };
       console.error(`JOIN_READY ${JSON.stringify({ endpoint: joinEndpointDemo, port: joinServer.port, loopback: joinEndpointLoopback })}`);
     }
+    // G：装配完成后写「已监听」标记——supervisor 用它判定新实例健康（join 失败则不写）
+    await writeServeReady(home).catch(() => undefined);
+    // G：若本次启动是「保存即生效」的候选实例 → 用新实例运行时算生效校验并落 result
+    await finalizePendingApply({ home, app, service, config, runtime }).catch(() => undefined);
     // C7：邀请自动授权的 TTL 清扫（默认 24h 到期自动撤销；走既有 revokeGrant，不改授权语义）
     const { sweepAutoGrantRevokes } = await import('./jointoken.mjs');
     const grantSweepInterval = setInterval(() => {

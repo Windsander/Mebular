@@ -612,7 +612,7 @@ async function main() {
           '命令：',
           '  mcp                          启动 stdio MCP server',
           '  serve [--host --port --auth --tls-key --tls-cert --tokens-file]   Streamable HTTP server',
-          '  service install|uninstall|status|logs [--no-autostart --label L]  常驻服务管理（mebular-serve）',
+          '  service install|uninstall|restart|status|logs [--no-autostart --label L]  常驻服务管理（mebular-serve）',
           '  console [--host --port]      打印控制台 URL（需 serve 正在运行）',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',

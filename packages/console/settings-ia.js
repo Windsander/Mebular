@@ -42,7 +42,11 @@ export const IA_TASK_CARDS = [
   },
 ];
 
-/** 「高级」字段（默认收起；风险由文案标注，语义与旧版一致）。 */
+/**
+ * 「高级」字段（默认收起；风险由文案标注）。
+ * B：暴露面收敛 —— `network.libp2p.relayServers` → status-only（自动 relay 池，只读），
+ * `network.libp2p.relayUnlimited` → internal（GUI 不渲染）：高级面 16 → **14**。
+ */
 export const IA_ADVANCED_FIELDS = [
   'sync.antiEntropy.enabled',
   'sync.antiEntropy.intervalMs',
@@ -52,8 +56,6 @@ export const IA_ADVANCED_FIELDS = [
   'sync.policyIssuers',
   'semantic.enabled',
   'semantic.minScore',
-  'network.libp2p.relayServers',
-  'network.libp2p.relayUnlimited',
   'joinService.bind',
   'joinService.port',
   'mcp.http.host',
@@ -62,10 +64,26 @@ export const IA_ADVANCED_FIELDS = [
   'mcp.http.tlsCert',
 ];
 
-/** 全部「可编辑 path」（24）——迁移覆盖率的基准。 */
-export const IA_EDITOR_PATHS = [
+/**
+ * 只读面（status-only）：值由运行时 / 自动推导（relay 池、LAN 发现、桥、打洞、广播、join、TLS、TTL）。
+ * 与 config-schema.mjs 的 STATUS_ONLY_PATHS 逐项一致（E1 防漂移断言；多/少即红）。
+ */
+export const IA_STATUS_ONLY_PATHS = [
+  'network.libp2p.relayServers',
   'sync.autoSync',
   'sync.pushOnWrite',
+  'status.lan.discovery',
+  'status.relay.role',
+  'status.relay.bridge',
+  'status.nat.holepunch',
+  'status.net.broadcast',
+  'status.join.endpoint',
+  'status.tls',
+  'status.invite.grantTtl',
+];
+
+/** 全部「可编辑 path」（常用 6 + 高级 14 = **20**）——与 schema EDITABLE_PATHS 一致。 */
+export const IA_EDITOR_PATHS = [
   ...IA_TASK_CARDS.flatMap((card) => card.fields),
   ...IA_ADVANCED_FIELDS,
 ];
@@ -78,6 +96,7 @@ export const IA_INFO_BLOCKS = {
   issuer: 'about',        // 签发者状态
   fleet: 'about',         // 舰队摘要
   tools: 'about',         // 能力清单（MCP = CLI 同名）
+  statusOnly: 'about',      // 只读状态（自动推导：relay 池 / LAN / 桥 / 打洞 / 广播 / join / TLS）
   rawConfig: 'diagnostics', // 完整配置（复制 / 下载）
   version: 'diagnostics',   // 版本 / 服务状态
   recovery: 'diagnostics',  // 恢复指引（auth 误切 / host 误设 / 缺证书 / 控制台打不开）
@@ -87,9 +106,8 @@ export const IA_INFO_BLOCKS = {
 export const IA_MIGRATION = {
   ...Object.fromEntries(IA_TASK_CARDS.flatMap((card) => card.fields.map((p) => [p, 'common']))),
   ...Object.fromEntries(IA_ADVANCED_FIELDS.map((p) => [p, 'advanced'])),
-  // 已从 GUI 移除的两项：只读展示在「关于本机 · 运行状态」（默认常开，不建议关闭）
-  'sync.autoSync': 'about',
-  'sync.pushOnWrite': 'about',
+  // 只读面：自动同步 / 写入即推（默认常开）+ relay 池 / LAN / 桥 / 打洞 / 广播 / join / TLS / TTL
+  ...Object.fromEntries(IA_STATUS_ONLY_PATHS.map((p) => [p, 'about'])),
   // 只读信息块
   ...IA_INFO_BLOCKS,
 };
@@ -100,5 +118,5 @@ export const IA_COMMON_FIELDS = IA_TASK_CARDS.flatMap((card) => card.fields);
 /** 「高级」里承担动作按钮（非配置键）的条目。 */
 export const IA_ADVANCED_ACTIONS = ['declare-issuer'];
 
-/** 前端实际渲染的编辑面 path（常用 6 + 高级 16 = 22；autoSync/pushOnWrite 不在其中）。 */
+/** 前端实际渲染的编辑面 path（常用 6 + 高级 14 = 20）。 */
 export const IA_EDITOR_RENDER_PATHS = [...IA_COMMON_FIELDS, ...IA_ADVANCED_FIELDS];

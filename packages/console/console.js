@@ -494,39 +494,36 @@ async function confirmHandoff() {
 
 // ---------- 设置卡：常用配置编辑器（curated；保存写入 config.json，需重启生效） ----------
 
-// 已从 GUI 移除、仅在「关于本机 · 运行状态」只读展示（决策：默认常开，不建议关闭）
-const CONFIG_READONLY_FIELDS = [
-  { path: 'sync.autoSync', label: '自动同步', type: 'bool', help: '连接建立或事件到达时自动触发一次收敛' },
-  { path: 'sync.pushOnWrite', label: '写入即推送', type: 'bool', help: '本机写入后即时推给对端（常驻模式默认开）' },
-];
+// A：编辑器字段元数据来自**服务端单一真源**（config-schema.mjs → /admin/api/settings.configSchema）；
+// 控制台不再重复声明字段（曾散在 serve/admin/console/settings-ia 四处 → 漂移）。
+// 曝光面：editable 渲染编辑器；status-only 只读展示（自动池 / 推导状态）；internal 不出现在 GUI。
 
-const CONFIG_EDITOR = [
-  { group: '记忆同步（M 数据域）', path: 'sync.namespaces', label: '订阅数据域（M）', type: 'list', placeholder: 'default, notes', help: '订阅即承担数据义务：接收该域，并同步本机新增记忆。留空 = 参与全部。生效共享 = 对端授权 ∩ 对端在册（启用成员制时）∩ 本机订阅' },
-  { group: '对端与签发者', path: 'sync.peerWhitelist', label: '对端白名单', type: 'list', placeholder: 'device-B, device-C', help: '记忆通道的传输闸门：仅与列出的 deviceId 建立会话；留空 = 不启用（按授权 / 成员制判定）' },
-  { group: '反熵与快照', path: 'sync.antiEntropy.enabled', label: '周期反熵', type: 'bool', help: '周期性对账，弥补推送丢失' },
-  { path: 'sync.antiEntropy.intervalMs', label: '反熵间隔（分钟）', type: 'minutes', help: '默认 10 分钟（±20% 抖动）' },
-  { path: 'sync.antiEntropy.jitterRatio', label: '反熵抖动比例', type: 'number', step: 0.05, min: 0, max: 1, help: '0 ~ 1，默认 0.2' },
-  { path: 'sync.snapshotThreshold', label: '快照阈值（事件数）', type: 'number', min: 1, placeholder: '留空 = 不启用', help: '对端空时钟且缺失事件数 ≥ 阈值时改用物化快照' },
-  { path: 'sync.policyIssuers', label: '引导签发者（配置）', type: 'list', placeholder: 'device-A', help: '可签发任意分区的引导设备；留空 = 仅图上声明' },
-  { group: '语义召回（可选依赖）', path: 'semantic.enabled', label: '启用语义召回', type: 'bool', help: '需要本地 embedding 模型（可选依赖）', warn: '需可选依赖 @huggingface/transformers；缺失时自动降级关键词并告警' },
-  { path: 'semantic.minScore', label: '召回阈值', type: 'number', step: 0.05, min: 0, max: 1, help: '0 ~ 1，默认 0.2' },
-  { group: '网络', path: 'network.enabled', label: '启用 P2P', type: 'bool', help: '关闭后仅本机离线使用' },
-  { path: 'network.libp2p.listen', label: '监听地址', type: 'list', placeholder: '/ip4/127.0.0.1/tcp/14001', help: 'multiaddr 列表；留空 = 默认监听' },
-  { group: 'Relay 与高级网络', path: 'network.libp2p.relayServers', label: 'Relay 服务器', type: 'list', placeholder: '/ip4/<relay>/tcp/4001/p2p/<ID>', help: 'circuit relay，纯传输、可自托管' },
-  { path: 'network.libp2p.relayUnlimited', label: 'Relay 不做限额', type: 'bool', warn: '仅可信自托管 relay；公网暴露有风险' },
-  { group: '设备接入（邀请新设备）', path: 'joinService.enabled', label: '启用加入服务', type: 'bool', help: '开启后可由「＋ 邀请新设备」签发一次性令牌（需重启）' },
-  { group: '设备接入（高级）', path: 'joinService.bind', label: '绑定地址', type: 'text', placeholder: '0.0.0.0', help: '令牌 join 端点绑定；默认即 0.0.0.0（quickstart 依赖 LAN 可达），仅可信 LAN 使用。它同时决定邀请令牌里写死的 endpoint：通配时自动取本机 LAN IPv4（无 LAN 时回环并在邀请面板告警）' },
-  { path: 'joinService.port', label: '端口', type: 'number', min: 0, max: 65535, help: '默认 4002' },
-  { group: 'MCP 接入（高级）', path: 'mcp.http.host', label: '监听地址', type: 'text', placeholder: '127.0.0.1', help: '仅回环可 auth=none/无 TLS', warn: '非回环（如 0.0.0.0）必须 auth≠none 且启用 TLS 并配证书，否则 serve 拒绝启动' },
-  { path: 'mcp.http.port', label: '端口', type: 'number', min: 0, max: 65535 },
-  { path: 'mcp.http.auth', label: '鉴权模式', type: 'select', options: [['none', 'none（仅回环）'], ['bearer', 'bearer（token）'], ['oauth', 'oauth']], warn: '切换后控制台 API 立即需要凭证：bearer 需先 `mebular token grant --scope memory.read,memory.admin` 并在页面粘贴 token（否则 401 missing bearer token）；oauth 需在 env 提供 MEBULAR_OAUTH_ADMIN_SECRET / MEBULAR_OAUTH_REGISTER_SECRET，否则 /register 默认 404、静态 token 会 401 invalid token，控制台内无法自救。误切后恢复：编辑 config.json 把 mcp.http.auth 改回 none（仅回环），或补齐凭证后重启 mebular serve' },
-  { path: 'mcp.http.tls', label: '启用 TLS', type: 'bool', help: '真开关：true 但缺证书时 serve 启动即报错（不静默降级）；证书齐备即实际启用（与运行状态同一真值）' },
-  { path: 'mcp.http.tlsKey', label: 'TLS 证书私钥路径', type: 'text', placeholder: '/path/to/key.pem', help: '与证书路径同时填写即实际启用 TLS（tls=true 则强制要求）' },
-  { path: 'mcp.http.tlsCert', label: 'TLS 证书路径', type: 'text', placeholder: '/path/to/cert.pem', help: '与证书路径同时填写即实际启用 TLS（tls=true 则强制要求）' },
-];
+let CONFIG_FIELDS_BY_PATH = new Map();
 
-const CONFIG_FIELDS_BY_PATH = new Map(CONFIG_EDITOR.map((field) => [field.path, field]));
+function rebuildConfigFields() {
+  const list = Array.isArray(state.settings?.configSchema) ? state.settings.configSchema : [];
+  CONFIG_FIELDS_BY_PATH = new Map(list.map((entry) => [entry.path, {
+    path: entry.path,
+    kind: entry.kind,
+    requiresRestart: entry.requiresRestart !== false,
+    ...(entry.ui ?? {}),
+  }]));
+}
 
+function configFields() {
+  return [...CONFIG_FIELDS_BY_PATH.values()];
+}
+
+// D：服务端三元组（已配置 / 实际 / 未生效原因）按 path 索引——原因由服务端计算，前端只渲染。
+function effectiveRowOf(path) {
+  const rows = Array.isArray(state.settings?.effective) ? state.settings.effective : [];
+  return rows.find((row) => row.path === path) ?? null;
+}
+
+function statusRows() {
+  const schema = Array.isArray(state.settings?.statusSchema) ? state.settings.statusSchema : [];
+  return schema.map((entry) => ({ ...entry, ...(effectiveRowOf(entry.path) ?? {}) }));
+}
 // ---------- 待重启（pendingRestart）：配置已保存，但当前实例尚未重启 ----------
 // 服务端 settings.pendingRestart 列出「磁盘值与启动快照不一致」的 curated 配置项（形如 { path, file, running }）。
 
@@ -557,6 +554,53 @@ function formatRestartValue(value) {
   return String(value);
 }
 
+/** G：最近一次「保存即生效」结果横幅（绿=已生效 / 红=未按预期生效 / 红=已回滚）。
+ *  - in-progress：重启中（页面已在等待恢复）
+ *  - applied 且 verify 全 ok：绿色「已生效（字段清单）」
+ *  - applied 但有 verify.ok===false：红色「未按预期生效：<字段>（已配置 X / 实际 Y）」
+ *  - rolled-back / rollback-failed：红色「未按预期生效（原因：…）：已回滚」
+ */
+function applyResultBanner() {
+  const apply = state.settings?.lastApply;
+  if (!apply || typeof apply.status !== 'string') return '';
+  const labelOf = (path) => CONFIG_FIELDS_BY_PATH.get(path)?.label ?? path;
+  const fields = Array.isArray(apply.fields) ? apply.fields : [];
+  const fieldText = fields.length ? fields.map(labelOf).join('、') : '（无字段记录）';
+  if (apply.status === 'in-progress') {
+    return `<div class="pending-restart" data-apply-result="in-progress">
+      <div class="pending-restart-head"><span class="crt-tag crt-tag-warn">正在重启…重连中…</span><span class="muted">让已保存的配置生效</span></div>
+      <p class="muted pending-restart-note">守护正在重启（fields=${escapeHtml(fields.join(', '))}）；恢复后本横幅会显示「已生效」或回滚结果。</p>
+    </div>`;
+  }
+  if (apply.status === 'applied') {
+    const verify = Array.isArray(apply.verify) ? apply.verify : [];
+    const failed = verify.filter((row) => row.ok === false);
+    if (failed.length > 0) {
+      const detail = failed.map((row) => `<li><b>${escapeHtml(labelOf(row.path))}</b> <code>${escapeHtml(row.path)}</code>`
+        + `<span class="muted">：已配置 ${escapeHtml(formatRestartValue(row.configured))} / 实际 ${escapeHtml(formatRestartValue(row.actual))}</span>`
+        + (row.reason ? `<span class="pending-restart-reason">原因：${escapeHtml(String(row.reason))}</span>` : '')
+        + '</li>').join('');
+      return `<div class="pending-restart is-error" data-apply-result="mismatch">
+        <div class="pending-restart-head"><span class="crt-tag crt-tag-error">未按预期生效</span><span class="muted">重启后 ${failed.length} 项与保存值不一致</span></div>
+        <ul class="pending-restart-list">${detail}</ul>
+      </div>`;
+    }
+    return `<div class="pending-restart is-ok" data-apply-result="applied">
+      <div class="pending-restart-head"><span class="crt-tag crt-tag-ok">已生效</span><span class="muted">${escapeHtml(fieldText)}</span></div>
+      <p class="muted pending-restart-note">已按保存值生效（${escapeHtml(String(apply.at ?? ''))}）；待重启清单已清空。</p>
+    </div>`;
+  }
+  if (apply.status === 'rolled-back' || apply.status === 'rollback-failed' || apply.status === 'failed') {
+    const rolled = apply.status === 'rolled-back';
+    return `<div class="pending-restart is-error" data-apply-result="${escapeHtml(apply.status)}">
+      <div class="pending-restart-head"><span class="crt-tag crt-tag-error">新配置未生效</span><span class="muted">${rolled ? '已回滚到上一次可用配置' : '回滚失败：请手动恢复'}</span></div>
+      <p class="muted pending-restart-note">原因：${escapeHtml(String(apply.reason ?? '未知'))}</p>
+      <p class="muted pending-restart-note">涉及字段（${escapeHtml(fieldText)}）${apply.backup ? `；备份：<code>${escapeHtml(String(apply.backup))}</code>` : ''}</p>
+    </div>`;
+  }
+  return '';
+}
+
 function pendingRestartBadge() {
   const count = pendingRestartItems().length;
   return count > 0 ? `<span class="crt-tag crt-tag-warn">待重启 ${count} 项</span>` : '';
@@ -567,9 +611,11 @@ function pendingRestartBanner() {
   if (items.length === 0) return '';
   const envOverrides = Array.isArray(state.settings?.pendingRestartEnvOverrides) ? state.settings.pendingRestartEnvOverrides : [];
   const cmd = restartCommand();
-  const rows = items.map((item) => `<li><b>${escapeHtml(restartLabel(item.path))}</b>`
+  const managed = state.settings?.restart?.serviceManaged === true;
+  const rows = items.map((item) => `<li><b>${escapeHtml(item.label ?? restartLabel(item.path))}</b>`
     + ` <code>${escapeHtml(item.path)}</code>`
-    + `<span class="muted">：已配置 ${escapeHtml(formatRestartValue(item.file))} / 实际 ${escapeHtml(formatRestartValue(item.running))}</span></li>`).join('');
+    + `<span class="muted">：已配置 ${escapeHtml(formatRestartValue(item.file))} / 实际 ${escapeHtml(formatRestartValue(item.running))}</span>`
+    + `<span class="pending-restart-reason">未生效原因：${escapeHtml(String(item.reason ?? '待重启：已保存的值将在重启后生效'))}</span></li>`).join('');
   return `<div class="pending-restart" data-pending-restart="1">
     <div class="pending-restart-head">
       <span class="crt-tag crt-tag-warn">待重启 ${items.length} 项</span>
@@ -578,9 +624,12 @@ function pendingRestartBanner() {
     <p class="muted pending-restart-note">守护只在启动时读取配置；保存后当前实例仍按上次启动的配置工作，重启后生效。${envOverrides.length > 0 ? `环境变量优先时以环境变量为准（当前：${escapeHtml(envOverrides.join(', '))}）。` : ''}</p>
     <ul class="pending-restart-list">${rows}</ul>
     <div class="pending-restart-cmd">
+      <button class="btn btn-small btn-crt" type="button" data-cfg-action="restart" ${state.features?.writes && !MOCK ? '' : 'disabled'}>一键重启</button>
       <code>${escapeHtml(cmd)}</code>
       <button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(cmd)}">复制重启命令</button>
+      <span class="cfg-restart-state muted"></span>
     </div>
+    ${managed ? '' : '<p class="muted" style="font-size:11px">未以服务方式运行（前台 nohup）：一键重启不可用，请按上方命令手动重启。</p>'}
   </div>`;
 }
 
@@ -602,123 +651,25 @@ function currentConfigFile() {
   return state.rawConfig?.config ?? {};
 }
 
-// 未在 config.json 中设置时的生效默认（取自运行快照；未列出的项显示为空 + 默认标记）
-const CONFIG_EFFECTIVE = {
-  'sync.autoSync': (s) => s.sync.autoSync,
-  'sync.pushOnWrite': (s) => s.sync.pushOnWrite,
-  'sync.namespaces': (s) => s.sync.subscriptions,
-  'sync.peerWhitelist': (s) => s.sync.peerWhitelist,
-  'sync.antiEntropy.enabled': (s) => s.sync.antiEntropy.enabled,
-  'sync.antiEntropy.intervalMs': (s) => s.sync.antiEntropy.intervalMs,
-  'sync.antiEntropy.jitterRatio': (s) => s.sync.antiEntropy.jitterRatio,
-  'sync.snapshotThreshold': (s) => s.sync.snapshotThreshold,
-  'sync.policyIssuers': (s) => s.sync.configPolicyIssuers,
-  'semantic.enabled': (s) => s.semantic.enabled,
-  'semantic.minScore': (s) => s.semantic.minScore,
-  'network.enabled': (s) => s.network.enabled,
-  'network.libp2p.relayUnlimited': (s) => s.network.relayUnlimited,
-  // F-C3：未配置时的真实生效值（与「实际运行状态」一致，区分配置 vs 实际）
-  'network.libp2p.listen': (s) => (s.network.listenConfigured?.length ? s.network.listenConfigured : (s.network.listen ?? [])),
-  'network.libp2p.relayServers': (s) => s.network.relays,
-  'mcp.http.host': (s) => s.mcp.host,
-  'mcp.http.port': (s) => s.mcp.port,
-  'mcp.http.auth': (s) => s.mcp.auth,
-  'mcp.http.tls': (s) => s.mcp.tls,
-  'joinService.enabled': (s) => s.join?.enabled,
-  'joinService.bind': (s) => s.join?.bind,
-  'joinService.port': (s) => s.join?.port,
-};
-
-function fieldInitial(field) {
-  const raw = cfgGet(currentConfigFile(), field.path);
-  if (raw !== undefined) return { value: raw, isDefault: false };
-  const effective = state.settings ? CONFIG_EFFECTIVE[field.path]?.(state.settings) : undefined;
-  return { value: effective, isDefault: true };
-}
-
-function fieldValue(field) {
-  const v = fieldInitial(field).value;
-  if (field.type === 'bool') return Boolean(v);
-  if (field.type === 'minutes') return typeof v === 'number' ? Math.round((v / 60000) * 100) / 100 : '';
-  if (field.type === 'number') return typeof v === 'number' ? v : '';
-  if (field.type === 'list') return Array.isArray(v) ? v.join(', ') : '';
-  if (field.type === 'select') return typeof v === 'string' ? v : field.options[0][0];
-  return typeof v === 'string' ? v : '';
-}
-
-function fieldToConfig(field, formValue) {
-  if (field.type === 'bool') return Boolean(formValue);
-  if (field.type === 'minutes') {
-    const n = Number(formValue);
-    return formValue === '' || !Number.isFinite(n) || n <= 0 ? null : Math.round(n * 60000);
-  }
-  if (field.type === 'number') {
-    const n = Number(formValue);
-    return formValue === '' || !Number.isFinite(n) ? null : n;
-  }
-  if (field.type === 'list') {
-    return String(formValue ?? '').split(/[,，\n]/).map((x) => x.trim()).filter(Boolean);
-  }
-  if (field.type === 'select') return String(formValue);
-  return String(formValue ?? '').trim();
-}
-
-function normalizedFieldValue(field) {
-  const v = fieldInitial(field).value;
-  if (field.type === 'bool') return Boolean(v);
-  if (field.type === 'minutes') return typeof v === 'number' ? v : null;
-  if (field.type === 'number') return typeof v === 'number' ? v : null;
-  if (field.type === 'list') return Array.isArray(v) ? v : [];
-  if (field.type === 'select') return typeof v === 'string' ? v : field.options[0][0];
-  return typeof v === 'string' ? v : '';
-}
-
-function collectConfigChanges(root) {
-  const changes = [];
-  for (const field of CONFIG_EDITOR) {
-    const el = root.querySelector(`[data-cfg-path="${CSS.escape(field.path)}"]`);
-    if (!el) continue;
-    const next = fieldToConfig(field, field.type === 'bool' ? el.checked : el.value);
-    const current = normalizedFieldValue(field);
-    if (JSON.stringify(next) === JSON.stringify(current)) continue;
-    changes.push({ path: field.path, value: next });
-  }
-  return changes;
-}
-
-// F-C8：显示口径以运行时生效值为准——raw 配置只作输入初值，凡有运行时真值的项都给出双行对照。
-const CONFIG_SHOW_EFFECTIVE = new Set([
-  'mcp.http.host',
-  'mcp.http.port',
-  'mcp.http.auth',
-  'mcp.http.tls',
-  'semantic.enabled',
-  'network.libp2p.listen',
-  'network.libp2p.relayServers',
-  'network.enabled',
-  'joinService.enabled',
-  'joinService.bind',
-  'joinService.port',
-]);
-
-function formatRuntimeValue(value) {
-  if (value === undefined || value === null) return '—';
-  if (Array.isArray(value)) return value.length ? value.join(', ') : '（空 = 默认）';
-  if (typeof value === 'boolean') return value ? '启用' : '未启用';
-  return String(value);
-}
-
+/**
+ * D：三元组渲染（已配置 X / 实际 Y / **未生效原因**）。
+ * configured/actual/reason 均由服务端 /admin/api/settings.effective 计算（单一真源，前端不推导）。
+ */
 function runtimeCompareLine(field) {
-  if (!state.settings || !CONFIG_SHOW_EFFECTIVE.has(field.path)) return '';
-  const effective = CONFIG_EFFECTIVE[field.path]?.(state.settings);
-  if (effective === undefined) return '';
-  const raw = cfgGet(currentConfigFile(), field.path);
-  const mismatch = raw !== undefined && JSON.stringify(raw ?? null) !== JSON.stringify(effective ?? null);
+  const row = effectiveRowOf(field.path);
+  if (!row) return '';
+  const configured = row.configured;
+  const actual = row.actual;
+  const mismatch = configured !== null && configured !== undefined
+    && JSON.stringify(configured ?? null) !== JSON.stringify(actual ?? null);
+  const reason = typeof row.reason === 'string' && row.reason.length > 0 ? row.reason : '';
+  const showReason = reason.length > 0 && reason !== '已生效';
   return `<p class="cfg-effective${mismatch ? ' is-mismatch' : ''}">`
-    + `<span><span class="cfg-eff-key">已配置</span> ${escapeHtml(formatRuntimeValue(raw))}</span>`
+    + `<span><span class="cfg-eff-key">已配置</span> ${escapeHtml(formatRuntimeValue(configured))}</span>`
     + '<span>/</span>'
-    + `<span><span class="cfg-eff-key">实际</span> ${escapeHtml(formatRuntimeValue(effective))}</span>`
-    + (mismatch ? '<span class="cfg-warn">⚠ 不一致：写入值未生效，实际以运行时为准</span>' : '')
+    + `<span><span class="cfg-eff-key">实际</span> ${escapeHtml(formatRuntimeValue(actual))}</span>`
+    + (showReason ? `<span class="cfg-reason"><span class="cfg-eff-key">未生效原因</span> ${escapeHtml(reason)}</span>` : '')
+    + (mismatch && !showReason ? '<span class="cfg-warn">⚠ 不一致：写入值未生效，实际以运行时为准</span>' : '')
     + '</p>';
 }
 
@@ -796,16 +747,17 @@ function valueWithEffective(mainHtml, { configured, effective }) {
 
 function cfgActionsBlock() {
   return `<div class="domain-actions cfg-actions">
-    <button class="btn btn-small btn-crt" data-cfg-action="save" type="button" disabled>保存配置</button>
+    <button class="btn btn-small btn-crt" data-cfg-action="save" type="button" disabled>保存</button>
     <button class="btn btn-small btn-crt" data-cfg-action="reset" type="button" disabled>撤销修改</button>
     <span class="cfg-state"></span>
   </div>
-  <p class="muted" style="font-size:11px">重启生效：重新运行 <code>mebular serve</code>；若已注册服务：<code>mebular service restart</code>。</p>`;
+  <p class="muted" style="font-size:11px">保存即生效：需重启项会自动重启（服务托管时<code>mebular service restart</code>，否则给你手动命令）；全为即时项则就地生效。</p>`;
 }
 
 function fieldOf(path) {
   const field = CONFIG_FIELDS_BY_PATH.get(path);
-  if (!field) throw new Error(`未知配置项：${path}`);
+  // 容错：schema 缺项（旧服务端 / 载荷异常）时退化为文本行，不整页崩
+  if (!field) return { path, type: 'text', label: path, help: '（该字段未在 schema 中声明）' };
   return field;
 }
 
@@ -867,6 +819,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     body.innerHTML = '<p class="muted">设置加载中…（若持续如此，检查 serve 是否运行）</p>';
     return;
   }
+  rebuildConfigFields();
   const configPath = state.rawConfig?.path ?? 'config.json';
   const self = s.identity.deviceId;
   const isIssuer = Array.isArray(s.policyIssuers) && s.policyIssuers.includes(self);
@@ -877,6 +830,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
 
   body.innerHTML = `
     ${pendingRestartBanner()}
+    ${applyResultBanner()}
     <div class="settings-tabs" role="tablist" aria-label="设置分区">${IA_TABS.map(tabButton).join('')}</div>
     ${panel('common', `
       <p class="cfg-path muted">修改写入 <code>${escapeHtml(configPath)}</code>（自动保留 .bak 备份）；设备身份 / 存储 / 加密等敏感项请手工编辑。只有需要时才动「Agent 怎么连我」。</p>
@@ -940,6 +894,27 @@ function renderDiagnostics() {
       </div>
     </section>
 
+    <section class="settings-section" data-info-block="lastApply">
+      <h3>最近一次应用结果 <span class="badge badge-muted">只读</span></h3>
+      ${(() => {
+        const apply = state.settings?.lastApply;
+        if (!apply) return '<p class="muted" style="font-size:11px">本次进程内尚无「保存即生效」记录。</p>';
+        const statusText = {
+          applied: '已生效', 'in-progress': '重启中', mismatch: '未按预期生效',
+          'rolled-back': '新配置未生效：已回滚', 'rollback-failed': '回滚失败（需手动恢复）', failed: '应用失败',
+        }[apply.status] ?? String(apply.status);
+        const verify = Array.isArray(apply.verify) ? apply.verify : [];
+        return kvRows([
+          kvRow('状态', escapeHtml(statusText)),
+          kvRow('时间', escapeHtml(String(apply.at ?? '—'))),
+          kvRow('字段', escapeHtml((apply.fields ?? []).join(', ') || '—')),
+          ...(apply.reason ? [kvRow('原因', escapeHtml(String(apply.reason)))] : []),
+          ...(apply.backup ? [copyRowOf('备份', String(apply.backup))] : []),
+          ...(verify.length ? [kvRow('逐项校验', verify.map((row) => `${escapeHtml(row.path)}：${row.ok === true ? '✓' : row.ok === false ? '✗' : '—'}`).join(' · '))] : []),
+        ]);
+      })()}
+    </section>
+
     <section class="settings-section" data-info-block="recovery">
       <h3>恢复指引 <span class="crt-tag">手改 config.json 后重启</span></h3>
       ${kvRows([
@@ -971,6 +946,7 @@ function renderAbout() {
     body.innerHTML = '<p class="muted">关于本机加载中…（若持续如此，检查 serve 是否运行）</p>';
     return;
   }
+  rebuildConfigFields();
   const self = s.identity.deviceId;
   const isIssuer = Array.isArray(s.policyIssuers) && s.policyIssuers.includes(self);
   const listenAlarm = (s.network.listen ?? []).filter((addr) => {
@@ -1000,14 +976,24 @@ function renderAbout() {
 
     <section class="settings-section" data-info-block="syncRate">
       <h3>同步节奏 <span class="badge badge-muted">只读 · 默认常开，不建议关闭</span></h3>
-      ${kvRows(CONFIG_READONLY_FIELDS.map((field) => kvRow(
-        field.label,
-        valueWithEffective(escapeHtml(formatRuntimeValue(CONFIG_EFFECTIVE[field.path]?.(s))), {
-          configured: cfgGet(currentConfigFile(), field.path),
-          effective: CONFIG_EFFECTIVE[field.path]?.(s),
+      ${kvRows(statusRows().filter((row) => row.path === 'sync.autoSync' || row.path === 'sync.pushOnWrite').map((row) => kvRow(
+        row.label ?? row.path,
+        valueWithEffective(escapeHtml(formatRuntimeValue(row.actual)), {
+          configured: row.configured,
+          effective: row.actual,
+          reason: row.reason,
         }),
       )))}
       <p class="muted" style="font-size:11px">默认常开，不建议关闭；如需改动请手工编辑 config.json 的 <code>sync.autoSync</code> / <code>sync.pushOnWrite</code>。</p>
+    </section>
+
+    <section class="settings-section" data-info-block="statusOnly">
+      <h3>只读状态（自动推导） <span class="badge badge-muted">只读</span></h3>
+      <p class="muted" style="font-size:11px;margin:0 0 8px">这些项由运行时自动决定（relay 池 / LAN 发现 / 桥 / 打洞 / 广播 / join / TLS）：控制台只展示真值与原因，不提供编辑。</p>
+      ${kvRows(statusRows().filter((row) => row.path !== 'sync.autoSync' && row.path !== 'sync.pushOnWrite').map((row) => kvRow(
+        row.label ?? row.path,
+        `${escapeHtml(formatRuntimeValue(row.actual))}${row.reason && row.reason !== '已生效' ? `<span class="cfg-reason"><span class="cfg-eff-key">未生效原因</span> ${escapeHtml(row.reason)}</span>` : ''}`,
+      )))}
     </section>
 
     <section class="settings-section" data-info-block="runtime">
@@ -1101,7 +1087,11 @@ function bindConfigEditor() {
   const stateEls = [...document.querySelectorAll('.cfg-state')];
   const update = () => {
     const paths = [...new Set(editors.flatMap((editor) => collectConfigChanges(editor)).map((c) => c.path))];
-    for (const btn of saveBtns) btn.disabled = paths.length === 0;
+    const needsRestart = paths.some((path) => state.settings?.configSchema?.find((e) => e.path === path)?.requiresRestart === true);
+    for (const btn of saveBtns) {
+      btn.disabled = paths.length === 0;
+      btn.textContent = paths.length === 0 ? '保存' : (needsRestart ? '保存并重启' : '保存');
+    }
     for (const btn of resetBtns) btn.disabled = paths.length === 0;
     for (const el of stateEls) {
       el.textContent = paths.length === 0 ? '' : `未保存修改：${paths.length} 项`;
@@ -1118,6 +1108,9 @@ function bindConfigEditor() {
     });
   }
   for (const btn of saveBtns) btn.addEventListener('click', saveConfigEditor);
+  for (const btn of document.querySelectorAll('[data-cfg-action="restart"]')) {
+    btn.addEventListener('click', (event) => { void restartServeFromUi(event); });
+  }
   for (const btn of resetBtns) {
     btn.addEventListener('click', () => {
       state.cfgDraft = {};
@@ -1155,18 +1148,127 @@ async function saveConfigEditor() {
   }
   if (Object.keys(patch).length === 0) return;
   const saveBtns = [...document.querySelectorAll('[data-cfg-action="save"]')];
+  const stateEls = [...document.querySelectorAll('.cfg-state')];
+  const setBusy = (text) => { for (const el of stateEls) el.textContent = text; };
   saveBtns.forEach((btn) => { btn.disabled = true; });
+  const submit = (confirm) => api('/admin/api/config', { method: 'POST', body: confirm ? { patch, confirm: true } : { patch } });
   try {
-    const res = await api('/admin/api/config', { method: 'POST', body: { patch } });
+    let res;
+    try {
+      res = await submit(false);
+    } catch (error) {
+      // G4：自锁防护（auth/host/tls）→ 服务端要求二次确认
+      if (error?.status === 409 && error?.payload?.needsConfirmation) {
+        const lockPaths = Array.isArray(error.payload.paths) ? error.payload.paths : [];
+        const ok = await confirmModal({
+          title: '保存并重启（可能失联）',
+          body: `${error.payload.message ?? ''}\n\n命中：${lockPaths.join(', ')}\n如重启后控制台打不开，请手工编辑 config.json 改回并重启。确定继续？`,
+          confirmLabel: '确认并重启',
+        });
+        if (!ok) {
+          saveBtns.forEach((btn) => { btn.disabled = false; });
+          setBusy('');
+          return;
+        }
+        setBusy('正在保存并重启…');
+        res = await submit(true);
+      } else {
+        throw error;
+      }
+    }
     state.rawConfig = { path: res.path, exists: true, parseError: null, config: res.config };
     state.cfgDraft = {};
     lastSettingsSignature = null;
-    showToast(`已写入 ${res.path}${res.backup ? '（旧文件已备份为 .bak）' : ''}；重启 serve 后生效`);
-    await refresh();
-    renderSettings();
+    if (res.restarting) {
+      setBusy('正在重启…重连中…');
+      showToast('已保存；正在自动重启使配置生效…');
+      await refresh().catch(() => undefined);
+      renderSettings();
+      await waitForServeBack();
+      await refresh();
+      lastSettingsSignature = null;
+      lastAboutSignature = null;
+      renderSettings();
+      renderAbout();
+      const applied = state.settings?.lastApply?.status;
+      showToast(applied === 'rolled-back' || applied === 'rollback-failed'
+        ? '新配置未生效：已回滚（详见横幅 / 诊断页）'
+        : '已生效');
+    } else if (res.effectiveImmediately) {
+      showToast('已保存（即时生效项，无需重启）');
+      await refresh();
+      renderSettings();
+      renderAbout();
+    } else {
+      // 前台模式：手动指引
+      const cmd = res.restart?.command ?? 'nohup mebular serve > ~/.mebular/serve.log 2>&1 &';
+      showToast(`已写入 ${res.path}${res.backup ? '（.bak 已备份）' : ''}；请手动重启：${cmd}`);
+      await refresh();
+      renderSettings();
+    }
   } catch (error) {
     window.alert(`保存失败：${error.message}`);
     saveBtns.forEach((btn) => { btn.disabled = false; });
+  }
+}
+
+/**
+ * C：一键重启——让「待重启」的配置立即生效。
+ * POST /admin/api/restart（memory.admin + CSRF + 二次确认）；守护先回 202 再重启，
+ * 之后轮询 /healthz 等它回来；未以服务方式运行 → 409 + 手动指引。
+ */
+async function restartServeFromUi(event) {
+  if (MOCK) {
+    window.alert('mock 模式不执行写操作。');
+    return;
+  }
+  const stateEl = document.querySelector('.cfg-restart-state');
+  const btn = event?.currentTarget ?? null;
+  const ok = await confirmModal({
+    title: '一键重启守护',
+    body: '将重启本机守护（mebular serve），让已保存但「待重启」的配置生效。期间控制台短暂不可用，恢复后页面自动刷新。确定？',
+    confirmLabel: '重启',
+  });
+  if (!ok) return;
+  if (btn) btn.disabled = true;
+  if (stateEl) stateEl.textContent = '正在重启…';
+  try {
+    const res = await api('/admin/api/restart', { method: 'POST', body: { confirm: true } });
+    if (res?.dryRun) {
+      if (stateEl) stateEl.textContent = `已排程（dry-run，未真正执行）：${res.command ?? ''}`;
+      if (btn) btn.disabled = false;
+      return;
+    }
+    if (stateEl) stateEl.textContent = '已触发重启，等待守护恢复…';
+    showToast('已触发重启；等待守护恢复…');
+    await waitForServeBack();
+    lastSettingsSignature = null;
+    lastAboutSignature = null;
+    await refresh();
+    renderSettings();
+    if (stateEl) stateEl.textContent = '';
+    showToast('守护已恢复');
+  } catch (error) {
+    const manual = error?.payload?.manual ?? null;
+    if (stateEl) stateEl.textContent = manual ?? `重启失败：${error.message}`;
+    if (btn) btn.disabled = false;
+    if (manual) window.alert(`一键重启不可用：${manual}`);
+    else window.alert(`重启失败：${error.message}`);
+  }
+}
+
+/** 等待守护回来（最多 90s；每 1.5s 探一次 /healthz）。 */
+async function waitForServeBack() {
+  const deadline = Date.now() + 90_000;
+  for (;;) {
+    try {
+      const res = await fetch('/healthz', { headers: { accept: 'application/json' }, credentials: 'same-origin' });
+      if (res.ok) return true;
+    } catch {
+      // 守护重启中：继续等
+    }
+    if (Date.now() > deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 1500));
   }
 }
 

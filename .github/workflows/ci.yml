@@ -67,6 +67,9 @@ jobs:
       - name: Console E1 (static/CSRF/scope/config combo/TLS)
         run: npm run verify:console > console-e1.log 2>&1 || { tail -n 200 console-e1.log; exit 1; }
 
+      - name: Config pipeline (schema/exposure/restart/apply/rollback)
+        run: npm run verify:config > verify-config.log 2>&1 || { tail -n 200 verify-config.log; exit 1; }
+
       - name: Console UI smoke (headless Chrome via CDP; SKIP if no browser)
         run: npm run verify:console:ui > console-ui.log 2>&1 || { tail -n 200 console-ui.log; exit 1; }
 

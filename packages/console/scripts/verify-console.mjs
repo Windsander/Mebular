@@ -139,9 +139,23 @@ function waitReady(handle, timeoutMs = 20000) {
 }
 
 async function stop(handle) {
-  if (handle?.proc && handle.proc.exitCode === null) {
-    handle.proc.kill('SIGTERM');
-    await new Promise((resolve) => handle.proc.on('exit', resolve));
+  const proc = handle?.proc;
+  if (!proc) return;
+  // 已退出（正常或被信号杀死）直接返回；否则限时等待，超时 SIGKILL 兜底
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+  const exited = new Promise((resolve) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) { resolve(); return; }
+    proc.once('exit', resolve);
+    proc.once('close', resolve);
+  });
+  try { proc.kill('SIGTERM'); } catch { /* 已退出 */ }
+  const timedOut = await Promise.race([
+    exited.then(() => false),
+    new Promise((resolve) => setTimeout(() => resolve(true), 8000)),
+  ]);
+  if (timedOut) {
+    try { proc.kill('SIGKILL'); } catch { /* 已退出 */ }
+    await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 3000))]);
   }
 }
 
@@ -625,6 +639,153 @@ try {
   const cfgAfterClear = JSON.parse(await readFile(join(home, 'config.json'), 'utf-8'));
   check('config 置空 → 删除键', cfgClear.status === 200 && !('snapshotThreshold' in (cfgAfterClear.sync ?? {})), `status=${cfgClear.status}`);
 
+  // ---------- 待重启（pendingRestart）：磁盘 config.json 与启动快照不一致 ----------
+  {
+    // 主实例：保存后磁盘值与启动快照不一致 → pendingRestart 命中刚改的键
+    const pendingWrite = await fetch(`http://127.0.0.1:${port}/admin/api/config`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ patch: { network: { enabled: true }, joinService: { enabled: true } } }),
+    });
+    check('pendingRestart：可写入 network/join 开关', pendingWrite.status === 200, `status=${pendingWrite.status}`);
+    const settingsPending = await getJson(port, '/admin/api/settings');
+    const pending = Array.isArray(settingsPending.json?.pendingRestart) ? settingsPending.json.pendingRestart : null;
+    const pendingPaths = new Set((pending ?? []).map((p) => p.path));
+    check(
+      'pendingRestart 含刚改的键（network.enabled / joinService.enabled / sync.antiEntropy.intervalMs）',
+      Array.isArray(pending)
+        && pendingPaths.has('network.enabled')
+        && pendingPaths.has('joinService.enabled')
+        && pendingPaths.has('sync.antiEntropy.intervalMs')
+        && pending.every((p) => typeof p.path === 'string' && 'file' in p && 'running' in p),
+      `pending=${[...pendingPaths].join(',')}`,
+    );
+    const networkPending = (pending ?? []).find((p) => p.path === 'network.enabled');
+    check(
+      'pendingRestart 元素含 file/running（network.enabled 磁盘 true / 启动快照 false）',
+      networkPending?.file === true && networkPending?.running === false,
+      JSON.stringify(networkPending),
+    );
+    check(
+      'pendingRestart 暴露重启元信息（restart.serviceHeartbeat / serviceManaged 为 boolean）',
+      typeof settingsPending.json?.restart?.serviceHeartbeat === 'boolean'
+        && typeof settingsPending.json?.restart?.serviceManaged === 'boolean',
+      JSON.stringify(settingsPending.json?.restart),
+    );
+  }
+
+  // 独立 home：同一实例重启后，磁盘值成为启动快照 → pendingRestart 清空
+  {
+    const restartHome = join(home, 'pending-restart');
+    const restartMcpPort = await freePort();
+    const restartJoinPort = await freePort();
+    await mkdir(restartHome, { recursive: true });
+    await writeFile(join(restartHome, 'config.json'), JSON.stringify({
+      storagePath: join(restartHome, 'store.jsonl'),
+      deviceId: 'device-pending',
+      encryption: { level: 'none' },
+      network: { enabled: false, libp2p: { listen: [], relayServers: [] } },
+      sync: { autoSync: true, pushOnWrite: false, antiEntropy: { enabled: false, intervalMs: 600000, jitterRatio: 0.2 }, namespaces: [], peerWhitelist: [], policyIssuers: [] },
+      semantic: { enabled: false, minScore: 0.2 },
+      mcp: { http: { host: '127.0.0.1', port: restartMcpPort, auth: 'none', tls: false } },
+      joinService: { enabled: false, bind: '127.0.0.1', port: restartJoinPort },
+    }, null, 2), 'utf-8');
+    const restartEnv = { MEBULAR_PUSH_ON_WRITE: 'false', MEBULAR_SEMANTIC_ENABLED: 'false', MEBULAR_NETWORK_ENABLED: 'false' };
+    const restartOpts = { home: restartHome, storage: join(restartHome, 'store.jsonl'), deviceId: 'device-pending', portFlag: null, env: restartEnv };
+    const first = spawnServe(restartOpts);
+    servers.push(first);
+    const firstReady = await waitReady(first);
+    const firstSettings = await getJson(firstReady.port, '/admin/api/settings');
+    check(
+      'pendingRestart 全新实例为空（磁盘 = 启动快照）',
+      Array.isArray(firstSettings.json?.pendingRestart) && firstSettings.json.pendingRestart.length === 0,
+      JSON.stringify(firstSettings.json?.pendingRestart),
+    );
+
+    const firstPage = await fetch(`http://127.0.0.1:${firstReady.port}/console/`);
+    const firstHeaders = { 'content-type': 'application/json', 'x-mebular-csrf': firstPage.headers.get('x-mebular-csrf'), cookie: `mebular_csrf=${cookieFrom(firstPage)}` };
+    const change = await fetch(`http://127.0.0.1:${firstReady.port}/admin/api/config`, {
+      method: 'POST',
+      headers: firstHeaders,
+      body: JSON.stringify({ patch: { joinService: { enabled: true } } }),
+    });
+    check('pendingRestart：保存重启类改动 → 200', change.status === 200, `status=${change.status}`);
+    const changedSettings = await getJson(firstReady.port, '/admin/api/settings');
+    check(
+      '保存后 pendingRestart 含 joinService.enabled',
+      (changedSettings.json?.pendingRestart ?? []).some((p) => p.path === 'joinService.enabled'),
+      JSON.stringify(changedSettings.json?.pendingRestart),
+    );
+
+    await stop(first);
+    const second = spawnServe(restartOpts);
+    servers.push(second);
+    const secondReady = await waitReady(second);
+    const secondSettings = await getJson(secondReady.port, '/admin/api/settings');
+    check(
+      '同一 home 重启后 pendingRestart 清空',
+      Array.isArray(secondSettings.json?.pendingRestart) && secondSettings.json.pendingRestart.length === 0,
+      JSON.stringify(secondSettings.json?.pendingRestart),
+    );
+  }
+
+  // ---------- G：保存即生效（前台模式契约 + 三元组/原因 + 一键重启接线） ----------
+  {
+    // G1（前台 nohup）：无服务托管 → 保存需重启项返回 restarting:false + 手动指引；待重启语义保留
+    const gSaved = await fetch(`http://127.0.0.1:${port}/admin/api/config`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ patch: { sync: { snapshotThreshold: 8192 } } }),
+    });
+    const gJson = await gSaved.json().catch(() => null);
+    check(
+      'G1 前台保存需重启项 → 200 + restarting:false + restart.mode=foreground（手动指引）',
+      gSaved.status === 200 && gJson?.restarting === false && gJson?.restart?.mode === 'foreground'
+        && /nohup mebular serve/.test(String(gJson?.restart?.command ?? ''))
+        && typeof gJson?.restart?.backup === 'string',
+      `status=${gSaved.status} mode=${gJson?.restart?.mode}`,
+    );
+    // G4：自锁项未确认 → 409 needsConfirmation（不写盘、不重启）
+    const gLock = await fetch(`http://127.0.0.1:${port}/admin/api/config`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ patch: { mcp: { http: { auth: 'bearer' } } } }),
+    });
+    const gLockJson = await gLock.json().catch(() => null);
+    check(
+      'G4 自锁项（mcp.http.auth）未确认 → 409 needsConfirmation',
+      gLock.status === 409 && gLockJson?.needsConfirmation === true && (gLockJson?.paths ?? []).includes('mcp.http.auth'),
+      `status=${gLock.status} paths=${JSON.stringify(gLockJson?.paths)}`,
+    );
+    const gLocked = JSON.parse(await readFile(join(home, 'config.json'), 'utf-8'));
+    check('G4 未确认时不写盘（auth 仍为 none）', gLocked.mcp?.http?.auth === 'none', `auth=${gLocked.mcp?.http?.auth}`);
+    // 三元组 + 未生效原因 + 暴露面（单一真源）
+    const gSettings = await getJson(port, '/admin/api/settings');
+    const gRow = (gSettings.json?.effective ?? []).find((row) => row.path === 'sync.antiEntropy.intervalMs');
+    check(
+      'D 三元组：已配置 / 实际 / 未生效原因（服务端计算；待重启项 reason 明确）',
+      gRow && 'configured' in gRow && 'actual' in gRow && typeof gRow.reason === 'string'
+        && gSettings.json?.effective?.some((row) => /待重启/.test(String(row.reason))),
+      `intervalMs reason=${gRow?.reason}`,
+    );
+    check(
+      'A 暴露面由 schema 驱动载荷（configSchema 20 editable / statusSchema 11 只读 / relayServers 只在只读面）',
+      (gSettings.json?.configSchema ?? []).length === 20 && (gSettings.json?.statusSchema ?? []).length === 11
+        && !(gSettings.json?.configSchema ?? []).some((e) => e.path === 'network.libp2p.relayServers')
+        && (gSettings.json?.statusSchema ?? []).some((e) => e.path === 'network.libp2p.relayServers'),
+      `editable=${(gSettings.json?.configSchema ?? []).length} status=${(gSettings.json?.statusSchema ?? []).length}`,
+    );
+    // 前台模式：无 lastApply（未发生自动重启）；控制台接线齐备
+    check('G 前台模式不产生自动重启记录（lastApply 为空）', !gSettings.json?.lastApply);
+    const consoleSrc3 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    check(
+      'G 控制台接线：保存并重启 / 重启中 / 已生效 / 已回滚 / 最近一次应用结果',
+      consoleSrc3.includes('保存并重启') && consoleSrc3.includes('正在重启…重连中…')
+        && consoleSrc3.includes('已生效') && consoleSrc3.includes('已回滚')
+        && consoleSrc3.includes('最近一次应用结果') && consoleSrc3.includes('needsConfirmation'),
+    );
+  }
+
   // ---------- 邀请新设备（T2 令牌加入） ----------
   const inviteDisabled = await fetch(`http://127.0.0.1:${port}/admin/api/invite`, {
     method: 'POST',
@@ -823,7 +984,7 @@ try {
 
   // ---------- CLI：mebular console ----------
   try {
-    const cliOut = execFileSync(process.execPath, [bin, 'console', '--port', String(port)], {
+    const cliOut = execFileSync(process.execPath, [bin, 'console', '--port', String(port)], { timeout: 30000,
       env: { ...process.env, MEBULAR_HOME: home },
       encoding: 'utf-8',
     });
@@ -843,6 +1004,7 @@ try {
     ['POST', '/admin/api/devices/device-x/sync'],
     ['POST', '/admin/api/devices/device-x/reset-watermarks'],
     ['POST', '/admin/api/config'],
+    ['POST', '/admin/api/restart'],
     ['POST', '/admin/api/invite'],
     ['POST', '/admin/api/policy-issuers'],
     ['POST', '/admin/api/memberships'],
@@ -875,6 +1037,11 @@ try {
     const roHome = join(home, 'readonly');
     await mkdir(roHome, { recursive: true });
     const roStorage = await seedHome(roHome);
+    // seedHome 的 config.mcp.http.port=7331；这里改用临时端口，避免与本机已在运行的真实实例（~/.mebular）抢 7331。
+    const roCfgPath = join(roHome, 'config.json');
+    const roCfg = JSON.parse(await readFile(roCfgPath, 'utf-8'));
+    roCfg.mcp = { ...(roCfg.mcp ?? {}), http: { ...(roCfg.mcp?.http ?? {}), port: 0 } };
+    await writeFile(roCfgPath, JSON.stringify(roCfg, null, 2), 'utf-8');
     const roProc = spawnServe({ home: roHome, storage: roStorage, env: { MEBULAR_CONSOLE_WRITES: '0' }, portFlag: null });
     try {
       const ro = await waitReady(roProc);
@@ -915,7 +1082,8 @@ try {
   ];
   const comboResults = [];
   for (const [patch, shouldReject, label] of combos) {
-    const r = await fetch(`http://127.0.0.1:${port}/admin/api/config`, { method: 'POST', headers: writeHeaders, body: JSON.stringify({ patch }) });
+    // confirm:true：合法组合可能命中 G4 自锁项（host/auth/tls）——组合校验仍先于自锁确认
+    const r = await fetch(`http://127.0.0.1:${port}/admin/api/config`, { method: 'POST', headers: writeHeaders, body: JSON.stringify({ patch, confirm: true }) });
     const ok = shouldReject ? r.status === 400 : r.status === 200;
     comboResults.push(`${label}:${r.status}${ok ? '' : '(✗)'}`);
   }
@@ -948,13 +1116,13 @@ try {
       `exit=${exitCode} err=${badProc.getErr().trim().slice(-120)}`);
 
     let openssl = true;
-    try { execFileSync('openssl', ['version'], { stdio: 'ignore' }); } catch { openssl = false; }
+    try { execFileSync('openssl', ['version'], { stdio: 'ignore', timeout: 15000 }); } catch { openssl = false; }
     if (!openssl) {
       console.log('  - F-C1 有证书 https 可用：SKIP（本机无 openssl）');
     } else {
       const keyPath = join(tlsHome, 'key.pem');
       const certPath = join(tlsHome, 'cert.pem');
-      execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=127.0.0.1'], { stdio: 'ignore' });
+      execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=127.0.0.1'], { stdio: 'ignore', timeout: 30000 });
       baseCfg.mcp.http.tlsKey = keyPath;
       baseCfg.mcp.http.tlsCert = certPath;
       await writeFile(cfgPath, JSON.stringify(baseCfg, null, 2), 'utf-8');
@@ -1023,19 +1191,27 @@ try {
       `config.enabled=${rawSemantic.json?.config?.semantic?.enabled} runtime.enabled=${runtimeSemantic} transformers=${transformersInstalled}`);
     await writeFile(join(home, 'config.json'), JSON.stringify(cfgRaw, null, 2), 'utf-8');
     const consoleSrc = await readFile(join(consoleDir, 'console.js'), 'utf-8');
-    const needed = [
-      'MEBULAR_OAUTH_ADMIN_SECRET', // auth=oauth warn
-      '@huggingface/transformers',  // semantic warn
-      'quickstart 依赖 LAN 可达',    // joinService.bind 文案诚实
-      '非回环',                      // mcp.http.host warn
-      'tlsKey',                      // 证书可编辑
+    // A：编辑器文案已随单一真源迁到 config-schema.mjs（serve 端），控制台只保留运行状态/恢复指引类文案
+    const schemaSrc = await readFile(join(rootDir, 'packages', 'mcp', 'src', 'config-schema.mjs'), 'utf-8');
+    const neededInConsole = [
+      'MEBULAR_OAUTH_ADMIN_SECRET', // 恢复指引：auth 误切（oauth）
+      'tlsKey',                      // 证书可编辑/恢复
       'TLS',                         // 实际运行状态展示
       '已配置',                       // F-C8 双行：已配置 X / 实际 Y
       '实际',                         // F-C8
       'endpoint',                    // F-C6 邀请端点可编辑/展示
       'token grant',                 // F-C7 auth 误切恢复步骤
+      '未生效原因',                    // D：三元组第三列
     ];
-    check('F-C4 文案/工具面诚实化（oauth/semantic/joinService.bind/host/TLS）', needed.every((token) => consoleSrc.includes(token)), needed.filter((t) => !consoleSrc.includes(t)).join(','));
+    const neededInSchema = [
+      '@huggingface/transformers',  // semantic warn（单一真源）
+      'quickstart 依赖 LAN 可达',    // joinService.bind 文案诚实
+      '非回环',                      // mcp.http.host warn
+    ];
+    check('F-C4 文案/工具面诚实化（oauth/semantic/joinService.bind/host/TLS）',
+      neededInConsole.every((token) => consoleSrc.includes(token))
+        && neededInSchema.every((token) => schemaSrc.includes(token)),
+      `console 缺=${neededInConsole.filter((t) => !consoleSrc.includes(t)).join(',') || '无'} schema 缺=${neededInSchema.filter((t) => !schemaSrc.includes(t)).join(',') || '无'}`);
   }
 
   // ---------- IA（设置页信息架构：常用/高级/诊断 + 关于本机） ----------
@@ -1053,13 +1229,38 @@ try {
       `编辑面命中=${[...editorFaces].filter((x) => x === 'sync.autoSync' || x === 'sync.pushOnWrite').join(',') || '无'}`);
 
     const homesOf = (path) => [ia.IA_MIGRATION[path]].filter((home) => HOMES.has(home));
+    // A/F：**防漂移断言**——schema（单一真源）的 exposure 集合 与 settings-ia 渲染面/只读面逐项一致（多/少即红）
+    const schema = await import('../../mcp/src/config-schema.mjs');
+    const schemaEditable = [...schema.EDITABLE_PATHS].sort();
+    const schemaStatusOnly = [...schema.STATUS_ONLY_PATHS].sort();
+    const iaEditable = [...ia.IA_EDITOR_RENDER_PATHS].sort();
+    const iaStatusOnly = [...ia.IA_STATUS_ONLY_PATHS].sort();
+    const diffSets = (a, b) => [...a.filter((x) => !b.includes(x)), ...b.filter((x) => !a.includes(x))];
+    const editableDrift = diffSets(schemaEditable, iaEditable);
+    const statusDrift = diffSets(schemaStatusOnly, iaStatusOnly);
+    check(`schema↔IA 防漂移：editable 集合逐项一致（各 ${schemaEditable.length}）`,
+      schemaEditable.length === 20 && editableDrift.length === 0,
+      `schema=${schemaEditable.length} ia=${iaEditable.length} 差异=${editableDrift.join(',') || '无'}`);
+    check(`schema↔IA 防漂移：status-only 集合逐项一致（各 ${schemaStatusOnly.length}）`,
+      schemaStatusOnly.length === 11 && statusDrift.length === 0,
+      `schema=${schemaStatusOnly.length} ia=${iaStatusOnly.length} 差异=${statusDrift.join(',') || '无'}`);
+    // B：收敛回归——relayServers 从编辑面消失（status-only）、relayUnlimited 不再渲染（internal）
+    const advancedDrift = ia.IA_ADVANCED_FIELDS.filter((p) => ['network.libp2p.relayServers', 'network.libp2p.relayUnlimited'].includes(p));
+    check('B 暴露面收敛：relayServers 退出编辑面（→只读自动池）/ relayUnlimited 退出 GUI（→internal）',
+      ia.IA_ADVANCED_FIELDS.length === 14 && advancedDrift.length === 0
+        && schema.exposureOf('network.libp2p.relayServers') === 'status-only'
+        && schema.exposureOf('network.libp2p.relayUnlimited') === 'internal'
+        && schema.isWritable('network.libp2p.relayServers') === false,
+      `advanced=${ia.IA_ADVANCED_FIELDS.length} 残留=${advancedDrift.join(',') || '无'}`);
+
     const pathsWithoutHome = ia.IA_EDITOR_PATHS.filter((path) => homesOf(path).length !== 1);
     const infoWithoutHome = Object.keys(ia.IA_INFO_BLOCKS).filter((block) => homesOf(block).length !== 1);
     const rendered = new Set([...ia.IA_COMMON_FIELDS, ...ia.IA_ADVANCED_FIELDS]);
     const drifted = ia.IA_EDITOR_PATHS.filter((path) => (ia.IA_MIGRATION[path] === 'common' || ia.IA_MIGRATION[path] === 'advanced') !== rendered.has(path));
-    check('IA 不丢项：24 可编辑 path + 9 信息块各有且仅有唯一去处（迁移表驱动）',
-      ia.IA_EDITOR_PATHS.length === 24 && pathsWithoutHome.length === 0 && infoWithoutHome.length === 0 && drifted.length === 0,
-      `editorPaths=${ia.IA_EDITOR_PATHS.length} 无去处=${pathsWithoutHome.join(',') || '无'} 信息块无去处=${infoWithoutHome.join(',') || '无'} 编辑面漂移=${drifted.join(',') || '无'}`);
+    const statusWithoutHome = ia.IA_STATUS_ONLY_PATHS.filter((path) => homesOf(path).length !== 1);
+    check('IA 不丢项：20 可编辑 path + 11 只读 path + 10 信息块各有且仅有唯一去处（迁移表驱动）',
+      ia.IA_EDITOR_PATHS.length === 20 && pathsWithoutHome.length === 0 && infoWithoutHome.length === 0 && drifted.length === 0 && statusWithoutHome.length === 0,
+      `editorPaths=${ia.IA_EDITOR_PATHS.length} 只读无去处=${statusWithoutHome.join(',') || '无'} 编辑无去处=${pathsWithoutHome.join(',') || '无'} 信息块无去处=${infoWithoutHome.join(',') || '无'} 编辑面漂移=${drifted.join(',') || '无'}`);
 
     const cardFields = ia.IA_TASK_CARDS.flatMap((card) => card.fields);
     check('IA 常用四张任务卡共 6 字段且不重复（含 agent 危险卡）',
@@ -1077,6 +1278,16 @@ try {
         && consoleSrc2.includes('data-settings-tab') && consoleSrc2.includes('IA_TASK_CARDS')
         && consoleSrc2.includes('IA_ADVANCED_FIELDS') && consoleSrc2.includes('IA_MIGRATION'),
       `tabs=${tabIds} labels=${tabLabels}`);
+    // A：编辑器字段改由服务端 schema 驱动（不再在控制台重复声明）；C：一键重启接线
+    check('A 编辑器由单一真源驱动（configSchema）且不再内置字段表',
+      consoleSrc2.includes('configSchema') && consoleSrc2.includes('rebuildConfigFields')
+        && !/const CONFIG_EDITOR = \[/.test(consoleSrc2),
+      'console.js 从 /admin/api/settings.configSchema 建字段表');
+    check('C 一键重启接线（按钮 + POST /admin/api/restart + 二次确认 + 手动指引回退）',
+      consoleSrc2.includes("data-cfg-action=\"restart\"") && consoleSrc2.includes('/admin/api/restart')
+        && consoleSrc2.includes('confirmModal') && consoleSrc2.includes('not_service_managed') === false
+        && consoleSrc2.includes('手动重启'),
+      'restart 按钮/接口/确认/回退齐备');
 
     const recoveryTokens = ['auth 误切', 'host 误设', '缺证书', '控制台打不开', 'MCP_INSECURE_CONFIG', 'MCP_STORAGE_LOCKED', 'token grant'];
     check('IA 诊断恢复指引文案完整（auth 误切 / host 误设 / 缺证书 / 控制台打不开）',

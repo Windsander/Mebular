@@ -24,7 +24,10 @@ import {
   registeredServicesForDir,
   runServiceCli,
   resolveBuildSha,
+  restartPlanFor,
+  restartService,
   unitText,
+  systemdUnitFileName,
   heartbeatPath,
   launchAgentsDir,
   systemdUserDir,
@@ -342,6 +345,78 @@ describe('install/uninstall/status/logs（fake runner）', () => {
     const manifest = JSON.parse(await readFile(manifestPath('fleet-node', home), 'utf-8')) as { sha: string; autostart: boolean };
     expect(manifest.sha).toBe('audit-sha');
     expect(manifest.autostart).toBe(true);
+  });
+});
+
+describe('一键重启（C：restart 计划/执行，命令可注入）', () => {
+  let home: string;
+  const calls: string[][] = [];
+  const fakeRun = (cmd: string, args: readonly string[]): RunResult => {
+    calls.push([cmd, ...args]);
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const descriptor: ServiceDescriptor = { kind: 'mebular-serve', args: ['/opt/cli.js', 'serve'], heartbeatDir: '' };
+
+  beforeEach(async () => {
+    calls.length = 0;
+    home = await mkdtemp(join(os.tmpdir(), 'svc-restart-'));
+    descriptor.heartbeatDir = home;
+  });
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 30 });
+  });
+
+  it('未注册为服务 → 不给平台命令，给手动指引（绝不盲发 kickstart）', () => {
+    const plan = restartPlanFor(descriptor, { platform: 'darwin', home });
+    expect(plan.registered).toBe(false);
+    expect(plan.commands).toEqual([]);
+    expect(plan.manual).toMatch(/未注册为服务/);
+    const result = restartService(descriptor, { platform: 'darwin', home, run: fakeRun });
+    expect(result.ok).toBe(false);
+    expect(result.executed).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  it('darwin：launchctl kickstart -k gui/<uid>/<label>；linux：systemctl --user restart <unit>；win32：End+Run', () => {
+    installService(descriptor, { platform: 'darwin', home, run: fakeRun, sha: 's' });
+    const darwin = restartPlanFor(descriptor, { platform: 'darwin', home });
+    expect(darwin.registered).toBe(true);
+    const darwinCmd = darwin.commands[0] ?? [];
+    expect(darwinCmd[0]).toBe('launchctl');
+    expect(darwinCmd.slice(1)).toEqual(['kickstart', '-k', expect.stringMatching(/^gui\/\d+\/com\.mebular\.mebular-serve$/)]);
+    calls.length = 0;
+    const runDarwin = restartService(descriptor, { platform: 'darwin', home, run: fakeRun });
+    expect(runDarwin.ok).toBe(true);
+    expect(runDarwin.executed).toBe(true);
+    expect(calls[0]?.slice(0, 3)).toEqual(['launchctl', 'kickstart', '-k']);
+
+    installService(descriptor, { platform: 'linux', home, run: fakeRun, sha: 's' });
+    const linux = restartPlanFor(descriptor, { platform: 'linux', home });
+    expect(linux.commands[0]).toEqual(['systemctl', '--user', 'restart', systemdUnitFileName('mebular-serve')]);
+
+    installService(descriptor, { platform: 'win32', home, run: fakeRun, sha: 's' });
+    const win = restartPlanFor(descriptor, { platform: 'win32', home });
+    expect(win.commands).toEqual([['schtasks', '/End', '/TN', 'mebular-serve'], ['schtasks', '/Run', '/TN', 'mebular-serve']]);
+    calls.length = 0;
+    restartService(descriptor, { platform: 'win32', home, run: fakeRun });
+    expect(calls.map((c) => c[1])).toEqual(['/End', '/Run']);
+  });
+
+  it('失败传播：命令非 0 → ok=false（executed 仍为 true）', () => {
+    installService(descriptor, { platform: 'linux', home, run: fakeRun, sha: 's' });
+    const failing = (cmd: string): RunResult => ({ code: cmd === 'systemctl' ? 1 : 0, stdout: '', stderr: 'boom' });
+    const result = restartService(descriptor, { platform: 'linux', home, run: failing });
+    expect(result.executed).toBe(true);
+    expect(result.ok).toBe(false);
+  });
+
+  it('runServiceCli restart：已注册→0 且输出命令；usage 含 restart', () => {
+    installService(descriptor, { platform: 'linux', home, run: fakeRun, sha: 's' });
+    const lines: string[] = [];
+    const code = runServiceCli({ descriptors: [descriptor], argv: ['restart'], home, platform: 'linux', run: fakeRun, out: (l) => lines.push(l) });
+    expect(code).toBe(0);
+    expect(JSON.parse(lines.join('\n')).action).toBe('restart');
+    expect(runServiceCli({ descriptors: [descriptor], argv: ['bogus'], home, platform: 'linux', run: fakeRun, out: () => {} })).toBe(2);
   });
 });
 

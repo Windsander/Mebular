@@ -71,6 +71,38 @@ html, body {
 .badge-ok { color: var(--ok); border-color: #10402f; }
 .badge-muted { color: var(--muted); }
 .badge-danger { color: var(--danger); border-color: #4a1f10; }
+.badge-warn { color: #ffd27a; border-color: #4a3a10; }
+
+/* ---------- 待重启（pendingRestart） ---------- */
+.pending-restart {
+  border: 1px solid #4a3a10;
+  border-radius: 8px;
+  background: rgba(230, 159, 0, 0.06);
+  padding: 10px 12px;
+  margin: 0 0 12px;
+}
+.pending-restart-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.pending-restart-note { font-size: 11px; line-height: 1.6; margin: 0 0 8px; }
+.pending-restart-list { margin: 0 0 8px; padding-left: 18px; display: grid; gap: 4px; font-size: 12px; }
+.pending-restart-list code { word-break: break-all; }
+.pending-restart-cmd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pending-restart-reason { display: block; color: #ffd27a; font-size: 11px; margin-top: 2px; }
+.cfg-restart-state { font-size: 11px; }
+/* G：应用结果横幅（绿=已生效 / 红=未生效或已回滚） */
+.pending-restart.is-ok { border-color: rgba(80, 255, 170, 0.45); }
+.pending-restart.is-error { border-color: #5a1a1a; background: #2a0f0f; }
+.crt-tag-ok { background: rgba(80, 255, 170, 0.14); border-color: rgba(80, 255, 170, 0.45); color: #9dffcf; }
+.crt-tag-error { background: #2a0f0f; border-color: #5a1a1a; color: #ffb4b4; }
+.pending-restart-cmd code {
+  flex: 1 1 240px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-panel);
+  font-size: 12px;
+  word-break: break-all;
+}
 
 /* ---------- 布局 ---------- */
 .layout {
@@ -794,6 +826,9 @@ select {
   margin: 0;
 }
 .cfg-effective .cfg-eff-key { color: var(--crt-dim); opacity: 0.85; }
+/* D：三元组第三列「未生效原因」（服务端计算） */
+.cfg-reason { display: block; margin-top: 2px; color: #ffd27a; font-size: 11px; }
+.cfg-reason .cfg-eff-key { color: #ffd27a; opacity: 0.85; }
 .cfg-effective.is-mismatch { color: #ffd27a; }
 .cfg-effective.is-mismatch .cfg-eff-key { color: #ffd27a; }
 .cfg-raw { margin: 4px 0 8px; }

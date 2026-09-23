@@ -17,6 +17,15 @@ import { readFile } from 'node:fs/promises';
 import { POLICY_NAMESPACE, normalizeNamespace } from '@mebular/core';
 import { configPath } from './config.mjs';
 import { TOOL_NAMES } from './tools.mjs';
+import { hotPaths, readApplyPending, readApplyResult } from './config-apply.mjs';
+import {
+  CONFIG_SCHEMA_BY_PATH,
+  EDITABLE_PATHS,
+  PENDING_RESTART_PATHS,
+  STATUS_ONLY_PATHS,
+  consoleSchema,
+  consoleStatusSchema,
+} from './config-schema.mjs';
 
 export const POLICY_NS = POLICY_NAMESPACE;
 
@@ -515,9 +524,108 @@ export async function buildNamespaces({ app, service, config }) {
   return result.sort((a, b) => (a.namespace < b.namespace ? -1 : 1));
 }
 
+// ---------- 待重启（pendingRestart）：磁盘 config.json 与「启动快照」不一致 ----------
+//
+// 守护只在启动时读取一次 config.json（createMebular），运行期没有热加载。设置页保存后
+// 磁盘已变，但当前实例仍按上次启动的快照工作——这里把它显式暴露给控制台。
+// **路径/归一函数均来自 config-schema.mjs 单一真源**（`read` 把「未设置」归一为生效默认值，
+// 避免默认值被误报为不一致）；`envVar` 命中的路径磁盘值不会被重启采纳，故不计入待重启。
+const HOT_PATHS = new Set(hotPaths());
+const RESTART_CONFIG_PATHS = PENDING_RESTART_PATHS.filter((entry) => !HOT_PATHS.has(entry.path)).map((entry) => ({
+  path: entry.path,
+  label: entry.ui?.label ?? entry.path,
+  ...(entry.envVar ? { envVar: entry.envVar } : {}),
+  read: entry.read,
+}));
+
+/**
+ * 比较「当前磁盘 config.json」与「本次启动快照」的 curated 重启类配置。
+ * 返回 `{ pending, envOverridden }`：pending 元素形如 `{ path, file, running }`；
+ * 受环境变量优先控制的路径跳过（重启也不会采纳磁盘值），并在 envOverridden 中列出。
+ */
+function computePendingRestart(diskConfig, startupConfig) {
+  const pending = [];
+  const envOverridden = [];
+  for (const spec of RESTART_CONFIG_PATHS) {
+    if (spec.envVar && process.env[spec.envVar] !== undefined) {
+      envOverridden.push(spec.path);
+      continue;
+    }
+    const file = spec.read(diskConfig) ?? null;
+    const running = spec.read(startupConfig) ?? null;
+    if (JSON.stringify(file) !== JSON.stringify(running)) {
+      // D：三元组第三列「未生效原因」——服务端计算，前端只渲染
+      pending.push({
+        path: spec.path,
+        label: spec.label,
+        file,
+        running,
+        reason: '待重启：已保存的值将在重启后生效（当前实例按上次启动的配置工作）',
+      });
+    }
+  }
+  return { pending, envOverridden };
+}
+
+/** join 启动失败根因（server.mjs 在 joinService 起不来时落盘；成功启动即清除）。 */
+async function readJoinError(home) {
+  if (!home) return null;
+  try {
+    const record = JSON.parse(await readFile(join(home, 'join.error.json'), 'utf-8'));
+    return record && typeof record === 'object' ? record : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * D：三元组（已配置 X / 实际 Y / **未生效原因**）——覆盖 editable 20 项 + status-only 只读行。
+ * 原因优先级：环境变量优先 > 待重启 > 条目自定义原因（缺依赖 / 端口被占 / 回环不可达 / 缺证书…）> 已生效。
+ */
+function buildEffectiveRows({ settings, config, diskConfig, pending, envOverridden }) {
+  const pendingPaths = new Set(pending.map((item) => item.path));
+  const envSet = new Set(envOverridden);
+  const rows = [];
+  for (const path of [...EDITABLE_PATHS, ...STATUS_ONLY_PATHS]) {
+    const entry = CONFIG_SCHEMA_BY_PATH.get(path);
+    let reason = '已生效';
+    if (HOT_PATHS.has(path)) reason = '已声明为热生效（本部署 MEBULAR_CONFIG_HOT_PATHS）';
+    else if (envSet.has(path)) reason = '环境变量优先：磁盘值不会被重启采纳（以 env 为准）';
+    else if (pendingPaths.has(path)) reason = '待重启：已保存的值将在重启后生效';
+    else if (typeof entry.reason === 'function') reason = entry.reason({ settings, config, diskConfig }) ?? '已生效';
+    rows.push({
+      path,
+      label: entry.ui?.label ?? path,
+      exposure: entry.exposure,
+      requiresRestart: entry.requiresRestart === true,
+      configured: entry.read ? (entry.read(diskConfig) ?? null) : null,
+      actual: typeof entry.effective === 'function' ? (entry.effective(settings) ?? null) : null,
+      reason,
+      pending: pendingPaths.has(path),
+    });
+  }
+  return rows;
+}
+
+/** 读取服务心跳（serve 常驻写 <home>/service.heartbeat）；供 UI 选择重启命令文案。 */
+async function readServiceHeartbeat(home) {
+  if (!home) return false;
+  try {
+    const record = JSON.parse(await readFile(join(home, 'service.heartbeat'), 'utf-8'));
+    return typeof record?.ts === 'number'
+      && Date.now() - record.ts <= 30_000
+      && record?.role === 'mebular-serve';
+  } catch {
+    return false;
+  }
+}
+
 /** GET /admin/api/settings（只读、脱敏；不含任何密钥/token） */
 export async function buildSettings({ app, service, config, runtime, home }) {
   const status = await service.status();
+  const joinError = await readJoinError(home);
+  // G：最近一次「保存即生效」的应用结果（pending = 正在重启中）
+  const [applyResult, applyPending] = await Promise.all([readApplyResult(home), readApplyPending(home)]);
   let policyIssuers = [];
   let revokedCount = 0;
   try {
@@ -528,7 +636,7 @@ export async function buildSettings({ app, service, config, runtime, home }) {
   }
   const sync = config?.sync ?? {};
   const antiEntropy = sync.antiEntropy ?? { enabled: true, intervalMs: 600000, jitterRatio: 0.2 };
-  return {
+  const payload = {
     identity: {
       deviceId: app.deviceId,
       name: runtime?.deviceName ?? config?.deviceName ?? null,
@@ -586,6 +694,8 @@ export async function buildSettings({ app, service, config, runtime, home }) {
       // F-C6：令牌里写死的端点（实际值）+ 是否为回环（回环则新设备不可达）
       endpoint: runtime?.join?.endpoint ?? null,
       endpointLoopback: runtime?.join?.endpointLoopback ?? null,
+      // E/D：上次 join 启动失败的根因（端口被占等）；成功启动后文件已清除
+      ...(joinError ? { lastError: joinError } : {}),
     },
     ...(await buildFleetView(home)),
     // C2：对端连接路径（只读；来自 core 地址簿的 path 状态）+ 地址簿元信息
@@ -598,6 +708,38 @@ export async function buildSettings({ app, service, config, runtime, home }) {
     nat: buildNatView(app),
     // 实际可调用面（MCP 工具 = `mebular <name>` CLI，逐字同名同 handler）
     tools: TOOL_NAMES,
+  };
+
+  // 待重启：读取**当前磁盘** config.json，与「本次启动快照 config」对比 curated 重启类路径。
+  // 注意：mcp.* 以启动快照为基准（`--port 0` 的实际端口由系统分配，不代表磁盘值未生效）。
+  let diskConfig = config ?? {};
+  if (home) {
+    try {
+      diskConfig = JSON.parse(await readFile(configPath(home), 'utf-8'));
+    } catch {
+      diskConfig = config ?? {};
+    }
+  }
+  const { pending, envOverridden } = computePendingRestart(diskConfig, config);
+  const effectiveRows = buildEffectiveRows({ settings: payload, config, diskConfig, pending, envOverridden });
+  return {
+    ...payload,
+    pendingRestart: pending,
+    ...(envOverridden.length > 0 ? { pendingRestartEnvOverrides: envOverridden } : {}),
+    // A/D：三元组 + 暴露面（单一真源驱动；GUI 编辑器改由 configSchema 渲染）
+    effective: effectiveRows,
+    // G：应用结果（green=已生效 / red=未按预期生效或已回滚 / in-progress=重启中）
+    lastApply: applyPending
+      ? { status: 'in-progress', at: applyPending.at ?? null, fields: applyPending.fields ?? [], attempt: applyPending.attempt ?? null }
+      : (applyResult ?? null),
+    configSchema: consoleSchema(),
+    statusSchema: consoleStatusSchema(),
+    restart: {
+      // 服务心跳（serve 常驻写）：用于选择重启命令文案
+      serviceHeartbeat: await readServiceHeartbeat(home),
+      // 由 launchd/systemd/计划任务拉起时注入（见 @mebular/service buildSpec）；普通 nohup 启动无此标记
+      serviceManaged: Boolean(process.env.MEBULAR_SERVICE_KIND || process.env.MEBULAR_SERVICE_SHA),
+    },
   };
 }
 

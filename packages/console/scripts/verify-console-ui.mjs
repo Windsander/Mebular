@@ -149,6 +149,27 @@ function launchChrome(executablePath) {
   });
 }
 
+/**
+ * Chrome 启动重试：CI runner 偶发 CDP/dbus 启动抖动（stderr 形如
+ * "Could not parse server address: Unknown address type"）——杀掉重来，最多 3 次。
+ */
+async function launchChromeRetry(executablePath, attempts = 3) {
+  let lastError = null;
+  for (let i = 0; i < attempts; i += 1) {
+    let handle = null;
+    try {
+      handle = await launchChrome(executablePath);
+      return handle;
+    } catch (error) {
+      lastError = error;
+      try { handle?.proc?.kill('SIGKILL'); } catch { /* 已退出 */ }
+      await rm(handle?.userDataDir, { recursive: true, force: true }).catch(() => undefined);
+      await sleep(500 * (i + 1));
+    }
+  }
+  throw lastError;
+}
+
 /** 极简 CDP 客户端（依赖 Node 内建 WebSocket） */
 function connectCdp(wsUrl) {
   const ws = new WebSocket(wsUrl);
@@ -207,7 +228,7 @@ async function main() {
     const base = `http://127.0.0.1:${ready.port}`;
     check('GET /console/ 200', (await waitHttp(`${base}/console/`)) === 200);
 
-    chromeHandle = await launchChrome(chrome);
+    chromeHandle = await launchChromeRetry(chrome);
     cdp = connectCdp(chromeHandle.wsUrl);
     await cdp.ready;
     const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
@@ -266,6 +287,36 @@ async function main() {
     check('显示未保存修改且未自动保存', await evalJs('/未保存修改/.test(document.querySelector("#settings-body .cfg-state")?.textContent ?? "")'));
     await evalJs('document.querySelector("#settings-body [data-cfg-action=reset]").click()');
     check('撤销后 auth 回到原值（签名已失效强制重建）', await waitFor(`document.querySelector('${authSelector}')?.value === ${JSON.stringify(authOriginal)}`));
+
+    // 待重启：页面内写配置（CSRF 取自 document.cookie）→ 设置弹窗出现「待重启」并含变更项；改回后清空
+    const applyIntervalMs = async (value) => evalJs(`(async () => {
+      const raw = document.cookie.match(/(?:^|; )mebular_csrf=([^;]*)/);
+      const csrf = raw ? decodeURIComponent(raw[1]) : '';
+      const body = JSON.stringify({ patch: { sync: { antiEntropy: { intervalMs: ${value} } } } });
+      const res = await fetch('/admin/api/config', { method: 'POST', credentials: 'same-origin', headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf }, body });
+      return res.status;
+    })()`);
+    const wrotePending = await applyIntervalMs(123456);
+    check('UI 待重启：页面内写 sync.antiEntropy.intervalMs → 200', wrotePending === 200, `status=${wrotePending}`);
+    check(
+      'UI 待重启：设置弹窗出现「待重启」并含变更项（反熵间隔）',
+      await waitFor('(() => { const el = document.querySelector("[data-pending-restart]"); return Boolean(el) && /待重启/.test(el.textContent) && /反熵间隔/.test(el.textContent) && /sync\\.antiEntropy\\.intervalMs/.test(el.textContent); })()'),
+    );
+    check(
+      'UI 待重启：设置入口徽标标注「待重启 N 项」',
+      await waitFor('/待重启/.test(document.querySelector("#settings-pending-badge")?.textContent ?? "")'),
+    );
+    check(
+      'D UI 三元组第三列：待重启横幅含「未生效原因」（服务端计算）',
+      await waitFor('/未生效原因/.test(document.querySelector("[data-pending-restart]")?.textContent ?? "")'),
+    );
+    check(
+      'C UI 一键重启按钮就位（待重启横幅内，写权限下可用）',
+      await evalJs("(() => { const b = document.querySelector('[data-pending-restart] [data-cfg-action=\"restart\"]'); return Boolean(b) && !b.disabled; })()"),
+    );
+    const revertedPending = await applyIntervalMs(null);
+    check('UI 待重启：改回（删除 intervalMs）→ 200', revertedPending === 200, `status=${revertedPending}`);
+    check('UI 待重启：pendingRestart 清空后提示消失', await waitFor('!document.querySelector("[data-pending-restart]")'));
     await evalJs('document.querySelector("#settings-close").click()');
     // 关于本机（点顶栏本机徽标进入）
     await evalJs('document.querySelector("#self-badge").click()');

@@ -293,6 +293,80 @@ export function serviceStatus(descriptor: ServiceDescriptor, options: ServiceOpt
   };
 }
 
+/** 一键重启：平台命令（**纯函数**，不执行；未注册为服务时给手动指引）。 */
+export interface RestartPlan {
+  kind: ServiceKind;
+  label: string;
+  registered: boolean;
+  /** 需按序执行的命令（每项 = [cmd, ...args]）；未注册时为空数组 */
+  commands: string[][];
+  /** 未注册/不可托管时的手动重启指引 */
+  manual?: string;
+}
+
+/**
+ * 构造重启命令（不执行）：
+ *  - darwin：`launchctl kickstart -k gui/<uid>/<label>`（-k 先杀再拉起，KeepAlive 兜底）
+ *  - linux ：`systemctl --user restart <unit>`（Restart=on-failure 兜底）
+ *  - win32 ：`schtasks /End` + `schtasks /Run`（计划任务无 restart，退化为停+起）
+ * 未注册（单元文件与 manifest 都不存在）→ 只给手动指引，绝不盲发 kickstart。
+ */
+export function restartPlanFor(descriptor: ServiceDescriptor, options: ServiceOptions = {}): RestartPlan {
+  const platform = currentPlatform(options.platform);
+  const home = options.home ?? os.homedir();
+  const manifest = readManifest(descriptor.kind, home);
+  const spec: UnitSpec = buildSpec(descriptor, {
+    home,
+    platform,
+    autostart: manifest?.autostart ?? true,
+    sha: manifest?.sha ?? options.sha ?? 'unknown',
+    ...(manifest?.label !== undefined ? { label: manifest.label } : {}),
+  });
+  const unitPath = unitFilePath(platform, spec, home);
+  const registered = fs.existsSync(unitPath) || manifest !== null;
+  const manual = '未注册为服务：请手动重启（nohup mebular serve > ~/.mebular/serve.log 2>&1 &）';
+  if (!registered) return { kind: descriptor.kind, label: spec.label, registered: false, commands: [], manual };
+  if (platform === 'darwin') {
+    return { kind: descriptor.kind, label: spec.label, registered: true, commands: [['launchctl', 'kickstart', '-k', `gui/${uid()}/${spec.label}`]] };
+  }
+  if (platform === 'linux') {
+    return { kind: descriptor.kind, label: spec.label, registered: true, commands: [['systemctl', '--user', 'restart', systemdUnitFileName(spec.kind)]] };
+  }
+  return {
+    kind: descriptor.kind,
+    label: spec.label,
+    registered: true,
+    commands: [['schtasks', '/End', '/TN', spec.kind], ['schtasks', '/Run', '/TN', spec.kind]],
+  };
+}
+
+export interface RestartResult {
+  ok: boolean;
+  action: 'restart';
+  kind: ServiceKind;
+  label: string;
+  registered: boolean;
+  commands: string[][];
+  executed: boolean;
+  manual?: string;
+}
+
+/** 执行重启（命令可注入，便于 hermetic 测试）。未注册 → executed:false + 手动指引。 */
+export function restartService(descriptor: ServiceDescriptor, options: ServiceOptions = {}): RestartResult {
+  const run = options.run ?? defaultRun;
+  const plan = restartPlanFor(descriptor, options);
+  if (!plan.registered) {
+    return { ok: false, action: 'restart', kind: plan.kind, label: plan.label, registered: false, commands: [], executed: false, ...(plan.manual !== undefined ? { manual: plan.manual } : {}) };
+  }
+  let ok = true;
+  for (const command of plan.commands) {
+    const cmd = command[0];
+    if (cmd === undefined) continue;
+    if (run(cmd, command.slice(1)).code !== 0) ok = false;
+  }
+  return { ok, action: 'restart', kind: plan.kind, label: plan.label, registered: true, commands: plan.commands, executed: true };
+}
+
 export interface LogsResult {
   kind: ServiceKind;
   stdoutLog: string;

@@ -16,34 +16,44 @@ IA 单一真源在 [`packages/console/settings-ia.js`](../../packages/console/se
 
 **邀请面板（C7 扫码即通）**：一次性令牌 + **二维码**（内容=令牌文本，服务端渲染 SVG，可选依赖缺省时只给文本）+ `fleet join` 命令 + 「兑换后自动授权（作用域=令牌分区，默认 24h 到期自动撤销）」说明。
 
-## 高级（16 字段 + 1 动作）
+## 高级（14 字段 + 1 动作）
 
 | 分组 | 字段 |
 |---|---|
 | 反熵与快照 | `sync.antiEntropy.enabled` · `sync.antiEntropy.intervalMs` · `sync.antiEntropy.jitterRatio` · `sync.snapshotThreshold` |
 | 对端与签发者 | `sync.peerWhitelist` · `sync.policyIssuers` |
 | 语义召回（可选依赖） | `semantic.enabled` · `semantic.minScore` |
-| Relay 与高级网络 | `network.libp2p.relayServers` · `network.libp2p.relayUnlimited` |
 | 设备接入（高级） | `joinService.bind` · `joinService.port` |
 | MCP 接入（高级） | `mcp.http.host` · `mcp.http.tls` · `mcp.http.tlsKey` · `mcp.http.tlsCert` |
 | 动作 | 「声明本机为引导签发者」（图上签名事件） |
+
+> **暴露面收敛（B）**：`network.libp2p.relayServers` 改为**只读**（自动 relay 池 = config seeds ∪ 令牌 hints ∪ 地址簿学习，见「关于本机 · 只读状态」）；`network.libp2p.relayUnlimited` 转为 internal（GUI 不渲染，需手工编辑 `config.json`）。字段元数据由服务端单一真源 `packages/mcp/src/config-schema.mjs` 驱动（`/admin/api/settings.configSchema`），控制台不再重复声明。
 
 ## 诊断（只读 + 恢复）
 
 - 版本与服务状态：`/healthz` 的 name/version/status、MCP 监听、TLS、控制台写入开关、P2P。
 - 完整配置：`config.json` 原文（复制 / 下载）。
+- **最近一次应用结果**：状态（已生效 / 重启中 / 未按预期生效 / 已回滚）、时间、字段清单、原因、备份路径、逐项校验。
 - **恢复指引**：auth 误切 · host 误设 · 缺证书 · 控制台打不开（含 `MCP_INSECURE_CONFIG` / `MCP_STORAGE_LOCKED` 判读）。
 
 ## 关于本机（顶栏徽章入口，只读）
 
-身份与存储 · **同步节奏** · 运行状态（含 **地址广播**：`full/relay-only/off` 档位 · 已发布 · 已采用 · 忽略原因，C5）· 签发者状态 · **对端连接路径**（C2：每个键的 `kind/address/最近切换/lastError/候选数`，只读）· 舰队摘要 · 能力清单（11 工具）。
+身份与存储 · **同步节奏** · **只读状态（自动推导）**（relay 池 / LAN 发现 / 桥 / 打洞 / 广播 / join 端点 / TLS / 邀请授权 TTL，均带「未生效原因」）· 运行状态（含 **地址广播**：`full/relay-only/off` 档位 · 已发布 · 已采用 · 忽略原因，C5）· 签发者状态 · **对端连接路径**（C2：每个键的 `kind/address/最近切换/lastError/候选数`，只读）· 舰队摘要 · 能力清单（11 工具）。
 
 > 星图设备卡同样有一行只读「当前路径」（`direct`/`lan`/`relay` + 地址 + 起始时间；未连接时显示 `lastError`）。数据来自 core 候选地址簿（`settings.peers.paths`），只展示不改变授权。
 
 > **同步节奏**（`sync.autoSync` / `sync.pushOnWrite`）已从 GUI 编辑面移除——默认常开、不建议关闭；需要改动请手工编辑 `config.json`。该处只读展示「已配置 vs 实际」双值。
 >
-> 所有可运行时项（host/port/auth/tls、listen/relay、semantic、join 等）在编辑面同样给「已配置 X / 实际 Y」双行，不一致时以 ⚠ 标注「写入值未生效，实际以运行时为准」。
+> 所有可运行时项（host/port/auth/tls、listen/relay、semantic、join 等）在编辑面给**三元组**「已配置 X / 实际 Y / 未生效原因」，原因由服务端计算（`/admin/api/settings.effective`）。
 
 ## 保存与撤销
 
-「常用」与「高级」两个 Tab 各自带**同一 handler** 的「保存配置 / 撤销修改」按钮：草稿跨 Tab 保留，任一 Tab 都能提交全部未保存修改（写入前仍会做 host/auth/tls 组合校验）。
+「常用」与「高级」两个 Tab 各自带**同一 handler** 的「保存 / 撤销修改」按钮：草稿跨 Tab 保留，任一 Tab 都能提交全部未保存修改（写入前仍会做 host/auth/tls 组合校验）。
+
+**保存即生效（G）**：
+
+- 改动含需重启项 → 按钮显示「保存并重启」，保存后**自动重启**（服务托管时）并轮询等待恢复；全为即时（热路径）项 → 就地生效，不重启。
+- 恢复后显示 **绿色「已生效（字段清单）」**（逐字段生效校验通过）或 **红色「未按预期生效」/「已回滚」**。
+- **自锁防护**：改动命中 `mcp.http.auth` / `mcp.http.host` / `mcp.http.tls` 时先二次确认（重启后控制台可能不可达；失联请手工编辑 `config.json` 改回），未确认则返回 `needsConfirmation` 且不写盘、不重启。
+- **回滚兜底**：新配置启动失败（如 join 端口被占）→ 自动用 `config.json.bak` 回滚并重启旧实例；原因写入诊断页「最近一次应用结果」。
+- 未以服务方式运行（前台 nohup）→ 返回手动命令 + 备份路径（待重启横幅保留，可「一键重启」或复制命令）。

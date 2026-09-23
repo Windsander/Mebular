@@ -132,35 +132,41 @@ describe('W1 工具面（CLI/MCP 同一 handler）', () => {
       // 不设 MEBULAR_DEVICE_ID：init 与后续 mcp 用同一派生 deviceId（避免身份文件与 config 不一致）
       const env = { ...process.env, MEBULAR_HOME: dir, MEBULAR_STORAGE_PATH: join(dir, 'store.jsonl') };
       execFileSync(process.execPath, [MCP_BIN, 'init'], { env, encoding: 'utf-8' });
-      const rpc = (messages: unknown[]): Array<{ result?: { tools?: Array<{ name: string }>; content?: Array<{ text: string }>; structuredContent?: Record<string, unknown> }; error?: { code: number } }> => {
+      // SDK 不保证响应顺序：按 JSON-RPC id 取响应（CI 上曾因顺序不同而误判）
+      const rpc = (messages: unknown[]): Map<number, Record<string, unknown>> => {
         const input = messages.map((m) => JSON.stringify(m)).join('\n') + '\n';
         const out = spawnSync(process.execPath, [MCP_BIN, 'mcp'], { env, input, encoding: 'utf-8', timeout: 30000 });
-        return out.stdout.trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+        const byId = new Map<number, Record<string, unknown>>();
+        for (const line of out.stdout.trim().split('\n')) {
+          if (!line) continue;
+          const parsed = JSON.parse(line) as { id?: number };
+          if (typeof parsed.id === 'number') byId.set(parsed.id, parsed as Record<string, unknown>);
+        }
+        return byId;
       };
+      const resultOf = (byId: Map<number, Record<string, unknown>>, id: number): Record<string, unknown> =>
+        ((byId.get(id) as { result?: Record<string, unknown> })?.result ?? {});
 
-      // 官方 client 的 initialize 握手由 verify:mcp:stdio 覆盖；此处只验统一注册表与 handler 同源
-      const [list] = rpc([
-        { jsonrpc: '2.0', id: 2, method: 'tools/list' },
-      ]);
-      const names = (list!.result?.tools ?? []).map((t) => t.name);
+      const listed = rpc([{ jsonrpc: '2.0', id: 2, method: 'tools/list' }]);
+      const names = ((resultOf(listed, 2).tools as Array<{ name: string }>) ?? []).map((t) => t.name);
       expect(names).toHaveLength(27);
       expect(names).toContain('memory_status');
       expect(names).toContain('task_submit');
       expect(names).toContain('task_status');
 
-      // 任务 handler 与 fleet 同源：task_status 在守护 home 上可读
-      const [quota, memory, badInput] = rpc([
+      const called = rpc([
         { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'task_quota', arguments: {} } },
         { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'memory_status', arguments: {} } },
         { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'task_submit', arguments: { to: { device: 'device-B', agent: 'echo' } } } },
       ]);
-      const quotaPayload = quota!.result?.structuredContent as { ok?: boolean; device?: string } | undefined;
-      expect(quotaPayload?.ok).toBe(true);
-      expect(typeof quotaPayload?.device).toBe('string');
-      const memoryPayload = memory!.result?.structuredContent as { deviceId?: string } | undefined;
-      expect(typeof memoryPayload?.deviceId).toBe('string');
+      // 任务 handler 与 fleet 同源：task_quota 在守护 home 上可读
+      const quota = resultOf(called, 3).structuredContent as { ok?: boolean; device?: string } | undefined;
+      expect(quota?.ok).toBe(true);
+      expect(typeof quota?.device).toBe('string');
+      const memory = resultOf(called, 4).structuredContent as { deviceId?: string } | undefined;
+      expect(typeof memory?.deviceId).toBe('string');
       // R3.3：错误信封（缺必填 intent → E_INPUT）
-      const bad = badInput!.result as { isError?: boolean; structuredContent?: { ok?: boolean; error?: { code?: string; message?: string } } };
+      const bad = resultOf(called, 5) as { isError?: boolean; structuredContent?: { ok?: boolean; error?: { code?: string; message?: string } } };
       expect(bad.isError).toBe(true);
       expect(bad.structuredContent?.ok).toBe(false);
       expect(bad.structuredContent?.error?.code).toBe('E_INPUT');

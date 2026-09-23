@@ -8,10 +8,12 @@
 
 | 入口 | 动作 | 结果 |
 |---|---|---|
-| **建新 Mebular** | `POST /app/provision/create`（设备名可改） | 生成 root 主密钥 + 写 `config.json`（`joinService.enabled=true`、`mcp.http` 回环、`network` 默认）→ **自动重启** → 正常态（「＋ 邀请新设备」可用） |
+| **建新 Mebular** | `POST /app/provision/create`（设备名可改；填名字即可，带 `device-` 前缀也不会重复拼接——见「设备名归一化」） | 生成 root 主密钥 + 写 `config.json`（`joinService.enabled=true`、`mcp.http` 回环、`network` 默认）→ **自动重启** → 正常态（「＋ 邀请新设备」可用） |
 | **加入已有 Mebular** | `POST /app/provision/join`（粘贴邀请令牌；复用 fleet 令牌验签/兑换） | 取回**委派证书链**（delegated，**无主私钥**）+ 主公钥（仅公钥）+ inviter hints 入 `<home>/net/peers.json` → **自动重启** → 正常态（授权分区 = 令牌分区） |
 
 错误可读：令牌过期 / 签名不符 / 端点不可达 / 已使用 → 页面直接显示原因；重复调 provision → `409`；失败**不残留半成品**（仍可重试）。未以服务方式运行时给出手动重启命令（`nohup mebular serve …`）。
+
+**设备名归一化（F-ONB-1）**：设备名先 sanitize，再去掉**所有重复的 `device-` 前缀**，最后拼一次前缀 —— 输入 `TestB` / `device-TestB` / `device-device-TestB` 都得到 `device-TestB`；空名 → `device-local`。两个输入框带「将使用 deviceId: …」实时预览。
 
 设置弹层分三个 Tab：**常用**（默认开）· **高级**（默认收起）· **诊断**；只读信息统一在**「关于本机」**面板（点顶栏状态徽章 `本机 · <deviceId>` 打开）。
 IA 单一真源在 [`packages/console/settings-ia.js`](../../packages/console/settings-ia.js)，E1（`verify-console.mjs`）以迁移表驱动断言「不丢项：每项有且仅有唯一去处」。

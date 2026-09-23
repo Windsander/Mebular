@@ -124,6 +124,24 @@ async function post(port, path, body, { withCsrf = true, timeoutMs = 20000 } = {
 }
 
 const readJson = async (p) => { try { return JSON.parse(await readFile(p, 'utf-8')); } catch { return null; } };
+
+/**
+ * F-UNI-1（同类审计）：轮询 /admin/api/settings 直到 predicate 为真；禁单次读碰运气。
+ * 超时返回最后一次观测（断言据此判红），并附等待时长。
+ */
+async function waitForSettings(port, predicate, { timeoutMs = 20000, pollMs = 300 } = {}) {
+  const started = Date.now();
+  let attempts = 0;
+  let last = null;
+  for (;;) {
+    attempts += 1;
+    const res = await getJson(port, '/admin/api/settings');
+    last = res.json ?? null;
+    if (last && predicate(last)) return { ok: true, settings: last, waitedMs: Date.now() - started, attempts };
+    if (Date.now() - started > timeoutMs) return { ok: false, settings: last, waitedMs: Date.now() - started, attempts };
+    await sleep(pollMs);
+  }
+}
 /** 等重启完成：新 pid + 健康 + 引导接口消失（进入正常态）。 */
 async function waitNormal(port, home, oldPid, timeoutMs = 30000) {
   const started = Date.now();
@@ -251,9 +269,10 @@ async function main() {
     check('O2 邀请面板可用（/admin/api/invite → 令牌）',
       (invite.status === 201 || invite.status === 200) && typeof invite.json?.token === 'string' && invite.json.token.length > 0,
       `status=${invite.status}`);
+    const s2 = await waitForSettings(portA, (j) => j.identity?.mode === 'root');
     check('O2 设置页数据可用（/admin/api/settings 200 + identity.mode=root）',
-      (await getJson(portA, '/admin/api/settings')).json?.identity?.mode === 'root',
-      `mode=${(await getJson(portA, '/admin/api/settings')).json?.identity?.mode}`);
+      s2.ok,
+      s2.ok ? `mode=root 等待=${s2.waitedMs}ms` : `mode=${s2.settings?.identity?.mode ?? 'undefined'} 等待=${s2.waitedMs}ms/${s2.attempts} 次`);
   }
 
   // ============================================================ O3 加入
@@ -305,9 +324,11 @@ async function main() {
     livePids.add(stateB?.pid);
     check('O3 自动重启 → 正常态（引导接口消失 + overview 200）',
       Boolean(stateB) && (await getJson(portB, '/admin/api/overview')).status === 200, `newPid=${stateB?.pid}`);
-    const settingsB = await getJson(portB, '/admin/api/settings');
+    const s3 = await waitForSettings(portB, (j) => j.identity?.mode === 'delegated');
+    const settingsB = s3.settings;
     check('O3 正常态身份为 delegated（控制台显示委派模式）',
-      settingsB.json?.identity?.mode === 'delegated', `mode=${settingsB.json?.identity?.mode}`);
+      s3.ok,
+      s3.ok ? `mode=delegated 等待=${s3.waitedMs}ms` : `mode=${settingsB?.identity?.mode ?? 'undefined'} 等待=${s3.waitedMs}ms/${s3.attempts} 次`);
     // granted = 令牌分区（inviter 侧可查）
     const deviceB = cfgB?.deviceId;
     const effective = await getJson(portA, `/app/policy/effective?device=${encodeURIComponent(deviceB)}`);

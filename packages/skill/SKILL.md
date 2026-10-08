@@ -8,6 +8,8 @@ whenToUse: 需要记住或复用用户偏好/事实/会话/技能，跨会话或
 
 Mebular 是一个本地优先的分布式图记忆层。通过 MCP 工具读写记忆，行为规约见 `MEMORY_POLICY.md`。
 
+它是**叠加**基建：与既有 memory provider **共存、不接管**（不替代、不改造；不双写同一事实）——分工与导入口径见 `MEMORY_POLICY.md` §8。
+
 ## 何时使用
 
 - 用户透露稳定偏好、事实或约束，且未来会复用时。
@@ -41,7 +43,16 @@ Mebular 是一个本地优先的分布式图记忆层。通过 MCP 工具读写�
 
 ## 接入
 
-本 Skill 目录附各客户端 MCP 接入片段（见 `mcp/`）；`scripts/install.mjs` 可将本 Skill 安装到常见 Skill 目录。
+本 Skill 目录附各客户端 MCP 接入片段（见 `mcp/`）；`scripts/install.mjs` 可将本 Skill（含 `mcp/` 片段）安装到常见 Skill 目录。
+
+**会话里没有 Mebular 工具时的第一步**（每次会话）：
+
+1. 确认守护在跑：`MEBULAR_HOME=~/.mebular mebular status` → `storeLock` 非 null（未跑则先拉起，见 [`SETUP.md`](./SETUP.md) §0.3）。
+2. 生成当前客户端的接入片段：`mebular print-config --client <opencode|claude|cursor|dsh|generic>`
+   （远程形态追加 `--url https://<host>/mcp`），合入客户端 MCP 配置（先备份）并**重载客户端**。
+3. 用 `memory_status` 验证工具面可用；失败排查见 [`SETUP.md`](./SETUP.md) §0.4。
+
+完整剧本（幂等判定 / 拉起 / 接入 / 红线）见 [`SETUP.md`](./SETUP.md) §0「会话内接入」。
 
 ## 部署 / 加入 / 邀请
 

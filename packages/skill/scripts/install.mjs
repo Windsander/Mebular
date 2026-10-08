@@ -55,6 +55,8 @@ for (const target of targets) {
   await cp(join(pkgRoot, 'MEMORY_POLICY.md'), join(dest, 'MEMORY_POLICY.md'));
   // A：部署手册随 Skill 一起安装（Agent 据此可自动部署/加入）
   await cp(join(pkgRoot, 'SETUP.md'), join(dest, 'SETUP.md'));
+  // G1：接入片段随 Skill 一起安装（保持 SKILL.md「见 mcp/」的承诺成立）
+  await cp(join(pkgRoot, 'mcp'), join(dest, 'mcp'), { recursive: true });
   installed.push(dest);
   console.log(`installed ${dest}`);
 

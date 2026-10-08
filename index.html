@@ -41,6 +41,8 @@
       -webkit-backdrop-filter:blur(10px);
       border-bottom:1px solid rgba(80,160,255,0.12);
       transition:background 0.3s ease;
+      flex-wrap:wrap;
+      row-gap:10px;
     }
     nav .brand {
       font-size:0.68rem;
@@ -511,9 +513,10 @@
 
     /* ===== 响应式 ===== */
     @media (max-width:640px) {
-      nav .links { gap:14px; }
-      nav a { font-size:0.64rem; }
-      nav .brand { margin-right:16px; font-size:0.62rem; }
+      nav { padding:12px 14px; row-gap:8px; }
+      nav .links { gap:12px; row-gap:8px; flex-wrap:wrap; justify-content:center; }
+      nav a { font-size:0.6rem; letter-spacing:0.08em; }
+      nav .brand { margin-right:12px; font-size:0.6rem; }
       section.page { padding:80px 16px 40px; }
       #page-network { padding:20px; justify-content:center; align-items:center; }
       #page-network .page-inner { max-width:100%; text-align:center; }
@@ -539,6 +542,8 @@
       <a href="#" data-page="page-hero">系统</a>
       <a href="#" data-page="page-network">网络</a>
       <a href="#" data-page="page-design">设计</a>
+      <a href="pricing.html">定价</a>
+      <a href="waitlist.html">等待名单</a>
       <a href="https://github.com/Windsander/Mebular" target="_blank" rel="noopener" class="github-link">GitHub</a>
     </div>
   </nav>
@@ -1329,6 +1334,16 @@
       net.syncTimer = 2000;
       requestAnimationFrame(loop);
       updateUI();
+
+      // 支持从定价/等待名单页通过 hash 深链进入指定分页（如 index.html#page-network）
+      try {
+        var hash = (location.hash || '').replace('#', '');
+        if (hash) {
+          var hashIdx = pages.findIndex(function(p){ return p.id === hash; });
+          if (hashIdx > 0) switchToPage(hashIdx, true);
+        }
+      } catch (e) {}
+
       if (DEBUG) console.log('[Mebular] 初始化 · 星星:', stars.stars.length);
     }
 

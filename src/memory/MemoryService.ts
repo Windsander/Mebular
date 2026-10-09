@@ -4,7 +4,7 @@
 // 复用 MemoryStore（类型化写入 + 关键词/向量检索），不重复实现。
 
 import type { Mebular } from '../mebular.js';
-import { MemoryStore } from './MemoryStore.js';
+import { MemoryStore, isArchived } from './MemoryStore.js';
 import { EdgeTypes, type EpisodeNode, type FactNode, type SkillNode } from './types.js';
 import type { VectorIndex } from './VectorIndex.js';
 import { ValidationError, ErrorCodes, MebularError, SyncError } from '../errors.js';
@@ -39,6 +39,29 @@ export interface MemoryServiceOptions {
   vectorIndex?: VectorIndex;
   /** 同步等待超时（ms，缺省 30s） */
   syncTimeoutMs?: number;
+}
+
+/**
+ * G-ML-1 生命周期选项：**默认不召回已归档**（`metadata.archivedAt`）；显式 `includeArchived: true` 才可见。
+ * 以交叉类型方式挂在查询参数上——不改动 Hermes/工具侧的既有类型定义。
+ */
+export interface LifecycleOptions {
+  includeArchived?: boolean;
+}
+
+/** G-ML-1 删除结果（墓碑；随 `node_deleted` 事件同步传播）。 */
+export interface DeleteResult {
+  deleted: string[];
+  notFound: string[];
+}
+
+/** G-ML-1 归档结果（`metadata.archivedAt` 标记，可逆；随 `node_updated` 事件同步传播）。 */
+export interface ArchiveResult {
+  archived: string[];
+  unarchived: string[];
+  notFound: string[];
+  /** 墓碑节点：不可归档（删除不可逆于归档语义） */
+  skipped: string[];
 }
 
 export interface MemoryStatus {
@@ -137,9 +160,10 @@ export class MemoryService {
 
   // ---------- 检索 ----------
 
-  async query(query: MemoryQuery): Promise<RetrievalResult> {
+  async query(query: MemoryQuery & LifecycleOptions): Promise<RetrievalResult> {
     const startedAt = Date.now();
     const candidateTypes = expandTypes(query.types);
+    const includeArchived = query.includeArchived === true;
 
     let nodes: Array<{ node: Node; relevance?: number }>;
 
@@ -147,7 +171,7 @@ export class MemoryService {
     const inNamespace = (node: Node): boolean => matchesNamespace(node.namespace, namespace);
 
     if (query.query && this.memory.hasVectorIndex()) {
-      const hits = await this.memory.vectorQuery(query.query, query.limit ?? 10);
+      const hits = await this.memory.vectorQuery(query.query, query.limit ?? 10, { includeArchived });
       const vectorNodes = hits
         .filter(({ node }) => candidateTypes.includes(node.type) && inNamespace(node))
         .map(({ node, score }) => ({ node, relevance: score }));
@@ -155,17 +179,18 @@ export class MemoryService {
         nodes = vectorNodes;
       } else {
         // 向量无命中：诚实回退关键词基线（G2-R）
-        const keywordHits = await this.memory.search(query.query, { types: candidateTypes, namespace });
+        const keywordHits = await this.memory.search(query.query, { types: candidateTypes, namespace, includeArchived });
         nodes = keywordHits.map((node) => ({ node }));
       }
     } else if (query.query) {
-      const hits = await this.memory.search(query.query, { types: candidateTypes, namespace });
+      const hits = await this.memory.search(query.query, { types: candidateTypes, namespace, includeArchived });
       nodes = hits.map((node) => ({ node }));
     } else {
       const collected: Node[] = [];
       for (const type of candidateTypes) {
         collected.push(...(await this.memory.listByType(type, {
           includeDeleted: query.includeHistory,
+          includeArchived,
           ...(namespace !== undefined ? { namespace } : {}),
         })));
       }
@@ -191,7 +216,7 @@ export class MemoryService {
     };
   }
 
-  async search(query: SearchQuery): Promise<SearchResult> {
+  async search(query: SearchQuery & LifecycleOptions): Promise<SearchResult> {
     const startedAt = Date.now();
     const hits = await this.memory.search(query.query, {
       types: query.types,
@@ -199,6 +224,7 @@ export class MemoryService {
       createdAfter: query.filters?.createdAfter,
       createdBefore: query.filters?.createdBefore,
       namespace: query.filters?.namespace,
+      includeArchived: query.includeArchived === true,
     });
     const limited = query.limit !== undefined ? hits.slice(0, query.limit) : hits;
 
@@ -229,14 +255,15 @@ export class MemoryService {
 
   // ---------- 画像 / 技能 / 历史 ----------
 
-  async profile(): Promise<UserProfile> {
-    const entities = await this.memory.listByType('entity');
+  async profile(options: LifecycleOptions = {}): Promise<UserProfile> {
+    const includeArchived = options.includeArchived === true;
+    const entities = await this.memory.listByType('entity', { includeArchived });
     const userEntity = entities.find(
       (node) => (node.content as { entityType?: string }).entityType === 'user'
         && (node.content as { name?: string }).name === this.userId,
     );
 
-    const preferenceFacts = (await this.memory.listActiveFacts())
+    const preferenceFacts = (await this.memory.listActiveFacts({ includeArchived }))
       .filter((fact) => (fact.tags ?? []).includes(PREFERENCE_TAG));
 
     const preferences: Preference[] = preferenceFacts.map((fact) => ({
@@ -256,8 +283,8 @@ export class MemoryService {
     };
   }
 
-  async skills(filter?: SkillFilter): Promise<Skill[]> {
-    let nodes = await this.memory.listByType('skill', { tags: filter?.tags });
+  async skills(filter?: SkillFilter & LifecycleOptions): Promise<Skill[]> {
+    let nodes = await this.memory.listByType('skill', { tags: filter?.tags, includeArchived: filter?.includeArchived === true });
     if (filter?.category) {
       nodes = nodes.filter((node) => (node.content as { category?: string }).category === filter.category);
     }
@@ -272,8 +299,8 @@ export class MemoryService {
     return nodes.map((node) => toSpecSkill(node as SkillNode));
   }
 
-  async history(filters: ConversationFilters): Promise<ConversationHistory> {
-    let episodes = (await this.memory.listByType('episode')) as EpisodeNode[];
+  async history(filters: ConversationFilters & LifecycleOptions): Promise<ConversationHistory> {
+    let episodes = (await this.memory.listByType('episode', { includeArchived: filters.includeArchived === true })) as EpisodeNode[];
     episodes = episodes.filter((episode) => episode.content.episodeType === 'conversation');
 
     if (filters.sessionIds?.length) {
@@ -306,10 +333,58 @@ export class MemoryService {
     return { episodes: limited, totalCount };
   }
 
+  // ---------- 生命周期：删除 / 归档（G-ML-1） ----------
+
+  /**
+   * 删除：复用 GraphStore 既有墓碑 API（`deleteNode` → `deletedAt` + `node_deleted` 事件）。
+   * 删除后默认不参与任何召回，且**随图事件同步**到各端（D1a：墓碑传播；对端旧快照无法强制回收）。
+   */
+  async delete(ids: string[]): Promise<DeleteResult> {
+    const deleted: string[] = [];
+    const notFound: string[] = [];
+    for (const id of ids) {
+      const ok = await this.mebular.graph.deleteNode(id);
+      (ok ? deleted : notFound).push(id);
+    }
+    return { deleted, notFound };
+  }
+
+  /**
+   * 归档 / 解除归档：节点级 `metadata.archivedAt` 标记（走 `updateNode` → `node_updated` 事件）。
+   * 可逆、无损；默认不参与召回，`includeArchived: true` 可查。墓碑节点跳过（skipped）。
+   */
+  async archive(ids: string[], archived = true): Promise<ArchiveResult> {
+    const archivedIds: string[] = [];
+    const unarchivedIds: string[] = [];
+    const notFound: string[] = [];
+    const skipped: string[] = [];
+    for (const id of ids) {
+      const node = await this.mebular.graph.getNode(id);
+      if (!node) { notFound.push(id); continue; }
+      if (node.deletedAt) { skipped.push(id); continue; }
+      const raw = (node.metadata ?? {}) as Record<string, unknown>;
+      const { archivedAt: _drop, ...rest } = raw;
+      const metadata = archived ? { ...rest, archivedAt: Date.now() } : rest;
+      await this.mebular.graph.updateNode(id, { metadata });
+      (archived ? archivedIds : unarchivedIds).push(id);
+    }
+    return { archived: archivedIds, unarchived: unarchivedIds, notFound, skipped };
+  }
+
   // ---------- 图 / 导入 / 状态 / 同步 ----------
 
-  async graph(startId: string, options?: TraverseOptions): Promise<TraverseResult> {
-    return this.mebular.graph.traverse(startId, options);
+  async graph(startId: string, options?: TraverseOptions & LifecycleOptions): Promise<TraverseResult> {
+    const includeArchived = options?.includeArchived === true;
+    const result = await this.mebular.graph.traverse(startId, options);
+    if (includeArchived) return result;
+    // G-ML-1：归档默认不参与遍历（节点与边按端点过滤；起点的归档由 core 侧决定）
+    const keep = (node: Node): boolean => !isArchived(node);
+    const keptIds = new Set(result.visitedNodes.filter(keep).map((n) => n.id));
+    return {
+      ...result,
+      visitedNodes: result.visitedNodes.filter(keep),
+      visitedEdges: result.visitedEdges.filter((e) => keptIds.has(e.source) || keptIds.has(e.target)),
+    };
   }
 
   async import(input: ImportInput): Promise<ImportResult> {

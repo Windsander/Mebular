@@ -150,6 +150,41 @@ try {
     check('SETUP §3 status 不再用不存在的 --home 参数（改注 MEBULAR_HOME）',
       !/mebular status --home/.test(setup) && setup.includes('MEBULAR_HOME=<dir> mebular status'));
 
+    // ---------- 修复轮 A/B/C（评审 3 处必改）----------
+    // A（高）：§0.1 的 `mebular status` 必须在「home 存在」守卫内（无 home 照抄不得自举身份）
+    const s01 = setup.slice(setup.indexOf('**0.1 幂等'), setup.indexOf('**0.2 无 home'));
+    const s01Block = (s01.match(/```bash\n([\s\S]*?)```/) ?? [])[1] ?? '';
+    check('A §0.1 的 `mebular status` 处于「home 存在」守卫内（if [ -f …config.json ] … then … else … fi）',
+      /if \[ -f "\$HOME_DIR\/config\.json" \]; then/.test(s01Block)
+        && /then[\s\S]*?mebular status[\s\S]*?else[\s\S]*?fi/.test(s01Block)
+        && (s01Block.match(/mebular status/g) ?? []).length === 1,
+      s01Block.includes('mebular status') ? '守卫内唯一一处 status' : '缺少 status');
+    check('A §0.1 守卫的 else 分支明确「无 home → §3/§5」且**不跑** status',
+      /else[\s\S]*?无 home → §3 建新 \/ §5 加入/.test(s01Block) && /不要在这里跑 status/.test(s01Block));
+
+    // B（中）：§0.4 判据不得把 storeLock 列为 memory_status 的返回项，且须注明它来自 CLI status
+    const s04 = setup.slice(setup.indexOf('**0.4 接入当前客户端'), setup.indexOf('**0.5 红线'));
+    check('B §0.4 不把 `storeLock` 列为 `memory_status` 返回项，并注明见 CLI `mebular status`',
+      /memory_status`.{0,40}`deviceId`.{0,20}`running`/.test(s04)
+        && /`storeLock` \*\*不在\*\* `memory_status` 的返回里/.test(s04)
+        && /CLI `mebular status`/.test(s04)
+        && !/memory_status` —— 期望返回 `deviceId` \/ `storeLock`/.test(s04),
+      '措辞已更正');
+
+    // C（中）：§0.3 的 service 命令必须带 MEBULAR_HOME 前缀（否则单元退化到 <cwd>/.mebular）
+    const s03 = setup.slice(setup.indexOf('**0.3 有 home 但未在跑'), setup.indexOf('若所在环境不支持常驻'));
+    check('C §0.3 `mebular service install`/`status` 均带 `MEBULAR_HOME=~/.mebular` 前缀',
+      /MEBULAR_HOME=~\/\.mebular mebular service install/.test(s03)
+        && (s03.match(/MEBULAR_HOME=~\/\.mebular mebular service status/g) ?? []).length === 2
+        && !/\n +mebular service (install|status)/.test(s03),
+      '三条命令均带前缀');
+    check('C §0.3 说明「未设 MEBULAR_HOME 时退化到 <cwd>/.mebular」的依据',
+      /`homeDir\(\)` 退化为 \*\*`<cwd>\/\.mebular`\*\*/.test(s03) && /workingDir/.test(s03) && /storeLock=null/.test(s03));
+
+    // D（随行）：SKILL.md 接入第 1 步同样防滥用
+    check('D SKILL.md 接入第 1 步注明「home 不存在时先按 SETUP §3/§5，不要跑 status」',
+      /home 不存在时\*\*先按 SETUP §3\/§5/.test(skill) && /不要跑 `status`/.test(skill));
+
     // §0 与 SKILL 的互相引用
     check('SKILL.md 接入节含 print-config 与「会话里没有 Mebular 工具时的第一步」',
       skill.includes('print-config') && /没有 Mebular 工具时的第一步/.test(skill));

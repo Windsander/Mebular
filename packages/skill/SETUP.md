@@ -12,8 +12,13 @@
 
 ```bash
 command -v mebular          # 期望：打印路径；未安装（无输出、exit 1）→ 见 §2
-test -f "${MEBULAR_HOME:-$HOME/.mebular}/config.json" && echo "home 存在" || echo "无 home → §3 建新 / §5 加入"
-MEBULAR_HOME="${MEBULAR_HOME:-$HOME/.mebular}" mebular status      # 判定见下（exit 0）
+# 幂等判定**只在 home 已存在时**执行 status（无 home 时它会在默认 home 自举身份材料，见 0.2）
+HOME_DIR="${MEBULAR_HOME:-$HOME/.mebular}"
+if [ -f "$HOME_DIR/config.json" ]; then
+  MEBULAR_HOME="$HOME_DIR" mebular status      # 判定见下（exit 0）
+else
+  echo "无 home → §3 建新 / §5 加入"           # 不要在这里跑 status
+fi
 ```
 
 判定「守护已在跑」：`status` 输出里 **`storeLock` 非 null**（形如 `{"pid":…,"startedAt":…,"storagePath":…}`）→
@@ -34,10 +39,14 @@ MEBULAR_HOME="${MEBULAR_HOME:-$HOME/.mebular}" mebular status      # 判定见�
 优先**常驻**（按 `packages/service` 的平台矩阵：darwin = launchd 用户级 LaunchAgent；linux = `systemd --user`；win32 = 计划任务 onlogon）：
 
 ```bash
-mebular service status     # 只读：services[0].registered / running
-mebular service install    # 常驻 + 自启（不想自启用 --no-autostart）
-mebular service status     # 判定：services[0].registered === true 且 running === true
+MEBULAR_HOME=~/.mebular mebular service status     # 只读：services[0].registered / running
+MEBULAR_HOME=~/.mebular mebular service install    # 常驻 + 自启（不想自启用 --no-autostart）
+MEBULAR_HOME=~/.mebular mebular service status     # 判定：services[0].registered === true 且 running === true
 ```
+
+> **必须带 `MEBULAR_HOME`**：CLI 未设该变量时 `homeDir()` 退化为 **`<cwd>/.mebular`**（与 `mebular status` 的
+> `~/.mebular` 不一致），service 会把该值写进单元的 `env.MEBULAR_HOME` 与 `workingDir` → 守护跑错 home，
+> 而 §0.3 的确认命令读 `~/.mebular`，会表现为「没起来」（`storeLock=null`）。
 
 若所在环境不支持常驻（无 launchd/systemd/计划任务的容器等），改**前台**拉起：
 
@@ -64,11 +73,12 @@ mebular print-config --client <opencode|claude|cursor|dsh|generic>    # 远程�
 
 1. 把输出片段合入**当前客户端**的 MCP 配置（**先备份**原文件）；`dsh` 形态为客户端桥接（只桥接 Tools）。
 2. **重载客户端**（重启该客户端/会话）后生效。
-3. 验证：在本会话调用 `memory_status` —— 期望返回 `deviceId` / `storeLock` / 计数等字段。
+3. 验证：在本会话调用 `memory_status` —— 期望返回 `deviceId` / `running`（P2P 节点）/ 计数等字段。
+   注意：`storeLock` **不在** `memory_status` 的返回里（那是 CLI `mebular status` 追加的字段，见 0.1/0.3）。
    若「没有 mebular 工具」：片段未生效或未重载客户端，回到第 1–2 步。
 
 > 实测：`MEBULAR_HOME=<沙箱> node packages/mcp/bin/mebular.mjs mcp` 上 `tools/call memory_status` 返回
-> `deviceId=device-local`，无 `isError`。
+> `deviceId=device-local`、`running=false`（P2P，默认 home 网络未启用）与 12 个字段；**无 `storeLock`**。
 
 **0.5 红线**
 

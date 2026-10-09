@@ -24,6 +24,9 @@ const state = {
   policy: [],
   namespaces: [],
   selectedNamespace: null,
+  // G-ML-1：记忆生命周期视图（动作式；默认过滤已删除/已归档）
+  memories: null,
+  memoryFilters: { archived: false, deleted: false, namespace: '' },
   settings: null,
   healthz: null,
   settingsTab: 'common',
@@ -100,9 +103,10 @@ async function refresh() {
     api('/admin/api/namespaces'),
     api('/admin/api/settings'),
     api('/admin/api/config'),
+    api(`/admin/api/memories${memQuery()}`),
     api('/healthz'),
   ]);
-  const [overview, devices, policy, namespaces, settings, configView, healthz] = results;
+  const [overview, devices, policy, namespaces, settings, configView, memories, healthz] = results;
   if (healthz && healthz.status === 'fulfilled') state.healthz = healthz.value;
   let firstError = null;
   if (overview.status === 'fulfilled') state.overview = overview.value;
@@ -113,6 +117,7 @@ async function refresh() {
   if (namespaces.status === 'fulfilled') state.namespaces = namespaces.value;
   if (settings.status === 'fulfilled') state.settings = settings.value;
   if (configView.status === 'fulfilled') state.rawConfig = configView.value;
+  if (memories.status === 'fulfilled') state.memories = memories.value;
   state.features = { writes: Boolean(state.overview?.features?.writes) };
   state.error = firstError;
   state.degraded = computeDegraded();
@@ -140,6 +145,7 @@ function render() {
   renderDeviceCard();
   renderDomains();
   renderAudit();
+  renderMemories();
   if (!$('#settings').hidden) renderSettings();
   if (!$('#about').hidden) renderAbout();
   renderBanner();
@@ -1351,10 +1357,106 @@ async function declareIssuer() {
   }
 }
 
+// ---------- G-ML-1：记忆生命周期（动作式：归档/解除归档/删除；默认过滤已删除与已归档） ----------
+
+function memQuery() {
+  const f = state.memoryFilters;
+  const params = new URLSearchParams();
+  if (f.archived) params.set('includeArchived', '1');
+  if (f.deleted) params.set('includeDeleted', '1');
+  if (f.namespace) params.set('namespace', f.namespace);
+  const query = params.toString();
+  return query ? `?${query}` : '';
+}
+
+function memActionLabel(action) {
+  return { archive: '归档', unarchive: '解除归档', delete: '删除' }[action] ?? action;
+}
+
+async function memAction(id, action) {
+  if (MOCK) {
+    window.alert('mock 模式不执行写操作。');
+    return;
+  }
+  if (action === 'delete') {
+    const ok = await confirmModal({
+      title: '删除记忆（不可逆）',
+      body: `将删除 ${id}：写墓碑并随图同步，删除后默认不再召回。\n注意：对端已拷贝的旧快照无法强制回收。确定？`,
+      confirmLabel: '删除',
+    });
+    if (!ok) return;
+  }
+  try {
+    await api(`/admin/api/memories/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: {} });
+    showToast(action === 'delete' ? `已删除 ${id}` : action === 'archive' ? `已归档 ${id}` : `已解除归档 ${id}`);
+    await refresh();
+  } catch (error) {
+    window.alert(`操作失败：${error.message}`);
+  }
+}
+
+function populateMemFilters() {
+  const select = $('#mem-filter-namespace');
+  if (!select) return;
+  const current = state.memoryFilters.namespace;
+  const names = [...new Set((state.namespaces ?? []).map((n) => n.namespace))].sort();
+  select.innerHTML = '<option value="">全部域</option>'
+    + names.map((name) => `<option value="${escapeHtml(name)}"${name === current ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('');
+}
+
+function renderMemories() {
+  const list = $('#memories-list');
+  if (!list) return;
+  const archivedBox = $('#mem-filter-archived');
+  const deletedBox = $('#mem-filter-deleted');
+  if (archivedBox) archivedBox.checked = state.memoryFilters.archived;
+  if (deletedBox) deletedBox.checked = state.memoryFilters.deleted;
+  populateMemFilters();
+  const data = state.memories;
+  if (!data) {
+    list.innerHTML = '<p class="muted">记忆加载中…</p>';
+    return;
+  }
+  if (data.memories.length === 0) {
+    list.innerHTML = `<p class="muted">没有匹配的记忆（默认不显示已删除/已归档；共 ${data.total} 条）。</p>`;
+    return;
+  }
+  list.innerHTML = data.memories.map((memory) => {
+    const badges = [
+      memory.archived ? '<span class="crt-tag crt-tag-warn">已归档</span>' : '',
+      memory.deleted ? '<span class="crt-tag crt-tag-error">已删除</span>' : '',
+    ].filter(Boolean).join(' ');
+    const canArchive = state.features.writes && !memory.deleted;
+    const actions = [
+      canArchive
+        ? `<button class="btn btn-small btn-crt" type="button" data-mem-action="${memory.archived ? 'unarchive' : 'archive'}" data-mem-id="${escapeHtml(memory.id)}">${memory.archived ? '解除归档' : '归档'}</button>`
+        : '',
+      !memory.deleted && state.features.writes
+        ? `<button class="btn btn-small btn-crt" type="button" data-mem-action="delete" data-mem-id="${escapeHtml(memory.id)}">删除</button>`
+        : '',
+    ].filter(Boolean).join(' ');
+    return `<article class="mem-row crt-surface" data-mem-row="${escapeHtml(memory.id)}">
+      <div class="mem-main">
+        <div class="mem-head">
+          <span class="crt-tag">${escapeHtml(String(memory.type))}</span>
+          <span class="crt-tag">${escapeHtml(String(memory.namespace))}</span>
+          ${badges}
+          <code class="mem-id">${escapeHtml(memory.id)}</code>
+        </div>
+        <p class="mem-preview">${escapeHtml(memory.preview || '（空）')}</p>
+        <p class="muted mem-meta">创建 ${formatTime(memory.createdAt)}${memory.archivedAt ? ` · 归档 ${formatTime(memory.archivedAt)}` : ''}${memory.deletedAt ? ` · 删除 ${formatTime(memory.deletedAt)}` : ''}</p>
+      </div>
+      <div class="mem-actions">${actions}</div>
+    </article>`;
+  }).join('');
+}
+
 function renderAudit() {
   const actionFilter = $('#audit-filter-action').value;
   const deviceFilter = $('#audit-filter-device').value;
   const nsFilter = $('#audit-filter-namespace').value;
+  const timeFilter = Number($('#audit-filter-time')?.value ?? '') || 0;
+  const since = timeFilter > 0 ? Date.now() - timeFilter : 0;
 
   populateAuditFilters();
 
@@ -1364,6 +1466,7 @@ function renderAudit() {
     if (actionFilter && event.type !== actionFilter) return false;
     if (deviceFilter && event.issuer !== deviceFilter && event.subject !== deviceFilter) return false;
     if (nsFilter && !(event.namespaces ?? []).includes(nsFilter)) return false;
+    if (since > 0 && (event.at ?? 0) < since) return false;
     return true;
   });
   if (events.length === 0) {
@@ -1985,6 +2088,7 @@ function setView(view) {
   document.querySelector('.sidebar')?.classList.toggle('is-map', view === 'map');
   $('#domains-view').hidden = view !== 'domains';
   $('#audit-view').hidden = view !== 'audit';
+  $('#memories-view').hidden = view !== 'memories';
   $('#stage').style.visibility = view === 'map' ? 'visible' : 'hidden';
   $('#empty-state').hidden = true;
   const asideEl = document.querySelector('.aside');
@@ -1995,6 +2099,26 @@ function setView(view) {
 $('#audit-filter-action').addEventListener('change', renderAudit);
 $('#audit-filter-device').addEventListener('change', renderAudit);
 $('#audit-filter-namespace').addEventListener('change', renderAudit);
+$('#audit-filter-time')?.addEventListener('change', renderAudit);
+
+$('#mem-filter-archived')?.addEventListener('change', (event) => {
+  state.memoryFilters.archived = event.target.checked;
+  void refresh();
+});
+$('#mem-filter-deleted')?.addEventListener('change', (event) => {
+  state.memoryFilters.deleted = event.target.checked;
+  void refresh();
+});
+$('#mem-filter-namespace')?.addEventListener('change', (event) => {
+  state.memoryFilters.namespace = event.target.value;
+  void refresh();
+});
+$('#mem-refresh')?.addEventListener('click', () => { void refresh(); });
+$('#memories-list')?.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-mem-action]');
+  if (!button) return;
+  void memAction(button.dataset.memId, button.dataset.memAction);
+});
 
 $('#audit-export').addEventListener('click', () => {
   const blob = new Blob([JSON.stringify(state.policy, null, 2)], { type: 'application/json' });

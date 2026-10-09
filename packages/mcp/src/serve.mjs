@@ -746,7 +746,7 @@ export async function startHttpServer({
     return sendJson(res, 404, { error: 'not_found', path });
   }
 
-  async function handleAdminRead(req, res, path) {
+  async function handleAdminRead(req, res, path, url) {
     const builder = READ_ROUTES[path];
     if (!builder) return false;
     if (!app || !service) {
@@ -761,7 +761,7 @@ export async function startHttpServer({
     // 注意：CSRF token 只在 /console/ 页面加载时签发。若在 overview 轮询里重新签发，
     // cookie 会被每次轮询改写，与并发的写请求竞争（读 cookie 后、发出写之前又来一次
     // overview）→ header 与 cookie 不一致而 403。token 12h 有效，页面加载签发一次即可。
-    const payload = await builder({ app, service, config, runtime, home });
+    const payload = await builder({ app, service, config, runtime, home, url });
     if (path === '/admin/api/overview') {
       payload.features = { writes: Boolean(writesEnabled) };
     }
@@ -860,6 +860,7 @@ export async function startHttpServer({
     /^\/admin\/api\/devices\/([^/]+)\/(revoke|connect|disconnect|sync|reset-watermarks)$/,
     /^\/admin\/api\/config$/,
     /^\/admin\/api\/restart$/,
+    /^\/admin\/api\/memories\/([^/]+)\/(archive|unarchive|delete)$/,
     /^\/admin\/api\/invite$/,
     /^\/admin\/api\/policy-issuers$/,
     /^\/admin\/api\/memberships$/,
@@ -1156,6 +1157,28 @@ export async function startHttpServer({
           timeoutMs,
         },
       });
+    }
+
+    // G-ML-1：记忆生命周期（动作式，无开关）——归档/解除归档（可逆）+ 删除（墓碑）
+    const memoryActionMatch = path.match(/^\/admin\/api\/memories\/([^/]+)\/(archive|unarchive|delete)$/);
+    if (memoryActionMatch) {
+      const id = decodeURIComponent(memoryActionMatch[1]);
+      const action = memoryActionMatch[2];
+      if (action === 'delete') {
+        const result = await service.delete([id]);
+        if (result.deleted.length === 0) {
+          return sendJson(res, 404, { ok: false, error: 'not_found', message: `记忆不存在：${id}` });
+        }
+        return sendJson(res, 200, { ok: true, action: 'delete', id, ...result });
+      }
+      const result = await service.archive([id], action === 'archive');
+      if (result.notFound.length > 0) {
+        return sendJson(res, 404, { ok: false, error: 'not_found', message: `记忆不存在：${id}` });
+      }
+      if (result.skipped.length > 0) {
+        return sendJson(res, 409, { ok: false, error: 'conflict', message: '已删除（墓碑）的记忆不可归档', id });
+      }
+      return sendJson(res, 200, { ok: true, action, id, ...result });
     }
 
     // 一键重启（C）：设置页「待重启」横幅 → 立即让保存的配置生效
@@ -1630,7 +1653,7 @@ export async function startHttpServer({
           const out = await buildHandoffPlan({ app }, decodeURIComponent(planMatch[1]), successor);
           return sendJson(res, out.status, out.body);
         }
-        if (req.method === 'GET' && READ_ROUTES[path]) return handleAdminRead(req, res, path);
+        if (req.method === 'GET' && READ_ROUTES[path]) return handleAdminRead(req, res, path, url);
         // 写端点路径：任何方法都交给 handleAdminWrite（非 POST/PUT/PATCH → 405；Origin/CSRF/scope 同处校验）
         if (WRITE_PATTERNS.some((re) => re.test(path))) {
           const done = await handleAdminWrite(req, res, path, body);

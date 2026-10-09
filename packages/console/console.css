@@ -956,3 +956,16 @@ select {
 #provision-status.is-error { color: #ffb4b4; }
 #provision-status.is-ok { color: #9dffcf; }
 #provision-join-token { font-family: var(--crt-mono, monospace); font-size: 11px; }
+
+/* ---------- G-ML-1：记忆生命周期视图（动作式） ---------- */
+.memories-list { display: grid; gap: 8px; margin-top: 10px; }
+.mem-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; padding: 10px 12px; align-items: start; }
+.mem-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.mem-id { font-size: 11px; opacity: 0.75; }
+.mem-preview { margin: 4px 0 2px; font-size: 12.5px; overflow-wrap: anywhere; }
+.mem-meta { font-size: 11px; margin: 0; }
+.mem-actions { display: flex; gap: 6px; align-items: center; }
+.mem-filter { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+@media (max-width: 760px) {
+  .mem-row { grid-template-columns: minmax(0, 1fr); }
+}

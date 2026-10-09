@@ -30,6 +30,7 @@
           <li><button class="view-btn is-active" data-view="map" type="button"><span class="view-icon">●</span><span class="view-label">星图</span></button></li>
           <li><button class="view-btn" data-view="domains" type="button"><span class="view-icon">○</span><span class="view-label">域视图</span></button></li>
           <li><button class="view-btn" data-view="audit" type="button"><span class="view-icon">○</span><span class="view-label">审计</span></button></li>
+          <li><button class="view-btn" data-view="memories" type="button"><span class="view-icon">○</span><span class="view-label">记忆</span></button></li>
         </ul>
         <section id="legend-panel" class="legend-panel crt-surface crt-corners">
           <button id="legend-toggle" class="legend-head" type="button" aria-expanded="true" aria-controls="legend-body">
@@ -86,10 +87,32 @@
               </select>
               <select id="audit-filter-device" aria-label="按设备过滤"><option value="">全部设备</option></select>
               <select id="audit-filter-namespace" aria-label="按域过滤"><option value="">全部域</option></select>
+              <select id="audit-filter-time" aria-label="按时间过滤">
+                <option value="">全部时间</option>
+                <option value="3600000">最近 1 小时</option>
+                <option value="86400000">最近 24 小时</option>
+                <option value="604800000">最近 7 天</option>
+              </select>
               <button id="audit-export" class="btn btn-crt" type="button">导出 JSON</button>
             </div>
           </div>
           <ol id="audit-list" class="audit-list"></ol>
+        </section>
+        <section id="memories-view" class="panel-view crt-screen" hidden>
+          <div class="audit-toolbar">
+            <div class="view-head">
+              <h2>记忆生命周期</h2>
+              <span class="view-head-sub">MEMORY CELLS</span>
+            </div>
+            <div class="audit-filters">
+              <label class="mem-filter muted"><input id="mem-filter-archived" type="checkbox" /> 显示已归档</label>
+              <label class="mem-filter muted"><input id="mem-filter-deleted" type="checkbox" /> 显示已删除</label>
+              <select id="mem-filter-namespace" aria-label="按域过滤"><option value="">全部域</option></select>
+              <button id="mem-refresh" class="btn btn-crt" type="button">刷新</button>
+            </div>
+          </div>
+          <p class="panel-note muted">动作式（无开关）：<b>归档</b> = 打 <code>metadata.archivedAt</code> 标记（默认不再召回、可解除、随图同步）；<b>删除</b> = 写墓碑（默认不再召回、随图同步；<b>不可逆</b>，对端已拷贝的旧快照无法强制回收）。两者都需 <code>memory.admin</code> + CSRF。</p>
+          <div id="memories-list" class="memories-list"></div>
         </section>
       </main>
 

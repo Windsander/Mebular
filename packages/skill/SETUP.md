@@ -109,16 +109,22 @@ command -v mebular && command -v fleet
 （`mebular --version` 不存在：会打印「未知命令：--version」并 exit 2。）
 
 > 安装时的 `prepare` 会自动完成三包构建（`mebular` 与 `fleet` 双 bin 随包发布，无需手动 build；缺省 home 为 `~/.mebular`）。
-> 若你的 npm 启用了 install-scripts 审批策略而拦住构建脚本，按提示加 `--allow-scripts=@mebular/core` 放行一次：
-> `npm i -g --allow-scripts=@mebular/core "github:Windsander/Mebular#$SHA"`。
+> **若该命令以 `ENOTDIR` / `git dep preparation failed` 失败**：这是部分 npm（实测 11.19）对**全局 git 依赖**的
+> staging 缺陷——与本仓库内容无关（`prepare` 一旦成功、进入全局 reify 才暴露；用基线 SHA 只是更早失败在 `tsc` 而看不到）。
+> 遇到时改用下面的 **B**（本地仓库），它等价且本机已实测可用。
 
-**B. 本地仓库（开发者）**
+**B. 本地仓库（开发者；也是 A 失败时的等价干净路径）**
 
 ```bash
+SHA=<要钉住的提交>
+git clone https://github.com/Windsander/Mebular.git && cd Mebular
+git checkout "$SHA"
 npm ci && npm run build
 npm i -g .
 command -v mebular && command -v fleet
 ```
+
+（本机实测：`npm i -g .` → 双 bin 就位、`mebular tools`=29、`fleet --version` 含该 SHA、不设 `MEBULAR_HOME` 起 `serve` → `PROVISION_READY home=~/.mebular`。）
 
 ## 3. 建一个新的 Mebular（本机 = 信任根）
 

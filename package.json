@@ -4,6 +4,9 @@
   "description": "本地优先的图式记忆系统：为 Hermes 等 Agent 提供跨设备、可离线、可验证的记忆共享层",
   "license": "MIT",
   "author": "Windsander",
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "mebular": "./packages/mcp/bin/mebular.mjs",
     "fleet": "./packages/fleet/dist/cli.js"

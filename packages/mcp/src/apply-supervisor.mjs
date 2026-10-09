@@ -7,7 +7,7 @@
 // 退出码：0 = 已生效或已回滚（结果写 <home>/config-apply.result.json）；2 = 监督失败。
 
 import { runApplySupervisor } from './config-apply.mjs';
-import { resolveBuildSha } from '@mebular/service';
+import { resolveBuildSha } from '../../service/dist/index.js';
 
 function parseArgs(argv) {
   const out = {};

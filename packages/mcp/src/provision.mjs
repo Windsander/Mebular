@@ -193,7 +193,7 @@ export async function provisionJoin({
     error.code = 'TOKEN_REQUIRED';
     throw error;
   }
-  const fleet = await import('@mebular/fleet');
+  const fleet = await import('../../fleet/dist/index.js');
   const parsed = inspectToken(fleet.decodeJoinToken, token.trim());
 
   const name = String(deviceName ?? '').trim() || defaultDeviceName();

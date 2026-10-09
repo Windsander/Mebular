@@ -25,7 +25,9 @@ const declaredSection = sections.find((sec) => sec.startsWith('可选运行时�
 const rowsAll = doc.split('\n').filter((line) => line.startsWith('| `'));
 const rows = rowsAll.filter((line) => !declaredSection.includes(line));
 
-const runtime = Object.entries({ ...(pkg.dependencies ?? {}), ...(pkg.optionalDependencies ?? {}) });
+const runtime = Object.entries({ ...(pkg.dependencies ?? {}), ...(pkg.optionalDependencies ?? {}) })
+  // 内部 workspace 包（@mebular/*）是本仓库自身产物，不属于第三方清单
+  .filter(([name]) => !name.startsWith('@mebular/'));
 const missing = runtime.filter(([name]) => !doc.includes(`\`${name}\``));
 check(`所有运行时依赖已在 THIRD-PARTY.md 登记（${runtime.length} 项）`, missing.length === 0, missing.map(([n]) => n).join(', '));
 

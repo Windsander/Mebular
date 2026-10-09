@@ -138,7 +138,7 @@ export async function runRestart({ home, kind, spawnImpl = spawn, env = process.
     return { executed: true, mode: 'cmd', commands: [env.MEBULAR_RESTART_CMD] };
   }
   if (!kind) return { executed: false, mode: 'foreground', commands: [] };
-  const mod = await import('@mebular/service');
+  const mod = await import('../../service/dist/index.js');
   const plan = mod.restartPlanFor({ kind, args: [], heartbeatDir: home, env: { MEBULAR_HOME: home } }, { home });
   if (!plan.registered) return { executed: false, mode: 'foreground', commands: [] };
   for (const [cmd, ...args] of plan.commands) {

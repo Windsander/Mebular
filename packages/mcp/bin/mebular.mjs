@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { homeDir } from '../src/home.mjs';
 
 const argv = process.argv.slice(2);
 const command = argv[0];
@@ -28,9 +29,8 @@ function parseFlags(list) {
   return flags;
 }
 
-function homeDir() {
-  return process.env.MEBULAR_HOME ?? join(process.cwd(), '.mebular');
-}
+// F-INST-1：home 默认与 config.mjs 共用同一真源（~/.mebular，MEBULAR_HOME 覆盖）。
+// 历史分裂（bin 用 <cwd>/.mebular）会导致 store lock 与 service.heartbeat 各写一边。
 function tokensPath(flagValue) {
   return flagValue ?? process.env.MEBULAR_TOKENS_FILE ?? join(homeDir(), 'auth', 'tokens.json');
 }

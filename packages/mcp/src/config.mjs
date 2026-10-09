@@ -6,14 +6,12 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { Mebular, IdentityManager, FileEndpointStore, EndpointBook } from '@mebular/core';
+import { homeDir } from './home.mjs';
 
-/** 统一家目录（W2）：`MEBULAR_HOME` 覆盖，缺省 `~/.mebular`。 */
-export function homeDir() {
-  return process.env.MEBULAR_HOME ?? join(homedir(), '.mebular');
-}
+/** 统一家目录（唯一真源，F-INST-1）：见 `./home.mjs`。 */
+export { homeDir };
 
 export function configPath(home) {
   return process.env.MEBULAR_CONFIG ?? join(home, 'config.json');
@@ -266,4 +264,4 @@ export async function createMebular() {
   return { app, home, config, storagePath, deviceId, identityMode: mode, effective };
 }
 
-export { homedir };
+export { homedir } from 'node:os';

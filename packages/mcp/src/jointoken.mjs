@@ -32,4 +32,4 @@ export {
   joinWithToken,
   persistInviterHints,
   startJoinService as createJoinServer,
-} from '@mebular/fleet';
+} from '../../fleet/dist/index.js';

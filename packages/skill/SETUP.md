@@ -3,6 +3,88 @@
 > 面向 **Agent**：本文件是可执行的部署/加入剧本。用户只负责两件事：**说出要做什么**、**转交配对码**。
 > 每一步都给出命令与「期望输出 / 判定」。任何一步失败：先按 §6 处置，不要猜、不要跳过。
 
+## 0. 会话内接入（每次会话第一步）
+
+> 目标：**在当前会话里直接拿到 Mebular 的跨设备记忆能力**（MCP 工具面），且**不改动任何既有 memory provider**。
+> 顺序：① 幂等检查 → ② 无 home 指回 §3/§5（**不自建身份**）→ ③ 有 home 未在跑则拉起 → ④ 接入当前客户端并验证 → ⑤ 红线。
+
+**0.1 幂等：已装且已在跑就直接用，不要重复安装/重启**
+
+```bash
+command -v mebular          # 期望：打印路径；未安装（无输出、exit 1）→ 见 §2
+# 幂等判定**只在 home 已存在时**执行 status（无 home 时它会在默认 home 自举身份材料，见 0.2）
+HOME_DIR="${MEBULAR_HOME:-$HOME/.mebular}"
+if [ -f "$HOME_DIR/config.json" ]; then
+  MEBULAR_HOME="$HOME_DIR" mebular status      # 判定见下（exit 0）
+else
+  echo "无 home → §3 建新 / §5 加入"           # 不要在这里跑 status
+fi
+```
+
+判定「守护已在跑」：`status` 输出里 **`storeLock` 非 null**（形如 `{"pid":…,"startedAt":…,"storagePath":…}`）→
+**直接使用**本机已有实例，不要重复 `install` 或再起 `serve`。
+
+> 注意口径：`status.running` 是 **P2P 节点**状态（`network.enabled=true` 才为 true），**不是**守护进程状态；
+> 默认 home 下它常为 `false`，属正常。判定守护进程请用 `storeLock`（或 0.3 的 `service status` / `/healthz`）。
+
+**0.2 无 home：不要在这里自建身份**
+
+`mebular status` 会在 home 不存在时**自举身份材料**（`user-master-key.json`、身份文件）。因此：
+
+- 无 `config.json` → **不要**跑 `status`；按 §3（建新）或 §5（加入）走，**只有用户明确要建新/加入时才创建身份**。
+- 已有 home（`config.json` 在）→ 才继续 0.3/0.4。
+
+**0.3 有 home 但未在跑：拉起守护**
+
+优先**常驻**（按 `packages/service` 的平台矩阵：darwin = launchd 用户级 LaunchAgent；linux = `systemd --user`；win32 = 计划任务 onlogon）：
+
+```bash
+MEBULAR_HOME=~/.mebular mebular service status     # 只读：services[0].registered / running
+MEBULAR_HOME=~/.mebular mebular service install    # 常驻 + 自启（不想自启用 --no-autostart）
+MEBULAR_HOME=~/.mebular mebular service status     # 判定：services[0].registered === true 且 running === true
+```
+
+> **必须带 `MEBULAR_HOME`**：CLI 未设该变量时 `homeDir()` 退化为 **`<cwd>/.mebular`**（与 `mebular status` 的
+> `~/.mebular` 不一致），service 会把该值写进单元的 `env.MEBULAR_HOME` 与 `workingDir` → 守护跑错 home，
+> 而 §0.3 的确认命令读 `~/.mebular`，会表现为「没起来」（`storeLock=null`）。
+
+若所在环境不支持常驻（无 launchd/systemd/计划任务的容器等），改**前台**拉起：
+
+```bash
+MEBULAR_HOME=~/.mebular mebular serve --port 7331     # 期望输出含 SERVE_READY {…}
+```
+
+**确认已拉起**（任一即可，判据如下）：
+
+```bash
+MEBULAR_HOME=~/.mebular mebular status                                    # 判据：storeLock 非 null
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:7331/healthz    # 判据：200
+```
+
+> 实测（沙箱 home，`mebular serve --port 0`）：`storeLock` 由 `null` → `{"pid":…,"startedAt":…}`，`/healthz` = `200`；
+> 停止后 `storeLock` 回到 `null`。`service install` 会注册**真实**常驻服务，故本沙箱未执行，依据 = `mebular service` 用法 +
+> `packages/service/src/units.ts` 平台矩阵 + `service status` 实跑输出。
+
+**0.4 接入当前客户端（MCP 片段）**
+
+```bash
+mebular print-config --client <opencode|claude|cursor|dsh|generic>    # 远程形态：追加 --url https://<host>/mcp
+```
+
+1. 把输出片段合入**当前客户端**的 MCP 配置（**先备份**原文件）；`dsh` 形态为客户端桥接（只桥接 Tools）。
+2. **重载客户端**（重启该客户端/会话）后生效。
+3. 验证：在本会话调用 `memory_status` —— 期望返回 `deviceId` / `running`（P2P 节点）/ 计数等字段。
+   注意：`storeLock` **不在** `memory_status` 的返回里（那是 CLI `mebular status` 追加的字段，见 0.1/0.3）。
+   若「没有 mebular 工具」：片段未生效或未重载客户端，回到第 1–2 步。
+
+> 实测：`MEBULAR_HOME=<沙箱> node packages/mcp/bin/mebular.mjs mcp` 上 `tools/call memory_status` 返回
+> `deviceId=device-local`、`running=false`（P2P，默认 home 网络未启用）与 12 个字段；**无 `storeLock`**。
+
+**0.5 红线**
+
+**不改变任何既有 memory provider 的代码、存储与进程**；Mebular 仅以 MCP 工具面**叠加**提供跨设备记忆。
+与既有 provider 的分工/导入/冲突口径见 [`MEMORY_POLICY.md`](./MEMORY_POLICY.md) §8。
+
 ## 1. 前置检查
 
 ```bash
@@ -22,7 +104,8 @@ npm i -g "github:Windsander/Mebular#$SHA"
 command -v mebular && command -v fleet
 ```
 
-判定：`mebular --version` 与 `fleet --version` 均可执行；记录 `$SHA` 以便回报。
+判定：`mebular --help`（exit 0）与 `fleet --version`（exit 0）均可执行；记录 `$SHA` 以便回报。
+（`mebular --version` 不存在：会打印「未知命令：--version」并 exit 2。）
 
 **B. 本地仓库（开发者）**
 
@@ -44,8 +127,10 @@ fleet quickstart --daemon --dir ~/.mebular --device "$(hostname | tr '[:upper:]'
 判定：命令退出码 0，且 JSON 含 `"ok": true`。随后自检：
 
 ```bash
-mebular status --home ~/.mebular
+mebular status           # home 由 MEBULAR_HOME 决定，缺省 ~/.mebular
 ```
+
+> `mebular status` **没有** `--home` 参数（传了会被忽略）；要指定别的 home 用 `MEBULAR_HOME=<dir> mebular status`。
 
 ## 4. 出一个邀请（让别的设备加入你）
 

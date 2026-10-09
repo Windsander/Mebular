@@ -124,6 +124,85 @@ try {
   check('安装后的 SETUP.md 含关键命令（fleet quickstart / fleet join --qr）',
     existsSync(installedSetup) && (await readFile(installedSetup, 'utf-8')).includes('fleet quickstart')
       && (await readFile(installedSetup, 'utf-8')).includes('fleet join --qr'));
+
+  // ---------- G1：会话内接入（SETUP §0）+ 接入片段随 Skill 安装 ----------
+  {
+    // §0 必须**在最前**（在 §1 之前），且 §1–§7 编号不被改动
+    const setupIdx = setup.indexOf('## 0. 会话内接入');
+    const c1Idx = setup.indexOf('## 1. 前置检查');
+    check('SETUP.md §0「会话内接入」位于最前（在 §1 之前；§1–§7 编号保留）',
+      setupIdx >= 0 && c1Idx > setupIdx
+        && ['## 1. 前置检查', '## 2. 安装 CLI', '## 3. 建一个新的 Mebular', '## 4. 出一个邀请', '## 5. 加入一个已有的 Mebular', '## 6. 自检与失败恢复', '## 7. 回报给用户']
+          .every((h) => setup.includes(h)),
+      `§0@${setupIdx} §1@${c1Idx}`);
+    const sessionAnchors = ['会话内接入', 'print-config', 'mebular service install', 'memory_status'];
+    const missingSession = sessionAnchors.filter((token) => !setup.includes(token));
+    check(`SETUP §0 会话内接入锚点（${sessionAnchors.length} 个）`, missingSession.length === 0, missingSession.join(', ') || '全部命中');
+    check('SETUP §0 幂等判定用 storeLock（并说明 running 是 P2P 节点状态，非守护进程）',
+      setup.includes('storeLock') && /running`?\s*是 \*\*P2P/.test(setup), 'storeLock + 口径说明');
+    check('SETUP §0.2 明示「无 home 不自建身份」（status 会自举身份材料）',
+      /无 `config\.json`[^\n]*不要[^\n]*`status`/.test(setup) && setup.includes('自举身份材料'));
+    check('SETUP §0.3 拉起含常驻（service install）+ 前台 serve + 确认判据（storeLock / healthz）',
+      setup.includes('mebular service install') && setup.includes('mebular serve --port 7331')
+        && /storeLock 非 null/.test(setup) && setup.includes('/healthz'));
+    check('SETUP §2 判定行修正为 mebular --help（+ fleet --version），不再用不存在的 --version',
+      /mebular --help/.test(setup) && setup.includes('fleet --version') && /`mebular --version` 不存在/.test(setup));
+    check('SETUP §3 status 不再用不存在的 --home 参数（改注 MEBULAR_HOME）',
+      !/mebular status --home/.test(setup) && setup.includes('MEBULAR_HOME=<dir> mebular status'));
+
+    // ---------- 修复轮 A/B/C（评审 3 处必改）----------
+    // A（高）：§0.1 的 `mebular status` 必须在「home 存在」守卫内（无 home 照抄不得自举身份）
+    const s01 = setup.slice(setup.indexOf('**0.1 幂等'), setup.indexOf('**0.2 无 home'));
+    const s01Block = (s01.match(/```bash\n([\s\S]*?)```/) ?? [])[1] ?? '';
+    check('A §0.1 的 `mebular status` 处于「home 存在」守卫内（if [ -f …config.json ] … then … else … fi）',
+      /if \[ -f "\$HOME_DIR\/config\.json" \]; then/.test(s01Block)
+        && /then[\s\S]*?mebular status[\s\S]*?else[\s\S]*?fi/.test(s01Block)
+        && (s01Block.match(/mebular status/g) ?? []).length === 1,
+      s01Block.includes('mebular status') ? '守卫内唯一一处 status' : '缺少 status');
+    check('A §0.1 守卫的 else 分支明确「无 home → §3/§5」且**不跑** status',
+      /else[\s\S]*?无 home → §3 建新 \/ §5 加入/.test(s01Block) && /不要在这里跑 status/.test(s01Block));
+
+    // B（中）：§0.4 判据不得把 storeLock 列为 memory_status 的返回项，且须注明它来自 CLI status
+    const s04 = setup.slice(setup.indexOf('**0.4 接入当前客户端'), setup.indexOf('**0.5 红线'));
+    check('B §0.4 不把 `storeLock` 列为 `memory_status` 返回项，并注明见 CLI `mebular status`',
+      /memory_status`.{0,40}`deviceId`.{0,20}`running`/.test(s04)
+        && /`storeLock` \*\*不在\*\* `memory_status` 的返回里/.test(s04)
+        && /CLI `mebular status`/.test(s04)
+        && !/memory_status` —— 期望返回 `deviceId` \/ `storeLock`/.test(s04),
+      '措辞已更正');
+
+    // C（中）：§0.3 的 service 命令必须带 MEBULAR_HOME 前缀（否则单元退化到 <cwd>/.mebular）
+    const s03 = setup.slice(setup.indexOf('**0.3 有 home 但未在跑'), setup.indexOf('若所在环境不支持常驻'));
+    check('C §0.3 `mebular service install`/`status` 均带 `MEBULAR_HOME=~/.mebular` 前缀',
+      /MEBULAR_HOME=~\/\.mebular mebular service install/.test(s03)
+        && (s03.match(/MEBULAR_HOME=~\/\.mebular mebular service status/g) ?? []).length === 2
+        && !/\n +mebular service (install|status)/.test(s03),
+      '三条命令均带前缀');
+    check('C §0.3 说明「未设 MEBULAR_HOME 时退化到 <cwd>/.mebular」的依据',
+      /`homeDir\(\)` 退化为 \*\*`<cwd>\/\.mebular`\*\*/.test(s03) && /workingDir/.test(s03) && /storeLock=null/.test(s03));
+
+    // D（随行）：SKILL.md 接入第 1 步同样防滥用
+    check('D SKILL.md 接入第 1 步注明「home 不存在时先按 SETUP §3/§5，不要跑 status」',
+      /home 不存在时\*\*先按 SETUP §3\/§5/.test(skill) && /不要跑 `status`/.test(skill));
+
+    // §0 与 SKILL 的互相引用
+    check('SKILL.md 接入节含 print-config 与「会话里没有 Mebular 工具时的第一步」',
+      skill.includes('print-config') && /没有 Mebular 工具时的第一步/.test(skill));
+    check('SKILL.md 定位补共存（叠加/不接管，指向 MEMORY_POLICY §8）',
+      skill.includes('共存') && /不接管/.test(skill) && /MEMORY_POLICY\.md`? §8/.test(skill));
+
+    // MEMORY_POLICY §8 共存口径
+    const coexistence = ['与其他记忆提供者共存', '叠加', '不接管', '不双写', '默认单向', 'memory_import', 'namespace', 'origin', '幂等', '只读'];
+    const missingCo = coexistence.filter((token) => !policy.includes(token));
+    check(`MEMORY_POLICY §8 共存在径锚点（${coexistence.length} 个）`, missingCo.length === 0, missingCo.join(', ') || '全部命中');
+    check('MEMORY_POLICY §8 覆盖「不外溢 / 不传播 / 停用无残留」',
+      /不外溢/.test(policy) && /不自动传播/.test(policy) && /停用/.test(policy) && /隐私/.test(policy));
+
+    // install.mjs 复制 mcp/（SKILL.md 承诺成立）
+    check('install.mjs 一并安装 mcp/ 片段（mebular-memory/mcp/opencode.json）',
+      existsSync(join(installTarget, 'mebular-memory', 'mcp', 'opencode.json'))
+        && existsSync(join(installTarget, 'mebular-memory', 'mcp', 'claude.json')));
+  }
 } catch (error) {
   check('G6.4 验证', false, String(error?.message ?? error).substring(0, 400));
 } finally {

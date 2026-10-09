@@ -218,25 +218,26 @@ async function main() {
 
   const home = await mkdtemp(join(tmpdir(), 'mebular-ui-home-'));
   const port = await freePort();
+  await seedHome(home);
+  // G-ML-1：播种一条记忆，供记忆生命周期视图用例。
+  // 必须在 serve 启动**之前**直接写存储：serve 持锁后 CLI 会改走 HTTP，而
+  // config.json 里 mcp.http.port=0（真实端口来自 --port 参数）→ 连接失败。
+  try {
+    execFileSync(process.execPath, [bin, 'memory_write', '--input', JSON.stringify({ items: [{ type: 'fact', content: 'UI 生命周期记忆' }] })], {
+      env: { ...process.env, MEBULAR_HOME: home },
+      encoding: 'utf-8',
+    });
+  } catch (error) {
+    console.log(`  ⚠ G-ML-1 播种记忆失败（后续记忆视图断言将随之失败）：${String(error?.message ?? error).split('\n')[0].slice(0, 160)}`);
+  }
   const handle = spawnServe(home, port);
   let chromeHandle = null;
   let cdp = null;
   try {
-    await seedHome(home);
     const ready = await waitReady(handle);
     check('serve 启动（SERVE_READY）', Number.isInteger(ready.port) && ready.port > 0, `port=${ready.port}`);
     const base = `http://127.0.0.1:${ready.port}`;
     check('GET /console/ 200', (await waitHttp(`${base}/console/`)) === 200);
-
-    // G-ML-1：播种一条记忆，供记忆生命周期视图用例（经 CLI，走已持锁的 serve）
-    try {
-      execFileSync(process.execPath, [bin, 'memory_write', '--input', JSON.stringify({ items: [{ type: 'fact', content: 'UI 生命周期记忆' }] })], {
-        env: { ...process.env, MEBULAR_HOME: home },
-        encoding: 'utf-8',
-      });
-    } catch (error) {
-      check('G-ML-1 播种记忆', false, String(error?.message ?? error).slice(0, 200));
-    }
 
     chromeHandle = await launchChromeRetry(chrome);
     cdp = connectCdp(chromeHandle.wsUrl);

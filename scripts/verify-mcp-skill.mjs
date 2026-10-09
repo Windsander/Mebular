@@ -198,6 +198,26 @@ try {
     check('MEMORY_POLICY §8 覆盖「不外溢 / 不传播 / 停用无残留」',
       /不外溢/.test(policy) && /不自动传播/.test(policy) && /停用/.test(policy) && /隐私/.test(policy));
 
+    // ---------- G-ML-1：记忆生命周期（删除 / 归档）与工具计数 ----------
+    const tasksSkill = await readFile(join(skillDir, 'tasks', 'SKILL.md'), 'utf-8');
+    check('E SKILL.md 工具表计数为 13（G-ML-1：+memory_delete/memory_archive）',
+      /^## 工具（13 个）$/m.test(skill), 'SKILL.md 头部计数锚点');
+    check('E SKILL.md 含 memory_delete 并注明「何时用」（不可逆 / 墓碑）',
+      /\|\s*`memory_delete`\s*\|/.test(skill) && /何时用/.test(skill) && /不可逆/.test(skill));
+    check('E SKILL.md 含 memory_archive 并注明可逆 / 解除归档',
+      /\|\s*`memory_archive`\s*\|/.test(skill) && /可逆/.test(skill) && /解除归档/.test(skill));
+    check('E SKILL.md 查询面注明「默认不返回已归档」且给出 includeArchived',
+      /includeArchived/.test(skill) && /默认\*{0,2}不返回已归档/.test(skill));
+    check('E tasks/SKILL.md 统一入口计数为 29（记忆 13 ∪ 任务 16）',
+      /29 工具中的 16 个/.test(tasksSkill));
+    check('E MEMORY_POLICY §8 生命周期锚点（墓碑传播 / 归档=标记 / includeArchived / 零新增配置项）',
+      /墓碑传播/.test(policy) && /归档\s*=\s*标记/.test(policy)
+        && /includeArchived/.test(policy) && /零新增配置项/.test(policy));
+    check('E MEMORY_POLICY §8 三问判据（跨设备稳定事实 / 会话过程产物 / 外源历史只在导入时判）',
+      /稳定事实/.test(policy) && /过程产物/.test(policy) && /只在导入那一刻判/.test(policy));
+    check('E MEMORY_POLICY §8 外源写权限（默认只读 / 回写仅追加 / 禁止对等双向）',
+      /默认只读/.test(policy) && /回写仅追加/.test(policy) && /禁止对等双向/.test(policy));
+
     // install.mjs 复制 mcp/（SKILL.md 承诺成立）
     check('install.mjs 一并安装 mcp/ 片段（mebular-memory/mcp/opencode.json）',
       existsSync(join(installTarget, 'mebular-memory', 'mcp', 'opencode.json'))

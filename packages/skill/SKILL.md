@@ -16,7 +16,7 @@ Mebular 是一个本地优先的分布式图记忆层。通过 MCP 工具读写�
 - 需要回顾历史会话、任务过程或既有技能时。
 - 需要按语义（同义不同词）或关系检索既有记忆时。
 
-## 工具（11 个）
+## 工具（13 个）
 
 | 工具 | 用途 |
 |------|------|
@@ -30,6 +30,10 @@ Mebular 是一个本地优先的分布式图记忆层。通过 MCP 工具读写�
 | `memory_import` | 经适配器导入异构来源（kv / markdown / …） |
 | `memory_status` | 设备/网络/计数/状态哈希/开关 |
 | `memory_sync` | 连接对端并等待一次同步（需 network.enabled） |
+| `memory_delete` | 删除记忆（写墓碑，随图同步；删除后默认不再召回）。**何时用**：内容已过时/错误/不该共享，且希望各端一起不再召回；不可逆（对端旧快照无法强制回收）。需 `memory.admin`。 |
+| `memory_archive` | 归档 / 解除归档记忆（`metadata.archivedAt`，随图同步、可逆）。**何时用**：内容暂时不该参与召回但**将来可能有用**（先归档而非删除）；`archived: false` 解除。需 `memory.write`。 |
+
+查询类工具（`memory_query` / `memory_search` / `memory_profile` / `memory_skills` / `memory_history` / `memory_graph`）默认**不返回已归档**；需要时传 `includeArchived: true`（已删除的墓碑始终不召回）。
 
 ## 工作流
 

@@ -68,6 +68,17 @@
   this round only fixes the constraint and tests.
 - **Cross-session duplicate sends are expected** (send-more-never-less; receivers dedupe by content-addressed id).
 - **Cross-NAT verification is still pending on real hardware**; local `verify:wan:l2*` are simulations.
+- **Foreign-provider bridges are one-way by default.** Mebular reads external memory providers for explicit import; it does
+  not take over or modify their storage. Write-back, when a human explicitly requests it, is append-only; peer-to-peer
+  bidirectional sync with an external provider is never implemented.
+- **Import mappings are not guaranteed reversible.** Adapters normalize external items into Mebular's node model; a round-trip
+  back to the source format is not promised, and re-imports are deduplicated by a content-addressed key rather than by source id.
+- **Deletion is a cooperative tombstone.** `memory_delete` writes a `deletedAt` tombstone and a `node_deleted` event that syncs
+  to authorized peers; both ends stop recalling the node by default, but a copy already held in a peer's older snapshot cannot
+  be force-reclaimed (deletion is irreversible).
+- **Archiving is a reversible marker.** `memory_archive` sets `metadata.archivedAt` (synced via `node_updated`); archived nodes
+  are excluded from recall by default and visible only with `includeArchived: true`, and `archived: false` unarchives them.
+  Tombstoned nodes cannot be archived.
 
 ---
 

@@ -33,7 +33,7 @@ function runJson(bin, args) {
 const fleetReg = TASK_TOOLS.map((t) => ({ tool: t.name, cli: t.cli }));
 check('任务工具 16 项且 CLI 逐字同名', fleetReg.length === 16 && new Set(fleetReg.map((t) => t.tool)).size === 16 && fleetReg.every((t) => t.cli === t.tool), { count: fleetReg.length });
 const mcpReg = TOOL_SPECS.map((t) => ({ tool: t.name, cli: t.name }));
-check('记忆工具 11 项且 CLI 逐字同名', mcpReg.length === 11 && new Set(mcpReg.map((t) => t.tool)).size === 11, { count: mcpReg.length });
+check('记忆工具 13 项且 CLI 逐字同名（G-ML-1：+memory_delete/memory_archive）', mcpReg.length === 13 && new Set(mcpReg.map((t) => t.tool)).size === 13, { count: mcpReg.length });
 const overlap = fleetReg.filter((t) => mcpReg.some((m) => m.tool === t.tool));
 check('任务面与记忆面工具名不冲突', overlap.length === 0, { overlap });
 
@@ -47,14 +47,14 @@ check('`mebular tools` 输出包含全部记忆工具', mcpReg.every((t) => (mcp
 // R1：唯一 MCP 入口（27 = 记忆 11 + 任务 16）
 const unified = ALL_TOOL_SPECS.map((t) => t.name);
 check(
-  '唯一入口：mebular 侧统一注册表 = 27（记忆 11 ∪ 任务 16，无重复）',
-  TOOL_SPECS.length === 11 && TASK_TOOL_SPECS.length === 16 && unified.length === 27 && new Set(unified).size === 27
+  '唯一入口：mebular 侧统一注册表 = 29（记忆 13 ∪ 任务 16，无重复）',
+  TOOL_SPECS.length === 13 && TASK_TOOL_SPECS.length === 16 && unified.length === 29 && new Set(unified).size === 29
     && TASK_TOOL_SPECS.every((t) => t.name === TASK_TOOLS.find((x) => x.name === t.name)?.name),
   { unified: unified.length, memory: TOOL_SPECS.length, task: TASK_TOOL_SPECS.length },
 );
 check(
-  '`mebular tools` 与统一注册表一致（27）',
-  mcpTools?.tools?.length === 27 && mcpTools.tools.map((t) => t.tool).sort().join() === [...unified].sort().join(),
+  '`mebular tools` 与统一注册表一致（29）',
+  mcpTools?.tools?.length === 29 && mcpTools.tools.map((t) => t.tool).sort().join() === [...unified].sort().join(),
   { count: mcpTools?.tools?.length },
 );
 // 全仓只有一个 MCP 注册点：fleet 侧不得再有 MCP server（`fleet mcp` 已删除）

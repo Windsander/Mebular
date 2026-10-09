@@ -36,9 +36,20 @@ export interface MemoryListFilter {
   createdAfter?: number;
   createdBefore?: number;
   includeDeleted?: boolean;
+  /**
+   * G-ML-1：是否包含**已归档**节点（`metadata.archivedAt` 非空）。
+   * 默认 false = 归档不参与召回；显式 true 才可见（可逆、无损）。
+   */
+  includeArchived?: boolean;
   /** 单分区或分区列表；缺省不过滤 */
   namespace?: NamespaceFilter;
   limit?: number;
+}
+
+/** G-ML-1：节点是否已归档（`metadata.archivedAt` 为数字）。 */
+export function isArchived(node: { metadata?: Record<string, unknown> } | null | undefined): boolean {
+  const value = node?.metadata?.archivedAt;
+  return typeof value === 'number';
 }
 
 export class MemoryStore {
@@ -227,6 +238,10 @@ export class MemoryStore {
       if (!filter.includeDeleted && node.deletedAt) {
         return false;
       }
+      // G-ML-1：归档默认不参与召回（显式 includeArchived 才可见）；墓碑与归档相互独立
+      if (!filter.includeArchived && isArchived(node)) {
+        return false;
+      }
       if (filter.createdAfter !== undefined && node.createdAt < filter.createdAfter) {
         return false;
       }
@@ -289,7 +304,11 @@ export class MemoryStore {
    * 查询前确保索引与图一致（惰性增量回填 + 墓碑剪枝）——
    * 覆盖「重启后索引为空」与「同步入库节点未索引」两种静默失效场景。
    */
-  async vectorQuery(text: string, k = 10): Promise<Array<{ node: Node; score: number }>> {
+  async vectorQuery(
+    text: string,
+    k = 10,
+    options: { includeArchived?: boolean } = {},
+  ): Promise<Array<{ node: Node; score: number }>> {
     if (!this.vectorIndex) {
       return [];
     }
@@ -298,8 +317,11 @@ export class MemoryStore {
     const results: Array<{ node: Node; score: number }> = [];
     for (const hit of hits) {
       const node = await this.graph.getNode(hit.nodeId);
-      if (node && !node.deletedAt) {
+      // G-ML-1：归档节点默认可留在索引里（可逆），但**默认不出现在召回结果**中
+      if (node && !node.deletedAt && (options.includeArchived === true || !isArchived(node))) {
         results.push({ node, score: hit.score });
+      } else if (node && !node.deletedAt) {
+        continue; // 归档但被过滤：保留索引条目（解除归档即可再召回）
       } else {
         // 墓碑/缺失节点：从索引移除，避免陈旧向量驻留（G2-R）
         await this.vectorIndex.remove(hit.nodeId);
@@ -324,13 +346,18 @@ export class MemoryStore {
     return nodes.length;
   }
 
-  /** 列出全部未删除的记忆节点（去重） */
+  /**
+   * 列出全部**未删除**的记忆节点（去重）。
+   * G-ML-1r：**显式包含归档**——归档可逆、向量条目应保留以便恢复。若这里用默认
+   * 过滤（排除归档），ensureVectorIndex 会把归档节点当成「缺失」从索引剪除 →
+   * `includeArchived` 查不到、解除归档后默认向量召回永久缺失。墓碑仍排除。
+   */
   private async listAllNodes(): Promise<Node[]> {
     const types: Array<Node['type']> = ['entity', 'fact', 'episode', 'skill', 'meta'];
     const seen = new Set<string>();
     const nodes: Node[] = [];
     for (const type of types) {
-      for (const node of await this.listByType(type)) {
+      for (const node of await this.listByType(type, { includeArchived: true })) {
         if (seen.has(node.id)) {
           continue;
         }
@@ -377,7 +404,8 @@ export class MemoryStore {
   private async getTyped<T extends Node>(id: string, type: Node['type']): Promise<T | null> {
     const node = await this.graph.getNode(id);
     // 排除墓碑：与 listByType 默认（includeDeleted=false）行为一致（Phase 6.1 修复）
-    if (!node || node.type !== type || node.deletedAt) {
+    // G-ML-1：归档同样默认不可取（显式列表路径可用 includeArchived 查看）
+    if (!node || node.type !== type || node.deletedAt || isArchived(node)) {
       return null;
     }
     return node as T;

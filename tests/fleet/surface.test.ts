@@ -149,8 +149,10 @@ describe('W1 工具面（CLI/MCP 同一 handler）', () => {
 
       const listed = rpc([{ jsonrpc: '2.0', id: 2, method: 'tools/list' }]);
       const names = ((resultOf(listed, 2).tools as Array<{ name: string }>) ?? []).map((t) => t.name);
-      expect(names).toHaveLength(27);
+      expect(names).toHaveLength(29);
       expect(names).toContain('memory_status');
+      expect(names).toContain('memory_delete');
+      expect(names).toContain('memory_archive');
       expect(names).toContain('task_submit');
       expect(names).toContain('task_status');
 

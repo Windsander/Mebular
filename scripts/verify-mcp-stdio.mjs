@@ -16,7 +16,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
 const serverBin = join(rootDir, 'packages', 'mcp', 'bin', 'mebular.mjs');
 
-// 统一入口 27：记忆 11（冻结面）+ 任务 16（fleet TASK_TOOLS）
+// 统一入口 29：记忆 13（含 G-ML-1 生命周期）+ 任务 16（fleet TASK_TOOLS）
 const EXPECTED = [
   'memory_write',
   'memory_write_batch',
@@ -29,6 +29,8 @@ const EXPECTED = [
   'memory_import',
   'memory_status',
   'memory_sync',
+  'memory_delete',
+  'memory_archive',
   // 任务面 16（复用 fleet TASK_TOOLS：同 handler 不复制）
   'task_submit', 'task_submit_batch', 'task_cancel', 'task_retry',
   'task_status', 'task_list', 'task_history', 'task_children', 'task_summarize',
@@ -79,7 +81,7 @@ try {
 
   const { tools } = await client.listTools();
   const names = tools.map((t) => t.name).sort();
-  check('tools/list 返回 27 个工具（记忆 11 + 任务 16）', tools.length === 27, `count=${tools.length}`);
+  check('tools/list 返回 29 个工具（记忆 13 + 任务 16）', tools.length === 29, `count=${tools.length}`);
   check(
     '工具名与统一入口冻结面一致',
     JSON.stringify(names) === JSON.stringify([...EXPECTED].sort()),
@@ -88,6 +90,10 @@ try {
   check(
     '任务工具也在统一入口（tools/list 含 task_submit 与 task_status）',
     names.includes('task_submit') && names.includes('task_status'),
+  );
+  check(
+    'G-ML-1 生命周期工具在统一入口（memory_delete / memory_archive）',
+    names.includes('memory_delete') && names.includes('memory_archive'),
   );
 
   // 写入（单 + 批）
@@ -114,6 +120,31 @@ try {
 
   const h = structuredOf(await client.callTool({ name: 'memory_history', arguments: {} }));
   check('memory_history 返回 totalCount', typeof h?.totalCount === 'number');
+
+  // ---------- G-ML-1：生命周期（归档 / 解除 / 删除）经统一入口 ----------
+  const lifeW = structuredOf(await client.callTool({ name: 'memory_write', arguments: { items: [{ type: 'fact', content: 'mcp-gml-lifecycle' }] } }));
+  const lifeId = lifeW?.stored?.[0]?.id;
+  check('G-ML-1 独立节点写入（供生命周期用例）', typeof lifeId === 'string', `id=${lifeId}`);
+  const arch = structuredOf(await client.callTool({ name: 'memory_archive', arguments: { ids: [lifeId] } }));
+  const hiddenAfterArchive = structuredOf(await client.callTool({ name: 'memory_query', arguments: { query: 'mcp-gml-lifecycle' } }));
+  const shownWithArchived = structuredOf(await client.callTool({ name: 'memory_query', arguments: { query: 'mcp-gml-lifecycle', includeArchived: true } }));
+  check('G-ML-1 memory_archive 成功且默认不召回、includeArchived 可见',
+    (arch?.archived ?? []).includes(lifeId)
+      && hiddenAfterArchive?.totalMatches === 0
+      && shownWithArchived?.totalMatches === 1,
+    `hidden=${hiddenAfterArchive?.totalMatches} shown=${shownWithArchived?.totalMatches}`);
+
+  const unarch = structuredOf(await client.callTool({ name: 'memory_archive', arguments: { ids: [lifeId], archived: false } }));
+  const recalled = structuredOf(await client.callTool({ name: 'memory_query', arguments: { query: 'mcp-gml-lifecycle' } }));
+  check('G-ML-1 解除归档可逆（默认重新召回）',
+    (unarch?.unarchived ?? []).includes(lifeId) && recalled?.totalMatches === 1,
+    `total=${recalled?.totalMatches}`);
+
+  const del = structuredOf(await client.callTool({ name: 'memory_delete', arguments: { ids: [lifeId] } }));
+  const gone = structuredOf(await client.callTool({ name: 'memory_query', arguments: { query: 'mcp-gml-lifecycle' } }));
+  check('G-ML-1 memory_delete 成功：墓碑后默认不召回',
+    (del?.deleted ?? []).includes(lifeId) && gone?.totalMatches === 0,
+    `total=${gone?.totalMatches}`);
 
   // R3.3：任务工具经统一入口返回**结构化错误信封**（此 home 无 fleet/守护 config → E_NOT_FOUND）
   const taskFail = await client.callTool({ name: 'task_status', arguments: {} });

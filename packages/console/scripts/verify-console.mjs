@@ -1459,6 +1459,89 @@ try {
       ['NAT 打洞', 'DCUtR', '直连升级'].every((token) => consoleSrc7.includes(token)));
   }
 
+  // ---------- G-ML-1：记忆生命周期（读面默认过滤 + 动作式写端点 + 前端锚点） ----------
+  {
+    const listDefault = await getJson(port, '/admin/api/memories');
+    check('G-ML-1 GET /admin/api/memories 200 + 形状（total/memories/includeArchived/includeDeleted）',
+      listDefault.status === 200
+        && typeof listDefault.json?.total === 'number'
+        && Array.isArray(listDefault.json?.memories)
+        && listDefault.json?.includeArchived === false
+        && listDefault.json?.includeDeleted === false,
+      `total=${listDefault.json?.total} a=${listDefault.json?.includeArchived} d=${listDefault.json?.includeDeleted}`);
+    const memId = listDefault.json?.memories?.[0]?.id;
+    check('G-ML-1 默认列表返回存活记忆（含 preview/id/type）',
+      typeof memId === 'string'
+        && listDefault.json.memories.every((m) => typeof m.id === 'string' && typeof m.type === 'string'
+          && typeof m.preview === 'string' && m.deleted === false && m.archived === false));
+
+    const memNoCsrf = await fetch(`http://127.0.0.1:${port}/admin/api/memories/${encodeURIComponent(memId)}/delete`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+    });
+    check('G-ML-1 删除无 CSRF → 403（动作式写需 CSRF）', memNoCsrf.status === 403, `status=${memNoCsrf.status}`);
+
+    const archived = await fetch(`http://127.0.0.1:${port}/admin/api/memories/${encodeURIComponent(memId)}/archive`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: '{}',
+    });
+    const archivedJson = await archived.json().catch(() => null);
+    check('G-ML-1 归档 → 200 且 archived 含该 id', archived.status === 200 && (archivedJson?.archived ?? []).includes(memId), `status=${archived.status}`);
+    const afterArchive = await getJson(port, '/admin/api/memories');
+    const withArchived = await getJson(port, '/admin/api/memories?includeArchived=1');
+    check('G-ML-1 归档后默认列表不含、includeArchived=1 含且 archived=true',
+      afterArchive.json?.memories.some((m) => m.id === memId) === false
+        && withArchived.json?.memories.find((m) => m.id === memId)?.archived === true,
+      `default=${afterArchive.json?.total} archived=${withArchived.json?.total}`);
+    const oneNs = withArchived.json?.memories.find((m) => m.id === memId)?.namespace;
+    const nsFiltered = await getJson(port, `/admin/api/memories?includeArchived=1&namespace=${encodeURIComponent(oneNs)}`);
+    const nsExcluded = await getJson(port, '/admin/api/memories?includeArchived=1&namespace=__no_such_namespace__');
+    check('G-ML-1 按域过滤：命中该域包含目标、未知域为空',
+      nsFiltered.json?.memories.some((m) => m.id === memId) === true && nsExcluded.json?.total === 0,
+      `ns=${oneNs} hit=${nsFiltered.json?.total} miss=${nsExcluded.json?.total}`);
+
+    const unarchived = await fetch(`http://127.0.0.1:${port}/admin/api/memories/${encodeURIComponent(memId)}/unarchive`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: '{}',
+    });
+    const afterUnarchive = await getJson(port, '/admin/api/memories');
+    check('G-ML-1 解除归档 → 200 且默认列表恢复含该 id（可逆）',
+      unarchived.status === 200 && afterUnarchive.json?.memories.some((m) => m.id === memId) === true);
+
+    const notFound = await fetch(`http://127.0.0.1:${port}/admin/api/memories/missing-id-xyz/archive`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: '{}',
+    });
+    check('G-ML-1 归档不存在的 id → 404', notFound.status === 404, `status=${notFound.status}`);
+
+    const deleted = await fetch(`http://127.0.0.1:${port}/admin/api/memories/${encodeURIComponent(memId)}/delete`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: '{}',
+    });
+    const deletedJson = await deleted.json().catch(() => null);
+    check('G-ML-1 删除 → 200 且 deleted 含该 id', deleted.status === 200 && (deletedJson?.deleted ?? []).includes(memId), `status=${deleted.status}`);
+    const afterDelete = await getJson(port, '/admin/api/memories');
+    const withDeleted = await getJson(port, '/admin/api/memories?includeDeleted=1');
+    check('G-ML-1 删除后默认列表不含、includeDeleted=1 含且 deleted=true',
+      afterDelete.json?.memories.some((m) => m.id === memId) === false
+        && withDeleted.json?.memories.find((m) => m.id === memId)?.deleted === true,
+      `default=${afterDelete.json?.total} deleted=${withDeleted.json?.total}`);
+
+    // 前端锚点：视图/过滤器/动作按钮/解除归档
+    const consoleHtml = await readFile(join(consoleDir, 'index.html'), 'utf-8');
+    const consoleSrc8 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    check('G-ML-1 控制台含记忆视图与默认过滤开关（显示已归档 / 显示已删除）',
+      ['id="memories-view"', 'data-view="memories"', 'id="mem-filter-archived"', 'id="mem-filter-deleted"'].every((t) => consoleHtml.includes(t))
+        && consoleSrc8.includes('memoryFilters') && /includeArchived/.test(consoleSrc8) && /includeDeleted/.test(consoleSrc8));
+    check('G-ML-1 控制台含归档 / 解除归档 / 删除动作（动作式，无开关）',
+      ['data-mem-action', 'memAction', "'archive'", "'unarchive'", "'delete'"].every((t) => consoleSrc8.includes(t))
+        && /归档/.test(consoleHtml) && /解除归档/.test(consoleSrc8));
+  }
+
   // ---------- 未知 API ----------
   const unknown = await getJson(port, '/admin/api/nope');
   check('未知 /admin/api 路径 404', unknown.status === 404);

@@ -147,7 +147,7 @@ try {
   const transport = new StdioClientTransport({ command: process.execPath, args: [bin, 'mcp'], env, stderr: 'pipe' });
   await client.connect(transport);
   const { tools } = await client.listTools();
-  check('安裝後 mebular mcp：tools/list=27（记忆 11 + 任务 16）', tools.length === 27, `count=${tools.length}`);
+  check('安裝後 mebular mcp：tools/list=29（记忆 13 + 任务 16）', tools.length === 29, `count=${tools.length}`);
   const written = await client.callTool({ name: 'memory_write', arguments: { items: [{ type: 'fact', content: 'publish-smoke' }] } });
   const parsed = written.structuredContent ?? JSON.parse(written.content?.find((c) => c.type === 'text')?.text ?? '{}');
   check('安裝後 memory_write 落圖', Array.isArray(parsed?.stored) && parsed.stored.length === 1);

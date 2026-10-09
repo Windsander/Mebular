@@ -886,6 +886,72 @@ export async function buildConfigView({ config, home }) {
   };
 }
 
+/**
+ * G-ML-1：记忆列表（动作式 GUI 的读面）。
+ * 默认**过滤已删除（墓碑）与已归档**；`includeDeleted=1` / `includeArchived=1` 可切换查看。
+ * 只读、脱敏（只给预览，不回显完整 metadata）。
+ */
+export async function buildMemories({ app, url }) {
+  const params = url?.searchParams ?? new URLSearchParams();
+  const flag = (name) => params.get(name) === '1' || params.get(name) === 'true';
+  const includeArchived = flag('includeArchived');
+  const includeDeleted = flag('includeDeleted');
+  const namespace = params.get('namespace') ?? undefined;
+  const limitRaw = Number(params.get('limit') ?? '50');
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 200) : 50;
+
+  const archivedOf = (node) => typeof node?.metadata?.archivedAt === 'number';
+  let nodes = [];
+  try {
+    nodes = await app.storage.listNodes();
+  } catch {
+    nodes = [];
+  }
+  const filtered = nodes.filter((node) => {
+    if (!includeDeleted && node.deletedAt) return false;
+    if (!includeArchived && archivedOf(node)) return false;
+    if (namespace !== undefined && (node.namespace ?? 'default') !== namespace) return false;
+    return true;
+  });
+  const previewOf = (node) => {
+    const content = node?.content ?? {};
+    if (typeof content === 'string') return content.slice(0, 160);
+    if (node?.type === 'fact') {
+      const f = content;
+      const triple = `${f.subject ?? ''} ${f.predicate ?? ''} ${f.object ?? ''}`.trim();
+      const text = typeof f.object === 'string' && f.object.length > 0 ? f.object : triple;
+      return text.slice(0, 160);
+    }
+    const text = content.content ?? content.name ?? content.description ?? content.value ?? '';
+    return String(text).slice(0, 160);
+  };
+  const memories = filtered
+    .slice()
+    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+    .slice(0, limit)
+    .map((node) => ({
+      id: node.id,
+      type: node.type,
+      namespace: node.namespace ?? 'default',
+      preview: previewOf(node),
+      createdAt: node.createdAt ?? null,
+      updatedAt: node.updatedAt ?? null,
+      archived: archivedOf(node),
+      archivedAt: node.metadata?.archivedAt ?? null,
+      deleted: Boolean(node.deletedAt),
+      deletedAt: node.deletedAt ?? null,
+      tags: Array.isArray(node.tags) ? node.tags : [],
+    }));
+  return {
+    total: filtered.length,
+    limit,
+    includeArchived,
+    includeDeleted,
+    ...(namespace !== undefined ? { namespace } : {}),
+    memories,
+  };
+}
+
 /** 只读 API 路由表：路径 → 构造器 */
 export const READ_ROUTES = {
   '/admin/api/overview': buildOverview,
@@ -894,4 +960,5 @@ export const READ_ROUTES = {
   '/admin/api/namespaces': buildNamespaces,
   '/admin/api/settings': buildSettings,
   '/admin/api/config': buildConfigView,
+  '/admin/api/memories': buildMemories,
 };

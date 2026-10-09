@@ -6,7 +6,7 @@ whenToUse: 需要把活派给别的设备上的 Agent、跨设备协作、子任
 
 # Mebular Tasks
 
-任务面与记忆面**共用同一个 MCP 入口**（`mebular mcp` / HTTP `/mcp`，27 工具中的 16 个 `task_*`/`chatter_*`/`board_create`）。
+任务面与记忆面**共用同一个 MCP 入口**（`mebular mcp` / HTTP `/mcp`，29 工具中的 16 个 `task_*`/`chatter_*`/`board_create`）。
 任务与记忆共用同一条加密记忆通道传输，但**任务不是记忆**（见 §6）。
 
 ## 1. 何时派活（而不是自己做）

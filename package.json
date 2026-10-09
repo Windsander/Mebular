@@ -60,7 +60,7 @@
     "build": "node scripts/clean-dist.mjs && tsc && tsc -p packages/service/tsconfig.json && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs",
     "build:fleet": "tsc -p packages/fleet/tsconfig.json",
     "build:service": "tsc -p packages/service/tsconfig.json",
-    "prepare": "node scripts/prepare-install.mjs",
+    "prepare": "npm run build",
     "build:watch": "tsc --watch",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",

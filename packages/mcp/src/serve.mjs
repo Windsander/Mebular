@@ -990,7 +990,7 @@ export async function startHttpServer({
     }
     let plan;
     try {
-      const { restartPlanFor } = await import('@mebular/service');
+      const { restartPlanFor } = await import('../../service/dist/index.js');
       plan = restartPlanFor({ kind, args: [], heartbeatDir: home, env: { MEBULAR_HOME: home } }, { home });
     } catch (error) {
       return { registered: false, manual: `服务管理不可用（${String(error?.message ?? error)}）：请手动重启` };

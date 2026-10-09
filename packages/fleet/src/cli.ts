@@ -15,7 +15,7 @@ import {
   startHeartbeat,
   type ServiceDescriptor,
   type ServicePlatform,
-} from '@mebular/service';
+} from '../../service/dist/index.js';
 import { echoResultFor, EchoExecutor, ExecutionLog } from './runtime/executor.js';
 import { FleetNode } from './runtime/node.js';
 import { FleetWorker } from './runtime/worker.js';

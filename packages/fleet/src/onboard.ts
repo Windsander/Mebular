@@ -13,7 +13,7 @@ import {
   type NamespaceHandoffResult,
   type NamespaceRejoinResult,
 } from '@mebular/core';
-import { isHeartbeatFresh, readHeartbeat, registeredServicesForDir } from '@mebular/service';
+import { isHeartbeatFresh, readHeartbeat, registeredServicesForDir } from '../../service/dist/index.js';
 
 import {
   fileMode,

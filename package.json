@@ -115,8 +115,6 @@
     "rulesets:apply": "node scripts/apply-rulesets.mjs --apply"
   },
   "dependencies": {
-    "@mebular/fleet": "file:packages/fleet",
-    "@mebular/service": "file:packages/service",
     "@modelcontextprotocol/server": "^2.0.0",
     "bonjour": "^3.5.1",
     "ulid": "^2.3.0",
@@ -174,6 +172,8 @@
       "node"
     ],
     "moduleNameMapper": {
+      "^(\\.\\./)+service/dist/index\\.js$": "<rootDir>/packages/service/src/index.ts",
+      "^(\\.\\./)+fleet/dist/index\\.js$": "<rootDir>/packages/fleet/src/index.ts",
       "^src/(.*)\\.js$": "<rootDir>/src/$1.ts",
       "^tests/(.*)\\.js$": "<rootDir>/tests/$1.ts",
       "^@mebular/core$": "<rootDir>/src/index.ts",

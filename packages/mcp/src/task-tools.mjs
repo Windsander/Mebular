@@ -4,7 +4,7 @@
 //
 // scope（R1.3）：读取类 task.read / 写入类 task.write。
 
-import { TASK_TOOLS } from '@mebular/fleet';
+import { TASK_TOOLS } from '../../fleet/dist/index.js';
 import { homeDir } from './config.mjs';
 import { json, fail, codeFor, jsonSchemaAdapter } from './tool-envelope.mjs';
 

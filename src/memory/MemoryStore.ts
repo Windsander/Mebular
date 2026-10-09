@@ -346,13 +346,18 @@ export class MemoryStore {
     return nodes.length;
   }
 
-  /** 列出全部未删除的记忆节点（去重） */
+  /**
+   * 列出全部**未删除**的记忆节点（去重）。
+   * G-ML-1r：**显式包含归档**——归档可逆、向量条目应保留以便恢复。若这里用默认
+   * 过滤（排除归档），ensureVectorIndex 会把归档节点当成「缺失」从索引剪除 →
+   * `includeArchived` 查不到、解除归档后默认向量召回永久缺失。墓碑仍排除。
+   */
   private async listAllNodes(): Promise<Node[]> {
     const types: Array<Node['type']> = ['entity', 'fact', 'episode', 'skill', 'meta'];
     const seen = new Set<string>();
     const nodes: Node[] = [];
     for (const type of types) {
-      for (const node of await this.listByType(type)) {
+      for (const node of await this.listByType(type, { includeArchived: true })) {
         if (seen.has(node.id)) {
           continue;
         }

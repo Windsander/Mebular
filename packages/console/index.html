@@ -111,7 +111,7 @@
               <button id="mem-refresh" class="btn btn-crt" type="button">刷新</button>
             </div>
           </div>
-          <p class="panel-note muted">动作式（无开关）：<b>归档</b> = 打 <code>metadata.archivedAt</code> 标记（默认不再召回、可解除、随图同步）；<b>删除</b> = 写墓碑（默认不再召回、随图同步；<b>不可逆</b>，对端已拷贝的旧快照无法强制回收）。两者都需 <code>memory.admin</code> + CSRF。</p>
+          <p class="panel-note muted">动作式（无开关）：<b>归档</b> = 打 <code>metadata.archivedAt</code> 标记（默认不再召回、可解除、随图同步）；<b>删除</b> = 写墓碑（默认不再召回、随图同步；<b>不可逆</b>，对端已拷贝的旧快照无法强制回收）。控制台写面一律需 <code>memory.admin</code> + CSRF（MCP/CLI 工具 scope：归档 <code>memory.write</code>、删除 <code>memory.admin</code>）。</p>
           <div id="memories-list" class="memories-list"></div>
         </section>
       </main>

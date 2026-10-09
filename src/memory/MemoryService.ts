@@ -352,6 +352,8 @@ export class MemoryService {
   /**
    * 归档 / 解除归档：节点级 `metadata.archivedAt` 标记（走 `updateNode` → `node_updated` 事件）。
    * 可逆、无损；默认不参与召回，`includeArchived: true` 可查。墓碑节点跳过（skipped）。
+   * G-ML-1r：归档不改内容但改变「是否可召回」，标记向量索引失效 → 下次向量查询
+   * 按最新图自愈（`listAllNodes` 含归档，故归档条目保留、解除后即可再召回）。
    */
   async archive(ids: string[], archived = true): Promise<ArchiveResult> {
     const archivedIds: string[] = [];
@@ -368,6 +370,9 @@ export class MemoryService {
       await this.mebular.graph.updateNode(id, { metadata });
       (archived ? archivedIds : unarchivedIds).push(id);
     }
+    if (archivedIds.length > 0 || unarchivedIds.length > 0) {
+      this.memory.markVectorIndexStale();
+    }
     return { archived: archivedIds, unarchived: unarchivedIds, notFound, skipped };
   }
 
@@ -383,7 +388,8 @@ export class MemoryService {
     return {
       ...result,
       visitedNodes: result.visitedNodes.filter(keep),
-      visitedEdges: result.visitedEdges.filter((e) => keptIds.has(e.source) || keptIds.has(e.target)),
+      // G-ML-1r：**两端都在可见集**才保留边——否则归档节点 id 会经端点泄漏
+      visitedEdges: result.visitedEdges.filter((e) => keptIds.has(e.source) && keptIds.has(e.target)),
     };
   }
 

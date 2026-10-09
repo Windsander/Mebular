@@ -15,9 +15,23 @@ import { join } from 'node:path';
 import { Mebular } from '../../src/mebular.js';
 import { IdentityManager } from '../../src/crypto/IdentityManager.js';
 import { MemoryService } from '../../src/memory/MemoryService.js';
+import { MemoryStore } from '../../src/memory/MemoryStore.js';
+import { type EmbeddingProvider } from '../../src/memory/embedding.js';
 import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
 
 jest.setTimeout(60000);
+
+// G-ML-1r：确定性「语义」embedding（不依赖真实模型）——命中也走向量路径。
+const SEM_CONCEPTS: string[][] = [['lifecycle', '生命周期']];
+const fakeEmbedding: EmbeddingProvider = {
+  id: 'fake-lifecycle',
+  async embed(texts: string[]): Promise<number[][]> {
+    return texts.map((text) => {
+      const lower = text.toLowerCase();
+      return SEM_CONCEPTS.map((syns) => (syns.some((s) => lower.includes(s.toLowerCase())) ? 1 : 0));
+    });
+  },
+};
 
 describe('G-ML-1 生命周期：删除（墓碑）与归档（标记）', () => {
   let dir: string;
@@ -38,6 +52,19 @@ describe('G-ML-1 生命周期：删除（墓碑）与归档（标记）', () => 
       storagePath: join(dir, `${deviceId}.jsonl`),
       deviceId,
       encryption: masterKeys,
+      sync: { autoSync: false },
+    });
+    await app.initialize();
+    return { app, service: new MemoryService(app) };
+  }
+
+  /** G-ML-1r：启用假 embedding 的向量索引，令召回走向量路径。 */
+  async function makeSemanticService(deviceId = 'device-A'): Promise<{ app: Mebular; service: MemoryService }> {
+    const app = new Mebular({
+      storagePath: join(dir, `${deviceId}-sem.jsonl`),
+      deviceId,
+      encryption: masterKeys,
+      semantic: { enabled: true, provider: fakeEmbedding },
       sync: { autoSync: false },
     });
     await app.initialize();
@@ -126,6 +153,83 @@ describe('G-ML-1 生命周期：删除（墓碑）与归档（标记）', () => 
     await app.shutdown();
   });
 
+  it('向量路径：归档默认不召回、includeArchived 可查；索引条目保留（G-ML-1r）', async () => {
+    const { app, service } = await makeSemanticService();
+    expect(app.semanticVectorIndex).not.toBeNull();
+    const [fact] = await service.write([{ type: 'fact', content: 'lifecycle vector object' }]);
+    // 建索引 + 默认向量召回命中
+    expect((await service.query({ query: 'lifecycle' })).totalMatches).toBe(1);
+
+    await service.archive([fact!.id], true);
+    // 归档期间用**新实例**触发一次索引对账（等价于同步完成 / 重启后的 stale 重建）：
+    // 修复前 listAllNodes 默认过滤会把归档节点当缺失剪除。
+    const observer = new MemoryStore(app.graph, app.semanticVectorIndex ?? undefined);
+    await observer.vectorQuery('lifecycle');
+    expect(app.semanticVectorIndex?.has?.(fact!.id)).toBe(true);
+    // 默认不召回；includeArchived 仍含，且 relevance>0 证明是**向量命中**而非关键词回退
+    expect((await service.query({ query: 'lifecycle' })).totalMatches).toBe(0);
+    const withArchived = await service.query({ query: 'lifecycle', includeArchived: true });
+    expect(withArchived.totalMatches).toBe(1);
+    expect(withArchived.memories[0]!.relevance).toBeGreaterThan(0);
+
+    await app.shutdown();
+  });
+
+  it('向量路径：归档期间索引对账后，解除归档仍恢复默认召回（无永久缺失，G-ML-1r）', async () => {
+    const { app, service } = await makeSemanticService();
+    const [fact] = await service.write([{ type: 'fact', content: 'lifecycle vector object' }]);
+    await service.query({ query: 'lifecycle' }); // 建索引
+    await service.archive([fact!.id], true);
+    // 归档期间对账（剪枝路径）
+    const observer = new MemoryStore(app.graph, app.semanticVectorIndex ?? undefined);
+    await observer.vectorQuery('lifecycle');
+
+    await service.archive([fact!.id], false); // 解除归档
+    // 1b 判据：解除归档后索引必须仍含该节点（否则永久缺失）
+    expect(app.semanticVectorIndex?.has?.(fact!.id)).toBe(true);
+    expect((await service.query({ query: 'lifecycle' })).totalMatches).toBe(1);
+
+    await app.shutdown();
+  });
+
+  it('向量路径：reindexVectorIndex 后归档节点仍可 includeArchived 查到（G-ML-1r）', async () => {
+    const { app, service } = await makeSemanticService();
+    const [fact] = await service.write([{ type: 'fact', content: 'lifecycle vector object' }]);
+    await service.query({ query: 'lifecycle' }); // 建索引
+    await service.archive([fact!.id], true);
+    await service.query({ query: 'lifecycle' }); // 触发剪枝路径（修复前会把归档节点从索引移除）
+
+    const store = new MemoryStore(app.graph, app.semanticVectorIndex ?? undefined);
+    expect(await store.reindexVectorIndex()).toBeGreaterThanOrEqual(1);
+    expect(app.semanticVectorIndex?.has?.(fact!.id)).toBe(true);
+    expect((await service.query({ query: 'lifecycle', includeArchived: true })).totalMatches).toBe(1);
+
+    await app.shutdown();
+  });
+
+  it('graph：归档节点不得经 visitedEdges 端点泄漏（两端都在可见集才保留边，G-ML-1r）', async () => {
+    const { app, service } = await makeService();
+    const [src] = await service.write([{ type: 'fact', content: '图源节点' }]);
+    const [tgt] = await service.write([{ type: 'fact', content: '图目标节点' }]);
+    await app.graph.createEdge(src!.id, tgt!.id, 'related_to');
+
+    await service.archive([tgt!.id], true);
+    const t = await service.graph(src!.id, { maxDepth: 1 });
+    const exposed = new Set<string>();
+    for (const e of t.visitedEdges) { exposed.add(e.source); exposed.add(e.target); }
+    expect(t.visitedNodes.some((n) => n.id === tgt!.id)).toBe(false);
+    expect(exposed.has(tgt!.id)).toBe(false);
+
+    // 显式 includeArchived：归档端点可见（边保留）
+    const withArchived = await service.graph(src!.id, { maxDepth: 1, includeArchived: true });
+    const exposed2 = new Set<string>();
+    for (const e of withArchived.visitedEdges) { exposed2.add(e.source); exposed2.add(e.target); }
+    expect(withArchived.visitedNodes.some((n) => n.id === tgt!.id)).toBe(true);
+    expect(exposed2.has(tgt!.id)).toBe(true);
+
+    await app.shutdown();
+  });
+
   /** 轮询直到条件成立（禁 sleep 碰运气；超时=失败）。 */
   async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 15000, pollMs = 100): Promise<boolean> {
     const started = Date.now();
@@ -193,7 +297,11 @@ describe('G-ML-1 生命周期：删除（墓碑）与归档（标记）', () => 
       (await sb.query({ query: '跨端归档对象' })).totalMatches === 0
       && (await sb.query({ query: '跨端归档对象', includeArchived: true })).totalMatches === 1);
     expect(converged).toBe(true);
-    expect(typeof (await b.graph.getNode(written!.id))?.metadata?.archivedAt).toBe('number');
+    const aArchivedAt = (await a.graph.getNode(written!.id))?.metadata?.archivedAt;
+    const bArchivedAt = (await b.graph.getNode(written!.id))?.metadata?.archivedAt;
+    expect(typeof bArchivedAt).toBe('number');
+    // G-ML-1r：两端 archivedAt 值必须相等（node_updated 传播的是同一节点版本）
+    expect(bArchivedAt).toBe(aArchivedAt);
 
     await a.shutdown();
     await b.shutdown();

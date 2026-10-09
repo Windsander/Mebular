@@ -95,7 +95,10 @@ Mebular 是**叠加基建**：把「单机记忆」升级为「去中心化记�
 - **归档 = 标记，默认不召回、可逆**：`memory_archive` 打 `metadata.archivedAt`（`node_updated` 事件，随图同步）；
   归档后默认不参与召回，查询类工具显式 `includeArchived: true` 可查；传 `archived: false` **解除归档**（无损、可逆）。
   墓碑节点不可归档（跳过）。
-- **动作式控制面**：控制台（GUI）与 MCP / CLI 提供删除 / 归档**动作**（`memory_delete` 需 `memory.admin`；`memory_archive` 需
-  `memory.write`；GUI 另需 CSRF），**不提供开关**——是否召回由上面的默认规则决定。
+- **动作式控制面（scope 口径）**：
+  - **MCP / CLI 按工具 scope**：`memory_delete` = `memory.admin`；`memory_archive` = `memory.write`。
+  - **控制台（GUI / HTTP admin 写面）一律 `memory.admin` + CSRF**（含归档 / 解除归档 / 删除）——与既有控制台安全姿态、
+    `LIMITATIONS`「写操作需 `memory.admin` + CSRF」一致（fail-safe；不按路径细分 scope）。
+  - **不提供开关**——是否召回由上面的默认规则决定。
 
 **内核口径**（红线/协议语义/推迟项）见仓库根 [`SEALING.md`](../../SEALING.md)；策略不变量矩阵见 [`src/sync/POLICY-INVARIANTS.md`](../../src/sync/POLICY-INVARIANTS.md)。

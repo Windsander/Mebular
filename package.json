@@ -4,9 +4,6 @@
   "description": "本地优先的图式记忆系统：为 Hermes 等 Agent 提供跨设备、可离线、可验证的记忆共享层",
   "license": "MIT",
   "author": "Windsander",
-  "workspaces": [
-    "packages/*"
-  ],
   "bin": {
     "mebular": "./packages/mcp/bin/mebular.mjs",
     "fleet": "./packages/fleet/dist/cli.js"
@@ -60,7 +57,7 @@
     "build": "node scripts/clean-dist.mjs && tsc && tsc -p packages/service/tsconfig.json && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs",
     "build:fleet": "tsc -p packages/fleet/tsconfig.json",
     "build:service": "tsc -p packages/service/tsconfig.json",
-    "prepare": "npm run build",
+    "prepare": "node scripts/prepare-install.mjs",
     "build:watch": "tsc --watch",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",

@@ -281,8 +281,8 @@ async function main() {
     check('切换到记忆视图（#memories-view 可见）', await waitFor('document.querySelector("#memories-view")?.hidden === false'));
     check('记忆视图含过滤器 + 记忆行 + 归档/删除动作按钮',
       await waitFor('(() => { const v = document.querySelector("#memories-view"); return Boolean(v) && Boolean(v.querySelector("#mem-filter-archived")) && Boolean(v.querySelector("#mem-filter-deleted")) && v.querySelectorAll(".mem-row").length >= 1 && Boolean(v.querySelector("[data-mem-action=archive]")) && Boolean(v.querySelector("[data-mem-action=delete]")); })()'));
-    check('记忆视图默认过滤说明（不显示已删除/已归档）',
-      await evalJs('/默认.{0,4}不显示已删除|默认过滤/.test(document.querySelector("#memories-view")?.textContent ?? "")'));
+    check('记忆视图默认过滤说明（动作式 + 归档默认不再召回）',
+      await evalJs('(() => { const t = document.querySelector("#memories-view")?.textContent ?? ""; return /动作式/.test(t) && /默认不再召回/.test(t) && /metadata\\.archivedAt/.test(t); })()'));
     // 归档：默认过滤下该行要么消失，要么按钮翻转为「解除归档」
     await evalJs('(() => { const b = document.querySelector("#memories-list [data-mem-action=archive]"); if (b) b.click(); })()');
     check('记忆视图：归档动作生效（行被过滤或按钮翻转）',

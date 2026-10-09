@@ -10,7 +10,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -171,6 +171,47 @@ try {
   const fleetBin = join(work, 'node_modules', '.bin', 'fleet');
   const fleetOut = execFileSync(process.execPath, [fleetBin, '--version'], { cwd: work, encoding: 'utf-8', env });
   check('安裝後 fleet --version', /0\.1\.0/.test(fleetOut), fleetOut.trim().split('\n').pop());
+
+  // ---------- F-INST-1：根包自足（`npm i -g github:…#<sha>` 一條命令裝出可用 CLI） ----------
+  const coreManifest = manifestOf(core.file);
+  check('F-INST-1 根 tarball 含雙 CLI 與其運行時',
+    ['package/dist/index.js', 'package/packages/mcp/bin/mebular.mjs', 'package/packages/mcp/src/home.mjs',
+      'package/packages/console/index.html', 'package/packages/fleet/dist/cli.js', 'package/packages/service/dist/index.js']
+      .every((f) => coreFiles.includes(f)),
+    'mcp/bin + console + fleet/service dist');
+  check('F-INST-1 根 package.json bin = mebular + fleet',
+    Boolean(coreManifest.bin?.mebular) && Boolean(coreManifest.bin?.fleet),
+    JSON.stringify(coreManifest.bin));
+  check('F-INST-1 根依賴含 mcp 運行時（zod + @modelcontextprotocol/server）',
+    Boolean(coreManifest.dependencies?.zod) && Boolean(coreManifest.dependencies?.['@modelcontextprotocol/server']));
+
+  // 根 tarball 全域安裝到獨立 prefix → 雙 bin + tools + home 預設
+  const gprefix = join(work, 'gprefix');
+  execFileSync(npm, ['install', '-g', '--prefix', gprefix, core.file, '--no-audit', '--no-fund', '--loglevel=error'], {
+    cwd: work,
+    stdio: ['ignore', 'ignore', 'inherit'],
+    env: process.env,
+  });
+  const gMebular = join(gprefix, 'bin', 'mebular');
+  const gFleet = join(gprefix, 'bin', 'fleet');
+  check('F-INST-1 全域安裝：雙 bin（mebular + fleet）就位', existsSync(gMebular) && existsSync(gFleet));
+  const gTools = JSON.parse(execFileSync(process.execPath, [gMebular, 'tools'], { cwd: work, encoding: 'utf-8', env }));
+  check('F-INST-1 全域安裝：`mebular tools` = 29', (gTools?.tools?.length ?? 0) === 29, `count=${gTools?.tools?.length}`);
+  const gFleetOut = execFileSync(process.execPath, [gFleet, '--version'], { cwd: work, encoding: 'utf-8', env });
+  check('F-INST-1 全域安裝：fleet --version 可執行', /^@mebular\/fleet /.test(gFleetOut.trim()), gFleetOut.trim());
+
+  // home 預設統一：不設 MEBULAR_HOME → $HOME/.mebular（而非 <cwd>/.mebular）
+  const gHome = join(work, 'ghome');
+  const gCwd = join(work, 'gcwd');
+  await mkdir(gHome, { recursive: true });
+  await mkdir(gCwd, { recursive: true });
+  const genv = { ...process.env, HOME: gHome };
+  delete genv.MEBULAR_HOME;
+  delete genv.MEBULAR_STORAGE_PATH;
+  delete genv.MEBULAR_DEVICE_ID;
+  execFileSync(process.execPath, [gMebular, 'status'], { cwd: gCwd, encoding: 'utf-8', env: genv });
+  check('F-INST-1 全域安裝：預設 home = $HOME/.mebular（不在 <cwd>）',
+    existsSync(join(gHome, '.mebular')) && !existsSync(join(gCwd, '.mebular')));
 } catch (error) {
   check('G6.5 發布驗證', false, String(error?.stderr ?? error?.message ?? error).substring(0, 500));
 } finally {

@@ -7,7 +7,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -171,15 +171,25 @@ try {
         && !/memory_status` —— 期望返回 `deviceId` \/ `storeLock`/.test(s04),
       '措辞已更正');
 
-    // C（中）：§0.3 的 service 命令必须带 MEBULAR_HOME 前缀（否则单元退化到 <cwd>/.mebular）
+    // F-INST-1：home 默认统一（bin 与 config 共用 ~/.mebular；MEBULAR_HOME 覆盖）
     const s03 = setup.slice(setup.indexOf('**0.3 有 home 但未在跑'), setup.indexOf('若所在环境不支持常驻'));
-    check('C §0.3 `mebular service install`/`status` 均带 `MEBULAR_HOME=~/.mebular` 前缀',
+    check('F-INST-1 §0.3 service install/status 三条命令带 `MEBULAR_HOME=~/.mebular`（显式声明）',
       /MEBULAR_HOME=~\/\.mebular mebular service install/.test(s03)
-        && (s03.match(/MEBULAR_HOME=~\/\.mebular mebular service status/g) ?? []).length === 2
-        && !/\n +mebular service (install|status)/.test(s03),
+        && (s03.match(/MEBULAR_HOME=~\/\.mebular mebular service status/g) ?? []).length === 2,
       '三条命令均带前缀');
-    check('C §0.3 说明「未设 MEBULAR_HOME 时退化到 <cwd>/.mebular」的依据',
-      /`homeDir\(\)` 退化为 \*\*`<cwd>\/\.mebular`\*\*/.test(s03) && /workingDir/.test(s03) && /storeLock=null/.test(s03));
+    check('F-INST-1 §0.3 不再声称 home 退化为 `<cwd>/.mebular`（默认已统一为 ~/.mebular）',
+      !/<cwd>\/\.mebular/.test(s03) && /~\/\.mebular/.test(s03));
+    // 行为验证：不设 MEBULAR_HOME → home 落在 $HOME/.mebular（不在 <cwd>）
+    const probeHome = join(dir, 'home-default-probe');
+    const probeCwd = join(dir, 'cwd-default-probe');
+    await mkdir(probeHome, { recursive: true });
+    await mkdir(probeCwd, { recursive: true });
+    const probeEnv = { ...process.env, HOME: probeHome };
+    delete probeEnv.MEBULAR_HOME;
+    delete probeEnv.MEBULAR_STORAGE_PATH;
+    execFileSync(process.execPath, [bin, 'status'], { cwd: probeCwd, encoding: 'utf-8', env: probeEnv });
+    check('F-INST-1 未设 MEBULAR_HOME：home 落在 $HOME/.mebular（不在 <cwd>）',
+      existsSync(join(probeHome, '.mebular')) && !existsSync(join(probeCwd, '.mebular')));
 
     // D（随行）：SKILL.md 接入第 1 步同样防滥用
     check('D SKILL.md 接入第 1 步注明「home 不存在时先按 SETUP §3/§5，不要跑 status」',

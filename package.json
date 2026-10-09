@@ -115,10 +115,8 @@
     "rulesets:apply": "node scripts/apply-rulesets.mjs --apply"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "^2.0.0",
     "bonjour": "^3.5.1",
-    "ulid": "^2.3.0",
-    "zod": "^4.6.5"
+    "ulid": "^2.3.0"
   },
   "optionalDependencies": {
     "@chainsafe/libp2p-noise": "^17.0.0",

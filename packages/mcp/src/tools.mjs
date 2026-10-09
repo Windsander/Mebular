@@ -27,6 +27,9 @@ export const TOOL_SCOPES = {
   memory_import: 'memory.admin',
   memory_status: 'memory.read',
   memory_sync: 'memory.admin',
+  // G-ML-1 生命周期：删除=admin（不可逆动作）；归档=write（可逆标记，按轮次规格）
+  memory_delete: 'memory.admin',
+  memory_archive: 'memory.write',
 };
 
 /** 记忆面工具名（11）。 */
@@ -42,6 +45,8 @@ export const MEMORY_TOOL_NAMES = [
   'memory_import',
   'memory_status',
   'memory_sync',
+  'memory_delete',
+  'memory_archive',
 ];
 
 /** 任务面工具名（16，来自 fleet 的 TASK_TOOLS）。 */
@@ -123,6 +128,8 @@ export const TOOL_SPECS = [
       limit: z.number().optional(),
       offset: z.number().optional(),
       includeHistory: z.boolean().optional(),
+      /** G-ML-1：默认 false（归档不参与召回）；显式 true 才可见已归档 */
+      includeArchived: z.boolean().optional(),
       filters: z
         .object({
           tags: z.array(z.string()).optional(),
@@ -142,6 +149,7 @@ export const TOOL_SPECS = [
           limit: clampLimit(args.limit),
           ...(args.offset !== undefined ? { offset: args.offset } : {}),
           ...(args.includeHistory !== undefined ? { includeHistory: args.includeHistory } : {}),
+          ...(args.includeArchived !== undefined ? { includeArchived: args.includeArchived } : {}),
           ...(args.filters ? { filters: args.filters } : {}),
         }));
       } catch (error) {
@@ -158,6 +166,8 @@ export const TOOL_SPECS = [
       types: z.array(z.string()).optional(),
       limit: z.number().optional(),
       includeRelations: z.boolean().optional(),
+      /** G-ML-1：默认 false（归档不参与召回） */
+      includeArchived: z.boolean().optional(),
       filters: z
         .object({
           tags: z.array(z.string()).optional(),
@@ -174,6 +184,7 @@ export const TOOL_SPECS = [
           ...(args.types ? { types: args.types } : {}),
           limit: clampLimit(args.limit),
           ...(args.includeRelations !== undefined ? { includeRelations: args.includeRelations } : {}),
+          ...(args.includeArchived !== undefined ? { includeArchived: args.includeArchived } : {}),
           ...(args.filters ? { filters: args.filters } : {}),
         }));
       } catch (error) {
@@ -184,11 +195,11 @@ export const TOOL_SPECS = [
   {
     name: 'memory_profile',
     title: '用户画像',
-    description: '返回用户偏好与属性',
-    inputSchema: z.object({}),
-    handler: async (service) => {
+    description: '返回用户偏好与属性（默认不含已归档）',
+    inputSchema: z.object({ includeArchived: z.boolean().optional() }),
+    handler: async (service, args) => {
       try {
-        return json(await service.profile());
+        return json(await service.profile(args?.includeArchived !== undefined ? { includeArchived: args.includeArchived } : {}));
       } catch (error) {
         return fail(String(error?.message ?? error));
       }
@@ -198,13 +209,19 @@ export const TOOL_SPECS = [
     name: 'memory_skills',
     title: '技能列表',
     description: '按分类/关键词/标签筛选技能',
-    inputSchema: z.object({ category: z.string().optional(), search: z.string().optional(), tags: z.array(z.string()).optional() }),
+    inputSchema: z.object({
+      category: z.string().optional(),
+      search: z.string().optional(),
+      tags: z.array(z.string()).optional(),
+      includeArchived: z.boolean().optional(),
+    }),
     handler: async (service, args) => {
       try {
         const skills = await service.skills({
           ...(args.category ? { category: args.category } : {}),
           ...(args.search ? { search: args.search } : {}),
           ...(args.tags ? { tags: args.tags } : {}),
+          ...(args.includeArchived !== undefined ? { includeArchived: args.includeArchived } : {}),
         });
         return json({ skills });
       } catch (error) {
@@ -223,11 +240,13 @@ export const TOOL_SPECS = [
       topic: z.string().optional(),
       limit: z.number().optional(),
       offset: z.number().optional(),
+      includeArchived: z.boolean().optional(),
     }),
     handler: async (service, args) => {
       try {
         return json(await service.history({
           ...(args.sessionIds ? { sessionIds: args.sessionIds } : {}),
+          ...(args.includeArchived !== undefined ? { includeArchived: args.includeArchived } : {}),
           ...(args.startTime !== undefined ? { startTime: args.startTime } : {}),
           ...(args.endTime !== undefined ? { endTime: args.endTime } : {}),
           ...(args.topic ? { topic: args.topic } : {}),
@@ -249,10 +268,12 @@ export const TOOL_SPECS = [
       maxDepth: z.number().optional(),
       edgeTypes: z.array(z.string()).optional(),
       namespace: namespaceFilter,
+      includeArchived: z.boolean().optional(),
     }),
     handler: async (service, args) => {
       try {
         return json(await service.graph(args.startId, {
+          ...(args.includeArchived !== undefined ? { includeArchived: args.includeArchived } : {}),
           ...(args.direction ? { direction: args.direction } : {}),
           maxDepth: clampDepth(args.maxDepth),
           ...(args.edgeTypes ? { edgeTypes: args.edgeTypes } : {}),
@@ -301,6 +322,33 @@ export const TOOL_SPECS = [
     handler: async (service, args) => {
       try {
         return json(await service.sync(args.peerId, args.address));
+      } catch (error) {
+        return fail(String(error?.message ?? error));
+      }
+    },
+  },
+  // ---------- G-ML-1 生命周期（删除 / 归档；MCP 与 CLI 同一 handler） ----------
+  {
+    name: 'memory_delete',
+    title: '删除记忆',
+    description: '删除记忆：写墓碑（deletedAt）并随图事件同步到各端；删除后默认不再参与任何召回。不可逆动作（对端已拷贝的旧快照无法强制回收）。需 memory.admin。',
+    inputSchema: z.object({ ids: z.array(z.string()).min(1) }),
+    handler: async (service, args) => {
+      try {
+        return json(await service.delete(args.ids));
+      } catch (error) {
+        return fail(String(error?.message ?? error));
+      }
+    },
+  },
+  {
+    name: 'memory_archive',
+    title: '归档 / 解除归档记忆',
+    description: '归档记忆：打 metadata.archivedAt 标记（随图同步、无损、可逆），归档后默认不参与召回；archived=false 解除归档。删除（墓碑）节点会被跳过。',
+    inputSchema: z.object({ ids: z.array(z.string()).min(1), archived: z.boolean().optional() }),
+    handler: async (service, args) => {
+      try {
+        return json(await service.archive(args.ids, args.archived !== false));
       } catch (error) {
         return fail(String(error?.message ?? error));
       }

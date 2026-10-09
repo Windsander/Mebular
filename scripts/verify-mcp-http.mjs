@@ -104,7 +104,7 @@ try {
 
     const client = await mcpClient(ready.port);
     const { tools } = await client.listTools();
-    check('POST /mcp 真实 MCP client tools/list=27（统一入口）', tools.length === 27, `count=${tools.length}`);
+    check('POST /mcp 真实 MCP client tools/list=29（统一入口）', tools.length === 29, `count=${tools.length}`);
     const w = await client.callTool({ name: 'memory_write', arguments: { items: [{ type: 'fact', content: 'http-smoke' }] } });
     check('POST /mcp tools/call 落图', Array.isArray(w.structuredContent?.stored));
     await client.close();
@@ -149,7 +149,7 @@ try {
 
     const client = await mcpClient(ready.port, { authorization: `Bearer ${readToken}` });
     const { tools } = await client.listTools();
-    check('正确 read token → tools/list 成功（27，含任务面）', tools.length === 27);
+    check('正确 read token → tools/list 成功（29，含任务面与生命周期工具）', tools.length === 29);
     await client.close();
 
     // R1.3：任务面 scope（memory.read ≠ task.read；两轴独立）
@@ -285,7 +285,7 @@ try {
 
     const client = await mcpClient(ready.port, { authorization: `Bearer ${tokenRes.json.access_token}` });
     const { tools } = await client.listTools();
-    check('oauth access token → /mcp tools/list 成功（27）', tools.length === 27, `count=${tools.length}`);
+    check('oauth access token → /mcp tools/list 成功（29）', tools.length === 29, `count=${tools.length}`);
     await client.close();
   }
 

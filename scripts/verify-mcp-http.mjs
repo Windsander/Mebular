@@ -117,6 +117,7 @@ try {
     const readToken = 'meb_readtoken';
     const writeToken = 'meb_writetoken';
     const taskReadToken = 'meb_taskreadtoken';
+    const adminToken = 'meb_admintoken';
     await mkdir(dirname(tokensFile), { recursive: true });
     await writeFile(
       tokensFile,
@@ -125,6 +126,7 @@ try {
           { id: 't-read', sha256: createHash('sha256').update(readToken).digest('hex'), scope: ['memory.read'], revoked: false },
           { id: 't-write', sha256: createHash('sha256').update(writeToken).digest('hex'), scope: ['memory.write'], revoked: false },
           { id: 't-taskread', sha256: createHash('sha256').update(taskReadToken).digest('hex'), scope: ['task.read'], revoked: false },
+          { id: 't-admin', sha256: createHash('sha256').update(adminToken).digest('hex'), scope: ['memory.admin'], revoked: false },
         ],
       }),
       'utf-8',
@@ -146,6 +148,56 @@ try {
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'memory_write', arguments: { items: [] } } }),
     });
     check('错误 scope（read 调 write）→ 403', wrongScope.status === 403, `status=${wrongScope.status}`);
+
+    // ---------- G-ML-1：生命周期工具的 scope 门控 + 成功路径 ----------
+    const toolCall = (token, name, args) => httpJson(`http://127.0.0.1:${ready.port}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 21, method: 'tools/call', params: { name, arguments: args } }),
+    });
+    const scOf = (res) => String(res.json?.error?.message ?? res.json?.message ?? '');
+
+    const deleteNoAdmin = await toolCall(writeToken, 'memory_delete', { ids: ['missing-id'] });
+    check('G-ML-1 memory_delete 无 memory.admin → 403 + 需要 memory.admin',
+      deleteNoAdmin.status === 403 && /memory\.admin/.test(scOf(deleteNoAdmin)),
+      `status=${deleteNoAdmin.status} msg=${scOf(deleteNoAdmin).slice(0, 60)}`);
+    const archiveNoWrite = await toolCall(readToken, 'memory_archive', { ids: ['missing-id'] });
+    check('G-ML-1 memory_archive 无 memory.write → 403 + 需要 memory.write',
+      archiveNoWrite.status === 403 && /memory\.write/.test(scOf(archiveNoWrite)),
+      `status=${archiveNoWrite.status} msg=${scOf(archiveNoWrite).slice(0, 60)}`);
+
+    // 成功路径：写 → 归档（默认不召回 / includeArchived 可见）→ 解除归档 → 删除（需 admin）
+    const lifeWrite = await mcpClient(ready.port, { authorization: `Bearer ${writeToken}` });
+    const lifeRead = await mcpClient(ready.port, { authorization: `Bearer ${readToken}` });
+    const lifeAdmin = await mcpClient(ready.port, { authorization: `Bearer ${adminToken}` });
+    const wrote = await lifeWrite.callTool({ name: 'memory_write', arguments: { items: [{ type: 'fact', content: 'http-lifecycle-node' }] } });
+    const nodeId = wrote.structuredContent?.stored?.[0]?.id;
+    check('G-ML-1 成功路径：memory_write 返回节点 id', typeof nodeId === 'string', `id=${nodeId}`);
+    const archived = await lifeWrite.callTool({ name: 'memory_archive', arguments: { ids: [nodeId] } });
+    const hidden = await lifeRead.callTool({ name: 'memory_query', arguments: { query: 'http-lifecycle-node' } });
+    const shown = await lifeRead.callTool({ name: 'memory_query', arguments: { query: 'http-lifecycle-node', includeArchived: true } });
+    check('G-ML-1 归档成功且默认不召回、includeArchived 可见',
+      (archived.structuredContent?.archived ?? []).includes(nodeId)
+        && hidden.structuredContent?.totalMatches === 0
+        && shown.structuredContent?.totalMatches === 1,
+      `archived=${(archived.structuredContent?.archived ?? []).length} hidden=${hidden.structuredContent?.totalMatches} shown=${shown.structuredContent?.totalMatches}`);
+    const unarchived = await lifeWrite.callTool({ name: 'memory_archive', arguments: { ids: [nodeId], archived: false } });
+    const back = await lifeRead.callTool({ name: 'memory_query', arguments: { query: 'http-lifecycle-node' } });
+    check('G-ML-1 解除归档可逆（默认重新召回）',
+      (unarchived.structuredContent?.unarchived ?? []).includes(nodeId) && back.structuredContent?.totalMatches === 1,
+      `total=${back.structuredContent?.totalMatches}`);
+    const deleted = await lifeAdmin.callTool({ name: 'memory_delete', arguments: { ids: [nodeId] } });
+    const gone = await lifeRead.callTool({ name: 'memory_query', arguments: { query: 'http-lifecycle-node' } });
+    check('G-ML-1 memory_delete（admin）成功：墓碑后默认不召回',
+      (deleted.structuredContent?.deleted ?? []).includes(nodeId) && gone.structuredContent?.totalMatches === 0,
+      `deleted=${(deleted.structuredContent?.deleted ?? []).length} total=${gone.structuredContent?.totalMatches}`);
+    await lifeWrite.close();
+    await lifeRead.close();
+    await lifeAdmin.close();
 
     const client = await mcpClient(ready.port, { authorization: `Bearer ${readToken}` });
     const { tools } = await client.listTools();

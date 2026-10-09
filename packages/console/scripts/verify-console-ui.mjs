@@ -10,7 +10,7 @@
 
 /* global WebSocket */
 
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -228,6 +228,16 @@ async function main() {
     const base = `http://127.0.0.1:${ready.port}`;
     check('GET /console/ 200', (await waitHttp(`${base}/console/`)) === 200);
 
+    // G-ML-1：播种一条记忆，供记忆生命周期视图用例（经 CLI，走已持锁的 serve）
+    try {
+      execFileSync(process.execPath, [bin, 'memory_write', '--input', JSON.stringify({ items: [{ type: 'fact', content: 'UI 生命周期记忆' }] })], {
+        env: { ...process.env, MEBULAR_HOME: home },
+        encoding: 'utf-8',
+      });
+    } catch (error) {
+      check('G-ML-1 播种记忆', false, String(error?.message ?? error).slice(0, 200));
+    }
+
     chromeHandle = await launchChromeRetry(chrome);
     cdp = connectCdp(chromeHandle.wsUrl);
     await cdp.ready;
@@ -264,6 +274,29 @@ async function main() {
     check('切换到域视图（#domains-view 可见）', await waitFor('document.querySelector("#domains-view")?.hidden === false'));
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('切回星图视图', await waitFor('document.querySelector("#domains-view")?.hidden === true'));
+
+    // G-ML-1：记忆生命周期视图（动作式：归档 / 解除归档 / 删除；默认过滤已删除与已归档）
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(4) button").click()');
+    check('切换到记忆视图（#memories-view 可见）', await waitFor('document.querySelector("#memories-view")?.hidden === false'));
+    check('记忆视图含过滤器 + 记忆行 + 归档/删除动作按钮',
+      await waitFor('(() => { const v = document.querySelector("#memories-view"); return Boolean(v) && Boolean(v.querySelector("#mem-filter-archived")) && Boolean(v.querySelector("#mem-filter-deleted")) && v.querySelectorAll(".mem-row").length >= 1 && Boolean(v.querySelector("[data-mem-action=archive]")) && Boolean(v.querySelector("[data-mem-action=delete]")); })()'));
+    check('记忆视图默认过滤说明（不显示已删除/已归档）',
+      await evalJs('/默认.{0,4}不显示已删除|默认过滤/.test(document.querySelector("#memories-view")?.textContent ?? "")'));
+    // 归档：默认过滤下该行要么消失，要么按钮翻转为「解除归档」
+    await evalJs('(() => { const b = document.querySelector("#memories-list [data-mem-action=archive]"); if (b) b.click(); })()');
+    check('记忆视图：归档动作生效（行被过滤或按钮翻转）',
+      await waitFor('(() => { const list = document.querySelector("#memories-list"); if (!list) return false; return Boolean(list.querySelector("[data-mem-action=unarchive]")) || list.querySelectorAll(".mem-row").length === 0; })()'));
+    // 勾选「显示已归档」→ 出现「已归档」徽标与「解除归档」
+    await evalJs('document.querySelector("#mem-filter-archived").click()');
+    check('记忆视图：显示已归档后出现「已归档」徽标与「解除归档」',
+      await waitFor('(() => { const v = document.querySelector("#memories-view"); return Boolean(v.querySelector("[data-mem-action=unarchive]")) && /已归档/.test(v.textContent); })()'));
+    // 解除归档（可逆）后关掉过滤，视图仍可交互
+    await evalJs('(() => { const b = document.querySelector("#memories-list [data-mem-action=unarchive]"); if (b) b.click(); })()');
+    await evalJs('document.querySelector("#mem-filter-archived").click()');
+    check('记忆视图：解除归档后视图仍可交互（刷新按钮就位）',
+      await waitFor('Boolean(document.querySelector("#memories-view")) && Boolean(document.querySelector("#mem-refresh"))'));
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
+    check('从记忆视图切回星图', await waitFor('document.querySelector("#memories-view")?.hidden === true'));
 
     // 设置弹窗（IA：常用/高级/诊断 + 关于本机）
     await evalJs('document.querySelector("#open-settings").click()');

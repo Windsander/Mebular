@@ -121,6 +121,31 @@ try {
   const h = structuredOf(await client.callTool({ name: 'memory_history', arguments: {} }));
   check('memory_history 返回 totalCount', typeof h?.totalCount === 'number');
 
+  // ---------- G-ML-1：生命周期（归档 / 解除 / 删除）经统一入口 ----------
+  const lifeW = structuredOf(await client.callTool({ name: 'memory_write', arguments: { items: [{ type: 'fact', content: 'mcp-gml-lifecycle' }] } }));
+  const lifeId = lifeW?.stored?.[0]?.id;
+  check('G-ML-1 独立节点写入（供生命周期用例）', typeof lifeId === 'string', `id=${lifeId}`);
+  const arch = structuredOf(await client.callTool({ name: 'memory_archive', arguments: { ids: [lifeId] } }));
+  const hiddenAfterArchive = structuredOf(await client.callTool({ name: 'memory_query', arguments: { query: 'mcp-gml-lifecycle' } }));
+  const shownWithArchived = structuredOf(await client.callTool({ name: 'memory_query', arguments: { query: 'mcp-gml-lifecycle', includeArchived: true } }));
+  check('G-ML-1 memory_archive 成功且默认不召回、includeArchived 可见',
+    (arch?.archived ?? []).includes(lifeId)
+      && hiddenAfterArchive?.totalMatches === 0
+      && shownWithArchived?.totalMatches === 1,
+    `hidden=${hiddenAfterArchive?.totalMatches} shown=${shownWithArchived?.totalMatches}`);
+
+  const unarch = structuredOf(await client.callTool({ name: 'memory_archive', arguments: { ids: [lifeId], archived: false } }));
+  const recalled = structuredOf(await client.callTool({ name: 'memory_query', arguments: { query: 'mcp-gml-lifecycle' } }));
+  check('G-ML-1 解除归档可逆（默认重新召回）',
+    (unarch?.unarchived ?? []).includes(lifeId) && recalled?.totalMatches === 1,
+    `total=${recalled?.totalMatches}`);
+
+  const del = structuredOf(await client.callTool({ name: 'memory_delete', arguments: { ids: [lifeId] } }));
+  const gone = structuredOf(await client.callTool({ name: 'memory_query', arguments: { query: 'mcp-gml-lifecycle' } }));
+  check('G-ML-1 memory_delete 成功：墓碑后默认不召回',
+    (del?.deleted ?? []).includes(lifeId) && gone?.totalMatches === 0,
+    `total=${gone?.totalMatches}`);
+
   // R3.3：任务工具经统一入口返回**结构化错误信封**（此 home 无 fleet/守护 config → E_NOT_FOUND）
   const taskFail = await client.callTool({ name: 'task_status', arguments: {} });
   check(

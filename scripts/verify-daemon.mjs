@@ -121,6 +121,7 @@ const homeB = join(root, 'B');
 let serve1 = null;
 let serve2 = null;
 let serveNet = null;
+let serveDoc = null;
 try {
   console.log('== A1/A5 委派身份模式（无主私钥）==');
   const joinPort = await freePort();
@@ -279,6 +280,57 @@ try {
       { code: serveNet2.code, err: err2.trim().slice(0, 140) });
   }
 
+  // F-CLI-2：doctor --net 守护感知（守护运行时不抢端口 / 取真实状态 / next 正确）
+  console.log('== F-CLI-2：doctor --net 守护感知 ==');
+  {
+    const docHome = join(root, 'doc');
+    const docPort = await freePort();
+    const docLanPort = await freePort();
+    await mkdir(docHome, { recursive: true });
+    await writeFile(join(docHome, 'config.json'), JSON.stringify({
+      storagePath: join(docHome, 'store.jsonl'),
+      deviceId: 'device-doc',
+      encryption: { level: 'none' },
+      network: { enabled: true, libp2p: { listen: [`/ip4/127.0.0.1/tcp/${docLanPort}`] } },
+      sync: { autoSync: false },
+      mcp: { http: { host: '127.0.0.1', port: docPort, auth: 'none', tls: false } },
+    }, null, 2), { mode: 0o600 });
+    const envDoc = { ...process.env, MEBULAR_HOME: docHome };
+
+    // 守护未跑：本地诊断语义（daemon=null）
+    const localDoc = await runCli(envDoc, ['doctor', '--net']);
+    const localDocJson = firstJson(localDoc.out) ?? {};
+    check('F-CLI-2 无守护 doctor --net：本地语义（daemon=null，runtime.enabled 反映 config）',
+      localDoc.code === 0 && !localDocJson.daemon && localDocJson.runtime?.enabled === true,
+      { code: localDoc.code, daemon: localDocJson.daemon ?? null });
+
+    // 起守护（固定 mcp 端口，doctor 可读 admin API）
+    serveDoc = startCli(envDoc, ['serve', '--port', String(docPort)]);
+    const docReady = await waitFor(() => /SERVE_READY/.test(serveDoc.state.out), 40000);
+    check('F-CLI-2 守护（固定 mcp 端口）启动', docReady, { out: serveDoc.state.out.slice(0, 100) });
+
+    const doc = await runCli(envDoc, ['doctor', '--net']);
+    const docJson = firstJson(doc.out) ?? {};
+    const docText = doc.out + doc.err;
+    check('F-CLI-2 守护运行 doctor --net：exit 0 + 复用守护(admin-api) + 真实 listen + 无 EADDRINUSE',
+      doc.code === 0 && docJson.daemon?.reused === true && docJson.daemon?.source === 'admin-api'
+        && Array.isArray(docJson.runtime?.listen) && docJson.runtime.listen.length > 0
+        && !/EADDRINUSE/.test(docText),
+      { code: doc.code, daemon: docJson.daemon ?? null, listen: docJson.runtime?.listen?.length ?? 0, eaddr: /EADDRINUSE/.test(docText) });
+    check('F-CLI-2 守护运行 doctor --net：lan/net/nat/relay 均取自守护（非 null 或 error）',
+      docJson.lan !== null && docJson.net !== null && docJson.nat !== null && docJson.relay !== null,
+      { lan: docJson.lan !== null, net: docJson.net !== null, nat: docJson.nat !== null, relay: docJson.relay !== null });
+    check('F-CLI-2 守护运行 doctor --net：next 不再误报「network.enabled=false」',
+      !(docJson.next ?? []).some((line) => /network\.enabled=false/.test(line)),
+      { next: docJson.next ?? [] });
+
+    // mcp(stdio) 守护运行时必须拒绝（第二写者/抢端口）
+    const mcpBlocked = await runCli(envDoc, ['mcp'], 15000);
+    check('F-CLI-2 守护运行 mcp(stdio)：拒绝并给可读错误（MCP_STORAGE_LOCKED）',
+      mcpBlocked.code !== 0 && /MCP_STORAGE_LOCKED|守护已在运行/.test(mcpBlocked.out + mcpBlocked.err),
+      { code: mcpBlocked.code, err: (mcpBlocked.out + mcpBlocked.err).trim().slice(0, 120) });
+  }
+
   console.log('== A4 join 迁回守护 + 策略 app 路由 ==');
   const invite = await fetch(`${base}/app/join/invite`, { method: 'POST', headers: auth, body: JSON.stringify({ namespace: 'tasks', ttlMs: 120000 }) });
   const inviteJson = await invite.json();
@@ -407,7 +459,7 @@ try {
   check('fleet node/worker daemon 模式任务往返（2/2）', summary?.submitted === 2 && summary?.done === 2 && summary?.resultsMatch === true, summary ?? { err: nodeRes.err.slice(-160) });
   check('daemon 模式：node 不监听 libp2p（mode=daemon）', /"mode":"daemon"/.test(nodeRes.out), { listening: nodeRes.out.split('\n').find((l) => l.includes('listening')) ?? null });
 } finally {
-  for (const s of [serve1, serve2, serveNet]) {
+  for (const s of [serve1, serve2, serveNet, serveDoc]) {
     if (s) {
       try {
         s.child.kill('SIGKILL');

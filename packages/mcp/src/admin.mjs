@@ -953,6 +953,26 @@ export async function buildMemories({ app, url }) {
 }
 
 /** 只读 API 路由表：路径 → 构造器 */
+/** F-CLI-2 · GET /admin/api/net：守护本机网络真状态（只读；`doctor --net` 守护感知复用）。 */
+export async function buildNetStatusView({ app }) {
+  let paths = [];
+  try {
+    const book = app?.endpointBook;
+    paths = book ? book.keys().map((key) => ({ key, path: book.getPath(key) })) : [];
+  } catch {
+    paths = [];
+  }
+  return {
+    enabled: Boolean(app?.node?.isRunning?.()),
+    listen: app?.node?.getLocalMultiaddrs?.() ?? [],
+    paths,
+    lan: app?.node?.getLanStatus?.() ?? null,
+    net: app?.getNetEndpointsStatus?.() ?? null,
+    nat: app?.getNatStatus?.() ?? null,
+    relay: app?.node?.getRelayStatus?.() ?? null,
+  };
+}
+
 export const READ_ROUTES = {
   '/admin/api/overview': buildOverview,
   '/admin/api/devices': buildDevices,
@@ -961,4 +981,5 @@ export const READ_ROUTES = {
   '/admin/api/settings': buildSettings,
   '/admin/api/config': buildConfigView,
   '/admin/api/memories': buildMemories,
+  '/admin/api/net': buildNetStatusView,
 };

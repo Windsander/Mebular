@@ -285,6 +285,27 @@ async function runConsole(flags) {
   process.exit(2);
 }
 
+/** F-CLI-2：从**运行中的守护**读本机网络真状态（只读 admin API；不初始化自己的 P2P）。 */
+async function readDaemonNetView(home, config) {
+  const httpCfg = config?.mcp?.http ?? {};
+  const host = httpCfg.host ?? '127.0.0.1';
+  const port = httpCfg.port ?? 7331;
+  const scheme = (httpCfg.tls === true || (httpCfg.tlsKey && httpCfg.tlsCert)) ? 'https' : 'http';
+  const token = process.env.MEBULAR_TOKEN;
+  try {
+    const res = await fetch(`${scheme}://${host}:${port}/admin/api/net`, {
+      headers: { accept: 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!res.ok) {
+      return { error: `守护只读端点不可用（HTTP ${res.status}${res.status === 401 ? '：需 token（设置 MEBULAR_TOKEN）' : ''}）` };
+    }
+    return { view: await res.json() };
+  } catch (error) {
+    return { error: `无法连接守护（${error?.message ?? error}）` };
+  }
+}
+
 /** C2：`doctor --net` —— 读地址簿/路径状态 + 轻量可达性探针，输出「下一步建议」。 */
 async function runNetDoctor() {
   const { createMebular, loadConfigFile, endpointsPath, networkHints, relaySeeds } = await import('../src/config.mjs');
@@ -321,73 +342,64 @@ async function runNetDoctor() {
     bookError = error.message;
   }
 
-  // 进程内路径状态（需网络启用；失败不阻断诊断）
+  // F-CLI-2：守护感知 —— 守护在运行时不初始化自己的 P2P（否则抢监听端口 → EADDRINUSE 污染全部段落）
+  const lockPath = join(home, 'lock');
+  let storeLock = null;
+  if (existsSync(lockPath)) {
+    try {
+      storeLock = JSON.parse(await readFile(lockPath, 'utf-8'));
+    } catch {
+      storeLock = { corrupt: true };
+    }
+  }
+  const { pidAlive } = await import('../src/serve.mjs');
+  const daemonLive = Boolean(storeLock?.pid) && pidAlive(storeLock.pid);
+  let daemon = null;
+
   let runtime = { enabled: false, listen: [], paths: [], nodeError: null };
-  try {
-    const { app } = await createMebular();
-    try {
-      const node = app.node;
-      runtime.enabled = Boolean(node?.isRunning());
-      runtime.listen = node?.getLocalMultiaddrs?.() ?? [];
-      const bookRef = app.endpointBook;
-      runtime.paths = bookRef ? bookRef.keys().map((key) => ({ key, path: bookRef.getPath(key) })) : [];
-    } finally {
-      await app.shutdown().catch(() => undefined);
-    }
-  } catch (error) {
-    runtime.nodeError = error.message;
-  }
-
-  // C3：LAN 自动发现状态（发现层是否启用/在跑、LAN 候选、忽略的陌生设备）
   let lan = null;
-  try {
-    const { app } = await createMebular();
-    try {
-      lan = app.node?.getLanStatus?.() ?? null;
-    } finally {
-      await app.shutdown().catch(() => undefined);
-    }
-  } catch (error) {
-    lan = { error: error.message };
-  }
-
-  // C5：地址自动广播状态（档位/已发布/已采用/忽略原因）
   let netStatus = null;
-  try {
-    const { app } = await createMebular();
-    try {
-      netStatus = app.getNetEndpointsStatus?.() ?? null;
-    } finally {
-      await app.shutdown().catch(() => undefined);
-    }
-  } catch (error) {
-    netStatus = { error: error.message };
-  }
-
-  // C4：NAT 穿透状态（AutoNAT/DCUtR + 直连升级计数）
   let natStatus = null;
-  try {
-    const { app } = await createMebular();
-    try {
-      natStatus = app.getNatStatus?.() ?? null;
-    } finally {
-      await app.shutdown().catch(() => undefined);
-    }
-  } catch (error) {
-    natStatus = { error: error.message };
-  }
-
-  // C6：内建 relay 角色（本机当不当桥、原因、白名单客户端数）
   let relay = null;
-  try {
-    const { app } = await createMebular();
-    try {
-      relay = app.node?.getRelayStatus?.() ?? null;
-    } finally {
-      await app.shutdown().catch(() => undefined);
+
+  if (daemonLive) {
+    const { view, error } = await readDaemonNetView(home, config);
+    if (view) {
+      runtime = { enabled: Boolean(view.enabled), listen: view.listen ?? [], paths: view.paths ?? [], nodeError: null };
+      lan = view.lan ?? null;
+      netStatus = view.net ?? null;
+      natStatus = view.nat ?? null;
+      relay = view.relay ?? null;
+      daemon = { reused: true, pid: storeLock.pid, source: 'admin-api' };
+    } else {
+      // 只读端点不可用（如需 token）：退回 config 判据，并明确标注不是本进程实测
+      runtime = { enabled: config.network?.enabled === true, listen: [], paths: [], nodeError: error };
+      daemon = { reused: true, pid: storeLock.pid, source: 'config-only', readError: error };
     }
-  } catch (error) {
-    relay = { error: error.message };
+  } else {
+    // 本地诊断（无守护）：进程内状态（一次装配，多处取用；失败不阻断诊断）
+    try {
+      const { app } = await createMebular();
+      try {
+        const node = app.node;
+        runtime.enabled = Boolean(node?.isRunning());
+        runtime.listen = node?.getLocalMultiaddrs?.() ?? [];
+        const bookRef = app.endpointBook;
+        runtime.paths = bookRef ? bookRef.keys().map((key) => ({ key, path: bookRef.getPath(key) })) : [];
+        lan = node?.getLanStatus?.() ?? null;
+        netStatus = app.getNetEndpointsStatus?.() ?? null;
+        natStatus = app.getNatStatus?.() ?? null;
+        relay = node?.getRelayStatus?.() ?? null;
+      } finally {
+        await app.shutdown().catch(() => undefined);
+      }
+    } catch (error) {
+      runtime.nodeError = error.message;
+      lan = { error: error.message };
+      netStatus = { error: error.message };
+      natStatus = { error: error.message };
+      relay = { error: error.message };
+    }
   }
 
   // relay seeds 探针（TCP 可达性）
@@ -400,7 +412,9 @@ async function runNetDoctor() {
   }
 
   const next = [];
-  if (!runtime.enabled) next.push('network.enabled=false：先开启 P2P（可达设备会自动成为桥；无需手工起 relay）');
+  // F-CLI-2：守护在运行时 runtime 取自守护实测；仅**无守护**时才用「未开启 P2P」建议（避免误导）
+  if (!runtime.enabled && !daemon) next.push('network.enabled=false：先开启 P2P（可达设备会自动成为桥；无需手工起 relay）');
+  if (daemon?.readError) next.push(`守护在运行但只读端点不可用（${daemon.readError}）：可设置 MEBULAR_TOKEN 后重试，或直接看 \`mebular status\``);
   if (runtime.listen.length === 0 && runtime.enabled) next.push('本机暂无监听地址：检查 network.libp2p.listen / 防火墙 / relay 预约');
   const totalHints = Object.values(hints).reduce((sum, list) => sum + list.length, 0);
   if (totalHints === 0) next.push('无配对 hints：用 `fleet invite`/控制台邀请，让新设备拿到可达地址（token.endpoints）');
@@ -431,6 +445,7 @@ async function runNetDoctor() {
         }
       : { loaded: false, error: bookError },
     configHints: hints,
+    daemon,
     lan,
     net: netStatus,
     nat: natStatus,
@@ -580,7 +595,12 @@ async function main() {
   switch (command) {
     case 'mcp': {
       const { startStdioServer } = await import('../src/server.mjs');
-      await startStdioServer();
+      try {
+        await startStdioServer();
+      } catch (error) {
+        console.error(`✗ mcp 启动失败（${error?.code ?? 'ERROR'}）：${error?.message ?? error}`);
+        process.exit(2);
+      }
       return;
     }
     case 'serve': {

@@ -1575,7 +1575,15 @@ export async function startHttpServer({
           return typeof addr === 'object' && addr !== null ? addr.port : port;
         })();
         if (path === '/app/provision/status' && req.method === 'GET') {
-          return sendJson(res, 200, provisionStatus({ home, mcpPort: boundPort }));
+          // C（F-ONB-2）：home 已初始化（config 存在）却仍是引导态 → 待重启态（带重启计划）。
+          const provisioned = !isProvisionHome(home);
+          const planned = provisioned ? await planProvisionRestart({ result: null }) : null;
+          return sendJson(res, 200, provisionStatus({
+            home,
+            mcpPort: boundPort,
+            provisioned,
+            ...(planned ? { restarting: planned.restarting, restart: planned.restart } : {}),
+          }));
         }
         if (path === '/app/provision/create' || path === '/app/provision/join') {
           if (req.method !== 'POST') return sendJson(res, 405, { error: 'method_not_allowed' });
@@ -1585,7 +1593,17 @@ export async function startHttpServer({
           }
           if (!csrfValid(req)) return sendJson(res, 403, { error: 'forbidden', message: 'CSRF token 缺失或无效' });
           if (!isProvisionHome(home)) {
-            return sendJson(res, 409, { ok: false, error: 'already_provisioned', message: '家目录已完成初始化：重复调用被拒' });
+            // B（F-ONB-2）：已完成但重复调用 → 结构化 409 带「待重启」指引（前端切「已完成」态，不裸报错）
+            const planned = await planProvisionRestart({ result: null });
+            return sendJson(res, 409, {
+              ok: false,
+              error: 'already_provisioned',
+              provisioned: true,
+              restartRequired: true,
+              restarting: planned.restarting,
+              restart: planned.restart,
+              message: '家目录已完成初始化：无需重复建新；按指引重启后进入正常态。',
+            });
           }
           const input = parseJsonBody(body) ?? {};
           if (input.confirm !== true) {

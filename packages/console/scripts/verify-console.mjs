@@ -126,7 +126,7 @@ function waitReady(handle, timeoutMs = 20000) {
   return new Promise((resolve, reject) => {
     const started = Date.now();
     const timer = setInterval(() => {
-      const match = handle.getOut().match(/SERVE_READY (\{.*\})/);
+      const match = handle.getOut().match(/(?:PROVISION_READY|SERVE_READY) (\{.*\})/);
       if (match) {
         clearInterval(timer);
         resolve(JSON.parse(match[1]));
@@ -804,6 +804,77 @@ try {
         && consoleSrcOnboard.includes('fetchProvisionStatus') && consoleSrcOnboard.includes('/app/provision/create')
         && consoleSrcOnboard.includes('/app/provision/join') && consoleSrcOnboard.includes('renderProvision'),
       'index.html 两入口 + console.js provision 客户端');
+  }
+
+  // ---------- F-ONB-2：引导态建新后的「待重启」UX（前台 vs 服务托管） ----------
+  {
+    const onboardHome = join(home, 'onboard');
+    await mkdir(onboardHome, { recursive: true });
+    const onboardHandle = spawnServe({ home: onboardHome, storage: join(onboardHome, 'store.jsonl'), deviceId: 'device-onboard' });
+    servers.push(onboardHandle);
+    const onboardReady = await waitReady(onboardHandle);
+    const obase = `http://127.0.0.1:${onboardReady.port}`;
+    const st0 = await (await fetch(`${obase}/app/provision/status`)).json().catch(() => null);
+    check('F-ONB-2 空 home：status provisioned=false / restartRequired=false',
+      st0?.provision === true && st0?.provisioned === false && st0?.restartRequired === false,
+      JSON.stringify({ provision: st0?.provision, provisioned: st0?.provisioned, restartRequired: st0?.restartRequired }));
+
+    const obPage = await fetch(`${obase}/console/`);
+    const obHeaders = {
+      'content-type': 'application/json',
+      'x-mebular-csrf': obPage.headers.get('x-mebular-csrf'),
+      cookie: `mebular_csrf=${cookieFrom(obPage)}`,
+    };
+    const created = await fetch(`${obase}/app/provision/create`, { method: 'POST', headers: obHeaders, body: JSON.stringify({ confirm: true }) });
+    const createdJson = await created.json().catch(() => null);
+    check('F-ONB-2 前台建新：202 + restarting=false + restart.mode=foreground + 手动命令',
+      created.status === 202 && createdJson?.restarting === false && createdJson?.restart?.mode === 'foreground'
+        && typeof createdJson?.restart?.command === 'string' && createdJson.restart.command.includes('mebular serve'),
+      `status=${created.status} restarting=${createdJson?.restarting} mode=${createdJson?.restart?.mode}`);
+
+    const st1 = await (await fetch(`${obase}/app/provision/status`)).json().catch(() => null);
+    check('F-ONB-2 建新后仍是引导态：status provisioned=true/restartRequired=true/restart.mode=foreground，且 note 不再称「家目录为空」',
+      st1?.provision === true && st1?.provisioned === true && st1?.restartRequired === true
+        && st1?.restarting === false && st1?.restart?.mode === 'foreground'
+        && !/家目录为空/.test(st1?.note ?? ''),
+      `provisioned=${st1?.provisioned} restartRequired=${st1?.restartRequired} note=${st1?.note}`);
+
+    const dup = await fetch(`${obase}/app/provision/create`, { method: 'POST', headers: obHeaders, body: JSON.stringify({ confirm: true }) });
+    const dupJson = await dup.json().catch(() => null);
+    check('F-ONB-2 重复建新：409 already_provisioned + restartRequired + restart（结构化，不裸报错）',
+      dup.status === 409 && dupJson?.error === 'already_provisioned' && dupJson?.restartRequired === true
+        && dupJson?.restart?.mode === 'foreground',
+      `status=${dup.status} error=${dupJson?.error}`);
+
+    const consoleSrcOnb2 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const htmlSrcOnb2 = await readFile(join(consoleDir, 'index.html'), 'utf-8');
+    check('F-ONB-2 前端分流：restarting 判定 + 前台「无法自动重启」+ already_provisioned → 待重启面板 + 复制按钮',
+      /res\?\.restarting/.test(consoleSrcOnb2) && /already_provisioned/.test(consoleSrcOnb2)
+        && /showProvisionRestart/.test(consoleSrcOnb2) && /无法自动重启/.test(consoleSrcOnb2)
+        && htmlSrcOnb2.includes('id="provision-restart"') && htmlSrcOnb2.includes('id="provision-restart-copy"')
+        && htmlSrcOnb2.includes('id="provision-restart-command"'),
+      'console.js 分流 + index.html 待重启面板');
+  }
+
+  // ---------- F-ONB-2：服务托管分支回归（restarting=true；引导态启动 + 写入 config，不触发真实重启） ----------
+  {
+    const svcHome = join(home, 'onboard-svc');
+    await mkdir(svcHome, { recursive: true });
+    const svcHandle = spawnServe({
+      home: svcHome,
+      storage: join(svcHome, 'store.jsonl'),
+      deviceId: 'device-onboard-svc',
+      env: { MEBULAR_SERVICE_KIND: 'launchd' },
+    });
+    servers.push(svcHandle);
+    const svcReady = await waitReady(svcHandle);
+    const sbase = `http://127.0.0.1:${svcReady.port}`;
+    // 模拟「建新完成」：写入 config（serve 进程仍处引导态）
+    await writeFile(join(svcHome, 'config.json'), JSON.stringify({ deviceId: 'device-onboard-svc', encryption: { level: 'none' } }, null, 2), 'utf-8');
+    const sst = await (await fetch(`${sbase}/app/provision/status`)).json().catch(() => null);
+    check('F-ONB-2 服务托管分支：status restarting=true + restart.mode=service（回归不破）',
+      sst?.provisioned === true && sst?.restartRequired === true && sst?.restarting === true && sst?.restart?.mode === 'service',
+      `restarting=${sst?.restarting} mode=${sst?.restart?.mode}`);
   }
 
   // ---------- 邀请新设备（T2 令牌加入） ----------

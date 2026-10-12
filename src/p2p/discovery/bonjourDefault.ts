@@ -5,6 +5,8 @@
 // 「无服务」处理（发现功能禁用，其他连接方式不受影响）。测试可注入替代 loader。
 
 import { createRequire } from 'node:module';
+import { realpathSync } from 'node:fs';
+import { join } from 'node:path';
 import type { BonjourServiceFactory, BonjourServiceInstance } from '../DeviceDiscovery.js';
 
 interface BonjourLike {
@@ -16,7 +18,7 @@ interface BonjourLike {
 type BonjourFactoryLike = (options?: Record<string, unknown>) => BonjourLike;
 
 export interface DefaultBonjourFactoryOptions {
-  /** 同步加载 bonjour 模块（测试注入；缺省 createRequire(import.meta.url)('bonjour')） */
+  /** 同步加载 bonjour 模块（测试注入；缺省 createRequire(入口真实路径)('bonjour')） */
   loadModule?: () => unknown;
   onWarn?: (message: string) => void;
   /** 传给 bonjour() 的选项 */
@@ -47,9 +49,19 @@ function adapter(instance: BonjourLike, onWarn: (message: string) => void): Bonj
  */
 export function createDefaultBonjourFactory(options: DefaultBonjourFactoryOptions = {}): BonjourServiceFactory {
   const warn = options.onWarn ?? (() => undefined);
-  // 解析锚点：优先入口脚本（CLI/测试进程），否则 cwd —— 避免 import.meta（CJS 构建下不可用）
-  const anchor = process.argv[1] && process.argv[1].length > 0 ? process.argv[1] : `${process.cwd()}/index.js`;
-  const load = options.loadModule ?? (() => createRequire(anchor)('bonjour'));
+  // 解析锚点：入口脚本的**真实路径**（`realpathSync` 解符号链接）。
+  // 历史 bug：直接用 `process.argv[1]` —— CLI 经 `~/.local/bin/mebular` 符号链接启动时锚点落在 bin
+  // 目录，向上找不到 `node_modules/bonjour` → factory 返回 null → 发现层误判不可用。
+  // 采用等价可靠方案而非 `import.meta`：仓库约定 src TS 不读 `import.meta`（ts-jest 以 CJS 加载
+  // src 会编译失败，见 packages/fleet/src/quickstart.ts 同一说明）。
+  const anchorOf = () => {
+    const entry = process.argv[1];
+    if (entry && entry.length > 0) {
+      try { return realpathSync(entry); } catch { return entry; }
+    }
+    return join(process.cwd(), 'index.js');
+  };
+  const load = options.loadModule ?? (() => createRequire(anchorOf())('bonjour'));
   return () => {
     try {
       const mod = load() as { default?: BonjourFactoryLike } | BonjourFactoryLike | undefined;

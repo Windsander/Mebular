@@ -120,6 +120,7 @@ const root = await mkdtemp(join(tmpdir(), 'mebular-daemon-'));
 const homeB = join(root, 'B');
 let serve1 = null;
 let serve2 = null;
+let serveNet = null;
 try {
   console.log('== A1/A5 委派身份模式（无主私钥）==');
   const joinPort = await freePort();
@@ -245,6 +246,38 @@ try {
   const dead = await waitFor(() => serve2.child.exitCode !== null, 15000) || serve2.child.exitCode !== null;
   const locked = /MCP_STORAGE_LOCKED|存储已被占用/.test(serve2.state.err + serve2.state.out);
   check('第二写者被明确拒绝（MCP_STORAGE_LOCKED）', dead && locked, { err: serve2.state.err.trim().slice(0, 120) });
+
+  console.log('== F-NET-1（C）：守护运行中 status 不抢端口 + 第二 serve 先于网络绑定被拒 ==');
+  {
+    const homeNet = join(root, 'net');
+    const netPort = await freePort();
+    await mkdir(homeNet, { recursive: true });
+    await writeFile(join(homeNet, 'config.json'), JSON.stringify({
+      storagePath: join(homeNet, 'store.jsonl'),
+      deviceId: 'device-net',
+      encryption: { level: 'none' },
+      // 启用真网络栈并**固定监听端口**：旧实现（先 createMebular 再取锁）第二进程会抢该端口 → 裸 EADDRINUSE
+      network: { enabled: true, libp2p: { listen: [`/ip4/127.0.0.1/tcp/${netPort}`] } },
+      sync: { autoSync: false },
+      mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
+    }, null, 2), { mode: 0o600 });
+    const envNet = { ...process.env, MEBULAR_HOME: homeNet };
+    serveNet = startCli(envNet, ['serve', '--port', '0']);
+    const netReady = await waitFor(() => /SERVE_READY/.test(serveNet.state.out), 40000);
+    check('F-NET-1 C 守护（libp2p 固定端口）启动', netReady, { out: serveNet.state.out.slice(0, 120), err: serveNet.state.err.slice(-120) });
+
+    const stLive = await runCli(envNet, ['status']);
+    const stLiveJson = firstJson(stLive.out) ?? {};
+    check('F-NET-1 C 守护运行中 status → exit 0 且含 storeLock（只读最小路径，不初始化网络）',
+      stLive.code === 0 && Boolean(stLiveJson.storeLock?.pid) && stLiveJson.reused === true,
+      { code: stLive.code, storeLockPid: stLiveJson.storeLock?.pid ?? null, err: stLive.err.slice(-120) });
+
+    const serveNet2 = await runCli(envNet, ['serve', '--port', '0']);
+    const err2 = serveNet2.out + serveNet2.err;
+    check('F-NET-1 C 第二 serve → MCP_STORAGE_LOCKED（先于网络绑定；无 EADDRINUSE）',
+      serveNet2.code !== 0 && /MCP_STORAGE_LOCKED|存储已被占用/.test(err2) && !/EADDRINUSE/.test(err2),
+      { code: serveNet2.code, err: err2.trim().slice(0, 140) });
+  }
 
   console.log('== A4 join 迁回守护 + 策略 app 路由 ==');
   const invite = await fetch(`${base}/app/join/invite`, { method: 'POST', headers: auth, body: JSON.stringify({ namespace: 'tasks', ttlMs: 120000 }) });
@@ -374,7 +407,7 @@ try {
   check('fleet node/worker daemon 模式任务往返（2/2）', summary?.submitted === 2 && summary?.done === 2 && summary?.resultsMatch === true, summary ?? { err: nodeRes.err.slice(-160) });
   check('daemon 模式：node 不监听 libp2p（mode=daemon）', /"mode":"daemon"/.test(nodeRes.out), { listening: nodeRes.out.split('\n').find((l) => l.includes('listening')) ?? null });
 } finally {
-  for (const s of [serve1, serve2]) {
+  for (const s of [serve1, serve2, serveNet]) {
     if (s) {
       try {
         s.child.kill('SIGKILL');

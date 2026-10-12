@@ -351,7 +351,7 @@ async function persistRevoked(revokedFile, revoked) {
 
 // ---------- 单实例锁 ----------
 
-function pidAlive(pid) {
+export function pidAlive(pid) {
   try {
     process.kill(pid, 0);
     return true;

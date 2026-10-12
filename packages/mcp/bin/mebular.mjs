@@ -442,27 +442,59 @@ async function runNetDoctor() {
 }
 
 async function runStatus() {
+  const { loadConfigFile, homeDir: resolveHome, identityMode: resolveIdentityMode } = await import('../src/config.mjs');
+  const home = resolveHome();
+  const configFile = await loadConfigFile(home).catch(() => ({}));
+  const storagePath = process.env.MEBULAR_STORAGE_PATH
+    ?? configFile.storagePath
+    ?? join(home, (configFile.storageAdapter ?? 'json') === 'sqlite' ? 'store.sqlite' : 'store.jsonl');
+  // store 锁持有者（单写者证据）
+  let storeLock = null;
+  const lockPath = join(home, 'lock');
+  if (existsSync(lockPath)) {
+    try {
+      storeLock = JSON.parse(await readFile(lockPath, 'utf-8'));
+    } catch {
+      storeLock = { path: lockPath, corrupt: true };
+    }
+  }
+  // F-NET-1（C）：守护在跑时**不初始化网络**（否则抢监听端口 → 裸 EADDRINUSE）。
+  // status 走只读最小路径：返回 storeLock 等可观测项，SETUP §0.1 的判据（storeLock 非 null）成立。
+  if (storeLock?.pid) {
+    const { pidAlive } = await import('../src/serve.mjs');
+    if (pidAlive(storeLock.pid)) {
+      console.log(JSON.stringify({
+        ok: true,
+        running: true,
+        reused: true,
+        deviceId: process.env.MEBULAR_DEVICE_ID ?? configFile.deviceId ?? `device-${process.env.HOSTNAME ?? 'local'}`,
+        peerId: null,
+        nodeCount: null,
+        stateHash: null,
+        home,
+        storagePath,
+        identityMode: resolveIdentityMode(home, configFile, storagePath),
+        network: { enabled: configFile.network?.enabled ?? false, listen: configFile.network?.libp2p?.listen ?? [], reused: true },
+        storeLock,
+        namespaces: [],
+        lan: null,
+        joinService: configFile.joinService ?? null,
+        note: `检测到守护进程（pid ${storeLock.pid}）正在运行：status 走只读最小路径（未初始化网络、未抢端口）。完整状态请走守护 API。`,
+      }, null, 2));
+      return;
+    }
+  }
   const { createMebular } = await import('../src/config.mjs');
   const { MemoryService } = await import('@mebular/core');
-  const { app, home, storagePath, deviceId, identityMode, config } = await createMebular();
+  const { app, storagePath: appStoragePath, deviceId, identityMode, config } = await createMebular();
   try {
     const status = await new MemoryService(app).status();
-    // store 锁持有者（单写者证据）
-    let storeLock = null;
-    const lockPath = join(home, 'lock');
-    if (existsSync(lockPath)) {
-      try {
-        storeLock = JSON.parse(await readFile(lockPath, 'utf-8'));
-      } catch {
-        storeLock = { path: lockPath, corrupt: true };
-      }
-    }
     const nodes = await app.graph.listNodes({});
     const namespaces = [...new Set(nodes.map((n) => n.namespace ?? 'default'))].sort();
     console.log(JSON.stringify({
       ...status,
       home,
-      storagePath,
+      storagePath: appStoragePath,
       deviceId,
       identityMode,
       network: { enabled: config.network?.enabled ?? false, listen: config.network?.libp2p?.listen ?? [] },

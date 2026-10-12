@@ -6,7 +6,7 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { MemoryService } from '@mebular/core';
-import { createMebular, homeDir } from './config.mjs';
+import { createMebular, homeDir, loadConfigFile } from './config.mjs';
 import { registerTools } from './tools.mjs';
 import { startHttpServer, acquireLock } from './serve.mjs';
 import { createJoinServer } from './jointoken.mjs';
@@ -149,8 +149,22 @@ export async function startServeServer(options = {}) {
   if (isProvisionHome(provisionHome, { storagePath: process.env.MEBULAR_STORAGE_PATH })) {
     return await startProvisionServer(options);
   }
-  const { app, home, storagePath, deviceId, config, effective } = await createMebular();
-  const lock = await acquireLock(home, storagePath);
+  // F-NET-1（C）：**先取单实例锁，再初始化网络**——第二写者应在绑定监听端口前就得到
+  // 可读的 MCP_STORAGE_LOCKED（此前 createMebular 先启网络 → 抢 4001 → 裸 EADDRINUSE）。
+  const home = homeDir();
+  const preConfig = await loadConfigFile(home).catch(() => ({}));
+  const preStoragePath = process.env.MEBULAR_STORAGE_PATH
+    ?? preConfig.storagePath
+    ?? join(home, (preConfig.storageAdapter ?? 'json') === 'sqlite' ? 'store.sqlite' : 'store.jsonl');
+  const lock = await acquireLock(home, preStoragePath);
+  let created;
+  try {
+    created = await createMebular();
+  } catch (error) {
+    await lock.release();
+    throw error;
+  }
+  const { app, storagePath, deviceId, config, effective } = created;
   let joinServer = null;
   try {
     const service = new MemoryService(app);

@@ -80,6 +80,11 @@ export interface MemoryStatus {
   semantic: boolean;
   /** 待发事件数（尚未送达对端的事件；源自 SyncManager.getSyncStatus().pendingCount） */
   pendingEventCount: number;
+  /** C3/F-NET-1：LAN 设备发现状态；禁用时带原因（其余传输不受影响） */
+  lan: {
+    enabled: boolean;
+    discovery: { running: boolean; disabled: boolean; reason: string | null };
+  } | null;
 }
 
 export type ImportInput = AdapterSource;
@@ -402,6 +407,7 @@ export class MemoryService {
     const nodes = await this.mebular.storage.listNodes();
     const edges = await this.mebular.storage.listEdges();
     const node = this.mebular.node;
+    const lanStatus = node?.getLanStatus?.();
     let pendingEventCount = 0;
     try {
       const syncStatus = await this.mebular.sync.getSyncStatus();
@@ -422,6 +428,17 @@ export class MemoryService {
       atRest: this.mebular.atRestEncryption,
       semantic: this.mebular.semanticVectorIndex !== null,
       pendingEventCount,
+      // F-NET-1（B）：发现层禁用时暴露「已禁用 + 原因」，其余传输不受影响
+      lan: lanStatus
+        ? {
+            enabled: lanStatus.enabled,
+            discovery: {
+              running: lanStatus.running,
+              disabled: !lanStatus.enabled,
+              reason: lanStatus.lastError ?? null,
+            },
+          }
+        : null,
     };
   }
 

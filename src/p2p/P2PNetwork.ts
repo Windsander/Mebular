@@ -348,14 +348,28 @@ export class P2PNode implements P2PNetwork {
           .find((port) => port > 0) ?? 0;
         const listenPort = this.config.listenPort && this.config.listenPort > 0 ? this.config.listenPort : portFromAddrs;
         this.discovery.setLocalInfo(this.peerId, listenPort, addrs);
-        await this.discovery.start();
-        // C3：发现 → LAN 候选/自动拨号（仅限已知或白名单对端）
-        this.discovery.onPeerDiscovered((peer) => {
-          void this.handleLanDiscovery(peer);
-        });
-        this.discovery.on('peer-removed', (peerId: PeerId) => {
-          void this.handleLanPeerRemoved(peerId.id);
-        });
+        // F-NET-1（B）：发现层启动失败（factory 返回 null / 缺包 / 载入抛错）**不得阻断**网络启动。
+        // 注释与 LIMITATIONS 承诺「发现不可用 → 禁用发现 + 告警 + 其他传输不受影响」；libp2p 传输已就绪，
+        // 这里降级：置 lanLastError、告警、关闭 lanEnabled 并丢弃半启动的 discovery，继续 node.start()。
+        try {
+          await this.discovery.start();
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.lanLastError = reason;
+          this.lanEnabled = false;
+          this.onWarn(`LAN 设备发现不可用（${reason}）→ 已禁用发现；其他连接方式不受影响`);
+          await this.discovery.stop().catch(() => undefined);
+          this.discovery = null;
+        }
+        if (this.discovery) {
+          // C3：发现 → LAN 候选/自动拨号（仅限已知或白名单对端）
+          this.discovery.onPeerDiscovered((peer) => {
+            void this.handleLanDiscovery(peer);
+          });
+          this.discovery.on('peer-removed', (peerId: PeerId) => {
+            void this.handleLanPeerRemoved(peerId.id);
+          });
+        }
       }
 
       this.attachComponentListeners();

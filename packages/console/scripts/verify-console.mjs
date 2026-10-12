@@ -877,6 +877,89 @@ try {
       `restarting=${sst?.restarting} mode=${sst?.restart?.mode}`);
   }
 
+  // ---------- H-1：常驻运行 + 连接 AI 助手 ----------
+  {
+    const h1Home = join(home, 'h1');
+    await mkdir(join(h1Home, '.config', 'opencode'), { recursive: true });
+    await writeFile(join(h1Home, '.config', 'opencode', 'opencode.json'), JSON.stringify({ theme: 'dark' }, null, 2), 'utf-8');
+    await writeFile(join(h1Home, 'config.json'), JSON.stringify({
+      storagePath: join(h1Home, 'store.jsonl'),
+      deviceId: 'device-h1',
+      encryption: { level: 'none' },
+      network: { enabled: false },
+      sync: { autoSync: false },
+      mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
+    }, null, 2), 'utf-8');
+    const h1Handle = spawnServe({ home: h1Home, storage: join(h1Home, 'store.jsonl'), deviceId: 'device-h1', env: { MEBULAR_SERVICE_DRY_RUN: '1' } });
+    servers.push(h1Handle);
+    const h1Ready = await waitReady(h1Handle);
+    const h1Base = `http://127.0.0.1:${h1Ready.port}`;
+    const h1Page = await fetch(`${h1Base}/console/`);
+    const h1Headers = {
+      'content-type': 'application/json',
+      'x-mebular-csrf': h1Page.headers.get('x-mebular-csrf'),
+      cookie: `mebular_csrf=${cookieFrom(h1Page)}`,
+    };
+
+    const svc = await getJson(h1Ready.port, '/admin/api/service');
+    check('H-1 读面 /admin/api/service 形状（platform/kind/home/registered/running/autostart）',
+      svc.status === 200 && svc.json?.kind === 'mebular-serve' && svc.json?.home === h1Home
+        && typeof svc.json?.registered === 'boolean' && typeof svc.json?.running === 'boolean' && 'autostart' in (svc.json ?? {}),
+      `kind=${svc.json?.kind} registered=${svc.json?.registered}`);
+
+    const clients = await getJson(h1Ready.port, '/admin/api/clients');
+    const ids = (clients.json?.clients ?? []).map((c) => c.id);
+    check('H-1 读面 /admin/api/clients 覆盖 7 个客户端（含 OpenChamber 复用 opencode）',
+      ['opencode', 'openchamber', 'claude-code', 'claude-desktop', 'cursor', 'dsh', 'generic'].every((x) => ids.includes(x))
+        && (clients.json?.clients ?? []).find((c) => c.id === 'openchamber')?.reuseOf === 'opencode',
+      ids.join(','));
+
+    const connect = await fetch(`${h1Base}/admin/api/clients/opencode/connect`, { method: 'POST', headers: h1Headers, body: '{}' });
+    const connectJson = await connect.json().catch(() => null);
+    const ocCfg = JSON.parse(await readFile(join(h1Home, '.config', 'opencode', 'opencode.json'), 'utf-8'));
+    check('H-1 接入 opencode：只并 mcp.mebular + 保留 theme + 写前备份',
+      connect.status === 200 && connectJson?.changed === true && Boolean(connectJson?.backupPath)
+        && ocCfg.theme === 'dark' && ocCfg.mcp?.mebular?.command?.[0] === 'mebular',
+      `changed=${connectJson?.changed} backup=${Boolean(connectJson?.backupPath)}`);
+
+    const again = await fetch(`${h1Base}/admin/api/clients/opencode/connect`, { method: 'POST', headers: h1Headers, body: '{}' });
+    const againJson = await again.json().catch(() => null);
+    check('H-1 重复接入幂等（changed=false，无新备份）',
+      again.status === 200 && againJson?.changed === false && againJson?.backupPath === null,
+      `changed=${againJson?.changed}`);
+
+    await mkdir(join(h1Home, '.cursor'), { recursive: true });
+    await writeFile(join(h1Home, '.cursor', 'mcp.json'), '{ not json', 'utf-8');
+    const bad = await fetch(`${h1Base}/admin/api/clients/cursor/connect`, { method: 'POST', headers: h1Headers, body: '{}' });
+    const badJson = await bad.json().catch(() => null);
+    check('H-1 解析失败 → 422 needsManual 且**不写**（原文保持）',
+      bad.status === 422 && badJson?.needsManual === true
+        && (await readFile(join(h1Home, '.cursor', 'mcp.json'), 'utf-8')) === '{ not json',
+      `status=${bad.status}`);
+
+    const noCsrf = await fetch(`${h1Base}/admin/api/clients/opencode/connect`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    check('H-1 接入无 CSRF → 403', noCsrf.status === 403, `status=${noCsrf.status}`);
+
+    const svcInstall = await fetch(`${h1Base}/admin/api/service/install`, { method: 'POST', headers: h1Headers, body: '{}' });
+    const svcInstallJson = await svcInstall.json().catch(() => null);
+    const unitPath = svcInstallJson?.result?.unitPath;
+    const unit = unitPath ? await readFile(unitPath, 'utf-8').catch(() => '') : '';
+    check('H-1 服务托管（试运行替身）：命令序列 + 单元带 MEBULAR_HOME=守护 home',
+      svcInstall.status === 200 && svcInstallJson?.dryRun === true
+        && Array.isArray(svcInstallJson?.commands) && svcInstallJson.commands.length > 0
+        && unit.includes('MEBULAR_HOME') && unit.includes(h1Home),
+      `commands=${(svcInstallJson?.commands ?? []).length} unitHasHome=${unit.includes(h1Home)}`);
+
+    const jsSrcH1 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const htmlSrcH1 = await readFile(join(consoleDir, 'index.html'), 'utf-8');
+    check('H-1 前端接线：连接 AI 助手面板 + 服务/客户端动作 + diff 预览',
+      htmlSrcH1.includes('id="connect-view"') && htmlSrcH1.includes('data-view="connect"')
+        && htmlSrcH1.includes('id="service-card"') && htmlSrcH1.includes('id="clients-list"')
+        && jsSrcH1.includes('renderConnect') && jsSrcH1.includes('data-svc-action')
+        && jsSrcH1.includes('data-cli-action') && jsSrcH1.includes('connect-diff'),
+      '面板 + 动作 + diff');
+  }
+
   // ---------- 邀请新设备（T2 令牌加入） ----------
   const inviteDisabled = await fetch(`http://127.0.0.1:${port}/admin/api/invite`, {
     method: 'POST',

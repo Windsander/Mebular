@@ -39,6 +39,9 @@ const state = {
   csrf: readCookie('mebular_csrf'),
   token: params.get('token') ?? localStorage.getItem('mebular_token') ?? null,
   features: { writes: false },
+  // H-1：常驻运行 + AI 助手接入
+  service: null,
+  clients: null,
 };
 
 const stage = new StarStage($('#stage'));
@@ -104,9 +107,11 @@ async function refresh() {
     api('/admin/api/settings'),
     api('/admin/api/config'),
     api(`/admin/api/memories${memQuery()}`),
+    api('/admin/api/service'),
+    api('/admin/api/clients'),
     api('/healthz'),
   ]);
-  const [overview, devices, policy, namespaces, settings, configView, memories, healthz] = results;
+  const [overview, devices, policy, namespaces, settings, configView, memories, serviceView, clientsView, healthz] = results;
   if (healthz && healthz.status === 'fulfilled') state.healthz = healthz.value;
   let firstError = null;
   if (overview.status === 'fulfilled') state.overview = overview.value;
@@ -118,6 +123,8 @@ async function refresh() {
   if (settings.status === 'fulfilled') state.settings = settings.value;
   if (configView.status === 'fulfilled') state.rawConfig = configView.value;
   if (memories.status === 'fulfilled') state.memories = memories.value;
+  if (serviceView.status === 'fulfilled') state.service = serviceView.value;
+  if (clientsView.status === 'fulfilled') state.clients = clientsView.value.clients ?? [];
   state.features = { writes: Boolean(state.overview?.features?.writes) };
   state.error = firstError;
   state.degraded = computeDegraded();
@@ -146,6 +153,7 @@ function render() {
   renderDomains();
   renderAudit();
   renderMemories();
+  renderConnect();
   if (!$('#settings').hidden) renderSettings();
   if (!$('#about').hidden) renderAbout();
   renderBanner();
@@ -1451,6 +1459,115 @@ function renderMemories() {
   }).join('');
 }
 
+// ---------- H-1：常驻运行 + 连接我的 AI 助手 ----------
+
+function connectStatusLabel(client) {
+  if (client.needsManual) return '需手动';
+  if (!client.installed) return client.format === 'generic' ? '未接入' : '未安装';
+  return client.connected ? '已接入' : '已安装·未接入';
+}
+
+function renderConnect() {
+  const serviceBox = $('#service-card');
+  if (serviceBox) {
+    const svc = state.service;
+    if (!svc) {
+      serviceBox.innerHTML = '<p class="muted">常驻状态加载中…</p>';
+    } else {
+      const badge = svc.registered ? (svc.running ? '已常驻·运行中' : '已常驻·未运行') : '未常驻（当前为临时运行）';
+      serviceBox.innerHTML = `
+        <div class="connect-head"><h3>常驻运行</h3><span class="crt-tag">${escapeHtml(badge)}</span></div>
+        <p class="muted">开机自启、崩溃自动拉起。家目录：<code>${escapeHtml(svc.home ?? '—')}</code>${svc.unitPath ? ` · 服务文件：<code>${escapeHtml(svc.unitPath)}</code>` : ''}</p>
+        <div class="connect-actions">
+          <button class="btn btn-crt" type="button" data-svc-action="install" ${svc.registered ? 'disabled' : ''}>让 Mebular 常驻</button>
+          <button class="btn" type="button" data-svc-action="uninstall" ${svc.registered ? '' : 'disabled'}>取消常驻</button>
+          <button class="btn" type="button" data-svc-action="restart">立即重启</button>
+          <button class="btn" type="button" data-svc-action="recheck">重新检测</button>
+        </div>
+        <p class="muted" id="service-msg"></p>`;
+    }
+  }
+  const list = $('#clients-list');
+  if (!list) return;
+  const clients = state.clients;
+  if (!clients) {
+    list.innerHTML = '<p class="muted">AI 助手列表加载中…</p>';
+    return;
+  }
+  list.innerHTML = clients.map((c) => {
+    const status = connectStatusLabel(c);
+    const actions = [
+      `<button class="btn btn-small btn-crt" type="button" data-cli-action="connect" data-cli-id="${escapeHtml(c.id)}">接入</button>`,
+      `<button class="btn btn-small" type="button" data-cli-action="preview" data-cli-id="${escapeHtml(c.id)}">查看改动</button>`,
+      `<button class="btn btn-small" type="button" data-cli-action="rollback" data-cli-id="${escapeHtml(c.id)}">回滚</button>`,
+      (c.skillsDirs ?? []).length > 0 ? `<button class="btn btn-small" type="button" data-cli-action="skills" data-cli-id="${escapeHtml(c.id)}">安装 Skill</button>` : '',
+      `<button class="btn btn-small" type="button" data-cli-action="copy" data-cli-id="${escapeHtml(c.id)}">复制片段</button>`,
+      `<button class="btn btn-small" type="button" data-cli-action="recheck" data-cli-id="${escapeHtml(c.id)}">重新检测</button>`,
+    ].filter(Boolean).join(' ');
+    const where = c.configPath ? `配置：<code>${escapeHtml(c.configPath)}</code>` : '没有可自动写入的配置';
+    return `<article class="connect-card crt-surface">
+      <div class="connect-head"><b>${escapeHtml(c.name)}</b><span class="crt-tag">${escapeHtml(status)}</span>${c.skillsInstalled ? '<span class="crt-tag">Skill 已装</span>' : ''}</div>
+      <p class="muted">${where}${c.note ? ` · ${escapeHtml(c.note)}` : ''}</p>
+      <div class="connect-actions">${actions}</div>
+      <pre class="connect-diff" hidden data-cli-diff="${escapeHtml(c.id)}"></pre>
+      <p class="muted" data-cli-msg="${escapeHtml(c.id)}"></p>
+    </article>`;
+  }).join('');
+}
+
+async function serviceAction(action) {
+  const msg = $('#service-msg');
+  const say = (t) => { if (msg) msg.textContent = t; };
+  try {
+    if (action === 'recheck') { await refresh(); say('已刷新'); return; }
+    if (action === 'restart') {
+      await api('/admin/api/restart', { method: 'POST', body: {} });
+      say('已请求重启；稍后本页会自动恢复。');
+      return;
+    }
+    const res = await api(`/admin/api/service/${action}`, { method: 'POST', body: {} });
+    if (res?.dryRun) {
+      const cmds = (res.commands ?? []).map((c) => c.join(' ')).join('；');
+      say(`（试运行）将执行：${cmds}`);
+    } else {
+      say(action === 'install' ? '已开启常驻运行。' : '已取消常驻运行。');
+    }
+    await refresh();
+  } catch (error) {
+    say(`没能完成：${error.message}。可点「重新检测」或复制诊断。`);
+  }
+}
+
+async function clientAction(id, action) {
+  const msg = document.querySelector(`[data-cli-msg="${id}"]`);
+  const diff = document.querySelector(`[data-cli-diff="${id}"]`);
+  const say = (t) => { if (msg) msg.textContent = t; };
+  try {
+    if (action === 'recheck') { await refresh(); say('已重新检测'); return; }
+    if (action === 'copy') {
+      const client = (state.clients ?? []).find((c) => c.id === id);
+      await navigator.clipboard.writeText(client?.snippet ?? '');
+      say('片段已复制，粘贴到该助手的 MCP 配置即可。');
+      return;
+    }
+    if (action === 'preview') {
+      const res = await api(`/admin/api/clients/${id}/preview`, { method: 'POST', body: {} });
+      if (diff) { diff.hidden = false; diff.textContent = res.preview || '（与当前一致，无需改动）'; }
+      say(res.needsManual ? `需要你手动合并：${res.reason ?? ''}` : '');
+      return;
+    }
+    const res = await api(`/admin/api/clients/${id}/${action}`, { method: 'POST', body: {} });
+    if (diff && typeof res.preview === 'string' && res.preview.length > 0) { diff.hidden = false; diff.textContent = res.preview; }
+    if (!res.ok) { say(`需要你手动处理：${res.reason ?? '请看片段'}`); return; }
+    say(action === 'connect'
+      ? (res.changed ? '接入完成（已备份原配置）。重启该助手后生效。' : '已接入（无需改动）。')
+      : action === 'rollback' ? '已还原到接入前。' : '已安装。');
+    await refresh();
+  } catch (error) {
+    say(`没能完成：${error.message}`);
+  }
+}
+
 function renderAudit() {
   const actionFilter = $('#audit-filter-action').value;
   const deviceFilter = $('#audit-filter-device').value;
@@ -2089,6 +2206,7 @@ function setView(view) {
   $('#domains-view').hidden = view !== 'domains';
   $('#audit-view').hidden = view !== 'audit';
   $('#memories-view').hidden = view !== 'memories';
+  $('#connect-view').hidden = view !== 'connect';
   $('#stage').style.visibility = view === 'map' ? 'visible' : 'hidden';
   $('#empty-state').hidden = true;
   const asideEl = document.querySelector('.aside');
@@ -2118,6 +2236,13 @@ $('#memories-list')?.addEventListener('click', (event) => {
   const button = event.target.closest('[data-mem-action]');
   if (!button) return;
   void memAction(button.dataset.memId, button.dataset.memAction);
+});
+
+$('#connect-view')?.addEventListener('click', (event) => {
+  const svc = event.target.closest('[data-svc-action]');
+  if (svc) { void serviceAction(svc.dataset.svcAction); return; }
+  const cli = event.target.closest('[data-cli-action]');
+  if (cli) { void clientAction(cli.dataset.cliId, cli.dataset.cliAction); }
 });
 
 $('#audit-export').addEventListener('click', () => {

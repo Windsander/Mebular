@@ -42,6 +42,9 @@ const state = {
   // H-1：常驻运行 + AI 助手接入
   service: null,
   clients: null,
+  serviceMsg: '',
+  clientMsg: {},
+  clientDiff: {},
 };
 
 const stage = new StarStage($('#stage'));
@@ -1484,7 +1487,7 @@ function renderConnect() {
           <button class="btn" type="button" data-svc-action="restart">立即重启</button>
           <button class="btn" type="button" data-svc-action="recheck">重新检测</button>
         </div>
-        <p class="muted" id="service-msg"></p>`;
+        <p class="muted" id="service-msg">${escapeHtml(state.serviceMsg)}</p>`;
     }
   }
   const list = $('#clients-list');
@@ -1509,15 +1512,14 @@ function renderConnect() {
       <div class="connect-head"><b>${escapeHtml(c.name)}</b><span class="crt-tag">${escapeHtml(status)}</span>${c.skillsInstalled ? '<span class="crt-tag">Skill 已装</span>' : ''}</div>
       <p class="muted">${where}${c.note ? ` · ${escapeHtml(c.note)}` : ''}</p>
       <div class="connect-actions">${actions}</div>
-      <pre class="connect-diff" hidden data-cli-diff="${escapeHtml(c.id)}"></pre>
-      <p class="muted" data-cli-msg="${escapeHtml(c.id)}"></p>
+      <pre class="connect-diff" ${state.clientDiff[c.id] ? '' : 'hidden'} data-cli-diff="${escapeHtml(c.id)}">${escapeHtml(state.clientDiff[c.id] ?? '')}</pre>
+      <p class="muted" data-cli-msg="${escapeHtml(c.id)}">${escapeHtml(state.clientMsg[c.id] ?? '')}</p>
     </article>`;
   }).join('');
 }
 
 async function serviceAction(action) {
-  const msg = $('#service-msg');
-  const say = (t) => { if (msg) msg.textContent = t; };
+  const say = (t) => { state.serviceMsg = t; renderConnect(); };
   try {
     if (action === 'recheck') { await refresh(); say('已刷新'); return; }
     if (action === 'restart') {
@@ -1539,9 +1541,8 @@ async function serviceAction(action) {
 }
 
 async function clientAction(id, action) {
-  const msg = document.querySelector(`[data-cli-msg="${id}"]`);
-  const diff = document.querySelector(`[data-cli-diff="${id}"]`);
-  const say = (t) => { if (msg) msg.textContent = t; };
+  const say = (t) => { state.clientMsg[id] = t; renderConnect(); };
+  const showDiff = (t) => { state.clientDiff[id] = t; renderConnect(); };
   try {
     if (action === 'recheck') { await refresh(); say('已重新检测'); return; }
     if (action === 'copy') {
@@ -1552,12 +1553,12 @@ async function clientAction(id, action) {
     }
     if (action === 'preview') {
       const res = await api(`/admin/api/clients/${id}/preview`, { method: 'POST', body: {} });
-      if (diff) { diff.hidden = false; diff.textContent = res.preview || '（与当前一致，无需改动）'; }
+      showDiff(res.preview || '（与当前一致，无需改动）');
       say(res.needsManual ? `需要你手动合并：${res.reason ?? ''}` : '');
       return;
     }
     const res = await api(`/admin/api/clients/${id}/${action}`, { method: 'POST', body: {} });
-    if (diff && typeof res.preview === 'string' && res.preview.length > 0) { diff.hidden = false; diff.textContent = res.preview; }
+    if (typeof res.preview === 'string' && res.preview.length > 0) showDiff(res.preview);
     if (!res.ok) { say(`需要你手动处理：${res.reason ?? '请看片段'}`); return; }
     say(action === 'connect'
       ? (res.changed ? '接入完成（已备份原配置）。重启该助手后生效。' : '已接入（无需改动）。')

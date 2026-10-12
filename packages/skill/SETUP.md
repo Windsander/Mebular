@@ -44,9 +44,9 @@ MEBULAR_HOME=~/.mebular mebular service install    # 常驻 + 自启（不想自
 MEBULAR_HOME=~/.mebular mebular service status     # 判定：services[0].registered === true 且 running === true
 ```
 
-> **必须带 `MEBULAR_HOME`**：CLI 未设该变量时 `homeDir()` 退化为 **`<cwd>/.mebular`**（与 `mebular status` 的
-> `~/.mebular` 不一致），service 会把该值写进单元的 `env.MEBULAR_HOME` 与 `workingDir` → 守护跑错 home，
-> 而 §0.3 的确认命令读 `~/.mebular`，会表现为「没起来」（`storeLock=null`）。
+> **home 默认已统一**：`mebular` 缺省用 `~/.mebular`（`MEBULAR_HOME` 可覆盖；`bin/mebular.mjs` 与
+> `src/config.mjs` 共用同一真源 `src/home.mjs`）。上面命令的 `MEBULAR_HOME=~/.mebular` 前缀是**显式声明**
+> （等价于缺省），跨环境脚本里保留更直观；service 会把该值写进单元的 `env.MEBULAR_HOME` 与 `workingDir`。
 
 若所在环境不支持常驻（无 launchd/systemd/计划任务的容器等），改**前台**拉起：
 
@@ -104,16 +104,27 @@ npm i -g "github:Windsander/Mebular#$SHA"
 command -v mebular && command -v fleet
 ```
 
-判定：`mebular --help`（exit 0）与 `fleet --version`（exit 0）均可执行；记录 `$SHA` 以便回报。
+判定：`command -v mebular && command -v fleet` 均有输出；`mebular --help`（exit 0）与 `fleet --version`（exit 0）可执行；
+`mebular tools` 列出 **29** 个工具；记录 `$SHA` 以便回报。
 （`mebular --version` 不存在：会打印「未知命令：--version」并 exit 2。）
 
-**B. 本地仓库（开发者）**
+> 安装时的 `prepare` 会自动完成三包构建（`mebular` 与 `fleet` 双 bin 随包发布，无需手动 build；缺省 home 为 `~/.mebular`）。
+> **若该命令以 `ENOTDIR` / `git dep preparation failed` 失败**：这是部分 npm（实测 11.19）对**全局 git 依赖**的
+> staging 缺陷——与本仓库内容无关（`prepare` 一旦成功、进入全局 reify 才暴露；用基线 SHA 只是更早失败在 `tsc` 而看不到）。
+> 遇到时改用下面的 **B**（本地仓库），它等价且本机已实测可用。
+
+**B. 本地仓库（开发者；也是 A 失败时的等价干净路径）**
 
 ```bash
+SHA=<要钉住的提交>
+git clone https://github.com/Windsander/Mebular.git && cd Mebular
+git checkout "$SHA"
 npm ci && npm run build
 npm i -g .
 command -v mebular && command -v fleet
 ```
+
+（本机实测：`npm i -g .` → 双 bin 就位、`mebular tools`=29、`fleet --version` 含该 SHA、不设 `MEBULAR_HOME` 起 `serve` → `PROVISION_READY home=~/.mebular`。）
 
 ## 3. 建一个新的 Mebular（本机 = 信任根）
 

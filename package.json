@@ -8,12 +8,20 @@
     "packages/*"
   ],
   "bin": {
+    "mebular": "./packages/mcp/bin/mebular.mjs",
     "fleet": "./packages/fleet/dist/cli.js"
   },
   "files": [
     "dist",
+    "packages/mcp/bin",
+    "packages/mcp/src",
+    "packages/mcp/package.json",
+    "packages/console",
     "packages/fleet/dist",
+    "packages/fleet/protocol",
     "packages/fleet/package.json",
+    "packages/service/dist",
+    "packages/service/package.json",
     "README.md",
     "LICENSE"
   ],
@@ -52,7 +60,7 @@
     "build": "node scripts/clean-dist.mjs && tsc && tsc -p packages/service/tsconfig.json && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs",
     "build:fleet": "tsc -p packages/fleet/tsconfig.json",
     "build:service": "tsc -p packages/service/tsconfig.json",
-    "prepare": "npm run build",
+    "prepare": "node scripts/prepare-install.mjs",
     "build:watch": "tsc --watch",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
@@ -107,8 +115,10 @@
     "rulesets:apply": "node scripts/apply-rulesets.mjs --apply"
   },
   "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
     "bonjour": "^3.5.1",
-    "ulid": "^2.3.0"
+    "ulid": "^2.3.0",
+    "zod": "^4.6.5"
   },
   "optionalDependencies": {
     "@chainsafe/libp2p-noise": "^17.0.0",
@@ -162,6 +172,8 @@
       "node"
     ],
     "moduleNameMapper": {
+      "^(\\.\\./)+service/dist/index\\.js$": "<rootDir>/packages/service/src/index.ts",
+      "^(\\.\\./)+fleet/dist/index\\.js$": "<rootDir>/packages/fleet/src/index.ts",
       "^src/(.*)\\.js$": "<rootDir>/src/$1.ts",
       "^tests/(.*)\\.js$": "<rootDir>/tests/$1.ts",
       "^@mebular/core$": "<rootDir>/src/index.ts",

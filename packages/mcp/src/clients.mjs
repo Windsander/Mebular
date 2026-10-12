@@ -13,6 +13,7 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // ---------- 片段与条目 ----------
 
@@ -280,17 +281,30 @@ export async function rollbackClient(id, options = {}) {
 // ---------- Skill 安装 ----------
 
 /**
+ * Skill 源：**模块相对**解析（`packages/mcp/src/clients.mjs` → 同级 `packages/skill`）。
+ * 服务托管/安装态 cwd=守护 home（如 `~/.mebular`），用 cwd 会找不到 → 必须按模块定位；
+ * `options.skillRoot` 优先注入，`repoRoot`/cwd 仅作最后回退。
+ */
+function moduleSkillRoot() {
+  return join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'skill');
+}
+
+/**
  * 安装 mebular-memory + mebular-tasks 到该客户端首个已知 Skill 目录（复用 skill 包文件语义）。
- * 源目录取 `skillRoot`（缺省 = <repo>/packages/skill）。
  */
 export async function installSkills(id, options = {}) {
   const desc = descriptorFor(id, options);
   if (!desc) return { ok: false, reason: `未知客户端：${id}` };
   const dirs = (desc.skillsDirs ?? []).filter(Boolean);
   if (dirs.length === 0) return { ok: false, reason: '该客户端没有已知的 Skill 目录' };
-  const root = options.skillRoot ?? join(options.repoRoot ?? process.cwd(), 'packages', 'skill');
-  if (!existsSync(join(root, 'SKILL.md'))) {
-    return { ok: false, reason: `未找到 Skill 源（${root}）`, snippet: '请在仓库内运行，或手动复制 Skill 目录' };
+  const candidates = [
+    options.skillRoot,
+    moduleSkillRoot(),
+    join(options.repoRoot ?? process.cwd(), 'packages', 'skill'),
+  ].filter((p) => typeof p === 'string' && p.length > 0);
+  const root = candidates.find((p) => existsSync(join(p, 'SKILL.md')));
+  if (!root) {
+    return { ok: false, reason: `未找到 Skill 源（试过：${candidates.join('、')}）`, snippet: '请在仓库内运行，或手动复制 Skill 目录' };
   }
   const target = dirs[0];
   const mem = join(target, 'mebular-memory');

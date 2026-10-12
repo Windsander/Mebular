@@ -119,15 +119,36 @@ describe('H-1 clients：侦测与合并写入', () => {
     expect(res.snippet).toMatch(/mcpServers/);
   });
 
-  it('Skill 安装：把 mebular-memory/mebular-tasks 装到首个 skill 目录（源缺失给 human 错误）', async () => {
-    const noSrc = await installSkills('opencode', { ...opts(), repoRoot: join(home, 'nope') });
-    expect(noSrc.ok).toBe(false);
-    expect(noSrc.reason).toMatch(/未找到 Skill 源/);
-    const repoRoot = process.cwd();
-    const ok = await installSkills('opencode', { ...opts(), repoRoot });
+  it('Skill 安装：显式 skillRoot 注入优先；默认装到首个 skill 目录', async () => {
+    const fakeRoot = join(home, 'fake-skill');
+    await mkdir(join(fakeRoot, 'tasks'), { recursive: true });
+    await writeFile(join(fakeRoot, 'SKILL.md'), 'S', 'utf-8');
+    await writeFile(join(fakeRoot, 'MEMORY_POLICY.md'), 'M', 'utf-8');
+    await writeFile(join(fakeRoot, 'SETUP.md'), 'U', 'utf-8');
+    await writeFile(join(fakeRoot, 'tasks', 'SKILL.md'), 'T', 'utf-8');
+    const injected = await installSkills('opencode', { ...opts(), skillRoot: fakeRoot });
+    expect(injected.ok).toBe(true);
+    expect(injected.installed.length).toBe(2);
+    const mem = join(home, '.config', 'opencode', 'skills', 'mebular-memory', 'SKILL.md');
+    expect(await readFile(mem, 'utf-8')).toBe('S');
+
+    const ok = await installSkills('opencode', { ...opts() });
     expect(ok.ok).toBe(true);
-    expect(ok.installed.length).toBe(2);
     const skillDir = join(home, '.config', 'opencode', 'skills');
     expect((await readdir(skillDir)).sort()).toEqual(['mebular-memory', 'mebular-tasks']);
+  });
+
+  it('安装态（cwd=临时目录、未给 skillRoot）也能找到 Skill 源（模块相对解析）', async () => {
+    const prev = process.cwd();
+    process.chdir(home); // 模拟服务托管/安装态：cwd=守护 home（非仓库）
+    try {
+      const ok = await installSkills('opencode', { ...opts() }); // 不给 skillRoot / repoRoot
+      expect(ok.ok).toBe(true);
+      expect(ok.installed.length).toBe(2);
+      const skillDir = join(home, '.config', 'opencode', 'skills');
+      expect((await readdir(skillDir)).sort()).toEqual(['mebular-memory', 'mebular-tasks']);
+    } finally {
+      process.chdir(prev);
+    }
   });
 });

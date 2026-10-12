@@ -2701,6 +2701,56 @@ function setProvisionStatus(text, kind = '') {
   el.classList.toggle('is-ok', kind === 'ok');
 }
 
+/**
+ * 「待重启」面板（F-ONB-2）：restarting:false（前台 nohup）时展示 `restart.command` + 复制按钮，
+ * 不再谎称「正在自动重启」；服务托管（mode=service）则提示由服务管理器重启。
+ */
+function showProvisionRestart(restart, { prefix = '已完成', hideChoices = false } = {}) {
+  const box = $('#provision-restart');
+  if (!box) return;
+  box.hidden = false;
+  if (hideChoices) {
+    const choices = $('#provision-choices');
+    if (choices) choices.hidden = true;
+  }
+  const mode = restart?.mode ?? 'foreground';
+  const command = String(restart?.command ?? '');
+  const noteEl = $('#provision-restart-note');
+  if (noteEl) {
+    noteEl.textContent = mode === 'service'
+      ? `${prefix}：正在自动重启（服务托管）；稍候本页会自动进入正常态。`
+      : `${prefix}完成；当前为前台运行，**无法自动重启** —— 请在终端执行下面的命令。`;
+  }
+  const cmdEl = $('#provision-restart-command');
+  if (cmdEl) {
+    cmdEl.textContent = command || '（服务托管模式：重启由服务管理器 / supervisor 完成，无手动命令）';
+  }
+  const hintEl = $('#provision-restart-hint');
+  if (hintEl) {
+    hintEl.textContent = restart?.manual
+      ?? (mode === 'service'
+        ? '重启由服务管理器触发；本页会自动刷新进入正常态。'
+        : '重启后本页进入正常态；若已重启，点下方「已重启？刷新页面」。');
+  }
+  const copyBtn = $('#provision-restart-copy');
+  if (copyBtn) {
+    const canCopy = mode !== 'service' && command.length > 0;
+    copyBtn.hidden = !canCopy;
+    if (canCopy) {
+      copyBtn.onclick = () => {
+        void (async () => {
+          try {
+            await navigator.clipboard.writeText(command);
+            setProvisionStatus('命令已复制到剪贴板。', 'ok');
+          } catch {
+            setProvisionStatus(`复制失败，请手动复制：${command}`, 'error');
+          }
+        })();
+      };
+    }
+  }
+}
+
 /** 重启后轮询：引导接口消失（正常态）即刷新页面。 */
 async function waitProvisionRestart() {
   const deadline = Date.now() + 90_000;
@@ -2735,10 +2785,27 @@ async function submitProvision(kind) {
       await waitProvisionRestart();
       return;
     }
-    const cmd = res?.restart?.command ?? 'nohup mebular serve > ~/.mebular/serve.log 2>&1 &';
-    setProvisionStatus(`已完成：请手动重启后刷新页面 —— ${cmd}`, 'ok');
+    // A（F-ONB-2）：前台运行（restarting:false）→ 明确说「无法自动重启」+ 命令 + 复制按钮
+    showProvisionRestart(res?.restart, { prefix: kind === 'create' ? '已建新' : '已加入' });
+    setProvisionStatus(kind === 'create'
+      ? '已建新完成：当前为前台运行，无法自动重启；按下方指引重启后本页进入正常态。'
+      : '已加入完成：当前为前台运行，无法自动重启；按下方指引重启后本页进入正常态。', 'ok');
     if (button) button.disabled = false;
   } catch (error) {
+    // B（F-ONB-2）：重复调用（already_provisioned）→ 切「已完成」态，不裸报错
+    if (error?.status === 409 && error?.payload?.error === 'already_provisioned') {
+      const payload = error.payload;
+      $('#provision-choices')?.setAttribute('hidden', '');
+      if (payload.restarting) {
+        setProvisionStatus('已完成：正在自动重启，进入正常态…', 'ok');
+        await waitProvisionRestart();
+        return;
+      }
+      showProvisionRestart(payload.restart, { prefix: '已完成' });
+      setProvisionStatus('已完成：家目录已初始化，无需重复建新；按下方指引重启后本页进入正常态。', 'ok');
+      if (button) button.disabled = false;
+      return;
+    }
     setProvisionStatus(`失败：${error.message}`, 'error');
     if (button) button.disabled = false;
   }
@@ -2783,13 +2850,22 @@ function renderProvision(status) {
   if (joinName && !joinName.value) joinName.value = suggested;
   const note = $('#provision-note');
   if (note) {
-    note.textContent = `${status.note ?? ''}（家目录：${status.home ?? '—'}）`;
+    note.textContent = status.provisioned
+      ? `家目录已完成初始化（${status.home ?? '—'}）：重启后进入正常态。`
+      : `${status.note ?? ''}（家目录：${status.home ?? '—'}）`;
   }
   bindProvisionPreview('#provision-create-name', '#provision-create-preview', status);
   bindProvisionPreview('#provision-join-name', '#provision-join-preview', status);
   $('#provision-create')?.addEventListener('click', () => { void submitProvision('create'); });
   $('#provision-join')?.addEventListener('click', () => { void submitProvision('join'); });
   $('#provision-reload')?.addEventListener('click', () => window.location.reload());
+  // C（F-ONB-2）：home 已初始化但进程仍是引导态 → 刷新即进入待重启态（隐藏建新/加入，避免重复提交）
+  if (status.provisioned && status.restartRequired) {
+    showProvisionRestart(status.restart, { prefix: '已完成', hideChoices: true });
+    setProvisionStatus(status.restarting
+      ? '已完成：正在自动重启（服务托管），稍候本页自动进入正常态。'
+      : '已完成：家目录已初始化；当前为前台运行，按下方指引重启后本页进入正常态。', 'ok');
+  }
 }
 
 const provisionStatus = await fetchProvisionStatus();

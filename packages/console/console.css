@@ -956,6 +956,12 @@ select {
 #provision-status.is-error { color: #ffb4b4; }
 #provision-status.is-ok { color: #9dffcf; }
 #provision-join-token { font-family: var(--crt-mono, monospace); font-size: 11px; }
+/* F-ONB-2：「待重启」面板（前台 nohup 无法自动重启 → 命令 + 复制按钮） */
+.provision-restart { margin-top: 12px; padding: 12px; border: 1px dashed #2f6f57; border-radius: 6px; background: rgba(0, 255, 180, 0.04); display: grid; gap: 8px; text-align: left; }
+.provision-restart-cmd { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.provision-restart-cmd code { flex: 1 1 300px; padding: 6px 8px; background: rgba(0, 0, 0, 0.35); border-radius: 4px; font-family: var(--crt-mono, monospace); font-size: 11.5px; overflow-wrap: anywhere; }
+#provision-restart-note { margin: 0; font-size: 12px; }
+#provision-restart-hint { margin: 0; font-size: 11px; }
 
 /* ---------- G-ML-1：记忆生命周期视图（动作式） ---------- */
 .memories-list { display: grid; gap: 8px; margin-top: 10px; }
@@ -969,3 +975,11 @@ select {
 @media (max-width: 760px) {
   .mem-row { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* ---------- F-ONB-2：引导态「待重启」面板 ---------- */
+.provision-restart { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--crt-border, #2b4a3f); border-radius: 6px; display: grid; gap: 8px; }
+.provision-restart[hidden] { display: none; }
+.provision-restart-cmd { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#provision-restart-command { flex: 1 1 260px; min-width: 200px; padding: 6px 8px; font-family: var(--crt-mono, monospace); font-size: 12px; overflow-wrap: anywhere; background: rgba(0,0,0,0.25); border-radius: 4px; }
+#provision-restart-note { margin: 0; font-size: 12px; }
+#provision-restart-hint { margin: 0; font-size: 11px; }

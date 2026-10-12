@@ -88,7 +88,7 @@ function spawnServe(home, port) {
 async function waitReady(handle, timeoutMs = 20000) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    const match = handle.getOut().match(/SERVE_READY (\{.*\})/);
+    const match = handle.getOut().match(/(?:PROVISION_READY|SERVE_READY) (\{.*\})/);
     if (match) {
       try {
         return JSON.parse(match[1]);
@@ -384,6 +384,31 @@ async function main() {
       pageErrors.length === 0,
       pageErrors.slice(0, 2).map((event) => event.params?.exceptionDetails?.exception?.description ?? event.params?.entry?.text ?? event.method).join(' | '),
     );
+    // ---------- F-ONB-2：引导态「建新 → 待重启」UX（前台进程无法自动重启） ----------
+    {
+      const onboardHome = await mkdtemp(join(tmpdir(), 'mebular-ui-onboard-'));
+      const onboardPort = await freePort();
+      const onboardHandle = spawnServe(onboardHome, onboardPort);
+      try {
+        const obReady = await waitReady(onboardHandle);
+        const obBase = `http://127.0.0.1:${obReady.port}`;
+        await send('Page.navigate', { url: `${obBase}/console/` });
+        check('F-ONB-2 UI 引导页呈现（建新/加入两入口）',
+          await waitFor('Boolean(document.querySelector("#provision")) && !document.querySelector("#provision").hidden && Boolean(document.querySelector("#provision-create"))'));
+        await evalJs('document.querySelector("#provision-create").click()');
+        check('F-ONB-2 UI ① 前台建新 → 呈现手动重启命令（不得出现「正在自动重启」）',
+          await waitFor('(() => { const panel = document.querySelector("#provision-restart"); const cmd = document.querySelector("#provision-restart-command")?.textContent ?? ""; const all = document.querySelector("#provision")?.textContent ?? ""; return Boolean(panel) && panel.hidden === false && /mebular serve/.test(cmd) && !/正在自动重启/.test(all); })()'));
+        await evalJs('document.querySelector("#provision-create").click()');
+        check('F-ONB-2 UI ② 重复建新 → 显示「已完成 + 重启指引」（非裸错误）',
+          await waitFor('(() => { const t = document.querySelector("#provision")?.textContent ?? ""; return /已完成/.test(t) && /mebular serve/.test(t) && !/失败：/.test(t); })()'));
+        await send('Page.navigate', { url: `${obBase}/console/` });
+        check('F-ONB-2 UI ③ 刷新 → 进入待重启态（命令 + 隐藏入口）',
+          await waitFor('(() => { const panel = document.querySelector("#provision-restart"); const cmd = document.querySelector("#provision-restart-command")?.textContent ?? ""; const choices = document.querySelector("#provision-choices"); return Boolean(panel) && panel.hidden === false && /mebular serve/.test(cmd) && Boolean(choices) && choices.hidden === true; })()'));
+      } finally {
+        try { onboardHandle.proc.kill('SIGKILL'); } catch { /* 已退出 */ }
+        await rm(onboardHome, { recursive: true, force: true }).catch(() => undefined);
+      }
+    }
   } catch (error) {
     check('UI 冒烟执行', false, String(error?.message ?? error));
   } finally {

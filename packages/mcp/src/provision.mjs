@@ -54,9 +54,9 @@ export function normalizeExplicitDeviceId(value) {
   return /^device-+/i.test(raw) ? deriveDeviceId(raw) : (sanitize(raw) || null);
 }
 
-export function provisionStatus({ home, mcpPort }) {
+export function provisionStatus({ home, mcpPort, provisioned = false, restarting = false, restart = null } = {}) {
   const name = defaultDeviceName();
-  return {
+  const base = {
     ok: true,
     provision: true,
     hostname: name,
@@ -65,6 +65,23 @@ export function provisionStatus({ home, mcpPort }) {
     home,
     configPath: configPath(home),
     mcpPort,
+  };
+  // C（F-ONB-2）：home 已初始化（config 存在）但进程仍是引导态 → 待重启态。
+  // 不再宣称「家目录为空」；带上重启计划，前端刷新即进入待重启面板。
+  if (provisioned) {
+    return {
+      ...base,
+      provisioned: true,
+      restartRequired: true,
+      restarting: Boolean(restarting),
+      ...(restart ? { restart } : {}),
+      note: '家目录已完成初始化；当前进程仍处于引导态，需重启后进入正常态。',
+    };
+  }
+  return {
+    ...base,
+    provisioned: false,
+    restartRequired: false,
     note: '家目录为空：请选择「建新 Mebular」或「加入已有 Mebular」；完成后自动重启进入正常态。',
   };
 }

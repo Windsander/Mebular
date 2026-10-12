@@ -46,8 +46,11 @@ describe('H-1 service-control：常驻运行', () => {
     expect(res.ok).toBe(true);
     expect(res.unitPath.startsWith(home)).toBe(true);
     const unit = readFileSync(res.unitPath, 'utf-8');
-    expect(unit).toContain(`MEBULAR_HOME=${home}`);
-    expect(unit).toContain(`WorkingDirectory=${home}`);
+    // 平台无关：home 可能被 systemdQuote 转义（Windows 路径含反斜杠）；用 token + 唯一目录名断言
+    const base = home.split(/[\\/]/).filter(Boolean).pop();
+    expect(unit).toContain('MEBULAR_HOME');
+    expect(unit).toContain('WorkingDirectory=');
+    expect(unit).toContain(base);
     expect(rec.commands[0]).toEqual(['systemctl', '--user', 'daemon-reload']);
     expect(rec.commands.some((c) => c[0] === 'systemctl' && c.includes('enable'))).toBe(true);
     expect(existsSync(res.manifestPath)).toBe(true);
@@ -58,8 +61,9 @@ describe('H-1 service-control：常驻运行', () => {
     expect(res.ok).toBe(true);
     expect(res.unitPath.endsWith('.plist')).toBe(true);
     const plist = readFileSync(res.unitPath, 'utf-8');
+    const base = home.split(/[\\/]/).filter(Boolean).pop();
     expect(plist).toContain('MEBULAR_HOME');
-    expect(plist).toContain(home);
+    expect(plist).toContain(base);
     expect(rec.commands.some((c) => c[0] === 'launchctl' && c.includes('bootstrap'))).toBe(true);
   });
 

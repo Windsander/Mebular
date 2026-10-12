@@ -944,11 +944,14 @@ try {
     const svcInstallJson = await svcInstall.json().catch(() => null);
     const unitPath = svcInstallJson?.result?.unitPath;
     const unit = unitPath ? await readFile(unitPath, 'utf-8').catch(() => '') : '';
-    check('H-1 服务托管（试运行替身）：命令序列 + 单元带 MEBULAR_HOME=守护 home',
+    const unitBase = h1Home.split(/[\\/]/).filter(Boolean).pop();
+    const unitOk = process.platform === 'win32'
+      ? (unit.includes('WorkingDirectory') && unit.includes(unitBase))
+      : (unit.includes('MEBULAR_HOME') && unit.includes(unitBase));
+    check('H-1 服务托管（试运行替身）：命令序列 + 单元带守护自身 home',
       svcInstall.status === 200 && svcInstallJson?.dryRun === true
-        && Array.isArray(svcInstallJson?.commands) && svcInstallJson.commands.length > 0
-        && unit.includes('MEBULAR_HOME') && unit.includes(h1Home),
-      `commands=${(svcInstallJson?.commands ?? []).length} unitHasHome=${unit.includes(h1Home)}`);
+        && Array.isArray(svcInstallJson?.commands) && svcInstallJson.commands.length > 0 && unitOk,
+      `commands=${(svcInstallJson?.commands ?? []).length} platform=${process.platform} unitOk=${unitOk}`);
 
     const jsSrcH1 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     const htmlSrcH1 = await readFile(join(consoleDir, 'index.html'), 'utf-8');

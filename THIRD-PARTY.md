@@ -36,6 +36,17 @@
 |---|---|---|---|---|
 | `@huggingface/transformers` | 未声明（用户自行安装） | Apache-2.0 | 语义召回（可选能力，动态 import） | 缺包 → 关键词检索降级 + 告警（`semantic.enabled` 运行时为假） |
 
+## 开发期技能素材（非运行时）
+
+> `.opencode/skills/` 下的 agent skill：纯文本指令，**不参与构建、不进 npm 包、
+> 不被运行时加载**，故不受「精确 pin / 降级行为」政策约束，但仍登记许可与来源。
+> 详表见 [`.opencode/skills/README.md`](.opencode/skills/README.md)。
+
+| 素材 | 来源 commit | 许可 | 用途 | 状态 |
+|---|---|---|---|---|
+| `frontend-design`（Anthropic） | `41bbe19` | Apache-2.0 | UI 审美方向顾问（开发期文本） | 已 vendor（含 LICENSE.txt） |
+| `web-design-guidelines`（Vercel） | `ba46938` | ⚠️ 不明（上游无 LICENSE） | UI 质量清单参考 | **未入库**，仅本机参考 |
+
 ## 校验
 
 ```bash

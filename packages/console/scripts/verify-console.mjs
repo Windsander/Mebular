@@ -284,6 +284,17 @@ try {
   const indexText = await index.text();
   check('GET /console 200 + text/html', index.status === 200 && /text\/html/.test(index.headers.get('content-type') ?? ''), `status=${index.status}`);
   check('/console 返回控制台页面', indexText.includes('Mebular 控制台'));
+
+  // 防再犯：index.html 中 id 必须唯一（provision-restart 待重启面板曾被整块复制两遍，
+  // 重复 id ×5，JS querySelector 只接线第一块，第二块成为带重复 id 的死代码）
+  {
+    const ids = [...indexText.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
+    const dupIds = [...new Set(ids.filter((id, i) => ids.indexOf(id) !== i))];
+    check('index.html 元素 id 全部唯一（面板单实例，无重复块）', dupIds.length === 0, dupIds.join(','));
+    check('provision 待重启面板单实例（provision-restart* 各出现一次）',
+      ['provision-restart', 'provision-restart-note', 'provision-restart-command', 'provision-restart-copy', 'provision-restart-hint']
+        .every((id) => ids.filter((x) => x === id).length === 1));
+  }
   check('/console 下发 CSRF cookie 与响应头', (index.headers.get('set-cookie') ?? '').includes('mebular_csrf=') && Boolean(index.headers.get('x-mebular-csrf')));
 
   for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['settings-ia.js', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript'], ['nebula.js', 'text/javascript'], ['stars.js', 'text/javascript']]) {

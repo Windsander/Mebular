@@ -308,6 +308,73 @@ async function main() {
       await waitFor('(() => { const l = document.querySelector("#clients-list"); return Boolean(l) && l.querySelectorAll(".connect-card").length >= 5 && Boolean(l.querySelector("[data-cli-action=connect]")); })()'));
     await evalJs('(() => { const b = document.querySelector("#clients-list [data-cli-action=preview]"); if (b) b.click(); })()');
     check('「查看改动」→ diff 预览出现', await waitFor('(() => { const d = document.querySelector(".connect-diff"); return Boolean(d) && d.hidden === false && (d.textContent ?? "").trim().length > 0; })()'));
+
+    // ---------- 背景层契约（crt-surface / crt-screen 扫描线 ::before 定位） ----------
+    // 回归场景（真机反馈：记忆共享 / 连接 AI 助手背景重叠、局部生效）：
+    // 卡片基元自身不定位时，::before(absolute inset:0) 逃逸到最近的已定位祖先
+    // （面板/弹窗），N 张卡 = N 层全屏扫描线叠加，且锚定滚动内容原点 → 滚动后下方无覆盖。
+    // 契约：① 背景画布唯一；② 每个 crt-surface/crt-screen 基元自成定位上下文（非 static）；
+    // ③ 四个面板视图的背景样式与扫描线行为完全一致，且扫描线 fixed 钉住可视区（滚动不失效）。
+    check('背景画布唯一（canvas.stage-bg 不重复插入）',
+      await evalJs('document.querySelectorAll("canvas.stage-bg").length === 1'));
+
+    const probeViewBg = `(async (viewId, cardSelectors) => {
+      const view = document.getElementById(viewId);
+      if (!view || view.hidden) return null;
+      const cs = getComputedStyle(view);
+      const before = getComputedStyle(view, '::before');
+      const cards = cardSelectors.map((sel) => {
+        const els = Array.from(view.querySelectorAll(sel));
+        if (els.length === 0) return { sel, missing: true };
+        return { sel, positions: els.map((el) => getComputedStyle(el).position) };
+      });
+      return { viewId, bgColor: cs.backgroundColor, bgImage: cs.backgroundImage, beforePosition: before.position, cards };
+    })`;
+    const viewTabs = { 'domains-view': 2, 'audit-view': 3, 'memories-view': 4, 'connect-view': 5 };
+    const viewCards = {
+      'domains-view': ['#domains-list', '#domain-detail .sector-readout'],
+      'audit-view': [],
+      'memories-view': ['#memories-list .mem-row'],
+      'connect-view': ['#service-card', '#clients-list .connect-card'],
+    };
+    const bgReports = [];
+    for (const [viewId, nth] of Object.entries(viewTabs)) {
+      await evalJs(`document.querySelector("#view-nav li:nth-of-type(${nth}) button").click()`);
+      await waitFor(`document.getElementById("${viewId}")?.hidden === false`);
+      bgReports.push(await evalJs(`${probeViewBg}(${JSON.stringify(viewId)}, ${JSON.stringify(viewCards[viewId])})`));
+    }
+    check('四个面板视图均激活并探针成功', bgReports.every((r) => r && r.beforePosition),
+      JSON.stringify(bgReports.map((r) => r?.viewId ?? null)));
+    check('面板扫描线钉住可视区（::before position: fixed，四视图一致）',
+      bgReports.every((r) => r.beforePosition === 'fixed'),
+      JSON.stringify(bgReports.map((r) => r.beforePosition)));
+    check('面板背景样式四视图一致（background-color / background-image）',
+      bgReports.every((r) => r.bgColor === bgReports[0].bgColor && r.bgImage === bgReports[0].bgImage));
+    const escapedCards = bgReports.flatMap((r) => r.cards
+      .filter((c) => !c.missing)
+      .flatMap((c) => c.positions.map((p, i) => (p === 'static' ? `${r.viewId} ${c.sel}[${i}]` : null)))
+      .filter(Boolean));
+    check('卡片基元自成定位上下文（crt-surface/crt-screen 非 static，::before 不逃逸）',
+      escapedCards.length === 0 && bgReports.every((r) => r.cards.every((c) => !c.missing || c.sel === '#memories-list .mem-row')),
+      escapedCards.slice(0, 3).join(', '));
+    // 滚动稳定性：连接视图滚到底部后扫描线仍钉住（fixed ⇒ 不随内容移走）
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
+    await waitFor('document.getElementById("connect-view")?.hidden === false');
+    const scrollProbe = await evalJs(`(() => {
+      const view = document.getElementById('connect-view');
+      view.scrollTop = view.scrollHeight;
+      return { scrollTop: view.scrollTop, beforePosition: getComputedStyle(view, '::before').position };
+    })()`);
+    check('面板滚动到底后扫描线仍覆盖可视区（fixed 不随滚动失效）',
+      scrollProbe.scrollTop > 0 && scrollProbe.beforePosition === 'fixed',
+      JSON.stringify(scrollProbe));
+    // 跨 3s 轮询：背景契约不回退（重渲染不重建背景层/不掉定位上下文）
+    await sleep(3600);
+    const repoll = await evalJs(`${probeViewBg}("connect-view", ["#service-card", "#clients-list .connect-card"])`);
+    check('跨 3s 轮询背景契约保持（fixed + 卡片定位不丢）',
+      Boolean(repoll) && repoll.beforePosition === 'fixed'
+        && repoll.cards.every((c) => !c.missing && c.positions.every((p) => p !== 'static')),
+      JSON.stringify(repoll?.beforePosition));
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
 
     // 设置弹窗（IA：常用/高级/诊断 + 关于本机）

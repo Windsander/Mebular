@@ -547,6 +547,10 @@ select {
   --crt-text-glow: 0 0 6px rgba(90, 255, 180, 0.35);
   --crt-radial: radial-gradient(120% 55% at 18% 0%, rgba(26, 96, 64, 0.30), transparent 62%);
 }
+/* 扫描线 ::before（absolute inset:0）必须锚定自身卡片：基元默认自带定位上下文，
+   否则会逃逸到最近的已定位祖先（.panel-view/.modal）层层叠加，且随滚动错位。
+   :where 零特异性：.panel-view/.aside 等自带定位的规则不受影响 */
+:where(.crt-surface, .crt-screen) { position: relative; }
 .crt-surface {
   background-color: rgba(2, 16, 11, 0.78);
   background-image: var(--crt-radial);
@@ -656,6 +660,9 @@ select {
   pointer-events: none;
   background: repeating-linear-gradient(180deg, rgba(140, 255, 200, 0.06) 0 1px, transparent 1px 3px);
 }
+/* 面板滚动时扫描线钉在可视区（不随内容移走 → 不再局部生效）：
+   .panel-view 的 backdrop-filter 使其成为 fixed 后代的包含块（含裁剪） */
+.panel-view.crt-screen::before { position: fixed; }
 .crt-screen h2 { color: var(--crt-bright); letter-spacing: 3px; font-size: 13px; text-transform: uppercase; }
 .crt-screen .muted, .crt-screen .panel-note { color: rgba(140, 255, 200, 0.45); }
 .view-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }

@@ -983,3 +983,13 @@ select {
 #provision-restart-command { flex: 1 1 260px; min-width: 200px; padding: 6px 8px; font-family: var(--crt-mono, monospace); font-size: 12px; overflow-wrap: anywhere; background: rgba(0,0,0,0.25); border-radius: 4px; }
 #provision-restart-note { margin: 0; font-size: 12px; }
 #provision-restart-hint { margin: 0; font-size: 11px; }
+
+/* ---------- H-1：常驻运行 + 连接 AI 助手 ---------- */
+#service-card { margin-top: 10px; }
+.connect-card { padding: 12px; display: grid; gap: 6px; margin-top: 10px; }
+.connect-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.connect-head h3 { margin: 0; font-size: 15px; }
+.connect-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+.clients-list { display: grid; gap: 8px; margin-top: 8px; }
+.connect-diff { margin: 4px 0 0; padding: 8px; font-family: var(--crt-mono, monospace); font-size: 11.5px; line-height: 1.5; background: rgba(0,0,0,0.3); border-radius: 4px; overflow-wrap: anywhere; white-space: pre-wrap; max-height: 220px; overflow: auto; }
+.btn[disabled] { opacity: 0.45; cursor: not-allowed; }

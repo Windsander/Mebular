@@ -179,6 +179,9 @@ try {
       'package/packages/console/index.html', 'package/packages/fleet/dist/cli.js', 'package/packages/service/dist/index.js']
       .every((f) => coreFiles.includes(f)),
     'mcp/bin + console + fleet/service dist');
+  check('G-H1 根 tarball 含 Skill 源（packages/skill/SKILL.md，供「安装 Skill」用）',
+    coreFiles.includes('package/packages/skill/SKILL.md') && coreFiles.includes('package/packages/skill/tasks/SKILL.md'),
+    'packages/skill/SKILL.md + tasks/SKILL.md');
   check('F-INST-1 根 package.json bin = mebular + fleet',
     Boolean(coreManifest.bin?.mebular) && Boolean(coreManifest.bin?.fleet),
     JSON.stringify(coreManifest.bin));

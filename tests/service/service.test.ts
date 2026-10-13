@@ -235,13 +235,13 @@ describe('install/uninstall/status/logs（fake runner）', () => {
   const fakeRun = (cmd: string, args: readonly string[]): RunResult => {
     calls.push([cmd, ...args]);
     if (cmd !== 'launchctl') return { code: 0, stdout: 'active', stderr: '' };
-    const labelOf = (value: string): string => value.split('/').pop() ?? '';
+    const labelOf = (value: string): string => value.split(/[\\/]/).pop() ?? '';
     if (args[0] === 'print') {
       const owner = loaded.get(labelOf(String(args[1] ?? '')));
       return owner === undefined ? { code: 1, stdout: '', stderr: 'Could not find service' } : { code: 0, stdout: printFor(labelOf(String(args[1] ?? '')), owner), stderr: '' };
     }
     if (args[0] === 'bootstrap') {
-      const label = String(args[2] ?? '').split('/').pop()?.replace(/\.plist$/, '') ?? '';
+      const label = labelOf(String(args[2] ?? '')).replace(/\.plist$/, '');
       loaded.set(label, home);
       return { code: 0, stdout: '', stderr: '' };
     }
@@ -392,6 +392,7 @@ describe('一键重启（C：restart 计划/执行，命令可注入）', () => 
   const calls: string[][] = [];
   // 模拟 launchd：print 仅对已加载 label 返回 0（供归属校验）。
   const loaded = new Set<string>();
+  const baseName = (value: string): string => value.split(/[\\/]/).pop() ?? '';
   const printFor = (label: string, ownerHome: string): string => `gui/501/${label} = {
 \tpath = ${ownerHome}/Library/LaunchAgents/${label}.plist
 \tworking directory = ${ownerHome}
@@ -403,13 +404,13 @@ describe('一键重启（C：restart 计划/执行，命令可注入）', () => 
     calls.push([cmd, ...args]);
     if (cmd !== 'launchctl') return { code: 0, stdout: '', stderr: '' };
     if (args[0] === 'print') {
-      const owner = String(args[1] ?? '').split('/').pop() ?? '';
+      const owner = baseName(String(args[1] ?? ''));
       return loaded.has(owner) ? { code: 0, stdout: printFor(owner, home), stderr: '' } : { code: 1, stdout: '', stderr: '' };
     }
     if (args[0] === 'bootstrap') {
-      loaded.add(String(args[2] ?? '').split('/').pop()?.replace(/\.plist$/, '') ?? '');
+      loaded.add(baseName(String(args[2] ?? '')).replace(/\.plist$/, ''));
     }
-    if (args[0] === 'bootout') loaded.delete(String(args[1] ?? '').split('/').pop() ?? '');
+    if (args[0] === 'bootout') loaded.delete(baseName(String(args[1] ?? '')));
     return { code: 0, stdout: '', stderr: '' };
   };
   const descriptor: ServiceDescriptor = { kind: 'mebular-serve', args: ['/opt/cli.js', 'serve'], heartbeatDir: '' };
@@ -573,7 +574,7 @@ describe('F-SVC-1：跨 home 隔离（install/status/restart，fake runner）', 
   let homeB: string;
   const calls: string[][] = [];
   const loaded = new Map<string, string>(); // label -> owner home
-  const labelOf = (value: string): string => value.split('/').pop() ?? '';
+  const labelOf = (value: string): string => value.split(/[\\/]/).pop() ?? '';
   const printFor = (label: string, ownerHome: string): string => `gui/501/${label} = {
 \tpath = ${ownerHome}/Library/LaunchAgents/${label}.plist
 \tworking directory = ${ownerHome}

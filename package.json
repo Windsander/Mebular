@@ -66,7 +66,7 @@
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
-    "lint": "eslint src tests tests-semantic scripts packages --ext .ts,.mjs",
+    "lint": "eslint src tests tests-semantic scripts packages apps/desktop --ext .ts,.mjs",
     "check:cleanliness": "node scripts/check-cleanliness.mjs",
     "check:surface-parity": "node scripts/check-surface-parity.mjs",
     "check:docs": "node scripts/check-docs.mjs",
@@ -113,7 +113,9 @@
     "check:deps": "node scripts/check-deps.mjs",
     "verify:invite": "node scripts/verify-invite.mjs",
     "verify:nat": "node scripts/verify-nat.mjs",
-    "rulesets:apply": "node scripts/apply-rulesets.mjs --apply"
+    "rulesets:apply": "node scripts/apply-rulesets.mjs --apply",
+    "desktop:dev": "npm --prefix apps/desktop run dev",
+    "desktop:smoke": "npm --prefix apps/desktop run smoke"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",

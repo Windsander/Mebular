@@ -1,0 +1,36 @@
+# Mebular 桌面 App · 打包配置（M1：仅留配置，不做签名/公证/自动更新——M3/M4）
+appId: com.mebular.desktop
+productName: Mebular
+copyright: Copyright © 2026 Windsander
+directories:
+  output: dist
+  buildResources: resources
+files:
+  - src/**/*
+  - resources/**/*
+  - package.json
+extraResources:
+  # 复用仓库既有构建产物（App 不复制逻辑，只编排）
+  - from: ../../dist
+    to: core-dist
+  - from: ../../packages/mcp
+    to: packages/mcp
+  - from: ../../packages/service/dist
+    to: packages/service/dist
+  - from: ../../packages/fleet/dist
+    to: packages/fleet/dist
+  - from: ../../packages/console
+    to: packages/console
+  - from: ../../packages/skill
+    to: packages/skill
+asar: true
+mac:
+  target: [dmg]
+  category: public.app-category.productivity
+win:
+  target: [nsis]
+linux:
+  target: [AppImage, deb]
+  category: Utility
+# M1 不做：签名/公证/发布/自动更新（见 plan §9：M3/M4）
+publish: null

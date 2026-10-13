@@ -1,0 +1,22 @@
+{
+  "name": "@mebular/desktop",
+  "productName": "Mebular",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Mebular 桌面应用（Electron 壳 + 内嵌控制台 + 守护托管）",
+  "license": "MIT",
+  "author": "Windsander",
+  "type": "module",
+  "main": "src/main/index.mjs",
+  "scripts": {
+    "prepare:build": "node scripts/prepare-build.mjs",
+    "dev": "node scripts/dev.mjs",
+    "start": "electron .",
+    "smoke": "node scripts/smoke.mjs",
+    "dist:stub": "electron-builder --config electron-builder.yml --dir"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  }
+}

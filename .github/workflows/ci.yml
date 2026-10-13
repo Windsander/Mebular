@@ -238,3 +238,33 @@ jobs:
 
       - name: Real semantic lifecycle + distributed tests (node:test)
         run: node --test tests-semantic/real-semantic.test.mjs
+
+  desktop:
+    name: desktop smoke (no GUI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # 复用仓库既有产物：App 只编排，不复制逻辑（同时让 ELECTRON_RUN_AS_NODE 的 CLI 加载检查可跑）
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Build (repo artifacts)
+        run: npm run build
+
+      # apps/desktop 独立安装（不并入根 workspaces → 现有四 job 零影响）
+      - name: Install desktop dependencies
+        working-directory: apps/desktop
+        run: npm install --no-audit --no-fund
+
+      - name: Desktop smoke (bounded, no GUI process left behind)
+        working-directory: apps/desktop
+        run: npm run smoke

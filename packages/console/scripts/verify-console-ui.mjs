@@ -362,8 +362,22 @@ async function main() {
     await waitFor('document.getElementById("connect-view")?.hidden === false');
     const scrollProbe = await evalJs(`(() => {
       const view = document.getElementById('connect-view');
+      // R-1 补丁：连接页分组折叠后内容可能短于视口（CI 视口更高时不溢出 ⇒ scrollTop 恒 0，前置条件失效；
+      // 本地实测 scrollHeight 332/clientHeight 280、overflowY auto —— 容器未变，只是溢出不确定）。
+      // 临时垫片**确定性制造溢出**，测完移除并还原滚动位——断言强度（scrollTop>0 && fixed）不变。
+      const spacer = document.createElement('div');
+      spacer.id = 'ui-probe-spacer';
+      spacer.style.height = '2000px';
+      view.appendChild(spacer);
       view.scrollTop = view.scrollHeight;
-      return { scrollTop: view.scrollTop, beforePosition: getComputedStyle(view, '::before').position };
+      const out = {
+        scrollTop: view.scrollTop,
+        beforePosition: getComputedStyle(view, '::before').position,
+        overflowY: getComputedStyle(view).overflowY,
+      };
+      spacer.remove();
+      view.scrollTop = 0;
+      return out;
     })()`);
     check('面板滚动到底后扫描线仍覆盖可视区（fixed 不随滚动失效）',
       scrollProbe.scrollTop > 0 && scrollProbe.beforePosition === 'fixed',

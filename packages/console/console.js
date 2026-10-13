@@ -180,7 +180,7 @@ function renderTopbar() {
   const online = Boolean(status?.running);
   onlineEl.textContent = online ? `${ICONS.online} P2P 已启用` : `${ICONS.offline} P2P 未启用`;
   onlineEl.className = `badge ${online ? 'badge-ok' : 'badge-muted'}`;
-  memEl.textContent = status ? `记忆 ${status.nodeCount}` : '记忆 …';
+  memEl.textContent = status ? `记忆 ${status.nodeCount ?? '—'}` : '记忆 …';
   memEl.className = 'badge badge-muted';
   const pendingBadge = $('#settings-pending-badge');
   if (pendingBadge) {
@@ -2925,13 +2925,15 @@ function showProvisionRestart(restart, { prefix = '已完成', hideChoices = fal
   const copyBtn = $('#provision-restart-copy');
   const noteEl = $('#provision-restart-note');
   const hintEl = $('#provision-restart-hint');
+  // R-1 补丁：prefix 归一（'已完成' 不再拼出「已完成完成」）
+  const prefixDone = prefix === '已完成' ? '已完成' : `${prefix}完成`;
 
   if (desktopShell && mode !== 'service') {
     // 桌面壳：一键重启（IPC），命令行区域整体收起
-    if (noteEl) noteEl.textContent = `${prefix}：点下方「重启守护」一键生效（桌面壳托管，无需打开终端）。`;
+    if (noteEl) noteEl.textContent = `${prefixDone}：点下方「重启守护」一键生效。`;
     if (cmdEl) cmdEl.hidden = true;
     if (copyBtn) copyBtn.hidden = true;
-    if (hintEl) hintEl.textContent = '重启后本页自动刷新进入正常态；也可回到向导第①步点「重启守护」。';
+    if (hintEl) hintEl.textContent = '也可回到向导第①步点「重启守护」。';
     if (shellBtn) {
       shellBtn.hidden = false;
       shellBtn.onclick = () => {
@@ -2955,8 +2957,8 @@ function showProvisionRestart(restart, { prefix = '已完成', hideChoices = fal
 
   if (noteEl) {
     noteEl.textContent = mode === 'service'
-      ? `${prefix}：正在自动重启（服务托管）；稍候本页会自动进入正常态。`
-      : `${prefix}完成；当前为前台运行，**无法自动重启** —— 请在终端执行下面的命令。`;
+      ? `${prefixDone}：正在自动重启（服务托管）；稍候本页会自动进入正常态。`
+      : `${prefixDone}：当前为前台运行，无法自动重启 —— 请在终端执行下面的命令。`;
   }
   if (cmdEl) {
     cmdEl.hidden = false;
@@ -2966,7 +2968,7 @@ function showProvisionRestart(restart, { prefix = '已完成', hideChoices = fal
     hintEl.textContent = restart?.manual
       ?? (mode === 'service'
         ? '重启由服务管理器触发；本页会自动刷新进入正常态。'
-        : '重启后本页进入正常态；若已重启，点下方「已重启？刷新页面」。');
+        : '若已重启，点下方「已重启？刷新页面」。');
   }
   if (copyBtn) {
     const canCopy = mode !== 'service' && command.length > 0;
@@ -3020,11 +3022,11 @@ async function submitProvision(kind) {
       await waitProvisionRestart();
       return;
     }
-    // A（F-ONB-2）：前台运行（restarting:false）→ 明确说「无法自动重启」+ 命令 + 复制按钮
+    // A（F-ONB-2）：前台运行（restarting:false）→ 面板给手动指引（web）或一键重启（桌面壳）
     showProvisionRestart(res?.restart, { prefix: kind === 'create' ? '已建新' : '已加入' });
     setProvisionStatus(kind === 'create'
-      ? '已建新完成：当前为前台运行，无法自动重启；按下方指引重启后本页进入正常态。'
-      : '已加入完成：当前为前台运行，无法自动重启；按下方指引重启后本页进入正常态。', 'ok');
+      ? '已建新完成：按上方指引重启。'
+      : '已加入完成：按上方指引重启。', 'ok');
     if (button) button.disabled = false;
   } catch (error) {
     // B（F-ONB-2）：重复调用（already_provisioned）→ 切「已完成」态，不裸报错
@@ -3037,7 +3039,7 @@ async function submitProvision(kind) {
         return;
       }
       showProvisionRestart(payload.restart, { prefix: '已完成' });
-      setProvisionStatus('已完成：家目录已初始化，无需重复建新；按下方指引重启后本页进入正常态。', 'ok');
+      setProvisionStatus('已完成：家目录已初始化，无需重复建新；按上方指引重启。', 'ok');
       if (button) button.disabled = false;
       return;
     }
@@ -3099,7 +3101,7 @@ function renderProvision(status) {
     showProvisionRestart(status.restart, { prefix: '已完成', hideChoices: true });
     setProvisionStatus(status.restarting
       ? '已完成：正在自动重启（服务托管），稍候本页自动进入正常态。'
-      : '已完成：家目录已初始化；当前为前台运行，按下方指引重启后本页进入正常态。', 'ok');
+      : '已完成：家目录已初始化，按上方指引重启即可。', 'ok');
   }
 }
 

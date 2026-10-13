@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog } from 'electron';
 import {
   APP_VERSION, consoleUrl, ensureDaemon, resolveCliBin, resolveHome, resolveHttp,
-  serviceEnabledFor, stopManaged, waitForDaemon, parseArgs, probeHealth, serviceDescriptorFor,
+  serviceEnabledFor, stopManaged, waitForDaemon, parseArgs, probeHealth, probeProvision, serviceDescriptorFor,
 } from './daemon.mjs';
 import { buildHandlerTable, diagnostics } from './ipc.mjs';
 import { iconDataUrl } from './tray-icons.mjs';
@@ -70,6 +70,8 @@ async function probeAssistants() {
   try {
     const res = await fetch(`http://${http.host}:${http.port}/admin/api/clients`, { signal: AbortSignal.timeout(2000) });
     if (res.status === 401) return { readError: '需要令牌（设置 MEBULAR_TOKEN 后重试）', connectedCount: 0, total: null };
+    // W-1 小-6：409 = 控制台还在初始设置 → 人话（不抛黑话状态码）
+    if (res.status === 409) return { readError: '先完成第①步（控制台还在初始设置）', connectedCount: 0, total: null };
     if (!res.ok) return { readError: `HTTP ${res.status}`, connectedCount: 0, total: null };
     const data = await res.json().catch(() => ({}));
     const clients = Array.isArray(data?.clients) ? data.clients : [];
@@ -83,10 +85,14 @@ let lastInviteCreated = false;
 
 async function wizardStateNow() {
   const healthy = await probeHealth(fetch, httpConf());
+  // W-1 高-1：守护活着但处引导/待重启态 → 步骤①不算完成（404 = 正常态）
+  const provision = await probeProvision(fetch, httpConf());
   const service = await probeService();
   const assistants = await probeAssistants();
   return computeWizardState({
     daemonHealthy: healthy,
+    provisionRequired: provision.required,
+    provisioned: provision.provisioned,
     service,
     assistants,
     invite: lastInviteCreated ? { created: true } : null,

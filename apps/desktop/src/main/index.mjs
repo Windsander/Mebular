@@ -10,10 +10,14 @@ import { spawn } from 'node:child_process';
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog } from 'electron';
 import {
   APP_VERSION, consoleUrl, ensureDaemon, resolveCliBin, resolveHome, resolveHttp,
-  serviceEnabledFor, stopManaged, waitForDaemon, parseArgs,
+  serviceEnabledFor, stopManaged, waitForDaemon, parseArgs, probeHealth, serviceDescriptorFor,
 } from './daemon.mjs';
 import { buildHandlerTable, diagnostics } from './ipc.mjs';
 import { iconDataUrl } from './tray-icons.mjs';
+import {
+  computeWizardState, deepLinks, invitePlan, inviteText, parseInviteOutput, isLoopbackUrl,
+} from './wizard.mjs';
+import { readDaemonLogs } from './logs.mjs';
 
 const cliArgs = parseArgs(process.argv.slice(1));
 const home = typeof cliArgs.home === 'string' ? cliArgs.home : resolveHome();
@@ -47,6 +51,46 @@ async function loadServiceModule() {
   } catch {
     return null;
   }
+}
+
+async function probeService() {
+  const service = await loadServiceModule();
+  if (!service?.serviceStatus) return { available: false };
+  try {
+    const st = service.serviceStatus(serviceDescriptorFor({ home, cliBin, http: httpConf() }), { home });
+    return { available: true, registered: st.registered, running: st.running, autostart: st.autostart, unitPath: st.unitPath ?? null };
+  } catch (error) {
+    return { available: true, error: String(error?.message ?? error) };
+  }
+}
+
+/** 连接 AI 助手状态：回环 auth=none 直读；401 给**人话**且不阻断。 */
+async function probeAssistants() {
+  const http = httpConf();
+  try {
+    const res = await fetch(`http://${http.host}:${http.port}/admin/api/clients`, { signal: AbortSignal.timeout(2000) });
+    if (res.status === 401) return { readError: '需要令牌（设置 MEBULAR_TOKEN 后重试）', connectedCount: 0, total: null };
+    if (!res.ok) return { readError: `HTTP ${res.status}`, connectedCount: 0, total: null };
+    const data = await res.json().catch(() => ({}));
+    const clients = Array.isArray(data?.clients) ? data.clients : [];
+    return { connectedCount: clients.filter((c) => c.connected).length, total: clients.length, needsManual: clients.filter((c) => c.needsManual).length };
+  } catch (error) {
+    return { readError: `无法读取（${error?.message ?? error}）`, connectedCount: 0, total: null };
+  }
+}
+
+let lastInviteCreated = false;
+
+async function wizardStateNow() {
+  const healthy = await probeHealth(fetch, httpConf());
+  const service = await probeService();
+  const assistants = await probeAssistants();
+  return computeWizardState({
+    daemonHealthy: healthy,
+    service,
+    assistants,
+    invite: lastInviteCreated ? { created: true } : null,
+  });
 }
 
 async function ensure() {
@@ -95,6 +139,11 @@ let loadingSeq = 0;
 
 async function safeLoad(url) {
   if (!win || win.isDestroyed()) return;
+  // 安全红线：只加载回环（或本地 data: 占位页），拒绝把 renderer 导航到外站
+  if (!isLoopbackUrl(url) && !String(url).startsWith('data:text/html')) {
+    console.log(`[desktop] 拒绝非回环导航：${String(url).slice(0, 120)}`);
+    return;
+  }
   try {
     await win.loadURL(url);
   } catch (error) {
@@ -136,10 +185,7 @@ function createWindow() {
       webSecurity: true,
     },
   });
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    if (/^https?:\/\/127\.0\.0\.1[:/]/.test(url)) return { action: 'allow' };
-    return { action: 'deny' };
-  });
+  win.webContents.setWindowOpenHandler(({ url }) => (isLoopbackUrl(url) ? { action: 'allow' } : { action: 'deny' }));
 }
 
 // ---------- 托盘 ----------
@@ -147,12 +193,15 @@ function createWindow() {
 function updateTray() {
   if (!tray) return;
   const state = healthy ? 'green' : daemonMode ? 'yellow' : 'red';
+  // 状态点绑定真实健康（healthy 由 probeHealth 决定；daemonMode 反映托管路径）
   tray.setImage(nativeImage.createFromDataURL(iconDataUrl(state)));
   tray.setToolTip(`Mebular · ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}`);
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: `${healthy ? '●' : '○'} ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}（${daemonMode ?? '—'}）`, enabled: false },
     { type: 'separator' },
-    { label: '打开控制台', click: () => { win?.show(); win?.focus(); if (win && !win.isDestroyed()) void win.loadURL(consoleUrl(httpConf())); } },
+    { label: '打开控制台', click: () => { win?.show(); win?.focus(); if (win && !win.isDestroyed()) void safeLoad(consoleUrl(httpConf())); } },
+    { label: '连接 AI 助手', click: () => { win?.show(); win?.focus(); void safeLoad(deepLinks(httpConf()).assistants); } },
+    { label: '添加设备', click: () => { win?.show(); win?.focus(); void safeLoad(wizardFileUrl()); } },
     { label: '启动', click: () => { void ensure().then(() => showConsoleWithRetry()); } },
     { label: '停止', click: () => { stopManaged(daemonChild); daemonChild = null; healthy = false; updateTray(); } },
     { label: '重启', click: () => { void restart(); } },
@@ -175,6 +224,42 @@ function createTray() {
   updateTray();
 }
 
+// ---------- M2：服务直装 / 邀请 / 视图 ----------
+
+function wizardFileUrl() {
+  return new URL('../renderer/wizard.html', import.meta.url).href;
+}
+
+/** 审批走**主进程直调** @mebular/service（不经 HTTP 写端点，避免 CSRF/token 复杂度）。 */
+async function installServiceDirect() {
+  if (process.env.MEBULAR_DESKTOP_DRY_RUN === '1') {
+    return { ok: true, dryRun: true, note: '（DRY_RUN）将调用 @mebular/service installService', home };
+  }
+  const service = await loadServiceModule();
+  if (!service?.installService) return { ok: false, reason: '@mebular/service 不可用' };
+  try {
+    const res = service.installService(serviceDescriptorFor({ home, cliBin, http: httpConf() }), { home, autostart: true });
+    return { ok: true, registered: true, unitPath: res?.unitPath ?? null };
+  } catch (error) {
+    return { ok: false, reason: String(error?.message ?? error) };
+  }
+}
+
+/** 邀请：优先 fleet invite（QR/文本）；qrcode 缺失时给文本令牌。**主进程执行，有界**。 */
+async function createInvite() {
+  const fleetBin = join(cliBin, '..', '..', '..', 'fleet', 'dist', 'cli.js');
+  const { command, args, cwd } = invitePlan({ fleetBin, home, device: process.env.MEBULAR_DEVICE_NAME });
+  try {
+    const { spawnSync } = await import('node:child_process');
+    const res = spawnSync(command, args, { cwd, timeout: 20000, encoding: 'utf-8', env: { ...process.env, MEBULAR_HOME: home } });
+    const parsed = parseInviteOutput(`${res.stdout ?? ''}\n${res.stderr ?? ''}`);
+    lastInviteCreated = Boolean(parsed.token);
+    return { ...parsed, text: inviteText(parsed), raw: String(res.stdout ?? '').trim().slice(0, 400) };
+  } catch (error) {
+    return { token: null, qrSvg: null, endpoint: null, warning: `邀请失败：${error?.message ?? error}`, text: null };
+  }
+}
+
 // ---------- IPC（白名单） ----------
 
 function registerIpc() {
@@ -186,6 +271,18 @@ function registerIpc() {
     'console:open': () => { win?.show(); win?.focus(); return { url: consoleUrl(httpConf()) }; },
     'logs:open': async () => { await shell.openPath(join(home, 'serve.log')); return { path: join(home, 'serve.log') }; },
     'app:diagnostics': () => diagnostics({ appVersion: APP_VERSION, electronVersion: process.versions.electron, mode: daemonMode, home, http: httpConf(), healthy }),
+    // M2：向导 / 服务托管（主进程直调，不经 HTTP 写端点）/ 日志 / 邀请 / 深链
+    'wizard:state': async () => wizardStateNow(),
+    'wizard:step': async () => ({ step: (await wizardStateNow()).current }),
+    'service:status': async () => probeService(),
+    'service:install': async () => installServiceDirect(),
+    'logs:read': async () => {
+      const svc = await loadServiceModule();
+      return readDaemonLogs({ home, service: svc, descriptor: serviceDescriptorFor({ home, cliBin, http: httpConf() }) });
+    },
+    'invite:create': async () => createInvite(),
+    'deep:assistants': async () => { await safeLoad(deepLinks(httpConf()).assistants); return { url: deepLinks(httpConf()).assistants }; },
+    'deep:device': async () => { await safeLoad(wizardFileUrl()); return { url: wizardFileUrl() }; },
   });
   for (const [channel, handler] of Object.entries(table)) ipcMain.handle(channel, handler);
 }
@@ -204,7 +301,15 @@ if (!gotLock) {
     createWindow();
     try {
       await ensure();
-      await showConsoleWithRetry();
+      const state = await wizardStateNow();
+      if (state.complete) {
+        await showConsoleWithRetry();
+      } else {
+        console.log(`[desktop] 未完成首次上手（待办：${state.current}）→ 打开向导`);
+        await safeLoad(wizardFileUrl());
+        healthy = await probeHealth(fetch, httpConf());
+        updateTray();
+      }
     } catch (error) {
       dialog.showErrorBox('Mebular 启动失败', String(error?.message ?? error));
       updateTray();

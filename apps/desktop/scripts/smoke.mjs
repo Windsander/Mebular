@@ -79,6 +79,29 @@ check('ensureDaemon：服务托管已登记 → 走服务重启（优先于子�
 check('退出策略：仅停止子进程托管（服务托管返回 false）',
   daemon.stopManaged({ kill: () => true }) === true && daemon.stopManaged(null) === false);
 
+// M2：三步向导状态机 / 深链 / 邀请构造（**不真发**）/ 日志脱敏
+const wizard = await import('../src/main/wizard.mjs');
+const w0 = wizard.computeWizardState({ daemonHealthy: false });
+const w1 = wizard.computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1 } });
+const wDone = wizard.computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1 }, invite: { created: true } });
+check('向导状态机：未启动 → start；已连助手 → device；邀请已生成 → complete',
+  w0.current === 'start' && w1.current === 'device' && wDone.complete === true);
+
+const plan = wizard.invitePlan({ fleetBin: '/repo/packages/fleet/dist/cli.js', home: '/h', device: 'device-A' });
+check('邀请命令构造（只构造不发送；fleet invite --dir <home>）',
+  plan.args[0].endsWith('cli.js') && plan.args.includes('invite') && plan.args.includes('--dir') && plan.args.includes('/h'));
+
+const parsedInvite = wizard.parseInviteOutput('noise\n{"token":"T","qrSvg":null,"warning":"缺少 qrcode"}');
+check('邀请输出解析（qrcode 缺失 → 文本令牌兜底）',
+  parsedInvite.token === 'T' && parsedInvite.qrSvg === null && /qrcode/.test(parsedInvite.warning));
+
+check('日志脱敏（令牌/密钥不回显）',
+  !wizard.redactLog('token=ABCDEFGH userMasterKey=SECRETKEY').includes('ABCDEFGH')
+    && !wizard.redactLog('token=ABCDEFGH userMasterKey=SECRETKEY').includes('SECRETKEY'));
+
+check('深链仅回环（拒绝外站）',
+  wizard.isLoopbackUrl(wizard.deepLinks({ host: '127.0.0.1', port: 7331 }).assistants) && !wizard.isLoopbackUrl('http://evil.example/x'));
+
 // 3) electron --version（有界）
 const { resolveElectronBinary } = await import('./electron-path.mjs');
 const electronPath = await resolveElectronBinary();

@@ -12,4 +12,13 @@ contextBridge.exposeInMainWorld('mebularDesktop', {
   openConsole: () => ipcRenderer.invoke('console:open'),
   openLogs: () => ipcRenderer.invoke('logs:open'),
   diagnostics: () => ipcRenderer.invoke('app:diagnostics'),
+  // M2：三步向导 / 服务托管 / 日志页 / 邀请（全部固定方法，不透传任意通道）
+  wizardState: () => ipcRenderer.invoke('wizard:state'),
+  wizardStep: (step) => ipcRenderer.invoke('wizard:step', String(step ?? '')),
+  serviceStatus: () => ipcRenderer.invoke('service:status'),
+  serviceInstall: () => ipcRenderer.invoke('service:install'),
+  readLogs: () => ipcRenderer.invoke('logs:read'),
+  createInvite: () => ipcRenderer.invoke('invite:create'),
+  deepAssistants: () => ipcRenderer.invoke('deep:assistants'),
+  deepDevice: () => ipcRenderer.invoke('deep:device'),
 });

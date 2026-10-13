@@ -111,11 +111,65 @@ function registerLabel(label) {
   if (TEST_LABEL_RE.test(label)) createdLabels.add(label);
   return label;
 }
-/** 同步清理：bootout 白名单内的测试标签 + 删 temp。任何分支都不抛。 */
+/** 同步有界等待（Node 主线程可用）：用于 bootout 后的收尾窗口。 */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function removeRoot() {
+  try {
+    rmSync(root, { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
+}
+
+/** 白名单作业是否仍被 launchd 加载（单次 `launchctl list`，供有界轮询）。 */
+function anyLabelLoaded(labels) {
+  if (labels.length === 0) return false;
+  const out = spawnSync('launchctl', ['list'], { encoding: 'utf-8' }).stdout ?? '';
+  return labels.some((label) => out.includes(label));
+}
+
+/**
+ * F-HYGIENE-1 跟补：删 temp 的**有界收敛**（总预算 ≤~3s，绝不无限等待）。
+ * 被 bootout 的服务进程收尾时仍会写最后一笔心跳（如 `<root>/A/service.heartbeat`），
+ * 因此「bootout → 立即 rmSync」会被**写回**而残留。做法：在固定预算内反复
+ * 「删除 → 短暂等待 → 复查」，**仅当白名单作业已从 launchd 退场（写者已死）且
+ * temp 未再重现**才提前收敛；预算耗尽则做最后一次删除。正常退出与
+ * SIGINT/SIGTERM/SIGHUP 共用本函数，行为一致。
+ */
+function settleRemoveRoot(labels) {
+  if (!IS_DARWIN) {
+    removeRoot(); // 非 launchd：无被托管进程写回，一次删除即可
+    return;
+  }
+  const watched = labels.filter((label) => TEST_LABEL_RE.test(label));
+  const start = Date.now();
+  const deadline = start + 3000;
+  let stable = 0;
+  while (Date.now() < deadline) {
+    removeRoot();
+    sleepSync(300);
+    stable = existsSync(root) ? 0 : stable + 1;
+    if (stable >= 1 && !anyLabelLoaded(watched)) break;
+  }
+  removeRoot(); // 最终删除（提前收敛或预算耗尽均执行）
+}
+
+/** 同步清理：kill→bootout 白名单内的测试标签 + 收敛删除 temp。任何分支都不抛。 */
 function cleanupSync() {
+  const labels = [...createdLabels];
   if (IS_DARWIN) {
-    for (const label of createdLabels) {
-      if (!TEST_LABEL_RE.test(label)) continue; // 双保险：白名单外一律不 bootout
+    for (const label of labels) {
+      if (!TEST_LABEL_RE.test(label)) continue; // 双保险：白名单外一律不 bootout/kill
+      // 先 SIGKILL（经 launchd 按标签投递，无 PID 复用风险）——进程立即死亡，不会再写心跳；
+      // 否则被 bootout 的进程收尾时仍会写最后一笔 `A/service.heartbeat`（有界窗口内追不上）。
+      try {
+        spawnSync('launchctl', ['kill', '9', `gui/${UID}/${label}`], { stdio: 'ignore' });
+      } catch {
+        // ignore
+      }
       try {
         spawnSync('launchctl', ['bootout', `gui/${UID}/${label}`], { stdio: 'ignore' });
       } catch {
@@ -124,11 +178,7 @@ function cleanupSync() {
     }
   }
   createdLabels.clear();
-  try {
-    rmSync(root, { recursive: true, force: true });
-  } catch {
-    // ignore
-  }
+  settleRemoveRoot(labels);
 }
 let cleanedUp = false;
 async function cleanup() {

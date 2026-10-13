@@ -78,4 +78,6 @@ $('#btn-logs')?.addEventListener('click', () => { void loadLogs(); });
 $('#btn-logs-open')?.addEventListener('click', () => { void api.openLogs(); });
 
 void refresh();
-setInterval(refresh, 3000);
+void loadLogs();
+// 日志随状态轮询刷新（守护刚起时 serve.log 可能尚未写出 → 自愈）
+setInterval(() => { void refresh(); void loadLogs(); }, 3000);

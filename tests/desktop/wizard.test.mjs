@@ -127,6 +127,12 @@ describe('M2 日志页：脱敏 + 回退', () => {
       const none = await readDaemonLogs({ home, service: null, descriptor: null, readFileImpl: async () => { throw new Error('ENOENT'); } });
       expect(none.source).toBe('none');
 
+      // 服务日志**为空**（未安装常驻）→ 回退 <home>/serve.log
+      const emptySvc = { serviceLogs: () => ({ stdoutLog: '/l/out', stderrLog: '/l/err', stdout: [], stderr: [] }) };
+      const fallback = await readDaemonLogs({ home, service: emptySvc, descriptor: { kind: 'mebular-serve' }, readFileImpl: async () => 'PROVISION_READY {"home":"/h"}\n' });
+      expect(fallback.source).toBe('file');
+      expect(fallback.text).toContain('PROVISION_READY');
+
       // 真实文件路径兜底（走默认 readFile）
       await writeFile(join(home, 'serve.log'), 'PROVISION_READY {"home":"/h"}\n', 'utf-8');
       const real = await readDaemonLogs({ home });

@@ -139,8 +139,10 @@ let loadingSeq = 0;
 
 async function safeLoad(url) {
   if (!win || win.isDestroyed()) return;
-  // 安全红线：只加载回环（或本地 data: 占位页），拒绝把 renderer 导航到外站
-  if (!isLoopbackUrl(url) && !String(url).startsWith('data:text/html')) {
+  // 安全红线：只允许回环、本地 data: 占位页、以及 **App 目录内**的本地页（向导，含缓存破坏参数）；拒绝外站
+  const appDirUrl = new URL('../', import.meta.url).href;
+  const allowed = isLoopbackUrl(url) || String(url).startsWith('data:text/html') || String(url).startsWith(appDirUrl);
+  if (!allowed) {
     console.log(`[desktop] 拒绝非回环导航：${String(url).slice(0, 120)}`);
     return;
   }
@@ -201,7 +203,7 @@ function updateTray() {
     { type: 'separator' },
     { label: '打开控制台', click: () => { win?.show(); win?.focus(); if (win && !win.isDestroyed()) void safeLoad(consoleUrl(httpConf())); } },
     { label: '连接 AI 助手', click: () => { win?.show(); win?.focus(); void safeLoad(deepLinks(httpConf()).assistants); } },
-    { label: '添加设备', click: () => { win?.show(); win?.focus(); void safeLoad(wizardFileUrl()); } },
+    { label: '添加设备', click: () => { win?.show(); win?.focus(); void safeLoad(wizardViewUrl()); } },
     { label: '启动', click: () => { void ensure().then(() => showConsoleWithRetry()); } },
     { label: '停止', click: () => { stopManaged(daemonChild); daemonChild = null; healthy = false; updateTray(); } },
     { label: '重启', click: () => { void restart(); } },
@@ -228,6 +230,11 @@ function createTray() {
 
 function wizardFileUrl() {
   return new URL('../renderer/wizard.html', import.meta.url).href;
+}
+
+/** 带缓存破坏参数的向导 URL（渲染层不缓存旧脚本）。 */
+function wizardViewUrl() {
+  return `${wizardFileUrl()}?t=${Date.now()}`;
 }
 
 /** 审批走**主进程直调** @mebular/service（不经 HTTP 写端点，避免 CSRF/token 复杂度）。 */
@@ -282,7 +289,7 @@ function registerIpc() {
     },
     'invite:create': async () => createInvite(),
     'deep:assistants': async () => { await safeLoad(deepLinks(httpConf()).assistants); return { url: deepLinks(httpConf()).assistants }; },
-    'deep:device': async () => { await safeLoad(wizardFileUrl()); return { url: wizardFileUrl() }; },
+    'deep:device': async () => { await safeLoad(wizardViewUrl()); return { url: wizardFileUrl() }; },
   });
   for (const [channel, handler] of Object.entries(table)) ipcMain.handle(channel, handler);
 }

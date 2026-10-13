@@ -12,6 +12,7 @@ import { redactLog, tailText } from './wizard.mjs';
  */
 export async function readDaemonLogs({ home, service, descriptor, tail = 200, readFileImpl = readFile } = {}) {
   const paths = {};
+  let serviceEmpty = false;
   if (service?.serviceLogs && descriptor) {
     try {
       const res = service.serviceLogs(descriptor, { home, tail });
@@ -21,7 +22,8 @@ export async function readDaemonLogs({ home, service, descriptor, tail = 200, re
       if (text.trim().length > 0) {
         return { source: 'service', text: redactLog(text), paths };
       }
-      return { source: 'service', text: '', paths };
+      // 服务日志为空（如尚未安装常驻）→ 继续尝试 <home>/serve.log
+      serviceEmpty = true;
     } catch {
       // 回退到文件
     }
@@ -29,8 +31,12 @@ export async function readDaemonLogs({ home, service, descriptor, tail = 200, re
   const file = join(home, 'serve.log');
   try {
     const raw = await readFileImpl(file, 'utf-8');
-    return { source: 'file', text: redactLog(tailText(raw, tail)), paths: { file } };
+    const text = redactLog(tailText(raw, tail));
+    if (text.trim().length > 0) return { source: 'file', text, paths: { ...paths, file } };
   } catch {
-    return { source: 'none', text: '', paths: {} };
+    // 无文件
   }
+  // 服务日志存在但为空：回服务来源（暴露日志文件路径）；否则无日志
+  if (serviceEmpty) return { source: 'service', text: '', paths };
+  return { source: 'none', text: '', paths: {} };
 }

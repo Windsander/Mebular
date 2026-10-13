@@ -13,6 +13,7 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { onboardAgentDone } from './lib/acceptance-conditions.mjs';
 
 const CLI = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
 const FIXTURE = fileURLToPath(new URL('../tests/fleet/fixtures/fake-agent.mjs', import.meta.url));
@@ -111,7 +112,8 @@ try {
   const workB = startCli(['worker', '--dir', B, '--timeout-ms', '30000', '--interval-ms', '10']);
   const execLog = join(B, 'exec.jsonl');
   const executed = await waitFor(async () => existsSync(execLog) && lineCount(execLog) >= N, 75000);
-  const aDone = await waitFor(async () => /"submitted":\s*3/.test(serveA.state.out), 75000);
+  // F-FLAKE-1：等**完整断言条件**（submitted+done+resultsMatch 三者同时成立），而非只等 submitted
+  const aDone = await waitFor(async () => onboardAgentDone(serveA.state.out), 75000);
   check('B 执行 N 次（fake agent）', executed && lineCount(execLog) === N, { lines: existsSync(execLog) ? lineCount(execLog) : 0 });
 
   const doctorB = await runCli(['doctor', '--dir', B, '--json']);
@@ -127,7 +129,9 @@ try {
     (report?.skipped ?? []).every((s) => KNOWN_SKIPS.includes(s)) && (report?.skipped ?? []).includes('服务已注册'),
     { skipped: report?.skipped },
   );
-  check('A 全部完成且结果前缀匹配', aDone && /"done":\s*3/.test(serveA.state.out) && /"resultsMatch":\s*true/.test(serveA.state.out), {});
+  check('A 全部完成且结果前缀匹配', aDone && onboardAgentDone(serveA.state.out), {
+    tail: serveA.state.out.split('\n').filter(Boolean).slice(-6).join(' | ').slice(0, 400),
+  });
 
   // S7 密钥卫生：日志里搜不到主密钥私钥材料
   const key = JSON.parse(readFileSync(join(A, 'master-key.json'), 'utf-8'));

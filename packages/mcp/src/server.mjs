@@ -3,12 +3,13 @@
 
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
-import { rm, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { MemoryService } from '@mebular/core';
 import { createMebular, homeDir, loadConfigFile } from './config.mjs';
 import { registerTools } from './tools.mjs';
-import { startHttpServer, acquireLock } from './serve.mjs';
+import { startHttpServer, acquireLock, pidAlive } from './serve.mjs';
 import { createJoinServer } from './jointoken.mjs';
 import { clearApplyPending, readApplyPending, writeApplyResult, writeServeReady } from './config-apply.mjs';
 import { buildSettings } from './admin.mjs';
@@ -78,8 +79,30 @@ async function finalizePendingApply({ home, app, service, config, runtime }) {
   await clearApplyPending(home);
 }
 
-/** 启动 stdio MCP server；返回句柄用于收尾 */
+/**
+ * 启动 stdio MCP server；返回句柄用于收尾。
+ * F-CLI-2：守护（`serve`）在运行时拒绝启动 stdio —— 否则第二写者会同库写、并抢 P2P 监听端口。
+ * 客户端应指向守护的 HTTP `/mcp`（`mebular print-config --client <id> --url <daemon>/mcp`），或先停止守护。
+ */
 export async function startStdioServer() {
+  const home = homeDir();
+  const lockPath = join(home, 'lock');
+  if (existsSync(lockPath)) {
+    let held = null;
+    try {
+      held = JSON.parse(await readFile(lockPath, 'utf-8'));
+    } catch {
+      held = null;
+    }
+    if (held?.pid && pidAlive(held.pid)) {
+      const error = new Error(
+        `守护已在运行（pid ${held.pid}）：stdio 会与它争用存储与监听端口。`
+          + '请把客户端指向守护的 HTTP /mcp（mebular print-config --client <id> --url http://<host>:<port>/mcp），或先停止守护。',
+      );
+      error.code = 'MCP_STORAGE_LOCKED';
+      throw error;
+    }
+  }
   const { app } = await createMebular();
   const service = new MemoryService(app);
   const handle = serveStdio(() => buildServer(service));

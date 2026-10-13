@@ -2212,8 +2212,29 @@ function setView(view) {
   $('#empty-state').hidden = true;
   const asideEl = document.querySelector('.aside');
   if (asideEl) asideEl.classList.toggle('is-open', view === 'map' && Boolean(state.selected));
+  syncStageActivity();
   renderEmptyState();
 }
+
+// F-PERF-1：星图动画只在「星图视图且页面可见」时持有 rAF；其余一律挂起
+function syncStageActivity() {
+  stage.setPaused(document.hidden === true || state.view !== 'map');
+}
+
+document.addEventListener('visibilitychange', () => {
+  syncStageActivity();
+  if (document.hidden === true) {
+    // 隐藏时断开 SSE：客户端不再被 2.5s 状态脉冲唤醒，守护侧的连接保活定时器也随之释放
+    if (eventSource) {
+      eventSource.close();
+      eventSource = null;
+    }
+    return;
+  }
+  // 回到前台：重连 SSE 并立即补一次刷新（隐藏期间轮询与 SSE 脉冲均被闸门拦下）
+  startEvents();
+  scheduleRefresh();
+});
 
 $('#audit-filter-action').addEventListener('change', renderAudit);
 $('#audit-filter-device').addEventListener('change', renderAudit);
@@ -2758,6 +2779,7 @@ let eventSource = null;
 let refreshTimer = null;
 function scheduleRefresh() {
   if (refreshTimer) return;
+  if (typeof document !== 'undefined' && document.hidden === true) return; // F-PERF-1：隐藏时不取数
   refreshTimer = setTimeout(() => {
     refreshTimer = null;
     refresh();
@@ -3002,5 +3024,8 @@ if (provisionStatus) {
   setView('map');
   refresh();
   startEvents();
-  setInterval(refresh, POLL_MS);
+  setInterval(() => {
+    if (document.hidden === true) return; // F-PERF-1：隐藏页不轮询，回前台由 visibilitychange 补刷
+    refresh();
+  }, POLL_MS);
 }

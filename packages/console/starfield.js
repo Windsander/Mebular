@@ -82,6 +82,10 @@ export class StarStage {
     this.selectedId = null;
     this.running = false;
     this.raf = 0;
+    // 省电（F-PERF-1）：_started 记录「应运行」意图，_paused 记录页面隐藏/
+    // 非星图视图导致的挂起；只有 _started && !_paused 才真正持有 rAF 循环
+    this._started = false;
+    this._paused = false;
     this.startTime = performance.now();
     this.pulseUntil = 0;
     this.onHover = null;
@@ -141,7 +145,8 @@ export class StarStage {
   }
 
   start() {
-    if (this.running) return;
+    this._started = true;
+    if (this.running || this._paused) return;
     this.running = true;
     if (this.reducedMotion) {
       this._draw(performance.now() / 1000);
@@ -152,9 +157,32 @@ export class StarStage {
   }
 
   stop() {
+    this._started = false;
     this.running = false;
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = 0;
+  }
+
+  /**
+   * 暂停/恢复动画循环（页面隐藏、切到非星图视图时调用；F-PERF-1）。
+   * 只影响 rAF 持有，不改变「应运行」意图：暂停后再 start() 不会抢跑，
+   * 恢复时若此前已 start() 则自动续跑。
+   */
+  setPaused(paused) {
+    const next = paused === true;
+    if (next === this._paused) return;
+    this._paused = next;
+    if (next) {
+      this.running = false;
+      if (this.raf) cancelAnimationFrame(this.raf);
+      this.raf = 0;
+      return;
+    }
+    if (this._started) {
+      // 长时间挂起后 frameMs 极大，清零避免误触帧率自适应降级
+      this.lastTickAt = 0;
+      this.start();
+    }
   }
 
   destroy() {

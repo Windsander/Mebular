@@ -165,4 +165,47 @@ export function tailText(text, lines = 200) {
   return arr.slice(-Math.max(0, lines)).join('\n');
 }
 
+/**
+ * R-1 中-8：邀请改走与控制台同源的 `POST /admin/api/invite`（主进程直调）。
+ * 不再依赖 `fleet invite` CLI（fresh home 无 fleet.config.json 时 CLI 必 ENOENT）。
+ * CSRF：先 GET 读端点取 `x-mebular-csrf` 响应头（回环 auth=none 下服务端会下发），再带头发 POST。
+ * 返回与 parseInviteOutput 同形：{ token, qrSvg, endpoint, warning }。
+ */
+export async function inviteViaApi(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, timeoutMs = 8000) {
+  const base = `http://${http.host}:${http.port}`;
+  try {
+    let csrf = null;
+    try {
+      const pre = await fetchImpl(`${base}/admin/api/overview`, { signal: AbortSignal.timeout(timeoutMs) });
+      csrf = pre?.headers?.get?.('x-mebular-csrf') ?? null;
+    } catch {
+      // 预取失败不阻断：POST 仍尝试（服务端校验失败会给出明确错误）
+    }
+    const res = await fetchImpl(`${base}/admin/api/invite`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: {
+        'content-type': 'application/json',
+        ...(csrf ? { 'x-mebular-csrf': csrf } : {}),
+      },
+      body: '{}',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (res.status === 409 && data?.error === 'join_disabled') {
+      return { token: null, qrSvg: null, endpoint: null, warning: '未启用加入服务：在控制台「设置 → 常用配置」开启加入服务并重启后再试。' };
+    }
+    if (!res.ok) {
+      return { token: null, qrSvg: null, endpoint: null, warning: `邀请失败（HTTP ${res.status}）：${data?.message ?? '请看诊断日志'}` };
+    }
+    return {
+      token: typeof data?.token === 'string' ? data.token : null,
+      qrSvg: typeof data?.qrSvg === 'string' && data.qrSvg.length > 0 ? data.qrSvg : null,
+      endpoint: typeof data?.endpoint === 'string' ? data.endpoint : null,
+      warning: typeof data?.warning === 'string' ? data.warning : null,
+    };
+  } catch (error) {
+    return { token: null, qrSvg: null, endpoint: null, warning: `邀请失败：${error?.message ?? error}` };
+  }
+}
+
 export { existsSync, join };

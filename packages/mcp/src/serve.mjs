@@ -186,6 +186,7 @@ const CONSOLE_FILES = {
   'index.html': 'text/html; charset=utf-8',
   'console.css': 'text/css; charset=utf-8',
   'console.js': 'text/javascript; charset=utf-8',
+  'deep-link.js': 'text/javascript; charset=utf-8',
   'settings-ia.js': 'text/javascript; charset=utf-8',
   'starfield.js': 'text/javascript; charset=utf-8',
   'wizard.js': 'text/javascript; charset=utf-8',
@@ -909,8 +910,9 @@ export async function startHttpServer({
         restarting: false,
         restart: {
           mode: 'foreground',
-          command: 'nohup mebular serve > ~/.mebular/serve.log 2>&1 &',
-          manual: '未以服务方式运行：请手动重启（nohup mebular serve > ~/.mebular/serve.log 2>&1 &），重启后控制台进入正常态',
+          // R-1 高-4：命令串用真实 home（不写死 ~/.mebular）
+          command: `nohup mebular serve > ${home}/serve.log 2>&1 &`,
+          manual: `未以服务方式运行：请手动重启（nohup mebular serve > ${home}/serve.log 2>&1 &），重启后控制台进入正常态`,
         },
       };
     }
@@ -986,8 +988,9 @@ export async function startHttpServer({
     if (!kind) {
       return {
         registered: false,
-        command: 'nohup mebular serve > ~/.mebular/serve.log 2>&1 &',
-        manual: '未以服务方式运行（前台 nohup）：请手动重启（nohup mebular serve > ~/.mebular/serve.log 2>&1 &）',
+        // R-1 高-4：命令串用真实 home（不写死 ~/.mebular）
+        command: `nohup mebular serve > ${home}/serve.log 2>&1 &`,
+        manual: `未以服务方式运行（前台 nohup）：请手动重启（nohup mebular serve > ${home}/serve.log 2>&1 &）`,
       };
     }
     let plan;
@@ -1134,9 +1137,9 @@ export async function startHttpServer({
           restarting: false,
           restart: {
             mode: 'foreground',
-            command: 'nohup mebular serve > ~/.mebular/serve.log 2>&1 &',
+            command: `nohup mebular serve > ${home}/serve.log 2>&1 &`,
             backup,
-            manual: `未以服务方式运行：请手动重启（nohup mebular serve > ~/.mebular/serve.log 2>&1 &）；如新配置起不来，用备份回滚：cp ${backup ?? `${cfgFile}.bak`} ${cfgFile}`,
+            manual: `未以服务方式运行：请手动重启（nohup mebular serve > ${home}/serve.log 2>&1 &）；如新配置起不来，用备份回滚：cp ${backup ?? `${cfgFile}.bak`} ${cfgFile}`,
           },
         });
       }

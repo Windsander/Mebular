@@ -7,6 +7,7 @@
 // `?mock=1` 使用内置演示数据，便于无网络验收。
 
 import { StarStage, namespaceColor, shortId } from './starfield.js';
+import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, selectedMemoryCount, WIZARD_STEPS } from './wizard.js';
 import { IA_TABS, IA_TASK_CARDS, IA_ADVANCED_FIELDS, IA_MIGRATION, IA_EDITOR_PATHS, IA_INFO_BLOCKS } from './settings-ia.js';
 
@@ -36,6 +37,7 @@ const state = {
   selected: null,
   degraded: null,
   error: null,
+  clientRestart: {},
   csrf: readCookie('mebular_csrf'),
   token: params.get('token') ?? localStorage.getItem('mebular_token') ?? null,
   features: { writes: false },
@@ -178,7 +180,7 @@ function renderTopbar() {
   const online = Boolean(status?.running);
   onlineEl.textContent = online ? `${ICONS.online} P2P 已启用` : `${ICONS.offline} P2P 未启用`;
   onlineEl.className = `badge ${online ? 'badge-ok' : 'badge-muted'}`;
-  memEl.textContent = status ? `记忆 ${status.nodeCount}` : '记忆 …';
+  memEl.textContent = status ? `记忆 ${status.nodeCount ?? '—'}` : '记忆 …';
   memEl.className = 'badge badge-muted';
   const pendingBadge = $('#settings-pending-badge');
   if (pendingBadge) {
@@ -306,7 +308,7 @@ function renderEmptyState() {
   if (show) {
     el.innerHTML = '<strong>还没有其他设备</strong>'
       + '我的关系图目前只有本机。<br />'
-      + '点击右上角「＋ 连接新对端」与对端建立连接；本视图只显示你与已知对端的关系。';
+      + '点击右上角「＋ 连接已有地址」接入已知地址，或「＋ 邀请新设备」生成一次性令牌；本视图只显示你与已知对端的关系。';
   }
 }
 
@@ -558,10 +560,12 @@ function restartLabel(path) {
 }
 
 // 服务由 launchd/systemd/计划任务拉起（注入 MEBULAR_SERVICE_KIND/SHA）→ service restart；否则给 nohup 启动命令。
+// R-1 高-4：路径不写死 ~/.mebular——优先用服务端上报的真实 home（state.service.home）。
 function restartCommand() {
+  const home = state.service?.home;
   return state.settings?.restart?.serviceManaged
     ? 'mebular service restart'
-    : 'nohup mebular serve > ~/.mebular/serve.log 2>&1 &';
+    : `nohup mebular serve > ${home ?? '<MEBULAR_HOME>'}/serve.log 2>&1 &`;
 }
 
 function formatRestartValue(value) {
@@ -1011,6 +1015,7 @@ function renderAbout() {
     state.healthz ?? null,
     state.features?.writes ?? null,
     state.overview?.device?.deviceId ?? null,
+    state.service?.unitPath ?? null,
   ]);
   if (signature === lastAboutSignature && body.childElementCount > 0) return;
   lastAboutSignature = signature;
@@ -1079,6 +1084,8 @@ function renderAbout() {
         kvRow('实际监听', escapeHtml(s.network.listen.join(', ') || '—')),
         kvRow('生效白名单', (s.sync.peerWhitelist ?? []).length ? escapeHtml(s.sync.peerWhitelist.join(', ')) : '未启用（按授权 / 成员制判定）'),
         kvRow('MCP 监听', `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`),
+        // R-1 中-5：常驻 plist 全路径从连接页卡片收编到这里
+        ...(state.service?.unitPath ? [kvRow('常驻服务文件', `<code>${escapeHtml(state.service.unitPath)}</code>`)] : []),
         kvRow('TLS', s.mcp.tls ? `已启用（key=${s.mcp.tlsKeyConfigured ? '有' : '缺'} / cert=${s.mcp.tlsCertConfigured ? '有' : '缺'}）` : '未启用（明文 HTTP）'),
         kvRow('加入服务', s.join?.enabled ? `已启用 · ${escapeHtml(String(s.join.bind))}:${escapeHtml(String(s.join.port))}` : '未启用'),
         kvRow('语义召回', `${s.semantic.enabled ? '已启用' : '未启用'}（minScore ${s.semantic.minScore}）`),
@@ -1274,7 +1281,7 @@ async function saveConfigEditor() {
       renderAbout();
     } else {
       // 前台模式：手动指引
-      const cmd = res.restart?.command ?? 'nohup mebular serve > ~/.mebular/serve.log 2>&1 &';
+      const cmd = res.restart?.command ?? restartCommand();
       showToast(`已写入 ${res.path}${res.backup ? '（.bak 已备份）' : ''}；请手动重启：${cmd}`);
       await refresh();
       renderSettings();
@@ -1478,9 +1485,10 @@ function renderConnect() {
       serviceBox.innerHTML = '<p class="muted">常驻状态加载中…</p>';
     } else {
       const badge = svc.registered ? (svc.running ? '已常驻·运行中' : '已常驻·未运行') : '未常驻（当前为临时运行）';
+      // R-1 中-5：plist 全路径移出首屏卡片 →「关于本机 · 常驻服务文件」
       serviceBox.innerHTML = `
         <div class="connect-head"><h3>常驻运行</h3><span class="crt-tag">${escapeHtml(badge)}</span></div>
-        <p class="muted">开机自启、崩溃自动拉起。家目录：<code>${escapeHtml(svc.home ?? '—')}</code>${svc.unitPath ? ` · 服务文件：<code>${escapeHtml(svc.unitPath)}</code>` : ''}</p>
+        <p class="muted">开机自启、崩溃自动拉起。家目录：<code>${escapeHtml(svc.home ?? '—')}</code></p>
         <div class="connect-actions">
           <button class="btn btn-crt" type="button" data-svc-action="install" ${svc.registered ? 'disabled' : ''}>让 Mebular 常驻</button>
           <button class="btn" type="button" data-svc-action="uninstall" ${svc.registered ? '' : 'disabled'}>取消常驻</button>
@@ -1497,25 +1505,59 @@ function renderConnect() {
     list.innerHTML = '<p class="muted">AI 助手列表加载中…</p>';
     return;
   }
-  list.innerHTML = clients.map((c) => {
-    const status = connectStatusLabel(c);
-    const actions = [
-      `<button class="btn btn-small btn-crt" type="button" data-cli-action="connect" data-cli-id="${escapeHtml(c.id)}">接入</button>`,
-      `<button class="btn btn-small" type="button" data-cli-action="preview" data-cli-id="${escapeHtml(c.id)}">查看改动</button>`,
-      `<button class="btn btn-small" type="button" data-cli-action="rollback" data-cli-id="${escapeHtml(c.id)}">回滚</button>`,
-      (c.skillsDirs ?? []).length > 0 ? `<button class="btn btn-small" type="button" data-cli-action="skills" data-cli-id="${escapeHtml(c.id)}">安装 Skill</button>` : '',
-      `<button class="btn btn-small" type="button" data-cli-action="copy" data-cli-id="${escapeHtml(c.id)}">复制片段</button>`,
-      `<button class="btn btn-small" type="button" data-cli-action="recheck" data-cli-id="${escapeHtml(c.id)}">重新检测</button>`,
-    ].filter(Boolean).join(' ');
-    const where = c.configPath ? `配置：<code>${escapeHtml(c.configPath)}</code>` : '没有可自动写入的配置';
-    return `<article class="connect-card crt-surface">
-      <div class="connect-head"><b>${escapeHtml(c.name)}</b><span class="crt-tag">${escapeHtml(status)}</span>${c.skillsInstalled ? '<span class="crt-tag">Skill 已装</span>' : ''}</div>
-      <p class="muted">${where}${c.note ? ` · ${escapeHtml(c.note)}` : ''}</p>
-      <div class="connect-actions">${actions}</div>
-      <pre class="connect-diff" ${state.clientDiff[c.id] ? '' : 'hidden'} data-cli-diff="${escapeHtml(c.id)}">${escapeHtml(state.clientDiff[c.id] ?? '')}</pre>
-      <p class="muted" data-cli-msg="${escapeHtml(c.id)}">${escapeHtml(state.clientMsg[c.id] ?? '')}</p>
-    </article>`;
-  }).join('');
+  // R-1 中-5：分组折叠——已装可接入（默认展开）/ 未安装 / 需手动合并（默认收起）
+  const groups = [
+    { id: 'ready', title: '已装可接入', open: true, items: [] },
+    { id: 'missing', title: '未安装', open: false, items: [] },
+    { id: 'manual', title: '需手动合并', open: false, items: [] },
+  ];
+  for (const c of clients) {
+    if (c.needsManual) groups[2].items.push(c);
+    else if (!c.installed) groups[1].items.push(c);
+    else groups[0].items.push(c);
+  }
+  list.innerHTML = groups.filter((g) => g.items.length > 0).map((g) => `
+    <details class="connect-group" ${g.open ? 'open' : ''}>
+      <summary>${escapeHtml(g.title)}（${g.items.length}）</summary>
+      ${g.items.map((c) => connectCardHtml(c)).join('')}
+    </details>`).join('') || '<p class="muted">未检测到已知 AI 助手。</p>';
+}
+
+/** R-1 中-5/中-6/小-11：每卡 1 个主按钮；已接入 →「已接入 ✓」收编；其余动作收进 overflow「更多」。 */
+function connectCardHtml(c) {
+  const status = connectStatusLabel(c);
+  const connected = c.installed && c.connected && !c.needsManual;
+  const primary = connected
+    ? '<span class="crt-tag connect-done-tag">已接入 ✓</span>'
+    : `<button class="btn btn-small btn-crt" type="button" data-cli-action="connect" data-cli-id="${escapeHtml(c.id)}">接入</button>`;
+  const overflow = [
+    `<button class="btn btn-small" type="button" data-cli-action="preview" data-cli-id="${escapeHtml(c.id)}">查看改动</button>`,
+    `<button class="btn btn-small" type="button" data-cli-action="rollback" data-cli-id="${escapeHtml(c.id)}">回滚</button>`,
+    (c.skillsDirs ?? []).length > 0 ? `<button class="btn btn-small" type="button" data-cli-action="skills" data-cli-id="${escapeHtml(c.id)}">安装 Skill</button>` : '',
+    `<button class="btn btn-small" type="button" data-cli-action="copy" data-cli-id="${escapeHtml(c.id)}">复制片段</button>`,
+    `<button class="btn btn-small" type="button" data-cli-action="recheck" data-cli-id="${escapeHtml(c.id)}">重新检测</button>`,
+  ].filter(Boolean).join(' ');
+  const where = c.configPath ? `配置：<code>${escapeHtml(c.configPath)}</code>` : '没有可自动写入的配置';
+  // 中-6：接入成功后的重启闭环 checklist + 「我已重启，重新检测」
+  const restartCheck = state.clientRestart[c.id]
+    ? `<div class="restart-checklist">
+        <p><b>最后一步：重启 ${escapeHtml(c.name)}</b></p>
+        <ol class="muted">
+          <li>完全退出该助手（不是关窗口，是退出进程）</li>
+          <li>重新打开</li>
+          <li>在它的工具列表里应能看到 <code>mebular</code> 工具</li>
+        </ol>
+        <button class="btn btn-small btn-crt" type="button" data-cli-action="recheck" data-cli-id="${escapeHtml(c.id)}">我已重启，重新检测</button>
+      </div>`
+    : '';
+  return `<article class="connect-card crt-surface">
+    <div class="connect-head"><b>${escapeHtml(c.name)}</b><span class="crt-tag">${escapeHtml(status)}</span>${c.skillsInstalled ? '<span class="crt-tag">Skill 已装</span>' : ''}</div>
+    <p class="muted">${where}${c.note ? ` · ${escapeHtml(c.note)}` : ''}</p>
+    <div class="connect-actions">${primary}<details class="connect-overflow"><summary>更多</summary><div class="connect-overflow-body">${overflow}</div></details></div>
+    ${restartCheck}
+    <pre class="connect-diff" ${state.clientDiff[c.id] ? '' : 'hidden'} data-cli-diff="${escapeHtml(c.id)}">${escapeHtml(state.clientDiff[c.id] ?? '')}</pre>
+    <p class="muted" data-cli-msg="${escapeHtml(c.id)}">${escapeHtml(state.clientMsg[c.id] ?? '')}</p>
+  </article>`;
 }
 
 async function serviceAction(action) {
@@ -1544,7 +1586,7 @@ async function clientAction(id, action) {
   const say = (t) => { state.clientMsg[id] = t; renderConnect(); };
   const showDiff = (t) => { state.clientDiff[id] = t; renderConnect(); };
   try {
-    if (action === 'recheck') { await refresh(); say('已重新检测'); return; }
+    if (action === 'recheck') { state.clientRestart[id] = false; await refresh(); say('已重新检测'); return; }
     if (action === 'copy') {
       const client = (state.clients ?? []).find((c) => c.id === id);
       await navigator.clipboard.writeText(client?.snippet ?? '');
@@ -1557,12 +1599,16 @@ async function clientAction(id, action) {
       say(res.needsManual ? `需要你手动合并：${res.reason ?? ''}` : '');
       return;
     }
+    // R-1 小-11：回滚是不可逆方向的操作 → 二次确认
+    if (action === 'rollback' && !window.confirm('确定回滚？将把该助手的配置还原到接入前（用自动备份恢复）。')) return;
     const res = await api(`/admin/api/clients/${id}/${action}`, { method: 'POST', body: {} });
     if (typeof res.preview === 'string' && res.preview.length > 0) showDiff(res.preview);
     if (!res.ok) { say(`需要你手动处理：${res.reason ?? '请看片段'}`); return; }
     say(action === 'connect'
       ? (res.changed ? '接入完成（已备份原配置）。重启该助手后生效。' : '已接入（无需改动）。')
       : action === 'rollback' ? '已还原到接入前。' : '已安装。');
+    // R-1 中-6：接入成功后给出重启闭环 checklist（「我已重启，重新检测」可消）
+    if (action === 'connect' && res.changed) state.clientRestart[id] = true;
     await refresh();
   } catch (error) {
     say(`没能完成：${error.message}`);
@@ -2487,6 +2533,14 @@ async function renderInvite(overrideEndpoint = null) {
 }
 
 $('#invite-device').addEventListener('click', openInvite);
+// R-1 小-10：桌面壳下连接页可一键返回向导（web 场景无 preload → 保持隐藏）
+{
+  const backWizard = $('#connect-back-wizard');
+  if (backWizard && typeof window.mebularDesktop?.openWizard === 'function') {
+    backWizard.hidden = false;
+    backWizard.addEventListener('click', () => { void window.mebularDesktop.openWizard(); });
+  }
+}
 $('#invite-close').addEventListener('click', () => {
   $('#invite').hidden = true;
 });
@@ -2852,6 +2906,8 @@ function setProvisionStatus(text, kind = '') {
 /**
  * 「待重启」面板（F-ONB-2）：restarting:false（前台 nohup）时展示 `restart.command` + 复制按钮，
  * 不再谎称「正在自动重启」；服务托管（mode=service）则提示由服务管理器重启。
+ * R-1 高-4：**桌面壳**（?shell=desktop，preload 注入 window.mebularDesktop）下不出现
+ * nohup/终端指令 —— 改为一键「重启守护」（走壳 IPC：wizard 第①步同一个 daemon:restart）。
  */
 function showProvisionRestart(restart, { prefix = '已完成', hideChoices = false } = {}) {
   const box = $('#provision-restart');
@@ -2863,24 +2919,57 @@ function showProvisionRestart(restart, { prefix = '已完成', hideChoices = fal
   }
   const mode = restart?.mode ?? 'foreground';
   const command = String(restart?.command ?? '');
+  const desktopShell = typeof window !== 'undefined' && typeof window.mebularDesktop?.restart === 'function';
+  const shellBtn = $('#provision-restart-shell');
+  const cmdEl = $('#provision-restart-command');
+  const copyBtn = $('#provision-restart-copy');
   const noteEl = $('#provision-restart-note');
+  const hintEl = $('#provision-restart-hint');
+  // R-1 补丁：prefix 归一（'已完成' 不再拼出「已完成完成」）
+  const prefixDone = prefix === '已完成' ? '已完成' : `${prefix}完成`;
+
+  if (desktopShell && mode !== 'service') {
+    // 桌面壳：一键重启（IPC），命令行区域整体收起
+    if (noteEl) noteEl.textContent = `${prefixDone}：点下方「重启守护」一键生效。`;
+    if (cmdEl) cmdEl.hidden = true;
+    if (copyBtn) copyBtn.hidden = true;
+    if (hintEl) hintEl.textContent = '也可回到向导第①步点「重启守护」。';
+    if (shellBtn) {
+      shellBtn.hidden = false;
+      shellBtn.onclick = () => {
+        void (async () => {
+          shellBtn.disabled = true;
+          shellBtn.textContent = '正在重启…';
+          try {
+            await window.mebularDesktop.restart();
+            void waitProvisionRestart();
+          } catch {
+            setProvisionStatus('重启失败：请回到向导第①步点「重启守护」重试。', 'error');
+            shellBtn.disabled = false;
+            shellBtn.textContent = '重启守护';
+          }
+        })();
+      };
+    }
+    return;
+  }
+  if (shellBtn) shellBtn.hidden = true;
+
   if (noteEl) {
     noteEl.textContent = mode === 'service'
-      ? `${prefix}：正在自动重启（服务托管）；稍候本页会自动进入正常态。`
-      : `${prefix}完成；当前为前台运行，**无法自动重启** —— 请在终端执行下面的命令。`;
+      ? `${prefixDone}：正在自动重启（服务托管）；稍候本页会自动进入正常态。`
+      : `${prefixDone}：当前为前台运行，无法自动重启 —— 请在终端执行下面的命令。`;
   }
-  const cmdEl = $('#provision-restart-command');
   if (cmdEl) {
+    cmdEl.hidden = false;
     cmdEl.textContent = command || '（服务托管模式：重启由服务管理器 / supervisor 完成，无手动命令）';
   }
-  const hintEl = $('#provision-restart-hint');
   if (hintEl) {
     hintEl.textContent = restart?.manual
       ?? (mode === 'service'
         ? '重启由服务管理器触发；本页会自动刷新进入正常态。'
-        : '重启后本页进入正常态；若已重启，点下方「已重启？刷新页面」。');
+        : '若已重启，点下方「已重启？刷新页面」。');
   }
-  const copyBtn = $('#provision-restart-copy');
   if (copyBtn) {
     const canCopy = mode !== 'service' && command.length > 0;
     copyBtn.hidden = !canCopy;
@@ -2933,11 +3022,11 @@ async function submitProvision(kind) {
       await waitProvisionRestart();
       return;
     }
-    // A（F-ONB-2）：前台运行（restarting:false）→ 明确说「无法自动重启」+ 命令 + 复制按钮
+    // A（F-ONB-2）：前台运行（restarting:false）→ 面板给手动指引（web）或一键重启（桌面壳）
     showProvisionRestart(res?.restart, { prefix: kind === 'create' ? '已建新' : '已加入' });
     setProvisionStatus(kind === 'create'
-      ? '已建新完成：当前为前台运行，无法自动重启；按下方指引重启后本页进入正常态。'
-      : '已加入完成：当前为前台运行，无法自动重启；按下方指引重启后本页进入正常态。', 'ok');
+      ? '已建新完成：按上方指引重启。'
+      : '已加入完成：按上方指引重启。', 'ok');
     if (button) button.disabled = false;
   } catch (error) {
     // B（F-ONB-2）：重复调用（already_provisioned）→ 切「已完成」态，不裸报错
@@ -2950,7 +3039,7 @@ async function submitProvision(kind) {
         return;
       }
       showProvisionRestart(payload.restart, { prefix: '已完成' });
-      setProvisionStatus('已完成：家目录已初始化，无需重复建新；按下方指引重启后本页进入正常态。', 'ok');
+      setProvisionStatus('已完成：家目录已初始化，无需重复建新；按上方指引重启。', 'ok');
       if (button) button.disabled = false;
       return;
     }
@@ -3012,7 +3101,7 @@ function renderProvision(status) {
     showProvisionRestart(status.restart, { prefix: '已完成', hideChoices: true });
     setProvisionStatus(status.restarting
       ? '已完成：正在自动重启（服务托管），稍候本页自动进入正常态。'
-      : '已完成：家目录已初始化；当前为前台运行，按下方指引重启后本页进入正常态。', 'ok');
+      : '已完成：家目录已初始化，按上方指引重启即可。', 'ok');
   }
 }
 
@@ -3020,9 +3109,12 @@ const provisionStatus = await fetchProvisionStatus();
 if (provisionStatus) {
   renderProvision(provisionStatus);
 } else {
+  // R-1 高-3：?view=<视图> 深链（向导②/托盘「连接 AI 助手」的 ?view=connect 落点）；
+  // step=device → 进连接页后自动开「邀请新设备」
+  const deepLink = initialViewFromSearch(location.search);
   stage.start();
-  setView('map');
-  refresh();
+  setView(deepLink.view ?? 'map');
+  refresh().then(() => { if (deepLink.openInvite) openInvite(); });
   startEvents();
   setInterval(() => {
     if (document.hidden === true) return; // F-PERF-1：隐藏页不轮询，回前台由 visibilitychange 补刷

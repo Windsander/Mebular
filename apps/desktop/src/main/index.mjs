@@ -16,7 +16,9 @@ import { buildHandlerTable, diagnostics } from './ipc.mjs';
 import { iconDataUrl } from './tray-icons.mjs';
 import {
   computeWizardState, deepLinks, inviteText, inviteViaApi, isLoopbackUrl,
+  readDesktopState, writeDesktopState,
 } from './wizard.mjs';
+import { closeAction, quitConfirm, stopConfirm, trayMenuModel, LOGIN_ITEM_ID } from './lifecycle.mjs';
 import { readDaemonLogs } from './logs.mjs';
 
 const cliArgs = parseArgs(process.argv.slice(1));
@@ -82,6 +84,21 @@ async function probeAssistants() {
 }
 
 let lastInviteCreated = false;
+let quitting = false;
+
+/** R-1 高-1：已知对端数（/admin/api/devices 读端点；失败/引导态 → 0，不阻断）。 */
+async function probePeers() {
+  const http = httpConf();
+  try {
+    const res = await fetch(`http://${http.host}:${http.port}/admin/api/devices`, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return { known: 0 };
+    const data = await res.json().catch(() => ({}));
+    const devices = Array.isArray(data?.devices) ? data.devices : Array.isArray(data) ? data : [];
+    return { known: devices.length };
+  } catch {
+    return { known: 0 };
+  }
+}
 
 async function wizardStateNow() {
   const healthy = await probeHealth(fetch, httpConf());
@@ -89,6 +106,9 @@ async function wizardStateNow() {
   const provision = await probeProvision(fetch, httpConf());
   const service = await probeService();
   const assistants = await probeAssistants();
+  // R-1 高-1：③done 真实推导——持久标记（磁盘）∨ 已知对端≥1；内存标记只管本次会话即时反馈
+  const desktop = readDesktopState(home);
+  const peers = await probePeers();
   return computeWizardState({
     daemonHealthy: healthy,
     provisionRequired: provision.required,
@@ -96,6 +116,8 @@ async function wizardStateNow() {
     service,
     assistants,
     invite: lastInviteCreated ? { created: true } : null,
+    peers,
+    wizard: { inviteCreated: Boolean(desktop.inviteCreated), skipped: Boolean(desktop.skipped) },
   });
 }
 
@@ -204,9 +226,81 @@ function createWindow() {
     },
   });
   win.webContents.setWindowOpenHandler(({ url }) => (isLoopbackUrl(url) ? { action: 'allow' } : { action: 'deny' }));
+  // R-1 高-2：关窗 = 隐藏（守护不动）；真退出只走托盘「退出」（quitting 标志位）
+  win.on('close', (event) => {
+    if (closeAction({ quitting }) === 'hide') {
+      event.preventDefault();
+      win?.hide();
+    }
+  });
 }
 
 // ---------- 托盘 ----------
+
+function showWindow() {
+  if (!win || win.isDestroyed()) createWindow();
+  win.show();
+  win.focus();
+}
+
+/** R-1 高-2：唯一真退出入口（托盘「退出」）；确认文案由 quitConfirm 按托管模式给出（不谎称停守护）。 */
+async function confirmQuit() {
+  const plan = quitConfirm({ daemonMode, hasManagedChild: Boolean(daemonChild) });
+  const { response } = await dialog.showMessageBox(win ?? undefined, {
+    type: 'question',
+    message: plan.message,
+    buttons: plan.buttons,
+    defaultId: 0,
+    cancelId: 0,
+  });
+  if (response !== plan.confirmIndex) return;
+  quitting = true;
+  app.quit();
+}
+
+/** R-1 中-9：停止需确认；停止后窗口内横幅（守护已停止，托盘可重启）。 */
+async function confirmStop() {
+  const plan = stopConfirm({ daemonMode, hasManagedChild: Boolean(daemonChild) });
+  if (!plan.canStop) {
+    await dialog.showMessageBox(win ?? undefined, { type: 'info', message: plan.message, buttons: ['知道了'] });
+    return;
+  }
+  const { response } = await dialog.showMessageBox(win ?? undefined, {
+    type: 'warning', message: plan.message, buttons: ['取消', '停止'], defaultId: 0, cancelId: 0,
+  });
+  if (response !== 1) return;
+  stopManaged(daemonChild);
+  daemonChild = null;
+  healthy = false;
+  updateTray();
+  if (win && !win.isDestroyed() && win.isVisible()) {
+    await safeLoad(loadingHtml('守护已停止（托盘可重启）'));
+  }
+}
+
+async function confirmRestart() {
+  const { response } = await dialog.showMessageBox(win ?? undefined, {
+    type: 'question', message: '重启本机 Mebular 守护？', buttons: ['取消', '重启'], defaultId: 0, cancelId: 0,
+  });
+  if (response !== 1) return;
+  await restart();
+}
+
+function trayActions() {
+  return {
+    // R-1 高-4：壳内入口一律带 ?shell=desktop（控制台据此收编终端指令/显示返回向导）
+    'open-console': () => { showWindow(); void safeLoad(shellConsoleUrl()); },
+    'connect-assistants': () => { showWindow(); void safeLoad(shellDeepLink(deepLinks(httpConf()).assistants)); },
+    'add-device': () => { showWindow(); void safeLoad(wizardViewUrl()); },
+    'open-wizard': () => { showWindow(); void safeLoad(wizardViewUrl()); },
+    'daemon-start': () => { void ensure().then(() => showConsoleWithRetry()); },
+    'daemon-stop': () => { void confirmStop(); },
+    'daemon-restart': () => { void confirmRestart(); },
+    'open-logs': () => { shell.openPath(join(home, 'serve.log')).catch(() => undefined); },
+    [LOGIN_ITEM_ID]: (item) => { app.setLoginItemSettings({ openAtLogin: Boolean(item.checked) }); updateTray(); },
+    quit: () => { void confirmQuit(); },
+  };
+}
 
 function updateTray() {
   if (!tray) return;
@@ -214,19 +308,15 @@ function updateTray() {
   // 状态点绑定真实健康（healthy 由 probeHealth 决定；daemonMode 反映托管路径）
   tray.setImage(nativeImage.createFromDataURL(iconDataUrl(state)));
   tray.setToolTip(`Mebular · ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}`);
-  tray.setContextMenu(Menu.buildFromTemplate([
-    { label: `${healthy ? '●' : '○'} ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}（${daemonMode ?? '—'}）`, enabled: false },
-    { type: 'separator' },
-    { label: '打开控制台', click: () => { win?.show(); win?.focus(); if (win && !win.isDestroyed()) void safeLoad(shellConsoleUrl()); } },
-    { label: '连接 AI 助手', click: () => { win?.show(); win?.focus(); void safeLoad(shellDeepLink(deepLinks(httpConf()).assistants)); } },
-    { label: '添加设备', click: () => { win?.show(); win?.focus(); void safeLoad(wizardViewUrl()); } },
-    { label: '启动', click: () => { void ensure().then(() => showConsoleWithRetry()); } },
-    { label: '停止', click: () => { stopManaged(daemonChild); daemonChild = null; healthy = false; updateTray(); } },
-    { label: '重启', click: () => { void restart(); } },
-    { label: '打开日志', click: () => { shell.openPath(join(home, 'serve.log')).catch(() => undefined); } },
-    { type: 'separator' },
-    { label: '退出', click: () => { app.quit(); } },
-  ]));
+  // R-1 中-9：分组菜单模型（lifecycle.mjs 纯数据）→ 绑定 click 后交给 Electron
+  const actions = trayActions();
+  const loginChecked = (() => { try { return Boolean(app.getLoginItemSettings().openAtLogin); } catch { return false; } })();
+  const template = trayMenuModel({ healthy, daemonMode, loginOpenAtLogin: loginChecked }).map((item) => {
+    if (item.type === 'separator') return item;
+    const { id, confirm: _confirm, ...rest } = item;
+    return { ...rest, click: actions[id] ? (_menuItem) => actions[id](_menuItem) : undefined };
+  });
+  tray.setContextMenu(Menu.buildFromTemplate(template));
 }
 
 async function restart() {
@@ -275,6 +365,8 @@ async function installServiceDirect() {
 async function createInvite() {
   const res = await inviteViaApi(fetch, httpConf());
   lastInviteCreated = Boolean(res.token);
+  // R-1 高-1：邀请成功即持久化（进程退出不归零 → ③done 跨重启成立）
+  if (res.token) writeDesktopState(home, { inviteCreated: true, inviteCreatedAt: new Date().toISOString() });
   return { ...res, text: inviteText(res), raw: null };
 }
 
@@ -292,6 +384,14 @@ function registerIpc() {
     // M2：向导 / 服务托管（主进程直调，不经 HTTP 写端点）/ 日志 / 邀请 / 深链
     'wizard:state': async () => wizardStateNow(),
     'wizard:step': async () => ({ step: (await wizardStateNow()).current }),
+    // R-1 高-1：任何时候可「跳过，直接进入控制台」（持久化 skipped → 重启直达控制台）
+    'wizard:skip': async () => {
+      writeDesktopState(home, { skipped: true, skippedAt: new Date().toISOString() });
+      showWindow();
+      await safeLoad(consoleUrl(httpConf()));
+      return { skipped: true };
+    },
+    'wizard:open': async () => { showWindow(); await safeLoad(wizardViewUrl()); return { url: wizardFileUrl() }; },
     'service:status': async () => probeService(),
     'service:install': async () => installServiceDirect(),
     'logs:read': async () => {
@@ -311,7 +411,10 @@ const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => { win?.show(); win?.focus(); });
+  app.on('second-instance', () => { showWindow(); });
+
+  // R-1 高-2：macOS Dock 点图标 / 重新激活 → 重建/显示窗口
+  app.on('activate', () => { showWindow(); });
 
   app.whenReady().then(async () => {
     registerIpc();
@@ -335,10 +438,8 @@ if (!gotLock) {
   });
 
   app.on('window-all-closed', () => {
-    // M1：App 退出即停**自己托管**的子进程；服务托管不动（常驻不受影响）
-    const stopped = stopManaged(daemonChild);
-    if (stopped) console.log('[desktop] 已停止子进程托管的守护（服务托管不受影响）');
-    app.quit();
+    // R-1 高-2：关窗 ≠ 退出。窗口 close 已被拦截为隐藏，这里不做任何事——
+    // 守护（任何托管模式）与 App 进程都保持存活；真退出只走托盘「退出」。
   });
 
   app.on('before-quit', () => {

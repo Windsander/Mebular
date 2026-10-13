@@ -3,6 +3,9 @@
 //
 // 角色命名（D2）：fleet-node（任务板/发起端）· fleet-worker（执行端）· mebular-serve（记忆/同步/MCP 底座）。
 
+import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
+
 export type ServicePlatform = 'darwin' | 'linux' | 'win32';
 
 /** 三个常驻组件（服务单元名 = 角色名）。 */
@@ -179,9 +182,24 @@ export function unitText(platform: ServicePlatform, spec: UnitSpec): string {
   }
 }
 
-/** 默认标签/单元名（kind → com.mebular.<kind>）。 */
-export function defaultLabel(kind: ServiceKind, labelPrefix = DEFAULT_LABEL_PREFIX): string {
+/** 旧标签/单元名（**无 home 维度**）：`com.mebular.<kind>`。仅用于迁移期识别与清理。 */
+export function legacyLabel(kind: ServiceKind, labelPrefix = DEFAULT_LABEL_PREFIX): string {
   return `${labelPrefix}.${kind}`;
+}
+
+/** home 派生键（纯函数）：同 home → 同键、不同 home → 不同键（12 位十六进制）。 */
+export function homeKey(home: string): string {
+  const normalized = resolve(home).replace(/[/\\]+$/, '') || resolve(home);
+  return createHash('sha256').update(normalized).digest('hex').slice(0, 12);
+}
+
+/**
+ * 默认标签/单元名：`<prefix>.<kind>.<homeKey>` —— **含 home 维度**，使不同 home 的服务身份彻底隔离、
+ * 互不顶替（F-SVC-1）。省略 `home` 时退回旧的无维度标签（仅供显示/迁移识别；install 恒传 home）。
+ */
+export function defaultLabel(kind: ServiceKind, labelPrefix = DEFAULT_LABEL_PREFIX, home?: string): string {
+  const base = `${labelPrefix}.${kind}`;
+  return home === undefined || home.length === 0 ? base : `${base}.${homeKey(home)}`;
 }
 
 /** systemd 单元文件名（`mebular-<kind>.service`）。 */

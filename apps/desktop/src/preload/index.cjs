@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('mebularDesktop', {
   // M2：三步向导 / 服务托管 / 日志页 / 邀请（全部固定方法，不透传任意通道）
   wizardState: () => ipcRenderer.invoke('wizard:state'),
   wizardStep: (step) => ipcRenderer.invoke('wizard:step', String(step ?? '')),
+  // R-1：跳过向导直达控制台（持久化）/ 返回向导
+  skipWizard: () => ipcRenderer.invoke('wizard:skip'),
+  openWizard: () => ipcRenderer.invoke('wizard:open'),
   serviceStatus: () => ipcRenderer.invoke('service:status'),
   serviceInstall: () => ipcRenderer.invoke('service:install'),
   readLogs: () => ipcRenderer.invoke('logs:read'),

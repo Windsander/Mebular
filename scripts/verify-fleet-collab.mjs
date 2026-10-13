@@ -28,6 +28,8 @@ import {
   FleetChatter,
 } from '../packages/fleet/dist/index.js';
 
+import { negotiationDone, negotiationLimit, waitForTaskState } from './lib/acceptance-conditions.mjs';
+
 const results = [];
 const skipped = [];
 function check(name, cond, detail) {
@@ -67,6 +69,12 @@ try {
         // 回程推送丢失）：本夹具此前只靠 pushOnWrite，推送一丢就只能等默认超长反熵间隔 → 90s 窗口外。
         // 与常驻守护默认一致地开启周期反熵做兜底，并把间隔压到秒级，让丢包在窗口内自愈（幂等重放）。
         antiEntropy: { enabled: true, intervalMs: 2000, jitterRatio: 0 },
+        // F-FLAKE-1：会话等待默认超时 30s（DEFAULT_SYNC_TIMEOUT），而 anti-entropy 失败退避以
+        // 反熵间隔为基数指数增长（2s→4s→8s…）。单次卡住的会话把 `syncing` 置真 → 反熵与推送一起被
+        // 跳闸，叠加退避即可超出验收窗口（证据：main @12bdd17 的 Fleet 步骤 154s，绿时为 57s，
+        // 差值 ≈ 一个 90s 等待超时；1d-b 超限 读到 `{}` = 尚未终态）。夹具把会话超时收紧到 5s，
+        // 使「卡住→重试」的最坏恢复时间（3 × 5s + 退避 2+4+8s ≈ 43s）远小于 90s 验收预算。
+        syncTimeout: 5000,
       },
     });
   a = mk('device-A', 'device-B');
@@ -144,14 +152,16 @@ try {
   const { taskId: nid } = await n2.submit({ intent: 'nego:x', to: { device: 'device-B', agent: 'echo' } });
   const { worker: w3 } = await makeWorker({ negotiation: { store: negB, maxRounds: 3, enabled: (s) => s.intent.startsWith('nego:') } });
   const l3 = loop(w3);
-  const okNeg = await n2.waitForTerminal([nid], { timeoutMs: 90000 });
+  // F-FLAKE-1：条件驱动的有界等待——按**精确断言谓词**轮询，并保持节点驱动
+  // （pollOnce + applyNegotiationPolicy，与 waitForTerminal 同语义；被动读会停在首轮）。
+  // 旧版等「出现终态」后单次读 status：终态与断言所需字段可能不同拍 → 抖动。
+  const neg = await waitForTaskState(n2, nid, negotiationDone);
   l3.stop();
   await l3.done;
-  const negState = await n2.stateOf(nid);
-  check('1d-b 协商：counter → accept → 完成', okNeg && negState?.status === 'done', {
-    okNeg,
-    status: negState?.status,
-    reason: negState?.reason,
+  check('1d-b 协商：counter → accept → 完成', neg.ok && negotiationDone(neg.state), {
+    ok: neg.ok,
+    status: neg.state?.status,
+    reason: neg.state?.reason,
     bKinds: (await negB.all()).map((m) => `${m.kind}#${m.round}@${m.from.device}`),
     aKinds: (await negotiationMessageStore(a).all()).map((m) => `${m.kind}#${m.round}@${m.from.device}`),
   });
@@ -160,10 +170,16 @@ try {
   const { taskId: oid } = await n3.submit({ intent: 'nego:over', to: { device: 'device-B', agent: 'echo' } });
   const { worker: w4 } = await makeWorker({ negotiation: { store: negB, maxRounds: 1, enabled: (s) => s.intent.startsWith('nego:') } });
   const l4 = loop(w4);
-  await n3.waitForTerminal([oid], { timeoutMs: 90000 });
+  const limit = await waitForTaskState(n3, oid, negotiationLimit);
   l4.stop();
   await l4.done;
-  check('1d-b 超限 → failed NEGOTIATION_LIMIT', (await n3.stateOf(oid))?.reason === 'NEGOTIATION_LIMIT: 2>1', { reason: (await n3.stateOf(oid))?.reason });
+  check('1d-b 超限 → failed NEGOTIATION_LIMIT', limit.ok && negotiationLimit(limit.state), {
+    ok: limit.ok,
+    status: limit.state?.status,
+    reason: limit.state?.reason,
+    bKinds: (await negB.all()).map((m) => `${m.kind}#${m.round}@${m.from.device}`),
+    aKinds: (await negotiationMessageStore(a).all()).map((m) => `${m.kind}#${m.round}@${m.from.device}`),
+  });
 
   // ---------------- 1d-c 闲聊 ----------------
   const chatterA = new FleetChatter({ device: 'device-A', quota: new LocalQuota({ limitPerDevice: 2, onOverflow: 'reject' }), store: chatterMessageStore(a) });

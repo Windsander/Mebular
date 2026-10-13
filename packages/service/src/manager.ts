@@ -12,14 +12,17 @@ import os from 'node:os';
 import { execFileSync, spawnSync } from 'node:child_process';
 
 import {
+  DEFAULT_LABEL_PREFIX,
   SERVICE_KINDS,
   defaultLabel,
+  legacyLabel,
   systemdUnitFileName,
   unitText,
   type ServiceKind,
   type ServicePlatform,
   type UnitSpec,
 } from './units.js';
+import { describeJobOwner, jobBelongsToHome, parseLaunchdPrint, type LaunchdJob } from './launchd.js';
 import {
   launchAgentsDir,
   manifestPath,
@@ -97,11 +100,25 @@ function readManifest(kind: ServiceKind, home: string): ServiceManifest | null {
   }
 }
 
+/**
+ * 实例身份（**服务身份隔离的根**）：优先取描述符里的守护 home（`env.MEBULAR_HOME`，其次
+ * `heartbeatDir`），最后退回服务包选项的 home。**必须与「plist/状态落盘位置」区分开**：
+ * mcp CLI 的 `service install` 不传 `--home`（落盘仍用用户 home），但其 `MEBULAR_HOME`
+ * 才是实例身份——用实例身份派生 label，沙箱 home 才不会与真实 home 撞标签。
+ */
+function instanceHomeOf(descriptor: ServiceDescriptor, home: string): string {
+  const envHome = descriptor.env?.MEBULAR_HOME;
+  if (typeof envHome === 'string' && envHome.length > 0) return envHome;
+  if (descriptor.heartbeatDir.length > 0) return descriptor.heartbeatDir;
+  return home;
+}
+
 function buildSpec(descriptor: ServiceDescriptor, opts: Required<Pick<ServiceOptions, 'home' | 'platform'>> & { label?: string; autostart: boolean; sha: string }): UnitSpec {
   const { stdoutLog, stderrLog } = serviceLogPaths(descriptor.kind, opts.home);
   return {
     kind: descriptor.kind,
-    label: opts.label ?? defaultLabel(descriptor.kind),
+    // F-SVC-1：标签**含实例 home 维度**（`com.mebular.<kind>.<homeKey>`），不同 home 互不顶替。
+    label: opts.label ?? defaultLabel(descriptor.kind, DEFAULT_LABEL_PREFIX, instanceHomeOf(descriptor, opts.home)),
     execPath: descriptor.execPath ?? process.execPath,
     args: descriptor.args,
     ...(descriptor.workingDir !== undefined ? { workingDir: descriptor.workingDir } : {}),
@@ -113,10 +130,42 @@ function buildSpec(descriptor: ServiceDescriptor, opts: Required<Pick<ServiceOpt
   };
 }
 
-function isRunning(platform: ServicePlatform, spec: UnitSpec, run: RunCommand): boolean {
-  if (platform === 'darwin') return run('launchctl', ['print', `gui/${uid()}/${spec.label}`]).code === 0;
-  if (platform === 'linux') return run('systemctl', ['--user', 'is-active', systemdUnitFileName(spec.kind)]).stdout.trim() === 'active';
-  return run('schtasks', ['/Query', '/TN', spec.kind]).code === 0;
+interface LoadedJob {
+  loaded: boolean;
+  job: LaunchdJob | null;
+}
+
+/** 读取某 label 的加载态（`launchctl print` 失败 = 未加载）。 */
+function readLoadedJob(label: string, run: RunCommand): LoadedJob {
+  const res = run('launchctl', ['print', `gui/${uid()}/${label}`]);
+  if (res.code !== 0) return { loaded: false, job: null };
+  return { loaded: true, job: parseLaunchdPrint(res.stdout) };
+}
+
+interface RunningState {
+  /** 加载中**且**归属本 home 才为 true。 */
+  running: boolean;
+  /** 有同 label 作业被加载但**不属于**本 home（跨 home 占用）。 */
+  foreign: boolean;
+}
+
+/**
+ * F-SVC-1：running 判定**校验作业归属**——`launchctl print` 只要 label 存在就返回 0，
+ * 故必须解析其 ProgramArguments/MEBULAR_HOME/WorkingDirectory/plist 路径是否与本 home 匹配；
+ * 不匹配（他人作业）→ running=false 且 foreign=true，**绝不算 running**。
+ */
+function runningState(platform: ServicePlatform, spec: UnitSpec, run: RunCommand, home: string): RunningState {
+  if (platform === 'darwin') {
+    const loaded = readLoadedJob(spec.label, run);
+    const owned = loaded.loaded && jobBelongsToHome(loaded.job, home);
+    return { running: owned, foreign: loaded.loaded && !owned };
+  }
+  if (platform === 'linux') {
+    const active = run('systemctl', ['--user', 'is-active', systemdUnitFileName(spec.kind)]).stdout.trim() === 'active';
+    return { running: active, foreign: false };
+  }
+  const queried = run('schtasks', ['/Query', '/TN', spec.kind]).code === 0;
+  return { running: queried, foreign: false };
 }
 
 function ensureDirs(platform: ServicePlatform, home: string): void {
@@ -136,6 +185,12 @@ export interface InstallResult {
   manifestPath: string;
   autostart: boolean;
   started: boolean;
+  /** 迁移：本次安装顺带卸下的旧（无 home 维度）作业 label。 */
+  migratedFrom?: string;
+  /** 同 label 被**他人**作业占用 → 已拒绝（绝不顶替/bootout）。 */
+  foreign?: boolean;
+  warning?: string;
+  error?: string;
 }
 
 export function installService(
@@ -147,10 +202,48 @@ export function installService(
   const run = options.run ?? defaultRun;
   const sha = options.sha ?? resolveBuildSha();
   const autostart = options.autostart ?? true;
+  const instanceHome = instanceHomeOf(descriptor, home);
   const spec = buildSpec(descriptor, { home, platform, autostart, sha, ...(options.label !== undefined ? { label: options.label } : {}) });
+  const unitPath = unitFilePath(platform, spec, home);
+
+  // F-SVC-1 护栏（darwin）：安装前先判「同 label 是否被**他人**作业占用」。
+  //  - 本 home 新标签被他人占用 → 拒绝（绝不 bootout 他人）；
+  //  - 旧全局标签被他人占用 → 保留不 bootout，只装本 home 专属标签并警告；
+  //  - 旧全局标签属于本 home → 记录待迁移（bootout 旧 + 装新，保留 KeepAlive/RunAtLoad）。
+  let migratedFrom: string | undefined;
+  let foreignWarning: string | undefined;
+  if (platform === 'darwin') {
+    const own = readLoadedJob(spec.label, run);
+    if (own.loaded && !jobBelongsToHome(own.job, instanceHome)) {
+      return {
+        ok: false,
+        action: 'install',
+        kind: spec.kind,
+        label: spec.label,
+        sha,
+        unitPath,
+        manifestPath: manifestPath(spec.kind, home),
+        autostart,
+        started: false,
+        foreign: true,
+        error: 'foreign_job',
+        warning: `标签 ${spec.label} 已被另一 home 的作业占用（占用者：${describeJobOwner(own.job) ?? '未知'}）→ 拒绝安装（绝不顶替他人）`,
+      };
+    }
+    const legacy = legacyLabel(spec.kind);
+    if (legacy !== spec.label) {
+      const legacyJob = readLoadedJob(legacy, run);
+      if (legacyJob.loaded) {
+        if (jobBelongsToHome(legacyJob.job, instanceHome)) {
+          migratedFrom = legacy;
+        } else {
+          foreignWarning = `旧标签 ${legacy} 由另一 home 的作业占用（占用者：${describeJobOwner(legacyJob.job) ?? '未知'}）→ 未 bootout 他人；仅安装本 home 专属标签 ${spec.label}`;
+        }
+      }
+    }
+  }
 
   ensureDirs(platform, home);
-  const unitPath = unitFilePath(platform, spec, home);
   fs.writeFileSync(unitPath, unitText(platform, spec), { mode: 0o644 });
 
   const manifest: ServiceManifest = {
@@ -167,14 +260,24 @@ export function installService(
 
   let started = false;
   if (platform === 'darwin') {
-    run('launchctl', ['bootout', `gui/${uid()}/${spec.label}`]); // 幂等：先卸旧（忽略失败）
+    if (migratedFrom !== undefined) {
+      // 仅当旧标签确属本 home 才卸载（上面已校验）；并清掉本 home 的旧 plist。
+      run('launchctl', ['bootout', `gui/${uid()}/${migratedFrom}`]);
+      const legacyUnit = unitFilePath('darwin', { kind: spec.kind, label: migratedFrom }, home);
+      try {
+        fs.rmSync(legacyUnit, { force: true });
+      } catch {
+        // ignore
+      }
+    }
+    run('launchctl', ['bootout', `gui/${uid()}/${spec.label}`]); // 幂等：先卸本 home 自个儿的旧作业（忽略失败）
     const boot = run('launchctl', ['bootstrap', `gui/${uid()}`, unitPath]);
     if (boot.code !== 0) run('launchctl', ['load', unitPath]); // 旧系统回退
     if (!autostart) {
       // RunAtLoad=false：显式拉起一次，确保 install 后即在跑
       started = run('launchctl', ['kickstart', `gui/${uid()}/${spec.label}`]).code === 0;
     } else {
-      started = isRunning(platform, spec, run);
+      started = runningState(platform, spec, run, instanceHome).running;
     }
   } else if (platform === 'linux') {
     run('systemctl', ['--user', 'daemon-reload']);
@@ -186,7 +289,19 @@ export function installService(
     if (!autostart) run('schtasks', ['/End', '/TN', spec.kind]); // 仅安装不自启：注册后停止
   }
 
-  return { ok: true, action: 'install', kind: spec.kind, label: spec.label, sha, unitPath, manifestPath: manifestPath(spec.kind, home), autostart, started };
+  return {
+    ok: true,
+    action: 'install',
+    kind: spec.kind,
+    label: spec.label,
+    sha,
+    unitPath,
+    manifestPath: manifestPath(spec.kind, home),
+    autostart,
+    started,
+    ...(migratedFrom !== undefined ? { migratedFrom } : {}),
+    ...(foreignWarning !== undefined ? { warning: foreignWarning } : {}),
+  };
 }
 
 export interface UninstallResult {
@@ -201,6 +316,7 @@ export function uninstallService(descriptor: ServiceDescriptor, options: Service
   const platform = currentPlatform(options.platform);
   const home = options.home ?? os.homedir();
   const run = options.run ?? defaultRun;
+  const instanceHome = instanceHomeOf(descriptor, home);
   const manifest = readManifest(descriptor.kind, home);
   const spec: UnitSpec = buildSpec(descriptor, {
     home,
@@ -216,14 +332,22 @@ export function uninstallService(descriptor: ServiceDescriptor, options: Service
   }
 
   if (platform === 'darwin') {
-    run('launchctl', ['bootout', `gui/${uid()}/${spec.label}`]);
+    // F-SVC-1：只卸**属于本 home** 的作业（含迁移期遗留的旧全局标签）；绝不 bootout 他人。
+    for (const candidate of [spec.label, legacyLabel(spec.kind)]) {
+      const loaded = readLoadedJob(candidate, run);
+      if (loaded.loaded && jobBelongsToHome(loaded.job, instanceHome)) {
+        run('launchctl', ['bootout', `gui/${uid()}/${candidate}`]);
+      }
+    }
   } else if (platform === 'linux') {
     run('systemctl', ['--user', 'disable', '--now', systemdUnitFileName(descriptor.kind)]);
   } else {
     run('schtasks', ['/End', '/TN', descriptor.kind]);
     run('schtasks', ['/Delete', '/TN', descriptor.kind, '/F']);
   }
-  for (const file of [unitPath, manifestPath(descriptor.kind, home)]) {
+  const legacyUnitPath = unitFilePath('darwin', { kind: descriptor.kind, label: legacyLabel(descriptor.kind) }, home);
+  const files = platform === 'darwin' ? [unitPath, legacyUnitPath, manifestPath(descriptor.kind, home)] : [unitPath, manifestPath(descriptor.kind, home)];
+  for (const file of files) {
     try {
       fs.rmSync(file, { force: true });
     } catch {
@@ -252,6 +376,10 @@ export interface ServiceStatusEntry {
   label: string;
   registered: boolean;
   running: boolean;
+  /** F-SVC-1：存在同 label（或旧全局 label）的**他人**作业 → 跨 home 占用（running 必为 false）。 */
+  foreign: boolean;
+  /** 跨 home 占用者的 home/路径提示（无则 null）。 */
+  foreignOwner: string | null;
   unitPath: string;
   sha: string | null;
   autostart: boolean | null;
@@ -263,6 +391,7 @@ export function serviceStatus(descriptor: ServiceDescriptor, options: ServiceOpt
   const home = options.home ?? os.homedir();
   const run = options.run ?? defaultRun;
   const now = options.now ?? Date.now();
+  const instanceHome = instanceHomeOf(descriptor, home);
   const manifest = readManifest(descriptor.kind, home);
   const spec: UnitSpec = buildSpec(descriptor, {
     home,
@@ -274,11 +403,30 @@ export function serviceStatus(descriptor: ServiceDescriptor, options: ServiceOpt
   const unitPath = unitFilePath(platform, spec, home);
   const hb = readHeartbeat(descriptor.heartbeatDir);
   const fresh = isHeartbeatFresh(descriptor.heartbeatDir, undefined, now);
+
+  // F-SVC-1：running 必须校验**作业归属**；并额外揭露「旧全局 label 被他人占用」这一假阳性来源。
+  const state = runningState(platform, spec, run, instanceHome);
+  let foreign = state.foreign;
+  let foreignOwner: string | null = null;
+  if (platform === 'darwin') {
+    if (state.foreign) foreignOwner = describeJobOwner(readLoadedJob(spec.label, run).job);
+    const legacy = legacyLabel(spec.kind);
+    if (legacy !== spec.label) {
+      const legacyLoaded = readLoadedJob(legacy, run);
+      if (legacyLoaded.loaded && !jobBelongsToHome(legacyLoaded.job, instanceHome)) {
+        foreign = true;
+        foreignOwner = foreignOwner ?? describeJobOwner(legacyLoaded.job);
+      }
+    }
+  }
+
   return {
     kind: descriptor.kind,
     label: spec.label,
     registered: fs.existsSync(unitPath) || manifest !== null,
-    running: isRunning(platform, spec, run),
+    running: state.running,
+    foreign,
+    foreignOwner,
     unitPath,
     sha: manifest?.sha ?? null,
     autostart: manifest?.autostart ?? null,
@@ -314,6 +462,8 @@ export interface RestartPlan {
 export function restartPlanFor(descriptor: ServiceDescriptor, options: ServiceOptions = {}): RestartPlan {
   const platform = currentPlatform(options.platform);
   const home = options.home ?? os.homedir();
+  const run = options.run ?? defaultRun;
+  const instanceHome = instanceHomeOf(descriptor, home);
   const manifest = readManifest(descriptor.kind, home);
   const spec: UnitSpec = buildSpec(descriptor, {
     home,
@@ -327,6 +477,18 @@ export function restartPlanFor(descriptor: ServiceDescriptor, options: ServiceOp
   const manual = '未注册为服务：请手动重启（nohup mebular serve > ~/.mebular/serve.log 2>&1 &）';
   if (!registered) return { kind: descriptor.kind, label: spec.label, registered: false, commands: [], manual };
   if (platform === 'darwin') {
+    // F-SVC-1：绝不 kickstart 他人作业——加载中的同 label 作业必须归属本 home。
+    const state = runningState(platform, spec, run, instanceHome);
+    if (state.foreign) {
+      const owner = describeJobOwner(readLoadedJob(spec.label, run).job);
+      return {
+        kind: descriptor.kind,
+        label: spec.label,
+        registered: false,
+        commands: [],
+        manual: `标签 ${spec.label} 被另一 home 的作业占用（占用者：${owner ?? '未知'}）→ 不 kickstart 他人；请确认该作业归属后重试`,
+      };
+    }
     return { kind: descriptor.kind, label: spec.label, registered: true, commands: [['launchctl', 'kickstart', '-k', `gui/${uid()}/${spec.label}`]] };
   }
   if (platform === 'linux') {

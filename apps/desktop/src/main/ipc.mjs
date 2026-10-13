@@ -15,6 +15,9 @@ export const IPC_CHANNELS = Object.freeze([
   // M2：三步向导 / 服务托管（主进程直调，不经 HTTP 写端点）/ 日志页 / 邀请
   'wizard:state',
   'wizard:step',
+  // R-1：跳过向导（持久化）/ 从控制台返回向导
+  'wizard:skip',
+  'wizard:open',
   'service:status',
   'service:install',
   'logs:read',

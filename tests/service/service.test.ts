@@ -28,6 +28,12 @@ import {
   restartService,
   unitText,
   systemdUnitFileName,
+  defaultLabel,
+  legacyLabel,
+  homeKey,
+  parseLaunchdPrint,
+  jobBelongsToHome,
+  describeJobOwner,
   heartbeatPath,
   launchAgentsDir,
   systemdUserDir,
@@ -208,10 +214,42 @@ describe('心跳', () => {
 describe('install/uninstall/status/logs（fake runner）', () => {
   let home: string;
   const calls: string[][] = [];
+  // 模拟 launchd：label → 作业归属 home；bootstrap/bootout 增删。print 仅对已加载 label 返回 0。
+  const loaded = new Map<string, string>();
+  const printFor = (label: string, ownerHome: string): string => `gui/501/${label} = {
+\tactive count = 1
+\tpath = ${ownerHome}/Library/LaunchAgents/${label}.plist
+\tstate = running
+\tprogram = /usr/bin/node
+\targuments = {
+\t\t/usr/bin/node
+\t\t/opt/cli.js
+\t\tnode
+\t}
+\tworking directory = ${ownerHome}
+\tenvironment = {
+\t\tMEBULAR_HOME => ${ownerHome}
+\t\tMEBULAR_SERVICE_KIND => fleet-node
+\t}
+}`;
   const fakeRun = (cmd: string, args: readonly string[]): RunResult => {
     calls.push([cmd, ...args]);
-    // launchctl print / systemctl is-active / schtasks query → “在跑”
-    return { code: 0, stdout: 'active', stderr: '' };
+    if (cmd !== 'launchctl') return { code: 0, stdout: 'active', stderr: '' };
+    const labelOf = (value: string): string => value.split('/').pop() ?? '';
+    if (args[0] === 'print') {
+      const owner = loaded.get(labelOf(String(args[1] ?? '')));
+      return owner === undefined ? { code: 1, stdout: '', stderr: 'Could not find service' } : { code: 0, stdout: printFor(labelOf(String(args[1] ?? '')), owner), stderr: '' };
+    }
+    if (args[0] === 'bootstrap') {
+      const label = String(args[2] ?? '').split('/').pop()?.replace(/\.plist$/, '') ?? '';
+      loaded.set(label, home);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'bootout') {
+      loaded.delete(labelOf(String(args[1] ?? '')));
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
   };
   const descriptor: ServiceDescriptor = {
     kind: 'fleet-node',
@@ -221,6 +259,7 @@ describe('install/uninstall/status/logs（fake runner）', () => {
 
   beforeEach(async () => {
     calls.length = 0;
+    loaded.clear();
     home = await mkdtemp(join(os.tmpdir(), 'svc-home-'));
     descriptor.heartbeatDir = home;
   });
@@ -236,7 +275,7 @@ describe('install/uninstall/status/logs（fake runner）', () => {
 
     calls.length = 0;
     const second = installService(descriptor, { platform: 'darwin', home, run: fakeRun, sha: 'sha1' });
-    expect(second.label).toBe('com.mebular.fleet-node');
+    expect(second.label).toBe(defaultLabel('fleet-node', 'com.mebular', home));
     expect(calls.some((c) => c[1] === 'bootout')).toBe(true);
     expect(calls.some((c) => c[1] === 'bootstrap')).toBe(true);
   });
@@ -351,14 +390,33 @@ describe('install/uninstall/status/logs（fake runner）', () => {
 describe('一键重启（C：restart 计划/执行，命令可注入）', () => {
   let home: string;
   const calls: string[][] = [];
+  // 模拟 launchd：print 仅对已加载 label 返回 0（供归属校验）。
+  const loaded = new Set<string>();
+  const printFor = (label: string, ownerHome: string): string => `gui/501/${label} = {
+\tpath = ${ownerHome}/Library/LaunchAgents/${label}.plist
+\tworking directory = ${ownerHome}
+\tenvironment = {
+\t\tMEBULAR_HOME => ${ownerHome}
+\t}
+}`;
   const fakeRun = (cmd: string, args: readonly string[]): RunResult => {
     calls.push([cmd, ...args]);
+    if (cmd !== 'launchctl') return { code: 0, stdout: '', stderr: '' };
+    if (args[0] === 'print') {
+      const owner = String(args[1] ?? '').split('/').pop() ?? '';
+      return loaded.has(owner) ? { code: 0, stdout: printFor(owner, home), stderr: '' } : { code: 1, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'bootstrap') {
+      loaded.add(String(args[2] ?? '').split('/').pop()?.replace(/\.plist$/, '') ?? '');
+    }
+    if (args[0] === 'bootout') loaded.delete(String(args[1] ?? '').split('/').pop() ?? '');
     return { code: 0, stdout: '', stderr: '' };
   };
   const descriptor: ServiceDescriptor = { kind: 'mebular-serve', args: ['/opt/cli.js', 'serve'], heartbeatDir: '' };
 
   beforeEach(async () => {
     calls.length = 0;
+    loaded.clear();
     home = await mkdtemp(join(os.tmpdir(), 'svc-restart-'));
     descriptor.heartbeatDir = home;
   });
@@ -367,7 +425,7 @@ describe('一键重启（C：restart 计划/执行，命令可注入）', () => 
   });
 
   it('未注册为服务 → 不给平台命令，给手动指引（绝不盲发 kickstart）', () => {
-    const plan = restartPlanFor(descriptor, { platform: 'darwin', home });
+    const plan = restartPlanFor(descriptor, { platform: 'darwin', home, run: fakeRun });
     expect(plan.registered).toBe(false);
     expect(plan.commands).toEqual([]);
     expect(plan.manual).toMatch(/未注册为服务/);
@@ -379,23 +437,24 @@ describe('一键重启（C：restart 计划/执行，命令可注入）', () => 
 
   it('darwin：launchctl kickstart -k gui/<uid>/<label>；linux：systemctl --user restart <unit>；win32：End+Run', () => {
     installService(descriptor, { platform: 'darwin', home, run: fakeRun, sha: 's' });
-    const darwin = restartPlanFor(descriptor, { platform: 'darwin', home });
+    const darwin = restartPlanFor(descriptor, { platform: 'darwin', home, run: fakeRun });
     expect(darwin.registered).toBe(true);
     const darwinCmd = darwin.commands[0] ?? [];
     expect(darwinCmd[0]).toBe('launchctl');
-    expect(darwinCmd.slice(1)).toEqual(['kickstart', '-k', expect.stringMatching(/^gui\/\d+\/com\.mebular\.mebular-serve$/)]);
+    expect(darwinCmd.slice(1, 3)).toEqual(['kickstart', '-k']);
+    expect(darwinCmd[3]).toMatch(new RegExp(`^gui/\\d+/${defaultLabel('mebular-serve', 'com.mebular', home).replace(/\./g, '\\.')}$`));
     calls.length = 0;
     const runDarwin = restartService(descriptor, { platform: 'darwin', home, run: fakeRun });
     expect(runDarwin.ok).toBe(true);
     expect(runDarwin.executed).toBe(true);
-    expect(calls[0]?.slice(0, 3)).toEqual(['launchctl', 'kickstart', '-k']);
+    expect(calls.some((c) => c[0] === 'launchctl' && c[1] === 'kickstart' && c[2] === '-k')).toBe(true);
 
     installService(descriptor, { platform: 'linux', home, run: fakeRun, sha: 's' });
-    const linux = restartPlanFor(descriptor, { platform: 'linux', home });
+    const linux = restartPlanFor(descriptor, { platform: 'linux', home, run: fakeRun });
     expect(linux.commands[0]).toEqual(['systemctl', '--user', 'restart', systemdUnitFileName('mebular-serve')]);
 
     installService(descriptor, { platform: 'win32', home, run: fakeRun, sha: 's' });
-    const win = restartPlanFor(descriptor, { platform: 'win32', home });
+    const win = restartPlanFor(descriptor, { platform: 'win32', home, run: fakeRun });
     expect(win.commands).toEqual([['schtasks', '/End', '/TN', 'mebular-serve'], ['schtasks', '/Run', '/TN', 'mebular-serve']]);
     calls.length = 0;
     restartService(descriptor, { platform: 'win32', home, run: fakeRun });
@@ -433,5 +492,232 @@ describe('默认 home 分支（不传 home → os.homedir）', () => {
     expect(unitFilePath('darwin', { kind: 'fleet-node', label: 'L' })).toBe(join(h, 'Library', 'LaunchAgents', 'L.plist'));
     expect(unitFilePath('linux', { kind: 'fleet-node', label: 'L' })).toBe(join(h, '.config', 'systemd', 'user', 'mebular-fleet-node.service'));
     expect(unitFilePath('win32', { kind: 'fleet-node', label: 'L' })).toBe(join(h, '.mebular', 'services', 'tasks', 'fleet-node.xml'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F-SVC-1：服务身份隔离（跨 home 劫持的根治）
+// ---------------------------------------------------------------------------
+
+describe('F-SVC-1：服务身份含 home 维度（纯函数）', () => {
+  it('label = 旧标签 + home 派生后缀；同 home 稳定、不同 home 互异', () => {
+    expect(legacyLabel('mebular-serve')).toBe('com.mebular.mebular-serve');
+    expect(defaultLabel('mebular-serve')).toBe('com.mebular.mebular-serve');
+    expect(homeKey('/a/b')).toBe(homeKey('/a/b/'));
+    expect(homeKey('/a/b')).not.toBe(homeKey('/a/c'));
+    const labelA = defaultLabel('mebular-serve', 'com.mebular', '/a/b');
+    const labelB = defaultLabel('mebular-serve', 'com.mebular', '/a/c');
+    expect(labelA).toBe(`com.mebular.mebular-serve.${homeKey('/a/b')}`);
+    expect(labelA).not.toBe(labelB);
+    expect(labelA).toMatch(/^com\.mebular\.mebular-serve\.[0-9a-f]{12}$/);
+    expect(labelA.startsWith(legacyLabel('mebular-serve') + '.')).toBe(true);
+  });
+});
+
+describe('F-SVC-1：launchctl print 解析与归属判定（纯函数）', () => {
+  const jobText = (homeDir: string, label = 'com.mebular.mebular-serve'): string => `gui/501/${label} = {
+\tactive count = 1
+\tpath = ${homeDir}/Library/LaunchAgents/${label}.plist
+\ttype = LaunchAgent
+\tstate = running
+\tprogram = /usr/bin/node
+\targuments = {
+\t\t/usr/bin/node
+\t\t/opt/cli.js
+\t\tserve
+\t\t--port
+\t\t7331
+\t}
+\tworking directory = ${homeDir}
+\tenvironment = {
+\t\tMEBULAR_HOME => ${homeDir}
+\t\tMEBULAR_SERVICE_KIND => mebular-serve
+\t\tPATH => /usr/bin:/bin
+\t}
+}`;
+
+  it('解析 path/program/arguments/environment/working directory', () => {
+    const parsed = parseLaunchdPrint(jobText('/Users/u/.mebular'));
+    expect(parsed.program).toBe('/usr/bin/node');
+    expect(parsed.arguments).toEqual(['/usr/bin/node', '/opt/cli.js', 'serve', '--port', '7331']);
+    expect(parsed.environment.MEBULAR_HOME).toBe('/Users/u/.mebular');
+    expect(parsed.workingDirectory).toBe('/Users/u/.mebular');
+    expect(parsed.path).toBe('/Users/u/.mebular/Library/LaunchAgents/com.mebular.mebular-serve.plist');
+  });
+
+  it('归属：MEBULAR_HOME / working directory / plist 路径 任一匹配即本 home', () => {
+    expect(jobBelongsToHome(parseLaunchdPrint(jobText('/Users/u/.mebular')), '/Users/u/.mebular')).toBe(true);
+    expect(jobBelongsToHome(parseLaunchdPrint(jobText('/Users/u/.mebular')), '/Users/u/sandbox')).toBe(false);
+    // 仅 plist 路径命中
+    const onlyPath = 'gui/501/L = {\n\tpath = /Users/u/.mebular/Library/LaunchAgents/L.plist\n}';
+    expect(jobBelongsToHome(parseLaunchdPrint(onlyPath), '/Users/u/.mebular')).toBe(true);
+    // 前缀相似但非同一 home：不匹配（避免 /a/.mebular 误吞 /a/.mebular-x）
+    expect(jobBelongsToHome(parseLaunchdPrint(jobText('/Users/u/.mebular-x')), '/Users/u/.mebular')).toBe(false);
+  });
+
+  it('无法判定 → 不归属（保守：绝不当 running）；空输入安全', () => {
+    expect(jobBelongsToHome(parseLaunchdPrint(''), '/x')).toBe(false);
+    expect(jobBelongsToHome(null, '/x')).toBe(false);
+    expect(describeJobOwner(parseLaunchdPrint(jobText('/Users/u/.mebular')))).toBe('/Users/u/.mebular');
+    expect(describeJobOwner(parseLaunchdPrint(''))).toBeNull();
+  });
+
+  it('environment 也接受老式 `=` 写法', () => {
+    const out = 'gui/501/L = {\n\tenvironment = {\n\t\tMEBULAR_HOME = /h\n\t}\n}';
+    expect(parseLaunchdPrint(out).environment.MEBULAR_HOME).toBe('/h');
+  });
+});
+
+describe('F-SVC-1：跨 home 隔离（install/status/restart，fake runner）', () => {
+  let homeA: string;
+  let homeB: string;
+  const calls: string[][] = [];
+  const loaded = new Map<string, string>(); // label -> owner home
+  const labelOf = (value: string): string => value.split('/').pop() ?? '';
+  const printFor = (label: string, ownerHome: string): string => `gui/501/${label} = {
+\tpath = ${ownerHome}/Library/LaunchAgents/${label}.plist
+\tworking directory = ${ownerHome}
+\tenvironment = {
+\t\tMEBULAR_HOME => ${ownerHome}
+\t}
+}`;
+  const run = (cmd: string, args: readonly string[]): RunResult => {
+    calls.push([cmd, ...args]);
+    if (cmd !== 'launchctl') return { code: 0, stdout: 'active', stderr: '' };
+    if (args[0] === 'print') {
+      const label = labelOf(String(args[1] ?? ''));
+      const owner = loaded.get(label);
+      return owner === undefined ? { code: 1, stdout: '', stderr: 'not found' } : { code: 0, stdout: printFor(label, owner), stderr: '' };
+    }
+    if (args[0] === 'bootstrap') {
+      const plist = String(args[2] ?? '');
+      const label = labelOf(plist).replace(/\.plist$/, '');
+      loaded.set(label, plist.includes(homeB) ? homeB : homeA);
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    if (args[0] === 'bootout') {
+      loaded.delete(labelOf(String(args[1] ?? '')));
+      return { code: 0, stdout: '', stderr: '' };
+    }
+    return { code: 0, stdout: '', stderr: '' };
+  };
+  const desc = (homeDir: string): ServiceDescriptor => ({ kind: 'mebular-serve', args: ['/opt/cli.js', 'serve'], heartbeatDir: homeDir });
+  const labelA = (): string => defaultLabel('mebular-serve', 'com.mebular', homeA);
+  const labelB = (): string => defaultLabel('mebular-serve', 'com.mebular', homeB);
+
+  beforeEach(async () => {
+    calls.length = 0;
+    loaded.clear();
+    homeA = await mkdtemp(join(os.tmpdir(), 'svc-A-'));
+    homeB = await mkdtemp(join(os.tmpdir(), 'svc-B-'));
+  });
+  afterEach(async () => {
+    await rm(homeA, { recursive: true, force: true, maxRetries: 10, retryDelay: 30 });
+    await rm(homeB, { recursive: true, force: true, maxRetries: 10, retryDelay: 30 });
+  });
+
+  it('不同 home → 不同 label；两个 home 各自 install 可共存，互不顶替', () => {
+    const a = installService(desc(homeA), { platform: 'darwin', home: homeA, run, sha: 's' });
+    calls.length = 0; // 只观察 B 的 install 对 A 的影响
+    const b = installService(desc(homeB), { platform: 'darwin', home: homeB, run, sha: 's' });
+    expect(a.label).not.toBe(b.label);
+    expect(loaded.get(a.label)).toBe(homeA);
+    expect(loaded.get(b.label)).toBe(homeB);
+    // B 的 install 绝不 bootout A 的作业
+    const bootouts = calls.filter((c) => c[1] === 'bootout').map((c) => c[2]);
+    expect(bootouts).not.toContain(`gui/501/${a.label}`);
+  });
+
+  it('实例身份取自 MEBULAR_HOME（非落盘 home）：同 home 下不同 MEBULAR_HOME → 不同 label', () => {
+    const realHome = join(homeA, '.mebular');
+    const sandbox = join(homeA, 'sandbox-home');
+    const mk = (instanceHome: string): ServiceDescriptor => ({
+      kind: 'mebular-serve',
+      args: ['/opt/cli.js', 'serve'],
+      heartbeatDir: instanceHome,
+      env: { MEBULAR_HOME: instanceHome },
+    });
+    const r1 = installService(mk(realHome), { platform: 'darwin', home: homeA, run, sha: 's' });
+    const r2 = installService(mk(sandbox), { platform: 'darwin', home: homeA, run, sha: 's' });
+    expect(r1.label).toBe(defaultLabel('mebular-serve', 'com.mebular', realHome));
+    expect(r2.label).toBe(defaultLabel('mebular-serve', 'com.mebular', sandbox));
+    expect(r1.label).not.toBe(r2.label);
+    // 同一落盘 home（用户 home）下，两个实例的 plist 并存、互不顶替
+    expect(loaded.get(r1.label)).toBe(homeA);
+    expect(loaded.get(r2.label)).toBe(homeA);
+  });
+
+  it('status 归属校验：他人占旧全局 label → 本 home running=false 且 foreign=true（消除假阳性）', () => {
+    const legacy = legacyLabel('mebular-serve');
+    loaded.set(legacy, homeB);
+    loaded.set(labelB(), homeB);
+    const statusA = serviceStatus(desc(homeA), { platform: 'darwin', home: homeA, run });
+    expect(statusA.running).toBe(false);
+    expect(statusA.foreign).toBe(true);
+    expect(statusA.foreignOwner).toBe(homeB);
+    const statusB = serviceStatus(desc(homeB), { platform: 'darwin', home: homeB, run });
+    expect(statusB.running).toBe(true);
+    expect(statusB.foreign).toBe(false);
+  });
+
+  it('install 护栏：旧全局 label 被他人占用 → 不 bootout 他人，只装本 home 专属 label 并警告', () => {
+    const legacy = legacyLabel('mebular-serve');
+    loaded.set(legacy, homeA);
+    const res = installService(desc(homeB), { platform: 'darwin', home: homeB, run, sha: 's' });
+    expect(res.ok).toBe(true);
+    expect(res.warning).toMatch(/另一 home|他人/);
+    expect(loaded.get(legacy)).toBe(homeA); // 他人作业原样保留
+    expect(calls.some((c) => c[0] === 'launchctl' && c[1] === 'bootout' && c[2] === `gui/501/${legacy}`)).toBe(false);
+    expect(loaded.get(res.label)).toBe(homeB);
+  });
+
+  it('install 拒绝：本 home 新标签被他人作业占用 → ok=false/foreign，绝不 bootout', () => {
+    loaded.set(labelA(), homeB);
+    const res = installService(desc(homeA), { platform: 'darwin', home: homeA, run, sha: 's' });
+    expect(res.ok).toBe(false);
+    expect(res.foreign).toBe(true);
+    expect(res.error).toBe('foreign_job');
+    expect(loaded.get(labelA())).toBe(homeB);
+    expect(calls.some((c) => c[1] === 'bootout' && c[2] === `gui/501/${labelA()}`)).toBe(false);
+  });
+
+  it('迁移：旧全局 label 属本 home → 一条 install 完成（bootout 旧 + 装新），保留 KeepAlive/RunAtLoad', async () => {
+    const legacy = legacyLabel('mebular-serve');
+    loaded.set(legacy, homeA);
+    const legacyUnit = unitFilePath('darwin', { kind: 'mebular-serve', label: legacy }, homeA);
+    await mkdir(join(homeA, 'Library', 'LaunchAgents'), { recursive: true });
+    await writeFile(legacyUnit, '<plist/>');
+    const res = installService(desc(homeA), { platform: 'darwin', home: homeA, run, sha: 's' });
+    expect(res.ok).toBe(true);
+    expect(res.migratedFrom).toBe(legacy);
+    expect(loaded.has(legacy)).toBe(false); // 旧作业已卸（仅因确属本 home）
+    expect(loaded.get(res.label)).toBe(homeA); // 新作业已装
+    const plist = await readFile(res.unitPath, 'utf-8');
+    expect(plist).toContain('<key>KeepAlive</key>');
+    expect(plist).toContain('<key>RunAtLoad</key>');
+    expect(plist).toContain('<true/>');
+    await expect(readFile(legacyUnit, 'utf-8')).rejects.toThrow(); // 旧 plist 已清
+  });
+
+  it('restart：他人作业 → 不发 kickstart（绝不重启他人）', async () => {
+    loaded.set(labelA(), homeB);
+    await mkdir(join(homeA, 'Library', 'LaunchAgents'), { recursive: true });
+    await writeFile(unitFilePath('darwin', { kind: 'mebular-serve', label: labelA() }, homeA), '<plist/>');
+    const plan = restartPlanFor(desc(homeA), { platform: 'darwin', home: homeA, run });
+    expect(plan.registered).toBe(false);
+    expect(plan.commands).toEqual([]);
+    expect(plan.manual).toMatch(/另一 home|占用/);
+    calls.length = 0;
+    const result = restartService(desc(homeA), { platform: 'darwin', home: homeA, run });
+    expect(result.executed).toBe(false);
+    expect(calls.some((c) => c[1] === 'kickstart')).toBe(false);
+  });
+
+  it('自动重启绝不安装：未注册 → 计划为空、无 bootstrap、不写 plist', async () => {
+    const plan = restartPlanFor(desc(homeA), { platform: 'darwin', home: homeA, run });
+    expect(plan.registered).toBe(false);
+    expect(plan.commands).toEqual([]);
+    expect(calls.some((c) => c[1] === 'bootstrap')).toBe(false);
+    await expect(stat(unitFilePath('darwin', { kind: 'mebular-serve', label: labelA() }, homeA))).rejects.toThrow();
   });
 });

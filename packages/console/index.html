@@ -119,6 +119,8 @@
           <div class="view-head">
             <h2>连接 AI 助手</h2>
             <span class="view-head-sub">CONNECT</span>
+            <!-- R-1 小-10：仅桌面壳（preload 注入 openWizard）显示 -->
+            <button id="connect-back-wizard" class="btn btn-small" type="button" hidden>← 返回向导</button>
           </div>
           <div id="service-card" class="connect-card crt-surface"></div>
           <p class="panel-note muted">接入只会**合并** <code>mebular</code> 这一条：写入前自动备份原配置（<code>.bak-时间</code>）、原子写入、重复点「接入」不会重复改；配置无法解析时**不会动**它，会提示你手动合并并给出片段。</p>
@@ -248,6 +250,8 @@
         <div class="provision-restart-cmd">
           <code id="provision-restart-command"></code>
           <button id="provision-restart-copy" class="btn btn-small btn-crt" type="button">复制命令</button>
+          <!-- R-1 高-4：桌面壳下用一键 IPC 重启替代终端命令（由 console.js 切换显示） -->
+          <button id="provision-restart-shell" class="btn btn-crt" type="button" hidden>重启守护</button>
         </div>
         <p class="muted" id="provision-restart-hint"></p>
       </div>

@@ -15,7 +15,7 @@ import {
 import { buildHandlerTable, diagnostics } from './ipc.mjs';
 import { iconDataUrl } from './tray-icons.mjs';
 import {
-  computeWizardState, deepLinks, invitePlan, inviteText, parseInviteOutput, isLoopbackUrl,
+  computeWizardState, deepLinks, inviteText, inviteViaApi, isLoopbackUrl,
 } from './wizard.mjs';
 import { readDaemonLogs } from './logs.mjs';
 
@@ -132,6 +132,15 @@ function spawnChild(exec, args, opts) {
 
 // ---------- 窗口 ----------
 
+/** R-1 高-4：壳加载控制台一律带 ?shell=desktop（控制台据此收编终端指令/显示返回向导）。 */
+function shellConsoleUrl() {
+  return `${consoleUrl(httpConf())}?shell=desktop`;
+}
+
+function shellDeepLink(url) {
+  return `${url}${url.includes('?') ? '&' : '?'}shell=desktop`;
+}
+
 function loadingHtml(message) {
   return `data:text/html;charset=utf-8,${encodeURIComponent(
     `<!doctype html><meta charset="utf-8"><title>Mebular</title>
@@ -173,7 +182,7 @@ async function showConsoleWithRetry() {
   updateTray();
   if (!win || win.isDestroyed()) return;
   if (ok) {
-    await safeLoad(consoleUrl(http));
+    await safeLoad(shellConsoleUrl());
   } else {
     await safeLoad(loadingHtml('Mebular 未就绪：请查看日志，或点托盘「重启」重试。'));
   }
@@ -181,7 +190,8 @@ async function showConsoleWithRetry() {
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1180,
+    // R-1 小-12：默认 1280（1180 顶栏临界拥挤）
+    width: 1280,
     height: 760,
     title: 'Mebular',
     backgroundColor: '#0b0f0d',
@@ -207,8 +217,8 @@ function updateTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: `${healthy ? '●' : '○'} ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}（${daemonMode ?? '—'}）`, enabled: false },
     { type: 'separator' },
-    { label: '打开控制台', click: () => { win?.show(); win?.focus(); if (win && !win.isDestroyed()) void safeLoad(consoleUrl(httpConf())); } },
-    { label: '连接 AI 助手', click: () => { win?.show(); win?.focus(); void safeLoad(deepLinks(httpConf()).assistants); } },
+    { label: '打开控制台', click: () => { win?.show(); win?.focus(); if (win && !win.isDestroyed()) void safeLoad(shellConsoleUrl()); } },
+    { label: '连接 AI 助手', click: () => { win?.show(); win?.focus(); void safeLoad(shellDeepLink(deepLinks(httpConf()).assistants)); } },
     { label: '添加设备', click: () => { win?.show(); win?.focus(); void safeLoad(wizardViewUrl()); } },
     { label: '启动', click: () => { void ensure().then(() => showConsoleWithRetry()); } },
     { label: '停止', click: () => { stopManaged(daemonChild); daemonChild = null; healthy = false; updateTray(); } },
@@ -258,19 +268,14 @@ async function installServiceDirect() {
   }
 }
 
-/** 邀请：优先 fleet invite（QR/文本）；qrcode 缺失时给文本令牌。**主进程执行，有界**。 */
+/**
+ * 邀请（R-1 中-8）：与控制台同源 `POST /admin/api/invite`（主进程直调，CSRF 头在 wizard.mjs 处理）。
+ * 不再走 `fleet invite` CLI —— fresh home 无 fleet.config.json 时 CLI 必 ENOENT。
+ */
 async function createInvite() {
-  const fleetBin = join(cliBin, '..', '..', '..', 'fleet', 'dist', 'cli.js');
-  const { command, args, cwd } = invitePlan({ fleetBin, home, device: process.env.MEBULAR_DEVICE_NAME });
-  try {
-    const { spawnSync } = await import('node:child_process');
-    const res = spawnSync(command, args, { cwd, timeout: 20000, encoding: 'utf-8', env: { ...process.env, MEBULAR_HOME: home } });
-    const parsed = parseInviteOutput(`${res.stdout ?? ''}\n${res.stderr ?? ''}`);
-    lastInviteCreated = Boolean(parsed.token);
-    return { ...parsed, text: inviteText(parsed), raw: String(res.stdout ?? '').trim().slice(0, 400) };
-  } catch (error) {
-    return { token: null, qrSvg: null, endpoint: null, warning: `邀请失败：${error?.message ?? error}`, text: null };
-  }
+  const res = await inviteViaApi(fetch, httpConf());
+  lastInviteCreated = Boolean(res.token);
+  return { ...res, text: inviteText(res), raw: null };
 }
 
 // ---------- IPC（白名单） ----------
@@ -281,7 +286,7 @@ function registerIpc() {
     'daemon:start': async () => { await ensure(); await showConsoleWithRetry(); return { mode: daemonMode }; },
     'daemon:stop': () => ({ stopped: stopManaged(daemonChild) }),
     'daemon:restart': async () => { await restart(); return { mode: daemonMode }; },
-    'console:open': () => { win?.show(); win?.focus(); return { url: consoleUrl(httpConf()) }; },
+    'console:open': async () => { win?.show(); win?.focus(); await safeLoad(shellConsoleUrl()); return { url: shellConsoleUrl() }; },
     'logs:open': async () => { await shell.openPath(join(home, 'serve.log')); return { path: join(home, 'serve.log') }; },
     'app:diagnostics': () => diagnostics({ appVersion: APP_VERSION, electronVersion: process.versions.electron, mode: daemonMode, home, http: httpConf(), healthy }),
     // M2：向导 / 服务托管（主进程直调，不经 HTTP 写端点）/ 日志 / 邀请 / 深链
@@ -294,7 +299,7 @@ function registerIpc() {
       return readDaemonLogs({ home, service: svc, descriptor: serviceDescriptorFor({ home, cliBin, http: httpConf() }) });
     },
     'invite:create': async () => createInvite(),
-    'deep:assistants': async () => { await safeLoad(deepLinks(httpConf()).assistants); return { url: deepLinks(httpConf()).assistants }; },
+    'deep:assistants': async () => { await safeLoad(shellDeepLink(deepLinks(httpConf()).assistants)); return { url: shellDeepLink(deepLinks(httpConf()).assistants) }; },
     'deep:device': async () => { await safeLoad(wizardViewUrl()); return { url: wizardFileUrl() }; },
   });
   for (const [channel, handler] of Object.entries(table)) ipcMain.handle(channel, handler);

@@ -85,8 +85,20 @@ const electronPath = await resolveElectronBinary();
 if (!electronPath) {
   console.log('  ⚠ 未找到 electron 二进制（可能 ELECTRON_SKIP_BINARY_DOWNLOAD=1）→ 跳过二进制冒烟');
 } else {
-  const version = spawnSync(electronPath, ['--version'], { timeout: 20000, encoding: 'utf-8' });
-  check('electron --version 可执行（有界 20s）', version.status === 0 && /v\d+\.\d+/.test(String(version.stdout)), String(version.stdout).trim());
+  // 无头安全：用 ELECTRON_RUN_AS_NODE 打印 Electron 版本（Linux CI 无显示器时 `--version` 会失败）
+  const versionProbe = spawnSync(electronPath, ['-e', 'console.log("v"+process.versions.electron)'], {
+    timeout: 20000, encoding: 'utf-8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+  });
+  const versionText = String(versionProbe.stdout).trim();
+  check('Electron 可执行且版本可读（无头安全；ELECTRON_RUN_AS_NODE）',
+    versionProbe.status === 0 && /^v\d+\.\d+/.test(versionText), `${versionText} ${String(versionProbe.stderr).trim().slice(0, 80)}`);
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    const version = spawnSync(electronPath, ['--version'], { timeout: 20000, encoding: 'utf-8' });
+    check('electron --version 可执行（macOS/Windows；有界 20s）',
+      version.status === 0 && /v\d+\.\d+/.test(String(version.stdout)), String(version.stdout).trim());
+  } else {
+    console.log('  · Linux：跳过 `electron --version`（无显示器时失败属预期；已用无头安全探测替代）');
+  }
 
   // 4) ELECTRON_RUN_AS_NODE：Electron 自带 Node 可加载 core（§2 风险 2；需仓库依赖已装+已 build）
   //    （不 import bin/mebular.mjs：bin 会执行 CLI；改用 core 入口验证 ABI/依赖可加载）

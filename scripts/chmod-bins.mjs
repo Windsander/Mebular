@@ -7,6 +7,9 @@
 //
 // 覆盖：根 package.json 的 `bin` + 各 workspace 包的 `bin`（本仓为 packages/fleet）。
 // 仅用 Node 内建 fs（Windows/Linux/macOS 通用）；Windows 上 chmod 近似无效，忽略失败。
+//
+// **输出必须走 stderr**：本脚本会作为 `prepare`（`npm run build` 的一步）在
+// `npm pack --json` 时执行，stdout 必须是纯 JSON（同 scripts/gen-fleet-version.mjs）。
 
 import { chmodSync, existsSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
@@ -39,9 +42,9 @@ for (const file of targets) {
   try {
     chmodSync(file, 0o755);
     changed += 1;
-    console.log(`[chmod-bins] +x ${relative(ROOT, file)}`);
+    process.stderr.write(`[chmod-bins] +x ${relative(ROOT, file)}\n`);
   } catch (error) {
-    console.warn(`[chmod-bins] 跳过 ${relative(ROOT, file)}：${String(error?.message ?? error)}`);
+    process.stderr.write(`[chmod-bins] 跳过 ${relative(ROOT, file)}：${String(error?.message ?? error)}\n`);
   }
 }
-console.log(`[chmod-bins] 完成（${targets.size} 个入口，补 +x ${changed} 个）`);
+process.stderr.write(`[chmod-bins] 完成（${targets.size} 个入口，补 +x ${changed} 个）\n`);

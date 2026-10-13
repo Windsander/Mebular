@@ -12,6 +12,15 @@ export const IPC_CHANNELS = Object.freeze([
   'console:open',
   'logs:open',
   'app:diagnostics',
+  // M2：三步向导 / 服务托管（主进程直调，不经 HTTP 写端点）/ 日志页 / 邀请
+  'wizard:state',
+  'wizard:step',
+  'service:status',
+  'service:install',
+  'logs:read',
+  'invite:create',
+  'deep:assistants',
+  'deep:device',
 ]);
 
 export function isAllowedChannel(channel) {

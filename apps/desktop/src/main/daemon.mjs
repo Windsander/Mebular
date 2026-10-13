@@ -79,7 +79,7 @@ export function serviceEnabledFor(service, home) {
   }
 }
 
-function descriptor({ home, cliBin, execPath, http }) {
+export function serviceDescriptorFor({ home, cliBin, execPath, http }) {
   const listenArgs = Number.isInteger(http?.port) && http.port > 0 ? ['--port', String(http.port)] : [];
   return {
     kind: SERVICE_KIND,
@@ -109,7 +109,7 @@ export async function ensureDaemon({
   env = process.env,
 } = {}) {
   if (await probeHealth(fetchImpl, http)) return { mode: 'reused', home, child: null };
-  const desc = descriptor({ home, cliBin, execPath, http });
+  const desc = serviceDescriptorFor({ home, cliBin, execPath, http });
   if (serviceEnabledFor(service, home)) {
     service.restartService(desc, { home });
     return { mode: 'service', home, child: null };

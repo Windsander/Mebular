@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <!-- 安全：仅本地渲染；无内联脚本执行外部内容；CSP 限制为自身 + 回环 -->
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'none'" />
+  <title>Mebular · 首次上手</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font: 14px -apple-system, system-ui, "PingFang SC", sans-serif; background: #0b0f0d; color: #d7ffe9; }
+    header { padding: 14px 20px; border-bottom: 1px solid #1e2b25; display: flex; align-items: center; gap: 12px; }
+    header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+    header .spacer { flex: 1; }
+    button { background: #123a2b; color: #c9ffe4; border: 1px solid #2c6b50; border-radius: 6px; padding: 7px 12px; cursor: pointer; font-size: 13px; }
+    button:hover { background: #17503a; }
+    button.ghost { background: transparent; }
+    main { padding: 18px 20px 40px; display: grid; gap: 14px; max-width: 900px; }
+    .step { border: 1px solid #1e2b25; border-radius: 8px; padding: 14px; }
+    .step.done { border-color: #2c6b50; }
+    .step h2 { font-size: 14px; margin: 0 0 6px; }
+    .muted { color: #8fb8a6; font-size: 12px; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+    code, pre { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+    pre { background: #0f1613; border: 1px solid #1e2b25; border-radius: 6px; padding: 10px; overflow: auto; max-height: 280px; white-space: pre-wrap; }
+    .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid #2c6b50; color: #9dffcf; }
+    .badge.todo { border-color: #6b5a2c; color: #ffd479; }
+    #qr svg { background: #fff; border-radius: 8px; padding: 8px; max-width: 220px; height: auto; }
+    #log { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Mebular · 首次上手</h1>
+    <span id="daemon-badge" class="badge todo">检查中…</span>
+    <span class="spacer"></span>
+    <button id="open-console" class="ghost">打开控制台</button>
+  </header>
+
+  <main>
+    <section class="step" id="step-start">
+      <h2>① 启动 Mebular</h2>
+      <p class="muted" id="start-detail">正在检测守护…</p>
+      <div class="row">
+        <button id="btn-start">启动</button>
+        <button id="btn-install" class="ghost">让 Mebular 常驻</button>
+        <button id="btn-restart" class="ghost">重启</button>
+      </div>
+    </section>
+
+    <section class="step" id="step-assistants">
+      <h2>② 连接 AI 助手</h2>
+      <p class="muted" id="assistants-detail">—</p>
+      <div class="row">
+        <button id="btn-assistants">打开控制台 · 连接 AI 助手</button>
+      </div>
+    </section>
+
+    <section class="step" id="step-device">
+      <h2>③ 添加设备</h2>
+      <p class="muted">另一台设备装同一个 Mebular App，扫码（或粘贴令牌）即可加入。</p>
+      <div class="row">
+        <button id="btn-invite">生成邀请</button>
+        <button id="btn-copy" class="ghost" hidden>复制令牌</button>
+      </div>
+      <div id="qr"></div>
+      <pre id="invite-text" hidden></pre>
+      <p class="muted" id="invite-msg"></p>
+    </section>
+
+    <section class="step" id="step-logs">
+      <h2>日志</h2>
+      <p class="muted" id="logs-source">—</p>
+      <div class="row">
+        <button id="btn-logs">刷新日志</button>
+        <button id="btn-logs-open" class="ghost">打开日志文件</button>
+      </div>
+      <pre id="log"></pre>
+    </section>
+  </main>
+
+  <script src="./wizard.js"></script>
+</body>
+</html>

@@ -19,6 +19,10 @@ import {
 } from '../../packages/fleet/src/index.js';
 import { mkEvent } from './helpers.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 const FIXTURE = join(process.cwd(), 'tests/fleet/fixtures/fake-agent.mjs');
 const node = (args: string[]): CommandAgent =>
   new CommandAgent({ command: process.execPath, baseArgs: [FIXTURE, ...args] });

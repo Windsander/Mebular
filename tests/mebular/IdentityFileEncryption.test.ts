@@ -8,6 +8,10 @@ import { readFile, rm } from 'fs/promises';
 import { Mebular } from '../../src/mebular.js';
 import { generateMasterKeyPair, masterPublicKeyBytes } from '../p2p/helpers.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 interface IdentityFileShape {
   deviceId: string;
   publicKeyHex: string;

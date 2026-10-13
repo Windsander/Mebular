@@ -14,6 +14,10 @@ import { IdentityManager } from '../../src/crypto/IdentityManager.js';
 import { ErrorCodes } from '../../src/errors.js';
 import type { Node } from '../../src/types/index.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 function sqliteAvailable(): boolean {
   const getBuiltin = (process as { getBuiltinModule?: (id: string) => unknown }).getBuiltinModule;
   if (typeof getBuiltin !== 'function') return false;

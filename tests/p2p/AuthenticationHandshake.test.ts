@@ -15,6 +15,10 @@ import {
   type TestIdentity,
 } from './helpers.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 describe('AuthenticationHandshake', () => {
   let master: CryptoKeyPair;
   let masterPub: Uint8Array;

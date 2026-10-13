@@ -19,6 +19,10 @@ import { describe, it, expect } from '@jest/globals';
 import { randomUUID } from 'node:crypto';
 import { derivePolicyState } from '../../src/sync/grantPolicy.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 type Entries = Parameters<typeof derivePolicyState>[0];
 type Entry = Entries[number];
 

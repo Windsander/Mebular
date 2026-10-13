@@ -28,7 +28,7 @@
     "access": "public"
   },
   "scripts": {
-    "prepack": "node ../../scripts/publish-manifest.mjs set",
+    "prepack": "node ../../scripts/chmod-bins.mjs && node ../../scripts/publish-manifest.mjs set",
     "postpack": "node ../../scripts/publish-manifest.mjs restore"
   },
   "dependencies": {

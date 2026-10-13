@@ -18,6 +18,10 @@ import {
 } from '../../packages/fleet/src/index.js';
 import { lifecycle, mkEvent, shuffle, mulberry32, endpoint } from './helpers.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 const SCENARIOS = 300;
 
 function groupByTask(events: readonly TaskEvent[]): Map<string, TaskEvent[]> {

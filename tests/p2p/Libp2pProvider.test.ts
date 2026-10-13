@@ -29,6 +29,10 @@ import {
   masterPublicKeyBytes,
 } from './helpers.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 // 可选依赖探测（收集期同步判定）：包缺失时集成用例记为 skip，而非静默通过。
 // 注意不能用 require.resolve：libp2p 系是纯 ESM 包，exports 不带 require 条件，
 // 会误报缺失；这里直接探测 node_modules 目录存在性。

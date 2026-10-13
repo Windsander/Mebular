@@ -20,6 +20,10 @@ import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
 import { SecureChannelSyncTransport } from '../../src/sync/protocol.js';
 import type { PeerId } from '../../src/p2p/P2PNetwork.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 const NS_POOL = ['default', 'ns-alpha', 'ns-beta'] as const;
 
 /** mulberry32：确定性 PRNG，保证失败可复现 */

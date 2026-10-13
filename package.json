@@ -58,7 +58,7 @@
     }
   },
   "scripts": {
-    "build": "node scripts/clean-dist.mjs && tsc && tsc -p packages/service/tsconfig.json && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs",
+    "build": "node scripts/clean-dist.mjs && tsc && tsc -p packages/service/tsconfig.json && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs && node scripts/chmod-bins.mjs",
     "build:fleet": "tsc -p packages/fleet/tsconfig.json",
     "build:service": "tsc -p packages/service/tsconfig.json",
     "prepare": "node scripts/prepare-install.mjs",

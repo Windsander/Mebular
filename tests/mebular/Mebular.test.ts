@@ -16,6 +16,10 @@ import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
 import { bytesToHex } from '../../src/p2p/handshake/AuthenticationHandshake.js';
 import type { SyncResult } from '../../src/sync/syncmgr/SyncManager.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 // 可选依赖探测：libp2p 系缺失时（npm 未安装可选依赖）真实装配用例记为 skip，
 // 与 tests/p2p/Libp2pProvider.test.ts 同一策略，避免 CI 可选依赖缺失时误报失败。
 function libp2pPackagesInstalled(): boolean {

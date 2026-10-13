@@ -8,9 +8,9 @@
 //
 // 前置：npm run build。
 
-import { spawn } from 'node:child_process';
-import { chmodSync, existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { spawn, spawnSync } from 'node:child_process';
+import { chmodSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtemp, writeFile, mkdir } from 'node:fs/promises';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -20,6 +20,7 @@ const CLI = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.u
 const FIXTURE = fileURLToPath(new URL('../tests/fleet/fixtures/fake-agent.mjs', import.meta.url));
 chmodSync(FIXTURE, 0o755);
 const IS_DARWIN = process.platform === 'darwin';
+const UID = String(process.getuid?.() ?? 0);
 
 const results = [];
 const skipped = [];
@@ -101,6 +102,50 @@ const root = await mkdtemp(join(tmpdir(), 'fleet-service-'));
 const svcEnv = { MEBULAR_SERVICE_HOME: join(root, 'home', '.mebular', 'services') };
 const runSvc = (args, t = 60000) => runCli(args, t, svcEnv);
 
+// F-HYGIENE-1：异常/信号退出清理（此前只删 temp，**从不 bootout**，故 macOS 上会残留
+// `com.mebular.fleet-node/worker.test-*` 作业与 $TMPDIR/fleet-service-*）。
+// 白名单：只认本脚本创建的测试标签；**绝不触碰真实作业**（如 com.mebular.mebular-serve*）。
+const TEST_LABEL_RE = /^com\.mebular\.(fleet-node|fleet-worker)\.test-[0-9a-z]+(-bad)?$/;
+const createdLabels = new Set();
+function registerLabel(label) {
+  if (TEST_LABEL_RE.test(label)) createdLabels.add(label);
+  return label;
+}
+/** 同步清理：bootout 白名单内的测试标签 + 删 temp。任何分支都不抛。 */
+function cleanupSync() {
+  if (IS_DARWIN) {
+    for (const label of createdLabels) {
+      if (!TEST_LABEL_RE.test(label)) continue; // 双保险：白名单外一律不 bootout
+      try {
+        spawnSync('launchctl', ['bootout', `gui/${UID}/${label}`], { stdio: 'ignore' });
+      } catch {
+        // ignore
+      }
+    }
+  }
+  createdLabels.clear();
+  try {
+    rmSync(root, { recursive: true, force: true });
+  } catch {
+    // ignore
+  }
+}
+let cleanedUp = false;
+async function cleanup() {
+  if (cleanedUp) return;
+  cleanedUp = true;
+  cleanupSync();
+}
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => {
+    try {
+      cleanupSync();
+    } finally {
+      process.exit(130);
+    }
+  });
+}
+
 try {
   console.log('== hermetic：service CLI 契约 ==');
   const H = join(root, 'home');
@@ -127,8 +172,9 @@ try {
     console.log('== macOS 真机：fleet-node/fleet-worker 服务 ==');
     const A = join(root, 'A');
     const B = join(root, 'B');
-    const labelNode = `com.mebular.fleet-node.test-${Date.now().toString(36)}`;
-    const labelWorker = `com.mebular.fleet-worker.test-${Date.now().toString(36)}`;
+    const labelNode = registerLabel(`com.mebular.fleet-node.test-${Date.now().toString(36)}`);
+    const labelWorker = registerLabel(`com.mebular.fleet-worker.test-${Date.now().toString(36)}`);
+    registerLabel(`${labelNode}-bad`); // 坏配置用例的标签（同样纳入白名单清理）
     const port = await freePort();
     const listen = `/ip4/127.0.0.1/tcp/${port}`;
 
@@ -231,8 +277,8 @@ try {
 } catch (error) {
   check('verify:fleet:service 未抛异常', false, { error: error?.message || String(error) });
 } finally {
-  // 清理 temp（服务均已在用例内卸载；launchd 单元在 H 下随删除消失）。
-  await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  // F-HYGIENE-1：bootout 本脚本创建的测试标签（白名单，绝不触碰真实作业）+ 删 temp。
+  await cleanup();
 }
 
 const failed = results.filter((r) => !r.ok);

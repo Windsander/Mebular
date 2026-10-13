@@ -18,16 +18,23 @@ export const STEP_TITLES = Object.freeze({
 /**
  * 计算向导状态（每步 done 由真实检测决定；current = 首个未完成步，全完成则 null）。
  * 入参均为「已探测结果」，本函数不发起 IO。
+ *
+ * 高-1（W-1）：步骤① done = daemonHealthy && !provisionRequired——
+ * 守护进程活着但处于引导/待重启态（/app/provision/status 200 且 provision===true）时
+ * 不算完成「启动」，current 停在 start 并给「建新/加入 →」CTA；404 = 正常态。
  */
-export function computeWizardState({ daemonHealthy, service, assistants, invite } = {}) {
+export function computeWizardState({ daemonHealthy, provisionRequired, provisioned, service, assistants, invite } = {}) {
   const steps = [
     {
       id: 'start',
       title: STEP_TITLES.start,
-      done: Boolean(daemonHealthy),
-      detail: service
-        ? { registered: Boolean(service.registered), running: Boolean(service.running), autostart: service.autostart ?? null }
-        : null,
+      done: Boolean(daemonHealthy) && !provisionRequired,
+      detail: {
+        provision: { required: Boolean(provisionRequired), provisioned: provisionRequired ? Boolean(provisioned) : null },
+        ...(service
+          ? { registered: Boolean(service.registered), running: Boolean(service.running), autostart: service.autostart ?? null }
+          : {}),
+      },
     },
     {
       id: 'assistants',

@@ -70,6 +70,23 @@ export async function probeHealth(fetchImpl, http = { host: '127.0.0.1', port: 7
   }
 }
 
+/**
+ * 引导/待重启探测（W-1 高-1 钩子）：GET /app/provision/status
+ *   200 且 provision===true → 引导态（provisioned:false＝待建新/加入；true＝已初始化待重启）
+ *   404 → 正常态（接口不挂载）；其他/异常 → 不阻断（守护健康探测另有 probeHealth）
+ */
+export async function probeProvision(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, timeoutMs = 1200) {
+  try {
+    const res = await fetchImpl(`http://${http.host}:${http.port}/app/provision/status`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res?.ok) return { required: false, provisioned: null };
+    const data = await res.json().catch(() => null);
+    if (data?.provision === true) return { required: true, provisioned: Boolean(data.provisioned) };
+    return { required: false, provisioned: null };
+  } catch {
+    return { required: false, provisioned: null };
+  }
+}
+
 /** 服务托管是否已登记（复用 @mebular/service 的注册判定）。 */
 export function serviceEnabledFor(service, home) {
   try {

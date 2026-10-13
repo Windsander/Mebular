@@ -80,6 +80,7 @@ $('#btn-restart')?.addEventListener('click', async () => { await api.restart(); 
 $('#btn-provision')?.addEventListener('click', () => { void api.openConsole(); });
 $('#btn-assistants')?.addEventListener('click', () => { void api.deepAssistants(); });
 $('#open-console')?.addEventListener('click', () => { void api.openConsole(); });
+$('#btn-skip')?.addEventListener('click', () => { void api.skipWizard(); });
 $('#btn-enter-console')?.addEventListener('click', () => { void api.openConsole(); });
 
 // ---------- ③ 添加设备：邀请（小-7：loading 禁用 + 已有令牌二次确认） ----------

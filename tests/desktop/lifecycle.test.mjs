@@ -1,0 +1,134 @@
+// R-1 PR-A · 壳层生命周期断言（纯逻辑；不启 GUI、不动真实 launchd / 真实 home）
+//
+// 高-1 向导完成态跨进程持久：③done = 曾生成邀请 ∨ 已知对端≥1（真实状态推导，非内存变量）；
+//       skipped/邀请标记持久化在 <home>/.desktop-state.json；完成 → 重启直达控制台。
+// 高-2 关窗生命周期：关窗=隐藏（守护不动）；托盘退出=唯一真退出，确认文案仅当壳托管守护时
+//       才说「将停止本机 Mebular 守护」；activate 重建/显示窗口。
+// 中-9 托盘菜单分组：导航 / 守护控制（停止·重启带确认）/ 诊断 / 登录时启动 / 退出。
+
+import { describe, it, expect } from '@jest/globals';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { computeWizardState, readDesktopState, writeDesktopState } from '../../apps/desktop/src/main/wizard.mjs';
+import { closeAction, quitConfirm, trayMenuModel, LOGIN_ITEM_ID } from '../../apps/desktop/src/main/lifecycle.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
+
+const doneStart = { daemonHealthy: true, service: { registered: true, running: true } };
+
+describe('R-1 高-1 ③done 真实状态推导（跨进程持久）', () => {
+  it('已知对端 ≥1 → ③done（无需内存里的邀请标记）', () => {
+    const s = computeWizardState({ ...doneStart, assistants: { connectedCount: 1 }, peers: { known: 1 } });
+    expect(s.steps.find((x) => x.id === 'device').done).toBe(true);
+    expect(s.complete).toBe(true);
+  });
+
+  it('持久化的邀请标记 → ③done（模拟重启后：内存归零、磁盘有记录）', () => {
+    const s = computeWizardState({ ...doneStart, assistants: { connectedCount: 1 }, wizard: { inviteCreated: true } });
+    expect(s.steps.find((x) => x.id === 'device').done).toBe(true);
+    expect(s.complete).toBe(true);
+  });
+
+  it('三无（无邀请/无对端/无标记）→ ③不 done、不 complete', () => {
+    const s = computeWizardState({ ...doneStart, assistants: { connectedCount: 1 } });
+    expect(s.steps.find((x) => x.id === 'device').done).toBe(false);
+    expect(s.complete).toBe(false);
+    expect(s.current).toBe('device');
+  });
+
+  it('桌面状态文件读写：inviteCreated / skipped 持久化（脏文件不炸）', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'mebular-desktop-state-'));
+    try {
+      expect(readDesktopState(home)).toEqual({});
+      writeDesktopState(home, { inviteCreated: true });
+      expect(readDesktopState(home)).toMatchObject({ inviteCreated: true });
+      writeDesktopState(home, { skipped: true });
+      expect(readDesktopState(home)).toMatchObject({ inviteCreated: true, skipped: true });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('用户跳过 → complete（重启直达控制台，不再回向导）', () => {
+    const s = computeWizardState({ ...doneStart, wizard: { skipped: true } });
+    expect(s.complete).toBe(true);
+    expect(s.skipped).toBe(true);
+  });
+});
+
+describe('R-1 高-2 关窗生命周期（决策纯函数）', () => {
+  it('未退出时关窗 → hide（守护不动）；退出中 → quit', () => {
+    expect(closeAction({ quitting: false })).toBe('hide');
+    expect(closeAction({ quitting: true })).toBe('quit');
+  });
+
+  it('退出确认：仅当壳确实托管守护（child）才说「将停止本机 Mebular 守护」', () => {
+    const child = quitConfirm({ daemonMode: 'child', hasManagedChild: true });
+    expect(child.message).toContain('将停止本机 Mebular 守护');
+    for (const mode of ['reused', 'service', null]) {
+      const plan = quitConfirm({ daemonMode: mode, hasManagedChild: false });
+      expect(plan.message).not.toContain('将停止本机 Mebular 守护');
+    }
+  });
+});
+
+describe('R-1 中-9 托盘菜单分组', () => {
+  const model = trayMenuModel({ healthy: true, daemonMode: 'child', loginOpenAtLogin: false });
+  const flat = model.map((i) => (i.type === 'separator' ? '|' : i.id ?? i.label));
+
+  it('分组顺序：导航 → 守护控制 → 诊断 → 登录时启动 → 退出', () => {
+    expect(flat).toEqual([
+      'status', '|',
+      'open-console', 'connect-assistants', 'add-device', 'open-wizard', '|',
+      'daemon-start', 'daemon-stop', 'daemon-restart', '|',
+      'open-logs', '|',
+      LOGIN_ITEM_ID, '|',
+      'quit',
+    ]);
+  });
+
+  it('停止/重启带确认标志；登录时启动为 checkbox 且回显当前值', () => {
+    const stop = model.find((i) => i.id === 'daemon-stop');
+    const restart = model.find((i) => i.id === 'daemon-restart');
+    const login = model.find((i) => i.id === LOGIN_ITEM_ID);
+    expect(stop.confirm).toBe(true);
+    expect(restart.confirm).toBe(true);
+    expect(login.type).toBe('checkbox');
+    expect(login.checked).toBe(false);
+    expect(trayMenuModel({ healthy: true, daemonMode: 'child', loginOpenAtLogin: true })
+      .find((i) => i.id === LOGIN_ITEM_ID).checked).toBe(true);
+  });
+
+  it('未运行态：状态行显示未运行，启动可用', () => {
+    const down = trayMenuModel({ healthy: false, daemonMode: null, loginOpenAtLogin: false });
+    expect(down.find((i) => i.id === 'status').label).toContain('未运行');
+  });
+});
+
+describe('R-1 高-2 薄壳接线（index.mjs 静态契约）', () => {
+  const mainSrc = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'main', 'index.mjs'), 'utf-8');
+
+  it('关窗被拦截为隐藏（close → preventDefault + hide），window-all-closed 不再 quit/停守护', () => {
+    expect(mainSrc).toMatch(/win\.on\('close'[\s\S]*?preventDefault\(\)[\s\S]*?hide\(\)/);
+    const allClosed = mainSrc.match(/window-all-closed'[\s\S]*?\}\);/)?.[0] ?? '';
+    expect(allClosed).not.toMatch(/app\.quit\(\)|stopManaged/);
+  });
+
+  it('activate → 重建/显示窗口；退出确认仅在 quitConfirm 判定后设 quitting', () => {
+    expect(mainSrc).toMatch(/app\.on\('activate'[\s\S]*?showWindow\(\)/);
+    expect(mainSrc).toMatch(/quitConfirm\(\{ daemonMode, hasManagedChild/);
+    expect(mainSrc).toMatch(/quitting = true;\s*app\.quit\(\)/);
+  });
+
+  it('停止后窗口内横幅「守护已停止（托盘可重启）」', () => {
+    expect(mainSrc).toContain('守护已停止（托盘可重启）');
+  });
+
+  it('托盘菜单由 trayMenuModel 驱动；登录时启动走 setLoginItemSettings', () => {
+    expect(mainSrc).toMatch(/trayMenuModel\(/);
+    expect(mainSrc).toMatch(/setLoginItemSettings\(\{ openAtLogin/);
+  });
+});

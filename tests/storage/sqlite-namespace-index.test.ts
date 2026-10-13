@@ -11,6 +11,10 @@ import { SqliteStorage } from '../../src/storage/SqliteStorage.js';
 import { MemoryStorage } from '../../src/storage/MemoryStorage.js';
 import type { Node, Event } from '../../src/types/index.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 interface SqliteRow {
   id: string;
   namespace: string | null;

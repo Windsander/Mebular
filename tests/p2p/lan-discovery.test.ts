@@ -11,6 +11,10 @@ import type { BonjourService, BonjourServiceInstance, BonjourServiceFactory, Con
 import { createDefaultBonjourFactory } from '../../src/p2p/discovery/bonjourDefault.js';
 import { createTestIdentity, type TestIdentity } from './helpers.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 const peerIdOf = (id: string): PeerId => ({ id, multihash: new TextEncoder().encode(id), pubKey: new TextEncoder().encode(id) });
 
 /**

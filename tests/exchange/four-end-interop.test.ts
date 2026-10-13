@@ -28,6 +28,10 @@ import {
 } from '../p2p/helpers.js';
 import { grant } from '../helpers/namespace.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 const HERMES_DIR = join(__dirname, 'fixtures', 'hermes');
 const OBSIDIAN_VAULT = join(process.cwd(), 'examples/obsidian-vault/vault');
 const LOG_JSONL = join(process.cwd(), 'examples/log-journal/data/journal.jsonl');

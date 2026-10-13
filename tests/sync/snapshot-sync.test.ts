@@ -13,6 +13,10 @@ import { IdentityManager } from '../../src/crypto/IdentityManager.js';
 import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
 import type { SyncResult } from '../../src/sync/syncmgr/SyncManager.js';
 
+import { useHeavyTimeout } from '../helpers/timeouts.js';
+// F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
+useHeavyTimeout();
+
 describe('G4 初始同步快照', () => {
   let dir: string;
   let hub: InMemoryHub;

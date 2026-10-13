@@ -2,6 +2,7 @@
 
 export * from './units.js';
 export * from './paths.js';
+export * from './launchd.js';
 export * from './heartbeat.js';
 export * from './manager.js';
 export * from './cli.js';

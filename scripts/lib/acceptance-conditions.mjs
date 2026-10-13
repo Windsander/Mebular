@@ -9,10 +9,18 @@
 
 import { setTimeout as delay } from 'node:timers/promises';
 
-/** onboard A：执行日志已 3 行提交、3 行完成、且结果前缀匹配（三条件同时成立才算完成）。 */
-export function onboardAgentDone(text) {
+/** 派发完成谓词：n 条提交、n 条完成、且结果前缀匹配（三者同时成立才算「收齐」）。 */
+export function agentResultsMatch(text, n) {
   const out = String(text ?? '');
-  return /"submitted":\s*3/.test(out) && /"done":\s*3/.test(out) && /"resultsMatch":\s*true/.test(out);
+  const count = String(n);
+  return new RegExp(`"submitted":\\s*${count}\\b`).test(out)
+    && new RegExp(`"done":\\s*${count}\\b`).test(out)
+    && /"resultsMatch":\s*true/.test(out);
+}
+
+/** onboard A：3 条收齐（`agentResultsMatch(text, 3)` 的具名别名）。 */
+export function onboardAgentDone(text) {
+  return agentResultsMatch(text, 3);
 }
 
 /** collab 1d-b 协商成功：任务到达 `done`（不接受 queued/pending/failed）。 */

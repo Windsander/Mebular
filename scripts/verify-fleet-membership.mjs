@@ -15,6 +15,7 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { agentResultsMatch } from './lib/acceptance-conditions.mjs';
 
 const CLI = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
 const FIXTURE = fileURLToPath(new URL('../tests/fleet/fixtures/fake-agent.mjs', import.meta.url));
@@ -111,9 +112,10 @@ try {
 
   const worker1 = startCli(['worker', '--dir', B, '--timeout-ms', '40000', '--interval-ms', '10']);
   const executed = await waitFor(() => lineCount(execB) >= N, 45000);
-  const aDone = await waitFor(() => /"submitted":\s*3/.test(node1.state.out), 45000);
+  // F-FLAKE-1：等**完整断言条件**（submitted+done+resultsMatch 同时成立），而非只等 submitted
+  const aDone = await waitFor(() => agentResultsMatch(node1.state.out, 3), 45000);
   check('① 成员 ∧ 授权 → B 执行 N 次', !!executed && lineCount(execB) === N, { lines: lineCount(execB) });
-  check('① A 收齐结果 resultsMatch', aDone && /"done":\s*3/.test(node1.state.out) && /"resultsMatch":\s*true/.test(node1.state.out), {});
+  check('① A 收齐结果 resultsMatch', aDone && agentResultsMatch(node1.state.out, 3), {});
   node1.child.kill('SIGKILL');
   worker1.child.kill('SIGKILL');
   await sleep(150);

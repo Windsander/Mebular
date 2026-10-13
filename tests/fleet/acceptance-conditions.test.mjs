@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  agentResultsMatch,
   onboardAgentDone,
   negotiationDone,
   negotiationLimit,
@@ -26,6 +27,16 @@ describe('F-FLAKE-1 onboard：必须等完整条件（submitted+done+resultsMatc
     expect(onboardAgentDone(partial)).toBe(false);      // 修复后的谓词不放行半成品
     expect(onboardAgentDone(withDone)).toBe(false);     // 结果未匹配也不算完成
     expect(onboardAgentDone(complete)).toBe(true);
+  });
+
+  it('agentResultsMatch(text, n)：n 可参数化，半成品/数量不符/未匹配 均否', () => {
+    const ok2 = '{"submitted": 2, "done": 2, "resultsMatch": true}';
+    expect(agentResultsMatch(ok2, 2)).toBe(true);
+    expect(agentResultsMatch(ok2, 3)).toBe(false);          // 数量不符
+    expect(agentResultsMatch('{"submitted": 2}', 2)).toBe(false); // 只有 submitted
+    expect(agentResultsMatch('{"submitted": 2, "done": 2, "resultsMatch": false}', 2)).toBe(false);
+    // 边界：`3` 不应匹配 `30`
+    expect(agentResultsMatch('{"submitted": 30, "done": 30, "resultsMatch": true}', 3)).toBe(false);
   });
 });
 
@@ -71,6 +82,15 @@ describe('F-FLAKE-1 源码锚点：verify 脚本按精确谓词做有界轮询�
     expect(onboard).toMatch(/await waitFor\(async \(\) => onboardAgentDone\(serveA\.state\.out\)/);
     // 旧写法：只等 `"submitted": 3` 就返回
     expect(onboard).not.toMatch(/waitFor\(async \(\) => \/"submitted":\\s\*3\/\.test\(serveA\.state\.out\)/);
+  });
+
+  it('grant / membership：同一反模式已修（等完整条件而非只等 submitted）', () => {
+    const grant = readFileSync(join(root, 'scripts', 'verify-fleet-grant.mjs'), 'utf-8');
+    const membership = readFileSync(join(root, 'scripts', 'verify-fleet-membership.mjs'), 'utf-8');
+    expect(grant).toMatch(/waitFor\(async \(\) => agentResultsMatch\(serveA\.state\.out, 3\)/);
+    expect(membership).toMatch(/waitFor\(\(\) => agentResultsMatch\(node1\.state\.out, 3\)/);
+    expect(grant).not.toMatch(/waitFor\(async \(\) => \/"submitted":\\s\*3\/\.test\(serveA\.state\.out\)/);
+    expect(membership).not.toMatch(/waitFor\(\(\) => \/"submitted":\\s\*3\/\.test\(node1\.state\.out\)/);
   });
 });
 

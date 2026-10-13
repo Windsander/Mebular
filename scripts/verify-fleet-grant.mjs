@@ -13,6 +13,7 @@ import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { agentResultsMatch } from './lib/acceptance-conditions.mjs';
 
 const CLI = fileURLToPath(new URL('../packages/fleet/dist/cli.js', import.meta.url));
 const FIXTURE = fileURLToPath(new URL('../tests/fleet/fixtures/fake-agent.mjs', import.meta.url));
@@ -178,9 +179,12 @@ try {
   const workB = startCli(['worker', '--dir', B, '--timeout-ms', '30000', '--interval-ms', '10']);
   const execLog = join(B, 'exec.jsonl');
   const gotN = await waitFor(async () => existsSync(execLog) && lineCount(execLog) >= N, 25000);
-  const aDone = await waitFor(async () => /"submitted":\s*3/.test(serveA.state.out), 25000);
+  // F-FLAKE-1：等**完整断言条件**（submitted+done+resultsMatch 同时成立），而非只等 submitted
+  const aDone = await waitFor(async () => agentResultsMatch(serveA.state.out, 3), 25000);
   check('仅图上 grant：B 收到并执行 N 次（fake agent）', gotN && lineCount(execLog) === N, { lines: existsSync(execLog) ? lineCount(execLog) : 0 });
-  check('仅图上 grant：A 收齐结果 resultsMatch', aDone && /"done":\s*3/.test(serveA.state.out) && /"resultsMatch":\s*true/.test(serveA.state.out), {});
+  check('仅图上 grant：A 收齐结果 resultsMatch', aDone && agentResultsMatch(serveA.state.out, 3), {
+    tail: serveA.state.out.split('\n').filter(Boolean).slice(-6).join(' | ').slice(0, 400),
+  });
 
   // S7：日志脱敏
   const secret = JSON.parse(readFileSync(join(A, 'master-key.json'), 'utf-8')).privateKeyPkcs8;

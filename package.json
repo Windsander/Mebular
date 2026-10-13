@@ -22,6 +22,7 @@
     "packages/fleet/package.json",
     "packages/service/dist",
     "packages/service/package.json",
+    "packages/skill",
     "README.md",
     "LICENSE"
   ],
@@ -143,7 +144,7 @@
     }
   },
   "devDependencies": {
-    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/client": "^2.3.1",
     "@modelcontextprotocol/server": "^2.0.0",
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.24",

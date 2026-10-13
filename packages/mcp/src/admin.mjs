@@ -973,6 +973,51 @@ export async function buildNetStatusView({ app }) {
   };
 }
 
+/** H-1 · GET /admin/api/service：常驻运行状态（registered/running/autostart/heartbeat）。 */
+export async function buildServiceView({ home }) {
+  const { serviceStatusForHome, registeredForHome, SERVICE_KIND } = await import('./service-control.mjs');
+  const platform = process.platform;
+  let status = null;
+  let error = null;
+  try {
+    status = serviceStatusForHome({ home, platform });
+  } catch (cause) {
+    error = String(cause?.message ?? cause);
+  }
+  let registeredKinds = [];
+  try {
+    registeredKinds = registeredForHome({ home, platform });
+  } catch {
+    registeredKinds = [];
+  }
+  return {
+    platform,
+    kind: SERVICE_KIND,
+    home,
+    serviceManaged: Boolean(process.env.MEBULAR_SERVICE_KIND || process.env.MEBULAR_SERVICE_SHA),
+    registered: status?.registered ?? registeredKinds.includes(SERVICE_KIND),
+    running: status?.running ?? false,
+    autostart: status?.autostart ?? null,
+    unitPath: status?.unitPath ?? null,
+    sha: status?.sha ?? null,
+    heartbeat: status?.heartbeat ?? null,
+    ...(error ? { error } : {}),
+  };
+}
+
+/** H-1 · GET /admin/api/clients：AI 助手接入侦测（每客户端一张卡的状态）。 */
+export async function buildClientsView({ home }) {
+  const { detectClients } = await import('./clients.mjs');
+  let clients = [];
+  let error = null;
+  try {
+    clients = detectClients({ home, cwd: process.cwd() });
+  } catch (cause) {
+    error = String(cause?.message ?? cause);
+  }
+  return { clients, ...(error ? { error } : {}) };
+}
+
 export const READ_ROUTES = {
   '/admin/api/overview': buildOverview,
   '/admin/api/devices': buildDevices,
@@ -982,4 +1027,6 @@ export const READ_ROUTES = {
   '/admin/api/config': buildConfigView,
   '/admin/api/memories': buildMemories,
   '/admin/api/net': buildNetStatusView,
+  '/admin/api/service': buildServiceView,
+  '/admin/api/clients': buildClientsView,
 };

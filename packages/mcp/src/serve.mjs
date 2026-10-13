@@ -865,6 +865,8 @@ export async function startHttpServer({
     /^\/admin\/api\/policy-issuers$/,
     /^\/admin\/api\/memberships$/,
     /^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/,
+    /^\/admin\/api\/service\/(install|uninstall)$/,
+    /^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview)$/,
   ];
 
   function parseJsonBody(body) {
@@ -1362,6 +1364,50 @@ export async function startHttpServer({
         ...(typeof input.note === 'string' ? { note: input.note } : {}),
       });
       return sendJson(res, result.ok ? 200 : 409, result);
+    }
+
+    // H-1：常驻运行（服务托管，动作式；服务命令带**守护自身 home**）。CI 用 MEBULAR_SERVICE_DRY_RUN=1 替身断言命令序列。
+    const svcAction = path.match(/^\/admin\/api\/service\/(install|uninstall)$/);
+    if (svcAction) {
+      const { installServiceForHome, uninstallServiceForHome, serviceStatusForHome } = await import('./service-control.mjs');
+      const dryRun = process.env.MEBULAR_SERVICE_DRY_RUN === '1';
+      const commands = [];
+      const run = dryRun ? (cmd, args) => { commands.push([cmd, ...(args ?? [])]); return { status: 0, stdout: '', stderr: '' }; } : undefined;
+      try {
+        const action = svcAction[1];
+        const result = action === 'install'
+          ? installServiceForHome({ home, ...(run ? { run } : {}) })
+          : uninstallServiceForHome({ home, ...(run ? { run } : {}) });
+        const status = serviceStatusForHome({ home, ...(run ? { run } : {}) });
+        return sendJson(res, 200, { ok: true, action, dryRun, commands, result, status });
+      } catch (error) {
+        return sendJson(res, 500, { ok: false, action: svcAction[1], error: 'service_action_failed', message: String(error?.message ?? error) });
+      }
+    }
+
+    // H-1：「连接我的 AI 助手」接入 / 预览 / 回滚 / Skill（只并 mebular 键；备份 + 原子写 + 幂等）
+    const cliAction = path.match(/^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview)$/);
+    if (cliAction) {
+      const { connectClient, rollbackClient, installSkills, previewClient } = await import('./clients.mjs');
+      const id = decodeURIComponent(cliAction[1]);
+      const action = cliAction[2];
+      const input = parseJsonBody(body) ?? {};
+      const opts = { home, cwd: process.cwd() };
+      try {
+        if (action === 'preview') return sendJson(res, 200, previewClient(id, opts));
+        if (action === 'connect') {
+          const result = await connectClient(id, opts);
+          return sendJson(res, result.ok ? 200 : 422, result);
+        }
+        if (action === 'rollback') {
+          const result = await rollbackClient(id, { ...opts, ...(typeof input.backupPath === 'string' ? { backupPath: input.backupPath } : {}) });
+          return sendJson(res, result.ok ? 200 : 422, result);
+        }
+        const result = await installSkills(id, { ...opts, repoRoot: process.cwd() });
+        return sendJson(res, result.ok ? 200 : 422, result);
+      } catch (error) {
+        return sendJson(res, 500, { ok: false, error: 'client_action_failed', message: String(error?.message ?? error) });
+      }
     }
 
     return sendJson(res, 404, { error: 'not_found', path });

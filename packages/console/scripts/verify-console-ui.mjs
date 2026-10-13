@@ -299,6 +299,17 @@ async function main() {
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('从记忆视图切回星图', await waitFor('document.querySelector("#memories-view")?.hidden === true'));
 
+    // H-1：连接 AI 助手面板（常驻运行卡 + 客户端卡 + diff 预览）
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
+    check('切换到连接 AI 助手视图（#connect-view 可见）', await waitFor('document.querySelector("#connect-view")?.hidden === false'));
+    check('常驻运行卡渲染（状态 + 动作按钮）',
+      await waitFor('(() => { const c = document.querySelector("#service-card"); return Boolean(c) && /常驻/.test(c.textContent) && c.querySelectorAll("[data-svc-action]").length >= 3; })()'));
+    check('AI 助手卡渲染（≥5 张 + 接入按钮）',
+      await waitFor('(() => { const l = document.querySelector("#clients-list"); return Boolean(l) && l.querySelectorAll(".connect-card").length >= 5 && Boolean(l.querySelector("[data-cli-action=connect]")); })()'));
+    await evalJs('(() => { const b = document.querySelector("#clients-list [data-cli-action=preview]"); if (b) b.click(); })()');
+    check('「查看改动」→ diff 预览出现', await waitFor('(() => { const d = document.querySelector(".connect-diff"); return Boolean(d) && d.hidden === false && (d.textContent ?? "").trim().length > 0; })()'));
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
+
     // 设置弹窗（IA：常用/高级/诊断 + 关于本机）
     await evalJs('document.querySelector("#open-settings").click()');
     check('设置弹窗打开（分区页签 + 常用配置编辑器）', await waitFor('document.querySelectorAll("#settings-body .settings-tab").length >= 3 && Boolean(document.querySelector("#settings-body .cfg-editor"))'));

@@ -297,11 +297,11 @@ async function main() {
     // 归档：默认过滤下该行要么消失，要么按钮翻转为「解除归档」
     await evalJs('(() => { const b = document.querySelector("#memories-list [data-mem-action=archive]"); if (b) b.click(); })()');
     check('记忆视图：归档动作生效（行被过滤或按钮翻转）',
-      await waitFor('(() => { const list = document.querySelector("#memories-list"); if (!list) return false; return Boolean(list.querySelector("[data-mem-action=unarchive]")) || list.querySelectorAll(".mem-row").length === 0; })()'));
+      await waitFor('(() => { const list = document.querySelector("#memories-list"); if (!list) return false; return Boolean(list.querySelector("[data-mem-action=unarchive]")) || list.querySelectorAll(".mem-row").length === 0; })()', 30000)); // 写后收敛可能受 serve 同步探针拖慢（断言内容不变）
     // 勾选「显示已归档」→ 出现「已归档」徽标与「解除归档」
     await evalJs('document.querySelector("#mem-filter-archived").click()');
     check('记忆视图：显示已归档后出现「已归档」徽标与「解除归档」',
-      await waitFor('(() => { const v = document.querySelector("#memories-view"); return Boolean(v.querySelector("[data-mem-action=unarchive]")) && /已归档/.test(v.textContent); })()'));
+      await waitFor('(() => { const v = document.querySelector("#memories-view"); return Boolean(v.querySelector("[data-mem-action=unarchive]")) && /已归档/.test(v.textContent); })()', 30000));
     // 解除归档（可逆）后关掉过滤，视图仍可交互
     await evalJs('(() => { const b = document.querySelector("#memories-list [data-mem-action=unarchive]"); if (b) b.click(); })()');
     await evalJs('document.querySelector("#mem-filter-archived").click()');
@@ -346,8 +346,15 @@ async function main() {
       document.querySelector('#asst-add-format').value = 'mcpServers';
       document.querySelector('#asst-add-submit').click();
     })()`);
-    check('登记后列表即时出现（自定义标记 + 入三态机：未接入）',
-      await waitFor('(() => { const r = document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]"); return Boolean(r) && /UI 测试助手/.test(r.textContent) && /未接入/.test(r.textContent) && Boolean(r.querySelector(".asst-tag")); })()'));
+    const regOk = await waitFor('(() => { const r = document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]"); return Boolean(r) && /UI 测试助手/.test(r.textContent) && /未接入/.test(r.textContent) && Boolean(r.querySelector(".asst-tag")); })()', 30000); // 写后收敛余量（断言内容不变）
+    check('登记后列表即时出现（自定义标记 + 入三态机：未接入）', regOk);
+    if (!regOk) {
+      // 失败诊断（不中断）：表单错误行 / 表单是否还在 / 当前行集合 / 服务端真实注册表
+      console.log('  · [诊断] 表单错误行：', await evalJs('document.querySelector("#asst-add-error")?.textContent ?? "（无）"').catch((e) => String(e)));
+      console.log('  · [诊断] 表单仍打开：', await evalJs('Boolean(document.querySelector("#asst-add-form"))').catch((e) => String(e)));
+      console.log('  · [诊断] 面板行：', await evalJs('JSON.stringify(Array.from(document.querySelectorAll("#settings-panel-assistants [data-asst-row]")).map((r) => r.dataset.asstRow))').catch((e) => String(e)));
+      console.log('  · [诊断] 服务端 custom：', await evalJs('fetch("/admin/api/clients").then((r) => r.json()).then((j) => JSON.stringify((j.clients ?? []).filter((c) => c.kind === "custom").map((c) => [c.id, c.state, c.kind])))').catch((e) => String(e)));
+    }
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=details][data-cli-id=ui-test-asst]"); if (b) b.click(); })()');
     check('自定义行详情含「编辑」「移除」',
       await waitFor('Boolean(document.querySelector("#settings-panel-assistants [data-asst-edit=ui-test-asst]")) && Boolean(document.querySelector("#settings-panel-assistants [data-asst-remove=ui-test-asst]"))'));
@@ -356,11 +363,11 @@ async function main() {
       await waitFor('(() => { const f = document.querySelector("#asst-add-form"); return Boolean(f) && f.dataset.editId === "ui-test-asst" && document.querySelector("#asst-add-id").disabled === true && document.querySelector("#asst-add-name").value === "UI 测试助手"; })()'));
     await evalJs('(() => { document.querySelector("#asst-add-name").value = "UI 测试助手改"; document.querySelector("#asst-add-submit").click(); })()');
     check('保存修改后列表即时更新（PUT 生效）',
-      await waitFor('(() => { const r = document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]"); return Boolean(r) && /UI 测试助手改/.test(r.textContent); })()'));
+      await waitFor('(() => { const r = document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]"); return Boolean(r) && /UI 测试助手改/.test(r.textContent); })()', 30000));
     await evalJs('window.confirm = () => true'); // 移除的二次确认桩住（headless 无对话框）
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-remove=ui-test-asst]"); if (b) b.click(); })()');
     check('移除后行消失（POST remove 生效）',
-      await waitFor('!document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]")'));
+      await waitFor('!document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]")', 30000));
     await evalJs('document.querySelector("#settings-close").click()');
 
     // ---------- 背景层契约（crt-surface / crt-screen 扫描线 ::before 定位） ----------

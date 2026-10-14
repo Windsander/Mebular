@@ -64,6 +64,8 @@ function readCookie(name) {
 
 // refresh 代际号（并发刷新丢弃过期完成；见 refresh()）
 let refreshSeq = 0;
+// refresh 单飞承诺（在途刷新未完结时复用，防请求雪崩堆叠——serve 变慢时系统仍能收敛）
+let refreshPromise = null;
 
 async function api(path, options = {}) {
   const headers = { accept: 'application/json', ...(options.headers ?? {}) };
@@ -77,6 +79,9 @@ async function api(path, options = {}) {
     credentials: 'same-origin',
     headers,
     ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+    // 有界等待：serve 事件循环被同步探针占住时，慢请求到点中止——
+    // allSettled 得以完结、连接池得以释放（否则刷新永远等不到全部响应，控制台永久卡死）
+    signal: options.signal ?? AbortSignal.timeout(options.timeoutMs ?? 12000),
   });
   const csrfHeader = res.headers.get('x-mebular-csrf');
   if (csrfHeader) state.csrf = csrfHeader;
@@ -98,7 +103,13 @@ async function api(path, options = {}) {
   return data;
 }
 
-async function refresh() {
+function refresh() {
+  // 单飞：在途刷新未完结 → 复用同一承诺（调用方拿到同一份结果；轮询不再堆叠请求批次）
+  refreshPromise ??= refreshOnce().finally(() => { refreshPromise = null; });
+  return refreshPromise;
+}
+
+async function refreshOnce() {
   // 代际号：并发刷新（3s 轮询 vs 动作后即时刷新）时，丢弃先发出后完成的旧数据，防旧列表覆盖新状态
   const seq = ++refreshSeq;
   if (MOCK) {
@@ -1537,7 +1548,7 @@ async function serviceAction(action) {
       say('已请求重启；稍后本页会自动恢复。');
       return;
     }
-    const res = await api(`/admin/api/service/${action}`, { method: 'POST', body: {} });
+    const res = await api(`/admin/api/service/${action}`, { method: 'POST', body: {}, timeoutMs: 30000 }); // launchd 安装/重启可能较慢
     if (res?.dryRun) {
       const cmds = (res.commands ?? []).map((c) => c.join(' ')).join('；');
       say(`（试运行）将执行：${cmds}`);
@@ -1561,6 +1572,7 @@ async function clientAction(id, action) {
       const res = await api(`/admin/api/clients/${id}/verify`, {
         method: 'POST',
         body: action === 'verify-confirm' ? { userConfirmedReload: true } : {},
+        timeoutMs: 40000, // 服务端 verify CLI 最长 30s（hermes mcp test）
       });
       state.clientVerify[id] = res;
       if (res?.state === 'connected') { state.clientRestart[id] = false; say('验证通过，已接入 ✓'); }
@@ -1583,7 +1595,7 @@ async function clientAction(id, action) {
     }
     // R-1 小-11：回滚是不可逆方向的操作 → 二次确认
     if (action === 'rollback' && !window.confirm('确定回滚？将把该助手的配置还原到接入前（用自动备份恢复）。')) return;
-    const res = await api(`/admin/api/clients/${id}/${action}`, { method: 'POST', body: {} });
+    const res = await api(`/admin/api/clients/${id}/${action}`, { method: 'POST', body: {}, timeoutMs: 20000 }); // 写入/CLI 动作给足余量
     if (typeof res.preview === 'string' && res.preview.length > 0) showDiff(res.preview);
     if (!res.ok) { say(`需要你手动处理：${res.reason ?? '请看片段'}`); return; }
     say(action === 'connect'

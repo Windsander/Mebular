@@ -27,13 +27,14 @@ describe('H-1 clients：侦测与合并写入', () => {
     await rm(home, { recursive: true, force: true });
   });
 
-  it('mergeJsonEntry：只并 mebular，保留其他键；结构/解析异常退回 error', () => {
+  it('mergeJsonEntry：只并 mebular（A-17 键位 mcp.servers.mebular），保留其他键；结构/解析异常退回 error', () => {
     const r = mergeJsonEntry('{"theme":"dark","mcp":{"other":{"x":1}}}', { format: 'opencode', entry: { type: 'local', command: ['mebular', 'mcp'] } });
     expect(r.changed).toBe(true);
     const parsed = JSON.parse(r.text);
     expect(parsed.theme).toBe('dark');
     expect(parsed.mcp.other).toEqual({ x: 1 });
-    expect(parsed.mcp.mebular).toEqual({ type: 'local', command: ['mebular', 'mcp'] });
+    expect(parsed.mcp.servers.mebular).toEqual({ type: 'local', command: ['mebular', 'mcp'] });
+    expect(parsed.mcp.mebular).toBeUndefined(); // A-17：不得写成旧形状
     expect(mergeJsonEntry('{ not json', { format: 'opencode', entry: {} }).error).toMatch(/不是合法 JSON/);
     expect(mergeJsonEntry('[]', { format: 'opencode', entry: {} }).error).toMatch(/顶层不是对象/);
     expect(mergeJsonEntry('{"mcp": 5}', { format: 'opencode', entry: {} }).error).toMatch(/mcp 结构未知/);
@@ -59,7 +60,7 @@ describe('H-1 clients：侦测与合并写入', () => {
     expect(first.backupPath).toBeTruthy();
     const parsed = JSON.parse(await readFile(cfg, 'utf-8'));
     expect(parsed.theme).toBe('dark');
-    expect(parsed.mcp.mebular).toEqual({ type: 'local', command: ['mebular', 'mcp'] });
+    expect(parsed.mcp.servers.mebular).toEqual({ type: 'local', command: ['mebular', 'mcp'] });
 
     const backups = (await readdir(cfgDir)).filter((f) => f.includes('.bak-'));
     expect(backups).toHaveLength(1);
@@ -73,6 +74,7 @@ describe('H-1 clients：侦测与合并写入', () => {
     const roll = await rollbackClient('opencode', opts());
     expect(roll.ok).toBe(true);
     const after = JSON.parse(await readFile(cfg, 'utf-8'));
+    expect(after.mcp?.servers?.mebular).toBeUndefined();
     expect(after.mcp?.mebular).toBeUndefined();
     expect(after.theme).toBe('dark');
   });

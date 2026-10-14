@@ -867,7 +867,10 @@ export async function startHttpServer({
     /^\/admin\/api\/memberships$/,
     /^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/,
     /^\/admin\/api\/service\/(install|uninstall)$/,
-    /^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview)$/,
+    /^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview|verify)$/,
+    /^\/admin\/api\/assistants$/,
+    /^\/admin\/api\/assistants\/([^/]+)$/,
+    /^\/admin\/api\/assistants\/([^/]+)\/remove$/,
   ];
 
   function parseJsonBody(body) {
@@ -1388,16 +1391,52 @@ export async function startHttpServer({
       }
     }
 
-    // H-1：「连接我的 AI 助手」接入 / 预览 / 回滚 / Skill（只并 mebular 键；备份 + 原子写 + 幂等）
-    const cliAction = path.match(/^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview)$/);
+    // UX-2：自定义助手条目 CRUD（注册表 = 内置 ∪ `<home>/assistants.custom.json`；内置不可改删）
+    const assistantsMatch = path.match(/^\/admin\/api\/assistants(?:\/([^/]+))?(\/remove)?$/);
+    if (assistantsMatch) {
+      const { addCustomAssistant, updateCustomAssistant, removeCustomAssistant } = await import('./clients.mjs');
+      const id = assistantsMatch[1] ? decodeURIComponent(assistantsMatch[1]) : null;
+      const isRemove = assistantsMatch[2] === '/remove';
+      const input = parseJsonBody(body) ?? {};
+      const opts = { home, cwd: process.cwd() };
+      try {
+        if (isRemove && id) {
+          const result = await removeCustomAssistant(id, opts);
+          return sendJson(res, result.ok ? 200 : 422, result);
+        }
+        if (req.method === 'POST' && !id) {
+          const result = await addCustomAssistant(input, opts);
+          return sendJson(res, result.ok ? 200 : 422, result);
+        }
+        if ((req.method === 'PUT' || req.method === 'PATCH') && id) {
+          const result = await updateCustomAssistant(id, input, opts);
+          return sendJson(res, result.ok ? 200 : 422, result);
+        }
+        return sendJson(res, 405, { error: 'method_not_allowed', message: '新增用 POST /admin/api/assistants；更新用 PUT/PATCH …/:id；删除用 POST …/:id/remove' });
+      } catch (error) {
+        return sendJson(res, 500, { ok: false, error: 'assistant_registry_failed', message: String(error?.message ?? error) });
+      }
+    }
+
+    // H-1：「连接我的 AI 助手」接入 / 预览 / 回滚 / Skill / 验证（只并 mebular 键；备份 + 原子写 + 幂等）
+    const cliAction = path.match(/^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview|verify)$/);
     if (cliAction) {
-      const { connectClient, rollbackClient, installSkills, previewClient } = await import('./clients.mjs');
+      const { connectClient, rollbackClient, installSkills, previewClient, verifyAssistant } = await import('./clients.mjs');
       const id = decodeURIComponent(cliAction[1]);
       const action = cliAction[2];
       const input = parseJsonBody(body) ?? {};
       const opts = { home, cwd: process.cwd() };
       try {
         if (action === 'preview') return sendJson(res, 200, previewClient(id, opts));
+        if (action === 'verify') {
+          // 验证未过也是**有效结果**（体里带 ok/state/steps），故一律 200 由 UI 读 body
+          const result = verifyAssistant(id, {
+            ...opts,
+            ...(input.userConfirmedReload === true ? { userConfirmedReload: true } : {}),
+            ...(typeof input.backupPath === 'string' ? { backupPath: input.backupPath } : {}),
+          });
+          return sendJson(res, 200, result);
+        }
         if (action === 'connect') {
           const result = await connectClient(id, opts);
           return sendJson(res, result.ok ? 200 : 422, result);

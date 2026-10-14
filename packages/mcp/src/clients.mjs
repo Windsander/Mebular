@@ -1,44 +1,116 @@
-// H-1 · 「连接我的 AI 助手」：客户端侦测 / 合并写入 / 备份 / 回滚 / diff / skill 安装
+// UX-2 · 「连接 AI 助手」注册表（助手 = 数据，不是代码）
+//
+// 契约：`.opencode/skills/mebular-assistant-integration/SKILL.md`
+// 规格：`docs/design/config-journey-v1.md`（§3 模型 / §5.3 / §5.4 / §9 A-1..A-19）
 //
 // 硬性写入规则（本模块唯一实现，供 admin 读写端点复用）：
-//   1. 只**合并** `mebular` 条目（opencode: `mcp.mebular`；其余 JSON: `mcpServers.mebular`）；
-//   2. 写前**先备份** `<path>.bak-<ts>`；
-//   3. **原子写**（临时文件 + rename）；
-//   4. 解析失败 / 结构未知 → **不写**，返回 `needsManual` + 片段；
-//   5. 重复接入**幂等**（条目已等价 → changed:false，不写不备份）。
+//   1. 只**合并**助手自己的一条键（opencode: `mcp.servers.mebular`；json-mcpServers: `mcpServers.mebular`；
+//      hermes: `mcp_servers.mebular`）；**A-17**：opencode 正确键位是 `mcp.servers.<name>`（非 `mcp.<name>`）。
+//   2. 写前**字节级备份** `<path>.bak-<ts>`（merge-key 与 cli-set 都必须）。
+//   3. **原子写**（临时文件 + rename）；cli-set 走助手官方 CLI（Hermes: `hermes config set --force`）。
+//   4. 解析失败 / 结构未知 → **不写**，返回 `needsManual` + 片段（原文件不动）。
+//   5. 重复接入**幂等**（条目已等价 → changed:false，不写不备份）；写入失败**回滚**。
+//   6. **禁写** `landing.forbiddenPaths`（如 OpenChamber 私有的 `opencode.managed.json`）。
+//   7. **A-19**：本模块**不得**调用 `opencode reload`（生效由用户在 App 侧重载）。
 //
-// 纯函数式：home/cwd/platform/env 可注入，便于单元测试（不触碰真实用户目录）。
+// 纯函数式：home/cwd/platform/env/run 可注入，便于单元测试（不触碰真实用户目录）。
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// ---------- 片段与条目 ----------
+// ---------------------------------------------------------------------------
+// 格式适配器（落面形状的唯一真源；A-17 以 `opencode mcp add` 产出为准）
+// ---------------------------------------------------------------------------
+
+/** 适配器注册表（内置）。`keyPath` 含叶子名（助手的 mcp 条目名固定 `mebular`）。 */
+export const FORMAT_ADAPTERS = {
+  // opencode v2（含 OpenChamber 宿主）：真源 = `opencode mcp add` 产出 `{"mcp":{"servers":{...}}}`
+  'opencode-json': {
+    id: 'opencode-json', serialization: 'json', strategy: 'merge-key', keyPath: ['mcp', 'servers', 'mebular'],
+    legacyKeyPath: ['mcp', 'mebular'], // A-17：旧版错形状，仅用于「诚实标注不生效」
+    entry: () => ({ type: 'local', command: ['mebular', 'mcp'] }),
+    snippet: () => JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp: { servers: { mebular: { type: 'local', command: ['mebular', 'mcp'] } } } }, null, 2),
+  },
+  'json-mcpServers': {
+    id: 'json-mcpServers', serialization: 'json', strategy: 'merge-key', keyPath: ['mcpServers', 'mebular'],
+    entry: () => ({ command: 'mebular', args: ['mcp'] }),
+    snippet: () => JSON.stringify({ mcpServers: { mebular: { command: 'mebular', args: ['mcp'] } } }, null, 2),
+  },
+  // Hermes：YAML，但写入**必须**经官方 CLI（ruamel 保注释）；无法 env 沙箱 ⇒ 备份/回滚是硬要求。
+  'hermes-yaml': {
+    id: 'hermes-yaml', serialization: 'yaml', strategy: 'cli-set', keyPath: ['mcp_servers', 'mebular'],
+    entry: () => ({ command: 'mebular', args: ['mcp'], enabled: true }),
+    snippet: () => [
+      'mcp_servers:',
+      '  mebular:',
+      '    command: mebular',
+      '    args:',
+      '      - mcp',
+      '    enabled: true',
+    ].join('\n'),
+  },
+  // 遗留 DSH（YAML 插件列表）：保持既有行为（结构未知不写）。
+  dsh: {
+    id: 'dsh', serialization: 'yaml', strategy: 'merge-key', keyPath: ['plugins', 'mebular'],
+    entry: () => ({ name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'mebular', transport: 'stdio', command: 'mebular', args: ['mcp'] } }),
+    snippet: () => "plugins:\n  - name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: mebular\n      transport: stdio\n      command: mebular\n      args: ['mcp']",
+  },
+  toml: { id: 'toml', serialization: 'toml', strategy: 'manual', keyPath: ['mcp_servers', 'mebular'], snippet: () => '[mcp_servers.mebular]\ncommand = "mebular"\nargs = ["mcp"]' },
+  yaml: { id: 'yaml', serialization: 'yaml', strategy: 'manual', keyPath: ['mcp_servers', 'mebular'], snippet: () => 'mcp_servers:\n  mebular:\n    command: mebular\n    args: [mcp]' },
+  'generic-snippet': { id: 'generic-snippet', serialization: 'text', strategy: 'manual', keyPath: ['mcpServers', 'mebular'], snippet: () => JSON.stringify({ mcpServers: { mebular: { command: 'mebular', args: ['mcp'] } } }, null, 2) },
+};
+
+/** 遗留 format 名 → 适配器 id（保持既有调用方与片段兼容）。 */
+const LEGACY_FORMAT = { opencode: 'opencode-json', mcpServers: 'json-mcpServers', generic: 'generic-snippet', dsh: 'dsh' };
+
+export function adapterFor(format) {
+  return FORMAT_ADAPTERS[LEGACY_FORMAT[format] ?? format] ?? null;
+}
 
 /** 各客户端 MCP 片段（与 `mebular print-config` 同源）。 */
 export function snippetFor(format) {
-  if (format === 'opencode') {
-    return JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp: { mebular: { type: 'local', command: ['mebular', 'mcp'] } } }, null, 2);
-  }
-  if (format === 'dsh') {
-    return "plugins:\n  - name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: mebular\n      transport: stdio\n      command: mebular\n      args: ['mcp']";
-  }
   if (format === 'opencode-remote') {
-    return JSON.stringify({ mcp: { mebular: { type: 'remote', url: 'http://127.0.0.1:7331/mcp' } } }, null, 2);
+    return JSON.stringify({ mcp: { servers: { mebular: { type: 'remote', url: 'http://127.0.0.1:7331/mcp' } } } }, null, 2);
   }
-  return JSON.stringify({ mcpServers: { mebular: { command: 'mebular', args: ['mcp'] } } }, null, 2);
+  const adapter = adapterFor(format);
+  if (!adapter) return JSON.stringify({ mcpServers: { mebular: { command: 'mebular', args: ['mcp'] } } }, null, 2);
+  return adapter.snippet();
 }
 
 /** 本机 MCP 条目（供合并）。 */
 export function mebularEntry(format) {
-  if (format === 'opencode') return { type: 'local', command: ['mebular', 'mcp'] };
-  return { command: 'mebular', args: ['mcp'] };
+  const adapter = adapterFor(format);
+  return adapter ? adapter.entry() : { command: 'mebular', args: ['mcp'] };
 }
 
-/** 客户端描述（所有可写路径都在这里；纯数据，便于测试与文档）。 */
-export function clientDescriptors(options = {}) {
+// ---------------------------------------------------------------------------
+// A-18：探针/验证输出卫生（只打印键名/变量名，绝不回显凭据值）
+// ---------------------------------------------------------------------------
+
+/** 抹掉形如 `token=…` / `api_key: …` / `Authorization: Bearer …` 的值。 */
+export function redactSecrets(text) {
+  return String(text ?? '')
+    .replace(/(\bBearer\s+)[A-Za-z0-9\-._~+/=]+/gi, '$1<redacted>')
+    .replace(/((?:\b|["'])(?:token|secret|password|passwd|api[_-]?key|access[_-]?key|authorization|credential|private[_-]?key)(?:\b|["'])\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)/gi, '$1<redacted>');
+}
+
+// ---------------------------------------------------------------------------
+// 内置条目（descriptor 六要素）
+// ---------------------------------------------------------------------------
+
+const HOME_OPENCODE = ['~', '.config', 'opencode', 'opencode.json'];
+const HOME_HERMES = ['~', '.hermes', 'config.yaml'];
+
+function expandHome(parts, home) {
+  return join(home, ...parts.slice(1));
+}
+
+/** 内置助手注册表（六要素；落面/写入/验证值以 F-EXP-1 实测为准）。 */
+export function builtinAssistants(options = {}) {
   const home = options.home ?? homedir();
   const cwd = options.cwd ?? process.cwd();
   const platform = options.platform ?? process.platform;
@@ -48,64 +120,294 @@ export function clientDescriptors(options = {}) {
     : platform === 'win32'
       ? (env.APPDATA ?? join(home, 'AppData', 'Roaming'))
       : (env.XDG_CONFIG_HOME ?? join(home, '.config'));
-  const dshConfig = join(cwd, '.dsh', 'cordis.yml');
+  const opencodePath = expandHome(HOME_OPENCODE, home);
+  const hermesPath = expandHome(HOME_HERMES, home);
+
   return [
     {
-      id: 'opencode', name: 'OpenCode', format: 'opencode', kind: 'file',
-      configPath: join(home, '.config', 'opencode', 'opencode.json'),
-      skillsDirs: [join(home, '.config', 'opencode', 'skills'), join(home, '.agents', 'skills'), join(cwd, '.agents', 'skills'), join(cwd, '.opencode', 'skills')],
-      requiresRestart: true,
-    },
-    {
-      // OpenChamber 复用 opencode 的配置（同一文件）；单独呈现以便用户找到它。
-      id: 'openchamber', name: 'OpenChamber', format: 'opencode', kind: 'file',
-      configPath: join(home, '.config', 'opencode', 'opencode.json'),
+      id: 'openchamber', name: 'OpenChamber', kind: 'file', format: 'opencode-json',
+      landing: {
+        primaryPath: opencodePath,
+        keyPath: 'mcp.servers.mebular',
+        forbiddenPaths: [join(home, '.config', 'openchamber', 'opencode.managed.json')],
+        format: 'opencode-json',
+      },
+      probe: {
+        signals: [
+          { kind: 'config-path', paths: [opencodePath] },
+          { kind: 'cli', command: 'opencode --version', timeoutMs: 1500 },
+          { kind: 'app-bundle', paths: ['/Applications/OpenChamber.app'] },
+          { kind: 'process', pattern: 'opencode serve --service' },
+        ],
+      },
+      writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
+      verify: { cli: { command: 'opencode mcp list', expect: 'mebular', timeoutMs: 4000 }, configReadback: true },
+      activation: { kind: 'user-reload', note: 'OpenChamber：由用户在 App 侧重载/重启生效；产品不得发 opencode reload 干扰运行服务' },
+      risks: [
+        'opencode.managed.json 为 App 所有且会被重写，禁写',
+        'opencode mcp list 经运行服务回答，只读但勿频繁调用',
+      ],
       skillsDirs: [join(home, '.config', 'opencode', 'skills')],
-      requiresRestart: true, reuseOf: 'opencode',
-      note: 'OpenChamber 复用 OpenCode 的 MCP 配置（同一文件，接一次即可）',
+      reuseOf: 'opencode',
+      note: 'OpenChamber 复用 OpenCode 的 global 配置（接一次即可）',
     },
     {
-      id: 'claude-code', name: 'Claude Code', format: 'mcpServers', kind: 'file',
-      configPath: join(home, '.claude.json'),
+      id: 'hermes', name: 'Hermes', kind: 'file', format: 'hermes-yaml',
+      landing: { primaryPath: hermesPath, keyPath: 'mcp_servers.mebular', forbiddenPaths: [], format: 'hermes-yaml' },
+      probe: {
+        signals: [
+          { kind: 'config-path', paths: [hermesPath] },
+          { kind: 'cli', command: 'hermes --version', timeoutMs: 2500 },
+          { kind: 'path', paths: [join(home, '.local', 'bin', 'hermes')] },
+        ],
+      },
+      writer: { strategy: 'cli-set', command: 'hermes config set --force mcp_servers.mebular', backup: 'byte-level', atomic: false },
+      verify: {
+        cli: { command: 'hermes mcp test mebular', expect: '✓ Connected', toolsPattern: 'Tools discovered:\\s*(\\d+)', minTools: 1, timeoutMs: 30000 },
+        configReadback: true,
+      },
+      activation: { kind: 'hot', note: 'Hermes 免重启：新会话即用，或已开会话 /reload-mcp' },
+      risks: [
+        'Hermes 无法 env 沙箱（HERMES_CONFIG_PATH 被剥离）→ 写前字节级备份 + 失败回滚为硬要求',
+        '写入仅经 `hermes config set --force`（ruamel 保注释）；未知子键必须 --force',
+      ],
+      skillsDirs: [join(home, '.agents', 'skills')],
+      reuseOf: null,
+      note: 'Hermes 的 MCP 配置在 ~/.hermes/config.yaml',
+    },
+    {
+      id: 'opencode', name: 'OpenCode', kind: 'file', format: 'opencode-json',
+      landing: { primaryPath: opencodePath, keyPath: 'mcp.servers.mebular', forbiddenPaths: [], format: 'opencode-json' },
+      probe: {
+        signals: [
+          { kind: 'config-path', paths: [opencodePath] },
+          { kind: 'cli', command: 'opencode --version', timeoutMs: 1500 },
+          { kind: 'dir', paths: [join(home, '.config', 'opencode')] },
+        ],
+      },
+      writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
+      verify: { cli: { command: 'opencode mcp list', expect: 'mebular', timeoutMs: 4000 }, configReadback: true },
+      activation: { kind: 'user-reload', note: 'OpenCode 侧重载/重启后生效' },
+      risks: ['opencode mcp list 经运行服务回答，只读但勿频繁调用'],
+      skillsDirs: [join(home, '.config', 'opencode', 'skills'), join(home, '.agents', 'skills'), join(cwd, '.agents', 'skills'), join(cwd, '.opencode', 'skills')],
+      reuseOf: null,
+      note: null,
+    },
+    {
+      id: 'claude-code', name: 'Claude Code', kind: 'file', format: 'json-mcpServers',
+      landing: { primaryPath: join(home, '.claude.json'), keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'json-mcpServers' },
+      probe: { signals: [{ kind: 'config-path', paths: [join(home, '.claude.json')] }, { kind: 'cli', command: 'claude --version', timeoutMs: 1500 }] },
+      writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
+      verify: { configReadback: true },
+      activation: { kind: 'user-reload', note: '重启 Claude Code 后生效' },
+      risks: [],
       skillsDirs: [join(home, '.agents', 'skills'), join(cwd, '.agents', 'skills')],
-      requiresRestart: true,
+      reuseOf: null, note: null,
     },
     {
-      id: 'claude-desktop', name: 'Claude Desktop', format: 'mcpServers', kind: 'file',
-      configPath: join(appData, 'Claude', 'claude_desktop_config.json'),
-      skillsDirs: [],
-      requiresRestart: true,
+      id: 'claude-desktop', name: 'Claude Desktop', kind: 'file', format: 'json-mcpServers',
+      landing: { primaryPath: join(appData, 'Claude', 'claude_desktop_config.json'), keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'json-mcpServers' },
+      probe: { signals: [{ kind: 'config-path', paths: [join(appData, 'Claude', 'claude_desktop_config.json')] }, { kind: 'dir', paths: [join(appData, 'Claude')] }] },
+      writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
+      verify: { configReadback: true },
+      activation: { kind: 'user-reload', note: '完全退出并重开 Claude Desktop 后生效' },
+      risks: [],
+      skillsDirs: [], reuseOf: null, note: null,
     },
     {
-      id: 'cursor', name: 'Cursor', format: 'mcpServers', kind: 'file',
-      configPath: join(home, '.cursor', 'mcp.json'),
-      skillsDirs: [],
-      requiresRestart: true,
+      id: 'cursor', name: 'Cursor', kind: 'file', format: 'json-mcpServers',
+      landing: { primaryPath: join(home, '.cursor', 'mcp.json'), keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'json-mcpServers' },
+      probe: { signals: [{ kind: 'config-path', paths: [join(home, '.cursor', 'mcp.json')] }, { kind: 'dir', paths: [join(home, '.cursor')] }] },
+      writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
+      verify: { configReadback: true },
+      activation: { kind: 'user-reload', note: '重启 Cursor 后生效' },
+      risks: [], skillsDirs: [], reuseOf: null, note: null,
     },
     {
-      id: 'dsh', name: 'DeepSeek Harness (DSH)', format: 'dsh', kind: 'file',
-      configPath: dshConfig,
-      skillsDirs: [join(cwd, '.dsh', 'skills'), join(home, '.agents', 'skills')],
-      requiresRestart: true,
+      id: 'dsh', name: 'DeepSeek Harness (DSH)', kind: 'file', format: 'dsh',
+      landing: { primaryPath: join(cwd, '.dsh', 'cordis.yml'), keyPath: 'plugins', forbiddenPaths: [], format: 'dsh' },
+      probe: { signals: [{ kind: 'config-path', paths: [join(cwd, '.dsh', 'cordis.yml')] }, { kind: 'dir', paths: [join(cwd, '.dsh')] }] },
+      writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
+      verify: { configReadback: true },
+      activation: { kind: 'user-reload', note: '重启 DSH 后生效' },
+      risks: ['DSH 配置为 YAML 插件列表：结构未知时不自动改写'],
+      skillsDirs: [join(cwd, '.dsh', 'skills'), join(home, '.agents', 'skills')], reuseOf: null, note: null,
     },
     {
-      id: 'generic', name: '其他 AI 助手（复制片段）', format: 'generic', kind: 'snippet',
-      configPath: null, skillsDirs: [], requiresRestart: true,
-      note: '不支持自动写入：复制片段粘贴到你的 MCP 配置',
+      id: 'generic', name: '其他 AI 助手（复制片段）', kind: 'snippet', format: 'generic-snippet',
+      landing: { primaryPath: null, keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'generic-snippet' },
+      probe: { signals: [{ kind: 'always', reason: '通用条目：不探测，仅提供片段' }] },
+      writer: { strategy: 'manual', command: null, backup: 'n/a', atomic: false },
+      verify: { configReadback: false },
+      activation: { kind: 'user-reload', note: '按你的助手文档重载后生效' },
+      risks: ['不支持自动写入：复制片段粘贴到你的 MCP 配置'],
+      skillsDirs: [], reuseOf: null, note: '不支持自动写入：复制片段粘贴到你的 MCP 配置',
     },
   ];
 }
 
-export function descriptorFor(id, options = {}) {
-  return clientDescriptors(options).find((d) => d.id === id) ?? null;
+// ---------------------------------------------------------------------------
+// 自定义条目（`<home>/assistants.custom.json`；红线五：与内置同 schema/同判据）
+// ---------------------------------------------------------------------------
+
+export function customAssistantsPath(home = homedir()) {
+  return join(home, 'assistants.custom.json');
 }
 
-// ---------- 合并（只并 mebular 键；结构未知 → 不写） ----------
+const CUSTOM_SCHEMA_HINT = 'assistants.custom.json 需为 {"assistants":[{id,name,landing,probe,writer,verify,activation}]}';
 
-/** JSON 合并：设置或删除 `root[key].mebular`，保留其余键。 */
-export function mergeJsonEntry(existingText, { format, entry }) {
+/** 校验一条自定义 descriptor（与内置同 schema；至少一条 probe 信号）。 */
+export function validateAssistant(entry) {
+  const errors = [];
+  const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+  if (!isObj(entry)) return ['条目不是对象'];
+  if (typeof entry.id !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(entry.id)) errors.push('id 必须为小写 kebab-case');
+  if (typeof entry.name !== 'string' || entry.name.trim() === '') errors.push('name 必填');
+  if (!isObj(entry.landing)) errors.push('landing 必填');
+  else {
+    if (typeof entry.landing.format !== 'string' || !adapterFor(entry.landing.format)) errors.push(`landing.format 未知：${entry.landing.format}`);
+    if (entry.landing.primaryPath !== null && typeof entry.landing.primaryPath !== 'string') errors.push('landing.primaryPath 必须是字符串或 null');
+    if (entry.landing.forbiddenPaths !== undefined && !Array.isArray(entry.landing.forbiddenPaths)) errors.push('landing.forbiddenPaths 必须是数组');
+  }
+  if (!isObj(entry.probe) || !Array.isArray(entry.probe.signals) || entry.probe.signals.length === 0) errors.push('probe.signals 至少一条');
+  if (!isObj(entry.writer)) errors.push('writer 必填');
+  else if (!['merge-key', 'cli-set', 'manual'].includes(entry.writer.strategy)) errors.push(`writer.strategy 未知：${entry.writer.strategy}`);
+  if (entry.writer?.strategy === 'cli-set' && (typeof entry.writer.command !== 'string' || entry.writer.command.trim() === '')) errors.push('cli-set 必须给 writer.command');
+  if (entry.writer?.strategy !== 'manual' && entry.writer?.backup !== 'byte-level') errors.push('merge-key/cli-set 必须 writer.backup=byte-level');
+  if (!isObj(entry.verify)) errors.push('verify 必填');
+  else if (entry.verify.cli === undefined && entry.verify.configReadback !== true) errors.push('verify.cli 缺省时 configReadback 必须为 true');
+  if (!isObj(entry.activation) || !['hot', 'user-reload'].includes(entry.activation?.kind)) errors.push('activation.kind 必须是 hot|user-reload');
+  return errors;
+}
+
+/** 读自定义条目；文件损坏 → 返回 error（不静默当空）。 */
+export function loadCustomAssistants(options = {}) {
+  const home = options.home ?? homedir();
+  const file = customAssistantsPath(home);
+  if (!existsSync(file)) return { assistants: [], error: null, path: file };
   let parsed;
-  if (existingText === null || existingText.trim() === '') {
+  try {
+    parsed = JSON.parse(readFileSync(file, 'utf-8'));
+  } catch (error) {
+    return { assistants: [], error: `${CUSTOM_SCHEMA_HINT}（解析失败：${error instanceof Error ? error.message : String(error)}）`, path: file };
+  }
+  if (parsed === null || typeof parsed !== 'object' || !Array.isArray(parsed.assistants)) {
+    return { assistants: [], error: CUSTOM_SCHEMA_HINT, path: file };
+  }
+  const assistants = [];
+  for (const entry of parsed.assistants) {
+    if (validateAssistant(entry).length === 0) {
+      // 归一化：自定义条目可省略 format/kind（从 landing 推导），与内置同形。
+      assistants.push({
+        ...entry,
+        kind: entry.kind ?? (entry.writer?.strategy === 'manual' ? 'snippet' : 'file'),
+        format: entry.format ?? entry.landing?.format,
+      });
+    }
+  }
+  return { assistants, error: null, path: file };
+}
+
+async function saveCustomAssistants(options, assistants) {
+  const home = options.home ?? homedir();
+  const file = customAssistantsPath(home);
+  await mkdir(dirname(file), { recursive: true });
+  await writeFile(file, `${JSON.stringify({ assistants }, null, 2)}\n`, 'utf-8');
+  try { await chmod(file, 0o600); } catch { /* Windows 无 POSIX mode */ }
+  return file;
+}
+
+/** 新增自定义条目（id 与内置/自定义冲突 → 失败）。 */
+export async function addCustomAssistant(entry, options = {}) {
+  const errors = validateAssistant(entry);
+  if (errors.length > 0) return { ok: false, reason: `descriptor 校验失败：${errors.join('；')}` };
+  if (builtinAssistants(options).some((b) => b.id === entry.id)) return { ok: false, reason: `id 与内置条目冲突：${entry.id}` };
+  const { assistants } = loadCustomAssistants(options);
+  if (assistants.some((a) => a.id === entry.id)) return { ok: false, reason: `id 已存在：${entry.id}` };
+  const next = [...assistants, entry];
+  const path = await saveCustomAssistants(options, next);
+  return { ok: true, added: entry.id, path, count: next.length };
+}
+
+/** 更新自定义条目（内置不可改）。 */
+export async function updateCustomAssistant(id, patch, options = {}) {
+  if (builtinAssistants(options).some((b) => b.id === id)) return { ok: false, reason: `内置条目不可修改：${id}` };
+  const { assistants } = loadCustomAssistants(options);
+  const idx = assistants.findIndex((a) => a.id === id);
+  if (idx < 0) return { ok: false, reason: `自定义条目不存在：${id}` };
+  const merged = { ...assistants[idx], ...patch, id };
+  const errors = validateAssistant(merged);
+  if (errors.length > 0) return { ok: false, reason: `descriptor 校验失败：${errors.join('；')}` };
+  const next = assistants.slice();
+  next[idx] = merged;
+  const path = await saveCustomAssistants(options, next);
+  return { ok: true, updated: id, path };
+}
+
+/** 删除自定义条目（内置不允许删除）。 */
+export async function removeCustomAssistant(id, options = {}) {
+  if (builtinAssistants(options).some((b) => b.id === id)) return { ok: false, reason: `内置条目不可删除：${id}` };
+  const { assistants } = loadCustomAssistants(options);
+  const next = assistants.filter((a) => a.id !== id);
+  if (next.length === assistants.length) return { ok: false, reason: `自定义条目不存在：${id}` };
+  const path = await saveCustomAssistants(options, next);
+  return { ok: true, removed: id, path, count: next.length };
+}
+
+/** 注册表 = 内置 ∪ 自定义（自定义可覆盖同名内置？——不允许：id 冲突在登记时已拒绝）。 */
+export function registry(options = {}) {
+  const custom = loadCustomAssistants(options);
+  return { assistants: [...builtinAssistants(options), ...custom.assistants], customError: custom.error, customPath: custom.path };
+}
+
+// ---------------------------------------------------------------------------
+// 兼容投影（既有调用方：clientDescriptors / descriptorFor）
+// ---------------------------------------------------------------------------
+
+export function clientDescriptors(options = {}) {
+  return builtinAssistants(options).map((a) => ({
+    id: a.id, name: a.name, format: a.format, kind: a.kind,
+    configPath: a.landing.primaryPath,
+    skillsDirs: a.skillsDirs ?? [],
+    requiresRestart: a.activation.kind === 'user-reload',
+    reuseOf: a.reuseOf ?? null, note: a.note ?? null,
+  }));
+}
+
+export function descriptorFor(id, options = {}) {
+  return builtinAssistants(options).find((d) => d.id === id)
+    ?? loadCustomAssistants(options).assistants.find((d) => d.id === id)
+    ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// 合并（JSON：只并助手一条键；结构未知 → 不写）
+// ---------------------------------------------------------------------------
+
+function keyPathOf(format, keyPathOverride) {
+  if (Array.isArray(keyPathOverride)) return keyPathOverride;
+  const adapter = adapterFor(format);
+  return adapter ? adapter.keyPath : ['mcpServers', 'mebular'];
+}
+
+function walkGet(root, path) {
+  let node = root;
+  for (const key of path) {
+    if (node === null || typeof node !== 'object' || Array.isArray(node)) return { missing: true, badAt: key };
+    if (!(key in node)) return { missing: true, value: undefined };
+    node = node[key];
+  }
+  return { value: node };
+}
+
+/**
+ * JSON 合并：设置或删除 `<keyPath>`（默认含叶子 `mebular`），保留其余键。
+ * 中间键存在但非对象 → error（结构未知，不自动改写）。
+ */
+export function mergeJsonEntry(existingText, { format, entry, keyPath } = {}) {
+  const path = keyPathOf(format, keyPath);
+  let parsed;
+  if (existingText === null || existingText === undefined || existingText.trim() === '') {
     parsed = {};
   } else {
     try {
@@ -117,16 +419,24 @@ export function mergeJsonEntry(existingText, { format, entry }) {
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return { error: '配置顶层不是对象（结构未知，不自动改写）' };
   }
-  const key = format === 'opencode' ? 'mcp' : 'mcpServers';
-  const current = parsed[key];
-  if (current !== undefined && (current === null || typeof current !== 'object' || Array.isArray(current))) {
-    return { error: `字段 ${key} 结构未知（非对象，不自动改写）` };
+  const parents = path.slice(0, -1);
+  const leaf = path[path.length - 1];
+  const next = { ...parsed };
+  let cursor = next;
+  for (const key of parents) {
+    const current = cursor[key];
+    if (current === undefined) {
+      cursor[key] = {};
+    } else if (current === null || typeof current !== 'object' || Array.isArray(current)) {
+      return { error: `字段 ${key} 结构未知（非对象，不自动改写）` };
+    } else {
+      cursor[key] = { ...current };
+    }
+    cursor = cursor[key];
   }
-  const section = { ...(current ?? {}) };
-  const changed = JSON.stringify(section.mebular ?? null) !== JSON.stringify(entry ?? null);
-  if (entry === undefined) delete section.mebular;
-  else section.mebular = entry;
-  const next = { ...parsed, [key]: section };
+  const changed = JSON.stringify(cursor[leaf] ?? null) !== JSON.stringify(entry ?? null);
+  if (entry === undefined) delete cursor[leaf];
+  else cursor[leaf] = entry;
   return { changed, next, text: `${JSON.stringify(next, null, 2)}\n` };
 }
 
@@ -152,60 +462,177 @@ export function lineDiff(before, after) {
   return out.join('\n');
 }
 
-function computeMerged(desc, existing) {
-  return desc.format === 'dsh'
-    ? mergeDsh(existing)
-    : mergeJsonEntry(existing, { format: desc.format, entry: mebularEntry(desc.format) });
-}
-
-// ---------- 侦测 ----------
-
-function isConnected(desc, text) {
-  if (text === null) return false;
-  if (desc.format === 'dsh') return /serverName:\s*['"]?mebular['"]?/.test(text);
-  try {
-    const parsed = JSON.parse(text);
-    const key = desc.format === 'opencode' ? 'mcp' : 'mcpServers';
-    const entry = parsed?.[key]?.mebular;
-    return entry !== undefined && JSON.stringify(entry) === JSON.stringify(mebularEntry(desc.format));
-  } catch {
-    return false;
-  }
-}
-
 function safeReadText(path) {
   try { return readFileSync(path, 'utf-8'); } catch { return null; }
 }
 
-export function detectClients(options = {}) {
-  return clientDescriptors(options).map((desc) => {
-    const text = desc.configPath ? safeReadText(desc.configPath) : null;
-    const skillsInstalled = (desc.skillsDirs ?? []).some((d) => existsSync(join(d, 'mebular-memory', 'SKILL.md')));
-    let parseError = null;
-    if (text !== null && desc.kind === 'file' && desc.format !== 'dsh') {
-      const merged = computeMerged(desc, text);
-      if (merged.error) parseError = merged.error;
-    }
-    return {
-      id: desc.id,
-      name: desc.name,
-      format: desc.format,
-      configPath: desc.configPath ?? null,
-      installed: desc.kind === 'file' ? text !== null : false,
-      connected: isConnected(desc, text),
-      skillsInstalled,
-      requiresRestart: desc.requiresRestart === true,
-      needsManual: Boolean(parseError),
-      parseError,
-      snippet: snippetFor(desc.format),
-      reuseOf: desc.reuseOf ?? null,
-      note: desc.note ?? null,
-      skillsDirs: desc.skillsDirs ?? [],
-    };
-  });
+/** YAML 行式判据：`<parent>:` 下出现 2 空格缩进的 `<child>:`（Hermes 用；避免引 yaml 依赖）。 */
+export function yamlHasKey(text, parent, child) {
+  if (typeof text !== 'string') return false;
+  const lines = text.split('\n');
+  let inParent = false;
+  for (const line of lines) {
+    if (new RegExp(`^${parent}\\s*:`).test(line)) { inParent = true; continue; }
+    if (!inParent) continue;
+    if (/^\S/.test(line)) inParent = false; // 回到顶层
+    if (new RegExp(`^\\s{1,4}${child}\\s*:`).test(line)) return true;
+  }
+  return false;
 }
 
-// ---------- 接入 / 预览 / 回滚 ----------
+/** 该助手在落面是否已有**正确形状**的 mebular 条目；并如实报 legacy 错形状。 */
+export function landingState(assistant) {
+  const primary = assistant.landing?.primaryPath ?? null;
+  const format = assistant.landing?.format;
+  const adapter = adapterFor(format);
+  if (!primary) return { exists: false, present: false, legacyShape: false, text: null };
+  const text = safeReadText(primary);
+  if (text === null) return { exists: false, present: false, legacyShape: false, text: null };
+  if (adapter?.serialization === 'yaml') {
+    const path = keyPathOf(format);
+    const present = yamlHasKey(text, path[0], path[1]);
+    return { exists: true, present, legacyShape: false, text };
+  }
+  if (format === 'dsh') {
+    return { exists: true, present: /serverName:\s*['"]?mebular['"]?/.test(text), legacyShape: false, text };
+  }
+  try {
+    const parsed = JSON.parse(text);
+    const path = keyPathOf(format);
+    const present = JSON.stringify(walkGet(parsed, path).value ?? null) === JSON.stringify(mebularEntry(format));
+    const legacy = adapter?.legacyKeyPath
+      ? walkGet(parsed, adapter.legacyKeyPath).value !== undefined
+      : false;
+    return { exists: true, present, legacyShape: legacy && !present, text };
+  } catch {
+    return { exists: true, present: false, legacyShape: false, text, parseError: true };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 探测（多信号并集，逐信号可证伪；红线一/二）
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_CLI_TIMEOUT_MS = 1500;
+
+function defaultRun(command, timeoutMs) {
+  const res = spawnSync(command, { shell: true, encoding: 'utf-8', timeout: timeoutMs });
+  return { ok: res.status === 0, code: res.status ?? 1, stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
+}
+
+function defaultProcessList() {
+  try {
+    const res = spawnSync('ps', ['-Ao', 'command'], { encoding: 'utf-8', timeout: 2000 });
+    return res.status === 0 ? (res.stdout ?? '') : '';
+  } catch {
+    return '';
+  }
+}
+
+/** 评估一条 probe 信号；返回 `{ kind, source, hit, detail }`（detail 一律脱敏）。 */
+export function probeSignal(signal, options = {}) {
+  const run = options.run ?? defaultRun;
+  const source = signal.paths?.[0] ?? signal.command ?? signal.pattern ?? signal.kind;
+  try {
+    if (signal.kind === 'always') return { kind: signal.kind, source, hit: true, detail: signal.reason ?? 'n/a' };
+    if (signal.kind === 'config-path' || signal.kind === 'app-bundle' || signal.kind === 'dir' || signal.kind === 'path') {
+      const paths = Array.isArray(signal.paths) ? signal.paths : [];
+      const hit = paths.some((p) => existsSync(p));
+      return { kind: signal.kind, source, hit, detail: hit ? `存在：${paths.find((p) => existsSync(p))}` : `不存在：${paths.join(' / ')}` };
+    }
+    if (signal.kind === 'cli') {
+      const r = run(signal.command, signal.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS);
+      return { kind: signal.kind, source, hit: r.ok === true, detail: `rc=${r.code}` };
+    }
+    if (signal.kind === 'process') {
+      const list = options.processList ?? defaultProcessList;
+      const out = typeof list === 'function' ? list() : String(list ?? '');
+      const hit = out.includes(signal.pattern);
+      return { kind: signal.kind, source, hit, detail: hit ? '进程命中' : '进程未命中' };
+    }
+    return { kind: signal.kind, source, hit: false, detail: `未知信号类型：${signal.kind}` };
+  } catch (error) {
+    return { kind: signal.kind, source, hit: false, detail: `探测异常：${redactSecrets(error?.message ?? error)}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 三态 + 派生态（A-1/A-2/A-4/A-6 数据面）
+// ---------------------------------------------------------------------------
+
+/** 单条助手状态（含 evidence / hasVerify / activation / kind）。 */
+export function assistantState(assistant, options = {}) {
+  const signals = (assistant.probe?.signals ?? []).map((s) => probeSignal(s, options));
+  const anyHit = signals.some((s) => s.hit);
+  const anyError = signals.some((s) => typeof s.detail === 'string' && s.detail.startsWith('探测异常'));
+  const landing = landingState(assistant);
+  const strategy = assistant.writer?.strategy ?? 'merge-key';
+  let state;
+  if (strategy === 'manual' && !landing.present) state = anyHit ? 'manual' : 'not-installed';
+  else if (landing.present) state = 'connected';
+  else if (!anyHit) state = anyError ? 'detect-failed' : 'not-installed';
+  else state = 'not-connected';
+  const STATE_LABEL = { 'not-installed': '未安装', 'not-connected': '未接入', connected: '已接入 ✓', manual: '需手动', 'detect-failed': '检测失败' };
+  return {
+    id: assistant.id,
+    name: assistant.name,
+    kind: assistant.registryKind ?? 'builtin', // builtin | custom（UI 区分来源）
+    type: assistant.kind === 'snippet' ? 'snippet' : 'file', // file | snippet（descriptor 形态）
+    registryKind: assistant.registryKind ?? 'builtin',
+    state,
+    stateLabel: STATE_LABEL[state] ?? state,
+    evidence: signals.map((s) => ({ ...s, detail: redactSecrets(s.detail) })),
+    anySignalHit: anyHit,
+    landing: {
+      primaryPath: assistant.landing?.primaryPath ?? null,
+      keyPath: assistant.landing?.keyPath ?? null,
+      forbiddenPaths: assistant.landing?.forbiddenPaths ?? [],
+      format: assistant.landing?.format ?? assistant.format,
+      strategy,
+      present: landing.present,
+      legacyShape: landing.legacyShape === true,
+      exists: landing.exists,
+      parseError: landing.parseError === true,
+    },
+    hasVerify: Boolean(assistant.verify?.cli?.command),
+    verify: assistant.verify ?? null,
+    activation: assistant.activation ?? { kind: 'user-reload' },
+    writer: assistant.writer ?? null,
+    risks: assistant.risks ?? [],
+    skillsDirs: assistant.skillsDirs ?? [],
+    format: assistant.format,
+    configPath: assistant.landing?.primaryPath ?? null,
+    reuseOf: assistant.reuseOf ?? null,
+    note: assistant.note ?? null,
+    snippet: snippetFor(assistant.format),
+    // 兼容既有 `/admin/api/clients` 字段（只扩展不破坏；UI 亦可继续用）
+    installed: signals.some((s) => s.kind !== 'always' && s.hit),
+    connected: state === 'connected',
+    requiresRestart: (assistant.activation?.kind ?? 'user-reload') === 'user-reload',
+    needsManual: state === 'manual',
+    parseError: landing.parseError === true ? '配置无法解析（不自动改写）' : null,
+    skillsInstalled: (assistant.skillsDirs ?? []).some((d) => existsSync(join(d, 'mebular-memory', 'SKILL.md'))),
+  };
+}
+
+/** 注册表驱动的完整列表（A-1/A-2）。 */
+export function listAssistants(options = {}) {
+  const reg = registry(options);
+  const items = reg.assistants.map((a, i) => {
+    const registryKind = i < builtinAssistants(options).length ? 'builtin' : 'custom';
+    return { ...assistantState(a, options), registryKind, kind: registryKind };
+  });
+  return { assistants: items, customError: reg.customError, customPath: reg.customPath };
+}
+
+/** 兼容投影：既有 `/admin/api/clients` 的字段面（只扩展不破坏）。 */
+export function detectClients(options = {}) {
+  return listAssistants(options).assistants;
+}
+
+// ---------------------------------------------------------------------------
+// 写入（merge-key / cli-set / manual）：备份 → 写 → 失败回滚
+// ---------------------------------------------------------------------------
 
 function tsStamp() {
   return new Date().toISOString().replace(/[:.]/g, '-');
@@ -218,80 +645,219 @@ async function atomicWrite(path, text) {
   await rename(tmp, path);
 }
 
-export function previewClient(id, options = {}) {
-  const desc = descriptorFor(id, options);
-  if (!desc) return { ok: false, reason: `未知客户端：${id}` };
-  if (!desc.configPath) return { ok: true, needsManual: true, snippet: snippetFor(desc.format), preview: '' };
-  const existing = safeReadText(desc.configPath);
-  const merged = computeMerged(desc, existing);
-  if (merged.error) return { ok: true, needsManual: true, reason: merged.error, snippet: snippetFor(desc.format), preview: '' };
-  return { ok: true, changed: merged.changed, preview: lineDiff(existing ?? '', merged.text), configPath: desc.configPath };
+function isForbidden(assistant, path) {
+  const forbidden = assistant.landing?.forbiddenPaths ?? [];
+  return forbidden.some((f) => f === path);
 }
 
-/**
- * 接入：合并写入（备份 → 原子写 → 幂等）。重复接入等价条目 → changed:false（不写不备份）。
- */
-export async function connectClient(id, options = {}) {
-  const desc = descriptorFor(id, options);
-  if (!desc) return { ok: false, reason: `未知客户端：${id}` };
-  if (!desc.configPath) {
-    return { ok: false, needsManual: true, snippet: snippetFor(desc.format), reason: '该客户端不支持自动写入：请复制片段' };
+function computeMerged(assistant, existing) {
+  if (assistant.format === 'dsh') return mergeDsh(existing);
+  return mergeJsonEntry(existing, { format: assistant.format, entry: mebularEntry(assistant.format), keyPath: keyPathOf(assistant.landing?.format ?? assistant.format) });
+}
+
+export function previewClient(id, options = {}) {
+  const assistant = descriptorFor(id, options);
+  if (!assistant) return { ok: false, reason: `未知客户端：${id}` };
+  const primary = assistant.landing?.primaryPath ?? null;
+  if (!primary || assistant.writer?.strategy === 'manual') {
+    return { ok: true, needsManual: true, snippet: snippetFor(assistant.format), preview: '' };
   }
-  const existing = safeReadText(desc.configPath);
-  const merged = computeMerged(desc, existing);
+  const existing = safeReadText(primary);
+  const merged = computeMerged(assistant, existing);
+  if (merged.error) return { ok: true, needsManual: true, reason: merged.error, snippet: snippetFor(assistant.format), preview: '' };
+  return { ok: true, changed: merged.changed, preview: lineDiff(existing ?? '', merged.text), configPath: primary };
+}
+
+/** cli-set 写入（Hermes）：官方 CLI 逐字段写；任一失败 → 回滚整文件。 */
+async function connectViaCli(assistant, options) {
+  const run = options.run ?? ((cmd) => defaultRun(cmd, 30000));
+  const primary = assistant.landing.primaryPath;
+  const base = assistant.writer.command;
+  const entry = mebularEntry(assistant.format);
+  const fields = [];
+  if (typeof entry.command === 'string') fields.push(['command', entry.command]);
+  if (Array.isArray(entry.args)) fields.push(['args', JSON.stringify(entry.args)]);
+  if (typeof entry.url === 'string') fields.push(['url', entry.url]);
+  fields.push(['enabled', 'true']);
+  const backupPath = existsSync(primary) ? `${primary}.bak-${tsStamp()}` : null;
+  if (backupPath) await copyFile(primary, backupPath);
+  const commands = [];
+  for (const [key, value] of fields) {
+    const cmd = `${base}.${key} ${JSON.stringify(value)}`;
+    const res = run(cmd, assistant.verify?.cli?.timeoutMs ?? 30000);
+    commands.push({ cmd, code: res.code ?? (res.ok ? 0 : 1) });
+    if (res.ok !== true) {
+      if (backupPath) await copyFile(backupPath, primary); // 失败回滚
+      return { ok: false, changed: false, rolledBack: true, backupPath, commands, reason: `写入失败（${key}）已回滚`, needsManual: true, snippet: snippetFor(assistant.format) };
+    }
+  }
+  return { ok: true, changed: true, backupPath, commands, configPath: primary, preview: lineDiff(safeReadText(primary) ?? '', snippetFor(assistant.format)) };
+}
+
+/** 接入：merge-key（备份 → 原子写）/ cli-set（官方 CLI）/ manual（仅片段）。 */
+export async function connectClient(id, options = {}) {
+  const assistant = descriptorFor(id, options);
+  if (!assistant) return { ok: false, reason: `未知客户端：${id}` };
+  const strategy = assistant.writer?.strategy ?? 'merge-key';
+  const primary = assistant.landing?.primaryPath ?? null;
+  if (strategy === 'manual' || !primary) {
+    return { ok: false, needsManual: true, snippet: snippetFor(assistant.format), reason: '该客户端不支持自动写入：请复制片段' };
+  }
+  if (isForbidden(assistant, primary)) {
+    return { ok: false, reason: `禁写路径（landing.forbiddenPaths）：${primary}` };
+  }
+  if (strategy === 'cli-set') return connectViaCli(assistant, options);
+  const existing = safeReadText(primary);
+  const merged = computeMerged(assistant, existing);
   if (merged.error) {
-    return { ok: false, needsManual: true, snippet: snippetFor(desc.format), reason: merged.error, configPath: desc.configPath };
+    return { ok: false, needsManual: true, snippet: snippetFor(assistant.format), reason: merged.error, configPath: primary };
   }
   const preview = lineDiff(existing ?? '', merged.text);
   if (!merged.changed) {
-    return { ok: true, changed: false, configPath: desc.configPath, backupPath: null, preview, note: '已接入（幂等：无需改动）' };
+    return { ok: true, changed: false, configPath: primary, backupPath: null, preview, note: '已接入（幂等：无需改动）' };
   }
-  let backupPath = null;
-  if (existing !== null) {
-    backupPath = `${desc.configPath}.bak-${tsStamp()}`;
-    await copyFile(desc.configPath, backupPath);
+  const backupPath = existing !== null ? `${primary}.bak-${tsStamp()}` : null;
+  if (backupPath) await copyFile(primary, backupPath);
+  try {
+    await atomicWrite(primary, merged.text);
+  } catch (error) {
+    if (backupPath) await copyFile(backupPath, primary); // 失败回滚
+    return { ok: false, changed: false, rolledBack: Boolean(backupPath), backupPath, reason: `写入失败已回滚：${redactSecrets(error?.message ?? error)}` };
   }
-  await atomicWrite(desc.configPath, merged.text);
-  return { ok: true, changed: true, configPath: desc.configPath, backupPath, preview };
+  return { ok: true, changed: true, configPath: primary, backupPath, preview };
 }
 
-/** 回滚：显式备份优先；否则取最近一次备份还原；无备份则删除 mebular 条目（DSH 除外）。 */
+/** 回滚：显式备份优先；否则最近一次备份；无备份则删除 mebular 条目（DSH 除外）。 */
 export async function rollbackClient(id, options = {}) {
-  const desc = descriptorFor(id, options);
-  if (!desc || !desc.configPath) return { ok: false, reason: `未知客户端：${id}` };
-  const existing = safeReadText(desc.configPath);
+  const assistant = descriptorFor(id, options);
+  if (!assistant || !assistant.landing?.primaryPath) return { ok: false, reason: `未知客户端：${id}` };
+  const primary = assistant.landing.primaryPath;
+  const existing = safeReadText(primary);
   if (existing === null) return { ok: false, reason: '配置文件不存在，无需回滚' };
-  const dir = dirname(desc.configPath);
-  const base = `${desc.configPath.slice(desc.configPath.lastIndexOf(sep) + 1)}.bak-`;
+  const dir = dirname(primary);
+  const base = `${primary.slice(primary.lastIndexOf(sep) + 1)}.bak-`;
   const candidates = readdirSync(dir).filter((f) => f.startsWith(base)).sort();
   const target = options.backupPath ?? (candidates.length > 0 ? join(dir, candidates[candidates.length - 1]) : null);
-  const safety = `${desc.configPath}.bak-${tsStamp()}`;
-  await copyFile(desc.configPath, safety);
+  const safety = `${primary}.bak-${tsStamp()}`;
+  await copyFile(primary, safety);
   if (target) {
-    await atomicWrite(desc.configPath, await readFile(target, 'utf-8'));
+    await atomicWrite(primary, await readFile(target, 'utf-8'));
     return { ok: true, restoredFrom: target, backupPath: safety, removed: false };
   }
-  if (desc.format === 'dsh') return { ok: false, reason: 'DSH 无备份可回滚：请按片段人工移除' };
-  const merged = mergeJsonEntry(existing, { format: desc.format, entry: undefined });
+  if (assistant.format === 'dsh') return { ok: false, reason: 'DSH 无备份可回滚：请按片段人工移除' };
+  const merged = mergeJsonEntry(existing, { format: assistant.format, entry: undefined, keyPath: keyPathOf(assistant.landing?.format ?? assistant.format) });
   if (merged.error) return { ok: false, reason: merged.error };
-  await atomicWrite(desc.configPath, merged.text);
+  await atomicWrite(primary, merged.text);
   return { ok: true, restoredFrom: null, backupPath: safety, removed: true };
 }
 
-// ---------- Skill 安装 ----------
+// ---------------------------------------------------------------------------
+// 验证闭环（A-9/A-10/A-11）
+// ---------------------------------------------------------------------------
+
+/** 回读校验：条目存在 ∧ 原配置其余键无损（有备份时逐键比对）。 */
+export function readbackCheck(assistant) {
+  const landing = landingState(assistant);
+  if (!landing.exists) return { ok: false, detail: '配置文件不存在' };
+  if (!landing.present) {
+    return { ok: false, detail: landing.legacyShape ? '只找到旧形状（不生效），建议重新接入' : '未找到 mebular 条目' };
+  }
+  const primary = assistant.landing.primaryPath;
+  let intact = true;
+  try {
+    const dir = dirname(primary);
+    const base = `${primary.slice(primary.lastIndexOf(sep) + 1)}.bak-`;
+    const backups = readdirSync(dir).filter((f) => f.startsWith(base)).sort();
+    if (backups.length > 0 && (assistant.landing.format ?? assistant.format) !== 'hermes-yaml') {
+      const before = JSON.parse(readFileSync(join(dir, backups[backups.length - 1]), 'utf-8'));
+      const after = JSON.parse(landing.text);
+      const path = keyPathOf(assistant.landing.format ?? assistant.format);
+      const pruneEmpty = (node) => {
+        if (node === null || typeof node !== 'object' || Array.isArray(node)) return node;
+        const out = {};
+        for (const [k, v] of Object.entries(node)) {
+          const pruned = pruneEmpty(v);
+          if (pruned !== null && typeof pruned === 'object' && !Array.isArray(pruned) && Object.keys(pruned).length === 0) continue;
+          out[k] = pruned;
+        }
+        return out;
+      };
+      const strip = (obj) => {
+        const clone = JSON.parse(JSON.stringify(obj));
+        let node = clone;
+        for (const key of path.slice(0, -1)) { if (node?.[key] === undefined) return clone; node = node[key]; }
+        if (node && typeof node === 'object') delete node[path[path.length - 1]];
+        return pruneEmpty(clone);
+      };
+      intact = JSON.stringify(strip(before)) === JSON.stringify(strip(after));
+    }
+  } catch {
+    intact = false;
+  }
+  return { ok: intact, detail: intact ? 'mebular 条目已写入，其余键无损' : '其余键与备份不一致' };
+}
+
+/** 解析 `verify.cli` 输出：expect 命中 ∧（可选）toolsPattern 的 N ≥ minTools。 */
+export function parseVerifyOutput(verifyCli, output) {
+  const text = String(output ?? '');
+  const expect = verifyCli?.expect;
+  const expectHit = typeof expect === 'string' ? text.includes(expect) : true;
+  let tools = null;
+  if (typeof verifyCli?.toolsPattern === 'string') {
+    const m = new RegExp(verifyCli.toolsPattern).exec(text);
+    tools = m ? Number(m[1]) : null;
+  }
+  const minTools = Number.isFinite(verifyCli?.minTools) ? verifyCli.minTools : null;
+  const toolsOk = minTools === null ? true : (tools ?? -1) >= minTools;
+  return { ok: expectHit && toolsOk, expectHit, tools, toolsOk };
+}
 
 /**
- * Skill 源：**模块相对**解析（`packages/mcp/src/clients.mjs` → 同级 `packages/skill`）。
- * 服务托管/安装态 cwd=守护 home（如 `~/.mebular`），用 cwd 会找不到 → 必须按模块定位；
- * `options.skillRoot` 优先注入，`repoRoot`/cwd 仅作最后回退。
+ * 验证：① 回读（必有）→ ② CLI（有 verify.cli 则必跑）→ 终结态。
+ * `userConfirmedReload` 由 UI 的「我已重载，重新验证」按钮传入（A-10）。
  */
+export function verifyAssistant(id, options = {}) {
+  const assistant = descriptorFor(id, options);
+  if (!assistant) return { ok: false, reason: `未知客户端：${id}` };
+  const steps = [];
+  const readback = readbackCheck(assistant);
+  steps.push({ name: 'readback', label: '回读校验', ok: readback.ok, detail: redactSecrets(readback.detail) });
+  let cliResult = null;
+  const cli = assistant.verify?.cli;
+  if (cli?.command) {
+    const run = options.run ?? ((cmd, timeoutMs) => defaultRun(cmd, timeoutMs ?? cli.timeoutMs ?? 5000));
+    const res = run(cli.command, cli.timeoutMs ?? 5000);
+    const parsed = parseVerifyOutput(cli, `${res.stdout ?? ''}\n${res.stderr ?? ''}`);
+    const ok = res.ok === true && parsed.ok;
+    cliResult = { code: res.code ?? (res.ok ? 0 : 1), parsed, output: redactSecrets(`${res.stdout ?? ''}${res.stderr ?? ''}`).slice(-800) };
+    steps.push({ name: 'cli', label: 'CLI 验证', ok, detail: ok ? `命中 ${cli.expect ?? ''}`.trim() : `未通过（rc=${cliResult.code}${parsed.tools !== null ? `, tools=${parsed.tools}` : ''}）`, output: cliResult.output });
+  }
+  const allOk = steps.every((s) => s.ok);
+  const hot = (assistant.activation?.kind ?? 'user-reload') === 'hot';
+  let state;
+  if (!allOk) state = 'verify-failed';
+  else if (hot || options.userConfirmedReload === true) state = 'connected';
+  else state = 'pending-restart';
+  const STATE_LABEL = { connected: '已接入 ✓', 'pending-restart': '待生效', 'verify-failed': '验证未过' };
+  return {
+    ok: allOk,
+    id, state, stateLabel: STATE_LABEL[state] ?? state,
+    steps,
+    activation: assistant.activation,
+    needsUserReload: state === 'pending-restart',
+    backupHint: options.backupPath ?? null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Skill 安装
+// ---------------------------------------------------------------------------
+
 function moduleSkillRoot() {
   return join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'skill');
 }
 
-/**
- * 安装 mebular-memory + mebular-tasks 到该客户端首个已知 Skill 目录（复用 skill 包文件语义）。
- */
+/** 安装 mebular-memory + mebular-tasks 到该客户端首个已知 Skill 目录。 */
 export async function installSkills(id, options = {}) {
   const desc = descriptorFor(id, options);
   if (!desc) return { ok: false, reason: `未知客户端：${id}` };
@@ -302,8 +868,8 @@ export async function installSkills(id, options = {}) {
     moduleSkillRoot(),
     join(options.repoRoot ?? process.cwd(), 'packages', 'skill'),
   ].filter((p) => typeof p === 'string' && p.length > 0);
-  const root = candidates.find((p) => existsSync(join(p, 'SKILL.md')));
-  if (!root) {
+  const rootDir = candidates.find((p) => existsSync(join(p, 'SKILL.md')));
+  if (!rootDir) {
     return { ok: false, reason: `未找到 Skill 源（试过：${candidates.join('、')}）`, snippet: '请在仓库内运行，或手动复制 Skill 目录' };
   }
   const target = dirs[0];
@@ -311,10 +877,10 @@ export async function installSkills(id, options = {}) {
   const tasks = join(target, 'mebular-tasks');
   await mkdir(mem, { recursive: true });
   await mkdir(tasks, { recursive: true });
-  await copyFile(join(root, 'SKILL.md'), join(mem, 'SKILL.md'));
-  await copyFile(join(root, 'MEMORY_POLICY.md'), join(mem, 'MEMORY_POLICY.md'));
-  await copyFile(join(root, 'SETUP.md'), join(mem, 'SETUP.md'));
-  await copyFile(join(root, 'tasks', 'SKILL.md'), join(tasks, 'SKILL.md'));
-  await copyFile(join(root, 'SETUP.md'), join(tasks, 'SETUP.md'));
+  await copyFile(join(rootDir, 'SKILL.md'), join(mem, 'SKILL.md'));
+  await copyFile(join(rootDir, 'MEMORY_POLICY.md'), join(mem, 'MEMORY_POLICY.md'));
+  await copyFile(join(rootDir, 'SETUP.md'), join(mem, 'SETUP.md'));
+  await copyFile(join(rootDir, 'tasks', 'SKILL.md'), join(tasks, 'SKILL.md'));
+  await copyFile(join(rootDir, 'SETUP.md'), join(tasks, 'SETUP.md'));
   return { ok: true, installed: [mem, tasks] };
 }

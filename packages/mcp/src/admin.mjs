@@ -1005,17 +1005,27 @@ export async function buildServiceView({ home }) {
   };
 }
 
-/** H-1 · GET /admin/api/clients：AI 助手接入侦测（每客户端一张卡的状态）。 */
+/** UX-2 · GET /admin/api/clients：助手注册表（内置 ∪ 自定义）三态视图（每助手一张卡的状态）。 */
 export async function buildClientsView({ home }) {
-  const { detectClients } = await import('./clients.mjs');
+  const { listAssistants } = await import('./clients.mjs');
   let clients = [];
+  let customError = null;
+  let customPath = null;
   let error = null;
   try {
-    clients = detectClients({ home, cwd: process.cwd() });
+    const out = listAssistants({ home, cwd: process.cwd() });
+    clients = out.assistants;
+    customError = out.customError;
+    customPath = out.customPath;
   } catch (cause) {
     error = String(cause?.message ?? cause);
   }
-  return { clients, ...(error ? { error } : {}) };
+  return {
+    clients,
+    ...(customError ? { customError } : {}),
+    ...(customPath ? { customPath } : {}),
+    ...(error ? { error } : {}),
+  };
 }
 
 export const READ_ROUTES = {

@@ -83,9 +83,9 @@ check('退出策略：仅停止子进程托管（服务托管返回 false）',
 const wizard = await import('../src/main/wizard.mjs');
 const w0 = wizard.computeWizardState({ daemonHealthy: false });
 const w1 = wizard.computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1 } });
-const wDone = wizard.computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1 }, invite: { created: true } });
-check('向导状态机：未启动 → start；已连助手 → device；邀请已生成 → complete',
-  w0.current === 'start' && w1.current === 'device' && wDone.complete === true);
+const wDone = wizard.computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1 }, wizard: { assistantsAcked: true } });
+check('向导状态机（UX-2 两段）：未启动 → start；已连助手未确认 → 停留 assistants；「已完成」确认 → complete',
+  w0.current === 'start' && w1.current === 'assistants' && w1.complete === false && wDone.complete === true);
 
 const plan = wizard.invitePlan({ fleetBin: '/repo/packages/fleet/dist/cli.js', home: '/h', device: 'device-A' });
 check('邀请命令构造（只构造不发送；fleet invite --dir <home>）',

@@ -2,12 +2,12 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <!-- 安全：仅本地渲染；无内联脚本执行外部内容；CSP 限制为自身 + 回环 -->
+  <!-- 安全：仅本地渲染；无内联脚本执行外部内容；CSP 限制为自身（渲染层零网络，全部走 preload 白名单） -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'none'" />
-  <title>Mebular · 首次上手</title>
+  <title>Mebular · 首次设置</title>
   <style>
-    /* 风格一致性（W-1）：复用控制台 :root/--crt-* token；系统字体栈；任务流克制（无星空背景） */
+    /* 风格一致性（W-1）：复用控制台 :root/--crt-* token；系统字体栈 */
     :root {
       color-scheme: dark;
       --bg: #05070f;
@@ -17,14 +17,19 @@
       --text: #dbe4ff;
       --muted: #8391b4;
       --accent: #56b4e9;
+      --accent-2: #e69f00;
+      --ok: #009e73;
       --crt: #6dffb8;
       --crt-bright: #c8ffe3;
       --crt-dim: rgba(140, 255, 200, 0.52);
       --crt-border: rgba(80, 255, 170, 0.38);
       --crt-border-soft: rgba(80, 255, 170, 0.22);
     }
-    body { margin: 0; font: 14px -apple-system, system-ui, "PingFang SC", sans-serif; background: var(--bg); color: var(--text); }
-    header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; background: linear-gradient(180deg, #0a0f1f, #070b16); }
+    body { margin: 0; font: 14px -apple-system, system-ui, "PingFang SC", sans-serif; background: var(--bg); color: var(--text); overflow-x: hidden; }
+    /* UX-2：星野舞台（轻量 canvas；prefers-reduced-motion 静止） */
+    #sky { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; }
+    header, main { position: relative; z-index: 1; }
+    header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; background: linear-gradient(180deg, rgba(10,15,31,0.9), rgba(7,11,22,0.75)); backdrop-filter: blur(4px); }
     header h1 { font-size: 15px; margin: 0; font-weight: 600; color: var(--crt-bright); letter-spacing: 1px; }
     header .spacer { flex: 1; }
     button { background: rgba(8, 38, 26, 0.6); color: #a9ffd4; border: 1px solid var(--crt-border); border-radius: 6px; padding: 7px 12px; cursor: pointer; font-size: 13px; }
@@ -32,22 +37,25 @@
     button:disabled { opacity: 0.35; cursor: default; }
     button.ghost { background: transparent; border-color: var(--border); color: var(--muted); }
     button.primary { background: rgba(12, 52, 36, 0.85); border-color: var(--crt); color: var(--crt-bright); box-shadow: 0 0 14px -4px rgba(80, 255, 170, 0.5); }
-    main { padding: 18px 20px 40px; display: grid; gap: 14px; max-width: 900px; }
-    .step { border: 1px solid var(--border); border-radius: 8px; padding: 14px; background: var(--bg-panel); border-left: 2px solid transparent; }
+    /* 里程碑轨道：一屏两段，纯点击 */
+    main.rail { padding: 18px 20px 40px; display: grid; gap: 14px; max-width: 720px; margin: 0 auto; }
+    .step { border: 1px solid var(--border); border-radius: 10px; padding: 16px; background: rgba(11, 16, 32, 0.88); border-left: 2px solid transparent; backdrop-filter: blur(3px); }
     .step h2 { font-size: 14px; margin: 0 0 6px; color: var(--crt-bright); display: flex; align-items: center; gap: 8px; }
     .step .step-check { color: var(--crt); }
-    /* 中-3：当前步高亮（左边框 accent + 状态点）；done 步降透明 */
     .step .step-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--crt-dim); flex: 0 0 auto; }
     .step.is-current { border-left: 2px solid var(--accent); }
     .step.is-current .step-dot { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
-    .step.done { opacity: 0.62; }
+    .step.done { opacity: 0.72; }
     .step.done .step-dot { background: var(--crt); }
-    /* 高-2：完成态三步卡折叠为回顾（只留标题 + 一行回顾） */
+    /* 完成态段折叠为回顾（点标题可重新展开） */
+    .step.is-collapsed h2 { cursor: pointer; margin: 0; }
+    .step.is-collapsed h2::after { content: '（再看一遍 ›）'; font-size: 11px; color: var(--muted); font-weight: 400; }
     .step.is-collapsed .row,
     .step.is-collapsed .troubleshoot,
-    .step.is-collapsed #qr,
-    .step.is-collapsed #invite-text,
-    .step.is-collapsed #invite-msg { display: none; }
+    .step.is-collapsed .flow,
+    .step.is-collapsed #asst-list,
+    .step.is-collapsed #flow-msg,
+    .step.is-collapsed .seg-body { display: none; }
     .muted { color: var(--muted); font-size: 12px; }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
     code, pre { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
@@ -58,67 +66,96 @@
     details { border: 1px dashed var(--border); border-radius: 6px; padding: 8px 10px; margin-top: 10px; }
     details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
     details[open] summary { margin-bottom: 6px; }
-    .complete { border: 1px solid var(--crt); border-radius: 8px; padding: 18px; text-align: center; background: rgba(12, 52, 36, 0.35); }
+    .complete { border: 1px solid var(--crt); border-radius: 10px; padding: 18px; text-align: center; background: rgba(12, 52, 36, 0.35); }
     .complete p { margin: 0 0 10px; color: var(--crt-bright); }
+    .complete .muted { display: block; margin: -4px 0 12px; }
+    /* 段① 子步骤流水 */
+    .flow { list-style: none; margin: 10px 0 4px; padding: 0; display: grid; gap: 4px; }
+    .flow[hidden] { display: none; }
+    .flow li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+    .flow li i { width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--border); flex: 0 0 auto; font-style: normal; text-align: center; line-height: 13px; font-size: 10px; }
+    .flow li[data-state="done"] { color: var(--crt); }
+    .flow li[data-state="done"] i { border-color: var(--crt); background: rgba(109, 255, 184, 0.15); }
+    .flow li[data-state="done"] i::before { content: '✓'; }
+    .flow li[data-state="active"] { color: var(--text); }
+    .flow li[data-state="active"] i { border-color: var(--accent); box-shadow: 0 0 6px var(--accent); }
+    .flow li[data-state="active"] i::before { content: '●'; color: var(--accent); }
+    .flow li[data-state="failed"] { color: var(--accent-2); }
+    .flow li[data-state="failed"] i { border-color: var(--accent-2); }
+    .flow li[data-state="failed"] i::before { content: '✗'; color: var(--accent-2); }
+    #flow-msg { margin: 4px 0 0; }
+    #flow-msg.error { color: var(--accent-2); }
+    /* 段② 行级接入（与 设置 · AI 助手 同一行模板语言） */
+    #asst-list { margin-top: 8px; }
+    .arow { display: flex; align-items: center; gap: 10px; padding: 7px 2px; border-bottom: 1px dashed var(--border); min-height: 27px; }
+    .arow:last-child { border-bottom: 0; }
+    .aname { flex: 0 0 auto; min-width: 130px; font-size: 13px; }
+    .ast { flex: 0 0 auto; font-size: 12px; color: var(--muted); }
+    .ast.ok { color: var(--ok); }
+    .ast.todo { color: var(--accent-2); }
+    .asp { flex: 1 1 auto; }
+    .amsg { margin: 2px 0 6px; font-size: 12px; color: var(--muted); }
     #logs-conclusion { margin: 0 0 6px; color: #ffd9a8; font-size: 12px; }
-    #qr svg { background: #fff; border-radius: 8px; padding: 8px; max-width: 220px; height: auto; }
     #log { white-space: pre-wrap; }
   </style>
 </head>
 <body>
+  <canvas id="sky" aria-hidden="true"></canvas>
   <header>
-    <h1>Mebular · 首次上手</h1>
+    <h1>Mebular · 首次设置</h1>
     <span id="daemon-badge" class="badge todo">检查中…</span>
     <span class="spacer"></span>
     <button id="btn-skip" class="ghost">跳过，直接进入控制台</button>
-    <button id="open-console" class="ghost">打开控制台</button>
   </header>
 
-  <main>
-    <!-- 高-2：完成态通关（单一主按钮；三步卡折叠为回顾） -->
+  <main class="rail">
+    <!-- 完成态通关（单一主按钮；两段折叠为回顾；邀请移出引导，完成页提一句） -->
     <section id="complete-cta" class="complete" hidden>
       <p>全部就绪 ✦ Mebular 已在后台运行，随时可以从托盘回来。</p>
+      <span class="muted">想加新设备？控制台右上角「＋ 邀请新设备」随时可发。</span>
       <button id="btn-enter-console" class="primary">进入控制台 ✦</button>
     </section>
 
     <section class="step" id="step-start">
-      <h2><span class="step-dot"></span><span class="step-check" hidden>✓</span>① 启动 Mebular <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
-      <p class="muted" id="start-detail">正在检测守护…</p>
-      <div class="row">
-        <button id="btn-provision" class="primary" hidden>建新 / 加入 →</button>
-        <button id="btn-start">启动</button>
-        <button id="btn-install" class="ghost">让 Mebular 常驻</button>
-      </div>
-      <!-- 中-4：「重启」收编进折叠的故障区 -->
-      <details class="troubleshoot" id="start-troubleshoot">
-        <summary>出问题了？</summary>
+      <h2><span class="step-dot"></span><span class="step-check" hidden>✓</span>① 一键开始 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
+      <div class="seg-body">
+        <p class="muted" id="start-detail">正在检测守护…</p>
+        <!-- 段①：按钮原位展开的子步骤流水（启动 → 写入初始设置 → 重启恢复；失败定位子步骤） -->
+        <ol id="start-flow" class="flow" hidden>
+          <li data-sub="launch" data-state="todo"><i></i>启动守护</li>
+          <li data-sub="write" data-state="todo"><i></i>写入初始设置</li>
+          <li data-sub="recover" data-state="todo"><i></i>重启恢复</li>
+        </ol>
+        <p class="muted" id="flow-msg"></p>
         <div class="row">
-          <button id="btn-restart" class="ghost">重启守护</button>
+          <button id="btn-go" class="primary">一键开始</button>
+          <button id="btn-resume" hidden>从此处续跑</button>
+          <button id="btn-provision" class="primary" hidden>去写入初始设置 →</button>
+          <button id="btn-install" class="ghost">让 Mebular 常驻</button>
         </div>
-      </details>
+        <details class="troubleshoot" id="start-troubleshoot">
+          <summary>出问题了？</summary>
+          <div class="row">
+            <button id="btn-restart" class="ghost">重启守护</button>
+            <button id="btn-start" class="ghost">仅启动守护</button>
+          </div>
+        </details>
+      </div>
     </section>
 
     <section class="step" id="step-assistants">
       <h2><span class="step-dot"></span><span class="step-check" hidden>✓</span>② 连接 AI 助手</h2>
-      <p class="muted" id="assistants-detail">—</p>
-      <div class="row">
-        <button id="btn-assistants">打开控制台 · 连接 AI 助手</button>
+      <div class="seg-body">
+        <p class="muted" id="assistants-detail">—</p>
+        <!-- 行级接入：名称 + 状态词 + 一个动作（与 设置 · AI 助手 同一语言） -->
+        <div id="asst-list"></div>
+        <div class="row">
+          <button id="btn-seg2-done" class="primary" disabled>已完成</button>
+        </div>
       </div>
     </section>
 
-    <section class="step" id="step-device">
-      <h2><span class="step-dot"></span><span class="step-check" hidden>✓</span>③ 添加设备</h2>
-      <p class="muted">另一台设备装同一个 Mebular App，扫码（或粘贴令牌）即可加入。</p>
-      <div class="row">
-        <button id="btn-invite">生成邀请</button>
-        <button id="btn-copy" class="ghost" hidden>复制令牌</button>
-      </div>
-      <div id="qr"></div>
-      <pre id="invite-text" hidden></pre>
-      <p class="muted" id="invite-msg"></p>
-    </section>
-
-    <!-- 中-5：日志默认折叠；异常（引导态/启动失败）由渲染层自动展开并给一行结论 -->
+    <!-- 日志默认折叠；异常（引导态/启动失败）由渲染层自动展开并给一行结论 -->
     <details id="logs-panel">
       <summary>诊断与日志</summary>
       <p id="logs-conclusion" hidden></p>

@@ -1,10 +1,12 @@
-// W-1：M2 三步向导交互修复断言（纯逻辑 + 静态契约；不启 GUI、不引依赖）
+// W-1/UX-2：一屏两段向导交互断言（纯逻辑 + 静态契约；不启 GUI、不引依赖）
 //
 // ① 状态机漏 provision 步（高-1）：daemonHealthy 但 provisionRequired → ① 不 done、current=start
-// ② 完成态通关（高-2）：主 CTA「进入控制台 ✦」+ 三步卡折叠为回顾
-// ③ 当前步高亮（中-3）：current → .is-current 契约；done 步 → ✓
+// ② 完成态通关（高-2）：主 CTA「进入控制台 ✦」+ 两段折叠为回顾（可再展开）
+// ③ 当前段高亮（中-3）：current → .is-current 契约；done 段 → ✓
 // ④ 日志默认折叠（中-5）：<details> 无 open；异常（引导/未就绪）才自动展开 + 人话结论
-// ⑤ 邀请二次确认（小-7）：已有令牌再点 → confirm 标志位
+// ⑤ UX-2 段① 子步骤流水：启动 → 写入初始设置 → 重启恢复；失败定位 + 从此处续跑
+// ⑥ UX-2 段② 行级接入：「已接入 ✓」不自动翻段；「已完成」≥1 已接入才可用
+// ⑦ UX-2 邀请移出引导：完成页只提一句；wizard 内不再出现邀请按钮
 
 import { describe, it, expect } from '@jest/globals';
 import { readFileSync } from 'node:fs';
@@ -12,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeWizardState } from '../../apps/desktop/src/main/wizard.mjs';
 import { probeProvision } from '../../apps/desktop/src/main/daemon.mjs';
-import { wizardView, inviteClickPlan } from '../../apps/desktop/src/renderer/wizard-view.mjs';
+import { wizardView } from '../../apps/desktop/src/renderer/wizard-view.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rendererDir = join(here, '..', '..', 'apps', 'desktop', 'src', 'renderer');
@@ -49,34 +51,35 @@ describe('W-1 ① 状态机：provision 步（引导/待重启不算完成启动
   });
 });
 
-describe('W-1 ② 完成态：通关 CTA + 三步卡折叠为回顾', () => {
+describe('W-1/UX-2 ② 完成态：通关 CTA + 两段折叠为回顾', () => {
   const completeState = computeWizardState({
     daemonHealthy: true,
     assistants: { connectedCount: 1 },
-    invite: { created: true },
+    wizard: { assistantsAcked: true },
   });
 
-  it('完成态视图含主 CTA「进入控制台」且三步全部折叠', () => {
+  it('完成态视图含主 CTA「进入控制台」且两段全部折叠', () => {
     const view = wizardView(completeState);
     expect(view.complete).not.toBeNull();
     expect(view.complete.cta).toContain('进入控制台');
     expect(view.steps.every((s) => s.collapsed)).toBe(true);
   });
 
-  it('未完成时不给通关 CTA、当前步不折叠', () => {
+  it('未完成时不给通关 CTA、当前段不折叠', () => {
     const view = wizardView(computeWizardState({ daemonHealthy: true }));
     expect(view.complete).toBeNull();
     expect(view.steps.find((s) => s.id === 'assistants').collapsed).toBe(false);
   });
 
-  it('静态契约：wizard.html 含 #complete-cta 主按钮挂载点（默认隐藏）', () => {
+  it('静态契约：wizard.html 含 #complete-cta 主按钮挂载点（默认隐藏）+ 邀请提示一句', () => {
     expect(wizardHtml).toMatch(/id="complete-cta"[^>]*hidden|hidden[^>]*id="complete-cta"/);
     expect(wizardHtml).toMatch(/id="btn-enter-console"/);
+    expect(wizardHtml).toMatch(/＋ 邀请新设备/);
   });
 });
 
-describe('W-1 ③ 当前步高亮 / done 步收编（视图契约）', () => {
-  it('当前步 status=current（→ .is-current），done 步 check=✓ 且降透明', () => {
+describe('W-1/UX-2 ③ 当前段高亮 / done 段收编（视图契约）', () => {
+  it('当前段 status=current（→ .is-current），done 段 check=✓ 且降透明', () => {
     const view = wizardView(computeWizardState({ daemonHealthy: true }));
     const start = view.steps.find((s) => s.id === 'start');
     const assistants = view.steps.find((s) => s.id === 'assistants');
@@ -86,10 +89,10 @@ describe('W-1 ③ 当前步高亮 / done 步收编（视图契约）', () => {
     expect(assistants.check).toBeNull();
   });
 
-  it('徽章文案「第 N/3 步 · <名称>」（完成时「已就绪」）', () => {
-    expect(wizardView(computeWizardState({ daemonHealthy: true })).badge).toBe('第 2/3 步 · 连接 AI 助手');
-    expect(wizardView(computeWizardState({})).badge).toBe('第 1/3 步 · 启动 Mebular');
-    expect(wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1 }, invite: { created: true } })).badge).toBe('已就绪');
+  it('徽章文案「第 N/2 步 · <名称>」（完成时「已就绪」）', () => {
+    expect(wizardView(computeWizardState({ daemonHealthy: true })).badge).toBe('第 2/2 步 · 连接 AI 助手');
+    expect(wizardView(computeWizardState({})).badge).toBe('第 1/2 步 · 一键开始');
+    expect(wizardView(computeWizardState({ daemonHealthy: true, wizard: { assistantsAcked: true } })).badge).toBe('已就绪');
   });
 
   it('静态契约：样式含 .is-current（左边框 accent）与 .step.done 降透明', () => {
@@ -97,14 +100,14 @@ describe('W-1 ③ 当前步高亮 / done 步收编（视图契约）', () => {
     expect(wizardHtml).toMatch(/\.step\.done[^}]*opacity/);
   });
 
-  it('done 步按钮收编：「启动」禁用、「重启」入「出问题了？」折叠区、常驻留次级 + 临时运行徽章', () => {
+  it('done 段按钮收编：「重启/仅启动」入「出问题了？」折叠区、常驻留次级 + 临时运行徽章', () => {
     const running = wizardView(computeWizardState({
       daemonHealthy: true,
       service: { registered: false, running: true },
     }));
     const start = running.steps.find((s) => s.id === 'start');
-    expect(start.actions.start.disabled).toBe(true);
     expect(start.actions.restart.area).toBe('troubleshoot');
+    expect(start.actions.startOnly.area).toBe('troubleshoot');
     expect(start.actions.install.hidden).toBe(false);
     expect(start.serviceBadge).toBe('临时运行');
     const registered = wizardView(computeWizardState({
@@ -141,19 +144,90 @@ describe('W-1 ④ 日志区：默认折叠，异常才自动展开 + 人话结�
   });
 });
 
-describe('W-1 ⑤ 邀请：loading 禁用 + 已有令牌再点 → 二次确认（标志位）', () => {
-  it('inviteClickPlan：无令牌直接生成；已有令牌 → confirm=true', () => {
-    expect(inviteClickPlan({ hasToken: false })).toMatchObject({ confirm: false, busyLabel: '正在生成…' });
-    expect(inviteClickPlan({ hasToken: true })).toMatchObject({ confirm: true, label: '重新生成邀请' });
+describe('UX-2 ⑤ 段① 一键开始：子步骤流水（启动 → 写入 → 重启恢复）', () => {
+  it('视图模型：静态流水进度（健康 → launch done；待写入 → write active；待重启 → recover active）', () => {
+    const fresh = wizardView(computeWizardState({}));
+    expect(fresh.steps[0].flow).toEqual({ launch: 'todo', write: 'todo', recover: 'todo' });
+    const healthy = wizardView(computeWizardState({ daemonHealthy: true }));
+    expect(healthy.steps[0].flow).toEqual({ launch: 'done', write: 'done', recover: 'done' });
+    const needWrite = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned: false }));
+    expect(needWrite.steps[0].flow).toEqual({ launch: 'done', write: 'active', recover: 'todo' });
+    const needRestart = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned: true }));
+    expect(needRestart.steps[0].flow).toEqual({ launch: 'done', write: 'done', recover: 'active' });
+  });
+
+  it('静态契约：流水三子步骤 + 一键开始 + 从此处续跑 + 失败图标态', () => {
+    for (const sub of ['data-sub="launch"', 'data-sub="write"', 'data-sub="recover"']) {
+      expect(wizardHtml).toContain(sub);
+    }
+    expect(wizardHtml).toContain('id="btn-go"');
+    expect(wizardHtml).toContain('id="btn-resume"');
+    expect(wizardHtml).toMatch(/data-state="failed"/);
+    expect(wizardJs).toContain('runFlow');
+    expect(wizardJs).toContain('pollState');
+    expect(wizardJs).toContain('failedSub');
+  });
+
+  it('回归：.flow 的 [hidden] 不被 display:grid 覆盖（未跑流水前流水面板必须真隐藏）', () => {
+    expect(wizardHtml).toMatch(/\.flow\[hidden\][^{]*\{[^}]*display:\s*none/);
+  });
+
+  it('有界轮询：子步骤等待 ≤60s 上限（40 × 1.5s），超时即失败定位', () => {
+    expect(wizardJs).toMatch(/for \(let i = 0; i < 40; i \+= 1\)/);
+    expect(wizardJs).toMatch(/60s/);
+  });
+});
+
+describe('UX-2 ⑥ 段② 行级接入 + 「已完成」显式确认', () => {
+  it('「已接入 ✓」不自动翻段：connected≥1 仅解锁「已完成」；start 未完成先拦住', () => {
+    const connected = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1, total: 7 } }));
+    const assistants = connected.steps.find((s) => s.id === 'assistants');
+    expect(assistants.doneEnabled).toBe(true);
+    expect(assistants.status).toBe('current');
+    expect(assistants.doneLabel).toBe('已完成');
+    const zero = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 7 } }));
+    expect(zero.steps.find((s) => s.id === 'assistants').doneEnabled).toBe(false);
+    const blocked = wizardView(computeWizardState({ daemonHealthy: false, assistants: { connectedCount: 3 } }));
+    expect(blocked.steps.find((s) => s.id === 'assistants').doneEnabled).toBe(false);
+    expect(blocked.steps.find((s) => s.id === 'assistants').detailText).toContain('先完成第①步');
+  });
+
+  it('静态契约：行级接入行模板（名称+状态词+一个动作）+ ackAssistants 绑定', () => {
+    expect(wizardHtml).toContain('id="asst-list"');
+    expect(wizardHtml).toContain('id="btn-seg2-done"');
+    expect(wizardJs).toContain('data-asst-act');
+    expect(wizardJs).toContain('我已重载，重新验证');
+    expect(wizardJs).toContain('ackAssistants');
+    expect(wizardJs).toContain('clientsList');
+    expect(wizardJs).toContain('clientsAction');
+  });
+
+  it('行状态词与设置 · AI 助手同一语言（未安装/未接入/待生效/已接入 ✓/需手动）', () => {
+    for (const word of ['未安装', '未接入', '待生效', '已接入 ✓', '需手动']) {
+      expect(wizardJs).toContain(word);
+    }
+  });
+});
+
+describe('UX-2 ⑦ 邀请移出引导（归控制台单动作页）', () => {
+  it('wizard.html 不再出现邀请生成按钮 / QR 容器', () => {
+    expect(wizardHtml).not.toContain('id="btn-invite"');
+    expect(wizardHtml).not.toContain('id="qr"');
+    expect(wizardHtml).not.toContain('id="step-device"');
+  });
+
+  it('渲染层不再消费邀请点击计划（inviteClickPlan 已随邀请一起移出）', () => {
+    expect(wizardJs).not.toContain('inviteClickPlan');
+    expect(wizardJs).not.toContain('createInvite');
   });
 });
 
 describe('W-1 ① 渲染层接线（provision CTA / ② 先完成第①步）', () => {
-  it('引导态 → 步骤①给「建新/加入 →」CTA（openConsole），② 文案「先完成第①步」', () => {
+  it('引导态 → 段①给「去写入初始设置 →」CTA（openConsole），② 文案「先完成第①步」', () => {
     const view = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned: false }));
     const start = view.steps.find((s) => s.id === 'start');
     expect(start.actions.provision.hidden).toBe(false);
-    expect(start.actions.provision.label).toContain('建新');
+    expect(start.actions.provision.label).toContain('写入初始设置');
     expect(view.steps.find((s) => s.id === 'assistants').detailText).toContain('先完成第①步');
   });
 
@@ -162,5 +236,10 @@ describe('W-1 ① 渲染层接线（provision CTA / ② 先完成第①步）', 
     expect(wizardJs).toMatch(/is-current/);
     expect(wizardJs).toMatch(/complete-cta/);
     expect(wizardJs).toMatch(/logs-panel/);
+  });
+
+  it('星野舞台：canvas #sky + prefers-reduced-motion 静止降级', () => {
+    expect(wizardHtml).toContain('id="sky"');
+    expect(wizardJs).toContain('prefers-reduced-motion');
   });
 });

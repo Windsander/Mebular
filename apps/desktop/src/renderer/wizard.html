@@ -5,9 +5,9 @@
   <!-- 安全：仅本地渲染；无内联脚本执行外部内容；CSP 限制为自身（渲染层零网络，全部走 preload 白名单） -->
   <meta http-equiv="Content-Security-Policy"
         content="default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'none'" />
-  <title>Mebular · 首次设置</title>
+  <title>Mebular · 开始</title>
   <style>
-    /* 风格一致性（W-1）：复用控制台 :root/--crt-* token；系统字体栈 */
+    /* 风格一致性：复用控制台 :root/--crt-* token；系统字体栈 */
     :root {
       color-scheme: dark;
       --bg: #05070f;
@@ -25,29 +25,42 @@
       --crt-border: rgba(80, 255, 170, 0.38);
       --crt-border-soft: rgba(80, 255, 170, 0.22);
     }
-    body { margin: 0; font: 14px -apple-system, system-ui, "PingFang SC", sans-serif; background: var(--bg); color: var(--text); overflow-x: hidden; }
-    /* UX-2：星野舞台（轻量 canvas；prefers-reduced-motion 静止） */
+    body { margin: 0; font: 14px -apple-system, system-ui, "PingFang SC", sans-serif; background: var(--bg); color: var(--text); overflow-x: hidden; min-height: 100vh; }
+    /* 星野舞台（轻量 canvas；仅可见时渲染、隐藏即停；prefers-reduced-motion 静止） */
     #sky { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; }
-    header, main { position: relative; z-index: 1; }
-    header { padding: 14px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 12px; background: linear-gradient(180deg, rgba(10,15,31,0.9), rgba(7,11,22,0.75)); backdrop-filter: blur(4px); }
-    header h1 { font-size: 15px; margin: 0; font-weight: 600; color: var(--crt-bright); letter-spacing: 1px; }
-    header .spacer { flex: 1; }
-    button { background: rgba(8, 38, 26, 0.6); color: #a9ffd4; border: 1px solid var(--crt-border); border-radius: 6px; padding: 7px 12px; cursor: pointer; font-size: 13px; }
-    button:hover:not(:disabled) { border-color: rgba(120, 255, 190, 0.6); background: rgba(12, 52, 36, 0.75); }
-    button:disabled { opacity: 0.35; cursor: default; }
-    button.ghost { background: transparent; border-color: var(--border); color: var(--muted); }
-    button.primary { background: rgba(12, 52, 36, 0.85); border-color: var(--crt); color: var(--crt-bright); box-shadow: 0 0 14px -4px rgba(80, 255, 170, 0.5); }
-    /* 里程碑轨道：一屏两段，纯点击 */
-    main.rail { padding: 18px 20px 40px; display: grid; gap: 14px; max-width: 720px; margin: 0 auto; }
-    .step { border: 1px solid var(--border); border-radius: 10px; padding: 16px; background: rgba(11, 16, 32, 0.88); border-left: 2px solid transparent; backdrop-filter: blur(3px); }
-    .step h2 { font-size: 14px; margin: 0 0 6px; color: var(--crt-bright); display: flex; align-items: center; gap: 8px; }
+    .stage { position: relative; z-index: 1; max-width: 620px; margin: 0 auto; padding: 52px 24px 96px; }
+
+    /* ===== hero：品牌区（✦ / MEBULAR / 一句 tagline） ===== */
+    .hero { text-align: center; margin-bottom: 34px; }
+    .hero .mark { font-size: 30px; color: var(--crt); text-shadow: 0 0 18px rgba(109, 255, 184, 0.8); animation: pulse 3.2s ease-in-out infinite; }
+    .hero h1 { font-size: 28px; letter-spacing: 8px; margin: 8px 0 6px; color: var(--crt-bright); text-shadow: 0 0 24px rgba(109, 255, 184, 0.35); font-weight: 600; }
+    .hero .tagline { color: var(--muted); font-size: 13px; letter-spacing: 2px; margin: 0; min-height: 18px; }
+    .hero .badge { margin-top: 8px; display: inline-block; }
+
+    /* ===== 里程碑轨道：左轨线 + 节点灯（当前=呼吸、完成=✓、未到=暗） ===== */
+    .rail { list-style: none; margin: 0; padding: 0; position: relative; }
+    .rail::before { content: ""; position: absolute; left: 9px; top: 14px; bottom: 14px; width: 1px;
+      background: linear-gradient(180deg, var(--crt-border), rgba(80, 255, 170, 0.06)); }
+    .node { position: relative; padding: 0 0 18px 34px; }
+    .pip { position: absolute; left: 3px; top: 20px; width: 13px; height: 13px; border-radius: 50%;
+      border: 1px solid var(--crt-dim); background: var(--bg); transition: all .4s; }
+    .node.active .pip { border-color: var(--crt); box-shadow: 0 0 12px rgba(109, 255, 184, 0.9); animation: pulse 1.6s ease-in-out infinite; }
+    .node.done .pip { background: var(--crt); border-color: var(--crt); box-shadow: 0 0 8px rgba(109, 255, 184, 0.6); }
+    .node.done .pip::after { content: "✓"; position: absolute; inset: 0; color: #04220f; font-size: 10px; line-height: 13px; text-align: center; }
+    .node.locked { opacity: .38; }
+    .node.locked .panel { pointer-events: none; }
+
+    /* ===== 段面板（玻璃质感；完成=降透明折叠回顾） ===== */
+    .panel { border: 1px solid var(--crt-border-soft); border-radius: 10px; padding: 16px 18px;
+      background: linear-gradient(180deg, rgba(14, 20, 40, 0.82), rgba(8, 12, 24, 0.82));
+      backdrop-filter: blur(6px);
+      box-shadow: 0 0 0 1px rgba(80, 255, 170, 0.04), 0 18px 50px -30px rgba(0, 0, 0, 0.9), inset 0 0 40px -30px rgba(80, 255, 170, 0.25); }
+    .node.active .panel { border-color: var(--crt-border); box-shadow: 0 0 24px -8px rgba(80, 255, 170, 0.35), 0 18px 50px -30px rgba(0,0,0,.9); }
+    .step h2 { font-size: 15px; letter-spacing: 2px; margin: 0 0 6px; color: var(--crt-bright); display: flex; align-items: center; gap: 8px; }
     .step .step-check { color: var(--crt); }
-    .step .step-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--crt-dim); flex: 0 0 auto; }
     .step.is-current { border-left: 2px solid var(--accent); }
-    .step.is-current .step-dot { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
-    .step.done { opacity: 0.72; }
-    .step.done .step-dot { background: var(--crt); }
-    /* 完成态段折叠为回顾（点标题可重新展开） */
+    .step.done { opacity: 0.78; }
+    /* 完成态段折叠为回顾（done-line / 点标题可重新展开） */
     .step.is-collapsed h2 { cursor: pointer; margin: 0; }
     .step.is-collapsed h2::after { content: '（再看一遍 ›）'; font-size: 11px; color: var(--muted); font-weight: 400; }
     .step.is-collapsed .row,
@@ -56,8 +69,15 @@
     .step.is-collapsed #asst-list,
     .step.is-collapsed #flow-msg,
     .step.is-collapsed .seg-body { display: none; }
+    .done-line { display: none; gap: 8px; align-items: center; color: var(--crt); font-size: 13px; cursor: pointer; margin-top: 8px; }
+    .done-line .muted { color: var(--muted); }
+    .done-line .chev { margin-left: auto; color: var(--muted); font-size: 11px; }
+    .step.is-collapsed .done-line { display: flex; }
+
     .muted { color: var(--muted); font-size: 12px; }
+    .hint { font-size: 11px; color: var(--muted); }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
+    .sec-foot { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
     code, pre { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
     pre { background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow: auto; max-height: 280px; white-space: pre-wrap; }
     .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--crt-border); color: var(--crt); }
@@ -66,10 +86,18 @@
     details { border: 1px dashed var(--border); border-radius: 6px; padding: 8px 10px; margin-top: 10px; }
     details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
     details[open] summary { margin-bottom: 6px; }
-    .complete { border: 1px solid var(--crt); border-radius: 10px; padding: 18px; text-align: center; background: rgba(12, 52, 36, 0.35); }
-    .complete p { margin: 0 0 10px; color: var(--crt-bright); }
-    .complete .muted { display: block; margin: -4px 0 12px; }
-    /* 段① 子步骤流水 */
+
+    button { background: rgba(8, 38, 26, 0.6); color: #a9ffd4; border: 1px solid var(--crt-border); border-radius: 6px; padding: 7px 12px; cursor: pointer; font-size: 13px; }
+    button:hover:not(:disabled) { border-color: rgba(120, 255, 190, 0.6); background: rgba(12, 52, 36, 0.75); }
+    button:disabled { opacity: 0.35; cursor: default; }
+    button.ghost { background: transparent; border-color: var(--border); color: var(--muted); }
+    button.primary { background: rgba(12, 52, 36, 0.85); border-color: var(--crt); color: var(--crt-bright); box-shadow: 0 0 14px -4px rgba(80, 255, 170, 0.5); }
+    button.big { font-size: 15px; padding: 11px 26px; border-radius: 8px; letter-spacing: 1px; }
+    button.small { padding: 4px 10px; font-size: 12px; }
+    .alt { display: inline-block; margin-left: 14px; font-size: 12px; color: var(--muted); text-decoration: none; border-bottom: 1px dashed var(--border); cursor: pointer; background: none; border-top: none; border-left: none; border-right: none; padding: 0 0 1px; }
+    .alt:hover { color: var(--text); }
+
+    /* ===== 段① 子步骤流水（一键后按钮区原位展开；失败定位子步骤） ===== */
     .flow { list-style: none; margin: 10px 0 4px; padding: 0; display: grid; gap: 4px; }
     .flow[hidden] { display: none; }
     .flow li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
@@ -85,88 +113,141 @@
     .flow li[data-state="failed"] i::before { content: '✗'; color: var(--accent-2); }
     #flow-msg { margin: 4px 0 0; }
     #flow-msg.error { color: var(--accent-2); }
-    /* 段② 行级接入（与 设置 · AI 助手 同一行模板语言） */
+
+    /* ===== 段② 行级接入（名称 + 一个动作，纯点击） ===== */
     #asst-list { margin-top: 8px; }
-    .arow { display: flex; align-items: center; gap: 10px; padding: 7px 2px; border-bottom: 1px dashed var(--border); min-height: 27px; }
-    .arow:last-child { border-bottom: 0; }
+    .arow { display: flex; align-items: center; gap: 10px; padding: 8px 2px; border-top: 1px dashed var(--border); min-height: 27px; }
+    .arow:first-of-type { border-top: none; }
     .aname { flex: 0 0 auto; min-width: 130px; font-size: 13px; }
     .ast { flex: 0 0 auto; font-size: 12px; color: var(--muted); }
-    .ast.ok { color: var(--ok); }
+    .ast.ok { color: var(--crt); }
     .ast.todo { color: var(--accent-2); }
     .asp { flex: 1 1 auto; }
     .amsg { margin: 2px 0 6px; font-size: 12px; color: var(--muted); }
+
+    /* ===== 完成时刻「已就绪 ✦」暖收尾 ===== */
+    .finish { text-align: center; padding: 26px 0 6px; opacity: 0; transform: translateY(8px); transition: all .6s; }
+    .finish.show { opacity: 1; transform: none; }
+    .finish .word { font-size: 22px; letter-spacing: 10px; color: var(--crt-bright); text-shadow: 0 0 26px rgba(109, 255, 184, 0.65); margin-bottom: 12px; }
+    .finish .note { color: var(--muted); font-size: 12px; margin: 4px 0 14px; line-height: 1.8; }
+    .finish .note .warn-text { display: block; color: #ffd9a8; }
+
+    /* 已设置过·直达变体（替换整个 rail） */
+    #existing { text-align: center; }
+    body.is-existing .rail, body.is-existing .finish, body.is-existing #logs-panel { display: none; }
+    body:not(.is-existing) #existing { display: none; }
+
+    /* 诊断与日志（默认折叠；异常时渲染层自动展开 + 一行结论） */
+    #logs-panel { position: relative; z-index: 1; max-width: 620px; margin: 0 auto; }
     #logs-conclusion { margin: 0 0 6px; color: #ffd9a8; font-size: 12px; }
     #log { white-space: pre-wrap; }
+
+    /* 右下常驻「跳过引导 ›」 */
+    .skip { position: fixed; right: 18px; bottom: 14px; z-index: 2; font-size: 11px; color: #5f6675; text-decoration: none; background: none; border: none; padding: 0; cursor: pointer; }
+    .skip:hover { color: var(--muted); }
+
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+
+    /* hidden 语义兜底：任何作者 display 规则都不得让 [hidden] 元素显形（置末位保证同优先级胜出） */
+    [hidden] { display: none; }
   </style>
 </head>
-<body>
+<body class="setup">
   <canvas id="sky" aria-hidden="true"></canvas>
-  <header>
-    <h1>Mebular · 首次设置</h1>
-    <span id="daemon-badge" class="badge todo">检查中…</span>
-    <span class="spacer"></span>
-    <button id="btn-skip" class="ghost">跳过，直接进入控制台</button>
-  </header>
 
-  <main class="rail">
-    <!-- 完成态通关（单一主按钮；两段折叠为回顾；邀请移出引导，完成页提一句） -->
-    <section id="complete-cta" class="complete" hidden>
-      <p>全部就绪 ✦ Mebular 已在后台运行，随时可以从托盘回来。</p>
-      <span class="muted">想加新设备？控制台右上角「＋ 邀请新设备」随时可发。</span>
-      <button id="btn-enter-console" class="primary">进入控制台 ✦</button>
-    </section>
+  <div class="stage">
+    <!-- ===== 品牌区（✦ / MEBULAR / 一句 tagline 随进度变化） ===== -->
+    <header class="hero">
+      <div class="mark">✦</div>
+      <h1>MEBULAR</h1>
+      <p class="tagline" id="tagline">点两下，把它接进你的日常。</p>
+      <span id="daemon-badge" class="badge todo">检查中…</span>
+    </header>
 
-    <section class="step" id="step-start">
-      <h2><span class="step-dot"></span><span class="step-check" hidden>✓</span>① 一键开始 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
-      <div class="seg-body">
-        <p class="muted" id="start-detail">正在检测守护…</p>
-        <!-- 段①：按钮原位展开的子步骤流水（启动 → 写入初始设置 → 重启恢复；失败定位子步骤） -->
-        <ol id="start-flow" class="flow" hidden>
-          <li data-sub="launch" data-state="todo"><i></i>启动守护</li>
-          <li data-sub="write" data-state="todo"><i></i>写入初始设置</li>
-          <li data-sub="recover" data-state="todo"><i></i>重启恢复</li>
-        </ol>
-        <p class="muted" id="flow-msg"></p>
-        <div class="row">
-          <button id="btn-go" class="primary">一键开始</button>
-          <button id="btn-resume" hidden>从此处续跑</button>
-          <button id="btn-provision" class="primary" hidden>去写入初始设置 →</button>
-          <button id="btn-install" class="ghost">让 Mebular 常驻</button>
-        </div>
-        <details class="troubleshoot" id="start-troubleshoot">
-          <summary>出问题了？</summary>
-          <div class="row">
-            <button id="btn-restart" class="ghost">重启守护</button>
-            <button id="btn-start" class="ghost">仅启动守护</button>
+    <!-- ===== 里程碑轨道：两段纵向流动 ===== -->
+    <ol class="rail">
+      <!-- ① 开始 -->
+      <li class="node step" id="step-start">
+        <span class="pip"></span>
+        <section class="panel">
+          <h2><span class="step-check" hidden>✓</span>开始 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
+          <div class="seg-body">
+            <p class="muted" id="start-detail">在这台机器上启动 Mebular 并完成初始设置。<br />数据只存在这台机器上，不上云。</p>
+            <!-- 段①：一键后按钮区原位展开实时流水（启动 → 写入初始设置 → 重启恢复；失败定位子步骤） -->
+            <ol id="start-flow" class="flow" hidden>
+              <li data-sub="launch" data-state="todo"><i></i>启动本机守护</li>
+              <li data-sub="write" data-state="todo"><i></i>写入本机设置</li>
+              <li data-sub="recover" data-state="todo"><i></i>重启生效（页面会自动恢复）</li>
+            </ol>
+            <p class="muted" id="flow-msg"></p>
+            <div class="row">
+              <button id="btn-go" class="primary big">一键开始</button>
+              <button id="btn-resume" class="primary" hidden>从此处续跑</button>
+              <button id="btn-provision" class="primary" hidden>去写入初始设置 →</button>
+              <button id="alt-join" class="alt" hidden>或加入已有的 Mebular ›</button>
+              <button id="btn-install" class="ghost" hidden>让 Mebular 常驻</button>
+            </div>
+            <details class="troubleshoot" id="start-troubleshoot">
+              <summary>出问题了？</summary>
+              <div class="row">
+                <button id="btn-restart" class="ghost">重启守护</button>
+                <button id="btn-start" class="ghost">仅启动守护</button>
+              </div>
+            </details>
           </div>
-        </details>
-      </div>
-    </section>
+          <div class="done-line" id="start-done-line"><span>✓ 已就绪</span><span class="muted">这台机器已在跑你的 Mebular</span><span class="chev">展开 ›</span></div>
+        </section>
+      </li>
 
-    <section class="step" id="step-assistants">
-      <h2><span class="step-dot"></span><span class="step-check" hidden>✓</span>② 连接 AI 助手</h2>
-      <div class="seg-body">
-        <p class="muted" id="assistants-detail">—</p>
-        <!-- 行级接入：名称 + 状态词 + 一个动作（与 设置 · AI 助手 同一语言） -->
-        <div id="asst-list"></div>
-        <div class="row">
-          <button id="btn-seg2-done" class="primary" disabled>已完成</button>
-        </div>
-      </div>
-    </section>
+      <!-- ② 连接你的 AI 助手 -->
+      <li class="node step locked" id="step-assistants">
+        <span class="pip"></span>
+        <section class="panel">
+          <h2><span class="step-check" hidden>✓</span>连接你的 AI 助手</h2>
+          <div class="seg-body">
+            <p class="muted" id="assistants-detail">—</p>
+            <!-- 行级接入：名称 + 状态词 + 一个动作（与 设置 · AI 助手 同一语言） -->
+            <div id="asst-list"></div>
+            <p class="hint" id="assist-note">接入只改它的一条配置；重载对应助手后生效（可到 设置 → AI 助手 验证）。</p>
+            <div class="sec-foot">
+              <button id="btn-seg2-done" class="primary" disabled>已完成</button>
+              <button id="btn-seg2-skip" class="ghost small">先不接 ›</button>
+              <span class="hint" id="done2-hint">接好一个即可点「已完成」</span>
+            </div>
+          </div>
+          <div class="done-line" id="connect-done-line"><span>✓ 已接好</span><span class="muted">重载对应助手后生效</span><span class="chev">展开 ›</span></div>
+        </section>
+      </li>
+    </ol>
 
-    <!-- 日志默认折叠；异常（引导态/启动失败）由渲染层自动展开并给一行结论 -->
-    <details id="logs-panel">
-      <summary>诊断与日志</summary>
-      <p id="logs-conclusion" hidden></p>
-      <p class="muted" id="logs-source">—</p>
-      <div class="row">
-        <button id="btn-logs">刷新日志</button>
-        <button id="btn-logs-open" class="ghost">打开日志文件</button>
-      </div>
-      <pre id="log"></pre>
-    </details>
-  </main>
+    <!-- ===== 完成时刻（单一主按钮；两段折叠为回顾；邀请移出引导，完成页提一句） ===== -->
+    <div class="finish" id="complete-cta" hidden>
+      <div class="word">已就绪 ✦</div>
+      <p class="note" id="finish-note">之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请新设备」随时可用。</p>
+      <button id="btn-enter-console" class="primary big">进入控制台 ✦</button>
+    </div>
+
+    <!-- ===== 已设置过·直达变体（替换整个 rail） ===== -->
+    <section class="panel" id="existing" hidden>
+      <h2>欢迎回来</h2>
+      <p class="muted">这台机器已经设置好，Mebular 正在后台运行。</p>
+      <button id="btn-enter-console-2" class="primary big">进入控制台</button>
+    </section>
+  </div>
+
+  <!-- 诊断与日志（默认折叠；异常时自动展开 + 一行结论） -->
+  <details id="logs-panel">
+    <summary>诊断与日志</summary>
+    <p id="logs-conclusion" hidden></p>
+    <p class="muted" id="logs-source">—</p>
+    <div class="row">
+      <button id="btn-logs">刷新日志</button>
+      <button id="btn-logs-open" class="ghost">打开日志文件</button>
+    </div>
+    <pre id="log"></pre>
+  </details>
+
+  <button class="skip" id="btn-skip">跳过引导 ›</button>
 
   <script type="module" src="./wizard.js"></script>
 </body>

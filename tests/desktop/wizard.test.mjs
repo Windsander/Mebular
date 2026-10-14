@@ -2,8 +2,10 @@
 
 import { describe, it, expect } from '@jest/globals';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   WIZARD_STEPS,
   computeWizardState,
@@ -20,6 +22,7 @@ import {
 import { readDaemonLogs } from '../../apps/desktop/src/main/logs.mjs';
 
 const http = { host: '127.0.0.1', port: 7331 };
+const here = dirname(fileURLToPath(import.meta.url));
 
 describe('M2/UX-2 向导：状态机（两段；幂等可重入，逐步检测）', () => {
   it('无守护 → current=start；守护健康 → 前进到 assistants', () => {
@@ -96,6 +99,36 @@ describe('UX-2 段②行级接入：clientsViaApi / clientActionViaApi（假 fet
     const err = await clientActionViaApi(async () => { throw new Error('boom'); }, http, 'cursor', 'connect');
     expect(err.ok).toBe(false);
     expect(err.warning).toMatch(/boom/);
+  });
+
+  it('UX-2 收口：verify 在白名单内（body 带 userConfirmedReload），state/steps 透传；rollback 仍拒', async () => {
+    const calls = [];
+    const fetchImpl = async (url, opts = {}) => {
+      calls.push({ url, method: opts.method ?? 'GET', body: opts.body ?? null });
+      if (calls.length === 1) return { headers: { get: () => 'CSRF1' } };
+      return { ok: true, status: 200, json: async () => ({ ok: false, state: 'verify-failed', steps: [{ name: 'cli', ok: false }] }) };
+    };
+    const res = await clientActionViaApi(fetchImpl, http, 'opencode', 'verify');
+    expect(calls[1].url).toContain('/admin/api/clients/opencode/verify');
+    expect(calls[1].body).toBe('{"userConfirmedReload":true}');
+    expect(res).toMatchObject({ ok: false, state: 'verify-failed' });
+    expect(res.steps).toHaveLength(1);
+    // verify 通过时 ok 透传
+    const okRes = await clientActionViaApi(async (url, opts = {}) => (
+      opts.method === 'POST'
+        ? { ok: true, status: 200, json: async () => ({ ok: true, state: 'connected', steps: [] }) }
+        : { headers: { get: () => null } }
+    ), http, 'opencode', 'verify');
+    expect(okRes).toMatchObject({ ok: true, state: 'connected' });
+    const evilAct = await clientActionViaApi(fetchImpl, http, 'opencode', 'rollback');
+    expect(evilAct.ok).toBe(false);
+  });
+
+  it('UX-2 收口：向导「我已重载，重新验证」对有 hasVerify 的助手走 verify（wizard.js 契约）', () => {
+    const wizardJs = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'renderer', 'wizard.js'), 'utf-8');
+    expect(wizardJs).toMatch(/c\.hasVerify[\s\S]{0,200}data-asst-act="verify"/);
+    expect(wizardJs).toMatch(/act === 'verify'[\s\S]{0,400}pending-restart/);
+    expect(wizardJs).toMatch(/验证未过/);
   });
 });
 

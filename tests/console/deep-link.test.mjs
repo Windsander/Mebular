@@ -176,3 +176,130 @@ describe('UX-2 邀请单动作页', () => {
     expect(consoleJs).toContain('invite-to-settings');
   });
 });
+
+// ---------------------------------------------------------------------------
+// UX-2 轮 B 收口：轮 A 注册表接线（状态机 / 行内 verify / 自定义助手 CRUD）
+// ---------------------------------------------------------------------------
+
+import { normalizeClient, assistantStatus, assistantsPanelHtml, assistantAddFormHtml } from '../../packages/console/assistants.js';
+
+describe('UX-2 收口 ① normalizeClient：轮 A 新形状优先，旧形状兜底', () => {
+  it('state/kind(type)/hasVerify/activation 全量对接；manual 与 custom 正确归类', () => {
+    const file = normalizeClient({
+      id: 'opencode', name: 'OpenCode', kind: 'builtin', type: 'file',
+      state: 'not-connected', hasVerify: true,
+      activation: { kind: 'user-reload' }, evidence: [{ kind: 'config-path', detail: 'hit' }],
+      landing: { primaryPath: '/x/opencode.json', format: 'opencode' },
+    });
+    expect(file).toMatchObject({ id: 'opencode', manual: false, custom: false, installed: true, connected: false, hasVerify: true });
+    expect(file.configPath).toBe('/x/opencode.json');
+
+    const manual = normalizeClient({ id: 'g', name: 'G', kind: 'custom', type: 'snippet', state: 'manual', writer: { strategy: 'manual' } });
+    expect(manual).toMatchObject({ manual: true, custom: true, installed: true, connected: false });
+
+    // 旧形状兜底（无 state）：installed/connected 推导
+    const legacy = normalizeClient({ id: 'old', name: 'Old', installed: true, connected: true });
+    expect(legacy).toMatchObject({ installed: true, connected: true, manual: false });
+
+    // 检测失败不算已安装
+    expect(normalizeClient({ id: 'd', state: 'detect-failed' }).installed).toBe(false);
+  });
+});
+
+describe('UX-2 收口 ② assistantStatus：verify 三态接入状态词', () => {
+  const base = normalizeClient({ id: 'c', name: 'C', state: 'not-connected', hasVerify: true });
+  it('verify-failed → 验证未过；pending-restart → 待生效；connected 仍看落面', () => {
+    expect(assistantStatus(base, { clientVerify: { c: { state: 'verify-failed' } } })).toMatchObject({ key: 'verify-failed', label: '验证未过', tone: 'todo' });
+    expect(assistantStatus(base, { clientVerify: { c: { state: 'pending-restart' } } })).toMatchObject({ key: 'pending-reload', label: '待生效' });
+    expect(assistantStatus(base, { clientRestart: { c: true } })).toMatchObject({ key: 'pending-reload' });
+    expect(assistantStatus(normalizeClient({ id: 'c', state: 'connected' }), {})).toMatchObject({ key: 'connected', label: '已接入 ✓' });
+    expect(assistantStatus(base, {})).toMatchObject({ key: 'not-connected' });
+    expect(assistantStatus(normalizeClient({ id: 'm', state: 'manual' }), {})).toMatchObject({ key: 'manual', label: '需手动' });
+  });
+});
+
+describe('UX-2 收口 ③ 行内 verify 动作与 steps[] 渲染', () => {
+  const clients = [
+    { id: 'c', name: 'C', state: 'not-connected', hasVerify: true, landing: { primaryPath: '/x.json' } },
+    { id: 'm', name: 'M', state: 'manual', type: 'snippet', writer: { strategy: 'manual' } },
+  ];
+  it('manual（粘片段）行永不出现自动写「接入」；not-connected 行主操作=接入', () => {
+    const html = assistantsPanelHtml({ clients, ui: {} });
+    const manualRow = html.match(/<div class="asst-row" data-asst-row="m">[\s\S]*?<\/div>/)?.[0] ?? '';
+    expect(manualRow).toContain('查看片段 ›');
+    expect(manualRow).not.toContain('data-cli-action="connect"');
+    const fileRow = html.match(/<div class="asst-row" data-asst-row="c">[\s\S]*?<\/div>/)?.[0] ?? '';
+    expect(fileRow).toContain('data-cli-action="connect"');
+  });
+
+  it('hasVerify → 详情内有「验证」；verify-failed → 黄态一行 + 重新验证 + 详情含输出', () => {
+    const ui = {
+      clientOpen: { c: true },
+      clientVerify: { c: { state: 'verify-failed', steps: [
+        { name: 'readback', label: '回读校验', ok: true, detail: '命中' },
+        { name: 'cli', label: 'CLI 验证', ok: false, detail: '未通过（rc=1）', output: 'some cli stderr' },
+      ] } },
+    };
+    const html = assistantsPanelHtml({ clients, ui });
+    expect(html).toContain('data-cli-action="verify"');
+    expect(html).toContain('重新验证');
+    expect(html).toContain('回读校验');
+    expect(html).toContain('CLI 验证');
+    expect(html).toContain('验证未过');
+    expect(html).toContain('some cli stderr'); // 详情含输出
+  });
+
+  it('pending-restart → 待生效一行 + 「我已重载，重新验证」= verify-confirm', () => {
+    const ui = { clientVerify: { c: { state: 'pending-restart', steps: [] } } };
+    const html = assistantsPanelHtml({ clients, ui });
+    expect(html).toContain('待生效');
+    expect(html).toContain('data-cli-action="verify-confirm"');
+    expect(html).toContain('我已重载，重新验证');
+  });
+});
+
+describe('UX-2 收口 ④ ＋新增助手 CRUD 表单与端点接线', () => {
+  it('表单：选文件 / 粘片段双模式 + 全字段 id；编辑模式禁改 id', () => {
+    const blank = assistantAddFormHtml();
+    for (const token of ['asst-add-form', 'asst-add-name', 'asst-add-id', 'asst-add-path', 'asst-add-format', 'asst-add-submit', 'asst-add-cancel', 'name="asst-mode"']) {
+      expect(blank).toContain(token);
+    }
+    expect(blank).toContain('选文件');
+    expect(blank).toContain('粘片段');
+    const edit = assistantAddFormHtml({ edit: { id: 'my-asst', name: '我的助手', landing: { format: 'mcpServers', primaryPath: '/a.json' }, writer: { strategy: 'merge-key' } } });
+    expect(edit).toContain('data-edit-id="my-asst"');
+    expect(edit).toMatch(/id="asst-add-id"[^>]*disabled/);
+    expect(edit).toContain('value="/a.json"');
+  });
+
+  it('自定义行：详情内含「编辑」「移除」，且带「自定义」标记', () => {
+    const html = assistantsPanelHtml({
+      clients: [{ id: 'mine', name: 'Mine', kind: 'custom', state: 'not-connected', landing: { primaryPath: '/m.json' } }],
+      ui: { clientOpen: { mine: true } },
+    });
+    expect(html).toContain('自定义');
+    expect(html).toContain('data-asst-edit="mine"');
+    expect(html).toContain('data-asst-remove="mine"');
+  });
+
+  it('console.js 接轮 A 端点：POST 新增 / PUT 更新 / POST remove / verify（userConfirmedReload）', () => {
+    expect(consoleJs).toMatch(/api\('\/admin\/api\/assistants',\s*\{\s*method:\s*'POST'/);
+    expect(consoleJs).toMatch(/api\(`\/admin\/api\/assistants\/\$\{encodeURIComponent\(read\.editId\)\}`,\s*\{\s*method:\s*'PUT'/);
+    expect(consoleJs).toMatch(/api\(`\/admin\/api\/assistants\/\$\{encodeURIComponent\(id\)\}\/remove`/);
+    expect(consoleJs).toMatch(/api\(`\/admin\/api\/clients\/\$\{id\}\/verify`/);
+    expect(consoleJs).toMatch(/userConfirmedReload:\s*true/);
+  });
+
+  it('粘片段模式生成 manual descriptor（不出现自动写入面）；选文件模式生成 merge-key descriptor', () => {
+    const fn = consoleJs.match(/function readAssistantForm[\s\S]*?\n}/)?.[0] ?? '';
+    expect(fn).toContain("writer: { strategy: 'manual' }");
+    expect(fn).toContain("writer: { strategy: 'merge-key', backup: 'byte-level' }");
+    expect(fn).toContain("landing: { format: 'generic', primaryPath: null }");
+    expect(fn).toContain("verify: { configReadback: true }");
+  });
+
+  it('移除需二次确认（window.confirm）', () => {
+    const fn = consoleJs.match(/async function assistantRemove[\s\S]*?\n}/)?.[0] ?? '';
+    expect(fn).toContain('window.confirm');
+  });
+});

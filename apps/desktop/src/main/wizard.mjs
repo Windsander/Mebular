@@ -64,8 +64,14 @@ export function computeWizardState({ daemonHealthy, provisionRequired, provision
       detail: {
         healthy: Boolean(daemonHealthy),
         provision: { required: Boolean(provisionRequired), provisioned: provisionRequired ? Boolean(provisioned) : null },
+        // F2a 双保险①：registered/running 保三态（true/false/null=未知）——
+        // probeService 模块加载失败/探测异常时 registered 为 undefined，绝不能坍缩成 false（会误显「让 Mebular 常驻」）
         ...(service
-          ? { registered: Boolean(service.registered), running: Boolean(service.running), autostart: service.autostart ?? null }
+          ? {
+              registered: service.registered === undefined || service.registered === null ? null : Boolean(service.registered),
+              running: service.running === undefined || service.running === null ? null : Boolean(service.running),
+              autostart: service.autostart ?? null,
+            }
           : {}),
       },
     },
@@ -79,6 +85,14 @@ export function computeWizardState({ daemonHealthy, provisionRequired, provision
   const current = steps.find((s) => !s.done)?.id ?? null;
   const skipped = Boolean(wizard?.skipped);
   return { steps, current, skipped, complete: current === null || skipped };
+}
+
+/**
+ * F2b 安装幂等判定（纯函数，可单测）：已注册 → no-op（不重写 plist、不重启守护）。
+ * @returns {{ action: 'noop' | 'install', already: boolean }}
+ */
+export function installDecision(status) {
+  return status?.registered === true ? { action: 'noop', already: true } : { action: 'install', already: false };
 }
 
 /** 深链：控制台（H-1「连接 AI 助手」面板 / 添加设备）。 */
@@ -229,11 +243,12 @@ export async function clientsViaApi(fetchImpl, http = { host: '127.0.0.1', port:
 }
 
 /**
- * POST /admin/api/clients/{id}/{action}（connect/recheck；CSRF 双提交）。
- * 返回 { ok, changed?, needsManual?, reason?, warning? }；id/action 仅允许安全字符（防路径注入）。
+ * POST /admin/api/clients/{id}/{action}（connect/recheck/verify；CSRF 双提交）。
+ * verify = 用户已确认重载后的重新验证（body {userConfirmedReload:true}），返回透传 state/steps。
+ * 返回 { ok, changed?, state?, needsManual?, reason?, warning? }；id/action 仅允许安全字符（防路径注入）。
  */
 export async function clientActionViaApi(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, id, action, timeoutMs = 15000) {
-  if (!/^[\w-]{1,64}$/.test(String(id ?? '')) || !/^(connect|recheck)$/.test(String(action ?? ''))) {
+  if (!/^[\w-]{1,64}$/.test(String(id ?? '')) || !/^(connect|recheck|verify)$/.test(String(action ?? ''))) {
     return { ok: false, warning: '非法的助手动作参数' };
   }
   const base = `http://${http.host}:${http.port}`;
@@ -246,13 +261,21 @@ export async function clientActionViaApi(fetchImpl, http = { host: '127.0.0.1', 
         'content-type': 'application/json',
         ...(csrf ? { 'x-mebular-csrf': csrf } : {}),
       },
-      body: '{}',
+      body: action === 'verify' ? '{"userConfirmedReload":true}' : '{}',
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       return { ok: false, needsManual: Boolean(data?.needsManual), warning: data?.reason ?? data?.message ?? `动作失败（HTTP ${res.status}）` };
     }
-    return { ok: true, changed: Boolean(data?.changed), needsManual: Boolean(data?.needsManual), reason: data?.reason ?? null };
+    // verify：未过也是有效结果（HTTP 200，body 带 ok/state/steps）
+    return {
+      ok: action === 'verify' ? Boolean(data?.ok) : true,
+      changed: Boolean(data?.changed),
+      state: data?.state ?? null,
+      steps: Array.isArray(data?.steps) ? data.steps : null,
+      needsManual: Boolean(data?.needsManual),
+      reason: data?.reason ?? null,
+    };
   } catch (error) {
     return { ok: false, warning: `动作失败：${error?.message ?? error}` };
   }

@@ -50,11 +50,15 @@ function renderState(state) {
     const btnProvision = $('#btn-provision');
     if (btnProvision) btnProvision.hidden = Boolean(start.actions.provision.hidden);
     const btnInstall = $('#btn-install');
-    if (btnInstall) btnInstall.hidden = Boolean(start.actions.install.hidden);
+    if (btnInstall) {
+      btnInstall.hidden = Boolean(start.actions.install.hidden);
+      btnInstall.disabled = Boolean(start.actions.install.disabled);
+      if (start.actions.install.label) btnInstall.textContent = start.actions.install.label;
+    }
     // 非跑流水期间：流水面板按静态进度呈现（① 未完成且从未跑过 → 保持隐藏）
     if (!flow.running && !flow.everRan) {
       const flowEl = $('#start-flow');
-      const showStatic = start.status !== 'done' && (start.flow.write !== 'todo' || start.flow.launch === 'done');
+      const showStatic = start.status !== 'done' && (start.flow.write !== 'todo' || start.flow.launch !== 'todo');
       if (flowEl) flowEl.hidden = !showStatic;
       if (showStatic) for (const sub of ['launch', 'write', 'recover']) setSubState(sub, start.flow[sub] ?? 'todo');
     }
@@ -80,8 +84,16 @@ function renderState(state) {
   }
 }
 
+// F4④ 重启/安装宽限窗（≤60s）：① 已完成期间的健康瞬断不翻回未完成（grace 注入视图模型）
+let graceUntil = 0;
+function armGrace(ms = 60000) { graceUntil = Date.now() + ms; }
+
 async function refresh() {
-  try { renderState(await api.wizardState()); } catch (error) { setText('#start-detail', `状态读取失败：${error.message}`); }
+  try {
+    const state = await api.wizardState();
+    if (Date.now() < graceUntil && state && !state.complete) state.grace = true;
+    renderState(state);
+  } catch (error) { setText('#start-detail', `状态读取失败：${error.message}`); }
 }
 
 // ---------- 段① 一键开始：子步骤流水（启动 → 写入初始设置 → 重启恢复） ----------
@@ -137,9 +149,9 @@ async function runFlow(fromSub = 'launch') {
         const state = await api.wizardState();
         const provision = state?.steps?.[0]?.detail?.provision ?? { required: false };
         if (provision.required && !provision.provisioned) {
-          flowMsg('请在打开的控制台里选「建新」或「加入」，完成后这里自动继续…');
+          // F3：不自动跳控制台——给出显式按钮，由用户点开（引导期间窗口不擅自导航）
+          flowMsg('点「去写入初始设置 →」打开控制台，选「建新」或「加入」，完成后这里自动继续…');
           $('#btn-provision').hidden = false;
-          void api.openConsole();
           const ok = await pollState((s) => {
             const p = s?.steps?.[0]?.detail?.provision ?? {};
             return !p.required || Boolean(p.provisioned);
@@ -151,6 +163,7 @@ async function runFlow(fromSub = 'launch') {
         const provision = state?.steps?.[0]?.detail?.provision ?? { required: false };
         if (provision.required) {
           flowMsg('正在重启守护以恢复…');
+          armGrace(); // 重启窗口内 ① 不翻回未完成
           await api.restart();
           const ok = await pollState((s) => {
             const d = s?.steps?.[0]?.detail ?? {};
@@ -181,11 +194,31 @@ $('#btn-go')?.addEventListener('click', () => { void runFlow('launch'); });
 $('#btn-resume')?.addEventListener('click', () => { void runFlow(flow.failedSub ?? 'launch'); });
 $('#btn-provision')?.addEventListener('click', () => { void api.openConsole(); });
 $('#btn-start')?.addEventListener('click', async () => { await api.start(); await refresh(); });
+// F2c/F4④：安装常驻 = 登记后守护被 launchd 接管重启 → 按钮进「重启中…」过渡（≤60s 轮询），
+// 宽限窗内 ① 不翻回未完成；已注册则服务端 no-op（already）直接刷新。
 $('#btn-install')?.addEventListener('click', async () => {
-  try { await api.serviceInstall(); } catch (error) { setText('#start-detail', `安装常驻失败：${error.message}`); }
-  await refresh();
+  const btn = $('#btn-install');
+  if (btn) { btn.disabled = true; btn.textContent = '重启中…'; }
+  try {
+    const res = await api.serviceInstall();
+    if (res?.ok === false) throw new Error(res.reason ?? '安装失败');
+    if (!res?.already) {
+      armGrace();
+      await refresh(); // 立刻进宽限呈现（不等健康瞬断发生）
+      const ok = await pollState((s) => {
+        const d = s?.steps?.[0]?.detail ?? {};
+        return Boolean(d.healthy) && d.registered === true;
+      });
+      if (!ok) flowMsg('守护仍在恢复中：稍候会自动刷新；若持续异常请看下方日志。');
+    }
+  } catch (error) {
+    setText('#start-detail', `安装常驻失败：${error.message}`);
+  } finally {
+    if (btn) btn.disabled = false; // 文案由下次 renderState 按视图模型恢复
+    await refresh();
+  }
 });
-$('#btn-restart')?.addEventListener('click', async () => { await api.restart(); await refresh(); });
+$('#btn-restart')?.addEventListener('click', async () => { armGrace(); await api.restart(); await refresh(); });
 
 // 完成态段标题点击 → 重新展开回顾
 for (const id of ['step-start', 'step-assistants']) {
@@ -228,7 +261,12 @@ function renderClients(clients) {
     const st = rowStatus(c);
     let action = '';
     if (st.key === 'not-connected') action = `<button data-asst-act="connect" data-asst-id="${c.id}">接入</button>`;
-    else if (st.key === 'pending') action = `<button data-asst-act="recheck" data-asst-id="${c.id}">我已重载，重新验证</button>`;
+    else if (st.key === 'pending') {
+      // 轮 A：有验证命令的助手走服务端 verify（用户已确认重载）；否则回读重检测
+      action = c.hasVerify
+        ? `<button data-asst-act="verify" data-asst-id="${c.id}">我已重载，重新验证</button>`
+        : `<button data-asst-act="recheck" data-asst-id="${c.id}">我已重载，重新验证</button>`;
+    }
     else if (st.key === 'manual') action = `<button class="ghost" data-asst-act="console" data-asst-id="${c.id}">去控制台处理 ›</button>`;
     return `<div class="arow" data-asst-row="${c.id}">
       <span class="aname">${c.name ?? c.id}</span>
@@ -265,7 +303,18 @@ $('#asst-list')?.addEventListener('click', async (event) => {
   btn.disabled = true;
   asstMsg(id, act === 'connect' ? '正在接入…' : '正在重新验证…');
   const res = await api.clientsAction(id, act);
-  if (!res?.ok) {
+  if (act === 'verify') {
+    // 服务端 verify：connected → 完成；pending-restart → 仍待生效；verify-failed → 黄态提示（含失败步骤）
+    if (res?.ok && res.state === 'connected') {
+      pendingReload.delete(id);
+      asstMsg(id, '验证通过，已接入 ✓');
+    } else if (res?.state === 'pending-restart') {
+      asstMsg(id, '仍在待生效：请确认已完全重载该助手（退出进程，不是关窗口）。');
+    } else {
+      const failed = (res?.steps ?? []).filter((s) => s && s.ok === false).map((s) => s.label ?? s.name).join('、');
+      asstMsg(id, `验证未过${failed ? `（${failed}）` : ''}；详情见「设置 · AI 助手」。`);
+    }
+  } else if (!res?.ok) {
     asstMsg(id, res?.warning ?? '没能完成；可在「设置 · AI 助手」里看详情。');
   } else if (act === 'connect') {
     pendingReload.add(id);

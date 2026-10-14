@@ -12,7 +12,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,6 +70,12 @@ async function seedHome(home) {
     sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: false } },
     mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
   }, null, 2), 'utf-8');
+  // UX-2 收口联调用料（全在沙箱 home 内）：
+  // ① opencode 配置存在但无 mebular 键 → 「未接入」行（hasVerify=true，可点行内验证）
+  await mkdir(join(home, '.config', 'opencode'), { recursive: true });
+  await writeFile(join(home, '.config', 'opencode', 'opencode.json'), JSON.stringify({ theme: 'dark' }, null, 2), 'utf-8');
+  // ② 自定义助手落面文件（{} 无 mebular 键）→ 登记后「未接入」
+  await writeFile(join(home, 'custom-mcp.json'), '{}\n', 'utf-8');
   return storagePath;
 }
 
@@ -291,11 +297,11 @@ async function main() {
     // 归档：默认过滤下该行要么消失，要么按钮翻转为「解除归档」
     await evalJs('(() => { const b = document.querySelector("#memories-list [data-mem-action=archive]"); if (b) b.click(); })()');
     check('记忆视图：归档动作生效（行被过滤或按钮翻转）',
-      await waitFor('(() => { const list = document.querySelector("#memories-list"); if (!list) return false; return Boolean(list.querySelector("[data-mem-action=unarchive]")) || list.querySelectorAll(".mem-row").length === 0; })()'));
+      await waitFor('(() => { const list = document.querySelector("#memories-list"); if (!list) return false; return Boolean(list.querySelector("[data-mem-action=unarchive]")) || list.querySelectorAll(".mem-row").length === 0; })()', 30000)); // 写后收敛可能受 serve 同步探针拖慢（断言内容不变）
     // 勾选「显示已归档」→ 出现「已归档」徽标与「解除归档」
     await evalJs('document.querySelector("#mem-filter-archived").click()');
     check('记忆视图：显示已归档后出现「已归档」徽标与「解除归档」',
-      await waitFor('(() => { const v = document.querySelector("#memories-view"); return Boolean(v.querySelector("[data-mem-action=unarchive]")) && /已归档/.test(v.textContent); })()'));
+      await waitFor('(() => { const v = document.querySelector("#memories-view"); return Boolean(v.querySelector("[data-mem-action=unarchive]")) && /已归档/.test(v.textContent); })()', 30000));
     // 解除归档（可逆）后关掉过滤，视图仍可交互
     await evalJs('(() => { const b = document.querySelector("#memories-list [data-mem-action=unarchive]"); if (b) b.click(); })()');
     await evalJs('document.querySelector("#mem-filter-archived").click()');
@@ -313,11 +319,55 @@ async function main() {
     check('AI 助手页打开（assistants 面板可见）', await waitFor('document.querySelector("#settings-panel-assistants")?.hidden === false'));
     check('AI 助手单列表渲染（≥5 行 + 状态词 + 每行一个动作）',
       await waitFor('(() => { const p = document.querySelector("#settings-panel-assistants"); return Boolean(p) && p.querySelectorAll(".asst-row").length >= 5 && p.querySelectorAll("[data-cli-action]").length >= 1 && /未安装|未接入|已接入/.test(p.textContent); })()'));
-    // 行内「详情 ›」→ 次级动作 → 「查看改动」diff 预览
-    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=details]"); if (b) b.click(); })()');
-    check('行内「详情 ›」展开次级动作', await waitFor('Boolean(document.querySelector("#settings-panel-assistants [data-cli-action=preview]"))'));
-    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=preview]"); if (b) b.click(); })()');
+    // 行内「详情 ›」（opencode：沙箱已置配置但无 mebular 键 → 未接入）→ 次级动作 → 「查看改动」diff 预览
+    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=details][data-cli-id=opencode]"); if (b) b.click(); })()');
+    check('行内「详情 ›」展开次级动作（含 hasVerify 行的「验证」）',
+      await waitFor('Boolean(document.querySelector("#settings-panel-assistants [data-cli-action=preview][data-cli-id=opencode]")) && Boolean(document.querySelector("#settings-panel-assistants [data-cli-action=verify][data-cli-id=opencode]"))'));
+    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=preview][data-cli-id=opencode]"); if (b) b.click(); })()');
     check('「查看改动」→ diff 预览出现', await waitFor('(() => { const d = document.querySelector("#settings-panel-assistants .connect-diff"); return Boolean(d) && (d.textContent ?? "").trim().length > 0; })()'));
+
+    // UX-2 收口 ②行内 verify：沙箱回读必败（无 mebular 键）→ 验证未过黄态一行 + 重新验证 + 详情含输出
+    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=verify][data-cli-id=opencode]"); if (b) b.click(); })()');
+    check('行内验证：steps[] 展开（回读校验 + CLI 验证）',
+      await waitFor('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); return Boolean(v) && /回读校验/.test(v.textContent) && /CLI 验证/.test(v.textContent); })()', 20000));
+    check('验证未过 = 黄态一行 + 「重新验证」+ 详情含输出',
+      await waitFor('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); if (!v || !/验证未过/.test(v.textContent)) return false; if (!v.querySelector("details")) return false; const row = document.querySelector("#settings-panel-assistants [data-asst-row=opencode]"); return Boolean(row) && /重新验证/.test(row.textContent); })()', 20000));
+    check('manual（generic 粘片段）行永不出现自动写「接入」',
+      await evalJs('(() => { const row = document.querySelector("#settings-panel-assistants [data-asst-row=generic]"); const xp = document.querySelector("#settings-panel-assistants [data-asst-xp=generic]"); if (!row || !/查看片段/.test(row.textContent)) return false; return !row.querySelector("[data-cli-action=connect]") && !(xp && xp.querySelector("[data-cli-action=connect]")); })()'));
+
+    // UX-2 收口 ①＋新增助手 CRUD：登记（POST）→ 列表即时出现 → 编辑（PUT）→ 移除（POST remove）
+    await evalJs('document.querySelector("#asst-add").click()');
+    check('＋新增助手表单出现（选文件 / 粘片段双模式）',
+      await waitFor('(() => { const f = document.querySelector("#asst-add-form"); return Boolean(f) && f.querySelectorAll("input[name=asst-mode]").length === 2 && Boolean(f.querySelector("#asst-add-path")); })()'));
+    await evalJs(`(() => {
+      document.querySelector('#asst-add-name').value = 'UI 测试助手';
+      document.querySelector('#asst-add-id').value = 'ui-test-asst';
+      document.querySelector('#asst-add-path').value = ${JSON.stringify(join(home, 'custom-mcp.json'))};
+      document.querySelector('#asst-add-format').value = 'mcpServers';
+      document.querySelector('#asst-add-submit').click();
+    })()`);
+    const regOk = await waitFor('(() => { const r = document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]"); return Boolean(r) && /UI 测试助手/.test(r.textContent) && /未接入/.test(r.textContent) && Boolean(r.querySelector(".asst-tag")); })()', 30000); // 写后收敛余量（断言内容不变）
+    check('登记后列表即时出现（自定义标记 + 入三态机：未接入）', regOk);
+    if (!regOk) {
+      // 失败诊断（不中断）：表单错误行 / 表单是否还在 / 当前行集合 / 服务端真实注册表
+      console.log('  · [诊断] 表单错误行：', await evalJs('document.querySelector("#asst-add-error")?.textContent ?? "（无）"').catch((e) => String(e)));
+      console.log('  · [诊断] 表单仍打开：', await evalJs('Boolean(document.querySelector("#asst-add-form"))').catch((e) => String(e)));
+      console.log('  · [诊断] 面板行：', await evalJs('JSON.stringify(Array.from(document.querySelectorAll("#settings-panel-assistants [data-asst-row]")).map((r) => r.dataset.asstRow))').catch((e) => String(e)));
+      console.log('  · [诊断] 服务端 custom：', await evalJs('fetch("/admin/api/clients").then((r) => r.json()).then((j) => JSON.stringify((j.clients ?? []).filter((c) => c.kind === "custom").map((c) => [c.id, c.state, c.kind])))').catch((e) => String(e)));
+    }
+    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=details][data-cli-id=ui-test-asst]"); if (b) b.click(); })()');
+    check('自定义行详情含「编辑」「移除」',
+      await waitFor('Boolean(document.querySelector("#settings-panel-assistants [data-asst-edit=ui-test-asst]")) && Boolean(document.querySelector("#settings-panel-assistants [data-asst-remove=ui-test-asst]"))'));
+    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-edit=ui-test-asst]"); if (b) b.click(); })()');
+    check('编辑模式表单预填（id 禁改）',
+      await waitFor('(() => { const f = document.querySelector("#asst-add-form"); return Boolean(f) && f.dataset.editId === "ui-test-asst" && document.querySelector("#asst-add-id").disabled === true && document.querySelector("#asst-add-name").value === "UI 测试助手"; })()'));
+    await evalJs('(() => { document.querySelector("#asst-add-name").value = "UI 测试助手改"; document.querySelector("#asst-add-submit").click(); })()');
+    check('保存修改后列表即时更新（PUT 生效）',
+      await waitFor('(() => { const r = document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]"); return Boolean(r) && /UI 测试助手改/.test(r.textContent); })()', 30000));
+    await evalJs('window.confirm = () => true'); // 移除的二次确认桩住（headless 无对话框）
+    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-remove=ui-test-asst]"); if (b) b.click(); })()');
+    check('移除后行消失（POST remove 生效）',
+      await waitFor('!document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]")', 30000));
     await evalJs('document.querySelector("#settings-close").click()');
 
     // ---------- 背景层契约（crt-surface / crt-screen 扫描线 ::before 定位） ----------

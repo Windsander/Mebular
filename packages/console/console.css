@@ -1056,3 +1056,9 @@ select {
 .attention-item { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 4px 2px;
   font-size: 12px; color: var(--text); cursor: pointer; }
 .attention-item:hover { color: var(--accent-2); }
+/* ＋新增助手表单（选文件 / 粘片段） */
+.asst-form { border: 1px dashed var(--border); border-radius: 8px; padding: 10px 12px; }
+.asst-form-modes { display: flex; gap: 14px; margin: 6px 0; font-size: 12px; color: var(--muted); }
+.asst-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.asst-form-grid label { display: grid; gap: 3px; }
+.asst-tag { font-size: 10px; border: 1px solid var(--crt-border-soft); border-radius: 999px; padding: 1px 6px; margin-left: 6px; color: var(--crt-dim); vertical-align: 1px; }

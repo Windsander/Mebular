@@ -10,7 +10,7 @@ import { StarStage, namespaceColor, shortId } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, selectedMemoryCount, WIZARD_STEPS } from './wizard.js';
 import { IA_TABS, IA_TASK_CARDS, IA_ADVANCED_FIELDS, IA_MIGRATION, IA_EDITOR_PATHS, IA_INFO_BLOCKS, IA_SETTINGS_EXTRA } from './settings-ia.js';
-import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems } from './assistants.js';
+import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 
 const $ = (selector) => document.querySelector(selector);
 const params = new URLSearchParams(location.search);
@@ -40,6 +40,8 @@ const state = {
   error: null,
   clientRestart: {},
   clientOpen: {},
+  clientVerify: {},
+  addForm: null,
   csrf: readCookie('mebular_csrf'),
   token: params.get('token') ?? localStorage.getItem('mebular_token') ?? null,
   features: { writes: false },
@@ -60,6 +62,11 @@ function readCookie(name) {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
+// refresh 代际号（并发刷新丢弃过期完成；见 refresh()）
+let refreshSeq = 0;
+// refresh 单飞承诺（在途刷新未完结时复用，防请求雪崩堆叠——serve 变慢时系统仍能收敛）
+let refreshPromise = null;
+
 async function api(path, options = {}) {
   const headers = { accept: 'application/json', ...(options.headers ?? {}) };
   if (options.body !== undefined) headers['content-type'] = 'application/json';
@@ -72,6 +79,9 @@ async function api(path, options = {}) {
     credentials: 'same-origin',
     headers,
     ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+    // 有界等待：serve 事件循环被同步探针占住时，慢请求到点中止——
+    // allSettled 得以完结、连接池得以释放（否则刷新永远等不到全部响应，控制台永久卡死）
+    signal: options.signal ?? AbortSignal.timeout(options.timeoutMs ?? 12000),
   });
   const csrfHeader = res.headers.get('x-mebular-csrf');
   if (csrfHeader) state.csrf = csrfHeader;
@@ -93,7 +103,15 @@ async function api(path, options = {}) {
   return data;
 }
 
-async function refresh() {
+function refresh() {
+  // 单飞：在途刷新未完结 → 复用同一承诺（调用方拿到同一份结果；轮询不再堆叠请求批次）
+  refreshPromise ??= refreshOnce().finally(() => { refreshPromise = null; });
+  return refreshPromise;
+}
+
+async function refreshOnce() {
+  // 代际号：并发刷新（3s 轮询 vs 动作后即时刷新）时，丢弃先发出后完成的旧数据，防旧列表覆盖新状态
+  const seq = ++refreshSeq;
   if (MOCK) {
     const mock = await mockData();
     state.overview = mock.overview;
@@ -119,6 +137,7 @@ async function refresh() {
     api('/healthz'),
   ]);
   const [overview, devices, policy, namespaces, settings, configView, memories, serviceView, clientsView, healthz] = results;
+  if (seq !== refreshSeq) return; // 已有更新的刷新在途/完成：本轮数据过期，整体丢弃
   if (healthz && healthz.status === 'fulfilled') state.healthz = healthz.value;
   let firstError = null;
   if (overview.status === 'fulfilled') state.overview = overview.value;
@@ -888,6 +907,8 @@ function settingsSignature(activeTab) {
     state.clientDiff ?? null,
     state.clientRestart ?? null,
     state.clientOpen ?? null,
+    state.clientVerify ?? null,
+    state.addForm ?? null,
   ]);
 }
 
@@ -929,7 +950,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
       <div class="task-cards">${renderTaskCards()}</div>
       ${cfgActionsBlock()}
     `)}
-    ${panel('assistants', `<div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: state })}</div>`)}
+    ${panel('assistants', `<div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: { ...state, addForm: state.addForm ? assistantAddFormHtml(state.addForm) : '' } })}</div>`)}
     ${panel('advanced', `
       <p class="cfg-path muted">高级项默认收起：改动前请确认理解其安全含义（尤其监听地址、TLS 与 relay）。</p>
       ${renderAdvanced()}
@@ -1527,7 +1548,7 @@ async function serviceAction(action) {
       say('已请求重启；稍后本页会自动恢复。');
       return;
     }
-    const res = await api(`/admin/api/service/${action}`, { method: 'POST', body: {} });
+    const res = await api(`/admin/api/service/${action}`, { method: 'POST', body: {}, timeoutMs: 30000 }); // launchd 安装/重启可能较慢
     if (res?.dryRun) {
       const cmds = (res.commands ?? []).map((c) => c.join(' ')).join('；');
       say(`（试运行）将执行：${cmds}`);
@@ -1546,7 +1567,20 @@ async function clientAction(id, action) {
   try {
     // UX-2：「详情 ›」= 行内展开/收起（判据/路径/次级动作）
     if (action === 'details') { state.clientOpen[id] = !state.clientOpen[id]; rerenderAssistants(); return; }
-    if (action === 'recheck') { state.clientRestart[id] = false; await refresh(); say('已重新检测'); return; }
+    // UX-2 行内 verify（轮 A）：hasVerify → steps[]（回读 → CLI 验证 → 待生效/已接入；失败黄态 + 输出）
+    if (action === 'verify' || action === 'verify-confirm') {
+      const res = await api(`/admin/api/clients/${id}/verify`, {
+        method: 'POST',
+        body: action === 'verify-confirm' ? { userConfirmedReload: true } : {},
+        timeoutMs: 40000, // 服务端 verify CLI 最长 30s（hermes mcp test）
+      });
+      state.clientVerify[id] = res;
+      if (res?.state === 'connected') { state.clientRestart[id] = false; say('验证通过，已接入 ✓'); }
+      else if (res?.state === 'pending-restart') say('配置已就绪，重载该助手后生效；重载后点「我已重载，重新验证」。');
+      else say('验证未过：展开看失败步骤与输出。');
+      return;
+    }
+    if (action === 'recheck') { state.clientRestart[id] = false; state.clientVerify[id] = null; await refresh(); say('已重新检测'); return; }
     if (action === 'copy') {
       const client = (state.clients ?? []).find((c) => c.id === id);
       await navigator.clipboard.writeText(client?.snippet ?? '');
@@ -1561,17 +1595,103 @@ async function clientAction(id, action) {
     }
     // R-1 小-11：回滚是不可逆方向的操作 → 二次确认
     if (action === 'rollback' && !window.confirm('确定回滚？将把该助手的配置还原到接入前（用自动备份恢复）。')) return;
-    const res = await api(`/admin/api/clients/${id}/${action}`, { method: 'POST', body: {} });
+    const res = await api(`/admin/api/clients/${id}/${action}`, { method: 'POST', body: {}, timeoutMs: 20000 }); // 写入/CLI 动作给足余量
     if (typeof res.preview === 'string' && res.preview.length > 0) showDiff(res.preview);
     if (!res.ok) { say(`需要你手动处理：${res.reason ?? '请看片段'}`); return; }
     say(action === 'connect'
       ? (res.changed ? '接入完成（已备份原配置）。重启该助手后生效。' : '已接入（无需改动）。')
       : action === 'rollback' ? '已还原到接入前。' : '已安装。');
     // R-1 中-6 → UX-2 行内闭环：接入成功后转「待生效」，「我已重载，重新验证」可消
-    if (action === 'connect' && res.changed) state.clientRestart[id] = true;
+    if (action === 'connect' && res.changed) { state.clientRestart[id] = true; state.clientVerify[id] = null; }
     await refresh();
   } catch (error) {
     say(`没能完成：${error.message}`);
+  }
+}
+
+// ---------- UX-2 自定义助手 CRUD（轮 A 注册表端点；选文件=merge-key 自动写 / 粘片段=manual 只给片段） ----------
+
+/** 从 #asst-add-form 读表单并构造 descriptor（服务端 validateAssistant 会再校验一次）。 */
+function readAssistantForm() {
+  const root = $('#asst-add-form');
+  if (!root) return null;
+  const mode = root.querySelector('input[name="asst-mode"]:checked')?.value ?? 'file';
+  const id = $('#asst-add-id')?.value?.trim() ?? '';
+  const name = $('#asst-add-name')?.value?.trim() ?? '';
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return { error: '标识需为小写 kebab-case（如 my-assistant）' };
+  if (name === '') return { error: '名称必填' };
+  if (mode === 'snippet') {
+    return {
+      editId: root.dataset.editId || null,
+      descriptor: {
+        id, name,
+        landing: { format: 'generic', primaryPath: null },
+        probe: { signals: [{ kind: 'always', reason: '手动条目（粘片段接入）' }] },
+        writer: { strategy: 'manual' },
+        verify: { configReadback: true },
+        activation: { kind: 'user-reload' },
+      },
+    };
+  }
+  const primaryPath = $('#asst-add-path')?.value?.trim() ?? '';
+  if (primaryPath === '') return { error: '配置文件路径必填（选文件模式）' };
+  const format = $('#asst-add-format')?.value ?? 'mcpServers';
+  return {
+    editId: root.dataset.editId || null,
+    descriptor: {
+      id, name,
+      landing: { format, primaryPath },
+      probe: { signals: [{ kind: 'config-path', paths: [primaryPath] }] },
+      writer: { strategy: 'merge-key', backup: 'byte-level' },
+      verify: { configReadback: true },
+      activation: { kind: 'user-reload' },
+    },
+  };
+}
+
+async function assistantSubmitForm() {
+  const read = readAssistantForm();
+  if (!read) return;
+  if (read.error) { state.addForm = { ...(state.addForm ?? {}), error: read.error }; rerenderAssistants(); return; }
+  try {
+    const res = read.editId
+      ? await api(`/admin/api/assistants/${encodeURIComponent(read.editId)}`, { method: 'PUT', body: read.descriptor })
+      : await api('/admin/api/assistants', { method: 'POST', body: read.descriptor });
+    if (!res?.ok) { state.addForm = { ...(state.addForm ?? {}), error: res?.reason ?? '登记失败' }; rerenderAssistants(); return; }
+    state.addForm = null;
+    await refresh();
+    if ($('#settings') && !$('#settings').hidden) { lastSettingsSignature = null; renderSettings('assistants'); }
+  } catch (error) {
+    state.addForm = { ...(state.addForm ?? {}), error: `没能完成：${error.message}` };
+    rerenderAssistants();
+  }
+}
+
+function assistantStartEdit(id) {
+  const client = (state.clients ?? []).find((c) => c.id === id);
+  if (!client) return;
+  state.addForm = {
+    edit: {
+      id: client.id,
+      name: client.name,
+      landing: { format: client.landing?.format ?? client.format ?? 'mcpServers', primaryPath: client.landing?.primaryPath ?? client.configPath ?? '' },
+      writer: { strategy: client.writer?.strategy ?? (client.needsManual ? 'manual' : 'merge-key') },
+    },
+  };
+  rerenderAssistants();
+}
+
+async function assistantRemove(id) {
+  // 移除自定义条目不可恢复 → 二次确认
+  if (!window.confirm(`确定移除自定义助手「${id}」？只删登记，不动它已有的配置文件。`)) return;
+  try {
+    const res = await api(`/admin/api/assistants/${encodeURIComponent(id)}/remove`, { method: 'POST', body: {} });
+    if (!res?.ok) { state.clientMsg[id] = res?.reason ?? '移除失败'; rerenderAssistants(); return; }
+    await refresh();
+    if ($('#settings') && !$('#settings').hidden) { lastSettingsSignature = null; renderSettings('assistants'); }
+  } catch (error) {
+    state.clientMsg[id] = `没能完成：${error.message}`;
+    rerenderAssistants();
   }
 }
 
@@ -2397,8 +2517,23 @@ $('#settings-body').addEventListener('click', (event) => {
   const cli = event.target.closest('[data-cli-action]');
   if (cli) { void clientAction(cli.dataset.cliId, cli.dataset.cliAction); return; }
   if (event.target.closest('#asst-add')) {
-    const flow = $('#asst-add-flow');
-    if (flow) flow.hidden = !flow.hidden;
+    state.addForm = state.addForm ? null : { edit: null };
+    rerenderAssistants();
+    return;
+  }
+  if (event.target.closest('#asst-add-submit')) { void assistantSubmitForm(); return; }
+  if (event.target.closest('#asst-add-cancel')) { state.addForm = null; rerenderAssistants(); return; }
+  const editBtn = event.target.closest('[data-asst-edit]');
+  if (editBtn) { assistantStartEdit(editBtn.dataset.asstEdit); return; }
+  const removeBtn = event.target.closest('[data-asst-remove]');
+  if (removeBtn) { void assistantRemove(removeBtn.dataset.asstRemove); return; }
+  // 表单内模式切换：选文件 ⇄ 粘片段（字段显隐，不重建整页）
+  const modeRadio = event.target.closest('input[name="asst-mode"]');
+  if (modeRadio) {
+    const form = $('#asst-add-form');
+    const fileMode = modeRadio.value === 'file';
+    form?.querySelectorAll('.asst-mode-file').forEach((el) => { el.hidden = !fileMode; });
+    form?.querySelectorAll('.asst-mode-snippet').forEach((el) => { el.hidden = fileMode; });
     return;
   }
   if (event.target.closest('#asst-missing-toggle')) {

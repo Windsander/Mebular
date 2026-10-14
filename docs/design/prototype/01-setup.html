@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Mebular · 开始</title>
+<link rel="stylesheet" href="./prototype.css" />
+<style>
+/* ===== 一屏引导 · 舞台（console 契约：星野 + CRT 绿） ===== */
+body.setup { min-height: 100vh; overflow-x: hidden; }
+#stars { position: fixed; inset: 0; z-index: 0; }
+.stage { position: relative; z-index: 1; max-width: 620px; margin: 0 auto; padding: 56px 24px 96px; }
+
+.hero { text-align: center; margin-bottom: 40px; }
+.hero .mark { font-size: 30px; color: var(--crt); text-shadow: 0 0 18px rgba(109, 255, 184, 0.8); animation: pulse 3.2s ease-in-out infinite; }
+.hero h1 { font-size: 30px; letter-spacing: 8px; margin: 8px 0 6px; text-shadow: 0 0 24px rgba(109, 255, 184, 0.35); }
+.hero .tagline { color: var(--muted); font-size: 13px; letter-spacing: 2px; margin: 0; min-height: 18px; }
+
+.rail { list-style: none; margin: 0; padding: 0; position: relative; }
+.rail::before { content: ""; position: absolute; left: 9px; top: 14px; bottom: 14px; width: 1px;
+  background: linear-gradient(180deg, var(--crt-border), rgba(80, 255, 170, 0.06)); }
+.node { position: relative; padding: 0 0 18px 34px; }
+.pip { position: absolute; left: 3px; top: 18px; width: 13px; height: 13px; border-radius: 50%;
+  border: 1px solid var(--crt-dim); background: var(--bg); transition: all .4s; }
+.node.active .pip { border-color: var(--crt); box-shadow: 0 0 12px rgba(109, 255, 184, 0.9); animation: pulse 1.6s ease-in-out infinite; }
+.node.done .pip { background: var(--crt); border-color: var(--crt); box-shadow: 0 0 8px rgba(109, 255, 184, 0.6); }
+.node.done .pip::after { content: "✓"; position: absolute; inset: 0; color: #04220f; font-size: 10px; line-height: 13px; text-align: center; }
+.node.locked { opacity: .38; }
+
+.panel { border: 1px solid var(--crt-border-soft); border-radius: 10px; padding: 18px 20px;
+  background: linear-gradient(180deg, rgba(14, 20, 40, 0.82), rgba(8, 12, 24, 0.82));
+  backdrop-filter: blur(6px);
+  box-shadow: 0 0 0 1px rgba(80, 255, 170, 0.04), 0 18px 50px -30px rgba(0, 0, 0, 0.9), inset 0 0 40px -30px rgba(80, 255, 170, 0.25); }
+.node.active .panel { border-color: var(--crt-border); box-shadow: 0 0 24px -8px rgba(80, 255, 170, 0.35), 0 18px 50px -30px rgba(0,0,0,.9); }
+.panel h2 { font-size: 16px; letter-spacing: 2px; margin-bottom: 6px; }
+.panel p { margin: 0 0 12px; font-size: 13px; color: var(--muted); line-height: 1.7; }
+
+button.big { font-size: 15px; padding: 11px 26px; border-radius: 8px; letter-spacing: 1px; }
+.alt { display: inline-block; margin-left: 14px; font-size: 12px; color: var(--muted); text-decoration: none; border-bottom: 1px dashed var(--border); cursor: pointer; }
+.alt:hover { color: var(--text); }
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--crt-dim); border-top-color: var(--crt); border-radius: 50%; animation: rot .8s linear infinite; vertical-align: -2px; margin-right: 8px; }
+
+/* 段①内部流水：一键之后，按钮区变成实时子步骤 */
+.pipeline { list-style: none; margin: 4px 0 0; padding: 0; font-size: 13px; line-height: 2.1; }
+.pipeline li { display: flex; gap: 9px; align-items: baseline; color: var(--muted); }
+.pipeline li .st { width: 14px; text-align: center; flex: none; }
+.pipeline li.ok { color: var(--text); }
+.pipeline li.ok .st { color: var(--crt); }
+.pipeline li.run { color: var(--crt-bright); }
+.pipeline li.bad { color: var(--warn); }
+.pipeline .resume { margin-left: 6px; }
+
+/* 助手行：名称 + 一个动作，纯点击 */
+.arow { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-top: 1px dashed var(--border); }
+.arow:first-of-type { border-top: none; }
+.arow .nm { flex: 1; font-size: 14px; }
+.arow .ok { color: var(--crt); font-size: 13px; }
+.sec-foot { display: flex; gap: 10px; align-items: center; margin-top: 12px; }
+.hint { font-size: 11px; color: var(--muted); }
+
+/* 完成一行（折叠态）：可重新展开 */
+.done-line { display: flex; gap: 8px; align-items: center; color: var(--crt); font-size: 13px; cursor: pointer; }
+.done-line .muted { color: var(--muted); }
+.done-line .chev { margin-left: auto; color: var(--muted); font-size: 11px; }
+
+.node.collapsed .panel .body { display: none; }
+.node:not(.active):not(.done) .panel { pointer-events: none; }
+
+.finish { text-align: center; padding: 26px 0 6px; opacity: 0; transform: translateY(8px); transition: all .6s; }
+.finish.show { opacity: 1; transform: none; }
+.finish .word { font-size: 22px; letter-spacing: 10px; color: var(--crt-bright); text-shadow: 0 0 26px rgba(109, 255, 184, 0.65); margin-bottom: 12px; }
+.finish .note { color: var(--muted); font-size: 12px; margin: 4px 0 14px; line-height: 1.8; }
+.finish .note .warn-text { display: block; }
+.skip { position: fixed; right: 18px; bottom: 14px; z-index: 2; font-size: 11px; color: #5f6675; text-decoration: none; }
+.skip:hover { color: var(--muted); }
+
+@keyframes rot { to { transform: rotate(360deg); } }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .45; } }
+</style>
+</head>
+<body class="setup">
+<canvas id="stars"></canvas>
+<!-- ===== 评审工具（非产品界面） ===== -->
+<div class="proto-review">
+  <span class="tag">评审工具</span>
+  <a href="./index.html">总览</a><a class="here" href="./01-setup.html">① 引导</a>
+  <a href="./03-settings.html">② 设置 · AI 助手</a><a href="./04-device.html">③ 添加设备</a>
+  <a href="./05-daily.html">④ 控制台首屏</a><a href="./06-shell.html">⑤ 壳行为</a>
+  <span class="sep"></span>
+  <span class="lbl">场景</span>
+  <button data-s="fresh" aria-pressed="true">全新</button>
+  <button data-s="step2" aria-pressed="false">已启动·待接入</button>
+  <button data-s="done" aria-pressed="false">已完成</button>
+  <button data-s="fail" aria-pressed="false">写入失败·续跑</button>
+  <button data-s="noassist" aria-pressed="false">无已装助手</button>
+  <button data-s="existing" aria-pressed="false">已设置过·直达</button>
+</div>
+<!-- ===== 产品界面 ===== -->
+<div class="stage">
+  <header class="hero">
+    <div class="mark">✦</div>
+    <h1>MEBULAR</h1>
+    <p class="tagline" id="tagline">点两下，把它接进你的日常。</p>
+  </header>
+
+  <ol class="rail">
+    <!-- ① 开始 -->
+    <li class="node active" id="n1">
+      <span class="pip"></span>
+      <section class="panel">
+        <div class="body">
+          <h2>开始</h2>
+          <p id="start-copy">在这台机器上启动 Mebular 并完成初始设置。<br>数据只存在这台机器上，不上云。</p>
+          <div id="start-actions">
+            <button class="primary big" id="go">一键开始</button>
+            <a class="alt" id="alt-join">或加入已有的 Mebular ›</a>
+          </div>
+          <div id="join-box" hidden>
+            <pre style="margin-top:10px">粘贴一次性令牌（邀请方「生成邀请」里的那段文本）…</pre>
+            <div class="row"><button class="primary" id="go-join">加入</button></div>
+          </div>
+          <!-- 一键之后的实时流水（按钮区原位展开） -->
+          <ul class="pipeline" id="pipe" hidden>
+            <li data-k="start"><span class="st">·</span>启动本机守护</li>
+            <li data-k="write"><span class="st">·</span>写入本机设置</li>
+            <li data-k="restart"><span class="st">·</span>重启生效（页面会自动恢复）</li>
+          </ul>
+          <details class="detail" id="start-fail-detail" hidden><summary>详情</summary><pre>写入 ~/.mebular/device.json 失败：磁盘只读（原型假数据）</pre></details>
+        </div>
+        <div class="done-line" hidden id="start-done"><span>✓ 已就绪</span><span class="muted">这台机器已是你的 Mebular 根（demo-mac）</span><span class="chev">展开 ›</span></div>
+      </section>
+    </li>
+
+    <!-- ② 连接助手 -->
+    <li class="node locked" id="n2">
+      <span class="pip"></span>
+      <section class="panel">
+        <div class="body">
+          <h2>连接你的 AI 助手</h2>
+          <p id="assist-copy">检测到 <b id="assist-count">3</b> 个已装助手。点「接入」；都接好了点「已完成」。</p>
+          <div id="assist-rows">
+            <div class="arow" data-name="OpenChamber"><span class="nm">OpenChamber</span><button class="primary small connect">接入</button></div>
+            <div class="arow" data-name="Claude Code"><span class="nm">Claude Code</span><button class="primary small connect">接入</button></div>
+            <div class="arow" data-name="Cursor"><span class="nm">Cursor</span><span class="ok">已接入 ✓</span></div>
+          </div>
+          <p class="hint" id="assist-note">接入只改它的一条配置；重载对应助手后生效（可到 设置 → AI 助手 验证）。</p>
+          <div class="sec-foot">
+            <button class="primary" id="done2" disabled>已完成</button>
+            <button class="ghost small" id="skip-connect">先不接 ›</button>
+            <span class="hint" id="done2-hint">接好一个即可点「已完成」</span>
+          </div>
+        </div>
+        <div class="done-line" hidden id="connect-done"><span>✓ 已接好 <b id="connected-names">OpenChamber</b></span><span class="muted">重载对应助手后生效</span><span class="chev">展开 ›</span></div>
+      </section>
+    </li>
+  </ol>
+
+  <div class="finish" id="finish">
+    <div class="word">已就绪 ✦</div>
+    <p class="note" id="finish-note">之后想接更多助手、邀请其他设备，都在控制台里：<br>顶栏「＋ 邀请新设备」随时可用。</p>
+    <button class="primary big" onclick="location.href='./05-daily.html'">进入控制台</button>
+  </div>
+
+  <!-- 已设置过·直达（existing 场景替换整个 rail） -->
+  <section class="panel" id="existing" hidden style="text-align:center">
+    <h2>欢迎回来</h2>
+    <p>这台机器已经设置好，Mebular 正在后台运行。</p>
+    <button class="primary big" onclick="location.href='./05-daily.html'">进入控制台</button>
+  </section>
+</div>
+<a class="skip" href="./05-daily.html">跳过引导 ›</a>
+
+<script>
+// 星野（console 契约：稀疏、缓慢、不抢戏）
+const cv = document.getElementById('stars'), cx = cv.getContext('2d');
+let stars = [];
+function resize() {
+  cv.width = innerWidth; cv.height = innerHeight;
+  stars = Array.from({ length: Math.min(160, innerWidth / 9) }, () => ({
+    x: Math.random() * cv.width, y: Math.random() * cv.height,
+    r: Math.random() * 1.1 + 0.2, p: Math.random() * Math.PI * 2, s: 0.15 + Math.random() * 0.5
+  }));
+}
+addEventListener('resize', resize); resize();
+(function tick(t) {
+  cx.clearRect(0, 0, cv.width, cv.height);
+  for (const st of stars) {
+    const a = 0.25 + 0.45 * (0.5 + 0.5 * Math.sin(t / 1400 * st.s + st.p));
+    cx.fillStyle = `rgba(180, 255, 214, ${a * 0.5})`;
+    cx.beginPath(); cx.arc(st.x, st.y, st.r, 0, 7); cx.fill();
+  }
+  requestAnimationFrame(tick);
+})(0);
+
+const $ = (id) => document.getElementById(id);
+const rail = document.querySelector('.rail');
+let joined = [];
+
+function setNode(n, state) { // state: active | done | locked
+  const el = $('n' + n);
+  el.classList.toggle('active', state === 'active');
+  el.classList.toggle('done', state === 'done');
+  el.classList.toggle('locked', state === 'locked');
+  el.classList.toggle('collapsed', state === 'done');
+  el.querySelector('.panel .body').hidden = state === 'done';
+  el.querySelector('.done-line').hidden = state !== 'done';
+}
+// done 段可重新展开（回顾 / 继续操作）
+document.querySelectorAll('.done-line').forEach((d) => d.addEventListener('click', () => {
+  const node = d.closest('.node');
+  node.classList.remove('collapsed');
+  node.querySelector('.panel .body').hidden = false;
+  d.hidden = true;
+}));
+function showFinish() {
+  if (joined.length) {
+    $('finish-note').innerHTML = `提醒：重载 ${joined.join('、')} 后，mebular 才会出现在它的工具列表。<br>之后想接更多助手、邀请其他设备，都在控制台里。`;
+  }
+  $('finish').classList.add('show');
+}
+
+// 段①：一键开始 → 按钮区原位展开实时流水；失败定位到子步骤并可续跑
+const pipeSteps = ['start', 'write', 'restart'];
+function setPipe(k, st, extra) { // st: run|ok|bad|todo
+  const li = document.querySelector(`#pipe li[data-k="${k}"]`);
+  li.className = st === 'todo' ? '' : st;
+  li.querySelector('.st').textContent = { ok: '✓', run: '●', bad: '✗', todo: '·' }[st];
+  li.querySelector('.resume')?.remove();
+  if (st === 'bad' && extra) {
+    const b = document.createElement('button');
+    b.className = 'primary small resume'; b.textContent = '从此处续跑';
+    b.addEventListener('click', () => { $('start-fail-detail').hidden = true; runPipeline(pipeSteps.indexOf(k)); });
+    li.appendChild(b);
+  }
+}
+function runPipeline(from = 0) {
+  $('start-actions').hidden = true; $('join-box').hidden = true; $('pipe').hidden = false;
+  pipeSteps.forEach((k, i) => setPipe(k, i < from ? 'ok' : i === from ? 'run' : 'todo'));
+  const failAt = (mode === 'fail') ? 1 : -1; // 失败场景：卡在「写入本机设置」
+  let i = from;
+  const step = () => {
+    if (i === failAt) {
+      setPipe(pipeSteps[i], 'bad', true);
+      $('start-fail-detail').hidden = false;
+      return;
+    }
+    setPipe(pipeSteps[i], 'ok');
+    i += 1;
+    if (i < pipeSteps.length) { setPipe(pipeSteps[i], 'run'); setTimeout(step, 900); return; }
+    // 全部完成
+    setTimeout(() => {
+      setNode(1, 'done'); setNode(2, 'active');
+      $('tagline').textContent = '很好，再接一个助手就完成。';
+    }, 500);
+  };
+  setTimeout(step, 900);
+}
+$('go').addEventListener('click', () => runPipeline(0));
+$('go-join').addEventListener('click', () => runPipeline(0));
+$('alt-join').addEventListener('click', () => { $('join-box').hidden = !$('join-box').hidden; });
+
+// 段②：行级「已接入」；「已完成」由用户显式点击才翻段（绑定逻辑见 bindConnects）
+$('done2').addEventListener('click', () => {
+  setNode(2, 'done'); showFinish();
+  $('tagline').textContent = '全部就绪。';
+});
+$('skip-connect').addEventListener('click', () => {
+  $('connect-done').innerHTML = '<span>— 已跳过</span><span class="muted">随时可以在 设置 → AI 助手 里接</span><span class="chev">展开 ›</span>';
+  setNode(2, 'done'); showFinish();
+  $('tagline').textContent = '全部就绪。';
+});
+
+// 场景（评审）
+let mode = 'fresh';
+const ROWS_HTML = $('assist-rows').innerHTML;
+function bindConnects() {
+  document.querySelectorAll('.connect').forEach((b) => b.addEventListener('click', () => {
+    const row = b.closest('.arow'), name = row.dataset.name;
+    b.disabled = true; b.innerHTML = '<span class="spin"></span>接入中…';
+    setTimeout(() => {
+      joined.push(name);
+      b.outerHTML = '<span class="ok">已接入 ✓</span>';
+      $('connected-names').textContent = joined.join('、');
+      $('done2').disabled = false;
+      $('done2-hint').textContent = '还可以继续接其他助手';
+    }, 1100);
+  }));
+}
+function resetAssists(count) {
+  joined = [];
+  $('assist-rows').innerHTML = ROWS_HTML; bindConnects();
+  $('assist-count').textContent = count;
+  $('assist-rows').hidden = count === 0;
+  $('assist-note').hidden = count === 0;
+  $('assist-copy').innerHTML = count === 0
+    ? '没检测到已装的 AI 助手 —— 可以先跳过，装好后再到 设置 → AI 助手 接入。'
+    : `检测到 <b id="assist-count">${count}</b> 个已装助手。点「接入」；都接好了点「已完成」。`;
+  $('done2').disabled = true; $('done2').hidden = count === 0;
+  $('done2-hint').textContent = count === 0 ? '' : '接好一个即可点「已完成」';
+}
+function show(s) {
+  mode = s;
+  document.querySelectorAll('.proto-review button[data-s]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.s === s)));
+  rail.hidden = s === 'existing'; $('existing').hidden = s !== 'existing';
+  $('finish').classList.remove('show');
+  $('pipe').hidden = true; $('start-fail-detail').hidden = true;
+  $('start-actions').hidden = false; $('go').disabled = false; $('go').textContent = '一键开始';
+  resetAssists(s === 'noassist' ? 0 : 3);
+  if (s === 'fresh' || s === 'fail' || s === 'noassist') {
+    $('tagline').textContent = '点两下，把它接进你的日常。';
+    setNode(1, 'active'); setNode(2, 'locked');
+  } else if (s === 'step2') {
+    $('tagline').textContent = '很好，再接一个助手就完成。';
+    setNode(1, 'done'); setNode(2, 'active');
+  } else if (s === 'done') {
+    $('tagline').textContent = '全部就绪。';
+    joined = ['OpenChamber']; $('connected-names').textContent = 'OpenChamber';
+    setNode(1, 'done'); setNode(2, 'done'); showFinish();
+  } else if (s === 'existing') {
+    $('tagline').textContent = '';
+  }
+}
+document.querySelectorAll('.proto-review button[data-s]').forEach((b) => b.addEventListener('click', () => show(b.dataset.s)));
+bindConnects();
+{ const qs = new URLSearchParams(location.search).get('s'); if (qs) show(qs); }
+</script>
+</body>
+</html>

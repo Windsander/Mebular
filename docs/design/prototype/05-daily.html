@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>Mebular 控制台</title>
+<link rel="stylesheet" href="./prototype.css" />
+<style>
+/* 首屏 = 现有全屏星图（原样保留）；配置相关新增仅为星图之上的叠加层 */
+body.home { min-height: 100vh; overflow: hidden; }
+#sky { position: fixed; inset: 0; z-index: 0; }
+.overlay { position: relative; z-index: 1; pointer-events: none; }
+.overlay > * { pointer-events: auto; }
+
+/* 状态总览：顶部居中紧凑条（玻璃拟态，可收起） */
+.stats-pill { position: fixed; top: 54px; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 18px; align-items: center; padding: 7px 18px;
+  border: 1px solid var(--crt-border-soft); border-radius: 999px;
+  background: rgba(11, 16, 32, 0.72); backdrop-filter: blur(8px);
+  font-size: 12px; color: var(--muted); box-shadow: 0 8px 30px -14px rgba(0,0,0,.8); }
+.stats-pill b { color: var(--crt-bright); font-weight: 500; }
+.stats-pill .dotsep { width: 3px; height: 3px; border-radius: 50%; background: var(--crt-dim); }
+
+/* 需要注意：右侧浮卡，条件渲染，无事不出现 */
+.attention { position: fixed; top: 96px; right: 16px; width: 300px;
+  border: 1px solid var(--warn-border); border-radius: 10px; padding: 12px 14px;
+  background: rgba(11, 16, 32, 0.85); backdrop-filter: blur(8px);
+  box-shadow: 0 18px 50px -24px rgba(0,0,0,.9); }
+.attention h3 { font-size: 12px; color: var(--warn); letter-spacing: 1px; margin-bottom: 6px; }
+.arow { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-top: 1px dashed var(--border); }
+.arow:first-of-type { border-top: none; }
+.arow .nm { font-size: 12px; }
+.arow .st { font-size: 11px; color: var(--muted); }
+.arow .st.todo { color: var(--warn); }
+.arow .sp { flex: 1; }
+</style>
+</head>
+<body class="home">
+<canvas id="sky"></canvas>
+<!-- ===== 评审工具（非产品界面） ===== -->
+<div class="proto-review">
+  <span class="tag">评审工具</span>
+  <a href="./index.html">总览</a><a href="./01-setup.html">① 引导</a>
+  <a href="./03-settings.html">② 设置 · AI 助手</a><a href="./04-device.html">③ 添加设备</a>
+  <a class="here" href="./05-daily.html">④ 控制台首屏</a><a href="./06-shell.html">⑤ 壳行为</a>
+  <span class="sep"></span>
+  <span class="lbl">场景（星图为现有视图占位演示，原样保留不动）</span>
+  <button data-s="normal" aria-pressed="true">一切正常</button>
+  <button data-s="attention" aria-pressed="false">有待办</button>
+</div>
+<!-- ===== 产品界面 ===== -->
+<header class="topbar" style="position:relative;z-index:2">
+  <span class="brand">✦ Mebular 控制台</span>
+  <span class="badge">本机 · device-demo</span><span class="badge gray">● P2P 已启用</span><span class="badge gray">记忆 128</span>
+  <span class="spacer"></span>
+  <button class="ghost">⚙ 设置</button><button>＋ 连接已有地址</button><button class="primary">＋ 邀请新设备</button>
+</header>
+
+<!-- 现有全屏星图（原样保留；此处仅以假数据演示其存在） -->
+<div class="overlay">
+  <!-- 新增①：状态总览条（纯状态，无操作） -->
+  <div class="stats-pill">
+    <span>守护 <b>运行中</b> · 临时</span><span class="dotsep"></span>
+    <span>对端 <b>1</b>/2 已连</span><span class="dotsep"></span>
+    <span>记忆 <b>128</b> · 今日 +6</span>
+  </div>
+
+  <!-- 新增②：需要注意（条件渲染，无事不出现） -->
+  <section class="attention" id="attention" hidden>
+    <h3>需要注意</h3>
+    <div class="arow"><span class="nm">OpenChamber 待生效</span><span class="sp"></span><a class="btn primary small" href="./03-settings.html?s=pending-restart">去处理 ›</a></div>
+    <div class="arow"><span class="nm">device-old-laptop 未连接</span><span class="st">12 天前</span><span class="sp"></span><button class="ghost small" onclick="alert('原型：对端详情（现有视图，不在本设计范围）。')">详情 ›</button></div>
+  </section>
+</div>
+
+<script>
+// 星图占位：示意既有全屏星图（真实星图及其特效原样保留，不在本设计范围）
+const cv = document.getElementById('sky'), cx = cv.getContext('2d');
+let stars = [], W, H;
+function resize() {
+  W = cv.width = innerWidth; H = cv.height = innerHeight;
+  stars = Array.from({ length: Math.min(220, innerWidth / 7) }, () => ({
+    x: Math.random() * W, y: Math.random() * H,
+    r: Math.random() * 1.2 + 0.2, p: Math.random() * 6.28, s: 0.15 + Math.random() * 0.5
+  }));
+}
+addEventListener('resize', resize); resize();
+function node(x, y, label, on) {
+  cx.beginPath(); cx.arc(x, y, 5, 0, 7);
+  cx.fillStyle = on ? '#6dffb8' : '#3a4358'; cx.fill();
+  if (on) { cx.shadowColor = '#6dffb8'; cx.shadowBlur = 16; cx.fill(); cx.shadowBlur = 0; }
+  cx.fillStyle = on ? '#c8ffe3' : '#5f6675'; cx.font = '11px system-ui';
+  cx.fillText(label, x + 12, y + 4);
+}
+(function tick(t) {
+  cx.clearRect(0, 0, W, H);
+  for (const st of stars) {
+    const a = 0.2 + 0.4 * (0.5 + 0.5 * Math.sin(t / 1400 * st.s + st.p));
+    cx.fillStyle = `rgba(180, 255, 214, ${a * 0.45})`;
+    cx.beginPath(); cx.arc(st.x, st.y, st.r, 0, 7); cx.fill();
+  }
+  const cx0 = W / 2, cy0 = H / 2 + 30;
+  cx.strokeStyle = 'rgba(109, 255, 184, 0.25)'; cx.lineWidth = 1;
+  cx.beginPath(); cx.moveTo(cx0, cy0); cx.lineTo(cx0 - 180, cy0 - 120); cx.stroke();
+  cx.setLineDash([3, 5]); cx.strokeStyle = 'rgba(131, 145, 180, 0.25)';
+  cx.beginPath(); cx.moveTo(cx0, cy0); cx.lineTo(cx0 + 200, cy0 + 110); cx.stroke();
+  cx.setLineDash([]);
+  node(cx0, cy0, '✦ 本机', true);
+  node(cx0 - 180, cy0 - 120, 'device-living-room', true);
+  node(cx0 + 200, cy0 + 110, 'device-old-laptop', false);
+  requestAnimationFrame(tick);
+})(0);
+
+const $ = (id) => document.getElementById(id);
+function show(s) {
+  document.querySelectorAll('.proto-review button[data-s]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.s === s)));
+  $('attention').hidden = s !== 'attention';
+}
+document.querySelectorAll('.proto-review button[data-s]').forEach((b) => b.addEventListener('click', () => show(b.dataset.s)));
+{ const qs = new URLSearchParams(location.search).get('s'); if (qs) show(qs); }
+</script>
+</body>
+</html>

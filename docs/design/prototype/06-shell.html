@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>壳行为（评审标注）</title>
+<link rel="stylesheet" href="./prototype.css" />
+</head>
+<body>
+<!-- 本页整体为评审标注：托盘/窗口行为无法在 HTML 演示 -->
+<div class="proto-review">
+  <span class="tag">评审工具</span>
+  <a href="./index.html">总览</a><a href="./01-setup.html">① 引导</a>
+  <a href="./03-settings.html">② 设置 · AI 助手</a><a href="./04-device.html">③ 添加设备</a>
+  <a href="./05-daily.html">④ 控制台首屏</a><a class="here" href="./06-shell.html">⑤ 壳行为</a>
+  <span class="sep"></span>
+  <span class="lbl">本页为标注屏：规格见 config-journey-v1.md §4.1</span>
+</div>
+<main>
+  <section class="card">
+    <div class="card-head"><h2>托盘菜单（分组）</h2><span class="badge gray">标注</span></div>
+    <pre>● 运行中（service）            ← 状态行（不可点）
+────────────
+打开控制台
+连接 AI 助手                   ← ?view=connect 深链
+添加设备
+重启向导                       ← 回想入口（重走首次设置）
+────────────
+启动                           ← 仅未运行时可用
+停止…          （确认）
+重启…          （确认）
+────────────
+打开日志
+────────────
+☐ 登录时启动
+────────────
+退出 Mebular…  （确认；口径见下）</pre>
+    <p class="muted">停止后窗口内横幅：「守护已停止（托盘可重启）」。</p>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>窗口 / 退出生命周期</h2><span class="badge gray">标注</span></div>
+    <ol class="checklist" style="color:var(--text)">
+      <li>点红叉 = <b>隐藏窗口</b>（守护在任何模式下都不动）；Dock 点图标 / activate → 窗口回来。</li>
+      <li>真退出只有托盘「退出」一条路径，确认弹窗口径分守护托管模式：</li>
+    </ol>
+    <pre>child（壳拉起的临时进程）：「退出 Mebular 将停止本机 Mebular 守护（由本 App 拉起的临时进程）。常驻服务/外部守护不受影响。」
+service（launchd 常驻）/ reused（外部已跑）：「退出 Mebular 桌面壳。本机守护不由本 App 托管，退出后照常运行。」</pre>
+  </section>
+
+  <section class="card">
+    <div class="card-head"><h2>单实例</h2><span class="badge gray">标注</span></div>
+    <p class="muted">二次启动不新开实例：聚焦已有窗口（窗口被隐藏则显示）。</p>
+  </section>
+</main>
+</body>
+</html>

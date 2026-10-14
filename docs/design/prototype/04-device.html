@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>邀请新设备</title>
+<link rel="stylesheet" href="./prototype.css" />
+<style>
+main.narrow { max-width: 640px; margin: 0 auto; }
+.arow { display: flex; align-items: center; gap: 10px; padding: 11px 4px; border-top: 1px dashed var(--border); }
+.arow:first-of-type { border-top: none; }
+.arow .nm { font-size: 14px; }
+.arow .st { font-size: 12px; color: var(--muted); }
+.arow .st.ok { color: var(--crt); }
+.arow .sp { flex: 1; }
+.qr { text-align: center; margin: 6px 0 10px; }
+.qr pre { display: inline-block; margin: 0; padding: 16px 20px; border-color: var(--crt-border-soft); letter-spacing: 5px; font-size: 20px; }
+.spin { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--crt-dim); border-top-color: var(--crt); border-radius: 50%; animation: rot .8s linear infinite; vertical-align: -1px; margin-right: 7px; }
+@keyframes rot { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<!-- ===== 评审工具（非产品界面） ===== -->
+<div class="proto-review">
+  <span class="tag">评审工具</span>
+  <a href="./index.html">总览</a><a href="./01-setup.html">① 引导</a>
+  <a href="./03-settings.html">② 设置 · AI 助手</a><a class="here" href="./04-device.html">③ 添加设备</a>
+  <a href="./05-daily.html">④ 控制台首屏</a><a href="./06-shell.html">⑤ 壳行为</a>
+  <span class="sep"></span>
+  <span class="lbl">场景</span>
+  <button data-s="none" aria-pressed="true">未邀未连</button>
+  <button data-s="invited" aria-pressed="false">已邀请</button>
+  <button data-s="joined" aria-pressed="false">已连</button>
+  <button data-s="join-off" aria-pressed="false">加入服务未启用</button>
+</div>
+<!-- ===== 产品界面 ===== -->
+<header class="topbar">
+  <span class="brand">✦ Mebular 控制台</span>
+  <span class="badge">本机 · device-demo</span><span class="badge gray">● P2P 已启用</span><span class="badge gray">记忆 —</span>
+  <span class="spacer"></span>
+  <button class="ghost">⚙ 设置</button><button>＋ 连接已有地址</button><button class="primary">＋ 邀请新设备</button>
+</header>
+<main class="narrow">
+  <!-- 已知对端（≥1 才渲染） -->
+  <section class="card crt" id="peers-card" hidden>
+    <div class="card-head"><h2>已知对端</h2><span class="badge">1 已连</span></div>
+    <div class="arow"><span class="nm">device-living-room</span><span class="st ok">已连 · 直连（LAN）· 3 分钟前</span><span class="sp"></span><button class="ghost small" onclick="alert('原型：对端详情 / 断开（二次确认）。')">详情 ›</button></div>
+  </section>
+
+  <section class="card crt" id="invite-card">
+    <div class="card-head"><h2>邀请新设备</h2></div>
+
+    <!-- 未邀未连：一个动作 -->
+    <div id="st-none">
+      <p class="muted" style="margin:0 0 10px">另一台设备装同一个 App，扫码（或粘贴令牌）即入。令牌一次性、15 分钟有效。</p>
+      <button class="primary" id="btn-gen">生成邀请</button>
+    </div>
+
+    <!-- 已邀请：结果（QR + 令牌），次级入详情 -->
+    <div id="st-invited" hidden>
+      <div class="qr"><pre>▦▦▦▦▦
+▦ QR ▦
+▦▦▦▦▦</pre></div>
+      <pre style="text-align:center">meb_eyJkZXZpY2VJZCI6ImRldmljZS1kZW1vIn0…</pre>
+      <div class="row" style="justify-content:center"><button class="primary small">复制令牌</button></div>
+      <p class="fail-line gray" style="justify-content:center;margin-top:8px">等待对方加入中…（15 分钟内有效）</p>
+      <details class="detail"><summary>详情</summary>
+        <p class="muted">邀请方端点 <code>http://192.168.1.20:4002</code>。重新生成会让旧令牌失效。</p>
+        <div class="row"><button class="small ghost" id="btn-regen">重新生成邀请</button></div>
+      </details>
+    </div>
+
+    <!-- 已连：收编；再邀请折叠 -->
+    <div id="st-joined" hidden>
+      <p class="fail-line ok" style="margin:0 0 6px">✓ device-living-room 已加入</p>
+      <details class="detail"><summary>再邀请一台 ›</summary>
+        <p class="muted" style="margin:6px 0 10px">令牌一次性、15 分钟有效。</p>
+        <button class="primary small" id="btn-gen2">生成邀请</button>
+      </details>
+    </div>
+
+    <!-- 加入服务未启用：一行 + 一个行动 -->
+    <p class="fail-line" id="st-joinoff" hidden>加入服务还没启用，先去设置里打开<a class="btn primary small" href="./03-settings.html?sec=common">去设置开启</a></p>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+function show(s) {
+  document.querySelectorAll('.proto-review button[data-s]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.s === s)));
+  $('st-none').hidden = s !== 'none' && s !== 'join-off';
+  $('st-invited').hidden = s !== 'invited';
+  $('st-joined').hidden = s !== 'joined';
+  $('st-joinoff').hidden = s !== 'join-off';
+  $('peers-card').hidden = s !== 'joined';
+  if (s === 'join-off') $('st-none').hidden = true;
+}
+document.querySelectorAll('.proto-review button[data-s]').forEach((b) => b.addEventListener('click', () => show(b.dataset.s)));
+{ const qs = new URLSearchParams(location.search).get('s'); if (qs) show(qs); }
+$('btn-gen').addEventListener('click', () => {
+  $('btn-gen').disabled = true; $('btn-gen').innerHTML = '<span class="spin"></span>正在生成…';
+  setTimeout(() => { show('invited'); document.querySelector('[data-s="invited"]').setAttribute('aria-pressed', 'true'); }, 800);
+});
+$('btn-gen2').addEventListener('click', () => alert('原型：生成邀请（同上 QR 态）。'));
+$('btn-regen').addEventListener('click', () => {
+  if (confirm('重新生成会让旧令牌失效，确定继续？')) alert('原型：已重新生成（旧令牌作废）。');
+});
+</script>
+</body>
+</html>

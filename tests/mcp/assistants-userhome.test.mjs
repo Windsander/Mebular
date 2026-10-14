@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, isAbsolute, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   assistantUserHome,
@@ -80,31 +80,35 @@ describe('F-FIX-A 路径基数 / 增强 PATH / recheck', () => {
     expect(assistantUserHome({ env: { MEBULAR_USER_HOME: '/u2' } })).toBe('/u2');
     const os = assistantUserHome({ env: {} });
     expect(typeof os).toBe('string');
-    expect(os.startsWith('/')).toBe(true);
+    expect(isAbsolute(os)).toBe(true); // 跨平台（Windows 为 C:\…）
     // 绝不回退到 Mebular home
     expect(assistantUserHome({ home: '/mebular', env: {} })).toBe(os);
   });
 
   // ---------- (b) 增强 PATH ----------
 
-  it('b) enhancedPath 含 ~/.local/bin + /usr/local/bin + /opt/homebrew/bin（捆綁目录存在才加）', () => {
-    const p = enhancedPath('/usr/bin:/bin', userHome);
-    const parts = p.split(':');
-    expect(parts).toContain(join(userHome, '.local', 'bin'));
-    expect(parts).toContain('/usr/local/bin');
-    expect(parts).toContain('/opt/homebrew/bin');
-    expect(parts).toContain('/usr/bin');            // 原有 PATH 保留
-    expect(new Set(parts).size).toBe(parts.length); // 去重
+  it('b) enhancedPath 含 ~/.local/bin + /usr/local/bin + /opt/homebrew/bin（跨平台分隔符；捆綁目录存在才加）', () => {
+    // 显式分隔符 ⇒ 在任何 CI 平台上都确定
+    const posix = enhancedPath('/usr/bin:/bin', userHome, 'darwin', ':').split(':');
+    expect(posix).toContain(join(userHome, '.local', 'bin'));
+    expect(posix).toContain('/usr/local/bin');
+    expect(posix).toContain('/opt/homebrew/bin');
+    expect(posix).toContain('/usr/bin');            // 原有 PATH 保留
+    expect(new Set(posix).size).toBe(posix.length); // 去重
     const bundle = '/Applications/OpenChamber.app/Contents/Resources/opencode-cli';
-    expect(parts.includes(bundle)).toBe(existsSync(bundle));
+    expect(posix.includes(bundle)).toBe(existsSync(bundle));
+    // Windows：';' 分隔、不注入 POSIX 目录、不把盘符拆坏
+    const win = enhancedPath('C:\\a;C:\\b', userHome, 'win32', ';').split(';');
+    expect(win).toEqual(expect.arrayContaining(['C:\\a', 'C:\\b', join(userHome, '.local', 'bin')]));
+    expect(win).not.toContain('/opt/homebrew/bin');
   });
 
   it('b2) spawnEnv：子进程环境带增强 PATH（含最小 PATH 场景）', () => {
-    const env = spawnEnv({ userHome });
+    const env = spawnEnv({ userHome, platform: 'darwin' });
     expect(env.PATH).toContain(join(userHome, '.local', 'bin'));
     expect(env.PATH).toContain('/opt/homebrew/bin');
-    // 最小 PATH 输入也照样增强
-    expect(enhancedPath('/usr/bin:/bin', userHome)).toContain(join(userHome, '.local', 'bin'));
+    // 最小 PATH 输入也照样增强（darwin）
+    expect(enhancedPath('/usr/bin:/bin', userHome, 'darwin')).toContain(join(userHome, '.local', 'bin'));
   });
 
   it('b3) 探针/写入/验证的命令均走增强 PATH（源码锚点：spawn 环境统一注入）', async () => {

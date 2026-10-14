@@ -24,7 +24,7 @@ import { chmod, copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/pro
 import { exec, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
-import { dirname, join, sep } from 'node:path';
+import { delimiter, dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // ---------------------------------------------------------------------------
@@ -127,18 +127,23 @@ export function assistantUserHome(options = {}) {
 /** 桌面壳/守护常驻的 opencode 捆绑目录（存在才注入 PATH）。 */
 export const OPENCODE_BUNDLE_BIN = '/Applications/OpenChamber.app/Contents/Resources/opencode-cli';
 
-/** 增强 PATH：现有 PATH + `~/.local/bin` + /usr/local/bin + /opt/homebrew/bin +（存在则）opencode 捆绑目录。 */
-export function enhancedPath(basePath = process.env.PATH, userHome = assistantUserHome()) {
-  const base = typeof basePath === 'string' && basePath.length > 0 ? basePath.split(':') : [];
-  const extra = [join(userHome, '.local', 'bin'), '/usr/local/bin', '/opt/homebrew/bin', OPENCODE_BUNDLE_BIN]
-    .filter((p) => p === OPENCODE_BUNDLE_BIN ? existsSync(p) : true);
-  return [...new Set([...base, ...extra].filter((p) => typeof p === 'string' && p.length > 0))].join(':');
+/**
+ * 增强 PATH（跨平台：用 `path.delimiter` 分割/拼接，绝不用 ':' 硬编码）：
+ * 现有 PATH + `~/.local/bin`；非 Windows 追加 `/usr/local/bin`、`/opt/homebrew/bin`；
+ * darwin 且**存在**时追加 opencode 捆绑目录（launchd 服务 env 的 PATH 极简）。
+ */
+export function enhancedPath(basePath = process.env.PATH, userHome = assistantUserHome(), platform = process.platform, pathDelimiter = delimiter) {
+  const base = typeof basePath === 'string' && basePath.length > 0 ? basePath.split(pathDelimiter) : [];
+  const extra = [join(userHome, '.local', 'bin')];
+  if (platform !== 'win32') extra.push('/usr/local/bin', '/opt/homebrew/bin');
+  if (platform === 'darwin' && existsSync(OPENCODE_BUNDLE_BIN)) extra.push(OPENCODE_BUNDLE_BIN);
+  return [...new Set([...base, ...extra].filter((p) => typeof p === 'string' && p.length > 0))].join(pathDelimiter);
 }
 
 /** 子进程环境：继承进程环境 + 增强 PATH（launchd 服务 env 的 PATH 极简 → rc=127）。 */
 export function spawnEnv(options = {}) {
   const userHome = assistantUserHome(options);
-  return { ...process.env, ...(options.env ?? {}), PATH: enhancedPath(process.env.PATH, userHome) };
+  return { ...process.env, ...(options.env ?? {}), PATH: enhancedPath(process.env.PATH, userHome, options.platform ?? process.platform) };
 }
 
 function expandHome(parts, home) {

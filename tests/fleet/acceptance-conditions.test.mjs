@@ -73,9 +73,17 @@ describe('F-FLAKE-1 源码锚点：verify 脚本按精确谓词做有界轮询�
     expect(collab).not.toMatch(/waitFor\(async \(\) => negotiationDone\(await n2\.stateOf\(nid\)\)/);
   });
 
-  it('collab：夹具收紧「卡住→重试」两段延迟（会话超时 + 退避基数）', () => {
+  it('collab：夹具关闭周期反熵（loop 显式驱动）并收紧会话超时 → 无退避毒化', () => {
     expect(collab).toMatch(/syncTimeout:\s*\d+/);
-    expect(collab).toMatch(/antiEntropy:\s*\{\s*enabled:\s*true,\s*intervalMs:\s*2000/);
+    // F-FLAKE-2：改为 `enabled: false`（反熵由 loop 显式驱动 runAntiEntropyCycle），
+    // 从根本上消除「失败退避基数 = intervalMs」把兜底封停近 1 小时的毒化。
+    expect(collab).toMatch(/antiEntropy:\s*\{\s*enabled:\s*false\s*\}/);
+    expect(collab).not.toMatch(/antiEntropy:\s*\{\s*enabled:\s*true,\s*intervalMs:/);
+  });
+
+  it('collab：1d-a 负例用 waitForTaskState 轮询 dagCycleRejected 谓词（不再单次读）', () => {
+    expect(collab).toMatch(/await waitForTaskState\(n1, badId, dagCycleRejected\)/);
+    expect(collab).not.toMatch(/await n1\.waitForDagCompletion\(badId/);
   });
 
   it('onboard：等待完整条件而非只等 submitted', () => {
@@ -97,14 +105,12 @@ describe('F-FLAKE-1 源码锚点：verify 脚本按精确谓词做有界轮询�
 describe('F-FLAKE-1 夹具恢复界：最坏「卡住→重试」时间必须远小于验收预算', () => {
   const collab = readFileSync(join(root, 'scripts', 'verify-fleet-collab.mjs'), 'utf-8');
 
-  it('3 次连续会话卡住（含指数退避）仍 < 60s（远小于 90s 等待）', () => {
+  it('3 次连续会话卡住（无退避）仍 < 60s（远小于 90s 等待）', () => {
     const timeoutMs = Number(/syncTimeout:\s*(\d+)/.exec(collab)?.[1]);
-    const intervalMs = Number(/antiEntropy:\s*\{\s*enabled:\s*true,\s*intervalMs:\s*(\d+)/.exec(collab)?.[1]);
     expect(Number.isFinite(timeoutMs) && timeoutMs > 0).toBe(true);
-    expect(Number.isFinite(intervalMs) && intervalMs > 0).toBe(true);
-    // 失败退避：intervalMs × 2^k（k=1..3）
-    const backoff = [1, 2, 3].reduce((sum, k) => sum + intervalMs * 2 ** k, 0);
-    const worstCase = 3 * timeoutMs + backoff;
-    expect(worstCase).toBeLessThan(60_000);
+    // F-FLAKE-2：反熵 `enabled:false` ⇒ `recordSyncOutcome` 不记退避（没有 intervalMs 基数可被毒化），
+    // 最坏「卡住→重试」= 3 × syncTimeout（不再叠加指数退避）。
+    expect(collab).toMatch(/antiEntropy:\s*\{\s*enabled:\s*false\s*\}/);
+    expect(3 * timeoutMs).toBeLessThan(60_000);
   });
 });

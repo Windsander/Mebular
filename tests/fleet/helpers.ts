@@ -86,3 +86,59 @@ export function shuffle<T>(input: readonly T[], rng: () => number): T[] {
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// F-FLAKE-2：TS 版「精确断言谓词 + 条件驱动有界等待」
+//
+// 与 `scripts/lib/acceptance-conditions.mjs` **同语义**（后者是 .mjs 脚本侧的单一真源；jest 走
+// ts-jest/CJS 转换，无法 import ESM，故在 TS 侧镜像）。**只等、不放宽**：谓词为真即返回，
+// 超时后返回最后一次观测，由调用方以原断言判定；`pollMs` 仅作轮询节奏（非固定 sleep）。
+// ---------------------------------------------------------------------------
+
+export interface TaskStateLike {
+  status?: string;
+  reason?: string;
+}
+
+/** collab 1d-b 协商成功：任务到达 `done`。 */
+export const negotiationDone = (state: TaskStateLike | null | undefined): boolean => state?.status === 'done';
+
+/** collab 1d-b 超限：reason 恰为 `NEGOTIATION_LIMIT: 2>1`。 */
+export const negotiationLimit = (state: TaskStateLike | null | undefined): boolean =>
+  state?.reason === 'NEGOTIATION_LIMIT: 2>1';
+
+/** collab 1d-a 负例：自环被拒 → `failed` 且 reason 形如 `DAG_CYCLE: …`。 */
+export const dagCycleRejected = (state: TaskStateLike | null | undefined): boolean =>
+  state?.status === 'failed' && /^DAG_CYCLE: /.test(state.reason ?? '');
+
+interface DrivableNode<S> {
+  pollOnce(): Promise<unknown>;
+  applyNegotiationPolicy(): Promise<unknown>;
+  stateOf(taskId: string): Promise<S | null>;
+}
+
+/**
+ * 条件驱动的有界等待：轮询期间**保持节点驱动**（`pollOnce` + `applyNegotiationPolicy`，
+ * 与 `waitForTerminal`/`waitForDagCompletion` 同语义；被动读会让任务不推进）。
+ */
+export async function waitForTaskState<S>(
+  node: DrivableNode<S>,
+  taskId: string,
+  predicate: (state: S | null) => boolean,
+  options: { timeoutMs?: number; pollMs?: number } = {},
+): Promise<{ ok: boolean; state: S | null }> {
+  const { timeoutMs = 90000, pollMs = 10 } = options;
+  const deadline = Date.now() + timeoutMs;
+  const drive = async (): Promise<void> => {
+    await node.pollOnce();
+    await node.applyNegotiationPolicy();
+  };
+  await drive();
+  let state = await node.stateOf(taskId);
+  while (!predicate(state) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, pollMs));
+    await drive();
+    state = await node.stateOf(taskId);
+  }
+  return { ok: predicate(state), state };
+}

@@ -358,19 +358,16 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
     }
   });
 
-  it('API 形状（给 UI 联调）：GET /admin/api/clients 的 buildClientsView 输出', async () => {
-    const { buildClientsView } = await import('../../packages/mcp/src/admin.mjs');
-    const view = await buildClientsView({ home });
-    expect(Array.isArray(view.clients)).toBe(true);
-    expect(view.clients.length).toBeGreaterThan(0);
-    const oc = view.clients.find((c) => c.id === 'openchamber');
-    for (const key of ['id', 'name', 'kind', 'state', 'stateLabel', 'evidence', 'hasVerify', 'activation', 'landing', 'snippet', 'installed', 'connected']) {
+  it('API 形状（给 UI 联调）：/admin/api/clients 载荷字段面（buildClientsView 委托 listAssistants）', () => {
+    const out = listAssistants(opts());
+    const oc = out.assistants.find((a) => a.id === 'openchamber');
+    for (const key of ['id', 'name', 'kind', 'type', 'state', 'stateLabel', 'evidence', 'hasVerify', 'activation', 'landing', 'snippet', 'installed', 'connected']) {
       expect(Object.prototype.hasOwnProperty.call(oc, key)).toBe(true);
     }
     expect(oc.kind).toBe('builtin');
-    expect(oc.type).toBeTruthy();
+    expect(oc.type).toBe('file');
     expect(oc.activation.kind).toBe('user-reload');
     expect(oc.hasVerify).toBe(true);
-    expect(view.customPath).toBe(customAssistantsPath(home));
+    expect(out.customPath).toBe(customAssistantsPath(home));
   });
 });

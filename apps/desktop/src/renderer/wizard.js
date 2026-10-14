@@ -228,7 +228,12 @@ function renderClients(clients) {
     const st = rowStatus(c);
     let action = '';
     if (st.key === 'not-connected') action = `<button data-asst-act="connect" data-asst-id="${c.id}">接入</button>`;
-    else if (st.key === 'pending') action = `<button data-asst-act="recheck" data-asst-id="${c.id}">我已重载，重新验证</button>`;
+    else if (st.key === 'pending') {
+      // 轮 A：有验证命令的助手走服务端 verify（用户已确认重载）；否则回读重检测
+      action = c.hasVerify
+        ? `<button data-asst-act="verify" data-asst-id="${c.id}">我已重载，重新验证</button>`
+        : `<button data-asst-act="recheck" data-asst-id="${c.id}">我已重载，重新验证</button>`;
+    }
     else if (st.key === 'manual') action = `<button class="ghost" data-asst-act="console" data-asst-id="${c.id}">去控制台处理 ›</button>`;
     return `<div class="arow" data-asst-row="${c.id}">
       <span class="aname">${c.name ?? c.id}</span>
@@ -265,7 +270,18 @@ $('#asst-list')?.addEventListener('click', async (event) => {
   btn.disabled = true;
   asstMsg(id, act === 'connect' ? '正在接入…' : '正在重新验证…');
   const res = await api.clientsAction(id, act);
-  if (!res?.ok) {
+  if (act === 'verify') {
+    // 服务端 verify：connected → 完成；pending-restart → 仍待生效；verify-failed → 黄态提示（含失败步骤）
+    if (res?.ok && res.state === 'connected') {
+      pendingReload.delete(id);
+      asstMsg(id, '验证通过，已接入 ✓');
+    } else if (res?.state === 'pending-restart') {
+      asstMsg(id, '仍在待生效：请确认已完全重载该助手（退出进程，不是关窗口）。');
+    } else {
+      const failed = (res?.steps ?? []).filter((s) => s && s.ok === false).map((s) => s.label ?? s.name).join('、');
+      asstMsg(id, `验证未过${failed ? `（${failed}）` : ''}；详情见「设置 · AI 助手」。`);
+    }
+  } else if (!res?.ok) {
     asstMsg(id, res?.warning ?? '没能完成；可在「设置 · AI 助手」里看详情。');
   } else if (act === 'connect') {
     pendingReload.add(id);

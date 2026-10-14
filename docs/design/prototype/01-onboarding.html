@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>原型 ① · 初始化（provision）</title>
+<link rel="stylesheet" href="./prototype.css" />
+</head>
+<body>
+<header class="topbar"><span class="brand">✦ Mebular 控制台</span><span class="spacer"></span><span class="muted">原型 ① · 初始化</span></header>
+<nav class="proto-nav">
+  <a href="./index.html">总览</a><a class="here" href="./01-onboarding.html">① 初始化</a>
+  <a href="./02-wizard.html">② 三步向导</a><a href="./03-connect.html">③ 连接助手</a>
+  <a href="./04-device.html">④ 添加设备</a><a href="./05-daily.html">⑤ 日常入口</a><a href="./06-shell.html">⑥ 壳行为（标注）</a>
+</nav>
+<div class="proto-scenarios">
+  <span class="lbl">场景</span>
+  <button class="small" data-s="fresh" aria-pressed="true">引导态（空家目录）</button>
+  <button class="small" data-s="pending-desktop" aria-pressed="false">待重启 · 桌面壳</button>
+  <button class="small" data-s="pending-web" aria-pressed="false">待重启 · web</button>
+</div>
+<main>
+  <!-- 场景 A：引导态（建新/加入） -->
+  <section class="card crt" id="s-fresh">
+    <div class="card-head"><h2>首次上手 · 建新 / 加入 Mebular</h2></div>
+    <p class="muted" id="fresh-note">家目录为空：建新（本机是根）或加入已有 Mebular（用一次性令牌）。（家目录：<code>~/.mebular</code>）</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+      <div class="card">
+        <div class="card-head"><h3>① 建新 Mebular</h3></div>
+        <p class="muted">生成 root 主密钥（本机是根），写入配置并自动重启；完成后「邀请新设备」可用。</p>
+        <div class="row"><span class="muted">设备名</span><code id="dev-name">demo-mac</code></div>
+        <p class="muted">将使用 deviceId：<code>device-demo-mac</code></p>
+        <div class="row"><button class="primary" id="btn-create">建新并重启</button></div>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>② 加入已有 Mebular</h3></div>
+        <p class="muted">粘贴邀请方「＋ 邀请新设备」生成的一次性令牌：取得委派证书（不复制主密钥），自动授权令牌分区。</p>
+        <pre>粘贴令牌文本（或二维码里的文本）…</pre>
+        <div class="row"><button class="ghost" disabled title="原型：演示用禁用">加入并重启</button></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 场景 B/C：待重启（桌面壳 / web） -->
+  <section class="card crt" id="s-pending" hidden>
+    <div class="card-head"><h2>首次上手 · 建新 / 加入 Mebular</h2></div>
+    <!-- 主指引唯一：只在这里说「重启后进入正常态」 -->
+    <p class="muted">家目录已完成初始化（<code>~/.mebular</code>）：重启后进入正常态。</p>
+    <div class="state-banner ok">
+      <p id="pending-note-desktop">已完成：点下方「重启守护」一键生效。</p>
+      <p id="pending-note-web" hidden>已完成：当前为前台运行，无法自动重启 —— 请在终端执行下面的命令。</p>
+      <div class="row" id="pending-desktop" >
+        <button class="primary" id="btn-shell-restart">重启守护</button>
+      </div>
+      <div id="pending-web" hidden>
+        <pre>nohup mebular serve &gt; ~/.mebular/serve.log 2&gt;&amp;1 &amp;</pre>
+        <div class="row"><button class="small">复制命令</button></div>
+      </div>
+      <p class="muted" id="pending-hint-desktop">也可回到向导第①步点「重启守护」。</p>
+      <p class="muted" id="pending-hint-web" hidden>若已重启，点下方「已重启？刷新页面」。</p>
+    </div>
+    <p class="muted">已完成：家目录已初始化，按上方指引重启即可。</p>
+    <div class="row"><button class="ghost" id="btn-reloaded">已重启？刷新页面</button></div>
+    <p class="ok" id="restart-done" hidden><span class="check">✓</span> 已重启：进入正常态（原型到此；真实环境自动跳转控制台）。</p>
+  </section>
+
+  <div class="proto-note">要点：主指引唯一（页眉）；桌面壳无终端命令、一键「重启守护」（走壳 IPC）；web 才给命令+复制。口径统一（外层不再说「前台运行」）。</div>
+</main>
+<script>
+const scenarios = ['fresh', 'pending-desktop', 'pending-web'];
+function show(s) {
+  document.querySelectorAll('.proto-scenarios button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.s === s)));
+  document.getElementById('s-fresh').hidden = s !== 'fresh';
+  document.getElementById('s-pending').hidden = s === 'fresh';
+  const desktop = s === 'pending-desktop';
+  document.getElementById('pending-note-desktop').hidden = !desktop;
+  document.getElementById('pending-desktop').hidden = !desktop;
+  document.getElementById('pending-hint-desktop').hidden = !desktop;
+  document.getElementById('pending-note-web').hidden = desktop;
+  document.getElementById('pending-web').hidden = desktop;
+  document.getElementById('pending-hint-web').hidden = desktop;
+  document.getElementById('restart-done').hidden = true;
+}
+document.querySelectorAll('.proto-scenarios button').forEach((b) => b.addEventListener('click', () => show(b.dataset.s)));
+{ const qs = new URLSearchParams(location.search).get('s'); if (qs) show(qs); }
+document.getElementById('btn-create').addEventListener('click', () => show('pending-desktop'));
+document.getElementById('btn-shell-restart').addEventListener('click', () => { document.getElementById('restart-done').hidden = false; });
+document.getElementById('btn-reloaded').addEventListener('click', () => { document.getElementById('restart-done').hidden = false; });
+</script>
+</body>
+</html>

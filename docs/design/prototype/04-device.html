@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>原型 ④ · 添加设备</title>
+<link rel="stylesheet" href="./prototype.css" />
+</head>
+<body>
+<header class="topbar"><span class="brand">✦ Mebular 控制台</span><span class="spacer"></span><span class="muted">原型 ④ · 添加设备 / 邀请</span></header>
+<nav class="proto-nav">
+  <a href="./index.html">总览</a><a href="./01-onboarding.html">① 初始化</a>
+  <a href="./02-wizard.html">② 三步向导</a><a href="./03-connect.html">③ 连接助手</a>
+  <a class="here" href="./04-device.html">④ 添加设备</a><a href="./05-daily.html">⑤ 日常入口</a><a href="./06-shell.html">⑥ 壳行为（标注）</a>
+</nav>
+<div class="proto-scenarios">
+  <span class="lbl">场景</span>
+  <button class="small" data-s="none" aria-pressed="true">未邀未连</button>
+  <button class="small" data-s="invited" aria-pressed="false">已邀请</button>
+  <button class="small" data-s="joined" aria-pressed="false">已连</button>
+  <button class="small" data-s="join-off" aria-pressed="false">加入服务未启用</button>
+</div>
+<main>
+  <section class="card crt" id="invite-card">
+    <div class="card-head"><h2>邀请新设备</h2><span class="badge dim">一次性令牌</span></div>
+    <p class="muted">另一台设备装同一个 Mebular App，扫码（或粘贴令牌）即可加入。令牌一次性、15 分钟有效。</p>
+    <div class="row" id="row-gen"><button class="primary" id="btn-gen">生成邀请</button></div>
+    <div id="invite-out" hidden>
+      <pre style="text-align:center;font-size:22px;letter-spacing:6px;padding:18px">▦▦▦▦▦▦▦
+▦ QR ▦
+▦▦▦▦▦▦▦</pre>
+      <pre>meb_eyJkZXZpY2VJZCI6ImRldmljZS1kZW1vIiwiZW5kcG9pbnQiOiJodHRwOi8vMTkyLjE2OC4xLjIwOjQwMDIi…（假数据）</pre>
+      <p class="muted">邀请方端点：<code>http://192.168.1.20:4002</code></p>
+      <div class="row"><button class="small">复制令牌</button><button class="small ghost" id="btn-regen">重新生成邀请</button></div>
+    </div>
+    <div class="state-banner" id="join-off" hidden>
+      <p>未启用加入服务：到「设置 → 常用配置」开启 joinService.enabled 并重启后再试。</p>
+      <div class="row"><button class="small">去设置开启</button></div>
+    </div>
+  </section>
+
+  <section class="card" id="joined-card" hidden>
+    <div class="card-head"><h2>已知对端（1）</h2><span class="badge">已连</span></div>
+    <p class="muted"><code>device-living-room</code> · 直连（LAN）· 最近同步 3 分钟前</p>
+    <div class="row"><button class="small ghost">详情</button><button class="small ghost">断开</button></div>
+  </section>
+
+  <div class="proto-note">要点：生成中禁用「正在生成…」；已有令牌再点 → 二次确认（旧令牌失效）；回环端点给人话警告；「已连」收编到对端列表，③ 步即 done。</div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+function show(s) {
+  document.querySelectorAll('.proto-scenarios button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.s === s)));
+  $('invite-out').hidden = s === 'none' || s === 'join-off';
+  $('row-gen').hidden = s !== 'none';
+  $('join-off').hidden = s !== 'join-off';
+  $('joined-card').hidden = s !== 'joined';
+  $('invite-card').hidden = false;
+}
+document.querySelectorAll('.proto-scenarios button').forEach((b) => b.addEventListener('click', () => show(b.dataset.s)));
+{ const qs = new URLSearchParams(location.search).get('s'); if (qs) show(qs); }
+$('btn-gen').addEventListener('click', () => {
+  $('btn-gen').disabled = true; $('btn-gen').textContent = '正在生成…';
+  setTimeout(() => { $('invite-out').hidden = false; $('btn-gen').hidden = true; }, 800);
+});
+$('btn-regen').addEventListener('click', () => {
+  if (confirm('已生成过一个邀请。重新生成会让旧令牌失效，确定继续？')) alert('原型：已重新生成（旧令牌作废）。');
+});
+</script>
+</body>
+</html>

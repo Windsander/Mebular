@@ -12,6 +12,8 @@
 //   5. 重复接入**幂等**（条目已等价 → changed:false，不写不备份）；写入失败**回滚**。
 //   6. **禁写** `landing.forbiddenPaths`（如 OpenChamber 私有的 `opencode.managed.json`）。
 //   7. **A-19**：本模块**不得**调用 `opencode reload`（生效由用户在 App 侧重载）。
+//   9. **F-FIX-A**：assistant 相关路径以**用户主目录**为基（`userHome`/`MEBULAR_USER_HOME`/`os.homedir()`），
+//      **绝不**用 MEBULAR_HOME（那是 Mebular 自有文件的家）；spawn 的子进程统一注入**增强 PATH**。
 //   8. **F-PERF-2**：请求路径的探针一律**异步**（exec promisify）+ **短 TTL 会话内缓存**（单飞去重、
 //      写后失效、`refresh` 绕过）——不得在事件循环里 `spawnSync` 阻塞（并发 GET 会互相排队）。
 //
@@ -108,23 +110,54 @@ export function redactSecrets(text) {
 const HOME_OPENCODE = ['~', '.config', 'opencode', 'opencode.json'];
 const HOME_HERMES = ['~', '.hermes', 'config.yaml'];
 
+/**
+ * assistant 落面/探测路径的**用户主目录**（F-FIX-A）：
+ * 显式 `options.userHome` > `MEBULAR_USER_HOME` > `os.homedir()`。
+ * **绝不**回退到 Mebular home（`MEBULAR_HOME`）——两者语义不同，混用会把路径拼成
+ * `<MEBULAR_HOME>/.config/…`（真机事故：Hermes 被误报未安装、OpenChamber 写入错路径）。
+ */
+export function assistantUserHome(options = {}) {
+  const explicit = options.userHome;
+  if (typeof explicit === 'string' && explicit.length > 0) return explicit;
+  const fromEnv = options.env?.MEBULAR_USER_HOME ?? process.env.MEBULAR_USER_HOME;
+  if (typeof fromEnv === 'string' && fromEnv.length > 0) return fromEnv;
+  return homedir();
+}
+
+/** 桌面壳/守护常驻的 opencode 捆绑目录（存在才注入 PATH）。 */
+export const OPENCODE_BUNDLE_BIN = '/Applications/OpenChamber.app/Contents/Resources/opencode-cli';
+
+/** 增强 PATH：现有 PATH + `~/.local/bin` + /usr/local/bin + /opt/homebrew/bin +（存在则）opencode 捆绑目录。 */
+export function enhancedPath(basePath = process.env.PATH, userHome = assistantUserHome()) {
+  const base = typeof basePath === 'string' && basePath.length > 0 ? basePath.split(':') : [];
+  const extra = [join(userHome, '.local', 'bin'), '/usr/local/bin', '/opt/homebrew/bin', OPENCODE_BUNDLE_BIN]
+    .filter((p) => p === OPENCODE_BUNDLE_BIN ? existsSync(p) : true);
+  return [...new Set([...base, ...extra].filter((p) => typeof p === 'string' && p.length > 0))].join(':');
+}
+
+/** 子进程环境：继承进程环境 + 增强 PATH（launchd 服务 env 的 PATH 极简 → rc=127）。 */
+export function spawnEnv(options = {}) {
+  const userHome = assistantUserHome(options);
+  return { ...process.env, ...(options.env ?? {}), PATH: enhancedPath(process.env.PATH, userHome) };
+}
+
 function expandHome(parts, home) {
   return join(home, ...parts.slice(1));
 }
 
 /** 内置助手注册表（六要素；落面/写入/验证值以 F-EXP-1 实测为准）。 */
 export function builtinAssistants(options = {}) {
-  const home = options.home ?? homedir();
+  const userHome = assistantUserHome(options);
   const cwd = options.cwd ?? process.cwd();
   const platform = options.platform ?? process.platform;
   const env = options.env ?? process.env;
   const appData = platform === 'darwin'
-    ? join(home, 'Library', 'Application Support')
+    ? join(userHome, 'Library', 'Application Support')
     : platform === 'win32'
-      ? (env.APPDATA ?? join(home, 'AppData', 'Roaming'))
-      : (env.XDG_CONFIG_HOME ?? join(home, '.config'));
-  const opencodePath = expandHome(HOME_OPENCODE, home);
-  const hermesPath = expandHome(HOME_HERMES, home);
+      ? (env.APPDATA ?? join(userHome, 'AppData', 'Roaming'))
+      : (env.XDG_CONFIG_HOME ?? join(userHome, '.config'));
+  const opencodePath = expandHome(HOME_OPENCODE, userHome);
+  const hermesPath = expandHome(HOME_HERMES, userHome);
 
   return [
     {
@@ -132,7 +165,7 @@ export function builtinAssistants(options = {}) {
       landing: {
         primaryPath: opencodePath,
         keyPath: 'mcp.servers.mebular',
-        forbiddenPaths: [join(home, '.config', 'openchamber', 'opencode.managed.json')],
+        forbiddenPaths: [join(userHome, '.config', 'openchamber', 'opencode.managed.json')],
         format: 'opencode-json',
       },
       probe: {
@@ -150,7 +183,7 @@ export function builtinAssistants(options = {}) {
         'opencode.managed.json 为 App 所有且会被重写，禁写',
         'opencode mcp list 经运行服务回答，只读但勿频繁调用',
       ],
-      skillsDirs: [join(home, '.config', 'opencode', 'skills')],
+      skillsDirs: [join(userHome, '.config', 'opencode', 'skills')],
       reuseOf: 'opencode',
       note: 'OpenChamber 复用 OpenCode 的 global 配置（接一次即可）',
     },
@@ -161,7 +194,7 @@ export function builtinAssistants(options = {}) {
         signals: [
           { kind: 'config-path', paths: [hermesPath] },
           { kind: 'cli', command: 'hermes --version', timeoutMs: 2500 },
-          { kind: 'path', paths: [join(home, '.local', 'bin', 'hermes')] },
+          { kind: 'path', paths: [join(userHome, '.local', 'bin', 'hermes')] },
         ],
       },
       writer: { strategy: 'cli-set', command: 'hermes config set --force mcp_servers.mebular', backup: 'byte-level', atomic: false },
@@ -174,7 +207,7 @@ export function builtinAssistants(options = {}) {
         'Hermes 无法 env 沙箱（HERMES_CONFIG_PATH 被剥离）→ 写前字节级备份 + 失败回滚为硬要求',
         '写入仅经 `hermes config set --force`（ruamel 保注释）；未知子键必须 --force',
       ],
-      skillsDirs: [join(home, '.agents', 'skills')],
+      skillsDirs: [join(userHome, '.agents', 'skills')],
       reuseOf: null,
       note: 'Hermes 的 MCP 配置在 ~/.hermes/config.yaml',
     },
@@ -185,26 +218,26 @@ export function builtinAssistants(options = {}) {
         signals: [
           { kind: 'config-path', paths: [opencodePath] },
           { kind: 'cli', command: 'opencode --version', timeoutMs: 1500 },
-          { kind: 'dir', paths: [join(home, '.config', 'opencode')] },
+          { kind: 'dir', paths: [join(userHome, '.config', 'opencode')] },
         ],
       },
       writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
       verify: { cli: { command: 'opencode mcp list', expect: 'mebular', timeoutMs: 4000 }, configReadback: true },
       activation: { kind: 'user-reload', note: 'OpenCode 侧重载/重启后生效' },
       risks: ['opencode mcp list 经运行服务回答，只读但勿频繁调用'],
-      skillsDirs: [join(home, '.config', 'opencode', 'skills'), join(home, '.agents', 'skills'), join(cwd, '.agents', 'skills'), join(cwd, '.opencode', 'skills')],
+      skillsDirs: [join(userHome, '.config', 'opencode', 'skills'), join(userHome, '.agents', 'skills'), join(cwd, '.agents', 'skills'), join(cwd, '.opencode', 'skills')],
       reuseOf: null,
       note: null,
     },
     {
       id: 'claude-code', name: 'Claude Code', kind: 'file', format: 'json-mcpServers',
-      landing: { primaryPath: join(home, '.claude.json'), keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'json-mcpServers' },
-      probe: { signals: [{ kind: 'config-path', paths: [join(home, '.claude.json')] }, { kind: 'cli', command: 'claude --version', timeoutMs: 1500 }] },
+      landing: { primaryPath: join(userHome, '.claude.json'), keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'json-mcpServers' },
+      probe: { signals: [{ kind: 'config-path', paths: [join(userHome, '.claude.json')] }, { kind: 'cli', command: 'claude --version', timeoutMs: 1500 }] },
       writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
       verify: { configReadback: true },
       activation: { kind: 'user-reload', note: '重启 Claude Code 后生效' },
       risks: [],
-      skillsDirs: [join(home, '.agents', 'skills'), join(cwd, '.agents', 'skills')],
+      skillsDirs: [join(userHome, '.agents', 'skills'), join(cwd, '.agents', 'skills')],
       reuseOf: null, note: null,
     },
     {
@@ -219,8 +252,8 @@ export function builtinAssistants(options = {}) {
     },
     {
       id: 'cursor', name: 'Cursor', kind: 'file', format: 'json-mcpServers',
-      landing: { primaryPath: join(home, '.cursor', 'mcp.json'), keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'json-mcpServers' },
-      probe: { signals: [{ kind: 'config-path', paths: [join(home, '.cursor', 'mcp.json')] }, { kind: 'dir', paths: [join(home, '.cursor')] }] },
+      landing: { primaryPath: join(userHome, '.cursor', 'mcp.json'), keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'json-mcpServers' },
+      probe: { signals: [{ kind: 'config-path', paths: [join(userHome, '.cursor', 'mcp.json')] }, { kind: 'dir', paths: [join(userHome, '.cursor')] }] },
       writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
       verify: { configReadback: true },
       activation: { kind: 'user-reload', note: '重启 Cursor 后生效' },
@@ -234,7 +267,7 @@ export function builtinAssistants(options = {}) {
       verify: { configReadback: true },
       activation: { kind: 'user-reload', note: '重启 DSH 后生效' },
       risks: ['DSH 配置为 YAML 插件列表：结构未知时不自动改写'],
-      skillsDirs: [join(cwd, '.dsh', 'skills'), join(home, '.agents', 'skills')], reuseOf: null, note: null,
+      skillsDirs: [join(cwd, '.dsh', 'skills'), join(userHome, '.agents', 'skills')], reuseOf: null, note: null,
     },
     {
       id: 'generic', name: '其他 AI 助手（复制片段）', kind: 'snippet', format: 'generic-snippet',
@@ -521,14 +554,14 @@ export function landingState(assistant) {
 
 export const DEFAULT_CLI_TIMEOUT_MS = 1500;
 
-function defaultRun(command, timeoutMs) {
-  const res = spawnSync(command, { shell: true, encoding: 'utf-8', timeout: timeoutMs });
+function defaultRun(command, timeoutMs, options = {}) {
+  const res = spawnSync(command, { shell: true, encoding: 'utf-8', timeout: timeoutMs, env: spawnEnv(options) });
   return { ok: res.status === 0, code: res.status ?? 1, stdout: res.stdout ?? '', stderr: res.stderr ?? '' };
 }
 
-function defaultProcessList() {
+function defaultProcessList(options = {}) {
   try {
-    const res = spawnSync('ps', ['-Ao', 'command'], { encoding: 'utf-8', timeout: 2000 });
+    const res = spawnSync('ps', ['-Ao', 'command'], { encoding: 'utf-8', timeout: 2000, env: spawnEnv(options) });
     return res.status === 0 ? (res.stdout ?? '') : '';
   } catch {
     return '';
@@ -538,9 +571,9 @@ function defaultProcessList() {
 const execAsync = promisify(exec);
 
 /** 异步命令执行（请求路径唯一入口；`exec` 自带 shell 语义，跨平台）。 */
-async function defaultRunAsync(command, timeoutMs) {
+async function defaultRunAsync(command, timeoutMs, options = {}) {
   try {
-    const { stdout, stderr } = await execAsync(command, { timeout: timeoutMs, encoding: 'utf-8', maxBuffer: 1 << 20, windowsHide: true });
+    const { stdout, stderr } = await execAsync(command, { timeout: timeoutMs, encoding: 'utf-8', maxBuffer: 1 << 20, windowsHide: true, env: spawnEnv(options) });
     return { ok: true, code: 0, stdout: stdout ?? '', stderr: stderr ?? '' };
   } catch (error) {
     return {
@@ -552,8 +585,8 @@ async function defaultRunAsync(command, timeoutMs) {
   }
 }
 
-async function defaultProcessListAsync() {
-  const r = await defaultRunAsync('ps -Ao command', 2000);
+async function defaultProcessListAsync(options = {}) {
+  const r = await defaultRunAsync('ps -Ao command', 2000, options);
   return r.ok ? r.stdout : '';
 }
 
@@ -569,11 +602,11 @@ export function probeSignal(signal, options = {}) {
       return { kind: signal.kind, source, hit, detail: hit ? `存在：${paths.find((p) => existsSync(p))}` : `不存在：${paths.join(' / ')}` };
     }
     if (signal.kind === 'cli') {
-      const r = run(signal.command, signal.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS);
+      const r = run(signal.command, signal.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS, options);
       return { kind: signal.kind, source, hit: r.ok === true, detail: `rc=${r.code}` };
     }
     if (signal.kind === 'process') {
-      const list = options.processList ?? defaultProcessList;
+      const list = options.processList ?? (() => defaultProcessList(options));
       const out = typeof list === 'function' ? list() : String(list ?? '');
       const hit = out.includes(signal.pattern);
       return { kind: signal.kind, source, hit, detail: hit ? '进程命中' : '进程未命中' };
@@ -592,7 +625,7 @@ export async function probeSignalAsync(signal, options = {}) {
     : defaultRunAsync);
   const listAsync = options.processListAsync ?? (options.processList !== undefined
     ? () => Promise.resolve(options.processList)
-    : defaultProcessListAsync);
+    : () => defaultProcessListAsync(options));
   const source = signal.paths?.[0] ?? signal.command ?? signal.pattern ?? signal.kind;
   try {
     if (signal.kind === 'always') return { kind: signal.kind, source, hit: true, detail: signal.reason ?? 'n/a' };
@@ -613,7 +646,7 @@ export async function probeSignalAsync(signal, options = {}) {
           return { kind: signal.kind, source, hit: cachedCli.hit, detail: `rc=${cachedCli.code}` };
         }
       }
-      const r = await runAsync(signal.command, signal.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS);
+      const r = await runAsync(signal.command, signal.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS, options);
       if (!injected) cliProbeCache.set(cacheKey, { at: Date.now(), hit: r.ok === true, code: r.code });
       return { kind: signal.kind, source, hit: r.ok === true, detail: `rc=${r.code}` };
     }
@@ -739,7 +772,7 @@ async function computeListAssistantsAsync(options) {
  * - 并发请求**单飞**：同一 key 的在途计算被共享（避免并发 10 发 → 10 次 spawn）。
  */
 export async function listAssistantsAsync(options = {}) {
-  const key = `${options.home ?? homedir()}::${options.cwd ?? process.cwd()}`;
+  const key = `${assistantUserHome(options)}::${options.home ?? ''}::${options.cwd ?? process.cwd()}`;
   const ttl = Number.isFinite(options.ttlMs) ? options.ttlMs : ASSISTANTS_CACHE_TTL_MS;
   if (options.refresh !== true) {
     if (ttl > 0 && assistantsCache.key === key && assistantsCache.value && Date.now() - assistantsCache.at < ttl) {

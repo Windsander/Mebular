@@ -44,8 +44,10 @@
 
 | 素材 | 来源 commit | 许可 | 用途 | 状态 |
 |---|---|---|---|---|
-| `frontend-design`（Anthropic） | `41bbe19` | Apache-2.0 | UI 审美方向顾问（开发期文本） | 已 vendor（含 LICENSE.txt） |
-| `web-design-guidelines`（Vercel） | `ba46938` | ⚠️ 不明（上游无 LICENSE） | UI 质量清单参考 | **未入库**，仅本机参考 |
+| `frontend-design`（Anthropic） | `41bbe19`（2026-09-03） | Apache-2.0 | UI 审美方向顾问（开发期文本） | 已 vendor（含 LICENSE.txt） |
+| `webapp-testing`（Anthropic） | `dbd4588`（2026-10-09） | Apache-2.0 | 浏览器自动化验收（Playwright 截图/交互/日志） | 已 vendor（含 LICENSE.txt） |
+| `web-design-guidelines`（Vercel） | `063bee9`（2026-08-28） | MIT（README 声明；仓库根无独立 LICENSE 文件） | UI 质量清单（a11y/对比度/性能/UX） | 已 vendor |
+| `writing-guidelines`（Vercel） | `063bee9`（2026-08-28） | MIT（同上） | 文案规范审计（语气/结构/排版） | 已 vendor |
 
 ## 校验
 

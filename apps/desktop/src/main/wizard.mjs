@@ -177,25 +177,18 @@ export function tailText(text, lines = 200) {
 /**
  * R-1 中-8：邀请改走与控制台同源的 `POST /admin/api/invite`（主进程直调）。
  * 不再依赖 `fleet invite` CLI（fresh home 无 fleet.config.json 时 CLI 必 ENOENT）。
- * CSRF：先 GET 读端点取 `x-mebular-csrf` 响应头（回环 auth=none 下服务端会下发），再带头发 POST。
  * 返回与 parseInviteOutput 同形：{ token, qrSvg, endpoint, warning }。
  */
 export async function inviteViaApi(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, timeoutMs = 8000) {
   const base = `http://${http.host}:${http.port}`;
   try {
-    let csrf = null;
-    try {
-      const pre = await fetchImpl(`${base}/admin/api/overview`, { signal: AbortSignal.timeout(timeoutMs) });
-      csrf = pre?.headers?.get?.('x-mebular-csrf') ?? null;
-    } catch {
-      // 预取失败不阻断：POST 仍尝试（服务端校验失败会给出明确错误）
-    }
+    const csrf = await prefetchCsrf(fetchImpl, base, timeoutMs);
     const res = await fetchImpl(`${base}/admin/api/invite`, {
       method: 'POST',
       signal: AbortSignal.timeout(timeoutMs),
       headers: {
         'content-type': 'application/json',
-        ...(csrf ? { 'x-mebular-csrf': csrf } : {}),
+        ...csrfHeaders(csrf),
       },
       body: '{}',
     });
@@ -219,14 +212,33 @@ export async function inviteViaApi(fetchImpl, http = { host: '127.0.0.1', port: 
 
 // ---------- UX-2 段②行级接入：助手列表 / 接入动作（主进程直调回环 admin API） ----------
 
-/** 预取 CSRF（回环 auth=none 下读端点会下发；失败不阻断）。 */
-async function prefetchCsrf(fetchImpl, base, timeoutMs) {
+/**
+ * CSRF 双提交预取（修死）：token **仅由 `GET /console/` 下发**（响应头 `x-mebular-csrf`
+ * + `Set-Cookie: mebular_csrf=<同值>`）；`/admin/api/*` 从不下发——此前从
+ * `/admin/api/overview` 预取恒空 → 桌面主进程一切写操作 403。
+ * 服务端 csrfValid 要求 **头 ∧ cookie 同值**，故两者都要取。
+ * 返回 { token, cookie } | null（失败不阻断：写请求会得到服务端明确的 403 文案）。
+ */
+export async function prefetchCsrf(fetchImpl, base, timeoutMs = 8000) {
   try {
-    const pre = await fetchImpl(`${base}/admin/api/overview`, { signal: AbortSignal.timeout(timeoutMs) });
-    return pre?.headers?.get?.('x-mebular-csrf') ?? null;
+    const pre = await fetchImpl(`${base}/console/`, { signal: AbortSignal.timeout(timeoutMs) });
+    const token = pre?.headers?.get?.('x-mebular-csrf') ?? null;
+    if (!token) return null;
+    const raw = typeof pre?.headers?.getSetCookie === 'function'
+      ? pre.headers.getSetCookie().join('; ')
+      : String(pre?.headers?.get?.('set-cookie') ?? '');
+    const match = raw.match(/(?:^|;\s*)mebular_csrf=([^;]*)/);
+    // 服务端保证 cookie 值 == token（setCsrfCookie）；解析失败时按契约回退
+    const cookie = `mebular_csrf=${match ? match[1] : token}`;
+    return { token, cookie };
   } catch {
     return null;
   }
+}
+
+/** CSRF 双提交头（`x-mebular-csrf` ∧ `cookie: mebular_csrf=<同值>`；null → 空对象）。 */
+function csrfHeaders(csrf) {
+  return csrf ? { 'x-mebular-csrf': csrf.token, cookie: csrf.cookie } : {};
 }
 
 /** GET /admin/api/clients → { ok, clients, warning? }（读失败不阻断向导，给 warning）。 */
@@ -259,7 +271,7 @@ export async function clientActionViaApi(fetchImpl, http = { host: '127.0.0.1', 
       signal: AbortSignal.timeout(timeoutMs),
       headers: {
         'content-type': 'application/json',
-        ...(csrf ? { 'x-mebular-csrf': csrf } : {}),
+        ...csrfHeaders(csrf),
       },
       body: action === 'verify' ? '{"userConfirmedReload":true}' : '{}',
     });

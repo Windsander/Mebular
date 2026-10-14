@@ -2,7 +2,7 @@
 //
 // 全部在临时 home 中、CLI 与进程列表一律注入替身（不触碰真实用户目录/CLI）。
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { appendFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -205,6 +205,9 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
     const cfg = join(userHome, '.hermes', 'config.yaml');
     await mkdir(dirname(cfg), { recursive: true });
     const original = 'model: x\nmcp_servers:\n  openchamber:\n    command: python3\n';
+
+// F-HYGIENE-1/F-FIX-A：本夹具含真实 fs + 合并/回滚往返，全量并行下会超默认 5s；给显式有界预算。
+jest.setTimeout(process.platform === 'win32' ? 30_000 : 15_000);
     await writeFile(cfg, original);
     const calls = [];
     const res = await connectClient('hermes', opts({ run: (cmd) => { calls.push(cmd); return runOk(); } }));

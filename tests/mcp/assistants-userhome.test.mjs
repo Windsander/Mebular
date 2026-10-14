@@ -2,7 +2,7 @@
 //
 // 夹具**双 home**（userHome ≠ mebularHome）：这正是不再「沙箱全绿、真机全瞎」的判别条件。
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -88,9 +88,10 @@ describe('F-FIX-A 路径基数 / 增强 PATH / recheck', () => {
   // ---------- (b) 增强 PATH ----------
 
   it('b) enhancedPath 含 ~/.local/bin + /usr/local/bin + /opt/homebrew/bin（跨平台分隔符；捆綁目录存在才加）', () => {
-    // 显式分隔符 ⇒ 在任何 CI 平台上都确定
-    const posix = enhancedPath('/usr/bin:/bin', userHome, 'darwin', ':').split(':');
-    expect(posix).toContain(join(userHome, '.local', 'bin'));
+    // 用**不含冒号**的 userHome ⇒ 在任何 CI 平台上都确定（避免按 ':' 切到 Windows 盘符）
+    const posixUser = '/tmp/u';
+    const posix = enhancedPath('/usr/bin:/bin', posixUser, 'darwin', ':').split(':');
+    expect(posix).toContain(join(posixUser, '.local', 'bin'));
     expect(posix).toContain('/usr/local/bin');
     expect(posix).toContain('/opt/homebrew/bin');
     expect(posix).toContain('/usr/bin');            // 原有 PATH 保留
@@ -98,8 +99,12 @@ describe('F-FIX-A 路径基数 / 增强 PATH / recheck', () => {
     const bundle = '/Applications/OpenChamber.app/Contents/Resources/opencode-cli';
     expect(posix.includes(bundle)).toBe(existsSync(bundle));
     // Windows：';' 分隔、不注入 POSIX 目录、不把盘符拆坏
-    const win = enhancedPath('C:\\a;C:\\b', userHome, 'win32', ';').split(';');
-    expect(win).toEqual(expect.arrayContaining(['C:\\a', 'C:\\b', join(userHome, '.local', 'bin')]));
+    const winUser = 'C:\\u';
+
+// F-HYGIENE-1/F-FIX-A：本夹具含真实 fs + 合并/回滚往返，全量并行下会超默认 5s；给显式有界预算。
+jest.setTimeout(process.platform === 'win32' ? 30_000 : 15_000);
+    const win = enhancedPath('C:\\a;C:\\b', winUser, 'win32', ';').split(';');
+    expect(win).toEqual(expect.arrayContaining(['C:\\a', 'C:\\b', join(winUser, '.local', 'bin')]));
     expect(win).not.toContain('/opt/homebrew/bin');
   });
 

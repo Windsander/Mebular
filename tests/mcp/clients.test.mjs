@@ -2,7 +2,7 @@
 //
 // 全部在临时 home 中进行（不触碰真实用户目录）。
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,6 +15,9 @@ import {
   mergeJsonEntry,
   installSkills,
 } from '../../packages/mcp/src/clients.mjs';
+
+// F-HYGIENE-1/F-FIX-A：本夹具含真实 fs + 合并/回滚往返，全量并行下会超默认 5s；给显式有界预算。
+jest.setTimeout(process.platform === 'win32' ? 30_000 : 15_000);
 
 describe('H-1 clients：侦测与合并写入', () => {
   let root;

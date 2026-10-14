@@ -1006,22 +1006,27 @@ export async function buildServiceView({ home }) {
 }
 
 /** UX-2 · GET /admin/api/clients：助手注册表（内置 ∪ 自定义）三态视图（每助手一张卡的状态）。 */
-export async function buildClientsView({ home }) {
-  const { listAssistants } = await import('./clients.mjs');
+export async function buildClientsView({ home, url }) {
+  const { listAssistantsAsync } = await import('./clients.mjs');
   let clients = [];
   let customError = null;
   let customPath = null;
+  let cached = false;
   let error = null;
   try {
-    const out = listAssistants({ home, cwd: process.cwd() });
+    // F-PERF-2：请求路径走**异步探针 + 短 TTL 缓存**（`?refresh=1` 绕过；并发单飞）
+    const refresh = typeof url?.searchParams?.get === 'function' && url.searchParams.get('refresh') === '1';
+    const out = await listAssistantsAsync({ home, cwd: process.cwd(), refresh });
     clients = out.assistants;
     customError = out.customError;
     customPath = out.customPath;
+    cached = out.cached === true;
   } catch (cause) {
     error = String(cause?.message ?? cause);
   }
   return {
     clients,
+    cached,
     ...(customError ? { customError } : {}),
     ...(customPath ? { customPath } : {}),
     ...(error ? { error } : {}),

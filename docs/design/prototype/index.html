@@ -9,36 +9,35 @@
 <!-- 本页整体为评审工具 -->
 <div class="proto-review">
   <span class="tag">评审工具</span>
-  <a class="here" href="./index.html">总览</a><a href="./01-onboarding.html">① 初始化</a>
-  <a href="./02-wizard.html">② 三步向导</a><a href="./03-connect.html">③ 连接助手</a>
-  <a href="./04-device.html">④ 添加设备</a><a href="./05-daily.html">⑤ 日常入口</a><a href="./06-shell.html">⑥ 壳行为</a>
+  <a class="here" href="./index.html">总览</a><a href="./01-setup.html">① 引导</a>
+  <a href="./03-connect.html">② 连接助手</a><a href="./04-device.html">③ 添加设备</a>
+  <a href="./05-daily.html">④ 日常入口</a><a href="./06-shell.html">⑤ 壳行为</a>
   <span class="sep"></span>
-  <span class="lbl">零依赖 · 假数据 · file:// 可点 · 各页场景可在顶部评审条切换</span>
+  <span class="lbl">零依赖 · 假数据 · file:// 可点 · 各页场景在顶部评审条切换</span>
 </div>
 <main>
   <section class="card">
     <div class="card-head"><h2>旅程图</h2></div>
-    <pre>安装 App → 首启守护自检 → 初始化（建新/加入）→ 接入助手（三态 → 接入 → 验证闭环）→ 添加设备 → 日常
-               │失败               │桌面壳一键重启          │未装也可点 · 无死按钮        │随时可回向导（回想）
-               └→ 诊断与日志        └→ 命令行给命令指引      └→ ＋新增助手（长尾零发布）</pre>
+    <pre>安装 App → 一屏引导（一键开始 → 接入助手 → 可选邀请，纯点击）→ 日常控制台
+                 │启动失败：一行提示 + 重试      │回想：控制台/托盘「返回向导」
+                 └────────────── 全程一屏，不分页、不读文档</pre>
   </section>
 
   <section class="card">
     <div class="card-head"><h2>推荐路线（逐屏点一遍）</h2></div>
     <ol class="checklist" style="color:var(--text)">
-      <li><a href="./01-onboarding.html">① 初始化</a>：引导态 → 点「建新并重启」→ 待重启（桌面壳=一键「重启守护」；切到命令行场景看命令指引）</li>
-      <li><a href="./02-wizard.html">② 三步向导</a>：逐场景切换；点「跳过」与「进入控制台 ✦」</li>
-      <li><a href="./03-connect.html">③ 连接助手</a>（核心）：对 OpenChamber 点「接入」走完整验证闭环；评审条切四个失败路径；点「＋ 新增助手」走登记流程</li>
-      <li><a href="./04-device.html">④ 添加设备</a>：生成邀请 → 二次确认再生 → 已连收编</li>
-      <li><a href="./05-daily.html">⑤ 日常入口</a>：完成态日常（控制台为家）</li>
-      <li><a href="./06-shell.html">⑥ 壳行为</a>：托盘/窗口/退出确认（标注屏）</li>
+      <li><a href="./01-setup.html">① 一屏引导</a>（核心）：点「一键开始」→ 给 OpenChamber 点「接入」→「生成邀请」或「跳过 ›」→「已就绪 ✦」；评审条切「启动失败 / 已设置过·直达」</li>
+      <li><a href="./03-connect.html">② 连接助手</a>（日常操作面）：三态卡片、＋新增助手、四个失败场景（评审条）</li>
+      <li><a href="./04-device.html">③ 添加设备</a>：生成邀请 → 二次确认再生 → 已连收编</li>
+      <li><a href="./05-daily.html">④ 日常入口</a>：完成态日常（控制台为家）</li>
+      <li><a href="./06-shell.html">⑤ 壳行为</a>：托盘/窗口/退出确认（标注屏）</li>
     </ol>
   </section>
 
   <section class="card">
     <div class="card-head"><h2>失败路径覆盖</h2></div>
-    <p class="muted">检测失败 / 写入失败 / 验证失败 / 需重启未重启 → 见 <a href="./03-connect.html">③ 连接助手</a> 评审条场景切换；守护启动失败 → 见 <a href="./02-wizard.html">② 向导</a>「守护未就绪」（日志自动展开 + 人话结论）。</p>
-    <p class="muted">对应规格：<code>docs/design/config-journey-v1.md</code>（§8.1「评审脚手架 vs 产品界面」约束本原型的批注边界）。</p>
+    <p class="muted">引导期：启动失败（① 屏评审条）。接入期：检测失败 / 写入失败 / 验证失败 / 需重启未重启 → 见 <a href="./03-connect.html">② 连接助手</a> 评审条。</p>
+    <p class="muted">对应规格：<code>docs/design/config-journey-v1.md</code>（§8.1 约束本原型的批注边界）。</p>
   </section>
 </main>
 </body>

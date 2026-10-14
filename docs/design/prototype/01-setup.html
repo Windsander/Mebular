@@ -83,7 +83,7 @@ button.big { font-size: 15px; padding: 11px 26px; border-radius: 8px; letter-spa
 <div class="proto-review">
   <span class="tag">评审工具</span>
   <a href="./index.html">总览</a><a class="here" href="./01-setup.html">① 引导</a>
-  <a href="./03-connect.html">② 连接助手</a><a href="./04-device.html">③ 添加设备</a>
+  <a href="./03-settings.html">② 设置 · AI 助手</a><a href="./04-device.html">③ 添加设备</a>
   <a href="./05-daily.html">④ 日常入口</a><a href="./06-shell.html">⑤ 壳行为</a>
   <span class="sep"></span>
   <span class="lbl">场景</span>
@@ -142,7 +142,7 @@ button.big { font-size: 15px; padding: 11px 26px; border-radius: 8px; letter-spa
             <div class="arow" data-name="Claude Code"><span class="nm">Claude Code</span><button class="primary small connect">接入</button></div>
             <div class="arow" data-name="Cursor"><span class="nm">Cursor</span><span class="ok">已接入 ✓</span></div>
           </div>
-          <p class="hint" id="assist-note">接入只改它的一条配置；重载对应助手后生效（可到控制台验证）。</p>
+          <p class="hint" id="assist-note">接入只改它的一条配置；重载对应助手后生效（可到 设置 → AI 助手 验证）。</p>
           <div class="sec-foot">
             <button class="primary" id="done2" disabled>已完成</button>
             <button class="ghost small" id="skip-connect">先不接 ›</button>
@@ -264,7 +264,7 @@ $('done2').addEventListener('click', () => {
   $('tagline').textContent = '全部就绪。';
 });
 $('skip-connect').addEventListener('click', () => {
-  $('connect-done').innerHTML = '<span>— 已跳过</span><span class="muted">随时可以在控制台「连接 AI 助手」</span><span class="chev">展开 ›</span>';
+  $('connect-done').innerHTML = '<span>— 已跳过</span><span class="muted">随时可以在 设置 → AI 助手 里接</span><span class="chev">展开 ›</span>';
   setNode(2, 'done'); showFinish();
   $('tagline').textContent = '全部就绪。';
 });
@@ -292,7 +292,7 @@ function resetAssists(count) {
   $('assist-rows').hidden = count === 0;
   $('assist-note').hidden = count === 0;
   $('assist-copy').innerHTML = count === 0
-    ? '没检测到已装的 AI 助手 —— 可以先跳过，装好后再到控制台「连接 AI 助手」。'
+    ? '没检测到已装的 AI 助手 —— 可以先跳过，装好后再到 设置 → AI 助手 接入。'
     : `检测到 <b id="assist-count">${count}</b> 个已装助手。点「接入」；都接好了点「已完成」。`;
   $('done2').disabled = true; $('done2').hidden = count === 0;
   $('done2-hint').textContent = count === 0 ? '' : '接好一个即可点「已完成」';

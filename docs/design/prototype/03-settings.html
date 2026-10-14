@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>设置 · AI 助手</title>
+<link rel="stylesheet" href="./prototype.css" />
+<style>
+/* 设置页布局：左侧栏 + 主列 */
+.settings { display: grid; grid-template-columns: 168px 1fr; gap: 18px; align-items: start; max-width: 860px; margin: 0 auto; width: 100%; }
+.sidenav { display: grid; gap: 2px; position: sticky; top: 46px; }
+.sidenav button { text-align: left; background: transparent; border: none; color: var(--muted); padding: 8px 12px; border-radius: 6px; font-size: 13px; cursor: pointer; }
+.sidenav button:hover { color: var(--text); background: rgba(255, 255, 255, 0.03); }
+.sidenav button.on { color: var(--crt-bright); background: rgba(12, 52, 36, 0.5); border-left: 2px solid var(--crt); border-radius: 0 6px 6px 0; }
+.sidenav button.soon { opacity: .45; cursor: default; }
+
+/* 助手行：与引导同语言（名称 + 状态词 + 一个动作） */
+.arow { display: flex; align-items: center; gap: 10px; padding: 11px 4px; border-top: 1px dashed var(--border); }
+.arow:first-of-type { border-top: none; }
+.arow .nm { font-size: 14px; }
+.arow .st { font-size: 12px; color: var(--muted); }
+.arow .st.todo { color: var(--warn); }
+.arow .st.ok { color: var(--crt); }
+.arow .sp { flex: 1; }
+.axp { margin: 0 4px 8px; padding: 10px 12px; border: 1px dashed var(--border); border-radius: 6px; background: var(--bg-panel-2); }
+.fold-row > .nm { color: var(--muted); }
+.sec-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.spin { display: inline-block; width: 11px; height: 11px; border: 2px solid var(--crt-dim); border-top-color: var(--crt); border-radius: 50%; animation: rot .8s linear infinite; vertical-align: -1px; margin-right: 7px; }
+@keyframes rot { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<!-- ===== 评审工具（非产品界面） ===== -->
+<div class="proto-review">
+  <span class="tag">评审工具</span>
+  <a href="./index.html">总览</a><a href="./01-setup.html">① 引导</a>
+  <a class="here" href="./03-settings.html">② 设置 · AI 助手</a><a href="./04-device.html">③ 添加设备</a>
+  <a href="./05-daily.html">④ 日常入口</a><a href="./06-shell.html">⑤ 壳行为</a>
+  <span class="sep"></span>
+  <span class="lbl">场景（作用于 OpenChamber 行）</span>
+  <button data-s="normal" aria-pressed="true">正常</button>
+  <button data-s="detect-fail" aria-pressed="false">检测失败</button>
+  <button data-s="write-fail" aria-pressed="false">写入失败</button>
+  <button data-s="verify-fail" aria-pressed="false">验证失败</button>
+  <button data-s="pending-restart" aria-pressed="false">需重启未重启</button>
+</div>
+<!-- ===== 产品界面 ===== -->
+<header class="topbar">
+  <span class="brand">✦ Mebular 控制台</span>
+  <span class="badge">本机 · device-demo</span><span class="badge gray">● P2P 已启用</span><span class="badge gray">记忆 —</span>
+  <span class="spacer"></span>
+  <button class="ghost">⚙ 设置</button><button>＋ 连接已有地址</button><button class="primary">＋ 邀请新设备</button>
+</header>
+<main style="max-width:none">
+  <div class="settings">
+    <nav class="sidenav">
+      <button data-sec="common">常用</button>
+      <button data-sec="assistants" class="on">AI 助手</button>
+      <button class="soon" title="原型未展开">高级</button>
+      <button class="soon" title="原型未展开">诊断</button>
+    </nav>
+
+    <!-- ===== 常用 ===== -->
+    <section class="card crt" id="sec-common" hidden>
+      <div class="sec-head"><h2>常用</h2></div>
+      <div class="arow"><span class="nm">常驻运行</span><span class="st">未常驻（临时运行）</span><span class="sp"></span><button class="primary small">让 Mebular 常驻</button></div>
+      <div class="axp" style="border:none;background:none;padding:2px 4px 6px"><details class="detail"><summary>详情</summary>
+        <p class="muted">开机自启、崩溃自动拉起。家目录 <code>~/.mebular</code>。</p>
+        <div class="row"><button class="small ghost">立即重启</button><button class="small ghost">重新检测</button></div>
+      </details></div>
+      <div class="arow"><span class="nm">加入服务</span><span class="st ok">已开启</span><span class="sp"></span><button class="ghost small">关闭</button></div>
+      <div class="arow"><span class="nm">重启向导</span><span class="st">重新走一遍首次设置（不动已有配置）</span><span class="sp"></span><a class="btn ghost small" href="./01-setup.html">重启向导 ›</a></div>
+    </section>
+
+    <!-- ===== AI 助手 ===== -->
+    <section class="card crt" id="sec-assistants">
+      <div class="sec-head">
+        <h2>AI 助手</h2><span class="sp" style="flex:1"></span>
+        <button class="small" id="btn-add-assistant">＋ 新增助手</button>
+      </div>
+      <p class="muted" style="margin:0 0 6px">接入只改助手的一条配置，写前自动备份；重载对应助手后生效。</p>
+
+      <!-- 新增助手流程 -->
+      <div class="axp" id="add-flow" hidden>
+        <div class="card-head"><h3>新增助手 · 第 <span id="add-step-no">1</span>/2 步</h3></div>
+        <div id="add-step1">
+          <div class="row"><span class="muted">名称</span><code id="add-name" contenteditable="true" style="border:1px solid var(--border);border-radius:4px;padding:4px 8px">Hermes</code></div>
+          <div class="row"><button class="primary" id="add-next">下一步：登记方式</button><button class="ghost" id="add-cancel">取消</button></div>
+        </div>
+        <div id="add-step2" hidden>
+          <div class="row"><button id="add-by-file">选配置文件</button><button class="ghost" id="add-by-snippet">粘贴片段</button></div>
+          <div id="add-file-detail" hidden style="margin-top:8px">
+            <p class="muted">已识别 Hermes 的配置：写入走它的官方命令，写前自动备份；装好后<b>免重启</b>，新会话即用。</p>
+            <div class="row"><button class="primary" id="add-save">保存并检测</button></div>
+            <details class="detail"><summary>详情</summary>
+              <p class="muted">路径 <code>~/.hermes/config.yaml</code>；写入 <code>hermes config set --force mcp_servers.mebular.url &lt;值&gt;</code>；验证 <code>hermes mcp test mebular</code>。</p>
+            </details>
+          </div>
+          <div id="add-snippet-detail" hidden style="margin-top:8px">
+            <pre>"mebular": { "url": "http://127.0.0.1:7331/mcp" }</pre>
+            <p class="muted">这类助手需要手动合并：给你片段和步骤，合并完点「我已手动合并，重新检测」。</p>
+            <div class="row"><button class="primary" id="add-save2">保存并检测</button></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="assist-list">
+        <!-- OpenChamber 行（场景目标） -->
+        <div class="arow" id="oc-row">
+          <span class="nm">OpenChamber</span><span class="st" id="oc-st">未接入</span><span class="sp"></span>
+          <span id="oc-action"><button class="primary small" id="oc-connect">接入</button></span>
+        </div>
+        <div class="axp" id="oc-xp" hidden></div>
+
+        <div class="arow">
+          <span class="nm">Claude Code</span><span class="st">未接入</span><span class="sp"></span>
+          <button class="primary small">接入</button>
+        </div>
+        <div class="arow">
+          <span class="nm">Cursor</span><span class="st ok">已接入 ✓</span><span class="sp"></span>
+          <button class="ghost small" data-detail>详情 ›</button>
+        </div>
+        <div class="arow">
+          <span class="nm">其他 MCP 客户端</span><span class="st">需手动</span><span class="sp"></span>
+          <button class="ghost small" data-detail>查看片段 ›</button>
+        </div>
+
+        <!-- 未安装：底部折叠一行 -->
+        <div class="arow fold-row">
+          <span class="nm">未安装（2）</span><span class="sp"></span>
+          <button class="ghost small" id="notinst-toggle">展开 ›</button>
+        </div>
+        <div class="axp" id="notinst" hidden>
+          <div class="arow"><span class="nm">Hermes</span><span class="st">未安装</span><span class="sp"></span><button class="ghost small" data-detail>怎么装 ›</button></div>
+          <div class="arow"><span class="nm">Windsurf</span><span class="st">未安装</span><span class="sp"></span><button class="ghost small" data-detail>怎么装 ›</button></div>
+        </div>
+      </div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+// 侧栏切换
+document.querySelectorAll('.sidenav button[data-sec]').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('.sidenav button[data-sec]').forEach((x) => x.classList.toggle('on', x === b));
+  $('sec-common').hidden = b.dataset.sec !== 'common';
+  $('sec-assistants').hidden = b.dataset.sec !== 'assistants';
+}));
+{ const qs = new URLSearchParams(location.search); if (qs.get('sec') === 'common') document.querySelector('[data-sec="common"]').click(); }
+
+// OpenChamber 行：正常接入闭环（行内展开），四个失败场景（一行式 + 详情）
+function ocReset() { $('oc-xp').hidden = true; $('oc-xp').innerHTML = ''; $('oc-row').hidden = false; }
+function ocState(st, actionHtml) { $('oc-st').textContent = st; $('oc-st').className = 'st' + (st.includes('✓') ? ' ok' : st === '未接入' ? '' : ' todo'); $('oc-action').innerHTML = actionHtml; }
+function ocFail(kind) {
+  ocReset();
+  const map = {
+    'detect-fail': ['检测失败', '检测失败：读不到它的配置（权限被拒）', '重试检测', '配置文件 ✗（权限）· 命令行 —（未执行）· App ✓。已装好但没检测到？可以手动登记。'],
+    'write-fail': ['写入失败', '没能写入：它的配置文件不是合法格式，原配置没动', '查看片段', 'opencode.json 第 41 行解析失败；备份在 opencode.json.bak-20261014-1012。可以改用手动合并。'],
+    'verify-fail': ['验证未过', '验证未过：没找到 mebular 工具', '重新验证', '已写入，但 opencode mcp list 的输出里没有 mebular：{ "servers": [] }'],
+    'pending-restart': ['待生效', '已接好，在 App 侧重载 OpenChamber 后生效', '我已重载，重新验证', '① 完全退出（不是关窗口）或在 App 内重载 ② 重新打开 ③ 工具列表应出现 mebular。我们不代发 reload。'],
+  }[kind];
+  ocState(map[0], '<button class="primary small" id="oc-fail-act">' + map[2] + '</button>');
+  $('oc-xp').hidden = false;
+  $('oc-xp').innerHTML = `<p class="fail-line${kind === 'detect-fail' ? ' gray' : ''}" style="margin:0">${map[1]}</p>
+    <details class="detail"><summary>详情</summary><p class="muted">${map[3]}</p>${kind === 'verify-fail' ? '<div class="row"><button class="small ghost">回滚</button></div>' : ''}</details>`;
+  if (kind === 'pending-restart') $('oc-fail-act').addEventListener('click', () => { show('normal'); $('oc-connect').click(); });
+}
+function ocFlow() {
+  $('oc-xp').hidden = false;
+  $('oc-xp').innerHTML = '<p class="fail-line ok" style="margin:0"><span class="spin"></span>正在写入（先自动备份）…</p>';
+  $('oc-action').innerHTML = '';
+  setTimeout(() => { $('oc-xp').innerHTML = '<p class="fail-line ok" style="margin:0"><span class="spin"></span>已写入并确认没动其他内容，正在验证…</p>'; }, 700);
+  setTimeout(() => {
+    ocState('待生效', '<button class="primary small" id="oc-reloaded">我已重载，重新验证</button>');
+    $('oc-xp').innerHTML = '<p class="fail-line" style="margin:0">已接好，在 App 侧重载 OpenChamber 后生效</p><details class="detail"><summary>详情</summary><p class="muted">① 完全退出（不是关窗口）或在 App 内重载 ② 重新打开 ③ 工具列表应出现 mebular。我们不代发 reload。</p></details>';
+    $('oc-reloaded').addEventListener('click', () => {
+      $('oc-xp').innerHTML = '<p class="fail-line ok" style="margin:0"><span class="spin"></span>正在重新验证…</p>';
+      setTimeout(() => {
+        ocState('已接入 ✓', '<button class="ghost small" data-detail>详情 ›</button>');
+        $('oc-xp').innerHTML = '<p class="fail-line ok" style="margin:0">验证通过：mebular 已在它的工具列表里</p>';
+        setTimeout(() => { $('oc-xp').hidden = true; }, 1800);
+      }, 800);
+    });
+  }, 1500);
+}
+function show(s) {
+  document.querySelectorAll('.proto-review button[data-s]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.s === s)));
+  ocReset();
+  if (s === 'normal') { ocState('未接入', '<button class="primary small" id="oc-connect">接入</button>'); $('oc-connect').addEventListener('click', ocFlow); }
+  else ocFail(s);
+}
+document.querySelectorAll('.proto-review button[data-s]').forEach((b) => b.addEventListener('click', () => show(b.dataset.s)));
+show('normal');
+{ const qs = new URLSearchParams(location.search).get('s'); if (qs) show(qs); }
+// 占位动作
+document.querySelectorAll('[data-detail]').forEach((b) => b.addEventListener('click', () => alert('原型：行内展开详情（判据 / 改动 / 回滚 / 重新检测）。')));
+$('notinst-toggle').addEventListener('click', () => { $('notinst').hidden = !$('notinst').hidden; $('notinst-toggle').textContent = $('notinst').hidden ? '展开 ›' : '收起 ›'; });
+// 新增助手流程
+$('btn-add-assistant').addEventListener('click', () => { $('add-flow').hidden = false; $('add-step1').hidden = false; $('add-step2').hidden = true; $('add-step-no').textContent = '1'; });
+$('add-cancel').addEventListener('click', () => { $('add-flow').hidden = true; });
+$('add-next').addEventListener('click', () => { $('add-step1').hidden = true; $('add-step2').hidden = false; $('add-step-no').textContent = '2'; });
+$('add-by-file').addEventListener('click', () => { $('add-file-detail').hidden = false; $('add-snippet-detail').hidden = true; });
+$('add-by-snippet').addEventListener('click', () => { $('add-snippet-detail').hidden = false; $('add-file-detail').hidden = true; });
+const saveCustom = () => {
+  $('add-flow').hidden = true;
+  const name = $('add-name').textContent.trim() || '自定义助手';
+  const row = document.createElement('div');
+  row.className = 'arow';
+  row.innerHTML = `<span class="nm">${name}</span><span class="st">未安装</span><span class="sp"></span><button class="ghost small" data-detail>怎么装 ›</button>`;
+  row.querySelector('button').addEventListener('click', () => alert('原型：怎么装（安装指引 / 重新检测 / 手动登记）。'));
+  $('assist-list').insertBefore(row, document.querySelector('.fold-row'));
+  alert('原型：已登记并即时入列。');
+};
+$('add-save').addEventListener('click', saveCustom);
+$('add-save2').addEventListener('click', saveCustom);
+</script>
+</body>
+</html>

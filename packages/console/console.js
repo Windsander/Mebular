@@ -9,7 +9,8 @@
 import { StarStage, namespaceColor, shortId } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, selectedMemoryCount, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_TASK_CARDS, IA_ADVANCED_FIELDS, IA_MIGRATION, IA_EDITOR_PATHS, IA_INFO_BLOCKS } from './settings-ia.js';
+import { IA_TABS, IA_TASK_CARDS, IA_ADVANCED_FIELDS, IA_MIGRATION, IA_EDITOR_PATHS, IA_INFO_BLOCKS, IA_SETTINGS_EXTRA } from './settings-ia.js';
+import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems } from './assistants.js';
 
 const $ = (selector) => document.querySelector(selector);
 const params = new URLSearchParams(location.search);
@@ -38,6 +39,7 @@ const state = {
   degraded: null,
   error: null,
   clientRestart: {},
+  clientOpen: {},
   csrf: readCookie('mebular_csrf'),
   token: params.get('token') ?? localStorage.getItem('mebular_token') ?? null,
   features: { writes: false },
@@ -158,7 +160,7 @@ function render() {
   renderDomains();
   renderAudit();
   renderMemories();
-  renderConnect();
+  renderOverlays();
   if (!$('#settings').hidden) renderSettings();
   if (!$('#about').hidden) renderAbout();
   renderBanner();
@@ -868,7 +870,8 @@ function renderAdvanced() {
 let lastSettingsSignature = null;
 
 // render() 每 3s 轮询会调用 renderSettings；内容签名用于判断是否真的需要重建 DOM。
-// 覆盖渲染依赖：activeTab（即 settingsTab）、settings、rawConfig、writes、healthz、本机 deviceId。
+// 覆盖渲染依赖：activeTab（即 settingsTab）、settings、rawConfig、writes、healthz、本机 deviceId、
+// AI 助手专区依赖（clients / service / 行内动作消息与展开态）。
 function settingsSignature(activeTab) {
   return JSON.stringify([
     activeTab,
@@ -877,6 +880,14 @@ function settingsSignature(activeTab) {
     state.features?.writes ?? null,
     state.healthz ?? null,
     state.overview?.device?.deviceId ?? null,
+    // AI 助手专区依赖：只取稳定投影（整对象序列化会因服务端易变字段导致每 3s 重建）
+    (state.clients ?? null) && (state.clients ?? []).map((c) => [c.id, Boolean(c.installed), Boolean(c.connected), c.state ?? null]),
+    state.service ? [Boolean(state.service.registered), Boolean(state.service.running)] : null,
+    state.serviceMsg ?? '',
+    state.clientMsg ?? null,
+    state.clientDiff ?? null,
+    state.clientRestart ?? null,
+    state.clientOpen ?? null,
   ]);
 }
 
@@ -908,12 +919,17 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   body.innerHTML = `
     ${pendingRestartBanner()}
     ${applyResultBanner()}
-    <div class="settings-tabs" role="tablist" aria-label="设置分区">${IA_TABS.map(tabButton).join('')}</div>
+    <div class="settings-tabs" role="tablist" aria-label="设置分区">${IA_TABS.map(tabButton).join('')}${
+      IA_SETTINGS_EXTRA.map((item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.label)}</button>`).join('')
+    }</div>
     ${panel('common', `
-      <p class="cfg-path muted">修改写入 <code>${escapeHtml(configPath)}</code>（自动保留 .bak 备份）；设备身份 / 存储 / 加密等敏感项请手工编辑。只有需要时才动「Agent 怎么连我」。</p>
+      <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
+      ${wizardRowHtml(typeof window.mebularDesktop?.openWizard === 'function')}
+      <p class="cfg-path muted">修改写入 <code>${escapeHtml(configPath)}</code>（自动保留 .bak 备份）；设备身份 / 存储 / 加密等敏感项请手工编辑。</p>
       <div class="task-cards">${renderTaskCards()}</div>
       ${cfgActionsBlock()}
     `)}
+    ${panel('assistants', `<div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: state })}</div>`)}
     ${panel('advanced', `
       <p class="cfg-path muted">高级项默认收起：改动前请确认理解其安全含义（尤其监听地址、TLS 与 relay）。</p>
       ${renderAdvanced()}
@@ -1469,99 +1485,41 @@ function renderMemories() {
   }).join('');
 }
 
-// ---------- H-1：常驻运行 + 连接我的 AI 助手 ----------
+// ---------- H-1/UX-2：设置 · AI 助手专区（单列表）+ 首屏只读叠加层 ----------
+// 连接页已收编进「设置 · AI 助手」（?view=connect 为别名重定向）；构建器见 assistants.js。
 
-function connectStatusLabel(client) {
-  if (client.needsManual) return '需手动';
-  if (!client.installed) return client.format === 'generic' ? '未接入' : '未安装';
-  return client.connected ? '已接入' : '已安装·未接入';
+/** 行内动作后的重绘：设置弹层开着就强刷设置（签名已含 clients/service/消息态），叠加层永远刷新。 */
+function rerenderAssistants() {
+  if (!$('#settings')?.hidden) { lastSettingsSignature = null; renderSettings(state.settingsTab ?? 'common'); }
+  renderOverlays();
 }
 
-function renderConnect() {
-  const serviceBox = $('#service-card');
-  if (serviceBox) {
-    const svc = state.service;
-    if (!svc) {
-      serviceBox.innerHTML = '<p class="muted">常驻状态加载中…</p>';
-    } else {
-      const badge = svc.registered ? (svc.running ? '已常驻·运行中' : '已常驻·未运行') : '未常驻（当前为临时运行）';
-      // R-1 中-5：plist 全路径移出首屏卡片 →「关于本机 · 常驻服务文件」
-      serviceBox.innerHTML = `
-        <div class="connect-head"><h3>常驻运行</h3><span class="crt-tag">${escapeHtml(badge)}</span></div>
-        <p class="muted">开机自启、崩溃自动拉起。家目录：<code>${escapeHtml(svc.home ?? '—')}</code></p>
-        <div class="connect-actions">
-          <button class="btn btn-crt" type="button" data-svc-action="install" ${svc.registered ? 'disabled' : ''}>让 Mebular 常驻</button>
-          <button class="btn" type="button" data-svc-action="uninstall" ${svc.registered ? '' : 'disabled'}>取消常驻</button>
-          <button class="btn" type="button" data-svc-action="restart">立即重启</button>
-          <button class="btn" type="button" data-svc-action="recheck">重新检测</button>
-        </div>
-        <p class="muted" id="service-msg">${escapeHtml(state.serviceMsg)}</p>`;
-    }
+/** UX-2 首屏叠加层：状态总览条（纯只读）+「需要注意」条件浮卡（无事不出现）；只在星图视图出现，星图本体不改。 */
+function renderOverlays() {
+  const pill = $('#status-pill');
+  const card = $('#attention-card');
+  if (!pill || !card) return;
+  const onMap = state.view === 'map';
+  const selfId = state.overview?.device?.deviceId ?? null;
+  pill.hidden = !onMap;
+  if (onMap) {
+    pill.innerHTML = statusPillHtml({
+      service: state.service,
+      devices: state.devices,
+      memoryCount: state.overview?.status?.nodeCount ?? null,
+      selfId,
+    });
   }
-  const list = $('#clients-list');
-  if (!list) return;
-  const clients = state.clients;
-  if (!clients) {
-    list.innerHTML = '<p class="muted">AI 助手列表加载中…</p>';
-    return;
+  const items = attentionItems({ clients: state.clients, ui: state, devices: state.devices, selfId });
+  card.hidden = !onMap || items.length === 0;
+  if (onMap && items.length > 0) {
+    card.innerHTML = `<h3>需要注意</h3><ul>${items.map((it) =>
+      `<li><button class="attention-item" type="button" data-attention-action="${escapeHtml(it.action)}" data-attention-id="${escapeHtml(it.id)}">${escapeHtml(it.label)} ›</button></li>`).join('')}</ul>`;
   }
-  // R-1 中-5：分组折叠——已装可接入（默认展开）/ 未安装 / 需手动合并（默认收起）
-  const groups = [
-    { id: 'ready', title: '已装可接入', open: true, items: [] },
-    { id: 'missing', title: '未安装', open: false, items: [] },
-    { id: 'manual', title: '需手动合并', open: false, items: [] },
-  ];
-  for (const c of clients) {
-    if (c.needsManual) groups[2].items.push(c);
-    else if (!c.installed) groups[1].items.push(c);
-    else groups[0].items.push(c);
-  }
-  list.innerHTML = groups.filter((g) => g.items.length > 0).map((g) => `
-    <details class="connect-group" ${g.open ? 'open' : ''}>
-      <summary>${escapeHtml(g.title)}（${g.items.length}）</summary>
-      ${g.items.map((c) => connectCardHtml(c)).join('')}
-    </details>`).join('') || '<p class="muted">未检测到已知 AI 助手。</p>';
-}
-
-/** R-1 中-5/中-6/小-11：每卡 1 个主按钮；已接入 →「已接入 ✓」收编；其余动作收进 overflow「更多」。 */
-function connectCardHtml(c) {
-  const status = connectStatusLabel(c);
-  const connected = c.installed && c.connected && !c.needsManual;
-  const primary = connected
-    ? '<span class="crt-tag connect-done-tag">已接入 ✓</span>'
-    : `<button class="btn btn-small btn-crt" type="button" data-cli-action="connect" data-cli-id="${escapeHtml(c.id)}">接入</button>`;
-  const overflow = [
-    `<button class="btn btn-small" type="button" data-cli-action="preview" data-cli-id="${escapeHtml(c.id)}">查看改动</button>`,
-    `<button class="btn btn-small" type="button" data-cli-action="rollback" data-cli-id="${escapeHtml(c.id)}">回滚</button>`,
-    (c.skillsDirs ?? []).length > 0 ? `<button class="btn btn-small" type="button" data-cli-action="skills" data-cli-id="${escapeHtml(c.id)}">安装 Skill</button>` : '',
-    `<button class="btn btn-small" type="button" data-cli-action="copy" data-cli-id="${escapeHtml(c.id)}">复制片段</button>`,
-    `<button class="btn btn-small" type="button" data-cli-action="recheck" data-cli-id="${escapeHtml(c.id)}">重新检测</button>`,
-  ].filter(Boolean).join(' ');
-  const where = c.configPath ? `配置：<code>${escapeHtml(c.configPath)}</code>` : '没有可自动写入的配置';
-  // 中-6：接入成功后的重启闭环 checklist + 「我已重启，重新检测」
-  const restartCheck = state.clientRestart[c.id]
-    ? `<div class="restart-checklist">
-        <p><b>最后一步：重启 ${escapeHtml(c.name)}</b></p>
-        <ol class="muted">
-          <li>完全退出该助手（不是关窗口，是退出进程）</li>
-          <li>重新打开</li>
-          <li>在它的工具列表里应能看到 <code>mebular</code> 工具</li>
-        </ol>
-        <button class="btn btn-small btn-crt" type="button" data-cli-action="recheck" data-cli-id="${escapeHtml(c.id)}">我已重启，重新检测</button>
-      </div>`
-    : '';
-  return `<article class="connect-card crt-surface">
-    <div class="connect-head"><b>${escapeHtml(c.name)}</b><span class="crt-tag">${escapeHtml(status)}</span>${c.skillsInstalled ? '<span class="crt-tag">Skill 已装</span>' : ''}</div>
-    <p class="muted">${where}${c.note ? ` · ${escapeHtml(c.note)}` : ''}</p>
-    <div class="connect-actions">${primary}<details class="connect-overflow"><summary>更多</summary><div class="connect-overflow-body">${overflow}</div></details></div>
-    ${restartCheck}
-    <pre class="connect-diff" ${state.clientDiff[c.id] ? '' : 'hidden'} data-cli-diff="${escapeHtml(c.id)}">${escapeHtml(state.clientDiff[c.id] ?? '')}</pre>
-    <p class="muted" data-cli-msg="${escapeHtml(c.id)}">${escapeHtml(state.clientMsg[c.id] ?? '')}</p>
-  </article>`;
 }
 
 async function serviceAction(action) {
-  const say = (t) => { state.serviceMsg = t; renderConnect(); };
+  const say = (t) => { state.serviceMsg = t; rerenderAssistants(); };
   try {
     if (action === 'recheck') { await refresh(); say('已刷新'); return; }
     if (action === 'restart') {
@@ -1583,9 +1541,11 @@ async function serviceAction(action) {
 }
 
 async function clientAction(id, action) {
-  const say = (t) => { state.clientMsg[id] = t; renderConnect(); };
-  const showDiff = (t) => { state.clientDiff[id] = t; renderConnect(); };
+  const say = (t) => { state.clientMsg[id] = t; rerenderAssistants(); };
+  const showDiff = (t) => { state.clientDiff[id] = t; rerenderAssistants(); };
   try {
+    // UX-2：「详情 ›」= 行内展开/收起（判据/路径/次级动作）
+    if (action === 'details') { state.clientOpen[id] = !state.clientOpen[id]; rerenderAssistants(); return; }
     if (action === 'recheck') { state.clientRestart[id] = false; await refresh(); say('已重新检测'); return; }
     if (action === 'copy') {
       const client = (state.clients ?? []).find((c) => c.id === id);
@@ -1607,7 +1567,7 @@ async function clientAction(id, action) {
     say(action === 'connect'
       ? (res.changed ? '接入完成（已备份原配置）。重启该助手后生效。' : '已接入（无需改动）。')
       : action === 'rollback' ? '已还原到接入前。' : '已安装。');
-    // R-1 中-6：接入成功后给出重启闭环 checklist（「我已重启，重新检测」可消）
+    // R-1 中-6 → UX-2 行内闭环：接入成功后转「待生效」，「我已重载，重新验证」可消
     if (action === 'connect' && res.changed) state.clientRestart[id] = true;
     await refresh();
   } catch (error) {
@@ -2253,7 +2213,6 @@ function setView(view) {
   $('#domains-view').hidden = view !== 'domains';
   $('#audit-view').hidden = view !== 'audit';
   $('#memories-view').hidden = view !== 'memories';
-  $('#connect-view').hidden = view !== 'connect';
   $('#stage').style.visibility = view === 'map' ? 'visible' : 'hidden';
   $('#empty-state').hidden = true;
   const asideEl = document.querySelector('.aside');
@@ -2306,11 +2265,17 @@ $('#memories-list')?.addEventListener('click', (event) => {
   void memAction(button.dataset.memId, button.dataset.memAction);
 });
 
-$('#connect-view')?.addEventListener('click', (event) => {
-  const svc = event.target.closest('[data-svc-action]');
-  if (svc) { void serviceAction(svc.dataset.svcAction); return; }
-  const cli = event.target.closest('[data-cli-action]');
-  if (cli) { void clientAction(cli.dataset.cliId, cli.dataset.cliAction); }
+// UX-2「需要注意」浮卡：点击直达处理位（助手 → 设置·AI 助手；对端 → 设备卡）
+$('#attention-card')?.addEventListener('click', (event) => {
+  const item = event.target.closest('[data-attention-action]');
+  if (!item) return;
+  if (item.dataset.attentionAction === 'assistants') {
+    $('#settings').hidden = false;
+    renderSettings('assistants');
+  } else if (item.dataset.attentionAction === 'device') {
+    const deviceId = item.dataset.attentionId?.replace(/^dev-/, '') ?? '';
+    if (deviceId) { state.selected = state.devices.find((d) => d.deviceId === deviceId) ?? null; render(); }
+  }
 });
 
 $('#audit-export').addEventListener('click', () => {
@@ -2420,10 +2385,34 @@ $('#open-settings').addEventListener('click', () => {
 $('#settings-close').addEventListener('click', () => {
   $('#settings').hidden = true;
 });
-// Tab 切换（事件委托：renderSettings 会整体替换 body）
+// Tab 切换 + AI 助手专区动作（事件委托：renderSettings 会整体替换 body）
 $('#settings-body').addEventListener('click', (event) => {
   const tab = event.target.closest('[data-settings-tab]');
-  if (tab) renderSettings(tab.dataset.settingsTab);
+  if (tab) { renderSettings(tab.dataset.settingsTab); return; }
+  // UX-2：附加导航「关于本机」→ 打开既有 about 弹层
+  const extra = event.target.closest('[data-settings-extra]');
+  if (extra) { $('#about').hidden = false; renderAbout(); return; }
+  const svc = event.target.closest('[data-svc-action]');
+  if (svc) { void serviceAction(svc.dataset.svcAction); return; }
+  const cli = event.target.closest('[data-cli-action]');
+  if (cli) { void clientAction(cli.dataset.cliId, cli.dataset.cliAction); return; }
+  if (event.target.closest('#asst-add')) {
+    const flow = $('#asst-add-flow');
+    if (flow) flow.hidden = !flow.hidden;
+    return;
+  }
+  if (event.target.closest('#asst-missing-toggle')) {
+    const missing = $('#asst-missing');
+    if (missing) {
+      missing.hidden = !missing.hidden;
+      event.target.closest('#asst-missing-toggle').textContent = missing.hidden ? '展开 ›' : '收起 ‹';
+    }
+    return;
+  }
+  // UX-2：重启向导（设置 · 常用；web 无 preload 桥时该按钮不渲染）
+  if (event.target.closest('#settings-open-wizard')) {
+    if (typeof window.mebularDesktop?.openWizard === 'function') void window.mebularDesktop.openWizard();
+  }
 });
 $('#self-badge').addEventListener('click', () => {
   $('#about').hidden = false;
@@ -2452,12 +2441,10 @@ async function openInvite() {
 
 async function renderInvite(overrideEndpoint = null) {
   const body = $('#invite-body');
-  const regenerate = $('#invite-regenerate');
   const toSettings = $('#invite-to-settings');
   const typedEndpoint = overrideEndpoint
     ?? $('#invite-endpoint')?.value?.trim()
     ?? null;
-  regenerate.hidden = true;
   toSettings.hidden = true;
   body.innerHTML = '<p class="muted">正在签发令牌…</p>';
   try {
@@ -2490,34 +2477,43 @@ async function renderInvite(overrideEndpoint = null) {
       </div>`;
     body.innerHTML = `
       ${qrBlock}
-      ${endpointEditor}
-      <dl class="settings-kv">
-        <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>
-        <dt>默认成员分区</dt><dd><code>${escapeHtml(res.namespace)}</code></dd>
-        <dt>有效期至</dt><dd>${escapeHtml(formatTime(res.expiresAt))}（一次性）</dd>
-      </dl>
       <div class="readout-block">
-        <span class="domain-label">令牌</span>
+        <span class="domain-label">令牌（一次性，默认 15 分钟有效）</span>
         <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
       </div>
-      <div class="readout-block">
-        <span class="domain-label">新设备</span>
-        <div class="copyable"><code>${escapeHtml(shortCmd)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(cmd)}">复制命令</button></div>
-      </div>
-      <div class="readout-block">
-        <span class="domain-label">本机批准</span>
-        <div class="copyable"><code>fleet approve --dir ~/.mebular --device &lt;新设备ID&gt; --addr &lt;其 multiaddr&gt;</code><button class="btn btn-small btn-crt" data-copy="fleet approve --dir ~/.mebular --device &lt;新设备ID&gt; --addr &lt;其 multiaddr&gt;">复制</button></div>
-      </div>
-      <div class="readout-block">
-        <span class="domain-label">查看待批</span>
-        <div class="copyable"><code>fleet pending --dir ~/.mebular</code><button class="btn btn-small btn-crt" data-copy="fleet pending --dir ~/.mebular">复制</button></div>
-      </div>
-      <p class="crt-warn">⚠ 令牌即入网权限：一次性、短时效（默认 15 分钟），仅经可信 LAN 使用，请勿写入工单或公开日志。</p>
+      <p class="cfg-help muted">让新设备扫码或粘贴令牌加入；它出现在星图上后本页即可关闭。</p>
+      <details class="asst-detail"><summary>详情</summary>
+        ${endpointEditor}
+        <dl class="settings-kv">
+          <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>
+          <dt>默认成员分区</dt><dd><code>${escapeHtml(res.namespace)}</code></dd>
+          <dt>有效期至</dt><dd>${escapeHtml(formatTime(res.expiresAt))}（一次性）</dd>
+        </dl>
+        <div class="readout-block">
+          <span class="domain-label">新设备</span>
+          <div class="copyable"><code>${escapeHtml(shortCmd)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(cmd)}">复制命令</button></div>
+        </div>
+        <div class="readout-block">
+          <span class="domain-label">本机批准</span>
+          <div class="copyable"><code>fleet approve --dir ~/.mebular --device &lt;新设备ID&gt; --addr &lt;其 multiaddr&gt;</code><button class="btn btn-small btn-crt" data-copy="fleet approve --dir ~/.mebular --device &lt;新设备ID&gt; --addr &lt;其 multiaddr&gt;">复制</button></div>
+        </div>
+        <div class="readout-block">
+          <span class="domain-label">查看待批</span>
+          <div class="copyable"><code>fleet pending --dir ~/.mebular</code><button class="btn btn-small btn-crt" data-copy="fleet pending --dir ~/.mebular">复制</button></div>
+        </div>
+        <p class="crt-warn">⚠ 令牌即入网权限：一次性、短时效（默认 15 分钟），仅经可信 LAN 使用，请勿写入工单或公开日志。</p>
+        <div class="asst-detail-actions">
+          <button class="btn btn-small" id="invite-regen-inline" type="button">重新生成邀请（旧令牌立即失效）</button>
+        </div>
+      </details>
     `;
+    body.querySelector('#invite-regen-inline')?.addEventListener('click', () => {
+      // UX-2：重新生成收详情且二次确认（旧令牌作废是不可逆方向）
+      if (window.confirm('重新生成会使当前令牌立即失效。确定？')) void renderInvite();
+    });
     body.querySelectorAll('[data-copy]').forEach((button) => {
       button.addEventListener('click', () => copyText(button.dataset.copy, button));
     });
-    regenerate.hidden = false;
   } catch (error) {
     state.inviteToken = null;
     if (error.payload?.error === 'join_disabled' || error.status === 409) {
@@ -2533,18 +2529,9 @@ async function renderInvite(overrideEndpoint = null) {
 }
 
 $('#invite-device').addEventListener('click', openInvite);
-// R-1 小-10：桌面壳下连接页可一键返回向导（web 场景无 preload → 保持隐藏）
-{
-  const backWizard = $('#connect-back-wizard');
-  if (backWizard && typeof window.mebularDesktop?.openWizard === 'function') {
-    backWizard.hidden = false;
-    backWizard.addEventListener('click', () => { void window.mebularDesktop.openWizard(); });
-  }
-}
 $('#invite-close').addEventListener('click', () => {
   $('#invite').hidden = true;
 });
-$('#invite-regenerate').addEventListener('click', () => renderInvite());
 $('#invite-to-settings').addEventListener('click', () => {
   $('#invite').hidden = true;
   $('#settings').hidden = false;
@@ -3114,7 +3101,11 @@ if (provisionStatus) {
   const deepLink = initialViewFromSearch(location.search);
   stage.start();
   setView(deepLink.view ?? 'map');
-  refresh().then(() => { if (deepLink.openInvite) openInvite(); });
+  refresh().then(() => {
+    // UX-2：?view=connect 别名重定向 → 设置 · AI 助手
+    if (deepLink.openSettings) { $('#settings').hidden = false; renderSettings(deepLink.openSettings); }
+    if (deepLink.openInvite) openInvite();
+  });
   startEvents();
   setInterval(() => {
     if (document.hidden === true) return; // F-PERF-1：隐藏页不轮询，回前台由 visibilitychange 补刷

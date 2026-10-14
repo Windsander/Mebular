@@ -297,7 +297,7 @@ try {
   }
   check('/console 下发 CSRF cookie 与响应头', (index.headers.get('set-cookie') ?? '').includes('mebular_csrf=') && Boolean(index.headers.get('x-mebular-csrf')));
 
-  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['settings-ia.js', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript'], ['nebula.js', 'text/javascript'], ['stars.js', 'text/javascript']]) {
+  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['assistants.js', 'text/javascript'], ['settings-ia.js', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript'], ['nebula.js', 'text/javascript'], ['stars.js', 'text/javascript']]) {
     const res = await fetch(`http://127.0.0.1:${port}/console/${file}`);
     check(`静态资源 /console/${file} 200`, res.status === 200 && (res.headers.get('content-type') ?? '').includes(mime), `status=${res.status}`);
   }
@@ -966,12 +966,14 @@ try {
 
     const jsSrcH1 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     const htmlSrcH1 = await readFile(join(consoleDir, 'index.html'), 'utf-8');
-    check('H-1 前端接线：连接 AI 助手面板 + 服务/客户端动作 + diff 预览',
-      htmlSrcH1.includes('id="connect-view"') && htmlSrcH1.includes('data-view="connect"')
-        && htmlSrcH1.includes('id="service-card"') && htmlSrcH1.includes('id="clients-list"')
-        && jsSrcH1.includes('renderConnect') && jsSrcH1.includes('data-svc-action')
-        && jsSrcH1.includes('data-cli-action') && jsSrcH1.includes('connect-diff'),
-      '面板 + 动作 + diff');
+    const asstSrcH1 = await readFile(join(consoleDir, 'assistants.js'), 'utf-8');
+    check('H-1/UX-2 前端接线：设置·AI 助手专区（单列表 + 服务/客户端动作 + diff 预览）+ 别名重定向 + 首屏叠加层',
+      !htmlSrcH1.includes('id="connect-view"') && !htmlSrcH1.includes('data-view="connect"')
+        && htmlSrcH1.includes('id="status-pill"') && htmlSrcH1.includes('id="attention-card"')
+        && jsSrcH1.includes('renderOverlays') && jsSrcH1.includes('data-svc-action')
+        && jsSrcH1.includes('data-cli-action') && jsSrcH1.includes('renderSettings(deepLink.openSettings)')
+        && asstSrcH1.includes('connect-diff') && asstSrcH1.includes('assistantsPanelHtml'),
+      '专区 + 别名 + 叠加层');
   }
 
   // ---------- 邀请新设备（T2 令牌加入） ----------
@@ -1460,11 +1462,13 @@ try {
     const consoleSrc2 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     const tabIds = ia.IA_TABS.map((tab) => tab.id).join(',');
     const tabLabels = ia.IA_TABS.map((tab) => tab.label).join(',');
-    check('IA Tab 结构（常用/高级/诊断）与「关于本机」入口齐备',
-      tabIds === 'common,advanced,diagnostics' && tabLabels === '常用,高级,诊断'
+    check('IA Tab 结构（常用/AI 助手/高级/诊断）与「关于本机」入口齐备（UX-2）',
+      tabIds === 'common,assistants,advanced,diagnostics' && tabLabels === '常用,AI 助手,高级,诊断'
+        && (ia.IA_SETTINGS_EXTRA ?? []).some((item) => item.id === 'about' && item.opens === 'about-modal')
         && htmlSrc.includes('id="self-badge"') && htmlSrc.includes('id="about"') && htmlSrc.includes('关于本机')
         && consoleSrc2.includes('data-settings-tab') && consoleSrc2.includes('IA_TASK_CARDS')
-        && consoleSrc2.includes('IA_ADVANCED_FIELDS') && consoleSrc2.includes('IA_MIGRATION'),
+        && consoleSrc2.includes('IA_ADVANCED_FIELDS') && consoleSrc2.includes('IA_MIGRATION')
+        && consoleSrc2.includes('assistantsPanelHtml') && consoleSrc2.includes("panel('assistants'"),
       `tabs=${tabIds} labels=${tabLabels}`);
     // A：编辑器字段改由服务端 schema 驱动（不再在控制台重复声明）；C：一键重启接线
     check('A 编辑器由单一真源驱动（configSchema）且不再内置字段表',

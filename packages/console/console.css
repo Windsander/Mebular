@@ -1016,3 +1016,43 @@ select {
 .restart-checklist p { margin: 0 0 6px; color: var(--crt-bright); font-size: 13px; }
 .restart-checklist ol { margin: 0 0 8px; padding-left: 18px; font-size: 12px; line-height: 1.7; }
 .btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+
+/* ---------- UX-2：设置 · AI 助手专区（单列表）+ 首屏只读叠加层 ---------- */
+/* 行模板：名称 | 状态词 | 弹簧 | 一个动作 */
+.asst-row { display: flex; align-items: center; gap: var(--row-gap); padding: 7px 2px; border-bottom: 1px dashed var(--border); min-height: var(--btn-h); }
+.asst-row:last-child { border-bottom: 0; }
+.asst-name { flex: 0 0 auto; min-width: 140px; font-size: 13px; color: var(--text); }
+.asst-st { flex: 0 0 auto; font-size: 12px; color: var(--muted); }
+.asst-st.ok { color: var(--ok); }
+.asst-st.todo { color: var(--accent-2); }
+.asst-sp { flex: 1 1 auto; }
+.asst-head { display: flex; align-items: center; justify-content: space-between; gap: var(--row-gap); margin-bottom: 6px; }
+.asst-head p { margin: 0; font-size: 12px; }
+.asst-xp { padding: 4px 2px 8px; }
+.asst-xp[hidden] { display: none; }
+.asst-line { margin: 2px 0; font-size: 12px; color: var(--muted); }
+.asst-line.todo { color: var(--accent-2); }
+.asst-fold .asst-name { font-size: 12px; }
+.asst-detail { margin-top: 4px; font-size: 12px; }
+.asst-detail > summary { cursor: pointer; color: var(--muted); }
+.asst-detail > summary:hover { color: var(--text); }
+.asst-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.settings-resident { margin-bottom: 4px; }
+.settings-tab-extra { margin-left: auto; }
+/* 首屏叠加层：状态总览条（纯只读，不挡星图交互；fixed 钉视口，免受容器定位影响） */
+.status-pill { position: fixed; top: 104px; left: 50%; transform: translateX(-50%); z-index: 5;
+  display: flex; align-items: center; gap: 10px; padding: 5px 14px; border-radius: 999px;
+  background: rgba(5, 7, 15, 0.72); border: 1px solid var(--border); pointer-events: none;
+  font-size: 12px; color: var(--muted); backdrop-filter: blur(4px); }
+.status-pill b { color: var(--text); font-weight: 600; }
+.status-pill .dotsep { width: 3px; height: 3px; border-radius: 50%; background: var(--muted); opacity: 0.6; }
+.status-pill[hidden], .attention-card[hidden] { display: none; }
+/* 首屏叠加层：「需要注意」条件浮卡（无事不出现） */
+.attention-card { position: fixed; top: 96px; right: 14px; z-index: 6; min-width: 180px; max-width: 260px;
+  background: rgba(5, 7, 15, 0.85); border: 1px solid var(--accent-2); border-radius: 8px; padding: 8px 10px;
+  backdrop-filter: blur(4px); }
+.attention-card h3 { margin: 0 0 4px; font-size: 12px; color: var(--accent-2); font-weight: 600; }
+.attention-card ul { margin: 0; padding: 0; list-style: none; }
+.attention-item { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 4px 2px;
+  font-size: 12px; color: var(--text); cursor: pointer; }
+.attention-item:hover { color: var(--accent-2); }

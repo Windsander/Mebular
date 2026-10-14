@@ -70,12 +70,23 @@ details.group[open] > summary { border-bottom: 1px dashed var(--crt-border-soft)
 .state-banner p { margin: 0 0 6px; font-size: 13px; }
 ol.checklist { margin: 0 0 8px; padding-left: 18px; font-size: 12px; line-height: 1.7; color: var(--muted); }
 
-/* 原型专用：场景切换条 + 标注 */
-.proto-scenarios { position: sticky; top: 0; z-index: 10; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; padding: 8px 20px; background: #101528; border-bottom: 1px solid var(--border); }
-.proto-scenarios .lbl { color: var(--muted); font-size: 11px; letter-spacing: 1px; }
-.proto-scenarios button[aria-pressed="true"] { border-color: var(--crt); color: var(--crt-bright); }
-.proto-note { border: 1px dashed var(--accent); border-radius: 6px; padding: 8px 12px; color: var(--accent); font-size: 12px; background: rgba(86, 180, 233, 0.06); }
-.proto-nav { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 20px; border-bottom: 1px solid var(--border); background: #080c18; }
-.proto-nav a { color: var(--muted); text-decoration: none; font-size: 12px; padding: 4px 8px; border-radius: 4px; }
-.proto-nav a:hover, .proto-nav a.here { color: var(--crt); background: rgba(12, 52, 36, 0.5); }
+/* ===== 评审工具条（非产品界面：灰底、虚线、小字号，与产品框明确区隔） ===== */
+.proto-review { position: sticky; top: 0; z-index: 10; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding: 6px 14px; background: #16181f; color: #7d8494; border-bottom: 2px dashed #2b303b; font-size: 11px; }
+.proto-review .tag { border: 1px solid #383e4b; border-radius: 3px; padding: 1px 6px; letter-spacing: 1.5px; color: #98a1b3; }
+.proto-review .lbl { color: #5f6675; }
+.proto-review a { color: #7d8494; text-decoration: none; padding: 2px 6px; border-radius: 3px; }
+.proto-review a:hover, .proto-review a.here { color: #dfe5f0; background: #232833; }
+.proto-review button { background: transparent; border: 1px solid #383e4b; color: #98a1b3; font-size: 11px; padding: 2px 8px; border-radius: 4px; }
+.proto-review button[aria-pressed="true"] { border-color: #7d8494; color: #dfe5f0; }
+.proto-review .sep { flex: 1; }
+
+/* 产品界面内的「详情」折叠（判据/路径/CLI/次级动作一律进这里） */
+details.detail { border: none; border-top: 1px dashed var(--border); padding: 6px 0 0; margin-top: 8px; }
+details.detail summary { font-size: 11px; }
+details.detail .row { margin-top: 6px; }
+
+/* 一行式失败/待办提示：一行话 + 一个行动 */
+.fail-line { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; color: var(--warn); font-size: 13px; margin-top: 6px; }
+.fail-line.gray { color: var(--muted); }
+.fail-line.ok { color: var(--crt); }
 [hidden] { display: none !important; }

@@ -2,52 +2,53 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<title>原型 ③ · 连接 AI 助手</title>
+<title>连接 AI 助手</title>
 <link rel="stylesheet" href="./prototype.css" />
 </head>
 <body>
+<!-- ===== 评审工具（非产品界面） ===== -->
+<div class="proto-review">
+  <span class="tag">评审工具</span>
+  <a href="./index.html">总览</a><a href="./01-onboarding.html">① 初始化</a>
+  <a href="./02-wizard.html">② 三步向导</a><a class="here" href="./03-connect.html">③ 连接助手</a>
+  <a href="./04-device.html">④ 添加设备</a><a href="./05-daily.html">⑤ 日常入口</a><a href="./06-shell.html">⑥ 壳行为</a>
+  <span class="sep"></span>
+  <span class="lbl">场景（作用于 OpenChamber 卡）</span>
+  <button data-s="normal" aria-pressed="true">正常</button>
+  <button data-s="detect-fail" aria-pressed="false">检测失败</button>
+  <button data-s="write-fail" aria-pressed="false">写入失败</button>
+  <button data-s="verify-fail" aria-pressed="false">验证失败</button>
+  <button data-s="pending-restart" aria-pressed="false">需重启未重启</button>
+</div>
+<!-- ===== 产品界面 ===== -->
 <header class="topbar">
   <span class="brand">✦ Mebular 控制台</span>
   <span class="badge">本机 · device-demo</span><span class="badge gray">● P2P 已启用</span><span class="badge gray">记忆 —</span>
   <span class="spacer"></span>
   <button class="ghost">⚙ 设置</button><button>＋ 连接已有地址</button><button class="primary">＋ 邀请新设备</button>
 </header>
-<nav class="proto-nav">
-  <a href="./index.html">总览</a><a href="./01-onboarding.html">① 初始化</a>
-  <a href="./02-wizard.html">② 三步向导</a><a class="here" href="./03-connect.html">③ 连接助手</a>
-  <a href="./04-device.html">④ 添加设备</a><a href="./05-daily.html">⑤ 日常入口</a><a href="./06-shell.html">⑥ 壳行为（标注）</a>
-</nav>
-<div class="proto-scenarios">
-  <span class="lbl">场景（作用于 OpenChamber 卡）</span>
-  <button class="small" data-s="normal" aria-pressed="true">正常（可接入）</button>
-  <button class="small" data-s="detect-fail" aria-pressed="false">检测失败</button>
-  <button class="small" data-s="write-fail" aria-pressed="false">写入失败</button>
-  <button class="small" data-s="verify-fail" aria-pressed="false">验证失败</button>
-  <button class="small" data-s="pending-restart" aria-pressed="false">需重启未重启</button>
-</div>
 <main>
   <div class="card-head" style="margin:0">
-    <h2>连接 AI 助手</h2><span class="muted">CONNECT</span><span class="spacer"></span>
-    <a class="btn small ghost" href="./02-wizard.html" title="回想入口：随时可回，状态实时">← 返回向导</a>
+    <h2>连接 AI 助手</h2><span class="spacer"></span>
+    <a class="btn small ghost" href="./02-wizard.html">← 返回向导</a>
   </div>
 
   <section class="card crt">
     <div class="card-head"><h3>常驻运行</h3><span class="badge dim">未常驻（当前为临时运行）</span></div>
-    <p class="muted">开机自启、崩溃自动拉起。家目录：<code>~/.mebular</code>（服务文件路径已收编到「关于本机」）</p>
-    <div class="row"><button>让 Mebular 常驻</button><button class="ghost" disabled>取消常驻</button><button class="ghost">立即重启</button><button class="ghost">重新检测</button></div>
+    <div class="row" style="margin-top:2px"><button class="primary small">让 Mebular 常驻</button></div>
+    <details class="detail"><summary>详情</summary>
+      <p class="muted">开机自启、崩溃自动拉起。家目录：<code>~/.mebular</code>（服务文件路径见「关于本机」）</p>
+      <div class="row"><button class="small ghost">立即重启</button><button class="small ghost">重新检测</button><button class="small ghost" disabled>取消常驻</button></div>
+    </details>
   </section>
 
-  <div class="row" style="margin-top:0">
-    <button class="primary" id="btn-add-assistant">＋ 新增助手</button>
-    <span class="muted">长尾助手零发布：选配置文件或粘贴片段即可登记</span>
-  </div>
+  <div class="row" style="margin-top:0"><button id="btn-add-assistant">＋ 新增助手</button></div>
 
   <!-- 新增助手流程（一等流程） -->
   <section class="card" id="add-flow" hidden>
-    <div class="card-head"><h3>新增助手 · 第 <span id="add-step-no">1</span>/2 步</h3><span class="badge dim">自定义</span></div>
+    <div class="card-head"><h3>新增助手 · 第 <span id="add-step-no">1</span>/2 步</h3></div>
     <div id="add-step1">
       <div class="row"><span class="muted">名称</span><code id="add-name" contenteditable="true" style="border:1px solid var(--border);border-radius:4px;padding:4px 8px">Hermes</code></div>
-      <p class="muted">id 自动派生（可改）：<code>hermes</code> · 冲突会报错</p>
       <div class="row"><button class="primary" id="add-next">下一步：登记方式</button><button class="ghost" id="add-cancel">取消</button></div>
     </div>
     <div id="add-step2" hidden>
@@ -56,20 +57,19 @@
         <button class="ghost" id="add-by-snippet">粘贴片段</button>
       </div>
       <div id="add-file-detail" hidden style="margin-top:8px">
-        <p class="muted">路径：<code>~/.hermes/config.yaml</code> → 推断格式适配器：<code>hermes-yaml</code>；写入只经官方 CLI：<code>hermes config set --force mcp_servers.mebular.url &lt;值&gt;</code>（保注释；写前字节级备份 · 失败回滚 · 重复接入幂等）</p>
-        <p class="muted">生效：<b>免重启</b>（新会话即用，已开会话 <code>/reload-mcp</code>）→ 跳过重启清单</p>
-        <p class="muted">验证（可选）：<code>hermes mcp test mebular</code> → rc=0 且 <code>✓ Connected</code> + <code>Tools discovered: N≥1</code>；不填 → 仅配置级验证并明示</p>
+        <p class="muted">已识别 Hermes 的配置：写入走它的官方命令，写前自动备份；装好后<b>免重启</b>，新会话即用。</p>
         <div class="row"><button class="primary" id="add-save">保存并检测</button></div>
+        <details class="detail"><summary>详情</summary>
+          <p class="muted">路径 <code>~/.hermes/config.yaml</code>；写入 <code>hermes config set --force mcp_servers.mebular.url &lt;值&gt;</code>（保注释 · 字节级备份 · 失败回滚）；验证 <code>hermes mcp test mebular</code>；已开会话可用 <code>/reload-mcp</code>。</p>
+        </details>
       </div>
       <div id="add-snippet-detail" hidden style="margin-top:8px">
         <pre>"mebular": { "url": "http://127.0.0.1:7331/mcp" }</pre>
-        <p class="muted">将登记为「手动合并」条目：不提供自动「接入」，给你片段 + 人话步骤 + 「我已手动合并，重新检测」。</p>
+        <p class="muted">这类助手需要你手动合并：给你片段和步骤，合并完点「我已手动合并，重新检测」。</p>
         <div class="row"><button class="primary" id="add-save2">保存并检测</button></div>
       </div>
     </div>
   </section>
-
-  <p class="muted" style="margin:0">接入只会<b>合并</b> <code>mebular</code> 这一条：写前自动备份、原子写入、重复点「接入」不重复改；无法解析时不动它，转手动合并并给片段。</p>
 
   <!-- 分组：已装可接入（默认展开） -->
   <details class="group" open>
@@ -77,49 +77,51 @@
 
     <!-- OpenChamber 卡：主交互卡（场景切换目标） -->
     <section class="card crt" id="oc-card">
-      <div class="card-head"><b>OpenChamber</b><span class="badge dim" id="oc-status">已安装·未接入</span><span class="badge gray">内置</span></div>
-      <p class="muted">判据：配置 <code>~/.config/opencode/opencode.json</code> <span class="check">✓</span> · CLI <code>opencode --version</code> <span class="check">✓</span> · 落面 global <code>mcp.servers.mebular</code>（<code>opencode.managed.json</code> 为 App 私有，禁写）· 生效 = 你在 App 侧重载/重启</p>
+      <div class="card-head"><b>OpenChamber</b><span class="badge dim" id="oc-status">未接入</span></div>
 
       <div id="oc-normal">
-        <div class="row">
-          <button class="primary small" id="oc-connect">接入</button>
-          <details style="display:inline-block;border:none;padding:0;margin:0"><summary>更多</summary><div class="row"><button class="small ghost">查看改动</button><button class="small ghost">回滚</button><button class="small ghost">复制片段</button><button class="small ghost">重新检测</button></div></details>
-        </div>
+        <div class="row"><button class="primary small" id="oc-connect">接入</button></div>
+        <details class="detail"><summary>详情</summary>
+          <p class="muted">已安装：配置 <code>~/.config/opencode/opencode.json</code> ✓ · 命令行可用 ✓。接入只合并 <code>mcp.servers.mebular</code> 一条，写前自动备份；<code>opencode.managed.json</code> 是 App 私有文件，不会碰。生效后需要你在 App 侧重载一次。</p>
+          <div class="row"><button class="small ghost">查看改动</button><button class="small ghost">回滚</button><button class="small ghost">复制片段</button><button class="small ghost">重新检测</button></div>
+        </details>
       </div>
 
       <div id="oc-detect-fail" hidden>
-        <div class="state-banner gray">
-          <p>检测失败：读取 <code>opencode.json</code> 超时（权限被拒）。</p>
-          <p class="muted">已试信号：config-path ✗（权限） · cli —（未执行） · app-bundle ✓</p>
-          <div class="row"><button class="primary small">重试检测</button><button class="small ghost">手动登记为已装</button></div>
-        </div>
+        <p class="fail-line gray">检测失败：读不到它的配置（权限被拒）<button class="primary small">重试检测</button></p>
+        <details class="detail"><summary>详情</summary>
+          <p class="muted">配置文件 ✗（权限）· 命令行 —（未执行）· App ✓。如果它已经装好，可以手动登记。</p>
+          <div class="row"><button class="small ghost">手动登记为已装</button></div>
+        </details>
       </div>
 
       <div id="oc-write-fail" hidden>
-        <div class="state-banner">
-          <p>没能写入：配置文件不是合法 JSON（第 41 行）。原配置未动；备份在 <code>opencode.json.bak-20261014-1012</code>。</p>
-          <div class="row"><button class="primary small">查看片段（手动合并）</button><button class="small ghost">重试</button></div>
-        </div>
+        <p class="fail-line">没能写入：它的配置文件不是合法格式，原配置没动<button class="primary small">查看片段</button></p>
+        <details class="detail"><summary>详情</summary>
+          <p class="muted"><code>opencode.json</code> 第 41 行解析失败；备份在 <code>opencode.json.bak-20261014-1012</code>。可以改用手动合并。</p>
+          <div class="row"><button class="small ghost">重试</button></div>
+        </details>
       </div>
 
       <div id="oc-verify-fail" hidden>
-        <div class="state-banner">
-          <p>已写入，但验证未过：<code>opencode mcp list</code> 输出里没有 mebular。</p>
-          <details><summary>查看验证输出</summary><pre>{ "servers": [] }  # 假数据：CLI 读的是另一份配置（头号嫌疑：写成了 mcp.mebular 而非 mcp.servers.mebular —— 见契约 §2.3）</pre></details>
-          <div class="row"><button class="primary small">重新验证</button><button class="small ghost">回滚</button></div>
-        </div>
+        <p class="fail-line">验证未过：没找到 mebular 工具<button class="primary small">重新验证</button></p>
+        <details class="detail"><summary>详情</summary>
+          <p class="muted">已写入，但 <code>opencode mcp list</code> 的输出里没有 mebular：</p>
+          <pre>{ "servers": [] }</pre>
+          <div class="row"><button class="small ghost">回滚</button></div>
+        </details>
       </div>
 
       <div id="oc-pending-restart" hidden>
-        <div class="state-banner">
-          <p><b>最后一步：在 App 侧重载或重启 OpenChamber</b>（我们不会替你发 <code>opencode reload</code>，以免干扰正在运行的服务）</p>
+        <p class="fail-line">已接好，在 App 侧重载 OpenChamber 后生效<button class="primary small" data-verify-again>我已重载，重新验证</button></p>
+        <details class="detail"><summary>详情</summary>
           <ol class="checklist">
-            <li>完全退出该助手（退出进程，不是关窗口）或在 App 内重载</li>
+            <li>完全退出（退出进程，不是关窗口）或在 App 内重载</li>
             <li>重新打开</li>
-            <li>在它的工具列表里应能看到 <code>mebular</code> 工具</li>
+            <li>工具列表里应能看到 mebular</li>
           </ol>
-          <div class="row"><button class="primary small" data-verify-again>我已重载，重新验证</button></div>
-        </div>
+          <p class="muted">我们不会替你发 <code>opencode reload</code>，以免干扰正在运行的服务。</p>
+        </details>
       </div>
 
       <!-- 正常流程的进行中/完成态（由脚本驱动） -->
@@ -128,16 +130,21 @@
 
     <!-- Claude Code：已装未接 -->
     <section class="card crt">
-      <div class="card-head"><b>Claude Code</b><span class="badge dim">已安装·未接入</span></div>
-      <p class="muted">判据：配置 <code>~/.claude.json</code> ✓ · CLI <code>claude --version</code> ✓</p>
-      <div class="row"><button class="primary small">接入</button><details style="display:inline-block;border:none;padding:0;margin:0"><summary>更多</summary><div class="row"><button class="small ghost">查看改动</button><button class="small ghost">回滚</button><button class="small ghost">安装 Skill</button><button class="small ghost">复制片段</button><button class="small ghost">重新检测</button></div></details></div>
+      <div class="card-head"><b>Claude Code</b><span class="badge dim">未接入</span></div>
+      <div class="row"><button class="primary small">接入</button></div>
+      <details class="detail"><summary>详情</summary>
+        <p class="muted">已安装：配置 <code>~/.claude.json</code> ✓ · 命令行可用 ✓。</p>
+        <div class="row"><button class="small ghost">查看改动</button><button class="small ghost">回滚</button><button class="small ghost">安装 Skill</button><button class="small ghost">复制片段</button><button class="small ghost">重新检测</button></div>
+      </details>
     </section>
 
     <!-- Cursor：已接入已验证（收编） -->
     <section class="card crt" style="opacity:.75">
-      <div class="card-head"><b>Cursor</b><span class="badge">已接入 ✓ 已验证</span></div>
-      <p class="muted">判据：配置 <code>~/.cursor/mcp.json</code> ✓ · 验证 <code>cursor mcp list</code> 命中 mebular ✓</p>
-      <div class="row"><details style="display:inline-block;border:none;padding:0;margin:0"><summary>更多</summary><div class="row"><button class="small ghost">查看改动</button><button class="small ghost">回滚</button><button class="small ghost">复制片段</button><button class="small ghost">重新检测</button></div></details></div>
+      <div class="card-head"><b>Cursor</b><span class="badge">已接入 ✓</span></div>
+      <details class="detail"><summary>详情</summary>
+        <p class="muted">配置 <code>~/.cursor/mcp.json</code> ✓ · 验证命中 mebular ✓</p>
+        <div class="row"><button class="small ghost">查看改动</button><button class="small ghost">回滚</button><button class="small ghost">复制片段</button><button class="small ghost">重新检测</button></div>
+      </details>
     </section>
   </details>
 
@@ -145,18 +152,22 @@
   <details class="group" open>
     <summary>未安装（2）</summary>
     <section class="card">
-      <div class="card-head"><b>Hermes</b><span class="badge gray">未安装</span><span class="badge gray">内置</span></div>
-      <p class="muted">判据：<code>~/.local/bin/hermes</code> ✗ · <code>~/.hermes/hermes-agent</code> ✗ · <code>~/.hermes/config.yaml</code> ✗（全部信号阴性 → 未安装）</p>
-      <details>
-        <summary style="color:var(--crt)">怎么装</summary>
-        <p class="muted">安装：<code>npm i -g @hermes/cli</code>（示意，以官网为准）→ 装好后回来点「重新检测」。</p>
-        <div class="row"><button class="small">我已装好，重新检测</button><button class="small ghost">手动登记为已装</button><a class="btn small ghost" href="#" onclick="return false">官网 ↗</a></div>
+      <div class="card-head"><b>Hermes</b><span class="badge gray">未安装</span></div>
+      <details class="detail" style="border-top:none;margin-top:2px;padding-top:0"><summary style="color:var(--crt);font-size:13px">怎么装</summary>
+        <p class="muted">安装后回来点「重新检测」即可接入。</p>
+        <div class="row"><button class="small">我已装好，重新检测</button><a class="btn small ghost" href="#" onclick="return false">官网 ↗</a></div>
+        <details class="detail"><summary>详情</summary>
+          <p class="muted">安装命令见官网；检测依据 <code>~/.local/bin/hermes</code> 与 <code>~/.hermes/config.yaml</code>。已装好但没检测到？可以手动登记。</p>
+          <div class="row"><button class="small ghost">手动登记为已装</button></div>
+        </details>
       </details>
     </section>
     <section class="card">
       <div class="card-head"><b>Windsurf</b><span class="badge gray">未安装</span></div>
-      <p class="muted">判据：配置 <code>~/.codeium/windsurf/mcp_config.json</code> ✗ · app-bundle ✗</p>
-      <details><summary style="color:var(--crt)">怎么装</summary><p class="muted">官网下载安装后点「重新检测」。</p><div class="row"><button class="small">我已装好，重新检测</button><button class="small ghost">手动登记为已装</button></div></details>
+      <details class="detail" style="border-top:none;margin-top:2px;padding-top:0"><summary style="color:var(--crt);font-size:13px">怎么装</summary>
+        <p class="muted">官网下载安装后点「重新检测」。</p>
+        <div class="row"><button class="small">我已装好，重新检测</button></div>
+      </details>
     </section>
   </details>
 
@@ -164,14 +175,14 @@
   <details class="group">
     <summary>需手动合并（1）</summary>
     <section class="card">
-      <div class="card-head"><b>其他 MCP 客户端（自定义）</b><span class="badge gray">需手动</span><span class="badge gray">自定义</span></div>
-      <p class="muted">manual 条目：不提供自动「接入」。把片段粘进该客户端的 MCP 配置，然后点「我已手动合并，重新检测」。</p>
-      <pre>"mebular": { "url": "http://127.0.0.1:7331/mcp" }</pre>
-      <div class="row"><button class="small">复制片段</button><button class="small ghost">我已手动合并，重新检测</button></div>
+      <div class="card-head"><b>其他 MCP 客户端（自定义）</b><span class="badge gray">需手动</span></div>
+      <details class="detail" style="border-top:none;margin-top:2px;padding-top:0"><summary style="color:var(--crt);font-size:13px">查看片段</summary>
+        <pre>"mebular": { "url": "http://127.0.0.1:7331/mcp" }</pre>
+        <p class="muted">把片段粘进该客户端的 MCP 配置，然后点「我已手动合并，重新检测」。</p>
+        <div class="row"><button class="small">复制片段</button><button class="small ghost">我已手动合并，重新检测</button></div>
+      </details>
     </section>
   </details>
-
-  <div class="proto-note">要点：三态诚实（判据注脚逐信号）；未装无「接入」（怎么装/重检/手动登记）；分组计数分母=已装；接入闭环四步（回读→CLI 验证→重启清单→重新验证）；「需重启未重启」「验证未过」是一等黄态。</div>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -179,36 +190,36 @@ const panes = ['oc-normal', 'oc-detect-fail', 'oc-write-fail', 'oc-verify-fail',
 function ocPane(name) {
   panes.forEach((p) => { $(p).hidden = p !== name; });
   $('oc-progress').hidden = true;
-  $('oc-status').textContent = { 'oc-normal': '已安装·未接入', 'oc-detect-fail': '检测失败', 'oc-write-fail': '写入失败', 'oc-verify-fail': '验证未过', 'oc-pending-restart': '已写入·待重启' }[name];
+  $('oc-status').textContent = { 'oc-normal': '未接入', 'oc-detect-fail': '检测失败', 'oc-write-fail': '写入失败', 'oc-verify-fail': '验证未过', 'oc-pending-restart': '待生效' }[name];
 }
-document.querySelectorAll('.proto-scenarios button').forEach((b) => b.addEventListener('click', () => {
-  document.querySelectorAll('.proto-scenarios button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+document.querySelectorAll('.proto-review button[data-s]').forEach((b) => b.addEventListener('click', () => {
+  document.querySelectorAll('.proto-review button[data-s]').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
   ocPane({ normal: 'oc-normal', 'detect-fail': 'oc-detect-fail', 'write-fail': 'oc-write-fail', 'verify-fail': 'oc-verify-fail', 'pending-restart': 'oc-pending-restart' }[b.dataset.s]);
 }));
-{ const qs = new URLSearchParams(location.search).get('s'); if (qs) document.querySelector(`.proto-scenarios button[data-s="${qs}"]`)?.click(); }
-// 正常接入闭环：接入 → 回读 → CLI 验证 → 重启清单 → 我已重启，重新验证 → ✓已验证
-function progress(html, primaryLabel, onPrimary) {
+{ const qs = new URLSearchParams(location.search).get('s'); if (qs) document.querySelector(`.proto-review button[data-s="${qs}"]`)?.click(); }
+// 正常接入闭环：接入 → 回读 → 验证 → 待生效一行态 → 我已重载，重新验证 → ✓已接入
+function progress(lineHtml, primaryLabel, onPrimary) {
   const box = $('oc-progress');
   box.hidden = false;
-  box.innerHTML = `<div class="state-banner"><p>${html}</p>${primaryLabel ? `<div class="row"><button class="primary small" id="oc-next">${primaryLabel}</button></div>` : ''}</div>`;
+  box.innerHTML = `<p class="fail-line ok">${lineHtml}${primaryLabel ? `<button class="primary small" id="oc-next">${primaryLabel}</button>` : ''}</p>`;
   $('oc-normal').hidden = true;
   if (primaryLabel) $('oc-next').addEventListener('click', onPrimary);
 }
 $('oc-connect').addEventListener('click', () => {
   progress('正在写入（先自动备份）…', null, null);
-  setTimeout(() => progress('已写入并回读确认（备份于 <code>opencode.json.bak-20261014-1015</code>）。<br>正在验证：<code>opencode mcp list</code> …', null, null), 700);
-  setTimeout(() => progress('验证通过：<code>opencode mcp list</code> 已看到 mebular。<br><b>最后一步：在 App 侧重载或重启 OpenChamber</b>（我们不代发 reload）<ol class="checklist"><li>完全退出该助手（退出进程，不是关窗口）或在 App 内重载</li><li>重新打开</li><li>工具列表应出现 <code>mebular</code></li></ol>', '我已重载，重新验证', () => {
+  setTimeout(() => progress('已写入并确认没动其他内容，正在验证…', null, null), 700);
+  setTimeout(() => progress('已接好，在 App 侧重载 OpenChamber 后生效', '我已重载，重新验证', () => {
     progress('正在重新验证…', null, null);
     setTimeout(() => {
       $('oc-progress').hidden = true;
-      $('oc-status').textContent = '已接入 ✓ 已验证';
+      $('oc-status').textContent = '已接入 ✓';
       $('oc-card').style.opacity = '.75';
       $('oc-normal').hidden = false;
-      $('oc-normal').innerHTML = '<div class="row"><span class="badge">已接入 ✓ 已验证</span><details style="display:inline-block;border:none;padding:0;margin:0"><summary>更多</summary><div class="row"><button class="small ghost">查看改动</button><button class="small ghost">回滚</button><button class="small ghost">复制片段</button><button class="small ghost">重新检测</button></div></details></div>';
+      $('oc-normal').innerHTML = '<details class="detail" style="border-top:none;margin-top:2px;padding-top:0"><summary>详情</summary><p class="muted">验证通过：<code>opencode mcp list</code> 已看到 mebular；备份于 <code>opencode.json.bak-20261014-1015</code>。</p><div class="row"><button class="small ghost">查看改动</button><button class="small ghost">回滚</button><button class="small ghost">复制片段</button><button class="small ghost">重新检测</button></div></details>';
     }, 700);
   }), 1500);
 });
-// 待重启场景里的「我已重启，重新验证」同样走重验
+// 待重启场景里的「我已重载，重新验证」同样走重验
 document.querySelectorAll('[data-verify-again]').forEach((b) => b.addEventListener('click', () => {
   ocPane('oc-normal'); $('oc-connect').click();
 }));
@@ -223,11 +234,11 @@ const saveCustom = (manual) => () => {
   const name = $('add-name').textContent.trim() || '自定义助手';
   const card = document.createElement('section');
   card.className = 'card';
-  card.innerHTML = `<div class="card-head"><b>${name}</b><span class="badge gray">未安装</span><span class="badge gray">自定义</span></div>
-    <p class="muted">判据：<code>~/.hermes/config.yaml</code> ✗ · CLI ✗（登记后立即进入三态机）${manual ? ' · manual 条目（无自动接入）' : ''}</p>
-    <details><summary style="color:var(--crt)">怎么装</summary><div class="row"><button class="small">我已装好，重新检测</button><button class="small ghost">手动登记为已装</button></div></details>`;
+  card.innerHTML = `<div class="card-head"><b>${name}</b><span class="badge gray">未安装</span></div>
+    <details class="detail" style="border-top:none;margin-top:2px;padding-top:0"><summary style="color:var(--crt);font-size:13px">怎么装</summary>
+      <div class="row"><button class="small">我已装好，重新检测</button><button class="small ghost">手动登记为已装</button></div></details>`;
   document.querySelector('details.group:nth-of-type(2)')?.appendChild(card);
-  alert(`原型：已写入 ~/.mebular/assistants.custom.json 并即时入列（${manual ? 'manual' : 'merge-key'} 条目）。`);
+  alert('原型：已登记并即时入列' + (manual ? '（手动合并条目）' : '') + '。');
 };
 $('add-save').addEventListener('click', saveCustom(false));
 $('add-save2').addEventListener('click', saveCustom(true));

@@ -2,45 +2,43 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8" />
-<title>UX-2 原型 · 配置旅程</title>
+<title>UX-2 原型 · 配置旅程（评审总览）</title>
 <link rel="stylesheet" href="./prototype.css" />
 </head>
 <body>
-<header class="topbar"><span class="brand">✦ Mebular · UX-2 配置旅程原型</span><span class="spacer"></span><span class="muted">零依赖 · 假数据 · file:// 可点</span></header>
-<nav class="proto-nav">
-  <a class="here" href="./index.html">总览</a>
-  <a href="./01-onboarding.html">① 初始化</a>
-  <a href="./02-wizard.html">② 三步向导</a>
-  <a href="./03-connect.html">③ 连接助手</a>
-  <a href="./04-device.html">④ 添加设备</a>
-  <a href="./05-daily.html">⑤ 日常入口</a>
-  <a href="./06-shell.html">⑥ 壳行为（标注）</a>
-</nav>
+<!-- 本页整体为评审工具 -->
+<div class="proto-review">
+  <span class="tag">评审工具</span>
+  <a class="here" href="./index.html">总览</a><a href="./01-onboarding.html">① 初始化</a>
+  <a href="./02-wizard.html">② 三步向导</a><a href="./03-connect.html">③ 连接助手</a>
+  <a href="./04-device.html">④ 添加设备</a><a href="./05-daily.html">⑤ 日常入口</a><a href="./06-shell.html">⑥ 壳行为</a>
+  <span class="sep"></span>
+  <span class="lbl">零依赖 · 假数据 · file:// 可点 · 各页场景可在顶部评审条切换</span>
+</div>
 <main>
-  <div class="proto-note">本原型对应规格 <code>docs/design/config-journey-v1.md</code>；视觉 token 直接取自控制台契约（<code>mebular-console-design</code>）。所有数据为假数据；助手条目（OpenChamber / Hermes 等）为占位示意。</div>
-
-  <section class="card crt">
+  <section class="card">
     <div class="card-head"><h2>旅程图</h2></div>
     <pre>安装 App → 首启守护自检 → 初始化（建新/加入）→ 接入助手（三态 → 接入 → 验证闭环）→ 添加设备 → 日常
                │失败               │桌面壳一键重启          │未装也可点 · 无死按钮        │随时可回向导（回想）
-               └→ 诊断与日志        └→ web 命令指引          └→ ＋新增助手（长尾零发布）</pre>
+               └→ 诊断与日志        └→ 命令行给命令指引      └→ ＋新增助手（长尾零发布）</pre>
   </section>
 
   <section class="card">
     <div class="card-head"><h2>推荐路线（逐屏点一遍）</h2></div>
     <ol class="checklist" style="color:var(--text)">
-      <li><a href="./01-onboarding.html">① 初始化</a>：引导态 → 点「建新并重启」→ 待重启（桌面壳=一键「重启守护」；切到 web 场景看命令指引）</li>
-      <li><a href="./02-wizard.html">② 三步向导</a》：逐场景切换（守护未就绪 / 初始设置子态 / ②计数 / 完成态）；点「跳过」与「进入控制台 ✦」</li>
-      <li><a href="./03-connect.html">③ 连接助手</a>（核心）：三态卡片、未装可点（怎么装）、OpenChamber/Hermes 判据注脚、「＋ 新增助手」全流程、接入→验证→重启→重检；右侧场景条切到四个失败路径</li>
+      <li><a href="./01-onboarding.html">① 初始化</a>：引导态 → 点「建新并重启」→ 待重启（桌面壳=一键「重启守护」；切到命令行场景看命令指引）</li>
+      <li><a href="./02-wizard.html">② 三步向导</a>：逐场景切换；点「跳过」与「进入控制台 ✦」</li>
+      <li><a href="./03-connect.html">③ 连接助手</a>（核心）：对 OpenChamber 点「接入」走完整验证闭环；评审条切四个失败路径；点「＋ 新增助手」走登记流程</li>
       <li><a href="./04-device.html">④ 添加设备</a>：生成邀请 → 二次确认再生 → 已连收编</li>
-      <li><a href="./05-daily.html">⑤ 日常入口</a>：完成态日常（控制台为家，设置/诊断/关于本机）</li>
-      <li><a href="./06-shell.html">⑥ 壳行为</a>：托盘/窗口/退出确认（HTML 跑不了壳 → 标注屏）</li>
+      <li><a href="./05-daily.html">⑤ 日常入口</a>：完成态日常（控制台为家）</li>
+      <li><a href="./06-shell.html">⑥ 壳行为</a>：托盘/窗口/退出确认（标注屏）</li>
     </ol>
   </section>
 
   <section class="card">
     <div class="card-head"><h2>失败路径覆盖</h2></div>
-    <p class="muted">检测失败 / 写入失败 / 验证失败 / 需重启未重启 → 见 <a href="./03-connect.html">③ 连接助手</a> 顶部「场景」切换；守护启动失败 → 见 <a href="./02-wizard.html">② 向导</a>「守护未就绪」场景（日志自动展开 + 人话结论）。</p>
+    <p class="muted">检测失败 / 写入失败 / 验证失败 / 需重启未重启 → 见 <a href="./03-connect.html">③ 连接助手</a> 评审条场景切换；守护启动失败 → 见 <a href="./02-wizard.html">② 向导</a>「守护未就绪」（日志自动展开 + 人话结论）。</p>
+    <p class="muted">对应规格：<code>docs/design/config-journey-v1.md</code>（§8.1「评审脚手架 vs 产品界面」约束本原型的批注边界）。</p>
   </section>
 </main>
 </body>

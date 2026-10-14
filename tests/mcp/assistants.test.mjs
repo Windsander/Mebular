@@ -4,7 +4,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { appendFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -209,11 +209,18 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
     // args 需以 JSON 字面量传递：shell 去引号后为 ["mcp"]（Hermes `_coerce_config_set_value` 据此解析）
     expect(calls[1]).toBe(String.raw`hermes config set --force mcp_servers.mebular.args "[\"mcp\"]"`);
     expect(calls[2]).toBe('hermes config set --force mcp_servers.mebular.enabled "true"');
-    // 失败 → 整文件回滚
-    const res2 = await connectClient('hermes', opts({ run: runFail }));
+    // 失败 → 整文件回滚（替身模拟「前几条已落盘、后一条失败」的部分写入）
+    let n = 0;
+    const res2 = await connectClient('hermes', opts({
+      run: () => {
+        n += 1;
+        if (n === 1) { appendFileSync(cfg, 'partial: true\n'); return runOk(); }
+        return runFail();
+      },
+    }));
     expect(res2.ok).toBe(false);
     expect(res2.rolledBack).toBe(true);
-    expect(await readFile(cfg, 'utf-8')).toBe(original);
+    expect(await readFile(cfg, 'utf-8')).toBe(original); // 部分写入被回滚
   });
 
   it('A-5：Hermes descriptor = ~/.hermes/config.yaml + mcp_servers.mebular + hot + verify 黄金样例', () => {

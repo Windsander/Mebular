@@ -16,7 +16,7 @@ import { buildHandlerTable, diagnostics } from './ipc.mjs';
 import { iconDataUrl } from './tray-icons.mjs';
 import {
   computeWizardState, deepLinks, inviteText, inviteViaApi, isLoopbackUrl,
-  readDesktopState, writeDesktopState, clientsViaApi, clientActionViaApi,
+  readDesktopState, writeDesktopState, clientsViaApi, clientActionViaApi, installDecision,
 } from './wizard.mjs';
 import { closeAction, quitConfirm, stopConfirm, trayMenuModel, LOGIN_ITEM_ID } from './lifecycle.mjs';
 import { readDaemonLogs } from './logs.mjs';
@@ -266,6 +266,7 @@ async function confirmRestart() {
   });
   if (response !== 1) return;
   await restart();
+  await showConsoleWithRetry(); // 托盘「重启」= 显式用户动作：维持旧行为，重启后落到控制台
 }
 
 function trayActions() {
@@ -301,12 +302,12 @@ function updateTray() {
   tray.setContextMenu(Menu.buildFromTemplate(template));
 }
 
+/** 重启守护本体（F1：不导航；托盘「重启」的导航由 confirmRestart 显式追加）。 */
 async function restart() {
   if (daemonChild) { stopManaged(daemonChild); daemonChild = null; }
   healthy = false; daemonMode = null; updateTray();
   await new Promise((r) => setTimeout(r, 800));
   await ensure();
-  await showConsoleWithRetry();
 }
 
 function createTray() {
@@ -332,9 +333,15 @@ async function installServiceDirect() {
   }
   const service = await loadServiceModule();
   if (!service?.installService) return { ok: false, reason: '@mebular/service 不可用' };
+  const descriptor = serviceDescriptorFor({ home, cliBin, http: httpConf() });
   try {
-    const res = service.installService(serviceDescriptorFor({ home, cliBin, http: httpConf() }), { home, autostart: true });
-    return { ok: true, registered: true, unitPath: res?.unitPath ?? null };
+    // F2b 幂等：已注册 → no-op（不重写 plist、不重启守护——重装会把健康瞬断、① 翻回未完成）
+    const status = service.serviceStatus?.(descriptor, { home });
+    if (installDecision(status).already) {
+      return { ok: true, already: true, registered: true, running: Boolean(status.running), unitPath: status.unitPath ?? null };
+    }
+    const res = service.installService(descriptor, { home, autostart: true });
+    return { ok: true, already: false, registered: true, unitPath: res?.unitPath ?? null };
   } catch (error) {
     return { ok: false, reason: String(error?.message ?? error) };
   }
@@ -356,9 +363,9 @@ async function createInvite() {
 function registerIpc() {
   const table = buildHandlerTable({
     'daemon:status': async () => ({ mode: daemonMode, healthy, home, http: httpConf() }),
-    'daemon:start': async () => { await ensure(); await showConsoleWithRetry(); return { mode: daemonMode }; },
+    'daemon:start': async () => { await ensure(); return { mode: daemonMode }; }, // F1：向导流水用——只启动，不导航（导航只保留显式 console:open）
     'daemon:stop': () => ({ stopped: stopManaged(daemonChild) }),
-    'daemon:restart': async () => { await restart(); return { mode: daemonMode }; },
+    'daemon:restart': async () => { await restart(); return { mode: daemonMode }; }, // F1：只重启，不导航
     'console:open': async () => { win?.show(); win?.focus(); await safeLoad(shellConsoleUrl()); return { url: shellConsoleUrl() }; },
     'logs:open': async () => { await shell.openPath(join(home, 'serve.log')); return { path: join(home, 'serve.log') }; },
     'app:diagnostics': () => diagnostics({ appVersion: APP_VERSION, electronVersion: process.versions.electron, mode: daemonMode, home, http: httpConf(), healthy }),

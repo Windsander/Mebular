@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeWizardState } from '../../apps/desktop/src/main/wizard.mjs';
+import { installDecision } from '../../apps/desktop/src/main/wizard.mjs';
 import { probeProvision } from '../../apps/desktop/src/main/daemon.mjs';
 import { wizardView } from '../../apps/desktop/src/renderer/wizard-view.mjs';
 
@@ -241,5 +242,119 @@ describe('W-1 ① 渲染层接线（provision CTA / ② 先完成第①步）', 
   it('星野舞台：canvas #sky + prefers-reduced-motion 静止降级', () => {
     expect(wizardHtml).toContain('id="sky"');
     expect(wizardJs).toContain('prefers-reduced-motion');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// UX-2 收口 · 引导三连环修复（F1 不导航 / F2 安装按钮语义 / F3 不擅自离开向导 / F4 宽限窗）
+// ---------------------------------------------------------------------------
+
+const indexMjs = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'main', 'index.mjs'), 'utf-8');
+
+describe('F1 向导流水不导航：daemon:start / daemon:restart 处理器去掉 showConsoleWithRetry', () => {
+  it('daemon:start / daemon:restart 处理器与 restart() 本体均不含导航；托盘 confirmRestart 显式保留', () => {
+    const startHandler = indexMjs.match(/'daemon:start':\s*async \(\) => \{[^}]*\}/)?.[0] ?? '';
+    expect(startHandler).toContain('await ensure()');
+    expect(startHandler).not.toContain('showConsoleWithRetry');
+    const restartHandler = indexMjs.match(/'daemon:restart':\s*async \(\) => \{[^}]*\}/)?.[0] ?? '';
+    expect(restartHandler).not.toContain('showConsoleWithRetry');
+    const restartFn = indexMjs.match(/async function restart\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(restartFn).not.toContain('showConsoleWithRetry');
+    expect(restartFn).not.toContain('safeLoad');
+    // 托盘「重启」= 显式用户动作：行为不变（重启后落控制台）
+    const confirmRestartFn = indexMjs.match(/async function confirmRestart\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(confirmRestartFn).toContain('await restart()');
+    expect(confirmRestartFn).toContain('showConsoleWithRetry');
+    // 导航仍只经显式通道：console:open 处理器在
+    expect(indexMjs).toMatch(/'console:open':\s*async \(\) => \{[^}]*safeLoad/);
+  });
+
+  it('F3：向导流程内不自动打开控制台（write 子步只给显式按钮；导航点 = skip / 进入控制台 ✦ / 显式按钮）', () => {
+    const runFlowFn = wizardJs.match(/async function runFlow[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(runFlowFn).not.toContain('openConsole');
+    // 渲染层全部导航调用均为显式按钮绑定
+    for (const m of wizardJs.matchAll(/api\.(openConsole|skipWizard|deepAssistants|deepDevice)\(\)/g)) {
+      expect(['openConsole', 'skipWizard', 'deepAssistants', 'deepDevice']).toContain(m[1]);
+    }
+    expect(wizardJs).toMatch(/\$\('#btn-provision'\)\?\.addEventListener\('click', \(\) => \{ void api\.openConsole\(\); \}\)/);
+    expect(wizardJs).toMatch(/\$\('#btn-enter-console'\)\?\.addEventListener\('click', \(\) => \{ void api\.openConsole\(\); \}\)/);
+    expect(wizardJs).toMatch(/\$\('#btn-skip'\)\?\.addEventListener\('click', \(\) => \{ void api\.skipWizard\(\); \}\)/);
+  });
+});
+
+describe('F2 安装按钮语义：三态 registered（false 才显示；未知/true 一律隐藏）+ 幂等', () => {
+  it('registered=null（probe 失败/未知）→ 安装按钮隐藏、无「临时运行」徽章、文案中性', () => {
+    const unknown = wizardView(computeWizardState({ daemonHealthy: true, service: { available: false } }));
+    const start = unknown.steps.find((s) => s.id === 'start');
+    expect(start.actions.install.hidden).toBe(true);
+    expect(start.serviceBadge).toBeNull();
+    expect(start.detailText).not.toContain('临时运行——');
+  });
+
+  it('registered=false → 显示「让 Mebular 常驻」+ 临时运行徽章；registered=true → 隐藏', () => {
+    const unreg = wizardView(computeWizardState({ daemonHealthy: true, service: { registered: false, running: true } }));
+    expect(unreg.steps.find((s) => s.id === 'start').actions.install.hidden).toBe(false);
+    expect(unreg.steps.find((s) => s.id === 'start').serviceBadge).toBe('临时运行');
+    const reg = wizardView(computeWizardState({ daemonHealthy: true, service: { registered: true, running: true } }));
+    expect(reg.steps.find((s) => s.id === 'start').actions.install.hidden).toBe(true);
+    expect(reg.steps.find((s) => s.id === 'start').detailText).toContain('常驻已装');
+  });
+
+  it('computeWizardState 保三态：undefined → null（不坍缩 false）；true/false 原样', () => {
+    const s1 = computeWizardState({ daemonHealthy: true, service: { available: false } });
+    expect(s1.steps[0].detail.registered).toBeNull();
+    const s2 = computeWizardState({ daemonHealthy: true, service: { registered: true } });
+    expect(s2.steps[0].detail.registered).toBe(true);
+    const s3 = computeWizardState({ daemonHealthy: true, service: { registered: false } });
+    expect(s3.steps[0].detail.registered).toBe(false);
+  });
+
+  it('service:install 幂等（静态契约 + 纯函数 installDecision）：已注册 → no-op 返回 already，不重装', () => {
+    expect(installDecision({ registered: true, running: true })).toEqual({ action: 'noop', already: true });
+    expect(installDecision({ registered: false })).toEqual({ action: 'install', already: false });
+    expect(installDecision(null)).toEqual({ action: 'install', already: false });
+    const fn = indexMjs.match(/async function installServiceDirect\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(fn).toContain('serviceStatus');
+    expect(fn).toContain('installDecision(status).already');
+    expect(fn.indexOf('serviceStatus')).toBeLessThan(fn.indexOf('installService(descriptor'));
+  });
+});
+
+describe('F4④ 宽限窗：重启/安装窗口内 ① 不翻回未完成（grace 呈现）', () => {
+  it('state.grace + ① 暂不健康 → 过渡呈现：current 不报警、日志不自动展开、安装按钮「重启中…」禁用', () => {
+    const state = computeWizardState({ daemonHealthy: false, service: { registered: true } });
+    state.grace = true;
+    const view = wizardView(state);
+    const start = view.steps.find((s) => s.id === 'start');
+    expect(view.logs.open).toBe(false); // 宽限窗内不算异常
+    expect(view.logs.conclusion).toBeNull();
+    expect(start.status).toBe('current');
+    expect(start.detailText).toContain('重启生效中');
+    expect(start.flow.launch).toBe('active');
+    expect(start.actions.install.disabled).toBe(true);
+    expect(start.actions.install.label).toBe('重启中…');
+    expect(start.actions.go.hidden).toBe(true);
+  });
+
+  it('无 grace 时健康瞬断仍按未完成呈现（不减弱原语义）', () => {
+    const view = wizardView(computeWizardState({ daemonHealthy: false, service: { registered: true } }));
+    expect(view.logs.open).toBe(true);
+    expect(view.steps.find((s) => s.id === 'start').status).toBe('current');
+  });
+
+  it('渲染层契约：安装/重启动作 arm 宽限窗；安装按钮进「重启中…」过渡并轮询恢复（≤60s）', () => {
+    expect(wizardJs).toMatch(/function armGrace\(ms = 60000\)/);
+    const installHandler = wizardJs.match(/\$\('#btn-install'\)\?\.addEventListener\('click', async \(\) => \{[\s\S]*?\n\}\);/)?.[0] ?? '';
+    expect(installHandler).toContain('重启中…');
+    expect(installHandler).toContain('armGrace()');
+    expect(installHandler).toContain('res?.already');
+    expect(installHandler).toContain('pollState');
+    const restartHandler = wizardJs.match(/\$\('#btn-restart'\)\?\.addEventListener\('click', async \(\) => \{[^}]*\}\);/)?.[0] ?? '';
+    expect(restartHandler).toContain('armGrace()');
+    // refresh 注入 grace 标志（仅宽限窗内且未完成）
+    expect(wizardJs).toMatch(/Date\.now\(\) < graceUntil[\s\S]{0,120}state\.grace = true/);
+    // 渲染层按视图模型应用 disabled/label
+    expect(wizardJs).toMatch(/btnInstall\.disabled = Boolean\(start\.actions\.install\.disabled\)/);
+    expect(wizardJs).toMatch(/btnInstall\.textContent = start\.actions\.install\.label/);
   });
 });

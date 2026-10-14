@@ -33,6 +33,11 @@ export function negotiationLimit(state) {
   return state?.reason === 'NEGOTIATION_LIMIT: 2>1';
 }
 
+/** collab 1d-a 负例：自环被拒 → 父任务 `failed` 且 reason 形如 `DAG_CYCLE: …`。 */
+export function dagCycleRejected(state) {
+  return state?.status === 'failed' && /^DAG_CYCLE: /.test(state.reason ?? '');
+}
+
 /** DAG 完成（1d-a 及负例）：全部可达任务到终态。 */
 export function dagComplete(completion) {
   return completion?.complete === true;

@@ -28,7 +28,7 @@ import {
   FleetChatter,
 } from '../packages/fleet/dist/index.js';
 
-import { negotiationDone, negotiationLimit, waitForTaskState } from './lib/acceptance-conditions.mjs';
+import { dagCycleRejected, negotiationDone, negotiationLimit, waitForTaskState } from './lib/acceptance-conditions.mjs';
 
 const results = [];
 const skipped = [];
@@ -65,10 +65,14 @@ try {
         pushOnWriteThrottleMs: 20,
         namespaces: ['tasks'],
         peerNamespacePolicy: { [peer]: ['tasks'] },
-        // CI 偶发 flake 根因（run 287/291：`1d-b 协商` 卡在 queued，B 已回 counter 而 A 一条未收 =
-        // 回程推送丢失）：本夹具此前只靠 pushOnWrite，推送一丢就只能等默认超长反熵间隔 → 90s 窗口外。
-        // 与常驻守护默认一致地开启周期反熵做兜底，并把间隔压到秒级，让丢包在窗口内自愈（幂等重放）。
-        antiEntropy: { enabled: true, intervalMs: 2000, jitterRatio: 0 },
+        // 往返推送可能丢（run 287/291：`1d-b 协商` 卡 queued，B 已回 counter 而 A 一条未收）。
+        // 本夹具**由 loop 显式驱动** `runAntiEntropyCycle()`（每轮一次），故**关闭周期反熵定时器**：
+        //  - `recordSyncOutcome` 仅在 `enabled` 时记退避，而**退避基数 = intervalMs**（F-FLAKE-1 发现）；
+        //    开着并把 intervalMs 设大（或默认 10min）时，一次会话失败就会把「反熵兜底」封停到
+        //    远超 90s 验收窗口（证据：main@7bd9de9 `1d-a 负例` 读到 queued = 等待超时）。
+        //  - 关闭后 `enabled=false`：仍建常驻收发循环（realtime 由 pushOnWrite 保证）、退避不生效、
+        //    也没有会在 close 后触发的定时器 → loop 的显式驱动恒可用（幂等重放不变）。
+        antiEntropy: { enabled: false },
         // F-FLAKE-1：会话等待默认超时 30s（DEFAULT_SYNC_TIMEOUT），而 anti-entropy 失败退避以
         // 反熵间隔为基数指数增长（2s→4s→8s…）。单次卡住的会话把 `syncing` 置真 → 反熵与推送一起被
         // 跳闸，叠加退避即可超出验收窗口（证据：main @12bdd17 的 Fleet 步骤 154s，绿时为 57s，
@@ -140,11 +144,13 @@ try {
   const { taskId: badId } = await n1.submit({ intent: 'root-cycle', to: { device: 'device-B', agent: 'echo' } });
   const { worker: w2 } = await makeWorker({ planner: selfCycle });
   const l2 = loop(w2);
-  await n1.waitForDagCompletion(badId, { timeoutMs: 90000 });
+  // F-FLAKE-2：精确断言谓词 + 条件驱动有界等待（旧版 `waitForDagCompletion` 超时后**单次读** → 抖动）。
+  // `dagCompletion.complete` 要求 root 终态（root∈reachable）⇒ 不存在「提前完成、bad 尚 queued」的缝；
+  // 真因是**投递停滞**（>90s）导致等待超时，故这里直接等「bad 到 failed 且 reason 形如 DAG_CYCLE」。
+  const bad = await waitForTaskState(n1, badId, dagCycleRejected);
   l2.stop();
   await l2.done;
-  const bad = await n1.stateOf(badId);
-  check('1d-a 负例：成环被拒（DAG_CYCLE）', bad?.status === 'failed' && /^DAG_CYCLE: /.test(bad.reason ?? ''), { reason: bad?.reason });
+  check('1d-a 负例：成环被拒（DAG_CYCLE）', bad.ok && dagCycleRejected(bad.state), { status: bad.state?.status, reason: bad.state?.reason });
 
   // ---------------- 1d-b 协商 ----------------
   const negB = negotiationMessageStore(b);

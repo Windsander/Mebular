@@ -33,6 +33,9 @@ import {
   type TaskState,
   type FleetWorkerOptions,
 } from '../../packages/fleet/src/index.js';
+// F-FLAKE-2：TS 版条件驱动有界等待 + 谓词（与 `scripts/lib/acceptance-conditions.mjs` 同语义；
+// .mjs 为脚本侧单一真源，jest 走 ts-jest/CJS 转换无法加载 ESM，故在 TS 侧镜像，见 helpers.ts 注释）。
+import { dagCycleRejected, negotiationDone, negotiationLimit, waitForTaskState } from './helpers.js';
 
 jest.setTimeout(120000);
 // live 同步 E2E 对 runner 负载敏感：允许重试以吸收慢 runner 抖动（本地/CI 双跑均稳定）
@@ -72,8 +75,9 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     let stop = false;
     const done = (async () => {
       while (!stop) {
-        await a.sync.runAntiEntropyCycle();
-        await b.sync.runAntiEntropyCycle();
+        // F-FLAKE-2：单次异常不得杀死同步驱动（否则同步静默停摆 → 等待超时）；吞掉后继续下一轮。
+        await a.sync.runAntiEntropyCycle().catch(() => undefined);
+        await b.sync.runAntiEntropyCycle().catch(() => undefined);
         await sleep(25);
       }
     })();
@@ -95,8 +99,13 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
       network: { enabled: true, provider: hub },
       sync: {
         autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 5, namespaces: ['tasks'], peerNamespacePolicy,
-        // 与 dag-e2e 同构：启用 anti-entropy（长间隔，仅由 kicker 显式驱动），保证常驻发起方循环可用
-        antiEntropy: { enabled: true, intervalMs: 3_600_000, jitterRatio: 0 },
+        // 与 dag-e2e 同构：反熵**由 kicker 显式驱动**。这里**关闭**周期反熵（而非设超长 intervalMs）：
+        // `recordSyncOutcome` 仅在 enabled 时记退避，且**退避基数 = intervalMs** ⇒ 开着并把 intervalMs
+        // 设长时，一次会话失败就会把反熵兜底封停到远超 90s（F-FLAKE-2 根因：1d-a 负例/1d-b 收到 queued）。
+        // enabled=false：退避不生效、也没有会在 shutdown 后触发的定时器；常驻收发循环由 pushOnWrite 保证。
+        antiEntropy: { enabled: false },
+        // F-FLAKE-2：卡住的会话默认 30s 才超时；收紧到 5s，使「卡住→重试」远小于 90s 验收预算。
+        syncTimeout: 5000,
       },
     });
   }
@@ -124,7 +133,8 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     let stop = false;
     const done = (async () => {
       while (!stop) {
-        await worker.pollOnce();
+        // F-FLAKE-2：worker 轮询单次异常不得杀死驱动（否则任务永不推进 → 等待超时）。
+        await worker.pollOnce().catch(() => undefined);
         await sleep(intervalMs);
       }
     })();
@@ -154,12 +164,15 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     const { taskId: badId } = await node.submit({ intent: 'root-cycle', to: { device: 'device-B', agent: 'echo' } });
     const { worker: worker2 } = await makeWorker({ planner: selfCycle });
     const loop2 = startLoop(worker2);
-    const badCompletion = await node.waitForDagCompletion(badId!, { timeoutMs: 90000 });
+    // F-FLAKE-2：精确断言谓词 + 条件驱动有界等待（旧版 `waitForDagCompletion` 超时后**单次读** → 抖动）。
+    // `dagCompletion.complete` 要求 root 终态 ⇒ 无「提前完成、bad 尚 queued」的缝；真因是投递停滞 → 等待超时。
+    const bad = await waitForTaskState(node, badId!, dagCycleRejected);
+    const badCompletion = await node.waitForDagCompletion(badId!, { timeoutMs: 90000 }); // 已终态 → 首轮即返回
     loop2.stop();
     await loop2.done;
-    const badState = await node.stateOf(badId!);
-    expect(badState?.status).toBe('failed');
-    expect(badState?.reason).toMatch(/^DAG_CYCLE: /);
+    expect(bad.ok).toBe(true);
+    expect(bad.state?.status).toBe('failed');
+    expect(bad.state?.reason).toMatch(/^DAG_CYCLE: /);
     expect(badCompletion.reachable).toEqual([badId]);
   });
 
@@ -172,11 +185,12 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
       negotiation: { store: negB, maxRounds: 3, enabled: (s: TaskState) => s.intent.startsWith('nego:') },
     });
     const loop = startLoop(worker);
-    const ok = await node.waitForTerminal([taskId!], { timeoutMs: 90000 });
+    // F-FLAKE-2：按精确谓词（status==='done'）有界等待，而非「等终态后单次读」。
+    const doneWait = await waitForTaskState(node, taskId!, negotiationDone);
     loop.stop();
     await loop.done;
-    expect(ok).toBe(true);
-    expect((await node.stateOf(taskId!))?.status).toBe('done');
+    expect(doneWait.ok).toBe(true);
+    expect(doneWait.state?.status).toBe('done');
     const msgs = await negB.all();
     expect(msgs.some((m) => m.kind === 'counter')).toBe(true);
     expect(msgs.some((m) => m.kind === 'accept')).toBe(true);
@@ -188,13 +202,13 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
       negotiation: { store: negB, maxRounds: 1, enabled: (s: TaskState) => s.intent.startsWith('nego:') },
     });
     const loop2 = startLoop(worker2);
-    const terminal = await node2.waitForTerminal([overId!], { timeoutMs: 90000 });
+    // F-FLAKE-2：按精确谓词（reason==='NEGOTIATION_LIMIT: 2>1'）有界等待。
+    const over = await waitForTaskState(node2, overId!, negotiationLimit);
     loop2.stop();
     await loop2.done;
-    expect(terminal).toBe(true);
-    const overState = await node2.stateOf(overId!);
-    expect(overState?.status).toBe('failed');
-    expect(overState?.reason).toBe('NEGOTIATION_LIMIT: 2>1');
+    expect(over.ok).toBe(true);
+    expect(over.state?.status).toBe('failed');
+    expect(over.state?.reason).toBe('NEGOTIATION_LIMIT: 2>1');
 
     // messageId 幂等
     const before = (await negB.all()).length;

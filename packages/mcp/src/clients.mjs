@@ -12,12 +12,15 @@
 //   5. 重复接入**幂等**（条目已等价 → changed:false，不写不备份）；写入失败**回滚**。
 //   6. **禁写** `landing.forbiddenPaths`（如 OpenChamber 私有的 `opencode.managed.json`）。
 //   7. **A-19**：本模块**不得**调用 `opencode reload`（生效由用户在 App 侧重载）。
+//   8. **F-PERF-2**：请求路径的探针一律**异步**（exec promisify）+ **短 TTL 会话内缓存**（单飞去重、
+//      写后失效、`refresh` 绕过）——不得在事件循环里 `spawnSync` 阻塞（并发 GET 会互相排队）。
 //
 // 纯函数式：home/cwd/platform/env/run 可注入，便于单元测试（不触碰真实用户目录）。
 
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { chmod, copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { spawnSync } from 'node:child_process';
+import { exec, spawnSync } from 'node:child_process';
+import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -326,6 +329,7 @@ export async function addCustomAssistant(entry, options = {}) {
   if (assistants.some((a) => a.id === entry.id)) return { ok: false, reason: `id 已存在：${entry.id}` };
   const next = [...assistants, entry];
   const path = await saveCustomAssistants(options, next);
+  clearAssistantsCache(); // F-PERF-2：写后失效，避免读到陈旧三态
   return { ok: true, added: entry.id, path, count: next.length };
 }
 
@@ -341,6 +345,7 @@ export async function updateCustomAssistant(id, patch, options = {}) {
   const next = assistants.slice();
   next[idx] = merged;
   const path = await saveCustomAssistants(options, next);
+  clearAssistantsCache(); // F-PERF-2：写后失效，避免读到陈旧三态
   return { ok: true, updated: id, path };
 }
 
@@ -351,6 +356,7 @@ export async function removeCustomAssistant(id, options = {}) {
   const next = assistants.filter((a) => a.id !== id);
   if (next.length === assistants.length) return { ok: false, reason: `自定义条目不存在：${id}` };
   const path = await saveCustomAssistants(options, next);
+  clearAssistantsCache(); // F-PERF-2：写后失效，避免读到陈旧三态
   return { ok: true, removed: id, path, count: next.length };
 }
 
@@ -529,6 +535,28 @@ function defaultProcessList() {
   }
 }
 
+const execAsync = promisify(exec);
+
+/** 异步命令执行（请求路径唯一入口；`exec` 自带 shell 语义，跨平台）。 */
+async function defaultRunAsync(command, timeoutMs) {
+  try {
+    const { stdout, stderr } = await execAsync(command, { timeout: timeoutMs, encoding: 'utf-8', maxBuffer: 1 << 20, windowsHide: true });
+    return { ok: true, code: 0, stdout: stdout ?? '', stderr: stderr ?? '' };
+  } catch (error) {
+    return {
+      ok: false,
+      code: typeof error?.code === 'number' ? error.code : 1,
+      stdout: error?.stdout ?? '',
+      stderr: error?.stderr ?? '',
+    };
+  }
+}
+
+async function defaultProcessListAsync() {
+  const r = await defaultRunAsync('ps -Ao command', 2000);
+  return r.ok ? r.stdout : '';
+}
+
 /** 评估一条 probe 信号；返回 `{ kind, source, hit, detail }`（detail 一律脱敏）。 */
 export function probeSignal(signal, options = {}) {
   const run = options.run ?? defaultRun;
@@ -556,16 +584,62 @@ export function probeSignal(signal, options = {}) {
   }
 }
 
+
+/** `probeSignal` 的**异步**版本（请求路径用；语义完全一致，仅把 spawnSync 换成 exec）。 */
+export async function probeSignalAsync(signal, options = {}) {
+  const runAsync = options.runAsync ?? (options.run
+    ? (cmd, t) => Promise.resolve(options.run(cmd, t))
+    : defaultRunAsync);
+  const listAsync = options.processListAsync ?? (options.processList !== undefined
+    ? () => Promise.resolve(options.processList)
+    : defaultProcessListAsync);
+  const source = signal.paths?.[0] ?? signal.command ?? signal.pattern ?? signal.kind;
+  try {
+    if (signal.kind === 'always') return { kind: signal.kind, source, hit: true, detail: signal.reason ?? 'n/a' };
+    if (signal.kind === 'config-path' || signal.kind === 'app-bundle' || signal.kind === 'dir' || signal.kind === 'path') {
+      const paths = Array.isArray(signal.paths) ? signal.paths : [];
+      const hit = paths.some((p) => existsSync(p));
+      return { kind: signal.kind, source, hit, detail: hit ? `存在：${paths.find((p) => existsSync(p))}` : `不存在：${paths.join(' / ')}` };
+    }
+    if (signal.kind === 'cli') {
+      // F-PERF-2：CLI 版本类探针按**短 TTL**缓存（默认 30s）——真实 CLI 启动可达数百毫秒
+      // （本机 hermes --version ≈763ms），`refresh` 只重算**列表/落面**，不必重复 spawn 版本探测。
+      // 注：注入的 `run`/`runAsync`（测试）不缓存，保证替身语义确定。
+      const injected = options.runAsync !== undefined || options.run !== undefined;
+      const cacheKey = `${signal.command}::${signal.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS}`;
+      if (!injected && options.refreshProbes !== true) {
+        const cachedCli = cliProbeCache.get(cacheKey);
+        if (cachedCli && Date.now() - cachedCli.at < PROBE_CACHE_TTL_MS) {
+          return { kind: signal.kind, source, hit: cachedCli.hit, detail: `rc=${cachedCli.code}` };
+        }
+      }
+      const r = await runAsync(signal.command, signal.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS);
+      if (!injected) cliProbeCache.set(cacheKey, { at: Date.now(), hit: r.ok === true, code: r.code });
+      return { kind: signal.kind, source, hit: r.ok === true, detail: `rc=${r.code}` };
+    }
+    if (signal.kind === 'process') {
+      const out = String((await listAsync()) ?? '');
+      const hit = out.includes(signal.pattern);
+      return { kind: signal.kind, source, hit, detail: hit ? '进程命中' : '进程未命中' };
+    }
+    return { kind: signal.kind, source, hit: false, detail: `未知信号类型：${signal.kind}` };
+  } catch (error) {
+    return { kind: signal.kind, source, hit: false, detail: `探测异常：${redactSecrets(error?.message ?? error)}` };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // 三态 + 派生态（A-1/A-2/A-4/A-6 数据面）
 // ---------------------------------------------------------------------------
 
 /** 单条助手状态（含 evidence / hasVerify / activation / kind）。 */
-export function assistantState(assistant, options = {}) {
-  const signals = (assistant.probe?.signals ?? []).map((s) => probeSignal(s, options));
+function builtinsCount(reg, options) {
+  return Math.min(builtinAssistants(options).length, reg.assistants.length);
+}
+
+function buildStateItem(assistant, signals, landing) {
   const anyHit = signals.some((s) => s.hit);
   const anyError = signals.some((s) => typeof s.detail === 'string' && s.detail.startsWith('探测异常'));
-  const landing = landingState(assistant);
   const strategy = assistant.writer?.strategy ?? 'merge-key';
   let state;
   if (strategy === 'manual' && !landing.present) state = anyHit ? 'manual' : 'not-installed';
@@ -615,11 +689,83 @@ export function assistantState(assistant, options = {}) {
   };
 }
 
-/** 注册表驱动的完整列表（A-1/A-2）。 */
+/** 单条助手状态（**同步**；测试与离线场景用）。 */
+export function assistantState(assistant, options = {}) {
+  const signals = (assistant.probe?.signals ?? []).map((s) => probeSignal(s, options));
+  return buildStateItem(assistant, signals, landingState(assistant));
+}
+
+/** 单条助手状态（**异步**；请求路径用——不阻塞事件循环）。 */
+export async function assistantStateAsync(assistant, options = {}) {
+  const signals = await Promise.all((assistant.probe?.signals ?? []).map((s) => probeSignalAsync(s, options)));
+  return buildStateItem(assistant, signals, landingState(assistant));
+}
+
+// ---------------------------------------------------------------------------
+// F-PERF-2：会话内短 TTL 缓存（+ 单飞去重），避免每请求重复 spawn 探针
+// ---------------------------------------------------------------------------
+
+/** 默认 TTL（ms）；可用 `MEBULAR_CLIENTS_CACHE_MS` 覆盖（0 = 不缓存）。 */
+export const ASSISTANTS_CACHE_TTL_MS = Number(process.env.MEBULAR_CLIENTS_CACHE_MS ?? 1500);
+
+/** CLI 探针结果缓存 TTL（ms）；`MEBULAR_PROBE_CACHE_MS=0` 关闭。 */
+export const PROBE_CACHE_TTL_MS = Number(process.env.MEBULAR_PROBE_CACHE_MS ?? 30000);
+
+const cliProbeCache = new Map();
+
+let assistantsCache = { key: null, at: 0, value: null };
+let assistantsInflight = { key: null, promise: null };
+
+/** 清空缓存（写操作后调用，避免读到陈旧状态）。 */
+export function clearAssistantsCache() {
+  assistantsCache = { key: null, at: 0, value: null };
+  assistantsInflight = { key: null, promise: null };
+  cliProbeCache.clear();
+}
+
+async function computeListAssistantsAsync(options) {
+  const reg = registry(options);
+  const builtinCount = builtinAssistants(options).length;
+  const items = await Promise.all(reg.assistants.map(async (a, i) => {
+    const registryKind = i < builtinCount ? 'builtin' : 'custom';
+    return { ...(await assistantStateAsync(a, options)), registryKind, kind: registryKind };
+  }));
+  return { assistants: items, customError: reg.customError, customPath: reg.customPath, cached: false };
+}
+
+/**
+ * 注册表驱动的完整列表（**异步**，请求路径唯一入口）。
+ * - TTL 内命中直接返回（`cached:true`）；`refresh:true` 或 `ttlMs:0` 绕过；
+ * - 并发请求**单飞**：同一 key 的在途计算被共享（避免并发 10 发 → 10 次 spawn）。
+ */
+export async function listAssistantsAsync(options = {}) {
+  const key = `${options.home ?? homedir()}::${options.cwd ?? process.cwd()}`;
+  const ttl = Number.isFinite(options.ttlMs) ? options.ttlMs : ASSISTANTS_CACHE_TTL_MS;
+  if (options.refresh !== true) {
+    if (ttl > 0 && assistantsCache.key === key && assistantsCache.value && Date.now() - assistantsCache.at < ttl) {
+      return { ...assistantsCache.value, cached: true };
+    }
+    if (assistantsInflight.key === key && assistantsInflight.promise) return assistantsInflight.promise;
+  }
+  const promise = computeListAssistantsAsync(options)
+    .then((value) => {
+      assistantsCache = { key, at: Date.now(), value };
+      assistantsInflight = { key: null, promise: null };
+      return value;
+    })
+    .catch((error) => {
+      assistantsInflight = { key: null, promise: null };
+      throw error;
+    });
+  assistantsInflight = { key, promise };
+  return promise;
+}
+
+/** 注册表驱动的完整列表（**同步**；测试/离线）。 */
 export function listAssistants(options = {}) {
   const reg = registry(options);
   const items = reg.assistants.map((a, i) => {
-    const registryKind = i < builtinAssistants(options).length ? 'builtin' : 'custom';
+    const registryKind = i < builtinsCount(reg, options) ? 'builtin' : 'custom';
     return { ...assistantState(a, options), registryKind, kind: registryKind };
   });
   return { assistants: items, customError: reg.customError, customPath: reg.customPath };
@@ -691,6 +837,7 @@ async function connectViaCli(assistant, options) {
       return { ok: false, changed: false, rolledBack: true, backupPath, commands, reason: `写入失败（${key}）已回滚`, needsManual: true, snippet: snippetFor(assistant.format) };
     }
   }
+  clearAssistantsCache(); // F-PERF-2：写后失效
   return { ok: true, changed: true, backupPath, commands, configPath: primary, preview: lineDiff(safeReadText(primary) ?? '', snippetFor(assistant.format)) };
 }
 
@@ -720,6 +867,7 @@ export async function connectClient(id, options = {}) {
   if (backupPath) await copyFile(primary, backupPath);
   try {
     await atomicWrite(primary, merged.text);
+    clearAssistantsCache(); // F-PERF-2：写后失效
   } catch (error) {
     if (backupPath) await copyFile(backupPath, primary); // 失败回滚
     return { ok: false, changed: false, rolledBack: Boolean(backupPath), backupPath, reason: `写入失败已回滚：${redactSecrets(error?.message ?? error)}` };
@@ -729,6 +877,7 @@ export async function connectClient(id, options = {}) {
 
 /** 回滚：显式备份优先；否则最近一次备份；无备份则删除 mebular 条目（DSH 除外）。 */
 export async function rollbackClient(id, options = {}) {
+  clearAssistantsCache(); // F-PERF-2：回滚会改变落面
   const assistant = descriptorFor(id, options);
   if (!assistant || !assistant.landing?.primaryPath) return { ok: false, reason: `未知客户端：${id}` };
   const primary = assistant.landing.primaryPath;
@@ -742,12 +891,14 @@ export async function rollbackClient(id, options = {}) {
   await copyFile(primary, safety);
   if (target) {
     await atomicWrite(primary, await readFile(target, 'utf-8'));
-    return { ok: true, restoredFrom: target, backupPath: safety, removed: false };
+    clearAssistantsCache();
+  return { ok: true, restoredFrom: target, backupPath: safety, removed: false };
   }
   if (assistant.format === 'dsh') return { ok: false, reason: 'DSH 无备份可回滚：请按片段人工移除' };
   const merged = mergeJsonEntry(existing, { format: assistant.format, entry: undefined, keyPath: keyPathOf(assistant.landing?.format ?? assistant.format) });
   if (merged.error) return { ok: false, reason: merged.error };
   await atomicWrite(primary, merged.text);
+  clearAssistantsCache();
   return { ok: true, restoredFrom: null, backupPath: safety, removed: true };
 }
 

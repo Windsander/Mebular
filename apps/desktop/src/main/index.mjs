@@ -16,7 +16,7 @@ import { buildHandlerTable, diagnostics } from './ipc.mjs';
 import { iconDataUrl } from './tray-icons.mjs';
 import {
   computeWizardState, deepLinks, inviteText, inviteViaApi, isLoopbackUrl,
-  readDesktopState, writeDesktopState,
+  readDesktopState, writeDesktopState, clientsViaApi, clientActionViaApi,
 } from './wizard.mjs';
 import { closeAction, quitConfirm, stopConfirm, trayMenuModel, LOGIN_ITEM_ID } from './lifecycle.mjs';
 import { readDaemonLogs } from './logs.mjs';
@@ -83,22 +83,7 @@ async function probeAssistants() {
   }
 }
 
-let lastInviteCreated = false;
 let quitting = false;
-
-/** R-1 高-1：已知对端数（/admin/api/devices 读端点；失败/引导态 → 0，不阻断）。 */
-async function probePeers() {
-  const http = httpConf();
-  try {
-    const res = await fetch(`http://${http.host}:${http.port}/admin/api/devices`, { signal: AbortSignal.timeout(2000) });
-    if (!res.ok) return { known: 0 };
-    const data = await res.json().catch(() => ({}));
-    const devices = Array.isArray(data?.devices) ? data.devices : Array.isArray(data) ? data : [];
-    return { known: devices.length };
-  } catch {
-    return { known: 0 };
-  }
-}
 
 async function wizardStateNow() {
   const healthy = await probeHealth(fetch, httpConf());
@@ -106,18 +91,15 @@ async function wizardStateNow() {
   const provision = await probeProvision(fetch, httpConf());
   const service = await probeService();
   const assistants = await probeAssistants();
-  // R-1 高-1：③done 真实推导——持久标记（磁盘）∨ 已知对端≥1；内存标记只管本次会话即时反馈
   const desktop = readDesktopState(home);
-  const peers = await probePeers();
   return computeWizardState({
     daemonHealthy: healthy,
     provisionRequired: provision.required,
     provisioned: provision.provisioned,
     service,
     assistants,
-    invite: lastInviteCreated ? { created: true } : null,
-    peers,
-    wizard: { inviteCreated: Boolean(desktop.inviteCreated), skipped: Boolean(desktop.skipped) },
+    // UX-2：② 完成 = 用户显式「已完成」（assistantsAcked）；邀请不再参与完成推导
+    wizard: { assistantsAcked: Boolean(desktop.assistantsAcked), skipped: Boolean(desktop.skipped) },
   });
 }
 
@@ -291,7 +273,7 @@ function trayActions() {
     // R-1 高-4：壳内入口一律带 ?shell=desktop（控制台据此收编终端指令/显示返回向导）
     'open-console': () => { showWindow(); void safeLoad(shellConsoleUrl()); },
     'connect-assistants': () => { showWindow(); void safeLoad(shellDeepLink(deepLinks(httpConf()).assistants)); },
-    'add-device': () => { showWindow(); void safeLoad(wizardViewUrl()); },
+    'add-device': () => { showWindow(); void safeLoad(shellDeepLink(deepLinks(httpConf()).device)); },
     'open-wizard': () => { showWindow(); void safeLoad(wizardViewUrl()); },
     'daemon-start': () => { void ensure().then(() => showConsoleWithRetry()); },
     'daemon-stop': () => { void confirmStop(); },
@@ -364,8 +346,7 @@ async function installServiceDirect() {
  */
 async function createInvite() {
   const res = await inviteViaApi(fetch, httpConf());
-  lastInviteCreated = Boolean(res.token);
-  // R-1 高-1：邀请成功即持久化（进程退出不归零 → ③done 跨重启成立）
+  // UX-2：邀请不再驱动向导完成（移出引导）；仍留痕于壳层状态文件（事实记录，非配置）
   if (res.token) writeDesktopState(home, { inviteCreated: true, inviteCreatedAt: new Date().toISOString() });
   return { ...res, text: inviteText(res), raw: null };
 }
@@ -392,6 +373,14 @@ function registerIpc() {
       return { skipped: true };
     },
     'wizard:open': async () => { showWindow(); await safeLoad(wizardViewUrl()); return { url: wizardFileUrl() }; },
+    // UX-2：段②「已完成」显式确认（持久化 assistantsAcked → 向导完成）
+    'wizard:ack': async () => {
+      writeDesktopState(home, { assistantsAcked: true, assistantsAckedAt: new Date().toISOString() });
+      return { acked: true };
+    },
+    // UX-2：段②行级接入（主进程直调回环 admin API；id/action 服务端白名单校验）
+    'clients:list': async () => clientsViaApi(fetch, httpConf()),
+    'clients:action': async (id, action) => clientActionViaApi(fetch, httpConf(), id, action),
     'service:status': async () => probeService(),
     'service:install': async () => installServiceDirect(),
     'logs:read': async () => {
@@ -400,7 +389,7 @@ function registerIpc() {
     },
     'invite:create': async () => createInvite(),
     'deep:assistants': async () => { await safeLoad(shellDeepLink(deepLinks(httpConf()).assistants)); return { url: shellDeepLink(deepLinks(httpConf()).assistants) }; },
-    'deep:device': async () => { await safeLoad(wizardViewUrl()); return { url: wizardFileUrl() }; },
+    'deep:device': async () => { await safeLoad(shellDeepLink(deepLinks(httpConf()).device)); return { url: shellDeepLink(deepLinks(httpConf()).device) }; },
   });
   for (const [channel, handler] of Object.entries(table)) ipcMain.handle(channel, handler);
 }

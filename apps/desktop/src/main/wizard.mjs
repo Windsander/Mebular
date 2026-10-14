@@ -1,18 +1,18 @@
-// M2 · 三步向导（首次上手）纯逻辑：状态机 / 深链 / 邀请构造 / 日志脱敏
+// M2/UX-2 · 一屏两段向导（首次上手）纯逻辑：状态机 / 深链 / 邀请构造 / 日志脱敏
 //
 // 不 import electron；home/http/cli 可注入，便于单测与 smoke（无 GUI、有界）。
 // 向导**幂等可重入**：每步用「真实状态检测」判 done，重跑不会重复副作用。
+// UX-2：邀请移出引导（控制台单动作页）；段②「已完成」需用户显式确认（assistantsAcked 持久化）。
 
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-/** 步骤（唯一真源）。 */
-export const WIZARD_STEPS = Object.freeze(['start', 'assistants', 'device']);
+/** 步骤（唯一真源）。UX-2：两段（邀请移出引导）。 */
+export const WIZARD_STEPS = Object.freeze(['start', 'assistants']);
 
 export const STEP_TITLES = Object.freeze({
-  start: '① 启动 Mebular',
+  start: '① 一键开始',
   assistants: '② 连接 AI 助手',
-  device: '③ 添加设备',
 });
 
 /**
@@ -51,17 +51,18 @@ export function writeDesktopState(home, patch) {
 }
 
 /**
- * R-1 高-1：③done 改真实状态推导——曾生成邀请（wizard.inviteCreated，持久化）
- * ∨ 已知对端 ≥1（peers.known，来自 /admin/api/devices）；不再依赖主进程内存变量。
+ * UX-2：complete = ① 跑通 ∧ ② 用户显式点「已完成」（wizard.assistantsAcked，持久化）。
+ * 「已接入 ✓」不自动翻段——接入 ≥1 只解锁「已完成」按钮；邀请不再参与完成推导（移出引导）。
  * wizard.skipped（用户点「跳过，直接进入控制台」）视为向导结束（complete）。
  */
-export function computeWizardState({ daemonHealthy, provisionRequired, provisioned, service, assistants, invite, peers, wizard } = {}) {
+export function computeWizardState({ daemonHealthy, provisionRequired, provisioned, service, assistants, wizard } = {}) {
   const steps = [
     {
       id: 'start',
       title: STEP_TITLES.start,
       done: Boolean(daemonHealthy) && !provisionRequired,
       detail: {
+        healthy: Boolean(daemonHealthy),
         provision: { required: Boolean(provisionRequired), provisioned: provisionRequired ? Boolean(provisioned) : null },
         ...(service
           ? { registered: Boolean(service.registered), running: Boolean(service.running), autostart: service.autostart ?? null }
@@ -71,14 +72,8 @@ export function computeWizardState({ daemonHealthy, provisionRequired, provision
     {
       id: 'assistants',
       title: STEP_TITLES.assistants,
-      done: Number(assistants?.connectedCount ?? 0) > 0,
+      done: Boolean(wizard?.assistantsAcked),
       detail: assistants ?? null,
-    },
-    {
-      id: 'device',
-      title: STEP_TITLES.device,
-      done: Boolean(invite?.created) || Boolean(wizard?.inviteCreated) || Number(peers?.known ?? 0) >= 1,
-      detail: { invite: invite ?? null, knownPeers: Number(peers?.known ?? 0), inviteCreated: Boolean(wizard?.inviteCreated) },
     },
   ];
   const current = steps.find((s) => !s.done)?.id ?? null;
@@ -205,6 +200,61 @@ export async function inviteViaApi(fetchImpl, http = { host: '127.0.0.1', port: 
     };
   } catch (error) {
     return { token: null, qrSvg: null, endpoint: null, warning: `邀请失败：${error?.message ?? error}` };
+  }
+}
+
+// ---------- UX-2 段②行级接入：助手列表 / 接入动作（主进程直调回环 admin API） ----------
+
+/** 预取 CSRF（回环 auth=none 下读端点会下发；失败不阻断）。 */
+async function prefetchCsrf(fetchImpl, base, timeoutMs) {
+  try {
+    const pre = await fetchImpl(`${base}/admin/api/overview`, { signal: AbortSignal.timeout(timeoutMs) });
+    return pre?.headers?.get?.('x-mebular-csrf') ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** GET /admin/api/clients → { ok, clients, warning? }（读失败不阻断向导，给 warning）。 */
+export async function clientsViaApi(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, timeoutMs = 8000) {
+  const base = `http://${http.host}:${http.port}`;
+  try {
+    const res = await fetchImpl(`${base}/admin/api/clients`, { signal: AbortSignal.timeout(timeoutMs) });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false, clients: [], warning: `助手列表读取失败（HTTP ${res.status}）` };
+    return { ok: true, clients: Array.isArray(data?.clients) ? data.clients : [] };
+  } catch (error) {
+    return { ok: false, clients: [], warning: `助手列表读取失败：${error?.message ?? error}` };
+  }
+}
+
+/**
+ * POST /admin/api/clients/{id}/{action}（connect/recheck；CSRF 双提交）。
+ * 返回 { ok, changed?, needsManual?, reason?, warning? }；id/action 仅允许安全字符（防路径注入）。
+ */
+export async function clientActionViaApi(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, id, action, timeoutMs = 15000) {
+  if (!/^[\w-]{1,64}$/.test(String(id ?? '')) || !/^(connect|recheck)$/.test(String(action ?? ''))) {
+    return { ok: false, warning: '非法的助手动作参数' };
+  }
+  const base = `http://${http.host}:${http.port}`;
+  try {
+    const csrf = await prefetchCsrf(fetchImpl, base, timeoutMs);
+    const res = await fetchImpl(`${base}/admin/api/clients/${id}/${action}`, {
+      method: 'POST',
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: {
+        'content-type': 'application/json',
+        ...(csrf ? { 'x-mebular-csrf': csrf } : {}),
+      },
+      body: '{}',
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return { ok: false, needsManual: Boolean(data?.needsManual), warning: data?.reason ?? data?.message ?? `动作失败（HTTP ${res.status}）` };
+    }
+    return { ok: true, changed: Boolean(data?.changed), needsManual: Boolean(data?.needsManual), reason: data?.reason ?? null };
+  } catch (error) {
+    return { ok: false, warning: `动作失败：${error?.message ?? error}` };
   }
 }
 

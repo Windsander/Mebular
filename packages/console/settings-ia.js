@@ -6,11 +6,17 @@
 //  - 只读信息统一进「关于本机」（顶栏状态徽章入口）；
 //  - Tab 命名：常用 / 高级 / 诊断。
 
-/** 设置弹层的三个 Tab（顺序即展示顺序；`common` 为默认）。 */
+/** 设置弹层的 Tab（顺序即展示顺序；`common` 为默认）。UX-2：增「AI 助手」专区。 */
 export const IA_TABS = [
   { id: 'common', label: '常用' },
+  { id: 'assistants', label: 'AI 助手' },
   { id: 'advanced', label: '高级' },
   { id: 'diagnostics', label: '诊断' },
+];
+
+/** 设置弹层的附加导航（非 Tab：点击打开既有「关于本机」弹层；UX-2 增「关于本机」区入口）。 */
+export const IA_SETTINGS_EXTRA = [
+  { id: 'about', label: '关于本机', opens: 'about-modal' },
 ];
 
 /** 「常用」的四张任务卡（共 6 字段：多或少即回归）。 */

@@ -19,34 +19,31 @@ const here = dirname(fileURLToPath(import.meta.url));
 
 const doneStart = { daemonHealthy: true, service: { registered: true, running: true } };
 
-describe('R-1 高-1 ③done 真实状态推导（跨进程持久）', () => {
-  it('已知对端 ≥1 → ③done（无需内存里的邀请标记）', () => {
-    const s = computeWizardState({ ...doneStart, assistants: { connectedCount: 1 }, peers: { known: 1 } });
-    expect(s.steps.find((x) => x.id === 'device').done).toBe(true);
-    expect(s.complete).toBe(true);
+describe('R-1 高-1/UX-2 向导完成推导（跨进程持久；两段模型）', () => {
+  it('UX-2：邀请标记/已知对端不再驱动完成（邀请移出引导）——仅「已完成」确认（assistantsAcked）', () => {
+    const byPeers = computeWizardState({ ...doneStart, assistants: { connectedCount: 1 }, peers: { known: 1 } });
+    expect(byPeers.complete).toBe(false);
+    const byInvite = computeWizardState({ ...doneStart, assistants: { connectedCount: 1 }, wizard: { inviteCreated: true } });
+    expect(byInvite.complete).toBe(false);
+    const acked = computeWizardState({ ...doneStart, assistants: { connectedCount: 1 }, wizard: { assistantsAcked: true } });
+    expect(acked.complete).toBe(true);
   });
 
-  it('持久化的邀请标记 → ③done（模拟重启后：内存归零、磁盘有记录）', () => {
-    const s = computeWizardState({ ...doneStart, assistants: { connectedCount: 1 }, wizard: { inviteCreated: true } });
-    expect(s.steps.find((x) => x.id === 'device').done).toBe(true);
-    expect(s.complete).toBe(true);
-  });
-
-  it('三无（无邀请/无对端/无标记）→ ③不 done、不 complete', () => {
+  it('「已接入 ✓」不自动翻段：connected≥1 但未确认 → ② 不 done、不 complete', () => {
     const s = computeWizardState({ ...doneStart, assistants: { connectedCount: 1 } });
-    expect(s.steps.find((x) => x.id === 'device').done).toBe(false);
+    expect(s.steps.find((x) => x.id === 'assistants').done).toBe(false);
     expect(s.complete).toBe(false);
-    expect(s.current).toBe('device');
+    expect(s.current).toBe('assistants');
   });
 
-  it('桌面状态文件读写：inviteCreated / skipped 持久化（脏文件不炸）', async () => {
+  it('桌面状态文件读写：assistantsAcked / skipped 持久化（脏文件不炸）', async () => {
     const home = await mkdtemp(join(tmpdir(), 'mebular-desktop-state-'));
     try {
       expect(readDesktopState(home)).toEqual({});
-      writeDesktopState(home, { inviteCreated: true });
-      expect(readDesktopState(home)).toMatchObject({ inviteCreated: true });
+      writeDesktopState(home, { assistantsAcked: true });
+      expect(readDesktopState(home)).toMatchObject({ assistantsAcked: true });
       writeDesktopState(home, { skipped: true });
-      expect(readDesktopState(home)).toMatchObject({ inviteCreated: true, skipped: true });
+      expect(readDesktopState(home)).toMatchObject({ assistantsAcked: true, skipped: true });
     } finally {
       await rm(home, { recursive: true, force: true });
     }
@@ -105,6 +102,10 @@ describe('R-1 中-9 托盘菜单分组', () => {
   it('未运行态：状态行显示未运行，启动可用', () => {
     const down = trayMenuModel({ healthy: false, daemonMode: null, loginOpenAtLogin: false });
     expect(down.find((i) => i.id === 'status').label).toContain('未运行');
+  });
+
+  it('UX-2：托盘「重启向导」改名（回想入口，不再是「返回向导」）', () => {
+    expect(model.find((i) => i.id === 'open-wizard').label).toBe('重启向导');
   });
 });
 

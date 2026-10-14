@@ -128,6 +128,8 @@ function launchChrome(executablePath) {
       '--disable-gpu',
       '--no-sandbox',
       '--disable-dev-shm-usage',
+      '--use-mock-keychain',
+      '--password-store=basic',
       '--remote-debugging-port=0',
       `--user-data-dir=${userDataDir}`,
       'about:blank',
@@ -269,6 +271,9 @@ async function main() {
     check('页面加载完成（标题 / #stage）', await waitFor('document.title.includes("控制台") && Boolean(document.querySelector("#stage"))'));
     check('星图画布已渲染（尺寸 > 0）', await evalJs('(() => { const c = document.querySelector("#stage"); return c.width > 0 && c.height > 0; })()'));
     check('首屏数据到达（记忆徽标非占位）', await waitFor('!/…/.test(document.querySelector("#memory-badge")?.textContent ?? "…")'));
+    // UX-2 首屏叠加层（只读；星图本体不改）
+    check('UX-2 首屏状态总览条可见（纯只读：守护/对端/记忆）', await waitFor('(() => { const p = document.querySelector("#status-pill"); return Boolean(p) && p.hidden === false && /守护/.test(p.textContent) && /对端/.test(p.textContent) && /记忆/.test(p.textContent); })()'));
+    check('UX-2「需要注意」浮卡条件渲染（无事不出现；有事则条目可点）', await evalJs('(() => { const c = document.querySelector("#attention-card"); return Boolean(c) && (c.hidden === true || c.querySelectorAll("[data-attention-action]").length > 0); })()'));
 
     // 选项卡切换（曾因误删 setView 失效）
     await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
@@ -299,22 +304,29 @@ async function main() {
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('从记忆视图切回星图', await waitFor('document.querySelector("#memories-view")?.hidden === true'));
 
-    // H-1：连接 AI 助手面板（常驻运行卡 + 客户端卡 + diff 预览）
-    await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
-    check('切换到连接 AI 助手视图（#connect-view 可见）', await waitFor('document.querySelector("#connect-view")?.hidden === false'));
-    check('常驻运行卡渲染（状态 + 动作按钮）',
-      await waitFor('(() => { const c = document.querySelector("#service-card"); return Boolean(c) && /常驻/.test(c.textContent) && c.querySelectorAll("[data-svc-action]").length >= 3; })()'));
-    check('AI 助手卡渲染（≥5 张 + 接入按钮）',
-      await waitFor('(() => { const l = document.querySelector("#clients-list"); return Boolean(l) && l.querySelectorAll(".connect-card").length >= 5 && Boolean(l.querySelector("[data-cli-action=connect]")); })()'));
-    await evalJs('(() => { const b = document.querySelector("#clients-list [data-cli-action=preview]"); if (b) b.click(); })()');
-    check('「查看改动」→ diff 预览出现', await waitFor('(() => { const d = document.querySelector(".connect-diff"); return Boolean(d) && d.hidden === false && (d.textContent ?? "").trim().length > 0; })()'));
+    // H-1/UX-2：设置 · AI 助手专区（连接页已收编进设置；单列表 + 行内闭环）
+    await evalJs('document.querySelector("#open-settings").click()');
+    check('设置弹层打开', await waitFor('document.querySelector("#settings")?.hidden === false'));
+    check('常驻运行行归设置 · 常用（状态 + 动作按钮）',
+      await waitFor('(() => { const r = document.querySelector("#settings-resident"); return Boolean(r) && /常驻/.test(r.textContent) && r.querySelectorAll("[data-svc-action]").length >= 1; })()'));
+    await evalJs('document.querySelector("[data-settings-tab=assistants]").click()');
+    check('AI 助手页打开（assistants 面板可见）', await waitFor('document.querySelector("#settings-panel-assistants")?.hidden === false'));
+    check('AI 助手单列表渲染（≥5 行 + 状态词 + 每行一个动作）',
+      await waitFor('(() => { const p = document.querySelector("#settings-panel-assistants"); return Boolean(p) && p.querySelectorAll(".asst-row").length >= 5 && p.querySelectorAll("[data-cli-action]").length >= 1 && /未安装|未接入|已接入/.test(p.textContent); })()'));
+    // 行内「详情 ›」→ 次级动作 → 「查看改动」diff 预览
+    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=details]"); if (b) b.click(); })()');
+    check('行内「详情 ›」展开次级动作', await waitFor('Boolean(document.querySelector("#settings-panel-assistants [data-cli-action=preview]"))'));
+    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=preview]"); if (b) b.click(); })()');
+    check('「查看改动」→ diff 预览出现', await waitFor('(() => { const d = document.querySelector("#settings-panel-assistants .connect-diff"); return Boolean(d) && (d.textContent ?? "").trim().length > 0; })()'));
+    await evalJs('document.querySelector("#settings-close").click()');
 
     // ---------- 背景层契约（crt-surface / crt-screen 扫描线 ::before 定位） ----------
     // 回归场景（真机反馈：记忆共享 / 连接 AI 助手背景重叠、局部生效）：
     // 卡片基元自身不定位时，::before(absolute inset:0) 逃逸到最近的已定位祖先
     // （面板/弹窗），N 张卡 = N 层全屏扫描线叠加，且锚定滚动内容原点 → 滚动后下方无覆盖。
     // 契约：① 背景画布唯一；② 每个 crt-surface/crt-screen 基元自成定位上下文（非 static）；
-    // ③ 四个面板视图的背景样式与扫描线行为完全一致，且扫描线 fixed 钉住可视区（滚动不失效）。
+    // ③ 三个面板视图的背景样式与扫描线行为完全一致，且扫描线 fixed 钉住可视区（滚动不失效）。
+    // （UX-2：连接视图收编进设置弹层，面板视图剩 domains/audit/memories 三个。）
     check('背景画布唯一（canvas.stage-bg 不重复插入）',
       await evalJs('document.querySelectorAll("canvas.stage-bg").length === 1'));
 
@@ -330,12 +342,11 @@ async function main() {
       });
       return { viewId, bgColor: cs.backgroundColor, bgImage: cs.backgroundImage, beforePosition: before.position, cards };
     })`;
-    const viewTabs = { 'domains-view': 2, 'audit-view': 3, 'memories-view': 4, 'connect-view': 5 };
+    const viewTabs = { 'domains-view': 2, 'audit-view': 3, 'memories-view': 4 };
     const viewCards = {
       'domains-view': ['#domains-list', '#domain-detail .sector-readout'],
       'audit-view': [],
       'memories-view': ['#memories-list .mem-row'],
-      'connect-view': ['#service-card', '#clients-list .connect-card'],
     };
     const bgReports = [];
     for (const [viewId, nth] of Object.entries(viewTabs)) {
@@ -343,12 +354,12 @@ async function main() {
       await waitFor(`document.getElementById("${viewId}")?.hidden === false`);
       bgReports.push(await evalJs(`${probeViewBg}(${JSON.stringify(viewId)}, ${JSON.stringify(viewCards[viewId])})`));
     }
-    check('四个面板视图均激活并探针成功', bgReports.every((r) => r && r.beforePosition),
+    check('三个面板视图均激活并探针成功', bgReports.every((r) => r && r.beforePosition),
       JSON.stringify(bgReports.map((r) => r?.viewId ?? null)));
-    check('面板扫描线钉住可视区（::before position: fixed，四视图一致）',
+    check('面板扫描线钉住可视区（::before position: fixed，三视图一致）',
       bgReports.every((r) => r.beforePosition === 'fixed'),
       JSON.stringify(bgReports.map((r) => r.beforePosition)));
-    check('面板背景样式四视图一致（background-color / background-image）',
+    check('面板背景样式三视图一致（background-color / background-image）',
       bgReports.every((r) => r.bgColor === bgReports[0].bgColor && r.bgImage === bgReports[0].bgImage));
     const escapedCards = bgReports.flatMap((r) => r.cards
       .filter((c) => !c.missing)
@@ -357,14 +368,12 @@ async function main() {
     check('卡片基元自成定位上下文（crt-surface/crt-screen 非 static，::before 不逃逸）',
       escapedCards.length === 0 && bgReports.every((r) => r.cards.every((c) => !c.missing || c.sel === '#memories-list .mem-row')),
       escapedCards.slice(0, 3).join(', '));
-    // 滚动稳定性：连接视图滚到底部后扫描线仍钉住（fixed ⇒ 不随内容移走）
-    await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
-    await waitFor('document.getElementById("connect-view")?.hidden === false');
+    // 滚动稳定性：审计视图滚到底部后扫描线仍钉住（fixed ⇒ 不随内容移走）
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(3) button").click()');
+    await waitFor('document.getElementById("audit-view")?.hidden === false');
     const scrollProbe = await evalJs(`(() => {
-      const view = document.getElementById('connect-view');
-      // R-1 补丁：连接页分组折叠后内容可能短于视口（CI 视口更高时不溢出 ⇒ scrollTop 恒 0，前置条件失效；
-      // 本地实测 scrollHeight 332/clientHeight 280、overflowY auto —— 容器未变，只是溢出不确定）。
-      // 临时垫片**确定性制造溢出**，测完移除并还原滚动位——断言强度（scrollTop>0 && fixed）不变。
+      const view = document.getElementById('audit-view');
+      // 垫片**确定性制造溢出**，测完移除并还原滚动位——断言强度（scrollTop>0 && fixed）不变。
       const spacer = document.createElement('div');
       spacer.id = 'ui-probe-spacer';
       spacer.style.height = '2000px';
@@ -384,10 +393,9 @@ async function main() {
       JSON.stringify(scrollProbe));
     // 跨 3s 轮询：背景契约不回退（重渲染不重建背景层/不掉定位上下文）
     await sleep(3600);
-    const repoll = await evalJs(`${probeViewBg}("connect-view", ["#service-card", "#clients-list .connect-card"])`);
-    check('跨 3s 轮询背景契约保持（fixed + 卡片定位不丢）',
-      Boolean(repoll) && repoll.beforePosition === 'fixed'
-        && repoll.cards.every((c) => !c.missing && c.positions.every((p) => p !== 'static')),
+    const repoll = await evalJs(`${probeViewBg}("audit-view", [])`);
+    check('跨 3s 轮询背景契约保持（fixed 不丢）',
+      Boolean(repoll) && repoll.beforePosition === 'fixed',
       JSON.stringify(repoll?.beforePosition));
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
 
@@ -449,6 +457,11 @@ async function main() {
     check('关于本机打开（身份/运行状态区块）', await waitFor('Boolean(document.querySelector("[data-info-block=identity]")) || /关于本机/.test(document.querySelector("#settings-body")?.textContent ?? "")'));
     await evalJs('document.querySelector("#settings-close").click()');
 
+    // UX-2：?view=connect 别名重定向 → 设置 · AI 助手自动打开
+    await send('Page.navigate', { url: `${base}/console/?view=connect` });
+    check('别名重定向：?view=connect → 设置 · AI 助手自动打开',
+      await waitFor('document.querySelector("#settings")?.hidden === false && document.querySelector("#settings-panel-assistants")?.hidden === false'));
+    await evalJs('document.querySelector("#settings-close").click()');
     // 邀请面板（joinService 未启用 → 引导文案；启用 → 令牌。两者都应有内容）
     await evalJs('document.querySelector("#invite-device").click()');
     check('邀请面板打开且渲染内容', await waitFor('(() => { const el = document.querySelector("#invite-body"); return Boolean(el) && el.textContent.trim().length > 0; })()'));

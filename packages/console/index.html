@@ -31,7 +31,6 @@
           <li><button class="view-btn" data-view="domains" type="button"><span class="view-icon">○</span><span class="view-label">记忆共享</span></button></li>
           <li><button class="view-btn" data-view="audit" type="button"><span class="view-icon">○</span><span class="view-label">审计</span></button></li>
           <li><button class="view-btn" data-view="memories" type="button"><span class="view-icon">○</span><span class="view-label">记忆</span></button></li>
-          <li><button class="view-btn" data-view="connect" type="button"><span class="view-icon">○</span><span class="view-label">连接 AI 助手</span></button></li>
         </ul>
         <section id="legend-panel" class="legend-panel crt-surface crt-corners">
           <button id="legend-toggle" class="legend-head" type="button" aria-expanded="true" aria-controls="legend-body">
@@ -58,6 +57,9 @@
         <canvas id="stage" class="stage" aria-label="对端关系星图（本机视角）"></canvas>
         <div id="tooltip" class="tooltip" hidden></div>
         <div id="empty-state" class="empty-state" hidden></div>
+        <!-- UX-2 首屏叠加层（只读；星图本体不改）：状态总览条 + 「需要注意」条件浮卡 -->
+        <div id="status-pill" class="status-pill" hidden></div>
+        <section id="attention-card" class="attention-card" hidden></section>
         <section id="domains-view" class="panel-view crt-screen" hidden>
           <div class="view-head">
             <h2>域视图</h2>
@@ -114,17 +116,6 @@
           </div>
           <p class="panel-note muted">动作式（无开关）：<b>归档</b> = 打 <code>metadata.archivedAt</code> 标记（默认不再召回、可解除、随图同步）；<b>删除</b> = 写墓碑（默认不再召回、随图同步；<b>不可逆</b>，对端已拷贝的旧快照无法强制回收）。控制台写面一律需 <code>memory.admin</code> + CSRF（MCP/CLI 工具 scope：归档 <code>memory.write</code>、删除 <code>memory.admin</code>）。</p>
           <div id="memories-list" class="memories-list"></div>
-        </section>
-        <section id="connect-view" class="panel-view crt-screen" hidden>
-          <div class="view-head">
-            <h2>连接 AI 助手</h2>
-            <span class="view-head-sub">CONNECT</span>
-            <!-- R-1 小-10：仅桌面壳（preload 注入 openWizard）显示 -->
-            <button id="connect-back-wizard" class="btn btn-small" type="button" hidden>← 返回向导</button>
-          </div>
-          <div id="service-card" class="connect-card crt-surface"></div>
-          <p class="panel-note muted">接入只会**合并** <code>mebular</code> 这一条：写入前自动备份原配置（<code>.bak-时间</code>）、原子写入、重复点「接入」不会重复改；配置无法解析时**不会动**它，会提示你手动合并并给出片段。</p>
-          <div id="clients-list" class="clients-list"></div>
         </section>
       </main>
 
@@ -184,7 +175,6 @@
       <div id="invite-body"></div>
       <div class="modal-actions">
         <button id="invite-to-settings" class="btn btn-crt" type="button" hidden>去设置启用</button>
-        <button id="invite-regenerate" class="btn btn-crt" type="button" hidden>重新生成</button>
         <button id="invite-close" class="btn btn-crt" type="button">关闭</button>
       </div>
     </div>

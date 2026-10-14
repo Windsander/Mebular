@@ -18,6 +18,10 @@ contextBridge.exposeInMainWorld('mebularDesktop', {
   // R-1：跳过向导直达控制台（持久化）/ 返回向导
   skipWizard: () => ipcRenderer.invoke('wizard:skip'),
   openWizard: () => ipcRenderer.invoke('wizard:open'),
+  // UX-2：段②「已完成」确认 / 行级接入（助手列表 + 接入动作；id/action 主进程强转字符串、服务端白名单校验）
+  ackAssistants: () => ipcRenderer.invoke('wizard:ack'),
+  clientsList: () => ipcRenderer.invoke('clients:list'),
+  clientsAction: (id, action) => ipcRenderer.invoke('clients:action', String(id ?? ''), String(action ?? '')),
   serviceStatus: () => ipcRenderer.invoke('service:status'),
   serviceInstall: () => ipcRenderer.invoke('service:install'),
   readLogs: () => ipcRenderer.invoke('logs:read'),

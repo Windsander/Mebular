@@ -52,7 +52,7 @@ export function trayMenuModel({ healthy, daemonMode, loginOpenAtLogin } = {}) {
     { id: 'open-console', label: '打开控制台' },
     { id: 'connect-assistants', label: '连接 AI 助手' },
     { id: 'add-device', label: '添加设备' },
-    { id: 'open-wizard', label: '返回向导' },
+    { id: 'open-wizard', label: '重启向导' },
     { type: 'separator' },
     { id: 'daemon-start', label: '启动', enabled: !healthy },
     { id: 'daemon-stop', label: '停止', enabled: healthy, confirm: true },

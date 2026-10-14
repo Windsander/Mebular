@@ -18,6 +18,10 @@ export const IPC_CHANNELS = Object.freeze([
   // R-1：跳过向导（持久化）/ 从控制台返回向导
   'wizard:skip',
   'wizard:open',
+  // UX-2：段②行级接入（助手列表/接入动作）+ 「已完成」确认（assistantsAcked 持久化）
+  'wizard:ack',
+  'clients:list',
+  'clients:action',
   'service:status',
   'service:install',
   'logs:read',
@@ -30,9 +34,17 @@ export function isAllowedChannel(channel) {
   return typeof channel === 'string' && IPC_CHANNELS.includes(channel);
 }
 
-/** 只允许无参调用（防止 renderer 传任意载荷进主进程）。 */
-export function sanitizeArgs(args) {
-  return Array.isArray(args) && args.length === 0 ? [] : [];
+/**
+ * 参数收敛：默认只允许无参调用（防止 renderer 传任意载荷进主进程）；
+ * UX-2 段②行级接入的 clients:action 例外——至多 2 个参数且一律强转字符串
+ * （服务端再按 /^[\w-]+$/ 白名单校验 id/action，双重防线）。
+ */
+const ARG_ALLOWLIST = Object.freeze({ 'clients:action': 2 });
+
+export function sanitizeArgs(args, channel = null) {
+  const max = ARG_ALLOWLIST[channel] ?? 0;
+  if (!Array.isArray(args) || max === 0) return [];
+  return args.slice(0, max).map((a) => String(a ?? ''));
 }
 
 /**
@@ -43,7 +55,7 @@ export function buildHandlerTable(handlers = {}) {
   const table = {};
   for (const channel of IPC_CHANNELS) {
     const fn = handlers[channel];
-    if (typeof fn === 'function') table[channel] = (event, ...args) => fn(...sanitizeArgs(args));
+    if (typeof fn === 'function') table[channel] = (event, ...args) => fn(...sanitizeArgs(args, channel));
   }
   return table;
 }

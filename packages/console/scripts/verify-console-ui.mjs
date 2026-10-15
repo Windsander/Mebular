@@ -76,6 +76,8 @@ async function seedHome(home) {
   await writeFile(join(home, '.config', 'opencode', 'opencode.json'), JSON.stringify({ theme: 'dark' }, null, 2), 'utf-8');
   // ② 自定义助手落面文件（{} 无 mebular 键）→ 登记后「未接入」
   await writeFile(join(home, 'custom-mcp.json'), '{}\n', 'utf-8');
+  // ③ 补丁 3 接入失败实证用料：坏 JSON（connect 走「配置无法解析」不写入路径，零写入风险）
+  await writeFile(join(home, 'broken-mcp.json'), '{ bad json', 'utf-8');
   return storagePath;
 }
 
@@ -368,6 +370,27 @@ async function main() {
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-remove=ui-test-asst]"); if (b) b.click(); })()');
     check('移除后行消失（POST remove 生效）',
       await waitFor('!document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]")', 30000));
+
+    // UX-2 补丁 3 · 接入失败反馈语义（沙箱实证）：坏 JSON 自定义助手 →「接入失败」+ 一行原因，绝不显示「待生效」
+    await evalJs('document.querySelector("#asst-add").click()');
+    await waitFor('Boolean(document.querySelector("#asst-add-form"))');
+    await evalJs(`(() => {
+      document.querySelector('#asst-add-name').value = '坏配置助手';
+      document.querySelector('#asst-add-id').value = 'ui-broken-asst';
+      document.querySelector('#asst-add-path').value = ${JSON.stringify(join(home, 'broken-mcp.json'))};
+      document.querySelector('#asst-add-format').value = 'mcpServers';
+      document.querySelector('#asst-add-submit').click();
+    })()`);
+    check('失败用料登记入列（未接入）',
+      await waitFor('Boolean(document.querySelector("#settings-panel-assistants [data-asst-row=ui-broken-asst]"))', 30000));
+    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-row=ui-broken-asst] [data-cli-action=connect]"); if (b) b.click(); })()');
+    check('接入失败 →「接入失败」+ 一行原因（配置不是合法 JSON）+「重试」，不显示「待生效」',
+      await waitFor('(() => { const r = document.querySelector("#settings-panel-assistants [data-asst-row=ui-broken-asst]"); const xp = document.querySelector("#settings-panel-assistants [data-asst-xp=ui-broken-asst]"); if (!r || !/接入失败/.test(r.textContent)) return false; if (/待生效/.test(r.textContent)) return false; return Boolean(xp) && /配置不是合法 JSON|无法解析/.test(xp.textContent) && /重试/.test(r.textContent); })()', 30000));
+    // 清理：展开详情移除（confirm 已桩住）
+    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=details][data-cli-id=ui-broken-asst]"); if (b) b.click(); })()');
+    await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-remove=ui-broken-asst]"); if (b) b.click(); })()');
+    check('失败用料移除（场地清理）',
+      await waitFor('!document.querySelector("#settings-panel-assistants [data-asst-row=ui-broken-asst]")', 30000));
     await evalJs('document.querySelector("#settings-close").click()');
 
     // ---------- 背景层契约（crt-surface / crt-screen 扫描线 ::before 定位） ----------

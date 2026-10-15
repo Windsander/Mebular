@@ -204,8 +204,14 @@ describe('UX-2 ⑥ 段② 行级接入 + 「已完成」显式确认', () => {
   });
 
   it('行状态词与设置 · AI 助手同一语言（未安装/未接入/待生效/已接入 ✓/需手动）', () => {
+    // 状态词唯一真源 = packages/console/assistant-status.js 的 projectAssistantStatus（补丁 3 增补起两面共用）
+    const statusSrc = readFileSync(join(here, '..', '..', 'packages', 'console', 'assistant-status.js'), 'utf-8');
     for (const word of ['未安装', '未接入', '待生效', '已接入 ✓', '需手动']) {
-      expect(wizardJs).toContain(word);
+      expect(statusSrc).toContain(word);
+    }
+    // 补丁 3 新增同语言：接入失败 / 验证未过 / 写入中… / 验证中…
+    for (const word of ['接入失败', '验证未过', '写入中…', '验证中…']) {
+      expect(statusSrc).toContain(word);
     }
   });
 });
@@ -537,5 +543,166 @@ describe('补丁 4 · 滚动条主题化 + 滚动手感（向导侧契约）', (
 
   it('向导长页 scrollbar-gutter: stable（滚动条出现/消失不跳变）', () => {
     expect(wizardHtml).toMatch(/html \{ scrollbar-gutter: stable/);
+    });
+  });
+// UX-2 补丁 3：接入反馈语义 + 瞬态容忍
+// ---------------------------------------------------------------------------
+
+import { flapGate, wizardRowStatus } from '../../apps/desktop/src/renderer/wizard-view.mjs';
+
+describe('补丁 3 · 瞬态容忍（flapGate）：连续 ≥2 次 miss 才翻回未完成', () => {
+  it('单次 miss → hold（UI 不动）；连续第二次 miss → 翻回；恢复立即 done', () => {
+    // 已就绪基线
+    let g = flapGate({ lastDone: true, done: true, misses: 0 });
+    expect(g).toEqual({ hold: false, misses: 0, lastDone: true });
+    // 单次 miss：hold，不翻
+    g = flapGate({ lastDone: true, done: false, misses: 0 });
+    expect(g).toEqual({ hold: true, misses: 1, lastDone: true });
+    // 连续第二次 miss：翻回未完成
+    g = flapGate({ lastDone: true, done: false, misses: 1 });
+    expect(g).toEqual({ hold: false, misses: 2, lastDone: false });
+    // 恢复：立即回到 done（无额外延迟，计数清零）
+    g = flapGate({ lastDone: false, done: true, misses: 2 });
+    expect(g).toEqual({ hold: false, misses: 0, lastDone: true });
+    // 本来就未完成：misses 不累计、正常呈现（不 hold）
+    g = flapGate({ lastDone: false, done: false, misses: 0 });
+    expect(g).toEqual({ hold: false, misses: 0, lastDone: false });
+  });
+
+  it('渲染层接线：refresh 经 flapGate 判定，hold 时跳过渲染（不翻段、不动日志）', () => {
+    expect(wizardJs).toMatch(/flapGate\(\{[\s\S]{0,120}lastDone/);
+    expect(wizardJs).toMatch(/if \(gate\.hold\) return/);
+    expect(wizardJs).toMatch(/healthMisses = gate\.misses/);
+  });
+});
+
+describe('补丁 3 · 行状态机（wizardRowStatus → 共享 helper projectAssistantStatus）：在途 > 失败 > verify 真值 > 服务端真值', () => {
+  const base = { id: 'x', installed: true, connected: false, state: 'not-connected' };
+  const connected = { id: 'x', installed: true, connected: true, state: 'connected' };
+  it('在途 busy →「写入中…/验证中…」+ busy 标志（渲染层据此禁用按钮）', () => {
+    expect(wizardRowStatus(base, { busy: { x: 'connect' } })).toMatchObject({ key: 'busy', label: '写入中…', busy: true });
+    expect(wizardRowStatus(base, { busy: { x: 'verify' } })).toMatchObject({ key: 'busy', label: '验证中…', busy: true });
+  });
+
+  it('失败语义：connect 失败 →「接入失败」；verify 失败 →「验证未过」；均不得落入「待生效」', () => {
+    expect(wizardRowStatus(base, { failed: { x: { kind: 'connect', reason: '写入失败已回滚' } } })).toMatchObject({ key: 'connect-failed', label: '接入失败' });
+    expect(wizardRowStatus(base, { failed: { x: { kind: 'verify' } } })).toMatchObject({ key: 'verify-failed', label: '验证未过' });
+    // 防御：failed 与 hint 同时存在时失败优先
+    expect(wizardRowStatus(connected, { failed: { x: { kind: 'connect' } }, pending: new Set(['x']) }).label).not.toBe('待生效');
+  });
+
+  it('补丁 3 增补 · 状态一致性：服务端 connected → 「已接入 ✓」（hint 只进提示层，永不覆盖状态词）', () => {
+    // 用户真机事故回归：写入后服务端已 connected，UI 不得显示「待生效」
+    const st = wizardRowStatus(connected, { pending: new Set(['x']) });
+    expect(st).toMatchObject({ key: 'connected', label: '已接入 ✓', reloadHint: true });
+    expect(st.label).not.toBe('待生效');
+    // 「待生效」唯一来源 = 服务端 verify pending-restart
+    expect(wizardRowStatus(connected, { verifyStates: { x: 'pending-restart' } })).toMatchObject({ key: 'pending-reload', label: '待生效' });
+    // hint 在 not-connected 时不成立（配置不在 → 无提醒）
+    expect(wizardRowStatus(base, { pending: new Set(['x']) })).toMatchObject({ key: 'not-connected', label: '未接入', reloadHint: false });
+  });
+
+  it('原语义保留：connected → 已接入 ✓；manual/not-installed 不变', () => {
+    expect(wizardRowStatus(connected, {})).toMatchObject({ key: 'connected', label: '已接入 ✓' });
+    expect(wizardRowStatus({ id: 'm', needsManual: true }, {})).toMatchObject({ key: 'manual', label: '需手动' });
+    expect(wizardRowStatus({ id: 'n', installed: false, state: 'not-installed' }, {})).toMatchObject({ key: 'not-installed', label: '未安装' });
+  });
+
+  it('渲染层契约：在途行按钮全禁 + 状态列写入中/验证中；失败行给「重试」/「重新验证」', () => {
+    expect(wizardJs).toMatch(/row\?\.querySelectorAll\('button'\)\.forEach\(\(b\) => \{ b\.disabled = true; \}\)/);
+    expect(wizardJs).toContain('写入中…');
+    expect(wizardJs).toContain('验证中…');
+    expect(wizardJs).toContain('接入失败');
+    expect(wizardJs).toContain('重试');
+    expect(wizardJs).toMatch(/rowFailed\.set\(id, \{ kind: 'connect'/);
+    expect(wizardJs).toMatch(/rowFailed\.set\(id, \{ kind: 'verify'/);
+    expect(wizardJs).toContain('已自动还原原配置');
+  });
+
+  it('clientActionViaApi 透传 rolledBack/backupPath（主进程契约）', () => {
+    const wizardMjs = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'main', 'wizard.mjs'), 'utf-8');
+    expect(wizardMjs).toMatch(/rolledBack:\s*Boolean\(data\?\.rolledBack\)/);
+    expect(wizardMjs).toMatch(/backupPath:\s*typeof data\?\.backupPath/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// UX-2 补丁 3 增补 · 状态一致性（"待生效"黏性态修复）：单一真源 + 对账 + 提示层分离
+// ---------------------------------------------------------------------------
+
+import { assistantStatus as consoleStatus, normalizeClient } from '../../packages/console/assistants.js';
+import { projectAssistantStatus, reconcileAssistantUi } from '../../packages/console/assistant-status.js';
+
+describe('补丁 3 增补 · 单一真源：向导/设置两面投影一致（同一 helper 快照）', () => {
+  // 同一组输入，两侧薄封装（wizardRowStatus / console assistantStatus）→ 同 key 同 label
+  const cases = [
+    ['未安装', { id: 'a', state: 'not-installed', installed: false }, {}],
+    ['未接入', { id: 'a', state: 'not-connected', installed: true, connected: false }, {}],
+    ['已接入', { id: 'a', state: 'connected', installed: true, connected: true }, {}],
+    ['已接入+写入提醒', { id: 'a', state: 'connected', installed: true, connected: true }, { hint: true }],
+    ['待生效（verify pending-restart）', { id: 'a', state: 'connected', installed: true, connected: true }, { verifyState: 'pending-restart' }],
+    ['验证未过', { id: 'a', state: 'not-connected', installed: true }, { verifyState: 'verify-failed' }],
+    ['接入失败', { id: 'a', state: 'not-connected', installed: true }, { failed: { kind: 'connect', reason: 'x' } }],
+    ['写入中', { id: 'a', state: 'connected', installed: true, connected: true }, { busy: 'connect' }],
+    ['需手动', { id: 'a', state: 'manual', needsManual: true }, {}],
+    ['检测失败', { id: 'a', state: 'detect-failed' }, {}],
+  ];
+  it.each(cases.map((c, i) => [String(i), ...c]))('两面一致 #%s（%s）', (_i, _name, client, ui) => {
+    const w = wizardRowStatus(client, {
+      pending: ui.hint ? new Set([client.id]) : new Set(),
+      busy: ui.busy ? { [client.id]: ui.busy } : {},
+      failed: ui.failed ? { [client.id]: ui.failed } : {},
+      verifyStates: ui.verifyState ? { [client.id]: ui.verifyState } : {},
+    });
+    const c = consoleStatus(normalizeClient(client), {
+      clientBusy: ui.busy ? { [client.id]: ui.busy } : {},
+      clientFailed: ui.failed ? { [client.id]: ui.failed } : {},
+      clientVerify: ui.verifyState ? { [client.id]: { state: ui.verifyState } } : {},
+      clientRestart: ui.hint ? { [client.id]: true } : {},
+    });
+    expect({ key: w.key, label: w.label, tone: w.tone, reloadHint: w.reloadHint })
+      .toEqual({ key: c.key, label: c.label, tone: c.tone, reloadHint: c.reloadHint });
+  });
+
+  it('helper 直测：服务端 connected + reloadHint → 已接入 ✓（hint 仅提示层）；hint 仅 connected/pending-restart 携带', () => {
+    expect(projectAssistantStatus({ state: 'connected' }, { reloadHint: true })).toMatchObject({ key: 'connected', label: '已接入 ✓', reloadHint: true });
+    expect(projectAssistantStatus({ state: 'not-connected', installed: true }, { reloadHint: true }).reloadHint).toBe(false);
+    expect(projectAssistantStatus({ state: 'connected' }, { verifyState: 'pending-restart', reloadHint: true })).toMatchObject({ key: 'pending-reload', label: '待生效', reloadHint: true });
+  });
+
+  it('对账：list not-connected → 清 hint/verify/failed；verify connected → 清 hint', () => {
+    const reloadHints = new Set(['a']);
+    const verifyStates = new Map([['a', 'pending-restart']]);
+    const failed = { a: { kind: 'connect' } };
+    // 配置不在了（用户抹掉/回滚）→ 全清
+    expect(reconcileAssistantUi({ id: 'a', state: 'not-connected' }, { reloadHints, verifyStates, failed })).toBe(true);
+    expect(reloadHints.size).toBe(0);
+    expect(verifyStates.size).toBe(0);
+    expect(failed.a).toBeUndefined();
+    // verify 确认 connected → 提醒退场
+    const hints2 = new Set(['b']);
+    reconcileAssistantUi({ id: 'b', state: 'connected' }, { reloadHints: hints2, verifyStates: { b: 'connected' } });
+    expect(hints2.size).toBe(0);
+    // 无矛盾 → 不动
+    const hints3 = new Set(['c']);
+    expect(reconcileAssistantUi({ id: 'c', state: 'connected' }, { reloadHints: hints3, verifyStates: {} })).toBe(false);
+    expect(hints3.size).toBe(1);
+  });
+
+  it('渲染层契约：向导 hint 小字行（不覆盖状态词）+ 对账接入 loadClients；控制台对账接入 refresh', () => {
+    expect(wizardJs).toContain('已写入 · 请重载该助手后生效');
+    expect(wizardJs).toMatch(/reconcileAssistantUi\(c, \{ reloadHints/);
+    expect(wizardJs).toContain('reloadHints.add(id)'); // connect 成功只记提示层
+    const consoleJsSrc = readFileSync(join(here, '..', '..', 'packages', 'console', 'console.js'), 'utf-8');
+    expect(consoleJsSrc).toMatch(/reconcileAssistantUi\(c, \{/);
+    const assistantsJs = readFileSync(join(here, '..', '..', 'packages', 'console', 'assistants.js'), 'utf-8');
+    expect(assistantsJs).toContain('已写入 · 请重载');
+    expect(assistantsJs).toMatch(/from '\.\/assistant-status\.js'/);
+  });
+
+  it('CONSOLE_FILES 登记 assistant-status.js（serve 白名单）', () => {
+    const serveSrc = readFileSync(join(here, '..', '..', 'packages', 'mcp', 'src', 'serve.mjs'), 'utf-8');
+    const filesBlock = serveSrc.match(/CONSOLE_FILES\s*=\s*\{[\s\S]*?\}/)?.[0] ?? '';
+    expect(filesBlock).toContain("'assistant-status.js'");
   });
 });

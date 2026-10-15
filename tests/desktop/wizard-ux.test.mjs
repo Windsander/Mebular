@@ -794,12 +794,12 @@ describe('简化轮走查修复 · 文案口径与完成段收纳', () => {
     expect(done.steps.every((s) => s.collapsed)).toBe(true);
   });
 
-  it('闪烁治理契约：品牌标静态（无呼吸动画）、唯一呼吸点=当前节点 pip（放慢）、面板无 backdrop-filter、星野明灭收窄', () => {
+  it('闪烁治理契约：品牌标静态、唯一呼吸点=当前节点 pip（放慢）、面板无 backdrop-filter、星野呼吸可见', () => {
     expect(wizardHtml).not.toMatch(/\.hero \.mark \{[^}]*animation/);
     expect(wizardHtml).toMatch(/\.node\.active \.pip[^}]*animation: pulse 2\.8s/);
     expect(wizardHtml).not.toMatch(/backdrop-filter:\s*blur/); // 注释提及无妨，属性用法必须为 0
     const wizardJsSrc = readFileSync(join(rendererDir, 'wizard.js'), 'utf-8');
-    expect(wizardJsSrc).toMatch(/0\.5 \+ 0\.15 \* Math\.sin\(t \/ 2200/);
+    expect(wizardJsSrc).toMatch(/0\.4 \+ 0\.28 \* Math\.sin\(t \/ 1600/); // 星野呼吸（可见；整页闪烁根因=backdrop-filter 已治）
   });
 });
 
@@ -857,5 +857,17 @@ describe('简化轮走查修复 4 · 一键启动（①②全自动跑给你看�
     expect(wizardJs).toMatch(/autoConnectRan = true/);
     expect(wizardJs).toMatch(/connectTargets\(list\.clients\)\.length > 0/);
     expect(wizardView(computeWizardState({})).steps.find((s) => s.id === 'start').detailText).toContain('一键完成');
+  });
+});
+
+describe('简化轮走查修复 5 · 居中 + 过程可见性', () => {
+  it('轨道居中补偿：节点灯挂点 34px → 卡片+灯整体左移半幅（17px）', () => {
+    expect(wizardHtml).toMatch(/\.rail \{[^}]*margin: 0 0 0 -17px/);
+  });
+
+  it('流水最小停留（过程可见）：每子步 ≥900ms + 汇总停留后再收尾', () => {
+    expect(wizardJs).toMatch(/SUB_MIN_DWELL_MS = 900/);
+    expect(wizardJs).toMatch(/await sleep\(SUB_MIN_DWELL_MS\); \/\/ 最小停留/);
+    expect(wizardJs).toMatch(/汇总行停留：读完再进完成态/);
   });
 });

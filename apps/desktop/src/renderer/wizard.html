@@ -41,7 +41,8 @@
     .hero .badge { margin-top: 8px; display: inline-block; }
 
     /* ===== 里程碑轨道：左轨线 + 节点灯（当前=呼吸、完成=✓、未到=暗） ===== */
-    .rail { list-style: none; margin: 0; padding: 0; position: relative; }
+    /* 居中补偿：节点灯占 34px 左侧挂点，把「卡片+灯」整体左移半幅（17px），卡片视觉居中 */
+    .rail { list-style: none; margin: 0 0 0 -17px; padding: 0; position: relative; }
     .rail::before { content: ""; position: absolute; left: 9px; top: 26px; bottom: 26%; width: 1px; /* 与 pip 圆心（left 3 + 13/2 = 9.5）中心对齐 */
       background: linear-gradient(180deg, rgba(80, 255, 170, 0.14), rgba(80, 255, 170, 0.03)); }
     .node { position: relative; padding: 0 0 18px 34px; }

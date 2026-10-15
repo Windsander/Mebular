@@ -185,6 +185,8 @@ async function refresh() {
 // ---------- 段① 一键开始：子步骤流水（启动 → 写入初始设置 → 重启恢复） ----------
 
 const SUBSTEPS = ['launch', 'write', 'recover', 'connect'];
+// 过程可见性：每个子步最小停留（太快等于没展示）；汇总行读完再收尾
+const SUB_MIN_DWELL_MS = 900;
 // 可自动接入的目标：已装、未接、非 manual 兜底、非检测失败
 function connectTargets(clients) {
   return (clients ?? []).filter((c) => c.installed && !c.connected
@@ -294,9 +296,11 @@ async function runFlow(fromSub = 'launch') {
         }
       }
       setSubState(sub, 'done');
+      await sleep(SUB_MIN_DWELL_MS); // 最小停留：让每一步看得见
     }
     flowMsg('已就绪 ✓');
     flow.failedSub = null;
+    await sleep(SUB_MIN_DWELL_MS + 600); // 汇总行停留：读完再进完成态
   } catch (error) {
     setSubState(currentSub, 'failed');
     flow.failedSub = currentSub;
@@ -530,8 +534,9 @@ $('#btn-logs-open')?.addEventListener('click', () => { void api.openLogs(); });
   function draw(t) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     for (const s of stars) {
-      // 闪烁治理：明灭幅度收窄 + 周期放慢（0.5±0.15，2.2s 周期）——星空是氛围，不抢戏不闪烁
-      const tw = reduced ? 0.6 : 0.5 + 0.15 * Math.sin(t / 2200 + s.p);
+      // 星野呼吸：明显的缓慢明灭（0.4±0.28，1.6s 周期）——是氛围的「活着」，
+      // 与「整页闪烁」（合成级，已由去 backdrop-filter 治理）不是一回事
+      const tw = reduced ? 0.6 : 0.4 + 0.28 * Math.sin(t / 1600 + s.p);
       ctx.globalAlpha = Math.max(0.12, tw);
       ctx.fillStyle = '#b4ffd6'; // 设计稿星色（console 契约：稀疏、缓慢、不抢戏）
       ctx.beginPath();

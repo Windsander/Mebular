@@ -33,7 +33,7 @@ function renderState(state) {
   const idleView = !deployView && !doneView;
   document.body.classList.toggle('is-idle', idleView);
 
-  setText('#tagline', idleView ? '点一下，接入设备' : view.tagline);
+  setText('#tagline', idleView ? '点一下，接入设备' : (flow.running ? '正在部署…' : view.tagline));
   const idleCta = $('#idle-cta');
   if (idleCta) idleCta.hidden = !idleView;
   const panel = $('#deploy-panel');
@@ -98,7 +98,9 @@ function renderState(state) {
     // 简洁（用户定调）：日志是**异常件**——未开始不出现、① 就绪后不常驻；
     // 只有真失败（跑过流水且失败）/ 运行中 / 引导态才出现（并自动展开一次）
     const provisionRequired = Boolean(state?.steps?.[0]?.detail?.provision?.required);
-    const showLogs = deployView && start?.status !== 'done' && (flow.everRan || flow.running || provisionRequired);
+    // 日志=异常件：健康部署中不弹（旧式 everRan||running 会让折条随流水全程出现）；失败/引导态才亮
+    const showLogs = deployView && start?.status !== 'done'
+      && (Boolean(flow.failedSub) || provisionRequired || (!flow.running && flow.everRan));
     logsPanel.hidden = !showLogs;
     if (showLogs && view.logs.open && !logsAutoOpened) {
       logsPanel.open = true;
@@ -202,6 +204,8 @@ async function runFlow(fromSub = 'launch') {
   $('#btn-go').hidden = true;
   $('#btn-resume').hidden = true;
   flowMsg('');
+  // 立即上屏：阶段框在本帧出现（3s 轮询曾有 running 守卫，点击后屏幕会冻在初始页直跳完成——走查事故）
+  await refresh();
 
   const startIndex = SUBSTEPS.indexOf(fromSub);
   let currentSub = fromSub;
@@ -393,5 +397,5 @@ $('#btn-logs-open')?.addEventListener('click', () => { void api.openLogs(); });
 
 void refresh();
 void loadLogs();
-// 状态轮询（跑流水期间也有自己的有界轮询；这里只读、幂等）
-setInterval(() => { if (!flow.running) { void refresh();  } void loadLogs(); }, 3000);
+// 状态轮询（幂等；跑流水期间必须照常——阶段框显隐由 renderState 驱动，曾被 running 守卫吞掉）
+setInterval(() => { void refresh(); void loadLogs(); }, 3000);

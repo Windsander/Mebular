@@ -7,7 +7,7 @@
 import { openSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog } from 'electron';
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog, session } from 'electron';
 import {
   APP_VERSION, consoleUrl, ensureDaemon, resolveCliBin, resolveHome, resolveHttp,
   serviceEnabledFor, stopManaged, waitForDaemon, parseArgs, probeHealth, probeProvision, serviceDescriptorFor,
@@ -284,7 +284,7 @@ function trayActions() {
     'open-console': () => { showWindow(); void safeLoad(shellConsoleUrl()); },
     'connect-assistants': () => { showWindow(); void safeLoad(shellDeepLink(deepLinks(httpConf()).assistants)); },
     'add-device': () => { showWindow(); void safeLoad(shellDeepLink(deepLinks(httpConf()).device)); },
-    'open-wizard': () => { showWindow(); void safeLoad(wizardViewUrl()); },
+    'open-wizard': () => { showWindow(); void loadWizardView(); },
     'daemon-start': () => { void ensure().then(() => showConsoleWithRetry()); },
     'daemon-stop': () => { void confirmStop(); },
     'daemon-restart': () => { void confirmRestart(); },
@@ -333,6 +333,14 @@ function wizardFileUrl() {
 /** 带缓存破坏参数的向导 URL（渲染层不缓存旧脚本）。 */
 function wizardViewUrl() {
   return `${wizardFileUrl()}?t=${Date.now()}`;
+}
+
+/** 打开向导页：先清渲染层磁盘缓存再加载。
+ *  file:// 下 **ESM 模块也会进缓存**——页级 ?t= 只能防 HTML 复活，
+ *  wizard.js / wizard-view.mjs 的 import URL 没有参数，必须清缓存才不回落旧版（走查事故：混合新旧渲染）。 */
+async function loadWizardView() {
+  try { await session.defaultSession.clearCache(); } catch { /* 清缓存失败不阻断加载 */ }
+  await safeLoad(wizardViewUrl());
 }
 
 /** 审批走**主进程直调** @mebular/service（不经 HTTP 写端点，避免 CSRF/token 复杂度）。 */
@@ -388,7 +396,7 @@ function registerIpc() {
       await safeLoad(consoleUrl(httpConf()));
       return { skipped: true };
     },
-    'wizard:open': async () => { showWindow(); await safeLoad(wizardViewUrl()); return { url: wizardFileUrl() }; },
+    'wizard:open': async () => { showWindow(); await loadWizardView(); return { url: wizardFileUrl() }; },
     // UX-2：段②「已完成」显式确认（持久化 assistantsAcked → 向导完成）
     'wizard:ack': async () => {
       writeDesktopState(home, { assistantsAcked: true, assistantsAckedAt: new Date().toISOString() });
@@ -432,7 +440,7 @@ if (!gotLock) {
         await showConsoleWithRetry();
       } else {
         console.log(`[desktop] 未完成首次上手（待办：${state.current}）→ 打开向导`);
-        await safeLoad(wizardViewUrl()); // 带缓存破坏参数：file:// 下 HTML/ESM 亦可能被缓存（走查事故：旧版向导复活）
+        await loadWizardView(); // 清缓存 + 缓存破坏参数：HTML/ESM 双保险（走查事故：旧版向导复活）
         healthy = await probeHealth(fetch, httpConf());
         updateTray();
       }

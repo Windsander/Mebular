@@ -796,9 +796,22 @@ describe('简化轮走查修复 2 · 极简（用户定调：完成即终态、�
 
 describe('简化轮走查修复 3 · 日志折条不常驻（① 就绪即隐藏，异常才出现）', () => {
   it('渲染层契约：日志是异常件（未开始不出现；部署中失败/引导态才出现并自动展开一次）', () => {
-    expect(wizardJs).toMatch(/const showLogs = deployView && start\?\.status !== 'done' && \(flow\.everRan \|\| flow\.running \|\| provisionRequired\)/);
+    // 异常件判据：失败(failedSub)/引导态(provisionRequired)/失败收场；健康部署中不弹（旧式 everRan||running 会全程挂着）
+    expect(wizardJs).toMatch(/const showLogs = deployView && start\?\.status !== 'done'[\s\S]{0,160}Boolean\(flow\.failedSub\) \|\| provisionRequired \|\| \(!flow\.running && flow\.everRan\)/);
     expect(wizardJs).toMatch(/logsPanel\.hidden = !showLogs/);
     expect(wizardHtml).toMatch(/<details[^>]*id="logs-panel"[^>]*>/);
+  });
+});
+
+describe('简化轮走查修复 5 · 点击即上屏（走查事故回归：点按钮后冻屏直跳完成）', () => {
+  it('runFlow 开场立即 refresh（阶段框本帧出现）；3s 轮询不再被 running 守卫吞掉', () => {
+    // 事故根因：setInterval 的 !flow.running 守卫 + runFlow 不在开场刷新 → 面板显隐无人驱动，
+    // 屏幕冻在初始页直到流水结束的 finally refresh 才蹦出完成态
+    expect(wizardJs).toMatch(/\/\/ 立即上屏[\s\S]{0,220}await refresh\(\);/);
+    expect(wizardJs).not.toMatch(/if \(!flow\.running\) \{ void refresh/);
+    expect(wizardJs).toMatch(/setInterval\(\(\) => \{ void refresh\(\); void loadLogs\(\); \}, 3000\)/);
+    // 部署中副标题不再是「点一下，接入设备」
+    expect(wizardJs).toMatch(/flow\.running \? '正在部署…' : view\.tagline/);
   });
 });
 

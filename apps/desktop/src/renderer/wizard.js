@@ -341,16 +341,16 @@ function renderClients(clients) {
         : `<button data-asst-act="recheck" data-asst-id="${c.id}">我已重载，验证</button>`;
     }
     else if (st.key === 'manual') action = `<button class="ghost" data-asst-act="console" data-asst-id="${c.id}">去控制台处理 ›</button>`;
-    // 提示层小字：不覆盖状态词（「已接入 ✓」旁挂「已写入 · 重启该软件后生效」）
-    const hintLine = st.reloadHint && st.key === 'connected'
-      ? `<p class="amsg" data-asst-hint="${c.id}">已写入 · 重启这个软件后生效（好了点「我已重载，验证」）</p>`
+    // 简化轮：提示层收进同一行（小字，不出新行）；成功/在途不新增行，仅失败时给原因行
+    const hintInline = st.reloadHint && st.key === 'connected'
+      ? '<span class="ast-hint">已写入 · 重启后生效</span>'
       : '';
     return `<div class="arow" data-asst-row="${c.id}">
       <span class="aname">${c.name ?? c.id}</span>
       <span class="ast${st.key === 'connected' ? ' ok' : st.key === 'pending-reload' || st.key === 'connect-failed' || st.key === 'verify-failed' ? ' todo' : ''}">${st.label}</span>
+      ${hintInline}
       <span class="asp"></span>${action}
     </div>
-    ${hintLine}
     <p class="amsg" data-asst-msg="${c.id}" hidden></p>`;
   }).join('');
 }
@@ -384,20 +384,19 @@ $('#asst-list')?.addEventListener('click', async (event) => {
   const act = btn.dataset.asstAct;
   if (act === 'console') { void api.deepAssistants(); return; }
   // 补丁 3：操作在途——该行按钮全禁 + 状态列「写入中…/验证中…」（防重复点击与困惑）
+  // 简化轮·行内反馈：在途/成功只变状态列与按钮（不新增行）；仅失败/待生效指引才给原因行
   const row = btn.closest('.arow');
   row?.querySelectorAll('button').forEach((b) => { b.disabled = true; });
   const stEl = row?.querySelector('.ast');
   if (stEl) stEl.textContent = act === 'verify' ? '验证中…' : act === 'connect' ? '写入中…' : '检测中…';
-  asstMsg(id, act === 'connect' ? '正在接入…' : act === 'verify' ? '正在验证…' : '正在重新检测…');
   const res = await api.clientsAction(id, act);
-  let msg;
+  let msg = '';
   if (act === 'verify') {
     // 服务端 verify 真值：connected → 完成（清提醒）；pending-restart → 「待生效」唯一正当来源；failed → 验证未过
     if (res?.ok && res.state === 'connected') {
       rowVerify.set(id, 'connected');
       reloadHints.delete(id);
       rowFailed.delete(id);
-      msg = '验证通过，已接入 ✓';
     } else if (res?.state === 'pending-restart') {
       rowVerify.set(id, 'pending-restart');
       msg = '仍在待生效：请完全退出并重新打开该软件（不是只关窗口）后，点「我已重载，验证」。';
@@ -414,16 +413,14 @@ $('#asst-list')?.addEventListener('click', async (event) => {
   } else if (act === 'connect') {
     rowFailed.delete(id);
     rowVerify.delete(id);
-    reloadHints.add(id); // 提示层：「已写入 · 请重载」（不驱动状态词；状态词随服务端真值）
-    msg = res.changed ? '已接好（写前已备份）——重启这个软件后生效。' : '已接入（无需改动）。';
+    reloadHints.add(id); // 提示层：行内小字「已写入 · 重启后生效」（不出新行）
   } else {
     rowFailed.delete(id);
     rowVerify.delete(id);
     reloadHints.delete(id);
-    msg = '已重新检测。';
   }
   await loadClients();
-  asstMsg(id, msg); // 渲染后落消息（行可能已重绘）
+  asstMsg(id, msg); // 仅失败/指引有内容（成功无行）
   await refresh();
 });
 

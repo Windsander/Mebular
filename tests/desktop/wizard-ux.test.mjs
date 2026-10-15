@@ -690,7 +690,7 @@ describe('补丁 3 增补 · 单一真源：向导/设置两面投影一致（�
   });
 
   it('渲染层契约：向导 hint 小字行（不覆盖状态词）+ 对账接入 loadClients；控制台对账接入 refresh', () => {
-    expect(wizardJs).toContain('已写入 · 重启这个软件后生效');
+    expect(wizardJs).toContain('已写入 · 重启后生效');
     expect(wizardJs).toMatch(/reconcileAssistantUi\(c, \{ reloadHints/);
     expect(wizardJs).toContain('reloadHints.add(id)'); // connect 成功只记提示层
     const consoleJsSrc = readFileSync(join(here, '..', '..', 'packages', 'console', 'console.js'), 'utf-8');
@@ -736,5 +736,24 @@ describe('简化轮 · 向导首屏去运维化（① 全自动、② 只看已�
   it('安装按钮只在 ① 完成后随 postdone-row 出现（渲染层契约）', () => {
     expect(wizardJs).toMatch(/postdone-row[\s\S]{0,240}start\.status === 'done'/);
     expect(wizardJs).toMatch(/start\.actions\.install\.hidden/);
+  });
+});
+
+describe('简化轮 · 行内反馈（一点接入不新增行）', () => {
+  it('提示层收进同一行（.ast-hint 行内小字），不再单独起一行；在途只变状态列与按钮', () => {
+    expect(wizardJs).toContain('class="ast-hint"');
+    expect(wizardJs).toContain('已写入 · 重启后生效');
+    // 行模板不再包含独立的 data-asst-hint 行
+    const renderFn = wizardJs.match(/function renderClients[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(renderFn).not.toContain('data-asst-hint');
+    // 点击处理：不再打「正在接入…/正在验证…」过渡行
+    const handler = wizardJs.match(/\$\('#asst-list'\)\?\.addEventListener\('click', async \(event\) => \{[\s\S]*?\n\}\);/)?.[0] ?? '';
+    expect(handler).not.toContain('正在接入…');
+    expect(handler).not.toContain('正在验证…');
+    // 失败仍给一行原因（异常值得空间）
+    expect(handler).toContain('rowFailed.set(id, { kind: ' + String.fromCharCode(39) + 'connect' + String.fromCharCode(39));
+  });
+  it('样式：.ast-hint 行内小字（不抢行高）', () => {
+    expect(wizardHtml).toMatch(/\.ast-hint \{[^}]*font-size: 11px/);
   });
 });

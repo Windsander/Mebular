@@ -519,6 +519,10 @@ export const EDITABLE_PATHS = pathsWith('editable');
 export const STATUS_ONLY_PATHS = pathsWith('status-only');
 /** 内部面（GUI 不渲染；API 仍可写）。 */
 export const INTERNAL_PATHS = pathsWith('internal');
+/** 内部面中 API 仍可写的 path——诊断三元组（已配置/实际/未生效原因）同样覆盖：写了就能生效/待重启，排查要看得到。 */
+export const WRITABLE_INTERNAL_PATHS = CONFIG_SCHEMA
+  .filter((entry) => entry.exposure === 'internal' && entry.writable === true)
+  .map((entry) => entry.path);
 
 /**
  * 需要重启才生效的 path（真值判定仍在 admin.computePendingRestart）。

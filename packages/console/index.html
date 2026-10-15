@@ -32,8 +32,8 @@
           <li><button class="view-btn" data-view="audit" type="button"><span class="view-icon">○</span><span class="view-label">审计</span></button></li>
           <li><button class="view-btn" data-view="memories" type="button"><span class="view-icon">○</span><span class="view-label">记忆</span></button></li>
         </ul>
-        <section id="legend-panel" class="legend-panel crt-surface crt-corners">
-          <button id="legend-toggle" class="legend-head" type="button" aria-expanded="true" aria-controls="legend-body">
+        <section id="legend-panel" class="legend-panel crt-surface crt-corners is-collapsed">
+          <button id="legend-toggle" class="legend-head" type="button" aria-expanded="false" aria-controls="legend-body">
             <span>图例</span>
             <span class="legend-chevron">▾</span>
           </button>
@@ -56,7 +56,6 @@
         <canvas class="stage-bg" aria-hidden="true"></canvas>
         <canvas id="stage" class="stage" aria-label="对端关系星图（本机视角）"></canvas>
         <div id="tooltip" class="tooltip" hidden></div>
-        <div id="empty-state" class="empty-state" hidden></div>
         <!-- UX-2 首屏叠加层（只读；星图本体不改）：状态总览条 + 「需要注意」条件浮卡 -->
         <div id="status-pill" class="status-pill" hidden></div>
         <section id="attention-card" class="attention-card" hidden></section>

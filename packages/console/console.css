@@ -205,18 +205,6 @@ html, body {
 .tooltip .tt-title { font-weight: 700; margin-bottom: 4px; }
 .tooltip .tt-row { color: var(--muted); }
 
-.empty-state { z-index: 3;
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  text-align: center;
-  color: var(--muted);
-  max-width: 360px;
-  line-height: 1.7;
-}
-.empty-state strong { color: var(--text); display: block; margin-bottom: 6px; }
-
 .banner { z-index: 3;
   position: absolute;
   top: 10px;

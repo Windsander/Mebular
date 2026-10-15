@@ -196,7 +196,6 @@ function render() {
   if (!$('#settings').hidden) renderSettings();
   if (!$('#about').hidden) renderAbout();
   renderBanner();
-  renderEmptyState();
 }
 
 function renderTopbar() {
@@ -331,19 +330,6 @@ function renderBanner() {
     return;
   }
   banner.hidden = true;
-}
-
-function renderEmptyState() {
-  const el = $('#empty-state');
-  const show = state.view === 'map'
-    && !state.error
-    && state.devices.filter((d) => d.deviceId !== state.overview?.device?.deviceId).length === 0;
-  el.hidden = !show;
-  if (show) {
-    el.innerHTML = '<strong>还没有其他设备</strong>'
-      + '我的关系图目前只有本机。<br />'
-      + '点击右上角「＋ 连接已有地址」接入已知地址，或「＋ 邀请新设备」生成一次性令牌；本视图只显示你与已知对端的关系。';
-  }
 }
 
 function renderDomains() {
@@ -2357,11 +2343,9 @@ function setView(view) {
   $('#audit-view').hidden = view !== 'audit';
   $('#memories-view').hidden = view !== 'memories';
   $('#stage').style.visibility = view === 'map' ? 'visible' : 'hidden';
-  $('#empty-state').hidden = true;
   const asideEl = document.querySelector('.aside');
   if (asideEl) asideEl.classList.toggle('is-open', view === 'map' && Boolean(state.selected));
   syncStageActivity();
-  renderEmptyState();
 }
 
 // F-PERF-1：星图动画只在「星图视图且页面可见」时持有 rAF；其余一律挂起
@@ -2706,7 +2690,8 @@ $('#device-card-close').addEventListener('click', () => {
   stage.redraw();
 });
 
-// 图例展开/折叠：首次进入展示后自动收纳；用户手动切换后尊重其选择
+// 图例展开/折叠（用户定稿）：默认收起（首访自动展开在 App 里显得多余）；
+// 用户手动展开后尊重其选择（localStorage）
 {
   const panel = $('#legend-panel');
   const toggle = $('#legend-toggle');
@@ -2714,22 +2699,8 @@ $('#device-card-close').addEventListener('click', () => {
     panel.classList.toggle('is-collapsed', collapsed);
     toggle.setAttribute('aria-expanded', String(!collapsed));
   };
-  const stored = localStorage.getItem('mebular_legend_collapsed');
-  apply(stored === '1');
-  let autoTimer = 0;
-  const cancelAuto = () => {
-    if (autoTimer) {
-      clearTimeout(autoTimer);
-      autoTimer = 0;
-    }
-  };
-  if (stored === null) {
-    // 首次进入：展示一小段时间后自动收纳（悬停阅读则取消）
-    autoTimer = window.setTimeout(() => apply(true), 7000);
-  }
-  panel.addEventListener('pointerenter', cancelAuto);
+  apply(localStorage.getItem('mebular_legend_collapsed') !== '0'); // 默认收起；仅显式展开过才保持展开
   toggle.addEventListener('click', () => {
-    cancelAuto();
     const next = !panel.classList.contains('is-collapsed');
     localStorage.setItem('mebular_legend_collapsed', next ? '1' : '0');
     apply(next);

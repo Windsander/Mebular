@@ -432,8 +432,7 @@ describe('设计稿 ③ done-line 回顾行与「先不接 ›」', () => {
     expect(skipped.steps.find((x) => x.id === 'assistants').doneLine).toMatchObject({ main: '— 无需接入' });
   });
 
-  it('「先不接 ›」：① 完成后可见、与「已完成」同路 ack（显式确认才翻段）', () => {
-    const view = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 3 } }));
+  it('「先不接 ›」退场（自动化模型）：② 零出口按钮——文案承担指引', () => {
     // ② 零按钮模型：无「先不接」出口（用户定调）——文案承担指引
     expect(wizardHtml).not.toContain('先不接');
     const blocked = wizardView(computeWizardState({ daemonHealthy: false, assistants: { connectedCount: 0, total: 3 } }));
@@ -791,7 +790,8 @@ describe('简化轮走查修复 · 文案口径与完成段收纳', () => {
     expect(wizardHtml).toMatch(/\.node\.active \.pip[^}]*animation: pulse 2\.8s/);
     expect(wizardHtml).not.toMatch(/backdrop-filter:\s*blur/); // 注释提及无妨，属性用法必须为 0
     const wizardJsSrc = readFileSync(join(rendererDir, 'wizard.js'), 'utf-8');
-    expect(wizardJsSrc).toMatch(/0\.4 \+ 0\.28 \* Math\.sin\(t \/ 1600/); // 星野呼吸（可见；整页闪烁根因=backdrop-filter 已治）
+    expect(wizardJsSrc).toMatch(/0\.42 \+ 0\.3 \* Math\.sin\(t \* s\.s \/ 1600/); // 星野闪烁：每颗独立频率（错落；整页闪烁根因=backdrop-filter 已治）
+    expect(wizardJsSrc).toMatch(/s: 0\.55 \+ Math\.random\(\) \* 0\.9/); // 每颗星独立频率因子
   });
 });
 

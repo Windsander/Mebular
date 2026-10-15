@@ -437,14 +437,16 @@ $('#btn-logs-open')?.addEventListener('click', () => { void api.openLogs(); });
       y: Math.random() * canvas.height,
       r: Math.random() * 1.4 + 0.3,
       p: Math.random() * Math.PI * 2,
+      // 每颗星独立频率（0.55~1.45 倍速）：错落闪烁，避免整体同步呼吸的「假星星」感
+      s: 0.55 + Math.random() * 0.9,
     }));
   }
   function draw(t) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     for (const s of stars) {
-      // 星野呼吸：明显的缓慢明灭（0.4±0.28，1.6s 周期）——是氛围的「活着」，
+      // 星野闪烁：每颗独立频率慢速明灭（基准 1.6s × 0.55~1.45）——错落、明显、不抢戏；
       // 与「整页闪烁」（合成级，已由去 backdrop-filter 治理）不是一回事
-      const tw = reduced ? 0.6 : 0.4 + 0.28 * Math.sin(t / 1600 + s.p);
+      const tw = reduced ? 0.6 : 0.42 + 0.3 * Math.sin(t * s.s / 1600 + s.p);
       ctx.globalAlpha = Math.max(0.12, tw);
       ctx.fillStyle = '#b4ffd6'; // 设计稿星色（console 契约：稀疏、缓慢、不抢戏）
       ctx.beginPath();

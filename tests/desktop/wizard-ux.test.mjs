@@ -96,8 +96,12 @@ describe('W-1/UX-2 ③ 当前段高亮 / done 段收编（视图契约）', () =
     expect(wizardView(computeWizardState({ daemonHealthy: true, wizard: { assistantsAcked: true } })).badge).toBe('已就绪');
   });
 
-  it('静态契约：样式含 .is-current（左边框 accent）与 .step.done 降透明', () => {
-    expect(wizardHtml).toMatch(/\.step\.is-current[^}]*border-left/);
+  it('静态契约：当前步 = 呼吸 pip + 面板提亮（无蓝条）；.step.done 降透明', () => {
+    // 用户定调 + 设计技能「减配饰」：当前步不再用 --accent 左边框（与 CRT 绿系不同调），
+    // 信号由 .node.active .pip 呼吸 + .node.active .panel 边框/光晕承担
+    expect(wizardHtml).not.toMatch(/\.step\.is-current[^}]*border-left/);
+    expect(wizardHtml).toMatch(/\.node\.active \.panel[^}]*border-color/);
+    expect(wizardHtml).toMatch(/\.node\.active \.pip[^}]*animation/);
     expect(wizardHtml).toMatch(/\.step\.done[^}]*opacity/);
   });
 
@@ -460,7 +464,7 @@ describe('设计稿 ④ 段② 文案与空态（以设计稿为准）', () => {
   it('① 正文按设计稿（数据只存在这台机器上，不上云）；注脚/hint 静态契约', () => {
     const view = wizardView(computeWizardState({}));
     expect(view.steps.find((s) => s.id === 'start').detailText).toContain('数据只存在这台机器上，不上云');
-    expect(wizardHtml).toContain('接入只改它的一条配置；重启对应软件后生效（可在 设置 → AI 助手 验证）。');
+    expect(wizardHtml).toContain('接入只改它的一条配置；重启对应软件后生效。');
     expect(wizardHtml).toContain('id="done2-hint"');
     expect(wizardHtml).toContain('在这台机器上启动 Mebular 并完成初始设置。');
   });

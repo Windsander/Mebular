@@ -40,8 +40,8 @@
 
     /* ===== 里程碑轨道：左轨线 + 节点灯（当前=呼吸、完成=✓、未到=暗） ===== */
     .rail { list-style: none; margin: 0; padding: 0; position: relative; }
-    .rail::before { content: ""; position: absolute; left: 9px; top: 14px; bottom: 14px; width: 1px;
-      background: linear-gradient(180deg, var(--crt-border), rgba(80, 255, 170, 0.06)); }
+    .rail::before { content: ""; position: absolute; left: 9px; top: 22px; bottom: 26%; width: 1px;
+      background: linear-gradient(180deg, rgba(80, 255, 170, 0.14), rgba(80, 255, 170, 0.03)); }
     .node { position: relative; padding: 0 0 18px 34px; }
     .pip { position: absolute; left: 3px; top: 20px; width: 13px; height: 13px; border-radius: 50%;
       border: 1px solid var(--crt-dim); background: var(--bg); transition: all .4s; }
@@ -59,7 +59,7 @@
     .node.active .panel { border-color: var(--crt-border); box-shadow: 0 0 24px -8px rgba(80, 255, 170, 0.35), 0 18px 50px -30px rgba(0,0,0,.9); }
     .step h2 { font-size: 15px; letter-spacing: 2px; margin: 0 0 6px; color: var(--crt-bright); display: flex; align-items: center; gap: 8px; }
     .step .step-check { color: var(--crt); }
-    .step.is-current { border-left: 2px solid var(--accent); }
+    /* 去「蓝条」：当前步 = 呼吸绿点 + 面板提亮已足够；蓝（--accent）与整页 CRT 绿系不同调，是多余配饰 */
     .step.done { opacity: 0.78; }
     /* 完成态段折叠为回顾（done-line / 点标题可重新展开） */
     /* 简洁（用户定调）：完成即终态单行——不再提供「再看一遍/展开」入口（异常时自动回到操作态，无需人找） */
@@ -110,8 +110,8 @@
     .flow li[data-state="done"] i { border-color: var(--crt); background: rgba(109, 255, 184, 0.15); }
     .flow li[data-state="done"] i::before { content: '✓'; }
     .flow li[data-state="active"] { color: var(--text); }
-    .flow li[data-state="active"] i { border-color: var(--accent); box-shadow: 0 0 6px var(--accent); }
-    .flow li[data-state="active"] i::before { content: '●'; color: var(--accent); }
+    .flow li[data-state="active"] i { border-color: var(--crt); box-shadow: 0 0 6px rgba(109, 255, 184, 0.7); }
+    .flow li[data-state="active"] i::before { content: '●'; color: var(--crt-bright); }
     .flow li[data-state="failed"] { color: var(--accent-2); }
     .flow li[data-state="failed"] i { border-color: var(--accent-2); }
     .flow li[data-state="failed"] i::before { content: '✗'; color: var(--accent-2); }
@@ -232,7 +232,7 @@
             <p class="muted" id="assistants-detail">—</p>
             <!-- 行级接入：名称 + 状态词 + 一个动作（与 设置 · AI 助手 同一语言） -->
             <div id="asst-list"></div>
-            <p class="hint" id="assist-note">接入只改它的一条配置；重启对应软件后生效（可在 设置 → AI 助手 验证）。</p>
+            <p class="hint" id="assist-note">接入只改它的一条配置；重启对应软件后生效。</p>
             <div class="sec-foot">
               <button id="btn-seg2-done" class="primary" disabled>已完成</button>
               <button id="btn-seg2-skip" class="ghost small">先不接 ›</button>

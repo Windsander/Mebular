@@ -2,7 +2,7 @@
 //
 // 全部在临时 home 中、CLI 与进程列表一律注入替身（不触碰真实用户目录/CLI）。
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { appendFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -34,14 +34,20 @@ const runOk = () => ({ ok: true, code: 0, stdout: '', stderr: '' });
 const runFail = () => ({ ok: false, code: 1, stdout: '', stderr: 'boom' });
 
 describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
-  let home;
-  const opts = (extra = {}) => ({ home, cwd: home, platform: 'darwin', env: {}, run: runOk, processList: '', ...extra });
+  let root;
+  let home;      // Mebular home
+  let userHome;  // 用户主目录（F-FIX-A：与 home **不同**）
+  const opts = (extra = {}) => ({ home, userHome, cwd: userHome, platform: 'darwin', env: {}, run: runOk, processList: '', ...extra });
 
   beforeEach(async () => {
-    home = await mkdtemp(join(tmpdir(), 'ux2-assistants-'));
+    root = await mkdtemp(join(tmpdir(), 'ux2-assistants-'));
+    home = join(root, '.mebular');
+    userHome = join(root, 'user');
+    await mkdir(home, { recursive: true });
+    await mkdir(userHome, { recursive: true });
   });
   afterEach(async () => {
-    await rm(home, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
   });
 
   // ---------- A-1 / A-2：注册表驱动 + 三态证据 ----------
@@ -86,7 +92,7 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
   });
 
   it('A-4：配置缺但 CLI 在 → 未接入（不假阴性）；CLI 缺 → 仍如实给证据（不假阳性静默）', async () => {
-    const opencodePath = join(home, '.config', 'opencode', 'opencode.json');
+    const opencodePath = join(userHome, '.config', 'opencode', 'opencode.json');
     // 只有 CLI（config-path 未命中，cli 命中）→ 未接入
     const onlyCli = assistantState(descriptorFor('opencode', opts()), opts({ run: (cmd) => (cmd.startsWith('opencode') ? runOk() : runFail()) }));
     expect(onlyCli.state).toBe('not-connected');
@@ -105,9 +111,9 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
 
   it('A-3：OpenChamber 落面 = global opencode.json 的 mcp.servers.mebular，且 managed 文件在禁写清单', () => {
     const a = descriptorFor('openchamber', opts());
-    expect(a.landing.primaryPath).toBe(join(home, '.config', 'opencode', 'opencode.json'));
+    expect(a.landing.primaryPath).toBe(join(userHome, '.config', 'opencode', 'opencode.json'));
     expect(a.landing.keyPath).toBe('mcp.servers.mebular');
-    const managed = join(home, '.config', 'openchamber', 'opencode.managed.json');
+    const managed = join(userHome, '.config', 'openchamber', 'opencode.managed.json');
     expect(a.landing.forbiddenPaths).toContain(managed);
     // 行为面：即使有人把落面指向禁写路径，写入也必须被拒
     return addCustomAssistant({
@@ -138,7 +144,7 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
   });
 
   it('A-17：旧错形状被判「不生效」并给出 legacyShape 证据（不冒充已接入）', async () => {
-    const cfg = join(home, '.config', 'opencode', 'opencode.json');
+    const cfg = join(userHome, '.config', 'opencode', 'opencode.json');
     await mkdir(dirname(cfg), { recursive: true });
     await writeFile(cfg, JSON.stringify({ mcp: { mebular: { type: 'local', command: ['mebular', 'mcp'] } } }, null, 2));
     const st = assistantState(descriptorFor('opencode', opts()), opts());
@@ -170,7 +176,7 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
   // ---------- 写入器：merge-key（沙箱 fixture） ----------
 
   it('写入器 merge-key：备份 → 原子写 → 幂等 → 其他键无损 → 回滚', async () => {
-    const cfg = join(home, '.config', 'opencode', 'opencode.json');
+    const cfg = join(userHome, '.config', 'opencode', 'opencode.json');
     await mkdir(dirname(cfg), { recursive: true });
     await writeFile(cfg, JSON.stringify({ $schema: 'x', theme: 'dark', mcp: { other: { keep: 1 } } }, null, 2));
     const first = await connectClient('opencode', opts());
@@ -196,9 +202,12 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
   // ---------- 写入器：cli-set（Hermes：命令形状 + 备份 + 失败回滚） ----------
 
   it('A-5：Hermes 写入仅经 `hermes config set --force`，写前字节级备份，失败整文件回滚', async () => {
-    const cfg = join(home, '.hermes', 'config.yaml');
+    const cfg = join(userHome, '.hermes', 'config.yaml');
     await mkdir(dirname(cfg), { recursive: true });
     const original = 'model: x\nmcp_servers:\n  openchamber:\n    command: python3\n';
+
+// F-HYGIENE-1/F-FIX-A：本夹具含真实 fs + 合并/回滚往返，全量并行下会超默认 5s；给显式有界预算。
+jest.setTimeout(process.platform === 'win32' ? 30_000 : 15_000);
     await writeFile(cfg, original);
     const calls = [];
     const res = await connectClient('hermes', opts({ run: (cmd) => { calls.push(cmd); return runOk(); } }));
@@ -225,7 +234,7 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
 
   it('A-5：Hermes descriptor = ~/.hermes/config.yaml + mcp_servers.mebular + hot + verify 黄金样例', () => {
     const h = descriptorFor('hermes', opts());
-    expect(h.landing.primaryPath).toBe(join(home, '.hermes', 'config.yaml'));
+    expect(h.landing.primaryPath).toBe(join(userHome, '.hermes', 'config.yaml'));
     expect(h.landing.keyPath).toBe('mcp_servers.mebular');
     expect(h.writer.strategy).toBe('cli-set');
     expect(h.writer.command).toMatch(/^hermes config set --force mcp_servers\.mebular$/);
@@ -242,7 +251,7 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
   // ---------- 验证器（A-9/A-10/A-11） ----------
 
   it('A-9/A-10：接入后走回读 + CLI 验证；user-reload → 待生效，确认重载后 → 已接入', async () => {
-    const cfg = join(home, '.config', 'opencode', 'opencode.json');
+    const cfg = join(userHome, '.config', 'opencode', 'opencode.json');
     await mkdir(dirname(cfg), { recursive: true });
     await writeFile(cfg, JSON.stringify({ theme: 'dark' }, null, 2));
     await connectClient('opencode', opts());
@@ -256,7 +265,7 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
   });
 
   it('A-5/A-9：Hermes 验证解析（rc=0 ∧ ✓Connected ∧ Tools≥1）；hot 条目直达已接入', async () => {
-    const cfg = join(home, '.hermes', 'config.yaml');
+    const cfg = join(userHome, '.hermes', 'config.yaml');
     await mkdir(dirname(cfg), { recursive: true });
     await writeFile(cfg, 'mcp_servers:\n  mebular:\n    command: mebular\n');
     const good = verifyAssistant('hermes', opts({ run: (cmd) => (cmd.startsWith('hermes mcp test') ? { ok: true, code: 0, stdout: 'Testing…\n  ✓ Connected (12ms)\n  ✓ Tools discovered: 4\n', stderr: '' } : runOk()) }));
@@ -270,7 +279,7 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
   });
 
   it('A-11：验证失败 → 黄态（verify-failed）+ 输出摘要；写入失败 → 原配置未动 + 备份在', async () => {
-    const cfg = join(home, '.config', 'opencode', 'opencode.json');
+    const cfg = join(userHome, '.config', 'opencode', 'opencode.json');
     await mkdir(dirname(cfg), { recursive: true });
     await writeFile(cfg, '{ not json');
     const res = await connectClient('opencode', opts());

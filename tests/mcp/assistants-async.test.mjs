@@ -2,7 +2,7 @@
 //
 // 全部在临时 home 中、探针执行器一律注入替身（不 spawn 真实 CLI）。
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -19,19 +19,28 @@ import {
   probeSignalAsync,
 } from '../../packages/mcp/src/clients.mjs';
 
+// F-HYGIENE-1/F-FIX-A：本夹具含真实 fs + 合并/回滚往返，全量并行下会超默认 5s；给显式有界预算。
+jest.setTimeout(process.platform === 'win32' ? 30_000 : 15_000);
+
 const srcRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'packages', 'mcp', 'src');
 
 describe('F-PERF-2 异步探针 + 短 TTL 缓存', () => {
+  let root;
   let home;
-  const opts = (extra = {}) => ({ home, cwd: home, platform: 'darwin', env: {}, processList: '', ...extra });
+  let userHome;
+  const opts = (extra = {}) => ({ home, userHome, cwd: userHome, platform: 'darwin', env: {}, processList: '', ...extra });
 
   beforeEach(async () => {
-    home = await mkdtemp(join(tmpdir(), 'perf2-clients-'));
+    root = await mkdtemp(join(tmpdir(), 'perf2-clients-'));
+    home = join(root, '.mebular');
+    userHome = join(root, 'user');
+    await mkdir(home, { recursive: true });
+    await mkdir(userHome, { recursive: true });
     clearAssistantsCache();
   });
   afterEach(async () => {
     clearAssistantsCache();
-    await rm(home, { recursive: true, force: true });
+    await rm(root, { recursive: true, force: true });
   });
 
   it('async 与 sync 判据一致（同替身 → 同 state/evidence）', async () => {
@@ -78,7 +87,7 @@ describe('F-PERF-2 异步探针 + 短 TTL 缓存', () => {
   });
 
   it('写后失效：connect 后重新探测（不返回陈旧「未接入」）', async () => {
-    const cfg = join(home, '.config', 'opencode', 'opencode.json');
+    const cfg = join(userHome, '.config', 'opencode', 'opencode.json');
     await mkdir(dirname(cfg), { recursive: true });
     await writeFile(cfg, JSON.stringify({ theme: 'dark' }, null, 2));
     const runAsync = async () => ({ ok: true, code: 0, stdout: '', stderr: '' });

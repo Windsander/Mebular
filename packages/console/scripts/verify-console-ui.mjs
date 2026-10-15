@@ -81,7 +81,7 @@ async function seedHome(home) {
 
 function spawnServe(home, port) {
   const proc = spawn(process.execPath, [bin, 'serve', '--port', String(port)], {
-    env: { ...process.env, MEBULAR_HOME: home },
+    env: { ...process.env, MEBULAR_HOME: home, MEBULAR_USER_HOME: home },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';

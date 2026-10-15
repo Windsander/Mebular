@@ -868,7 +868,7 @@ export async function startHttpServer({
     /^\/admin\/api\/memberships$/,
     /^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/,
     /^\/admin\/api\/service\/(install|uninstall)$/,
-    /^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview|verify)$/,
+    /^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview|verify|recheck)$/,
     /^\/admin\/api\/assistants$/,
     /^\/admin\/api\/assistants\/([^/]+)$/,
     /^\/admin\/api\/assistants\/([^/]+)\/remove$/,
@@ -1420,9 +1420,9 @@ export async function startHttpServer({
     }
 
     // H-1：「连接我的 AI 助手」接入 / 预览 / 回滚 / Skill / 验证（只并 mebular 键；备份 + 原子写 + 幂等）
-    const cliAction = path.match(/^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview|verify)$/);
+    const cliAction = path.match(/^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview|verify|recheck)$/);
     if (cliAction) {
-      const { connectClient, rollbackClient, installSkills, previewClient, verifyAssistant } = await import('./clients.mjs');
+      const { connectClient, rollbackClient, installSkills, previewClient, verifyAssistant, listAssistantsAsync, assistantUserHome } = await import('./clients.mjs');
       const id = decodeURIComponent(cliAction[1]);
       const action = cliAction[2];
       const input = parseJsonBody(body) ?? {};
@@ -1441,6 +1441,15 @@ export async function startHttpServer({
         if (action === 'connect') {
           const result = await connectClient(id, opts);
           return sendJson(res, result.ok ? 200 : 422, result);
+        }
+        if (action === 'recheck') {
+          // F-FIX-A：桌面白名单已允许 `recheck`（服务端此前 404）。语义 = 单客户端**强制重探**：
+          // 只读某条状态，但会真实探测（CLI/进程/文件），故与 preview/connect 同族走动作端点
+          // （同一鉴权 + CSRF 管线），并强制 `refresh:true` 绕过缓存——避免 GET 被缓存/预取而看不到即时状态。
+          const out = await listAssistantsAsync({ home, userHome: assistantUserHome(), cwd: process.cwd(), refresh: true });
+          const client = out.assistants.find((c) => c.id === id) ?? null;
+          if (!client) return sendJson(res, 404, { ok: false, error: 'unknown_client', id });
+          return sendJson(res, 200, { ok: true, client, cached: false });
         }
         if (action === 'rollback') {
           const result = await rollbackClient(id, { ...opts, ...(typeof input.backupPath === 'string' ? { backupPath: input.backupPath } : {}) });

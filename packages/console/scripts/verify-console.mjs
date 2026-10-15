@@ -109,6 +109,7 @@ function spawnServe({ home, storage, args = [], env = {}, deviceId = 'device-con
     env: {
       ...process.env,
       MEBULAR_HOME: home,
+      MEBULAR_USER_HOME: home,   // F-FIX-A：沙箱 harness 声明用户主目录；否则 assistant 落面指向真实 home
       MEBULAR_STORAGE_PATH: storage,
       MEBULAR_DEVICE_ID: deviceId,
       ...env,

@@ -1062,3 +1062,28 @@ select {
 .asst-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; font-size: 12px; color: var(--muted); margin-top: 6px; }
 .asst-form-grid label { display: grid; gap: 3px; }
 .asst-tag { font-size: 10px; border: 1px solid var(--crt-border-soft); border-radius: 999px; padding: 1px 6px; margin-left: 6px; color: var(--crt-dim); vertical-align: 1px; }
+
+/* ===== UX-2 补丁 4 · 窗口外框与滚动条（控制台） ===== */
+/* A. 桌面壳拖拽区：顶栏整体可拖（移动窗口），可点元素除外 */
+.topbar { -webkit-app-region: drag; }
+.topbar button, .topbar a, .topbar input, .topbar select, .topbar [role="button"] { -webkit-app-region: no-drag; }
+/* macOS hiddenInset：交通灯安全区避让（仅桌面壳 darwin；浏览器/其他平台不受影响） */
+body.shell-desktop-darwin .topbar { padding-left: 84px; }
+
+/* B. 滚动条主题化：细（10px）、暗轨道、thumb 契约色、hover 微亮、corner 清理。
+   注意：一旦定义 ::-webkit-scrollbar，Chrome 在「滚动时显示」与「常显」两种系统模式下
+   都渲染此主题样式（ overlay 灰条被替代）——可见性/对比度由 thumb 保留（不隐藏滚动条）。 */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(140, 255, 200, 0.20);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*::-webkit-scrollbar-thumb:hover { background: rgba(140, 255, 200, 0.36); border: 2px solid transparent; background-clip: padding-box; }
+*::-webkit-scrollbar-corner { background: transparent; }
+
+/* C. 滚动手感：主滚动容器稳定 gutter（滚动条出现/消失不挤压内容、不跳变） */
+html { scrollbar-gutter: stable; }
+.aside, .modal, .wizard-list, .snippet, .connect-diff, #memories-view, #settings-body { scrollbar-gutter: stable; }

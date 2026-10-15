@@ -199,6 +199,9 @@ function createWindow() {
     height: 760,
     title: 'Mebular',
     backgroundColor: '#0b0f0d',
+    // UX-2 补丁 4：macOS 交通灯内嵌（hiddenInset）——内容区与 CRT 风格连续；
+    // Windows/Linux 保守默认 frame（系统标题栏保留，不冒险）
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' } : {}),
     webPreferences: {
       preload: join(import.meta.dirname, '..', 'preload', 'index.cjs'),
       contextIsolation: true,

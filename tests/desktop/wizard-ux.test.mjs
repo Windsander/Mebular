@@ -500,3 +500,42 @@ describe('设计稿 ⑥ [hidden] 语义兜底（author display 不得覆盖 hidd
     expect(wizardHtml).toMatch(/id="btn-install"[^>]*hidden/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// UX-2 补丁 4 · 窗口外框 + 滚动条/滚动手感（desktop 侧契约）
+// ---------------------------------------------------------------------------
+
+const preloadCjs = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'preload', 'index.cjs'), 'utf-8');
+
+describe('补丁 4 · 窗口外框（macOS hiddenInset 交通灯内嵌；Windows/Linux 保守）', () => {
+  it('BrowserWindow：darwin → titleBarStyle hiddenInset；其他平台不带（条件展开）', () => {
+    const cw = indexMjs.match(/function createWindow\(\) \{[\s\S]*?webPreferences/)?.[0] ?? '';
+    expect(cw).toContain("process.platform === 'darwin'");
+    expect(cw).toContain("titleBarStyle: 'hiddenInset'");
+    expect(cw).not.toContain('frame: false'); // 不无框（保守）
+  });
+
+  it('preload 暴露静态 platform（渲染层避让交通灯安全区用；非函数不增攻击面）', () => {
+    expect(preloadCjs).toContain('platform: process.platform');
+  });
+
+  it('向导拖拽区：hero 可拖 + 可点元素 no-drag（含右下「跳过引导 ›」）', () => {
+    expect(wizardHtml).toMatch(/\.hero \{[^}]*-webkit-app-region: drag/);
+    expect(wizardHtml).toMatch(/\.hero \.badge[^}]*no-drag/);
+    expect(wizardHtml).toMatch(/\.skip \{[^}]*-webkit-app-region: no-drag/);
+  });
+});
+
+describe('补丁 4 · 滚动条主题化 + 滚动手感（向导侧契约）', () => {
+  it('向导 ::-webkit-scrollbar：细 10px / 透明轨道 / 契约色 thumb / hover 微亮 / corner 清理', () => {
+    expect(wizardHtml).toMatch(/::-webkit-scrollbar \{[^}]*width: 10px/);
+    expect(wizardHtml).toMatch(/::-webkit-scrollbar-track \{[^}]*transparent/);
+    expect(wizardHtml).toMatch(/::-webkit-scrollbar-thumb \{[^}]*border-radius: 999px/);
+    expect(wizardHtml).toMatch(/::-webkit-scrollbar-thumb:hover/);
+    expect(wizardHtml).toMatch(/::-webkit-scrollbar-corner \{[^}]*transparent/);
+  });
+
+  it('向导长页 scrollbar-gutter: stable（滚动条出现/消失不跳变）', () => {
+    expect(wizardHtml).toMatch(/html \{ scrollbar-gutter: stable/);
+  });
+});

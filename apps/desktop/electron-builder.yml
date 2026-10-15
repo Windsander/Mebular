@@ -2,6 +2,8 @@
 appId: com.mebular.desktop
 productName: Mebular
 copyright: Copyright © 2026 Windsander
+# App 图标（与网页版 favicon 同源的 ✦ 星）：electron-builder 自动派生 icns/ico
+icon: resources/icon.png
 directories:
   output: dist
   buildResources: resources

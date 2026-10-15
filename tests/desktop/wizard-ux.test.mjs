@@ -872,3 +872,17 @@ describe('简化轮走查修复 5 · 居中 + 过程可见性', () => {
     expect(wizardJs).toMatch(/汇总行停留：读完再进完成态/);
   });
 });
+
+describe('App 图标（用户定稿：网页版 favicon 的 ✦ 同源）', () => {
+  it('main：macOS Dock 图标（开发态也生效）+ 窗口 icon；打包配置指向 resources/icon.png', () => {
+    expect(indexMjs).toMatch(/app\.dock\.setIcon/);
+    expect(indexMjs).toMatch(/icon: appIconPath\(\)/);
+    const yml = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'electron-builder.yml'), 'utf-8');
+    expect(yml).toMatch(/^icon: resources\/icon\.png/m);
+    // 资源在位且为合法 PNG（魔数）
+    const png = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'resources', 'icon.png'));
+    expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
+    // 矢量源同步在仓（可再生成任意尺寸）
+    expect(readFileSync(join(here, '..', '..', 'apps', 'desktop', 'resources', 'icon.svg'), 'utf-8')).toContain('#6dffb8');
+  });
+});

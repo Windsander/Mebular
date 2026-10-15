@@ -198,12 +198,25 @@ async function showConsoleWithRetry() {
   }
 }
 
+/** App 图标路径（Dock / 窗口 / 打包共用；与网页版 favicon 同源的 ✦ 星） */
+function appIconPath() {
+  return join(import.meta.dirname, '..', '..', 'resources', 'icon.png');
+}
+/** macOS Dock 图标：开发态（Electron 裸跑）也显示品牌图标；打包态与 bundle 图标一致 */
+function applyAppIcon() {
+  if (process.platform === 'darwin' && app.dock) {
+    const img = nativeImage.createFromPath(appIconPath());
+    if (!img.isEmpty()) app.dock.setIcon(img);
+  }
+}
+
 function createWindow() {
   win = new BrowserWindow({
     // R-1 小-12：默认 1280（1180 顶栏临界拥挤）
     width: 1280,
     height: 760,
     title: 'Mebular',
+    icon: appIconPath(), // Windows/Linux 窗口图标（macOS 走 Dock/bundle）
     backgroundColor: '#0b0f0d',
     // UX-2 补丁 4：macOS 交通灯内嵌（hiddenInset）——内容区与 CRT 风格连续；
     // Windows/Linux 保守默认 frame（系统标题栏保留，不冒险）
@@ -430,6 +443,7 @@ if (!gotLock) {
   app.on('activate', () => { showWindow(); });
 
   app.whenReady().then(async () => {
+    applyAppIcon();
     registerIpc();
     createTray();
     createWindow();

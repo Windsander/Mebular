@@ -773,16 +773,16 @@ try {
     check('G4 未确认时不写盘（auth 仍为 none）', gLocked.mcp?.http?.auth === 'none', `auth=${gLocked.mcp?.http?.auth}`);
     // 三元组 + 未生效原因 + 暴露面（单一真源）
     const gSettings = await getJson(port, '/admin/api/settings');
-    const gRow = (gSettings.json?.effective ?? []).find((row) => row.path === 'sync.antiEntropy.intervalMs');
+    const gRow = (gSettings.json?.effective ?? []).find((row) => row.path === 'sync.antiEntropy.enabled');
     check(
       'D 三元组：已配置 / 实际 / 未生效原因（服务端计算；待重启项 reason 明确）',
       gRow && 'configured' in gRow && 'actual' in gRow && typeof gRow.reason === 'string'
         && gSettings.json?.effective?.some((row) => /待重启/.test(String(row.reason))),
-      `intervalMs reason=${gRow?.reason}`,
+      `antiEntropy.enabled reason=${gRow?.reason}`,
     );
     check(
-      'A 暴露面由 schema 驱动载荷（configSchema 20 editable / statusSchema 11 只读 / relayServers 只在只读面）',
-      (gSettings.json?.configSchema ?? []).length === 20 && (gSettings.json?.statusSchema ?? []).length === 11
+      'A 暴露面由 schema 驱动载荷（configSchema 16 editable / statusSchema 11 只读 / relayServers 只在只读面）',
+      (gSettings.json?.configSchema ?? []).length === 16 && (gSettings.json?.statusSchema ?? []).length === 11
         && !(gSettings.json?.configSchema ?? []).some((e) => e.path === 'network.libp2p.relayServers')
         && (gSettings.json?.statusSchema ?? []).some((e) => e.path === 'network.libp2p.relayServers'),
       `editable=${(gSettings.json?.configSchema ?? []).length} status=${(gSettings.json?.statusSchema ?? []).length}`,
@@ -791,8 +791,8 @@ try {
     check('G 前台模式不产生自动重启记录（lastApply 为空）', !gSettings.json?.lastApply);
     const consoleSrc3 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     check(
-      'G 控制台接线：保存并重启 / 重启中 / 已生效 / 已回滚 / 最近一次应用结果',
-      consoleSrc3.includes('保存并重启') && consoleSrc3.includes('正在重启…重连中…')
+      'G 控制台接线：写入并重启 / 自动重启中 / 已生效 / 已回滚 / 最近一次应用结果（简化轮即时生效）',
+      consoleSrc3.includes('确认并重启') && consoleSrc3.includes('正在自动重启使配置生效…')
         && consoleSrc3.includes('已生效') && consoleSrc3.includes('已回滚')
         && consoleSrc3.includes('最近一次应用结果') && consoleSrc3.includes('needsConfirmation'),
     );
@@ -1411,9 +1411,9 @@ try {
   // ---------- IA（设置页信息架构：常用/高级/诊断 + 关于本机） ----------
   {
     const ia = await import('../settings-ia.js');
-    const HOMES = new Set(['common', 'advanced', 'about', 'diagnostics']);
+    const HOMES = new Set(['common', 'advanced', 'about', 'domains']); // 简化轮：诊断并入高级；订阅域归主页「记忆共享」
     const commonFields = ia.IA_COMMON_FIELDS;
-    check(`IA 常用恰 6 字段（实得 ${commonFields.length}）`, commonFields.length === 6, commonFields.join(', '));
+    check(`IA 常用恰 5 字段（实得 ${commonFields.length}）`, commonFields.length === 5, commonFields.join(', '));
 
     const editorFaces = new Set([...ia.IA_COMMON_FIELDS, ...ia.IA_ADVANCED_FIELDS]);
     check('IA 同步节奏（autoSync/pushOnWrite）不在任何编辑面（只读进「关于本机」）',
@@ -1427,13 +1427,13 @@ try {
     const schema = await import('../../mcp/src/config-schema.mjs');
     const schemaEditable = [...schema.EDITABLE_PATHS].sort();
     const schemaStatusOnly = [...schema.STATUS_ONLY_PATHS].sort();
-    const iaEditable = [...ia.IA_EDITOR_RENDER_PATHS].sort();
+    const iaEditable = [...ia.IA_EDITOR_PATHS].sort(); // 全量可编辑面（设置 15 + 记忆共享 1）
     const iaStatusOnly = [...ia.IA_STATUS_ONLY_PATHS].sort();
     const diffSets = (a, b) => [...a.filter((x) => !b.includes(x)), ...b.filter((x) => !a.includes(x))];
     const editableDrift = diffSets(schemaEditable, iaEditable);
     const statusDrift = diffSets(schemaStatusOnly, iaStatusOnly);
     check(`schema↔IA 防漂移：editable 集合逐项一致（各 ${schemaEditable.length}）`,
-      schemaEditable.length === 20 && editableDrift.length === 0,
+      schemaEditable.length === 16 && editableDrift.length === 0,
       `schema=${schemaEditable.length} ia=${iaEditable.length} 差异=${editableDrift.join(',') || '无'}`);
     check(`schema↔IA 防漂移：status-only 集合逐项一致（各 ${schemaStatusOnly.length}）`,
       schemaStatusOnly.length === 11 && statusDrift.length === 0,
@@ -1441,7 +1441,7 @@ try {
     // B：收敛回归——relayServers 从编辑面消失（status-only）、relayUnlimited 不再渲染（internal）
     const advancedDrift = ia.IA_ADVANCED_FIELDS.filter((p) => ['network.libp2p.relayServers', 'network.libp2p.relayUnlimited'].includes(p));
     check('B 暴露面收敛：relayServers 退出编辑面（→只读自动池）/ relayUnlimited 退出 GUI（→internal）',
-      ia.IA_ADVANCED_FIELDS.length === 14 && advancedDrift.length === 0
+      ia.IA_ADVANCED_FIELDS.length === 10 && advancedDrift.length === 0
         && schema.exposureOf('network.libp2p.relayServers') === 'status-only'
         && schema.exposureOf('network.libp2p.relayUnlimited') === 'internal'
         && schema.isWritable('network.libp2p.relayServers') === false,
@@ -1452,22 +1452,39 @@ try {
     const rendered = new Set([...ia.IA_COMMON_FIELDS, ...ia.IA_ADVANCED_FIELDS]);
     const drifted = ia.IA_EDITOR_PATHS.filter((path) => (ia.IA_MIGRATION[path] === 'common' || ia.IA_MIGRATION[path] === 'advanced') !== rendered.has(path));
     const statusWithoutHome = ia.IA_STATUS_ONLY_PATHS.filter((path) => homesOf(path).length !== 1);
-    check('IA 不丢项：20 可编辑 path + 11 只读 path + 10 信息块各有且仅有唯一去处（迁移表驱动）',
-      ia.IA_EDITOR_PATHS.length === 20 && pathsWithoutHome.length === 0 && infoWithoutHome.length === 0 && drifted.length === 0 && statusWithoutHome.length === 0,
+    check('IA 不丢项：16 可编辑 path + 11 只读 path + 10 信息块各有且仅有唯一去处（迁移表驱动）',
+      ia.IA_EDITOR_PATHS.length === 16 && pathsWithoutHome.length === 0 && infoWithoutHome.length === 0 && drifted.length === 0 && statusWithoutHome.length === 0,
       `editorPaths=${ia.IA_EDITOR_PATHS.length} 只读无去处=${statusWithoutHome.join(',') || '无'} 编辑无去处=${pathsWithoutHome.join(',') || '无'} 信息块无去处=${infoWithoutHome.join(',') || '无'} 编辑面漂移=${drifted.join(',') || '无'}`);
 
     const cardFields = ia.IA_TASK_CARDS.flatMap((card) => card.fields);
-    check('IA 常用四张任务卡共 6 字段且不重复（含 agent 危险卡）',
-      ia.IA_TASK_CARDS.length === 4 && cardFields.length === 6 && new Set(cardFields).size === 6
-        && ia.IA_TASK_CARDS.some((card) => card.id === 'agent' && card.danger === true),
+    check('IA 常用三张任务卡共 5 字段且不重复（含 agent 危险卡；订阅域已移出归记忆共享）',
+      ia.IA_TASK_CARDS.length === 3 && cardFields.length === 5 && new Set(cardFields).size === 5
+        && ia.IA_TASK_CARDS.some((card) => card.id === 'agent' && card.danger === true)
+        && !cardFields.includes('sync.namespaces'),
       `cards=${ia.IA_TASK_CARDS.length} fields=${cardFields.join(',')}`);
+
 
     const htmlSrc = await readFile(join(consoleDir, 'index.html'), 'utf-8');
     const consoleSrc2 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+
+    // UX-2 简化轮：内容管理出设置（订阅域归「记忆共享」）；自动策略出 GUI（internal）；即时生效无「保存」按钮
+    check('简化轮 · 订阅域归主页「记忆共享」（设置页不渲染）且黑盒自动策略 internal（GUI 不渲染，API 仍可写）',
+      ia.IA_MIGRATION['sync.namespaces'] === 'domains'
+        && !ia.IA_EDITOR_RENDER_PATHS.includes('sync.namespaces')
+        && ia.IA_EDITOR_PATHS.includes('sync.namespaces')
+        && ['sync.antiEntropy.intervalMs', 'sync.antiEntropy.jitterRatio', 'sync.snapshotThreshold', 'semantic.minScore']
+          .every((p) => schema.exposureOf(p) === 'internal' && schema.isWritable(p) === true)
+        && ia.IA_EDITOR_RENDER_PATHS.length === 15,
+      `render=${ia.IA_EDITOR_RENDER_PATHS.length} namespacesHome=${ia.IA_MIGRATION['sync.namespaces']}`);
+    check('简化轮 · 即时生效（无「保存/撤销」按钮；字段 change 即写入；409 自锁走品牌确认卡）',
+      !/data-cfg-action="save"/.test(consoleSrc2) && !/data-cfg-action="reset"/.test(consoleSrc2)
+        && consoleSrc2.includes('applyConfigField') && consoleSrc2.includes('submitConfigPatch')
+        && consoleSrc2.includes('confirmModal') && consoleSrc2.includes("addEventListener('change'"),
+      '草稿机制已退场');
     const tabIds = ia.IA_TABS.map((tab) => tab.id).join(',');
     const tabLabels = ia.IA_TABS.map((tab) => tab.label).join(',');
-    check('IA Tab 结构（常用/AI 助手/高级/诊断）与「关于本机」入口齐备（UX-2）',
-      tabIds === 'common,assistants,advanced,diagnostics' && tabLabels === '常用,AI 助手,高级,诊断'
+    check('IA Tab 结构（常用/AI 助手/高级；诊断并入高级）与「关于本机」入口齐备（UX-2 简化轮）',
+      tabIds === 'common,assistants,advanced' && tabLabels === '常用,AI 助手,高级'
         && (ia.IA_SETTINGS_EXTRA ?? []).some((item) => item.id === 'about' && item.opens === 'about-modal')
         && htmlSrc.includes('id="self-badge"') && htmlSrc.includes('id="about"') && htmlSrc.includes('关于本机')
         && consoleSrc2.includes('data-settings-tab') && consoleSrc2.includes('IA_TASK_CARDS')

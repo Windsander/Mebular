@@ -198,11 +198,16 @@
               <button id="btn-go" class="primary big">一键开始</button>
               <button id="btn-resume" class="primary" hidden>从此处续跑</button>
               <button id="btn-provision" class="primary" hidden>去写入初始设置 →</button>
-              <button id="alt-join" class="alt" hidden>或加入已有的 Mebular ›</button>
+              <a class="alt" id="alt-join" hidden>或加入已有的 Mebular ›</a>
+            </div>
+            <!-- ① 完成后：开机自启（推荐、非阻塞、一次点击） -->
+            <div class="row" id="postdone-row" hidden>
+              <span class="hint">已就绪 · 开机自启更省心？</span>
               <button id="btn-install" class="ghost" hidden>让 Mebular 常驻</button>
             </div>
+            <!-- 高级（出问题了？）：运维入口统一折叠，不占首屏 -->
             <details class="troubleshoot" id="start-troubleshoot">
-              <summary>出问题了？</summary>
+              <summary>高级 · 出问题了？</summary>
               <div class="row">
                 <button id="btn-restart" class="ghost">重启守护</button>
                 <button id="btn-start" class="ghost">仅启动守护</button>
@@ -222,7 +227,7 @@
             <p class="muted" id="assistants-detail">—</p>
             <!-- 行级接入：名称 + 状态词 + 一个动作（与 设置 · AI 助手 同一语言） -->
             <div id="asst-list"></div>
-            <p class="hint" id="assist-note">接入只改它的一条配置；重载对应助手后生效（可到 设置 → AI 助手 验证）。</p>
+            <p class="hint" id="assist-note">接入只改它的一条配置；重启对应软件后生效（可在 设置 → AI 助手 验证）。</p>
             <div class="sec-foot">
               <button id="btn-seg2-done" class="primary" disabled>已完成</button>
               <button id="btn-seg2-skip" class="ghost small">先不接 ›</button>

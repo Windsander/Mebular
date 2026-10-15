@@ -51,7 +51,7 @@ function renderState(state) {
   if (finishNote && view.complete) {
     const pending = [...reloadHints];
     finishNote.innerHTML = (pending.length > 0
-      ? `<span class="warn-text">提醒：重载 ${pending.map((n) => escapeHtml(n)).join('、')} 后，mebular 才会出现在它的工具列表。</span><br />`
+      ? `<span class="warn-text">提醒：重启 ${pending.map((n) => escapeHtml(n)).join('、')} 这个软件后，mebular 才会出现在它的工具列表。</span><br />`
       : '') + '之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请新设备」随时可用。';
   }
 
@@ -92,6 +92,9 @@ function renderState(state) {
       btnInstall.disabled = Boolean(start.actions.install.disabled);
       if (start.actions.install.label) btnInstall.textContent = start.actions.install.label;
     }
+    // P1 简化：常驻只在 ① 完成后以「开机自启？」一行出现（推荐、非阻塞），不占首屏
+    const postRow = $('#postdone-row');
+    if (postRow) postRow.hidden = !(start.status === 'done' && !start.actions.install.hidden);
     // 非跑流水期间：流水面板按静态进度呈现（① 未完成且从未跑过 → 保持隐藏）
     if (!flow.running && !flow.everRan) {
       const flowEl = $('#start-flow');
@@ -317,13 +320,15 @@ function renderClients(clients) {
   );
   if (signature === clientsSignature) return;
   clientsSignature = signature;
-  if (clients.length === 0) {
-    list.innerHTML = '<p class="amsg">还没有检测到已知助手；也可稍后在「设置 · AI 助手」里补。</p>';
-    return;
-  }
   const failedObj = Object.fromEntries(rowFailed);
   const verifyObj = Object.fromEntries(rowVerify);
-  list.innerHTML = clients.map((c) => {
+  // P1 简化：只显示**已安装**的助手（未装不出现——装好后自会进来）；每行一个动作
+  const visible = clients.filter((c) => (c.state ?? (c.installed ? 'x' : 'not-installed')) !== 'not-installed' && c.state !== 'detect-failed');
+  if (visible.length === 0) {
+    list.innerHTML = '<p class="amsg">没检测到已装的 AI 助手——可以先跳过，装好后回到这里（或到 设置 → AI 助手 接入）。</p>';
+    return;
+  }
+  list.innerHTML = visible.map((c) => {
     const st = wizardRowStatus(c, { pending: reloadHints, failed: failedObj, verifyStates: verifyObj });
     let action = '';
     if (st.key === 'not-connected') action = `<button data-asst-act="connect" data-asst-id="${c.id}">接入</button>`;
@@ -332,13 +337,13 @@ function renderClients(clients) {
     else if (st.key === 'pending-reload' || (st.key === 'connected' && st.reloadHint)) {
       // 提示层/待生效共用动作：「我已重载，验证」（有验证命令走服务端 verify，否则回读重检测）
       action = c.hasVerify
-        ? `<button data-asst-act="verify" data-asst-id="${c.id}">我已重载，重新验证</button>`
-        : `<button data-asst-act="recheck" data-asst-id="${c.id}">我已重载，重新验证</button>`;
+        ? `<button data-asst-act="verify" data-asst-id="${c.id}">我已重载，验证</button>`
+        : `<button data-asst-act="recheck" data-asst-id="${c.id}">我已重载，验证</button>`;
     }
     else if (st.key === 'manual') action = `<button class="ghost" data-asst-act="console" data-asst-id="${c.id}">去控制台处理 ›</button>`;
-    // 提示层小字：不覆盖状态词（「已接入 ✓」旁挂「已写入 · 请重载助手后生效」）
+    // 提示层小字：不覆盖状态词（「已接入 ✓」旁挂「已写入 · 重启该软件后生效」）
     const hintLine = st.reloadHint && st.key === 'connected'
-      ? `<p class="amsg" data-asst-hint="${c.id}">已写入 · 请重载该助手后生效（点右侧「我已重载，重新验证」确认）</p>`
+      ? `<p class="amsg" data-asst-hint="${c.id}">已写入 · 重启这个软件后生效（好了点「我已重载，验证」）</p>`
       : '';
     return `<div class="arow" data-asst-row="${c.id}">
       <span class="aname">${c.name ?? c.id}</span>
@@ -395,7 +400,7 @@ $('#asst-list')?.addEventListener('click', async (event) => {
       msg = '验证通过，已接入 ✓';
     } else if (res?.state === 'pending-restart') {
       rowVerify.set(id, 'pending-restart');
-      msg = '仍在待生效：请确认已完全重载该助手（退出进程，不是关窗口）。';
+      msg = '仍在待生效：请完全退出并重新打开该软件（不是只关窗口）后，点「我已重载，验证」。';
     } else {
       const failedSteps = (res?.steps ?? []).filter((s) => s && s.ok === false).map((s) => s.label ?? s.name).join('、');
       rowVerify.set(id, 'verify-failed');
@@ -410,7 +415,7 @@ $('#asst-list')?.addEventListener('click', async (event) => {
     rowFailed.delete(id);
     rowVerify.delete(id);
     reloadHints.add(id); // 提示层：「已写入 · 请重载」（不驱动状态词；状态词随服务端真值）
-    msg = res.changed ? '已接好（写前已备份），重载该助手后生效。' : '已接入（无需改动）。';
+    msg = res.changed ? '已接好（写前已备份）——重启这个软件后生效。' : '已接入（无需改动）。';
   } else {
     rowFailed.delete(id);
     rowVerify.delete(id);

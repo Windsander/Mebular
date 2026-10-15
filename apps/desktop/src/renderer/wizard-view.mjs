@@ -151,7 +151,7 @@ function assistantsStepView(step, start) {
     skipConnect: { label: '先不接 ›', hidden: !startDone },
     doneLine: step.done
       ? (connected >= 1
-        ? { main: '✓ 已接好', sub: '重载对应助手后生效' }
+        ? { main: '✓ 已接好', sub: '重启对应软件后生效' }
         : { main: '— 已跳过', sub: '随时可以在 设置 → AI 助手 接' })
       : null,
   };

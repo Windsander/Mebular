@@ -1087,3 +1087,7 @@ body.shell-desktop-darwin .topbar { padding-left: 84px; }
 /* C. 滚动手感：主滚动容器稳定 gutter（滚动条出现/消失不挤压内容、不跳变） */
 html { scrollbar-gutter: stable; }
 .aside, .modal, .wizard-list, .snippet, .connect-diff, #memories-view, #settings-body { scrollbar-gutter: stable; }
+
+/* 简化轮：记忆共享 · 参与开关 */
+.ns-subscribe { display: inline-flex; align-items: center; gap: 6px; margin-left: 6px; }
+.diag-fold { margin-top: 14px; }

@@ -2,6 +2,9 @@
 // 与 console.js 的约定：console.js 负责取数/动作/事件，本模块负责
 //   归一化（轮 A 注册表形状优先：state/evidence/hasVerify/activation/kind；旧形状 installed/connected 兜底）、
 //   单列表 HTML、行内 verify 步骤、自定义助手 CRUD 表单、常驻运行行、重启向导行、「需要注意」条目推导。
+// 状态词投影唯一真源 = ./assistant-status.js 的 projectAssistantStatus（向导/设置页共用，快照断言守护一致）。
+
+import { projectAssistantStatus } from './assistant-status.js';
 
 const esc = (s) => String(s ?? '')
   .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -38,21 +41,19 @@ export function normalizeClient(c = {}) {
   };
 }
 
-/** 状态词（与引导同语言；ui.clientRestart=已写入待重载（无 verify 路径）；ui.clientVerify=verify 结果）。 */
+/** 状态词投影（共享 helper 薄封装；clientRestart 语义 = reloadHint 提示层，不再驱动「待生效」）。 */
 export function assistantStatus(client, ui = {}) {
-  if (client.state === 'detect-failed') return { key: 'detect-failed', label: '检测失败', tone: 'todo' };
-  if (client.manual) return { key: 'manual', label: '需手动', tone: 'muted' };
-  if (!client.installed) return { key: 'not-installed', label: '未安装', tone: 'muted' };
-  const verify = ui.clientVerify?.[client.id];
-  if (verify?.state === 'verify-failed') return { key: 'verify-failed', label: '验证未过', tone: 'todo' };
-  if (verify?.state === 'pending-restart' || ui.clientRestart?.[client.id]) return { key: 'pending-reload', label: '待生效', tone: 'todo' };
-  if (client.connected) return { key: 'connected', label: '已接入 ✓', tone: 'ok' };
-  return { key: 'not-connected', label: '未接入', tone: 'muted' };
+  return projectAssistantStatus(client, {
+    busy: ui.clientBusy?.[client.id] ?? null,
+    failed: ui.clientFailed?.[client.id] ?? null,
+    verifyState: ui.clientVerify?.[client.id]?.state ?? null,
+    reloadHint: Boolean(ui.clientRestart?.[client.id]),
+  });
 }
 
-/** 排序：需处理优先（未接入/验证未过/待生效/检测失败 → 需手动 → 已接入）；未安装单独进底部折叠。 */
+/** 排序：需处理优先（未接入/接入失败/验证未过/待生效/检测失败 → 需手动 → 已接入）；未安装单独进底部折叠。 */
 export function sortClients(clients) {
-  const rank = { 'not-connected': 0, 'verify-failed': 0, 'pending-reload': 0, 'detect-failed': 0, manual: 1, connected: 2 };
+  const rank = { 'not-connected': 0, 'connect-failed': 0, 'verify-failed': 0, busy: 0, 'pending-reload': 0, 'detect-failed': 0, manual: 1, connected: 2 };
   const actionable = [], missing = [];
   for (const c of clients) (c.installed ? actionable : missing).push(c);
   actionable.sort((a, b) => (rank[assistantStatus(a).key] ?? 9) - (rank[assistantStatus(b).key] ?? 9));
@@ -87,9 +88,11 @@ function rowHtml(client, ui, status) {
   const msg = ui.clientMsg?.[client.id] ?? '';
   const diff = ui.clientDiff?.[client.id] ?? '';
   const verify = ui.clientVerify?.[client.id] ?? null;
+  const failed = ui.clientFailed?.[client.id] ?? null;
   const pending = status.key === 'pending-reload';
   let action;
-  if (status.key === 'connected') action = `<button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">详情 ›</button>`;
+  if (status.key === 'busy') action = `<button class="btn btn-small btn-crt" type="button" disabled>${esc(status.label)}</button>`;
+  else if (status.key === 'connected') action = `<button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">详情 ›</button>`;
   else if (status.key === 'manual') action = `<button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">查看片段 ›</button>`;
   else if (status.key === 'not-installed') action = `<button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">怎么装 ›</button>`;
   else if (pending) {
@@ -97,12 +100,29 @@ function rowHtml(client, ui, status) {
       ? `<button class="btn btn-small btn-crt" type="button" data-cli-action="verify-confirm" data-cli-id="${id}">我已重载，重新验证</button>`
       : `<button class="btn btn-small btn-crt" type="button" data-cli-action="recheck" data-cli-id="${id}">我已重载，重新验证</button>`;
   } else if (status.key === 'verify-failed') action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="verify" data-cli-id="${id}">重新验证</button>`;
+  else if (status.key === 'connect-failed') action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="connect" data-cli-id="${id}">重试</button>\n      <button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">详情 ›</button>`;
   else if (status.key === 'detect-failed') action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="recheck" data-cli-id="${id}">重试检测</button>`;
   else action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="connect" data-cli-id="${id}">接入</button>\n      <button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">详情 ›</button>`;
 
-  // 行内展开（默认收起；有消息/待生效/验证结果/打开详情时展开）
-  const open = Boolean(msg) || pending || Boolean(verify) || ui.clientOpen?.[client.id];
+  // 行内展开（默认收起；有消息/失败/重载提醒/待生效/验证结果/打开详情时展开）
+  const reloadHint = status.reloadHint === true;
+  const open = Boolean(msg) || Boolean(failed) || reloadHint || pending || Boolean(verify) || ui.clientOpen?.[client.id];
   const detailBits = [];
+  // 补丁 3 增补：提示层与状态层分离——「已写入 · 请重载」小字提醒不覆盖「已接入 ✓」
+  if (reloadHint && (status.key === 'connected' || pending)) {
+    detailBits.push(`<p class="asst-line muted">已写入 · 请重载 ${esc(client.name)} 后生效 · <button class="btn btn-small" type="button" data-cli-action="${client.hasVerify ? 'verify-confirm' : 'recheck'}" data-cli-id="${id}">我已重载，验证</button></p>`);
+  }
+  // 补丁 3：接入失败反馈——一行原因（人话/脱敏）+ rolledBack 明示「已自动还原原配置」+ 查看详情（备份/命令摘要）
+  if (failed) {
+    detailBits.push(`<p class="asst-line todo">${esc(failed.reason ?? '接入失败')}</p>`);
+    if (failed.rolledBack) {
+      const cmds = Array.isArray(failed.commands) && failed.commands.length > 0
+        ? `<br />命令摘要：${esc(failed.commands.map((c) => `${c.cmd}（rc=${c.code}）`).join('；'))}`
+        : '';
+      detailBits.push(`<p class="asst-line">已自动还原原配置。
+        <details class="asst-detail"><summary>查看详情</summary><p class="muted">备份：<code>${esc(failed.backupPath ?? '—')}</code>${cmds}</p></details></p>`);
+    }
+  }
   if (verify) {
     detailBits.push(verifyBlockHtml(client, verify));
   } else if (pending) {

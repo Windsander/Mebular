@@ -156,3 +156,40 @@ function assistantsStepView(step, start) {
       : null,
   };
 }
+
+// ---------------------------------------------------------------------------
+// UX-2 补丁 3：瞬态容忍 + 行状态机（纯函数，渲染层与单测共用）
+// ---------------------------------------------------------------------------
+
+import { projectAssistantStatus } from '../../../../packages/console/assistant-status.js';
+
+/**
+ * ①「守护已就绪」瞬态容忍（防误翻）：曾就绪时**连续 ≥2 次**探测失败才翻回未完成；
+ * 单次 miss → hold（保持上一帧：不翻段、不自动展开日志）；恢复后立即回到 done（无额外延迟）。
+ * @returns {{ hold: boolean, misses: number, lastDone: boolean }}
+ */
+export function flapGate({ lastDone = false, done = false, misses = 0 } = {}) {
+  if (done) return { hold: false, misses: 0, lastDone: true };
+  if (!lastDone) return { hold: false, misses: 0, lastDone: false }; // 本来就未完成：正常呈现
+  const next = misses + 1;
+  return next < 2
+    ? { hold: true, misses: next, lastDone: true }   // 单次 miss：UI 不动
+    : { hold: false, misses: next, lastDone: false }; // 连续 ≥2 次：翻回未完成
+}
+
+/**
+ * 段②行状态 = 共享 helper 薄封装（packages/console/assistant-status.js，
+ * 与设置 · AI 助手同一投影；一致性由快照断言守护）。
+ * ui: { pending?: Set<id>（语义 = reloadHint 提示层）, busy?: {id:action}, failed?: {id:{kind}}, verifyStates?: {id:state} }
+ * 铁律：失败（connect !ok / verify verify-failed）→「接入失败」/「验证未过」，**一律不得显示「待生效」**；
+ *       「待生效」唯一来源 = 服务端 verify pending-restart；服务端 connected → 「已接入 ✓」不被覆盖。
+ */
+export function wizardRowStatus(client, ui = {}) {
+  const id = client?.id;
+  return projectAssistantStatus(client, {
+    busy: ui.busy?.[id] ?? null,
+    failed: ui.failed?.[id] ?? null,
+    verifyState: ui.verifyStates?.[id] ?? null,
+    reloadHint: ui.pending?.has?.(id) ?? false,
+  });
+}

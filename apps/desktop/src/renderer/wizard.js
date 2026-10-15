@@ -10,6 +10,7 @@ const api = window.mebularDesktop;
 const $ = (sel) => document.querySelector(sel);
 const setText = (sel, text) => { const el = $(sel); if (el) el.textContent = text ?? ''; };
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ?? false;
 
 // 日志区只在「进入异常态」的边沿自动展开一次（不打断用户手动收起）
 let logsAutoOpened = false;
@@ -58,23 +59,12 @@ function renderState(state) {
     if (svcBadge) svcBadge.hidden = !start.serviceBadge;
     const goRow = $('#go-row');
     if (goRow) goRow.hidden = doneView; // 简述：完成态无动作行
-    const troubleshooting = $('#start-troubleshoot');
-    if (troubleshooting) troubleshooting.hidden = doneView; // 简述：完成态不挂运维入口（设置/控制台承担）
     const btnGo = $('#btn-go');
     if (btnGo) btnGo.hidden = Boolean(start.actions.go.hidden) || flow.running || doneView;
     const altJoin = $('#alt-join');
     if (altJoin) altJoin.hidden = Boolean(start.actions.join?.hidden ?? true) || flow.running;
     const btnProvision = $('#btn-provision');
     if (btnProvision) btnProvision.hidden = Boolean(start.actions.provision.hidden);
-    const btnInstall = $('#btn-install');
-    if (btnInstall) {
-      btnInstall.hidden = Boolean(start.actions.install.hidden);
-      btnInstall.disabled = Boolean(start.actions.install.disabled);
-      if (start.actions.install.label) btnInstall.textContent = start.actions.install.label;
-    }
-    const postRow = $('#postdone-row');
-    // 简述（完成态）里不挂「开机自启？」——它是部署中的可选动作；日常入口在设置 · 常用
-    if (postRow) postRow.hidden = doneView || !(start.status === 'done' && !start.actions.install.hidden);
 
     if (doneView) {
       const msgEl = $('#flow-msg');
@@ -205,7 +195,22 @@ async function runFlow(fromSub = 'launch') {
   $('#btn-resume').hidden = true;
   flowMsg('');
   // 立即上屏：阶段框在本帧出现（3s 轮询曾有 running 守卫，点击后屏幕会冻在初始页直跳完成——走查事故）
+  // 开场动画（用户定稿手势）：品牌从居中滑到顶部 → 卡片随后展开（FLIP；reduced-motion 直接切换）
+  const heroEl = $('.hero');
+  const panelEl = $('#deploy-panel');
+  const heroBefore = heroEl?.getBoundingClientRect();
   await refresh();
+  if (!reducedMotion && heroEl && heroBefore) {
+    const dy = heroBefore.top - heroEl.getBoundingClientRect().top;
+    if (Math.abs(dy) > 2) {
+      heroEl.animate([{ transform: `translateY(${dy}px)` }, { transform: 'translateY(0)' }],
+        { duration: 420, easing: 'cubic-bezier(0.22, 0.61, 0.36, 1)' });
+    }
+  }
+  if (!reducedMotion && panelEl && !panelEl.hidden) {
+    panelEl.animate([{ opacity: 0, transform: 'translateY(14px)' }, { opacity: 1, transform: 'translateY(0)' }],
+      { duration: 420, delay: 140, easing: 'ease-out', fill: 'backwards' });
+  }
 
   const startIndex = SUBSTEPS.indexOf(fromSub);
   let currentSub = fromSub;
@@ -281,32 +286,6 @@ async function runFlow(fromSub = 'launch') {
 $('#btn-go')?.addEventListener('click', () => { void runFlow('launch'); });
 $('#btn-resume')?.addEventListener('click', () => { void runFlow(flow.failedSub ?? 'launch'); });
 $('#btn-provision')?.addEventListener('click', () => { void api.openConsole(); });
-$('#btn-start')?.addEventListener('click', async () => { await api.start(); await refresh(); });
-// F2c/F4④：安装常驻 = 登记后守护被 launchd 接管重启 → 按钮进「重启中…」过渡（≤60s 轮询），
-// 宽限窗内 ① 不翻回未完成；已注册则服务端 no-op（already）直接刷新。
-$('#btn-install')?.addEventListener('click', async () => {
-  const btn = $('#btn-install');
-  if (btn) { btn.disabled = true; btn.textContent = '重启中…'; }
-  try {
-    const res = await api.serviceInstall();
-    if (res?.ok === false) throw new Error(res.reason ?? '安装失败');
-    if (!res?.already) {
-      armGrace();
-      await refresh(); // 立刻进宽限呈现（不等健康瞬断发生）
-      const ok = await pollState((s) => {
-        const d = s?.steps?.[0]?.detail ?? {};
-        return Boolean(d.healthy) && d.registered === true;
-      });
-      if (!ok) flowMsg('守护仍在恢复中：稍候会自动刷新；若持续异常请看下方日志。');
-    }
-  } catch (error) {
-    setText('#start-detail', `安装常驻失败：${error.message}`);
-  } finally {
-    if (btn) btn.disabled = false; // 文案由下次 renderState 按视图模型恢复
-    await refresh();
-  }
-});
-$('#btn-restart')?.addEventListener('click', async () => { armGrace(); await api.restart(); await refresh(); });
 
 // 完成段为终态单行（用户定调：展开/高级都是自动保障，不给用户找活——
 // 守护/配置异常时视图自动回到操作态并给恢复入口）

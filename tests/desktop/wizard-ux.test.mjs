@@ -103,27 +103,28 @@ describe('W-1/UX-2 ③ 当前段高亮 / done 段收编（视图契约）', () =
     expect(wizardHtml).toMatch(/\.flow li\[data-state="active"\] > i[^}]*box-shadow/);
   });
 
-  it('done 段按钮收编：「重启/仅启动」入「出问题了？」折叠区、常驻留次级 + 临时运行徽章', () => {
+  it('done 段按钮收编（用户定稿去运维化）：常驻/重启/仅启动退出向导——入口归托盘与设置；保留临时运行徽章', () => {
     const running = wizardView(computeWizardState({
       daemonHealthy: true,
       service: { registered: false, running: true },
     }));
     const start = running.steps.find((s) => s.id === 'start');
-    expect(start.actions.restart.area).toBe('troubleshoot');
-    expect(start.actions.startOnly.area).toBe('troubleshoot');
-    expect(start.actions.install.hidden).toBe(false);
+    expect(start.actions.install).toBeUndefined();
+    expect(start.actions.restart).toBeUndefined();
+    expect(start.actions.startOnly).toBeUndefined();
     expect(start.serviceBadge).toBe('临时运行');
     const registered = wizardView(computeWizardState({
       daemonHealthy: true,
       service: { registered: true, running: true },
     }));
-    expect(registered.steps.find((s) => s.id === 'start').actions.install.hidden).toBe(true);
     expect(registered.steps.find((s) => s.id === 'start').serviceBadge).toBeNull();
   });
 
-  it('静态契约：重启按钮位于「出问题了？」<details> 内', () => {
-    expect(wizardHtml).toMatch(/<details[^>]*class="troubleshoot"[\s\S]*?btn-restart[\s\S]*?<\/details>/);
-    expect(wizardHtml).toMatch(/出问题了？/);
+  it('静态契约（用户定稿）：向导无「出问题了？」运维折叠——重启/仅启动入口归托盘菜单', () => {
+    expect(wizardHtml).not.toContain('出问题了');
+    expect(wizardHtml).not.toContain('btn-restart');
+    expect(wizardHtml).not.toContain('btn-start');
+    expect(wizardHtml).not.toContain('troubleshoot');
   });
 });
 
@@ -286,21 +287,21 @@ describe('F1 向导流水不导航：daemon:start / daemon:restart 处理器去�
   });
 });
 
-describe('F2 安装按钮语义：三态 registered（false 才显示；未知/true 一律隐藏）+ 幂等', () => {
-  it('registered=null（probe 失败/未知）→ 安装按钮隐藏、无「临时运行」徽章、文案中性', () => {
+describe('F2 常驻语义：三态 registered（徽章/文案；安装入口已退出向导——归托盘/设置）+ 幂等', () => {
+  it('registered=null（probe 失败/未知）→ 无「临时运行」徽章、文案中性；向导不再提供安装动作', () => {
     const unknown = wizardView(computeWizardState({ daemonHealthy: true, service: { available: false } }));
     const start = unknown.steps.find((s) => s.id === 'start');
-    expect(start.actions.install.hidden).toBe(true);
+    expect(start.actions.install).toBeUndefined();
     expect(start.serviceBadge).toBeNull();
     expect(start.detailText).not.toContain('临时运行——');
   });
 
-  it('registered=false → 显示「让 Mebular 常驻」+ 临时运行徽章；registered=true → 隐藏', () => {
+  it('registered=false → 临时运行徽章（安装入口归托盘/设置）；registered=true → 常驻已装', () => {
     const unreg = wizardView(computeWizardState({ daemonHealthy: true, service: { registered: false, running: true } }));
-    expect(unreg.steps.find((s) => s.id === 'start').actions.install.hidden).toBe(false);
     expect(unreg.steps.find((s) => s.id === 'start').serviceBadge).toBe('临时运行');
+    expect(unreg.steps.find((s) => s.id === 'start').actions.install).toBeUndefined();
     const reg = wizardView(computeWizardState({ daemonHealthy: true, service: { registered: true, running: true } }));
-    expect(reg.steps.find((s) => s.id === 'start').actions.install.hidden).toBe(true);
+    expect(reg.steps.find((s) => s.id === 'start').serviceBadge).toBeNull();
     expect(reg.steps.find((s) => s.id === 'start').detailText).toContain('常驻已装');
   });
 
@@ -325,7 +326,7 @@ describe('F2 安装按钮语义：三态 registered（false 才显示；未知/t
 });
 
 describe('F4④ 宽限窗：重启/安装窗口内 ① 不翻回未完成（grace 呈现）', () => {
-  it('state.grace + ① 暂不健康 → 过渡呈现：current 不报警、日志不自动展开、安装按钮「重启中…」禁用', () => {
+  it('state.grace + ① 暂不健康 → 过渡呈现：current 不报警、日志不自动展开、宽限文案到位', () => {
     const state = computeWizardState({ daemonHealthy: false, service: { registered: true } });
     state.grace = true;
     const view = wizardView(state);
@@ -335,8 +336,6 @@ describe('F4④ 宽限窗：重启/安装窗口内 ① 不翻回未完成（grac
     expect(start.status).toBe('current');
     expect(start.detailText).toContain('重启生效中');
     expect(start.flow.launch).toBe('active');
-    expect(start.actions.install.disabled).toBe(true);
-    expect(start.actions.install.label).toBe('重启中…');
     expect(start.actions.go.hidden).toBe(true);
   });
 
@@ -346,18 +345,13 @@ describe('F4④ 宽限窗：重启/安装窗口内 ① 不翻回未完成（grac
     expect(view.steps.find((s) => s.id === 'start').status).toBe('current');
   });
 
-  it('渲染层契约：安装/重启动作 arm 宽限窗；安装按钮进「重启中…」过渡并轮询恢复（≤60s）', () => {
+  it('渲染层契约：宽限窗由 recover 子步（流水）arm；向导不再有安装/重启按钮', () => {
     expect(wizardJs).toMatch(/function armGrace\(ms = 60000\)/);
-    const installHandler = wizardJs.match(/\$\('#btn-install'\)\?\.addEventListener\('click', async \(\) => \{[\s\S]*?\n\}\);/)?.[0] ?? '';
-    expect(installHandler).toContain('重启中…');
-    expect(installHandler).toContain('armGrace()');
-    expect(installHandler).toContain('res?.already');
-    expect(installHandler).toContain('pollState');
-    const restartHandler = wizardJs.match(/\$\('#btn-restart'\)\?\.addEventListener\('click', async \(\) => \{[^}]*\}\);/)?.[0] ?? '';
-    expect(restartHandler).toContain('armGrace()');
+    expect(wizardJs).toMatch(/sub === 'recover'[\s\S]{0,340}armGrace\(\)/);
     expect(wizardJs).toMatch(/Date\.now\(\) < graceUntil[\s\S]{0,120}state\.grace = true/);
-    expect(wizardJs).toMatch(/btnInstall\.disabled = Boolean\(start\.actions\.install\.disabled\)/);
-    expect(wizardJs).toMatch(/btnInstall\.textContent = start\.actions\.install\.label/);
+    expect(wizardJs).not.toContain('#btn-install');
+    expect(wizardJs).not.toContain('#btn-restart');
+    expect(wizardJs).not.toContain('#btn-start');
   });
 });
 
@@ -496,10 +490,9 @@ describe('设计稿 ⑤ 完成时刻与已设置过·直达 + 星野省电纪律
 });
 
 describe('设计稿 ⑥ [hidden] 语义兜底（author display 不得覆盖 hidden）', () => {
-  it('置末位的 [hidden]{display:none} 守卫 + 安装按钮初始 hidden（F2a 未知一律隐藏，无首屏闪现）', () => {
+  it('置末位的 [hidden]{display:none} 守卫（author display 不得覆盖 hidden）', () => {
     expect(wizardHtml).toMatch(/\[hidden\] \{ display: none; \}/);
     expect(wizardHtml.indexOf('[hidden] { display: none; }')).toBeGreaterThan(wizardHtml.indexOf('.alt {'));
-    expect(wizardHtml).toMatch(/id="btn-install"[^>]*hidden/);
   });
 });
 
@@ -701,14 +694,13 @@ describe('补丁 3 增补 · 单一真源：向导/设置两面投影一致（�
 // ---------------------------------------------------------------------------
 
 describe('简化轮 · 向导首屏去运维化（① 全自动、② 只看已装）', () => {
-  it('首屏（初始态）只有一个按钮；常驻/重启/仅启动全部收在阶段框内（部署时才出现）', () => {
+  it('首屏（初始态）只有一个按钮；常驻/重启/仅启动已退出向导（入口归托盘与设置）', () => {
     const idle = wizardHtml.match(/<div class="idle-cta" id="idle-cta">[\s\S]*?<\/div>/)?.[0] ?? '';
     expect(idle).toContain('id="btn-go"');
     expect(idle).toContain('开始部署');
-    expect(idle).not.toContain('btn-install');
     expect(idle).not.toContain('alt-join');
-    expect(wizardHtml).toMatch(/<details class="troubleshoot"[\s\S]*?btn-restart[\s\S]*?btn-start[\s\S]*?<\/details>/);
-    expect(wizardHtml).toMatch(/id="postdone-row"[^>]*hidden[\s\S]{0,200}btn-install/);
+    expect(wizardHtml).not.toContain('btn-install');
+    expect(wizardHtml).not.toContain('btn-restart');
   });
 
   it('（旁白式修订）向导不再有助手清单——manual 兜底天然不进向导；目标过滤只含真实已装', () => {
@@ -718,9 +710,11 @@ describe('简化轮 · 向导首屏去运维化（① 全自动、② 只看已�
     expect(wizardJs).not.toContain('renderClients');
   });
 
-  it('安装按钮只在 ① 完成后随 postdone-row 出现（渲染层契约）', () => {
-    expect(wizardJs).toMatch(/postdone-row[\s\S]{0,240}start\.status === 'done'/);
-    expect(wizardJs).toMatch(/start\.actions\.install\.hidden/);
+  it('（用户定稿）持久化按钮不进部署卡片——「让 Mebular 常驻」整行下线', () => {
+    expect(wizardJs).not.toContain('postdone-row');
+    expect(wizardJs).not.toContain('btn-install');
+    expect(wizardHtml).not.toContain('让 Mebular 常驻');
+    expect(wizardHtml).not.toContain('postdone-row');
   });
 });
 
@@ -788,9 +782,10 @@ describe('简化轮走查修复 2 · 极简（用户定调：完成即终态、�
     expect(fn).toMatch(/c\.needsManual !== true/);
   });
 
-  it('（三态·简述定稿）「高级 · 出问题了？」只在部署态可见——完成态简述收起运维入口（设置/控制台承担）', () => {
-    expect(wizardHtml).toMatch(/<details class="troubleshoot"[\s\S]{0,220}btn-restart/);
-    expect(wizardJs).toMatch(/troubleshooting\.hidden = doneView/);
+  it('（用户定稿·去运维化）「高级 · 出问题了？」整块下线——部署卡片只剩步骤+旁白（运维入口归托盘/设置）', () => {
+    expect(wizardHtml).not.toContain('高级 · 出问题了');
+    expect(wizardHtml).not.toContain('troubleshoot');
+    expect(wizardJs).not.toContain('troubleshooting');
   });
 });
 
@@ -807,11 +802,16 @@ describe('简化轮走查修复 5 · 点击即上屏（走查事故回归：点�
   it('runFlow 开场立即 refresh（阶段框本帧出现）；3s 轮询不再被 running 守卫吞掉', () => {
     // 事故根因：setInterval 的 !flow.running 守卫 + runFlow 不在开场刷新 → 面板显隐无人驱动，
     // 屏幕冻在初始页直到流水结束的 finally refresh 才蹦出完成态
-    expect(wizardJs).toMatch(/\/\/ 立即上屏[\s\S]{0,220}await refresh\(\);/);
+    expect(wizardJs).toMatch(/\/\/ 立即上屏[\s\S]{0,460}await refresh\(\);/);
     expect(wizardJs).not.toMatch(/if \(!flow\.running\) \{ void refresh/);
     expect(wizardJs).toMatch(/setInterval\(\(\) => \{ void refresh\(\); void loadLogs\(\); \}, 3000\)/);
     // 部署中副标题不再是「点一下，接入设备」
     expect(wizardJs).toMatch(/flow\.running \? '正在部署…' : view\.tagline/);
+    // 用户定稿手势：品牌 FLIP 滑到顶部 → 卡片延迟展开（reduced-motion 直达）
+    expect(wizardJs).toMatch(/heroBefore = heroEl\?\.getBoundingClientRect\(\)/);
+    expect(wizardJs).toMatch(/heroEl\.animate\(\[/);
+    expect(wizardJs).toMatch(/panelEl\.animate\(\[\{ opacity: 0/);
+    expect(wizardJs).toMatch(/if \(!reducedMotion && heroEl && heroBefore\)/);
   });
 });
 

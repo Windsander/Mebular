@@ -120,10 +120,6 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
       provision: { label: '去写入初始设置 →', kind: 'primary', hidden: !(provision.required && !provision.provisioned) },
       // 设计稿：「或加入已有的 Mebular ›」——与「去写入初始设置」同路（控制台 provision），仅引导态显示
       join: { label: '或加入已有的 Mebular ›', kind: 'alt', hidden: !(provision.required && !provision.provisioned) },
-      // F2a：仅当明确「未注册」（registered === false）才显示安装按钮；未知/true 一律隐藏
-      install: { label: '让 Mebular 常驻', kind: 'ghost', hidden: registered !== false, recommended: step.done && registered === false },
-      restart: { label: '重启守护', kind: 'ghost', area: 'troubleshoot', hidden: false },
-      startOnly: { label: '仅启动守护', kind: 'ghost', area: 'troubleshoot', hidden: false },
     },
   };
 }

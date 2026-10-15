@@ -71,9 +71,6 @@
     details { border: 1px dashed var(--border); border-radius: 6px; padding: 8px 10px; margin-top: 10px; }
     details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
     details[open] summary { margin-bottom: 6px; }
-    details.troubleshoot { border: none; padding: 2px 0 0; margin-top: 10px; }
-    details.troubleshoot summary { font-size: 11px; color: var(--muted); }
-    details.troubleshoot summary:hover { color: var(--text); }
 
     /* 流水（部署四步）：全自动叙事 */
     .flow { list-style: none; margin: 10px 0 4px; padding: 0; display: grid; gap: 4px; }
@@ -163,17 +160,6 @@
         <button id="btn-provision" class="primary" hidden>去写入初始设置 →</button>
         <a class="alt" id="alt-join" hidden>或加入已有的 Mebular ›</a>
       </div>
-      <div class="row" id="postdone-row" hidden>
-        <span class="hint">已就绪 · 开机自启更省心？</span>
-        <button id="btn-install" class="ghost" hidden>让 Mebular 常驻</button>
-      </div>
-      <details class="troubleshoot" id="start-troubleshoot">
-        <summary>高级 · 出问题了？</summary>
-        <div class="row">
-          <button id="btn-restart" class="ghost">重启守护</button>
-          <button id="btn-start" class="ghost">仅启动守护</button>
-        </div>
-      </details>
     </section>
 
     <!-- ===== 状态 3：完成缩略卡（阶段框的收束形态 + 主按钮） ===== -->

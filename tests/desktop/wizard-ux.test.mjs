@@ -179,11 +179,11 @@ describe('UX-2 ⑤ 段① 一键开始：子步骤流水（启动 → 写入 →
 });
 
 describe('UX-2 ⑥ 段② 行级接入 + 「已完成」显式确认', () => {
-  it('自动化模型（用户定调）：② 无出口按钮；确认由「自动部署」流水尾统一执行（点过即确认）', () => {
+  it('自动化模型（用户定调）：② 无出口按钮；确认由「开始部署」流水尾统一执行（点过即确认）', () => {
     const partial = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1, total: 8, installedCount: 3 } }));
     const a = partial.steps.find((s) => s.id === 'assistants');
     expect(a.skipConnect).toBeUndefined();
-    expect(a.detailText).toContain('点「自动部署」');
+    expect(a.detailText).toContain('点「开始部署」');
     expect(wizardJs).not.toContain('data-asst-act');
     expect(wizardJs).toMatch(/await api\.ackAssistants\(\)/); // 流水尾统一确认
     // start 未完成 → 拦住
@@ -240,7 +240,7 @@ describe('W-1 ① 渲染层接线（provision CTA / ② 先完成第①步）', 
     expect(wizardJs).toMatch(/setText\('#start-detail'/);
     expect(wizardJs).toMatch(/complete-cta/);
     expect(wizardJs).toMatch(/logs-panel/);
-    expect(wizardJs).toMatch(/panel\.hidden = existing/); // 完成态步骤框保留，仅直达变体隐藏
+    expect(wizardJs).toMatch(/panel\.hidden = !\(deployView \|\| doneView\)/); // 完成态步骤框保留
   });
 
   it('星野舞台：canvas #sky + prefers-reduced-motion 静止降级', () => {
@@ -406,11 +406,12 @@ describe('设计稿 ② 里程碑轨道（左轨线 + 节点灯 active/done/lock
   });
 
   it('渲染层契约（三态·用户定稿）：is-idle 居中 → 部署阶段框 → 完成缩略卡（含 CTA）', () => {
-    expect(wizardJs).toMatch(/const deploying = !complete && \(flow\.running \|\| flow\.everRan \|\| Date\.now\(\) < graceUntil\)/);
-    expect(wizardJs).toMatch(/classList\.toggle\('is-idle'/);
-    expect(wizardJs).toMatch(/idleCta\.hidden = existing \|\| complete \|\| deploying/);
-    expect(wizardJs).toMatch(/panel\.hidden = existing \|\| \(!deploying && !complete\)/); // 完成态：阶段框简述保留
-    expect(wizardJs).toMatch(/cta\.hidden = !complete \|\| existing/);
+    expect(wizardJs).toMatch(/const deployView = flow\.running \|\| \(!complete && \(flow\.everRan \|\| Date\.now\(\) < graceUntil\)\)/);
+    expect(wizardJs).toMatch(/const doneView = !deployView && complete && flow\.everRan/);
+    expect(wizardJs).toMatch(/classList\.toggle\('is-idle', idleView\)/);
+    expect(wizardJs).toMatch(/idleCta\.hidden = !idleView/);
+    expect(wizardJs).toMatch(/panel\.hidden = !\(deployView \|\| doneView\)/); // 完成态：阶段框简述保留
+    expect(wizardJs).toMatch(/cta\.hidden = !doneView/);
   });
 });
 
@@ -439,21 +440,21 @@ describe('设计稿 ③ done-line 回顾行与「先不接 ›」', () => {
 });
 
 describe('设计稿 ④ 段② 文案与空态（以设计稿为准）', () => {
-  it('检测到 N 个已装助手（含已接入计数）；文案指引「自动部署」', () => {
+  it('检测到 N 个已装助手（含已接入计数）；文案指引「开始部署」', () => {
     const view = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1, total: 3 } }));
     const a = view.steps.find((s) => s.id === 'assistants');
-    expect(a.detailText).toBe('检测到 3 个已装助手（已接入 1 个）——点「自动部署」接上；未成功的会在下方给出原因。');
+    expect(a.detailText).toBe('检测到 3 个已装助手（已接入 1 个）——点「开始部署」接上；未成功的会在下方给出原因。');
     expect(a.skipConnect).toBeUndefined();
     const zero = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 3, installedCount: 3 } }));
-    expect(zero.steps.find((s) => s.id === 'assistants').detailText).toContain('点「自动部署」');
+    expect(zero.steps.find((s) => s.id === 'assistants').detailText).toContain('点「开始部署」');
     const empty = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 0 } }));
     const ae = empty.steps.find((s) => s.id === 'assistants');
     expect(ae.detailText).toContain('没检测到已装的 AI 助手');
     expect(ae.skipConnect).toBeUndefined();
   });
 
-  it('（三态修订）初始态仅「自动部署」一个按钮；隐私文案随面板退场（不再上屏）', () => {
-    expect(wizardHtml).toContain('自动部署');
+  it('（三态修订）初始态仅「开始部署」一个按钮；隐私文案随面板退场（不再上屏）', () => {
+    expect(wizardHtml).toContain('开始部署');
     expect(wizardHtml).toContain('id="idle-cta"');
     expect(wizardHtml).not.toContain('id="assist-note"');
   });
@@ -476,12 +477,14 @@ describe('设计稿 ⑤ 完成时刻与已设置过·直达 + 星野省电纪律
     expect(wizardJs).toMatch(/提醒：重启 \$\{pending/);
   });
 
-  it('已设置过·直达：首次即完成 → is-existing（欢迎回来替换部署面板；跑完当场完成仍走 finish）', () => {
-    expect(wizardHtml).toContain('id="existing"');
-    expect(wizardHtml).toContain('欢迎回来');
-    expect(wizardHtml).toMatch(/body\.is-existing #deploy-panel[^}]*display:\s*none/);
-    expect(wizardJs).toMatch(/if \(!firstSeen\)[\s\S]{0,160}is-existing/);
-    expect(wizardJs).toContain('btn-enter-console-2');
+  it('外开已完成机器 → 引导首页（重启向导=从头走，部署幂等）；欢迎回来变体已退场', () => {
+    expect(wizardHtml).not.toContain('欢迎回来');
+    expect(wizardHtml).not.toContain('id="existing"');
+    expect(wizardJs).not.toContain('is-existing');
+    expect(wizardJs).not.toContain('firstSeen');
+    // 三态裁决：仅「本次会话刚完成」才走完成简述；其余（含外开完成机）回引导首页
+    expect(wizardJs).toMatch(/const doneView = !deployView && complete && flow\.everRan/);
+    expect(wizardJs).toMatch(/const idleView = !deployView && !doneView/);
   });
 
   it('星野省电纪律：仅可见时渲染、隐藏即停（visibilitychange + cancelAnimationFrame）；reduced-motion 静止', () => {
@@ -701,7 +704,7 @@ describe('简化轮 · 向导首屏去运维化（① 全自动、② 只看已�
   it('首屏（初始态）只有一个按钮；常驻/重启/仅启动全部收在阶段框内（部署时才出现）', () => {
     const idle = wizardHtml.match(/<div class="idle-cta" id="idle-cta">[\s\S]*?<\/div>/)?.[0] ?? '';
     expect(idle).toContain('id="btn-go"');
-    expect(idle).toContain('自动部署');
+    expect(idle).toContain('开始部署');
     expect(idle).not.toContain('btn-install');
     expect(idle).not.toContain('alt-join');
     expect(wizardHtml).toMatch(/<details class="troubleshoot"[\s\S]*?btn-restart[\s\S]*?btn-start[\s\S]*?<\/details>/);
@@ -775,8 +778,8 @@ describe('简化轮走查修复 2 · 极简（用户定调：完成即终态、�
     expect(wizardHtml).not.toContain('展开 ›');
     expect(wizardJs).not.toContain('userExpanded');
     // 阶段框与缩略卡互斥：完成时 panel 隐藏、done-card 显示
-    expect(wizardJs).toMatch(/panel\.hidden = existing \|\| \(!deploying && !complete\)/); // 完成态：阶段框简述保留
-    expect(wizardJs).toMatch(/cta\.hidden = !complete \|\| existing/);
+    expect(wizardJs).toMatch(/panel\.hidden = !\(deployView \|\| doneView\)/); // 完成态：阶段框简述保留
+    expect(wizardJs).toMatch(/cta\.hidden = !doneView/);
   });
 
   it('内置兜底「其他 AI 助手（复制片段）」（manual）不进向导——connectTargets 排除', () => {
@@ -787,13 +790,13 @@ describe('简化轮走查修复 2 · 极简（用户定调：完成即终态、�
 
   it('（三态·简述定稿）「高级 · 出问题了？」只在部署态可见——完成态简述收起运维入口（设置/控制台承担）', () => {
     expect(wizardHtml).toMatch(/<details class="troubleshoot"[\s\S]{0,220}btn-restart/);
-    expect(wizardJs).toMatch(/troubleshooting\.hidden = complete/);
+    expect(wizardJs).toMatch(/troubleshooting\.hidden = doneView/);
   });
 });
 
 describe('简化轮走查修复 3 · 日志折条不常驻（① 就绪即隐藏，异常才出现）', () => {
   it('渲染层契约：日志是异常件（未开始不出现；部署中失败/引导态才出现并自动展开一次）', () => {
-    expect(wizardJs).toMatch(/const showLogs = deploying && start\?\.status !== 'done' && \(flow\.everRan \|\| flow\.running \|\| provisionRequired\)/);
+    expect(wizardJs).toMatch(/const showLogs = deployView && start\?\.status !== 'done' && \(flow\.everRan \|\| flow\.running \|\| provisionRequired\)/);
     expect(wizardJs).toMatch(/logsPanel\.hidden = !showLogs/);
     expect(wizardHtml).toMatch(/<details[^>]*id="logs-panel"[^>]*>/);
   });

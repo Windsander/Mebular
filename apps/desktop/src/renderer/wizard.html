@@ -101,10 +101,6 @@
     .done-card #finish-note { margin: 0 0 14px; line-height: 1.8; }
     .done-card #finish-note .warn-text { display: block; color: #ffd9a8; }
 
-    /* 已设置过·直达变体 */
-    #existing { text-align: center; }
-    body.is-existing #deploy-panel, body.is-existing .idle-cta, body.is-existing #complete-cta, body.is-existing #logs-panel { display: none; }
-    body:not(.is-existing) #existing { display: none; }
 
     /* 诊断与日志（默认折叠；异常时渲染层自动展开 + 一行结论） */
     #logs-panel { position: relative; z-index: 1; max-width: 620px; margin: 0 auto; }
@@ -148,12 +144,12 @@
 
     <!-- ===== 状态 1：初始（仅一个按钮，全部居中、无附加元素） ===== -->
     <div class="idle-cta" id="idle-cta">
-      <button id="btn-go" class="primary big">自动部署</button>
+      <button id="btn-go" class="primary big">开始部署</button>
     </div>
 
     <!-- ===== 状态 2：阶段框（点击后出现，四步进度 + 旁白） ===== -->
     <section class="panel" id="deploy-panel" hidden>
-      <h2>自动部署 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
+      <h2>开始部署 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
       <p class="muted" id="start-detail" hidden></p>
       <ol id="start-flow" class="flow">
         <li data-sub="launch" data-state="todo"><i></i>启动本机守护</li>
@@ -187,12 +183,6 @@
       <button id="btn-enter-console" class="primary big">进入控制台 ✦</button>
     </section>
 
-    <!-- ===== 已设置过·直达变体 ===== -->
-    <section class="panel" id="existing" hidden>
-      <h2>欢迎回来</h2>
-      <p class="muted">这台机器已经设置好，Mebular 正在后台运行。</p>
-      <button id="btn-enter-console-2" class="primary big">进入控制台</button>
-    </section>
   </div>
 
   <details id="logs-panel">

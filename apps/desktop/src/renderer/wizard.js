@@ -16,34 +16,30 @@ let logsAutoOpened = false;
 
 // ---------- 渲染（视图模型驱动；01-setup 设计稿：hero/tagline + 里程碑轨道 + done-line 回顾） ----------
 
-// 已设置过·直达变体：首次拿到的状态就是完成态 → 「欢迎回来」替换整个轨道
-let firstSeen = false;
 
 function renderState(state) {
   if (!state) return;
   const view = wizardView(state);
   const complete = Boolean(state.complete);
 
-  if (!firstSeen) {
-    firstSeen = true;
-    if (complete) document.body.classList.add('is-existing');
-  }
-  const existing = document.body.classList.contains('is-existing');
-  const existingEl = $('#existing');
-  if (existingEl) existingEl.hidden = !existing;
+  // 三态（用户定稿）：
+  //   引导首页 = 全屏居中仅「开始部署」（外开已完成机器也回到这里——重启向导=从头走，部署幂等）
+  //   部署中   = 标题上浮 + 阶段框（四步流水 + 旁白）
+  //   完成     = 阶段框简述（四步全 ✓）+ 已就绪卡（仅本次会话刚完成时呈现——完成即奖励，再进=首页）
+  // 流水运行中优先走「部署」呈现（已完工机器上重复点「开始部署」也完整走一遍动画）；
+  // 仅「本次会话刚完成、且没在跑」才切完成简述
+  const deployView = flow.running || (!complete && (flow.everRan || Date.now() < graceUntil));
+  const doneView = !deployView && complete && flow.everRan;
+  const idleView = !deployView && !doneView;
+  document.body.classList.toggle('is-idle', idleView);
 
-  // 三态（用户定稿）：初始=全屏居中仅一个按钮 → 部署=标题上浮+阶段框 → 完成=缩略卡
-  const deploying = !complete && (flow.running || flow.everRan || Date.now() < graceUntil);
-  document.body.classList.toggle('is-idle', !existing && !complete && !deploying);
-
-  setText('#tagline', existing ? '' : view.tagline);
+  setText('#tagline', idleView ? '点一下，接入设备' : view.tagline);
   const idleCta = $('#idle-cta');
-  if (idleCta) idleCta.hidden = existing || complete || deploying;
+  if (idleCta) idleCta.hidden = !idleView;
   const panel = $('#deploy-panel');
-  // 完成态（用户定稿）：面板以「阶段框简述」保留（四步全 ✓，其余元素收起）+ 已就绪卡
-  if (panel) panel.hidden = existing || (!deploying && !complete);
+  if (panel) panel.hidden = !(deployView || doneView);
   const cta = $('#complete-cta');
-  if (cta) cta.hidden = !complete || existing;
+  if (cta) cta.hidden = !doneView;
   const finishNote = $('#finish-note');
   if (finishNote && complete) {
     const pending = [...reloadHints];
@@ -54,18 +50,18 @@ function renderState(state) {
 
   const start = view.steps.find((s) => s.id === 'start');
   const assistantsDone = Boolean(state.steps?.find((s) => s.id === 'assistants')?.done);
-  if (start && (deploying || complete)) {
+  if (start && (deployView || doneView)) {
     setText('#start-detail', start.detailText);
     const startDetail = $('#start-detail');
-    if (startDetail) startDetail.hidden = complete; // 简述：完成态收掉状态行
+    if (startDetail) startDetail.hidden = doneView; // 简述：完成态收掉状态行
     const svcBadge = $('#start-service-badge');
     if (svcBadge) svcBadge.hidden = !start.serviceBadge;
     const goRow = $('#go-row');
-    if (goRow) goRow.hidden = complete; // 简述：完成态无动作行
+    if (goRow) goRow.hidden = doneView; // 简述：完成态无动作行
     const troubleshooting = $('#start-troubleshoot');
-    if (troubleshooting) troubleshooting.hidden = complete; // 简述：完成态不挂运维入口（设置/控制台承担）
+    if (troubleshooting) troubleshooting.hidden = doneView; // 简述：完成态不挂运维入口（设置/控制台承担）
     const btnGo = $('#btn-go');
-    if (btnGo) btnGo.hidden = Boolean(start.actions.go.hidden) || flow.running || complete;
+    if (btnGo) btnGo.hidden = Boolean(start.actions.go.hidden) || flow.running || doneView;
     const altJoin = $('#alt-join');
     if (altJoin) altJoin.hidden = Boolean(start.actions.join?.hidden ?? true) || flow.running;
     const btnProvision = $('#btn-provision');
@@ -78,9 +74,9 @@ function renderState(state) {
     }
     const postRow = $('#postdone-row');
     // 简述（完成态）里不挂「开机自启？」——它是部署中的可选动作；日常入口在设置 · 常用
-    if (postRow) postRow.hidden = complete || !(start.status === 'done' && !start.actions.install.hidden);
+    if (postRow) postRow.hidden = doneView || !(start.status === 'done' && !start.actions.install.hidden);
 
-    if (complete) {
+    if (doneView) {
       const msgEl = $('#flow-msg');
       if (msgEl) msgEl.textContent = '';
     }
@@ -102,7 +98,7 @@ function renderState(state) {
     // 简洁（用户定调）：日志是**异常件**——未开始不出现、① 就绪后不常驻；
     // 只有真失败（跑过流水且失败）/ 运行中 / 引导态才出现（并自动展开一次）
     const provisionRequired = Boolean(state?.steps?.[0]?.detail?.provision?.required);
-    const showLogs = deploying && start?.status !== 'done' && (flow.everRan || flow.running || provisionRequired);
+    const showLogs = deployView && start?.status !== 'done' && (flow.everRan || flow.running || provisionRequired);
     logsPanel.hidden = !showLogs;
     if (showLogs && view.logs.open && !logsAutoOpened) {
       logsPanel.open = true;
@@ -322,7 +318,6 @@ $('#alt-join')?.addEventListener('click', () => { void api.openConsole(); });
 
 $('#btn-skip')?.addEventListener('click', () => { void api.skipWizard(); });
 $('#btn-enter-console')?.addEventListener('click', () => { void api.openConsole(); });
-$('#btn-enter-console-2')?.addEventListener('click', () => { void api.openConsole(); });
 
 // ---------- 诊断与日志 ----------
 

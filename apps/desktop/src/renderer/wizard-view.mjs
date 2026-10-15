@@ -116,7 +116,7 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
       : null,
     actions: {
       // 完成前恒在：② 未收尾时它仍是唯一动作入口（点一次跑完剩余全部自动化）
-      go: { label: '自动部署', kind: 'primary', hidden: false },
+      go: { label: '开始部署', kind: 'primary', hidden: false },
       provision: { label: '去写入初始设置 →', kind: 'primary', hidden: !(provision.required && !provision.provisioned) },
       // 设计稿：「或加入已有的 Mebular ›」——与「去写入初始设置」同路（控制台 provision），仅引导态显示
       join: { label: '或加入已有的 Mebular ›', kind: 'alt', hidden: !(provision.required && !provision.provisioned) },
@@ -142,7 +142,7 @@ function assistantsStepView(step, start) {
   else if (detail.readError) detailText = `状态读取受限：${detail.readError}（不阻断）。`;
   else if (installed === 0) detailText = '没检测到已装的 AI 助手 —— 装好后回来点「一键开始」即可。';
   else if (connected >= installed) detailText = `已接入 ${connected} 个 AI 助手。`;
-  else detailText = `检测到 ${installed} 个已装助手（已接入 ${connected} 个）——点「自动部署」接上；未成功的会在下方给出原因。`;
+  else detailText = `检测到 ${installed} 个已装助手（已接入 ${connected} 个）——点「开始部署」接上；未成功的会在下方给出原因。`;
   return {
     detailText,
     connected,

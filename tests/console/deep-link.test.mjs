@@ -206,15 +206,24 @@ describe('UX-2 收口 ① normalizeClient：轮 A 新形状优先，旧形状兜
   });
 });
 
-describe('UX-2 收口 ② assistantStatus：verify 三态接入状态词', () => {
+describe('UX-2 收口 ② assistantStatus：verify 三态接入状态词（补丁 3 增补：clientRestart 降为提示层）', () => {
   const base = normalizeClient({ id: 'c', name: 'C', state: 'not-connected', hasVerify: true });
-  it('verify-failed → 验证未过；pending-restart → 待生效；connected 仍看落面', () => {
+  it('verify-failed → 验证未过；verify pending-restart → 待生效（唯一来源）；connected 仍看落面', () => {
     expect(assistantStatus(base, { clientVerify: { c: { state: 'verify-failed' } } })).toMatchObject({ key: 'verify-failed', label: '验证未过', tone: 'todo' });
     expect(assistantStatus(base, { clientVerify: { c: { state: 'pending-restart' } } })).toMatchObject({ key: 'pending-reload', label: '待生效' });
-    expect(assistantStatus(base, { clientRestart: { c: true } })).toMatchObject({ key: 'pending-reload' });
     expect(assistantStatus(normalizeClient({ id: 'c', state: 'connected' }), {})).toMatchObject({ key: 'connected', label: '已接入 ✓' });
     expect(assistantStatus(base, {})).toMatchObject({ key: 'not-connected' });
     expect(assistantStatus(normalizeClient({ id: 'm', state: 'manual' }), {})).toMatchObject({ key: 'manual', label: '需手动' });
+  });
+
+  it('补丁 3 增补：clientRestart（已写入记忆）不再驱动「待生效」——服务端 connected → 已接入 ✓ + reloadHint 提示层', () => {
+    // 用户真机事故回归：服务端已 connected 时 UI 永远不得显示「待生效」
+    const conn = normalizeClient({ id: 'c', state: 'connected' });
+    const st = assistantStatus(conn, { clientRestart: { c: true } });
+    expect(st).toMatchObject({ key: 'connected', label: '已接入 ✓', reloadHint: true });
+    expect(st.label).not.toBe('待生效');
+    // 写入后 list 尚未刷到 connected 的窗口期：hint 存疑但不冒充状态词
+    expect(assistantStatus(base, { clientRestart: { c: true } })).toMatchObject({ key: 'not-connected', reloadHint: false });
   });
 });
 
@@ -301,5 +310,63 @@ describe('UX-2 收口 ④ ＋新增助手 CRUD 表单与端点接线', () => {
   it('移除需二次确认（window.confirm）', () => {
     const fn = consoleJs.match(/async function assistantRemove[\s\S]*?\n}/)?.[0] ?? '';
     expect(fn).toContain('window.confirm');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// UX-2 补丁 3：接入失败反馈语义 + 在途禁用（控制台 · 设置 · AI 助手）
+// ---------------------------------------------------------------------------
+
+describe('UX-2 补丁 3 · 控制台：接入失败语义（绝不落入「待生效」）', () => {
+  const base = normalizeClient({ id: 'c', name: 'C', state: 'not-connected', hasVerify: true, landing: { primaryPath: '/x.json' } });
+
+  it('connect 失败 →「接入失败」+ 重试；rolledBack → 「已自动还原原配置」+ 查看详情（备份/命令摘要）', () => {
+    const ui = { clientFailed: { c: { kind: 'connect', reason: '写入失败（mcp_servers.mebular）已回滚', rolledBack: true, backupPath: '/x.json.bak-1', commands: [{ cmd: 'cfg set x', code: 1 }] } } };
+    expect(assistantStatus(base, ui)).toMatchObject({ key: 'connect-failed', label: '接入失败', tone: 'todo' });
+    const html = assistantsPanelHtml({ clients: [{ id: 'c', name: 'C', state: 'not-connected', hasVerify: true, landing: { primaryPath: '/x.json' } }], ui });
+    expect(html).toContain('接入失败');
+    expect(html).toContain('重试');
+    expect(html).toContain('写入失败（mcp_servers.mebular）已回滚');
+    expect(html).toContain('已自动还原原配置');
+    expect(html).toContain('查看详情');
+    expect(html).toContain('/x.json.bak-1');
+    expect(html).toContain('cfg set x');
+  });
+
+  it('未回滚的失败（解析失败等）→「接入失败」+ 原因，无「还原」行；与 pending 并存时失败优先', () => {
+    const ui = { clientFailed: { c: { kind: 'connect', reason: '配置无法解析（不自动改写）' } } };
+    const html = assistantsPanelHtml({ clients: [{ id: 'c', name: 'C', state: 'not-connected' }], ui });
+    expect(html).toContain('接入失败');
+    expect(html).toContain('配置无法解析');
+    expect(html).not.toContain('已自动还原');
+    // 防御：failed + restart 同帧 → 接入失败优先（待生效 = 仅写入成功且待重载）
+    expect(assistantStatus(base, { clientFailed: { c: { kind: 'connect', reason: 'x' } }, clientRestart: { c: true } }).label).toBe('接入失败');
+  });
+
+  it('在途 busy →「写入中…/验证中…」+ 按钮禁用；busy 优先于失败态', () => {
+    expect(assistantStatus(base, { clientBusy: { c: 'connect' } })).toMatchObject({ key: 'busy', label: '写入中…' });
+    expect(assistantStatus(base, { clientBusy: { c: 'verify' } })).toMatchObject({ key: 'busy', label: '验证中…' });
+    expect(assistantStatus(base, { clientBusy: { c: 'connect' }, clientFailed: { c: { kind: 'connect', reason: 'x' } } }).key).toBe('busy');
+    const html = assistantsPanelHtml({ clients: [{ id: 'c', name: 'C', state: 'not-connected' }], ui: { clientBusy: { c: 'connect' } } });
+    const row = html.match(/<div class="asst-row" data-asst-row="c">[\s\S]*?<\/div>/)?.[0] ?? '';
+    expect(row).toContain('disabled');
+    expect(row).not.toContain('data-cli-action='); // 在途不给任何可点动作
+  });
+
+  it('「待生效」新语义（补丁 3 增补）：仅服务端 verify pending-restart；clientRestart 是提示层', () => {
+    expect(assistantStatus(base, { clientVerify: { c: { state: 'pending-restart' } } })).toMatchObject({ key: 'pending-reload', label: '待生效' });
+    // clientRestart（写入记忆）+ 服务端 connected → 已接入 ✓（提示层小字，不覆盖状态词）
+    const conn = normalizeClient({ id: 'c', state: 'connected' });
+    expect(assistantStatus(conn, { clientRestart: { c: true } })).toMatchObject({ key: 'connected', reloadHint: true });
+  });
+
+  it('console.js 接线契约：clientFailed 取自 error.payload（reason/rolledBack/backupPath/commands）+ busy 包裹 + 签名含两者', () => {
+    expect(consoleJs).toMatch(/state\.clientFailed\[id\] = \{[\s\S]{0,220}rolledBack: p\.rolledBack === true/);
+    expect(consoleJs).toMatch(/state\.clientBusy\[id\] = action/);
+    expect(consoleJs).toMatch(/delete state\.clientBusy\[id\]/);
+    expect(consoleJs).toMatch(/state\.clientBusy \?\? null/);
+    expect(consoleJs).toMatch(/state\.clientFailed \?\? null/);
+    // recheck/成功清失败态
+    expect(consoleJs).toMatch(/delete state\.clientFailed\[id\]/);
   });
 });

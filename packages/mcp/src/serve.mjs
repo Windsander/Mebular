@@ -187,6 +187,7 @@ const CONSOLE_FILES = {
   'console.css': 'text/css; charset=utf-8',
   'console.js': 'text/javascript; charset=utf-8',
   'assistants.js': 'text/javascript; charset=utf-8',
+  'assistant-status.js': 'text/javascript; charset=utf-8',
   'deep-link.js': 'text/javascript; charset=utf-8',
   'settings-ia.js': 'text/javascript; charset=utf-8',
   'starfield.js': 'text/javascript; charset=utf-8',

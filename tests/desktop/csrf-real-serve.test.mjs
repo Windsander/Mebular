@@ -35,7 +35,8 @@ beforeAll(async () => {
   await writeFile(opencodePath(), JSON.stringify({ theme: 'dark' }, null, 2), 'utf-8');
 
   serve = spawn(process.execPath, [bin, 'serve', '--port', '0'], {
-    // F-FIX-A：沙箱 serve 必须声明用户主目录，否则 assistant 落面会写到**真实** `~/.config/…`
+    // F-FIX-A（#113）：assistant 路径以用户主目录为基——测试必须显式沙箱化 MEBULAR_USER_HOME，
+    // 否则探测/写入会落到真实 ~/.config（真机文件）
     env: { ...process.env, MEBULAR_HOME: home, MEBULAR_USER_HOME: home },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

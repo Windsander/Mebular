@@ -1423,16 +1423,18 @@ export async function startHttpServer({
     // H-1：「连接我的 AI 助手」接入 / 预览 / 回滚 / Skill / 验证（只并 mebular 键；备份 + 原子写 + 幂等）
     const cliAction = path.match(/^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview|verify|recheck)$/);
     if (cliAction) {
-      const { connectClient, rollbackClient, installSkills, previewClient, verifyAssistant, listAssistantsAsync, assistantUserHome } = await import('./clients.mjs');
+      const { connectClient, rollbackClient, installSkills, previewClient, verifyAssistant, listAssistantsAsync, assistantUserHome, daemonMcpUrl } = await import('./clients.mjs');
       const id = decodeURIComponent(cliAction[1]);
       const action = cliAction[2];
       const input = parseJsonBody(body) ?? {};
-      const opts = { home, cwd: process.cwd() };
+      // F-FIX-B：与本 serve 实例同一守护端点（HTTP /mcp）→ 条目/片段/写入都用它
+      const mcpUrl = daemonMcpUrl({ host: req.headers?.host, encrypted: Boolean(req.socket?.encrypted) });
+      const opts = { home, cwd: process.cwd(), mcpUrl };
       try {
         if (action === 'preview') return sendJson(res, 200, previewClient(id, opts));
         if (action === 'verify') {
           // 验证未过也是**有效结果**（体里带 ok/state/steps），故一律 200 由 UI 读 body
-          const result = verifyAssistant(id, {
+          const result = await verifyAssistant(id, {
             ...opts,
             ...(input.userConfirmedReload === true ? { userConfirmedReload: true } : {}),
             ...(typeof input.backupPath === 'string' ? { backupPath: input.backupPath } : {}),
@@ -1447,7 +1449,7 @@ export async function startHttpServer({
           // F-FIX-A：桌面白名单已允许 `recheck`（服务端此前 404）。语义 = 单客户端**强制重探**：
           // 只读某条状态，但会真实探测（CLI/进程/文件），故与 preview/connect 同族走动作端点
           // （同一鉴权 + CSRF 管线），并强制 `refresh:true` 绕过缓存——避免 GET 被缓存/预取而看不到即时状态。
-          const out = await listAssistantsAsync({ home, userHome: assistantUserHome(), cwd: process.cwd(), refresh: true });
+          const out = await listAssistantsAsync({ home, userHome: assistantUserHome(), cwd: process.cwd(), refresh: true, mcpUrl });
           const client = out.assistants.find((c) => c.id === id) ?? null;
           if (!client) return sendJson(res, 404, { ok: false, error: 'unknown_client', id });
           return sendJson(res, 200, { ok: true, client, cached: false });

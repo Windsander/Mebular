@@ -93,7 +93,7 @@ describe('F-PERF-2 异步探针 + 短 TTL 缓存', () => {
     const runAsync = async () => ({ ok: true, code: 0, stdout: '', stderr: '' });
     const before = await listAssistantsAsync(opts({ runAsync }));
     expect(before.assistants.find((a) => a.id === 'opencode').state).toBe('not-connected');
-    await connectClient('opencode', opts());          // 写（使用同步注入 run）
+    await connectClient('opencode', opts({ mcpUrl: 'http://127.0.0.1:7331/mcp' })); // 写（remote 形态，等同 serve 端点）
     const after = await listAssistantsAsync(opts({ runAsync })); // 缓存已被写操作清空
     expect(after.cached).toBe(false);
     expect(after.assistants.find((a) => a.id === 'opencode').state).toBe('connected');

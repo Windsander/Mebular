@@ -130,7 +130,7 @@ describe('W1 工具面（CLI/MCP 同一 handler）', () => {
     try {
       // 守护 home（config.json + user-master-key.json）——记忆面与任务面都可服务
       // 不设 MEBULAR_DEVICE_ID：init 与后续 mcp 用同一派生 deviceId（避免身份文件与 config 不一致）
-      const env = { ...process.env, MEBULAR_HOME: dir, MEBULAR_STORAGE_PATH: join(dir, 'store.jsonl') };
+      const env = { ...process.env, MEBULAR_HOME: dir, MEBULAR_USER_HOME: dir, MEBULAR_STORAGE_PATH: join(dir, 'store.jsonl') };
       execFileSync(process.execPath, [MCP_BIN, 'init'], { env, encoding: 'utf-8' });
       // SDK 不保证响应顺序：按 JSON-RPC id 取响应（CI 上曾因顺序不同而误判）
       const rpc = (messages: unknown[]): Map<number, Record<string, unknown>> => {

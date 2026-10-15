@@ -75,6 +75,15 @@ describe('F-FIX-A 路径基数 / 增强 PATH / recheck', () => {
     expect(customAssistantsPath(mebularHome).includes(userHome)).toBe(false);
   });
 
+  it('a4) 所有沙箱 serve spawn 均声明 MEBULAR_USER_HOME（否则落面写到真实 home）', async () => {
+    const fs = await import('node:fs/promises');
+    const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+    for (const rel of ['desktop/csrf-real-serve.test.mjs', 'fleet/surface.test.ts', 'service/service.test.ts']) {
+      const text = await fs.readFile(join(root, rel), 'utf-8');
+      expect(text).toMatch(/MEBULAR_USER_HOME/);
+    }
+  });
+
   it('a3) 用户主目录解析：显式 userHome > MEBULAR_USER_HOME > os.homedir()', () => {
     expect(assistantUserHome({ userHome: '/u1', env: { MEBULAR_USER_HOME: '/u2' } })).toBe('/u1');
     expect(assistantUserHome({ env: { MEBULAR_USER_HOME: '/u2' } })).toBe('/u2');
@@ -120,9 +129,11 @@ jest.setTimeout(process.platform === 'win32' ? 30_000 : 15_000);
     const clients = await readFile(join(srcRoot, 'clients.mjs'), 'utf-8');
     expect(clients).toMatch(/env: spawnEnv\(options\)/);                  // 同步 runner
     expect(clients).toMatch(/windowsHide: true, env: spawnEnv\(options\)/); // 异步 runner
-    // connectViaCli / verifyAssistant 的默认 runner 均复用 defaultRun（→ 增强 PATH）
-    expect(clients).toMatch(/options\.run \?\? \(\(cmd\) => defaultRun\(cmd, 30000\)\)/);
-    expect(clients).toMatch(/defaultRun\(cmd, timeoutMs \?\? cli\.timeoutMs \?\? 5000\)/);
+    // 请求路径（connect / verify）用异步 runner，且不再 spawnSync
+    expect(clients).toMatch(/defaultRunAsync\(cmd, t \?\? 30000, options\)/);
+    expect(clients).toMatch(/defaultRunAsync\(cmd, t \?\? cli\.timeoutMs \?\? 5000, options\)/);
+    const requestBodies = [clients.slice(clients.indexOf('async function connectViaCli'), clients.indexOf('export async function connectClient')), clients.slice(clients.indexOf('export async function verifyAssistant'))];
+    for (const body of requestBodies) expect(body).not.toMatch(/spawnSync/);
   });
 
   // ---------- (c) recheck ----------
@@ -131,7 +142,8 @@ jest.setTimeout(process.platform === 'win32' ? 30_000 : 15_000);
     const serve = await readFile(join(srcRoot, 'serve.mjs'), 'utf-8');
     expect(serve).toMatch(/clients\\\/\(\[\^\/\]\+\)\\\/\(connect\|rollback\|skills\|preview\|verify\|recheck\)/);
     expect(serve).toMatch(/action === 'recheck'/);
-    expect(serve).toMatch(/refresh: true \}/);
+    expect(serve).toMatch(/refresh: true/);   // F-FIX-B：现为 `refresh: true, mcpUrl }`
+    expect(serve).toMatch(/mcpUrl/);
     expect(serve).toMatch(/unknown_client/);
     // 行为：recheck 等价「强制刷新后的该客户端状态」——写后可见
     const cfg = join(userHome, '.config', 'opencode', 'opencode.json');
@@ -140,7 +152,7 @@ jest.setTimeout(process.platform === 'win32' ? 30_000 : 15_000);
     const okAsync = async () => ({ ok: true, code: 0, stdout: '', stderr: '' });
     const before = await listAssistantsAsync(opts({ runAsync: okAsync }));
     expect(before.assistants.find((a) => a.id === 'opencode').state).toBe('not-connected');
-    await connectClient('opencode', opts());
+    await connectClient('opencode', opts({ mcpUrl: 'http://127.0.0.1:7331/mcp' }));
     const re = await listAssistantsAsync(opts({ runAsync: okAsync, refresh: true }));
     expect(re.cached).toBe(false);
     expect(re.assistants.find((a) => a.id === 'opencode').state).toBe('connected');

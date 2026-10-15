@@ -216,30 +216,30 @@ async function runInit(flags) {
   );
 }
 
-function runPrintConfig(flags) {
+/**
+ * F-FIX-B：`print-config` **委托注册表**（单一真源）——条目形态、键位、HTTP/stdio 选择都在
+ * `src/clients.mjs`（`mebularEntry`/`snippetFor`）。有 `--url` 即产出指向守护 HTTP `/mcp` 的形态；
+ * 无 `--url` 回落 stdio（并提示守护运行时应改指向 HTTP）。
+ */
+async function runPrintConfig(flags) {
   const client = typeof flags.client === 'string' ? flags.client : 'generic';
   const url = typeof flags.url === 'string' ? flags.url : null;
-  const local = { command: 'mebular', args: ['mcp'] };
-
-  const snippets = {
-    opencode: JSON.stringify(
-      { $schema: 'https://opencode.ai/config.json', mcp: { mebular: url ? { type: 'remote', url } : { type: 'local', command: ['mebular', 'mcp'] } } },
-      null,
-      2,
-    ),
-    claude: JSON.stringify({ mcpServers: { mebular: url ? { url } : local } }, null, 2),
-    cursor: JSON.stringify({ mcpServers: { mebular: url ? { url } : local } }, null, 2),
-    generic: JSON.stringify({ mcpServers: { mebular: url ? { url } : local } }, null, 2),
-    dsh: url
-      ? `plugins:\n  - name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: mebular\n      transport: streamable-http\n      url: ${url}`
-      : "plugins:\n  - name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: mebular\n      transport: stdio\n      command: mebular\n      args: ['mcp']",
-  };
-  const output = snippets[client];
-  if (!output) {
+  const { snippetFor, descriptorFor } = await import('../src/clients.mjs');
+  const ids = { opencode: 'opencode', claude: 'claude-code', cursor: 'cursor', dsh: 'dsh', generic: 'generic' };
+  const id = ids[client];
+  if (!id) {
     console.error(`未知 client：${client}（opencode/claude/cursor/dsh/generic）`);
     process.exit(2);
   }
-  console.log(output);
+  const assistant = descriptorFor(id);
+  const options = {
+    ...(url ? { url } : {}),
+    ...(assistant?.landing?.httpShape ? { httpShape: assistant.landing.httpShape } : {}),
+  };
+  console.log(snippetFor(assistant.format, options));
+  if (!url) {
+    console.error('提示：守护运行中 stdio `mebular mcp` 会被拒（MCP_STORAGE_LOCKED）；请用 --url http://<host>:<port>/mcp');
+  }
 }
 
 async function runConsole(flags) {
@@ -690,7 +690,7 @@ async function main() {
       await runKeygen(flags);
       return;
     case 'print-config':
-      runPrintConfig(flags);
+      await runPrintConfig(flags);
       return;
     case 'tools': {
       const { ALL_TOOL_SPECS } = await import('../src/tools.mjs');

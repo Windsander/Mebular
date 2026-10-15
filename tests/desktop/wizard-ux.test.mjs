@@ -463,8 +463,10 @@ describe('设计稿 ④ 段② 文案与空态（以设计稿为准）', () => {
 });
 
 describe('设计稿 ⑤ 完成时刻与已设置过·直达 + 星野省电纪律', () => {
-  it('完成态 = 缩略卡（已就绪 ✦ + 提醒 + 进入控制台 ✦）；无旧 finish 动画类', () => {
-    expect(wizardHtml).toMatch(/class="panel done-card" id="complete-cta"|id="complete-cta"[^>]*class="panel done-card"/);
+  it('完成态 = 同框变身（用户定稿 2：已就绪 ✦ + 提醒 + 进入控制台 ✦ 内嵌于部署卡片）；无旧 finish 动画类', () => {
+    const panel = wizardHtml.match(/<section class="panel" id="deploy-panel"[\s\S]*?<\/section>/)?.[0] ?? '';
+    expect(panel).toContain('id="deploy-flow"');
+    expect(panel).toMatch(/class="done-card" id="complete-cta"/);
     expect(wizardHtml).toContain('已就绪 ✦');
     expect(wizardHtml).toContain('＋ 邀请新设备');
     expect(wizardHtml).not.toContain('.finish');
@@ -812,6 +814,25 @@ describe('简化轮走查修复 5 · 点击即上屏（走查事故回归：点�
     expect(wizardJs).toMatch(/heroEl\.animate\(\[/);
     expect(wizardJs).toMatch(/panelEl\.animate\(\[\{ opacity: 0/);
     expect(wizardJs).toMatch(/if \(!reducedMotion && heroEl && heroBefore\)/);
+  });
+});
+
+describe('简化轮走查修复 6 · 收尾动效（用户定稿 2：卡片「同框变身」为已就绪——不再两个完成词）', () => {
+  it('静态：done 内容并入部署卡片（同框变身）+ compact 收束规则；「✓ 已完成」条已退场', () => {
+    expect(wizardHtml).not.toContain('flow-doneline');
+    expect(wizardHtml).not.toContain('✓ 已完成'); // 用户定稿 2：与「已就绪」重复，删除
+    expect(wizardHtml).toMatch(/#deploy-panel\.is-compact #deploy-flow \{ display: none; \}/);
+    expect(wizardHtml).toMatch(/#deploy-panel:not\(\.is-compact\) #complete-cta \{ display: none; \}/);
+    expect(wizardHtml).toMatch(/#deploy-panel \.done-card \{ margin-top: 0; \}/);
+  });
+
+  it('渲染层：完成时播放一次；内容退场→收束变身→已就绪入场；reduced-motion 直达；runFlow 重置', () => {
+    expect(wizardJs).toMatch(/doneView && !doneFxPlayed[\s\S]{0,60}doneFxPlayed = true; playDoneFx\(\)/);
+    expect(wizardJs).toMatch(/flowBox\?\.children \?\? \[\]/);
+    expect(wizardJs).toMatch(/panel\.animate\(\[\{ height: /);
+    expect(wizardJs).toMatch(/cta\?\.animate\(\[\{ opacity: 0/);
+    expect(wizardJs).toMatch(/if \(reducedMotion\) \{ compact\(\); return; \}/);
+    expect(wizardJs).toMatch(/doneFxPlayed = false; \/\/ 重置收尾动效[\s\S]{0,80}classList\.remove\('is-compact'\)/);
   });
 });
 

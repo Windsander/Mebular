@@ -92,6 +92,11 @@
     /* 唯一呼吸点：流水中「进行中」步骤的圆点（部署时的心跳） */
     .flow li[data-state="active"] i { animation: pulse 1.8s ease-in-out infinite; }
 
+    /* ===== 收尾「同框变身」（用户定稿 2）：完成 → 部署内容收束，本卡变为「已就绪」 ===== */
+    #deploy-panel:not(.is-compact) #complete-cta { display: none; }
+    #deploy-panel.is-compact #deploy-flow { display: none; }
+    #deploy-panel .done-card { margin-top: 0; }
+
     /* ===== 状态 3：完成缩略卡（阶段框的收束形态） ===== */
     .done-card { text-align: center; margin-top: 14px; }
     .done-card .done-word { font-size: 20px; letter-spacing: 8px; color: var(--crt-bright); text-shadow: 0 0 26px rgba(109, 255, 184, 0.65); margin: 2px 0 10px; }
@@ -144,29 +149,30 @@
       <button id="btn-go" class="primary big">开始部署</button>
     </div>
 
-    <!-- ===== 状态 2：阶段框（点击后出现，四步进度 + 旁白） ===== -->
+    <!-- ===== 状态 2：阶段框（点击后出现，四步进度 + 旁白；完成后同框「变身」为已就绪） ===== -->
     <section class="panel" id="deploy-panel" hidden>
-      <h2>开始部署 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
-      <p class="muted" id="start-detail" hidden></p>
-      <ol id="start-flow" class="flow">
-        <li data-sub="launch" data-state="todo"><i></i>启动本机守护</li>
-        <li data-sub="write" data-state="todo"><i></i>写入本机设置</li>
-        <li data-sub="recover" data-state="todo"><i></i>重启生效（页面会自动恢复）</li>
-        <li data-sub="connect" data-state="todo"><i></i>接入 AI 助手（自动）</li>
-      </ol>
-      <p class="muted" id="flow-msg"></p>
-      <div class="row" id="go-row" hidden>
-        <button id="btn-resume" class="primary" hidden>从此处续跑</button>
-        <button id="btn-provision" class="primary" hidden>去写入初始设置 →</button>
-        <a class="alt" id="alt-join" hidden>或加入已有的 Mebular ›</a>
+      <div id="deploy-flow">
+        <h2>开始部署 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
+        <p class="muted" id="start-detail" hidden></p>
+        <ol id="start-flow" class="flow">
+          <li data-sub="launch" data-state="todo"><i></i>启动本机守护</li>
+          <li data-sub="write" data-state="todo"><i></i>写入本机设置</li>
+          <li data-sub="recover" data-state="todo"><i></i>重启生效（页面会自动恢复）</li>
+          <li data-sub="connect" data-state="todo"><i></i>接入 AI 助手（自动）</li>
+        </ol>
+        <p class="muted" id="flow-msg"></p>
+        <div class="row" id="go-row" hidden>
+          <button id="btn-resume" class="primary" hidden>从此处续跑</button>
+          <button id="btn-provision" class="primary" hidden>去写入初始设置 →</button>
+          <a class="alt" id="alt-join" hidden>或加入已有的 Mebular ›</a>
+        </div>
       </div>
-    </section>
-
-    <!-- ===== 状态 3：完成缩略卡（阶段框的收束形态 + 主按钮） ===== -->
-    <section class="panel done-card" id="complete-cta" hidden>
-      <p class="done-word">已就绪 ✦</p>
-      <p class="muted" id="finish-note">之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请新设备」随时可用。</p>
-      <button id="btn-enter-console" class="primary big">进入控制台 ✦</button>
+      <!-- 完成态（用户定稿 2）：同框变身内容——不再另起卡、不再出现「已完成/已就绪」两个完成词 -->
+      <div class="done-card" id="complete-cta" hidden>
+        <p class="done-word">已就绪 ✦</p>
+        <p class="muted" id="finish-note">之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请新设备」随时可用。</p>
+        <button id="btn-enter-console" class="primary big">进入控制台 ✦</button>
+      </div>
     </section>
 
   </div>

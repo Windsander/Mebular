@@ -66,10 +66,7 @@ function renderState(state) {
     const btnProvision = $('#btn-provision');
     if (btnProvision) btnProvision.hidden = Boolean(start.actions.provision.hidden);
 
-    if (doneView) {
-      const msgEl = $('#flow-msg');
-      if (msgEl) msgEl.textContent = '';
-    }
+    if (doneView && !doneFxPlayed) { doneFxPlayed = true; playDoneFx(); } // 收尾动效：一次锁定（含已就绪入场）
     // 阶段框：四步现状（未跑流水时按状态静态推导；跑流水时由 runFlow 实时接管）
     if (!flow.running && !flow.everRan) {
       for (const sub of ['launch', 'write', 'recover']) setSubState(sub, start.flow[sub] ?? 'todo');
@@ -101,6 +98,29 @@ function renderState(state) {
 
 function escapeHtml(s) {
   return String(s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+// 收尾动效（用户定稿 2 · 同框变身）：完成 → 部署内容退场、卡片收束，「已就绪」在本卡内入场
+// （不再另起一张卡；「已完成/已就绪」两个完成词不再打架）
+let doneFxPlayed = false;
+function playDoneFx() {
+  const panel = $('#deploy-panel');
+  const flowBox = $('#deploy-flow');
+  const cta = $('#complete-cta');
+  if (!panel) return;
+  const compact = () => panel.classList.add('is-compact');
+  if (reducedMotion) { compact(); return; } // 减动效：直达变身态
+  const h0 = panel.getBoundingClientRect().height;
+  [...(flowBox?.children ?? [])]
+    .filter((el) => !el.hidden)
+    .forEach((el) => el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150, fill: 'forwards' }));
+  window.setTimeout(() => {
+    compact();
+    const h1 = panel.getBoundingClientRect().height;
+    panel.animate([{ height: `${h0}px` }, { height: `${h1}px` }], { duration: 300, easing: 'cubic-bezier(0.4, 0, 0.2, 1)' });
+    cta?.animate([{ opacity: 0, transform: 'translateY(10px)' }, { opacity: 1, transform: 'translateY(0)' }],
+      { duration: 320, delay: 160, easing: 'ease-out', fill: 'backwards' });
+  }, 160);
 }
 
 // F4④ 重启/安装宽限窗（≤60s）：① 已完成期间的健康瞬断不翻回未完成（grace 注入视图模型）
@@ -194,6 +214,8 @@ async function runFlow(fromSub = 'launch') {
   $('#btn-go').hidden = true;
   $('#btn-resume').hidden = true;
   flowMsg('');
+  doneFxPlayed = false; // 重置收尾动效：重复部署整场可再次播放
+  $('#deploy-panel')?.classList.remove('is-compact');
   // 立即上屏：阶段框在本帧出现（3s 轮询曾有 running 守卫，点击后屏幕会冻在初始页直跳完成——走查事故）
   // 开场动画（用户定稿手势）：品牌从居中滑到顶部 → 卡片随后展开（FLIP；reduced-motion 直接切换）
   const heroEl = $('.hero');

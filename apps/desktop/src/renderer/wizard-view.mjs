@@ -60,7 +60,7 @@ export function wizardView(state) {
         // 里程碑轨道节点态：当前=呼吸(active)、完成=✓(done)、未到=暗(locked)
         node: step.done ? 'done' : status === 'current' ? 'active' : 'locked',
         check: step.done ? '✓' : null,
-        collapsed: complete, // 完成态两段折叠为回顾（可再展开）
+        collapsed: step.done, // 完成段即收成回顾行（可用 done-line 再展开；设计稿语义）
       };
       if (step.id === 'start') return { ...base, ...startStepView(step, { healthy, provision, registered, grace }) };
       return { ...base, ...assistantsStepView(step, start) };
@@ -133,18 +133,21 @@ function assistantsStepView(step, start) {
   const detail = step?.detail;
   const connected = Number(detail?.connectedCount ?? 0);
   const total = Number(detail?.total ?? 0);
+  // 已装数（installedCount）——列表只显示已装，文案口径必须一致（旧载荷回退 total）
+  const installed = Number(detail?.installedCount ?? detail?.total ?? 0);
   let detailText;
   if (!startDone) detailText = '先完成第①步：Mebular 跑起来（并完成初始设置）后才能连接助手。';
   else if (!detail) detailText = '助手列表加载中…';
   else if (detail.readError) detailText = `状态读取受限：${detail.readError}（不阻断）。`;
-  else if (total === 0) detailText = '没检测到已装的 AI 助手 —— 可以先跳过，装好后再到 设置 → AI 助手 接入。';
-  else detailText = `检测到 ${total} 个已装助手（已接入 ${connected} 个）。点「接入」；都接好了点「已完成」。`;
+  else if (installed === 0) detailText = '没检测到已装的 AI 助手 —— 可以先跳过，装好后再到 设置 → AI 助手 接入。';
+  else detailText = `检测到 ${installed} 个已装助手（已接入 ${connected} 个）。点「接入」；都接好了点「已完成」。`;
   return {
     detailText,
     connected,
     total,
+    installed,
     doneEnabled: startDone && connected >= 1,
-    doneHidden: startDone && total === 0, // 空态不渲染「已完成」（设计稿）
+    doneHidden: startDone && installed === 0, // 空态不渲染「已完成」（设计稿）
     doneLabel: '已完成',
     doneHint: !startDone || total === 0 ? '' : connected >= 1 ? '还可以继续接其他助手' : '接好一个即可点「已完成」',
     // 「先不接 ›」：① 完成后随时可显式跳过段②（= 用户对段②的显式确认，与「已完成」同路 ack）

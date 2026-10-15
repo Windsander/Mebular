@@ -479,8 +479,9 @@ $('#btn-logs-open')?.addEventListener('click', () => { void api.openLogs(); });
   function draw(t) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     for (const s of stars) {
-      const tw = reduced ? 0.6 : 0.35 + 0.3 * Math.sin(t / 900 + s.p);
-      ctx.globalAlpha = Math.max(0.08, tw);
+      // 闪烁治理：明灭幅度收窄 + 周期放慢（0.5±0.15，2.2s 周期）——星空是氛围，不抢戏不闪烁
+      const tw = reduced ? 0.6 : 0.5 + 0.15 * Math.sin(t / 2200 + s.p);
+      ctx.globalAlpha = Math.max(0.12, tw);
       ctx.fillStyle = '#b4ffd6'; // 设计稿星色（console 契约：稀疏、缓慢、不抢戏）
       ctx.beginPath();
       ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);

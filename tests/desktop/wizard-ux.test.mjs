@@ -757,3 +757,37 @@ describe('简化轮 · 行内反馈（一点接入不新增行）', () => {
     expect(wizardHtml).toMatch(/\.ast-hint \{[^}]*font-size: 11px/);
   });
 });
+
+describe('简化轮走查修复 · 文案口径与完成段收纳', () => {
+  it('② 文案用「已装数」而非全部客户端数（列表只显示已装，口径一致）；旧载荷回退 total', () => {
+    // 真机场景：8 个客户端登记、其中 4 个已装、3 个已接入
+    const v = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 3, total: 8, installedCount: 4 } }));
+    const a = v.steps.find((s) => s.id === 'assistants');
+    expect(a.detailText).toContain('检测到 4 个已装助手（已接入 3 个）');
+    expect(a.detailText).not.toContain('8 个已装');
+    // 旧载荷（无 installedCount）→ 回退 total 不崩
+    const legacy = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1, total: 3 } }));
+    expect(legacy.steps.find((s) => s.id === 'assistants').detailText).toContain('检测到 3 个已装助手');
+    // 已装 0（全未安装）→ 空态 + 不渲染已完成
+    const empty = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 5, installedCount: 0 } }));
+    const ae = empty.steps.find((s) => s.id === 'assistants');
+    expect(ae.detailText).toContain('没检测到已装的 AI 助手');
+    expect(ae.doneHidden).toBe(true);
+  });
+
+  it('① 完成后即收成回顾行（collapsed = done；设计稿语义），完成态两段仍折叠', () => {
+    const step2 = wizardView(computeWizardState({ daemonHealthy: true }));
+    expect(step2.steps.find((s) => s.id === 'start').collapsed).toBe(true);
+    expect(step2.steps.find((s) => s.id === 'assistants').collapsed).toBe(false);
+    const done = wizardView(computeWizardState({ daemonHealthy: true, wizard: { assistantsAcked: true } }));
+    expect(done.steps.every((s) => s.collapsed)).toBe(true);
+  });
+
+  it('闪烁治理契约：品牌标静态（无呼吸动画）、唯一呼吸点=当前节点 pip（放慢）、面板无 backdrop-filter、星野明灭收窄', () => {
+    expect(wizardHtml).not.toMatch(/\.hero \.mark \{[^}]*animation/);
+    expect(wizardHtml).toMatch(/\.node\.active \.pip[^}]*animation: pulse 2\.8s/);
+    expect(wizardHtml).not.toMatch(/backdrop-filter:\s*blur/); // 注释提及无妨，属性用法必须为 0
+    const wizardJsSrc = readFileSync(join(rendererDir, 'wizard.js'), 'utf-8');
+    expect(wizardJsSrc).toMatch(/0\.5 \+ 0\.15 \* Math\.sin\(t \/ 2200/);
+  });
+});

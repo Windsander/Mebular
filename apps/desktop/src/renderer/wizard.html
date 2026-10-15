@@ -32,7 +32,8 @@
 
     /* ===== hero：品牌区（✦ / MEBULAR / 一句 tagline） ===== */
     .hero { text-align: center; margin-bottom: 34px; }
-    .hero .mark { font-size: 30px; color: var(--crt); text-shadow: 0 0 18px rgba(109, 255, 184, 0.8); animation: pulse 3.2s ease-in-out infinite; }
+    /* 闪烁治理：品牌标静态辉光（不再呼吸） */
+    .hero .mark { font-size: 30px; color: var(--crt); text-shadow: 0 0 18px rgba(109, 255, 184, 0.8); }
     .hero h1 { font-size: 28px; letter-spacing: 8px; margin: 8px 0 6px; color: var(--crt-bright); text-shadow: 0 0 24px rgba(109, 255, 184, 0.35); font-weight: 600; }
     .hero .tagline { color: var(--muted); font-size: 13px; letter-spacing: 2px; margin: 0; min-height: 18px; }
     .hero .badge { margin-top: 8px; display: inline-block; }
@@ -44,7 +45,7 @@
     .node { position: relative; padding: 0 0 18px 34px; }
     .pip { position: absolute; left: 3px; top: 20px; width: 13px; height: 13px; border-radius: 50%;
       border: 1px solid var(--crt-dim); background: var(--bg); transition: all .4s; }
-    .node.active .pip { border-color: var(--crt); box-shadow: 0 0 12px rgba(109, 255, 184, 0.9); animation: pulse 1.6s ease-in-out infinite; }
+    .node.active .pip { border-color: var(--crt); box-shadow: 0 0 8px rgba(109, 255, 184, 0.7); animation: pulse 2.8s ease-in-out infinite; }
     .node.done .pip { background: var(--crt); border-color: var(--crt); box-shadow: 0 0 8px rgba(109, 255, 184, 0.6); }
     .node.done .pip::after { content: "✓"; position: absolute; inset: 0; color: #04220f; font-size: 10px; line-height: 13px; text-align: center; }
     .node.locked { opacity: .38; }
@@ -52,8 +53,8 @@
 
     /* ===== 段面板（玻璃质感；完成=降透明折叠回顾） ===== */
     .panel { border: 1px solid var(--crt-border-soft); border-radius: 10px; padding: 16px 18px;
-      background: linear-gradient(180deg, rgba(14, 20, 40, 0.82), rgba(8, 12, 24, 0.82));
-      backdrop-filter: blur(6px);
+      /* 闪烁治理：去掉 backdrop-filter（Electron/macOS 动画背景上的合成闪烁源）；底色本身 0.88 不透明，观感不降 */
+      background: linear-gradient(180deg, rgba(14, 20, 40, 0.88), rgba(8, 12, 24, 0.88));
       box-shadow: 0 0 0 1px rgba(80, 255, 170, 0.04), 0 18px 50px -30px rgba(0, 0, 0, 0.9), inset 0 0 40px -30px rgba(80, 255, 170, 0.25); }
     .node.active .panel { border-color: var(--crt-border); box-shadow: 0 0 24px -8px rgba(80, 255, 170, 0.35), 0 18px 50px -30px rgba(0,0,0,.9); }
     .step h2 { font-size: 15px; letter-spacing: 2px; margin: 0 0 6px; color: var(--crt-bright); display: flex; align-items: center; gap: 8px; }
@@ -86,6 +87,10 @@
     details { border: 1px dashed var(--border); border-radius: 6px; padding: 8px 10px; margin-top: 10px; }
     details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
     details[open] summary { margin-bottom: 6px; }
+    /* 整洁：段内「高级 · 出问题了？」是安静文本开关（不是虚线大框） */
+    details.troubleshoot { border: none; padding: 2px 0 0; margin-top: 10px; }
+    details.troubleshoot summary { font-size: 11px; color: var(--muted); }
+    details.troubleshoot summary:hover { color: var(--text); }
 
     button { background: rgba(8, 38, 26, 0.6); color: #a9ffd4; border: 1px solid var(--crt-border); border-radius: 6px; padding: 7px 12px; cursor: pointer; font-size: 13px; }
     button:hover:not(:disabled) { border-color: rgba(120, 255, 190, 0.6); background: rgba(12, 52, 36, 0.75); }

@@ -591,7 +591,7 @@ export function yamlEntryBlock(text, parent, child) {
   let inParent = false;
   let block = null;
   for (const line of lines) {
-    if (new RegExp(`^${parent}\s*:`).test(line)) { inParent = true; continue; }
+    if (new RegExp(`^${parent}\\s*:`).test(line)) { inParent = true; continue; }
     if (!inParent) continue;
     if (/^\S/.test(line)) { inParent = false; block = null; continue; }
     if (new RegExp(`^\\s{1,6}${child}\\s*:`).test(line)) { block = [line]; continue; }

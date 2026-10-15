@@ -64,8 +64,6 @@ function renderState(state) {
     el.classList.toggle('active', step.node === 'active');
     el.classList.toggle('locked', step.node === 'locked');
     el.classList.toggle('is-collapsed', Boolean(step.collapsed)); // 完成即终态单行（无展开交互；异常时视图自动回到操作态）
-    const check = el.querySelector('.step-check');
-    if (check) check.hidden = !step.check;
     // done-line 回顾行（折叠时可见；点击重新展开）
     const doneLine = el.querySelector('.done-line');
     if (doneLine && step.doneLine) {
@@ -107,14 +105,17 @@ function renderState(state) {
   const assistants = view.steps.find((s) => s.id === 'assistants');
   if (assistants) {
     setText('#assistants-detail', assistants.detailText);
-    const doneBtn = $('#btn-seg2-done');
-    if (doneBtn) {
-      doneBtn.disabled = !assistants.doneEnabled;
-      doneBtn.hidden = Boolean(assistants.doneHidden);
+    // 底部出口：仅「先不接 ›」（全部接齐 → autoAck → 完成态；无按钮可点）
+    const foot = $('#seg2-foot');
+    if (foot) foot.hidden = Boolean(assistants.skipConnect?.hidden ?? true);
+    // 自动完成（用户定调）：已装的全部接入 → 自动 ack（幂等；防重入）
+    if (assistants.autoAck && !autoAckPending) {
+      autoAckPending = true;
+      void api.ackAssistants()
+        .then(() => refresh())
+        .catch(() => { /* 落盘失败不阻断 */ })
+        .finally(() => { autoAckPending = false; });
     }
-    const skipBtn = $('#btn-seg2-skip');
-    if (skipBtn) skipBtn.hidden = Boolean(assistants.skipConnect?.hidden ?? true);
-    setText('#done2-hint', assistants.doneHint ?? '');
   }
 
   // 异常（引导态/启动失败）→ 自动展开 + 一行结论；正常保持默认折叠
@@ -146,6 +147,8 @@ function armGrace(ms = 60000) { graceUntil = Date.now() + ms; }
 // UX-2 补丁 3：① 瞬态容忍（flapGate 纯函数）——连续 ≥2 次 miss 才翻回未完成；单次 miss UI 不动
 let healthMisses = 0;
 let lastStartDone = false;
+// 简化轮：② 全部接齐自动完成（ack 一次，防重入）
+let autoAckPending = false;
 
 async function refresh() {
   try {
@@ -422,11 +425,7 @@ $('#asst-list')?.addEventListener('click', async (event) => {
 });
 
 // 「已完成」：显式确认（≥1 已接入才可用）→ 持久化 assistantsAcked → 完成态
-$('#btn-seg2-done')?.addEventListener('click', async () => {
-  try { await api.ackAssistants(); } catch { /* 落盘失败不阻断 */ }
-  await refresh();
-});
-// 「先不接 ›」：段② 的显式跳过（与「已完成」同路 ack——用户显式确认后才翻段/通关）
+// 「先不接 ›」：段② 的显式跳过（唯一出口；全部接齐时自动完成，不需要任何按钮）
 $('#btn-seg2-skip')?.addEventListener('click', async () => {
   try { await api.ackAssistants(); } catch { /* 落盘失败不阻断 */ }
   await refresh();

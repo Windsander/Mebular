@@ -25,6 +25,8 @@
       --crt-border: rgba(80, 255, 170, 0.38);
       --crt-border-soft: rgba(80, 255, 170, 0.22);
     }
+    /* 几何卫生：border-box 复位——pip 的 1px 边框计入宽高，节点灯圆心与轨道线严格同心 */
+    *, *::before, *::after { box-sizing: border-box; }
     body { margin: 0; font: 14px -apple-system, system-ui, "PingFang SC", sans-serif; background: var(--bg); color: var(--text); overflow-x: hidden; min-height: 100vh; }
     /* 星野舞台（轻量 canvas；仅可见时渲染、隐藏即停；prefers-reduced-motion 静止） */
     #sky { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; }
@@ -40,7 +42,7 @@
 
     /* ===== 里程碑轨道：左轨线 + 节点灯（当前=呼吸、完成=✓、未到=暗） ===== */
     .rail { list-style: none; margin: 0; padding: 0; position: relative; }
-    .rail::before { content: ""; position: absolute; left: 9px; top: 22px; bottom: 26%; width: 1px;
+    .rail::before { content: ""; position: absolute; left: 9px; top: 26px; bottom: 26%; width: 1px; /* 与 pip 圆心（left 3 + 13/2 = 9.5）中心对齐 */
       background: linear-gradient(180deg, rgba(80, 255, 170, 0.14), rgba(80, 255, 170, 0.03)); }
     .node { position: relative; padding: 0 0 18px 34px; }
     .pip { position: absolute; left: 3px; top: 20px; width: 13px; height: 13px; border-radius: 50%;
@@ -58,7 +60,6 @@
       box-shadow: 0 0 0 1px rgba(80, 255, 170, 0.04), 0 18px 50px -30px rgba(0, 0, 0, 0.9), inset 0 0 40px -30px rgba(80, 255, 170, 0.25); }
     .node.active .panel { border-color: var(--crt-border); box-shadow: 0 0 24px -8px rgba(80, 255, 170, 0.35), 0 18px 50px -30px rgba(0,0,0,.9); }
     .step h2 { font-size: 15px; letter-spacing: 2px; margin: 0 0 6px; color: var(--crt-bright); display: flex; align-items: center; gap: 8px; }
-    .step .step-check { color: var(--crt); }
     /* 去「蓝条」：当前步 = 呼吸绿点 + 面板提亮已足够；蓝（--accent）与整页 CRT 绿系不同调，是多余配饰 */
     .step.done { opacity: 0.78; }
     /* 完成态段折叠为回顾（done-line / 点标题可重新展开） */
@@ -189,7 +190,7 @@
       <li class="node step" id="step-start">
         <span class="pip"></span>
         <section class="panel">
-          <h2><span class="step-check" hidden>✓</span>开始 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
+          <h2>开始 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
           <div class="seg-body">
             <p class="muted" id="start-detail">在这台机器上启动 Mebular 并完成初始设置。<br />数据只存在这台机器上，不上云。</p>
             <!-- 段①：一键后按钮区原位展开实时流水（启动 → 写入初始设置 → 重启恢复；失败定位子步骤） -->
@@ -227,16 +228,14 @@
       <li class="node step locked" id="step-assistants">
         <span class="pip"></span>
         <section class="panel">
-          <h2><span class="step-check" hidden>✓</span>连接你的 AI 助手</h2>
+          <h2>连接你的 AI 助手</h2>
           <div class="seg-body">
             <p class="muted" id="assistants-detail">—</p>
             <!-- 行级接入：名称 + 状态词 + 一个动作（与 设置 · AI 助手 同一语言） -->
             <div id="asst-list"></div>
             <p class="hint" id="assist-note">接入只改它的一条配置；重启对应软件后生效。</p>
-            <div class="sec-foot">
-              <button id="btn-seg2-done" class="primary" disabled>已完成</button>
+            <div class="sec-foot" id="seg2-foot" hidden>
               <button id="btn-seg2-skip" class="ghost small">先不接 ›</button>
-              <span class="hint" id="done2-hint">接好一个即可点「已完成」</span>
             </div>
           </div>
           <div class="done-line" id="connect-done-line"><span>✓ 已接好</span><span class="muted">重启对应软件后生效</span></div>

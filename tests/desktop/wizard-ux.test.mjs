@@ -85,9 +85,10 @@ describe('W-1/UX-2 ③ 当前段高亮 / done 段收编（视图契约）', () =
     const start = view.steps.find((s) => s.id === 'start');
     const assistants = view.steps.find((s) => s.id === 'assistants');
     expect(start.status).toBe('done');
-    expect(start.check).toBe('✓');
+    // h2 前置对勾退场（与 done-line「✓ 已就绪」重复；用户定调）——✓ 由回顾行表达
+    expect(start.doneLine).toMatchObject({ main: '✓ 已就绪' });
     expect(assistants.status).toBe('current');
-    expect(assistants.check).toBeNull();
+    expect(assistants.doneLine).toBeNull();
   });
 
   it('徽章文案「第 N/2 步 · <名称>」（完成时「已就绪」）', () => {
@@ -103,6 +104,7 @@ describe('W-1/UX-2 ③ 当前段高亮 / done 段收编（视图契约）', () =
     expect(wizardHtml).toMatch(/\.node\.active \.panel[^}]*border-color/);
     expect(wizardHtml).toMatch(/\.node\.active \.pip[^}]*animation/);
     expect(wizardHtml).toMatch(/\.step\.done[^}]*opacity/);
+    expect(wizardHtml).not.toContain('step-check'); // h2 对勾已去重
   });
 
   it('done 段按钮收编：「重启/仅启动」入「出问题了？」折叠区、常驻留次级 + 临时运行徽章', () => {
@@ -184,22 +186,26 @@ describe('UX-2 ⑤ 段① 一键开始：子步骤流水（启动 → 写入 →
 });
 
 describe('UX-2 ⑥ 段② 行级接入 + 「已完成」显式确认', () => {
-  it('「已接入 ✓」不自动翻段：connected≥1 仅解锁「已完成」；start 未完成先拦住', () => {
-    const connected = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1, total: 7 } }));
-    const assistants = connected.steps.find((s) => s.id === 'assistants');
-    expect(assistants.doneEnabled).toBe(true);
-    expect(assistants.status).toBe('current');
-    expect(assistants.doneLabel).toBe('已完成');
-    const zero = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 7 } }));
-    expect(zero.steps.find((s) => s.id === 'assistants').doneEnabled).toBe(false);
-    const blocked = wizardView(computeWizardState({ daemonHealthy: false, assistants: { connectedCount: 3 } }));
-    expect(blocked.steps.find((s) => s.id === 'assistants').doneEnabled).toBe(false);
+  it('自动完成（用户定调）：已装**全部**接入 → autoAck；未接齐不翻段；start 未完成先拦住', () => {
+    // 全部接齐（3/3）→ autoAck（不需要「已完成」按钮的仪式）
+    const all = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 3, total: 8, installedCount: 3 } }));
+    const a = all.steps.find((s) => s.id === 'assistants');
+    expect(a.autoAck).toBe(true);
+    expect(a.status).toBe('current'); // 视图层不翻段——由 autoAck 持久化后自然完成
+    // 未接齐（1/3）→ 不自动翻段（防误判），只有「先不接 ›」出口
+    const partial = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1, total: 8, installedCount: 3 } }));
+    const p = partial.steps.find((s) => s.id === 'assistants');
+    expect(p.autoAck).toBe(false);
+    expect(p.skipConnect.hidden).toBe(false);
+    // start 未完成 → 拦住
+    const blocked = wizardView(computeWizardState({ daemonHealthy: false, assistants: { connectedCount: 3, installedCount: 3 } }));
+    expect(blocked.steps.find((s) => s.id === 'assistants').autoAck).toBe(false);
     expect(blocked.steps.find((s) => s.id === 'assistants').detailText).toContain('先完成第①步');
   });
 
   it('静态契约：行级接入行模板（名称+状态词+一个动作）+ ackAssistants 绑定', () => {
     expect(wizardHtml).toContain('id="asst-list"');
-    expect(wizardHtml).toContain('id="btn-seg2-done"');
+    expect(wizardHtml).not.toContain('id="btn-seg2-done"'); // 自动完成：按钮退场
     expect(wizardJs).toContain('data-asst-act');
     expect(wizardJs).toContain('我已重载，验证');
     expect(wizardJs).toContain('ackAssistants');
@@ -447,25 +453,26 @@ describe('设计稿 ③ done-line 回顾行与「先不接 ›」', () => {
 });
 
 describe('设计稿 ④ 段② 文案与空态（以设计稿为准）', () => {
-  it('检测到 N 个已装助手（含已接入计数）；空态不渲染「已完成」', () => {
+  it('检测到 N 个已装助手（含已接入计数）；空态不自动完成（出口=先不接 ›）', () => {
     const view = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1, total: 3 } }));
     const a = view.steps.find((s) => s.id === 'assistants');
-    expect(a.detailText).toBe('检测到 3 个已装助手（已接入 1 个）。点「接入」；都接好了点「已完成」。');
-    expect(a.doneHint).toBe('还可以继续接其他助手');
-    const zero = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 3 } }));
-    expect(zero.steps.find((s) => s.id === 'assistants').doneHint).toBe('接好一个即可点「已完成」');
+    expect(a.detailText).toBe('检测到 3 个已装助手（已接入 1 个）。点「接入」，都接上后自动完成。');
+    // 有未接的 → 只有「先不接 ›」出口；全部接齐 → autoAck
+    expect(a.skipConnect.hidden).toBe(false);
+    const zero = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 3, installedCount: 3 } }));
+    expect(zero.steps.find((s) => s.id === 'assistants').autoAck).toBe(false);
     const empty = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 0 } }));
     const ae = empty.steps.find((s) => s.id === 'assistants');
     expect(ae.detailText).toContain('没检测到已装的 AI 助手');
-    expect(ae.doneHidden).toBe(true);
-    expect(ae.doneHint).toBe('');
+    expect(ae.autoAck).toBe(false); // 空态不自动完成；出口 = 先不接 ›
+    expect(ae.skipConnect.hidden).toBe(false);
   });
 
   it('① 正文按设计稿（数据只存在这台机器上，不上云）；注脚/hint 静态契约', () => {
     const view = wizardView(computeWizardState({}));
     expect(view.steps.find((s) => s.id === 'start').detailText).toContain('数据只存在这台机器上，不上云');
     expect(wizardHtml).toContain('接入只改它的一条配置；重启对应软件后生效。');
-    expect(wizardHtml).toContain('id="done2-hint"');
+
     expect(wizardHtml).toContain('在这台机器上启动 Mebular 并完成初始设置。');
   });
 
@@ -776,7 +783,7 @@ describe('简化轮走查修复 · 文案口径与完成段收纳', () => {
     const empty = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 5, installedCount: 0 } }));
     const ae = empty.steps.find((s) => s.id === 'assistants');
     expect(ae.detailText).toContain('没检测到已装的 AI 助手');
-    expect(ae.doneHidden).toBe(true);
+    expect(ae.autoAck).toBe(false);
   });
 
   it('① 完成后即收成回顾行（collapsed = done；设计稿语义），完成态两段仍折叠', () => {

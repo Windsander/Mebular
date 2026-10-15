@@ -59,8 +59,7 @@ export function wizardView(state) {
         status,
         // 里程碑轨道节点态：当前=呼吸(active)、完成=✓(done)、未到=暗(locked)
         node: step.done ? 'done' : status === 'current' ? 'active' : 'locked',
-        check: step.done ? '✓' : null,
-        collapsed: step.done, // 完成段即收成回顾行（可用 done-line 再展开；设计稿语义）
+        collapsed: step.done, // 完成段即收成终态单行（无展开交互）
       };
       if (step.id === 'start') return { ...base, ...startStepView(step, { healthy, provision, registered, grace }) };
       return { ...base, ...assistantsStepView(step, start) };
@@ -140,18 +139,17 @@ function assistantsStepView(step, start) {
   else if (!detail) detailText = '助手列表加载中…';
   else if (detail.readError) detailText = `状态读取受限：${detail.readError}（不阻断）。`;
   else if (installed === 0) detailText = '没检测到已装的 AI 助手 —— 可以先跳过，装好后再到 设置 → AI 助手 接入。';
-  else detailText = `检测到 ${installed} 个已装助手（已接入 ${connected} 个）。点「接入」；都接好了点「已完成」。`;
+  else detailText = `检测到 ${installed} 个已装助手（已接入 ${connected} 个）。点「接入」，都接上后自动完成。`;
   return {
     detailText,
     connected,
     total,
     installed,
-    doneEnabled: startDone && connected >= 1,
-    doneHidden: startDone && installed === 0, // 空态不渲染「已完成」（设计稿）
-    doneLabel: '已完成',
-    doneHint: !startDone || total === 0 ? '' : connected >= 1 ? '还可以继续接其他助手' : '接好一个即可点「已完成」',
-    // 「先不接 ›」：① 完成后随时可显式跳过段②（= 用户对段②的显式确认，与「已完成」同路 ack）
-    skipConnect: { label: '先不接 ›', hidden: !startDone },
+    // 自动完成（用户定调）：已装的全部接入 = 段② 目的达成，自动 ack 进完成态——
+    // 「已完成」按钮是多余仪式；没接齐时不自动翻段（防误判）
+    autoAck: startDone && installed > 0 && connected >= installed && !step.done,
+    // 「先不接 ›」：有未接齐时的唯一安静出口（显式跳过 = ack）；全部接齐自动完成，不需要任何按钮
+    skipConnect: { label: '先不接 ›', hidden: !startDone || step.done },
     doneLine: step.done
       ? (connected >= 1
         ? { main: '✓ 已接好', sub: '重启对应软件后生效' }

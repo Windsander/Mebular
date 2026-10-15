@@ -432,7 +432,7 @@ if (!gotLock) {
         await showConsoleWithRetry();
       } else {
         console.log(`[desktop] 未完成首次上手（待办：${state.current}）→ 打开向导`);
-        await safeLoad(wizardFileUrl());
+        await safeLoad(wizardViewUrl()); // 带缓存破坏参数：file:// 下 HTML/ESM 亦可能被缓存（走查事故：旧版向导复活）
         healthy = await probeHealth(fetch, httpConf());
         updateTray();
       }

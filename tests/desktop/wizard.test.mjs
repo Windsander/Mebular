@@ -130,7 +130,7 @@ describe('UX-2 段②行级接入：clientsViaApi / clientActionViaApi（假 fet
   it('UX-2 收口（自动化模型修订）：向导②零按钮——验证/重试归 设置 · AI 助手（console 侧承担）', () => {
     const wizardJs = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'renderer', 'wizard.js'), 'utf-8');
     expect(wizardJs).not.toContain('data-asst-act'); // 向导内无行内动作
-    expect(wizardJs).toMatch(/失败只给一行原因/);
+    expect(wizardJs).toMatch(/失败非阻断并入汇总|可在 设置 → AI 助手 重试/);
     // console 侧仍是验证闭环（同一语言；deep-link.test 另有全量契约）
     const assistantsJs = readFileSync(join(here, '..', '..', 'packages', 'console', 'assistants.js'), 'utf-8');
     expect(assistantsJs).toContain('我已重载，验证');

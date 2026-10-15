@@ -31,10 +31,10 @@ export function wizardView(state) {
 
   // 设计稿（01-setup）：hero tagline 随进度变化
   const tagline = complete
-    ? '全部就绪。'
+    ? ''
     : start?.done
-      ? '很好，再接一个助手就完成。'
-      : '点两下，把它接进你的日常。';
+      ? '正在接入 AI 助手…'
+      : '点一下，接入设备';
 
   // 异常（① 未完成 = 守护未就绪 / 引导态 / 待重启）→ 日志自动展开 + 一行人话结论；宽限窗内不算异常
   const abnormal = Boolean(start) && !start.done && !grace;
@@ -116,7 +116,7 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
       : null,
     actions: {
       // 完成前恒在：② 未收尾时它仍是唯一动作入口（点一次跑完剩余全部自动化）
-      go: { label: '一键开始', kind: 'primary', hidden: false },
+      go: { label: '自动部署', kind: 'primary', hidden: false },
       provision: { label: '去写入初始设置 →', kind: 'primary', hidden: !(provision.required && !provision.provisioned) },
       // 设计稿：「或加入已有的 Mebular ›」——与「去写入初始设置」同路（控制台 provision），仅引导态显示
       join: { label: '或加入已有的 Mebular ›', kind: 'alt', hidden: !(provision.required && !provision.provisioned) },
@@ -142,7 +142,7 @@ function assistantsStepView(step, start) {
   else if (detail.readError) detailText = `状态读取受限：${detail.readError}（不阻断）。`;
   else if (installed === 0) detailText = '没检测到已装的 AI 助手 —— 装好后回来点「一键开始」即可。';
   else if (connected >= installed) detailText = `已接入 ${connected} 个 AI 助手。`;
-  else detailText = `检测到 ${installed} 个已装助手（已接入 ${connected} 个）——点「一键开始」自动接入；未成功的会在下方给出原因。`;
+  else detailText = `检测到 ${installed} 个已装助手（已接入 ${connected} 个）——点「自动部署」接上；未成功的会在下方给出原因。`;
   return {
     detailText,
     connected,

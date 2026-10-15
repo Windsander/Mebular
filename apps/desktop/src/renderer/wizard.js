@@ -4,7 +4,6 @@
 //       段②行级接入（名称+状态词+一个动作；「已接入 ✓」不自动翻段，「已完成」显式确认）。
 
 import { wizardView, flapGate, wizardRowStatus } from './wizard-view.mjs';
-import { reconcileAssistantUi } from '../../../../packages/console/assistant-status.js';
 
 const api = window.mebularDesktop;
 
@@ -23,89 +22,73 @@ let firstSeen = false;
 function renderState(state) {
   if (!state) return;
   const view = wizardView(state);
+  const complete = Boolean(state.complete);
 
-  // 直达变体仅按**首次**状态判定（跑完流程当场完成仍走 finish 暖收尾）
   if (!firstSeen) {
     firstSeen = true;
-    if (state.complete) document.body.classList.add('is-existing');
+    if (complete) document.body.classList.add('is-existing');
   }
   const existing = document.body.classList.contains('is-existing');
   const existingEl = $('#existing');
   if (existingEl) existingEl.hidden = !existing;
 
+  // 三态（用户定稿）：初始=全屏居中仅一个按钮 → 部署=标题上浮+阶段框 → 完成=缩略卡
+  const deploying = !complete && (flow.running || flow.everRan || Date.now() < graceUntil);
+  document.body.classList.toggle('is-idle', !existing && !complete && !deploying);
+
   setText('#tagline', existing ? '' : view.tagline);
-
-  const badge = $('#daemon-badge');
-  if (badge) {
-    badge.textContent = view.badge;
-    badge.classList.toggle('todo', !state.complete);
-  }
-
-  // 完成态 → 「已就绪 ✦」暖收尾（单一主按钮）+ 两段折叠为回顾（done-line 可再展开）
+  const idleCta = $('#idle-cta');
+  if (idleCta) idleCta.hidden = existing || complete || deploying;
+  const panel = $('#deploy-panel');
+  // 完成态（用户定稿）：面板以「阶段框简述」保留（四步全 ✓，其余元素收起）+ 已就绪卡
+  if (panel) panel.hidden = existing || (!deploying && !complete);
   const cta = $('#complete-cta');
-  if (cta) {
-    cta.hidden = !view.complete || existing;
-    cta.classList.toggle('show', Boolean(view.complete) && !existing);
-  }
+  if (cta) cta.hidden = !complete || existing;
   const finishNote = $('#finish-note');
-  if (finishNote && view.complete) {
+  if (finishNote && complete) {
     const pending = [...reloadHints];
     finishNote.innerHTML = (pending.length > 0
       ? `<span class="warn-text">提醒：重启 ${pending.map((n) => escapeHtml(n)).join('、')} 这个软件后，mebular 才会出现在它的工具列表。</span><br />`
       : '') + '之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请新设备」随时可用。';
   }
 
-  for (const step of view.steps) {
-    const el = document.getElementById(`step-${step.id}`);
-    if (!el) continue;
-    el.classList.toggle('done', step.status === 'done');
-    el.classList.toggle('is-current', step.status === 'current');
-    // 里程碑轨道节点态：active=呼吸 / done=✓ / locked=暗（未到段不可点）
-    el.classList.toggle('active', step.node === 'active');
-    el.classList.toggle('locked', step.node === 'locked');
-    el.classList.toggle('is-collapsed', Boolean(step.collapsed)); // 完成即终态单行（无展开交互；异常时视图自动回到操作态）
-    // done-line 回顾行（折叠时可见；点击重新展开）
-    const doneLine = el.querySelector('.done-line');
-    if (doneLine && step.doneLine) {
-      const [main, sub] = [doneLine.querySelector('span:first-child'), doneLine.querySelector('.muted')];
-      if (main) main.textContent = step.doneLine.main;
-      if (sub) sub.textContent = step.doneLine.sub;
-    }
-  }
-
   const start = view.steps.find((s) => s.id === 'start');
-  if (start) {
+  const assistantsDone = Boolean(state.steps?.find((s) => s.id === 'assistants')?.done);
+  if (start && (deploying || complete)) {
     setText('#start-detail', start.detailText);
+    const startDetail = $('#start-detail');
+    if (startDetail) startDetail.hidden = complete; // 简述：完成态收掉状态行
     const svcBadge = $('#start-service-badge');
     if (svcBadge) svcBadge.hidden = !start.serviceBadge;
+    const goRow = $('#go-row');
+    if (goRow) goRow.hidden = complete; // 简述：完成态无动作行
+    const troubleshooting = $('#start-troubleshoot');
+    if (troubleshooting) troubleshooting.hidden = complete; // 简述：完成态不挂运维入口（设置/控制台承担）
     const btnGo = $('#btn-go');
-    if (btnGo) btnGo.hidden = Boolean(start.actions.go.hidden) || flow.running;
+    if (btnGo) btnGo.hidden = Boolean(start.actions.go.hidden) || flow.running || complete;
+    const altJoin = $('#alt-join');
+    if (altJoin) altJoin.hidden = Boolean(start.actions.join?.hidden ?? true) || flow.running;
     const btnProvision = $('#btn-provision');
     if (btnProvision) btnProvision.hidden = Boolean(start.actions.provision.hidden);
-    const altJoin = $('#alt-join');
-    if (altJoin) altJoin.hidden = Boolean(start.actions.join?.hidden ?? true);
     const btnInstall = $('#btn-install');
     if (btnInstall) {
       btnInstall.hidden = Boolean(start.actions.install.hidden);
       btnInstall.disabled = Boolean(start.actions.install.disabled);
       if (start.actions.install.label) btnInstall.textContent = start.actions.install.label;
     }
-    // P1 简化：常驻只在 ① 完成后以「开机自启？」一行出现（推荐、非阻塞），不占首屏
     const postRow = $('#postdone-row');
-    if (postRow) postRow.hidden = !(start.status === 'done' && !start.actions.install.hidden);
-    // 非跑流水期间：流水面板按静态进度呈现（① 未完成且从未跑过 → 保持隐藏）
-    if (!flow.running && !flow.everRan) {
-      const flowEl = $('#start-flow');
-      const showStatic = start.status !== 'done' && (start.flow.write !== 'todo' || start.flow.launch !== 'todo');
-      if (flowEl) flowEl.hidden = !showStatic;
-      if (showStatic) for (const sub of ['launch', 'write', 'recover']) setSubState(sub, start.flow[sub] ?? 'todo');
-    }
-  }
+    // 简述（完成态）里不挂「开机自启？」——它是部署中的可选动作；日常入口在设置 · 常用
+    if (postRow) postRow.hidden = complete || !(start.status === 'done' && !start.actions.install.hidden);
 
-  const assistants = view.steps.find((s) => s.id === 'assistants');
-  if (assistants) {
-    // 自动化（用户定调）：② 纯过程展示——无任何按钮；确认收尾由流水尾部统一执行
-    setText('#assistants-detail', assistants.detailText);
+    if (complete) {
+      const msgEl = $('#flow-msg');
+      if (msgEl) msgEl.textContent = '';
+    }
+    // 阶段框：四步现状（未跑流水时按状态静态推导；跑流水时由 runFlow 实时接管）
+    if (!flow.running && !flow.everRan) {
+      for (const sub of ['launch', 'write', 'recover']) setSubState(sub, start.flow[sub] ?? 'todo');
+      setSubState('connect', assistantsDone ? 'done' : (start.status === 'done' ? 'active' : 'todo'));
+    }
   }
 
   // 异常（引导态/启动失败）→ 自动展开 + 一行结论；正常保持默认折叠
@@ -116,10 +99,12 @@ function renderState(state) {
     if (view.logs.conclusion) conclusion.textContent = view.logs.conclusion;
   }
   if (logsPanel) {
-    // 简洁（用户定调）：① 就绪后日志折条不常驻；有异常待办时才出现（并自动展开一次）
-    const startStep = view.steps.find((s) => s.id === 'start');
-    logsPanel.hidden = startStep?.status === 'done';
-    if (!logsPanel.hidden && view.logs.open && !logsAutoOpened) {
+    // 简洁（用户定调）：日志是**异常件**——未开始不出现、① 就绪后不常驻；
+    // 只有真失败（跑过流水且失败）/ 运行中 / 引导态才出现（并自动展开一次）
+    const provisionRequired = Boolean(state?.steps?.[0]?.detail?.provision?.required);
+    const showLogs = deploying && start?.status !== 'done' && (flow.everRan || flow.running || provisionRequired);
+    logsPanel.hidden = !showLogs;
+    if (showLogs && view.logs.open && !logsAutoOpened) {
       logsPanel.open = true;
       logsAutoOpened = true;
     }
@@ -137,7 +122,6 @@ function armGrace(ms = 60000) { graceUntil = Date.now() + ms; }
 // UX-2 补丁 3：① 瞬态容忍（flapGate 纯函数）——连续 ≥2 次 miss 才翻回未完成；单次 miss UI 不动
 let healthMisses = 0;
 let lastStartDone = false;
-
 
 async function refresh() {
   try {
@@ -160,39 +144,36 @@ async function refresh() {
 const SUBSTEPS = ['launch', 'write', 'recover', 'connect'];
 // 过程可见性：每个子步最小停留（太快等于没展示）；汇总行读完再收尾
 const SUB_MIN_DWELL_MS = 900;
+const flow = { running: false, everRan: false, failedSub: null };
 // 可自动接入的目标：已装、未接、非 manual 兜底、非检测失败
 function connectTargets(clients) {
   return (clients ?? []).filter((c) => c.installed && !c.connected
     && c.state !== 'manual' && c.needsManual !== true && c.state !== 'detect-failed');
 }
-/** 逐个自动接入（行内实时反馈）；返回 { ok:[], failed:[] }。失败非阻断（异常才给出口）。 */
+/** 逐个自动接入（旁白式进度：一次只报当前一个；失败非阻断，收尾汇总）。返回 { ok:[], failed:[] }。 */
 async function autoConnectAll() {
   let clients = [];
   try { clients = (await api.clientsList())?.clients ?? []; } catch { return { ok: [], failed: [] }; }
   const targets = connectTargets(clients);
   const ok = [];
   const failed = [];
-  for (const c of targets) {
-    flowMsg(`正在接入 ${c.name}…`);
+  for (let i = 0; i < targets.length; i += 1) {
+    const c = targets[i];
+    flowMsg(`正在接入 ${c.name}…（${i + 1}/${targets.length}）`);
     try {
       const r = await api.clientsAction(c.id, 'connect');
       if (r?.ok) {
         ok.push(c.name);
-        reloadHints.add(c.id); // 提示层：行内「已写入 · 重启后生效」+ 完成页提醒
-        rowFailed.delete(c.id);
+        reloadHints.add(c.id); // 完成页提醒名单（重启对应软件后生效）
       } else {
-        rowFailed.set(c.id, { kind: 'connect', reason: r?.warning ?? '未成功' });
         failed.push(`${c.name}（${r?.warning ?? '未成功'}）`);
       }
     } catch (error) {
-      rowFailed.set(c.id, { kind: 'connect', reason: `没能完成：${error?.message ?? error}` });
       failed.push(`${c.name}（${error?.message ?? error}）`);
     }
-    await loadClients();
   }
   return { ok, failed };
 }
-const flow = { running: false, everRan: false, failedSub: null };
 
 function setSubState(sub, state) {
   const li = document.querySelector(`#start-flow [data-sub="${sub}"]`);
@@ -269,7 +250,7 @@ async function runFlow(fromSub = 'launch') {
         flowMsg('正在接入 AI 助手…');
         const { ok, failed } = await autoConnectAll();
         if (failed.length > 0) {
-          flowMsg(`已自动接入 ${ok.length} 个；${failed.join('；')}——可在下方「重试」或稍后在 设置 → AI 助手 处理。`, true);
+          flowMsg(`已自动接入 ${ok.length} 个；${failed.join('；')}——可在 设置 → AI 助手 重试。`, true);
         } else if (ok.length > 0) {
           flowMsg(`已接入 ${ok.length} 个 AI 助手——重启对应软件后生效。`);
         } else {
@@ -294,8 +275,7 @@ async function runFlow(fromSub = 'launch') {
     flow.running = false;
     $('#btn-go').hidden = true; // 跑过后由「续跑」/状态驱动，不再回显主按钮（幂等）
     await refresh();
-    await loadClients();
-  }
+    }
 }
 
 $('#btn-go')?.addEventListener('click', () => { void runFlow('launch'); });
@@ -334,69 +314,9 @@ $('#btn-restart')?.addEventListener('click', async () => { armGrace(); await api
 // ---------- 段② 行级接入（名称 + 状态词 + 一个动作；与 设置 · AI 助手 同一语言） ----------
 
 // 补丁 3 增补：语义更名 pendingReload → reloadHints（提示层「已写入·请重载」，**不再驱动「待生效」状态词**）；
-// rowVerify = 最近一次服务端 verify 真值（pending-restart 是「待生效」唯一正当来源）。
 const reloadHints = new Set();
-const rowVerify = new Map();
 // UX-2 补丁 3：行级失败态（id → { kind: 'connect'|'verify', reason }）——失败绝不显示「待生效」
-const rowFailed = new Map();
 let clientsSignature = null;
-
-function renderClients(clients) {
-  const list = $('#asst-list');
-  if (!list) return;
-  if (!Array.isArray(clients)) {
-    list.innerHTML = '<p class="amsg">助手列表加载中…</p>';
-    return;
-  }
-  const signature = JSON.stringify(
-    clients.map((c) => [c.id, Boolean(c.installed), Boolean(c.connected), c.state ?? null])
-      .concat([...reloadHints].map((k) => `hint:${k}`))
-      .concat([...rowFailed.keys()].map((k) => `fail:${k}`)),
-  );
-  if (signature === clientsSignature) return;
-  clientsSignature = signature;
-  const failedObj = Object.fromEntries(rowFailed);
-  // 只显示**真实已装**的助手：未安装不出现；内置兜底「其他 AI 助手（复制片段）」（state=manual）不进向导
-  const visible = clients.filter((c) => (c.state ?? (c.installed ? 'x' : 'not-installed')) !== 'not-installed'
-    && c.state !== 'detect-failed' && c.state !== 'manual' && c.needsManual !== true);
-  if (visible.length === 0) {
-    list.innerHTML = '<p class="amsg">没检测到已装的 AI 助手——装好后回来点「一键开始」即可。</p>';
-    return;
-  }
-  // 自动化（用户定调）：② 是**纯过程展示，任何状态零按钮**——
-  // 未接的由「一键开始」自动接入；失败只给一行原因（重试归 设置 → AI 助手）
-  list.innerHTML = visible.map((c) => {
-    const st = wizardRowStatus(c, { pending: reloadHints, failed: failedObj, verifyStates: {} });
-    const hintInline = st.reloadHint && st.key === 'connected'
-      ? '<span class="ast-hint">已写入 · 重启后生效</span>'
-      : '';
-    const failed = failedObj[c.id];
-    const reasonLine = failed
-      ? `<p class="amsg">${c.name ?? c.id}：${failed.reason ?? '未成功'}——可在 设置 → AI 助手 重试</p>`
-      : '';
-    return `<div class="arow" data-asst-row="${c.id}">
-      <span class="aname">${c.name ?? c.id}</span>
-      <span class="ast${st.key === 'connected' ? ' ok' : st.key === 'pending-reload' || st.key === 'connect-failed' || st.key === 'verify-failed' ? ' todo' : ''}">${st.label}</span>
-      ${hintInline}
-    </div>
-    ${reasonLine}`;
-  }).join('');
-}
-
-async function loadClients() {
-  try {
-    const res = await api.clientsList();
-    const clients = res?.clients ?? [];
-    // 补丁 3 增补 · 对账：每轮刷新清掉与服务端真值矛盾的客户端残留
-    for (const c of clients) {
-      reconcileAssistantUi(c, { reloadHints, verifyStates: rowVerify, failed: rowFailed });
-    }
-    renderClients(clients);
-    if (res?.warning) setText('#assistants-detail', `${res.warning}（不阻断，可稍后在「设置 · AI 助手」里补）`);
-  } catch {
-    renderClients([]);
-  }
-}
 
 $('#alt-join')?.addEventListener('click', () => { void api.openConsole(); });
 
@@ -477,7 +397,6 @@ $('#btn-logs-open')?.addEventListener('click', () => { void api.openLogs(); });
 })();
 
 void refresh();
-void loadClients();
 void loadLogs();
 // 状态轮询（跑流水期间也有自己的有界轮询；这里只读、幂等）
-setInterval(() => { if (!flow.running) { void refresh(); void loadClients(); } void loadLogs(); }, 3000);
+setInterval(() => { if (!flow.running) { void refresh();  } void loadLogs(); }, 3000);

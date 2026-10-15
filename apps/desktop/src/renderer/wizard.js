@@ -149,6 +149,8 @@ let healthMisses = 0;
 let lastStartDone = false;
 // 简化轮：② 全部接齐自动完成（ack 一次，防重入）
 let autoAckPending = false;
+// 全自动：重开向导时续跑接入（一次/会话，防循环）
+let autoConnectRan = false;
 
 async function refresh() {
   try {
@@ -163,12 +165,50 @@ async function refresh() {
     if (gate.hold) return; // 单次 miss：不翻段、不自动展开日志（其他区随下一轮更新）
     if (Date.now() < graceUntil && state && !state.complete) state.grace = true;
     renderState(state);
+    // 全自动（用户定调「点一次，其余自动跑」）：重开后 ① 已就绪且有可接助手 → 自动续跑接入一次
+    if (state && !state.complete && !autoConnectRan && Boolean(state.steps?.[0]?.done)) {
+      const list = await api.clientsList().catch(() => null);
+      if (list && connectTargets(list.clients).length > 0) {
+        autoConnectRan = true;
+        flow.running = true;
+        try {
+          await autoConnectAll();
+        } finally {
+          flow.running = false;
+          await loadClients();
+        }
+      }
+    }
   } catch (error) { setText('#start-detail', `状态读取失败：${error.message}`); }
 }
 
 // ---------- 段① 一键开始：子步骤流水（启动 → 写入初始设置 → 重启恢复） ----------
 
-const SUBSTEPS = ['launch', 'write', 'recover'];
+const SUBSTEPS = ['launch', 'write', 'recover', 'connect'];
+// 可自动接入的目标：已装、未接、非 manual 兜底、非检测失败
+function connectTargets(clients) {
+  return (clients ?? []).filter((c) => c.installed && !c.connected
+    && c.state !== 'manual' && c.needsManual !== true && c.state !== 'detect-failed');
+}
+/** 逐个自动接入（行内实时反馈）；返回 { ok:[], failed:[] }。失败非阻断（异常才给出口）。 */
+async function autoConnectAll() {
+  let clients = [];
+  try { clients = (await api.clientsList())?.clients ?? []; } catch { return { ok: [], failed: [] }; }
+  const targets = connectTargets(clients);
+  const ok = [];
+  const failed = [];
+  for (const c of targets) {
+    flowMsg(`正在接入 ${c.name}…`);
+    try {
+      const r = await api.clientsAction(c.id, 'connect');
+      if (r?.ok) { ok.push(c.name); reloadHints.add(c.id); } else failed.push(`${c.name}（${r?.warning ?? '未成功'}）`);
+    } catch (error) {
+      failed.push(`${c.name}（${error?.message ?? error}）`);
+    }
+    await loadClients();
+  }
+  return { ok, failed };
+}
 const flow = { running: false, everRan: false, failedSub: null };
 
 function setSubState(sub, state) {
@@ -240,6 +280,17 @@ async function runFlow(fromSub = 'launch') {
             return Boolean(d.healthy) && !d.provision?.required;
           });
           if (!ok) throw new Error('重启后守护未在 60s 内恢复');
+        }
+      } else if (sub === 'connect') {
+        // 一键启动的核心自动化：把已装的 AI 助手全部接上（行内实时翻状态；失败非阻断）
+        flowMsg('正在接入 AI 助手…');
+        const { ok, failed } = await autoConnectAll();
+        if (failed.length > 0) {
+          flowMsg(`已自动接入 ${ok.length} 个；${failed.join('；')}——可在下方「重试」或稍后在 设置 → AI 助手 处理。`, true);
+        } else if (ok.length > 0) {
+          flowMsg(`已接入 ${ok.length} 个 AI 助手——重启对应软件后生效。`);
+        } else {
+          flowMsg('没有需要接入的助手。');
         }
       }
       setSubState(sub, 'done');
@@ -324,6 +375,9 @@ function renderClients(clients) {
   // 只显示**真实已装**的助手：未安装不出现；内置兜底「其他 AI 助手（复制片段）」（state=manual）不进向导（太干扰，归设置处理）
   const visible = clients.filter((c) => (c.state ?? (c.installed ? 'x' : 'not-installed')) !== 'not-installed'
     && c.state !== 'detect-failed' && c.state !== 'manual' && c.needsManual !== true);
+  // 一键启动/自动续跑期间：行是**过程展示**（无按钮）——交互只在异常时出现（失败行保留重试）
+  const passive = flow.running;
+  if (passive && !(clientsSignature ?? '').startsWith('P:')) clientsSignature = `P:${clientsSignature}`;
   if (visible.length === 0) {
     list.innerHTML = '<p class="amsg">没检测到已装的 AI 助手——可以先跳过，装好后回到这里（或到 设置 → AI 助手 接入）。</p>';
     return;
@@ -331,7 +385,8 @@ function renderClients(clients) {
   list.innerHTML = visible.map((c) => {
     const st = wizardRowStatus(c, { pending: reloadHints, failed: failedObj, verifyStates: verifyObj });
     let action = '';
-    if (st.key === 'not-connected') action = `<button data-asst-act="connect" data-asst-id="${c.id}">接入</button>`;
+    if (passive) action = ''; // 过程展示：不出现按钮
+    else if (st.key === 'not-connected') action = `<button data-asst-act="connect" data-asst-id="${c.id}">接入</button>`;
     else if (st.key === 'connect-failed') action = `<button data-asst-act="connect" data-asst-id="${c.id}">重试</button>`;
     else if (st.key === 'verify-failed') action = `<button data-asst-act="verify" data-asst-id="${c.id}">重新验证</button>`;
     else if (st.key === 'pending-reload' || (st.key === 'connected' && st.reloadHint)) {

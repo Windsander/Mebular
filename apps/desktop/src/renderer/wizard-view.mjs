@@ -98,7 +98,7 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
         : '守护运行中。（常驻状态读取中或不可用）';
   } else {
     // 设计稿（01-setup）① 正文
-    detailText = '在这台机器上启动 Mebular 并完成初始设置。数据只存在这台机器上，不上云。';
+    detailText = '一键完成：启动 Mebular、接上你已装的 AI 助手。数据只存在这台机器上，不上云。';
   }
   // 子步骤流水进度（静态推导；渲染层在跑流水时以运行时状态覆盖）
   const flow = {
@@ -139,7 +139,7 @@ function assistantsStepView(step, start) {
   else if (!detail) detailText = '助手列表加载中…';
   else if (detail.readError) detailText = `状态读取受限：${detail.readError}（不阻断）。`;
   else if (installed === 0) detailText = '没检测到已装的 AI 助手 —— 可以先跳过，装好后再到 设置 → AI 助手 接入。';
-  else detailText = `检测到 ${installed} 个已装助手（已接入 ${connected} 个）。点「接入」，都接上后自动完成。`;
+  else detailText = `检测到 ${installed} 个已装助手（已接入 ${connected} 个）。`;
   return {
     detailText,
     connected,

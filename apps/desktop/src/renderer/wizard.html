@@ -192,12 +192,13 @@
         <section class="panel">
           <h2>开始 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
           <div class="seg-body">
-            <p class="muted" id="start-detail">在这台机器上启动 Mebular 并完成初始设置。<br />数据只存在这台机器上，不上云。</p>
+            <p class="muted" id="start-detail">一键完成：启动 Mebular、接上你已装的 AI 助手。<br />数据只存在这台机器上，不上云。</p>
             <!-- 段①：一键后按钮区原位展开实时流水（启动 → 写入初始设置 → 重启恢复；失败定位子步骤） -->
             <ol id="start-flow" class="flow" hidden>
               <li data-sub="launch" data-state="todo"><i></i>启动本机守护</li>
               <li data-sub="write" data-state="todo"><i></i>写入本机设置</li>
               <li data-sub="recover" data-state="todo"><i></i>重启生效（页面会自动恢复）</li>
+              <li data-sub="connect" data-state="todo"><i></i>接入 AI 助手（自动）</li>
             </ol>
             <p class="muted" id="flow-msg"></p>
             <div class="row">

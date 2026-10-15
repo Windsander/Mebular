@@ -456,7 +456,7 @@ describe('设计稿 ④ 段② 文案与空态（以设计稿为准）', () => {
   it('检测到 N 个已装助手（含已接入计数）；空态不自动完成（出口=先不接 ›）', () => {
     const view = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1, total: 3 } }));
     const a = view.steps.find((s) => s.id === 'assistants');
-    expect(a.detailText).toBe('检测到 3 个已装助手（已接入 1 个）。点「接入」，都接上后自动完成。');
+    expect(a.detailText).toBe('检测到 3 个已装助手（已接入 1 个）。');
     // 有未接的 → 只有「先不接 ›」出口；全部接齐 → autoAck
     expect(a.skipConnect.hidden).toBe(false);
     const zero = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 3, installedCount: 3 } }));
@@ -473,7 +473,7 @@ describe('设计稿 ④ 段② 文案与空态（以设计稿为准）', () => {
     expect(view.steps.find((s) => s.id === 'start').detailText).toContain('数据只存在这台机器上，不上云');
     expect(wizardHtml).toContain('接入只改它的一条配置；重启对应软件后生效。');
 
-    expect(wizardHtml).toContain('在这台机器上启动 Mebular 并完成初始设置。');
+    expect(wizardHtml).toContain('一键完成：启动 Mebular、接上你已装的 AI 助手。');
   });
 
   it('「或加入已有的 Mebular ›」：仅引导态显示、显式点击 openConsole', () => {
@@ -831,5 +831,31 @@ describe('简化轮走查修复 3 · 日志折条不常驻（① 就绪即隐藏
     expect(wizardJs).toMatch(/!logsPanel\.hidden && view\.logs\.open && !logsAutoOpened/);
     // logs-panel 仍在 DOM（静态契约保留），且默认无 open
     expect(wizardHtml).toMatch(/<details[^>]*id="logs-panel"[^>]*>/);
+  });
+});
+
+describe('简化轮走查修复 4 · 一键启动（①②全自动跑给你看）', () => {
+  it('流水四步：启动 → 写入 → 重启恢复 → 接入 AI 助手（自动）；HTML/JS 契约', () => {
+    for (const sub of ['launch', 'write', 'recover', 'connect']) {
+      expect(wizardHtml).toContain(`data-sub="${sub}"`);
+    }
+    expect(wizardHtml).toContain('接入 AI 助手（自动）');
+    expect(wizardJs).toMatch(/const SUBSTEPS = \['launch', 'write', 'recover', 'connect'\]/);
+    expect(wizardJs).toContain('autoConnectAll');
+    expect(wizardJs).toMatch(/sub === 'connect'[\s\S]{0,260}autoConnectAll\(\)/);
+  });
+
+  it('一键启动核心自动化：connect 子步逐个接入（非阻断，失败行进「重试」）+ 行在流程中被动（无按钮）', () => {
+    const fn = wizardJs.match(/async function autoConnectAll\(\)[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(fn).toMatch(/clientsAction\(c\.id, 'connect'\)/);
+    expect(fn).toMatch(/failed\.push/); // 失败非阻断
+    expect(wizardJs).toMatch(/const passive = flow\.running/);
+    expect(wizardJs).toMatch(/if \(passive\) action = ''/);
+  });
+
+  it('重开向导自动续跑接入（一次/会话，防循环）；点一次即可的叙事文案', () => {
+    expect(wizardJs).toMatch(/autoConnectRan = true/);
+    expect(wizardJs).toMatch(/connectTargets\(list\.clients\)\.length > 0/);
+    expect(wizardView(computeWizardState({})).steps.find((s) => s.id === 'start').detailText).toContain('一键完成');
   });
 });

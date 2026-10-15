@@ -63,9 +63,13 @@ describe('UX-2 定稿：中央空态遮罩下线（只有本机时不遮挡星�
     expect(indexHtml).not.toContain('empty-state');
     const consoleCss = readFileSync(join(here, '..', '..', 'packages', 'console', 'console.css'), 'utf-8');
     expect(consoleCss).not.toContain('.empty-state');
-    // 引导入口（顶栏）仍在
-    expect(indexHtml).toContain('＋ 连接已有地址');
-    expect(indexHtml).toContain('＋ 邀请新设备');
+    // 顶栏操作组几何统一（用户实拍：三个按钮大小不一致感）——固定高 + flex 居中 + 图标槽
+    expect(consoleCss).toMatch(/\.topbar-actions \.btn \{[^}]*inline-flex[^}]*height: 34px/);
+    expect(consoleCss).toMatch(/\.topbar-actions \.btn \.btn-ico \{[^}]*width: 15px/);
+    // 引导入口（顶栏）仍在（图标槽 span + 文案）
+    expect(indexHtml).toContain('btn-ico');
+    expect(indexHtml).toContain('连接已有地址');
+    expect(indexHtml).toContain('邀请新设备');
   });
 });
 

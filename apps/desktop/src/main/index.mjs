@@ -228,7 +228,10 @@ function createWindow() {
     backgroundColor: '#0b0f0d',
     // UX-2 补丁 4：macOS 交通灯内嵌（hiddenInset）——内容区与 CRT 风格连续；
     // Windows/Linux 保守默认 frame（系统标题栏保留，不冒险）
-    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' } : {}),
+    // 走查修正（用户实拍：灯与顶栏内容不在一条线上）：hiddenInset 默认 margin (12,11)
+    // 是 Electron ≤12 的旧布局（比官方 App 偏高）；顶栏 56px → 内容中线 28。
+    // trafficLightPosition.y = 按钮 frame 顶距窗口顶；frame 高 14~16 → 取 20 使灯心 ≈27~28。
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 12, y: 20 } } : {}),
     webPreferences: {
       preload: join(import.meta.dirname, '..', 'preload', 'index.cjs'),
       contextIsolation: true,

@@ -509,6 +509,7 @@ describe('补丁 4 · 窗口外框（macOS hiddenInset 交通灯内嵌；Windows
     const cw = indexMjs.match(/function createWindow\(\) \{[\s\S]*?webPreferences/)?.[0] ?? '';
     expect(cw).toContain("process.platform === 'darwin'");
     expect(cw).toContain("titleBarStyle: 'hiddenInset'");
+    expect(cw).toContain('trafficLightPosition: { x: 12, y: 20 }'); // 走查：灯与顶栏内容同线（顶栏 56 → 中线 28）
     expect(cw).not.toContain('frame: false'); // 不无框（保守）
   });
 

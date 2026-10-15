@@ -14,11 +14,25 @@ const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
 // 日志区只在「进入异常态」的边沿自动展开一次（不打断用户手动收起）
 let logsAutoOpened = false;
 
-// ---------- 渲染（视图模型驱动） ----------
+// ---------- 渲染（视图模型驱动；01-setup 设计稿：hero/tagline + 里程碑轨道 + done-line 回顾） ----------
+
+// 已设置过·直达变体：首次拿到的状态就是完成态 → 「欢迎回来」替换整个轨道
+let firstSeen = false;
 
 function renderState(state) {
   if (!state) return;
   const view = wizardView(state);
+
+  // 直达变体仅按**首次**状态判定（跑完流程当场完成仍走 finish 暖收尾）
+  if (!firstSeen) {
+    firstSeen = true;
+    if (state.complete) document.body.classList.add('is-existing');
+  }
+  const existing = document.body.classList.contains('is-existing');
+  const existingEl = $('#existing');
+  if (existingEl) existingEl.hidden = !existing;
+
+  setText('#tagline', existing ? '' : view.tagline);
 
   const badge = $('#daemon-badge');
   if (badge) {
@@ -26,18 +40,38 @@ function renderState(state) {
     badge.classList.toggle('todo', !state.complete);
   }
 
-  // 完成态 → 单一主按钮「进入控制台 ✦」+ 两段折叠为回顾（点标题可再展开）
+  // 完成态 → 「已就绪 ✦」暖收尾（单一主按钮）+ 两段折叠为回顾（done-line 可再展开）
   const cta = $('#complete-cta');
-  if (cta) cta.hidden = !view.complete;
+  if (cta) {
+    cta.hidden = !view.complete || existing;
+    cta.classList.toggle('show', Boolean(view.complete) && !existing);
+  }
+  const finishNote = $('#finish-note');
+  if (finishNote && view.complete) {
+    const pending = [...pendingReload];
+    finishNote.innerHTML = (pending.length > 0
+      ? `<span class="warn-text">提醒：重载 ${pending.map((n) => escapeHtml(n)).join('、')} 后，mebular 才会出现在它的工具列表。</span><br />`
+      : '') + '之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请新设备」随时可用。';
+  }
 
   for (const step of view.steps) {
     const el = document.getElementById(`step-${step.id}`);
     if (!el) continue;
     el.classList.toggle('done', step.status === 'done');
     el.classList.toggle('is-current', step.status === 'current');
+    // 里程碑轨道节点态：active=呼吸 / done=✓ / locked=暗（未到段不可点）
+    el.classList.toggle('active', step.node === 'active');
+    el.classList.toggle('locked', step.node === 'locked');
     el.classList.toggle('is-collapsed', Boolean(step.collapsed) && !el.dataset.userExpanded);
     const check = el.querySelector('.step-check');
     if (check) check.hidden = !step.check;
+    // done-line 回顾行（折叠时可见；点击重新展开）
+    const doneLine = el.querySelector('.done-line');
+    if (doneLine && step.doneLine) {
+      const [main, sub] = [doneLine.querySelector('span:first-child'), doneLine.querySelector('.muted')];
+      if (main) main.textContent = step.doneLine.main;
+      if (sub) sub.textContent = step.doneLine.sub;
+    }
   }
 
   const start = view.steps.find((s) => s.id === 'start');
@@ -49,6 +83,8 @@ function renderState(state) {
     if (btnGo) btnGo.hidden = Boolean(start.actions.go.hidden) || flow.running;
     const btnProvision = $('#btn-provision');
     if (btnProvision) btnProvision.hidden = Boolean(start.actions.provision.hidden);
+    const altJoin = $('#alt-join');
+    if (altJoin) altJoin.hidden = Boolean(start.actions.join?.hidden ?? true);
     const btnInstall = $('#btn-install');
     if (btnInstall) {
       btnInstall.hidden = Boolean(start.actions.install.hidden);
@@ -68,7 +104,13 @@ function renderState(state) {
   if (assistants) {
     setText('#assistants-detail', assistants.detailText);
     const doneBtn = $('#btn-seg2-done');
-    if (doneBtn) doneBtn.disabled = !assistants.doneEnabled;
+    if (doneBtn) {
+      doneBtn.disabled = !assistants.doneEnabled;
+      doneBtn.hidden = Boolean(assistants.doneHidden);
+    }
+    const skipBtn = $('#btn-seg2-skip');
+    if (skipBtn) skipBtn.hidden = Boolean(assistants.skipConnect?.hidden ?? true);
+    setText('#done2-hint', assistants.doneHint ?? '');
   }
 
   // 异常（引导态/启动失败）→ 自动展开 + 一行结论；正常保持默认折叠
@@ -82,6 +124,10 @@ function renderState(state) {
     logsPanel.open = true;
     logsAutoOpened = true;
   }
+}
+
+function escapeHtml(s) {
+  return String(s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }
 
 // F4④ 重启/安装宽限窗（≤60s）：① 已完成期间的健康瞬断不翻回未完成（grace 注入视图模型）
@@ -220,14 +266,17 @@ $('#btn-install')?.addEventListener('click', async () => {
 });
 $('#btn-restart')?.addEventListener('click', async () => { armGrace(); await api.restart(); await refresh(); });
 
-// 完成态段标题点击 → 重新展开回顾
+// 完成态段标题 / done-line 点击 → 重新展开回顾
 for (const id of ['step-start', 'step-assistants']) {
-  document.getElementById(id)?.querySelector('h2')?.addEventListener('click', () => {
-    const el = document.getElementById(id);
+  const node = document.getElementById(id);
+  const toggle = () => {
+    const el = node;
     if (!el?.classList.contains('is-collapsed') && !el?.dataset.userExpanded) return;
     el.dataset.userExpanded = el.dataset.userExpanded ? '' : '1';
     el.classList.toggle('is-collapsed', !el.dataset.userExpanded);
-  });
+  };
+  node?.querySelector('h2')?.addEventListener('click', toggle);
+  node?.querySelector('.done-line')?.addEventListener('click', toggle);
 }
 
 // ---------- 段② 行级接入（名称 + 状态词 + 一个动作；与 设置 · AI 助手 同一语言） ----------
@@ -332,9 +381,17 @@ $('#btn-seg2-done')?.addEventListener('click', async () => {
   try { await api.ackAssistants(); } catch { /* 落盘失败不阻断 */ }
   await refresh();
 });
+// 「先不接 ›」：段② 的显式跳过（与「已完成」同路 ack——用户显式确认后才翻段/通关）
+$('#btn-seg2-skip')?.addEventListener('click', async () => {
+  try { await api.ackAssistants(); } catch { /* 落盘失败不阻断 */ }
+  await refresh();
+});
+// 「或加入已有的 Mebular ›」：与「去写入初始设置」同路（控制台 provision），显式点击才导航
+$('#alt-join')?.addEventListener('click', () => { void api.openConsole(); });
 
 $('#btn-skip')?.addEventListener('click', () => { void api.skipWizard(); });
 $('#btn-enter-console')?.addEventListener('click', () => { void api.openConsole(); });
+$('#btn-enter-console-2')?.addEventListener('click', () => { void api.openConsole(); });
 
 // ---------- 诊断与日志 ----------
 
@@ -350,7 +407,7 @@ async function loadLogs() {
 $('#btn-logs')?.addEventListener('click', () => { void loadLogs(); });
 $('#btn-logs-open')?.addEventListener('click', () => { void api.openLogs(); });
 
-// ---------- 星野舞台（轻量；prefers-reduced-motion → 静止一帧） ----------
+// ---------- 星野舞台（轻量；省电纪律：仅可见时渲染、隐藏即停；prefers-reduced-motion → 静止一帧） ----------
 
 (function sky() {
   const canvas = $('#sky');
@@ -358,6 +415,8 @@ $('#btn-logs-open')?.addEventListener('click', () => { void api.openLogs(); });
   const ctx = canvas.getContext('2d');
   const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ?? false;
   let stars = [];
+  let rafId = null;
+  let running = false;
   function resize() {
     canvas.width = Math.floor(window.innerWidth * (window.devicePixelRatio || 1));
     canvas.height = Math.floor(window.innerHeight * (window.devicePixelRatio || 1));
@@ -374,17 +433,32 @@ $('#btn-logs-open')?.addEventListener('click', () => { void api.openLogs(); });
     for (const s of stars) {
       const tw = reduced ? 0.6 : 0.35 + 0.3 * Math.sin(t / 900 + s.p);
       ctx.globalAlpha = Math.max(0.08, tw);
-      ctx.fillStyle = '#b9d2ff';
+      ctx.fillStyle = '#b4ffd6'; // 设计稿星色（console 契约：稀疏、缓慢、不抢戏）
       ctx.beginPath();
       ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
-    if (!reduced) window.requestAnimationFrame(draw);
+  }
+  function loop(t) {
+    draw(t);
+    rafId = running ? window.requestAnimationFrame(loop) : null;
+  }
+  function setRunning(on) {
+    if (reduced || on === running) return;
+    running = on;
+    if (on) {
+      if (rafId === null) rafId = window.requestAnimationFrame(loop);
+    } else if (rafId !== null) {
+      window.cancelAnimationFrame(rafId); // 隐藏即停：不再消耗 GPU/电量
+      rafId = null;
+    }
   }
   window.addEventListener('resize', () => { resize(); draw(0); });
+  document.addEventListener('visibilitychange', () => setRunning(document.visibilityState === 'visible'));
   resize();
-  if (reduced) draw(0); else window.requestAnimationFrame(draw);
+  if (reduced) draw(0);
+  else setRunning(document.visibilityState === 'visible');
 })();
 
 void refresh();

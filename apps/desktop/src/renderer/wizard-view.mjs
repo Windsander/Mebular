@@ -29,6 +29,13 @@ export function wizardView(state) {
     ? '已就绪'
     : `第 ${currentIndex + 1}/2 步 · ${STEP_NAME[state?.current] ?? ''}`.trim();
 
+  // 设计稿（01-setup）：hero tagline 随进度变化
+  const tagline = complete
+    ? '全部就绪。'
+    : start?.done
+      ? '很好，再接一个助手就完成。'
+      : '点两下，把它接进你的日常。';
+
   // 异常（① 未完成 = 守护未就绪 / 引导态 / 待重启）→ 日志自动展开 + 一行人话结论；宽限窗内不算异常
   const abnormal = Boolean(start) && !start.done && !grace;
   const logsConclusion = !abnormal
@@ -36,18 +43,22 @@ export function wizardView(state) {
     : provision.required
       ? (provision.provisioned
         ? '初始设置已写入，等待重启生效；重启后向导自动继续。'
-        : '还差一步初始设置：在打开的控制台里选「建新」或「加入」，完成后向导自动继续。')
+        : '还差一步初始设置：点「去写入初始设置 →」，在控制台里选「建新」或「加入」，完成后向导自动继续。')
       : '守护未运行：点①的「一键开始」；反复失败先看下面的日志。';
 
   return {
     badge,
+    tagline,
     complete: complete ? { cta: '进入控制台 ✦' } : null,
     logs: { open: abnormal, conclusion: logsConclusion },
     steps: steps.map((step) => {
+      const status = step.done ? 'done' : (step.id === state?.current ? 'current' : 'todo');
       const base = {
         id: step.id,
         title: step.title,
-        status: step.done ? 'done' : (step.id === state?.current ? 'current' : 'todo'),
+        status,
+        // 里程碑轨道节点态：当前=呼吸(active)、完成=✓(done)、未到=暗(locked)
+        node: step.done ? 'done' : status === 'current' ? 'active' : 'locked',
         check: step.done ? '✓' : null,
         collapsed: complete, // 完成态两段折叠为回顾（可再展开）
       };
@@ -65,6 +76,7 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
       detailText: '正在重启生效中：健康瞬时波动属预期（最长约 60 秒），无需操作。',
       flow: { launch: 'active', write: 'todo', recover: 'todo' },
       serviceBadge: null,
+      doneLine: null,
       actions: {
         go: { label: '一键开始', kind: 'primary', hidden: true },
         provision: { label: '去写入初始设置 →', kind: 'primary', hidden: true },
@@ -86,7 +98,8 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
         ? '守护运行中。当前是临时运行——关机/退出后不会自动拉起，想开机自启可让 Mebular 常驻。'
         : '守护运行中。（常驻状态读取中或不可用）';
   } else {
-    detailText = '一键完成：启动守护 → 写入初始设置 → 重启恢复。中途失败会停在对应子步骤，可「从此处续跑」。';
+    // 设计稿（01-setup）① 正文
+    detailText = '在这台机器上启动 Mebular 并完成初始设置。数据只存在这台机器上，不上云。';
   }
   // 子步骤流水进度（静态推导；渲染层在跑流水时以运行时状态覆盖）
   const flow = {
@@ -98,9 +111,14 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
     detailText,
     flow,
     serviceBadge: step.done && registered === false ? '临时运行' : null,
+    doneLine: step.done
+      ? { main: '✓ 已就绪', sub: registered === true ? '常驻已装 · 开机自启' : '这台机器已在跑你的 Mebular' }
+      : null,
     actions: {
       go: { label: '一键开始', kind: 'primary', hidden: step.done && !provision.required },
       provision: { label: '去写入初始设置 →', kind: 'primary', hidden: !(provision.required && !provision.provisioned) },
+      // 设计稿：「或加入已有的 Mebular ›」——与「去写入初始设置」同路（控制台 provision），仅引导态显示
+      join: { label: '或加入已有的 Mebular ›', kind: 'alt', hidden: !(provision.required && !provision.provisioned) },
       // F2a：仅当明确「未注册」（registered === false）才显示安装按钮；未知/true 一律隐藏
       install: { label: '让 Mebular 常驻', kind: 'ghost', hidden: registered !== false, recommended: step.done && registered === false },
       restart: { label: '重启守护', kind: 'ghost', area: 'troubleshoot', hidden: false },
@@ -109,7 +127,7 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
   };
 }
 
-/** 段②：行级接入 + 「已完成」解锁（≥1 已接入才可用；① 未完成先拦住）。 */
+/** 段②：行级接入 + 「已完成」解锁（≥1 已接入才可用；① 未完成先拦住）+ 设计稿文案与「先不接 ›」。 */
 function assistantsStepView(step, start) {
   const startDone = Boolean(start?.done);
   const detail = step?.detail;
@@ -119,12 +137,22 @@ function assistantsStepView(step, start) {
   if (!startDone) detailText = '先完成第①步：Mebular 跑起来（并完成初始设置）后才能连接助手。';
   else if (!detail) detailText = '助手列表加载中…';
   else if (detail.readError) detailText = `状态读取受限：${detail.readError}（不阻断）。`;
-  else detailText = `已接入 ${connected}/${total || '—'} 个 AI 助手。接入 ≥1 个后可点「已完成」；也可稍后在「设置 · AI 助手」里补。`;
+  else if (total === 0) detailText = '没检测到已装的 AI 助手 —— 可以先跳过，装好后再到 设置 → AI 助手 接入。';
+  else detailText = `检测到 ${total} 个已装助手（已接入 ${connected} 个）。点「接入」；都接好了点「已完成」。`;
   return {
     detailText,
     connected,
     total,
     doneEnabled: startDone && connected >= 1,
+    doneHidden: startDone && total === 0, // 空态不渲染「已完成」（设计稿）
     doneLabel: '已完成',
+    doneHint: !startDone || total === 0 ? '' : connected >= 1 ? '还可以继续接其他助手' : '接好一个即可点「已完成」',
+    // 「先不接 ›」：① 完成后随时可显式跳过段②（= 用户对段②的显式确认，与「已完成」同路 ack）
+    skipConnect: { label: '先不接 ›', hidden: !startDone },
+    doneLine: step.done
+      ? (connected >= 1
+        ? { main: '✓ 已接好', sub: '重载对应助手后生效' }
+        : { main: '— 已跳过', sub: '随时可以在 设置 → AI 助手 接' })
+      : null,
   };
 }

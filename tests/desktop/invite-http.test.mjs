@@ -12,11 +12,17 @@ const indexSrc = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', '
 
 const http = { host: '127.0.0.1', port: 7331 };
 
-/** mock fetch：GET 给 CSRF 头；POST 记录请求头并回 201 令牌。 */
+/** mock fetch：GET /console/ 给 CSRF 头+cookie；POST 记录请求头并回 201 令牌。 */
 function mockFetchOk(captured) {
   return async (url, opts = {}) => {
     if ((opts.method ?? 'GET') === 'GET') {
-      return { ok: true, status: 200, headers: { get: (h) => (h === 'x-mebular-csrf' ? 'csrf-1' : null) }, json: async () => ({}) };
+      captured.prefetchUrl = url;
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: (h) => (h === 'x-mebular-csrf' ? 'csrf-1' : h === 'set-cookie' ? 'mebular_csrf=csrf-1; Path=/' : null) },
+        json: async () => ({}),
+      };
     }
     captured.headers = opts.headers;
     captured.url = url;
@@ -25,14 +31,17 @@ function mockFetchOk(captured) {
 }
 
 describe('R-1 中-8 邀请走 /admin/api/invite（fresh home 无 fleet.config.json 也可出邀请）', () => {
-  it('成功：先取 CSRF 再带头发 POST，返回 token/qrSvg/endpoint', async () => {
+  it('成功：从 /console/ 取 CSRF（头∧cookie）双提交发 POST，返回 token/qrSvg/endpoint', async () => {
     const captured = {};
     const res = await inviteViaApi(mockFetchOk(captured), http);
     expect(res.token).toBe('tok-1');
     expect(res.qrSvg).toBe('<svg/>');
     expect(res.endpoint).toBe('http://192.168.1.20:4002');
+    // 修死：预取打 /console/（token 唯一签发点）；写请求头∧cookie 同值双提交
+    expect(captured.prefetchUrl).toBe('http://127.0.0.1:7331/console/');
     expect(captured.url).toBe('http://127.0.0.1:7331/admin/api/invite');
     expect(captured.headers['x-mebular-csrf']).toBe('csrf-1');
+    expect(captured.headers.cookie).toBe('mebular_csrf=csrf-1');
   });
 
   it('409 join_disabled → 人话指引（不抛黑话）；网络失败 → warning 兜底', async () => {

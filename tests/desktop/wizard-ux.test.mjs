@@ -358,3 +358,145 @@ describe('F4④ 宽限窗：重启/安装窗口内 ① 不翻回未完成（grac
     expect(wizardJs).toMatch(/btnInstall\.textContent = start\.actions\.install\.label/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// UX-2 补丁 2 · 引导页按 01-setup 设计稿重做（hero/里程碑轨道/done-line/星野省电）
+// ---------------------------------------------------------------------------
+
+describe('设计稿 ① hero 与 tagline（随进度三段变化）', () => {
+  it('未开始 →「点两下，把它接进你的日常。」；① done →「很好，再接一个助手就完成。」；完成 →「全部就绪。」', () => {
+    expect(wizardView(computeWizardState({})).tagline).toBe('点两下，把它接进你的日常。');
+    expect(wizardView(computeWizardState({ daemonHealthy: true })).tagline).toBe('很好，再接一个助手就完成。');
+    expect(wizardView(computeWizardState({ daemonHealthy: true, wizard: { assistantsAcked: true } })).tagline).toBe('全部就绪。');
+  });
+
+  it('静态契约：hero 品牌区（✦ / MEBULAR / #tagline）+ 右下常驻「跳过引导 ›」+ 星野画布', () => {
+    expect(wizardHtml).toContain('class="mark">✦<');
+    expect(wizardHtml).toMatch(/<h1>MEBULAR<\/h1>/);
+    expect(wizardHtml).toContain('id="tagline"');
+    expect(wizardHtml).toContain('点两下，把它接进你的日常。');
+    expect(wizardHtml).toContain('id="sky"');
+    expect(wizardHtml).toMatch(/class="skip"[^>]*id="btn-skip"|id="btn-skip"[^>]*class="skip"/);
+    expect(wizardHtml).toContain('跳过引导 ›');
+  });
+});
+
+describe('设计稿 ② 里程碑轨道（左轨线 + 节点灯 active/done/locked）', () => {
+  it('节点态：当前=active、完成=done、未到=locked（② 在 ① 未完成时 locked）', () => {
+    const fresh = wizardView(computeWizardState({}));
+    expect(fresh.steps.find((s) => s.id === 'start').node).toBe('active');
+    expect(fresh.steps.find((s) => s.id === 'assistants').node).toBe('locked');
+    const step2 = wizardView(computeWizardState({ daemonHealthy: true }));
+    expect(step2.steps.find((s) => s.id === 'start').node).toBe('done');
+    expect(step2.steps.find((s) => s.id === 'assistants').node).toBe('active');
+    const done = wizardView(computeWizardState({ daemonHealthy: true, wizard: { assistantsAcked: true } }));
+    expect(done.steps.every((s) => s.node === 'done')).toBe(true);
+  });
+
+  it('静态契约：轨道结构（.rail::before 轨线 + .pip 节点灯 + active 呼吸/done ✓/locked 暗）', () => {
+    expect(wizardHtml).toMatch(/\.rail::before/);
+    expect(wizardHtml).toContain('class="pip"');
+    expect(wizardHtml).toMatch(/\.node\.active \.pip[^}]*animation/);
+    expect(wizardHtml).toMatch(/\.node\.done \.pip::after[^}]*content:\s*"✓"/);
+    expect(wizardHtml).toMatch(/\.node\.locked[^}]*opacity/);
+  });
+
+  it('渲染层契约：renderState 应用 active/locked 节点类 + done-line 文案填充', () => {
+    expect(wizardJs).toMatch(/classList\.toggle\('active', step\.node === 'active'\)/);
+    expect(wizardJs).toMatch(/classList\.toggle\('locked', step\.node === 'locked'\)/);
+    expect(wizardJs).toMatch(/step\.doneLine\.main/);
+    expect(wizardJs).toMatch(/tagline/);
+  });
+});
+
+describe('设计稿 ③ done-line 回顾行与「先不接 ›」', () => {
+  it('① done → doneLine「✓ 已就绪」；② done：已接好（≥1）/ 已跳过（0）两态', () => {
+    const s = wizardView(computeWizardState({ daemonHealthy: true, service: { registered: true } }));
+    expect(s.steps.find((x) => x.id === 'start').doneLine).toMatchObject({ main: '✓ 已就绪' });
+    const connected = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 2 }, wizard: { assistantsAcked: true } }));
+    expect(connected.steps.find((x) => x.id === 'assistants').doneLine).toMatchObject({ main: '✓ 已接好' });
+    const skipped = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0 }, wizard: { assistantsAcked: true } }));
+    expect(skipped.steps.find((x) => x.id === 'assistants').doneLine).toMatchObject({ main: '— 已跳过' });
+  });
+
+  it('「先不接 ›」：① 完成后可见、与「已完成」同路 ack（显式确认才翻段）', () => {
+    const view = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 3 } }));
+    expect(view.steps.find((s) => s.id === 'assistants').skipConnect.hidden).toBe(false);
+    const blocked = wizardView(computeWizardState({ daemonHealthy: false, assistants: { connectedCount: 0, total: 3 } }));
+    expect(blocked.steps.find((s) => s.id === 'assistants').skipConnect.hidden).toBe(true);
+    expect(wizardJs).toMatch(/#btn-seg2-skip'\)\?\.addEventListener\('click', async \(\) => \{[\s\S]{0,120}ackAssistants/);
+  });
+
+  it('静态契约：done-line 元素 ×2（折叠时显示）+ 「先不接 ›」挂载点', () => {
+    expect(wizardHtml).toContain('id="start-done-line"');
+    expect(wizardHtml).toContain('id="connect-done-line"');
+    expect(wizardHtml).toMatch(/\.step\.is-collapsed \.done-line[^}]*display:\s*flex/);
+    expect(wizardHtml).toContain('id="btn-seg2-skip"');
+    expect(wizardHtml).toContain('先不接 ›');
+  });
+});
+
+describe('设计稿 ④ 段② 文案与空态（以设计稿为准）', () => {
+  it('检测到 N 个已装助手（含已接入计数）；空态不渲染「已完成」', () => {
+    const view = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 1, total: 3 } }));
+    const a = view.steps.find((s) => s.id === 'assistants');
+    expect(a.detailText).toBe('检测到 3 个已装助手（已接入 1 个）。点「接入」；都接好了点「已完成」。');
+    expect(a.doneHint).toBe('还可以继续接其他助手');
+    const zero = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 3 } }));
+    expect(zero.steps.find((s) => s.id === 'assistants').doneHint).toBe('接好一个即可点「已完成」');
+    const empty = wizardView(computeWizardState({ daemonHealthy: true, assistants: { connectedCount: 0, total: 0 } }));
+    const ae = empty.steps.find((s) => s.id === 'assistants');
+    expect(ae.detailText).toContain('没检测到已装的 AI 助手');
+    expect(ae.doneHidden).toBe(true);
+    expect(ae.doneHint).toBe('');
+  });
+
+  it('① 正文按设计稿（数据只存在这台机器上，不上云）；注脚/hint 静态契约', () => {
+    const view = wizardView(computeWizardState({}));
+    expect(view.steps.find((s) => s.id === 'start').detailText).toContain('数据只存在这台机器上，不上云');
+    expect(wizardHtml).toContain('接入只改它的一条配置；重载对应助手后生效（可到 设置 → AI 助手 验证）。');
+    expect(wizardHtml).toContain('id="done2-hint"');
+    expect(wizardHtml).toContain('在这台机器上启动 Mebular 并完成初始设置。');
+  });
+
+  it('「或加入已有的 Mebular ›」：仅引导态显示、显式点击 openConsole', () => {
+    const provision = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned: false }));
+    expect(provision.steps.find((s) => s.id === 'start').actions.join.hidden).toBe(false);
+    const normal = wizardView(computeWizardState({ daemonHealthy: true }));
+    expect(normal.steps.find((s) => s.id === 'start').actions.join.hidden).toBe(true);
+    expect(wizardJs).toMatch(/#alt-join'\)\?\.addEventListener\('click', \(\) => \{ void api\.openConsole\(\); \}\)/);
+  });
+});
+
+describe('设计稿 ⑤ 完成时刻与已设置过·直达 + 星野省电纪律', () => {
+  it('完成态 finish 暖收尾（.show 动画类 + 已就绪 ✦ + 控制台提一句邀请）', () => {
+    expect(wizardHtml).toMatch(/class="finish"[^>]*id="complete-cta"|id="complete-cta"[^>]*class="finish"/);
+    expect(wizardHtml).toContain('已就绪 ✦');
+    expect(wizardHtml).toMatch(/\.finish\.show[^}]*opacity/);
+    expect(wizardJs).toMatch(/cta\.classList\.toggle\('show'/);
+    expect(wizardJs).toMatch(/提醒：重载 /);
+  });
+
+  it('已设置过·直达：首次即完成 → is-existing（欢迎回来替换轨道；跑完当场完成仍走 finish）', () => {
+    expect(wizardHtml).toContain('id="existing"');
+    expect(wizardHtml).toContain('欢迎回来');
+    expect(wizardHtml).toMatch(/body\.is-existing \.rail[^}]*display:\s*none/);
+    expect(wizardJs).toMatch(/if \(!firstSeen\)[\s\S]{0,160}is-existing/);
+    expect(wizardJs).toContain('btn-enter-console-2');
+  });
+
+  it('星野省电纪律：仅可见时渲染、隐藏即停（visibilitychange + cancelAnimationFrame）；reduced-motion 静止', () => {
+    expect(wizardJs).toContain("document.addEventListener('visibilitychange'");
+    expect(wizardJs).toContain('cancelAnimationFrame');
+    expect(wizardJs).toContain('document.visibilityState');
+    expect(wizardJs).toContain("prefers-reduced-motion");
+  });
+});
+
+describe('设计稿 ⑥ [hidden] 语义兜底（author display 不得覆盖 hidden）', () => {
+  it('置末位的 [hidden]{display:none} 守卫 + 安装按钮初始 hidden（F2a 未知一律隐藏，无首屏闪现）', () => {
+    expect(wizardHtml).toMatch(/\[hidden\] \{ display: none; \}/);
+    expect(wizardHtml.indexOf('[hidden] { display: none; }')).toBeGreaterThan(wizardHtml.indexOf('.alt {'));
+    expect(wizardHtml).toMatch(/id="btn-install"[^>]*hidden/);
+  });
+});

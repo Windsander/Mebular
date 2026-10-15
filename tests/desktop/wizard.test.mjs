@@ -74,18 +74,21 @@ describe('UX-2 段②行级接入：clientsViaApi / clientActionViaApi（假 fet
     expect(err.warning).toMatch(/ECONNREFUSED/);
   });
 
-  it('clientActionViaApi：CSRF 预取 + POST；id/action 白名单外直接拒（防路径注入）', async () => {
+  it('clientActionViaApi：CSRF 双提交预取（/console/ 头∧cookie）+ POST；id/action 白名单外直接拒（防路径注入）', async () => {
     const calls = [];
     const fetchImpl = async (url, opts = {}) => {
-      calls.push({ url, method: opts.method ?? 'GET', csrf: opts.headers?.['x-mebular-csrf'] ?? null });
-      if (calls.length === 1) return { headers: { get: () => 'CSRF1' } };
+      calls.push({ url, method: opts.method ?? 'GET', csrf: opts.headers?.['x-mebular-csrf'] ?? null, cookie: opts.headers?.cookie ?? null });
+      if (calls.length === 1) return { headers: { get: (k) => (k === 'set-cookie' ? 'mebular_csrf=CSRF1; Path=/' : 'CSRF1') } };
       return { ok: true, status: 200, json: async () => ({ ok: true, changed: true }) };
     };
     const res = await clientActionViaApi(fetchImpl, http, 'opencode', 'connect');
     expect(res).toMatchObject({ ok: true, changed: true });
+    // 修死：预取打 /console/（token 唯一签发点），POST 同时带头与 cookie（同值）
+    expect(calls[0].url).toBe('http://127.0.0.1:7331/console/');
     expect(calls[1].url).toContain('/admin/api/clients/opencode/connect');
     expect(calls[1].method).toBe('POST');
     expect(calls[1].csrf).toBe('CSRF1');
+    expect(calls[1].cookie).toBe('mebular_csrf=CSRF1');
     const evil = await clientActionViaApi(fetchImpl, http, '../admin', 'connect');
     expect(evil.ok).toBe(false);
     const evilAct = await clientActionViaApi(fetchImpl, http, 'opencode', 'rollback');

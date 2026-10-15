@@ -183,6 +183,7 @@ function runFleetService(argv: readonly string[]): number {
   return runServiceCli({
     descriptors: fleetServiceDescriptors(dir),
     argv,
+    sha: buildSha(), // F-INSTALL-1：模块邻接 version.json/模块仓库 git，与 cwd 无关
     ...(flagValue(argv, '--home') !== undefined ? { home: flagValue(argv, '--home')! } : {}),
     ...(flagValue(argv, '--platform') !== undefined
       ? { platform: flagValue(argv, '--platform')! as ServicePlatform }

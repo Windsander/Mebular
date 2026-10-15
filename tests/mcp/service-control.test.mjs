@@ -6,7 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import {
   serviceDescriptor,
   serviceStatusForHome,
@@ -16,9 +16,21 @@ import {
   SERVICE_KIND,
 } from '../../packages/mcp/src/service-control.mjs';
 
-function recorder() {
+function recorder(home) {
   const commands = [];
-  return { commands, run: (cmd, args) => { commands.push([cmd, ...(args ?? [])]); return { status: 0, stdout: '', stderr: '' }; } };
+  return {
+    commands,
+    run: (cmd, args) => {
+      commands.push([cmd, ...(args ?? [])]);
+      // F-INSTALL-1：print 恒「未加载」（bootout 后的等待卸载轮询即刻通过）；bootstrap 模拟守护起搏副作用
+      // （写新鲜心跳——install 的终态校验只认比基线新的新鲜心跳，不再以「作业已装载」谎报 started）。
+      if (cmd === 'launchctl' && args?.[0] === 'print') return { code: 1, status: 1, stdout: '', stderr: 'Could not find service' };
+      if (cmd === 'launchctl' && args?.[0] === 'bootstrap') {
+        writeFileSync(join(home, 'service.heartbeat'), JSON.stringify({ pid: process.pid, ts: Date.now(), role: 'mebular-serve', sha: 's' }), { mode: 0o600 });
+      }
+      return { code: 0, status: 0, stdout: '', stderr: '' };
+    },
+  };
 }
 
 describe('H-1 service-control：常驻运行', () => {
@@ -26,7 +38,7 @@ describe('H-1 service-control：常驻运行', () => {
   let rec;
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), 'h1-svc-'));
-    rec = recorder();
+    rec = recorder(home);
   });
   afterEach(async () => {
     await rm(home, { recursive: true, force: true });
@@ -59,6 +71,7 @@ describe('H-1 service-control：常驻运行', () => {
   it('darwin：安装 → plist 含 MEBULAR_HOME=home；launchctl 序列', () => {
     const res = installServiceForHome({ home, platform: 'darwin', run: rec.run, now: 1700000000000 });
     expect(res.ok).toBe(true);
+    expect(res.started).toBe(true); // F-INSTALL-1：终态校验（替身 bootstrap 写了新鲜心跳）通过才算 started
     expect(res.unitPath.endsWith('.plist')).toBe(true);
     const plist = readFileSync(res.unitPath, 'utf-8');
     const base = home.split(/[\\/]/).filter(Boolean).pop();

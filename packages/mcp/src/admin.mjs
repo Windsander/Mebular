@@ -21,6 +21,7 @@ import { hotPaths, readApplyPending, readApplyResult } from './config-apply.mjs'
 import {
   CONFIG_SCHEMA_BY_PATH,
   EDITABLE_PATHS,
+  WRITABLE_INTERNAL_PATHS,
   PENDING_RESTART_PATHS,
   STATUS_ONLY_PATHS,
   consoleSchema,
@@ -586,7 +587,7 @@ function buildEffectiveRows({ settings, config, diskConfig, pending, envOverridd
   const pendingPaths = new Set(pending.map((item) => item.path));
   const envSet = new Set(envOverridden);
   const rows = [];
-  for (const path of [...EDITABLE_PATHS, ...STATUS_ONLY_PATHS]) {
+  for (const path of [...EDITABLE_PATHS, ...STATUS_ONLY_PATHS, ...WRITABLE_INTERNAL_PATHS]) { // writable-internal 也进诊断三元组（API 可写）
     const entry = CONFIG_SCHEMA_BY_PATH.get(path);
     let reason = '已生效';
     if (HOT_PATHS.has(path)) reason = '已声明为热生效（本部署 MEBULAR_CONFIG_HOT_PATHS）';

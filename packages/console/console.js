@@ -427,8 +427,8 @@ function renderDomainDetail(n) {
       <span class="readout-meta">${n.count} 条 · 最近更新 ${n.lastUpdatedAt ? formatTime(n.lastUpdatedAt) : '—'}</span>
       <span class="readout-meta">HASH ${n.stateHash ? escapeHtml(n.stateHash.slice(0, 10)) : '—'}</span>
       <span class="crt-tag${n.membershipEnabled ? '' : ' is-off'}">${n.membershipEnabled ? '成员制 ACTIVE' : '成员制 OFF'}</span>
-      <span class="crt-tag${n.subscribed ? '' : ' is-off'}">${n.subscribed ? '本机关注' : '未关注'}</span>
       ${n.rejoinReset ? '<span class="crt-tag">待重入</span>' : ''}
+      <span class="ns-subscribe"><label class="toggle" title="参与 = 接收这个域并同步本机新增记忆；不参与 = 不再接收（已有的还在）"><input id="ns-subscribe" type="checkbox" data-ns-subscribe="${escapeHtml(ns)}" ${n.subscribed ? 'checked' : ''} ${writes ? '' : 'disabled'}><span class="slider"></span></label><span class="readout-meta">参与这个记忆域</span></span>
     </header>
     ${isTaskNs ? '<p class="muted" style="font-size:11px;margin:6px 0 0">任务面：发起节点为根派发任务树，远端 Agent 执行后回传结果（有向无环）；成员/授权闸门同记忆域，但语义不是共享记忆池。</p>' : ''}
     <div class="readout-block"><span class="domain-label">AUTH →</span><div class="chip-wrap">${granted}</div></div>
@@ -444,6 +444,19 @@ function renderDomainDetail(n) {
 
 function bindDomainActions() {
   const detail = $('#domain-detail');
+  // 订阅（参与记忆域）：内容管理，即时写 sync.namespaces（空 = 参与全部；关一个 = 白名单化其余）
+  detail.querySelectorAll('[data-ns-subscribe]').forEach((el) => {
+    el.addEventListener('change', () => {
+      const ns = el.dataset.nsSubscribe;
+      const on = el.checked;
+      const current = Array.isArray(state.rawConfig?.config?.sync?.namespaces) ? state.rawConfig.config.sync.namespaces : [];
+      const all = (state.namespaces ?? []).map((x) => x.namespace).filter((x) => x !== ns);
+      const next = on
+        ? (current.length === 0 ? [] : [...new Set([...current, ns])])
+        : (current.length === 0 ? all : current.filter((x) => x !== ns));
+      void applyConfigField(fieldOf('sync.namespaces'), next);
+    });
+  });
   detail.querySelectorAll('[data-approve-member]').forEach((button) => {
     button.addEventListener('click', async () => {
       if (MOCK) {
@@ -857,12 +870,8 @@ function valueWithEffective(mainHtml, { configured, effective }) {
 }
 
 function cfgActionsBlock() {
-  return `<div class="domain-actions cfg-actions">
-    <button class="btn btn-small btn-crt" data-cfg-action="save" type="button" disabled>保存</button>
-    <button class="btn btn-small btn-crt" data-cfg-action="reset" type="button" disabled>撤销修改</button>
-    <span class="cfg-state"></span>
-  </div>
-  <p class="muted" style="font-size:11px">保存即生效：需重启项会自动重启（服务托管时<code>mebular service restart</code>，否则给你手动命令）；全为即时项则就地生效。</p>`;
+  // 简化轮：即时生效——改动即写入（无「保存/撤销」按钮）；需重启项写后自动重启生效
+  return `<p class="muted" style="font-size:11px">改动即生效：需重启的项会自动重启生效（服务托管时<code>mebular service restart</code>，否则给你手动命令）；即时项就地生效。</p>`;
 }
 
 function fieldOf(path) {
@@ -967,13 +976,17 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     `)}
     ${panel('assistants', `<div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: { ...state, addForm: state.addForm ? assistantAddFormHtml(state.addForm) : '' } })}</div>`)}
     ${panel('advanced', `
-      <p class="cfg-path muted">高级项默认收起：改动前请确认理解其安全含义（尤其监听地址、TLS 与 relay）。</p>
+      <p class="cfg-path muted">高级项：改动前请确认理解其安全含义（尤其监听地址、TLS 与 relay）。自动策略（反熵节奏/快照阈值/召回阈值）不在此处暴露，细节请直接编辑 config.json。</p>
       ${renderAdvanced()}
       <div class="domain-actions"><button id="declare-issuer" class="btn btn-small btn-crt" type="button" ${state.features.writes && !isIssuer && !MOCK ? '' : 'disabled'}>声明本机为引导签发者</button></div>
       <p class="muted" style="font-size:11px">图上声明（签名事件，随 __policy__ 同步；受 device_revoke 排斥）。</p>
       ${cfgActionsBlock()}
+      <!-- 简化轮：诊断并入高级底部只读折叠 -->
+      <details class="diag-fold" id="diag-fold">
+        <summary>诊断与恢复（只读）</summary>
+        ${renderDiagnostics()}
+      </details>
     `)}
-    ${panel('diagnostics', renderDiagnostics())}
   `;
 
   body.querySelectorAll('[data-copy]').forEach((button) => {
@@ -1212,49 +1225,24 @@ function renderAbout() {
   });
 }
 
+/** 简化轮 · 即时生效：字段变更即写入（勾选/选择立即、文本/数字失焦）；无草稿态。 */
 function bindConfigEditor() {
-  const editors = [...document.querySelectorAll('.cfg-editor')];
-  const saveBtns = [...document.querySelectorAll('[data-cfg-action="save"]')];
-  const resetBtns = [...document.querySelectorAll('[data-cfg-action="reset"]')];
-  const stateEls = [...document.querySelectorAll('.cfg-state')];
-  const update = () => {
-    const paths = [...new Set(editors.flatMap((editor) => collectConfigChanges(editor)).map((c) => c.path))];
-    const needsRestart = paths.some((path) => state.settings?.configSchema?.find((e) => e.path === path)?.requiresRestart === true);
-    for (const btn of saveBtns) {
-      btn.disabled = paths.length === 0;
-      btn.textContent = paths.length === 0 ? '保存' : (needsRestart ? '保存并重启' : '保存');
+  for (const editor of document.querySelectorAll('.cfg-editor')) {
+    for (const el of editor.querySelectorAll('[data-cfg-path]')) {
+      el.addEventListener('change', () => {
+        const field = fieldOf(el.dataset.cfgPath);
+        const next = fieldToConfig(field, el.type === 'checkbox' ? el.checked : el.value);
+        void applyConfigField(field, next);
+      });
     }
-    for (const btn of resetBtns) btn.disabled = paths.length === 0;
-    for (const el of stateEls) {
-      el.textContent = paths.length === 0 ? '' : `未保存修改：${paths.length} 项`;
-      el.title = paths.join('\n');
-    }
-  };
-  for (const editor of editors) {
-    editor.querySelectorAll('[data-cfg-path]').forEach((el) => {
-      const record = () => {
-        state.cfgDraft[el.dataset.cfgPath] = el.type === 'checkbox' ? el.checked : el.value;
-        update();
-      };
-      el.addEventListener(el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input', record);
-    });
   }
-  for (const btn of saveBtns) btn.addEventListener('click', saveConfigEditor);
   for (const btn of document.querySelectorAll('[data-cfg-action="restart"]')) {
     btn.addEventListener('click', (event) => { void restartServeFromUi(event); });
-  }
-  for (const btn of resetBtns) {
-    btn.addEventListener('click', () => {
-      state.cfgDraft = {};
-      lastSettingsSignature = null;
-      renderSettings();
-    });
   }
   const copyAll = $('#cfg-copy-all');
   if (copyAll) copyAll.addEventListener('click', () => copyText(JSON.stringify(currentConfigFile(), null, 2), copyAll));
   const download = $('#cfg-download');
   if (download) download.addEventListener('click', downloadConfig);
-  update();
 }
 
 function downloadConfig() {
@@ -1269,78 +1257,78 @@ function downloadConfig() {
   URL.revokeObjectURL(url);
 }
 
-async function saveConfigEditor() {
-  if (MOCK) {
-    window.alert('mock 模式不执行写操作。');
-    return;
-  }
-  const patch = {};
-  for (const editor of document.querySelectorAll('.cfg-editor')) {
-    for (const change of collectConfigChanges(editor)) cfgSet(patch, change.path, change.value);
-  }
-  if (Object.keys(patch).length === 0) return;
-  const saveBtns = [...document.querySelectorAll('[data-cfg-action="save"]')];
-  const stateEls = [...document.querySelectorAll('.cfg-state')];
-  const setBusy = (text) => { for (const el of stateEls) el.textContent = text; };
-  saveBtns.forEach((btn) => { btn.disabled = true; });
+/** 写配置补丁（共用核心：G4 自锁 409 二次确认 → 写入 → 自动重启/即时生效分支）。 */
+async function submitConfigPatch(patch) {
   const submit = (confirm) => api('/admin/api/config', { method: 'POST', body: confirm ? { patch, confirm: true } : { patch } });
   try {
-    let res;
-    try {
-      res = await submit(false);
-    } catch (error) {
-      // G4：自锁防护（auth/host/tls）→ 服务端要求二次确认
-      if (error?.status === 409 && error?.payload?.needsConfirmation) {
-        const lockPaths = Array.isArray(error.payload.paths) ? error.payload.paths : [];
-        const ok = await confirmModal({
-          title: '保存并重启（可能失联）',
-          body: `${error.payload.message ?? ''}\n\n命中：${lockPaths.join(', ')}\n如重启后控制台打不开，请手工编辑 config.json 改回并重启。确定继续？`,
-          confirmLabel: '确认并重启',
-        });
-        if (!ok) {
-          saveBtns.forEach((btn) => { btn.disabled = false; });
-          setBusy('');
-          return;
-        }
-        setBusy('正在保存并重启…');
-        res = await submit(true);
-      } else {
-        throw error;
-      }
-    }
-    state.rawConfig = { path: res.path, exists: true, parseError: null, config: res.config };
-    state.cfgDraft = {};
-    lastSettingsSignature = null;
-    if (res.restarting) {
-      setBusy('正在重启…重连中…');
-      showToast('已保存；正在自动重启使配置生效…');
-      await refresh().catch(() => undefined);
-      renderSettings();
-      await waitForServeBack();
-      await refresh();
-      lastSettingsSignature = null;
-      lastAboutSignature = null;
-      renderSettings();
-      renderAbout();
-      const applied = state.settings?.lastApply?.status;
-      showToast(applied === 'rolled-back' || applied === 'rollback-failed'
-        ? '新配置未生效：已回滚（详见横幅 / 诊断页）'
-        : '已生效');
-    } else if (res.effectiveImmediately) {
-      showToast('已保存（即时生效项，无需重启）');
-      await refresh();
-      renderSettings();
-      renderAbout();
-    } else {
-      // 前台模式：手动指引
-      const cmd = res.restart?.command ?? restartCommand();
-      showToast(`已写入 ${res.path}${res.backup ? '（.bak 已备份）' : ''}；请手动重启：${cmd}`);
-      await refresh();
-      renderSettings();
-    }
+    return await submit(false);
   } catch (error) {
-    window.alert(`保存失败：${error.message}`);
-    saveBtns.forEach((btn) => { btn.disabled = false; });
+    // G4：自锁防护（auth/host/tls）→ 服务端要求二次确认（品牌确认卡，不发系统弹窗）
+    if (error?.status === 409 && error?.payload?.needsConfirmation) {
+      const lockPaths = Array.isArray(error.payload.paths) ? error.payload.paths : [];
+      const ok = await confirmModal({
+        title: '写入并重启（可能失联）',
+        body: `${error.payload.message ?? ''}\n\n命中：${lockPaths.join(', ')}\n如重启后控制台打不开，请手工编辑 config.json 改回并重启。确定继续？`,
+        confirmLabel: '确认并重启',
+      });
+      if (!ok) {
+        const cancel = new Error('已取消（未写入）');
+        cancel.uiHandled = true;
+        throw cancel;
+      }
+      return submit(true);
+    }
+    throw error;
+  }
+}
+
+/** 写入成功后的生效分支（自动重启等待 / 即时生效 / 前台手动指引）。 */
+async function onConfigSaved(res) {
+  state.rawConfig = { path: res.path, exists: true, parseError: null, config: res.config };
+  lastSettingsSignature = null;
+  if (res.restarting) {
+    showToast('正在自动重启使配置生效…');
+    await refresh().catch(() => undefined);
+    renderSettings();
+    await waitForServeBack();
+    await refresh();
+    lastSettingsSignature = null;
+    lastAboutSignature = null;
+    renderSettings();
+    renderAbout();
+    const applied = state.settings?.lastApply?.status;
+    showToast(applied === 'rolled-back' || applied === 'rollback-failed'
+      ? '新配置未生效：已回滚（详见横幅 / 高级 · 诊断）'
+      : '已生效');
+  } else if (res.effectiveImmediately) {
+    showToast('已生效（即时生效项）');
+    await refresh();
+    renderSettings();
+    renderAbout();
+  } else {
+    // 前台模式：手动指引
+    const cmd = res.restart?.command ?? restartCommand();
+    showToast(`已写入 ${res.path}${res.backup ? '（.bak 已备份）' : ''}；请手动重启：${cmd}`);
+    await refresh();
+    renderSettings();
+  }
+}
+
+/** 单字段即时写入（值与当前不同才写；被自锁确认取消则静默回读）。 */
+async function applyConfigField(field, next) {
+  const current = normalizedFieldValue(field);
+  if (JSON.stringify(next) === JSON.stringify(current)) return;
+  if (MOCK) { showToast('mock 模式不执行写操作。'); return; }
+  const patch = {};
+  cfgSet(patch, field.path, next);
+  try {
+    const res = await submitConfigPatch(patch);
+    await onConfigSaved(res);
+  } catch (error) {
+    if (!error?.uiHandled) showToast(`没保存成功：${error.message}`);
+  } finally {
+    lastSettingsSignature = null;
+    renderSettings();
   }
 }
 
@@ -1593,7 +1581,7 @@ async function clientAction(id, action) {
       });
       state.clientVerify[id] = res;
       if (res?.state === 'connected') { state.clientRestart[id] = false; say('验证通过，已接入 ✓'); }
-      else if (res?.state === 'pending-restart') say('配置已就绪，重载该助手后生效；重载后点「我已重载，重新验证」。');
+      else if (res?.state === 'pending-restart') say('配置已就绪——重启该软件后生效；好了点「我已重载，验证」。');
       else say('验证未过：展开看失败步骤与输出。');
       return;
     }
@@ -1619,7 +1607,7 @@ async function clientAction(id, action) {
     say(action === 'connect'
       ? (res.changed ? '接入完成（已备份原配置）。重启该助手后生效。' : '已接入（无需改动）。')
       : action === 'rollback' ? '已还原到接入前。' : '已安装。');
-    // R-1 中-6 → UX-2 行内闭环：接入成功后转「待生效」，「我已重载，重新验证」可消
+    // R-1 中-6 → UX-2 行内闭环：接入成功后挂重载提醒，「我已重载，验证」可消
     if (action === 'connect' && res.changed) { state.clientRestart[id] = true; state.clientVerify[id] = null; }
     await refresh();
   } catch (error) {
@@ -2594,7 +2582,8 @@ $('#about-close').addEventListener('click', () => {
 $('#about-to-diagnostics').addEventListener('click', () => {
   $('#about').hidden = true;
   $('#settings').hidden = false;
-  renderSettings('diagnostics');
+  renderSettings('advanced'); // 简化轮：诊断并入高级
+  setTimeout(() => { const fold = $('#diag-fold'); if (fold) fold.open = true; }, 0);
 });
 $('#handoff-close').addEventListener('click', () => {
   $('#handoff').hidden = true;

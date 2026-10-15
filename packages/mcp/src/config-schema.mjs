@@ -136,7 +136,8 @@ export const CONFIG_SCHEMA = [
     read: (c) => c?.sync?.antiEntropy?.intervalMs ?? 600000,
     kind: 'int',
     spec: { min: 1000, nullable: true },
-    exposure: 'editable',
+    exposure: 'internal',
+    writable: true,
     requiresRestart: true,
     default: 600000,
     ui: { type: 'minutes', label: '反熵间隔（分钟）', help: '默认 10 分钟（±20% 抖动）' },
@@ -147,7 +148,8 @@ export const CONFIG_SCHEMA = [
     read: (c) => c?.sync?.antiEntropy?.jitterRatio ?? 0.2,
     kind: 'num',
     spec: { min: 0, max: 1, nullable: true },
-    exposure: 'editable',
+    exposure: 'internal',
+    writable: true,
     requiresRestart: true,
     default: 0.2,
     ui: { type: 'number', label: '反熵抖动比例', step: 0.05, min: 0, max: 1, help: '0 ~ 1，默认 0.2' },
@@ -158,7 +160,8 @@ export const CONFIG_SCHEMA = [
     read: (c) => c?.sync?.snapshotThreshold ?? null,
     kind: 'int',
     spec: { min: 1, nullable: true },
-    exposure: 'editable',
+    exposure: 'internal',
+    writable: true,
     requiresRestart: true,
     default: null,
     ui: { type: 'number', label: '快照阈值（事件数）', min: 1, placeholder: '留空 = 不启用', help: '对端空时钟且缺失事件数 ≥ 阈值时改用物化快照' },
@@ -218,7 +221,8 @@ export const CONFIG_SCHEMA = [
     read: (c) => c?.semantic?.minScore ?? 0.2,
     kind: 'num',
     spec: { min: 0, max: 1, nullable: true },
-    exposure: 'editable',
+    exposure: 'internal',
+    writable: true,
     requiresRestart: true,
     default: 0.2,
     ui: { type: 'number', label: '召回阈值', step: 0.05, min: 0, max: 1, help: '0 ~ 1，默认 0.2' },
@@ -515,6 +519,10 @@ export const EDITABLE_PATHS = pathsWith('editable');
 export const STATUS_ONLY_PATHS = pathsWith('status-only');
 /** 内部面（GUI 不渲染；API 仍可写）。 */
 export const INTERNAL_PATHS = pathsWith('internal');
+/** 内部面中 API 仍可写的 path——诊断三元组（已配置/实际/未生效原因）同样覆盖：写了就能生效/待重启，排查要看得到。 */
+export const WRITABLE_INTERNAL_PATHS = CONFIG_SCHEMA
+  .filter((entry) => entry.exposure === 'internal' && entry.writable === true)
+  .map((entry) => entry.path);
 
 /**
  * 需要重启才生效的 path（真值判定仍在 admin.computePendingRestart）。

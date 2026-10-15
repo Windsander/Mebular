@@ -294,8 +294,8 @@ async function main() {
     check('切换到记忆视图（#memories-view 可见）', await waitFor('document.querySelector("#memories-view")?.hidden === false'));
     check('记忆视图含过滤器 + 记忆行 + 归档/删除动作按钮',
       await waitFor('(() => { const v = document.querySelector("#memories-view"); return Boolean(v) && Boolean(v.querySelector("#mem-filter-archived")) && Boolean(v.querySelector("#mem-filter-deleted")) && v.querySelectorAll(".mem-row").length >= 1 && Boolean(v.querySelector("[data-mem-action=archive]")) && Boolean(v.querySelector("[data-mem-action=delete]")); })()'));
-    check('记忆视图默认过滤说明（动作式 + 归档默认不再召回）',
-      await evalJs('(() => { const t = document.querySelector("#memories-view")?.textContent ?? ""; return /动作式/.test(t) && /默认不再召回/.test(t) && /metadata\\.archivedAt/.test(t); })()'));
+    check('记忆视图说明人话化（归档可逆不参与回忆；删除不可逆；无内部术语）',
+      await evalJs('(() => { const t = document.querySelector("#memories-view")?.textContent ?? ""; return /归档/.test(t) && /不再参与回忆/.test(t) && /不可逆/.test(t) && !/metadata/.test(t) && !/CSRF/.test(t) && !/scope/.test(t); })()'));
     // 归档：默认过滤下该行要么消失，要么按钮翻转为「解除归档」
     await evalJs('(() => { const b = document.querySelector("#memories-list [data-mem-action=archive]"); if (b) b.click(); })()');
     check('记忆视图：归档动作生效（行被过滤或按钮翻转）',
@@ -330,8 +330,13 @@ async function main() {
 
     // UX-2 收口 ②行内 verify：沙箱回读必败（无 mebular 键）→ 验证未过黄态一行 + 重新验证 + 详情含输出
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=verify][data-cli-id=opencode]"); if (b) b.click(); })()');
-    check('行内验证：steps[] 展开（回读校验 + CLI 验证）',
-      await waitFor('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); return Boolean(v) && /回读校验/.test(v.textContent) && /CLI 验证/.test(v.textContent); })()', 20000));
+    const verifyOk = await waitFor('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); return Boolean(v) && /回读校验/.test(v.textContent) && /CLI 验证/.test(v.textContent); })()', 20000);
+    check('行内验证：steps[] 展开（回读校验 + CLI 验证）', verifyOk);
+    if (!verifyOk) {
+      console.log('  · [诊断] verify 块:', await evalJs('document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]")?.outerHTML?.slice(0, 400) ?? "（无）"').catch((e) => String(e)));
+      console.log('  · [诊断] 行状态:', await evalJs('document.querySelector("#settings-panel-assistants [data-asst-row=opencode]")?.textContent ?? "（无行）"').catch((e) => String(e)));
+      console.log('  · [诊断] 页面异常:', await evalJs('JSON.stringify(window.__pageErrors ?? [])').catch((e) => String(e)));
+    }
     check('验证未过 = 黄态一行 + 「重新验证」+ 详情含输出',
       await waitFor('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); if (!v || !/验证未过/.test(v.textContent)) return false; if (!v.querySelector("details")) return false; const row = document.querySelector("#settings-panel-assistants [data-asst-row=opencode]"); return Boolean(row) && /重新验证/.test(row.textContent); })()', 20000));
     check('manual（generic 粘片段）行永不出现自动写「接入」',
@@ -484,16 +489,36 @@ async function main() {
     check('跨 3s 轮询设置容器节点引用不变（DOM 未重建）', await evalJs('Boolean(window.__settingsProbe) && window.__settingsProbe === document.querySelector("#settings-body .settings-tabs")'));
     check('跨 3s 轮询 auth 下拉节点引用不变', await evalJs(`Boolean(window.__authProbe) && window.__authProbe === document.querySelector('${authSelector}')`));
 
-    // 草稿保持：改 auth 下拉 → 跨轮询值不丢；撤销复位且全程不保存
+    // 简化轮 · 设置三分法：3 tab（诊断并入高级）；订阅域移出；反熵细节不出屏；无「保存」按钮
+    check('简化轮：设置 3 页签（常用/AI 助手/高级）且无诊断页签/保存按钮',
+      await evalJs('document.querySelectorAll("#settings-body .settings-tab:not(.settings-tab-extra)").length === 3 && !document.querySelector("#settings-panel-diagnostics") && !document.querySelector("[data-cfg-action=save]")'));
+    check('简化轮：订阅域与反熵细节不出设置页（grep 断言面）',
+      await evalJs(`(() => { const body = document.querySelector("#settings-body"); return !body.querySelector('[data-cfg-path="sync.namespaces"]') && !body.querySelector('[data-cfg-path="sync.antiEntropy.intervalMs"]') && !body.querySelector('[data-cfg-path="sync.antiEntropy.jitterRatio"]') && !body.querySelector('[data-cfg-path="sync.snapshotThreshold"]') && !body.querySelector('[data-cfg-path="semantic.minScore"]') && Boolean(body.querySelector('[data-cfg-path="sync.antiEntropy.enabled"]')); })()`));
+    check('简化轮：诊断并入高级底部折叠（cfg-copy-all 就位）',
+      await evalJs('(() => { document.querySelector("[data-settings-tab=advanced]")?.click(); const f = document.querySelector("#diag-fold"); return Boolean(f) && Boolean(f.querySelector("#cfg-copy-all")); })()'));
+    await evalJs('document.querySelector("[data-settings-tab=common]").click()');
+
+    // 即时生效：改低风险 toggle（joinService.enabled）→ 无草稿态、3s 跨轮询值持久（已写入）
+    const toggleSel = '#settings-body input[data-cfg-path="joinService.enabled"]';
+    check('即时生效：joinService 开关在常用页', await waitFor(`Boolean(document.querySelector('${toggleSel}'))`));
+    const tgOriginal = await evalJs(`document.querySelector('${toggleSel}').checked`);
+    await evalJs(`(() => { const el = document.querySelector('${toggleSel}'); el.checked = !el.checked; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await sleep(1200);
+    await sleep(3600);
+    check('即时生效：改动即写入且跨轮询持久（无「未保存修改」文案）',
+      (await evalJs(`document.querySelector('${toggleSel}').checked`)) === !tgOriginal
+        && (await evalJs('!/未保存修改/.test(document.querySelector("#settings-body").textContent)')),
+      `checked=${!tgOriginal}`);
+    // 复原开关（避免污染后续 pendingRestart 清空断言）
+    await evalJs(`(() => { const el = document.querySelector('${toggleSel}'); el.checked = ${tgOriginal}; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await sleep(1200);
+
+    // G4 自锁：改 auth 下拉 → 品牌确认卡（409 needsConfirmation）→ 取消 → 不写盘值回弹
     const authOriginal = await evalJs(`document.querySelector('${authSelector}').value`);
     await evalJs(`(() => { const sel = document.querySelector('${authSelector}'); sel.value = sel.value === 'none' ? 'bearer' : 'none'; sel.dispatchEvent(new Event('change', { bubbles: true })); })()`);
-    const authPicked = await evalJs(`document.querySelector('${authSelector}').value`);
-    check('修改 auth 下拉后值已变更', authPicked !== authOriginal, `${authOriginal} → ${authPicked}`);
-    await sleep(3600);
-    check('跨 3s 轮询 auth 选择保持（草稿未丢）', (await evalJs(`document.querySelector('${authSelector}').value`)) === authPicked);
-    check('显示未保存修改且未自动保存', await evalJs('/未保存修改/.test(document.querySelector("#settings-body .cfg-state")?.textContent ?? "")'));
-    await evalJs('document.querySelector("#settings-body [data-cfg-action=reset]").click()');
-    check('撤销后 auth 回到原值（签名已失效强制重建）', await waitFor(`document.querySelector('${authSelector}')?.value === ${JSON.stringify(authOriginal)}`));
+    check('即时生效 · 自锁项：品牌确认卡出现（不再用系统弹窗）', await waitFor('document.querySelector("#modal")?.hidden === false'));
+    await evalJs('document.querySelector("#modal-cancel").click()');
+    check('自锁取消 → 不写盘，auth 回原值', await waitFor(`document.querySelector('${authSelector}')?.value === ${JSON.stringify(authOriginal)}`));
 
     // 待重启：页面内写配置（CSRF 取自 document.cookie）→ 设置弹窗出现「待重启」并含变更项；改回后清空
     const applyIntervalMs = async (value) => evalJs(`(async () => {

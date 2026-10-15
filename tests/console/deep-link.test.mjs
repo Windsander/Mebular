@@ -96,10 +96,10 @@ describe('UX-2 设置 · AI 助手专区（单列表，静态契约）', () => {
     expect(assistantsJs).toContain('asst-missing');
   });
 
-  it('行内验证闭环：接入 → 待生效 → 「我已重载，重新验证」；不替用户发 reload', () => {
-    expect(assistantsJs).toContain('我已重载，重新验证');
-    expect(assistantsJs).toContain('已接好，重载');
-    expect(assistantsJs).toContain('我们不会替你发 reload');
+  it('行内验证闭环：接入 → 待生效 → 「我已重载，验证」；不替用户发 reload', () => {
+    expect(assistantsJs).toContain('我已重载，验证');
+    expect(assistantsJs).toContain('已接好——重启');
+    expect(assistantsJs).toContain('我们不会替你重启它');
   });
 
   it('回滚有二次确认（小-11 保持）；详情行内展开（判据/路径/次级动作）', () => {
@@ -258,12 +258,12 @@ describe('UX-2 收口 ③ 行内 verify 动作与 steps[] 渲染', () => {
     expect(html).toContain('some cli stderr'); // 详情含输出
   });
 
-  it('pending-restart → 待生效一行 + 「我已重载，重新验证」= verify-confirm', () => {
+  it('pending-restart → 待生效一行 + 「我已重载，验证」= verify-confirm', () => {
     const ui = { clientVerify: { c: { state: 'pending-restart', steps: [] } } };
     const html = assistantsPanelHtml({ clients, ui });
     expect(html).toContain('待生效');
     expect(html).toContain('data-cli-action="verify-confirm"');
-    expect(html).toContain('我已重载，重新验证');
+    expect(html).toContain('我已重载，验证');
   });
 });
 
@@ -397,5 +397,43 @@ describe('UX-2 补丁 3 · 控制台：接入失败语义（绝不落入「待�
     expect(consoleJs).toMatch(/state\.clientFailed \?\? null/);
     // recheck/成功清失败态
     expect(consoleJs).toMatch(/delete state\.clientFailed\[id\]/);
+  });
+});
+
+describe('简化轮 · 术语净化（内部机制不上屏）', () => {
+  it('主页三视图无内部术语（metadata/CSRF/scope/英文装饰副标）；记忆说明人话化', () => {
+    expect(indexHtml).not.toContain('SECTOR SCAN');
+    expect(indexHtml).not.toContain('SIGNAL LOG');
+    expect(indexHtml).not.toContain('MEMORY CELLS');
+    expect(indexHtml).not.toContain('metadata.archivedAt');
+    expect(indexHtml).not.toContain('memory.admin');
+    expect(indexHtml).not.toContain('CSRF');
+    expect(indexHtml).toContain('收起来不再参与回忆');
+    expect(indexHtml).toContain('不可逆');
+  });
+
+  it('设置页不出订阅域/反熵细节（settings-ia 单一真源）；诊断并入高级', async () => {
+    const ia = await import('../../packages/console/settings-ia.js');
+    expect(ia.IA_TABS.map((t) => t.id)).toEqual(['common', 'assistants', 'advanced']);
+    expect(ia.IA_MIGRATION['sync.namespaces']).toBe('domains');
+    expect(ia.IA_EDITOR_RENDER_PATHS).not.toContain('sync.namespaces');
+    for (const hidden of ['sync.antiEntropy.intervalMs', 'sync.antiEntropy.jitterRatio', 'sync.snapshotThreshold', 'semantic.minScore']) {
+      expect(ia.IA_EDITOR_RENDER_PATHS).not.toContain(hidden);
+    }
+    expect(ia.IA_EDITOR_RENDER_PATHS.length).toBe(15);
+    expect(consoleJs).toContain('diag-fold');
+  });
+});
+
+describe('简化轮 · stale 状态语义（#116 F-FIX-B：stdio 已写入需升级为直连）', () => {
+  it('state=stale → 「已写入·需升级为直连」（todo 黄色），不得显示「未接入」或「待生效」', async () => {
+    const { projectAssistantStatus } = await import('../../packages/console/assistant-status.js');
+    const st = projectAssistantStatus({ id: 'x', state: 'stale', installed: true }, {});
+    expect(st).toMatchObject({ key: 'stale', label: '已写入·需升级为直连', tone: 'todo' });
+    expect(st.label).not.toBe('未接入');
+    expect(st.label).not.toBe('待生效');
+    // 两面一致（向导同一 helper）
+    const { wizardRowStatus } = await import('../../apps/desktop/src/renderer/wizard-view.mjs');
+    expect(wizardRowStatus({ id: 'x', state: 'stale', installed: true }, {})).toMatchObject({ key: 'stale', label: '已写入·需升级为直连' });
   });
 });

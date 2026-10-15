@@ -266,8 +266,8 @@ async function main() {
     const configPaths = (settings.configSchema ?? []).map((e) => e.path).sort();
     const statusPaths = (settings.statusSchema ?? []).map((e) => e.path).sort();
     const effectivePaths = (settings.effective ?? []).map((r) => r.path).sort();
-    check(`S2 configSchema = editable 20 项（实得 ${configPaths.length}）`,
-      configPaths.length === 20 && JSON.stringify(configPaths) === JSON.stringify([...schema.EDITABLE_PATHS].sort()));
+    check(`S2 configSchema = editable 16 项（实得 ${configPaths.length}）`,
+      configPaths.length === 16 && JSON.stringify(configPaths) === JSON.stringify([...schema.EDITABLE_PATHS].sort()));
     check(`S2 statusSchema = status-only 11 项（实得 ${statusPaths.length}）`,
       statusPaths.length === 11 && JSON.stringify(statusPaths) === JSON.stringify([...schema.STATUS_ONLY_PATHS].sort()));
     check('S2 收敛：relayServers 仅只读面；relayUnlimited 不在任何渲染面',
@@ -275,9 +275,10 @@ async function main() {
         && !configPaths.includes('network.libp2p.relayServers')
         && !configPaths.includes('network.libp2p.relayUnlimited')
         && !statusPaths.includes('network.libp2p.relayUnlimited'));
-    check(`S2 三元组覆盖 = editable ∪ status-only（实得 ${effectivePaths.length}）`,
-      effectivePaths.length === 31
-        && JSON.stringify(effectivePaths) === JSON.stringify([...schema.EDITABLE_PATHS, ...schema.STATUS_ONLY_PATHS].sort()));
+    // 简化轮：writable-internal（反熵节奏/快照阈值/召回阈值/relayUnlimited）也进诊断三元组——API 可写即可生效/待重启，排查要看得到
+    check(`S2 三元组覆盖 = editable ∪ status-only ∪ writable-internal（实得 ${effectivePaths.length}）`,
+      effectivePaths.length === 32
+        && JSON.stringify(effectivePaths) === JSON.stringify([...schema.EDITABLE_PATHS, ...schema.STATUS_ONLY_PATHS, ...schema.WRITABLE_INTERNAL_PATHS].sort()));
   }
 
   // ---------------- S3 自锁防护（不写盘 / 不重启） ----------------

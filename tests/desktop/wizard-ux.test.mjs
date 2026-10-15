@@ -197,7 +197,7 @@ describe('UX-2 ⑥ 段② 行级接入 + 「已完成」显式确认', () => {
     expect(wizardHtml).toContain('id="asst-list"');
     expect(wizardHtml).toContain('id="btn-seg2-done"');
     expect(wizardJs).toContain('data-asst-act');
-    expect(wizardJs).toContain('我已重载，重新验证');
+    expect(wizardJs).toContain('我已重载，验证');
     expect(wizardJs).toContain('ackAssistants');
     expect(wizardJs).toContain('clientsList');
     expect(wizardJs).toContain('clientsAction');
@@ -460,7 +460,7 @@ describe('设计稿 ④ 段② 文案与空态（以设计稿为准）', () => {
   it('① 正文按设计稿（数据只存在这台机器上，不上云）；注脚/hint 静态契约', () => {
     const view = wizardView(computeWizardState({}));
     expect(view.steps.find((s) => s.id === 'start').detailText).toContain('数据只存在这台机器上，不上云');
-    expect(wizardHtml).toContain('接入只改它的一条配置；重载对应助手后生效（可到 设置 → AI 助手 验证）。');
+    expect(wizardHtml).toContain('接入只改它的一条配置；重启对应软件后生效（可在 设置 → AI 助手 验证）。');
     expect(wizardHtml).toContain('id="done2-hint"');
     expect(wizardHtml).toContain('在这台机器上启动 Mebular 并完成初始设置。');
   });
@@ -480,7 +480,7 @@ describe('设计稿 ⑤ 完成时刻与已设置过·直达 + 星野省电纪律
     expect(wizardHtml).toContain('已就绪 ✦');
     expect(wizardHtml).toMatch(/\.finish\.show[^}]*opacity/);
     expect(wizardJs).toMatch(/cta\.classList\.toggle\('show'/);
-    expect(wizardJs).toMatch(/提醒：重载 /);
+    expect(wizardJs).toMatch(/提醒：重启 /);
   });
 
   it('已设置过·直达：首次即完成 → is-existing（欢迎回来替换轨道；跑完当场完成仍走 finish）', () => {
@@ -690,13 +690,13 @@ describe('补丁 3 增补 · 单一真源：向导/设置两面投影一致（�
   });
 
   it('渲染层契约：向导 hint 小字行（不覆盖状态词）+ 对账接入 loadClients；控制台对账接入 refresh', () => {
-    expect(wizardJs).toContain('已写入 · 请重载该助手后生效');
+    expect(wizardJs).toContain('已写入 · 重启这个软件后生效');
     expect(wizardJs).toMatch(/reconcileAssistantUi\(c, \{ reloadHints/);
     expect(wizardJs).toContain('reloadHints.add(id)'); // connect 成功只记提示层
     const consoleJsSrc = readFileSync(join(here, '..', '..', 'packages', 'console', 'console.js'), 'utf-8');
     expect(consoleJsSrc).toMatch(/reconcileAssistantUi\(c, \{/);
     const assistantsJs = readFileSync(join(here, '..', '..', 'packages', 'console', 'assistants.js'), 'utf-8');
-    expect(assistantsJs).toContain('已写入 · 请重载');
+    expect(assistantsJs).toContain('已写入 · 重启');
     expect(assistantsJs).toMatch(/from '\.\/assistant-status\.js'/);
   });
 
@@ -704,5 +704,37 @@ describe('补丁 3 增补 · 单一真源：向导/设置两面投影一致（�
     const serveSrc = readFileSync(join(here, '..', '..', 'packages', 'mcp', 'src', 'serve.mjs'), 'utf-8');
     const filesBlock = serveSrc.match(/CONSOLE_FILES\s*=\s*\{[\s\S]*?\}/)?.[0] ?? '';
     expect(filesBlock).toContain("'assistant-status.js'");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// UX-2 简化轮 · 向导：首屏可点 ≤3 / ② 只显示已装 / 运维收「高级」
+// ---------------------------------------------------------------------------
+
+describe('简化轮 · 向导首屏去运维化（① 全自动、② 只看已装）', () => {
+  it('首屏主区只剩「一键开始」+「或加入」；常驻/重启/仅启动全部收进高级折叠与完成后行', () => {
+    // 高级折叠（出问题了？）收纳 btn-restart/btn-start
+    expect(wizardHtml).toMatch(/<details class="troubleshoot"[\s\S]*?btn-restart[\s\S]*?btn-start[\s\S]*?<\/details>/);
+    // 常驻按钮在「① 完成后」行（postdone-row），不在首屏按钮行
+    const row = wizardHtml.match(/<div class="row">\s*<button id="btn-go"[\s\S]*?<\/div>/)?.[0] ?? '';
+    expect(row).toContain('id="btn-go"');
+    expect(row).toContain('id="alt-join"');
+    expect(row).not.toContain('btn-install');
+    expect(row).not.toContain('btn-restart');
+    expect(wizardHtml).toMatch(/id="postdone-row"[^>]*hidden[\s\S]{0,200}btn-install/);
+  });
+
+  it('② 列表只含已安装（未装不渲染 + 空态一句话）；每行一个动作', () => {
+    expect(wizardJs).toMatch(/只显示\*\*已安装\*\*的助手|visible = clients\.filter/);
+    expect(wizardJs).toContain('没检测到已装的 AI 助手');
+    // 渲染行只出一个 data-asst-act 按钮（6 个互斥分支各一枚：接入/重试/重新验证/我已重载·verify/我已重载·recheck/去控制台）
+    const renderFn = wizardJs.match(/function renderClients[\s\S]*?\n\}/)?.[0] ?? '';
+    const acts = renderFn.match(/data-asst-act/g)?.length ?? 0;
+    expect(acts).toBeLessThanOrEqual(6);
+  });
+
+  it('安装按钮只在 ① 完成后随 postdone-row 出现（渲染层契约）', () => {
+    expect(wizardJs).toMatch(/postdone-row[\s\S]{0,240}start\.status === 'done'/);
+    expect(wizardJs).toMatch(/start\.actions\.install\.hidden/);
   });
 });

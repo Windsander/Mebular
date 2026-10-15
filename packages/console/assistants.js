@@ -74,7 +74,7 @@ function verifyBlockHtml(client, verify) {
   }).join('');
   let stateLine = '';
   if (verify.state === 'pending-restart') {
-    stateLine = `<p class="asst-line todo">已接好，重载 ${esc(client.name)} 后生效${client.activation?.note ? `（${esc(client.activation.note)}）` : ''}</p>`;
+    stateLine = `<p class="asst-line todo">已接好——重启 ${esc(client.name)} 这个软件后生效${client.activation?.note ? `（${esc(client.activation.note)}）` : ''}</p>`;
   } else if (verify.state === 'connected') {
     stateLine = '<p class="asst-line ok">验证通过，已接入 ✓</p>';
   } else if (verify.state === 'verify-failed') {
@@ -97,8 +97,8 @@ function rowHtml(client, ui, status) {
   else if (status.key === 'not-installed') action = `<button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">怎么装 ›</button>`;
   else if (pending) {
     action = client.hasVerify
-      ? `<button class="btn btn-small btn-crt" type="button" data-cli-action="verify-confirm" data-cli-id="${id}">我已重载，重新验证</button>`
-      : `<button class="btn btn-small btn-crt" type="button" data-cli-action="recheck" data-cli-id="${id}">我已重载，重新验证</button>`;
+      ? `<button class="btn btn-small btn-crt" type="button" data-cli-action="verify-confirm" data-cli-id="${id}">我已重载，验证</button>`
+      : `<button class="btn btn-small btn-crt" type="button" data-cli-action="recheck" data-cli-id="${id}">我已重载，验证</button>`;
   } else if (status.key === 'verify-failed') action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="verify" data-cli-id="${id}">重新验证</button>`;
   else if (status.key === 'connect-failed') action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="connect" data-cli-id="${id}">重试</button>\n      <button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">详情 ›</button>`;
   else if (status.key === 'detect-failed') action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="recheck" data-cli-id="${id}">重试检测</button>`;
@@ -110,7 +110,7 @@ function rowHtml(client, ui, status) {
   const detailBits = [];
   // 补丁 3 增补：提示层与状态层分离——「已写入 · 请重载」小字提醒不覆盖「已接入 ✓」
   if (reloadHint && (status.key === 'connected' || pending)) {
-    detailBits.push(`<p class="asst-line muted">已写入 · 请重载 ${esc(client.name)} 后生效 · <button class="btn btn-small" type="button" data-cli-action="${client.hasVerify ? 'verify-confirm' : 'recheck'}" data-cli-id="${id}">我已重载，验证</button></p>`);
+    detailBits.push(`<p class="asst-line muted">已写入 · 重启 ${esc(client.name)} 这个软件后生效 · <button class="btn btn-small" type="button" data-cli-action="${client.hasVerify ? 'verify-confirm' : 'recheck'}" data-cli-id="${id}">我已重载，验证</button></p>`);
   }
   // 补丁 3：接入失败反馈——一行原因（人话/脱敏）+ rolledBack 明示「已自动还原原配置」+ 查看详情（备份/命令摘要）
   if (failed) {
@@ -126,8 +126,8 @@ function rowHtml(client, ui, status) {
   if (verify) {
     detailBits.push(verifyBlockHtml(client, verify));
   } else if (pending) {
-    detailBits.push(`<p class="asst-line todo">已接好，重载 ${esc(client.name)} 后生效</p>
-      <details class="asst-detail"><summary>详情</summary><p class="muted">① 完全退出（退出进程，不是关窗口）或在 App 内重载 ② 重新打开 ③ 工具列表应出现 <code>mebular</code>。我们不会替你发 reload。</p></details>`);
+    detailBits.push(`<p class="asst-line todo">已接好——重启 ${esc(client.name)} 这个软件后生效</p>
+      <details class="asst-detail"><summary>详情</summary><p class="muted">① 完全退出该软件（退出进程，不是只关窗口）② 重新打开 ③ 工具列表应出现 <code>mebular</code>。我们不会替你重启它。</p></details>`);
   } else if (msg) {
     detailBits.push(`<p class="asst-line${status.tone === 'todo' ? ' todo' : ''}">${esc(msg)}</p>`);
   }
@@ -206,7 +206,7 @@ export function assistantsPanelHtml({ clients, ui = {} } = {}) {
   const missingRows = missing.map((c) => rowHtml(c, ui, assistantStatus(c, ui))).join('');
   return `
     <div class="asst-head">
-      <p class="muted">接入只改助手的一条配置，写前自动备份；重载对应助手后生效。</p>
+      <p class="muted">接入只改助手的一条配置，写前自动备份；重启对应软件后生效。</p>
       <button class="btn btn-small btn-crt" type="button" id="asst-add">＋ 新增助手</button>
     </div>
     <div class="asst-xp" id="asst-add-flow"${ui.addForm ? '' : ' hidden'}>${ui.addForm ?? ''}</div>

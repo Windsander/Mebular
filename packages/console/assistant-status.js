@@ -47,6 +47,8 @@ export function projectAssistantStatus(client = {}, ui = {}) {
   const installed = state ? state !== 'not-installed' && state !== 'detect-failed' : Boolean(client.installed);
   const connected = state ? state === 'connected' : Boolean(client.installed && client.connected);
   if (state === 'detect-failed') return { key: 'detect-failed', label: '检测失败', tone: 'todo', ...noHint };
+  // F-FIX-B（#116）：已写入但过时（stdio 形态）→ 需升级为 HTTP 直连（待处理黄色，非「未接入」）
+  if (state === 'stale') return { key: 'stale', label: '已写入·需升级为直连', tone: 'todo', ...noHint };
   if (manual) return { key: 'manual', label: '需手动', tone: 'muted', ...noHint };
   if (!installed) return { key: 'not-installed', label: '未安装', tone: 'muted', ...noHint };
   if (connected) {

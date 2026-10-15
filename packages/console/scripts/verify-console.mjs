@@ -929,11 +929,13 @@ try {
     const connect = await fetch(`${h1Base}/admin/api/clients/opencode/connect`, { method: 'POST', headers: h1Headers, body: '{}' });
     const connectJson = await connect.json().catch(() => null);
     const ocCfg = JSON.parse(await readFile(join(h1Home, '.config', 'opencode', 'opencode.json'), 'utf-8'));
-    check('H-1 接入 opencode：只并 mcp.servers.mebular + 保留 theme + 写前备份（A-17 形状）',
+    check('H-1 接入 opencode：只并 mcp.servers.mebular（remote → 守护 HTTP /mcp）+ 保留 theme + 写前备份（A-17+F-FIX-B 形状）',
       connect.status === 200 && connectJson?.changed === true && Boolean(connectJson?.backupPath)
-        && ocCfg.theme === 'dark' && ocCfg.mcp?.servers?.mebular?.command?.[0] === 'mebular'
+        && ocCfg.theme === 'dark'
+        && ocCfg.mcp?.servers?.mebular?.type === 'remote'
+        && /^http:\/\/127\.0\.0\.1:\d+\/mcp$/.test(ocCfg.mcp?.servers?.mebular?.url ?? '')
         && ocCfg.mcp?.mebular === undefined,
-      `changed=${connectJson?.changed} backup=${Boolean(connectJson?.backupPath)}`);
+      `changed=${connectJson?.changed} backup=${Boolean(connectJson?.backupPath)} url=${ocCfg.mcp?.servers?.mebular?.url}`);
 
     const again = await fetch(`${h1Base}/admin/api/clients/opencode/connect`, { method: 'POST', headers: h1Headers, body: '{}' });
     const againJson = await again.json().catch(() => null);

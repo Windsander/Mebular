@@ -5,12 +5,13 @@
 import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   clientDescriptors,
   detectClients,
   connectClient,
   rollbackClient,
+  listAssistants,
   previewClient,
   mergeJsonEntry,
   installSkills,
@@ -161,5 +162,48 @@ describe('H-1 clients：侦测与合并写入', () => {
     } finally {
       process.chdir(prev);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 走查事故回归：回滚必须还原到「不含 mebular」的真实接入前快照
+// （旧实现取最新备份——连续连接/回滚的安全备份已含 mebular → 回滚实为无操作）
+// ---------------------------------------------------------------------------
+
+describe('rollbackClient：取最新「不含 mebular」备份（接入前快照）', () => {
+  it('备份链 干净→接入→再备份(含) → 回滚必须还原到干净快照（而非最新含项备份）', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'rb-userhome-'));
+    const mebularHome = join(tmpdir(), `rb-mebular-${Date.now()}`);
+    const primary = join(home, '.config', 'opencode', 'opencode.json');
+    await (await import('node:fs/promises')).mkdir(dirname(primary), { recursive: true });
+    // 时间线模拟：B1=干净备份 → 写入含 mebular 的现文件 → B2=含 mebular 的安全备份（rollback 自身会再产）
+    await writeFile(`${primary}.bak-2026-01-01T00-00-00-000Z`, JSON.stringify({ theme: 'dark' }, null, 2));
+    await writeFile(primary, JSON.stringify({ theme: 'dark', mcp: { servers: { mebular: { type: 'remote', url: 'http://127.0.0.1:7331/mcp' } } } }, null, 2));
+    await writeFile(`${primary}.bak-2026-01-02T00-00-00-000Z`, await readFile(primary, 'utf-8')); // 含项的最新备份（旧实现的陷阱）
+
+    const res = await rollbackClient('opencode', { home: mebularHome, userHome: home, cwd: process.cwd() });
+    expect(res.ok).toBe(true);
+    expect(res.restoredFrom).toContain('2026-01-01'); // 命中干净快照，而不是 01-02 的含项备份
+    const after = JSON.parse(await readFile(primary, 'utf-8'));
+    expect(after.mcp).toBeUndefined(); // mebular 已随干净快照移除
+    expect(after.theme).toBe('dark');  // 其余键无损
+    // 回滚后的探针状态：不再 connected
+    const items = listAssistants({ home: mebularHome, userHome: home, cwd: process.cwd() }).assistants;
+    expect(items.find((c) => c.id === 'opencode').state).not.toBe('connected');
+  });
+
+  it('无任何干净备份（全都含 mebular）→ 走摘除路径 removed:true；无备份且无条目 → 报无需回滚', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'rb2-userhome-'));
+    const primary = join(home, '.config', 'opencode', 'opencode.json');
+    await (await import('node:fs/promises')).mkdir(dirname(primary), { recursive: true });
+    // 全含备份 → find 找不到干净候选 → target=null → 摘除路径
+    await writeFile(primary, JSON.stringify({ theme: 'dark', mcp: { servers: { mebular: { type: 'remote', url: 'http://127.0.0.1:7331/mcp' } } } }, null, 2));
+    await writeFile(`${primary}.bak-2026-01-03T00-00-00-000Z`, await readFile(primary, 'utf-8'));
+    const res = await rollbackClient('opencode', { home: join(tmpdir(), `rb2-mebular-${Date.now()}`), userHome: home, cwd: process.cwd() });
+    expect(res.ok).toBe(true);
+    expect(res.removed).toBe(true);
+    const after = JSON.parse(await readFile(primary, 'utf-8'));
+    // 摘除路径：条目必须消失（允许留空壳对象——合并器的既有形态）
+    expect(after.mcp?.servers?.mebular).toBeUndefined();
   });
 });

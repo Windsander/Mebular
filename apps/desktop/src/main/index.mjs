@@ -77,8 +77,12 @@ async function probeAssistants() {
     if (!res.ok) return { readError: `HTTP ${res.status}`, connectedCount: 0, total: null };
     const data = await res.json().catch(() => ({}));
     const clients = Array.isArray(data?.clients) ? data.clients : [];
-    // 已装数：与状态投影同一条规则（state 优先；always 信号的 manual 条目也算已装）——文案口径与列表逐行一致
-    const installedCount = clients.filter((c) => (c.state ? c.state !== 'not-installed' && c.state !== 'detect-failed' : Boolean(c.installed))).length;
+    // 已装数：与向导列表可见集同一规则——state 优先、排除未安装/检测失败，且**排除 manual 兜底**（不显示就不计数）
+    const installedCount = clients.filter((c) => {
+      const state = c.state ?? null;
+      const installed = state ? state !== 'not-installed' && state !== 'detect-failed' : Boolean(c.installed);
+      return installed && state !== 'manual' && c.needsManual !== true;
+    }).length;
     return { connectedCount: clients.filter((c) => c.connected).length, total: clients.length, installedCount, needsManual: clients.filter((c) => c.needsManual).length };
   } catch (error) {
     return { readError: `无法读取（${error?.message ?? error}）`, connectedCount: 0, total: null };

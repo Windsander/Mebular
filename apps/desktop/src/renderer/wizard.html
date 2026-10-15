@@ -62,17 +62,16 @@
     .step.is-current { border-left: 2px solid var(--accent); }
     .step.done { opacity: 0.78; }
     /* 完成态段折叠为回顾（done-line / 点标题可重新展开） */
-    .step.is-collapsed h2 { cursor: pointer; margin: 0; }
-    .step.is-collapsed h2::after { content: '（再看一遍 ›）'; font-size: 11px; color: var(--muted); font-weight: 400; }
+    /* 简洁（用户定调）：完成即终态单行——不再提供「再看一遍/展开」入口（异常时自动回到操作态，无需人找） */
+    .step.is-collapsed h2 { margin: 0; cursor: default; }
     .step.is-collapsed .row,
     .step.is-collapsed .troubleshoot,
     .step.is-collapsed .flow,
     .step.is-collapsed #asst-list,
     .step.is-collapsed #flow-msg,
     .step.is-collapsed .seg-body { display: none; }
-    .done-line { display: none; gap: 8px; align-items: center; color: var(--crt); font-size: 13px; cursor: pointer; margin-top: 8px; }
+    .done-line { display: none; gap: 8px; align-items: center; color: var(--crt); font-size: 13px; margin-top: 8px; }
     .done-line .muted { color: var(--muted); }
-    .done-line .chev { margin-left: auto; color: var(--muted); font-size: 11px; }
     .step.is-collapsed .done-line { display: flex; }
 
     .muted { color: var(--muted); font-size: 12px; }
@@ -220,7 +219,7 @@
               </div>
             </details>
           </div>
-          <div class="done-line" id="start-done-line"><span>✓ 已就绪</span><span class="muted">这台机器已在跑你的 Mebular</span><span class="chev">展开 ›</span></div>
+          <div class="done-line" id="start-done-line"><span>✓ 已就绪</span><span class="muted">这台机器已在跑你的 Mebular</span></div>
         </section>
       </li>
 
@@ -240,7 +239,7 @@
               <span class="hint" id="done2-hint">接好一个即可点「已完成」</span>
             </div>
           </div>
-          <div class="done-line" id="connect-done-line"><span>✓ 已接好</span><span class="muted">重载对应助手后生效</span><span class="chev">展开 ›</span></div>
+          <div class="done-line" id="connect-done-line"><span>✓ 已接好</span><span class="muted">重启对应软件后生效</span></div>
         </section>
       </li>
     </ol>

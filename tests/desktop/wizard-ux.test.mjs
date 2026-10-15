@@ -791,3 +791,34 @@ describe('简化轮走查修复 · 文案口径与完成段收纳', () => {
     expect(wizardJsSrc).toMatch(/0\.5 \+ 0\.15 \* Math\.sin\(t \/ 2200/);
   });
 });
+
+describe('简化轮走查修复 2 · 极简（用户定调：完成即终态、兜底行不进向导）', () => {
+  it('完成段为终态单行：无「展开 ›/再看一遍 ›」入口、无展开交互（异常时自动回到操作态）', () => {
+    expect(wizardHtml).not.toContain('展开 ›');
+    expect(wizardHtml).not.toMatch(/content:\s*'（再看一遍/); // 注释提及无妨，伪元素内容必须为 0
+    expect(wizardJs).not.toContain('userExpanded');
+    // done-line 仍在（折叠时显示状态行）
+    expect(wizardHtml).toContain('id="start-done-line"');
+    expect(wizardHtml).toMatch(/\.step\.is-collapsed \.done-line[^}]*display:\s*flex/);
+  });
+
+  it('内置兜底「其他 AI 助手（复制片段）」（manual）不进向导②（太干扰，归设置处理）', () => {
+    const fn = wizardJs.match(/function renderClients[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(fn).toMatch(/c\.state !== 'manual'/);
+    expect(fn).toMatch(/c\.needsManual !== true/);
+  });
+
+  it('① 折叠后正文（含「高级 · 出问题了？」）不可达是设计语义：重启守护/仅启动仅异常态可见', () => {
+    // 折叠态隐藏 .seg-body（高级折叠在其内）与标题入口
+    expect(wizardHtml).toMatch(/\.step\.is-collapsed[\s\S]{0,220}\.seg-body \{ display: none; \}/);
+  });
+});
+
+describe('简化轮走查修复 3 · 日志折条不常驻（① 就绪即隐藏，异常才出现）', () => {
+  it('渲染层契约：start done → logs-panel hidden；异常态（未就绪）自动展开一次', () => {
+    expect(wizardJs).toMatch(/logsPanel\.hidden = startStep\?\.status === 'done'/);
+    expect(wizardJs).toMatch(/!logsPanel\.hidden && view\.logs\.open && !logsAutoOpened/);
+    // logs-panel 仍在 DOM（静态契约保留），且默认无 open
+    expect(wizardHtml).toMatch(/<details[^>]*id="logs-panel"[^>]*>/);
+  });
+});

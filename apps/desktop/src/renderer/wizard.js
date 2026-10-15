@@ -63,7 +63,7 @@ function renderState(state) {
     // 里程碑轨道节点态：active=呼吸 / done=✓ / locked=暗（未到段不可点）
     el.classList.toggle('active', step.node === 'active');
     el.classList.toggle('locked', step.node === 'locked');
-    el.classList.toggle('is-collapsed', Boolean(step.collapsed) && !el.dataset.userExpanded);
+    el.classList.toggle('is-collapsed', Boolean(step.collapsed)); // 完成即终态单行（无展开交互；异常时视图自动回到操作态）
     const check = el.querySelector('.step-check');
     if (check) check.hidden = !step.check;
     // done-line 回顾行（折叠时可见；点击重新展开）
@@ -124,9 +124,14 @@ function renderState(state) {
     conclusion.hidden = !view.logs.conclusion;
     if (view.logs.conclusion) conclusion.textContent = view.logs.conclusion;
   }
-  if (logsPanel && view.logs.open && !logsAutoOpened) {
-    logsPanel.open = true;
-    logsAutoOpened = true;
+  if (logsPanel) {
+    // 简洁（用户定调）：① 就绪后日志折条不常驻；有异常待办时才出现（并自动展开一次）
+    const startStep = view.steps.find((s) => s.id === 'start');
+    logsPanel.hidden = startStep?.status === 'done';
+    if (!logsPanel.hidden && view.logs.open && !logsAutoOpened) {
+      logsPanel.open = true;
+      logsAutoOpened = true;
+    }
   }
 }
 
@@ -282,18 +287,8 @@ $('#btn-install')?.addEventListener('click', async () => {
 });
 $('#btn-restart')?.addEventListener('click', async () => { armGrace(); await api.restart(); await refresh(); });
 
-// 完成态段标题 / done-line 点击 → 重新展开回顾
-for (const id of ['step-start', 'step-assistants']) {
-  const node = document.getElementById(id);
-  const toggle = () => {
-    const el = node;
-    if (!el?.classList.contains('is-collapsed') && !el?.dataset.userExpanded) return;
-    el.dataset.userExpanded = el.dataset.userExpanded ? '' : '1';
-    el.classList.toggle('is-collapsed', !el.dataset.userExpanded);
-  };
-  node?.querySelector('h2')?.addEventListener('click', toggle);
-  node?.querySelector('.done-line')?.addEventListener('click', toggle);
-}
+// 完成段为终态单行（用户定调：展开/高级都是自动保障，不给用户找活——
+// 守护/配置异常时视图自动回到操作态并给恢复入口）
 
 // ---------- 段② 行级接入（名称 + 状态词 + 一个动作；与 设置 · AI 助手 同一语言） ----------
 
@@ -323,7 +318,9 @@ function renderClients(clients) {
   const failedObj = Object.fromEntries(rowFailed);
   const verifyObj = Object.fromEntries(rowVerify);
   // P1 简化：只显示**已安装**的助手（未装不出现——装好后自会进来）；每行一个动作
-  const visible = clients.filter((c) => (c.state ?? (c.installed ? 'x' : 'not-installed')) !== 'not-installed' && c.state !== 'detect-failed');
+  // 只显示**真实已装**的助手：未安装不出现；内置兜底「其他 AI 助手（复制片段）」（state=manual）不进向导（太干扰，归设置处理）
+  const visible = clients.filter((c) => (c.state ?? (c.installed ? 'x' : 'not-installed')) !== 'not-installed'
+    && c.state !== 'detect-failed' && c.state !== 'manual' && c.needsManual !== true);
   if (visible.length === 0) {
     list.innerHTML = '<p class="amsg">没检测到已装的 AI 助手——可以先跳过，装好后回到这里（或到 设置 → AI 助手 接入）。</p>';
     return;

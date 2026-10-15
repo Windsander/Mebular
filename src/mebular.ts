@@ -32,6 +32,7 @@ import { SqliteStorage } from './storage/SqliteStorage.js';
 import type { StorageAdapter } from './storage/StorageAdapter.js';
 import { SyncManager } from './sync/syncmgr/SyncManager.js';
 import { ConfigNamespacePolicy, CompositeNamespacePolicy } from './sync/namespacePolicy.js';
+import { evaluateAutoGrants, type AutoGrantEvaluation } from './sync/autoGrant.js';
 import {
   GraphNamespacePolicy,
   POLICY_NAMESPACE,
@@ -217,6 +218,14 @@ export interface MebularConfig {
     /** 周期 anti-entropy（C）：缺省关闭；常驻入口（serve/MCP）默认开启 */
     antiEntropy?: { enabled?: boolean; intervalMs?: number; jitterRatio?: number };
     /**
+     * 守护层自动签发（订阅驱动授权）：对「图上在册 ∧ 未吊销 ∧ 无生效授权」的成员按规则链
+     * 幂等签发 grant（与人工批准同一 `grantNamespaces` 链路；被吊销设备**永不**自动签发——
+     * 红线）。评估节奏：守护启动首评一次 + 周期评估（intervalMs，默认 30s）+
+     * 同步会话结束去抖触发（2s）。缺省关闭；常驻入口（serve/MCP）默认开启
+     * （形状照 antiEntropy 先例）。legacy 域（未启用成员资格）不在本轮范围。
+     */
+    autoGrant?: { enabled?: boolean; intervalMs?: number };
+    /**
      * 引导期策略签发者白名单（R-a，可多台）：列出的设备可为任意 namespace 签发。
      * 未列出者只能在其自身已获授权范围内签发/撤销。缺省空。各端应保持一致。
      */
@@ -310,6 +319,10 @@ export class Mebular {
   private nodeImpl: P2PNode | null = null;
   private libp2pProvider: Libp2pProvider | null = null;
   private endpointBookImpl: EndpointBook | null = null;
+  // 守护层自动签发（订阅驱动授权）的运行态：周期定时器 / 事件去抖 / 单飞标志
+  private autoGrantTimer: ReturnType<typeof setInterval> | null = null;
+  private autoGrantDebounce: ReturnType<typeof setTimeout> | null = null;
+  private autoGrantRunning = false;
   private netBroadcastMode: NetBroadcastMode = 'off';
   private netBroadcastTtlMs = 24 * 3600_000;
   private netBroadcastEnabled = false;
@@ -436,6 +449,9 @@ export class Mebular {
         if (await this.hasRejoinReset(ns)) this.syncImpl.noteLocalReset(ns);
       }
 
+      // 5.7 守护层自动签发（订阅驱动授权）：配置门控，缺省关闭；常驻入口默认开启。
+      this.startAutoGrant();
+
       // 5.5 语义向量索引（可选依赖；缺包降级关键词并告警）
       if (this.config.semantic?.enabled) {
         this.semanticVectorIndexImpl = await resolveVectorIndex({
@@ -556,6 +572,7 @@ export class Mebular {
 
   /** 初始化失败的清理：与 shutdown 同等收拢，但吞掉清理错误以保留原始错误 */
   private async rollbackPartialInit(): Promise<void> {
+    this.stopAutoGrant();
     if (this.nodeImpl?.isRunning()) {
       await this.nodeImpl.stop().catch(() => undefined);
     }
@@ -580,6 +597,7 @@ export class Mebular {
     if (!this.initialized) {
       return;
     }
+    this.stopAutoGrant();
     if (this.nodeImpl?.isRunning()) {
       await this.nodeImpl.stop();
     }
@@ -630,6 +648,77 @@ export class Mebular {
    */
   async resetPeerWatermarks(peerDeviceId?: string): Promise<void> {
     await this.sync.resetPeerWatermarks(peerDeviceId);
+  }
+
+  // ---------- 守护层自动签发（订阅驱动授权） ----------
+
+  /**
+   * 单轮评估（首评/周期/事件触发共用；**单飞**：进行中的评估未结束时直接返回 null）。
+   * 规则链见 `sync/autoGrant.ts`；【红线】被吊销设备永不自动签发，且签发前经
+   * `getRevokedDevices()` 对 subject 再查一次（新鲜推导，压平竞态窗口）。
+   * 返回本轮评估结果（诊断/测试用）；评估器永不撤销、不为 self 签发。
+   */
+  async evaluateAutoGrantsOnce(): Promise<AutoGrantEvaluation | null> {
+    if (this.autoGrantRunning) return null;
+    this.autoGrantRunning = true;
+    try {
+      const policy = this.assertReady(this.graphPolicyImpl, 'namespacePolicy');
+      const snapshot = await policy.snapshot();
+      return await evaluateAutoGrants({
+        snapshot,
+        self: this.config.deviceId,
+        confirmNotRevoked: async (subject) => !(await policy.getRevokedDevices()).has(subject),
+        grant: async (input) => {
+          await this.grantNamespaces(input);
+        },
+      });
+    } finally {
+      this.autoGrantRunning = false;
+    }
+  }
+
+  /** 启动自动签发评估器（配置门控：`sync.autoGrant.enabled === true` 才启动）。 */
+  private startAutoGrant(): void {
+    const cfg = this.config.sync?.autoGrant;
+    if (cfg?.enabled !== true) return;
+    const intervalMs = cfg.intervalMs ?? 30_000;
+    // ① 首评：守护重启后补齐离线期间到达的订阅。**延迟到下一 tick**——initialize 期间
+    //    this.initialized 尚未置位，立即评估会被 assertReady 拒（语义不变：守护起来后评）。
+    this.autoGrantDebounce = setTimeout(() => {
+      this.autoGrantDebounce = null;
+      void this.evaluateAutoGrantsOnce().catch(() => undefined);
+    }, 0);
+    this.autoGrantDebounce.unref?.();
+    // ② 周期评估：自愈主干（错过的事件/时钟漂移兜底）
+    this.autoGrantTimer = setInterval(() => {
+      void this.evaluateAutoGrantsOnce().catch(() => undefined);
+    }, intervalMs);
+    this.autoGrantTimer.unref?.();
+    // ③ 事件触发：同步会话结束 → 去抖 2s 后评估（降时延）。触发源是 `sync-completed` 而非
+    //    `events-applied`：后者只对物化进图存储的事件计数（applyRemoteEvent 不处理 __policy__
+    //    事件类型 → 策略记录落图不发 events-applied，实测证实）；membership/grant 记录只能经
+    //    同步会话到达，会话结束即评估即可捕获，且零 SyncManager 改动（范围红线）。
+    //    （syncImpl 在本方法调用前已构建；不能用 assertReady——initialize 期间 initialized 未置位）
+    this.syncImpl?.on('sync-completed', () => {
+      if (this.autoGrantDebounce !== null) clearTimeout(this.autoGrantDebounce);
+      this.autoGrantDebounce = setTimeout(() => {
+        this.autoGrantDebounce = null;
+        void this.evaluateAutoGrantsOnce().catch(() => undefined);
+      }, 2000);
+      this.autoGrantDebounce.unref?.();
+    });
+  }
+
+  /** 停止自动签发评估器（幂等；shutdown/rollback 各调一次）。 */
+  private stopAutoGrant(): void {
+    if (this.autoGrantTimer !== null) {
+      clearInterval(this.autoGrantTimer);
+      this.autoGrantTimer = null;
+    }
+    if (this.autoGrantDebounce !== null) {
+      clearTimeout(this.autoGrantDebounce);
+      this.autoGrantDebounce = null;
+    }
   }
 
   // ---------- 授权作为记忆（Phase 2 · D）与身份吊销（E） ----------

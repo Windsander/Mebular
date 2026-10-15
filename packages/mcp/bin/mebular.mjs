@@ -198,7 +198,7 @@ async function runInit(flags) {
       encryption: { level: 'none', keyFile },
       network: { enabled: false, libp2p: { listen: [], relayServers: [], relayUnlimited: false } },
       // 常驻入口默认实时（写入即推 + 周期 anti-entropy）；可显式关闭
-      sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: true } },
+      sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: true }, autoGrant: { enabled: true } },
       semantic: { enabled: false, minScore: 0.2 },
       mcp: { http: { host: '127.0.0.1', port: 7331, auth: 'none', tls: false, tokensFile: join(home, 'auth', 'tokens.json') } },
     };

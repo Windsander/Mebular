@@ -42,6 +42,7 @@ import {
   serviceStateDir,
   type ServiceDescriptor,
   type RunResult,
+  type RunTraceEntry,
   type UnitSpec,
 } from '../../packages/service/src/index.js';
 
@@ -151,10 +152,12 @@ WantedBy=default.target
     expect(unitFilePath('win32', spec, '/h')).toBe(join('/h', '.mebular', 'services', 'tasks', 'fleet-node.xml'));
   });
 
-  it('resolveBuildSha：env 优先，其次 git，最后 unknown', () => {
+  it('resolveBuildSha：env 优先；显式 cwd 的 git HEAD 兜底；非仓库 cwd → unknown', () => {
     expect(resolveBuildSha({ MEBULAR_BUILD_SHA: 'deadbeef' } as NodeJS.ProcessEnv, '/nonexistent')).toBe('deadbeef');
     expect(resolveBuildSha({ MEBULAR_SERVICE_SHA: 'cafe' } as NodeJS.ProcessEnv, '/nonexistent')).toBe('cafe');
+    // F-INSTALL-1：本 helper 不再默认读 process.cwd()（那是 sha 漂移病灶）；显式 cwd 仅作兜底
     expect(resolveBuildSha({} as NodeJS.ProcessEnv, '/nonexistent')).toBe('unknown');
+    expect(resolveBuildSha({} as NodeJS.ProcessEnv)).toBe('unknown');
   });
 
   it('unitText：未知平台抛错', () => {
@@ -216,6 +219,8 @@ describe('install/uninstall/status/logs（fake runner）', () => {
   const calls: string[][] = [];
   // 模拟 launchd：label → 作业归属 home；bootstrap/bootout 增删。print 仅对已加载 label 返回 0。
   const loaded = new Map<string, string>();
+  // F-INSTALL-1：装载成功后守护会写新鲜心跳（install 的终态校验依据）；替身模拟该副作用，ts 单调递增。
+  let hbTick = 0;
   const printFor = (label: string, ownerHome: string): string => `gui/501/${label} = {
 \tactive count = 1
 \tpath = ${ownerHome}/Library/LaunchAgents/${label}.plist
@@ -243,6 +248,7 @@ describe('install/uninstall/status/logs（fake runner）', () => {
     if (args[0] === 'bootstrap') {
       const label = labelOf(String(args[2] ?? '')).replace(/\.plist$/, '');
       loaded.set(label, home);
+      writeHeartbeat(home, { role: 'fleet-node', sha: 's', now: Date.now() + ++hbTick });
       return { code: 0, stdout: '', stderr: '' };
     }
     if (args[0] === 'bootout') {
@@ -574,6 +580,7 @@ describe('F-SVC-1：跨 home 隔离（install/status/restart，fake runner）', 
   let homeB: string;
   const calls: string[][] = [];
   const loaded = new Map<string, string>(); // label -> owner home
+  let hbTick = 0; // F-INSTALL-1：替身心跳 ts 单调递增（install 终态校验只认比基线新的心跳）
   const labelOf = (value: string): string => value.split(/[\\/]/).pop() ?? '';
   const printFor = (label: string, ownerHome: string): string => `gui/501/${label} = {
 \tpath = ${ownerHome}/Library/LaunchAgents/${label}.plist
@@ -593,7 +600,9 @@ describe('F-SVC-1：跨 home 隔离（install/status/restart，fake runner）', 
     if (args[0] === 'bootstrap') {
       const plist = String(args[2] ?? '');
       const label = labelOf(plist).replace(/\.plist$/, '');
-      loaded.set(label, plist.includes(homeB) ? homeB : homeA);
+      const owner = plist.includes(homeB) ? homeB : homeA;
+      loaded.set(label, owner);
+      writeHeartbeat(owner, { role: 'mebular-serve', sha: 's', now: Date.now() + ++hbTick }); // F-INSTALL-1：守护起搏副作用
       return { code: 0, stdout: '', stderr: '' };
     }
     if (args[0] === 'bootout') {
@@ -720,5 +729,116 @@ describe('F-SVC-1：跨 home 隔离（install/status/restart，fake runner）', 
     expect(plan.commands).toEqual([]);
     expect(calls.some((c) => c[1] === 'bootstrap')).toBe(false);
     await expect(stat(unitFilePath('darwin', { kind: 'mebular-serve', label: labelA() }, homeA))).rejects.toThrow();
+  });
+});
+
+// F-INSTALL-1：install「谎报成功」根治——bootout 后有界等待卸载、bootstrap 有界退避重试、
+// 装载后终态校验（只认比基线新的新鲜心跳），失败如实 started:false + startError；sha 与 cwd 解耦。
+// 真机实证（2026-10-15）：cwd=repo 时 install 报 started:true 但作业 state=SIGTERMed、healthz=000，
+// 恢复时撞 `Bootstrap failed: 5: Input/output error`（bootout→bootstrap 收尾竞态）。
+describe('F-INSTALL-1：install 终态校验 + 有界重试（绝不谎报 started）', () => {
+  let home: string;
+  let hbTick = 0;
+  // 时序旋钮全部小值：有界逻辑在测试中秒级走完，不靠真等。
+  const FAST = { unloadTimeoutMs: 300, bootstrapBackoffMs: 5, verifyTimeoutMs: 400, verifyIntervalMs: 20 } as const;
+  const labelOf = (value: string): string => value.split(/[\\/]/).pop() ?? '';
+
+  beforeEach(async () => {
+    home = await mkdtemp(join(os.tmpdir(), 'svc-fix-'));
+  });
+  afterEach(async () => {
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 30 });
+  });
+
+  const descriptor = (): ServiceDescriptor => ({ kind: 'mebular-serve', args: ['/opt/cli.js', 'serve'], heartbeatDir: home });
+
+  /** 可编程 launchd 替身：bootstrap 前 failBoots 次返回 error 5；成功后按需写新心跳（守护起搏副作用）。 */
+  const makeRun = (opts: { failBoots?: number; failLoad?: boolean; writeHeartbeatOnBoot?: boolean }): { calls: string[][]; run: (cmd: string, args: readonly string[]) => RunResult } => {
+    const calls: string[][] = [];
+    const loaded = new Map<string, string>();
+    let boots = 0;
+    const run = (cmd: string, args: readonly string[]): RunResult => {
+      calls.push([cmd, ...args]);
+      if (cmd !== 'launchctl') return { code: 0, stdout: 'active', stderr: '' };
+      if (args[0] === 'print') {
+        const owner = loaded.get(labelOf(String(args[1] ?? '')));
+        return owner === undefined
+          ? { code: 1, stdout: '', stderr: 'Could not find service' }
+          : { code: 0, stdout: `gui/501/x = {\n\tworking directory = ${owner}\n\tenvironment = {\n\t\tMEBULAR_HOME => ${owner}\n\t}\n}`, stderr: '' };
+      }
+      if (args[0] === 'bootout') {
+        loaded.delete(labelOf(String(args[1] ?? '')));
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'bootstrap') {
+        boots += 1;
+        if (boots <= (opts.failBoots ?? 0)) return { code: 1, stdout: '', stderr: 'Bootstrap failed: 5: Input/output error' };
+        const label = labelOf(String(args[2] ?? '')).replace(/\.plist$/, '');
+        loaded.set(label, home);
+        if (opts.writeHeartbeatOnBoot !== false) writeHeartbeat(home, { role: 'mebular-serve', sha: 's', now: Date.now() + ++hbTick });
+        return { code: 0, stdout: '', stderr: '' };
+      }
+      if (args[0] === 'load') {
+        return opts.failLoad === true ? { code: 1, stdout: '', stderr: 'Load failed: 5: Input/output error' } : { code: 0, stdout: '', stderr: '' };
+      }
+      return { code: 0, stdout: '', stderr: '' };
+    };
+    return { calls, run };
+  };
+
+  it('bootstrap 首次 error 5、二次成功 → 有界重试装载 + 终态校验通过 + started:true + 全程留痕', () => {
+    const { calls, run } = makeRun({ failBoots: 1 });
+    const traces: RunTraceEntry[] = [];
+    const res = installService(descriptor(), { platform: 'darwin', home, run, sha: 's', ...FAST, trace: (e) => traces.push(e) });
+    expect(res.ok).toBe(true);
+    expect(res.started).toBe(true);
+    expect(res.startError).toBeUndefined();
+    expect(calls.filter((c) => c[1] === 'bootstrap')).toHaveLength(2); // 首次失败 + 二次成功
+    // 仪器化：每条命令留痕（rc/耗时），两次 bootstrap 一败一成清晰可辨
+    const tracedBoots = traces.filter((t) => t.args[0] === 'bootstrap');
+    expect(tracedBoots).toHaveLength(2);
+    expect(tracedBoots[0]!.code).toBe(1);
+    expect(tracedBoots[0]!.stderr).toContain('Bootstrap failed: 5');
+    expect(tracedBoots[1]!.code).toBe(0);
+    expect(traces.every((t) => typeof t.durationMs === 'number' && t.at.length > 0)).toBe(true);
+    // bootout 后有「等待卸载」的 print 轮询（序列：bootout → print … → bootstrap）
+    const bootoutIdx = calls.findIndex((c) => c[1] === 'bootout');
+    const firstBootIdx = calls.findIndex((c) => c[1] === 'bootstrap');
+    expect(calls.slice(bootoutIdx + 1, firstBootIdx).some((c) => c[1] === 'print')).toBe(true);
+  });
+
+  it('bootstrap 重试耗尽 + load 回退亦败 → ok:true 但 started:false + startError 真实原因', () => {
+    const { calls, run } = makeRun({ failBoots: 99, failLoad: true });
+    const res = installService(descriptor(), { platform: 'darwin', home, run, sha: 's', ...FAST, bootstrapAttempts: 3 });
+    expect(res.ok).toBe(true);       // 单元文件/manifest 已落盘：安装动作本身完成
+    expect(res.started).toBe(false); // 绝不谎报
+    expect(res.startError).toContain('bootstrap');
+    expect(res.startError).toContain('Bootstrap failed: 5');
+    expect(calls.filter((c) => c[1] === 'bootstrap')).toHaveLength(3); // 恰为注入的重试上限
+    expect(calls.some((c) => c[1] === 'load')).toBe(true);             // 旧系统回退尝试过
+  });
+
+  it('装载成功但进程未起（无新心跳）→ started:false + 校验超时原因（根治 SIGTERMed 谎报）', () => {
+    const { run } = makeRun({ writeHeartbeatOnBoot: false });
+    const res = installService(descriptor(), { platform: 'darwin', home, run, sha: 's', ...FAST });
+    expect(res.ok).toBe(true);
+    expect(res.started).toBe(false);
+    expect(res.startError).toContain('心跳');
+    expect(res.startError).toContain('超时');
+  });
+
+  it('陈旧心跳防线：install 前残留新鲜心跳但装载后无新心跳 → 仍判 started:false（基线守卫）', () => {
+    writeHeartbeat(home, { role: 'mebular-serve', sha: 'old', now: Date.now() }); // 上一次运行的残留
+    const { run } = makeRun({ writeHeartbeatOnBoot: false });
+    const res = installService(descriptor(), { platform: 'darwin', home, run, sha: 's', ...FAST });
+    expect(res.started).toBe(false);
+    expect(res.startError).toContain('未见更新');
+  });
+
+  it('--no-autostart：kickstart 拉起后同样走终态校验（rc==0 不再等于 started）', () => {
+    const { calls, run } = makeRun({});
+    const res = installService(descriptor(), { platform: 'darwin', home, run, sha: 's', ...FAST, autostart: false });
+    expect(res.started).toBe(true);
+    expect(calls.some((c) => c[1] === 'kickstart')).toBe(true);
   });
 });

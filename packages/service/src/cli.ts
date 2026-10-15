@@ -8,6 +8,24 @@
 import type { RunCommand, ServiceDescriptor, ServiceOptions } from './manager.js';
 import { installService, resolveBuildSha, restartService, serviceLogs, serviceStatus, uninstallService } from './manager.js';
 import type { ServiceKind, ServicePlatform } from './units.js';
+import { appendFileSync } from 'node:fs';
+
+/**
+ * 仪器化（F-INSTALL-1）：`MEBULAR_SERVICE_TRACE=<path>` 时，install 的每条外部命令
+ * （launchctl/systemctl/…）以 JSONL 追加落盘（at/cmd/args/rc/stdout/stderr/durationMs），
+ * 供 launchd 收尾竞态等「命令级时序」诊断。
+ */
+function fileTracerFromEnv(): ServiceOptions['trace'] {
+  const target = process.env.MEBULAR_SERVICE_TRACE;
+  if (target === undefined || target.length === 0) return undefined;
+  return (entry) => {
+    try {
+      appendFileSync(target, `${JSON.stringify(entry)}\n`, 'utf-8');
+    } catch {
+      // 留痕失败绝不阻塞安装主路径
+    }
+  };
+}
 
 export interface ServiceCliOptions {
   descriptors: readonly ServiceDescriptor[];
@@ -16,6 +34,8 @@ export interface ServiceCliOptions {
   platform?: ServicePlatform;
   run?: RunCommand;
   out?: (line: string) => void;
+  /** 入口边界解析好的构建 SHA（F-INSTALL-1：与 cwd 解耦）；缺省回落 resolveBuildSha()。 */
+  sha?: string;
 }
 
 function parseFlags(list: readonly string[]): { positional: string[]; flags: Record<string, string | boolean> } {
@@ -90,12 +110,14 @@ export function runServiceCli(opts: ServiceCliOptions): number {
 
   if (sub === 'install') {
     const autostart = flags['no-autostart'] !== true;
-    const sha = typeof flags.sha === 'string' ? flags.sha : resolveBuildSha();
+    const sha = typeof flags.sha === 'string' ? flags.sha : (opts.sha ?? resolveBuildSha());
+    const trace = fileTracerFromEnv();
     const result = installService(descriptor, {
       ...base,
       autostart,
       sha,
       ...(typeof flags.label === 'string' ? { label: flags.label } : {}),
+      ...(trace !== undefined ? { trace } : {}),
     });
     return emit(result);
   }

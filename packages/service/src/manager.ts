@@ -47,6 +47,17 @@ export const defaultRun: RunCommand = (cmd, args) => {
   return { code: res.status ?? 1, stdout: (res.stdout ?? '').trim(), stderr: (res.stderr ?? '').trim() };
 };
 
+/** install 仪器化留痕：每条外部命令的 argv/rc/stdout/stderr/耗时（供 launchd 竞态诊断）。 */
+export interface RunTraceEntry {
+  at: string;
+  cmd: string;
+  args: string[];
+  code: number;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+}
+
 /** 单个常驻组件的宿主描述（由 fleet / mebular CLI 提供）。 */
 export interface ServiceDescriptor {
   kind: ServiceKind;
@@ -65,6 +76,8 @@ export interface ServiceOptions {
   run?: RunCommand;
   now?: number;
   sha?: string;
+  /** 仪器化：非空则对每条外部命令回调一条留痕（CLI 经 MEBULAR_SERVICE_TRACE 落 JSONL）。 */
+  trace?: (entry: RunTraceEntry) => void;
 }
 
 export interface ServiceManifest {
@@ -81,15 +94,24 @@ export interface ServiceManifest {
 const currentPlatform = (p?: ServicePlatform): ServicePlatform => p ?? (process.platform as ServicePlatform);
 const uid = (): string => String(process.getuid?.() ?? 0);
 
-/** 构建 SHA（复用现有 version 机制：env → git HEAD → unknown）。 */
-export function resolveBuildSha(env: NodeJS.ProcessEnv = process.env, cwd: string = process.cwd()): string {
+/**
+ * 构建 SHA 兜底 helper：env → 显式 cwd 的 git HEAD → `unknown`。
+ * **本模块刻意不读 `import.meta` 与 `process.cwd()`**（F-INSTALL-1）：前者 ts-jest 以 CJS 加载 src 会编译失败；
+ * 后者是「sha 随 cwd 漂移」的病灶。真正与 cwd 无关的解析（模块邻接 `version.json` → 模块所在仓库 git）
+ * 在 ESM 入口边界完成并注入：`mebular service` 经 `packages/mcp/src/build-sha.mjs`、`fleet` 经 `cli.ts buildSha()`，
+ * 再经 `runServiceCli({ sha })` / `installService({ sha })` 传入。
+ */
+export function resolveBuildSha(env: NodeJS.ProcessEnv = process.env, cwd?: string): string {
   const fromEnv = env.MEBULAR_BUILD_SHA ?? env.MEBULAR_SERVICE_SHA;
   if (fromEnv) return fromEnv;
-  try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
-  } catch {
-    return 'unknown';
+  if (cwd !== undefined) {
+    try {
+      return execFileSync('git', ['rev-parse', 'HEAD'], { cwd, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim();
+    } catch {
+      // 显式目录不在 git 仓库内 → unknown
+    }
   }
+  return 'unknown';
 }
 
 function readManifest(kind: ServiceKind, home: string): ServiceManifest | null {
@@ -185,6 +207,8 @@ export interface InstallResult {
   manifestPath: string;
   autostart: boolean;
   started: boolean;
+  /** started=false 时的真实原因（bootstrap 重试耗尽 / 终态校验超时等）；绝不谎报。 */
+  startError?: string;
   /** 迁移：本次安装顺带卸下的旧（无 home 维度）作业 label。 */
   migratedFrom?: string;
   /** 同 label 被**他人**作业占用 → 已拒绝（绝不顶替/bootout）。 */
@@ -193,15 +217,105 @@ export interface InstallResult {
   error?: string;
 }
 
+/** install 专属选项：时序旋钮全部有界且可注入（测试用小值；CLI 用默认）。 */
+export interface InstallOptions extends ServiceOptions {
+  autostart?: boolean;
+  label?: string;
+  /** bootout 后等待「作业确实卸载」的预算（默认 3000ms；轮询 print 直至查无此作业）。 */
+  unloadTimeoutMs?: number;
+  /** bootstrap 失败（如 launchd 收尾竞态 error 5）时的尝试次数（默认 4，含首次）。 */
+  bootstrapAttempts?: number;
+  /** bootstrap 相邻两次尝试间的退避（默认 750ms）。 */
+  bootstrapBackoffMs?: number;
+  /** 装载后「确认真的起来了」的校验预算（默认 8000ms；轮询新鲜心跳）。 */
+  verifyTimeoutMs?: number;
+  /** 校验轮询间隔（默认 250ms）。 */
+  verifyIntervalMs?: number;
+}
+
+/** 同步睡眠（install 全程基于同步 RunCommand；Atomics.wait 不依赖事件循环）。 */
+function sleepSync(ms: number): void {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** bootout 后**有界**等待作业真正卸载（bootout→bootstrap 收尾竞态的根治：未卸完不 bootstrap）。 */
+function waitForUnloaded(label: string, run: RunCommand, timeoutMs: number): boolean {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!readLoadedJob(label, run).loaded) return true;
+    if (Date.now() >= deadline) return false;
+    sleepSync(150);
+  }
+}
+
+/** bootstrap 有界退避重试（launchd 偶发 `Bootstrap failed: 5: Input/output error` 等暂态失败）。 */
+function bootstrapWithRetry(unitPath: string, run: RunCommand, attempts: number, backoffMs: number): RunResult {
+  let last: RunResult = { code: 1, stdout: '', stderr: 'not attempted' };
+  for (let i = 0; i < Math.max(1, attempts); i++) {
+    last = run('launchctl', ['bootstrap', `gui/${uid()}`, unitPath]);
+    if (last.code === 0) return last;
+    if (i + 1 < attempts) sleepSync(backoffMs);
+  }
+  return last;
+}
+
+/**
+ * 装载后终态校验：在预算内等待「**比基线更新**的新鲜心跳」。基线 = 本次安装前的心跳 ts——
+ * 没有它，上一次运行残留的陈旧心跳会让「装载即 SIGTERM」被误判成 started:true（谎报根因之一）。
+ */
+function verifyStartedFresh(
+  descriptor: ServiceDescriptor,
+  baselineTs: number,
+  timeoutMs: number,
+  intervalMs: number,
+): { ok: boolean; reason?: string } {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const hb = readHeartbeat(descriptor.heartbeatDir);
+    if (hb !== null && hb.ts > baselineTs && isHeartbeatFresh(descriptor.heartbeatDir)) return { ok: true };
+    if (Date.now() >= deadline) {
+      const seen = hb === null ? '无心跳文件' : `心跳 ts=${hb.ts}（基线 ${baselineTs}，未见更新）`;
+      return { ok: false, reason: `启动校验超时：${timeoutMs}ms 内未见新的新鲜心跳（${seen}；heartbeatDir=${descriptor.heartbeatDir}）` };
+    }
+    sleepSync(intervalMs);
+  }
+}
+
+const summarizeRun = (r: RunResult): string => (r.stderr || r.stdout || `rc=${r.code}`).slice(0, 300);
+
 export function installService(
   descriptor: ServiceDescriptor,
-  options: ServiceOptions & { autostart?: boolean; label?: string } = {},
+  options: InstallOptions = {},
 ): InstallResult {
   const platform = currentPlatform(options.platform);
   const home = options.home ?? os.homedir();
-  const run = options.run ?? defaultRun;
+  const rawRun = options.run ?? defaultRun;
+  const trace = options.trace;
+  // 仪器化：每条外部命令（含重试/轮询）都留痕——launchd 竞态只能靠命令级时序定位。
+  const run: RunCommand = trace === undefined
+    ? rawRun
+    : (cmd, args) => {
+        const t0 = Date.now();
+        const r = rawRun(cmd, args);
+        trace({
+          at: new Date(t0).toISOString(),
+          cmd,
+          args: [...args],
+          code: r.code,
+          stdout: r.stdout.slice(0, 4000),
+          stderr: r.stderr.slice(0, 4000),
+          durationMs: Date.now() - t0,
+        });
+        return r;
+      };
   const sha = options.sha ?? resolveBuildSha();
   const autostart = options.autostart ?? true;
+  const unloadTimeoutMs = options.unloadTimeoutMs ?? 3000;
+  const bootstrapAttempts = options.bootstrapAttempts ?? 4;
+  const bootstrapBackoffMs = options.bootstrapBackoffMs ?? 750;
+  const verifyTimeoutMs = options.verifyTimeoutMs ?? 8000;
+  const verifyIntervalMs = options.verifyIntervalMs ?? 250;
   const instanceHome = instanceHomeOf(descriptor, home);
   const spec = buildSpec(descriptor, { home, platform, autostart, sha, ...(options.label !== undefined ? { label: options.label } : {}) });
   const unitPath = unitFilePath(platform, spec, home);
@@ -259,10 +373,12 @@ export function installService(
   fs.writeFileSync(manifestPath(spec.kind, home), JSON.stringify(manifest, null, 2), { mode: 0o600 });
 
   let started = false;
+  let startError: string | undefined;
   if (platform === 'darwin') {
     if (migratedFrom !== undefined) {
       // 仅当旧标签确属本 home 才卸载（上面已校验）；并清掉本 home 的旧 plist。
       run('launchctl', ['bootout', `gui/${uid()}/${migratedFrom}`]);
+      waitForUnloaded(migratedFrom, run, unloadTimeoutMs);
       const legacyUnit = unitFilePath('darwin', { kind: spec.kind, label: migratedFrom }, home);
       try {
         fs.rmSync(legacyUnit, { force: true });
@@ -271,13 +387,28 @@ export function installService(
       }
     }
     run('launchctl', ['bootout', `gui/${uid()}/${spec.label}`]); // 幂等：先卸本 home 自个儿的旧作业（忽略失败）
-    const boot = run('launchctl', ['bootstrap', `gui/${uid()}`, unitPath]);
-    if (boot.code !== 0) run('launchctl', ['load', unitPath]); // 旧系统回退
-    if (!autostart) {
-      // RunAtLoad=false：显式拉起一次，确保 install 后即在跑
-      started = run('launchctl', ['kickstart', `gui/${uid()}/${spec.label}`]).code === 0;
-    } else {
-      started = runningState(platform, spec, run, instanceHome).running;
+    // bootout 是异步生效的：不等待卸载完成就 bootstrap 会撞 `Bootstrap failed: 5`（收尾竞态）。
+    waitForUnloaded(spec.label, run, unloadTimeoutMs);
+    // 基线心跳：之后只认「比它新」的心跳，杜绝陈旧心跳造成的 started 假阳性。
+    const baselineHbTs = readHeartbeat(descriptor.heartbeatDir)?.ts ?? 0;
+    const boot = bootstrapWithRetry(unitPath, run, bootstrapAttempts, bootstrapBackoffMs);
+    let loadedUnit = boot.code === 0;
+    if (!loadedUnit) {
+      const legacy = run('launchctl', ['load', unitPath]); // 旧系统回退
+      loadedUnit = legacy.code === 0;
+      if (!loadedUnit) {
+        startError = `bootstrap 失败（${bootstrapAttempts} 次有界重试）：${summarizeRun(boot)}；load 回退亦失败：${summarizeRun(legacy)}`;
+      }
+    }
+    if (loadedUnit) {
+      if (!autostart) {
+        // RunAtLoad=false：显式拉起一次，确保 install 后即在跑
+        run('launchctl', ['kickstart', `gui/${uid()}/${spec.label}`]);
+      }
+      // 终态校验：装载成功 ≠ 进程活着。只有新的新鲜心跳才允许报 started:true。
+      const verify = verifyStartedFresh(descriptor, baselineHbTs, verifyTimeoutMs, verifyIntervalMs);
+      started = verify.ok;
+      if (!verify.ok) startError = verify.reason;
     }
   } else if (platform === 'linux') {
     run('systemctl', ['--user', 'daemon-reload']);
@@ -299,6 +430,7 @@ export function installService(
     manifestPath: manifestPath(spec.kind, home),
     autostart,
     started,
+    ...(startError !== undefined ? { startError } : {}),
     ...(migratedFrom !== undefined ? { migratedFrom } : {}),
     ...(foreignWarning !== undefined ? { warning: foreignWarning } : {}),
   };

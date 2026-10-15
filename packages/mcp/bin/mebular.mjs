@@ -8,6 +8,7 @@ import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { homeDir } from '../src/home.mjs';
+import { serviceBuildSha } from '../src/build-sha.mjs';
 
 const argv = process.argv.slice(2);
 const command = argv[0];
@@ -648,7 +649,7 @@ async function main() {
         workingDir: home,
         env: { MEBULAR_HOME: home },
       };
-      process.exit(runServiceCli({ descriptors: [descriptor], argv: argv.slice(1) }));
+      process.exit(runServiceCli({ descriptors: [descriptor], argv: argv.slice(1), sha: serviceBuildSha() }));
       return;
     }
     case 'console': {

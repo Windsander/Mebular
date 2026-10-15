@@ -104,18 +104,8 @@ function renderState(state) {
 
   const assistants = view.steps.find((s) => s.id === 'assistants');
   if (assistants) {
+    // 自动化（用户定调）：② 纯过程展示——无任何按钮；确认收尾由流水尾部统一执行
     setText('#assistants-detail', assistants.detailText);
-    // 底部出口：仅「先不接 ›」（全部接齐 → autoAck → 完成态；无按钮可点）
-    const foot = $('#seg2-foot');
-    if (foot) foot.hidden = Boolean(assistants.skipConnect?.hidden ?? true);
-    // 自动完成（用户定调）：已装的全部接入 → 自动 ack（幂等；防重入）
-    if (assistants.autoAck && !autoAckPending) {
-      autoAckPending = true;
-      void api.ackAssistants()
-        .then(() => refresh())
-        .catch(() => { /* 落盘失败不阻断 */ })
-        .finally(() => { autoAckPending = false; });
-    }
   }
 
   // 异常（引导态/启动失败）→ 自动展开 + 一行结论；正常保持默认折叠
@@ -147,10 +137,7 @@ function armGrace(ms = 60000) { graceUntil = Date.now() + ms; }
 // UX-2 补丁 3：① 瞬态容忍（flapGate 纯函数）——连续 ≥2 次 miss 才翻回未完成；单次 miss UI 不动
 let healthMisses = 0;
 let lastStartDone = false;
-// 简化轮：② 全部接齐自动完成（ack 一次，防重入）
-let autoAckPending = false;
-// 全自动：重开向导时续跑接入（一次/会话，防循环）
-let autoConnectRan = false;
+
 
 async function refresh() {
   try {
@@ -165,20 +152,6 @@ async function refresh() {
     if (gate.hold) return; // 单次 miss：不翻段、不自动展开日志（其他区随下一轮更新）
     if (Date.now() < graceUntil && state && !state.complete) state.grace = true;
     renderState(state);
-    // 全自动（用户定调「点一次，其余自动跑」）：重开后 ① 已就绪且有可接助手 → 自动续跑接入一次
-    if (state && !state.complete && !autoConnectRan && Boolean(state.steps?.[0]?.done)) {
-      const list = await api.clientsList().catch(() => null);
-      if (list && connectTargets(list.clients).length > 0) {
-        autoConnectRan = true;
-        flow.running = true;
-        try {
-          await autoConnectAll();
-        } finally {
-          flow.running = false;
-          await loadClients();
-        }
-      }
-    }
   } catch (error) { setText('#start-detail', `状态读取失败：${error.message}`); }
 }
 
@@ -203,8 +176,16 @@ async function autoConnectAll() {
     flowMsg(`正在接入 ${c.name}…`);
     try {
       const r = await api.clientsAction(c.id, 'connect');
-      if (r?.ok) { ok.push(c.name); reloadHints.add(c.id); } else failed.push(`${c.name}（${r?.warning ?? '未成功'}）`);
+      if (r?.ok) {
+        ok.push(c.name);
+        reloadHints.add(c.id); // 提示层：行内「已写入 · 重启后生效」+ 完成页提醒
+        rowFailed.delete(c.id);
+      } else {
+        rowFailed.set(c.id, { kind: 'connect', reason: r?.warning ?? '未成功' });
+        failed.push(`${c.name}（${r?.warning ?? '未成功'}）`);
+      }
     } catch (error) {
+      rowFailed.set(c.id, { kind: 'connect', reason: `没能完成：${error?.message ?? error}` });
       failed.push(`${c.name}（${error?.message ?? error}）`);
     }
     await loadClients();
@@ -301,6 +282,8 @@ async function runFlow(fromSub = 'launch') {
     flowMsg('已就绪 ✓');
     flow.failedSub = null;
     await sleep(SUB_MIN_DWELL_MS + 600); // 汇总行停留：读完再进完成态
+    // 用户点过「一键开始」= 对 ② 的显式确认：统一 ack 收尾（个别未成功的已给原因，重试归设置·AI 助手）
+    try { await api.ackAssistants(); } catch { /* 落盘失败不阻断 */ }
   } catch (error) {
     setSubState(currentSub, 'failed');
     flow.failedSub = currentSub;
@@ -368,57 +351,36 @@ function renderClients(clients) {
   const signature = JSON.stringify(
     clients.map((c) => [c.id, Boolean(c.installed), Boolean(c.connected), c.state ?? null])
       .concat([...reloadHints].map((k) => `hint:${k}`))
-      .concat([...rowFailed.keys()].map((k) => `fail:${k}`))
-      .concat([...rowVerify.entries()].map(([k, v]) => `verify:${k}:${v}`)),
+      .concat([...rowFailed.keys()].map((k) => `fail:${k}`)),
   );
   if (signature === clientsSignature) return;
   clientsSignature = signature;
   const failedObj = Object.fromEntries(rowFailed);
-  const verifyObj = Object.fromEntries(rowVerify);
-  // P1 简化：只显示**已安装**的助手（未装不出现——装好后自会进来）；每行一个动作
-  // 只显示**真实已装**的助手：未安装不出现；内置兜底「其他 AI 助手（复制片段）」（state=manual）不进向导（太干扰，归设置处理）
+  // 只显示**真实已装**的助手：未安装不出现；内置兜底「其他 AI 助手（复制片段）」（state=manual）不进向导
   const visible = clients.filter((c) => (c.state ?? (c.installed ? 'x' : 'not-installed')) !== 'not-installed'
     && c.state !== 'detect-failed' && c.state !== 'manual' && c.needsManual !== true);
-  // 一键启动/自动续跑期间：行是**过程展示**（无按钮）——交互只在异常时出现（失败行保留重试）
-  const passive = flow.running;
-  if (passive && !(clientsSignature ?? '').startsWith('P:')) clientsSignature = `P:${clientsSignature}`;
   if (visible.length === 0) {
-    list.innerHTML = '<p class="amsg">没检测到已装的 AI 助手——可以先跳过，装好后回到这里（或到 设置 → AI 助手 接入）。</p>';
+    list.innerHTML = '<p class="amsg">没检测到已装的 AI 助手——装好后回来点「一键开始」即可。</p>';
     return;
   }
+  // 自动化（用户定调）：② 是**纯过程展示，任何状态零按钮**——
+  // 未接的由「一键开始」自动接入；失败只给一行原因（重试归 设置 → AI 助手）
   list.innerHTML = visible.map((c) => {
-    const st = wizardRowStatus(c, { pending: reloadHints, failed: failedObj, verifyStates: verifyObj });
-    let action = '';
-    if (passive) action = ''; // 过程展示：不出现按钮
-    else if (st.key === 'not-connected') action = `<button data-asst-act="connect" data-asst-id="${c.id}">接入</button>`;
-    else if (st.key === 'connect-failed') action = `<button data-asst-act="connect" data-asst-id="${c.id}">重试</button>`;
-    else if (st.key === 'verify-failed') action = `<button data-asst-act="verify" data-asst-id="${c.id}">重新验证</button>`;
-    else if (st.key === 'pending-reload' || (st.key === 'connected' && st.reloadHint)) {
-      // 提示层/待生效共用动作：「我已重载，验证」（有验证命令走服务端 verify，否则回读重检测）
-      action = c.hasVerify
-        ? `<button data-asst-act="verify" data-asst-id="${c.id}">我已重载，验证</button>`
-        : `<button data-asst-act="recheck" data-asst-id="${c.id}">我已重载，验证</button>`;
-    }
-    else if (st.key === 'manual') action = `<button class="ghost" data-asst-act="console" data-asst-id="${c.id}">去控制台处理 ›</button>`;
-    // 简化轮：提示层收进同一行（小字，不出新行）；成功/在途不新增行，仅失败时给原因行
+    const st = wizardRowStatus(c, { pending: reloadHints, failed: failedObj, verifyStates: {} });
     const hintInline = st.reloadHint && st.key === 'connected'
       ? '<span class="ast-hint">已写入 · 重启后生效</span>'
+      : '';
+    const failed = failedObj[c.id];
+    const reasonLine = failed
+      ? `<p class="amsg">${c.name ?? c.id}：${failed.reason ?? '未成功'}——可在 设置 → AI 助手 重试</p>`
       : '';
     return `<div class="arow" data-asst-row="${c.id}">
       <span class="aname">${c.name ?? c.id}</span>
       <span class="ast${st.key === 'connected' ? ' ok' : st.key === 'pending-reload' || st.key === 'connect-failed' || st.key === 'verify-failed' ? ' todo' : ''}">${st.label}</span>
       ${hintInline}
-      <span class="asp"></span>${action}
     </div>
-    <p class="amsg" data-asst-msg="${c.id}" hidden></p>`;
+    ${reasonLine}`;
   }).join('');
-}
-
-function asstMsg(id, text) {
-  const el = document.querySelector(`[data-asst-msg="${CSS.escape(id)}"]`);
-  if (!el) return;
-  el.hidden = !text;
-  el.textContent = text ?? '';
 }
 
 async function loadClients() {
@@ -436,60 +398,6 @@ async function loadClients() {
   }
 }
 
-$('#asst-list')?.addEventListener('click', async (event) => {
-  const btn = event.target.closest('[data-asst-act]');
-  if (!btn) return;
-  const id = btn.dataset.asstId;
-  const act = btn.dataset.asstAct;
-  if (act === 'console') { void api.deepAssistants(); return; }
-  // 补丁 3：操作在途——该行按钮全禁 + 状态列「写入中…/验证中…」（防重复点击与困惑）
-  // 简化轮·行内反馈：在途/成功只变状态列与按钮（不新增行）；仅失败/待生效指引才给原因行
-  const row = btn.closest('.arow');
-  row?.querySelectorAll('button').forEach((b) => { b.disabled = true; });
-  const stEl = row?.querySelector('.ast');
-  if (stEl) stEl.textContent = act === 'verify' ? '验证中…' : act === 'connect' ? '写入中…' : '检测中…';
-  const res = await api.clientsAction(id, act);
-  let msg = '';
-  if (act === 'verify') {
-    // 服务端 verify 真值：connected → 完成（清提醒）；pending-restart → 「待生效」唯一正当来源；failed → 验证未过
-    if (res?.ok && res.state === 'connected') {
-      rowVerify.set(id, 'connected');
-      reloadHints.delete(id);
-      rowFailed.delete(id);
-    } else if (res?.state === 'pending-restart') {
-      rowVerify.set(id, 'pending-restart');
-      msg = '仍在待生效：请完全退出并重新打开该软件（不是只关窗口）后，点「我已重载，验证」。';
-    } else {
-      const failedSteps = (res?.steps ?? []).filter((s) => s && s.ok === false).map((s) => s.label ?? s.name).join('、');
-      rowVerify.set(id, 'verify-failed');
-      rowFailed.set(id, { kind: 'verify', reason: failedSteps || '验证未过' });
-      msg = `验证未过${failedSteps ? `（${failedSteps}）` : ''}；详情见「设置 · AI 助手」。`;
-    }
-  } else if (!res?.ok) {
-    // 补丁 3 接入失败语义：状态词「接入失败」+ 一行原因（脱敏）；rolledBack → 明示已自动还原
-    rowFailed.set(id, { kind: 'connect', reason: res?.warning ?? '没能完成' });
-    msg = `${res?.warning ?? '没能完成；可在「设置 · AI 助手」里看详情。'}${res?.rolledBack ? '（已自动还原原配置）' : ''}`;
-  } else if (act === 'connect') {
-    rowFailed.delete(id);
-    rowVerify.delete(id);
-    reloadHints.add(id); // 提示层：行内小字「已写入 · 重启后生效」（不出新行）
-  } else {
-    rowFailed.delete(id);
-    rowVerify.delete(id);
-    reloadHints.delete(id);
-  }
-  await loadClients();
-  asstMsg(id, msg); // 仅失败/指引有内容（成功无行）
-  await refresh();
-});
-
-// 「已完成」：显式确认（≥1 已接入才可用）→ 持久化 assistantsAcked → 完成态
-// 「先不接 ›」：段② 的显式跳过（唯一出口；全部接齐时自动完成，不需要任何按钮）
-$('#btn-seg2-skip')?.addEventListener('click', async () => {
-  try { await api.ackAssistants(); } catch { /* 落盘失败不阻断 */ }
-  await refresh();
-});
-// 「或加入已有的 Mebular ›」：与「去写入初始设置」同路（控制台 provision），显式点击才导航
 $('#alt-join')?.addEventListener('click', () => { void api.openConsole(); });
 
 $('#btn-skip')?.addEventListener('click', () => { void api.skipWizard(); });

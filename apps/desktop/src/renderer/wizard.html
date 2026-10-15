@@ -41,8 +41,8 @@
     .hero .badge { margin-top: 8px; display: inline-block; }
 
     /* ===== 里程碑轨道：左轨线 + 节点灯（当前=呼吸、完成=✓、未到=暗） ===== */
-    /* 居中补偿：节点灯占 34px 左侧挂点，把「卡片+灯」整体左移半幅（17px），卡片视觉居中 */
-    .rail { list-style: none; margin: 0 0 0 -17px; padding: 0; position: relative; }
+    /* 居中补偿：节点灯占 34px 左侧挂点 → 左移半幅（17px）；右边界同步收回 17px（否则 auto 宽度又被撑满，卡片仍右偏） */
+    .rail { list-style: none; margin: 0 17px 0 -17px; padding: 0; position: relative; }
     .rail::before { content: ""; position: absolute; left: 9px; top: 26px; bottom: 26%; width: 1px; /* 与 pip 圆心（left 3 + 13/2 = 9.5）中心对齐 */
       background: linear-gradient(180deg, rgba(80, 255, 170, 0.14), rgba(80, 255, 170, 0.03)); }
     .node { position: relative; padding: 0 0 18px 34px; }
@@ -236,9 +236,8 @@
             <!-- 行级接入：名称 + 状态词 + 一个动作（与 设置 · AI 助手 同一语言） -->
             <div id="asst-list"></div>
             <p class="hint" id="assist-note">接入只改它的一条配置；重启对应软件后生效。</p>
-            <div class="sec-foot" id="seg2-foot" hidden>
-              <button id="btn-seg2-skip" class="ghost small">先不接 ›</button>
-            </div>
+            <!-- 自动化（用户定调）：第二步是纯过程展示——任何状态下零按钮 -->
+
           </div>
           <div class="done-line" id="connect-done-line"><span>✓ 已接好</span><span class="muted">重启对应软件后生效</span></div>
         </section>

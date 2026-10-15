@@ -59,7 +59,8 @@ export function wizardView(state) {
         status,
         // 里程碑轨道节点态：当前=呼吸(active)、完成=✓(done)、未到=暗(locked)
         node: step.done ? 'done' : status === 'current' ? 'active' : 'locked',
-        collapsed: step.done, // 完成段即收成终态单行（无展开交互）
+        // ① 在旅程未完时保持展开（「一键开始」入口可达——重开未 ack 态的唯一动作）；全部完成才折叠成终态单行
+        collapsed: step.id === 'start' ? (step.done && complete) : step.done,
       };
       if (step.id === 'start') return { ...base, ...startStepView(step, { healthy, provision, registered, grace }) };
       return { ...base, ...assistantsStepView(step, start) };
@@ -114,7 +115,8 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
       ? { main: '✓ 已就绪', sub: registered === true ? '常驻已装 · 开机自启' : '这台机器已在跑你的 Mebular' }
       : null,
     actions: {
-      go: { label: '一键开始', kind: 'primary', hidden: step.done && !provision.required },
+      // 完成前恒在：② 未收尾时它仍是唯一动作入口（点一次跑完剩余全部自动化）
+      go: { label: '一键开始', kind: 'primary', hidden: false },
       provision: { label: '去写入初始设置 →', kind: 'primary', hidden: !(provision.required && !provision.provisioned) },
       // 设计稿：「或加入已有的 Mebular ›」——与「去写入初始设置」同路（控制台 provision），仅引导态显示
       join: { label: '或加入已有的 Mebular ›', kind: 'alt', hidden: !(provision.required && !provision.provisioned) },
@@ -138,22 +140,19 @@ function assistantsStepView(step, start) {
   if (!startDone) detailText = '先完成第①步：Mebular 跑起来（并完成初始设置）后才能连接助手。';
   else if (!detail) detailText = '助手列表加载中…';
   else if (detail.readError) detailText = `状态读取受限：${detail.readError}（不阻断）。`;
-  else if (installed === 0) detailText = '没检测到已装的 AI 助手 —— 可以先跳过，装好后再到 设置 → AI 助手 接入。';
-  else detailText = `检测到 ${installed} 个已装助手（已接入 ${connected} 个）。`;
+  else if (installed === 0) detailText = '没检测到已装的 AI 助手 —— 装好后回来点「一键开始」即可。';
+  else if (connected >= installed) detailText = `已接入 ${connected} 个 AI 助手。`;
+  else detailText = `检测到 ${installed} 个已装助手（已接入 ${connected} 个）——点「一键开始」自动接入；未成功的会在下方给出原因。`;
   return {
     detailText,
     connected,
     total,
     installed,
-    // 自动完成（用户定调）：已装的全部接入 = 段② 目的达成，自动 ack 进完成态——
-    // 「已完成」按钮是多余仪式；没接齐时不自动翻段（防误判）
-    autoAck: startDone && installed > 0 && connected >= installed && !step.done,
-    // 「先不接 ›」：有未接齐时的唯一安静出口（显式跳过 = ack）；全部接齐自动完成，不需要任何按钮
-    skipConnect: { label: '先不接 ›', hidden: !startDone || step.done },
+    // 自动化（用户定调）：第二步纯过程展示、零按钮——确认收尾由渲染层在流水尾部统一执行
     doneLine: step.done
       ? (connected >= 1
         ? { main: '✓ 已接好', sub: '重启对应软件后生效' }
-        : { main: '— 已跳过', sub: '随时可以在 设置 → AI 助手 接' })
+        : { main: '— 无需接入', sub: '这台机器没有已装的 AI 助手' })
       : null,
   };
 }

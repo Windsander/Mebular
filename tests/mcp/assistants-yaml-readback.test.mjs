@@ -3,11 +3,13 @@
 // 真机实证：`~/.hermes/config.yaml` 的 `mcp_servers.mebular = {url, enabled}`，hermes 侧
 // `config get`/`mcp test` 全通，但我们的行式解析把「顶格注释行」当父段结束 → 漏判。
 
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, jest } from '@jest/globals';
 import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { yamlEntryBlock, yamlHasKey } from '../../packages/mcp/src/clients.mjs';
+import { builtinAssistants, clearAssistantsCache, connectClient, landingState, yamlEntryBlock, yamlHasKey } from '../../packages/mcp/src/clients.mjs';
 
 describe('yamlEntryBlock：注释/空行不终止父段（复刻真实结构）', () => {
   // 真机结构：child 在顶格注释块之后（hermes CLI 的新键追加落点）

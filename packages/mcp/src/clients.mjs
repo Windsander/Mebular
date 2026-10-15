@@ -1067,6 +1067,13 @@ export async function connectClient(id, options = {}) {
 }
 
 /** 回滚：显式备份优先；否则最近一次备份；无备份则删除 mebular 条目（DSH 除外）。 */
+/** 备份候选是否已含 mebular 条目——**与状态探针同一判据**（landingState：present ∪ staleStdio ∪ legacyShape），
+ *  避免自建弱判据（如 yamlHasKey）漏报导致回滚选错快照。 */
+function backupHasMebularEntry(assistant, backupPath) {
+  const st = landingState({ ...assistant, landing: { ...assistant.landing, primaryPath: backupPath } }, {});
+  return Boolean(st.present || st.staleStdio || st.legacyShape);
+}
+
 export async function rollbackClient(id, options = {}) {
   clearAssistantsCache(); // F-PERF-2：回滚会改变落面
   const assistant = descriptorFor(id, options);
@@ -1076,8 +1083,11 @@ export async function rollbackClient(id, options = {}) {
   if (existing === null) return { ok: false, reason: '配置文件不存在，无需回滚' };
   const dir = dirname(primary);
   const base = `${primary.slice(primary.lastIndexOf(sep) + 1)}.bak-`;
-  const candidates = readdirSync(dir).filter((f) => f.startsWith(base)).sort();
-  const target = options.backupPath ?? (candidates.length > 0 ? join(dir, candidates[candidates.length - 1]) : null);
+  // 备份候选：**新 → 旧**；目标 = 最新一个**不含 mebular 条目**的备份（= 真正的「接入前」快照）
+  // 旧实现取「最新备份」：连续连接/多次回滚的安全备份本身已含 mebular → 回滚实为无操作（真机走查事故）
+  const candidates = readdirSync(dir).filter((f) => f.startsWith(base)).sort().reverse();
+  const target = options.backupPath
+    ?? candidates.map((f) => join(dir, f)).find((p) => !backupHasMebularEntry(assistant, p)) ?? null;
   const safety = `${primary}.bak-${tsStamp()}`;
   await copyFile(primary, safety);
   if (target) {

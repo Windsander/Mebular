@@ -15,7 +15,7 @@ import {
   resolveHttp,
 } from '../../apps/desktop/src/main/daemon.mjs';
 import { IPC_CHANNELS, isAllowedChannel, buildHandlerTable, diagnostics } from '../../apps/desktop/src/main/ipc.mjs';
-import { iconDataUrl, TRAY_STATES } from '../../apps/desktop/src/main/tray-icons.mjs';
+import { iconDataUrl, iconDataUrl2x, TRAY_STATES } from '../../apps/desktop/src/main/tray-icons.mjs';
 
 const http = { host: '127.0.0.1', port: 7331 };
 const running = async () => ({ ok: true });
@@ -97,10 +97,11 @@ describe('M1 桌面 App：IPC 白名单 / 托盘', () => {
     expect(Object.keys(table)).toEqual(['daemon:status']);
   });
 
-  it('托盘状态点：三态且可取值', () => {
+  it('菜单栏星章：任意 state 同一品牌图形（模板图）+ @2x 载荷可取', () => {
     expect(TRAY_STATES).toEqual(['green', 'yellow', 'red']);
     expect(iconDataUrl('green')).toMatch(/^data:image\/png;base64,/);
     expect(iconDataUrl('nonsense')).toBe(iconDataUrl('red'));
+    expect(iconDataUrl2x()).toMatch(/^data:image\/png;base64,/);
   });
 
   it('diagnostics 仅本地信息（无外联字段）', () => {

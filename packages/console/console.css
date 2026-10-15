@@ -53,7 +53,11 @@ html, body {
 .brand { font-weight: 700; letter-spacing: 0.5px; white-space: nowrap; }
 .brand-star { color: var(--accent); }
 .topbar-identity { display: flex; gap: 8px; flex: 1 1 auto; flex-wrap: wrap; }
-.topbar-actions { flex: 0 0 auto; }
+.topbar-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+/* 走查修正（用户实拍：三个操作按钮"大小感觉不一致"）：统一几何——
+   固定高 + flex 居中 + 统一图标槽（消除 ⚙/＋ 字形度量与行内基线差异导致的视觉漂移） */
+.topbar-actions .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 34px; padding: 0 12px; line-height: 1; }
+.topbar-actions .btn .btn-ico { display: inline-flex; align-items: center; justify-content: center; width: 15px; font-size: 15px; line-height: 1; }
 
 .badge {
   display: inline-flex;
@@ -204,18 +208,6 @@ html, body {
 }
 .tooltip .tt-title { font-weight: 700; margin-bottom: 4px; }
 .tooltip .tt-row { color: var(--muted); }
-
-.empty-state { z-index: 3;
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
-  text-align: center;
-  color: var(--muted);
-  max-width: 360px;
-  line-height: 1.7;
-}
-.empty-state strong { color: var(--text); display: block; margin-bottom: 6px; }
 
 .banner { z-index: 3;
   position: absolute;

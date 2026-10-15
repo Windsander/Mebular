@@ -25,67 +25,38 @@
       --crt-border: rgba(80, 255, 170, 0.38);
       --crt-border-soft: rgba(80, 255, 170, 0.22);
     }
+    *, *::before, *::after { box-sizing: border-box; }
     body { margin: 0; font: 14px -apple-system, system-ui, "PingFang SC", sans-serif; background: var(--bg); color: var(--text); overflow-x: hidden; min-height: 100vh; }
     /* 星野舞台（轻量 canvas；仅可见时渲染、隐藏即停；prefers-reduced-motion 静止） */
     #sky { position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; }
-    .stage { position: relative; z-index: 1; max-width: 620px; margin: 0 auto; padding: 52px 24px 96px; }
+    /* 三态布局：初始=全屏居中；部署/完成=标题上浮至顶部、内容自上而下 */
+    .stage { position: relative; z-index: 1; max-width: 620px; margin: 0 auto; padding: 52px 24px 96px; min-height: 100vh; display: flex; flex-direction: column; box-sizing: border-box; }
+    body.is-idle .stage { justify-content: center; padding-top: 0; padding-bottom: 0; }
+    body.is-idle .hero { margin-bottom: 26px; }
+    .idle-cta { text-align: center; }
 
     /* ===== hero：品牌区（✦ / MEBULAR / 一句 tagline） ===== */
     .hero { text-align: center; margin-bottom: 34px; }
-    .hero .mark { font-size: 30px; color: var(--crt); text-shadow: 0 0 18px rgba(109, 255, 184, 0.8); animation: pulse 3.2s ease-in-out infinite; }
+    /* 闪烁治理：品牌标静态辉光（不再呼吸） */
+    .hero .mark { font-size: 30px; color: var(--crt); text-shadow: 0 0 18px rgba(109, 255, 184, 0.8); }
     .hero h1 { font-size: 28px; letter-spacing: 8px; margin: 8px 0 6px; color: var(--crt-bright); text-shadow: 0 0 24px rgba(109, 255, 184, 0.35); font-weight: 600; }
     .hero .tagline { color: var(--muted); font-size: 13px; letter-spacing: 2px; margin: 0; min-height: 18px; }
     .hero .badge { margin-top: 8px; display: inline-block; }
 
-    /* ===== 里程碑轨道：左轨线 + 节点灯（当前=呼吸、完成=✓、未到=暗） ===== */
-    .rail { list-style: none; margin: 0; padding: 0; position: relative; }
-    .rail::before { content: ""; position: absolute; left: 9px; top: 14px; bottom: 14px; width: 1px;
-      background: linear-gradient(180deg, var(--crt-border), rgba(80, 255, 170, 0.06)); }
-    .node { position: relative; padding: 0 0 18px 34px; }
-    .pip { position: absolute; left: 3px; top: 20px; width: 13px; height: 13px; border-radius: 50%;
-      border: 1px solid var(--crt-dim); background: var(--bg); transition: all .4s; }
-    .node.active .pip { border-color: var(--crt); box-shadow: 0 0 12px rgba(109, 255, 184, 0.9); animation: pulse 1.6s ease-in-out infinite; }
-    .node.done .pip { background: var(--crt); border-color: var(--crt); box-shadow: 0 0 8px rgba(109, 255, 184, 0.6); }
-    .node.done .pip::after { content: "✓"; position: absolute; inset: 0; color: #04220f; font-size: 10px; line-height: 13px; text-align: center; }
-    .node.locked { opacity: .38; }
-    .node.locked .panel { pointer-events: none; }
-
-    /* ===== 段面板（玻璃质感；完成=降透明折叠回顾） ===== */
+    /* ===== 部署舞台（单面板：完整居中） ===== */
     .panel { border: 1px solid var(--crt-border-soft); border-radius: 10px; padding: 16px 18px;
-      background: linear-gradient(180deg, rgba(14, 20, 40, 0.82), rgba(8, 12, 24, 0.82));
-      backdrop-filter: blur(6px);
+      background: linear-gradient(180deg, rgba(14, 20, 40, 0.88), rgba(8, 12, 24, 0.88));
       box-shadow: 0 0 0 1px rgba(80, 255, 170, 0.04), 0 18px 50px -30px rgba(0, 0, 0, 0.9), inset 0 0 40px -30px rgba(80, 255, 170, 0.25); }
-    .node.active .panel { border-color: var(--crt-border); box-shadow: 0 0 24px -8px rgba(80, 255, 170, 0.35), 0 18px 50px -30px rgba(0,0,0,.9); }
-    .step h2 { font-size: 15px; letter-spacing: 2px; margin: 0 0 6px; color: var(--crt-bright); display: flex; align-items: center; gap: 8px; }
-    .step .step-check { color: var(--crt); }
-    .step.is-current { border-left: 2px solid var(--accent); }
-    .step.done { opacity: 0.78; }
-    /* 完成态段折叠为回顾（done-line / 点标题可重新展开） */
-    .step.is-collapsed h2 { cursor: pointer; margin: 0; }
-    .step.is-collapsed h2::after { content: '（再看一遍 ›）'; font-size: 11px; color: var(--muted); font-weight: 400; }
-    .step.is-collapsed .row,
-    .step.is-collapsed .troubleshoot,
-    .step.is-collapsed .flow,
-    .step.is-collapsed #asst-list,
-    .step.is-collapsed #flow-msg,
-    .step.is-collapsed .seg-body { display: none; }
-    .done-line { display: none; gap: 8px; align-items: center; color: var(--crt); font-size: 13px; cursor: pointer; margin-top: 8px; }
-    .done-line .muted { color: var(--muted); }
-    .done-line .chev { margin-left: auto; color: var(--muted); font-size: 11px; }
-    .step.is-collapsed .done-line { display: flex; }
+    .step h2, #deploy-panel h2 { font-size: 15px; letter-spacing: 2px; margin: 0 0 6px; color: var(--crt-bright); display: flex; align-items: center; gap: 8px; }
 
     .muted { color: var(--muted); font-size: 12px; }
     .hint { font-size: 11px; color: var(--muted); }
     .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 8px; }
-    .sec-foot { display: flex; gap: 10px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
     code, pre { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
     pre { background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px; overflow: auto; max-height: 280px; white-space: pre-wrap; }
     .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; border: 1px solid var(--crt-border); color: var(--crt); }
     .badge.todo { border-color: #6b5a2c; color: #ffd479; }
     .badge.service { border-color: var(--crt-border-soft); color: var(--crt-dim); }
-    details { border: 1px dashed var(--border); border-radius: 6px; padding: 8px 10px; margin-top: 10px; }
-    details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
-    details[open] summary { margin-bottom: 6px; }
 
     button { background: rgba(8, 38, 26, 0.6); color: #a9ffd4; border: 1px solid var(--crt-border); border-radius: 6px; padding: 7px 12px; cursor: pointer; font-size: 13px; }
     button:hover:not(:disabled) { border-color: rgba(120, 255, 190, 0.6); background: rgba(12, 52, 36, 0.75); }
@@ -97,45 +68,41 @@
     .alt { display: inline-block; margin-left: 14px; font-size: 12px; color: var(--muted); text-decoration: none; border-bottom: 1px dashed var(--border); cursor: pointer; background: none; border-top: none; border-left: none; border-right: none; padding: 0 0 1px; }
     .alt:hover { color: var(--text); }
 
-    /* ===== 段① 子步骤流水（一键后按钮区原位展开；失败定位子步骤） ===== */
+    details { border: 1px dashed var(--border); border-radius: 6px; padding: 8px 10px; margin-top: 10px; }
+    details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+    details[open] summary { margin-bottom: 6px; }
+
+    /* 流水（部署四步）：全自动叙事 */
     .flow { list-style: none; margin: 10px 0 4px; padding: 0; display: grid; gap: 4px; }
     .flow[hidden] { display: none; }
-    .flow li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
-    .flow li i { width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--border); flex: 0 0 auto; font-style: normal; text-align: center; line-height: 13px; font-size: 10px; }
+    .flow li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
+    .flow > li > i { width: 14px; height: 14px; border-radius: 50%; border: 1px solid var(--border); flex: 0 0 auto; font-style: normal; text-align: center; line-height: 13px; font-size: 10px; }
     .flow li[data-state="done"] { color: var(--crt); }
-    .flow li[data-state="done"] i { border-color: var(--crt); background: rgba(109, 255, 184, 0.15); }
-    .flow li[data-state="done"] i::before { content: '✓'; }
+    .flow li[data-state="done"] > i { border-color: var(--crt); background: rgba(109, 255, 184, 0.15); }
+    .flow li[data-state="done"] > i::before { content: '✓'; }
     .flow li[data-state="active"] { color: var(--text); }
-    .flow li[data-state="active"] i { border-color: var(--accent); box-shadow: 0 0 6px var(--accent); }
-    .flow li[data-state="active"] i::before { content: '●'; color: var(--accent); }
+    .flow li[data-state="active"] > i { border-color: var(--crt); box-shadow: 0 0 6px rgba(109, 255, 184, 0.7); }
+    .flow li[data-state="active"] > i::before { content: '●'; color: var(--crt-bright); }
     .flow li[data-state="failed"] { color: var(--accent-2); }
-    .flow li[data-state="failed"] i { border-color: var(--accent-2); }
-    .flow li[data-state="failed"] i::before { content: '✗'; color: var(--accent-2); }
+    .flow li[data-state="failed"] > i { border-color: var(--accent-2); }
+    .flow li[data-state="failed"] > i::before { content: '✗'; color: var(--accent-2); }
     #flow-msg { margin: 4px 0 0; }
     #flow-msg.error { color: var(--accent-2); }
 
-    /* ===== 段② 行级接入（名称 + 一个动作，纯点击） ===== */
-    #asst-list { margin-top: 8px; }
-    .arow { display: flex; align-items: center; gap: 10px; padding: 8px 2px; border-top: 1px dashed var(--border); min-height: 27px; }
-    .arow:first-of-type { border-top: none; }
-    .aname { flex: 0 0 auto; min-width: 130px; font-size: 13px; }
-    .ast { flex: 0 0 auto; font-size: 12px; color: var(--muted); }
-    .ast.ok { color: var(--crt); }
-    .ast.todo { color: var(--accent-2); }
-    .asp { flex: 1 1 auto; }
-    .amsg { margin: 2px 0 6px; font-size: 12px; color: var(--muted); }
+    /* 唯一呼吸点：流水中「进行中」步骤的圆点（部署时的心跳） */
+    .flow li[data-state="active"] i { animation: pulse 1.8s ease-in-out infinite; }
 
-    /* ===== 完成时刻「已就绪 ✦」暖收尾 ===== */
-    .finish { text-align: center; padding: 26px 0 6px; opacity: 0; transform: translateY(8px); transition: all .6s; }
-    .finish.show { opacity: 1; transform: none; }
-    .finish .word { font-size: 22px; letter-spacing: 10px; color: var(--crt-bright); text-shadow: 0 0 26px rgba(109, 255, 184, 0.65); margin-bottom: 12px; }
-    .finish .note { color: var(--muted); font-size: 12px; margin: 4px 0 14px; line-height: 1.8; }
-    .finish .note .warn-text { display: block; color: #ffd9a8; }
+    /* ===== 收尾「同框变身」（用户定稿 2）：完成 → 部署内容收束，本卡变为「已就绪」 ===== */
+    #deploy-panel:not(.is-compact) #complete-cta { display: none; }
+    #deploy-panel.is-compact #deploy-flow { display: none; }
+    #deploy-panel .done-card { margin-top: 0; }
 
-    /* 已设置过·直达变体（替换整个 rail） */
-    #existing { text-align: center; }
-    body.is-existing .rail, body.is-existing .finish, body.is-existing #logs-panel { display: none; }
-    body:not(.is-existing) #existing { display: none; }
+    /* ===== 状态 3：完成缩略卡（阶段框的收束形态） ===== */
+    .done-card { text-align: center; margin-top: 14px; }
+    .done-card .done-word { font-size: 20px; letter-spacing: 8px; color: var(--crt-bright); text-shadow: 0 0 26px rgba(109, 255, 184, 0.65); margin: 2px 0 10px; }
+    .done-card #finish-note { margin: 0 0 14px; line-height: 1.8; }
+    .done-card #finish-note .warn-text { display: block; color: #ffd9a8; }
+
 
     /* 诊断与日志（默认折叠；异常时渲染层自动展开 + 一行结论） */
     #logs-panel { position: relative; z-index: 1; max-width: 620px; margin: 0 auto; }
@@ -166,95 +133,50 @@
     html { scrollbar-gutter: stable; }
   </style>
 </head>
-<body class="setup">
+<body class="setup is-idle">
   <canvas id="sky" aria-hidden="true"></canvas>
 
-  <div class="stage">
-    <!-- ===== 品牌区（✦ / MEBULAR / 一句 tagline 随进度变化） ===== -->
+  <div class="stage" id="stage">
+    <!-- ===== 品牌区（✦ / MEBULAR / 一句 tagline；部署中/完成时上浮至顶部） ===== -->
     <header class="hero">
       <div class="mark">✦</div>
       <h1>MEBULAR</h1>
-      <p class="tagline" id="tagline">点两下，把它接进你的日常。</p>
-      <span id="daemon-badge" class="badge todo">检查中…</span>
+      <p class="tagline" id="tagline">点一下，接入设备</p>
     </header>
 
-    <!-- ===== 里程碑轨道：两段纵向流动 ===== -->
-    <ol class="rail">
-      <!-- ① 开始 -->
-      <li class="node step" id="step-start">
-        <span class="pip"></span>
-        <section class="panel">
-          <h2><span class="step-check" hidden>✓</span>开始 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
-          <div class="seg-body">
-            <p class="muted" id="start-detail">在这台机器上启动 Mebular 并完成初始设置。<br />数据只存在这台机器上，不上云。</p>
-            <!-- 段①：一键后按钮区原位展开实时流水（启动 → 写入初始设置 → 重启恢复；失败定位子步骤） -->
-            <ol id="start-flow" class="flow" hidden>
-              <li data-sub="launch" data-state="todo"><i></i>启动本机守护</li>
-              <li data-sub="write" data-state="todo"><i></i>写入本机设置</li>
-              <li data-sub="recover" data-state="todo"><i></i>重启生效（页面会自动恢复）</li>
-            </ol>
-            <p class="muted" id="flow-msg"></p>
-            <div class="row">
-              <button id="btn-go" class="primary big">一键开始</button>
-              <button id="btn-resume" class="primary" hidden>从此处续跑</button>
-              <button id="btn-provision" class="primary" hidden>去写入初始设置 →</button>
-              <a class="alt" id="alt-join" hidden>或加入已有的 Mebular ›</a>
-            </div>
-            <!-- ① 完成后：开机自启（推荐、非阻塞、一次点击） -->
-            <div class="row" id="postdone-row" hidden>
-              <span class="hint">已就绪 · 开机自启更省心？</span>
-              <button id="btn-install" class="ghost" hidden>让 Mebular 常驻</button>
-            </div>
-            <!-- 高级（出问题了？）：运维入口统一折叠，不占首屏 -->
-            <details class="troubleshoot" id="start-troubleshoot">
-              <summary>高级 · 出问题了？</summary>
-              <div class="row">
-                <button id="btn-restart" class="ghost">重启守护</button>
-                <button id="btn-start" class="ghost">仅启动守护</button>
-              </div>
-            </details>
-          </div>
-          <div class="done-line" id="start-done-line"><span>✓ 已就绪</span><span class="muted">这台机器已在跑你的 Mebular</span><span class="chev">展开 ›</span></div>
-        </section>
-      </li>
-
-      <!-- ② 连接你的 AI 助手 -->
-      <li class="node step locked" id="step-assistants">
-        <span class="pip"></span>
-        <section class="panel">
-          <h2><span class="step-check" hidden>✓</span>连接你的 AI 助手</h2>
-          <div class="seg-body">
-            <p class="muted" id="assistants-detail">—</p>
-            <!-- 行级接入：名称 + 状态词 + 一个动作（与 设置 · AI 助手 同一语言） -->
-            <div id="asst-list"></div>
-            <p class="hint" id="assist-note">接入只改它的一条配置；重启对应软件后生效（可在 设置 → AI 助手 验证）。</p>
-            <div class="sec-foot">
-              <button id="btn-seg2-done" class="primary" disabled>已完成</button>
-              <button id="btn-seg2-skip" class="ghost small">先不接 ›</button>
-              <span class="hint" id="done2-hint">接好一个即可点「已完成」</span>
-            </div>
-          </div>
-          <div class="done-line" id="connect-done-line"><span>✓ 已接好</span><span class="muted">重载对应助手后生效</span><span class="chev">展开 ›</span></div>
-        </section>
-      </li>
-    </ol>
-
-    <!-- ===== 完成时刻（单一主按钮；两段折叠为回顾；邀请移出引导，完成页提一句） ===== -->
-    <div class="finish" id="complete-cta" hidden>
-      <div class="word">已就绪 ✦</div>
-      <p class="note" id="finish-note">之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请新设备」随时可用。</p>
-      <button id="btn-enter-console" class="primary big">进入控制台 ✦</button>
+    <!-- ===== 状态 1：初始（仅一个按钮，全部居中、无附加元素） ===== -->
+    <div class="idle-cta" id="idle-cta">
+      <button id="btn-go" class="primary big">开始部署</button>
     </div>
 
-    <!-- ===== 已设置过·直达变体（替换整个 rail） ===== -->
-    <section class="panel" id="existing" hidden>
-      <h2>欢迎回来</h2>
-      <p class="muted">这台机器已经设置好，Mebular 正在后台运行。</p>
-      <button id="btn-enter-console-2" class="primary big">进入控制台</button>
+    <!-- ===== 状态 2：阶段框（点击后出现，四步进度 + 旁白；完成后同框「变身」为已就绪） ===== -->
+    <section class="panel" id="deploy-panel" hidden>
+      <div id="deploy-flow">
+        <h2>开始部署 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
+        <p class="muted" id="start-detail" hidden></p>
+        <ol id="start-flow" class="flow">
+          <li data-sub="launch" data-state="todo"><i></i>启动本机守护</li>
+          <li data-sub="write" data-state="todo"><i></i>写入本机设置</li>
+          <li data-sub="recover" data-state="todo"><i></i>重启生效（页面会自动恢复）</li>
+          <li data-sub="connect" data-state="todo"><i></i>接入 AI 助手（自动）</li>
+        </ol>
+        <p class="muted" id="flow-msg"></p>
+        <div class="row" id="go-row" hidden>
+          <button id="btn-resume" class="primary" hidden>从此处续跑</button>
+          <button id="btn-provision" class="primary" hidden>去写入初始设置 →</button>
+          <a class="alt" id="alt-join" hidden>或加入已有的 Mebular ›</a>
+        </div>
+      </div>
+      <!-- 完成态（用户定稿 2）：同框变身内容——不再另起卡、不再出现「已完成/已就绪」两个完成词 -->
+      <div class="done-card" id="complete-cta" hidden>
+        <p class="done-word">已就绪 ✦</p>
+        <p class="muted" id="finish-note">之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请新设备」随时可用。</p>
+        <button id="btn-enter-console" class="primary big">进入控制台 ✦</button>
+      </div>
     </section>
+
   </div>
 
-  <!-- 诊断与日志（默认折叠；异常时自动展开 + 一行结论） -->
   <details id="logs-panel">
     <summary>诊断与日志</summary>
     <p id="logs-conclusion" hidden></p>

@@ -4,117 +4,74 @@
 //       段②行级接入（名称+状态词+一个动作；「已接入 ✓」不自动翻段，「已完成」显式确认）。
 
 import { wizardView, flapGate, wizardRowStatus } from './wizard-view.mjs';
-import { reconcileAssistantUi } from '../../../../packages/console/assistant-status.js';
 
 const api = window.mebularDesktop;
 
 const $ = (sel) => document.querySelector(sel);
 const setText = (sel, text) => { const el = $(sel); if (el) el.textContent = text ?? ''; };
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
+const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ?? false;
 
 // 日志区只在「进入异常态」的边沿自动展开一次（不打断用户手动收起）
 let logsAutoOpened = false;
 
 // ---------- 渲染（视图模型驱动；01-setup 设计稿：hero/tagline + 里程碑轨道 + done-line 回顾） ----------
 
-// 已设置过·直达变体：首次拿到的状态就是完成态 → 「欢迎回来」替换整个轨道
-let firstSeen = false;
 
 function renderState(state) {
   if (!state) return;
   const view = wizardView(state);
+  const complete = Boolean(state.complete);
 
-  // 直达变体仅按**首次**状态判定（跑完流程当场完成仍走 finish 暖收尾）
-  if (!firstSeen) {
-    firstSeen = true;
-    if (state.complete) document.body.classList.add('is-existing');
-  }
-  const existing = document.body.classList.contains('is-existing');
-  const existingEl = $('#existing');
-  if (existingEl) existingEl.hidden = !existing;
+  // 三态（用户定稿）：
+  //   引导首页 = 全屏居中仅「开始部署」（外开已完成机器也回到这里——重启向导=从头走，部署幂等）
+  //   部署中   = 标题上浮 + 阶段框（四步流水 + 旁白）
+  //   完成     = 阶段框简述（四步全 ✓）+ 已就绪卡（仅本次会话刚完成时呈现——完成即奖励，再进=首页）
+  // 流水运行中优先走「部署」呈现（已完工机器上重复点「开始部署」也完整走一遍动画）；
+  // 仅「本次会话刚完成、且没在跑」才切完成简述
+  const deployView = flow.running || (!complete && (flow.everRan || Date.now() < graceUntil));
+  const doneView = !deployView && complete && flow.everRan;
+  const idleView = !deployView && !doneView;
+  document.body.classList.toggle('is-idle', idleView);
 
-  setText('#tagline', existing ? '' : view.tagline);
-
-  const badge = $('#daemon-badge');
-  if (badge) {
-    badge.textContent = view.badge;
-    badge.classList.toggle('todo', !state.complete);
-  }
-
-  // 完成态 → 「已就绪 ✦」暖收尾（单一主按钮）+ 两段折叠为回顾（done-line 可再展开）
+  setText('#tagline', idleView ? '点一下，接入设备' : (flow.running ? '正在部署…' : view.tagline));
+  const idleCta = $('#idle-cta');
+  if (idleCta) idleCta.hidden = !idleView;
+  const panel = $('#deploy-panel');
+  if (panel) panel.hidden = !(deployView || doneView);
   const cta = $('#complete-cta');
-  if (cta) {
-    cta.hidden = !view.complete || existing;
-    cta.classList.toggle('show', Boolean(view.complete) && !existing);
-  }
+  if (cta) cta.hidden = !doneView;
   const finishNote = $('#finish-note');
-  if (finishNote && view.complete) {
+  if (finishNote && complete) {
     const pending = [...reloadHints];
     finishNote.innerHTML = (pending.length > 0
       ? `<span class="warn-text">提醒：重启 ${pending.map((n) => escapeHtml(n)).join('、')} 这个软件后，mebular 才会出现在它的工具列表。</span><br />`
       : '') + '之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请新设备」随时可用。';
   }
 
-  for (const step of view.steps) {
-    const el = document.getElementById(`step-${step.id}`);
-    if (!el) continue;
-    el.classList.toggle('done', step.status === 'done');
-    el.classList.toggle('is-current', step.status === 'current');
-    // 里程碑轨道节点态：active=呼吸 / done=✓ / locked=暗（未到段不可点）
-    el.classList.toggle('active', step.node === 'active');
-    el.classList.toggle('locked', step.node === 'locked');
-    el.classList.toggle('is-collapsed', Boolean(step.collapsed) && !el.dataset.userExpanded);
-    const check = el.querySelector('.step-check');
-    if (check) check.hidden = !step.check;
-    // done-line 回顾行（折叠时可见；点击重新展开）
-    const doneLine = el.querySelector('.done-line');
-    if (doneLine && step.doneLine) {
-      const [main, sub] = [doneLine.querySelector('span:first-child'), doneLine.querySelector('.muted')];
-      if (main) main.textContent = step.doneLine.main;
-      if (sub) sub.textContent = step.doneLine.sub;
-    }
-  }
-
   const start = view.steps.find((s) => s.id === 'start');
-  if (start) {
+  const assistantsDone = Boolean(state.steps?.find((s) => s.id === 'assistants')?.done);
+  if (start && (deployView || doneView)) {
     setText('#start-detail', start.detailText);
+    const startDetail = $('#start-detail');
+    if (startDetail) startDetail.hidden = doneView; // 简述：完成态收掉状态行
     const svcBadge = $('#start-service-badge');
     if (svcBadge) svcBadge.hidden = !start.serviceBadge;
+    const goRow = $('#go-row');
+    if (goRow) goRow.hidden = doneView; // 简述：完成态无动作行
     const btnGo = $('#btn-go');
-    if (btnGo) btnGo.hidden = Boolean(start.actions.go.hidden) || flow.running;
+    if (btnGo) btnGo.hidden = Boolean(start.actions.go.hidden) || flow.running || doneView;
+    const altJoin = $('#alt-join');
+    if (altJoin) altJoin.hidden = Boolean(start.actions.join?.hidden ?? true) || flow.running;
     const btnProvision = $('#btn-provision');
     if (btnProvision) btnProvision.hidden = Boolean(start.actions.provision.hidden);
-    const altJoin = $('#alt-join');
-    if (altJoin) altJoin.hidden = Boolean(start.actions.join?.hidden ?? true);
-    const btnInstall = $('#btn-install');
-    if (btnInstall) {
-      btnInstall.hidden = Boolean(start.actions.install.hidden);
-      btnInstall.disabled = Boolean(start.actions.install.disabled);
-      if (start.actions.install.label) btnInstall.textContent = start.actions.install.label;
-    }
-    // P1 简化：常驻只在 ① 完成后以「开机自启？」一行出现（推荐、非阻塞），不占首屏
-    const postRow = $('#postdone-row');
-    if (postRow) postRow.hidden = !(start.status === 'done' && !start.actions.install.hidden);
-    // 非跑流水期间：流水面板按静态进度呈现（① 未完成且从未跑过 → 保持隐藏）
-    if (!flow.running && !flow.everRan) {
-      const flowEl = $('#start-flow');
-      const showStatic = start.status !== 'done' && (start.flow.write !== 'todo' || start.flow.launch !== 'todo');
-      if (flowEl) flowEl.hidden = !showStatic;
-      if (showStatic) for (const sub of ['launch', 'write', 'recover']) setSubState(sub, start.flow[sub] ?? 'todo');
-    }
-  }
 
-  const assistants = view.steps.find((s) => s.id === 'assistants');
-  if (assistants) {
-    setText('#assistants-detail', assistants.detailText);
-    const doneBtn = $('#btn-seg2-done');
-    if (doneBtn) {
-      doneBtn.disabled = !assistants.doneEnabled;
-      doneBtn.hidden = Boolean(assistants.doneHidden);
+    if (doneView && !doneFxPlayed) { doneFxPlayed = true; playDoneFx(); } // 收尾动效：一次锁定（含已就绪入场）
+    // 阶段框：四步现状（未跑流水时按状态静态推导；跑流水时由 runFlow 实时接管）
+    if (!flow.running && !flow.everRan) {
+      for (const sub of ['launch', 'write', 'recover']) setSubState(sub, start.flow[sub] ?? 'todo');
+      setSubState('connect', assistantsDone ? 'done' : (start.status === 'done' ? 'active' : 'todo'));
     }
-    const skipBtn = $('#btn-seg2-skip');
-    if (skipBtn) skipBtn.hidden = Boolean(assistants.skipConnect?.hidden ?? true);
-    setText('#done2-hint', assistants.doneHint ?? '');
   }
 
   // 异常（引导态/启动失败）→ 自动展开 + 一行结论；正常保持默认折叠
@@ -124,14 +81,46 @@ function renderState(state) {
     conclusion.hidden = !view.logs.conclusion;
     if (view.logs.conclusion) conclusion.textContent = view.logs.conclusion;
   }
-  if (logsPanel && view.logs.open && !logsAutoOpened) {
-    logsPanel.open = true;
-    logsAutoOpened = true;
+  if (logsPanel) {
+    // 简洁（用户定调）：日志是**异常件**——未开始不出现、① 就绪后不常驻；
+    // 只有真失败（跑过流水且失败）/ 运行中 / 引导态才出现（并自动展开一次）
+    const provisionRequired = Boolean(state?.steps?.[0]?.detail?.provision?.required);
+    // 日志=异常件：健康部署中不弹（旧式 everRan||running 会让折条随流水全程出现）；失败/引导态才亮
+    const showLogs = deployView && start?.status !== 'done'
+      && (Boolean(flow.failedSub) || provisionRequired || (!flow.running && flow.everRan));
+    logsPanel.hidden = !showLogs;
+    if (showLogs && view.logs.open && !logsAutoOpened) {
+      logsPanel.open = true;
+      logsAutoOpened = true;
+    }
   }
 }
 
 function escapeHtml(s) {
   return String(s ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+// 收尾动效（用户定稿 2 · 同框变身）：完成 → 部署内容退场、卡片收束，「已就绪」在本卡内入场
+// （不再另起一张卡；「已完成/已就绪」两个完成词不再打架）
+let doneFxPlayed = false;
+function playDoneFx() {
+  const panel = $('#deploy-panel');
+  const flowBox = $('#deploy-flow');
+  const cta = $('#complete-cta');
+  if (!panel) return;
+  const compact = () => panel.classList.add('is-compact');
+  if (reducedMotion) { compact(); return; } // 减动效：直达变身态
+  const h0 = panel.getBoundingClientRect().height;
+  [...(flowBox?.children ?? [])]
+    .filter((el) => !el.hidden)
+    .forEach((el) => el.animate([{ opacity: 1 }, { opacity: 0 }], { duration: 150, fill: 'forwards' }));
+  window.setTimeout(() => {
+    compact();
+    const h1 = panel.getBoundingClientRect().height;
+    panel.animate([{ height: `${h0}px` }, { height: `${h1}px` }], { duration: 300, easing: 'cubic-bezier(0.4, 0, 0.2, 1)' });
+    cta?.animate([{ opacity: 0, transform: 'translateY(10px)' }, { opacity: 1, transform: 'translateY(0)' }],
+      { duration: 320, delay: 160, easing: 'ease-out', fill: 'backwards' });
+  }, 160);
 }
 
 // F4④ 重启/安装宽限窗（≤60s）：① 已完成期间的健康瞬断不翻回未完成（grace 注入视图模型）
@@ -160,8 +149,39 @@ async function refresh() {
 
 // ---------- 段① 一键开始：子步骤流水（启动 → 写入初始设置 → 重启恢复） ----------
 
-const SUBSTEPS = ['launch', 'write', 'recover'];
+const SUBSTEPS = ['launch', 'write', 'recover', 'connect'];
+// 过程可见性：每个子步最小停留（太快等于没展示）；汇总行读完再收尾
+const SUB_MIN_DWELL_MS = 900;
 const flow = { running: false, everRan: false, failedSub: null };
+// 可自动接入的目标：已装、未接、非 manual 兜底、非检测失败
+function connectTargets(clients) {
+  return (clients ?? []).filter((c) => c.installed && !c.connected
+    && c.state !== 'manual' && c.needsManual !== true && c.state !== 'detect-failed');
+}
+/** 逐个自动接入（旁白式进度：一次只报当前一个；失败非阻断，收尾汇总）。返回 { ok:[], failed:[] }。 */
+async function autoConnectAll() {
+  let clients = [];
+  try { clients = (await api.clientsList())?.clients ?? []; } catch { return { ok: [], failed: [] }; }
+  const targets = connectTargets(clients);
+  const ok = [];
+  const failed = [];
+  for (let i = 0; i < targets.length; i += 1) {
+    const c = targets[i];
+    flowMsg(`正在接入 ${c.name}…（${i + 1}/${targets.length}）`);
+    try {
+      const r = await api.clientsAction(c.id, 'connect');
+      if (r?.ok) {
+        ok.push(c.name);
+        reloadHints.add(c.id); // 完成页提醒名单（重启对应软件后生效）
+      } else {
+        failed.push(`${c.name}（${r?.warning ?? '未成功'}）`);
+      }
+    } catch (error) {
+      failed.push(`${c.name}（${error?.message ?? error}）`);
+    }
+  }
+  return { ok, failed };
+}
 
 function setSubState(sub, state) {
   const li = document.querySelector(`#start-flow [data-sub="${sub}"]`);
@@ -194,6 +214,25 @@ async function runFlow(fromSub = 'launch') {
   $('#btn-go').hidden = true;
   $('#btn-resume').hidden = true;
   flowMsg('');
+  doneFxPlayed = false; // 重置收尾动效：重复部署整场可再次播放
+  $('#deploy-panel')?.classList.remove('is-compact');
+  // 立即上屏：阶段框在本帧出现（3s 轮询曾有 running 守卫，点击后屏幕会冻在初始页直跳完成——走查事故）
+  // 开场动画（用户定稿手势）：品牌从居中滑到顶部 → 卡片随后展开（FLIP；reduced-motion 直接切换）
+  const heroEl = $('.hero');
+  const panelEl = $('#deploy-panel');
+  const heroBefore = heroEl?.getBoundingClientRect();
+  await refresh();
+  if (!reducedMotion && heroEl && heroBefore) {
+    const dy = heroBefore.top - heroEl.getBoundingClientRect().top;
+    if (Math.abs(dy) > 2) {
+      heroEl.animate([{ transform: `translateY(${dy}px)` }, { transform: 'translateY(0)' }],
+        { duration: 420, easing: 'cubic-bezier(0.22, 0.61, 0.36, 1)' });
+    }
+  }
+  if (!reducedMotion && panelEl && !panelEl.hidden) {
+    panelEl.animate([{ opacity: 0, transform: 'translateY(14px)' }, { opacity: 1, transform: 'translateY(0)' }],
+      { duration: 420, delay: 140, easing: 'ease-out', fill: 'backwards' });
+  }
 
   const startIndex = SUBSTEPS.indexOf(fromSub);
   let currentSub = fromSub;
@@ -233,11 +272,26 @@ async function runFlow(fromSub = 'launch') {
           });
           if (!ok) throw new Error('重启后守护未在 60s 内恢复');
         }
+      } else if (sub === 'connect') {
+        // 一键启动的核心自动化：把已装的 AI 助手全部接上（行内实时翻状态；失败非阻断）
+        flowMsg('正在接入 AI 助手…');
+        const { ok, failed } = await autoConnectAll();
+        if (failed.length > 0) {
+          flowMsg(`已自动接入 ${ok.length} 个；${failed.join('；')}——可在 设置 → AI 助手 重试。`, true);
+        } else if (ok.length > 0) {
+          flowMsg(`已接入 ${ok.length} 个 AI 助手——重启对应软件后生效。`);
+        } else {
+          flowMsg('没有需要接入的助手。');
+        }
       }
       setSubState(sub, 'done');
+      await sleep(SUB_MIN_DWELL_MS); // 最小停留：让每一步看得见
     }
     flowMsg('已就绪 ✓');
     flow.failedSub = null;
+    await sleep(SUB_MIN_DWELL_MS + 600); // 汇总行停留：读完再进完成态
+    // 用户点过「一键开始」= 对 ② 的显式确认：统一 ack 收尾（个别未成功的已给原因，重试归设置·AI 助手）
+    try { await api.ackAssistants(); } catch { /* 落盘失败不阻断 */ }
   } catch (error) {
     setSubState(currentSub, 'failed');
     flow.failedSub = currentSub;
@@ -248,201 +302,27 @@ async function runFlow(fromSub = 'launch') {
     flow.running = false;
     $('#btn-go').hidden = true; // 跑过后由「续跑」/状态驱动，不再回显主按钮（幂等）
     await refresh();
-    await loadClients();
-  }
+    }
 }
 
 $('#btn-go')?.addEventListener('click', () => { void runFlow('launch'); });
 $('#btn-resume')?.addEventListener('click', () => { void runFlow(flow.failedSub ?? 'launch'); });
 $('#btn-provision')?.addEventListener('click', () => { void api.openConsole(); });
-$('#btn-start')?.addEventListener('click', async () => { await api.start(); await refresh(); });
-// F2c/F4④：安装常驻 = 登记后守护被 launchd 接管重启 → 按钮进「重启中…」过渡（≤60s 轮询），
-// 宽限窗内 ① 不翻回未完成；已注册则服务端 no-op（already）直接刷新。
-$('#btn-install')?.addEventListener('click', async () => {
-  const btn = $('#btn-install');
-  if (btn) { btn.disabled = true; btn.textContent = '重启中…'; }
-  try {
-    const res = await api.serviceInstall();
-    if (res?.ok === false) throw new Error(res.reason ?? '安装失败');
-    if (!res?.already) {
-      armGrace();
-      await refresh(); // 立刻进宽限呈现（不等健康瞬断发生）
-      const ok = await pollState((s) => {
-        const d = s?.steps?.[0]?.detail ?? {};
-        return Boolean(d.healthy) && d.registered === true;
-      });
-      if (!ok) flowMsg('守护仍在恢复中：稍候会自动刷新；若持续异常请看下方日志。');
-    }
-  } catch (error) {
-    setText('#start-detail', `安装常驻失败：${error.message}`);
-  } finally {
-    if (btn) btn.disabled = false; // 文案由下次 renderState 按视图模型恢复
-    await refresh();
-  }
-});
-$('#btn-restart')?.addEventListener('click', async () => { armGrace(); await api.restart(); await refresh(); });
 
-// 完成态段标题 / done-line 点击 → 重新展开回顾
-for (const id of ['step-start', 'step-assistants']) {
-  const node = document.getElementById(id);
-  const toggle = () => {
-    const el = node;
-    if (!el?.classList.contains('is-collapsed') && !el?.dataset.userExpanded) return;
-    el.dataset.userExpanded = el.dataset.userExpanded ? '' : '1';
-    el.classList.toggle('is-collapsed', !el.dataset.userExpanded);
-  };
-  node?.querySelector('h2')?.addEventListener('click', toggle);
-  node?.querySelector('.done-line')?.addEventListener('click', toggle);
-}
+// 完成段为终态单行（用户定调：展开/高级都是自动保障，不给用户找活——
+// 守护/配置异常时视图自动回到操作态并给恢复入口）
 
 // ---------- 段② 行级接入（名称 + 状态词 + 一个动作；与 设置 · AI 助手 同一语言） ----------
 
 // 补丁 3 增补：语义更名 pendingReload → reloadHints（提示层「已写入·请重载」，**不再驱动「待生效」状态词**）；
-// rowVerify = 最近一次服务端 verify 真值（pending-restart 是「待生效」唯一正当来源）。
 const reloadHints = new Set();
-const rowVerify = new Map();
 // UX-2 补丁 3：行级失败态（id → { kind: 'connect'|'verify', reason }）——失败绝不显示「待生效」
-const rowFailed = new Map();
 let clientsSignature = null;
 
-function renderClients(clients) {
-  const list = $('#asst-list');
-  if (!list) return;
-  if (!Array.isArray(clients)) {
-    list.innerHTML = '<p class="amsg">助手列表加载中…</p>';
-    return;
-  }
-  const signature = JSON.stringify(
-    clients.map((c) => [c.id, Boolean(c.installed), Boolean(c.connected), c.state ?? null])
-      .concat([...reloadHints].map((k) => `hint:${k}`))
-      .concat([...rowFailed.keys()].map((k) => `fail:${k}`))
-      .concat([...rowVerify.entries()].map(([k, v]) => `verify:${k}:${v}`)),
-  );
-  if (signature === clientsSignature) return;
-  clientsSignature = signature;
-  const failedObj = Object.fromEntries(rowFailed);
-  const verifyObj = Object.fromEntries(rowVerify);
-  // P1 简化：只显示**已安装**的助手（未装不出现——装好后自会进来）；每行一个动作
-  const visible = clients.filter((c) => (c.state ?? (c.installed ? 'x' : 'not-installed')) !== 'not-installed' && c.state !== 'detect-failed');
-  if (visible.length === 0) {
-    list.innerHTML = '<p class="amsg">没检测到已装的 AI 助手——可以先跳过，装好后回到这里（或到 设置 → AI 助手 接入）。</p>';
-    return;
-  }
-  list.innerHTML = visible.map((c) => {
-    const st = wizardRowStatus(c, { pending: reloadHints, failed: failedObj, verifyStates: verifyObj });
-    let action = '';
-    if (st.key === 'not-connected') action = `<button data-asst-act="connect" data-asst-id="${c.id}">接入</button>`;
-    else if (st.key === 'connect-failed') action = `<button data-asst-act="connect" data-asst-id="${c.id}">重试</button>`;
-    else if (st.key === 'verify-failed') action = `<button data-asst-act="verify" data-asst-id="${c.id}">重新验证</button>`;
-    else if (st.key === 'pending-reload' || (st.key === 'connected' && st.reloadHint)) {
-      // 提示层/待生效共用动作：「我已重载，验证」（有验证命令走服务端 verify，否则回读重检测）
-      action = c.hasVerify
-        ? `<button data-asst-act="verify" data-asst-id="${c.id}">我已重载，验证</button>`
-        : `<button data-asst-act="recheck" data-asst-id="${c.id}">我已重载，验证</button>`;
-    }
-    else if (st.key === 'manual') action = `<button class="ghost" data-asst-act="console" data-asst-id="${c.id}">去控制台处理 ›</button>`;
-    // 提示层小字：不覆盖状态词（「已接入 ✓」旁挂「已写入 · 重启该软件后生效」）
-    const hintLine = st.reloadHint && st.key === 'connected'
-      ? `<p class="amsg" data-asst-hint="${c.id}">已写入 · 重启这个软件后生效（好了点「我已重载，验证」）</p>`
-      : '';
-    return `<div class="arow" data-asst-row="${c.id}">
-      <span class="aname">${c.name ?? c.id}</span>
-      <span class="ast${st.key === 'connected' ? ' ok' : st.key === 'pending-reload' || st.key === 'connect-failed' || st.key === 'verify-failed' ? ' todo' : ''}">${st.label}</span>
-      <span class="asp"></span>${action}
-    </div>
-    ${hintLine}
-    <p class="amsg" data-asst-msg="${c.id}" hidden></p>`;
-  }).join('');
-}
-
-function asstMsg(id, text) {
-  const el = document.querySelector(`[data-asst-msg="${CSS.escape(id)}"]`);
-  if (!el) return;
-  el.hidden = !text;
-  el.textContent = text ?? '';
-}
-
-async function loadClients() {
-  try {
-    const res = await api.clientsList();
-    const clients = res?.clients ?? [];
-    // 补丁 3 增补 · 对账：每轮刷新清掉与服务端真值矛盾的客户端残留
-    for (const c of clients) {
-      reconcileAssistantUi(c, { reloadHints, verifyStates: rowVerify, failed: rowFailed });
-    }
-    renderClients(clients);
-    if (res?.warning) setText('#assistants-detail', `${res.warning}（不阻断，可稍后在「设置 · AI 助手」里补）`);
-  } catch {
-    renderClients([]);
-  }
-}
-
-$('#asst-list')?.addEventListener('click', async (event) => {
-  const btn = event.target.closest('[data-asst-act]');
-  if (!btn) return;
-  const id = btn.dataset.asstId;
-  const act = btn.dataset.asstAct;
-  if (act === 'console') { void api.deepAssistants(); return; }
-  // 补丁 3：操作在途——该行按钮全禁 + 状态列「写入中…/验证中…」（防重复点击与困惑）
-  const row = btn.closest('.arow');
-  row?.querySelectorAll('button').forEach((b) => { b.disabled = true; });
-  const stEl = row?.querySelector('.ast');
-  if (stEl) stEl.textContent = act === 'verify' ? '验证中…' : act === 'connect' ? '写入中…' : '检测中…';
-  asstMsg(id, act === 'connect' ? '正在接入…' : act === 'verify' ? '正在验证…' : '正在重新检测…');
-  const res = await api.clientsAction(id, act);
-  let msg;
-  if (act === 'verify') {
-    // 服务端 verify 真值：connected → 完成（清提醒）；pending-restart → 「待生效」唯一正当来源；failed → 验证未过
-    if (res?.ok && res.state === 'connected') {
-      rowVerify.set(id, 'connected');
-      reloadHints.delete(id);
-      rowFailed.delete(id);
-      msg = '验证通过，已接入 ✓';
-    } else if (res?.state === 'pending-restart') {
-      rowVerify.set(id, 'pending-restart');
-      msg = '仍在待生效：请完全退出并重新打开该软件（不是只关窗口）后，点「我已重载，验证」。';
-    } else {
-      const failedSteps = (res?.steps ?? []).filter((s) => s && s.ok === false).map((s) => s.label ?? s.name).join('、');
-      rowVerify.set(id, 'verify-failed');
-      rowFailed.set(id, { kind: 'verify', reason: failedSteps || '验证未过' });
-      msg = `验证未过${failedSteps ? `（${failedSteps}）` : ''}；详情见「设置 · AI 助手」。`;
-    }
-  } else if (!res?.ok) {
-    // 补丁 3 接入失败语义：状态词「接入失败」+ 一行原因（脱敏）；rolledBack → 明示已自动还原
-    rowFailed.set(id, { kind: 'connect', reason: res?.warning ?? '没能完成' });
-    msg = `${res?.warning ?? '没能完成；可在「设置 · AI 助手」里看详情。'}${res?.rolledBack ? '（已自动还原原配置）' : ''}`;
-  } else if (act === 'connect') {
-    rowFailed.delete(id);
-    rowVerify.delete(id);
-    reloadHints.add(id); // 提示层：「已写入 · 请重载」（不驱动状态词；状态词随服务端真值）
-    msg = res.changed ? '已接好（写前已备份）——重启这个软件后生效。' : '已接入（无需改动）。';
-  } else {
-    rowFailed.delete(id);
-    rowVerify.delete(id);
-    reloadHints.delete(id);
-    msg = '已重新检测。';
-  }
-  await loadClients();
-  asstMsg(id, msg); // 渲染后落消息（行可能已重绘）
-  await refresh();
-});
-
-// 「已完成」：显式确认（≥1 已接入才可用）→ 持久化 assistantsAcked → 完成态
-$('#btn-seg2-done')?.addEventListener('click', async () => {
-  try { await api.ackAssistants(); } catch { /* 落盘失败不阻断 */ }
-  await refresh();
-});
-// 「先不接 ›」：段② 的显式跳过（与「已完成」同路 ack——用户显式确认后才翻段/通关）
-$('#btn-seg2-skip')?.addEventListener('click', async () => {
-  try { await api.ackAssistants(); } catch { /* 落盘失败不阻断 */ }
-  await refresh();
-});
-// 「或加入已有的 Mebular ›」：与「去写入初始设置」同路（控制台 provision），显式点击才导航
 $('#alt-join')?.addEventListener('click', () => { void api.openConsole(); });
 
 $('#btn-skip')?.addEventListener('click', () => { void api.skipWizard(); });
 $('#btn-enter-console')?.addEventListener('click', () => { void api.openConsole(); });
-$('#btn-enter-console-2')?.addEventListener('click', () => { void api.openConsole(); });
 
 // ---------- 诊断与日志 ----------
 
@@ -477,13 +357,17 @@ $('#btn-logs-open')?.addEventListener('click', () => { void api.openLogs(); });
       y: Math.random() * canvas.height,
       r: Math.random() * 1.4 + 0.3,
       p: Math.random() * Math.PI * 2,
+      // 每颗星独立频率（0.55~1.45 倍速）：错落闪烁，避免整体同步呼吸的「假星星」感
+      s: 0.55 + Math.random() * 0.9,
     }));
   }
   function draw(t) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     for (const s of stars) {
-      const tw = reduced ? 0.6 : 0.35 + 0.3 * Math.sin(t / 900 + s.p);
-      ctx.globalAlpha = Math.max(0.08, tw);
+      // 星野闪烁：每颗独立频率慢速明灭（基准 1.6s × 0.55~1.45）——错落、明显、不抢戏；
+      // 与「整页闪烁」（合成级，已由去 backdrop-filter 治理）不是一回事
+      const tw = reduced ? 0.6 : 0.42 + 0.3 * Math.sin(t * s.s / 1600 + s.p);
+      ctx.globalAlpha = Math.max(0.12, tw);
       ctx.fillStyle = '#b4ffd6'; // 设计稿星色（console 契约：稀疏、缓慢、不抢戏）
       ctx.beginPath();
       ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
@@ -513,7 +397,6 @@ $('#btn-logs-open')?.addEventListener('click', () => { void api.openLogs(); });
 })();
 
 void refresh();
-void loadClients();
 void loadLogs();
-// 状态轮询（跑流水期间也有自己的有界轮询；这里只读、幂等）
-setInterval(() => { if (!flow.running) { void refresh(); void loadClients(); } void loadLogs(); }, 3000);
+// 状态轮询（幂等；跑流水期间必须照常——阶段框显隐由 renderState 驱动，曾被 running 守卫吞掉）
+setInterval(() => { void refresh(); void loadLogs(); }, 3000);

@@ -56,12 +56,30 @@ describe('R-1 高-3 view 深链映射（initialViewFromSearch）', () => {
   });
 });
 
-describe('R-1 高-3 空态词表对齐真实按钮', () => {
-  it('空态提到「＋ 连接已有地址」与「＋ 邀请新设备」，不再指不存在的「＋ 连接新对端」', () => {
-    const emptyBlock = consoleJs.match(/function renderEmptyState[\s\S]*?\n}/)?.[0] ?? '';
-    expect(emptyBlock).toContain('＋ 连接已有地址');
-    expect(emptyBlock).toContain('＋ 邀请新设备');
-    expect(emptyBlock).not.toContain('＋ 连接新对端');
+describe('UX-2 定稿：中央空态遮罩下线（只有本机时不遮挡星图）', () => {
+  it('empty-state 元素/渲染/样式全部移除；引导归顶栏真实按钮', () => {
+    expect(consoleJs).not.toContain('renderEmptyState');
+    expect(consoleJs).not.toContain('empty-state');
+    expect(indexHtml).not.toContain('empty-state');
+    const consoleCss = readFileSync(join(here, '..', '..', 'packages', 'console', 'console.css'), 'utf-8');
+    expect(consoleCss).not.toContain('.empty-state');
+    // 顶栏操作组几何统一（用户实拍：三个按钮大小不一致感）——固定高 + flex 居中 + 图标槽
+    expect(consoleCss).toMatch(/\.topbar-actions \.btn \{[^}]*inline-flex[^}]*height: 34px/);
+    expect(consoleCss).toMatch(/\.topbar-actions \.btn \.btn-ico \{[^}]*width: 15px/);
+    // 引导入口（顶栏）仍在（图标槽 span + 文案）
+    expect(indexHtml).toContain('btn-ico');
+    expect(indexHtml).toContain('连接已有地址');
+    expect(indexHtml).toContain('邀请新设备');
+  });
+});
+
+describe('UX-2 定稿：图例默认收起（无首访自动展开）', () => {
+  it('静态默认 is-collapsed + aria-expanded=false；渲染层无自动展开计时器', () => {
+    expect(indexHtml).toMatch(/id="legend-panel"[^>]*is-collapsed/);
+    expect(indexHtml).toMatch(/aria-expanded="false"/);
+    expect(consoleJs).not.toContain('autoTimer');
+    expect(consoleJs).toMatch(/默认收起/);
+    expect(consoleJs).toMatch(/apply\(localStorage\.getItem\('mebular_legend_collapsed'\) !== '0'\)/);
   });
 });
 

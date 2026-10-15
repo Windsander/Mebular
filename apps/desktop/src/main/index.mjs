@@ -7,13 +7,13 @@
 import { openSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog } from 'electron';
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog, session } from 'electron';
 import {
   APP_VERSION, consoleUrl, ensureDaemon, resolveCliBin, resolveHome, resolveHttp,
   serviceEnabledFor, stopManaged, waitForDaemon, parseArgs, probeHealth, probeProvision, serviceDescriptorFor,
 } from './daemon.mjs';
 import { buildHandlerTable, diagnostics } from './ipc.mjs';
-import { iconDataUrl } from './tray-icons.mjs';
+import { iconDataUrl, iconDataUrl2x } from './tray-icons.mjs';
 import {
   computeWizardState, deepLinks, inviteText, inviteViaApi, isLoopbackUrl,
   readDesktopState, writeDesktopState, clientsViaApi, clientActionViaApi, installDecision,
@@ -77,7 +77,13 @@ async function probeAssistants() {
     if (!res.ok) return { readError: `HTTP ${res.status}`, connectedCount: 0, total: null };
     const data = await res.json().catch(() => ({}));
     const clients = Array.isArray(data?.clients) ? data.clients : [];
-    return { connectedCount: clients.filter((c) => c.connected).length, total: clients.length, needsManual: clients.filter((c) => c.needsManual).length };
+    // 已装数：与向导列表可见集同一规则——state 优先、排除未安装/检测失败，且**排除 manual 兜底**（不显示就不计数）
+    const installedCount = clients.filter((c) => {
+      const state = c.state ?? null;
+      const installed = state ? state !== 'not-installed' && state !== 'detect-failed' : Boolean(c.installed);
+      return installed && state !== 'manual' && c.needsManual !== true;
+    }).length;
+    return { connectedCount: clients.filter((c) => c.connected).length, total: clients.length, installedCount, needsManual: clients.filter((c) => c.needsManual).length };
   } catch (error) {
     return { readError: `无法读取（${error?.message ?? error}）`, connectedCount: 0, total: null };
   }
@@ -192,16 +198,40 @@ async function showConsoleWithRetry() {
   }
 }
 
+/** App 图标路径（Dock / 窗口 / 打包共用；与网页版 favicon 同源的 ✦ 星） */
+function appIconPath() {
+  return join(import.meta.dirname, '..', '..', 'resources', 'icon.png');
+}
+/** 菜单栏图标：18pt 品牌星章（模板图——深色菜单栏自动渲染白底镂空星）+ @2x 载荷 */
+function trayImage() {
+  const img = nativeImage.createFromDataURL(iconDataUrl());
+  img.addRepresentation({ scaleFactor: 2, dataURL: iconDataUrl2x() });
+  img.setTemplateImage(true);
+  return img;
+}
+
+/** macOS Dock 图标：开发态（Electron 裸跑）也显示品牌图标；打包态与 bundle 图标一致 */
+function applyAppIcon() {
+  if (process.platform === 'darwin' && app.dock) {
+    const img = nativeImage.createFromPath(appIconPath());
+    if (!img.isEmpty()) app.dock.setIcon(img);
+  }
+}
+
 function createWindow() {
   win = new BrowserWindow({
     // R-1 小-12：默认 1280（1180 顶栏临界拥挤）
     width: 1280,
     height: 760,
     title: 'Mebular',
+    icon: appIconPath(), // Windows/Linux 窗口图标（macOS 走 Dock/bundle）
     backgroundColor: '#0b0f0d',
     // UX-2 补丁 4：macOS 交通灯内嵌（hiddenInset）——内容区与 CRT 风格连续；
     // Windows/Linux 保守默认 frame（系统标题栏保留，不冒险）
-    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' } : {}),
+    // 走查修正（用户实拍：灯与顶栏内容不在一条线上）：hiddenInset 默认 margin (12,11)
+    // 是 Electron ≤12 的旧布局（比官方 App 偏高）；顶栏 56px → 内容中线 28。
+    // trafficLightPosition.y = 按钮 frame 顶距窗口顶；frame 高 14~16 → 取 20 使灯心 ≈27~28。
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset', trafficLightPosition: { x: 12, y: 20 } } : {}),
     webPreferences: {
       preload: join(import.meta.dirname, '..', 'preload', 'index.cjs'),
       contextIsolation: true,
@@ -278,7 +308,7 @@ function trayActions() {
     'open-console': () => { showWindow(); void safeLoad(shellConsoleUrl()); },
     'connect-assistants': () => { showWindow(); void safeLoad(shellDeepLink(deepLinks(httpConf()).assistants)); },
     'add-device': () => { showWindow(); void safeLoad(shellDeepLink(deepLinks(httpConf()).device)); },
-    'open-wizard': () => { showWindow(); void safeLoad(wizardViewUrl()); },
+    'open-wizard': () => { showWindow(); void loadWizardView(); },
     'daemon-start': () => { void ensure().then(() => showConsoleWithRetry()); },
     'daemon-stop': () => { void confirmStop(); },
     'daemon-restart': () => { void confirmRestart(); },
@@ -290,9 +320,8 @@ function trayActions() {
 
 function updateTray() {
   if (!tray) return;
-  const state = healthy ? 'green' : daemonMode ? 'yellow' : 'red';
-  // 状态点绑定真实健康（healthy 由 probeHealth 决定；daemonMode 反映托管路径）
-  tray.setImage(nativeImage.createFromDataURL(iconDataUrl(state)));
+  // 图标 = 品牌星章（状态语义在 tooltip 与菜单；不再分色）
+  tray.setImage(trayImage());
   tray.setToolTip(`Mebular · ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}`);
   // R-1 中-9：分组菜单模型（lifecycle.mjs 纯数据）→ 绑定 click 后交给 Electron
   const actions = trayActions();
@@ -314,7 +343,7 @@ async function restart() {
 }
 
 function createTray() {
-  tray = new Tray(nativeImage.createFromDataURL(iconDataUrl('red')));
+  tray = new Tray(trayImage());
   updateTray();
 }
 
@@ -327,6 +356,14 @@ function wizardFileUrl() {
 /** 带缓存破坏参数的向导 URL（渲染层不缓存旧脚本）。 */
 function wizardViewUrl() {
   return `${wizardFileUrl()}?t=${Date.now()}`;
+}
+
+/** 打开向导页：先清渲染层磁盘缓存再加载。
+ *  file:// 下 **ESM 模块也会进缓存**——页级 ?t= 只能防 HTML 复活，
+ *  wizard.js / wizard-view.mjs 的 import URL 没有参数，必须清缓存才不回落旧版（走查事故：混合新旧渲染）。 */
+async function loadWizardView() {
+  try { await session.defaultSession.clearCache(); } catch { /* 清缓存失败不阻断加载 */ }
+  await safeLoad(wizardViewUrl());
 }
 
 /** 审批走**主进程直调** @mebular/service（不经 HTTP 写端点，避免 CSRF/token 复杂度）。 */
@@ -382,7 +419,7 @@ function registerIpc() {
       await safeLoad(consoleUrl(httpConf()));
       return { skipped: true };
     },
-    'wizard:open': async () => { showWindow(); await safeLoad(wizardViewUrl()); return { url: wizardFileUrl() }; },
+    'wizard:open': async () => { showWindow(); await loadWizardView(); return { url: wizardFileUrl() }; },
     // UX-2：段②「已完成」显式确认（持久化 assistantsAcked → 向导完成）
     'wizard:ack': async () => {
       writeDesktopState(home, { assistantsAcked: true, assistantsAckedAt: new Date().toISOString() });
@@ -416,6 +453,7 @@ if (!gotLock) {
   app.on('activate', () => { showWindow(); });
 
   app.whenReady().then(async () => {
+    applyAppIcon();
     registerIpc();
     createTray();
     createWindow();
@@ -426,7 +464,7 @@ if (!gotLock) {
         await showConsoleWithRetry();
       } else {
         console.log(`[desktop] 未完成首次上手（待办：${state.current}）→ 打开向导`);
-        await safeLoad(wizardFileUrl());
+        await loadWizardView(); // 清缓存 + 缓存破坏参数：HTML/ESM 双保险（走查事故：旧版向导复活）
         healthy = await probeHealth(fetch, httpConf());
         updateTray();
       }

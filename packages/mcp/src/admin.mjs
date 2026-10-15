@@ -1007,7 +1007,7 @@ export async function buildServiceView({ home }) {
 
 /** UX-2 · GET /admin/api/clients：助手注册表（内置 ∪ 自定义）三态视图（每助手一张卡的状态）。 */
 export async function buildClientsView({ home, url }) {
-  const { listAssistantsAsync, assistantUserHome } = await import('./clients.mjs');
+  const { listAssistantsAsync, assistantUserHome, daemonMcpUrl } = await import('./clients.mjs');
   // F-FIX-A：assistant 路径以**用户主目录**为基；`home` 只用于 Mebular 自有文件（assistants.custom.json）
   const userHome = assistantUserHome();
   let clients = [];
@@ -1018,7 +1018,9 @@ export async function buildClientsView({ home, url }) {
   try {
     // F-PERF-2：请求路径走**异步探针 + 短 TTL 缓存**（`?refresh=1` 绕过；并发单飞）
     const refresh = typeof url?.searchParams?.get === 'function' && url.searchParams.get('refresh') === '1';
-    const out = await listAssistantsAsync({ home, userHome, cwd: process.cwd(), refresh });
+    // F-FIX-B：条目/片段指向**本 serve 实例的守护 HTTP /mcp**（由请求 Host/scheme 推导）
+    const mcpUrl = daemonMcpUrl({ host: url?.host, encrypted: url?.protocol === 'https:' });
+    const out = await listAssistantsAsync({ home, userHome, cwd: process.cwd(), refresh, mcpUrl });
     clients = out.assistants;
     customError = out.customError;
     customPath = out.customPath;

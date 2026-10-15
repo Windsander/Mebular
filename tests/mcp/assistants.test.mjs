@@ -2,9 +2,9 @@
 //
 // 全部在临时 home 中、CLI 与进程列表一律注入替身（不触碰真实用户目录/CLI）。
 
-import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { appendFileSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -201,35 +201,59 @@ describe('UX-2 助手注册表 / 写入器 / 验证器', () => {
 
   // ---------- 写入器：cli-set（Hermes：命令形状 + 备份 + 失败回滚） ----------
 
-  it('A-5：Hermes 写入仅经 `hermes config set --force`，写前字节级备份，失败整文件回滚', async () => {
+  it('A-5：Hermes 写入 = 一次写整棵子树 + 回读放置校验；失败/错位均整文件回滚', async () => {
     const cfg = join(userHome, '.hermes', 'config.yaml');
     await mkdir(dirname(cfg), { recursive: true });
     const original = 'model: x\nmcp_servers:\n  openchamber:\n    command: python3\n';
-
-// F-HYGIENE-1/F-FIX-A：本夹具含真实 fs + 合并/回滚往返，全量并行下会超默认 5s；给显式有界预算。
-jest.setTimeout(process.platform === 'win32' ? 30_000 : 15_000);
     await writeFile(cfg, original);
+    const url = 'http://127.0.0.1:7331/mcp';
+    // 忠实替身：`hermes config set` 真的改文件（可选「错位」写法）；`hermes config get mcp_servers` 回读
     const calls = [];
-    const res = await connectClient('hermes', opts({ run: (cmd) => { calls.push(cmd); return runOk(); } }));
+    const makeRun = ({ misplaced = false, failAfter = false } = {}) => {
+      let n = 0;
+      return async (cmd) => {
+        calls.push(cmd);
+        if (cmd.includes('get mcp_servers')) {
+          const text = await readFile(cfg, 'utf-8');
+          return { ok: true, code: 0, stdout: misplaced ? 'mcp_servers:\n  openchamber:\n    command: python3\n' : text, stderr: '' };
+        }
+        n += 1;
+        if (failAfter && n === 1) { await writeFile(cfg, `${original}partial: true\n`); return { ok: false, code: 1, stdout: '', stderr: 'boom' }; }
+        const entry = misplaced
+          ? `${original}  mebular:\n    command: mebular\n`        // 真机事故：块被追加到文件末尾（丢 mcp_servers: 键）
+          : 'model: x\nmcp_servers:\n  openchamber:\n    command: python3\n  mebular:\n    url: http://127.0.0.1:7331/mcp\n    enabled: true\n';
+        await writeFile(cfg, entry);
+        return { ok: true, code: 0, stdout: '', stderr: '' };
+      };
+    };
+
+    const res = await connectClient('hermes', opts({ mcpUrl: url, run: makeRun() }));
     expect(res.ok).toBe(true);
     expect(res.backupPath).toBeTruthy();
     expect(await readFile(res.backupPath, 'utf-8')).toBe(original); // 字节级备份
-    expect(calls[0]).toBe('hermes config set --force mcp_servers.mebular.command "mebular"');
-    // args 需以 JSON 字面量传递：shell 去引号后为 ["mcp"]（Hermes `_coerce_config_set_value` 据此解析）
-    expect(calls[1]).toBe(String.raw`hermes config set --force mcp_servers.mebular.args "[\"mcp\"]"`);
-    expect(calls[2]).toBe('hermes config set --force mcp_servers.mebular.enabled "true"');
-    // 失败 → 整文件回滚（替身模拟「前几条已落盘、后一条失败」的部分写入）
-    let n = 0;
-    const res2 = await connectClient('hermes', opts({
-      run: () => {
-        n += 1;
-        if (n === 1) { appendFileSync(cfg, 'partial: true\n'); return runOk(); }
-        return runFail();
-      },
-    }));
+    // ① **单次** CLI 写入整棵子树（JSON 字面量；shell 去引号后为对象）
+    expect(calls[0]).toBe(String.raw`hermes config set --force mcp_servers.mebular "{\"url\":\"http://127.0.0.1:7331/mcp\",\"enabled\":true}"`);
+    // ② 回读放置校验
+    expect(calls[1]).toBe('hermes config get mcp_servers');
+
+    // 幂等：已接入 → 不写、不备份
+    const again = await connectClient('hermes', opts({ mcpUrl: url, run: makeRun() }));
+    expect(again.changed).toBe(false);
+    expect(again.backupPath).toBeNull();
+
+    // 写入失败 → 整文件回滚（部分写入被还原）；先复位为「未接入」以便真正走写入路径
+    await writeFile(cfg, original);
+    const res2 = await connectClient('hermes', opts({ mcpUrl: url, run: makeRun({ failAfter: true }) }));
     expect(res2.ok).toBe(false);
     expect(res2.rolledBack).toBe(true);
-    expect(await readFile(cfg, 'utf-8')).toBe(original); // 部分写入被回滚
+    expect(await readFile(cfg, 'utf-8')).toBe(original);
+
+    // 放置错位（回读看不到 mcp_servers.mebular）→ 同样整文件回滚（真机事故即此处失守）
+    const misplacedRes = await connectClient('hermes', opts({ mcpUrl: url, run: makeRun({ misplaced: true }) }));
+    expect(misplacedRes.ok).toBe(false);
+    expect(misplacedRes.rolledBack).toBe(true);
+    expect(misplacedRes.reason).toMatch(/放置错位/);
+    expect(await readFile(cfg, 'utf-8')).toBe(original);
   });
 
   it('A-5：Hermes descriptor = ~/.hermes/config.yaml + mcp_servers.mebular + hot + verify 黄金样例', () => {
@@ -254,25 +278,25 @@ jest.setTimeout(process.platform === 'win32' ? 30_000 : 15_000);
     const cfg = join(userHome, '.config', 'opencode', 'opencode.json');
     await mkdir(dirname(cfg), { recursive: true });
     await writeFile(cfg, JSON.stringify({ theme: 'dark' }, null, 2));
-    await connectClient('opencode', opts());
-    const pending = verifyAssistant('opencode', opts({ run: (cmd) => (cmd.startsWith('opencode') ? { ok: true, code: 0, stdout: 'mebular  pending\n', stderr: '' } : runFail()) }));
+    await connectClient('opencode', opts({ mcpUrl: 'http://127.0.0.1:7331/mcp' }));
+    const pending = await verifyAssistant('opencode', opts({ mcpUrl: 'http://127.0.0.1:7331/mcp', run: (cmd) => (cmd.startsWith('opencode') ? { ok: true, code: 0, stdout: 'mebular  pending\n', stderr: '' } : runFail()) }));
     expect(pending.ok).toBe(true);
     expect(pending.state).toBe('pending-restart');
     expect(pending.needsUserReload).toBe(true);
     expect(pending.steps.map((s) => s.name)).toEqual(['readback', 'cli']);
-    const done = verifyAssistant('opencode', opts({ userConfirmedReload: true, run: (cmd) => (cmd.startsWith('opencode') ? { ok: true, code: 0, stdout: 'mebular  pending\n', stderr: '' } : runFail()) }));
+    const done = await verifyAssistant('opencode', opts({ mcpUrl: 'http://127.0.0.1:7331/mcp', userConfirmedReload: true, run: (cmd) => (cmd.startsWith('opencode') ? { ok: true, code: 0, stdout: 'mebular  pending\n', stderr: '' } : runFail()) }));
     expect(done.state).toBe('connected');
   });
 
   it('A-5/A-9：Hermes 验证解析（rc=0 ∧ ✓Connected ∧ Tools≥1）；hot 条目直达已接入', async () => {
     const cfg = join(userHome, '.hermes', 'config.yaml');
     await mkdir(dirname(cfg), { recursive: true });
-    await writeFile(cfg, 'mcp_servers:\n  mebular:\n    command: mebular\n');
-    const good = verifyAssistant('hermes', opts({ run: (cmd) => (cmd.startsWith('hermes mcp test') ? { ok: true, code: 0, stdout: 'Testing…\n  ✓ Connected (12ms)\n  ✓ Tools discovered: 4\n', stderr: '' } : runOk()) }));
+    await writeFile(cfg, 'mcp_servers:\n  mebular:\n    url: http://127.0.0.1:7331/mcp\n');
+    const good = await verifyAssistant('hermes', opts({ run: (cmd) => (cmd.startsWith('hermes mcp test') ? { ok: true, code: 0, stdout: 'Testing…\n  ✓ Connected (12ms)\n  ✓ Tools discovered: 4\n', stderr: '' } : runOk()) }));
     expect(good.ok).toBe(true);
     expect(good.state).toBe('connected');
     expect(good.needsUserReload).toBe(false);
-    const bad = verifyAssistant('hermes', opts({ run: (cmd) => (cmd.startsWith('hermes mcp test') ? { ok: false, code: 1, stdout: '✗ failed: no tools', stderr: '' } : runOk()) }));
+    const bad = await verifyAssistant('hermes', opts({ run: (cmd) => (cmd.startsWith('hermes mcp test') ? { ok: false, code: 1, stdout: '✗ failed: no tools', stderr: '' } : runOk()) }));
     expect(bad.ok).toBe(false);
     expect(bad.state).toBe('verify-failed');
     expect(bad.steps.find((s) => s.name === 'cli').output).toMatch(/failed/);

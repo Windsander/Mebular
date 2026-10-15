@@ -31,42 +31,54 @@ import { fileURLToPath } from 'node:url';
 // 格式适配器（落面形状的唯一真源；A-17 以 `opencode mcp add` 产出为准）
 // ---------------------------------------------------------------------------
 
+/**
+ * 条目形状注册表（**可序列化 id → 构造函数**）。F-FIX-B：守护运行中 **stdio `mebular mcp` 会被拒**
+ * （MCP_STORAGE_LOCKED，F-CLI-2 设计如此）⇒ 注入条目必须指向**守护 HTTP `/mcp`**；
+ * 只有拿不到守护端点时才回落 stdio（并保留"同机"前提与指引）。
+ */
+export const ENTRY_SHAPES = {
+  'opencode-remote': (url) => ({ type: 'remote', url }),
+  'opencode-stdio': () => ({ type: 'local', command: ['mebular', 'mcp'] }),
+  'claude-http': (url) => ({ type: 'http', url }),
+  'url-only': (url) => ({ url }),
+  'stdio-mcpServers': () => ({ command: 'mebular', args: ['mcp'] }),
+  'hermes-url': (url) => ({ url, enabled: true }),
+  'hermes-stdio': () => ({ command: 'mebular', args: ['mcp'], enabled: true }),
+  'dsh-http': (url) => ({ name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'mebular', transport: 'streamable-http', url } }),
+  'dsh-stdio': () => ({ name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'mebular', transport: 'stdio', command: 'mebular', args: ['mcp'] } }),
+};
+
+/** 取某形状的条目；未知形状 → null（调用方回落）。 */
+export function entryForShape(shape, url) {
+  const build = ENTRY_SHAPES[shape];
+  return build ? build(url) : null;
+}
+
 /** 适配器注册表（内置）。`keyPath` 含叶子名（助手的 mcp 条目名固定 `mebular`）。 */
 export const FORMAT_ADAPTERS = {
   // opencode v2（含 OpenChamber 宿主）：真源 = `opencode mcp add` 产出 `{"mcp":{"servers":{...}}}`
   'opencode-json': {
     id: 'opencode-json', serialization: 'json', strategy: 'merge-key', keyPath: ['mcp', 'servers', 'mebular'],
     legacyKeyPath: ['mcp', 'mebular'], // A-17：旧版错形状，仅用于「诚实标注不生效」
-    entry: () => ({ type: 'local', command: ['mebular', 'mcp'] }),
-    snippet: () => JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp: { servers: { mebular: { type: 'local', command: ['mebular', 'mcp'] } } } }, null, 2),
+    httpShape: 'opencode-remote', stdioShape: 'opencode-stdio',
   },
   'json-mcpServers': {
     id: 'json-mcpServers', serialization: 'json', strategy: 'merge-key', keyPath: ['mcpServers', 'mebular'],
-    entry: () => ({ command: 'mebular', args: ['mcp'] }),
-    snippet: () => JSON.stringify({ mcpServers: { mebular: { command: 'mebular', args: ['mcp'] } } }, null, 2),
+    httpShape: 'url-only', stdioShape: 'stdio-mcpServers',
   },
   // Hermes：YAML，但写入**必须**经官方 CLI（ruamel 保注释）；无法 env 沙箱 ⇒ 备份/回滚是硬要求。
   'hermes-yaml': {
     id: 'hermes-yaml', serialization: 'yaml', strategy: 'cli-set', keyPath: ['mcp_servers', 'mebular'],
-    entry: () => ({ command: 'mebular', args: ['mcp'], enabled: true }),
-    snippet: () => [
-      'mcp_servers:',
-      '  mebular:',
-      '    command: mebular',
-      '    args:',
-      '      - mcp',
-      '    enabled: true',
-    ].join('\n'),
+    httpShape: 'hermes-url', stdioShape: 'hermes-stdio',
   },
-  // 遗留 DSH（YAML 插件列表）：保持既有行为（结构未知不写）。
+  // 遗留 DSH（YAML 插件列表）：DDH 插件支持 streamable-http（与 `mebular print-config --client dsh` 同源）。
   dsh: {
     id: 'dsh', serialization: 'yaml', strategy: 'merge-key', keyPath: ['plugins', 'mebular'],
-    entry: () => ({ name: '@deepseek-ai/dsh-mcp-client', config: { serverName: 'mebular', transport: 'stdio', command: 'mebular', args: ['mcp'] } }),
-    snippet: () => "plugins:\n  - name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: mebular\n      transport: stdio\n      command: mebular\n      args: ['mcp']",
+    httpShape: 'dsh-http', stdioShape: 'dsh-stdio',
   },
-  toml: { id: 'toml', serialization: 'toml', strategy: 'manual', keyPath: ['mcp_servers', 'mebular'], snippet: () => '[mcp_servers.mebular]\ncommand = "mebular"\nargs = ["mcp"]' },
-  yaml: { id: 'yaml', serialization: 'yaml', strategy: 'manual', keyPath: ['mcp_servers', 'mebular'], snippet: () => 'mcp_servers:\n  mebular:\n    command: mebular\n    args: [mcp]' },
-  'generic-snippet': { id: 'generic-snippet', serialization: 'text', strategy: 'manual', keyPath: ['mcpServers', 'mebular'], snippet: () => JSON.stringify({ mcpServers: { mebular: { command: 'mebular', args: ['mcp'] } } }, null, 2) },
+  toml: { id: 'toml', serialization: 'toml', strategy: 'manual', keyPath: ['mcp_servers', 'mebular'], httpShape: 'url-only', stdioShape: 'stdio-mcpServers' },
+  yaml: { id: 'yaml', serialization: 'yaml', strategy: 'manual', keyPath: ['mcp_servers', 'mebular'], httpShape: 'url-only', stdioShape: 'stdio-mcpServers' },
+  'generic-snippet': { id: 'generic-snippet', serialization: 'text', strategy: 'manual', keyPath: ['mcpServers', 'mebular'], httpShape: 'url-only', stdioShape: 'stdio-mcpServers' },
 };
 
 /** 遗留 format 名 → 适配器 id（保持既有调用方与片段兼容）。 */
@@ -76,20 +88,63 @@ export function adapterFor(format) {
   return FORMAT_ADAPTERS[LEGACY_FORMAT[format] ?? format] ?? null;
 }
 
-/** 各客户端 MCP 片段（与 `mebular print-config` 同源）。 */
-export function snippetFor(format) {
-  if (format === 'opencode-remote') {
-    return JSON.stringify({ mcp: { servers: { mebular: { type: 'remote', url: 'http://127.0.0.1:7331/mcp' } } } }, null, 2);
-  }
-  const adapter = adapterFor(format);
-  if (!adapter) return JSON.stringify({ mcpServers: { mebular: { command: 'mebular', args: ['mcp'] } } }, null, 2);
-  return adapter.snippet();
+/**
+ * 守护 HTTP `/mcp` 端点（**单一真源**：`mebular print-config --client <id> --url …` 同此形态）。
+ * 由请求 Host/scheme 推导；`0.0.0.0`/`::` 归一为 `127.0.0.1`（同 `mebular console`）。
+ */
+export function daemonMcpUrl({ host, encrypted } = {}) {
+  const raw = typeof host === 'string' && host.length > 0 ? host : '127.0.0.1:7331';
+  const [hostPart, portPart] = raw.split(':');
+  const target = hostPart === '0.0.0.0' || hostPart === '::' || hostPart === undefined || hostPart === '' ? '127.0.0.1' : hostPart;
+  const port = portPart !== undefined && /^[0-9]+$/.test(portPart) ? portPart : '7331';
+  return `${encrypted ? 'https' : 'http'}://${target}:${port}/mcp`;
 }
 
-/** 本机 MCP 条目（供合并）。 */
-export function mebularEntry(format) {
+/** 形状选择：给 url → HTTP 形态；否则 stdio（descriptor 可用 `landing.httpShape` 覆盖）。 */
+function shapeFor(format, options = {}) {
   const adapter = adapterFor(format);
-  return adapter ? adapter.entry() : { command: 'mebular', args: ['mcp'] };
+  if (!adapter) return null;
+  return options.url
+    ? (options.httpShape ?? adapter.httpShape ?? 'url-only')
+    : (options.stdioShape ?? adapter.stdioShape ?? 'stdio-mcpServers');
+}
+
+/**
+ * 本机 MCP 条目（供合并/写入）：**有守护 url 即指向 HTTP `/mcp`**；无 url 回落 stdio。
+ * F-FIX-B：守护运行中 stdio `mebular mcp` 会被 MCP_STORAGE_LOCKED 拒（F-CLI-2 设计如此）。
+ */
+export function mebularEntry(format, options = {}) {
+  const adapter = adapterFor(format);
+  if (!adapter) return { command: 'mebular', args: ['mcp'] };
+  return entryForShape(shapeFor(format, options), options.url) ?? { command: 'mebular', args: ['mcp'] };
+}
+
+/** 各客户端 MCP 片段（与 `mebular print-config --client …` 同源）；有 `url` → HTTP 形态。 */
+export function snippetFor(format, options = {}) {
+  if (format === 'opencode-remote') {
+    return snippetFor('opencode-json', { url: options.url ?? 'http://127.0.0.1:7331/mcp' });
+  }
+  const url = options.url ?? null;
+  const adapter = adapterFor(format);
+  const id = adapter?.id ?? format;
+  const entry = mebularEntry(format, { ...options, url });
+  if (id === 'opencode-json') {
+    return JSON.stringify({ $schema: 'https://opencode.ai/config.json', mcp: { servers: { mebular: entry } } }, null, 2);
+  }
+  if (id === 'dsh') {
+    const cfg = entry.config ?? {};
+    return cfg.transport === 'streamable-http'
+      ? `plugins:\n  - name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: mebular\n      transport: streamable-http\n      url: ${cfg.url}`
+      : "plugins:\n  - name: '@deepseek-ai/dsh-mcp-client'\n    config:\n      serverName: mebular\n      transport: stdio\n      command: mebular\n      args: ['mcp']";
+  }
+  if (id === 'hermes-yaml') {
+    return url
+      ? ['mcp_servers:', '  mebular:', `    url: ${url}`, '    enabled: true'].join('\n')
+      : ['mcp_servers:', '  mebular:', '    command: mebular', '    args:', '      - mcp', '    enabled: true'].join('\n');
+  }
+  if (id === 'toml') return url ? `[mcp_servers.mebular]\nurl = "${url}"\nenabled = true` : '[mcp_servers.mebular]\ncommand = "mebular"\nargs = ["mcp"]';
+  if (id === 'yaml') return url ? `mcp_servers:\n  mebular:\n    url: ${url}\n    enabled: true` : 'mcp_servers:\n  mebular:\n    command: mebular\n    args: [mcp]';
+  return JSON.stringify({ mcpServers: { mebular: entry } }, null, 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,7 +257,7 @@ export function builtinAssistants(options = {}) {
           { kind: 'path', paths: [join(userHome, '.local', 'bin', 'hermes')] },
         ],
       },
-      writer: { strategy: 'cli-set', command: 'hermes config set --force mcp_servers.mebular', backup: 'byte-level', atomic: false },
+      writer: { strategy: 'cli-set', command: 'hermes config set --force mcp_servers.mebular', readbackCommand: 'hermes config get mcp_servers', backup: 'byte-level', atomic: false },
       verify: {
         cli: { command: 'hermes mcp test mebular', expect: '✓ Connected', toolsPattern: 'Tools discovered:\\s*(\\d+)', minTools: 1, timeoutMs: 30000 },
         configReadback: true,
@@ -236,7 +291,7 @@ export function builtinAssistants(options = {}) {
     },
     {
       id: 'claude-code', name: 'Claude Code', kind: 'file', format: 'json-mcpServers',
-      landing: { primaryPath: join(userHome, '.claude.json'), keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'json-mcpServers' },
+      landing: { primaryPath: join(userHome, '.claude.json'), keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'json-mcpServers', httpShape: 'claude-http' },
       probe: { signals: [{ kind: 'config-path', paths: [join(userHome, '.claude.json')] }, { kind: 'cli', command: 'claude --version', timeoutMs: 1500 }] },
       writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
       verify: { configReadback: true },
@@ -247,7 +302,7 @@ export function builtinAssistants(options = {}) {
     },
     {
       id: 'claude-desktop', name: 'Claude Desktop', kind: 'file', format: 'json-mcpServers',
-      landing: { primaryPath: join(appData, 'Claude', 'claude_desktop_config.json'), keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'json-mcpServers' },
+      landing: { primaryPath: join(appData, 'Claude', 'claude_desktop_config.json'), keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'json-mcpServers', httpShape: 'claude-http' },
       probe: { signals: [{ kind: 'config-path', paths: [join(appData, 'Claude', 'claude_desktop_config.json')] }, { kind: 'dir', paths: [join(appData, 'Claude')] }] },
       writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
       verify: { configReadback: true },
@@ -262,7 +317,7 @@ export function builtinAssistants(options = {}) {
       writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
       verify: { configReadback: true },
       activation: { kind: 'user-reload', note: '重启 Cursor 后生效' },
-      risks: [], skillsDirs: [], reuseOf: null, note: null,
+      risks: ['HTTP /mcp 默认只监听回环：客户端与守护须**同机**（跨机请在 config 里启用 TLS+鉴权并用可达主机名）'], skillsDirs: [], reuseOf: null, note: null,
     },
     {
       id: 'dsh', name: 'DeepSeek Harness (DSH)', kind: 'file', format: 'dsh',
@@ -271,7 +326,7 @@ export function builtinAssistants(options = {}) {
       writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
       verify: { configReadback: true },
       activation: { kind: 'user-reload', note: '重启 DSH 后生效' },
-      risks: ['DSH 配置为 YAML 插件列表：结构未知时不自动改写'],
+      risks: ['DSH 配置为 YAML 插件列表：结构未知时不自动改写', 'HTTP /mcp 默认只监听回环：客户端与守护须同机（跨机请启用 TLS+鉴权并用可达主机名）'],
       skillsDirs: [join(cwd, '.dsh', 'skills'), join(userHome, '.agents', 'skills')], reuseOf: null, note: null,
     },
     {
@@ -281,7 +336,7 @@ export function builtinAssistants(options = {}) {
       writer: { strategy: 'manual', command: null, backup: 'n/a', atomic: false },
       verify: { configReadback: false },
       activation: { kind: 'user-reload', note: '按你的助手文档重载后生效' },
-      risks: ['不支持自动写入：复制片段粘贴到你的 MCP 配置'],
+      risks: ['不支持自动写入：复制片段粘贴到你的 MCP 配置', '片段默认指向本机守护 HTTP /mcp（http://127.0.0.1:<port>/mcp）；跨机请用可达主机名并启用 TLS+鉴权'],
       skillsDirs: [], reuseOf: null, note: '不支持自动写入：复制片段粘贴到你的 MCP 配置',
     },
   ];
@@ -485,10 +540,16 @@ export function mergeJsonEntry(existingText, { format, entry, keyPath } = {}) {
 }
 
 /** DSH(YAML) 合并：空文件 → 写片段；已含 serverName: mebular → 幂等；结构未知 → 不写。 */
-export function mergeDsh(existingText) {
-  const snippet = snippetFor('dsh');
+export function mergeDsh(existingText, options = {}) {
+  const snippet = snippetFor('dsh', options);
   if (existingText === null || existingText.trim() === '') return { changed: true, text: `${snippet}\n` };
-  if (/serverName:\s*['"]?mebular['"]?/.test(existingText)) return { changed: false, text: existingText };
+  if (/serverName:\s*['"]?mebular['"]?/.test(existingText)) {
+    // 已接入：仅当**形态等价**（HTTP vs stdio）才算幂等，否则需改写
+    const wantHttp = Boolean(options.url);
+    const hasHttp = /transport:\s*streamable-http/.test(existingText);
+    if (wantHttp === hasHttp) return { changed: false, text: existingText };
+    return { changed: true, text: `${snippet}\n` };
+  }
   return { error: 'DSH 配置已存在但未接入：YAML 结构未知，未自动改写（请按片段人工合并）' };
 }
 
@@ -524,30 +585,74 @@ export function yamlHasKey(text, parent, child) {
   return false;
 }
 
+/** 提取 YAML 中 `<parent>:` 下 `<child>:` 的块文本（行式，供语义判据；无需 yaml 依赖）。 */
+export function yamlEntryBlock(text, parent, child) {
+  const lines = String(text ?? '').split('\n');
+  let inParent = false;
+  let block = null;
+  for (const line of lines) {
+    if (new RegExp(`^${parent}\s*:`).test(line)) { inParent = true; continue; }
+    if (!inParent) continue;
+    if (/^\S/.test(line)) { inParent = false; block = null; continue; }
+    if (new RegExp(`^\\s{1,6}${child}\\s*:`).test(line)) { block = [line]; continue; }
+    if (block !== null) {
+      if (/^\s*\S/.test(line)) block.push(line);
+      else break;
+    }
+  }
+  return block === null ? null : block.join('\n');
+}
+
+/** 该格式下「HTTP/remote」形态（valid）；`stdio` 形态守护运行中会被拒（MCP_STORAGE_LOCKED）。 */
+export function entryIsHttp(format, entry) {
+  if (entry === null || typeof entry !== 'object') return false;
+  if (format === 'opencode-json') return entry.type === 'remote' || entry.type === 'http';
+  if (format === 'dsh') return entry.config?.transport === 'streamable-http';
+  return typeof entry.url === 'string' && entry.url.length > 0;
+}
+export function entryIsStdio(format, entry) {
+  if (entry === null || typeof entry !== 'object') return false;
+  if (format === 'opencode-json') return entry.type === 'local' && Array.isArray(entry.command);
+  if (format === 'dsh') return entry.config?.transport === 'stdio';
+  return typeof entry.command === 'string' && entry.url === undefined;
+}
+
 /** 该助手在落面是否已有**正确形状**的 mebular 条目；并如实报 legacy 错形状。 */
-export function landingState(assistant) {
+export function landingState(assistant, options = {}) {
   const primary = assistant.landing?.primaryPath ?? null;
   const format = assistant.landing?.format;
   const adapter = adapterFor(format);
   if (!primary) return { exists: false, present: false, legacyShape: false, text: null };
   const text = safeReadText(primary);
   if (text === null) return { exists: false, present: false, legacyShape: false, text: null };
+  if (format === 'dsh') {
+    const has = /serverName:\s*['"]?mebular['"]?/.test(text);
+    const present = has && /transport:\s*streamable-http/.test(text);
+    return { exists: true, present, legacyShape: false, staleStdio: has && /transport:\s*stdio/.test(text) && !present, text };
+  }
   if (adapter?.serialization === 'yaml') {
     const path = keyPathOf(format);
-    const present = yamlHasKey(text, path[0], path[1]);
-    return { exists: true, present, legacyShape: false, text };
-  }
-  if (format === 'dsh') {
-    return { exists: true, present: /serverName:\s*['"]?mebular['"]?/.test(text), legacyShape: false, text };
+    const block = yamlEntryBlock(text, path[0], path[1]);
+    const hasUrl = block !== null && /^\s*url\s*:\s*\S+/m.test(block);
+    const hasCommand = block !== null && /^\s*command\s*:\s*\S+/m.test(block);
+    // 语义判据：remote（有 url）→ present；stdio（有 command 无 url）→ stale；旧「逐字段错位追加」也归 stale
+    const present = hasUrl && !hasCommand;
+    return { exists: true, present, legacyShape: false, staleStdio: !present && hasCommand, text };
   }
   try {
     const parsed = JSON.parse(text);
     const path = keyPathOf(format);
-    const present = JSON.stringify(walkGet(parsed, path).value ?? null) === JSON.stringify(mebularEntry(format));
+    const stored = walkGet(parsed, path).value ?? null;
     const legacy = adapter?.legacyKeyPath
       ? walkGet(parsed, adapter.legacyKeyPath).value !== undefined
       : false;
-    return { exists: true, present, legacyShape: legacy && !present, text };
+    // 语义判据（兼容迁移）：remote/http 形态 → present；stdio 形态或**端口与当前守护端点不符** → stale
+    const isHttp = entryIsHttp(format, stored);
+    const storedUrl = typeof stored?.url === 'string' ? stored.url : null;
+    const urlOk = options.mcpUrl === undefined || options.mcpUrl === null || storedUrl === options.mcpUrl;
+    const present = isHttp && urlOk;
+    const staleStdio = !present && (entryIsStdio(format, stored) || (isHttp && !urlOk));
+    return { exists: true, present, legacyShape: legacy && !present, staleStdio, text };
   } catch {
     return { exists: true, present: false, legacyShape: false, text, parseError: true };
   }
@@ -675,16 +780,24 @@ function builtinsCount(reg, options) {
   return Math.min(builtinAssistants(options).length, reg.assistants.length);
 }
 
-function buildStateItem(assistant, signals, landing) {
+/** 条目选项（形状 + url）：由 descriptor 的 `landing` 与当前守护端点决定。 */
+function entryOptionsFor(assistant, options = {}) {
+  const url = options.mcpUrl ?? null;
+  const httpShape = assistant.landing?.httpShape;
+  return { ...(url ? { url } : {}), ...(httpShape ? { httpShape } : {}) };
+}
+
+function buildStateItem(assistant, signals, landing, options = {}) {
   const anyHit = signals.some((s) => s.hit);
   const anyError = signals.some((s) => typeof s.detail === 'string' && s.detail.startsWith('探测异常'));
   const strategy = assistant.writer?.strategy ?? 'merge-key';
   let state;
   if (strategy === 'manual' && !landing.present) state = anyHit ? 'manual' : 'not-installed';
   else if (landing.present) state = 'connected';
+  else if (landing.staleStdio) state = 'stale';   // 已写入但过时（stdio）→ 升级直连
   else if (!anyHit) state = anyError ? 'detect-failed' : 'not-installed';
   else state = 'not-connected';
-  const STATE_LABEL = { 'not-installed': '未安装', 'not-connected': '未接入', connected: '已接入 ✓', manual: '需手动', 'detect-failed': '检测失败' };
+  const STATE_LABEL = { 'not-installed': '未安装', 'not-connected': '未接入', connected: '已接入 ✓', manual: '需手动', 'detect-failed': '检测失败', stale: '已写入·需升级为直连' };
   return {
     id: assistant.id,
     name: assistant.name,
@@ -703,6 +816,7 @@ function buildStateItem(assistant, signals, landing) {
       strategy,
       present: landing.present,
       legacyShape: landing.legacyShape === true,
+      staleStdio: landing.staleStdio === true,
       exists: landing.exists,
       parseError: landing.parseError === true,
     },
@@ -716,7 +830,8 @@ function buildStateItem(assistant, signals, landing) {
     configPath: assistant.landing?.primaryPath ?? null,
     reuseOf: assistant.reuseOf ?? null,
     note: assistant.note ?? null,
-    snippet: snippetFor(assistant.format),
+    snippet: snippetFor(assistant.format, entryOptionsFor(assistant, options)),
+    mcpUrl: options.mcpUrl ?? null,
     // 兼容既有 `/admin/api/clients` 字段（只扩展不破坏；UI 亦可继续用）
     installed: signals.some((s) => s.kind !== 'always' && s.hit),
     connected: state === 'connected',
@@ -730,13 +845,13 @@ function buildStateItem(assistant, signals, landing) {
 /** 单条助手状态（**同步**；测试与离线场景用）。 */
 export function assistantState(assistant, options = {}) {
   const signals = (assistant.probe?.signals ?? []).map((s) => probeSignal(s, options));
-  return buildStateItem(assistant, signals, landingState(assistant));
+  return buildStateItem(assistant, signals, landingState(assistant, options), options);
 }
 
 /** 单条助手状态（**异步**；请求路径用——不阻塞事件循环）。 */
 export async function assistantStateAsync(assistant, options = {}) {
   const signals = await Promise.all((assistant.probe?.signals ?? []).map((s) => probeSignalAsync(s, options)));
-  return buildStateItem(assistant, signals, landingState(assistant));
+  return buildStateItem(assistant, signals, landingState(assistant, options), options);
 }
 
 // ---------------------------------------------------------------------------
@@ -777,7 +892,7 @@ async function computeListAssistantsAsync(options) {
  * - 并发请求**单飞**：同一 key 的在途计算被共享（避免并发 10 发 → 10 次 spawn）。
  */
 export async function listAssistantsAsync(options = {}) {
-  const key = `${assistantUserHome(options)}::${options.home ?? ''}::${options.cwd ?? process.cwd()}`;
+  const key = `${assistantUserHome(options)}::${options.home ?? ''}::${options.cwd ?? process.cwd()}::${options.mcpUrl ?? ''}`;
   const ttl = Number.isFinite(options.ttlMs) ? options.ttlMs : ASSISTANTS_CACHE_TTL_MS;
   if (options.refresh !== true) {
     if (ttl > 0 && assistantsCache.key === key && assistantsCache.value && Date.now() - assistantsCache.at < ttl) {
@@ -834,9 +949,13 @@ function isForbidden(assistant, path) {
   return forbidden.some((f) => f === path);
 }
 
-function computeMerged(assistant, existing) {
-  if (assistant.format === 'dsh') return mergeDsh(existing);
-  return mergeJsonEntry(existing, { format: assistant.format, entry: mebularEntry(assistant.format), keyPath: keyPathOf(assistant.landing?.format ?? assistant.format) });
+function computeMerged(assistant, existing, options = {}) {
+  if (assistant.format === 'dsh') return mergeDsh(existing, entryOptionsFor(assistant, options));
+  return mergeJsonEntry(existing, {
+    format: assistant.format,
+    entry: mebularEntry(assistant.format, entryOptionsFor(assistant, options)),
+    keyPath: keyPathOf(assistant.landing?.format ?? assistant.format),
+  });
 }
 
 export function previewClient(id, options = {}) {
@@ -844,39 +963,72 @@ export function previewClient(id, options = {}) {
   if (!assistant) return { ok: false, reason: `未知客户端：${id}` };
   const primary = assistant.landing?.primaryPath ?? null;
   if (!primary || assistant.writer?.strategy === 'manual') {
-    return { ok: true, needsManual: true, snippet: snippetFor(assistant.format), preview: '' };
+    return { ok: true, needsManual: true, snippet: snippetFor(assistant.format, entryOptionsFor(assistant, options)), preview: '' };
   }
   const existing = safeReadText(primary);
-  const merged = computeMerged(assistant, existing);
-  if (merged.error) return { ok: true, needsManual: true, reason: merged.error, snippet: snippetFor(assistant.format), preview: '' };
+  const merged = computeMerged(assistant, existing, options);
+  if (merged.error) return { ok: true, needsManual: true, reason: merged.error, snippet: snippetFor(assistant.format, entryOptionsFor(assistant, options)), preview: '' };
   return { ok: true, changed: merged.changed, preview: lineDiff(existing ?? '', merged.text), configPath: primary };
 }
 
-/** cli-set 写入（Hermes）：官方 CLI 逐字段写；任一失败 → 回滚整文件。 */
-async function connectViaCli(assistant, options) {
-  const run = options.run ?? ((cmd) => defaultRun(cmd, 30000));
+/**
+ * cli-set 写入（Hermes）：**一次写入整棵子树** `mcp_servers.mebular`（F-EXP-1 已证结构化字面量可解析）。
+ *
+ * 真机事故：逐字段 `hermes config set --force mcp_servers.mebular.<field>` 会让 ruamel round-trip
+ * 把**新建嵌套映射错位**（块被追加到文件末尾、丢 `mcp_servers:` 键 → 回读 `mcp_servers.mebular`
+ * 不存在 = 不生效）。故：一次写入整棵子树 → **回读校验放置**（`hermes config get mcp_servers`）
+ * → 放置错/写失败一律**整文件回滚**（字节级备份）。
+ *
+ * F-PERF-2/F-FIX-B：请求路径一律 `runAsync`（`exec`），**不得 `spawnSync`**（会阻塞事件循环，
+ * 让宿主的健康探测超时）。
+ */
+async function connectViaCli(assistant, options = {}) {
+  const runAsync = options.runAsync ?? (options.run
+    ? (cmd, t) => Promise.resolve(options.run(cmd, t))   // 注入替身（测试）：同步 run 也可用
+    : (cmd, t) => defaultRunAsync(cmd, t ?? 30000, options));
   const primary = assistant.landing.primaryPath;
   const base = assistant.writer.command;
-  const entry = mebularEntry(assistant.format);
-  const fields = [];
-  if (typeof entry.command === 'string') fields.push(['command', entry.command]);
-  if (Array.isArray(entry.args)) fields.push(['args', JSON.stringify(entry.args)]);
-  if (typeof entry.url === 'string') fields.push(['url', entry.url]);
-  fields.push(['enabled', 'true']);
+  const entry = mebularEntry(assistant.format, entryOptionsFor(assistant, options));
+  // 幂等：已等价 → 不写、不备份
+  const before = landingState(assistant, options);
+  if (before.present) {
+    return { ok: true, changed: false, configPath: primary, backupPath: null, commands: [], preview: '', note: '已接入（幂等：无需改动）' };
+  }
   const backupPath = existsSync(primary) ? `${primary}.bak-${tsStamp()}` : null;
   if (backupPath) await copyFile(primary, backupPath);
+  const rollback = async () => { if (backupPath) await copyFile(backupPath, primary); clearAssistantsCache(); };
   const commands = [];
-  for (const [key, value] of fields) {
-    const cmd = `${base}.${key} ${JSON.stringify(value)}`;
-    const res = run(cmd, assistant.verify?.cli?.timeoutMs ?? 30000);
-    commands.push({ cmd, code: res.code ?? (res.ok ? 0 : 1) });
-    if (res.ok !== true) {
-      if (backupPath) await copyFile(backupPath, primary); // 失败回滚
-      return { ok: false, changed: false, rolledBack: true, backupPath, commands, reason: `写入失败（${key}）已回滚`, needsManual: true, snippet: snippetFor(assistant.format) };
+
+  // ① 一次写整棵子树（单次 CLI 调用：4 次逐字段 → 1 次）
+  const cmd = `${base} ${JSON.stringify(JSON.stringify(entry))}`;
+  const res = await runAsync(cmd, assistant.verify?.cli?.timeoutMs ?? 30000);
+  commands.push({ cmd, code: res.code ?? (res.ok ? 0 : 1) });
+  if (res.ok !== true) {
+    await rollback();
+    return { ok: false, changed: false, rolledBack: true, backupPath, commands, reason: '写入失败已回滚', needsManual: true, snippet: snippetFor(assistant.format, entryOptionsFor(assistant, options)) };
+  }
+
+  // ② 放置校验：条目必须落在 `mcp_servers` 段内（真机事故即此处失守）
+  const readbackCommand = assistant.writer.readbackCommand;
+  if (typeof readbackCommand === 'string' && readbackCommand.length > 0) {
+    const rb = await runAsync(readbackCommand, 30000);
+    commands.push({ cmd: readbackCommand, code: rb.code ?? (rb.ok ? 0 : 1) });
+    const placed = /^\s*mebular\s*:/m.test(`${rb.stdout ?? ''}\n${rb.stderr ?? ''}`);
+    if (rb.ok !== true || !placed) {
+      await rollback();
+      return {
+        ok: false, changed: false, rolledBack: true, backupPath, commands,
+        reason: '写入放置错位（条目不在 mcp_servers 段内）已回滚',
+        needsManual: true, snippet: snippetFor(assistant.format, entryOptionsFor(assistant, options)),
+      };
     }
   }
+
   clearAssistantsCache(); // F-PERF-2：写后失效
-  return { ok: true, changed: true, backupPath, commands, configPath: primary, preview: lineDiff(safeReadText(primary) ?? '', snippetFor(assistant.format)) };
+  return {
+    ok: true, changed: true, backupPath, commands, configPath: primary,
+    preview: lineDiff(safeReadText(primary) ?? '', snippetFor(assistant.format, entryOptionsFor(assistant, options))),
+  };
 }
 
 /** 接入：merge-key（备份 → 原子写）/ cli-set（官方 CLI）/ manual（仅片段）。 */
@@ -893,9 +1045,9 @@ export async function connectClient(id, options = {}) {
   }
   if (strategy === 'cli-set') return connectViaCli(assistant, options);
   const existing = safeReadText(primary);
-  const merged = computeMerged(assistant, existing);
+  const merged = computeMerged(assistant, existing, options);
   if (merged.error) {
-    return { ok: false, needsManual: true, snippet: snippetFor(assistant.format), reason: merged.error, configPath: primary };
+    return { ok: false, needsManual: true, snippet: snippetFor(assistant.format, entryOptionsFor(assistant, options)), reason: merged.error, configPath: primary };
   }
   const preview = lineDiff(existing ?? '', merged.text);
   if (!merged.changed) {
@@ -945,11 +1097,13 @@ export async function rollbackClient(id, options = {}) {
 // ---------------------------------------------------------------------------
 
 /** 回读校验：条目存在 ∧ 原配置其余键无损（有备份时逐键比对）。 */
-export function readbackCheck(assistant) {
-  const landing = landingState(assistant);
+export function readbackCheck(assistant, options = {}) {
+  const landing = landingState(assistant, options);
   if (!landing.exists) return { ok: false, detail: '配置文件不存在' };
   if (!landing.present) {
-    return { ok: false, detail: landing.legacyShape ? '只找到旧形状（不生效），建议重新接入' : '未找到 mebular 条目' };
+    if (landing.legacyShape) return { ok: false, detail: '只找到旧形状（不生效），建议重新接入' };
+    if (landing.staleStdio) return { ok: false, detail: '条目是 stdio 形态：守护运行中会被拒（MCP_STORAGE_LOCKED），建议重新接入为 HTTP /mcp' };
+    return { ok: false, detail: '未找到 mebular 条目' };
   }
   const primary = assistant.landing.primaryPath;
   let intact = true;
@@ -1005,17 +1159,19 @@ export function parseVerifyOutput(verifyCli, output) {
  * 验证：① 回读（必有）→ ② CLI（有 verify.cli 则必跑）→ 终结态。
  * `userConfirmedReload` 由 UI 的「我已重载，重新验证」按钮传入（A-10）。
  */
-export function verifyAssistant(id, options = {}) {
+export async function verifyAssistant(id, options = {}) {
   const assistant = descriptorFor(id, options);
   if (!assistant) return { ok: false, reason: `未知客户端：${id}` };
   const steps = [];
-  const readback = readbackCheck(assistant);
+  const readback = readbackCheck(assistant, options);
   steps.push({ name: 'readback', label: '回读校验', ok: readback.ok, detail: redactSecrets(readback.detail) });
   let cliResult = null;
   const cli = assistant.verify?.cli;
   if (cli?.command) {
-    const run = options.run ?? ((cmd, timeoutMs) => defaultRun(cmd, timeoutMs ?? cli.timeoutMs ?? 5000));
-    const res = run(cli.command, cli.timeoutMs ?? 5000);
+    const runAsync = options.runAsync ?? (options.run
+      ? (cmd, t) => Promise.resolve(options.run(cmd, t))
+      : (cmd, t) => defaultRunAsync(cmd, t ?? cli.timeoutMs ?? 5000, options));
+    const res = await runAsync(cli.command, cli.timeoutMs ?? 5000);
     const parsed = parseVerifyOutput(cli, `${res.stdout ?? ''}\n${res.stderr ?? ''}`);
     const ok = res.ok === true && parsed.ok;
     cliResult = { code: res.code ?? (res.ok ? 0 : 1), parsed, output: redactSecrets(`${res.stdout ?? ''}${res.stderr ?? ''}`).slice(-800) };

@@ -636,7 +636,7 @@ describe('F-SVC-1：跨 home 隔离（install/status/restart，fake runner）', 
       kind: 'mebular-serve',
       args: ['/opt/cli.js', 'serve'],
       heartbeatDir: instanceHome,
-      env: { MEBULAR_HOME: instanceHome },
+      env: { MEBULAR_HOME: instanceHome, MEBULAR_USER_HOME: instanceHome },
     });
     const r1 = installService(mk(realHome), { platform: 'darwin', home: homeA, run, sha: 's' });
     const r2 = installService(mk(sandbox), { platform: 'darwin', home: homeA, run, sha: 's' });

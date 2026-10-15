@@ -35,7 +35,8 @@ beforeAll(async () => {
   await writeFile(opencodePath(), JSON.stringify({ theme: 'dark' }, null, 2), 'utf-8');
 
   serve = spawn(process.execPath, [bin, 'serve', '--port', '0'], {
-    env: { ...process.env, MEBULAR_HOME: home },
+    // F-FIX-A：沙箱 serve 必须声明用户主目录，否则 assistant 落面会写到**真实** `~/.config/…`
+    env: { ...process.env, MEBULAR_HOME: home, MEBULAR_USER_HOME: home },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';

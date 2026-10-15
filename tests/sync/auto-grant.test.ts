@@ -133,7 +133,7 @@ describe('autoGrant 纯函数：规则链（顺序即防线）', () => {
   });
 
   it('⑤d 签发资格：self 已被授权该域（非 bootstrap）→ 签（R-a 转授）', async () => {
-    const { calls, grant } = grantSpy();
+    const { grant } = grantSpy();
     const res = await evaluateAutoGrants({
       snapshot: snap({ issuers: new Set(), authorized: new Map([['device-A', ['nsA']]]) }),
       self: 'device-A',

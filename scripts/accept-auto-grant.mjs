@@ -89,70 +89,71 @@ const AUTO_NOTE = 'auto-grant: subscription-driven';
 const root = await mkdtemp(join(tmpdir(), 'auto-grant-accept-'));
 const serves = [];
 const facades = [];
-try {
-  // ---------- 共享主密钥（同一用户的两台 root 守护：A 默认开、A2 开关关） ----------
-  const imMaster = new IdentityManager();
-  const master = await imMaster.generateUserMasterKey();
-  const masterKeyFile = join(root, 'master-key.json');
-  await writeFile(masterKeyFile, JSON.stringify({
-    publicKey: Buffer.from(master.publicKey).toString('base64'),
-    privateKeyPkcs8: await IdentityManager.exportPrivateKey(master.privateKey),
+
+// ---------- 共享主密钥（同一用户的两台 root 守护：A 默认开、A2 开关关） ----------
+const imMaster = new IdentityManager();
+const master = await imMaster.generateUserMasterKey();
+const masterKeyFile = join(root, 'master-key.json');
+await writeFile(masterKeyFile, JSON.stringify({
+  publicKey: Buffer.from(master.publicKey).toString('base64'),
+  privateKeyPkcs8: await IdentityManager.exportPrivateKey(master.privateKey),
+}, null, 2), { mode: 0o600 });
+const masterKeys = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
+
+/** 一台 root 守护（供给端；autoGrant 省略 = 验收守护默认开）。 */
+async function bootRoot(deviceId, port, autoGrant) {
+  const home = join(root, deviceId);
+  await mkdir(home, { recursive: true });
+  await writeFile(join(home, 'config.json'), JSON.stringify({
+    storagePath: join(home, 'store.jsonl'), deviceId,
+    identity: { mode: 'root' },
+    encryption: { level: 'none', keyFile: masterKeyFile },
+    network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
+    sync: {
+      autoSync: true, pushOnWrite: true,
+      namespaces: ['notes', 'work', 'legacy-ns'],
+      policyIssuers: [deviceId],
+      antiEntropy: { enabled: true, intervalMs: 3000, jitterRatio: 0.2 },
+      ...(autoGrant !== undefined ? { autoGrant } : {}),
+    },
+    mcp: { http: { host: '127.0.0.1', port, auth: 'none' } },
   }, null, 2), { mode: 0o600 });
-  const masterKeys = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
+  const serve = startServe(home);
+  serves.push(serve);
+  const ready = await waitFor(async () => {
+    if (!/SERVE_READY/.test(serve.state.out)) return false;
+    const r = await getJson(`http://127.0.0.1:${port}/app/network`).catch(() => null);
+    return typeof r?.json?.multiaddrs?.[0] === 'string';
+  }, 25000, 300);
+  const addr = (await getJson(`http://127.0.0.1:${port}/app/network`)).json?.multiaddrs?.[0];
+  return { home, port, addr, ready, storePath: join(home, 'store.jsonl') };
+}
 
-  /** 一台 root 守护（供给端；autoGrant 省略 = 验收守护默认开）。 */
-  async function bootRoot(deviceId, port, autoGrant) {
-    const home = join(root, deviceId);
-    await mkdir(home, { recursive: true });
-    await writeFile(join(home, 'config.json'), JSON.stringify({
-      storagePath: join(home, 'store.jsonl'), deviceId,
-      identity: { mode: 'root' },
-      encryption: { level: 'none', keyFile: masterKeyFile },
-      network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
-      sync: {
-        autoSync: true, pushOnWrite: true,
-        namespaces: ['notes', 'work', 'legacy-ns'],
-        policyIssuers: [deviceId],
-        antiEntropy: { enabled: true, intervalMs: 3000, jitterRatio: 0.2 },
-        ...(autoGrant !== undefined ? { autoGrant } : {}),
-      },
-      mcp: { http: { host: '127.0.0.1', port, auth: 'none' } },
-    }, null, 2), { mode: 0o600 });
-    const serve = startServe(home);
-    serves.push(serve);
-    const ready = await waitFor(async () => {
-      if (!/SERVE_READY/.test(serve.state.out)) return false;
-      const r = await getJson(`http://127.0.0.1:${port}/app/network`).catch(() => null);
-      return typeof r?.json?.multiaddrs?.[0] === 'string';
-    }, 25000, 300);
-    const addr = (await getJson(`http://127.0.0.1:${port}/app/network`)).json?.multiaddrs?.[0];
-    return { home, port, addr, ready, storePath: join(home, 'store.jsonl') };
-  }
+/** 一个 in-process 订阅端门面（真 libp2p/签名/存储），拨指定守护。 */
+async function bootFacade(deviceId, namespaces) {
+  const m = new Mebular({
+    storagePath: join(root, `${deviceId}.jsonl`),
+    deviceId,
+    encryption: masterKeys,
+    network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
+    sync: { autoSync: true, pushOnWrite: true, namespaces, policyIssuers: ['device-A', 'device-A2'] },
+  });
+  facades.push(m);
+  await m.initialize();
+  return m;
+}
+/** 门面 ↔ 守护 同步一轮（先断开保证新会话）。 */
+async function syncFacadeTo(facade, daemonAddr) {
+  const peerId = /\/p2p\/([^/]+)$/.exec(daemonAddr)?.[1] ?? '';
+  await facade.node.disconnectPeer({ id: peerId, multihash: new Uint8Array(), pubKey: new Uint8Array() }).catch(() => undefined);
+  const done = new Promise((resolve) => facade.sync.once('sync-completed', resolve));
+  await facade.node.connectToPeer({ id: peerId, multihash: new Uint8Array(), pubKey: new Uint8Array() }, daemonAddr);
+  return done;
+}
+const facadeHas = async (facade, ns, text) =>
+  (await facade.graph.listNodes({ namespace: ns })).some((n) => n.content?.text === text || JSON.stringify(n.content ?? {}).includes(text));
 
-  /** 一个 in-process 订阅端门面（真 libp2p/签名/存储），拨指定守护。 */
-  async function bootFacade(deviceId, namespaces) {
-    const m = new Mebular({
-      storagePath: join(root, `${deviceId}.jsonl`),
-      deviceId,
-      encryption: masterKeys,
-      network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
-      sync: { autoSync: true, pushOnWrite: true, namespaces, policyIssuers: ['device-A', 'device-A2'] },
-    });
-    facades.push(m);
-    await m.initialize();
-    return m;
-  }
-  /** 门面 ↔ 守护 同步一轮（先断开保证新会话）。 */
-  async function syncFacadeTo(facade, daemonAddr) {
-    const peerId = /\/p2p\/([^/]+)$/.exec(daemonAddr)?.[1] ?? '';
-    await facade.node.disconnectPeer({ id: peerId, multihash: new Uint8Array(), pubKey: new Uint8Array() }).catch(() => undefined);
-    const done = new Promise((resolve) => facade.sync.once('sync-completed', resolve));
-    await facade.node.connectToPeer({ id: peerId, multihash: new Uint8Array(), pubKey: new Uint8Array() }, daemonAddr);
-    return done;
-  }
-  const facadeHas = async (facade, ns, text) =>
-    (await facade.graph.listNodes({ namespace: ns })).some((n) => n.content?.text === text || JSON.stringify(n.content ?? {}).includes(text));
-
+try {
   // ========== pair1：A（默认开） ==========
   const portA = await freePort();
   const A = await bootRoot('device-A', portA, undefined);

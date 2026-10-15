@@ -11,6 +11,7 @@ import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, selectedMemoryCount, WIZARD_STEPS } from './wizard.js';
 import { IA_TABS, IA_TASK_CARDS, IA_ADVANCED_FIELDS, IA_MIGRATION, IA_EDITOR_PATHS, IA_INFO_BLOCKS, IA_SETTINGS_EXTRA } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
+import { reconcileAssistantUi } from './assistant-status.js';
 
 const $ = (selector) => document.querySelector(selector);
 const params = new URLSearchParams(location.search);
@@ -41,6 +42,8 @@ const state = {
   clientRestart: {},
   clientOpen: {},
   clientVerify: {},
+  clientBusy: {},
+  clientFailed: {},
   addForm: null,
   csrf: readCookie('mebular_csrf'),
   token: params.get('token') ?? localStorage.getItem('mebular_token') ?? null,
@@ -151,6 +154,16 @@ async function refreshOnce() {
   if (memories.status === 'fulfilled') state.memories = memories.value;
   if (serviceView.status === 'fulfilled') state.service = serviceView.value;
   if (clientsView.status === 'fulfilled') state.clients = clientsView.value.clients ?? [];
+  // 补丁 3 增补 · 对账：每轮刷新清掉与服务端真值矛盾的客户端残留
+  // （配置不在了 → 清提示/verify/失败残留；verify 确认 connected → 重载提醒退场）
+  for (const c of state.clients ?? []) {
+    reconcileAssistantUi(c, {
+      reloadHints: state.clientRestart,
+      verifyStates: state.clientVerify,
+      failed: state.clientFailed,
+      busy: state.clientBusy,
+    });
+  }
   state.features = { writes: Boolean(state.overview?.features?.writes) };
   state.error = firstError;
   state.degraded = computeDegraded();
@@ -908,6 +921,8 @@ function settingsSignature(activeTab) {
     state.clientRestart ?? null,
     state.clientOpen ?? null,
     state.clientVerify ?? null,
+    state.clientBusy ?? null,
+    state.clientFailed ?? null,
     state.addForm ?? null,
   ]);
 }
@@ -1564,6 +1579,8 @@ async function serviceAction(action) {
 async function clientAction(id, action) {
   const say = (t) => { state.clientMsg[id] = t; rerenderAssistants(); };
   const showDiff = (t) => { state.clientDiff[id] = t; rerenderAssistants(); };
+  const busyActions = ['connect', 'verify', 'verify-confirm', 'recheck', 'rollback', 'skills'];
+  if (busyActions.includes(action)) { state.clientBusy[id] = action; rerenderAssistants(); } // 补丁 3：在途禁用 + 「写入中…/验证中…」
   try {
     // UX-2：「详情 ›」= 行内展开/收起（判据/路径/次级动作）
     if (action === 'details') { state.clientOpen[id] = !state.clientOpen[id]; rerenderAssistants(); return; }
@@ -1580,7 +1597,7 @@ async function clientAction(id, action) {
       else say('验证未过：展开看失败步骤与输出。');
       return;
     }
-    if (action === 'recheck') { state.clientRestart[id] = false; state.clientVerify[id] = null; await refresh(); say('已重新检测'); return; }
+    if (action === 'recheck') { state.clientRestart[id] = false; state.clientVerify[id] = null; delete state.clientFailed[id]; await refresh(); say('已重新检测'); return; }
     if (action === 'copy') {
       const client = (state.clients ?? []).find((c) => c.id === id);
       await navigator.clipboard.writeText(client?.snippet ?? '');
@@ -1598,6 +1615,7 @@ async function clientAction(id, action) {
     const res = await api(`/admin/api/clients/${id}/${action}`, { method: 'POST', body: {}, timeoutMs: 20000 }); // 写入/CLI 动作给足余量
     if (typeof res.preview === 'string' && res.preview.length > 0) showDiff(res.preview);
     if (!res.ok) { say(`需要你手动处理：${res.reason ?? '请看片段'}`); return; }
+    delete state.clientFailed[id]; // 成功/重试成功 → 清失败态
     say(action === 'connect'
       ? (res.changed ? '接入完成（已备份原配置）。重启该助手后生效。' : '已接入（无需改动）。')
       : action === 'rollback' ? '已还原到接入前。' : '已安装。');
@@ -1605,7 +1623,24 @@ async function clientAction(id, action) {
     if (action === 'connect' && res.changed) { state.clientRestart[id] = true; state.clientVerify[id] = null; }
     await refresh();
   } catch (error) {
-    say(`没能完成：${error.message}`);
+    // 补丁 3：接入失败反馈语义——「接入失败」+ 一行原因（人话/脱敏）+ rolledBack 明示还原；绝不落入「待生效」
+    if (action === 'connect') {
+      const p = error?.payload ?? {};
+      state.clientFailed[id] = {
+        kind: 'connect',
+        reason: p.reason ?? error.message,
+        rolledBack: p.rolledBack === true,
+        backupPath: typeof p.backupPath === 'string' ? p.backupPath : null,
+        commands: Array.isArray(p.commands) ? p.commands : null,
+      };
+      state.clientRestart[id] = false;
+      rerenderAssistants();
+    } else {
+      say(`没能完成：${error.message}`);
+    }
+  } finally {
+    delete state.clientBusy[id];
+    rerenderAssistants();
   }
 }
 

@@ -277,7 +277,14 @@ export async function clientActionViaApi(fetchImpl, http = { host: '127.0.0.1', 
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      return { ok: false, needsManual: Boolean(data?.needsManual), warning: data?.reason ?? data?.message ?? `动作失败（HTTP ${res.status}）` };
+      // 补丁 3：失败语义透传 rolledBack/backupPath（UI 据此明示「已自动还原原配置」）
+      return {
+        ok: false,
+        needsManual: Boolean(data?.needsManual),
+        rolledBack: Boolean(data?.rolledBack),
+        backupPath: typeof data?.backupPath === 'string' ? data.backupPath : null,
+        warning: data?.reason ?? data?.message ?? `动作失败（HTTP ${res.status}）`,
+      };
     }
     // verify：未过也是有效结果（HTTP 200，body 带 ok/state/steps）
     return {

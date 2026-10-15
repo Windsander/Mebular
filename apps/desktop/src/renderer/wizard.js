@@ -3,7 +3,8 @@
 // UX-2：段①「一键开始」原位展开子步骤流水（失败定位 + 从此处续跑）；
 //       段②行级接入（名称+状态词+一个动作；「已接入 ✓」不自动翻段，「已完成」显式确认）。
 
-import { wizardView } from './wizard-view.mjs';
+import { wizardView, flapGate, wizardRowStatus } from './wizard-view.mjs';
+import { reconcileAssistantUi } from '../../../../packages/console/assistant-status.js';
 
 const api = window.mebularDesktop;
 
@@ -48,7 +49,7 @@ function renderState(state) {
   }
   const finishNote = $('#finish-note');
   if (finishNote && view.complete) {
-    const pending = [...pendingReload];
+    const pending = [...reloadHints];
     finishNote.innerHTML = (pending.length > 0
       ? `<span class="warn-text">提醒：重载 ${pending.map((n) => escapeHtml(n)).join('、')} 后，mebular 才会出现在它的工具列表。</span><br />`
       : '') + '之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请新设备」随时可用。';
@@ -134,9 +135,21 @@ function escapeHtml(s) {
 let graceUntil = 0;
 function armGrace(ms = 60000) { graceUntil = Date.now() + ms; }
 
+// UX-2 补丁 3：① 瞬态容忍（flapGate 纯函数）——连续 ≥2 次 miss 才翻回未完成；单次 miss UI 不动
+let healthMisses = 0;
+let lastStartDone = false;
+
 async function refresh() {
   try {
     const state = await api.wizardState();
+    const gate = flapGate({
+      lastDone: lastStartDone,
+      done: Boolean(state?.steps?.[0]?.done),
+      misses: healthMisses,
+    });
+    healthMisses = gate.misses;
+    lastStartDone = gate.lastDone;
+    if (gate.hold) return; // 单次 miss：不翻段、不自动展开日志（其他区随下一轮更新）
     if (Date.now() < graceUntil && state && !state.complete) state.grace = true;
     renderState(state);
   } catch (error) { setText('#start-detail', `状态读取失败：${error.message}`); }
@@ -281,16 +294,13 @@ for (const id of ['step-start', 'step-assistants']) {
 
 // ---------- 段② 行级接入（名称 + 状态词 + 一个动作；与 设置 · AI 助手 同一语言） ----------
 
-const pendingReload = new Set(); // 本会话内「已写入待重载」的助手 id
+// 补丁 3 增补：语义更名 pendingReload → reloadHints（提示层「已写入·请重载」，**不再驱动「待生效」状态词**）；
+// rowVerify = 最近一次服务端 verify 真值（pending-restart 是「待生效」唯一正当来源）。
+const reloadHints = new Set();
+const rowVerify = new Map();
+// UX-2 补丁 3：行级失败态（id → { kind: 'connect'|'verify', reason }）——失败绝不显示「待生效」
+const rowFailed = new Map();
 let clientsSignature = null;
-
-function rowStatus(client) {
-  if (client.needsManual) return { key: 'manual', label: '需手动' };
-  if (!client.installed) return { key: 'not-installed', label: '未安装' };
-  if (pendingReload.has(client.id)) return { key: 'pending', label: '待生效' };
-  if (client.connected) return { key: 'connected', label: '已接入 ✓' };
-  return { key: 'not-connected', label: '未接入' };
-}
 
 function renderClients(clients) {
   const list = $('#asst-list');
@@ -299,29 +309,43 @@ function renderClients(clients) {
     list.innerHTML = '<p class="amsg">助手列表加载中…</p>';
     return;
   }
-  const signature = JSON.stringify(clients.map((c) => [c.id, Boolean(c.installed), Boolean(c.connected)]).concat([...pendingReload]));
+  const signature = JSON.stringify(
+    clients.map((c) => [c.id, Boolean(c.installed), Boolean(c.connected), c.state ?? null])
+      .concat([...reloadHints].map((k) => `hint:${k}`))
+      .concat([...rowFailed.keys()].map((k) => `fail:${k}`))
+      .concat([...rowVerify.entries()].map(([k, v]) => `verify:${k}:${v}`)),
+  );
   if (signature === clientsSignature) return;
   clientsSignature = signature;
   if (clients.length === 0) {
     list.innerHTML = '<p class="amsg">还没有检测到已知助手；也可稍后在「设置 · AI 助手」里补。</p>';
     return;
   }
+  const failedObj = Object.fromEntries(rowFailed);
+  const verifyObj = Object.fromEntries(rowVerify);
   list.innerHTML = clients.map((c) => {
-    const st = rowStatus(c);
+    const st = wizardRowStatus(c, { pending: reloadHints, failed: failedObj, verifyStates: verifyObj });
     let action = '';
     if (st.key === 'not-connected') action = `<button data-asst-act="connect" data-asst-id="${c.id}">接入</button>`;
-    else if (st.key === 'pending') {
-      // 轮 A：有验证命令的助手走服务端 verify（用户已确认重载）；否则回读重检测
+    else if (st.key === 'connect-failed') action = `<button data-asst-act="connect" data-asst-id="${c.id}">重试</button>`;
+    else if (st.key === 'verify-failed') action = `<button data-asst-act="verify" data-asst-id="${c.id}">重新验证</button>`;
+    else if (st.key === 'pending-reload' || (st.key === 'connected' && st.reloadHint)) {
+      // 提示层/待生效共用动作：「我已重载，验证」（有验证命令走服务端 verify，否则回读重检测）
       action = c.hasVerify
         ? `<button data-asst-act="verify" data-asst-id="${c.id}">我已重载，重新验证</button>`
         : `<button data-asst-act="recheck" data-asst-id="${c.id}">我已重载，重新验证</button>`;
     }
     else if (st.key === 'manual') action = `<button class="ghost" data-asst-act="console" data-asst-id="${c.id}">去控制台处理 ›</button>`;
+    // 提示层小字：不覆盖状态词（「已接入 ✓」旁挂「已写入 · 请重载助手后生效」）
+    const hintLine = st.reloadHint && st.key === 'connected'
+      ? `<p class="amsg" data-asst-hint="${c.id}">已写入 · 请重载该助手后生效（点右侧「我已重载，重新验证」确认）</p>`
+      : '';
     return `<div class="arow" data-asst-row="${c.id}">
       <span class="aname">${c.name ?? c.id}</span>
-      <span class="ast${st.key === 'connected' ? ' ok' : st.key === 'pending' ? ' todo' : ''}">${st.label}</span>
+      <span class="ast${st.key === 'connected' ? ' ok' : st.key === 'pending-reload' || st.key === 'connect-failed' || st.key === 'verify-failed' ? ' todo' : ''}">${st.label}</span>
       <span class="asp"></span>${action}
     </div>
+    ${hintLine}
     <p class="amsg" data-asst-msg="${c.id}" hidden></p>`;
   }).join('');
 }
@@ -336,7 +360,12 @@ function asstMsg(id, text) {
 async function loadClients() {
   try {
     const res = await api.clientsList();
-    renderClients(res?.clients ?? []);
+    const clients = res?.clients ?? [];
+    // 补丁 3 增补 · 对账：每轮刷新清掉与服务端真值矛盾的客户端残留
+    for (const c of clients) {
+      reconcileAssistantUi(c, { reloadHints, verifyStates: rowVerify, failed: rowFailed });
+    }
+    renderClients(clients);
     if (res?.warning) setText('#assistants-detail', `${res.warning}（不阻断，可稍后在「设置 · AI 助手」里补）`);
   } catch {
     renderClients([]);
@@ -349,30 +378,47 @@ $('#asst-list')?.addEventListener('click', async (event) => {
   const id = btn.dataset.asstId;
   const act = btn.dataset.asstAct;
   if (act === 'console') { void api.deepAssistants(); return; }
-  btn.disabled = true;
-  asstMsg(id, act === 'connect' ? '正在接入…' : '正在重新验证…');
+  // 补丁 3：操作在途——该行按钮全禁 + 状态列「写入中…/验证中…」（防重复点击与困惑）
+  const row = btn.closest('.arow');
+  row?.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+  const stEl = row?.querySelector('.ast');
+  if (stEl) stEl.textContent = act === 'verify' ? '验证中…' : act === 'connect' ? '写入中…' : '检测中…';
+  asstMsg(id, act === 'connect' ? '正在接入…' : act === 'verify' ? '正在验证…' : '正在重新检测…');
   const res = await api.clientsAction(id, act);
+  let msg;
   if (act === 'verify') {
-    // 服务端 verify：connected → 完成；pending-restart → 仍待生效；verify-failed → 黄态提示（含失败步骤）
+    // 服务端 verify 真值：connected → 完成（清提醒）；pending-restart → 「待生效」唯一正当来源；failed → 验证未过
     if (res?.ok && res.state === 'connected') {
-      pendingReload.delete(id);
-      asstMsg(id, '验证通过，已接入 ✓');
+      rowVerify.set(id, 'connected');
+      reloadHints.delete(id);
+      rowFailed.delete(id);
+      msg = '验证通过，已接入 ✓';
     } else if (res?.state === 'pending-restart') {
-      asstMsg(id, '仍在待生效：请确认已完全重载该助手（退出进程，不是关窗口）。');
+      rowVerify.set(id, 'pending-restart');
+      msg = '仍在待生效：请确认已完全重载该助手（退出进程，不是关窗口）。';
     } else {
-      const failed = (res?.steps ?? []).filter((s) => s && s.ok === false).map((s) => s.label ?? s.name).join('、');
-      asstMsg(id, `验证未过${failed ? `（${failed}）` : ''}；详情见「设置 · AI 助手」。`);
+      const failedSteps = (res?.steps ?? []).filter((s) => s && s.ok === false).map((s) => s.label ?? s.name).join('、');
+      rowVerify.set(id, 'verify-failed');
+      rowFailed.set(id, { kind: 'verify', reason: failedSteps || '验证未过' });
+      msg = `验证未过${failedSteps ? `（${failedSteps}）` : ''}；详情见「设置 · AI 助手」。`;
     }
   } else if (!res?.ok) {
-    asstMsg(id, res?.warning ?? '没能完成；可在「设置 · AI 助手」里看详情。');
+    // 补丁 3 接入失败语义：状态词「接入失败」+ 一行原因（脱敏）；rolledBack → 明示已自动还原
+    rowFailed.set(id, { kind: 'connect', reason: res?.warning ?? '没能完成' });
+    msg = `${res?.warning ?? '没能完成；可在「设置 · AI 助手」里看详情。'}${res?.rolledBack ? '（已自动还原原配置）' : ''}`;
   } else if (act === 'connect') {
-    pendingReload.add(id);
-    asstMsg(id, res.changed ? '已接好（写前已备份），重载该助手后生效。' : '已接入（无需改动）。');
+    rowFailed.delete(id);
+    rowVerify.delete(id);
+    reloadHints.add(id); // 提示层：「已写入 · 请重载」（不驱动状态词；状态词随服务端真值）
+    msg = res.changed ? '已接好（写前已备份），重载该助手后生效。' : '已接入（无需改动）。';
   } else {
-    pendingReload.delete(id);
-    asstMsg(id, '已重新检测。');
+    rowFailed.delete(id);
+    rowVerify.delete(id);
+    reloadHints.delete(id);
+    msg = '已重新检测。';
   }
   await loadClients();
+  asstMsg(id, msg); // 渲染后落消息（行可能已重绘）
   await refresh();
 });
 

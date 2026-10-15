@@ -579,7 +579,9 @@ export function yamlHasKey(text, parent, child) {
   for (const line of lines) {
     if (new RegExp(`^${parent}\\s*:`).test(line)) { inParent = true; continue; }
     if (!inParent) continue;
-    if (/^\S/.test(line)) inParent = false; // 回到顶层
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue; // 注释/空行不终止父段（与 yamlEntryBlock 一致）
+    if (/^\S/.test(line)) break;                            // 真正的顶格非注释行 → 父段结束
     if (new RegExp(`^\\s{1,4}${child}\\s*:`).test(line)) return true;
   }
   return false;
@@ -593,12 +595,11 @@ export function yamlEntryBlock(text, parent, child) {
   for (const line of lines) {
     if (new RegExp(`^${parent}\\s*:`).test(line)) { inParent = true; continue; }
     if (!inParent) continue;
-    if (/^\S/.test(line)) { inParent = false; block = null; continue; }
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) continue; // 顶格注释/空行不终止父段，也不进子块
+    if (/^\S/.test(line)) break; // 真正的顶格非注释行 → 父段结束（**保留**已收集的块，勿清空）
     if (new RegExp(`^\\s{1,6}${child}\\s*:`).test(line)) { block = [line]; continue; }
-    if (block !== null) {
-      if (/^\s*\S/.test(line)) block.push(line);
-      else break;
-    }
+    if (block !== null) block.push(line); // 子块内的缩进行
   }
   return block === null ? null : block.join('\n');
 }

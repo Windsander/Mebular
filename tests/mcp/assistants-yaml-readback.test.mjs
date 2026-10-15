@@ -3,13 +3,13 @@
 // 真机实证：`~/.hermes/config.yaml` 的 `mcp_servers.mebular = {url, enabled}`，hermes 侧
 // `config get`/`mcp test` 全通，但我们的行式解析把「顶格注释行」当父段结束 → 漏判。
 
-import { describe, it, expect, jest } from '@jest/globals';
+import { describe, it, expect } from '@jest/globals';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { builtinAssistants, clearAssistantsCache, connectClient, landingState, yamlEntryBlock, yamlHasKey } from '../../packages/mcp/src/clients.mjs';
+import { builtinAssistants, connectClient, landingState, yamlEntryBlock, yamlHasKey } from '../../packages/mcp/src/clients.mjs';
 
 describe('yamlEntryBlock：注释/空行不终止父段（复刻真实结构）', () => {
   // 真机结构：child 在顶格注释块之后（hermes CLI 的新键追加落点）
@@ -60,5 +60,28 @@ describe('yamlEntryBlock：注释/空行不终止父段（复刻真实结构）'
     const block = yamlEntryBlock(readFileSync(real, 'utf-8'), 'mcp_servers', 'mebular');
     if (block === null) return; // 该机器未接入 → 无可验（当前真实形态见 F-FIX-B 回执）
     expect(/^\s*url\s*:/m.test(block)).toBe(true); // 真机结构：块在注释块之后 → 必须命中
+  });
+
+  it('幂等预检：landingState.present=true → connectViaCli **零写入**（runner 0 次调用、不产生新 .bak）', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'yaml-idem-'));
+    const mebularHome = join(home, '.mebular');
+    await mkdir(join(home, '.hermes'), { recursive: true });
+    await mkdir(mebularHome, { recursive: true });
+    const cfg = join(home, '.hermes', 'config.yaml');
+    // 真机结构：注释块之后的等价 remote 条目（修复前 present 恒 false → 会重复写入+备份）
+    await writeFile(cfg, 'mcp_servers:\n  openchamber:\n    command: python3\n\n  # ── Security ──\n  mebular:\n    url: http://127.0.0.1:7331/mcp\n    enabled: true\n');
+    const hermes = builtinAssistants({ home: mebularHome, userHome: home }).find((a) => a.id === 'hermes');
+    expect(landingState(hermes, { userHome: home }).present).toBe(true);
+    let calls = 0;
+    const res = await connectClient('hermes', {
+      home: mebularHome, userHome: home,
+      runAsync: async () => { calls += 1; return { ok: true, code: 0, stdout: '', stderr: '' }; },
+    });
+    expect(res.changed).toBe(false);           // 等价条目 → 不重写
+    expect(res.backupPath).toBeNull();         // 不产生新备份
+    expect(res.note).toMatch(/已接入/);
+    expect(calls).toBe(0);                     // runner 零调用（不写不读 CLI）
+    expect((await readdir(join(home, '.hermes'))).filter((f) => f.includes('.bak-'))).toHaveLength(0);
+    await rm(home, { recursive: true, force: true });
   });
 });

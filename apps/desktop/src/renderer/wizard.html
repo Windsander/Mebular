@@ -150,6 +150,20 @@
 
     /* hidden 语义兜底：任何作者 display 规则都不得让 [hidden] 元素显形（置末位保证同优先级胜出） */
     [hidden] { display: none; }
+
+    /* ===== UX-2 补丁 4 · 窗口外框与滚动条（向导） ===== */
+    /* A. 拖拽区：hero 品牌区可拖（移动窗口）；可点元素除外 */
+    .hero { -webkit-app-region: drag; }
+    .hero .badge, .hero button, .hero a { -webkit-app-region: no-drag; }
+    .skip { -webkit-app-region: no-drag; }
+    /* B. 滚动条主题化（与控制台同一契约：细、暗轨道、契约色 thumb、hover 微亮） */
+    *::-webkit-scrollbar { width: 10px; height: 10px; }
+    *::-webkit-scrollbar-track { background: transparent; }
+    *::-webkit-scrollbar-thumb { background: rgba(140, 255, 200, 0.20); border-radius: 999px; border: 2px solid transparent; background-clip: padding-box; }
+    *::-webkit-scrollbar-thumb:hover { background: rgba(140, 255, 200, 0.36); border: 2px solid transparent; background-clip: padding-box; }
+    *::-webkit-scrollbar-corner { background: transparent; }
+    /* C. 长页滚动稳定：gutter 预留，滚动条出现/消失不挤压内容 */
+    html { scrollbar-gutter: stable; }
   </style>
 </head>
 <body class="setup">

@@ -314,6 +314,35 @@ describe('UX-2 收口 ④ ＋新增助手 CRUD 表单与端点接线', () => {
 });
 
 // ---------------------------------------------------------------------------
+// UX-2 补丁 4 · 滚动条主题化 + 拖拽区 + 交通灯避让（控制台侧契约）
+// ---------------------------------------------------------------------------
+
+describe('UX-2 补丁 4 · 控制台：滚动条/拖拽区/交通灯避让（静态契约）', () => {
+  const consoleCss = readFileSync(join(here, '..', '..', 'packages', 'console', 'console.css'), 'utf-8');
+
+  it('滚动条主题化：细 10px / 透明轨道 / 契约色 thumb / hover 微亮 / corner 清理（不隐藏滚动条）', () => {
+    expect(consoleCss).toMatch(/::-webkit-scrollbar \{[^}]*width: 10px/);
+    expect(consoleCss).toMatch(/::-webkit-scrollbar-track \{[^}]*transparent/);
+    expect(consoleCss).toMatch(/::-webkit-scrollbar-thumb \{[^}]*rgba\(140, 255, 200/);
+    expect(consoleCss).toMatch(/::-webkit-scrollbar-thumb:hover/);
+    expect(consoleCss).toMatch(/::-webkit-scrollbar-corner \{[^}]*transparent/);
+  });
+
+  it('滚动手感：主滚动容器 scrollbar-gutter stable（html + 记忆视图 + 设置体 + 弹层等）', () => {
+    expect(consoleCss).toMatch(/html \{ scrollbar-gutter: stable/);
+    expect(consoleCss).toMatch(/#memories-view[^}]*scrollbar-gutter: stable/);
+    expect(consoleCss).toMatch(/#settings-body[^}]*scrollbar-gutter: stable/);
+    expect(consoleCss).toMatch(/\.modal[^}]*scrollbar-gutter: stable/);
+  });
+
+  it('拖拽区：顶栏可拖 + 可点元素 no-drag；macOS 壳交通灯安全区（shell-desktop-darwin）', () => {
+    expect(consoleCss).toMatch(/\.topbar \{[^}]*-webkit-app-region: drag/);
+    expect(consoleCss).toMatch(/\.topbar button[^{]*\{[^}]*-webkit-app-region: no-drag/);
+    expect(consoleCss).toMatch(/body\.shell-desktop-darwin \.topbar \{[^}]*padding-left: 84px/);
+    expect(consoleJs).toContain('shell-desktop-darwin');
+    expect(consoleJs).toMatch(/window\.mebularDesktop\?\.platform === 'darwin'/);
+    });
+  });
 // UX-2 补丁 3：接入失败反馈语义 + 在途禁用（控制台 · 设置 · AI 助手）
 // ---------------------------------------------------------------------------
 

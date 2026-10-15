@@ -5,6 +5,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('mebularDesktop', {
+  // UX-2 补丁 4：平台标识（渲染层据此避让 macOS 交通灯安全区；静态值，非函数）
+  platform: process.platform,
   status: () => ipcRenderer.invoke('daemon:status'),
   start: () => ipcRenderer.invoke('daemon:start'),
   stop: () => ipcRenderer.invoke('daemon:stop'),

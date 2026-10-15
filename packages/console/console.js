@@ -3269,6 +3269,11 @@ if (provisionStatus) {
   // R-1 高-3：?view=<视图> 深链（向导②/托盘「连接 AI 助手」的 ?view=connect 落点）；
   // step=device → 进连接页后自动开「邀请新设备」
   const deepLink = initialViewFromSearch(location.search);
+  // UX-2 补丁 4：桌面壳 + macOS hiddenInset → 顶栏避让交通灯安全区（body 类驱动 CSS）
+  document.body.classList.toggle(
+    'shell-desktop-darwin',
+    Boolean(deepLink.shellDesktop || window.mebularDesktop) && window.mebularDesktop?.platform === 'darwin',
+  );
   stage.start();
   setView(deepLink.view ?? 'map');
   refresh().then(() => {

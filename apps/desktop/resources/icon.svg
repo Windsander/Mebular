@@ -1,15 +1,16 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <!-- Mebular App 图标（与网页版 favicon 同源：✦ 星）· 深底圆角 + 薄荷绿辉光 -->
+  <!-- Mebular App 图标（与网页版 favicon 同源的 ✦ 星）· 深底圆角 + 薄荷绿辉光 -->
+  <!-- 尺寸遵循 macOS 官方图标网格：内容 824×824 居中（四周各 100px 透明边距），与其他 App 视觉等大 -->
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
       <stop offset="0" stop-color="#0d1326"/>
       <stop offset="1" stop-color="#05070f"/>
     </linearGradient>
     <filter id="glow" x="-40%" y="-40%" width="180%" height="180%">
-      <feGaussianBlur stdDeviation="26" result="b"/>
+      <feGaussianBlur stdDeviation="21" result="b"/>
       <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
     </filter>
   </defs>
-  <rect width="1024" height="1024" rx="232" fill="url(#bg)"/>
-  <path filter="url(#glow)" fill="#6dffb8" d="M512 300 C 524 420, 560 456, 680 512 C 560 568, 524 604, 512 724 C 500 604, 464 568, 344 512 C 464 456, 500 420, 512 300 Z"/>
+  <rect x="100" y="100" width="824" height="824" rx="187" fill="url(#bg)"/>
+  <path filter="url(#glow)" fill="#6dffb8" d="M512 341.3 C 521.7 437.9, 550.6 466.9, 647.2 512 C 550.6 557.1, 521.7 586.1, 512 682.7 C 502.3 586.1, 473.4 557.1, 376.8 512 C 473.4 466.9, 502.3 437.9, 512 341.3 Z"/>
 </svg>

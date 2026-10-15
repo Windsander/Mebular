@@ -13,7 +13,7 @@ import {
   serviceEnabledFor, stopManaged, waitForDaemon, parseArgs, probeHealth, probeProvision, serviceDescriptorFor,
 } from './daemon.mjs';
 import { buildHandlerTable, diagnostics } from './ipc.mjs';
-import { iconDataUrl } from './tray-icons.mjs';
+import { iconDataUrl, iconDataUrl2x } from './tray-icons.mjs';
 import {
   computeWizardState, deepLinks, inviteText, inviteViaApi, isLoopbackUrl,
   readDesktopState, writeDesktopState, clientsViaApi, clientActionViaApi, installDecision,
@@ -202,6 +202,14 @@ async function showConsoleWithRetry() {
 function appIconPath() {
   return join(import.meta.dirname, '..', '..', 'resources', 'icon.png');
 }
+/** 菜单栏图标：18pt 品牌星章（模板图——深色菜单栏自动渲染白底镂空星）+ @2x 载荷 */
+function trayImage() {
+  const img = nativeImage.createFromDataURL(iconDataUrl());
+  img.addRepresentation({ scaleFactor: 2, dataURL: iconDataUrl2x() });
+  img.setTemplateImage(true);
+  return img;
+}
+
 /** macOS Dock 图标：开发态（Electron 裸跑）也显示品牌图标；打包态与 bundle 图标一致 */
 function applyAppIcon() {
   if (process.platform === 'darwin' && app.dock) {
@@ -309,9 +317,8 @@ function trayActions() {
 
 function updateTray() {
   if (!tray) return;
-  const state = healthy ? 'green' : daemonMode ? 'yellow' : 'red';
-  // 状态点绑定真实健康（healthy 由 probeHealth 决定；daemonMode 反映托管路径）
-  tray.setImage(nativeImage.createFromDataURL(iconDataUrl(state)));
+  // 图标 = 品牌星章（状态语义在 tooltip 与菜单；不再分色）
+  tray.setImage(trayImage());
   tray.setToolTip(`Mebular · ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}`);
   // R-1 中-9：分组菜单模型（lifecycle.mjs 纯数据）→ 绑定 click 后交给 Electron
   const actions = trayActions();
@@ -333,7 +340,7 @@ async function restart() {
 }
 
 function createTray() {
-  tray = new Tray(nativeImage.createFromDataURL(iconDataUrl('red')));
+  tray = new Tray(trayImage());
   updateTray();
 }
 

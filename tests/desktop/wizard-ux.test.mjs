@@ -882,7 +882,12 @@ describe('App 图标（用户定稿：网页版 favicon 的 ✦ 同源）', () =
     // 资源在位且为合法 PNG（魔数）
     const png = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'resources', 'icon.png'));
     expect(png.subarray(0, 8).toString('hex')).toBe('89504e470d0a1a0a');
-    // 矢量源同步在仓（可再生成任意尺寸）
-    expect(readFileSync(join(here, '..', '..', 'apps', 'desktop', 'resources', 'icon.svg'), 'utf-8')).toContain('#6dffb8');
+    // 矢量源同步在仓（可再生成任意尺寸）；尺寸遵循 macOS 网格（824 内容 @ 1024 画布）
+    const svg = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'resources', 'icon.svg'), 'utf-8');
+    expect(svg).toContain('#6dffb8');
+    expect(svg).toMatch(/x="100" y="100" width="824" height="824"/);
+    // 菜单栏星章：模板图 + @2x
+    expect(indexMjs).toMatch(/setTemplateImage\(true\)/);
+    expect(indexMjs).toMatch(/addRepresentation\(\{ scaleFactor: 2/);
   });
 });

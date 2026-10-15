@@ -1066,25 +1066,11 @@ export async function connectClient(id, options = {}) {
 }
 
 /** 回滚：显式备份优先；否则最近一次备份；无备份则删除 mebular 条目（DSH 除外）。 */
-/** 该配置文件文本里是否已含 mebular 条目（json/yaml/dsh 各按其形状判；兼容 legacy 键位）。 */
-function textHasMebularEntry(assistant, text) {
-  if (!text) return false;
-  const format = assistant.landing?.format ?? assistant.format;
-  const adapter = adapterFor(format);
-  if (adapter?.serialization === 'yaml' && format !== 'dsh') {
-    const path = keyPathOf(format);
-    return yamlHasKey(text, path[0], path[1]);
-  }
-  if (format === 'dsh') return /serverName:\s*['"]?mebular['"]?/.test(text);
-  try {
-    const parsed = JSON.parse(text);
-    const path = keyPathOf(format);
-    if (walkGet(parsed, path).value !== undefined) return true;
-    if (adapter?.legacyKeyPath && walkGet(parsed, adapter.legacyKeyPath).value !== undefined) return true;
-    return false;
-  } catch {
-    return false;
-  }
+/** 备份候选是否已含 mebular 条目——**与状态探针同一判据**（landingState：present ∪ staleStdio ∪ legacyShape），
+ *  避免自建弱判据（如 yamlHasKey）漏报导致回滚选错快照。 */
+function backupHasMebularEntry(assistant, backupPath) {
+  const st = landingState({ ...assistant, landing: { ...assistant.landing, primaryPath: backupPath } }, {});
+  return Boolean(st.present || st.staleStdio || st.legacyShape);
 }
 
 export async function rollbackClient(id, options = {}) {
@@ -1100,7 +1086,7 @@ export async function rollbackClient(id, options = {}) {
   // 旧实现取「最新备份」：连续连接/多次回滚的安全备份本身已含 mebular → 回滚实为无操作（真机走查事故）
   const candidates = readdirSync(dir).filter((f) => f.startsWith(base)).sort().reverse();
   const target = options.backupPath
-    ?? candidates.map((f) => join(dir, f)).find((p) => !textHasMebularEntry(assistant, safeReadText(p) ?? '')) ?? null;
+    ?? candidates.map((f) => join(dir, f)).find((p) => !backupHasMebularEntry(assistant, p)) ?? null;
   const safety = `${primary}.bak-${tsStamp()}`;
   await copyFile(primary, safety);
   if (target) {

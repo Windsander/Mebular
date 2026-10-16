@@ -121,6 +121,7 @@ async function refreshOnce() {
     state.devices = mock.devices;
     state.policy = mock.policy;
     state.namespaces = mock.namespaces;
+    state.memories = mock.memories;
     state.features = { writes: false };
     state.error = null;
     state.degraded = mock.degraded;
@@ -242,7 +243,7 @@ function renderLegend() {
   if (names.length === 0) {
     const li = document.createElement('li');
     li.className = 'muted';
-    li.textContent = '暂无分区';
+    li.textContent = '暂无记忆域';
     list.append(li);
     return;
   }
@@ -317,36 +318,58 @@ function renderStageScene() {
 
 function renderBanner() {
   const banner = $('#banner');
+  // 常驻横幅可见时给 .stage-wrap 打标——窄屏下面板视图据此让位，不被横幅压住标题/统计
+  const wrap = document.querySelector('.stage-wrap');
   if (state.error) {
     banner.hidden = false;
     banner.className = 'banner is-error';
     banner.textContent = `无法连接本机 serve：${state.error.message}（保留上次数据）`;
+    wrap?.classList.add('has-banner');
     return;
   }
   if (state.degraded) {
     banner.hidden = false;
     banner.className = 'banner';
     banner.textContent = state.degraded;
+    wrap?.classList.add('has-banner');
     return;
   }
   banner.hidden = true;
+  wrap?.classList.remove('has-banner');
 }
 
 function renderDomains() {
   const list = $('#domains-list');
   const detail = $('#domain-detail');
   const stats = $('#domains-stats');
+  const layout = $('#domains-layout');
+  const empty = $('#domains-empty');
+  const note = $('#domains-note');
   const items = state.namespaces ?? [];
 
+  // v4 统计标签新口径：记忆域 N · 参与中 M（成员制计数退役；0 域不渲染统计）
   if (stats) {
-    const memberEnabled = items.filter((n) => n.membershipEnabled).length;
-    stats.innerHTML = `<span class="crt-tag">分区 ${items.length}</span><span class="crt-tag">成员制 ${memberEnabled}</span>`;
+    if (items.length === 0) {
+      stats.innerHTML = '<span class="crt-tag">本机视角</span>';
+    } else {
+      const participating = items.filter((n) => n.subscribed).length;
+      stats.innerHTML = `<span class="crt-tag">记忆域 ${items.length}</span>`
+        + (participating > 0 ? `<span class="crt-tag">参与中 ${participating}</span>` : '');
+    }
   }
+  // v4 空态（scene-2）：左右两栏整体让位给单一空态区
   if (items.length === 0) {
-    list.innerHTML = '<p class="muted" style="padding:8px">暂无分区记忆。</p>';
+    state.selectedNamespace = null;
+    list.innerHTML = '';
     detail.innerHTML = '';
+    if (layout) layout.hidden = true;
+    if (empty) empty.hidden = false;
+    if (note) note.hidden = true;
     return;
   }
+  if (layout) layout.hidden = false;
+  if (empty) empty.hidden = true;
+  if (note) note.hidden = false;
   // 选中保持：默认第一个；轮询刷新不丢选择
   if (!items.some((n) => n.namespace === state.selectedNamespace)) {
     state.selectedNamespace = items[0].namespace;
@@ -355,13 +378,13 @@ function renderDomains() {
   const taskNs = state.settings?.fleet?.namespace ?? null;
   list.innerHTML = items.map((n) => {
     const active = n.namespace === state.selectedNamespace;
-    const memberLabel = n.membershipEnabled ? `${n.effectiveMembers.length}/${n.members.length}` : '仅授权';
     const isTask = taskNs !== null && n.namespace === taskNs;
+    // 左列只讲参与事实：未参与的域在左列直接标记（参与中/未参与）
+    const meta = `${n.count} 条${n.subscribed ? '' : ' · 未参与'}${isTask ? ' · 任务域' : ''}`;
     return `<button class="sector-item${active ? ' is-active' : ''}" data-sector="${escapeHtml(n.namespace)}" type="button">
-      <span class="sector-dot${n.membershipEnabled ? ' is-on' : ''}"></span>
-      <span class="sector-name"><span class="ns-chip" style="background:${namespaceColor(n.namespace)}">${escapeHtml(n.namespace)}</span>
-        <span class="sector-meta">${n.count} 条${n.rejoinReset ? ' · 待恢复' : ''}${isTask ? ' · 任务域' : ''}</span></span>
-      <span class="sector-meta" title="生效/在册成员">${memberLabel}</span>
+      <span class="sector-dot${n.subscribed ? ' is-on' : ''}"></span>
+      <span class="sector-name"><span class="ns-chip" style="background:${namespaceColor(n.namespace)}">${escapeHtml(n.namespace)}</span></span>
+      <span class="sector-meta${n.subscribed ? '' : ' off'}">${meta}</span>
     </button>`;
   }).join('');
   renderDomainDetail(selected);
@@ -382,28 +405,31 @@ function renderDomainDetail(n) {
   }
   const writes = state.features.writes && !MOCK;
   const ns = n.namespace;
+  const selfId = state.overview?.device?.deviceId ?? null;
+  const members = Array.isArray(n.members) ? n.members : [];
+  const effective = new Set(Array.isArray(n.effectiveMembers) ? n.effectiveMembers : []);
 
-  const granted = (n.grantedTo ?? []).length
-    ? n.grantedTo.map((g) => `<span class="member-chip" title="grantId=${escapeHtml(g.grantId)}">${escapeHtml(g.deviceId)}</span>`).join(' ')
-    : '<span class="muted">—</span>';
-  const members = n.membershipEnabled
-    ? (n.members.length
-      ? n.members.map((m) => {
-        const eff = n.effectiveMembers.includes(m);
-        const approve = !eff && writes
-          ? `<button class="btn btn-small btn-crt" data-approve-member="${escapeHtml(m)}" data-ns="${escapeHtml(ns)}" title="批准准入：签发授权（已同步内容不回撤）">批准</button>`
-          : '';
-        return `<span class="member-chip ${eff ? 'is-effective' : ''}" title="${eff ? '在册且已授权（生效）' : '在册但缺授权（待批准）'}">${escapeHtml(m)}${eff ? ' ✓' : ''}</span>${approve}`;
-      }).join(' ')
-      : '<span class="muted">暂无在册成员</span>')
-    : '<span class="muted">未启用成员制（只需授权）</span>';
-  const rejoinTitle = !writes
-    ? '只读模式'
-    : n.selfAuthorized
-      ? '清空本机该分区水位，请对端从 0 重发（或发初始快照）'
-      : '需本机对该分区有生效授权（默认拒绝）';
+  // v4 关系行：参与事实（谁也在参与），取代旧的授权/成员清单平铺
+  const others = members.filter((m) => m !== selfId);
+  const othersText = others.slice(0, 4).map((m) => escapeHtml(m)).join('、')
+    + (others.length > 4 ? ` 等 ${others.length} 台设备` : '');
+  const relation = others.length === 0 ? '没有其他设备参与这个域' : `${othersText} 也在参与这个域`;
+  // 「本机」置前（scene-1：本机 ✓ device-B ✓ device-C ✓）
+  const orderedMembers = [...members].sort((a, b) => (a === selfId ? -1 : 0) - (b === selfId ? -1 : 0));
+  const memberChips = members.length
+    ? orderedMembers.map((m) => {
+      const label = m === selfId ? '本机' : escapeHtml(m);
+      const eff = effective.has(m);
+      return `<span class="member-chip${eff ? ' is-effective' : ''}" title="${label}${eff ? '：参与记录与授权一致' : '：已有参与记录，授权尚未一致'}">${label}${eff ? ' ✓' : ''}</span>`;
+    }).join(' ')
+    : '<span class="muted">暂无参与记录（参与是每台设备自己的决定）</span>';
+
+  // v4：重新同步是执行层——低权重文字动作；机器解决不了的（准入失败）由核心返回原因
   const rejoin = n.rejoinReset
-    ? `<button class="btn btn-small btn-crt" data-rejoin="${escapeHtml(ns)}" ${(writes && n.selfAuthorized) ? '' : 'disabled'} title="${escapeHtml(rejoinTitle)}">重入恢复</button>`
+    ? `<div class="ctx-row">
+        <span>⟳ 上次退出后本机水位已清空：重新同步后，对端会从头重发这个记忆域（或发初始快照）</span>
+        <button class="link-btn" type="button" data-rejoin="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="${writes ? '对端将从头重发这个记忆域' : '只读模式'}">重新同步…</button>
+      </div>`
     : '';
 
   const isTaskNs = (state.settings?.fleet?.namespace ?? null) === ns;
@@ -411,17 +437,20 @@ function renderDomainDetail(n) {
     <header class="readout-head">
       <span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>${isTaskNs ? '<span class="crt-tag">任务域</span>' : ''}
       <span class="readout-meta">${n.count} 条 · 最近更新 ${n.lastUpdatedAt ? formatTime(n.lastUpdatedAt) : '—'}</span>
-      <span class="readout-meta">HASH ${n.stateHash ? escapeHtml(n.stateHash.slice(0, 10)) : '—'}</span>
-      <span class="crt-tag${n.membershipEnabled ? '' : ' is-off'}">${n.membershipEnabled ? '成员制 ACTIVE' : '成员制 OFF'}</span>
-      ${n.rejoinReset ? '<span class="crt-tag">待重入</span>' : ''}
-      <span class="ns-subscribe"><label class="toggle" title="参与 = 接收这个域并同步本机新增记忆；不参与 = 不再接收（已有的还在）"><input id="ns-subscribe" type="checkbox" data-ns-subscribe="${escapeHtml(ns)}" ${n.subscribed ? 'checked' : ''} ${writes ? '' : 'disabled'}><span class="slider"></span></label><span class="readout-meta">参与这个记忆域</span></span>
+      <span class="ns-subscribe"><label class="toggle" title="参与 = 接收这个记忆域的全部更新，并把本机的新增同步给其他参与设备（参与即数据义务）"><input id="ns-subscribe" type="checkbox" data-ns-subscribe="${escapeHtml(ns)}" aria-label="参与这个记忆域（当前${n.subscribed ? '参与中' : '未参与'}）" ${n.subscribed ? 'checked' : ''} ${writes ? '' : 'disabled'}><span class="slider"></span></label><span class="readout-meta">${n.subscribed ? '参与中' : '未参与'}</span></span>
     </header>
     ${isTaskNs ? '<p class="muted" style="font-size:11px;margin:6px 0 0">任务面：发起节点为根派发任务树，远端 Agent 执行后回传结果（有向无环）；成员/授权闸门同记忆域，但语义不是共享记忆池。</p>' : ''}
-    <div class="readout-block"><span class="domain-label">AUTH →</span><div class="chip-wrap">${granted}</div></div>
-    <div class="readout-block"><span class="domain-label">MEMBERS →</span><div class="chip-wrap">${members}<span class="muted" style="font-size:10.5px;margin-left:6px">在册 = 对端自声明；本机动作 = 批准准入</span></div></div>
-    <div class="readout-block readout-actions">
-      ${rejoin}
-      <button class="btn btn-small btn-crt btn-crt-danger" data-handoff="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="退订交接：继任者全量 ack 后才清理本机数据">退订交接…</button>
+    <p class="relation">${relation}</p>
+    <p class="subscribe-note">参与 = 接收这个记忆域的全部更新；本机新增也同步给其他参与设备（参与即数据义务）。</p>
+    <details class="share" open>
+      <summary>参与的设备</summary>
+      <div class="share-row"><span class="lbl">参与中</span><div class="chip-wrap">${memberChips}</div></div>
+      <div class="share-row"><span class="lbl"></span><span class="share-hint">参与是每台设备自己的决定；图上记录，本机视角。</span></div>
+    </details>
+    ${rejoin}
+    <div class="danger-zone">
+      <button class="danger-link" type="button" data-handoff="${escapeHtml(ns)}" ${writes ? '' : 'disabled'}>退出并交接这个域…</button>
+      <span class="hint">本机数据将清理，已同步给别人的不回撤 · 需二次确认</span>
     </div>
   </article>`;
 
@@ -430,7 +459,7 @@ function renderDomainDetail(n) {
 
 function bindDomainActions() {
   const detail = $('#domain-detail');
-  // 订阅（参与记忆域）：内容管理，即时写 sync.namespaces（空 = 参与全部；关一个 = 白名单化其余）
+  // 参与（记忆域唯一开关）：内容管理，即时写 sync.namespaces（空 = 参与全部；关一个 = 白名单化其余）
   detail.querySelectorAll('[data-ns-subscribe]').forEach((el) => {
     el.addEventListener('change', () => {
       const ns = el.dataset.nsSubscribe;
@@ -440,24 +469,23 @@ function bindDomainActions() {
       const next = on
         ? (current.length === 0 ? [] : [...new Set([...current, ns])])
         : (current.length === 0 ? all : current.filter((x) => x !== ns));
-      void applyConfigField(fieldOf('sync.namespaces'), next);
-    });
-  });
-  detail.querySelectorAll('[data-approve-member]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      if (MOCK) {
-        window.alert('mock 模式不执行写操作。');
+      // 三态翻转提示：声明为空（= 参与全部）时关掉一个域会写成一整张白名单——先讲清后果再动手
+      if (!on && current.length === 0) {
+        void (async () => {
+          const ok = await confirmModal({
+            title: '改为只参与部分记忆域',
+            body: `当前本机参与全部记忆域。关掉「${ns}」后，将改为只参与其余 ${all.length} 个记忆域；之后新出现的记忆域默认不再参与。`,
+            confirmLabel: '确认',
+          });
+          if (!ok) {
+            el.checked = true;
+            return;
+          }
+          void applyConfigField(fieldOf('sync.namespaces'), next);
+        })();
         return;
       }
-      button.disabled = true;
-      try {
-        await api('/admin/api/grants', { method: 'POST', body: { subject: button.dataset.approveMember, namespaces: [button.dataset.ns] } });
-        showToast(`已批准 ${button.dataset.approveMember} 在「${button.dataset.ns}」的准入`);
-        await refresh();
-      } catch (error) {
-        window.alert(`操作失败：${error.message}`);
-        button.disabled = false;
-      }
+      void applyConfigField(fieldOf('sync.namespaces'), next);
     });
   });
   detail.querySelectorAll('[data-rejoin]').forEach((button) => {
@@ -474,30 +502,30 @@ async function doRejoin(ns) {
     return;
   }
   const ok = await confirmModal({
-    title: `重入恢复 ${ns}`,
-    body: `将对「${ns}」声明重入：清空本机该分区水位，对端会从 0 重发（或发初始快照）。前提：本机对该分区有生效授权且重新在册。确定继续？`,
-    confirmLabel: '重入恢复',
+    title: `重新同步 ${ns}`,
+    body: `将对「${ns}」声明重置：清空本机水位，对端会从头重发这个记忆域（或发初始快照）。本机对该记忆域无生效授权时会被拒绝。确定继续？`,
+    confirmLabel: '重新同步',
   });
   if (!ok) return;
   try {
     const result = await api(`/admin/api/namespaces/${encodeURIComponent(ns)}/rejoin`, { method: 'POST', body: {} });
-    if (result?.ok) showToast(`已重入「${ns}」`);
-    else showToast(`重入失败：${result?.reason ?? '条件不满足'}`);
+    if (result?.ok) showToast(`已重新同步「${ns}」`);
+    else showToast(`重新同步失败：${result?.reason ?? '条件不满足'}`);
     await refresh();
   } catch (error) {
     window.alert(`操作失败：${error.message}`);
   }
 }
 
-// ---------- 退订交接（plan 预检 + 强确认；force 不提供） ----------
+// ---------- 退出并交接（plan 预检 + 强确认；force 不提供） ----------
 
 let handoffNs = null;
 
 function openHandoff(ns) {
   handoffNs = ns;
-  $('#handoff-title').textContent = `退订交接 · ${ns}`;
+  $('#handoff-title').textContent = `退出并交接 · ${ns}`;
   $('#handoff-desc').textContent =
-    '退订 = 成员退出 + 本机彻底清理该分区数据与水位（无 tombstone；__policy__ 保留）。清理前必须继任者全量 ack；门禁不过则中止。重入需满足「本机有生效授权 + 重新在册」。';
+    '退出并交接：本机彻底清理该记忆域数据与水位（无 tombstone；__policy__ 保留）。清理前必须继任者全量 ack；门禁不过则中止。如需再次参与并从头重发，需本机对该记忆域有生效授权。';
   $('#handoff-successor').value = '';
   $('#handoff-result').hidden = true;
   $('#handoff-result').textContent = '';
@@ -527,14 +555,14 @@ async function confirmHandoff() {
   const successor = ($('#handoff-successor').value ?? '').trim();
   if (!ns || !successor) return;
   const ok = await confirmModal({
-    title: `退订交接 ${ns}`,
-    body: `将把「${ns}」交接给 ${successor}，并从本机彻底清理该分区数据（不可撤销）。确定继续？`,
-    confirmLabel: '退订并清理',
+    title: `退出并交接 ${ns}`,
+    body: `将把「${ns}」交接给 ${successor}，并从本机彻底清理该记忆域数据（不可撤销）；已同步给别人的不回撤。确定继续？`,
+    confirmLabel: '退出并清理',
   });
   if (!ok) return;
   try {
     const result = await api(`/admin/api/namespaces/${encodeURIComponent(ns)}/leave`, { method: 'POST', body: { successor } });
-    showToast(result?.ok ? `已退订并清理「${ns}」` : `交接中止：${result?.reason ?? '未满足门禁'}`);
+    showToast(result?.ok ? `已退出并清理「${ns}」` : `交接中止：${result?.reason ?? '未满足门禁'}`);
     $('#handoff').hidden = true;
     await refresh();
   } catch (error) {
@@ -919,6 +947,8 @@ function settingsSignature(activeTab) {
     state.clientBusy ?? null,
     state.clientFailed ?? null,
     state.addForm ?? null,
+    // 诊断 · 状态指纹（来自记忆域的 stateHash；轮询内变化时重建）
+    (state.namespaces ?? []).map((n) => [n.namespace, n.stateHash ?? null]),
   ]);
 }
 
@@ -950,7 +980,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   body.innerHTML = `
     ${pendingRestartBanner()}
     ${applyResultBanner()}
-    <div class="settings-tabs" role="tablist" aria-label="设置分区">${IA_TABS.map(tabButton).join('')}${
+    <div class="settings-tabs" role="tablist" aria-label="设置页签">${IA_TABS.map(tabButton).join('')}${
       IA_SETTINGS_EXTRA.map((item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.label)}</button>`).join('')
     }</div>
     ${panel('common', `
@@ -1006,6 +1036,10 @@ function renderDiagnostics() {
         kvRow('TLS', s.mcp.tls ? '已启用' : '未启用（明文 HTTP）'),
         kvRow('控制台写入', state.features.writes ? '可写（写需 memory.admin scope + CSRF）' : '只读（D1 / MEBULAR_CONSOLE_WRITES=0）'),
         kvRow('P2P', s.network.enabled ? '已启用' : '未启用'),
+        // v4：状态指纹（调试信息）从记忆共享第一屏收编到此，格式「域 前10位」
+        kvRow('状态指纹', (state.namespaces ?? []).filter((n) => n.stateHash).length
+          ? escapeHtml((state.namespaces ?? []).filter((n) => n.stateHash).map((n) => `${n.namespace} ${String(n.stateHash).slice(0, 10)}`).join(' · '))
+          : '—'),
       ])}
     </section>
 
@@ -1056,6 +1090,13 @@ function renderDiagnostics() {
 }
 
 let lastAboutSignature = null;
+
+/** 「订阅自动签发」只读文案：默认开（kill-switch = config.json 写 sync.autoGrant.enabled=false）。 */
+function autoGrantRowText() {
+  const raw = state.rawConfig?.config?.sync?.autoGrant?.enabled;
+  if (raw === false) return '关（config.json 已关闭）';
+  return raw === true ? '开' : '开（默认）';
+}
 
 function renderAbout() {
   const body = $('#about-body');
@@ -1118,11 +1159,15 @@ function renderAbout() {
 
     <section class="settings-section" data-info-block="statusOnly">
       <h3>只读状态（自动推导） <span class="badge badge-muted">只读</span></h3>
-      <p class="muted" style="font-size:11px;margin:0 0 8px">这些项由运行时自动决定（relay 池 / LAN 发现 / 桥 / 打洞 / 广播 / join / TLS）：控制台只展示真值与原因，不提供编辑。</p>
-      ${kvRows(statusRows().filter((row) => row.path !== 'sync.autoSync' && row.path !== 'sync.pushOnWrite').map((row) => kvRow(
-        row.label ?? row.path,
-        `${escapeHtml(formatRuntimeValue(row.actual))}${row.reason && row.reason !== '已生效' ? `<span class="cfg-reason"><span class="cfg-eff-key">未生效原因</span> ${escapeHtml(row.reason)}</span>` : ''}`,
-      )))}
+      <p class="muted" style="font-size:11px;margin:0 0 8px">这些项由运行时自动决定（relay 池 / LAN 发现 / 桥 / 打洞 / 广播 / join / TLS / 自动签发）：控制台只展示真值与原因，不提供编辑。</p>
+      ${kvRows([
+        ...statusRows().filter((row) => row.path !== 'sync.autoSync' && row.path !== 'sync.pushOnWrite').map((row) => kvRow(
+          row.label ?? row.path,
+          `${escapeHtml(formatRuntimeValue(row.actual))}${row.reason && row.reason !== '已生效' ? `<span class="cfg-reason"><span class="cfg-eff-key">未生效原因</span> ${escapeHtml(row.reason)}</span>` : ''}`,
+        )),
+        // v4 决策 5：autoGrant 开关曝光（默认开；config.json 置 sync.autoGrant.enabled=false 即关）——只读，不可编辑
+        kvRow('订阅自动签发', autoGrantRowText()),
+      ])}
     </section>
 
     <section class="settings-section" data-info-block="runtime">
@@ -1133,7 +1178,7 @@ function renderAbout() {
           : []),
         kvRow('P2P', s.network.enabled ? '已启用' : '未启用'),
         kvRow('实际监听', escapeHtml(s.network.listen.join(', ') || '—')),
-        kvRow('生效白名单', (s.sync.peerWhitelist ?? []).length ? escapeHtml(s.sync.peerWhitelist.join(', ')) : '未启用（按授权 / 成员制判定）'),
+        kvRow('生效白名单', (s.sync.peerWhitelist ?? []).length ? escapeHtml(s.sync.peerWhitelist.join(', ')) : '未启用（按授权判定）'),
         kvRow('MCP 监听', `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`),
         // R-1 中-5：常驻 plist 全路径从连接页卡片收编到这里
         ...(state.service?.unitPath ? [kvRow('常驻服务文件', `<code>${escapeHtml(state.service.unitPath)}</code>`)] : []),
@@ -1149,7 +1194,7 @@ function renderAbout() {
         kvRow('桥白名单', s.relay ? `${s.relay.allowedClients ?? 0} 个已配对对端` : '—'),
         // C5：地址自动广播（只读；提示类信息，不参与授权）
         kvRow('地址广播', s.net
-          ? `${s.net.enabled ? `${escapeHtml(String(s.net.mode))} 档` : '未开启（opt-in：把 __net__ 加入订阅或配置 network.broadcast）'} · 已发布 ${s.net.published} · 已采用 ${s.net.applied}`
+          ? `${s.net.enabled ? `${escapeHtml(String(s.net.mode))} 档` : '未开启（opt-in：把 __net__ 加入 sync.namespaces 或配置 network.broadcast）'} · 已发布 ${s.net.published} · 已采用 ${s.net.applied}`
           : '—'),
         // C4：NAT 穿透（只读）
         kvRow('NAT 打洞', s.nat
@@ -1197,7 +1242,7 @@ function renderAbout() {
           kvRow('配置', escapeHtml(s.fleet.path ?? 'fleet.config.json')),
         ])
         : '<p class="muted" style="font-size:11px">尚未配置舰队。</p>'}
-      <p class="muted" style="font-size:11px">任务 ≠ 记忆订阅：任务树以发起节点为根派发，远端 Agent 执行后回传结果（有向无环树；经记忆通道传输，但不是共享记忆池）。任务配置由 <code>fleet</code> CLI 管理（<code>fleet.config.json</code>）。${s.fleet?.configured ? '' : ' 上车：<code>fleet quickstart --daemon --dir ~/.mebular --device &lt;ID&gt;</code>'}</p>
+      <p class="muted" style="font-size:11px">任务面 ≠ 记忆域：任务树以发起节点为根派发，远端 Agent 执行后回传结果（有向无环树；经记忆通道传输，但不是共享记忆池）。任务配置由 <code>fleet</code> CLI 管理（<code>fleet.config.json</code>）。${s.fleet?.configured ? '' : ' 上车：<code>fleet quickstart --daemon --dir ~/.mebular --device &lt;ID&gt;</code>'}</p>
     </section>
 
     <section class="settings-section" data-info-block="tools">
@@ -1714,7 +1759,6 @@ function renderAudit() {
   populateAuditFilters();
 
   const list = $('#audit-list');
-  list.innerHTML = '';
   const events = state.policy.filter((event) => {
     if (actionFilter && event.type !== actionFilter) return false;
     if (deviceFilter && event.issuer !== deviceFilter && event.subject !== deviceFilter) return false;
@@ -1723,35 +1767,72 @@ function renderAudit() {
     return true;
   });
   if (events.length === 0) {
-    const li = document.createElement('li');
-    li.className = 'muted';
-    li.textContent = '没有匹配的政策事件。';
-    list.append(li);
+    list.innerHTML = '<li class="muted">没有匹配的政策事件。</li>';
     return;
   }
+  // §7 补充：自动签发行默认折叠为汇总行（「自动签发 ×N ›」，展开见明细）；人工动作保持显眼。
+  // 展开态记在 auditAutoOpen（按组首事件 id 为键）——跨 3s 轮询重渲染不丢。
+  const items = [];
+  let autoGroup = null;
+  const flushAuto = () => {
+    if (!autoGroup) return;
+    items.push(auditAutoGroupHtml(autoGroup));
+    autoGroup = null;
+  };
   for (const event of events) {
-    const li = document.createElement('li');
-    li.className = `audit-item${event.valid ? '' : ' invalid'}`;
-    const time = document.createElement('span');
-    time.className = 'audit-time';
-    time.textContent = formatTime(event.at);
-    const action = document.createElement('span');
-    const actionClass = {
-      namespace_grant: 'grant',
-      namespace_revoke: 'revoke',
-      device_revoke: 'device',
-      policy_issuer_declare: 'declare',
-      namespace_membership: 'membership',
-      namespace_handoff: 'handoff',
-    }[event.type] ?? 'device';
-    action.className = `audit-action ${actionClass}`;
-    action.textContent = actionLabel(event.type);
-    const detail = document.createElement('span');
-    detail.className = 'audit-detail';
-    detail.innerHTML = describeEvent(event);
-    li.append(time, action, detail);
-    list.append(li);
+    if (isAutoGrantEvent(event)) {
+      autoGroup ??= { events: [] };
+      autoGroup.events.push(event);
+    } else {
+      flushAuto();
+      items.push(auditItemHtml(event));
+    }
   }
+  flushAuto();
+  list.innerHTML = items.join('');
+}
+
+const auditAutoOpen = new Set();
+
+/** 自动签发的判据（note 字段）：autoGrant 的 'auto-grant: subscription-driven' / C7 邀请的 'C7 邀请自动授权'。 */
+function isAutoGrantEvent(event) {
+  if (event?.type !== 'namespace_grant') return false;
+  const note = typeof event.note === 'string' ? event.note : '';
+  return /auto-grant/i.test(note) || note.includes('自动授权');
+}
+
+function auditItemHtml(event) {
+  const actionClass = {
+    namespace_grant: 'grant',
+    namespace_revoke: 'revoke',
+    device_revoke: 'device',
+    policy_issuer_declare: 'declare',
+    namespace_membership: 'membership',
+    namespace_handoff: 'handoff',
+  }[event.type] ?? 'device';
+  return `<li class="audit-item${event.valid ? '' : ' invalid'}">
+    <span class="audit-time">${escapeHtml(formatTime(event.at))}</span>
+    <span class="audit-action ${actionClass}">${escapeHtml(actionLabel(event.type))}</span>
+    <span class="audit-detail">${describeEvent(event)}</span>
+  </li>`;
+}
+
+/** 自动签发汇总行：折叠时只有一行「自动签发 ×N」；展开后明细行缩进列出。 */
+function auditAutoGroupHtml(group) {
+  const key = `auto:${group.events[0].eventId}`;
+  const open = auditAutoOpen.has(key);
+  const first = group.events[0];
+  const rows = open
+    ? `<ol class="audit-auto-rows">${group.events.map((event) => auditItemHtml(event)).join('')}</ol>`
+    : '';
+  return `<li class="audit-auto-group">
+    <div class="audit-item audit-auto-head">
+      <span class="audit-time">${escapeHtml(formatTime(first.at))}</span>
+      <span class="audit-action grant">授权</span>
+      <span class="audit-detail"><button class="audit-auto-toggle" type="button" data-audit-auto="${escapeHtml(key)}" aria-expanded="${open}">自动签发 ×${group.events.length} <span class="audit-auto-caret" aria-hidden="true">${open ? '▾' : '▸'}</span></button></span>
+    </div>
+    ${rows}
+  </li>`;
 }
 
 function populateAuditFilters() {
@@ -1786,18 +1867,32 @@ function actionLabel(type) {
   if (type === 'device_revoke') return '屏蔽设备';
   if (type === 'policy_issuer_declare') return '声明签发者';
   if (type === 'namespace_membership') return '成员变更';
-  if (type === 'namespace_handoff') return '退订交接';
+  if (type === 'namespace_handoff') return '退出并交接';
   return type;
+}
+
+/** 审计 id 收敛：截断 8 位 + 点击复制完整值（协议面保留 id，不再全量平铺）。 */
+function auditIdHtml(id) {
+  const full = String(id ?? '');
+  if (!full) return '<span class="muted">grantId=—</span>';
+  const short = full.length > 8 ? `${full.slice(0, 8)}…` : full;
+  return `<span class="muted">grantId=<button class="id-copy" type="button" data-copy-id="${escapeHtml(full)}" title="点击复制完整 grantId" aria-label="复制完整 grantId ${escapeHtml(full)}">${escapeHtml(short)}</button></span>`;
+}
+
+/** 自动签发标记（§7）：note 命中自动判据的行在明细内挂「自动」tag；人工签发不加。 */
+function auditNoteHtml(event) {
+  if (!isAutoGrantEvent(event)) return '';
+  return ` <span class="crt-tag" title="${escapeHtml(String(event.note))}">自动</span>`;
 }
 
 function describeEvent(event) {
   if (event.type === 'namespace_grant') {
     const namespaces = (event.namespaces ?? []).map((ns) => `<span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>`).join(' ');
     return `签发者 <b>${escapeHtml(event.issuer)}</b> → <b>${escapeHtml(event.subject)}</b> ${namespaces} `
-      + `<span class="muted">grantId=${escapeHtml(event.grantId ?? '')}${event.valid ? '' : ' · 已失效'}</span>`;
+      + `${auditIdHtml(event.grantId)}${event.valid ? '' : ' · 已失效'}${auditNoteHtml(event)}`;
   }
   if (event.type === 'namespace_revoke') {
-    return `签发者 <b>${escapeHtml(event.issuer)}</b> 撤销 grantId=${escapeHtml(event.grantId ?? '')}`
+    return `签发者 <b>${escapeHtml(event.issuer)}</b> 撤销 ${auditIdHtml(event.grantId)}`
       + `${event.subject ? `（对象 ${escapeHtml(event.subject)}）` : ''}`;
   }
   if (event.type === 'device_revoke') {
@@ -1892,73 +1987,63 @@ function renderDeviceCard() {
     state.settings?.sync?.subscriptions ?? [], state.settings?.fleet?.namespace ?? null,
     allNamespaces,
     (selfRow0?.memberships ?? []).map((m) => m.namespace),
+    (state.namespaces ?? []).map((n) => [n.namespace, n.subscribed]),
   ]);
   if (cardSignature === lastCardSignature) return;
   lastCardSignature = cardSignature;
-  const peerWrites = writes && !isSelf;
 
   const selfRow = state.devices.find((d) => d.deviceId === state.overview?.device?.deviceId);
   const selfFollowSet = new Set((selfRow?.memberships ?? []).map((m) => m.namespace));
-  const subs = state.settings?.sync?.subscriptions ?? [];
-  const subscribedTo = (ns) => subs.length === 0 || subs.includes(ns);
-  const iFollow = (ns) => subscribedTo(ns) || selfFollowSet.has(ns);
+  const nsList = state.namespaces ?? [];
+  // 参与声明：优先 settings.sync.subscriptions（空 = 全部）；mock 无 settings 时用域记录的参与状态推断
+  const subsDeclared = state.settings?.sync?.subscriptions ?? null;
+  const effectiveSubs = subsDeclared ?? (nsList.some((n) => !n.subscribed) ? nsList.filter((n) => n.subscribed).map((n) => n.namespace) : []);
+  const subscribedTo = (ns) => effectiveSubs.length === 0 || effectiveSubs.includes(ns);
+  // 参与事实：域接口的 subscribed 为权威口径（含「空 = 全部」归一）；缺记录时退回订阅声明 ∪ 图上本机参与记录
+  const nsRecord = new Map(nsList.map((n) => [n.namespace, n]));
+  const iFollow = (ns) => (nsRecord.has(ns) ? nsRecord.get(ns).subscribed || selfFollowSet.has(ns) : subscribedTo(ns));
 
-  // 本机：关注开关（图上在册；订阅声明决定传输层）
+  // 本机：我参与的记忆域（只读；调整参与的唯一入口在「记忆共享」，不再设第二套开关）
   const followRows = allNamespaces.length === 0
-    ? '<li class="muted">暂无已知分区</li>'
-    : allNamespaces.map((ns) => {
-      const following = Boolean((device.memberships ?? []).find((m) => m.namespace === ns));
-      const declared = subscribedTo(ns);
-      const hint = following
-        ? (declared ? '关注中' : '在册 · 订阅声明未含（重启后收发）')
-        : (declared ? '订阅声明含 · 未在册' : '未关注');
-      return `<li>
+    ? '<li class="muted">暂无已知记忆域</li>'
+    : allNamespaces.map((ns) => `<li>
         <span><span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
-          <span class="muted" style="margin-left:6px">${hint}</span></span>
-        <label class="toggle" title="关注 = 接收该域对端新记忆，并把本机该域新记忆同步到其他端（订阅即数据义务）">
-          <input type="checkbox" data-follow="${escapeHtml(ns)}" aria-label="关注数据域 ${escapeHtml(ns)}（当前${following ? '关注中' : '未关注'}）" ${following ? 'checked' : ''} ${writes ? '' : 'disabled'}>
-          <span class="slider"></span>
-        </label>
-      </li>`;
-    }).join('');
+          <span class="muted" style="margin-left:6px">${iFollow(ns) ? '参与中' : '未参与'}</span></span>
+      </li>`).join('');
 
-  // 对端：它关注的域（对端从自身出发声明的图上在册，只读）
+  // 对端：它参与的记忆域（对端从自身出发声明的图上记录，只读）
   const peerFollowRows = (device.memberships ?? []).length
     ? device.memberships.map((m) => `<li>
         <span><span class="ns-chip" style="background:${namespaceColor(m.namespace)}">${escapeHtml(m.namespace)}</span>
-          <span class="muted" style="margin-left:6px">${m.effective ? '在册 · 生效' : '在册 · 待你批准准入'}</span></span>
+          <span class="muted" style="margin-left:6px">参与中</span></span>
       </li>`).join('')
-    : '<li class="muted">对端尚未声明关注任何域</li>';
+    : '<li class="muted">对端尚未声明参与任何记忆域</li>';
 
-  // 对端：互通状态 = 你关注 ∩ 它关注 ∩ 它已获授权（默认拒绝的准入）
+  // 对端：参与情况 = 参与事实的中性陈述（v4：域级审批不存在；自动签发后授权即参与的机器回执）
   const authorizedSet = new Set(device.authorizedFor ?? []);
   const peerFollowSet = new Set((device.memberships ?? []).map((m) => m.namespace));
   const domains = [...new Set([...allNamespaces, ...peerFollowSet, ...authorizedSet])].sort();
   const interop = domains.map((ns) => {
-    const peerFollows = peerFollowSet.has(ns);
-    const authorized = authorizedSet.has(ns);
-    const mutual = peerFollows && authorized && iFollow(ns);
-    const state = mutual ? '✓ 可互通'
-      : peerFollows && !authorized ? '待你批准'
-        : !peerFollows && authorized ? '已授权 · 待对端关注'
-          : '未互通';
-    const action = peerFollows && !authorized
-      ? `<button class="btn btn-small btn-crt" data-approve="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="批准对端准入：签发授权（已同步内容不回撤）">批准</button>`
-      : authorized
-        ? `<button class="btn btn-small btn-crt btn-crt-danger" data-revoke-ns="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="撤回该域的授权">撤回</button>`
-        : '';
-    return { ns, state, action };
+    const peerIn = peerFollowSet.has(ns) || authorizedSet.has(ns);
+    const mineIn = iFollow(ns);
+    const noContent = !allNamespaces.includes(ns);
+    let fact = '';
+    if (peerIn && mineIn) fact = '双方都在参与';
+    else if (peerIn) fact = '它在参与 · 本机未参与';
+    else if (mineIn) fact = '本机参与中 · 它未参与';
+    // 「有参与、零内容」的域不占主列表，但在这里可见（协作形成信号不丢）
+    if (fact && noContent) fact += ' · 这个域还没有内容';
+    return { ns, fact };
   });
-  const visibleInterop = interop.filter((row) => row.state !== '未互通');
+  const visibleInterop = interop.filter((row) => row.fact !== '');
   const hiddenCount = interop.length - visibleInterop.length;
   const interopRows = (visibleInterop.length > 0
     ? visibleInterop.map((row) => `<li>
         <span><span class="ns-chip" style="background:${namespaceColor(row.ns)}">${escapeHtml(row.ns)}</span>
-          <span class="muted" style="margin-left:6px">${row.state}</span></span>
-        ${row.action}
+          <span class="muted" style="margin-left:6px">${row.fact}</span></span>
       </li>`).join('')
-    : '<li class="muted">暂无需处理的域</li>')
-    + (hiddenCount > 0 ? `<li class="muted">另有 ${hiddenCount} 个域未互通（双方均未关注/授权）</li>` : '');
+    : '<li class="muted">暂无需处理的记忆域</li>')
+    + (hiddenCount > 0 ? `<li class="muted">另有 ${hiddenCount} 个记忆域双方均未参与</li>` : '');
 
   const actions = isSelf ? '' : `
     <div class="card-actions">
@@ -1985,13 +2070,14 @@ function renderDeviceCard() {
     ${metaParts.length > 0 ? `<p class="card-meta muted">${escapeHtml(metaParts.join(' · '))}</p>` : '<p class="card-meta muted"></p>'}
     <ul class="path-list" aria-label="连接路径（只读）">${pathRow}</ul>
     ${isSelf ? `
-    <h3>我关注的域 <span class="h3-note">M 记忆域 · 订阅即数据义务</span></h3>
-    <p class="card-help muted">关注后①有权接收该域对端变更；②本机该域新记忆同步给在册成员 / 已授权且关注的对端。图上在册即时生效；订阅声明需重启传输层。</p>
+    <h3>我参与的记忆域 <span class="h3-note">参与即数据义务</span></h3>
+    <p class="card-help muted">参与 = 接收该记忆域的更新，本机新增也同步给其他参与设备。此处只读；调整参与请到「记忆共享」。</p>
     <ul class="chip-list">${followRows}</ul>
+    <div class="card-actions"><button class="btn btn-small btn-crt" type="button" data-action="goto-domains">去「记忆共享」调整 ›</button></div>
     ` : `
-    <h3>它关注的域 <span class="h3-note">对端自声明</span></h3>
+    <h3>它参与的记忆域 <span class="h3-note">对端自声明 · 图上记录</span></h3>
     <ul class="chip-list">${peerFollowRows}</ul>
-    <h3>互通状态 <span class="h3-note">需你关注 + 它关注 + 已获授权</span></h3>
+    <h3>参与情况 <span class="h3-note">本机视角</span></h3>
     <ul class="chip-list">${interopRows}</ul>
     `}
     ${actions}
@@ -2001,12 +2087,6 @@ function renderDeviceCard() {
   if (advancedEl && advancedOpen) advancedEl.open = true;
   body.querySelectorAll('[data-action]').forEach((button) => {
     button.addEventListener('click', () => handleDeviceAction(button.dataset.action, device));
-  });
-  body.querySelectorAll('[data-approve]').forEach((button) => {
-    button.addEventListener('click', () => handleApprove(device, button.dataset.approve, button));
-  });
-  body.querySelectorAll('[data-revoke-ns]').forEach((button) => {
-    button.addEventListener('click', () => handleRevokeNamespace(device, button.dataset.revokeNs, button));
   });
 
   // 高度收口：内容/文案变化导致的高度差 → 220ms 平滑过渡（否则贴底抽屉顶边瞬跳）
@@ -2018,92 +2098,8 @@ function renderDeviceCard() {
         { duration: 220, easing: 'cubic-bezier(0.22, 0.8, 0.24, 1)' },
       );
     }
-  }}
-
-/** 本机关注（= 图上在册）＋ 需要时同步订阅声明（构造期配置，重启后传输层生效） */
-async function handleFollowToggle(device, ns, on, input) {
-  input.disabled = true;
-  try {
-    if (MOCK) {
-      window.alert('mock 模式不执行写操作。');
-      input.checked = !on;
-      return;
-    }
-    await api('/admin/api/memberships', { method: 'POST', body: { member: device.deviceId, namespace: ns, active: on } });
-    const subs = state.settings?.sync?.subscriptions ?? [];
-    let patched = false;
-    let hint = '';
-    if (on && subs.length > 0 && !subs.includes(ns)) {
-      await api('/admin/api/config', { method: 'POST', body: { patch: { sync: { namespaces: [...subs, ns] } } } });
-      patched = true;
-    } else if (!on && subs.includes(ns)) {
-      const next = subs.filter((x) => x !== ns);
-      if (next.length > 0) {
-        await api('/admin/api/config', { method: 'POST', body: { patch: { sync: { namespaces: next } } } });
-        patched = true;
-      } else {
-        hint = '；订阅声明为空 = 参与全部，如需排除请手工编辑';
-      }
-    } else if (!on && subs.length === 0) {
-      hint = '；订阅声明为「全部」，传输层仍会接收，如需排除请编辑订阅声明并重启';
-    }
-    showToast(on
-      ? `已关注「${ns}」${patched ? '：订阅声明已更新，重启 serve 后传输层生效' : ''}`
-      : `已取消关注「${ns}」${patched ? '：订阅声明已更新，重启 serve 后传输层生效' : ''}${hint}`);
-    await refresh();
-  } catch (error) {
-    window.alert(`操作失败：${error.message}`);
-    input.checked = !on;
-  } finally {
-    input.disabled = false;
   }
 }
-
-/** 批准对端准入：签发授权（默认拒绝下的准入动作，对应 fleet approve） */
-async function handleApprove(device, ns, button) {
-  if (MOCK) {
-    window.alert('mock 模式不执行写操作。');
-    return;
-  }
-  button.disabled = true;
-  try {
-    await api('/admin/api/grants', { method: 'POST', body: { subject: device.deviceId, namespaces: [ns] } });
-    showToast(`已批准 ${device.deviceId} 在「${ns}」的准入（签发授权）`);
-    await refresh();
-  } catch (error) {
-    window.alert(`操作失败：${error.message}`);
-    button.disabled = false;
-  }
-}
-
-/** 撤回某域授权（已同步内容不回撤） */
-async function handleRevokeNamespace(device, ns, button) {
-  if (MOCK) {
-    window.alert('mock 模式不执行写操作。');
-    return;
-  }
-  const ok = await confirmModal({
-    title: `撤回授权 ${ns}`,
-    body: `${device.deviceId} 不会再收到关于「${ns}」的新记忆；已同步内容不会撤回；可用重新批准恢复。`,
-    confirmLabel: '撤回授权',
-  });
-  if (!ok) return;
-  button.disabled = true;
-  try {
-    const grantIds = grantsCovering(device.deviceId, ns);
-    for (const grantId of grantIds) {
-      await api(`/admin/api/grants/${encodeURIComponent(grantId)}/revoke`, { method: 'POST', body: {} });
-    }
-    showToast(grantIds.length > 0 ? `已撤回「${ns}」的授权` : `「${ns}」没有可撤回的授权`);
-    await refresh();
-  } catch (error) {
-    window.alert(`操作失败：${error.message}`);
-    button.disabled = false;
-  }
-}
-
-
-
 
 // ---------- 交互 ----------
 
@@ -2412,6 +2408,8 @@ function setView(view) {
   renderOverlays();
   const asideEl = document.querySelector('.aside');
   if (asideEl) asideEl.classList.toggle('is-open', view === 'map' && Boolean(state.selected));
+  // 设备卡空壳处理：面板视图（记忆共享/审计/记忆）整体隐藏右栏，窄屏不再占底部一行
+  document.querySelector('.layout')?.classList.toggle('is-panel-view', view !== 'map');
   syncStageActivity();
 }
 
@@ -2439,6 +2437,19 @@ $('#audit-filter-action').addEventListener('change', renderAudit);
 $('#audit-filter-device').addEventListener('change', renderAudit);
 $('#audit-filter-namespace').addEventListener('change', renderAudit);
 $('#audit-filter-time')?.addEventListener('change', renderAudit);
+// 审计：自动签发汇总行的展开/收起（§7）+ id 收敛（点击截断的 grantId → 复制完整值）
+$('#audit-list')?.addEventListener('click', (event) => {
+  const toggle = event.target.closest('[data-audit-auto]');
+  if (toggle) {
+    const key = toggle.dataset.auditAuto;
+    if (auditAutoOpen.has(key)) auditAutoOpen.delete(key);
+    else auditAutoOpen.add(key);
+    renderAudit();
+    return;
+  }
+  const button = event.target.closest('[data-copy-id]');
+  if (button) void copyText(button.dataset.copyId, button);
+});
 
 $('#mem-filter-archived')?.addEventListener('change', (event) => {
   state.memoryFilters.archived = event.target.checked;
@@ -2484,20 +2495,11 @@ $('#audit-export').addEventListener('click', () => {
 
 // ---------- 写操作（D2；features.writes 打开后可用） ----------
 
-function grantsCovering(deviceId, ns) {
-  const selfId = state.overview?.device?.deviceId;
-  return state.policy
-    .filter((event) => event.type === 'namespace_grant'
-      && event.valid
-      && event.issuer === selfId
-      && event.subject === deviceId
-      && (event.namespaces ?? []).includes(ns))
-    .map((event) => event.grantId);
-}
-
-
-
 async function handleDeviceAction(action, device) {
+  if (action === 'goto-domains') {
+    setView('domains');
+    return;
+  }
   if (action === 'sync') {
     const self = state.overview?.device?.deviceId;
     if (self) stage.launchFleet(self, device.deviceId, { kind: 'mine', ships: 3 });
@@ -2511,7 +2513,7 @@ async function handleDeviceAction(action, device) {
   } else if (action === 'reset-watermarks') {
     const ok = await confirmModal({
       title: '重置同步水位',
-      body: `将清除与 ${device.deviceId} 的本机同步水位。已同步内容不会撤回；最多导致已确认事件冗余重发一次。`,
+      body: `将清除与 ${device.deviceId} 的本机同步水位。已同步内容不会回撤；最多导致已确认事件冗余重发一次。`,
       confirmLabel: '重置',
     });
     if (ok) await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/reset-watermarks`, {}, '水位已重置');
@@ -2675,7 +2677,7 @@ async function renderInvite(overrideEndpoint = null) {
       ? `<div class="readout-block qr-block">
           <span class="domain-label">扫码即通（QR 内容 = 令牌文本）</span>
           <img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />
-          <p class="cfg-help muted">${res.grantOnJoin === false ? '本令牌不自动授权（需对端手动批准）' : '兑换后自动授权（作用域=令牌分区；默认 24h 后自动撤销）'}</p>
+          <p class="cfg-help muted">${res.grantOnJoin === false ? '本令牌不自动授权（对端参与该记忆域后自动签发）' : '兑换后自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）'}</p>
         </div>`
       : `<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用下方文本令牌。</p>`;
     const endpointEditor = `
@@ -2696,21 +2698,14 @@ async function renderInvite(overrideEndpoint = null) {
         ${endpointEditor}
         <dl class="settings-kv">
           <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>
-          <dt>默认成员分区</dt><dd><code>${escapeHtml(res.namespace)}</code></dd>
+          <dt>默认记忆域</dt><dd><code>${escapeHtml(res.namespace)}</code></dd>
           <dt>有效期至</dt><dd>${escapeHtml(formatTime(res.expiresAt))}（一次性）</dd>
         </dl>
         <div class="readout-block">
           <span class="domain-label">新设备</span>
           <div class="copyable"><code>${escapeHtml(shortCmd)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(cmd)}">复制命令</button></div>
         </div>
-        <div class="readout-block">
-          <span class="domain-label">本机批准</span>
-          <div class="copyable"><code>fleet approve --dir ~/.mebular --device &lt;新设备ID&gt; --addr &lt;其 multiaddr&gt;</code><button class="btn btn-small btn-crt" data-copy="fleet approve --dir ~/.mebular --device &lt;新设备ID&gt; --addr &lt;其 multiaddr&gt;">复制</button></div>
-        </div>
-        <div class="readout-block">
-          <span class="domain-label">查看待批</span>
-          <div class="copyable"><code>fleet pending --dir ~/.mebular</code><button class="btn btn-small btn-crt" data-copy="fleet pending --dir ~/.mebular">复制</button></div>
-        </div>
+        <p class="cfg-help muted">兑换令牌只建立入网信任（安全边界在入网）；该设备之后按自己的参与选择收发（参与是每台设备自己的决定）。</p>
         <p class="crt-warn">⚠ 令牌即入网权限：一次性、短时效（默认 15 分钟），仅经可信 LAN 使用，请勿写入工单或公开日志。</p>
         <div class="asst-detail-actions">
           <button class="btn btn-small" id="invite-regen-inline" type="button">重新生成邀请（旧令牌立即失效）</button>
@@ -2739,6 +2734,9 @@ async function renderInvite(overrideEndpoint = null) {
 }
 
 $('#invite-device').addEventListener('click', openInvite);
+// v4 空态的两个去向动作（与顶栏同名动作：＋邀请新设备 / ＋连接已有地址）
+$('#domains-empty-invite')?.addEventListener('click', openInvite);
+$('#domains-empty-connect')?.addEventListener('click', openWizard);
 $('#invite-close').addEventListener('click', () => {
   $('#invite').hidden = true;
 });
@@ -2782,7 +2780,7 @@ $('#wizard-next').addEventListener('click', wizardNext);
 const STEP_LABELS = {
   local: '① 本机信息 / 对端地址',
   connect: '② 建立连接',
-  domains: '③ 选择共享域',
+  domains: '③ 选择记忆域',
   done: '④ 完成',
 };
 
@@ -2853,13 +2851,13 @@ function renderWizard() {
   } else if (wizardState.step === 'domains') {
     const entries = state.namespaces;
     body.innerHTML = `
-      <p class="wizard-note">选择要共享给 <code>${escapeHtml(wizardState.deviceId)}</code> 的域（默认全不选）。将共享约 ${selectedMemoryCount(entries, wizardState.selected)} 条记忆。</p>
+      <p class="wizard-note">选择要共享的记忆域（默认全不选）。将共享约 ${selectedMemoryCount(entries, wizardState.selected)} 条记忆给 <code>${escapeHtml(wizardState.deviceId)}</code>。</p>
       <ul class="wizard-list">${entries.length
         ? entries.map((entry) => {
           const checked = wizardState.selected.includes(entry.namespace);
           return `<li><label><input type="checkbox" data-wizard-ns="${escapeHtml(entry.namespace)}" ${checked ? 'checked' : ''}> <span class="ns-chip" style="background:${namespaceColor(entry.namespace)}">${escapeHtml(entry.namespace)}</span> <span class="muted">${entry.count} 条</span></label></li>`;
         }).join('')
-        : '<li class="muted">暂无分区</li>'}</ul>
+        : '<li class="muted">暂无记忆域</li>'}</ul>
     `;
     next.textContent = wizardState.granting ? '签发中…' : '签发授权';
     next.disabled = wizardState.granting || wizardState.selected.length === 0;
@@ -2871,7 +2869,7 @@ function renderWizard() {
     body.innerHTML = `
       <p class="wizard-note">已向 <code>${escapeHtml(wizardState.deviceId)}</code> 签发授权。</p>
       <div class="field"><label>grantId</label><div class="copyable"><code>${escapeHtml(wizardState.grantId ?? '')}</code><button class="btn btn-small" data-copy="${escapeHtml(wizardState.grantId ?? '')}">复制</button></div></div>
-      <p class="wizard-note">之后可在设备卡继续调整域开关。</p>
+      <p class="wizard-note">之后可在「记忆共享」查看双方的参与情况。</p>
     `;
     next.textContent = '完成';
     next.disabled = false;
@@ -2975,8 +2973,20 @@ function escapeHtml(value) {
 
 // ---------- mock 数据 ----------
 
+// mock 的完整记忆清单（供记忆视图过滤演示；id 用短 ULID 样式）
+const MOCK_MEMORIES = [
+  { id: '01MOCKMEMORY000000000000001', type: 'fact', namespace: 'notes', preview: '演示记忆：mock 数据已补齐，记忆视图可无网络验收', createdAt: 0, archived: false, deleted: false },
+  { id: '01MOCKMEMORY000000000000002', type: 'note', namespace: 'work', preview: '第二条演示记忆（已归档示例）', createdAt: 0, archived: true, deleted: false },
+  { id: '01MOCKMEMORY000000000000003', type: 'fact', namespace: 'default', preview: '第三条演示记忆', createdAt: 0, archived: false, deleted: false },
+];
+
 async function mockData() {
   const now = Date.now();
+  // 记忆视图：按当前过滤器在本地过滤（?mock=1 是契约规定的无网络验收路径）
+  const f = state.memoryFilters;
+  const memories = MOCK_MEMORIES
+    .filter((m) => (f.archived || !m.archived) && (f.deleted || !m.deleted) && (!f.namespace || m.namespace === f.namespace))
+    .map((m) => ({ ...m, createdAt: now - 240_000, ...(m.archived ? { archivedAt: now - 120_000 } : {}) }));
   return {
     overview: {
       device: { deviceId: 'device-A', name: 'device-A', peerId: 'peer-a', multiaddrs: ['/ip4/127.0.0.1/tcp/4001/p2p/peer-a'], relays: [] },
@@ -2990,22 +3000,41 @@ async function mockData() {
       features: { writes: false },
     },
     devices: [
-      { deviceId: 'device-A', online: true, grantedByMe: ['notes', 'work'], grantedToMe: [], revoked: false, pendingEventCount: 0 },
-      { deviceId: 'device-B', online: true, peerId: 'peer-b', addrs: ['/ip4/127.0.0.1/tcp/4011'], lastSyncAt: now - 65_000, grantedByMe: ['notes'], grantedToMe: ['work'], revoked: false, pendingEventCount: 3 },
-      { deviceId: 'device-C', online: false, grantedByMe: ['work'], grantedToMe: [], revoked: false, pendingEventCount: 1 },
-      { deviceId: 'device-D', online: false, grantedByMe: [], grantedToMe: [], revoked: true },
+      { deviceId: 'device-A', online: true, grantedByMe: ['notes', 'work'], grantedToMe: [], authorizedFor: [], memberships: [{ namespace: 'notes', active: true, effective: true }], revoked: false, pendingEventCount: 0 },
+      // ledger：对端已参与但本机还没有任何内容——「有参与、零内容」的域不占主列表，但设备卡可见
+      { deviceId: 'device-B', online: true, peerId: 'peer-b', addrs: ['/ip4/127.0.0.1/tcp/4011'], lastSyncAt: now - 65_000, grantedByMe: ['notes'], grantedToMe: ['work'], authorizedFor: ['notes'], memberships: [{ namespace: 'notes', active: true, effective: true }, { namespace: 'ledger', active: true, effective: false }], revoked: false, pendingEventCount: 3 },
+      { deviceId: 'device-C', online: false, grantedByMe: ['work'], grantedToMe: [], authorizedFor: ['work'], memberships: [], revoked: false, pendingEventCount: 1 },
+      { deviceId: 'device-D', online: false, grantedByMe: [], grantedToMe: [], authorizedFor: [], memberships: [], revoked: true },
     ],
+    // v4：成员制/参与字段齐备（membershipEnabled/members/effectiveMembers/grantedTo/subscribed/rejoinReset/selfAuthorized/selfMember）
     namespaces: [
-      { namespace: 'notes', count: 42, lastUpdatedAt: now - 120_000, stateHash: 'h1' },
-      { namespace: 'work', count: 70, lastUpdatedAt: now - 300_000, stateHash: 'h2' },
-      { namespace: 'default', count: 16, lastUpdatedAt: now - 900_000, stateHash: 'h3' },
+      {
+        namespace: 'notes', count: 42, lastUpdatedAt: now - 120_000, stateHash: 'h1',
+        membershipEnabled: true, members: ['device-B', 'device-C'], effectiveMembers: ['device-B', 'device-C'],
+        grantedTo: [{ deviceId: 'device-B', grantId: 'g-b', at: now - 900_000 }, { deviceId: 'device-C', grantId: 'g-c', at: now - 300_000 }],
+        subscribed: true, rejoinReset: false, selfAuthorized: false, selfMember: null,
+      },
+      {
+        namespace: 'work', count: 70, lastUpdatedAt: now - 300_000, stateHash: 'h2',
+        membershipEnabled: false, members: [], effectiveMembers: [], grantedTo: [],
+        subscribed: false, rejoinReset: false, selfAuthorized: false, selfMember: null,
+      },
+      {
+        namespace: 'default', count: 16, lastUpdatedAt: now - 900_000, stateHash: 'h3',
+        membershipEnabled: false, members: [], effectiveMembers: [], grantedTo: [],
+        subscribed: true, rejoinReset: false, selfAuthorized: false, selfMember: null,
+      },
     ],
+    memories: { total: memories.length, memories, includeArchived: f.archived, includeDeleted: f.deleted },
     policy: [
-      { eventId: 'e5', type: 'namespace_grant', issuer: 'device-A', subject: 'device-C', namespaces: ['work'], grantId: 'g-c', at: now - 300_000, valid: true },
-      { eventId: 'e3', type: 'namespace_revoke', issuer: 'device-A', subject: 'device-D', grantId: 'g-d', at: now - 600_000, valid: true },
+      { eventId: 'e5', type: 'namespace_grant', issuer: 'device-A', subject: 'device-C', namespaces: ['work'], grantId: 'g-c0000000-1111-2222-3333-444455556666', at: now - 300_000, valid: true, note: 'auto-grant: subscription-driven' },
+      // 连续自动签发行（§7：默认折叠为「自动签发 ×3」汇总行，展开见明细）
+      { eventId: 'e6', type: 'namespace_grant', issuer: 'device-A', subject: 'device-B', namespaces: ['notes'], grantId: 'g-b0000000-1111-2222-3333-444455556666', at: now - 320_000, valid: true, note: 'auto-grant: subscription-driven' },
+      { eventId: 'e7', type: 'namespace_grant', issuer: 'device-A', subject: 'device-C', namespaces: ['notes'], grantId: 'g-c0000000-1111-2222-3333-444455556667', at: now - 340_000, valid: true, note: 'auto-grant: subscription-driven' },
+      { eventId: 'e3', type: 'namespace_revoke', issuer: 'device-A', subject: 'device-D', grantId: 'g-d0000000-1111-2222-3333-444455556666', at: now - 600_000, valid: true },
       { eventId: 'e2', type: 'device_revoke', issuer: 'device-A', subject: 'device-D', at: now - 700_000, valid: true },
-      { eventId: 'e0', type: 'namespace_grant', issuer: 'device-A', subject: 'device-D', namespaces: ['work'], grantId: 'g-d', at: now - 800_000, valid: false },
-      { eventId: 'e1', type: 'namespace_grant', issuer: 'device-A', subject: 'device-B', namespaces: ['notes'], grantId: 'g-b', at: now - 900_000, valid: true },
+      { eventId: 'e0', type: 'namespace_grant', issuer: 'device-A', subject: 'device-D', namespaces: ['work'], grantId: 'g-d0000000-1111-2222-3333-444455556666', at: now - 800_000, valid: false },
+      { eventId: 'e1', type: 'namespace_grant', issuer: 'device-A', subject: 'device-B', namespaces: ['notes'], grantId: 'g-b0000000-1111-2222-3333-444455556666', at: now - 900_000, valid: true },
     ],
     degraded: null,
   };

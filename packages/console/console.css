@@ -275,6 +275,25 @@ select {
 .audit-action.device { color: var(--danger); }
 .audit-detail { color: var(--text); }
 .audit-detail .muted { color: var(--muted); }
+/* A-3：grantId 收敛——截断 8 位 + 点击复制（协议面保留 id，不再全量平铺） */
+.id-copy {
+  background: none; border: none; padding: 0; font: inherit; font-size: inherit;
+  color: inherit; cursor: pointer; text-decoration: underline dotted;
+  text-underline-offset: 2px; opacity: 0.85;
+}
+.id-copy:hover { color: var(--accent); opacity: 1; }
+/* §7 补充：自动签发默认折叠为汇总行（展开见明细；人工动作保持显眼） */
+.audit-auto-toggle {
+  background: none; border: none; padding: 0; font: inherit; font-size: 12px;
+  color: var(--crt-dim); cursor: pointer; text-align: left;
+}
+.audit-auto-toggle:hover { color: var(--crt-bright); }
+.audit-auto-caret { color: var(--crt-dim); }
+.audit-auto-rows {
+  list-style: none; margin: 6px 0 0; padding: 0 0 0 16px;
+  display: grid; gap: 6px; border-left: 1px dashed rgba(80, 255, 170, 0.22);
+}
+.audit-auto-rows .audit-item { opacity: 0.85; }
 
 /* ---------- 设备卡 ---------- */
 .card { background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; }
@@ -1106,6 +1125,57 @@ html { scrollbar-gutter: stable; }
 .aside, .modal, .wizard-list, .snippet, .connect-diff, .panel-view, #settings-body { scrollbar-gutter: stable; }
 /* 走查修复：审计/域视图此前漏了 gutter——切换视图后内容溢出时 10px 滚动条挤动面板（「展开后跳一下」） */
 
-/* 简化轮：记忆共享 · 参与开关 */
-.ns-subscribe { display: inline-flex; align-items: center; gap: 6px; margin-left: 6px; }
+/* 简化轮：记忆共享 · 参与开关（v4：状态文字化，开关贴右） */
+.ns-subscribe { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
 .diag-fold { margin-top: 14px; }
+
+/* ---------- v4 记忆共享：参与事实 · 危险区 · 空态（scene-1/2） ---------- */
+.sector-meta.off { color: rgba(140, 255, 200, 0.35); }
+.relation { margin: 10px 0 0; font-size: 12.5px; color: var(--crt-bright); }
+.subscribe-note { margin: 6px 0 0; font-size: 11px; color: rgba(140, 255, 200, 0.5); line-height: 1.6; }
+details.share { margin-top: 10px; border-top: 1px dashed rgba(80, 255, 170, 0.22); padding-top: 8px; }
+details.share summary { cursor: pointer; color: rgba(140, 255, 200, 0.75); font-size: 11.5px; list-style: none; }
+details.share summary::before { content: "▸ "; color: var(--crt-dim); }
+details.share[open] summary::before { content: "▾ "; }
+.share-row { display: flex; gap: 8px; align-items: baseline; margin-top: 8px; font-size: 12px; flex-wrap: wrap; }
+.share-row .lbl { min-width: 56px; color: var(--crt-dim); font-size: 11px; }
+.share-hint { color: rgba(140, 255, 200, 0.45); font-size: 11px; }
+/* 危险动作不藏：卡尾独立危险区（低权重文字链 + 全名 + 二次确认） */
+.danger-zone {
+  margin-top: 12px; border-top: 1px solid rgba(255, 155, 155, 0.22);
+  padding-top: 8px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+.danger-link {
+  background: none; border: none; padding: 0; font: inherit; font-size: 11.5px;
+  color: #ff9b9b; text-decoration: underline; text-underline-offset: 3px;
+  text-decoration-color: rgba(255, 155, 155, 0.5); cursor: pointer;
+}
+.danger-link:disabled { opacity: 0.45; cursor: not-allowed; }
+.danger-zone .hint { color: rgba(255, 155, 155, 0.45); font-size: 11px; }
+/* 低权重文字动作（重新同步 / 空态去向） */
+.link-btn {
+  background: none; border: none; padding: 0; font: inherit; font-size: inherit;
+  color: #9dffcf; text-decoration: underline; text-underline-offset: 3px;
+  text-decoration-color: rgba(120, 255, 190, 0.45); cursor: pointer;
+}
+.link-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+/* 执行层状态行（同步中断恢复）：参与开着而水位已清时的进行态/待办 */
+.ctx-row {
+  margin-top: 10px; padding: 8px 10px; border: 1px solid rgba(255, 210, 122, 0.35);
+  border-radius: 6px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  background: rgba(60, 42, 8, 0.25); font-size: 12px; color: #ffe3ae;
+}
+.ctx-row .link-btn { color: #ffe3ae; text-decoration-color: rgba(255, 227, 174, 0.5); }
+/* 空态：解释来源 + 一个去向动作；左右布局整体让位（scene-2） */
+.domains-empty { max-width: 640px; margin-top: 10px; padding: 34px 22px 28px; }
+.empty-glyph { font-size: 20px; color: var(--crt-dim); margin-bottom: 10px; }
+.empty-big { color: var(--crt-bright); font-size: 14px; font-weight: 700; margin: 0 0 10px; }
+.empty-text { color: rgba(140, 255, 200, 0.62); font-size: 12.5px; line-height: 1.8; margin: 0 0 18px; }
+.empty-sub { margin: 12px 0 0; font-size: 11px; }
+/* 面板视图收纳设备卡空壳：非星图视图整体隐藏右栏（窄屏不再占底部一行） */
+.layout.is-panel-view .aside { display: none; }
+/* 窄屏：常驻横幅不再压副标题/统计——面板内容随横幅让位（toast 不受影响） */
+@media (max-width: 900px) {
+  .stage-wrap.has-banner .panel-view { padding-top: 76px; }
+  .banner { max-width: calc(100% - 24px); }
+}

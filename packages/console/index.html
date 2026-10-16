@@ -30,9 +30,9 @@
       <nav class="sidebar">
         <ul id="view-nav" class="view-tabs">
           <li><button class="view-btn is-active" data-view="map" type="button"><span class="view-icon">●</span><span class="view-label">星图</span></button></li>
-          <li><button class="view-btn" data-view="domains" type="button"><span class="view-icon">○</span><span class="view-label">记忆共享</span></button></li>
-          <li><button class="view-btn" data-view="audit" type="button"><span class="view-icon">○</span><span class="view-label">审计</span></button></li>
+          <li><button class="view-btn" data-view="domains" type="button"><span class="view-icon">○</span><span class="view-label">共享</span></button></li>
           <li><button class="view-btn" data-view="memories" type="button"><span class="view-icon">○</span><span class="view-label">记忆</span></button></li>
+          <li><button class="view-btn" data-view="audit" type="button"><span class="view-icon">○</span><span class="view-label">审计</span></button></li>
         </ul>
         <section id="legend-panel" class="legend-panel crt-surface crt-corners is-collapsed">
           <button id="legend-toggle" class="legend-head" type="button" aria-expanded="false" aria-controls="legend-body">
@@ -66,11 +66,19 @@
             <h2>记忆共享</h2>
             <div id="domains-stats" class="view-head-stats"></div>
           </div>
-          <p class="panel-note muted">你的记忆跟谁共享、共享了哪些，都在这里。左边是记忆域，点开可以看共享给谁、要不要参与。</p>
-          <div class="domains-layout">
+          <p id="domains-note" class="panel-note muted">你的记忆跟谁共享、共享了哪些，都在这里。左边是记忆域，点开可以看谁也在参与、要不要参与。</p>
+          <div id="domains-layout" class="domains-layout">
             <div id="domains-list" class="sector-list crt-surface crt-corners"></div>
             <div id="domain-detail" class="sector-detail"></div>
           </div>
+          <!-- v4 空态（scene-2）：解释来源 + 一个去向动作；0 域不渲染统计、右栏不留空白 -->
+          <section id="domains-empty" class="domains-empty crt-surface crt-corners" hidden>
+            <div class="empty-glyph" aria-hidden="true">✦</div>
+            <p class="empty-big">还没有可以共享的记忆</p>
+            <p class="empty-text">记忆域是记忆的分类，会随助手写入自动出现。每台设备自己决定参与哪些域——参与就接收更新、也承担同步义务；没入网的设备拿不到任何数据。</p>
+            <button id="domains-empty-invite" class="btn btn-primary" type="button">＋ 邀请新设备</button>
+            <p class="empty-sub muted">也可以先从「<button id="domains-empty-connect" class="link-btn" type="button">＋ 连接已有地址</button>」接入一台已知设备。</p>
+          </section>
         </section>
         <section id="audit-view" class="panel-view crt-screen" hidden>
           <div class="audit-toolbar">
@@ -85,7 +93,7 @@
                 <option value="device_revoke">屏蔽设备</option>
                 <option value="policy_issuer_declare">声明签发者</option>
                 <option value="namespace_membership">成员变更</option>
-                <option value="namespace_handoff">退订交接</option>
+                <option value="namespace_handoff">退出并交接</option>
               </select>
               <select id="audit-filter-device" aria-label="按设备过滤"><option value="">全部设备</option></select>
               <select id="audit-filter-namespace" aria-label="按域过滤"><option value="">全部域</option></select>
@@ -106,8 +114,8 @@
               <h2>记忆</h2>
             </div>
             <div class="audit-filters">
-              <label class="mem-filter muted"><input id="mem-filter-archived" type="checkbox" /> 显示已归档</label>
-              <label class="mem-filter muted"><input id="mem-filter-deleted" type="checkbox" /> 显示已删除</label>
+              <label class="mem-filter muted"><input id="mem-filter-archived" type="checkbox" aria-label="显示已归档" /> 显示已归档</label>
+              <label class="mem-filter muted"><input id="mem-filter-deleted" type="checkbox" aria-label="显示已删除" /> 显示已删除</label>
               <select id="mem-filter-namespace" aria-label="按域过滤"><option value="">全部域</option></select>
               <button id="mem-refresh" class="btn btn-crt" type="button">刷新</button>
             </div>
@@ -181,8 +189,8 @@
   </div>
 
   <div id="handoff" class="modal" hidden>
-    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="退订交接">
-      <h2 id="handoff-title">退订交接</h2>
+    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="退出并交接">
+      <h2 id="handoff-title">退出并交接</h2>
       <p id="handoff-desc" class="modal-note muted"></p>
       <div class="field"><label>继任者 deviceId</label><input id="handoff-successor" class="crt-input" type="text" placeholder="device-B" /></div>
       <div class="modal-actions">

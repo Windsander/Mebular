@@ -1789,6 +1789,21 @@ try {
         && consoleSrcV4.includes("classList.toggle('is-panel-view'"));
   }
 
+  // ---------- P3 · 收敛健康（阶段 B）：只读 API 汇总 + 控制台锚点 ----------
+  {
+    const overviewConv = await getJson(port, '/admin/api/overview');
+    check('P3 收敛健康：overview 带汇总（守护默认开；无对端时 peers=0）',
+      overviewConv.json?.convergence?.summary?.peers === 0
+        && typeof overviewConv.json?.convergence?.summary?.ok === 'number',
+      JSON.stringify(overviewConv.json?.convergence ?? null));
+    const consoleSrcP3 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    check('P3 收敛健康：控制台锚点（设备卡同步健康 / 关于本机汇总 / SSE convergence / 人话原因）',
+      consoleSrcP3.includes('收敛健康') && consoleSrcP3.includes('同步健康')
+        && consoleSrcP3.includes('CONVERGENCE_STATE_META') && consoleSrcP3.includes('convergenceChipRows')
+        && consoleSrcP3.includes('convergenceAboutSection') && consoleSrcP3.includes("addEventListener('convergence'")
+        && consoleSrcP3.includes('状态指纹') && consoleSrcP3.includes('backlog-mismatch'));
+  }
+
   // ---------- 未知 API ----------
   const unknown = await getJson(port, '/admin/api/nope');
   check('未知 /admin/api 路径 404', unknown.status === 404);

@@ -1108,6 +1108,8 @@ function renderAbout() {
     state.features?.writes ?? null,
     state.overview?.device?.deviceId ?? null,
     state.service?.unitPath ?? null,
+    state.overview?.convergence ?? null,
+    (state.devices ?? []).map((d) => [d.deviceId, d.convergence ?? null]),
   ]);
   if (signature === lastAboutSignature && body.childElementCount > 0) return;
   lastAboutSignature = signature;
@@ -1156,6 +1158,8 @@ function renderAbout() {
       )))}
       <p class="muted" style="font-size:11px">默认常开，不建议关闭；如需改动请手工编辑 config.json 的 <code>sync.autoSync</code> / <code>sync.pushOnWrite</code>。</p>
     </section>
+
+    ${convergenceAboutSection()}
 
     <section class="settings-section" data-info-block="statusOnly">
       <h3>只读状态（自动推导） <span class="badge badge-muted">只读</span></h3>
@@ -1931,6 +1935,98 @@ function peerPathFor(device) {
     ?? null;
 }
 
+// ---------- P3 · 收敛健康（只读；状态来自 /admin/api/devices.convergence） ----------
+
+const CONVERGENCE_STATE_META = {
+  ok: { text: '已收敛', cls: 'crt-tag-ok' },
+  stalled: { text: '停滞', cls: 'crt-tag-error' },
+  diverged: { text: '未收敛', cls: 'crt-tag-error' },
+  unverifiable: { text: '未对账', cls: 'crt-tag-warn' },
+  syncing: { text: '同步中', cls: 'crt-tag-warn' },
+  offline: { text: '未连接', cls: 'is-off' },
+};
+
+function fmtClock(at) {
+  const d = new Date(at);
+  const p2 = (n) => String(n).padStart(2, '0');
+  return `${p2(d.getHours())}:${p2(d.getMinutes())}`;
+}
+
+/** P3：收敛原因 → 人话（与 src/sync/convergence.ts 的 reason code 对齐；只读展示） */
+function convergenceReasonText(reason) {
+  const domains = Array.isArray(reason?.domains) ? reason.domains.join('、') : '';
+  switch (reason?.code) {
+    case 'fingerprint-mismatch':
+      return reason.detail === '策略视图指纹不一致'
+        ? '策略视图指纹不一致'
+        : `${domains || '共同'}的记忆域状态指纹不一致`;
+    case 'session-failures': return `会话连续失败 ${reason.count ?? ''} 次`;
+    case 'no-ack-progress': return '已发出的数据一直未被确认';
+    case 'backlog-mismatch': return `${reason.count ?? 0} 条已发出但水位记账认为无需发送`;
+    case 'keying-drop': return '键控异常（身份缺失的帧被丢弃）';
+    case 'keying-drops': return `键控告警（nudge/stale 丢弃 ${reason.count ?? ''}）`;
+    case 'probe-ineffective': return '自动探测多轮仍未恢复';
+    case 'peer-claims-ahead': return '对端自报超前（本机记账落后，提示）';
+    case 'peer-state-loss': return `对端状态反复回退 ${reason.count ?? ''} 次（提示）`;
+    case 'unknown-event-types': return `收到未知事件类型 ${reason.count ?? ''} 条（日志有、图无）`;
+    case 'no-fingerprints': return '对端未提供状态指纹（旧版本 / 未启用）';
+    case 'awaiting-session': return '尚未完成首轮对账';
+    case 'expected-yet-unverifiable': return `期望参与${domains ? `「${domains}」` : ''}，但无法跨端自证`;
+    default: return String(reason?.code ?? '');
+  }
+}
+
+function convergencePrimaryText(conv) {
+  const reason = (conv?.reasons ?? []).find((r) => r && r.code !== 'awaiting-session');
+  return reason ? convergenceReasonText(reason) : '';
+}
+
+/** 设备卡（对端）：状态 chip 一行 + 至多两条人话原因（只读；不设第二套开关） */
+function convergenceChipRows(conv, shortTimeFn) {
+  const meta = CONVERGENCE_STATE_META[conv?.state] ?? { text: String(conv?.state ?? '—'), cls: 'is-off' };
+  const when = conv?.state === 'ok' && conv.lastConvergedAt
+    ? `<span class="muted" style="margin-left:6px">${shortTimeFn(conv.lastConvergedAt)} 对账</span>`
+    : '';
+  const rows = [`<li><span class="crt-tag ${meta.cls}">${meta.text}</span>${when}</li>`];
+  for (const reason of (conv?.reasons ?? []).slice(0, 2)) {
+    rows.push(`<li><span class="muted">${escapeHtml(convergenceReasonText(reason))}</span></li>`);
+  }
+  return rows.join('');
+}
+
+/** 「关于本机」：收敛健康汇总段（对端各自一句话；未启用 = 说明 + 关掉入口） */
+function convergenceAboutSection() {
+  const peers = (state.devices ?? [])
+    .filter((d) => d.deviceId !== state.overview?.device?.deviceId && d.convergence)
+    .sort((a, b) => (a.deviceId < b.deviceId ? -1 : 1));
+  const s = state.overview?.convergence?.summary;
+  if (!s && peers.length === 0) {
+    return `
+    <section class="settings-section" data-info-block="convergence">
+      <h3>收敛健康 <span class="badge badge-muted">只读</span></h3>
+      <p class="muted" style="font-size:11px;margin:0">未启用（config.json 置 <code>sync.convergence.enabled</code> 后重启）。</p>
+    </section>`;
+  }
+  const summary = s
+    ? `对端 ${s.peers} 个 · 已收敛 ${s.ok} · 停滞 ${s.stalled} · 未收敛 ${s.diverged} · 未对账 ${s.unverifiable} · 未连接 ${s.offline}`
+    : '';
+  const rows = peers.map((d) => {
+    const conv = d.convergence;
+    const meta = CONVERGENCE_STATE_META[conv.state] ?? { text: String(conv.state), cls: 'is-off' };
+    const detail = [convergencePrimaryText(conv), conv.state === 'ok' && conv.lastConvergedAt ? `${fmtClock(conv.lastConvergedAt)} 对账` : '']
+      .filter(Boolean)
+      .join(' · ');
+    return kvRow(d.deviceId, `<span class="crt-tag ${meta.cls}">${meta.text}</span>${detail ? ` <span class="muted">${escapeHtml(detail)}</span>` : ''}`);
+  });
+  return `
+    <section class="settings-section" data-info-block="convergence">
+      <h3>收敛健康 <span class="badge badge-muted">只读 · 本机视角</span></h3>
+      ${summary ? `<p class="muted" style="font-size:11px;margin:0 0 8px">${escapeHtml(summary)}</p>` : ''}
+      ${peers.length ? kvRows(rows) : '<p class="muted" style="font-size:11px;margin:0">暂无对端对账记录</p>'}
+      <p class="muted" style="font-size:11px;margin:8px 0 0">「状态指纹」对账得出；差异只告警，不改变授权与同步行为。</p>
+    </section>`;
+}
+
 function renderDeviceCard() {
   const asideEl = document.querySelector('.aside');
   // 走查修复（用户指认：卡片「分区」区在首次轮询补全文案 → 内容变高 → 贴底抽屉顶边瞬跳）：
@@ -1988,6 +2084,7 @@ function renderDeviceCard() {
     allNamespaces,
     (selfRow0?.memberships ?? []).map((m) => m.namespace),
     (state.namespaces ?? []).map((n) => [n.namespace, n.subscribed]),
+    device.convergence ?? null,
   ]);
   if (cardSignature === lastCardSignature) return;
   lastCardSignature = cardSignature;
@@ -2062,6 +2159,7 @@ function renderDeviceCard() {
     ${writes ? '' : '<p class="muted" style="margin-top:10px">当前为只读模式（写操作需 memory.admin + CSRF）。</p>'}`;
 
   const advancedOpen = body.querySelector('.card-advanced')?.open === true;
+  const conv = isSelf ? null : device.convergence ?? null;
   body.innerHTML = `
     <div class="card-identity">
       <span class="card-id"><span class="dev-led ${status.cls}" aria-hidden="true"></span>${escapeHtml(device.deviceId)}</span>
@@ -2069,6 +2167,10 @@ function renderDeviceCard() {
     </div>
     ${metaParts.length > 0 ? `<p class="card-meta muted">${escapeHtml(metaParts.join(' · '))}</p>` : '<p class="card-meta muted"></p>'}
     <ul class="path-list" aria-label="连接路径（只读）">${pathRow}</ul>
+    ${conv ? `
+    <h3>同步健康 <span class="h3-note">本机视角 · 只读</span></h3>
+    <ul class="chip-list">${convergenceChipRows(conv, shortTime)}</ul>
+    ` : ''}
     ${isSelf ? `
     <h3>我参与的记忆域 <span class="h3-note">参与即数据义务</span></h3>
     <p class="card-help muted">参与 = 接收该记忆域的更新，本机新增也同步给其他参与设备。此处只读；调整参与请到「记忆共享」。</p>
@@ -2998,12 +3100,16 @@ async function mockData() {
       onlinePeers: [{ peerId: 'peer-b', deviceId: 'device-B', remoteAddress: '/ip4/127.0.0.1/tcp/4011', state: 'connected', authenticated: true }],
       revokedCount: 1,
       features: { writes: false },
+      // P3：收敛健康汇总（mock 无网络验收：B 停滞 / C 未连接）
+      convergence: { at: now, summary: { peers: 2, online: 1, ok: 0, stalled: 1, diverged: 0, unverifiable: 0, syncing: 0, offline: 1 } },
     },
     devices: [
       { deviceId: 'device-A', online: true, grantedByMe: ['notes', 'work'], grantedToMe: [], authorizedFor: [], memberships: [{ namespace: 'notes', active: true, effective: true }], revoked: false, pendingEventCount: 0 },
       // ledger：对端已参与但本机还没有任何内容——「有参与、零内容」的域不占主列表，但设备卡可见
-      { deviceId: 'device-B', online: true, peerId: 'peer-b', addrs: ['/ip4/127.0.0.1/tcp/4011'], lastSyncAt: now - 65_000, grantedByMe: ['notes'], grantedToMe: ['work'], authorizedFor: ['notes'], memberships: [{ namespace: 'notes', active: true, effective: true }, { namespace: 'ledger', active: true, effective: false }], revoked: false, pendingEventCount: 3 },
-      { deviceId: 'device-C', online: false, grantedByMe: ['work'], grantedToMe: [], authorizedFor: ['work'], memberships: [], revoked: false, pendingEventCount: 1 },
+      { deviceId: 'device-B', online: true, peerId: 'peer-b', addrs: ['/ip4/127.0.0.1/tcp/4011'], lastSyncAt: now - 65_000, grantedByMe: ['notes'], grantedToMe: ['work'], authorizedFor: ['notes'], memberships: [{ namespace: 'notes', active: true, effective: true }, { namespace: 'ledger', active: true, effective: false }], revoked: false, pendingEventCount: 3,
+        convergence: { peerDeviceId: 'device-B', state: 'stalled', reasons: [{ code: 'no-ack-progress', count: 2 }], since: now - 600_000, lastEvaluatedAt: now, lastSessionAt: now - 120_000, lastConvergedAt: now - 1_800_000, pendingEvents: 3, probes: 0, lastProbeAt: null, online: true } },
+      { deviceId: 'device-C', online: false, grantedByMe: ['work'], grantedToMe: [], authorizedFor: ['work'], memberships: [], revoked: false, pendingEventCount: 1,
+        convergence: { peerDeviceId: 'device-C', state: 'offline', reasons: [], since: now - 3_600_000, lastEvaluatedAt: now, lastSessionAt: now - 3_600_000, lastConvergedAt: now - 3_600_000, pendingEvents: 1, probes: 0, lastProbeAt: null, online: false } },
       { deviceId: 'device-D', online: false, grantedByMe: [], grantedToMe: [], authorizedFor: [], memberships: [], revoked: true },
     ],
     // v4：成员制/参与字段齐备（membershipEnabled/members/effectiveMembers/grantedTo/subscribed/rejoinReset/selfAuthorized/selfMember）
@@ -3089,6 +3195,7 @@ function startEvents() {
   eventSource.addEventListener('status', onPulse);
   eventSource.addEventListener('sync', onSyncPulse);
   eventSource.addEventListener('sync-failed', onPulse);
+  eventSource.addEventListener('convergence', onPulse);
   eventSource.onerror = () => {
     // EventSource 会自动重连；网络关闭时保持静默
   };

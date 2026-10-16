@@ -35,6 +35,27 @@ export interface ApplyResult {
   conflict?: SyncConflict;
 }
 
+/**
+ * P3（S9）：本端可物化的事件类型集合。未知类型 = 前向兼容入日志但不物化
+ * （`applyRemoteEvent` 默认分支）——收敛健康度据此计数（解释「日志有、图无」，
+ * 也是跨版本混用的诊断信号）。新增事件类型时必须同步此表。
+ */
+export function isApplyableEventType(type: string): boolean {
+  switch (type) {
+    case 'node_created':
+    case 'node_updated':
+    case 'node_deleted':
+    case 'edge_created':
+    case 'edge_updated':
+    case 'edge_deleted':
+    case 'tag_added':
+    case 'tag_removed':
+      return true;
+    default:
+      return false;
+  }
+}
+
 type Clock = Record<string, number>;
 
 function compareClocks(a: Clock, b: Clock): 'less' | 'equal' | 'greater' | 'concurrent' {

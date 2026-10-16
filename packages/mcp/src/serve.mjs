@@ -811,11 +811,33 @@ export async function startHttpServer({
       peerDeviceId: result?.peerDeviceId,
       sentEvents: result?.sentEvents,
       receivedEvents: result?.receivedEvents,
+      // P3/SP-29：显式信号接线（诊断字段；缺省不发送）
+      ...(result?.reportedAhead !== undefined ? { reportedAhead: result.reportedAhead } : {}),
+      ...(result?.denied !== undefined ? { denied: result.denied } : {}),
+      ...(result?.membershipRejected !== undefined ? { membershipRejected: result.membershipRejected } : {}),
+      ...(result?.ackedOutgoing !== undefined ? { ackedOutgoing: result.ackedOutgoing } : {}),
+      ...(result?.watermarkDownCorrections !== undefined ? { watermarkDownCorrections: result.watermarkDownCorrections } : {}),
+      ...(result?.unknownEventTypes !== undefined ? { unknownEventTypes: result.unknownEventTypes } : {}),
     });
     const onFail = (payload) => send('sync-failed', {
       at: Date.now(),
       message: String(payload?.error?.message ?? payload?.error ?? ''),
     });
+    // P3：收敛状态翻转（每对端）→ 控制台即时刷新（只读；状态本体走 /admin/api/devices）
+    let offConvergence = null;
+    try {
+      offConvergence = typeof app.onConvergence === 'function'
+        ? app.onConvergence((transition) => send('convergence', {
+            at: Date.now(),
+            peerDeviceId: transition?.peerDeviceId,
+            from: transition?.from,
+            to: transition?.to,
+            reasons: transition?.reasons,
+          }))
+        : null;
+    } catch {
+      offConvergence = null;
+    }
     try {
       app.sync.on('sync-completed', onSync);
       app.sync.on('sync-failed', onFail);
@@ -851,6 +873,7 @@ export async function startHttpServer({
       } catch {
         // ignore
       }
+      try { offConvergence?.(); } catch { /* ignore */ }
       try { res.end(); } catch { /* ignore */ }
     };
     req.on('close', cleanup);

@@ -307,6 +307,34 @@ async function readDaemonNetView(home, config) {
   }
 }
 
+/**
+ * P3：从**运行中的守护**读收敛健康度（只读 admin API /admin/api/devices 的
+ * convergence 字段；未启用/守护不可达 = error/空）。不初始化自己的网络。
+ */
+async function readDaemonConvergence(config) {
+  const httpCfg = config?.mcp?.http ?? {};
+  const host = httpCfg.host ?? '127.0.0.1';
+  const port = httpCfg.port ?? 7331;
+  const scheme = (httpCfg.tls === true || (httpCfg.tlsKey && httpCfg.tlsCert)) ? 'https' : 'http';
+  const token = process.env.MEBULAR_TOKEN;
+  try {
+    const res = await fetch(`${scheme}://${host}:${port}/admin/api/devices`, {
+      headers: { accept: 'application/json', ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      signal: AbortSignal.timeout(2500),
+    });
+    if (!res.ok) {
+      return { error: `守护只读端点不可用（HTTP ${res.status}${res.status === 401 ? '：需 token（设置 MEBULAR_TOKEN）' : ''}）` };
+    }
+    const devices = await res.json();
+    const peers = (Array.isArray(devices) ? devices : [])
+      .filter((d) => d && d.convergence)
+      .map((d) => ({ peerDeviceId: d.deviceId, ...d.convergence }));
+    return { peers };
+  } catch (error) {
+    return { error: `无法连接守护（${error?.message ?? error}）` };
+  }
+}
+
 /** C2：`doctor --net` —— 读地址簿/路径状态 + 轻量可达性探针，输出「下一步建议」。 */
 async function runNetDoctor() {
   const { createMebular, loadConfigFile, endpointsPath, networkHints, relaySeeds } = await import('../src/config.mjs');
@@ -479,6 +507,8 @@ async function runStatus() {
   if (storeLock?.pid) {
     const { pidAlive } = await import('../src/serve.mjs');
     if (pidAlive(storeLock.pid)) {
+      // P3：收敛健康度读运行中守护（只读 admin API；未启用/不可达 = null/error）
+      const convergence = await readDaemonConvergence(configFile);
       console.log(JSON.stringify({
         ok: true,
         running: true,
@@ -495,6 +525,7 @@ async function runStatus() {
         namespaces: [],
         lan: null,
         joinService: configFile.joinService ?? null,
+        convergence,
         note: `检测到守护进程（pid ${storeLock.pid}）正在运行：status 走只读最小路径（未初始化网络、未抢端口）。完整状态请走守护 API。`,
       }, null, 2));
       return;
@@ -517,6 +548,15 @@ async function runStatus() {
       storeLock,
       namespaces,
       joinService: config.joinService ?? null,
+      // P3：收敛健康度（本进程刚初始化；对端会话发生前通常为空汇总——持续观察请走守护）
+      convergence: (() => {
+        try {
+          const conv = app.getConvergenceStatus?.();
+          return conv ? { at: conv.at, summary: conv.summary, peers: conv.peers } : null;
+        } catch {
+          return null;
+        }
+      })(),
     }, null, 2));
   } finally {
     await app.shutdown().catch(() => undefined);

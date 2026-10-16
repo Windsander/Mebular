@@ -30,7 +30,17 @@ import { EventLog } from './eventlog/EventLog.js';
 import { JsonFileStorage } from './storage/JsonFileStorage.js';
 import { SqliteStorage } from './storage/SqliteStorage.js';
 import type { StorageAdapter } from './storage/StorageAdapter.js';
-import { SyncManager } from './sync/syncmgr/SyncManager.js';
+import { SyncManager, type SyncResult } from './sync/syncmgr/SyncManager.js';
+import {
+  ConvergenceMonitor,
+  hashPolicyState,
+  type ConvergenceConfig,
+  type ConvergenceStatus,
+  type ConvergenceTransition,
+  type SyncFingerprintEvent,
+} from './sync/convergence.js';
+import { computeStateHashByNamespace } from './core/stateHash.js';
+import type { SyncStateFingerprints } from './sync/protocol.js';
 import { ConfigNamespacePolicy, CompositeNamespacePolicy } from './sync/namespacePolicy.js';
 import { evaluateAutoGrants, type AutoGrantEvaluation } from './sync/autoGrant.js';
 import {
@@ -230,6 +240,13 @@ export interface MebularConfig {
      * 未列出者只能在其自身已获授权范围内签发/撤销。缺省空。各端应保持一致。
      */
     policyIssuers?: string[];
+    /**
+     * P3 · 收敛健康度：周期性对账「未收敛/停滞」并在控制台/CLI 呈现 + 告警。
+     * 缺省关闭（core）；常驻入口（serve/MCP）默认开启（形状照 antiEntropy 先例）。
+     * 检测层纯观察：不改同步/授权/水位语义；会话尾状态指纹（`sync-done` 可选字段）
+     * 仅在启用时携带。
+     */
+    convergence?: ConvergenceConfig;
   };
   /** 语义召回（G2，可选依赖；缺包降级关键词并告警） */
   semantic?: {
@@ -320,6 +337,9 @@ export class Mebular {
   private syncImpl: SyncManager | null = null;
   private graphPolicyImpl: GraphNamespacePolicy | null = null;
   private namespacePolicyImpl: CompositeNamespacePolicy | null = null;
+  /** P3：收敛健康度监控（仅开关启用时创建；纯观察层，不改变任何同步语义） */
+  private convergenceMonitorImpl: ConvergenceMonitor | null = null;
+  private readonly convergenceListeners = new Set<(transition: ConvergenceTransition) => void>();
   private nodeImpl: P2PNode | null = null;
   private libp2pProvider: Libp2pProvider | null = null;
   private endpointBookImpl: EndpointBook | null = null;
@@ -445,12 +465,52 @@ export class Mebular {
         syncStatePath:
           this.config.sync?.syncStatePath ??
           `${this.config.storagePath.replace(/\.json$/i, '')}.sync-state.json`,
+        // P3：会话尾状态指纹（C3 A 类可选字段）——仅收敛健康度启用时注入；
+        // 未注入 = 与今日线协议行为逐字节一致。
+        ...(this.config.sync?.convergence?.enabled
+          ? { fingerprints: { report: () => this.buildStateFingerprints() } }
+          : {}),
       });
 
       // 5.6 2c：依据图外「已重置」标记恢复 reset 声明（重入方 hello 以空时钟上报，
       //     触发对端向下修正并从 0 重发）。标记不同步、不入图。
       for (const ns of this.config.sync?.namespaces ?? []) {
         if (await this.hasRejoinReset(ns)) this.syncImpl.noteLocalReset(ns);
+      }
+
+      // 5.65 P3 · 收敛健康度（纯观察层）：订阅会话/指纹/写入事件；周期性评估
+      //      「未收敛/停滞」并对外呈现（控制台/CLI）+ 翻转告警。缺省关闭（core）；
+      //      常驻入口由 config.mjs 默认开启（形状照 antiEntropy 先例）。
+      if (this.config.sync?.convergence?.enabled) {
+        const monitor = new ConvergenceMonitor({
+          config: this.config.sync.convergence,
+          getOnlinePeers: () => this.syncImpl?.getOnlinePeers() ?? [],
+          getBacklog: (peer: string) =>
+            this.syncImpl?.getBacklogDiagnostics(peer) ?? Promise.resolve({ pendingById: 0, missingByWatermark: 0 }),
+          getDropCounters: () =>
+            this.syncImpl?.getDropCounters() ?? { nudgeDroppedStaleEntry: 0, staleEntrySignals: 0, identityFailures: 0 },
+          // A1（批准项）：限频探测——复用既有触发路径，最多多起一轮会话；
+          // 对端 hello 自报会触发既有 R2 向下修正（方向安全）。
+          requestSession: (peer: string) => this.syncImpl?.requestSession(peer) ?? false,
+          getExpectedIncomingDomains: () => this.expectedIncomingDomains(),
+        });
+        monitor.on('transition', (transition: ConvergenceTransition) => {
+          for (const listener of this.convergenceListeners) listener(transition);
+        });
+        this.syncImpl.on('sync-started', (payload: { peerDeviceId?: string }) => {
+          if (payload?.peerDeviceId) monitor.noteSessionStarted(payload.peerDeviceId);
+        });
+        this.syncImpl.on('sync-completed', (result: SyncResult) => monitor.noteSessionCompleted(result));
+        this.syncImpl.on('sync-failed', (payload: { peerDeviceId?: string }) => {
+          if (payload?.peerDeviceId) monitor.noteSessionFailed({ peerDeviceId: payload.peerDeviceId });
+        });
+        this.syncImpl.on('sync-fingerprint', (payload: SyncFingerprintEvent) => {
+          monitor.noteFingerprintComparison(payload);
+        });
+        // 本地写入（event-appended 仅本地触发）→ 静止窗口判定
+        this.eventLogImpl.on('event-appended', () => monitor.noteLocalAppend());
+        monitor.start();
+        this.convergenceMonitorImpl = monitor;
       }
 
       // 5.7 守护层自动签发（订阅驱动授权）：配置门控，缺省关闭；常驻入口默认开启。
@@ -577,6 +637,8 @@ export class Mebular {
   /** 初始化失败的清理：与 shutdown 同等收拢，但吞掉清理错误以保留原始错误 */
   private async rollbackPartialInit(): Promise<void> {
     this.stopAutoGrant();
+    this.convergenceMonitorImpl?.stop();
+    this.convergenceMonitorImpl = null;
     if (this.nodeImpl?.isRunning()) {
       await this.nodeImpl.stop().catch(() => undefined);
     }
@@ -602,6 +664,8 @@ export class Mebular {
       return;
     }
     this.stopAutoGrant();
+    this.convergenceMonitorImpl?.stop();
+    this.convergenceMonitorImpl = null;
     if (this.nodeImpl?.isRunning()) {
       await this.nodeImpl.stop();
     }
@@ -1111,6 +1175,61 @@ export class Mebular {
     return [
       ...(await this.assertReady(this.namespacePolicyImpl, 'namespacePolicy').getRevokedDevices()),
     ];
+  }
+
+  // ---------- P3 · 收敛健康度（只读） ----------
+
+  /**
+   * 收敛健康度快照（未启用 = null）。只读；控制台 / CLI / 管家共用。
+   * 检测层不改变任何同步语义；指纹差异的默认动作是**告警**，绝不放宽授权/水位。
+   */
+  getConvergenceStatus(): ConvergenceStatus | null {
+    return this.convergenceMonitorImpl?.getStatus() ?? null;
+  }
+
+  /**
+   * 订阅「每对端收敛状态翻转」事件（返回退订函数）。未启用 = 订阅无效果
+   * （监听器保留，若该实例之后启用不会发生——开关在 initialize 期决定）。
+   */
+  onConvergence(listener: (transition: ConvergenceTransition) => void): () => void {
+    this.convergenceListeners.add(listener);
+    return () => {
+      this.convergenceListeners.delete(listener);
+    };
+  }
+
+  /**
+   * P3：会话尾状态指纹报告 = 图分区块哈希（`computeStateHashByNamespace`）+
+   * 策略视图哈希（`derivePolicyState` 确定性序列化）。诊断载荷；策略指纹失败
+   * 只丢策略一格，图谱指纹照常比较。
+   */
+  private async buildStateFingerprints(): Promise<SyncStateFingerprints> {
+    const [nodes, edges] = await Promise.all([this.storage.listNodes(), this.storage.listEdges()]);
+    const graphs = computeStateHashByNamespace(nodes, edges);
+    let policy: string | undefined;
+    try {
+      if (this.graphPolicyImpl) policy = hashPolicyState(await this.graphPolicyImpl.snapshot());
+    } catch {
+      // 策略指纹失败不致命（图谱指纹仍可比较）
+    }
+    return { graphs, ...(policy !== undefined ? { policy } : {}) };
+  }
+
+  /**
+   * P3（S6/S7）：本机「期望收到」的分区 = 生效授权（主体 = 本机）∩ 订阅声明；
+   * 订阅为全量（未配置）时取全部授权域。仅用于指纹比较的「对端多出」判据。
+   */
+  private async expectedIncomingDomains(): Promise<string[]> {
+    try {
+      const authorized = await this.assertReady(this.namespacePolicyImpl, 'namespacePolicy')
+        .getAuthorizedNamespaces(this.config.deviceId);
+      const declared = this.config.sync?.namespaces;
+      if (!declared || declared.length === 0) return [...authorized];
+      const subs = declared.map((ns) => normalizeNamespace(ns));
+      return authorized.filter((ns) => subs.includes(normalizeNamespace(ns)));
+    } catch {
+      return [];
+    }
   }
 
   /** 网络未启用时为 null */

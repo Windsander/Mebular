@@ -1838,6 +1838,9 @@ function peerPathFor(device) {
 
 function renderDeviceCard() {
   const asideEl = document.querySelector('.aside');
+  // 走查修复（用户指认：卡片「分区」区在首次轮询补全文案 → 内容变高 → 贴底抽屉顶边瞬跳）：
+  // 内容重渲染前后测高，高度有变化则用 FLIP 平滑掉（reduced-motion 跳过）
+  const hBefore = asideEl ? asideEl.getBoundingClientRect().height : 0;
   if (asideEl) asideEl.classList.toggle('is-open', Boolean(state.selected) && state.view === 'map');
   const empty = $('#device-card-empty');
   const body = $('#device-card-body');
@@ -2005,7 +2008,17 @@ function renderDeviceCard() {
   body.querySelectorAll('[data-revoke-ns]').forEach((button) => {
     button.addEventListener('click', () => handleRevokeNamespace(device, button.dataset.revokeNs, button));
   });
-}
+
+  // 高度收口：内容/文案变化导致的高度差 → 220ms 平滑过渡（否则贴底抽屉顶边瞬跳）
+  if (asideEl && asideEl.classList.contains('is-open') && !window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
+    const hAfter = asideEl.getBoundingClientRect().height;
+    if (Math.abs(hAfter - hBefore) > 1) {
+      asideEl.animate(
+        [{ height: `${hBefore}px` }, { height: `${hAfter}px` }],
+        { duration: 220, easing: 'cubic-bezier(0.22, 0.8, 0.24, 1)' },
+      );
+    }
+  }}
 
 /** 本机关注（= 图上在册）＋ 需要时同步订阅声明（构造期配置，重启后传输层生效） */
 async function handleFollowToggle(device, ns, on, input) {

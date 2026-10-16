@@ -122,7 +122,9 @@ html, body {
   gap: 12px;
 }
 .stage-wrap { position: relative; min-width: 0; overflow: hidden; background: radial-gradient(circle at 50% 45%, #0a1124 0%, #05070f 70%); }
-.aside { border-left: 1px solid var(--border); background: var(--bg-panel); overflow: auto; padding: 12px; }
+/* 走查修复（用户实锤）：设备卡底部出现横向滚动条——一出现就吃掉卡底 ~10px 高度，
+   贴底抽屉高度突变即"弹跳"。卡片横向永久禁滚（overflow-x: hidden），长串靠换行消化。 */
+.aside { border-left: 1px solid var(--border); background: var(--bg-panel); overflow-x: hidden; overflow-y: auto; padding: 12px; }
 
 /* ---------- 侧栏：左上选项卡 + 左下绿光图例 ---------- */
 .view-tabs { list-style: none; margin: 0; padding: 0; display: flex; gap: 16px; }
@@ -502,7 +504,7 @@ select {
   .dev-led.is-danger { background: #ff9b9b; box-shadow: 0 0 6px rgba(255, 155, 155, 0.7); }
   /* 正文去辉光（设计契约「正文不发光」）：卡片正文 text-shadow 清零，标题/状态保留微光。
      同时把每帧重光栅的载荷降下来。 */
-  #device-card { position: relative; text-shadow: none; }
+  #device-card { position: relative; text-shadow: none; overflow-wrap: anywhere; }
   #device-card h2, #device-card .crt-tag { text-shadow: var(--crt-text-glow); }
   /* 导光扫线：随擦写边缘从左到右（一次性） */
   .aside::after {

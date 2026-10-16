@@ -21,6 +21,7 @@ import {
 import { closeAction, quitConfirm, stopConfirm, trayMenuModel, LOGIN_ITEM_ID } from './lifecycle.mjs';
 import { readDaemonLogs } from './logs.mjs';
 
+
 const cliArgs = parseArgs(process.argv.slice(1));
 const home = typeof cliArgs.home === 'string' ? cliArgs.home : resolveHome();
 const cliBin = resolveCliBin();

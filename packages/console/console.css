@@ -312,7 +312,8 @@ select {
 .btn-small { padding: 4px 8px; font-size: 12px; }
 
 /* ---------- 模态 ---------- */
-.modal { position: fixed; inset: 0; background: rgba(2, 4, 10, 0.72); display: flex; align-items: center; justify-content: center; z-index: 50; overflow-y: auto; padding: 24px 0; }
+/* 走查修复：弹层顶部锚定（原 flex 垂直居中 → 切「选项卡」页面高度变化时整块垂直跳） */
+.modal { position: fixed; inset: 0; background: rgba(2, 4, 10, 0.72); display: flex; align-items: flex-start; justify-content: center; z-index: 50; overflow-y: auto; padding: 7vh 0 32px; }
 .modal-box { background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; width: min(520px, 92vw); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); margin: auto; }
 .modal-box h2 { margin: 0 0 10px; font-size: 15px; }
 .modal-box p { margin: 0; line-height: 1.7; white-space: pre-wrap; }
@@ -1100,7 +1101,8 @@ select {
 
 /* C. 滚动手感：主滚动容器稳定 gutter（滚动条出现/消失不挤压内容、不跳变） */
 html { scrollbar-gutter: stable; }
-.aside, .modal, .wizard-list, .snippet, .connect-diff, #memories-view, #settings-body { scrollbar-gutter: stable; }
+.aside, .modal, .wizard-list, .snippet, .connect-diff, .panel-view, #settings-body { scrollbar-gutter: stable; }
+/* 走查修复：审计/域视图此前漏了 gutter——切换视图后内容溢出时 10px 滚动条挤动面板（「展开后跳一下」） */
 
 /* 简化轮：记忆共享 · 参与开关 */
 .ns-subscribe { display: inline-flex; align-items: center; gap: 6px; margin-left: 6px; }

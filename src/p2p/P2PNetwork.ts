@@ -17,6 +17,7 @@ import { decideRelayRole, type RelayRoleDecision, type RelayServiceMode } from '
 import {
   AuthenticationHandshake,
   hexToBytes,
+  type AuthSession,
   type DeviceCertificate,
 } from './handshake/AuthenticationHandshake.js';
 import { SecureChannelImpl, type SecureChannel } from './secure/SecureChannelImpl.js';
@@ -129,7 +130,7 @@ export interface P2PNetwork {
   stop(): Promise<void>;
   onPeerDiscovered(callback: (peer: PeerInfo) => void): void;
   onConnectionOpened(callback: (conn: Connection) => void): void;
-  onConnectionClosed(callback: (peerId: PeerId) => void): void;
+  onConnectionClosed(callback: (peerId: PeerId, connection?: Connection) => void): void;
 }
 
 /** 本机身份：设备密钥 + 用户主密钥签发的设备证书 */
@@ -222,6 +223,15 @@ export class P2PNode implements P2PNetwork {
   private channelCloseTimeoutMs = 500;
   /** peerId → deviceId（握手成功后建立，用于把 deviceId 键的配对 hints 归并到 peerId） */
   private peerDeviceIds = new Map<string, string>();
+  /**
+   * N1/N2：本地键（拨号键/连接键）→ 规范对端键（sha256hex 设备公钥）。
+   * 认证成功时学习；连接关闭事件与通道清理据此翻译到规范键（单一口径）。
+   */
+  private peerKeyAliases = new Map<string, string>();
+  /** N2：规范对端键 → 当前活动连接（同设备单活收敛；新连接认证成功才替换/退役旧连接） */
+  private activePeerConnections = new Map<string, Connection>();
+  /** N1/N2：规范对端键 → 通道归属连接（通道按规范键维护；替换须比对归属，避免误删新连接通道） */
+  private channelOwner = new Map<string, Connection>();
 
   private running = false;
   private peerDiscoveredCallbacks: Array<(peer: PeerInfo) => void> = [];
@@ -415,6 +425,9 @@ export class P2PNode implements P2PNetwork {
       }
     }
     this.channels.clear();
+    this.channelOwner.clear();
+    this.activePeerConnections.clear();
+    this.peerKeyAliases.clear();
 
     if (this.discovery?.isRunning()) {
       await this.discovery.stop();
@@ -500,23 +513,69 @@ export class P2PNode implements P2PNetwork {
     ) {
       return true;
     }
-    // 重连：在握手完成（authenticated 事件）前作废旧信道——
-    // 消费者在 getChannel 中会等待基于新连接的信道，而不是命中死信道（F4）
-    this.channels.delete(connection.peerId.id);
+    // N2/F4：**不在握手前清理任何既有状态**——旧连接（及其信道）在新连接
+    // 认证成功前必须继续正常服务；第二次认证失败时旧连接不受任何影响。
+    // 新连接的信道由 convergePeerConnection 在认证成功后按归属替换。
     const session = await this.handshake.initiateAuth(connection);
     if (session.state === 'authenticated') {
       this.learnPeerIdentity(connection, session.certificate?.deviceId);
-      this.prepareChannel(connection);
+      this.convergePeerConnection(connection, session);
       return true;
     }
     return false;
   }
 
+  /**
+   * 连接的**规范对端键**（N1）：认证后取握手中已规范化的 `session.peerId.id`
+   * （`sha256hex(对端设备公钥)`）；未认证/无会话时退回连接本地键（仅本端事务用）。
+   */
+  private canonicalKeyOf(connection: Connection): string {
+    return this.handshake.getSession(connection.peerId)?.peerId?.id ?? connection.peerId.id;
+  }
+
+  /**
+   * N2：同设备单活连接收敛——**认证成功后**调用。
+   * - 规范键 → 当前活动连接登记（新连接胜出）；
+   * - 旧连接显式退役（关闭；其清理走 `connection-closed` 并按连接代际比对，
+   *   只清属于它自己的信道/会话登记，不误伤新连接）；
+   * - 为新连接准备加密信道（通道按规范键维护、按归属替换）。
+   *
+   * 只在认证成功时收敛 ⇒ 「第二次认证失败 → 旧连接继续正常服务」（对抗不变式）。
+   */
+  private convergePeerConnection(connection: Connection, session: AuthSession): void {
+    const canonicalId = session.peerId.id;
+    const previous = this.activePeerConnections.get(canonicalId);
+    this.activePeerConnections.set(canonicalId, connection);
+    if (previous && previous !== connection) {
+      void this.retireConnection(previous);
+    }
+    this.prepareChannel(connection);
+  }
+
+  /** 退役被同一设备新连接替换的旧连接：关闭**该连接对象**；清理由 connection-closed 事件代际比对完成 */
+  private async retireConnection(previous: Connection): Promise<void> {
+    try {
+      await this.connectionManager.disconnect(previous.peerId, previous);
+    } catch {
+      // 已不在表/已关闭：忽略
+    }
+    await previous.close().catch(() => undefined);
+  }
+
   /** C1：学习 peerId ↔ deviceId 与可用远端地址（用于把配对 hints 归并到 peerId 键） */
   private learnPeerIdentity(connection: Connection, deviceId?: string): void {
+    const canonicalId = this.canonicalKeyOf(connection);
+    if (canonicalId !== connection.peerId.id) {
+      // N1：本地键 → 规范键（事件/清理翻译；拨号键只作寻址提示）
+      this.peerKeyAliases.set(connection.peerId.id, canonicalId);
+      if (this.endpointBook) {
+        void this.endpointBook.alias(connection.peerId.id, canonicalId).catch(() => undefined);
+      }
+    }
     if (!this.endpointBook) return;
     if (deviceId && deviceId.length > 0) {
       this.peerDeviceIds.set(connection.peerId.id, deviceId);
+      if (canonicalId !== connection.peerId.id) this.peerDeviceIds.set(canonicalId, deviceId);
       void this.endpointBook.alias(deviceId, connection.peerId.id).catch(() => undefined);
     }
     const remote = connection.remoteAddress;
@@ -727,7 +786,7 @@ export class P2PNode implements P2PNetwork {
     };
   }
 
-  /** 被动接入：完成对端发起的认证，认证成功后登记连接并准备信道 */
+  /** 被动接入：完成对端发起的认证，认证成功后收敛连接身份并准备信道 */
   private async handleIncomingConnection(connection: Connection): Promise<void> {
     try {
       // C6：入站直连证据（非 circuit）→ 说明外部确实能连到本机，可作为「对外可达」的依据
@@ -736,13 +795,13 @@ export class P2PNode implements P2PNetwork {
         this.inboundDirectEvidence = true;
         this.refreshRelayRole();
       }
-      // 重连：acceptAuth 完成即触发 authenticated 事件，必须在事件前清掉旧信道（F4）
-      this.channels.delete(connection.peerId.id);
+      // N2/F4：不在握手前清理任何既有状态——第二次认证失败时旧连接必须继续正常服务。
+      // 新连接的收敛（退役旧连接 + 信道按归属替换）只在 acceptAuth 成功之后进行。
       const session = await this.handshake.acceptAuth(connection);
-      if (session.state === 'authenticated') this.learnPeerIdentity(connection, session.certificate?.deviceId);
       if (session.state === 'authenticated') {
+        this.learnPeerIdentity(connection, session.certificate?.deviceId);
+        this.convergePeerConnection(connection, session);
         this.connectionManager.setConnection(connection.peerId, connection);
-        this.prepareChannel(connection);
       }
     } catch (error) {
       await connection.close().catch(() => undefined);
@@ -768,11 +827,25 @@ export class P2PNode implements P2PNetwork {
     yield* channel.receive();
   }
 
-  /** 认证完成后双端各自建信道：同时发临时公钥，协商自然收敛 */
+  /**
+   * 认证完成后双端各自建信道：同时发临时公钥，协商自然收敛。
+   *
+   * N1/N2：通道按**规范对端键**维护；`channelOwner` 记录归属连接——
+   * - 同连接重复调用 = 幂等；
+   * - 不同连接（同设备新连接/重连）= 按归属替换旧通道表项（旧通道随旧连接关闭自然收束；
+   *   其延迟失败由 started.catch 的「表项仍是自己」守卫兜住，不会误删新通道）。
+   */
   private prepareChannel(connection: Connection): void {
-    const key = connection.peerId.id;
-    if (this.channels.has(key)) {
-      return;
+    const key = this.canonicalKeyOf(connection);
+    const owner = this.channelOwner.get(key);
+    if (owner === connection && this.channels.has(key)) {
+      return; // 幂等：同一连接已有信道
+    }
+    if (owner && owner !== connection) {
+      this.channels.delete(key);
+      this.channelOwner.delete(key);
+    } else if (!owner && this.channels.has(key)) {
+      return; // 无归属记录的既有信道（历史行为）：保持
     }
     // 身份绑定：密钥交换帧由本机设备私钥签名，并用握手已验证的对端证书公钥验签
     const session = this.handshake.getSession(connection.peerId);
@@ -789,13 +862,15 @@ export class P2PNode implements P2PNetwork {
       // 否则旧连接信道的延迟失败会误删重连后的新信道（G3-R 两阶段重连）
       if (this.channels.get(key) === started) {
         this.channels.delete(key);
+        this.channelOwner.delete(key);
       }
     });
     this.channels.set(key, started);
+    this.channelOwner.set(key, connection);
   }
 
   private channelFor(connection: Connection): Promise<SecureChannel> {
-    const key = connection.peerId.id;
+    const key = this.canonicalKeyOf(connection);
     let channel = this.channels.get(key);
     if (!channel) {
       this.prepareChannel(connection);
@@ -820,19 +895,40 @@ export class P2PNode implements P2PNetwork {
     }
   }
 
-  onConnectionClosed(callback: (peerId: PeerId) => void): void {
-    this.connectionClosedCallbacks.push(callback);
+  onConnectionClosed(callback: (peerId: PeerId, connection?: Connection) => void): void {
+    // N1：对上层统一交付**规范对端键**（认证后学习；未认证的连接按本地键原样交付）
+    const deliver = (peerId: PeerId, connection?: Connection) =>
+      callback(this.translatePeerId(peerId), connection);
+    this.connectionClosedCallbacks.push(deliver);
     if (this.running) {
-      this.connectionManager.on('connection-closed', callback);
+      this.connectionManager.on('connection-closed', deliver);
     }
+  }
+
+  /** 本地键 → 规范对端键（无别名时原样返回） */
+  private translatePeerId(peerId: PeerId): PeerId {
+    const canonical = this.peerKeyAliases.get(peerId.id);
+    return canonical && canonical !== peerId.id ? { ...peerId, id: canonical } : peerId;
   }
 
   private attachComponentListeners(): void {
     // 连接关闭即释放对应加密信道与认证会话，避免重连命中过期状态
     // （否则 initiateAuth 命中已认证会话而跳过握手，对端读到信道帧报 malformed）（G3-R）
-    this.connectionManager.on('connection-closed', (peerId: PeerId) => {
-      this.channels.delete(peerId.id);
-      this.handshake.removeSession(peerId);
+    // N2：清理按**连接代际**比对——被退役旧连接的关闭事件不得误删新连接的信道/会话登记。
+    this.connectionManager.on('connection-closed', (peerId: PeerId, connection?: Connection) => {
+      const canonicalId = this.peerKeyAliases.get(peerId.id) ?? peerId.id;
+      const owner = this.channelOwner.get(canonicalId);
+      if (!connection || owner === connection) {
+        this.channels.delete(canonicalId);
+        this.channelOwner.delete(canonicalId);
+      }
+      const session = this.handshake.getSession(peerId);
+      if (!connection || !session || session.connection === connection) {
+        this.handshake.removeSession(peerId);
+      }
+      if (!connection || this.activePeerConnections.get(canonicalId) === connection) {
+        this.activePeerConnections.delete(canonicalId);
+      }
     });
     if (this.discovery) {
       for (const cb of this.peerDiscoveredCallbacks) {
@@ -869,15 +965,28 @@ export class P2PNode implements P2PNetwork {
    * 取得到端的加密信道。认证完成时信道异步建立，
    * timeoutMs 内轮询等待其就绪（默认 5s），超时返回 null。
    * 绑定已关闭连接的残留信道不返回：继续等待重连后的新信道（F4）。
+   *
+   * N1/N2：`options.connection` 提供「连接代际」锚点——只返回**属于该连接**的信道；
+   * 同设备新连接认证后信道会按归属替换，调用方不会命中旧连接的信道。省略时保持
+   * 历史行为（任意就绪信道）。
    */
-  async getChannel(peerId: PeerId, timeoutMs = 5000): Promise<SecureChannel | null> {
+  async getChannel(
+    peerId: PeerId,
+    options: { connection?: Connection; timeoutMs?: number } = {},
+  ): Promise<SecureChannel | null> {
+    const timeoutMs = options.timeoutMs ?? 5000;
     const deadline = Date.now() + timeoutMs;
     for (;;) {
       const pending = this.channels.get(peerId.id);
       if (pending) {
         try {
           const channel = await pending;
-          if (channel.connection.state !== 'closed' && channel.connection.state !== 'disconnecting') {
+          const ownerOk = !options.connection || channel.connection === options.connection;
+          if (
+            ownerOk &&
+            channel.connection.state !== 'closed' &&
+            channel.connection.state !== 'disconnecting'
+          ) {
             return channel;
           }
         } catch {

@@ -138,7 +138,7 @@ export class ConnectionManager extends EventEmitter {
     if (existing) {
       // 残留的死连接不得复用：先按关闭处理（触发上层清信道/会话），再拨新连接（F4）
       this.connections.delete(peerId.id);
-      this.emit('connection-closed', existing.peerId);
+      this.emit('connection-closed', existing.peerId, existing);
     }
 
     const pending = this.pendingConnections.get(peerId.id);
@@ -272,13 +272,18 @@ export class ConnectionManager extends EventEmitter {
     });
   }
 
-  async disconnect(peerId: PeerId): Promise<void> {
+  /**
+   * 断开连接。`connection` 显式给定时关闭该连接对象本身（退役旧连接的正确姿势：
+   * 表项可能已被同键的新连接替换，按键查表会关错连接）；否则保持历史行为按键关闭。
+   * 无论哪种方式，`connection-closed` 都携带**实际被关闭的连接**上报。
+   */
+  async disconnect(peerId: PeerId, connection?: Connection): Promise<void> {
     if (!this.running) {
       throw new NetworkError('ConnectionManager not running', ErrorCodes.NETWORK_NOT_RUNNING);
     }
 
-    const connection = this.connections.get(peerId.id);
-    if (!connection) {
+    const target = connection ?? this.connections.get(peerId.id);
+    if (!target) {
       const pending = this.pendingConnections.get(peerId.id);
       if (pending) {
         this.pendingConnections.delete(peerId.id);
@@ -289,14 +294,18 @@ export class ConnectionManager extends EventEmitter {
     }
 
     try {
-      await connection.close();
+      await target.close();
     } catch (error) {
       // ignore close errors
     }
 
-    this.connections.delete(peerId.id);
-    this.endpointBook?.clearPath(peerId.id);
-    this.emit('connection-closed', peerId);
+    // 表项可能已被更新的连接替换（同键多连接/退役竞态）：只清仍属于自己的表项与路径，
+    // 事件仍如实上报（携带连接对象，供上层按代际比对做清理）
+    if (this.connections.get(peerId.id) === target) {
+      this.connections.delete(peerId.id);
+      this.endpointBook?.clearPath(peerId.id);
+    }
+    this.emit('connection-closed', peerId, target);
   }
 
   getConnection(peerId: PeerId): Connection | null {
@@ -396,7 +405,7 @@ export class ConnectionManager extends EventEmitter {
     this.endpointBook?.clearPath(peerId);
     conn.close().catch(() => undefined);
     this.emit('connection-timeout', conn.peerId);
-    this.emit('connection-closed', conn.peerId);
+    this.emit('connection-closed', conn.peerId, conn);
   }
 
   private checkHeartbeatTimeout(): void {

@@ -435,7 +435,7 @@ describe('Libp2pProvider 双节点集成（真实 TCP）', () => {
       expect(conn.isAuthenticated()).toBe(true);
 
       // 双方信道就绪后，A 发密文消息，B 解密收到
-      const channelB = await nodeB.getChannel(a.peerId, 10000);
+      const channelB = await nodeB.getChannel(a.peerId, { timeoutMs: 10000 });
       expect(channelB).not.toBeNull();
       const receivedPromise = (async () => {
         for await (const message of channelB!.receive()) {

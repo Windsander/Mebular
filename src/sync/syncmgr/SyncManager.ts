@@ -63,7 +63,7 @@ import {
   type SyncSnapshot,
   type SyncTransport,
 } from '../protocol.js';
-import type { P2PNode, PeerId } from '../../p2p/P2PNetwork.js';
+import type { P2PNode, PeerId, Connection } from '../../p2p/P2PNetwork.js';
 
 export interface SyncPeer {
   deviceId: string;
@@ -212,6 +212,11 @@ export function computeAntiEntropyDelay(
 interface OnlinePeer {
   peerId: PeerId;
   peer: SyncPeer;
+  /**
+   * N1/N2：登记时的连接（来自握手会话）。同设备新连接替换旧连接时，
+   * 旧连接的关闭事件据此比对代际，不误删新登记。
+   */
+  connection?: Connection;
   /** 对端 hello 的订阅声明：true = 全部分区；false = 只订阅 namespaces */
   subscribeAll: boolean;
   /** 对端 hello 中声明的显式订阅清单（subscribeAll=true 时忽略） */
@@ -366,10 +371,29 @@ export class SyncManager extends EventEmitter {
   /** 懒加载在途 Promise（去重并发首次访问） */
   private syncStateLoading: Promise<void> | null = null;
 
-  private queue: Promise<unknown> = Promise.resolve();
+  /**
+   * N4：会话串行化按**连接**粒度（同一信道上会话串行，帧序不交错；
+   * 不同连接互不饿死——旧实现为每 SyncManager 全局串行，单个"无限等待 hello"
+   * 的常驻响应方会话会饿死同管理器内其它连接/对端的会话）。
+   * key = 连接对象（或 `'global'`：无法获知连接时的退化为全局队列）。
+   */
+  private readonly sessionQueues = new Map<object | string, Promise<unknown>>();
   private syncing = false;
   private lastSyncAt: number | null = null;
   private lastResult: SyncResult | null = null;
+
+  /**
+   * 「丢弃必须发声」（N3）：三类静默点各有计数，且每次丢弃 emit
+   * `sync-frames-dropped`。供测试判别性断言与现场诊断：
+   * - `nudgeDroppedStaleEntry`：nudge 落在已被替换的旧 entry（连接键控错位的直接信号）；
+   * - `staleEntrySignals`：其余因 entry 已被替换而忽略的滞后信号（退役旧连接的关闭清理等）；
+   * - `identityFailures`：已认证会话缺权威身份（证书 deviceId），对端不登记（禁静默兜底）。
+   */
+  private readonly dropCounters = {
+    nudgeDroppedStaleEntry: 0,
+    staleEntrySignals: 0,
+    identityFailures: 0,
+  };
 
   constructor(options: SyncManagerOptions) {
     super();
@@ -439,7 +463,11 @@ export class SyncManager extends EventEmitter {
   }
 
   private deliverTrigger(entry: OnlinePeer): void {
-    if (this.onlinePeers.get(entry.peerId.id) !== entry) return;
+    if (this.onlinePeers.get(entry.peerId.id) !== entry) {
+      // 「丢弃必须发声」：entry 已被同设备新连接替换（旧连接的滞后触发）
+      this.noteDropped('staleEntrySignals', { where: 'deliverTrigger', peerDeviceId: entry.peer.deviceId });
+      return;
+    }
     if (entry.initiate) {
       // 本机是发起方：唤醒常驻循环起一轮
       this.wakeInitiator(entry);
@@ -473,9 +501,39 @@ export class SyncManager extends EventEmitter {
 
   /** 收到对端 nudge（仅发起方角色响应）：节流后起一轮 */
   private onPeerNudge(entry: OnlinePeer): void {
-    if (this.onlinePeers.get(entry.peerId.id) !== entry) return;
+    if (this.onlinePeers.get(entry.peerId.id) !== entry) {
+      // 「丢弃必须发声」：nudge 落在被替换的旧 entry——连接键控错位的直接信号；
+      // 静默丢弃会让「对端写入永不落图」失去任何可观测面（N3 红线）。
+      this.noteDropped('nudgeDroppedStaleEntry', {
+        where: 'onPeerNudge',
+        peerDeviceId: entry.peer.deviceId,
+        key: entry.peerId.id,
+      });
+      return;
+    }
     if (!entry.initiate) return; // 只有发起方响应 nudge
     this.scheduleSyncTrigger(entry);
+  }
+
+  /**
+   * 「丢弃必须发声」（N3）：递增分类计数并 emit `sync-frames-dropped`。
+   * 计数口径见 `dropCounters` 文档。
+   */
+  private noteDropped(
+    kind: keyof typeof this.dropCounters,
+    detail: Record<string, unknown>,
+  ): void {
+    this.dropCounters[kind] += 1;
+    this.emit('sync-frames-dropped', { kind, ...detail });
+  }
+
+  /** 丢弃计数快照（测试判别性断言 / 现场诊断） */
+  getDropCounters(): {
+    nudgeDroppedStaleEntry: number;
+    staleEntrySignals: number;
+    identityFailures: number;
+  } {
+    return { ...this.dropCounters };
   }
 
   // ---------- spec-004 查询面 ----------
@@ -736,7 +794,7 @@ export class SyncManager extends EventEmitter {
     const direction = options.direction ?? 'bidirectional';
     const timeout = options.timeoutMs ?? this.syncTimeout;
 
-    return this.enqueue(() =>
+    return this.enqueue(this.connectionQueueKey(undefined, transport), () =>
       this.runSession(peer, async () => {
         try {
           const iterator = existingIterator ?? transport.receive()[Symbol.asyncIterator]();
@@ -834,7 +892,7 @@ export class SyncManager extends EventEmitter {
 
   /** 响应方：接受对端发起的同步会话（帧序与 syncWithDevice 镜像） */
   async acceptSync(transport: SyncTransport, peer: SyncPeer): Promise<SyncResult> {
-    return this.enqueue(() =>
+    return this.enqueue(this.connectionQueueKey(undefined, transport), () =>
       this.runSession(peer, () =>
         this.runResponder(
           transport,
@@ -932,7 +990,7 @@ export class SyncManager extends EventEmitter {
       if (this.onlinePeers.get(entry.peerId.id) !== entry || frames.isClosed) return;
       frames.setSessionActive(true);
       try {
-        await this.enqueue(() =>
+        await this.enqueue(this.connectionQueueKey(entry.connection, transport), () =>
           this.runSession(entry.peer, () => this.runResponder(transport, entry.peer, reader, undefined)),
         );
       } catch (error) {
@@ -981,21 +1039,42 @@ export class SyncManager extends EventEmitter {
    */
   attachToNode(node: P2PNode): void {
     this.node = node;
-    // 连接关闭：清理在线登记与触发计时器
-    node.onConnectionClosed((peerId: PeerId) => this.removeOnlinePeer(peerId));
+    // 连接关闭：清理在线登记与触发计时器（N2：携带连接对象做代际比对）
+    node.onConnectionClosed((peerId: PeerId, connection?: Connection) =>
+      this.removeOnlinePeer(peerId, connection),
+    );
 
     node.getHandshake().on('authenticated', (session: AuthSession) => {
-      const peerDeviceId = session.certificate?.deviceId ?? session.peerId.id;
+      // 身份不变量 I1：唯一权威身份 = 握手证书 deviceId。
+      // 取不到权威身份 = 显式失败 + 告警（禁静默兜底——兜底成 peerId.id 会让
+      // 角色仲裁/信任判定/键控在不同形态间静默错位）。
+      const certificate = session.certificate;
+      if (!certificate?.deviceId) {
+        this.noteDropped('identityFailures', { where: 'authenticated', key: session.peerId.id });
+        const error = new SyncError(
+          `Authenticated session without certificate identity: ${session.peerId.id}`,
+          ErrorCodes.SYNC_INVALID_EVENT,
+        );
+        console.warn(`[sync] 已认证会话缺权威身份（证书 deviceId），对端不登记：${session.peerId.id}`);
+        this.emit('sync-failed', { peerDeviceId: session.peerId.id, error });
+        return;
+      }
+      const peerDeviceId = certificate.deviceId;
       if (this.peerWhitelist && !this.peerWhitelist.includes(peerDeviceId)) {
         return;
       }
-      const publicKey = session.certificate
-        ? hexToBytes(session.certificate.devicePublicKey)
-        : session.peerId.pubKey;
+      const publicKey = hexToBytes(certificate.devicePublicKey);
       const peer: SyncPeer = { deviceId: peerDeviceId, publicKey };
       const initiate = this.deviceId < peerDeviceId;
       // hello 到达前保守取「不订阅任何分区」，避免过早推送；首次会话即回填
-      const entry: OnlinePeer = { peerId: session.peerId, peer, initiate, subscribeAll: false, namespaces: [] };
+      const entry: OnlinePeer = {
+        peerId: session.peerId,
+        peer,
+        initiate,
+        subscribeAll: false,
+        namespaces: [],
+        ...(session.connection ? { connection: session.connection } : {}),
+      };
       this.onlinePeers.set(session.peerId.id, entry);
 
       const realtime = this.pushOnWrite || this.antiEntropy.enabled;
@@ -1003,7 +1082,11 @@ export class SyncManager extends EventEmitter {
 
       void (async () => {
         try {
-          const channel = await node.getChannel(session.peerId);
+          // N1/N2：按「连接代际」取信道——同设备新连接认证后信道按归属替换，
+          // 这里绝不会命中旧连接的信道（旧信道随旧连接关闭自然收束）。
+          const channel = await node.getChannel(session.peerId, {
+            ...(session.connection ? { connection: session.connection } : {}),
+          });
           if (!channel) {
             throw new SyncError(
               `Secure channel to ${peer.deviceId} not ready`,
@@ -1043,8 +1126,22 @@ export class SyncManager extends EventEmitter {
     });
   }
 
-  private removeOnlinePeer(peerId: PeerId): void {
+  /**
+   * 连接关闭：清理在线登记与触发计时器。
+   * N2：`connection` 用于**代际比对**——被退役旧连接的关闭事件不得误删
+   * 同设备新连接的登记（同规范键、不同连接）。
+   */
+  private removeOnlinePeer(peerId: PeerId, connection?: Connection): void {
     const entry = this.onlinePeers.get(peerId.id);
+    if (entry && connection && entry.connection && entry.connection !== connection) {
+      // 「丢弃必须发声」：旧连接的关闭事件（entry 已属新连接）
+      this.noteDropped('staleEntrySignals', {
+        where: 'removeOnlinePeer',
+        peerDeviceId: entry.peer.deviceId,
+        key: peerId.id,
+      });
+      return;
+    }
     if (entry?.triggerResolve) {
       const resolve = entry.triggerResolve;
       entry.triggerResolve = undefined;
@@ -1503,10 +1600,32 @@ export class SyncManager extends EventEmitter {
     return result;
   }
 
-  /** 会话串行化：共享信道不允许多会话帧序交错 */
-  private enqueue<T>(task: () => Promise<T>): Promise<T> {
-    const run = this.queue.then(task);
-    this.queue = run.catch(() => undefined);
+  /**
+   * 会话队列键（N4）：优先用 entry 的连接对象；否则用传输承载的连接；
+   * 都无法获知（内存/测试替身）时退化为全局键（历史行为）。
+   */
+  private connectionQueueKey(
+    connection: Connection | undefined,
+    transport: SyncTransport,
+  ): object | string {
+    return connection ?? transport.connection ?? 'global';
+  }
+
+  /**
+   * 会话串行化（N4）：**按连接粒度**排队——同一信道上不允许多会话帧序交错；
+   * 不同连接的会话互不阻塞（单个"无限等待 hello"的常驻响应方会话不再饿死
+   * 同管理器内其它连接/对端的会话）。队列尾完成即自清理（不泄漏）。
+   */
+  private enqueue<T>(key: object | string, task: () => Promise<T>): Promise<T> {
+    const previous = this.sessionQueues.get(key) ?? Promise.resolve();
+    const run = previous.then(task);
+    const tail = run.catch(() => undefined);
+    this.sessionQueues.set(key, tail);
+    void tail.finally(() => {
+      if (this.sessionQueues.get(key) === tail) {
+        this.sessionQueues.delete(key);
+      }
+    });
     return run;
   }
 

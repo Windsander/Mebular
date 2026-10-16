@@ -44,6 +44,48 @@ export interface SyncSnapshot {
   namespaces: string[];
 }
 
+/**
+ * P3 · 会话尾「状态指纹」（收敛健康度）：双方各自计算、会话结束时交换的
+ * **只读诊断指纹**。C3 A 类加法式变更——旧端忽略未知字段；新端缺字段即跳过
+ * 对账（降级为「无法跨端自证」）。**绝不参与**任何授权/水位/发送集合判定。
+ */
+export interface SyncStateFingerprints {
+  /** 分区（记忆域）→ 物化图状态哈希（`computeStateHashByNamespace` 口径） */
+  graphs: Record<string, string>;
+  /** 策略视图哈希（`derivePolicyState` 确定性序列化；可选） */
+  policy?: string;
+}
+
+const FINGERPRINT_MAX_ENTRIES = 256;
+const FINGERPRINT_MAX_LENGTH = 128;
+
+/**
+ * 宽容解析 `sync-done.stateFingerprints`：形状不符 → `null`（按缺省降级）。
+ * 诊断字段的畸形**不视为协议违例**——不使会话失败，也不影响既有字段消费。
+ */
+export function parseStateFingerprints(value: unknown): SyncStateFingerprints | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const record = value as { graphs?: unknown; policy?: unknown };
+  const graphs = record.graphs;
+  if (graphs === null || typeof graphs !== 'object' || Array.isArray(graphs)) return null;
+  const entries = Object.entries(graphs as Record<string, unknown>);
+  if (entries.length > FINGERPRINT_MAX_ENTRIES) return null;
+  const out: Record<string, string> = {};
+  for (const [ns, hash] of entries) {
+    if (ns.length === 0 || ns.length > FINGERPRINT_MAX_LENGTH) return null;
+    if (typeof hash !== 'string' || hash.length === 0 || hash.length > FINGERPRINT_MAX_LENGTH) return null;
+    out[ns] = hash;
+  }
+  let policy: string | undefined;
+  if (record.policy !== undefined) {
+    if (typeof record.policy !== 'string' || record.policy.length === 0 || record.policy.length > FINGERPRINT_MAX_LENGTH) {
+      return null;
+    }
+    policy = record.policy;
+  }
+  return { graphs: out, ...(policy !== undefined ? { policy } : {}) };
+}
+
 export type SyncMessage =
   | {
       type: 'sync-hello';
@@ -69,7 +111,15 @@ export type SyncMessage =
        */
       snapshotApplied?: boolean;
     }
-  | { type: 'sync-done'; finalVectorClock: Record<string, number> }
+  | {
+      type: 'sync-done';
+      finalVectorClock: Record<string, number>;
+      /**
+       * P3：会话尾状态指纹（可选；C3 A 类）。旧端忽略；缺省 = 不参与对账。
+       * 载荷为**只读诊断**：不参与授权/水位判定（收到即比对，差异只告警）。
+       */
+      stateFingerprints?: SyncStateFingerprints;
+    }
   /**
    * 反向推送提示（H）：**无业务载荷**的「请现在发起一次会话」。由响应方角色
    * （不能自行发起会话的一方）在现有信道上发送；发起方收到后发起一次会话。

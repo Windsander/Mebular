@@ -231,6 +231,10 @@ export async function createMebular() {
       pushOnWrite: effective.pushOnWrite,
       ...(effective.pushOnWriteThrottleMs !== null ? { pushOnWriteThrottleMs: effective.pushOnWriteThrottleMs } : {}),
       antiEntropy: config.sync?.antiEntropy ?? { enabled: true, intervalMs: 600000, jitterRatio: 0.2 },
+      // P3 · 收敛健康度：常驻入口默认开启（纯观察层；形状照 antiEntropy 先例）。
+      // 会话尾状态指纹（C3 A 类可选字段）随之启用；kill-switch：config.json 置
+      // sync.convergence = { enabled:false } 即回默认静默观察。
+      convergence: config.sync?.convergence ?? { enabled: true },
       // 守护层自动签发（订阅驱动授权）：常驻入口默认开启（形状照 antiEntropy 先例）；
       // kill-switch：config.json 置 sync.autoGrant = { enabled:false } 即回默认拒绝。
       autoGrant: config.sync?.autoGrant ?? { enabled: true },

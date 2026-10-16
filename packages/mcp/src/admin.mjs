@@ -279,6 +279,14 @@ export async function buildOverview({ app, service }) {
   } catch {
     revokedCount = 0;
   }
+  // P3：收敛健康度汇总（未启用 = 无字段；「关于本机」只读展示）
+  let convergence = null;
+  try {
+    const conv = app.getConvergenceStatus?.();
+    if (conv) convergence = { at: conv.at, summary: conv.summary };
+  } catch {
+    convergence = null;
+  }
   return {
     device: {
       deviceId: app.deviceId,
@@ -290,6 +298,7 @@ export async function buildOverview({ app, service }) {
     status,
     onlinePeers: peers.filter((p) => p.authenticated),
     revokedCount,
+    ...(convergence ? { convergence } : {}),
   };
 }
 
@@ -342,6 +351,15 @@ export async function buildDevices({ app, config }) {
     syncStatus = null;
   }
   const lastSyncPeer = syncStatus?.lastResult?.peerDeviceId ?? null;
+
+  // P3：收敛健康度（每对端只读状态；未启用 = 无）
+  let convergenceByPeer = new Map();
+  try {
+    const convergence = app.getConvergenceStatus?.();
+    for (const peer of convergence?.peers ?? []) convergenceByPeer.set(peer.peerDeviceId, peer);
+  } catch {
+    convergenceByPeer = new Map();
+  }
 
   // 成员制分区（一次计算，避免逐设备重复查询）：{ ns -> {enabled, members, effective} }
   const nsCandidates = new Set([
@@ -424,6 +442,7 @@ export async function buildDevices({ app, config }) {
       ...(connection ? { peerId: connection.peerId, addrs: [connection.remoteAddress] } : {}),
       ...(lastSyncPeer === deviceId && syncStatus?.lastSyncAt ? { lastSyncAt: syncStatus.lastSyncAt } : {}),
       ...(pendingEventCount !== null ? { pendingEventCount } : {}),
+      ...(convergenceByPeer.has(deviceId) ? { convergence: convergenceByPeer.get(deviceId) } : {}),
       grantedByMe: unique(grantedByMe),
       grantedToMe,
       authorizedFor,

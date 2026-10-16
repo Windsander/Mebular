@@ -40,6 +40,21 @@ export {
   type ApplyResult,
   type SyncConflict,
 } from './sync/index.js';
+// P3 · 收敛健康度（监控 + 会话尾状态指纹；只读诊断，绝不参与授权/水位判定）
+export {
+  ConvergenceMonitor,
+  compareStateFingerprints,
+  hashPolicyState,
+  type ConvergenceConfig,
+  type PeerConvergenceStatus,
+  type ConvergenceStatus,
+  type ConvergenceSummary,
+  type ConvergenceState,
+  type ConvergenceReason,
+  type ConvergenceTransition,
+  type SyncFingerprintEvent,
+  type SyncStateFingerprints,
+} from './sync/index.js';
 // Phase 2 · D/E：授权作为记忆与身份吊销（公共面保持在最小集合；其余经 Mebular facade）
 export {
   GraphNamespacePolicy,

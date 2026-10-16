@@ -31,7 +31,7 @@ import { EventLog } from '../../eventlog/EventLog.js';
 import { VectorClock } from '../vectorclock/index.js';
 import { ErrorCodes, StorageError, SyncError } from '../../errors.js';
 import type { Event } from '../../types/event.js';
-import { applyRemoteEvent, type SyncConflict } from '../apply.js';
+import { applyRemoteEvent, isApplyableEventType, type SyncConflict } from '../apply.js';
 import {
   ConfigNamespacePolicy,
   type NamespaceGrantPolicy,
@@ -58,11 +58,14 @@ import {
   assertValidHello,
   assertValidSnapshot,
   assertValidAck,
+  parseStateFingerprints,
   type SyncDirection,
   type SyncMessage,
   type SyncSnapshot,
+  type SyncStateFingerprints,
   type SyncTransport,
 } from '../protocol.js';
+import { compareStateFingerprints, type SyncFingerprintEvent } from '../convergence.js';
 import type { P2PNode, PeerId, Connection } from '../../p2p/P2PNetwork.js';
 
 export interface SyncPeer {
@@ -119,6 +122,20 @@ export interface SyncResult {
    * 该信号非空也不会影响本会话的发送集合。无差异时为 undefined。
    */
   reportedAhead?: NamespaceClocks;
+  /**
+   * P3（S1）：本会话我方 offer（`sentEvents`）中被对端 ack 的事件数。
+   * `sentEvents > 0 ∧ ackedOutgoing === 0` 即「发出但未被确认」的一手证据。
+   */
+  ackedOutgoing?: number;
+  /**
+   * P3（S3）：本会话 hello 触发的水位**向下修正**次数（R2；每次修正一个
+   * 作者/分区记 1）。频繁出现意味着对端反复「丢失状态」——值得解释而非静默。
+   */
+  watermarkDownCorrections?: number;
+  /**
+   * P3（S9）：本会话收到的、本端无法物化的未知事件类型数（日志有、图无）。
+   */
+  unknownEventTypes?: number;
 }
 
 export interface SyncStatus {
@@ -177,6 +194,13 @@ export interface SyncManagerOptions {
    * pending 的对端兜底同步一次。**core 默认关闭**（不藏定时器）；常驻入口默认开启。
    */
   antiEntropy?: AntiEntropyConfig;
+  /**
+   * P3（收敛健康度）：会话尾状态指纹（`sync-done.stateFingerprints`，C3 A 类
+   * 可选字段）。**由门面在开关启用时注入**；未注入 = 与今日线协议行为逐字节一致。
+   * 指纹只作诊断（收到即比对 + emit `sync-fingerprint`），绝不参与授权/水位判定；
+   * 计算失败不影响会话（丢弃发声：`sync-fingerprint{result:'local-error'}`）。
+   */
+  fingerprints?: { report: () => Promise<SyncStateFingerprints> };
 }
 
 /** 周期 anti-entropy 配置（core 默认 disabled） */
@@ -239,6 +263,8 @@ interface AppliedOffer {
   received: number;
   duplicates: number;
   conflicts: SyncConflict[];
+  /** P3（S9）：未知事件类型计数（日志有、图无） */
+  unknownEventTypes?: number;
 }
 
 /**
@@ -344,6 +370,8 @@ export class SyncManager extends EventEmitter {
   private antiEntropyTimer: ReturnType<typeof setTimeout> | null = null;
   /** per-peer anti-entropy 退避状态（连续失败指数退避，成功复位） */
   private readonly antiEntropyBackoff = new Map<string, { failures: number; nextAttemptAt: number }>();
+  /** P3：会话尾状态指纹提供者（门面注入；未注入 = 不携带、不比对） */
+  private readonly fingerprints: { report: () => Promise<SyncStateFingerprints> } | null;
 
   /** attachToNode 后的网络节点引用（push-on-write 取信道用） */
   private node: P2PNode | null = null;
@@ -417,6 +445,7 @@ export class SyncManager extends EventEmitter {
       intervalMs: options.antiEntropy?.intervalMs ?? DEFAULT_ANTI_ENTROPY_INTERVAL_MS,
       jitterRatio: options.antiEntropy?.jitterRatio ?? DEFAULT_ANTI_ENTROPY_JITTER_RATIO,
     };
+    this.fingerprints = options.fingerprints ?? null;
     if (this.pushOnWrite) {
       // 本地写入即触发定向推送；远端 appendRemote 不触发，避免回弹风暴
       this.eventLog.on('event-appended', this.handleLocalAppend);
@@ -778,6 +807,46 @@ export class SyncManager extends EventEmitter {
     };
   }
 
+  /**
+   * P3（收敛健康度）· 只读诊断：该对端的「积压两口径」。
+   * - `pendingById`：per-event ack 集合视角（`getPendingEvents`）；
+   * - `missingByWatermark`：per-(对端, 分区) 水路口径（缺失判定实际发送依据）。
+   * 两者长期「有 id 欠账、无水位欠账」（`pendingById>0 ∧ missingByWatermark===0`）
+   * 即 SP-28 类「记账矛盾」（可伴随既有快照路径的良性残留）；纯读取，无行为变化。
+   */
+  async getBacklogDiagnostics(peerDeviceId: string): Promise<{ pendingById: number; missingByWatermark: number }> {
+    await this.ensureSyncStateLoaded();
+    const [pending, missing] = await Promise.all([
+      this.getPendingEvents(peerDeviceId),
+      this.missingEventsForPeer(peerDeviceId),
+    ]);
+    return { pendingById: pending.length, missingByWatermark: missing.length };
+  }
+
+  /**
+   * P3（A1 批准项）· 对指定在线对端**安排一轮同步触发**（限频由调用方执行）。
+   * 复用既有触发路径（发起方唤醒 / 响应方 nudge），不越过任何安全判定：
+   * 最多让会话多起一轮；对端 hello 自报会触发既有的 R2 向下修正（方向安全）。
+   * 返回 false = 对端不在线/无常驻信道（未安排）。
+   */
+  requestSession(peerDeviceId: string): boolean {
+    for (const entry of this.onlinePeers.values()) {
+      if (entry.peer.deviceId !== peerDeviceId) continue;
+      if (!entry.transport) continue; // 非实时形态无常驻循环
+      this.deliverTrigger(entry); // 发起方：唤醒；响应方：发 nudge（既有路径）
+      return true;
+    }
+    return false;
+  }
+
+  /** P3：当前已认证在线对端（收敛健康度的观察对象）。 */
+  getOnlinePeers(): Array<{ deviceId: string; peerId: string }> {
+    return [...this.onlinePeers.values()].map((entry) => ({
+      deviceId: entry.peer.deviceId,
+      peerId: entry.peerId.id,
+    }));
+  }
+
   // ---------- 同步会话 ----------
 
   /**
@@ -807,7 +876,8 @@ export class SyncManager extends EventEmitter {
           });
           const hello = await nextSyncMessage(iterator, 'sync-hello', timeout);
           assertValidHello(hello);
-          const reportedAhead = await this.recordPeerHello(peer.deviceId, hello);
+          const helloOutcome = await this.recordPeerHello(peer.deviceId, hello);
+          const reportedAhead = helloOutcome.ahead;
 
           // 2. 我方 offer：按 per-(对端, 分区) 水位计算缺失集；pull 模式只收不发。
           //    先按「对端授权 ∩ 对端订阅 ∩ 本机订阅」裁剪（T2 供给端强制），
@@ -841,6 +911,7 @@ export class SyncManager extends EventEmitter {
           );
           const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
           assertValidAck(ack);
+          const ackedOutgoing = ack.appliedEventIds.length; // P3（S1）：发出→确认的一手计数
           await this.markEventsSynced(peer.deviceId, ack.appliedEventIds, outgoing);
           // F4：**只在**对端确认已应用快照后，才按快照分区水位推进对端水位。
           // 发完就乐观推进会在此前把对端标记为「已有」，一旦应用失败即永久丢失。
@@ -869,12 +940,23 @@ export class SyncManager extends EventEmitter {
             ...(offer.snapshot ? { snapshotApplied: true } : {}),
           });
 
-          // 4. 交换最终时钟，收尾
+          // 4. 交换最终时钟，收尾（P3：附带会话尾状态指纹——双方各自算、会话尾交换；
+          //    仅门面注入 fingerprints 时携带，旧端忽略未知字段）
           const finalVectorClock = this.eventLog.getClock().toJSON();
-          await transport.send({ type: 'sync-done', finalVectorClock });
-          await nextSyncMessage(iterator, 'sync-done', timeout);
+          const localFingerprints = await this.buildStateFingerprintEnvelope(peer);
+          await transport.send({
+            type: 'sync-done',
+            finalVectorClock,
+            ...localFingerprints,
+          });
+          const peerDone = await nextSyncMessage(iterator, 'sync-done', timeout);
+          await this.notePeerFingerprints(peer, localFingerprints.stateFingerprints ?? null, peerDone.stateFingerprints, allow);
 
-          const result = this.buildResult(peer, direction, outgoing.length, applied, allow, reportedAhead);
+          const result = this.buildResult(peer, direction, outgoing.length, applied, allow, reportedAhead, {
+            ackedOutgoing,
+            watermarkDownCorrections: helloOutcome.downCorrections,
+            unknownEventTypes: applied.unknownEventTypes,
+          });
           if (snapshot) {
             result.snapshotSent = snapshot.nodes.length + snapshot.edges.length;
           }
@@ -919,7 +1001,8 @@ export class SyncManager extends EventEmitter {
     try {
       const hello = await nextSyncMessage(iterator, 'sync-hello', firstHelloTimeout);
       assertValidHello(hello);
-      const reportedAhead = await this.recordPeerHello(peer.deviceId, hello);
+      const helloOutcome = await this.recordPeerHello(peer.deviceId, hello);
+      const reportedAhead = helloOutcome.ahead;
       const direction: SyncDirection = hello.direction ?? 'bidirectional';
       await transport.send({
         type: 'sync-hello',
@@ -959,13 +1042,26 @@ export class SyncManager extends EventEmitter {
       await transport.send({ type: 'sync-offer', events: outgoing });
       const ack = await nextSyncMessage(iterator, 'sync-ack', timeout);
       assertValidAck(ack);
+      const ackedOutgoing = ack.appliedEventIds.length; // P3（S1）：发出→确认的一手计数
       await this.markEventsSynced(peer.deviceId, ack.appliedEventIds, outgoing);
 
-      await nextSyncMessage(iterator, 'sync-done', timeout);
+      // P3：先收对端 sync-done（含其状态指纹），再发本机收尾帧并附本机指纹；
+      //     收到对端 done 后即可比对（双方此时均已完成本会话 apply）。
+      const peerDone = await nextSyncMessage(iterator, 'sync-done', timeout);
       const finalVectorClock = this.eventLog.getClock().toJSON();
-      await transport.send({ type: 'sync-done', finalVectorClock });
+      const localFingerprints = await this.buildStateFingerprintEnvelope(peer);
+      await this.notePeerFingerprints(peer, localFingerprints.stateFingerprints ?? null, peerDone.stateFingerprints, allow);
+      await transport.send({
+        type: 'sync-done',
+        finalVectorClock,
+        ...localFingerprints,
+      });
 
-      const result = this.buildResult(peer, direction, outgoing.length, applied, allow, reportedAhead);
+      const result = this.buildResult(peer, direction, outgoing.length, applied, allow, reportedAhead, {
+        ackedOutgoing,
+        watermarkDownCorrections: helloOutcome.downCorrections,
+        unknownEventTypes: applied.unknownEventTypes,
+      });
       if (snapshotApplied > 0) {
         result.snapshotApplied = snapshotApplied;
       }
@@ -1175,7 +1271,7 @@ export class SyncManager extends EventEmitter {
   private async recordPeerHello(
     peerDeviceId: string,
     hello: Extract<SyncMessage, { type: 'sync-hello' }>,
-  ): Promise<NamespaceClocks> {
+  ): Promise<{ ahead: NamespaceClocks; downCorrections: number }> {
     const namespaces = normalizeNamespaceList(hello.namespaces);
     for (const entry of this.onlinePeers.values()) {
       if (entry.peer.deviceId === peerDeviceId) {
@@ -1187,6 +1283,7 @@ export class SyncManager extends EventEmitter {
     const watermarks = this.peerWatermarks.get(peerDeviceId) ?? {};
     const ahead: NamespaceClocks = {};
     let changed = false;
+    let downCorrections = 0; // P3（S3）：向下修正计数（每次修正一个作者/分区记 1）
     for (const [ns, clock] of Object.entries(hello.namespaceClocks)) {
       const knownNs = watermarks[ns] ?? {};
       // ② 诊断：自报高于本机记录 → 差额（不抬高本机水位）
@@ -1204,6 +1301,7 @@ export class SyncManager extends EventEmitter {
           if (reported === 0) delete watermarks[ns][author];
           else watermarks[ns][author] = reported;
           changed = true;
+          downCorrections += 1;
         }
       }
     }
@@ -1211,7 +1309,7 @@ export class SyncManager extends EventEmitter {
       this.peerWatermarks.set(peerDeviceId, watermarks);
       await this.persistSyncState();
     }
-    return ahead;
+    return { ahead, downCorrections };
   }
 
   /** 本机 hello：订阅声明（subscribeAll + namespaces）+ 分区水位 */
@@ -1409,6 +1507,7 @@ export class SyncManager extends EventEmitter {
     const conflicts: SyncConflict[] = [];
     let received = 0;
     let duplicates = 0;
+    let unknownEventTypes = 0; // P3（S9）：日志有、图无（前向兼容；解释未收敛成因）
 
     // E · 入站吊销：默认拒绝只挡「我们发给它」，挡不住被吊销设备把事件推进我们
     // 的图。这里按当前吊销集合隔离其**署名的**事件（不验签就谈不上凭据，故放在
@@ -1452,6 +1551,9 @@ export class SyncManager extends EventEmitter {
         received += 1;
         appliedIds.push(event.id);
         appliedNamespaces.add(normalizeNamespace(event.namespace));
+      } else if (result.status === 'stale' && !isApplyableEventType(event.type)) {
+        // 未知事件类型：入日志但不物化（前向兼容设计）——计数发声（P3/S9）
+        unknownEventTypes += 1;
       }
       if (result.conflict) {
         conflicts.push(result.conflict);
@@ -1468,7 +1570,13 @@ export class SyncManager extends EventEmitter {
       });
     }
 
-    return { ackedIds, received, duplicates, conflicts };
+    return {
+      ackedIds,
+      received,
+      duplicates,
+      conflicts,
+      ...(unknownEventTypes > 0 ? { unknownEventTypes } : {}),
+    };
   }
 
   /**
@@ -1574,6 +1682,11 @@ export class SyncManager extends EventEmitter {
     applied: AppliedOffer,
     allow: string[],
     reportedAhead?: NamespaceClocks,
+    diagnostics: {
+      ackedOutgoing?: number;
+      watermarkDownCorrections?: number;
+      unknownEventTypes?: number;
+    } = {},
   ): SyncResult {
     const result: SyncResult = {
       peerDeviceId: peer.deviceId,
@@ -1597,7 +1710,82 @@ export class SyncManager extends EventEmitter {
     if (reportedAhead && Object.keys(reportedAhead).length > 0) {
       result.reportedAhead = reportedAhead;
     }
+    // P3 诊断信号（S1/S3/S9）：发出→确认计数、向下修正、未知事件类型
+    if (typeof diagnostics.ackedOutgoing === 'number') {
+      result.ackedOutgoing = diagnostics.ackedOutgoing;
+    }
+    if (diagnostics.watermarkDownCorrections && diagnostics.watermarkDownCorrections > 0) {
+      result.watermarkDownCorrections = diagnostics.watermarkDownCorrections;
+    }
+    if (diagnostics.unknownEventTypes && diagnostics.unknownEventTypes > 0) {
+      result.unknownEventTypes = diagnostics.unknownEventTypes;
+    }
     return result;
+  }
+
+  // ---------- P3 · 收敛健康度（会话尾指纹） ----------
+
+  /**
+   * P3：本会话要携带的状态指纹信封（仅在门面注入 `fingerprints` 时非空）。
+   * 计算失败不影响会话（诊断载荷；以 `sync-fingerprint{result:'local-error'}`
+   * 发声，不静默）。
+   */
+  private async buildStateFingerprintEnvelope(peer: SyncPeer): Promise<{ stateFingerprints?: SyncStateFingerprints }> {
+    if (!this.fingerprints) return {};
+    try {
+      return { stateFingerprints: await this.fingerprints.report() };
+    } catch (error) {
+      this.emit('sync-fingerprint', {
+        peerDeviceId: peer.deviceId,
+        at: Date.now(),
+        result: 'local-error',
+        commonDomains: [],
+        mismatchedDomains: [],
+        peerOnlyDomains: [],
+        localOnlyDomains: [],
+        policy: 'local-missing',
+        error: error instanceof Error ? error.message : String(error),
+      } satisfies SyncFingerprintEvent);
+      return {};
+    }
+  }
+
+  /**
+   * P3：比对双方会话尾指纹（收到对端 `sync-done` 后调用）。结果一律以
+   * `sync-fingerprint` 事件上报（含 `peer-missing` 降级）；**绝不改变**任何
+   * 会话/授权/水位状态（只读诊断，差异默认动作 = 告警）。
+   */
+  private async notePeerFingerprints(
+    peer: SyncPeer,
+    local: SyncStateFingerprints | null,
+    peerRaw: unknown,
+    outgoingAllow: string[],
+  ): Promise<void> {
+    if (!local) return; // 本地未启用或计算失败：无可比（对端字段按未知字段忽略）
+    const comparison = compareStateFingerprints(local, parseStateFingerprints(peerRaw), {
+      expectedIncoming: await this.expectedIncomingDomains(),
+      outgoingAllow,
+    });
+    this.emit('sync-fingerprint', {
+      peerDeviceId: peer.deviceId,
+      at: Date.now(),
+      ...comparison,
+    } satisfies SyncFingerprintEvent);
+  }
+
+  /**
+   * P3（S6/S7）：「本机期望收到」的分区 = 生效授权（主体 = 本机）∩ 订阅声明；
+   * 订阅为全量（subscribeAll）时取全部授权域。仅用于指纹比较的「对端多出」判据
+   * ——授权外的数据多寡不是收敛义务。
+   */
+  private async expectedIncomingDomains(): Promise<string[]> {
+    try {
+      const authorized = await this.namespacePolicy.getAuthorizedNamespaces(this.deviceId);
+      if (this.subscriptionNamespaces.length === 0) return [...authorized];
+      return authorized.filter((ns) => this.subscriptionNamespaces.includes(normalizeNamespace(ns)));
+    } catch {
+      return [];
+    }
   }
 
   /**

@@ -1,8 +1,11 @@
-# 键控修复提案（P1·A2 出稿 · 等待检查点①复核）
+# 键控修复提案（P1·A2 出稿 · 检查点①已复核放行 · B 阶段已实施）
 
-> 基线：`main = bbc2e13`（worktree `fix-conn-identity`，分支自最新 main）
+> 基线：`main = bbc2e13`（worktree `fix-conn-identity`）
 > 复现工具：`scripts/keying-repro.mjs`（红/绿样本）+ `scripts/keying-preload.mjs`（分层探针，不改产品代码）
-> 状态：**A1 钉死完成；本文件为 A2 提案；未动产品代码。收到"继续"后进 B 阶段。**
+> 矩阵验收：`scripts/verify-keying-matrix.mjs`（`npm run verify:keying:matrix`）
+> 不变量定稿：`src/sync/IDENTITY-INVARIANTS.md`
+> 状态：**A1 钉死 / A2 提案 / B1 修复 / B2 测试矩阵 已完成；B3 沙箱真机验收与 B4 PR 进行中。**
+> §1.4 的「如实更正」（两嫌疑断点未触发）按主控要求保留于 PR 描述（历史可溯）。
 
 ## 1. A1 钉死结论（证据先行）
 
@@ -65,6 +68,26 @@ B: sm.deliverTrigger + nudge（走旧连接）                       # → A 旧
 - **真实断点 = 计划未列的第三方**：连接层"同一对端多键并存 + 被拨侧同键坍缩 + 多连接会话饥饿 + 静默丢弃"（§1.3）。
 
 ## 2. 修复方案（B 阶段实施；本阶段仅提案）
+
+> **B 阶段实施注记（2026-10-16）**：N1–N4 已按批准范围落地（提交见 PR）：
+> - N1：`AuthenticationHandshake` 认证成功即把会话 `peerId` 规范化为
+>   `sha256hex(证书设备公钥)`（`canonicalPeerIdFromCertificate`，导出供测试）；
+>   `P2PNode.peerKeyAliases` 记录本地键→规范键；`channels`/`onlinePeers`/`pushTimers`、
+>   `getChannel` 全走规范键。
+> - N2：`P2PNode.convergePeerConnection`/`retireConnection`——**认证成功**才退役旧连接
+>   （`ConnectionManager.disconnect(peerId, connection)` 按对象关闭 + 身份守卫）；
+>   `connection-closed` 携带连接对象，信道/会话/登记清理全部按代际比对；
+>   握手失败恢复同键原有已认证会话（影子会话不得覆盖）。
+> - N3：`SyncManager` 三类丢弃计数（nudgeDroppedStaleEntry / staleEntrySignals /
+>   identityFailures）+ `sync-frames-dropped` 事件；`attachToNode` 缺权威身份=显式失败+告警
+>   （静默兜底 `?? session.peerId.id` 已删）。
+> - N4：`SyncManager.sessionQueues` 按连接粒度（`SyncTransport.connection` 暴露承载连接），
+>   空闲守候不再占全局队列。
+> - 测试与矩阵：`tests/p2p/keying-canonicalization.test.ts`、
+>   `tests/sync/drop-counters.test.ts`、`tests/sync/session-queue-isolation.test.ts`、
+>   `tests/integration/keying-convergence.test.ts`（含对抗）+
+>   `scripts/verify-keying-matrix.mjs` 13 场景（四方向 × 再拨两形态 + 重连 + 冒名 +
+>   #122 主网流程 + 混合版本抽查）。
 
 红线对照（§1.3 of plan）：不碰线协议（认证/同步帧与 multiaddr 语义不变）✓；不碰策略/存储语义 ✓；删除静默兜底、单一身份口径 ✓；先红后绿、四方向矩阵 ✓。
 

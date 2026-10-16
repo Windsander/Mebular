@@ -16,6 +16,7 @@
 // 两者缺一不可——仅有前者无法抵抗证书重放冒名。
 
 import { EventEmitter } from 'events';
+import { createHash } from 'node:crypto';
 import type { Connection, PeerId } from '../P2PNetwork.js';
 import type { MutableAuthenticationConnection } from '../transport/InMemoryTransport.js';
 import { ErrorCodes, NetworkError } from '../../errors.js';
@@ -72,11 +73,20 @@ export interface AuthResponse {
 }
 
 export interface AuthSession {
-  readonly peerId: PeerId;
+  /**
+   * 对端身份键。
+   * - 认证**成功前**：连接建立时的本地键（拨号键或握手派生键，仅本端事务用）；
+   * - 认证**成功时**（`authenticated` 事件前）由握手层规范化为
+   *   `sha256hex(对端证书设备公钥)`（`canonicalPeerIdFromCertificate`）——
+   *   这是连接/会话路由唯一的对端键口径（N1：两侧同算法同形态）。
+   */
+  peerId: PeerId;
   state: 'pending' | 'authenticated' | 'failed';
   certificate?: DeviceCertificate;
   /** 对端证书链（叶→根；T2） */
   certificateChain?: DeviceCertificate[];
+  /** 本会话承载的连接（供上层做「连接代际」判定；N2 退役/清理按连接对象比对） */
+  connection?: Connection;
 }
 
 type AuthWireMessage =
@@ -238,8 +248,10 @@ export class AuthenticationHandshake extends EventEmitter {
       return existing;
     }
 
-    const session: AuthSession = { peerId: connection.peerId, state: 'pending' };
-    this.sessions.set(connection.peerId.id, session);
+    const sessionKey = connection.peerId.id;
+    const previousSession = this.sessions.get(sessionKey);
+    const session: AuthSession = { peerId: connection.peerId, state: 'pending', connection };
+    this.sessions.set(sessionKey, session);
 
     try {
       const iter = connection.receive()[Symbol.asyncIterator]();
@@ -298,6 +310,7 @@ export class AuthenticationHandshake extends EventEmitter {
       session.state = 'authenticated';
       session.certificate = reply.certificate;
       session.certificateChain = reply.chain ?? [reply.certificate];
+      session.peerId = canonicalPeerIdFromCertificate(reply.certificate);
       this.markAuthenticated(connection);
       this.emit('authenticated', session);
       return session;
@@ -305,6 +318,7 @@ export class AuthenticationHandshake extends EventEmitter {
       session.state = 'failed';
       await this.trySendError(connection, error);
       this.emit('auth-failed', connection.peerId, error);
+      this.restoreAuthenticatedSessionOnFailure(sessionKey, session, previousSession);
       throw error;
     }
   }
@@ -320,8 +334,10 @@ export class AuthenticationHandshake extends EventEmitter {
       throw new NetworkError('Local certificate missing. Call createCertificate() first.', ErrorCodes.NETWORK_HANDSHAKE_FAILED);
     }
 
-    const session: AuthSession = { peerId: connection.peerId, state: 'pending' };
-    this.sessions.set(connection.peerId.id, session);
+    const sessionKey = connection.peerId.id;
+    const previousSession = this.sessions.get(sessionKey);
+    const session: AuthSession = { peerId: connection.peerId, state: 'pending', connection };
+    this.sessions.set(sessionKey, session);
 
     try {
       const iter = connection.receive()[Symbol.asyncIterator]();
@@ -377,6 +393,7 @@ export class AuthenticationHandshake extends EventEmitter {
       session.state = 'authenticated';
       session.certificate = hello.certificate;
       session.certificateChain = hello.chain ?? [hello.certificate];
+      session.peerId = canonicalPeerIdFromCertificate(hello.certificate);
       this.markAuthenticated(connection);
       this.emit('authenticated', session);
       return session;
@@ -384,7 +401,23 @@ export class AuthenticationHandshake extends EventEmitter {
       session.state = 'failed';
       await this.trySendError(connection, error);
       this.emit('auth-failed', connection.peerId, error);
+      this.restoreAuthenticatedSessionOnFailure(sessionKey, session, previousSession);
       throw error;
+    }
+  }
+
+  /**
+   * 二次认证失败不得留下「影子会话」（I5 代际隔离 / N2 对抗不变式）：
+   * 同键（本地连接键）原有**已认证**会话因本次尝试被覆盖时，失败后恢复之——
+   * 旧连接继续正常服务；恢复仅限「表中仍是我们这次的失败会话」，不抢回后续状态。
+   */
+  private restoreAuthenticatedSessionOnFailure(
+    sessionKey: string,
+    failedSession: AuthSession,
+    previousSession: AuthSession | undefined,
+  ): void {
+    if (previousSession?.state === 'authenticated' && this.sessions.get(sessionKey) === failedSession) {
+      this.sessions.set(sessionKey, previousSession);
     }
   }
 
@@ -517,6 +550,24 @@ export function canonicalCertificateData(certificate: DeviceCertificate): string
     payload.issuer = { deviceId: certificate.issuer.deviceId, publicKey: certificate.issuer.publicKey };
   }
   return JSON.stringify(payload);
+}
+
+/**
+ * 认证完成后的**规范对端键**：`sha256hex(证书设备公钥)`。
+ *
+ * 这是连接/会话路由唯一的对端键口径（N1）：
+ * - 与被拨侧 `Libp2pProvider.fromLibp2pPeerId`、`P2PNode.derivePeerId`、
+ *   `derivePeerIdHex` 同算法同形态（sha256 hex）；
+ * - 与拨号键（libp2p id / deviceId / 任意地址注释）解耦：拨号键只作寻址提示，
+ *   不得作为映射/信任/角色判定的键（身份不变量 I1）。
+ */
+export function canonicalPeerIdFromCertificate(certificate: DeviceCertificate): PeerId {
+  const digest = createHash('sha256').update(hexToBytes(certificate.devicePublicKey)).digest();
+  return {
+    id: bytesToHex(new Uint8Array(digest)),
+    multihash: new Uint8Array(digest),
+    pubKey: hexToBytes(certificate.devicePublicKey),
+  };
 }
 
 /**

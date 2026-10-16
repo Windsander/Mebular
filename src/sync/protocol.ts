@@ -18,6 +18,7 @@ import type { Event } from '../types/event.js';
 import type { Node, Edge } from '../types/index.js';
 import type { NamespaceClocks } from '../core/namespace.js';
 import type { SecureChannel } from '../p2p/secure/SecureChannelImpl.js';
+import type { Connection } from '../p2p/P2PNetwork.js';
 import { ErrorCodes, SyncError } from '../errors.js';
 
 export type SyncDirection = 'push' | 'pull' | 'bidirectional';
@@ -191,6 +192,11 @@ export interface SyncTransport {
   send(message: SyncMessage): Promise<void>;
   receive(): AsyncIterable<SyncMessage>;
   close(): Promise<void>;
+  /**
+   * 承载传输的连接（N4）：会话串行化按连接粒度（同信道串行、异连接互不饿死）。
+   * 内存/测试替身可为 undefined（退化为全局队列）。
+   */
+  readonly connection?: Connection;
 }
 
 /** 在加密信道上承载 JSON 帧的同步传输 */
@@ -199,6 +205,11 @@ export class SecureChannelSyncTransport implements SyncTransport {
 
   constructor(channel: SecureChannel) {
     this.channel = channel;
+  }
+
+  /** N4：承载连接（会话队列按连接粒度） */
+  get connection(): Connection {
+    return this.channel.connection;
   }
 
   async send(message: SyncMessage): Promise<void> {

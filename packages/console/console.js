@@ -2407,6 +2407,9 @@ function setView(view) {
   $('#audit-view').hidden = view !== 'audit';
   $('#memories-view').hidden = view !== 'memories';
   $('#stage').style.visibility = view === 'map' ? 'visible' : 'hidden';
+  // 走查修复：顶部「守护」气泡 /「需要注意」卡只属星图——切出视图即时隐藏
+  //（此前仅在 3s 轮询里更新，切走后要滞留最多一个轮询周期才消失）
+  renderOverlays();
   const asideEl = document.querySelector('.aside');
   if (asideEl) asideEl.classList.toggle('is-open', view === 'map' && Boolean(state.selected));
   syncStageActivity();

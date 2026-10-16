@@ -283,6 +283,13 @@ async function main() {
     check('UX-2 首屏状态总览条可见（纯只读：守护/对端/记忆）', await waitFor('(() => { const p = document.querySelector("#status-pill"); return Boolean(p) && p.hidden === false && /守护/.test(p.textContent) && /对端/.test(p.textContent) && /记忆/.test(p.textContent); })()'));
     check('UX-2「需要注意」浮卡条件渲染（无事不出现；有事则条目可点）', await evalJs('(() => { const c = document.querySelector("#attention-card"); return Boolean(c) && (c.hidden === true || c.querySelectorAll("[data-attention-action]").length > 0); })()'));
 
+    // §7：导航序与命名（星图 / 共享 / 记忆 / 审计；data-view 驱动切换，顺序不影响行为）
+    check('§7 导航：tab 顺序与命名 = 星图/共享/记忆/审计',
+      await evalJs(`(() => {
+        const labels = Array.from(document.querySelectorAll('#view-nav .view-label')).map((el) => el.textContent);
+        return JSON.stringify(labels) === JSON.stringify(['星图', '共享', '记忆', '审计']);
+      })()`));
+
     // 选项卡切换（曾因误删 setView 失效）
     await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
     check('切换到域视图（#domains-view 可见）', await waitFor('document.querySelector("#domains-view")?.hidden === false'));
@@ -290,7 +297,7 @@ async function main() {
     check('切回星图视图', await waitFor('document.querySelector("#domains-view")?.hidden === true'));
 
     // G-ML-1：记忆生命周期视图（动作式：归档 / 解除归档 / 删除；默认过滤已删除与已归档）
-    await evalJs('document.querySelector("#view-nav li:nth-of-type(4) button").click()');
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(3) button").click()');
     check('切换到记忆视图（#memories-view 可见）', await waitFor('document.querySelector("#memories-view")?.hidden === false'));
     check('记忆视图含过滤器 + 记忆行 + 归档/删除动作按钮',
       await waitFor('(() => { const v = document.querySelector("#memories-view"); return Boolean(v) && Boolean(v.querySelector("#mem-filter-archived")) && Boolean(v.querySelector("#mem-filter-deleted")) && v.querySelectorAll(".mem-row").length >= 1 && Boolean(v.querySelector("[data-mem-action=archive]")) && Boolean(v.querySelector("[data-mem-action=delete]")); })()'));
@@ -420,7 +427,7 @@ async function main() {
       });
       return { viewId, bgColor: cs.backgroundColor, bgImage: cs.backgroundImage, beforePosition: before.position, cards };
     })`;
-    const viewTabs = { 'domains-view': 2, 'audit-view': 3, 'memories-view': 4 };
+    const viewTabs = { 'domains-view': 2, 'memories-view': 3, 'audit-view': 4 };
     const viewCards = {
       'domains-view': ['#domains-list', '#domain-detail .sector-readout'],
       'audit-view': [],
@@ -447,7 +454,7 @@ async function main() {
       escapedCards.length === 0 && bgReports.every((r) => r.cards.every((c) => !c.missing || c.sel === '#memories-list .mem-row')),
       escapedCards.slice(0, 3).join(', '));
     // 滚动稳定性：审计视图滚到底部后扫描线仍钉住（fixed ⇒ 不随内容移走）
-    await evalJs('document.querySelector("#view-nav li:nth-of-type(3) button").click()');
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(4) button").click()');
     await waitFor('document.getElementById("audit-view")?.hidden === false');
     const scrollProbe = await evalJs(`(() => {
       const view = document.getElementById('audit-view');
@@ -565,12 +572,102 @@ async function main() {
     check('邀请面板打开且渲染内容', await waitFor('(() => { const el = document.querySelector("#invite-body"); return Boolean(el) && el.textContent.trim().length > 0; })()'));
     await evalJs('document.querySelector("#invite-close").click()');
 
+    // ---------- v4 记忆共享（W1-A）：?mock=1 验收路径 + 无审批族 + 参与事实 ----------
+    await send('Page.navigate', { url: `${base}/console/?mock=1` });
+    check('v4 mock：记忆共享统计新口径 + 左列参与标记',
+      await waitFor('(() => { const s = document.querySelector("#domains-stats")?.textContent ?? ""; const list = document.querySelector("#domains-list")?.textContent ?? ""; return /记忆域 3/.test(s) && /参与中 2/.test(s) && /未参与/.test(list); })()'));
+    await evalJs('document.querySelector("#domains-list [data-sector=notes]").click()');
+    check('v4 mock：域卡 = 参与事实（关系行 + 参与的设备 + 状态文字化；无批准/撤回）',
+      await waitFor(`(() => {
+        const d = document.querySelector('#domain-detail');
+        if (!d) return false;
+        const t = d.textContent;
+        return /也在参与这个域/.test(t) && /参与的设备/.test(t) && /参与中/.test(t)
+          && /退出并交接这个域/.test(t)
+          && !d.querySelector('[data-approve]') && !d.querySelector('[data-approve-member]') && !d.querySelector('[data-revoke-ns]')
+          && !/批准/.test(t) && !/撤回/.test(t);
+      })()`));
+    check('v4 mock：无「HASH 平铺」与「成员制 ACTIVE/OFF」标签',
+      await evalJs(`(() => { const t = document.querySelector('#domains-view')?.textContent ?? ''; return !/HASH/.test(t) && !/成员制/.test(t) && !/AUTH/.test(t) && !/MEMBERS/.test(t); })()`));
+    // 记忆视图：mock 数据缺口已补（不再卡「记忆加载中…」；过滤本地生效；§7 后位于第 3 位）
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(3) button").click()');
+    check('v4 mock：记忆视图可验收（memories 缺口已补，行渲染）',
+      await waitFor('(() => { const v = document.querySelector("#memories-view"); return Boolean(v) && v.querySelectorAll(".mem-row").length >= 2 && !/记忆加载中/.test(v.textContent); })()'));
+    await evalJs('document.querySelector("#mem-filter-archived").click()');
+    check('v4 mock：显示已归档后出现归档行（本地过滤生效）',
+      await waitFor('(() => { const v = document.querySelector("#memories-view"); return v.querySelectorAll(".mem-row").length >= 3 && /已归档/.test(v.textContent); })()'));
+    await evalJs('document.querySelector("#mem-filter-archived").click()');
+    // §7：审计——自动签发默认折叠为汇总行（展开见明细；人工动作保持显眼；跨轮询不丢展开态）
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(4) button").click()');
+    check('§7 mock 审计：自动签发折叠为「自动签发 ×3」汇总行，人工行显眼',
+      await waitFor(`(() => {
+        const view = document.querySelector('#audit-view');
+        if (!view || view.hidden) return false;
+        const toggle = view.querySelector('.audit-auto-toggle');
+        const manual = view.querySelectorAll('.audit-item:not(.audit-auto-head)');
+        return Boolean(toggle) && /自动签发 ×3/.test(toggle.textContent)
+          && view.querySelectorAll('.audit-auto-rows').length === 0
+          && manual.length >= 2
+          && /屏蔽设备/.test(view.textContent);
+      })()`));
+    await evalJs('document.querySelector("#audit-view .audit-auto-toggle").click()');
+    check('§7 mock 审计：展开见明细（3 行，行内「自动」标记）',
+      await waitFor(`(() => {
+        const rows = document.querySelectorAll('#audit-view .audit-auto-rows .audit-item');
+        return rows.length === 3 && Array.from(rows).every((row) => /自动/.test(row.textContent));
+      })()`));
+    await sleep(3600);
+    check('§7 mock 审计：跨 3s 轮询展开态不丢（重渲染不折叠）',
+      await evalJs('document.querySelectorAll("#audit-view .audit-auto-rows .audit-item").length === 3'));
+    // 设备卡（对端）：interop 段为参与事实、无批准/撤回（?select= 深链选中）
+    await send('Page.navigate', { url: `${base}/console/?mock=1&select=device-B` });
+    check('v4 mock：设备卡对端 = 参与事实（它参与的记忆域 + 参与情况 + 双方/单方陈述）',
+      await waitFor(`(() => {
+        const b = document.querySelector('#device-card-body');
+        if (!b || b.hidden) return false;
+        const t = b.textContent;
+        return /它参与的记忆域/.test(t) && /参与情况/.test(t)
+          && /双方都在参与/.test(t) && /本机参与中 · 它未参与/.test(t)
+          && /另有 1 个记忆域双方均未参与/.test(t);
+      })()`));
+    check('v4 mock：「有参与、零内容」的域在设备卡可见（ledger：不占主列表，协作信号不丢）',
+      await evalJs(`(() => {
+        const b = document.querySelector('#device-card-body');
+        const domains = document.querySelector('#domains-list')?.textContent ?? '';
+        const t = b?.textContent ?? '';
+        return /ledger/.test(t) && /这个域还没有内容/.test(t) && !/ledger/.test(domains);
+      })()`));
+    check('v4 mock：设备卡无域级审批动作（批准/撤回按钮整组删除）',
+      await evalJs(`(() => { const b = document.querySelector('#device-card-body'); if (!b || b.hidden) return false; const t = b.textContent; return !b.querySelector('[data-approve]') && !b.querySelector('[data-revoke-ns]') && !/批准/.test(t) && !/撤回/.test(t) && !/待你批准/.test(t); })()`));
+
     // 移动端无横向溢出
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await sleep(500);
     const overflow = await evalJs('document.documentElement.scrollWidth - window.innerWidth');
     check('移动视口无横向溢出', overflow <= 1, `overflow=${overflow}`);
     await send('Emulation.clearDeviceMetricsOverride');
+
+    // v4：≤900px 常驻横幅让位（不遮挡面板标题/统计）
+    {
+      await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+      await send('Page.navigate', { url: `${base}/console/` });
+      check('v4 窄屏：活体面板视图就位（未启用 P2P 常驻横幅可见）',
+        await waitFor('(() => { const b = document.querySelector("#banner"); return Boolean(b) && b.hidden === false && document.querySelector(".stage-wrap")?.classList.contains("has-banner"); })()'));
+      await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
+      await waitFor('document.querySelector("#domains-view")?.hidden === false');
+      const bannerOverlap = await evalJs(`(() => {
+        const banner = document.querySelector('#banner');
+        const head = document.querySelector('#domains-view .view-head h2');
+        if (!banner || banner.hidden || !head) return { ok: false, why: 'missing' };
+        const b = banner.getBoundingClientRect();
+        const h = head.getBoundingClientRect();
+        return { ok: b.bottom <= h.top + 1, bannerBottom: Math.round(b.bottom), headTop: Math.round(h.top) };
+      })()`);
+      check('v4 窄屏：常驻横幅不遮挡面板标题（has-banner 让位）', bannerOverlap.ok === true, JSON.stringify(bannerOverlap));
+      await send('Emulation.clearDeviceMetricsOverride');
+      await send('Page.navigate', { url: `${base}/console/` });
+      await waitFor('document.querySelector("#domains-view")?.hidden === true');
+    }
 
     // 页面异常（pageerror / console.error / Log error）
     const pageErrors = cdp.events.filter((event) => {

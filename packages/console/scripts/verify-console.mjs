@@ -1735,6 +1735,56 @@ try {
         && /归档/.test(consoleHtml) && /解除归档/.test(consoleSrc8));
   }
 
+  // ---------- v4 记忆共享 UI 收口（W1-A）：无审批族 + 术语统一 + mock 数据缺口 ----------
+  {
+    const consoleSrcV4 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const htmlSrcV4 = await readFile(join(consoleDir, 'index.html'), 'utf-8');
+    check('v4 UI：域级审批整组删除（无批准/撤回动作与「待你批准」文案）',
+      !consoleSrcV4.includes('data-approve') && !consoleSrcV4.includes('data-revoke-ns')
+        && !consoleSrcV4.includes('handleApprove') && !consoleSrcV4.includes('handleRevokeNamespace')
+        && !consoleSrcV4.includes('待你批准') && !consoleSrcV4.includes('批准') && !consoleSrcV4.includes('撤回'));
+    const retiredTokens = ['AUTH →', 'MEMBERS →', '成员制 ACTIVE', '重入恢复', '待重入', '退订交接', '暂无分区', 'HASH ']
+      .filter((t) => consoleSrcV4.includes(t) || htmlSrcV4.includes(t));
+    check('v4 UI：术语统一（记忆域/参与中/也在参与/退出并交接/状态指纹；退役词清除）',
+      consoleSrcV4.includes('记忆域') && consoleSrcV4.includes('未参与') && consoleSrcV4.includes('也在参与这个域')
+        && consoleSrcV4.includes('退出并交接') && consoleSrcV4.includes('状态指纹')
+        && retiredTokens.length === 0,
+      `残留=${retiredTokens.join(',') || '无'}`);
+    check('v4 UI：mock 数据缺口补齐（memories 字段 + 成员制/参与字段）',
+      consoleSrcV4.includes('MOCK_MEMORIES') && /memories:\s*\{ total:/.test(consoleSrcV4)
+        && consoleSrcV4.includes('membershipEnabled') && consoleSrcV4.includes('selfAuthorized') && consoleSrcV4.includes('effectiveMembers'));
+    check('v4 UI：空态重做 + 统计新口径 + 卡尾危险区（scene-1/2 落点）',
+      htmlSrcV4.includes('id="domains-empty"') && htmlSrcV4.includes('还没有可以共享的记忆')
+        && consoleSrcV4.includes('退出并交接这个域…') && consoleSrcV4.includes('记忆域 ${items.length}')
+        && consoleSrcV4.includes('参与中'));
+    check('v4 UI：订阅自动签发只读行（关于本机 · 只读状态）',
+      consoleSrcV4.includes('订阅自动签发') && consoleSrcV4.includes('autoGrantRowText')
+        && consoleSrcV4.includes('sync?.autoGrant?.enabled'));
+    check('v4 UI：审计 auto-grant 渲染「自动」标记 + grantId 收敛（截断 + 复制）',
+      consoleSrcV4.includes('auditNoteHtml') && consoleSrcV4.includes('>自动</span>')
+        && consoleSrcV4.includes('auditIdHtml') && consoleSrcV4.includes('data-copy-id') && consoleSrcV4.includes('slice(0, 8)'));
+    // §7 补充：自动事件默认折叠为汇总行（结构保留，不拆页）；导航序与命名（星图/共享/记忆/审计）
+    check('§7 UI：审计自动事件折叠为汇总行（自动签发 ×N；展开态跨轮询保持）',
+      consoleSrcV4.includes('isAutoGrantEvent') && consoleSrcV4.includes('auditAutoGroupHtml')
+        && consoleSrcV4.includes('auditAutoOpen') && consoleSrcV4.includes('自动签发 ×')
+        && consoleSrcV4.includes('data-audit-auto'));
+    check('§7 UI：导航序与命名（星图/共享/记忆/审计；data-view 切换契约不变）',
+      htmlSrcV4.includes('<span class="view-label">共享</span>')
+        && !htmlSrcV4.includes('<span class="view-label">记忆共享</span>')
+        && htmlSrcV4.indexOf('data-view="memories"') < htmlSrcV4.indexOf('data-view="audit"'));
+    check('v4 UI：记忆过滤 checkbox 有 accessible name（a11y）',
+      htmlSrcV4.includes('id="mem-filter-archived" type="checkbox" aria-label="显示已归档"')
+        && htmlSrcV4.includes('id="mem-filter-deleted" type="checkbox" aria-label="显示已删除"'));
+    check('v4 UI：设备卡 interop 段改参与事实（它参与的记忆域 / 参与情况；无第二套开关）',
+      consoleSrcV4.includes('我参与的记忆域') && consoleSrcV4.includes('它参与的记忆域') && consoleSrcV4.includes('参与情况')
+        && consoleSrcV4.includes('双方都在参与') && consoleSrcV4.includes('这个域还没有内容')
+        && !consoleSrcV4.includes('data-follow') && !consoleSrcV4.includes('handleFollowToggle'));
+    check('v4 UI：窄屏横幅让位 + 面板视图隐藏设备卡空壳（CSS 落点）',
+      (await readFile(join(consoleDir, 'console.css'), 'utf-8')).includes('.stage-wrap.has-banner .panel-view')
+        && (await readFile(join(consoleDir, 'console.css'), 'utf-8')).includes('.layout.is-panel-view .aside')
+        && consoleSrcV4.includes("classList.toggle('is-panel-view'"));
+  }
+
   // ---------- 未知 API ----------
   const unknown = await getJson(port, '/admin/api/nope');
   check('未知 /admin/api 路径 404', unknown.status === 404);

@@ -86,6 +86,9 @@ export interface PolicyIssuerDeclareRecord {
  * 采纳**不做 R-a**（无条件，仅要求签发者与成员可信且未被吊销）→ 与不动点无循环依赖。
  * 同一 `(namespace, member)` 取 R-c 定序下**最新记录**的 `active`（在册/注销）。
  * 生效成员集合还需 ∩ 该设备对该分区的**生效授权**（授权默认拒绝不变）。
+ *
+ * **闸门启用（W1-B）**：分区进入「已启用成员资格」当且仅当存在被采纳的 `active=true` 记录；
+ * 注销记录不启用闸门（只有注销记录的分区与 legacy/从未有记录一致）。
  */
 export interface NamespaceMembershipRecord {
   /** 成员设备 ID */
@@ -128,7 +131,10 @@ export interface PolicyState {
   issuers: Set<string>;
   /** M1：`namespace → 在册成员集合`（采纳且 active；尚未 ∩ 授权） */
   members: Map<string, Set<string>>;
-  /** M1：出现≥1 条被采纳成员记录的分区（= 已启用成员资格，须强制闸门） */
+  /**
+   * M1：出现≥1 条被采纳 **active=true** 成员记录的分区（= 已启用成员资格，须强制闸门）。
+   * W1-B 起**仅** active=true 记录启用——只有注销记录（或没有记录）的分区不启用（legacy 语义）。
+   */
   membershipNamespaces: Set<string>;
   /** 不动点是否在迭代上限内**收敛**（false = 到达上限，回退到最保守结果，可观测） */
   converged: boolean;
@@ -366,6 +372,10 @@ function effectiveIssuers(
  *
  * 纯函数于 `(sorted, revokedIn)`（不做 R-a）→ 不引入新不动点未知量。R-b：签发者或成员被吊销
  * 的记录不采纳。`sorted` 已是 R-c 确定序，故同一 `(namespace, member)` **后者胜**（最新记录）。
+ *
+ * **闸门启用边界（W1-B）**：仅 `active=true` 记录让分区进入「已启用成员资格」；只有注销记录
+ * （`active=false`）或没有记录的分区 = 未启用（沿用 hello 订阅裁剪，与 legacy 一致）。启用是
+ * 单调的：曾启用即保持——注销只把成员移出在册集合（「非成员收不到」仍成立），不回退 legacy。
  */
 function deriveMembership(
   sorted: ParsedEntry[],
@@ -378,7 +388,7 @@ function deriveMembership(
     if (revokedIn.has(entry.author)) continue; // R-b：被吊销签发者的记录不采纳
     if (revokedIn.has(entry.membership.member)) continue; // R-b：被吊销成员不采纳
     const { namespace, member, active } = entry.membership;
-    namespaces.add(namespace);
+    if (active) namespaces.add(namespace); // W1-B：仅 active=true 记录启用闸门（注销记录不启用）
     latest.set(`${namespace}\u0000${member}`, active);
   }
   const members = new Map<string, Set<string>>();
@@ -575,8 +585,9 @@ export class GraphNamespacePolicy implements NamespaceGrantPolicy {
   }
 
   /**
-   * M1：某分区的成员资格。`active=false` 表示**该分区尚无被采纳的成员记录**（未启用成员资格，
-   * 调用方沿用旧行为）；`active=true` 时 `members` 为在册成员（已 ∩ 授权由上层完成）。
+   * M1：某分区的成员资格。`active=false` 表示**该分区尚无被采纳的 active=true 成员记录**
+   * （未启用成员资格，调用方沿用旧行为）；`active=true` 时 `members` 为在册成员
+   * （已 ∩ 授权由上层完成）。W1-B：注销记录不再启用闸门。
    */
   async getNamespaceMembership(namespace: string): Promise<{ active: boolean; members: string[] }> {
     const state = await this.snapshot();
@@ -584,6 +595,34 @@ export class GraphNamespacePolicy implements NamespaceGrantPolicy {
       active: state.membershipNamespaces.has(namespace),
       members: [...(state.members.get(namespace) ?? [])].sort(),
     };
+  }
+
+  /**
+   * W1-B（Q2）：`member` 是否在该分区**曾声明在册**（存在被采纳的 `active=true` 成员记录，
+   * 任意时点）。与 `getNamespaceMembership` 同一信任/吊销过滤口径（链到用户主密钥、
+   * 签发者与成员未被吊销）；只回答「曾在册」，不改变任何推导。
+   *
+   * 用于 rejoin 准入（「本机订阅声明 ∧ 未吊销」）：曾在册 = 图上留有该设备的持久订阅声明
+   * ——不再要求 self-grant（网内订阅自主；autoGrant 对 self 冻结签发，旧门槛会让本机对
+   * 自己参与过的域永远无法重入）。
+   */
+  async wasNamespaceMember(namespace: string, member: string): Promise<boolean> {
+    const state = await this.snapshot();
+    if (state.revoked.has(member)) return false; // R-b：被吊销成员不采纳
+    const events = await this.eventLog.listEvents({ namespace: POLICY_NAMESPACE });
+    const trusted: Event[] = [];
+    for (const event of events) {
+      if (event.type !== NAMESPACE_MEMBERSHIP_EVENT) continue;
+      if (await verifyIssuedByUser(event, this.userMasterPublicKey)) trusted.push(event);
+    }
+    for (const entry of parseEntries(trusted)) {
+      if (entry.kind !== 'membership' || !entry.membership) continue;
+      if (state.revoked.has(entry.author)) continue; // R-b：被吊销签发者的记录不采纳
+      if (entry.membership.active !== true) continue;
+      if (entry.membership.namespace !== namespace || entry.membership.member !== member) continue;
+      return true;
+    }
+    return false;
   }
 
   async getRevokedDevices(): Promise<ReadonlySet<string>> {

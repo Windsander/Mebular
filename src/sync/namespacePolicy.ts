@@ -31,8 +31,9 @@ export interface NamespaceGrantPolicy {
  * M1–M3：成员资格策略（持久、签名的图上成员记录）。与授权正交：本接口只回答
  * 「该分区是否已启用成员资格」与「在册成员」，**不**参与授权判定。
  *
- * 兼容语义：`active=false` = 该分区**尚无**被采纳成员记录 → 调用方沿用既有订阅声明裁剪
- * （不放松授权默认拒绝）；`active=true` = 成员资格为强制闸门。
+ * 兼容语义（W1-B）：`active=false` = 该分区**尚无被采纳的 active=true 成员记录**
+ * （含仅有注销记录）→ 调用方沿用既有订阅声明裁剪（不放松授权默认拒绝）；
+ * `active=true` = 成员资格为强制闸门（非成员收不到）。
  */
 export interface NamespaceMembershipPolicy {
   getNamespaceMembership(namespace: string): Promise<{ active: boolean; members: string[] }>;

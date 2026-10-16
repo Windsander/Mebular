@@ -1976,7 +1976,7 @@ function renderDeviceCard() {
   const advancedOpen = body.querySelector('.card-advanced')?.open === true;
   body.innerHTML = `
     <div class="card-identity">
-      <span class="card-id">${escapeHtml(device.deviceId)}</span>
+      <span class="card-id"><span class="dev-led ${status.cls}" aria-hidden="true"></span>${escapeHtml(device.deviceId)}</span>
       <span class="crt-tag card-status ${status.cls}">${status.text}</span>
     </div>
     ${metaParts.length > 0 ? `<p class="card-meta muted">${escapeHtml(metaParts.join(' · '))}</p>` : '<p class="card-meta muted"></p>'}
@@ -2160,7 +2160,7 @@ stage.onOverlay = (ctx) => {
   const elapsed = time - reticleState.lockAt;
   const r = node.r ?? 8;
   // 锁定收缩：准星从远处收拢到星体（0.55s），到位后轻微呼吸
-  const lockT = Math.min(1, elapsed / 0.55);
+  const lockT = Math.min(1, elapsed / 0.40); // 仪器抽屉 v2：锁定提速（0.55→0.40）
   const ease = 1 - Math.pow(1 - lockT, 3);
   const focus = r * 2.6 * (1 + (1 - ease) * 1.1);
   const alpha = (0.32 + 0.48 * ease) * (0.85 + 0.15 * Math.sin(time * 2.4));
@@ -2322,6 +2322,37 @@ stage.onOverlay = (ctx) => {
         ctx.stroke();
         ctx.restore();
       }
+    }
+    // 数据脉冲（一次性，仪器抽屉 v2）：光束就位后一枚光点沿路径滑入接口
+    const PULSE_START = LINK_DONE + 0.02;
+    const PULSE_DUR = 0.28;
+    if (elapsed >= PULSE_START && elapsed <= PULSE_START + PULSE_DUR) {
+      const ptP = (elapsed - PULSE_START) / PULSE_DUR;
+      const pe = 1 - Math.pow(1 - ptP, 2);
+      let distLeft = total * pe;
+      let px = pts[0].x;
+      let py = pts[0].y;
+      for (const seg of segs) {
+        if (distLeft <= seg.len) {
+          const t2 = seg.len === 0 ? 0 : distLeft / seg.len;
+          px = seg.a.x + (seg.b.x - seg.a.x) * t2;
+          py = seg.a.y + (seg.b.y - seg.a.y) * t2;
+          break;
+        }
+        distLeft -= seg.len;
+        px = seg.b.x;
+        py = seg.b.y;
+      }
+      const fade = Math.sin(Math.PI * Math.min(1, Math.max(0, ptP)));
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = `rgba(200, 255, 227, ${(0.9 * fade).toFixed(3)})`;
+      ctx.shadowColor = 'rgba(140, 255, 200, 0.95)';
+      ctx.shadowBlur = 10;
+      ctx.beginPath();
+      ctx.arc(px, py, 2.6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
     }
   }
 };

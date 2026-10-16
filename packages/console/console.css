@@ -441,43 +441,69 @@ select {
   .legend-list { margin: 0; }
   .legend-note { margin: 8px 0 0; }
 
-  /* 设备卡 = 传统示波器绿光显示框（皮肤见 .crt-surface）
-     展开 = 自连线侧（左上）横向擦写：clip-path 展开 + 导光扫线 + 内容落位 */
+  /* 设备卡 = 「仪器抽屉」（用户定稿 v2）：右下角、贴底边抽出，顶缘握线。
+     入场只用 transform/opacity（GPU 合成层，零重光栅）——走查事故：clip-path 擦写 +
+     阴影脉冲每帧重光栅整张发光卡，真机帧间隔峰值 400~500ms。 */
   .aside {
     position: absolute;
     right: 12px;
-    top: 12px;
-    bottom: auto;
+    bottom: 0;
+    top: auto;
     z-index: 6;
     width: 340px;
     max-height: calc(100% - 24px);
     padding: 12px;
+    border-radius: 10px 10px 0 0;
+    border-bottom: 0;
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
-    transform: translateX(8px) scale(0.995);
-    transform-origin: left top;
-    clip-path: inset(0 100% 0 0 round 8px);
+    transform: translate3d(0, 14px, 0);
     transition:
-      clip-path 0.26s cubic-bezier(0.4, 0, 0.6, 1),
-      transform 0.26s cubic-bezier(0.4, 0, 0.6, 1),
-      opacity 0.2s ease,
-      visibility 0s linear 0.26s;
+      opacity 0.18s ease,
+      transform 0.24s cubic-bezier(0.22, 0.8, 0.24, 1),
+      visibility 0s linear 0.24s;
   }
-  /* 打开：等连线画到角上（0.14s）再擦写，内容随擦写出现 */
+  /* 打开：等连线画到角上（0.12s）再抽抽屉，内容随行 */
   .aside.is-open {
     opacity: 1;
     visibility: visible;
     pointer-events: auto;
-    transform: none;
-    clip-path: inset(0 0 0 0 round 8px);
+    transform: translate3d(0, 0, 0);
     transition:
-      clip-path 0.36s cubic-bezier(0.22, 0.8, 0.24, 1) 0.14s,
-      transform 0.36s cubic-bezier(0.22, 0.8, 0.24, 1) 0.14s,
-      opacity 0.2s ease 0.14s,
-      visibility 0s 0.14s;
-    animation: crt-arrive 0.5s ease-out 0.34s 1;
+      opacity 0.2s ease 0.12s,
+      transform 0.24s cubic-bezier(0.22, 0.8, 0.24, 1) 0.12s,
+      visibility 0s 0.12s;
   }
+  /* 抽屉握线（顶缘中央发光刻线） */
+  .drawer-grip {
+    position: absolute;
+    top: 5px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 56px;
+    height: 2px;
+    border-radius: 2px;
+    background: linear-gradient(90deg, transparent, rgba(140, 255, 200, 0.85), transparent);
+    opacity: 0.8;
+    pointer-events: none;
+  }
+  /* 接口（光束落点）：卡片左上角括号；就位后一次性闪光（合成层） */
+  .drawer-port { position: absolute; top: -3px; left: -3px; width: 16px; height: 16px; pointer-events: none; opacity: 0.55; }
+  .drawer-port::before, .drawer-port::after { content: ""; position: absolute; background: rgba(140, 255, 200, 0.9); box-shadow: 0 0 6px rgba(109, 255, 184, 0.75); }
+  .drawer-port::before { left: 1px; top: 1px; width: 12px; height: 1.5px; }
+  .drawer-port::after { left: 1px; top: 1px; width: 1.5px; height: 12px; }
+  @keyframes port-flash { 0% { opacity: 0; } 35% { opacity: 1; } 100% { opacity: 0.55; } }
+  .aside.is-open .drawer-port { animation: port-flash 0.3s ease-out 0.3s 1 backwards; }
+  /* 状态 LED（名字前）：蓝=已连 / 灰=离线 / 红=已屏蔽 */
+  .dev-led { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: #5a6785; }
+  .dev-led.is-ok { background: #56b4e9; box-shadow: 0 0 6px rgba(86, 180, 233, 0.75); }
+  .dev-led.is-off { background: #5a6785; }
+  .dev-led.is-danger { background: #ff9b9b; box-shadow: 0 0 6px rgba(255, 155, 155, 0.7); }
+  /* 正文去辉光（设计契约「正文不发光」）：卡片正文 text-shadow 清零，标题/状态保留微光。
+     同时把每帧重光栅的载荷降下来。 */
+  #device-card { position: relative; text-shadow: none; }
+  #device-card h2, #device-card .crt-tag { text-shadow: var(--crt-text-glow); }
   /* 导光扫线：随擦写边缘从左到右（一次性） */
   .aside::after {
     content: "";
@@ -491,30 +517,25 @@ select {
     background: linear-gradient(180deg, transparent, rgba(150, 255, 205, 0.9), transparent);
     opacity: 0;
   }
-  .aside.is-open::after { animation: crt-wipe 0.4s cubic-bezier(0.22, 0.8, 0.24, 1) 0.14s 1; }
+  .aside.is-open::after { animation: crt-wipe 0.3s cubic-bezier(0.22, 0.8, 0.24, 1) 0.34s 1; }
   @keyframes crt-wipe {
     0% { transform: translateX(0); opacity: 0.9; }
     85% { opacity: 0.6; }
     100% { transform: translateX(338px); opacity: 0; }
   }
   /* 内容随擦写出现（不再滞后成"空面板"） */
-  .aside.is-open #device-card { animation: crt-content 0.24s cubic-bezier(0.22, 0.8, 0.24, 1) 0.14s 1 backwards; }
+  .aside.is-open #device-card { animation: crt-content 0.24s cubic-bezier(0.22, 0.8, 0.24, 1) 0.16s 1 backwards; }
   @keyframes crt-content {
     from { opacity: 0; transform: translateX(4px); }
     to { opacity: 1; transform: none; }
   }
-  /* 连线到位时卡框辉光脉冲（一次） */
-  @keyframes crt-arrive {
-    0% { box-shadow: 0 0 0 1px rgba(80, 255, 170, 0.08), 0 0 26px rgba(60, 255, 160, 0.20), inset 0 0 48px rgba(60, 255, 160, 0.07); }
-    28% { box-shadow: 0 0 0 1px rgba(120, 255, 190, 0.4), 0 0 46px rgba(60, 255, 160, 0.5), inset 0 0 68px rgba(60, 255, 160, 0.18); }
-    100% { box-shadow: 0 0 0 1px rgba(80, 255, 170, 0.08), 0 0 26px rgba(60, 255, 160, 0.20), inset 0 0 48px rgba(60, 255, 160, 0.07); }
-  }
   @media (prefers-reduced-motion: reduce) {
     .aside,
-    .aside.is-open { transition: none; animation: none; clip-path: none; transform: none; }
+    .aside.is-open { transition: none; animation: none; transform: none; }
     .aside::after,
     .aside.is-open::after,
-    .aside.is-open #device-card { animation: none; }
+    .aside.is-open #device-card,
+    .aside.is-open .drawer-port { animation: none; }
   }
   #device-card h2 { color: #c8ffe3; letter-spacing: 3px; font-size: 12px; text-transform: uppercase; }
 

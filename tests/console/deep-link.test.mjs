@@ -356,10 +356,16 @@ describe('UX-2 补丁 4 · 控制台：滚动条/拖拽区/交通灯避让（静
   it('拖拽区：顶栏可拖 + 可点元素 no-drag；macOS 壳交通灯安全区（shell-desktop-darwin）', () => {
     expect(consoleCss).toMatch(/\.topbar \{[^}]*-webkit-app-region: drag/);
     expect(consoleCss).toMatch(/\.topbar button[^{]*\{[^}]*-webkit-app-region: no-drag/);
-    expect(consoleCss).toMatch(/body\.shell-desktop-darwin \.topbar \{[^}]*padding-left: 84px/);
+    expect(consoleCss).toMatch(/\.shell-desktop-darwin \.topbar \{[^}]*padding-left: 84px/);
     expect(consoleJs).toContain('shell-desktop-darwin');
     expect(consoleJs).toMatch(/window\.mebularDesktop\?\.platform === 'darwin'/);
-    });
+    // 走查修复 B：首帧前就位——shell-boot.js 同步于 <head>（先于样式/首帧），且已登记服务白名单
+    const bootJs = readFileSync(join(here, '..', '..', 'packages', 'console', 'shell-boot.js'), 'utf-8');
+    expect(bootJs).toContain("document.documentElement.classList.add('shell-desktop-darwin')");
+    expect(indexHtml.indexOf('./shell-boot.js')).toBeGreaterThan(-1);
+    expect(indexHtml.indexOf('./shell-boot.js')).toBeLessThan(indexHtml.indexOf('./console.css'));
+    expect(serveSrc).toContain("'shell-boot.js'");
+  });
   });
 // UX-2 补丁 3：接入失败反馈语义 + 在途禁用（控制台 · 设置 · AI 助手）
 // ---------------------------------------------------------------------------

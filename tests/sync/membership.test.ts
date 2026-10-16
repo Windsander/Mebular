@@ -47,12 +47,21 @@ describe('M1 纯函数：成员资格推导（确定、顺序无关、独立于�
     expect(s.membershipNamespaces.has('nsA')).toBe(true);
   });
 
-  it('⑥ 同键取 R-c 最新（注销覆盖在册；顺序无关）', () => {
+  it('⑥ 同键取 R-c 最新（注销覆盖在册；顺序无关）；曾有在册 → 闸门保持（W1-B）', () => {
     const entries = [member('root', 'device-B', 'nsA', true), member('root', 'device-B', 'nsA', false)];
     const a = derivePolicyState(entries);
     expect([...(a.members.get('nsA') ?? [])]).toEqual([]);
-    expect(a.membershipNamespaces.has('nsA')).toBe(true); // 仍有记录 → 已启用
+    expect(a.membershipNamespaces.has('nsA')).toBe(true); // 曾有 active=true 记录 → 闸门保持（注销只移出成员，不回退 legacy）
     expect([...(derivePolicyState([...entries].reverse()).members.get('nsA') ?? [])]).toEqual([]);
+  });
+
+  it('W1-B：仅注销记录的域 → **不**启用成员资格（与 legacy/从未有记录一致）', () => {
+    const entries = [member('root', 'device-B', 'nsA', false)];
+    const s = derivePolicyState(entries);
+    expect([...(s.members.get('nsA') ?? [])]).toEqual([]);
+    // 旧行为：任何被采纳记录（含注销）都启用闸门 → true（红）；新行为：仅 active=true 记录启用 → false（绿）
+    expect(s.membershipNamespaces.has('nsA')).toBe(false);
+    expect([...(derivePolicyState([...entries].reverse()).membershipNamespaces)].sort()).toEqual([]);
   });
 
   it('R-b：被吊销签发者/成员的记录不采纳', () => {
@@ -175,6 +184,34 @@ describe('M1–M3 门面：裁剪链 与 显式拒绝', () => {
     await a2.graph.createNode('fact', { text: 'two' }, [], { namespace: 'nsA' });
     await syncBetween(a2, b2);
     expect((await b2.graph.listNodes()).length).toBe(1); // 旧 'one' 保留，'two' 未到达
+    await a2.shutdown();
+    await b2.shutdown();
+  });
+
+  it('W1-B：legacy 域与「仅注销记录」域行为一致（闸门未启用；hello 订阅即通）', async () => {
+    const hub = new InMemoryHub();
+    // ① 基线 legacy 域：无任何成员记录 → hello 订阅即通
+    const a1 = makeFacade('device-A', hub, { peerNamespacePolicy: { 'device-B': ['nsA'] } });
+    const b1 = makeFacade('device-B', hub, { namespaces: ['nsA'] });
+    await a1.initialize();
+    await b1.initialize();
+    await a1.graph.createNode('fact', { text: 'legacy' }, [], { namespace: 'nsA' });
+    await syncBetween(a1, b1);
+    expect(await namespacesOf(b1)).toEqual(['nsA']);
+    await a1.shutdown();
+    await b1.shutdown();
+
+    // ② 「仅注销记录」域（如退订/交接在 legacy 域留下的注销记录）：与 legacy 行为一致
+    const a2 = makeFacade('device-A2', hub, { peerNamespacePolicy: { 'device-B2': ['nsA'] } });
+    const b2 = makeFacade('device-B2', hub, { namespaces: ['nsA'] });
+    await a2.initialize();
+    await b2.initialize();
+    await a2.declareNamespaceMembership({ member: 'device-C', namespace: 'nsA', active: false });
+    await a2.graph.createNode('fact', { text: 'unsub-only' }, [], { namespace: 'nsA' });
+    const [a2Result] = await syncBetween(a2, b2);
+    // 旧行为：注销记录也启用闸门 → B2 非成员被拒（红）；新行为：未启用（与 legacy 一致）→ 到达（绿）
+    expect(a2Result.membershipRejected ?? []).toEqual([]);
+    expect(await namespacesOf(b2)).toEqual(['nsA']);
     await a2.shutdown();
     await b2.shutdown();
   });

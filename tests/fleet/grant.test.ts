@@ -264,9 +264,9 @@ describe('2c：fleet 重入 API 与 doctor', () => {
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
-  it('rejoinNamespace 准入：授权自己才可；写 reset 标记；幂等', async () => {
+  it('rejoinNamespace 准入（W1-B）：无本机在册声明 → not-authorized（不写标记）', async () => {
     await onboardDevice({ dir, device: 'device-A', peerDevice: 'device-B', agents: echoAgent });
-    // 无对 device-A 的授权 → not-authorized
+    // W1-B：准入 = 本机订阅声明（曾在册）∧ 未吊销；设备从未声明在册 → not-authorized
     expect(await rejoinNamespace(dir, { namespace: 'tasks' })).toMatchObject({ ok: false, reason: 'not-authorized' });
     expect(await rejoinReset(dir, 'tasks')).toBe(false);
   });

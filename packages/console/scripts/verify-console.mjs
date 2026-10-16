@@ -575,7 +575,11 @@ try {
     body: JSON.stringify({}),
   });
   const rejoinJson = await rejoin.json().catch(() => null);
-  check('rejoin 未满足生效授权 → 409 结构化', rejoin.status === 409 && rejoinJson?.ok !== true, `status=${rejoin.status} reason=${rejoinJson?.reason ?? rejoinJson?.error}`);
+  check(
+    'rejoin 满足「本机订阅声明 ∧ 未吊销」→ 200 结构化（W1-B 新准入）',
+    rejoin.status === 200 && rejoinJson?.ok === true && rejoinJson?.reset === true,
+    `status=${rejoin.status} ok=${rejoinJson?.ok} reason=${rejoinJson?.reason ?? rejoinJson?.error}`,
+  );
 
   const leaveForce = await fetch(`http://127.0.0.1:${port}/admin/api/namespaces/notes/leave`, {
     method: 'POST',

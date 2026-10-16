@@ -287,6 +287,10 @@ export interface NamespaceRejoinResult {
   /** 是否已声明“本机该分区已重置/为空”（触发对端向下修正并从 0 重发） */
   reset: boolean;
   member: boolean;
+  /**
+   * 准入通过（W1-B：「本机订阅声明 ∧ 未吊销」；字段名沿用旧称）。旧口径为「本机对该分区
+   * 有生效授权」。注意：本准入只决定本机「重置/重拉」，数据是否流动由供给端裁剪链独立决定。
+   */
   authorized: boolean;
   reason?: 'not-authorized' | 'membership-not-active';
 }
@@ -886,8 +890,11 @@ export class Mebular {
   /**
    * 2c：重订阅恢复——退订清理后**重新加入**该分区。
    *
-   * 准入（R1）：①该分区对**本设备**有**生效授权**（`getEffectiveNamespaces(self)` 含该分区，
-   * 即存在签发给本机的 grant；默认拒绝不变）②本机重新声明成员在册。任一不满足 → **显式失败**。
+   * 准入（R1，W1-B 修订）：①**本机订阅声明**——图上本机对该分区**曾声明在册**（存在被采纳的
+   * `namespace_membership` active=true 记录；**不再要求 self-grant**——网内订阅自主，且自动签发
+   * 对 self 冻结，旧门槛会让本机对自己参与过的域永远无法重入）②本机**未被吊销**。任一不满足 →
+   * **显式失败**（`not-authorized`，不写标记、不静默）。随后本机重新声明成员在册；未被采纳 →
+   * `membership-not-active`。本准入只决定本机「重置/重拉」；数据是否流动由供给端裁剪链独立决定。
    *
    * 重置（R2）：写**图外**「已清理」标记（R3，不同步），清空本机该分区本地水位；本机之后的
    * hello 会以**空时钟**上报该（显式订阅的）分区 → 对端按「自报水位只允许向下修正」**从 0 重发**
@@ -896,7 +903,13 @@ export class Mebular {
   async rejoinNamespace(input: { namespace: string }): Promise<NamespaceRejoinResult> {
     const ns = normalizeNamespace(input.namespace);
     if (ns === POLICY_NAMESPACE) throw new MebularError('不允许对保留策略分区 __policy__ 执行重入', ErrorCodes.VALIDATION_INVALID_ARGUMENT);
-    const authorized = (await this.getEffectiveNamespaces(this.config.deviceId)).includes(ns);
+    // W1-B（Q2）· 准入 = 本机订阅声明 ∧ 未吊销（原 self-grant 门槛收编为二者）
+    const declared = await this.assertReady(this.graphPolicyImpl, 'namespacePolicy').wasNamespaceMember(
+      ns,
+      this.config.deviceId,
+    );
+    const revoked = (await this.getRevokedDevices()).includes(this.config.deviceId);
+    const authorized = declared && !revoked;
     if (!authorized) {
       return { ok: false, action: 'rejoin', namespace: ns, reset: false, member: false, authorized: false, reason: 'not-authorized' };
     }

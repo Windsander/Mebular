@@ -2176,13 +2176,19 @@ stage.onOverlay = (ctx) => {
   ctx.arc(node.x, node.y, focus * 1.7, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.strokeStyle = `rgba(120, 255, 185, ${alpha.toFixed(3)})`;
-  ctx.shadowColor = 'rgba(70, 255, 160, 0.8)';
-  ctx.shadowBlur = 6;
-  ctx.lineWidth = 1;
   const rot = time * 0.85;
   const gap = Math.PI / 4.5;
-  // 外锁定环（旋转双弧）
+  // 外锁定环（旋转双弧）——发光用「宽淡描边」替代 shadowBlur（Intel 核显上模糊描边是慢路径）
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = `rgba(120, 255, 185, ${(alpha * 0.22).toFixed(3)})`;
+  ctx.beginPath();
+  ctx.arc(node.x, node.y, focus, rot, rot + Math.PI - gap);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(node.x, node.y, focus, rot + Math.PI, rot + 2 * Math.PI - gap);
+  ctx.stroke();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = `rgba(120, 255, 185, ${alpha.toFixed(3)})`;
   ctx.beginPath();
   ctx.arc(node.x, node.y, focus, rot, rot + Math.PI - gap);
   ctx.stroke();
@@ -2276,23 +2282,29 @@ stage.onOverlay = (ctx) => {
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     ctx.setLineDash([4, 4]);
+    // 发光 = 三档无模糊描边（shadowBlur 在核显上是慢路径）
     ctx.lineWidth = 3.5;
     ctx.strokeStyle = 'rgba(70, 255, 160, 0.10)';
-    ctx.shadowColor = 'rgba(70, 255, 160, 0.65)';
-    ctx.shadowBlur = 6;
+    trace();
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgba(110, 255, 175, 0.20)';
     trace();
     ctx.lineWidth = 1;
     ctx.strokeStyle = 'rgba(150, 255, 200, 0.85)';
-    ctx.shadowBlur = 3;
     trace();
     ctx.restore();
 
     // 折点节点
     if (routed && drawEase * total > Math.hypot(bendX - sx, cornerY - sy)) {
       ctx.save();
-      ctx.fillStyle = 'rgba(160, 255, 205, 0.9)';
-      ctx.shadowColor = 'rgba(80, 255, 170, 0.85)';
-      ctx.shadowBlur = 7;
+      const bendHalo = ctx.createRadialGradient(bendX, cornerY, 0, bendX, cornerY, 7);
+      bendHalo.addColorStop(0, 'rgba(80, 255, 170, 0.5)');
+      bendHalo.addColorStop(1, 'rgba(80, 255, 170, 0)');
+      ctx.fillStyle = bendHalo;
+      ctx.beginPath();
+      ctx.arc(bendX, cornerY, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(160, 255, 205, 0.95)';
       ctx.beginPath();
       ctx.arc(bendX, cornerY, 1.6, 0, Math.PI * 2);
       ctx.fill();
@@ -2302,20 +2314,23 @@ stage.onOverlay = (ctx) => {
     if (drawT >= 1) {
       const arrive = elapsed - LINK_DONE;
       ctx.save();
-      ctx.fillStyle = 'rgba(160, 255, 205, 0.9)';
-      ctx.shadowColor = 'rgba(80, 255, 170, 0.85)';
-      ctx.shadowBlur = 7;
       ctx.translate(cornerX, cornerY);
+      const termHalo = ctx.createRadialGradient(0, 0, 0, 0, 0, 9);
+      termHalo.addColorStop(0, 'rgba(80, 255, 170, 0.55)');
+      termHalo.addColorStop(1, 'rgba(80, 255, 170, 0)');
+      ctx.fillStyle = termHalo;
+      ctx.beginPath();
+      ctx.arc(0, 0, 9, 0, Math.PI * 2);
+      ctx.fill();
       ctx.rotate(Math.PI / 4);
+      ctx.fillStyle = 'rgba(160, 255, 205, 0.95)';
       ctx.fillRect(-2.8, -2.8, 5.6, 5.6);
       ctx.restore();
       if (arrive < 0.34) {
         const k = arrive / 0.34;
         ctx.save();
         ctx.globalCompositeOperation = 'lighter';
-        ctx.strokeStyle = `rgba(170, 255, 215, ${(0.7 * (1 - k)).toFixed(3)})`;
-        ctx.shadowColor = 'rgba(80, 255, 170, 0.9)';
-        ctx.shadowBlur = 12;
+        ctx.strokeStyle = `rgba(170, 255, 215, ${(0.85 * (1 - k)).toFixed(3)})`;
         ctx.lineWidth = 1.4;
         ctx.beginPath();
         ctx.arc(cornerX, cornerY, 3 + k * 22, 0, Math.PI * 2);
@@ -2346,9 +2361,14 @@ stage.onOverlay = (ctx) => {
       const fade = Math.sin(Math.PI * Math.min(1, Math.max(0, ptP)));
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
+      const pulseHalo = ctx.createRadialGradient(px, py, 0, px, py, 10);
+      pulseHalo.addColorStop(0, `rgba(140, 255, 200, ${(0.5 * fade).toFixed(3)})`);
+      pulseHalo.addColorStop(1, 'rgba(140, 255, 200, 0)');
+      ctx.fillStyle = pulseHalo;
+      ctx.beginPath();
+      ctx.arc(px, py, 10, 0, Math.PI * 2);
+      ctx.fill();
       ctx.fillStyle = `rgba(200, 255, 227, ${(0.9 * fade).toFixed(3)})`;
-      ctx.shadowColor = 'rgba(140, 255, 200, 0.95)';
-      ctx.shadowBlur = 10;
       ctx.beginPath();
       ctx.arc(px, py, 2.6, 0, Math.PI * 2);
       ctx.fill();

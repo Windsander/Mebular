@@ -346,11 +346,16 @@ describe('UX-2 补丁 4 · 控制台：滚动条/拖拽区/交通灯避让（静
     expect(consoleCss).toMatch(/::-webkit-scrollbar-corner \{[^}]*transparent/);
   });
 
-  it('滚动手感：主滚动容器 scrollbar-gutter stable（html + 记忆视图 + 设置体 + 弹层等）', () => {
+  it('滚动手感：主滚动容器 scrollbar-gutter stable（html + panel-view/设置体 + 弹层等）', () => {
     expect(consoleCss).toMatch(/html \{ scrollbar-gutter: stable/);
-    expect(consoleCss).toMatch(/#memories-view[^}]*scrollbar-gutter: stable/);
+    // 走查修复：由逐视图 ID 改为 .panel-view 类（审计/域视图此前漏配）
+    expect(consoleCss).toMatch(/\.panel-view[^}]*scrollbar-gutter: stable/);
     expect(consoleCss).toMatch(/#settings-body[^}]*scrollbar-gutter: stable/);
     expect(consoleCss).toMatch(/\.modal[^}]*scrollbar-gutter: stable/);
+  });
+
+  it('走查修复：弹层顶部锚定（切设置选项卡时整层不再垂直跳）', () => {
+    expect(consoleCss).toMatch(/\.modal \{[^}]*align-items: flex-start/);
   });
 
   it('拖拽区：顶栏可拖 + 可点元素 no-drag；macOS 壳交通灯安全区（shell-desktop-darwin）', () => {

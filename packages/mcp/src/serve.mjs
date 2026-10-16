@@ -184,6 +184,7 @@ const CONSOLE_DIR =
   process.env.MEBULAR_CONSOLE_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'console');
 const CONSOLE_FILES = {
   'index.html': 'text/html; charset=utf-8',
+  'shell-boot.js': 'text/javascript; charset=utf-8', // 走查修复 B：壳安全区首帧引导脚本
   'console.css': 'text/css; charset=utf-8',
   'console.js': 'text/javascript; charset=utf-8',
   'assistants.js': 'text/javascript; charset=utf-8',

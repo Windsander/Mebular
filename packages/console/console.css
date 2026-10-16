@@ -1059,8 +1059,9 @@ select {
 /* A. 桌面壳拖拽区：顶栏整体可拖（移动窗口），可点元素除外 */
 .topbar { -webkit-app-region: drag; }
 .topbar button, .topbar a, .topbar input, .topbar select, .topbar [role="button"] { -webkit-app-region: no-drag; }
-/* macOS hiddenInset：交通灯安全区避让（仅桌面壳 darwin；浏览器/其他平台不受影响） */
-body.shell-desktop-darwin .topbar { padding-left: 84px; }
+/* macOS hiddenInset：交通灯安全区避让（仅桌面壳 darwin；浏览器/其他平台不受影响）。
+   走查修复 B：类由 shell-boot.js 在首帧前置到 <html>（console.js 侧保留 body 兜底）→ 选择器泛化。 */
+.shell-desktop-darwin .topbar { padding-left: 84px; }
 
 /* B. 滚动条主题化：细（10px）、暗轨道、thumb 契约色、hover 微亮、corner 清理。
    注意：一旦定义 ::-webkit-scrollbar，Chrome 在「滚动时显示」与「常显」两种系统模式下

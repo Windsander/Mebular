@@ -322,6 +322,30 @@ async function main() {
     // H-1/UX-2：设置 · AI 助手专区（连接页已收编进设置；单列表 + 行内闭环）
     await evalJs('document.querySelector("#open-settings").click()');
     check('设置弹层打开', await waitFor('document.querySelector("#settings")?.hidden === false'));
+    // 轮 C 症状①：背板固定不滚，滚动收进 .modal-box；弹层打开时页面滚动锁定
+    check('轮 C 弹层壳：背板不滚 + 内容框内滚 + 页面滚动锁定',
+      await evalJs(`(() => {
+        const modal = document.querySelector('#settings');
+        const box = modal.querySelector('.modal-box');
+        const m = getComputedStyle(modal);
+        const b = getComputedStyle(box);
+        const spacer = document.createElement('div');
+        spacer.style.height = '900px';
+        box.appendChild(spacer);
+        box.scrollTop = 120;
+        const out = {
+          modalOverflow: m.overflowY,
+          boxOverflow: b.overflowY,
+          maxHeight: b.maxHeight,
+          boxScrolled: box.scrollTop > 0,
+          backdropStill: modal.scrollTop === 0,
+          bodyLocked: document.body.classList.contains('modal-open'),
+        };
+        spacer.remove();
+        box.scrollTop = 0;
+        return out.modalOverflow === 'hidden' && out.boxOverflow === 'auto'
+          && out.maxHeight !== 'none' && out.boxScrolled && out.backdropStill && out.bodyLocked;
+      })()`));
     check('常驻运行行归设置 · 常用（状态 + 动作按钮）',
       await waitFor('(() => { const r = document.querySelector("#settings-resident"); return Boolean(r) && /常驻/.test(r.textContent) && r.querySelectorAll("[data-svc-action]").length >= 1; })()'));
     await evalJs('document.querySelector("[data-settings-tab=assistants]").click()');
@@ -504,6 +528,24 @@ async function main() {
     check('简化轮：诊断并入高级底部折叠（cfg-copy-all 就位）',
       await evalJs('(() => { document.querySelector("[data-settings-tab=advanced]")?.click(); const f = document.querySelector("#diag-fold"); return Boolean(f) && Boolean(f.querySelector("#cfg-copy-all")); })()'));
     await evalJs('document.querySelector("[data-settings-tab=common]").click()');
+    // 轮 C 症状③：常显 = 名称 + 控件 + 生效中；异常才完整三元组；帮助/警告墙折叠
+    check('轮 C 呈现分级：常态三元组收成「生效中」，异常自动出现完整三元组',
+      await evalJs(`(() => {
+        const body = document.querySelector('#settings-body');
+        const ok = body.querySelectorAll('[data-cfg-state=ok]').length;
+        const ex = body.querySelector('[data-cfg-state=exception]');
+        return ok >= 3 && /✓ 生效中/.test(body.textContent)
+          && Boolean(ex) && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent) && /不一致/.test(ex.textContent);
+      })()`));
+    check('轮 C 呈现分级：帮助/风险说明收进「详情」，不再与控件平铺',
+      await evalJs(`(() => {
+        const card = document.querySelector('#settings-body [data-task=agent]');
+        const folded = card.querySelector('details.cfg-more .cfg-help');
+        const direct = card.querySelector('.cfg-control > .cfg-help');
+        return Boolean(folded) && !direct;
+      })()`));
+    check('轮 C 预留安全卡结构（只有插槽，未渲染功能）',
+      await evalJs('(() => { const s = document.querySelector("#settings-security-slot"); return Boolean(s) && s.hidden === true && s.dataset.settingsSlot === "security" && s.childElementCount === 0; })()'));
 
     // 即时生效：改低风险 toggle（joinService.enabled）→ 无草稿态、3s 跨轮询值持久（已写入）
     const toggleSel = '#settings-body input[data-cfg-path="joinService.enabled"]';
@@ -524,7 +566,9 @@ async function main() {
     const authOriginal = await evalJs(`document.querySelector('${authSelector}').value`);
     await evalJs(`(() => { const sel = document.querySelector('${authSelector}'); sel.value = sel.value === 'none' ? 'bearer' : 'none'; sel.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     check('即时生效 · 自锁项：品牌确认卡出现（不再用系统弹窗）', await waitFor('document.querySelector("#modal")?.hidden === false'));
-    await evalJs('document.querySelector("#modal-cancel").click()');
+    // 轮 C：Esc = 取消（绝不等于确认）；危险语义保持
+    await evalJs('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
+    check('轮 C 确认弹层：Esc = 取消（不写盘）', await waitFor('document.querySelector("#modal")?.hidden === true'));
     check('自锁取消 → 不写盘，auth 回原值', await waitFor(`document.querySelector('${authSelector}')?.value === ${JSON.stringify(authOriginal)}`));
 
     // 待重启：页面内写配置（CSRF 取自 document.cookie）→ 设置弹窗出现「待重启」并含变更项；改回后清空
@@ -557,10 +601,27 @@ async function main() {
     check('UI 待重启：改回（删除 intervalMs）→ 200', revertedPending === 200, `status=${revertedPending}`);
     check('UI 待重启：pendingRestart 清空后提示消失', await waitFor('!document.querySelector("[data-pending-restart]")'));
     await evalJs('document.querySelector("#settings-close").click()');
+    // 轮 C 症状②：Esc 只关最上层；点空白关闭；设置/关于叠加时顺序正确
+    await evalJs('document.querySelector("#open-settings").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === false');
+    await evalJs('document.querySelector("#self-badge").click()');
+    await waitFor('document.querySelector("#about")?.hidden === false');
+    await evalJs('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
+    check('轮 C 弹层关闭：Esc 只关最上层（关于关、设置留）',
+      await evalJs('document.querySelector("#about")?.hidden === true && document.querySelector("#settings")?.hidden === false'));
+    await evalJs(`(() => {
+      const el = document.querySelector('#settings');
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    })()`);
+    check('轮 C 弹层关闭：点空白（backdrop target===currentTarget）关闭设置',
+      await waitFor('document.querySelector("#settings")?.hidden === true && !document.body.classList.contains("modal-open")'));
     // 关于本机（点顶栏本机徽标进入）
     await evalJs('document.querySelector("#self-badge").click()');
     check('关于本机打开（身份/运行状态区块）', await waitFor('Boolean(document.querySelector("[data-info-block=identity]")) || /关于本机/.test(document.querySelector("#settings-body")?.textContent ?? "")'));
-    await evalJs('document.querySelector("#settings-close").click()');
+    check('轮 C 配套：写盘路径/.bak 收进关于本机、设置常用页不再重复',
+      await evalJs('(() => { const t = document.querySelector("#about-body")?.textContent ?? ""; const s = document.querySelector("#settings-body")?.textContent ?? ""; return /配置文件/.test(t) && /\\.bak/.test(t) && !/修改写入/.test(s); })()'));
+    await evalJs('document.querySelector("#about-close").click()');
 
     // UX-2：?view=connect 别名重定向 → 设置 · AI 助手自动打开
     await send('Page.navigate', { url: `${base}/console/?view=connect` });
@@ -570,6 +631,8 @@ async function main() {
     // 邀请面板（joinService 未启用 → 引导文案；启用 → 令牌。两者都应有内容）
     await evalJs('document.querySelector("#invite-device").click()');
     check('邀请面板打开且渲染内容', await waitFor('(() => { const el = document.querySelector("#invite-body"); return Boolean(el) && el.textContent.trim().length > 0; })()'));
+    check('轮 C 邀请卡：帮助去重（兑换语义只讲一次）',
+      await evalJs('(() => { const t = document.querySelector("#invite-body")?.textContent ?? ""; const hits = (t.match(/兑换/g) ?? []).length; return hits <= 2 && !/兑换后自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）\\s*让新设备/.test(t); })()'));
     await evalJs('document.querySelector("#invite-close").click()');
 
     // ---------- v4 记忆共享（W1-A）：?mock=1 验收路径 + 无审批族 + 参与事实 ----------
@@ -695,6 +758,9 @@ async function main() {
         await send('Page.navigate', { url: `${obBase}/console/` });
         check('F-ONB-2 UI 引导页呈现（建新/加入两入口）',
           await waitFor('Boolean(document.querySelector("#provision")) && !document.querySelector("#provision").hidden && Boolean(document.querySelector("#provision-create"))'));
+        await evalJs('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
+        check('轮 C 引导态不响应 Esc（必须先建新/加入）',
+          await evalJs('document.querySelector("#provision")?.hidden === false'));
         await evalJs('document.querySelector("#provision-create").click()');
         check('F-ONB-2 UI ① 前台建新 → 呈现手动重启命令（不得出现「正在自动重启」）',
           await waitFor('(() => { const panel = document.querySelector("#provision-restart"); const cmd = document.querySelector("#provision-restart-command")?.textContent ?? ""; const all = document.querySelector("#provision")?.textContent ?? ""; return Boolean(panel) && panel.hidden === false && /mebular serve/.test(cmd) && !/正在自动重启/.test(all); })()'));

@@ -1545,6 +1545,56 @@ try {
       !/style="width/.test(jsSrc), /style="width/.test(jsSrc) ? '发现内联 width' : '无内联 width');
   }
 
+  // ---------- 轮 C：设置页三症状 + 呈现分级（弹层壳 / 关闭规范 / 常显-折叠-异常） ----------
+  {
+    const cssSrc = await readFile(join(consoleDir, 'console.css'), 'utf-8');
+    const jsSrc = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const htmlSrc = await readFile(join(consoleDir, 'index.html'), 'utf-8');
+
+    check('轮 C ① 弹层壳：背板固定不滚 + .modal-box 限高内滚（六处弹层共用）',
+      /\.modal \{[^}]*overflow: hidden;[^}]*padding: 24px;/.test(cssSrc)
+        && /\.modal-box \{[^}]*max-height: calc\(100vh - 48px\);[^}]*overflow-y: auto;/.test(cssSrc)
+        && cssSrc.includes('body.modal-open { overflow: hidden; }'),
+      'backdrop fixed / box max-height + overflow-y auto / body 锁滚动');
+
+    check('轮 C ② 弹层关闭规范：Esc ∧ 点空白一处实现；确认弹层=取消、引导态不可关',
+      jsSrc.includes("event.key !== 'Escape'")
+        && jsSrc.includes("classList.contains('modal')")
+        && jsSrc.includes("event.target.classList.contains('modal')")
+        && jsSrc.includes('settleConfirmModal(false)')
+        && jsSrc.includes("el.id === 'provision'")
+        && jsSrc.includes("wizardState.connection === 'connecting'"),
+      'Esc/backdrop 全局监听 + 危险语义规则');
+
+    check('轮 C ③ 呈现分级：常态「生效中」/ 异常完整三元组 / 帮助与警告墙折叠',
+      jsSrc.includes('data-cfg-state="ok"')
+        && jsSrc.includes('✓ 生效中')
+        && jsSrc.includes('data-cfg-state="exception"')
+        && jsSrc.includes('class="cfg-more"')
+        && jsSrc.includes('runtimeFoldedReason')
+        && jsSrc.includes('cfg-pending')
+        && jsSrc.includes('settingsFoldKey')
+        && jsSrc.includes('prevScrollTop')
+        && cssSrc.includes('.cfg-more > summary'),
+      '名称+控件+状态常显；帮助/机制/警告入 details；异常自动出现');
+
+    check('轮 C 配套：页头内部口径删除、写盘路径/.bak 归「关于本机」、邀请帮助去重、帮助行长收窄',
+      !htmlSrc.includes('运行时可用项可直接操作')
+        && !jsSrc.includes('修改写入 <code>')
+        && jsSrc.includes("copyRowOf('配置文件', configPath)")
+        && jsSrc.includes('写盘备份')
+        && jsSrc.includes('兑换只建立入网信任')
+        && !jsSrc.includes('兑换令牌只建立入网信任')
+        && cssSrc.includes('max-width: 62ch'),
+      '页头/写盘/邀请/行长四项配套');
+
+    const securitySlotLine = jsSrc.split('\n').find((line) => line.includes('id="settings-security-slot"')) ?? '';
+    check('轮 C 预留：设置弹层「安全卡」插槽（结构 only，无功能）',
+      securitySlotLine.includes('<section') && securitySlotLine.includes('hidden></section>')
+        && securitySlotLine.includes('data-settings-slot="security"'),
+      'hidden 空插槽');
+  }
+
   // ---------- C2：对端连接路径（只读渲染断言，不涉行为） ----------
   {
     const settingsNow2 = await getJson(port, '/admin/api/settings');

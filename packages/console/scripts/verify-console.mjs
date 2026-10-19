@@ -1622,6 +1622,41 @@ try {
         && consoleSrc2.includes('diag-open-wizard') && consoleSrc2.includes('manual-connect'),
       'add-device/空态连接入口已撤下；诊断与设备卡保留手动连接');
 
+    // E2-A2 · 忆云入口：品牌后徽章 + 对称两按钮；加入弹层与卡片接线
+    check('E2-A2 顶栏：品牌后 #cloud-badge + 对称「加入忆云 / 邀请设备」',
+      /class="brand"[\s\S]{0,160}id="cloud-badge"/.test(htmlSrc)
+        && htmlSrc.includes('id="join-cloud"') && htmlSrc.includes('加入忆云')
+        && htmlSrc.includes('id="invite-device"') && htmlSrc.includes('邀请设备')
+        && !htmlSrc.includes('id="add-device"') && !consoleSrc2.includes("$('#add-device')"),
+      '品牌后徽章 + 两枚入口对称；无旧连接入口');
+    check('E2-A2 加入弹层：令牌 / 名字 / 指纹预览 / 分步 / 结果面板',
+      ['cloud-join-token', 'cloud-join-name', 'cloud-join-inspect', 'cloud-join-steps', 'cloud-join-result', 'cloud-join-submit']
+        .every((id) => htmlSrc.includes(`id="${id}"`))
+        && consoleSrc2.includes('/admin/api/clouds/inspect')
+        && consoleSrc2.includes('/admin/api/clouds/join')
+        && /body:\s*\{\s*token,\s*name,\s*confirm:\s*true\s*\}/.test(consoleSrc2)
+        && consoleSrc2.includes('正在校验令牌') && consoleSrc2.includes('正在创建忆云')
+        && consoleSrc2.includes('mebular cloud use')
+        && consoleSrc2.includes('window.mebularDesktop?.cloudSwitch'),
+      'inspect 不消费 nonce；join confirm:true；无 App 桥给 CLI 兜底');
+    check('E2-A2 忆云卡：设置·常用只读状态之后 / 当前不可切换 / 改名 / 无删除入口',
+      consoleSrc2.includes('settings-cloud-card')
+        && consoleSrc2.includes('/admin/api/clouds/rename')
+        && consoleSrc2.includes('归档保留，不删除')
+        && !consoleSrc2.includes('data-cloud-delete')
+        && !consoleSrc2.includes('删除忆云')
+        && /cloudRowHtml[\s\S]{0,1400}current\s*\?\s*''\s*:\s*`<button[^`]*data-cloud-switch/.test(consoleSrc2)
+        && consoleSrc2.indexOf('settings-common-status') < consoleSrc2.indexOf('cloudCardHtml()'),
+      '当前项无切换按钮；改名写注册表；无删除');
+    check('E2-A2 深链 focus=clouds：常用页滚到忆云卡（纯函数 + 启动接线）',
+      (await import('../deep-link.js')).initialViewFromSearch('?view=settings&focus=clouds').focusClouds === true
+        && consoleSrc2.includes('deepLink.focusClouds') && consoleSrc2.includes('settings-cloud-card'),
+      '?view=settings&focus=clouds → 常用 + 卡片聚焦');
+    check('E2-A2 术语：忆云 / 加入忆云 / 邀请设备 / 切换忆云 / 已归档 / 加入令牌；无「档案」「删除忆云」',
+      !htmlSrc.includes('档案') && !consoleSrc2.includes('档案') && !consoleSrc2.includes('删除忆云')
+        && consoleSrc2.includes('切换忆云') && consoleSrc2.includes('已归档') && consoleSrc2.includes('加入令牌'),
+      '用户可见词表零违例');
+
     // E1 · 邀请单屏：令牌 + 二维码（缺依赖降级）+ 复制在首屏；机制说明收「详情」
     const inviteSrc = (() => {
       const start = consoleSrc2.indexOf('function showInviteResult');

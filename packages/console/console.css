@@ -76,6 +76,21 @@ html, body {
 .badge-muted { color: var(--muted); }
 .badge-danger { color: var(--danger); border-color: #4a1f10; }
 .badge-warn { color: #ffd27a; border-color: #4a3a10; }
+/* E2-A2：顶栏忆云徽章（名字只取 overview.cloud.name；缺失时元素 hidden） */
+#cloud-badge { max-width: 260px; overflow: hidden; text-overflow: ellipsis; border-color: #29456b; color: #cfe4ff; background: rgba(20, 40, 72, 0.55); }
+#cloud-badge[hidden] { display: none; }
+#cloud-badge:hover { border-color: #3b6ea8; color: #eaf4ff; }
+.topbar-actions .btn-label { white-space: nowrap; }
+/* 窄屏：两枚入口折叠为图标 + 无障碍标题（保持等宽等高、对称） */
+@media (max-width: 900px) {
+  .topbar { gap: 10px; }
+  .topbar-actions .btn { width: 34px; padding: 0; }
+  .topbar-actions .btn .btn-label { display: none; }
+  .topbar-actions .btn #settings-pending-badge { position: absolute; transform: translate(13px, -10px); }
+  .topbar-actions .btn { position: relative; }
+  #cloud-badge { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; }
+}
+
 
 /* ---------- 待重启（pendingRestart） ---------- */
 .pending-restart {
@@ -399,6 +414,57 @@ body.modal-open { overflow: hidden; }
 .modal-note { font-size: 12px; line-height: 1.6; margin: 6px 0 10px; }
 .settings-section { border-top: 1px solid var(--border); padding: 10px 0; }
 .settings-section h3 { margin: 0 0 8px; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+/* E2-A2：忆云卡（设置 · 常用） */
+.cloud-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.cloud-intro { margin: 0 0 8px; font-size: 11.5px; }
+.cloud-rows { display: grid; gap: 8px; }
+.cloud-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(8, 14, 28, 0.45);
+  min-width: 0;
+}
+.cloud-row.is-current { border-color: rgba(80, 255, 170, 0.32); background: rgba(80, 255, 170, 0.05); }
+.cloud-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.cloud-name { font-weight: 600; overflow-wrap: anywhere; }
+.cloud-meta { grid-column: 1; display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); min-width: 0; }
+.cloud-meta code { color: var(--accent); overflow-wrap: anywhere; }
+.cloud-actions { grid-column: 2; grid-row: 1 / span 2; display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; min-width: 0; }
+.cloud-actions .cloud-rename-input { width: 150px; min-width: 0; }
+.cloud-rename-error { grid-column: 1 / -1; margin: 2px 0 0; font-size: 11px; }
+.cloud-unavailable { margin: 0 0 4px; font-size: 12px; color: #ffd27a; line-height: 1.6; }
+.cloud-inspect { margin: 8px 0 0; font-size: 11.5px; line-height: 1.7; min-height: 0; }
+.cloud-inspect p { margin: 0 0 2px; }
+.cloud-inspect code, .cloud-result code { color: var(--accent); overflow-wrap: anywhere; }
+.cloud-inspect-error { color: #ffd27a; }
+.cloud-duplicate { color: #ffd27a; margin: 6px 0 4px; }
+.cloud-warning { margin: 10px 0 0; font-size: 11.5px; line-height: 1.7; color: #ffd27a; }
+.cloud-steps { margin: 8px 0 0; font-size: 11.5px; }
+.cloud-result { margin: 10px 0 0; padding: 10px 12px; border: 1px solid rgba(80, 255, 170, 0.3); border-radius: 8px; background: rgba(80, 255, 170, 0.05); }
+.cloud-result p { margin: 0 0 6px; }
+.cloud-result-ok { color: #9dffcf; font-weight: 600; }
+.cloud-switch-progress { color: #ffd27a; }
+.cloud-switch-ok { color: #9dffcf; }
+.cloud-switch-error { color: #ffb4b4; }
+.cloud-error-detail { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
+.invite-cloud-line { margin-top: 6px; }
+/* E2-A2：加入忆云弹层字段竖排（label 独占一行；textarea/input 满宽） */
+#cloud-join .cfg-label { display: block; margin-top: 8px; }
+#cloud-join textarea.crt-input,
+#cloud-join input.crt-input { width: 100%; margin-top: 4px; box-sizing: border-box; }
+#cloud-join textarea.crt-input { font-family: var(--crt-mono, monospace); font-size: 11px; resize: vertical; }
+#cloud-join .modal-note { margin-bottom: 4px; }
+#cloud-join .modal-actions { margin-top: 10px; }
+@media (max-width: 760px) {
+  .cloud-row { grid-template-columns: minmax(0, 1fr); }
+  .cloud-actions { grid-column: 1; grid-row: auto; justify-content: flex-start; }
+  .cloud-actions .cloud-rename-input { flex: 1 1 100%; width: 100%; }
+}
 .settings-kv {
   display: grid;
   grid-template-columns: var(--row-label-w) minmax(0, 1fr) var(--kv-action-w);
@@ -1133,6 +1199,13 @@ body.modal-open { overflow: hidden; }
 .attention-card { position: fixed; top: 96px; right: 14px; z-index: 6; min-width: 180px; max-width: 260px;
   background: rgba(5, 7, 15, 0.92); border: 1px solid var(--accent-2); border-radius: 8px; padding: 8px 10px; }
 .attention-card h3 { margin: 0 0 4px; font-size: 12px; color: var(--accent-2); font-weight: 600; }
+/* E2-A2：窄屏顶栏有三枚图标 + 导航/图例，固定叠加条会压住入口 → 收进星图区内绝对定位 */
+@media (max-width: 900px) {
+  .status-pill { position: absolute; top: 10px; }
+  .attention-card { position: absolute; top: 10px; right: 10px; }
+  .stage-wrap.has-banner .status-pill,
+  .stage-wrap.has-banner .attention-card { top: 54px; }
+}
 .attention-card ul { margin: 0; padding: 0; list-style: none; }
 .attention-item { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 4px 2px;
   font-size: 12px; color: var(--text); cursor: pointer; }

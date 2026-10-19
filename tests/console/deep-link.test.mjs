@@ -30,6 +30,17 @@ describe('R-1 高-3 view 深链映射（initialViewFromSearch）', () => {
     expect(initialViewFromSearch('?mock=1&token=x').view).toBeNull();
   });
 
+  it('E2-A2：?view=settings&focus=clouds → 常用页 + focusClouds（托盘「管理忆云…」）', () => {
+    expect(initialViewFromSearch('?view=settings&focus=clouds')).toMatchObject({
+      view: null,
+      openSettings: 'common',
+      focusClouds: true,
+      focusSecurity: false,
+    });
+    expect(initialViewFromSearch('?view=settings&focus=security').focusClouds).toBe(false);
+    expect(initialViewFromSearch('?view=map&focus=clouds').focusClouds).toBe(false);
+  });
+
   it('?shell=desktop → shellDesktop 标志', () => {
     expect(initialViewFromSearch('?shell=desktop').shellDesktop).toBe(true);
     expect(initialViewFromSearch('?view=connect&shell=desktop')).toMatchObject({ view: null, shellDesktop: true });
@@ -53,6 +64,46 @@ describe('R-1 高-3 view 深链映射（initialViewFromSearch）', () => {
     const filesBlock = serveSrc.match(/CONSOLE_FILES\s*=\s*\{[\s\S]*?\}/)?.[0] ?? '';
     expect(filesBlock).toContain("'assistants.js'");
     expect(consoleJs).toMatch(/from '\.\/assistants\.js'/);
+  });
+});
+
+describe('E2-A2 忆云入口与卡片（静态契约）', () => {
+  it('顶栏：品牌后 #cloud-badge + 对称「加入忆云」「邀请设备」；无 #add-device', () => {
+    expect(indexHtml).toMatch(/class="brand"[\s\S]{0,160}id="cloud-badge"/);
+    expect(indexHtml).toContain('id="join-cloud"');
+    expect(indexHtml).toContain('加入忆云');
+    expect(indexHtml).toContain('id="invite-device"');
+    expect(indexHtml).not.toContain('id="add-device"');
+    expect(consoleJs).not.toContain("$('#add-device')");
+  });
+
+  it('加入弹层：令牌 / 名字 / 指纹预览 / 分步 / 结果面板', () => {
+    for (const id of ['cloud-join-token', 'cloud-join-name', 'cloud-join-inspect', 'cloud-join-steps', 'cloud-join-result', 'cloud-join-submit']) {
+      expect(indexHtml).toContain(`id="${id}"`);
+    }
+    expect(consoleJs).toContain('/admin/api/clouds/inspect');
+    expect(consoleJs).toContain('/admin/api/clouds/join');
+    expect(consoleJs).toMatch(/body:\s*\{\s*token,\s*name,\s*confirm:\s*true\s*\}/);
+    expect(consoleJs).toContain('正在校验令牌');
+    expect(consoleJs).toContain('正在创建忆云');
+    expect(consoleJs).toContain('mebular cloud use');
+    expect(consoleJs).toContain('window.mebularDesktop?.cloudSwitch');
+  });
+
+  it('忆云卡：当前不可切换 / 已归档危险确认 / 改名即时生效 / 无删除入口', () => {
+    expect(consoleJs).toContain('settings-cloud-card');
+    expect(consoleJs).toMatch(/current\s*\?\s*''\s*:\s*`<button[^`]*data-cloud-switch/);
+    expect(consoleJs).toContain('/admin/api/clouds/rename');
+    expect(consoleJs).toContain('归档保留，不删除');
+    expect(consoleJs).not.toContain('data-cloud-delete');
+    expect(consoleJs).not.toContain('删除忆云');
+    expect(consoleJs).toMatch(/settingsSignature[\s\S]{0,900}state\.clouds/);
+  });
+
+  it('邀请单屏：本忆云 + 根指纹 + 「加入忆云」指路', () => {
+    expect(consoleJs).toContain('本忆云');
+    expect(consoleJs).toContain('invite-cloud-identity');
+    expect(consoleJs).toContain('让 TA 在控制台点「加入忆云」');
   });
 });
 

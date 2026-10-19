@@ -13,6 +13,7 @@ export * from './agentdir.js';
 export * from './surface.js';
 export * from './config.js';
 export * from './onboard.js';
+export * from './security.js';
 export * from './quickstart.js';
 export * from './jointoken.js';
 export * from './qr.js';

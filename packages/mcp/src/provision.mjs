@@ -112,27 +112,15 @@ async function writeConfigFile(home, config) {
 }
 
 /**
- * 建新：生成 root 主密钥（复用 resolveMasterKeys：env > keyFile > <home>/user-master-key.json > 生成并持久化）
- * + 写 config.json（joinService 开、mcp 回环、network 默认），返回落盘结果与端口。
+ * 写引导态 config.json（create/restore 共用）。调用方必须已确保 `<home>/user-master-key.json` 存在
+ * （create 由 resolveMasterKeys 生成；restore 由备份解密落盘）。
  */
-export async function provisionCreate({ home, deviceName, deviceId, mcpPort, joinPort, listenPort }) {
-  if (!isProvisionHome(home)) {
-    const error = new Error('该家目录已完成初始化（已存在 config.json / 主密钥 / 身份文件）');
-    error.code = 'ALREADY_PROVISIONED';
-    throw error;
-  }
+async function writeInitialProvisionConfig({ home, deviceName, deviceId, mcpPort, joinPort, listenPort, action = 'create', notes = [] }) {
   const name = String(deviceName ?? '').trim() || defaultDeviceName();
   const id = normalizeExplicitDeviceId(deviceId) ?? deriveDeviceId(name);
   // 端口预检（避免重启即失败）：mcp 端口 = 当前引导服务端口（我们自己持有，无需探测）
   const joinChoice = await findFreePort(Number(joinPort) > 0 ? Number(joinPort) : 4002);
   const listenChoice = await findFreePort(Number(listenPort) > 0 ? Number(listenPort) : 4001);
-
-  const master = await resolveMasterKeys(home, {});
-  if (master.userMasterPrivateKey === undefined) {
-    const error = new Error('建新需要 root 主密钥（生成失败：未获得私钥）');
-    error.code = 'MASTER_KEY_FAILED';
-    throw error;
-  }
 
   const config = {
     deviceId: id,
@@ -156,17 +144,112 @@ export async function provisionCreate({ home, deviceName, deviceId, mcpPort, joi
   const path = await writeConfigFile(home, config);
   return {
     ok: true,
-    action: 'create',
+    action,
     deviceId: id,
     deviceName: name,
     configPath: path,
     ports: { mcp: mcpPort, join: joinChoice.port, listen: listenChoice.port },
     notes: [
-      `已生成 root 主密钥（<home>/user-master-key.json，0600）`,
+      ...notes,
       joinChoice.preferredAvailable ? `join 端口 ${joinChoice.port}` : `join 端口 4002 被占 → 已改用 ${joinChoice.port}`,
       listenChoice.preferredAvailable ? `监听 /ip4/0.0.0.0/tcp/${listenChoice.port}` : `监听端口 4001 被占 → 已改用 ${listenChoice.port}`,
     ],
   };
+}
+
+/**
+ * 建新：生成 root 主密钥（复用 resolveMasterKeys：env > keyFile > <home>/user-master-key.json > 生成并持久化）
+ * + 写 config.json（joinService 开、mcp 回环、network 默认），返回落盘结果与端口。
+ */
+export async function provisionCreate({ home, deviceName, deviceId, mcpPort, joinPort, listenPort }) {
+  if (!isProvisionHome(home)) {
+    const error = new Error('该家目录已完成初始化（已存在 config.json / 主密钥 / 身份文件）');
+    error.code = 'ALREADY_PROVISIONED';
+    throw error;
+  }
+  const master = await resolveMasterKeys(home, {});
+  if (master.userMasterPrivateKey === undefined) {
+    const error = new Error('建新需要 root 主密钥（生成失败：未获得私钥）');
+    error.code = 'MASTER_KEY_FAILED';
+    throw error;
+  }
+  return writeInitialProvisionConfig({
+    home,
+    deviceName,
+    deviceId,
+    mcpPort,
+    joinPort,
+    listenPort,
+    action: 'create',
+    notes: ['已生成 root 主密钥（<home>/user-master-key.json，0600）'],
+  });
+}
+
+/**
+ * 从备份恢复（§4.3）：解密主密钥 → 写 `<home>/user-master-key.json`（0600）→ 写 config.json。
+ * 失败不残留（备份模块先解密/验公钥再写盘；本函数失败时清理本次新建的主密钥）。
+ */
+export async function provisionRestore({ home, file, code, deviceName, deviceId, mcpPort, joinPort, listenPort }) {
+  if (!isProvisionHome(home)) {
+    const error = new Error('该家目录已完成初始化（已存在 config.json / 主密钥 / 身份文件）');
+    error.code = 'ALREADY_PROVISIONED';
+    throw error;
+  }
+  if (typeof file !== 'string' || file.trim().length === 0) {
+    const error = new Error('需要备份文件路径');
+    error.code = 'BACKUP_FILE_REQUIRED';
+    throw error;
+  }
+  if (typeof code !== 'string' || code.trim().length === 0) {
+    const error = new Error('需要备份码');
+    error.code = 'BACKUP_CODE_REQUIRED';
+    throw error;
+  }
+  const fleet = await import('../../fleet/dist/index.js');
+  const keyPath = join(home, 'user-master-key.json');
+  let restored;
+  try {
+    restored = await fleet.restoreMasterKeyBackup({
+      file: await readFile(file, 'utf-8'),
+      code: code.trim(),
+      dir: home,
+      keyPath,
+    });
+  } catch (error) {
+    await rm(keyPath, { force: true }).catch(() => undefined);
+    const wrapped = new Error(`恢复失败：${error?.message ?? error}`);
+    wrapped.code = 'RESTORE_FAILED';
+    throw wrapped;
+  }
+  try {
+    const result = await writeInitialProvisionConfig({
+      home,
+      deviceName,
+      deviceId,
+      mcpPort,
+      joinPort,
+      listenPort,
+      action: 'restore',
+      notes: [
+        `已从备份恢复主密钥（${restored.fingerprint}）`,
+        '请核对指纹与既有设备「关于本机」一致',
+      ],
+    });
+    return {
+      ...result,
+      fingerprint: restored.fingerprint,
+      masterPublicKeyHex: restored.masterPublicKeyHex,
+      notes: [
+        ...result.notes,
+        '既有设备无需重新入网（主密钥未变）；与恢复机建立连接即可继续同步',
+        '恢复机成为新 root：建议重新导出备份并轮换恢复码',
+      ],
+    };
+  } catch (error) {
+    await rm(keyPath, { force: true }).catch(() => undefined);
+    await rm(configPath(home), { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 /** 令牌可读化校验（形状/TTL）+ 提前失败，避免把不可用的令牌发到 inviter。 */

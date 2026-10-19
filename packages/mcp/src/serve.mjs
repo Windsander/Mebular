@@ -26,6 +26,7 @@ import {
   isProvisionHome,
   provisionCreate,
   provisionJoin,
+  provisionRestore,
   provisionStatus,
   writeProvisionRecord,
 } from './provision.mjs';
@@ -558,6 +559,52 @@ function isLoopbackMultiaddr(address) {
   return ['127.0.0.1', '::1', 'localhost', ''].includes(host) || host.startsWith('127.');
 }
 
+// ---------- 安全三档（S2）：写端点门禁 + 安全后端端点 ----------
+//
+// S1 未合并时 `getSecurityTier()` 缺失 → fleet security 模块按 low 处理（不炸、不放宽）。
+// 本文件的 `securityWriteGate` 只做**本机程序门槛**；权威采纳（会签/恢复码）在 core 推导。
+let fleetSecurityPromise = null;
+
+/** 延迟加载 @mebular/fleet 安全模块（测试/未构建时返回 null，门禁按 low 放行）。 */
+export function loadFleetSecurity() {
+  if (fleetSecurityPromise === null) {
+    fleetSecurityPromise = import('../../fleet/dist/index.js').catch(() => null);
+  }
+  return fleetSecurityPromise;
+}
+
+/**
+ * 写端点门禁：medium 要动态码；high 要会签批准/恢复码；low 放行。
+ * 导出供 S2-3 单测直接断言（HTTP 层同样走这里）。
+ */
+export async function securityWriteGate({ app, home, path, input = {}, namespace = 'tasks' }) {
+  const lib = await loadFleetSecurity();
+  if (!lib || typeof lib.evaluateSecurityGate !== 'function') return { ok: true };
+  let action = null;
+  let subject;
+  let level;
+  if (path === '/admin/api/invite') {
+    action = 'invite';
+  } else if (/^\/admin\/api\/devices\/[^/]+\/revoke$/.test(path)) {
+    action = 'revoke';
+    subject = decodeURIComponent(path.split('/')[4] ?? '');
+  } else if (path === '/admin/api/security/tier') {
+    action = 'tier';
+    level = typeof input.level === 'string' ? input.level : undefined;
+  }
+  if (action === null) return { ok: true };
+  return lib.evaluateSecurityGate(app, home, {
+    action,
+    ...(typeof input.code === 'string' ? { code: input.code } : {}),
+    ...(input.cosign !== undefined ? { cosign: input.cosign } : {}),
+    ...(input.breakGlass !== undefined ? { breakGlass: input.breakGlass } : {}),
+    ...(typeof input.approvalId === 'string' ? { approvalId: input.approvalId } : {}),
+    ...(subject !== undefined ? { subject } : {}),
+    ...(level !== undefined ? { level } : {}),
+    namespace: typeof input.namespace === 'string' && input.namespace.length > 0 ? input.namespace : namespace,
+  });
+}
+
 function sendJson(res, status, data) {
   const body = JSON.stringify(data);
   res.statusCode = status;
@@ -750,6 +797,56 @@ export async function startHttpServer({
     return sendJson(res, 404, { error: 'not_found', path });
   }
 
+  async function handleSecurityRead(req, res) {
+    if (!app || !service) {
+      return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
+    }
+    const check = await authenticate(req, Buffer.alloc(0), 'memory.read');
+    if (!check.ok) {
+      res.statusCode = check.status;
+      if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+      return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
+    }
+    const lib = await loadFleetSecurity();
+    if (!lib) {
+      return sendJson(res, 200, {
+        ok: true,
+        level: 'low',
+        admitted: [],
+        rejections: [],
+        coreTierAvailable: false,
+        totp: { imported: false, failures: 0, lockedUntil: 0, backoffUntil: 0, lastAcceptedAt: 0 },
+        recovery: { registered: false },
+        pendingApprovals: [],
+        recentApprovals: [],
+      });
+    }
+    const state = await lib.readSecurityState(app);
+    const events = await lib.listPolicyEvents(app);
+    const registry = lib.collectRecoveryRegistry(events);
+    const latest = lib.latestRecoveryRecord(events);
+    const totp = await lib.readTotpStatus(home).catch(() => ({
+      imported: false, failures: 0, lockedUntil: 0, backoffUntil: 0, lastAcceptedAt: 0,
+    }));
+    return sendJson(res, 200, {
+      ok: true,
+      ...state,
+      totp,
+      recovery: latest === null
+        ? { registered: false }
+        : {
+            registered: true,
+            keyId: latest.keyId,
+            mode: latest.mode,
+            createdAt: latest.createdAt,
+            lastUsedAt: registry.lastUsedAt ?? null,
+            current: registry.currentKeyId === latest.keyId,
+          },
+      pendingApprovals: lib.pendingApprovals(events),
+      recentApprovals: lib.approvalsFromEvents(events).slice(-50),
+    });
+  }
+
   async function handleAdminRead(req, res, path, url) {
     const builder = READ_ROUTES[path];
     if (!builder) return false;
@@ -889,6 +986,11 @@ export async function startHttpServer({
     /^\/admin\/api\/restart$/,
     /^\/admin\/api\/memories\/([^/]+)\/(archive|unarchive|delete)$/,
     /^\/admin\/api\/invite$/,
+    /^\/admin\/api\/security\/tier$/,
+    /^\/admin\/api\/security\/approvals$/,
+    /^\/admin\/api\/security\/approvals\/([^/]+)\/(approve|deny)$/,
+    /^\/admin\/api\/security\/totp\/(show|import)$/,
+    /^\/admin\/api\/security\/recovery\/(generate|rotate)$/,
     /^\/admin\/api\/policy-issuers$/,
     /^\/admin\/api\/memberships$/,
     /^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/,
@@ -1052,6 +1154,331 @@ export async function startHttpServer({
       return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
     }
 
+    // S2：安全三档写端点门禁（medium 动态码 / high 会签或恢复码；low 放行）。
+    const gateInput = parseJsonBody(body) ?? {};
+    const gate = await securityWriteGate({ app, home, path, input: gateInput, namespace });
+    if (!gate.ok) {
+      if (gate.retryAfterMs !== undefined) res.setHeader('retry-after', String(Math.ceil(gate.retryAfterMs / 1000)));
+      return sendJson(res, gate.status ?? 403, {
+        ok: false,
+        error: gate.error ?? 'security_gate',
+        message: gate.message ?? '安全门槛未通过',
+        ...(gate.retryAfterMs !== undefined ? { retryAfterMs: gate.retryAfterMs } : {}),
+      });
+    }
+
+    // S2：安全后端端点（tier 读写 / 批准请求 / 待批准 / 批准 / 拒绝 / 恢复码状态）。
+    // S2：TOTP 分发（显示需先输入一次动态码；导入写审计）。
+    const totpAction = path.match(/^\/admin\/api\/security\/totp\/(show|import)$/);
+    if (totpAction) {
+      const lib = await loadFleetSecurity();
+      if (!lib) return sendJson(res, 503, { ok: false, error: 'security_unavailable', message: '安全模块不可用' });
+      const input = parseJsonBody(body) ?? {};
+      if (totpAction[1] === 'show') {
+        let seed;
+        try {
+          seed = await lib.readTotpSeed(home);
+        } catch (error) {
+          return sendJson(res, 400, { ok: false, error: 'totp_invalid_file', message: String(error?.message ?? error) });
+        }
+        if (seed === null) {
+          if (input.generate !== true) {
+            return sendJson(res, 409, {
+              ok: false,
+              error: 'totp_not_configured',
+              message: '本机尚未导入动态码种子：请从一台已有设备导入，或由 root 生成新种子',
+            });
+          }
+          if (!app.identity?.hasMasterPrivateKey?.()) {
+            return sendJson(res, 403, { ok: false, error: 'root_required', message: '仅 root（持有主密钥私钥的设备）可生成动态码种子' });
+          }
+          seed = await lib.writeTotpSeed(home, lib.generateTotpSecret());
+        } else {
+          if (typeof input.code !== 'string' || input.code.trim().length === 0) {
+            return sendJson(res, 403, { ok: false, error: 'totp_required', message: '显示动态码种子前需要输入一次本机动态码（code）' });
+          }
+          const check = await lib.verifyTotp(seed.secret, input.code, Date.now(), { dir: home });
+          if (!check.ok) {
+            return sendJson(res, check.reason === 'locked' ? 429 : 403, {
+              ok: false,
+              error: check.reason === 'locked' ? 'totp_locked' : check.reason === 'replay' ? 'totp_replayed' : 'totp_invalid',
+              message: check.reason === 'locked'
+                ? `动态码已锁定：请在 ${Math.ceil((check.retryAfterMs ?? 0) / 1000)} 秒后重试`
+                : check.reason === 'replay' ? '动态码已使用过（重放被拒）' : '动态码无效：请检查设备时间',
+              ...(check.retryAfterMs !== undefined ? { retryAfterMs: check.retryAfterMs } : {}),
+            });
+          }
+        }
+        const share = await lib.renderTotpShare(seed.secret, deviceId, { qr: true });
+        const svg = await lib.renderTotpShareSvg(seed.secret, deviceId);
+        await lib.writeSecurityTotpAudit(app, {
+          device: deviceId,
+          fingerprint: seed.fingerprint,
+          issuedAt: Date.now(),
+          note: 'console show',
+        });
+        return sendJson(res, 200, {
+          ok: true,
+          device: deviceId,
+          fingerprint: seed.fingerprint,
+          secret: seed.secret,
+          groups: share.groups,
+          otpauth: share.otpauth,
+          qr: share.qrText ?? null,
+          qrSvg: svg,
+          warning: '种子等于这一档的钥匙：只在两台你自己的设备之间当面出示；不要截图、不要发聊天工具。',
+        });
+      }
+      const inputSecret = typeof input.secret === 'string'
+        ? input.secret
+        : typeof input.uri === 'string' ? input.uri : '';
+      if (inputSecret.length === 0) {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: '需要 secret（base32）或 uri（otpauth://…）' });
+      }
+      try {
+        const record = await lib.importTotpSeed(home, inputSecret, {
+          ...(typeof input.expectedFingerprint === 'string' ? { expectedFingerprint: input.expectedFingerprint } : {}),
+        });
+        await lib.writeSecurityTotpAudit(app, {
+          device: deviceId,
+          fingerprint: record.fingerprint,
+          issuedAt: Date.now(),
+          note: 'console import',
+        });
+        return sendJson(res, 200, { ok: true, device: deviceId, fingerprint: record.fingerprint, createdAt: record.createdAt });
+      } catch (error) {
+        return sendJson(res, 400, { ok: false, error: 'totp_import_failed', message: String(error?.message ?? error) });
+      }
+    }
+
+    // S2：恢复码生成/轮换（新码只返回一次）。
+    const recoveryAction = path.match(/^\/admin\/api\/security\/recovery\/(generate|rotate)$/);
+    if (recoveryAction) {
+      const lib = await loadFleetSecurity();
+      if (!lib) return sendJson(res, 503, { ok: false, error: 'security_unavailable', message: '安全模块不可用' });
+      const input = parseJsonBody(body) ?? {};
+      const events = await lib.listPolicyEvents(app);
+      if (recoveryAction[1] === 'generate') {
+        const existing = lib.latestRecoveryRecord(events);
+        if (existing !== null) {
+          return sendJson(res, 409, {
+            ok: false,
+            error: 'recovery_exists',
+            message: `已存在恢复码（keyId ${existing.keyId.slice(0, 8)}…）：请使用轮换`,
+          });
+        }
+        const material = lib.generateRecoveryCode();
+        const event = await lib.writeSecurityRecovery(app, {
+          keyId: material.keyId,
+          publicKey: material.publicKeyHex,
+          createdAt: material.createdAt,
+          mode: 'set',
+          ...(typeof input.note === 'string' ? { note: input.note } : {}),
+        });
+        return sendJson(res, 201, {
+          ok: true,
+          keyId: material.keyId,
+          code: material.code,
+          codeFormatted: lib.formatRecoveryCode(material.code),
+          eventId: event.id,
+          shownOnce: true,
+        });
+      }
+      const oldCode = typeof input.oldCode === 'string' ? input.oldCode : typeof input.code === 'string' ? input.code : '';
+      if (oldCode.length === 0) {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: '轮换需要 oldCode（当前恢复码）' });
+      }
+      const registry = lib.collectRecoveryRegistry(events);
+      const state = await lib.readSecurityState(app);
+      const currentKeyId = state.recoveryKeyId ?? registry.currentKeyId ?? lib.latestRecoveryRecord(events)?.keyId;
+      if (currentKeyId === undefined) {
+        return sendJson(res, 409, { ok: false, error: 'recovery_missing', message: '尚未生成恢复码' });
+      }
+      let oldDerived;
+      try {
+        oldDerived = lib.deriveRecoveryKey(oldCode);
+      } catch (error) {
+        return sendJson(res, 400, { ok: false, error: 'recovery_invalid', message: String(error?.message ?? error) });
+      }
+      if (oldDerived.keyId !== currentKeyId) {
+        return sendJson(res, 403, { ok: false, error: 'recovery_mismatch', message: '恢复码不匹配当前 keyId（可能已被轮换）' });
+      }
+      const material = lib.generateRecoveryCode();
+      const signed = lib.signBreakGlass({
+        code: oldCode,
+        op: 'rotate',
+        initiator: deviceId,
+        oldKeyId: currentKeyId,
+        newPublicKey: material.publicKeyHex,
+      });
+      const event = await lib.writeSecurityRecovery(app, {
+        keyId: material.keyId,
+        publicKey: material.publicKeyHex,
+        createdAt: material.createdAt,
+        mode: 'rotate',
+        nonce: signed.proof.nonce,
+        breakGlass: signed.proof,
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+      });
+      return sendJson(res, 200, {
+        ok: true,
+        oldKeyId: currentKeyId,
+        keyId: material.keyId,
+        code: material.code,
+        codeFormatted: lib.formatRecoveryCode(material.code),
+        eventId: event.id,
+        shownOnce: true,
+      });
+    }
+
+    if (path === '/admin/api/security/tier') {
+      const input = parseJsonBody(body) ?? {};
+      const level = typeof input.level === 'string' ? input.level : '';
+      if (!['low', 'medium', 'high'].includes(level)) {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: 'level 必须是 low|medium|high' });
+      }
+      const lib = await loadFleetSecurity();
+      if (!lib) return sendJson(res, 503, { ok: false, error: 'security_unavailable', message: '安全模块不可用（@mebular/fleet 未构建）' });
+      const state = await lib.readSecurityState(app);
+      const events = await lib.listPolicyEvents(app);
+      let recoveryCode;
+      let recoveryKeyId = state.recoveryKeyId;
+      if (level === 'high' && state.level !== 'high') {
+        const registry = lib.collectRecoveryRegistry(events);
+        if (registry.currentKeyId === undefined && recoveryKeyId === undefined) {
+          const material = lib.generateRecoveryCode();
+          await lib.writeSecurityRecovery(app, {
+            keyId: material.keyId,
+            publicKey: material.publicKeyHex,
+            createdAt: material.createdAt,
+            mode: 'set',
+            note: 'tier-upgrade-high',
+          });
+          recoveryCode = material.code;
+          recoveryKeyId = material.keyId;
+        }
+      }
+      let cosign = input.cosign;
+      let approvalNonce;
+      if (cosign === undefined && input.breakGlass === undefined && typeof input.approvalId === 'string') {
+        const approval = lib.findApproval(events, input.approvalId);
+        cosign = approval?.cosign;
+        approvalNonce = approval?.nonce;
+      }
+      const written = await lib.writeSecurityTier(app, {
+        level,
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+        ...(input.nonce !== undefined ? { nonce: input.nonce } : approvalNonce !== undefined ? { nonce: approvalNonce } : {}),
+        ...(cosign !== undefined ? { cosign } : {}),
+        ...(input.breakGlass !== undefined ? { breakGlass: input.breakGlass } : {}),
+      });
+      return sendJson(res, 200, {
+        ok: true,
+        level,
+        ...(written.id !== undefined ? { eventId: written.id } : {}),
+        ...(recoveryKeyId !== undefined ? { recoveryKeyId } : {}),
+        ...(recoveryCode !== undefined ? {
+          recoveryCode,
+          recoveryCodeFormatted: lib.formatRecoveryCode(recoveryCode),
+          mustAcknowledge: true,
+          message: '已生成离线恢复码：只显示这一次，请抄写到离线介质后确认已保存。',
+        } : {}),
+      });
+    }
+
+    if (path === '/admin/api/security/approvals') {
+      const input = parseJsonBody(body) ?? {};
+      const op = input.op;
+      if (!['kick', 'join', 'tier'].includes(op)) {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: 'op 必须是 kick|join|tier' });
+      }
+      if (op === 'kick' && typeof input.target !== 'string') {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: 'kick 需要 target（被踢设备）' });
+      }
+      if (op === 'join' && typeof input.namespace !== 'string') {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: 'join 需要 namespace' });
+      }
+      if (op === 'tier' && !['low', 'medium', 'high'].includes(input.level)) {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: 'tier 需要 level=low|medium|high' });
+      }
+      const lib = await loadFleetSecurity();
+      if (!lib) return sendJson(res, 503, { ok: false, error: 'security_unavailable', message: '安全模块不可用' });
+      const approvalId = randomUUID();
+      const nonce = randomUUID();
+      const digest = lib.securityActionDigest({
+        op,
+        initiator: deviceId,
+        ...(op === 'kick' ? { subject: input.target } : {}),
+        ...(op === 'join' ? { namespace: input.namespace } : {}),
+        ...(op === 'tier' ? { level: input.level } : {}),
+        nonce,
+      });
+      const record = {
+        approvalId,
+        op,
+        decision: 'request',
+        initiator: deviceId,
+        ...(op === 'kick' ? { target: input.target } : {}),
+        ...(op === 'join' ? { namespace: input.namespace } : {}),
+        ...(op === 'tier' ? { level: input.level } : {}),
+        nonce,
+        digest,
+        pairingCode: lib.pairingCodeForDigest(digest),
+        expiresAt: Date.now() + 10 * 60_000,
+        issuedAt: Date.now(),
+        ...(typeof input.note === 'string' ? { note: input.note } : {}),
+      };
+      const event = await lib.writeSecurityApproval(app, record);
+      return sendJson(res, 201, { ok: true, ...record, eventId: event.id });
+    }
+
+    const approvalAction = path.match(/^\/admin\/api\/security\/approvals\/([^/]+)\/(approve|deny)$/);
+    if (approvalAction) {
+      const approvalId = decodeURIComponent(approvalAction[1]);
+      const decision = approvalAction[2];
+      const lib = await loadFleetSecurity();
+      if (!lib) return sendJson(res, 503, { ok: false, error: 'security_unavailable', message: '安全模块不可用' });
+      const events = await lib.listPolicyEvents(app);
+      const request = lib.approvalsFromEvents(events).find((record) => record.approvalId === approvalId && record.decision === 'request');
+      if (!request) return sendJson(res, 404, { ok: false, error: 'approval_not_found', message: '待批准请求不存在或已处理' });
+      if (request.initiator === deviceId) {
+        return sendJson(res, 403, { ok: false, error: 'self_approval', message: '发起设备不能批准自己的动作' });
+      }
+      if (decision === 'deny') {
+        const record = {
+          ...request,
+          decision: 'deny',
+          issuedAt: Date.now(),
+        };
+        const event = await lib.writeSecurityApproval(app, record);
+        return sendJson(res, 200, { ok: true, approvalId, decision: 'deny', eventId: event.id });
+      }
+      const identity = app.identity?.getDeviceKey?.(deviceId);
+      if (!identity || identity.privateKey === undefined) {
+        return sendJson(res, 409, { ok: false, error: 'identity_unavailable', message: '本机设备身份不可用，无法会签' });
+      }
+      const chain = Array.isArray(identity.certificateChain) && identity.certificateChain.length > 0
+        ? identity.certificateChain
+        : identity.certificate !== undefined ? [identity.certificate] : [];
+      const cosign = await lib.signCosignProof({
+        privateKey: identity.privateKey,
+        approver: deviceId,
+        approverCertificateChain: chain,
+        approvalId,
+        op: request.op,
+        digest: request.digest,
+        pairingCode: request.pairingCode,
+      });
+      const record = {
+        ...request,
+        decision: 'approve',
+        cosign,
+        issuedAt: Date.now(),
+      };
+      const event = await lib.writeSecurityApproval(app, record);
+      return sendJson(res, 200, { ok: true, approvalId, decision: 'approve', eventId: event.id, cosign });
+    }
+
     // 新设备上车：签发一次性加入令牌（需 joinService 已启用；由守护 identity 签发）
     if (path === '/admin/api/invite') {
       // C7：二维码 + 文本一起给（QR 内容 = 内联令牌文本；缺可选依赖 → 只给文本，不报错）
@@ -1063,6 +1490,34 @@ export async function startHttpServer({
         });
       }
       const input = parseJsonBody(body) ?? {};
+      // §7-4 可选增强：被吊销设备不签发新令牌（不改变令牌格式/默认语义）。
+      if (typeof app.getRevokedDevices === 'function') {
+        const revoked = await app.getRevokedDevices().catch(() => []);
+        if (Array.isArray(revoked) && revoked.includes(deviceId)) {
+          return sendJson(res, 403, {
+            ok: false,
+            error: 'inviter_revoked',
+            message: '本机已被踢出网络（device_revoke 已采纳）：不能再签发加入令牌',
+          });
+        }
+      }
+      // §3.7 ④：高档下把已核对的批准随响应交给新设备（内嵌到首现记录用）。
+      let securityApproval = null;
+      if (typeof input.approvalId === 'string' && input.approvalId.length > 0) {
+        const lib = await loadFleetSecurity();
+        if (lib) {
+          const events = await lib.listPolicyEvents(app);
+          const approval = lib.findApproval(events, input.approvalId);
+          if (!approval) {
+            return sendJson(res, 409, { ok: false, error: 'approval_missing', message: '批准记录不存在或未生效' });
+          }
+          securityApproval = {
+            approvalId: approval.approvalId,
+            nonce: approval.nonce,
+            ...(approval.cosign !== undefined ? { cosign: approval.cosign } : {}),
+          };
+        }
+      }
       const ns = typeof input.namespace === 'string' && input.namespace ? input.namespace : namespace;
       const ttlMs = Number.isInteger(input.ttlMs) && input.ttlMs > 0 ? input.ttlMs : 900_000;
       // F-C6：端点默认取守护计算的**可达**地址（通配 bind → 本机 LAN IPv4）；允许调用方显式覆盖
@@ -1099,6 +1554,7 @@ export async function startHttpServer({
         namespace: ns,
         expiresAt: token.expiresAt,
         ttlMs,
+        ...(securityApproval !== null ? { securityApproval } : {}),
         ...(loopback
           ? { warning: '该端点是回环地址，另一台机器无法访问：请把 joinService.bind 设为 0.0.0.0（自动取本机 LAN IPv4），或在本面板填写新设备可达地址（如 http://<本机LAN IP>:端口）' }
           : {}),
@@ -1289,6 +1745,36 @@ export async function startHttpServer({
 
       if (action === 'revoke') {
         const input = parseJsonBody(body) ?? {};
+        const lib = await loadFleetSecurity();
+        let cosign = input.cosign;
+        let approvalNonce = typeof input.nonce === 'string' ? input.nonce : undefined;
+        if (lib && (cosign !== undefined || typeof input.approvalId === 'string') && input.breakGlass === undefined) {
+          const events = await lib.listPolicyEvents(app);
+          const approvalId = typeof input.approvalId === 'string'
+            ? input.approvalId
+            : typeof cosign?.approvalId === 'string' ? cosign.approvalId : null;
+          if (approvalId !== null) {
+            const approval = lib.findApproval(events, approvalId);
+            if (cosign === undefined) cosign = approval?.cosign;
+            if (approvalNonce === undefined) approvalNonce = approval?.nonce;
+          }
+        }
+        if (lib && (cosign !== undefined || input.breakGlass !== undefined)) {
+          const event = await lib.writeDeviceRevoke(app, {
+            subject: deviceId,
+            ...(typeof input.note === 'string' ? { note: input.note } : {}),
+            ...(approvalNonce !== undefined ? { nonce: approvalNonce } : {}),
+            ...(cosign !== undefined ? { cosign } : {}),
+            ...(input.breakGlass !== undefined ? { breakGlass: input.breakGlass } : {}),
+          });
+          return sendJson(res, 200, {
+            ok: true,
+            deviceId,
+            eventId: event.id,
+            method: input.breakGlass !== undefined ? 'breakGlass' : 'cosign',
+            ...(input.breakGlass !== undefined ? { auditLabel: '恢复码' } : {}),
+          });
+        }
         const event = await app.revokeDevice({
           subject: deviceId,
           ...(typeof input.note === 'string' ? { note: input.note } : {}),
@@ -1710,7 +2196,7 @@ export async function startHttpServer({
             ...(planned ? { restarting: planned.restarting, restart: planned.restart } : {}),
           }));
         }
-        if (path === '/app/provision/create' || path === '/app/provision/join') {
+        if (path === '/app/provision/create' || path === '/app/provision/join' || path === '/app/provision/restore') {
           if (req.method !== 'POST') return sendJson(res, 405, { error: 'method_not_allowed' });
           const reqOrigin = req.headers.origin;
           if (typeof reqOrigin === 'string' && reqOrigin.length > 0 && reqOrigin !== origin) {
@@ -1744,15 +2230,26 @@ export async function startHttpServer({
                 joinPort: input.joinPort,
                 listenPort: input.listenPort,
               })
-              : await provisionJoin({
-                home,
-                token: typeof input.token === 'string' ? input.token : '',
-                deviceName: typeof input.deviceName === 'string' ? input.deviceName : undefined,
-                mcpPort: boundPort,
-                joinPort: input.joinPort,
-                listenPort: input.listenPort,
-                timeoutMs: Number.isFinite(input.timeoutMs) ? input.timeoutMs : undefined,
-              });
+              : path.endsWith('/join')
+                ? await provisionJoin({
+                  home,
+                  token: typeof input.token === 'string' ? input.token : '',
+                  deviceName: typeof input.deviceName === 'string' ? input.deviceName : undefined,
+                  mcpPort: boundPort,
+                  joinPort: input.joinPort,
+                  listenPort: input.listenPort,
+                  timeoutMs: Number.isFinite(input.timeoutMs) ? input.timeoutMs : undefined,
+                })
+                : await provisionRestore({
+                  home,
+                  file: typeof input.file === 'string' ? input.file : '',
+                  code: typeof input.code === 'string' ? input.code : '',
+                  deviceName: typeof input.deviceName === 'string' ? input.deviceName : undefined,
+                  ...(typeof input.deviceId === 'string' ? { deviceId: input.deviceId } : {}),
+                  mcpPort: boundPort,
+                  joinPort: input.joinPort,
+                  listenPort: input.listenPort,
+                });
             await writeProvisionRecord(home, { ...result, at: new Date().toISOString() });
             const planned = await planProvisionRestart({ result });
             sendJson(res, 202, {
@@ -1781,6 +2278,7 @@ export async function startHttpServer({
         return sendJson(res, 404, { error: 'not_found', path });
       }
       if (path.startsWith('/admin/api/')) {
+        if (req.method === 'GET' && (path === '/admin/api/security' || path === '/admin/api/security/approvals')) return handleSecurityRead(req, res);
         const planMatch = path.match(/^\/admin\/api\/namespaces\/([^/]+)\/handoff-plan$/);
         if (req.method === 'GET' && planMatch) {
           if (!app || !service) {

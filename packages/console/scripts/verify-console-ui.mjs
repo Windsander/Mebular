@@ -820,7 +820,7 @@ async function main() {
         const modal = document.querySelector('#cloud-join');
         return Boolean(modal) && modal.hidden === false
           && document.querySelector('#cloud-join-name')?.value === '忆云 3'
-          && /当前忆云「忆云 1」/.test(document.querySelector('#cloud-join-warning')?.textContent ?? '')
+          && /当前忆云(?:仍是)?「忆云 1」/.test(document.querySelector('#cloud-join-warning')?.textContent ?? '')
           && /归档保留，不删除/.test(modal.textContent);
       })()`);
     if (!joinModalOk) {

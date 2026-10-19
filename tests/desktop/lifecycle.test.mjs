@@ -79,7 +79,7 @@ describe('R-1 中-9 托盘菜单分组', () => {
   it('分组顺序：导航 → 守护控制 → 诊断 → 登录时启动 → 退出', () => {
     expect(flat).toEqual([
       'status', 'security-level', '|',
-      'open-console', 'connect-assistants', 'add-device', 'open-wizard', '|',
+      'open-console', 'manage-clouds', 'connect-assistants', 'add-device', 'open-wizard', '|',
       'daemon-start', 'daemon-stop', 'daemon-restart', '|',
       'open-logs', '|',
       LOGIN_ITEM_ID, '|',

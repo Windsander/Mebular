@@ -13,12 +13,14 @@ import {
   healthUrl,
   consoleUrl,
   resolveHttp,
+  homeKey,
+  serviceDescriptorFor,
 } from '../../apps/desktop/src/main/daemon.mjs';
 import { IPC_CHANNELS, isAllowedChannel, buildHandlerTable, diagnostics } from '../../apps/desktop/src/main/ipc.mjs';
 import { iconDataUrl, iconDataUrl2x, TRAY_STATES } from '../../apps/desktop/src/main/tray-icons.mjs';
 
 const http = { host: '127.0.0.1', port: 7331 };
-const running = async () => ({ ok: true });
+const running = async () => ({ ok: true, json: async () => ({ instance: homeKey('/h') }) });
 const refused = async () => { throw new Error('ECONNREFUSED'); };
 
 describe('M1 桌面 App：参数 / URL', () => {
@@ -56,16 +58,34 @@ describe('M1 桌面 App：守护托管', () => {
     expect(restarted).toBe(true);
   });
 
-  it('无服务 → 子进程兜底且显式传 MEBULAR_HOME（禁止 cwd）', async () => {
+  it('无服务 → 子进程兜底且显式传 MEBULAR_HOME / CLOUD_ROOT / ELECTRON_RUN_AS_NODE（禁止 cwd）', async () => {
     let spawned = null;
     const r = await ensureDaemon({
-      home: '/h', http, fetchImpl: refused, cliBin: '/x/mebular.mjs',
+      home: '/h', http, fetchImpl: refused, cliBin: '/x/mebular.mjs', cloudRoot: '/root',
       service: { registeredServicesForDir: () => [] },
       spawnFn: (exec, args, opts) => { spawned = { exec, args, opts }; return { kill: () => true }; },
     });
     expect(r.mode).toBe('child');
     expect(spawned.args).toEqual(['/x/mebular.mjs', 'serve', '--port', '7331']);
-    expect(spawned.opts.env.MEBULAR_HOME).toBe('/h');
+    expect(spawned.opts.env).toMatchObject({
+      MEBULAR_HOME: '/h',
+      MEBULAR_CLOUD_ROOT: '/root',
+      ELECTRON_RUN_AS_NODE: '1',
+    });
+  });
+
+  it('服务描述符：OS home 与实例 home 分离；env 带 root + ELECTRON_RUN_AS_NODE', () => {
+    const descriptor = serviceDescriptorFor({ home: '/cloud', cliBin: '/x/mebular.mjs', cloudRoot: '/root', http });
+    expect(descriptor).toMatchObject({
+      heartbeatDir: '/cloud',
+      workingDir: '/cloud',
+      env: {
+        MEBULAR_HOME: '/cloud',
+        MEBULAR_CLOUD_ROOT: '/root',
+        ELECTRON_RUN_AS_NODE: '1',
+      },
+    });
+    expect(descriptor.args).toEqual(['/x/mebular.mjs', 'serve', '--port', '7331']);
   });
 
   it('退出策略：仅停子进程托管（服务托管不返回子进程）', () => {

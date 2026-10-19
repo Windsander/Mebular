@@ -28,6 +28,10 @@ export const IPC_CHANNELS = Object.freeze([
   'invite:create',
   'deep:assistants',
   'deep:device',
+  // E2-B：忆云列表 / 切换（A2 控制台经 window.mebularDesktop.cloudSwitch 调用）/ 管理深链
+  'cloud:list',
+  'cloud:switch',
+  'cloud:manage',
 ]);
 
 export function isAllowedChannel(channel) {
@@ -39,7 +43,7 @@ export function isAllowedChannel(channel) {
  * UX-2 段②行级接入的 clients:action 例外——至多 2 个参数且一律强转字符串
  * （服务端再按 /^[\w-]+$/ 白名单校验 id/action，双重防线）。
  */
-const ARG_ALLOWLIST = Object.freeze({ 'clients:action': 2 });
+const ARG_ALLOWLIST = Object.freeze({ 'clients:action': 2, 'cloud:switch': 1 });
 
 export function sanitizeArgs(args, channel = null) {
   const max = ARG_ALLOWLIST[channel] ?? 0;

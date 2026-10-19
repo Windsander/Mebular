@@ -36,7 +36,29 @@ npm run smoke                     # 无 GUI 有界冒烟（CI 用）
    CLI/GUI 的「常驻运行」安装（等价 `mebular service install` 语义）。
 2. **兜底**：子进程 `spawn(<electron-node>, <repo>/packages/mcp/bin/mebular.mjs serve)`，显式传
    `MEBULAR_HOME`（禁止 cwd）。**M1 退出策略**：App 退出即停**自己托管**的子进程；服务托管不动。
-3. 已有实例在跑（lock + `/healthz` 200）→ **直接复用**，不重复启动；端口被非 Mebular 程序占用时给人话处置。
+3. 已有实例在跑（lock + `/healthz` 200 **且 instance 匹配**）→ **直接复用**，不重复启动；端口被非 Mebular 程序占用时给人话处置。
+
+## 忆云切换（E2-B）
+
+App 的 `home` 是**可变运行时状态**（默认取注册表 current）；`httpConf()` 每次都从当前 home 的
+`config.json` 读端口。child / 服务两条启动路径都显式带 `MEBULAR_CLOUD_ROOT=<root>`，服务描述符
+另带 `ELECTRON_RUN_AS_NODE=1`（打包态用 Electron 的 Node 运行时跑 CLI）。
+
+- **IPC / preload**：`cloud:list` / `cloud:switch` / `cloud:manage`；控制台 A2 通过
+  `window.mebularDesktop.cloudSwitch(id)` 触发。不提供删除忆云的 IPC。
+- **切换状态机**：停旧守护 → 等旧 `lock` 消失 → 写注册表 current → 起新守护 →
+  `/healthz`（`instance=homeKey`）校验 → 重载控制台；失败回滚旧守护。
+  切换不复制、不合并、不删除任何忆云目录；原忆云归档保留，随时可切回。
+- **崩溃恢复**：`switch.intent.json` 在启动时恢复——目标健康 = 成功；否则回旧；
+  两者都不健康只显示诊断，保留 intent 与全部档案。
+- **单活**：`<root>/active.lock` 被活 PID 占用且 home 不同 → `CLOUD_ALREADY_ACTIVE`。
+- **身份校验**：端口 200 但 `instance` 不匹配 = 端口被另一张忆云占用，不能 `reused`、
+  不能继续切换；文案「端口 X 上是另一张忆云，请先停止它」。
+- **服务迁移**：旧单 home 服务单元迁到 OS home 归属，保留旧 manifest 的 `autostart`
+  （`--no-autostart` 不会被切档改成自启动）。
+- **托盘**：「管理忆云…」→ `?view=settings&focus=clouds`（MVP 不做二级菜单）。
+
+详见 `CLOUD-SWITCH.md`。
 
 ## 安全
 

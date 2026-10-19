@@ -30,14 +30,18 @@ console.log('===============================');
 const daemon = await import('../src/main/daemon.mjs');
 const ipc = await import('../src/main/ipc.mjs');
 const icons = await import('../src/main/tray-icons.mjs');
-check('main 纯逻辑模块可加载（daemon/ipc/tray-icons）',
-  typeof daemon.ensureDaemon === 'function' && typeof ipc.isAllowedChannel === 'function' && icons.TRAY_STATES.length === 3);
+const clouds = await import('../src/main/clouds.mjs');
+check('main 纯逻辑模块可加载（daemon/ipc/clouds/tray-icons）',
+  typeof daemon.ensureDaemon === 'function' && typeof ipc.isAllowedChannel === 'function'
+    && typeof clouds.performCloudSwitch === 'function' && icons.TRAY_STATES.length === 3);
 
 const parsed = daemon.parseArgs(['--home', '/tmp/x', '--port=7399', '--flag']);
 check('参数解析（--home 空格 / --port= 等号 / 布尔）',
   parsed.home === '/tmp/x' && parsed.port === '7399' && parsed.flag === true, JSON.stringify(parsed));
 
-check('IPC 白名单：允许 daemon:status / console:open', ipc.isAllowedChannel('daemon:status') && ipc.isAllowedChannel('console:open'));
+check('IPC 白名单：允许 daemon:status / console:open / cloud:*',
+  ipc.isAllowedChannel('daemon:status') && ipc.isAllowedChannel('console:open')
+    && ipc.isAllowedChannel('cloud:list') && ipc.isAllowedChannel('cloud:switch') && ipc.isAllowedChannel('cloud:manage'));
 check('IPC 白名单：拒绝任意通道（负例）', !ipc.isAllowedChannel('exec:arbitrary') && !ipc.isAllowedChannel('') && !ipc.isAllowedChannel('daemon:status;rm -rf /'));
 
 const table = ipc.buildHandlerTable({ 'daemon:status': () => 'ok', 'exec:arbitrary': () => 'nope' });
@@ -53,9 +57,21 @@ check('probeHealth：健康 → true；拒连 → false（不抛）', healthy ==
 
 const reused = await daemon.ensureDaemon({
   home: '/tmp/home', http: { host: '127.0.0.1', port: 7331 },
-  fetchImpl: async () => ({ ok: true }), service: {}, spawnFn: () => { throw new Error('should not spawn'); },
+  fetchImpl: async () => ({
+    ok: true,
+    json: async () => ({ instance: daemon.homeKey('/tmp/home') }),
+  }),
+  service: {}, spawnFn: () => { throw new Error('should not spawn'); },
 });
-check('ensureDaemon：已有实例健康 → reused（不重复启动）', reused.mode === 'reused' && reused.child === null);
+check('ensureDaemon：已有实例健康且 instance 匹配 → reused（不重复启动）', reused.mode === 'reused' && reused.child === null);
+
+const mismatched = await daemon.ensureDaemon({
+  home: '/tmp/home', http: { host: '127.0.0.1', port: 7331 },
+  fetchImpl: async () => ({ ok: true, json: async () => ({ instance: 'other-instance' }) }),
+  service: {}, spawnFn: () => { throw new Error('must not spawn on identity mismatch'); },
+});
+check('ensureDaemon：端口被另一张忆云占用 → conflict（不 reused/不 spawn）',
+  mismatched.mode === 'conflict' && /另一张忆云/.test(mismatched.message ?? ''));
 
 let spawned = null;
 const childMode = await daemon.ensureDaemon({

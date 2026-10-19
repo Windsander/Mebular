@@ -5,14 +5,18 @@
 // 业务逻辑在 daemon.mjs / ipc.mjs（不 import electron，可单测）。
 
 import { openSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog, session } from 'electron';
 import {
   APP_VERSION, consoleUrl, ensureDaemon, resolveCliBin, resolveHome, resolveHttp,
-  serviceEnabledFor, stopManaged, waitForDaemon, parseArgs, probeHealth, probeProvision, probeSecurityLevel,
-  serviceDescriptorFor,
+  serviceEnabledFor, stopManaged, waitForDaemonDetail, parseArgs, probeHealthDetail, probeProvision,
+  probeSecurityLevel, serviceDescriptorFor, homeKey, isPortOpen,
 } from './daemon.mjs';
+import {
+  loadCloudModules, migrateLegacyService, performCloudSwitch, recoverSwitchIntent,
+} from './clouds.mjs';
 import { buildHandlerTable, diagnostics } from './ipc.mjs';
 import { iconDataUrl, iconDataUrl2x } from './tray-icons.mjs';
 import {
@@ -24,8 +28,11 @@ import { readDaemonLogs } from './logs.mjs';
 
 
 const cliArgs = parseArgs(process.argv.slice(1));
-const home = typeof cliArgs.home === 'string' ? cliArgs.home : resolveHome();
+// E2-B：home 是**可变运行时状态**（切换忆云时更新）；httpConf() 每次都从当前 home 读端口。
+let home = typeof cliArgs.home === 'string' ? cliArgs.home : resolveHome();
 const cliBin = resolveCliBin();
+// @mebular/service 的落盘位置 = OS 用户 home（plist/manifest），不是忆云 home（profiles/<id>）。
+const serviceHome = homedir();
 
 let win = null;
 let tray = null;
@@ -34,6 +41,13 @@ let daemonMode = null;
 let healthy = false;
 // S3：托盘只读安全等级（null = 未取到/旧版；显示 —，不猜测档位）
 let securityLevel = null;
+// E2-B：忆云上下文（root/current/name）。null = 自定义 home / 受限 env（功能不可用）。
+let cloudModules = null;
+let cloudRoot = null;
+let cloudId = null;
+let cloudName = null;
+let cloudUnavailable = null;
+let startupDiagnostic = null;
 
 function readConfig() {
   try {
@@ -63,7 +77,10 @@ async function probeService() {
   const service = await loadServiceModule();
   if (!service?.serviceStatus) return { available: false };
   try {
-    const st = service.serviceStatus(serviceDescriptorFor({ home, cliBin, http: httpConf() }), { home });
+    const st = service.serviceStatus(
+      serviceDescriptorFor({ home, cliBin, http: httpConf(), cloudRoot }),
+      { home: serviceHome },
+    );
     return { available: true, registered: st.registered, running: st.running, autostart: st.autostart, unitPath: st.unitPath ?? null };
   } catch (error) {
     return { available: true, error: String(error?.message ?? error) };
@@ -96,7 +113,7 @@ async function probeAssistants() {
 let quitting = false;
 
 async function wizardStateNow() {
-  const healthy = await probeHealth(fetch, httpConf());
+  const healthy = (await probeHealthDetail(fetch, httpConf(), { expectedInstance: homeKey(home) })).ok;
   // W-1 高-1：守护活着但处引导/待重启态 → 步骤①不算完成（404 = 正常态）
   const provision = await probeProvision(fetch, httpConf());
   const service = await probeService();
@@ -120,10 +137,19 @@ async function ensure() {
     home,
     http,
     cliBin,
+    cloudRoot,
+    serviceHome,
     service: service ?? {},
     fetchImpl: fetch,
     spawnFn: (exec, args, opts) => spawnChild(exec, args, opts),
   });
+  if (result.mode === 'conflict') {
+    healthy = false;
+    securityLevel = null;
+    updateTray();
+    console.log(`[desktop] 守护未启动（${result.reason}）：${result.message}`);
+    return result;
+  }
   daemonMode = result.mode;
   daemonChild = result.child ?? null;
   console.log(`[desktop] 守护托管模式：${result.mode}（home=${home}, http=${http.host}:${http.port}）`);
@@ -131,16 +157,17 @@ async function ensure() {
 }
 
 function spawnChild(exec, args, opts) {
-  // 子进程输出落 <home>/serve.log（诊断 + 托盘「打开日志」）；App 自身也回显一行运行模式
+  // 子进程输出落**该子进程 home** 的 serve.log（切换新忆云时不能写进旧 home）。
+  const childHome = typeof opts?.env?.MEBULAR_HOME === 'string' ? opts.env.MEBULAR_HOME : home;
   let stdio = ['ignore', 'pipe', 'pipe'];
   try {
-    const fd = openSync(join(home, 'serve.log'), 'a');
+    const fd = openSync(join(childHome, 'serve.log'), 'a');
     stdio = ['ignore', fd, fd];
   } catch {
     // 落盘失败不阻断；退回管道
   }
   const child = spawn(exec, args, { ...opts, stdio });
-  child.on('exit', (code) => console.log(`[desktop] 子进程托管守护退出（code=${code}）—— 详情见 ${join(home, 'serve.log')}`));
+  child.on('exit', (code) => console.log(`[desktop] 子进程托管守护退出（code=${code}）—— 详情见 ${join(childHome, 'serve.log')}`));
   return child;
 }
 
@@ -153,6 +180,13 @@ function shellConsoleUrl() {
 
 function shellDeepLink(url) {
   return `${url}${url.includes('?') ? '&' : '?'}shell=desktop`;
+}
+
+/** E2-B：端口 200 但身份不符时的人话（不冒充目标忆云）。 */
+function healthMessage(health, http) {
+  if (health?.reason === 'instance_mismatch') return `端口 ${http.port} 上是另一张忆云，请先停止它。`;
+  if (health?.reason === 'instance_missing') return `端口 ${http.port} 上的守护没有实例身份，无法确认是当前忆云。`;
+  return 'Mebular 未就绪：请查看日志，或点托盘「重启」重试。';
 }
 
 function loadingHtml(message) {
@@ -190,14 +224,18 @@ async function showConsoleWithRetry() {
   const seq = ++loadingSeq;
   const http = httpConf();
   await safeLoad(loadingHtml('正在启动 Mebular…'));
-  const ok = await waitForDaemon({ fetchImpl: fetch, http, attempts: 120, intervalMs: 500 });
+  const health = await waitForDaemonDetail({
+    fetchImpl: fetch, http, attempts: 120, intervalMs: 500, expectedInstance: homeKey(home),
+  });
   if (seq !== loadingSeq) return; // 已被更新的加载流程接管
-  healthy = ok;
+  healthy = health.ok;
   updateTray();
-  if (ok) void refreshTraySecurity();
+  if (health.ok) void refreshTraySecurity();
   if (!win || win.isDestroyed()) return;
-  if (ok) {
+  if (health.ok) {
     await safeLoad(shellConsoleUrl());
+  } else if (health.reason === 'instance_mismatch') {
+    await safeLoad(loadingHtml(healthMessage(health, http)));
   } else {
     await safeLoad(loadingHtml('Mebular 未就绪：请查看日志，或点托盘「重启」重试。'));
   }
@@ -322,6 +360,8 @@ function trayActions() {
   return {
     // R-1 高-4：壳内入口一律带 ?shell=desktop（控制台据此收编终端指令/显示返回向导）
     'open-console': () => { showWindow(); void safeLoad(shellConsoleUrl()); },
+    // E2-B：托盘「管理忆云…」→ 设置·忆云卡（MVP 不做二级菜单）
+    'manage-clouds': () => { showWindow(); void safeLoad(cloudSettingsUrl()); },
     // S3：只读等级行 → 打开控制台安全卡（不做壳内写操作）
     'security-level': () => {
       showWindow();
@@ -343,11 +383,11 @@ function updateTray() {
   if (!tray) return;
   // 图标 = 品牌星章（状态语义在 tooltip 与菜单；不再分色）
   tray.setImage(trayImage());
-  tray.setToolTip(`Mebular · ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}`);
+  tray.setToolTip(`Mebular${cloudName ? ` · ${cloudName}` : ''} · ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}`);
   // R-1 中-9：分组菜单模型（lifecycle.mjs 纯数据）→ 绑定 click 后交给 Electron
   const actions = trayActions();
   const loginChecked = (() => { try { return Boolean(app.getLoginItemSettings().openAtLogin); } catch { return false; } })();
-  const template = trayMenuModel({ healthy, daemonMode, loginOpenAtLogin: loginChecked, securityLevel }).map((item) => {
+  const template = trayMenuModel({ healthy, daemonMode, loginOpenAtLogin: loginChecked, securityLevel, cloudName }).map((item) => {
     if (item.type === 'separator') return item;
     const { id, confirm: _confirm, ...rest } = item;
     return { ...rest, click: actions[id] ? (_menuItem) => actions[id](_menuItem) : undefined };
@@ -394,14 +434,14 @@ async function installServiceDirect() {
   }
   const service = await loadServiceModule();
   if (!service?.installService) return { ok: false, reason: '@mebular/service 不可用' };
-  const descriptor = serviceDescriptorFor({ home, cliBin, http: httpConf() });
+  const descriptor = serviceDescriptorFor({ home, cliBin, http: httpConf(), cloudRoot });
   try {
     // F2b 幂等：已注册 → no-op（不重写 plist、不重启守护——重装会把健康瞬断、① 翻回未完成）
-    const status = service.serviceStatus?.(descriptor, { home });
+    const status = service.serviceStatus?.(descriptor, { home: serviceHome });
     if (installDecision(status).already) {
       return { ok: true, already: true, registered: true, running: Boolean(status.running), unitPath: status.unitPath ?? null };
     }
-    const res = service.installService(descriptor, { home, autostart: true });
+    const res = service.installService(descriptor, { home: serviceHome, autostart: true });
     return { ok: true, already: false, registered: true, unitPath: res?.unitPath ?? null };
   } catch (error) {
     return { ok: false, reason: String(error?.message ?? error) };
@@ -419,11 +459,252 @@ async function createInvite() {
   return { ...res, text: inviteText(res), raw: null };
 }
 
+// ---------- E2-B：忆云运行时 / 切换 / 深链 ----------
+
+function cloudSettingsUrl() {
+  return shellDeepLink(`${consoleUrl(httpConf())}?view=settings&focus=clouds`);
+}
+
+function setWindowTitle() {
+  if (!win || win.isDestroyed()) return;
+  win.setTitle(cloudName ? `Mebular · ${cloudName}` : 'Mebular');
+}
+
+/** 从注册表重读当前项，更新 home / id / name（切换成功的唯一真源是注册表 current）。 */
+async function refreshCloudIdentity() {
+  if (!cloudModules || !cloudRoot) return null;
+  const state = await cloudModules.profiles.readRegistry(cloudRoot);
+  const current = state.registry.profiles.find((profile) => profile.id === state.registry.current) ?? null;
+  if (current) {
+    home = cloudModules.profiles.profileHomeForEntry(cloudRoot, current);
+    cloudId = current.id;
+    cloudName = current.name;
+  }
+  return { state, current };
+}
+
+/** 启动时把旧单 home 服务单元迁到 OS home 归属（保留 autostart）。 */
+async function migrateCurrentCloudService() {
+  if (!cloudModules || !cloudRoot) return null;
+  // 崩溃恢复刚拉起的 child 占着端口：先不迁移服务，避免两套守护抢同一端口。
+  if (daemonChild) return null;
+  const service = await loadServiceModule();
+  if (!service?.serviceStatus) return null;
+  try {
+    const result = await migrateLegacyService({
+      service,
+      descriptor: serviceDescriptorFor({ home, cliBin, http: httpConf(), cloudRoot }),
+      home,
+      serviceHome,
+      http: httpConf(),
+      fetchImpl: fetch,
+    });
+    if (result.migrated) {
+      console.log(`[desktop] 已迁移旧守护服务到 ${serviceHome}（autostart=${result.autostart}）`);
+    }
+    return result;
+  } catch (error) {
+    console.log(`[desktop] 旧守护服务迁移失败（继续用现有方式）：${error?.message ?? error}`);
+    return { migrated: false, error: String(error?.message ?? error) };
+  }
+}
+
+/**
+ * 启动期：解析 root/current → 崩溃恢复 switch.intent → 迁移旧服务。
+ * 外部自定义 home / 受限 env：cloudRoot=null，壳照常运行（忆云管理不可用）。
+ */
+async function initCloudState() {
+  try {
+    cloudModules = await loadCloudModules(cliBin);
+  } catch (error) {
+    cloudUnavailable = `忆云模块不可用：${error?.message ?? error}`;
+    return;
+  }
+  let resolved = null;
+  try {
+    resolved = cloudModules.profiles.resolveCloudRoot({ home, env: process.env });
+  } catch (error) {
+    cloudUnavailable = `忆云根目录无法解析：${error?.message ?? error}`;
+    return;
+  }
+  if (!resolved?.available) {
+    cloudUnavailable = '当前为自定义 home 或受限环境，忆云管理不可用';
+    return;
+  }
+  cloudRoot = resolved.root;
+  try {
+    const state = await cloudModules.profiles.readRegistry(cloudRoot);
+    const current = state.registry.profiles.find((profile) => profile.id === state.registry.current) ?? null;
+    if (current) {
+      home = cloudModules.profiles.profileHomeForEntry(cloudRoot, current);
+      cloudId = current.id;
+      cloudName = current.name;
+    }
+  } catch (error) {
+    cloudUnavailable = `忆云注册表无法读取（${error?.code ?? 'ERROR'}）：${error?.message ?? error}`;
+    return;
+  }
+
+  const service = (await loadServiceModule()) ?? {};
+  try {
+    const recovery = await recoverSwitchIntent({
+      root: cloudRoot,
+      cliBin,
+      service,
+      serviceHome,
+      modules: cloudModules,
+      fetchImpl: fetch,
+      spawnFn: (exec, args, opts) => spawnChild(exec, args, opts),
+      env: process.env,
+    });
+    if (recovery.recovered) {
+      if (recovery.home) home = recovery.home;
+      if (recovery.mode) daemonMode = recovery.mode;
+      if (recovery.child) daemonChild = recovery.child;
+      if (recovery.status === 'committed') {
+        console.log('[desktop] 崩溃恢复：目标忆云已健康，切换按成功处理');
+      } else if (recovery.status === 'rolled_back') {
+        console.log('[desktop] 崩溃恢复：目标未就绪，已回到旧忆云');
+      } else if (recovery.status === 'diagnostics') {
+        startupDiagnostic = recovery.message;
+        console.log(`[desktop] ${recovery.message}`);
+      }
+    }
+  } catch (error) {
+    console.log(`[desktop] 崩溃恢复失败（保留 intent/档案）：${error?.message ?? error}`);
+  }
+
+  await migrateCurrentCloudService();
+  try {
+    await refreshCloudIdentity();
+  } catch {
+    // 注册表刚恢复/损坏：沿用已有 home，后续列表会给出可读错误
+  }
+}
+
+async function cloudListNow() {
+  if (!cloudModules || !cloudRoot) {
+    return {
+      ok: false,
+      available: false,
+      error: 'CLOUD_UNAVAILABLE',
+      message: cloudUnavailable ?? '忆云管理不可用；当前忆云未变',
+    };
+  }
+  try {
+    const state = await cloudModules.profiles.readRegistry(cloudRoot);
+    const current = state.registry.current;
+    return {
+      ok: true,
+      available: true,
+      root: cloudRoot,
+      current,
+      profiles: state.registry.profiles.map((profile) => ({
+        id: profile.id,
+        name: profile.name,
+        home: profile.home,
+        kind: profile.kind,
+        createdAt: profile.createdAt ?? null,
+        lastUsedAt: profile.lastUsedAt ?? null,
+        masterFingerprint: profile.masterFingerprint ?? null,
+        deviceId: profile.deviceId ?? null,
+        current: profile.id === current,
+      })),
+      ...(state.warning ? { warning: state.warning } : {}),
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      available: true,
+      error: error?.code ?? 'CLOUD_LIST_FAILED',
+      message: String(error?.message ?? error),
+    };
+  }
+}
+
+/** 控制台 A2 的 cloudSwitch 桥：主进程停旧/起新/校验/回滚，成功后重载控制台。 */
+async function cloudSwitchNow(rawId) {
+  const id = String(rawId ?? '');
+  if (!cloudModules || !cloudRoot) {
+    throw new Error(cloudUnavailable ?? '忆云管理不可用：当前为自定义 home 或受限环境');
+  }
+  if (!/^[a-z0-9_]+$/.test(id)) throw new Error('未找到这个忆云；列表可能已变化，请刷新后重试。');
+  const service = (await loadServiceModule()) ?? {};
+  let result;
+  try {
+    result = await performCloudSwitch({
+      root: cloudRoot,
+      id,
+      home,
+      cliBin,
+      service,
+      serviceHome,
+      modules: cloudModules,
+      fetchImpl: fetch,
+      spawnFn: (exec, args, opts) => spawnChild(exec, args, opts),
+      env: process.env,
+      managedChild: daemonChild,
+      probePort: (http) => isPortOpen(http),
+    });
+  } catch (error) {
+    // 回滚成功时引擎会重新拉起旧守护：把返回的 child 收编，避免脱离 App 生命周期。
+    if (Object.prototype.hasOwnProperty.call(error, 'child')) daemonChild = error.child;
+    if (error.mode) daemonMode = error.mode;
+    securityLevel = null;
+    healthy = (await probeHealthDetail(fetch, httpConf(), { expectedInstance: homeKey(home) })).ok;
+    try { await refreshCloudIdentity(); } catch { /* 保留旧值 */ }
+    updateTray();
+    setWindowTitle();
+    if (healthy) {
+      await showConsoleWithRetry();
+    } else if (win && !win.isDestroyed()) {
+      await safeLoad(loadingHtml(error?.message ?? '忆云切换失败；请查看日志后重试。'));
+    }
+    throw error;
+  }
+  if (!result.changed) {
+    // 当前忆云不可切换：不改 home/守护状态，也不重载控制台。
+    return {
+      ok: true,
+      changed: false,
+      current: result.current,
+      previous: null,
+      home,
+      name: result.profile?.name ?? cloudName,
+    };
+  }
+  home = result.home;
+  await refreshCloudIdentity();
+  if (result.profile?.name) cloudName = result.profile.name;
+  daemonChild = result.child ?? null;
+  daemonMode = result.mode ?? (result.child ? 'child' : 'service');
+  healthy = true;
+  securityLevel = null;
+  updateTray();
+  setWindowTitle();
+  // 切换成功：控制台必须重载到新 home 的端口；updateTray 已先刷新名称/状态。
+  await showConsoleWithRetry();
+  return {
+    ok: true,
+    changed: Boolean(result.changed),
+    current: result.current,
+    previous: result.previous ?? null,
+    home: result.home,
+    name: result.profile?.name ?? cloudName,
+  };
+}
+
 // ---------- IPC（白名单） ----------
 
 function registerIpc() {
   const table = buildHandlerTable({
-    'daemon:status': async () => ({ mode: daemonMode, healthy, home, http: httpConf() }),
+    'daemon:status': async () => ({
+      mode: daemonMode,
+      healthy,
+      home,
+      http: httpConf(),
+      cloud: { root: cloudRoot, id: cloudId, name: cloudName, available: Boolean(cloudRoot) },
+    }),
     'daemon:start': async () => { await ensure(); return { mode: daemonMode }; }, // F1：向导流水用——只启动，不导航（导航只保留显式 console:open）
     'daemon:stop': () => ({ stopped: stopManaged(daemonChild) }),
     'daemon:restart': async () => { await restart(); return { mode: daemonMode }; }, // F1：只重启，不导航
@@ -453,11 +734,25 @@ function registerIpc() {
     'service:install': async () => installServiceDirect(),
     'logs:read': async () => {
       const svc = await loadServiceModule();
-      return readDaemonLogs({ home, service: svc, descriptor: serviceDescriptorFor({ home, cliBin, http: httpConf() }) });
+      return readDaemonLogs({
+        home,
+        service: svc,
+        serviceHome,
+        descriptor: serviceDescriptorFor({ home, cliBin, http: httpConf(), cloudRoot }),
+      });
     },
     'invite:create': async () => createInvite(),
     'deep:assistants': async () => { await safeLoad(shellDeepLink(deepLinks(httpConf()).assistants)); return { url: shellDeepLink(deepLinks(httpConf()).assistants) }; },
     'deep:device': async () => { await safeLoad(shellDeepLink(deepLinks(httpConf()).device)); return { url: shellDeepLink(deepLinks(httpConf()).device) }; },
+    // E2-B：忆云（列表 / 切换 / 管理深链）。不提供删除。
+    'cloud:list': async () => cloudListNow(),
+    'cloud:switch': async (id) => cloudSwitchNow(id),
+    'cloud:manage': async () => {
+      showWindow();
+      const url = cloudSettingsUrl();
+      await safeLoad(url);
+      return { url, view: 'settings', focus: 'clouds' };
+    },
   });
   for (const [channel, handler] of Object.entries(table)) ipcMain.handle(channel, handler);
 }
@@ -475,21 +770,39 @@ if (!gotLock) {
 
   app.whenReady().then(async () => {
     applyAppIcon();
+    // E2-B：先解析忆云 root/current 并做崩溃恢复，再决定 home/端口与窗口内容。
+    try {
+      await initCloudState();
+    } catch (error) {
+      console.log(`[desktop] 忆云初始化失败（壳继续启动）：${error?.message ?? error}`);
+    }
     registerIpc();
     createTray();
     createWindow();
+    setWindowTitle();
     // S3：托盘只读等级每 20s 刷新一次（轻量 GET；失败保持旧值，不阻断壳）
     const securityTimer = setInterval(() => { void refreshTraySecurity(); }, 20_000);
     securityTimer.unref?.();
     try {
-      await ensure();
+      if (startupDiagnostic) {
+        // 切换崩溃且两张忆云都不健康：只显示诊断，不删 intent/档案，也不猜要起哪张。
+        updateTray();
+        await safeLoad(loadingHtml(startupDiagnostic));
+        return;
+      }
+      const ensured = await ensure();
+      if (ensured.mode === 'conflict') {
+        updateTray();
+        await safeLoad(loadingHtml(ensured.message ?? '端口被另一张忆云占用，请先停止它。'));
+        return;
+      }
       const state = await wizardStateNow();
       if (state.complete) {
         await showConsoleWithRetry();
       } else {
         console.log(`[desktop] 未完成首次上手（待办：${state.current}）→ 打开向导`);
         await loadWizardView(); // 清缓存 + 缓存破坏参数：HTML/ESM 双保险（走查事故：旧版向导复活）
-        healthy = await probeHealth(fetch, httpConf());
+        healthy = (await probeHealthDetail(fetch, httpConf(), { expectedInstance: homeKey(home) })).ok;
         updateTray();
         if (healthy) void refreshTraySecurity();
       }

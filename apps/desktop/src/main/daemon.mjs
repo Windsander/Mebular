@@ -5,9 +5,11 @@
 //
 // 复用既有纪律：MEBULAR_HOME 显式传入（禁止 cwd）；服务托管复用 @mebular/service；零新增 daemon 配置。
 
-import { existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync } from 'node:fs';
+import { connect } from 'node:net';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const APP_VERSION = '0.1.0';
@@ -18,9 +20,18 @@ export function repoRootFromModule() {
   return join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', '..');
 }
 
-/** 内置 CLI（`mebular serve` 入口）。开发态取仓库 packages/mcp/bin/mebular.mjs。 */
+/**
+ * 内置 CLI（`mebular serve` 入口）。
+ *   开发态：仓库 packages/mcp/bin/mebular.mjs；
+ *   打包态：extraResources 落在 <resources>/packages/mcp/bin（app.asar 内没有 packages）。
+ */
 export function resolveCliBin(root = repoRootFromModule()) {
-  return join(root, 'packages', 'mcp', 'bin', 'mebular.mjs');
+  const candidates = [];
+  if (typeof process.resourcesPath === 'string' && process.resourcesPath.length > 0) {
+    candidates.push(join(process.resourcesPath, 'packages', 'mcp', 'bin', 'mebular.mjs'));
+  }
+  candidates.push(join(root, 'packages', 'mcp', 'bin', 'mebular.mjs'));
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];
 }
 
 export function resolveHome(env = process.env) {
@@ -60,11 +71,71 @@ export function parseArgs(argv = []) {
   return out;
 }
 
-/** /healthz 探测（注入 fetch，便于单测）。 */
-export async function probeHealth(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, timeoutMs = 1200) {
+/** 实例身份：home 的 sha256 前 12 hex（必须与 @mebular/service / profiles.mjs 同定义）。 */
+export function homeKey(home) {
+  const normalized = resolve(home).replace(/[/\\]+$/, '') || resolve(home);
+  return createHash('sha256').update(normalized).digest('hex').slice(0, 12);
+}
+
+/**
+ * /healthz 探测详情（注入 fetch，便于单测）。
+ *
+ * E2-B：端口 200 不再等于「就是我要的忆云」——必须核对 A1 的 `instance`（homeKey）。
+ *   - 200 但 instance 不匹配/缺失 → 返回原因，调用方不得 reused / 不得继续切换；
+ *   - 旧测试的 `{ok:true}` 无 json 方法：视为无身份信息（仅无 expectedInstance 时可用）。
+ */
+export async function probeHealthDetail(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, options = {}) {
+  const { timeoutMs = 1200, expectedInstance = null, cloudId = null } = typeof options === 'number'
+    ? { timeoutMs: options }
+    : (options ?? {});
+  let res;
   try {
-    const res = await fetchImpl(healthUrl(http), { signal: AbortSignal.timeout(timeoutMs) });
-    return Boolean(res?.ok);
+    res = await fetchImpl(healthUrl(http), { signal: AbortSignal.timeout(timeoutMs) });
+  } catch (error) {
+    return { ok: false, reason: 'unreachable', http, error: String(error?.message ?? error) };
+  }
+  if (!res?.ok) return { ok: false, reason: 'status', status: res?.status ?? null, http };
+  let body = null;
+  try {
+    body = typeof res.json === 'function' ? await res.json() : null;
+  } catch {
+    body = null;
+  }
+  const instance = typeof body?.instance === 'string' ? body.instance : null;
+  if (typeof expectedInstance === 'string' && expectedInstance.length > 0) {
+    if (instance === null) return { ok: false, reason: 'instance_missing', body, http };
+    if (instance !== expectedInstance) return { ok: false, reason: 'instance_mismatch', instance, body, http };
+  }
+  if (typeof cloudId === 'string' && cloudId.length > 0
+    && typeof body?.cloudId === 'string' && body.cloudId !== cloudId) {
+    return { ok: false, reason: 'cloud_mismatch', cloudId: body.cloudId, body, http };
+  }
+  return { ok: true, body, instance, http };
+}
+
+/**
+ * /healthz 探测布尔壳（保留旧签名；需要原因时用 probeHealthDetail）。
+ * 第三参数兼容旧 `timeoutMs`，或 `{ timeoutMs, expectedInstance, cloudId }`（E2-B 身份校验）。
+ */
+export async function probeHealth(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, options = 1200) {
+  return (await probeHealthDetail(fetchImpl, http, options)).ok;
+}
+
+/** root 级单活锁（A1）：`<root>/active.lock`。损坏/不存在 → null。 */
+export function readActiveLock(root) {
+  if (typeof root !== 'string' || root.length === 0) return null;
+  try {
+    return JSON.parse(readFileSync(join(root, 'active.lock'), 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+export function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
   } catch {
     return false;
   }
@@ -106,15 +177,20 @@ export async function probeProvision(fetchImpl, http = { host: '127.0.0.1', port
 }
 
 /** 服务托管是否已登记（复用 @mebular/service 的注册判定）。 */
-export function serviceEnabledFor(service, home) {
+export function serviceEnabledFor(service, home, serviceHome = homedir()) {
   try {
-    return service.registeredServicesForDir(home, { home }).includes(SERVICE_KIND);
+    return service.registeredServicesForDir(home, { home: serviceHome }).includes(SERVICE_KIND);
   } catch {
     return false;
   }
 }
 
-export function serviceDescriptorFor({ home, cliBin, execPath, http }) {
+/**
+ * 服务描述符：实例身份 = MEBULAR_HOME（home），root 由 MEBULAR_CLOUD_ROOT 显式携带。
+ * `ServiceOptions.home` 是「plist/manifest 落在哪个 OS 用户目录」，由调用方另传
+ * （App 必须传 OS home，而不是忆云 home——否则单元会写进 profiles/<id> 内）。
+ */
+export function serviceDescriptorFor({ home, cliBin, execPath, http, cloudRoot = null }) {
   const listenArgs = Number.isInteger(http?.port) && http.port > 0 ? ['--port', String(http.port)] : [];
   return {
     kind: SERVICE_KIND,
@@ -122,7 +198,12 @@ export function serviceDescriptorFor({ home, cliBin, execPath, http }) {
     heartbeatDir: home,
     workingDir: home,
     execPath,
-    env: { MEBULAR_HOME: home },
+    env: {
+      MEBULAR_HOME: home,
+      ...(typeof cloudRoot === 'string' && cloudRoot.length > 0 ? { MEBULAR_CLOUD_ROOT: cloudRoot } : {}),
+      // 打包态 execPath = Electron 本体；显式以 Node 运行时启动 CLI（否则会再开一个 App）。
+      ELECTRON_RUN_AS_NODE: '1',
+    },
   };
 }
 
@@ -142,18 +223,44 @@ export async function ensureDaemon({
   execPath = process.execPath,
   http = { host: '127.0.0.1', port: 7331 },
   env = process.env,
+  cloudRoot = null,
+  serviceHome = homedir(),
 } = {}) {
-  if (await probeHealth(fetchImpl, http)) return { mode: 'reused', home, child: null };
-  const desc = serviceDescriptorFor({ home, cliBin, execPath, http });
-  if (serviceEnabledFor(service, home)) {
-    service.restartService(desc, { home });
+  const expectedInstance = homeKey(home);
+  const health = await probeHealthDetail(fetchImpl, http, { expectedInstance });
+  if (health.ok) return { mode: 'reused', home, child: null };
+  if (health.reason === 'instance_mismatch' || health.reason === 'instance_missing') {
+    const message = health.reason === 'instance_mismatch'
+      ? `端口 ${http.port} 上是另一张忆云，请先停止它`
+      : `端口 ${http.port} 上的守护没有 /healthz instance 身份，无法确认是当前忆云`;
+    return { mode: 'conflict', reason: health.reason, instance: health.instance ?? null, home, child: null, message };
+  }
+  // root 级单活：另一张忆云的活 PID 占着 root → 拒绝再起（CL-02）。
+  const active = readActiveLock(cloudRoot);
+  if (active && pidAlive(active.pid) && resolve(String(active.home ?? '')) !== resolve(home)) {
+    return {
+      mode: 'conflict',
+      reason: 'CLOUD_ALREADY_ACTIVE',
+      home,
+      child: null,
+      message: `已有忆云守护在运行（pid ${active.pid}，home=${active.home ?? '未知'}）：请先停止它`,
+    };
+  }
+  const desc = serviceDescriptorFor({ home, cliBin, execPath, http, cloudRoot });
+  if (serviceEnabledFor(service, home, serviceHome)) {
+    service.restartService(desc, { home: serviceHome });
     return { mode: 'service', home, child: null };
   }
   // Electron 作为 Node 运行时：ELECTRON_RUN_AS_NODE=1（在 Electron 内有效；纯 node 下无害）
   // 端口显式传给子进程（与 App 探测/加载的端口一致；否则子进程用默认端口 → 探测不匹配）
   const listenArgs = Number.isInteger(http?.port) && http.port > 0 ? ['--port', String(http.port)] : [];
   const child = spawnFn(execPath, [cliBin, 'serve', ...listenArgs], {
-    env: { ...env, MEBULAR_HOME: home, ELECTRON_RUN_AS_NODE: '1' },
+    env: {
+      ...env,
+      MEBULAR_HOME: home,
+      ...(typeof cloudRoot === 'string' && cloudRoot.length > 0 ? { MEBULAR_CLOUD_ROOT: cloudRoot } : {}),
+      ELECTRON_RUN_AS_NODE: '1',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   return { mode: 'child', home, child };
@@ -173,6 +280,24 @@ export function stopManaged(child) {
   }
 }
 
+/** 端口是否有进程监听（只做 connect 探测，不发数据）。 */
+export function isPortOpen({ host = '127.0.0.1', port } = {}, timeoutMs = 800) {
+  return new Promise((resolvePromise) => {
+    if (!Number.isInteger(port) || port <= 0) return resolvePromise(false);
+    const socket = connect({ host, port });
+    let settled = false;
+    const done = (open) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolvePromise(open);
+    };
+    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once('connect', () => done(true));
+    socket.once('error', () => done(false));
+  });
+}
+
 /**
  * 端口冲突的人话处置：/healthz 不通且默认端口被占用时给出可读建议（不新增配置概念）。
  */
@@ -184,14 +309,33 @@ export async function diagnosePort({ http, fetchImpl, probePort }) {
   return `端口 ${http.port} 已被占用但不是 Mebular 守护：请关闭占用该端口的程序，或在启动参数里换一个端口（--port <n>）。`;
 }
 
-/** 引导态/正常态都可加载控制台：/healthz 200 即认为可显示（引导态同样服务 /healthz）。 */
-export async function waitForDaemon({ fetchImpl, http, attempts = 60, intervalMs = 500, onTick } = {}) {
+/**
+ * 等待目标守护就绪（E2-B：带实例身份）。
+ * instance 不匹配/缺失 / cloudId 不匹配是**终态**：端口上是别的忆云，重试没有意义。
+ */
+export async function waitForDaemonDetail({
+  fetchImpl,
+  http,
+  attempts = 60,
+  intervalMs = 500,
+  onTick,
+  expectedInstance = null,
+  cloudId = null,
+} = {}) {
+  let last = null;
   for (let i = 0; i < attempts; i++) {
-    if (await probeHealth(fetchImpl, http)) return true;
+    last = await probeHealthDetail(fetchImpl, http, { expectedInstance, cloudId });
+    if (last.ok) return last;
+    if (['instance_mismatch', 'instance_missing', 'cloud_mismatch'].includes(last.reason)) return last;
     onTick?.(i);
     await new Promise((r) => setTimeout(r, intervalMs));
   }
-  return false;
+  return last ?? { ok: false, reason: 'timeout', http };
+}
+
+/** 引导态/正常态都可加载控制台：/healthz 200 且实例匹配即可显示。 */
+export async function waitForDaemon({ fetchImpl, http, attempts = 60, intervalMs = 500, onTick, expectedInstance = null, cloudId = null } = {}) {
+  return (await waitForDaemonDetail({ fetchImpl, http, attempts, intervalMs, onTick, expectedInstance, cloudId })).ok;
 }
 
 export { existsSync };

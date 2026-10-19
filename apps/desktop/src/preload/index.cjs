@@ -30,4 +30,8 @@ contextBridge.exposeInMainWorld('mebularDesktop', {
   createInvite: () => ipcRenderer.invoke('invite:create'),
   deepAssistants: () => ipcRenderer.invoke('deep:assistants'),
   deepDevice: () => ipcRenderer.invoke('deep:device'),
+  // E2-B：忆云（列表只读 / 切换由主进程停旧起新 / 管理深链到设置·忆云卡）
+  cloudList: () => ipcRenderer.invoke('cloud:list'),
+  cloudSwitch: (id) => ipcRenderer.invoke('cloud:switch', String(id ?? '')),
+  cloudManage: () => ipcRenderer.invoke('cloud:manage'),
 });

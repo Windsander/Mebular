@@ -44,8 +44,8 @@ export function stopConfirm({ daemonMode, hasManagedChild } = {}) {
  * 托盘菜单模型（中-9 分组：导航 / 守护控制 / 诊断 / 登录时启动 / 退出）。
  * 返回纯数据模板；index.mjs 按 id 绑定 click，再交给 Menu.buildFromTemplate。
  */
-export function trayMenuModel({ healthy, daemonMode, loginOpenAtLogin, securityLevel = null } = {}) {
-  const statusLabel = `${healthy ? '●' : '○'} ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}（${daemonMode ?? '—'}）`;
+export function trayMenuModel({ healthy, daemonMode, loginOpenAtLogin, securityLevel = null, cloudName = null } = {}) {
+  const statusLabel = `${healthy ? '●' : '○'} ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}（${daemonMode ?? '—'}）${cloudName ? ` · ${cloudName}` : ''}`;
   const levelLabel = securityLevel === 'high' ? '高' : securityLevel === 'medium' ? '中' : securityLevel === 'low' ? '低' : '—';
   return [
     { id: 'status', label: statusLabel, enabled: false },
@@ -53,6 +53,8 @@ export function trayMenuModel({ healthy, daemonMode, loginOpenAtLogin, securityL
     { id: 'security-level', label: `安全等级：${levelLabel}`, enabled: securityLevel !== null },
     { type: 'separator' },
     { id: 'open-console', label: '打开控制台' },
+    // E2-B：MVP 不做二级菜单；跳设置·忆云卡（归档/切换都在控制台完成）
+    { id: 'manage-clouds', label: '管理忆云…' },
     { id: 'connect-assistants', label: '连接 AI 助手' },
     { id: 'add-device', label: '添加设备' },
     { id: 'open-wizard', label: '重启向导' },

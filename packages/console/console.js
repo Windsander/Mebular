@@ -1268,14 +1268,14 @@ function securityCardHtml() {
       <span class="crt-tag ${securityLevelTag(level)}" data-security-current>当前：${securityLevelLabel(level)}</span>
       ${mismatch ? '<span class="crt-tag crt-tag-error">种子不一致</span>' : ''}
     </div>
+    ${incoming.length > 0 || outgoing.length > 0 ? `<div class="sec-pending sec-pending-top" data-security-pending>
+      <h4>待批准 ${incoming.length > 0 ? `<span class="crt-tag crt-tag-warn">${incoming.length} 项</span>` : ''}</h4>
+      ${incoming.length > 0 ? pendingRows : ''}${outgoingRows}
+    </div>` : ''}
     <ol class="sec-ladder" aria-label="安全等级三档">${ladder}</ol>
     ${mismatch ? '<p class="crt-warn sec-anomaly">⚠ 种子 fingerprint 不一致：请从持有同一颗种子的设备重新导入（导入错误/被替换）。</p>' : ''}
     <p class="sec-current muted">当前：<b>${escapeHtml(SECURITY_LEVEL_TITLE[level])}</b>
       ${sec.changedBy ? ` · 变更者 ${escapeHtml(sec.changedBy)}` : ''}${sec.changedAt ? ` · ${escapeHtml(formatTime(sec.changedAt))}` : ''}</p>
-    ${incoming.length > 0 ? `<div class="sec-pending" data-security-pending>
-      <h4>待批准 <span class="crt-tag crt-tag-warn">${incoming.length} 项</span></h4>
-      ${pendingRows}${outgoingRows}
-    </div>` : `<div class="sec-pending"><h4>待批准</h4>${pendingRows}${outgoingRows}</div>`}
     <dl class="settings-kv sec-kv">
       <dt>动态码种子</dt><dd class="kv-value">${totpStatus}</dd><dd class="kv-action sec-actions">${totpActions}</dd>
       <dt>恢复码</dt><dd class="kv-value">${recoveryStatus}</dd><dd class="kv-action sec-actions">${recoveryActions}</dd>

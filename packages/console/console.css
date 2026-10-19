@@ -1311,3 +1311,5 @@ details.share[open] summary::before { content: "▾ "; }
   .sec-wait-dot { animation: none; opacity: 1; }
 }
 .sec-pairing-inline { color: #ffd27a; letter-spacing: 1px; font-variant-numeric: tabular-nums; }
+.sec-pending-top { margin: 0 0 10px; padding: 8px 10px; border: 1px solid rgba(255, 210, 122, 0.35); border-radius: 6px; background: rgba(60, 42, 8, 0.22); border-top: 1px solid rgba(255, 210, 122, 0.35); }
+.sec-pending-top h4 { color: #ffd27a; }

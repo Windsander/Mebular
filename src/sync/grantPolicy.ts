@@ -8,11 +8,18 @@
 //
 // 本文件只做「从图上推导授权/吊销状态」，不引入任何任务/调度/执行语义。
 
+import { createHash } from 'node:crypto';
 import type { Event } from '../types/event.js';
 import type { EventLog } from '../eventlog/EventLog.js';
 import { normalizeNamespaceList } from '../core/namespace.js';
 import type { NamespaceGrantPolicy } from './namespacePolicy.js';
 import { verifyIssuedByUser } from './trust.js';
+import {
+  base64ToBytes,
+  hexToBytes,
+  verifyCertificateChain,
+  type DeviceCertificate,
+} from '../p2p/handshake/AuthenticationHandshake.js';
 
 /**
  * 保留策略命名空间：授权/吊销记录落在这里。
@@ -37,6 +44,142 @@ export const NAMESPACE_MEMBERSHIP_EVENT = 'namespace_membership';
  */
 export const NAMESPACE_HANDOFF_EVENT = 'namespace_handoff';
 
+// ---------------------------------------------------------------------------
+// S1 · 安全等级（low / medium / high）与会签证明
+// ---------------------------------------------------------------------------
+//
+// **线协议零新增消息类型**（SPEC §3.9）：三档的全部新增载体都是
+// `__policy__` 里的**新事件类型**（旧端 `isPolicyType` 不含 → 忽略，A 类）
+// 与既有记录的**可选证明字段**（旧端忽略未知字段，A 类）。不新增任何
+// auth-* / sync-* 帧，也不改加入令牌格式。
+
+/** 等级记录事件类型。 */
+export const SECURITY_TIER_EVENT = 'security_tier';
+/** 会签请求/批准/拒绝记录事件类型（流程载体 + 审计，不改变授权）。 */
+export const SECURITY_APPROVAL_EVENT = 'security_approval';
+/** 恢复码公钥登记/轮换记录事件类型（审计 + 登记）。 */
+export const SECURITY_RECOVERY_EVENT = 'security_recovery';
+
+export type SecurityLevel = 'low' | 'medium' | 'high';
+export type SecurityOp = 'kick' | 'join' | 'tier' | 'rotate';
+
+/**
+ * 会签证明：另一台已受信且已准入的设备对**本次动作摘要**的设备密钥签名。
+ *
+ * `issuedAt/expiresAt` 是**流程/UI 元数据**；推导与预检层**永不读取**（SPEC §3.4）——
+ * 已采纳记录不随墙钟翻转，`expiresAt` 只约束发起方提交前的执行窗口。
+ */
+export interface CosignProof {
+  v: 1;
+  op: SecurityOp;
+  /** 批准设备 deviceId（≠ 记录作者，≠ 动作对象） */
+  approver: string;
+  /** 叶→根；锚定主公钥（自包含，防依赖图序） */
+  approverCertificateChain: DeviceCertificate[];
+  /** 指向 security_approval(approve) 记录（R-c 因果校验用） */
+  approvalId: string;
+  /** sha256hex(canonicalAction(op, ...))（SPEC §3.2） */
+  digest: string;
+  /** 人类比对码（由 digest 确定性派生，不传输、不存种） */
+  pairingCode: string;
+  issuedAt: number;
+  /** 流程元数据；推导/预检层不判 */
+  expiresAt: number;
+  /** base64：批准设备私钥签 canonical(CosignProof 除 signature) */
+  signature: string;
+}
+
+/** 恢复码（break-glass）证明：离线凭据签名，替代会签。 */
+export interface BreakGlassProof {
+  v: 1;
+  op: SecurityOp;
+  /** 指向已采纳的 security_recovery 记录（须在 R-c 序更早） */
+  keyId: string;
+  digest: string;
+  /** 一次性消费（同一 keyId 下 nonce 不可重复） */
+  nonce: string;
+  issuedAt: number;
+  /** 流程元数据；推导/预检层不判 */
+  expiresAt: number;
+  signature: string;
+}
+
+/** 等级记录（`__policy__`；C3 A 类）。 */
+export interface SecurityTierRecord {
+  level: SecurityLevel;
+  /** 本次变更唯一号（进入 cosign digest） */
+  nonce: string;
+  /** 仅审计；定序用 R-c（vectorClock），不看墙钟 */
+  issuedAt: number;
+  note?: string;
+  /** 本记录把档位**从 high** 改出时必需（网络规则） */
+  cosign?: CosignProof;
+  breakGlass?: BreakGlassProof;
+}
+
+/** 会签请求/批准/拒绝记录。 */
+export interface SecurityApprovalRecord {
+  approvalId: string;
+  op: 'kick' | 'join' | 'tier';
+  decision: 'request' | 'approve' | 'deny';
+  /** request 作者 = 发起设备 */
+  initiator: string;
+  /** kick: 被踢设备；join: 可缺省 */
+  target?: string;
+  namespace?: string;
+  level?: SecurityLevel;
+  nonce: string;
+  /** 由发起方计算并公开，供批准侧核对 */
+  digest: string;
+  pairingCode: string;
+  /** decision='approve' 时携带（approver 签署） */
+  cosign?: CosignProof;
+  /** 流程元数据；推导/预检层不判 */
+  expiresAt: number;
+  issuedAt: number;
+  note?: string;
+}
+
+/** 恢复码公钥登记/轮换记录。 */
+export interface SecurityRecoveryRecord {
+  keyId: string;
+  publicKey: string;
+  createdAt: number;
+  mode: 'set' | 'rotate';
+  /** rotate 的动作 nonce（进入 digest；`set` 可缺省） */
+  nonce?: string;
+  note?: string;
+  cosign?: CosignProof;
+  breakGlass?: BreakGlassProof;
+}
+
+/** §3.4E 拒绝原因枚举（`expiresAt` 相关原因**不在**枚举内——无墙钟判定）。 */
+export type SecurityRejectionReason =
+  | 'missing-proof'
+  | 'invalid-proof'
+  | 'approval-missing-or-not-causal'
+  | 'approval-approver-revoked-at-its-order'
+  | 'approver-not-admitted-at-approval'
+  | 'approver-equals-author'
+  | 'approver-equals-subject'
+  | 'stale-or-replayed-nonce';
+
+export interface SecurityRejection {
+  eventId: string;
+  reason: SecurityRejectionReason;
+}
+
+/** `PolicyState.security` 子对象（SPEC §1.5；`admitted` 必须暴露）。 */
+export interface SecurityPolicyState {
+  level: SecurityLevel;
+  changedAt?: number;
+  changedBy?: string;
+  /** 有资格担任会签批准人的设备（§3.5） */
+  admitted: string[];
+  recoveryKeyId?: string;
+  rejections: SecurityRejection[];
+}
+
 /** 授予记录：把 `namespaces` 授予 `subject` 设备。 */
 export interface NamespaceGrantRecord {
   /** 唯一 ID，用于授予/撤销配对与幂等 */
@@ -50,6 +193,12 @@ export interface NamespaceGrantRecord {
   /** 预留：过期时间（本轮**不**强制生效，见 README） */
   expiresAt?: number;
   note?: string;
+  /** S1：加入动作 nonce（high 档首现验收用；进入 digest） */
+  nonce?: string;
+  /** S1：join 动作发起设备（批准侧填写；缺省 = 记录作者） */
+  initiator?: string;
+  cosign?: CosignProof;
+  breakGlass?: BreakGlassProof;
 }
 
 /** 撤销记录：撤销某个 grantId（按 ID 精确失效）。 */
@@ -65,6 +214,10 @@ export interface DeviceRevokeRecord {
   subject: string;
   issuedAt: number;
   note?: string;
+  /** S1：kick 动作 nonce（high 档必需；进入 digest） */
+  nonce?: string;
+  cosign?: CosignProof;
+  breakGlass?: BreakGlassProof;
 }
 
 /**
@@ -99,6 +252,12 @@ export interface NamespaceMembershipRecord {
   active: boolean;
   issuedAt: number;
   note?: string;
+  /** S1：join 动作 nonce（high 档首现验收用；进入 digest） */
+  nonce?: string;
+  /** S1：join 动作发起设备（缺省 = 记录作者） */
+  initiator?: string;
+  cosign?: CosignProof;
+  breakGlass?: BreakGlassProof;
 }
 
 /**
@@ -140,6 +299,22 @@ export interface PolicyState {
   converged: boolean;
   /** 实际执行的迭代轮数（诊断） */
   iterations: number;
+  /**
+   * S1：安全等级子对象（仅有安全记录时出现；纯旧记录输入不出现 →
+   * 与基线 `23a4468ad` 的 `PolicyState` 形状逐字节一致）。
+   */
+  security?: SecurityPolicyState;
+}
+
+/** §3.4E 拒绝诊断的累计器（确定性顺序 = R-c 处理顺序）。 */
+interface SecurityPassResult {
+  security: SecurityPolicyState;
+  /** 被安全门槛拒绝的 grant/membership 事件 ID（下一轮授权/成员推导跳过） */
+  rejectedJoinIds: Set<string>;
+  /** 被安全门槛拒绝的 device_revoke 事件 ID（下一轮吊销推导跳过） */
+  rejectedRevokeIds: Set<string>;
+  /** 是否存在任何安全记录（决定是否暴露 `security`） */
+  present: boolean;
 }
 
 /** 单轮推导的结果（不含不动点诊断字段） */
@@ -149,10 +324,11 @@ interface Authority {
   issuers: Set<string>;
   members: Map<string, Set<string>>;
   membershipNamespaces: Set<string>;
+  security: SecurityPassResult;
 }
 
 interface ParsedEntry {
-  kind: 'grant' | 'revoke' | 'device' | 'issuer' | 'membership';
+  kind: 'grant' | 'revoke' | 'device' | 'issuer' | 'membership' | 'tier' | 'approval' | 'recovery';
   /** 签发者设备 ID（= event.author） */
   author: string;
   /**
@@ -171,6 +347,20 @@ interface ParsedEntry {
   device?: DeviceRevokeRecord;
   issuer?: PolicyIssuerDeclareRecord;
   membership?: NamespaceMembershipRecord;
+  tier?: SecurityTierRecord;
+  approval?: SecurityApprovalRecord;
+  recovery?: SecurityRecoveryRecord;
+  /** 记录体上内嵌的证明（与 cosign/breakGlass 同名字段一一对应） */
+  cosign?: CosignProof;
+  breakGlass?: BreakGlassProof;
+  /**
+   * 异步预检结果（信任过滤阶段产出；**不含墙钟**）：
+   * 链锚定 ∧ approver/恢复码签名 ∧ 结构完整。缺省 = 未通过（fail-closed）。
+   */
+  cosignWellFormed?: boolean;
+  breakGlassWellFormed?: boolean;
+  /** `security_approval(approve)` 自带 cosign 的预检结果 */
+  approvalCosignWellFormed?: boolean;
 }
 
 function isPolicyType(type: string): boolean {
@@ -179,8 +369,27 @@ function isPolicyType(type: string): boolean {
     type === NAMESPACE_REVOKE_EVENT ||
     type === DEVICE_REVOKE_EVENT ||
     type === POLICY_ISSUER_DECLARE_EVENT ||
-    type === NAMESPACE_MEMBERSHIP_EVENT
+    type === NAMESPACE_MEMBERSHIP_EVENT ||
+    type === SECURITY_TIER_EVENT ||
+    type === SECURITY_APPROVAL_EVENT ||
+    type === SECURITY_RECOVERY_EVENT
   );
+}
+
+function isSecurityLevel(value: unknown): value is SecurityLevel {
+  return value === 'low' || value === 'medium' || value === 'high';
+}
+
+function proofFields(data: object): {
+  cosign?: CosignProof;
+  breakGlass?: BreakGlassProof;
+} {
+  const cosign = (data as { cosign?: CosignProof }).cosign;
+  const breakGlass = (data as { breakGlass?: BreakGlassProof }).breakGlass;
+  return {
+    ...(cosign && typeof cosign === 'object' ? { cosign } : {}),
+    ...(breakGlass && typeof breakGlass === 'object' ? { breakGlass } : {}),
+  };
 }
 
 /**
@@ -215,39 +424,259 @@ function parseEntries(events: Event[]): ParsedEntry[] {
     const author = event.author;
     const seq = eventSeq(event);
     const logical = eventLogical(event);
+    const data = event.data as Record<string, unknown>;
     if (event.type === NAMESPACE_GRANT_EVENT) {
-      const grant = (event.data as { grant?: NamespaceGrantRecord }).grant;
+      const grant = (data as { grant?: NamespaceGrantRecord }).grant;
       if (grant && typeof grant.grantId === 'string' && typeof grant.subject === 'string') {
-        entries.push({ kind: 'grant', author, seq, logical, id: event.id, grant });
+        entries.push({ kind: 'grant', author, seq, logical, id: event.id, grant, ...proofFields(grant) });
       }
     } else if (event.type === NAMESPACE_REVOKE_EVENT) {
-      const revoke = (event.data as { revoke?: NamespaceRevokeRecord }).revoke;
+      const revoke = (data as { revoke?: NamespaceRevokeRecord }).revoke;
       if (revoke && typeof revoke.grantId === 'string') {
         entries.push({ kind: 'revoke', author, seq, logical, id: event.id, revoke });
       }
     } else if (event.type === POLICY_ISSUER_DECLARE_EVENT) {
-      const issuer = (event.data as { policyIssuer?: PolicyIssuerDeclareRecord }).policyIssuer;
+      const issuer = (data as { policyIssuer?: PolicyIssuerDeclareRecord }).policyIssuer;
       if (issuer && typeof issuer.subject === 'string') {
         entries.push({ kind: 'issuer', author, seq, logical, id: event.id, issuer });
       }
     } else if (event.type === NAMESPACE_MEMBERSHIP_EVENT) {
-      const membership = (event.data as { membership?: NamespaceMembershipRecord }).membership;
+      const membership = (data as { membership?: NamespaceMembershipRecord }).membership;
       if (
         membership &&
         typeof membership.member === 'string' &&
         typeof membership.namespace === 'string' &&
         typeof membership.active === 'boolean'
       ) {
-        entries.push({ kind: 'membership', author, seq, logical, id: event.id, membership });
+        entries.push({ kind: 'membership', author, seq, logical, id: event.id, membership, ...proofFields(membership) });
+      }
+    } else if (event.type === SECURITY_TIER_EVENT) {
+      const securityTier = (data as { securityTier?: SecurityTierRecord }).securityTier;
+      if (
+        securityTier &&
+        isSecurityLevel(securityTier.level) &&
+        typeof securityTier.nonce === 'string'
+      ) {
+        entries.push({
+          kind: 'tier',
+          author,
+          seq,
+          logical,
+          id: event.id,
+          tier: securityTier,
+          ...proofFields(securityTier),
+        });
+      }
+    } else if (event.type === SECURITY_APPROVAL_EVENT) {
+      const securityApproval = (data as { securityApproval?: SecurityApprovalRecord }).securityApproval;
+      if (
+        securityApproval &&
+        typeof securityApproval.approvalId === 'string' &&
+        typeof securityApproval.initiator === 'string' &&
+        typeof securityApproval.nonce === 'string' &&
+        typeof securityApproval.digest === 'string'
+      ) {
+        entries.push({
+          kind: 'approval',
+          author,
+          seq,
+          logical,
+          id: event.id,
+          approval: securityApproval,
+        });
+      }
+    } else if (event.type === SECURITY_RECOVERY_EVENT) {
+      const securityRecovery = (data as { securityRecovery?: SecurityRecoveryRecord }).securityRecovery;
+      if (
+        securityRecovery &&
+        typeof securityRecovery.keyId === 'string' &&
+        typeof securityRecovery.publicKey === 'string'
+      ) {
+        entries.push({
+          kind: 'recovery',
+          author,
+          seq,
+          logical,
+          id: event.id,
+          recovery: securityRecovery,
+          ...proofFields(securityRecovery),
+        });
       }
     } else {
-      const device = (event.data as { deviceRevoke?: DeviceRevokeRecord }).deviceRevoke;
+      const device = (data as { deviceRevoke?: DeviceRevokeRecord }).deviceRevoke;
       if (device && typeof device.subject === 'string') {
-        entries.push({ kind: 'device', author, seq, logical, id: event.id, device });
+        entries.push({ kind: 'device', author, seq, logical, id: event.id, device, ...proofFields(device) });
       }
     }
   }
   return entries;
+}
+
+// ---------------------------------------------------------------------------
+// 动作摘要 / 配对号 / 证明预检（SPEC §3.2、§3.4）
+// ---------------------------------------------------------------------------
+
+/** 稳定 JSON 序列化：对象键递归排序、无空白。用于证明签名覆盖的规范数据。 */
+function stableCanonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableCanonicalJson).join(',')}]`;
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableCanonicalJson(record[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function sha256Hex(input: string): string {
+  return createHash('sha256').update(input).digest('hex');
+}
+
+export type SecurityAction =
+  | { op: 'kick'; initiator: string; subject: string; nonce: string }
+  | { op: 'join'; initiator: string; namespace: string; nonce: string }
+  | { op: 'tier'; initiator: string; level: SecurityLevel; nonce: string }
+  | { op: 'rotate'; initiator: string; oldKeyId: string; newPublicKey: string; nonce: string };
+
+/**
+ * 动作摘要（SPEC §3.2 冻结的规范 JSON：键序固定、无空白）。
+ *
+ * `digest = sha256hex(canonicalJson(...))`；nonce 由发起方生成并同时进入
+ * 请求记录与最终操作记录（最终记录的作者重算并复用）。
+ */
+export function securityActionDigest(action: SecurityAction): string {
+  let canonical: Record<string, unknown>;
+  switch (action.op) {
+    case 'kick':
+      canonical = {
+        authority: 'mebular-security',
+        op: 'kick',
+        initiator: action.initiator,
+        subject: action.subject,
+        nonce: action.nonce,
+      };
+      break;
+    case 'join':
+      canonical = {
+        authority: 'mebular-security',
+        op: 'join',
+        initiator: action.initiator,
+        namespace: action.namespace,
+        nonce: action.nonce,
+      };
+      break;
+    case 'tier':
+      canonical = {
+        authority: 'mebular-security',
+        op: 'tier',
+        initiator: action.initiator,
+        level: action.level,
+        nonce: action.nonce,
+      };
+      break;
+    case 'rotate':
+      canonical = {
+        authority: 'mebular-security',
+        op: 'rotate',
+        initiator: action.initiator,
+        oldKeyId: action.oldKeyId,
+        newPublicKey: action.newPublicKey,
+        nonce: action.nonce,
+      };
+      break;
+  }
+  return sha256Hex(JSON.stringify(canonical));
+}
+
+/**
+ * 配对号：`sha256('mebular-pairing' || digest)` 的**前 6 位十进制**，
+ * 格式 `NNN-NNN`。两机各自确定性计算，不传输、不存种。
+ *
+ * 实现注记：取哈希前 4 字节（uint32 BE）对 10^6 取模，零填充 6 位。
+ * 这是规格「前 6 位十进制」的确定性落法，S2/S3 必须复用本函数。
+ */
+export function pairingCodeForDigest(digest: string): string {
+  const hash = createHash('sha256').update('mebular-pairing').update(digest).digest();
+  const value = hash.readUInt32BE(0) % 1_000_000;
+  const digits = String(value).padStart(6, '0');
+  return `${digits.slice(0, 3)}-${digits.slice(3)}`;
+}
+
+/** 证明签名覆盖的规范数据（除 `signature` 外的全部字段，稳定键序）。 */
+export function canonicalCosignProofData(proof: CosignProof): string {
+  const { signature: _signature, ...data } = proof;
+  return stableCanonicalJson(data);
+}
+
+/** 恢复码证明签名覆盖的规范数据。 */
+export function canonicalBreakGlassProofData(proof: BreakGlassProof): string {
+  const { signature: _signature, ...data } = proof;
+  return stableCanonicalJson(data);
+}
+
+async function importEd25519PublicKey(raw: Uint8Array): Promise<CryptoKey> {
+  return crypto.subtle.importKey('raw', raw as BufferSource, { name: 'Ed25519' }, false, ['verify']);
+}
+
+function base64ToArrayBuffer(base64: string): ArrayBuffer {
+  const bytes = base64ToBytes(base64);
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+}
+
+/**
+ * cosign 的**密码学预检**：链锚定（叶→根到主公钥）+ approver 设备私钥验签。
+ * **不读取 issuedAt/expiresAt**（无墙钟）。digest/动作绑定由推导层做纯关系判定。
+ */
+export async function verifyCosignProof(
+  proof: CosignProof,
+  userMasterPublicKey: Uint8Array | null | undefined,
+): Promise<boolean> {
+  if (!userMasterPublicKey) return false;
+  if (!proof || proof.v !== 1 || !Array.isArray(proof.approverCertificateChain)) return false;
+  if (typeof proof.approver !== 'string' || proof.approver.length === 0) return false;
+  if (typeof proof.signature !== 'string' || proof.signature.length === 0) return false;
+  const leaf = proof.approverCertificateChain[0];
+  if (!leaf || leaf.deviceId !== proof.approver) return false;
+  try {
+    const anchored = await verifyCertificateChain(proof.approverCertificateChain, userMasterPublicKey, {
+      subjectDeviceId: proof.approver,
+    });
+    if (!anchored) return false;
+    const key = await importEd25519PublicKey(hexToBytes(leaf.devicePublicKey));
+    return await crypto.subtle.verify(
+      { name: 'Ed25519' },
+      key,
+      base64ToArrayBuffer(proof.signature),
+      new TextEncoder().encode(canonicalCosignProofData(proof)),
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * breakGlass 的**密码学预检**：用已登记的恢复码公钥验签。
+ * **不读取 issuedAt/expiresAt**；keyId 是否当前/更早由推导层判定。
+ */
+export async function verifyBreakGlassProof(
+  proof: BreakGlassProof,
+  publicKeyHex: string | undefined,
+): Promise<boolean> {
+  if (!publicKeyHex) return false;
+  if (!proof || proof.v !== 1) return false;
+  if (typeof proof.signature !== 'string' || proof.signature.length === 0) return false;
+  try {
+    const key = await importEd25519PublicKey(hexToBytes(publicKeyHex));
+    return await crypto.subtle.verify(
+      { name: 'Ed25519' },
+      key,
+      base64ToArrayBuffer(proof.signature),
+      new TextEncoder().encode(canonicalBreakGlassProofData(proof)),
+    );
+  } catch {
+    return false;
+  }
 }
 
 /** `derivePolicyState` 选项 */
@@ -380,11 +809,13 @@ function effectiveIssuers(
 function deriveMembership(
   sorted: ParsedEntry[],
   revokedIn: ReadonlySet<string>,
+  rejectedJoinIds: ReadonlySet<string> = new Set(),
 ): { members: Map<string, Set<string>>; namespaces: Set<string> } {
   const latest = new Map<string, boolean>();
   const namespaces = new Set<string>();
   for (const entry of sorted) {
     if (entry.kind !== 'membership' || !entry.membership) continue;
+    if (rejectedJoinIds.has(entry.id)) continue; // S1：high 档首现未通过会签验收
     if (revokedIn.has(entry.author)) continue; // R-b：被吊销签发者的记录不采纳
     if (revokedIn.has(entry.membership.member)) continue; // R-b：被吊销成员不采纳
     const { namespace, member, active } = entry.membership;
@@ -407,23 +838,445 @@ function deriveMembership(
   return { members, namespaces };
 }
 
+/** 上一轮安全验收的过滤集（反馈进下一轮授权/吊销推导）。 */
+interface SecurityFilters {
+  rejectedJoinIds: ReadonlySet<string>;
+  rejectedRevokeIds: ReadonlySet<string>;
+}
+
+const EMPTY_FILTERS: SecurityFilters = {
+  rejectedJoinIds: new Set<string>(),
+  rejectedRevokeIds: new Set<string>(),
+};
+
+function consumeNonce(
+  used: Map<string, string>,
+  scope: string,
+  op: SecurityOp,
+  nonce: string | undefined,
+  digest: string,
+): boolean {
+  if (!nonce) return false;
+  const key = `${scope}|${op}|${nonce}`;
+  const prior = used.get(key);
+  if (prior !== undefined) return prior === digest; // 同一动作重复 = 幂等，不同动作 = 重放
+  used.set(key, digest);
+  return true;
+}
+
+interface SecurityContext {
+  index: number;
+  recoveryKeyId?: string;
+  admitted: ReadonlySet<string>;
+  revokedAtOrder: ReadonlySet<string>;
+  approvalIndex: ReadonlyMap<string, number>;
+  approvalValidity: ReadonlyMap<number, SecurityRejectionReason | null>;
+  usedNonces: Map<string, string>;
+  sorted: ParsedEntry[];
+}
+
+/**
+ * 判定一条记录携带的会签/恢复码证明（纯关系 + digest 重算；不读墙钟）。
+ *
+ * 返回 `undefined` = 通过；否则返回 §3.4E 的原因。密码学预检
+ * （链锚定/签名）已由 `GraphNamespacePolicy.snapshot` 异步完成并写入
+ * `cosignWellFormed`/`breakGlassWellFormed`；本函数只消费该标记。
+ */
+function proofOf(entry: ParsedEntry): { cosign?: CosignProof; breakGlass?: BreakGlassProof } {
+  return {
+    cosign:
+      entry.cosign ??
+      entry.tier?.cosign ??
+      entry.device?.cosign ??
+      entry.grant?.cosign ??
+      entry.membership?.cosign ??
+      entry.recovery?.cosign,
+    breakGlass:
+      entry.breakGlass ??
+      entry.tier?.breakGlass ??
+      entry.device?.breakGlass ??
+      entry.grant?.breakGlass ??
+      entry.membership?.breakGlass ??
+      entry.recovery?.breakGlass,
+  };
+}
+
+/**
+ * join 动作的发起方：cosign 以**批准请求的 initiator** 为准（D 的 grant 与
+ * R 的 membership 共用同一份证明，作者可能不同，SPEC §3.7）；breakGlass
+ * 用记录自带的 initiator，缺省退回记录作者。
+ */
+function joinInitiator(entry: ParsedEntry, ctx: SecurityContext): string {
+  const { cosign } = proofOf(entry);
+  if (cosign) {
+    const at = ctx.approvalIndex.get(cosign.approvalId);
+    const approval = at !== undefined ? ctx.sorted[at]?.approval : undefined;
+    if (approval) return approval.initiator;
+  }
+  return entry.grant?.initiator ?? entry.membership?.initiator ?? entry.author;
+}
+
+function checkSecurityProof(
+  entry: ParsedEntry,
+  op: SecurityOp,
+  expectedDigest: string,
+  subject: string | undefined,
+  nonce: string | undefined,
+  ctx: SecurityContext,
+): SecurityRejectionReason | undefined {
+  const { cosign, breakGlass: glass } = proofOf(entry);
+  if (!cosign && !glass) return 'missing-proof';
+
+  if (glass) {
+    if (!entry.breakGlassWellFormed) return 'invalid-proof';
+    if (glass.op !== op || glass.keyId !== ctx.recoveryKeyId || glass.digest !== expectedDigest) {
+      return 'invalid-proof';
+    }
+    if (!consumeNonce(ctx.usedNonces, `breakglass:${glass.keyId}`, op, nonce, expectedDigest)) {
+      return 'stale-or-replayed-nonce';
+    }
+    return undefined;
+  }
+
+  if (!cosign || !entry.cosignWellFormed) return 'invalid-proof';
+  if (cosign.op !== op) return 'invalid-proof';
+  const approvalAt = ctx.approvalIndex.get(cosign.approvalId);
+  if (approvalAt === undefined || approvalAt >= ctx.index) return 'approval-missing-or-not-causal';
+  if (!ctx.approvalValidity.has(approvalAt)) return 'approval-missing-or-not-causal';
+  const approvalReason = ctx.approvalValidity.get(approvalAt);
+  if (approvalReason) return approvalReason;
+
+  const approval = ctx.sorted[approvalAt]?.approval;
+  if (!approval) return 'approval-missing-or-not-causal';
+  const approvalAuthor = ctx.sorted[approvalAt]!.author;
+  if (cosign.approver !== approvalAuthor) return 'invalid-proof';
+  if (approval.op !== op) return 'invalid-proof';
+  const pairing = pairingCodeForDigest(expectedDigest);
+  if (cosign.digest !== expectedDigest || cosign.pairingCode !== pairing) return 'invalid-proof';
+  if (approval.digest !== expectedDigest || approval.pairingCode !== pairing) return 'invalid-proof';
+  if (cosign.approver === entry.author) return 'approver-equals-author';
+  if (subject !== undefined && cosign.approver === subject) return 'approver-equals-subject';
+  if (!consumeNonce(ctx.usedNonces, `cosign:${cosign.approver}`, op, nonce, expectedDigest)) {
+    return 'stale-or-replayed-nonce';
+  }
+  return undefined;
+}
+
+/**
+ * S1 安全轴单遍推导（SPEC §1.2、§3.4、§3.5、§3.6）。
+ *
+ * 输入：R-c 定序后的记录、上一轮吊销排除集、上一轮 grantId 撤销集、本轮
+ * 授权步采纳的 grantId。输出：档位/准入/恢复码/拒绝诊断，以及供下一轮
+ * 授权/吊销步使用的过滤集。
+ *
+ * **无墙钟**：只读记录字段与位次；`issuedAt/expiresAt` 仅原样拷贝到审计
+ * 出口 `changedAt`，绝不参与采纳判定。
+ */
+function runSecurityPass(
+  sorted: ParsedEntry[],
+  revokedIn: ReadonlySet<string>,
+  adoptedGrantIds: ReadonlySet<string>,
+  candidateGrantIds: ReadonlySet<string> = adoptedGrantIds,
+): SecurityPassResult {
+  const present = sorted.some(
+    (entry) => entry.kind === 'tier' || entry.kind === 'approval' || entry.kind === 'recovery',
+  );
+  const rejections: SecurityRejection[] = [];
+  const rejectedEventIds = new Set<string>();
+  const rejectedJoinIds = new Set<string>();
+  const rejectedRevokeIds = new Set<string>();
+  const reject = (eventId: string, reason: SecurityRejectionReason): void => {
+    if (rejectedEventIds.has(eventId)) return;
+    rejectedEventIds.add(eventId);
+    rejections.push({ eventId, reason });
+  };
+
+  const approvalIndex = new Map<string, number>();
+  for (let i = 0; i < sorted.length; i += 1) {
+    const entry = sorted[i]!;
+    if (entry.kind !== 'approval' || !entry.approval) continue;
+    if (entry.approval.decision !== 'approve') continue;
+    if (!approvalIndex.has(entry.approval.approvalId)) approvalIndex.set(entry.approval.approvalId, i);
+  }
+
+  const seed = new Set<string>();
+  const admitted = new Set<string>();
+  let sealed = false;
+  let level: SecurityLevel = 'low';
+  let changedAt: number | undefined;
+  let changedBy: string | undefined;
+  let recoveryKeyId: string | undefined;
+  const usedNonces = new Map<string, string>();
+  const revokedAtOrder = new Set<string>();
+  const approvalValidity = new Map<number, SecurityRejectionReason | null>();
+
+  for (let index = 0; index < sorted.length; index += 1) {
+    const entry = sorted[index]!;
+    const ctx: SecurityContext & { sorted: ParsedEntry[] } = {
+      index,
+      ...(recoveryKeyId !== undefined ? { recoveryKeyId } : {}),
+      admitted,
+      revokedAtOrder,
+      approvalIndex,
+      approvalValidity,
+      usedNonces,
+      sorted,
+    };
+
+    switch (entry.kind) {
+      case 'grant': {
+        if (!entry.grant) break;
+        if (revokedIn.has(entry.author) || revokedAtOrder.has(entry.author)) break; // R-b
+        // 用**候选集**（R-a/R-d 通过、未应用上一轮 join 过滤）判定首现门槛：
+        // 否则被 join 过滤的 grant 在下一轮从 adoptedGrantIds 消失，会把它的
+        // rejection 清掉，造成过滤集振荡。采纳/准入/恢复仍只看本轮实际采纳集。
+        if (!candidateGrantIds.has(entry.grant.grantId)) break; // R-a / R-d 已判定
+        const subject = entry.grant.subject;
+        const gated = sealed && level === 'high' && !admitted.has(subject);
+        if (gated) {
+          const namespaces = normalizeNamespaceList(entry.grant.namespaces);
+          const initiator = joinInitiator(entry, ctx);
+          const nonce = entry.grant.nonce;
+          let reason: SecurityRejectionReason | undefined;
+          if (namespaces.length !== 1) {
+            // join digest 只绑定单个 namespace；多分区首现无法被一个会签覆盖 → fail-closed。
+            reason = proofOf(entry).cosign || proofOf(entry).breakGlass ? 'invalid-proof' : 'missing-proof';
+          } else if (!nonce) {
+            reason = proofOf(entry).cosign || proofOf(entry).breakGlass ? 'invalid-proof' : 'missing-proof';
+          } else {
+            const digest = securityActionDigest({
+              op: 'join',
+              initiator,
+              namespace: namespaces[0]!,
+              nonce,
+            });
+            reason = checkSecurityProof(entry, 'join', digest, subject, nonce, ctx);
+          }
+          if (reason) {
+            reject(entry.id, reason);
+            rejectedJoinIds.add(entry.id);
+            break;
+          }
+        }
+        // 本轮授权步可能因上一轮 join 过滤未采纳它；下一轮会采纳，届时再加入
+        // admitted/seed（避免把「尚未生效」写成既成事实）。
+        if (!adoptedGrantIds.has(entry.grant.grantId)) break;
+        if (!sealed) {
+          seed.add(entry.author);
+          seed.add(subject);
+        } else if (!admitted.has(subject)) {
+          admitted.add(subject);
+        }
+        revokedAtOrder.delete(subject); // R-d 恢复
+        break;
+      }
+
+      case 'membership': {
+        if (!entry.membership) break;
+        if (revokedIn.has(entry.author) || revokedIn.has(entry.membership.member)) break; // R-b
+        const member = entry.membership.member;
+        const gated = sealed && level === 'high' && !admitted.has(member);
+        if (gated) {
+          const initiator = joinInitiator(entry, ctx);
+          const nonce = entry.membership.nonce;
+          let reason: SecurityRejectionReason | undefined;
+          if (!nonce) {
+            reason = proofOf(entry).cosign || proofOf(entry).breakGlass ? 'invalid-proof' : 'missing-proof';
+          } else {
+            const digest = securityActionDigest({
+              op: 'join',
+              initiator,
+              namespace: entry.membership.namespace,
+              nonce,
+            });
+            reason = checkSecurityProof(entry, 'join', digest, member, nonce, ctx);
+          }
+          if (reason) {
+            reject(entry.id, reason);
+            rejectedJoinIds.add(entry.id);
+            break;
+          }
+        }
+        if (!sealed) {
+          seed.add(entry.author);
+          seed.add(member);
+        } else if (!admitted.has(member)) {
+          admitted.add(member);
+        }
+        break;
+      }
+
+      case 'device': {
+        if (!entry.device) break;
+        if (revokedIn.has(entry.author) || revokedAtOrder.has(entry.author)) break; // R-b
+        if (entry.device.subject === entry.author) break; // 自吊销不采纳（基线）
+        const subject = entry.device.subject;
+        if (level === 'high') {
+          const nonce = entry.device.nonce;
+          const digest = nonce
+            ? securityActionDigest({ op: 'kick', initiator: entry.author, subject, nonce })
+            : '';
+          const reason = checkSecurityProof(entry, 'kick', digest, subject, nonce, ctx);
+          if (reason) {
+            reject(entry.id, reason);
+            rejectedRevokeIds.add(entry.id);
+            break;
+          }
+        }
+        if (!sealed) {
+          seed.add(entry.author);
+          seed.add(subject);
+        }
+        revokedAtOrder.add(subject);
+        break;
+      }
+
+      case 'revoke': {
+        if (!entry.revoke || revokedIn.has(entry.author)) break;
+        if (!sealed) {
+          seed.add(entry.author);
+          if (entry.revoke.subject !== undefined) seed.add(entry.revoke.subject);
+        }
+        break;
+      }
+
+      case 'issuer': {
+        if (!entry.issuer || revokedIn.has(entry.author) || revokedIn.has(entry.issuer.subject)) break;
+        if (!sealed) {
+          seed.add(entry.author);
+          seed.add(entry.issuer.subject);
+        }
+        break;
+      }
+
+      case 'tier': {
+        if (!entry.tier) break;
+        if (revokedIn.has(entry.author) || revokedAtOrder.has(entry.author)) break; // R-b（含历史）
+        const record = entry.tier;
+        const before = level;
+        if (before === 'high' && record.level === 'high') break; // 同级重发：采纳但无效果
+        if (before === 'high' && record.level !== 'high') {
+          const nonce = record.nonce;
+          const digest = nonce
+            ? securityActionDigest({ op: 'tier', initiator: entry.author, level: record.level, nonce })
+            : '';
+          const reason = checkSecurityProof(entry, 'tier', digest, undefined, nonce, ctx);
+          if (reason) {
+            reject(entry.id, reason);
+            break;
+          }
+        }
+        level = record.level;
+        changedAt = record.issuedAt;
+        changedBy = entry.author;
+        if (!sealed) {
+          // §3.5 种子口径：首条被采纳 tier 记录的作者自动准入（否则单设备升级 high 后
+          // 无人可批准，与 §3.5 目的及 §6.4 E-7 冲突）。
+          seed.add(entry.author);
+          for (const device of seed) admitted.add(device);
+          sealed = true;
+        }
+        break;
+      }
+
+      case 'approval': {
+        if (!entry.approval) break;
+        if (entry.approval.decision !== 'approve') break;
+        const record = entry.approval;
+        let reason: SecurityRejectionReason | null = null;
+        if (!record.cosign || !entry.approvalCosignWellFormed) {
+          reason = 'invalid-proof';
+        } else if (
+          record.cosign.approver !== entry.author ||
+          record.cosign.approvalId !== record.approvalId ||
+          record.cosign.op !== record.op ||
+          record.cosign.digest !== record.digest
+        ) {
+          reason = 'invalid-proof';
+        } else if (
+          record.cosign.pairingCode !== pairingCodeForDigest(record.digest) ||
+          record.pairingCode !== pairingCodeForDigest(record.digest)
+        ) {
+          reason = 'invalid-proof';
+        } else if (entry.author === record.initiator) {
+          reason = 'approver-equals-author';
+        } else if (revokedAtOrder.has(entry.author)) {
+          reason = 'approval-approver-revoked-at-its-order';
+        } else if (!admitted.has(entry.author)) {
+          reason = 'approver-not-admitted-at-approval';
+        }
+        approvalValidity.set(index, reason);
+        break;
+      }
+
+      case 'recovery': {
+        if (!entry.recovery) break;
+        if (revokedIn.has(entry.author) || revokedAtOrder.has(entry.author)) break; // R-b
+        const record = entry.recovery;
+        if (recoveryKeyId === undefined) {
+          // 初始登记（无当前 key）：签发者受信未吊销即采纳。
+          recoveryKeyId = record.keyId;
+          if (!sealed) seed.add(entry.author);
+          break;
+        }
+        const nonce = record.nonce;
+        const digest = nonce
+          ? securityActionDigest({
+              op: 'rotate',
+              initiator: entry.author,
+              oldKeyId: recoveryKeyId,
+              newPublicKey: record.publicKey,
+              nonce,
+            })
+          : '';
+        const reason = checkSecurityProof(entry, 'rotate', digest, undefined, nonce, ctx);
+        if (reason) {
+          reject(entry.id, reason);
+          break;
+        }
+        recoveryKeyId = record.keyId;
+        if (!sealed) seed.add(entry.author);
+        break;
+      }
+    }
+  }
+
+  return {
+    security: {
+      level,
+      ...(changedAt !== undefined ? { changedAt } : {}),
+      ...(changedBy !== undefined ? { changedBy } : {}),
+      admitted: [...admitted].sort(),
+      ...(recoveryKeyId !== undefined ? { recoveryKeyId } : {}),
+      rejections,
+    },
+    rejectedJoinIds,
+    rejectedRevokeIds,
+    present,
+  };
+}
+
 function deriveOnce(
   sorted: ParsedEntry[],
   bootstrap: ReadonlySet<string>,
   revokedGrantIds: ReadonlySet<string>,
   revokedIn: ReadonlySet<string>,
+  filters: SecurityFilters = EMPTY_FILTERS,
 ): Authority {
   // C1：R-a 的引导白名单改为「生效引导集合」（图上声明 ∪ 配置）。
   const issuers = effectiveIssuers(sorted, bootstrap, revokedIn);
   // 权威授权：R-b（revokedIn）→ R-d（grantId 撤销）→ R-a
   const authorized = new Map<string, Set<string>>();
   const adoptedGrantIds = new Set<string>();
+  const candidateGrantIds = new Set<string>();
   for (const entry of sorted) {
     if (revokedIn.has(entry.author)) continue; // R-b：被吊销签发者的记录不采纳
     if (entry.kind !== 'grant' || !entry.grant) continue;
     if (revokedGrantIds.has(entry.grant.grantId)) continue; // R-d：grantId 精确撤销
     const granted = namespacesOf(entry.grant);
     if (!isAuthorizedFor(entry.author, granted, authorized, issuers)) continue; // R-a
+    candidateGrantIds.add(entry.grant.grantId);
+    if (filters.rejectedJoinIds.has(entry.id)) continue; // S1：high 档首现未通过会签验收
     adoptedGrantIds.add(entry.grant.grantId);
     let set = authorized.get(entry.grant.subject);
     if (!set) {
@@ -440,6 +1293,7 @@ function deriveOnce(
     // 记录，F-1），也包括本轮在途已判吊销者（互吊销按逻辑序确定，见「R-b 互吊销」）。
     if (revokedIn.has(entry.author) || revoked.has(entry.author)) continue;
     if (entry.kind === 'device' && entry.device) {
+      if (filters.rejectedRevokeIds.has(entry.id)) continue; // S1：high 档踢人未通过会签验收
       // 自吊销（subject === author）语义未定义，且与 R-b 自指冲突（吊销后其记录不再被采纳 →
       // 反而无法维持吊销）。不予采纳：吊销须由**其他**设备发起。
       if (entry.device.subject !== entry.author) revoked.add(entry.device.subject);
@@ -451,8 +1305,17 @@ function deriveOnce(
 
   const out = new Map<string, string[]>();
   for (const [subject, set] of authorized) out.set(subject, [...set]);
-  const membership = deriveMembership(sorted, revokedIn);
-  return { authorized: out, revoked, issuers, members: membership.members, membershipNamespaces: membership.namespaces };
+  const membership = deriveMembership(sorted, revokedIn, filters.rejectedJoinIds);
+  // S1：安全轴单遍（tier/admitted/recovery/rejections）与既有两轴同一推导循环。
+  const security = runSecurityPass(sorted, revokedIn, adoptedGrantIds, candidateGrantIds);
+  return {
+    authorized: out,
+    revoked,
+    issuers,
+    members: membership.members,
+    membershipNamespaces: membership.namespaces,
+    security,
+  };
 }
 
 /** 由权威 `revoked` 过滤出应被采纳的 revoke（R-b：排除被吊销签发者发出的 revoke） */
@@ -484,7 +1347,8 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
 
   let revokedGrantIds = new Set<string>();
   let revokedIn = new Set<string>();
-  let current = deriveOnce(sorted, bootstrap, revokedGrantIds, revokedIn);
+  let filters: SecurityFilters = EMPTY_FILTERS;
+  let current = deriveOnce(sorted, bootstrap, revokedGrantIds, revokedIn, filters);
   const rounds: Array<{ revokedGrantIds: Set<string>; state: Authority }> = [
     { revokedGrantIds, state: current },
   ];
@@ -494,13 +1358,24 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
   while (iterations < maxIterations) {
     iterations += 1;
     const nextRevokes = filterRevokes(sorted, current.revoked);
-    if (setsEqual(nextRevokes, revokedGrantIds) && setsEqual(current.revoked, revokedIn)) {
+    const filtersStable =
+      setsEqual(current.security.rejectedJoinIds, filters.rejectedJoinIds) &&
+      setsEqual(current.security.rejectedRevokeIds, filters.rejectedRevokeIds);
+    if (
+      setsEqual(nextRevokes, revokedGrantIds) &&
+      setsEqual(current.revoked, revokedIn) &&
+      filtersStable
+    ) {
       converged = true;
       break;
     }
     revokedGrantIds = nextRevokes;
     revokedIn = current.revoked;
-    current = deriveOnce(sorted, bootstrap, revokedGrantIds, revokedIn);
+    filters = {
+      rejectedJoinIds: current.security.rejectedJoinIds,
+      rejectedRevokeIds: current.security.rejectedRevokeIds,
+    };
+    current = deriveOnce(sorted, bootstrap, revokedGrantIds, revokedIn, filters);
     rounds.push({ revokedGrantIds, state: current });
   }
 
@@ -516,7 +1391,7 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
     for (const round of rounds) for (const device of round.state.revoked) excluded.add(device);
     const hardCap = 2 * sorted.length + 1;
     for (let guard = 0; guard < hardCap; guard += 1) {
-      const candidate = deriveOnce(sorted, bootstrap, filterRevokes(sorted, excluded), excluded);
+      const candidate = deriveOnce(sorted, bootstrap, filterRevokes(sorted, excluded), excluded, filters);
       chosen = candidate;
       let grew = false;
       for (const device of candidate.revoked) {
@@ -529,6 +1404,19 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
     }
   }
 
+  // 未收敛回退：新轴一律取更保守值（证明视为不满足、档位变更不采纳、恢复码
+  // 签名不采纳）——SPEC §3.4 实现注记。`rejections` 保留以便诊断。
+  let securityOut: SecurityPolicyState | undefined;
+  if (chosen.security.present) {
+    securityOut = converged
+      ? chosen.security.security
+      : {
+          level: 'low',
+          admitted: [],
+          rejections: chosen.security.security.rejections,
+        };
+  }
+
   return {
     authorized: chosen.authorized,
     revoked: chosen.revoked,
@@ -537,6 +1425,7 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
     membershipNamespaces: chosen.membershipNamespaces,
     converged,
     iterations,
+    ...(securityOut !== undefined ? { security: securityOut } : {}),
   };
 }
 
@@ -570,9 +1459,46 @@ export class GraphNamespacePolicy implements NamespaceGrantPolicy {
       if (!isPolicyType(event.type)) continue;
       if (await verifyIssuedByUser(event, this.userMasterPublicKey)) trusted.push(event);
     }
+    const entries = parseEntries(trusted);
+    await this.annotateProofs(entries);
     // 生产路径恒用输入的确定性上限 `iterationBound(entries)`（不可由构造选项注入，
     // 避免各端上限不同导致权威集不一致）。
-    return derivePolicyState(parseEntries(trusted), { policyIssuers: this.policyIssuers });
+    return derivePolicyState(entries, { policyIssuers: this.policyIssuers });
+  }
+
+  /**
+   * S1：异步密码学预检（链锚定 / 签名 / 结构），产出 `*WellFormed` 标记。
+   * **不读取 issuedAt/expiresAt**（无墙钟）——时效只约束发起方执行窗口。
+   */
+  private async annotateProofs(entries: ParsedEntry[]): Promise<void> {
+    const recoveryKeys = new Map<string, string>();
+    for (const entry of entries) {
+      if (entry.kind === 'recovery' && entry.recovery) {
+        recoveryKeys.set(entry.recovery.keyId, entry.recovery.publicKey);
+      }
+    }
+    for (const entry of entries) {
+      if (entry.kind === 'approval' && entry.approval?.cosign) {
+        entry.approvalCosignWellFormed = await verifyCosignProof(
+          entry.approval.cosign,
+          this.userMasterPublicKey,
+        );
+      }
+      if (entry.cosign) {
+        entry.cosignWellFormed = await verifyCosignProof(entry.cosign, this.userMasterPublicKey);
+      }
+      if (entry.breakGlass) {
+        entry.breakGlassWellFormed = await verifyBreakGlassProof(
+          entry.breakGlass,
+          recoveryKeys.get(entry.breakGlass.keyId),
+        );
+      }
+    }
+  }
+
+  /** S1：只读安全等级出口（`admitted` 必须暴露，SPEC §3.5）。 */
+  async getSecurityTier(): Promise<SecurityPolicyState> {
+    return (await this.snapshot()).security ?? { level: 'low', admitted: [], rejections: [] };
   }
 
   async getAuthorizedNamespaces(peerDeviceId: string): Promise<string[]> {

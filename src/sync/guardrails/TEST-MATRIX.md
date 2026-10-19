@@ -39,13 +39,37 @@
 **注**：F2 的「◐」= 单条 A→B 记忆断言 + 成员表计数（`verify-daemon-cluster.mjs:123-131`）；
 这正是 P1 探针指出的「连接方向与故障同构、断言只查没坏的方向」问题。
 
+## 1.5 S1 安全三档（core）红绿矩阵
+
+> 落点：`tests/sync/security-tier.test.ts`（R1-1…R1-12）＋ `tests/sync/policy-invariants.test.ts`
+> （安全轴随机场景）。规格：SECURITY-TIERS-SPEC v1.1 §6.1。
+
+| # | 场景 | 覆盖 | 状态 |
+|---|---|---|---|
+| R1-1 | 无 tier=low；medium 生效；R-c 最新胜出（乱序/幂等） | `security-tier` | ✅ |
+| R1-2 | 被吊销签发者的 tier 记录不采纳（R-b 含历史） | `security-tier` | ✅ |
+| R1-3 | 降级逃逸：无证明不采纳；有效 cosign 采纳；各失败原因归因 | `security-tier` | ✅ |
+| R1-4 | medium→low 网络侧照常采纳（TOTP 本机门槛归 S2） | `security-tier` | ✅ |
+| R1-5 | device_revoke @high：无证明/approver=subject/nonce 重放不采纳；有效 cosign 采纳 | `security-tier` | ✅ |
+| R1-6 | 首现验收：新设备无证明不采纳且不 admitted；带证明采纳；历史成员不回溯 | `security-tier` | ✅ |
+| R1-7 | 恢复码登记→消费（nonce 一次）→轮换；旧 key 新签名不采纳 | `security-tier` | ✅ |
+| R1-8 | 拒绝诊断：§3.4E 八类 reason 均出现在 `security.rejections` | `security-tier` | ✅ |
+| R1-9 | 纯旧记录 golden 与基线逐字节一致；harness 含新类型后排列/幂等/oracle-free 全过 | `security-tier` · `policy-invariants` | ✅ |
+| R1-10 | POLICY-INVARIANTS / SEALING / 护栏四件套同步；`npm test` 不降；CI 五项绿 | 本文档 + 测试内文档断言 | ✅（`npm test` 见 PR） |
+| R1-11 | 无墙钟：`expiresAt` 已过去仍采纳；重复推导恒等 | `security-tier` | ✅ |
+| R1-12 | 批准人事后吊销不回撤；其新批准不再有效 | `security-tier` | ✅ |
+
+**混合版本**：S1 无行为模拟自动化（G-3 仍缺）；最低手工/脚本判据见
+`MIXED-VERSION-POLICY.md` §5：旧端忽略新记录/字段、旧端裸记录 @high 不采纳且
+`security.rejections` 可见。**未做**：真双版本互连（G-4）。
+
 ## 2. 矩阵二：版本维度（现状 vs 缺口）
 
 | 版本档 | 现状 | 说明 |
 |---|---|---|
 | 同版本 | ✅ 全部自动化只跑此档（含一次性跨网 `verify-mcp-cross`，非 CI） | 唯一有系统覆盖的档 |
 | 行为模拟（新代码→旧端行为） | ◐ 仅 1 例：`accept-auto-grant.mjs` ④a「老订阅端：只 hello、不写 membership → 中性态 + CLI 兜底」（手动脚本，非 CI） | 这是「legacy-empty 降级」的行为模拟，不是混合版本测试框架 |
-| 真双版本（N-1 产物互连） | ✗ **零覆盖** | C3 政策 §5 要求的最低验证；当前没有任何脚本/CI 组合两个 ref |
+| 真双版本（N-1 产物互连） | ✗ **零覆盖** | C3 政策 §5 要求的最低验证；当前没有任何脚本/CI 组合两个 ref。S1 安全三档的最低判据：旧端忽略 `security_*` 记录/证明字段，旧端裸记录 @high 新端不采纳 |
 | 跨代（skip-version） | ✗（不承诺） | C3 §4：doctor/巡检应显式告警（当前无版本标识） |
 
 ## 3. 缺口清单与可自动化项

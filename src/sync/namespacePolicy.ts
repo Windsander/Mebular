@@ -9,6 +9,7 @@
 // 的裁剪链不变。注意：本期**不实现** grant-as-memory（见 PLAN 第 4 节）。
 
 import { normalizeNamespaceList } from '../core/namespace.js';
+import type { SecurityPolicyState } from './grantPolicy.js';
 
 export interface NamespaceGrantPolicy {
   /**
@@ -25,6 +26,13 @@ export interface NamespaceGrantPolicy {
    * 实现应只采纳签发者可信的吊销记录；缺省（不实现）视为无吊销。
    */
   getRevokedDevices?(): Promise<ReadonlySet<string>>;
+
+  /**
+   * 可选（S1 · 安全三档）：网络级安全等级只读出口。
+   * `level` 缺省 low；`admitted` 必须暴露（会签批准人资格诊断，SPEC §3.5）；
+   * `rejections` 对齐 P2「拒绝不静默」。
+   */
+  getSecurityTier?(): Promise<SecurityPolicyState>;
 }
 
 /**

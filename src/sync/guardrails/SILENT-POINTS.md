@@ -21,7 +21,7 @@
 - **P2**：诊断/运维可观测性缺口（无安全后果，但故障不可解释）；
 - **P3**：体验/未来健康面板（P3 收敛健康度波次顺带落地）。
 
-**摘要统计**：共清点 **41** 条。其中 P0 = 2、P1 = 7、P2 = 13、P3 = 14、有意静默（已复核、
+**摘要统计**：共清点 **42** 条。其中 P0 = 2、P1 = 7、P2 = 14、P3 = 14、有意静默（已复核、
 无需变更）= 5。最值得优先的：**SP-01 / SP-02**（身份与公钥兜底，P0）与
 **SP-04 + SP-12 + SP-13**（认证失败/信任过滤/策略推导异常无任何出口，P1）。
 同时发现 **3 类「已发声但无人听」的信号**：`auth-failed`（握手层）、`sync-membership-rejected`、
@@ -101,6 +101,7 @@
 | SP-36 | `src/mebular.ts:918-940` | 兜底 | `readHandoffIntent` 读失败 → `null`：崩溃恢复意图静默失效（幂等重跑可自愈，但恢复路径偏离无信号）。 | 除 `ENOENT` 外计数。 | P3 |
 | SP-37 | `src/sync/namespacePolicy.ts`（全文） | — | `ConfigNamespacePolicy`/`CompositeNamespacePolicy`：未授权一致返回 `[]`（默认拒绝显式），无静默点。 | 无需变更。 | 有意静默 |
 | SP-38 | `packages/mcp/src/serve.mjs:1296-1302` | — | `findConnectionByDevice` 未命中 → 显式 409 `not_connected`（替代了旧的静默路径）。 | 无需变更（正面样本）。 | 有意静默 |
+| SP-42 | `src/sync/grantPolicy.ts`（S1 `security.rejections`） | — | **新增安全门槛的拒绝不静默**：`PolicyState.security.rejections` 逐条携带 `{eventId, reason}`（§3.4E 八类），`admitted` 暴露有资格批准的设备；未收敛回退仍保留 `rejections` 与 `converged=false`。**不新增静默点**（证明缺失/无效、批准缺失或非因果、批准人位次吊销/未准入、approver=author/subject、nonce 重放均可见）。 | 无需变更；S2/S3 把 `security.rejections` 接到审计/安全卡/「需要注意」（只读）。 | 有意静默（正面样本） |
 
 ## 7. 守护接线（packages/mcp）
 

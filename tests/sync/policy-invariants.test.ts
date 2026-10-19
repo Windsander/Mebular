@@ -103,12 +103,30 @@ function key(state: ReturnType<typeof derivePolicyState>): {
   authorized: Record<string, string[]>;
   revoked: string[];
   issuers: string[];
+  security: {
+    level: string;
+    admitted: string[];
+    recoveryKeyId?: string;
+    rejections: Array<{ eventId: string; reason: string }>;
+  } | null;
 } {
   const authorized: Record<string, string[]> = {};
   for (const name of [...state.authorized.keys()].sort()) {
     authorized[name] = [...state.authorized.get(name)!].sort();
   }
-  return { authorized, revoked: [...state.revoked].sort(), issuers: [...state.issuers].sort() };
+  return {
+    authorized,
+    revoked: [...state.revoked].sort(),
+    issuers: [...state.issuers].sort(),
+    security: state.security
+      ? {
+          level: state.security.level,
+          admitted: [...state.security.admitted].sort(),
+          ...(state.security.recoveryKeyId !== undefined ? { recoveryKeyId: state.security.recoveryKeyId } : {}),
+          rejections: state.security.rejections.map((r) => ({ eventId: r.eventId, reason: r.reason })),
+        }
+      : null,
+  };
 }
 
 /** dropDeclares 的授权是 actual 的子集（声明只可能增加签发者 → 只可能增加授权）。 */
@@ -124,7 +142,133 @@ function authorizedSubset(
   return true;
 }
 
+/**
+ * S1：在旧记录场景之上追加安全记录（tier/recovery/裸 membership）。
+ * 不改变旧场景的 300 组断言；安全轴单独一组，只断言确定性与结构不变量。
+ */
+function buildSecurityScenario(rng: () => number): Scenario {
+  const base = buildScenario(rng);
+  const entries = [...base.entries];
+  const pick = <T>(arr: T[]): T => arr[Math.floor(rng() * arr.length)]!;
+  let seq = Math.max(0, ...entries.map((entry) => entry.seq)) + 1;
+  let logical = Math.max(0, ...entries.map((entry) => entry.logical)) + 1;
+  const push = (entry: Omit<Entry, 'seq' | 'logical'>): void => {
+    entries.push({ ...entry, seq: seq++, logical: logical++ } as Entry);
+  };
+
+  const n = 1 + Math.floor(rng() * 4);
+  for (let i = 0; i < n; i += 1) {
+    const author = pick(DEVICES);
+    const roll = rng();
+    if (roll < 0.6) {
+      push({
+        kind: 'tier',
+        author,
+        id: `stier-${seq}`,
+        tier: {
+          level: (['low', 'medium', 'high'] as const)[Math.floor(rng() * 3)]!,
+          nonce: `stn-${seq}`,
+          issuedAt: logical,
+        },
+      });
+    } else if (roll < 0.8) {
+      push({
+        kind: 'recovery',
+        author,
+        id: `srec-${seq}`,
+        recovery: {
+          keyId: `K-${seq}`,
+          publicKey: `pub-${seq}`,
+          createdAt: logical,
+          mode: 'set',
+        },
+      });
+    } else {
+      // high 下的裸首现 → 应被拒绝且不 admitted（fail-closed）
+      push({
+        kind: 'membership',
+        author,
+        id: `smem-${seq}`,
+        membership: {
+          member: pick(DEVICES),
+          namespace: pick(NAMESPACES),
+          active: true,
+          issuedAt: logical,
+        },
+      });
+    }
+  }
+
+  // 一半场景追加：high 之后的新设备裸 membership（首现验收）
+  if (rng() < 0.5) {
+    push({
+      kind: 'tier',
+      author: pick(DEVICES),
+      id: `stier-high-${seq}`,
+      tier: { level: 'high', nonce: `stn-high-${seq}`, issuedAt: logical },
+    });
+    push({
+      kind: 'membership',
+      author: pick(DEVICES),
+      id: `smem-after-${seq}`,
+      membership: {
+        member: pick(DEVICES),
+        namespace: pick(NAMESPACES),
+        active: true,
+        issuedAt: logical,
+      },
+    });
+  }
+  return { entries, bootstrap: base.bootstrap };
+}
+
 describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', () => {
+  it('S1 安全轴随机事件：排列不变 / 幂等 / 结构不变量 / 删 tier → low', () => {
+    const rng = mulberry32(0x5ec0);
+    const scenarios = 120;
+    for (let scenario = 0; scenario < scenarios; scenario += 1) {
+      const { entries, bootstrap } = buildSecurityScenario(rng);
+      const options = { policyIssuers: bootstrap };
+      const actual = derivePolicyState(entries, options);
+      const actualKey = key(actual);
+
+      expect(key(derivePolicyState([...entries].reverse(), options))).toEqual(actualKey);
+      const shuffled = [...entries];
+      for (let i = shuffled.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(rng() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j]!, shuffled[i]!];
+      }
+      expect(key(derivePolicyState(shuffled, options))).toEqual(actualKey);
+      expect(key(derivePolicyState(entries, options))).toEqual(actualKey);
+
+      const inputIds = new Set(entries.map((entry) => entry.id));
+      const inputDevices = new Set<string>();
+      for (const entry of entries) {
+        inputDevices.add(entry.author);
+        if (entry.grant) inputDevices.add(entry.grant.subject);
+        if (entry.device) inputDevices.add(entry.device.subject);
+        if (entry.membership) inputDevices.add(entry.membership.member);
+        if (entry.issuer) inputDevices.add(entry.issuer.subject);
+        if (entry.revoke?.subject) inputDevices.add(entry.revoke.subject);
+      }
+      if (actual.security) {
+        for (const rejection of actual.security.rejections) {
+          expect(inputIds.has(rejection.eventId)).toBe(true);
+        }
+        for (const device of actual.security.admitted) {
+          expect(inputDevices.has(device)).toBe(true);
+        }
+      }
+
+      // oracle-free：删掉全部 tier 记录 → 未开卡（low）且 admitted 为空。
+      const noTier = derivePolicyState(entries.filter((entry) => entry.kind !== 'tier'), options);
+      if (noTier.security) {
+        expect(noTier.security.level).toBe('low');
+        expect(noTier.security.admitted).toEqual([]);
+      }
+    }
+  });
+
   it('空输入 + 缺省选项：默认拒绝（无授权/无吊销）且收敛', () => {
     const state = derivePolicyState([]);
     expect(state.authorized.size).toBe(0);
@@ -190,6 +334,33 @@ describe('derivePolicyState 随机化不变量（oracle-free 扰动检查）', (
           if (!membershipSubjects.has(m)) throw new Error(`成员必须曾是某条成员记录的主体 @scenario ${scenario}：${m}`);
         }
         if (!actual.membershipNamespaces.has(ns)) throw new Error(`有成员的分区必已启用成员资格 @scenario ${scenario}：${ns}`);
+      }
+
+      // S1：安全轴结构不变量（拒绝事件存在、admitted 来自输入、level 合法）
+      const inputIds = new Set(entries.map((e) => e.id));
+      const inputDevices = new Set<string>();
+      for (const entry of entries) {
+        inputDevices.add(entry.author);
+        if (entry.grant) inputDevices.add(entry.grant.subject);
+        if (entry.device) inputDevices.add(entry.device.subject);
+        if (entry.membership) inputDevices.add(entry.membership.member);
+        if (entry.issuer) inputDevices.add(entry.issuer.subject);
+        if (entry.revoke?.subject) inputDevices.add(entry.revoke.subject);
+      }
+      if (actual.security) {
+        if (!['low', 'medium', 'high'].includes(actual.security.level)) {
+          throw new Error(`非法安全等级 @scenario ${scenario}`);
+        }
+        for (const rejection of actual.security.rejections) {
+          if (!inputIds.has(rejection.eventId)) {
+            throw new Error(`拒绝事件必须来自输入 @scenario ${scenario}：${rejection.eventId}`);
+          }
+        }
+        for (const device of actual.security.admitted) {
+          if (!inputDevices.has(device)) {
+            throw new Error(`admitted 设备必须来自输入 @scenario ${scenario}：${device}`);
+          }
+        }
       }
 
       // 4) 扰动不变性（oracle-free，含未收敛场景）

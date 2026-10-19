@@ -324,9 +324,9 @@ async function main() {
     // 验收截图：仅在显式指定 MEBULAR_SCREENSHOT_DIR 时写盘（CI 不产生文件）。
     const shotDir = process.env.MEBULAR_SCREENSHOT_DIR ?? null;
     if (shotDir) await mkdir(shotDir, { recursive: true });
-    const capture = async (name) => {
+    const capture = async (name, viewport = { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }) => {
       if (!shotDir) return null;
-      await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+      await send('Emulation.setDeviceMetricsOverride', viewport);
       await sleep(250);
       const shot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 90 });
       await writeFile(join(shotDir, name), Buffer.from(shot.data, 'base64'));
@@ -348,6 +348,14 @@ async function main() {
         const labels = Array.from(document.querySelectorAll('#view-nav .view-label')).map((el) => el.textContent);
         return JSON.stringify(labels) === JSON.stringify(['星图', '共享', '记忆', '审计']);
       })()`));
+    check('E1 顶栏：无「连接已有地址」，仅保留「邀请设备」',
+      await evalJs(`(() => {
+        const actions = document.querySelector('.topbar-actions');
+        return !document.querySelector('#add-device')
+          && Boolean(document.querySelector('#invite-device'))
+          && !/连接已有地址/.test(actions?.textContent ?? '');
+      })()`));
+    await capture('e1-after-topbar-live.jpg');
 
     // 选项卡切换（曾因误删 setView 失效）
     await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
@@ -567,26 +575,66 @@ async function main() {
       JSON.stringify(repoll?.beforePosition));
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
 
-    // 设置弹窗（IA：常用/高级/诊断 + 关于本机）
+    // 设置弹窗（E1 IA：常用/安全/AI 助手/MCP 接入/高级 + 关于本机）
     await evalJs('document.querySelector("#open-settings").click()');
-    check('设置弹窗打开（分区页签 + 常用配置编辑器）', await waitFor('document.querySelectorAll("#settings-body .settings-tab").length >= 3 && Boolean(document.querySelector("#settings-body .cfg-editor"))'));
+    check('E1 设置弹窗打开（5 页签：常用 / 安全 / AI 助手 / MCP 接入 / 高级）', await waitFor(`(() => {
+      const tabs = [...document.querySelectorAll('#settings-body .settings-tab:not(.settings-tab-extra)')].map((el) => el.textContent.trim());
+      return tabs.join(',') === '常用,安全,AI 助手,MCP 接入,高级' && document.querySelector('#settings')?.hidden === false;
+    })()`));
+    await evalJs('document.querySelector("[data-settings-tab=common]").click()');
+    check('E1 常用页：三卡迁出后保留只读状态 + 重启向导/邀请入口', await waitFor(`(() => {
+      const common = document.querySelector('#settings-panel-common');
+      return Boolean(common) && common.hidden === false
+        && !common.querySelector('.cfg-editor') && Boolean(common.querySelector('#settings-resident'))
+        && Boolean(common.querySelector('[data-settings-common-status]'))
+        && Boolean(common.querySelector('#settings-invite-device'))
+        && /高级/.test(common.textContent);
+    })()`));
+
+    // 高级页：只留「常驻服务」卡 + 网络/sync 字段 + 诊断；MCP 六项独立 tab
+    await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
+    check('E1 高级页：常驻服务卡就位，MCP 字段不再混入高级',
+      await waitFor(`(() => {
+        const p = document.querySelector('#settings-panel-advanced');
+        return Boolean(p) && Boolean(p.querySelector('[data-task=join-service]'))
+          && !p.querySelector('[data-task=mcp]') && !p.querySelector('[data-cfg-path="mcp.http.host"]')
+          && Boolean(p.querySelector('[data-cfg-path="network.enabled"]'))
+          && Boolean(p.querySelector('[data-cfg-path="sync.policyIssuers"]'));
+      })()`));
+    check('E1 诊断 · 连接排障：手动连接入口在诊断折叠内（文案=传输修复）',
+      await evalJs(`(() => {
+        const fold = document.querySelector('#diag-fold');
+        if (fold) fold.open = true;
+        const btn = document.querySelector('#diag-open-wizard');
+        return Boolean(btn) && /手动连接/.test(btn.textContent) && /不改变入网信任|不改动入网信任/.test(fold?.textContent ?? '');
+      })()`));
+    await evalJs('document.querySelector("[data-settings-tab=mcp]").click()');
+    check('E1 MCP 接入独立 tab：六字段 + danger 说明/自救文案',
+      await waitFor(`(() => {
+        const p = document.querySelector('#settings-panel-mcp');
+        const card = p?.querySelector('[data-task=mcp]');
+        const paths = ['mcp.http.port', 'mcp.http.auth', 'mcp.http.host', 'mcp.http.tls', 'mcp.http.tlsKey', 'mcp.http.tlsCert'];
+        return Boolean(card) && card.classList.contains('task-card-danger')
+          && paths.every((path) => Boolean(card.querySelector('[data-cfg-path="' + path + '"]')))
+          && /token grant|config\\.json/.test(card.textContent);
+      })()`));
 
     // 轮询重建回归（修复前：render() 每 3s 整体重建 #settings-body → 原生 <select> 弹层被销毁、选择丢失）
     const authSelector = '#settings-body select[data-cfg-path="mcp.http.auth"]';
-    check('设置内存在 auth 下拉', await waitFor(`Boolean(document.querySelector('${authSelector}'))`));
+    check('设置内存在 auth 下拉（MCP 接入 tab）', await waitFor(`Boolean(document.querySelector('${authSelector}'))`));
     await evalJs(`window.__settingsProbe = document.querySelector('#settings-body .settings-tabs'); window.__authProbe = document.querySelector('${authSelector}');`);
     await sleep(3600);
     check('跨 3s 轮询设置容器节点引用不变（DOM 未重建）', await evalJs('Boolean(window.__settingsProbe) && window.__settingsProbe === document.querySelector("#settings-body .settings-tabs")'));
     check('跨 3s 轮询 auth 下拉节点引用不变', await evalJs(`Boolean(window.__authProbe) && window.__authProbe === document.querySelector('${authSelector}')`));
 
-    // 简化轮 · 设置三分法：3 tab（诊断并入高级）；订阅域移出；反熵细节不出屏；无「保存」按钮
-    check('简化轮：设置 3 页签（常用/AI 助手/高级）且无诊断页签/保存按钮',
-      await evalJs('document.querySelectorAll("#settings-body .settings-tab:not(.settings-tab-extra)").length === 3 && !document.querySelector("#settings-panel-diagnostics") && !document.querySelector("[data-cfg-action=save]")'));
+    // E1 · 设置分层：5 tab；诊断并入高级；订阅域移出；反熵细节不出屏；无「保存」按钮
+    check('E1 设置 5 页签（常用/安全/AI 助手/MCP 接入/高级）且无诊断页签/保存按钮',
+      await evalJs('document.querySelectorAll("#settings-body .settings-tab:not(.settings-tab-extra)").length === 5 && !document.querySelector("#settings-panel-diagnostics") && !document.querySelector("[data-cfg-action=save]")'));
     check('简化轮：订阅域与反熵细节不出设置页（grep 断言面）',
       await evalJs(`(() => { const body = document.querySelector("#settings-body"); return !body.querySelector('[data-cfg-path="sync.namespaces"]') && !body.querySelector('[data-cfg-path="sync.antiEntropy.intervalMs"]') && !body.querySelector('[data-cfg-path="sync.antiEntropy.jitterRatio"]') && !body.querySelector('[data-cfg-path="sync.snapshotThreshold"]') && !body.querySelector('[data-cfg-path="semantic.minScore"]') && Boolean(body.querySelector('[data-cfg-path="sync.antiEntropy.enabled"]')); })()`));
     check('简化轮：诊断并入高级底部折叠（cfg-copy-all 就位）',
       await evalJs('(() => { document.querySelector("[data-settings-tab=advanced]")?.click(); const f = document.querySelector("#diag-fold"); return Boolean(f) && Boolean(f.querySelector("#cfg-copy-all")); })()'));
-    await evalJs('document.querySelector("[data-settings-tab=common]").click()');
+    await evalJs('document.querySelector("[data-settings-tab=mcp]").click()');
     // 轮 C 症状③：常显 = 名称 + 控件 + 生效中；异常才完整三元组；帮助/警告墙折叠
     check('轮 C 呈现分级：常态三元组收成「生效中」，异常自动出现完整三元组',
       await evalJs(`(() => {
@@ -600,24 +648,28 @@ async function main() {
       })()`));
     check('轮 C 呈现分级：帮助/风险说明收进「详情」，不再与控件平铺',
       await evalJs(`(() => {
-        const card = document.querySelector('#settings-body [data-task=agent]');
+        const card = document.querySelector('#settings-body [data-task=mcp]');
         const folded = card.querySelector('details.cfg-more .cfg-help');
         const direct = card.querySelector('.cfg-control > .cfg-help');
         return Boolean(folded) && !direct;
       })()`));
-    check('S3 安全卡渲染在设置·常用顶部（低/中/高 + 诚实文案 + 当前档）',
+    await evalJs('document.querySelector("[data-settings-tab=security]").click()');
+    check('E1 安全 tab：安全卡完整随迁（低/中/高 + 诚实文案 + 当前档）',
       await evalJs(`(() => {
+        const panel = document.querySelector('#settings-panel-security');
         const s = document.querySelector('#settings-security-slot');
-        if (!s || s.hidden) return false;
+        if (!panel || panel.hidden || !s || s.hidden) return false;
         const t = s.textContent;
         return s.dataset.settingsSlot === 'security' && s.childElementCount > 0
           && /安全等级/.test(t) && /低（默认）/.test(t) && /中 · 动态码（防顺手）/.test(t) && /高 · 设备会签/.test(t)
           && /挡不住拿走整台设备的人/.test(t) && /当前：低/.test(t);
       })()`));
+    await capture('e1-after-settings-security-tab.jpg');
 
-    // 即时生效：改低风险 toggle（joinService.enabled）→ 无草稿态、3s 跨轮询值持久（已写入）
+    // 即时生效：改低风险 toggle（joinService.enabled；高级 · 常驻服务卡）→ 无草稿态、3s 跨轮询值持久（已写入）
+    await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
     const toggleSel = '#settings-body input[data-cfg-path="joinService.enabled"]';
-    check('即时生效：joinService 开关在常用页', await waitFor(`Boolean(document.querySelector('${toggleSel}'))`));
+    check('即时生效：joinService 开关在高级 · 常驻服务卡', await waitFor(`Boolean(document.querySelector('${toggleSel}'))`));
     const tgOriginal = await evalJs(`document.querySelector('${toggleSel}').checked`);
     await evalJs(`(() => { const el = document.querySelector('${toggleSel}'); el.checked = !el.checked; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     await sleep(1200);
@@ -696,9 +748,27 @@ async function main() {
     check('别名重定向：?view=connect → 设置 · AI 助手自动打开',
       await waitFor('document.querySelector("#settings")?.hidden === false && document.querySelector("#settings-panel-assistants")?.hidden === false'));
     await evalJs('document.querySelector("#settings-close").click()');
-    // 邀请面板（joinService 未启用 → 引导文案；启用 → 令牌。两者都应有内容）
+    // 邀请面板（joinService 未启用 → 就地启用；启用 → 令牌。两者都应有内容）
     await evalJs('document.querySelector("#invite-device").click()');
-    check('邀请面板打开且渲染内容', await waitFor('(() => { const el = document.querySelector("#invite-body"); return Boolean(el) && el.textContent.trim().length > 0; })()'));
+    check('邀请面板打开且渲染内容（令牌或未启用提示）', await waitFor('(() => { const b = document.querySelector("#invite-body"); return Boolean(b?.querySelector("[data-copy]")) || /加入服务未启用/.test(b?.textContent ?? ""); })()'));
+    check('E1 邀请单屏：首屏令牌 + 二维码/降级 + 复制；机制收「详情」', await evalJs(`(() => {
+      const body = document.querySelector('#invite-body');
+      if (!body) return false;
+      const details = body.querySelector('details');
+      if (!details) return false;
+      const blocks = [...body.children];
+      const detailsIndex = blocks.indexOf(details);
+      const before = blocks.slice(0, detailsIndex).map((el) => el.textContent + (el.querySelector?.('img') ? ' QR' : '')).join('\\n');
+      const tokenBlock = blocks.slice(0, detailsIndex).some((el) => /令牌/.test(el.textContent) && el.querySelector('[data-copy]'));
+      const qr = before.includes('QR') || /二维码不可用/.test(before);
+      return tokenBlock && qr && /join 端点/.test(details.textContent) && Boolean(details.querySelector('#invite-endpoint'));
+    })()`));
+    check('E1 邀请面板无「去设置启用」旧指路（未启用时就地一键启用）',
+      await evalJs(`(() => {
+        const html = document.querySelector('#invite')?.outerHTML ?? '';
+        return !/去设置启用/.test(html) && !/设置 → 常用/.test(html);
+      })()`));
+    await capture('e1-after-invite-single-screen.jpg');
     check('轮 C 邀请卡：帮助去重（兑换语义只讲一次）',
       await evalJs('(() => { const t = document.querySelector("#invite-body")?.textContent ?? ""; const hits = (t.match(/兑换/g) ?? []).length; return hits <= 2 && !/兑换后自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）\\s*让新设备/.test(t); })()'));
     await evalJs('document.querySelector("#invite-close").click()');
@@ -708,9 +778,9 @@ async function main() {
     const SEC_TOTP_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
     check('S3 活体：顶栏只读徽章显示「🛡 安全：低」',
       await waitFor('(() => { const b = document.querySelector("#security-badge"); return Boolean(b) && /🛡 安全：低/.test(b.textContent); })()'));
-    // 低档：屏蔽仍是「更多操作」折叠内的次级动作
+    // 低档：移出仍是「更多操作」折叠内的次级动作
     await send('Page.navigate', { url: `${base}/console/?select=device-C` });
-    check('S3 低档踢人布局：屏蔽该设备留在「更多操作」折叠内（防误触）',
+    check('S3 低档移出布局：移出留在「更多操作」折叠内（防误触）',
       await waitFor(`(() => {
         const b = document.querySelector('#device-card-body');
         if (!b || b.hidden) return false;
@@ -719,10 +789,17 @@ async function main() {
         const main = b.querySelector(':scope > .card-actions');
         return Boolean(adv) && Boolean(btn) && adv.contains(btn) && !(main?.contains(btn));
       })()`));
+    check('E1 设备卡「连不上」语境：手动连接入口可见（传输修复）',
+      await evalJs(`(() => {
+        const b = document.querySelector('#device-card-body');
+        const manual = b?.querySelector('[data-action=manual-connect]');
+        return Boolean(manual) && /连不上|手动连接/.test(manual.textContent);
+      })()`));
     await send('Page.navigate', { url: `${base}/console/` });
     await waitFor('document.querySelector("#memory-badge") && !/…/.test(document.querySelector("#memory-badge").textContent)');
     await evalJs('document.querySelector("#open-settings").click()');
     await waitFor('document.querySelector("#settings")?.hidden === false');
+    await evalJs('document.querySelector("[data-settings-tab=security]").click()');
 
     // 批准侧：种子请求（他机发起）→ 配对号核对 → 批准/拒绝写入
     check('S3 批准侧：安全卡顶部待批准入口 + 配对号 aria-live',
@@ -763,7 +840,7 @@ async function main() {
     check('S3 导入成功：安全卡显示已导入 + fingerprint；注意项退场',
       await waitFor(`(() => { const s = document.querySelector('#settings-security-slot'); return Boolean(s) && /已导入/.test(s.textContent) && s.textContent.includes(${JSON.stringify(totpFingerprint(SEC_TOTP_SECRET))}) && !document.querySelector('#attention-card')?.textContent.includes('动态码种子未导入'); })()`, 20000));
 
-    // 中档邀请要码 → 中档踢人提级
+    // 中档邀请要码 → 中档移出提级
     await evalJs('document.querySelector("#invite-device").click()');
     check('S3 中档邀请改道：先输入 6 位动态码（不直接签发令牌）',
       await waitFor('Boolean(document.querySelector("#security-code")) && document.querySelector("#invite")?.hidden === true'));
@@ -774,7 +851,7 @@ async function main() {
     await evalJs('document.querySelector("#invite-close").click()');
     await evalJs('document.querySelector("#settings-close").click()');
     await send('Page.navigate', { url: `${base}/console/?select=device-C` });
-    check('S3 中档踢人布局：屏蔽提级为一等动作（btn-crt-danger，与同步同排）',
+    check('S3 中档移出布局：移出提级为一等动作（btn-crt-danger，与同步同排）',
       await waitFor(`(() => {
         const b = document.querySelector('#device-card-body');
         if (!b || b.hidden) return false;
@@ -788,6 +865,7 @@ async function main() {
     await send('Page.navigate', { url: `${base}/console/` });
     await waitFor('document.querySelector("#security-badge") && /🛡 安全：中/.test(document.querySelector("#security-badge").textContent) && !/…/.test(document.querySelector("#memory-badge")?.textContent ?? "…")', 20000);
     await evalJs('document.querySelector("#open-settings").click()');
+    await evalJs('document.querySelector("[data-settings-tab=security]").click()');
     check('S3 中档凭条：设置打开且安全卡就位（降级入口在卡尾折叠）',
       await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]"))', 20000));
     await evalJs('(() => { const d = document.querySelector("#settings-security-slot .sec-more"); if (d) d.open = true; })()');
@@ -822,15 +900,15 @@ async function main() {
       })()`));
     await evalJs('document.querySelector("#security-action-close").click()');
 
-    // S4：高档踢人「用恢复码执行」路径（原确认 + 会签等待保留；码一次性、不回显）
+    // S4：高档移出「用恢复码执行」路径（原确认 + 会签等待保留；码一次性、不回显）
     await send('Page.navigate', { url: `${base}/console/?select=device-C` });
-    check('S4 高档踢人前置：设备卡屏蔽入口就位',
+    check('S4 高档移出前置：设备卡移出入口就位',
       await waitFor('(() => { const b = document.querySelector("#device-card-body"); return Boolean(b) && !b.hidden && Boolean(b.querySelector("[data-action=revoke-device]")); })()'));
     await evalJs('document.querySelector("#device-card-body [data-action=revoke-device]").click()');
-    check('S4 高档踢人：先保留原确认与警告',
+    check('S4 高档移出：先保留原确认与警告',
       await waitFor('document.querySelector("#modal")?.hidden === false && /高 · 设备会签/.test(document.querySelector("#modal")?.textContent ?? "")'));
     await evalJs('document.querySelector("#modal-confirm").click()');
-    check('S4 高档踢人：会签等待弹层提供「用恢复码执行」入口',
+    check('S4 高档移出：会签等待弹层提供「用恢复码执行」入口',
       await waitFor('document.querySelector("#security-action")?.hidden === false && Boolean(document.querySelector("[data-security-recovery-switch]")) && /等待另一台设备批准/.test(document.querySelector("#security-action")?.textContent ?? "")'));
     await evalJs('document.querySelector("[data-security-recovery-switch]").click()');
     check('S4 恢复码弹层：密码型输入 + 不回显/不落浏览器存储提示',
@@ -847,17 +925,18 @@ async function main() {
     check('S4 错码后输入框已清空（不回显、不保留）',
       (await evalJs('document.querySelector("#security-recovery-code")?.value ?? ""')) === '');
     await evalJs(`(() => { document.querySelector('#security-recovery-code').value = ${JSON.stringify(onceText)}; document.querySelector('#security-action-confirm').click(); })()`);
-    check('S4 正确恢复码 → 屏蔽写入并关闭弹层（toast 标注恢复码）',
+    check('S4 正确恢复码 → 移出写入并关闭弹层（toast 标注恢复码）',
       await waitFor('document.querySelector("#security-action")?.hidden === true && /恢复码/.test(document.querySelector("#banner")?.textContent ?? "")', 20000));
     const kickAudit = await evalJs(`(async () => {
       const rows = await fetch('/admin/api/policy').then((r) => r.json());
       const row = (rows ?? []).find((e) => e.type === 'device_revoke' && e.subject === 'device-C');
       return { has: Boolean(row), keyId: row?.breakGlassKeyId ?? null };
     })()`);
-    check('S4 踢人审计行标注恢复码（breakGlassKeyId）', kickAudit.has === true && typeof kickAudit.keyId === 'string');
+    check('S4 移出审计行标注恢复码（breakGlassKeyId）', kickAudit.has === true && typeof kickAudit.keyId === 'string');
 
     // S4：高档降档「用恢复码执行」路径
     await evalJs('document.querySelector("#open-settings").click()');
+    await evalJs('document.querySelector("[data-settings-tab=security]").click()');
     check('S4 高档降档前置：安全卡为高档 + 降级入口就位',
       await waitFor('document.querySelector("#settings")?.hidden === false && document.querySelector("#settings-security-slot")?.dataset.securityLevel === "high" && Boolean(document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]"))', 20000));
     await evalJs('(() => { const d = document.querySelector("#settings-security-slot .sec-more"); if (d) d.open = true; })()');
@@ -940,7 +1019,7 @@ async function main() {
         return Boolean(toggle) && /自动签发 ×3/.test(toggle.textContent)
           && view.querySelectorAll('.audit-auto-rows').length === 0
           && manual.length >= 2
-          && /屏蔽设备/.test(view.textContent);
+          && /移出/.test(view.textContent);
       })()`));
     await evalJs('document.querySelector("#audit-view .audit-auto-toggle").click()');
     check('§7 mock 审计：展开见明细（3 行，行内「自动」标记）',
@@ -960,6 +1039,7 @@ async function main() {
           && /待批准 1 项/.test(t) && /1 条安全操作被拒绝/.test(t);
       })()`));
     await evalJs('document.querySelector("#open-settings").click()');
+    await evalJs('document.querySelector("[data-settings-tab=security]").click()');
     check('S3 mock：高档安全卡 = 当前高 + 恢复码 keyId 前 8 + 有资格设备',
       await waitFor(`(() => {
         const s = document.querySelector('#settings-security-slot');
@@ -967,6 +1047,7 @@ async function main() {
         return s?.dataset.securityLevel === 'high' && /当前：高/.test(t)
           && /恢复码/.test(t) && /a1b2c3d4/.test(t) && /有资格的设备/.test(t);
       })()`));
+    await capture('e1-after-settings-security-mock.jpg');
     check('S3 mock：待批准行（配对号 aria-live + 批准/拒绝 + 到期提示）',
       await waitFor(`(() => {
         const s = document.querySelector('#settings-security-slot');
@@ -994,14 +1075,18 @@ async function main() {
     // S3 窄屏：安全卡弹层无横向溢出（配对号/恢复码/按钮换行）
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await evalJs('document.querySelector("#open-settings").click()');
-    check('S3 窄屏：安全卡不横向溢出（390px）',
+    await evalJs('document.querySelector("[data-settings-tab=security]").click()');
+    check('S3/E1 窄屏：安全卡与 5 页签不横向溢出（390px）',
       await waitFor(`(() => {
         const box = document.querySelector('#settings .modal-box');
         const card = document.querySelector('#settings-security-slot');
-        if (!box || !card) return false;
+        const tabs = document.querySelector('#settings-body .settings-tabs');
+        if (!box || !card || !tabs) return false;
         return box.scrollWidth <= box.clientWidth + 1 && card.scrollWidth <= card.clientWidth + 1
+          && tabs.scrollWidth <= tabs.clientWidth + 1
           && document.documentElement.scrollWidth <= window.innerWidth + 1;
       })()`));
+    await capture('e1-after-settings-security-narrow-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await evalJs('document.querySelector("#settings-close").click()');
     await send('Emulation.clearDeviceMetricsOverride');
 

@@ -11,7 +11,7 @@
 # 实例 A
 export A=/tmp/mebular-a
 node packages/mcp/bin/mebular.mjs init --storage $A/store.jsonl   # 生成 key/config
-# 让 A 监听真实网络（在 $A/config.json 中设置）：
+# 让 A 监听真实地址（在 $A/config.json 中设置）：
 #   network.enabled: true
 #   network.libp2p.listen: ["/ip4/127.0.0.1/tcp/14001/ws", "/ip4/127.0.0.1/tcp/14001"]
 #   sync.policyIssuers: ["device-A"]        # 引导签发者（两端一致）
@@ -35,16 +35,13 @@ node packages/mcp/bin/mebular.mjs console --port 7332
 
 浏览器打开 A 的控制台：`http://127.0.0.1:7331/console/`。
 
-## 1. 用向导连接并授权（D3）
+## 1. 手动连接（传输修复，E1 入口）
 
-1. 在 A 点「＋ 连接新对端」：
-   - 第 ① 步复制 A 的 multiaddr（形如 `/ip4/127.0.0.1/tcp/14001/p2p/<peerId>`）。
-   - 在 B 的控制台同样打开向导，复制 B 的 multiaddr 与 deviceId。
-2. 回到 A，填入 B 的 deviceId 与 multiaddr → 「连接」。
+1. 在 A 打开「设置 → 高级 → 诊断与恢复」→「手动连接已知设备…」：
+   - 第 ① 步粘贴 B 的 deviceId 与 multiaddr（B 侧同页可复制自己的连接信息）。
    - 成功：第 ② 步显示「已连接并完成认证」。
    - 失败：按提示检查对面 serve、multiaddr 是否含 `/p2p/`、端口可达性，修正后「重试」。
-3. 第 ③ 步勾选要共享给 B 的域（默认全不选；界面显示将共享的记忆条数）→「签发授权」。
-4. 第 ④ 步显示 grantId，可复制留档。
+2. v4 起连接向导不再签发授权：授权随订阅参与自动签发（旧控制台的域开关路径已退役）。
 
 ## 2. 验证双向同步
 
@@ -53,13 +50,13 @@ node packages/mcp/bin/mebular.mjs console --port 7332
   且域视图里该域记忆数增加。
 - 反向在 B 写入，A 侧同样可见（B 需对 A 授权；在 B 的控制台用向导/域开关完成）。
 
-## 3. 撤销授权与屏蔽设备（二次确认）
+## 3. 撤销授权与移出（二次确认）
 
 - 在 A 的设备卡关闭某域开关：弹窗文案应为
   「B 不会再收到关于『该域』的新记忆；已同步内容不会撤回；可用新授权恢复。」
   确认后，A 再写入的新记忆不再抵达 B（已同步内容仍在 B）。
-- 在 A 点「屏蔽该设备」：弹窗文案应为
-  「B 无法再接收你的任何分区，其签发的政策记录不再被采纳；已同步数据不回撤；
+- 在 A 点「移出设备」：弹窗文案应为
+  「B 无法再接收你的任何分区，其签发的政策记录不再被采纳；已同步的数据不回收；
   可重新授权恢复。」确认后 B 读侧为空；再对 B 签发新 grant 即恢复。
 
 ## 4. 审计时间线导出

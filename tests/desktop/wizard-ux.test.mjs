@@ -75,7 +75,7 @@ describe('W-1/UX-2 ② 完成态：通关 CTA + 两段折叠为回顾', () => {
   it('静态契约：wizard.html 含 #complete-cta 主按钮挂载点（默认隐藏）+ 邀请提示一句', () => {
     expect(wizardHtml).toMatch(/id="complete-cta"[^>]*hidden|hidden[^>]*id="complete-cta"/);
     expect(wizardHtml).toMatch(/id="btn-enter-console"/);
-    expect(wizardHtml).toMatch(/＋ 邀请新设备/);
+    expect(wizardHtml).toMatch(/＋ 邀请设备/);
   });
 });
 
@@ -453,7 +453,7 @@ describe('设计稿 ④ 段② 文案与空态（以设计稿为准）', () => {
     expect(wizardHtml).not.toContain('id="assist-note"');
   });
 
-  it('「或加入已有的 Mebular ›」：仅引导态显示、显式点击 openConsole', () => {
+  it('「或加入已有忆云 ›」：仅引导态显示、显式点击 openConsole', () => {
     const provision = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned: false }));
     expect(provision.steps.find((s) => s.id === 'start').actions.join.hidden).toBe(false);
     const normal = wizardView(computeWizardState({ daemonHealthy: true }));
@@ -468,7 +468,7 @@ describe('设计稿 ⑤ 完成时刻与已设置过·直达 + 星野省电纪律
     expect(panel).toContain('id="deploy-flow"');
     expect(panel).toMatch(/class="done-card" id="complete-cta"/);
     expect(wizardHtml).toContain('已就绪 ✦');
-    expect(wizardHtml).toContain('＋ 邀请新设备');
+    expect(wizardHtml).toContain('＋ 邀请设备');
     expect(wizardHtml).not.toContain('.finish');
     expect(wizardJs).toMatch(/提醒：重启 \$\{pending/);
   });

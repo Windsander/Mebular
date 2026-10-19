@@ -66,10 +66,11 @@ describe('UX-2 定稿：中央空态遮罩下线（只有本机时不遮挡星�
     // 顶栏操作组几何统一（用户实拍：三个按钮大小不一致感）——固定高 + flex 居中 + 图标槽
     expect(consoleCss).toMatch(/\.topbar-actions \.btn \{[^}]*inline-flex[^}]*height: 34px/);
     expect(consoleCss).toMatch(/\.topbar-actions \.btn \.btn-ico \{[^}]*width: 15px/);
-    // 引导入口（顶栏）仍在（图标槽 span + 文案）
+    // 引导入口（顶栏）仍在（图标槽 span + 文案）；E1：连接已有地址已撤下
     expect(indexHtml).toContain('btn-ico');
-    expect(indexHtml).toContain('连接已有地址');
-    expect(indexHtml).toContain('邀请新设备');
+    expect(indexHtml).not.toContain('连接已有地址');
+    expect(indexHtml).toContain('邀请设备');
+    expect(indexHtml).toContain('诊断与恢复');
   });
 });
 
@@ -180,7 +181,8 @@ describe('UX-2 邀请单动作页', () => {
   it('主结果 = QR + 令牌复制；次级（端点编辑/多余命令/警告）收「详情」折叠', () => {
     // S3：结果面板从 renderInvite 抽成 showInviteResult（low 直接出；medium/high 门槛通过后复用）
     expect(consoleJs).toMatch(/function showInviteResult\(res\)/);
-    expect(consoleJs).toContain('让新设备扫码或粘贴令牌加入');
+    expect(consoleJs).toContain('令牌即入网权限');
+    expect(consoleJs).toContain('扫码即通');
     expect(consoleJs).toContain('<details class="asst-detail"><summary>详情</summary>');
     expect(consoleJs).toContain('invite-endpoint');
   });
@@ -190,9 +192,10 @@ describe('UX-2 邀请单动作页', () => {
     expect(consoleJs).toMatch(/invite-regen-inline[\s\S]{0,260}confirm\(/);
   });
 
-  it('joinService 未启用 → 一行式 + 「去设置启用」', () => {
+  it('joinService 未启用 → 弹层内一键启用（复用设置写路径，不再指路常用）', () => {
     expect(consoleJs).toContain('join_disabled');
-    expect(consoleJs).toContain('invite-to-settings');
+    expect(consoleJs).toContain('invite-enable-service');
+    expect(consoleJs).not.toContain('invite-to-settings');
   });
 });
 
@@ -444,7 +447,7 @@ describe('简化轮 · 术语净化（内部机制不上屏）', () => {
 
   it('设置页不出订阅域/反熵细节（settings-ia 单一真源）；诊断并入高级', async () => {
     const ia = await import('../../packages/console/settings-ia.js');
-    expect(ia.IA_TABS.map((t) => t.id)).toEqual(['common', 'assistants', 'advanced']);
+    expect(ia.IA_TABS.map((t) => t.id)).toEqual(['common', 'security', 'assistants', 'mcp', 'advanced']);
     expect(ia.IA_MIGRATION['sync.namespaces']).toBe('domains');
     expect(ia.IA_EDITOR_RENDER_PATHS).not.toContain('sync.namespaces');
     for (const hidden of ['sync.antiEntropy.intervalMs', 'sync.antiEntropy.jitterRatio', 'sync.snapshotThreshold', 'semantic.minScore']) {

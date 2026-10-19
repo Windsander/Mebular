@@ -8,8 +8,8 @@
 
 import { StarStage, namespaceColor, shortId } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
-import { createWizardState, wizardReduce, selectedMemoryCount, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_TASK_CARDS, IA_ADVANCED_FIELDS, IA_MIGRATION, IA_EDITOR_PATHS, IA_INFO_BLOCKS, IA_SETTINGS_EXTRA } from './settings-ia.js';
+import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
+import { IA_TABS, IA_ADVANCED_CARDS, IA_MCP_CARD, IA_ADVANCED_FIELDS, IA_MIGRATION, IA_EDITOR_PATHS, IA_INFO_BLOCKS, IA_SETTINGS_EXTRA } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 
@@ -958,8 +958,8 @@ function renderEditor(paths) {
   return `<div class="cfg-editor">${paths.map((path) => renderCfgField(fieldOf(path))).join('')}</div>`;
 }
 
-function renderTaskCards() {
-  return IA_TASK_CARDS.map((card) => `
+function renderCard(card) {
+  return `
     <article class="task-card${card.danger ? ' task-card-danger' : ''}" data-task="${escapeHtml(card.id)}">
       <header class="task-card-head">
         <h4>${escapeHtml(card.title)}</h4>
@@ -967,14 +967,23 @@ function renderTaskCards() {
       </header>
       <details class="task-card-more"><summary>这是什么</summary><p class="muted">${escapeHtml(card.desc)}</p></details>
       ${renderEditor(card.fields)}
-    </article>`).join('');
+    </article>`;
+}
+
+function renderAdvancedCards() {
+  return IA_ADVANCED_CARDS.map(renderCard).join('');
+}
+
+function renderMcpCard() {
+  return renderCard(IA_MCP_CARD);
 }
 
 function renderAdvanced() {
   const groups = [];
   for (const path of IA_ADVANCED_FIELDS) {
     const field = fieldOf(path);
-    if (field.group) groups.push({ name: field.group, fields: [] });
+    const groupName = path.startsWith('network.') ? '忆云连接' : field.group;
+    if (groupName && groups[groups.length - 1]?.name !== groupName) groups.push({ name: groupName, fields: [] });
     if (groups.length === 0) groups.push({ name: '高级', fields: [] });
     groups[groups.length - 1].fields.push(field.path);
   }
@@ -1041,10 +1050,23 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     ? new Set([...body.querySelectorAll('details[open]')].map(settingsFoldKey).filter(Boolean))
     : new Set();
   const s = state.settings;
+  const tabButton = (tab) => `<button id="settings-tab-${tab.id}" class="settings-tab${tab.id === activeTab ? ' is-active' : ''}"`
+    + ` data-settings-tab="${tab.id}" type="button" role="tab" aria-selected="${tab.id === activeTab}" aria-controls="settings-panel-${tab.id}">${escapeHtml(tab.label)}</button>`;
+  const panel = (id, inner) => `<section id="settings-panel-${id}" class="settings-panel" data-settings-panel="${id}" role="tabpanel"`
+    + ` aria-labelledby="settings-tab-${id}"${id === activeTab ? '' : ' hidden'}>${inner}</section>`;
   if (!s) {
-    // ?mock=1 无 settings 载荷：仍渲染安全卡（无网络验收路径；其余设置保持加载态）
+    // ?mock=1 无 settings 载荷：仍渲染五页签与安全卡（无网络验收路径；其余设置保持加载态）
     if (MOCK && state.security) {
-      body.innerHTML = `<section id="settings-security-slot" class="settings-slot security-card" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`;
+      body.innerHTML = `
+        <div class="settings-tabs" role="tablist" aria-label="设置页签">${IA_TABS.map(tabButton).join('')}${
+          IA_SETTINGS_EXTRA.map((item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.label)}</button>`).join('')
+        }</div>
+        ${panel('common', '<section class="settings-section" data-settings-common-status><h3>本机状态 <span class="badge badge-muted">只读</span></h3><p class="muted">?mock=1 仅提供安全卡与只读演示；可编辑设置需连接真实守护。</p></section>')}
+        ${panel('security', `<section id="settings-security-slot" class="settings-slot security-card" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
+        ${panel('assistants', '<p class="muted">?mock=1 不提供 AI 助手演示数据。</p>')}
+        ${panel('mcp', '<p class="muted">?mock=1 不提供可编辑配置。</p>')}
+        ${panel('advanced', '<p class="muted">?mock=1 不提供可编辑配置。</p>')}
+      `;
       bindSecurityCard(body);
       return;
     }
@@ -1052,12 +1074,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     return;
   }
   rebuildConfigFields();
-  const self = s.identity.deviceId;
-  const isIssuer = Array.isArray(s.policyIssuers) && s.policyIssuers.includes(self);
-  const tabButton = (tab) => `<button id="settings-tab-${tab.id}" class="settings-tab${tab.id === activeTab ? ' is-active' : ''}"`
-    + ` data-settings-tab="${tab.id}" type="button" role="tab" aria-selected="${tab.id === activeTab}" aria-controls="settings-panel-${tab.id}">${escapeHtml(tab.label)}</button>`;
-  const panel = (id, inner) => `<section id="settings-panel-${id}" class="settings-panel" data-settings-panel="${id}" role="tabpanel"`
-    + ` aria-labelledby="settings-tab-${id}"${id === activeTab ? '' : ' hidden'}>${inner}</section>`;
+  const securityLevel = state.security?.level ?? null;
 
   body.innerHTML = `
     ${pendingRestartBanner()}
@@ -1068,16 +1085,29 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     ${panel('common', `
       <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
       ${wizardRowHtml(typeof window.mebularDesktop?.openWizard === 'function')}
-      <section id="settings-security-slot" class="settings-slot security-card" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>
-      <div class="task-cards">${renderTaskCards()}</div>
+      <section class="settings-section" data-settings-common-status>
+        <h3>本机状态 <span class="badge badge-muted">只读</span></h3>
+        ${kvRows([
+          kvRow('P2P', s.network.enabled ? '已启用' : '未启用'),
+          kvRow('邀请服务', s.join?.enabled ? '已启用' : '未启用（点「邀请设备」可就地启用）'),
+          kvRow('安全等级', securityLevel ? securityLevelLabel(securityLevel) : '—'),
+        ])}
+        <div class="domain-actions"><button id="settings-invite-device" class="btn btn-small btn-crt" type="button" ${state.features.writes && !MOCK ? '' : 'disabled'}>＋ 邀请设备</button></div>
+        <p class="muted" style="font-size:11px">可编辑配置已归入「高级」与「MCP 接入」；安全等级、动态码与恢复码在「安全」。</p>
+      </section>
       ${cfgActionsBlock()}
     `)}
+    ${panel('security', `<section id="settings-security-slot" class="settings-slot security-card" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
     ${panel('assistants', `<div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: { ...state, addForm: state.addForm ? assistantAddFormHtml(state.addForm) : '' } })}</div>`)}
+    ${panel('mcp', `
+      <details class="page-more"><summary>MCP 接入说明</summary><p class="muted">Agent 经 MCP 连接本机；端口/鉴权/监听/TLS 改动会立即影响控制台自身访问方式，保存前会做组合校验与自锁确认。</p></details>
+      <div class="task-cards">${renderMcpCard()}</div>
+      ${cfgActionsBlock()}
+    `)}
     ${panel('advanced', `
-      <details class="page-more"><summary>高级项说明</summary><p class="muted">高级项改动前请确认理解其安全含义（尤其监听地址、TLS 与 relay）。自动策略（反熵节奏/快照阈值/召回阈值）不在此处暴露，细节请直接编辑 config.json。</p></details>
+      <details class="page-more"><summary>高级项说明</summary><p class="muted">高级项改动前请确认理解其安全含义（尤其监听地址与 relay）；MCP 端口/鉴权/TLS 在「MCP 接入」。自动策略（反熵节奏/快照阈值/召回阈值）不在此处暴露，细节请直接编辑 config.json。</p></details>
+      <div class="task-cards">${renderAdvancedCards()}</div>
       ${renderAdvanced()}
-      <div class="domain-actions"><button id="declare-issuer" class="btn btn-small btn-crt" type="button" ${state.features.writes && !isIssuer && !MOCK ? '' : 'disabled'}>声明本机为引导签发者</button></div>
-      <p class="muted" style="font-size:11px">图上声明（签名事件，随 __policy__ 同步；受 device_revoke 排斥）。</p>
       ${cfgActionsBlock()}
       <!-- 简化轮：诊断并入高级底部只读折叠 -->
       <details class="diag-fold" id="diag-fold">
@@ -1096,8 +1126,6 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   body.querySelectorAll('[data-copy]').forEach((button) => {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
   });
-  const declare = $('#declare-issuer');
-  if (declare) declare.addEventListener('click', declareIssuer);
   bindSecurityCard(body);
   bindConfigEditor();
   if (prevPath) {
@@ -1123,14 +1151,14 @@ const SECURITY_LEVEL_TITLE = {
 };
 const SECURITY_LEVEL_NOTE = {
   low: '无额外门槛（信任链仍在）。',
-  medium: '做加入/添加/踢出这类敏感动作前，需要输入 6 位动态码。它能挡住拿错你鼠标的手和一时手滑，挡不住拿走整台设备的人（钥匙就在设备里）。要防设备被拿走，请升级到『高 · 设备会签』。',
+  medium: '做加入/添加/移出这类敏感动作前，需要输入 6 位动态码。它能挡住拿错你鼠标的手和一时手滑，挡不住拿走整台设备的人（钥匙就在设备里）。要防设备被拿走，请升级到『高 · 设备会签』。',
   high: '敏感动作需要另一台已受准入的设备批准（人眼核对配对号）；防设备被窃伪造。',
 };
 const SECURITY_REJECTION_LABEL = {
   'missing-proof': '缺少会签证明',
   'invalid-proof': '证明无效',
   'approval-missing-or-not-causal': '批准不存在或晚于动作',
-  'approval-approver-revoked-at-its-order': '批准人当时已被屏蔽',
+  'approval-approver-revoked-at-its-order': '批准人当时已被移出',
   'approver-not-admitted-at-approval': '批准设备当时尚未准入',
   'approver-equals-author': '批准人 = 发起人',
   'approver-equals-subject': '批准人 = 被操作设备',
@@ -1150,8 +1178,8 @@ function securityReasonLabel(reason) {
 }
 
 function securityOpText(record) {
-  if (record?.op === 'kick') return `屏蔽设备 ${record.target ?? '—'}`;
-  if (record?.op === 'join') return `加入网络${record.namespace ? `（${record.namespace}）` : ''}`;
+  if (record?.op === 'kick') return `移出设备 ${record.target ?? '—'}`;
+  if (record?.op === 'join') return `加入忆云${record.namespace ? `（${record.namespace}）` : ''}`;
   if (record?.op === 'tier') return `安全等级 → ${securityLevelLabel(record.level)}`;
   return record?.op ?? '—';
 }
@@ -1438,8 +1466,8 @@ async function securityStartLevelChange(targetLevel) {
       const ok = await confirmModal({
         title: `升级到${targetLabel}`,
         body: targetLevel === 'high'
-          ? '将启用「高 · 设备会签」：之后加入/添加/踢出与降级都需要另一台已准入设备批准。本机会强制生成一张离线恢复码（只显示一次，须抄写回执）。'
-          : '将启用「中 · 动态码」：之后加入/添加/踢出与降级需要本机 6 位动态码。它挡顺手/误操作，挡不住拿走整台设备的人。',
+          ? '将启用「高 · 设备会签」：之后加入/添加/移出与降级都需要另一台已准入设备批准。本机会强制生成一张离线恢复码（只显示一次，须抄写回执）。'
+          : '将启用「中 · 动态码」：之后加入/添加/移出与降级需要本机 6 位动态码。它挡顺手/误操作，挡不住拿走整台设备的人。',
         confirmLabel: `升级到${targetLabel}`,
       });
       if (!ok) return;
@@ -1493,7 +1521,7 @@ async function securityStartApproval({ title, op, target, level, intro, onApprov
     hideClose: false,
     body: `<p class="muted">${escapeHtml(intro ?? '')}</p>
       <div class="sec-pairing sec-pairing-lg" data-security-pairing aria-live="polite">${escapeHtml(request.pairingCode ?? '—')}</div>
-      <p class="cfg-help muted">在另一台已准入设备上打开「设置 → 常用 → 安全等级」，核对同一配对号后点「配对号一致，批准」。</p>
+      <p class="cfg-help muted">在另一台已准入设备上打开「设置 → 安全 → 安全等级」，核对同一配对号后点「配对号一致，批准」。</p>
       ${kvRows([
         kvRow('动作', escapeHtml(securityOpText(request))),
         kvRow('发起设备', `<code>${escapeHtml(self ?? '—')}</code>`),
@@ -1501,7 +1529,7 @@ async function securityStartApproval({ title, op, target, level, intro, onApprov
         kvRow('有资格的设备', admitted.length ? escapeHtml(admitted.join(' · ')) : '<span class="muted">（尚未取得 admitted 列表）</span>'),
       ])}
       <p class="sec-wait" id="security-wait-status" aria-live="polite"><span class="sec-wait-dot" aria-hidden="true"></span>等待另一台设备批准…</p>
-      <p class="cfg-help muted">配对号不通过任何网络传输：两台设备各自从动作摘要算出，人眼比对即可。</p>
+      <p class="cfg-help muted">配对号不经过任何通道传输：两台设备各自从动作摘要算出，人眼比对即可。</p>
       ${typeof recovery === 'function'
         ? `<div class="domain-actions"><button class="btn btn-small btn-crt" type="button" data-security-recovery-switch>另一台设备不在？用恢复码执行</button></div>
            <p class="cfg-help muted">切到恢复码后，这次会签请求会留待过期；恢复码只在本次本机签名时使用。</p>`
@@ -1598,7 +1626,7 @@ async function securityDeny(approvalId) {
 function securityTotpImport() {
   securityModalConfig({
     title: '导入动态码种子',
-    body: `<p class="muted">从持有种子的另一台设备「显示种子」处，粘贴分组文本或 <code>otpauth://</code> URI。种子绝不走网络。</p>
+    body: `<p class="muted">从持有种子的另一台设备「显示种子」处，粘贴分组文本或 <code>otpauth://</code> URI。种子绝不经过忆云。</p>
       <div class="field"><label for="security-totp-secret">种子（分组文本 / otpauth URI）</label>
       <textarea id="security-totp-secret" class="crt-input" rows="3" spellcheck="false" placeholder="ABCD EFGH IJKL … 或 otpauth://totp/…"></textarea></div>
       <div class="field"><label for="security-totp-fingerprint">期望 fingerprint（可选，8 hex）</label>
@@ -1775,8 +1803,8 @@ function securityRecoveryCodeModal({ title, intro, confirmLabel = '用恢复码�
 
 async function securityRevokeViaRecovery(device) {
   securityRecoveryCodeModal({
-    title: `屏蔽 ${device.deviceId} · 恢复码`,
-    intro: '当前为高 · 设备会签。用离线恢复码在本机签名后立即写入屏蔽记录；恢复码不经过网络。',
+    title: `移出设备 · 恢复码`,
+    intro: '当前为高 · 设备会签。用离线恢复码在本机签名后立即写入移出记录；恢复码不经过忆云。',
     onSubmit: async (code) => {
       await api(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, {
         method: 'POST',
@@ -1784,7 +1812,7 @@ async function securityRevokeViaRecovery(device) {
       });
       closeSecurityAction();
       await refresh();
-      showToast('已在本地屏蔽该设备（恢复码）');
+      showToast('已在本地移出该设备（恢复码）');
     },
   });
 }
@@ -1793,7 +1821,7 @@ async function securityTierViaRecovery(targetLevel) {
   const targetLabel = securityLevelLabel(targetLevel);
   securityRecoveryCodeModal({
     title: `降级到${targetLabel} · 恢复码`,
-    intro: '当前为高 · 设备会签。用离线恢复码签署本次降档；恢复码不经过网络。',
+    intro: '当前为高 · 设备会签。用离线恢复码签署本次降档；恢复码不经过忆云。',
     onSubmit: async (code) => {
       await api('/admin/api/security/tier', { method: 'POST', body: { level: targetLevel, recoveryCode: code } });
       closeSecurityAction();
@@ -1803,24 +1831,24 @@ async function securityTierViaRecovery(targetLevel) {
   });
 }
 
-/** 踢人改道（SPEC §5.2）：low 直接确认；medium 要码；high 会签或恢复码。 */
+/** 移出改道（SPEC §5.2）：low 直接确认；medium 要码；high 会签或恢复码。 */
 async function securityRevokeFlow(device) {
   const level = state.security?.level ?? 'low';
   const ok = await confirmModal({
-    title: `屏蔽设备 ${device.deviceId}`,
-    body: `${device.deviceId} 签发的政策记录将不再被本机采纳，本机也不再向它发送数据；已同步数据不回撤；可重新授权恢复。\n\n`
+    title: '移出设备',
+    body: `${device.deviceId} 签发的政策记录将不再被本机采纳，本机也不再向它发送数据；已同步的数据不回收；可重新授权恢复。\n\n`
       + (level === 'high'
-        ? '当前为高 · 设备会签：需要另一台已准入设备核对配对号并批准，批准后本机自动完成屏蔽。'
+        ? '当前为高 · 设备会签：需要另一台已准入设备核对配对号并批准，批准后本机自动完成移出。'
         : level === 'medium'
           ? '当前为中 · 动态码：下一步需要输入本机 6 位动态码。'
           : '当前为低（默认）：无额外门槛。'),
-    confirmLabel: '屏蔽该设备',
+    confirmLabel: '移出设备',
   });
   if (!ok) return;
   if (level === 'high') {
     try {
       await securityStartApproval({
-        title: `屏蔽 ${device.deviceId} · 设备会签`,
+        title: `移出设备 · 设备会签`,
         op: 'kick',
         target: device.deviceId,
         intro: `${device.deviceId} 签发的政策记录将不再被本机采纳；会签批准后自动执行。`,
@@ -1828,7 +1856,7 @@ async function securityRevokeFlow(device) {
           await api(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, { method: 'POST', body: { approvalId } });
           closeSecurityAction();
           await refresh();
-          showToast(`已在本地屏蔽该设备（会签）`);
+          showToast(`已在本地移出该设备（会签）`);
         },
         recovery: () => securityRevokeViaRecovery(device),
       });
@@ -1839,19 +1867,19 @@ async function securityRevokeFlow(device) {
   }
   if (level === 'medium') {
     securityCodeModal({
-      title: `屏蔽 ${device.deviceId} · 动态码`,
-      intro: '输入本机 6 位动态码后写入屏蔽记录。',
-      confirmLabel: '屏蔽该设备',
+      title: `移出设备 · 动态码`,
+      intro: '输入本机 6 位动态码后写入移出记录。',
+      confirmLabel: '移出设备',
       onSubmit: async (code) => {
         await api(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, { method: 'POST', body: { code } });
         closeSecurityAction();
         await refresh();
-        showToast('已在本地屏蔽该设备');
+        showToast('已在本地移出该设备');
       },
     });
     return;
   }
-  await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, {}, '已在本地屏蔽该设备');
+  await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, {}, '已在本地移出该设备');
 }
 
 function renderDiagnostics() {
@@ -1859,6 +1887,12 @@ function renderDiagnostics() {
   const configPath = state.rawConfig?.path ?? 'config.json';
   const health = state.healthz ?? null;
   return `
+    <section class="settings-section" data-info-block="connectionRepair">
+      <h3>连接排障 <span class="badge badge-muted">手动</span></h3>
+      <p class="muted" style="font-size:11px">一台已加入同一忆云的设备一直显示未连接时，可手动粘贴对方 multiaddr 建立传输。此操作只修复连接，不改变入网信任、不签发授权；新设备入网请用「邀请设备」。</p>
+      <div class="domain-actions"><button id="diag-open-wizard" class="btn btn-small btn-crt" type="button" ${state.features.writes && !MOCK ? '' : 'disabled'}>手动连接已知设备…</button></div>
+    </section>
+
     <section class="settings-section" data-info-block="version">
       <h3>版本与服务状态 <span class="badge badge-muted">只读</span></h3>
       ${kvRows([
@@ -2262,29 +2296,6 @@ async function waitForServeBack() {
     }
     if (Date.now() > deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, 1500));
-  }
-}
-
-async function declareIssuer() {
-  if (MOCK) {
-    window.alert('mock 模式不执行写操作。');
-    return;
-  }
-  const self = state.overview?.device?.deviceId;
-  if (!self) return;
-  const ok = await confirmModal({
-    title: '声明引导签发者',
-    body: `将把本机（${self}）声明为引导签发者：该声明为图上签名事件，随 __policy__ 同步到各端；可被 device_revoke 排斥。确定？`,
-    confirmLabel: '声明',
-  });
-  if (!ok) return;
-  try {
-    await api('/admin/api/policy-issuers', { method: 'POST', body: { subject: self } });
-    showToast('已声明本机为引导签发者');
-    await refresh();
-    renderSettings();
-  } catch (error) {
-    window.alert(`操作失败：${error.message}`);
   }
 }
 
@@ -2711,7 +2722,7 @@ function populateAuditFilters() {
 function actionLabel(type) {
   if (type === 'namespace_grant') return '授权';
   if (type === 'namespace_revoke') return '撤销域';
-  if (type === 'device_revoke') return '屏蔽设备';
+  if (type === 'device_revoke') return '移出设备';
   if (type === 'policy_issuer_declare') return '声明签发者';
   if (type === 'namespace_membership') return '成员变更';
   if (type === 'namespace_handoff') return '退出并交接';
@@ -2747,10 +2758,10 @@ function describeEvent(event) {
       + `${event.subject ? `（对象 ${escapeHtml(event.subject)}）` : ''}`;
   }
   if (event.type === 'device_revoke') {
-    return `签发者 <b>${escapeHtml(event.issuer)}</b> 屏蔽设备 <b>${escapeHtml(event.subject)}</b>（本机不再采纳其政策记录）`
+    return `签发者 <b>${escapeHtml(event.issuer)}</b> 移出设备 <b>${escapeHtml(event.subject)}</b>（本机不再采纳其政策记录）`
       + `${event.cosignApprover ? ` · 会签：<b>${escapeHtml(event.cosignApprover)}</b>` : ''}`
       + `${event.breakGlassKeyId ? ` · <span class="crt-warn">恢复码 ${escapeHtml(String(event.breakGlassKeyId).slice(0, 8))}</span>` : ''}`
-      + `${event.valid ? '' : ' · 已不再屏蔽'}`;
+      + `${event.valid ? '' : ' · 未生效'}`;
   }
   if (event.type === 'security_tier') {
     const from = event.fromLevel ? securityLevelLabel(event.fromLevel) : '—';
@@ -2925,7 +2936,7 @@ function renderDeviceCard() {
   const status = isSelf
     ? { text: `${ICONS.online} 本机`, cls: 'is-ok' }
     : device.revoked
-      ? { text: `${ICONS.revoked} 已屏蔽`, cls: 'is-danger' }
+      ? { text: `${ICONS.revoked} 已移出`, cls: 'is-danger' }
       : device.online
         ? { text: `${ICONS.online} 在线`, cls: 'is-ok' }
         : { text: `${ICONS.offline} 离线`, cls: 'is-off' };
@@ -3020,11 +3031,11 @@ function renderDeviceCard() {
     : '<li class="muted">暂无需处理的记忆域</li>')
     + (hiddenCount > 0 ? `<li class="muted">另有 ${hiddenCount} 个记忆域双方均未参与</li>` : '');
 
-  // S3 · 踢人分级（SPEC §5.2 v1.1）：low 维持「更多操作」折叠（防误触）；
+  // S3 · 移出分级（SPEC §5.2 v1.1）：low 维持「更多操作」折叠（防误触）；
   // medium/high 提级为一等动作（与同步/断开同排，危险样式），门槛由动态码/会签提供。
   const secLevel = state.security?.level ?? 'low';
   const elevatedKick = secLevel === 'medium' || secLevel === 'high';
-  const kickButton = `<button class="btn btn-small btn-crt btn-crt-danger" data-action="revoke-device" ${writes ? '' : 'disabled'}>屏蔽该设备</button>`;
+  const kickButton = `<button class="btn btn-small btn-crt btn-crt-danger" data-action="revoke-device" ${writes ? '' : 'disabled'}>移出</button>`;
   const actions = isSelf ? '' : `
     <div class="card-actions">
       <button class="btn btn-small btn-crt" data-action="sync" ${writes && device.online ? '' : 'disabled'}>立即同步</button>
@@ -3033,10 +3044,11 @@ function renderDeviceCard() {
         : `<button class="btn btn-small btn-crt" data-action="connect" ${writes ? '' : 'disabled'}>连接</button>`}
       ${elevatedKick ? kickButton : ''}
     </div>
-    ${elevatedKick ? `<p class="card-help muted">屏蔽该设备 = 踢出本网络（已同步数据不回撤）。${secLevel === 'high' ? '高档需要另一台已准入设备会签。' : '中档需要本机 6 位动态码。'}</p>` : ''}
+    ${elevatedKick ? `<p class="card-help muted">移出后，本机与其他设备不再采纳它的记录；已同步的数据不回收。${secLevel === 'high' ? '高档需要另一台已准入设备会签。' : '中档需要本机 6 位动态码。'}</p>` : ''}
     <details class="card-advanced">
       <summary>更多操作</summary>
       <div class="card-actions">
+        ${device.online ? '' : `<button class="btn btn-small btn-crt" data-action="manual-connect" ${writes ? '' : 'disabled'}>连不上？手动连接…</button>`}
         <button class="btn btn-small btn-crt" data-action="reset-watermarks" ${writes ? '' : 'disabled'}>重置水位</button>
         ${elevatedKick ? '' : kickButton}
       </div>
@@ -3102,7 +3114,7 @@ stage.onHover = (node, x, y) => {
   tooltip.style.top = `${Math.min(y + 14, Math.max(0, stage.height - 120))}px`;
   tooltip.innerHTML = `
     <div class="tt-title">${escapeHtml(node.self ? '本机' : node.id)}</div>
-    <div class="tt-row">${node.revoked ? '已被我屏蔽' : node.online ? '与我连接中' : '未连接'}</div>
+    <div class="tt-row">${node.revoked ? '已被我移出' : node.online ? '与我连接中' : '未连接'}</div>
     ${device && (device.grantedByMe.length || device.grantedToMe.length)
       ? `<div class="tt-row">我授权：${escapeHtml(device.grantedByMe.join(', ') || '—')}</div>
          <div class="tt-row">授权我：${escapeHtml(device.grantedToMe.join(', ') || '—')}</div>`
@@ -3515,6 +3527,12 @@ async function handleDeviceAction(action, device) {
       confirmLabel: '重置',
     });
     if (ok) await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/reset-watermarks`, {}, '水位已重置');
+  } else if (action === 'manual-connect') {
+    // E1：网内传输修复（不改变入网信任、不签发授权）
+    openWizard({
+      deviceId: device.deviceId,
+      address: peerPathFor(device)?.address ?? '',
+    });
   } else if (action === 'revoke-device') {
     await securityRevokeFlow(device);
   }
@@ -3579,7 +3597,7 @@ function topmostModal() {
 function modalCanDismiss(el) {
   if (!el || el.id === 'provision') return false;
   if (el.dataset.modalStatic === 'true') return false;
-  if (el.id === 'wizard' && (wizardState.connection === 'connecting' || wizardState.granting === true)) return false;
+  if (el.id === 'wizard' && wizardState.connection === 'connecting') return false;
   // S3：恢复码一次性展示期间不可关闭（必须先回执「我已抄写」）
   if (el.id === 'security-action' && state.securityFlow?.blockClose === true) return false;
   return true;
@@ -3658,7 +3676,7 @@ $('#security-action')?.addEventListener('click', (event) => {
 });
 $('#security-badge')?.addEventListener('click', () => {
   $('#settings').hidden = false;
-  renderSettings('common');
+  renderSettings('security');
   setTimeout(() => {
     const slot = $('#settings-security-slot');
     if (!slot) return;
@@ -3667,7 +3685,6 @@ $('#security-badge')?.addEventListener('click', () => {
   }, 0);
 });
 
-$('#add-device').addEventListener('click', openWizard);
 $('#open-settings').addEventListener('click', () => {
   $('#settings').hidden = false;
   renderSettings(state.settingsTab ?? 'common');
@@ -3717,6 +3734,18 @@ $('#settings-body').addEventListener('click', (event) => {
   // UX-2：重启向导（设置 · 常用；web 无 preload 桥时该按钮不渲染）
   if (event.target.closest('#settings-open-wizard')) {
     if (typeof window.mebularDesktop?.openWizard === 'function') void window.mebularDesktop.openWizard();
+    return;
+  }
+  // E1：常用页的邀请入口；未启用 joinService 时由邀请弹层就地一键启用
+  if (event.target.closest('#settings-invite-device')) {
+    $('#settings').hidden = true;
+    void openInvite();
+    return;
+  }
+  // E1：诊断内「手动连接已知设备」（网内传输修复，不改变入网信任）
+  if (event.target.closest('#diag-open-wizard')) {
+    openWizard();
+    return;
   }
 });
 $('#self-badge').addEventListener('click', () => {
@@ -3739,13 +3768,13 @@ $('#handoff-close').addEventListener('click', () => {
 $('#handoff-plan').addEventListener('click', runHandoffPlan);
 $('#handoff-confirm').addEventListener('click', confirmHandoff);
 
-// ---------- 邀请新设备（T2 令牌加入：主密钥不复制） ----------
+// ---------- 邀请设备（T2 令牌加入：主密钥不复制） ----------
 
 async function openInvite() {
   const level = state.security?.level ?? 'low';
   if (level === 'medium') {
     securityCodeModal({
-      title: '邀请新设备 · 动态码',
+      title: '邀请设备 · 动态码',
       intro: '中档在签发一次性令牌前需要输入本机 6 位动态码。',
       confirmLabel: '验证并生成令牌',
       onSubmit: async (code) => {
@@ -3759,7 +3788,7 @@ async function openInvite() {
   if (level === 'high') {
     try {
       await securityStartApproval({
-        title: '邀请新设备 · 设备会签',
+        title: '邀请设备 · 设备会签',
         op: 'join',
         intro: '高档签发的不是立刻出令牌：先在另一台已准入设备上核对配对号并批准，批准后本机自动出令牌/二维码。',
         onApproved: async (approvalId) => {
@@ -3782,11 +3811,9 @@ async function openInvite() {
 
 async function renderInvite(overrideEndpoint = null) {
   const body = $('#invite-body');
-  const toSettings = $('#invite-to-settings');
   const typedEndpoint = overrideEndpoint
     ?? $('#invite-endpoint')?.value?.trim()
     ?? null;
-  toSettings.hidden = true;
   $('#invite').hidden = false;
   body.innerHTML = '<p class="muted">正在签发令牌…</p>';
   try {
@@ -3800,17 +3827,73 @@ async function renderInvite(overrideEndpoint = null) {
   }
 }
 
+/** joinService 未启用：弹层内就地启用（复用设置写路径；写后自动重启，前台则给一键重启/重试）。 */
+async function inviteEnableJoinService(button) {
+  if (MOCK) { showToast('mock 模式不执行写操作。'); return; }
+  const body = $('#invite-body');
+  const field = fieldOf('joinService.enabled');
+  if (button) {
+    button.disabled = true;
+    button.textContent = '正在启用…';
+  }
+  body.innerHTML = '<p class="muted">正在启用加入服务并写入配置…将重启守护；恢复后会自动继续签发令牌。</p>';
+  await applyConfigField(field, true);
+  if (state.settings?.join?.enabled === true) {
+    await renderInvite();
+    return;
+  }
+  if (state.rawConfig?.config?.joinService?.enabled === true) {
+    showInvitePendingRestart();
+    return;
+  }
+  const writesAllowed = Boolean(state.features?.writes) && !MOCK;
+  body.innerHTML = `
+    <p class="crt-warn">没能写入加入服务配置。</p>
+    <p class="cfg-help muted">${writesAllowed ? '请重试；若持续失败，检查 config.json 写权限或守护日志。' : '当前控制台为只读模式，需要 memory.admin 写权限。'}</p>
+    <div class="domain-actions"><button id="invite-enable-retry" class="btn btn-small btn-crt" type="button" ${writesAllowed ? '' : 'disabled'}>重试</button></div>
+  `;
+  body.querySelector('#invite-enable-retry')?.addEventListener('click', (event) => {
+    void inviteEnableJoinService(event.currentTarget);
+  });
+}
+
+/** 配置已写入但当前实例未重启：给出既有「一键重启」与「重试」两条路。 */
+function showInvitePendingRestart() {
+  const body = $('#invite-body');
+  const pending = pendingRestartItems().some((item) => item.path === 'joinService.enabled');
+  const writes = state.features?.writes && !MOCK;
+  body.innerHTML = `
+    <p class="modal-note muted">加入服务已写入配置${pending ? '，但当前实例还未重启（待重启）' : '，守护正在重启'}。</p>
+    <p class="cfg-help muted">重启后守护会读取新配置；点「重试签发」即可直接出令牌与二维码。</p>
+    <div class="domain-actions">
+      <button class="btn btn-small btn-crt" id="invite-restart-service" type="button" ${writes ? '' : 'disabled'}>一键重启并继续</button>
+      <button class="btn btn-small btn-crt" id="invite-retry" type="button">重试签发</button>
+    </div>
+  `;
+  body.querySelector('#invite-retry')?.addEventListener('click', () => void renderInvite());
+  body.querySelector('#invite-restart-service')?.addEventListener('click', async () => {
+    await restartServeFromUi();
+    if (state.settings?.join?.enabled === true) await renderInvite();
+    else showInvitePendingRestart();
+  });
+}
+
 function showInviteError(error) {
   const body = $('#invite-body');
-  const toSettings = $('#invite-to-settings');
   state.inviteToken = null;
   $('#invite').hidden = false;
   if (error.payload?.error === 'join_disabled' || error.status === 409) {
-    toSettings.hidden = false;
+    const writes = state.features?.writes && !MOCK;
     body.innerHTML = `
-      <p class="modal-note muted">加入服务未启用：开启后即可在新设备上用一条命令入网（主密钥不复制，令牌一次性、默认 15 分钟有效）。</p>
-      <p class="cfg-path muted">在「设置 → 常用 → 邀请新设备上车」打开「启用加入服务」；改动即写入，重启 serve 后生效。</p>
+      <p class="modal-note muted">加入服务未启用：启用后即可在新设备上兑换一次性令牌（主密钥不复制，默认 15 分钟有效）。</p>
+      <div class="domain-actions">
+        <button id="invite-enable-service" class="btn btn-small btn-crt" type="button" ${writes ? '' : 'disabled'}>一键启用并继续</button>
+      </div>
+      <p class="cfg-help muted">将写入 joinService.enabled=true 并重启守护（服务托管时自动重启；前台运行时按提示手动重启）。</p>
     `;
+    body.querySelector('#invite-enable-service')?.addEventListener('click', (event) => {
+      void inviteEnableJoinService(event.currentTarget);
+    });
   } else {
     body.innerHTML = `<p class="crt-warn">签发失败：${escapeHtml(error.message)}</p>`;
   }
@@ -3819,10 +3902,8 @@ function showInviteError(error) {
 /** 令牌结果面板（low 直接出；medium/high 门槛通过后复用同一面板）。 */
 function showInviteResult(res) {
   const body = $('#invite-body');
-  const toSettings = $('#invite-to-settings');
   state.inviteToken = res;
   $('#invite').hidden = false;
-  toSettings.hidden = true;
   // 令牌很长：显示截断，复制按钮携带完整值
   const shortToken = res.token.length > 56 ? `${res.token.slice(0, 42)}…${res.token.slice(-12)}` : res.token;
   const cmd = `fleet join --token ${res.token} --daemon --dir ~/.mebular --device <新设备ID>`;
@@ -3836,7 +3917,7 @@ function showInviteResult(res) {
         <span class="domain-label">扫码即通（QR 内容 = 令牌文本）</span>
         <img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />
       </div>`
-    : `<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用下方文本令牌。</p>`;
+    : '<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用上方文本令牌。</p>';
   const endpointEditor = `
     <div class="readout-block">
       <span class="domain-label">join 端点（写死进令牌，须为新设备可达地址）</span>
@@ -3844,27 +3925,29 @@ function showInviteResult(res) {
       <p class="cfg-help muted">默认由守护按 joinService.bind 计算：通配时取本机 LAN IPv4。跨网段/NAT 时可改为新设备可达地址后重新签发。</p>
       ${endpointWarning}
     </div>`;
+  // E1 单屏：打开即见「令牌 + 二维码 + 复制」；端点/命令/兑换机制/重新生成全部收进「详情」。
   body.innerHTML = `
-    ${qrBlock}
-    <div class="readout-block">
+    <div class="readout-block invite-token-block">
       <span class="domain-label">令牌（一次性，默认 15 分钟有效）</span>
       <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
     </div>
-    <p class="cfg-help muted">让新设备扫码或粘贴令牌加入；兑换只建立入网信任，之后按各自的参与选择收发。它出现在星图上后本页即可关闭。</p>
+    ${qrBlock}
+    <p class="cfg-help muted">令牌即入网权限：一次性、短时效，仅当面或可信局域网传递；新设备入网后本页即可关闭。</p>
     ${res.securityApproval ? '<p class="crt-warn">已随令牌带上会签批准（新设备首现记录内嵌 cosign）。</p>' : ''}
     <details class="asst-detail"><summary>详情</summary>
       ${endpointEditor}
       <dl class="settings-kv">
         <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>
         <dt>默认记忆域</dt><dd><code>${escapeHtml(res.namespace)}</code></dd>
-        <dt>兑换后</dt><dd>${res.grantOnJoin === false ? '兑换后不自动授权（对端参与该记忆域后自动签发）' : '兑换后自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）'}</dd>
+        <dt>授权</dt><dd>${res.grantOnJoin === false ? '不自动授权（对端参与该记忆域后自动签发）' : '自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）'}</dd>
         <dt>有效期至</dt><dd>${escapeHtml(formatTime(res.expiresAt))}（一次性）</dd>
       </dl>
+      <p class="cfg-help muted">兑换只建立入网信任，之后按各自的参与选择收发；不复制主密钥。</p>
       <div class="readout-block">
         <span class="domain-label">新设备</span>
         <div class="copyable"><code>${escapeHtml(shortCmd)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(cmd)}">复制命令</button></div>
       </div>
-      <p class="crt-warn">⚠ 令牌即入网权限：一次性、短时效（默认 15 分钟），仅经可信 LAN 使用，请勿写入工单或公开日志。</p>
+      <p class="crt-warn">⚠ 请勿把令牌写入工单或公开日志；旧令牌在重新生成后立即失效。</p>
       <div class="asst-detail-actions">
         <button class="btn btn-small" id="invite-regen-inline" type="button">重新生成邀请（旧令牌立即失效）</button>
       </div>
@@ -3880,18 +3963,11 @@ function showInviteResult(res) {
 }
 
 $('#invite-device').addEventListener('click', openInvite);
-// v4 空态的两个去向动作（与顶栏同名动作：＋邀请新设备 / ＋连接已有地址）
+// v4 空态的去向动作（顶栏「邀请设备」同款）
 $('#domains-empty-invite')?.addEventListener('click', openInvite);
-$('#domains-empty-connect')?.addEventListener('click', openWizard);
 $('#invite-close').addEventListener('click', () => {
   $('#invite').hidden = true;
   state.inviteToken = null;
-});
-$('#invite-to-settings').addEventListener('click', () => {
-  $('#invite').hidden = true;
-  state.inviteToken = null;
-  $('#settings').hidden = false;
-  renderSettings('common');
 });
 
 $('#device-card-close').addEventListener('click', () => {
@@ -3923,19 +3999,17 @@ $('#wizard-close').addEventListener('click', closeWizard);
 $('#wizard-back').addEventListener('click', () => wizardSet({ type: 'BACK' }));
 $('#wizard-next').addEventListener('click', wizardNext);
 
-// ---------- 连接新对端向导 ----------
+// ---------- 手动连接已知设备（网内传输修复；不是加入忆云） ----------
 
 const STEP_LABELS = {
-  local: '① 本机信息 / 对端地址',
+  local: '① 对端地址',
   connect: '② 建立连接',
-  domains: '③ 选择记忆域',
-  done: '④ 完成',
 };
 
 let wizardState = createWizardState();
 
-function openWizard() {
-  wizardState = createWizardState();
+function openWizard({ deviceId = '', address = '' } = {}) {
+  wizardState = { ...createWizardState(), deviceId, address };
   $('#wizard').hidden = false;
   renderWizard();
 }
@@ -3950,7 +4024,7 @@ function wizardSet(action) {
 }
 
 function renderWizard() {
-  const order = [...WIZARD_STEPS, 'done'];
+  const order = WIZARD_STEPS;
   const index = order.indexOf(wizardState.step);
   $('#wizard-steps').innerHTML = order
     .map((step, i) => `<span class="${i === index ? 'active' : ''}">${STEP_LABELS[step]}</span>`)
@@ -3966,15 +4040,18 @@ function renderWizard() {
     const device = state.overview?.device ?? {};
     const multiaddrs = device.multiaddrs ?? [];
     body.innerHTML = `
-      <p class="wizard-note">把本机地址给对面，并粘贴对面的 deviceId 与 multiaddr。</p>
-      <div class="field"><label>本机 deviceId</label><div class="copyable"><code>${escapeHtml(device.deviceId ?? '—')}</code><button class="btn btn-small" data-copy="${escapeHtml(device.deviceId ?? '')}">复制</button></div></div>
-      <div class="field"><label>本机 peerId</label><div class="copyable"><code>${escapeHtml(device.peerId ?? '—')}</code>${device.peerId ? `<button class="btn btn-small" data-copy="${escapeHtml(device.peerId)}">复制</button>` : ''}</div></div>
-      <div class="field"><label>本机 multiaddrs</label>${multiaddrs.length
-        ? multiaddrs.map((addr) => `<div class="copyable"><code>${escapeHtml(addr)}</code><button class="btn btn-small" data-copy="${escapeHtml(addr)}">复制</button></div>`).join('')
-        : '<code class="muted">（未启用 P2P，无监听地址）</code>'}</div>
-      <div class="field"><label>relay（可选）</label><code>${escapeHtml((device.relays ?? []).join(', ') || '—')}</code></div>
+      <p class="wizard-note">一台<strong>已加入同一忆云</strong>的设备一直显示未连接时，可在这里手动粘贴对方地址建立传输。此操作只修复连接，不改变入网信任，也不签发授权。</p>
       <div class="field"><label>对方 deviceId</label><input id="wizard-device" type="text" value="${escapeHtml(wizardState.deviceId)}" placeholder="device-B" /></div>
       <div class="field"><label>对方 multiaddr</label><textarea id="wizard-address" placeholder="/ip4/…/tcp/…/p2p/…">${escapeHtml(wizardState.address)}</textarea></div>
+      <details class="cfg-more">
+        <summary>我的连接信息 ›</summary>
+        <div class="field"><label>本机 deviceId</label><div class="copyable"><code>${escapeHtml(device.deviceId ?? '—')}</code><button class="btn btn-small" data-copy="${escapeHtml(device.deviceId ?? '')}">复制</button></div></div>
+        <div class="field"><label>本机 peerId</label><div class="copyable"><code>${escapeHtml(device.peerId ?? '—')}</code>${device.peerId ? `<button class="btn btn-small" data-copy="${escapeHtml(device.peerId)}">复制</button>` : ''}</div></div>
+        <div class="field"><label>本机 multiaddrs</label>${multiaddrs.length
+          ? multiaddrs.map((addr) => `<div class="copyable"><code>${escapeHtml(addr)}</code><button class="btn btn-small" data-copy="${escapeHtml(addr)}">复制</button></div>`).join('')
+          : '<code class="muted">（未启用 P2P，无监听地址）</code>'}</div>
+        <div class="field"><label>relay（可选）</label><code>${escapeHtml((device.relays ?? []).join(', ') || '—')}</code></div>
+      </details>
     `;
     next.textContent = '连接';
     next.disabled = false;
@@ -3989,39 +4066,16 @@ function renderWizard() {
     body.innerHTML = `
       <p class="wizard-note">目标：<code>${escapeHtml(wizardState.deviceId)}</code> @ <code>${escapeHtml(wizardState.address)}</code></p>
       <p><b>${status}</b></p>
+      ${wizardState.connection === 'connected'
+        ? '<p class="wizard-note">传输已修复；回到星图查看该设备是否转为在线。若仍不通，检查端口/防火墙后重试。</p>'
+        : ''}
       ${wizardState.connection === 'failed'
         ? '<p class="wizard-note">可行动建议：确认对面已运行 serve、multiaddr 含 /p2p/&lt;peerId&gt;、端口可达；修正后重试。</p>'
         : ''}
     `;
-    next.textContent = wizardState.connection === 'connected' ? '下一步' : '重试';
+    next.textContent = wizardState.connection === 'connected' ? '完成' : '重试';
     next.disabled = wizardState.connection === 'connecting';
     back.disabled = wizardState.connection === 'connecting';
-  } else if (wizardState.step === 'domains') {
-    const entries = state.namespaces;
-    body.innerHTML = `
-      <p class="wizard-note">选择要共享的记忆域（默认全不选）。将共享约 ${selectedMemoryCount(entries, wizardState.selected)} 条记忆给 <code>${escapeHtml(wizardState.deviceId)}</code>。</p>
-      <ul class="wizard-list">${entries.length
-        ? entries.map((entry) => {
-          const checked = wizardState.selected.includes(entry.namespace);
-          return `<li><label><input type="checkbox" data-wizard-ns="${escapeHtml(entry.namespace)}" ${checked ? 'checked' : ''}> <span class="ns-chip" style="background:${namespaceColor(entry.namespace)}">${escapeHtml(entry.namespace)}</span> <span class="muted">${entry.count} 条</span></label></li>`;
-        }).join('')
-        : '<li class="muted">暂无记忆域</li>'}</ul>
-    `;
-    next.textContent = wizardState.granting ? '签发中…' : '签发授权';
-    next.disabled = wizardState.granting || wizardState.selected.length === 0;
-    back.disabled = wizardState.granting;
-    body.querySelectorAll('input[data-wizard-ns]').forEach((input) => {
-      input.addEventListener('change', () => wizardSet({ type: 'TOGGLE_NAMESPACE', namespace: input.dataset.wizardNs }));
-    });
-  } else if (wizardState.step === 'done') {
-    body.innerHTML = `
-      <p class="wizard-note">已向 <code>${escapeHtml(wizardState.deviceId)}</code> 签发授权。</p>
-      <div class="field"><label>grantId</label><div class="copyable"><code>${escapeHtml(wizardState.grantId ?? '')}</code><button class="btn btn-small" data-copy="${escapeHtml(wizardState.grantId ?? '')}">复制</button></div></div>
-      <p class="wizard-note">之后可在「记忆共享」查看双方的参与情况。</p>
-    `;
-    next.textContent = '完成';
-    next.disabled = false;
-    back.disabled = true;
   }
   body.querySelectorAll('[data-copy]').forEach((button) => {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
@@ -4077,28 +4131,12 @@ async function wizardNext() {
     if (wizardState.step !== 'connect') return;
     await doWizardConnect();
   } else if (wizardState.step === 'connect') {
-    if (wizardState.connection === 'connected') wizardSet({ type: 'GO_DOMAINS' });
-    else await doWizardConnect();
-  } else if (wizardState.step === 'domains') {
-    wizardState = wizardReduce(wizardState, { type: 'GRANT_START' });
-    renderWizard();
-    if (wizardState.granting !== true) return;
-    if (MOCK) {
-      wizardSet({ type: 'GRANT_FAILURE', message: 'mock 模式不执行签发' });
+    if (wizardState.connection === 'connected') {
+      closeWizard();
+      showToast('已接通；回到星图查看该设备是否转为在线');
       return;
     }
-    try {
-      const result = await api('/admin/api/grants', {
-        method: 'POST',
-        body: { subject: wizardState.deviceId, namespaces: wizardState.selected },
-      });
-      wizardSet({ type: 'GRANT_SUCCESS', grantId: result.grantId });
-      await refresh();
-    } catch (error) {
-      wizardSet({ type: 'GRANT_FAILURE', message: error.message });
-    }
-  } else if (wizardState.step === 'done') {
-    closeWizard();
+    await doWizardConnect();
   }
 }
 
@@ -4123,7 +4161,7 @@ function escapeHtml(value) {
 
 // mock 的完整记忆清单（供记忆视图过滤演示；id 用短 ULID 样式）
 const MOCK_MEMORIES = [
-  { id: '01MOCKMEMORY000000000000001', type: 'fact', namespace: 'notes', preview: '演示记忆：mock 数据已补齐，记忆视图可无网络验收', createdAt: 0, archived: false, deleted: false },
+  { id: '01MOCKMEMORY000000000000001', type: 'fact', namespace: 'notes', preview: '演示记忆：mock 数据已补齐，记忆视图可离线验收', createdAt: 0, archived: false, deleted: false },
   { id: '01MOCKMEMORY000000000000002', type: 'note', namespace: 'work', preview: '第二条演示记忆（已归档示例）', createdAt: 0, archived: true, deleted: false },
   { id: '01MOCKMEMORY000000000000003', type: 'fact', namespace: 'default', preview: '第三条演示记忆', createdAt: 0, archived: false, deleted: false },
 ];
@@ -4427,7 +4465,7 @@ async function submitProvision(kind) {
     showProvisionRestart(res?.restart, { prefix: kind === 'create' ? '已建新' : '已加入' });
     setProvisionStatus(kind === 'create'
       ? '已建新完成：按上方指引重启。'
-      : '已加入完成：按上方指引重启。重启后若网络启用了「中 · 动态码」，请在「设置 → 常用 → 安全等级」导入种子（两台设备当面出示）；若启用了「高 · 设备会签」，首现记录会带邀请方批准，被拒原因会显示在安全卡/审计。', 'ok');
+      : '已加入完成：按上方指引重启。重启后若忆云启用了「中 · 动态码」，请在「设置 → 安全 → 安全等级」导入种子（两台设备当面出示）；若启用了「高 · 设备会签」，首现记录会带邀请方批准，被拒原因会显示在安全卡/审计。', 'ok');
     if (button) button.disabled = false;
   } catch (error) {
     // B（F-ONB-2）：重复调用（already_provisioned）→ 切「已完成」态，不裸报错
@@ -4511,7 +4549,7 @@ if (provisionStatus) {
   renderProvision(provisionStatus);
 } else {
   // R-1 高-3：?view=<视图> 深链（向导②/托盘「连接 AI 助手」的 ?view=connect 落点）；
-  // step=device → 进连接页后自动开「邀请新设备」
+  // step=device → 进连接页后自动开「邀请设备」
   const deepLink = initialViewFromSearch(location.search);
   // UX-2 补丁 4：桌面壳 + macOS hiddenInset → 顶栏避让交通灯安全区（body 类驱动 CSS）
   document.body.classList.toggle(

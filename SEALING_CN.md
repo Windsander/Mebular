@@ -57,7 +57,18 @@
 >   新增 **join 令牌**（inviter 设备私钥签名，含 TTL/一次性 nonce/可撕；**不含主密钥**）与可选 libp2p
 >   `/mebular/join/1.0.0` 请求-签发协议：**任意在册设备**可作 inviter 签发委派证书。
 
-- **策略事件类型与命名空间**：保留命名空间 `__policy__`；事件类型 `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare` / `namespace_membership` / `namespace_handoff`。
+> **⚠️ 语义变更 · S1（安全三档）**：新增 `__policy__` 记录类型 `security_tier` /
+> `security_approval` / `security_recovery`，以及既有记录的可选证明字段 `cosign` /
+> `breakGlass`。**线协议零新增消息类型**（无新 `auth-*` / `sync-*` 帧，加入令牌格式不变）：
+> 旧端忽略新记录类型与未知字段 → 行为逐字节不变（**A 类载体**）。**语义面为 B 类**：
+> 档位缺省 `low`；`high → 非 high`、high 下的踢人与新设备首现必须携有效会签/恢复码证明；
+> 证明随记录、全网在 R-c 序验收，**推导与预检全程不读墙钟**（`issuedAt/expiresAt` 仅流程/UI
+> 元数据），已采纳记录不随时间翻转。混合窗口内旧端不执行新门槛：新端对旧端发出的裸记录
+> （当刻档位=high）**不采纳** → 已知偏差 =「少采纳 / 两端吊销视图可能短暂分歧」，安全方向
+> 不 fail-open；升级窗口纪律见 `MIXED-VERSION-POLICY.md`。`PolicyState.security` 暴露
+> `level` / `admitted` / `recoveryKeyId` / `rejections`（§3.4E），拒绝不静默。
+
+- **策略事件类型与命名空间**：保留命名空间 `__policy__`；事件类型 `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare` / `namespace_membership` / `namespace_handoff` / `security_tier` / `security_approval` / `security_recovery`。
 - **地址广播（C5，`net_endpoints`，命名空间 `__net__`，**opt-in**）**：新增**信息类**记录类型
   `net_endpoints`（命名空间 `__net__`），载荷 `{subject, endpoints[{addr,kind:lan|public|relay}], relayCapable, issuedAt, expiry, sig?}`。
   语义（8 条，红线）：
@@ -88,6 +99,22 @@
   - **R-b 吊销连坐（含历史）**：被吊销签发者的记录**一律不采纳**——其历史 `grant`、它发出的 `device_revoke` / `namespace_revoke`。**自吊销（`subject === author`）不采纳**（语义未定义；吊销须由其他设备发起）。
   - **R-c 逻辑时间定序**（见红线 2），不看墙钟。
   - **R-d grantId 精确撤销**：被 `namespace_revoke` 撤销过的 grantId **永久失效**；恢复必须用**全新 grantId**（复用旧 grantId 的「伪恢复」无效）。吊销**非终态**。
+  - **S1 安全三档（`security_tier`）**：`low`（默认，无额外门槛）/ `medium`（本机 TOTP，S2）/
+    `high`（另一台已受信且已准入设备会签，或离线恢复码）。采纳规则：`before=high ∧ level≠high`
+    必须携有效 `cosign`/`breakGlass`（防降级逃逸，fail-closed）；`before=low/medium` 无网络证明
+    要求；`high→high` 同级重发幂等。`security_approval(approve)` 的有效性在其 R-c 位次求出并
+    缓存：批准人未在其位次被吊销 ∧ 其位次已 `admitted` ∧ approver ≠ initiator；**事后吊销不回撤**
+    （防「踢批准人=救人」）。`admitted` 种子 = 首条 tier 前的被采纳策略记录参与者 ∪ 首条 tier
+    作者；high 下新设备首现（grant/membership）必须携 `cosign(op:'join')`/`breakGlass`，否则
+    不采纳且不进 `admitted`。`breakGlass` 的 keyId 必须等于当刻 `recoveryKeyId`，nonce 一次性；
+    轮换后旧 key 的新签名不再采纳（历史不回撤）。**恢复码初始登记**仅当 `mode:'set'` 且 R-c 序
+    早于首条被采纳 high-tier 时免证明；high 出现之后（含之后降档窗口）必须携
+    `cosign(op:'rotate', oldKeyId='')` / `breakGlass`，否则不采纳（防被窃受信设备自登记恢复码
+    后用 breakGlass 绕过会签）。全部拒绝写入
+    `PolicyState.security.rejections`（`missing-proof` / `invalid-proof` /
+    `approval-missing-or-not-causal` / `approval-approver-revoked-at-its-order` /
+    `approver-not-admitted-at-approval` / `approver-equals-author` / `approver-equals-subject` /
+    `stale-or-replayed-nonce`）。
 - **`derivePolicyState` 迭代上限 = 输入的确定纯函数** `iterationBound(entries) = 2·|entries| + 2`。**这是协议语义**：只用输入规模，不依赖配置/环境/时钟 → 同一输入在任何端得到同一上限。
 - **未收敛 = fail-closed 两轴保守回退**：`revokedGrantIds = ∅`（不采纳任何 revoke）且 `revokedIn = 各轮吊销并集的闭包`，迭代直到输出 **`revoked ⊆ excluded`**（R-b 在回退路径**字面成立**）；绝不 fail-open。`PolicyState.converged = false` 可观测（含 `iterations`）。
 - **`maxIterations` 不可由生产注入**：`GraphNamespacePolicy` 构造**无**该选项，生产恒用 `iterationBound`；`DerivePolicyOptions.maxIterations` 标注 `@internal`，**仅测试专用**。
@@ -110,9 +137,14 @@
   边界：**跨设备通信统一走记忆通道；不提供通用远程查询/调用**。
 - **会话多路复用**。
 - **quorum / 阈值签名**（多签发者已有，但无门限）。
-- **`expiresAt` 强制生效**（字段已预留，不引入跨端时钟依赖；移入 fleet MVP 范围）。
+- **`expiresAt` 强制生效**（字段已预留，不引入跨端时钟依赖；移入 fleet MVP 范围）。**S1 安全证明
+  的 `expiresAt` 明确不参与推导/预检**：它只是发起方执行窗口/UI 元数据；已采纳记录不随墙钟翻转。
 - **fleet（`@mebular/fleet`）已落地 M0–M4**（**不改 core/SEALING 语义**）：M0 骨架/边界、M1 协议模型（事件/状态机/本地配额 + 不变量 harness）、M2 单机双进程（spool）、M3 真实 libp2p + 记忆同步、M4 **agent 路由**（注册表 + Command/Hermes 适配器）与**三种协作形态模型**（审查 DAG / 有限协商 / 配额制闲聊 + 矩阵 + 随机 harness）。
   入口见 `packages/fleet/DESIGN.md`、`PROTOCOL-INVARIANTS.md`、`RUNBOOK.md`。**OpenChamber 会话接缝：已解决**（provider #1 = 桥 daemon `POST /agent/run-once`；provider #2 = Self-Skills `skills/oc-node-provider` 的 Node 版，复用 `oc-bridge.js`，Windows 无需 Python/Hermes；fleet 侧 `HttpOpenChamberSeam` 保持中立——替换 provider 不改 fleet 代码，见 `packages/fleet/OPENCHAMBER-SEAM.md`）。**剩余推迟**：执行器生产化/运维细节（可选）。**协作形态 live 通道接线（1d）已完成**。
+- **安全三档的 S2/S3 面**：S1 只交付 core 推导/验收（`security_tier` / `security_approval` /
+  `security_recovery` + `cosign`/`breakGlass`）。**TOTP 种子与限次**（`security-totp.json`）、
+  恢复码生成/展示/消费 UI、主密钥备份/恢复、`/admin/api/security/*` 与安全卡/审计呈现归 S2/S3；
+  S1 不落任何种子或恢复码 secret（图上只有公钥/证明）。
 - **自动事件裁剪**：本期只固化约束与测试——**任何裁剪必须排除尚未被所有已授权对端 ack 的事件**，不实现裁剪。
 - **信任模型 v2（委派证书链 + 加入令牌）已落地**（T2；契约见 §1.3、§3；验收见 S2 报告）。**剩余**：吊销的**全网传播延迟**（`device_revoke` 级联在策略层即时，但需事件同步到达各端才生效）与**跨 NAT 实测回填**。
 

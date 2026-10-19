@@ -58,7 +58,21 @@
 > Also adds a **join token** (signed by the inviter device's key, with TTL / one-time nonce / tearable; **does not contain the master key**) and an optional libp2p
 > `/mebular/join/1.0.0` request-issue protocol: **any enrolled device** can act as inviter and issue delegation certificates.
 
-- **Policy event types and namespaces**: reserved namespace `__policy__`; event types `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare` / `namespace_membership` / `namespace_handoff`.
+> **⚠️ Semantic change · S1 (security tiers)**: adds `__policy__` record types `security_tier` /
+> `security_approval` / `security_recovery`, plus optional proof fields `cosign` / `breakGlass` on
+> existing records. **Zero new wire message types** (no new `auth-*` / `sync-*` frames; join-token
+> format unchanged): old ends ignore the new record types and unknown fields → byte-identical behavior
+> (**class-A carriers**). **The semantics are class B**: the tier defaults to `low`; `high → non-high`,
+> kicks under `high`, and a new device's first appearance require a valid cosign/break-glass proof;
+> proofs travel with records and are verified by every end in R-c order, with **no wall clock in
+> precheck/derivation** (`issuedAt/expiresAt` are flow/UI metadata only), so adopted records never flip
+> over time. In a mixed window old ends do not enforce the new gates: a new end **does not adopt** a
+> bare record from an old end when the current tier is `high` → known deviation = "adopts less / the
+> two ends' revocation views may briefly differ", never fail-open. Upgrade-window discipline lives in
+> `MIXED-VERSION-POLICY.md`. `PolicyState.security` exposes `level` / `admitted` / `recoveryKeyId` /
+> `rejections` (§3.4E); rejections are never silent.
+
+- **Policy event types and namespaces**: reserved namespace `__policy__`; event types `namespace_grant` / `namespace_revoke` / `device_revoke` / `policy_issuer_declare` / `namespace_membership` / `namespace_handoff` / `security_tier` / `security_approval` / `security_recovery`.
 - **Address broadcast (C5, `net_endpoints`, namespace `__net__`, **opt-in**)**: adds an **informational** record type
   `net_endpoints` (namespace `__net__`), payload `{subject, endpoints[{addr,kind:lan|public|relay}], relayCapable, issuedAt, expiry, sig?}`.
   Semantics (8 items, red lines):
@@ -89,6 +103,24 @@
   - **R-b revocation contagion (including history)**: records of a revoked issuer are **never adopted** — its historical `grant`, and the `device_revoke` / `namespace_revoke` it issued. **Self-revocation (`subject === author`) is not adopted** (semantics undefined; revocation must be initiated by another device).
   - **R-c logical-time ordering** (see red line 2), not looking at the wall clock.
   - **R-d exact grantId revocation**: a grantId revoked by `namespace_revoke` **permanently lapses**; recovery must use a **brand-new grantId** (a "pseudo-recovery" reusing the old grantId is void). Revocation is **not terminal**.
+  - **S1 security tiers (`security_tier`)**: `low` (default, no extra gate) / `medium` (local TOTP, S2) /
+    `high` (cosign by another trusted, admitted device, or offline break-glass). Adoption: `before=high ∧ level≠high`
+    requires a valid `cosign`/`breakGlass` (no downgrade escape, fail-closed); `before=low/medium` imposes no
+    network proof; `high→high` is an idempotent re-send. A `security_approval(approve)` is evaluated and cached
+    **at its R-c position**: approver not revoked at that position ∧ approver already `admitted` there ∧
+    approver ≠ initiator; a later revocation does **not** undo it (prevents "kick the approver = rescue").
+    `admitted` seed = participants of adopted policy records before the first tier ∪ the first tier's author;
+    a new device's first appearance under `high` (grant/membership) must carry `cosign(op:'join')`/`breakGlass`,
+    otherwise it is not adopted and does not enter `admitted`. A `breakGlass` keyId must equal the current
+    `recoveryKeyId`; nonces are one-time; after rotation new signatures by the old key are not adopted (history
+    is not undone). **Initial recovery-key registration** is proof-free only when `mode:'set'` and the record is
+    R-c earlier than the first adopted high-tier record; after high has ever appeared (including a later
+    downgrade window) it must carry `cosign(op:'rotate', oldKeyId='')` / `breakGlass`, otherwise it is not
+    adopted (prevents a stolen trusted device from self-registering a recovery key and bypassing cosign).
+    Rejections are exposed in `PolicyState.security.rejections` (`missing-proof` /
+    `invalid-proof` / `approval-missing-or-not-causal` / `approval-approver-revoked-at-its-order` /
+    `approver-not-admitted-at-approval` / `approver-equals-author` / `approver-equals-subject` /
+    `stale-or-replayed-nonce`).
 - **`derivePolicyState` iteration bound = a deterministic pure function of the input** `iterationBound(entries) = 2·|entries| + 2`. **This is protocol semantics**: it uses only the input size, independent of config/environment/clock → the same input yields the same bound on any end.
 - **Non-convergence = fail-closed two-axis conservative fallback**: `revokedGrantIds = ∅` (adopt no revoke) and `revokedIn = closure of the union of all rounds' revocations`, iterating until the output satisfies **`revoked ⊆ excluded`** (R-b **literally holds** on the fallback path); never fail-open. `PolicyState.converged = false` is observable (with `iterations`).
 - **`maxIterations` cannot be injected by production**: the `GraphNamespacePolicy` constructor has **no** such option, and production always uses `iterationBound`; `DerivePolicyOptions.maxIterations` is marked `@internal`, **test-only**.
@@ -110,9 +142,14 @@
   Boundary: **cross-device communication all goes through the memory channel; no general remote query/RPC is provided**.
 - **Session multiplexing**.
 - **quorum / threshold signatures** (multi-issuer exists, but no threshold).
-- **`expiresAt` enforcement** (the field is reserved; no cross-end clock dependency is introduced; moved into the fleet MVP scope).
+- **`expiresAt` enforcement** (the field is reserved; no cross-end clock dependency is introduced; moved into the fleet MVP scope). **S1 security proofs explicitly do not read `expiresAt` in precheck/derivation**: it is an initiator execution-window/UI metadata only; adopted records never flip with the wall clock.
 - **fleet (`@mebular/fleet`) has landed M0–M4** (**without changing core/SEALING semantics**): M0 skeleton/boundary, M1 protocol model (events/state machine/local quota + invariant harness), M2 single-machine two-process (spool), M3 real libp2p + memory sync, M4 **agent routing** (registry + Command/Hermes adapters) and the **three collaboration-shape models** (review DAG / bounded negotiation / quota-based chatter + matrix + randomized harness).
   Entry points: `packages/fleet/DESIGN.md`, `PROTOCOL-INVARIANTS.md`, `RUNBOOK.md`. **OpenChamber session seam: resolved** (provider #1 = bridge daemon `POST /agent/run-once`; provider #2 = the Node version of Self-Skills `skills/oc-node-provider`, reusing `oc-bridge.js`, no Python/Hermes needed on Windows; the fleet-side `HttpOpenChamberSeam` stays neutral — replacing the provider does not change fleet code, see `packages/fleet/OPENCHAMBER-SEAM.md`). **Remaining deferral**: executor productization/ops details (optional). **Collaboration-shape live-channel wiring (1d) is complete**.
+- **S2/S3 surface of the security tiers**: S1 delivers core derivation/acceptance only (`security_tier` /
+  `security_approval` / `security_recovery` + `cosign`/`breakGlass`). **TOTP seed and rate limiting**
+  (`security-totp.json`), recovery-code generation/display/consumption UI, master-key backup/restore,
+  `/admin/api/security/*`, the security card, and audit rendering belong to S2/S3; S1 persists no seed or
+  recovery secret (only public keys/proofs on the graph).
 - **Automatic event pruning**: this round only fixes the constraint and tests — **any pruning must exclude events not yet acked by all authorized peers**; no pruning is implemented.
 - **Trust model v2 (delegation cert chain + join token) has landed** (T2; contract in §1.3, §3; acceptance in the S2 report). **Remaining**: revocation's **network-wide propagation delay** (the `device_revoke` cascade is immediate at the policy layer, but takes effect only once the event syncs to each end) and **cross-NAT measured backfill**.
 

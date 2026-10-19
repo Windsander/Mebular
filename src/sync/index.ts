@@ -50,3 +50,26 @@ export {
   ConfigNamespacePolicy,
   type NamespaceGrantPolicy,
 } from './namespacePolicy.js';
+// S1 · 安全三档（core 公共面：记录形状 + 摘要/配对号/证明预检辅助）
+export {
+  SECURITY_TIER_EVENT,
+  SECURITY_APPROVAL_EVENT,
+  SECURITY_RECOVERY_EVENT,
+  securityActionDigest,
+  pairingCodeForDigest,
+  canonicalCosignProofData,
+  canonicalBreakGlassProofData,
+  verifyCosignProof,
+  verifyBreakGlassProof,
+  type SecurityLevel,
+  type SecurityOp,
+  type CosignProof,
+  type BreakGlassProof,
+  type SecurityTierRecord,
+  type SecurityApprovalRecord,
+  type SecurityRecoveryRecord,
+  type SecurityRejectionReason,
+  type SecurityRejection,
+  type SecurityPolicyState,
+  type SecurityAction,
+} from './grantPolicy.js';

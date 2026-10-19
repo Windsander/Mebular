@@ -52,12 +52,18 @@ import {
   POLICY_ISSUER_DECLARE_EVENT,
   NAMESPACE_MEMBERSHIP_EVENT,
   NAMESPACE_HANDOFF_EVENT,
+  SECURITY_TIER_EVENT,
   type NamespaceGrantRecord,
   type NamespaceRevokeRecord,
   type DeviceRevokeRecord,
   type PolicyIssuerDeclareRecord,
   type NamespaceMembershipRecord,
   type NamespaceHandoffRecord,
+  type SecurityTierRecord,
+  type SecurityLevel,
+  type SecurityPolicyState,
+  type CosignProof,
+  type BreakGlassProof,
 } from './sync/grantPolicy.js';
 import {
   IdentityManager,
@@ -324,6 +330,21 @@ export interface NamespaceHandoffResult {
   handoffEventId?: string;
   resumed?: boolean;
   missing?: Array<{ author: string; count: number }>;
+}
+
+/** S1：设置网络级安全等级（写本机签名的 `security_tier` 记录）。 */
+export interface SetSecurityTierInput {
+  level: SecurityLevel;
+  /** 中档本机 TOTP 动态码（S2 校验；S1 core 只透传/忽略，不做本地门槛） */
+  code?: string;
+  note?: string;
+  /**
+   * 高 → 中/低 时必须携带的会签/恢复码证明；`nonce` 必须与证明 digest 内
+   * 使用的 nonce 一致（缺省生成随机值——有证明时务必显式传入）。
+   */
+  nonce?: string;
+  cosign?: CosignProof;
+  breakGlass?: BreakGlassProof;
 }
 
 export class Mebular {
@@ -847,6 +868,42 @@ export class Mebular {
       data: { deviceRevoke },
       namespace: POLICY_NAMESPACE,
     });
+  }
+
+  /**
+   * S1：设置网络级安全等级（写本机签名 `security_tier` 记录到 `__policy__`）。
+   *
+   * 网络验收规则（`derivePolicyState`）：缺省 low；low/medium → 任意档无证明要求；
+   * **high → 非 high** 必须携有效 `cosign`/`breakGlass`（防降级逃逸）。本方法只负责
+   * 写记录，不在本地重复网络验收；中档 TOTP 本机门槛由 S2 在调用方/写端点接线。
+   */
+  async setSecurityTier(input: SetSecurityTierInput): Promise<Event> {
+    if (input.level !== 'low' && input.level !== 'medium' && input.level !== 'high') {
+      throw new MebularError(`未知安全等级：${String(input.level)}`, ErrorCodes.VALIDATION_INVALID_ARGUMENT);
+    }
+    const securityTier: SecurityTierRecord = {
+      level: input.level,
+      nonce: input.nonce ?? randomUUID(),
+      issuedAt: Date.now(),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+      ...(input.cosign !== undefined ? { cosign: input.cosign } : {}),
+      ...(input.breakGlass !== undefined ? { breakGlass: input.breakGlass } : {}),
+    };
+    return this.eventLog.append({
+      type: SECURITY_TIER_EVENT,
+      data: { securityTier },
+      namespace: POLICY_NAMESPACE,
+    });
+  }
+
+  /**
+   * S1：只读安全等级出口（缺省 low）。**必含 `admitted`**：批准失败时用户
+   * 必须能看到「谁有资格批准、缺了谁」（SPEC §3.5）。`rejections` 对齐
+   * P2「拒绝不静默」。
+   */
+  async getSecurityTier(): Promise<SecurityPolicyState> {
+    const policy = this.assertReady(this.graphPolicyImpl, 'namespacePolicy');
+    return policy.getSecurityTier();
   }
 
   /**

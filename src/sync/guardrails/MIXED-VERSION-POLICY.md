@@ -17,7 +17,7 @@
 
 | 档 | 定义 | 例子（本仓已发生） | 发布要求 |
 |---|---|---|---|
-| **A · 加法式** | 旧端**能安全忽略**：新增可选字段 / 新事件类型 / 新记录类型 | `namespace` 可选字段；`sync-offer.snapshot` / `sync-ack.snapshotApplied` 可选字段；`namespace_membership` 新记录类型（旧端忽略 ⇒ legacy-empty）；`authorCertificateChain` 可选字段 | 随时发布；不需要全端同步；旧端降级必须是「少收」。（注意：**新增消息类型**默认不属 A 类——旧端的帧序校验会把未知 type 当协议违例，见 §2 注意事项） |
+| **A · 加法式** | 旧端**能安全忽略**：新增可选字段 / 新事件类型 / 新记录类型 | `namespace` 可选字段；`sync-offer.snapshot` / `sync-ack.snapshotApplied` 可选字段；`namespace_membership` 新记录类型（旧端忽略 ⇒ legacy-empty）；`authorCertificateChain` 可选字段；S1 `security_tier` / `security_approval` / `security_recovery` 新记录类型 + `cosign`/`breakGlass` 可选证明字段（旧端忽略） | 随时发布；不需要全端同步；旧端降级必须是「少收」。（注意：**新增消息类型**默认不属 A 类——旧端的帧序校验会把未知 type 当协议违例，见 §2 注意事项） |
 | **B · 语义式** | 改变**采纳/判定**结果的规则 | 策略推导规则（R-a/R-b 迭代上限）、成员闸门启用条件、令牌/证书校验收紧或放宽 | 发布说明**强制标注**；限「全端同版本族」窗口内生效；必须附混合版本验证（§5）与保守侧论证 |
 | **C · 传输式** | 破坏帧序列/编码本身 | 改变 hello 必填字段集；改变内容寻址字段集（`canonicalEventData`）；bump libp2p protocol 串 | 等同 B 类，并要求旧端收到**显式**错误而非静默错位 |
 
@@ -37,6 +37,7 @@
 | 快照（`sync-offer.snapshot`） | 旧端缺快照能力：只发事件流即可（新端对「自报空水位」可直接走事件流；快照是发送方主动选择，**降到事件流即安全**） | 新端收到旧端事件流照常应用 | 少/慢，不劣化安全 | 快照门禁（R2/R3）不放松；发送方在未知对端时**允许**主动不发快照（成本是首同步慢） |
 | `namespace_membership`（M1–M3） | 旧端忽略该记录 → 该分区按 legacy-empty 处理 | 新端看到「旧端未启用成员资格」→ 沿用 hello 声明 | 少收（不 fail-open） | 已有政策锚点（`POLICY-INVARIANTS.md` §9）；**全端升级后**严格成员资格自动生效，无需迁移动作 |
 | `policy_issuer_declare`（C1） | 旧端忽略 → 该声明不生效（授权可能少） | 同 | 少授权（不越权） | 配置 `policyIssuers` 是旧端兜底路径，窗口内保留 |
+| `security_tier` / `security_approval` / `security_recovery`（S1） | 旧端忽略新记录类型 → 档位视图恒为 low；旧端仍按旧规则采纳/吊销 | 新端看到旧端发出的**裸** `device_revoke` / 首现 grant/membership：当刻档位=high 时**不采纳**（`missing-proof` 可见）；旧端不执行 high 门槛 | **少采纳 / 两端吊销视图可能短暂分歧**（不 fail-open；绝不越权/多收） | 新端 `PolicyState.security.rejections` 可见；升级窗口内**先升级会被会签约束的设备**、再升级其余端；发布说明强制标注「旧端不执行门槛、新端对旧端裸记录 @high 不采纳」。**禁止**在混合窗口把档位切到 high 后依赖旧端完成踢人/首现 |
 | 委派证书链（T2） | 旧端无法验证带链证书的**中继**事件 → 拒绝 | 同 | 少收 | 直连快路径不受影响；窗口内建议委派设备优先直连 |
 | 新增事件类型（如 `net_endpoints`） | 旧端：**入日志但不物化**（`apply.ts:97-100`），数据「日志有、图无」 | 同 | 少物化 | 属 A 类可发布；新端应容忍旧端不回传（幂等/重放安全） |
 | 反熵/自动签发/推送节奏 | 纯本地行为，对旧端表现为普通会话 | 同 | —— | 节奏参数不是协议 |
@@ -55,7 +56,9 @@
 
 每个 B 类或「帧序列相关」的 A 类变更，PR 必须附**混合版本测试计划**。当前仓库**没有任何混合版本
 自动化**；最接近的是 `scripts/accept-auto-grant.mjs` ④a「老订阅端行为模拟」（新代码扮演只 hello、
-不写 membership 的旧订阅端）。建议的最低可行自动化为：
+不写 membership 的旧订阅端）。S1 安全三档的混合验证最低要求：旧端行为模拟器**不识别**
+`security_tier`/`security_approval`/`security_recovery`、**剥离** `cosign`/`breakGlass` 字段，
+验证「旧端裸记录 → 新端 @high 不采纳且 `rejections` 可见；旧端自身行为不变」。建议的最低可行自动化为：
 
 1. **行为模拟级**（可用现有代码达成）：用一个「旧端适配器」剥离/忽略新字段与新消息（如禁用 nudge、
    禁用快照、不物化新事件类型），跑双向矩阵；

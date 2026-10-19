@@ -27,6 +27,19 @@ hello 订阅声明降级为**活跃性/一致性校验**，与实际成员资格
 不撤销「曾启用」——闸门单调启用）。旧节点（不含 M1）不识别 `namespace_membership`，只会看到
 「对端未启用成员资格」→ **行为不变/少收**（安全方向，不 fail-open）；全端升级后启用严格成员资格。
 
+**S1（安全三档，C3 A 类记录 + B 类语义）**：新增 `__policy__` 记录类型
+`security_tier`（档位）、`security_approval`（会签请求/批准/拒绝）、`security_recovery`
+（恢复码公钥登记/轮换），以及既有 `device_revoke` / `namespace_grant` /
+`namespace_membership` / `security_tier` / `security_recovery` 的**可选证明字段**
+`cosign` / `breakGlass`。**线协议零新增消息类型**：全部载体是事件/记录层，旧端
+`isPolicyType` 不含新类型 → 忽略（A 类，行为逐字节不变）；旧端忽略未知证明字段。
+**语义面属 B 类**（改变采纳/判定结果）：档位缺省 `low`；`high → 非 high` 必须携
+有效 `cosign`（批准设备签名）或 `breakGlass`（恢复码签名）；`high` 下的踢人
+（`device_revoke`）与新设备首现（`namespace_grant` / `namespace_membership`）
+必须携证明；证明的密码学预检（链锚定/签名）异步完成，**推导/预检全程无墙钟**
+（`issuedAt/expiresAt` 只作流程/UI 元数据，不参与采纳）。`admitted`（有资格批准
+的设备）与 `rejections`（§3.4E 原因）经 `PolicyState.security` 暴露，拒绝不静默。
+
 ## 1. 记录类型 × 签发者状态 × 对象状态
 
 「对象状态」对 `namespace_revoke` 指其**目标 grantId**；对 `grant` 指自身 grantId；
@@ -60,6 +73,23 @@ hello 订阅声明降级为**活跃性/一致性校验**，与实际成员资格
 | `namespace_membership` | 已被吊销（R-b 含历史） | 任意 | **不采纳** | harness `扰动 d` |
 | `namespace_membership` | 可信/任意 | 成员已被 `device_revoke` 吊销 | **不采纳** | `M1 被吊销成员的记录不采纳` |
 | `namespace_membership`（伪造） | 非本用户主密钥链 | 任意 | **忽略**（信任过滤） | 锚点⑤ |
+| `security_tier`（low/medium 语境） | 可信、未被吊销 | 任意 | **采纳**：`level = record.level`（网络侧无证明要求；medium 的本机 TOTP 门槛属 S2） | `R1-1` · `R1-4` |
+| `security_tier`（high → 非 high） | 可信、未被吊销 | 有效 `cosign`/`breakGlass` | **采纳**（降档；证明按 §3.4A.3/§3.6 验收） | `R1-3` |
+| `security_tier`（high → 非 high） | 可信、未被吊销 | 无证明 / 无效证明 / 批准缺失或非因果 / approver 不满足 | **不采纳**（fail-closed，进 `security.rejections`） | `R1-3` · `R1-8` |
+| `security_tier`（high → high） | 可信、未被吊销 | 任意 | **采纳但无效果**（同级重发幂等） | `R1-1` |
+| `security_tier` | 已被吊销（R-b 含历史） | 任意 | **不采纳**（档位不变） | `R1-2` |
+| `device_revoke`（当刻 high） | 可信、未被吊销 | 无证明 / 无效证明 | **不采纳**（目标不进 `revoked`；进 `rejections`） | `R1-5` · `R1-8` |
+| `device_revoke`（当刻 high） | 可信、未被吊销 | 有效 `cosign`（approver ≠ author/subject）或 `breakGlass` | **采纳**（目标进 `revoked`） | `R1-5` · `R1-11` |
+| `namespace_grant` / `namespace_membership`（首现 @high） | 可信、未被吊销 | 无证明 / 无效证明 | **不采纳**：不进授权/成员集合，且设备不進 `admitted` | `R1-6` |
+| `namespace_grant` / `namespace_membership`（首现 @high） | 可信、未被吊销 | 有效 `cosign(op:'join', initiator ≠ X)` / `breakGlass` | **采纳**：记录生效，X 進 `admitted` | `R1-6` |
+| `namespace_grant` / `namespace_membership`（历史成员，tier 前已有被采纳记录） | 可信、未被吊销 | 任意 | **不回溯要求会签**（已在 `admitted₀`） | `R1-6` |
+| `security_recovery(mode:'set')`（升档仪式内：R-c 序早于首条被采纳 high-tier） | 可信、未被吊销 | 任意 | **采纳**（`recoveryKeyId = keyId`；免证明） | `R1-7` · `R1-7b②` |
+| `security_recovery(mode:'set')`（high 已出现之后） | 可信、未被吊销 | 无证明 | **不采纳**（`missing-proof`；防被窃受信设备自登记恢复码） | `R1-7b①` |
+| `security_recovery(mode:'set')`（high 已出现之后） | 可信、未被吊销 | 有效 `cosign(op:'rotate', oldKeyId='')` / `breakGlass` | **采纳**（初始登记；`oldKeyId` 空串哨兵） | `R1-7b③` |
+| `security_recovery`（轮换） | 可信、未被吊销 | 有效 `breakGlass(op:'rotate', oldKeyId=当前 key)` 或 `cosign(op:'rotate', oldKeyId=当前 key)` | **采纳**（`recoveryKeyId` 前移；旧 key 新签名不再采纳，历史不回撤） | `R1-7` · `R1-7b④` |
+| `security_recovery`（轮换） | 可信、未被吊销 | 无证明 / 旧 key 已轮换 / nonce 重放 | **不采纳**（进 `rejections`） | `R1-7` · `R1-8` |
+| `security_approval(approve)` | 可信、**在其 R-c 位次未被吊销** | approver ∈ `admitted`（其位次）∧ approver ≠ initiator | **位次有效**（供后续最终记录引用；事后吊销不回撤） | `R1-12` |
+| `security_approval(approve)` | 可信、其位次已吊销 / 未准入 | — | **位次无效**（引用它的最终记录不采纳并归因） | `R1-3` · `R1-8` · `R1-12` |
 | `namespace_handoff`（2b 审计） | 任意（退订方本地签名写入） | — | **不参与推导**：不改变 `authorized`/`revoked`/`issuers`/`members` | `2b oracle-free：清理前后策略状态一致` · `交接记录样例` |
 
 ## 2. 横切不变量
@@ -148,12 +178,42 @@ hello 订阅声明降级为**活跃性/一致性校验**，与实际成员资格
      `③ 未 reset 的重入→对端不重发（可诊断）` · `④ 重复 rejoin 幂等` · `⑤ 无 tombstone + __policy__ 保留` ·
      `⑦ 在册但无 self-grant→重入通过（W1-B 准入）` · `⑧ 本机被吊销→显式失败（不写标记）`。
 
+12. **安全三档（S1）**：
+    - **无墙钟 / 不翻转**：`issuedAt/expiresAt` 绝不参与预检/推导；同一输入重复推导恒等。
+      构造「R-c 因果正确但 `expiresAt` 已过去」的踢人记录 → **仍采纳**。覆盖 `R1-11`。
+    - **位次语义（R1-12）**：`security_approval(approve)` 的有效性在其 R-c 位次求出并缓存；
+      批准人**事后**被吊销**不回撤**历史批准，也不回撤已采纳的后续记录；其**位次及其后**的
+      新批准不再有效（防「踢批准人 = 救人」）。覆盖 `R1-12`。
+    - **`admitted` 种子与增长**：种子 = 第一条被采纳 `security_tier` 之前出现的被采纳策略记录
+      参与者（作者/对象），**外加首条 tier 记录的作者**（否则单设备升级 high 后无人可批准，
+      违反 §3.5 目的与 §6.4 E-7）；之后设备 X 的首现 `namespace_grant`/`namespace_membership`
+      被采纳 → X 進 `admitted`。`admitted` 必须经只读出口暴露。覆盖 `R1-6`。
+    - **证明验收**：`cosign` 要求链锚定 ∧ approver 签名 ∧ digest 与动作绑定 ∧ 批准记录
+      R-c 更早且位次有效 ∧ approver ≠ author/subject；`breakGlass` 要求 keyId = 当刻
+      `recoveryKeyId` ∧ 签名有效 ∧ digest 绑定 ∧ nonce 一次性。所有不满足进
+      `PolicyState.security.rejections`（§3.4E 枚举：`missing-proof` / `invalid-proof` /
+      `approval-missing-or-not-causal` / `approval-approver-revoked-at-its-order` /
+      `approver-not-admitted-at-approval` / `approver-equals-author` / `approver-equals-subject` /
+      `stale-or-replayed-nonce`；无 `expiresAt` 原因）。覆盖 `R1-3`/`R1-5`/`R1-7`/`R1-8`。
+    - **恢复码初始登记（安全修复）**：`mode:'set'` 且 R-c 序**早于首条被采纳 high-tier**
+      时免证明（升档仪式内）；high 出现之后（含之后降档窗口）的初始登记必须携
+      `cosign(op:'rotate', oldKeyId='')` / `breakGlass`，否则不采纳并进 `rejections`。
+      防「被窃受信设备自登记恢复码 → 用 breakGlass 绕过会签」。覆盖 `R1-7b`。
+    - **防降级逃逸**：`high → medium/low` 无有效证明 → 档位保持 high（fail-closed）；
+      `low/medium` 下的升级/同级变更无网络证明要求。覆盖 `R1-3`/`R1-4`。
+    - **fail-closed 回退**：未收敛时新轴取保守值（证明视为不满足、档位变更不采纳、
+      恢复码签名不采纳），`converged=false` 与 `rejections` 仍可观测。
+
 ## 3. 覆盖它的 harness（`tests/sync/policy-invariants.test.ts`）
 
 固定种子（`mulberry32(0xc0ffee)`）、可复现，`scenarios=300`。**C1 起随机事件含
-`policy_issuer_declare`**。对每组断言：排列不变、幂等、结构不变量
+`policy_issuer_declare`**；**S1 起另有一组 `scenarios=120` 的安全轴随机场景**
+（`mulberry32(0x5ec0)`，在旧记录上追加 `security_tier` / `security_recovery` / high 后裸
+`namespace_membership`），断言排列不变、幂等、`security` 结构不变量（拒绝事件 ID 来自输入、
+`admitted` 设备来自输入、level 合法）与 **oracle-free「删全部 tier → level=low 且 admitted=[]」**。
+旧 300 组继续断言：排列不变、幂等、结构不变量
 （`authorized ∩ revoked = ∅`；被授权设备必曾是某条 `grant` 的主体；**生效引导集合 ⊆ 被声明主体 ∪ 配置**）、
-以及**三条 oracle-free 扰动检查**（不依赖任何参考实现）：
+以及**三条 oracle-free 扰动检查**（不依赖任何参考实现；不含安全记录，故不受安全轴耦合影响）：
 
 - **检查 a（R-b on grants/device_revoke）**：对输出 `revoked` 里的每个设备，删掉它签发的**全部**
   记录后重跑，`authorized`/`revoked` 必须完全不变。

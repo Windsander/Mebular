@@ -1340,13 +1340,14 @@ function closeSecurityAction({ silent = false } = {}) {
   }
 }
 
-function securityModalConfig({ title, body, confirmLabel = '确认', onConfirm = null, hideClose = false, blockClose = false } = {}) {
+function securityModalConfig({ title, body, confirmLabel = '确认', onConfirm = null, hideClose = false, blockClose = false, recovery = null } = {}) {
   stopSecurityPoll();
   state.securityFlow = {
     ...(state.securityFlow ?? {}),
     opener: state.securityFlow?.opener ?? document.activeElement,
     onConfirm,
     blockClose,
+    recovery,
     timer: null,
   };
   $('#security-action-title').textContent = title;
@@ -1458,6 +1459,7 @@ async function securityStartLevelChange(targetLevel) {
           await refresh();
           showToast(`安全等级已设为「${targetLabel}」${result?.ok ? '' : ''}`);
         },
+        recovery: () => securityTierViaRecovery(targetLevel),
       });
       return;
     }
@@ -1476,7 +1478,7 @@ async function securityStartLevelChange(targetLevel) {
 }
 
 /** 发起会签请求 → 展示配对号 → 轮询批准/拒绝/过期 → 自动执行最终动作。 */
-async function securityStartApproval({ title, op, target, level, intro, onApproved }) {
+async function securityStartApproval({ title, op, target, level, intro, onApproved, recovery = null }) {
   const payload = {
     op,
     ...(op === 'kick' ? { target } : {}),
@@ -1499,7 +1501,12 @@ async function securityStartApproval({ title, op, target, level, intro, onApprov
         kvRow('有资格的设备', admitted.length ? escapeHtml(admitted.join(' · ')) : '<span class="muted">（尚未取得 admitted 列表）</span>'),
       ])}
       <p class="sec-wait" id="security-wait-status" aria-live="polite"><span class="sec-wait-dot" aria-hidden="true"></span>等待另一台设备批准…</p>
-      <p class="cfg-help muted">配对号不通过任何网络传输：两台设备各自从动作摘要算出，人眼比对即可。</p>`,
+      <p class="cfg-help muted">配对号不通过任何网络传输：两台设备各自从动作摘要算出，人眼比对即可。</p>
+      ${typeof recovery === 'function'
+        ? `<div class="domain-actions"><button class="btn btn-small btn-crt" type="button" data-security-recovery-switch>另一台设备不在？用恢复码执行</button></div>
+           <p class="cfg-help muted">切到恢复码后，这次会签请求会留待过期；恢复码只在本次本机签名时使用。</p>`
+        : ''}`,
+    recovery,
   });
   const started = Date.now();
   const tick = async () => {
@@ -1726,7 +1733,77 @@ async function securityRecoveryGenerate() {
   }
 }
 
-/** 踢人改道（SPEC §5.2）：low 直接确认；medium 要码；high 会签。 */
+const SECURITY_RECOVERY_ERROR_TEXT = {
+  recovery_mismatch: '恢复码不匹配当前 keyId（可能已被轮换）：请使用最新恢复码。',
+  recovery_missing: '尚未生成恢复码：请先在安全卡生成/轮换恢复码。',
+  recovery_invalid: '恢复码格式不正确：请完整输入 34 位（连字符可省略）。',
+  recovery_not_applicable: '当前不是高档：恢复码只用于替代高档会签，无需输入。',
+  recovery_sign_failed: '恢复码签名校验失败：请重试；若持续失败请轮换恢复码。',
+};
+
+function securityRecoveryErrorText(error) {
+  return SECURITY_RECOVERY_ERROR_TEXT[error?.payload?.error] ?? error?.message ?? '恢复码执行失败';
+}
+
+/** 恢复码输入（高档「另一台设备不在」路径）：只用于本次签名，不回显、不进 localStorage。 */
+function securityRecoveryCodeModal({ title, intro, confirmLabel = '用恢复码执行', onSubmit }) {
+  securityModalConfig({
+    title,
+    body: `<p class="muted">${escapeHtml(intro)}</p>
+      <div class="field"><label for="security-recovery-code">恢复码</label>
+      <input id="security-recovery-code" class="crt-input" type="password" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-…" aria-describedby="security-recovery-help" /></div>
+      <p id="security-recovery-help" class="cfg-help muted">离线保存的 34 位码；只在本机参与签名，不上传、不写入浏览器存储，提交后输入框即清空。</p>`,
+    confirmLabel,
+    onConfirm: async () => {
+      const input = $('#security-recovery-code');
+      const code = input?.value?.trim() ?? '';
+      if (!code) {
+        securitySetError('请输入离线恢复码。');
+        return;
+      }
+      if (input) input.value = '';
+      try {
+        await onSubmit(code);
+      } catch (error) {
+        error.message = securityRecoveryErrorText(error);
+        throw error;
+      }
+    },
+  });
+  setTimeout(() => $('#security-recovery-code')?.focus(), 0);
+}
+
+async function securityRevokeViaRecovery(device) {
+  securityRecoveryCodeModal({
+    title: `屏蔽 ${device.deviceId} · 恢复码`,
+    intro: '当前为高 · 设备会签。用离线恢复码在本机签名后立即写入屏蔽记录；恢复码不经过网络。',
+    onSubmit: async (code) => {
+      await api(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, {
+        method: 'POST',
+        body: { recoveryCode: code },
+      });
+      closeSecurityAction();
+      await refresh();
+      showToast('已在本地屏蔽该设备（恢复码）');
+    },
+  });
+}
+
+async function securityTierViaRecovery(targetLevel) {
+  const targetLabel = securityLevelLabel(targetLevel);
+  securityRecoveryCodeModal({
+    title: `降级到${targetLabel} · 恢复码`,
+    intro: '当前为高 · 设备会签。用离线恢复码签署本次降档；恢复码不经过网络。',
+    onSubmit: async (code) => {
+      await api('/admin/api/security/tier', { method: 'POST', body: { level: targetLevel, recoveryCode: code } });
+      closeSecurityAction();
+      await refresh();
+      showToast(`安全等级已设为「${targetLabel}」（恢复码）`);
+    },
+  });
+}
+
+/** 踢人改道（SPEC §5.2）：low 直接确认；medium 要码；high 会签或恢复码。 */
 async function securityRevokeFlow(device) {
   const level = state.security?.level ?? 'low';
   const ok = await confirmModal({
@@ -1753,6 +1830,7 @@ async function securityRevokeFlow(device) {
           await refresh();
           showToast(`已在本地屏蔽该设备（会签）`);
         },
+        recovery: () => securityRevokeViaRecovery(device),
       });
     } catch (error) {
       window.alert(`发起会签失败：${error.message}`);
@@ -3563,6 +3641,15 @@ $('#security-action-close')?.addEventListener('click', () => {
   closeSecurityAction();
 });
 $('#security-action')?.addEventListener('click', (event) => {
+  const recoverySwitch = event.target.closest('[data-security-recovery-switch]');
+  if (recoverySwitch) {
+    const handler = state.securityFlow?.recovery;
+    if (typeof handler === 'function') {
+      stopSecurityPoll();
+      handler();
+    }
+    return;
+  }
   const ack = event.target.closest('[data-security-ack]');
   if (ack) {
     closeSecurityAction();

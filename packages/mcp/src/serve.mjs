@@ -593,6 +593,11 @@ export async function securityWriteGate({ app, home, path, input = {}, namespace
     level = typeof input.level === 'string' ? input.level : undefined;
   }
   if (action === null) return { ok: true };
+  // S4：恢复码不是预签证明，必须由端点 derive + sign 后才落盘。
+  // 这里只放行 revoke/tier 的 recoveryCode 请求；档位/当前 keyId 的权威校验在端点内完成，
+  // 避免在门禁里提前消费一次性 nonce，也避免把码写进任何错误路径。
+  const recoveryCode = typeof input.recoveryCode === 'string' ? input.recoveryCode.trim() : '';
+  if (recoveryCode.length > 0 && (action === 'revoke' || action === 'tier')) return { ok: true };
   return lib.evaluateSecurityGate(app, home, {
     action,
     ...(typeof input.code === 'string' ? { code: input.code } : {}),
@@ -603,6 +608,73 @@ export async function securityWriteGate({ app, home, path, input = {}, namespace
     ...(level !== undefined ? { level } : {}),
     namespace: typeof input.namespace === 'string' && input.namespace.length > 0 ? input.namespace : namespace,
   });
+}
+
+/**
+ * S4：恢复码代签（服务端 derive → 对齐当刻 keyId → signBreakGlass）。
+ * 仅高档可用；返回证明供 writeDeviceRevoke / writeSecurityTier 落盘。
+ * 本函数及调用方都不得记录/回显 code（只在内存里派生私钥）。
+ */
+async function signRecoveryProof({ lib, app, code, op, subject, level, initiator }) {
+  const state = await lib.readSecurityState(app);
+  if (state.level !== 'high') {
+    return {
+      ok: false,
+      status: 409,
+      error: 'recovery_not_applicable',
+      message: `当前不是高档（${state.level}）：恢复码只用于替代高档会签，无需输入。`,
+    };
+  }
+  // 以 core 的当刻派生为准（getSecurityTier().recoveryKeyId）：不在服务端另建登记口径。
+  const currentKeyId = state.recoveryKeyId;
+  if (currentKeyId === undefined) {
+    return {
+      ok: false,
+      status: 409,
+      error: 'recovery_missing',
+      message: '尚未生成恢复码：请先在安全卡生成/轮换恢复码。',
+    };
+  }
+  let derived;
+  try {
+    derived = lib.deriveRecoveryKey(code);
+  } catch {
+    return {
+      ok: false,
+      status: 400,
+      error: 'recovery_invalid',
+      message: '恢复码格式不正确：请完整输入 34 位（连字符可省略）。',
+    };
+  }
+  if (derived.keyId !== currentKeyId) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'recovery_mismatch',
+      message: '恢复码不匹配当前 keyId（可能已被轮换）：请使用最新恢复码。',
+    };
+  }
+  const signed = lib.signBreakGlass({
+    code,
+    op,
+    initiator,
+    ...(subject !== undefined ? { subject } : {}),
+    ...(level !== undefined ? { level } : {}),
+  });
+  const verified = lib.verifyBreakGlassProof(signed.proof, {
+    publicKeyHex: derived.publicKeyHex,
+    expectedDigest: signed.digest,
+    currentKeyId,
+  });
+  if (!verified.ok) {
+    return {
+      ok: false,
+      status: 500,
+      error: 'recovery_sign_failed',
+      message: '恢复码签名校验失败：请重试；若持续失败请轮换恢复码。',
+    };
+  }
+  return { ok: true, proof: signed.proof, digest: signed.digest, nonce: signed.nonce };
 }
 
 function sendJson(res, status, data) {
@@ -1341,6 +1413,37 @@ export async function startHttpServer({
       if (!lib) return sendJson(res, 503, { ok: false, error: 'security_unavailable', message: '安全模块不可用（@mebular/fleet 未构建）' });
       const state = await lib.readSecurityState(app);
       const events = await lib.listPolicyEvents(app);
+      const suppliedRecoveryCode = typeof input.recoveryCode === 'string' ? input.recoveryCode.trim() : '';
+      let breakGlass = input.breakGlass;
+      if (suppliedRecoveryCode.length > 0) {
+        if (input.breakGlass !== undefined || input.cosign !== undefined || input.nonce !== undefined
+          || typeof input.approvalId === 'string') {
+          return sendJson(res, 400, {
+            ok: false,
+            error: 'bad_request',
+            message: 'recoveryCode 不能与 breakGlass / 会签批准 / 自定义 nonce 同时使用：请只选一种执行方式。',
+          });
+        }
+        if (level === 'high') {
+          return sendJson(res, 409, {
+            ok: false,
+            error: 'recovery_not_applicable',
+            message: '恢复码只用于高档降档；升档或保持高档无需恢复码。',
+          });
+        }
+        const signed = await signRecoveryProof({
+          lib,
+          app,
+          code: suppliedRecoveryCode,
+          op: 'tier',
+          level,
+          initiator: app.deviceId ?? deviceId ?? '',
+        });
+        if (!signed.ok) {
+          return sendJson(res, signed.status, { ok: false, error: signed.error, message: signed.message });
+        }
+        breakGlass = signed.proof;
+      }
       let recoveryCode;
       let recoveryKeyId = state.recoveryKeyId;
       if (level === 'high' && state.level !== 'high') {
@@ -1360,7 +1463,7 @@ export async function startHttpServer({
       }
       let cosign = input.cosign;
       let approvalNonce;
-      if (cosign === undefined && input.breakGlass === undefined && typeof input.approvalId === 'string') {
+      if (cosign === undefined && breakGlass === undefined && typeof input.approvalId === 'string') {
         const approval = lib.findApproval(events, input.approvalId);
         cosign = approval?.cosign;
         approvalNonce = approval?.nonce;
@@ -1370,12 +1473,13 @@ export async function startHttpServer({
         ...(typeof input.note === 'string' ? { note: input.note } : {}),
         ...(input.nonce !== undefined ? { nonce: input.nonce } : approvalNonce !== undefined ? { nonce: approvalNonce } : {}),
         ...(cosign !== undefined ? { cosign } : {}),
-        ...(input.breakGlass !== undefined ? { breakGlass: input.breakGlass } : {}),
+        ...(breakGlass !== undefined ? { breakGlass } : {}),
       });
       return sendJson(res, 200, {
         ok: true,
         level,
         ...(written.id !== undefined ? { eventId: written.id } : {}),
+        ...(suppliedRecoveryCode.length > 0 ? { method: 'breakGlass', auditLabel: '恢复码' } : {}),
         ...(recoveryKeyId !== undefined ? { recoveryKeyId } : {}),
         ...(recoveryCode !== undefined ? {
           recoveryCode,
@@ -1746,6 +1850,41 @@ export async function startHttpServer({
       if (action === 'revoke') {
         const input = parseJsonBody(body) ?? {};
         const lib = await loadFleetSecurity();
+        const suppliedRecoveryCode = typeof input.recoveryCode === 'string' ? input.recoveryCode.trim() : '';
+        if (suppliedRecoveryCode.length > 0) {
+          if (!lib) return sendJson(res, 503, { ok: false, error: 'security_unavailable', message: '安全模块不可用（@mebular/fleet 未构建）' });
+          if (input.breakGlass !== undefined || input.cosign !== undefined || input.nonce !== undefined
+            || typeof input.approvalId === 'string') {
+            return sendJson(res, 400, {
+              ok: false,
+              error: 'bad_request',
+              message: 'recoveryCode 不能与 breakGlass / 会签批准 / 自定义 nonce 同时使用：请只选一种执行方式。',
+            });
+          }
+          const signed = await signRecoveryProof({
+            lib,
+            app,
+            code: suppliedRecoveryCode,
+            op: 'kick',
+            subject: deviceId,
+            initiator: app.deviceId ?? deviceId ?? '',
+          });
+          if (!signed.ok) {
+            return sendJson(res, signed.status, { ok: false, error: signed.error, message: signed.message });
+          }
+          const event = await lib.writeDeviceRevoke(app, {
+            subject: deviceId,
+            note: typeof input.note === 'string' ? input.note : 'recovery-code',
+            breakGlass: signed.proof,
+          });
+          return sendJson(res, 200, {
+            ok: true,
+            deviceId,
+            eventId: event.id,
+            method: 'breakGlass',
+            auditLabel: '恢复码',
+          });
+        }
         let cosign = input.cosign;
         let approvalNonce = typeof input.nonce === 'string' ? input.nonce : undefined;
         if (lib && (cosign !== undefined || typeof input.approvalId === 'string') && input.breakGlass === undefined) {

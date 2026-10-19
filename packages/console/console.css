@@ -333,11 +333,16 @@ select {
 .btn-small { padding: 4px 8px; font-size: 12px; }
 
 /* ---------- 模态 ---------- */
-/* 走查修复：弹层顶部锚定（原 flex 垂直居中 → 切「选项卡」页面高度变化时整块垂直跳） */
-.modal { position: fixed; inset: 0; background: rgba(2, 4, 10, 0.72); display: flex; align-items: flex-start; justify-content: center; z-index: 50; overflow-y: auto; padding: 7vh 0 32px; }
-.modal-box { background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; width: min(520px, 92vw); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); margin: auto; }
+/* 走查修复：弹层顶部锚定（原 flex 垂直居中 → 切「选项卡」页面高度变化时整块垂直跳）。
+   轮 C：背板不滚（fixed + overflow hidden），滚动收进 .modal-box（六处弹层共用）。 */
+.modal { position: fixed; inset: 0; background: rgba(2, 4, 10, 0.72); display: flex; align-items: flex-start; justify-content: center; z-index: 50; overflow: hidden; padding: 24px; }
+.modal-box { background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; width: min(520px, 92vw); max-height: calc(100vh - 48px); overflow-y: auto; overscroll-behavior: contain; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); margin: 0; }
 .modal-box h2 { margin: 0 0 10px; font-size: 15px; }
 .modal-box p { margin: 0; line-height: 1.7; white-space: pre-wrap; }
+/* 轮 C：弹层帮助文本收窄行长（中文约 30–34 字；英文约 60–68 字），避免 90+ 字符长行 */
+.modal-box p, .modal-note, .cfg-help, .cfg-effective, .wizard-note { max-width: 62ch; }
+/* 弹层打开时锁住背后的页面滚动（背板本身也不滚） */
+body.modal-open { overflow: hidden; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 
 /* ---------- 向导 ---------- */
@@ -855,6 +860,25 @@ select {
 .cfg-control .cfg-toggle { order: 0; }
 .cfg-help { flex: 1 1 100%; margin: 0; font-size: 10.5px; line-height: 1.5; }
 .cfg-warn { color: #ffd27a; }
+/* 轮 C · 呈现分级：帮助 / 机制 / 警告墙默认折叠（常显只留名称 + 控件 + 状态） */
+.cfg-more { flex: 1 1 100%; margin: 0; }
+.cfg-more > summary { cursor: pointer; color: var(--crt-dim); font-size: 11px; line-height: 1.5; width: fit-content; }
+.cfg-more > summary:hover { color: var(--crt); }
+.cfg-more[open] > summary { margin-bottom: 2px; }
+.cfg-more .cfg-help + .cfg-help { margin-top: 4px; }
+.cfg-warn-mark { margin-left: 4px; color: #ffd27a; font-size: 11px; }
+.task-card-more { margin: 0 0 4px; }
+.task-card-more > summary { cursor: pointer; color: var(--crt-dim); font-size: 11px; width: fit-content; }
+.task-card-more > summary:hover { color: var(--crt); }
+.task-card-more p { margin: 4px 0 0; font-size: 11px; line-height: 1.6; }
+.page-more { margin: 0 0 8px; }
+.page-more > summary { cursor: pointer; color: var(--crt-dim); font-size: 11px; width: fit-content; }
+.page-more > summary:hover { color: var(--crt); }
+.page-more p { margin: 4px 0 0; font-size: 11px; line-height: 1.6; }
+/* 预警常显一行；完整三元组只在异常时展开（见 runtimeCompareLine） */
+.cfg-effective .cfg-ok { color: var(--ok); }
+.cfg-pending { color: #ffd27a; }
+.settings-slot[hidden] { display: none; }
 /* 双值行：结构化（已配置 X / 实际 Y）；一致=暗色，不一致=警示色；优先不换行 */
 .cfg-effective {
   flex: 1 1 100%;
@@ -969,6 +993,15 @@ select {
   .cfg-label { line-height: 1.4; min-height: 0; }
   .settings-kv dd, .cfg-help, .cfg-effective, .snippet { overflow-wrap: anywhere; }
   .modal-box { max-width: 100%; }
+  .modal { padding: 12px; }
+  .modal-box { max-height: calc(100vh - 24px); }
+  /* 窄屏：常驻行/动作按钮不把文字挤成竖排 */
+  #settings-resident .asst-row { flex-wrap: wrap; }
+  #settings-resident .asst-name { min-width: 0; }
+  #settings-resident .asst-sp { flex-basis: 100%; }
+  #settings-resident .asst-row .btn,
+  .settings-tab,
+  .settings-tab-extra { white-space: nowrap; }
 }
 
 /* ---------- C2：对端连接路径（只读行） ---------- */
@@ -985,6 +1018,18 @@ select {
 /* ---------- C7：邀请二维码 ---------- */
 .qr-block { display: grid; gap: 6px; justify-items: start; }
 .qr-img { width: 180px; height: 180px; background: #fff; border-radius: 8px; padding: 6px; image-rendering: pixelated; }
+/* 轮 C：邀请弹层窄框内 label/输入/令牌各占整行，复制按钮不再被挤成竖排 */
+#invite-body .readout-block { flex-wrap: wrap; }
+#invite-body .readout-block > .domain-label { flex: 1 1 100%; }
+#invite-body .readout-block > .crt-input,
+#invite-body .readout-block > .copyable,
+#invite-body .readout-block > .cfg-help { flex: 1 1 100%; min-width: 0; }
+#invite-body .copyable .btn { flex: 0 0 auto; white-space: nowrap; }
+/* 邀请详情是「label/value」两列（不是设置页的 label/value/动作三列） */
+#invite-body .settings-kv { grid-template-columns: 96px minmax(0, 1fr); }
+@media (max-width: 760px) {
+  #invite-body .settings-kv { grid-template-columns: minmax(0, 1fr); }
+}
 
 /* ---------- 引导态（首次上手）：建新 / 加入 ---------- */
 .provision-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin-top: 8px; }
@@ -1122,7 +1167,7 @@ select {
 
 /* C. 滚动手感：主滚动容器稳定 gutter（滚动条出现/消失不挤压内容、不跳变） */
 html { scrollbar-gutter: stable; }
-.aside, .modal, .wizard-list, .snippet, .connect-diff, .panel-view, #settings-body { scrollbar-gutter: stable; }
+.aside, .modal-box, .wizard-list, .snippet, .connect-diff, .panel-view, #settings-body { scrollbar-gutter: stable; }
 /* 走查修复：审计/域视图此前漏了 gutter——切换视图后内容溢出时 10px 滚动条挤动面板（「展开后跳一下」） */
 
 /* 简化轮：记忆共享 · 参与开关（v4：状态文字化，开关贴右） */

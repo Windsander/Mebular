@@ -792,7 +792,12 @@ function collectConfigChanges(root) {
 /**
  * D：三元组渲染（已配置 X / 实际 Y / **未生效原因**）。
  * configured/actual/reason 均由服务端 /admin/api/settings.effective 计算（单一真源，前端不推导）。
+ * 轮 C · 呈现分级：三元组相等（且无异常原因）时收成一行「生效中」；异常才完整呈现。
  */
+function reasonIsFatal(reason) {
+  return /(失败|被占|占用|未生效|无法|拒绝|EADDRINUSE|缺证书|MCP_INSECURE_CONFIG)/i.test(String(reason ?? ''));
+}
+
 function runtimeCompareLine(field) {
   const row = effectiveRowOf(field.path);
   if (!row) return '';
@@ -801,14 +806,37 @@ function runtimeCompareLine(field) {
   const mismatch = configured !== null && configured !== undefined
     && JSON.stringify(configured ?? null) !== JSON.stringify(actual ?? null);
   const reason = typeof row.reason === 'string' && row.reason.length > 0 ? row.reason : '';
-  const showReason = reason.length > 0 && reason !== '已生效';
-  return `<p class="cfg-effective${mismatch ? ' is-mismatch' : ''}">`
+  // 「已生效：… / 已装配：…」是生效说明，不是未生效原因；其它原因才作为异常自动出现。
+  // 布尔开关本就关闭时（如语义召回未启用），原因属于「为什么没开」的说明 → 收进详情，不占常显。
+  const infoReason = reason.length > 0 && /^(已生效|已装配)/.test(reason);
+  const boolOff = field.type === 'bool' && configured !== true && actual !== true && !reasonIsFatal(reason);
+  const showReason = reason.length > 0 && !infoReason && !boolOff;
+  const pendingItem = pendingRestartItems().find((item) => item.path === field.path) ?? null;
+  const normal = !mismatch && !showReason && !pendingItem;
+  if (normal) {
+    return `<p class="cfg-effective" data-cfg-state="ok"><span class="cfg-ok">✓ 生效中</span></p>`;
+  }
+  return `<p class="cfg-effective${mismatch ? ' is-mismatch' : ''}" data-cfg-state="exception">`
     + `<span><span class="cfg-eff-key">已配置</span> ${escapeHtml(formatRuntimeValue(configured))}</span>`
     + '<span>/</span>'
     + `<span><span class="cfg-eff-key">实际</span> ${escapeHtml(formatRuntimeValue(actual))}</span>`
+    + (pendingItem ? `<span class="cfg-pending"><span class="cfg-eff-key">待重启</span> 已保存 ${escapeHtml(formatRestartValue(pendingItem.file))} / 当前 ${escapeHtml(formatRestartValue(pendingItem.running))}</span>` : '')
     + (showReason ? `<span class="cfg-reason"><span class="cfg-eff-key">未生效原因</span> ${escapeHtml(reason)}</span>` : '')
     + (mismatch && !showReason ? '<span class="cfg-warn">⚠ 不一致：写入值未生效，实际以运行时为准</span>' : '')
     + '</p>';
+}
+
+/** 收进「详情」的原因（仅布尔开关关闭时的说明；异常原因仍走常显三元组）。 */
+function runtimeFoldedReason(field) {
+  if (field.type !== 'bool') return '';
+  const row = effectiveRowOf(field.path);
+  if (!row) return '';
+  const configured = row.configured;
+  const actual = row.actual;
+  if (configured === true || actual === true) return '';
+  const reason = typeof row.reason === 'string' ? row.reason.trim() : '';
+  if (!reason || /^(已生效|已装配)/.test(reason) || reasonIsFatal(reason)) return '';
+  return reason;
 }
 
 function renderCfgField(field) {
@@ -840,11 +868,22 @@ function renderCfgField(field) {
     control = `<input id="${id}" class="crt-input cfg-input" type="${type}" data-cfg-path="${escapeHtml(field.path)}" value="${escapeHtml(String(value))}" ${attrs} />`;
   }
   const defaultTag = initial.isDefault ? '<span class="cfg-default">默认</span>' : '';
+  const warnMark = field.warn ? '<span class="cfg-warn-mark" title="展开详情查看风险说明" aria-label="有风险说明">⚠</span>' : '';
+  const foldedReason = runtimeFoldedReason(field);
+  const helpBits = [
+    field.help ? `<p class="cfg-help muted">${escapeHtml(field.help)}</p>` : '',
+    foldedReason ? `<p class="cfg-help muted">${escapeHtml(foldedReason)}</p>` : '',
+    field.warn ? `<p class="cfg-help cfg-warn">⚠ ${escapeHtml(field.warn)}</p>` : '',
+  ].filter(Boolean);
+  // 轮 C：帮助 / 机制 / 警告墙收进「详情」；常显只留名称 + 控件 + 状态。
+  const more = helpBits.length
+    ? `<details class="cfg-more"><summary>详情</summary>${helpBits.join('')}</details>`
+    : '';
   return `<div class="cfg-row">
-    <label class="cfg-label" for="${id}">${escapeHtml(field.label)}${defaultTag}</label>
+    <label class="cfg-label" for="${id}">${escapeHtml(field.label)}${defaultTag}${warnMark}</label>
     <div class="cfg-control">${control}
-      <p class="cfg-help muted">${escapeHtml(field.help ?? '')}${field.warn ? ` <span class="cfg-warn">⚠ ${escapeHtml(field.warn)}</span>` : ''}</p>
       ${runtimeCompareLine(field)}
+      ${more}
     </div>
   </div>`;
 }
@@ -884,8 +923,9 @@ function valueWithEffective(mainHtml, { configured, effective }) {
 }
 
 function cfgActionsBlock() {
-  // 简化轮：即时生效——改动即写入（无「保存/撤销」按钮）；需重启项写后自动重启生效
-  return `<p class="muted" style="font-size:11px">改动即生效：需重启的项会自动重启生效（服务托管时<code>mebular service restart</code>，否则给你手动命令）；即时项就地生效。</p>`;
+  // 简化轮：即时生效——改动即写入（无「保存/撤销」按钮）；需重启项写后自动重启生效。
+  // 轮 C：机制说明折叠，常显不占位。
+  return `<details class="page-more"><summary>改动如何生效</summary><p class="muted">改动即生效：需重启的项会自动重启生效（服务托管时 <code>mebular service restart</code>，否则给你手动命令）；即时项就地生效。</p></details>`;
 }
 
 function fieldOf(path) {
@@ -906,7 +946,7 @@ function renderTaskCards() {
         <h4>${escapeHtml(card.title)}</h4>
         ${card.danger ? '<span class="crt-tag crt-tag-warn">危险项</span>' : ''}
       </header>
-      <p class="muted task-card-desc">${escapeHtml(card.desc)}</p>
+      <details class="task-card-more"><summary>这是什么</summary><p class="muted">${escapeHtml(card.desc)}</p></details>
       ${renderEditor(card.fields)}
     </article>`).join('');
 }
@@ -952,7 +992,17 @@ function settingsSignature(activeTab) {
   ]);
 }
 
+/** 设置页折叠块稳定键（跨轮询保留展开态；不触碰 AI 专区的行内详情）。 */
+function settingsFoldKey(el) {
+  if (!el.matches?.('.cfg-more, .task-card-more, .page-more')) return null;
+  const task = el.closest('[data-task]')?.dataset.task ?? '';
+  const path = el.closest('.cfg-row')?.querySelector('[data-cfg-path]')?.dataset.cfgPath ?? '';
+  const summary = el.querySelector(':scope > summary')?.textContent?.trim() ?? '';
+  return `${task}|${path}|${summary}`;
+}
+
 function renderSettings(activeTab = state.settingsTab ?? 'common') {
+  const prevTab = state.settingsTab ?? 'common';
   state.settingsTab = activeTab;
   const body = $('#settings-body');
   // 轮询时内容未变则跳过重建，避免原生 <select> 弹层/焦点/选择被销毁
@@ -963,13 +1013,19 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   const prevPath = prevActive?.dataset?.cfgPath ?? null;
   const prevStart = prevActive?.selectionStart ?? null;
   const prevEnd = prevActive?.selectionEnd ?? null;
+  // 轮 C：设置改为框内滚动后，重建时保留同一 Tab 的滚动位与折叠展开态
+  const sameTab = prevTab === activeTab;
+  const box = $('#settings')?.querySelector('.modal-box') ?? null;
+  const prevScrollTop = sameTab ? (box?.scrollTop ?? 0) : 0;
+  const openFolds = sameTab
+    ? new Set([...body.querySelectorAll('details[open]')].map(settingsFoldKey).filter(Boolean))
+    : new Set();
   const s = state.settings;
   if (!s) {
     body.innerHTML = '<p class="muted">设置加载中…（若持续如此，检查 serve 是否运行）</p>';
     return;
   }
   rebuildConfigFields();
-  const configPath = state.rawConfig?.path ?? 'config.json';
   const self = s.identity.deviceId;
   const isIssuer = Array.isArray(s.policyIssuers) && s.policyIssuers.includes(self);
   const tabButton = (tab) => `<button id="settings-tab-${tab.id}" class="settings-tab${tab.id === activeTab ? ' is-active' : ''}"`
@@ -986,13 +1042,14 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     ${panel('common', `
       <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
       ${wizardRowHtml(typeof window.mebularDesktop?.openWizard === 'function')}
-      <p class="cfg-path muted">修改写入 <code>${escapeHtml(configPath)}</code>（自动保留 .bak 备份）；设备身份 / 存储 / 加密等敏感项请手工编辑。</p>
+      <!-- 预留：后续「安全卡」插槽（本轮只留结构，不渲染功能） -->
+      <section id="settings-security-slot" class="settings-slot" data-settings-slot="security" hidden></section>
       <div class="task-cards">${renderTaskCards()}</div>
       ${cfgActionsBlock()}
     `)}
     ${panel('assistants', `<div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: { ...state, addForm: state.addForm ? assistantAddFormHtml(state.addForm) : '' } })}</div>`)}
     ${panel('advanced', `
-      <p class="cfg-path muted">高级项：改动前请确认理解其安全含义（尤其监听地址、TLS 与 relay）。自动策略（反熵节奏/快照阈值/召回阈值）不在此处暴露，细节请直接编辑 config.json。</p>
+      <details class="page-more"><summary>高级项说明</summary><p class="muted">高级项改动前请确认理解其安全含义（尤其监听地址、TLS 与 relay）。自动策略（反熵节奏/快照阈值/召回阈值）不在此处暴露，细节请直接编辑 config.json。</p></details>
       ${renderAdvanced()}
       <div class="domain-actions"><button id="declare-issuer" class="btn btn-small btn-crt" type="button" ${state.features.writes && !isIssuer && !MOCK ? '' : 'disabled'}>声明本机为引导签发者</button></div>
       <p class="muted" style="font-size:11px">图上声明（签名事件，随 __policy__ 同步；受 device_revoke 排斥）。</p>
@@ -1004,6 +1061,12 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
       </details>
     `)}
   `;
+
+  // 恢复折叠展开态（仅设置页的字段/卡片/机制折叠）
+  body.querySelectorAll('details').forEach((el) => {
+    const key = settingsFoldKey(el);
+    if (key && openFolds.has(key)) el.open = true;
+  });
 
   body.querySelectorAll('[data-copy]').forEach((button) => {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
@@ -1020,6 +1083,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
       }
     }
   }
+  if (box && prevScrollTop > 0) box.scrollTop = prevScrollTop;
 }
 
 function renderDiagnostics() {
@@ -1121,6 +1185,7 @@ function renderAbout() {
   rebuildConfigFields();
   const self = s.identity.deviceId;
   const isIssuer = Array.isArray(s.policyIssuers) && s.policyIssuers.includes(self);
+  const configPath = state.rawConfig?.path ?? 'config.json';
   const listenAlarm = (s.network.listen ?? []).filter((addr) => {
     const m = addr.match(/\/(ip4|ip6|dns4|dns6|dns)\/([^/]+)/);
     if (!m) return false;
@@ -1141,6 +1206,8 @@ function renderAbout() {
         ...(s.identity.peerId ? [copyRowOf('peerId', s.identity.peerId)] : []),
         ...addrRows,
         copyRowOf('storagePath', s.storage.path ?? '—'),
+        copyRowOf('配置文件', configPath),
+        kvRow('写盘备份', `<code>${escapeHtml(configPath)}.bak</code><span class="muted">（每次写入前自动保留）</span>`),
         kvRow('storageAdapter', escapeHtml(s.storage.adapter)),
         kvRow('加密级别', `${escapeHtml(s.encryption.level)}${s.encryption.atRest ? '（静态加密生效）' : ''}`),
       ])}
@@ -1293,7 +1360,7 @@ function downloadConfig() {
 }
 
 /** 写配置补丁（共用核心：G4 自锁 409 二次确认 → 写入 → 自动重启/即时生效分支）。 */
-async function submitConfigPatch(patch) {
+async function submitConfigPatch(patch, warning = '') {
   const submit = (confirm) => api('/admin/api/config', { method: 'POST', body: confirm ? { patch, confirm: true } : { patch } });
   try {
     return await submit(false);
@@ -1301,9 +1368,12 @@ async function submitConfigPatch(patch) {
     // G4：自锁防护（auth/host/tls）→ 服务端要求二次确认（品牌确认卡，不发系统弹窗）
     if (error?.status === 409 && error?.payload?.needsConfirmation) {
       const lockPaths = Array.isArray(error.payload.paths) ? error.payload.paths : [];
+      const warnText = typeof warning === 'string' && warning.trim().length > 0
+        ? `\n\n风险说明：${warning.trim()}`
+        : '';
       const ok = await confirmModal({
         title: '写入并重启（可能失联）',
-        body: `${error.payload.message ?? ''}\n\n命中：${lockPaths.join(', ')}\n如重启后控制台打不开，请手工编辑 config.json 改回并重启。确定继续？`,
+        body: `${error.payload.message ?? ''}${warnText}\n\n命中：${lockPaths.join(', ')}\n如重启后控制台打不开，请手工编辑 config.json 改回并重启。确定继续？`,
         confirmLabel: '确认并重启',
       });
       if (!ok) {
@@ -1357,7 +1427,7 @@ async function applyConfigField(field, next) {
   const patch = {};
   cfgSet(patch, field.path, next);
   try {
-    const res = await submitConfigPatch(patch);
+    const res = await submitConfigPatch(patch, field.warn ?? '');
     await onConfigSaved(res);
   } catch (error) {
     if (!error?.uiHandled) showToast(`没保存成功：${error.message}`);
@@ -2664,16 +2734,82 @@ function confirmModal({ title, body, confirmLabel }) {
   });
 }
 
-$('#modal-cancel').addEventListener('click', () => {
+function settleConfirmModal(result) {
   $('#modal').hidden = true;
-  if (modalResolve) modalResolve(false);
+  if (modalResolve) modalResolve(result);
   modalResolve = null;
+}
+
+// ---------- 轮 C：弹层统一关闭规范（点空白 ∧ Esc；六处弹层一处实现） ----------
+// 规则（危险语义明确）：
+//  - 确认弹层：Esc / 点空白 = 「取消」（resolve false），永不等于确认；
+//  - 首次上手 provision：不可关闭（必须先建新或加入）；
+//  - 连接向导：连接 / 签发在途时不可关闭，其余可关；
+//  - 其余弹层（设置 / 关于 / 邀请 / 交接）：可关；设置即时写盘，无「未保存草稿」。
+function visibleModalElements() {
+  return [...document.querySelectorAll('.modal')].filter((el) => !el.hidden);
+}
+
+function topmostModal() {
+  const modals = visibleModalElements();
+  return modals.length > 0 ? modals[modals.length - 1] : null;
+}
+
+function modalCanDismiss(el) {
+  if (!el || el.id === 'provision') return false;
+  if (el.dataset.modalStatic === 'true') return false;
+  if (el.id === 'wizard' && (wizardState.connection === 'connecting' || wizardState.granting === true)) return false;
+  return true;
+}
+
+function dismissModal(el) {
+  if (!el || !modalCanDismiss(el)) return false;
+  if (el.id === 'modal') { settleConfirmModal(false); return true; }
+  if (el.id === 'wizard') { closeWizard(); return true; }
+  el.hidden = true;
+  if (el.id === 'handoff') {
+    handoffNs = null;
+    $('#handoff-result').hidden = true;
+    $('#handoff-result').textContent = '';
+  }
+  if (el.id === 'invite') state.inviteToken = null;
+  return true;
+}
+
+// 点空白：按下与抬起都必须落在背板本身（防「弹层内按下、拖到外面松开」误关危险确认）。
+let backdropPointerDownTarget = null;
+document.addEventListener('pointerdown', (event) => { backdropPointerDownTarget = event.target; });
+document.addEventListener('click', (event) => {
+  const downTarget = backdropPointerDownTarget;
+  backdropPointerDownTarget = null;
+  if (downTarget !== event.target) return;
+  if (!(event.target instanceof Element) || !event.target.classList.contains('modal')) return;
+  if (topmostModal() !== event.target) return;
+  dismissModal(event.target);
 });
-$('#modal-confirm').addEventListener('click', () => {
-  $('#modal').hidden = true;
-  if (modalResolve) modalResolve(true);
-  modalResolve = null;
+
+// Esc：只关最上层；in-progress 操作与引导态不响应（见 modalCanDismiss）。
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || event.defaultPrevented) return;
+  const modal = topmostModal();
+  if (!modal || !modalCanDismiss(modal)) return;
+  event.preventDefault();
+  dismissModal(modal);
 });
+
+// 弹层打开时锁住页面滚动；任何弹层 hidden 变化都重新计算（覆盖所有既有 open/close 路径）。
+function syncModalLock() {
+  document.body.classList.toggle('modal-open', visibleModalElements().length > 0);
+}
+new MutationObserver(syncModalLock).observe(document.body, {
+  subtree: true,
+  attributes: true,
+  attributeFilter: ['hidden'],
+});
+syncModalLock();
+
+$('#modal-cancel').addEventListener('click', () => settleConfirmModal(false));
+$('#modal-confirm').addEventListener('click', () => settleConfirmModal(true));
 
 $('#add-device').addEventListener('click', openWizard);
 $('#open-settings').addEventListener('click', () => {
@@ -2742,6 +2878,7 @@ $('#about-to-diagnostics').addEventListener('click', () => {
 });
 $('#handoff-close').addEventListener('click', () => {
   $('#handoff').hidden = true;
+  handoffNs = null;
 });
 $('#handoff-plan').addEventListener('click', runHandoffPlan);
 $('#handoff-confirm').addEventListener('click', confirmHandoff);
@@ -2779,7 +2916,6 @@ async function renderInvite(overrideEndpoint = null) {
       ? `<div class="readout-block qr-block">
           <span class="domain-label">扫码即通（QR 内容 = 令牌文本）</span>
           <img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />
-          <p class="cfg-help muted">${res.grantOnJoin === false ? '本令牌不自动授权（对端参与该记忆域后自动签发）' : '兑换后自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）'}</p>
         </div>`
       : `<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用下方文本令牌。</p>`;
     const endpointEditor = `
@@ -2795,19 +2931,19 @@ async function renderInvite(overrideEndpoint = null) {
         <span class="domain-label">令牌（一次性，默认 15 分钟有效）</span>
         <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
       </div>
-      <p class="cfg-help muted">让新设备扫码或粘贴令牌加入；它出现在星图上后本页即可关闭。</p>
+      <p class="cfg-help muted">让新设备扫码或粘贴令牌加入；兑换只建立入网信任，之后按各自的参与选择收发。它出现在星图上后本页即可关闭。</p>
       <details class="asst-detail"><summary>详情</summary>
         ${endpointEditor}
         <dl class="settings-kv">
           <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>
           <dt>默认记忆域</dt><dd><code>${escapeHtml(res.namespace)}</code></dd>
+          <dt>兑换后</dt><dd>${res.grantOnJoin === false ? '兑换后不自动授权（对端参与该记忆域后自动签发）' : '兑换后自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）'}</dd>
           <dt>有效期至</dt><dd>${escapeHtml(formatTime(res.expiresAt))}（一次性）</dd>
         </dl>
         <div class="readout-block">
           <span class="domain-label">新设备</span>
           <div class="copyable"><code>${escapeHtml(shortCmd)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(cmd)}">复制命令</button></div>
         </div>
-        <p class="cfg-help muted">兑换令牌只建立入网信任（安全边界在入网）；该设备之后按自己的参与选择收发（参与是每台设备自己的决定）。</p>
         <p class="crt-warn">⚠ 令牌即入网权限：一次性、短时效（默认 15 分钟），仅经可信 LAN 使用，请勿写入工单或公开日志。</p>
         <div class="asst-detail-actions">
           <button class="btn btn-small" id="invite-regen-inline" type="button">重新生成邀请（旧令牌立即失效）</button>
@@ -2827,7 +2963,7 @@ async function renderInvite(overrideEndpoint = null) {
       toSettings.hidden = false;
       body.innerHTML = `
         <p class="modal-note muted">加入服务未启用：开启后即可在新设备上用一条命令入网（主密钥不复制，令牌一次性、默认 15 分钟有效）。</p>
-        <p class="cfg-path muted">在「设置 → 常用配置 → 设备接入」勾选 <code>joinService.enabled</code> 并保存，重启 serve 后生效。</p>
+        <p class="cfg-path muted">在「设置 → 常用 → 邀请新设备上车」打开「启用加入服务」；改动即写入，重启 serve 后生效。</p>
       `;
     } else {
       body.innerHTML = `<p class="crt-warn">签发失败：${escapeHtml(error.message)}</p>`;
@@ -2841,9 +2977,11 @@ $('#domains-empty-invite')?.addEventListener('click', openInvite);
 $('#domains-empty-connect')?.addEventListener('click', openWizard);
 $('#invite-close').addEventListener('click', () => {
   $('#invite').hidden = true;
+  state.inviteToken = null;
 });
 $('#invite-to-settings').addEventListener('click', () => {
   $('#invite').hidden = true;
+  state.inviteToken = null;
   $('#settings').hidden = false;
   renderSettings('common');
 });

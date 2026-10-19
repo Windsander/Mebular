@@ -18,6 +18,14 @@
 设置弹层分三个 Tab：**常用**（默认开）· **AI 助手** · **高级**（含底部「诊断与恢复」只读折叠）；只读信息统一在**「关于本机」**面板（点顶栏状态徽章 `本机 · <deviceId>` 打开）。
 IA 单一真源在 [`packages/console/settings-ia.js`](../../packages/console/settings-ia.js)，E1（`verify-console.mjs`）以迁移表驱动断言「不丢项：每项有且仅有唯一去处」。
 
+**弹层交互（轮 C，六处弹层共用）**：
+
+- **点空白**（backdrop `target === currentTarget`）与 **Esc** 关闭**最上层**弹层；一处实现全弹层受益。
+- 危险语义：确认弹层的 Esc / 点空白 = **取消**（resolve false，永不等于确认）；首次上手（建新/加入）不可关闭；连接向导在「连接中 / 签发中」不可关闭。
+- 背板固定不滚（`.modal { overflow: hidden }`）；滚动收进 `.modal-box`（`max-height: calc(100vh - 48px); overflow-y: auto`），六处弹层一致。
+
+**呈现分级（轮 C）**：常显 = 名称 + 控件 + 状态（三元组相等时收成一行「生效中」）；帮助 / 机制解释 / 警告墙收进「详情」折叠；**异常自动出现**（已配置≠实际、未生效原因、待重启）。安全卡结构插槽已预留（`#settings-security-slot`，本轮不渲染功能）。
+
 ## 常用（3 张任务卡，共 5 字段）
 
 | 任务卡 | 字段 |
@@ -28,22 +36,22 @@ IA 单一真源在 [`packages/console/settings-ia.js`](../../packages/console/se
 
 > **订阅域归主页「记忆共享」**：`sync.namespaces`（参与哪些记忆域）属内容管理，已移出设置页（`IA_MIGRATION['sync.namespaces'] = 'domains'`），在记忆共享域卡头部以「参与」开关呈现。
 
-「Agent 怎么连我」卡片保留改鉴权/端口的后果与恢复说明（bearer 可粘贴 token 自救；oauth 需 env secret，否则只能改回配置）。
+「Agent 怎么连我」卡片保留改鉴权/端口的后果与恢复说明（bearer 可粘贴 token 自救；oauth 需 env secret，否则只能改回配置）。风险说明默认折叠在字段「详情」；命中自锁项时关键警告会进入二次确认弹层。
 
-**邀请面板（C7 扫码即通）**：一次性令牌 + **二维码**（内容=令牌文本，服务端渲染 SVG，可选依赖缺省时只给文本）+ `fleet join` 命令 + 「兑换后自动授权（作用域=令牌记忆域，默认 24h 到期自动撤销）」说明。
+**邀请面板（C7 扫码即通）**：一次性令牌 + **二维码**（内容=令牌文本，服务端渲染 SVG，可选依赖缺省时只给文本）+ `fleet join` 命令 + 兑换语义（作用域=令牌记忆域，默认 24h 到期自动撤销）只讲一次；安全警告收「详情」。
 
 ## 高级（10 字段 + 1 动作）
 
 | 分组 | 字段 |
 |---|---|
-| 反熵与快照 | `sync.antiEntropy.enabled` · `sync.antiEntropy.intervalMs` · `sync.antiEntropy.jitterRatio` · `sync.snapshotThreshold` |
+| 反熵与快照 | `sync.antiEntropy.enabled` |
 | 对端与签发者 | `sync.peerWhitelist` · `sync.policyIssuers` |
-| 语义召回（可选依赖） | `semantic.enabled` · `semantic.minScore` |
+| 语义召回（可选依赖） | `semantic.enabled` |
 | 设备接入（高级） | `joinService.bind` · `joinService.port` |
 | MCP 接入（高级） | `mcp.http.host` · `mcp.http.tls` · `mcp.http.tlsKey` · `mcp.http.tlsCert` |
 | 动作 | 「声明本机为引导签发者」（图上签名事件） |
 
-> **暴露面收敛（B）**：`network.libp2p.relayServers` 改为**只读**（自动 relay 池 = config seeds ∪ 令牌 hints ∪ 地址簿学习，见「关于本机 · 只读状态」）；`network.libp2p.relayUnlimited` 转为 internal（GUI 不渲染，需手工编辑 `config.json`）。字段元数据由服务端单一真源 `packages/mcp/src/config-schema.mjs` 驱动（`/admin/api/settings.configSchema`），控制台不再重复声明。
+> **暴露面收敛（B + 轮 C）**：反熵间隔/抖动、快照阈值、召回阈值属自动策略 → `internal`（GUI 不渲染，需手工编辑 `config.json`）；`network.libp2p.relayServers` 为只读（自动 relay 池 = config seeds ∪ 令牌 hints ∪ 地址簿学习，见「关于本机 · 只读状态」）；`network.libp2p.relayUnlimited` 转为 internal。字段元数据由服务端单一真源 `packages/mcp/src/config-schema.mjs` 驱动（`/admin/api/settings.configSchema`），控制台不再重复声明。
 
 ## 诊断与恢复（高级 Tab 底部只读折叠）
 
@@ -54,7 +62,7 @@ IA 单一真源在 [`packages/console/settings-ia.js`](../../packages/console/se
 
 ## 关于本机（顶栏徽章入口，只读）
 
-身份与存储 · **同步节奏** · **只读状态（自动推导）**（relay 池 / LAN 发现 / 桥 / 打洞 / 广播 / join 端点 / TLS / 邀请授权 TTL，均带「未生效原因」）· 运行状态（含 **地址广播**：`full/relay-only/off` 档位 · 已发布 · 已采用 · 忽略原因，C5）· 签发者状态 · **对端连接路径**（C2：每个键的 `kind/address/最近切换/lastError/候选数`，只读）· 舰队摘要 · 能力清单（27 工具 = 记忆 11 + 任务 16；与 MCP 入口同源）。
+身份与存储 · **配置文件与写盘备份**（`config.json` 路径 + `.bak`，写盘路径从常页面收编到此）· **同步节奏** · **只读状态（自动推导）**（relay 池 / LAN 发现 / 桥 / 打洞 / 广播 / join 端点 / TLS / 邀请授权 TTL，均带「未生效原因」）· 运行状态（含 **地址广播**：`full/relay-only/off` 档位 · 已发布 · 已采用 · 忽略原因，C5）· 签发者状态 · **对端连接路径**（C2：每个键的 `kind/address/最近切换/lastError/候选数`，只读）· 舰队摘要 · 能力清单（27 工具 = 记忆 11 + 任务 16；与 MCP 入口同源）。
 
 > 星图设备卡同样有一行只读「当前路径」（`direct`/`lan`/`relay` + 地址 + 起始时间；未连接时显示 `lastError`）。数据来自 core 候选地址簿（`settings.peers.paths`），只展示不改变授权。
 

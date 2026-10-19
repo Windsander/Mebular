@@ -78,6 +78,23 @@ async function seedHome(home) {
   await app.declarePolicyIssuer({ subject: 'device-console' });
   await app.declareNamespaceMembership({ member: 'device-peer', namespace: 'notes', active: true });
   await app.declareNamespaceMembership({ member: 'device-peer', namespace: 'notes', active: false });
+  // S3：审计安全行（低 → 中 → 低；动态码导入留痕）——不改变最终档位，避免影响后续写端点断言
+  const secNow = Date.now();
+  await app.eventLog.append({
+    type: 'security_tier',
+    data: { securityTier: { level: 'medium', nonce: 'seed-tier-medium', issuedAt: secNow - 120_000 } },
+    namespace: POLICY_NAMESPACE,
+  });
+  await app.eventLog.append({
+    type: 'security_tier',
+    data: { securityTier: { level: 'low', nonce: 'seed-tier-low', issuedAt: secNow - 60_000 } },
+    namespace: POLICY_NAMESPACE,
+  });
+  await app.eventLog.append({
+    type: 'security_totp',
+    data: { securityTotp: { device: 'device-console', fingerprint: 'a1b2c3d4', issuedAt: secNow - 30_000, note: 'seed' } },
+    namespace: POLICY_NAMESPACE,
+  });
   await app.eventLog.append({
     type: 'namespace_handoff',
     data: { handoff: { handoffId: 'handoff-1', namespace: 'work', successor: 'device-peer', forced: false, pendingCount: 0, issuedAt: Date.now() } },
@@ -1589,10 +1606,11 @@ try {
       '页头/写盘/邀请/行长四项配套');
 
     const securitySlotLine = jsSrc.split('\n').find((line) => line.includes('id="settings-security-slot"')) ?? '';
-    check('轮 C 预留：设置弹层「安全卡」插槽（结构 only，无功能）',
-      securitySlotLine.includes('<section') && securitySlotLine.includes('hidden></section>')
-        && securitySlotLine.includes('data-settings-slot="security"'),
-      'hidden 空插槽');
+    check('S3 安全卡落位：设置·常用顶部 slot（渲染 securityCardHtml，不再 hidden 空插槽）',
+      securitySlotLine.includes('<section') && !securitySlotLine.includes('hidden')
+        && securitySlotLine.includes('data-settings-slot="security"')
+        && securitySlotLine.includes('securityCardHtml()'),
+      '安全卡已接管插槽');
   }
 
   // ---------- C2：对端连接路径（只读渲染断言，不涉行为） ----------
@@ -1793,10 +1811,11 @@ try {
   {
     const consoleSrcV4 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     const htmlSrcV4 = await readFile(join(consoleDir, 'index.html'), 'utf-8');
-    check('v4 UI：域级审批整组删除（无批准/撤回动作与「待你批准」文案）',
+    check('v4 UI：域级审批整组删除（无批准/撤回动作与「待你批准」文案；S3 设备会签不属域级审批）',
       !consoleSrcV4.includes('data-approve') && !consoleSrcV4.includes('data-revoke-ns')
         && !consoleSrcV4.includes('handleApprove') && !consoleSrcV4.includes('handleRevokeNamespace')
-        && !consoleSrcV4.includes('待你批准') && !consoleSrcV4.includes('批准') && !consoleSrcV4.includes('撤回'));
+        && !consoleSrcV4.includes('待你批准') && !consoleSrcV4.includes('撤回')
+        && !consoleSrcV4.includes('域级批准'));
     const retiredTokens = ['AUTH →', 'MEMBERS →', '成员制 ACTIVE', '重入恢复', '待重入', '退订交接', '暂无分区', 'HASH ']
       .filter((t) => consoleSrcV4.includes(t) || htmlSrcV4.includes(t));
     check('v4 UI：术语统一（记忆域/参与中/也在参与/退出并交接/状态指纹；退役词清除）',
@@ -1852,6 +1871,206 @@ try {
         && consoleSrcP3.includes('CONVERGENCE_STATE_META') && consoleSrcP3.includes('convergenceChipRows')
         && consoleSrcP3.includes('convergenceAboutSection') && consoleSrcP3.includes("addEventListener('convergence'")
         && consoleSrcP3.includes('状态指纹') && consoleSrcP3.includes('backlog-mismatch'));
+  }
+
+  // ---------- S3 · 安全三档（只消费 S2 端点；控制台审计/卡片契约） ----------
+  {
+    const secRead = await getJson(port, '/admin/api/security');
+    check('S3 GET /admin/api/security 200 + 状态形状（level/admitted/rejections/totp/recovery/pending）',
+      secRead.status === 200
+        && ['low', 'medium', 'high'].includes(secRead.json?.level)
+        && Array.isArray(secRead.json?.admitted)
+        && Array.isArray(secRead.json?.rejections)
+        && typeof secRead.json?.totp?.imported === 'boolean'
+        && typeof secRead.json?.recovery?.registered === 'boolean'
+        && Array.isArray(secRead.json?.pendingApprovals),
+      `level=${secRead.json?.level}`);
+    check('S3 GET /admin/api/security 不泄露种子/私钥/恢复码明文',
+      !/"secret"\s*:/.test(secRead.text)
+        && !/"privateKey"/.test(secRead.text)
+        && !/"recoveryCode"\s*:/.test(secRead.text)
+        && !/"codeFormatted"\s*:/.test(secRead.text));
+
+    const policySec = await getJson(port, '/admin/api/policy');
+    const secTimeline = (policySec.json ?? []).filter((e) => String(e.type).startsWith('security_'));
+    check('S3 审计含安全事件（security_tier / security_totp）',
+      ['security_tier', 'security_totp'].every((t) => (policySec.json ?? []).some((e) => e.type === t)),
+      `types=${[...new Set(secTimeline.map((e) => e.type))].join(',')}`);
+    check('S3 审计安全行字段（等级 from→to / fingerprint；valid 口径存在）',
+      secTimeline.every((e) => typeof e.valid === 'boolean')
+        && secTimeline.filter((e) => e.type === 'security_tier').every((e) => ['low', 'medium', 'high'].includes(e.level))
+        && secTimeline.filter((e) => e.type === 'security_totp').every((e) => typeof e.fingerprint === 'string'));
+
+    const req = await fetch(`http://127.0.0.1:${port}/admin/api/security/approvals`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ op: 'kick', target: 'device-peer', note: 'S3 E1' }),
+    });
+    const reqJson = await req.json().catch(() => null);
+    check('S3 会签请求（high 前置流程）201 + approvalId/配对号',
+      req.status === 201 && typeof reqJson?.approvalId === 'string' && /^\d{3}-\d{3}$/.test(reqJson?.pairingCode ?? ''),
+      `status=${req.status} pairing=${reqJson?.pairingCode}`);
+    const pendingRead = await getJson(port, '/admin/api/security');
+    check('S3 待批准入口数据可见（pendingApprovals 含刚发起请求）',
+      (pendingRead.json?.pendingApprovals ?? []).some((a) => a.approvalId === reqJson?.approvalId));
+    const selfApprove = await fetch(`http://127.0.0.1:${port}/admin/api/security/approvals/${encodeURIComponent(reqJson?.approvalId ?? '')}/approve`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: '{}',
+    });
+    check('S3 自批被拒（发起设备不能批准自己的动作）→ 403', selfApprove.status === 403, `status=${selfApprove.status}`);
+    const selfDeny = await fetch(`http://127.0.0.1:${port}/admin/api/security/approvals/${encodeURIComponent(reqJson?.approvalId ?? '')}/deny`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: '{}',
+    });
+    check('S3 自拒同样 403（批准侧只处理他机请求）', selfDeny.status === 403, `status=${selfDeny.status}`);
+
+    const toMedium = await fetch(`http://127.0.0.1:${port}/admin/api/security/tier`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ level: 'medium' }),
+    });
+    const toMediumJson = await toMedium.json().catch(() => null);
+    check('S3 低→中（显式确认，无码）→ 200', toMedium.status === 200 && toMediumJson?.level === 'medium', `status=${toMedium.status}`);
+    const mediumState = await getJson(port, '/admin/api/security');
+    check('S3 中档离屏状态读取 = medium（GET 不泄密）', mediumState.json?.level === 'medium' && !/"secret"\s*:/.test(mediumState.text));
+
+    const inviteNoCode = await fetch(`http://127.0.0.1:${port}/admin/api/invite`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: '{}',
+    });
+    const inviteNoCodeJson = await inviteNoCode.json().catch(() => null);
+    check('S3 中档邀请无动态码 → 403 totp_required（可读原因）',
+      inviteNoCode.status === 403 && inviteNoCodeJson?.error === 'totp_required',
+      `status=${inviteNoCode.status} error=${inviteNoCodeJson?.error}`);
+    const tierNoCode = await fetch(`http://127.0.0.1:${port}/admin/api/security/tier`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ level: 'low' }),
+    });
+    const tierNoCodeJson = await tierNoCode.json().catch(() => null);
+    check('S3 中档降级无动态码 → 403 totp_required', tierNoCode.status === 403 && tierNoCodeJson?.error === 'totp_required', `status=${tierNoCode.status}`);
+
+    const secret = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+    const imported = await fetch(`http://127.0.0.1:${port}/admin/api/security/totp/import`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ secret }),
+    });
+    const importedJson = await imported.json().catch(() => null);
+    check('S3 动态码种子导入 → 200 + fingerprint（8 hex）',
+      imported.status === 200 && /^[0-9a-f]{8}$/.test(importedJson?.fingerprint ?? ''),
+      `status=${imported.status} fp=${importedJson?.fingerprint}`);
+    const { totpCodeAt } = await import('@mebular/fleet');
+    const step = Math.floor(Date.now() / 30_000);
+    const toLow = await fetch(`http://127.0.0.1:${port}/admin/api/security/tier`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ level: 'low', code: totpCodeAt(secret, step) }),
+    });
+    const toLowJson = await toLow.json().catch(() => null);
+    check('S3 中→低携有效动态码 → 200（本机门槛）', toLow.status === 200 && toLowJson?.level === 'low', `status=${toLow.status}`);
+
+    const toHigh = await fetch(`http://127.0.0.1:${port}/admin/api/security/tier`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ level: 'high' }),
+    });
+    const toHighJson = await toHigh.json().catch(() => null);
+    check('S3 低→高强制生成并一次性返回恢复码（mustAcknowledge）',
+      toHigh.status === 200 && toHighJson?.level === 'high'
+        && typeof toHighJson?.recoveryCode === 'string'
+        && /[0-9A-Z]{4}/.test(toHighJson?.recoveryCodeFormatted ?? '')
+        && toHighJson?.mustAcknowledge === true,
+      `status=${toHigh.status} keyId=${toHighJson?.recoveryKeyId?.slice(0, 8)}`);
+    const highState = await getJson(port, '/admin/api/security');
+    check('S3 高挡状态：recovery 已登记 + current=true',
+      highState.json?.level === 'high'
+        && highState.json?.recovery?.registered === true
+        && highState.json?.recovery?.current === true);
+
+    const inviteNoApproval = await fetch(`http://127.0.0.1:${port}/admin/api/invite`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: '{}',
+    });
+    const inviteNoApprovalJson = await inviteNoApproval.json().catch(() => null);
+    check('S3 高档邀请无会签 → 403 approval_required', inviteNoApproval.status === 403 && inviteNoApprovalJson?.error === 'approval_required', `status=${inviteNoApproval.status}`);
+    const downgradeNoProof = await fetch(`http://127.0.0.1:${port}/admin/api/security/tier`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ level: 'medium' }),
+    });
+    const downgradeNoProofJson = await downgradeNoProof.json().catch(() => null);
+    check('S3 高档降档无会签/恢复码 → 403（防降级逃逸）', downgradeNoProof.status === 403 && downgradeNoProofJson?.error === 'approval_required', `status=${downgradeNoProof.status}`);
+
+    const rotate = await fetch(`http://127.0.0.1:${port}/admin/api/security/recovery/rotate`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ oldCode: toHighJson?.recoveryCode }),
+    });
+    const rotateJson = await rotate.json().catch(() => null);
+    check('S3 恢复码轮换 → 200 + 新码一次性 + oldKeyId',
+      rotate.status === 200 && typeof rotateJson?.code === 'string' && typeof rotateJson?.oldKeyId === 'string' && rotateJson?.shownOnce === true,
+      `status=${rotate.status}`);
+    const rotateAgain = await fetch(`http://127.0.0.1:${port}/admin/api/security/recovery/rotate`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ oldCode: toHighJson?.recoveryCode }),
+    });
+    check('S3 旧恢复码再次轮换 → 403（keyId 不再当前）', rotateAgain.status === 403, `status=${rotateAgain.status}`);
+
+    const showSeed = await fetch(`http://127.0.0.1:${port}/admin/api/security/totp/show`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ code: totpCodeAt(secret, Math.floor(Date.now() / 30_000) + 1) }),
+    });
+    const showSeedJson = await showSeed.json().catch(() => null);
+    check('S3 显示动态码种子需本机码 → 200 + 分组文本/otpauth（QR 可选）',
+      showSeed.status === 200
+        && (typeof showSeedJson?.groups === 'string' || Array.isArray(showSeedJson?.groups))
+        && /^otpauth:\/\/totp\//.test(showSeedJson?.otpauth ?? '')
+        && (showSeedJson?.qrSvg === null || typeof showSeedJson?.qrSvg === 'string'),
+      `status=${showSeed.status} qr=${typeof showSeedJson?.qrSvg}`);
+
+    const policyFinal = await getJson(port, '/admin/api/policy');
+    const finalTypes = new Set((policyFinal.json ?? []).map((e) => e.type));
+    check('S3 审计时间线覆盖 security_tier / security_approval / security_recovery / security_totp',
+      ['security_tier', 'security_approval', 'security_recovery', 'security_totp'].every((t) => finalTypes.has(t)),
+      `types=${[...finalTypes].filter((t) => t.startsWith('security_')).join(',')}`);
+    const recoveryRows = (policyFinal.json ?? []).filter((e) => e.type === 'security_recovery');
+    check('S3 审计恢复码行含 keyId/mode（轮换后新旧两行）',
+      recoveryRows.length >= 2 && recoveryRows.every((e) => typeof e.keyId === 'string' && ['set', 'rotate'].includes(e.mode)));
+
+    // 前端锚点：安全卡 / 三操作改道 / 审计过滤器 / 壳徽章 / a11y 静态契约
+    const consoleSrcSec = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const htmlSec = await readFile(join(consoleDir, 'index.html'), 'utf-8');
+    const cssSec = await readFile(join(consoleDir, 'console.css'), 'utf-8');
+    check('S3 前端锚点：安全卡（设置·常用），插槽不再隐藏',
+      /id="settings-security-slot"/.test(consoleSrcSec) && !/settings-slot[^>]*hidden/.test(consoleSrcSec)
+        && /securityCardHtml/.test(consoleSrcSec)
+        && /中 · 动态码（防顺手）/.test(consoleSrcSec)
+        && /高 · 设备会签/.test(consoleSrcSec)
+        && /挡不住拿走整台设备的人/.test(consoleSrcSec));
+    check('S3 前端锚点：三操作改道（邀请 medium 码 / high 会签；屏蔽按档位分级；批准侧）',
+      /async function openInvite/.test(consoleSrcSec) && /securityCodeModal/.test(consoleSrcSec)
+        && /securityStartApproval/.test(consoleSrcSec) && /securityRevokeFlow/.test(consoleSrcSec)
+        && /data-security-action/.test(consoleSrcSec) && /pendingApprovals/.test(consoleSrcSec)
+        && /配对号一致，批准/.test(consoleSrcSec));
+    check('S3 前端锚点：顶栏只读徽章 + 星图「需要注意」安全项',
+      htmlSec.includes('id="security-badge"') && /🛡 安全：/.test(consoleSrcSec)
+        && /动态码种子未导入/.test(await readFile(join(consoleDir, 'assistants.js'), 'utf-8'))
+        && /待批准/.test(await readFile(join(consoleDir, 'assistants.js'), 'utf-8')));
+    check('S3 前端锚点：审计安全过滤器/标签/拒绝原因映射',
+      htmlSec.includes('value="security_tier"') && htmlSec.includes('value="security_approval"')
+        && /安全等级变更/.test(consoleSrcSec) && /设备会签/.test(consoleSrcSec)
+        && /缺少会签证明/.test(consoleSrcSec));
+    check('S3 前端锚点：a11y（配对号 aria-live / 恢复码焦点）+ reduced-motion + 窄屏样式',
+      /aria-live="polite"/.test(consoleSrcSec) && /tabindex="-1"/.test(consoleSrcSec)
+        && /prefers-reduced-motion/.test(cssSec) && /security-card/.test(cssSec)
+        && /@media \(max-width: 900px\)/.test(cssSec));
   }
 
   // ---------- 未知 API ----------

@@ -78,7 +78,7 @@ describe('R-1 中-9 托盘菜单分组', () => {
 
   it('分组顺序：导航 → 守护控制 → 诊断 → 登录时启动 → 退出', () => {
     expect(flat).toEqual([
-      'status', '|',
+      'status', 'security-level', '|',
       'open-console', 'connect-assistants', 'add-device', 'open-wizard', '|',
       'daemon-start', 'daemon-stop', 'daemon-restart', '|',
       'open-logs', '|',
@@ -107,6 +107,17 @@ describe('R-1 中-9 托盘菜单分组', () => {
   it('UX-2：托盘「重启向导」改名（回想入口，不再是「返回向导」）', () => {
     expect(model.find((i) => i.id === 'open-wizard').label).toBe('重启向导');
   });
+
+  it('S3：托盘只读安全等级行（低/中/高；未知显示 — 且禁用）', () => {
+    expect(model.find((i) => i.id === 'security-level').label).toBe('安全等级：—');
+    expect(model.find((i) => i.id === 'security-level').enabled).toBe(false);
+    for (const [level, label] of [['low', '低'], ['medium', '中'], ['high', '高']]) {
+      const item = trayMenuModel({ healthy: true, daemonMode: 'child', loginOpenAtLogin: false, securityLevel: level })
+        .find((i) => i.id === 'security-level');
+      expect(item.label).toBe(`安全等级：${label}`);
+      expect(item.enabled).toBe(true);
+    }
+  });
 });
 
 describe('R-1 高-2 薄壳接线（index.mjs 静态契约）', () => {
@@ -131,5 +142,11 @@ describe('R-1 高-2 薄壳接线（index.mjs 静态契约）', () => {
   it('托盘菜单由 trayMenuModel 驱动；登录时启动走 setLoginItemSettings', () => {
     expect(mainSrc).toMatch(/trayMenuModel\(/);
     expect(mainSrc).toMatch(/setLoginItemSettings\(\{ openAtLogin/);
+  });
+
+  it('S3：托盘等级只读（probeSecurityLevel）+ 点击打开控制台安全卡', () => {
+    expect(mainSrc).toMatch(/probeSecurityLevel\(/);
+    expect(mainSrc).toMatch(/view=settings&focus=security/);
+    expect(mainSrc).toMatch(/securityLevel/);
   });
 });

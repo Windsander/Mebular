@@ -178,10 +178,11 @@ describe('UX-2 首屏叠加层（只读；星图本体不改）', () => {
 
 describe('UX-2 邀请单动作页', () => {
   it('主结果 = QR + 令牌复制；次级（端点编辑/多余命令/警告）收「详情」折叠', () => {
-    const inviteBlock = consoleJs.match(/async function renderInvite[\s\S]*?\n {2}\} catch/)?.[0] ?? '';
-    expect(inviteBlock).toContain('让新设备扫码或粘贴令牌加入');
-    expect(inviteBlock).toContain('<details class="asst-detail"><summary>详情</summary>');
-    expect(inviteBlock).toContain('invite-endpoint');
+    // S3：结果面板从 renderInvite 抽成 showInviteResult（low 直接出；medium/high 门槛通过后复用）
+    expect(consoleJs).toMatch(/function showInviteResult\(res\)/);
+    expect(consoleJs).toContain('让新设备扫码或粘贴令牌加入');
+    expect(consoleJs).toContain('<details class="asst-detail"><summary>详情</summary>');
+    expect(consoleJs).toContain('invite-endpoint');
   });
 
   it('重新生成收详情且二次确认（旧令牌失效是不可逆方向）', () => {

@@ -31,6 +31,9 @@ const state = {
   memories: null,
   memoryFilters: { archived: false, deleted: false, namespace: '' },
   settings: null,
+  // S3：安全三档只读状态（GET /admin/api/security）+ 活动流（写操作弹层）
+  security: null,
+  securityFlow: null,
   healthz: null,
   settingsTab: 'common',
   rawConfig: null,
@@ -122,6 +125,7 @@ async function refreshOnce() {
     state.policy = mock.policy;
     state.namespaces = mock.namespaces;
     state.memories = mock.memories;
+    state.security = mock.security ?? null;
     state.features = { writes: false };
     state.error = null;
     state.degraded = mock.degraded;
@@ -139,8 +143,9 @@ async function refreshOnce() {
     api('/admin/api/service'),
     api('/admin/api/clients'),
     api('/healthz'),
+    api('/admin/api/security'),
   ]);
-  const [overview, devices, policy, namespaces, settings, configView, memories, serviceView, clientsView, healthz] = results;
+  const [overview, devices, policy, namespaces, settings, configView, memories, serviceView, clientsView, healthz, securityView] = results;
   if (seq !== refreshSeq) return; // 已有更新的刷新在途/完成：本轮数据过期，整体丢弃
   if (healthz && healthz.status === 'fulfilled') state.healthz = healthz.value;
   let firstError = null;
@@ -155,6 +160,8 @@ async function refreshOnce() {
   if (memories.status === 'fulfilled') state.memories = memories.value;
   if (serviceView.status === 'fulfilled') state.service = serviceView.value;
   if (clientsView.status === 'fulfilled') state.clients = clientsView.value.clients ?? [];
+  // S3：安全状态只读；旧版 serve（无端点）→ null（徽章显示 —，不阻塞控制台）
+  if (securityView.status === 'fulfilled') state.security = securityView.value;
   // 补丁 3 增补 · 对账：每轮刷新清掉与服务端真值矛盾的客户端残留
   // （配置不在了 → 清提示/verify/失败残留；verify 确认 connected → 重载提醒退场）
   for (const c of state.clients ?? []) {
@@ -216,6 +223,18 @@ function renderTopbar() {
   onlineEl.className = `badge ${online ? 'badge-ok' : 'badge-muted'}`;
   memEl.textContent = status ? `记忆 ${status.nodeCount ?? '—'}` : '记忆 …';
   memEl.className = 'badge badge-muted';
+  // S3：只读安全徽章（点击 = 打开安全卡；不做写操作）
+  const secEl = $('#security-badge');
+  if (secEl) {
+    const level = state.security?.level ?? null;
+    secEl.textContent = level ? `🛡 安全：${securityLevelLabel(level)}` : '🛡 安全：—';
+    secEl.className = `badge badge-button ${level === 'high' ? 'badge-ok' : level === 'medium' ? 'badge-warn' : 'badge-muted'}`;
+    const pending = (state.security?.pendingApprovals ?? []).filter((a) => a?.initiator !== state.overview?.device?.deviceId).length;
+    const rejected = (state.security?.rejections ?? []).length;
+    secEl.title = level
+      ? `安全等级：${securityLevelLabel(level)}${pending ? ` · 待批准 ${pending} 项` : ''}${rejected ? ` · ${rejected} 条被拒绝` : ''}（点击打开安全卡）`
+      : '安全状态不可用（旧版守护 / 读取失败）';
+  }
   const pendingBadge = $('#settings-pending-badge');
   if (pendingBadge) {
     const count = pendingRestartItems().length;
@@ -971,6 +990,7 @@ function settingsSignature(activeTab) {
   return JSON.stringify([
     activeTab,
     state.settings ?? null,
+    state.security ?? null,
     state.rawConfig ?? null,
     state.features?.writes ?? null,
     state.healthz ?? null,
@@ -1022,6 +1042,12 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     : new Set();
   const s = state.settings;
   if (!s) {
+    // ?mock=1 无 settings 载荷：仍渲染安全卡（无网络验收路径；其余设置保持加载态）
+    if (MOCK && state.security) {
+      body.innerHTML = `<section id="settings-security-slot" class="settings-slot security-card" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`;
+      bindSecurityCard(body);
+      return;
+    }
     body.innerHTML = '<p class="muted">设置加载中…（若持续如此，检查 serve 是否运行）</p>';
     return;
   }
@@ -1042,8 +1068,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     ${panel('common', `
       <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
       ${wizardRowHtml(typeof window.mebularDesktop?.openWizard === 'function')}
-      <!-- 预留：后续「安全卡」插槽（本轮只留结构，不渲染功能） -->
-      <section id="settings-security-slot" class="settings-slot" data-settings-slot="security" hidden></section>
+      <section id="settings-security-slot" class="settings-slot security-card" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>
       <div class="task-cards">${renderTaskCards()}</div>
       ${cfgActionsBlock()}
     `)}
@@ -1073,6 +1098,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   });
   const declare = $('#declare-issuer');
   if (declare) declare.addEventListener('click', declareIssuer);
+  bindSecurityCard(body);
   bindConfigEditor();
   if (prevPath) {
     const el = body.querySelector(`[data-cfg-path="${CSS.escape(prevPath)}"]`);
@@ -1084,6 +1110,670 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     }
   }
   if (box && prevScrollTop > 0) box.scrollTop = prevScrollTop;
+}
+
+// ---------- S3 · 安全三档（安全卡 / 三操作改道 / 批准侧 / 恢复码） ----------
+
+const SECURITY_LEVEL_ORDER = { low: 0, medium: 1, high: 2 };
+const SECURITY_LEVEL_LABEL = { low: '低', medium: '中', high: '高' };
+const SECURITY_LEVEL_TITLE = {
+  low: '低（默认）',
+  medium: '中 · 动态码（防顺手）',
+  high: '高 · 设备会签',
+};
+const SECURITY_LEVEL_NOTE = {
+  low: '无额外门槛（信任链仍在）。',
+  medium: '做加入/添加/踢出这类敏感动作前，需要输入 6 位动态码。它能挡住拿错你鼠标的手和一时手滑，挡不住拿走整台设备的人（钥匙就在设备里）。要防设备被拿走，请升级到『高 · 设备会签』。',
+  high: '敏感动作需要另一台已受准入的设备批准（人眼核对配对号）；防设备被窃伪造。',
+};
+const SECURITY_REJECTION_LABEL = {
+  'missing-proof': '缺少会签证明',
+  'invalid-proof': '证明无效',
+  'approval-missing-or-not-causal': '批准不存在或晚于动作',
+  'approval-approver-revoked-at-its-order': '批准人当时已被屏蔽',
+  'approver-not-admitted-at-approval': '批准设备当时尚未准入',
+  'approver-equals-author': '批准人 = 发起人',
+  'approver-equals-subject': '批准人 = 被操作设备',
+  'stale-or-replayed-nonce': '随机数已重放',
+};
+
+function securityLevelLabel(level) {
+  return SECURITY_LEVEL_LABEL[level] ?? '—';
+}
+
+function securityLevelTag(level) {
+  return level === 'high' ? 'crt-tag-ok' : level === 'medium' ? 'crt-tag-warn' : 'crt-tag';
+}
+
+function securityReasonLabel(reason) {
+  return SECURITY_REJECTION_LABEL[reason] ?? String(reason ?? '未知原因');
+}
+
+function securityOpText(record) {
+  if (record?.op === 'kick') return `屏蔽设备 ${record.target ?? '—'}`;
+  if (record?.op === 'join') return `加入网络${record.namespace ? `（${record.namespace}）` : ''}`;
+  if (record?.op === 'tier') return `安全等级 → ${securityLevelLabel(record.level)}`;
+  return record?.op ?? '—';
+}
+
+function inviteNamespace() {
+  const configured = state.settings?.sync?.subscriptions;
+  return Array.isArray(configured) && configured.length > 0 ? configured[0] : 'tasks';
+}
+
+function securitySelfId() {
+  return state.overview?.device?.deviceId ?? state.settings?.identity?.deviceId ?? null;
+}
+
+/** 安全卡（设置·常用顶部；结构按 SPEC §5.1；诚实文案按 §2.8 冻结）。 */
+function securityCardHtml() {
+  const sec = state.security;
+  if (!sec) {
+    return `<div class="sec-head"><h3>安全等级</h3><span class="badge badge-muted">只读</span></div>
+      <p class="muted sec-loading">安全状态加载中…（旧版守护或读取失败时显示 —，不影响其他设置）</p>`;
+  }
+  const level = sec.level ?? 'low';
+  const selfId = securitySelfId();
+  const writes = Boolean(state.features?.writes) && !MOCK;
+  const isRoot = state.settings?.identity?.mode === 'root';
+  const pending = Array.isArray(sec.pendingApprovals) ? sec.pendingApprovals : [];
+  const incoming = pending.filter((a) => a?.initiator !== selfId);
+  const outgoing = pending.filter((a) => a?.initiator === selfId);
+  const rejections = Array.isArray(sec.rejections) ? sec.rejections : [];
+  const totp = sec.totp ?? { imported: false };
+  const recovery = sec.recovery ?? { registered: false };
+  const admitted = Array.isArray(sec.admitted) ? sec.admitted : [];
+  const fps = [...new Set((state.policy ?? [])
+    .filter((event) => event.type === 'security_totp' && typeof event.fingerprint === 'string')
+    .map((event) => event.fingerprint))];
+  const mismatch = totp.imported === true && fps.some((fp) => fp !== totp.fingerprint);
+
+  const ladder = ['low', 'medium', 'high'].map((tier) => {
+    const current = tier === level;
+    const canUpgrade = SECURITY_LEVEL_ORDER[tier] > SECURITY_LEVEL_ORDER[level];
+    const action = canUpgrade
+      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="upgrade" data-level="${tier}" ${writes ? '' : 'disabled'}>升级到${securityLevelLabel(tier)} ›</button>`
+      : current ? '<span class="crt-tag crt-tag-ok">当前</span>' : '';
+    return `<li class="sec-tier${current ? ' is-current' : ''}" data-security-tier="${tier}">
+      <div class="sec-tier-head"><span class="sec-tier-title">${escapeHtml(SECURITY_LEVEL_TITLE[tier])}</span>${action}</div>
+      <p class="sec-tier-note muted">${escapeHtml(SECURITY_LEVEL_NOTE[tier])}</p>
+    </li>`;
+  }).join('');
+
+  const fingerprint = totp.fingerprint ?? null;
+  const totpStatus = totp.imported === true
+    ? `<span class="sec-ok">已导入 ✓</span> <code>${escapeHtml(fingerprint ?? '—')}</code>`
+    : '<span class="crt-warn">未导入</span> <span class="muted">中档的敏感动作会被拒绝（totp_not_configured）</span>';
+  const totpActions = `${totp.imported === true
+    ? `<button class="btn btn-small btn-crt" type="button" data-security-action="totp-show" ${writes ? '' : 'disabled'}>显示种子</button>`
+    : ''}
+    <button class="btn btn-small btn-crt" type="button" data-security-action="totp-import" ${writes ? '' : 'disabled'}>导入种子</button>
+    ${totp.imported !== true && isRoot
+      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="totp-generate" ${writes ? '' : 'disabled'}>生成共享种子</button>`
+      : ''}`;
+
+  const recoveryStatus = recovery.registered === true
+    ? `<span class="sec-ok">已生成</span> <code>${escapeHtml(String(recovery.keyId ?? '').slice(0, 8))}</code>
+       <span class="muted">${recovery.mode === 'rotate' ? '最近轮换' : '登记'} ${escapeHtml(formatTime(recovery.createdAt))}</span>
+       ${recovery.lastUsedAt ? `<span class="muted">· 最近使用 ${escapeHtml(formatTime(recovery.lastUsedAt))}</span>` : ''}
+       ${recovery.current === false ? '<span class="crt-warn">当前 keyId 不一致</span>' : ''}`
+    : '<span class="muted">—（升到「高」时生成）</span>';
+  const recoveryActions = recovery.registered === true
+    ? `<button class="btn btn-small btn-crt" type="button" data-security-action="recovery-rotate" ${writes ? '' : 'disabled'}>轮换恢复码</button>`
+    : level === 'high'
+      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="recovery-generate" ${writes ? '' : 'disabled'}>生成恢复码</button>`
+      : '';
+
+  const pendingRows = incoming.length > 0
+    ? `<ul class="sec-approval-list">${incoming.map((a) => `
+        <li class="sec-approval-row" data-approval-id="${escapeHtml(a.approvalId)}">
+          <div class="sec-approval-head">
+            <b>${escapeHtml(securityOpText(a))}</b>
+            <span class="muted">发起：${escapeHtml(a.initiator ?? '—')}</span>
+          </div>
+          <div class="sec-pairing" data-security-pairing aria-live="polite">${escapeHtml(a.pairingCode ?? '—')}</div>
+          <div class="sec-approval-meta muted">请与另一台设备上的配对号逐位核对 · 有效至 ${escapeHtml(formatTime(a.expiresAt))}</div>
+          <div class="sec-approval-actions">
+            <button class="btn btn-small btn-crt" type="button" data-security-approve="${escapeHtml(a.approvalId)}" ${writes ? '' : 'disabled'}>配对号一致，批准</button>
+            <button class="btn btn-small btn-crt btn-crt-danger" type="button" data-security-deny="${escapeHtml(a.approvalId)}" ${writes ? '' : 'disabled'}>拒绝</button>
+          </div>
+        </li>`).join('')}</ul>`
+    : '<p class="muted sec-none">无待批准请求。</p>';
+  const outgoingRows = outgoing.length > 0
+    ? `<p class="sec-outgoing muted">等待另一台设备批准：${outgoing.map((a) => `${escapeHtml(securityOpText(a))}（配对号 <span class="sec-pairing-inline">${escapeHtml(a.pairingCode ?? '—')}</span>）`).join('、')}</p>`
+    : '';
+
+  const rejectionBlock = rejections.length > 0
+    ? `<div class="sec-rejections" data-security-rejections>
+        <p class="crt-warn"><b>${rejections.length} 条安全操作被拒绝</b>（不会静默；权威判定在 core）</p>
+        <ul>${rejections.slice(0, 5).map((r) => `<li><code>${escapeHtml(String(r.eventId ?? '').slice(0, 10))}</code> ${escapeHtml(securityReasonLabel(r.reason))}</li>`).join('')}</ul>
+        ${rejections.length > 5 ? `<p class="muted">另有 ${rejections.length - 5} 条见审计。</p>` : ''}
+      </div>`
+    : '';
+
+  const lowerTiers = ['low', 'medium', 'high'].filter((tier) => SECURITY_LEVEL_ORDER[tier] < SECURITY_LEVEL_ORDER[level]);
+  const downgrade = lowerTiers.length > 0
+    ? `<details class="cfg-more sec-more">
+        <summary>降级…</summary>
+        <div class="sec-downgrade">
+          ${lowerTiers.map((tier) => `<button class="btn btn-small btn-crt btn-crt-danger" type="button" data-security-action="downgrade" data-level="${tier}" ${writes ? '' : 'disabled'}>降到${securityLevelLabel(tier)}</button>`).join('')}
+          <p class="muted">${level === 'high' ? '高档降级需要另一台已准入设备会签（或离线恢复码）。' : '中档降级需要本机 6 位动态码。'}</p>
+        </div>
+      </details>`
+    : '';
+
+  return `
+    <div class="sec-head">
+      <h3>安全等级</h3>
+      <span class="crt-tag ${securityLevelTag(level)}" data-security-current>当前：${securityLevelLabel(level)}</span>
+      ${mismatch ? '<span class="crt-tag crt-tag-error">种子不一致</span>' : ''}
+    </div>
+    ${incoming.length > 0 || outgoing.length > 0 ? `<div class="sec-pending sec-pending-top" data-security-pending>
+      <h4>待批准 ${incoming.length > 0 ? `<span class="crt-tag crt-tag-warn">${incoming.length} 项</span>` : ''}</h4>
+      ${incoming.length > 0 ? pendingRows : ''}${outgoingRows}
+    </div>` : ''}
+    <ol class="sec-ladder" aria-label="安全等级三档">${ladder}</ol>
+    ${mismatch ? '<p class="crt-warn sec-anomaly">⚠ 种子 fingerprint 不一致：请从持有同一颗种子的设备重新导入（导入错误/被替换）。</p>' : ''}
+    <p class="sec-current muted">当前：<b>${escapeHtml(SECURITY_LEVEL_TITLE[level])}</b>
+      ${sec.changedBy ? ` · 变更者 ${escapeHtml(sec.changedBy)}` : ''}${sec.changedAt ? ` · ${escapeHtml(formatTime(sec.changedAt))}` : ''}</p>
+    <dl class="settings-kv sec-kv">
+      <dt>动态码种子</dt><dd class="kv-value">${totpStatus}</dd><dd class="kv-action sec-actions">${totpActions}</dd>
+      <dt>恢复码</dt><dd class="kv-value">${recoveryStatus}</dd><dd class="kv-action sec-actions">${recoveryActions}</dd>
+    </dl>
+    ${rejectionBlock}
+    ${admitted.length > 0 ? `<details class="cfg-more"><summary>有资格的设备（${admitted.length}）</summary><p class="muted">${escapeHtml(admitted.join(' · '))}</p><p class="muted">会签要求批准设备已准入（admitted）；没有资格时先让已准入设备批准它的一条记录。</p></details>` : ''}
+    <details class="cfg-more"><summary>这一档的边界（诚实说明）</summary>
+      <p class="muted">中档的种子就在本机文件里：设备被拿走时，种子一并被拿走——中档防的是顺手和误操作，不防窃。</p>
+      <p class="muted">高档的代价：敏感操作需要另一台你自己的设备在场；它不在时，用你离线保存的恢复码。</p>
+      <p class="muted">高档不能追认/否决低档时期的历史动作。全部设备丢失动态码种子时：由 root 重置种子；无主密钥备份则不可恢复。</p>
+    </details>
+    ${downgrade}
+  `;
+}
+
+/** 安全卡事件（settings 每次重建都重新绑定；全部委托在本节点内）。 */
+function bindSecurityCard(root) {
+  root.querySelectorAll('[data-security-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const action = button.dataset.securityAction;
+      const level = button.dataset.level;
+      if (action === 'upgrade') void securityStartLevelChange(level);
+      else if (action === 'downgrade') void securityStartLevelChange(level);
+      else if (action === 'totp-import') securityTotpImport();
+      else if (action === 'totp-show') void securityTotpShow();
+      else if (action === 'totp-generate') void securityTotpGenerate();
+      else if (action === 'recovery-rotate') void securityRecoveryRotate();
+      else if (action === 'recovery-generate') void securityRecoveryGenerate();
+    });
+  });
+  root.querySelectorAll('[data-security-approve]').forEach((button) => {
+    button.addEventListener('click', () => void securityApprove(button.dataset.securityApprove));
+  });
+  root.querySelectorAll('[data-security-deny]').forEach((button) => {
+    button.addEventListener('click', () => void securityDeny(button.dataset.securityDeny));
+  });
+}
+
+function securitySetError(message) {
+  const el = $('#security-action-error');
+  if (!el) return;
+  el.hidden = !message;
+  el.textContent = message ?? '';
+}
+
+function stopSecurityPoll() {
+  if (state.securityFlow?.timer) clearTimeout(state.securityFlow.timer);
+  if (state.securityFlow) state.securityFlow.timer = null;
+}
+
+function closeSecurityAction({ silent = false } = {}) {
+  const opener = state.securityFlow?.opener ?? null;
+  stopSecurityPoll();
+  state.securityFlow = null;
+  const modal = $('#security-action');
+  if (modal) modal.hidden = true;
+  const body = $('#security-action-body');
+  if (body) body.innerHTML = '';
+  securitySetError('');
+  if (opener && typeof opener.focus === 'function' && !silent) {
+    try { opener.focus(); } catch { /* 已卸载 */ }
+  }
+}
+
+function securityModalConfig({ title, body, confirmLabel = '确认', onConfirm = null, hideClose = false, blockClose = false } = {}) {
+  stopSecurityPoll();
+  state.securityFlow = {
+    ...(state.securityFlow ?? {}),
+    opener: state.securityFlow?.opener ?? document.activeElement,
+    onConfirm,
+    blockClose,
+    timer: null,
+  };
+  $('#security-action-title').textContent = title;
+  $('#security-action-body').innerHTML = body;
+  securitySetError('');
+  const confirm = $('#security-action-confirm');
+  confirm.hidden = typeof onConfirm !== 'function';
+  confirm.disabled = false;
+  confirm.textContent = confirmLabel;
+  $('#security-action-close').hidden = hideClose;
+  $('#security-action').hidden = false;
+  return $('#security-action-body');
+}
+
+async function securityConfirmHandler() {
+  const flow = state.securityFlow;
+  if (!flow?.onConfirm) return;
+  const confirm = $('#security-action-confirm');
+  const label = confirm.textContent;
+  confirm.disabled = true;
+  confirm.textContent = '处理中…';
+  securitySetError('');
+  try {
+    await flow.onConfirm();
+  } catch (error) {
+    securitySetError(error?.message ?? String(error));
+  } finally {
+    if (state.securityFlow) {
+      confirm.disabled = false;
+      confirm.textContent = label;
+    }
+  }
+}
+
+function securityCodeModal({ title, intro, confirmLabel = '验证', onSubmit }) {
+  securityModalConfig({
+    title,
+    body: `<p class="muted">${escapeHtml(intro)}</p>
+      <div class="field"><label for="security-code">6 位动态码</label>
+      <input id="security-code" class="crt-input" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" aria-describedby="security-code-help" /></div>
+      <p id="security-code-help" class="cfg-help muted">打开认证器 App 读取当前 6 位数字；同一码不能用两次。</p>`,
+    confirmLabel,
+    onConfirm: async () => {
+      const code = $('#security-code')?.value?.trim() ?? '';
+      if (!/^\d{6}$/.test(code)) {
+        securitySetError('请输入 6 位动态码（只含数字）。');
+        return;
+      }
+      await onSubmit(code);
+    },
+  });
+  setTimeout(() => $('#security-code')?.focus(), 0);
+}
+
+async function securityPostTier(level, extra = {}) {
+  const result = await api('/admin/api/security/tier', { method: 'POST', body: { level, ...extra } });
+  await refresh();
+  if (result?.recoveryCode) {
+    securityShowRecoveryOnce(result.recoveryCodeFormatted ?? result.recoveryCode, {
+      title: '升级到高 · 离线恢复码（只显示这一次）',
+      intro: '已启用「高 · 设备会签」。恢复码是另一台设备不在场时的离线钥匙。',
+    });
+  } else {
+    showToast(`安全等级已设为「${securityLevelLabel(level)}」`);
+    closeSecurityAction();
+  }
+  return result;
+}
+
+async function securityStartLevelChange(targetLevel) {
+  const current = state.security?.level ?? 'low';
+  if (targetLevel === current) return;
+  const targetLabel = securityLevelLabel(targetLevel);
+  try {
+    if (SECURITY_LEVEL_ORDER[targetLevel] > SECURITY_LEVEL_ORDER[current]) {
+      if (current === 'medium') {
+        securityCodeModal({
+          title: `升级到${targetLabel}`,
+          intro: '中档升级需要本机 6 位动态码（TOTP）。',
+          confirmLabel: `升级到${targetLabel}`,
+          onSubmit: async (code) => {
+            closeSecurityAction();
+            await securityPostTier(targetLevel, { code });
+          },
+        });
+        return;
+      }
+      const ok = await confirmModal({
+        title: `升级到${targetLabel}`,
+        body: targetLevel === 'high'
+          ? '将启用「高 · 设备会签」：之后加入/添加/踢出与降级都需要另一台已准入设备批准。本机会强制生成一张离线恢复码（只显示一次，须抄写回执）。'
+          : '将启用「中 · 动态码」：之后加入/添加/踢出与降级需要本机 6 位动态码。它挡顺手/误操作，挡不住拿走整台设备的人。',
+        confirmLabel: `升级到${targetLabel}`,
+      });
+      if (!ok) return;
+      await securityPostTier(targetLevel);
+      return;
+    }
+    // 降级
+    if (current === 'high') {
+      await securityStartApproval({
+        title: `降级到${targetLabel} · 设备会签`,
+        op: 'tier',
+        level: targetLevel,
+        intro: '高档降级必须由另一台已准入设备会签（防降级逃逸）。',
+        onApproved: async (approvalId) => {
+          const result = await api('/admin/api/security/tier', { method: 'POST', body: { level: targetLevel, approvalId } });
+          closeSecurityAction();
+          await refresh();
+          showToast(`安全等级已设为「${targetLabel}」${result?.ok ? '' : ''}`);
+        },
+      });
+      return;
+    }
+    securityCodeModal({
+      title: `降级到${targetLabel}`,
+      intro: '中档降级需要本机 6 位动态码。',
+      confirmLabel: `降到${targetLabel}`,
+      onSubmit: async (code) => {
+        closeSecurityAction();
+        await securityPostTier(targetLevel, { code });
+      },
+    });
+  } catch (error) {
+    window.alert(`安全等级变更失败：${error.message}`);
+  }
+}
+
+/** 发起会签请求 → 展示配对号 → 轮询批准/拒绝/过期 → 自动执行最终动作。 */
+async function securityStartApproval({ title, op, target, level, intro, onApproved }) {
+  const payload = {
+    op,
+    ...(op === 'kick' ? { target } : {}),
+    ...(op === 'join' ? { namespace: inviteNamespace() } : {}),
+    ...(op === 'tier' ? { level } : {}),
+  };
+  const request = await api('/admin/api/security/approvals', { method: 'POST', body: payload });
+  const self = securitySelfId();
+  const admitted = state.security?.admitted ?? [];
+  securityModalConfig({
+    title,
+    hideClose: false,
+    body: `<p class="muted">${escapeHtml(intro ?? '')}</p>
+      <div class="sec-pairing sec-pairing-lg" data-security-pairing aria-live="polite">${escapeHtml(request.pairingCode ?? '—')}</div>
+      <p class="cfg-help muted">在另一台已准入设备上打开「设置 → 常用 → 安全等级」，核对同一配对号后点「配对号一致，批准」。</p>
+      ${kvRows([
+        kvRow('动作', escapeHtml(securityOpText(request))),
+        kvRow('发起设备', `<code>${escapeHtml(self ?? '—')}</code>`),
+        kvRow('有效至', escapeHtml(formatTime(request.expiresAt))),
+        kvRow('有资格的设备', admitted.length ? escapeHtml(admitted.join(' · ')) : '<span class="muted">（尚未取得 admitted 列表）</span>'),
+      ])}
+      <p class="sec-wait" id="security-wait-status" aria-live="polite"><span class="sec-wait-dot" aria-hidden="true"></span>等待另一台设备批准…</p>
+      <p class="cfg-help muted">配对号不通过任何网络传输：两台设备各自从动作摘要算出，人眼比对即可。</p>`,
+  });
+  const started = Date.now();
+  const tick = async () => {
+    if (state.securityFlow === null || $('#security-action')?.hidden !== false) return;
+    try {
+      const sec = await api('/admin/api/security', { timeoutMs: 8000 });
+      const records = Array.isArray(sec?.recentApprovals) ? sec.recentApprovals : [];
+      const decided = records.find((r) => r?.approvalId === request.approvalId && r?.decision !== 'request');
+      if (decided?.decision === 'approve') {
+        stopSecurityPoll();
+        const status = $('#security-wait-status');
+        if (status) status.innerHTML = '<span class="sec-ok">✓ 已批准，正在执行…</span>';
+        try {
+          await onApproved(request.approvalId, decided);
+        } catch (error) {
+          if (status) status.innerHTML = `<span class="crt-warn">已批准，但执行失败：${escapeHtml(error.message)}</span>`;
+          securitySetError(`执行失败：${error.message}`);
+        }
+        return;
+      }
+      if (decided?.decision === 'deny') {
+        stopSecurityPoll();
+        const status = $('#security-wait-status');
+        if (status) {
+          status.innerHTML = '<span class="crt-warn">已被拒绝</span> <span class="muted">（发起设备可见；本版本拒绝记录不附文字理由）</span>';
+          status.dataset.securityDenied = '1';
+        }
+        void refresh();
+        return;
+      }
+      const expired = typeof request.expiresAt === 'number' && Date.now() > request.expiresAt;
+      if (expired) {
+        stopSecurityPoll();
+        const status = $('#security-wait-status');
+        if (status) status.innerHTML = '<span class="crt-warn">请求已过期</span> <span class="muted">请关闭后重新发起。</span>';
+        return;
+      }
+      const status = $('#security-wait-status');
+      if (status) {
+        const left = Math.max(0, Math.ceil((request.expiresAt - Date.now()) / 1000));
+        status.innerHTML = `<span class="sec-wait-dot" aria-hidden="true"></span>等待另一台设备批准… <span class="muted">（剩余 ${left}s）</span>`;
+      }
+    } catch {
+      // 轮询失败保持等待，下轮再试（不把瞬时网络错误当拒绝）
+    }
+    if (state.securityFlow?.timer !== null) {
+      state.securityFlow.timer = setTimeout(tick, Math.max(500, 2500 - ((Date.now() - started) % 500)));
+    }
+  };
+  state.securityFlow.timer = setTimeout(tick, 500);
+}
+
+async function securityApprove(approvalId) {
+  const record = (state.security?.pendingApprovals ?? []).find((a) => a?.approvalId === approvalId);
+  if (!record) return;
+  const ok = await confirmModal({
+    title: `批准：${securityOpText(record)}`,
+    body: `发起设备：${record.initiator}\n配对号：${record.pairingCode}\n有效至：${formatTime(record.expiresAt)}\n\n请在另一台设备屏幕上核对配对号，完全一致再批准。`,
+    confirmLabel: '配对号一致，批准',
+  });
+  if (!ok) return;
+  try {
+    await api(`/admin/api/security/approvals/${encodeURIComponent(approvalId)}/approve`, { method: 'POST', body: {} });
+    await refresh();
+    showToast('已批准；发起设备会自动继续');
+  } catch (error) {
+    window.alert(`批准失败：${error.message}`);
+  }
+}
+
+async function securityDeny(approvalId) {
+  const record = (state.security?.pendingApprovals ?? []).find((a) => a?.approvalId === approvalId);
+  if (!record) return;
+  const ok = await confirmModal({
+    title: '拒绝这次请求？',
+    body: `动作：${securityOpText(record)}\n发起设备：${record.initiator}\n\n发起设备会看到「已被拒绝」。本版本拒绝记录不附文字理由。`,
+    confirmLabel: '拒绝',
+  });
+  if (!ok) return;
+  try {
+    await api(`/admin/api/security/approvals/${encodeURIComponent(approvalId)}/deny`, { method: 'POST', body: {} });
+    await refresh();
+    showToast('已拒绝该请求');
+  } catch (error) {
+    window.alert(`拒绝失败：${error.message}`);
+  }
+}
+
+function securityTotpImport() {
+  securityModalConfig({
+    title: '导入动态码种子',
+    body: `<p class="muted">从持有种子的另一台设备「显示种子」处，粘贴分组文本或 <code>otpauth://</code> URI。种子绝不走网络。</p>
+      <div class="field"><label for="security-totp-secret">种子（分组文本 / otpauth URI）</label>
+      <textarea id="security-totp-secret" class="crt-input" rows="3" spellcheck="false" placeholder="ABCD EFGH IJKL … 或 otpauth://totp/…"></textarea></div>
+      <div class="field"><label for="security-totp-fingerprint">期望 fingerprint（可选，8 hex）</label>
+      <input id="security-totp-fingerprint" class="crt-input" type="text" maxlength="16" placeholder="a1b2c3d4" /></div>
+      <p class="cfg-help muted">导入前请与另一台设备上的 fingerprint 对账；不一致会拒绝导入。</p>`,
+    confirmLabel: '导入',
+    onConfirm: async () => {
+      const secret = $('#security-totp-secret')?.value?.trim() ?? '';
+      if (!secret) {
+        securitySetError('请粘贴种子文本或 otpauth URI。');
+        return;
+      }
+      const expectedFingerprint = $('#security-totp-fingerprint')?.value?.trim() ?? '';
+      const result = await api('/admin/api/security/totp/import', {
+        method: 'POST',
+        body: { secret, ...(expectedFingerprint ? { expectedFingerprint } : {}) },
+      });
+      await refresh();
+      closeSecurityAction();
+      showToast(`动态码种子已导入（fingerprint ${result.fingerprint}）`);
+    },
+  });
+  setTimeout(() => $('#security-totp-secret')?.focus(), 0);
+}
+
+function securitySeedDisplay(seed, { generated = false } = {}) {
+  const groupText = Array.isArray(seed.groups)
+    ? seed.groups.join(' ')
+    : String(seed.groups ?? seed.secret ?? '');
+  const qr = typeof seed.qrSvg === 'string' && seed.qrSvg.length > 0
+    ? `<div class="readout-block qr-block"><span class="domain-label">扫码导入（内容 = otpauth URI）</span>
+       <img class="qr-img" alt="动态码种子二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(seed.qrSvg)))}" /></div>`
+    : '<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用下方分组文本。</p>';
+  securityModalConfig({
+    title: generated ? '共享动态码种子（只显示这一次）' : '动态码种子',
+    hideClose: false,
+    body: `<div id="totp-seed-display" class="sec-seed" tabindex="-1">
+        <p class="crt-warn">${escapeHtml(seed.warning ?? '种子等于这一档的钥匙：谁看到它，谁就能过这档的码。只在两台你自己的设备之间当面出示。')}</p>
+        ${qr}
+        <div class="readout-block"><span class="domain-label">分组文本</span><code class="sec-seed-groups">${escapeHtml(groupText)}</code></div>
+        <div class="readout-block"><span class="domain-label">otpauth URI</span><code class="sec-seed-uri">${escapeHtml(seed.otpauth ?? '')}</code></div>
+        <p class="muted">fingerprint：<code>${escapeHtml(seed.fingerprint ?? '—')}</code>（可与另一台设备对账；不含种子本身）</p>
+        <p class="cfg-help muted">不要截图、不要发聊天工具；当面出示后即可关闭。</p>
+      </div>`,
+  });
+  setTimeout(() => { $('#totp-seed-display')?.focus(); }, 0);
+}
+
+async function securityTotpShow() {
+  securityCodeModal({
+    title: '显示动态码种子',
+    intro: '显示种子前先输入一次本机动态码（防顺手窥屏）。',
+    confirmLabel: '验证并显示',
+    onSubmit: async (code) => {
+      const seed = await api('/admin/api/security/totp/show', { method: 'POST', body: { code } });
+      securitySeedDisplay(seed);
+    },
+  });
+}
+
+async function securityTotpGenerate() {
+  const ok = await confirmModal({
+    title: '生成共享动态码种子？',
+    body: '仅 root 可生成。新种子会写在本机，并需要你在其他设备上「导入种子」后，中档门槛才在各设备一致生效。',
+    confirmLabel: '生成',
+  });
+  if (!ok) return;
+  try {
+    const seed = await api('/admin/api/security/totp/show', { method: 'POST', body: { generate: true } });
+    await refresh();
+    securitySeedDisplay(seed, { generated: true });
+  } catch (error) {
+    window.alert(`生成失败：${error.message}`);
+  }
+}
+
+function securityShowRecoveryOnce(codeFormatted, { title, intro = '' } = {}) {
+  securityModalConfig({
+    title,
+    hideClose: true,
+    blockClose: true,
+    body: `<p class="muted">${escapeHtml(intro)}</p>
+      <div id="security-recovery-once" class="sec-once-code" data-security-once tabindex="-1" aria-live="polite">${escapeHtml(codeFormatted)}</div>
+      <p class="crt-warn">恢复码只在屏幕上出现这一次：请抄写到离线介质（纸/金属/密码器），与主密钥备份分开存放。不要截图、不要发聊天工具。丢失只能轮换。</p>
+      <p class="muted">抄写完成后点下方按钮继续；页面销毁后无法再次显示。</p>
+      <div class="domain-actions"><button class="btn btn-crt" type="button" data-security-ack>我已抄写，继续</button></div>`,
+  });
+  setTimeout(() => {
+    const once = $('#security-recovery-once');
+    if (once) once.focus();
+  }, 0);
+}
+
+async function securityRecoveryRotate() {
+  securityModalConfig({
+    title: '轮换恢复码',
+    body: `<p class="muted">用当前恢复码签名换一张新码。旧码的新签名立即失效（已采纳的历史不回撤）。</p>
+      <div class="field"><label for="security-recovery-old">当前恢复码</label>
+      <input id="security-recovery-old" class="crt-input" type="text" autocomplete="off" spellcheck="false" placeholder="XXXX XXXX …" /></div>
+      <p class="cfg-help muted">新码只显示一次；请准备好离线介质。</p>`,
+    confirmLabel: '轮换',
+    onConfirm: async () => {
+      const oldCode = $('#security-recovery-old')?.value?.trim() ?? '';
+      if (!oldCode) {
+        securitySetError('请输入当前恢复码。');
+        return;
+      }
+      const result = await api('/admin/api/security/recovery/rotate', { method: 'POST', body: { oldCode } });
+      await refresh();
+      securityShowRecoveryOnce(result.codeFormatted ?? result.code, {
+        title: '新恢复码（只显示这一次）',
+        intro: `旧 keyId ${String(result.oldKeyId ?? '').slice(0, 8)} 已轮换；旧码的新签名不再被采纳。`,
+      });
+    },
+  });
+  setTimeout(() => $('#security-recovery-old')?.focus(), 0);
+}
+
+async function securityRecoveryGenerate() {
+  const ok = await confirmModal({
+    title: '生成恢复码？',
+    body: '恢复码用于高档下「另一台设备不在场」时替代会签。只在屏幕上出现一次；请准备离线介质抄写。',
+    confirmLabel: '生成',
+  });
+  if (!ok) return;
+  try {
+    const result = await api('/admin/api/security/recovery/generate', { method: 'POST', body: {} });
+    await refresh();
+    securityShowRecoveryOnce(result.codeFormatted ?? result.code, { title: '离线恢复码（只显示这一次）' });
+  } catch (error) {
+    window.alert(`生成失败：${error.message}`);
+  }
+}
+
+/** 踢人改道（SPEC §5.2）：low 直接确认；medium 要码；high 会签。 */
+async function securityRevokeFlow(device) {
+  const level = state.security?.level ?? 'low';
+  const ok = await confirmModal({
+    title: `屏蔽设备 ${device.deviceId}`,
+    body: `${device.deviceId} 签发的政策记录将不再被本机采纳，本机也不再向它发送数据；已同步数据不回撤；可重新授权恢复。\n\n`
+      + (level === 'high'
+        ? '当前为高 · 设备会签：需要另一台已准入设备核对配对号并批准，批准后本机自动完成屏蔽。'
+        : level === 'medium'
+          ? '当前为中 · 动态码：下一步需要输入本机 6 位动态码。'
+          : '当前为低（默认）：无额外门槛。'),
+    confirmLabel: '屏蔽该设备',
+  });
+  if (!ok) return;
+  if (level === 'high') {
+    try {
+      await securityStartApproval({
+        title: `屏蔽 ${device.deviceId} · 设备会签`,
+        op: 'kick',
+        target: device.deviceId,
+        intro: `${device.deviceId} 签发的政策记录将不再被本机采纳；会签批准后自动执行。`,
+        onApproved: async (approvalId) => {
+          await api(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, { method: 'POST', body: { approvalId } });
+          closeSecurityAction();
+          await refresh();
+          showToast(`已在本地屏蔽该设备（会签）`);
+        },
+      });
+    } catch (error) {
+      window.alert(`发起会签失败：${error.message}`);
+    }
+    return;
+  }
+  if (level === 'medium') {
+    securityCodeModal({
+      title: `屏蔽 ${device.deviceId} · 动态码`,
+      intro: '输入本机 6 位动态码后写入屏蔽记录。',
+      confirmLabel: '屏蔽该设备',
+      onSubmit: async (code) => {
+        await api(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, { method: 'POST', body: { code } });
+        closeSecurityAction();
+        await refresh();
+        showToast('已在本地屏蔽该设备');
+      },
+    });
+    return;
+  }
+  await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, {}, '已在本地屏蔽该设备');
 }
 
 function renderDiagnostics() {
@@ -1639,7 +2329,7 @@ function renderOverlays() {
       selfId,
     });
   }
-  const items = attentionItems({ clients: state.clients, ui: state, devices: state.devices, selfId });
+  const items = attentionItems({ clients: state.clients, ui: state, devices: state.devices, selfId, security: state.security });
   card.hidden = !onMap || items.length === 0;
   if (onMap && items.length > 0) {
     card.innerHTML = `<h3>需要注意</h3><ul>${items.map((it) =>
@@ -1721,6 +2411,7 @@ async function clientAction(id, action) {
       const p = error?.payload ?? {};
       state.clientFailed[id] = {
         kind: 'connect',
+        at: Date.now(),
         reason: p.reason ?? error.message,
         rolledBack: p.rolledBack === true,
         backupPath: typeof p.backupPath === 'string' ? p.backupPath : null,
@@ -1883,11 +2574,15 @@ function auditItemHtml(event) {
     policy_issuer_declare: 'declare',
     namespace_membership: 'membership',
     namespace_handoff: 'handoff',
+    security_tier: 'security',
+    security_approval: 'security',
+    security_recovery: 'recovery',
+    security_totp: 'security',
   }[event.type] ?? 'device';
   return `<li class="audit-item${event.valid ? '' : ' invalid'}">
     <span class="audit-time">${escapeHtml(formatTime(event.at))}</span>
     <span class="audit-action ${actionClass}">${escapeHtml(actionLabel(event.type))}</span>
-    <span class="audit-detail">${describeEvent(event)}</span>
+    <span class="audit-detail">${describeEvent(event)}${event.rejectReason ? ` · <span class="crt-warn">被拒绝：${escapeHtml(securityReasonLabel(event.rejectReason))}</span>` : ''}</span>
   </li>`;
 }
 
@@ -1942,6 +2637,10 @@ function actionLabel(type) {
   if (type === 'policy_issuer_declare') return '声明签发者';
   if (type === 'namespace_membership') return '成员变更';
   if (type === 'namespace_handoff') return '退出并交接';
+  if (type === 'security_tier') return '安全等级变更';
+  if (type === 'security_approval') return '设备会签';
+  if (type === 'security_recovery') return '恢复码';
+  if (type === 'security_totp') return '动态码';
   return type;
 }
 
@@ -1971,7 +2670,37 @@ function describeEvent(event) {
   }
   if (event.type === 'device_revoke') {
     return `签发者 <b>${escapeHtml(event.issuer)}</b> 屏蔽设备 <b>${escapeHtml(event.subject)}</b>（本机不再采纳其政策记录）`
+      + `${event.cosignApprover ? ` · 会签：<b>${escapeHtml(event.cosignApprover)}</b>` : ''}`
+      + `${event.breakGlassKeyId ? ` · <span class="crt-warn">恢复码 ${escapeHtml(String(event.breakGlassKeyId).slice(0, 8))}</span>` : ''}`
       + `${event.valid ? '' : ' · 已不再屏蔽'}`;
+  }
+  if (event.type === 'security_tier') {
+    const from = event.fromLevel ? securityLevelLabel(event.fromLevel) : '—';
+    const to = securityLevelLabel(event.level);
+    return `签发者 <b>${escapeHtml(event.issuer)}</b> 将安全等级 <b>${escapeHtml(from)} → ${escapeHtml(to)}</b>`
+      + `${event.cosignApprover ? ` · 会签：<b>${escapeHtml(event.cosignApprover)}</b>` : ''}`
+      + `${event.breakGlassKeyId ? ` · <span class="crt-warn">恢复码 ${escapeHtml(String(event.breakGlassKeyId).slice(0, 8))}</span>` : ''}`;
+  }
+  if (event.type === 'security_approval') {
+    const decision = event.decision === 'approve' ? '批准' : event.decision === 'deny' ? '拒绝' : '请求';
+    const pair = event.pairingCode ? ` · 配对号 <code>${escapeHtml(event.pairingCode)}</code>` : '';
+    if (event.decision === 'deny') {
+      return `设备会签：<b>${escapeHtml(securityOpText(event))}</b> 已被拒绝${pair}`;
+    }
+    if (event.decision === 'approve') {
+      return `设备会签：批准设备 <b>${escapeHtml(event.issuer)}</b> ${decision} <b>${escapeHtml(securityOpText(event))}</b>${pair}`;
+    }
+    return `设备会签：发起设备 <b>${escapeHtml(event.initiator)}</b> 请求 <b>${escapeHtml(securityOpText(event))}</b>${pair}`
+      + `${event.expiresAt ? ` · 有效至 ${escapeHtml(formatTime(event.expiresAt))}` : ''}`;
+  }
+  if (event.type === 'security_recovery') {
+    return `恢复码${event.mode === 'rotate' ? '轮换' : '登记'}：<code>${escapeHtml(String(event.keyId ?? '').slice(0, 8))}</code>`
+      + `${event.breakGlassKeyId ? ` · 旧码签名 ${escapeHtml(String(event.breakGlassKeyId).slice(0, 8))}` : ''}`
+      + `${event.cosignApprover ? ` · 会签：${escapeHtml(event.cosignApprover)}` : ''}`;
+  }
+  if (event.type === 'security_totp') {
+    const action = /show/i.test(String(event.note ?? '')) ? '展示' : '导入';
+    return `设备 <b>${escapeHtml(event.device ?? event.issuer)}</b> ${action}动态码种子 · fingerprint <code>${escapeHtml(event.fingerprint ?? '—')}</code>`;
   }
   if (event.type === 'policy_issuer_declare') {
     return `签发者 <b>${escapeHtml(event.issuer)}</b> 在图上声明 <b>${escapeHtml(event.subject)}</b> 为引导签发者`
@@ -2150,6 +2879,7 @@ function renderDeviceCard() {
     device.lastSyncAt ?? null, device.grantedByMe, device.grantedToMe, device.authorizedFor ?? [],
     (device.memberships ?? []).map((m) => [m.namespace, m.effective]),
     Boolean(device.declaredIssuer), isSelf, writes,
+    state.security?.level ?? 'low',
     state.settings?.sync?.subscriptions ?? [], state.settings?.fleet?.namespace ?? null,
     allNamespaces,
     (selfRow0?.memberships ?? []).map((m) => m.namespace),
@@ -2212,18 +2942,25 @@ function renderDeviceCard() {
     : '<li class="muted">暂无需处理的记忆域</li>')
     + (hiddenCount > 0 ? `<li class="muted">另有 ${hiddenCount} 个记忆域双方均未参与</li>` : '');
 
+  // S3 · 踢人分级（SPEC §5.2 v1.1）：low 维持「更多操作」折叠（防误触）；
+  // medium/high 提级为一等动作（与同步/断开同排，危险样式），门槛由动态码/会签提供。
+  const secLevel = state.security?.level ?? 'low';
+  const elevatedKick = secLevel === 'medium' || secLevel === 'high';
+  const kickButton = `<button class="btn btn-small btn-crt btn-crt-danger" data-action="revoke-device" ${writes ? '' : 'disabled'}>屏蔽该设备</button>`;
   const actions = isSelf ? '' : `
     <div class="card-actions">
       <button class="btn btn-small btn-crt" data-action="sync" ${writes && device.online ? '' : 'disabled'}>立即同步</button>
       ${device.online
         ? `<button class="btn btn-small btn-crt" data-action="disconnect" ${writes ? '' : 'disabled'}>断开连接</button>`
         : `<button class="btn btn-small btn-crt" data-action="connect" ${writes ? '' : 'disabled'}>连接</button>`}
+      ${elevatedKick ? kickButton : ''}
     </div>
+    ${elevatedKick ? `<p class="card-help muted">屏蔽该设备 = 踢出本网络（已同步数据不回撤）。${secLevel === 'high' ? '高档需要另一台已准入设备会签。' : '中档需要本机 6 位动态码。'}</p>` : ''}
     <details class="card-advanced">
       <summary>更多操作</summary>
       <div class="card-actions">
         <button class="btn btn-small btn-crt" data-action="reset-watermarks" ${writes ? '' : 'disabled'}>重置水位</button>
-        <button class="btn btn-small btn-crt btn-crt-danger" data-action="revoke-device" ${writes ? '' : 'disabled'}>屏蔽该设备</button>
+        ${elevatedKick ? '' : kickButton}
       </div>
     </details>
     ${writes ? '' : '<p class="muted" style="margin-top:10px">当前为只读模式（写操作需 memory.admin + CSRF）。</p>'}`;
@@ -2649,6 +3386,17 @@ $('#attention-card')?.addEventListener('click', (event) => {
   if (item.dataset.attentionAction === 'assistants') {
     $('#settings').hidden = false;
     renderSettings('assistants');
+  } else if (item.dataset.attentionAction === 'security' || item.dataset.attentionAction === 'security-approvals') {
+    $('#settings').hidden = false;
+    renderSettings('common');
+    setTimeout(() => {
+      const slot = $('#settings-security-slot');
+      if (!slot) return;
+      const target = item.dataset.attentionAction === 'security-approvals'
+        ? slot.querySelector('[data-security-pending]')
+        : slot;
+      (target ?? slot).scrollIntoView({ block: 'start', behavior: 'smooth' });
+    }, 0);
   } else if (item.dataset.attentionAction === 'device') {
     const deviceId = item.dataset.attentionId?.replace(/^dev-/, '') ?? '';
     if (deviceId) { state.selected = state.devices.find((d) => d.deviceId === deviceId) ?? null; render(); }
@@ -2690,12 +3438,7 @@ async function handleDeviceAction(action, device) {
     });
     if (ok) await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/reset-watermarks`, {}, '水位已重置');
   } else if (action === 'revoke-device') {
-    const ok = await confirmModal({
-      title: `屏蔽设备 ${device.deviceId}`,
-      body: `${device.deviceId} 签发的政策记录将不再被本机采纳，本机也不再向它发送数据；已同步数据不回撤；可重新授权恢复。`,
-      confirmLabel: '屏蔽该设备',
-    });
-    if (ok) await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, {}, '已在本地屏蔽该设备');
+    await securityRevokeFlow(device);
   }
 }
 
@@ -2759,6 +3502,8 @@ function modalCanDismiss(el) {
   if (!el || el.id === 'provision') return false;
   if (el.dataset.modalStatic === 'true') return false;
   if (el.id === 'wizard' && (wizardState.connection === 'connecting' || wizardState.granting === true)) return false;
+  // S3：恢复码一次性展示期间不可关闭（必须先回执「我已抄写」）
+  if (el.id === 'security-action' && state.securityFlow?.blockClose === true) return false;
   return true;
 }
 
@@ -2766,6 +3511,7 @@ function dismissModal(el) {
   if (!el || !modalCanDismiss(el)) return false;
   if (el.id === 'modal') { settleConfirmModal(false); return true; }
   if (el.id === 'wizard') { closeWizard(); return true; }
+  if (el.id === 'security-action') { closeSecurityAction(); return true; }
   el.hidden = true;
   if (el.id === 'handoff') {
     handoffNs = null;
@@ -2810,6 +3556,29 @@ syncModalLock();
 
 $('#modal-cancel').addEventListener('click', () => settleConfirmModal(false));
 $('#modal-confirm').addEventListener('click', () => settleConfirmModal(true));
+// S3：安全操作弹层（确认 / 关闭 / 一次性恢复码回执）
+$('#security-action-confirm')?.addEventListener('click', () => void securityConfirmHandler());
+$('#security-action-close')?.addEventListener('click', () => {
+  if (state.securityFlow?.blockClose === true) return;
+  closeSecurityAction();
+});
+$('#security-action')?.addEventListener('click', (event) => {
+  const ack = event.target.closest('[data-security-ack]');
+  if (ack) {
+    closeSecurityAction();
+    void refresh();
+  }
+});
+$('#security-badge')?.addEventListener('click', () => {
+  $('#settings').hidden = false;
+  renderSettings('common');
+  setTimeout(() => {
+    const slot = $('#settings-security-slot');
+    if (!slot) return;
+    slot.scrollIntoView({ block: 'start', behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ? 'auto' : 'smooth' });
+    slot.focus?.();
+  }, 0);
+});
 
 $('#add-device').addEventListener('click', openWizard);
 $('#open-settings').addEventListener('click', () => {
@@ -2886,6 +3655,40 @@ $('#handoff-confirm').addEventListener('click', confirmHandoff);
 // ---------- 邀请新设备（T2 令牌加入：主密钥不复制） ----------
 
 async function openInvite() {
+  const level = state.security?.level ?? 'low';
+  if (level === 'medium') {
+    securityCodeModal({
+      title: '邀请新设备 · 动态码',
+      intro: '中档在签发一次性令牌前需要输入本机 6 位动态码。',
+      confirmLabel: '验证并生成令牌',
+      onSubmit: async (code) => {
+        const res = await api('/admin/api/invite', { method: 'POST', body: { code } });
+        closeSecurityAction();
+        showInviteResult(res);
+      },
+    });
+    return;
+  }
+  if (level === 'high') {
+    try {
+      await securityStartApproval({
+        title: '邀请新设备 · 设备会签',
+        op: 'join',
+        intro: '高档签发的不是立刻出令牌：先在另一台已准入设备上核对配对号并批准，批准后本机自动出令牌/二维码。',
+        onApproved: async (approvalId) => {
+          const res = await api('/admin/api/invite', {
+            method: 'POST',
+            body: { approvalId, namespace: inviteNamespace() },
+          });
+          closeSecurityAction();
+          showInviteResult(res);
+        },
+      });
+    } catch (error) {
+      window.alert(`发起会签失败：${error.message}`);
+    }
+    return;
+  }
   $('#invite').hidden = false;
   await renderInvite();
 }
@@ -2897,78 +3700,96 @@ async function renderInvite(overrideEndpoint = null) {
     ?? $('#invite-endpoint')?.value?.trim()
     ?? null;
   toSettings.hidden = true;
+  $('#invite').hidden = false;
   body.innerHTML = '<p class="muted">正在签发令牌…</p>';
   try {
     const res = await api('/admin/api/invite', {
       method: 'POST',
       body: typedEndpoint ? { endpoint: typedEndpoint } : {},
     });
-    state.inviteToken = res;
-    // 令牌很长：显示截断，复制按钮携带完整值
-    const shortToken = res.token.length > 56 ? `${res.token.slice(0, 42)}…${res.token.slice(-12)}` : res.token;
-    const cmd = `fleet join --token ${res.token} --daemon --dir ~/.mebular --device <新设备ID>`;
-    const shortCmd = `fleet join --token ${shortToken} --daemon --dir ~/.mebular --device <新设备ID>`;
-    const endpointWarning = res.warning
-      ? `<p class="crt-warn">⚠ ${escapeHtml(res.warning)}</p>`
-      : '';
-    // C7：二维码（服务端渲染 SVG → data-uri；缺可选依赖时为 null → 只显示文本）
-    const qrBlock = res.qrSvg
-      ? `<div class="readout-block qr-block">
-          <span class="domain-label">扫码即通（QR 内容 = 令牌文本）</span>
-          <img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />
-        </div>`
-      : `<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用下方文本令牌。</p>`;
-    const endpointEditor = `
-      <div class="readout-block">
-        <span class="domain-label">join 端点（写死进令牌，须为新设备可达地址）</span>
-        <input id="invite-endpoint" class="crt-input" type="text" value="${escapeHtml(res.endpoint)}" />
-        <p class="cfg-help muted">默认由守护按 joinService.bind 计算：通配时取本机 LAN IPv4。跨网段/NAT 时可改为新设备可达地址后重新签发。</p>
-        ${endpointWarning}
-      </div>`;
-    body.innerHTML = `
-      ${qrBlock}
-      <div class="readout-block">
-        <span class="domain-label">令牌（一次性，默认 15 分钟有效）</span>
-        <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
-      </div>
-      <p class="cfg-help muted">让新设备扫码或粘贴令牌加入；兑换只建立入网信任，之后按各自的参与选择收发。它出现在星图上后本页即可关闭。</p>
-      <details class="asst-detail"><summary>详情</summary>
-        ${endpointEditor}
-        <dl class="settings-kv">
-          <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>
-          <dt>默认记忆域</dt><dd><code>${escapeHtml(res.namespace)}</code></dd>
-          <dt>兑换后</dt><dd>${res.grantOnJoin === false ? '兑换后不自动授权（对端参与该记忆域后自动签发）' : '兑换后自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）'}</dd>
-          <dt>有效期至</dt><dd>${escapeHtml(formatTime(res.expiresAt))}（一次性）</dd>
-        </dl>
-        <div class="readout-block">
-          <span class="domain-label">新设备</span>
-          <div class="copyable"><code>${escapeHtml(shortCmd)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(cmd)}">复制命令</button></div>
-        </div>
-        <p class="crt-warn">⚠ 令牌即入网权限：一次性、短时效（默认 15 分钟），仅经可信 LAN 使用，请勿写入工单或公开日志。</p>
-        <div class="asst-detail-actions">
-          <button class="btn btn-small" id="invite-regen-inline" type="button">重新生成邀请（旧令牌立即失效）</button>
-        </div>
-      </details>
-    `;
-    body.querySelector('#invite-regen-inline')?.addEventListener('click', () => {
-      // UX-2：重新生成收详情且二次确认（旧令牌作废是不可逆方向）
-      if (window.confirm('重新生成会使当前令牌立即失效。确定？')) void renderInvite();
-    });
-    body.querySelectorAll('[data-copy]').forEach((button) => {
-      button.addEventListener('click', () => copyText(button.dataset.copy, button));
-    });
+    showInviteResult(res);
   } catch (error) {
-    state.inviteToken = null;
-    if (error.payload?.error === 'join_disabled' || error.status === 409) {
-      toSettings.hidden = false;
-      body.innerHTML = `
-        <p class="modal-note muted">加入服务未启用：开启后即可在新设备上用一条命令入网（主密钥不复制，令牌一次性、默认 15 分钟有效）。</p>
-        <p class="cfg-path muted">在「设置 → 常用 → 邀请新设备上车」打开「启用加入服务」；改动即写入，重启 serve 后生效。</p>
-      `;
-    } else {
-      body.innerHTML = `<p class="crt-warn">签发失败：${escapeHtml(error.message)}</p>`;
-    }
+    showInviteError(error);
   }
+}
+
+function showInviteError(error) {
+  const body = $('#invite-body');
+  const toSettings = $('#invite-to-settings');
+  state.inviteToken = null;
+  $('#invite').hidden = false;
+  if (error.payload?.error === 'join_disabled' || error.status === 409) {
+    toSettings.hidden = false;
+    body.innerHTML = `
+      <p class="modal-note muted">加入服务未启用：开启后即可在新设备上用一条命令入网（主密钥不复制，令牌一次性、默认 15 分钟有效）。</p>
+      <p class="cfg-path muted">在「设置 → 常用 → 邀请新设备上车」打开「启用加入服务」；改动即写入，重启 serve 后生效。</p>
+    `;
+  } else {
+    body.innerHTML = `<p class="crt-warn">签发失败：${escapeHtml(error.message)}</p>`;
+  }
+}
+
+/** 令牌结果面板（low 直接出；medium/high 门槛通过后复用同一面板）。 */
+function showInviteResult(res) {
+  const body = $('#invite-body');
+  const toSettings = $('#invite-to-settings');
+  state.inviteToken = res;
+  $('#invite').hidden = false;
+  toSettings.hidden = true;
+  // 令牌很长：显示截断，复制按钮携带完整值
+  const shortToken = res.token.length > 56 ? `${res.token.slice(0, 42)}…${res.token.slice(-12)}` : res.token;
+  const cmd = `fleet join --token ${res.token} --daemon --dir ~/.mebular --device <新设备ID>`;
+  const shortCmd = `fleet join --token ${shortToken} --daemon --dir ~/.mebular --device <新设备ID>`;
+  const endpointWarning = res.warning
+    ? `<p class="crt-warn">⚠ ${escapeHtml(res.warning)}</p>`
+    : '';
+  // C7：二维码（服务端渲染 SVG → data-uri；缺可选依赖时为 null → 只显示文本）
+  const qrBlock = res.qrSvg
+    ? `<div class="readout-block qr-block">
+        <span class="domain-label">扫码即通（QR 内容 = 令牌文本）</span>
+        <img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />
+      </div>`
+    : `<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用下方文本令牌。</p>`;
+  const endpointEditor = `
+    <div class="readout-block">
+      <span class="domain-label">join 端点（写死进令牌，须为新设备可达地址）</span>
+      <input id="invite-endpoint" class="crt-input" type="text" value="${escapeHtml(res.endpoint)}" />
+      <p class="cfg-help muted">默认由守护按 joinService.bind 计算：通配时取本机 LAN IPv4。跨网段/NAT 时可改为新设备可达地址后重新签发。</p>
+      ${endpointWarning}
+    </div>`;
+  body.innerHTML = `
+    ${qrBlock}
+    <div class="readout-block">
+      <span class="domain-label">令牌（一次性，默认 15 分钟有效）</span>
+      <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
+    </div>
+    <p class="cfg-help muted">让新设备扫码或粘贴令牌加入；兑换只建立入网信任，之后按各自的参与选择收发。它出现在星图上后本页即可关闭。</p>
+    ${res.securityApproval ? '<p class="crt-warn">已随令牌带上会签批准（新设备首现记录内嵌 cosign）。</p>' : ''}
+    <details class="asst-detail"><summary>详情</summary>
+      ${endpointEditor}
+      <dl class="settings-kv">
+        <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>
+        <dt>默认记忆域</dt><dd><code>${escapeHtml(res.namespace)}</code></dd>
+        <dt>兑换后</dt><dd>${res.grantOnJoin === false ? '兑换后不自动授权（对端参与该记忆域后自动签发）' : '兑换后自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）'}</dd>
+        <dt>有效期至</dt><dd>${escapeHtml(formatTime(res.expiresAt))}（一次性）</dd>
+      </dl>
+      <div class="readout-block">
+        <span class="domain-label">新设备</span>
+        <div class="copyable"><code>${escapeHtml(shortCmd)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(cmd)}">复制命令</button></div>
+      </div>
+      <p class="crt-warn">⚠ 令牌即入网权限：一次性、短时效（默认 15 分钟），仅经可信 LAN 使用，请勿写入工单或公开日志。</p>
+      <div class="asst-detail-actions">
+        <button class="btn btn-small" id="invite-regen-inline" type="button">重新生成邀请（旧令牌立即失效）</button>
+      </div>
+    </details>
+  `;
+  body.querySelector('#invite-regen-inline')?.addEventListener('click', () => {
+    // UX-2：重新生成收详情且二次确认（旧令牌作废是不可逆方向）
+    if (window.confirm('重新生成会使当前令牌立即失效。确定？')) void openInvite();
+  });
+  body.querySelectorAll('[data-copy]').forEach((button) => {
+    button.addEventListener('click', () => copyText(button.dataset.copy, button));
+  });
 }
 
 $('#invite-device').addEventListener('click', openInvite);
@@ -3220,6 +4041,34 @@ const MOCK_MEMORIES = [
   { id: '01MOCKMEMORY000000000000003', type: 'fact', namespace: 'default', preview: '第三条演示记忆', createdAt: 0, archived: false, deleted: false },
 ];
 
+function mockSecurity(now) {
+  return {
+    ok: true,
+    level: 'high',
+    changedAt: now - 240_000,
+    changedBy: 'device-A',
+    admitted: ['device-A', 'device-B'],
+    recoveryKeyId: 'a1b2c3d4e5f60718',
+    coreTierAvailable: true,
+    totp: { imported: true, fingerprint: 'a1b2c3d4', createdAt: now - 3_600_000, failures: 0, lockedUntil: 0, backoffUntil: 0, lastAcceptedAt: now - 60_000 },
+    recovery: { registered: true, keyId: 'a1b2c3d4e5f60718', mode: 'set', createdAt: now - 240_000, lastUsedAt: null, current: true },
+    pendingApprovals: [{
+      approvalId: 'mock-approval-kick',
+      op: 'kick',
+      decision: 'request',
+      initiator: 'device-B',
+      target: 'device-D',
+      nonce: 'mock-kick',
+      digest: 'mock-digest',
+      pairingCode: '482-917',
+      expiresAt: now + 8 * 60_000,
+      issuedAt: now - 30_000,
+    }],
+    recentApprovals: [],
+    rejections: [{ eventId: 'e-sec-reject-1', reason: 'missing-proof' }],
+  };
+}
+
 async function mockData() {
   const now = Date.now();
   // 记忆视图：按当前过滤器在本地过滤（?mock=1 是契约规定的无网络验收路径）
@@ -3270,6 +4119,7 @@ async function mockData() {
       },
     ],
     memories: { total: memories.length, memories, includeArchived: f.archived, includeDeleted: f.deleted },
+    security: mockSecurity(now),
     policy: [
       { eventId: 'e5', type: 'namespace_grant', issuer: 'device-A', subject: 'device-C', namespaces: ['work'], grantId: 'g-c0000000-1111-2222-3333-444455556666', at: now - 300_000, valid: true, note: 'auto-grant: subscription-driven' },
       // 连续自动签发行（§7：默认折叠为「自动签发 ×3」汇总行，展开见明细）
@@ -3279,6 +4129,12 @@ async function mockData() {
       { eventId: 'e2', type: 'device_revoke', issuer: 'device-A', subject: 'device-D', at: now - 700_000, valid: true },
       { eventId: 'e0', type: 'namespace_grant', issuer: 'device-A', subject: 'device-D', namespaces: ['work'], grantId: 'g-d0000000-1111-2222-3333-444455556666', at: now - 800_000, valid: false },
       { eventId: 'e1', type: 'namespace_grant', issuer: 'device-A', subject: 'device-B', namespaces: ['notes'], grantId: 'g-b0000000-1111-2222-3333-444455556666', at: now - 900_000, valid: true },
+      // S3：安全时间线（档位拒绝 / 会签 / 恢复码 / 动态码；拒绝原因抬头可见）
+      { eventId: 'e-sec-tier-1', type: 'security_tier', issuer: 'device-A', level: 'high', fromLevel: 'low', at: now - 1_000_000, valid: true },
+      { eventId: 'e-sec-reject-1', type: 'security_tier', issuer: 'device-B', level: 'medium', fromLevel: 'high', at: now - 1_020_000, valid: false, rejectReason: 'missing-proof', note: '裸降档应被拒绝' },
+      { eventId: 'e-sec-approve-1', type: 'security_approval', issuer: 'device-B', subject: 'device-D', approvalId: 'mock-approval-done', op: 'kick', decision: 'approve', initiator: 'device-A', target: 'device-D', pairingCode: '482-917', at: now - 1_040_000, valid: true, cosignApprover: 'device-B' },
+      { eventId: 'e-sec-recovery-1', type: 'security_recovery', issuer: 'device-A', subject: 'device-A', keyId: 'a1b2c3d4e5f60718', mode: 'set', at: now - 1_060_000, valid: true },
+      { eventId: 'e-sec-totp-1', type: 'security_totp', issuer: 'device-A', subject: 'device-A', device: 'device-A', fingerprint: 'a1b2c3d4', at: now - 1_080_000, valid: true, note: 'console import' },
     ],
     degraded: null,
   };
@@ -3484,7 +4340,7 @@ async function submitProvision(kind) {
     showProvisionRestart(res?.restart, { prefix: kind === 'create' ? '已建新' : '已加入' });
     setProvisionStatus(kind === 'create'
       ? '已建新完成：按上方指引重启。'
-      : '已加入完成：按上方指引重启。', 'ok');
+      : '已加入完成：按上方指引重启。重启后若网络启用了「中 · 动态码」，请在「设置 → 常用 → 安全等级」导入种子（两台设备当面出示）；若启用了「高 · 设备会签」，首现记录会带邀请方批准，被拒原因会显示在安全卡/审计。', 'ok');
     if (button) button.disabled = false;
   } catch (error) {
     // B（F-ONB-2）：重复调用（already_provisioned）→ 切「已完成」态，不裸报错
@@ -3579,7 +4435,19 @@ if (provisionStatus) {
   setView(deepLink.view ?? 'map');
   refresh().then(() => {
     // UX-2：?view=connect 别名重定向 → 设置 · AI 助手
-    if (deepLink.openSettings) { $('#settings').hidden = false; renderSettings(deepLink.openSettings); }
+    if (deepLink.openSettings) {
+      $('#settings').hidden = false;
+      renderSettings(deepLink.openSettings);
+      if (deepLink.focusSecurity) {
+        setTimeout(() => {
+          const slot = $('#settings-security-slot');
+          if (slot) {
+            slot.scrollIntoView({ block: 'start', behavior: 'auto' });
+            slot.focus?.();
+          }
+        }, 0);
+      }
+    }
     if (deepLink.openInvite) openInvite();
   });
   startEvents();

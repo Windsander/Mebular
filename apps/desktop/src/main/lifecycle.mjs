@@ -44,10 +44,13 @@ export function stopConfirm({ daemonMode, hasManagedChild } = {}) {
  * 托盘菜单模型（中-9 分组：导航 / 守护控制 / 诊断 / 登录时启动 / 退出）。
  * 返回纯数据模板；index.mjs 按 id 绑定 click，再交给 Menu.buildFromTemplate。
  */
-export function trayMenuModel({ healthy, daemonMode, loginOpenAtLogin } = {}) {
+export function trayMenuModel({ healthy, daemonMode, loginOpenAtLogin, securityLevel = null } = {}) {
   const statusLabel = `${healthy ? '●' : '○'} ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}（${daemonMode ?? '—'}）`;
+  const levelLabel = securityLevel === 'high' ? '高' : securityLevel === 'medium' ? '中' : securityLevel === 'low' ? '低' : '—';
   return [
     { id: 'status', label: statusLabel, enabled: false },
+    // S3：只读等级行；点击只打开控制台安全卡（壳内不做任何安全写操作）
+    { id: 'security-level', label: `安全等级：${levelLabel}`, enabled: securityLevel !== null },
     { type: 'separator' },
     { id: 'open-console', label: '打开控制台' },
     { id: 'connect-assistants', label: '连接 AI 助手' },

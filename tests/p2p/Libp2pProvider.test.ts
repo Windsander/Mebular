@@ -72,8 +72,18 @@ async function makeDeviceKey(): Promise<{ publicKey: Uint8Array; privateKey: Cry
   };
 }
 
-/** 绕开转译器 import 改写的真实动态导入（与 Libp2pProvider 内部一致） */
-const realDynamicImport = new Function('specifier', 'return import(specifier);') as ModuleImporter;
+/** 绕开转译器 import 改写的真实动态导入（与 Libp2pProvider 内部一致）。
+ *
+ * V8 按函数体源码字符串缓存 `new Function` 的编译结果；Jest 会在同一 worker 跨测试文件/环境
+ * 复用该缓存，命中已销毁环境的函数时动态 `import()` 会以环境已销毁拒绝。这里给每次调用的
+ * 源码附加“模块加载唯一种子 + 调用计数”的注释，强制重新编译（与生产 defaultImporter 同策略）。
+ */
+let importNonce = 0;
+const importerModuleNonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+const realDynamicImport: ModuleImporter = (specifier) => new Function(
+  'specifier',
+  `return import(specifier); //#${importerModuleNonce}-${importNonce += 1}`,
+)(specifier) as Promise<Record<string, unknown>>;
 
 // ---------- 帧编解码（纯函数） ----------
 

@@ -44,7 +44,7 @@ function makeApp(level, options = {}) {
       calls.tier.push(input);
       return { id: 'tier-event', data: {} };
     },
-    getRevokedDevices: async () => [],
+    getBlockedDevices: async () => [],
     revokeDevice: async (input) => {
       calls.revoke.push(input);
       return { id: 'revoke-event', data: {} };

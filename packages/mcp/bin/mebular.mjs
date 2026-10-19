@@ -109,7 +109,7 @@ async function runTokenConsent(flags) {
   await writeFile(file, JSON.stringify({ codes }, null, 2), 'utf-8');
   await chmod(file, 0o600);
   console.log(JSON.stringify({ code, scopes, expiresAt: new Date(now + ttl * 1000).toISOString(), consentFile: file }, null, 2));
-  console.error('（将同意码提交到 /authorize 表示授权；一次性、短时有效）');
+  console.error('（将同意码提交到 /authorize 表示同意；一次性、短时有效）');
 }
 
 async function runToken(action, flags, subArg) {
@@ -199,7 +199,7 @@ async function runInit(flags) {
       encryption: { level: 'none', keyFile },
       network: { enabled: false, libp2p: { listen: [], relayServers: [], relayUnlimited: false } },
       // 常驻入口默认实时（写入即推 + 周期 anti-entropy）；可显式关闭
-      sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: true }, autoGrant: { enabled: true } },
+      sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: true } },
       semantic: { enabled: false, minScore: 0.2 },
       mcp: { http: { host: '127.0.0.1', port: 7331, auth: 'none', tls: false, tokensFile: join(home, 'auth', 'tokens.json') } },
     };
@@ -1033,7 +1033,7 @@ async function main() {
         });
         if (result.provision) {
           console.log(`PROVISION_READY ${JSON.stringify({ host: result.host, port: result.port, home: homeDir() })}`);
-          console.log('引导态：家目录为空。请在浏览器打开控制台完成「建新 Mebular / 加入已有 Mebular」。');
+          console.log('引导态：家目录为空。请在浏览器打开控制台完成「新建忆云 / 加入已有忆云」，之后各设备自行订阅记忆域。');
         } else {
           console.log(`SERVE_READY ${JSON.stringify({ host: result.host, port: result.port, auth: result.auth, issuer: result.issuer })}`);
         }

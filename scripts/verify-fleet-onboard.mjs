@@ -123,7 +123,7 @@ try {
     skipped: report?.skipped,
     failed: (report?.checks ?? []).filter((c) => c.status === 'FAIL').map((c) => `${c.name}:${c.detail}`),
   });
-  const KNOWN_SKIPS = ['config 权限', '主密钥权限', '服务已注册', '心跳新鲜', 'namespace 成员资格', 'peer 可达', '同步已收敛'];
+  const KNOWN_SKIPS = ['config 权限', '主密钥权限', '服务已注册', '心跳新鲜', '对端订阅', 'peer 可达', '同步已收敛'];
   check(
     'doctor(B) skipped 无未知项，且「服务已注册」按 dir 明列 SKIP',
     (report?.skipped ?? []).every((s) => KNOWN_SKIPS.includes(s)) && (report?.skipped ?? []).includes('服务已注册'),
@@ -170,12 +170,12 @@ try {
   const f3 = await runCli(['onboard', '--dir', F3, '--device', 'device-Z', '--master-key', badKey]);
   check('F3 主密钥文件损坏 → 非零退出 + 清晰错误', f3.code !== 0 && /invalid|JSON|形状|parse/i.test(f3.err + f3.out), { code: f3.code });
 
-  // F4 未授权 namespace（默认拒绝）
+  // F4 上车即自订阅（零门槛）
   const F4 = join(root, 'F4');
-  await runCli(['onboard', '--dir', F4, '--device', 'device-Q', ...agentArgs]); // 无 --peer-device
+  await runCli(['onboard', '--dir', F4, '--device', 'device-Q', ...agentArgs]);
   const f4 = await runCli(['doctor', '--dir', F4, '--json']);
   const f4r = lastJson(f4.out);
-  check('F4 未授权 namespace → doctor FAIL(namespace 已授权)', f4.code !== 0 && f4r?.checks?.some((c) => c.name === 'namespace 已授权' && c.status === 'FAIL'), { code: f4.code });
+  check('F4 上车即订阅 → doctor PASS(namespace 订阅)', f4.code === 0 && f4r?.checks?.some((c) => c.name === 'namespace 订阅' && c.status === 'PASS'), { code: f4.code });
 
   // F5 peer 不可达
   const F5 = join(root, 'F5');

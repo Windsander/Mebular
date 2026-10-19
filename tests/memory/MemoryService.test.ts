@@ -147,7 +147,6 @@ describe('MemoryService', () => {
       network: { enabled: true, provider: hub },
       sync: {
         autoSync: true,
-        peerNamespacePolicy: { 'device-B': ['default'] },
       },
     });
     const b = new Mebular({
@@ -157,7 +156,6 @@ describe('MemoryService', () => {
       network: { enabled: true, provider: hub },
       sync: {
         autoSync: true,
-        peerNamespacePolicy: { 'device-A': ['default'] },
       },
     });
     await a.initialize();

@@ -11,7 +11,7 @@ describe('W2 daemon-home 夹具', () => {
     expect(fixture.modes.store).toEqual(['daemon', 'embedded']);
     expect(fixture.daemonConfig.identity.mode).toBe('root');
     expect(fixture.daemonConfig.joinService.enabled).toBe(true);
-    expect(Array.isArray(fixture.daemonConfig.sync.policyIssuers)).toBe(true);
+    expect(Array.isArray(fixture.daemonConfig.sync.namespaces)).toBe(true);
     expect(fixture.delegatedDaemonConfig.identity.mode).toBe('delegated');
     expect(fixture.delegatedDaemonConfig.encryption.userMasterPublicKeyFile).toBeTruthy();
     expect(fixture.fleetClientConfig.store).toBe('daemon');

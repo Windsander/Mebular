@@ -4,7 +4,7 @@
 // 真实 libp2p circuit relay v2（**不新增同步协议**）：只交换 **circuit 地址**（`/p2p-circuit`），
 // 从不交换直连地址 → 对端只能经 relay 连通（NAT 后无入站）。断言：
 //   ① relay-only 连通（拨号地址含 p2p-circuit）且同步收敛（stateHash 一致）；
-//   ② 授权负例（未授权分区不可见，默认拒绝）；
+//   ② 订阅负例（未订阅分区不可见）；
 //   ③ relay 重启后恢复；④ 对端“IP 变更”（新监听端口）后经 relay 恢复；
 //   ⑤（L4）relay 不可达时降级手动 multiaddr 直连仍可用。
 //
@@ -102,7 +102,7 @@ try {
         deviceId,
         encryption,
         network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'], ...(relayServers ? { relayServers } : {}) } },
-        sync: { autoSync: true, ...(peer ? { peerNamespacePolicy: { [peer]: ['default'] } } : {}) },
+        sync: { autoSync: true },
       });
       await app.initialize();
       apps.push(app);
@@ -122,10 +122,10 @@ try {
     const idsB = await idsOf(b);
     check('① 双方 default 分区状态一致', JSON.stringify(idsA) === JSON.stringify(idsB) && idsA.length >= 1, { a: idsA.length, b: idsB.length });
 
-    // ② 授权负例：secret 分区未授权给 B
+    // ② 订阅负例：secret 分区未订阅给 B
     const secret = await a.graph.createNode('fact', { text: 'secret' }, [], { namespace: 'secret' });
     await connectUntil(b, a, await waitFor(() => pickRelayAddress(a), 15000), async () => (await b.graph.getNode(node1.id)) !== null);
-    check('② 授权负例：未授权分区不可见（默认拒绝）', (await b.graph.getNode(secret.id)) === null, {});
+    check('② 订阅负例：未订阅分区不可见', (await b.graph.getNode(secret.id)) === null, {});
 
     // ③ relay 重启后恢复（同端口重开）
     const relayPort = Number(relayAddr.match(/tcp\/(\d+)/)[1]);

@@ -47,11 +47,23 @@ export {
   type SyncStateFingerprints,
 } from './protocol.js';
 export {
-  ConfigNamespacePolicy,
-  type NamespaceGrantPolicy,
+  EmptySubscriptionPolicy,
+  type NamespaceSubscriptionPolicy,
 } from './namespacePolicy.js';
 // S1 · 安全三档（core 公共面：记录形状 + 摘要/配对号/证明预检辅助）
 export {
+  derivePolicyState,
+  POLICY_NAMESPACE,
+  NAMESPACE_SUBSCRIPTION_EVENT,
+  NAMESPACE_DECLARE_EVENT,
+  DEVICE_REVOKE_EVENT,
+  DEVICE_RESTORE_EVENT,
+  NAMESPACE_HANDOFF_EVENT,
+  type PolicyState,
+  type NamespaceSubscriptionRecord,
+  type NamespaceDeclareRecord,
+  type DeviceRevokeRecord,
+  type DeviceRestoreRecord,
   SECURITY_TIER_EVENT,
   SECURITY_APPROVAL_EVENT,
   SECURITY_RECOVERY_EVENT,

@@ -1,4 +1,4 @@
-// namespace 配置在 Mebular 门面上的装配（sync.namespaces / sync.peerNamespacePolicy）。
+// namespace 配置在 Mebular 门面上的装配（sync.namespaces 热订阅）。
 //
 // 校验 mebular.ts 把配置正确透传到 SyncManager，并端到端生效。
 
@@ -44,8 +44,7 @@ describe('namespace 配置装配', () => {
 
   it('sync.namespaces：对端订阅只影响收到的分区', async () => {
     const hub = new InMemoryHub();
-    // 默认拒绝：A 必须显式授权 B；B 再按自己的订阅声明裁剪
-    const a = makeFacade('device-A', hub, { peerNamespacePolicy: { 'device-B': ['nsA', 'nsB'] } });
+    const a = makeFacade('device-A', hub, { namespaces: ['nsA', 'nsB'] });
     const b = makeFacade('device-B', hub, { namespaces: ['nsA'] });
     await a.initialize();
     await b.initialize();
@@ -59,9 +58,9 @@ describe('namespace 配置装配', () => {
     await b.shutdown();
   });
 
-  it('sync.peerNamespacePolicy：供给端按对端授权裁剪', async () => {
+  it('本机订阅：供给端只发自己订阅的分区', async () => {
     const hub = new InMemoryHub();
-    const a = makeFacade('device-A', hub, { peerNamespacePolicy: { 'device-B': ['nsA'] } });
+    const a = makeFacade('device-A', hub, { namespaces: ['nsA'] });
     const b = makeFacade('device-B', hub);
     await a.initialize();
     await b.initialize();
@@ -79,11 +78,9 @@ describe('namespace 配置装配', () => {
     const hub = new InMemoryHub();
     const a = makeFacade('device-A', hub, {
       namespaces: ['nsA', 'nsB'],
-      peerNamespacePolicy: { 'device-B': ['nsA', 'nsB'] },
     });
     const b = makeFacade('device-B', hub, {
       namespaces: ['nsA', 'nsB'],
-      peerNamespacePolicy: { 'device-A': ['nsA', 'nsB'] },
     });
     await a.initialize();
     await b.initialize();
@@ -97,8 +94,8 @@ describe('namespace 配置装配', () => {
     const aNamespaces = (await a.graph.listNodes()).map((n) => n.namespace).sort();
     expect(bNamespaces).toEqual(['nsA', 'nsA', 'nsB']);
     expect(aNamespaces).toEqual(bNamespaces);
-    expect(resultA.denied).toBe(false);
-    expect(resultB.denied).toBe(false);
+    expect(resultA.noSubscriptionOverlap).toBe(false);
+    expect(resultB.noSubscriptionOverlap).toBe(false);
 
     await a.shutdown();
     await b.shutdown();
@@ -106,8 +103,8 @@ describe('namespace 配置装配', () => {
 
   it('facade.resetPeerWatermarks 暴露：可按对端 / 全部清空水位（F3）', async () => {
     const hub = new InMemoryHub();
-    const a = makeFacade('device-A', hub, { peerNamespacePolicy: { 'device-B': ['default'] } });
-    const b = makeFacade('device-B', hub, { peerNamespacePolicy: { 'device-A': ['default'] } });
+    const a = makeFacade('device-A', hub);
+    const b = makeFacade('device-B', hub);
     await a.initialize();
     await b.initialize();
     await a.graph.createNode('fact', { text: 'x' });

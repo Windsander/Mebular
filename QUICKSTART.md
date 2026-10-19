@@ -104,7 +104,7 @@ Device B — join with the QR content (or `--token`):
 fleet join --qr "<QR content>" --daemon --dir ~/.mebular --device device-B
 ```
 
-After the join, grants apply automatically (scoped to the token's domain, 24h by default, revocable) and a
+After the join, the new device declares its own subscription (zero friction) and a
 one-time sync runs. Writes on either device converge after reconnect — offline-first, with no central service.
 
 ## 6. Verify and troubleshoot

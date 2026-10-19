@@ -308,7 +308,6 @@ async function main() {
     ['semantic.minScore', { semantic: { minScore: 0.33 } }],
     ['joinService.bind', { joinService: { bind: '127.0.0.1' } }],
     ['joinService.port', { joinService: { port: 4021 } }],
-    ['sync.policyIssuers', { sync: { policyIssuers: ['device-config'] } }],
   ];
   {
     const oldPid = handle.proc.pid;

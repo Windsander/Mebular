@@ -90,13 +90,13 @@ function check(name, cond, detail) {
 const dir = await mkdtemp(join(tmpdir(), 'fleet-agents-'));
 const master = await Mebular.generateUserMasterKey();
 const encryption = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
-const makeNode = (deviceId, policy) =>
+const makeNode = (deviceId) =>
   new Mebular({
     storagePath: join(dir, `${deviceId}.jsonl`),
     deviceId,
     encryption,
     network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
-    sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 20, namespaces: ['tasks'], peerNamespacePolicy: policy },
+    sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 20, namespaces: ['tasks'] },
   });
 function waitBothSynced(a, b, timeoutMs = 10000) {
   return new Promise((resolve) => {

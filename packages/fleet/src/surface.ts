@@ -8,7 +8,7 @@ import {
   loadToolConfig,
   readMasterKeyFile,
 } from './config.js';
-import { offlineMebularOptions, grantNamespace, setNamespaceMembership } from './onboard.js';
+import { declareNamespace, offlineMebularOptions, subscribeNamespace } from './onboard.js';
 import { MebularTaskEventStore } from './store/mebular-store.js';
 import { negotiationMessageStore, type NegotiationMessage } from './collab/negotiation.js';
 import { chatterMessageStore, FleetChatter } from './collab/chatter.js';
@@ -448,20 +448,20 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_targets',
     cli: 'task_targets',
     scope: 'task.read',
-    description: '我能派给谁：L1 授权对端 ∩ 其 Agent 目录（device, agent）',
+    description: '我能派给谁：订阅任务域的对端 ∩ 其 Agent 目录（device, agent）',
     inputSchema: { type: 'object', properties: {} },
     handler: async (_input, ctx) => {
       const session = await openSession(ctx);
       try {
         const config = await loadToolConfig(ctx.dir);
-        const authorized: string[] = [];
+        const subscribed: string[] = [];
         for (const peer of config.peers) {
-          const effective = await session.mebular.getEffectiveNamespaces(peer.device);
-          if (effective.includes(session.namespace)) authorized.push(peer.device);
+          const namespaces = await session.mebular.getSubscriptions(peer.device);
+          if (namespaces.includes(session.namespace)) subscribed.push(peer.device);
         }
         const entries = await agentDirectoryStore(session.mebular, 'agents').all();
-        const targets = expandTargets(entries, authorized);
-        return { ok: true, namespace: session.namespace, authorized, targets };
+        const targets = expandTargets(entries, subscribed);
+        return { ok: true, namespace: session.namespace, subscribed, targets };
       } finally {
         await session.close();
       }
@@ -471,21 +471,25 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'board_create',
     cli: 'board_create',
     scope: 'task.write',
-    description: '建板（= 建域 + 授权 + 邀请成员）；域是板的薄封装',
+    description: '建板（= 建域 + 本机订阅 + 邀请成员）；域是板的薄封装',
     inputSchema: { type: 'object', required: ['name'], properties: { name: { type: 'string' }, with: { type: 'array', items: { type: 'string' } } } },
     handler: async (input, ctx) => {
       const name = requiredString(input, 'name');
       const withDevices = Array.isArray(input.with) ? (input.with as string[]) : [];
       const config = await loadToolConfig(ctx.dir);
-      const granted: Array<{ device: string; grantId: string }> = [];
-      // 建域 = 声明成员（本机在册）+ 对邀请设备授权 + 成员在册
-      await setNamespaceMembership(ctx.dir, { namespace: name, to: config.device, active: true, note: `board ${name}` });
-      for (const device of withDevices) {
-        const g = await grantNamespace(ctx.dir, { to: device, namespaces: [name], note: `board ${name}` });
-        await setNamespaceMembership(ctx.dir, { namespace: name, to: device, active: true, note: `board ${name}` });
-        granted.push({ device, grantId: g.grantId });
-      }
-      return { ok: true, namespace: name, members: [config.device, ...withDevices], granted };
+      // 建域 = 公告（零门槛）+ 本机订阅；其他设备自行订阅（不能代订）。
+      const declaration = await declareNamespace(ctx.dir, { namespace: name, note: `board ${name}` });
+      const subscription = await subscribeNamespace(ctx.dir, { namespace: name, note: `board ${name}` });
+      return {
+        ok: true,
+        namespace: name,
+        declaredBy: config.device,
+        declarationEventId: declaration.eventId,
+        subscribedBy: [config.device],
+        subscriptionEventId: subscription.eventId,
+        invited: withDevices,
+        note: '其他设备需自行订阅该域（订阅零门槛；不能替他人订阅）',
+      };
     },
   },
 ];

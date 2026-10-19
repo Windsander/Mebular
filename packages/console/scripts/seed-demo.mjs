@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // W4：控制台演示种子（确定性、可重复、仅本机）：
-//   在指定 home 生成 root 身份 + 配置 + 若干 __policy__ 事件（授权/成员/签发者）+ 跨域记忆节点，
+//   在指定 home 生成 root 身份 + 配置 + 若干域公告/订阅事件 + 跨域记忆节点，
 //   并打印「如何起 serve + 打开控制台」的下一步。仅用于演示/人工验收，不清除既有数据（幂等追加）。
 //
 // 用法：node packages/console/scripts/seed-demo.mjs --home /tmp/mebular-demo
@@ -47,7 +47,6 @@ if (!existsSync(cfgFile)) {
       autoSync: true,
       pushOnWrite: true,
       namespaces: ['notes', 'work', 'tasks'],
-      policyIssuers: [device],
       antiEntropy: { enabled: true, intervalMs: 600000, jitterRatio: 0.2 },
     },
     semantic: { enabled: false, minScore: 0.2 },
@@ -56,7 +55,7 @@ if (!existsSync(cfgFile)) {
   }, null, 2), { mode: 0o600 });
 }
 
-// 3) 图上策略 + 跨域记忆（幂等：事件内容寻址，重复运行不会重复入库）
+// 3) 图上公告 + 本机订阅 + 跨域记忆（幂等：事件内容寻址，重复运行不会重复入库）
 const master = JSON.parse(await readFile(keyFile, 'utf-8'));
 const encryption = {
   userMasterKey: new Uint8Array(Buffer.from(master.publicKey, 'base64')),
@@ -68,15 +67,14 @@ const app = new Mebular({
   deviceId: config.deviceId,
   encryption,
   network: { enabled: false },
-  sync: { policyIssuers: config.sync?.policyIssuers ?? [] },
+  sync: { namespaces: config.sync?.namespaces ?? [] },
 });
 await app.initialize();
 try {
-  await app.declarePolicyIssuer({ subject: self, note: 'console demo seed' });
-  const peer = 'device-peer';
-  await app.declareNamespaceMembership({ member: self, namespace: 'notes', active: true, note: 'seed' });
-  await app.declareNamespaceMembership({ member: peer, namespace: 'notes', active: true, note: 'seed' });
-  await app.grantNamespaces({ subject: peer, namespaces: ['notes'], note: 'seed' });
+  for (const namespace of ['notes', 'work', 'tasks']) {
+    await app.declareNamespace({ namespace, note: 'console demo seed' });
+    await app.subscribeNamespace(namespace);
+  }
   const service = new MemoryService(app);
   await service.write([
     { type: 'preference', content: '深色主题', metadata: { preferenceType: 'theme', confidence: 0.9, namespace: 'notes' } },
@@ -89,7 +87,7 @@ try {
   await app.shutdown();
 }
 
-console.log(JSON.stringify({ ok: true, home, storagePath, device, port, next: [
+console.log(JSON.stringify({ ok: true, home, storagePath, device: self, port, next: [
   `MEBULAR_HOME=${home} node packages/mcp/bin/mebular.mjs serve --port ${port}`,
   `打开 http://127.0.0.1:${port}/console   （只读；写需在「设置」开启或 MEMBULAR_CONSOLE_WRITES≠0）`,
   '演示重置：删除 home 目录后重跑本脚本',

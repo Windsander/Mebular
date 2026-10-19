@@ -111,7 +111,7 @@ export interface SecurityTierRecord {
 
 export interface SecurityApprovalRecord {
   approvalId: string;
-  op: 'kick' | 'join' | 'tier';
+  op: SecurityAction;
   decision: 'request' | 'approve' | 'deny';
   initiator: string;
   target?: string;
@@ -146,7 +146,7 @@ export interface SecurityTotpRecord {
   note?: string;
 }
 
-export type SecurityAction = 'kick' | 'join' | 'tier' | 'rotate';
+export type SecurityAction = 'kick' | 'join' | 'tier' | 'rotate' | 'restore';
 
 export interface SecurityActionParams {
   op: SecurityAction;
@@ -167,8 +167,9 @@ export interface SecurityApp {
   };
   getSecurityTier?: (...args: any[]) => Promise<unknown>;
   setSecurityTier?: (...args: any[]) => Promise<unknown>;
-  getRevokedDevices?: (...args: any[]) => Promise<unknown>;
+  getBlockedDevices?: (...args: any[]) => Promise<unknown>;
   revokeDevice?: (...args: any[]) => Promise<unknown>;
+  restoreDevice?: (...args: any[]) => Promise<unknown>;
   identity?: any;
 }
 
@@ -696,6 +697,9 @@ export function securityActionCanonical(params: SecurityActionParams): Record<st
   } else if (params.op === 'tier') {
     base.initiator = params.initiator;
     base.level = params.level;
+  } else if (params.op === 'restore') {
+    base.initiator = params.initiator;
+    base.subject = params.subject;
   } else {
     base.initiator = params.initiator;
     base.oldKeyId = params.oldKeyId;
@@ -910,8 +914,8 @@ export function collectRecoveryRegistry(events: readonly PolicyEvent[]): Recover
     }
     if (event.type === SECURITY_TIER_EVENT) collectBreakGlass(data.securityTier, registry, event.timestamp);
     else if (event.type === 'device_revoke') collectBreakGlass(data.deviceRevoke, registry, event.timestamp);
-    else if (event.type === 'namespace_grant') collectBreakGlass(data.grant, registry, event.timestamp);
-    else if (event.type === 'namespace_membership') collectBreakGlass(data.membership, registry, event.timestamp);
+    else if (event.type === 'device_restore') collectBreakGlass(data.deviceRestore, registry, event.timestamp);
+    else if (event.type === 'namespace_subscription') collectBreakGlass(data.subscription, registry, event.timestamp);
   }
   return registry;
 }
@@ -1043,6 +1047,43 @@ export async function writeDeviceRevoke(app: SecurityApp, input: WriteDeviceRevo
   return { id: event.id };
 }
 
+export interface WriteDeviceRestoreInput {
+  subject: string;
+  note?: string;
+  nonce?: string;
+  cosign?: CosignProof;
+  breakGlass?: BreakGlassProof;
+}
+
+/** 写 `device_restore`（恢复纪元由 core 推导；high 档证明随记录走）。 */
+export async function writeDeviceRestore(app: SecurityApp, input: WriteDeviceRestoreInput): Promise<{ id?: string }> {
+  if (input.cosign !== undefined || input.breakGlass !== undefined) {
+    const nonce = input.nonce ?? input.breakGlass?.nonce;
+    const event = await appendSecurityRecord(app, 'device_restore', 'deviceRestore', {
+      subject: input.subject,
+      issuedAt: Date.now(),
+      ...(nonce !== undefined ? { nonce } : {}),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+      ...(input.cosign !== undefined ? { cosign: input.cosign } : {}),
+      ...(input.breakGlass !== undefined ? { breakGlass: input.breakGlass } : {}),
+    });
+    return { id: event.id };
+  }
+  if (typeof app.restoreDevice === 'function') {
+    const event = await app.restoreDevice({ subject: input.subject, ...(input.note !== undefined ? { note: input.note } : {}) });
+    const id = event !== null && typeof event === 'object' && typeof (event as { id?: unknown }).id === 'string'
+      ? String((event as { id: string }).id)
+      : undefined;
+    return { ...(id !== undefined ? { id } : {}) };
+  }
+  const event = await appendSecurityRecord(app, 'device_restore', 'deviceRestore', {
+    subject: input.subject,
+    issuedAt: Date.now(),
+    ...(input.note !== undefined ? { note: input.note } : {}),
+  });
+  return { id: event.id };
+}
+
 export async function writeSecurityApproval(app: SecurityApp, record: SecurityApprovalRecord): Promise<{ id: string }> {
   return appendSecurityRecord(app, SECURITY_APPROVAL_EVENT, 'securityApproval', record);
 }
@@ -1103,7 +1144,7 @@ export interface SecurityGateResult {
 }
 
 export interface SecurityGateInput {
-  action: 'invite' | 'revoke' | 'tier';
+  action: 'invite' | 'revoke' | 'tier' | 'restore';
   level?: SecurityLevel;
   code?: string;
   cosign?: CosignProof;
@@ -1201,6 +1242,13 @@ export async function evaluateSecurityGate(
           level: input.level,
           nonce: input.breakGlass.nonce,
         });
+      } else if (input.action === 'restore' && input.subject !== undefined) {
+        expectedDigest = securityActionDigest({
+          op: 'restore',
+          initiator: app.deviceId ?? '',
+          subject: input.subject,
+          nonce: input.breakGlass.nonce,
+        });
       }
       const check = verifyBreakGlassProof(input.breakGlass, {
         publicKeyHex: key.publicKeyHex,
@@ -1224,12 +1272,18 @@ export async function evaluateSecurityGate(
       if (approval === null) {
         return { ok: false, status: 403, error: 'approval_missing', message: '会签批准记录不存在或未生效' };
       }
-      const expectedOp = input.action === 'invite' ? 'join' : input.action === 'revoke' ? 'kick' : 'tier';
+      const expectedOp = input.action === 'invite'
+        ? 'join'
+        : input.action === 'revoke'
+          ? 'kick'
+          : input.action === 'restore'
+            ? 'restore'
+            : 'tier';
       if (approval.op !== expectedOp || approval.initiator !== (app.deviceId ?? '')) {
         return { ok: false, status: 403, error: 'approval_invalid', message: '批准记录与本次动作不匹配（op/发起设备）' };
       }
-      if (input.action === 'revoke' && approval.target !== input.subject) {
-        return { ok: false, status: 403, error: 'approval_invalid', message: '批准记录的对象与实际要踢的设备不一致' };
+      if ((input.action === 'revoke' || input.action === 'restore') && approval.target !== input.subject) {
+        return { ok: false, status: 403, error: 'approval_invalid', message: '批准记录的对象与实际设备不一致' };
       }
       if (input.action === 'tier' && input.level !== undefined && approval.level !== input.level) {
         return { ok: false, status: 403, error: 'approval_invalid', message: '批准记录的档位与实际要变更的档位不一致' };
@@ -1240,7 +1294,7 @@ export async function evaluateSecurityGate(
       const expectedDigest = securityActionDigest({
         op: approval.op,
         initiator: approval.initiator,
-        ...(approval.op === 'kick' ? { subject: approval.target ?? '' } : {}),
+        ...(approval.op === 'kick' || approval.op === 'restore' ? { subject: approval.target ?? '' } : {}),
         ...(approval.op === 'join' ? { namespace: approval.namespace ?? '' } : {}),
         ...(approval.op === 'tier' ? { level: approval.level ?? 'low' } : {}),
         nonce: approval.nonce,
@@ -1257,8 +1311,8 @@ export async function evaluateSecurityGate(
         if (approval.cosign.approver === approval.initiator) {
           return { ok: false, status: 403, error: 'approval_invalid', message: '发起设备不能批准自己的动作' };
         }
-        if (input.action === 'revoke' && approval.cosign.approver === input.subject) {
-          return { ok: false, status: 403, error: 'approval_invalid', message: '被踢设备不能批准对自己的动作' };
+        if ((input.action === 'revoke' || input.action === 'restore') && approval.cosign.approver === input.subject) {
+          return { ok: false, status: 403, error: 'approval_invalid', message: '目标设备不能批准对自己的动作' };
         }
         if (state.admitted.length > 0 && !state.admitted.includes(approval.cosign.approver)) {
           return { ok: false, status: 403, error: 'approver_not_admitted', message: '批准设备尚未准入（admitted）' };

@@ -51,9 +51,7 @@ describe('M3 任务经记忆同步（两节点 + 授权）', () => {
     const master = await Mebular.generateUserMasterKey();
     const encryption = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
     const hub = new InMemoryHub();
-    const policy = { 'device-A': ['tasks'], 'device-B': ['tasks'] };
-
-    const make = (deviceId: string) =>
+    const make = (deviceId: string, namespace = 'tasks') =>
       new Mebular({
         storagePath: join(dir, `${deviceId}.jsonl`),
         deviceId,
@@ -63,8 +61,7 @@ describe('M3 任务经记忆同步（两节点 + 授权）', () => {
           autoSync: true,
           pushOnWrite: true,
           pushOnWriteThrottleMs: 20,
-          namespaces: ['tasks'],
-          peerNamespacePolicy: policy,
+          namespaces: [namespace],
           // 显式驱动 anti-entropy 轮次（见下），不依赖 push 定时器/初始同步时序假设。
           antiEntropy: { enabled: true, intervalMs: 3_600_000, jitterRatio: 0 },
         },
@@ -72,7 +69,7 @@ describe('M3 任务经记忆同步（两节点 + 授权）', () => {
 
     const a = make('device-A');
     const b = make('device-B');
-    const c = make('device-C'); // 未被 A 授权 → 默认拒绝
+    const c = make('device-C', 'other'); // 不订阅 tasks → 收不到
     await a.initialize();
     await b.initialize();
     await c.initialize();
@@ -109,7 +106,7 @@ describe('M3 任务经记忆同步（两节点 + 授权）', () => {
     expect(states.every((s) => s.status === 'done' && s.resultRef === echoResultFor(s.intent))).toBe(true);
     expect(log.size()).toBe(3); // 每任务执行一次
 
-    // 授权负例：显式驱动若干轮次后，未授权 C 仍看不到任何任务事件（默认拒绝）。
+    // 订阅负例：C 不订阅 tasks，显式驱动若干轮次后仍看不到任何任务事件。
     for (let i = 0; i < 10; i++) {
       await a.sync.runAntiEntropyCycle();
       await c.sync.runAntiEntropyCycle();

@@ -74,13 +74,13 @@ fleet invite --dir ~/.mebular                                  # 给新设备的
 fleet join --qr "<二维码内容>" --daemon --dir ~/.mebular --device device-B   # 也可用 --token
 ```
 
-首次上手全程 GUI（**建新** / **加入已有** —— 粘贴令牌即可，不需要命令行） · 命令行仍保留给脚本（`fleet join`） · 默认无需 `fleet approve` · 授权默认 24h、可撤销 · 想先看界面用 `seed-demo.mjs`
+首次上手全程 GUI（**建新** / **加入已有** —— 粘贴令牌即可，不需要命令行） · 命令行仍保留给脚本（`fleet join`） · 无需批准——每台设备自行订阅，零门槛 · 想先看界面用 `seed-demo.mjs`
 
 ### 谁做什么
 | 谁 | 管什么 | 代表命令 |
 |---|---|---|
 | **你的 Agent**（你不碰） | 记忆读写/检索、任务执行与结果回传 | `memory_write` …（全表见 skill 文档） |
-| **你**（很少） | 配对一次；授权/撤销/退订/重入；看状态；（可选）派活 | `fleet invite` · `fleet revoke` · `fleet task_submit` |
+| **你**（很少） | 配对一次；订阅/退订/退出并交接/重入；看状态；（可选）派活 | `fleet invite` · `fleet subscribe` · `fleet task_submit` |
 | **框架**（自动） | 连接寻址、直连/中继/打洞切换、自动当桥、同步重试、证书与令牌 TTL、服务自启 | — |
 
 唯一需你物理决定：两个网络都无公网入口时，自备一台可达设备当桥（配对进来即自动生效）。

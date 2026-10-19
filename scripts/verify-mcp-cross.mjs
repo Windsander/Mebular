@@ -125,7 +125,7 @@ async function runChain(cfg, { requirePeerMatch = false } = {}) {
     evidence.B.stateHashByNamespace = statusB1?.stateHashByNamespace;
     evidence.B.pendingEventCount = statusB1?.pendingEventCount;
     evidence.pendingEventCount = statusB1?.pendingEventCount;
-    // 全局哈希（兼容记录）；判据用「共同授权域」（①）
+    // 全局哈希（兼容记录）；判据用「共同订阅域」（①）
     evidence.stateMatches = Boolean(statusA1?.stateHash) && statusA1?.stateHash === statusB1?.stateHash;
     const domain = commonDomainMatch(statusA1?.stateHashByNamespace, statusB1?.stateHashByNamespace);
     evidence.commonDomains = domain.common;
@@ -241,7 +241,6 @@ async function runSelftest() {
       [homeB, 'device-B-local'],
     ];
     for (const [home, deviceId] of writes) {
-      const peerDeviceId = deviceId === 'device-A-local' ? 'device-B-local' : 'device-A-local';
       await mkdir(home, { recursive: true });
       await writeFile(
         join(home, 'config.json'),
@@ -251,7 +250,6 @@ async function runSelftest() {
             deviceId,
             encryption: { level: 'none', keyFile },
             network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
-            sync: { peerNamespacePolicy: { [peerDeviceId]: ['default'] } },
           },
           null,
           2,

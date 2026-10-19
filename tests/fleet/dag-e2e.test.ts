@@ -48,7 +48,6 @@ describe('F-1 审查 DAG E2E（两节点）', () => {
     const master = await Mebular.generateUserMasterKey();
     const encryption = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
     const hub = new InMemoryHub();
-    const policy = { 'device-A': ['tasks'], 'device-B': ['tasks'] };
     const make = (deviceId: string) =>
       new Mebular({
         storagePath: join(dir, `${deviceId}.jsonl`),
@@ -60,7 +59,6 @@ describe('F-1 审查 DAG E2E（两节点）', () => {
           pushOnWrite: true,
           pushOnWriteThrottleMs: 20,
           namespaces: ['tasks'],
-          peerNamespacePolicy: policy,
           antiEntropy: { enabled: true, intervalMs: 3_600_000, jitterRatio: 0 },
         },
       });

@@ -109,7 +109,7 @@ async function makeDelegatedHome(home, joinPort, mcpPort) {
     identity: { mode: 'delegated' },
     encryption: { level: 'none', userMasterPublicKeyFile: join(home, 'user-master-key.json') },
     network: { enabled: false },
-    sync: { autoSync: false, namespaces: ['tasks'], policyIssuers: ['device-B'] },
+    sync: { autoSync: false, namespaces: ['tasks'] },
     mcp: { http: { host: '127.0.0.1', port: mcpPort, auth: 'bearer', tokensFile: join(home, 'auth', 'tokens.json') } },
     joinService: { enabled: true, bind: '127.0.0.1', port: joinPort },
   }, null, 2), { mode: 0o600 });
@@ -140,16 +140,6 @@ try {
       const mcpInFleet = await fleetJt.verifyJoinToken(tMcp, { now: 2000 });
       const same = mcpJt.canonicalJoinTokenData(tFleet) === fleetJt.canonicalJoinTokenData(tFleet);
       check('令牌跨包互验（fleet↔daemon）+ canonical 一致', fleetInMcp.ok === true && mcpInFleet.ok === true && same, { fleetInMcp, mcpInFleet, same });
-
-      // C7：grantOnJoin/grantTtlMs 字段跨包一致（含显式关闭时的签名体一致）
-      const tGrantOff = await fleetJt.buildJoinToken({ ...base, nonce: 'ng', grantOnJoin: false, grantTtlMs: 3_600_000 });
-      const grantParity = mcpJt.canonicalJoinTokenData(tGrantOff) === fleetJt.canonicalJoinTokenData(tGrantOff);
-      const grantVerify = (await mcpJt.verifyJoinToken(tGrantOff, { now: 2000 })).ok === true
-        && (await fleetJt.verifyJoinToken(tGrantOff, { now: 2000 })).ok === true;
-      check('C7 令牌 grant 字段跨包一致（canonical + 双向验签）', grantParity && grantVerify, { grantParity, grantVerify });
-      check('C7 默认授权 TTL = 24h（两侧常量一致）',
-        mcpJt.DEFAULT_GRANT_TTL_MS === fleetJt.DEFAULT_GRANT_TTL_MS && fleetJt.DEFAULT_GRANT_TTL_MS === 24 * 3600_000,
-        { mcp: mcpJt.DEFAULT_GRANT_TTL_MS, fleet: fleetJt.DEFAULT_GRANT_TTL_MS });
 
       // C7：二维码渲染跨包一致（同一可选依赖）+ 缺包降级一致（null + 告警）
       const mcpQr = await import('../packages/mcp/src/qr.mjs');
@@ -345,32 +335,6 @@ try {
   const joinedJson = await joined.json();
   const chain = joinedJson.chain ?? [];
   check('委派签发：C 证书链长度 3（C←B←A）且锚定主密钥', joined.status === 200 && chain.length === 3 && (await verifyCertificateChain(chain, hexToBytes(Buffer.from(JSON.parse(readFileSync(join(homeB, 'user-master-key.json'), 'utf-8')).publicKey, 'base64').toString('hex')), { subjectDeviceId: 'device-C' })), { chainLen: chain.length });
-  // F-FIN-1：守护侧「令牌兑换即自动授权」（C7 grantOnJoin）必须**直接**断言。
-  // 注意：只断言 granted 字段不足以发现问题（可能「谎报 200 但跳过授权」）——
-  // 必须以 policy/effective **未经显式 grant** 就含令牌分区来证明授权真的落库。
-  const autoEffRes = await fetch(`${base}/app/policy/effective?device=device-C`, { headers: auth });
-  const autoEffJson = await autoEffRes.json();
-  check('C7 守护侧自动授权：兑换响应 granted=true 且 namespace=tasks',
-    joined.status === 200 && joinedJson.granted === true && joinedJson.namespace === 'tasks',
-    { status: joined.status, granted: joinedJson.granted, namespace: joinedJson.namespace });
-  check('C7 守护侧自动授权：未经显式 grant，device-C 已生效含 tasks（effective 证明）',
-    autoEffRes.status === 200 && Array.isArray(autoEffJson.namespaces) && autoEffJson.namespaces.includes('tasks'),
-    { namespaces: autoEffJson.namespaces });
-
-  // 策略 app 路由（**独立用例**：不依赖自动授权即可成立——用另一个设备/另一个分区做显式 grant）
-  const grantRes = await fetch(`${base}/app/policy/grant`, { method: 'POST', headers: auth, body: JSON.stringify({ subject: 'device-D', namespaces: ['work'] }) });
-  const grantJson = await grantRes.json();
-  const effDRes = await fetch(`${base}/app/policy/effective?device=device-D`, { headers: auth });
-  const effDJson = await effDRes.json();
-  const effCRes = await fetch(`${base}/app/policy/effective?device=device-C`, { headers: auth });
-  const effCJson = await effCRes.json();
-  check('策略 app 路由：显式 grant + effective 生效（device-D/work，独立于自动授权）',
-    grantRes.status === 200 && grantJson.ok === true && effDJson.namespaces?.includes('work'),
-    { namespaces: effDJson.namespaces });
-  check('策略 app 路由：作用域隔离（device-C 不含 work；device-D 不含 tasks）',
-    !(effCJson.namespaces ?? []).includes('work') && !(effDJson.namespaces ?? []).includes('tasks'),
-    { c: effCJson.namespaces, d: effDJson.namespaces });
-
   console.log('== C3③ 委派加入的设备能跑守护（无主密钥）==');
   const homeC = join(root, 'C');
   await mkdir(homeC, { recursive: true });
@@ -424,7 +388,7 @@ try {
   const fleetCfg = JSON.parse(readFileSync(join(homeD, 'fleet.config.json'), 'utf-8'));
   const daemonCfg = JSON.parse(readFileSync(join(homeD, 'config.json'), 'utf-8'));
   check('quickstart --daemon：fleet 走 daemon 客户端', qs.code === 0 && fleetCfg.store === 'daemon' && fleetCfg.daemon?.endpoint === `http://127.0.0.1:${daemonPort}`, { store: fleetCfg.store, endpoint: fleetCfg.daemon?.endpoint });
-  check('quickstart --daemon：守护 home 配置（root 身份 + joinService + policyIssuers）', daemonCfg.identity?.mode === 'root' && daemonCfg.joinService?.enabled === true && Array.isArray(daemonCfg.sync?.policyIssuers), { identity: daemonCfg.identity, joinService: daemonCfg.joinService });
+  check('quickstart --daemon：守护 home 配置（root 身份 + joinService + 订阅）', daemonCfg.identity?.mode === 'root' && daemonCfg.joinService?.enabled === true && Array.isArray(daemonCfg.sync?.namespaces), { identity: daemonCfg.identity, joinService: daemonCfg.joinService });
   // 用写好的 config.json 默认值启动守护（host/port/auth/tokensFile 来自配置）
   const dserve = startCli({ ...process.env, MEBULAR_HOME: homeD }, ['serve']);
   const dready = await waitFor(() => /SERVE_READY/.test(dserve.state.out) || /JOIN_READY/.test(dserve.state.err + dserve.state.out), 15000);
@@ -445,7 +409,6 @@ try {
     namespace: 'tasks',
     listen: '/ip4/127.0.0.1/tcp/0',
     peers: [{ device: 'device-F' }],
-    policyIssuers: ['device-F'],
     agents: [{ name: 'echo', kind: 'echo' }],
     store: 'daemon',
     daemon: { endpoint: base, token },

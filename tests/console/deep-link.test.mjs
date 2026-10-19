@@ -492,7 +492,7 @@ describe('简化轮 · 术语净化（内部机制不上屏）', () => {
     expect(indexHtml).not.toContain('metadata.archivedAt');
     expect(indexHtml).not.toContain('memory.admin');
     expect(indexHtml).not.toContain('CSRF');
-    expect(indexHtml).toContain('收起来不再参与回忆');
+    expect(indexHtml).toContain('收起来不再出现在回忆');
     expect(indexHtml).toContain('不可逆');
   });
 
@@ -501,10 +501,10 @@ describe('简化轮 · 术语净化（内部机制不上屏）', () => {
     expect(ia.IA_TABS.map((t) => t.id)).toEqual(['common', 'security', 'assistants', 'mcp', 'advanced']);
     expect(ia.IA_MIGRATION['sync.namespaces']).toBe('domains');
     expect(ia.IA_EDITOR_RENDER_PATHS).not.toContain('sync.namespaces');
-    for (const hidden of ['sync.antiEntropy.intervalMs', 'sync.antiEntropy.jitterRatio', 'sync.snapshotThreshold', 'semantic.minScore']) {
+    for (const hidden of ['sync.antiEntropy.intervalMs', 'sync.antiEntropy.jitterRatio', 'sync.snapshotThreshold', 'semantic.minScore', 'sync.peerWhitelist']) {
       expect(ia.IA_EDITOR_RENDER_PATHS).not.toContain(hidden);
     }
-    expect(ia.IA_EDITOR_RENDER_PATHS.length).toBe(15);
+    expect(ia.IA_EDITOR_RENDER_PATHS.length).toBe(13);
     expect(consoleJs).toContain('diag-fold');
   });
 });

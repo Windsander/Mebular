@@ -5,7 +5,7 @@
 //   O2 建新：POST /app/provision/create → root 主密钥 + config（joinService 开 / mcp 回环）→ 自动重启
 //      → 正常态（/admin/api/overview 200、邀请面板可用）；重复调 → 409
 //   O3 加入：inviter 签发令牌 → 新空 home POST /app/provision/join → 委派身份（**无主私钥**）+ hints
-//      + 授权分区 = 令牌分区 → 自动重启 → 正常态（doctor --net 正常）
+//      + 本机订阅令牌分区 → 自动重启 → 正常态（doctor --net 正常）
 //   O4 错误可读：过期 / 错签 / 端点不可达 → 4xx + 可读原因；重复 provision → 409；非回环 → fail closed；失败不残留半成品
 //
 // 重启通道复用 A 轮（MEBULAR_SERVICE_KIND + MEBULAR_RESTART_CMD 注入）——与生产同一路径。
@@ -329,10 +329,10 @@ async function main() {
     check('O3 正常态身份为 delegated（控制台显示委派模式）',
       s3.ok,
       s3.ok ? `mode=delegated 等待=${s3.waitedMs}ms` : `mode=${settingsB?.identity?.mode ?? 'undefined'} 等待=${s3.waitedMs}ms/${s3.attempts} 次`);
-    // granted = 令牌分区（inviter 侧可查）
+    // 本机订阅 = 令牌分区（B 自己声明；订阅零门槛）
     const deviceB = cfgB?.deviceId;
-    const effective = await getJson(portA, `/app/policy/effective?device=${encodeURIComponent(deviceB)}`);
-    check('O3 授权分区 = 令牌分区（inviter /app/policy/effective 含 tasks）',
+    const effective = await getJson(portB, `/app/policy/subscriptions?device=${encodeURIComponent(deviceB)}`);
+    check('O3 本机订阅 = 令牌分区（/app/policy/subscriptions 含 tasks）',
       effective.json?.ok === true && (effective.json?.namespaces ?? []).includes('tasks'),
       `namespaces=${JSON.stringify(effective.json?.namespaces)}`);
     // doctor --net（正常态自检）

@@ -254,7 +254,7 @@ describe('C1 门面（Mebular）· 离线 no-op 与授权不变', () => {
       expect(m.getPeerPath('device-B')).toBeNull();
       expect(m.endpointBook).not.toBeNull();
       // ……但完全不影响授权判定：未授权设备仍为空集（默认拒绝）
-      expect(await m.getEffectiveNamespaces('device-B')).toEqual([]);
+      expect(await m.getSubscriptions('device-B')).toEqual([]);
     } finally {
       await m.shutdown();
     }

@@ -14,7 +14,6 @@ import { SecureChannelImpl } from '../../src/p2p/secure/SecureChannelImpl.js';
 import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
 import type { PeerId } from '../../src/p2p/P2PNetwork.js';
 import type { Event } from '../../src/types/event.js';
-import { grant } from '../helpers/namespace.js';
 
 interface TestDevice {
   deviceId: string;
@@ -38,7 +37,6 @@ async function createDevice(deviceId: string): Promise<TestDevice> {
     eventLog,
     storage,
     deviceId,
-    namespacePolicy: grant(), // 默认拒绝：显式授权对端（用例只关心同步语义）
   });
   const peerId: PeerId = { multihash: publicKey, pubKey: publicKey, id: deviceId };
 

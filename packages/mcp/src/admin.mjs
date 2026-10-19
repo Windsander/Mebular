@@ -1,7 +1,7 @@
 // 控制台只读 API 的数据组装（D1）
 //
 // 只使用 @mebular/core 的公共 API：eventLog / storage / node / sync / 门面
-// 只读入口（getEffectiveNamespaces / getRevokedDevices）与 MemoryService.status()。
+// 只读入口（getSubscriptions / getBlockedDevices / 域公告）与 MemoryService.status()。
 // 这里不做任何写入，也不替其他设备做决定——只回答「本机给谁看什么」「与谁连接」。
 //
 // 契约（见 docs/console/interaction-draft.md）：
@@ -54,15 +54,14 @@ function unique(list) {
 /**
  * 从 `__policy__` 事件流推导只读审计视图。
  * 注意：这里不逐条做用户主密钥信任链校验（GraphNamespacePolicy 已在校验），
- * 仅按「撤销优先」的保守口径标注 `valid`，用于展示而非权威判定。
+ * 仅做保守的 `valid` 标注，用于展示而非权威判定。
  */
 export async function collectPolicy(app) {
   const events = await app.eventLog.listEvents({ namespace: POLICY_NS });
-  const grants = [];
-  const revokes = [];
+  const subscriptions = [];
+  const declarations = [];
   const deviceRevokes = [];
-  const policyIssuerDeclares = [];
-  const memberships = [];
+  const deviceRestores = [];
   const handoffs = [];
   const securityTiers = [];
   const securityApprovals = [];
@@ -73,31 +72,31 @@ export async function collectPolicy(app) {
 
   for (const event of events) {
     authors.push(event.author);
-    if (event.type === 'namespace_grant') {
-      const grant = event.data?.grant;
-      if (grant && typeof grant.grantId === 'string' && typeof grant.subject === 'string') {
-        grants.push({
+    if (event.type === 'namespace_subscription') {
+      const subscription = event.data?.subscription;
+      if (subscription && typeof subscription.member === 'string' && typeof subscription.namespace === 'string') {
+        subscriptions.push({
           eventId: event.id,
           issuer: event.author,
           at: event.timestamp,
-          grantId: grant.grantId,
-          subject: grant.subject,
-          namespaces: unique(grant.namespaces ?? []).map(nsOf),
-          note: grant.note,
-          cosignApprover: grant.cosign?.approver,
-          breakGlassKeyId: grant.breakGlass?.keyId,
+          member: subscription.member,
+          namespace: nsOf(subscription.namespace),
+          active: subscription.active !== false,
+          note: subscription.note,
+          cosignApprover: subscription.cosign?.approver,
+          breakGlassKeyId: subscription.breakGlass?.keyId,
+          selfDeclared: subscription.member === event.author,
         });
       }
-    } else if (event.type === 'namespace_revoke') {
-      const revoke = event.data?.revoke;
-      if (revoke && typeof revoke.grantId === 'string') {
-        revokes.push({
+    } else if (event.type === 'namespace_declare') {
+      const declaration = event.data?.declaration;
+      if (declaration && typeof declaration.namespace === 'string') {
+        declarations.push({
           eventId: event.id,
           issuer: event.author,
           at: event.timestamp,
-          grantId: revoke.grantId,
-          subject: revoke.subject,
-          note: revoke.note,
+          namespace: nsOf(declaration.namespace),
+          note: declaration.note,
         });
       }
     } else if (event.type === 'device_revoke') {
@@ -113,30 +112,17 @@ export async function collectPolicy(app) {
           breakGlassKeyId: deviceRevoke.breakGlass?.keyId,
         });
       }
-    } else if (event.type === 'policy_issuer_declare') {
-      const policyIssuer = event.data?.policyIssuer;
-      if (policyIssuer && typeof policyIssuer.subject === 'string') {
-        policyIssuerDeclares.push({
+    } else if (event.type === 'device_restore') {
+      const deviceRestore = event.data?.deviceRestore;
+      if (deviceRestore && typeof deviceRestore.subject === 'string') {
+        deviceRestores.push({
           eventId: event.id,
           issuer: event.author,
           at: event.timestamp,
-          subject: policyIssuer.subject,
-          note: policyIssuer.note,
-        });
-      }
-    } else if (event.type === 'namespace_membership') {
-      const membership = event.data?.membership;
-      if (membership && typeof membership.member === 'string' && typeof membership.namespace === 'string') {
-        memberships.push({
-          eventId: event.id,
-          issuer: event.author,
-          at: event.timestamp,
-          member: membership.member,
-          namespace: nsOf(membership.namespace),
-          active: membership.active !== false,
-          note: membership.note,
-          cosignApprover: membership.cosign?.approver,
-          breakGlassKeyId: membership.breakGlass?.keyId,
+          subject: deviceRestore.subject,
+          note: deviceRestore.note,
+          cosignApprover: deviceRestore.cosign?.approver,
+          breakGlassKeyId: deviceRestore.breakGlass?.keyId,
         });
       }
     } else if (event.type === 'namespace_handoff') {
@@ -223,43 +209,40 @@ export async function collectPolicy(app) {
     }
   }
 
-  let revokedDevices = [];
+  let blockedDevices = [];
   try {
-    revokedDevices = await app.getRevokedDevices();
+    blockedDevices = await app.getBlockedDevices();
   } catch {
-    revokedDevices = [];
+    blockedDevices = [];
   }
-  const revokedSet = new Set(revokedDevices.filter((d) => typeof d === 'string'));
-
-  // grantId 撤销集合：只采纳「签发者未被吊销」的 revoke（R-b 的保守近似）
-  const revokedGrantIds = new Set(
-    revokes.filter((r) => !revokedSet.has(r.issuer)).map((r) => r.grantId),
-  );
+  const blockedSet = new Set(blockedDevices.filter((d) => typeof d === 'string'));
 
   const timeline = [
-    ...grants.map((g) => ({
-      eventId: g.eventId,
-      type: 'namespace_grant',
-      issuer: g.issuer,
-      subject: g.subject,
-      namespaces: g.namespaces,
-      grantId: g.grantId,
-      at: g.at,
-      note: g.note,
-      valid:
-        !revokedGrantIds.has(g.grantId)
-        && !revokedSet.has(g.subject)
-        && !revokedSet.has(g.issuer),
+    ...subscriptions.map((s) => ({
+      eventId: s.eventId,
+      type: 'namespace_subscription',
+      issuer: s.issuer,
+      subject: s.member,
+      namespace: s.namespace,
+      namespaces: [s.namespace],
+      active: s.active,
+      at: s.at,
+      note: s.note,
+      cosignApprover: s.cosignApprover,
+      breakGlassKeyId: s.breakGlassKeyId,
+      valid: s.selfDeclared && !blockedSet.has(s.issuer) && !blockedSet.has(s.member),
+      ...(s.selfDeclared ? {} : { rejectReason: 'foreign-subscription' }),
     })),
-    ...revokes.map((r) => ({
-      eventId: r.eventId,
-      type: 'namespace_revoke',
-      issuer: r.issuer,
-      subject: r.subject,
-      grantId: r.grantId,
-      at: r.at,
-      note: r.note,
-      valid: !revokedSet.has(r.issuer),
+    ...declarations.map((d) => ({
+      eventId: d.eventId,
+      type: 'namespace_declare',
+      issuer: d.issuer,
+      subject: d.issuer,
+      namespace: d.namespace,
+      namespaces: [d.namespace],
+      at: d.at,
+      note: d.note,
+      valid: !blockedSet.has(d.issuer),
     })),
     ...deviceRevokes.map((d) => ({
       eventId: d.eventId,
@@ -270,30 +253,18 @@ export async function collectPolicy(app) {
       note: d.note,
       cosignApprover: d.cosignApprover,
       breakGlassKeyId: d.breakGlassKeyId,
-      valid: !revokedSet.has(d.issuer) && revokedSet.has(d.subject),
+      valid: !blockedSet.has(d.issuer) && blockedSet.has(d.subject),
     })),
-    ...policyIssuerDeclares.map((d) => ({
+    ...deviceRestores.map((d) => ({
       eventId: d.eventId,
-      type: 'policy_issuer_declare',
+      type: 'device_restore',
       issuer: d.issuer,
       subject: d.subject,
       at: d.at,
       note: d.note,
-      valid: !revokedSet.has(d.issuer) && !revokedSet.has(d.subject),
-    })),
-    ...memberships.map((m) => ({
-      eventId: m.eventId,
-      type: 'namespace_membership',
-      issuer: m.issuer,
-      subject: m.member,
-      namespace: m.namespace,
-      active: m.active,
-      at: m.at,
-      note: m.note,
-      cosignApprover: m.cosignApprover,
-      breakGlassKeyId: m.breakGlassKeyId,
-      namespaces: [m.namespace],
-      valid: !revokedSet.has(m.issuer) && !revokedSet.has(m.member),
+      cosignApprover: d.cosignApprover,
+      breakGlassKeyId: d.breakGlassKeyId,
+      valid: !blockedSet.has(d.issuer),
     })),
     ...handoffs.map((h) => ({
       eventId: h.eventId,
@@ -320,8 +291,7 @@ export async function collectPolicy(app) {
       note: t.note,
       cosignApprover: t.cosignApprover,
       breakGlassKeyId: t.breakGlassKeyId,
-      // 权威采纳在 core；这里只做签发者未吊销的保守近似，rejections 会再覆写 valid=false
-      valid: !revokedSet.has(t.issuer),
+      valid: !blockedSet.has(t.issuer),
     })),
     ...securityApprovals.map((a) => ({
       eventId: a.eventId,
@@ -353,7 +323,7 @@ export async function collectPolicy(app) {
       note: r.note,
       cosignApprover: r.cosignApprover,
       breakGlassKeyId: r.breakGlassKeyId,
-      valid: !revokedSet.has(r.issuer),
+      valid: !blockedSet.has(r.issuer),
     })),
     ...securityTotps.map((t) => ({
       eventId: t.eventId,
@@ -369,8 +339,7 @@ export async function collectPolicy(app) {
     })),
   ].sort((a, b) => b.at - a.at);
 
-  // S3：拒绝不静默——用 core 的权威诊断给时间线行加 rejectReason（valid=false）。
-  // 只在 core 暴露 getSecurityTier() 时使用；旧版 core 保持保守近似，不猜测。
+  // 拒绝不静默——用 core 的权威诊断给时间线行加 rejectReason（valid=false）。
   let securityState = null;
   if (typeof app.getSecurityTier === 'function') {
     try {
@@ -397,19 +366,17 @@ export async function collectPolicy(app) {
 
   return {
     events,
-    grants,
-    revokes,
+    subscriptions,
+    declarations,
     deviceRevokes,
-    policyIssuerDeclares,
-    memberships,
+    deviceRestores,
     handoffs,
     securityTiers,
     securityApprovals,
     securityRecoveries,
     securityTotps,
     securityState,
-    revokedGrantIds,
-    revokedSet,
+    blockedSet,
     timeline,
     authors: unique(authors),
   };
@@ -444,11 +411,11 @@ export function collectOnlinePeers(app) {
 export async function buildOverview({ app, service, cloud }) {
   const status = await service.status();
   const { peers } = collectOnlinePeers(app);
-  let revokedCount = 0;
+  let blockedCount = 0;
   try {
-    revokedCount = (await app.getRevokedDevices()).length;
+    blockedCount = (await app.getBlockedDevices()).length;
   } catch {
-    revokedCount = 0;
+    blockedCount = 0;
   }
   // P3：收敛健康度汇总（未启用 = 无字段；「关于本机」只读展示）
   let convergence = null;
@@ -486,7 +453,7 @@ export async function buildOverview({ app, service, cloud }) {
     },
     status,
     onlinePeers: peers.filter((p) => p.authenticated),
-    revokedCount,
+    blockedCount,
     ...(convergence ? { convergence } : {}),
     ...(cloudView ? { cloud: cloudView } : {}),
   };
@@ -527,41 +494,26 @@ export async function collectKnownDevices(app, policy, online) {
   const self = app.deviceId;
   const known = new Set([self]);
   for (const author of policy.authors) known.add(author);
-  for (const grant of policy.grants) {
-    known.add(grant.issuer);
-    known.add(grant.subject);
+  for (const subscription of policy.subscriptions) {
+    known.add(subscription.issuer);
+    known.add(subscription.member);
   }
-  for (const revoke of policy.revokes) {
-    if (revoke.subject) known.add(revoke.subject);
-  }
-  for (const deviceRevoke of policy.deviceRevokes) {
-    known.add(deviceRevoke.subject);
-  }
-  for (const declare of policy.policyIssuerDeclares ?? []) {
-    known.add(declare.subject);
-  }
-  for (const membership of policy.memberships ?? []) {
-    known.add(membership.member);
-  }
+  for (const declaration of policy.declarations) known.add(declaration.issuer);
+  for (const deviceRevoke of policy.deviceRevokes) known.add(deviceRevoke.subject);
+  for (const deviceRestore of policy.deviceRestores) known.add(deviceRestore.subject);
   for (const handoff of policy.handoffs ?? []) {
     if (handoff.successor) known.add(handoff.successor);
   }
   for (const deviceId of online.byDeviceId.keys()) known.add(deviceId);
-  // sync.policyIssuers / sync.peerNamespacePolicy 键
-  for (const issuer of policy.bootstrapIssuers ?? []) known.add(issuer);
-  for (const peer of policy.configuredPeers ?? []) known.add(peer);
   known.delete('');
   return [...known];
 }
 
 /** GET /admin/api/devices */
-export async function buildDevices({ app, config }) {
+export async function buildDevices({ app, config: _config }) {
   const self = app.deviceId;
   const online = collectOnlinePeers(app);
   const policy = await collectPolicy(app);
-  policy.bootstrapIssuers = Array.isArray(config?.sync?.policyIssuers) ? config.sync.policyIssuers : [];
-  policy.configuredPeers = Object.keys(config?.sync?.peerNamespacePolicy ?? {});
-
   const known = await collectKnownDevices(app, policy, online);
 
   let syncStatus = null;
@@ -581,81 +533,43 @@ export async function buildDevices({ app, config }) {
     convergenceByPeer = new Map();
   }
 
-  // 成员制分区（一次计算，避免逐设备重复查询）：{ ns -> {enabled, members, effective} }
-  const nsCandidates = new Set([
-    ...policy.memberships.map((m) => m.namespace),
-    ...policy.grants.flatMap((g) => g.namespaces ?? []),
-  ]);
-  const membershipByNs = new Map();
-  for (const ns of nsCandidates) {
+  let selfSubscriptions = [];
+  try {
+    selfSubscriptions = await app.getSubscriptions(self);
+  } catch {
+    selfSubscriptions = [];
+  }
+  const runtimeSubscriptions = app.sync?.getSubscriptionNamespaces?.() ?? [];
+  for (const ns of runtimeSubscriptions) {
+    if (!selfSubscriptions.includes(ns)) selfSubscriptions.push(ns);
+  }
+  if (runtimeSubscriptions.length === 0) {
     try {
-      const info = await app.getNamespaceMembership(ns);
-      const effective = info.active ? await app.getNamespaceMembers(ns) : [];
-      membershipByNs.set(ns, { enabled: info.active, members: new Set(info.members), effective: new Set(effective) });
+      for (const ns of await app.getNamespaceDirectory()) {
+        if (!selfSubscriptions.includes(ns)) selfSubscriptions.push(ns);
+      }
     } catch {
-      // 门面未就绪等：跳过该分区
+      // 门面未就绪：按空订阅集处理
     }
   }
-  let policyIssuers = [];
-  try {
-    policyIssuers = await app.getPolicyIssuers();
-  } catch {
-    policyIssuers = [];
-  }
-  const issuerSet = new Set(policyIssuers);
+  const selfSubscribedSet = new Set(selfSubscriptions);
 
   const devices = [];
   for (const deviceId of known) {
     const connection = online.byDeviceId.get(deviceId) ?? null;
-    // 「我授权它」= 本机（含配置引导）签发的有效 grant 覆盖的域。
-    // 不能直接用 getEffectiveNamespaces(peer)：那是「该对端被任何人授权」的并集，
-    // 多签发者场景会把别人给它的授权误显示成我授权；对「本机」行更是无意义。
-    const grantedByMe = unique([
-      ...policy.grants
-        .filter(
-          (g) =>
-            g.issuer === self
-            && g.subject === deviceId
-            && !policy.revokedGrantIds.has(g.grantId)
-            && !policy.revokedSet.has(self),
-        )
-        .flatMap((g) => g.namespaces),
-      ...((Array.isArray(config?.sync?.peerNamespacePolicy?.[deviceId])
-        ? config.sync.peerNamespacePolicy[deviceId]
-        : []
-      ).map(nsOf)),
-    ]);
-    const grantedToMe = unique(
-      policy.grants
-        .filter(
-          (g) =>
-            g.subject === self
-            && g.issuer !== self
-            && !policy.revokedGrantIds.has(g.grantId)
-            && !policy.revokedSet.has(g.issuer),
-        )
-        .flatMap((g) => g.namespaces),
-    );
+    let subscriptions = [];
+    try {
+      subscriptions = await app.getSubscriptions(deviceId);
+    } catch {
+      subscriptions = [];
+    }
+    const sharesWithMe = subscriptions.filter((ns) => selfSubscribedSet.has(ns)).sort();
     let pendingEventCount = null;
     try {
       pendingEventCount = (await app.sync.getPendingEvents(deviceId)).length;
     } catch {
       pendingEventCount = null;
     }
-    // 该设备在本机视图下的生效授权（含自声明/他人签发；信任链过滤后）
-    let authorizedFor = [];
-    try {
-      authorizedFor = [...(await app.getEffectiveNamespaces(deviceId))];
-    } catch {
-      authorizedFor = [];
-    }
-    // 成员资格（仅启用成员制的分区；effective = 在册 ∩ 生效授权）
-    const memberships = [];
-    for (const [ns, info] of membershipByNs) {
-      if (!info.enabled || !info.members.has(deviceId)) continue;
-      memberships.push({ namespace: ns, active: true, effective: info.effective.has(deviceId) });
-    }
-    memberships.sort((a, b) => (a.namespace < b.namespace ? -1 : 1));
     devices.push({
       deviceId,
       online: Boolean(connection),
@@ -663,12 +577,9 @@ export async function buildDevices({ app, config }) {
       ...(lastSyncPeer === deviceId && syncStatus?.lastSyncAt ? { lastSyncAt: syncStatus.lastSyncAt } : {}),
       ...(pendingEventCount !== null ? { pendingEventCount } : {}),
       ...(convergenceByPeer.has(deviceId) ? { convergence: convergenceByPeer.get(deviceId) } : {}),
-      grantedByMe: unique(grantedByMe),
-      grantedToMe,
-      authorizedFor,
-      memberships,
-      declaredIssuer: issuerSet.has(deviceId),
-      revoked: policy.revokedSet.has(deviceId),
+      subscriptions: [...subscriptions].sort(),
+      sharesWithMe,
+      blocked: policy.blockedSet.has(deviceId),
     });
   }
 
@@ -688,58 +599,55 @@ export async function buildPolicy({ app }) {
   return policy.timeline;
 }
 
-/** GET /admin/api/namespaces */
+/** GET /admin/api/namespaces：目录 = 域公告 ∪ 本地节点（未订阅也显示）。 */
 export async function buildNamespaces({ app, service, config }) {
   const [nodes, status, policy] = await Promise.all([
     app.storage.listNodes(),
     service.status(),
     collectPolicy(app),
   ]);
-  const self = app.deviceId;
   const byNamespace = new Map();
+  for (const declaration of policy.declarations) {
+    byNamespace.set(declaration.namespace, {
+      namespace: declaration.namespace,
+      count: 0,
+      lastUpdatedAt: 0,
+      declared: true,
+      declaredAt: declaration.at,
+      declaredBy: declaration.issuer,
+    });
+  }
   for (const node of nodes) {
     const namespace = nsOf(node.namespace);
-    const entry = byNamespace.get(namespace) ?? { namespace, count: 0, lastUpdatedAt: 0 };
+    const entry = byNamespace.get(namespace) ?? {
+      namespace,
+      count: 0,
+      lastUpdatedAt: 0,
+      declared: false,
+      declaredAt: null,
+      declaredBy: null,
+    };
     entry.count += 1;
     const at = Math.max(node.updatedAt ?? 0, node.createdAt ?? 0);
     if (at > entry.lastUpdatedAt) entry.lastUpdatedAt = at;
     byNamespace.set(namespace, entry);
   }
   const hashes = status.stateHashByNamespace ?? {};
-  const subscription = Array.isArray(config?.sync?.namespaces) ? config.sync.namespaces : [];
+  const subscription = app.sync?.getSubscriptionNamespaces?.()
+    ?? (Array.isArray(config?.sync?.namespaces) ? config.sync.namespaces : []);
   const subscribedToAll = subscription.length === 0;
-  // 本机对该分区的生效授权（用于重入按钮可用性与提示）
-  let selfAuthorizedNs = new Set();
-  try {
-    selfAuthorizedNs = new Set(await app.getEffectiveNamespaces(self));
-  } catch {
-    selfAuthorizedNs = new Set();
-  }
-
-  // 我授权给谁：issuer=self 的有效 grant，按分区归组
-  const grantedToByNs = new Map();
-  for (const g of policy.grants) {
-    if (g.issuer !== self || policy.revokedGrantIds.has(g.grantId) || policy.revokedSet.has(self)) continue;
-    for (const ns of g.namespaces ?? []) {
-      const list = grantedToByNs.get(ns) ?? [];
-      list.push({ deviceId: g.subject, grantId: g.grantId, at: g.at });
-      grantedToByNs.set(ns, list);
-    }
-  }
 
   const result = [];
   for (const entry of byNamespace.values()) {
     const ns = entry.namespace;
-    let membershipEnabled = false;
-    let members = [];
-    let effectiveMembers = [];
+    let subscriptionDeclared = false;
+    let subscribers = [];
     try {
-      const info = await app.getNamespaceMembership(ns);
-      membershipEnabled = info.active;
-      members = info.members;
-      if (membershipEnabled) effectiveMembers = await app.getNamespaceMembers(ns);
+      const info = await app.getNamespaceSubscriptions(ns);
+      subscriptionDeclared = info.active;
+      subscribers = info.subscribers;
     } catch {
-      // 门面未就绪：按未启用处理
+      // 门面未就绪：按未声明处理
     }
     let rejoinReset = false;
     try {
@@ -747,18 +655,16 @@ export async function buildNamespaces({ app, service, config }) {
     } catch {
       rejoinReset = false;
     }
+    const subscribed = subscribedToAll || subscription.includes(ns);
     result.push({
       ...entry,
       lastUpdatedAt: entry.lastUpdatedAt || null,
       stateHash: hashes[ns] ?? null,
-      membershipEnabled,
-      members,
-      effectiveMembers,
-      subscribed: subscribedToAll || subscription.includes(ns),
-      grantedTo: grantedToByNs.get(ns) ?? [],
+      subscriptionDeclared,
+      subscribers,
+      subscribed,
+      selfSubscribed: subscribed,
       rejoinReset,
-      selfAuthorized: selfAuthorizedNs.has(ns),
-      selfMember: membershipEnabled ? members.includes(self) : null,
     });
   }
   return result.sort((a, b) => (a.namespace < b.namespace ? -1 : 1));
@@ -866,11 +772,11 @@ export async function buildSettings({ app, service, config, runtime, home }) {
   const joinError = await readJoinError(home);
   // G：最近一次「保存即生效」的应用结果（pending = 正在重启中）
   const [applyResult, applyPending] = await Promise.all([readApplyResult(home), readApplyPending(home)]);
-  let policyIssuers = [];
-  let revokedCount = 0;
+  let declaredNamespaces = [];
+  let blockedCount = 0;
   try {
-    policyIssuers = await app.getPolicyIssuers();
-    revokedCount = (await app.getRevokedDevices()).length;
+    declaredNamespaces = await app.getNamespaceDeclarations();
+    blockedCount = (await app.getBlockedDevices()).length;
   } catch {
     // 忽略：门面未就绪
   }
@@ -908,14 +814,12 @@ export async function buildSettings({ app, service, config, runtime, home }) {
       pushOnWriteThrottleMs: runtime?.pushOnWriteThrottleMs ?? sync.pushOnWriteThrottleMs ?? 50,
       antiEntropy,
       snapshotThreshold: sync.snapshotThreshold ?? null,
-      subscriptions: Array.isArray(sync.namespaces) ? sync.namespaces : [],
-      // L5 对端白名单（设备级；未设置 = 按授权/成员制判定）
+      subscriptions: app.sync?.getSubscriptionNamespaces?.() ?? (Array.isArray(sync.namespaces) ? sync.namespaces : []),
+      // 对端白名单（设备级连接准入；不是域授权）
       peerWhitelist: runtime?.peerWhitelist ?? (Array.isArray(sync.peerWhitelist) ? sync.peerWhitelist : []),
-      legacyPeerAllowList: Object.keys(sync.peerNamespacePolicy ?? {}),
-      configPolicyIssuers: Array.isArray(sync.policyIssuers) ? sync.policyIssuers : [],
     },
-    policyIssuers,
-    revokedCount,
+    declaredNamespaces,
+    blockedCount,
     semantic: {
       enabled: app.semanticVectorIndex !== null,
       minScore: runtime?.semanticMinScore ?? config?.semantic?.minScore ?? 0.2,

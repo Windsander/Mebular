@@ -209,7 +209,7 @@ function parseAuthorize(raw) {
   return ids.length ? Object.fromEntries(ids.map((id) => [id, ['default']])) : null;
 }
 
-async function makeApp({ dir, deviceId, masterKeys, relayServers, listen, peerNamespacePolicy }) {
+async function makeApp({ dir, deviceId, masterKeys, relayServers, listen }) {
   const app = new Mebular({
     storagePath: join(dir, `${deviceId}.jsonl`),
     deviceId,
@@ -224,7 +224,6 @@ async function makeApp({ dir, deviceId, masterKeys, relayServers, listen, peerNa
     // 默认拒绝：只有显式传入的对端授权映射才可能同步；未配置 = 谁都不发
     sync: {
       autoSync: true,
-      ...(peerNamespacePolicy ? { peerNamespacePolicy } : {}),
     },
   });
   await app.initialize();
@@ -286,8 +285,8 @@ async function runLocal() {
   };
 
   try {
-    let a = await makeApp({ dir, deviceId: 'device-A', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null, peerNamespacePolicy: { 'device-B': ['default'] } });
-    let b = await makeApp({ dir, deviceId: 'device-B', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null, peerNamespacePolicy: { 'device-A': ['default'] } });
+    let a = await makeApp({ dir, deviceId: 'device-A', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null });
+    let b = await makeApp({ dir, deviceId: 'device-B', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null });
     const addressA = mode === 'relay' ? await waitForRelayReservation(a) : pickDirectAddress(a);
     const node = await a.graph.createNode('fact', { text: 'base-memory' });
     const sync1 = await connectUntil(b, a, addressA, async () => memoryText(await b.graph.getNode(node.id)) === 'base-memory');
@@ -296,8 +295,8 @@ async function runLocal() {
     await a.shutdown();
     await b.shutdown();
 
-    a = await makeApp({ dir, deviceId: 'device-A', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null, peerNamespacePolicy: { 'device-B': ['default'] } });
-    b = await makeApp({ dir, deviceId: 'device-B', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null, peerNamespacePolicy: { 'device-A': ['default'] } });
+    a = await makeApp({ dir, deviceId: 'device-A', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null });
+    b = await makeApp({ dir, deviceId: 'device-B', masterKeys, relayServers: mode === 'relay' ? [relayAddress] : null });
     const addressA2 = mode === 'relay' ? await waitForRelayReservation(a) : pickDirectAddress(a);
     await a.graph.updateNode(node.id, { content: { text: 'from-A' } });
     await b.graph.updateNode(node.id, { content: { text: 'from-B' } });
@@ -467,7 +466,7 @@ async function runPeer() {
     log('  对端（cross）用 --device-id <同一 deviceId> 固定自身设备名，例如 --authorize device-B。');
     process.exit(1);
   }
-  const start = () => makeApp({ dir: storageDir, deviceId: `device-${role.toUpperCase()}`, masterKeys, relayServers, listen: [bind], peerNamespacePolicy: authorize });
+  const start = () => makeApp({ dir: storageDir, deviceId: `device-${role.toUpperCase()}`, masterKeys, relayServers, listen: [bind] });
   const egress = await lookupEgress();
 
   let app = null;
@@ -570,7 +569,7 @@ async function runCross() {
     log('  A（peer）默认 deviceId 为 device-A（即此处 --authorize 的值）；A 侧需 --authorize 授权本命令 --device-id。');
     process.exit(1);
   }
-  const start = () => makeApp({ dir: storageDir, deviceId, masterKeys, relayServers: relay ? [relay] : null, listen, peerNamespacePolicy: authorize });
+  const start = () => makeApp({ dir: storageDir, deviceId, masterKeys, relayServers: relay ? [relay] : null, listen });
   const egress = await lookupEgress();
   const remote = peerIdFromString(peerId);
   const startedAt = new Date().toISOString();
@@ -754,8 +753,8 @@ async function relayCipherSelfCheck(keySource, dir) {
   const proxy = await createCaptureProxy(relayPort, capture);
   const proxyAddr = `/ip4/127.0.0.1/tcp/${proxy.port}/p2p/${relayPeerId}`;
   const marker = `RELAY-CIPHER-MARKER-${crypto.randomUUID()}`;
-  const a = await makeApp({ dir, deviceId: 'device-CA', masterKeys, relayServers: [proxyAddr], peerNamespacePolicy: { 'device-CB': ['default'] } });
-  const b = await makeApp({ dir, deviceId: 'device-CB', masterKeys, relayServers: [proxyAddr], peerNamespacePolicy: { 'device-CA': ['default'] } });
+  const a = await makeApp({ dir, deviceId: 'device-CA', masterKeys, relayServers: [proxyAddr] });
+  const b = await makeApp({ dir, deviceId: 'device-CB', masterKeys, relayServers: [proxyAddr] });
   try {
     const circuitA = await waitForRelayReservation(a);
     if (!circuitA) throw new Error('A 未取得 circuit 预约');

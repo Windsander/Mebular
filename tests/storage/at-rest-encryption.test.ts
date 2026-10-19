@@ -158,14 +158,14 @@ describe('静态加密（at-rest encryption, G1）', () => {
       deviceId: 'device-A',
       encryption: { level: 'user', ...masterKey },
       network: { enabled: true, provider: hub },
-      sync: { autoSync: true, peerNamespacePolicy: { 'device-B': ['default'] } },
+      sync: { autoSync: true },
     });
     const b = new Mebular({
       storagePath: pathB,
       deviceId: 'device-B',
       encryption: { level: 'user', ...masterKey },
       network: { enabled: true, provider: hub },
-      sync: { autoSync: true, peerNamespacePolicy: { 'device-A': ['default'] } },
+      sync: { autoSync: true },
     });
     await a.initialize();
     await b.initialize();

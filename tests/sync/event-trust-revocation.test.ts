@@ -1,7 +1,7 @@
 // 吊销作用域锚点（作者级，T2 信任模型 v2）。
 //
 // 语义：`device_revoke` **只作用于被吊销设备本人**——
-//   - 读侧：`getAuthorizedNamespaces(target) = []`（策略层，grant-policy 覆盖）；
+//   - 读侧：`getSubscriptions(target)` 不含该域（策略层，grant-policy 覆盖）；
 //   - 入站：`event.author === target` 的事件不应用/不入库/不 ack（本文件覆盖）；
 //   - **不连坐**：证书链中含被吊销设备（根机/中间设备）时，其下级与新成员的事件
 //     仍按自身证书链验签、按自身作者状态隔离（本文件覆盖）。
@@ -23,7 +23,7 @@ import {
   GraphNamespacePolicy,
   POLICY_NAMESPACE,
 } from '../../src/sync/grantPolicy.js';
-import type { NamespaceGrantPolicy } from '../../src/sync/namespacePolicy.js';
+import type { NamespaceSubscriptionPolicy } from '../../src/sync/namespacePolicy.js';
 import { DEFAULT_NAMESPACE } from '../../src/core/namespace.js';
 
 interface Dev {
@@ -34,13 +34,14 @@ interface Dev {
   eventLog: EventLog;
   store: GraphStore;
   syncManager: SyncManager;
-  policy: NamespaceGrantPolicy;
+  policy: NamespaceSubscriptionPolicy;
 }
 
-function policy(granted: string[], revoked: string[]): NamespaceGrantPolicy {
+function policy(_granted: string[], revoked: string[]): NamespaceSubscriptionPolicy {
   return {
-    getAuthorizedNamespaces: async () => [...granted],
-    getRevokedDevices: async () => new Set(revoked),
+    // 没有订阅记录：对端订阅回退 hello（本文件只验证作者级入站隔离）。
+    getNamespaceSubscriptions: async () => ({ active: false, subscribers: [] }),
+    getBlockedDevices: async () => new Set(revoked),
   };
 }
 
@@ -48,7 +49,7 @@ async function makeDeviceWithPolicy(
   im: IdentityManager,
   deviceId: string,
   masterPub: Uint8Array,
-  makePolicy: (eventLog: EventLog) => NamespaceGrantPolicy,
+  makePolicy: (eventLog: EventLog) => NamespaceSubscriptionPolicy,
 ): Promise<Dev> {
   const key = im.getDeviceKey(deviceId)!;
   const storage = new MemoryStorage();
@@ -61,13 +62,13 @@ async function makeDeviceWithPolicy(
     },
   });
   const store = new GraphStore({ storage, author: deviceId, eventLog });
-  const namespacePolicy = makePolicy(eventLog);
+  const subscriptionPolicy = makePolicy(eventLog);
   const syncManager = new SyncManager({
     eventLog,
     storage,
     deviceId,
     userMasterPublicKey: masterPub,
-    namespacePolicy,
+    subscriptionPolicy,
   });
   return {
     deviceId,
@@ -77,7 +78,7 @@ async function makeDeviceWithPolicy(
     eventLog,
     store,
     syncManager,
-    policy: namespacePolicy,
+    policy: subscriptionPolicy,
   };
 }
 
@@ -179,12 +180,11 @@ describe('F-1 事件信任路径的吊销作用域（作者级）', () => {
       (eventLog) => new GraphNamespacePolicy({
         eventLog,
         userMasterPublicKey: masterPub,
-        policyIssuers: ['device-B'],
       }),
     );
     const d = await makeDevice(im, 'device-D', masterPub, []);
     await seedDeviceRevoke(im, c, 'device-B', 'device-X');
-    expect([...(await c.policy.getRevokedDevices!())]).toEqual(['device-X']);
+    expect([...(await c.policy.getBlockedDevices!())]).toEqual(['device-X']);
 
     const nodeA = await a.store.createNode('fact', { text: 'x-child' });
     const nodeB = await b.store.createNode('fact', { text: 'sibling' });

@@ -1,268 +1,88 @@
-# 策略推导不变量矩阵（`derivePolicyState` 改动的准入条件）
+# 订阅自主 · 策略不变量（greenfield）
 
-> 本文件随 `src/sync/grantPolicy.ts` 一起受版本控制。**任何对 `derivePolicyState`
-> 行为的改动，必须先在下面的矩阵里补/改一格并配一个测试**，否则不予合入。
-> 之所以放在 `src/sync/`（而非 `docs/`）：仓库的 `docs/`、`docs.design/` 被
-> `.gitignore` 忽略，放在那里无法随仓库分发、也就无法作为准入条件。
+> 系统只有四个概念：**设备（信任链）· 订阅（阅读权 + 维持义务）· 移出（唯一否定）· 安全档（动作门槛）**。
+> 没有第二条授权轴：没有 grant / revoke / issuer / 自动签发 / 对端×按域白名单。
 
-规则代号：**R-a** 不可越权授予；**R-b** 吊销隔离（**作者级**，含历史）；**R-c** 逻辑时间定序；
-**R-d** grantId 精确撤销 / 恢复用新 grantId。实现为**有界不动点**（见文件头注释）。
+## 1. 记录类型
 
-> **R-b 的作用键是「记录作者」**，不是证书链上的节点：被吊销设备**本人**的记录不再采纳；
-> 不因证书链中含被吊销设备而拒绝其下级/新成员（吊销不沿证书链级联）。
+| 事件（`__policy__`） | 含义 | 参与推导 |
+|---|---|---|
+| `namespace_subscription` | 设备对某记忆域的自声明（`active:true/false`） | 是 |
+| `namespace_declare` | 域公告（自签名，零门槛） | 目录可见性 |
+| `device_revoke` | 移出设备（事件名保留；UI「移出」） | 是 |
+| `device_restore` | 恢复设备 + 恢复纪元 E-1 | 是 |
+| `namespace_handoff` | 退出并交接审计 | 否 |
+| `security_tier` / `security_approval` / `security_recovery` | 安全三档 | 是 |
 
-**C1（引导签发者上图化，破坏性协议变更）**：新增记录类型 `policy_issuer_declare`，把「谁是
-引导签发者」从**本地配置**改为**图上签名声明**。**生效引导集合 = 图上被采纳声明 ∪ 本地配置
-`policyIssuers`**（配置降级为 bootstrap/兼容回退）。采纳**不做 R-a 检查**（无条件），因此与不动点
-**无循环依赖**；但受 **R-b** 约束：**签发者**或**被声明主体**被 `device_revoke` 吊销时，该声明
-**不采纳**。R-a 改为用生效引导集合，其余 R-b/R-c/R-d、不动点与 fail-closed 回退不变。
+旧授权事件类型（grant / revoke / issuer / membership）不再识别：未知类型不参与推导。
 
-**M1–M3（订阅 = 成员资格，破坏性协议变更）**：新增记录类型 `namespace_membership`（`__policy__`，
-`{ member, namespace, active, issuedAt }`），把「订阅」从**瞬时 hello 声明**升格为**持久、签名的
-成员资格**。采纳**不做 R-a**（无条件，故与不动点无循环依赖），受 **R-b**（签发者/成员被吊销 →
-不采纳）。每个 `(namespace, member)` 取 **R-c 定序下最新记录**的 `active`（在册/注销），确定、
-顺序无关、幂等。**生效成员 = 被采纳的 active 成员 ∧ 该设备对该分区的生效授权**（授权默认拒绝
-不变；成员记录**不得**放宽授权）。裁剪链（M3）：`对端授权 ∩ 对端成员资格 ∩ 本机订阅声明`；
-hello 订阅声明降级为**活跃性/一致性校验**，与实际成员资格不一致时**显式拒绝/告警**。
-**兼容规则（legacy-empty；W1-B 修订）**：某分区**没有任何被采纳的 active=true 成员记录**（含
-仅有注销记录）时视为「未启用成员资格」，沿用既有 hello 订阅裁剪（不放松授权默认拒绝）；一旦出现
-该分区的 active=true 记录，成员资格即成为该分区**强制闸门**（非成员收不到；注销只移出成员集合，
-不撤销「曾启用」——闸门单调启用）。旧节点（不含 M1）不识别 `namespace_membership`，只会看到
-「对端未启用成员资格」→ **行为不变/少收**（安全方向，不 fail-open）；全端升级后启用严格成员资格。
+## 2. 规则代号
 
-**S1（安全三档，C3 A 类记录 + B 类语义）**：新增 `__policy__` 记录类型
-`security_tier`（档位）、`security_approval`（会签请求/批准/拒绝）、`security_recovery`
-（恢复码公钥登记/轮换），以及既有 `device_revoke` / `namespace_grant` /
-`namespace_membership` / `security_tier` / `security_recovery` 的**可选证明字段**
-`cosign` / `breakGlass`。**线协议零新增消息类型**：全部载体是事件/记录层，旧端
-`isPolicyType` 不含新类型 → 忽略（A 类，行为逐字节不变）；旧端忽略未知证明字段。
-**语义面属 B 类**（改变采纳/判定结果）：档位缺省 `low`；`high → 非 high` 必须携
-有效 `cosign`（批准设备签名）或 `breakGlass`（恢复码签名）；`high` 下的踢人
-（`device_revoke`）与新设备首现（`namespace_grant` / `namespace_membership`）
-必须携证明；证明的密码学预检（链锚定/签名）异步完成，**推导/预检全程无墙钟**
-（`issuedAt/expiresAt` 只作流程/UI 元数据，不参与采纳）。`admitted`（有资格批准
-的设备）与 `rejections`（§3.4E 原因）经 `PolicyState.security` 暴露，拒绝不静默。
+| 代号 | 含义 |
+|---|---|
+| **S-1** | 自声明：`namespace_subscription` 仅 `author === member` 时采纳；禁止替他人订阅/退订 |
+| **R-b** | 作者级移出：被移出作者本人的策略记录不采纳（含历史）；**不沿证书链传播** |
+| **R-c** | 逻辑时间定序：同作者 `seq` / 跨作者 `sum(vectorClock)` / `(author,id)` 兜底；不看墙钟 |
+| **E-1** | 恢复纪元：最近一次被采纳 `device_restore` 位次之前的策略记录不采纳 |
+| **H-1** | high 档首现会签：设备首次 `active=true` 订阅需 `cosign(op:'join')`/`breakGlass`；订阅任何域永远自主 |
 
-## 1. 记录类型 × 签发者状态 × 对象状态
+## 3. 记录 × 状态矩阵
 
-「对象状态」对 `namespace_revoke` 指其**目标 grantId**；对 `grant` 指自身 grantId；
-对 `device_revoke` 指被吊销的目标设备；对 `policy_issuer_declare` 指被声明主体。
-
-| 记录 | 签发者状态 | 对象状态 | 期望 | 覆盖测试 |
+| 记录 | 作者状态 | 对象状态 | 期望 | 覆盖 |
 |---|---|---|---|---|
-| `namespace_grant` | 引导白名单 | grantId 未撤销 | 采纳（授权生效） | `签发者的 grant 被采纳；多个 grant 取并集` · `R-a 引导白名单…` |
-| `namespace_grant` | 引导白名单 | grantId 已撤销 | **不采纳**（R-d） | `F-3：恢复必须使用新的 grantId…` |
-| `namespace_grant` | 当时已被授权（含转授） | grantId 未撤销 | 采纳 | `R-a 授权转授…` |
-| `namespace_grant` | 未被授权 | 任意 | **不采纳**（R-a） | `洞1…未授权设备自授提权` · `R-a 越权转授…` |
-| `namespace_grant` | 已被吊销 | 任意 | **不采纳**（R-b，含**历史**：即使早于其被吊销） | `洞2…被吊销签发者的记录不再被采纳` · harness `扰动 a` |
-| `namespace_revoke` | 引导白名单 / 已被授权 | grantId 在效 | 采纳（目标 grant 失效） | `撤销按 grantId 精确失效` · `F-B 正例…` |
-| `namespace_revoke` | 未被授权但未被吊销 | grantId 在效 | 采纳（**有意**：撤销不要求被授权，避免 revoke↔authorized 振荡） | `未被授权但未被吊销的 namespace_revoke 仍被采纳（有意语义）` |
-| `namespace_revoke` | 已被吊销 | grantId 在效 | **不采纳**（R-b，含**历史**）（F-B / F-1 回归锚点） | `F-B：被吊销签发者发出的 namespace_revoke 不得生效` · harness `扰动 b` |
-| `device_revoke` | 引导白名单 / 已被授权 / 未被授权但未被吊销 | 目标未吊销 | 采纳（目标进入 `revoked`） | `设备吊销：读侧 []…` · `未被授权但未被吊销的 device_revoke 仍被采纳（有意语义）` |
-| `device_revoke` | 已被吊销 | 任意 | **不采纳**（R-b，含**历史**：即使早于其被吊销） | `R-b 吊销隔离（作者级）…` · `R-b 历史隔离（作者级，F-1）…` · harness `扰动 a` |
-| `device_revoke` | `subject === author`（自吊销） | 任意 | **不采纳**（语义未定义；吊销须由**其他**设备发起） | `device_revoke 自吊销不采纳…` |
-| `device_revoke`（恢复） | 任意有效 | 目标已吊销 → 之后有效 `grant` | 目标移出 `revoked`（R-d 恢复） | `设备吊销…之后新 grant 即恢复` · `F-A 正例…` |
-| `namespace_grant`（恢复） | 任意有效 | 目标已吊销，grantId 全新 | 恢复 | `F-A 正例：全新 grantId…` |
-| `namespace_grant`（伪恢复） | 任意有效 | 目标已吊销，但复用**已被撤销**的 grantId | **不恢复**（F-A） | `F-A：被 namespace_revoke 撤销过的 grantId 不能用来清除吊销状态` |
-| `policy_issuer_declare` | 可信（链到主密钥）、未被吊销 | 被声明主体未被吊销 | **采纳**（进入生效引导集合；不做 R-a） | `C1 仅图声明（无本地配置）→ 自动采纳并接活` · `C1 声明与配置并集` · harness `声明采纳` |
-| `policy_issuer_declare` | 已被吊销（R-b 含历史） | 任意 | **不采纳** | `C1 被吊销签发者的声明不生效` · harness `扰动 c` |
-| `policy_issuer_declare` | 可信 / 任意 | 被声明主体已被 `device_revoke` 吊销 | **不采纳**（R-b 优先级：吊销设备不得成为引导签发者） | `C1 声明了被吊销设备 → 不生效` |
-| `policy_issuer_declare`（伪造） | 非本用户主密钥链（别家/无证书） | 任意 | **忽略**（GraphNamespacePolicy 逐条信任过滤） | `C1 非主密钥链签名的声明被忽略` |
-| 声明上位的 `namespace_grant` | 因声明而进入生效引导集合 | grantId 未撤销 | 采纳（R-a 用生效引导集合） | `C1 仅图声明下 grant 生效` · `C1 声明与 R-d 撤销交互` |
-| `namespace_membership`(active) | 可信、未被吊销 | 成员未被吊销 | **采纳**：成员进入该分区成员集合；该分区进入「已启用成员资格」（**仅 active=true 记录启用**；单调保持——注销不撤销） | `M1 成员采纳` · `锚点①` · harness `成员轴独立` · `W1-B legacy 域与「仅注销记录」域行为一致` |
-| `namespace_membership`(注销) | 可信、未被吊销 | 成员未被吊销 | **采纳**：按 R-c 最新记录，成员移出集合（`active=false`）；**不启用闸门**（该分区若无任何 active=true 记录 → 未启用，与 legacy 一致） | `M1 注销后不再到达` · `锚点④` · `W1-B 仅注销记录 → 未启用（与 legacy 一致）` |
-| `namespace_membership`（曾启用后全注销） | 可信、未被吊销 | 成员未被吊销 | 成员移出集合；该分区**保持**「已启用成员资格」（曾启用不回退 legacy；非成员仍收不到） | `W1-B 曾有在册后全注销 → 闸门保持` · `锚点④` |
-| `namespace_membership`(旧) | 可信、未被吊销 | 成员未被吊销 | 被同 `(ns,member)` 的**更晚**记录覆盖（确定序） | `M1 同键最新胜出（R-c）` |
-| `namespace_membership` | 已被吊销（R-b 含历史） | 任意 | **不采纳** | harness `扰动 d` |
-| `namespace_membership` | 可信/任意 | 成员已被 `device_revoke` 吊销 | **不采纳** | `M1 被吊销成员的记录不采纳` |
-| `namespace_membership`（伪造） | 非本用户主密钥链 | 任意 | **忽略**（信任过滤） | 锚点⑤ |
-| `security_tier`（low/medium 语境） | 可信、未被吊销 | 任意 | **采纳**：`level = record.level`（网络侧无证明要求；medium 的本机 TOTP 门槛属 S2） | `R1-1` · `R1-4` |
-| `security_tier`（high → 非 high） | 可信、未被吊销 | 有效 `cosign`/`breakGlass` | **采纳**（降档；证明按 §3.4A.3/§3.6 验收） | `R1-3` |
-| `security_tier`（high → 非 high） | 可信、未被吊销 | 无证明 / 无效证明 / 批准缺失或非因果 / approver 不满足 | **不采纳**（fail-closed，进 `security.rejections`） | `R1-3` · `R1-8` |
-| `security_tier`（high → high） | 可信、未被吊销 | 任意 | **采纳但无效果**（同级重发幂等） | `R1-1` |
-| `security_tier` | 已被吊销（R-b 含历史） | 任意 | **不采纳**（档位不变） | `R1-2` |
-| `device_revoke`（当刻 high） | 可信、未被吊销 | 无证明 / 无效证明 | **不采纳**（目标不进 `revoked`；进 `rejections`） | `R1-5` · `R1-8` |
-| `device_revoke`（当刻 high） | 可信、未被吊销 | 有效 `cosign`（approver ≠ author/subject）或 `breakGlass` | **采纳**（目标进 `revoked`） | `R1-5` · `R1-11` |
-| `namespace_grant` / `namespace_membership`（首现 @high） | 可信、未被吊销 | 无证明 / 无效证明 | **不采纳**：不进授权/成员集合，且设备不進 `admitted` | `R1-6` |
-| `namespace_grant` / `namespace_membership`（首现 @high） | 可信、未被吊销 | 有效 `cosign(op:'join', initiator ≠ X)` / `breakGlass` | **采纳**：记录生效，X 進 `admitted` | `R1-6` |
-| `namespace_grant` / `namespace_membership`（历史成员，tier 前已有被采纳记录） | 可信、未被吊销 | 任意 | **不回溯要求会签**（已在 `admitted₀`） | `R1-6` |
-| `security_recovery(mode:'set')`（升档仪式内：R-c 序早于首条被采纳 high-tier） | 可信、未被吊销 | 任意 | **采纳**（`recoveryKeyId = keyId`；免证明） | `R1-7` · `R1-7b②` |
-| `security_recovery(mode:'set')`（high 已出现之后） | 可信、未被吊销 | 无证明 | **不采纳**（`missing-proof`；防被窃受信设备自登记恢复码） | `R1-7b①` |
-| `security_recovery(mode:'set')`（high 已出现之后） | 可信、未被吊销 | 有效 `cosign(op:'rotate', oldKeyId='')` / `breakGlass` | **采纳**（初始登记；`oldKeyId` 空串哨兵） | `R1-7b③` |
-| `security_recovery`（轮换） | 可信、未被吊销 | 有效 `breakGlass(op:'rotate', oldKeyId=当前 key)` 或 `cosign(op:'rotate', oldKeyId=当前 key)` | **采纳**（`recoveryKeyId` 前移；旧 key 新签名不再采纳，历史不回撤） | `R1-7` · `R1-7b④` |
-| `security_recovery`（轮换） | 可信、未被吊销 | 无证明 / 旧 key 已轮换 / nonce 重放 | **不采纳**（进 `rejections`） | `R1-7` · `R1-8` |
-| `security_approval(approve)` | 可信、**在其 R-c 位次未被吊销** | approver ∈ `admitted`（其位次）∧ approver ≠ initiator | **位次有效**（供后续最终记录引用；事后吊销不回撤） | `R1-12` |
-| `security_approval(approve)` | 可信、其位次已吊销 / 未准入 | — | **位次无效**（引用它的最终记录不采纳并归因） | `R1-3` · `R1-8` · `R1-12` |
-| `namespace_handoff`（2b 审计） | 任意（退订方本地签名写入） | — | **不参与推导**：不改变 `authorized`/`revoked`/`issuers`/`members` | `2b oracle-free：清理前后策略状态一致` · `交接记录样例` |
+| `namespace_subscription(active)` | 可信、未被移出、`author === member` | member 未被移出；E-1 通过 | 采纳：member 进入该域订阅者集合；该域进入权威模式 | S-1 |
+| `namespace_subscription` | `author !== member` | — | **不采纳**；进 `rejections`（`foreign-subscription`） | S-1 反例 |
+| `namespace_subscription(active=false)` | 可信、未被移出、自声明 | — | 采纳：member 移出；不 seed/admitted、不触发会签 | 退订 |
+| `namespace_subscription` | 被移出（R-b 含历史） | — | **不采纳** | R-b |
+| `namespace_subscription`（恢复前） | 已恢复设备 | — | **不采纳**（E-1） | 纪元 |
+| `namespace_subscription`（high 首现） | 可信、未被移出 | 无证明 | **不采纳**；不进 `admitted`；`missing-proof`/`invalid-proof` | H-1 |
+| `namespace_subscription`（high 首现） | 可信、未被移出 | 有效 `cosign(op:'join')`/`breakGlass` | 采纳；进 `admitted` | H-1 |
+| `namespace_declare` | 可信、未被移出、E-1 通过 | — | 采纳：进入域目录（可见 ≠ 可读） | 公告 |
+| `device_revoke` | 可信、未被移出 | subject 未移出 | 采纳：subject 进 `blocked` | 移出 |
+| `device_revoke` | 被移出 | — | **不采纳**（R-b 含历史） | R-b |
+| `device_revoke` | `subject === author` | — | **不采纳**（自移出） | 自否定 |
+| `device_revoke`（high） | 可信、未被移出 | 无证明 | **不采纳**；`rejections` | 安全档 |
+| `device_restore` | 可信、未被移出、`author !== subject` | subject 当前被移出 | 采纳：移出 → 未移出；记 `restoreAt`；旧纪元策略失效 | E-1 |
+| `device_restore` | 可信、未被移出 | subject 未被移出 | **no-op**（防洗历史） | E-1 |
+| `device_restore` | `author === subject` | — | **不采纳**（自恢复） | 自否定 |
+| `device_restore`（high） | 可信、未被移出 | 无证明 | **不采纳**；`rejections` | 安全档 |
+| `security_tier` / `security_approval` / `security_recovery` | 同原语义 | 同原语义 | 不变；seed 口径更新；拒绝原因含 `approval-missing-or-not-causal` | 安全三档 |
 
-## 2. 横切不变量
+## 4. 横切不变量
 
-1. **排列不变性**：打乱同一批记录的输入顺序，`authorized`/`revoked` 完全一致。
-   覆盖：`F-B 确定性…`、随机化 harness `排列不变性`。
-2. **幂等 / 不振荡**：同一输入重复推导结果相同。覆盖：`F-B 确定性…（重复读稳定）`、harness `幂等`。
-3. **权威链**：被采纳的 grant 的签发者必为引导白名单成员，或**当时**已获授权其声明的全部分区；
-   且签发者未被吊销、grantId 未被有效撤销。覆盖：harness `结构不变量` 与各 R-a 测试。
-4. **有界 + 两轴保守回退（含闭包不变量）**：不动点迭代上限是**输入的确定纯函数**
-   `2·|entries| + 2`（`iterationBound`；只用输入规模，不依赖配置 / 环境变量 / 时钟 → 同一输入在
-   任何端得到**同一上限**。**这是协议语义**：改它属破坏性协议变更，需全端同版本）。
-   未收敛时回退：以各轮吊销并集为初始排除集 `excluded`，**只增不减**迭代（每轮沿用
-   `filterRevokes(sorted, excluded)` 与 `excluded`），直到 **`chosen.revoked ⊆ excluded`**——
-   闭包不变量：输出里每个被吊销设备的记录都不被采纳 → **R-b 在回退路径上字面成立**。
-   两轴**皆保守**：设备吊销轴排除更多签发者（可能少授权）；撤销轴只采纳**非排除**签发者的
-   revoke（少 grant → 少授权/少恢复），**绝不 fail-open**。`PolicyState.converged=false` 可观测。
-   覆盖：`F-C：…被吊销签发者的 revoke 仍不生效…` · `F-C 回退综合：撤销轴也保守…` ·
-   `F-C 回退闭包：输出 revoked 里设备的记录不被采纳…` · `F-C 回退综合：设备本会因 grant 而恢复…` ·
-   `迭代上限是输入的纯函数…` · `F-C 诊断…`。
-5. **扰动不变性（oracle-free，F-1）**：删掉输出 `revoked` 里设备的**全部**记录（检查 a：R-b on
-   grants/device_revoke）后重跑，或删掉被吊销签发者发出的 `namespace_revoke`（检查 b：R-b on
-   revokes）后重跑，`authorized`/`revoked` 必须不变。二者只用「输入记录 + 输出」、不读实现内部，
-   故为**真正独立**的检查（收敛结果上严格成立；非收敛回退边界除外，见 §3）。
-6. **R-c 定序**：跨签发者按逻辑时间 `sum(vectorClock)`，不看墙钟。覆盖：`R-c 时钟偏移…`。
-7. **保留语义不受影响**：缺 namespace = `default`、本机订阅空 = 全部、持有者只供自己订阅分区——
-   这些在 `namespacePolicy`/`SyncManager` 层，策略层只产出授权/吊销，不触碰。覆盖：既有 namespace
-   与 selective-sync 套件。
-8. **生效引导集合的并集与确定性（C1）**：`issuers = 图上被采纳声明 ∪ 配置 policyIssuers`；
-   声明是无条件采纳（不做 R-a），但受 R-b 约束（签发者或主体被吊销 → 不采纳）。
-   - **无循环依赖**：采纳不依赖 `authorized`，仅是 `(entries, 配置, revokedIn)` 的纯函数 → 不动点
-     未知量仍是 `(revokedGrantIds, revokedIn)`，结构不变。
-   - **顺序无关 + 幂等**：声明按确定序（R-c）处理，`issuers`/`authorized`/`revoked` 与输入排列无关、
-     重复推导一致。覆盖：harness `排列不变性`/`幂等`、`C1 声明顺序无关且幂等`。
-   - **oracle-free 扰动 c（声明轴）**：删掉「输出 `revoked` 里设备签发的**全部**声明」后重跑，
-     `authorized`/`revoked` 在收敛不动点上必须不变；配置为空时删掉**全部**声明必须**不减授权**
-     地改变（即声明的存在只可能**增加**签发者 → 只可能增加授权，删除不会增加授权）。
-     覆盖：harness `扰动 c` 与 `C1 空配置删声明 → 授权单调不增`。
-9. **成员资格（M1–M3）**：
-   - **持久 + 签名 + 无循环**：`namespace_membership` 与 grant/declare 同在 `__policy__`，只采纳链到
-     主密钥、且签发者/成员未被吊销的记录；采纳不做 R-a（纯函数于 `revokedIn`）→ 不动点结构不变。
-   - **确定 + 顺序无关 + 幂等**：每个 `(namespace, member)` 取 R-c 序最新记录的 `active`；打乱输入一致。
-   - **生效成员 = 成员 ∧ 授权**：`getNamespaceMembers(ns) = active成员 ∩ { d : ns ∈ 生效授权(d) }`；
-     成员记录**不得**改变 `authorized`/`revoked`（信息不回流授权）——独立轴。
-   - **默认拒绝不放松**：无授权则无数据流动，即使有成员记录。
-   - **legacy-empty（W1-B 修订）**：无 **active=true** 成员记录的分区（含仅有注销记录）沿用
-     hello 订阅裁剪；一旦出现 active=true 记录则成员资格强制（非成员收不到；注销只移出成员集合，
-     不撤销「曾启用」，闸门单调保持）。
-   - **oracle-free 扰动 d（成员轴独立）**：删掉**全部**成员记录后重跑，`authorized`/`revoked` 必须
-     **完全不变**（成员不参与授权推导）；且 `members`/`membershipNamespaces` 清空。
-     覆盖：harness `扰动 d` · `M1 成员轴独立于授权`。
-   - **显式拒绝（M3）**：对端 hello 声明订阅了「它并非成员」的分区时，发送侧必须**显式**记录
-     `membershipRejected`（非静默）；`sync-completed` 对其可见。
-     覆盖：`M3 非成员声明订阅 → 显式拒绝` · `M3 成员但 hello 未声明 → 仍按成员发送`。
-10. **退订交接（2b）**：
-   - **无 tombstone**：退订是**物理删除**本分区事件/节点/边；**绝不追加任何“已删除”事件**。
-     `namespace_handoff` 仅审计，不参与推导。
-   - **`__policy__` 保留**：清理仅针对目标分区，绝不触碰 `__policy__`（成员/授权/声明/交接记录）。
-     → 清理前后 `derivePolicyState` 结果**完全一致**（oracle-free）；legacy-empty 不退化。
-   - **全量 ack 门禁（H1）**：清理前要求继任者已 ack 退订方在该分区的**全部**事件（per-event ack，
-     `getPendingEvents(successor)` 无该分区残留；含退订方自己作为作者的事件）。**复用既有 ack 机制、
-     不新增同步协议、不放宽快照门禁**；不自证、不看对端自报水位。门禁不过 → **保持原状**（不半清）。
-   - **验前不删 + 幂等可续（H3/H4）**：先校验 → 写成员注销 + 交接记录 → 写**图外**意图文件 → 物理删除 →
-     清本地水位 → 移除意图。崩溃后重跑：意图在则**续跑删除**（幂等）。
-   - **成员闸门仍在**：清理不删成员记录 → 该分区仍处于「已启用成员资格」，非成员仍收不到（不退回 legacy）。
-   - **`force` 仅本地**：跳过 ack 门禁，但交接记录**如实**标注 `forced:true` 与未覆盖作者明细；
-     不经 MCP/远程暴露。
-   - 覆盖：`2b ① 覆盖足→清理成功且策略保留` · `② 覆盖不足→中止且数据原封不动` · `③ force→forced:true` ·
-     `④ 中断→续跑且无 tombstone` · `⑤ 清理后成员闸门仍在` · `2b 多端 B/C 数据不丢`。
-11. **重订阅恢复（2c）**：
-   - **准入（R1，W1-B 修订）**：重入必须同时满足 ①**本机订阅声明**——图上本机（member=self）
-     对该分区**曾被采纳在册**（存在被采纳的 `namespace_membership` active=true 记录，任意时点；
-     **不再要求 self-grant**——网内订阅自主，且自动签发对 self 冻结）②本机**未被吊销**（R-b）。
-     任一不满足 → **`not-authorized` 显式失败、不写标记、不静默**。通过后本机重新声明成员在册；
-     未被采纳（如吊销竞态）→ `membership-not-active`。准入只决定本机「重置/重拉」；数据是否流动
-     仍由供给端裁剪链独立决定。
-   - **显式降水位（R2）**：复用 hello 自报——**自报水位只允许向下修正**（作者自报缺失 = 0）：
-     对端据此**下调** `peerWatermarks[peer][ns]` 并从 0 重新 offer；**绝不向上修正**（不把所有
-     “对端没有”误判为“已有”）。重入方**显式订阅的空分区上报空时钟**（`buildLocalNamespaceClocks`
-     纳入订阅分区）→ 触发对端重发。**快照门禁不放宽**：“自报分区水位为空”的判据改为“每个分区
-     时钟均无作者计数”（空对象亦算空）。**不新增同步协议**。
-   - **本地重置标记（R3）**：`<storagePath>.rejoin.<ns>.json`（图外、**不同步**、无 tombstone），
-     仅供本机 reset 决策与诊断。
-   - **oracle-free + 幂等（R4）**：重入/reset **不改变** `__policy__` 派生结果；重复重入安全。
-   - 覆盖：`2c ① 清理后重入→历史完整拉回` · `② 未曾参与（无在册声明）重入→拉不到（显式失败）` ·
-     `③ 未 reset 的重入→对端不重发（可诊断）` · `④ 重复 rejoin 幂等` · `⑤ 无 tombstone + __policy__ 保留` ·
-     `⑦ 在册但无 self-grant→重入通过（W1-B 准入）` · `⑧ 本机被吊销→显式失败（不写标记）`。
+1. **排列不变性**：打乱 block/restore/subscribe/declare 输入，`blocked`/`subscriptions`/`declarations`/`restoreAt` 一致。
+2. **幂等**：重复推导一致。
+3. **自声明闭包**：输出订阅者集合 ⊆ 自声明 `active=true` 的作者集合。
+4. **R-b 闭包**：输出 `blocked` 中设备的记录不被采纳（含历史 + 回退路径）。
+5. **E-1 闭包**：恢复位次之前的策略记录不进入 `subscriptions` / `security` / `admitted`。
+6. **有界**：迭代上限是输入的确定纯函数 `2·|entries|+2`；未收敛回退只增不减，`converged=false` 可观测。
+7. **无墙钟**：`issuedAt/expiresAt` 不参与采纳。
+8. **无授权轴**：`PolicyState` 没有 `authorized`/`issuers`/`members`；读权只能由 `subscriptions` + `blocked` + 信任边界解释。
+9. **无链级连坐**：`blocked(author) ⇒ 该作者的记录不采纳`；`blocked(ancestor) ⇏ 拒绝 descendant`。
 
-12. **安全三档（S1）**：
-    - **无墙钟 / 不翻转**：`issuedAt/expiresAt` 绝不参与预检/推导；同一输入重复推导恒等。
-      构造「R-c 因果正确但 `expiresAt` 已过去」的踢人记录 → **仍采纳**。覆盖 `R1-11`。
-    - **位次语义（R1-12）**：`security_approval(approve)` 的有效性在其 R-c 位次求出并缓存；
-      批准人**事后**被吊销**不回撤**历史批准，也不回撤已采纳的后续记录；其**位次及其后**的
-      新批准不再有效（防「踢批准人 = 救人」）。覆盖 `R1-12`。
-    - **`admitted` 种子与增长**：种子 = 第一条被采纳 `security_tier` 之前出现的被采纳策略记录
-      参与者（作者/对象），**外加首条 tier 记录的作者**（否则单设备升级 high 后无人可批准，
-      违反 §3.5 目的与 §6.4 E-7）；之后设备 X 的首现 `namespace_grant`/`namespace_membership`
-      被采纳 → X 進 `admitted`。`admitted` 必须经只读出口暴露。覆盖 `R1-6`。
-    - **证明验收**：`cosign` 要求链锚定 ∧ approver 签名 ∧ digest 与动作绑定 ∧ 批准记录
-      R-c 更早且位次有效 ∧ approver ≠ author/subject；`breakGlass` 要求 keyId = 当刻
-      `recoveryKeyId` ∧ 签名有效 ∧ digest 绑定 ∧ nonce 一次性。所有不满足进
-      `PolicyState.security.rejections`（§3.4E 枚举：`missing-proof` / `invalid-proof` /
-      `approval-missing-or-not-causal` / `approval-approver-revoked-at-its-order` /
-      `approver-not-admitted-at-approval` / `approver-equals-author` / `approver-equals-subject` /
-      `stale-or-replayed-nonce`；无 `expiresAt` 原因）。覆盖 `R1-3`/`R1-5`/`R1-7`/`R1-8`。
-    - **恢复码初始登记（安全修复）**：`mode:'set'` 且 R-c 序**早于首条被采纳 high-tier**
-      时免证明（升档仪式内）；high 出现之后（含之后降档窗口）的初始登记必须携
-      `cosign(op:'rotate', oldKeyId='')` / `breakGlass`，否则不采纳并进 `rejections`。
-      防「被窃受信设备自登记恢复码 → 用 breakGlass 绕过会签」。覆盖 `R1-7b`。
-    - **防降级逃逸**：`high → medium/low` 无有效证明 → 档位保持 high（fail-closed）；
-      `low/medium` 下的升级/同级变更无网络证明要求。覆盖 `R1-3`/`R1-4`。
-    - **fail-closed 回退**：未收敛时新轴取保守值（证明视为不满足、档位变更不采纳、
-      恢复码签名不采纳），`converged=false` 与 `rejections` 仍可观测。
+## 5. 扰动检查
 
-## 3. 覆盖它的 harness（`tests/sync/policy-invariants.test.ts`）
+- **S-1**：删掉所有 `author !== member` 的订阅记录后重跑，结果不变。
+- **R-b**：删掉输出 `blocked` 里设备署名的全部策略记录后重跑，`subscriptions`/`blocked` 不变。
+- **E-1**：对已恢复设备，删掉恢复位次之前的全部策略记录后重跑，结果不变。
+- **H-1**：删掉 high 档未带证明的首现订阅后重跑，结果不变。
+- **无链级连坐**：把被移出设备的祖先从 `blocked` 中加入/移除后重跑，后代作者的事件采纳结果不变。
 
-固定种子（`mulberry32(0xc0ffee)`）、可复现，`scenarios=300`。**C1 起随机事件含
-`policy_issuer_declare`**；**S1 起另有一组 `scenarios=120` 的安全轴随机场景**
-（`mulberry32(0x5ec0)`，在旧记录上追加 `security_tier` / `security_recovery` / high 后裸
-`namespace_membership`），断言排列不变、幂等、`security` 结构不变量（拒绝事件 ID 来自输入、
-`admitted` 设备来自输入、level 合法）与 **oracle-free「删全部 tier → level=low 且 admitted=[]」**。
-旧 300 组继续断言：排列不变、幂等、结构不变量
-（`authorized ∩ revoked = ∅`；被授权设备必曾是某条 `grant` 的主体；**生效引导集合 ⊆ 被声明主体 ∪ 配置**）、
-以及**三条 oracle-free 扰动检查**（不依赖任何参考实现；不含安全记录，故不受安全轴耦合影响）：
+## 6. 供给链
 
-- **检查 a（R-b on grants/device_revoke）**：对输出 `revoked` 里的每个设备，删掉它签发的**全部**
-  记录后重跑，`authorized`/`revoked` 必须完全不变。
-- **检查 b（R-b on revokes）**：把所有「已被吊销签发者发出的 `namespace_revoke`」删掉后重跑，
-  `authorized`/`revoked` 必须完全不变。
-- **检查 c（声明轴单调，C1）**：配置为空时，删掉全部 `policy_issuer_declare` 后重跑，授权只能
-  **不增**（声明的存在只会增加签发者、从而只可能增加授权），且 `revoked` 不变。
+```text
+send(peer, ns) ⇔ trusted(peer) ∧ localSub(ns) ∧ peerSub(peer, ns)
+```
 
-二者只用「输入记录 + 输出 `revoked`」，不读实现内部中间变量，因此与实现**独立**。
+- 没有「对端授权」项；
+- 对端有该域的订阅记录 → 记录权威（`active=false` 即不订阅）；
+- 对端没有任何该域记录 → 回退 hello 会话声明（首个会话 bootstrap）；
+- `__policy__` 始终放行（策略事件无需订阅即可见）。
 
-**为何不再用「独立参考重放」作主证据**：早期版本以 SUT 输出 `revoked` 作为参考重放的输入，导致
-`revoked` 的比对退化为「SUT 是该规则的不动点」而非「SUT 算出了正确的 `revoked`」——错误但自洽
-的结果也能通过。现以扰动检查替代；参考重放与实现同规格，无法提供独立性。
+## 7. 测试锚点
 
-**边界（有意）**：`converged=false` 时结果落入两轴保守回退，它不是不动点，故扰动检查在**回退
-路径**上可能不成立。harness 因此对**收敛结果**做严格不变性断言，对**未收敛结果**只记录残差
-`residualA/B` 并断言其上界（≤2%）；未收敛本身也断言在 1..5% 之间，并打印触发样例。
-
-**残差机制（非安全缺陷）**：实测所有 `residualA` 都满足 `actual.converged=false ∧
-perturbed.converged=true`——即**扰动后的世界收敛到了另一个不动点**（删除记录可能打破振荡环），
-而非回退结果里存在被采纳的「被吊销签发者记录」。回退本身已由闭包不变量
-`chosen.revoked ⊆ excluded` 保证 R-b 字面成立（见 §2.4 与其锚点），故残差是「世界不同」而非
-R-b 违反；harness 逐条打印 `[residual] …` 以便复核该分类。
-
-## 4. 证书链与加入令牌（T2，信任模型 v2）
-
-**T2（破坏性协议变更）**：设备证书新增可选 `issuer:{deviceId,publicKey}`；**委派证书**由签发者设备私钥签署；
-证书链为**叶→根**有序数组。事件新增可选 `authorCertificateChain`（不参与内容寻址/签名，与 `authorCertificate` 同）。
-
-| 不变量 | 规则 | 期望 | 覆盖测试 |
-|---|---|---|---|
-| 链完整 | 叶→根，`chain[i].issuer.deviceId === chain[i+1].deviceId` 且公钥一致 | 逐跳验签通过才接受 | `链式正例：master→A→B` |
-| 根锚定 | 末元素 `issuer` 缺省 | 用**用户主公钥**验最后一跳 | `链式正例` · `旧主密钥直签证书仍有效` |
-| 跳数上界 | 委派跳数 = `chain.length-1` ≤ **N=4** | 超长链**拒绝** | `超长链（>N）拒绝` |
-| 无自签/伪造 | `chain[0].deviceId === 主体`；`issuer` 必须等于下一跳主体公钥 | 自签/伪造链拒绝 | `自签拒绝` · `伪造链（错公钥）拒绝` |
-| 主体绑定 | 证书 `deviceId` 与请求主体一致 | 不一致拒绝 | `deviceId 不匹配拒绝` |
-| 旧格式兼容 | `issuer` 缺省 & 单证书 | 走既有主密钥单层验签（逐字节不变） | 既有 `TrustChain`/`EventLog` 套件 |
-| 吊销作用域（作者级） | `device_revoke` 只作用于目标设备**本人**：其作为作者的记录不采纳（R-b，含历史） | **不**因链中含被吊销设备而拒绝其下级/新成员；下级事件仍按**自身**证书链与**自身**作者吊销状态判定 | `event-trust-revocation`：踢根机/中间设备 X 后，A（链 `[A,X]`）与新成员 D（链 `[D,A,X]`）仍可同步；被吊销作者的事件隔离 |
-| 令牌 TTL | `now <= expiresAt`（inviter 时钟判定） | 过期**拒绝** | `令牌过期拒绝` |
-| 令牌一次性 | nonce 已消费 | 二次 join **拒绝** | `令牌已用拒绝` |
-| 令牌可撕 | 显式撤销记录 | 撤销后**拒绝** | `令牌被撕拒绝` |
-| 令牌不含主密钥 | 令牌字段仅授权信息 + 签名 | 主密钥材料**不出现** | `令牌脱敏（无主密钥/私钥）` |
-| 去中心化 | 任意在册设备可作 inviter | **不存在**“必须在线的特定设备” | `invite 在任意设备均可` |
-
-**吊销语义分工**：
-- **设备证书吊销** = 图上 `device_revoke`（R-b，**作者级**）：**被吊销设备本人**的记录不再采纳
-  （读侧 `[]`、入站隔离、快照按作者过滤）；其签发的下级证书/设备**不连带失效**，仍按自身证书链
-  与自身吊销状态判定。证书链验签（握手/事件信任）只做密码学，不接收吊销输入。
-- **令牌吊销** = 过期 / 一次性 nonce 已用 / 显式“撕票”；与设备证书吊销**分开**，令牌只是准入凭据。
+- `tests/sync/security-tier.test.ts`：安全三档 + H1 首现。
+- `tests/sync/policy-invariants.test.ts`：S-1 / R-b / E-1 / 排列不变。
+- `tests/sync/subscription-autonomy.test.ts`：订阅即读、零授权记录。
+- `tests/sync/device-restore.test.ts`：移出 → 恢复 → 重新订阅。
+- `tests/sync/namespace-selective-sync.test.ts`：供给裁剪与快照裁剪。

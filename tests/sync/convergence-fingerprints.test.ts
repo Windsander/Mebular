@@ -17,7 +17,6 @@ import { SecureChannelSyncTransport, parseStateFingerprints, type SyncStateFinge
 import { compareStateFingerprints, hashPolicyState, type SyncFingerprintEvent } from '../../src/sync/convergence.js';
 import { SecureChannelImpl } from '../../src/p2p/secure/SecureChannelImpl.js';
 import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
-import { grant } from '../helpers/namespace.js';
 import type { PolicyState } from '../../src/sync/grantPolicy.js';
 
 const H = (c: string) => c.repeat(64);
@@ -105,11 +104,12 @@ describe('compareStateFingerprints · 判据', () => {
 describe('hashPolicyState · 确定性', () => {
   function policyState(overrides: Partial<PolicyState> = {}): PolicyState {
     return {
-      authorized: new Map([['device-B', ['tasks']]]),
-      revoked: new Set<string>(),
-      issuers: new Set(['device-A']),
-      members: new Map([['tasks', new Set(['device-A', 'device-B'])]]),
-      membershipNamespaces: new Set(['tasks']),
+      subscriptions: new Map([['tasks', new Set(['device-A', 'device-B'])]]),
+      subscriptionNamespaces: new Set(['tasks']),
+      subscriptionRecords: new Map([['tasks', new Set(['device-A', 'device-B'])]]),
+      blocked: new Set<string>(),
+      declarations: new Set(['tasks']),
+      restoreAt: new Map<string, number>(),
       converged: true,
       iterations: 2,
       ...overrides,
@@ -119,23 +119,21 @@ describe('hashPolicyState · 确定性', () => {
   it('同一策略状态（插入序不同）→ 同一哈希', () => {
     const a = policyState();
     const b = policyState({
-      authorized: new Map([['device-B', ['tasks']]]),
-      members: new Map([['tasks', new Set(['device-B', 'device-A'])]]),
-      issuers: new Set(['device-A']),
+      subscriptions: new Map([['tasks', new Set(['device-B', 'device-A'])]]),
     });
     expect(hashPolicyState(a)).toBe(hashPolicyState(b));
   });
 
-  it('授权 / 吊销 / 成员差异 → 哈希不同', () => {
+  it('订阅 / 移出 / 安全档差异 → 哈希不同', () => {
     const base = policyState();
     expect(hashPolicyState(base)).not.toBe(hashPolicyState(policyState({
-      authorized: new Map([['device-B', ['notes']]]),
+      subscriptions: new Map([['tasks', new Set(['device-A'])]]),
     })));
     expect(hashPolicyState(base)).not.toBe(hashPolicyState(policyState({
-      revoked: new Set(['device-B']),
+      blocked: new Set(['device-B']),
     })));
     expect(hashPolicyState(base)).not.toBe(hashPolicyState(policyState({
-      members: new Map([['tasks', new Set(['device-A'])]]),
+      security: { level: 'high', admitted: ['device-A'], rejections: [] },
     })));
   });
 });
@@ -165,7 +163,6 @@ async function createDevice(
     eventLog,
     storage,
     deviceId,
-    namespacePolicy: grant('tasks', 'default'),
     ...(options.fingerprints ? { fingerprints: options.fingerprints } : {}),
   });
   return { deviceId, storage, eventLog, store, syncManager, publicKey, peerId: { id: deviceId, multihash: publicKey, pubKey: publicKey } };

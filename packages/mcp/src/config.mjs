@@ -235,20 +235,11 @@ export async function createMebular() {
       // 会话尾状态指纹（C3 A 类可选字段）随之启用；kill-switch：config.json 置
       // sync.convergence = { enabled:false } 即回默认静默观察。
       convergence: config.sync?.convergence ?? { enabled: true },
-      // 守护层自动签发（订阅驱动授权）：常驻入口默认开启（形状照 antiEntropy 先例）；
-      // kill-switch：config.json 置 sync.autoGrant = { enabled:false } 即回默认拒绝。
-      autoGrant: config.sync?.autoGrant ?? { enabled: true },
       ...(config.sync?.snapshotThreshold !== undefined
         ? { snapshotThreshold: config.sync.snapshotThreshold }
         : {}),
-      // 默认拒绝：对端白名单未配置 = 拒绝所有对端。跨机部署必须显式填写。
-      ...(config.sync?.peerNamespacePolicy
-        ? { peerNamespacePolicy: config.sync.peerNamespacePolicy }
-        : {}),
       ...(Array.isArray(config.sync?.namespaces) ? { namespaces: config.sync.namespaces } : {}),
       ...(Array.isArray(config.sync?.peerWhitelist) ? { peerWhitelist: config.sync.peerWhitelist } : {}),
-      // W2 A2：引导签发者白名单（图上声明 ∪ 本地配置）
-      ...(Array.isArray(config.sync?.policyIssuers) ? { policyIssuers: config.sync.policyIssuers } : {}),
     },
     semantic: {
       enabled: effective.semanticEnabled,

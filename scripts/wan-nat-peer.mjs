@@ -25,7 +25,6 @@ const relayAddr = `/ip4/${relayIp}/tcp/4001/p2p/${relay.peerId}`;
 console.log(`WAN_RELAYADDR ${JSON.stringify({ role, relayIp, relayAddr })}`);
 
 const deviceId = role === 'A' ? 'device-A' : 'device-B';
-const partner = role === 'A' ? 'device-B' : 'device-A';
 const storagePath = join(state, `${role}.jsonl`);
 const pickCircuit = (m) => (m.node.getLocalMultiaddrs() ?? []).find((a) => a.includes('/p2p-circuit'));
 
@@ -39,7 +38,7 @@ for (let attempt = 1; attempt <= 4 && !circuit; attempt++) {
     deviceId,
     encryption: { userMasterKey, userMasterPrivateKey },
     network: { enabled: true, libp2p: { listen: ['/ip4/0.0.0.0/tcp/0'], relayServers: [relayAddr] } },
-    sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 50, antiEntropy: { enabled: true, intervalMs: 1000, jitterRatio: 0 }, peerNamespacePolicy: { [partner]: ['default'] } },
+    sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 50, antiEntropy: { enabled: true, intervalMs: 1000, jitterRatio: 0 } },
   });
   await mebular.initialize();
   circuit = await waitFor(() => pickCircuit(mebular), 10000);

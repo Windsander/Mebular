@@ -143,9 +143,9 @@ async function runReal() {
     // 5) 分布式召回：A 写 → B 同步 → B 召回命中
     const hub = new InMemoryHub();
     const bPath = join(dir, 'b.jsonl');
-    // 默认拒绝：分布式召回需显式授权对端（本用例记忆落在 default 分区）
-    const a3 = new Mebular({ storagePath: join(dir, 'a-sync.jsonl'), deviceId: 'device-A', encryption: masterKeys, semantic, network: { enabled: true, provider: hub }, sync: { autoSync: true, peerNamespacePolicy: { 'device-B': ['default'] } } });
-    const b3 = new Mebular({ storagePath: bPath, deviceId: 'device-B', encryption: masterKeys, semantic, network: { enabled: true, provider: hub }, sync: { autoSync: true, peerNamespacePolicy: { 'device-A': ['default'] } } });
+    // 订阅供给：分布式召回需双方订阅（本用例记忆落在 default 分区）
+    const a3 = new Mebular({ storagePath: join(dir, 'a-sync.jsonl'), deviceId: 'device-A', encryption: masterKeys, semantic, network: { enabled: true, provider: hub }, sync: { autoSync: true } });
+    const b3 = new Mebular({ storagePath: bPath, deviceId: 'device-B', encryption: masterKeys, semantic, network: { enabled: true, provider: hub }, sync: { autoSync: true } });
     await a3.initialize();
     await b3.initialize();
     const providerA3 = new HermesMemoryProvider(a3);

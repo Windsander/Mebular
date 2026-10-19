@@ -144,6 +144,39 @@ for (const file of srcTs) {
   });
 }
 
+// 规则 5：订阅自主净删除门禁——旧授权符号全仓 0 引用。
+// 本脚本自身通过字符串拼接构造模式，避免「门禁文件命中门禁」。
+const FORBIDDEN = [
+  'namespace_' + 'grant',
+  'namespace_' + 'revoke',
+  'policy_' + 'issuer_declare',
+  'auto' + 'Grant',
+  'policy' + 'Issuers',
+  'peerNamespace' + 'Policy',
+  'grant' + 'OnJoin',
+  'grant' + 'TtlMs',
+  'getAuthorized' + 'Namespaces',
+  'getEffective' + 'Namespaces',
+  'grant' + 'Namespaces',
+  'revoke' + 'Grant',
+  'declarePolicy' + 'Issuer',
+  'declareNamespace' + 'Membership',
+  'getNamespace' + 'Membership',
+  'wasNamespace' + 'Member',
+  'namespace_' + 'membership',
+];
+const forbiddenRe = new RegExp(FORBIDDEN.join('|'));
+const textFiles = allFiles.filter((f) => /\.(ts|mts|cts|mjs|js|md|json|html)$/.test(f));
+for (const file of textFiles) {
+  if (rel(file) === 'scripts/check-cleanliness.mjs') continue;
+  const text = readFileSync(file, 'utf-8');
+  const hit = forbiddenRe.exec(text);
+  if (hit) {
+    const line = text.slice(0, hit.index).split('\n').length;
+    errors.push(`旧授权符号残留: ${rel(file)}:${line} → ${hit[0]}`);
+  }
+}
+
 for (const e of errors) console.log(`✗ ${e}`);
 for (const w of warnings) console.log(`⚠ ${w}`);
 console.log(

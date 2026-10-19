@@ -19,8 +19,8 @@ import { useHeavyTimeout } from '../helpers/timeouts.js';
 // F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
 useHeavyTimeout();
 
-const A_SYNC = { namespaces: ['nsA'], peerNamespacePolicy: { 'device-B': ['nsA'], 'device-A': ['nsA'] } };
-const B_SYNC = { namespaces: ['nsA'], peerNamespacePolicy: { 'device-A': ['nsA'] } };
+const A_SYNC = { namespaces: ['nsA'] };
+const B_SYNC = { namespaces: ['nsA'] };
 
 describe('2c 重订阅恢复', () => {
   let dir: string;
@@ -65,7 +65,8 @@ describe('2c 重订阅恢复', () => {
   it('① leave→rejoin（reset）→ 历史完整拉回（与对端一致）', async () => {
     const hub = new InMemoryHub();
     let { a, b } = await openPair(hub);
-    for (const m of ['device-A', 'device-B']) await a.declareNamespaceMembership({ member: m, namespace: 'nsA' });
+    await a.subscribeNamespace('nsA');
+    await b.subscribeNamespace('nsA');
     await a.graph.createNode('fact', { text: 'one' }, [], { namespace: 'nsA' });
     await a.graph.createNode('fact', { text: 'two' }, [], { namespace: 'nsA' });
     await syncBetween(a, b);
@@ -75,7 +76,7 @@ describe('2c 重订阅恢复', () => {
     expect(await nsNodes(a)).toEqual([]);
     expect(await a.hasRejoinReset('nsA')).toBe(false);
     const rejoin = await a.rejoinNamespace({ namespace: 'nsA' });
-    expect(rejoin).toMatchObject({ ok: true, reset: true, member: true, authorized: true });
+    expect(rejoin).toMatchObject({ ok: true, reset: true, subscribed: true, eligible: true });
     await a.shutdown();
     await b.shutdown();
 
@@ -90,15 +91,15 @@ describe('2c 重订阅恢复', () => {
 
   it('② 未曾参与（无本机在册声明）的重入 → 拉不到（显式失败 not-authorized）', async () => {
     const hub = new InMemoryHub();
-    const a = makeFacade('device-A', hub, { peerNamespacePolicy: { 'device-B': ['nsA'] } });
+    const a = makeFacade('device-A', hub, { namespaces: ['nsA'] });
     await a.initialize();
     const rejoin = await a.rejoinNamespace({ namespace: 'nsA' });
-    expect(rejoin).toMatchObject({ ok: false, authorized: false, reason: 'not-authorized' });
+    expect(rejoin).toMatchObject({ ok: false, eligible: false, reason: 'not-subscribed' });
     expect(await a.hasRejoinReset('nsA')).toBe(false); // 失败不留痕
     await a.shutdown();
   });
 
-  it('③ 未 reset 的重入 → 对端不重发；reset 后才重发', async () => {
+  it('③ leave 清水位后重订阅 → 对端重发；显式 reset 仍幂等', async () => {
     const hub = new InMemoryHub();
     let { a, b } = await openPair(hub);
     // B 署名 2 条 → A 收下并 ack（推进 B 对 A 的水位）
@@ -107,17 +108,15 @@ describe('2c 重订阅恢复', () => {
     await syncBetween(a, b);
     expect((await nsNodes(a)).length).toBe(2);
 
-    // A 清理 + 只重新声明成员（**不做 reset**）
-    await a.declareNamespaceMembership({ member: 'device-A', namespace: 'nsA' });
-    await a.declareNamespaceMembership({ member: 'device-B', namespace: 'nsA' });
+    // A 清理 + 只重新声明订阅（**不做 reset**）
     await a.leaveNamespace({ namespace: 'nsA', successor: 'device-B' });
-    await a.declareNamespaceMembership({ member: 'device-A', namespace: 'nsA', active: true });
+    await a.subscribeNamespace('nsA');
     await a.shutdown();
     await b.shutdown();
 
     ({ a, b } = await openPair(hub));
     await syncBetween(a, b);
-    expect((await nsNodes(a)).length).toBe(0); // 对端未重发（水位仍在）
+    expect((await nsNodes(a)).length).toBe(2); // leave 已清本机水位 → 对端重发
     await a.rejoinNamespace({ namespace: 'nsA' }); // 显式 reset
     await a.shutdown();
     await b.shutdown();
@@ -132,7 +131,8 @@ describe('2c 重订阅恢复', () => {
   it('④ 重复 rejoin 幂等；⑤ 无 tombstone + __policy__ 保留', async () => {
     const hub = new InMemoryHub();
     const { a, b } = await openPair(hub);
-    for (const m of ['device-A', 'device-B']) await a.declareNamespaceMembership({ member: m, namespace: 'nsA' });
+    await a.subscribeNamespace('nsA');
+    await b.subscribeNamespace('nsA');
     await a.graph.createNode('fact', { text: 'x' }, [], { namespace: 'nsA' });
     await syncBetween(a, b);
     await a.leaveNamespace({ namespace: 'nsA', successor: 'device-B' });
@@ -149,29 +149,30 @@ describe('2c 重订阅恢复', () => {
     await b.shutdown();
   });
 
-  it('⑥ oracle-free：rejoin/reset 不改变签发者推导', async () => {
+  it('⑥ oracle-free：rejoin/reset 不改变域公告', async () => {
     const hub = new InMemoryHub();
     const { a, b } = await openPair(hub);
-    for (const m of ['device-A', 'device-B']) await a.declareNamespaceMembership({ member: m, namespace: 'nsA' });
+    await a.subscribeNamespace('nsA');
+    await b.subscribeNamespace('nsA');
     await a.graph.createNode('fact', { text: 'x' }, [], { namespace: 'nsA' });
     await syncBetween(a, b);
     await a.leaveNamespace({ namespace: 'nsA', successor: 'device-B' });
-    const issuersBefore = (await a.getPolicyIssuers()).sort();
+    const declarationsBefore = await a.getNamespaceDeclarations();
     await a.rejoinNamespace({ namespace: 'nsA' });
-    expect((await a.getPolicyIssuers()).sort()).toEqual(issuersBefore);
+    expect(await a.getNamespaceDeclarations()).toEqual(declarationsBefore);
     await a.shutdown();
     await b.shutdown();
   });
 
-  it('⑦ W1-B 准入：在册声明存在但无 self-grant → 重入通过（本机订阅声明 ∧ 未吊销）', async () => {
+  it('⑦ 准入：曾订阅 ∧ 未被移出 → 重入通过', async () => {
     const hub = new InMemoryHub();
-    // 无任何 grant（不配置 peerNamespacePolicy、不留 self-grant）；A 自己在图上声明在册（持久、签名）
+    // 无授权记录；A 自己在图上声明订阅（持久、签名）
     const a = makeFacade('device-A', hub, { namespaces: ['nsA'] });
     await a.initialize();
-    await a.declareNamespaceMembership({ member: 'device-A', namespace: 'nsA', active: true });
+    await a.subscribeNamespace('nsA');
     const rejoin = await a.rejoinNamespace({ namespace: 'nsA' });
-    // 旧准入（getEffectiveNamespaces(self)）：无 self-grant → not-authorized（红）；新准入：通过（绿）
-    expect(rejoin).toMatchObject({ ok: true, reset: true, member: true });
+    // 旧准入（getSubscriptions(self)）：无 self-grant → not-authorized（红）；新准入：通过（绿）
+    expect(rejoin).toMatchObject({ ok: true, reset: true, subscribed: true });
     expect(await a.hasRejoinReset('nsA')).toBe(true);
     await a.shutdown();
   });
@@ -179,12 +180,12 @@ describe('2c 重订阅恢复', () => {
   it('⑧ W1-B 准入：本机被吊销 → 重入显式失败（不写标记）', async () => {
     const hub = new InMemoryHub();
     const { a, b } = await openPair(hub);
-    await a.declareNamespaceMembership({ member: 'device-A', namespace: 'nsA', active: true });
+    await a.subscribeNamespace('nsA');
     // 吊销须由**其他**设备发起（自吊销不被采纳）：B 吊销 A，经同步落到 A 的图上
     await b.revokeDevice({ subject: 'device-A', note: 'W1-B 准入测试' });
     await syncBetween(a, b);
     const rejoin = await a.rejoinNamespace({ namespace: 'nsA' });
-    expect(rejoin).toMatchObject({ ok: false, authorized: false, reason: 'not-authorized' });
+    expect(rejoin).toMatchObject({ ok: false, eligible: false, reason: 'not-subscribed' });
     expect(await a.hasRejoinReset('nsA')).toBe(false); // 失败不留痕
     await a.shutdown();
     await b.shutdown();

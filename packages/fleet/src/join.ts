@@ -49,7 +49,6 @@ export interface JoinWithTokenResult {
   fingerprint: string;
   alreadyJoined: boolean;
   inviterDeviceId: string;
-  awaitingApproval: boolean;
   next: string[];
   /** W2：统一守护配置结果 */
   daemon?: { endpoint: string; installed: boolean; note?: string };
@@ -110,6 +109,7 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
   const storagePath = fleetStoragePath(input.dir);
   const keyPath = fleetMasterKeyPath(input.dir);
   let peerAddr: string | undefined;
+  let securityApproval: { approvalId: string; nonce: string; initiator?: string; cosign?: unknown } | undefined;
 
   if (!alreadyJoined) {
     const im = new IdentityManager();
@@ -122,6 +122,7 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
       ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
     });
     peerAddr = issued.inviterMultiaddrs[0];
+    securityApproval = issued.securityApproval;
     const privateKeyPkcs8 = await IdentityManager.exportPrivateKey(deviceKey.privateKey);
     const record = {
       deviceId: input.device,
@@ -149,8 +150,6 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
     agents: input.agents,
     peerDevice: token.inviterDeviceId,
     ...(peerAddr !== undefined ? { peerAddr } : {}),
-    configGrant: false,
-    policyIssuers: [token.inviterDeviceId],
   });
   const config = onboard.config;
   const encryption = await readMasterKeyFile(config.masterKeyFile);
@@ -158,7 +157,18 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
   try {
-    await mebular.declareNamespaceMembership({ member: input.device, namespace, active: true, note: 'join-token self' });
+    await mebular.declareNamespaceSubscription({
+      namespace,
+      active: true,
+      note: 'join-token self',
+      ...(securityApproval !== undefined
+        ? {
+            initiator: securityApproval.initiator,
+            nonce: securityApproval.nonce,
+            ...(securityApproval.cosign !== undefined ? { cosign: securityApproval.cosign as never } : {}),
+          }
+        : {}),
+    });
   } finally {
     await mebular.shutdown();
   }
@@ -198,10 +208,8 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
     fingerprint: masterKeyFingerprint(encryption.userMasterKey),
     alreadyJoined,
     inviterDeviceId: token.inviterDeviceId,
-    awaitingApproval: true,
     next: [
-      `在 ${token.inviterDeviceId} 上运行：fleet pending`,
-      `在 ${token.inviterDeviceId} 上运行：fleet approve ${config.device}`,
+      '本机已声明订阅；对端同步后即可互通（订阅零门槛，无需批准）',
       ...(hinted > 0 ? [`已写入邀请方地址 hints（${hinted} 条）：本机可在无 --addr 时自动选路连通`] : ['令牌未携带地址 hints（旧令牌）：首次连接仍需显式 --addr']),
     ],
     ...(daemonInfo !== null ? { daemon: daemonInfo } : {}),

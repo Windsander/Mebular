@@ -66,13 +66,13 @@ export const CONFIG_SCHEMA = [
     kind: 'list',
     spec: { empty: 'set' },
     exposure: 'editable',
-    requiresRestart: true,
+    requiresRestart: false,
     default: null,
     ui: {
       type: 'list',
-      label: '订阅数据域（M）',
+      label: '订阅的记忆域',
       placeholder: 'default, notes',
-      help: '订阅即承担数据义务：接收该域，并同步本机新增记忆。留空 = 参与全部。生效共享 = 对端授权 ∩ 对端在册（启用成员制时）∩ 本机订阅',
+      help: '订阅 = 阅读权 + 维持义务：接收该域的更新，并把本机新增同步给其他订阅设备。留空 = 订阅全部。控制台开关热生效，无需重启',
     },
     effective: (s) => (s?.sync?.subscriptions?.length ? s.sync.subscriptions : null),
   },
@@ -83,7 +83,7 @@ export const CONFIG_SCHEMA = [
     exposure: 'editable',
     requiresRestart: true,
     default: false,
-    ui: { type: 'bool', label: '启用加入服务', help: '开启后可由「＋ 邀请新设备」签发一次性令牌（需重启）' },
+    ui: { type: 'bool', label: '启用加入服务', help: '开启后可由「＋ 邀请新设备」生成一次性令牌（需重启）' },
     effective: (s) => s?.join?.enabled === true,
     reason: (ctx) => (ctx.settings?.join?.enabled === true && ctx.settings?.join?.endpointLoopback === true
       ? 'join 端点解析为回环地址：LAN 内新设备不可达（joinService.bind 设 0.0.0.0）'
@@ -245,35 +245,17 @@ export const CONFIG_SCHEMA = [
     effective: (s) => s?.sync?.snapshotThreshold ?? null,
   },
   {
+    // config-only：不在 GUI 渲染输入框；在 config.json 手工配置。
     path: 'sync.peerWhitelist',
     read: (c) => listOrNull(c?.sync?.peerWhitelist),
     kind: 'list',
     spec: { empty: 'delete' },
-    exposure: 'editable',
+    exposure: 'internal',
+    writable: false,
     requiresRestart: true,
     default: null,
-    ui: { group: '对端与签发者',       type: 'list',
-      label: '对端白名单',
-      placeholder: 'device-B, device-C',
-      help: '记忆通道的传输闸门：仅与列出的 deviceId 建立会话；留空 = 不启用（按授权 / 成员制判定）',
-    },
+    ui: { type: 'list', label: '对端白名单（仅 config.json）' },
     effective: (s) => (s?.sync?.peerWhitelist?.length ? s.sync.peerWhitelist : null),
-  },
-  {
-    path: 'sync.policyIssuers',
-    read: (c) => listOrNull(c?.sync?.policyIssuers),
-    kind: 'list',
-    spec: { empty: 'delete' },
-    exposure: 'editable',
-    requiresRestart: true,
-    default: null,
-    ui: {
-      type: 'list',
-      label: '引导签发者（配置）',
-      placeholder: 'device-A',
-      help: '可签发任意分区的引导设备；留空 = 仅图上声明',
-    },
-    effective: (s) => (s?.sync?.configPolicyIssuers?.length ? s.sync.configPolicyIssuers : null),
   },
   {
     path: 'semantic.enabled',
@@ -453,7 +435,7 @@ export const CONFIG_SCHEMA = [
       const relay = ctx.settings?.relay;
       if (!relay) return '状态不可读';
       if (relay.mode === 'off') return `未提供中转：${relay.reason ?? 'mode=off'}`;
-      return relay.serving ? '已生效：本机对外提供中转（仅已配对/已授权对端）' : `待条件满足：${relay.reason ?? '未对外可达'}`;
+      return relay.serving ? '已生效：本机对外提供中转（仅已配对/已入网对端）' : `待条件满足：${relay.reason ?? '未对外可达'}`;
     },
   },
   {
@@ -517,17 +499,6 @@ export const CONFIG_SCHEMA = [
     effective: (s) => (s?.mcp?.tls === true ? 'on' : 'off'),
     reason: (ctx) => (ctx.settings?.mcp?.tls ? '已生效：TLS 实际启用' : '未启用：明文 HTTP（仅回环安全）'),
   },
-  {
-    // grantTtl 不是配置键：由邀请令牌的 grantTtlMs 决定（默认 24h，自动撤销）
-    path: 'status.invite.grantTtl',
-    kind: 'status',
-    exposure: 'status-only',
-    requiresRestart: false,
-    ui: { type: 'status', label: '邀请自动授权 TTL' },
-    effective: (() => '24h'),
-    reason: (() => '已生效：默认 24h（随令牌可选覆盖，到期自动撤销）'),
-  },
-
   // ------------------------------------------------------------------ internal（GUI 不渲染；API 仍可写）
   { path: 'network.libp2p.relayUnlimited', read: (c) => c?.network?.libp2p?.relayUnlimited === true, kind: 'bool', exposure: 'internal', writable: true, requiresRestart: true, default: false, ui: { type: 'bool', label: 'Relay 不做限额' } },
   { path: 'network.libp2p.relayServer', kind: 'bool', exposure: 'internal', requiresRestart: true, default: false, ui: { type: 'bool', label: '本机充当 relay 服务端' } },
@@ -544,7 +515,6 @@ export const CONFIG_SCHEMA = [
   { path: 'network.autoConnect', kind: 'bool', exposure: 'internal', requiresRestart: true, default: true, ui: { type: 'bool', label: '地址簿自动拨号' } },
   { path: 'network.peers', kind: 'list', exposure: 'internal', writable: false, requiresRestart: true, default: null, ui: { type: 'list', label: '启动时主动拨号对端' } },
   { path: 'sync.pushOnWriteThrottleMs', kind: 'int', exposure: 'internal', requiresRestart: true, default: 50, ui: { type: 'number', label: '写入即推节流' } },
-  { path: 'sync.peerNamespacePolicy', kind: 'object', exposure: 'internal', writable: false, requiresRestart: true, default: null, ui: { type: 'object', label: '按对端的分区策略（旧）' } },
   { path: 'sync.syncTimeout', kind: 'int', exposure: 'internal', requiresRestart: true, default: null, ui: { type: 'number', label: '同步超时' } },
   { path: 'sync.syncStatePath', kind: 'string', exposure: 'internal', writable: false, requiresRestart: true, default: null, ui: { type: 'text', label: '已确认集合持久化路径' } },
   { path: 'semantic.model', kind: 'string', exposure: 'internal', writable: false, requiresRestart: true, default: null, ui: { type: 'text', label: 'embedding 模型' } },

@@ -82,7 +82,7 @@ export function provisionStatus({ home, mcpPort, provisioned = false, restarting
     ...base,
     provisioned: false,
     restartRequired: false,
-    note: '家目录为空：请选择「建新 Mebular」或「加入已有 Mebular」；完成后自动重启进入正常态。',
+    note: '家目录为空：请选择「新建忆云」或「加入已有忆云」；完成后自动重启进入正常态，之后由各设备自行订阅记忆域。',
   };
 }
 
@@ -135,7 +135,6 @@ async function writeInitialProvisionConfig({ home, deviceName, deviceId, mcpPort
       autoSync: true,
       pushOnWrite: true,
       namespaces: ['tasks'],
-      policyIssuers: [id],
       antiEntropy: { enabled: true, intervalMs: 600000, jitterRatio: 0.2 },
     },
     joinService: { enabled: true, bind: '0.0.0.0', port: joinChoice.port },
@@ -283,7 +282,7 @@ async function resolveJoinPorts({ ports = {}, mcpPort, joinPort, listenPort }) {
   return { mcp, join, listen };
 }
 
-function delegatedConfig({ home, id, name, namespace, parsed, ports, peers = [] }) {
+function delegatedConfig({ home, id, name, namespace, ports, peers = [] }) {
   return {
     storagePath: join(home, 'store.jsonl'),
     deviceId: id,
@@ -300,7 +299,6 @@ function delegatedConfig({ home, id, name, namespace, parsed, ports, peers = [] 
       autoSync: true,
       pushOnWrite: true,
       namespaces: [namespace],
-      policyIssuers: [parsed.inviterDeviceId],
       antiEntropy: { enabled: true, intervalMs: 600000, jitterRatio: 0.2 },
     },
     joinService: { enabled: true, bind: '0.0.0.0', port: ports.join },
@@ -354,7 +352,7 @@ export async function provisionJoinInto({
   const configPreexisting = existsSync(configFile);
 
   // 预写 config：兑换前完成本机落盘（端口复用当前忆云；准备阶段不 bind）。
-  await writeConfigFile(home, delegatedConfig({ home, id, name, namespace, parsed, ports: resolvedPorts }));
+  await writeConfigFile(home, delegatedConfig({ home, id, name, namespace, ports: resolvedPorts }));
 
   let joined;
   try {
@@ -399,7 +397,7 @@ export async function provisionJoinInto({
     ? fleetCfg.peers.filter((p) => p && typeof p.device === 'string').map((p) => (p.addr ? { device: p.device, addr: p.addr } : { device: p.device }))
     : [];
   const masterKeyPublic = join(home, 'master-key.json');
-  const path = await writeConfigFile(home, delegatedConfig({ home, id, name, namespace, parsed, ports: resolvedPorts, peers }));
+  const path = await writeConfigFile(home, delegatedConfig({ home, id, name, namespace, ports: resolvedPorts, peers }));
   return {
     ok: true,
     action: 'join',
@@ -407,7 +405,6 @@ export async function provisionJoinInto({
     deviceName: name,
     inviterDeviceId: parsed.inviterDeviceId,
     namespace,
-    grantsOnJoin: parsed.grantOnJoin !== false,
     hinted: joined.hinted,
     peers,
     configPath: path,
@@ -417,7 +414,7 @@ export async function provisionJoinInto({
     notes: [
       '已取得委派证书链（无主私钥）：<home>/store.jsonl.identity.json',
       `用户主公钥（仅公钥）：${masterKeyPublic}`,
-      `授权分区：${namespace}（兑换时自动授权=${parsed.grantOnJoin !== false}）`,
+      `默认订阅：${namespace}（加入后由本机自行声明；不复制任何权限记录）`,
       ...(joined.hinted > 0 ? [`inviter 地址 hints 已写入 <home>/net/peers.json（${joined.hinted} 条）`] : []),
     ],
   };
@@ -449,7 +446,7 @@ export async function provisionJoin({
   return provisionJoinInto({ home, token, deviceName, mcpPort, joinPort, listenPort, timeoutMs });
 }
 
-/** 读回已落盘的 provider 结果（供控制台「已加入」展示当前路径/授权分区）。 */
+/** 读回已落盘的 provider 结果（供控制台「已加入」展示当前路径/订阅分区）。 */
 export async function readProvisionRecord(home) {
   try {
     const record = JSON.parse(await readFile(join(home, 'provision.json'), 'utf-8'));

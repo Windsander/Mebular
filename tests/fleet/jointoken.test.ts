@@ -30,7 +30,7 @@ jest.setTimeout(60000);
 const AGENTS = [{ name: 'echo', kind: 'echo' as const }];
 
 async function makeInviter(dir: string, device = 'device-A'): Promise<Mebular> {
-  await onboardDevice({ dir, device, agents: AGENTS, configGrant: false, policyIssuers: [device] });
+  await onboardDevice({ dir, device, agents: AGENTS });
   const config = await loadFleetConfig(fleetConfigPath(dir));
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const m = new Mebular(offlineMebularOptions(config, encryption) as never);
@@ -80,7 +80,6 @@ describe('T2 加入令牌与 join 服务', () => {
         const inline = encodeJoinToken(token);
 
         const res = await joinWithToken({ dir: B, token: inline, device: 'device-B', listen: '/ip4/127.0.0.1/tcp/0', agents: AGENTS });
-        expect(res.awaitingApproval).toBe(true);
         expect(res.alreadyJoined).toBe(false);
         expect(res.inviterDeviceId).toBe('device-A');
 

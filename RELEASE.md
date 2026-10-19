@@ -134,7 +134,7 @@ push 后 GitHub Actions `Publish` 流水线自动执行：
 | verify 报 `version=... != ...` | 分支名与 package.json 不一致。在分支上跑 `bash scripts/bump_version.sh vX.Y.Z` 并提交。 |
 | verify 报 `CHANGELOG.md 缺少 [vX.Y.Z]` | 未生成/未提交 CHANGELOG 章节；跑 `bump_version.sh` 后补内容并提交。 |
 | publish 报 `EOTP` / 需要一次性密码 | `NPM_TOKEN` 不是 Automation token 或缺 bypass-2FA 权限，重新生成。 |
-| publish 报 `E403` / scope 无权 | token 未授权 `@mebular` scope 的 read/write，或 npm org 不存在。 |
+| publish 报 `E403` / scope 无权 | token 缺少 `@mebular` scope 的 read/write 权限，或 npm org 不存在。 |
 | publish 报 `EPUBLISHCONFLICT` | 该版本已存在（幂等应已 skip）；确认版本号是否递增正确。 |
 | 安装 tarball 报找不到 `@mebular/*` | 检查 `scripts/publish-manifest.mjs` 是否在 prepack 生效、发布顺序是否完整。 |
 | release 报 `contents: write` 被拒 | 仓库 Actions 权限未开读写；见第 1 节。 |

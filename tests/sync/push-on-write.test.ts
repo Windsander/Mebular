@@ -45,10 +45,6 @@ describe('push-on-write', () => {
         pushOnWrite: true,
         pushOnWriteThrottleMs: 20,
         // 默认拒绝：显式授权对端；具体订阅由各用例的 namespaces 决定
-        peerNamespacePolicy: {
-          'device-A': ['default', 'task', 'taskA', 'taskB'],
-          'device-B': ['default', 'task', 'taskA', 'taskB'],
-        },
         ...sync,
       },
     });
@@ -159,11 +155,11 @@ describe('push-on-write', () => {
     await b.shutdown();
   });
 
-  it('未授权不发（H）：本机写入未授权分区不触发对端同步', async () => {
+  it('未订阅不发（H）：本机写入未订阅分区不供给对端', async () => {
     const hub = new InMemoryHub();
-    // A 只授权 B 接收 taskA；写入 taskB 不应触发任何同步
-    const a = makeFacade('device-A', hub, { peerNamespacePolicy: { 'device-B': ['taskA'] } });
-    const b = makeFacade('device-B', hub);
+    // A 只订阅 taskA；写入 taskB 不会供给给 B
+    const a = makeFacade('device-A', hub, { namespaces: ['taskA'] });
+    const b = makeFacade('device-B', hub, { namespaces: ['taskA', 'taskB'] });
     await a.initialize();
     await b.initialize();
     await connectAndSettle(a, b);

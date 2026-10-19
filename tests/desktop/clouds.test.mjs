@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   ensureDaemon,
+  probeHealth,
   probeHealthDetail,
   waitForDaemonDetail,
 } from '../../apps/desktop/src/main/daemon.mjs';
@@ -137,6 +138,14 @@ describe('CL-05 · healthz 实例身份', () => {
     }), http, { expectedInstance: 'abc123def456' });
     expect(missing.ok).toBe(false);
     expect(missing.reason).toBe('instance_missing');
+
+    // 旧布尔入口也接受身份选项（E2-B 调用方不必都改用 Detail）
+    expect(await probeHealth(async () => ({
+      ok: true, status: 200, json: async () => ({ instance: 'abc123def456' }),
+    }), http, { expectedInstance: 'abc123def456' })).toBe(true);
+    expect(await probeHealth(async () => ({
+      ok: true, status: 200, json: async () => ({ instance: 'other0000000' }),
+    }), http, { expectedInstance: 'abc123def456' })).toBe(false);
   });
 
   it('waitForDaemonDetail：instance 不匹配立即终止（不把别的忆云当目标）', async () => {

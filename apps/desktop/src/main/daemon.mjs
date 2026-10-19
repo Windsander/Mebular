@@ -113,9 +113,12 @@ export async function probeHealthDetail(fetchImpl, http = { host: '127.0.0.1', p
   return { ok: true, body, instance, http };
 }
 
-/** /healthz 探测布尔壳（保留旧签名；需要原因时用 probeHealthDetail）。 */
-export async function probeHealth(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, timeoutMs = 1200) {
-  return (await probeHealthDetail(fetchImpl, http, { timeoutMs })).ok;
+/**
+ * /healthz 探测布尔壳（保留旧签名；需要原因时用 probeHealthDetail）。
+ * 第三参数兼容旧 `timeoutMs`，或 `{ timeoutMs, expectedInstance, cloudId }`（E2-B 身份校验）。
+ */
+export async function probeHealth(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, options = 1200) {
+  return (await probeHealthDetail(fetchImpl, http, options)).ok;
 }
 
 /** root 级单活锁（A1）：`<root>/active.lock`。损坏/不存在 → null。 */

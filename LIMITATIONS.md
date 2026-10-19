@@ -22,8 +22,8 @@
 - **Revocation is domain shrinkage, not remote erasure.** It stops *future ingestion* (read side `[]`, inbound
   isolation, snapshot filtering); it does not retract data already in the graph, and revoked devices may still open
   sessions (otherwise they could never learn about recovery).
-- **Revocation propagation is delayed** by event sync: the cascade is immediate once the `device_revoke` event is
-  present, so each peer only sees it after syncing.
+- **Revocation propagation is delayed** by event sync: the revocation takes effect immediately once the
+  `device_revoke` event is present, so each peer only sees it after syncing.
 - **Reserved namespace `__policy__` is readable by all authenticated devices (including revoked ones)** — a
   deliberate bootstrapping/recovery trade-off; the authorization graph is visible to enrolled devices.
 - **`policyIssuers` is local configuration** (bootstrap). Peers must agree on it, otherwise they may derive

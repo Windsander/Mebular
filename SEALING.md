@@ -82,7 +82,7 @@
   3. **Default tier `full`**: publishes actually-present lan/public/relay addresses, tagged; `relay-only` / `off` are optional privacy tiers (`off` publishes nothing);
   4. **Visible only to `__net__` members**: the record lands only in `__net__` (the transport side reuses the existing "authorization ∩ membership ∩ subscription" pruning; same-shaped records in namespaces other than `__net__` are always ignored);
   5. **`expiry` is local policy**: expired records are ignored only locally; **the wall clock never enters consistency**, and does not affect `stateHash` or conflict resolution;
-  6. **Revocation cascade filtering**: records of a revoked subject are always ignored (including its historical records);
+  6. **Revocation filtering (subject-level)**: records of a revoked subject are always ignored (including its historical records);
   7. **Candidate ordering `public > lan > relay`** (consistent with `EndpointBook.KIND_PRIORITY`);
   8. **`relayCapable` carries no obligation and no permission**: it is information only (it does not make the local node a bridge and buys no authorization; the bridge decision still rests with C6's
      `relayService` + address-book allow-list).
@@ -100,7 +100,7 @@
 - **Rules R-a/R-b/R-c/R-d**:
   - **R-a cannot grant beyond one's rights**: the issuer must belong to the **effective bootstrap set** (subjects of adopted on-graph `policy_issuer_declare` ∪ local config `sync.policyIssuers`), or **at that time** already be authorized for **all** the namespaces it declares.
   - **C1 bootstrap-issuer declaration (`policy_issuer_declare`)**: when both the issuer and the subject are not revoked by `device_revoke`, it is **unconditionally adopted** (does not do R-a, hence no cyclic dependency with the fixed point); a revoked issuer (R-b, including historical) or a revoked subject → **not adopted**. Forged records / records not chaining to this user's master key are ignored during verification.
-  - **R-b revocation contagion (including history)**: records of a revoked issuer are **never adopted** — its historical `grant`, and the `device_revoke` / `namespace_revoke` it issued. **Self-revocation (`subject === author`) is not adopted** (semantics undefined; revocation must be initiated by another device).
+  - **R-b revocation isolation (author-level, including history)**: records **of the revoked issuer itself** are **never adopted** — its historical `grant`, and the `device_revoke` / `namespace_revoke` it issued. **Self-revocation (`subject === author`) is not adopted** (semantics undefined; revocation must be initiated by another device). Its **descendants / new members are not affected**: their events are judged by their own certificate chain and their own author revocation state.
   - **R-c logical-time ordering** (see red line 2), not looking at the wall clock.
   - **R-d exact grantId revocation**: a grantId revoked by `namespace_revoke` **permanently lapses**; recovery must use a **brand-new grantId** (a "pseudo-recovery" reusing the old grantId is void). Revocation is **not terminal**.
   - **S1 security tiers (`security_tier`)**: `low` (default, no extra gate) / `medium` (local TOTP, S2) /
@@ -151,7 +151,7 @@
   `/admin/api/security/*`, the security card, and audit rendering belong to S2/S3; S1 persists no seed or
   recovery secret (only public keys/proofs on the graph).
 - **Automatic event pruning**: this round only fixes the constraint and tests — **any pruning must exclude events not yet acked by all authorized peers**; no pruning is implemented.
-- **Trust model v2 (delegation cert chain + join token) has landed** (T2; contract in §1.3, §3; acceptance in the S2 report). **Remaining**: revocation's **network-wide propagation delay** (the `device_revoke` cascade is immediate at the policy layer, but takes effect only once the event syncs to each end) and **cross-NAT measured backfill**.
+- **Trust model v2 (delegation cert chain + join token) has landed** (T2; contract in §1.3, §3; acceptance in the S2 report). **Remaining**: revocation's **network-wide propagation delay** (`device_revoke` is immediate at the policy layer, but takes effect only once the event syncs to each end) and **cross-NAT measured backfill**.
 
 ## 5. Known boundaries (deliberate trade-offs / needs human attention)
 
@@ -175,6 +175,6 @@ node --experimental-vm-modules node_modules/jest/bin/jest.js tests/sync/policy-i
 # [policy-invariants] scenarios=300 nonConverged=6 residualA=4 residualB=0
 ```
 
-**Red→green spot check (R-b historical contagion)**: temporarily delete
-`revokedIn.has(entry.author) || ` in `src/sync/grantPolicy.ts` → `jest tests/sync/grant-policy.test.ts -t "R-b 历史连坐"` should be **✕**;
+**Red→green spot check (R-b historical isolation, author-level)**: temporarily delete
+`revokedIn.has(entry.author) || ` in `src/sync/grantPolicy.ts` → `jest tests/sync/grant-policy.test.ts -t "R-b 历史隔离"` should be **✕**;
 after `git checkout -- src/sync/grantPolicy.ts` restores it, it should be **✓**. The working tree must be clean afterwards.

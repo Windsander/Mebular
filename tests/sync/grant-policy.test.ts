@@ -276,7 +276,7 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
     expect(await policyWith(['issuer']).getAuthorizedNamespaces('device-B')).toEqual(['nsX']);
   });
 
-  it('R-b 吊销连坐：被吊销签发者的 device_revoke 不再生效，也不能自复活', async () => {
+  it('R-b 吊销隔离（作者级）：被吊销签发者的 device_revoke 不再生效，也不能自复活', async () => {
     await appendDeviceRevoke(trusted2, 'device-X', 1000); // 引导 issuer2 吊销 device-X
     const xLog = await makeTrustedLog(storage, master, 'device-X', { restore: true }); // 因果在后
     await appendDeviceRevoke(xLog, 'device-B', 2000); // device-X 已吊销 → 无效
@@ -286,7 +286,7 @@ describe('GraphNamespacePolicy（签发者信任与策略推导）', () => {
     expect(await p.getAuthorizedNamespaces('device-X')).toEqual([]);
   });
 
-  it('R-b 历史连坐（F-1）：被吊销者更早发出的 device_revoke 不生效', async () => {
+  it('R-b 历史隔离（作者级，F-1）：被吊销者更早发出的 device_revoke 不生效', async () => {
     const d0Log = await makeTrustedLog(storage, master, 'device-D0');
     await appendDeviceRevoke(d0Log, 'device-D3', 1000); // D0（当时有效）吊销 D3
     const d4Log = await makeTrustedLog(storage, master, 'device-D4', { restore: true });

@@ -4,7 +4,7 @@
 //  - 仅 subject 本人签发（读取侧要求 `event.author === payload.subject`）；
 //  - 载荷带 `sig`（subject 设备钥对规范化载荷签名；读取侧可选校验）；
 //  - `expiry` 是**本地策略**（墙钟只影响本机是否采用该 hint，**不进一致性**、不影响 stateHash）；
-//  - 吊销级联过滤：被吊销的 subject 的记录一律忽略；
+//  - 吊销过滤（subject 级）：被吊销的 subject 的记录一律忽略；
 //  - 候选排序 `public > lan > relay`（与 EndpointBook 的 direct > lan > relay 一致）；
 //  - `relayCapable` 只是信息（无义务、无权限）：不使本机成为桥，也不换取任何授权。
 
@@ -124,7 +124,7 @@ export function parseNetEndpointsPayload(raw: unknown): NetEndpointsPayload | nu
  *  - `author` 必须等于 payload.subject（仅 subject 签发）；
  *  - 事件命名空间必须是 `__net__`；
  *  - `expiry` 过期（本地墙钟）→ 忽略；
- *  - subject 被吊销 → 级联忽略；
+ *  - subject 被吊销 → 忽略（subject 级，不涉证书链）；
  *  - 无有效端点 → 忽略。
  * **注意**：本函数不做任何授权/成员判定；hints 永不参与授权。
  */

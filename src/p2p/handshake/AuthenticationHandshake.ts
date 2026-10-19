@@ -103,8 +103,6 @@ export class AuthenticationHandshake extends EventEmitter {
   private userMasterPublicKey: Uint8Array | null = null;
   private userMasterPrivateKey: CryptoKey | null = null;
   private identity: LocalIdentity | null = null;
-  /** 吊销级联判定（T2）：链中任一设备被 `device_revoke` → 拒绝；缺省不判（握手层只做密码学）。 */
-  private revocationCheck: ((deviceId: string) => boolean) | null = null;
 
   constructor(options: AuthHandshakeOptions = {}) {
     super();
@@ -114,11 +112,6 @@ export class AuthenticationHandshake extends EventEmitter {
       maxRetries: 3,
       ...options,
     };
-  }
-
-  /** 注入吊销级联判定（T2）：由策略/同步层提供 `device_revoke` 集合。 */
-  setRevocationCheck(check: ((deviceId: string) => boolean) | null): void {
-    this.revocationCheck = check;
   }
 
   async start(): Promise<void> {
@@ -210,11 +203,10 @@ export class AuthenticationHandshake extends EventEmitter {
       return false;
     }
     // T2：带链（委派）走链式校验；否则维持旧「主密钥直签」单层校验（逐字节语义不变）。
+    // 吊销是**作者级**语义（`SyncManager` 按事件作者隔离），不在握手/链验签层判定：
+    // 链中含被吊销设备不连带拒绝其下级或新成员。
     if (chain !== undefined && chain.length > 1) {
-      return verifyCertificateChain(chain, this.userMasterPublicKey, {
-        subjectDeviceId: deviceId,
-        ...(this.revocationCheck ? { isRevoked: this.revocationCheck } : {}),
-      });
+      return verifyCertificateChain(chain, this.userMasterPublicKey, { subjectDeviceId: deviceId });
     }
     if (certificate.issuer !== undefined) {
       return false; // 委派证书必须携带链
@@ -602,14 +594,15 @@ export async function verifyCertificateSignature(
  *   的 `deviceId`/`devicePublicKey` **完全一致**，并用 `chain[i+1].devicePublicKey` 验 `chain[i]` 签名；
  * - 末元素（根）必须**无 `issuer`**，并用 `userMasterPublicKey` 验签；
  * - 委派跳数 = `chain.length - 1`，**超过 `MAX_CERT_CHAIN_HOPS` 拒绝**；
- * - `opts.isRevoked(deviceId)` 为真时拒绝（**吊销级联**，与策略层 R-b 同源；握手层本身不做吊销判定）。
+ * - **只做密码学**：不接收吊销输入。`device_revoke` 只作用于被吊销设备本人
+ *   （作者级隔离，见 `SyncManager.applyOffer`），不因链中含被吊销设备而拒绝下级。
  *
  * 单元素链（`issuer` 缺省）= 旧“主密钥直签”证书，等价于 `verifyCertificateSignature`。
  */
 export async function verifyCertificateChain(
   chain: readonly DeviceCertificate[],
   userMasterPublicKey: Uint8Array,
-  opts: { subjectDeviceId?: string; isRevoked?: (deviceId: string) => boolean } = {},
+  opts: { subjectDeviceId?: string } = {},
 ): Promise<boolean> {
   if (!Array.isArray(chain) || chain.length === 0) return false;
   if (chain.length - 1 > MAX_CERT_CHAIN_HOPS) return false;
@@ -617,12 +610,10 @@ export async function verifyCertificateChain(
   if (opts.subjectDeviceId !== undefined && leaf.deviceId !== opts.subjectDeviceId) return false;
   if (chain.length === 1) {
     if (leaf.issuer !== undefined) return false; // 单元素必须是主密钥直签
-    if (opts.isRevoked?.(leaf.deviceId)) return false;
     return verifyCertificateSignature(leaf, userMasterPublicKey);
   }
   for (let i = 0; i < chain.length; i += 1) {
     const cert = chain[i]!;
-    if (opts.isRevoked?.(cert.deviceId)) return false;
     if (i === chain.length - 1) {
       if (cert.issuer !== undefined) return false; // 根不得再委派
       if (!(await verifyCertificateSignature(cert, userMasterPublicKey))) return false;

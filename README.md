@@ -46,7 +46,8 @@ you cannot tell who wrote what; go offline and it stops working.
   (`causedBy`/`chain`, cycle-free). The only remote surface is the memory channel — no general remote query/RPC.
 - **Trust is a certificate chain to the user master key.** Any enrolled device may delegate a certificate to a new
   device (bounded chain length); a short-lived, single-use join token lets a new device enroll without copying the
-  master key. Revocation cascades to delegated certificates.
+  master key. Revocation applies to the revoked device itself (author-level); it does not cascade to delegated
+  certificates, so descendants and new members remain unaffected.
 
 ![Mebular architecture](assets/architecture-en.svg)
 

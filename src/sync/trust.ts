@@ -8,6 +8,9 @@
 // **不新造信任根**：授权记录（grant/revoke）的签发者判定与普通事件的信任链
 // 走同一套密码学校验。直连对端的「直签快路径」不在此列：授权是元数据，
 // 只有能出示用户主密钥签发证书的设备才可信。
+//
+// 本函数**不含吊销判定**：`device_revoke` 只作用于被吊销设备本人，由调用方按
+// `event.author` 隔离（作者级）；链中含被吊销设备不连带拒绝其下级/新成员。
 
 import type { Event } from '../types/event.js';
 import { EventLog } from '../eventlog/EventLog.js';
@@ -20,7 +23,6 @@ import { hexToBytes, verifyCertificateSignature, verifyCertificateChain } from '
 export async function verifyIssuedByUser(
   event: Event,
   userMasterPublicKey: Uint8Array | null | undefined,
-  opts: { isRevoked?: (deviceId: string) => boolean } = {},
 ): Promise<boolean> {
   if (!userMasterPublicKey) return false;
   const certificate = event.authorCertificate;
@@ -28,10 +30,7 @@ export async function verifyIssuedByUser(
   // T2：带链（委派）走链式校验；否则旧主密钥直签单层校验。
   const chain = event.authorCertificateChain;
   if (chain !== undefined && chain.length > 1) {
-    const ok = await verifyCertificateChain(chain, userMasterPublicKey, {
-      subjectDeviceId: event.author,
-      ...(opts.isRevoked ? { isRevoked: opts.isRevoked } : {}),
-    });
+    const ok = await verifyCertificateChain(chain, userMasterPublicKey, { subjectDeviceId: event.author });
     if (!ok) return false;
   } else {
     if (certificate.issuer !== undefined) return false;

@@ -78,7 +78,7 @@
   3. **默认档 `full`**：发布实际存在的 lan/public/relay 地址并打标；`relay-only` / `off` 为可选隐私档（`off` 完全不发布）；
   4. **仅 `__net__` 成员可见**：记录只落在 `__net__`（传输侧沿用既有「授权 ∩ 成员资格 ∩ 订阅」裁剪；非 `__net__` 命名空间的同形记录一律忽略）；
   5. **`expiry` 是本地策略**：过期记录仅在本机被忽略，**墙钟不进一致性**、不影响 `stateHash` 与冲突裁决；
-  6. **吊销级联过滤**：被吊销 subject 的记录一律忽略（含其历史记录）；
+  6. **吊销过滤（subject 级）**：被吊销 subject 的记录一律忽略（含其历史记录）；
   7. **候选排序 `public > lan > relay`**（与 `EndpointBook.KIND_PRIORITY` 一致）；
   8. **`relayCapable` 无义务、无权限**：仅是信息（不使本机成为桥、不换取任何授权；当桥判定仍由 C6 的
      `relayService` + 地址簿白名单决定）。
@@ -96,7 +96,7 @@
 - **规则 R-a/R-b/R-c/R-d**：
   - **R-a 不可越权授予**：签发者须属于**生效引导集合**（图上被采纳的 `policy_issuer_declare` 主体 ∪ 本地配置 `sync.policyIssuers`），或**当时**已获授权其声明的**全部**分区。
   - **C1 引导签发者声明（`policy_issuer_declare`）**：签发者与主体均未被 `device_revoke` 吊销时，**无条件采纳**（不做 R-a，故与不动点无循环依赖）；被吊销的签发者（R-b 含历史）或被吊销的主体 → **不采纳**。伪造/非本用户主密钥链的记录在校验阶段被忽略。
-  - **R-b 吊销连坐（含历史）**：被吊销签发者的记录**一律不采纳**——其历史 `grant`、它发出的 `device_revoke` / `namespace_revoke`。**自吊销（`subject === author`）不采纳**（语义未定义；吊销须由其他设备发起）。
+  - **R-b 吊销隔离（作者级，含历史）**：被吊销签发者**本人**的记录**一律不采纳**——其历史 `grant`、它发出的 `device_revoke` / `namespace_revoke`。**自吊销（`subject === author`）不采纳**（语义未定义；吊销须由其他设备发起）。被吊销设备的**下级/新成员不连带**：其事件仍按自身证书链与自身作者吊销状态判定。
   - **R-c 逻辑时间定序**（见红线 2），不看墙钟。
   - **R-d grantId 精确撤销**：被 `namespace_revoke` 撤销过的 grantId **永久失效**；恢复必须用**全新 grantId**（复用旧 grantId 的「伪恢复」无效）。吊销**非终态**。
   - **S1 安全三档（`security_tier`）**：`low`（默认，无额外门槛）/ `medium`（本机 TOTP，S2）/
@@ -146,7 +146,7 @@
   恢复码生成/展示/消费 UI、主密钥备份/恢复、`/admin/api/security/*` 与安全卡/审计呈现归 S2/S3；
   S1 不落任何种子或恢复码 secret（图上只有公钥/证明）。
 - **自动事件裁剪**：本期只固化约束与测试——**任何裁剪必须排除尚未被所有已授权对端 ack 的事件**，不实现裁剪。
-- **信任模型 v2（委派证书链 + 加入令牌）已落地**（T2；契约见 §1.3、§3；验收见 S2 报告）。**剩余**：吊销的**全网传播延迟**（`device_revoke` 级联在策略层即时，但需事件同步到达各端才生效）与**跨 NAT 实测回填**。
+- **信任模型 v2（委派证书链 + 加入令牌）已落地**（T2；契约见 §1.3、§3；验收见 S2 报告）。**剩余**：吊销的**全网传播延迟**（`device_revoke` 在策略层即时，但需事件同步到达各端才生效）与**跨 NAT 实测回填**。
 
 ## 5. 已知边界（有意取舍 / 需人工关注）
 
@@ -170,6 +170,6 @@ node --experimental-vm-modules node_modules/jest/bin/jest.js tests/sync/policy-i
 # [policy-invariants] scenarios=300 nonConverged=6 residualA=4 residualB=0
 ```
 
-**红→绿抽验（R-b 历史连坐）**：临时把 `src/sync/grantPolicy.ts` 的
-`revokedIn.has(entry.author) || ` 去掉 → `jest tests/sync/grant-policy.test.ts -t "R-b 历史连坐"` 应 **✕**；
+**红→绿抽验（R-b 历史隔离，作者级）**：临时把 `src/sync/grantPolicy.ts` 的
+`revokedIn.has(entry.author) || ` 去掉 → `jest tests/sync/grant-policy.test.ts -t "R-b 历史隔离"` 应 **✕**；
 `git checkout -- src/sync/grantPolicy.ts` 还原后应 **✓**。完成后工作区必须干净。

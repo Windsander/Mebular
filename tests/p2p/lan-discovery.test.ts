@@ -28,7 +28,6 @@ class StubHandshake extends EventEmitter {
   setUserMasterPublicKey(): void { /* noop */ }
   setUserMasterPrivateKey(): void { /* noop */ }
   setIdentity(): void { /* noop */ }
-  setRevocationCheck(): void { /* noop */ }
   async createCertificate(): Promise<unknown> {
     return { deviceId: 'device-local', devicePublicKey: '', createdAt: 0, metadata: {}, signature: '' };
   }

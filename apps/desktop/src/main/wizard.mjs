@@ -194,7 +194,7 @@ export async function inviteViaApi(fetchImpl, http = { host: '127.0.0.1', port: 
     });
     const data = await res.json().catch(() => ({}));
     if (res.status === 409 && data?.error === 'join_disabled') {
-      return { token: null, qrSvg: null, endpoint: null, warning: '未启用加入服务：在控制台「设置 → 常用配置」开启加入服务并重启后再试。' };
+      return { token: null, qrSvg: null, endpoint: null, warning: '未启用加入服务：在控制台点「邀请设备」可就地启用加入服务并继续（将重启守护）。' };
     }
     if (!res.ok) {
       return { token: null, qrSvg: null, endpoint: null, warning: `邀请失败（HTTP ${res.status}）：${data?.message ?? '请看诊断日志'}` };

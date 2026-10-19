@@ -521,7 +521,7 @@ body.modal-open { overflow: hidden; }
   .drawer-port::after { left: 1px; top: 1px; width: 1.5px; height: 12px; }
   @keyframes port-flash { 0% { opacity: 0; } 35% { opacity: 1; } 100% { opacity: 0.55; } }
   .aside.is-open .drawer-port { animation: port-flash 0.3s ease-out 0.3s 1 backwards; }
-  /* 状态 LED（名字前）：蓝=已连 / 灰=离线 / 红=已屏蔽 */
+  /* 状态 LED（名字前）：蓝=已连 / 灰=离线 / 红=已移出 */
   .dev-led { display: inline-block; width: 6px; height: 6px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; background: #5a6785; }
   .dev-led.is-ok { background: #56b4e9; box-shadow: 0 0 6px rgba(86, 180, 233, 0.75); }
   .dev-led.is-off { background: #5a6785; }
@@ -982,6 +982,7 @@ body.modal-open { overflow: hidden; }
 
 /* ---------- 响应式：≤760px 行模板转为上下布局（无横向滚动） ---------- */
 @media (max-width: 760px) {
+  .settings-tabs { flex-wrap: wrap; }
   .settings-kv {
     grid-template-columns: minmax(0, 1fr);
     gap: var(--field-gap);

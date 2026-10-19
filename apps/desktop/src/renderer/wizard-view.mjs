@@ -90,7 +90,7 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
   if (provision.required) {
     detailText = provision.provisioned
       ? '初始设置已写入，等待重启生效：向导会自动续跑；也可点「出问题了？」里的重启。'
-      : '还差一步初始设置（建新或加入一个 Mebular，数据都在本机）：';
+      : '还差一步初始设置（建新或加入一个忆云，数据都在本机）：';
   } else if (step.done) {
     detailText = registered === true
       ? '守护运行中（常驻已装 · 开机自启）。'
@@ -118,8 +118,8 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
       // 完成前恒在：② 未收尾时它仍是唯一动作入口（点一次跑完剩余全部自动化）
       go: { label: '开始部署', kind: 'primary', hidden: false },
       provision: { label: '去写入初始设置 →', kind: 'primary', hidden: !(provision.required && !provision.provisioned) },
-      // 设计稿：「或加入已有的 Mebular ›」——与「去写入初始设置」同路（控制台 provision），仅引导态显示
-      join: { label: '或加入已有的 Mebular ›', kind: 'alt', hidden: !(provision.required && !provision.provisioned) },
+      // 设计稿：「或加入已有忆云 ›」——与「去写入初始设置」同路（控制台 provision），仅引导态显示
+      join: { label: '或加入已有忆云 ›', kind: 'alt', hidden: !(provision.required && !provision.provisioned) },
     },
   };
 }

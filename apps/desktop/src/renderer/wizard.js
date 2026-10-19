@@ -46,7 +46,7 @@ function renderState(state) {
     const pending = [...reloadHints];
     finishNote.innerHTML = (pending.length > 0
       ? `<span class="warn-text">提醒：重启 ${pending.map((n) => escapeHtml(n)).join('、')} 这个软件后，mebular 才会出现在它的工具列表。</span><br />`
-      : '') + '之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请新设备」随时可用。';
+      : '') + '之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请设备」随时可用。';
   }
 
   const start = view.steps.find((s) => s.id === 'start');

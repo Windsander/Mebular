@@ -221,8 +221,8 @@ async function main() {
     statusA.json?.defaultDeviceId === provision.deriveDeviceId(statusA.json?.defaultDeviceName),
     `defaultDeviceId=${statusA.json?.defaultDeviceId}`);
   const consoleHtml = await (await fetch(`http://127.0.0.1:${portA}/console/`)).text();
-  check('O1 首屏含两入口（建新 Mebular / 加入已有 Mebular）',
-    consoleHtml.includes('建新 Mebular') && consoleHtml.includes('加入已有 Mebular')
+  check('O1 首屏含两入口（建新忆云 / 加入已有忆云）',
+    consoleHtml.includes('建新忆云') && consoleHtml.includes('加入已有忆云')
       && consoleHtml.includes('id="provision-create"') && consoleHtml.includes('id="provision-join"'),
     'index.html 引导页两入口');
 

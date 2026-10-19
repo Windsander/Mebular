@@ -35,7 +35,7 @@ if (!existsSync(keyFile)) {
   }, null, 2), { mode: 0o600 });
 }
 
-// 2) config（root 身份；joinService 开启便于演示「邀请新设备」；仅回环）
+// 2) config（root 身份；joinService 开启便于演示「邀请设备」；仅回环）
 if (!existsSync(cfgFile)) {
   await writeFile(cfgFile, JSON.stringify({
     storagePath,

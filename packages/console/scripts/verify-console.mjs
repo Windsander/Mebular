@@ -15,7 +15,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import net from 'node:net';
-import { createWizardState, wizardReduce, selectedMemoryCount } from '../wizard.js';
+import { createWizardState, wizardReduce } from '../wizard.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const consoleDir = join(__dirname, '..');
@@ -248,42 +248,25 @@ function openSse(port, path, timeoutMs = 8000) {
 console.log('Mebular 控制台 E1 验证（D1+D2，含 D3 向导状态机）');
 console.log('===============================');
 
-// ---------- D3 添加设备向导状态机（纯函数，无需起服务） ----------
+// ---------- E1 · 手动连接（网内传输修复）状态机（纯函数，无需起服务） ----------
 {
   let s = createWizardState();
-  check('向导初始 step=local', s.step === 'local');
+  check('E1 手动连接初始 step=local', s.step === 'local');
   s = wizardReduce(s, { type: 'GO_CONNECT' });
-  check('缺 deviceId/address → 拦截', s.step === 'local' && Boolean(s.error));
+  check('E1 缺 deviceId/address → 拦截', s.step === 'local' && Boolean(s.error));
   s = wizardReduce(s, { type: 'PEER_INPUT', deviceId: 'device-B', address: '/ip4/127.0.0.1/tcp/4011/p2p/xyz' });
   s = wizardReduce(s, { type: 'GO_CONNECT' });
-  check('输入齐全 → step=connect/connecting', s.step === 'connect' && s.connection === 'connecting');
-  s = wizardReduce(s, { type: 'GO_DOMAINS' });
-  check('未连接 → 不能进入 domains', s.step === 'connect' && Boolean(s.error));
+  check('E1 输入齐全 → step=connect/connecting', s.step === 'connect' && s.connection === 'connecting');
   s = wizardReduce(s, { type: 'CONNECT_SUCCESS' });
-  s = wizardReduce(s, { type: 'GO_DOMAINS' });
-  check('已连接 → step=domains', s.step === 'domains');
-  s = wizardReduce(s, { type: 'GRANT_START' });
-  check('未选域 → GRANT_START 被拦', s.granting !== true && Boolean(s.error));
-  s = wizardReduce(s, { type: 'TOGGLE_NAMESPACE', namespace: 'notes' });
-  check('选择域 notes', s.selected.includes('notes'));
-  check(
-    'selectedMemoryCount 汇总所选域记忆数',
-    selectedMemoryCount([{ namespace: 'notes', count: 2 }, { namespace: 'work', count: 3 }], s.selected) === 2,
-  );
-  s = wizardReduce(s, { type: 'GRANT_START' });
-  check('已选域 → granting', s.granting === true);
-  s = wizardReduce(s, { type: 'GRANT_SUCCESS', grantId: 'g-1' });
-  check('签发成功 → step=done + grantId', s.step === 'done' && s.grantId === 'g-1');
-  s = wizardReduce(s, { type: 'BACK' });
-  check('done 不可后退（保持）', s.step === 'done');
+  check('E1 连接成功 → connected（无共享域/签发步骤）', s.connection === 'connected' && s.step === 'connect');
   const reset = wizardReduce(s, { type: 'RESET' });
-  check('RESET 回到初始', reset.step === 'local' && reset.selected.length === 0);
+  check('E1 RESET 回到初始', reset.step === 'local' && reset.deviceId === '' && reset.address === '');
   let f = wizardReduce(createWizardState(), { type: 'PEER_INPUT', deviceId: 'd', address: 'a' });
   f = wizardReduce(f, { type: 'GO_CONNECT' });
   f = wizardReduce(f, { type: 'CONNECT_FAILURE', message: 'refused' });
-  check('连接失败可重试', f.connection === 'failed' && f.error === 'refused');
+  check('E1 连接失败可重试', f.connection === 'failed' && f.error === 'refused');
   f = wizardReduce(f, { type: 'BACK' });
-  check('connect → BACK 回 local', f.step === 'local');
+  check('E1 connect → BACK 回 local', f.step === 'local');
 }
 
 const home = await mkdtemp(join(tmpdir(), 'mebular-console-'));
@@ -593,7 +576,7 @@ try {
   });
   const rejoinJson = await rejoin.json().catch(() => null);
   check(
-    'rejoin 满足「本机订阅声明 ∧ 未吊销」→ 200 结构化（W1-B 新准入）',
+    'rejoin 满足「本机订阅声明 ∧ 未移出」→ 200 结构化（W1-B 新准入）',
     rejoin.status === 200 && rejoinJson?.ok === true && rejoinJson?.reset === true,
     `status=${rejoin.status} ok=${rejoinJson?.ok} reason=${rejoinJson?.reason ?? rejoinJson?.error}`,
   );
@@ -833,7 +816,7 @@ try {
     const htmlSrcOnboard = await readFile(join(consoleDir, 'index.html'), 'utf-8');
     check('GUI 首次上手接线：控制台含「建新 / 加入」两入口 + provision 客户端逻辑',
       htmlSrcOnboard.includes('id="provision-create"') && htmlSrcOnboard.includes('id="provision-join"')
-        && htmlSrcOnboard.includes('建新 Mebular') && htmlSrcOnboard.includes('加入已有 Mebular')
+        && htmlSrcOnboard.includes('建新忆云') && htmlSrcOnboard.includes('加入已有忆云')
         && consoleSrcOnboard.includes('fetchProvisionStatus') && consoleSrcOnboard.includes('/app/provision/create')
         && consoleSrcOnboard.includes('/app/provision/join') && consoleSrcOnboard.includes('renderProvision'),
       'index.html 两入口 + console.js provision 客户端');
@@ -1001,7 +984,7 @@ try {
       '专区 + 别名 + 叠加层');
   }
 
-  // ---------- 邀请新设备（T2 令牌加入） ----------
+  // ---------- 邀请设备（T2 令牌加入） ----------
   const inviteDisabled = await fetch(`http://127.0.0.1:${port}/admin/api/invite`, {
     method: 'POST',
     headers: writeHeaders,
@@ -1432,11 +1415,13 @@ try {
   // ---------- IA（设置页信息架构：常用/高级/诊断 + 关于本机） ----------
   {
     const ia = await import('../settings-ia.js');
-    const HOMES = new Set(['common', 'advanced', 'about', 'domains']); // 简化轮：诊断并入高级；订阅域归主页「记忆共享」
+    const HOMES = new Set(['common', 'advanced', 'mcp', 'about', 'domains']); // E1：MCP 接入独立 tab；诊断并入高级；订阅域归主页「记忆共享」
     const commonFields = ia.IA_COMMON_FIELDS;
-    check(`IA 常用恰 5 字段（实得 ${commonFields.length}）`, commonFields.length === 5, commonFields.join(', '));
+    check(`E1 IA 常用不再有可编辑字段（三卡迁出；实得 ${commonFields.length}）`, commonFields.length === 0, commonFields.join(', '));
 
-    const editorFaces = new Set([...ia.IA_COMMON_FIELDS, ...ia.IA_ADVANCED_FIELDS]);
+    const advancedCardFields = ia.IA_ADVANCED_CARDS.flatMap((card) => card.fields);
+    const mcpFields = ia.IA_MCP_CARD.fields;
+    const editorFaces = new Set([...ia.IA_COMMON_FIELDS, ...advancedCardFields, ...mcpFields, ...ia.IA_ADVANCED_FIELDS]);
     check('IA 同步节奏（autoSync/pushOnWrite）不在任何编辑面（只读进「关于本机」）',
       !editorFaces.has('sync.autoSync') && !editorFaces.has('sync.pushOnWrite')
         && ia.IA_MIGRATION['sync.autoSync'] === 'about' && ia.IA_MIGRATION['sync.pushOnWrite'] === 'about'
@@ -1460,29 +1445,33 @@ try {
       schemaStatusOnly.length === 11 && statusDrift.length === 0,
       `schema=${schemaStatusOnly.length} ia=${iaStatusOnly.length} 差异=${statusDrift.join(',') || '无'}`);
     // B：收敛回归——relayServers 从编辑面消失（status-only）、relayUnlimited 不再渲染（internal）
-    const advancedDrift = ia.IA_ADVANCED_FIELDS.filter((p) => ['network.libp2p.relayServers', 'network.libp2p.relayUnlimited'].includes(p));
+    const advancedDrift = [...advancedCardFields, ...mcpFields, ...ia.IA_ADVANCED_FIELDS].filter((p) => ['network.libp2p.relayServers', 'network.libp2p.relayUnlimited'].includes(p));
     check('B 暴露面收敛：relayServers 退出编辑面（→只读自动池）/ relayUnlimited 退出 GUI（→internal）',
-      ia.IA_ADVANCED_FIELDS.length === 10 && advancedDrift.length === 0
+      ia.IA_ADVANCED_FIELDS.length === 6 && advancedDrift.length === 0
         && schema.exposureOf('network.libp2p.relayServers') === 'status-only'
         && schema.exposureOf('network.libp2p.relayUnlimited') === 'internal'
         && schema.isWritable('network.libp2p.relayServers') === false,
-      `advanced=${ia.IA_ADVANCED_FIELDS.length} 残留=${advancedDrift.join(',') || '无'}`);
+      `advanced=${ia.IA_ADVANCED_FIELDS.length} cards=${advancedCardFields.length} mcp=${mcpFields.length} 残留=${advancedDrift.join(',') || '无'}`);
 
     const pathsWithoutHome = ia.IA_EDITOR_PATHS.filter((path) => homesOf(path).length !== 1);
     const infoWithoutHome = Object.keys(ia.IA_INFO_BLOCKS).filter((block) => homesOf(block).length !== 1);
-    const rendered = new Set([...ia.IA_COMMON_FIELDS, ...ia.IA_ADVANCED_FIELDS]);
-    const drifted = ia.IA_EDITOR_PATHS.filter((path) => (ia.IA_MIGRATION[path] === 'common' || ia.IA_MIGRATION[path] === 'advanced') !== rendered.has(path));
+    const rendered = new Set([...ia.IA_COMMON_FIELDS, ...advancedCardFields, ...mcpFields, ...ia.IA_ADVANCED_FIELDS]);
+    const drifted = ia.IA_EDITOR_PATHS.filter((path) => (ia.IA_MIGRATION[path] === 'common' || ia.IA_MIGRATION[path] === 'advanced' || ia.IA_MIGRATION[path] === 'mcp') !== rendered.has(path));
     const statusWithoutHome = ia.IA_STATUS_ONLY_PATHS.filter((path) => homesOf(path).length !== 1);
     check('IA 不丢项：16 可编辑 path + 11 只读 path + 10 信息块各有且仅有唯一去处（迁移表驱动）',
       ia.IA_EDITOR_PATHS.length === 16 && pathsWithoutHome.length === 0 && infoWithoutHome.length === 0 && drifted.length === 0 && statusWithoutHome.length === 0,
       `editorPaths=${ia.IA_EDITOR_PATHS.length} 只读无去处=${statusWithoutHome.join(',') || '无'} 编辑无去处=${pathsWithoutHome.join(',') || '无'} 信息块无去处=${infoWithoutHome.join(',') || '无'} 编辑面漂移=${drifted.join(',') || '无'}`);
 
-    const cardFields = ia.IA_TASK_CARDS.flatMap((card) => card.fields);
-    check('IA 常用三张任务卡共 5 字段且不重复（含 agent 危险卡；订阅域已移出归记忆共享）',
-      ia.IA_TASK_CARDS.length === 3 && cardFields.length === 5 && new Set(cardFields).size === 5
-        && ia.IA_TASK_CARDS.some((card) => card.id === 'agent' && card.danger === true)
-        && !cardFields.includes('sync.namespaces'),
-      `cards=${ia.IA_TASK_CARDS.length} fields=${cardFields.join(',')}`);
+    const cardFields = advancedCardFields;
+    check('E1 高级只留「常驻服务」卡（3 字段）；MCP 六项独立成卡（危险）',
+      ia.IA_ADVANCED_CARDS.length === 1 && ia.IA_ADVANCED_CARDS[0].id === 'join-service'
+        && cardFields.length === 3 && new Set(cardFields).size === 3
+        && ia.IA_MCP_CARD.id === 'mcp' && ia.IA_MCP_CARD.danger === true
+        && mcpFields.length === 6 && new Set(mcpFields).size === 6
+        && ['mcp.http.port', 'mcp.http.auth', 'mcp.http.host', 'mcp.http.tls', 'mcp.http.tlsKey', 'mcp.http.tlsCert'].every((p) => mcpFields.includes(p))
+        && cardFields.includes('joinService.enabled') && cardFields.includes('joinService.bind') && cardFields.includes('joinService.port')
+        && !cardFields.includes('sync.namespaces') && !cardFields.includes('mcp.http.port'),
+      `advancedCards=${ia.IA_ADVANCED_CARDS.length} fields=${cardFields.join(',')} mcp=${mcpFields.join(',')}`);
 
 
     const htmlSrc = await readFile(join(consoleDir, 'index.html'), 'utf-8');
@@ -1504,13 +1493,16 @@ try {
       '草稿机制已退场');
     const tabIds = ia.IA_TABS.map((tab) => tab.id).join(',');
     const tabLabels = ia.IA_TABS.map((tab) => tab.label).join(',');
-    check('IA Tab 结构（常用/AI 助手/高级；诊断并入高级）与「关于本机」入口齐备（UX-2 简化轮）',
-      tabIds === 'common,assistants,advanced' && tabLabels === '常用,AI 助手,高级'
+    check('E1 IA Tab 结构（常用/安全/AI 助手/MCP 接入/高级；诊断并入高级）与「关于本机」入口齐备',
+      tabIds === 'common,security,assistants,mcp,advanced' && tabLabels === '常用,安全,AI 助手,MCP 接入,高级'
         && (ia.IA_SETTINGS_EXTRA ?? []).some((item) => item.id === 'about' && item.opens === 'about-modal')
         && htmlSrc.includes('id="self-badge"') && htmlSrc.includes('id="about"') && htmlSrc.includes('关于本机')
-        && consoleSrc2.includes('data-settings-tab') && consoleSrc2.includes('IA_TASK_CARDS')
+        && consoleSrc2.includes('data-settings-tab') && consoleSrc2.includes('IA_ADVANCED_CARDS') && consoleSrc2.includes('IA_MCP_CARD')
         && consoleSrc2.includes('IA_ADVANCED_FIELDS') && consoleSrc2.includes('IA_MIGRATION')
-        && consoleSrc2.includes('assistantsPanelHtml') && consoleSrc2.includes("panel('assistants'"),
+        && consoleSrc2.includes('assistantsPanelHtml') && consoleSrc2.includes("panel('assistants'") && consoleSrc2.includes("panel('mcp'")
+        && ia.IA_ADVANCED_ACTIONS.length === 0
+        && !consoleSrc2.includes('declare-issuer') && !consoleSrc2.includes('declareIssuer')
+        && !htmlSrc.includes('declare-issuer'),
       `tabs=${tabIds} labels=${tabLabels}`);
     // A：编辑器字段改由服务端 schema 驱动（不再在控制台重复声明）；C：一键重启接线
     check('A 编辑器由单一真源驱动（configSchema）且不再内置字段表',
@@ -1567,6 +1559,8 @@ try {
     const cssSrc = await readFile(join(consoleDir, 'console.css'), 'utf-8');
     const jsSrc = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     const htmlSrc = await readFile(join(consoleDir, 'index.html'), 'utf-8');
+    // E1 断言沿用 consoleSrc2 命名（与本段 jsSrc 同源）
+    const consoleSrc2 = jsSrc;
 
     check('轮 C ① 弹层壳：背板固定不滚 + .modal-box 限高内滚（六处弹层共用）',
       /\.modal \{[^}]*overflow: hidden;[^}]*padding: 24px;/.test(cssSrc)
@@ -1606,11 +1600,67 @@ try {
       '页头/写盘/邀请/行长四项配套');
 
     const securitySlotLine = jsSrc.split('\n').find((line) => line.includes('id="settings-security-slot"')) ?? '';
-    check('S3 安全卡落位：设置·常用顶部 slot（渲染 securityCardHtml，不再 hidden 空插槽）',
+    const commonPanelAt = jsSrc.indexOf("panel('common'");
+    const securityPanelAt = jsSrc.indexOf("panel('security'");
+    const commonPanelSrc = commonPanelAt >= 0 && securityPanelAt > commonPanelAt
+      ? jsSrc.slice(commonPanelAt, securityPanelAt)
+      : '';
+    check('E1 安全卡落位：设置·安全 tab（安全卡随迁，常用页不再占位）',
       securitySlotLine.includes('<section') && !securitySlotLine.includes('hidden')
         && securitySlotLine.includes('data-settings-slot="security"')
-        && securitySlotLine.includes('securityCardHtml()'),
-      '安全卡已接管插槽');
+        && securitySlotLine.includes('securityCardHtml()')
+        && securityPanelAt > 0
+        && jsSrc.slice(securityPanelAt, securityPanelAt + 320).includes('settings-security-slot')
+        && commonPanelSrc.length > 0 && !commonPanelSrc.includes('settings-security-slot'),
+      '安全卡已接管「安全」页签插槽');
+
+    // E1 · 入口收口：顶栏只留邀请；连接已有地址撤下，传输修复移入诊断/设备卡「连不上」语境
+    check('E1 顶栏收口：无「连接已有地址」，仅保留「邀请设备」；空态无旧入口',
+      !htmlSrc.includes('id="add-device"') && !htmlSrc.includes('domains-empty-connect')
+        && !consoleSrc2.includes("$('#add-device')") && !consoleSrc2.includes("$('#domains-empty-connect')")
+        && htmlSrc.includes('id="invite-device"')
+        && consoleSrc2.includes('diag-open-wizard') && consoleSrc2.includes('manual-connect'),
+      'add-device/空态连接入口已撤下；诊断与设备卡保留手动连接');
+
+    // E1 · 邀请单屏：令牌 + 二维码（缺依赖降级）+ 复制在首屏；机制说明收「详情」
+    const inviteSrc = (() => {
+      const start = consoleSrc2.indexOf('function showInviteResult');
+      const end = consoleSrc2.indexOf("$('#invite-device')", start);
+      return start >= 0 && end > start ? consoleSrc2.slice(start, end) : '';
+    })();
+    const inviteDetailsAt = inviteSrc.indexOf('<details');
+    check('E1 邀请单屏：首屏令牌 + 二维码/降级 + 复制；端点与命令收「详情」',
+      inviteSrc.length > 0
+        && inviteDetailsAt > 0
+        && inviteSrc.indexOf('令牌（一次性') >= 0 && inviteSrc.indexOf('令牌（一次性') < inviteDetailsAt
+        && inviteSrc.indexOf('qrBlock') >= 0 && inviteSrc.indexOf('qrBlock') < inviteDetailsAt
+        && inviteSrc.indexOf('二维码不可用') >= 0
+        && inviteSrc.indexOf('data-copy=') >= 0
+        && /<details[^>]*>\s*<summary>详情/.test(inviteSrc)
+        && inviteSrc.slice(inviteDetailsAt).includes('${endpointEditor}'),
+      `detailsAt=${inviteDetailsAt}`);
+
+    // E1 · 邀请未启用时就地一键启用（复用设置写路径；不再指路「设置 → 常用」）
+    check('E1 邀请未启用：弹层内一键启用并继续（改配置 + 重启提示）',
+      consoleSrc2.includes('invite-enable-service')
+        && consoleSrc2.includes("fieldOf('joinService.enabled')")
+        && consoleSrc2.includes('applyConfigField')
+        && /将重启守护/.test(consoleSrc2)
+        && !htmlSrc.includes('invite-to-settings'),
+      '就地启用按钮 + applyConfigField + 重启提示；旧设置指路已删');
+    const stripComments = (src) => src
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+    const consoleCode = stripComments(consoleSrc2);
+    const htmlCode = htmlSrc.replace(/<!--[\s\S]*?-->/g, '');
+    const assistantsCode = stripComments(await readFile(join(consoleDir, 'assistants.js'), 'utf-8'));
+    const bannedWords = [['屏', '蔽'].join(''), ['踢', '出'].join(''), ['吊', '销'].join('')];
+    check('E1 术语：「忆云 / 移出 / 加入」；禁用词=0（注释除外）',
+      !consoleCode.includes('网络') && !htmlCode.includes('网络') && !assistantsCode.includes('网络')
+        && bannedWords.every((word) => !consoleCode.includes(word) && !htmlCode.includes(word) && !assistantsCode.includes(word))
+        && consoleCode.includes('加入忆云') && consoleCode.includes('移出后')
+        && htmlCode.includes('没加入忆云') && htmlCode.includes('移出设备'),
+      `console=${(consoleCode.match(/网络/g) ?? []).length} html=${(htmlCode.match(/网络/g) ?? []).length}`);
   }
 
   // ---------- C2：对端连接路径（只读渲染断言，不涉行为） ----------
@@ -1703,7 +1753,7 @@ try {
       { status: inviteRes.status, qr: inviteJson?.qrSvg === null ? 'null（缺可选依赖）' : 'svg', grantOnJoin: inviteJson?.grantOnJoin });
     const consoleSrc6 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     check('C7 控制台邀请面板渲染二维码与自动授权说明',
-      ['扫码即通', 'qrSvg', '兑换后自动授权'].every((token) => consoleSrc6.includes(token)));
+      ['扫码即通', 'qrSvg', '自动授权（作用域=令牌记忆域'].every((token) => consoleSrc6.includes(token)));
     const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
     check('C7 二维码依赖为**精确 pin** 的可选依赖（依赖政策）',
       typeof pkg.optionalDependencies?.qrcode === 'string' && /^\d+\.\d+\.\d+$/.test(pkg.optionalDependencies.qrcode),
@@ -2006,7 +2056,7 @@ try {
     const downgradeNoProofJson = await downgradeNoProof.json().catch(() => null);
     check('S3 高档降档无会签/恢复码 → 403（防降级逃逸）', downgradeNoProof.status === 403 && downgradeNoProofJson?.error === 'approval_required', `status=${downgradeNoProof.status}`);
 
-    // S4：高档恢复码执行通路（踢人 / 降档）。码只在请求体出现，任何响应/审计都不得回显。
+    // S4：高档恢复码执行通路（移出 / 降档）。码只在请求体出现，任何响应/审计都不得回显。
     const recoveryCode = toHighJson?.recoveryCode;
     const kickWrong = await fetch(`http://127.0.0.1:${port}/admin/api/devices/device-peer/revoke`, {
       method: 'POST',
@@ -2014,7 +2064,7 @@ try {
       body: JSON.stringify({ recoveryCode: generateRecoveryCode().code }),
     });
     const kickWrongJson = await kickWrong.json().catch(() => null);
-    check('S4 高档踢人错恢复码 → 403 recovery_mismatch（可读原因）',
+    check('S4 高档移出错恢复码 → 403 recovery_mismatch（可读原因）',
       kickWrong.status === 403 && kickWrongJson?.error === 'recovery_mismatch'
         && !JSON.stringify(kickWrongJson).includes(recoveryCode),
       `status=${kickWrong.status} error=${kickWrongJson?.error}`);
@@ -2024,14 +2074,14 @@ try {
       body: JSON.stringify({ recoveryCode, note: 'S4 E1 recovery kick' }),
     });
     const kickRecoveryJson = await kickRecovery.json().catch(() => null);
-    check('S4 高档踢人携恢复码 → 200 + breakGlass（审计标注恢复码；响应无码）',
+    check('S4 高档移出携恢复码 → 200 + breakGlass（审计标注恢复码；响应无码）',
       kickRecovery.status === 200 && kickRecoveryJson?.method === 'breakGlass'
         && kickRecoveryJson?.auditLabel === '恢复码'
         && !JSON.stringify(kickRecoveryJson).includes(recoveryCode),
       `status=${kickRecovery.status} method=${kickRecoveryJson?.method}`);
     const policyAfterKick = await getJson(port, '/admin/api/policy');
     const kickRow = (policyAfterKick.json ?? []).find((e) => e.type === 'device_revoke' && e.subject === 'device-peer');
-    check('S4 踢人审计行内嵌 breakGlassKeyId（UI 标注恢复码）；审计无码明文',
+    check('S4 移出审计行内嵌 breakGlassKeyId（UI 标注恢复码）；审计无码明文',
       typeof kickRow?.breakGlassKeyId === 'string'
         && kickRow.breakGlassKeyId === highState.json?.recovery?.keyId
         && !policyAfterKick.text.includes(recoveryCode),
@@ -2079,7 +2129,7 @@ try {
       body: JSON.stringify({ recoveryCode }),
     });
     const kickNotApplicableJson = await kickNotApplicable.json().catch(() => null);
-    check('S4 非高档踢人携恢复码 → 409 recovery_not_applicable',
+    check('S4 非高档移出携恢复码 → 409 recovery_not_applicable',
       kickNotApplicable.status === 409 && kickNotApplicableJson?.error === 'recovery_not_applicable',
       `status=${kickNotApplicable.status} error=${kickNotApplicableJson?.error}`);
     const backToHigh = await fetch(`http://127.0.0.1:${port}/admin/api/security/tier`, {
@@ -2134,18 +2184,18 @@ try {
     const consoleSrcSec = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     const htmlSec = await readFile(join(consoleDir, 'index.html'), 'utf-8');
     const cssSec = await readFile(join(consoleDir, 'console.css'), 'utf-8');
-    check('S3 前端锚点：安全卡（设置·常用），插槽不再隐藏',
+    check('S3 前端锚点：安全卡（设置·安全 tab），插槽不再隐藏',
       /id="settings-security-slot"/.test(consoleSrcSec) && !/settings-slot[^>]*hidden/.test(consoleSrcSec)
         && /securityCardHtml/.test(consoleSrcSec)
         && /中 · 动态码（防顺手）/.test(consoleSrcSec)
         && /高 · 设备会签/.test(consoleSrcSec)
         && /挡不住拿走整台设备的人/.test(consoleSrcSec));
-    check('S3 前端锚点：三操作改道（邀请 medium 码 / high 会签；屏蔽按档位分级；批准侧）',
+    check('S3 前端锚点：三操作改道（邀请 medium 码 / high 会签；移出按档位分级；批准侧）',
       /async function openInvite/.test(consoleSrcSec) && /securityCodeModal/.test(consoleSrcSec)
         && /securityStartApproval/.test(consoleSrcSec) && /securityRevokeFlow/.test(consoleSrcSec)
         && /data-security-action/.test(consoleSrcSec) && /pendingApprovals/.test(consoleSrcSec)
         && /配对号一致，批准/.test(consoleSrcSec));
-    check('S4 前端锚点：高档踢人/降档「用恢复码执行」入口 + 码输入不回显/不落 localStorage',
+    check('S4 前端锚点：高档移出/降档「用恢复码执行」入口 + 码输入不回显/不落 localStorage',
       /securityRecoveryCodeModal/.test(consoleSrcSec)
         && /data-security-recovery-switch/.test(consoleSrcSec)
         && /securityRevokeViaRecovery/.test(consoleSrcSec)

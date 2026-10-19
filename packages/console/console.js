@@ -581,8 +581,8 @@ async function createNamespace() {
     // 服务端默认自订阅（active:true）：创建完就能写；用户仍可随时退订。
     await api('/admin/api/namespaces', { method: 'POST', body: { namespace, subscribe: true } });
     state.selectedNamespace = namespace;
-    showToast(`已创建并订阅「${namespace}」；本机即可开始记录`);
     await refresh();
+    showToast(`已创建并订阅「${namespace}」；本机即可开始记录`);
   } catch (error) {
     window.alert(`创建失败：${error.message}`);
   }

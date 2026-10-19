@@ -11,14 +11,35 @@ import { startHttpServer } from '../../../packages/mcp/src/serve.mjs';
 
 const fleet = await import('../../../packages/fleet/dist/index.js');
 
-function makeApp(level) {
+function makeApp(level, options = {}) {
   const calls = { tier: [], revoke: [] };
   const events = [];
+  if (options.recovery) {
+    events.push({
+      id: 'policy-event-recovery-seed',
+      timestamp: Date.now() - 60_000,
+      author: 'device-A',
+      type: 'security_recovery',
+      data: {
+        securityRecovery: {
+          keyId: options.recovery.keyId,
+          publicKey: options.recovery.publicKeyHex,
+          createdAt: Date.now() - 60_000,
+          mode: 'set',
+        },
+      },
+    });
+  }
   return {
     deviceId: 'device-A',
     calls,
     events,
-    getSecurityTier: async () => ({ level, admitted: ['device-A', 'device-B'], rejections: [] }),
+    getSecurityTier: async () => ({
+      level,
+      admitted: ['device-A', 'device-B'],
+      rejections: [],
+      ...(options.recovery ? { recoveryKeyId: options.recovery.keyId } : {}),
+    }),
     setSecurityTier: async (input) => {
       calls.tier.push(input);
       return { id: 'tier-event', data: {} };
@@ -40,9 +61,9 @@ function makeApp(level) {
   };
 }
 
-async function start(level) {
+async function start(level, options = {}) {
   const home = await mkdtemp(join(tmpdir(), 'security-gate-harness-'));
-  const app = makeApp(level);
+  const app = makeApp(level, options);
   const server = await startHttpServer({
     home,
     app,
@@ -234,6 +255,109 @@ const out = {};
       recoveryKeyMatches: read.body.recovery?.keyId === rotated.body.keyId,
       leaksGeneratedCode: JSON.stringify(read.body).includes(generated.body.code),
       leaksRotatedCode: JSON.stringify(read.body).includes(rotated.body.code),
+    };
+  } finally {
+    await s.close();
+  }
+}
+
+// 7) S4：高档恢复码代签（踢人 / 降档）+ 错误人话 + 无码泄露
+{
+  const material = fleet.generateRecoveryCode();
+  const s = await start('high', { recovery: material });
+  try {
+    const wrongCode = fleet.generateRecoveryCode().code;
+    const wrong = await s.post('/admin/api/devices/device-B/revoke', { recoveryCode: wrongCode, note: 'S4 wrong' });
+    const ok = await s.post('/admin/api/devices/device-B/revoke', { recoveryCode: material.code, note: 'S4 kick' });
+    const record = s.app.events.find((entry) => entry.type === 'device_revoke')?.data?.deviceRevoke;
+    const expectedDigest = record?.breakGlass?.nonce
+      ? fleet.securityActionDigest({ op: 'kick', initiator: 'device-A', subject: 'device-B', nonce: record.breakGlass.nonce })
+      : '';
+    const signatureCheck = record?.breakGlass
+      ? fleet.verifyBreakGlassProof(record.breakGlass, {
+        publicKeyHex: material.publicKeyHex,
+        expectedDigest,
+        currentKeyId: material.keyId,
+      })
+      : { ok: false };
+    out.recoveryKick = {
+      wrongStatus: wrong.status,
+      wrongError: wrong.body.error,
+      wrongLeaksCode: JSON.stringify(wrong.body).includes(wrongCode),
+      okStatus: ok.status,
+      okMethod: ok.body.method,
+      okAuditLabel: ok.body.auditLabel,
+      breakGlassKeyId: record?.breakGlass?.keyId,
+      digestOk: record?.breakGlass?.digest === expectedDigest,
+      signatureOk: signatureCheck.ok,
+      leaksCodeResponse: JSON.stringify(ok.body).includes(material.code),
+      leaksCodeEvents: JSON.stringify(s.app.events).includes(material.code),
+    };
+  } finally {
+    await s.close();
+  }
+}
+
+{
+  const s = await start('high');
+  try {
+    const material = fleet.generateRecoveryCode();
+    const missing = await s.post('/admin/api/devices/device-B/revoke', { recoveryCode: material.code });
+    out.recoveryMissing = {
+      status: missing.status,
+      error: missing.body.error,
+      leaksCode: JSON.stringify(missing.body).includes(material.code),
+    };
+  } finally {
+    await s.close();
+  }
+}
+
+{
+  const s = await start('medium');
+  try {
+    const material = fleet.generateRecoveryCode();
+    const notHigh = await s.post('/admin/api/devices/device-B/revoke', { recoveryCode: material.code });
+    out.recoveryNotHigh = {
+      status: notHigh.status,
+      error: notHigh.body.error,
+      message: notHigh.body.message,
+    };
+  } finally {
+    await s.close();
+  }
+}
+
+{
+  const material = fleet.generateRecoveryCode();
+  const s = await start('high', { recovery: material });
+  try {
+    const wrong = await s.post('/admin/api/security/tier', {
+      level: 'medium',
+      recoveryCode: fleet.generateRecoveryCode().code,
+    });
+    const ok = await s.post('/admin/api/security/tier', { level: 'medium', recoveryCode: material.code });
+    const record = s.app.events.find((entry) => entry.type === 'security_tier')?.data?.securityTier;
+    const expectedDigest = record?.breakGlass?.nonce
+      ? fleet.securityActionDigest({ op: 'tier', initiator: 'device-A', level: 'medium', nonce: record.breakGlass.nonce })
+      : '';
+    const signatureCheck = record?.breakGlass
+      ? fleet.verifyBreakGlassProof(record.breakGlass, {
+        publicKeyHex: material.publicKeyHex,
+        expectedDigest,
+        currentKeyId: material.keyId,
+      })
+      : { ok: false };
+    out.recoveryTier = {
+      wrongStatus: wrong.status,
+      wrongError: wrong.body.error,
+      okStatus: ok.status,
+      okLevel: ok.body.level,
+      breakGlassKeyId: record?.breakGlass?.keyId,
+      digestOk: record?.breakGlass?.digest === expectedDigest,
+      signatureOk: signatureCheck.ok,
+      leaksCodeResponse: JSON.stringify(ok.body).includes(material.code),
+      leaksCodeEvents: JSON.stringify(s.app.events).includes(material.code),
     };
   } finally {
     await s.close();

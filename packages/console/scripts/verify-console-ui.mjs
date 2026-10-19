@@ -321,6 +321,18 @@ async function main() {
       }
       return false;
     };
+    // 验收截图：仅在显式指定 MEBULAR_SCREENSHOT_DIR 时写盘（CI 不产生文件）。
+    const shotDir = process.env.MEBULAR_SCREENSHOT_DIR ?? null;
+    if (shotDir) await mkdir(shotDir, { recursive: true });
+    const capture = async (name) => {
+      if (!shotDir) return null;
+      await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+      await sleep(250);
+      const shot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 90 });
+      await writeFile(join(shotDir, name), Buffer.from(shot.data, 'base64'));
+      await send('Emulation.clearDeviceMetricsOverride');
+      return join(shotDir, name);
+    };
 
     await send('Page.navigate', { url: `${base}/console/` });
     check('页面加载完成（标题 / #stage）', await waitFor('document.title.includes("控制台") && Boolean(document.querySelector("#stage"))'));
@@ -692,7 +704,7 @@ async function main() {
     await evalJs('document.querySelector("#invite-close").click()');
 
     // ---------- S3 · 安全三档（活体：真实端点；先红后绿） ----------
-    const { totpFingerprint, totpCodeAt } = await import('@mebular/fleet');
+    const { totpFingerprint, totpCodeAt, generateRecoveryCode } = await import('@mebular/fleet');
     const SEC_TOTP_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
     check('S3 活体：顶栏只读徽章显示「🛡 安全：低」',
       await waitFor('(() => { const b = document.querySelector("#security-badge"); return Boolean(b) && /🛡 安全：低/.test(b.textContent); })()'));
@@ -809,6 +821,62 @@ async function main() {
           && /等待/.test(t) && /批准/.test(t);
       })()`));
     await evalJs('document.querySelector("#security-action-close").click()');
+
+    // S4：高档踢人「用恢复码执行」路径（原确认 + 会签等待保留；码一次性、不回显）
+    await send('Page.navigate', { url: `${base}/console/?select=device-C` });
+    check('S4 高档踢人前置：设备卡屏蔽入口就位',
+      await waitFor('(() => { const b = document.querySelector("#device-card-body"); return Boolean(b) && !b.hidden && Boolean(b.querySelector("[data-action=revoke-device]")); })()'));
+    await evalJs('document.querySelector("#device-card-body [data-action=revoke-device]").click()');
+    check('S4 高档踢人：先保留原确认与警告',
+      await waitFor('document.querySelector("#modal")?.hidden === false && /高 · 设备会签/.test(document.querySelector("#modal")?.textContent ?? "")'));
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    check('S4 高档踢人：会签等待弹层提供「用恢复码执行」入口',
+      await waitFor('document.querySelector("#security-action")?.hidden === false && Boolean(document.querySelector("[data-security-recovery-switch]")) && /等待另一台设备批准/.test(document.querySelector("#security-action")?.textContent ?? "")'));
+    await evalJs('document.querySelector("[data-security-recovery-switch]").click()');
+    check('S4 恢复码弹层：密码型输入 + 不回显/不落浏览器存储提示',
+      await waitFor(`(() => {
+        const input = document.querySelector('#security-recovery-code');
+        const t = document.querySelector('#security-action-body')?.textContent ?? '';
+        return Boolean(input) && input.type === 'password' && /不写入浏览器存储/.test(t) && /提交后输入框即清空/.test(t);
+      })()`));
+    await capture('after-high-kick-recovery-code.jpg');
+    const wrongRecoveryCode = generateRecoveryCode().code;
+    await evalJs(`(() => { document.querySelector('#security-recovery-code').value = ${JSON.stringify(wrongRecoveryCode)}; document.querySelector('#security-action-confirm').click(); })()`);
+    check('S4 错恢复码映射人话（不匹配当前 keyId）',
+      await waitFor('/不匹配当前 keyId/.test(document.querySelector("#security-action-error")?.textContent ?? "")'));
+    check('S4 错码后输入框已清空（不回显、不保留）',
+      (await evalJs('document.querySelector("#security-recovery-code")?.value ?? ""')) === '');
+    await evalJs(`(() => { document.querySelector('#security-recovery-code').value = ${JSON.stringify(onceText)}; document.querySelector('#security-action-confirm').click(); })()`);
+    check('S4 正确恢复码 → 屏蔽写入并关闭弹层（toast 标注恢复码）',
+      await waitFor('document.querySelector("#security-action")?.hidden === true && /恢复码/.test(document.querySelector("#banner")?.textContent ?? "")', 20000));
+    const kickAudit = await evalJs(`(async () => {
+      const rows = await fetch('/admin/api/policy').then((r) => r.json());
+      const row = (rows ?? []).find((e) => e.type === 'device_revoke' && e.subject === 'device-C');
+      return { has: Boolean(row), keyId: row?.breakGlassKeyId ?? null };
+    })()`);
+    check('S4 踢人审计行标注恢复码（breakGlassKeyId）', kickAudit.has === true && typeof kickAudit.keyId === 'string');
+
+    // S4：高档降档「用恢复码执行」路径
+    await evalJs('document.querySelector("#open-settings").click()');
+    check('S4 高档降档前置：安全卡为高档 + 降级入口就位',
+      await waitFor('document.querySelector("#settings")?.hidden === false && document.querySelector("#settings-security-slot")?.dataset.securityLevel === "high" && Boolean(document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]"))', 20000));
+    await evalJs('(() => { const d = document.querySelector("#settings-security-slot .sec-more"); if (d) d.open = true; })()');
+    await evalJs('document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]").click()');
+    check('S4 高档降档：会签等待弹层提供「用恢复码执行」入口',
+      await waitFor('Boolean(document.querySelector("[data-security-recovery-switch]")) && /降级到低/.test(document.querySelector("#security-action-title")?.textContent ?? "")'));
+    await evalJs('document.querySelector("[data-security-recovery-switch]").click()');
+    await waitFor('Boolean(document.querySelector("#security-recovery-code"))');
+    await evalJs(`(() => { document.querySelector('#security-recovery-code').value = ${JSON.stringify(onceText)}; document.querySelector('#security-action-confirm').click(); })()`);
+    check('S4 高档降档用恢复码 → 回到低档',
+      await waitFor('document.querySelector("#settings-security-slot")?.dataset.securityLevel === "low"', 20000));
+    const tierAudit = await evalJs(`(async () => {
+      const rows = await fetch('/admin/api/policy').then((r) => r.json());
+      const row = (rows ?? []).find((e) => e.type === 'security_tier' && typeof e.breakGlassKeyId === 'string');
+      return { level: row?.level ?? null, keyId: row?.breakGlassKeyId ?? null };
+    })()`);
+    check('S4 降档审计行标注恢复码（低档 + breakGlassKeyId）',
+      tierAudit.level === 'low' && typeof tierAudit.keyId === 'string');
+    await evalJs('document.querySelector("#settings-close").click()');
 
     // 审计：安全事件标签 / 过滤器 / 详情
     await evalJs('document.querySelector("#settings-close").click()');

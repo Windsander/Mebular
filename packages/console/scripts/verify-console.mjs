@@ -1963,7 +1963,7 @@ try {
     check('S3 动态码种子导入 → 200 + fingerprint（8 hex）',
       imported.status === 200 && /^[0-9a-f]{8}$/.test(importedJson?.fingerprint ?? ''),
       `status=${imported.status} fp=${importedJson?.fingerprint}`);
-    const { totpCodeAt } = await import('@mebular/fleet');
+    const { totpCodeAt, generateRecoveryCode } = await import('@mebular/fleet');
     const step = Math.floor(Date.now() / 30_000);
     const toLow = await fetch(`http://127.0.0.1:${port}/admin/api/security/tier`, {
       method: 'POST',
@@ -2005,6 +2005,92 @@ try {
     });
     const downgradeNoProofJson = await downgradeNoProof.json().catch(() => null);
     check('S3 高档降档无会签/恢复码 → 403（防降级逃逸）', downgradeNoProof.status === 403 && downgradeNoProofJson?.error === 'approval_required', `status=${downgradeNoProof.status}`);
+
+    // S4：高档恢复码执行通路（踢人 / 降档）。码只在请求体出现，任何响应/审计都不得回显。
+    const recoveryCode = toHighJson?.recoveryCode;
+    const kickWrong = await fetch(`http://127.0.0.1:${port}/admin/api/devices/device-peer/revoke`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ recoveryCode: generateRecoveryCode().code }),
+    });
+    const kickWrongJson = await kickWrong.json().catch(() => null);
+    check('S4 高档踢人错恢复码 → 403 recovery_mismatch（可读原因）',
+      kickWrong.status === 403 && kickWrongJson?.error === 'recovery_mismatch'
+        && !JSON.stringify(kickWrongJson).includes(recoveryCode),
+      `status=${kickWrong.status} error=${kickWrongJson?.error}`);
+    const kickRecovery = await fetch(`http://127.0.0.1:${port}/admin/api/devices/device-peer/revoke`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ recoveryCode, note: 'S4 E1 recovery kick' }),
+    });
+    const kickRecoveryJson = await kickRecovery.json().catch(() => null);
+    check('S4 高档踢人携恢复码 → 200 + breakGlass（审计标注恢复码；响应无码）',
+      kickRecovery.status === 200 && kickRecoveryJson?.method === 'breakGlass'
+        && kickRecoveryJson?.auditLabel === '恢复码'
+        && !JSON.stringify(kickRecoveryJson).includes(recoveryCode),
+      `status=${kickRecovery.status} method=${kickRecoveryJson?.method}`);
+    const policyAfterKick = await getJson(port, '/admin/api/policy');
+    const kickRow = (policyAfterKick.json ?? []).find((e) => e.type === 'device_revoke' && e.subject === 'device-peer');
+    check('S4 踢人审计行内嵌 breakGlassKeyId（UI 标注恢复码）；审计无码明文',
+      typeof kickRow?.breakGlassKeyId === 'string'
+        && kickRow.breakGlassKeyId === highState.json?.recovery?.keyId
+        && !policyAfterKick.text.includes(recoveryCode),
+      `keyId=${kickRow?.breakGlassKeyId?.slice(0, 8)}`);
+
+    const tierWrong = await fetch(`http://127.0.0.1:${port}/admin/api/security/tier`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ level: 'medium', recoveryCode: generateRecoveryCode().code }),
+    });
+    const tierWrongJson = await tierWrong.json().catch(() => null);
+    check('S4 高档降档错恢复码 → 403 recovery_mismatch',
+      tierWrong.status === 403 && tierWrongJson?.error === 'recovery_mismatch',
+      `status=${tierWrong.status} error=${tierWrongJson?.error}`);
+    const tierRecovery = await fetch(`http://127.0.0.1:${port}/admin/api/security/tier`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ level: 'low', recoveryCode, note: 'S4 E1 recovery tier' }),
+    });
+    const tierRecoveryJson = await tierRecovery.json().catch(() => null);
+    check('S4 高档降档携恢复码 → 200 + 写 tier 记录（审计标注恢复码；响应无码）',
+      tierRecovery.status === 200 && tierRecoveryJson?.level === 'low'
+        && tierRecoveryJson?.method === 'breakGlass' && tierRecoveryJson?.auditLabel === '恢复码'
+        && !JSON.stringify(tierRecoveryJson).includes(recoveryCode),
+      `status=${tierRecovery.status} level=${tierRecoveryJson?.level}`);
+    const policyAfterTier = await getJson(port, '/admin/api/policy');
+    const tierRow = (policyAfterTier.json ?? []).find((e) => e.type === 'security_tier' && typeof e.breakGlassKeyId === 'string');
+    check('S4 降档审计行内嵌 breakGlassKeyId（UI 标注恢复码）；审计无码明文',
+      typeof tierRow?.breakGlassKeyId === 'string'
+        && !policyAfterTier.text.includes(recoveryCode),
+      `keyId=${tierRow?.breakGlassKeyId?.slice(0, 8)}`);
+
+    const tierNotApplicable = await fetch(`http://127.0.0.1:${port}/admin/api/security/tier`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ level: 'medium', recoveryCode }),
+    });
+    const tierNotApplicableJson = await tierNotApplicable.json().catch(() => null);
+    check('S4 非高档携恢复码 → 409 recovery_not_applicable（不误用码）',
+      tierNotApplicable.status === 409 && tierNotApplicableJson?.error === 'recovery_not_applicable',
+      `status=${tierNotApplicable.status} error=${tierNotApplicableJson?.error}`);
+    const kickNotApplicable = await fetch(`http://127.0.0.1:${port}/admin/api/devices/device-peer/revoke`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ recoveryCode }),
+    });
+    const kickNotApplicableJson = await kickNotApplicable.json().catch(() => null);
+    check('S4 非高档踢人携恢复码 → 409 recovery_not_applicable',
+      kickNotApplicable.status === 409 && kickNotApplicableJson?.error === 'recovery_not_applicable',
+      `status=${kickNotApplicable.status} error=${kickNotApplicableJson?.error}`);
+    const backToHigh = await fetch(`http://127.0.0.1:${port}/admin/api/security/tier`, {
+      method: 'POST',
+      headers: writeHeaders,
+      body: JSON.stringify({ level: 'high' }),
+    });
+    const backToHighJson = await backToHigh.json().catch(() => null);
+    check('S4 恢复码降档后低→高回到高档（恢复码仍登记，不重复生成）',
+      backToHigh.status === 200 && backToHighJson?.level === 'high' && backToHighJson?.recoveryCode === undefined,
+      `status=${backToHigh.status} level=${backToHighJson?.level}`);
 
     const rotate = await fetch(`http://127.0.0.1:${port}/admin/api/security/recovery/rotate`, {
       method: 'POST',
@@ -2059,6 +2145,13 @@ try {
         && /securityStartApproval/.test(consoleSrcSec) && /securityRevokeFlow/.test(consoleSrcSec)
         && /data-security-action/.test(consoleSrcSec) && /pendingApprovals/.test(consoleSrcSec)
         && /配对号一致，批准/.test(consoleSrcSec));
+    check('S4 前端锚点：高档踢人/降档「用恢复码执行」入口 + 码输入不回显/不落 localStorage',
+      /securityRecoveryCodeModal/.test(consoleSrcSec)
+        && /data-security-recovery-switch/.test(consoleSrcSec)
+        && /securityRevokeViaRecovery/.test(consoleSrcSec)
+        && /securityTierViaRecovery/.test(consoleSrcSec)
+        && /type="password"/.test(consoleSrcSec)
+        && !/recovery[^\n]*localStorage|localStorage[^\n]*recovery/i.test(consoleSrcSec));
     check('S3 前端锚点：顶栏只读徽章 + 星图「需要注意」安全项',
       htmlSec.includes('id="security-badge"') && /🛡 安全：/.test(consoleSrcSec)
         && /动态码种子未导入/.test(await readFile(join(consoleDir, 'assistants.js'), 'utf-8'))

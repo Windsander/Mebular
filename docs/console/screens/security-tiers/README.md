@@ -10,6 +10,7 @@
 | `after-settings-security-mock-high.jpg` | 改动后 · `?mock=1` 高档完整卡 | 无网络验收路径；pending + recovery + rejection 同屏 |
 | `after-settings-security-narrow-390.jpg` | 改动后 · 390px 窄屏 | 无横向溢出；三档说明、配对号、按钮换行正常 |
 | `after-invite-high-pairing-wait.jpg` | 改动后 · 高档邀请改道 | 先出配对号并等待另一台设备批准，批准后自动出令牌 |
+| `after-high-kick-recovery-code.jpg` | 改动后 · 高档踢人「用恢复码执行」 | 原确认与会签等待保留；切到恢复码输入（密码型、不回显、不落浏览器存储） |
 | `after-audit-security-mock.jpg` | 改动后 · 审计安全行 | 等级变更 / 会签 / 恢复码 / 动态码 + 拒绝原因抬头可见 |
 
-复跑：`npm run verify:console`、`npm run verify:console:ui`（Chrome 经 `CHROME_PATH` 指定；无浏览器时 UI 冒烟 SKIP）。
+复跑：`npm run verify:console`、`npm run verify:console:ui`（Chrome 经 `CHROME_PATH` 指定；无浏览器时 UI 冒烟 SKIP）。截图复跑：`MEBULAR_SCREENSHOT_DIR=docs/console/screens/security-tiers npm run verify:console:ui`（S4 新增 `after-high-kick-recovery-code.jpg`）。

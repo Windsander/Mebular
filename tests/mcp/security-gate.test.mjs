@@ -96,4 +96,41 @@ describe('S2-3 写端点门禁', () => {
     expect(r.leaksGeneratedCode).toBe(false);
     expect(r.leaksRotatedCode).toBe(false);
   });
+
+  test('S4 高档踢人用恢复码：正确码代签写入；错码 403；响应/事件无码', () => {
+    const r = result.recoveryKick;
+    expect(r.wrongStatus).toBe(403);
+    expect(r.wrongError).toBe('recovery_mismatch');
+    expect(r.wrongLeaksCode).toBe(false);
+    expect(r.okStatus).toBe(200);
+    expect(r.okMethod).toBe('breakGlass');
+    expect(r.okAuditLabel).toBe('恢复码');
+    expect(r.breakGlassKeyId).toMatch(/^[0-9a-f]{16}$/);
+    expect(r.digestOk).toBe(true);
+    expect(r.signatureOk).toBe(true);
+    expect(r.leaksCodeResponse).toBe(false);
+    expect(r.leaksCodeEvents).toBe(false);
+  });
+
+  test('S4 高档恢复码：未生成 409；非 high 不适用 409', () => {
+    expect(result.recoveryMissing.status).toBe(409);
+    expect(result.recoveryMissing.error).toBe('recovery_missing');
+    expect(result.recoveryMissing.leaksCode).toBe(false);
+    expect(result.recoveryNotHigh.status).toBe(409);
+    expect(result.recoveryNotHigh.error).toBe('recovery_not_applicable');
+    expect(result.recoveryNotHigh.message).toMatch(/高档/);
+  });
+
+  test('S4 高档降档用恢复码：正确码签 tier 证明后写记录；错码 403；无码泄露', () => {
+    const r = result.recoveryTier;
+    expect(r.wrongStatus).toBe(403);
+    expect(r.wrongError).toBe('recovery_mismatch');
+    expect(r.okStatus).toBe(200);
+    expect(r.okLevel).toBe('medium');
+    expect(r.breakGlassKeyId).toMatch(/^[0-9a-f]{16}$/);
+    expect(r.digestOk).toBe(true);
+    expect(r.signatureOk).toBe(true);
+    expect(r.leaksCodeResponse).toBe(false);
+    expect(r.leaksCodeEvents).toBe(false);
+  });
 });

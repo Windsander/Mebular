@@ -58,12 +58,14 @@ export function defaultCloudHome({ userHome = homedir() } = {}) {
   return join(userHome, '.mebular');
 }
 
-/** 展示用路径：用户主目录前缀 → `~`（不含秘密，仅用于控制台）。 */
+/** 展示用路径：用户主目录前缀 → `~`；统一正斜杠（控制台跨平台一致，不含秘密）。 */
 export function displayPath(path, { userHome = homedir() } = {}) {
+  const toPosix = (value) => value.split(sep).join('/');
   const absolute = resolve(path);
   const home = resolve(userHome);
   if (absolute === home) return '~';
-  return absolute.startsWith(`${home}${sep}`) ? `~${absolute.slice(home.length)}` : absolute;
+  if (absolute.startsWith(`${home}${sep}`)) return `~${toPosix(absolute.slice(home.length))}`;
+  return toPosix(absolute);
 }
 
 /** host 是否位于 root 自身或 root/profiles/<id>（id 白名单）。 */

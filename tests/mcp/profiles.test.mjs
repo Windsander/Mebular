@@ -17,7 +17,7 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   acquireActiveLock,
@@ -116,7 +116,7 @@ describe('E2-A1 root 解析 / 档案功能开关', () => {
       userHome,
     });
     expect(explicit.available).toBe(true);
-    expect(explicit.root).toBe('/tmp/root');
+    expect(explicit.root).toBe(resolve('/tmp/root'));
 
     const derived = resolveCloudRoot({
       home: '/tmp/root/profiles/p_00000001',
@@ -124,15 +124,15 @@ describe('E2-A1 root 解析 / 档案功能开关', () => {
       userHome,
     });
     expect(derived.available).toBe(true);
-    expect(derived.root).toBe('/tmp/root');
+    expect(derived.root).toBe(resolve('/tmp/root'));
 
     const byDefault = resolveCloudRoot({ home: join(userHome, '.mebular'), env: {}, userHome });
     expect(byDefault.available).toBe(true);
-    expect(byDefault.root).toBe(join(userHome, '.mebular'));
+    expect(byDefault.root).toBe(resolve(userHome, '.mebular'));
 
     const rootOnly = resolveCloudRoot({ env: { MEBULAR_CLOUD_ROOT: '/tmp/root' }, userHome });
     expect(rootOnly.available).toBe(true);
-    expect(rootOnly.root).toBe('/tmp/root');
+    expect(rootOnly.root).toBe(resolve('/tmp/root'));
   });
 
   it('自定义 home / 危险 env → CLOUD_UNAVAILABLE（不误闯新档案）', () => {
@@ -153,6 +153,7 @@ describe('E2-A1 root 解析 / 档案功能开关', () => {
 
   it('displayPath 展示为 ~ 前缀；homeKey 与 service 同定义', () => {
     expect(displayPath('/u/.mebular', { userHome: '/u' })).toBe('~/.mebular');
+    expect(displayPath('/tmp/other', { userHome: '/u' })).not.toContain('\\');
     expect(homeKey('/tmp/abc')).toMatch(/^[0-9a-f]{12}$/);
     expect(homeKey('/tmp/abc/')).toBe(homeKey('/tmp/abc'));
   });
@@ -194,7 +195,10 @@ describe('E2-A1 注册表 v1：合成 / 原子写 / 备份 / 默认名', () => {
     await writeRegistry(root, second);
 
     const path = join(root, 'profiles.json');
-    expect((await stat(path)).mode & 0o777).toBe(0o600);
+    // Windows 的 fs.stat().mode 不带 POSIX 权限位（常见 0o666）；实现仍以 0600 创建/收口。
+    if (process.platform !== 'win32') {
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+    }
     expect(JSON.parse(await readFile(path, 'utf-8')).profiles[0].name).toBe('忆云 1 改名');
     expect(JSON.parse(await readFile(`${path}.bak`, 'utf-8')).profiles[0].name).toBe('忆云 1');
     expect((await readdir(root)).some((name) => name.startsWith('profiles.json.tmp-'))).toBe(false);
@@ -273,7 +277,15 @@ describe('E2-A1 路径安全 / 锁 / active.lock', () => {
     const outside = join(userHome, 'outside');
     await mkdir(outside, { recursive: true });
     await mkdir(join(root, 'profiles'), { recursive: true });
-    await symlink(outside, join(root, 'profiles', ID_A), 'dir');
+    let symlinked = true;
+    try {
+      await symlink(outside, join(root, 'profiles', ID_A), 'dir');
+    } catch (error) {
+      // Windows 无 Developer Mode/非管理员时创建目录符号链接会被拒（EPERM/EACCES）：
+      // 该断言无法执行，但路径白名单/越界断言仍保留。
+      if (process.platform === 'win32' && ['EPERM', 'EACCES', 'UNKNOWN'].includes(error?.code)) symlinked = false;
+      else throw error;
+    }
     await writeRegistry(root, {
       v: 1,
       current: 'default',
@@ -281,7 +293,7 @@ describe('E2-A1 路径安全 / 锁 / active.lock', () => {
     });
     const state = await readRegistry(root);
     const target = state.registry.profiles.find((profile) => profile.id === ID_A);
-    expect(() => profileHomeForEntry(root, target)).toThrow(/root 之外/);
+    if (symlinked) expect(() => profileHomeForEntry(root, target)).toThrow(/root 之外/);
     await expect(registerProfile(root, { id: '../x', name: '坏' })).rejects.toMatchObject({ code: 'INVALID_PROFILE_ID' });
   });
 

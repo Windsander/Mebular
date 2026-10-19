@@ -80,12 +80,25 @@ export function reconcileAssistantUi(client, maps) {
     }
   };
   if (gone) {
-    for (const m of [maps.reloadHints, maps.verifyStates, maps.failed, maps.busy]) del(m);
+    for (const m of [maps.reloadHints, maps.busy]) del(m);
+    // 失败态是**刚发生的显式动作结果**，与 not-connected 不矛盾：保留到用户重试/重新检测。
+    // 但「旧失败」不应黏住：有 at 且超过 10s 的失败随真值清掉（无 at 的旧形状按旧口径清）。
+    const rawFailed = maps.failed instanceof Map ? maps.failed.get(id) : maps.failed?.[id];
+    const freshFailure = rawFailed
+      && typeof rawFailed === 'object'
+      && typeof rawFailed.at === 'number'
+      && Date.now() - rawFailed.at < 10_000;
+    if (!freshFailure) del(maps.failed);
+    // verify-failed 同理保留到「重新检测/重新验证」；pending-restart/connected 等旧结论才清。
+    const rawVerify = maps.verifyStates instanceof Map ? maps.verifyStates.get(id) : maps.verifyStates?.[id];
+    const verifyState = typeof rawVerify === 'object' && rawVerify !== null ? rawVerify.state : rawVerify;
+    if (verifyState !== 'verify-failed') del(maps.verifyStates);
   } else if (connected) {
     // 服务端 verify 确认运行时生效 → 重载提醒退场（verifyStates 值可为 'connected' 或 {state:'connected'}）
     const raw = maps.verifyStates instanceof Map ? maps.verifyStates.get(id) : maps.verifyStates?.[id];
     const vs = typeof raw === 'object' && raw !== null ? raw.state : raw;
     if (vs === 'connected') del(maps.reloadHints);
+    del(maps.failed);
   }
   return changed;
 }

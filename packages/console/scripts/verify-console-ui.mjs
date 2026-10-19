@@ -62,14 +62,61 @@ function findChrome() {
 
 async function seedHome(home) {
   const storagePath = join(home, 'store.jsonl');
+  // S3：真实 root + 两条他机会签请求（批准/拒绝写入走真实端点，不靠桩）
+  const { Mebular, IdentityManager, POLICY_NAMESPACE } = await import('@mebular/core');
+  const { securityActionDigest, pairingCodeForDigest } = await import('@mebular/fleet');
+  const master = await new IdentityManager().generateUserMasterKey();
+  const keyFile = join(home, 'user-master-key.json');
+  await writeFile(keyFile, JSON.stringify({
+    publicKey: Buffer.from(master.publicKey).toString('base64'),
+    privateKeyPkcs8: await IdentityManager.exportPrivateKey(master.privateKey),
+    createdAt: new Date().toISOString(),
+  }, null, 2), 'utf-8');
   await writeFile(join(home, 'config.json'), JSON.stringify({
     storagePath,
     deviceId: 'device-ui',
-    encryption: { level: 'none' },
+    encryption: { level: 'none', keyFile },
     network: { enabled: false },
-    sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: false } },
+    sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: false }, policyIssuers: ['device-ui'] },
     mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
+    joinService: { enabled: true, bind: '0.0.0.0', port: 4013 },
   }, null, 2), 'utf-8');
+  {
+    const app = new Mebular({
+      storagePath,
+      deviceId: 'device-ui',
+      encryption: { level: 'none', userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
+      network: { enabled: false },
+      sync: { autoSync: true, policyIssuers: ['device-ui'] },
+    });
+    await app.initialize();
+    await app.grantNamespaces({ subject: 'device-peer', namespaces: ['notes'] });
+    await app.grantNamespaces({ subject: 'device-C', namespaces: ['work'] });
+    const now = Date.now();
+    const kickNonce = 'ui-seed-kick';
+    const kickDigest = securityActionDigest({ op: 'kick', initiator: 'device-peer', subject: 'device-C', nonce: kickNonce });
+    await app.eventLog.append({
+      type: 'security_approval',
+      data: { securityApproval: {
+        approvalId: 'ui-seed-kick-approval', op: 'kick', decision: 'request', initiator: 'device-peer',
+        target: 'device-C', nonce: kickNonce, digest: kickDigest, pairingCode: pairingCodeForDigest(kickDigest),
+        expiresAt: now + 9 * 60_000, issuedAt: now - 20_000, note: 'UI 批准用例',
+      } },
+      namespace: POLICY_NAMESPACE,
+    });
+    const joinNonce = 'ui-seed-join';
+    const joinDigest = securityActionDigest({ op: 'join', initiator: 'device-peer', namespace: 'notes', nonce: joinNonce });
+    await app.eventLog.append({
+      type: 'security_approval',
+      data: { securityApproval: {
+        approvalId: 'ui-seed-join-approval', op: 'join', decision: 'request', initiator: 'device-peer',
+        namespace: 'notes', nonce: joinNonce, digest: joinDigest, pairingCode: pairingCodeForDigest(joinDigest),
+        expiresAt: now + 8 * 60_000, issuedAt: now - 10_000, note: 'UI 拒绝用例',
+      } },
+      namespace: POLICY_NAMESPACE,
+    });
+    await app.shutdown();
+  }
   // UX-2 收口联调用料（全在沙箱 home 内）：
   // ① opencode 配置存在但无 mebular 键 → 「未接入」行（hasVerify=true，可点行内验证）
   await mkdir(join(home, '.config', 'opencode'), { recursive: true });
@@ -533,7 +580,9 @@ async function main() {
       await evalJs(`(() => {
         const body = document.querySelector('#settings-body');
         const ok = body.querySelectorAll('[data-cfg-state=ok]').length;
-        const ex = body.querySelector('[data-cfg-state=exception]');
+        // 专指 mcp.http.port 的「已配置 0 / 实际 <port>」例外：避免被 join 端点回环等其它异常行抢先
+        const row = body.querySelector('[data-cfg-path="mcp.http.port"]')?.closest('.cfg-row');
+        const ex = row?.querySelector('[data-cfg-state=exception]');
         return ok >= 3 && /✓ 生效中/.test(body.textContent)
           && Boolean(ex) && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent) && /不一致/.test(ex.textContent);
       })()`));
@@ -544,8 +593,15 @@ async function main() {
         const direct = card.querySelector('.cfg-control > .cfg-help');
         return Boolean(folded) && !direct;
       })()`));
-    check('轮 C 预留安全卡结构（只有插槽，未渲染功能）',
-      await evalJs('(() => { const s = document.querySelector("#settings-security-slot"); return Boolean(s) && s.hidden === true && s.dataset.settingsSlot === "security" && s.childElementCount === 0; })()'));
+    check('S3 安全卡渲染在设置·常用顶部（低/中/高 + 诚实文案 + 当前档）',
+      await evalJs(`(() => {
+        const s = document.querySelector('#settings-security-slot');
+        if (!s || s.hidden) return false;
+        const t = s.textContent;
+        return s.dataset.settingsSlot === 'security' && s.childElementCount > 0
+          && /安全等级/.test(t) && /低（默认）/.test(t) && /中 · 动态码（防顺手）/.test(t) && /高 · 设备会签/.test(t)
+          && /挡不住拿走整台设备的人/.test(t) && /当前：低/.test(t);
+      })()`));
 
     // 即时生效：改低风险 toggle（joinService.enabled）→ 无草稿态、3s 跨轮询值持久（已写入）
     const toggleSel = '#settings-body input[data-cfg-path="joinService.enabled"]';
@@ -635,6 +691,151 @@ async function main() {
       await evalJs('(() => { const t = document.querySelector("#invite-body")?.textContent ?? ""; const hits = (t.match(/兑换/g) ?? []).length; return hits <= 2 && !/兑换后自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）\\s*让新设备/.test(t); })()'));
     await evalJs('document.querySelector("#invite-close").click()');
 
+    // ---------- S3 · 安全三档（活体：真实端点；先红后绿） ----------
+    const { totpFingerprint, totpCodeAt } = await import('@mebular/fleet');
+    const SEC_TOTP_SECRET = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+    check('S3 活体：顶栏只读徽章显示「🛡 安全：低」',
+      await waitFor('(() => { const b = document.querySelector("#security-badge"); return Boolean(b) && /🛡 安全：低/.test(b.textContent); })()'));
+    // 低档：屏蔽仍是「更多操作」折叠内的次级动作
+    await send('Page.navigate', { url: `${base}/console/?select=device-C` });
+    check('S3 低档踢人布局：屏蔽该设备留在「更多操作」折叠内（防误触）',
+      await waitFor(`(() => {
+        const b = document.querySelector('#device-card-body');
+        if (!b || b.hidden) return false;
+        const adv = b.querySelector('.card-advanced');
+        const btn = b.querySelector('[data-action=revoke-device]');
+        const main = b.querySelector(':scope > .card-actions');
+        return Boolean(adv) && Boolean(btn) && adv.contains(btn) && !(main?.contains(btn));
+      })()`));
+    await send('Page.navigate', { url: `${base}/console/` });
+    await waitFor('document.querySelector("#memory-badge") && !/…/.test(document.querySelector("#memory-badge").textContent)');
+    await evalJs('document.querySelector("#open-settings").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === false');
+
+    // 批准侧：种子请求（他机发起）→ 配对号核对 → 批准/拒绝写入
+    check('S3 批准侧：安全卡顶部待批准入口 + 配对号 aria-live',
+      await waitFor(`(() => {
+        const s = document.querySelector('#settings-security-slot');
+        const rows = s?.querySelectorAll('[data-security-approve]') ?? [];
+        const pair = s?.querySelector('[data-security-pairing]');
+        return rows.length >= 2 && Boolean(pair) && pair.getAttribute('aria-live') === 'polite' && /^\\d{3}-\\d{3}$/.test(pair.textContent.trim());
+      })()`));
+    await evalJs('document.querySelector("#settings-security-slot [data-security-approve]").click()');
+    check('S3 批准：确认卡展示配对号与「配对号一致，批准」',
+      await waitFor('document.querySelector("#modal")?.hidden === false && /配对号一致，批准/.test(document.querySelector("#modal-confirm")?.textContent ?? "")'));
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    check('S3 批准写入生效（待批准行减少）',
+      await waitFor('document.querySelectorAll("#settings-security-slot [data-security-approve]").length === 1', 20000));
+    await evalJs('document.querySelector("#settings-security-slot [data-security-deny]").click()');
+    check('S3 拒绝：确认卡出现（拒绝写入前二次确认）',
+      await waitFor('document.querySelector("#modal")?.hidden === false && /拒绝/.test(document.querySelector("#modal-confirm")?.textContent ?? "")'));
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    check('S3 拒绝写入生效（待批准清零；发起侧可见「已被拒绝」）',
+      await waitFor('document.querySelectorAll("#settings-security-slot [data-security-approve]").length === 0', 20000));
+
+    // 中档动态码：导入 → 卡片显示 fingerprint；未导入时异常常显
+    check('S3 动态码未导入 = 安全卡异常常显（提示会拒绝敏感动作）',
+      await waitFor('(() => { const s = document.querySelector("#settings-security-slot"); return Boolean(s) && /未导入/.test(s.textContent) && /totp_not_configured/.test(s.textContent); })()'));
+
+    // 低→中（显式确认）→ 未导入种子进入星图「需要注意」→ 导入 → 异常退场
+    await evalJs('document.querySelector("#settings-security-slot [data-security-action=upgrade][data-level=medium]").click()');
+    await waitFor('document.querySelector("#modal")?.hidden === false');
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    check('S3 低→中：安全卡当前档与顶栏徽章同步',
+      await waitFor('document.querySelector("#settings-security-slot")?.dataset.securityLevel === "medium" && /🛡 安全：中/.test(document.querySelector("#security-badge")?.textContent ?? "")', 20000));
+    check('S3 中档未导入种子 → 星图「需要注意」抬显',
+      await waitFor('document.querySelector("#attention-card")?.textContent.includes("动态码种子未导入")', 20000));
+    await evalJs('document.querySelector("#settings-security-slot [data-security-action=totp-import]").click()');
+    check('S3 导入种子弹层（粘贴分组文本 / otpauth）', await waitFor('Boolean(document.querySelector("#security-totp-secret"))'));
+    await evalJs(`(() => { document.querySelector('#security-totp-secret').value = ${JSON.stringify(SEC_TOTP_SECRET)}; document.querySelector('#security-action-confirm').click(); })()`);
+    check('S3 导入成功：安全卡显示已导入 + fingerprint；注意项退场',
+      await waitFor(`(() => { const s = document.querySelector('#settings-security-slot'); return Boolean(s) && /已导入/.test(s.textContent) && s.textContent.includes(${JSON.stringify(totpFingerprint(SEC_TOTP_SECRET))}) && !document.querySelector('#attention-card')?.textContent.includes('动态码种子未导入'); })()`, 20000));
+
+    // 中档邀请要码 → 中档踢人提级
+    await evalJs('document.querySelector("#invite-device").click()');
+    check('S3 中档邀请改道：先输入 6 位动态码（不直接签发令牌）',
+      await waitFor('Boolean(document.querySelector("#security-code")) && document.querySelector("#invite")?.hidden === true'));
+    const mediumCode = totpCodeAt(SEC_TOTP_SECRET, Math.floor(Date.now() / 30_000));
+    await evalJs(`(() => { document.querySelector('#security-code').value = ${JSON.stringify(mediumCode)}; document.querySelector('#security-action-confirm').click(); })()`);
+    check('S3 中档邀请：码通过后出令牌（旧流程复用）',
+      await waitFor('(() => { const t = document.querySelector("#invite-body")?.textContent ?? ""; return /令牌/.test(t) && t.length > 40; })()', 20000));
+    await evalJs('document.querySelector("#invite-close").click()');
+    await evalJs('document.querySelector("#settings-close").click()');
+    await send('Page.navigate', { url: `${base}/console/?select=device-C` });
+    check('S3 中档踢人布局：屏蔽提级为一等动作（btn-crt-danger，与同步同排）',
+      await waitFor(`(() => {
+        const b = document.querySelector('#device-card-body');
+        if (!b || b.hidden) return false;
+        const mainRow = b.querySelector(':scope > .card-actions');
+        const main = mainRow?.querySelector('[data-action=revoke-device]');
+        const adv = b.querySelector('.card-advanced');
+        return Boolean(main) && main.classList.contains('btn-crt-danger') && (!adv || !adv.contains(main));
+      })()`));
+
+    // 中→低（要码）→ 低→高（强制恢复码展示+回执）→ 高档邀请等待会签
+    await send('Page.navigate', { url: `${base}/console/` });
+    await waitFor('document.querySelector("#security-badge") && /🛡 安全：中/.test(document.querySelector("#security-badge").textContent) && !/…/.test(document.querySelector("#memory-badge")?.textContent ?? "…")', 20000);
+    await evalJs('document.querySelector("#open-settings").click()');
+    check('S3 中档凭条：设置打开且安全卡就位（降级入口在卡尾折叠）',
+      await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]"))', 20000));
+    await evalJs('(() => { const d = document.querySelector("#settings-security-slot .sec-more"); if (d) d.open = true; })()');
+    await evalJs('document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]").click()');
+    await waitFor('Boolean(document.querySelector("#security-code"))');
+    const downCode = totpCodeAt(SEC_TOTP_SECRET, Math.floor(Date.now() / 30_000) + 1);
+    await evalJs(`(() => { document.querySelector('#security-code').value = ${JSON.stringify(downCode)}; document.querySelector('#security-action-confirm').click(); })()`);
+    check('S3 中→低：动态码通过后回到低档',
+      await waitFor('document.querySelector("#settings-security-slot")?.dataset.securityLevel === "low"', 20000));
+    await evalJs('document.querySelector("#settings-security-slot [data-security-action=upgrade][data-level=high]").click()');
+    await waitFor('document.querySelector("#modal")?.hidden === false');
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    const onceOk = await waitFor('Boolean(document.querySelector("[data-security-once]"))', 20000);
+    const onceText = onceOk ? await evalJs('document.querySelector("[data-security-once]").textContent.trim()') : '';
+    check('S3 低→高：恢复码只显示一次（格式分组 + 焦点在展示区 + 回执按钮）',
+      onceOk && /[0-9A-Z]{4}/.test(onceText)
+        && (await evalJs('document.activeElement?.closest("[data-security-once]") !== null || document.activeElement?.id === "security-recovery-once"'))
+        && (await evalJs('Boolean(document.querySelector("[data-security-ack]"))')));
+    check('S3 恢复码展示：禁止截图/数字化文案（诚实）',
+      await evalJs('(() => { const t = document.querySelector("#security-action-body")?.textContent ?? ""; return /离线介质/.test(t) && /不要截图/.test(t); })()'));
+    await evalJs('document.querySelector("[data-security-ack]").click()');
+    check('S3 回执后：高档开卡（恢复码 keyId 前 8 + 轮换入口）',
+      await waitFor('document.querySelector("#settings-security-slot")?.dataset.securityLevel === "high" && /恢复码/.test(document.querySelector("#settings-security-slot")?.textContent ?? "") && Boolean(document.querySelector("#settings-security-slot [data-security-action=recovery-rotate]"))', 20000));
+    check('S3 顶栏徽章与高档同步（🛡 安全：高）', await waitFor('/🛡 安全：高/.test(document.querySelector("#security-badge")?.textContent ?? "")'));
+    await evalJs('document.querySelector("#invite-device").click()');
+    check('S3 高档邀请改道：配对号 + 等待状态（aria-live；批准后自动出令牌）',
+      await waitFor(`(() => {
+        const p = document.querySelector('#security-action-body [data-security-pairing]');
+        const t = document.querySelector('#security-action-body')?.textContent ?? '';
+        return Boolean(p) && p.getAttribute('aria-live') === 'polite' && /^\\d{3}-\\d{3}$/.test(p.textContent.trim())
+          && /等待/.test(t) && /批准/.test(t);
+      })()`));
+    await evalJs('document.querySelector("#security-action-close").click()');
+
+    // 审计：安全事件标签 / 过滤器 / 详情
+    await evalJs('document.querySelector("#settings-close").click()');
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(4) button").click()');
+    check('S3 审计：过滤器含安全事件项（等级变更/设备会签/恢复码/动态码）',
+      await waitFor(`(() => {
+        const sel = document.querySelector('#audit-filter-action');
+        const values = Array.from(sel?.options ?? []).map((o) => o.value);
+        return ['security_tier', 'security_approval', 'security_recovery', 'security_totp'].every((v) => values.includes(v));
+      })()`));
+    // 触发一次「安全等级变更」过滤，断言行标签与详情
+    await evalJs(`(() => { const sel = document.querySelector('#audit-filter-action'); sel.value = 'security_tier'; sel.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    check('S3 审计：安全等级变更行标签 + 「低 → 中/中 → 低/低 → 高」详情',
+      await waitFor(`(() => {
+        const t = document.querySelector('#audit-view')?.textContent ?? '';
+        return /安全等级变更/.test(t) && /低 → 中/.test(t) && /中 → 低/.test(t) && /低 → 高/.test(t);
+      })()`));
+    await evalJs(`(() => { const sel = document.querySelector('#audit-filter-action'); sel.value = 'security_approval'; sel.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    check('S3 审计：设备会签行（批准/拒绝 + 配对号 + 对象）',
+      await waitFor(`(() => {
+        const t = document.querySelector('#audit-view')?.textContent ?? '';
+        return /设备会签/.test(t) && /批准/.test(t) && /拒绝/.test(t) && /\\d{3}-\\d{3}/.test(t);
+      })()`));
+    await evalJs(`(() => { const sel = document.querySelector('#audit-filter-action'); sel.value = 'security_recovery'; sel.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    check('S3 审计：恢复码行（keyId 前 8 + 登记/轮换）',
+      await waitFor(`(() => { const t = document.querySelector('#audit-view')?.textContent ?? ''; return /恢复码/.test(t) && /[0-9a-f]{8}/.test(t) && /(登记|轮换)/.test(t); })()`));
+
     // ---------- v4 记忆共享（W1-A）：?mock=1 验收路径 + 无审批族 + 参与事实 ----------
     await send('Page.navigate', { url: `${base}/console/?mock=1` });
     check('v4 mock：记忆共享统计新口径 + 左列参与标记',
@@ -682,6 +883,60 @@ async function main() {
     await sleep(3600);
     check('§7 mock 审计：跨 3s 轮询展开态不丢（重渲染不折叠）',
       await evalJs('document.querySelectorAll("#audit-view .audit-auto-rows .audit-item").length === 3'));
+
+    // S3 mock：高档安全卡（待批准 / 恢复码 / 拒绝原因）+ 星图注意 + 审计拒绝原因
+    check('S3 mock：顶栏徽章高 + 星图「需要注意」安全项（待批准 / 拒绝）',
+      await waitFor(`(() => {
+        const t = document.querySelector('#attention-card')?.textContent ?? '';
+        return /🛡 安全：高/.test(document.querySelector('#security-badge')?.textContent ?? '')
+          && /待批准 1 项/.test(t) && /1 条安全操作被拒绝/.test(t);
+      })()`));
+    await evalJs('document.querySelector("#open-settings").click()');
+    check('S3 mock：高档安全卡 = 当前高 + 恢复码 keyId 前 8 + 有资格设备',
+      await waitFor(`(() => {
+        const s = document.querySelector('#settings-security-slot');
+        const t = s?.textContent ?? '';
+        return s?.dataset.securityLevel === 'high' && /当前：高/.test(t)
+          && /恢复码/.test(t) && /a1b2c3d4/.test(t) && /有资格的设备/.test(t);
+      })()`));
+    check('S3 mock：待批准行（配对号 aria-live + 批准/拒绝 + 到期提示）',
+      await waitFor(`(() => {
+        const s = document.querySelector('#settings-security-slot');
+        const p = s?.querySelector('[data-security-pairing]');
+        return Boolean(p) && p.getAttribute('aria-live') === 'polite' && /^\\d{3}-\\d{3}$/.test(p.textContent.trim())
+          && Boolean(s.querySelector('[data-security-approve]')) && Boolean(s.querySelector('[data-security-deny]'))
+          && /有效至|过期/.test(s.textContent);
+      })()`));
+    check('S3 mock：拒绝原因抬头可见（映射为中文，不静默）',
+      await evalJs('(() => { const s = document.querySelector("#settings-security-slot"); return /1 条安全操作被拒绝/.test(s.textContent) && /缺少会签证明/.test(s.textContent); })()'));
+    await evalJs('document.querySelector("#settings-close").click()');
+    await evalJs('(() => { const sel = document.querySelector("#audit-filter-action"); sel.value = "security_tier"; sel.dispatchEvent(new Event("change", { bubbles: true })); })()');
+    check('S3 mock 审计：安全等级行 + 拒绝原因（抬头可见）',
+      await waitFor(`(() => {
+        const t = document.querySelector('#audit-view')?.textContent ?? '';
+        return /安全等级变更/.test(t) && /低 → 高/.test(t) && /缺少会签证明/.test(t);
+      })()`));
+    await evalJs('(() => { const sel = document.querySelector("#audit-filter-action"); sel.value = ""; sel.dispatchEvent(new Event("change", { bubbles: true })); })()');
+    check('S3 mock 审计：设备会签 + 恢复码 + 动态码行标签齐备',
+      await waitFor(`(() => {
+        const t = document.querySelector('#audit-view')?.textContent ?? '';
+        return /设备会签/.test(t) && /恢复码/.test(t) && /动态码/.test(t) && /482-917/.test(t);
+      })()`));
+
+    // S3 窄屏：安全卡弹层无横向溢出（配对号/恢复码/按钮换行）
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await evalJs('document.querySelector("#open-settings").click()');
+    check('S3 窄屏：安全卡不横向溢出（390px）',
+      await waitFor(`(() => {
+        const box = document.querySelector('#settings .modal-box');
+        const card = document.querySelector('#settings-security-slot');
+        if (!box || !card) return false;
+        return box.scrollWidth <= box.clientWidth + 1 && card.scrollWidth <= card.clientWidth + 1
+          && document.documentElement.scrollWidth <= window.innerWidth + 1;
+      })()`));
+    await evalJs('document.querySelector("#settings-close").click()');
+    await send('Emulation.clearDeviceMetricsOverride');
+
     // 设备卡（对端）：interop 段为参与事实、无批准/撤回（?select= 深链选中）
     await send('Page.navigate', { url: `${base}/console/?mock=1&select=device-B` });
     check('v4 mock：设备卡对端 = 参与事实（它参与的记忆域 + 参与情况 + 双方/单方陈述）',

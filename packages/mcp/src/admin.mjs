@@ -63,7 +63,12 @@ export async function collectPolicy(app) {
   const policyIssuerDeclares = [];
   const memberships = [];
   const handoffs = [];
+  const securityTiers = [];
+  const securityApprovals = [];
+  const securityRecoveries = [];
+  const securityTotps = [];
   const authors = [];
+  let previousTier = 'low';
 
   for (const event of events) {
     authors.push(event.author);
@@ -78,6 +83,8 @@ export async function collectPolicy(app) {
           subject: grant.subject,
           namespaces: unique(grant.namespaces ?? []).map(nsOf),
           note: grant.note,
+          cosignApprover: grant.cosign?.approver,
+          breakGlassKeyId: grant.breakGlass?.keyId,
         });
       }
     } else if (event.type === 'namespace_revoke') {
@@ -101,6 +108,8 @@ export async function collectPolicy(app) {
           at: event.timestamp,
           subject: deviceRevoke.subject,
           note: deviceRevoke.note,
+          cosignApprover: deviceRevoke.cosign?.approver,
+          breakGlassKeyId: deviceRevoke.breakGlass?.keyId,
         });
       }
     } else if (event.type === 'policy_issuer_declare') {
@@ -125,6 +134,8 @@ export async function collectPolicy(app) {
           namespace: nsOf(membership.namespace),
           active: membership.active !== false,
           note: membership.note,
+          cosignApprover: membership.cosign?.approver,
+          breakGlassKeyId: membership.breakGlass?.keyId,
         });
       }
     } else if (event.type === 'namespace_handoff') {
@@ -141,6 +152,71 @@ export async function collectPolicy(app) {
           pendingCount: typeof handoff.pendingCount === 'number' ? handoff.pendingCount : 0,
           missingAuthors: Array.isArray(handoff.missingAuthors) ? handoff.missingAuthors : [],
           note: handoff.note,
+        });
+      }
+    } else if (event.type === 'security_tier') {
+      const tier = event.data?.securityTier;
+      if (tier && ['low', 'medium', 'high'].includes(tier.level)) {
+        securityTiers.push({
+          eventId: event.id,
+          issuer: event.author,
+          at: event.timestamp,
+          level: tier.level,
+          fromLevel: previousTier,
+          note: tier.note,
+          cosignApprover: tier.cosign?.approver,
+          breakGlassKeyId: tier.breakGlass?.keyId,
+          nonce: tier.nonce,
+        });
+        previousTier = tier.level;
+      }
+    } else if (event.type === 'security_approval') {
+      const approval = event.data?.securityApproval;
+      if (approval && typeof approval.approvalId === 'string') {
+        securityApprovals.push({
+          eventId: event.id,
+          issuer: event.author,
+          subject: approval.target ?? approval.initiator,
+          at: event.timestamp,
+          approvalId: approval.approvalId,
+          op: approval.op,
+          decision: approval.decision,
+          initiator: approval.initiator,
+          target: approval.target,
+          namespace: approval.namespace !== undefined ? nsOf(approval.namespace) : undefined,
+          level: approval.level,
+          pairingCode: approval.pairingCode,
+          expiresAt: approval.expiresAt,
+          cosignApprover: approval.cosign?.approver,
+          note: approval.note,
+        });
+      }
+    } else if (event.type === 'security_recovery') {
+      const recovery = event.data?.securityRecovery;
+      if (recovery && typeof recovery.keyId === 'string') {
+        securityRecoveries.push({
+          eventId: event.id,
+          issuer: event.author,
+          at: event.timestamp,
+          keyId: recovery.keyId,
+          mode: recovery.mode === 'rotate' ? 'rotate' : 'set',
+          note: recovery.note,
+          cosignApprover: recovery.cosign?.approver,
+          breakGlassKeyId: recovery.breakGlass?.keyId,
+        });
+      }
+    } else if (event.type === 'security_totp') {
+      const totp = event.data?.securityTotp;
+      if (totp && typeof totp.fingerprint === 'string') {
+        securityTotps.push({
+          eventId: event.id,
+          issuer: event.author,
+          at: event.timestamp,
+          device: totp.device,
+          subject: totp.device,
+          fingerprint: totp.fingerprint,
+          epoch: totp.epoch,
+          note: totp.note,
         });
       }
     }
@@ -191,6 +267,8 @@ export async function collectPolicy(app) {
       subject: d.subject,
       at: d.at,
       note: d.note,
+      cosignApprover: d.cosignApprover,
+      breakGlassKeyId: d.breakGlassKeyId,
       valid: !revokedSet.has(d.issuer) && revokedSet.has(d.subject),
     })),
     ...policyIssuerDeclares.map((d) => ({
@@ -211,6 +289,9 @@ export async function collectPolicy(app) {
       active: m.active,
       at: m.at,
       note: m.note,
+      cosignApprover: m.cosignApprover,
+      breakGlassKeyId: m.breakGlassKeyId,
+      namespaces: [m.namespace],
       valid: !revokedSet.has(m.issuer) && !revokedSet.has(m.member),
     })),
     ...handoffs.map((h) => ({
@@ -227,7 +308,91 @@ export async function collectPolicy(app) {
       note: h.note,
       valid: true,
     })),
+    ...securityTiers.map((t) => ({
+      eventId: t.eventId,
+      type: 'security_tier',
+      issuer: t.issuer,
+      subject: t.issuer,
+      level: t.level,
+      fromLevel: t.fromLevel,
+      at: t.at,
+      note: t.note,
+      cosignApprover: t.cosignApprover,
+      breakGlassKeyId: t.breakGlassKeyId,
+      // 权威采纳在 core；这里只做签发者未吊销的保守近似，rejections 会再覆写 valid=false
+      valid: !revokedSet.has(t.issuer),
+    })),
+    ...securityApprovals.map((a) => ({
+      eventId: a.eventId,
+      type: 'security_approval',
+      issuer: a.issuer,
+      subject: a.subject,
+      approvalId: a.approvalId,
+      op: a.op,
+      decision: a.decision,
+      initiator: a.initiator,
+      target: a.target,
+      level: a.level,
+      pairingCode: a.pairingCode,
+      expiresAt: a.expiresAt,
+      cosignApprover: a.cosignApprover,
+      ...(a.namespace !== undefined ? { namespace: a.namespace, namespaces: [a.namespace] } : {}),
+      at: a.at,
+      note: a.note,
+      valid: true,
+    })),
+    ...securityRecoveries.map((r) => ({
+      eventId: r.eventId,
+      type: 'security_recovery',
+      issuer: r.issuer,
+      subject: r.issuer,
+      keyId: r.keyId,
+      mode: r.mode,
+      at: r.at,
+      note: r.note,
+      cosignApprover: r.cosignApprover,
+      breakGlassKeyId: r.breakGlassKeyId,
+      valid: !revokedSet.has(r.issuer),
+    })),
+    ...securityTotps.map((t) => ({
+      eventId: t.eventId,
+      type: 'security_totp',
+      issuer: t.issuer,
+      subject: t.device,
+      device: t.device,
+      fingerprint: t.fingerprint,
+      epoch: t.epoch,
+      at: t.at,
+      note: t.note,
+      valid: true,
+    })),
   ].sort((a, b) => b.at - a.at);
+
+  // S3：拒绝不静默——用 core 的权威诊断给时间线行加 rejectReason（valid=false）。
+  // 只在 core 暴露 getSecurityTier() 时使用；旧版 core 保持保守近似，不猜测。
+  let securityState = null;
+  if (typeof app.getSecurityTier === 'function') {
+    try {
+      const raw = await app.getSecurityTier();
+      if (raw !== null && typeof raw === 'object') securityState = raw;
+    } catch {
+      securityState = null;
+    }
+  }
+  const rejectionByEvent = new Map(
+    (Array.isArray(securityState?.rejections) ? securityState.rejections : [])
+      .filter((row) => row && typeof row.eventId === 'string' && typeof row.reason === 'string')
+      .map((row) => [row.eventId, row.reason]),
+  );
+  if (rejectionByEvent.size > 0) {
+    for (const item of timeline) {
+      const reason = rejectionByEvent.get(item.eventId);
+      if (reason !== undefined) {
+        item.valid = false;
+        item.rejectReason = reason;
+      }
+    }
+  }
 
   return {
     events,
@@ -237,6 +402,11 @@ export async function collectPolicy(app) {
     policyIssuerDeclares,
     memberships,
     handoffs,
+    securityTiers,
+    securityApprovals,
+    securityRecoveries,
+    securityTotps,
+    securityState,
     revokedGrantIds,
     revokedSet,
     timeline,

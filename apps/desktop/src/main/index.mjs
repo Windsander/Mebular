@@ -10,7 +10,8 @@ import { spawn } from 'node:child_process';
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog, session } from 'electron';
 import {
   APP_VERSION, consoleUrl, ensureDaemon, resolveCliBin, resolveHome, resolveHttp,
-  serviceEnabledFor, stopManaged, waitForDaemon, parseArgs, probeHealth, probeProvision, serviceDescriptorFor,
+  serviceEnabledFor, stopManaged, waitForDaemon, parseArgs, probeHealth, probeProvision, probeSecurityLevel,
+  serviceDescriptorFor,
 } from './daemon.mjs';
 import { buildHandlerTable, diagnostics } from './ipc.mjs';
 import { iconDataUrl, iconDataUrl2x } from './tray-icons.mjs';
@@ -31,6 +32,8 @@ let tray = null;
 let daemonChild = null;
 let daemonMode = null;
 let healthy = false;
+// S3：托盘只读安全等级（null = 未取到/旧版；显示 —，不猜测档位）
+let securityLevel = null;
 
 function readConfig() {
   try {
@@ -191,6 +194,7 @@ async function showConsoleWithRetry() {
   if (seq !== loadingSeq) return; // 已被更新的加载流程接管
   healthy = ok;
   updateTray();
+  if (ok) void refreshTraySecurity();
   if (!win || win.isDestroyed()) return;
   if (ok) {
     await safeLoad(shellConsoleUrl());
@@ -288,6 +292,7 @@ async function confirmStop() {
   stopManaged(daemonChild);
   daemonChild = null;
   healthy = false;
+  securityLevel = null;
   updateTray();
   if (win && !win.isDestroyed() && win.isVisible()) {
     await safeLoad(loadingHtml('守护已停止（托盘可重启）'));
@@ -303,10 +308,25 @@ async function confirmRestart() {
   await showConsoleWithRetry(); // 托盘「重启」= 显式用户动作：维持旧行为，重启后落到控制台
 }
 
+/** S3：只读刷新托盘等级（失败保持上一值；旧值不冒充新值）。 */
+async function refreshTraySecurity() {
+  if (!healthy) return;
+  const level = await probeSecurityLevel(fetch, httpConf());
+  if (level !== null && level !== securityLevel) {
+    securityLevel = level;
+    updateTray();
+  }
+}
+
 function trayActions() {
   return {
     // R-1 高-4：壳内入口一律带 ?shell=desktop（控制台据此收编终端指令/显示返回向导）
     'open-console': () => { showWindow(); void safeLoad(shellConsoleUrl()); },
+    // S3：只读等级行 → 打开控制台安全卡（不做壳内写操作）
+    'security-level': () => {
+      showWindow();
+      void safeLoad(shellDeepLink(`${consoleUrl(httpConf())}?view=settings&focus=security`));
+    },
     'connect-assistants': () => { showWindow(); void safeLoad(shellDeepLink(deepLinks(httpConf()).assistants)); },
     'add-device': () => { showWindow(); void safeLoad(shellDeepLink(deepLinks(httpConf()).device)); },
     'open-wizard': () => { showWindow(); void loadWizardView(); },
@@ -327,7 +347,7 @@ function updateTray() {
   // R-1 中-9：分组菜单模型（lifecycle.mjs 纯数据）→ 绑定 click 后交给 Electron
   const actions = trayActions();
   const loginChecked = (() => { try { return Boolean(app.getLoginItemSettings().openAtLogin); } catch { return false; } })();
-  const template = trayMenuModel({ healthy, daemonMode, loginOpenAtLogin: loginChecked }).map((item) => {
+  const template = trayMenuModel({ healthy, daemonMode, loginOpenAtLogin: loginChecked, securityLevel }).map((item) => {
     if (item.type === 'separator') return item;
     const { id, confirm: _confirm, ...rest } = item;
     return { ...rest, click: actions[id] ? (_menuItem) => actions[id](_menuItem) : undefined };
@@ -338,7 +358,7 @@ function updateTray() {
 /** 重启守护本体（F1：不导航；托盘「重启」的导航由 confirmRestart 显式追加）。 */
 async function restart() {
   if (daemonChild) { stopManaged(daemonChild); daemonChild = null; }
-  healthy = false; daemonMode = null; updateTray();
+  healthy = false; daemonMode = null; securityLevel = null; updateTray();
   await new Promise((r) => setTimeout(r, 800));
   await ensure();
 }
@@ -458,6 +478,9 @@ if (!gotLock) {
     registerIpc();
     createTray();
     createWindow();
+    // S3：托盘只读等级每 20s 刷新一次（轻量 GET；失败保持旧值，不阻断壳）
+    const securityTimer = setInterval(() => { void refreshTraySecurity(); }, 20_000);
+    securityTimer.unref?.();
     try {
       await ensure();
       const state = await wizardStateNow();
@@ -468,6 +491,7 @@ if (!gotLock) {
         await loadWizardView(); // 清缓存 + 缓存破坏参数：HTML/ESM 双保险（走查事故：旧版向导复活）
         healthy = await probeHealth(fetch, httpConf());
         updateTray();
+        if (healthy) void refreshTraySecurity();
       }
     } catch (error) {
       dialog.showErrorBox('Mebular 启动失败', String(error?.message ?? error));

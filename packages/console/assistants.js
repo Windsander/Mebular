@@ -266,14 +266,28 @@ export function statusPillHtml({ service, devices, memoryCount, selfId = null } 
     <span>记忆 <b>${memoryCount ?? '—'}</b></span>`;
 }
 
-/** 「需要注意」条目（条件渲染，无事不出现；本机不计入对端未连接）。 */
-export function attentionItems({ clients, ui = {}, devices, selfId = null } = {}) {
+/** 「需要注意」条目（条件渲染，无事不出现；本机不计入对端未连接）。
+ *  S3：安全项 = medium 未导入动态码种子 / 待批准（他机发起）/ 验收拒绝（rejections）。 */
+export function attentionItems({ clients, ui = {}, devices, selfId = null, security = null } = {}) {
   const items = [];
   for (const raw of clients ?? []) {
     const c = normalizeClient(raw);
     const st = assistantStatus(c, ui);
     if (st.key === 'pending-reload') items.push({ id: `asst-${c.id}`, label: `${c.name} 待生效`, action: 'assistants' });
     if (st.key === 'verify-failed') items.push({ id: `asst-${c.id}`, label: `${c.name} 验证未过`, action: 'assistants' });
+  }
+  if (security !== null && security !== undefined) {
+    if (security.level === 'medium' && security.totp?.imported !== true) {
+      items.push({ id: 'security-totp', label: '动态码种子未导入', action: 'security' });
+    }
+    const pending = (security.pendingApprovals ?? []).filter((a) => a?.initiator !== selfId);
+    if (pending.length > 0) {
+      items.push({ id: 'security-approvals', label: `待批准 ${pending.length} 项`, action: 'security-approvals' });
+    }
+    const rejected = (security.rejections ?? []).length;
+    if (rejected > 0) {
+      items.push({ id: 'security-rejections', label: `${rejected} 条安全操作被拒绝`, action: 'security' });
+    }
   }
   for (const d of devices ?? []) {
     if (!d.deviceId || d.deviceId === selfId) continue;

@@ -71,6 +71,24 @@ export async function probeHealth(fetchImpl, http = { host: '127.0.0.1', port: 7
 }
 
 /**
+ * S3：只读安全等级探测（GET /admin/api/security）。
+ * 401/409/旧版守护/网络错误 → null（托盘显示 —，不显示假档位，也不阻断壳）。
+ */
+export async function probeSecurityLevel(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, timeoutMs = 1500) {
+  try {
+    const res = await fetchImpl(`http://${http.host}:${http.port}/admin/api/security`, {
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { accept: 'application/json' },
+    });
+    if (!res?.ok) return null;
+    const data = await res.json().catch(() => null);
+    return ['low', 'medium', 'high'].includes(data?.level) ? data.level : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 引导/待重启探测（W-1 高-1 钩子）：GET /app/provision/status
  *   200 且 provision===true → 引导态（provisioned:false＝待建新/加入；true＝已初始化待重启）
  *   404 → 正常态（接口不挂载）；其他/异常 → 不阻断（守护健康探测另有 probeHealth）

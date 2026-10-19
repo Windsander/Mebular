@@ -253,7 +253,7 @@ export async function provisionRestore({ home, file, code, deviceName, deviceId,
 }
 
 /** 令牌可读化校验（形状/TTL）+ 提前失败，避免把不可用的令牌发到 inviter。 */
-function inspectToken(decodeJoinToken, token, now = Date.now()) {
+export function inspectJoinToken(decodeJoinToken, token, now = Date.now()) {
   let parsed;
   try {
     parsed = decodeJoinToken(token);
@@ -270,9 +270,162 @@ function inspectToken(decodeJoinToken, token, now = Date.now()) {
   return parsed;
 }
 
+async function resolveJoinPorts({ ports = {}, mcpPort, joinPort, listenPort }) {
+  const positive = (value) => Number.isInteger(Number(value)) && Number(value) > 0;
+  const mcp = positive(ports.mcp) ? Number(ports.mcp) : (positive(mcpPort) ? Number(mcpPort) : 0);
+  // 档案加入必须复用当前忆云的端口（旧守护还占着，不能探测）；只有首启/显式 0 才回退 findFreePort。
+  const join = positive(ports.join)
+    ? Number(ports.join)
+    : (positive(joinPort) ? Number(joinPort) : (await findFreePort(4002)).port);
+  const listen = positive(ports.listen)
+    ? Number(ports.listen)
+    : (positive(listenPort) ? Number(listenPort) : (await findFreePort(4001)).port);
+  return { mcp, join, listen };
+}
+
+function delegatedConfig({ home, id, name, namespace, parsed, ports, peers = [] }) {
+  return {
+    storagePath: join(home, 'store.jsonl'),
+    deviceId: id,
+    deviceName: name,
+    identity: { mode: 'delegated' },
+    encryption: { level: 'none', userMasterPublicKeyFile: join(home, 'master-key.json') },
+    network: {
+      enabled: true,
+      autoConnect: true,
+      libp2p: { listen: [`/ip4/0.0.0.0/tcp/${ports.listen}`] },
+      ...(peers.length > 0 ? { peers } : {}),
+    },
+    sync: {
+      autoSync: true,
+      pushOnWrite: true,
+      namespaces: [namespace],
+      policyIssuers: [parsed.inviterDeviceId],
+      antiEntropy: { enabled: true, intervalMs: 600000, jitterRatio: 0.2 },
+    },
+    joinService: { enabled: true, bind: '0.0.0.0', port: ports.join },
+    mcp: { http: { host: '127.0.0.1', port: ports.mcp, auth: 'none', tls: false } },
+  };
+}
+
 /**
- * 加入：复用 fleet `joinWithToken`（令牌验签/兑换/身份/主密钥公钥/hints/登记）→ 再写守护 home 的 config.json
- * （delegated，无主私钥）。inviter 返回 granted 语义由令牌 grantOnJoin 决定（服务端 C7 自动授权）。
+ * 加入一个**已存在的空 home**（档案加入复用）：
+ *   ① 先解码/校验令牌（形状/TTL）② 预写 delegated config（避免「令牌已兑换、本机写失败」窗口）
+ *   ③ 复用 fleet joinWithToken（身份/证书/hints）④ 补写 peers。
+ *
+ * `ports` 由调用方显式给出时**原样使用**（档案切换复用当前忆云端口，不探测、不抢端口）；
+ * 未给出时按首启习惯 findFreePort。`rollbackDirectory` 只允许调用方对「本次独占创建、尚未注册」的
+ * 目录使用：失败时整目录回滚；默认仅清理本次新建的文件（保留首启 provisionJoin 的旧语义）。
+ */
+export async function provisionJoinInto({
+  home,
+  token,
+  deviceName,
+  deviceId,
+  ports,
+  mcpPort,
+  joinPort,
+  listenPort,
+  timeoutMs,
+  rollbackDirectory = false,
+}) {
+  if (!isProvisionHome(home)) {
+    const error = new Error('该家目录已完成初始化（已存在 config.json / 主密钥 / 身份文件）');
+    error.code = 'ALREADY_PROVISIONED';
+    throw error;
+  }
+  if (typeof token !== 'string' || token.trim().length === 0) {
+    const error = new Error('需要令牌文本（邀请面板生成的 base64 令牌）');
+    error.code = 'TOKEN_REQUIRED';
+    throw error;
+  }
+  const fleet = await import('../../fleet/dist/index.js');
+  const parsed = inspectJoinToken(fleet.decodeJoinToken, token.trim());
+
+  const name = String(deviceName ?? '').trim() || defaultDeviceName();
+  const id = normalizeExplicitDeviceId(deviceId) ?? deriveDeviceId(name);
+  const namespace = parsed.namespace;
+  const resolvedPorts = await resolveJoinPorts({ ports, mcpPort, joinPort, listenPort });
+
+  // 复用 fleet join（不复制第二套实现）；agents 用 fleet CLI 同款占位（fleet 要求非空）
+  const artifacts = ['store.jsonl', 'store.jsonl.identity.json', 'master-key.json', 'fleet.config.json', join('net', 'peers.json')];
+  const preexisting = new Set(artifacts.filter((rel) => existsSync(join(home, rel))));
+  const configFile = configPath(home);
+  const configPreexisting = existsSync(configFile);
+
+  // 预写 config：兑换前完成本机落盘（端口复用当前忆云；准备阶段不 bind）。
+  await writeConfigFile(home, delegatedConfig({ home, id, name, namespace, parsed, ports: resolvedPorts }));
+
+  let joined;
+  try {
+    joined = await fleet.joinWithToken({
+      dir: home,
+      token: token.trim(),
+      device: id,
+      namespace,
+      listen: `/ip4/0.0.0.0/tcp/${resolvedPorts.listen}`,
+      agents: [{ name: 'echo', kind: 'echo' }],
+      ...(Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
+    });
+  } catch (error) {
+    if (rollbackDirectory) {
+      await rm(home, { recursive: true, force: true }).catch(() => undefined);
+    } else {
+      // 失败不得留下半成品（否则引导态判定失效、无法重试）：仅清理本次新建的产物
+      for (const rel of artifacts) {
+        if (!preexisting.has(rel)) await rm(join(home, rel), { force: true }).catch(() => undefined);
+      }
+      if (!configPreexisting) await rm(configFile, { force: true }).catch(() => undefined);
+    }
+    const raw = String(error?.message ?? error);
+    const code = error?.code ?? (error?.cause?.code ?? '');
+    if (['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ETIMEDOUT'].includes(code) || /超时|timeout/i.test(raw)) {
+      const wrapped = new Error(`邀请方端点不可达（${parsed.endpoint}）：请确认对方 serve 在运行且该地址可达`);
+      wrapped.code = 'ENDPOINT_UNREACHABLE';
+      throw wrapped;
+    }
+    if (/令牌不可用|used|expired|signature|签名/i.test(raw)) {
+      const wrapped = new Error(`令牌不可用：${raw}`);
+      wrapped.code = 'TOKEN_REJECTED';
+      throw wrapped;
+    }
+    throw error;
+  }
+
+  // fleet 落盘：<home>/store.jsonl.identity.json（委派身份，无主私钥）+ <home>/master-key.json（仅公钥）
+  //           + <home>/fleet.config.json（登记 inviter 地址）+ <home>/net/peers.json（hints）
+  const fleetCfg = await fleet.loadFleetConfig(fleet.fleetConfigPath(home)).catch(() => null);
+  const peers = Array.isArray(fleetCfg?.peers)
+    ? fleetCfg.peers.filter((p) => p && typeof p.device === 'string').map((p) => (p.addr ? { device: p.device, addr: p.addr } : { device: p.device }))
+    : [];
+  const masterKeyPublic = join(home, 'master-key.json');
+  const path = await writeConfigFile(home, delegatedConfig({ home, id, name, namespace, parsed, ports: resolvedPorts, peers }));
+  return {
+    ok: true,
+    action: 'join',
+    deviceId: id,
+    deviceName: name,
+    inviterDeviceId: parsed.inviterDeviceId,
+    namespace,
+    grantsOnJoin: parsed.grantOnJoin !== false,
+    hinted: joined.hinted,
+    peers,
+    configPath: path,
+    masterKeyPublicFile: masterKeyPublic,
+    fingerprint: typeof joined.fingerprint === 'string' ? joined.fingerprint : null,
+    ports: { mcp: resolvedPorts.mcp, join: resolvedPorts.join, listen: resolvedPorts.listen },
+    notes: [
+      '已取得委派证书链（无主私钥）：<home>/store.jsonl.identity.json',
+      `用户主公钥（仅公钥）：${masterKeyPublic}`,
+      `授权分区：${namespace}（兑换时自动授权=${parsed.grantOnJoin !== false}）`,
+      ...(joined.hinted > 0 ? [`inviter 地址 hints 已写入 <home>/net/peers.json（${joined.hinted} 条）`] : []),
+    ],
+  };
+}
+
+/**
+ * 首启加入：保留「只认空 home」的 gate；内部委托 provisionJoinInto。
+ * 失败只清理本次新建产物（home 本身由引导流程保留，便于重试）。
  */
 export async function provisionJoin({
   home,
@@ -293,99 +446,7 @@ export async function provisionJoin({
     error.code = 'TOKEN_REQUIRED';
     throw error;
   }
-  const fleet = await import('../../fleet/dist/index.js');
-  const parsed = inspectToken(fleet.decodeJoinToken, token.trim());
-
-  const name = String(deviceName ?? '').trim() || defaultDeviceName();
-  const id = deriveDeviceId(name);
-  const namespace = parsed.namespace;
-
-  // 复用 fleet join（不复制第二套实现）；agents 用 fleet CLI 同款占位（fleet 要求非空）
-  const artifacts = ['store.jsonl', 'store.jsonl.identity.json', 'master-key.json', 'fleet.config.json', join('net', 'peers.json')];
-  const preexisting = new Set(artifacts.filter((rel) => existsSync(join(home, rel))));
-  let joined;
-  try {
-    joined = await fleet.joinWithToken({
-      dir: home,
-      token: token.trim(),
-      device: id,
-      namespace,
-      listen: `/ip4/0.0.0.0/tcp/${(await findFreePort(Number(listenPort) > 0 ? Number(listenPort) : 4001)).port}`,
-      agents: [{ name: 'echo', kind: 'echo' }],
-      ...(Number.isFinite(timeoutMs) ? { timeoutMs } : {}),
-    });
-  } catch (error) {
-    // 失败不得留下半成品（否则引导态判定失效、无法重试）：仅清理本次新建的产物
-    for (const rel of artifacts) {
-      if (!preexisting.has(rel)) await rm(join(home, rel), { force: true }).catch(() => undefined);
-    }
-    const raw = String(error?.message ?? error);
-    const code = error?.code ?? (error?.cause?.code ?? '');
-    if (['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ETIMEDOUT'].includes(code)) {
-      const wrapped = new Error(`邀请方端点不可达（${parsed.endpoint}）：请确认对方 serve 在运行且该地址可达`);
-      wrapped.code = 'ENDPOINT_UNREACHABLE';
-      throw wrapped;
-    }
-    if (/令牌不可用|used|expired|signature|签名/i.test(raw)) {
-      const wrapped = new Error(`令牌不可用：${raw}`);
-      wrapped.code = 'TOKEN_REJECTED';
-      throw wrapped;
-    }
-    throw error;
-  }
-
-  // fleet 落盘：<home>/store.jsonl.identity.json（委派身份，无主私钥）+ <home>/master-key.json（仅公钥）
-  //           + <home>/fleet.config.json（登记 inviter 地址）+ <home>/net/peers.json（hints）
-  const fleetCfg = await fleet.loadFleetConfig(fleet.fleetConfigPath(home)).catch(() => null);
-  const peers = Array.isArray(fleetCfg?.peers)
-    ? fleetCfg.peers.filter((p) => p && typeof p.device === 'string').map((p) => (p.addr ? { device: p.device, addr: p.addr } : { device: p.device }))
-    : [];
-  const joinChoice = await findFreePort(Number(joinPort) > 0 ? Number(joinPort) : 4002);
-  const masterKeyPublic = join(home, 'master-key.json');
-
-  const config = {
-    storagePath: join(home, 'store.jsonl'),
-    deviceId: id,
-    deviceName: name,
-    identity: { mode: 'delegated' },
-    encryption: { level: 'none', userMasterPublicKeyFile: masterKeyPublic },
-    network: {
-      enabled: true,
-      autoConnect: true,
-      libp2p: { listen: [`/ip4/0.0.0.0/tcp/${(await findFreePort(Number(listenPort) > 0 ? Number(listenPort) : 4001)).port}`] },
-      ...(peers.length > 0 ? { peers } : {}),
-    },
-    sync: {
-      autoSync: true,
-      pushOnWrite: true,
-      namespaces: [namespace],
-      policyIssuers: [parsed.inviterDeviceId],
-      antiEntropy: { enabled: true, intervalMs: 600000, jitterRatio: 0.2 },
-    },
-    joinService: { enabled: true, bind: '0.0.0.0', port: joinChoice.port },
-    mcp: { http: { host: '127.0.0.1', port: mcpPort, auth: 'none', tls: false } },
-  };
-  const path = await writeConfigFile(home, config);
-  return {
-    ok: true,
-    action: 'join',
-    deviceId: id,
-    deviceName: name,
-    inviterDeviceId: parsed.inviterDeviceId,
-    namespace,
-    grantsOnJoin: parsed.grantOnJoin !== false,
-    hinted: joined.hinted,
-    peers,
-    configPath: path,
-    masterKeyPublicFile: masterKeyPublic,
-    ports: { mcp: mcpPort, join: joinChoice.port },
-    notes: [
-      `已取得委派证书链（无主私钥）：<home>/store.jsonl.identity.json`,
-      `用户主公钥（仅公钥）：${masterKeyPublic}`,
-      `授权分区：${namespace}（兑换时自动授权=${parsed.grantOnJoin !== false}）`,
-      ...(joined.hinted > 0 ? [`inviter 地址 hints 已写入 <home>/net/peers.json（${joined.hinted} 条）`] : []),
-    ],
-  };
+  return provisionJoinInto({ home, token, deviceName, mcpPort, joinPort, listenPort, timeoutMs });
 }
 
 /** 读回已落盘的 provider 结果（供控制台「已加入」展示当前路径/授权分区）。 */

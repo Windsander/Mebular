@@ -7,11 +7,11 @@
 
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { chmod, copyFile, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { existsSync, realpathSync } from 'node:fs';
+import { chmod, copyFile, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import https from 'node:https';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { TOOL_ALL_SCOPES } from './tools.mjs';
@@ -23,13 +23,29 @@ import { configPath } from './config.mjs';
 //   editable → 允许；status-only → 400（自动推导）；internal → 仅显式 writable 允许；未知 → 400。
 import { CONFIG_SCHEMA_BY_PATH, isWritable, writeRejection } from './config-schema.mjs';
 import {
+  inspectJoinToken,
   isProvisionHome,
   provisionCreate,
   provisionJoin,
+  provisionJoinInto,
   provisionRestore,
   provisionStatus,
   writeProvisionRecord,
 } from './provision.mjs';
+import {
+  acquireActiveLock,
+  cloudError,
+  homeKey,
+  masterFingerprintFromHex,
+  newProfileId,
+  normalizeProfileName,
+  profileIdForHome,
+  readRegistry,
+  registerProfile,
+  renameProfile,
+  resolveCloudRoot,
+  PROFILES_DIR,
+} from './profiles.mjs';
 import {
   APPLY_HEALTH_TIMEOUT_MS,
   RESTART_DEBOUNCE_MS,
@@ -769,6 +785,12 @@ export async function startHttpServer({
     throw error;
   }
 
+  // 忆云档案上下文（root 解析 + 单活）。自定义 home / 危险 env → available:false（档案端点 503/403）。
+  const cloud = resolveCloudRoot({ home, env: process.env });
+  const cloudId = app && service && cloud.available
+    ? await profileIdForHome(cloud.root, home).catch(() => null)
+    : null;
+
   const scheme = tls ? 'https' : 'http';
   // D45：OAuth 硬化配置（密钥/secret 不落 config，仅 env）
   const adminSecret = process.env.MEBULAR_OAUTH_ADMIN_SECRET ?? null;
@@ -934,7 +956,21 @@ export async function startHttpServer({
     // 注意：CSRF token 只在 /console/ 页面加载时签发。若在 overview 轮询里重新签发，
     // cookie 会被每次轮询改写，与并发的写请求竞争（读 cookie 后、发出写之前又来一次
     // overview）→ header 与 cookie 不一致而 403。token 12h 有效，页面加载签发一次即可。
-    const payload = await builder({ app, service, config, runtime, home, url });
+    let payload;
+    try {
+      payload = await builder({ app, service, config, runtime, home, url, cloud });
+    } catch (error) {
+      if (error?.code === 'CLOUD_UNAVAILABLE') {
+        return sendJson(res, 503, { ok: false, error: 'CLOUD_UNAVAILABLE', message: error.message, reason: error.reason ?? null });
+      }
+      if (error?.code === 'CLOUD_REGISTRY_INVALID') {
+        return sendJson(res, 500, { ok: false, error: 'CLOUD_REGISTRY_INVALID', message: error.message });
+      }
+      if (error?.code === 'CLOUD_REGISTRY_LOCKED') {
+        return sendJson(res, 503, { ok: false, error: 'CLOUD_REGISTRY_LOCKED', message: error.message });
+      }
+      throw error;
+    }
     if (path === '/admin/api/overview') {
       payload.features = { writes: Boolean(writesEnabled) };
     }
@@ -1052,6 +1088,7 @@ export async function startHttpServer({
 
   const WRITE_PATTERNS = [
     /^\/admin\/api\/grants$/,
+    /^\/admin\/api\/clouds\/(join|rename|inspect)$/,
     /^\/admin\/api\/grants\/([^/]+)\/revoke$/,
     /^\/admin\/api\/devices\/([^/]+)\/(revoke|connect|disconnect|sync|reset-watermarks)$/,
     /^\/admin\/api\/config$/,
@@ -1079,6 +1116,308 @@ export async function startHttpServer({
       return parsed && typeof parsed === 'object' ? parsed : {};
     } catch {
       return null;
+    }
+  }
+
+  // ---------- 忆云档案端点（A：控制台准备；App/CLI 负责真正的停旧/起新） ----------
+
+  const publicProfile = (profile, currentId = null) => ({
+    id: profile.id,
+    name: profile.name,
+    home: profile.home,
+    kind: profile.kind,
+    createdAt: profile.createdAt ?? null,
+    lastUsedAt: profile.lastUsedAt ?? null,
+    masterFingerprint: profile.masterFingerprint ?? null,
+    deviceId: profile.deviceId ?? null,
+    ...(currentId !== null ? { current: profile.id === currentId } : {}),
+  });
+
+  const scrubToken = (value, token) => (
+    typeof token === 'string' && token.length > 0 ? String(value).split(token).join('[redacted]') : String(value)
+  );
+
+  function sendCloudError(res, error, { disabled = false } = {}) {
+    const code = error?.code ?? 'CLOUD_FAILED';
+    const status = {
+      CONFIRMATION_REQUIRED: 400,
+      TOKEN_REQUIRED: 400,
+      TOKEN_INVALID: 400,
+      TOKEN_EXPIRED: 400,
+      TOKEN_REJECTED: 400,
+      INVALID_NAME: 400,
+      NAME_TAKEN: 400,
+      PROFILE_NOT_FOUND: 404,
+      CLOUD_ALREADY_JOINED: 409,
+      ALREADY_PROVISIONED: 409,
+      ENDPOINT_UNREACHABLE: 502,
+      CLOUD_UNAVAILABLE: disabled ? 403 : 503,
+      CLOUD_DISABLED: 403,
+      CLOUD_REGISTRY_INVALID: 500,
+      CLOUD_REGISTRY_LOCKED: 503,
+      CLOUD_PROFILE_PATH_INVALID: 500,
+      PROFILE_JOIN_FAILED: 500,
+    }[code] ?? 500;
+    const errorName = disabled && code === 'CLOUD_UNAVAILABLE' ? 'CLOUD_DISABLED' : code;
+    return sendJson(res, status, {
+      ok: false,
+      error: errorName,
+      message: error?.message ?? String(error),
+      ...(error?.existing !== undefined ? { existing: error.existing } : {}),
+      ...(error?.reason !== undefined ? { reason: error.reason } : {}),
+    });
+  }
+
+  async function decodeCloudToken(token) {
+    const fleet = await import('../../fleet/dist/index.js');
+    return inspectJoinToken(fleet.decodeJoinToken, token);
+  }
+
+  function cloudUnavailableError() {
+    return cloudError(
+      'CLOUD_DISABLED',
+      `当前为自定义 home / 受限 env（${cloud.reason ?? 'unavailable'}）：忆云档案功能不可用`,
+      { reason: cloud.reason ?? 'unavailable' },
+    );
+  }
+
+  const parseListenPort = (configValue) => {
+    const listen = configValue?.network?.libp2p?.listen;
+    const first = Array.isArray(listen) ? listen.find((entry) => typeof entry === 'string') : null;
+    const port = first ? Number(/\/tcp\/(\d+)/.exec(first)?.[1] ?? 0) : 0;
+    return Number.isInteger(port) && port > 0 ? port : 0;
+  };
+
+  // 当前守护的**实际**监听端口（config 写 0 时也能复用；取不到再回退 config）。
+  const currentListenPort = () => {
+    try {
+      const addrs = app?.node?.getLocalMultiaddrs?.() ?? [];
+      for (const addr of addrs) {
+        const port = Number(/\/tcp\/(\d+)/.exec(String(addr))?.[1] ?? 0);
+        if (Number.isInteger(port) && port > 0) return port;
+      }
+    } catch {
+      // 回退 config
+    }
+    return parseListenPort(config);
+  };
+
+  async function handleCloudInspect(req, res, body) {
+    const input = parseJsonBody(body) ?? {};
+    const token = typeof input.token === 'string' ? input.token.trim() : '';
+    if (token.length === 0) return sendCloudError(res, cloudError('TOKEN_REQUIRED', '需要加入令牌'));
+    let parsed;
+    try {
+      parsed = await decodeCloudToken(token);
+    } catch (error) {
+      return sendCloudError(res, error);
+    }
+    const fingerprint = masterFingerprintFromHex(parsed.masterPublicKey);
+    let alreadyJoined = null;
+    if (cloud.available && fingerprint !== null) {
+      try {
+        const state = await readRegistry(cloud.root);
+        const duplicate = state.registry.profiles.find((profile) => profile.masterFingerprint === fingerprint);
+        if (duplicate) alreadyJoined = { id: duplicate.id, name: duplicate.name };
+      } catch {
+        // inspect 不因注册表瞬时错误失败
+      }
+    }
+    return sendJson(res, 200, {
+      ok: true,
+      inviterDeviceId: parsed.inviterDeviceId,
+      namespace: parsed.namespace,
+      masterFingerprint: fingerprint,
+      expiresAt: parsed.expiresAt,
+      alreadyJoined,
+    });
+  }
+
+  async function handleCloudJoin(req, res, body) {
+    const input = parseJsonBody(body) ?? {};
+    if (input.confirm !== true) {
+      return sendCloudError(res, cloudError('CONFIRMATION_REQUIRED', '加入忆云需要显式确认（confirm:true）'));
+    }
+    if (!cloud.available) return sendCloudError(res, cloudUnavailableError(), { disabled: true });
+    const token = typeof input.token === 'string' ? input.token.trim() : '';
+    if (token.length === 0) return sendCloudError(res, cloudError('TOKEN_REQUIRED', '需要加入令牌'));
+
+    let parsed;
+    try {
+      parsed = await decodeCloudToken(token);
+    } catch (error) {
+      return sendCloudError(res, error);
+    }
+    const fingerprint = masterFingerprintFromHex(parsed.masterPublicKey);
+
+    // 指纹重复：不创建目录；返回已有条目，前端提供「切换到它」。
+    let state;
+    try {
+      state = await readRegistry(cloud.root);
+    } catch (error) {
+      return sendCloudError(res, error, { disabled: true });
+    }
+    if (fingerprint !== null) {
+      const duplicate = state.registry.profiles.find((profile) => profile.masterFingerprint === fingerprint);
+      if (duplicate) {
+        return sendCloudError(res, cloudError(
+          'CLOUD_ALREADY_JOINED',
+          `这台设备已加入「${duplicate.name}」，可直接切换`,
+          { existing: { id: duplicate.id, name: duplicate.name } },
+        ));
+      }
+    }
+    // 名字先校验（不消耗令牌/不建目录）；锁内 registerProfile 仍会再查一次防并发。
+    if (input.name !== undefined) {
+      let name;
+      try {
+        name = normalizeProfileName(input.name);
+      } catch (error) {
+        return sendCloudError(res, error);
+      }
+      if (state.registry.profiles.some((profile) => profile.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
+        return sendCloudError(res, cloudError('NAME_TAKEN', '已有同名忆云，请换一个名字'));
+      }
+    }
+
+    const profilesDir = join(cloud.root, PROFILES_DIR);
+    // profiles/ 已存在时做 realpath containment：防止有人把它 symlink 到 root 外。
+    if (existsSync(profilesDir)) {
+      try {
+        const realProfiles = realpathSync(profilesDir);
+        const realRoot = realpathSync(cloud.root);
+        if (realProfiles !== realRoot && !realProfiles.startsWith(`${realRoot}${sep}`)) {
+          throw cloudError('CLOUD_PROFILE_PATH_INVALID', 'profiles/ 指向 root 之外，拒绝创建忆云目录');
+        }
+      } catch (error) {
+        if (error?.code === 'CLOUD_PROFILE_PATH_INVALID') return sendCloudError(res, error);
+        return sendCloudError(res, cloudError(
+          'PROFILE_JOIN_FAILED',
+          `无法校验忆云目录：${scrubToken(error?.message ?? error, token)}`,
+        ));
+      }
+    }
+    try {
+      await mkdir(profilesDir, { recursive: true, mode: 0o700 });
+    } catch (error) {
+      return sendCloudError(res, cloudError(
+        'PROFILE_JOIN_FAILED',
+        `本机无法创建忆云目录：${scrubToken(error?.message ?? error, token)}`,
+      ));
+    }
+    let id = null;
+    let newHome = null;
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      let candidate;
+      try {
+        candidate = newProfileId(state.registry.profiles);
+      } catch (error) {
+        return sendCloudError(res, cloudError('PROFILE_JOIN_FAILED', error?.message ?? String(error)));
+      }
+      const candidateHome = join(profilesDir, candidate);
+      try {
+        await mkdir(candidateHome, { mode: 0o700 });
+        id = candidate;
+        newHome = candidateHome;
+        break;
+      } catch (error) {
+        if (error?.code === 'EEXIST') continue;
+        return sendCloudError(res, cloudError(
+          'PROFILE_JOIN_FAILED',
+          `本机无法创建忆云目录：${scrubToken(error?.message ?? error, token)}`,
+        ));
+      }
+    }
+    if (newHome === null) {
+      return sendCloudError(res, cloudError('PROFILE_JOIN_FAILED', '无法分配新的忆云目录：请重试'));
+    }
+
+    // 标记只含 id/时间/pid（绝不含令牌）；失败时整目录删除（尚未注册）。
+    try {
+      await writeFile(
+        join(newHome, '.provisioning'),
+        JSON.stringify({ id, at: new Date().toISOString(), pid: process.pid }),
+        { mode: 0o600 },
+      );
+    } catch (error) {
+      await rm(newHome, { recursive: true, force: true }).catch(() => undefined);
+      return sendCloudError(res, cloudError(
+        'PROFILE_JOIN_FAILED',
+        `本机无法写入忆云目录：${scrubToken(error?.message ?? error, token)}`,
+      ));
+    }
+
+    let registered = false;
+    try {
+      const mcpPort = runtime?.mcp?.port ?? config?.mcp?.http?.port ?? 7331;
+      const joinPort = runtime?.join?.port ?? config?.joinService?.port ?? 4002;
+      const listenPort = currentListenPort();
+      const result = await provisionJoinInto({
+        home: newHome,
+        token,
+        ports: { mcp: mcpPort, join: joinPort, listen: listenPort },
+        rollbackDirectory: true,
+        ...(Number.isFinite(input.timeoutMs) ? { timeoutMs: input.timeoutMs } : {}),
+      });
+      // 校验落盘：config + 委派身份 + 指纹一致（缺失/不一致 → 失败，且整目录删除）
+      if (!existsSync(configPath(newHome)) || !existsSync(join(newHome, 'store.jsonl.identity.json'))) {
+        throw cloudError('PROFILE_JOIN_FAILED', '新忆云落盘不完整（config/身份缺失），已回滚');
+      }
+      if (fingerprint !== null && result.fingerprint !== null && result.fingerprint !== fingerprint) {
+        throw cloudError('PROFILE_JOIN_FAILED', '新忆云主公钥指纹与令牌不一致，已回滚');
+      }
+
+      const registeredResult = await registerProfile(cloud.root, {
+        id,
+        name: input.name,
+        kind: 'delegated',
+        masterFingerprint: fingerprint ?? result.fingerprint ?? null,
+        deviceId: result.deviceId,
+        createdAt: new Date().toISOString(),
+      });
+      registered = true;
+      const profile = registeredResult.value;
+      const current = registeredResult.registry.current;
+      await rm(join(newHome, '.provisioning'), { force: true }).catch(() => undefined);
+      await writeProvisionRecord(newHome, { ...result, at: new Date().toISOString() }).catch(() => undefined);
+      return sendJson(res, 201, {
+        ok: true,
+        profile: publicProfile(profile),
+        current,
+        switch: { required: true, command: `mebular cloud use ${profile.id}` },
+      });
+    } catch (error) {
+      if (!registered) await rm(newHome, { recursive: true, force: true }).catch(() => undefined);
+      const known = new Set([
+        'CONFIRMATION_REQUIRED', 'TOKEN_REQUIRED', 'TOKEN_INVALID', 'TOKEN_EXPIRED', 'TOKEN_REJECTED',
+        'ENDPOINT_UNREACHABLE', 'CLOUD_ALREADY_JOINED', 'INVALID_NAME', 'NAME_TAKEN', 'PROFILE_EXISTS',
+        'INVALID_PROFILE_ID', 'PROFILE_JOIN_FAILED', 'CLOUD_DISABLED', 'CLOUD_UNAVAILABLE',
+        'CLOUD_REGISTRY_INVALID', 'CLOUD_REGISTRY_LOCKED', 'CLOUD_PROFILE_PATH_INVALID',
+      ]);
+      const wrapped = known.has(error?.code)
+        ? error
+        : cloudError('PROFILE_JOIN_FAILED', scrubToken(error?.message ?? error, token));
+      // 走到这里时令牌可能已在邀请方处兑换（兑换后本机写失败）——文案必须说明需重新生成。
+      if (['PROFILE_JOIN_FAILED', 'CLOUD_REGISTRY_LOCKED', 'CLOUD_REGISTRY_INVALID'].includes(wrapped.code)) {
+        wrapped.message = `${wrapped.message}（令牌可能已在对方处兑换；请让邀请方重新生成）`;
+      }
+      return sendCloudError(res, wrapped, { disabled: true });
+    }
+  }
+
+  async function handleCloudRename(req, res, body) {
+    if (!cloud.available) return sendCloudError(res, cloudUnavailableError(), { disabled: true });
+    const input = parseJsonBody(body) ?? {};
+    const id = typeof input.id === 'string' ? input.id : '';
+    if (id.length === 0) return sendCloudError(res, cloudError('PROFILE_NOT_FOUND', '需要忆云 id'));
+    try {
+      const result = await renameProfile(cloud.root, id, input.name);
+      return sendJson(res, 200, {
+        ok: true,
+        profile: publicProfile(result.value, result.registry.current),
+      });
+    } catch (error) {
+      return sendCloudError(res, error, { disabled: true });
     }
   }
 
@@ -1225,6 +1564,11 @@ export async function startHttpServer({
     if (!app || !service) {
       return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
     }
+
+    // 忆云档案写端点：**不**经 securityWriteGate（§6.3：加入是出站动作，语义相反）。
+    if (path === '/admin/api/clouds/inspect') return handleCloudInspect(req, res, body);
+    if (path === '/admin/api/clouds/join') return handleCloudJoin(req, res, body);
+    if (path === '/admin/api/clouds/rename') return handleCloudRename(req, res, body);
 
     // S2：安全三档写端点门禁（medium 动态码 / high 会签或恢复码；low 放行）。
     const gateInput = parseJsonBody(body) ?? {};
@@ -2141,6 +2485,14 @@ export async function startHttpServer({
     }
     // 3) D1：只读降级；D2 起由 applyAdminWrite 处理
     if (!writesEnabled || typeof applyAdminWrite !== 'function') {
+      if (/^\/admin\/api\/clouds\/(join|rename|inspect)$/.test(path)) {
+        return sendJson(res, 403, {
+          ok: false,
+          error: 'CLOUD_DISABLED',
+          reason: 'read_only',
+          message: '控制台处于只读模式：忆云写操作已禁用',
+        });
+      }
       return sendJson(res, 403, { error: 'forbidden', reason: 'console_read_only' });
     }
     return applyAdminWrite(req, res, path, body);
@@ -2153,7 +2505,16 @@ export async function startHttpServer({
       const body = req.method === 'POST' || req.method === 'PUT' ? await readBody(req) : Buffer.alloc(0);
 
       if (path === '/healthz' && req.method === 'GET') {
-        return sendJson(res, 200, { status: 'ok', name: 'mebular', version: '0.1.0', auth, tls });
+        return sendJson(res, 200, {
+          status: 'ok',
+          name: 'mebular',
+          version: '0.1.0',
+          auth,
+          tls,
+          // 实例身份：App 用 instance 校验端口上是不是目标忆云（200 但 instance 不符 = 另一张忆云）。
+          instance: homeKey(home),
+          ...(cloudId !== null ? { cloudId } : {}),
+        });
       }
       if (auth === 'oauth') {
         if (path === '/.well-known/oauth-protected-resource' && req.method === 'GET') {
@@ -2587,16 +2948,27 @@ export async function startHttpServer({
     }
   };
 
+  // root 级硬单活：仅已初始化档案的守护获取（引导态 app/service 为空，不参与）。
+  // 被活 PID 占用且 home 不同 → CLOUD_ALREADY_ACTIVE（复用 <home>/lock 的 PID 检查纪律）。
+  const activeLock = app && service && cloud.available
+    ? await acquireActiveLock({ root: cloud.root, home, profileId: cloudId })
+    : null;
+
   let server;
-  if (tls) {
-    server = https.createServer({ key: await readFile(tlsKey, 'utf-8'), cert: await readFile(tlsCert, 'utf-8') }, handler);
-  } else {
-    server = http.createServer(handler);
+  try {
+    if (tls) {
+      server = https.createServer({ key: await readFile(tlsKey, 'utf-8'), cert: await readFile(tlsCert, 'utf-8') }, handler);
+    } else {
+      server = http.createServer(handler);
+    }
+    await new Promise((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, host, () => resolve());
+    });
+  } catch (error) {
+    await activeLock?.release?.().catch(() => undefined);
+    throw error;
   }
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, host, () => resolve());
-  });
   const actualPort = server.address().port;
   origin = `${scheme}://${isLoopback ? '127.0.0.1' : host}:${actualPort}`;
   issuer = process.env.MEBULAR_OAUTH_ISSUER ?? origin;
@@ -2604,6 +2976,7 @@ export async function startHttpServer({
   const close = async () => {
     await new Promise((resolve) => server.close(() => resolve()));
     for (const entry of mcpSessions.values()) await entry.server.close().catch(() => undefined);
+    await activeLock?.release?.().catch(() => undefined);
   };
   return { server, host, port: actualPort, auth, issuer, close };
 }

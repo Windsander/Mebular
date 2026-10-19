@@ -816,14 +816,28 @@ async function main() {
 
     // E2-A2 · 加入忆云弹层：预填名字、当前忆云提示、坏令牌可读错误、当前忆云不变
     await evalJs('document.querySelector("#join-cloud").click()');
-    check('E2-A2 加入弹层：名字预填「忆云 3」+ 当前忆云归档提示 + 终端兜底文案',
-      await waitFor(`(() => {
+    const joinModalOk = await waitFor(`(() => {
         const modal = document.querySelector('#cloud-join');
         return Boolean(modal) && modal.hidden === false
           && document.querySelector('#cloud-join-name')?.value === '忆云 3'
           && /当前忆云「忆云 1」/.test(document.querySelector('#cloud-join-warning')?.textContent ?? '')
           && /归档保留，不删除/.test(modal.textContent);
-      })()`));
+      })()`);
+    if (!joinModalOk) {
+      const diag = await evalJs(`(() => {
+        const modal = document.querySelector('#cloud-join');
+        return {
+          hidden: modal?.hidden,
+          name: document.querySelector('#cloud-join-name')?.value,
+          warning: document.querySelector('#cloud-join-warning')?.textContent,
+          modalText: (modal?.textContent ?? '').replace(/\\s+/g, ' ').slice(0, 500),
+          badge: document.querySelector('#cloud-badge')?.textContent,
+          rows: document.querySelectorAll('[data-cloud-row]').length,
+        };
+      })()`);
+      console.log('  [diag] E2-A2 join modal:', JSON.stringify(diag));
+    }
+    check('E2-A2 加入弹层：名字预填「忆云 3」+ 当前忆云归档提示 + 终端兜底文案', joinModalOk);
     await capture('e2a2-after-cloud-join-modal.jpg');
     await evalJs(`(() => {
       document.querySelector('#cloud-join-token').value = 'not-a-join-token';

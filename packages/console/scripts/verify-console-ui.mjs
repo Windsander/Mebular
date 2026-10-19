@@ -11,6 +11,7 @@
 /* global WebSocket */
 
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -66,6 +67,7 @@ async function seedHome(home) {
   const { Mebular, IdentityManager, POLICY_NAMESPACE } = await import('@mebular/core');
   const { securityActionDigest, pairingCodeForDigest } = await import('@mebular/fleet');
   const master = await new IdentityManager().generateUserMasterKey();
+  const defaultFingerprint = `sha256:${createHash('sha256').update(Buffer.from(master.publicKey)).digest('hex').slice(0, 12)}`;
   const keyFile = join(home, 'user-master-key.json');
   await writeFile(keyFile, JSON.stringify({
     publicKey: Buffer.from(master.publicKey).toString('base64'),
@@ -125,12 +127,32 @@ async function seedHome(home) {
   await writeFile(join(home, 'custom-mcp.json'), '{}\n', 'utf-8');
   // ③ 补丁 3 接入失败实证用料：坏 JSON（connect 走「配置无法解析」不写入路径，零写入风险）
   await writeFile(join(home, 'broken-mcp.json'), '{ bad json', 'utf-8');
+  // E2-A2：忆云注册表（默认当前 + 一台已归档），供卡片/切换兜底/改名/深链用例。
+  await mkdir(join(home, 'profiles', 'p_demo0001'), { recursive: true });
+  const nowIso = new Date().toISOString();
+  await writeFile(join(home, 'profiles.json'), JSON.stringify({
+    v: 1,
+    current: 'default',
+    profiles: [
+      {
+        id: 'default', name: '忆云 1', home: '.', kind: 'root',
+        createdAt: nowIso, lastUsedAt: nowIso,
+        masterFingerprint: defaultFingerprint, deviceId: 'device-ui',
+      },
+      {
+        id: 'p_demo0001', name: '忆云 2', home: 'profiles/p_demo0001', kind: 'delegated',
+        createdAt: nowIso, lastUsedAt: new Date(Date.now() - 86_400_000).toISOString(),
+        masterFingerprint: 'sha256:222222222222', deviceId: 'device-ui',
+      },
+    ],
+  }, null, 2), 'utf-8');
   return storagePath;
 }
 
 function spawnServe(home, port) {
   const proc = spawn(process.execPath, [bin, 'serve', '--port', String(port)], {
-    env: { ...process.env, MEBULAR_HOME: home, MEBULAR_USER_HOME: home },
+    // E2-A2：显式 CLOUD_ROOT 让临时 home 具备忆云注册表（否则自定义 home 会按设计关闭忆云管理）。
+    env: { ...process.env, MEBULAR_HOME: home, MEBULAR_USER_HOME: home, MEBULAR_CLOUD_ROOT: home },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';
@@ -355,7 +377,15 @@ async function main() {
           && Boolean(document.querySelector('#invite-device'))
           && !/连接已有地址/.test(actions?.textContent ?? '');
       })()`));
-    await capture('e1-after-topbar-live.jpg');
+    check('E2-A2 顶栏：忆云徽章取 overview.cloud.name（忆云 1）+ 对称「加入忆云 / 邀请设备」',
+      await waitFor(`(() => {
+        const badge = document.querySelector('#cloud-badge');
+        const actions = document.querySelector('.topbar-actions');
+        return Boolean(badge) && badge.hidden === false && /忆云 1/.test(badge.textContent)
+          && Boolean(document.querySelector('#join-cloud')) && Boolean(document.querySelector('#invite-device'))
+          && /加入忆云/.test(actions?.textContent ?? '') && !document.querySelector('#add-device');
+      })()`));
+    await capture('e2a2-after-topbar-live.jpg');
 
     // 选项卡切换（曾因误删 setView 失效）
     await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
@@ -591,6 +621,68 @@ async function main() {
         && /高级/.test(common.textContent);
     })()`));
 
+    // E2-A2 · 忆云卡（设置 · 常用）：每行名字/当前|已归档/根指纹/最近使用/动作；当前不可切换
+    check('E2-A2 忆云卡：两行（当前 + 已归档）+ 根指纹/最近使用；当前项无切换；无删除入口',
+      await waitFor(`(() => {
+        const card = document.querySelector('#settings-cloud-card');
+        if (!card) return false;
+        const current = card.querySelector('[data-cloud-row=default]');
+        const archived = card.querySelector('[data-cloud-row=p_demo0001]');
+        const common = document.querySelector('#settings-panel-common');
+        return Boolean(current) && Boolean(archived)
+          && /忆云 1/.test(current.textContent) && /当前/.test(current.textContent)
+          && /忆云 2/.test(archived.textContent) && /已归档/.test(archived.textContent)
+          && /sha256:[0-9a-f]{12}/.test(current.textContent) && /最近使用/.test(current.textContent)
+          && !current.querySelector('[data-cloud-switch]')
+          && Boolean(archived.querySelector('[data-cloud-switch]')) && Boolean(archived.querySelector('[data-cloud-rename]'))
+          && !card.querySelector('[data-cloud-delete]') && !/删除忆云/.test(card.textContent)
+          && /归档保留，不删除/.test(card.textContent)
+          && Boolean(common) && common.contains(card)
+          && Boolean(common.querySelector('[data-settings-common-status]'))
+          && (common.querySelector('[data-settings-common-status]').compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+      })()`));
+    await capture('e2a2-after-settings-clouds.jpg');
+
+    // 改名即时生效（不重启）：当前忆云 忆云 1 → 工作室；顶栏徽章同步；守护进程仍存活
+    await evalJs('document.querySelector("[data-cloud-rename=default]").click()');
+    check('E2-A2 改名：行内编辑输入就位', await waitFor('Boolean(document.querySelector("[data-cloud-rename-input]"))'));
+    await evalJs(`(() => {
+      const input = document.querySelector('[data-cloud-rename-input]');
+      input.value = '工作室';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('[data-cloud-rename-save]').click();
+    })()`);
+    check('E2-A2 改名即时生效：卡片与顶栏徽章同步为「工作室」',
+      await waitFor('(() => { const card = document.querySelector("#settings-cloud-card"); const badge = document.querySelector("#cloud-badge"); return Boolean(card) && /工作室/.test(card.textContent) && /工作室/.test(badge?.textContent ?? ""); })()', 20000));
+    check('E2-A2 改名不重启守护（进程仍存活）', handle.proc.exitCode === null && handle.proc.signalCode === null);
+    // 改回默认名（避免影响后续邀请/指纹用例）
+    await evalJs('document.querySelector("[data-cloud-rename=default]").click()');
+    await waitFor('Boolean(document.querySelector("[data-cloud-rename-input]"))');
+    await evalJs(`(() => {
+      const input = document.querySelector('[data-cloud-rename-input]');
+      input.value = '忆云 1';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('[data-cloud-rename-save]').click();
+    })()`);
+    check('E2-A2 改名可改回（忆云 1）',
+      await waitFor('(() => { const card = document.querySelector("#settings-cloud-card"); return Boolean(card) && /忆云 1/.test(card.textContent); })()', 20000));
+
+    // 已归档切换：危险确认 → 无 App 桥时给 CLI 兜底（当前忆云不变）
+    await evalJs('document.querySelector("[data-cloud-row=p_demo0001] [data-cloud-switch]").click()');
+    check('E2-A2 已归档切换：危险确认（说明归档保留、不删除）',
+      await waitFor('document.querySelector("#modal")?.hidden === false && /归档保留，不删除/.test(document.querySelector("#modal")?.textContent ?? "")'));
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    check('E2-A2 无 App 桥兜底：显示 mebular cloud use p_demo0001 + 复制；当前仍是忆云 1',
+      await waitFor(`(() => {
+        const body = document.querySelector('#cloud-switch-body');
+        return document.querySelector('#cloud-switch')?.hidden === false
+          && /mebular cloud use p_demo0001/.test(body?.textContent ?? '')
+          && Boolean(body?.querySelector('[data-copy]'))
+          && /忆云 1/.test(document.querySelector('#cloud-badge')?.textContent ?? '');
+      })()`));
+    await capture('e2a2-after-cloud-switch-fallback.jpg');
+    await evalJs('document.querySelector("#cloud-switch-close").click()');
+
     // 高级页：只留「常驻服务」卡 + 网络/sync 字段 + 诊断；MCP 六项独立 tab
     await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
     check('E1 高级页：常驻服务卡就位，MCP 字段不再混入高级',
@@ -721,6 +813,57 @@ async function main() {
     check('UI 待重启：改回（删除 intervalMs）→ 200', revertedPending === 200, `status=${revertedPending}`);
     check('UI 待重启：pendingRestart 清空后提示消失', await waitFor('!document.querySelector("[data-pending-restart]")'));
     await evalJs('document.querySelector("#settings-close").click()');
+
+    // E2-A2 · 加入忆云弹层：预填名字、当前忆云提示、坏令牌可读错误、当前忆云不变
+    await evalJs('document.querySelector("#join-cloud").click()');
+    check('E2-A2 加入弹层：名字预填「忆云 3」+ 当前忆云归档提示 + 终端兜底文案',
+      await waitFor(`(() => {
+        const modal = document.querySelector('#cloud-join');
+        return Boolean(modal) && modal.hidden === false
+          && document.querySelector('#cloud-join-name')?.value === '忆云 3'
+          && /当前忆云「忆云 1」/.test(document.querySelector('#cloud-join-warning')?.textContent ?? '')
+          && /归档保留，不删除/.test(modal.textContent);
+      })()`));
+    await capture('e2a2-after-cloud-join-modal.jpg');
+    await evalJs(`(() => {
+      document.querySelector('#cloud-join-token').value = 'not-a-join-token';
+      document.querySelector('#cloud-join-token').dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('#cloud-join-submit').click();
+    })()`);
+    check('E2-A2 坏令牌：可读错误（令牌格式不对）+ 令牌输入保留 + 当前忆云不变',
+      await waitFor(`(() => {
+        const err = document.querySelector('#cloud-join-error');
+        return err && err.hidden === false && /令牌格式不对/.test(err.textContent)
+          && document.querySelector('#cloud-join-token')?.value === 'not-a-join-token'
+          && /忆云 1/.test(document.querySelector('#cloud-badge')?.textContent ?? '');
+      })()`));
+    await evalJs('document.querySelector("#cloud-join-close").click()');
+    check('E2-A2 加入弹层可关闭且清空令牌', await waitFor('document.querySelector("#cloud-join")?.hidden === true && document.querySelector("#cloud-join-token")?.value === ""'));
+
+    // E2-A2 · 深链：?view=settings&focus=clouds 直接打开常用并聚焦忆云卡
+    await send('Page.navigate', { url: `${base}/console/?view=settings&focus=clouds` });
+    check('E2-A2 深链 focus=clouds：设置常用打开并聚焦忆云卡',
+      await waitFor('document.querySelector("#settings")?.hidden === false && document.querySelector("#settings-panel-common")?.hidden === false && document.activeElement?.id === "settings-cloud-card"', 20000));
+    await evalJs('document.querySelector("#settings-close").click()');
+
+    // E2-A2 · 重复加入：用当前忆云的邀请令牌 → CLOUD_ALREADY_JOINED → 已有忆云 + 切换入口
+    await evalJs('document.querySelector("#invite-device").click()');
+    check('E2-A2 准备重复加入用的邀请令牌', await waitFor('Boolean(document.querySelector("#invite-body [data-copy]")?.dataset.copy)', 20000));
+    const duplicateToken = await evalJs('document.querySelector("#invite-body [data-copy]")?.dataset.copy ?? ""');
+    await evalJs('document.querySelector("#invite-close").click()');
+    await evalJs('document.querySelector("#join-cloud").click()');
+    await evalJs(`(() => {
+      document.querySelector('#cloud-join-token').value = ${JSON.stringify(duplicateToken)};
+      document.querySelector('#cloud-join-token').dispatchEvent(new Event('input', { bubbles: true }));
+    })()`);
+    check('E2-A2 重复加入：识别已加入「忆云 1」+ 主按钮变切换入口，不创建重复项',
+      await waitFor(`(() => {
+        const box = document.querySelector('#cloud-join-inspect');
+        return /这台设备已加入「忆云 1」/.test(box?.textContent ?? '')
+          && /切换到「忆云 1」/.test(document.querySelector('#cloud-join-submit')?.textContent ?? '');
+      })()`, 20000));
+    await evalJs('document.querySelector("#cloud-join-close").click()');
+
     // 轮 C 症状②：Esc 只关最上层；点空白关闭；设置/关于叠加时顺序正确
     await evalJs('document.querySelector("#open-settings").click()');
     await waitFor('document.querySelector("#settings")?.hidden === false');
@@ -768,6 +911,15 @@ async function main() {
         const html = document.querySelector('#invite')?.outerHTML ?? '';
         return !/去设置启用/.test(html) && !/设置 → 常用/.test(html);
       })()`));
+    check('E2-A2 邀请单屏：本忆云名 + 根指纹 + 「加入忆云」指路（取 overview.cloud）',
+      await evalJs(`(() => {
+        const line = document.querySelector('#invite-cloud-identity');
+        const body = document.querySelector('#invite-body')?.textContent ?? '';
+        return Boolean(line) && /本忆云：忆云 1/.test(line.textContent)
+          && /sha256:[0-9a-f]{12}/.test(line.textContent)
+          && /让 TA 在控制台点「加入忆云」粘贴此令牌/.test(body);
+      })()`));
+    await capture('e2a2-after-invite-cloud-line.jpg');
     await capture('e1-after-invite-single-screen.jpg');
     check('轮 C 邀请卡：帮助去重（兑换语义只讲一次）',
       await evalJs('(() => { const t = document.querySelector("#invite-body")?.textContent ?? ""; const hits = (t.match(/兑换/g) ?? []).length; return hits <= 2 && !/兑换后自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）\\s*让新设备/.test(t); })()'));
@@ -1124,6 +1276,16 @@ async function main() {
       await send('Page.navigate', { url: `${base}/console/` });
       check('v4 窄屏：活体面板视图就位（未启用 P2P 常驻横幅可见）',
         await waitFor('(() => { const b = document.querySelector("#banner"); return Boolean(b) && b.hidden === false && document.querySelector(".stage-wrap")?.classList.contains("has-banner"); })()'));
+      check('E2-A2 窄屏：两枚入口折叠为图标（等宽）+ 忆云徽章可见 + 无横向溢出',
+        await waitFor(`(() => {
+          const labels = [...document.querySelectorAll('.topbar-actions .btn-label')];
+          const buttons = [...document.querySelectorAll('.topbar-actions .btn')];
+          return labels.length >= 3 && labels.every((el) => getComputedStyle(el).display === 'none')
+            && buttons.every((el) => Math.abs(el.getBoundingClientRect().width - 34) <= 2)
+            && document.querySelector('#cloud-badge')?.hidden === false
+            && document.documentElement.scrollWidth <= window.innerWidth + 1;
+        })()`));
+      await capture('e2a2-after-topbar-narrow-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
       await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
       await waitFor('document.querySelector("#domains-view")?.hidden === false');
       const bannerOverlap = await evalJs(`(() => {

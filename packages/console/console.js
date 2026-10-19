@@ -31,6 +31,14 @@ const state = {
   memories: null,
   memoryFilters: { archived: false, deleted: false, namespace: '' },
   settings: null,
+  // E2-A2：忆云列表/卡片与加入弹层（clouds 端点旧守护可能没有 → 卡片显示升级提示）
+  clouds: null,
+  cloudsError: null,
+  cloudRename: null,
+  cloudRenameError: '',
+  cloudJoinInspect: null,
+  cloudJoinResult: null,
+  cloudJoinNameAuto: true,
   // S3：安全三档只读状态（GET /admin/api/security）+ 活动流（写操作弹层）
   security: null,
   securityFlow: null,
@@ -126,6 +134,8 @@ async function refreshOnce() {
     state.namespaces = mock.namespaces;
     state.memories = mock.memories;
     state.security = mock.security ?? null;
+    state.clouds = mock.clouds ?? null;
+    state.cloudsError = null;
     state.features = { writes: false };
     state.error = null;
     state.degraded = mock.degraded;
@@ -144,8 +154,9 @@ async function refreshOnce() {
     api('/admin/api/clients'),
     api('/healthz'),
     api('/admin/api/security'),
+    api('/admin/api/clouds'),
   ]);
-  const [overview, devices, policy, namespaces, settings, configView, memories, serviceView, clientsView, healthz, securityView] = results;
+  const [overview, devices, policy, namespaces, settings, configView, memories, serviceView, clientsView, healthz, securityView, cloudsView] = results;
   if (seq !== refreshSeq) return; // 已有更新的刷新在途/完成：本轮数据过期，整体丢弃
   if (healthz && healthz.status === 'fulfilled') state.healthz = healthz.value;
   let firstError = null;
@@ -162,6 +173,18 @@ async function refreshOnce() {
   if (clientsView.status === 'fulfilled') state.clients = clientsView.value.clients ?? [];
   // S3：安全状态只读；旧版 serve（无端点）→ null（徽章显示 —，不阻塞控制台）
   if (securityView.status === 'fulfilled') state.security = securityView.value;
+  // E2-A2：忆云列表只读；失败不阻塞总览（旧守护 404 / 自定义 home 403 → 卡片给可读说明）
+  if (cloudsView.status === 'fulfilled') {
+    state.clouds = cloudsView.value;
+    state.cloudsError = null;
+  } else {
+    state.clouds = null;
+    const payload = cloudsView.reason?.payload ?? null;
+    state.cloudsError = {
+      code: payload?.error ?? (cloudsView.reason?.status === 404 ? 'CLOUD_UNSUPPORTED' : 'CLOUD_LIST_FAILED'),
+      message: payload?.message ?? cloudsView.reason?.message ?? '忆云列表不可用',
+    };
+  }
   // 补丁 3 增补 · 对账：每轮刷新清掉与服务端真值矛盾的客户端残留
   // （配置不在了 → 清提示/verify/失败残留；verify 确认 connected → 重载提醒退场）
   for (const c of state.clients ?? []) {
@@ -175,6 +198,8 @@ async function refreshOnce() {
   state.features = { writes: Boolean(state.overview?.features?.writes) };
   state.error = firstError;
   state.degraded = computeDegraded();
+  // 若加入弹层在首轮数据到达前已打开：补齐当前忆云名与默认名字（不覆盖用户已输入内容）。
+  syncCloudJoinMeta();
   render();
 }
 
@@ -211,6 +236,20 @@ function renderTopbar() {
   const selfEl = $('#self-badge');
   const onlineEl = $('#online-badge');
   const memEl = $('#memory-badge');
+  // E2-A2：忆云名只取 overview.cloud.name；旧守护没有该字段 → 徽章隐藏（绝不用端口/目录猜）。
+  const cloudEl = $('#cloud-badge');
+  if (cloudEl) {
+    const cloud = state.overview?.cloud ?? null;
+    if (typeof cloud?.name === 'string' && cloud.name.trim().length > 0) {
+      cloudEl.hidden = false;
+      cloudEl.textContent = `☁ ${cloud.name}`;
+      cloudEl.title = `当前忆云：${cloud.name}（点击打开设置 · 忆云）`;
+      cloudEl.setAttribute('aria-label', `当前忆云：${cloud.name}；打开设置 · 忆云`);
+    } else {
+      cloudEl.hidden = true;
+      cloudEl.textContent = '';
+    }
+  }
   if (state.overview?.device) {
     selfEl.textContent = `本机 · ${state.overview.device.deviceId}`;
     selfEl.title = `打开「关于本机」（${state.overview.device.deviceId}）`;
@@ -1004,6 +1043,11 @@ function settingsSignature(activeTab) {
     state.features?.writes ?? null,
     state.healthz ?? null,
     state.overview?.device?.deviceId ?? null,
+    // E2-A2：忆云卡随轮询更新名字/当前项；改名编辑态也纳入签名（输入值只放 state，不触发每键重建）
+    state.clouds ?? null,
+    state.cloudsError ?? null,
+    state.cloudRename?.id ?? null,
+    state.cloudRenameError ?? '',
     // AI 助手专区依赖：只取稳定投影（整对象序列化会因服务端易变字段导致每 3s 重建）
     (state.clients ?? null) && (state.clients ?? []).map((c) => [c.id, Boolean(c.installed), Boolean(c.connected), c.state ?? null]),
     state.service ? [Boolean(state.service.registered), Boolean(state.service.running)] : null,
@@ -1095,6 +1139,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
         <div class="domain-actions"><button id="settings-invite-device" class="btn btn-small btn-crt" type="button" ${state.features.writes && !MOCK ? '' : 'disabled'}>＋ 邀请设备</button></div>
         <p class="muted" style="font-size:11px">可编辑配置已归入「高级」与「MCP 接入」；安全等级、动态码与恢复码在「安全」。</p>
       </section>
+      ${cloudCardHtml()}
       ${cfgActionsBlock()}
     `)}
     ${panel('security', `<section id="settings-security-slot" class="settings-slot security-card" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
@@ -3598,6 +3643,8 @@ function modalCanDismiss(el) {
   if (!el || el.id === 'provision') return false;
   if (el.dataset.modalStatic === 'true') return false;
   if (el.id === 'wizard' && wizardState.connection === 'connecting') return false;
+  // E2-A2：加入忆云提交中不可关闭（避免用户以为取消、实际仍完成切换）
+  if (el.id === 'cloud-join' && cloudJoinBusy) return false;
   // S3：恢复码一次性展示期间不可关闭（必须先回执「我已抄写」）
   if (el.id === 'security-action' && state.securityFlow?.blockClose === true) return false;
   return true;
@@ -3615,6 +3662,12 @@ function dismissModal(el) {
     $('#handoff-result').textContent = '';
   }
   if (el.id === 'invite') state.inviteToken = null;
+  if (el.id === 'cloud-join') {
+    state.cloudJoinInspect = null;
+    state.cloudJoinResult = null;
+    const input = $('#cloud-join-token');
+    if (input) input.value = '';
+  }
   return true;
 }
 
@@ -3689,6 +3742,11 @@ $('#open-settings').addEventListener('click', () => {
   $('#settings').hidden = false;
   renderSettings(state.settingsTab ?? 'common');
 });
+// E2-A2：顶栏忆云徽章 → 设置 · 常用忆云卡；加入忆云 → 弹层。
+$('#cloud-badge')?.addEventListener('click', () => openCloudSettings());
+$('#join-cloud')?.addEventListener('click', () => openCloudJoin());
+$('#cloud-join-close')?.addEventListener('click', () => closeCloudJoin());
+$('#cloud-switch-close')?.addEventListener('click', () => { $('#cloud-switch').hidden = true; });
 $('#settings-close').addEventListener('click', () => {
   $('#settings').hidden = true;
 });
@@ -3731,6 +3789,18 @@ $('#settings-body').addEventListener('click', (event) => {
     }
     return;
   }
+  // E2-A2：忆云卡（切换 / 改名 / 保存 / 取消）
+  const cloudSwitch = event.target.closest('[data-cloud-switch]');
+  if (cloudSwitch) { void requestCloudSwitch(cloudSwitch.dataset.cloudSwitch); return; }
+  const cloudRename = event.target.closest('[data-cloud-rename]');
+  if (cloudRename) { startCloudRename(cloudRename.dataset.cloudRename); return; }
+  if (event.target.closest('[data-cloud-rename-save]')) { void saveCloudRename(); return; }
+  if (event.target.closest('[data-cloud-rename-cancel]')) {
+    state.cloudRename = null;
+    state.cloudRenameError = '';
+    renderSettings(state.settingsTab ?? 'common');
+    return;
+  }
   // UX-2：重启向导（设置 · 常用；web 无 preload 桥时该按钮不渲染）
   if (event.target.closest('#settings-open-wizard')) {
     if (typeof window.mebularDesktop?.openWizard === 'function') void window.mebularDesktop.openWizard();
@@ -3746,6 +3816,12 @@ $('#settings-body').addEventListener('click', (event) => {
   if (event.target.closest('#diag-open-wizard')) {
     openWizard();
     return;
+  }
+});
+$('#settings-body').addEventListener('input', (event) => {
+  if (event.target?.matches?.('[data-cloud-rename-input]')) {
+    if (state.cloudRename) state.cloudRename.name = event.target.value;
+    state.cloudRenameError = '';
   }
 });
 $('#self-badge').addEventListener('click', () => {
@@ -3925,6 +4001,11 @@ function showInviteResult(res) {
       <p class="cfg-help muted">默认由守护按 joinService.bind 计算：通配时取本机 LAN IPv4。跨网段/NAT 时可改为新设备可达地址后重新签发。</p>
       ${endpointWarning}
     </div>`;
+  // E2-A2：邀请方忆云名 + 根指纹取 overview.cloud（加入方核对指纹的唯一可靠来源）。
+  const cloud = state.overview?.cloud ?? null;
+  const cloudLine = cloud?.name
+    ? `<p class="cfg-help muted invite-cloud-line" id="invite-cloud-identity">本忆云：<b>${escapeHtml(cloud.name)}</b> · 根指纹 ${cloud.masterFingerprint ? `<code>${escapeHtml(cloud.masterFingerprint)}</code>` : '<span class="kv-empty">未知</span>'}</p>`
+    : '';
   // E1 单屏：打开即见「令牌 + 二维码 + 复制」；端点/命令/兑换机制/重新生成全部收进「详情」。
   body.innerHTML = `
     <div class="readout-block invite-token-block">
@@ -3932,9 +4013,11 @@ function showInviteResult(res) {
       <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
     </div>
     ${qrBlock}
-    <p class="cfg-help muted">令牌即入网权限：一次性、短时效，仅当面或可信局域网传递；新设备入网后本页即可关闭。</p>
+    ${cloudLine}
+    <p class="cfg-help muted">对方已用过 Mebular：让 TA 在控制台点「加入忆云」粘贴此令牌；新设备：扫码或粘贴令牌。</p>
     ${res.securityApproval ? '<p class="crt-warn">已随令牌带上会签批准（新设备首现记录内嵌 cosign）。</p>' : ''}
     <details class="asst-detail"><summary>详情</summary>
+      <p class="cfg-help muted">令牌即入网权限：一次性、短时效，仅当面或可信局域网传递；新设备入网后本页即可关闭。</p>
       ${endpointEditor}
       <dl class="settings-kv">
         <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>
@@ -3969,6 +4052,496 @@ $('#invite-close').addEventListener('click', () => {
   $('#invite').hidden = true;
   state.inviteToken = null;
 });
+
+// ---------- E2-A2 · 忆云（加入 / 切换 / 改名 / 设置卡） ----------
+// 只读列表来自 /admin/api/clouds；加入走当前守护的准备端点，切换由桌面 App 的
+// cloudSwitch 桥执行（Web-only 显示 `mebular cloud use <id>` 兜底，绝不假装已切换）。
+
+let cloudJoinBusy = false;
+let cloudInspectSeq = 0;
+let cloudInspectTimer = null;
+let cloudRenameBusy = false;
+
+function hasCloudSwitchBridge() {
+  return typeof window.mebularDesktop?.cloudSwitch === 'function';
+}
+
+function cloudCurrentName() {
+  return state.overview?.cloud?.name
+    ?? state.clouds?.profiles?.find((entry) => entry.current)?.name
+    ?? '当前忆云';
+}
+
+function cloudNameOf(id) {
+  return state.clouds?.profiles?.find((entry) => entry.id === id)?.name ?? id;
+}
+
+/** 新忆云默认名：未占用的最小整数 N >= 2 → 忆云 N（与守护端规则一致）。 */
+function nextCloudName() {
+  const names = new Set((state.clouds?.profiles ?? [])
+    .map((entry) => String(entry.name ?? '').trim().toLocaleLowerCase()));
+  for (let n = 2; n < 1000; n += 1) {
+    const candidate = `忆云 ${n}`;
+    if (!names.has(candidate.toLocaleLowerCase())) return candidate;
+  }
+  return `忆云 ${Date.now()}`;
+}
+
+function cloudErrorCopy(error) {
+  const code = typeof error === 'string' ? error : error?.payload?.error;
+  const server = typeof error === 'string' ? '' : (error?.payload?.message ?? error?.message ?? '');
+  const titles = {
+    TOKEN_REQUIRED: '请先粘贴加入令牌。',
+    TOKEN_INVALID: '令牌格式不对，请让邀请方重新生成。',
+    TOKEN_EXPIRED: '令牌已过期，请让邀请方重新生成。',
+    TOKEN_REJECTED: '令牌已失效或已被使用，请让邀请方重新生成。',
+    CONFIRMATION_REQUIRED: '需要确认后才能加入。',
+    INVALID_NAME: '忆云名字需为 1–24 个字符，且不能包含 /、\\ 或 ..。',
+    NAME_TAKEN: '已有同名忆云，请换一个名字。',
+    PROFILE_NOT_FOUND: '未找到这个忆云；列表可能已变化，请刷新后重试。',
+    PROFILE_JOIN_FAILED: '本机无法创建忆云；令牌可能已在对方处兑换，请让邀请方重新生成。',
+    ENDPOINT_UNREACHABLE: '连不上邀请方：确认对方守护在运行、地址可达，然后重试。',
+    CLOUD_ALREADY_JOINED: '这台设备已加入该忆云，可直接切换。',
+    CLOUD_DISABLED: '当前为自定义 home 或受限环境，忆云管理不可用；当前忆云未变。',
+    CLOUD_UNAVAILABLE: '当前为自定义 home 或受限环境，忆云管理不可用；当前忆云未变。',
+    CLOUD_UNSUPPORTED: '当前守护不支持忆云管理，请升级 Mebular；当前忆云不受影响。',
+    CLOUD_LIST_FAILED: '忆云列表读取失败；当前忆云未变，请稍后重试。',
+    CLOUD_REGISTRY_INVALID: '忆云列表无法读取（注册表损坏）；当前忆云未变，请先修复注册表。',
+    CLOUD_REGISTRY_LOCKED: '忆云列表正被其他进程写入，请稍后重试。',
+    CLOUD_PROFILE_PATH_INVALID: '忆云目录越界，已拒绝操作；当前忆云未变。',
+  };
+  return {
+    title: titles[code] ?? (server || '操作失败，请稍后重试。'),
+    detail: titles[code] && server ? server : '',
+  };
+}
+
+function cloudRowHtml(entry) {
+  const id = escapeHtml(entry.id);
+  const current = entry.current === true;
+  const renaming = state.cloudRename?.id === entry.id;
+  const fingerprint = entry.masterFingerprint
+    ? `<code>${escapeHtml(entry.masterFingerprint)}</code>`
+    : '<span class="kv-empty">未知（需要修复）</span>';
+  const lastUsed = entry.lastUsedAt ? formatTime(entry.lastUsedAt) : '—';
+  const renameUi = renaming
+    ? `<input class="crt-input cloud-rename-input" data-cloud-rename-input type="text" maxlength="24"
+         value="${escapeHtml(state.cloudRename?.name ?? entry.name)}" aria-label="忆云名字" />
+       <button class="btn btn-small btn-crt" data-cloud-rename-save type="button" ${cloudRenameBusy ? 'disabled' : ''}>保存</button>
+       <button class="btn btn-small" data-cloud-rename-cancel type="button">取消</button>`
+    : `${current ? '' : `<button class="btn btn-small btn-crt btn-crt-danger" data-cloud-switch="${id}" type="button">切换</button>`}
+       <button class="btn btn-small btn-crt" data-cloud-rename="${id}" type="button">改名</button>`;
+  return `<div class="cloud-row${current ? ' is-current' : ''}" data-cloud-row="${id}">
+    <div class="cloud-main">
+      <span class="cloud-name">${escapeHtml(entry.name)}</span>
+      <span class="badge ${current ? 'badge-ok' : 'badge-muted'}">${current ? '当前' : '已归档'}</span>
+    </div>
+    <div class="cloud-meta">
+      <span>根指纹 ${fingerprint}</span>
+      <span>最近使用 ${escapeHtml(lastUsed)}</span>
+    </div>
+    <div class="cloud-actions">${renameUi}</div>
+    ${renaming && state.cloudRenameError ? `<p class="crt-warn cloud-rename-error" role="alert">${escapeHtml(state.cloudRenameError)}</p>` : ''}
+  </div>`;
+}
+
+/** 设置 · 常用：忆云卡（E1 只读状态/动作行之后；不提供删除入口）。 */
+function cloudCardHtml() {
+  let body;
+  if (state.clouds) {
+    const rows = (state.clouds.profiles ?? []).map(cloudRowHtml).join('');
+    body = `${state.clouds.warning ? `<p class="crt-warn">${escapeHtml(state.clouds.warning)}</p>` : ''}
+      <div class="cloud-rows">${rows || '<p class="muted">还没有忆云记录。</p>'}</div>
+      <p class="cfg-help muted">当前忆云不可切换；已归档忆云切换前会确认。改名即时生效，不需要重启。</p>`;
+  } else if (state.cloudsError) {
+    const { title, detail } = cloudErrorCopy(state.cloudsError);
+    body = `<p class="cloud-unavailable">${escapeHtml(title)}</p>${detail ? `<p class="cfg-help muted">${escapeHtml(detail)}</p>` : ''}`;
+  } else {
+    body = '<p class="muted">正在读取忆云…</p>';
+  }
+  return `<section id="settings-cloud-card" class="settings-section cloud-card" data-settings-clouds tabindex="-1">
+    <h3>忆云 <span class="badge badge-muted">归档保留，不删除</span></h3>
+    <p class="muted cloud-intro">加入忆云不会修改当前忆云；切换后原忆云归档保留，随时可以切回。</p>
+    ${body}
+  </section>`;
+}
+
+function openCloudSettings() {
+  $('#settings').hidden = false;
+  renderSettings('common');
+  setTimeout(() => {
+    const card = $('#settings-cloud-card');
+    if (!card) return;
+    card.scrollIntoView({
+      block: 'start',
+      behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ? 'auto' : 'smooth',
+    });
+    card.focus?.({ preventScroll: true });
+  }, 0);
+}
+
+function startCloudRename(id) {
+  const entry = state.clouds?.profiles?.find((item) => item.id === id);
+  if (!entry) return;
+  state.cloudRename = { id, name: entry.name };
+  state.cloudRenameError = '';
+  renderSettings(state.settingsTab ?? 'common');
+  setTimeout(() => {
+    const input = document.querySelector('[data-cloud-rename-input]');
+    if (!input) return;
+    input.focus?.();
+    input.select?.();
+  }, 0);
+}
+
+async function saveCloudRename() {
+  if (cloudRenameBusy || !state.cloudRename) return;
+  const { id } = state.cloudRename;
+  const name = String(state.cloudRename.name ?? '').trim();
+  if (name.length === 0) {
+    state.cloudRenameError = '忆云名字不能为空。';
+    renderSettings(state.settingsTab ?? 'common');
+    return;
+  }
+  cloudRenameBusy = true;
+  state.cloudRenameError = '';
+  renderSettings(state.settingsTab ?? 'common');
+  try {
+    await api('/admin/api/clouds/rename', { method: 'POST', body: { id, name } });
+    state.cloudRename = null;
+    state.cloudRenameError = '';
+    await refresh();
+    showToast(`已改名为「${name}」；不需要重启。`);
+  } catch (error) {
+    const { title, detail } = cloudErrorCopy(error);
+    state.cloudRenameError = detail ? `${title}（${detail}）` : title;
+  } finally {
+    cloudRenameBusy = false;
+    renderSettings(state.settingsTab ?? 'common');
+  }
+}
+
+function cloudSwitchCommand(id) {
+  return `mebular cloud use ${id}`;
+}
+
+function cloudSwitchFallbackHtml(id, name, reason = '') {
+  const current = cloudCurrentName();
+  const command = cloudSwitchCommand(id);
+  return `${reason ? `<p class="cloud-switch-error" role="alert">${escapeHtml(reason)}</p>` : ''}
+    <p class="muted">当前页面无法直接切换忆云（不在桌面 App 中）。当前忆云仍是「${escapeHtml(current)}」，不会自动变化。</p>
+    <p class="cloud-warning">在终端运行下面的命令后，才会切换到「${escapeHtml(name)}」；原忆云归档保留，不删除。</p>
+    <div class="copyable"><code>${escapeHtml(command)}</code><button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(command)}">复制</button></div>`;
+}
+
+function bindCloudCopy(root) {
+  root?.querySelectorAll('[data-copy]').forEach((button) => {
+    button.addEventListener('click', () => copyText(button.dataset.copy, button));
+  });
+}
+
+function openCloudSwitch(id, name = cloudNameOf(id)) {
+  const modal = $('#cloud-switch');
+  const body = $('#cloud-switch-body');
+  if (!modal || !body) return;
+  $('#cloud-switch-title').textContent = `切换到「${name}」`;
+  if (state.clouds?.current === id) {
+    body.innerHTML = `<p class="cloud-switch-ok">「${escapeHtml(name)}」已经是当前忆云，无需切换。</p>`;
+    modal.hidden = false;
+    return;
+  }
+  if (hasCloudSwitchBridge()) {
+    body.innerHTML = `<p class="cloud-switch-progress" aria-live="polite">正在切换忆云…</p>
+      <p class="muted">当前忆云「${escapeHtml(cloudCurrentName())}」将归档保留，不删除；完成后控制台会自动刷新。</p>`;
+  } else {
+    body.innerHTML = cloudSwitchFallbackHtml(id, name);
+    bindCloudCopy(body);
+  }
+  modal.hidden = false;
+  if (hasCloudSwitchBridge()) void performCloudSwitch(id, name);
+}
+
+async function performCloudSwitch(id, name = cloudNameOf(id)) {
+  const body = $('#cloud-switch-body');
+  try {
+    await window.mebularDesktop.cloudSwitch(id);
+    if (body && $('#cloud-switch')?.hidden === false) {
+      body.innerHTML = `<p class="cloud-switch-ok" aria-live="polite">已提交切换到「${escapeHtml(name)}」。</p>
+        <p class="muted">App 完成切换后控制台会自动刷新；若仍显示旧忆云，请稍后重试。</p>`;
+    }
+    const joinError = $('#cloud-join-switch-error');
+    if (joinError) joinError.innerHTML = `<p class="cloud-switch-ok">已提交切换；App 完成后控制台会自动刷新。</p>`;
+    setTimeout(() => { if (!MOCK) void refresh(); }, 1500);
+    return true;
+  } catch (error) {
+    const reason = `无法自动切换：${error?.message ?? error}`;
+    if (body && $('#cloud-switch')?.hidden === false) {
+      body.innerHTML = cloudSwitchFallbackHtml(id, name, reason);
+      bindCloudCopy(body);
+    }
+    const joinError = $('#cloud-join-switch-error');
+    if (joinError) {
+      const command = cloudSwitchCommand(id);
+      joinError.innerHTML = `<p class="cloud-switch-error" role="alert">${escapeHtml(reason)}</p>
+        <p class="cfg-help muted">可复制命令后在终端切换；当前忆云未变。</p>
+        <div class="copyable"><code>${escapeHtml(command)}</code><button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(command)}">复制</button></div>`;
+      bindCloudCopy(joinError);
+    }
+    return false;
+  }
+}
+
+async function requestCloudSwitch(id) {
+  const entry = state.clouds?.profiles?.find((item) => item.id === id);
+  if (!entry) return;
+  if (entry.current) { showToast('这已经是当前忆云。'); return; }
+  const ok = await confirmModal({
+    title: '切换忆云',
+    body: `切换到「${entry.name}」？\n\n当前忆云「${cloudCurrentName()}」将归档保留，不删除；随时可以切回。`,
+    confirmLabel: `切换到「${entry.name}」`,
+  });
+  if (!ok) return;
+  openCloudSwitch(entry.id, entry.name);
+}
+
+function updateCloudJoinWarning() {
+  const el = $('#cloud-join-warning');
+  if (!el) return;
+  const current = cloudCurrentName();
+  el.textContent = hasCloudSwitchBridge()
+    ? `⚠ 加入后本机会切换到新忆云；当前忆云「${current}」将归档保留，不删除。`
+    : `加入后当前忆云仍是「${current}」；按提示执行切换命令后，原忆云归档保留，不删除。`;
+}
+
+/** 首轮数据晚于弹层打开时，补齐当前忆云名与默认名字（用户已编辑则不改名）。 */
+function syncCloudJoinMeta() {
+  if ($('#cloud-join')?.hidden !== false) return;
+  updateCloudJoinWarning();
+  if (state.cloudJoinNameAuto) {
+    const input = $('#cloud-join-name');
+    if (input) input.value = nextCloudName();
+  }
+  updateCloudJoinSubmitState();
+}
+
+function updateCloudJoinSubmitState() {
+  const button = $('#cloud-join-submit');
+  if (!button) return;
+  const duplicate = state.cloudJoinInspect?.data?.alreadyJoined ?? null;
+  if (state.cloudJoinResult) {
+    button.disabled = false;
+    button.textContent = '关闭';
+    return;
+  }
+  button.disabled = cloudJoinBusy;
+  if (cloudJoinBusy) button.textContent = '正在加入…';
+  else if (duplicate) button.textContent = `切换到「${duplicate.name}」`;
+  else button.textContent = hasCloudSwitchBridge() ? '归档当前并加入' : '加入忆云';
+}
+
+function resetCloudJoin() {
+  cloudInspectSeq += 1;
+  if (cloudInspectTimer) clearTimeout(cloudInspectTimer);
+  cloudInspectTimer = null;
+  state.cloudJoinInspect = null;
+  state.cloudJoinResult = null;
+  const token = $('#cloud-join-token');
+  if (token) token.value = '';
+  const inspect = $('#cloud-join-inspect');
+  if (inspect) inspect.innerHTML = '';
+  const error = $('#cloud-join-error');
+  if (error) { error.hidden = true; error.innerHTML = ''; }
+  const steps = $('#cloud-join-steps');
+  if (steps) { steps.hidden = true; steps.textContent = ''; }
+  const result = $('#cloud-join-result');
+  if (result) { result.hidden = true; result.innerHTML = ''; }
+  state.cloudJoinNameAuto = true;
+  const name = $('#cloud-join-name');
+  if (name) name.value = nextCloudName();
+  updateCloudJoinWarning();
+  updateCloudJoinSubmitState();
+}
+
+function openCloudJoin() {
+  resetCloudJoin();
+  const modal = $('#cloud-join');
+  if (modal) modal.hidden = false;
+  setTimeout(() => $('#cloud-join-token')?.focus?.(), 0);
+}
+
+function closeCloudJoin() {
+  if (cloudJoinBusy) return;
+  const modal = $('#cloud-join');
+  if (modal) modal.hidden = true;
+  resetCloudJoin();
+}
+
+function cloudJoinStep(text) {
+  const el = $('#cloud-join-steps');
+  if (!el) return;
+  if (!text) { el.hidden = true; el.textContent = ''; return; }
+  el.hidden = false;
+  el.textContent = text;
+}
+
+function showCloudJoinError(error) {
+  const el = $('#cloud-join-error');
+  const { title, detail } = cloudErrorCopy(error);
+  if (!el) return;
+  el.innerHTML = `<strong>${escapeHtml(title)}</strong>${detail ? `<span class="cloud-error-detail">${escapeHtml(detail)}</span>` : ''}`;
+  el.hidden = false;
+}
+
+function renderCloudJoinInspect() {
+  const el = $('#cloud-join-inspect');
+  if (!el) return;
+  const inspected = state.cloudJoinInspect;
+  if (!inspected) { el.innerHTML = ''; updateCloudJoinSubmitState(); return; }
+  if (inspected.error) {
+    // 预览只负责成功态（指纹/重复检测）；令牌错误在提交时给一条可读错误，避免同一文案出现两次。
+    el.innerHTML = '';
+    updateCloudJoinSubmitState();
+    return;
+  }
+  const fingerprint = inspected.data.masterFingerprint
+    ? `<code>${escapeHtml(inspected.data.masterFingerprint)}</code>`
+    : '<span class="kv-empty">未知</span>';
+  const expires = inspected.data.expiresAt ? formatTime(inspected.data.expiresAt) : '—';
+  const duplicate = inspected.data.alreadyJoined;
+  el.innerHTML = `<p>对方忆云根指纹：${fingerprint}</p>
+    <p class="muted">邀请设备 ${escapeHtml(inspected.data.inviterDeviceId ?? '—')} · 共享域 ${escapeHtml(inspected.data.namespace ?? '—')} · 有效期至 ${escapeHtml(expires)}</p>
+    ${duplicate ? `<p class="cloud-duplicate">这台设备已加入「${escapeHtml(duplicate.name)}」，可直接切换。</p>` : ''}`;
+  updateCloudJoinSubmitState();
+}
+
+async function inspectCloudToken(token) {
+  const seq = ++cloudInspectSeq;
+  try {
+    const data = await api('/admin/api/clouds/inspect', { method: 'POST', body: { token } });
+    if (seq !== cloudInspectSeq) return { stale: true };
+    if ($('#cloud-join')?.hidden !== false) return { stale: true };
+    state.cloudJoinInspect = { data };
+    renderCloudJoinInspect();
+    return { ok: true, data };
+  } catch (error) {
+    if (seq !== cloudInspectSeq) return { stale: true };
+    state.cloudJoinInspect = { error };
+    renderCloudJoinInspect();
+    return { ok: false, error };
+  }
+}
+
+function scheduleCloudInspect() {
+  if (cloudInspectTimer) clearTimeout(cloudInspectTimer);
+  const token = String($('#cloud-join-token')?.value ?? '').trim();
+  if (token.length === 0) {
+    state.cloudJoinInspect = null;
+    renderCloudJoinInspect();
+    return;
+  }
+  cloudInspectTimer = setTimeout(() => { void inspectCloudToken(token); }, 600);
+}
+
+function renderCloudJoinResult() {
+  const result = $('#cloud-join-result');
+  const joined = state.cloudJoinResult;
+  if (!result || !joined?.profile) return;
+  const name = joined.profile.name;
+  const oldName = state.clouds?.profiles?.find((entry) => entry.id === joined.current)?.name
+    ?? state.overview?.cloud?.name
+    ?? joined.current
+    ?? '当前忆云';
+  const command = joined.switch?.command ?? cloudSwitchCommand(joined.profile.id);
+  if (hasCloudSwitchBridge()) {
+    result.innerHTML = `<p class="cloud-result-ok">已加入「${escapeHtml(name)}」。</p>
+      <p class="muted">正在切换到新忆云…App 完成切换后控制台会自动刷新。</p>
+      <div id="cloud-join-switch-error"></div>`;
+  } else {
+    result.innerHTML = `<p class="cloud-result-ok">已加入「${escapeHtml(name)}」。</p>
+      <p class="cloud-warning">当前仍是「${escapeHtml(oldName)}」；执行下面的命令后才会切换。原忆云归档保留，不删除。</p>
+      <div class="copyable"><code>${escapeHtml(command)}</code><button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(command)}">复制</button></div>
+      <div class="domain-actions"><button id="cloud-join-open-settings" class="btn btn-small btn-crt" type="button">打开忆云卡</button></div>`;
+    bindCloudCopy(result);
+    result.querySelector('#cloud-join-open-settings')?.addEventListener('click', () => {
+      closeCloudJoin();
+      openCloudSettings();
+    });
+  }
+  result.hidden = false;
+}
+
+async function submitCloudJoin() {
+  if (cloudJoinBusy) return;
+  if (state.cloudJoinResult) { closeCloudJoin(); return; }
+  if (cloudInspectTimer) { clearTimeout(cloudInspectTimer); cloudInspectTimer = null; }
+  const errorEl = $('#cloud-join-error');
+  if (errorEl) { errorEl.hidden = true; errorEl.innerHTML = ''; }
+  const token = String($('#cloud-join-token')?.value ?? '').trim();
+  const name = String($('#cloud-join-name')?.value ?? '').trim();
+  if (token.length === 0) { showCloudJoinError('TOKEN_REQUIRED'); return; }
+  if (state.cloudJoinInspect?.data?.alreadyJoined) {
+    const existing = state.cloudJoinInspect.data.alreadyJoined;
+    openCloudSwitch(existing.id, existing.name);
+    return;
+  }
+  cloudJoinBusy = true;
+  updateCloudJoinSubmitState();
+  cloudJoinStep('正在校验令牌…');
+  const inspected = await inspectCloudToken(token);
+  if (inspected.stale) { cloudJoinBusy = false; updateCloudJoinSubmitState(); return; }
+  if (!inspected.ok) {
+    cloudJoinBusy = false;
+    cloudJoinStep('');
+    updateCloudJoinSubmitState();
+    showCloudJoinError(inspected.error);
+    return;
+  }
+  if (inspected.data.alreadyJoined) {
+    cloudJoinBusy = false;
+    cloudJoinStep('');
+    updateCloudJoinSubmitState();
+    return;
+  }
+  cloudJoinStep('正在创建忆云…');
+  try {
+    const res = await api('/admin/api/clouds/join', {
+      method: 'POST',
+      body: { token, name, confirm: true },
+    });
+    state.cloudJoinResult = res;
+    state.cloudJoinInspect = null;
+    const input = $('#cloud-join-token');
+    if (input) input.value = '';
+    renderCloudJoinInspect();
+    cloudJoinStep(hasCloudSwitchBridge() ? '正在切换…' : '已加入；当前忆云未变');
+    renderCloudJoinResult();
+    cloudJoinBusy = false;
+    updateCloudJoinSubmitState();
+    if (!hasCloudSwitchBridge()) await refresh();
+    if (hasCloudSwitchBridge()) {
+      await performCloudSwitch(res.profile.id, res.profile.name);
+      cloudJoinStep('');
+    }
+  } catch (error) {
+    cloudJoinBusy = false;
+    cloudJoinStep('');
+    updateCloudJoinSubmitState();
+    showCloudJoinError(error);
+    if (error?.payload?.error === 'CLOUD_ALREADY_JOINED') {
+      const existing = error.payload?.existing;
+      if (existing?.id) {
+        state.cloudJoinInspect = { data: { alreadyJoined: existing } };
+        renderCloudJoinInspect();
+        updateCloudJoinSubmitState();
+      }
+    }
+  }
+}
+
+$('#cloud-join-token')?.addEventListener('input', scheduleCloudInspect);
+$('#cloud-join-token')?.addEventListener('paste', () => setTimeout(scheduleCloudInspect, 0));
+$('#cloud-join-name')?.addEventListener('input', () => { state.cloudJoinNameAuto = false; });
+$('#cloud-join-submit')?.addEventListener('click', () => { void submitCloudJoin(); });
 
 $('#device-card-close').addEventListener('click', () => {
   state.selected = null;
@@ -4212,6 +4785,7 @@ async function mockData() {
       onlinePeers: [{ peerId: 'peer-b', deviceId: 'device-B', remoteAddress: '/ip4/127.0.0.1/tcp/4011', state: 'connected', authenticated: true }],
       revokedCount: 1,
       features: { writes: false },
+      cloud: { id: 'default', name: '忆云 1', masterFingerprint: 'sha256:1a2b3c4d5e6f', current: true },
       // P3：收敛健康汇总（mock 无网络验收：B 停滞 / C 未连接）
       convergence: { at: now, summary: { peers: 2, online: 1, ok: 0, stalled: 1, diverged: 0, unverifiable: 0, syncing: 0, offline: 1 } },
     },
@@ -4244,6 +4818,15 @@ async function mockData() {
       },
     ],
     memories: { total: memories.length, memories, includeArchived: f.archived, includeDeleted: f.deleted },
+    clouds: {
+      ok: true,
+      root: '~/.mebular',
+      current: 'default',
+      profiles: [
+        { id: 'default', name: '忆云 1', home: '.', kind: 'root', createdAt: now - 30 * 86_400_000, lastUsedAt: now - 3_600_000, masterFingerprint: 'sha256:1a2b3c4d5e6f', deviceId: 'device-A', current: true },
+        { id: 'p_demo0001', name: '忆云 2', home: 'profiles/p_demo0001', kind: 'delegated', createdAt: now - 5 * 86_400_000, lastUsedAt: now - 2 * 86_400_000, masterFingerprint: 'sha256:9f8e7d6c5b4a', deviceId: 'device-A', current: false },
+      ],
+    },
     security: mockSecurity(now),
     policy: [
       { eventId: 'e5', type: 'namespace_grant', issuer: 'device-A', subject: 'device-C', namespaces: ['work'], grantId: 'g-c0000000-1111-2222-3333-444455556666', at: now - 300_000, valid: true, note: 'auto-grant: subscription-driven' },
@@ -4569,6 +5152,15 @@ if (provisionStatus) {
           if (slot) {
             slot.scrollIntoView({ block: 'start', behavior: 'auto' });
             slot.focus?.();
+          }
+        }, 0);
+      }
+      if (deepLink.focusClouds) {
+        setTimeout(() => {
+          const card = $('#settings-cloud-card');
+          if (card) {
+            card.scrollIntoView({ block: 'start', behavior: 'auto' });
+            card.focus?.({ preventScroll: true });
           }
         }, 0);
       }

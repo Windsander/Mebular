@@ -14,6 +14,7 @@
   <div id="app" class="app">
     <header class="topbar">
       <div class="brand"><span class="brand-star">✦</span> Mebular 控制台</div>
+      <button id="cloud-badge" class="badge badge-cloud badge-button" type="button" title="打开设置 · 忆云" aria-label="打开设置 · 忆云" hidden></button>
       <div class="topbar-identity">
         <button id="self-badge" class="badge badge-self badge-button" type="button" title="打开「关于本机」" aria-label="打开关于本机">本机 · …</button>
         <span id="online-badge" class="badge badge-muted">○ 未知</span>
@@ -21,8 +22,9 @@
         <span id="memory-badge" class="badge badge-muted">记忆 …</span>
       </div>
       <div class="topbar-actions">
-        <button id="open-settings" class="btn" type="button"><span class="btn-ico">⚙</span>设置<span id="settings-pending-badge" class="badge badge-warn" hidden></span></button>
-        <button id="invite-device" class="btn btn-primary" type="button"><span class="btn-ico">＋</span>邀请设备</button>
+        <button id="open-settings" class="btn" type="button" title="设置" aria-label="设置"><span class="btn-ico">⚙</span><span class="btn-label">设置</span><span id="settings-pending-badge" class="badge badge-warn" hidden></span></button>
+        <button id="join-cloud" class="btn" type="button" title="加入忆云" aria-label="加入忆云"><span class="btn-ico">☁</span><span class="btn-label">加入忆云</span></button>
+        <button id="invite-device" class="btn btn-primary" type="button" title="邀请设备" aria-label="邀请设备"><span class="btn-ico">＋</span><span class="btn-label">邀请设备</span></button>
       </div>
     </header>
 
@@ -185,6 +187,36 @@
       <div id="invite-body"></div>
       <div class="modal-actions">
         <button id="invite-close" class="btn btn-crt" type="button">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="cloud-join" class="modal" hidden>
+    <div class="modal-box modal-box-wide crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="cloud-join-title">
+      <h2 id="cloud-join-title">加入忆云 <span class="crt-tag">一次性令牌</span></h2>
+      <p class="modal-note muted">粘贴邀请方给的一次性令牌。加入不会修改当前忆云；切换后当前忆云会归档保留。</p>
+      <label class="cfg-label" for="cloud-join-token">加入令牌</label>
+      <textarea id="cloud-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…"></textarea>
+      <label class="cfg-label" for="cloud-join-name">忆云名字</label>
+      <input id="cloud-join-name" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="忆云 2" />
+      <div id="cloud-join-inspect" class="cloud-inspect" aria-live="polite"></div>
+      <p id="cloud-join-warning" class="cloud-warning muted"></p>
+      <p id="cloud-join-steps" class="cloud-steps muted" aria-live="polite" hidden></p>
+      <div id="cloud-join-result" class="cloud-result" hidden></div>
+      <p id="cloud-join-error" class="crt-warn" role="alert" hidden></p>
+      <div class="modal-actions">
+        <button id="cloud-join-close" class="btn btn-crt" type="button">取消</button>
+        <button id="cloud-join-submit" class="btn btn-primary" type="button">加入忆云</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="cloud-switch" class="modal" hidden>
+    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="cloud-switch-title">
+      <h2 id="cloud-switch-title">切换忆云</h2>
+      <div id="cloud-switch-body"></div>
+      <div class="modal-actions">
+        <button id="cloud-switch-close" class="btn btn-crt" type="button">关闭</button>
       </div>
     </div>
   </div>

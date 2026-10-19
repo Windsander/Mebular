@@ -4,7 +4,8 @@
 // 两个命令各自使用**独立 storage 路径 + 独立设备身份**，通过共享 spool 目录交换
 // **显式状态事件**（本地最少形态；M3 换真实传输）。输出 JSON 事实供脚本断言。
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Mebular } from '@mebular/core';
@@ -26,7 +27,7 @@ import type { TaskEventStore } from './store/file-store.js';
 import { NullTransport } from './transport/null.js';
 import { SpoolTransport } from './transport/spool.js';
 import { LocalQuota } from './quota.js';
-import { fleetConfigPath, loadFleetConfig, parseAgentSpecs, readMasterKeyFile, type FleetConfig } from './config.js';
+import { fleetConfigPath, loadFleetConfig, loadToolConfig, parseAgentSpecs, readMasterKeyFile, type FleetConfig } from './config.js';
 import {
   buildRegistry,
   declarePolicyIssuer,
@@ -63,6 +64,29 @@ import { renderTerminalQr, renderSvgQr } from './qr.js';
 import { createRequire } from 'node:module';
 import { joinWithToken } from './join.js';
 import { toolByCli, toolCliTable } from './surface.js';
+import {
+  collectRecoveryRegistry,
+  deriveRecoveryKey,
+  evaluateSecurityGate,
+  exportMasterKeyBackup,
+  formatRecoveryCode,
+  generateRecoveryCode,
+  generateTotpSecret,
+  importTotpSeed,
+  latestRecoveryRecord,
+  listPolicyEvents,
+  readSecurityState,
+  readTotpSeed,
+  renderTotpShare,
+  renderTotpShareSvg,
+  restoreMasterKeyBackup,
+  signBreakGlass,
+  verifyTotp,
+  writeBackupFile,
+  writeSecurityRecovery,
+  writeSecurityTotpAudit,
+  writeTotpSeed,
+} from './security.js';
 
 interface Args {
   [key: string]: string | boolean | undefined;
@@ -816,6 +840,16 @@ async function runInvite(args: Args): Promise<number> {
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
   try {
+    const gate = await evaluateSecurityGate(mebular as never, dir, {
+      action: 'invite',
+      ...(typeof args.code === 'string' ? { code: args.code } : {}),
+      ...(typeof args['approval-id'] === 'string' ? { approvalId: args['approval-id'] } : {}),
+      namespace: str(args.namespace, config.namespace),
+    });
+    if (!gate.ok) {
+      console.log(JSON.stringify({ role: 'invite', ...gate, ok: false }, null, 2));
+      return 1;
+    }
     const port = num(args['join-port'], config.joinService?.port ?? 4002);
     const endpoint = str(args.endpoint, `http://${pickLanHost()}:${port}`);
     const ttlMs = typeof args.ttl === 'string' ? num(args.ttl, 900) * 1000 : 900_000;
@@ -897,6 +931,265 @@ async function runTaskTool(cliName: string, args: Args): Promise<number> {
 }
 
 /** `fleet tools`：打印工具 ↔ CLI 对照表（供 A2 核对）。 */
+/** `fleet security …`：TOTP / 恢复码 / 主密钥备份（S2）。 */
+async function runSecurity(args: Args, positionals: string[]): Promise<number> {
+  const sub = positionals[0];
+  const action = positionals[1];
+  const dir = fleetDirFrom(args);
+
+  const openApp = async (): Promise<{ config: FleetConfig; mebular: Mebular }> => {
+    const config = await loadToolConfig(dir);
+    const encryption = await readMasterKeyFile(config.masterKeyFile);
+    const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+    await mebular.initialize();
+    return { config, mebular };
+  };
+
+  if (sub === 'totp' && action === 'show') {
+    const { config, mebular } = await openApp();
+    try {
+      let seed = await readTotpSeed(dir);
+      if (seed === null) {
+        if (args.generate !== true) {
+          throw new Error('尚无动态码种子：先 `fleet security totp show --generate`（root）或从另一台设备 `totp import`');
+        }
+        const encryption = await readMasterKeyFile(config.masterKeyFile);
+        if (encryption.userMasterPrivateKey === undefined) {
+          throw new Error('仅 root（持有主密钥私钥的设备）可生成动态码种子');
+        }
+        seed = await writeTotpSeed(dir, generateTotpSecret());
+      } else {
+        const code = str(args.code, '');
+        if (code.length === 0) {
+          throw new Error('显示动态码种子前需要输入一次本机动态码：--code <6 位>');
+        }
+        const check = await verifyTotp(seed.secret, code, Date.now(), { dir });
+        if (!check.ok) {
+          throw new Error(check.reason === 'locked'
+            ? `动态码已锁定（剩余 ${Math.ceil((check.retryAfterMs ?? 0) / 1000)}s）`
+            : check.reason === 'replay'
+              ? '动态码已使用过（重放被拒）'
+              : '动态码无效：请检查设备时间');
+        }
+      }
+      const share = await renderTotpShare(seed.secret, config.device, { qr: args['no-qr'] !== true });
+      const svg = args.svg === true ? await renderTotpShareSvg(seed.secret, config.device) : null;
+      await writeSecurityTotpAudit(mebular as never, {
+        device: config.device,
+        fingerprint: seed.fingerprint,
+        issuedAt: Date.now(),
+        note: 'fleet security totp show',
+      });
+      console.log(JSON.stringify({
+        ok: true,
+        role: 'security-totp-show',
+        device: config.device,
+        fingerprint: seed.fingerprint,
+        secret: seed.secret,
+        groups: share.groups,
+        otpauth: share.otpauth,
+        qr: share.qrText ?? null,
+        ...(svg !== null ? { qrSvg: svg } : {}),
+        warning: '种子等于这一档的钥匙：只在两台你自己的设备之间当面出示；不要截图、不要发聊天工具。',
+      }, null, 2));
+      return 0;
+    } finally {
+      await mebular.shutdown();
+    }
+  }
+
+  if (sub === 'totp' && action === 'import') {
+    const input = str(args.secret, str(args.code, str(args.uri, '')));
+    if (input.length === 0) throw new Error('需要 --secret <base32|otpauth://…>（或 --uri）');
+    const { config, mebular } = await openApp();
+    try {
+      const record = await importTotpSeed(dir, input, {
+        ...(typeof args['expected-fingerprint'] === 'string' ? { expectedFingerprint: args['expected-fingerprint'] } : {}),
+      });
+      await writeSecurityTotpAudit(mebular as never, {
+        device: config.device,
+        fingerprint: record.fingerprint,
+        issuedAt: Date.now(),
+        ...(typeof args.epoch === 'string' ? { epoch: args.epoch } : {}),
+        note: 'fleet security totp import',
+      });
+      console.log(JSON.stringify({
+        ok: true,
+        role: 'security-totp-import',
+        device: config.device,
+        fingerprint: record.fingerprint,
+        createdAt: record.createdAt,
+      }, null, 2));
+      return 0;
+    } finally {
+      await mebular.shutdown();
+    }
+  }
+
+  if (sub === 'recovery' && action === 'generate') {
+    const { config, mebular } = await openApp();
+    try {
+      const events = await listPolicyEvents(mebular as never);
+      const existing = latestRecoveryRecord(events);
+      if (existing !== null) {
+        throw new Error(`已存在恢复码（keyId ${existing.keyId.slice(0, 8)}…）：请使用 recovery rotate --old-code 轮换`);
+      }
+      const material = generateRecoveryCode();
+      const event = await writeSecurityRecovery(mebular as never, {
+        keyId: material.keyId,
+        publicKey: material.publicKeyHex,
+        createdAt: material.createdAt,
+        mode: 'set',
+        ...(typeof args.note === 'string' ? { note: args.note } : {}),
+      });
+      console.log(JSON.stringify({
+        ok: true,
+        role: 'security-recovery-generate',
+        device: config.device,
+        keyId: material.keyId,
+        code: material.code,
+        codeFormatted: formatRecoveryCode(material.code),
+        eventId: event.id,
+        shownOnce: true,
+        guidance: [
+          '恢复码只在屏幕上出现这一次；请抄写到离线介质（纸/金属/密码器）。',
+          '与主密钥备份分开存放；不要截图、不要发聊天工具。',
+          '任何看到它的人都能在 high 档替代会签——丢失只能轮换。',
+        ],
+      }, null, 2));
+      return 0;
+    } finally {
+      await mebular.shutdown();
+    }
+  }
+
+  if (sub === 'recovery' && action === 'rotate') {
+    const oldCode = str(args['old-code'], str(args.code, ''));
+    if (oldCode.length === 0) throw new Error('需要 --old-code <当前恢复码>');
+    const { config, mebular } = await openApp();
+    try {
+      const events = await listPolicyEvents(mebular as never);
+      const registry = collectRecoveryRegistry(events);
+      const state = await readSecurityState(mebular as never);
+      const currentKeyId = state.recoveryKeyId ?? registry.currentKeyId ?? latestRecoveryRecord(events)?.keyId;
+      if (currentKeyId === undefined) {
+        throw new Error('尚未生成恢复码：先 `fleet security recovery generate`');
+      }
+      const oldDerived = deriveRecoveryKey(oldCode);
+      if (oldDerived.keyId !== currentKeyId) {
+        throw new Error(`恢复码不匹配当前 keyId（当前 ${currentKeyId.slice(0, 8)}…）；请使用当前恢复码`);
+      }
+      const material = generateRecoveryCode();
+      const signed = signBreakGlass({
+        code: oldCode,
+        op: 'rotate',
+        initiator: config.device,
+        oldKeyId: currentKeyId,
+        newPublicKey: material.publicKeyHex,
+      });
+      const event = await writeSecurityRecovery(mebular as never, {
+        keyId: material.keyId,
+        publicKey: material.publicKeyHex,
+        createdAt: material.createdAt,
+        mode: 'rotate',
+        nonce: signed.proof.nonce,
+        breakGlass: signed.proof,
+        ...(typeof args.note === 'string' ? { note: args.note } : {}),
+      });
+      console.log(JSON.stringify({
+        ok: true,
+        role: 'security-recovery-rotate',
+        device: config.device,
+        oldKeyId: currentKeyId,
+        keyId: material.keyId,
+        code: material.code,
+        codeFormatted: formatRecoveryCode(material.code),
+        eventId: event.id,
+        shownOnce: true,
+        guidance: ['旧恢复码立即失效（新签名不再被采纳）；请把新码抄写到离线介质并销毁旧码。'],
+      }, null, 2));
+      return 0;
+    } finally {
+      await mebular.shutdown();
+    }
+  }
+
+  if (sub === 'backup' && action === 'export') {
+    const out = str(args.out, str(args.file, ''));
+    if (out.length === 0) throw new Error('需要 --out <备份文件路径>（或 --file）');
+    const result = await exportMasterKeyBackup({
+      dir,
+      ...(typeof args.code === 'string' ? { code: args.code } : {}),
+      ...(typeof args.note === 'string' ? { note: args.note } : {}),
+    });
+    await writeBackupFile(out, result.file);
+    console.log(JSON.stringify({
+      ok: true,
+      role: 'security-backup-export',
+      out,
+      deviceId: result.deviceId,
+      fingerprint: result.fingerprint,
+      code: result.code,
+      codeFormatted: formatRecoveryCode(result.code),
+      codeGenerated: result.codeGenerated,
+      createdAt: result.file.createdAt,
+      warning: '备份码只在本次输出；请与备份文件分开保管（两处不同介质/地点）。恢复码不要数字化。',
+    }, null, 2));
+    return 0;
+  }
+
+  if (sub === 'backup' && action === 'restore') {
+    const file = str(args.file, '');
+    const code = str(args.code, '');
+    if (file.length === 0) throw new Error('需要 --file <备份文件路径>');
+    if (code.length === 0) throw new Error('需要 --code <备份码>');
+    let keyPath: string | undefined;
+    if (existsSync(fleetConfigPath(dir))) {
+      keyPath = (await loadFleetConfig(fleetConfigPath(dir))).masterKeyFile;
+    } else if (existsSync(join(dir, 'config.json'))) {
+      const daemon = JSON.parse(await readFile(join(dir, 'config.json'), 'utf-8')) as Record<string, any>;
+      const encryption = (daemon.encryption ?? {}) as Record<string, unknown>;
+      keyPath = typeof encryption.userMasterPublicKeyFile === 'string'
+        ? encryption.userMasterPublicKeyFile
+        : typeof encryption.keyFile === 'string'
+          ? encryption.keyFile
+          : join(dir, 'user-master-key.json');
+    } else if (typeof args.device === 'string' && args.device.length > 0) {
+      keyPath = join(dir, 'master-key.json');
+    } else {
+      keyPath = join(dir, 'user-master-key.json');
+    }
+    const raw = await readFile(file, 'utf-8');
+    const result = await restoreMasterKeyBackup({
+      file: raw,
+      code,
+      dir,
+      keyPath,
+      ...(typeof args.device === 'string' && args.device.length > 0 ? { device: args.device } : {}),
+      ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
+      ...(typeof args.listen === 'string' ? { listen: args.listen } : {}),
+    });
+    console.log(JSON.stringify({
+      ok: true,
+      role: 'security-backup-restore',
+      dir,
+      keyPath: result.keyPath,
+      ...(result.configPath !== undefined ? { configPath: result.configPath } : {}),
+      deviceId: result.deviceId,
+      fingerprint: result.fingerprint,
+      masterPublicKeyHex: result.masterPublicKeyHex,
+      onboarded: result.onboarded,
+      next: result.onboarded
+        ? ['核对主公钥指纹与既有设备「关于本机」一致', '重新导出备份并轮换恢复码（恢复机成为新 root）']
+        : [`如需成为新 root：fleet onboard --dir ${dir} --device <deviceId> --master-key ${result.keyPath}`],
+    }, null, 2));
+    return 0;
+  }
+
+  console.error('用法：fleet security totp show|import | recovery generate|rotate | backup export|restore …');
+  return 2;
+}
+
 function runTools(): number {
   console.log(JSON.stringify({ ok: true, tools: toolCliTable() }, null, 2));
   return 0;
@@ -930,6 +1223,7 @@ async function main(): Promise<void> {
   else if (command === 'quickstart') code = await runQuickstart(args);
   else if (command === 'join') code = await runJoin(args);
   else if (command === 'invite') code = await runInvite(args);
+  else if (command === 'security') code = await runSecurity(args, positionals);
   else if (command === 'tools') code = runTools();
   else if (command !== undefined && toolByCli(command) !== undefined) code = await runTaskTool(command, args);
   else if (command === 'pending') code = await runPending(args);
@@ -943,7 +1237,7 @@ async function main(): Promise<void> {
   else if (command === 'leave') code = await runLeave(args);
   else if (command === 'rejoin') code = await runRejoin(args);
   else {
-    console.error('用法：fleet quickstart|join|invite|pending|approve|tools|task_submit|task_submit_batch|task_cancel|task_retry|task_status|task_list|task_history|task_children|task_summarize|task_subscribe|task_negotiate|chatter_send|chatter_inbox|task_quota|task_targets|board_create|onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|node|worker|service|spool … | fleet --version');
+    console.error('用法：fleet quickstart|join|invite|pending|approve|tools|task_submit|task_submit_batch|task_cancel|task_retry|task_status|task_list|task_history|task_children|task_summarize|task_subscribe|task_negotiate|chatter_send|chatter_inbox|task_quota|task_targets|board_create|onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|security|node|worker|service|spool … | fleet --version');
     code = 2;
   }
   } catch (error) {

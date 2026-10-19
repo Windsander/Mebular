@@ -10,12 +10,12 @@ import { redactLog, tailText } from './wizard.mjs';
  * 读取守护日志（脱敏后）。
  * 返回 { source: 'service'|'file'|'none', text, paths }。
  */
-export async function readDaemonLogs({ home, service, descriptor, tail = 200, readFileImpl = readFile } = {}) {
+export async function readDaemonLogs({ home, serviceHome = home, service, descriptor, tail = 200, readFileImpl = readFile } = {}) {
   const paths = {};
   let serviceEmpty = false;
   if (service?.serviceLogs && descriptor) {
     try {
-      const res = service.serviceLogs(descriptor, { home, tail });
+      const res = service.serviceLogs(descriptor, { home: serviceHome, tail });
       const text = [...(res.stdout ?? []), ...(res.stderr ?? [])].join('\n');
       if (typeof res.stdoutLog === 'string') paths.stdout = res.stdoutLog;
       if (typeof res.stderrLog === 'string') paths.stderr = res.stderrLog;

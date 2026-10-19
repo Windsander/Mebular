@@ -754,7 +754,7 @@ function checkSecurityProof(
 /**
  * 安全轴单遍推导（H1）：
  * - 只有 **active=true** 的订阅参与 seed/admitted/首现会签；
- * - 首现会签只覆盖「设备第一次 active=true 订阅」（设备级），订阅任何域永远自主；
+ * - 加入首记：首现会签只覆盖「设备第一次 active=true 订阅」（设备级）；通过后订阅任何域自主、无需会签；
  * - `active=false` 不触发会签、不 seed、不 admitted。
  */
 function runSecurityPass(

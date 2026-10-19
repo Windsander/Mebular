@@ -96,7 +96,7 @@
     "verify:daemon": "node scripts/verify-daemon.mjs",
     "verify:daemon:cluster": "node scripts/verify-daemon-cluster.mjs",
     "verify:convergence": "node scripts/verify-convergence.mjs",
-    "verify:console": "node packages/console/scripts/verify-subscription-ui.mjs",
+    "verify:console": "node packages/console/scripts/verify-console.mjs",
     "verify:config": "node scripts/verify-config.mjs",
     "verify:onboarding": "node scripts/verify-onboarding.mjs",
     "verify:fleet:service": "node scripts/verify-fleet-service.mjs",
@@ -111,7 +111,10 @@
     "verify:nat": "node scripts/verify-nat.mjs",
     "rulesets:apply": "node scripts/apply-rulesets.mjs --apply",
     "desktop:dev": "npm --prefix apps/desktop run dev",
-    "desktop:smoke": "npm --prefix apps/desktop run smoke"
+    "desktop:smoke": "npm --prefix apps/desktop run smoke",
+    "verify:console:ui": "node packages/console/scripts/verify-console-ui.mjs",
+    "verify:console:subscription-ui": "node packages/console/scripts/verify-subscription-ui.mjs",
+    "verify:invite": "node scripts/verify-invite.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",

@@ -566,6 +566,33 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
     expect(historical.security?.rejections ?? []).toHaveLength(0);
   });
 
+  it('R1-14 H1 加入首记：首条订阅带会签后，第二个域无需会签', () => {
+    resetSeq();
+    const base = highBase({ includeX: true });
+    const joinNonce = 'h1-first';
+    const joinDigest = securityActionDigest({ op: 'join', initiator: 'D', namespace: 'nsA', nonce: joinNonce });
+    const proof = cosign({ op: 'join', approver: 'E', approvalId: 'ap-h1-first', digest: joinDigest });
+    const state = derive([
+      ...base,
+      approvalEntry({
+        author: 'E',
+        approvalId: 'ap-h1-first',
+        op: 'join',
+        initiator: 'D',
+        target: 'Y',
+        namespace: 'nsA',
+        nonce: joinNonce,
+        digest: joinDigest,
+      }),
+      subscription('Y', 'Y', 'nsA', { nonce: joinNonce, cosign: proof.proof }),
+      subscription('Y', 'Y', 'nsB'),
+    ]);
+    expect(state.subscriptions.get('nsA')?.has('Y') ?? false).toBe(true);
+    expect(state.subscriptions.get('nsB')?.has('Y') ?? false).toBe(true);
+    expect(state.security?.admitted).toContain('Y');
+    expect(state.security?.rejections ?? []).toHaveLength(0);
+  });
+
   it('R1-7 恢复码：登记 → 使用（nonce 一次）→ 轮换；旧 key 新签名不采纳', () => {
     resetSeq();
     const k1 = 'K1';

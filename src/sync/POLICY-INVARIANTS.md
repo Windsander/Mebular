@@ -24,7 +24,7 @@
 | **R-b** | 作者级移出：被移出作者本人的策略记录不采纳（含历史）；**不沿证书链传播** |
 | **R-c** | 逻辑时间定序：同作者 `seq` / 跨作者 `sum(vectorClock)` / `(author,id)` 兜底；不看墙钟 |
 | **E-1** | 恢复纪元：最近一次被采纳 `device_restore` 位次之前的策略记录不采纳 |
-| **H-1** | high 档首现会签：设备首次 `active=true` 订阅需 `cosign(op:'join')`/`breakGlass`；订阅任何域永远自主 |
+| **H-1** | 加入首记：high 档下设备**首次** `active=true` 订阅需 `cosign(op:'join')`/`breakGlass`；通过后订阅任何域自主、无需会签 |
 
 ## 3. 记录 × 状态矩阵
 

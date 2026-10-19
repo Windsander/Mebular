@@ -40,7 +40,7 @@
 | medium | token + 本机 TOTP | TOTP | TOTP | TOTP | 零门槛 |
 | high | 设备会签 / 恢复码 | 会签 / 恢复码 | 会签 / 恢复码 | 会签 / 恢复码 | 零门槛 |
 
-- H1：high 档会签**只覆盖设备首次 `active=true` 订阅**（加入首现）；订阅任何域永远自主，不触发会签。
+- H1 (first join record): high-tier cosign covers **only the device's first `active=true` subscription**; after that, subscribing to any further domain is autonomous and needs no cosign.
 - 中档 = 挡手不挡钥匙；高档会签只覆盖加入首现。
 - 恢复码是 break-glass，不是日常路径。
 

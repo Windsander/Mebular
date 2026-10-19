@@ -2197,11 +2197,9 @@ export async function startHttpServer({
       }
       const ns = input.namespace;
       const active = input.active !== false;
-      if (active) {
-        await app.subscribeNamespace(ns);
-      } else {
-        await app.unsubscribeNamespace(ns);
-      }
+      const event = active
+        ? await app.subscribeNamespace(ns)
+        : await app.unsubscribeNamespace(ns);
       // 持久化 sync.namespaces（热生效：不重启；core 运行期已更新）
       const next = Array.isArray(input.nextNamespaces)
         ? input.nextNamespaces.filter((entry) => typeof entry === 'string' && entry.length > 0)
@@ -2213,6 +2211,7 @@ export async function startHttpServer({
         ok: true,
         namespace: ns,
         active,
+        eventId: event.id,
         subscriptions: app.sync.getSubscriptionNamespaces(),
       });
     }

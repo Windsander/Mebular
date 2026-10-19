@@ -94,8 +94,8 @@ const execLogPath = join(dir, 'B.exec.jsonl');
 
 try {
   console.log('== M3 fleet 真实 libp2p（loopback）验收 ==');
-  A = makeNode('device-A', { 'device-B': ['tasks'] });
-  B = makeNode('device-B', { 'device-A': ['tasks'] });
+  A = makeNode('device-A');
+  B = makeNode('device-B');
   await A.initialize();
   await B.initialize();
   const addrA = A.node.getLocalMultiaddrs()[0];
@@ -153,7 +153,7 @@ try {
 
     if (!restarted && terminal >= RESTART_AFTER) {
       await B.shutdown();
-      B2 = makeNode('device-B', { 'device-A': ['tasks'] });
+      B2 = makeNode('device-B');
       await B2.initialize();
       await B2.node.connectToPeer(A.node.peerId, addrA);
       await sleep(300);

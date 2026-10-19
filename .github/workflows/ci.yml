@@ -82,7 +82,7 @@ jobs:
       - name: LAN discovery (deterministic fake-bonjour harness + best-effort real mDNS)
         run: npm run verify:lan > verify-lan.log 2>&1 || { tail -n 200 verify-lan.log; exit 1; }
 
-      - name: Invite / QR / auto-grant (scan-to-connect acceptance)
+      - name: Invite / QR / one-time token (scan-to-connect acceptance)
         run: npm run verify:invite > verify-invite.log 2>&1 || { tail -n 200 verify-invite.log; exit 1; }
 
       - name: NAT hole punching (AutoNAT + DCUtR; deterministic + best-effort real)

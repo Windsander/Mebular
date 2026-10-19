@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { POLICY_NAMESPACE, normalizeNamespace } from '@mebular/core';
 import { configPath } from './config.mjs';
+import { cloudError, displayPath, readRegistry } from './profiles.mjs';
 import { TOOL_NAMES } from './tools.mjs';
 import { hotPaths, readApplyPending, readApplyResult } from './config-apply.mjs';
 import {
@@ -440,7 +441,7 @@ export function collectOnlinePeers(app) {
 }
 
 /** GET /admin/api/overview */
-export async function buildOverview({ app, service }) {
+export async function buildOverview({ app, service, cloud }) {
   const status = await service.status();
   const { peers } = collectOnlinePeers(app);
   let revokedCount = 0;
@@ -457,6 +458,24 @@ export async function buildOverview({ app, service }) {
   } catch {
     convergence = null;
   }
+  // 忆云身份：旧守护无此字段 → 前端自行隐藏；注册表不可读时同样省略（不阻塞总览）。
+  let cloudView = null;
+  if (cloud?.available) {
+    try {
+      const state = await readRegistry(cloud.root);
+      const current = state.registry.profiles.find((profile) => profile.id === state.registry.current) ?? null;
+      if (current) {
+        cloudView = {
+          id: current.id,
+          name: current.name,
+          masterFingerprint: current.masterFingerprint ?? null,
+          current: true,
+        };
+      }
+    } catch {
+      cloudView = null;
+    }
+  }
   return {
     device: {
       deviceId: app.deviceId,
@@ -469,6 +488,37 @@ export async function buildOverview({ app, service }) {
     onlinePeers: peers.filter((p) => p.authenticated),
     revokedCount,
     ...(convergence ? { convergence } : {}),
+    ...(cloudView ? { cloud: cloudView } : {}),
+  };
+}
+
+/** GET /admin/api/clouds：注册表 v1 的只读视图（不含秘密）。 */
+export async function buildClouds({ cloud }) {
+  if (!cloud?.available) {
+    throw cloudError(
+      'CLOUD_UNAVAILABLE',
+      '当前为自定义 home / 受限 env：忆云档案功能不可用（默认 ~/.mebular 不受影响）',
+      { reason: cloud?.reason ?? 'unavailable' },
+    );
+  }
+  const state = await readRegistry(cloud.root);
+  const current = state.registry.current;
+  return {
+    ok: true,
+    root: displayPath(cloud.root),
+    current,
+    profiles: state.registry.profiles.map((profile) => ({
+      id: profile.id,
+      name: profile.name,
+      home: profile.home,
+      kind: profile.kind,
+      createdAt: profile.createdAt ?? null,
+      lastUsedAt: profile.lastUsedAt ?? null,
+      masterFingerprint: profile.masterFingerprint ?? null,
+      deviceId: profile.deviceId ?? null,
+      current: profile.id === current,
+    })),
+    ...(state.warning ? { warning: state.warning } : {}),
   };
 }
 
@@ -1229,6 +1279,7 @@ export async function buildClientsView({ home, url }) {
 
 export const READ_ROUTES = {
   '/admin/api/overview': buildOverview,
+  '/admin/api/clouds': buildClouds,
   '/admin/api/devices': buildDevices,
   '/admin/api/policy': buildPolicy,
   '/admin/api/namespaces': buildNamespaces,

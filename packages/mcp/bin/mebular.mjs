@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { homeDir } from '../src/home.mjs';
 import { serviceBuildSha } from '../src/build-sha.mjs';
 
@@ -631,6 +632,370 @@ async function runMemoryTool(name, flags) {
   console.log(JSON.stringify(result, null, 2));
 }
 
+// ---------- 忆云（profile）CLI：list / use / rename ----------
+
+async function readHomeConfig(home) {
+  try {
+    return JSON.parse(await readFile(join(home, 'config.json'), 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function cloudHttpTarget(config) {
+  const http = config?.mcp?.http ?? {};
+  const rawHost = typeof http.host === 'string' && http.host.length > 0 ? http.host : '127.0.0.1';
+  const host = rawHost === '0.0.0.0' || rawHost === '::' ? '127.0.0.1' : rawHost;
+  const port = Number.isInteger(http.port) && http.port > 0 ? http.port : 7331;
+  const tls = http.tls === true || Boolean(http.tlsKey && http.tlsCert);
+  return { host, port, scheme: tls ? 'https' : 'http' };
+}
+
+async function probeCloudHealth(home) {
+  const config = await readHomeConfig(home);
+  const target = cloudHttpTarget(config);
+  const url = `${target.scheme}://${target.host}:${target.port}/healthz`;
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(2500) });
+    if (!res.ok) return { ok: false, status: res.status, url };
+    return { ok: true, body: await res.json(), url };
+  } catch (error) {
+    return { ok: false, url, error: error?.message ?? String(error) };
+  }
+}
+
+async function consoleUrlForHome(home) {
+  const target = cloudHttpTarget(await readHomeConfig(home));
+  return `${target.scheme}://${target.host}:${target.port}/console`;
+}
+
+async function readHomeLock(home) {
+  try {
+    return JSON.parse(await readFile(join(home, 'lock'), 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitForCloudStopped(home, { pid = null, timeoutMs = 10_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const health = await probeCloudHealth(home);
+    const lock = await readHomeLock(home);
+    const lockAlive = (pid !== null && pidAliveSafe(pid))
+      || (Boolean(lock?.pid) && pidAliveSafe(lock.pid));
+    if (!health.ok && !lockAlive) return true;
+    await sleep(200);
+  }
+  return false;
+}
+
+async function waitForCloudHealthy(home, { expectedInstance, cloudId = null, timeoutMs = 20_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let last = null;
+  while (Date.now() < deadline) {
+    const health = await probeCloudHealth(home);
+    last = health;
+    if (health.ok) {
+      const instance = health.body?.instance;
+      if (typeof expectedInstance === 'string') {
+        if (typeof instance !== 'string') {
+          return { ok: false, reason: 'instance_missing', url: health.url };
+        }
+        if (instance !== expectedInstance) {
+          return { ok: false, reason: 'instance_mismatch', instance, url: health.url };
+        }
+      }
+      if (cloudId !== null && typeof health.body?.cloudId === 'string' && health.body.cloudId !== cloudId) {
+        return { ok: false, reason: 'cloud_mismatch', cloudId: health.body.cloudId, url: health.url };
+      }
+      return { ok: true, body: health.body, url: health.url };
+    }
+    await sleep(250);
+  }
+  return { ok: false, reason: 'timeout', url: last?.url ?? null, error: last?.error ?? null };
+}
+
+function pidAliveSafe(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function looksLikeMebularServeAsync(pid) {
+  if (process.platform === 'win32') return true;
+  try {
+    const { execFileSync } = await import('node:child_process');
+    const command = execFileSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf-8' }).trim();
+    return command.length === 0 || /mebular|serve/i.test(command);
+  } catch {
+    return true; // ps 不可用/进程刚退出：由 --force 的显式语义兜底
+  }
+}
+
+async function runCloudList() {
+  const { displayPath, readRegistry, resolveCloudRoot } = await import('../src/profiles.mjs');
+  const cloud = resolveCloudRoot({ home: homeDir(), env: process.env });
+  if (!cloud.available) {
+    console.error(`✗ 忆云档案功能不可用（${cloud.reason}）：当前为自定义 home / 受限 env`);
+    process.exit(2);
+  }
+  const state = await readRegistry(cloud.root).catch((error) => {
+    console.error(`✗ 忆云注册表不可读（${error?.code ?? 'ERROR'}）：${error?.message ?? error}`);
+    process.exit(2);
+  });
+  const current = state.registry.current;
+  console.log(JSON.stringify({
+    ok: true,
+    root: displayPath(cloud.root),
+    current,
+    profiles: state.registry.profiles.map((profile) => ({
+      id: profile.id,
+      name: profile.name,
+      home: profile.home,
+      kind: profile.kind,
+      createdAt: profile.createdAt ?? null,
+      lastUsedAt: profile.lastUsedAt ?? null,
+      masterFingerprint: profile.masterFingerprint ?? null,
+      deviceId: profile.deviceId ?? null,
+      current: profile.id === current,
+    })),
+    ...(state.warning ? { warning: state.warning } : {}),
+  }, null, 2));
+}
+
+async function runCloudRename(id, name) {
+  if (typeof id !== 'string' || id.length === 0 || typeof name !== 'string' || name.length === 0) {
+    console.error('用法：mebular cloud rename <id> <name>');
+    process.exit(2);
+  }
+  const { renameProfile, resolveCloudRoot } = await import('../src/profiles.mjs');
+  const cloud = resolveCloudRoot({ home: homeDir(), env: process.env });
+  if (!cloud.available) {
+    console.error(`✗ 忆云档案功能不可用（${cloud.reason}）`);
+    process.exit(2);
+  }
+  try {
+    const result = await renameProfile(cloud.root, id, name);
+    const profile = result.value;
+    console.log(JSON.stringify({
+      ok: true,
+      profile: { ...profile, current: profile.id === result.registry.current },
+    }, null, 2));
+  } catch (error) {
+    console.error(`✗ 改名失败（${error?.code ?? 'ERROR'}）：${error?.message ?? error}`);
+    process.exit(2);
+  }
+}
+
+async function runCloudUse(id, flags) {
+  if (typeof id !== 'string' || id.length === 0) {
+    console.error('用法：mebular cloud use <id> [--force]');
+    process.exit(2);
+  }
+  const {
+    homeKey,
+    profileHomeForEntry,
+    readRegistry,
+    resolveCloudRoot,
+  } = await import('../src/profiles.mjs');
+  const {
+    installProfileService,
+    profileServiceDescriptor,
+    profileServiceStatus,
+    switchProfile,
+    uninstallProfileService,
+  } = await import('../src/cloud-switch.mjs');
+
+  const cloud = resolveCloudRoot({ home: homeDir(), env: process.env });
+  if (!cloud.available) {
+    console.error(`✗ 忆云档案功能不可用（${cloud.reason}）：当前为自定义 home / 受限 env`);
+    process.exit(2);
+  }
+  const state = await readRegistry(cloud.root).catch((error) => {
+    console.error(`✗ 忆云注册表不可读（${error?.code ?? 'ERROR'}）：${error?.message ?? error}`);
+    process.exit(2);
+  });
+  const target = state.registry.profiles.find((profile) => profile.id === id);
+  if (!target) {
+    console.error(`✗ 未找到忆云：${id}`);
+    process.exit(2);
+  }
+  if (state.registry.current === id) {
+    console.log(JSON.stringify({
+      ok: true,
+      changed: false,
+      current: id,
+      profile: target,
+      consoleUrl: await consoleUrlForHome(profileHomeForEntry(cloud.root, target)),
+    }, null, 2));
+    return;
+  }
+
+  const previous = state.registry.profiles.find((profile) => profile.id === state.registry.current) ?? null;
+  const previousHome = previous ? profileHomeForEntry(cloud.root, previous) : null;
+  const targetHome = profileHomeForEntry(cloud.root, target);
+  if (!existsSync(targetHome)) {
+    console.error(`✗ 忆云「${target.name}」的目录不存在（PROFILE_HOME_MISSING）：${targetHome}`);
+    process.exit(2);
+  }
+
+  const cliBin = fileURLToPath(new URL('./mebular.mjs', import.meta.url));
+  const serviceHome = (await import('node:os')).homedir();
+  const descriptorFor = (home) => profileServiceDescriptor({ root: cloud.root, home, cliBin });
+
+  const oldHealth = previousHome ? await probeCloudHealth(previousHome) : { ok: false };
+  if (oldHealth.ok && typeof oldHealth.body?.instance === 'string'
+    && previousHome && oldHealth.body.instance !== homeKey(previousHome)) {
+    console.error('✗ 旧忆云端口上运行的是另一张忆云（CLOUD_INSTANCE_MISMATCH：/healthz instance 不匹配）：请先停止它');
+    process.exit(2);
+  }
+  const oldLock = previousHome ? await readHomeLock(previousHome) : null;
+  const oldPid = Number.isInteger(oldLock?.pid) && pidAliveSafe(oldLock.pid) ? oldLock.pid : null;
+  const oldWasLive = Boolean(oldHealth.ok || oldPid);
+  const force = flags.force === true;
+
+  let statusNew = { registered: false, autostart: null };
+  let statusLegacy = { registered: false, autostart: null };
+  let statusTarget = { registered: false };
+  try {
+    if (previousHome) {
+      statusNew = await profileServiceStatus({ descriptor: descriptorFor(previousHome), serviceHome });
+      statusLegacy = await profileServiceStatus({ descriptor: descriptorFor(previousHome), serviceHome: previousHome });
+    }
+    // 目标档案可能残留旧服务单元（上次失败切换）：起新前一并卸掉，避免与 child 抢端口/单活。
+    statusTarget = await profileServiceStatus({ descriptor: descriptorFor(targetHome), serviceHome });
+  } catch {
+    // 服务包不可用：按未托管处理
+  }
+  const serviceManaged = Boolean(statusNew.registered || statusLegacy.registered);
+  if (!serviceManaged && oldWasLive && !force) {
+    console.error('✗ 当前守护由外部托管（CLOUD_EXTERNALLY_MANAGED），CLI 不自动停止它。');
+    console.error(`  先停止它，或显式：mebular cloud use ${id} --force（会杀 <oldHome>/lock 的 PID）`);
+    process.exit(2);
+  }
+
+  const stop = async () => {
+    if (serviceManaged) {
+      if (statusLegacy.registered) {
+        await uninstallProfileService({ descriptor: descriptorFor(previousHome), serviceHome: previousHome });
+      }
+      if (statusNew.registered) {
+        await uninstallProfileService({ descriptor: descriptorFor(previousHome), serviceHome });
+      }
+    } else if (oldWasLive) {
+      if (oldPid === null) {
+        throw new Error('旧忆云健康响应存在但找不到 lock PID：拒绝盲目停止');
+      }
+      if (!(await looksLikeMebularServeAsync(oldPid))) {
+        throw new Error(`lock PID ${oldPid} 不是 mebular serve：拒绝 --force 误杀`);
+      }
+      process.kill(oldPid, 'SIGTERM');
+    }
+    if (statusTarget.registered) {
+      await uninstallProfileService({ descriptor: descriptorFor(targetHome), serviceHome }).catch(() => undefined);
+    }
+    if (await waitForCloudStopped(previousHome ?? cloud.root, { pid: oldPid, timeoutMs: 10_000 })) return;
+    if (!serviceManaged && force && oldPid !== null && pidAliveSafe(oldPid)) {
+      process.kill(oldPid, 'SIGKILL');
+      if (await waitForCloudStopped(previousHome ?? cloud.root, { pid: oldPid, timeoutMs: 5_000 })) return;
+    }
+    throw new Error('旧忆云未能停止（端口/锁仍被占用）：请检查诊断');
+  };
+
+  const start = async ({ to, toHome }) => {
+    // 回滚到一个切换前就未运行的旧忆云：恢复「未运行」状态，不额外拉起。
+    if (to?.id === previous?.id && !oldWasLive) return;
+    if (serviceManaged) {
+      await installProfileService({
+        descriptor: descriptorFor(toHome),
+        serviceHome,
+        autostart: statusNew.autostart ?? statusLegacy.autostart ?? true,
+      });
+      return;
+    }
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, [cliBin, 'serve'], {
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env, MEBULAR_HOME: toHome, MEBULAR_CLOUD_ROOT: cloud.root },
+    });
+    child.unref();
+  };
+
+  const verify = async ({ to, home, rollback }) => {
+    if (to?.id === previous?.id && !oldWasLive) return true;
+    const result = await waitForCloudHealthy(home, {
+      expectedInstance: homeKey(home),
+      cloudId: to?.id ?? null,
+      timeoutMs: 20_000,
+    });
+    if (result.ok) return true;
+    if (result.reason === 'instance_mismatch') {
+      throw new Error(`端口上运行的是另一张忆云（instance=${result.instance}），不是「${to?.name ?? '目标'}」`);
+    }
+    if (result.reason === 'instance_missing') {
+      throw new Error('目标端口上的守护没有 /healthz instance 身份（旧版本？）：无法确认是目标忆云');
+    }
+    if (result.reason === 'cloud_mismatch') {
+      throw new Error(`/healthz cloudId=${result.cloudId} 与目标「${to?.id}」不一致`);
+    }
+    void rollback;
+    return false;
+  };
+
+  // 起新失败/健康校验失败：停掉可能已半启动的新忆云，避免回滚时双活。
+  const abortTarget = async ({ toHome }) => {
+    if (serviceManaged) {
+      try {
+        await uninstallProfileService({ descriptor: descriptorFor(toHome), serviceHome });
+      } catch {
+        // 未安装/已退出：继续按 PID 兜底
+      }
+    }
+    const lock = await readHomeLock(toHome);
+    const pid = Number.isInteger(lock?.pid) && pidAliveSafe(lock.pid) ? lock.pid : null;
+    if (pid === null || !(await looksLikeMebularServeAsync(pid))) return;
+    try { process.kill(pid, 'SIGTERM'); } catch { return; }
+    if (await waitForCloudStopped(toHome, { pid, timeoutMs: 5_000 })) return;
+    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    await waitForCloudStopped(toHome, { pid, timeoutMs: 3_000 });
+  };
+
+  try {
+    const result = await switchProfile({ root: cloud.root, id, stop, start, verify, abort: abortTarget });
+    console.log(JSON.stringify({
+      ok: true,
+      changed: result.changed,
+      current: result.current,
+      previous: result.previous,
+      profile: result.profile,
+      consoleUrl: await consoleUrlForHome(result.home),
+      ...(result.warning ? { warning: result.warning } : {}),
+    }, null, 2));
+    console.log(`控制台：${await consoleUrlForHome(result.home)}`);
+  } catch (error) {
+    console.error(`✗ 切换失败（${error?.code ?? 'ERROR'}）：${error?.message ?? error}`);
+    if (error?.rollback && error.rollback.ok === false) {
+      console.error(`  回滚也失败：${error.rollback.error}`);
+    }
+    process.exit(2);
+  }
+}
+
+async function runCloud(action, args, flags) {
+  if (action === 'list') return runCloudList();
+  if (action === 'use') return runCloudUse(args[0], flags);
+  if (action === 'rename') return runCloudRename(args[0], args[1]);
+  console.error('用法：mebular cloud <list|use|rename> [id] [name] [--force]');
+  process.exit(2);
+}
+
 async function main() {
   const flags = parseFlags(argv.slice(1));
   switch (command) {
@@ -696,6 +1061,10 @@ async function main() {
       await runConsole(flags);
       return;
     }
+    case 'cloud': {
+      await runCloud(argv[1], argv.slice(2), flags);
+      return;
+    }
     case 'token': {
       await runToken(argv[1], flags, argv[2]);
       return;
@@ -712,6 +1081,7 @@ async function main() {
           '  serve [--host --port --auth --tls-key --tls-cert --tokens-file]   Streamable HTTP server',
           '  service install|uninstall|restart|status|logs [--no-autostart --label L]  常驻服务管理（mebular-serve）',
           '  console [--host --port]      打印控制台 URL（需 serve 正在运行）',
+          '  cloud list|use|rename [id] [name] [--force]   忆云管理（use 停旧/起新/失败回滚）',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
           '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',

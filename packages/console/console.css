@@ -77,7 +77,7 @@ html, body {
 .badge-danger { color: var(--danger); border-color: #4a1f10; }
 .badge-warn { color: #ffd27a; border-color: #4a3a10; }
 /* E2-A2：顶栏忆云徽章（名字只取 overview.cloud.name；缺失时元素 hidden） */
-#cloud-badge { border-color: #29456b; color: #cfe4ff; background: rgba(20, 40, 72, 0.55); }
+#cloud-badge { max-width: 260px; overflow: hidden; text-overflow: ellipsis; border-color: #29456b; color: #cfe4ff; background: rgba(20, 40, 72, 0.55); }
 #cloud-badge[hidden] { display: none; }
 #cloud-badge:hover { border-color: #3b6ea8; color: #eaf4ff; }
 .topbar-actions .btn-label { white-space: nowrap; }

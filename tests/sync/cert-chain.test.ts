@@ -1,4 +1,6 @@
-// T2 信任模型 v2：委派证书链（正例 / 负数 / 吊销级联 / 事件信任 / 握手校验）。
+// T2 信任模型 v2：委派证书链（正例 / 负数 / 事件信任 / 握手校验）。
+// 吊销不在本文件：它是**作者级**语义（SyncManager 按事件作者隔离），
+// 链验签只做密码学，不因链中含被吊销设备而拒绝下级（见 event-trust-revocation）。
 import { describe, it, expect } from '@jest/globals';
 import { IdentityManager } from '../../src/crypto/IdentityManager.js';
 import {
@@ -75,27 +77,16 @@ describe('T2 委派证书链', () => {
     expect(await verifyCertificateChain([b, badRoot], masterPub, { subjectDeviceId: 'device-B' })).toBe(false);
   });
 
-  it('吊销级联：链中含被吊销节点 → 拒绝（与策略层 R-b 同源）', async () => {
-    const { masterPub, a, b, c } = await setupChain();
-    expect(await verifyCertificateChain([c, b, a], masterPub, { isRevoked: (d) => d === 'device-B' })).toBe(false);
-    expect(await verifyCertificateChain([c, b, a], masterPub, { isRevoked: (d) => d === 'device-A' })).toBe(false);
-    expect(await verifyCertificateChain([c, b, a], masterPub, { isRevoked: (d) => d === 'device-Z' })).toBe(true);
-  });
-
-  it('握手层：委派证书须带链；带吊销判定时级联拒绝', async () => {
+  it('握手层：委派证书须带链（握手只做密码学，不含吊销输入）', async () => {
     const { masterPub, a, b } = await setupChain();
     const h = new AuthenticationHandshake();
     h.setUserMasterPublicKey(masterPub);
     expect(await h.verifyCertificate('device-B', b, [b, a])).toBe(true);
     expect(await h.verifyCertificate('device-B', b)).toBe(false); // 委派证书无链 → 拒
     expect(await h.verifyCertificate('device-A', a)).toBe(true); // 旧直签仍可
-    h.setRevocationCheck((d) => d === 'device-A');
-    expect(await h.verifyCertificate('device-B', b, [b, a])).toBe(false); // 级联吊销
-    h.setRevocationCheck(null);
-    expect(await h.verifyCertificate('device-B', b, [b, a])).toBe(true);
   });
 
-  it('事件信任：委派签发的事件经链验签；旧直签事件不变；吊销级联拒绝', async () => {
+  it('事件信任：委派签发的事件经链验签；旧直签事件不变', async () => {
     const { im, masterPub, a, b } = await setupChain();
     const bKey = im.getDeviceKey('device-B')!;
     const storage = new MemoryStorage();
@@ -106,7 +97,6 @@ describe('T2 委派证书链', () => {
     expect(evt.authorCertificate?.deviceId).toBe('device-B');
     expect(evt.authorCertificateChain?.length).toBe(2);
     expect(await verifyIssuedByUser(evt, masterPub)).toBe(true);
-    expect(await verifyIssuedByUser(evt, masterPub, { isRevoked: (d) => d === 'device-A' })).toBe(false);
     expect(await verifyIssuedByUser(evt, null)).toBe(false);
 
     // 旧直签事件（A，无链）仍有效

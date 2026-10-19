@@ -75,7 +75,7 @@ describe('C5 · 广播记录只作 hints', () => {
       expect(await app.ingestNetEndpointsEvent({ author: 'device-attacker', namespace: NET_NAMESPACE, data: spoofed })).toBe(false);
       expect(app.getNetEndpointsStatus().ignored.subject).toBeGreaterThan(0);
 
-      // 吊销级联：device-B 被吊销后其记录一律忽略
+      // 吊销过滤（subject 级）：device-B 被吊销后其记录一律忽略
       await app.revokeDevice({ subject: 'device-B' });
       const fresh = buildNetEndpointsPayload({ subject: 'device-B', addresses: [PUBLIC], relayCapable: true });
       expect(await app.ingestNetEndpointsEvent({ author: 'device-B', namespace: NET_NAMESPACE, data: fresh })).toBe(false);

@@ -1592,16 +1592,10 @@ export class SyncManager extends EventEmitter {
       return EventLog.verifyEvent(event, peer.publicKey);
     }
     // 中继/多跳：与 `GraphNamespacePolicy` 的签发者判定共用同一套证书链校验。
-    // T2 吊销级联：证书链中任一设备被 device_revoke → 拒绝（与策略层 R-b 同源）。
-    // 注意：**不**在握手/会话层拒绝被吊销者（否则无从得知恢复），级联在**事件信任**层施加。
-    const revoked = this.namespacePolicy.getRevokedDevices
-      ? new Set(await this.namespacePolicy.getRevokedDevices())
-      : undefined;
-    return verifyIssuedByUser(
-      event,
-      this.userMasterPublicKey,
-      revoked ? { isRevoked: (deviceId: string) => revoked.has(deviceId) } : {},
-    );
+    // 吊销是**作者级**语义：本函数只验签发者证书链，不检查链中其他设备；
+    // 被吊销作者的隔离在 `applyOffer` 按 `event.author` 判定（不应用/不入库/不 ack）。
+    // 因此踢根机/中间设备不会连带拒绝其下级或新成员的事件。
+    return verifyIssuedByUser(event, this.userMasterPublicKey);
   }
 
   /**

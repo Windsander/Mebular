@@ -1,4 +1,4 @@
-// C5 · net_endpoints 记录（纯逻辑）：默认 full 三类并排序 / 过期忽略 / 吊销级联 / subject 绑定
+// C5 · net_endpoints 记录（纯逻辑）：默认 full 三类并排序 / 过期忽略 / 吊销过滤（subject 级）/ subject 绑定
 import { describe, it, expect } from '@jest/globals';
 import {
   NET_NAMESPACE,
@@ -56,7 +56,7 @@ describe('C5 · 读取侧过滤（本地策略）', () => {
     expect(acceptNetEndpointsEvent({ author: 'device-A', namespace: NET_NAMESPACE, data: payload }, { now: 61_000 })).toEqual({ ok: false, reason: 'expired' });
   });
 
-  it('吊销级联过滤：subject 被吊销 → 忽略其记录', () => {
+  it('吊销过滤（subject 级）：subject 被吊销 → 忽略其记录', () => {
     const result = acceptNetEndpointsEvent(
       { author: 'device-A', namespace: NET_NAMESPACE, data: payload },
       { now: 2_000, isRevoked: (subject) => subject === 'device-A' },

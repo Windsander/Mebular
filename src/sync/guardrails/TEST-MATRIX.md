@@ -29,7 +29,7 @@
 | 重连 / 双拨 / 静默重启 | ✅ `GraphSync.integration` F4 两方向；`SyncManager` 断线续传 | ◐ cluster 无重启/重连断言（P1 四方向第 4 项） | ✗ | ◐ `verify:connect` relay 降级/恢复（CI） | ✗ |
 | 授权（grant）传播与生效 | ✅ `namespace-selective-sync`、`grant-policy`、`policy-issuer` | ◐ `verify:daemon` 单守护断言自动授权（C7）+ 作用域隔离（CI）；**跨守护传播 ✗** | ◐ `accept-auto-grant`（手动） | ✗ | ◐ `verify:fleet:grant` |
 | 成员资格（M1–M3）传播与闸门 | ✅ `membership.test`（含伪造过滤） | ◐ cluster 只断言「成员表每机一条」；闸门/拒绝/传播 ✗ | ✗ | ✗ | ◐ `verify:fleet:membership` |
-| 吊销隔离（入站/读侧） | ✅ `event-trust-revocation`、`cert-chain` | ✗ 无 daemon e2e | ✗ | ✗ | ✗ |
+| 吊销隔离（作者级：入站/读侧；踢根机/中间设备不连坐） | ✅ `event-trust-revocation`、`grant-policy` | ✗ 无 daemon e2e | ✗ | ✗ | ✗ |
 | 吊销可见性传播（`__policy__` 同步） | ✅ `policy-invariants`/`grant-policy` | ✗ | ✗ | ✗ | ◐ |
 | 水位（F1/R1/R2/R3/F4） | ✅ `namespace-watermarks`、`snapshot-sync` | ✗ 无 | ✗ | ◐ `wan-sync` 用 `stateHashByNamespace` 硬判据 | ✗ |
 | 离线队列跨重启 | ✅ `sync-state-persistence`、`GraphSync` 重启 | ✗ 无 daemon 级重启续传断言 | ✗ | ✗ | ✗ |

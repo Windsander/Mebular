@@ -1345,7 +1345,7 @@ export class Mebular {
 
   /**
    * 单条 `net_endpoints` 记录的读取侧过滤与采用（hints only）：
-   * subject 绑定 / 命名空间 / 过期（本地墙钟）/ 吊销级联 → 通过则写入候选地址簿（source=learned）。
+   * subject 绑定 / 命名空间 / 过期（本地墙钟）/ 吊销过滤（subject 级）→ 通过则写入候选地址簿（source=learned）。
    * **绝不**触碰授权判定或策略状态。
    */
   async ingestNetEndpointsEvent(event: { author?: string; namespace?: string; data?: unknown }): Promise<boolean> {

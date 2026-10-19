@@ -705,8 +705,8 @@ export interface DerivePolicyOptions {
  * - 只采纳「链到用户主密钥」的事件（由调用方先行过滤 / 或在此逐条校验）；
  * - **R-a 不可越权授予**：一条 grant 生效，要求签发者①在 `policyIssuers` 白名单，
  *   或②**当时**已被授权其声明的全部 namespaces（"不能给出自己没有的"）；
- * - **R-b 吊销连坐**：签发者被吊销 → 其记录（含**历史** grant、它发出的
- *   `device_revoke`）一律不采纳；
+ * - **R-b 吊销隔离（作者级，含历史）**：签发者被吊销 → **其本人**的记录（含**历史**
+ *   grant、它发出的 `device_revoke`）一律不采纳；不连带其签发的下级证书/设备；
  * - **R-c**：排序用同一签发者的单调序列 / 跨签发者的逻辑时间 `sum(vectorClock)`，
  *   并发的 `(author, id)` 兜底；不看墙钟；
  * - **R-d**：`namespace_revoke` 按 grantId 精确失效；恢复必须用新 grantId。

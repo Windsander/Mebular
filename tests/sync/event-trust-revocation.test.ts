@@ -1,8 +1,13 @@
-// F-1 判别性锚点：**事件信任路径**（SyncManager 中继/多跳）的吊销级联。
+// 吊销作用域锚点（作者级，T2 信任模型 v2）。
 //
-// 与 cert-chain.test.ts 的区别：那里直接调 `verifyCertificateChain`/`verifyIssuedByUser`；
-// 这里走真实同步会话（A→B 直连 + B→C 中继），断言 C 的 SyncManager 拒绝「链中含被吊销节点」的事件。
-// 若把 SyncManager.verifyEventTrust 的 `isRevoked` 接线关掉，本文件的锚点必须变红。
+// 语义：`device_revoke` **只作用于被吊销设备本人**——
+//   - 读侧：`getAuthorizedNamespaces(target) = []`（策略层，grant-policy 覆盖）；
+//   - 入站：`event.author === target` 的事件不应用/不入库/不 ack（本文件覆盖）；
+//   - **不连坐**：证书链中含被吊销设备（根机/中间设备）时，其下级与新成员的事件
+//     仍按自身证书链验签、按自身作者状态隔离（本文件覆盖）。
+//
+// 与 cert-chain.test.ts 的区别：那里是纯密码学的链验签；这里走真实同步会话
+// （A→B 直连 + B→C 中继），并断言「踢根机/中间设备」后的实际传播行为。
 
 import { describe, it, expect } from '@jest/globals';
 import { IdentityManager } from '../../src/crypto/IdentityManager.js';
@@ -13,6 +18,11 @@ import { SyncManager, type SyncPeer, type SyncResult } from '../../src/sync/sync
 import { SecureChannelSyncTransport } from '../../src/sync/protocol.js';
 import { SecureChannelImpl } from '../../src/p2p/secure/SecureChannelImpl.js';
 import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
+import {
+  DEVICE_REVOKE_EVENT,
+  GraphNamespacePolicy,
+  POLICY_NAMESPACE,
+} from '../../src/sync/grantPolicy.js';
 import type { NamespaceGrantPolicy } from '../../src/sync/namespacePolicy.js';
 import { DEFAULT_NAMESPACE } from '../../src/core/namespace.js';
 
@@ -24,6 +34,7 @@ interface Dev {
   eventLog: EventLog;
   store: GraphStore;
   syncManager: SyncManager;
+  policy: NamespaceGrantPolicy;
 }
 
 function policy(granted: string[], revoked: string[]): NamespaceGrantPolicy {
@@ -33,7 +44,12 @@ function policy(granted: string[], revoked: string[]): NamespaceGrantPolicy {
   };
 }
 
-async function makeDevice(im: IdentityManager, deviceId: string, masterPub: Uint8Array, revoked: string[]): Promise<Dev> {
+async function makeDeviceWithPolicy(
+  im: IdentityManager,
+  deviceId: string,
+  masterPub: Uint8Array,
+  makePolicy: (eventLog: EventLog) => NamespaceGrantPolicy,
+): Promise<Dev> {
   const key = im.getDeviceKey(deviceId)!;
   const storage = new MemoryStorage();
   const eventLog = new EventLog(storage, deviceId, {
@@ -45,14 +61,56 @@ async function makeDevice(im: IdentityManager, deviceId: string, masterPub: Uint
     },
   });
   const store = new GraphStore({ storage, author: deviceId, eventLog });
+  const namespacePolicy = makePolicy(eventLog);
   const syncManager = new SyncManager({
     eventLog,
     storage,
     deviceId,
     userMasterPublicKey: masterPub,
-    namespacePolicy: policy([DEFAULT_NAMESPACE], revoked),
+    namespacePolicy,
   });
-  return { deviceId, publicKey: key.publicKey, privateKey: key.privateKey, storage, eventLog, store, syncManager };
+  return {
+    deviceId,
+    publicKey: key.publicKey,
+    privateKey: key.privateKey,
+    storage,
+    eventLog,
+    store,
+    syncManager,
+    policy: namespacePolicy,
+  };
+}
+
+async function makeDevice(
+  im: IdentityManager,
+  deviceId: string,
+  masterPub: Uint8Array,
+  revoked: string[],
+): Promise<Dev> {
+  return makeDeviceWithPolicy(im, deviceId, masterPub, () => policy([DEFAULT_NAMESPACE], revoked));
+}
+
+/** 在目标设备的本地事件图里写入一条真实的 `device_revoke`（由 author 签发）。 */
+async function seedDeviceRevoke(
+  im: IdentityManager,
+  target: Dev,
+  authorDeviceId: string,
+  subject: string,
+): Promise<void> {
+  const key = im.getDeviceKey(authorDeviceId)!;
+  const authorLog = await EventLog.restore(target.storage, authorDeviceId, {
+    signer: {
+      deviceId: authorDeviceId,
+      privateKey: key.privateKey,
+      certificate: key.certificate!,
+      ...(key.certificateChain !== undefined ? { certificateChain: key.certificateChain } : {}),
+    },
+  });
+  await authorLog.append({
+    type: DEVICE_REVOKE_EVENT,
+    data: { deviceRevoke: { subject, issuedAt: 1 } },
+    namespace: POLICY_NAMESPACE,
+  });
 }
 
 function peerOf(d: Dev): SyncPeer {
@@ -74,7 +132,7 @@ async function runSync(initiator: Dev, responder: Dev): Promise<[SyncResult, Syn
   ]);
 }
 
-/** master → X（一级，主密钥直签）→ A（二级，X 委派）。 */
+/** master → X（一级，主密钥直签）→ A（二级，X 委派）；B/C 主密钥直签。 */
 async function setup(): Promise<{ im: IdentityManager; masterPub: Uint8Array }> {
   const im = new IdentityManager();
   await im.generateUserMasterKey();
@@ -90,7 +148,7 @@ async function setup(): Promise<{ im: IdentityManager; masterPub: Uint8Array }> 
   return { im, masterPub };
 }
 
-describe('F-1 事件信任路径的吊销级联（SyncManager 中继）', () => {
+describe('F-1 事件信任路径的吊销作用域（作者级）', () => {
   it('对照：X 未被吊销时，C 经中继接受 A 的委派链事件', async () => {
     const { im, masterPub } = await setup();
     const a = await makeDevice(im, 'device-A', masterPub, []);
@@ -105,30 +163,70 @@ describe('F-1 事件信任路径的吊销级联（SyncManager 中继）', () => 
     expect((await c.store.getNode(node.id))?.content).toEqual({ text: 'relayed-control' });
   });
 
-  it('锚点：X 被 device_revoke（吊销集合含 X）→ C 拒绝链中含 X 的中继事件', async () => {
+  it('踢根机/中间设备 X：其余设备同步与 X 的下级/新成员加入均不受影响', async () => {
+    const { im, masterPub } = await setup();
+    // 新成员 D：由 A 委派签发，链 [D, A, X]（X 是中间设备）
+    await im.generateDeviceKey('device-D', 'D');
+    await im.issueDelegatedDeviceCertificate('device-D', 'device-A');
+
+    const a = await makeDevice(im, 'device-A', masterPub, []);
+    const b = await makeDevice(im, 'device-B', masterPub, []);
+    // C 用真实策略推导：B（可信签发者）签发 device_revoke(X) → revoked = {X}
+    const c = await makeDeviceWithPolicy(
+      im,
+      'device-C',
+      masterPub,
+      (eventLog) => new GraphNamespacePolicy({
+        eventLog,
+        userMasterPublicKey: masterPub,
+        policyIssuers: ['device-B'],
+      }),
+    );
+    const d = await makeDevice(im, 'device-D', masterPub, []);
+    await seedDeviceRevoke(im, c, 'device-B', 'device-X');
+    expect([...(await c.policy.getRevokedDevices!())]).toEqual(['device-X']);
+
+    const nodeA = await a.store.createNode('fact', { text: 'x-child' });
+    const nodeB = await b.store.createNode('fact', { text: 'sibling' });
+    const nodeD = await d.store.createNode('fact', { text: 'new-member' });
+
+    await runSync(a, b); // A→B 直连
+    await runSync(d, b); // D→B 直连（链 [D,A,X]）
+    const [, resC] = await runSync(b, c); // B→C 中继：A/B/D 三条事件
+
+    expect(resC.receivedEvents).toBe(3);
+    expect((await c.store.getNode(nodeA.id))?.content).toEqual({ text: 'x-child' });
+    expect((await c.store.getNode(nodeB.id))?.content).toEqual({ text: 'sibling' });
+    expect((await c.store.getNode(nodeD.id))?.content).toEqual({ text: 'new-member' });
+  });
+
+  it('作者级隔离：被吊销作者 A 的中继事件不应用/不入库/不 ack，且不中止会话', async () => {
     const { im, masterPub } = await setup();
     const a = await makeDevice(im, 'device-A', masterPub, []);
     const b = await makeDevice(im, 'device-B', masterPub, []);
-    const c = await makeDevice(im, 'device-C', masterPub, ['device-X']); // ← 事件信任层的吊销谓词
+    const c = await makeDevice(im, 'device-C', masterPub, ['device-A']);
 
-    const node = await a.store.createNode('fact', { text: 'relayed-revoked' });
+    const node = await a.store.createNode('fact', { text: 'revoked-author-relayed' });
     await runSync(a, b);
-    // C 的 SyncManager 必须在事件信任路径拒绝（而非仅证书链单测）
-    await expect(runSync(b, c)).rejects.toThrow('Event signature verification failed');
+    const [, resC] = await runSync(b, c);
+
+    expect(resC.receivedEvents).toBe(0);
+    expect(resC.appliedEventIds).toEqual([]);
     expect(await c.store.getNode(node.id)).toBeNull();
     expect(await c.eventLog.listEvents()).toHaveLength(0);
   });
 
-  it('锚点判别性：吊销的是链中**签发者** X（A 自身未被吊销）', async () => {
+  it('作者级隔离：直连快路径同样按作者隔离（不应用/不入库/不 ack）', async () => {
     const { im, masterPub } = await setup();
     const a = await makeDevice(im, 'device-A', masterPub, []);
-    const b = await makeDevice(im, 'device-B', masterPub, []);
-    // 只吊销 A（叶）应拒；只吊销 X（中间签发者）也应拒 —— 后者是级联的关键判别
-    const cLeafRevoked = await makeDevice(im, 'device-C', masterPub, ['device-A']);
-    const cIssuerRevoked = await makeDevice(im, 'device-C', masterPub, ['device-X']);
-    await a.store.createNode('fact', { text: 'relayed-discriminate' });
-    await runSync(a, b);
-    await expect(runSync(b, cLeafRevoked)).rejects.toThrow('Event signature verification failed');
-    await expect(runSync(b, cIssuerRevoked)).rejects.toThrow('Event signature verification failed');
+    const c = await makeDevice(im, 'device-C', masterPub, ['device-A']);
+
+    const node = await a.store.createNode('fact', { text: 'revoked-author-direct' });
+    const [, resC] = await runSync(a, c);
+
+    expect(resC.receivedEvents).toBe(0);
+    expect(resC.appliedEventIds).toEqual([]);
+    expect(await c.store.getNode(node.id)).toBeNull();
+    expect(await c.eventLog.listEvents()).toHaveLength(0);
   });
 });

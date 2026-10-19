@@ -107,7 +107,10 @@
     （防「踢批准人=救人」）。`admitted` 种子 = 首条 tier 前的被采纳策略记录参与者 ∪ 首条 tier
     作者；high 下新设备首现（grant/membership）必须携 `cosign(op:'join')`/`breakGlass`，否则
     不采纳且不进 `admitted`。`breakGlass` 的 keyId 必须等于当刻 `recoveryKeyId`，nonce 一次性；
-    轮换后旧 key 的新签名不再采纳（历史不回撤）。全部拒绝写入
+    轮换后旧 key 的新签名不再采纳（历史不回撤）。**恢复码初始登记**仅当 `mode:'set'` 且 R-c 序
+    早于首条被采纳 high-tier 时免证明；high 出现之后（含之后降档窗口）必须携
+    `cosign(op:'rotate', oldKeyId='')` / `breakGlass`，否则不采纳（防被窃受信设备自登记恢复码
+    后用 breakGlass 绕过会签）。全部拒绝写入
     `PolicyState.security.rejections`（`missing-proof` / `invalid-proof` /
     `approval-missing-or-not-causal` / `approval-approver-revoked-at-its-order` /
     `approver-not-admitted-at-approval` / `approver-equals-author` / `approver-equals-subject` /

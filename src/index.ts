@@ -13,6 +13,7 @@ export {
   type NamespaceHandoffPlan,
   type NamespaceHandoffResult,
   type NamespaceRejoinResult,
+  type SetSecurityTierInput,
 } from './mebular.js';
 export {
   EventLog,
@@ -62,6 +63,15 @@ export {
   POLICY_ISSUER_DECLARE_EVENT,
   NAMESPACE_MEMBERSHIP_EVENT,
   NAMESPACE_HANDOFF_EVENT,
+  SECURITY_TIER_EVENT,
+  SECURITY_APPROVAL_EVENT,
+  SECURITY_RECOVERY_EVENT,
+  securityActionDigest,
+  pairingCodeForDigest,
+  canonicalCosignProofData,
+  canonicalBreakGlassProofData,
+  verifyCosignProof,
+  verifyBreakGlassProof,
   type NamespaceGrantRecord,
   type NamespaceRevokeRecord,
   type DeviceRevokeRecord,
@@ -69,6 +79,17 @@ export {
   type NamespaceMembershipRecord,
   type NamespaceHandoffRecord,
   type PolicyState,
+  type SecurityLevel,
+  type SecurityOp,
+  type CosignProof,
+  type BreakGlassProof,
+  type SecurityTierRecord,
+  type SecurityApprovalRecord,
+  type SecurityRecoveryRecord,
+  type SecurityRejectionReason,
+  type SecurityRejection,
+  type SecurityPolicyState,
+  type SecurityAction,
 } from './sync/grantPolicy.js';
 export { CompositeNamespacePolicy, type NamespaceMembershipPolicy } from './sync/namespacePolicy.js';
 export {

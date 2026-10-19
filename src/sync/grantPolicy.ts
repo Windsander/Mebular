@@ -120,7 +120,8 @@ export interface SecurityTierRecord {
 /** 会签请求/批准/拒绝记录。 */
 export interface SecurityApprovalRecord {
   approvalId: string;
-  op: 'kick' | 'join' | 'tier';
+  /** `rotate` 用于恢复码初始登记/轮换（§3.4D；初始登记 oldKeyId = '' 哨兵） */
+  op: 'kick' | 'join' | 'tier' | 'rotate';
   decision: 'request' | 'approve' | 'deny';
   /** request 作者 = 发起设备 */
   initiator: string;
@@ -1006,6 +1007,8 @@ function runSecurityPass(
   let changedAt: number | undefined;
   let changedBy: string | undefined;
   let recoveryKeyId: string | undefined;
+  /** 是否已采纳过任何 high-tier 记录（用于恢复码初始登记的“升档仪式”边界）。 */
+  let highTierAdopted = false;
   const usedNonces = new Map<string, string>();
   const revokedAtOrder = new Set<string>();
   const approvalValidity = new Map<number, SecurityRejectionReason | null>();
@@ -1154,7 +1157,10 @@ function runSecurityPass(
         if (revokedIn.has(entry.author) || revokedAtOrder.has(entry.author)) break; // R-b（含历史）
         const record = entry.tier;
         const before = level;
-        if (before === 'high' && record.level === 'high') break; // 同级重发：采纳但无效果
+        if (before === 'high' && record.level === 'high') {
+          highTierAdopted = true; // 同级重发：采纳但无效果
+          break;
+        }
         if (before === 'high' && record.level !== 'high') {
           const nonce = record.nonce;
           const digest = nonce
@@ -1167,6 +1173,7 @@ function runSecurityPass(
           }
         }
         level = record.level;
+        if (record.level === 'high') highTierAdopted = true;
         changedAt = record.issuedAt;
         changedBy = entry.author;
         if (!sealed) {
@@ -1214,7 +1221,28 @@ function runSecurityPass(
         if (revokedIn.has(entry.author) || revokedAtOrder.has(entry.author)) break; // R-b
         const record = entry.recovery;
         if (recoveryKeyId === undefined) {
-          // 初始登记（无当前 key）：签发者受信未吊销即采纳。
+          // 初始登记：仅「升档仪式内」（R-c 序早于首条被采纳的 high-tier 记录）
+          // 的 mode:'set' 免证明。high 出现后（含之后降档窗口）必须携
+          // cosign(op:'rotate', oldKeyId='') 或 breakGlass——防被窃受信设备
+          // 自登记恢复码后用 breakGlass 绕过会签。
+          const freeInitial = record.mode === 'set' && !highTierAdopted;
+          if (!freeInitial) {
+            const nonce = record.nonce;
+            const digest = nonce
+              ? securityActionDigest({
+                  op: 'rotate',
+                  initiator: entry.author,
+                  oldKeyId: '',
+                  newPublicKey: record.publicKey,
+                  nonce,
+                })
+              : '';
+            const reason = checkSecurityProof(entry, 'rotate', digest, undefined, nonce, ctx);
+            if (reason) {
+              reject(entry.id, reason);
+              break;
+            }
+          }
           recoveryKeyId = record.keyId;
           if (!sealed) seed.add(entry.author);
           break;

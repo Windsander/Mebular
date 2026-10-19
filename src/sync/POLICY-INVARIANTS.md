@@ -83,8 +83,10 @@ hello 订阅声明降级为**活跃性/一致性校验**，与实际成员资格
 | `namespace_grant` / `namespace_membership`（首现 @high） | 可信、未被吊销 | 无证明 / 无效证明 | **不采纳**：不进授权/成员集合，且设备不進 `admitted` | `R1-6` |
 | `namespace_grant` / `namespace_membership`（首现 @high） | 可信、未被吊销 | 有效 `cosign(op:'join', initiator ≠ X)` / `breakGlass` | **采纳**：记录生效，X 進 `admitted` | `R1-6` |
 | `namespace_grant` / `namespace_membership`（历史成员，tier 前已有被采纳记录） | 可信、未被吊销 | 任意 | **不回溯要求会签**（已在 `admitted₀`） | `R1-6` |
-| `security_recovery`（初始登记，无当前 key） | 可信、未被吊销 | 任意 | **采纳**（`recoveryKeyId = keyId`） | `R1-7` |
-| `security_recovery`（轮换） | 可信、未被吊销 | 有效 `breakGlass(op:'rotate', oldKeyId=当前 key)` 或 `cosign(op:'rotate')` | **采纳**（`recoveryKeyId` 前移；旧 key 新签名不再采纳，历史不回撤） | `R1-7` |
+| `security_recovery(mode:'set')`（升档仪式内：R-c 序早于首条被采纳 high-tier） | 可信、未被吊销 | 任意 | **采纳**（`recoveryKeyId = keyId`；免证明） | `R1-7` · `R1-7b②` |
+| `security_recovery(mode:'set')`（high 已出现之后） | 可信、未被吊销 | 无证明 | **不采纳**（`missing-proof`；防被窃受信设备自登记恢复码） | `R1-7b①` |
+| `security_recovery(mode:'set')`（high 已出现之后） | 可信、未被吊销 | 有效 `cosign(op:'rotate', oldKeyId='')` / `breakGlass` | **采纳**（初始登记；`oldKeyId` 空串哨兵） | `R1-7b③` |
+| `security_recovery`（轮换） | 可信、未被吊销 | 有效 `breakGlass(op:'rotate', oldKeyId=当前 key)` 或 `cosign(op:'rotate', oldKeyId=当前 key)` | **采纳**（`recoveryKeyId` 前移；旧 key 新签名不再采纳，历史不回撤） | `R1-7` · `R1-7b④` |
 | `security_recovery`（轮换） | 可信、未被吊销 | 无证明 / 旧 key 已轮换 / nonce 重放 | **不采纳**（进 `rejections`） | `R1-7` · `R1-8` |
 | `security_approval(approve)` | 可信、**在其 R-c 位次未被吊销** | approver ∈ `admitted`（其位次）∧ approver ≠ initiator | **位次有效**（供后续最终记录引用；事后吊销不回撤） | `R1-12` |
 | `security_approval(approve)` | 可信、其位次已吊销 / 未准入 | — | **位次无效**（引用它的最终记录不采纳并归因） | `R1-3` · `R1-8` · `R1-12` |
@@ -193,6 +195,10 @@ hello 订阅声明降级为**活跃性/一致性校验**，与实际成员资格
       `approval-missing-or-not-causal` / `approval-approver-revoked-at-its-order` /
       `approver-not-admitted-at-approval` / `approver-equals-author` / `approver-equals-subject` /
       `stale-or-replayed-nonce`；无 `expiresAt` 原因）。覆盖 `R1-3`/`R1-5`/`R1-7`/`R1-8`。
+    - **恢复码初始登记（安全修复）**：`mode:'set'` 且 R-c 序**早于首条被采纳 high-tier**
+      时免证明（升档仪式内）；high 出现之后（含之后降档窗口）的初始登记必须携
+      `cosign(op:'rotate', oldKeyId='')` / `breakGlass`，否则不采纳并进 `rejections`。
+      防「被窃受信设备自登记恢复码 → 用 breakGlass 绕过会签」。覆盖 `R1-7b`。
     - **防降级逃逸**：`high → medium/low` 无有效证明 → 档位保持 high（fail-closed）；
       `low/medium` 下的升级/同级变更无网络证明要求。覆盖 `R1-3`/`R1-4`。
     - **fail-closed 回退**：未收敛时新轴取保守值（证明视为不满足、档位变更不采纳、

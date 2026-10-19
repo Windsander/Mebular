@@ -113,7 +113,11 @@
     a new device's first appearance under `high` (grant/membership) must carry `cosign(op:'join')`/`breakGlass`,
     otherwise it is not adopted and does not enter `admitted`. A `breakGlass` keyId must equal the current
     `recoveryKeyId`; nonces are one-time; after rotation new signatures by the old key are not adopted (history
-    is not undone). Rejections are exposed in `PolicyState.security.rejections` (`missing-proof` /
+    is not undone). **Initial recovery-key registration** is proof-free only when `mode:'set'` and the record is
+    R-c earlier than the first adopted high-tier record; after high has ever appeared (including a later
+    downgrade window) it must carry `cosign(op:'rotate', oldKeyId='')` / `breakGlass`, otherwise it is not
+    adopted (prevents a stolen trusted device from self-registering a recovery key and bypassing cosign).
+    Rejections are exposed in `PolicyState.security.rejections` (`missing-proof` /
     `invalid-proof` / `approval-missing-or-not-causal` / `approval-approver-revoked-at-its-order` /
     `approver-not-admitted-at-approval` / `approver-equals-author` / `approver-equals-subject` /
     `stale-or-replayed-nonce`).

@@ -652,6 +652,105 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
     expect(reasonsOf(afterRotate)).toContain('invalid-proof');
   });
 
+  it('R1-7b 恢复码初始登记：high 后裸登记不采纳 / 升档仪式内免证明 / high 后 cosign 采纳', () => {
+    // ① high 既成后裸登记 → 不采纳（可见 reason）
+    resetSeq();
+    const late = derive([
+      ...highBase(),
+      recovery('D', { keyId: 'K-late', publicKey: 'pub-late', createdAt: 1, mode: 'set' }),
+    ]);
+    expect(late.security?.recoveryKeyId).toBeUndefined();
+    expect(reasonsOf(late)).toContain('missing-proof');
+
+    // ② 升档仪式内（R-c 序早于首条 high-tier）→ 免证明采纳
+    resetSeq();
+    const ceremony = derive([
+      recovery('D', { keyId: 'K-ceremony', publicKey: 'pub-ceremony', createdAt: 1, mode: 'set' }),
+      tier('D', 'high'),
+    ]);
+    expect(ceremony.security?.recoveryKeyId).toBe('K-ceremony');
+    expect(reasonsOf(ceremony)).toHaveLength(0);
+
+    // ③ high 后带 cosign(op:'rotate', oldKeyId='') 登记 → 采纳
+    resetSeq();
+    const setNonce = 'rec-set-after';
+    const setDigest = securityActionDigest({
+      op: 'rotate',
+      initiator: 'D',
+      oldKeyId: '',
+      newPublicKey: 'pub-after',
+      nonce: setNonce,
+    });
+    const setProof = cosign({
+      op: 'rotate',
+      approver: 'E',
+      approvalId: 'ap-rec-set',
+      digest: setDigest,
+    });
+    const registered = derive([
+      ...highBase(),
+      approvalEntry({
+        author: 'E',
+        approvalId: 'ap-rec-set',
+        op: 'rotate',
+        initiator: 'D',
+        nonce: setNonce,
+        digest: setDigest,
+      }),
+      recovery('D', {
+        keyId: 'K-after',
+        publicKey: 'pub-after',
+        createdAt: 1,
+        mode: 'set',
+        nonce: setNonce,
+        cosign: setProof.proof,
+      }),
+    ]);
+    expect(registered.security?.recoveryKeyId).toBe('K-after');
+    expect(reasonsOf(registered)).toHaveLength(0);
+
+    // ④ 已登记 key 的 cosign 轮换（oldKeyId = 当前 key）→ 采纳
+    resetSeq();
+    const rotateNonce = 'rec-cosign-rotate';
+    const rotateDigest = securityActionDigest({
+      op: 'rotate',
+      initiator: 'D',
+      oldKeyId: 'K1',
+      newPublicKey: 'pub-k2',
+      nonce: rotateNonce,
+    });
+    const rotateProof = cosign({
+      op: 'rotate',
+      approver: 'E',
+      approvalId: 'ap-rec-rotate',
+      digest: rotateDigest,
+    });
+    const rotated = derive([
+      grant('D', 'E', ['nsA']),
+      grant('D', 'F', ['nsA']),
+      recovery('D', { keyId: 'K1', publicKey: 'pub-k1', createdAt: 1, mode: 'set' }),
+      tier('D', 'high'),
+      approvalEntry({
+        author: 'E',
+        approvalId: 'ap-rec-rotate',
+        op: 'rotate',
+        initiator: 'D',
+        nonce: rotateNonce,
+        digest: rotateDigest,
+      }),
+      recovery('D', {
+        keyId: 'K2',
+        publicKey: 'pub-k2',
+        createdAt: 2,
+        mode: 'rotate',
+        nonce: rotateNonce,
+        cosign: rotateProof.proof,
+      }),
+    ]);
+    expect(rotated.security?.recoveryKeyId).toBe('K2');
+    expect(reasonsOf(rotated)).toHaveLength(0);
+  });
+
   it('R1-8 拒绝诊断：§3.4E 枚举的 reason 均出现在 PolicyState.security.rejections', () => {
     const seen = new Set<string>();
     const collect = (state: ReturnType<typeof derivePolicyState>) => {

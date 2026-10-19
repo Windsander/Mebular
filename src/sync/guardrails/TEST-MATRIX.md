@@ -53,6 +53,7 @@
 | R1-5 | device_revoke @high：无证明/approver=subject/nonce 重放不采纳；有效 cosign 采纳 | `security-tier` | ✅ |
 | R1-6 | 首现验收：新设备无证明不采纳且不 admitted；带证明采纳；历史成员不回溯 | `security-tier` | ✅ |
 | R1-7 | 恢复码登记→消费（nonce 一次）→轮换；旧 key 新签名不采纳 | `security-tier` | ✅ |
+| R1-7b | 初始登记：high 后裸登记不采纳；升档仪式内免证明；high 后 cosign(op:'rotate', oldKeyId='') 采纳；当前 key 的 cosign 轮换采纳 | `security-tier` | ✅ |
 | R1-8 | 拒绝诊断：§3.4E 八类 reason 均出现在 `security.rejections` | `security-tier` | ✅ |
 | R1-9 | 纯旧记录 golden 与基线逐字节一致；harness 含新类型后排列/幂等/oracle-free 全过 | `security-tier` · `policy-invariants` | ✅ |
 | R1-10 | POLICY-INVARIANTS / SEALING / 护栏四件套同步；`npm test` 不降；CI 五项绿 | 本文档 + 测试内文档断言 | ✅（`npm test` 见 PR） |

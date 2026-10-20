@@ -90,9 +90,11 @@ describe('E2-A2 忆云入口与卡片（静态契约）', () => {
     expect(consoleJs).toContain('window.mebularDesktop?.cloudSwitch');
   });
 
-  it('忆云卡：当前不可切换 / 已归档危险确认 / 改名即时生效 / 无删除入口', () => {
+  it('忆云卡：当前不可切换 / 仅当前可改名 / 归档提示切换后改 / 无删除入口', () => {
     expect(consoleJs).toContain('settings-cloud-card');
-    expect(consoleJs).toMatch(/current\s*\?\s*''\s*:\s*`<button[^`]*data-cloud-switch/);
+    expect(consoleJs).toContain('const renameUi = current');
+    expect(consoleJs).toContain('data-cloud-switch');
+    expect(consoleJs).toContain('切换到该忆云后可改名');
     expect(consoleJs).toContain('/admin/api/clouds/rename');
     expect(consoleJs).toContain('归档保留，不删除');
     expect(consoleJs).not.toContain('data-cloud-delete');

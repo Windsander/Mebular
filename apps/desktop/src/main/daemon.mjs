@@ -160,6 +160,33 @@ export async function probeSecurityLevel(fetchImpl, http = { host: '127.0.0.1', 
 }
 
 /**
+ * 运行期展示名探测（托盘/窗口标题）：GET /admin/api/overview。
+ * 忆云名以网络派生为准（另一台设备改名同步后，本机 registry 可能仍是旧名）。
+ * 失败返回 null（调用方保留上一值，不冒充新值）。
+ */
+export async function probeRuntimeIdentity(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, timeoutMs = 1500) {
+  try {
+    const res = await fetchImpl(`http://${http.host}:${http.port}/admin/api/overview`, {
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: { accept: 'application/json' },
+    });
+    if (!res?.ok) return null;
+    const data = await res.json().catch(() => null);
+    if (!data || typeof data !== 'object') return null;
+    return {
+      cloudName: typeof data.cloud?.name === 'string' && data.cloud.name.trim().length > 0
+        ? data.cloud.name
+        : null,
+      deviceName: typeof data.device?.name === 'string' && data.device.name.trim().length > 0
+        ? data.device.name
+        : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 引导/待重启探测（W-1 高-1 钩子）：GET /app/provision/status
  *   200 且 provision===true → 引导态（provisioned:false＝待建新/加入；true＝已初始化待重启）
  *   404 → 正常态（接口不挂载）；其他/异常 → 不阻断（守护健康探测另有 probeHealth）

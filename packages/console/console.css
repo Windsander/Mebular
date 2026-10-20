@@ -473,6 +473,17 @@ body.modal-open { overflow: hidden; }
 .cloud-row.is-current { border-color: rgba(80, 255, 170, 0.32); background: rgba(80, 255, 170, 0.05); }
 .cloud-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
 .cloud-name { font-weight: 600; overflow-wrap: anywhere; }
+.cloud-row.is-duplicate { border-color: rgba(255, 210, 122, 0.45); }
+.cloud-dup-badge, .cloud-suggest-badge { white-space: nowrap; }
+.cloud-rename-hint { font-size: 11px; }
+.cloud-rename-note { grid-column: 1 / -1; margin: 0; font-size: 11px; }
+/* 顶栏忆云徽章：当前忆云被判定重名时的警告点 */
+.cloud-warning-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: #ffd27a;
+  box-shadow: 0 0 0 2px rgba(255, 210, 122, 0.18);
+  flex: 0 0 auto;
+}
 .cloud-meta { grid-column: 1; display: flex; gap: 6px 14px; flex-wrap: wrap; font-size: 11px; color: var(--muted); min-width: 0; }
 .cloud-meta code { color: var(--accent); overflow-wrap: anywhere; }
 .cloud-actions { grid-column: 2; grid-row: 1 / span 2; display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex-wrap: wrap; min-width: 0; }
@@ -494,6 +505,10 @@ body.modal-open { overflow: hidden; }
 .cloud-switch-error { color: #ffb4b4; }
 .cloud-error-detail { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
 .invite-cloud-line { margin-top: 6px; }
+.device-rename-inline { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.device-rename-input { width: 170px; min-width: 0; }
+.device-rename-error { display: block; margin-top: 4px; font-size: 11px; }
+.device-name-value { margin-right: 8px; }
 /* E2-A2：加入忆云弹层字段竖排（label 独占一行；textarea/input 满宽） */
 #cloud-join textarea.crt-input { font-family: var(--crt-mono, monospace); font-size: 11px; resize: vertical; }
 #cloud-join .modal-note { margin-bottom: 4px; }
@@ -1035,8 +1050,10 @@ body.modal-open { overflow: hidden; }
 }
 
 /* ---------- 设备卡排版（紧凑身份头 + 短说明） ---------- */
-#device-card .card-identity { display: flex; align-items: center; gap: 8px; }
-#device-card .card-id { font-size: 15px; font-weight: 700; color: #d9ffec; letter-spacing: 0.5px; }
+#device-card .card-identity { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+#device-card .card-name { font-size: 15px; font-weight: 700; color: #d9ffec; overflow-wrap: anywhere; }
+#device-card .card-id { font-size: 12px; font-weight: 600; color: var(--muted); overflow-wrap: anywhere; }
+#device-card .card-name + .card-id { font-size: 11px; }
 #device-card .card-status.is-ok { border-color: rgba(80, 255, 170, 0.45); color: #9dffcf; }
 #device-card .card-status.is-off { border-color: rgba(140, 255, 200, 0.25); color: rgba(140, 255, 200, 0.5); }
 #device-card .card-status.is-danger { border-color: rgba(255, 120, 120, 0.5); color: #ffb9b9; }

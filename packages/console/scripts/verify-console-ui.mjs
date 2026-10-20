@@ -732,7 +732,8 @@ async function main() {
           && /忆云 2/.test(archived.textContent) && /已归档/.test(archived.textContent)
           && /sha256:[0-9a-f]{12}/.test(current.textContent) && /最近使用/.test(current.textContent)
           && !current.querySelector('[data-cloud-switch]')
-          && Boolean(archived.querySelector('[data-cloud-switch]')) && Boolean(archived.querySelector('[data-cloud-rename]'))
+          && Boolean(archived.querySelector('[data-cloud-switch]')) && !archived.querySelector('[data-cloud-rename]')
+          && /切换到该忆云后可改名/.test(archived.textContent)
           && !card.querySelector('[data-cloud-delete]') && !/删除忆云/.test(card.textContent)
           && /归档保留，不删除/.test(card.textContent)
           && Boolean(common) && common.contains(card)
@@ -764,6 +765,29 @@ async function main() {
     })()`);
     check('E2-A2 改名可改回（忆云 1）',
       await waitFor('(() => { const card = document.querySelector("#settings-cloud-card"); return Boolean(card) && /忆云 1/.test(card.textContent); })()', 20000));
+
+    // 设备名：关于本机 → 身份与存储 → 改名；保存后设备列表/概览都显示新名字
+    await evalJs('document.querySelector("#settings-close").click()');
+    await evalJs('document.querySelector("#self-badge").click()');
+    check('设备名：关于本机提供「改名」入口',
+      await waitFor('Boolean(document.querySelector("#about-body [data-device-rename]"))'));
+    await evalJs('document.querySelector("#about-body [data-device-rename]").click()');
+    check('设备名：行内输入就位', await waitFor('Boolean(document.querySelector("[data-device-rename-input]"))'));
+    await evalJs(`(() => {
+      const input = document.querySelector('[data-device-rename-input]');
+      input.value = '演示笔记本';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('[data-device-rename-save]').click();
+    })()`);
+    check('设备名：保存后关于本机显示新名字',
+      await waitFor('(() => { const body = document.querySelector("#about-body"); return Boolean(body) && /演示笔记本/.test(body.textContent); })()', 20000));
+    check('设备名：设备列表返回最新 name（deviceId 仍是唯一标识）', await evalJs(`(async () => {
+      const res = await fetch('/admin/api/devices', { headers: { accept: 'application/json' } });
+      const rows = await res.json();
+      const self = rows.find((row) => row.deviceId === 'device-ui');
+      return Boolean(self) && self.name === '演示笔记本';
+    })()`));
+    await evalJs('document.querySelector("#about-close").click()');
 
     // U-1：CSRF 403 自愈——旧 token + 错误 cookie → 重取 /console/ → 原表单内容自动重试一次
     await evalJs('document.querySelector("[data-cloud-rename=default]").click()');

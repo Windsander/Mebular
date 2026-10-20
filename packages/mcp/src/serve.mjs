@@ -1111,6 +1111,7 @@ export async function startHttpServer({
     /^\/admin\/api\/clouds\/(join|rename|inspect)$/,
     /^\/admin\/api\/subscriptions$/,
     /^\/admin\/api\/namespaces$/,
+    /^\/admin\/api\/devices\/self\/name$/,
     /^\/admin\/api\/devices\/([^/]+)\/(revoke|restore|connect|disconnect|sync|reset-watermarks)$/,
     /^\/admin\/api\/config$/,
     /^\/admin\/api\/restart$/,
@@ -1147,6 +1148,7 @@ export async function startHttpServer({
     kind: profile.kind,
     createdAt: profile.createdAt ?? null,
     lastUsedAt: profile.lastUsedAt ?? null,
+    nameUpdatedAt: profile.nameUpdatedAt ?? null,
     masterFingerprint: profile.masterFingerprint ?? null,
     deviceId: profile.deviceId ?? null,
     ...(currentId !== null ? { current: profile.id === currentId } : {}),
@@ -1166,6 +1168,8 @@ export async function startHttpServer({
       TOKEN_REJECTED: 400,
       INVALID_NAME: 400,
       NAME_TAKEN: 400,
+      CLOUD_ARCHIVED: 409,
+      CLOUD_BLOCKED: 403,
       PROFILE_NOT_FOUND: 404,
       CLOUD_ALREADY_JOINED: 409,
       ALREADY_PROVISIONED: 409,
@@ -1430,10 +1434,47 @@ export async function startHttpServer({
     const id = typeof input.id === 'string' ? input.id : '';
     if (id.length === 0) return sendCloudError(res, cloudError('PROFILE_NOT_FOUND', '需要忆云 id'));
     try {
-      const result = await renameProfile(cloud.root, id, input.name);
+      const state = await readRegistry(cloud.root);
+      if (!state.registry.profiles.some((profile) => profile.id === id)) {
+        throw cloudError('PROFILE_NOT_FOUND', `未找到忆云：${id}`);
+      }
+      // 第一版：只有当前忆云能写网络级 `cloud_name`；归档忆云不广播旧名。
+      if (id !== state.registry.current) {
+        throw cloudError(
+          'CLOUD_ARCHIVED',
+          '归档忆云不支持网络改名；请先切换到该忆云后再改名',
+          { id, current: state.registry.current },
+        );
+      }
+      const name = normalizeProfileName(input.name);
+      if (state.registry.profiles.some((profile) => profile.id !== id
+        && String(profile.name).trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
+        throw cloudError('NAME_TAKEN', '已有同名忆云，请换一个名字');
+      }
+      const blocked = await app.getBlockedDevices();
+      if (blocked.includes(app.deviceId)) {
+        throw cloudError('CLOUD_BLOCKED', '本机已被移出当前忆云，不能改名');
+      }
+      // 先写网络事件，再更新本机 registry 缓存；失败时 registry 不变（fallback 仍可用）。
+      const event = await app.setCloudName({ name });
+      const result = await renameProfile(cloud.root, id, name);
+      let derived = null;
+      try {
+        derived = await app.getCloudName();
+      } catch {
+        derived = null;
+      }
       return sendJson(res, 200, {
         ok: true,
         profile: publicProfile(result.value, result.registry.current),
+        cloud: {
+          id,
+          name,
+          nameSource: 'network',
+          nameUpdatedAt: result.value.nameUpdatedAt ?? null,
+          eventId: event.id,
+        },
+        derived: derived ?? null,
       });
     } catch (error) {
       return sendCloudError(res, error, { disabled: true });
@@ -2214,6 +2255,32 @@ export async function startHttpServer({
         eventId: event.id,
         subscriptions: app.sync.getSubscriptionNamespaces(),
       });
+    }
+
+    // 本机设备名（只有本人可改；写自签名 device_name，不重签证书）。
+    if (path === '/admin/api/devices/self/name') {
+      const input = parseJsonBody(body) ?? {};
+      if (typeof input.name !== 'string' || input.name.trim().length === 0) {
+        return sendJson(res, 400, { error: 'invalid_name', message: '需要 { name }（1–24 个字符）' });
+      }
+      try {
+        const event = await app.setDeviceName({ name: input.name });
+        const derived = await app.getDeviceName(app.deviceId);
+        return sendJson(res, 200, {
+          ok: true,
+          deviceId: app.deviceId,
+          name: derived?.name ?? input.name,
+          eventId: event.id,
+          deviceName: derived ?? null,
+        });
+      } catch (error) {
+        const status = error?.code === 'VALIDATION_INVALID_ARGUMENT' ? 400 : 500;
+        return sendJson(res, status, {
+          ok: false,
+          error: error?.code ?? 'device_name_failed',
+          message: error?.message ?? String(error),
+        });
+      }
     }
 
     const deviceMatch = path.match(/^\/admin\/api\/devices\/([^/]+)\/(revoke|restore|connect|disconnect|sync|reset-watermarks)$/);

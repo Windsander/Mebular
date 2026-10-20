@@ -374,6 +374,20 @@ async function main() {
 
     await send('Page.navigate', { url: `${base}/console/` });
     check('页面加载完成（标题 / #stage）', await waitFor('document.title.includes("控制台") && Boolean(document.querySelector("#stage"))'));
+    check('弹窗对齐规范：小弹窗 modal-center；大面板顶部对齐 + 内部滚动',
+      await evalJs(`(() => {
+        const small = ['wizard', 'invite', 'cloud-switch', 'security-action', 'handoff', 'modal', 'auth-token', 'namespace-new-modal'];
+        const large = ['settings', 'about', 'cloud-join', 'provision'];
+        const boxes = [...document.querySelectorAll('.modal .modal-box')];
+        return small.every((id) => document.querySelector('#' + id)?.classList.contains('modal-center'))
+          && large.every((id) => !document.querySelector('#' + id)?.classList.contains('modal-center'))
+          && boxes.every((box) => box.classList.contains('crt-surface') && box.classList.contains('crt-corners'));
+      })()`));
+    check('弹窗宽度：邀请/新建域 520（非 wide）；加入忆云 640（wide）',
+      await evalJs(`(() => {
+        const wide = (id) => document.querySelector('#' + id + ' .modal-box')?.classList.contains('modal-box-wide');
+        return wide('invite') === false && wide('namespace-new-modal') === false && wide('cloud-join') === true;
+      })()`));
     check('星图画布已渲染（尺寸 > 0）', await evalJs('(() => { const c = document.querySelector("#stage"); return c.width > 0 && c.height > 0; })()'));
     check('首屏数据到达（记忆徽标非占位）', await waitFor('!/…/.test(document.querySelector("#memory-badge")?.textContent ?? "…")'));
     // UX-2 首屏叠加层（只读；星图本体不改）
@@ -420,6 +434,7 @@ async function main() {
     await evalJs('document.querySelector("#namespace-new").click()');
     check('U-2 新建域弹窗：名称输入 + 创建并订阅（不用 window.prompt）',
       await waitFor('document.querySelector("#namespace-new-modal")?.hidden === false && Boolean(document.querySelector("#namespace-new-name"))'));
+    await capture('u3-after-dialog-namespace.jpg');
     await evalJs(`(() => {
       document.querySelector('#namespace-new-name').value = 'ledger-ui';
       document.querySelector('#namespace-new-create').click();
@@ -999,6 +1014,7 @@ async function main() {
     }
     check('E2-A2 加入弹层：名字预填「忆云 3」+ 当前忆云归档提示 + 终端兜底文案', joinModalOk);
     await capture('e2a2-after-cloud-join-modal.jpg');
+    await capture('u3-after-dialog-cloud-join.jpg');
     await evalJs(`(() => {
       document.querySelector('#cloud-join-token').value = 'not-a-join-token';
       document.querySelector('#cloud-join-token').dispatchEvent(new Event('input', { bubbles: true }));
@@ -1078,6 +1094,7 @@ async function main() {
     // 邀请面板（joinService 未启用 → 就地启用；启用 → 令牌。两者都应有内容）
     await evalJs('document.querySelector("#invite-device").click()');
     check('邀请面板打开且渲染内容（令牌或未启用提示）', await waitFor('(() => { const b = document.querySelector("#invite-body"); return Boolean(b?.querySelector("[data-copy]")) || /加入服务未启用/.test(b?.textContent ?? ""); })()'));
+    await capture('u3-after-dialog-invite.jpg');
     check('E1 邀请单屏：首屏令牌 + 二维码/降级 + 复制；机制收「邀请设备 · 详情」', await evalJs(`(() => {
       const body = document.querySelector('#invite-body');
       if (!body) return false;
@@ -1191,6 +1208,7 @@ async function main() {
     // 低→中（显式确认）→ 未导入种子进入星图「需要注意」→ 导入 → 异常退场
     await evalJs('document.querySelector("#settings-security-slot [data-security-action=upgrade][data-level=medium]").click()');
     await waitFor('document.querySelector("#modal")?.hidden === false');
+    await capture('u3-after-settings-security-dialog.jpg');
     await evalJs('document.querySelector("#modal-confirm").click()');
     check('S3 低→中：安全卡当前档与顶栏徽章同步',
       await waitFor('document.querySelector("#settings-security-slot")?.dataset.securityLevel === "medium" && /🛡 安全：中/.test(document.querySelector("#security-badge")?.textContent ?? "")', 20000));

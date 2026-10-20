@@ -349,7 +349,7 @@ select {
 
 /* ---------- 模态 ---------- */
 /* 走查修复：弹层顶部锚定（原 flex 垂直居中 → 切「选项卡」页面高度变化时整块垂直跳）。
-   轮 C：背板不滚（fixed + overflow hidden），滚动收进 .modal-box（六处弹层共用）。 */
+   轮 C：背板不滚（fixed + overflow hidden），滚动收进 .modal-box（所有弹层共用）。 */
 .modal { position: fixed; inset: 0; background: rgba(2, 4, 10, 0.72); display: flex; align-items: flex-start; justify-content: center; z-index: 50; overflow: hidden; padding: 24px; }
 /* 小弹窗统一垂直居中；大设置/加入忆云仍顶部对齐，避免超高面板上下裁切 */
 .modal.modal-center { align-items: center; }
@@ -375,7 +375,7 @@ body.modal-open { overflow: hidden; }
 .wizard-list label { display: flex; align-items: center; gap: 8px; }
 .field { display: grid; gap: 4px; margin: 8px 0; }
 .field label { color: var(--muted); font-size: 11px; }
-.field input[type="text"], .field textarea {
+.field input[type="text"], .field input[type="password"], .field textarea {
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
@@ -462,9 +462,6 @@ body.modal-open { overflow: hidden; }
 .cloud-error-detail { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
 .invite-cloud-line { margin-top: 6px; }
 /* E2-A2：加入忆云弹层字段竖排（label 独占一行；textarea/input 满宽） */
-#cloud-join .cfg-label { display: block; margin-top: 8px; }
-#cloud-join textarea.crt-input,
-#cloud-join input.crt-input { width: 100%; margin-top: 4px; box-sizing: border-box; }
 #cloud-join textarea.crt-input { font-family: var(--crt-mono, monospace); font-size: 11px; resize: vertical; }
 #cloud-join .modal-note { margin-bottom: 4px; }
 #cloud-join .modal-actions { margin-top: 10px; }

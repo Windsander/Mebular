@@ -1,6 +1,6 @@
 # U-3 · 设置页设计收口（安全 / MCP / 高级）
 
-基线：`openchamber/ui-consistency` `75ccff3`（#144）。本分支只改 `packages/console/**`、`tests/console/**`、`docs/console/**`；不改配置能力、行为或协议。
+基线：`openchamber/ui-consistency` `6475131`（#145，含 `f08091f` 新建域弹窗与 `6475131` 小弹窗居中）。本分支只改 `packages/console/**`、`tests/console/**`、`docs/console/**`；不改配置能力、行为或协议。
 
 ## 1. 现状 sections → 目标 sections
 
@@ -56,11 +56,25 @@
 | `before-settings-advanced.jpg` / `u3-after-settings-advanced.jpg` | 高级：多卡 → 三组 + 诊断折叠 |
 | `u3-after-settings-advanced-diagnostics.jpg` | 诊断与恢复展开：版本、完整配置、最近应用、手动连接、恢复指引 |
 | `u3-after-settings-{security,mcp,advanced}-390.jpg` | 390px：无横向溢出 |
+| `u3-after-settings-security-dialog.jpg` | 小弹窗居中（安全档位确认；`modal-center`） |
+| `u3-after-dialog-namespace.jpg` | 新建记忆域：与邀请同规格（520、crt 外壳、字段整行） |
+| `u3-after-dialog-invite.jpg` | 邀请设备：小弹窗居中（520） |
+| `u3-after-dialog-cloud-join.jpg` | 加入忆云：大面板顶部对齐（640，内部滚动） |
 
 ## 5. 边界与取舍
 
+- **Electron 兼容补充**：`console.js` 内 `window.prompt` 已归零——bearer token 改用 App 内 `#auth-token` 弹层；设备卡「连接」复用既有手动连接向导；复制失败的兜底改为临时 textarea + `execCommand('copy')`。`window.alert/confirm` 在 Electron 可用，保留。
+- **弹窗对齐**：小弹窗（邀请 / 切换忆云 / 安全操作 / 手动连接 / handoff / 通用确认 / 令牌输入 / 新建域）统一 `modal-center` 垂直居中；大面板（设置 / 关于本机 / 加入忆云 / 首启引导）保持顶部对齐 + 内部滚动。
 - 字段展示文案覆盖放在 `packages/console/settings-ia.js` 的 `IA_FIELD_COPY`：文件域不包含 `packages/mcp/src/config-schema.mjs`，因此服务端 schema 仍负责校验/默认值/写入，控制台只覆盖展示标签与帮助。
 - 安全「变更者/时间」不再常显；审计时间线保留完整记录。
 - 绑定地址/端口的深层语义压成一行；完整键语义仍以 `config.json` / 恢复指引为准。
 - OAuth 缺 env 的具体变量名只在诊断折叠出现，主界面只留一句「oauth 用环境密钥」。
 - 设置内 `<details>` 仍为 2 个（MCP 危险与自救 / 诊断与恢复）；关于本机与邀请面板各 1 个，总数不变。
+
+## 6. 弹窗规范落地
+
+- 统一外壳：所有 `.modal-box` 都带 `crt-surface crt-corners`；没有裸 `modal-box`。
+- 小弹窗（`modal-center`，520px）：邀请、新建记忆域、切换忆云、安全操作/批准、手动连接、handoff、通用确认、bearer 令牌输入。
+- 大面板（顶部对齐 + 内部滚动）：设置、关于本机、加入忆云（640px）、首启引导（640px）。
+- 标题/说明/字段/动作：标题（可带 `crt-tag`）+ 一句 `.modal-note` + `.field` 整行输入 + 右对齐 `.modal-actions`。
+- 落地位置：`packages/console/index.html` 的 `.modal` 标记 + `packages/console/console.css` 的 `.modal.modal-center` / `.modal-box-wide` / `.field`；`verify-console-ui.mjs` 断言对齐与宽度不漂移。

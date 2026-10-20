@@ -1497,6 +1497,10 @@ try {
       consoleSrc2.includes('configSchema') && consoleSrc2.includes('rebuildConfigFields')
         && !/const CONFIG_EDITOR = \[/.test(consoleSrc2),
       'console.js 从 /admin/api/settings.configSchema 建字段表');
+    check('Electron 兼容：控制台无 window.prompt；bearer token 走 App 内输入',
+      !/window\.prompt\s*\(/.test(consoleSrc2) && htmlSrc.includes('id="auth-token"')
+        && consoleSrc2.includes('requestAuthToken') && consoleSrc2.includes('settleAuthToken'),
+      '原生 prompt 已移除；token 输入/取消/Enter 由 App 弹层接管');
     check('C 一键重启接线（按钮 + POST /admin/api/restart + 二次确认 + 手动指引回退）',
       consoleSrc2.includes("data-cfg-action=\"restart\"") && consoleSrc2.includes('/admin/api/restart')
         && consoleSrc2.includes('confirmModal') && consoleSrc2.includes('not_service_managed') === false

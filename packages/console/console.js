@@ -84,6 +84,44 @@ let refreshSeq = 0;
 // refresh 单飞承诺（在途刷新未完结时复用，防请求雪崩堆叠——serve 变慢时系统仍能收敛）
 let refreshPromise = null;
 
+// ---------- bearer 令牌（App 内输入；Electron 不支持 window.prompt） ----------
+let authTokenPromise = null;
+let authTokenResolve = null;
+
+function requestAuthToken() {
+  if (authTokenPromise) return authTokenPromise;
+  const modal = $('#auth-token');
+  const input = $('#auth-token-input');
+  const error = $('#auth-token-error');
+  const help = $('#auth-token-help');
+  if (!modal || !input) return Promise.resolve(null);
+  input.value = '';
+  if (error) { error.hidden = true; error.textContent = ''; }
+  if (help) help.innerHTML = '在终端运行 <code>mebular token grant --scope memory.read,memory.admin</code> 生成。';
+  modal.hidden = false;
+  setTimeout(() => input.focus(), 0);
+  authTokenPromise = new Promise((resolve) => { authTokenResolve = resolve; });
+  return authTokenPromise;
+}
+
+function settleAuthToken(value) {
+  const modal = $('#auth-token');
+  if (modal) modal.hidden = true;
+  if (authTokenResolve) authTokenResolve(value);
+  authTokenResolve = null;
+  authTokenPromise = null;
+}
+
+function submitAuthToken() {
+  const value = $('#auth-token-input')?.value?.trim() ?? '';
+  if (!value) {
+    const error = $('#auth-token-error');
+    if (error) { error.textContent = '请粘贴访问令牌。'; error.hidden = false; }
+    return;
+  }
+  settleAuthToken(value);
+}
+
 async function api(path, options = {}) {
   const send = async () => {
     const headers = { accept: 'application/json', ...(options.headers ?? {}) };
@@ -106,10 +144,10 @@ async function api(path, options = {}) {
     const data = await res.json().catch(() => null);
     if (!res.ok) {
       if (res.status === 401 && !state.token) {
-        const token = window.prompt('serve 需要 bearer token（读需 memory.read，写需 memory.admin）：', '');
+        const token = await requestAuthToken();
         if (token) {
-          state.token = token.trim();
-          localStorage.setItem('mebular_token', state.token);
+          state.token = token;
+          localStorage.setItem('mebular_token', token);
           startEvents();
         }
       }
@@ -3590,10 +3628,12 @@ async function handleDeviceAction(action, device) {
     const self = state.overview?.device?.deviceId;
     if (self) stage.launchFleet(self, device.deviceId, { kind: 'mine', ships: 3 });
     await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/sync`, {}, '已触发同步（有 pending 时立即开会话）');
-  } else if (action === 'connect') {
-    const address = window.prompt('对方的 multiaddr（含 /p2p/…）：', '');
-    if (!address) return;
-    await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/connect`, { address }, '已发起连接');
+  } else if (action === 'connect' || action === 'manual-connect') {
+    // E1：网内传输修复（不改变入网信任与订阅）；Electron 无 window.prompt，统一走 App 内向导。
+    openWizard({
+      deviceId: device.deviceId,
+      address: peerPathFor(device)?.address ?? '',
+    });
   } else if (action === 'disconnect') {
     await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/disconnect`, {}, '已断开');
   } else if (action === 'reset-watermarks') {
@@ -3603,12 +3643,6 @@ async function handleDeviceAction(action, device) {
       confirmLabel: '重置',
     });
     if (ok) await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/reset-watermarks`, {}, '水位已重置');
-  } else if (action === 'manual-connect') {
-    // E1：网内传输修复（不改变入网信任与订阅）
-    openWizard({
-      deviceId: device.deviceId,
-      address: peerPathFor(device)?.address ?? '',
-    });
   } else if (action === 'revoke-device') {
     await securityRevokeFlow(device);
   } else if (action === 'restore-device') {
@@ -3657,7 +3691,7 @@ function settleConfirmModal(result) {
   modalResolve = null;
 }
 
-// ---------- 轮 C：弹层统一关闭规范（点空白 ∧ Esc；六处弹层一处实现） ----------
+// ---------- 轮 C：弹层统一关闭规范（点空白 ∧ Esc；所有弹层一处实现） ----------
 // 规则（危险语义明确）：
 //  - 确认弹层：Esc / 点空白 = 「取消」（resolve false），永不等于确认；
 //  - 首次上手 provision：不可关闭（必须先建新或加入）；
@@ -3688,6 +3722,7 @@ function dismissModal(el) {
   if (el.id === 'modal') { settleConfirmModal(false); return true; }
   if (el.id === 'wizard') { closeWizard(); return true; }
   if (el.id === 'security-action') { closeSecurityAction(); return true; }
+  if (el.id === 'auth-token') { settleAuthToken(null); return true; }
   el.hidden = true;
   if (el.id === 'handoff') {
     handoffNs = null;
@@ -3738,6 +3773,15 @@ syncModalLock();
 
 $('#modal-cancel').addEventListener('click', () => settleConfirmModal(false));
 $('#modal-confirm').addEventListener('click', () => settleConfirmModal(true));
+// bearer token：App 内输入（Electron 无 window.prompt）
+$('#auth-token-save')?.addEventListener('click', submitAuthToken);
+$('#auth-token-cancel')?.addEventListener('click', () => settleAuthToken(null));
+$('#auth-token-input')?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    submitAuthToken();
+  }
+});
 // S3：安全操作弹层（确认 / 关闭 / 一次性恢复码回执）
 $('#security-action-confirm')?.addEventListener('click', () => void securityConfirmHandler());
 $('#security-action-close')?.addEventListener('click', () => {
@@ -4721,7 +4765,22 @@ async function copyText(text, button) {
       setTimeout(() => { button.textContent = old; }, 1200);
     }
   } catch {
-    window.prompt('复制：', text);
+    // Electron / 非安全上下文：navigator.clipboard 可能不可用；用临时 textarea 兜底（不再用 window.prompt）。
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch { copied = false; }
+    ta.remove();
+    if (button) {
+      const old = button.textContent;
+      button.textContent = copied ? '已复制' : '请手动复制';
+      setTimeout(() => { button.textContent = old; }, 1600);
+    }
   }
 }
 

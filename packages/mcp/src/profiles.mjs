@@ -289,6 +289,10 @@ function validateRegistry(home, raw) {
     if (entry.createdAt !== undefined && !isIsoTime(entry.createdAt)) {
       throw cloudRegistryInvalid(`档案 ${entry.id} 的 createdAt 非法`);
     }
+    // 旧 registry 没有 nameUpdatedAt（迁移：用 createdAt/null 回退，不拒绝）。
+    if (entry.nameUpdatedAt !== null && entry.nameUpdatedAt !== undefined && !isIsoTime(entry.nameUpdatedAt)) {
+      throw cloudRegistryInvalid(`档案 ${entry.id} 的 nameUpdatedAt 非法`);
+    }
     if (entry.lastUsedAt !== null && entry.lastUsedAt !== undefined && !isIsoTime(entry.lastUsedAt)) {
       throw cloudRegistryInvalid(`档案 ${entry.id} 的 lastUsedAt 非法`);
     }
@@ -452,7 +456,12 @@ function sameName(a, b) {
   return String(a).trim().toLocaleLowerCase() === String(b).trim().toLocaleLowerCase();
 }
 
-/** 名字：去首尾空白 / 去控制字符；1–24 字符；拒绝 `/`、`\`、`..`。 */
+/**
+ * 名字：与 core `normalizeDisplayName` 同一口径（去控制字符/trim；1–24 Unicode 字符；
+ * 拒绝 `/`、`\`、`..`）。**不在这里 import @mebular/core**：profiles.mjs 也被 Jest
+ * `--coverage` 的 ESM 链接直接加载，core 桶会触发命名导出链接错误；口径一致性由
+ * `tests/sync/display-name-parity.test.ts` 的对照用例锁定。
+ */
 export function normalizeProfileName(raw) {
   if (typeof raw !== 'string') throw cloudError('INVALID_NAME', '忆云名字必须是字符串');
   const name = raw.replace(/[\u0000-\u001f\u007f]/g, '').trim();
@@ -536,6 +545,8 @@ export async function renameProfile(home, id, rawName) {
       throw cloudError('NAME_TAKEN', '已有同名忆云，请换一个名字');
     }
     entry.name = name;
+    // 本机 registry 缓存时间：重名时判断“最近更新”的依据；旧条目缺失时回退 createdAt。
+    entry.nameUpdatedAt = new Date().toISOString();
     return entry;
   });
 }

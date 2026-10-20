@@ -12,7 +12,7 @@ import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog, se
 import {
   APP_VERSION, consoleUrl, ensureDaemon, resolveCliBin, resolveHome, resolveHttp,
   serviceEnabledFor, stopManaged, waitForDaemonDetail, parseArgs, probeHealthDetail, probeProvision,
-  probeSecurityLevel, serviceDescriptorFor, homeKey, isPortOpen,
+  probeRuntimeIdentity, probeSecurityLevel, serviceDescriptorFor, homeKey, isPortOpen,
 } from './daemon.mjs';
 import {
   loadCloudModules, migrateLegacyService, performCloudSwitch, recoverSwitchIntent,
@@ -230,7 +230,7 @@ async function showConsoleWithRetry() {
   if (seq !== loadingSeq) return; // 已被更新的加载流程接管
   healthy = health.ok;
   updateTray();
-  if (health.ok) void refreshTraySecurity();
+  if (health.ok) void refreshTrayStatus();
   if (!win || win.isDestroyed()) return;
   if (health.ok) {
     await safeLoad(shellConsoleUrl());
@@ -346,14 +346,27 @@ async function confirmRestart() {
   await showConsoleWithRetry(); // 托盘「重启」= 显式用户动作：维持旧行为，重启后落到控制台
 }
 
-/** S3：只读刷新托盘等级（失败保持上一值；旧值不冒充新值）。 */
-async function refreshTraySecurity() {
+/**
+ * 只读刷新托盘等级 + 运行期展示名（失败保持上一值；旧值不冒充新值）。
+ * 忆云名从 overview 的网络派生读取：另一台设备改名同步后，本机 registry 尚未刷新也能更新托盘/标题。
+ */
+async function refreshTrayStatus() {
   if (!healthy) return;
-  const level = await probeSecurityLevel(fetch, httpConf());
+  const [level, runtimeIdentity] = await Promise.all([
+    probeSecurityLevel(fetch, httpConf()),
+    probeRuntimeIdentity(fetch, httpConf()),
+  ]);
+  let changed = false;
   if (level !== null && level !== securityLevel) {
     securityLevel = level;
-    updateTray();
+    changed = true;
   }
+  if (runtimeIdentity?.cloudName && runtimeIdentity.cloudName !== cloudName) {
+    cloudName = runtimeIdentity.cloudName;
+    setWindowTitle();
+    changed = true;
+  }
+  if (changed) updateTray();
 }
 
 function trayActions() {
@@ -606,6 +619,7 @@ async function cloudListNow() {
         kind: profile.kind,
         createdAt: profile.createdAt ?? null,
         lastUsedAt: profile.lastUsedAt ?? null,
+        nameUpdatedAt: profile.nameUpdatedAt ?? null,
         masterFingerprint: profile.masterFingerprint ?? null,
         deviceId: profile.deviceId ?? null,
         current: profile.id === current,
@@ -781,7 +795,7 @@ if (!gotLock) {
     createWindow();
     setWindowTitle();
     // S3：托盘只读等级每 20s 刷新一次（轻量 GET；失败保持旧值，不阻断壳）
-    const securityTimer = setInterval(() => { void refreshTraySecurity(); }, 20_000);
+    const securityTimer = setInterval(() => { void refreshTrayStatus(); }, 20_000);
     securityTimer.unref?.();
     try {
       if (startupDiagnostic) {
@@ -804,7 +818,7 @@ if (!gotLock) {
         await loadWizardView(); // 清缓存 + 缓存破坏参数：HTML/ESM 双保险（走查事故：旧版向导复活）
         healthy = (await probeHealthDetail(fetch, httpConf(), { expectedInstance: homeKey(home) })).ok;
         updateTray();
-        if (healthy) void refreshTraySecurity();
+        if (healthy) void refreshTrayStatus();
       }
     } catch (error) {
       dialog.showErrorBox('Mebular 启动失败', String(error?.message ?? error));

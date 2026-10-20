@@ -65,6 +65,8 @@ export {
   DEVICE_REVOKE_EVENT,
   DEVICE_RESTORE_EVENT,
   NAMESPACE_HANDOFF_EVENT,
+  CLOUD_NAME_EVENT,
+  DEVICE_NAME_EVENT,
   SECURITY_TIER_EVENT,
   SECURITY_APPROVAL_EVENT,
   SECURITY_RECOVERY_EVENT,
@@ -79,6 +81,10 @@ export {
   type DeviceRevokeRecord,
   type DeviceRestoreRecord,
   type NamespaceHandoffRecord,
+  type CloudNameRecord,
+  type DeviceNameRecord,
+  type CloudNameState,
+  type DeviceNameState,
   type PolicyState,
   type SecurityLevel,
   type SecurityOp,
@@ -92,6 +98,7 @@ export {
   type SecurityPolicyState,
   type SecurityAction,
 } from './sync/grantPolicy.js';
+export { normalizeDisplayName, isValidDisplayName } from './core/displayName.js';
 export {
   DEFAULT_NAMESPACE,
   normalizeNamespace,

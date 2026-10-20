@@ -1681,15 +1681,25 @@ try {
         && consoleSrc2.includes('mebular cloud use')
         && consoleSrc2.includes('window.mebularDesktop?.cloudSwitch'),
       'inspect 不消费 nonce；join confirm:true；无 App 桥给 CLI 兜底');
-    check('E2-A2 忆云卡：设置·常用只读状态之后 / 当前不可切换 / 改名 / 无删除入口',
+    check('E2-A2 忆云卡：设置·常用只读状态之后 / 当前不可切换 / 仅当前项可改名 / 无删除入口',
       consoleSrc2.includes('settings-cloud-card')
         && consoleSrc2.includes('/admin/api/clouds/rename')
         && consoleSrc2.includes('归档保留，不删除')
         && !consoleSrc2.includes('data-cloud-delete')
         && !consoleSrc2.includes('删除忆云')
-        && /cloudRowHtml[\s\S]{0,1400}current\s*\?\s*''\s*:\s*`<button[^`]*data-cloud-switch/.test(consoleSrc2)
+        && /cloudRowHtml[\s\S]{0,1800}const renameUi = current/.test(consoleSrc2)
+        && consoleSrc2.includes('切换到该忆云后可改名')
+        && consoleSrc2.includes('改名会同步到所有设备')
         && consoleSrc2.indexOf('settings-common-status') < consoleSrc2.indexOf('cloudCardHtml()'),
-      '当前项无切换按钮；改名写注册表；无删除');
+      '当前项无切换按钮；归档项不提供改名；无删除');
+    check('云名重名：重名 / 最近更新·建议改名 / 顶栏警告点 / 设备名编辑入口',
+      consoleSrc2.includes('duplicateName') && consoleSrc2.includes('suggestedRename')
+        && consoleSrc2.includes('cloud-warning-dot') && consoleSrc2.includes('重名')
+        && consoleSrc2.includes('最近更新 · 建议改名')
+        && consoleSrc2.includes('/admin/api/devices/self/name')
+        && consoleSrc2.includes('data-device-rename')
+        && consoleSrc2.includes('只有本人可改'),
+      '重名标记与设备名编辑均走 API');
     check('E2-A2 深链 focus=clouds：常用页滚到忆云卡（纯函数 + 启动接线）',
       (await import('../deep-link.js')).initialViewFromSearch('?view=settings&focus=clouds').focusClouds === true
         && consoleSrc2.includes('deepLink.focusClouds') && consoleSrc2.includes('settings-cloud-card'),

@@ -226,6 +226,14 @@ describe('E2-A1 注册表 v1：合成 / 原子写 / 备份 / 默认名', () => {
     const result = await renameProfile(root, 'default', '工作室');
     expect(result.registry.futureTop).toEqual({ keep: true });
     expect(result.registry.profiles[0].futureEntry).toBe(42);
+    expect(result.registry.profiles[0].nameUpdatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // 旧 registry 没有 nameUpdatedAt 也能读（迁移回退 createdAt/null）。
+    await writeRegistry(root, {
+      v: 1,
+      current: 'default',
+      profiles: [entry('default', '旧忆云', '.', { kind: 'root' })],
+    });
+    await expect(readRegistry(root)).resolves.toBeTruthy();
 
     await writeFile(join(root, 'profiles.json'), JSON.stringify({ ...registry, v: 2 }), 'utf-8');
     await expect(readRegistry(root)).rejects.toMatchObject({ code: 'CLOUD_REGISTRY_INVALID', reason: 'version' });

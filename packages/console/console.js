@@ -417,7 +417,6 @@ function renderDomains() {
   const layout = $('#domains-layout');
   const empty = $('#domains-empty');
   const note = $('#domains-note');
-  const newButton = $('#namespace-new');
   const items = state.namespaces ?? [];
 
   if (stats) {
@@ -435,14 +434,12 @@ function renderDomains() {
     detail.innerHTML = '';
     if (layout) layout.hidden = true;
     if (empty) empty.hidden = false;
-    if (note) note.hidden = true;
-    if (newButton) newButton.hidden = true; // 空态只留一处「新建记忆域」
+    if (note) note.hidden = false;
     return;
   }
   if (layout) layout.hidden = false;
   if (empty) empty.hidden = true;
   if (note) note.hidden = false;
-  if (newButton) newButton.hidden = false;
   if (!items.some((n) => n.namespace === state.selectedNamespace)) {
     state.selectedNamespace = items[0].namespace;
   }
@@ -4045,7 +4042,6 @@ function showInviteResult(res) {
 
 $('#invite-device').addEventListener('click', openInvite);
 // 共享页只做域管理：空态唯一 CTA = 新建记忆域；邀请只在顶栏。
-$('#domains-empty-new')?.addEventListener('click', () => { void createNamespace(); });
 $('#namespace-new')?.addEventListener('click', () => { void createNamespace(); });
 $('#invite-close').addEventListener('click', () => {
   $('#invite').hidden = true;

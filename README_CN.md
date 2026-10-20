@@ -122,4 +122,6 @@ await mebular.initialize();
 
 [官网](https://mebular.cyberfederal.io) · [GitHub](https://github.com/Windsander/Mebular) · © 2026 Windsander · MIT License
 
+「Mebular」名称与 ✦ 标识为保留商标，详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
 </div>

@@ -128,4 +128,6 @@ Runnable example: [`examples/quickstart`](examples/quickstart/index.mjs) — it 
 
 [Website](https://mebular.cyberfederal.io) · [GitHub](https://github.com/Windsander/Mebular) · © 2026 Windsander · MIT License
 
+The "Mebular" name and ✦ mark are reserved trademarks — see [CONTRIBUTING.md](CONTRIBUTING.md).
+
 </div>

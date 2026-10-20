@@ -39,7 +39,7 @@ chore(scripts): 新增 wan-l2 relay-only 驗證腳本
 ## 文档边界
 
 - `README.md` / 本文件 / 代码注释：随仓库发布
-- `docs/`、`docs.design/`、`design-notes/`：本地设计文档，**不进入远端**（已被 gitignore 排除，请勿提交）
+- `docs/`、`docs.design/`、`design-notes/`：本地设计文档，**不进入远端**（已被 gitignore 排除，请勿提交）；对外法律文件 `docs/DCO.md` 除外，随仓库发布
 
 ## 项目状态与质量门禁
 
@@ -72,3 +72,37 @@ Mebular 仍在早期：功能可用，API 未稳定，未发 npm 包；生产使
 - 管理员保留 bypass，避免误锁维护者
 
 应用/更新：`npm run rulesets:apply`（dry-run 直接运行 `node scripts/apply-rulesets.mjs`；需要 `GH_TOKEN`，权限 repo admin）。
+
+## 知识产权与商标 / Intellectual Property & Trademark
+
+### 版权归属 / Copyright ownership
+
+本项目（含原始代码、文档与设计素材）的版权归发起人 Sobert Li（李述博）个人所有，依 MIT 协议发布，许可全文见 [LICENSE](LICENSE)。本项目不设立、也不代表任何公司或其他法律实体。
+
+「Windsander」是指自然人 Sobert Li（李述博）的 GitHub 账号与品牌名，二者为同一主体；本章节所称「发起人」均指该自然人。
+
+Copyright in this project — including its original code, documentation, and design assets — is held by the founder, Sobert Li (李述博), and is released under the MIT License; the full license text is in [LICENSE](LICENSE). The project does not establish, and does not represent, any company or other legal entity.
+
+"Windsander" refers to the GitHub account and brand name of the natural person Sobert Li (李述博); the two denote the same natural person. "The founder" in this section means that natural person.
+
+### 贡献许可 / Contribution licensing
+
+贡献者保留其贡献的版权。贡献一经合并，即视为贡献者以 MIT 协议向本项目及所有下游使用者授予全球范围、永久、免费、非排他、不可撤回的许可，允许使用、复制、修改、合并、发布、分发、再许可及销售该贡献，条件与 MIT 协议一致。
+
+提交贡献须按 Developer Certificate of Origin 1.1 使用 `git commit -s` 签署；DCO 全文与中文导读见 [docs/DCO.md](docs/DCO.md)。DCO 是对贡献来源的声明，不转移版权，也不改变本项目以 MIT 发布的许可条款。
+
+Contributors retain copyright in their contributions. Once a contribution is merged, the contributor is deemed to grant this project and all downstream recipients a worldwide, perpetual, royalty-free, non-exclusive, and irrevocable license under the MIT License to use, copy, modify, merge, publish, distribute, sublicense, and sell that contribution, on the terms of the MIT License.
+
+Contributions must be signed off with `git commit -s` under the Developer Certificate of Origin 1.1; the full text and a Chinese guide are in [docs/DCO.md](docs/DCO.md). The DCO is a certification of the contribution's origin; it does not transfer copyright and does not change the MIT terms under which this project is released.
+
+### 商标 / Trademarks
+
+MIT 协议仅授予版权许可，不包含商标、商号或标识许可。「Mebular」名称与 ✦ 标识由发起人保留全部相关权利（无论是否注册），并为未来可能设立的实体预留。未经书面许可，不得以「Mebular」名义推广衍生产品，或暗示官方背书、赞助或关联；为如实指代本项目而进行的合理使用（例如说明某产品「基于 Mebular 构建」）除外。
+
+The MIT License grants copyright permissions only; it grants no trademark, trade name, or logo license. The founder reserves all rights in the "Mebular" name and the ✦ mark, whether or not registered, including for any entity that may be established in the future. Without written permission, you may not promote a derivative product under the "Mebular" name or suggest official endorsement, sponsorship, or affiliation; reasonable, truthful references to this project (for example, stating that a product is "built on Mebular") remain permitted.
+
+### 效力语言 / Governing language
+
+本章节中英文并列，英文为参考译文。两者表述不一致时，以中文为准；本章节未尽事宜，依 [LICENSE](LICENSE)。
+
+This section is presented in Chinese and English side by side; the English text is a reference translation. If the two versions differ, the Chinese version governs. For matters not addressed in this section, [LICENSE](LICENSE) governs.

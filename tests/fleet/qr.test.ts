@@ -28,6 +28,9 @@ describe('C7 · 二维码渲染与隔离', () => {
     const termFleet = await fleetTerminal(token);
     expect(termFleet?.kind).toBe('terminal');
     expect((termFleet?.value ?? '').length).toBeGreaterThan(0);
+    // 主题无关的极性：ANSI 黑字白底 + 反相半块（暗模块为块）
+    expect(termFleet?.value).toContain('\x1b[30;47m');
+    expect(termFleet?.value).toContain('█');
   });
 
   it('渲染失败软降级：超长输入 → null + warning，不抛错', async () => {

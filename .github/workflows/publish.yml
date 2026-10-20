@@ -44,14 +44,14 @@ jobs:
           echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "版本 SSOT：$GITHUB_REF -> TAG=$TAG VERSION=$VERSION"
 
-      - name: Verify version consistency (branch == 5×package.json == CHANGELOG)
+      - name: Verify version consistency (branch == 6×package.json == CHANGELOG)
         shell: bash
         run: |
           node - <<'NODE'
           const fs = require('node:fs');
           const version = process.env.VERSION;
           const tag = process.env.TAG;
-          const targets = ['.', 'packages/fleet', 'packages/mcp', 'packages/service', 'packages/skill'];
+          const targets = ['.', 'packages/qr', 'packages/fleet', 'packages/mcp', 'packages/service', 'packages/skill'];
           let ok = true;
           for (const rel of targets) {
             const pkg = JSON.parse(fs.readFileSync(`${rel}/package.json`, 'utf8'));
@@ -69,7 +69,7 @@ jobs:
             console.error(`修复：在 release 分支上运行 \`bash scripts/bump_version.sh ${tag}\`，或重命名分支。`);
             process.exit(1);
           }
-          console.log(`version consistency OK: ${tag}（branch + 5×package.json + CHANGELOG）`);
+          console.log(`version consistency OK: ${tag}（branch + 6×package.json + CHANGELOG）`);
           NODE
 
       - name: Build
@@ -81,11 +81,11 @@ jobs:
       - name: Test with coverage gates
         run: npm run test:coverage
 
-      - name: Pack smoke (5 packages + tarball install)
+      - name: Pack smoke (6 packages + tarball install)
         run: npm run verify:mcp:publish
 
   publish:
-    name: npm publish (core -> service/skill -> mcp -> fleet)
+    name: npm publish (qr -> core -> service/skill -> mcp -> fleet)
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -131,6 +131,7 @@ jobs:
             fi
           }
           # prepack/postpack 会把内部 file: 依赖改写为 ^$VERSION 再发布。
+          publish packages/qr     "@mebular/qr"
           publish .                "@mebular/core"
           publish packages/service "@mebular/service"
           publish packages/skill   "@mebular/skill"

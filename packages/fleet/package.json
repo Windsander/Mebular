@@ -33,6 +33,7 @@
   },
   "dependencies": {
     "@mebular/core": "file:../..",
-    "@mebular/service": "file:../service"
+    "@mebular/service": "file:../service",
+    "@mebular/qr": "file:../qr"
   }
 }

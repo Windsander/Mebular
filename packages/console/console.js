@@ -1822,7 +1822,7 @@ function securitySeedDisplay(seed, { generated = false } = {}) {
   const qr = typeof seed.qrSvg === 'string' && seed.qrSvg.length > 0
     ? `<div class="readout-block qr-block"><span class="domain-label">扫码导入（内容 = otpauth URI）</span>
        <img class="qr-img" alt="动态码种子二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(seed.qrSvg)))}" /></div>`
-    : '<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用下方分组文本。</p>';
+    : '<p class="cfg-help muted">二维码不可用（生成失败）：请使用下方分组文本。</p>';
   securityModalConfig({
     title: generated ? '共享动态码种子（只显示这一次）' : '动态码种子',
     hideClose: false,
@@ -4075,7 +4075,7 @@ function showInviteResult(res) {
         <span class="domain-label">扫码即通（QR 内容 = 令牌文本）</span>
         <img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />
       </div>`
-    : '<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用上方文本令牌。</p>';
+    : '<p class="cfg-help muted">二维码不可用（生成失败）：请使用上方文本令牌。</p>';
   const endpointEditor = `
     <div class="readout-block">
       <span class="domain-label">join 端点（写死进令牌，须为新设备可达地址）</span>

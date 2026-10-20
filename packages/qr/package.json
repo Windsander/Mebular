@@ -1,0 +1,35 @@
+{
+  "name": "@mebular/qr",
+  "version": "0.1.0",
+  "description": "Mebular app-layer QR capability (zero runtime dependencies; core never imports this package)",
+  "license": "MIT",
+  "private": false,
+  "author": "Windsander",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Windsander/Mebular.git"
+  },
+  "dependencies": {}
+}

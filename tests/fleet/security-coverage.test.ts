@@ -731,25 +731,15 @@ describe('S2 覆盖率补齐 · 备份解析/恢复失败', () => {
 });
 
 describe('S2 覆盖率补齐 · QR 渲染分支', () => {
-  test('renderTotpShare/TotpShareSvg 的 qr 开关/缺依赖/注入实现', async () => {
+  test('renderTotpShare/TotpShareSvg 的 qr 开关与内置编码器', async () => {
     const secret = generateTotpSecret();
-    const fakeQr = {
-      toString: async () => '<svg>fake</svg>',
-      toDataURL: async () => 'data:image/png;base64,AA==',
-    };
-    const text = await renderTotpShare(secret, 'device-A', { loadQrModule: () => fakeQr });
-    expect(text.qrText).toBe('<svg>fake</svg>');
+    const text = await renderTotpShare(secret, 'device-A');
+    expect(text.qrText?.length).toBeGreaterThan(0);
     const noQr = await renderTotpShare(secret, 'device-A', { qr: false });
     expect(noQr.qrText).toBeUndefined();
-    const missing = await renderTotpShare(secret, 'device-A', {
-      loadQrModule: () => { throw new Error('missing'); },
-    });
-    expect(missing.qrText).toBeUndefined();
 
     expect(await renderTotpShareSvg(secret, 'device-A', { qr: false })).toBeNull();
-    expect(await renderTotpShareSvg(secret, 'device-A', { loadQrModule: () => fakeQr })).toBe('<svg>fake</svg>');
-    expect(await renderTotpShareSvg(secret, 'device-A', {
-      loadQrModule: () => { throw new Error('missing'); },
-    })).toBeNull();
+    const svg = await renderTotpShareSvg(secret, 'device-A');
+    expect(svg?.startsWith('<svg')).toBe(true);
   });
 });

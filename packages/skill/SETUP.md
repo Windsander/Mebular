@@ -108,7 +108,7 @@ command -v mebular && command -v fleet
 `mebular tools` 列出 **29** 个工具；记录 `$SHA` 以便回报。
 （`mebular --version` 不存在：会打印「未知命令：--version」并 exit 2。）
 
-> 安装时的 `prepare` 会自动完成三包构建（`mebular` 与 `fleet` 双 bin 随包发布，无需手动 build；缺省 home 为 `~/.mebular`）。
+> 安装时的 `prepare` 会自动完成全量构建（`mebular` 与 `fleet` 双 bin 随包发布，无需手动 build；缺省 home 为 `~/.mebular`）。
 > **若该命令以 `ENOTDIR` / `git dep preparation failed` 失败**：这是部分 npm（实测 11.19）对**全局 git 依赖**的
 > staging 缺陷——与本仓库内容无关（`prepare` 一旦成功、进入全局 reify 才暴露；用基线 SHA 只是更早失败在 `tsc` 而看不到）。
 > 遇到时改用下面的 **B**（本地仓库），它等价且本机已实测可用。

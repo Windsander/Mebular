@@ -7,7 +7,7 @@
 //
 // 修法：若构建工具链缺失，就在 clone 里补做一次**本地**安装——显式去掉 global
 // 诉求（`npm_config_global`/argv），并用 `--ignore-scripts` 避免 `prepare` 递归。
-// 随后执行完整构建（不变：仍跑全量 tsc 三包构建）。
+// 随后执行完整构建（不变：仍跑全量 tsc 构建，含 qr/core/service/fleet）。
 
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';

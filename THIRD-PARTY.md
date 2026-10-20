@@ -18,7 +18,6 @@
 
 | 包 | 版本 | 许可 | 用途 | 降级行为 |
 |---|---|---|---|---|
-| `qrcode` | `1.5.4`（**精确 pin**） | MIT | 邀请令牌二维码（C7：终端/SVG/PNG；QR 内容 = 内联令牌文本） | 缺包 → **只给文本令牌**（`fleet invite` 打印文本、控制台不显示二维码），不报错 |
 | `libp2p` | `^2.x`（legacy-range） | Apache-2.0 OR MIT | libp2p 核心（真实网络栈装配） | 缺包 → `NETWORK_LIBP2P_NOT_AVAILABLE`（诚实报错，不静默降级） |
 | `@chainsafe/libp2p-noise` | `^17.0.0`（legacy-range） | Apache-2.0 OR MIT | libp2p 连接加密 | 缺包 → `NETWORK_LIBP2P_NOT_AVAILABLE`（诚实报错，不静默降级） |
 | `@chainsafe/libp2p-yamux` | `^8.0.1`（legacy-range） | Apache-2.0 OR MIT | libp2p 流复用 | 同上 |
@@ -30,6 +29,13 @@
 | `@libp2p/peer-id` | `^6.0.15`（legacy-range） | Apache-2.0 OR MIT | peerId 派生/解析 | 同上 |
 | `@libp2p/tcp` | `^11.0.27`（legacy-range） | Apache-2.0 OR MIT | TCP 传输 | 同上 |
 | `@multiformats/multiaddr` | `^13.0.3`（legacy-range） | Apache-2.0 OR MIT | multiaddr 解析 | 同上 |
+
+### 内置 vendored（随包源码，不是 npm 依赖）
+
+| 包 | 版本 | 许可 | 用途 | 降级行为 |
+|---|---|---|---|---|
+| `qrcode-generator` | `2.0.4`（**源码内置**，`packages/qr/src/third-party`） | MIT | `@mebular/qr` 的 QR 编码（终端/SVG；应用层专用） | 随包编译，无缺包路径；编码失败 → 文本令牌/分组文本兜底 |
+
 ### 可选运行时导入（**非** package.json 依赖）
 
 | 包 | 版本 | 许可 | 用途 | 降级行为 |
@@ -52,5 +58,5 @@
 ```bash
 npm run check:deps     # ① 所有 runtime/optional 依赖都在本清单；② 新依赖必须精确 pin；③ 清单条目字段齐备
 ```
-CI 在 `build / test / lint` job 中执行 `npm run check:deps`；另有「无 QR 库」降级路径由
-`npm run verify:invite`（注入缺失模块）与单测覆盖。
+CI 在 `build / test / lint` job 中执行 `npm run check:deps`；QR 正常路径由内置编码器覆盖，
+渲染失败时回退文本令牌/分组文本（`npm run verify:invite` 与单测覆盖）。

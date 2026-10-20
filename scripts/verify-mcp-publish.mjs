@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // G6.5 發布驗證（E1）
 //
-// 1) 對五個可發布套件（@mebular/core / service / fleet / mcp / skill）npm pack；
+// 1) 對六個可發布套件（@mebular/core / qr / service / fleet / mcp / skill）npm pack；
 //    檢驗 tarball 內容，且 mcp/fleet 內的 `@mebular/*` 已於 prepack 由 `file:` 改寫為
 //    `^0.1.0`，pack 後本地依賴已還原、備份已清除。
 // 2) 用產出的 tarball 在乾淨目錄安裝；以安裝後的 `mebular status`、`mebular mcp`
@@ -13,13 +13,14 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
 // F-UNI：统一 MCP 入口让 mcp 依赖 fleet → 发布面 = core + service + fleet + mcp + skill
+const qrDir = join(rootDir, 'packages', 'qr');
 const serviceDir = join(rootDir, 'packages', 'service');
 const fleetDir = join(rootDir, 'packages', 'fleet');
 const mcpDir = join(rootDir, 'packages', 'mcp');
@@ -59,25 +60,30 @@ const home = join(app, 'home');
 let client = null;
 
 try {
-  // ---------- npm pack（五包） ----------
+  // ---------- npm pack（六包） ----------
+  const qr = pack(qrDir, work);
   const core = pack(rootDir, work);
   const service = pack(serviceDir, work);
   const fleet = pack(fleetDir, work);
   const mcp = pack(mcpDir, work);
   const skill = pack(skillDir, work);
   check(
-    '五包 npm pack',
+    '六包 npm pack',
     true,
-    [core.meta.name, service.meta.name, fleet.meta.name, mcp.meta.name, skill.meta.name].join(' / '),
+    [qr.meta.name, core.meta.name, service.meta.name, fleet.meta.name, mcp.meta.name, skill.meta.name].join(' / '),
   );
 
   // D41：packed manifest 內的內部依賴均為版本號引用
   const mcpManifest = manifestOf(mcp.file);
   const fleetManifest = manifestOf(fleet.file);
+  const coreManifestForDeps = manifestOf(core.file);
+  check('core tarball 依賴 @mebular/qr=^0.1.0', coreManifestForDeps.dependencies?.['@mebular/qr'] === '^0.1.0', coreManifestForDeps.dependencies?.['@mebular/qr']);
   check('mcp tarball 依賴 @mebular/core=^0.1.0', mcpManifest.dependencies?.['@mebular/core'] === '^0.1.0', mcpManifest.dependencies?.['@mebular/core']);
   check('mcp tarball 依賴 @mebular/fleet=^0.1.0', mcpManifest.dependencies?.['@mebular/fleet'] === '^0.1.0', mcpManifest.dependencies?.['@mebular/fleet']);
   check('fleet tarball 依賴 @mebular/core=^0.1.0', fleetManifest.dependencies?.['@mebular/core'] === '^0.1.0', fleetManifest.dependencies?.['@mebular/core']);
   check('fleet tarball 依賴 @mebular/service=^0.1.0', fleetManifest.dependencies?.['@mebular/service'] === '^0.1.0', fleetManifest.dependencies?.['@mebular/service']);
+  check('mcp tarball 依賴 @mebular/qr=^0.1.0', mcpManifest.dependencies?.['@mebular/qr'] === '^0.1.0', mcpManifest.dependencies?.['@mebular/qr']);
+  check('fleet tarball 依賴 @mebular/qr=^0.1.0', fleetManifest.dependencies?.['@mebular/qr'] === '^0.1.0', fleetManifest.dependencies?.['@mebular/qr']);
   const leaks = [
     ...Object.values(mcpManifest.dependencies ?? {}),
     ...Object.values(fleetManifest.dependencies ?? {}),
@@ -85,21 +91,29 @@ try {
   check('tarball 無 file:/workspace: 洩漏', leaks.length === 0, leaks.join(', '));
 
   // 本地 manifest 已還原
+  const rootLocal = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
   const mcpLocal = JSON.parse(await readFile(join(mcpDir, 'package.json'), 'utf-8'));
   const fleetLocal = JSON.parse(await readFile(join(fleetDir, 'package.json'), 'utf-8'));
   check('pack 後 mcp 本地依賴還原為 file:../..', mcpLocal.dependencies?.['@mebular/core'] === 'file:../..', mcpLocal.dependencies?.['@mebular/core']);
   check('pack 後 fleet 本地依賴還原為 file:../..', fleetLocal.dependencies?.['@mebular/core'] === 'file:../..', fleetLocal.dependencies?.['@mebular/core']);
+  check('pack 後 fleet 的 qr 依賴仍為 file:../qr', fleetLocal.dependencies?.['@mebular/qr'] === 'file:../qr', fleetLocal.dependencies?.['@mebular/qr']);
+  check('pack 後 root 的 qr 依賴仍為 file:packages/qr', rootLocal.dependencies?.['@mebular/qr'] === 'file:packages/qr', rootLocal.dependencies?.['@mebular/qr']);
   check(
     'pack 備份已清除',
     !existsSync(join(mcpDir, 'package.json.packbak')) && !existsSync(join(fleetDir, 'package.json.packbak')),
   );
 
   // tarball 內容
+  const qrFiles = listTarball(qr.file);
   const coreFiles = listTarball(core.file);
   const serviceFiles = listTarball(service.file);
   const fleetFiles = listTarball(fleet.file);
   const mcpFiles = listTarball(mcp.file);
   const skillFiles = listTarball(skill.file);
+  check('qr tarball 含 dist/index.js + LICENSE + vendored LICENSE',
+    qrFiles.includes('package/dist/index.js') && qrFiles.includes('package/LICENSE')
+      && qrFiles.includes('package/src/third-party/qrcode-generator/qrcode.ts')
+      && qrFiles.includes('package/src/third-party/qrcode-generator/LICENSE'));
   check('core tarball 含 dist/index.js', coreFiles.includes('package/dist/index.js'));
   check('core tarball 含 package.json', coreFiles.includes('package/package.json'));
   check('service tarball 含 dist/index.js', serviceFiles.includes('package/dist/index.js'));
@@ -117,6 +131,7 @@ try {
     npm,
     [
       'install',
+      qr.file,
       core.file,
       service.file,
       fleet.file,
@@ -132,9 +147,16 @@ try {
   const installedCore = JSON.parse(await readFile(join(work, 'node_modules', '@mebular', 'core', 'package.json'), 'utf-8'));
   check('tarball 安裝：@mebular/core@0.1.0', installedCore.version === '0.1.0', installedCore.version);
   check(
-    'tarball 安裝：五包齊備',
-    ['core', 'service', 'fleet', 'mcp', 'skill'].every((name) => existsSync(join(work, 'node_modules', '@mebular', name))),
+    'tarball 安裝：六包齊備',
+    ['qr', 'core', 'service', 'fleet', 'mcp', 'skill'].every((name) => existsSync(join(work, 'node_modules', '@mebular', name))),
   );
+  const installedQr = JSON.parse(await readFile(join(work, 'node_modules', '@mebular', 'qr', 'package.json'), 'utf-8'));
+  check('tarball 安裝：@mebular/qr@0.1.0', installedQr.version === '0.1.0', installedQr.version);
+  const qrModule = await import(pathToFileURL(join(work, 'node_modules', '@mebular', 'qr', 'dist', 'index.js')).href);
+  const qrSmoke = await qrModule.renderSvgQr('mebular-publish-smoke');
+  const qrTerm = await qrModule.renderTerminalQr('mebular-publish-smoke');
+  check('tarball 安裝：QR 内置编码器可渲染 SVG/terminal',
+    Boolean(qrSmoke?.value.startsWith('<svg')) && Boolean(qrTerm?.value.length > 0));
 
   const bin = join(work, 'node_modules', '.bin', 'mebular');
   const env = { ...process.env, MEBULAR_HOME: home, MEBULAR_STORAGE_PATH: join(home, 'store.jsonl'), MEBULAR_DEVICE_ID: 'device-publish-smoke' };
@@ -185,12 +207,13 @@ try {
   check('F-INST-1 根 package.json bin = mebular + fleet',
     Boolean(coreManifest.bin?.mebular) && Boolean(coreManifest.bin?.fleet),
     JSON.stringify(coreManifest.bin));
-  check('F-INST-1 根依賴含 mcp 運行時（zod + @modelcontextprotocol/server）',
-    Boolean(coreManifest.dependencies?.zod) && Boolean(coreManifest.dependencies?.['@modelcontextprotocol/server']));
+  check('F-INST-1 根依賴含 mcp 運行時（zod + @modelcontextprotocol/server + qr）',
+    Boolean(coreManifest.dependencies?.zod) && Boolean(coreManifest.dependencies?.['@modelcontextprotocol/server']) && coreManifest.dependencies?.['@mebular/qr'] === '^0.1.0');
 
-  // 根 tarball 全域安裝到獨立 prefix → 雙 bin + tools + home 預設
+  // 根 tarball + qr tarball 全域安裝到獨立 prefix（本地 smoke 沒有 registry；
+  // 正式發布時 qr 先於 core 發布，依賴可由 registry 解析）
   const gprefix = join(work, 'gprefix');
-  execFileSync(npm, ['install', '-g', '--prefix', gprefix, core.file, '--no-audit', '--no-fund', '--loglevel=error'], {
+  execFileSync(npm, ['install', '-g', '--prefix', gprefix, core.file, qr.file, '--no-audit', '--no-fund', '--loglevel=error'], {
     cwd: work,
     stdio: ['ignore', 'ignore', 'inherit'],
     env: process.env,

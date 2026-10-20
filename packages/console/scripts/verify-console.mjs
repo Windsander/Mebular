@@ -1798,17 +1798,18 @@ try {
       method: 'POST', headers: qrHeaders, body: JSON.stringify({ ttlMs: 60000 }),
     });
     const inviteJson = await inviteRes.json().catch(() => null);
-    // 可选依赖在场 → SVG；缺包 → null（只给文本）；两者都合法，字段必须存在
-    check('C7 邀请响应提供二维码（qrSvg：SVG 字符串或缺可选依赖时为 null）',
-      inviteRes.status === 201 && 'qrSvg' in (inviteJson ?? {}) && (inviteJson?.qrSvg === null || String(inviteJson?.qrSvg).startsWith('<svg')),
-      { status: inviteRes.status, qr: inviteJson?.qrSvg === null ? 'null（缺可选依赖）' : 'svg' });
+    // 内置 @mebular/qr：邀请响应必须提供 SVG（不再有缺包降级）
+    check('C7 邀请响应提供二维码（qrSvg 为 SVG 字符串）',
+      inviteRes.status === 201 && String(inviteJson?.qrSvg ?? '').startsWith('<svg'),
+      { status: inviteRes.status, qr: String(inviteJson?.qrSvg ?? '').startsWith('<svg') ? 'svg' : 'missing' });
     const consoleSrc6 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     check('C7 控制台邀请面板渲染二维码与订阅说明',
       ['扫码即通', 'qrSvg', '自行订阅'].every((token) => consoleSrc6.includes(token)));
     const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
-    check('C7 二维码依赖为**精确 pin** 的可选依赖（依赖政策）',
-      typeof pkg.optionalDependencies?.qrcode === 'string' && /^\d+\.\d+\.\d+$/.test(pkg.optionalDependencies.qrcode),
-      { qrcode: pkg.optionalDependencies?.qrcode });
+    const qrVendor = join(rootDir, 'packages', 'qr', 'src', 'third-party', 'qrcode-generator', 'qrcode.ts');
+    check('C7 QR 为内置 app-layer 能力（无 qrcode 运行时依赖）',
+      !pkg.dependencies?.qrcode && !pkg.optionalDependencies?.qrcode && existsSync(qrVendor),
+      { qrcode: pkg.optionalDependencies?.qrcode ?? null });
   }
 
   // ---------- C4：NAT 打洞（只读渲染断言） ----------
@@ -2214,12 +2215,12 @@ try {
       body: JSON.stringify({ code: totpCodeAt(secret, Math.floor(Date.now() / 30_000) + 1) }),
     });
     const showSeedJson = await showSeed.json().catch(() => null);
-    check('S3 显示动态码种子需本机码 → 200 + 分组文本/otpauth（QR 可选）',
+    check('S3 显示动态码种子需本机码 → 200 + 分组文本/otpauth + QR SVG',
       showSeed.status === 200
         && (typeof showSeedJson?.groups === 'string' || Array.isArray(showSeedJson?.groups))
         && /^otpauth:\/\/totp\//.test(showSeedJson?.otpauth ?? '')
-        && (showSeedJson?.qrSvg === null || typeof showSeedJson?.qrSvg === 'string'),
-      `status=${showSeed.status} qr=${typeof showSeedJson?.qrSvg}`);
+        && String(showSeedJson?.qrSvg ?? '').startsWith('<svg'),
+      `status=${showSeed.status} qr=${String(showSeedJson?.qrSvg ?? '').startsWith('<svg') ? 'svg' : 'missing'}`);
 
     const policyFinal = await getJson(port, '/admin/api/policy');
     const finalTypes = new Set((policyFinal.json ?? []).map((e) => e.type));

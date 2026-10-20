@@ -22,8 +22,9 @@ const check = (label, ok, detail = '') => {
 // 「可选运行时导入（非 package.json 依赖）」小节中的条目不参与双向校验
 const sections = doc.split(/^### /m);
 const declaredSection = sections.find((sec) => sec.startsWith('可选运行时导入')) ?? '';
+const vendoredSection = sections.find((sec) => sec.startsWith('内置 vendored')) ?? '';
 const rowsAll = doc.split('\n').filter((line) => line.startsWith('| `'));
-const rows = rowsAll.filter((line) => !declaredSection.includes(line));
+const rows = rowsAll.filter((line) => !declaredSection.includes(line) && !vendoredSection.includes(line));
 
 const runtime = Object.entries({ ...(pkg.dependencies ?? {}), ...(pkg.optionalDependencies ?? {}) })
   // 内部 workspace 包（@mebular/*）是本仓库自身产物，不属于第三方清单

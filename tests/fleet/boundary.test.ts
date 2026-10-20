@@ -33,11 +33,12 @@ function moduleSpecifiers(source: string): string[] {
 }
 
 describe('fleet 边界（红线）', () => {
-  it('core `src/**` 不得依赖 fleet', () => {
+  it('core `src/**` 不得依赖 fleet 或 QR 能力', () => {
     const violations: string[] = [];
     for (const file of listFiles(join(ROOT, 'src'))) {
       for (const spec of moduleSpecifiers(readFileSync(file, 'utf-8'))) {
-        if (spec === '@mebular/fleet' || spec.includes('packages/fleet')) {
+        if (spec === '@mebular/fleet' || spec === '@mebular/qr'
+          || spec.includes('packages/fleet') || spec.includes('qrcode-generator')) {
           violations.push(`${relative(ROOT, file)} → ${spec}`);
         }
       }
@@ -60,11 +61,11 @@ describe('fleet 边界（红线）', () => {
     expect(violations).toEqual([]);
   });
 
-  it('fleet 只声明 @mebular/core 与 @mebular/service（无其它内部包）', () => {
+  it('fleet 只声明 @mebular/core、@mebular/service 与 @mebular/qr（无其它内部包）', () => {
     const pkg = JSON.parse(readFileSync(join(ROOT, 'packages/fleet/package.json'), 'utf-8')) as {
       dependencies?: Record<string, string>;
     };
-    const allowed = ['@mebular/core', '@mebular/service'];
+    const allowed = ['@mebular/core', '@mebular/service', '@mebular/qr'];
     const deps = Object.keys(pkg.dependencies ?? {});
     expect(deps).toContain('@mebular/core');
     for (const dep of deps) {

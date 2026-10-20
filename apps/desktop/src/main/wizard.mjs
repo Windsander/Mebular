@@ -95,7 +95,7 @@ export function installDecision(status) {
   return status?.registered === true ? { action: 'noop', already: true } : { action: 'install', already: false };
 }
 
-/** 深链：控制台（H-1「连接 AI 助手」面板 / 添加设备）。 */
+/** 深链：控制台（H-1「连接 AI 助手」面板 / 邀请设备）。 */
 export function deepLinks(http = { host: '127.0.0.1', port: 7331 }) {
   const base = `http://${http.host}:${http.port}/console`;
   return {

@@ -68,7 +68,7 @@ function verifyBlockHtml(client, verify) {
     const icon = s.ok ? '✓' : '✗';
     const cls = s.ok ? 'ok' : 'todo';
     const out = typeof s.output === 'string' && s.output.trim().length > 0
-      ? `<details class="asst-detail"><summary>输出</summary><pre class="connect-diff">${esc(s.output)}</pre></details>`
+      ? `<pre class="connect-diff asst-output" data-asst-output>${esc(s.output)}</pre>`
       : '';
     return `<p class="asst-line ${cls}">${icon} ${esc(s.label ?? s.name ?? '')}：${esc(s.detail ?? '')}</p>${out}`;
   }).join('');
@@ -119,15 +119,14 @@ function rowHtml(client, ui, status) {
       const cmds = Array.isArray(failed.commands) && failed.commands.length > 0
         ? `<br />命令摘要：${esc(failed.commands.map((c) => `${c.cmd}（rc=${c.code}）`).join('；'))}`
         : '';
-      detailBits.push(`<p class="asst-line">已自动还原原配置。
-        <details class="asst-detail"><summary>查看详情</summary><p class="muted">备份：<code>${esc(failed.backupPath ?? '—')}</code>${cmds}</p></details></p>`);
+      detailBits.push(`<p class="asst-line">已自动还原原配置。备份：<code>${esc(failed.backupPath ?? '—')}</code>${cmds}</p>`);
     }
   }
   if (verify) {
     detailBits.push(verifyBlockHtml(client, verify));
   } else if (pending) {
     detailBits.push(`<p class="asst-line todo">已接好——重启 ${esc(client.name)} 这个软件后生效</p>
-      <details class="asst-detail"><summary>详情</summary><p class="muted">① 完全退出该软件（退出进程，不是只关窗口）② 重新打开 ③ 工具列表应出现 <code>mebular</code>。我们不会替你重启它。</p></details>`);
+      <p class="asst-line muted">① 完全退出该软件（退出进程，不是只关窗口）② 重新打开 ③ 工具列表应出现 <code>mebular</code>。我们不会替你重启它。</p>`);
   } else if (msg) {
     detailBits.push(`<p class="asst-line${status.tone === 'todo' ? ' todo' : ''}">${esc(msg)}</p>`);
   }
@@ -146,7 +145,7 @@ function rowHtml(client, ui, status) {
       ? `<button class="btn btn-small" type="button" data-asst-edit="${id}">编辑</button>
          <button class="btn btn-small" type="button" data-asst-remove="${id}">移除</button>`
       : '';
-    detailBits.push(`<details class="asst-detail"${ui.clientOpen?.[client.id] ? ' open' : ''}><summary>详情</summary>
+    detailBits.push(`<div class="asst-detail-panel" data-asst-detail="${id}">
       <p class="muted">${bits.join(' · ') || '（无判据明细）'}</p>
       <div class="asst-detail-actions">
         ${client.hasVerify ? `<button class="btn btn-small btn-crt" type="button" data-cli-action="verify" data-cli-id="${id}">验证</button>` : ''}
@@ -156,7 +155,7 @@ function rowHtml(client, ui, status) {
         <button class="btn btn-small" type="button" data-cli-action="copy" data-cli-id="${id}">复制片段</button>
         <button class="btn btn-small" type="button" data-cli-action="recheck" data-cli-id="${id}">重新检测</button>
         ${customActions}
-      </div></details>`);
+      </div></div>`);
   }
   const customTag = client.custom ? '<span class="asst-tag">自定义</span>' : '';
   return `<div class="asst-row" data-asst-row="${id}">
@@ -230,15 +229,13 @@ export function serviceRowHtml(service, serviceMsg = '') {
         ? '<button class="btn btn-small" type="button" data-svc-action="recheck">重新检测</button>'
         : '<button class="btn btn-small btn-crt" type="button" data-svc-action="install">让 Mebular 常驻</button>'}
     </div>
-    <div class="asst-xp">
-      <details class="asst-detail"><summary>详情</summary>
-        <p class="muted">开机自启、崩溃自动拉起。家目录 <code>${esc(service.home ?? '—')}</code>（服务文件路径见「关于本机」）。</p>
-        <div class="asst-detail-actions">
-          <button class="btn btn-small" type="button" data-svc-action="restart">立即重启</button>
-          <button class="btn btn-small" type="button" data-svc-action="recheck">重新检测</button>
-          <button class="btn btn-small" type="button" data-svc-action="uninstall" ${registered ? '' : 'disabled'}>取消常驻</button>
-        </div>
-      </details>
+    <div class="asst-xp asst-service-xp">
+      <p class="muted">开机自启、崩溃自动拉起。家目录 <code>${esc(service.home ?? '—')}</code>（服务文件路径见「关于本机」）。</p>
+      <div class="asst-detail-actions">
+        <button class="btn btn-small" type="button" data-svc-action="restart">立即重启</button>
+        <button class="btn btn-small" type="button" data-svc-action="recheck">重新检测</button>
+        <button class="btn btn-small" type="button" data-svc-action="uninstall" ${registered ? '' : 'disabled'}>取消常驻</button>
+      </div>
       <p class="asst-line" id="service-msg">${esc(serviceMsg)}</p>
     </div>`;
 }

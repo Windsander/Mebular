@@ -1,4 +1,5 @@
-// 控制台设置页信息架构（IA）——单一真源，供前端渲染与 E1 断言共用（纯数据，无 DOM）。
+// 控制台设置页信息架构（IA）——单一真源，供前端渲染与 E1 断言共用（纯逻辑，无 DOM）。
+// U-1 起也承载少量共享纯函数（CSRF 403 自愈）：console 静态文件白名单固定，避免新增 serve 侧入口。
 //
 // 决策（用户拍板）：
 //  - `sync.autoSync` / `sync.pushOnWrite` 从 GUI 彻底移除（默认常开，不需暴露），仅在「关于本机 · 运行状态」以只读行展示真值；
@@ -34,6 +35,17 @@ export const IA_SETTINGS_EXTRA = [
 ];
 
 /**
+ * U-1 折叠白名单（设置/关于/邀请共用；≤5，当前 4）。
+ * 每项必须带 data-settings-fold，UI 断言据此防回归；不允许新增其它 <details>。
+ */
+export const IA_SETTINGS_FOLDS = [
+  { id: 'mcp-danger', label: 'MCP 接入 · 危险与自救', home: 'mcp' },
+  { id: 'diagnostics', label: '诊断与恢复', home: 'advanced' },
+  { id: 'about-runtime', label: '运行状态（只读）', home: 'about' },
+  { id: 'invite', label: '邀请设备 · 详情', home: 'invite' },
+];
+
+/**
  * 「高级」的成组卡片（E1：原「常用」的加入服务三项聚成「常驻服务」）。
  * 网络两项按常规字段组渲染；MCP 六项独立成 Tab（见 IA_MCP_CARD）。
  */
@@ -53,7 +65,7 @@ export const IA_ADVANCED_CARDS = [
 export const IA_MCP_CARD = {
   id: 'mcp',
   title: 'MCP 接入',
-  desc: 'Agent 经 MCP 连接本机；改端口/鉴权/监听/TLS 会立即影响控制台自身的访问方式。改到不可达时：bearer 可粘贴 token 自救；oauth 需 env secret，否则只能编辑 config.json 改回并重启。',
+  desc: 'Agent 经 MCP 连接本机；改端口/鉴权/监听/TLS 会立即影响控制台自身的访问方式。',
   danger: true,
   fields: ['mcp.http.port', 'mcp.http.auth', 'mcp.http.host', 'mcp.http.tls', 'mcp.http.tlsKey', 'mcp.http.tlsCert'],
 };
@@ -132,3 +144,66 @@ export const IA_EDITOR_RENDER_PATHS = [
   ...IA_ADVANCED_FIELDS,
   ...IA_MCP_CARD.fields,
 ];
+
+// ---------- U-1 · CSRF 403 自愈（与 IA 同处共享纯逻辑模块：无 DOM、零依赖） ----------
+// 长开页面 / 守护重启后旧 token 失效时，重取一次 /console/ 的 token（响应头 + cookie），
+// 保留调用方表单状态并重试一次；不做无限重试。独立静态文件需同步改 serve 白名单，
+// 故与 IA 常量共置（见 PR 说明）。
+
+export const CSRF_ERROR_MESSAGE = 'CSRF token 缺失或无效';
+export const CSRF_RETRY_FAILED_MESSAGE = '会话已刷新，请重试；仍失败请重开窗口';
+
+/** 只认服务端明确的 CSRF 403；其它 403（scope/权限）不触发重取。 */
+export function isCsrfFailure(error) {
+  return Number(error?.status) === 403
+    && String(error?.message ?? '').includes(CSRF_ERROR_MESSAGE);
+}
+
+/** 包一层统一错误（保留原状态码/载荷，便于调用方继续做错误映射）。 */
+export function csrfRetryError(cause) {
+  const error = new Error(CSRF_RETRY_FAILED_MESSAGE);
+  error.status = cause?.status ?? 403;
+  error.payload = cause?.payload ?? null;
+  error.csrfRetry = true;
+  error.cause = cause;
+  return error;
+}
+
+/**
+ * 重新取 CSRF token：优先读 /console/ 响应头的 x-mebular-csrf（同源），
+ * 读不到再回退 document.cookie。不整页重载，调用方 DOM/表单原样保留。
+ */
+export async function refreshCsrfToken({
+  fetchImpl = globalThis.fetch,
+  readCookie = () => null,
+} = {}) {
+  const res = await fetchImpl('/console/', {
+    method: 'GET',
+    credentials: 'same-origin',
+    cache: 'no-store',
+    headers: { accept: 'text/html' },
+  });
+  const header = res?.headers?.get?.('x-mebular-csrf') ?? null;
+  const token = header || readCookie('mebular_csrf');
+  return res?.ok && token ? token : null;
+}
+
+/**
+ * 发送一次；命中 CSRF 403 时恢复 token 并原样重试一次。
+ * send 必须自行读取最新 token（调用方在 recover 回调里写回状态）。
+ */
+export async function withCsrfRetry(send, recover) {
+  try {
+    return await send();
+  } catch (error) {
+    if (!isCsrfFailure(error)) throw error;
+    const token = await recover();
+    if (!token) throw csrfRetryError(error);
+    try {
+      return await send();
+    } catch (retryError) {
+      if (isCsrfFailure(retryError)) throw csrfRetryError(retryError);
+      throw retryError;
+    }
+  }
+}

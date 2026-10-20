@@ -234,7 +234,8 @@ describe('UX-2 邀请单动作页', () => {
     expect(consoleJs).toMatch(/function showInviteResult\(res\)/);
     expect(consoleJs).toContain('令牌即入网权限');
     expect(consoleJs).toContain('扫码即通');
-    expect(consoleJs).toContain('<details class="asst-detail"><summary>详情</summary>');
+    expect(consoleJs).toContain('data-settings-fold="invite"');
+    expect(consoleJs).toContain("foldLabel('invite')");
     expect(consoleJs).toContain('invite-endpoint');
   });
 
@@ -433,7 +434,7 @@ describe('UX-2 补丁 4 · 控制台：滚动条/拖拽区/交通灯避让（静
 describe('UX-2 补丁 3 · 控制台：接入失败语义（绝不落入「待生效」）', () => {
   const base = normalizeClient({ id: 'c', name: 'C', state: 'not-connected', hasVerify: true, landing: { primaryPath: '/x.json' } });
 
-  it('connect 失败 →「接入失败」+ 重试；rolledBack → 「已自动还原原配置」+ 查看详情（备份/命令摘要）', () => {
+  it('connect 失败 →「接入失败」+ 重试；rolledBack → 「已自动还原原配置」+ 备份/命令摘要（内联）', () => {
     const ui = { clientFailed: { c: { kind: 'connect', reason: '写入失败（mcp_servers.mebular）已回滚', rolledBack: true, backupPath: '/x.json.bak-1', commands: [{ cmd: 'cfg set x', code: 1 }] } } };
     expect(assistantStatus(base, ui)).toMatchObject({ key: 'connect-failed', label: '接入失败', tone: 'todo' });
     const html = assistantsPanelHtml({ clients: [{ id: 'c', name: 'C', state: 'not-connected', hasVerify: true, landing: { primaryPath: '/x.json' } }], ui });
@@ -441,7 +442,7 @@ describe('UX-2 补丁 3 · 控制台：接入失败语义（绝不落入「待�
     expect(html).toContain('重试');
     expect(html).toContain('写入失败（mcp_servers.mebular）已回滚');
     expect(html).toContain('已自动还原原配置');
-    expect(html).toContain('查看详情');
+    expect(html).not.toContain('查看详情');
     expect(html).toContain('/x.json.bak-1');
     expect(html).toContain('cfg set x');
   });

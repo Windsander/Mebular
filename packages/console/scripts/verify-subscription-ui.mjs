@@ -22,8 +22,13 @@ const check = (name, ok, detail = undefined) => {
 
 check('共享页含订阅三态文案', /订阅/.test(html) && /已订阅/.test(js) && /未订阅/.test(js));
 check('共享页含新建记忆域与退出并交接', html.includes('新建记忆域') && html.includes('退出并交接'));
-check('空态主按钮 = 新建记忆域，次按钮 = 邀请设备', html.includes('id="domains-empty-new"') && html.includes('id="domains-empty-invite"') && html.indexOf('domains-empty-new') < html.indexOf('domains-empty-invite'));
-check('空态文案：只有本机也可以新建并记录', html.includes('只有本机也可以新建记忆域并开始记录'));
+check('空态唯一 CTA = 新建记忆域（共享页无邀请按钮）',
+  html.includes('id="domains-empty-new"') && !html.includes('domains-empty-invite')
+  && !/domains-empty[\s\S]{0,800}邀请设备/.test(html));
+check('空态文案：只有本机也可以新建并记录', html.includes('只有本机也可以新建一个记忆域并开始记录'));
+const domainsSection = html.slice(html.indexOf('id="domains-view"'), html.indexOf('id="audit-view"'));
+check('邀请设备只在顶栏/邀请弹层（共享页无 CTA）',
+  html.includes('id="invite-device"') && domainsSection.length > 0 && !/邀请设备/.test(domainsSection));
 check('新建域默认自订阅（create 请求 subscribe:true + toast）', /createNamespace[\s\S]{0,600}subscribe:\s*true/.test(js) && js.includes('已创建并订阅'));
 check('全站无「添加设备」', !all.includes('添加设备'));
 check('peerWhitelist 不在 GUI 可编辑面', !ia.includes("'sync.peerWhitelist'"));

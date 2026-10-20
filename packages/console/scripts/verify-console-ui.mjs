@@ -374,10 +374,10 @@ async function main() {
 
     await send('Page.navigate', { url: `${base}/console/` });
     check('页面加载完成（标题 / #stage）', await waitFor('document.title.includes("控制台") && Boolean(document.querySelector("#stage"))'));
-    check('弹窗对齐规范：小弹窗 modal-center；大面板顶部对齐 + 内部滚动',
+    check('弹窗对齐规范：小弹窗 + 加入忆云 modal-center；其余大面板顶部对齐',
       await evalJs(`(() => {
-        const small = ['wizard', 'invite', 'cloud-switch', 'security-action', 'handoff', 'modal', 'auth-token', 'namespace-new-modal'];
-        const large = ['settings', 'about', 'cloud-join', 'provision'];
+        const small = ['wizard', 'invite', 'cloud-switch', 'security-action', 'handoff', 'modal', 'auth-token', 'namespace-new-modal', 'cloud-join'];
+        const large = ['settings', 'about', 'provision'];
         const boxes = [...document.querySelectorAll('.modal .modal-box')];
         return small.every((id) => document.querySelector('#' + id)?.classList.contains('modal-center'))
           && large.every((id) => !document.querySelector('#' + id)?.classList.contains('modal-center'))

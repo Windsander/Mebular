@@ -60,12 +60,12 @@
 | `u3-after-settings-security-dialog.jpg` | 小弹窗居中（安全档位确认；`modal-center`） |
 | `u3-after-dialog-namespace.jpg` | 新建记忆域：与邀请同规格（520、crt 外壳、字段整行） |
 | `u3-after-dialog-invite.jpg` | 邀请设备：小弹窗居中（520） |
-| `u3-after-dialog-cloud-join.jpg` | 加入忆云：大面板顶部对齐（640，内部滚动） |
+| `u3-after-dialog-cloud-join.jpg` | 加入忆云：640 宽，垂直居中，内部滚动 |
 
 ## 5. 边界与取舍
 
 - **Electron 兼容补充**：`console.js` 内 `window.prompt` 已归零——bearer token 改用 App 内 `#auth-token` 弹层；设备卡「连接」复用既有手动连接向导；复制失败的兜底改为临时 textarea + `execCommand('copy')`。`window.alert/confirm` 在 Electron 可用，保留。
-- **弹窗对齐**：小弹窗（邀请 / 切换忆云 / 安全操作 / 手动连接 / handoff / 通用确认 / 令牌输入 / 新建域）统一 `modal-center` 垂直居中；大面板（设置 / 关于本机 / 加入忆云 / 首启引导）保持顶部对齐 + 内部滚动。
+- **弹窗对齐**：小弹窗（邀请 / 切换忆云 / 安全操作 / 手动连接 / handoff / 通用确认 / 令牌输入 / 新建域）统一 `modal-center` 垂直居中；「加入忆云」640 宽也垂直居中；设置 / 关于本机 / 首启引导保持顶部对齐 + 内部滚动。
 - 字段展示文案覆盖放在 `packages/console/settings-ia.js` 的 `IA_FIELD_COPY`：文件域不包含 `packages/mcp/src/config-schema.mjs`，因此服务端 schema 仍负责校验/默认值/写入，控制台只覆盖展示标签与帮助。
 - 安全「变更者/时间」不再常显；审计时间线保留完整记录。
 - 绑定地址/端口的深层语义压成一行；完整键语义仍以 `config.json` / 恢复指引为准。

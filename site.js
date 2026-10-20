@@ -120,6 +120,12 @@
 
       'pricing.includes.title': '所有套餐均包含',
       'pricing.includes.body': '端到端加密 · 设备侧记忆存储 · 开源客户端 · 可验证同步',
+
+      /* ---- Trust Anchor（记忆公证）预告 ---- */
+      'pricing.anchor.title': '记忆公证 · Trust Anchor',
+      'pricing.anchor.badge': '即将推出',
+      'pricing.anchor.desc': '举证级时间戳，第三方可验证的记忆存在性证明',
+
       'faq.title': '常见问题',
       'faq.q1': '什么是托管 Relay？',
       'faq.a1': 'Relay 是记忆同步的中转节点。托管 Relay 由我们部署与运维，你无需自己搭建服务器，即可让多台设备保持记忆同步。',
@@ -131,6 +137,8 @@
       'faq.a4': '可以。订阅按月计费，可随时升级、降级或取消；取消后，当前计费周期结束前仍可正常使用。',
       'faq.q5': '企业合规与私有部署怎么支持？',
       'faq.a5': 'Team 套餐提供多域管理、完整审计可见性与优先支持。如需私有部署或定制合规方案，请在等待名单中选择「企业合规」与我们联系。',
+      'faq.q6': '什么是记忆公证（Trust Anchor）？',
+      'faq.a6': '它把你记忆事件的加密指纹定期锚到公链上，任何人都能独立验证‘这些记忆在某时刻已存在’，而你的记忆内容零暴露。即将推出。',
 
       /* ---- 等待名单页 ---- */
       'waitlist.tag': 'v1.0 · 等待名单',
@@ -143,6 +151,7 @@
       'form.intent.relay': '托管 relay',
       'form.intent.enterprise': '企业合规',
       'form.intent.consulting': '咨询集成',
+      'form.intent.anchor': '记忆公证',
       'form.submit': '提交',
       'form.privacy': '我们仅使用你的邮箱发送产品更新，不会分享给第三方。',
       'form.err.email': '请输入有效的邮箱地址。',
@@ -248,6 +257,12 @@
 
       'pricing.includes.title': 'Included in every plan',
       'pricing.includes.body': 'End-to-end encryption · device-side memory storage · open-source client · verifiable sync',
+
+      /* ---- Trust Anchor (coming soon) ---- */
+      'pricing.anchor.title': 'Trust Anchor',
+      'pricing.anchor.badge': 'coming soon',
+      'pricing.anchor.desc': 'Evidence-grade timestamps, third-party verifiable proof of your memory\'s existence',
+
       'faq.title': 'FAQ',
       'faq.q1': 'What is a hosted relay?',
       'faq.a1': 'A relay is a transit node for memory sync. A hosted relay is deployed and operated by us, so you can keep multiple devices in sync without running your own server.',
@@ -259,6 +274,8 @@
       'faq.a4': 'Yes. Subscriptions are billed monthly and you can upgrade, downgrade, or cancel anytime. After cancelling, your plan stays active until the end of the current billing period.',
       'faq.q5': 'How do you support enterprise compliance and private deployment?',
       'faq.a5': 'The Team plan offers multi-domain management, full audit visibility, and priority support. For private deployment or custom compliance, choose “Enterprise compliance” on the waitlist and reach out to us.',
+      'faq.q6': 'What is Trust Anchor?',
+      'faq.a6': 'It periodically anchors cryptographic fingerprints of your memory events to a public chain, so anyone can independently verify that “these memories existed at a certain time” — while your memory content is never exposed. Coming soon.',
 
       /* ---- Waitlist ---- */
       'waitlist.tag': 'v1.0 · Waitlist',
@@ -271,6 +288,7 @@
       'form.intent.relay': 'Hosted relay',
       'form.intent.enterprise': 'Enterprise compliance',
       'form.intent.consulting': 'Consulting & integration',
+      'form.intent.anchor': 'Trust anchor',
       'form.submit': 'Submit',
       'form.privacy': 'We only use your email for product updates and never share it with third parties.',
       'form.err.email': 'Please enter a valid email address.',

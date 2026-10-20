@@ -989,9 +989,8 @@ function runtimeCompareLine(field) {
   const showReason = reason.length > 0 && !infoReason && !boolOff;
   const pendingItem = pendingRestartItems().find((item) => item.path === field.path) ?? null;
   const normal = !mismatch && !showReason && !pendingItem;
-  if (normal) {
-    return `<p class="cfg-effective" data-cfg-state="ok"><span class="cfg-ok">✓ 生效中</span></p>`;
-  }
+  // 常态不占行：没有异常就是生效；只有待重启/不一致/未生效时才在字段下展开。
+  if (normal) return '';
   return `<p class="cfg-effective${mismatch ? ' is-mismatch' : ''}" data-cfg-state="exception">`
     + `<span><span class="cfg-eff-key">已配置</span> ${escapeHtml(formatRuntimeValue(configured))}</span>`
     + '<span>/</span>'
@@ -1026,11 +1025,17 @@ function renderCfgField(field) {
       : field.type === 'select' ? (typeof initial.value === 'string' ? initial.value : field.options[0][0])
       : (typeof initial.value === 'string' ? initial.value : ''));
   const id = `cfg-${field.path.replace(/\./g, '-')}`;
+  const helpTitle = [field.help, field.warn].filter(Boolean).join(' ');
+  const controlTitle = helpTitle ? ` title="${escapeHtml(helpTitle)}"` : '';
+  // 空输入时把「默认值 / 短提示」收进 placeholder；有值时 placeholder 不显示，帮助在聚焦时展开。
+  const defaultHint = initial.isDefault && field.default !== null && field.default !== undefined
+    ? `默认 ${field.default}` : '';
+  const placeholderText = field.placeholder || defaultHint || field.help || '';
   let control;
   if (field.type === 'bool') {
-    control = `<label class="toggle cfg-toggle"><input id="${id}" type="checkbox" data-cfg-path="${escapeHtml(field.path)}" ${value ? 'checked' : ''}><span class="slider"></span></label>`;
+    control = `<label class="toggle cfg-toggle"${controlTitle}><input id="${id}" type="checkbox" data-cfg-path="${escapeHtml(field.path)}" ${value ? 'checked' : ''}><span class="slider"></span></label>`;
   } else if (field.type === 'select') {
-    control = `<select id="${id}" class="crt-input" data-cfg-path="${escapeHtml(field.path)}">`
+    control = `<select id="${id}" class="crt-input" data-cfg-path="${escapeHtml(field.path)}"${controlTitle}>`
       + field.options.map(([v, label]) => `<option value="${escapeHtml(v)}" ${v === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')
       + '</select>';
   } else {
@@ -1039,11 +1044,13 @@ function renderCfgField(field) {
       field.type === 'number' || field.type === 'minutes' ? `step="${field.step ?? 1}"` : '',
       field.min !== undefined ? `min="${field.min}"` : '',
       field.max !== undefined ? `max="${field.max}"` : '',
-      field.placeholder ? `placeholder="${escapeHtml(field.placeholder)}"` : '',
+      placeholderText ? `placeholder="${escapeHtml(placeholderText)}"` : '',
+      controlTitle,
     ].filter(Boolean).join(' ');
     control = `<input id="${id}" class="crt-input cfg-input" type="${type}" data-cfg-path="${escapeHtml(field.path)}" value="${escapeHtml(String(value))}" ${attrs} />`;
   }
-  const defaultTag = initial.isDefault ? '<span class="cfg-default">默认</span>' : '';
+  const hasDefault = field.default !== null && field.default !== undefined && field.default !== '';
+  const defaultTag = initial.isDefault && hasDefault ? '<span class="cfg-default">默认</span>' : '';
   const warnMark = field.warn ? '<span class="cfg-warn-mark" title="风险说明" aria-label="有风险说明">⚠</span>' : '';
   const foldedReason = runtimeFoldedReason(field);
   const helpBits = [
@@ -1207,7 +1214,6 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
         <div class="settings-tabs" role="tablist" aria-label="设置页签">${IA_TABS.map(tabButton).join('')}${
           IA_SETTINGS_EXTRA.map((item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.label)}</button>`).join('')
         }</div>
-        <p class="settings-note settings-apply-note muted">改动即生效：需重启的项会自动重启，即时项就地生效。</p>
         <div class="settings-scroll">
           ${panel('common', '<section class="settings-section" data-settings-common-status><h3>本机状态 <span class="badge badge-muted">只读</span></h3><p class="muted">?mock=1 仅提供安全卡与只读演示；可编辑设置需连接真实守护。</p></section>')}
           ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
@@ -1231,7 +1237,6 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     <div class="settings-tabs" role="tablist" aria-label="设置页签">${IA_TABS.map(tabButton).join('')}${
       IA_SETTINGS_EXTRA.map((item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.label)}</button>`).join('')
     }</div>
-    <p class="settings-note settings-apply-note muted">改动即生效：需重启的项会自动重启，即时项就地生效。</p>
     <div class="settings-scroll">
     ${panel('common', `
       <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>

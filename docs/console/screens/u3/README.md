@@ -25,7 +25,8 @@
 
 **MCP**
 
-- 删除鉴权方式 300+ 字长警告与 2 段危险说明；改为字段一行帮助 + 折叠内 3 行：后果、bearer 自救、oauth/端口失联改回配置。
+- 删除鉴权方式 300+ 字长警告与 2 段危险说明；折叠内保留 3 行：后果、bearer 自救、oauth/端口失联改回配置。
+- 字段帮助默认收起，聚焦时才出现；空值把默认值/短提示放进 placeholder；常态不再显示「生效中」，只有待重启/不一致/未生效才占行。
 - 统一「认证」（不再用“鉴权”）；字段标签统一为「证书路径 / 私钥路径」。
 - 保留 `token grant`、`config.json`、`.bak` 与自锁确认；风险与自救可达。
 
@@ -36,7 +37,7 @@
 - 常驻服务长说明、绑定地址长解释压成一行；「周期反熵」显示名改为「自动对账」。
 - 诊断里的恢复指引压缩，但保留 `MCP_INSECURE_CONFIG` / `MCP_STORAGE_LOCKED`、OAuth env 名与 `token grant`。
 
-## 3. 文本量（可见、去空白；不含隐藏折叠）
+## 3. 文本量（DOM 文本、去空白；不含折叠；隐藏帮助仍计入，视觉可见更短）
 
 | Tab | before | after | 目标 |
 |---|---:|---:|---:|
@@ -76,5 +77,6 @@
 - 统一外壳：所有 `.modal-box` 都带 `crt-surface crt-corners`；没有裸 `modal-box`。
 - 小弹窗（`modal-center`，520px）：邀请、新建记忆域、切换忆云、安全操作/批准、手动连接、handoff、通用确认、bearer 令牌输入。
 - 大面板（顶部对齐 + 内部滚动）：设置、关于本机、加入忆云（640px）、首启引导（640px）。
+- 设置面板：标题下常驻一行「改动即生效」；页签固定；只有页签下的内容滚动；滚动条 6px 贴设置框右边缘；关闭收进右上角 X，底部关闭移除。
 - 标题/说明/字段/动作：标题（可带 `crt-tag`）+ 一句 `.modal-note` + `.field` 整行输入 + 右对齐 `.modal-actions`。
-- 落地位置：`packages/console/index.html` 的 `.modal` 标记 + `packages/console/console.css` 的 `.modal.modal-center` / `.modal-box-wide` / `.field`；`verify-console-ui.mjs` 断言对齐与宽度不漂移。
+- 落地位置：`packages/console/index.html` 的 `.modal` 标记 + `packages/console/console.css` 的 `.modal.modal-center` / `.modal-box-wide` / `.modal-settings` / `.settings-scroll` / `.field`；`verify-console-ui.mjs` 断言对齐、宽度与滚动区不漂移。

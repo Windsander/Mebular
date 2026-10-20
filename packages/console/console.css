@@ -362,9 +362,11 @@ select {
 body.modal-open { overflow: hidden; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 
-/* U-3 · 设置壳：标题栏固定，提示独立下划线，只有其下内容滚动 */
-.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; }
+/* U-3 · 设置壳：提示收进标题，页签固定，只有其下内容滚动 */
+.modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin: 0 0 8px; }
+.modal-heading { min-width: 0; }
 .modal-head h2 { margin: 0; }
+.modal-head .settings-apply-note { margin: 3px 0 0; max-width: 62ch; font-size: 11px; line-height: 1.45; }
 .modal-x {
   display: inline-flex; align-items: center; justify-content: center;
   width: 28px; height: 28px; flex: 0 0 auto; padding: 0;
@@ -374,13 +376,22 @@ body.modal-open { overflow: hidden; }
 }
 .modal-x:hover { color: var(--crt-bright, #9dffcf); border-color: var(--border); background: rgba(10, 16, 32, 0.55); }
 .modal-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.modal-box.modal-settings { display: flex; flex-direction: column; overflow: hidden; padding: 18px 20px; }
+.modal-box.modal-settings { display: flex; flex-direction: column; overflow: hidden; padding: 18px 0 18px 20px; scrollbar-gutter: auto; }
+.modal-settings .modal-head, .modal-settings .settings-tabs { padding-right: 20px; }
 .modal-settings #settings-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
-.modal-settings .settings-tabs { flex: 0 0 auto; margin: 0 0 8px; }
-.modal-settings .settings-apply-note { flex: 0 0 auto; align-self: stretch; width: 100%; max-width: none; margin: 0; padding: 0 0 9px; border-bottom: 1px dashed rgba(80, 255, 170, 0.22); }
-.settings-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 2px 12px 0; scrollbar-gutter: stable; }
+.modal-settings .settings-tabs { flex: 0 0 auto; margin: 0; }
+/* 滚动条贴设置框右边缘：滚动容器贴边，内容右侧留 20px；thumb 收细。 */
+.settings-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 20px 12px 0; scrollbar-gutter: stable; }
+.settings-scroll::-webkit-scrollbar { width: 6px; }
+.settings-scroll::-webkit-scrollbar-track { background: transparent; margin: 6px 0; }
+.settings-scroll::-webkit-scrollbar-thumb { border: 0; border-radius: 999px; background: rgba(140, 255, 200, 0.18); }
+.settings-scroll::-webkit-scrollbar-thumb:hover { border: 0; background: rgba(140, 255, 200, 0.32); }
 .settings-scroll > .settings-panel > .settings-section:first-child,
 .settings-scroll > .settings-panel > .settings-slot:first-child > .settings-section:first-child { border-top: 0; padding-top: 0; }
+/* 字段帮助默认收起；聚焦/警告时再出现，空值提示由 placeholder 承担。 */
+.cfg-row .cfg-help { display: none; }
+.cfg-row:focus-within .cfg-help,
+.cfg-row .cfg-help.cfg-warn { display: block; }
 
 /* ---------- 向导 ---------- */
 .modal-box-wide { width: min(640px, 94vw); }

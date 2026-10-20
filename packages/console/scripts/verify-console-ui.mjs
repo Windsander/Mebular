@@ -484,18 +484,16 @@ async function main() {
     // H-1/UX-2：设置 · AI 助手专区（连接页已收编进设置；单列表 + 行内闭环）
     await evalJs('document.querySelector("#open-settings").click()');
     check('设置弹层打开', await waitFor('document.querySelector("#settings")?.hidden === false'));
-    // U-3 症状①：背板/设置框不滚，只有提示下划线以下的 .settings-scroll 滚动；页面滚动锁定
-    check('U-3 设置壳：提示下划线 + 仅内容区滚动 + 右上角 X',
+    // U-3 症状①：背板/设置框不滚，只有页签下的 .settings-scroll 滚动；页面滚动锁定
+    check('U-3 设置壳：提示在标题下 + 仅内容区滚动 + 右上角 X + 滚动条贴边',
       await evalJs(`(() => {
         const modal = document.querySelector('#settings');
         const box = modal.querySelector('.modal-box');
         const scroller = modal.querySelector('.settings-scroll');
-        const note = modal.querySelector('.settings-apply-note');
         const close = modal.querySelector('.modal-head #settings-close.modal-x');
         const m = getComputedStyle(modal);
         const b = getComputedStyle(box);
         const s = getComputedStyle(scroller);
-        const n = getComputedStyle(note);
         const securityFirst = modal.querySelector('#settings-panel-security .settings-section');
         const spacer = document.createElement('div');
         spacer.style.height = '900px';
@@ -505,8 +503,8 @@ async function main() {
           modalOverflow: m.overflowY,
           boxOverflow: b.overflowY,
           scrollOverflow: s.overflowY,
-          noteBorder: n.borderBottomWidth,
-          noteFull: note.getBoundingClientRect().width >= scroller.getBoundingClientRect().width - 2,
+          noteInHead: Boolean(modal.querySelector('.modal-head .settings-apply-note')),
+          scrollEdge: Math.abs(scroller.getBoundingClientRect().right - box.getBoundingClientRect().right) <= 1,
           securityTop: securityFirst ? getComputedStyle(securityFirst).borderTopWidth : 'missing',
           scrolled: scroller.scrollTop > 0,
           boxStill: box.scrollTop === 0,
@@ -517,8 +515,8 @@ async function main() {
         spacer.remove();
         scroller.scrollTop = 0;
         return out.modalOverflow === 'hidden' && out.boxOverflow === 'hidden'
-          && out.scrollOverflow === 'auto' && out.noteBorder !== '0px'
-          && out.noteFull && out.securityTop === '0px'
+          && out.scrollOverflow === 'auto' && out.noteInHead && out.scrollEdge
+          && out.securityTop === '0px'
           && out.scrolled && out.boxStill && out.backdropStill && out.bodyLocked && out.hasX;
       })()`));
     check('常驻运行行归设置 · 常用（状态 + 动作按钮）',
@@ -912,22 +910,31 @@ async function main() {
     check('简化轮：诊断并入高级底部折叠（cfg-copy-all 就位）',
       await evalJs('(() => { document.querySelector("[data-settings-tab=advanced]")?.click(); const f = document.querySelector("#diag-fold"); return Boolean(f) && Boolean(f.querySelector("#cfg-copy-all")); })()'));
     await evalJs('document.querySelector("[data-settings-tab=mcp]").click()');
-    // 轮 C 症状③：常显 = 名称 + 控件 + 生效中；异常才完整三元组；帮助/警告墙折叠
-    check('轮 C 呈现分级：常态三元组收成「生效中」，异常自动出现完整三元组',
+    // 轮 C 症状③：常态不占行；异常才完整三元组；帮助聚焦出现；空值提示进 placeholder
+    check('轮 C 呈现分级：常态不占行，异常自动出现完整三元组',
       await evalJs(`(() => {
         const body = document.querySelector('#settings-body');
         const ok = body.querySelectorAll('[data-cfg-state=ok]').length;
         // 专指 mcp.http.port 的「已配置 0 / 实际 <port>」例外：避免被 join 端点回环等其它异常行抢先
         const row = body.querySelector('[data-cfg-path="mcp.http.port"]')?.closest('.cfg-row');
         const ex = row?.querySelector('[data-cfg-state=exception]');
-        return ok >= 3 && /✓ 生效中/.test(body.textContent)
+        return ok === 0 && !/生效中/.test(body.textContent)
           && Boolean(ex) && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent) && /不一致/.test(ex.textContent);
       })()`));
-    check('U-1 呈现分级：字段帮助/风险内联一行，不再有逐字段「详情」折叠',
+    check('U-1 呈现分级：帮助聚焦时出现、空值默认/短提示进 placeholder',
       await evalJs(`(() => {
         const panel = document.querySelector('#settings-panel-mcp');
-        const direct = panel?.querySelector('.settings-section .cfg-control > .cfg-help');
-        return Boolean(direct) && !panel.querySelector('details.cfg-more') && !/这是什么/.test(panel.textContent);
+        const row = panel?.querySelector('.cfg-row');
+        const help = row?.querySelector('.cfg-control > .cfg-help');
+        const input = row?.querySelector('input, select');
+        if (!help || !input) return false;
+        const hidden = getComputedStyle(help).display === 'none';
+        input.focus();
+        const shown = getComputedStyle(help).display !== 'none';
+        input.blur();
+        const cert = panel.querySelector('[data-cfg-path="mcp.http.tlsCert"]');
+        return hidden && shown && Boolean(cert) && /cert\\.pem/.test(cert.placeholder)
+          && !panel.querySelector('details.cfg-more') && !/这是什么/.test(panel.textContent);
       })()`));
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
     check('U-3 安全 tab：三段式（等级/动态码种子/恢复码）+ 当前档 + 短边界',

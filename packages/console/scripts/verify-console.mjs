@@ -1569,17 +1569,18 @@ try {
         && jsSrc.includes("wizardState.connection === 'connecting'"),
       'Esc/backdrop 全局监听 + 危险语义规则');
 
-    check('轮 C ③ 呈现分级：常态「生效中」/ 异常完整三元组 / 帮助与警告内联一行',
-      jsSrc.includes('data-cfg-state="ok"')
-        && jsSrc.includes('✓ 生效中')
+    check('轮 C ③ 呈现分级：常态不占行 / 异常完整三元组 / 帮助聚焦出现、警告常显',
+      !jsSrc.includes('data-cfg-state="ok"')
+        && !jsSrc.includes('✓ 生效中')
         && jsSrc.includes('data-cfg-state="exception"')
         && !jsSrc.includes('class="cfg-more"')
         && jsSrc.includes('runtimeFoldedReason')
         && jsSrc.includes('cfg-pending')
         && jsSrc.includes('settingsFoldKey')
         && jsSrc.includes('prevScrollTop')
-        && cssSrc.includes('.settings-note'),
-      '名称+控件+状态常显；帮助/风险内联；异常自动出现');
+        && cssSrc.includes('.cfg-row:focus-within .cfg-help')
+        && cssSrc.includes('.cfg-row .cfg-help.cfg-warn'),
+      '常态不占行；异常自动出现；帮助聚焦/警告时出现');
 
     const iaFolds = (await import('../settings-ia.js')).IA_SETTINGS_FOLDS;
     const foldIds = iaFolds.map((fold) => fold.id);

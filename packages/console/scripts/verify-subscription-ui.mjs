@@ -22,10 +22,11 @@ const check = (name, ok, detail = undefined) => {
 
 check('共享页含订阅三态文案', /订阅/.test(html) && /已订阅/.test(js) && /未订阅/.test(js));
 check('共享页含新建记忆域与退出并交接', html.includes('新建记忆域') && html.includes('退出并交接'));
-check('空态唯一 CTA = 新建记忆域（共享页无邀请按钮）',
-  html.includes('id="domains-empty-new"') && !html.includes('domains-empty-invite')
+check('共享页头部唯一 CTA = 新建记忆域（无空态按钮/邀请）',
+  html.includes('id="namespace-new"') && !html.includes('domains-empty-new')
+  && !html.includes('domains-empty-invite')
   && !/domains-empty[\s\S]{0,800}邀请设备/.test(html));
-check('空态文案：只有本机也可以新建并记录', html.includes('只有本机也可以新建一个记忆域并开始记录'));
+check('空态文案：只有本机也可以新建并记录', html.includes('只有本机也可以新建记忆域并开始记录'));
 const domainsSection = html.slice(html.indexOf('id="domains-view"'), html.indexOf('id="audit-view"'));
 check('邀请设备只在顶栏/邀请弹层（共享页无 CTA）',
   html.includes('id="invite-device"') && domainsSection.length > 0 && !/邀请设备/.test(domainsSection));

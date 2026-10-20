@@ -1295,11 +1295,8 @@ details.share[open] summary::before { content: "▾ "; }
   background: rgba(60, 42, 8, 0.25); font-size: 12px; color: #ffe3ae;
 }
 .ctx-row .link-btn { color: #ffe3ae; text-decoration-color: rgba(255, 227, 174, 0.5); }
-/* 空态：解释来源 + 一个去向动作；左右布局整体让位（scene-2） */
-.domains-empty { max-width: 640px; margin-top: 10px; padding: 34px 22px 28px; }
-.empty-glyph { font-size: 20px; color: var(--crt-dim); margin-bottom: 10px; }
-.empty-big { color: var(--crt-bright); font-size: 14px; font-weight: 700; margin: 0 0 10px; }
-.empty-text { color: rgba(140, 255, 200, 0.62); font-size: 12.5px; line-height: 1.8; margin: 0 0 18px; }
+/* 共享页头部动作与统计（与记忆/审计同款 toolbar）；空态只用一行 muted */
+.domains-stats { display: flex; gap: 6px; align-items: center; }
 /* 面板视图收纳设备卡空壳：非星图视图整体隐藏右栏（窄屏不再占底部一行） */
 .layout.is-panel-view .aside { display: none; }
 /* 窄屏：常驻横幅不再压副标题/统计——面板内容随横幅让位（toast 不受影响） */

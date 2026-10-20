@@ -64,23 +64,21 @@
         <div id="status-pill" class="status-pill" hidden></div>
         <section id="attention-card" class="attention-card" hidden></section>
         <section id="domains-view" class="panel-view crt-screen" hidden>
-          <div class="view-head">
-            <h2>记忆共享</h2>
-            <div id="domains-stats" class="view-head-stats"></div>
-            <button id="namespace-new" class="btn btn-crt" type="button">＋ 新建记忆域</button>
+          <div class="audit-toolbar">
+            <div class="view-head">
+              <h2>记忆共享</h2>
+            </div>
+            <div class="audit-filters">
+              <div id="domains-stats" class="domains-stats"></div>
+              <button id="namespace-new" class="btn btn-crt" type="button">＋ 新建记忆域</button>
+            </div>
           </div>
-          <p id="domains-note" class="panel-note muted">你的记忆跟谁共享、共享了哪些，都在这里。左边是记忆域，点开可以看谁也在订阅、要不要订阅。</p>
+          <p id="domains-note" class="panel-note muted">你的记忆跟谁共享、共享了哪些，都在这里。只有本机也可以新建记忆域并开始记录；点开一个域可以看谁也在订阅。没加入忆云的设备拿不到任何数据。</p>
+          <p id="domains-empty" class="panel-note muted" hidden>还没有记忆域。</p>
           <div id="domains-layout" class="domains-layout">
             <div id="domains-list" class="sector-list crt-surface crt-corners"></div>
             <div id="domain-detail" class="sector-detail"></div>
           </div>
-          <!-- v4 空态（scene-2）：解释来源 + 一个去向动作；0 域不渲染统计、右栏不留空白 -->
-          <section id="domains-empty" class="domains-empty crt-surface crt-corners" hidden>
-            <div class="empty-glyph" aria-hidden="true">✦</div>
-            <p class="empty-big">还没有记忆域</p>
-            <p class="empty-text">只有本机也可以新建一个记忆域并开始记录。每台设备自己决定订阅哪些域——订阅就接收更新、也承担同步义务；没加入忆云的设备拿不到任何数据。</p>
-            <button id="domains-empty-new" class="btn btn-primary" type="button">＋ 新建记忆域</button>
-          </section>
         </section>
         <section id="audit-view" class="panel-view crt-screen" hidden>
           <div class="audit-toolbar">

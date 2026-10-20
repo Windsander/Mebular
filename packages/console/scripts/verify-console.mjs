@@ -1921,10 +1921,12 @@ try {
     check('v4 UI：mock 数据缺口补齐（memories 字段 + 订阅字段）',
       consoleSrcV4.includes('MOCK_MEMORIES') && /memories:\s*\{ total:/.test(consoleSrcV4)
         && consoleSrcV4.includes('subscriptionDeclared') && consoleSrcV4.includes('subscribers') && consoleSrcV4.includes('selfSubscribed'));
-    check('v4/U-1 UI：空态只留新建域 + 统计新口径 + 卡尾危险区（scene-1/2 落点）',
+    check('v4/U-1/U-2 UI：共享页头部右上新建域、空态一行 muted、无空态 CTA',
       htmlSrcV4.includes('id="domains-empty"') && htmlSrcV4.includes('还没有记忆域')
-        && htmlSrcV4.includes('只有本机也可以新建一个记忆域并开始记录')
-        && !htmlSrcV4.includes('domains-empty-invite') && !htmlSrcV4.includes('empty-sub')
+        && htmlSrcV4.includes('只有本机也可以新建记忆域并开始记录')
+        && htmlSrcV4.includes('id="namespace-new"') && htmlSrcV4.includes('audit-toolbar')
+        && !htmlSrcV4.includes('domains-empty-invite') && !htmlSrcV4.includes('domains-empty-new')
+        && !htmlSrcV4.includes('empty-sub')
         && consoleSrcV4.includes('退出并交接这个域…') && consoleSrcV4.includes('记忆域 ${items.length}')
         && consoleSrcV4.includes('已订阅'));
     check('v4 UI：自动签发入口已删除（无可配置入口）',

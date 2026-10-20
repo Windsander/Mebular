@@ -405,17 +405,17 @@ async function main() {
 
     // W-B：共享页新建记忆域（零门槛；默认自订阅；0 条 / 0 对端也可用）
     // U-1 补充 2：共享页只管理记忆域，邀请设备只在顶栏。
-    check('W-B/U-1 空态唯一 CTA「新建记忆域」+ 无邀请按钮/诊断指路',
+    check('U-2 共享页头部：工具栏右上「新建记忆域」+ 空态一行 muted、无邀请/诊断',
       await evalJs(`(() => {
-        const newBtn = document.querySelector('#domains-empty-new');
+        const btn = document.querySelector('.audit-toolbar #namespace-new');
         const empty = document.querySelector('#domains-empty');
-        const invites = empty?.querySelectorAll('button') ?? [];
-        return Boolean(newBtn) && !document.querySelector('#domains-empty-invite')
-          && invites.length === 1 && /新建记忆域/.test(newBtn.textContent)
-          && /还没有记忆域/.test(empty?.textContent ?? '')
-          && /只有本机也可以新建一个记忆域并开始记录/.test(empty?.textContent ?? '')
-          && !/邀请设备/.test(empty?.textContent ?? '')
-          && !/诊断与恢复/.test(empty?.textContent ?? '');
+        const note = document.querySelector('#domains-note');
+        return Boolean(btn) && /新建记忆域/.test(btn.textContent)
+          && Boolean(empty) && empty.tagName === 'P' && /还没有记忆域/.test(empty.textContent)
+          && /只有本机也可以新建记忆域并开始记录/.test(note?.textContent ?? '')
+          && !document.querySelector('#domains-empty-new')
+          && !document.querySelector('#domains-empty-invite')
+          && !/邀请设备|诊断与恢复/.test(empty.textContent);
       })()`));
     await evalJs('window.prompt = () => "ledger-ui"');
     await evalJs('document.querySelector("#namespace-new").click()');

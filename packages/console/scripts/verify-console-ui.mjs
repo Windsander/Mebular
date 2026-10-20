@@ -796,18 +796,35 @@ async function main() {
     await capture('e2a2-after-cloud-switch-fallback.jpg');
     await evalJs('document.querySelector("#cloud-switch-close").click()');
 
-    // 高级页：只留「常驻服务」卡 + 网络/sync 字段 + 诊断；MCP 六项独立 tab
+    // 高级页：3 组（常驻服务/网络/自动化）+ 诊断折叠；MCP 六项独立 tab
     await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
-    check('E1 高级页：常驻服务卡就位，MCP 字段不再混入高级',
+    check('U-3 高级页：三组就位（常驻服务/网络/自动化），MCP 字段不再混入',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-advanced');
-        return Boolean(p) && Boolean(p.querySelector('[data-task=join-service]'))
-          && !p.querySelector('[data-task=mcp]') && !p.querySelector('[data-cfg-path="mcp.http.host"]')
+        const sections = [...(p?.querySelectorAll(':scope > .settings-section') ?? [])];
+        const ids = sections.map((s) => s.dataset.settingsSection).join(',');
+        return Boolean(p) && ids === 'resident,network,automation'
+          && sections.every((s) => Boolean(s.querySelector('h3')) && Boolean(s.querySelector('.settings-section-desc')))
+          && Boolean(p.querySelector('[data-cfg-path="joinService.enabled"]'))
           && Boolean(p.querySelector('[data-cfg-path="network.enabled"]'))
+          && Boolean(p.querySelector('[data-cfg-path="sync.antiEntropy.enabled"]'))
+          && !p.querySelector('[data-task]') && !p.querySelector('[data-cfg-path="mcp.http.host"]')
           && !p.querySelector('[data-cfg-path="sync.peerWhitelist"]');
       })()`));
-    await capture('u1-after-settings-advanced.jpg');
-    check('E1 诊断 · 连接排障：手动连接入口在诊断折叠内（文案=传输修复）',
+    const advancedText = await evalJs(`(() => {
+      const p = document.querySelector('#settings-panel-advanced');
+      const clone = p.cloneNode(true);
+      clone.querySelector('#diag-fold')?.remove();
+      const text = (clone.textContent ?? '').replace(/\\s+/g, '');
+      return { ok: text.length <= 1200, length: text.length };
+    })()`);
+    check('U-3 高级主区文本 ≤1200 字（不含诊断折叠）', advancedText.ok, `${advancedText.length} 字`);
+    await capture('u3-after-settings-advanced.jpg');
+    await capture('u3-after-settings-advanced-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await evalJs('document.querySelector("#diag-fold").open = true; document.querySelector("#diag-fold").scrollIntoView({ block: "start" })');
+    await capture('u3-after-settings-advanced-diagnostics.jpg');
+    await evalJs('document.querySelector("#diag-fold").open = false');
+    check('E1 诊断 · 手动连接：入口在诊断折叠内（文案=传输修复）',
       await evalJs(`(() => {
         const fold = document.querySelector('#diag-fold');
         if (fold) fold.open = true;
@@ -815,16 +832,36 @@ async function main() {
         return Boolean(btn) && /手动连接/.test(btn.textContent) && /不改变入网信任|不改动入网信任/.test(fold?.textContent ?? '');
       })()`));
     await evalJs('document.querySelector("[data-settings-tab=mcp]").click()');
-    check('E1 MCP 接入独立 tab：六字段 + danger 说明/自救文案',
+    check('U-3 MCP 接入：连接/TLS 两组 + 一个「危险与自救」折叠；六字段齐全',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-mcp');
-        const card = p?.querySelector('[data-task=mcp]');
+        const sections = [...(p?.querySelectorAll(':scope > .settings-section') ?? [])];
+        const ids = sections.map((s) => s.dataset.settingsSection).join(',');
         const paths = ['mcp.http.port', 'mcp.http.auth', 'mcp.http.host', 'mcp.http.tls', 'mcp.http.tlsKey', 'mcp.http.tlsCert'];
-        return Boolean(card) && card.classList.contains('settings-danger')
-          && paths.every((path) => Boolean(card.querySelector('[data-cfg-path="' + path + '"]')))
-          && /token grant|config\\.json/.test(p.querySelector('#mcp-danger-fold')?.textContent ?? '');
+        return Boolean(p) && ids === 'connection,tls'
+          && paths.every((path) => Boolean(p.querySelector('[data-cfg-path="' + path + '"]')))
+          && !p.querySelector('.settings-danger') && !p.querySelector('[data-task]')
+          && /token grant|config\\.json/.test(p.querySelector('#mcp-danger-fold')?.textContent ?? '')
+          && /bearer/.test(p.querySelector('#mcp-danger-fold')?.textContent ?? '');
       })()`));
-    await capture('u1-after-settings-mcp.jpg');
+    const mcpText = await evalJs(`(() => {
+      const p = document.querySelector('#settings-panel-mcp');
+      const clone = p.cloneNode(true);
+      clone.querySelector('#mcp-danger-fold')?.remove();
+      const text = (clone.textContent ?? '').replace(/\\s+/g, '');
+      return { ok: text.length <= 700, length: text.length };
+    })()`);
+    check('U-3 MCP 主区文本 ≤700 字（不含危险折叠）', mcpText.ok, `${mcpText.length} 字`);
+    check('U-3 MCP 字段帮助一行化（每条 ≤36 字）',
+      await evalJs(`(() => {
+        const helps = [...document.querySelectorAll('#settings-panel-mcp .cfg-help')].map((el) => el.textContent.trim()).filter(Boolean);
+        return helps.length >= 3 && helps.every((text) => text.replace(/\\s+/g, '').length <= 36);
+      })()`));
+    await evalJs('document.querySelector("#mcp-danger-fold").open = true');
+    await capture('u3-after-settings-mcp-danger.jpg');
+    await evalJs('document.querySelector("#mcp-danger-fold").open = false');
+    await capture('u3-after-settings-mcp.jpg');
+    await capture('u3-after-settings-mcp-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await sleep(250);
     check('U-1 390px 设置（MCP 危险项 + 内联帮助）无横向溢出',
@@ -860,28 +897,31 @@ async function main() {
       })()`));
     check('U-1 呈现分级：字段帮助/风险内联一行，不再有逐字段「详情」折叠',
       await evalJs(`(() => {
-        const card = document.querySelector('#settings-body [data-task=mcp]');
-        const direct = card.querySelector('.cfg-control > .cfg-help');
-        return Boolean(direct) && !card.querySelector('details.cfg-more') && !/这是什么/.test(card.textContent);
+        const panel = document.querySelector('#settings-panel-mcp');
+        const direct = panel?.querySelector('.settings-section .cfg-control > .cfg-help');
+        return Boolean(direct) && !panel.querySelector('details.cfg-more') && !/这是什么/.test(panel.textContent);
       })()`));
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
-    check('E1 安全 tab：安全卡完整随迁（低/中/高 + 诚实文案 + 当前档）',
+    check('U-3 安全 tab：三段式（等级/动态码种子/恢复码）+ 当前档 + 短边界',
       await evalJs(`(() => {
         const panel = document.querySelector('#settings-panel-security');
         const s = document.querySelector('#settings-security-slot');
         if (!panel || panel.hidden || !s || s.hidden) return false;
+        const sections = [...s.querySelectorAll(':scope > .settings-section')];
         const t = s.textContent;
-        return s.dataset.settingsSlot === 'security' && s.childElementCount > 0
-          && /安全等级/.test(t) && /低（默认）/.test(t) && /中 · 动态码（防顺手）/.test(t) && /高 · 设备会签/.test(t)
-          && /挡不住拿走整台设备的人/.test(t) && /当前：低/.test(t);
+        return s.dataset.settingsSlot === 'security'
+          && sections.map((el) => el.dataset.settingsSection).join(',') === 'security-level,security-totp,security-recovery'
+          && /安全等级/.test(t) && /低（默认）/.test(t) && /中 · 动态码/.test(t) && /高 · 设备会签/.test(t)
+          && /防顺手/.test(t) && /挡手不挡钥匙/.test(t)
+          && Boolean(s.querySelector('[data-security-current]')) && /当前/.test(s.querySelector('[data-security-current]').textContent)
+          && Boolean(s.querySelector('[data-security-tier=low].is-current'))
+          && !/totp_not_configured/.test(t);
       })()`));
-    await capture('e1-after-settings-security-tab.jpg');
-    await capture('u1-after-settings-security.jpg');
 
-    // 即时生效：改低风险 toggle（joinService.enabled；高级 · 常驻服务卡）→ 无草稿态、3s 跨轮询值持久（已写入）
+    // 即时生效：改低风险 toggle（joinService.enabled；高级 · 常驻服务组）→ 无草稿态、3s 跨轮询值持久（已写入）
     await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
     const toggleSel = '#settings-body input[data-cfg-path="joinService.enabled"]';
-    check('即时生效：joinService 开关在高级 · 常驻服务卡', await waitFor(`Boolean(document.querySelector('${toggleSel}'))`));
+    check('即时生效：joinService 开关在高级 · 常驻服务组', await waitFor(`Boolean(document.querySelector('${toggleSel}'))`));
     const tgOriginal = await evalJs(`document.querySelector('${toggleSel}').checked`);
     await evalJs(`(() => { const el = document.querySelector('${toggleSel}'); el.checked = !el.checked; el.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     await sleep(1200);
@@ -1125,9 +1165,28 @@ async function main() {
     check('S3 拒绝写入生效（待批准清零；发起侧可见「已被拒绝」）',
       await waitFor('document.querySelectorAll("#settings-security-slot [data-security-approve]").length === 0', 20000));
 
-    // 中档动态码：导入 → 卡片显示 fingerprint；未导入时异常常显
-    check('S3 动态码未导入 = 安全卡异常常显（提示会拒绝敏感动作）',
-      await waitFor('(() => { const s = document.querySelector("#settings-security-slot"); return Boolean(s) && /未导入/.test(s.textContent) && /totp_not_configured/.test(s.textContent); })()'));
+    // 中档动态码：导入 → 卡片显示 fingerprint；未导入时用一句人话说明
+    check('U-3 动态码未导入：提示会拒绝敏感动作，不显示内部错误码',
+      await waitFor('(() => { const s = document.querySelector("#settings-security-slot"); return Boolean(s) && /未导入/.test(s.textContent) && /中档敏感操作会被拒绝/.test(s.textContent) && !/totp_not_configured/.test(s.textContent); })()'));
+    const securityText = await evalJs(`(() => {
+      const s = document.querySelector('#settings-panel-security');
+      const text = (s.textContent ?? '').replace(/\\s+/g, '');
+      return { ok: text.length <= 350, length: text.length };
+    })()`);
+    check('U-3 安全 tab 文本 ≤350 字（待批准已清零）', securityText.ok, `${securityText.length} 字`);
+    await capture('u3-after-settings-security.jpg');
+    await capture('u3-after-settings-security-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    const overflowTabs = [];
+    for (const tab of ['security', 'mcp', 'advanced']) {
+      await evalJs(`document.querySelector("[data-settings-tab=${tab}]").click()`);
+      await sleep(200);
+      const ok = await evalJs('(() => { const box = document.querySelector("#settings .modal-box"); const b = document.body; return Boolean(box) && box.scrollWidth <= box.clientWidth + 1 && b.scrollWidth <= b.clientWidth + 1; })()');
+      if (!ok) overflowTabs.push(tab);
+    }
+    check('U-3 390px：安全 / MCP / 高级均无横向溢出', overflowTabs.length === 0, overflowTabs.join(',') || 'ok');
+    await send('Emulation.clearDeviceMetricsOverride');
+    await evalJs('document.querySelector("[data-settings-tab=security]").click()');
 
     // 低→中（显式确认）→ 未导入种子进入星图「需要注意」→ 导入 → 异常退场
     await evalJs('document.querySelector("#settings-security-slot [data-security-action=upgrade][data-level=medium]").click()');
@@ -1347,12 +1406,13 @@ async function main() {
       })()`));
     await evalJs('document.querySelector("#open-settings").click()');
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
-    check('S3 mock：高档安全卡 = 当前高 + 恢复码 keyId 前 8 + 有资格设备',
+    check('S3 mock：高档安全卡 = 当前高 + 恢复码 keyId 前 8 + 可会签设备',
       await waitFor(`(() => {
         const s = document.querySelector('#settings-security-slot');
         const t = s?.textContent ?? '';
-        return s?.dataset.securityLevel === 'high' && /当前：高/.test(t)
-          && /恢复码/.test(t) && /a1b2c3d4/.test(t) && /有资格的设备/.test(t);
+        return s?.dataset.securityLevel === 'high' && /当前/.test(s.querySelector('[data-security-current]')?.textContent ?? '')
+          && Boolean(s.querySelector('[data-security-tier=high].is-current'))
+          && /恢复码/.test(t) && /a1b2c3d4/.test(t) && /可会签设备/.test(t);
       })()`));
     await capture('e1-after-settings-security-mock.jpg');
     check('S3 mock：待批准行（配对号 aria-live + 批准/拒绝 + 到期提示）',

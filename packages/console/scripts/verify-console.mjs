@@ -1406,8 +1406,8 @@ try {
     const commonFields = ia.IA_COMMON_FIELDS;
     check(`E1 IA 常用不再有可编辑字段（三卡迁出；实得 ${commonFields.length}）`, commonFields.length === 0, commonFields.join(', '));
 
-    const advancedCardFields = ia.IA_ADVANCED_CARDS.flatMap((card) => card.fields);
-    const mcpFields = ia.IA_MCP_CARD.fields;
+    const advancedCardFields = ia.IA_ADVANCED_SECTIONS.flatMap((section) => section.fields);
+    const mcpFields = ia.IA_MCP_SECTIONS.flatMap((section) => section.fields);
     const editorFaces = new Set([...ia.IA_COMMON_FIELDS, ...advancedCardFields, ...mcpFields, ...ia.IA_ADVANCED_FIELDS]);
     check('IA 同步节奏（autoSync/pushOnWrite）不在任何编辑面（只读进「关于本机」）',
       !editorFaces.has('sync.autoSync') && !editorFaces.has('sync.pushOnWrite')
@@ -1432,9 +1432,9 @@ try {
       schemaStatusOnly.length === 10 && statusDrift.length === 0,
       `schema=${schemaStatusOnly.length} ia=${iaStatusOnly.length} 差异=${statusDrift.join(',') || '无'}`);
     // B：收敛回归——relayServers 从编辑面消失（status-only）、relayUnlimited 不再渲染（internal）
-    const advancedDrift = [...advancedCardFields, ...mcpFields, ...ia.IA_ADVANCED_FIELDS].filter((p) => ['network.libp2p.relayServers', 'network.libp2p.relayUnlimited'].includes(p));
+    const advancedDrift = [...advancedCardFields, ...mcpFields].filter((p) => ['network.libp2p.relayServers', 'network.libp2p.relayUnlimited'].includes(p));
     check('B 暴露面收敛：relayServers 退出编辑面（→只读自动池）/ relayUnlimited 退出 GUI（→internal）',
-      ia.IA_ADVANCED_FIELDS.length === 4 && advancedDrift.length === 0
+      ia.IA_ADVANCED_FIELDS.length === 7 && advancedDrift.length === 0
         && schema.exposureOf('network.libp2p.relayServers') === 'status-only'
         && schema.exposureOf('network.libp2p.relayUnlimited') === 'internal'
         && schema.isWritable('network.libp2p.relayServers') === false,
@@ -1449,16 +1449,17 @@ try {
       ia.IA_EDITOR_PATHS.length === 14 && pathsWithoutHome.length === 0 && infoWithoutHome.length === 0 && drifted.length === 0 && statusWithoutHome.length === 0,
       `editorPaths=${ia.IA_EDITOR_PATHS.length} 只读无去处=${statusWithoutHome.join(',') || '无'} 编辑无去处=${pathsWithoutHome.join(',') || '无'} 信息块无去处=${infoWithoutHome.join(',') || '无'} 编辑面漂移=${drifted.join(',') || '无'}`);
 
-    const cardFields = advancedCardFields;
-    check('E1 高级只留「常驻服务」卡（3 字段）；MCP 六项独立成卡（危险）',
-      ia.IA_ADVANCED_CARDS.length === 1 && ia.IA_ADVANCED_CARDS[0].id === 'join-service'
-        && cardFields.length === 3 && new Set(cardFields).size === 3
-        && ia.IA_MCP_CARD.id === 'mcp' && ia.IA_MCP_CARD.danger === true
-        && mcpFields.length === 6 && new Set(mcpFields).size === 6
+    check('U-3 高级三组（常驻服务/网络/自动化，7 字段）+ MCP 两组（连接/TLS，6 字段）',
+      ia.IA_ADVANCED_SECTIONS.length === 3
+        && ia.IA_ADVANCED_SECTIONS.map((section) => section.id).join(',') === 'resident,network,automation'
+        && ia.IA_ADVANCED_FIELDS.length === 7 && new Set(ia.IA_ADVANCED_FIELDS).size === 7
+        && ia.IA_MCP_SECTIONS.length === 2
+        && ia.IA_MCP_SECTIONS.map((section) => section.id).join(',') === 'connection,tls'
+        && ia.IA_MCP_FIELDS.length === 6 && new Set(ia.IA_MCP_FIELDS).size === 6
         && ['mcp.http.port', 'mcp.http.auth', 'mcp.http.host', 'mcp.http.tls', 'mcp.http.tlsKey', 'mcp.http.tlsCert'].every((p) => mcpFields.includes(p))
-        && cardFields.includes('joinService.enabled') && cardFields.includes('joinService.bind') && cardFields.includes('joinService.port')
-        && !cardFields.includes('sync.namespaces') && !cardFields.includes('mcp.http.port'),
-      `advancedCards=${ia.IA_ADVANCED_CARDS.length} fields=${cardFields.join(',')} mcp=${mcpFields.join(',')}`);
+        && advancedCardFields.includes('joinService.enabled') && advancedCardFields.includes('joinService.bind') && advancedCardFields.includes('joinService.port')
+        && !advancedCardFields.includes('sync.namespaces') && !advancedCardFields.includes('mcp.http.port'),
+      `advancedSections=${ia.IA_ADVANCED_SECTIONS.length} fields=${advancedCardFields.join(',')} mcp=${mcpFields.join(',')}`);
 
 
     const htmlSrc = await readFile(join(consoleDir, 'index.html'), 'utf-8');
@@ -1484,8 +1485,8 @@ try {
       tabIds === 'common,security,assistants,mcp,advanced' && tabLabels === '常用,安全,AI 助手,MCP 接入,高级'
         && (ia.IA_SETTINGS_EXTRA ?? []).some((item) => item.id === 'about' && item.opens === 'about-modal')
         && htmlSrc.includes('id="self-badge"') && htmlSrc.includes('id="about"') && htmlSrc.includes('关于本机')
-        && consoleSrc2.includes('data-settings-tab') && consoleSrc2.includes('IA_ADVANCED_CARDS') && consoleSrc2.includes('IA_MCP_CARD')
-        && consoleSrc2.includes('IA_ADVANCED_FIELDS') && consoleSrc2.includes('IA_MIGRATION')
+        && consoleSrc2.includes('data-settings-tab') && consoleSrc2.includes('IA_ADVANCED_SECTIONS') && consoleSrc2.includes('IA_MCP_SECTIONS')
+        && consoleSrc2.includes('IA_FIELD_COPY') && consoleSrc2.includes('IA_SECURITY_SECTIONS')
         && consoleSrc2.includes('assistantsPanelHtml') && consoleSrc2.includes("panel('assistants'") && consoleSrc2.includes("panel('mcp'")
         && ia.IA_ADVANCED_ACTIONS.length === 0
         && !consoleSrc2.includes('declare-issuer') && !consoleSrc2.includes('declareIssuer')
@@ -2231,9 +2232,9 @@ try {
     check('S3 前端锚点：安全卡（设置·安全 tab），插槽不再隐藏',
       /id="settings-security-slot"/.test(consoleSrcSec) && !/settings-slot[^>]*hidden/.test(consoleSrcSec)
         && /securityCardHtml/.test(consoleSrcSec)
-        && /中 · 动态码（防顺手）/.test(consoleSrcSec)
+        && /中 · 动态码/.test(consoleSrcSec)
         && /高 · 设备会签/.test(consoleSrcSec)
-        && /挡不住拿走整台设备的人/.test(consoleSrcSec));
+        && /挡顺手/.test(consoleSrcSec) && /不挡设备被拿走/.test(consoleSrcSec));
     check('S3 前端锚点：三操作改道（邀请 medium 码 / high 会签；移出按档位分级；批准侧）',
       /async function openInvite/.test(consoleSrcSec) && /securityCodeModal/.test(consoleSrcSec)
         && /securityStartApproval/.test(consoleSrcSec) && /securityRevokeFlow/.test(consoleSrcSec)
@@ -2256,7 +2257,7 @@ try {
         && /缺少会签证明/.test(consoleSrcSec));
     check('S3 前端锚点：a11y（配对号 aria-live / 恢复码焦点）+ reduced-motion + 窄屏样式',
       /aria-live="polite"/.test(consoleSrcSec) && /tabindex="-1"/.test(consoleSrcSec)
-        && /prefers-reduced-motion/.test(cssSec) && /security-card/.test(cssSec)
+        && /prefers-reduced-motion/.test(cssSec) && /settings-security-slot/.test(cssSec)
         && /@media \(max-width: 900px\)/.test(cssSec));
   }
 

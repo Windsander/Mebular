@@ -141,13 +141,13 @@ try {
       const same = mcpJt.canonicalJoinTokenData(tFleet) === fleetJt.canonicalJoinTokenData(tFleet);
       check('令牌跨包互验（fleet↔daemon）+ canonical 一致', fleetInMcp.ok === true && mcpInFleet.ok === true && same, { fleetInMcp, mcpInFleet, same });
 
-      // C7：二维码渲染跨包一致（同为内置 @mebular/qr）
+      // C7：二维码渲染跨包一致（mcp 复用 fleet 的 qrcode-generator 实现）
       const mcpQr = await import('../packages/mcp/src/qr.mjs');
       const qrText = Buffer.from(JSON.stringify(tFleet), 'utf-8').toString('base64');
       const [fFleetSvg, fMcpSvg, fFleetTerm, fMcpTerm] = await Promise.all([
         fleetJt.renderSvgQr(qrText), mcpQr.renderSvgQr(qrText), fleetJt.renderTerminalQr(qrText), mcpQr.renderTerminalQr(qrText),
       ]);
-      check('C7 二维码渲染跨包一致（同一 @mebular/qr 依赖）',
+      check('C7 二维码渲染跨包一致（mcp re-export fleet）',
         Boolean(fFleetSvg && fMcpSvg && fFleetTerm && fMcpTerm)
           && fFleetSvg.value === fMcpSvg.value && fFleetTerm.value === fMcpTerm.value,
         { svg: Boolean(fFleetSvg), term: Boolean(fFleetTerm) });

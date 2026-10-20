@@ -1,6 +1,6 @@
 // Mebular 桌面 App · 准备构建产物：确保仓库既有产物存在（不重复构建）
 //
-// App 只编排、不复制逻辑：需要 dist/（core）、packages/{mcp,qr,service,fleet,console,skill}。
+// App 只编排、不复制逻辑：需要 dist/（core）、packages/{mcp,service,fleet,console,skill}。
 // 缺失时调用仓库根 `npm run build`。
 
 import { existsSync } from 'node:fs';
@@ -13,7 +13,6 @@ const root = join(here, '..', '..', '..');
 
 const required = [
   join(root, 'dist', 'index.js'),
-  join(root, 'packages', 'qr', 'dist', 'index.js'),
   join(root, 'packages', 'service', 'dist', 'index.js'),
   join(root, 'packages', 'fleet', 'dist', 'cli.js'),
 ];
@@ -26,9 +25,9 @@ if (missing.length === 0) {
   execFileSync('npm', ['run', 'build'], { cwd: root, stdio: 'inherit' });
 }
 
-// @mebular/qr 的唯一直接依赖：打包时 extraResources 会从根 node_modules 复制到 App。
+// fleet 的 QR 运行时依赖；extraResources 会从根 node_modules 复制到 App。
 const qrEncoder = join(root, 'node_modules', 'qrcode-generator', 'package.json');
 if (!existsSync(qrEncoder)) {
-  console.error('[desktop] 缺少 node_modules/qrcode-generator（@mebular/qr 的运行时依赖）：请先 npm install');
+  console.error('[desktop] 缺少 node_modules/qrcode-generator（fleet QR 运行时依赖）：请先 npm install');
   process.exit(1);
 }

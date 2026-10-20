@@ -34,6 +34,6 @@
   "dependencies": {
     "@mebular/core": "file:../..",
     "@mebular/service": "file:../service",
-    "@mebular/qr": "file:../qr"
+    "qrcode-generator": "2.0.4"
   }
 }

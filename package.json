@@ -58,8 +58,8 @@
     }
   },
   "scripts": {
-    "build": "node scripts/clean-dist.mjs && tsc -p packages/qr/tsconfig.json && tsc && tsc -p packages/service/tsconfig.json && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs && node scripts/chmod-bins.mjs",
-    "build:fleet": "tsc -p packages/qr/tsconfig.json && tsc -p packages/fleet/tsconfig.json",
+    "build": "node scripts/clean-dist.mjs && tsc && tsc -p packages/service/tsconfig.json && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs && node scripts/chmod-bins.mjs",
+    "build:fleet": "tsc -p packages/fleet/tsconfig.json",
     "build:service": "tsc -p packages/service/tsconfig.json",
     "prepare": "node scripts/prepare-install.mjs",
     "build:watch": "tsc --watch",
@@ -114,16 +114,14 @@
     "desktop:smoke": "npm --prefix apps/desktop run smoke",
     "verify:console:ui": "node packages/console/scripts/verify-console-ui.mjs",
     "verify:console:subscription-ui": "node packages/console/scripts/verify-subscription-ui.mjs",
-    "verify:invite": "node scripts/verify-invite.mjs",
-    "prepack": "node scripts/publish-manifest.mjs set",
-    "postpack": "node scripts/publish-manifest.mjs restore"
+    "verify:invite": "node scripts/verify-invite.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
     "bonjour": "^3.5.1",
+    "qrcode-generator": "2.0.4",
     "ulid": "^2.3.0",
-    "zod": "^4.6.5",
-    "@mebular/qr": "file:packages/qr"
+    "zod": "^4.6.5"
   },
   "optionalDependencies": {
     "@chainsafe/libp2p-noise": "^17.0.0",
@@ -182,8 +180,7 @@
       "^tests/(.*)\\.js$": "<rootDir>/tests/$1.ts",
       "^@mebular/core$": "<rootDir>/src/index.ts",
       "^@mebular/service$": "<rootDir>/packages/service/src/index.ts",
-      "^(\\.{1,2}/.*)\\.js$": "$1",
-      "^@mebular/qr$": "<rootDir>/packages/qr/src/index.ts"
+      "^(\\.{1,2}/.*)\\.js$": "$1"
     },
     "testMatch": [
       "**/tests/**/*.test.ts",
@@ -195,8 +192,7 @@
       "packages/fleet/src/**/*.ts",
       "!packages/fleet/src/**/*.d.ts",
       "packages/service/src/**/*.ts",
-      "!packages/service/src/**/*.d.ts",
-      "packages/qr/src/**/*.ts"
+      "!packages/service/src/**/*.d.ts"
     ],
     "coveragePathIgnorePatterns": [
       "/node_modules/",

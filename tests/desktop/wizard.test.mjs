@@ -168,10 +168,10 @@ describe('M2 向导：邀请构造与解析（不真发）', () => {
     const out = 'log line\n{"ok":true,"token":"TOK123","qrSvg":"<svg/>","endpoint":"http://127.0.0.1:4002"}\n';
     expect(parseInviteOutput(out)).toEqual({ token: 'TOK123', qrSvg: '<svg/>', endpoint: 'http://127.0.0.1:4002', warning: null });
     expect(parseInviteOutput('no json here')).toMatchObject({ token: null, qrSvg: null });
-    // QR 渲染失败：warning + 无 svg（仍给文本令牌）
-    const noQr = parseInviteOutput('{"token":"T","qrSvg":null,"warning":"QR 不可用：只给文本令牌"}');
+    // qrcode 缺失：warning + 无 svg（仍给文本令牌）
+    const noQr = parseInviteOutput('{"token":"T","qrSvg":null,"warning":"缺少 qrcode：只给文本令牌"}');
     expect(noQr.qrSvg).toBeNull();
-    expect(noQr.warning).toMatch(/QR/);
+    expect(noQr.warning).toMatch(/qrcode/);
   });
 
   it('inviteText：文本令牌兜底（含端点）', () => {

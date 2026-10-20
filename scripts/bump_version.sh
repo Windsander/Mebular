@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 一键同步版本号（lockstep：6 个可发布包共用同一版本）。
+# 一键同步版本号（lockstep：5 个可发布包共用同一版本）。
 #
 #   bash scripts/bump_version.sh v0.2.0
 #
 # 同步内容：
-#   1. package.json × 6（root @mebular/core + qr / fleet / mcp / service / skill）的 version；
+#   1. package.json × 5（root @mebular/core + fleet / mcp / service / skill）的 version；
 #   2. 这些 manifest 中任何“已是版本号区间”的内部 @mebular/* 依赖 -> ^<new version>
 #      （源码开发期使用 file: 本地链接，pack 期由 scripts/publish-manifest.mjs 统一改写为
 #       ^<version>，故 file: 依赖保持不动、无需在此改写）；
@@ -49,7 +49,6 @@ const date = process.env.DATE;
 
 const TARGETS = [
   '.',
-  'packages/qr',
   'packages/fleet',
   'packages/mcp',
   'packages/service',
@@ -57,7 +56,6 @@ const TARGETS = [
 ];
 const INTERNAL = new Set([
   '@mebular/core',
-  '@mebular/qr',
   '@mebular/fleet',
   '@mebular/mcp',
   '@mebular/service',
@@ -117,4 +115,4 @@ if (new RegExp(`^## \\[${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]`, 'm').t
 console.log(`  内部依赖版本号同步：${changedDeps} 处（file: 本地依赖由 pack 期改写）`);
 NODE
 
-echo "✓ 已同步为 $TAG（版本号 ×6 + CHANGELOG；请填写章节内容后提交，并将分支命名为 release/$TAG）"
+echo "✓ 已同步为 $TAG（版本号 ×5 + CHANGELOG；请填写章节内容后提交，并将分支命名为 release/$TAG）"

@@ -27,7 +27,6 @@
     "@mebular/core": "file:../..",
     "@modelcontextprotocol/server": "^2.0.0",
     "zod": "^4.6.5",
-    "@mebular/fleet": "file:../fleet",
-    "@mebular/qr": "file:../qr"
+    "@mebular/fleet": "file:../fleet"
   }
 }

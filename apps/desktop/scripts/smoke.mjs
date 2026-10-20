@@ -107,9 +107,9 @@ const plan = wizard.invitePlan({ fleetBin: '/repo/packages/fleet/dist/cli.js', h
 check('邀请命令构造（只构造不发送；fleet invite --dir <home>）',
   plan.args[0].endsWith('cli.js') && plan.args.includes('invite') && plan.args.includes('--dir') && plan.args.includes('/h'));
 
-const parsedInvite = wizard.parseInviteOutput('noise\n{"token":"T","qrSvg":null,"warning":"QR 不可用"}');
-check('邀请输出解析（QR 不可用 → 文本令牌兜底）',
-  parsedInvite.token === 'T' && parsedInvite.qrSvg === null && /QR/.test(parsedInvite.warning));
+const parsedInvite = wizard.parseInviteOutput('noise\n{"token":"T","qrSvg":null,"warning":"缺少 qrcode"}');
+check('邀请输出解析（qrcode 缺失 → 文本令牌兜底）',
+  parsedInvite.token === 'T' && parsedInvite.qrSvg === null && /qrcode/.test(parsedInvite.warning));
 
 check('日志脱敏（令牌/密钥不回显）',
   !wizard.redactLog('token=ABCDEFGH userMasterKey=SECRETKEY').includes('ABCDEFGH')

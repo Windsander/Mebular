@@ -141,7 +141,7 @@ export function parseInviteOutput(output) {
   return { token: null, qrSvg: null, endpoint: null, warning: null };
 }
 
-/** 文本令牌兜底（QR 渲染失败时）。 */
+/** 文本令牌兜底（qrcode 缺失时）。 */
 export function inviteText({ token, endpoint }) {
   if (!token) return null;
   return endpoint

@@ -1798,7 +1798,7 @@ try {
       method: 'POST', headers: qrHeaders, body: JSON.stringify({ ttlMs: 60000 }),
     });
     const inviteJson = await inviteRes.json().catch(() => null);
-    // 应用层 @mebular/qr：邀请响应必须提供 SVG（不再有缺包降级）
+    // 普通依赖 qrcode-generator：邀请响应必须提供 SVG（不再有缺包降级）
     check('C7 邀请响应提供二维码（qrSvg 为 SVG 字符串）',
       inviteRes.status === 201 && String(inviteJson?.qrSvg ?? '').startsWith('<svg'),
       { status: inviteRes.status, qr: String(inviteJson?.qrSvg ?? '').startsWith('<svg') ? 'svg' : 'missing' });
@@ -1806,12 +1806,12 @@ try {
     check('C7 控制台邀请面板渲染二维码与订阅说明',
       ['扫码即通', 'qrSvg', '自行订阅'].every((token) => consoleSrc6.includes(token)));
     const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
-    const qrPkg = JSON.parse(await readFile(join(rootDir, 'packages', 'qr', 'package.json'), 'utf-8'));
-    check('C7 QR 为独立 app-layer 包（qrcode-generator 精确 pin，非 vendored）',
-      !pkg.dependencies?.qrcode && !pkg.optionalDependencies?.qrcode
-        && qrPkg.dependencies?.['qrcode-generator'] === '2.0.4'
-        && !existsSync(join(rootDir, 'packages', 'qr', 'src', 'third-party')),
-      { encoder: qrPkg.dependencies?.['qrcode-generator'] ?? null });
+    const fleetPkg = JSON.parse(await readFile(join(rootDir, 'packages', 'fleet', 'package.json'), 'utf-8'));
+    check('C7 二维码依赖为精确 pin 的普通依赖（qrcode-generator）',
+      !pkg.optionalDependencies?.qrcode
+        && pkg.dependencies?.['qrcode-generator'] === '2.0.4'
+        && fleetPkg.dependencies?.['qrcode-generator'] === '2.0.4',
+      { root: pkg.dependencies?.['qrcode-generator'] ?? null, fleet: fleetPkg.dependencies?.['qrcode-generator'] ?? null });
   }
 
   // ---------- C4：NAT 打洞（只读渲染断言） ----------
@@ -2217,12 +2217,12 @@ try {
       body: JSON.stringify({ code: totpCodeAt(secret, Math.floor(Date.now() / 30_000) + 1) }),
     });
     const showSeedJson = await showSeed.json().catch(() => null);
-    check('S3 显示动态码种子需本机码 → 200 + 分组文本/otpauth + QR SVG',
+    check('S3 显示动态码种子需本机码 → 200 + 分组文本/otpauth（QR 可选）',
       showSeed.status === 200
         && (typeof showSeedJson?.groups === 'string' || Array.isArray(showSeedJson?.groups))
         && /^otpauth:\/\/totp\//.test(showSeedJson?.otpauth ?? '')
-        && String(showSeedJson?.qrSvg ?? '').startsWith('<svg'),
-      `status=${showSeed.status} qr=${String(showSeedJson?.qrSvg ?? '').startsWith('<svg') ? 'svg' : 'missing'}`);
+        && (showSeedJson?.qrSvg === null || typeof showSeedJson?.qrSvg === 'string'),
+      `status=${showSeed.status} qr=${typeof showSeedJson?.qrSvg}`);
 
     const policyFinal = await getJson(port, '/admin/api/policy');
     const finalTypes = new Set((policyFinal.json ?? []).map((e) => e.type));

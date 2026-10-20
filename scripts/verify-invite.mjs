@@ -88,11 +88,11 @@ try {
     decodedApproval.securityApproval?.approvalId === 'ap-invite' && (await verifyJoinToken(decodedApproval)).ok === true,
     { approvalId: decodedApproval.securityApproval?.approvalId });
 
-  // ---------- Part B：内置二维码渲染 ----------
+  // ---------- Part B：二维码渲染（qrcode-generator 普通依赖） ----------
   const inline = encodeJoinToken(plain);
   const terminal = await renderTerminalQr(inline);
   const svg = await renderSvgQr(inline);
-  check('B. @mebular/qr → 终端 + SVG 二维码产出（内容=令牌文本）',
+  check('B. fleet QR → 终端 + SVG 二维码产出（内容=令牌文本）',
     Boolean(terminal && svg) && terminal.value.length > 0 && svg.value.startsWith('<svg') && !svg.value.includes('mebular://'),
     { terminalKind: terminal?.kind, svgBytes: svg?.value.length });
 

@@ -13,12 +13,10 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const TARGETS = [
   'dist',
-  'packages/qr/dist',
   'packages/service/dist',
   'packages/fleet/dist',
   // tsc 增量信息：陈旧会导致「输出已存在」误判，一并清理
   'tsconfig.tsbuildinfo',
-  'packages/qr/tsconfig.tsbuildinfo',
   'packages/service/tsconfig.tsbuildinfo',
   'packages/fleet/tsconfig.tsbuildinfo',
 ];

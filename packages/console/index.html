@@ -255,6 +255,20 @@
     </div>
   </div>
 
+  <div id="namespace-new-modal" class="modal" hidden>
+    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="namespace-new-title">
+      <h2 id="namespace-new-title">新建记忆域</h2>
+      <p class="modal-note muted">只有本机也可以开始记录；创建后默认订阅，可随时退订。</p>
+      <label class="cfg-label" for="namespace-new-name">名称</label>
+      <input id="namespace-new-name" class="crt-input" type="text" maxlength="64" autocomplete="off" placeholder="例如：阅读、工作、灵感" />
+      <p id="namespace-new-error" class="crt-warn" role="alert" hidden></p>
+      <div class="modal-actions">
+        <button id="namespace-new-cancel" class="btn" type="button">取消</button>
+        <button id="namespace-new-create" class="btn btn-primary" type="button">创建并订阅</button>
+      </div>
+    </div>
+  </div>
+
   <div id="provision" class="modal" hidden>
     <div class="modal-box modal-box-wide crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="首次上手：建新 / 加入忆云">
       <h2>首次上手 · 建新 / 加入忆云</h2>

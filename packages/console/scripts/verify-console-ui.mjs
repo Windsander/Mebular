@@ -417,8 +417,13 @@ async function main() {
           && !document.querySelector('#domains-empty-invite')
           && !/邀请设备|诊断与恢复/.test(empty.textContent);
       })()`));
-    await evalJs('window.prompt = () => "ledger-ui"');
     await evalJs('document.querySelector("#namespace-new").click()');
+    check('U-2 新建域弹窗：名称输入 + 创建并订阅（不用 window.prompt）',
+      await waitFor('document.querySelector("#namespace-new-modal")?.hidden === false && Boolean(document.querySelector("#namespace-new-name"))'));
+    await evalJs(`(() => {
+      document.querySelector('#namespace-new-name').value = 'ledger-ui';
+      document.querySelector('#namespace-new-create').click();
+    })()`);
     check('W-B 新建域默认自订阅 + 0 条目录可见',
       await waitFor(`(() => {
         const list = document.querySelector('#domains-list')?.textContent ?? '';

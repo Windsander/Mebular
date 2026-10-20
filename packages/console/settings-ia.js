@@ -35,16 +35,27 @@ export const IA_SETTINGS_EXTRA = [
 ];
 
 /**
- * 折叠白名单（设置/关于/邀请共用；≤5，当前 4）。
- * 设置内只有 2 个（MCP 危险与自救 / 诊断与恢复）；另两个属于关于本机、邀请面板。
- * 每项必须带 data-settings-fold，UI 断言据此防回归；不允许新增其它 <details>。
+ * 折叠白名单（设置/关于共用；≤5，当前 3）。
+ * 设置内 2 个（MCP 危险与自救 / 诊断与恢复）；关于本机 1 个（运行状态）。
+ * 邀请面板不再有详情折叠。每项必须带 data-settings-fold，UI 断言据此防回归。
  */
 export const IA_SETTINGS_FOLDS = [
   { id: 'mcp-danger', label: 'MCP 接入 · 危险与自救', home: 'mcp' },
   { id: 'diagnostics', label: '诊断与恢复', home: 'advanced' },
   { id: 'about-runtime', label: '运行状态（只读）', home: 'about' },
-  { id: 'invite', label: '邀请设备 · 详情', home: 'invite' },
 ];
+
+/** 邀请令牌有效期档位（UI 与断言共用；默认 15 分钟 = 服务端默认）。 */
+export const INVITE_TTL_OPTIONS = [
+  { label: '5 分钟', ttlMs: 300_000 },
+  { label: '15 分钟', ttlMs: 900_000 },
+  { label: '20 分钟', ttlMs: 1_200_000 },
+  { label: '2 小时', ttlMs: 7_200_000 },
+  { label: '6 小时', ttlMs: 21_600_000 },
+  { label: '12 小时', ttlMs: 43_200_000 },
+  { label: '24 小时', ttlMs: 86_400_000 },
+];
+export const INVITE_TTL_DEFAULT_MS = 900_000;
 
 /**
  * 安全 tab 的三段式结构：等级 / 动态码种子 / 恢复码。

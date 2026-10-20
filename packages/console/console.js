@@ -9,7 +9,7 @@
 import { StarStage, namespaceColor, shortId } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINES, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE, SECURITY_LEVEL_NOTE, SECURITY_BOUNDARY, SECURITY_TOTP_FOOT, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINES, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE, SECURITY_LEVEL_NOTE, SECURITY_BOUNDARY, SECURITY_TOTP_FOOT, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 
@@ -50,6 +50,7 @@ const state = {
   rawConfig: null,
   cfgDraft: {},
   inviteToken: null,
+  inviteTtlMs: INVITE_TTL_DEFAULT_MS,
   selected: null,
   degraded: null,
   error: null,
@@ -3928,7 +3929,11 @@ $('#handoff-confirm').addEventListener('click', confirmHandoff);
 
 // ---------- 邀请设备（T2 令牌加入：主密钥不复制） ----------
 
-async function openInvite() {
+async function openInvite(ttlMs = state.inviteTtlMs) {
+  const selectedTtl = INVITE_TTL_OPTIONS.some((option) => option.ttlMs === ttlMs)
+    ? ttlMs
+    : INVITE_TTL_DEFAULT_MS;
+  state.inviteTtlMs = selectedTtl;
   const level = state.security?.level ?? 'low';
   if (level === 'medium') {
     securityCodeModal({
@@ -3936,7 +3941,7 @@ async function openInvite() {
       intro: '中档在生成一次性令牌前需要输入本机 6 位动态码。',
       confirmLabel: '验证并生成令牌',
       onSubmit: async (code) => {
-        const res = await api('/admin/api/invite', { method: 'POST', body: { code } });
+        const res = await api('/admin/api/invite', { method: 'POST', body: { code, ttlMs: selectedTtl } });
         closeSecurityAction();
         showInviteResult(res);
       },
@@ -3952,7 +3957,7 @@ async function openInvite() {
         onApproved: async (approvalId) => {
           const res = await api('/admin/api/invite', {
             method: 'POST',
-            body: { approvalId, namespace: inviteNamespace() },
+            body: { approvalId, namespace: inviteNamespace(), ttlMs: selectedTtl },
           });
           closeSecurityAction();
           showInviteResult(res);
@@ -3964,20 +3969,17 @@ async function openInvite() {
     return;
   }
   $('#invite').hidden = false;
-  await renderInvite();
+  await renderInvite(selectedTtl);
 }
 
-async function renderInvite(overrideEndpoint = null) {
+async function renderInvite(ttlMs = state.inviteTtlMs) {
   const body = $('#invite-body');
-  const typedEndpoint = overrideEndpoint
-    ?? $('#invite-endpoint')?.value?.trim()
-    ?? null;
   $('#invite').hidden = false;
   body.innerHTML = '<p class="muted">正在生成令牌…</p>';
   try {
     const res = await api('/admin/api/invite', {
       method: 'POST',
-      body: typedEndpoint ? { endpoint: typedEndpoint } : {},
+      body: { ttlMs },
     });
     showInviteResult(res);
   } catch (error) {
@@ -4064,8 +4066,6 @@ function showInviteResult(res) {
   $('#invite').hidden = false;
   // 令牌很长：显示截断，复制按钮携带完整值
   const shortToken = res.token.length > 56 ? `${res.token.slice(0, 42)}…${res.token.slice(-12)}` : res.token;
-  const cmd = `fleet join --token ${res.token} --daemon --dir ~/.mebular --device <新设备ID>`;
-  const shortCmd = `fleet join --token ${shortToken} --daemon --dir ~/.mebular --device <新设备ID>`;
   const endpointWarning = res.warning
     ? `<p class="crt-warn">⚠ ${escapeHtml(res.warning)}</p>`
     : '';
@@ -4076,59 +4076,55 @@ function showInviteResult(res) {
         <img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />
       </div>`
     : '<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用上方文本令牌。</p>';
-  const endpointEditor = `
-    <div class="readout-block">
-      <span class="domain-label">join 端点（写死进令牌，须为新设备可达地址）</span>
-      <input id="invite-endpoint" class="crt-input" type="text" value="${escapeHtml(res.endpoint)}" />
-      <p class="cfg-help muted">默认由守护按 joinService.bind 计算：通配时取本机 LAN IPv4。跨网段/NAT 时可改为新设备可达地址后重新生成。</p>
-      ${endpointWarning}
-    </div>`;
   // E2-A2：邀请方忆云名 + 根指纹取 overview.cloud（加入方核对指纹的唯一可靠来源）。
   const cloud = state.overview?.cloud ?? null;
   const cloudLine = cloud?.name
     ? `<p class="cfg-help muted invite-cloud-line" id="invite-cloud-identity">本忆云：<b>${escapeHtml(cloud.name)}</b> · 根指纹 ${cloud.masterFingerprint ? `<code>${escapeHtml(cloud.masterFingerprint)}</code>` : '<span class="kv-empty">未知</span>'}</p>`
     : '';
-  // E1 单屏：打开即见「令牌 + 二维码 + 复制」；端点/命令/兑换机制/重新生成全部收进「详情」。
+  const selectedTtl = INVITE_TTL_OPTIONS.some((option) => option.ttlMs === res.ttlMs)
+    ? res.ttlMs
+    : state.inviteTtlMs;
+  state.inviteTtlMs = selectedTtl;
+  const ttlOptions = INVITE_TTL_OPTIONS.map((option) => (
+    `<option value="${option.ttlMs}"${option.ttlMs === selectedTtl ? ' selected' : ''}>${escapeHtml(option.label)}</option>`
+  )).join('');
+  // 单动作面板：令牌 + 二维码 + 忆云身份 + 有效期/重新生成；不再有详情折叠。
   body.innerHTML = `
     <div class="readout-block invite-token-block">
-      <span class="domain-label">令牌（一次性，默认 15 分钟有效）</span>
+      <span class="domain-label">令牌（一次性）</span>
       <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
     </div>
     ${qrBlock}
     ${cloudLine}
+    <div class="invite-controls">
+      <label class="invite-ttl" for="invite-ttl">有效期
+        <select id="invite-ttl" class="crt-input">${ttlOptions}</select>
+      </label>
+      <button class="btn btn-small btn-crt" id="invite-regenerate" type="button">重新生成</button>
+    </div>
+    <p class="cfg-help muted">当前令牌有效至 ${escapeHtml(formatTime(res.expiresAt))}；改档后点「重新生成」才生效。</p>
+    ${endpointWarning}
     <p class="cfg-help muted">对方已用过 Mebular：让 TA 在控制台点「加入忆云」粘贴此令牌；新设备：扫码或粘贴令牌。</p>
+    <p class="cfg-help muted">令牌即入网权限：仅当面或可信局域网传递；重新生成后旧令牌立即失效。</p>
     ${res.securityApproval ? '<p class="crt-warn">已随令牌带上会签批准（新设备首现记录内嵌 cosign）。</p>' : ''}
-    <details class="settings-fold fold-invite" id="invite-detail-fold" data-settings-fold="invite">
-      <summary>${escapeHtml(foldLabel('invite'))}</summary>
-      <p class="cfg-help muted">令牌即入网权限：一次性、短时效，仅当面或可信局域网传递；新设备入网后本页即可关闭。</p>
-      ${endpointEditor}
-      <dl class="settings-kv">
-        <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>
-        <dt>默认记忆域</dt><dd><code>${escapeHtml(res.namespace)}</code></dd>
-        <dt>订阅</dt><dd>兑换只建立入网信任；新设备加入后自行订阅，零门槛、无需批准</dd>
-        <dt>有效期至</dt><dd>${escapeHtml(formatTime(res.expiresAt))}（一次性）</dd>
-      </dl>
-      <p class="cfg-help muted">兑换只建立入网信任，之后按各自的订阅选择收发；不复制主密钥。</p>
-      <div class="readout-block">
-        <span class="domain-label">新设备</span>
-        <div class="copyable"><code>${escapeHtml(shortCmd)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(cmd)}">复制命令</button></div>
-      </div>
-      <p class="crt-warn">⚠ 请勿把令牌写入工单或公开日志；旧令牌在重新生成后立即失效。</p>
-      <div class="asst-detail-actions">
-        <button class="btn btn-small" id="invite-regen-inline" type="button">重新生成邀请（旧令牌立即失效）</button>
-      </div>
-    </details>
   `;
-  body.querySelector('#invite-regen-inline')?.addEventListener('click', () => {
-    // UX-2：重新生成收详情且二次确认（旧令牌作废是不可逆方向）
-    if (window.confirm('重新生成会使当前令牌立即失效。确定？')) void openInvite();
+  body.querySelector('#invite-ttl')?.addEventListener('change', (event) => {
+    const value = Number(event.currentTarget.value);
+    if (INVITE_TTL_OPTIONS.some((option) => option.ttlMs === value)) state.inviteTtlMs = value;
+  });
+  body.querySelector('#invite-regenerate')?.addEventListener('click', () => {
+    // 二次确认保留但简短：旧令牌作废是不可逆方向。
+    if (window.confirm('重新生成后旧令牌立即失效。确定？')) void openInvite(state.inviteTtlMs);
   });
   body.querySelectorAll('[data-copy]').forEach((button) => {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
   });
 }
 
-$('#invite-device').addEventListener('click', openInvite);
+$('#invite-device').addEventListener('click', () => {
+  state.inviteTtlMs = INVITE_TTL_DEFAULT_MS;
+  void openInvite();
+});
 // 共享页只做域管理：唯一入口 = 新建记忆域；邀请只在顶栏。
 $('#namespace-new')?.addEventListener('click', openNamespaceNew);
 $('#namespace-new-cancel')?.addEventListener('click', closeNamespaceNew);

@@ -4,8 +4,9 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
-import { Mebular, bytesToBase64 } from '@mebular/core';
+import { IdentityManager, Mebular, bytesToBase64 } from '@mebular/core';
 import {
+  activateJoinInvite,
   buildJoinToken,
   decodeJoinToken,
   describeJoinToken,
@@ -138,6 +139,76 @@ describe('T2 加入令牌与 join 服务', () => {
         expect(state.used.filter((n) => n === (JSON.parse(Buffer.from(token, 'base64').toString('utf-8')) as { nonce: string }).nonce)).toHaveLength(1);
       } finally {
         await svc.close();
+        await inviter.shutdown();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('单一有效邀请：新令牌撤销旧 active；旧令牌兑换被拒，新令牌可兑换', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fleet-join-revoke-'));
+    try {
+      const A = join(root, 'A');
+      const inviter = await makeInviter(A);
+      const storagePath = join(A, 'store.jsonl');
+      const svc = await startJoinService({ mebular: inviter, deviceId: 'device-A', storagePath, port: 0 });
+      const endpoint = `http://127.0.0.1:${svc.port}`;
+      try {
+        const oldToken = await buildJoinToken({
+          mebular: inviter, deviceId: 'device-A', namespace: 'tasks', endpoint, ttlMs: 60_000, nonce: 'a'.repeat(32),
+        });
+        expect(await activateJoinInvite(storagePath, oldToken.nonce)).toEqual({ revoked: null });
+        const newToken = await buildJoinToken({
+          mebular: inviter, deviceId: 'device-A', namespace: 'tasks', endpoint, ttlMs: 60_000, nonce: 'b'.repeat(32),
+        });
+        expect(await activateJoinInvite(storagePath, newToken.nonce)).toEqual({ revoked: oldToken.nonce });
+
+        const state = await readJoinNonceState(storagePath);
+        expect(state.active).toBe(newToken.nonce);
+        expect(state.revoked).toContain(oldToken.nonce);
+
+        const im = new IdentityManager();
+        const key = await im.generateDeviceKey('device-B', 'B');
+        await expect(requestJoin({
+          endpoint, token: encodeJoinToken(oldToken), deviceId: 'device-B',
+          devicePublicKeyHex: Buffer.from(key.publicKey).toString('hex'),
+        })).rejects.toThrow(/revoked/);
+
+        const accepted = await requestJoin({
+          endpoint, token: encodeJoinToken(newToken), deviceId: 'device-B',
+          devicePublicKeyHex: Buffer.from(key.publicKey).toString('hex'),
+        });
+        expect(accepted.inviterDeviceId).toBe('device-A');
+        const after = await readJoinNonceState(storagePath);
+        expect(after.used).toContain(newToken.nonce);
+        expect(after.active).toBeUndefined();
+      } finally {
+        await svc.close();
+        await inviter.shutdown();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('并发激活：串行落盘，不丢 used/revoked；仅一个 active', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fleet-join-activate-race-'));
+    try {
+      const A = join(root, 'A');
+      const inviter = await makeInviter(A);
+      try {
+        const storagePath = join(A, 'store.jsonl');
+        const n1 = 'c'.repeat(32);
+        const n2 = 'd'.repeat(32);
+        await Promise.all([activateJoinInvite(storagePath, n1), activateJoinInvite(storagePath, n2)]);
+        const state = await readJoinNonceState(storagePath);
+        const active = state.active;
+        expect([n1, n2]).toContain(active);
+        const other = active === n1 ? n2 : n1;
+        expect(state.revoked).toEqual([other]);
+        await expect(activateJoinInvite(storagePath, 'not-a-nonce')).rejects.toThrow(/nonce/);
+      } finally {
         await inviter.shutdown();
       }
     } finally {

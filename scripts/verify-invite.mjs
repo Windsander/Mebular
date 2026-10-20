@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Mebular, IdentityManager } from '@mebular/core';
 import {
+  activateJoinInvite,
   buildJoinToken,
   decodeJoinToken,
   encodeJoinToken,
@@ -121,6 +122,15 @@ try {
     log: () => undefined,
   });
   try {
+    const storagePath = inviter.storagePath ?? join(dir, 'device-inviter.jsonl');
+    const stale = await buildJoinToken({
+      mebular: inviter,
+      deviceId: 'device-inviter',
+      namespace: 'tasks',
+      endpoint: `http://127.0.0.1:${joinPort}`,
+      ttlMs: 60_000,
+    });
+    await activateJoinInvite(storagePath, stale.nonce);
     const token = await buildJoinToken({
       mebular: inviter,
       deviceId: 'device-inviter',
@@ -129,6 +139,8 @@ try {
       ttlMs: 60_000,
       securityApproval: approval,
     });
+    const activation = await activateJoinInvite(storagePath, token.nonce);
+    check('C. 新令牌激活 → 旧 active nonce 进入 revoked', activation.revoked === stale.nonce, { revoked: activation.revoked });
     const redeem = async (t) => {
       const res = await fetch(`http://127.0.0.1:${joinPort}/mebular/join`, {
         method: 'POST',
@@ -137,6 +149,11 @@ try {
       });
       return { status: res.status, body: await res.json().catch(() => null) };
     };
+
+    const revoked = await redeem(stale);
+    check('C. 重新生成后旧 token 兑换被拒（revoked）',
+      revoked.status === 403 && String(revoked.body?.error ?? '').includes('revoked'),
+      { status: revoked.status, error: revoked.body?.error });
 
     const first = await redeem(token);
     check('C. 首次兑换：签发委派证书',

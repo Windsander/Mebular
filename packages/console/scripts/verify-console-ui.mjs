@@ -703,8 +703,8 @@ async function main() {
       const details = [...document.querySelectorAll('#settings-body details')];
       return { count: details.length, keys: details.map((d) => d.dataset.settingsFold ?? d.className) };
     })()`);
-    check('U1 设置折叠预算：≤5 且均为允许类型', Boolean(foldAudit) && foldAudit.count <= 5
-      && foldAudit.keys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'invite', 'assistants'].includes(key)),
+    check('U1 设置折叠预算：≤5 且均为允许类型（邀请无折叠）', Boolean(foldAudit) && foldAudit.count <= 5
+      && foldAudit.keys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(key)),
       JSON.stringify(foldAudit));
     check('U-1 设置无退役配置项/引导签发者/授权·签发·参与',
       await evalJs(`(() => {
@@ -1116,24 +1116,40 @@ async function main() {
     await evalJs('document.querySelector("#invite-device").click()');
     check('邀请面板打开且渲染内容（令牌或未启用提示）', await waitFor('(() => { const b = document.querySelector("#invite-body"); return Boolean(b?.querySelector("[data-copy]")) || /加入服务未启用/.test(b?.textContent ?? ""); })()'));
     await capture('u3-after-dialog-invite.jpg');
-    check('E1 邀请单屏：首屏令牌 + 二维码/降级 + 复制；机制收「邀请设备 · 详情」', await evalJs(`(() => {
+    check('E1 邀请单屏：令牌 + 二维码/降级 + 忆云身份 + TTL；无详情/端点编辑/CLI 命令', await evalJs(`(() => {
       const body = document.querySelector('#invite-body');
       if (!body) return false;
-      const details = body.querySelector('details');
-      if (!details || details.dataset.settingsFold !== 'invite') return false;
-      const blocks = [...body.children];
-      const detailsIndex = blocks.indexOf(details);
-      const before = blocks.slice(0, detailsIndex).map((el) => el.textContent + (el.querySelector?.('img') ? ' QR' : '')).join('\\n');
-      const tokenBlock = blocks.slice(0, detailsIndex).some((el) => /令牌/.test(el.textContent) && el.querySelector('[data-copy]'));
-      const qr = before.includes('QR') || /二维码不可用/.test(before);
-      return tokenBlock && qr && /join 端点/.test(details.textContent) && Boolean(details.querySelector('#invite-endpoint'))
-        && body.querySelectorAll('details').length === 1;
+      const ttl = document.querySelector('#invite-ttl');
+      const options = ttl ? [...ttl.options].map((o) => [o.value, o.textContent]) : [];
+      const expected = [['300000','5 分钟'],['900000','15 分钟'],['1200000','20 分钟'],['7200000','2 小时'],['21600000','6 小时'],['43200000','12 小时'],['86400000','24 小时']];
+      const tokenBlock = Boolean(body.querySelector('.invite-token-block [data-copy]'));
+      const qr = Boolean(body.querySelector('.qr-img')) || /二维码不可用/.test(body.textContent);
+      return body.querySelectorAll('details').length === 0
+        && !body.querySelector('#invite-endpoint') && !/fleet join/.test(body.textContent)
+        && !/join 端点|默认记忆域|订阅/.test(body.textContent)
+        && tokenBlock && qr && /本忆云/.test(body.textContent) && /根指纹/.test(body.textContent)
+        && Boolean(ttl) && ttl.value === '900000' && JSON.stringify(options) === JSON.stringify(expected)
+        && Boolean(document.querySelector('#invite-regenerate'));
     })()`));
+    const beforeTtlToken = await evalJs('document.querySelector("#invite-body [data-copy]")?.dataset.copy ?? ""');
+    await evalJs(`(() => {
+      const select = document.querySelector('#invite-ttl');
+      select.value = '7200000';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      window.confirm = () => true;
+      document.querySelector('#invite-regenerate').click();
+    })()`);
+    check('E1 重新生成：选中 2 小时后新令牌，选择保持（ttlMs 透传生效）',
+      await waitFor(`(() => {
+        const select = document.querySelector('#invite-ttl');
+        const token = document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '';
+        return select?.value === '7200000' && token.length > 0 && token !== ${JSON.stringify(beforeTtlToken)};
+      })()`, 20000));
     const allFoldKeys = await evalJs(`(() => [...document.querySelectorAll('#settings-body details, #about-body details, #invite-body details')]
       .map((el) => el.dataset.settingsFold ?? el.className))()`);
-    check('U-1 全域折叠预算：设置 + 关于 + 邀请 ≤5 且均为白名单类型', Array.isArray(allFoldKeys)
+    check('U-1 全域折叠预算：设置 + 关于 ≤5 且均为白名单类型（邀请无折叠）', Array.isArray(allFoldKeys)
       && allFoldKeys.length <= 5
-      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'invite', 'assistants'].includes(key)),
+      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(key)),
       JSON.stringify(allFoldKeys));
     check('E1 邀请面板无「去设置启用」旧指路（未启用时就地一键启用）',
       await evalJs(`(() => {
@@ -1150,8 +1166,8 @@ async function main() {
       })()`));
     await capture('e2a2-after-invite-cloud-line.jpg');
     await capture('e1-after-invite-single-screen.jpg');
-    check('轮 C 邀请卡：帮助去重（兑换语义只讲一次）',
-      await evalJs('(() => { const t = document.querySelector("#invite-body")?.textContent ?? ""; const hits = (t.match(/兑换/g) ?? []).length; return hits <= 2 && !/兑换后自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）\\s*让新设备/.test(t); })()'));
+    check('E1 邀请卡：详情/端点/命令/默认域与订阅说明不再出现',
+      await evalJs('(() => { const t = document.querySelector("#invite-body")?.textContent ?? ""; return !/join 端点|默认记忆域|新设备.*fleet join|订阅/.test(t) && /有效期/.test(t) && /重新生成/.test(t); })()'));
     await evalJs('document.querySelector("#invite-close").click()');
 
     // ---------- S3 · 安全三档（活体：真实端点；先红后绿） ----------

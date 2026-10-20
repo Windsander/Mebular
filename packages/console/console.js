@@ -292,7 +292,7 @@ function renderTopbar() {
     const cloud = state.overview?.cloud ?? null;
     if (typeof cloud?.name === 'string' && cloud.name.trim().length > 0) {
       cloudEl.hidden = false;
-      cloudEl.textContent = `☁ ${cloud.name}`;
+      cloudEl.innerHTML = `<svg class="cloud-mark" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.6 12.2h6.9a2.7 2.7 0 0 0 .4-5.37A4.2 4.2 0 0 0 3.4 7.1a2.6 2.6 0 0 0 1.2 5.1Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="cloud-name">${escapeHtml(cloud.name)}</span>`;
       cloudEl.title = `当前忆云：${cloud.name}（点击打开设置 · 忆云）`;
       cloudEl.setAttribute('aria-label', `当前忆云：${cloud.name}；打开设置 · 忆云`);
     } else {

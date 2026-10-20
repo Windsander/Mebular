@@ -38,6 +38,47 @@
       'lang.toggle': 'EN',
       'lang.aria': '切换语言',
 
+      /* ---- 首页（单文件滚动叙事）---- */
+      'doc.site': 'Mebular · 分布式记忆网络',
+      'hero.tag': 'v1.0 · 早期设计',
+      'hero.subtitle': '分布式存储的跨广域网记忆系统<br>所有设备拥有相同的记忆，共同构造一张共享的知识图谱。',
+      'hero.mission': '<strong>没有中心服务器。</strong> 每一个节点都是对等的，<br>记忆在它们之间分散存储、保持同步。<br>星空中的每一颗星，都可以成为网络中的一个记忆节点。',
+      'overview.title': '系统概览',
+      'overview.body': 'Mebular 是一个<strong>分布式记忆存储系统</strong>，通过关联性图记忆组织跨域知识。<br>每个设备（节点）存储相同的记忆集，系统在它们之间保持同步。<br>记忆以图的形式组织：节点之间怎么关联，决定了知识的结构长什么样。<br>目前还在早期设计阶段，设计文档保留本地。',
+
+      'network.panel.title': '✦ 网络舞台 · 点击星空注册节点',
+      'network.stat.nodes': '节点',
+      'network.stat.links': '链路',
+      'network.stat.waiting': '等待节点',
+      'network.add': '✦ 添加节点',
+      'network.empty': '点击星空中的星星<br>注册一个节点',
+      'network.status.synced': '已同步',
+      'network.status.syncing': '同步中',
+      'network.status.idle': '已同步·休眠',
+      'network.remove': '移除',
+      'network.mem.all': '全部同步',
+      'network.mem.consistent': '✓ 一致',
+      'network.mem.syncing': '同步中...',
+      'network.mem.offline': '未连接',
+
+      'design.title': '设计理念',
+      'design.c1.label': '分布式存储',
+      'design.c1.desc': '没有中心服务器。每一个节点独立存储完整的记忆集，<br>系统通过对等同步协议保持各节点之间的一致性。',
+      'design.c2.label': '共享记忆',
+      'design.c2.desc': '所有设备拥有相同的记忆。任一节点添加或更新记忆，<br>该变更会传播到网络中的所有其他节点，<br>使整个记忆图谱保持一致。',
+      'design.c3.label': '跨广域网',
+      'design.c3.desc': '节点可以分布在广域网的不同位置，通过星空般的拓扑结构<br>互相连接。距离不影响记忆的一致性。',
+      'design.c4.label': '关联性图记忆',
+      'design.c4.desc': '记忆以图的形式组织，节点之间的关联定义了知识的结构。<br>类似 Griphify 等以代码为目标的关联记忆方式。',
+      'design.c5.label': '未回答的问题',
+      'design.c5.desc': '跨域记忆互通、各端记忆系统可能存在差异的问题尚未解决。<br>向量化更新成本较大，未来可能转向图记忆方式。',
+
+      'footer.brand': 'Mebular · 分布式记忆网络',
+      'footer.github': 'GitHub →',
+      'footer.license': 'MIT 协议',
+      'footer.stage': '早期设计阶段',
+      'scroll.hint': '↓ 向下翻页',
+
       /* ---- 定价页 ---- */
       'pricing.tag': 'v1.0 · 定价预告',
       'pricing.title': '定价',
@@ -124,6 +165,47 @@
       'nav.github': 'GitHub',
       'lang.toggle': '中文',
       'lang.aria': 'Switch language',
+
+      /* ---- Home (single-file scroll narrative) ---- */
+      'doc.site': 'Mebular · Distributed Memory Network',
+      'hero.tag': 'v1.0 · early design',
+      'hero.subtitle': 'A cross-WAN memory system for distributed storage<br>Every device holds the same memories, together forming one shared knowledge graph.',
+      'hero.mission': '<strong>No central server.</strong> Every node is a peer,<br>memories are stored and kept in sync across them.<br>Any star in the sky can become a memory node in the network.',
+      'overview.title': 'System overview',
+      'overview.body': 'Mebular is a <strong>distributed memory storage system</strong> that organizes cross-domain knowledge as associative graph memory.<br>Every device (node) stores the same memory set, kept in sync across them.<br>Memories are organized as a graph: how nodes relate defines the shape of the knowledge.<br>It is still in early design, and the design docs are kept locally.',
+
+      'network.panel.title': '✦ Network stage · click a star to register a node',
+      'network.stat.nodes': 'Nodes',
+      'network.stat.links': 'Links',
+      'network.stat.waiting': 'Waiting for nodes',
+      'network.add': '✦ Add node',
+      'network.empty': 'Click a star in the sky<br>to register a node',
+      'network.status.synced': 'Synced',
+      'network.status.syncing': 'Syncing',
+      'network.status.idle': 'Synced · idle',
+      'network.remove': 'Remove',
+      'network.mem.all': 'All synced',
+      'network.mem.consistent': '✓ Consistent',
+      'network.mem.syncing': 'Syncing…',
+      'network.mem.offline': 'Not connected',
+
+      'design.title': 'Design principles',
+      'design.c1.label': 'Distributed storage',
+      'design.c1.desc': 'No central server. Every node independently stores the full memory set,<br>and a peer-to-peer sync protocol keeps nodes consistent.',
+      'design.c2.label': 'Shared memory',
+      'design.c2.desc': 'Every device holds the same memories. When any node adds or updates one,<br>the change propagates to all other nodes in the network,<br>keeping the whole memory graph consistent.',
+      'design.c3.label': 'Cross-WAN',
+      'design.c3.desc': 'Nodes can live anywhere on the wide area network, connected through<br>a starfield-like topology. Distance does not affect memory consistency.',
+      'design.c4.label': 'Associative graph memory',
+      'design.c4.desc': 'Memories are organized as a graph, and the links between nodes define the structure of knowledge.<br>Similar in spirit to code-oriented associative memory like Griphify.',
+      'design.c5.label': 'Open questions',
+      'design.c5.desc': 'Cross-domain memory interop and differences between per-device memory systems remain unsolved.<br>Vector updates are costly, and the design may move toward graph memory.',
+
+      'footer.brand': 'Mebular · Distributed Memory Network',
+      'footer.github': 'GitHub →',
+      'footer.license': 'MIT license',
+      'footer.stage': 'early design',
+      'scroll.hint': '↓ Scroll',
 
       /* ---- Pricing ---- */
       'pricing.tag': 'v1.0 · Pricing preview',
@@ -245,6 +327,15 @@
     if (titleEl) document.title = t(titleEl);
 
     try { localStorage.setItem(STORAGE_KEY, lang); } catch (e) {}
+
+    // 通知动态内容（如网络舞台的设备状态）按当前语言重绘
+    try {
+      document.dispatchEvent(new CustomEvent('mebular:lang', { detail: { lang: lang } }));
+    } catch (e) {
+      var ev = document.createEvent('Event');
+      ev.initEvent('mebular:lang', true, true);
+      document.dispatchEvent(ev);
+    }
   }
 
   function initI18n() {
@@ -275,6 +366,9 @@
      3. 星空背景动画
      ========================================================= */
   function initBackground() {
+    // index.html 的内联脚本自带背景控制器（同时驱动 #bg-canvas 与 #net-canvas）；
+    // 此时 site.js 不再创建第二套渲染循环，避免两个循环互相擦除造成闪烁。
+    if (document.getElementById('net-canvas')) return;
     var canvas = document.getElementById('bg-canvas');
     if (!canvas || typeof window.Nebula !== 'function' || typeof window.Starfield !== 'function') return;
 
@@ -405,4 +499,7 @@
   }
 
   window.MEBULAR_SET_LANG = applyLang;
+  // 供 index.html 内联脚本翻译动态生成的文案（设备状态、空态提示等）
+  window.MEBULAR_T = t;
+  window.MEBULAR_GET_LANG = function () { return lang; };
 })();

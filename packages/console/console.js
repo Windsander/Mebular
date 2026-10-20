@@ -254,7 +254,7 @@ function renderTopbar() {
     const cloud = state.overview?.cloud ?? null;
     if (typeof cloud?.name === 'string' && cloud.name.trim().length > 0) {
       cloudEl.hidden = false;
-      cloudEl.textContent = `☁ ${cloud.name}`;
+      cloudEl.innerHTML = `<svg class="cloud-mark" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.6 12.2h6.9a2.7 2.7 0 0 0 .4-5.37A4.2 4.2 0 0 0 3.4 7.1a2.6 2.6 0 0 0 1.2 5.1Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="cloud-name">${escapeHtml(cloud.name)}</span>`;
       cloudEl.title = `当前忆云：${cloud.name}（点击打开设置 · 忆云）`;
       cloudEl.setAttribute('aria-label', `当前忆云：${cloud.name}；打开设置 · 忆云`);
     } else {
@@ -580,24 +580,56 @@ async function applySubscription(ns, active, nextNamespaces) {
   }
 }
 
-async function createNamespace() {
+function openNamespaceNew() {
   if (MOCK) {
     window.alert('mock 模式不执行写操作。');
     return;
   }
-  const name = window.prompt('新建记忆域（全网可见，零门槛；创建后默认订阅）');
-  if (name === null) return;
-  const namespace = name.trim();
-  if (namespace.length === 0) return;
+  const modal = $('#namespace-new-modal');
+  const input = $('#namespace-new-name');
+  const error = $('#namespace-new-error');
+  if (!modal || !input) return;
+  if (error) { error.hidden = true; error.textContent = ''; }
+  input.value = '';
+  modal.hidden = false;
+  setTimeout(() => input.focus(), 0);
+}
+
+function closeNamespaceNew() {
+  const modal = $('#namespace-new-modal');
+  if (modal) modal.hidden = true;
+}
+
+async function createNamespace(rawName) {
+  if (MOCK) {
+    window.alert('mock 模式不执行写操作。');
+    return;
+  }
+  const namespace = String(rawName ?? '').trim();
+  const error = $('#namespace-new-error');
+  const showError = (message) => {
+    if (!error) return;
+    error.textContent = message;
+    error.hidden = false;
+  };
+  if (namespace.length === 0) {
+    showError('请先填写记忆域名称。');
+    return;
+  }
   try {
     // 服务端默认自订阅（active:true）：创建完就能写；用户仍可随时退订。
     await api('/admin/api/namespaces', { method: 'POST', body: { namespace, subscribe: true } });
     state.selectedNamespace = namespace;
+    closeNamespaceNew();
     await refresh();
     showToast(`已创建并订阅「${namespace}」；本机即可开始记录`);
-  } catch (error) {
-    window.alert(`创建失败：${error.message}`);
+  } catch (err) {
+    showError(`创建失败：${err.message}`);
   }
+}
+
+function submitNamespaceNew() {
+  void createNamespace($('#namespace-new-name')?.value ?? '');
 }
 
 async function doRejoin(ns) {
@@ -4041,8 +4073,25 @@ function showInviteResult(res) {
 }
 
 $('#invite-device').addEventListener('click', openInvite);
-// 共享页只做域管理：空态唯一 CTA = 新建记忆域；邀请只在顶栏。
-$('#namespace-new')?.addEventListener('click', () => { void createNamespace(); });
+// 共享页只做域管理：唯一入口 = 新建记忆域；邀请只在顶栏。
+$('#namespace-new')?.addEventListener('click', openNamespaceNew);
+$('#namespace-new-cancel')?.addEventListener('click', closeNamespaceNew);
+$('#namespace-new-create')?.addEventListener('click', submitNamespaceNew);
+$('#namespace-new-name')?.addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    submitNamespaceNew();
+  }
+});
+$('#namespace-new-modal')?.addEventListener('click', (event) => {
+  if (event.target === event.currentTarget) closeNamespaceNew();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && $('#namespace-new-modal')?.hidden === false) {
+    event.preventDefault();
+    closeNamespaceNew();
+  }
+});
 $('#invite-close').addEventListener('click', () => {
   $('#invite').hidden = true;
   state.inviteToken = null;

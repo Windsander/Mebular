@@ -398,7 +398,8 @@ async function main() {
         const badge = document.querySelector('#cloud-badge');
         const actions = document.querySelector('.topbar-actions');
         return Boolean(badge) && badge.hidden === false && /忆云 1/.test(badge.textContent)
-          && Boolean(document.querySelector('#join-cloud')) && Boolean(document.querySelector('#invite-device'))
+          && Boolean(badge.querySelector('.cloud-mark')) && Boolean(badge.querySelector('.cloud-name'))
+          && Boolean(document.querySelector('#join-cloud .cloud-mark')) && Boolean(document.querySelector('#invite-device'))
           && /加入忆云/.test(actions?.textContent ?? '') && !document.querySelector('#add-device');
       })()`));
     await capture('e2a2-after-topbar-live.jpg');
@@ -417,8 +418,13 @@ async function main() {
           && !document.querySelector('#domains-empty-invite')
           && !/邀请设备|诊断与恢复/.test(empty.textContent);
       })()`));
-    await evalJs('window.prompt = () => "ledger-ui"');
     await evalJs('document.querySelector("#namespace-new").click()');
+    check('U-2 新建域弹窗：名称输入 + 创建并订阅（不用 window.prompt）',
+      await waitFor('document.querySelector("#namespace-new-modal")?.hidden === false && Boolean(document.querySelector("#namespace-new-name"))'));
+    await evalJs(`(() => {
+      document.querySelector('#namespace-new-name').value = 'ledger-ui';
+      document.querySelector('#namespace-new-create').click();
+    })()`);
     check('W-B 新建域默认自订阅 + 0 条目录可见',
       await waitFor(`(() => {
         const list = document.querySelector('#domains-list')?.textContent ?? '';

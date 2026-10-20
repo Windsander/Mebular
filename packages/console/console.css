@@ -77,7 +77,9 @@ html, body {
 .badge-danger { color: var(--danger); border-color: #4a1f10; }
 .badge-warn { color: #ffd27a; border-color: #4a3a10; }
 /* E2-A2：顶栏忆云徽章（名字只取 overview.cloud.name；缺失时元素 hidden） */
-#cloud-badge { max-width: 260px; overflow: hidden; text-overflow: ellipsis; border-color: #29456b; color: #cfe4ff; background: rgba(20, 40, 72, 0.55); }
+#cloud-badge { max-width: 260px; overflow: hidden; display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; border-color: #29456b; color: #cfe4ff; background: rgba(20, 40, 72, 0.55); }
+.cloud-mark { width: 14px; height: 14px; flex: none; display: block; }
+#cloud-badge .cloud-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #cloud-badge[hidden] { display: none; }
 #cloud-badge:hover { border-color: #3b6ea8; color: #eaf4ff; }
 .topbar-actions .btn-label { white-space: nowrap; }
@@ -351,6 +353,8 @@ select {
 /* 走查修复：弹层顶部锚定（原 flex 垂直居中 → 切「选项卡」页面高度变化时整块垂直跳）。
    轮 C：背板不滚（fixed + overflow hidden），滚动收进 .modal-box（六处弹层共用）。 */
 .modal { position: fixed; inset: 0; background: rgba(2, 4, 10, 0.72); display: flex; align-items: flex-start; justify-content: center; z-index: 50; overflow: hidden; padding: 24px; }
+/* 小弹窗统一垂直居中；大设置/加入忆云仍顶部对齐，避免超高面板上下裁切 */
+.modal.modal-center { align-items: center; }
 .modal-box { background: var(--bg-panel-2); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; width: min(520px, 92vw); max-height: calc(100vh - 48px); overflow-y: auto; overscroll-behavior: contain; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); margin: 0; }
 .modal-box h2 { margin: 0 0 10px; font-size: 15px; }
 .modal-box p { margin: 0; line-height: 1.7; white-space: pre-wrap; }

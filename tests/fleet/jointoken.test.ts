@@ -1,6 +1,6 @@
 // T2：加入令牌 + join 服务 + joinWithToken（loopback HTTP；不复制主密钥）。
 import { describe, it, expect, jest } from '@jest/globals';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import http from 'node:http';
@@ -209,6 +209,67 @@ describe('T2 加入令牌与 join 服务', () => {
         expect(state.revoked).toEqual([other]);
         await expect(activateJoinInvite(storagePath, 'not-a-nonce')).rejects.toThrow(/nonce/);
       } finally {
+        await inviter.shutdown();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('跨进程锁：陈旧锁自动回收；写盘失败时锁释放且错误上抛', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fleet-join-lock-'));
+    try {
+      const A = join(root, 'A');
+      const inviter = await makeInviter(A);
+      try {
+        const storagePath = join(A, 'store.jsonl');
+        const lockPath = `${joinNonceStatePath(storagePath)}.lock`;
+        // 死 PID 的陈旧锁 → EEXIST 分支 → kill(ESRCH) → 回收后重试。
+        await writeFile(lockPath, JSON.stringify({ pid: 999_999, at: 0 }));
+        const nonce = 'e'.repeat(32);
+        await expect(activateJoinInvite(storagePath, nonce)).resolves.toEqual({ revoked: null });
+        expect((await readJoinNonceState(storagePath)).active).toBe(nonce);
+        await expect(access(lockPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+        // 状态路径被目录占用 → tmp+rename 失败；锁仍应释放，错误向调用方上抛。
+        const brokenStorage = join(root, 'broken', 'store.jsonl');
+        const brokenStatePath = joinNonceStatePath(brokenStorage);
+        await mkdir(brokenStatePath, { recursive: true });
+        await expect(activateJoinInvite(brokenStorage, 'f'.repeat(32))).rejects.toThrow();
+        await expect(access(`${brokenStatePath}.lock`)).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await inviter.shutdown();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('签发失败：nonce 先消费，响应 500（fail-closed）', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fleet-join-issue-fail-'));
+    try {
+      const A = join(root, 'A');
+      const inviter = await makeInviter(A);
+      const storagePath = join(A, 'store.jsonl');
+      const svc = await startJoinService({ mebular: inviter, deviceId: 'device-A', storagePath, port: 0 });
+      const endpoint = `http://127.0.0.1:${svc.port}`;
+      try {
+        const token = await buildJoinToken({
+          mebular: inviter, deviceId: 'device-A', namespace: 'tasks', endpoint, ttlMs: 60_000, nonce: '9'.repeat(32),
+        });
+        await activateJoinInvite(storagePath, token.nonce);
+        const key = await new IdentityManager().generateDeviceKey('device-F', 'F');
+        const spy = jest.spyOn(inviter.identity, 'issueDelegatedCertificateFor').mockRejectedValueOnce(new Error('boom'));
+        await expect(requestJoin({
+          endpoint, token: encodeJoinToken(token), deviceId: 'device-F',
+          devicePublicKeyHex: Buffer.from(key.publicKey).toString('hex'),
+        })).rejects.toThrow(/签发失败/);
+        spy.mockRestore();
+        const state = await readJoinNonceState(storagePath);
+        expect(state.used).toContain(token.nonce);
+        expect(state.active).toBeUndefined();
+      } finally {
+        await svc.close();
         await inviter.shutdown();
       }
     } finally {

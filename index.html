@@ -4,6 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Mebular · 分布式记忆网络</title>
+  <!-- 共享站点样式（定价卡片 / FAQ / 表单组件，双语导航） -->
+  <link rel="stylesheet" href="site.css" />
   <style>
     /* ===== 基础 ===== */
     *, *::before, *::after { box-sizing:border-box; margin:0; padding:0; }
@@ -88,11 +90,19 @@
       top:0; left:0;
       width:100%;
       height:100vh;
-      overflow:hidden;
+      /* 内容超高的页面（定价 / 等待名单）可内部滚动，滚到顶/底再切页 */
+      overflow-y:auto;
+      overflow-x:hidden;
+      -webkit-overflow-scrolling:touch;
+      overscroll-behavior:contain;
+      scrollbar-width:thin;
+      scrollbar-color:rgba(80,160,255,0.15) transparent;
       z-index:10;
       display:flex;
       flex-direction:column;
-      justify-content:center;
+      /* 主轴 flex-start + .page-inner 的 margin:auto：
+         内容不超高时垂直居中，超高时从顶部开始，不会裁掉顶端。 */
+      justify-content:flex-start;
       align-items:center;
       padding:100px 24px 60px;
       opacity:0;
@@ -102,6 +112,12 @@
                   visibility 0.5s;
       visibility:hidden;
       pointer-events:none;
+    }
+    section.page::-webkit-scrollbar { width:6px; }
+    section.page::-webkit-scrollbar-track { background:transparent; }
+    section.page::-webkit-scrollbar-thumb {
+      background:rgba(80,160,255,0.15);
+      border-radius:6px;
     }
     section.page.active {
       opacity:1;
@@ -117,13 +133,16 @@
       pointer-events:none;
     }
 
-    /* 页面内容内层约束 */
+    /* 页面内容内层约束
+       margin:auto —— 内容不超高时垂直居中；超出时从顶部开始，
+       不会像 justify-content:center 那样把顶端内容裁掉。 */
     .page-inner {
       width:100%;
       max-width:720px;
       text-align:center;
       position:relative;
       z-index:1;
+      margin:auto;
     }
 
     /* 第一页：系统 */
@@ -133,16 +152,24 @@
     #page-design .page-inner { max-width:720px; }
 
     /* 第三页：网络舞台 */
-    #page-network {
-      justify-content:flex-start;
-      align-items:flex-start;
-      padding:60px 40px 60px;
-      overflow-y:auto;
-    }
+    #page-network { padding:60px 40px 60px; }
     #page-network .page-inner {
       width:100%;
       max-width:1100px;
       text-align:left;
+    }
+
+    /* 第四页：定价 */
+    #page-pricing { padding:96px 40px 60px; }
+    #page-pricing .page-inner {
+      max-width:1080px;
+      text-align:left;
+    }
+
+    /* 第五页：等待名单 */
+    #page-waitlist .page-inner {
+      max-width:720px;
+      text-align:center;
     }
 
     /* ===== Hero ===== */
@@ -505,7 +532,11 @@
       opacity:0.5;
       transition:opacity 0.4s ease, transform 0.4s ease;
     }
-    .scroll-indicator.hide { opacity:0; transform:translateX(-50%) translateY(10px); }
+    .scroll-indicator.hide {
+      opacity:0;
+      transform:translateX(-50%) translateY(10px);
+      animation:none; /* 动画的 opacity 会覆盖 .hide，最后一页需彻底隐藏 */
+    }
     @keyframes scrollBounce {
       0%,100% { transform:translateX(-50%) translateY(0); opacity:0.3; }
       50% { transform:translateX(-50%) translateY(-6px); opacity:0.6; }
@@ -518,8 +549,10 @@
       nav a { font-size:0.6rem; letter-spacing:0.08em; }
       nav .brand { margin-right:12px; font-size:0.6rem; }
       section.page { padding:80px 16px 40px; }
-      #page-network { padding:20px; justify-content:center; align-items:center; }
+      #page-network { padding:20px; }
       #page-network .page-inner { max-width:100%; text-align:center; }
+      #page-pricing { padding:78px 16px 36px; }
+      #page-waitlist .page-inner { max-width:100%; }
       .net-stage-panel { width:92%; max-width:320px; padding:14px 12px; }
       .net-panel-stats { gap:4px; }
       .net-stat-value { font-size:1.2rem; }
@@ -528,7 +561,7 @@
     }
   </style>
 </head>
-<body>
+<body data-title-i18n="doc.site">
 
   <!-- 星空铺底画布（所有页面共用） -->
   <canvas id="bg-canvas"></canvas>
@@ -537,15 +570,16 @@
 
   <!-- 导航 -->
   <nav>
-    <span class="brand">Mebular</span>
+    <a class="brand" href="#page-hero" data-page="page-hero">Mebular</a>
     <div class="links">
-      <a href="#" data-page="page-hero">系统</a>
-      <a href="#" data-page="page-network">网络</a>
-      <a href="#" data-page="page-design">设计</a>
-      <a href="pricing.html">定价</a>
-      <a href="waitlist.html">等待名单</a>
-      <a href="https://github.com/Windsander/Mebular" target="_blank" rel="noopener" class="github-link">GitHub</a>
+      <a href="#page-hero" data-page="page-hero" data-i18n="nav.system">系统</a>
+      <a href="#page-network" data-page="page-network" data-i18n="nav.network">网络</a>
+      <a href="#page-design" data-page="page-design" data-i18n="nav.design">设计</a>
+      <a href="#page-pricing" data-page="page-pricing" data-i18n="nav.pricing">定价</a>
+      <a href="#page-waitlist" data-page="page-waitlist" data-i18n="nav.waitlist">等待名单</a>
+      <a href="https://github.com/Windsander/Mebular" target="_blank" rel="noopener" class="github-link" data-i18n="nav.github">GitHub</a>
     </div>
+    <button class="lang-toggle" type="button" data-lang-toggle data-i18n-aria="lang.aria" aria-label="切换语言" data-i18n="lang.toggle">EN</button>
   </nav>
 
   <!-- ====== 页面栈 ====== -->
@@ -555,13 +589,13 @@
     <section class="page active" id="page-hero" data-page-name="系统">
       <div class="page-inner">
         <section class="hero">
-          <span class="tag">v1.0 · early design</span>
+          <span class="tag" data-i18n="hero.tag">v1.0 · 早期设计</span>
           <h1>Mebular</h1>
-          <p>
+          <p data-i18n-html="hero.subtitle">
             分布式存储的跨广域网记忆系统<br>
             所有设备拥有相同的记忆，共同构造一张共享的知识图谱。
           </p>
-          <div class="mission">
+          <div class="mission" data-i18n-html="hero.mission">
             <strong>没有中心服务器。</strong> 每一个节点都是对等的，<br>
             记忆在它们之间分散存储、保持同步。<br>
             星空中的每一颗星，都可以成为网络中的一个记忆节点。
@@ -569,8 +603,8 @@
         </section>
 
         <section class="card" id="overview">
-          <h2>系统概览</h2>
-          <p>
+          <h2 data-i18n="overview.title">系统概览</h2>
+          <p data-i18n-html="overview.body">
             Mebular 是一个<strong>分布式记忆存储系统</strong>，通过关联性图记忆组织跨域知识。<br>
             每个设备（节点）存储相同的记忆集，系统在它们之间保持同步。<br>
             记忆以图的形式组织：节点之间怎么关联，决定了知识的结构长什么样。<br>
@@ -584,15 +618,15 @@
     <section class="page" id="page-network" data-page-name="网络">
       <div class="page-inner">
         <div class="net-stage-panel">
-          <div class="net-panel-title">✦ 网络舞台 · 点击星空注册节点</div>
+          <div class="net-panel-title" data-i18n="network.panel.title">✦ 网络舞台 · 点击星空注册节点</div>
           <div class="net-panel-stats">
             <div class="net-panel-stat">
               <div class="net-stat-value" id="stat-nodes">0</div>
-              <div class="net-stat-label">节点</div>
+              <div class="net-stat-label" data-i18n="network.stat.nodes">节点</div>
             </div>
             <div class="net-panel-stat">
               <div class="net-stat-value" id="stat-links">0</div>
-              <div class="net-stat-label">链路</div>
+              <div class="net-stat-label" data-i18n="network.stat.links">链路</div>
             </div>
             <div class="net-panel-stat">
               <div class="net-stat-value" id="stat-memory">—</div>
@@ -601,7 +635,7 @@
           </div>
           <div class="net-panel-divider"></div>
           <div class="net-panel-devices" id="net-devices-list"></div>
-          <button class="net-add-btn" id="net-add-btn">✦ 添加节点</button>
+          <button class="net-add-btn" id="net-add-btn" data-i18n="network.add">✦ 添加节点</button>
         </div>
       </div>
     </section>
@@ -610,40 +644,40 @@
     <section class="page" id="page-design" data-page-name="设计">
       <div class="page-inner">
         <section class="card">
-          <h2>设计理念</h2>
+          <h2 data-i18n="design.title">设计理念</h2>
           <div class="concept-grid">
             <div class="concept-item">
-              <div class="label">分布式存储</div>
-              <div class="desc">
+              <div class="label" data-i18n="design.c1.label">分布式存储</div>
+              <div class="desc" data-i18n-html="design.c1.desc">
                 没有中心服务器。每一个节点独立存储完整的记忆集，<br>
                 系统通过对等同步协议保持各节点之间的一致性。
               </div>
             </div>
             <div class="concept-item">
-              <div class="label">共享记忆</div>
-              <div class="desc">
+              <div class="label" data-i18n="design.c2.label">共享记忆</div>
+              <div class="desc" data-i18n-html="design.c2.desc">
                 所有设备拥有相同的记忆。任一节点添加或更新记忆，<br>
                 该变更会传播到网络中的所有其他节点，<br>
                 使整个记忆图谱保持一致。
               </div>
             </div>
             <div class="concept-item">
-              <div class="label">跨广域网</div>
-              <div class="desc">
+              <div class="label" data-i18n="design.c3.label">跨广域网</div>
+              <div class="desc" data-i18n-html="design.c3.desc">
                 节点可以分布在广域网的不同位置，通过星空般的拓扑结构<br>
                 互相连接。距离不影响记忆的一致性。
               </div>
             </div>
             <div class="concept-item">
-              <div class="label">关联性图记忆</div>
-              <div class="desc">
+              <div class="label" data-i18n="design.c4.label">关联性图记忆</div>
+              <div class="desc" data-i18n-html="design.c4.desc">
                 记忆以图的形式组织，节点之间的关联定义了知识的结构。<br>
                 类似 Griphify 等以代码为目标的关联记忆方式。
               </div>
             </div>
             <div class="concept-item accent">
-              <div class="label">未回答的问题</div>
-              <div class="desc">
+              <div class="label" data-i18n="design.c5.label">未回答的问题</div>
+              <div class="desc" data-i18n-html="design.c5.desc">
                 跨域记忆互通、各端记忆系统可能存在差异的问题尚未解决。<br>
                 向量化更新成本较大，未来可能转向图记忆方式。
               </div>
@@ -653,26 +687,195 @@
       </div>
     </section>
 
+    <!-- ====== 第四页：定价 ====== -->
+    <section class="page" id="page-pricing" data-page-name="定价">
+      <div class="page-inner">
+
+        <header class="page-head reveal">
+          <span class="tag" data-i18n="pricing.tag">v1.0 · 定价预告</span>
+          <h1 data-i18n="pricing.title">定价</h1>
+          <p data-i18n-html="pricing.subtitle">托管 Relay 订阅。分布式可验证的 agent 记忆网络，<br>数据主权始终在你手中。</p>
+          <div class="billing-note" data-i18n="pricing.billing">价格以美元计 · 按月订阅 · 可随时取消</div>
+        </header>
+
+        <section class="pricing-grid" aria-label="pricing plans">
+
+          <!-- Free -->
+          <article class="plan reveal d1">
+            <div class="plan-name" data-i18n="plan.free.name">Free</div>
+            <div class="price-row">
+              <span class="price" data-i18n="plan.free.price">$0</span>
+              <span class="period" data-i18n="plan.free.period">永久免费</span>
+            </div>
+            <p class="plan-desc" data-i18n="plan.free.desc">适合个人体验分布式记忆网络。</p>
+            <ul class="features">
+              <li data-i18n="plan.free.f1">公共 relay 节点</li>
+              <li data-i18n="plan.free.f2">最多 2 台设备</li>
+              <li data-i18n="plan.free.f3">公平使用限额</li>
+              <li data-i18n="plan.free.f4">基础记忆同步</li>
+            </ul>
+            <a class="btn" href="#page-waitlist" data-i18n="plan.free.cta">加入等待名单</a>
+          </article>
+
+          <!-- Pro -->
+          <article class="plan featured reveal d2">
+            <span class="badge" data-i18n="plan.pro.badge">推荐</span>
+            <div class="plan-name" data-i18n="plan.pro.name">Pro</div>
+            <div class="price-row">
+              <span class="price" data-i18n="plan.pro.price">$8</span>
+              <span class="period" data-i18n="plan.pro.period">/ 月</span>
+            </div>
+            <p class="plan-desc" data-i18n="plan.pro.desc">为长期使用与多设备场景打造的专属实例。</p>
+            <ul class="features">
+              <li data-i18n="plan.pro.f1">专属 relay 实例</li>
+              <li data-i18n="plan.pro.f2">服务等级协议（SLA）</li>
+              <li data-i18n="plan.pro.f3">更多设备（最多 10 台）</li>
+              <li data-i18n="plan.pro.f4">优先同步与更低延迟</li>
+              <li data-i18n="plan.pro.f5">可验证审计日志</li>
+            </ul>
+            <a class="btn primary" href="#page-waitlist" data-i18n="plan.pro.cta">加入等待名单</a>
+          </article>
+
+          <!-- Team -->
+          <article class="plan reveal d3">
+            <div class="plan-name" data-i18n="plan.team.name">Team</div>
+            <div class="price-row">
+              <span class="price" data-i18n="plan.team.price">$12</span>
+              <span class="period" data-i18n="plan.team.period">/ 席 · 月</span>
+            </div>
+            <p class="plan-desc" data-i18n="plan.team.desc">面向团队的多域记忆协作与合规审计。</p>
+            <ul class="features">
+              <li data-i18n="plan.team.f1">多域管理</li>
+              <li data-i18n="plan.team.f2">完整审计可见性</li>
+              <li data-i18n="plan.team.f3">优先支持</li>
+              <li data-i18n="plan.team.f4">席位与角色权限</li>
+              <li data-i18n="plan.team.f5">合规导出与私有部署咨询</li>
+            </ul>
+            <a class="btn" href="#page-waitlist" data-i18n="plan.team.cta">加入等待名单</a>
+          </article>
+
+        </section>
+
+        <p class="form-note reveal d4" style="margin-top:28px;text-align:center;">
+          <span data-i18n="pricing.includes.title">所有套餐均包含</span> ·
+          <span data-i18n="pricing.includes.body">端到端加密 · 设备侧记忆存储 · 开源客户端 · 可验证同步</span>
+        </p>
+
+        <!-- FAQ -->
+        <section class="faq">
+          <h2 class="section-title" data-i18n="faq.title">常见问题</h2>
+          <div class="faq-list">
+            <details class="faq-item">
+              <summary data-i18n="faq.q1">什么是托管 Relay？</summary>
+              <div class="faq-body" data-i18n="faq.a1">Relay 是记忆同步的中转节点。托管 Relay 由我们部署与运维，你无需自己搭建服务器，即可让多台设备保持记忆同步。</div>
+            </details>
+            <details class="faq-item">
+              <summary data-i18n="faq.q2">Free 和 Pro 有什么区别？</summary>
+              <div class="faq-body" data-i18n="faq.a2">Free 使用公共 relay 并受公平使用限额约束，最多 2 台设备。Pro 提供专属 relay 实例、SLA 保障与更多设备，同步更稳定、延迟更低。</div>
+            </details>
+            <details class="faq-item">
+              <summary data-i18n="faq.q3">你们能看到我的记忆数据吗？</summary>
+              <div class="faq-body" data-i18n="faq.a3">不能。记忆在设备侧加密，Relay 只负责转发与验证，不持有明文。审计日志可验证，但无法读取内容，数据主权始终属于你。</div>
+            </details>
+            <details class="faq-item">
+              <summary data-i18n="faq.q4">可以随时取消或更换套餐吗？</summary>
+              <div class="faq-body" data-i18n="faq.a4">可以。订阅按月计费，可随时升级、降级或取消；取消后，当前计费周期结束前仍可正常使用。</div>
+            </details>
+            <details class="faq-item">
+              <summary data-i18n="faq.q5">企业合规与私有部署怎么支持？</summary>
+              <div class="faq-body" data-i18n="faq.a5">Team 套餐提供多域管理、完整审计可见性与优先支持。如需私有部署或定制合规方案，请在等待名单中选择「企业合规」与我们联系。</div>
+            </details>
+          </div>
+        </section>
+
+      </div>
+    </section>
+
+    <!-- ====== 第五页：等待名单 ====== -->
+    <section class="page" id="page-waitlist" data-page-name="等待名单">
+      <div class="page-inner">
+
+        <header class="page-head reveal">
+          <span class="tag" data-i18n="waitlist.tag">v1.0 · 等待名单</span>
+          <h1 data-i18n="waitlist.title">加入等待名单</h1>
+          <p data-i18n="waitlist.subtitle">留下邮箱，第一时间获取托管 Relay 的开放通知。</p>
+        </header>
+
+        <section class="form-card reveal d1">
+          <!-- Buttondown 嵌入表单：提交地址由 site.js 中的 BUTTONDOWN_EMBED_URL 统一注入 -->
+          <form id="waitlist-form"
+                method="post"
+                target="popupwindow"
+                novalidate>
+            <input type="hidden" name="embed" value="1" />
+
+            <div class="field">
+              <label for="email" data-i18n="form.email.label">邮箱</label>
+              <input type="email"
+                     id="email"
+                     name="email"
+                     autocomplete="email"
+                     required
+                     data-i18n-placeholder="form.email.placeholder"
+                     placeholder="you@example.com" />
+            </div>
+
+            <div class="field">
+              <label for="intent" data-i18n="form.intent.label">付费意向</label>
+              <select id="intent" name="metadata__paid-interest" required>
+                <option value="" disabled selected data-i18n="form.intent.placeholder">请选择</option>
+                <option value="hosted-relay" data-i18n="form.intent.relay">托管 relay</option>
+                <option value="enterprise-compliance" data-i18n="form.intent.enterprise">企业合规</option>
+                <option value="consulting" data-i18n="form.intent.consulting">咨询集成</option>
+              </select>
+            </div>
+
+            <button class="btn primary" type="submit" data-i18n="form.submit">提交</button>
+
+            <div class="form-status" id="form-status" role="status" aria-live="polite"></div>
+            <p class="form-note" data-i18n="form.privacy">我们仅使用你的邮箱发送产品更新，不会分享给第三方。</p>
+          </form>
+
+          <div class="form-success" id="form-success" role="status" hidden>
+            <div class="check">✦</div>
+            <h2 data-i18n="form.success.title">已收到，谢谢！</h2>
+            <p data-i18n="form.success.body">我们会通过邮件与你联系。在此之前，欢迎先在 GitHub 上了解更多。</p>
+            <a class="btn" href="#page-pricing" data-i18n="form.success.back">返回定价</a>
+          </div>
+        </section>
+
+        <!-- 页脚 -->
+        <footer>
+          <div class="foot-brand" data-i18n="footer.brand">Mebular · 分布式记忆网络</div>
+          <a href="https://github.com/Windsander/Mebular" target="_blank" rel="noopener" data-i18n="footer.github">GitHub →</a>
+          &ensp;·&ensp;<span data-i18n="footer.license">MIT 协议</span>&ensp;·&ensp;<span data-i18n="footer.stage">早期设计阶段</span>
+        </footer>
+
+      </div>
+    </section>
+
   </div>
 
   <!-- 滚动提示 -->
-  <div class="scroll-indicator" id="scroll-indicator">↓ 向下翻页</div>
-
-  <!-- 页脚 -->
-  <footer id="github">
-    <div class="foot-brand">Mebular · 分布式记忆网络</div>
-    <a href="https://github.com/Windsander/Mebular" target="_blank" rel="noopener">GitHub →</a>
-    &ensp;·&ensp;MIT 协议&ensp;·&ensp;早期设计阶段
-  </footer>
+  <div class="scroll-indicator" id="scroll-indicator" data-i18n="scroll.hint">↓ 向下翻页</div>
 
   <!-- ===== 核心脚本 ===== -->
   <script src="nebula.js"></script>
   <script src="stars.js"></script>
+  <!-- 共享脚本：双语字典 / 语言切换 / 等待名单表单（Buttondown）。
+       背景动画由下方内联脚本接管（检测到 #net-canvas 时 site.js 会跳过自带背景）。 -->
+  <script src="site.js"></script>
   <script>
   (function(){
     'use strict';
 
     var DEBUG = false;
+
+    // 动态文案翻译：字典由共享的 site.js 提供（window.MEBULAR_T）。
+    // 网络舞台的设备状态、空态提示等由 JS 生成，需要跟随语言切换重绘。
+    function T(key) {
+      return (window.MEBULAR_T && window.MEBULAR_T(key)) || key;
+    }
 
     var bgCanvas = document.getElementById('bg-canvas');
     var netCanvas = document.getElementById('net-canvas');
@@ -1016,8 +1219,8 @@
 
       if (n === 0) {
         statMemoryEl.textContent = '—';
-        statMemoryLabelEl.textContent = '等待节点';
-        netDevicesListEl.innerHTML = '<div class="net-empty-hint">点击星空中的星星<br>注册一个节点</div>';
+        statMemoryLabelEl.textContent = T('network.stat.waiting');
+        netDevicesListEl.innerHTML = '<div class="net-empty-hint">' + T('network.empty') + '</div>';
         return;
       }
 
@@ -1027,15 +1230,15 @@
       for (var i = 0; i < n; i++) {
         var node = net.nodes[i];
         var dotClass = 'net-device-dot';
-        var statusText = '已同步';
+        var statusText = T('network.status.synced');
         var statusClass = 'synced';
         if (node.syncStatus === 'syncing') {
           dotClass += ' syncing';
-          statusText = '同步中';
+          statusText = T('network.status.syncing');
           statusClass = 'syncing';
         } else if (node.syncStatus === 'idle') {
           dotClass += ' idle';
-          statusText = '已同步·休眠';
+          statusText = T('network.status.idle');
           statusClass = '';
         } else {
           syncedCount++;
@@ -1044,14 +1247,14 @@
           '<div class="' + dotClass + '"></div>' +
           '<div class="net-device-name">' + node.name + '</div>' +
           '<div class="net-device-status ' + statusClass + '">' + statusText + '</div>' +
-          '<button class="net-device-remove-btn" aria-label="移除 ' + node.name + '" title="移除">−</button>' +
+          '<button class="net-device-remove-btn" aria-label="' + T('network.remove') + ' ' + node.name + '" title="' + T('network.remove') + '">−</button>' +
           '</div>';
       }
       netDevicesListEl.innerHTML = html;
 
-      var memText = (syncedCount === n && n > 0) ? '全部同步' : (n > 0 ? syncedCount + '/' + n : '—');
+      var memText = (syncedCount === n && n > 0) ? T('network.mem.all') : (n > 0 ? syncedCount + '/' + n : '—');
       statMemoryEl.textContent = memText;
-      statMemoryLabelEl.textContent = (syncedCount === n && n > 0) ? '✓ 一致' : (n > 0 ? '同步中...' : '未连接');
+      statMemoryLabelEl.textContent = (syncedCount === n && n > 0) ? T('network.mem.consistent') : T('network.mem.syncing');
     }
 
     // ======================= 节点删除 =======================
@@ -1080,16 +1283,13 @@
     var pageEls = [
       document.getElementById('page-hero'),
       document.getElementById('page-network'),
-      document.getElementById('page-design')
+      document.getElementById('page-design'),
+      document.getElementById('page-pricing'),
+      document.getElementById('page-waitlist')
     ];
-
-    // 每页指针（供点击/导航使用）
-    var pageHeroEl     = document.getElementById('page-hero');
-    var pageNetworkEl  = document.getElementById('page-network');
-    var pageDesignEl   = document.getElementById('page-design');
     pages = pageEls.filter(function(el){ return el; });
 
-    // 初始化
+    // 初始化：仅第一页 active
     pages.forEach(function(p, i){
       if (i === 0) {
         p.classList.add('active');
@@ -1097,6 +1297,60 @@
         p.classList.remove('active');
       }
     });
+
+    /** 同步导航高亮（SYSTEM/NETWORK/DESIGN/PRICING/WAITLIST，不含品牌链接） */
+    function updateNavHighlight() {
+      var links = document.querySelectorAll('nav .links a[data-page]');
+      var activeId = pages[currentPageIndex] && pages[currentPageIndex].id;
+      for (var i = 0; i < links.length; i++) {
+        if (links[i].getAttribute('data-page') === activeId) {
+          links[i].classList.add('is-active');
+        } else {
+          links[i].classList.remove('is-active');
+        }
+      }
+    }
+
+    /** 把当前页写入 URL hash，便于分享与刷新定位（不产生历史记录） */
+    function syncHash(idx) {
+      try {
+        var id = pages[idx] && pages[idx].id;
+        var base = location.pathname + location.search;
+        if (idx > 0 && id) history.replaceState(null, '', '#' + id);
+        else history.replaceState(null, '', base);
+      } catch (e) {}
+    }
+
+    /**
+     * 从事件目标向上寻找「在当前滚动方向上仍可滚动」的容器。
+     * 返回非 null 表示这次滚轮 / 滑动应先交给内部滚动，不触发切页。
+     * 这样高于 100vh 的定价 / 等待名单页可以正常滚动，滚到顶 / 底再翻页。
+     */
+    function findScrollableInDirection(target, dir) {
+      var el = target;
+      while (el && el !== document.body && el !== document.documentElement) {
+        var oy = '';
+        try { oy = window.getComputedStyle(el).overflowY; } catch (e) { oy = ''; }
+        if (oy === 'auto' || oy === 'scroll') {
+          var max = el.scrollHeight - el.clientHeight;
+          if (max > 1) {
+            if (dir > 0 ? el.scrollTop < max - 1 : el.scrollTop > 1) return el;
+          }
+        }
+        el = el.parentElement;
+      }
+      return null;
+    }
+
+    /** 当前活动页若在该方向上仍可滚动，返回它（键盘方向键优先滚动内部） */
+    function activeScrollable(dir) {
+      var el = pages[currentPageIndex];
+      if (!el) return null;
+      var max = el.scrollHeight - el.clientHeight;
+      if (max <= 1) return null;
+      if (dir > 0 ? el.scrollTop < max - 1 : el.scrollTop > 1) return el;
+      return null;
+    }
 
     /** 切换到目标页面 */
     function switchToPage(targetIndex, userInitiated) {
@@ -1139,6 +1393,8 @@
       } catch (e) {}
 
       currentPageIndex = targetIndex;
+      updateNavHighlight();
+      syncHash(targetIndex);
 
       // 超时兜底：避免個别意外讓 isAnimating 長期鎖死
       setTimeout(function() {
@@ -1175,18 +1431,27 @@
         }
       }, { passive: true, capture: true });
 
-      // 滚轮：阈值式翻页（一个滚动手势 only 触发一次），冷却窗口长于过渡动画
+      // 滚轮：阈值式翻页（一个滚动手势只触发一次），冷却窗口长于过渡动画。
+      // 内部滚动优先：指针下方的容器还能滚动时先交给它，滚到顶 / 底才翻页。
       var wheelAccum = 0;
       var WHEEL_THRESHOLD = 60;        // 等效滚动距离阈值
       var wheelCooldownUntil = 0;
       var WHEEL_COOLDOWN_MS = 620;     // > PAGE_TRANSITION_MS，保证动画完毕后还有缓冲
       var lastDir = 0;
       window.addEventListener('wheel', function(e) {
+        var dir = e.deltaY > 0 ? 1 : -1;
+
         if (isAnimating) return;
+
+        if (findScrollableInDirection(e.target, dir)) {
+          // 交给原生滚动，清除累积，避免刚滚到底就立刻翻页
+          wheelAccum = 0;
+          lastDir = dir;
+          return;
+        }
+
         var now = performance.now();
         if (now < wheelCooldownUntil) return;
-
-        var dir = e.deltaY > 0 ? 1 : -1;
 
         if (dir !== lastDir) {
           wheelAccum = 0;
@@ -1206,12 +1471,52 @@
         }
       }, { passive: false });
 
+      // 移动端触摸：同样让内部滚动优先，滚到顶 / 底后一次滑动手势翻页
+      var touchStartX = 0, touchStartY = 0, touchTarget = null, touchActive = false, touchConsumed = false;
+      window.addEventListener('touchstart', function(e) {
+        if (e.touches.length !== 1) { touchActive = false; return; }
+        touchStartX = e.touches[0].clientX;
+        touchStartY = e.touches[0].clientY;
+        touchTarget = e.target;
+        touchActive = true;
+        touchConsumed = false;   // 本次手势是否被内部滚动消费
+      }, { passive: true, capture: true });
+
+      window.addEventListener('touchmove', function(e) {
+        if (!touchActive || e.touches.length !== 1) return;
+        var dy = e.touches[0].clientY - touchStartY;
+        var dx = e.touches[0].clientX - touchStartX;
+        if (Math.abs(dx) > Math.abs(dy)) return;        // 横向手势，忽略
+        var dir = dy < 0 ? 1 : -1;                      // 上滑 = 下一页
+        if (findScrollableInDirection(touchTarget, dir)) {
+          touchConsumed = true;                         // 交给内部滚动，本次手势不再翻页
+          return;
+        }
+        // 已到顶 / 底：拦截原生回弹，touchend 时决定是否翻页
+        if (Math.abs(dy) > 24 && e.cancelable) e.preventDefault();
+      }, { passive: false, capture: true });
+
+      window.addEventListener('touchend', function(e) {
+        var wasActive = touchActive;
+        touchActive = false;
+        if (!wasActive || touchConsumed) return;        // 内部滚动消费过 → 不翻页
+        if (!e.changedTouches || !e.changedTouches.length) return;
+        var t = e.changedTouches[0];
+        var dy = t.clientY - touchStartY;
+        var dx = t.clientX - touchStartX;
+        if (Math.abs(dx) > Math.abs(dy)) return;
+        if (Math.abs(dy) < 50) return;
+        if (dy < 0) goNext(); else goPrev();
+      }, { passive: true, capture: true });
+
       // 点击星空：点未注册的星则注册节点；点已注册的星则删除该节点
       window.addEventListener('click', function(e) {
-        if (e.target.closest('#net-add-btn')) return;
-        if (e.target.closest('.net-device-remove-btn')) return;
         // 只在网络舞台页响应星空点击
         if (currentPageIndex !== 1) return;
+        // 不拦截导航 / 链接 / 表单 / 卡片等交互元素
+        if (e.target.closest && e.target.closest('nav, a, button, input, select, textarea, label, summary, .card, .plan, .form-card, .faq-item, .net-stage-panel, .page-head, footer')) return;
+        if (e.target.closest('#net-add-btn')) return;
+        if (e.target.closest('.net-device-remove-btn')) return;
         // 找到鼠标位置最近的星（不管是否已注册），
         // 已注册就删掉、未注册就用它注册一个新节点
         var nearest = null, nearestD = Infinity;
@@ -1262,26 +1567,59 @@
         removeNode(net.nodes[idx]);
       });
 
-      // 导航链接
-      var navLinks = document.querySelectorAll('nav a[data-page]');
-      navLinks.forEach(function(link){
-        link.addEventListener('click', function(e){
-          e.preventDefault();
-          var targetId = link.getAttribute('data-page');
-          var idx = pages.findIndex(function(p){ return p.id === targetId; });
-          if (idx !== -1) switchToPage(idx, true);
-        });
+      // 导航 / 页内锚点：统一委托到 data-page 或 #page-* 链接
+      document.addEventListener('click', function(e){
+        var link = e.target.closest ? e.target.closest('a[data-page], a[href^="#page-"]') : null;
+        if (!link) return;
+        var targetId = link.getAttribute('data-page');
+        if (!targetId) {
+          var href = link.getAttribute('href') || '';
+          targetId = href.charAt(0) === '#' ? href.slice(1) : '';
+        }
+        var idx = pages.findIndex(function(p){ return p.id === targetId; });
+        if (idx === -1) return;
+        e.preventDefault();
+        if (idx === currentPageIndex) {
+          // 已在该页：平滑回到顶部
+          try { pages[idx].scrollTo({ top: 0, behavior: 'smooth' }); } catch (err) {}
+          return;
+        }
+        switchToPage(idx, true);
       });
 
-      // 键盘上下翻页
+      // 键盘翻页：表单控件内不拦截；页面可滚动时方向键先滚动内部
       window.addEventListener('keydown', function(e){
-        if (e.key === 'ArrowDown' || e.key === 'ArrowRight') {
-          e.preventDefault();
-          goNext();
-        } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') {
-          e.preventDefault();
-          goPrev();
+        var tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+        if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+        if (e.target && e.target.isContentEditable) return;
+
+        var dir = 0;
+        if (e.key === 'ArrowDown' || e.key === 'ArrowRight') dir = 1;
+        else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') dir = -1;
+        else return;
+
+        e.preventDefault();
+
+        var sc = activeScrollable(dir);
+        if (sc) {
+          sc.scrollBy({ top: dir * Math.max(120, sc.clientHeight * 0.5), behavior: 'smooth' });
+          return;
         }
+        if (dir > 0) goNext(); else goPrev();
+      });
+
+      // 语言切换时重绘动态文案（设备状态、空态提示等）
+      document.addEventListener('mebular:lang', function(){ updateUI(); });
+
+      // 地址栏手动改 hash / 浏览器前进后退也能定位分页
+      window.addEventListener('hashchange', function(){
+        var id = (location.hash || '').replace('#', '');
+        if (!id) {
+          if (currentPageIndex !== 0) switchToPage(0, true);
+          return;
+        }
+        var idx = pages.findIndex(function(p){ return p.id === id; });
+        if (idx !== -1 && idx !== currentPageIndex) switchToPage(idx, true);
       });
 
       window.addEventListener('resize', resizeAll);
@@ -1334,13 +1672,20 @@
       net.syncTimer = 2000;
       requestAnimationFrame(loop);
       updateUI();
+      updateNavHighlight();
 
-      // 支持从定价/等待名单页通过 hash 深链进入指定分页（如 index.html#page-network）
+      // 深链：index.html#page-pricing / #page-waitlist 等直接定位到对应页；
+      // 同时兼容旧链接 #pricing / #waitlist / #network / #design。
       try {
         var hash = (location.hash || '').replace('#', '');
+        if (hash === 'pricing')  hash = 'page-pricing';
+        if (hash === 'waitlist') hash = 'page-waitlist';
+        if (hash === 'network')  hash = 'page-network';
+        if (hash === 'design')   hash = 'page-design';
         if (hash) {
           var hashIdx = pages.findIndex(function(p){ return p.id === hash; });
           if (hashIdx > 0) switchToPage(hashIdx, true);
+          else if (hashIdx === 0) scrollIndicator.classList.remove('hide');
         }
       } catch (e) {}
 

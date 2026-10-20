@@ -398,6 +398,7 @@ async function main() {
         const badge = document.querySelector('#cloud-badge');
         const actions = document.querySelector('.topbar-actions');
         return Boolean(badge) && badge.hidden === false && /忆云 1/.test(badge.textContent)
+          && Boolean(badge.querySelector('.cloud-mark')) && Boolean(badge.querySelector('.cloud-name'))
           && Boolean(document.querySelector('#join-cloud')) && Boolean(document.querySelector('#invite-device'))
           && /加入忆云/.test(actions?.textContent ?? '') && !document.querySelector('#add-device');
       })()`));

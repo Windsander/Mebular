@@ -244,7 +244,7 @@
     </div>
   </div>
 
-  <div id="modal" class="modal" hidden>
+  <div id="modal" class="modal modal-center" hidden>
     <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <h2 id="modal-title"></h2>
       <p id="modal-body"></p>
@@ -255,12 +255,14 @@
     </div>
   </div>
 
-  <div id="namespace-new-modal" class="modal" hidden>
+  <div id="namespace-new-modal" class="modal modal-center" hidden>
     <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="namespace-new-title">
       <h2 id="namespace-new-title">新建记忆域</h2>
       <p class="modal-note muted">只有本机也可以开始记录；创建后默认订阅，可随时退订。</p>
-      <label class="cfg-label" for="namespace-new-name">名称</label>
-      <input id="namespace-new-name" class="crt-input" type="text" maxlength="64" autocomplete="off" placeholder="例如：阅读、工作、灵感" />
+      <div class="field">
+        <label for="namespace-new-name">名称</label>
+        <input id="namespace-new-name" class="crt-input" type="text" maxlength="64" autocomplete="off" placeholder="例如：阅读、工作、灵感" />
+      </div>
       <p id="namespace-new-error" class="crt-warn" role="alert" hidden></p>
       <div class="modal-actions">
         <button id="namespace-new-cancel" class="btn" type="button">取消</button>

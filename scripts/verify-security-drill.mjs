@@ -311,7 +311,7 @@ try {
       try {
         await app.setSecurityTier({ level: 'high', note: 'drill' });
         const write = await fleet.writeDeviceRevoke(app, { subject: 'device-B', breakGlass: proof.proof, note: 'drill break-glass kick' });
-        const revoked = await app.getRevokedDevices();
+        const revoked = await app.getBlockedDevices();
         check('D-3 恢复码踢人记录被全网采纳（revoked 含 subject）', revoked.includes('device-B'), { revoked });
         check('D-3 审计记录携带 breakGlass（恢复码标注来源）', hasPolicyType(D, 'device_revoke'), { eventId: write.id });
         // 重放：同一 nonce 用于**不同动作**（subject C；digest 不同）→ core 的 consumeNonce
@@ -373,7 +373,7 @@ try {
         try {
           await app.setSecurityTier({ level: 'high', note: 'drill' });
           const oldWrite = await fleet.writeDeviceRevoke(app, { subject: 'device-X', breakGlass: oldProof.proof, note: 'old key' });
-          const afterOld = await app.getRevokedDevices();
+          const afterOld = await app.getBlockedDevices();
           const stateAfterOld = await app.getSecurityTier();
           const oldRejected = (stateAfterOld.rejections ?? []).some(
             (r) => r.eventId === oldWrite.id && r.reason === 'invalid-proof',
@@ -384,7 +384,7 @@ try {
             { revoked: afterOld, rejections: stateAfterOld.rejections, oldEventId: oldWrite.id },
           );
           await fleet.writeDeviceRevoke(app, { subject: 'device-X', breakGlass: newProof.proof, note: 'new key' });
-          const afterNew = await app.getRevokedDevices();
+          const afterNew = await app.getBlockedDevices();
           check('D-4 core：新码签名可用（X 进 revoked）', afterNew.includes('device-X'), { revoked: afterNew });
         } finally {
           await app.shutdown();

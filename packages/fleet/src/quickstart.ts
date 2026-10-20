@@ -27,7 +27,7 @@ import {
   type FleetEncryption,
 } from './config.js';
 import { mebularOptions, offlineMebularOptions, onboardDevice } from './onboard.js';
-import { buildJoinToken } from './jointoken.js';
+import { activateJoinInvite, buildJoinToken } from './jointoken.js';
 
 /** 加入码内信任材料的记录形状（Stage 2 将由令牌取代）。 */
 export interface JoinTrustMaterial {
@@ -413,6 +413,8 @@ export async function quickstart(input: QuickstartInput): Promise<QuickstartResu
   let inviteToken: string;
   try {
     const token = await buildJoinToken({ mebular: tokenBuilder, deviceId: config.device, namespace, endpoint: joinEndpoint });
+    // 预生成令牌也进入单一有效邀请状态：之后在控制台重新生成会撤销它。
+    await activateJoinInvite(config.storagePath, token.nonce);
     inviteToken = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
   } finally {
     await tokenBuilder.shutdown();

@@ -23,6 +23,7 @@ export {
   joinNonceStatePath,
   readJoinNonceState,
   writeJoinNonceState,
+  activateJoinInvite,
   requestJoin,
   joinWithToken,
   persistInviterHints,

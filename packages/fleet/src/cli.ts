@@ -55,7 +55,7 @@ import {
   writeJoinCodeFile,
   type ServiceInstaller,
 } from './quickstart.js';
-import { buildJoinToken, startJoinService, type JoinService } from './jointoken.js';
+import { activateJoinInvite, buildJoinToken, startJoinService, type JoinService } from './jointoken.js';
 import { renderTerminalQr, renderSvgQr } from './qr.js';
 import { createRequire } from 'node:module';
 import { joinWithToken } from './join.js';
@@ -808,6 +808,8 @@ async function runInvite(args: Args): Promise<number> {
       endpoint,
       ttlMs,
     });
+    // 单一有效邀请：与守护 /admin/api/invite 共用同一 nonce 状态（跨进程文件锁）。
+    await activateJoinInvite(config.storagePath, token.nonce);
     const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
     if (typeof args['token-file'] === 'string') await writeJoinCodeFile(args['token-file'], inline);
 

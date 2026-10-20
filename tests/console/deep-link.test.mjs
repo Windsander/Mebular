@@ -229,19 +229,21 @@ describe('UX-2 首屏叠加层（只读；星图本体不改）', () => {
 });
 
 describe('UX-2 邀请单动作页', () => {
-  it('主结果 = QR + 令牌复制；次级（端点编辑/多余命令/警告）收「详情」折叠', () => {
+  it('主结果 = QR + 令牌复制；无详情折叠 / 端点编辑 / CLI 命令', () => {
     // S3：结果面板从 renderInvite 抽成 showInviteResult（low 直接出；medium/high 门槛通过后复用）
     expect(consoleJs).toMatch(/function showInviteResult\(res\)/);
     expect(consoleJs).toContain('令牌即入网权限');
     expect(consoleJs).toContain('扫码即通');
-    expect(consoleJs).toContain('data-settings-fold="invite"');
-    expect(consoleJs).toContain("foldLabel('invite')");
-    expect(consoleJs).toContain('invite-endpoint');
+    expect(consoleJs).not.toContain('data-settings-fold="invite"');
+    expect(consoleJs).not.toContain("foldLabel('invite')");
+    expect(consoleJs).not.toContain('invite-endpoint');
+    expect(consoleJs).not.toContain('fleet join --token');
   });
 
-  it('重新生成收详情且二次确认（旧令牌失效是不可逆方向）', () => {
-    expect(consoleJs).toContain('invite-regen-inline');
-    expect(consoleJs).toMatch(/invite-regen-inline[\s\S]{0,260}confirm\(/);
+  it('重新生成有简短二次确认；TTL 选择不自动刷新', () => {
+    expect(consoleJs).toContain('id="invite-regenerate"');
+    expect(consoleJs).toMatch(/invite-regenerate[\s\S]{0,260}confirm\(/);
+    expect(consoleJs).toContain('改档后点「重新生成」才生效');
   });
 
   it('joinService 未启用 → 弹层内一键启用（复用设置写路径，不再指路常用）', () => {

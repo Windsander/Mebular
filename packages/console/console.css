@@ -1134,6 +1134,10 @@ body.modal-open { overflow: hidden; }
 /* ---------- C7：邀请二维码 ---------- */
 .qr-block { display: grid; gap: 6px; justify-items: start; }
 .qr-img { width: 180px; height: 180px; background: #fff; border-radius: 8px; padding: 6px; image-rendering: pixelated; }
+/* 邀请单动作：紧凑的有效期选择 + 重新生成（不自动刷新） */
+.invite-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 4px 0 2px; }
+.invite-ttl { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.invite-ttl select.crt-input { width: auto; min-width: 104px; padding: 4px 8px; }
 /* 轮 C：邀请弹层窄框内 label/输入/令牌各占整行，复制按钮不再被挤成竖排 */
 #invite-body .readout-block { flex-wrap: wrap; }
 #invite-body .readout-block > .domain-label { flex: 1 1 100%; }

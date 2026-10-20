@@ -5,7 +5,7 @@
 // - fail closed：非环回必须 TLS 且 auth != none，否则拒绝启动。
 // - 单实例：<home>/lock O_EXCL + PID 存活检测 + 陈旧回收。
 
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { chmod, copyFile, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
@@ -178,7 +178,7 @@ function deleteAtPath(root, path) {
   }
 }
 import { endpointHostname, isLoopbackHost } from './lan-host.mjs';
-import { buildJoinToken } from './jointoken.mjs';
+import { activateJoinInvite, buildJoinToken } from './jointoken.mjs';
 import { renderSvgQr } from './qr.mjs';
 
 // R1.3：记忆面 memory.* + 任务面 task.*（两轴独立；同一轴内 write ⇒ read、admin ⇒ 其余）
@@ -805,6 +805,11 @@ export async function startHttpServer({
     error.code = 'MCP_INSECURE_CONFIG';
     throw error;
   }
+
+  // 邀请 nonce 状态与 join 服务共用同一 storagePath（生成新令牌时撤销旧 active）。
+  const joinStateStoragePath = typeof runtime?.storagePath === 'string'
+    ? runtime.storagePath
+    : typeof config?.storagePath === 'string' ? config.storagePath : join(home, 'store.jsonl');
 
   // 忆云档案上下文（root 解析 + 单活）。自定义 home / 危险 env → available:false（档案端点 503/403）。
   const cloud = resolveCloudRoot({ home, env: process.env });
@@ -1997,17 +2002,22 @@ export async function startHttpServer({
       const endpoint = override ?? joinEndpoint;
       // C2：令牌携带邀请方可达端点（hints），新设备 join 后写入地址簿 → 自动选路
       const hints = collectInviteHints(app, config);
+      const nonce = randomBytes(16).toString('hex');
       const token = await buildJoinToken({
         mebular: app,
         deviceId,
         namespace: ns,
         endpoint,
         ttlMs,
+        nonce,
         ...(securityApproval !== null ? { securityApproval } : {}),
         ...hints,
       });
+      // 单一有效邀请：新令牌激活时把上一个 active nonce 放进 revoked（join 服务验证时拒绝）。
+      await activateJoinInvite(joinStateStoragePath, nonce);
       const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
       const endpointHost = endpointHostname(endpoint);
+      const invalidEndpoint = endpointHost === null;
       const loopback = endpointHost !== null && isLoopbackHost(endpointHost);
       const qrWarnings = [];
       const qrSvg = await renderSvgQr(inline, { onWarn: (m) => qrWarnings.push(m) });
@@ -2023,9 +2033,11 @@ export async function startHttpServer({
         expiresAt: token.expiresAt,
         ttlMs,
         ...(securityApproval !== null ? { securityApproval } : {}),
-        ...(loopback
-          ? { warning: '该端点是回环地址，另一台机器无法访问：请把 joinService.bind 设为 0.0.0.0（自动取本机 LAN IPv4），或在本面板填写新设备可达地址（如 http://<本机LAN IP>:端口）' }
-          : {}),
+        ...(invalidEndpoint
+          ? { warning: '邀请端点不是有效地址：请在「设置 → 高级 → 常驻服务」检查 joinService.bind/port，或手工修正 config.json 中的 joinService.endpoint。' }
+          : loopback
+            ? { warning: '该端点是回环地址，其他设备无法访问：请在「设置 → 高级 → 常驻服务」将 joinService.bind 设为 0.0.0.0。' }
+            : {}),
       });
     }
 
@@ -2955,6 +2967,7 @@ export async function startHttpServer({
             ttlMs,
             ...collectInviteHints(app, config),
           });
+          await activateJoinInvite(joinStateStoragePath, token.nonce);
           const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
           return sendJson(res, 200, { ok: true, token: inline, endpoint, namespace: ns, expiresAt: token.expiresAt, nonce: token.nonce });
         }

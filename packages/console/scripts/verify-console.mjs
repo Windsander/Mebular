@@ -1011,6 +1011,31 @@ try {
     const { decodeJoinToken } = await import('../../mcp/src/jointoken.mjs');
     const decoded = decodeJoinToken(inviteJson?.token ?? '');
     check('令牌可解码且指向本机守护', decoded?.inviterDeviceId === 'device-invite' && String(decoded?.endpoint ?? '').includes(String(invitePort)), `endpoint=${decoded?.endpoint}`);
+
+    // 单一有效邀请：再次生成（不同 TTL）→ 旧 token 进 revoked，兑换被拒。
+    const nextInvite = await fetch(`http://127.0.0.1:${inviteReady.port}/admin/api/invite`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-mebular-csrf': inviteCsrf, cookie: `mebular_csrf=${inviteCookie}` },
+      body: JSON.stringify({ ttlMs: 300000 }),
+    });
+    const nextJson = await nextInvite.json().catch(() => null);
+    const nextDecoded = decodeJoinToken(nextJson?.token ?? '');
+    check('邀请 TTL 透传：ttlMs=300000 → 响应与令牌一致',
+      nextInvite.status === 201 && nextJson?.ttlMs === 300000 && nextDecoded?.nonce !== decoded?.nonce,
+      `status=${nextInvite.status} ttlMs=${nextJson?.ttlMs}`);
+    const oldRedeem = await fetch(`http://127.0.0.1:${invitePort}/mebular/join`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ token: inviteJson?.token, deviceId: 'device-old-token', devicePublicKey: 'a'.repeat(64) }),
+    });
+    const oldRedeemJson = await oldRedeem.json().catch(() => null);
+    check('重新生成后旧 token 兑换被拒（revoked）',
+      oldRedeem.status === 403 && String(oldRedeemJson?.error ?? '').includes('revoked'),
+      `status=${oldRedeem.status} error=${oldRedeemJson?.error}`);
+    const nonceState = JSON.parse(await readFile(join(inviteHome, 'store.jsonl.join-tokens.json'), 'utf-8'));
+    check('nonce 状态持久化：active=新 nonce，revoked 含旧 nonce',
+      nonceState?.active === nextDecoded?.nonce && Array.isArray(nonceState?.revoked) && nonceState.revoked.includes(decoded?.nonce),
+      `active=${nonceState?.active === nextDecoded?.nonce} revoked=${nonceState?.revoked?.length}`);
   }
 
   // ---------- F-C6：邀请端点必须为新设备可达地址（bind=0.0.0.0 时不得写回环） ----------
@@ -1584,12 +1609,12 @@ try {
 
     const iaFolds = (await import('../settings-ia.js')).IA_SETTINGS_FOLDS;
     const foldIds = iaFolds.map((fold) => fold.id);
-    const renderedFolds = ['mcp-danger', 'diagnostics', 'about-runtime', 'invite'].filter((id) => jsSrc.includes(`data-settings-fold="${id}"`));
-    check('U-1 折叠白名单：≤5 且设置/关于/邀请只渲染白名单内类型',
-      iaFolds.length <= 5 && renderedFolds.length === 4
+    const renderedFolds = ['mcp-danger', 'diagnostics', 'about-runtime'].filter((id) => jsSrc.includes(`data-settings-fold="${id}"`));
+    check('U-1 折叠白名单：≤5 且设置/关于只渲染白名单内类型（邀请无详情）',
+      iaFolds.length <= 5 && renderedFolds.length === 3
         && !jsSrc.includes('cfg-more') && !jsSrc.includes('task-card-more') && !jsSrc.includes('page-more')
         && !/<details/.test(jsSrc.slice(jsSrc.indexOf('function renderCfgField'), jsSrc.indexOf('function fieldOf')))
-        && foldIds.every((id) => ['mcp-danger', 'diagnostics', 'about-runtime', 'invite', 'assistants'].includes(id)),
+        && foldIds.every((id) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(id)),
       `folds=${JSON.stringify(foldIds)} rendered=${JSON.stringify(renderedFolds)}`);
 
     const codeOnly = jsSrc.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
@@ -1609,8 +1634,8 @@ try {
         && !jsSrc.includes('修改写入 <code>')
         && jsSrc.includes("copyRowOf('配置文件', configPath)")
         && jsSrc.includes('写盘备份')
-        && jsSrc.includes('兑换只建立入网信任')
-        && !jsSrc.includes('兑换令牌只建立入网信任')
+        && !jsSrc.includes('fold-invite')
+        && jsSrc.includes('改档后点「重新生成」才生效')
         && cssSrc.includes('max-width: 62ch'),
       '页头/写盘/邀请/行长四项配套');
 
@@ -1674,23 +1699,43 @@ try {
         && consoleSrc2.includes('切换忆云') && consoleSrc2.includes('已归档') && consoleSrc2.includes('加入令牌'),
       '用户可见词表零违例');
 
-    // E1 · 邀请单屏：令牌 + 二维码（缺依赖降级）+ 复制在首屏；机制说明收「详情」
+    // E1/U-1 · 邀请单屏：令牌 + 二维码（缺依赖降级）+ 忆云身份 + TTL/重新生成；无详情折叠。
     const inviteSrc = (() => {
       const start = consoleSrc2.indexOf('function showInviteResult');
       const end = consoleSrc2.indexOf("$('#invite-device')", start);
       return start >= 0 && end > start ? consoleSrc2.slice(start, end) : '';
     })();
-    const inviteDetailsAt = inviteSrc.indexOf('<details');
-    check('E1 邀请单屏：首屏令牌 + 二维码/降级 + 复制；端点与命令收「详情」',
+    const inviteIa = await import('../settings-ia.js');
+    const ttlIds = inviteIa.INVITE_TTL_OPTIONS.map((option) => option.ttlMs);
+    check('E1 邀请单屏：令牌 + 二维码/降级 + 复制 + 忆云身份；无详情/端点编辑/CLI 命令',
       inviteSrc.length > 0
-        && inviteDetailsAt > 0
-        && inviteSrc.indexOf('令牌（一次性') >= 0 && inviteSrc.indexOf('令牌（一次性') < inviteDetailsAt
-        && inviteSrc.indexOf('qrBlock') >= 0 && inviteSrc.indexOf('qrBlock') < inviteDetailsAt
-        && inviteSrc.indexOf('二维码不可用') >= 0
-        && inviteSrc.indexOf('data-copy=') >= 0
-        && /<details[^>]*>\s*<summary>\$\{escapeHtml\(foldLabel\('invite'\)\)\}/.test(inviteSrc)
-        && inviteSrc.slice(inviteDetailsAt).includes('${endpointEditor}'),
-      `detailsAt=${inviteDetailsAt}`);
+        && !inviteSrc.includes('<details')
+        && !inviteSrc.includes('data-settings-fold="invite"')
+        && !inviteSrc.includes('invite-endpoint')
+        && !inviteSrc.includes('endpointEditor')
+        && !inviteSrc.includes('fleet join --token')
+        && !inviteSrc.includes('默认记忆域')
+        && inviteSrc.includes('令牌（一次性')
+        && inviteSrc.includes('qrBlock')
+        && inviteSrc.includes('二维码不可用')
+        && inviteSrc.includes('data-copy=')
+        && inviteSrc.includes('invite-cloud-identity')
+        && inviteSrc.includes('令牌即入网权限'),
+      '无 details / endpointEditor / 命令；首屏令牌+QR+忆云行');
+    check('E1 邀请 TTL：档位精确（5/15/20 分钟、2/6/12/24 小时），默认 15 分钟；改档不自动刷新',
+      JSON.stringify(ttlIds) === JSON.stringify([300000, 900000, 1200000, 7200000, 21600000, 43200000, 86400000])
+        && inviteIa.INVITE_TTL_DEFAULT_MS === 900000
+        && consoleSrc2.includes('inviteTtlMs: INVITE_TTL_DEFAULT_MS')
+        && consoleSrc2.includes('改档后点「重新生成」才生效')
+        && /#invite-ttl[\s\S]{0,240}#invite-regenerate/.test(consoleSrc2)
+        && /body\.querySelector\('#invite-ttl'\)[\s\S]{0,240}state\.inviteTtlMs = value/.test(consoleSrc2),
+      `ttl=${JSON.stringify(ttlIds)} default=${inviteIa.INVITE_TTL_DEFAULT_MS}`);
+    check('E1 重新生成：简短二次确认后把选中 ttlMs 传给 POST /admin/api/invite',
+      /confirm\('重新生成后旧令牌立即失效。确定？'\)\)\s*void openInvite\(state\.inviteTtlMs\)/.test(consoleSrc2)
+        && /async function renderInvite\(ttlMs = state\.inviteTtlMs\)[\s\S]{0,260}body: \{ ttlMs \}/.test(consoleSrc2)
+        && /body: \{ code, ttlMs: selectedTtl \}/.test(consoleSrc2)
+        && /body: \{ approvalId, namespace: inviteNamespace\(\), ttlMs: selectedTtl \}/.test(consoleSrc2),
+      'low/medium/high 三条生成路径均带 ttlMs');
 
     // E1 · 邀请未启用时就地一键启用（复用设置写路径；不再指路「设置 → 常用」）
     check('E1 邀请未启用：弹层内一键启用并继续（改配置 + 重启提示）',
@@ -1803,8 +1848,9 @@ try {
       inviteRes.status === 201 && String(inviteJson?.qrSvg ?? '').startsWith('<svg'),
       { status: inviteRes.status, qr: String(inviteJson?.qrSvg ?? '').startsWith('<svg') ? 'svg' : 'missing' });
     const consoleSrc6 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
-    check('C7 控制台邀请面板渲染二维码与订阅说明',
-      ['扫码即通', 'qrSvg', '自行订阅'].every((token) => consoleSrc6.includes(token)));
+    check('C7 控制台邀请面板渲染二维码 + TTL/重新生成（无详情/订阅说明）',
+      ['扫码即通', 'qrSvg', 'id="invite-ttl"', 'id="invite-regenerate"'].every((token) => consoleSrc6.includes(token))
+        && !consoleSrc6.includes('fold-invite'));
     const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
     const fleetPkg = JSON.parse(await readFile(join(rootDir, 'packages', 'fleet', 'package.json'), 'utf-8'));
     check('C7 二维码依赖为精确 pin 的普通依赖（qrcode-generator）',

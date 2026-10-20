@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // L2 · NAT 隔离（docker-compose 三容器）：relay 公开；peerA/peerB 各自隔离网络、无入站端口。
-// 断言：relay-only 连通 + 同步收敛 + 授权负例（未授权分区不可见）。无 docker → SKIP（明列原因）。
+// 断言：relay-only 连通 + 同步收敛 + 订阅负例（未订阅分区不可见）。无 docker → SKIP（明列原因）。
 // relay 重启/IP 变更恢复见 `verify:wan:l2`（本机 relay-only 仿真，同一 libp2p relay 代码路径）。
 import { spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
@@ -49,14 +49,14 @@ if (!hasDocker) {
     }, 90000);
     check('① relay-only 收敛（A→B→A 往返）', !!synced, { a: readJson(join(state, 'A.json')), b: readJson(join(state, 'B.json')) });
 
-    writeFileSync(join(state, 'phase.json'), JSON.stringify({ epoch: 2, phase: 'authneg' }));
-    const authneg = await waitFor(() => {
+    writeFileSync(join(state, 'phase.json'), JSON.stringify({ epoch: 2, phase: 'subneg' }));
+    const subneg = await waitFor(() => {
       const sa = readJson(join(state, 'A.json'));
       const sb = readJson(join(state, 'B.json'));
       return sa?.secretCreated === true && typeof sb?.secretCount === 'number';
     }, 30000);
     const b = readJson(join(state, 'B.json'));
-    check('② 授权负例：未授权分区对隔离网络中的对端不可见', !!authneg && b?.secretCount === 0, { secretCount: b?.secretCount });
+    check('② 订阅负例：未订阅分区对隔离网络中的对端不可见', !!subneg && b?.secretCount === 0, { secretCount: b?.secretCount });
   } catch (error) {
     check('verify:wan:l2:docker 未抛异常', false, { error: error?.message || String(error) });
   } finally {

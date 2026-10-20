@@ -1,6 +1,6 @@
 // Fleet 订阅语义（库级）：onboard 自订阅 / subscribe / unsubscribe / subscribers / 建域 / 恢复。
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Mebular } from '@mebular/core';
@@ -9,6 +9,12 @@ import {
   namespaceSubscriptions,
   onboardDevice,
   offlineMebularOptions,
+  doctor,
+  saveFleetConfig,
+  planHandoff,
+  leaveNamespace,
+  rejoinNamespace,
+  rejoinReset,
   readMasterKeyFile,
   restoreDevice,
   subscribeNamespace,
@@ -115,6 +121,40 @@ describe('fleet 订阅语义', () => {
     } finally {
       await app.shutdown();
     }
+  });
+
+  it('rejoin/rejoinReset 包装器：曾订阅 → 可重入并落 reset 标记', async () => {
+    const app = await open();
+    await app.shutdown();
+    const rejoin = await rejoinNamespace(dir, { namespace: 'tasks' });
+    expect(rejoin).toMatchObject({ ok: true, namespace: 'tasks', reset: true, subscribed: true });
+    expect(await rejoinReset(dir, 'tasks')).toBe(true);
+  });
+
+  it('planHandoff/leaveNamespace 包装器：force 清理并写交接记录', async () => {
+    const plan = await planHandoff(dir, { namespace: 'tasks', successor: 'device-B' });
+    expect(plan.namespace).toBe('tasks');
+    expect(plan.successorSubscribed).toBe(false);
+    const left = await leaveNamespace(dir, { namespace: 'tasks', successor: 'device-B', force: true, note: 'test' });
+    expect(left).toMatchObject({ ok: true, namespace: 'tasks', forced: true });
+    expect(await rejoinReset(dir, 'tasks')).toBe(false);
+  });
+
+  it('doctor 分支：无法解析监听 / 守护不可达 / 未完成交接 / 心跳新鲜', async () => {
+    const config = await loadFleetConfig(fleetConfigPath(dir));
+    await saveFleetConfig(fleetConfigPath(dir), {
+      ...config,
+      listen: 'not-a-multiaddr',
+      daemon: { endpoint: 'http://127.0.0.1:1' },
+    });
+    await writeFile(`${config.storagePath}.handoff.json`, JSON.stringify({ namespace: 'tasks' }));
+    await writeFile(join(dir, 'service.heartbeat'), JSON.stringify({ ts: Date.now(), role: 'fleet-node', pid: 1, sha: 'test' }));
+    const report = await doctor(dir);
+    const byName = new Map(report.checks.map((check) => [check.name, check]));
+    expect(byName.get('监听地址')?.status).toBe('SKIP');
+    expect(byName.get('守护')?.status).toBe('FAIL');
+    expect(byName.get('交接状态')?.status).toBe('FAIL');
+    expect(byName.get('心跳新鲜')?.status).toBe('PASS');
   });
 
   it('订阅只能改自己：member 恒为本机', async () => {

@@ -102,7 +102,7 @@ try {
         deviceId,
         encryption,
         network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'], ...(relayServers ? { relayServers } : {}) } },
-        sync: { autoSync: true },
+        sync: { autoSync: true, namespaces: deviceId === 'device-A' ? ['default', 'secret'] : ['default'] },
       });
       await app.initialize();
       apps.push(app);

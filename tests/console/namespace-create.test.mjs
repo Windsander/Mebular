@@ -1,74 +1,97 @@
-// W-B 补充：共享页「新建记忆域」的接口契约
-// - 0 条记忆 / 0 台对端：GET /admin/api/namespaces 仍返回该域（declared=true, count=0）；
-// - 创建后默认自订阅；
-// - 写一条记忆后 count=1，重开存储后仍在。
+// W-B 补充：共享页「新建记忆域」的接口契约（原生 Node 子进程）
+//
+// 与 tests/mcp/security-gate.test.mjs 同策略：Jest coverage 的 ESM 图下，
+// `@mebular/core` 桶可能触发 `EndpointBook` 命名导出链接错误。用子进程跑真实
+// dist 入口 + admin handler，避免把 @mebular/core 拉进 coverage 模块图。
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect } from '@jest/globals';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = fileURLToPath(new URL('../..', import.meta.url));
+
+const HARNESS = String.raw`
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Mebular, MemoryService } from '@mebular/core';
-import { buildNamespaces } from '../../packages/mcp/src/admin.mjs';
+import { pathToFileURL } from 'node:url';
 
+const ROOT = process.env.WB_ROOT;
+const load = (rel) => import(pathToFileURL(join(ROOT, rel)).href);
+const { Mebular, MemoryService } = await load('dist/index.js');
+const { buildNamespaces } = await load('packages/mcp/src/admin.mjs');
+
+const dir = await mkdtemp(join(tmpdir(), 'console-new-ns-'));
+const storagePath = join(dir, 'store.jsonl');
+const master = await Mebular.generateUserMasterKey();
+const encryption = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
 const service = { status: async () => ({ stateHashByNamespace: {} }) };
 
+const open = () => new Mebular({
+  storagePath,
+  deviceId: 'device-A',
+  encryption,
+  network: { enabled: false },
+  sync: { namespaces: ['ledger'] },
+});
+
+let app = open();
+try {
+  await app.initialize();
+  await app.declareNamespace({ namespace: 'ledger' });
+  await app.subscribeNamespace('ledger');
+  const rows = await buildNamespaces({ app, service, config: { sync: { namespaces: ['ledger'] } } });
+  const empty = rows.find((row) => row.namespace === 'ledger');
+
+  const memories = new MemoryService(app);
+  await memories.write([{ type: 'fact', content: 'first', metadata: { namespace: 'ledger' } }]);
+  const afterRows = await buildNamespaces({ app, service, config: { sync: { namespaces: ['ledger'] } } });
+  const after = afterRows.find((row) => row.namespace === 'ledger');
+
+  await app.shutdown();
+  app = open();
+  await app.initialize();
+  const reopenedRows = await buildNamespaces({ app, service, config: { sync: { namespaces: ['ledger'] } } });
+  const reopened = reopenedRows.find((row) => row.namespace === 'ledger');
+
+  const subscription = await app.getNamespaceSubscriptions('ledger');
+  console.log(JSON.stringify({
+    empty: {
+      declared: empty?.declared,
+      count: empty?.count,
+      subscribed: empty?.selfSubscribed,
+      subscribers: subscription.subscribers,
+    },
+    after: { count: after?.count, declared: after?.declared },
+    reopened: { count: reopened?.count, declared: reopened?.declared, selfSubscribed: reopened?.selfSubscribed },
+  }));
+} finally {
+  await app.shutdown().catch(() => undefined);
+  await rm(dir, { recursive: true, force: true });
+}
+`;
+
 describe('共享页新建记忆域（0 记忆 / 0 对端）', () => {
-  let dir;
-  let storagePath;
-  let app;
-  let masterKeys;
-
-  beforeEach(async () => {
-    dir = await mkdtemp(join(tmpdir(), 'console-new-ns-'));
-    storagePath = join(dir, 'store.jsonl');
-    const master = await Mebular.generateUserMasterKey();
-    masterKeys = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
-    app = new Mebular({
-      storagePath,
-      deviceId: 'device-A',
-      encryption: masterKeys,
-      network: { enabled: false },
-      sync: { namespaces: ['ledger'] },
+  it('建域 + 默认自订阅：空域可见；写入后计数=1；重开存储仍在', () => {
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', HARNESS], {
+      cwd: ROOT,
+      encoding: 'utf-8',
+      timeout: 120_000,
+      env: { ...process.env, WB_ROOT: ROOT, NODE_NO_WARNINGS: '1' },
     });
-    await app.initialize();
-  });
-
-  afterEach(async () => {
-    await app?.shutdown();
-    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 30 });
-  });
-
-  it('建域 + 自订阅：空域也出现在目录且 selfSubscribed=true', async () => {
-    await app.declareNamespace({ namespace: 'ledger' });
-    await app.subscribeNamespace('ledger');
-    const rows = await buildNamespaces({ app, service, config: { sync: { namespaces: ['ledger'] } } });
-    const ledger = rows.find((row) => row.namespace === 'ledger');
-    expect(ledger).toMatchObject({ namespace: 'ledger', count: 0, declared: true, subscribed: true, selfSubscribed: true });
-    expect((await app.getNamespaceSubscriptions('ledger')).subscribers).toContain('device-A');
-  });
-
-  it('写入一条记忆后 count=1；重开存储后仍在', async () => {
-    await app.declareNamespace({ namespace: 'ledger' });
-    await app.subscribeNamespace('ledger');
-    const memories = new MemoryService(app);
-    await memories.write([{ type: 'fact', content: 'first', metadata: { namespace: 'ledger' } }]);
-
-    const rows = await buildNamespaces({ app, service, config: { sync: { namespaces: ['ledger'] } } });
-    expect(rows.find((row) => row.namespace === 'ledger')?.count).toBe(1);
-
-    await app.shutdown();
-    const master = await Mebular.generateUserMasterKey();
-    masterKeys = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
-    app = new Mebular({
-      storagePath,
-      deviceId: 'device-A',
-      encryption: masterKeys,
-      network: { enabled: false },
-      sync: { namespaces: ['ledger'] },
+    if (result.status !== 0) {
+      throw new Error(`namespace-create harness failed (exit ${result.status}):\n${result.stderr}\n${result.stdout}`);
+    }
+    const line = String(result.stdout).split('\n').filter((entry) => entry.trim().startsWith('{')).pop();
+    if (!line) throw new Error(`namespace-create harness produced no JSON:\n${result.stdout}\n${result.stderr}`);
+    const summary = JSON.parse(line);
+    expect(summary.empty).toEqual({
+      declared: true,
+      count: 0,
+      subscribed: true,
+      subscribers: ['device-A'],
     });
-    await app.initialize();
-    const again = await buildNamespaces({ app, service, config: { sync: { namespaces: ['ledger'] } } });
-    expect(again.find((row) => row.namespace === 'ledger')?.count).toBe(1);
-    expect(again.find((row) => row.namespace === 'ledger')?.declared).toBe(true);
+    expect(summary.after).toEqual({ count: 1, declared: true });
+    expect(summary.reopened).toEqual({ count: 1, declared: true, selfSubscribed: true });
   });
 });

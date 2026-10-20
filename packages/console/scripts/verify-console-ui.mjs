@@ -484,29 +484,42 @@ async function main() {
     // H-1/UX-2：设置 · AI 助手专区（连接页已收编进设置；单列表 + 行内闭环）
     await evalJs('document.querySelector("#open-settings").click()');
     check('设置弹层打开', await waitFor('document.querySelector("#settings")?.hidden === false'));
-    // 轮 C 症状①：背板固定不滚，滚动收进 .modal-box；弹层打开时页面滚动锁定
-    check('轮 C 弹层壳：背板不滚 + 内容框内滚 + 页面滚动锁定',
+    // U-3 症状①：背板/设置框不滚，只有提示下划线以下的 .settings-scroll 滚动；页面滚动锁定
+    check('U-3 设置壳：提示下划线 + 仅内容区滚动 + 右上角 X',
       await evalJs(`(() => {
         const modal = document.querySelector('#settings');
         const box = modal.querySelector('.modal-box');
+        const scroller = modal.querySelector('.settings-scroll');
+        const note = modal.querySelector('.settings-apply-note');
+        const close = modal.querySelector('.modal-head #settings-close.modal-x');
         const m = getComputedStyle(modal);
         const b = getComputedStyle(box);
+        const s = getComputedStyle(scroller);
+        const n = getComputedStyle(note);
+        const securityFirst = modal.querySelector('#settings-panel-security .settings-section');
         const spacer = document.createElement('div');
         spacer.style.height = '900px';
-        box.appendChild(spacer);
-        box.scrollTop = 120;
+        scroller.appendChild(spacer);
+        scroller.scrollTop = 120;
         const out = {
           modalOverflow: m.overflowY,
           boxOverflow: b.overflowY,
-          maxHeight: b.maxHeight,
-          boxScrolled: box.scrollTop > 0,
+          scrollOverflow: s.overflowY,
+          noteBorder: n.borderBottomWidth,
+          noteFull: note.getBoundingClientRect().width >= scroller.getBoundingClientRect().width - 2,
+          securityTop: securityFirst ? getComputedStyle(securityFirst).borderTopWidth : 'missing',
+          scrolled: scroller.scrollTop > 0,
+          boxStill: box.scrollTop === 0,
           backdropStill: modal.scrollTop === 0,
           bodyLocked: document.body.classList.contains('modal-open'),
+          hasX: Boolean(close) && !modal.querySelector('.modal-actions'),
         };
         spacer.remove();
-        box.scrollTop = 0;
-        return out.modalOverflow === 'hidden' && out.boxOverflow === 'auto'
-          && out.maxHeight !== 'none' && out.boxScrolled && out.backdropStill && out.bodyLocked;
+        scroller.scrollTop = 0;
+        return out.modalOverflow === 'hidden' && out.boxOverflow === 'hidden'
+          && out.scrollOverflow === 'auto' && out.noteBorder !== '0px'
+          && out.noteFull && out.securityTop === '0px'
+          && out.scrolled && out.boxStill && out.backdropStill && out.bodyLocked && out.hasX;
       })()`));
     check('常驻运行行归设置 · 常用（状态 + 动作按钮）',
       await waitFor('(() => { const r = document.querySelector("#settings-resident"); return Boolean(r) && /常驻/.test(r.textContent) && r.querySelectorAll("[data-svc-action]").length >= 1; })()'));

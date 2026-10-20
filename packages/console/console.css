@@ -362,6 +362,26 @@ select {
 body.modal-open { overflow: hidden; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 
+/* U-3 · 设置壳：标题栏固定，提示独立下划线，只有其下内容滚动 */
+.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 10px; }
+.modal-head h2 { margin: 0; }
+.modal-x {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; flex: 0 0 auto; padding: 0;
+  border: 1px solid transparent; border-radius: 7px;
+  background: none; color: var(--muted);
+  font: inherit; font-size: 16px; line-height: 1; cursor: pointer;
+}
+.modal-x:hover { color: var(--crt-bright, #9dffcf); border-color: var(--border); background: rgba(10, 16, 32, 0.55); }
+.modal-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.modal-box.modal-settings { display: flex; flex-direction: column; overflow: hidden; padding: 18px 20px; }
+.modal-settings #settings-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.modal-settings .settings-tabs { flex: 0 0 auto; margin: 0 0 8px; }
+.modal-settings .settings-apply-note { flex: 0 0 auto; align-self: stretch; width: 100%; max-width: none; margin: 0; padding: 0 0 9px; border-bottom: 1px dashed rgba(80, 255, 170, 0.22); }
+.settings-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 2px 12px 0; scrollbar-gutter: stable; }
+.settings-scroll > .settings-panel > .settings-section:first-child,
+.settings-scroll > .settings-panel > .settings-slot:first-child > .settings-section:first-child { border-top: 0; padding-top: 0; }
+
 /* ---------- 向导 ---------- */
 .modal-box-wide { width: min(640px, 94vw); }
 .wizard-step { display: none; }
@@ -1257,7 +1277,7 @@ body.modal-open { overflow: hidden; }
 
 /* C. 滚动手感：主滚动容器稳定 gutter（滚动条出现/消失不挤压内容、不跳变） */
 html { scrollbar-gutter: stable; }
-.aside, .modal-box, .wizard-list, .snippet, .connect-diff, .panel-view, #settings-body { scrollbar-gutter: stable; }
+.aside, .modal-box, .wizard-list, .snippet, .connect-diff, .panel-view, .settings-scroll { scrollbar-gutter: stable; }
 /* 走查修复：审计/域视图此前漏了 gutter——切换视图后内容溢出时 10px 滚动条挤动面板（「展开后跳一下」） */
 
 /* 简化轮：记忆共享 · 参与开关（v4：状态文字化，开关贴右） */

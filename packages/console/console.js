@@ -1188,10 +1188,10 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   const prevPath = prevActive?.dataset?.cfgPath ?? null;
   const prevStart = prevActive?.selectionStart ?? null;
   const prevEnd = prevActive?.selectionEnd ?? null;
-  // 轮 C：设置改为框内滚动后，重建时保留同一 Tab 的滚动位与折叠展开态
+  // 轮 C/U-3：只有提示下划线以下的内容滚动；重建时保留同一 Tab 的滚动位与折叠展开态
   const sameTab = prevTab === activeTab;
-  const box = $('#settings')?.querySelector('.modal-box') ?? null;
-  const prevScrollTop = sameTab ? (box?.scrollTop ?? 0) : 0;
+  const prevScroller = body.querySelector('.settings-scroll') ?? null;
+  const prevScrollTop = sameTab ? (prevScroller?.scrollTop ?? 0) : 0;
   const openFolds = sameTab
     ? new Set([...body.querySelectorAll('details[open]')].map(settingsFoldKey).filter(Boolean))
     : new Set();
@@ -1207,11 +1207,14 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
         <div class="settings-tabs" role="tablist" aria-label="设置页签">${IA_TABS.map(tabButton).join('')}${
           IA_SETTINGS_EXTRA.map((item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.label)}</button>`).join('')
         }</div>
-        ${panel('common', '<section class="settings-section" data-settings-common-status><h3>本机状态 <span class="badge badge-muted">只读</span></h3><p class="muted">?mock=1 仅提供安全卡与只读演示；可编辑设置需连接真实守护。</p></section>')}
-        ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
-        ${panel('assistants', '<p class="muted">?mock=1 不提供 AI 助手演示数据。</p>')}
-        ${panel('mcp', '<p class="muted">?mock=1 不提供可编辑配置。</p>')}
-        ${panel('advanced', '<p class="muted">?mock=1 不提供可编辑配置。</p>')}
+        <p class="settings-note settings-apply-note muted">改动即生效：需重启的项会自动重启，即时项就地生效。</p>
+        <div class="settings-scroll">
+          ${panel('common', '<section class="settings-section" data-settings-common-status><h3>本机状态 <span class="badge badge-muted">只读</span></h3><p class="muted">?mock=1 仅提供安全卡与只读演示；可编辑设置需连接真实守护。</p></section>')}
+          ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
+          ${panel('assistants', '<p class="muted">?mock=1 不提供 AI 助手演示数据。</p>')}
+          ${panel('mcp', '<p class="muted">?mock=1 不提供可编辑配置。</p>')}
+          ${panel('advanced', '<p class="muted">?mock=1 不提供可编辑配置。</p>')}
+        </div>
       `;
       bindSecurityCard(body);
       return;
@@ -1228,7 +1231,8 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     <div class="settings-tabs" role="tablist" aria-label="设置页签">${IA_TABS.map(tabButton).join('')}${
       IA_SETTINGS_EXTRA.map((item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.label)}</button>`).join('')
     }</div>
-    <p class="settings-note muted">改动即生效：需重启的项会自动重启，即时项就地生效。</p>
+    <p class="settings-note settings-apply-note muted">改动即生效：需重启的项会自动重启，即时项就地生效。</p>
+    <div class="settings-scroll">
     ${panel('common', `
       <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
       ${wizardRowHtml(typeof window.mebularDesktop?.openWizard === 'function')}
@@ -1259,6 +1263,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
         ${renderDiagnostics()}
       </details>
     `)}
+    </div>
   `;
 
   // 恢复折叠展开态（仅设置页的字段/卡片/机制折叠）
@@ -1281,7 +1286,8 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
       }
     }
   }
-  if (box && prevScrollTop > 0) box.scrollTop = prevScrollTop;
+  const nextScroller = body.querySelector('.settings-scroll');
+  if (nextScroller && prevScrollTop > 0) nextScroller.scrollTop = prevScrollTop;
 }
 
 // ---------- S3 · 安全三档（安全卡 / 三操作改道 / 批准侧 / 恢复码） ----------

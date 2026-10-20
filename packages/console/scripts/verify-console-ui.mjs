@@ -74,6 +74,7 @@ async function seedHome(home) {
     privateKeyPkcs8: await IdentityManager.exportPrivateKey(master.privateKey),
     createdAt: new Date().toISOString(),
   }, null, 2), 'utf-8');
+  const joinServicePort = await freePort();
   await writeFile(join(home, 'config.json'), JSON.stringify({
     storagePath,
     deviceId: 'device-ui',
@@ -81,7 +82,7 @@ async function seedHome(home) {
     network: { enabled: false },
     sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: false }, namespaces: ['notes', 'work'] },
     mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
-    joinService: { enabled: true, bind: '0.0.0.0', port: 4013 },
+    joinService: { enabled: true, bind: '0.0.0.0', port: joinServicePort },
   }, null, 2), 'utf-8');
   {
     const app = new Mebular({
@@ -1358,8 +1359,9 @@ async function main() {
     check('S4 错码后输入框已清空（不回显、不保留）',
       (await evalJs('document.querySelector("#security-recovery-code")?.value ?? ""')) === '');
     await evalJs(`(() => { document.querySelector('#security-recovery-code').value = ${JSON.stringify(onceText)}; document.querySelector('#security-action-confirm').click(); })()`);
-    check('S4 正确恢复码 → 移出写入并关闭弹层（toast 标注恢复码）',
-      await waitFor('document.querySelector("#security-action")?.hidden === true && /恢复码/.test(document.querySelector("#banner")?.textContent ?? "")', 20000));
+    // toast 只存活 2.5s（CI 慢时可能错过）；稳定断言是弹层关闭 + 下方审计行带 breakGlassKeyId。
+    check('S4 正确恢复码 → 移出写入并关闭弹层',
+      await waitFor('document.querySelector("#security-action")?.hidden === true', 20000));
     const kickAudit = await evalJs(`(async () => {
       const rows = await fetch('/admin/api/policy').then((r) => r.json());
       const row = (rows ?? []).find((e) => e.type === 'device_revoke' && e.subject === 'device-C');

@@ -170,20 +170,20 @@ describe('Mebular 门面', () => {
     const pathA = join(dir, 'a.jsonl');
     const pathB = join(dir, 'b.jsonl');
 
-    // 默认拒绝：显式授权对端（用例数据都在 default 分区）
+    // 订阅自主：两端默认订阅全部（用例数据都在 default 分区）
     const a = new Mebular({
       storagePath: pathA,
       deviceId: 'device-A',
       encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
       network: { enabled: true, provider: hub },
-      sync: { autoSync: true, peerNamespacePolicy: { 'device-B': ['default'] } },
+      sync: { autoSync: true },
     });
     const b = new Mebular({
       storagePath: pathB,
       deviceId: 'device-B',
       encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
       network: { enabled: true, provider: hub },
-      sync: { autoSync: true, peerNamespacePolicy: { 'device-A': ['default'] } },
+      sync: { autoSync: true },
     });
 
     // 离线写入（网络未启动）

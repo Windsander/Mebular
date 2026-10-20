@@ -30,28 +30,24 @@ import { LocalQuota } from './quota.js';
 import { fleetConfigPath, loadFleetConfig, loadToolConfig, parseAgentSpecs, readMasterKeyFile, type FleetConfig } from './config.js';
 import {
   buildRegistry,
-  declarePolicyIssuer,
+  declareNamespace,
   doctor,
-  grantNamespace,
   mebularOptions,
-  namespaceMembers,
-  namespaceMembership,
+  namespaceSubscribers,
+  namespaceSubscriptions,
   leaveNamespace,
   offlineMebularOptions,
   planHandoff,
   rejoinNamespace,
   onboardDevice,
-  revokeNamespaceGrant,
-  setNamespaceMembership,
+  restoreDevice,
+  subscribeNamespace,
   type DoctorReport,
 } from './onboard.js';
 import {
-  approveDevice,
-  autoApproveOnce,
   defaultDeviceName,
   defaultFleetDir,
   joinFleet,
-  pendingDevices,
   pickLanHost,
   agentMcpConfig,
   quickstart,
@@ -59,7 +55,7 @@ import {
   writeJoinCodeFile,
   type ServiceInstaller,
 } from './quickstart.js';
-import { buildJoinToken, startJoinService, DEFAULT_GRANT_TTL_MS, type JoinService } from './jointoken.js';
+import { buildJoinToken, startJoinService, type JoinService } from './jointoken.js';
 import { renderTerminalQr, renderSvgQr } from './qr.js';
 import { createRequire } from 'node:module';
 import { joinWithToken } from './join.js';
@@ -350,11 +346,9 @@ async function runOnboard(args: Args): Promise<number> {
     ...(typeof args['peer-addr'] === 'string' ? { peerAddr: args['peer-addr'] } : {}),
     ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
     ...(typeof args.listen === 'string' ? { listen: args.listen } : {}),
-    ...(typeof args['policy-issuer'] === 'string' ? { policyIssuers: args['policy-issuer'].split(',') } : {}),
     ...(parseAgents(args.agent, args['agent-command'], args['agent-base-args']) !== undefined
       ? { agents: parseAgents(args.agent, args['agent-command'], args['agent-base-args'])! }
       : {}),
-    ...(args['no-config-grant'] === true ? { configGrant: false } : {}),
   });
   console.log(JSON.stringify({
     ok: true,
@@ -369,67 +363,63 @@ async function runOnboard(args: Args): Promise<number> {
   return 0;
 }
 
-async function runGrant(args: Args): Promise<number> {
+async function runSubscribe(args: Args): Promise<number> {
   const dir = fleetDirFrom(args);
-  const namespaces = str(args.namespace, '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  const result = await grantNamespace(dir, {
-    to: str(args.to, ''),
-    ...(namespaces.length > 0 ? { namespaces } : {}),
-    ...(typeof args['expires-at'] === 'string' ? { expiresAt: num(args['expires-at'], 0) } : {}),
-    ...(typeof args.note === 'string' ? { note: args.note } : {}),
-  });
-  console.log(JSON.stringify({ ok: true, role: 'grant', ...result }, null, 2));
-  return 0;
-}
-
-async function runRevoke(args: Args): Promise<number> {
-  const dir = fleetDirFrom(args);
-  const result = await revokeNamespaceGrant(dir, {
-    grantId: str(args['grant-id'], ''),
-    ...(typeof args.subject === 'string' ? { subject: args.subject } : {}),
-    ...(typeof args.note === 'string' ? { note: args.note } : {}),
-  });
-  console.log(JSON.stringify({ ok: true, role: 'revoke', ...result }, null, 2));
-  return 0;
-}
-
-async function runDeclareIssuer(args: Args): Promise<number> {
-  const dir = fleetDirFrom(args);
-  const result = await declarePolicyIssuer(dir, {
-    to: str(args.to, ''),
-    ...(typeof args.note === 'string' ? { note: args.note } : {}),
-  });
-  console.log(JSON.stringify({ ok: true, role: 'declare-issuer', ...result }, null, 2));
-  return 0;
-}
-
-async function runMember(args: Args): Promise<number> {
-  const dir = fleetDirFrom(args);
-  const result = await setNamespaceMembership(dir, {
-    to: str(args.to, ''),
+  const result = await subscribeNamespace(dir, {
     ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
-    active: args.leave === true ? false : true,
+    active: true,
     ...(typeof args.note === 'string' ? { note: args.note } : {}),
   });
-  console.log(JSON.stringify({ ok: true, role: 'member', ...result }, null, 2));
+  console.log(JSON.stringify({ ok: true, role: 'subscribe', ...result }, null, 2));
   return 0;
 }
 
-async function runMembers(args: Args): Promise<number> {
+async function runUnsubscribe(args: Args): Promise<number> {
+  const dir = fleetDirFrom(args);
+  const result = await subscribeNamespace(dir, {
+    ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
+    active: false,
+    ...(typeof args.note === 'string' ? { note: args.note } : {}),
+  });
+  console.log(JSON.stringify({ ok: true, role: 'unsubscribe', ...result }, null, 2));
+  return 0;
+}
+
+async function runSubscribers(args: Args): Promise<number> {
   const dir = fleetDirFrom(args);
   const namespace = typeof args.namespace === 'string' ? args.namespace : undefined;
-  const membership = await namespaceMembership(dir, namespace);
-  const members = await namespaceMembers(dir, namespace);
+  const view = await namespaceSubscriptions(dir, namespace);
+  const subscribers = await namespaceSubscribers(dir, namespace);
   console.log(
     JSON.stringify(
-      { ok: true, role: 'members', namespace: namespace ?? '(config default)', active: membership.active, members, onRecord: membership.members },
+      { ok: true, role: 'subscribers', namespace: namespace ?? '(config default)', active: view.active, subscribers },
       null,
       2,
     ),
   );
+  return 0;
+}
+
+async function runDeclareNamespace(args: Args): Promise<number> {
+  const dir = fleetDirFrom(args);
+  const result = await declareNamespace(dir, {
+    namespace: str(args.namespace, ''),
+    ...(typeof args.note === 'string' ? { note: args.note } : {}),
+  });
+  console.log(JSON.stringify({ ok: true, role: 'namespace', ...result }, null, 2));
+  return 0;
+}
+
+async function runRestore(args: Args): Promise<number> {
+  const dir = fleetDirFrom(args);
+  const result = await restoreDevice(dir, {
+    subject: str(args.to ?? args.device, ''),
+    ...(typeof args.note === 'string' ? { note: args.note } : {}),
+    ...(typeof args.nonce === 'string' ? { nonce: args.nonce } : {}),
+    ...(typeof args.cosign === 'string' ? { cosign: JSON.parse(args.cosign) } : {}),
+    ...(typeof args['break-glass'] === 'string' ? { breakGlass: JSON.parse(args['break-glass']) } : {}),
+  });
+  console.log(JSON.stringify({ ok: true, role: 'restore', ...result }, null, 2));
   return 0;
 }
 
@@ -541,20 +531,6 @@ async function runFleetNode(args: Args): Promise<number> {
   }
   const node = new FleetNode({ device: config.device, store, transport: new NullTransport(), quota: new LocalQuota({ limitPerDevice: config.quotaLimitPerDevice ?? 1_000_000 }) });
   const submit = num(args.submit, 0);
-  const autoApprove = config.autoApprove === true;
-  let lastAutoApprove = 0;
-  const tickAutoApprove = async (): Promise<void> => {
-    if (!autoApprove) return;
-    const now = Date.now();
-    if (now - lastAutoApprove < 2000) return;
-    lastAutoApprove = now;
-    if (mebular === null) return;
-    try {
-      await autoApproveOnce(mebular, config.device, config.namespace);
-    } catch {
-      // 下轮重试；doctor 会暴露未授权项
-    }
-  };
   let code = 0;
   if (submit > 0) {
     // 先等首轮同步（对端连入）再提交，避免在无连接时提交导致事件丢失触发。
@@ -594,7 +570,6 @@ async function runFleetNode(args: Args): Promise<number> {
     code = ok && done.length === ids.length && resultsMatch ? 0 : 1;
     if (runForever) {
       while (!shutdown.isStopping()) {
-        await tickAutoApprove();
         await sleep(200); // 常驻：保持在线供对端同步
       }
     } else {
@@ -603,7 +578,6 @@ async function runFleetNode(args: Args): Promise<number> {
     }
   } else if (runForever) {
     while (!shutdown.isStopping()) {
-      await tickAutoApprove();
       await sleep(200);
     }
   } else {
@@ -681,7 +655,7 @@ function daemonInstaller(): ServiceInstaller {
   };
 }
 
-/** `fleet quickstart`：A 一条命令上车（onboard + 声明签发者/成员/自授权 + 加入码 + 服务 + doctor）。 */
+/** `fleet quickstart`：A 一条命令上车（onboard + 本机订阅 + 加入码 + 服务 + doctor）。 */
 async function runQuickstart(args: Args): Promise<number> {
   const dir = fleetDirFrom(args);
   const noService = args['no-service'] === true;
@@ -696,7 +670,6 @@ async function runQuickstart(args: Args): Promise<number> {
     ...(typeof args['join-port'] === 'string' ? { joinPort: num(args['join-port'], DEFAULT_JOIN_PORT_FALLBACK) } : {}),
     ...(typeof args['join-host'] === 'string' ? { joinHost: args['join-host'] } : {}),
     ...(agents !== undefined ? { agents } : {}),
-    ...(args['auto-approve'] === true ? { autoApprove: true } : {}),
     ...(args.daemon === true ? { daemon: true } : {}),
     ...(typeof args['daemon-port'] === 'string' ? { daemonPort: num(args['daemon-port'], 7331) } : {}),
     ...(args.daemon === true && !noService ? { installDaemon: daemonInstaller() } : {}),
@@ -715,7 +688,6 @@ async function runQuickstart(args: Args): Promise<number> {
     agentSources: result.agentSources,
     serviceInstalled: result.serviceInstalled,
     ...(result.serviceNote !== undefined ? { serviceNote: result.serviceNote } : {}),
-    autoApprove: result.autoApprove,
     code: result.code,
     ...(result.codeFile !== undefined ? { codeFile: result.codeFile } : {}),
     inviteToken: result.inviteToken,
@@ -766,7 +738,6 @@ async function runJoin(args: Args): Promise<number> {
       namespace: result.namespace,
       fingerprint: result.fingerprint,
       alreadyJoined: result.alreadyJoined,
-      awaitingApproval: result.awaitingApproval,
       inviterDeviceId: result.inviterDeviceId,
       ...(result.daemon !== undefined ? { daemon: result.daemon } : {}),
       agentMcp: result.agentMcp,
@@ -799,7 +770,6 @@ async function runJoin(args: Args): Promise<number> {
     namespace: result.namespace,
     fingerprint: result.fingerprint,
     alreadyJoined: result.alreadyJoined,
-    awaitingApproval: result.awaitingApproval,
     serviceInstalled: result.serviceInstalled,
     ...(result.serviceNote !== undefined ? { serviceNote: result.serviceNote } : {}),
     agents: result.agents,
@@ -807,28 +777,6 @@ async function runJoin(args: Args): Promise<number> {
     doctor: summarizeDoctor(report),
     next: result.next,
   }, null, 2));
-  return 0;
-}
-
-/** `fleet pending`：A 侧列出在册但未授权的设备（待批准）。 */
-async function runPending(args: Args): Promise<number> {
-  const result = await pendingDevices(fleetDirFrom(args), typeof args.namespace === 'string' ? args.namespace : undefined);
-  console.log(JSON.stringify({ ok: true, role: 'pending', ...result }, null, 2));
-  return 0;
-}
-
-/** `fleet approve <deviceId>`：A 侧图上门授权 + 成员在册（+ 登记地址）。 */
-async function runApprove(args: Args): Promise<number> {
-  const dir = fleetDirFrom(args);
-  const device = str(args.device, '');
-  if (device.length === 0) throw new Error('approve 需要 --device <deviceId>');
-  const result = await approveDevice(dir, {
-    device,
-    ...(typeof args.namespace === 'string' ? { namespace: args.namespace } : {}),
-    ...(typeof args.addr === 'string' ? { addr: args.addr } : {}),
-  });
-  const report = await doctor(dir);
-  console.log(JSON.stringify({ ok: true, role: 'approve', ...result, doctor: summarizeDoctor(report) }, null, 2));
   return 0;
 }
 
@@ -859,9 +807,6 @@ async function runInvite(args: Args): Promise<number> {
       namespace: str(args.namespace, config.namespace),
       endpoint,
       ttlMs,
-      // C7：自动授权（默认 true；`--no-grant` 关闭）+ 授权 TTL（默认 24h，`--grant-ttl <小时>`）
-      ...(str(args['grant'], 'on') === 'off' || args['no-grant'] === true ? { grantOnJoin: false } : {}),
-      ...(typeof args['grant-ttl'] === 'string' ? { grantTtlMs: Math.max(0, num(args['grant-ttl'], 24) * 3600_000) } : {}),
     });
     const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
     if (typeof args['token-file'] === 'string') await writeJoinCodeFile(args['token-file'], inline);
@@ -872,7 +817,6 @@ async function runInvite(args: Args): Promise<number> {
     const svgQr = args['no-qr'] === true ? null : await renderSvgQr(inline, { onWarn: (m) => warnings.push(m) });
     if (terminalQr) console.log(terminalQr.value);
 
-    const grantTtlMs = token.grantTtlMs ?? DEFAULT_GRANT_TTL_MS;
     console.log(JSON.stringify({
       ok: true,
       role: 'invite',
@@ -882,8 +826,6 @@ async function runInvite(args: Args): Promise<number> {
       nonce: token.nonce,
       expiresAt: token.expiresAt,
       token: inline,
-      grantOnJoin: token.grantOnJoin !== false,
-      grantTtlMs: token.grantOnJoin === false ? null : grantTtlMs,
       qr: terminalQr ? { kind: terminalQr.kind, value: terminalQr.value } : null,
       qrSvg: svgQr ? svgQr.value : null,
       ...(typeof args['token-file'] === 'string' ? { tokenFile: args['token-file'] } : {}),
@@ -1226,18 +1168,16 @@ async function main(): Promise<void> {
   else if (command === 'security') code = await runSecurity(args, positionals);
   else if (command === 'tools') code = runTools();
   else if (command !== undefined && toolByCli(command) !== undefined) code = await runTaskTool(command, args);
-  else if (command === 'pending') code = await runPending(args);
-  else if (command === 'approve') code = await runApprove(args);
   else if (command === 'doctor') code = await runDoctor(args);
-  else if (command === 'grant') code = await runGrant(args);
-  else if (command === 'revoke') code = await runRevoke(args);
-  else if (command === 'declare-issuer') code = await runDeclareIssuer(args);
-  else if (command === 'member') code = await runMember(args);
-  else if (command === 'members') code = await runMembers(args);
+  else if (command === 'subscribe') code = await runSubscribe(args);
+  else if (command === 'unsubscribe') code = await runUnsubscribe(args);
+  else if (command === 'subscribers') code = await runSubscribers(args);
+  else if (command === 'namespace') code = await runDeclareNamespace(args);
+  else if (command === 'restore') code = await runRestore(args);
   else if (command === 'leave') code = await runLeave(args);
   else if (command === 'rejoin') code = await runRejoin(args);
   else {
-    console.error('用法：fleet quickstart|join|invite|pending|approve|tools|task_submit|task_submit_batch|task_cancel|task_retry|task_status|task_list|task_history|task_children|task_summarize|task_subscribe|task_negotiate|chatter_send|chatter_inbox|task_quota|task_targets|board_create|onboard|doctor|grant|revoke|declare-issuer|member|members|leave|rejoin|security|node|worker|service|spool … | fleet --version');
+    console.error('用法：fleet quickstart|join|invite|tools|task_submit|task_submit_batch|task_cancel|task_retry|task_status|task_list|task_history|task_children|task_summarize|task_subscribe|task_negotiate|chatter_send|chatter_inbox|task_quota|task_targets|board_create|onboard|doctor|subscribe|unsubscribe|subscribers|namespace|restore|leave|rejoin|security|node|worker|service|spool … | fleet --version');
     code = 2;
   }
   } catch (error) {

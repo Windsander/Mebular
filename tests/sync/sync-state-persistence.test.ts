@@ -21,7 +21,6 @@ import {
   issueCertificate,
   masterPublicKeyBytes,
 } from '../p2p/helpers.js';
-import { grant } from '../helpers/namespace.js';
 
 interface End {
   deviceId: string;
@@ -138,7 +137,6 @@ describe('syncedByPeer 持久化（6.4）', () => {
         storage: end.storage,
         deviceId: end.deviceId,
         userMasterPublicKey: masterPub,
-        namespacePolicy: grant(), // 默认拒绝：显式授权对端
         ...(path !== undefined ? { syncStatePath: path } : {}),
       });
 

@@ -2,8 +2,8 @@
 //
 // 覆盖：
 // - 对端只订阅 A 分区 → 只收到 A 分区事件；未授权分区不进 offer；
-// - 快照路径同样被裁剪（空水位 + 未授权分区绕不过授权）；
-// - 默认拒绝：未列出对端 → 0 分区 + sync-completed.denied 信号（不静默）；
+// - 快照路径同样被裁剪；
+// - 无订阅交集 → 0 分区 + sync-completed.noSubscriptionOverlap 信号（不静默）；
 // - sync-completed.appliedEventIds 与实际应用集合一致、events-applied 触发。
 
 import { describe, it, expect } from '@jest/globals';
@@ -12,9 +12,7 @@ import { EventLog, type EventSigner } from '../../src/eventlog/EventLog.js';
 import { MemoryStorage } from '../../src/storage/MemoryStorage.js';
 import { SyncManager, type SyncPeer, type SyncResult } from '../../src/sync/syncmgr/SyncManager.js';
 import { applyRemoteEvent } from '../../src/sync/apply.js';
-import { ConfigNamespacePolicy, type NamespaceGrantPolicy } from '../../src/sync/namespacePolicy.js';
 import type { Event } from '../../src/types/event.js';
-import { grant } from '../helpers/namespace.js';
 import { SecureChannelSyncTransport } from '../../src/sync/protocol.js';
 import { SecureChannelImpl } from '../../src/p2p/secure/SecureChannelImpl.js';
 import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
@@ -33,7 +31,6 @@ interface TestDevice {
 
 interface DeviceOptions {
   subscriptionNamespaces?: string[];
-  namespacePolicy?: NamespaceGrantPolicy;
   snapshotThreshold?: number;
 }
 
@@ -49,8 +46,6 @@ async function createDevice(deviceId: string, options: DeviceOptions = {}): Prom
     eventLog,
     storage,
     deviceId,
-    // 默认拒绝：未显式给策略时授予本文件用到的分区（授权边界用例自行覆盖）
-    namespacePolicy: options.namespacePolicy ?? grant('default', 'nsA', 'nsB'),
     ...(options.subscriptionNamespaces ? { subscriptionNamespaces: options.subscriptionNamespaces } : {}),
     ...(options.snapshotThreshold !== undefined ? { snapshotThreshold: options.snapshotThreshold } : {}),
   });
@@ -93,7 +88,7 @@ async function namespacesOn(device: TestDevice): Promise<string[]> {
 }
 
 describe('选择性同步（供给端强制）', () => {
-  it('对端只订阅 A 分区：只收到 A，未授权 B 分区不进 offer', async () => {
+  it('对端只订阅 A 分区：只收到 A，B 分区不进 offer', async () => {
     const a = await createDevice('device-A');
     const b = await createDevice('device-B', { subscriptionNamespaces: ['nsA'] });
 
@@ -109,9 +104,8 @@ describe('选择性同步（供给端强制）', () => {
     expect(await namespacesOn(a)).toEqual(['nsA', 'nsA', 'nsB']);
   });
 
-  it('数据持有者授权策略：未授权分区不进 offer（即便对端未声明）', async () => {
-    const policy = new ConfigNamespacePolicy({ 'device-B': ['nsA'] });
-    const a = await createDevice('device-A', { namespacePolicy: policy });
+  it('本机只订阅 A：B 分区不进 offer（即便对端未声明）', async () => {
+    const a = await createDevice('device-A', { subscriptionNamespaces: ['nsA'] });
     const b = await createDevice('device-B');
 
     await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
@@ -124,9 +118,8 @@ describe('选择性同步（供给端强制）', () => {
     expect(await namespacesOn(a)).toEqual(['nsA', 'nsB']);
   });
 
-  it('快照路径同样裁剪：空时钟 + 未授权分区绕不过授权', async () => {
-    const policy = new ConfigNamespacePolicy({ 'device-B': ['nsA'] });
-    const a = await createDevice('device-A', { namespacePolicy: policy, snapshotThreshold: 1 });
+  it('快照路径同样裁剪：空时钟 + 未订阅分区不进快照', async () => {
+    const a = await createDevice('device-A', { subscriptionNamespaces: ['nsA'], snapshotThreshold: 1 });
     const b = await createDevice('device-B');
 
     for (let i = 0; i < 3; i++) {
@@ -145,7 +138,7 @@ describe('选择性同步（供给端强制）', () => {
     expect(await namespacesOn(b)).toEqual(['nsA', 'nsA', 'nsA']);
   });
 
-  it('对端声明 subscribeAll=true：接收全部已授权分区', async () => {
+  it('对端声明 subscribeAll=true：接收本机订阅的全部分区', async () => {
     const a = await createDevice('device-A');
     const b = await createDevice('device-B');
 
@@ -159,10 +152,9 @@ describe('选择性同步（供给端强制）', () => {
     expect(await namespacesOn(b)).toEqual(['nsA', 'nsB']);
   });
 
-  it('授权策略为空白名单：明确不允许任何分区（不进 offer）', async () => {
-    const policy = new ConfigNamespacePolicy({ 'device-B': [] });
-    const a = await createDevice('device-A', { namespacePolicy: policy });
-    const b = await createDevice('device-B');
+  it('双方订阅无交集：明确不发送任何分区（不进 offer）', async () => {
+    const a = await createDevice('device-A', { subscriptionNamespaces: ['nsA'] });
+    const b = await createDevice('device-B', { subscriptionNamespaces: ['nsB'] });
 
     await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
     await a.store.createNode('fact', { text: 'b1' }, [], { namespace: 'nsB' });
@@ -170,13 +162,13 @@ describe('选择性同步（供给端强制）', () => {
     const [resultA] = await runSync(a, b);
 
     expect(resultA.sentEvents).toBe(0);
-    expect(resultA.denied).toBe(true); // 拒绝不再静默
+    expect(resultA.noSubscriptionOverlap).toBe(true); // 拒绝不再静默
     expect(await namespacesOn(b)).toEqual([]);
   });
 
-  it('默认拒绝：未列出任何对端 → 0 分区 + denied 信号（不是「碰巧没数据」）', async () => {
-    const a = await createDevice('device-A', { namespacePolicy: new ConfigNamespacePolicy() });
-    const b = await createDevice('device-B');
+  it('没有任何订阅声明且 hello 无交集 → 0 分区 + noSubscriptionOverlap 信号', async () => {
+    const a = await createDevice('device-A', { subscriptionNamespaces: ['nsA'] });
+    const b = await createDevice('device-B', { subscriptionNamespaces: ['nsB'] });
 
     await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
     await a.store.createNode('fact', { text: 'b1' }, [], { namespace: 'nsB' });
@@ -184,7 +176,7 @@ describe('选择性同步（供给端强制）', () => {
     const [resultA, resultB] = await runSync(a, b);
 
     expect(resultA.sentEvents).toBe(0);
-    expect(resultA.denied).toBe(true);
+    expect(resultA.noSubscriptionOverlap).toBe(true);
     expect(resultB.receivedEvents).toBe(0);
     expect(await namespacesOn(b)).toEqual([]);
   });

@@ -17,16 +17,16 @@
 
 ## 2. 任务 = 记忆
 
-- **分区**：任务记录落在共享 `namespace`（默认 `tasks`），复用 core 的图上记忆与选择性同步（默认拒绝 + 显式授权）。
+- **分区**：任务记录落在共享 `namespace`（默认 `tasks`），复用 core 的图上记忆与选择性同步（订阅供给）。
 - **显式状态机**：`queued → claimed → running → done | failed`；状态迁移是**显式事件**，确定性、可收敛（状态**单调秩** + 终态平局裁决；见 `protocol/state-machine.json`）。
 - **`expiresAt` 软约定**：仅影响本机展示与本地排队；**不触发**跨端状态迁移，也不参与权威判定。
 - **因果链**：`trace.causedBy` / `trace.chain` 记录派生关系（如子任务由父任务触发）。
 
 ## 2.5 域 vs 任务（W1 语义钉住）
 
-- **域（namespace）= 记忆数据通道**：参与 = **数据义务**（收 + 及时同步本地新记忆）；**不含派发语义**，不存在只读参与。
+- **域（namespace）= 记忆数据通道**：订阅 = **数据义务**（收 + 及时同步本地新记忆）；**不含派发语义**。
 - **任务 = 树/DAG**：root = 派发者（发起 Agent）；子任务由执行者派生（`trace.causedBy`/`chain`，禁环）；任务事件存放在某个域里，域只是**运输与存储**。
-- **派发权限三层**：**L1 传输**（发送方对接收方的域授权，默认拒绝）→ **L2 任务树**（**创建者即派发者**：子任务由执行者创建，预算随树递减）→ **L3 执行**（本地：`to.device`/`to.agent` 过滤、执行器、并发/准入）。
+- **派发权限三层**：**L1 传输**（双方订阅交集）→ **L2 任务树**（**创建者即派发者**：子任务由执行者创建，预算随树递减）→ **L3 执行**（本地：`to.device`/`to.agent` 过滤、执行器、并发/准入）。
 
 ### 2.5.1 反滥用（预算 + 公平准入）
 
@@ -37,7 +37,7 @@
 
 ### 2.5.2 每设备 Agent 目录 + 工具面
 
-- **目录**（普通记忆域，默认 `agents`）：每设备一条**签名**记录 `{device, agents:[{name,kind,capabilities?,concurrency,capacity?}], updatedAt, version}`；`task_targets = 我 L1 授权过的对端 ∩ 其目录 (device,agent)`；`capacity/load` 为**建议性**，不参与授权/一致性。
+- **目录**（普通记忆域，默认 `agents`）：每设备一条**签名**记录 `{device, agents:[{name,kind,capabilities?,concurrency,capacity?}], updatedAt, version}`；`task_targets = 订阅任务域的对端 ∩ 其目录 (device,agent)`；`capacity/load` 为**建议性**，不参与授权/一致性。
 - **工具面（MCP 与 CLI 能力完全一致）**：任务工具经**统一 MCP 入口**暴露（`mebular mcp` / HTTP `/mcp`，与记忆面同一入口；
   `fleet mcp` 已删除）+ 等价子命令 `fleet task_*` / `mebular task_*`；对照见下表。
 
@@ -67,9 +67,9 @@ CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--
 **拓扑**：**一台机器 = 一个节点 = 一个守护**（`mebular serve`），守护是 **记忆/身份/网络/信任的唯一持有者**；fleet 与各 Agent（MCP/skill）都是**本机客户端**，共用守护的身份与存储，数据分域。
 
 - **身份模式**：`root`（持有用户主密钥私钥，首台设备）| `delegated`（仅委派证书链 + 设备钥，**无主私钥**——T2 令牌加入的设备）。`mebular status|doctor` 显示 `identityMode`。
-- **同机互信**：设备级身份，**同机 Agent 之间默认可信**（不做加密隔离）；跨机仍走"链到主密钥"的证书链 + 域授权（默认拒绝）。
+- **同机互信**：设备级身份，**同机 Agent 之间默认可信**（不做加密隔离）；跨机仍走"链到主密钥"的证书链 + 订阅供给。
 - **存储模式**（fleet）：`daemon`（默认于统一上车；fleet 只走守护本机 app 接口，**不监听 libp2p、不托管 join**）| `embedded`（**仅测试/CI**，本地 Mebular）。
-- **本机 app 接口**（loopback HTTP + bearer，非回环 fail-closed）：`createNode`/`listNodes`/`namespaces` + `policy/{grant,revoke,member,declare-issuer,effective,membership}` + `join/invite`；**单写者**（守护持 store 锁，第二写者 `MCP_STORAGE_LOCKED`）。
+- **本机 app 接口**（loopback HTTP + bearer，非回环 fail-closed）：`createNode`/`listNodes`/`namespaces` + `policy/{subscription,subscriptions,namespace}` + `join/invite`；**单写者**（守护持 store 锁，第二写者 `MCP_STORAGE_LOCKED`）。
 - **统一 home**：`~/.mebular`（`MEBULAR_HOME` 覆盖）——守护 `config.json` 与 fleet `fleet.config.json` 同目录。
 - **join 归守护**：invite/join/委派签发由守护提供；fleet 仅作客户端。embedded 模式保留 fleet 自托管 join（`packages/fleet/src/jointoken.ts` + `fleet node --join-serve`），**仅测试/CI（test-only）**，生产不用。
 
@@ -91,7 +91,7 @@ CLI 通用形参：`--input '<json>'`（字段与 MCP `arguments` 一致）+ `--
 - **M0（本阶段）**：骨架 + 边界测试 + CI 接线 + 设计/协议夹具先行。
 - **M1**：协议与模型（envelope / 状态机 / 配额语义）+ `PROTOCOL-INVARIANTS.md` 矩阵 + 随机化 harness（含 oracle-free 扰动检查）。
 - **M2**：单机双进程最小可用（A 派活 → B 执行 → 结果回传）+ `scripts/verify-fleet-local.mjs`。
-- **M3**：真跨设备（真实 libp2p 传输，loopback 先验证）+ 授权负例 + 时延统计 + 双机 runbook。
+- **M3**：真跨设备（真实 libp2p 传输，loopback 先验证）+ 订阅负例 + 时延统计 + 双机 runbook。
 - **M4（不在本 goal 内）**：三种协作形态扩展 + 适配器（Hermes / OpenChamber 真实执行器）。
 
 ## 6. 夹具先行（fixture-first）

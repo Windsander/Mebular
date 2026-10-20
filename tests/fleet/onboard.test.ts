@@ -53,7 +53,7 @@ describe('config：主密钥与配置 IO', () => {
     const base = {
       v: 1 as const, device: 'device-A', dir, storagePath: join(dir, 'store.jsonl'),
       masterKeyFile: fleetMasterKeyPath(dir), namespace: 'tasks', listen: '/ip4/0.0.0.0/tcp/0',
-      peers: [], policyIssuers: [], agents: [{ name: 'echo', kind: 'echo' as const }],
+      peers: [], agents: [{ name: 'echo', kind: 'echo' as const }],
     };
     expect(validateFleetConfig(base)).toEqual([]);
     await saveFleetConfig(path, base);
@@ -190,8 +190,8 @@ describe('doctor：peer/同步/身份链 与注册表/选项', () => {
     await onboardDevice({ dir, device: 'device-A', peerDevice: 'device-B', agents: [{ name: 'echo', kind: 'echo' }] });
     const cfg = await loadFleetConfig(fleetConfigPath(dir));
     const enc = await readMasterKeyFile(cfg.masterKeyFile);
-    const opts = mebularOptions(cfg, enc) as { sync: { peerNamespacePolicy: Record<string, string[]> } };
-    expect(opts.sync.peerNamespacePolicy).toEqual({ 'device-B': ['tasks'] });
+    const opts = mebularOptions(cfg, enc) as { sync: { namespaces: string[] } };
+    expect(opts.sync.namespaces).toEqual(['tasks']);
   });
 
   it('peer 可达：对端监听 → PASS；不可达 → FAIL', async () => {
@@ -260,7 +260,7 @@ describe('loadToolConfig / daemonConfigToFleet（统一 MCP 入口的 home 适�
   it('fleet home：优先 fleet.config.json', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'fleet-toolcfg-'));
     try {
-      await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'echo', kind: 'echo' }], configGrant: false, policyIssuers: ['device-A'] });
+      await onboardDevice({ dir, device: 'device-A', agents: [{ name: 'echo', kind: 'echo' }] });
       const cfg = await loadToolConfig(dir);
       expect(cfg.device).toBe('device-A');
       expect(cfg.namespace).toBe('tasks');
@@ -269,7 +269,7 @@ describe('loadToolConfig / daemonConfigToFleet（统一 MCP 入口的 home 适�
     }
   });
 
-  it('守护 home：由 config.json 适配（device/namespace/peers/policyIssuers/agents/网络/主密钥路径）', async () => {
+  it('守护 home：由 config.json 适配（device/namespace/peers/agents/网络/主密钥路径）', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'daemon-toolcfg-'));
     try {
       await writeFile(join(dir, 'config.json'), JSON.stringify({
@@ -277,7 +277,7 @@ describe('loadToolConfig / daemonConfigToFleet（统一 MCP 入口的 home 适�
         storagePath: join(dir, 'store.jsonl'),
         encryption: { level: 'none' },
         network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/15001'] }, peers: [{ device: 'device-peer', addr: '/ip4/1.2.3.4/tcp/1/p2p/x' }, { device: 'device-noaddr' }] },
-        sync: { namespaces: ['notes'], policyIssuers: ['device-daemon'], peerNamespacePolicy: { 'device-peer': ['notes'] } },
+        sync: { namespaces: ['notes'] },
         quotaLimitPerDevice: 42,
       }), 'utf-8');
       const cfg = await loadToolConfig(dir);
@@ -285,8 +285,6 @@ describe('loadToolConfig / daemonConfigToFleet（统一 MCP 入口的 home 适�
       expect(cfg.namespace).toBe('notes');
       expect(cfg.listen).toBe('/ip4/127.0.0.1/tcp/15001');
       expect(cfg.peers).toEqual([{ device: 'device-peer', addr: '/ip4/1.2.3.4/tcp/1/p2p/x' }, { device: 'device-noaddr' }]);
-      expect(cfg.policyIssuers).toEqual(['device-daemon']);
-      expect(cfg.peerNamespacePolicy).toEqual({ 'device-peer': ['notes'] });
       expect(cfg.quotaLimitPerDevice).toBe(42);
       expect(cfg.agents.length).toBeGreaterThan(0);
       expect(cfg.masterKeyFile).toBe(join(dir, 'user-master-key.json'));
@@ -310,7 +308,6 @@ describe('loadToolConfig / daemonConfigToFleet（统一 MCP 入口的 home 适�
       expect(cfg.namespace).toBe('tasks');       // 无订阅 → 缺省分区
       expect(cfg.storagePath).toBe(join(dir, 'store.jsonl'));
       expect(cfg.peers).toEqual([]);
-      expect(cfg.policyIssuers).toEqual([]);
       expect(cfg.agents.length).toBeGreaterThan(0); // 占位 agent（满足校验）
     } finally {
       await rm(dir, { recursive: true, force: true });

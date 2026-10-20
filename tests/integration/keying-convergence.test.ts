@@ -30,7 +30,6 @@ import {
   masterPublicKeyBytes,
   type TestIdentity,
 } from '../p2p/helpers.js';
-import { grant } from '../helpers/namespace.js';
 import { useHeavyTimeout } from '../helpers/timeouts.js';
 
 useHeavyTimeout();
@@ -71,7 +70,6 @@ async function createDevice(
     eventLog,
     storage,
     deviceId,
-    namespacePolicy: grant(),
     pushOnWrite: true,
     pushOnWriteThrottleMs: 20,
   });

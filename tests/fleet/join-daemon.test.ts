@@ -69,7 +69,6 @@ describe('W2 joinWithToken --daemon', () => {
     const joinPort = await freePort();
     try {
       const res = await joinWithToken({ dir, token, device: 'device-B', listen: '/ip4/127.0.0.1/tcp/0', agents: [{ name: 'echo', kind: 'echo' }], daemon: true, daemonPort, joinPort, installDaemon: async () => ({ installed: true }) });
-      expect(res.awaitingApproval).toBe(true);
       expect(res.daemon?.endpoint).toBe(`http://127.0.0.1:${daemonPort}`);
       expect(res.daemon?.installed).toBe(true);
       expect(res.agentMcp).toEqual({ mcp: { mebular: { type: 'local', command: ['mebular', 'mcp'] } } });

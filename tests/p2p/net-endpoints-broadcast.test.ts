@@ -35,7 +35,7 @@ describe('C5 · 广播记录只作 hints', () => {
         ...network,
       },
       // 让本机成为策略权威：这样「若 hints 被越界写成授权」锚点才会真的变红
-      sync: { autoSync: false, policyIssuers: ['device-self'] },
+      sync: { autoSync: false },
     });
     await app.initialize();
     return app;
@@ -44,9 +44,9 @@ describe('C5 · 广播记录只作 hints', () => {
   it('注入 net_endpoints 记录 → 进候选池，但**授权判定不变**（hints 永不参与授权）', async () => {
     const app = await makeApp({});
     try {
-      const before = await app.getEffectiveNamespaces('device-B');
+      const before = await app.getSubscriptions('device-B');
       expect(before).toEqual([]);
-      const policyEventsBefore = await app.eventLog.listEvents({ type: 'namespace_grant' });
+      const policyEventsBefore = await app.eventLog.listEvents({ type: 'namespace_subscription' });
 
       const payload = buildNetEndpointsPayload({ subject: 'device-B', addresses: [LAN, PUBLIC], relayCapable: true, now: Date.now(), ttlMs: 60_000 });
       const accepted = await app.ingestNetEndpointsEvent({ author: 'device-B', namespace: NET_NAMESPACE, data: payload });
@@ -55,10 +55,10 @@ describe('C5 · 广播记录只作 hints', () => {
       // hints 进了候选池（source=learned）……
       expect(app.endpointBook?.addresses('device-B')).toEqual([PUBLIC, LAN]);
       // ……授权仍然为空（默认拒绝未被放松）
-      expect(await app.getEffectiveNamespaces('device-B')).toEqual([]);
+      expect(await app.getSubscriptions('device-B')).toEqual([]);
       expect(app.getNetEndpointsStatus().applied).toBe(1);
       // 读取侧绝不写授权状态：策略事件数量不变
-      expect(await app.eventLog.listEvents({ type: 'namespace_grant' })).toHaveLength(policyEventsBefore.length);
+      expect(await app.eventLog.listEvents({ type: 'namespace_subscription' })).toHaveLength(policyEventsBefore.length);
     } finally {
       await app.shutdown();
     }

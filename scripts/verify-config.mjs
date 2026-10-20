@@ -1,7 +1,7 @@
 // verify:config —— 配置管道端到端矩阵（A 单一真源/暴露面 + C 一键重启 + D 三元组 + E 根因 + G 保存即生效）
 //
 //   S1 schema 驱动写校验：editable 可写 / status-only 拒写 400 / 敏感 internal 拒写 400 / 未知 400 / 非法值 400
-//   S2 暴露面：configSchema=20 editable、statusSchema=11 status-only、internal 不出现在任何渲染面 + 三元组覆盖
+//   S2 暴露面：configSchema=14 editable、statusSchema=10 status-only、internal 不出现在任何渲染面 + 三元组覆盖
 //   S3 自锁防护：auth/host/tls → 409 needsConfirmation（不写盘、不重启）
 //   S4 保存即生效：需重启项 → 自动重启 → lastApply=applied + 逐字段生效校验 + 待重启清空
 //   S5 防抖：窗口内两次保存只触发一次重启（重启计数）
@@ -266,10 +266,10 @@ async function main() {
     const configPaths = (settings.configSchema ?? []).map((e) => e.path).sort();
     const statusPaths = (settings.statusSchema ?? []).map((e) => e.path).sort();
     const effectivePaths = (settings.effective ?? []).map((r) => r.path).sort();
-    check(`S2 configSchema = editable 16 项（实得 ${configPaths.length}）`,
-      configPaths.length === 16 && JSON.stringify(configPaths) === JSON.stringify([...schema.EDITABLE_PATHS].sort()));
-    check(`S2 statusSchema = status-only 11 项（实得 ${statusPaths.length}）`,
-      statusPaths.length === 11 && JSON.stringify(statusPaths) === JSON.stringify([...schema.STATUS_ONLY_PATHS].sort()));
+    check(`S2 configSchema = editable 14 项（实得 ${configPaths.length}）`,
+      configPaths.length === 14 && JSON.stringify(configPaths) === JSON.stringify([...schema.EDITABLE_PATHS].sort()));
+    check(`S2 statusSchema = status-only 10 项（实得 ${statusPaths.length}）`,
+      statusPaths.length === 10 && JSON.stringify(statusPaths) === JSON.stringify([...schema.STATUS_ONLY_PATHS].sort()));
     check('S2 收敛：relayServers 仅只读面；relayUnlimited 不在任何渲染面',
       statusPaths.includes('network.libp2p.relayServers')
         && !configPaths.includes('network.libp2p.relayServers')
@@ -277,7 +277,7 @@ async function main() {
         && !statusPaths.includes('network.libp2p.relayUnlimited'));
     // 简化轮：writable-internal（反熵节奏/快照阈值/召回阈值/relayUnlimited）也进诊断三元组——API 可写即可生效/待重启，排查要看得到
     check(`S2 三元组覆盖 = editable ∪ status-only ∪ writable-internal（实得 ${effectivePaths.length}）`,
-      effectivePaths.length === 32
+      effectivePaths.length === 29
         && JSON.stringify(effectivePaths) === JSON.stringify([...schema.EDITABLE_PATHS, ...schema.STATUS_ONLY_PATHS, ...schema.WRITABLE_INTERNAL_PATHS].sort()));
   }
 
@@ -308,7 +308,6 @@ async function main() {
     ['semantic.minScore', { semantic: { minScore: 0.33 } }],
     ['joinService.bind', { joinService: { bind: '127.0.0.1' } }],
     ['joinService.port', { joinService: { port: 4021 } }],
-    ['sync.policyIssuers', { sync: { policyIssuers: ['device-config'] } }],
   ];
   {
     const oldPid = handle.proc.pid;

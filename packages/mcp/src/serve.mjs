@@ -700,6 +700,27 @@ function sendJson(res, status, data) {
   res.end(body);
 }
 
+/** 持久化运行期订阅集（热生效；空 = 订阅全部，删除显式键）。 */
+async function persistSubscriptionNamespaces(home, next) {
+  const cfgFile = configPath(home);
+  let current = {};
+  try {
+    current = JSON.parse(await readFile(cfgFile, 'utf-8'));
+  } catch {
+    current = {};
+  }
+  const merged = JSON.parse(JSON.stringify(current));
+  if (next.length === 0) delete merged.sync?.namespaces;
+  else {
+    merged.sync = merged.sync && typeof merged.sync === 'object' ? merged.sync : {};
+    merged.sync.namespaces = next;
+  }
+  const tmp = `${cfgFile}.tmp-${process.pid}`;
+  await writeFile(tmp, JSON.stringify(merged, null, 2), 'utf-8');
+  if (existsSync(cfgFile)) await copyFile(cfgFile, `${cfgFile}.bak`);
+  await rename(tmp, cfgFile);
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -1019,7 +1040,7 @@ export async function startHttpServer({
       // P3/SP-29：显式信号接线（诊断字段；缺省不发送）
       ...(result?.reportedAhead !== undefined ? { reportedAhead: result.reportedAhead } : {}),
       ...(result?.denied !== undefined ? { denied: result.denied } : {}),
-      ...(result?.membershipRejected !== undefined ? { membershipRejected: result.membershipRejected } : {}),
+      ...(result?.subscriptionRejected !== undefined ? { subscriptionRejected: result.subscriptionRejected } : {}),
       ...(result?.ackedOutgoing !== undefined ? { ackedOutgoing: result.ackedOutgoing } : {}),
       ...(result?.watermarkDownCorrections !== undefined ? { watermarkDownCorrections: result.watermarkDownCorrections } : {}),
       ...(result?.unknownEventTypes !== undefined ? { unknownEventTypes: result.unknownEventTypes } : {}),
@@ -1087,10 +1108,10 @@ export async function startHttpServer({
   }
 
   const WRITE_PATTERNS = [
-    /^\/admin\/api\/grants$/,
     /^\/admin\/api\/clouds\/(join|rename|inspect)$/,
-    /^\/admin\/api\/grants\/([^/]+)\/revoke$/,
-    /^\/admin\/api\/devices\/([^/]+)\/(revoke|connect|disconnect|sync|reset-watermarks)$/,
+    /^\/admin\/api\/subscriptions$/,
+    /^\/admin\/api\/namespaces$/,
+    /^\/admin\/api\/devices\/([^/]+)\/(revoke|restore|connect|disconnect|sync|reset-watermarks)$/,
     /^\/admin\/api\/config$/,
     /^\/admin\/api\/restart$/,
     /^\/admin\/api\/memories\/([^/]+)\/(archive|unarchive|delete)$/,
@@ -1100,8 +1121,6 @@ export async function startHttpServer({
     /^\/admin\/api\/security\/approvals\/([^/]+)\/(approve|deny)$/,
     /^\/admin\/api\/security\/totp\/(show|import)$/,
     /^\/admin\/api\/security\/recovery\/(generate|rotate)$/,
-    /^\/admin\/api\/policy-issuers$/,
-    /^\/admin\/api\/memberships$/,
     /^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/,
     /^\/admin\/api\/service\/(install|uninstall)$/,
     /^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview|verify|recheck)$/,
@@ -1837,11 +1856,11 @@ export async function startHttpServer({
     if (path === '/admin/api/security/approvals') {
       const input = parseJsonBody(body) ?? {};
       const op = input.op;
-      if (!['kick', 'join', 'tier'].includes(op)) {
-        return sendJson(res, 400, { ok: false, error: 'bad_request', message: 'op 必须是 kick|join|tier' });
+      if (!['kick', 'join', 'tier', 'restore'].includes(op)) {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: 'op 必须是 kick|join|tier|restore' });
       }
-      if (op === 'kick' && typeof input.target !== 'string') {
-        return sendJson(res, 400, { ok: false, error: 'bad_request', message: 'kick 需要 target（被踢设备）' });
+      if ((op === 'kick' || op === 'restore') && typeof input.target !== 'string') {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: `${op} 需要 target（设备）` });
       }
       if (op === 'join' && typeof input.namespace !== 'string') {
         return sendJson(res, 400, { ok: false, error: 'bad_request', message: 'join 需要 namespace' });
@@ -1856,7 +1875,7 @@ export async function startHttpServer({
       const digest = lib.securityActionDigest({
         op,
         initiator: deviceId,
-        ...(op === 'kick' ? { subject: input.target } : {}),
+        ...(op === 'kick' || op === 'restore' ? { subject: input.target } : {}),
         ...(op === 'join' ? { namespace: input.namespace } : {}),
         ...(op === 'tier' ? { level: input.level } : {}),
         nonce,
@@ -1866,7 +1885,7 @@ export async function startHttpServer({
         op,
         decision: 'request',
         initiator: deviceId,
-        ...(op === 'kick' ? { target: input.target } : {}),
+        ...(op === 'kick' || op === 'restore' ? { target: input.target } : {}),
         ...(op === 'join' ? { namespace: input.namespace } : {}),
         ...(op === 'tier' ? { level: input.level } : {}),
         nonce,
@@ -1927,7 +1946,7 @@ export async function startHttpServer({
       return sendJson(res, 200, { ok: true, approvalId, decision: 'approve', eventId: event.id, cosign });
     }
 
-    // 新设备上车：签发一次性加入令牌（需 joinService 已启用；由守护 identity 签发）
+    // 新设备上车：生成一次性加入令牌（需 joinService 已启用；由守护 identity 生成）
     if (path === '/admin/api/invite') {
       // C7：二维码 + 文本一起给（QR 内容 = 内联令牌文本；缺可选依赖 → 只给文本，不报错）
       if (typeof deviceId !== 'string' || typeof joinEndpoint !== 'string') {
@@ -1938,14 +1957,14 @@ export async function startHttpServer({
         });
       }
       const input = parseJsonBody(body) ?? {};
-      // §7-4 可选增强：被吊销设备不签发新令牌（不改变令牌格式/默认语义）。
-      if (typeof app.getRevokedDevices === 'function') {
-        const revoked = await app.getRevokedDevices().catch(() => []);
-        if (Array.isArray(revoked) && revoked.includes(deviceId)) {
+      // 被移出设备不生成新令牌（作者级否定）。
+      if (typeof app.getBlockedDevices === 'function') {
+        const blocked = await app.getBlockedDevices().catch(() => []);
+        if (Array.isArray(blocked) && blocked.includes(deviceId)) {
           return sendJson(res, 403, {
             ok: false,
-            error: 'inviter_revoked',
-            message: '本机已被踢出网络（device_revoke 已采纳）：不能再签发加入令牌',
+            error: 'inviter_blocked',
+            message: '本机已被移出网络（device_revoke 已采纳）：不能再生成加入令牌',
           });
         }
       }
@@ -1962,6 +1981,7 @@ export async function startHttpServer({
           securityApproval = {
             approvalId: approval.approvalId,
             nonce: approval.nonce,
+            initiator: approval.initiator,
             ...(approval.cosign !== undefined ? { cosign: approval.cosign } : {}),
           };
         }
@@ -1983,6 +2003,7 @@ export async function startHttpServer({
         namespace: ns,
         endpoint,
         ttlMs,
+        ...(securityApproval !== null ? { securityApproval } : {}),
         ...hints,
       });
       const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
@@ -1995,7 +2016,6 @@ export async function startHttpServer({
         token: inline,
         // C7：服务端渲染 SVG（data-uri 由前端组装）；库不可用时为 null
         qrSvg: qrSvg ? qrSvg.value : null,
-        grantOnJoin: true,
         ...(qrWarnings.length > 0 ? { qrWarnings } : {}),
         endpoint,
         endpointSource: override ? 'override' : 'daemon',
@@ -2149,44 +2169,54 @@ export async function startHttpServer({
       return true;
     }
 
-    const grantMatch = path.match(/^\/admin\/api\/grants$/);
-    if (grantMatch) {
+    // 新建记忆域（零门槛）：写自签名 `namespace_declare`；不自动订阅。
+    if (path === '/admin/api/namespaces') {
       const input = parseJsonBody(body);
-      if (!input || typeof input.subject !== 'string' || !Array.isArray(input.namespaces) || input.namespaces.length === 0) {
-        return sendJson(res, 400, { error: 'bad_request', message: '需要 { subject, namespaces[] }' });
+      if (!input || typeof input.namespace !== 'string' || input.namespace.trim().length === 0) {
+        return sendJson(res, 400, { error: 'bad_request', message: '需要 { namespace }' });
       }
-      const namespaces = [...new Set(input.namespaces.filter((ns) => typeof ns === 'string' && ns.length > 0))];
-      if (namespaces.length === 0) {
-        return sendJson(res, 400, { error: 'bad_request', message: 'namespaces 不能为空' });
-      }
-      const event = await app.grantNamespaces({
-        subject: input.subject,
-        namespaces,
+      const event = await app.declareNamespace({
+        namespace: input.namespace,
         ...(typeof input.note === 'string' ? { note: input.note } : {}),
-        ...(typeof input.expiresAt === 'number' ? { expiresAt: input.expiresAt } : {}),
       });
-      return sendJson(res, 201, {
+      const namespace = event.data?.declaration?.namespace ?? input.namespace;
+      // 默认自订阅（零门槛）：创建完就能写；用户仍可随时退订。
+      const subscribed = input.subscribe !== false;
+      if (subscribed) {
+        await app.subscribeNamespace(namespace);
+        await persistSubscriptionNamespaces(home, app.sync.getSubscriptionNamespaces());
+      }
+      return sendJson(res, 201, { ok: true, namespace, eventId: event.id, subscribed });
+    }
+
+    // 订阅/退订（只改本机；热生效，不重启）
+    if (path === '/admin/api/subscriptions') {
+      const input = parseJsonBody(body);
+      if (!input || typeof input.namespace !== 'string' || input.namespace.trim().length === 0) {
+        return sendJson(res, 400, { error: 'bad_request', message: '需要 { namespace, active?, nextNamespaces? }' });
+      }
+      const ns = input.namespace;
+      const active = input.active !== false;
+      const event = active
+        ? await app.subscribeNamespace(ns)
+        : await app.unsubscribeNamespace(ns);
+      // 持久化 sync.namespaces（热生效：不重启；core 运行期已更新）
+      const next = Array.isArray(input.nextNamespaces)
+        ? input.nextNamespaces.filter((entry) => typeof entry === 'string' && entry.length > 0)
+        : app.sync.getSubscriptionNamespaces();
+      if (next.length > 0 || input.nextNamespaces !== undefined || !active) {
+        await persistSubscriptionNamespaces(home, next);
+      }
+      return sendJson(res, 200, {
         ok: true,
-        grantId: event.data?.grant?.grantId,
+        namespace: ns,
+        active,
         eventId: event.id,
-        subject: input.subject,
-        namespaces,
+        subscriptions: app.sync.getSubscriptionNamespaces(),
       });
     }
 
-    const revokeMatch = path.match(/^\/admin\/api\/grants\/([^/]+)\/revoke$/);
-    if (revokeMatch) {
-      const grantId = decodeURIComponent(revokeMatch[1]);
-      const input = parseJsonBody(body) ?? {};
-      const event = await app.revokeGrant({
-        grantId,
-        ...(typeof input.subject === 'string' ? { subject: input.subject } : {}),
-        ...(typeof input.note === 'string' ? { note: input.note } : {}),
-      });
-      return sendJson(res, 200, { ok: true, grantId, eventId: event.id });
-    }
-
-    const deviceMatch = path.match(/^\/admin\/api\/devices\/([^/]+)\/(revoke|connect|disconnect|sync|reset-watermarks)$/);
+    const deviceMatch = path.match(/^\/admin\/api\/devices\/([^/]+)\/(revoke|restore|connect|disconnect|sync|reset-watermarks)$/);
     if (deviceMatch) {
       const deviceId = decodeURIComponent(deviceMatch[1]);
       const action = deviceMatch[2];
@@ -2265,6 +2295,80 @@ export async function startHttpServer({
         return sendJson(res, 200, { ok: true, deviceId, eventId: event.id });
       }
 
+      if (action === 'restore') {
+        const input = parseJsonBody(body) ?? {};
+        const lib = await loadFleetSecurity();
+        const suppliedRecoveryCode = typeof input.recoveryCode === 'string' ? input.recoveryCode.trim() : '';
+        if (suppliedRecoveryCode.length > 0) {
+          if (!lib) return sendJson(res, 503, { ok: false, error: 'security_unavailable', message: '安全模块不可用（@mebular/fleet 未构建）' });
+          if (input.breakGlass !== undefined || input.cosign !== undefined || input.nonce !== undefined
+            || typeof input.approvalId === 'string') {
+            return sendJson(res, 400, {
+              ok: false,
+              error: 'bad_request',
+              message: 'recoveryCode 不能与 breakGlass / 会签批准 / 自定义 nonce 同时使用：请只选一种执行方式。',
+            });
+          }
+          const signed = await signRecoveryProof({
+            lib,
+            app,
+            code: suppliedRecoveryCode,
+            op: 'restore',
+            subject: deviceId,
+            initiator: app.deviceId ?? deviceId ?? '',
+          });
+          if (!signed.ok) {
+            return sendJson(res, signed.status, { ok: false, error: signed.error, message: signed.message });
+          }
+          const event = await lib.writeDeviceRestore(app, {
+            subject: deviceId,
+            note: typeof input.note === 'string' ? input.note : 'recovery-code',
+            breakGlass: signed.proof,
+          });
+          return sendJson(res, 200, {
+            ok: true,
+            deviceId,
+            eventId: event.id,
+            method: 'breakGlass',
+            auditLabel: '恢复码',
+          });
+        }
+        let cosign = input.cosign;
+        let approvalNonce = typeof input.nonce === 'string' ? input.nonce : undefined;
+        if (lib && (cosign !== undefined || typeof input.approvalId === 'string') && input.breakGlass === undefined) {
+          const events = await lib.listPolicyEvents(app);
+          const approvalId = typeof input.approvalId === 'string'
+            ? input.approvalId
+            : typeof cosign?.approvalId === 'string' ? cosign.approvalId : null;
+          if (approvalId !== null) {
+            const approval = lib.findApproval(events, approvalId);
+            if (cosign === undefined) cosign = approval?.cosign;
+            if (approvalNonce === undefined) approvalNonce = approval?.nonce;
+          }
+        }
+        if (lib && (cosign !== undefined || input.breakGlass !== undefined)) {
+          const event = await lib.writeDeviceRestore(app, {
+            subject: deviceId,
+            ...(typeof input.note === 'string' ? { note: input.note } : {}),
+            ...(approvalNonce !== undefined ? { nonce: approvalNonce } : {}),
+            ...(cosign !== undefined ? { cosign } : {}),
+            ...(input.breakGlass !== undefined ? { breakGlass: input.breakGlass } : {}),
+          });
+          return sendJson(res, 200, {
+            ok: true,
+            deviceId,
+            eventId: event.id,
+            method: input.breakGlass !== undefined ? 'breakGlass' : 'cosign',
+            ...(input.breakGlass !== undefined ? { auditLabel: '恢复码' } : {}),
+          });
+        }
+        const event = await app.restoreDevice({
+          subject: deviceId,
+          ...(typeof input.note === 'string' ? { note: input.note } : {}),
+        });
+        return sendJson(res, 200, { ok: true, deviceId, eventId: event.id });
+      }
+
       if (action === 'reset-watermarks') {
         await app.resetPeerWatermarks(deviceId);
         return sendJson(res, 200, { ok: true, deviceId });
@@ -2315,34 +2419,7 @@ export async function startHttpServer({
       }
     }
 
-    // 引导签发者声明（C1：图上签名声明；受 R-b 吊销排斥）
-    if (path === '/admin/api/policy-issuers') {
-      const input = parseJsonBody(body) ?? {};
-      const subject = typeof input.subject === 'string' && input.subject.length > 0 ? input.subject : app.deviceId;
-      const event = await app.declarePolicyIssuer({
-        subject,
-        ...(typeof input.note === 'string' ? { note: input.note } : {}),
-      });
-      return sendJson(res, 201, { ok: true, subject, eventId: event.id });
-    }
-
-    // 成员资格声明（active=false 即注销；不清理数据）
-    if (path === '/admin/api/memberships') {
-      const input = parseJsonBody(body);
-      if (!input || typeof input.member !== 'string' || typeof input.namespace !== 'string') {
-        return sendJson(res, 400, { error: 'bad_request', message: '需要 { member, namespace, active? }' });
-      }
-      const active = input.active !== false;
-      const event = await app.declareNamespaceMembership({
-        member: input.member,
-        namespace: input.namespace,
-        active,
-        ...(typeof input.note === 'string' ? { note: input.note } : {}),
-      });
-      return sendJson(res, 201, { ok: true, member: input.member, namespace: input.namespace, active, eventId: event.id });
-    }
-
-    // 分区动作：rejoin（重入恢复）/ leave（退订交接；force 不走控制台）
+    // 分区动作：rejoin（重入恢复）/ leave（退出并交接；force 不走控制台）
     const nsActionMatch = path.match(/^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/);
     if (nsActionMatch) {
       const namespace = decodeURIComponent(nsActionMatch[1]);
@@ -2856,7 +2933,7 @@ export async function startHttpServer({
             nodes: trimmed.map((n) => ({ id: n.id, type: n.type, namespace: n.namespace ?? 'default', content: n.content })),
           });
         }
-        // W2 A4：join 邀请（守护用自身身份签发令牌）
+        // W2 A4：join 邀请（守护用自身身份生成令牌）
         if (path === '/app/join/invite' && req.method === 'POST') {
           if (typeof deviceId !== 'string' || typeof joinEndpoint !== 'string') {
             return sendJson(res, 400, { ok: false, error: '守护未启用 joinService（缺 deviceId/joinEndpoint）' });
@@ -2881,17 +2958,19 @@ export async function startHttpServer({
           const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
           return sendJson(res, 200, { ok: true, token: inline, endpoint, namespace: ns, expiresAt: token.expiresAt, nonce: token.nonce });
         }
-        // W2：策略/成员（守护持有图表；fleet 客户端化）
-        if (path === '/app/policy/effective' && req.method === 'GET') {
+        // W2：订阅（守护持有图表；fleet 客户端化）
+        if (path === '/app/policy/subscriptions' && req.method === 'GET') {
           const device = url.searchParams.get('device');
-          if (!device) return sendJson(res, 400, { ok: false, error: 'device 必填' });
-          const namespaces = await app.getEffectiveNamespaces(device);
-          return sendJson(res, 200, { ok: true, device, namespaces });
-        }
-        if (path === '/app/policy/membership' && req.method === 'GET') {
-          const ns = url.searchParams.get('namespace') ?? namespace;
-          const membership = await app.getNamespaceMembership(ns);
-          return sendJson(res, 200, { ok: true, namespace: ns, ...membership });
+          const ns = url.searchParams.get('namespace');
+          if (device) {
+            const namespaces = await app.getSubscriptions(device);
+            return sendJson(res, 200, { ok: true, device, namespaces });
+          }
+          if (ns) {
+            const subscriptions = await app.getNamespaceSubscriptions(ns);
+            return sendJson(res, 200, { ok: true, namespace: ns, ...subscriptions });
+          }
+          return sendJson(res, 400, { ok: false, error: 'device 或 namespace 必填' });
         }
         if (path.startsWith('/app/policy/') && req.method === 'POST') {
           let payload;
@@ -2900,26 +2979,17 @@ export async function startHttpServer({
           } catch {
             return sendJson(res, 400, { ok: false, error: 'invalid json' });
           }
-          if (path === '/app/policy/grant') {
-            const namespaces = Array.isArray(payload.namespaces) ? payload.namespaces : payload.namespace ? [payload.namespace] : [];
-            if (typeof payload.subject !== 'string' || namespaces.length === 0) return sendJson(res, 400, { ok: false, error: 'subject/namespaces 必填' });
-            const event = await app.grantNamespaces({ subject: payload.subject, namespaces, ...(typeof payload.note === 'string' ? { note: payload.note } : {}) });
-            return sendJson(res, 200, { ok: true, eventId: event.id, grant: event.data?.grant ?? null });
-          }
-          if (path === '/app/policy/revoke') {
-            if (typeof payload.grantId !== 'string' || !payload.grantId) return sendJson(res, 400, { ok: false, error: 'grantId 必填' });
-            const event = await app.revokeGrant({ grantId: payload.grantId, ...(typeof payload.subject === 'string' ? { subject: payload.subject } : {}), ...(typeof payload.note === 'string' ? { note: payload.note } : {}) });
-            return sendJson(res, 200, { ok: true, eventId: event.id });
-          }
-          if (path === '/app/policy/member') {
+          if (path === '/app/policy/subscription') {
             const ns = typeof payload.namespace === 'string' && payload.namespace ? payload.namespace : namespace;
-            if (typeof payload.member !== 'string' || !payload.member) return sendJson(res, 400, { ok: false, error: 'member 必填' });
-            const event = await app.declareNamespaceMembership({ member: payload.member, namespace: ns, active: payload.active !== false, ...(typeof payload.note === 'string' ? { note: payload.note } : {}) });
-            return sendJson(res, 200, { ok: true, eventId: event.id });
+            if (!ns) return sendJson(res, 400, { ok: false, error: 'namespace 必填' });
+            const event = payload.active === false
+              ? await app.unsubscribeNamespace(ns)
+              : await app.subscribeNamespace(ns);
+            return sendJson(res, 200, { ok: true, eventId: event.id, namespace: ns, active: payload.active !== false });
           }
-          if (path === '/app/policy/declare-issuer') {
-            if (typeof payload.subject !== 'string' || !payload.subject) return sendJson(res, 400, { ok: false, error: 'subject 必填' });
-            const event = await app.declarePolicyIssuer({ subject: payload.subject, ...(typeof payload.note === 'string' ? { note: payload.note } : {}) });
+          if (path === '/app/policy/namespace') {
+            if (typeof payload.namespace !== 'string' || !payload.namespace) return sendJson(res, 400, { ok: false, error: 'namespace 必填' });
+            const event = await app.declareNamespace({ namespace: payload.namespace, ...(typeof payload.note === 'string' ? { note: payload.note } : {}) });
             return sendJson(res, 200, { ok: true, eventId: event.id });
           }
         }

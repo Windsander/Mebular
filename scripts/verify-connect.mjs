@@ -89,7 +89,7 @@ const makeApp = async ({ deviceId, home, listen, relayServers, endpoints, endpoi
       },
       ...(relayService ? { relayService } : {}),
     },
-    sync: { autoSync: true, ...(deviceId === 'device-A' ? { peerNamespacePolicy: { 'device-B': ['tasks'] } } : {}) },
+    sync: { autoSync: true },
   });
   await app.initialize();
   apps.push(app);

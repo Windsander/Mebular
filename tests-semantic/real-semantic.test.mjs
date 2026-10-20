@@ -94,7 +94,7 @@ test('分布式召回：对端同步入库的节点本端可见', async () => {
     semantic: semantic(),
     network: { enabled: true, provider: hub },
     // 默认拒绝：分布式召回需显式授权对端（本用例记忆落在 default 分区）
-    sync: { autoSync: true, peerNamespacePolicy: { 'device-B': ['default'] } },
+    sync: { autoSync: true },
   });
   const b = new Mebular({
     storagePath: join(dir, 'b.jsonl'),
@@ -102,7 +102,7 @@ test('分布式召回：对端同步入库的节点本端可见', async () => {
     encryption: masterKeys,
     semantic: semantic(),
     network: { enabled: true, provider: hub },
-    sync: { autoSync: true, peerNamespacePolicy: { 'device-A': ['default'] } },
+    sync: { autoSync: true },
   });
   await a.initialize();
   await b.initialize();

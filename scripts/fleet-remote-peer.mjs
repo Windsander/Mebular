@@ -65,7 +65,6 @@ async function loadKey(path) {
 
 function makeMebular(args, encryption) {
   const deviceId = str(args.device, 'device-A');
-  const authorize = str(args.authorize, deviceId === 'device-A' ? 'device-B' : 'device-A');
   const listen = str(args.listen, '/ip4/0.0.0.0/tcp/0');
   const storage = str(args.storage, `./.fleet/${deviceId}.jsonl`);
   return new Mebular({
@@ -73,7 +72,7 @@ function makeMebular(args, encryption) {
     deviceId,
     encryption,
     network: { enabled: true, libp2p: { listen: [listen] } },
-    sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 20, namespaces: ['tasks'], peerNamespacePolicy: { [authorize]: ['tasks'] } },
+    sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 20, namespaces: ['tasks'] },
   });
 }
 

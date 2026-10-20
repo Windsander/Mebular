@@ -23,16 +23,15 @@ import {
   SECURITY_APPROVAL_EVENT,
   SECURITY_RECOVERY_EVENT,
   DEVICE_REVOKE_EVENT,
-  NAMESPACE_GRANT_EVENT,
+  NAMESPACE_SUBSCRIPTION_EVENT,
   type CosignProof,
   type BreakGlassProof,
   type SecurityApprovalRecord,
   type SecurityRecoveryRecord,
   type SecurityTierRecord,
   type SecurityRejectionReason,
-  type NamespaceGrantRecord,
+  type NamespaceSubscriptionRecord,
   type DeviceRevokeRecord,
-  type NamespaceMembershipRecord,
 } from '../../src/sync/grantPolicy.js';
 import { Mebular } from '../../src/mebular.js';
 import {
@@ -59,7 +58,7 @@ function resetSeq(): void {
 
 function withProofFlags(entry: Entry): Entry {
   const record =
-    entry.tier ?? entry.device ?? entry.grant ?? entry.membership ?? entry.recovery;
+    entry.tier ?? entry.device ?? entry.subscription ?? entry.restore ?? entry.recovery;
   if (record && 'cosign' in record && record.cosign && entry.cosignWellFormed === undefined) {
     entry.cosignWellFormed = true;
   }
@@ -69,13 +68,18 @@ function withProofFlags(entry: Entry): Entry {
   return entry;
 }
 
-function grant(author: string, subject: string, namespaces: string[], extra: Partial<NamespaceGrantRecord> = {}): Entry {
+function subscription(
+  author: string,
+  member: string,
+  namespace: string,
+  extra: Partial<NamespaceSubscriptionRecord> = {},
+): Entry {
   return withProofFlags(
     E({
-      kind: 'grant',
+      kind: 'subscription',
       author,
-      id: extra.grantId ?? `g-${author}-${subject}-${seq + 1}`,
-      grant: { grantId: extra.grantId ?? `G-${author}-${subject}-${seq + 1}`, subject, namespaces, issuedAt: seq + 1, ...extra },
+      id: `s-${author}-${member}-${namespace}-${seq + 1}`,
+      subscription: { member, namespace, active: true, issuedAt: seq + 1, ...extra },
     }),
   );
 }
@@ -91,16 +95,7 @@ function deviceRevoke(author: string, subject: string, extra: Partial<DeviceRevo
   );
 }
 
-function membership(author: string, member: string, namespace: string, extra: Partial<NamespaceMembershipRecord> = {}): Entry {
-  return withProofFlags(
-    E({
-      kind: 'membership',
-      author,
-      id: `m-${author}-${member}-${seq + 1}`,
-      membership: { member, namespace, active: true, issuedAt: seq + 1, ...extra },
-    }),
-  );
-}
+
 
 function tier(author: string, level: SecurityTierRecord['level'], extra: Partial<SecurityTierRecord> = {}): Entry {
   return withProofFlags(
@@ -228,31 +223,28 @@ function kickProof(opts: {
   return { proof: built.proof, digest, wellFormed: built.wellFormed };
 }
 
-/** 低档既成成员：D（bootstrap）授予 E/F/X 授权，随后 D 升到 high。 */
+/** 低档既成订阅者：E/F/X 各自声明订阅，随后 D 升到 high（历史成员不回溯）。 */
 function highBase(options: { includeX?: boolean } = {}): Entries {
   return [
-    grant('D', 'E', ['nsA']),
-    grant('D', 'F', ['nsA']),
-    ...(options.includeX ? [grant('D', 'X', ['nsA'])] : []),
+    subscription('E', 'E', 'nsA'),
+    subscription('F', 'F', 'nsA'),
+    ...(options.includeX ? [subscription('X', 'X', 'nsA')] : []),
     tier('D', 'high'),
   ];
 }
 
 function derive(entries: Entries) {
-  return derivePolicyState(entries, { policyIssuers: ['D'] });
+  return derivePolicyState(entries);
 }
 
 function json(state: ReturnType<typeof derivePolicyState>) {
-  const authorized: Record<string, string[]> = {};
-  for (const key of [...state.authorized.keys()].sort()) authorized[key] = [...state.authorized.get(key)!].sort();
-  const members: Record<string, string[]> = {};
-  for (const key of [...state.members.keys()].sort()) members[key] = [...state.members.get(key)!].sort();
+  const subscriptions: Record<string, string[]> = {};
+  for (const key of [...state.subscriptions.keys()].sort()) subscriptions[key] = [...state.subscriptions.get(key)!].sort();
   return {
-    authorized,
-    revoked: [...state.revoked].sort(),
-    issuers: [...state.issuers].sort(),
-    members,
-    membershipNamespaces: [...state.membershipNamespaces].sort(),
+    subscriptions,
+    subscriptionNamespaces: [...state.subscriptionNamespaces].sort(),
+    blocked: [...state.blocked].sort(),
+    declarations: [...state.declarations].sort(),
   };
 }
 
@@ -279,7 +271,7 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
   it('R1-2 被吊销签发者的 tier 记录不采纳（R-b 含历史）', () => {
     resetSeq();
     const state = derive([tier('E', 'medium'), deviceRevoke('D', 'E')]);
-    expect(state.revoked.has('E')).toBe(true);
+    expect(state.blocked.has('E')).toBe(true);
     expect(state.security?.level).toBe('low');
   });
 
@@ -379,7 +371,7 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
     const revokedDigest = securityActionDigest({ op: 'tier', initiator: 'D', level: 'medium', nonce: 'n-rev' });
     const revokedProof = cosign({ op: 'tier', approver: 'E', approvalId: 'ap-rev', digest: revokedDigest });
     const revokedAtOrder = derive([
-      grant('D', 'E', ['nsA']),
+      subscription('E', 'E', 'nsA'),
       deviceRevoke('D', 'E'),
       tier('D', 'high'),
       approvalEntry({
@@ -439,7 +431,7 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
   it('R1-5 device_revoke @high：无证明不采纳；有效 cosign 采纳；approver=subject / nonce 重放不采纳', () => {
     resetSeq();
     const bare = derive([...highBase({ includeX: true }), deviceRevoke('D', 'X')]);
-    expect(bare.revoked.has('X')).toBe(false);
+    expect(bare.blocked.has('X')).toBe(false);
     expect(reasonsOf(bare)).toContain('missing-proof');
 
     resetSeq();
@@ -458,7 +450,7 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
       }),
       deviceRevoke('D', 'X', { nonce, cosign: built.proof }),
     ]);
-    expect(ok.revoked.has('X')).toBe(true);
+    expect(ok.blocked.has('X')).toBe(true);
 
     // approver = subject
     resetSeq();
@@ -477,7 +469,7 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
       }),
       deviceRevoke('D', 'X', { nonce: subjNonce, cosign: subjBuilt.proof }),
     ]);
-    expect(subj.revoked.has('X')).toBe(false);
+    expect(subj.blocked.has('X')).toBe(false);
     expect(reasonsOf(subj)).toContain('approver-equals-subject');
 
     // 同一 nonce 重放（不同动作）
@@ -492,15 +484,53 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
       approvalEntry({ author: 'E', approvalId: 'ap-r2', op: 'kick', initiator: 'D', target: 'F', nonce: replayNonce, digest: second.digest }),
       deviceRevoke('D', 'F', { nonce: replayNonce, cosign: second.proof }),
     ]);
-    expect(replay.revoked.has('X')).toBe(true);
-    expect(replay.revoked.has('F')).toBe(false);
+    expect(replay.blocked.has('X')).toBe(true);
+    expect(replay.blocked.has('F')).toBe(false);
     expect(reasonsOf(replay)).toContain('stale-or-replayed-nonce');
+  });
+
+  it('R1-13 device_restore @high：无证明不采纳；带 cosign 采纳并建立恢复纪元', () => {
+    resetSeq();
+    const base = highBase({ includeX: true });
+    const kickNonce = 'restore-kick';
+    const kickDigest = securityActionDigest({ op: 'kick', initiator: 'D', subject: 'X', nonce: kickNonce });
+    const kickApproval = approvalEntry({
+      author: 'E', approvalId: 'ap-restore-kick', op: 'kick', initiator: 'D', target: 'X', nonce: kickNonce, digest: kickDigest,
+    });
+    const kickProof = cosign({ op: 'kick', approver: 'E', approvalId: 'ap-restore-kick', digest: kickDigest });
+
+    const bare = derive([
+      ...base,
+      kickApproval,
+      deviceRevoke('D', 'X', { nonce: kickNonce, cosign: kickProof.proof }),
+      E({ kind: 'restore', author: 'D', id: 'restore-bare', restore: { subject: 'X', issuedAt: 10 } }),
+    ]);
+    expect(bare.blocked.has('X')).toBe(true);
+    expect(reasonsOf(bare)).toContain('missing-proof');
+
+    resetSeq();
+    const base2 = highBase({ includeX: true });
+    const restoreNonce = 'restore-ok';
+    const restoreDigest = securityActionDigest({ op: 'restore', initiator: 'D', subject: 'X', nonce: restoreNonce });
+    const restoreApproval = approvalEntry({
+      author: 'E', approvalId: 'ap-restore-ok', op: 'restore', initiator: 'D', target: 'X', nonce: restoreNonce, digest: restoreDigest,
+    });
+    const restoreProof = cosign({ op: 'restore', approver: 'E', approvalId: 'ap-restore-ok', digest: restoreDigest });
+    const adopted = derive([
+      ...base2,
+      kickApproval,
+      deviceRevoke('D', 'X', { nonce: kickNonce, cosign: kickProof.proof }),
+      restoreApproval,
+      E({ kind: 'restore', author: 'D', id: 'restore-ok', restore: { subject: 'X', issuedAt: 11, nonce: restoreNonce, cosign: restoreProof.proof }, cosignWellFormed: true }),
+    ]);
+    expect(adopted.blocked.has('X')).toBe(false);
+    expect(adopted.restoreAt.has('X')).toBe(true);
   });
 
   it('R1-6 首现验收：@high 新设备无证明不采纳且不 admitted；带证明采纳；历史成员不回溯', () => {
     resetSeq();
-    const bare = derive([...highBase({ includeX: true }), membership('Y', 'Y', 'nsA')]);
-    expect(bare.members.get('nsA')?.has('Y') ?? false).toBe(false);
+    const bare = derive([...highBase({ includeX: true }), subscription('Y', 'Y', 'nsA')]);
+    expect(bare.subscriptions.get('nsA')?.has('Y') ?? false).toBe(false);
     expect(bare.security?.admitted).not.toContain('Y');
     expect(reasonsOf(bare)).toContain('missing-proof');
 
@@ -521,61 +551,46 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
         nonce: joinNonce,
         digest,
       }),
-      membership('Y', 'Y', 'nsA', { nonce: joinNonce, cosign: proof.proof }),
+      subscription('Y', 'Y', 'nsA', { nonce: joinNonce, cosign: proof.proof }),
     ]);
-    expect(joined.members.get('nsA')?.has('Y') ?? false).toBe(true);
+    expect(joined.subscriptions.get('nsA')?.has('Y') ?? false).toBe(true);
     expect(joined.security?.admitted).toContain('Y');
 
-    // 历史成员 X 在 high 之后的新记录不回溯要求会签
+    // 历史订阅者 X 在 high 之后的新订阅不回溯要求会签
     resetSeq();
     const historical = derive([
       ...highBase({ includeX: true }),
-      grant('D', 'X', ['nsB']),
+      subscription('X', 'X', 'nsB'),
     ]);
-    expect(historical.authorized.get('X')).toEqual(['nsA', 'nsB']);
+    expect(historical.subscriptions.get('nsB')?.has('X') ?? false).toBe(true);
     expect(historical.security?.rejections ?? []).toHaveLength(0);
+  });
 
-    // grant 首现路径：裸 grant 不采纳且不 admitted；带会签 grant 采纳后
-    // Y 可作为 R-a 授权方继续转授（候选集/过滤集不振荡）。
+  it('R1-14 H1 加入首记：首条订阅带会签后，第二个域无需会签', () => {
     resetSeq();
-    const bareGrant = derive([...highBase(), grant('D', 'Y', ['nsA']), grant('Y', 'Z', ['nsA'])]);
-    expect(bareGrant.converged).toBe(true);
-    expect(bareGrant.authorized.has('Y')).toBe(false);
-    expect(bareGrant.authorized.has('Z')).toBe(false);
-    expect(bareGrant.security?.admitted).not.toContain('Y');
-    expect(reasonsOf(bareGrant)).toContain('missing-proof');
-
-    resetSeq();
-    const grantJoinNonce = 'join-grant';
-    const grantJoinDigest = securityActionDigest({
-      op: 'join',
-      initiator: 'D',
-      namespace: 'nsA',
-      nonce: grantJoinNonce,
-    });
-    const grantJoinProof = cosign({
-      op: 'join',
-      approver: 'E',
-      approvalId: 'ap-join-grant',
-      digest: grantJoinDigest,
-    });
-    const granted = derive([
-      ...highBase(),
+    const base = highBase({ includeX: true });
+    const joinNonce = 'h1-first';
+    const joinDigest = securityActionDigest({ op: 'join', initiator: 'D', namespace: 'nsA', nonce: joinNonce });
+    const proof = cosign({ op: 'join', approver: 'E', approvalId: 'ap-h1-first', digest: joinDigest });
+    const state = derive([
+      ...base,
       approvalEntry({
         author: 'E',
-        approvalId: 'ap-join-grant',
+        approvalId: 'ap-h1-first',
         op: 'join',
         initiator: 'D',
         target: 'Y',
         namespace: 'nsA',
-        nonce: grantJoinNonce,
-        digest: grantJoinDigest,
+        nonce: joinNonce,
+        digest: joinDigest,
       }),
-      grant('D', 'Y', ['nsA'], { nonce: grantJoinNonce, cosign: grantJoinProof.proof }),
+      subscription('Y', 'Y', 'nsA', { nonce: joinNonce, cosign: proof.proof }),
+      subscription('Y', 'Y', 'nsB'),
     ]);
-    expect(granted.converged).toBe(true);
-    expect(granted.security?.admitted).toContain('Y');
-    expect(granted.authorized.get('Y')).toEqual(['nsA']);
+    expect(state.subscriptions.get('nsA')?.has('Y') ?? false).toBe(true);
+    expect(state.subscriptions.get('nsB')?.has('Y') ?? false).toBe(true);
+    expect(state.security?.admitted).toContain('Y');
+    expect(state.security?.rejections ?? []).toHaveLength(0);
   });
 
   it('R1-7 恢复码：登记 → 使用（nonce 一次）→ 轮换；旧 key 新签名不采纳', () => {
@@ -591,7 +606,7 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
       tier('D', 'high'),
       deviceRevoke('D', 'X', { nonce: kickNonce, breakGlass: bg.proof }),
     ]);
-    expect(used.revoked.has('X')).toBe(true);
+    expect(used.blocked.has('X')).toBe(true);
     expect(used.security?.recoveryKeyId).toBe(k1);
 
     // 同一 nonce 重放（不同动作）→ 拒绝
@@ -603,7 +618,7 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
       deviceRevoke('D', 'X', { nonce: kickNonce, breakGlass: bg.proof }),
       deviceRevoke('D', 'F', { nonce: kickNonce, breakGlass: replayBg.proof }),
     ]);
-    expect(replay.revoked.has('F')).toBe(false);
+    expect(replay.blocked.has('F')).toBe(false);
     expect(reasonsOf(replay)).toContain('stale-or-replayed-nonce');
 
     // 轮换：旧码签 rotate → 新 key 生效
@@ -647,7 +662,7 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
       }),
       deviceRevoke('D', 'Z', { nonce: oldNonce, breakGlass: oldBg.proof }),
     ]);
-    expect(afterRotate.revoked.has('Z')).toBe(false);
+    expect(afterRotate.blocked.has('Z')).toBe(false);
     expect(afterRotate.security?.recoveryKeyId).toBe(k2);
     expect(reasonsOf(afterRotate)).toContain('invalid-proof');
   });
@@ -726,8 +741,8 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
       digest: rotateDigest,
     });
     const rotated = derive([
-      grant('D', 'E', ['nsA']),
-      grant('D', 'F', ['nsA']),
+      subscription('E', 'E', 'nsA'),
+      subscription('F', 'F', 'nsA'),
       recovery('D', { keyId: 'K1', publicKey: 'pub-k1', createdAt: 1, mode: 'set' }),
       tier('D', 'high'),
       approvalEntry({
@@ -818,7 +833,7 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
     const revProof = cosign({ op: 'kick', approver: 'E', approvalId: 'ap-r8-rev', digest: revDigest });
     collect(
       derive([
-        grant('D', 'E', ['nsA']),
+        subscription('E', 'E', 'nsA'),
         deviceRevoke('D', 'E'),
         tier('D', 'high'),
         approvalEntry({ author: 'E', approvalId: 'ap-r8-rev', op: 'kick', initiator: 'D', target: 'X', nonce: 'r8-rev', digest: revDigest }),
@@ -866,34 +881,21 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
     for (const reason of expected) expect(seen.has(reason)).toBe(true);
   });
 
-  it('R1-9 纯旧记录：推导结果与基线 golden 逐字节一致，且不出现 security 子对象', () => {
+  it('R1-9 纯订阅记录：推导确定、无 security 子对象', () => {
     resetSeq();
     const entries: Entries = [
-      E({ kind: 'grant', author: 'issuer', id: 'g1', grant: { grantId: 'G1', subject: 'A', namespaces: ['nsA'], issuedAt: 1 } }),
-      E({ kind: 'grant', author: 'issuer', id: 'g2', grant: { grantId: 'G2', subject: 'B', namespaces: ['nsB'], issuedAt: 2 } }),
-      E({ kind: 'issuer', author: 'issuer', id: 'i1', issuer: { subject: 'A', issuedAt: 3 } }),
-      E({ kind: 'revoke', author: 'issuer', id: 'r1', revoke: { grantId: 'G2', subject: 'B', issuedAt: 4 } }),
-      E({ kind: 'device', author: 'issuer', id: 'd1', device: { subject: 'B', issuedAt: 5 } }),
-      E({ kind: 'grant', author: 'A', id: 'g3', grant: { grantId: 'G3', subject: 'B', namespaces: ['nsA'], issuedAt: 6 } }),
-      E({ kind: 'membership', author: 'issuer', id: 'm1', membership: { member: 'B', namespace: 'nsA', active: true, issuedAt: 7 } }),
-      E({ kind: 'device', author: 'issuer', id: 'd2', device: { subject: 'A', issuedAt: 8 } }),
-      E({ kind: 'grant', author: 'issuer', id: 'g4', grant: { grantId: 'G4', subject: 'C', namespaces: ['nsA'], issuedAt: 9 } }),
+      E({ kind: 'subscription', author: 'A', id: 's1', subscription: { member: 'A', namespace: 'nsA', active: true, issuedAt: 1 } }),
+      E({ kind: 'subscription', author: 'B', id: 's2', subscription: { member: 'B', namespace: 'nsB', active: true, issuedAt: 2 } }),
+      E({ kind: 'declare', author: 'C', id: 'n1', declaration: { namespace: 'nsC', issuedAt: 3 } }),
+      E({ kind: 'device', author: 'issuer', id: 'd1', device: { subject: 'B', issuedAt: 4 } }),
     ];
-    const state = derivePolicyState(entries, { policyIssuers: ['issuer'] });
-    const actual = {
-      ...json(state),
-      converged: state.converged,
-      iterations: state.iterations,
-    };
-    expect(actual).toEqual({
-      authorized: { C: ['nsA'] },
-      revoked: ['A', 'B'],
-      issuers: ['issuer'],
-      members: {},
-      membershipNamespaces: [],
-      converged: true,
-      iterations: 3,
-    });
+    const state = derivePolicyState(entries);
+    expect([...state.subscriptions.get('nsA') ?? []]).toEqual(['A']);
+    expect(state.subscriptions.has('nsB')).toBe(false);
+    // B 被移出：其订阅记录不采纳，nsB 不进入订阅权威模式
+    expect([...state.subscriptionNamespaces].sort()).toEqual(['nsA']);
+    expect([...state.declarations]).toEqual(['nsC']);
+    expect([...state.blocked]).toEqual(['B']);
     expect(state.security).toBeUndefined();
   });
 
@@ -939,7 +941,7 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
     if (approval?.approval) approval.approval.expiresAt = 1;
 
     const first = derive(entries);
-    expect(first.revoked.has('X')).toBe(true);
+    expect(first.blocked.has('X')).toBe(true);
     const second = derive(entries);
     expect(json(second)).toEqual(json(first));
     expect(second.security).toEqual(first.security);
@@ -969,9 +971,9 @@ describe('R1 · 安全等级 core（SPEC §6.1）', () => {
       deviceRevoke('D', 'Y', { nonce: newApprovalNonce, cosign: newProof.proof }),
     ]);
 
-    expect(state.revoked.has('X')).toBe(true);
-    expect(state.revoked.has('E')).toBe(true);
-    expect(state.revoked.has('Y')).toBe(false);
+    expect(state.blocked.has('X')).toBe(true);
+    expect(state.blocked.has('E')).toBe(true);
+    expect(state.blocked.has('Y')).toBe(false);
     expect(reasonsOf(state)).toContain('approval-approver-revoked-at-its-order');
   });
 });
@@ -1036,8 +1038,8 @@ describe('R1 · cosign / breakGlass 真实预检', () => {
     const D = await makeDevice(master, 'D');
     const E = await makeDevice(master, 'E');
 
-    await append(storage, D, NAMESPACE_GRANT_EVENT, {
-      grant: { grantId: 'g-D-E', subject: 'E', namespaces: ['nsA'], issuedAt: 1 },
+    await append(storage, E, NAMESPACE_SUBSCRIPTION_EVENT, {
+      subscription: { member: 'E', namespace: 'nsA', active: true, issuedAt: 1 },
     });
     await append(storage, D, SECURITY_TIER_EVENT, {
       securityTier: { level: 'high', nonce: 'tier-1', issuedAt: 2 } satisfies SecurityTierRecord,
@@ -1076,16 +1078,16 @@ describe('R1 · cosign / breakGlass 真实预检', () => {
       deviceRevoke: { subject: 'X', issuedAt: 3, nonce, cosign: proof } satisfies DeviceRevokeRecord,
     });
 
-    const policy = new GraphNamespacePolicy({ eventLog: new EventLog(storage, 'reader'), userMasterPublicKey: masterPub, policyIssuers: ['D'] });
+    const policy = new GraphNamespacePolicy({ eventLog: new EventLog(storage, 'reader'), userMasterPublicKey: masterPub });
     const state = await policy.snapshot();
-    expect(state.revoked.has('X')).toBe(true);
+    expect(state.blocked.has('X')).toBe(true);
     expect(state.security?.level).toBe('high');
     expect(state.security?.rejections ?? []).toHaveLength(0);
 
     // 篡改签名
     const storage2 = new MemoryStorage();
-    await append(storage2, D, NAMESPACE_GRANT_EVENT, {
-      grant: { grantId: 'g-D-E', subject: 'E', namespaces: ['nsA'], issuedAt: 1 },
+    await append(storage2, E, NAMESPACE_SUBSCRIPTION_EVENT, {
+      subscription: { member: 'E', namespace: 'nsA', active: true, issuedAt: 1 },
     });
     await append(storage2, D, SECURITY_TIER_EVENT, {
       securityTier: { level: 'high', nonce: 'tier-1', issuedAt: 2 } satisfies SecurityTierRecord,
@@ -1109,9 +1111,9 @@ describe('R1 · cosign / breakGlass 真实预检', () => {
     await append(storage2, D, DEVICE_REVOKE_EVENT, {
       deviceRevoke: { subject: 'X', issuedAt: 3, nonce, cosign: tampered } satisfies DeviceRevokeRecord,
     });
-    const policy2 = new GraphNamespacePolicy({ eventLog: new EventLog(storage2, 'reader'), userMasterPublicKey: masterPub, policyIssuers: ['D'] });
+    const policy2 = new GraphNamespacePolicy({ eventLog: new EventLog(storage2, 'reader'), userMasterPublicKey: masterPub });
     const state2 = await policy2.snapshot();
-    expect(state2.revoked.has('X')).toBe(false);
+    expect(state2.blocked.has('X')).toBe(false);
     expect(state2.security?.rejections.map((r) => r.reason)).toContain('invalid-proof');
   });
 
@@ -1147,9 +1149,9 @@ describe('R1 · cosign / breakGlass 真实预检', () => {
       deviceRevoke: { subject: 'X', issuedAt: 3, nonce, breakGlass: proof } satisfies DeviceRevokeRecord,
     });
 
-    const policy = new GraphNamespacePolicy({ eventLog: new EventLog(storage, 'reader'), userMasterPublicKey: masterPub, policyIssuers: ['D'] });
+    const policy = new GraphNamespacePolicy({ eventLog: new EventLog(storage, 'reader'), userMasterPublicKey: masterPub });
     const state = await policy.snapshot();
-    expect(state.revoked.has('X')).toBe(true);
+    expect(state.blocked.has('X')).toBe(true);
     expect(state.security?.recoveryKeyId).toBe('K1');
 
     // 轮换到 K2，旧 K1 的新签名应被拒
@@ -1200,10 +1202,10 @@ describe('R1 · cosign / breakGlass 真实预检', () => {
       deviceRevoke: { subject: 'Z', issuedAt: 4, nonce: oldNonce, breakGlass: oldProof } satisfies DeviceRevokeRecord,
     });
 
-    const policy2 = new GraphNamespacePolicy({ eventLog: new EventLog(storage, 'reader'), userMasterPublicKey: masterPub, policyIssuers: ['D'] });
+    const policy2 = new GraphNamespacePolicy({ eventLog: new EventLog(storage, 'reader'), userMasterPublicKey: masterPub });
     const state2 = await policy2.snapshot();
     expect(state2.security?.recoveryKeyId).toBe('K2');
-    expect(state2.revoked.has('Z')).toBe(false);
+    expect(state2.blocked.has('Z')).toBe(false);
     expect(state2.security?.rejections.map((r) => r.reason)).toContain('invalid-proof');
   });
 });

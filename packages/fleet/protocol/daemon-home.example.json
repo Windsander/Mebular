@@ -21,11 +21,7 @@
     "sync": {
       "namespaces": [
         "tasks"
-      ],
-      "policyIssuers": [
-        "device-A"
-      ],
-      "peerNamespacePolicy": {}
+      ]
     },
     "joinService": {
       "enabled": true,

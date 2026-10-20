@@ -28,7 +28,7 @@ const makeDevice = (deviceId, peerDeviceId) =>
     encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
     network: { enabled: true, provider: hub },
     // 默认拒绝：必须显式授权对端，否则提供端裁剪链解析为空、什么都不发
-    sync: { autoSync: true, peerNamespacePolicy: { [peerDeviceId]: ['default'] } },
+    sync: { autoSync: true },
   });
 
 async function waitForNode(app, nodeId, timeoutMs = 15000) {

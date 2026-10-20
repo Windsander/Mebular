@@ -41,23 +41,19 @@ import {
 } from './sync/convergence.js';
 import { computeStateHashByNamespace } from './core/stateHash.js';
 import type { SyncStateFingerprints } from './sync/protocol.js';
-import { ConfigNamespacePolicy, CompositeNamespacePolicy } from './sync/namespacePolicy.js';
-import { evaluateAutoGrants, type AutoGrantEvaluation } from './sync/autoGrant.js';
 import {
   GraphNamespacePolicy,
   POLICY_NAMESPACE,
-  NAMESPACE_GRANT_EVENT,
-  NAMESPACE_REVOKE_EVENT,
+  NAMESPACE_SUBSCRIPTION_EVENT,
+  NAMESPACE_DECLARE_EVENT,
   DEVICE_REVOKE_EVENT,
-  POLICY_ISSUER_DECLARE_EVENT,
-  NAMESPACE_MEMBERSHIP_EVENT,
+  DEVICE_RESTORE_EVENT,
   NAMESPACE_HANDOFF_EVENT,
   SECURITY_TIER_EVENT,
-  type NamespaceGrantRecord,
-  type NamespaceRevokeRecord,
+  type NamespaceSubscriptionRecord,
+  type NamespaceDeclareRecord,
   type DeviceRevokeRecord,
-  type PolicyIssuerDeclareRecord,
-  type NamespaceMembershipRecord,
+  type DeviceRestoreRecord,
   type NamespaceHandoffRecord,
   type SecurityTierRecord,
   type SecurityLevel,
@@ -220,32 +216,12 @@ export interface MebularConfig {
     snapshotThreshold?: number;
     /** 本机订阅的 namespace：空/缺省 = 全部（保持现状语义） */
     namespaces?: string[];
-    /**
-     * 对端授权策略（配置驱动，**默认拒绝**）：peerDeviceId → 允许接收的
-     * namespace 白名单。未列出的对端拿不到任何分区，必须显式写入才能同步；
-     * 空数组 = 明确不允许。该接缝为将来「授权来自图上的 grant 记忆」预留
-     * 实现位（本期不实现）。
-     */
-    peerNamespacePolicy?: Record<string, string[]>;
     /** 本地写入后向订阅对端即时推送（默认关闭，保持既有行为；常驻入口默认开启） */
     pushOnWrite?: boolean;
     /** push-on-write 节流窗口（ms，默认 50） */
     pushOnWriteThrottleMs?: number;
     /** 周期 anti-entropy（C）：缺省关闭；常驻入口（serve/MCP）默认开启 */
     antiEntropy?: { enabled?: boolean; intervalMs?: number; jitterRatio?: number };
-    /**
-     * 守护层自动签发（订阅驱动授权）：对「图上在册 ∧ 未吊销 ∧ 无生效授权」的成员按规则链
-     * 幂等签发 grant（与人工批准同一 `grantNamespaces` 链路；被吊销设备**永不**自动签发——
-     * 红线）。评估节奏：守护启动首评一次 + 周期评估（intervalMs，默认 30s）+
-     * 同步会话结束去抖触发（2s）。缺省关闭；常驻入口（serve/MCP）默认开启
-     * （形状照 antiEntropy 先例）。legacy 域（未启用成员资格）不在本轮范围。
-     */
-    autoGrant?: { enabled?: boolean; intervalMs?: number };
-    /**
-     * 引导期策略签发者白名单（R-a，可多台）：列出的设备可为任意 namespace 签发。
-     * 未列出者只能在其自身已获授权范围内签发/撤销。缺省空。各端应保持一致。
-     */
-    policyIssuers?: string[];
     /**
      * P3 · 收敛健康度：周期性对账「未收敛/停滞」并在控制台/CLI 呈现 + 告警。
      * 缺省关闭（core）；常驻入口（serve/MCP）默认开启（形状照 antiEntropy 先例）。
@@ -293,8 +269,8 @@ export interface NamespaceHandoffPlan {
   ok: boolean;
   namespace: string;
   successor: string;
-  /** 继任者是否为该分区的**生效成员** */
-  successorIsMember: boolean;
+  /** 继任者是否为该分区的 active 订阅者 */
+  successorSubscribed: boolean;
   /** 退订方仍持有、继任者尚未 ack 的事件总数（0 = 已全量覆盖） */
   pendingTotal: number;
   /** 未完全覆盖的作者明细（诊断：缺哪些作者/多少条） */
@@ -309,13 +285,10 @@ export interface NamespaceRejoinResult {
   namespace: string;
   /** 是否已声明“本机该分区已重置/为空”（触发对端向下修正并从 0 重发） */
   reset: boolean;
-  member: boolean;
-  /**
-   * 准入通过（W1-B：「本机订阅声明 ∧ 未吊销」；字段名沿用旧称）。旧口径为「本机对该分区
-   * 有生效授权」。注意：本准入只决定本机「重置/重拉」，数据是否流动由供给端裁剪链独立决定。
-   */
-  authorized: boolean;
-  reason?: 'not-authorized' | 'membership-not-active';
+  subscribed: boolean;
+  /** 准入通过（「曾订阅 ∧ 未被移出」）。只决定本机「重置/重拉」，数据流动由供给链独立决定。 */
+  eligible: boolean;
+  reason?: 'not-subscribed' | 'subscription-not-active';
 }
 
 export interface NamespaceHandoffResult {
@@ -325,7 +298,7 @@ export interface NamespaceHandoffResult {
   successor: string;
   forced: boolean;
   aborted?: boolean;
-  reason?: 'successor-not-member' | 'successor-incomplete';
+  reason?: 'successor-not-subscribed' | 'successor-incomplete';
   deleted?: { events: number; nodes: number; edges: number };
   handoffEventId?: string;
   resumed?: boolean;
@@ -357,17 +330,12 @@ export class Mebular {
   private graphImpl: GraphStore | null = null;
   private syncImpl: SyncManager | null = null;
   private graphPolicyImpl: GraphNamespacePolicy | null = null;
-  private namespacePolicyImpl: CompositeNamespacePolicy | null = null;
   /** P3：收敛健康度监控（仅开关启用时创建；纯观察层，不改变任何同步语义） */
   private convergenceMonitorImpl: ConvergenceMonitor | null = null;
   private readonly convergenceListeners = new Set<(transition: ConvergenceTransition) => void>();
   private nodeImpl: P2PNode | null = null;
   private libp2pProvider: Libp2pProvider | null = null;
   private endpointBookImpl: EndpointBook | null = null;
-  // 守护层自动签发（订阅驱动授权）的运行态：周期定时器 / 事件去抖 / 单飞标志
-  private autoGrantTimer: ReturnType<typeof setInterval> | null = null;
-  private autoGrantDebounce: ReturnType<typeof setTimeout> | null = null;
-  private autoGrantRunning = false;
   private netBroadcastMode: NetBroadcastMode = 'off';
   private netBroadcastTtlMs = 24 * 3600_000;
   private netBroadcastEnabled = false;
@@ -450,19 +418,13 @@ export class Mebular {
         eventLog: this.eventLogImpl,
       });
 
-      // 5. 供给侧授权策略（Phase 2 · D/E）：图上授权（grant-as-memory）+ 配置引导。
-      //    - GraphNamespacePolicy 只采纳「链到用户主密钥」的签发者记录；
-      //    - 配置白名单作为 bootstrap 路径；两者并集，任一为空都不会放松默认拒绝；
-      //    - 设备被吊销时读侧一律 []（配置白名单也绕不过）。
+      // 5. 订阅策略：图上 `namespace_subscription`（只采纳作者自声明）+ 移出/恢复。
+      //    GraphNamespacePolicy 只采纳「链到用户主密钥」的作者记录；设备被移出时
+      //    其记录不采纳，且读侧不供给。
       this.graphPolicyImpl = new GraphNamespacePolicy({
         eventLog: this.eventLogImpl,
         userMasterPublicKey: this.identity.getUserMasterPublicKey(),
-        policyIssuers: this.config.sync?.policyIssuers,
       });
-      this.namespacePolicyImpl = new CompositeNamespacePolicy([
-        this.graphPolicyImpl,
-        new ConfigNamespacePolicy(this.config.sync?.peerNamespacePolicy ?? {}),
-      ]);
 
       // 5.5 同步管理器（携带用户主公钥：信任链验签，收口 D9；
       //    已确认集合持久化到存储旁路文件，重启后首帧不再冗余，6.4）
@@ -475,10 +437,8 @@ export class Mebular {
         syncTimeout: this.config.sync?.syncTimeout,
         snapshotThreshold: this.config.sync?.snapshotThreshold,
         subscriptionNamespaces: this.config.sync?.namespaces,
-        // 默认拒绝：图上与配置任一为空都不会放松；两者都空 = 拒绝所有对端
-        namespacePolicy: this.namespacePolicyImpl,
-        // M1–M3：成员资格（来自图上成员记录；未启用分区沿用对端订阅声明）
-        membershipPolicy: this.graphPolicyImpl,
+        // 订阅即读：图上订阅记录 + hello 回退；没有对端授权白名单
+        subscriptionPolicy: this.graphPolicyImpl,
         pushOnWrite: this.config.sync?.pushOnWrite,
         pushOnWriteThrottleMs: this.config.sync?.pushOnWriteThrottleMs,
         antiEntropy: this.config.sync?.antiEntropy,
@@ -533,9 +493,6 @@ export class Mebular {
         monitor.start();
         this.convergenceMonitorImpl = monitor;
       }
-
-      // 5.7 守护层自动签发（订阅驱动授权）：配置门控，缺省关闭；常驻入口默认开启。
-      this.startAutoGrant();
 
       // 5.5 语义向量索引（可选依赖；缺包降级关键词并告警）
       if (this.config.semantic?.enabled) {
@@ -657,7 +614,6 @@ export class Mebular {
 
   /** 初始化失败的清理：与 shutdown 同等收拢，但吞掉清理错误以保留原始错误 */
   private async rollbackPartialInit(): Promise<void> {
-    this.stopAutoGrant();
     this.convergenceMonitorImpl?.stop();
     this.convergenceMonitorImpl = null;
     if (this.nodeImpl?.isRunning()) {
@@ -669,7 +625,6 @@ export class Mebular {
       this.libp2pProvider = null;
     }
     this.syncImpl = null;
-    this.namespacePolicyImpl = null;
     this.graphPolicyImpl = null;
     this.graphImpl = null;
     this.eventLogImpl = null;
@@ -684,7 +639,6 @@ export class Mebular {
     if (!this.initialized) {
       return;
     }
-    this.stopAutoGrant();
     this.convergenceMonitorImpl?.stop();
     this.convergenceMonitorImpl = null;
     if (this.nodeImpl?.isRunning()) {
@@ -696,7 +650,6 @@ export class Mebular {
       this.libp2pProvider = null;
     }
     this.syncImpl = null;
-    this.namespacePolicyImpl = null;
     this.graphPolicyImpl = null;
     this.graphImpl = null;
     this.eventLogImpl = null;
@@ -739,135 +692,203 @@ export class Mebular {
     await this.sync.resetPeerWatermarks(peerDeviceId);
   }
 
-  // ---------- 守护层自动签发（订阅驱动授权） ----------
+  // ---------- 订阅（阅读权 + 维持义务） ----------
+
+  /** 本机当前生效的订阅集（空 = 参与全部时返回本地已知域）。 */
+  private async effectiveSubscriptions(): Promise<string[]> {
+    if ((this.config.sync?.namespaces ?? []).length > 0) {
+      return normalizeNamespaceList(this.config.sync?.namespaces);
+    }
+    return (await this.getNamespaceDirectory()).filter((ns) => ns !== POLICY_NAMESPACE);
+  }
 
   /**
-   * 单轮评估（首评/周期/事件触发共用；**单飞**：进行中的评估未结束时直接返回 null）。
-   * 规则链见 `sync/autoGrant.ts`；【红线】被吊销设备永不自动签发，且签发前经
-   * `getRevokedDevices()` 对 subject 再查一次（新鲜推导，压平竞态窗口）。
-   * 返回本轮评估结果（诊断/测试用）；评估器永不撤销、不为 self 签发。
+   * 本机声明/撤回某记忆域的订阅（**只能声明自己**；写 `namespace_subscription` 到 `__policy__`）。
+   * `active=false` 即退订（不清数据、不产生 tombstone）。
    */
-  async evaluateAutoGrantsOnce(): Promise<AutoGrantEvaluation | null> {
-    if (this.autoGrantRunning) return null;
-    this.autoGrantRunning = true;
-    try {
-      const policy = this.assertReady(this.graphPolicyImpl, 'namespacePolicy');
-      const snapshot = await policy.snapshot();
-      return await evaluateAutoGrants({
-        snapshot,
-        self: this.config.deviceId,
-        confirmNotRevoked: async (subject) => !(await policy.getRevokedDevices()).has(subject),
-        grant: async (input) => {
-          await this.grantNamespaces(input);
-        },
-      });
-    } finally {
-      this.autoGrantRunning = false;
-    }
-  }
-
-  /** 启动自动签发评估器（配置门控：`sync.autoGrant.enabled === true` 才启动）。 */
-  private startAutoGrant(): void {
-    const cfg = this.config.sync?.autoGrant;
-    if (cfg?.enabled !== true) return;
-    const intervalMs = cfg.intervalMs ?? 30_000;
-    // ① 首评：守护重启后补齐离线期间到达的订阅。**延迟到下一 tick**——initialize 期间
-    //    this.initialized 尚未置位，立即评估会被 assertReady 拒（语义不变：守护起来后评）。
-    this.autoGrantDebounce = setTimeout(() => {
-      this.autoGrantDebounce = null;
-      void this.evaluateAutoGrantsOnce().catch(() => undefined);
-    }, 0);
-    this.autoGrantDebounce.unref?.();
-    // ② 周期评估：自愈主干（错过的事件/时钟漂移兜底）
-    this.autoGrantTimer = setInterval(() => {
-      void this.evaluateAutoGrantsOnce().catch(() => undefined);
-    }, intervalMs);
-    this.autoGrantTimer.unref?.();
-    // ③ 事件触发：同步会话结束 → 去抖 2s 后评估（降时延）。触发源是 `sync-completed` 而非
-    //    `events-applied`：后者只对物化进图存储的事件计数（applyRemoteEvent 不处理 __policy__
-    //    事件类型 → 策略记录落图不发 events-applied，实测证实）；membership/grant 记录只能经
-    //    同步会话到达，会话结束即评估即可捕获，且零 SyncManager 改动（范围红线）。
-    //    （syncImpl 在本方法调用前已构建；不能用 assertReady——initialize 期间 initialized 未置位）
-    this.syncImpl?.on('sync-completed', () => {
-      if (this.autoGrantDebounce !== null) clearTimeout(this.autoGrantDebounce);
-      this.autoGrantDebounce = setTimeout(() => {
-        this.autoGrantDebounce = null;
-        void this.evaluateAutoGrantsOnce().catch(() => undefined);
-      }, 2000);
-      this.autoGrantDebounce.unref?.();
-    });
-  }
-
-  /** 停止自动签发评估器（幂等；shutdown/rollback 各调一次）。 */
-  private stopAutoGrant(): void {
-    if (this.autoGrantTimer !== null) {
-      clearInterval(this.autoGrantTimer);
-      this.autoGrantTimer = null;
-    }
-    if (this.autoGrantDebounce !== null) {
-      clearTimeout(this.autoGrantDebounce);
-      this.autoGrantDebounce = null;
-    }
-  }
-
-  // ---------- 授权作为记忆（Phase 2 · D）与身份吊销（E） ----------
-
-  /**
-   * 授予某设备若干分区（写入**本机签名**的策略记录，落保留命名空间 `__policy__`）。
-   * 只有链到用户主密钥的设备签发的记录才会被其他设备采纳；本机需配置主密钥
-   * （即拥有设备证书）才有签发资格。
-   */
-  async grantNamespaces(input: {
-    subject: string;
-    namespaces: string[];
-    expiresAt?: number;
+  async declareNamespaceSubscription(input: {
+    namespace: string;
+    active?: boolean;
     note?: string;
+    initiator?: string;
+    nonce?: string;
+    cosign?: CosignProof;
+    breakGlass?: BreakGlassProof;
   }): Promise<Event> {
-    const grant: NamespaceGrantRecord = {
-      grantId: randomUUID(),
-      subject: input.subject,
-      namespaces: normalizeNamespaceList(input.namespaces),
-      issuedAt: Date.now(),
-      ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
-      ...(input.note !== undefined ? { note: input.note } : {}),
-    };
-    return this.eventLog.append({
-      type: NAMESPACE_GRANT_EVENT,
-      data: { grant },
-      namespace: POLICY_NAMESPACE,
-    });
-  }
-
-  /** 按 grantId 撤销一条授权（签发者签名；立即反映到裁剪链）。 */
-  async revokeGrant(input: { grantId: string; subject?: string; note?: string }): Promise<Event> {
-    const revoke: NamespaceRevokeRecord = {
-      grantId: input.grantId,
-      ...(input.subject !== undefined ? { subject: input.subject } : {}),
+    const subscription: NamespaceSubscriptionRecord = {
+      member: this.config.deviceId,
+      namespace: normalizeNamespace(input.namespace),
+      active: input.active ?? true,
       issuedAt: Date.now(),
       ...(input.note !== undefined ? { note: input.note } : {}),
+      ...(input.initiator !== undefined ? { initiator: input.initiator } : {}),
+      ...(input.nonce !== undefined ? { nonce: input.nonce } : {}),
+      ...(input.cosign !== undefined ? { cosign: input.cosign } : {}),
+      ...(input.breakGlass !== undefined ? { breakGlass: input.breakGlass } : {}),
     };
     return this.eventLog.append({
-      type: NAMESPACE_REVOKE_EVENT,
-      data: { revoke },
+      type: NAMESPACE_SUBSCRIPTION_EVENT,
+      data: { subscription },
       namespace: POLICY_NAMESPACE,
     });
   }
 
   /**
-   * 吊销某设备身份：读侧立即 `[]`，且其署名的事件在入站写入处被隔离。
-   * 非终态——之后对该设备再写一条 grant 即恢复。
+   * 热生效设置本机订阅集（空 = 参与全部）。
+   *
+   * 写订阅记录 → 更新运行期订阅集 → 唤醒在线对端。持久化 `sync.namespaces`
+   * 由守护/控制台端点负责（core 不写配置文件）。
    */
-  async revokeDevice(input: { subject: string; note?: string }): Promise<Event> {
+  async setSubscriptions(namespaces: readonly string[]): Promise<void> {
+    const desired = normalizeNamespaceList(namespaces);
+    const desiredSet = new Set(desired);
+    const desiredAll = desired.length === 0;
+    const known = await this.getNamespaceDirectory();
+    const current = await this.effectiveSubscriptions();
+    const universe = new Set<string>([...current, ...known, ...desired]);
+    universe.delete(POLICY_NAMESPACE);
+    for (const ns of universe) {
+      const want = desiredAll ? true : desiredSet.has(ns);
+      const had = current.includes(ns);
+      if (want === had) continue;
+      await this.declareNamespaceSubscription({ namespace: ns, active: want, note: 'subscription update' });
+    }
+    this.sync.setSubscriptionNamespaces(desired);
+    this.sync.requestSubscriptionSync();
+  }
+
+  async subscribeNamespace(namespace: string): Promise<Event> {
+    const ns = normalizeNamespace(namespace);
+    const event = await this.declareNamespaceSubscription({ namespace: ns, active: true });
+    const current = this.sync.getSubscriptionNamespaces();
+    // 空 = 订阅全部：保持「全部」语义，不因为订阅一个域而收窄其余域。
+    if (current.length > 0) {
+      const next = new Set(current);
+      next.add(ns);
+      this.sync.setSubscriptionNamespaces([...next]);
+    }
+    this.sync.requestSubscriptionSync();
+    return event;
+  }
+
+  async unsubscribeNamespace(namespace: string): Promise<Event> {
+    const ns = normalizeNamespace(namespace);
+    const event = await this.declareNamespaceSubscription({ namespace: ns, active: false });
+    const desiredAll = this.sync.getSubscriptionNamespaces().length === 0;
+    const next = desiredAll
+      ? new Set((await this.getNamespaceDirectory()).filter((entry) => entry !== ns && entry !== POLICY_NAMESPACE))
+      : new Set(this.sync.getSubscriptionNamespaces().filter((entry) => entry !== ns));
+    this.sync.setSubscriptionNamespaces([...next]);
+    this.sync.requestSubscriptionSync();
+    return event;
+  }
+
+  /** 建域（零门槛）：写自签名 `namespace_declare`；不自动订阅（可见 ≠ 可读）。 */
+  async declareNamespace(input: { namespace: string; note?: string }): Promise<Event> {
+    const declaration: NamespaceDeclareRecord = {
+      namespace: normalizeNamespace(input.namespace),
+      issuedAt: Date.now(),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+    };
+    return this.eventLog.append({
+      type: NAMESPACE_DECLARE_EVENT,
+      data: { declaration },
+      namespace: POLICY_NAMESPACE,
+    });
+  }
+
+  /** 某分区的订阅视图（`active=false` = 尚无订阅记录，调用方回退 hello）。 */
+  async getNamespaceSubscriptions(namespace: string): Promise<{ active: boolean; subscribers: string[] }> {
+    return this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getNamespaceSubscriptions(
+      normalizeNamespace(namespace),
+    );
+  }
+
+  /** 某设备作为 member 的 active 订阅域。 */
+  async getSubscriptions(deviceId: string): Promise<string[]> {
+    return this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getSubscriptions(deviceId);
+  }
+
+  /** 某分区的 active 订阅者。 */
+  async getNamespaceSubscribers(namespace: string): Promise<string[]> {
+    return (await this.getNamespaceSubscriptions(namespace)).subscribers;
+  }
+
+  /** 域公告 ∪ 本地节点（未订阅也可见）。 */
+  async getNamespaceDirectory(): Promise<string[]> {
+    const names = new Set<string>();
+    const declared = await this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getDeclaredNamespaces();
+    for (const ns of declared) names.add(normalizeNamespace(ns));
+    for (const node of await this.storage.listNodes()) names.add(normalizeNamespace(node.namespace));
+    names.delete(POLICY_NAMESPACE);
+    return [...names].sort();
+  }
+
+  /** 域公告集合（不含本地节点）。 */
+  async getNamespaceDeclarations(): Promise<string[]> {
+    return this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getDeclaredNamespaces();
+  }
+
+  // ---------- 移出 / 恢复 ----------
+
+  /**
+   * 移出某设备：读侧立即不供给，其署名事件在入站写入处被隔离。
+   * 作者级否定，不沿证书链传播；后代/新成员不受影响。
+   */
+  async revokeDevice(input: {
+    subject: string;
+    note?: string;
+    nonce?: string;
+    cosign?: CosignProof;
+    breakGlass?: BreakGlassProof;
+  }): Promise<Event> {
     const deviceRevoke: DeviceRevokeRecord = {
       subject: input.subject,
       issuedAt: Date.now(),
       ...(input.note !== undefined ? { note: input.note } : {}),
+      ...(input.nonce !== undefined ? { nonce: input.nonce } : {}),
+      ...(input.cosign !== undefined ? { cosign: input.cosign } : {}),
+      ...(input.breakGlass !== undefined ? { breakGlass: input.breakGlass } : {}),
     };
     return this.eventLog.append({
       type: DEVICE_REVOKE_EVENT,
       data: { deviceRevoke },
       namespace: POLICY_NAMESPACE,
     });
+  }
+
+  /**
+   * 恢复被移出的设备（同身份）：写 `device_restore`。恢复建立 E-1 纪元——
+   * 该设备在恢复位次之前的策略记录不再采纳，重启后需重新声明订阅。
+   * high 档必须携 `cosign(op:'restore')` 或恢复码。
+   */
+  async restoreDevice(input: {
+    subject: string;
+    note?: string;
+    nonce?: string;
+    cosign?: CosignProof;
+    breakGlass?: BreakGlassProof;
+  }): Promise<Event> {
+    const deviceRestore: DeviceRestoreRecord = {
+      subject: input.subject,
+      issuedAt: Date.now(),
+      ...(input.note !== undefined ? { note: input.note } : {}),
+      ...(input.nonce !== undefined ? { nonce: input.nonce } : {}),
+      ...(input.cosign !== undefined ? { cosign: input.cosign } : {}),
+      ...(input.breakGlass !== undefined ? { breakGlass: input.breakGlass } : {}),
+    };
+    return this.eventLog.append({
+      type: DEVICE_RESTORE_EVENT,
+      data: { deviceRestore },
+      namespace: POLICY_NAMESPACE,
+    });
+  }
+
+  /** 当前处于移出状态的设备集合。 */
+  async getBlockedDevices(): Promise<string[]> {
+    return [
+      ...(await this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getBlockedDevices()),
+    ];
   }
 
   /**
@@ -906,84 +927,7 @@ export class Mebular {
     return policy.getSecurityTier();
   }
 
-  /**
-   * C1：把某设备声明为**引导签发者**（写入本机签名记录 `policy_issuer_declare`，落 `__policy__`）。
-   *
-   * 采纳**不做 R-a**（无条件），但受 R-b 约束（签发者/主体被吊销则不采纳）；生效集合
-   * = 图上被采纳声明 ∪ 本地配置 `sync.policyIssuers`。用于去中心化 bootstrap：新设备同步到
-   * 声明后即可采纳该签发者的授权，**无需本地配置一致**。
-   */
-  async declarePolicyIssuer(input: { subject: string; note?: string }): Promise<Event> {
-    const policyIssuer: PolicyIssuerDeclareRecord = {
-      subject: input.subject,
-      issuedAt: Date.now(),
-      ...(input.note !== undefined ? { note: input.note } : {}),
-    };
-    return this.eventLog.append({
-      type: POLICY_ISSUER_DECLARE_EVENT,
-      data: { policyIssuer },
-      namespace: POLICY_NAMESPACE,
-    });
-  }
-
-  /**
-   * 只读审计入口：当前**生效引导签发者集合**（图上被采纳声明 ∪ 配置 `sync.policyIssuers`，
-   * 吊销优先）。不改变任何状态。
-   */
-  async getPolicyIssuers(): Promise<string[]> {
-    return this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getPolicyIssuers();
-  }
-
-  /**
-   * M1：声明/注销某设备在某分区的**成员资格**（写本机签名 `namespace_membership` 到 `__policy__`）。
-   * 采纳无条件（不做 R-a），受 R-b 约束。`active=false` 即**注销**（本轮只改成员集合，不做数据清理）。
-   */
-  async declareNamespaceMembership(input: {
-    member: string;
-    namespace: string;
-    active?: boolean;
-    note?: string;
-  }): Promise<Event> {
-    const membership: NamespaceMembershipRecord = {
-      member: input.member,
-      namespace: normalizeNamespace(input.namespace),
-      active: input.active ?? true,
-      issuedAt: Date.now(),
-      ...(input.note !== undefined ? { note: input.note } : {}),
-    };
-    return this.eventLog.append({
-      type: NAMESPACE_MEMBERSHIP_EVENT,
-      data: { membership },
-      namespace: POLICY_NAMESPACE,
-    });
-  }
-
-  /**
-   * M1：某分区的**成员资格**（`active=false` = 该分区尚无被采纳成员记录，未启用成员资格）。
-   * `members` 为图上在册成员（未 ∩ 授权）；生效成员请用 `getNamespaceMembers`。
-   */
-  async getNamespaceMembership(namespace: string): Promise<{ active: boolean; members: string[] }> {
-    return this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getNamespaceMembership(
-      normalizeNamespace(namespace),
-    );
-  }
-
-  /**
-   * M2：某分区的**生效成员集合** = 图上在册成员 ∩ 各成员对该分区的**生效授权**（默认拒绝不变）。
-   * 供 2b 的退订/继任者门禁使用。
-   */
-  async getNamespaceMembers(namespace: string): Promise<string[]> {
-    const ns = normalizeNamespace(namespace);
-    const adopted = await this.getNamespaceMembership(ns);
-    if (!adopted.active) return [];
-    const effective: string[] = [];
-    for (const member of adopted.members) {
-      if ((await this.getEffectiveNamespaces(member)).includes(ns)) effective.push(member);
-    }
-    return effective.sort();
-  }
-
-  // ---------- 2b：退订交接（继任者全量 ack 门禁 + 本地彻底清理） ----------
+  // ---------- 2b：退出并交接（继任者全量 ack 门禁 + 本地彻底清理） ----------
 
   private handoffIntentPath(): string {
     return `${this.config.storagePath}.handoff.json`;
@@ -1011,11 +955,10 @@ export class Mebular {
   /**
    * 2c：重订阅恢复——退订清理后**重新加入**该分区。
    *
-   * 准入（R1，W1-B 修订）：①**本机订阅声明**——图上本机对该分区**曾声明在册**（存在被采纳的
-   * `namespace_membership` active=true 记录；**不再要求 self-grant**——网内订阅自主，且自动签发
-   * 对 self 冻结，旧门槛会让本机对自己参与过的域永远无法重入）②本机**未被吊销**。任一不满足 →
-   * **显式失败**（`not-authorized`，不写标记、不静默）。随后本机重新声明成员在册；未被采纳 →
-   * `membership-not-active`。本准入只决定本机「重置/重拉」；数据是否流动由供给端裁剪链独立决定。
+   * 准入：①图上本机对该分区**曾声明 active=true 订阅**；②本机**未被移出**。
+   * 任一不满足 → **显式失败**（`not-subscribed`，不写标记、不静默）。随后本机重新声明订阅；
+   * 未被采纳 → `subscription-not-active`。本准入只决定本机「重置/重拉」；数据是否流动由
+   * 供给链独立决定。
    *
    * 重置（R2）：写**图外**「已清理」标记（R3，不同步），清空本机该分区本地水位；本机之后的
    * hello 会以**空时钟**上报该（显式订阅的）分区 → 对端按「自报水位只允许向下修正」**从 0 重发**
@@ -1024,20 +967,20 @@ export class Mebular {
   async rejoinNamespace(input: { namespace: string }): Promise<NamespaceRejoinResult> {
     const ns = normalizeNamespace(input.namespace);
     if (ns === POLICY_NAMESPACE) throw new MebularError('不允许对保留策略分区 __policy__ 执行重入', ErrorCodes.VALIDATION_INVALID_ARGUMENT);
-    // W1-B（Q2）· 准入 = 本机订阅声明 ∧ 未吊销（原 self-grant 门槛收编为二者）
-    const declared = await this.assertReady(this.graphPolicyImpl, 'namespacePolicy').wasNamespaceMember(
+    // 准入 = 曾订阅 ∧ 未被移出
+    const declared = await this.assertReady(this.graphPolicyImpl, 'namespacePolicy').wasNamespaceSubscriber(
       ns,
       this.config.deviceId,
     );
-    const revoked = (await this.getRevokedDevices()).includes(this.config.deviceId);
-    const authorized = declared && !revoked;
-    if (!authorized) {
-      return { ok: false, action: 'rejoin', namespace: ns, reset: false, member: false, authorized: false, reason: 'not-authorized' };
+    const blocked = (await this.getBlockedDevices()).includes(this.config.deviceId);
+    const eligible = declared && !blocked;
+    if (!eligible) {
+      return { ok: false, action: 'rejoin', namespace: ns, reset: false, subscribed: false, eligible: false, reason: 'not-subscribed' };
     }
-    await this.declareNamespaceMembership({ member: this.config.deviceId, namespace: ns, active: true });
-    const member = (await this.getNamespaceMembership(ns)).members.includes(this.config.deviceId);
-    if (!member) {
-      return { ok: false, action: 'rejoin', namespace: ns, reset: false, member: false, authorized: true, reason: 'membership-not-active' };
+    await this.declareNamespaceSubscription({ namespace: ns, active: true });
+    const subscribed = (await this.getNamespaceSubscriptions(ns)).subscribers.includes(this.config.deviceId);
+    if (!subscribed) {
+      return { ok: false, action: 'rejoin', namespace: ns, reset: false, subscribed: false, eligible: true, reason: 'subscription-not-active' };
     }
     // R3：图外重置标记（不同步）
     const path = this.rejoinMarkerPath(ns);
@@ -1046,7 +989,7 @@ export class Mebular {
     // R2：清本机该分区本地水位（含快照水位）→ 登记 reset，使 hello 上报空时钟
     await this.sync.forgetNamespace(ns, []);
     this.sync.noteLocalReset(ns);
-    return { ok: true, action: 'rejoin', namespace: ns, reset: true, member: true, authorized: true };
+    return { ok: true, action: 'rejoin', namespace: ns, reset: true, subscribed: true, eligible: true };
   }
 
   private async readHandoffIntent(): Promise<{
@@ -1119,8 +1062,8 @@ export class Mebular {
     if (typeof input.successor !== 'string' || input.successor.length === 0) {
       throw new MebularError('交接需要显式继任者（--successor <deviceId>）', ErrorCodes.VALIDATION_INVALID_ARGUMENT);
     }
-    const members = await this.getNamespaceMembers(ns);
-    const successorIsMember = members.includes(input.successor);
+    const subscribers = await this.getNamespaceSubscribers(ns);
+    const successorSubscribed = subscribers.includes(input.successor);
     // 覆盖要求：继任者已 ack 退订方在该分区持有的、**由他人署名**的事件。
     // 继任者**自己署名**的事件它本就拥有（无需 ack），排除以免误判“未覆盖”。
     const pending = (await this.sync.getPendingEvents(input.successor)).filter(
@@ -1131,7 +1074,7 @@ export class Mebular {
     const pendingByAuthor = [...counts.entries()]
       .map(([author, count]) => ({ author, count }))
       .sort((a, b) => (a.author < b.author ? -1 : a.author > b.author ? 1 : 0));
-    return { ok: successorIsMember && pending.length === 0, namespace: ns, successor: input.successor, successorIsMember, pendingTotal: pending.length, pendingByAuthor };
+    return { ok: successorSubscribed && pending.length === 0, namespace: ns, successor: input.successor, successorSubscribed, pendingTotal: pending.length, pendingByAuthor };
   }
 
   /**
@@ -1175,16 +1118,18 @@ export class Mebular {
     // 始终如实计算覆盖明细（force 也记录真相）
     const plan = await this.planNamespaceHandoff({ namespace: ns, successor: input.successor });
     if (!force) {
-      if (!plan.successorIsMember) {
-        return { ok: false, action: 'leave', namespace: ns, successor: input.successor, forced: false, aborted: true, reason: 'successor-not-member', missing: plan.pendingByAuthor };
+      if (!plan.successorSubscribed) {
+        return { ok: false, action: 'leave', namespace: ns, successor: input.successor, forced: false, aborted: true, reason: 'successor-not-subscribed', missing: plan.pendingByAuthor };
       }
       if (plan.pendingTotal > 0) {
         return { ok: false, action: 'leave', namespace: ns, successor: input.successor, forced: false, aborted: true, reason: 'successor-incomplete', missing: plan.pendingByAuthor };
       }
     }
 
-    // 退订 = 成员资格退出（本机在该分区注销）
-    await this.declareNamespaceMembership({ member: this.config.deviceId, namespace: ns, active: false });
+    // 退订 = 本机在该分区声明 active=false（不清历史、不产生 tombstone）
+    await this.declareNamespaceSubscription({ namespace: ns, active: false });
+    const remaining = (await this.getNamespaceDirectory()).filter((entry) => entry !== ns);
+    this.sync.setSubscriptionNamespaces(remaining);
     // 交接记录（审计；不参与策略推导）
     const handoff: NamespaceHandoffRecord = {
       handoffId: randomUUID(),
@@ -1215,23 +1160,6 @@ export class Mebular {
       deleted: { events: purged.events, nodes: purged.nodes, edges: purged.edges },
       handoffEventId: event.id,
     };
-  }
-
-  /**
-   * 只读审计入口：某对端当前**生效**的授权分区（图上 grant ∪ 配置白名单，吊销
-   * 优先）。便于排障与审计，不改变任何状态。
-   */
-  async getEffectiveNamespaces(peerDeviceId: string): Promise<string[]> {
-    return this.assertReady(this.namespacePolicyImpl, 'namespacePolicy').getAuthorizedNamespaces(
-      peerDeviceId,
-    );
-  }
-
-  /** 只读审计入口：当前被吊销的设备集合。 */
-  async getRevokedDevices(): Promise<string[]> {
-    return [
-      ...(await this.assertReady(this.namespacePolicyImpl, 'namespacePolicy').getRevokedDevices()),
-    ];
   }
 
   // ---------- P3 · 收敛健康度（只读） ----------
@@ -1273,17 +1201,14 @@ export class Mebular {
   }
 
   /**
-   * P3（S6/S7）：本机「期望收到」的分区 = 生效授权（主体 = 本机）∩ 订阅声明；
-   * 订阅为全量（未配置）时取全部授权域。仅用于指纹比较的「对端多出」判据。
+   * P3（S6/S7）：本机「期望收到」的分区 = 本机订阅集；订阅为空（参与全部）
+   * 时取本地已知域。仅用于指纹比较的「对端多出」判据。
    */
   private async expectedIncomingDomains(): Promise<string[]> {
     try {
-      const authorized = await this.assertReady(this.namespacePolicyImpl, 'namespacePolicy')
-        .getAuthorizedNamespaces(this.config.deviceId);
       const declared = this.config.sync?.namespaces;
-      if (!declared || declared.length === 0) return [...authorized];
-      const subs = declared.map((ns) => normalizeNamespace(ns));
-      return authorized.filter((ns) => subs.includes(normalizeNamespace(ns)));
+      if (declared && declared.length > 0) return [...new Set(declared.map((ns) => normalizeNamespace(ns)))];
+      return await this.getNamespaceDirectory();
     } catch {
       return [];
     }
@@ -1351,7 +1276,7 @@ export class Mebular {
   async ingestNetEndpointsEvent(event: { author?: string; namespace?: string; data?: unknown }): Promise<boolean> {
     let revoked: string[] = [];
     try {
-      revoked = this.graphPolicyImpl ? [...(await this.graphPolicyImpl.getRevokedDevices())] : [];
+      revoked = this.graphPolicyImpl ? [...(await this.graphPolicyImpl.getBlockedDevices())] : [];
     } catch {
       revoked = [];
     }

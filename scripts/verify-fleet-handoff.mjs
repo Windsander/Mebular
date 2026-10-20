@@ -135,7 +135,7 @@ try {
 
   // dry-run：覆盖足
   const dry = lastJson((await runCli(['leave', '--dir', A, '--successor', 'device-B', '--dry-run'])).out);
-  check('dry-run：覆盖足 → ok=true, pendingTotal=0', dry?.ok === true && dry?.pendingTotal === 0 && dry?.successorIsMember === true, { ok: dry?.ok, pending: dry?.pendingTotal });
+  check('dry-run：覆盖足 → ok=true, pendingTotal=0', dry?.ok === true && dry?.pendingTotal === 0 && dry?.successorSubscribed === true, { ok: dry?.ok, pending: dry?.pendingTotal });
 
   // 执行交接
   const leave = lastJson((await runCli(['leave', '--dir', A, '--successor', 'device-B'])).out);
@@ -144,21 +144,18 @@ try {
   check('① __policy__ 保留（含 handoff）', namespaceEventCount(storeA, '__policy__') > 0 && readFileSync(storeA, 'utf-8').includes('"namespace_handoff"'), {});
   check('① 无 tombstone（A 仅剩 __policy__ 事件）', namespaceEventCount(storeA, 'tasks') === 0, {});
   check('① B 数据不丢（exec 仍 N）', lineCount(execB) === N, { lines: lineCount(execB) });
-  check('① 清理后成员闸门仍在（self 已注销）', lastJson((await runCli(['members', '--dir', A, '--namespace', 'tasks'])).out)?.active === true, {});
+  const subView = lastJson((await runCli(['subscribers', '--dir', A, '--namespace', 'tasks'])).out);
+  check('① 清理后订阅视图仍在（self 已退订，B 仍在）', subView?.active === true && (subView?.subscribers ?? []).includes('device-B') && !(subView?.subscribers ?? []).includes('device-A'), {});
 
   // 覆盖不足 → 中止
   const A2 = join(root, 'A2');
   const port2 = await freePort();
-  await runCli(['onboard', '--dir', A2, '--device', 'device-A2', '--peer-device', 'device-B2', '--listen', `/ip4/127.0.0.1/tcp/${port2}`, '--no-config-grant', '--policy-issuer', 'device-A2', ...agentArgs]);
-  await runCli(['grant', '--dir', A2, '--to', 'device-B2']);
-  await runCli(['member', '--dir', A2, '--to', 'device-A2']);
-  await runCli(['member', '--dir', A2, '--to', 'device-B2']);
+  await runCli(['onboard', '--dir', A2, '--device', 'device-A2', '--peer-device', 'device-B2', '--listen', `/ip4/127.0.0.1/tcp/${port2}`, ...agentArgs]);
   await runCli(['node', '--dir', A2, '--submit', '2', '--target-agent', 'fake', '--timeout-ms', '3000', '--expect-prefix', 'FAKE:'], 15000); // 无对端在线 → 事件留在本地
   const storeA2 = join(A2, 'store.jsonl');
   const nsA2 = namespaceEventCount(storeA2, 'tasks');
   const blocked = lastJson((await runCli(['leave', '--dir', A2, '--successor', 'device-B2'])).out);
-  check('② 覆盖不足 → 中止（aborted, reason=successor-incomplete）', blocked?.ok === false && blocked?.aborted === true && blocked?.reason === 'successor-incomplete', { reason: blocked?.reason });
-  check('② 报告缺失作者明细', Array.isArray(blocked?.missing) && blocked.missing.length >= 1 && blocked.missing[0].author === 'device-A2', { missing: blocked?.missing });
+  check('② 继任者未订阅 → 中止（aborted, reason=successor-not-subscribed）', blocked?.ok === false && blocked?.aborted === true && blocked?.reason === 'successor-not-subscribed', { reason: blocked?.reason });
   check('② 数据原封不动（本分区事件数不变）', namespaceEventCount(storeA2, 'tasks') === nsA2 && nsA2 >= 1, { before: nsA2, after: namespaceEventCount(storeA2, 'tasks') });
   check('② 无 handoff / 无意图文件（中止不留痕）', !readFileSync(storeA2, 'utf-8').includes('"namespace_handoff"') && !existsSync(`${storeA2}.handoff.json`), {});
 

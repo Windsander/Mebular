@@ -228,8 +228,7 @@ try {
     const port = await freePort();
     const listen = `/ip4/127.0.0.1/tcp/${port}`;
 
-    await runCli(['onboard', '--dir', A, '--device', 'device-A', '--peer-device', 'device-B', '--listen', listen, '--no-config-grant', '--policy-issuer', 'device-A', ...agentArgs]);
-    await runCli(['grant', '--dir', A, '--to', 'device-B']);
+    await runCli(['onboard', '--dir', A, '--device', 'device-A', '--peer-device', 'device-B', '--listen', listen, ...agentArgs]);
 
     // 1) 安装 fleet-node 服务：带 --submit + 长 wait-sync → 等 B 连入后派发（避免重装打断 B 的连接）
     const instNode = lastJson(
@@ -245,7 +244,7 @@ try {
 
     const doctorA = lastJson((await runSvc(['doctor', '--dir', A, '--json'])).out);
     check(
-      'doctor：服务已注册 PASS + 心跳新鲜 PASS（无本地 --policy-issuer 依赖）',
+      'doctor：服务已注册 PASS + 心跳新鲜 PASS',
       doctorA?.checks?.some((c) => c.name === '服务已注册' && c.status === 'PASS') && doctorA?.checks?.some((c) => c.name === '心跳新鲜' && c.status === 'PASS'),
       { service: doctorA?.checks?.find((c) => c.name === '服务已注册'), heartbeat: doctorA?.checks?.find((c) => c.name === '心跳新鲜') },
     );

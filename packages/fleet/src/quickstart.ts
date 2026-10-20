@@ -11,7 +11,7 @@ import { existsSync } from 'node:fs';
 import net from 'node:net';
 import { hostname, networkInterfaces } from 'node:os';
 import { delimiter, dirname, join } from 'node:path';
-import { Mebular, type Event } from '@mebular/core';
+import { Mebular } from '@mebular/core';
 
 import {
   fleetConfigPath,
@@ -45,8 +45,6 @@ export interface JoinCode {
   namespace: string;
   /** A 的可达 multiaddr（含 /p2p/<id>），跨网回退用 */
   multiaddrs: string[];
-  /** A 自声明的引导签发者（join 侧写入本地 policyIssuers，无需等图同步） */
-  policyIssuer: string;
   fingerprint: string;
   issuedAt: number;
   trust: JoinTrustMaterial;
@@ -181,7 +179,7 @@ export function decodeJoinCode(text: string): JoinCode {
   if (!Array.isArray(c.multiaddrs) || c.multiaddrs.some((a) => typeof a !== 'string')) {
     throw new Error('加入码 multiaddrs 非法');
   }
-  if (typeof c.policyIssuer !== 'string' || typeof c.fingerprint !== 'string') throw new Error('加入码缺少签发者/指纹');
+  if (typeof c.fingerprint !== 'string') throw new Error('加入码缺少指纹');
   const trust = c.trust as Record<string, unknown> | undefined;
   if (typeof trust !== 'object' || trust === null || typeof trust.publicKey !== 'string' || typeof trust.privateKeyPkcs8 !== 'string') {
     throw new Error('加入码信任材料非法');
@@ -193,7 +191,6 @@ export function decodeJoinCode(text: string): JoinCode {
     device: c.device,
     namespace: c.namespace,
     multiaddrs: c.multiaddrs as string[],
-    policyIssuer: c.policyIssuer,
     fingerprint: c.fingerprint,
     issuedAt: typeof c.issuedAt === 'number' ? c.issuedAt : 0,
     trust: { publicKey: trust.publicKey, privateKeyPkcs8: trust.privateKeyPkcs8 },
@@ -215,7 +212,6 @@ export function describeJoinCode(code: JoinCode): Record<string, unknown> {
     device: code.device,
     namespace: code.namespace,
     multiaddrs: code.multiaddrs,
-    policyIssuer: code.policyIssuer,
     fingerprint: code.fingerprint,
     issuedAt: code.issuedAt,
     hasTrustMaterial: true,
@@ -248,7 +244,6 @@ export interface QuickstartInput {
   joinPort?: number;
   joinHost?: string;
   agents?: FleetAgentConfig[];
-  autoApprove?: boolean;
   /** W2：同时配置**统一守护**（写 <dir>/config.json + fleet daemon 客户端 + 装 mebular-serve） */
   daemon?: boolean;
   /** 守护 MCP/app 端口（默认 7331） */
@@ -278,7 +273,6 @@ export interface QuickstartResult {
   agentSources: string[];
   serviceInstalled: boolean;
   serviceNote?: string;
-  autoApprove: boolean;
   joinNext: string[];
   warnings: string[];
   /** T2：令牌加入（主密钥不复制）——推荐路径 */
@@ -344,8 +338,6 @@ export async function configureDaemonHome(
       autoSync: true,
       pushOnWrite: true,
       namespaces: [namespace],
-      peerNamespacePolicy: config.peerNamespacePolicy ?? {},
-      policyIssuers: config.policyIssuers,
       antiEntropy: { enabled: true, intervalMs: 600000, jitterRatio: 0.2 },
     },
     joinService: { enabled: true, bind: '0.0.0.0', port: joinPort },
@@ -379,7 +371,7 @@ export function pickLanHost(): string {
   return '127.0.0.1';
 }
 
-/** A 一条命令：onboard（默认无配置授权）+ 声明签发者(self) + 成员(self) + 自授权 + 加入码 + 服务 + doctor。 */
+/** A 一条命令：onboard + 本机订阅(self) + 加入码 + 服务 + doctor。 */
 export async function quickstart(input: QuickstartInput): Promise<QuickstartResult> {
   const env = input.env ?? process.env;
   const namespace = input.namespace ?? 'tasks';
@@ -396,22 +388,15 @@ export async function quickstart(input: QuickstartInput): Promise<QuickstartResu
     namespace,
     listen,
     agents: probe.agents,
-    configGrant: false,
-    policyIssuers: [input.device],
   });
   const config = onboard.config;
-  if (input.autoApprove === true) {
-    await saveFleetConfig(fleetConfigPath(input.dir), { ...config, autoApprove: true });
-  }
   const encryption = await readMasterKeyFile(config.masterKeyFile);
 
-  // 图上门面：声明签发者(self)、成员(self active)、自授权（让对端一同步即见 A 已授权）。
+  // 图上订阅：本机声明参与该域（订阅自主，零门槛）。
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
   try {
-    await mebular.declarePolicyIssuer({ subject: input.device, note: 'quickstart self' });
-    await mebular.declareNamespaceMembership({ member: input.device, namespace, active: true, note: 'quickstart self' });
-    await mebular.grantNamespaces({ subject: input.device, namespaces: [namespace], note: 'quickstart self-grant' });
+    await mebular.subscribeNamespace(namespace);
   } finally {
     await mebular.shutdown();
   }
@@ -421,7 +406,6 @@ export async function quickstart(input: QuickstartInput): Promise<QuickstartResu
   await saveFleetConfig(fleetConfigPath(input.dir), {
     ...config,
     joinService: { enabled: true, bind: '0.0.0.0', port: joinPort },
-    ...(input.autoApprove === true ? { autoApprove: true } : {}),
   });
   const joinEndpoint = `http://${input.joinHost ?? pickLanHost()}:${joinPort}`;
   const tokenBuilder = new Mebular(offlineMebularOptions(config, encryption) as never);
@@ -442,7 +426,6 @@ export async function quickstart(input: QuickstartInput): Promise<QuickstartResu
     device: config.device,
     namespace,
     multiaddrs,
-    policyIssuer: config.device,
     fingerprint: onboard.masterKeyFingerprint,
     issuedAt: Date.now(),
     trust: {
@@ -488,11 +471,9 @@ export async function quickstart(input: QuickstartInput): Promise<QuickstartResu
     agentSources: probe.sources,
     serviceInstalled,
     ...(serviceNote !== undefined ? { serviceNote } : {}),
-    autoApprove: input.autoApprove === true,
     joinNext: [
       'fleet join --token <内联|文件>（推荐：主密钥不复制）',
-      'fleet pending（A 侧查看待批准）',
-      'fleet approve <deviceId>（A 批准）',
+      '新设备加入后自行 subscribe；订阅零门槛、无需批准',
     ],
     warnings,
     inviteToken,
@@ -546,7 +527,6 @@ export interface JoinResult {
   multiaddrs: string[];
   agents: FleetAgentConfig[];
   agentSources: string[];
-  awaitingApproval: boolean;
   next: string[];
 }
 
@@ -595,15 +575,13 @@ export async function joinFleet(input: JoinInput): Promise<JoinResult> {
     agents: probe.agents,
     peerDevice: code.device,
     ...(code.multiaddrs[0] !== undefined ? { peerAddr: code.multiaddrs[0] } : {}),
-    configGrant: false,
-    policyIssuers: [code.policyIssuer],
   });
   const encryption = await readMasterKeyFile(onboard.config.masterKeyFile);
 
   const mebular = new Mebular(offlineMebularOptions(onboard.config, encryption) as never);
   await mebular.initialize();
   try {
-    await mebular.declareNamespaceMembership({ member: input.device, namespace, active: true, note: 'join self' });
+    await mebular.subscribeNamespace(namespace);
   } finally {
     await mebular.shutdown();
   }
@@ -628,8 +606,7 @@ export async function joinFleet(input: JoinInput): Promise<JoinResult> {
     multiaddrs: code.multiaddrs,
     agents: probe.agents,
     agentSources: probe.sources,
-    awaitingApproval: true,
-    next: [`在 ${code.device} 上运行：fleet pending`, `在 ${code.device} 上运行：fleet approve ${onboard.config.device}`],
+    next: ['本机已声明订阅；对端同步后即可互通（无需批准）'],
   };
 }
 
@@ -643,101 +620,6 @@ async function importTrust(code: JoinCode): Promise<FleetEncryption> {
     ['sign'],
   );
   return { userMasterKey, userMasterPrivateKey };
-}
-
-export interface PendingResult {
-  device: string;
-  namespace: string;
-  active: boolean;
-  members: string[];
-  authorized: string[];
-  pending: string[];
-}
-
-/** A 侧：列出该分区在册但尚未授权的设备（待批准）。 */
-export async function pendingDevices(dir: string, namespace?: string): Promise<PendingResult> {
-  const config = await loadFleetConfig(fleetConfigPath(dir));
-  const encryption = await readMasterKeyFile(config.masterKeyFile);
-  const ns = namespace ?? config.namespace;
-  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
-  await mebular.initialize();
-  try {
-    const membership = await mebular.getNamespaceMembership(ns);
-    const authorized: string[] = [];
-    const pending: string[] = [];
-    for (const member of membership.members) {
-      const ok = (await mebular.getEffectiveNamespaces(member)).includes(ns);
-      if (ok) authorized.push(member);
-      else if (member !== config.device) pending.push(member);
-    }
-    return { device: config.device, namespace: ns, active: membership.active, members: membership.members, authorized, pending };
-  } finally {
-    await mebular.shutdown();
-  }
-}
-
-export interface ApproveInput {
-  device: string;
-  namespace?: string;
-  /** 可选：登记对端可达地址（A 作为拨号方/医生可达性检查用） */
-  addr?: string;
-}
-
-export interface ApproveResult {
-  device: string;
-  namespace: string;
-  grantId: string;
-  eventId: string;
-  memberEventId: string;
-  peerRegistered: boolean;
-}
-
-/** A 批准：图上 grant + 成员在册 + （可选）登记对端地址。 */
-export async function approveDevice(dir: string, input: ApproveInput): Promise<ApproveResult> {
-  const config = await loadFleetConfig(fleetConfigPath(dir));
-  const encryption = await readMasterKeyFile(config.masterKeyFile);
-  const ns = input.namespace ?? config.namespace;
-  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
-  await mebular.initialize();
-  let grant: Event;
-  let member: Event;
-  try {
-    grant = await mebular.grantNamespaces({ subject: input.device, namespaces: [ns], note: 'approve' });
-    member = await mebular.declareNamespaceMembership({ member: input.device, namespace: ns, active: true, note: 'approve' });
-  } finally {
-    await mebular.shutdown();
-  }
-  const grantRecord = (grant.data as { grant: { grantId: string } }).grant;
-
-  let peerRegistered = false;
-  const peers = [...config.peers];
-  const idx = peers.findIndex((p) => p.device === input.device);
-  if (idx >= 0) {
-    if (input.addr !== undefined && peers[idx]!.addr !== input.addr) {
-      peers[idx] = { device: input.device, addr: input.addr };
-      peerRegistered = true;
-    }
-  } else {
-    peers.push(input.addr !== undefined ? { device: input.device, addr: input.addr } : { device: input.device });
-    peerRegistered = true;
-  }
-  if (peerRegistered) await saveFleetConfig(fleetConfigPath(dir), { ...config, peers });
-
-  return { device: input.device, namespace: ns, grantId: grantRecord.grantId, eventId: grant.id, memberEventId: member.id, peerRegistered };
-}
-
-/** 运行期自动批准（`--auto-approve`）：对每个在册且未授权的成员发 grant + 成员在册。仅在 `fleet node` 常驻循环调用。 */
-export async function autoApproveOnce(mebular: Mebular, self: string, namespace: string): Promise<number> {
-  const membership = await mebular.getNamespaceMembership(namespace);
-  let approved = 0;
-  for (const member of membership.members) {
-    if (member === self) continue;
-    if ((await mebular.getEffectiveNamespaces(member)).includes(namespace)) continue;
-    await mebular.grantNamespaces({ subject: member, namespaces: [namespace], note: 'auto-approve' });
-    await mebular.declareNamespaceMembership({ member, namespace, active: true, note: 'auto-approve' });
-    approved += 1;
-  }
-  return approved;
 }
 
 /** 读加入码文件（或内联）。 */

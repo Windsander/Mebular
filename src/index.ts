@@ -28,8 +28,8 @@ export {
   VectorClock,
   SecureChannelSyncTransport,
   applyRemoteEvent,
-  ConfigNamespacePolicy,
-  type NamespaceGrantPolicy,
+  EmptySubscriptionPolicy,
+  type NamespaceSubscriptionPolicy,
   type SyncPeer,
   type SyncOptions,
   type SyncResult,
@@ -56,12 +56,14 @@ export {
   type SyncFingerprintEvent,
   type SyncStateFingerprints,
 } from './sync/index.js';
-// Phase 2 · D/E：授权作为记忆与身份吊销（公共面保持在最小集合；其余经 Mebular facade）
+// 订阅自主：订阅/域公告/移出/恢复（公共面保持在最小集合；其余经 Mebular facade）
 export {
   GraphNamespacePolicy,
   POLICY_NAMESPACE,
-  POLICY_ISSUER_DECLARE_EVENT,
-  NAMESPACE_MEMBERSHIP_EVENT,
+  NAMESPACE_SUBSCRIPTION_EVENT,
+  NAMESPACE_DECLARE_EVENT,
+  DEVICE_REVOKE_EVENT,
+  DEVICE_RESTORE_EVENT,
   NAMESPACE_HANDOFF_EVENT,
   SECURITY_TIER_EVENT,
   SECURITY_APPROVAL_EVENT,
@@ -72,11 +74,10 @@ export {
   canonicalBreakGlassProofData,
   verifyCosignProof,
   verifyBreakGlassProof,
-  type NamespaceGrantRecord,
-  type NamespaceRevokeRecord,
+  type NamespaceSubscriptionRecord,
+  type NamespaceDeclareRecord,
   type DeviceRevokeRecord,
-  type PolicyIssuerDeclareRecord,
-  type NamespaceMembershipRecord,
+  type DeviceRestoreRecord,
   type NamespaceHandoffRecord,
   type PolicyState,
   type SecurityLevel,
@@ -91,7 +92,6 @@ export {
   type SecurityPolicyState,
   type SecurityAction,
 } from './sync/grantPolicy.js';
-export { CompositeNamespacePolicy, type NamespaceMembershipPolicy } from './sync/namespacePolicy.js';
 export {
   DEFAULT_NAMESPACE,
   normalizeNamespace,

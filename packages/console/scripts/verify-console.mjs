@@ -51,7 +51,7 @@ async function seedHome(home) {
     deviceId: 'device-console',
     encryption: { level: 'none', keyFile },
     network: { enabled: false, libp2p: { listen: [], relayServers: [] } },
-    sync: { autoSync: true, pushOnWrite: false, antiEntropy: { enabled: false }, policyIssuers: ['device-console'], peerWhitelist: ['device-peer'] },
+    sync: { autoSync: true, pushOnWrite: false, antiEntropy: { enabled: false }, namespaces: ['notes', 'work'], peerWhitelist: ['device-peer'] },
     mcp: { http: { host: '127.0.0.1', port: 7331, auth: 'none', tls: false } },
   };
   await writeFile(join(home, 'config.json'), JSON.stringify(config, null, 2), 'utf-8');
@@ -61,7 +61,7 @@ async function seedHome(home) {
     deviceId: 'device-console',
     encryption: { level: 'none', userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
     network: { enabled: false },
-    sync: { autoSync: true, policyIssuers: ['device-console'] },
+    sync: { autoSync: true, namespaces: ['notes', 'work'] },
   });
   await app.initialize();
   const service = new MemoryService(app);
@@ -70,14 +70,16 @@ async function seedHome(home) {
     { type: 'fact', content: 'beta', metadata: { namespace: 'notes' } },
     { type: 'fact', content: 'gamma', metadata: { namespace: 'work' } },
   ]);
-  await app.grantNamespaces({ subject: 'device-peer', namespaces: ['notes'] });
-  const revocable = await app.grantNamespaces({ subject: 'device-other', namespaces: ['work'] });
-  await app.revokeGrant({ grantId: revocable.data.grant.grantId, subject: 'device-other' });
+  await app.declareNamespace({ namespace: 'notes', note: 'seed' });
+  await app.declareNamespace({ namespace: 'work', note: 'seed' });
+  await app.subscribeNamespace('notes');
   await app.revokeDevice({ subject: 'device-bad' });
-  // C1 / M1–M3 / 2b：预置新三类策略事件（审计渲染与 API 结构防回归）
-  await app.declarePolicyIssuer({ subject: 'device-console' });
-  await app.declareNamespaceMembership({ member: 'device-peer', namespace: 'notes', active: true });
-  await app.declareNamespaceMembership({ member: 'device-peer', namespace: 'notes', active: false });
+  // 2b：预置交接审计事件（审计渲染与 API 结构防回归）
+  await app.eventLog.append({
+    type: 'namespace_handoff',
+    data: { handoff: { handoffId: 'handoff-1', namespace: 'work', successor: 'device-peer', forced: false, pendingCount: 0, issuedAt: Date.now() } },
+    namespace: POLICY_NAMESPACE,
+  });
   // S3：审计安全行（低 → 中 → 低；动态码导入留痕）——不改变最终档位，避免影响后续写端点断言
   const secNow = Date.now();
   await app.eventLog.append({
@@ -112,7 +114,6 @@ async function seedHome(home) {
       namespace: 'tasks',
       listen: '',
       peers: [{ device: 'device-peer', addr: '/ip4/127.0.0.1/tcp/4001/p2p/peerid' }],
-      policyIssuers: ['device-console'],
       agents: [],
     }, null, 2),
     'utf-8',
@@ -316,7 +317,7 @@ try {
   check('overview.device.deviceId', overview.json?.device?.deviceId === 'device-console', overview.json?.device?.deviceId);
   check('overview.status.nodeCount ≥ 3', (overview.json?.status?.nodeCount ?? 0) >= 3, String(overview.json?.status?.nodeCount));
   check('overview.onlinePeers 为数组', Array.isArray(overview.json?.onlinePeers));
-  check('overview.revokedCount = 1', overview.json?.revokedCount === 1, String(overview.json?.revokedCount));
+  check('overview.blockedCount = 1', overview.json?.blockedCount === 1, String(overview.json?.blockedCount));
   check('overview.status.stateHashByNamespace 存在', typeof overview.json?.status?.stateHashByNamespace === 'object');
   check('overview.features.writes 为 boolean', typeof overview.json?.features?.writes === 'boolean');
 
@@ -324,38 +325,34 @@ try {
   check('GET /admin/api/devices 200 + 数组', devices.status === 200 && Array.isArray(devices.json));
   const byId = new Map((devices.json ?? []).map((d) => [d.deviceId, d]));
   const peer = byId.get('device-peer');
-  check('devices 含 device-peer 且 grantedByMe 含 notes', Array.isArray(peer?.grantedByMe) && peer.grantedByMe.includes('notes'));
-  const other = byId.get('device-other');
-  check('device-other 的 grant 已撤销（grantedByMe 为空）', other && other.grantedByMe.length === 0);
+  check('devices 含 device-peer 且 subscriptions 为数组', Array.isArray(peer?.subscriptions));
+  const selfDevice = byId.get('device-console');
+  check('device-console 的 subscriptions 含 notes', Array.isArray(selfDevice?.subscriptions) && selfDevice.subscriptions.includes('notes'));
   const bad = byId.get('device-bad');
-  check('device-bad revoked=true', bad?.revoked === true);
-  check('devices 项字段齐全', (devices.json ?? []).every((d) => typeof d.deviceId === 'string' && typeof d.online === 'boolean' && typeof d.revoked === 'boolean' && Array.isArray(d.grantedByMe) && Array.isArray(d.grantedToMe) && 'pendingEventCount' in d));
+  check('device-bad blocked=true', bad?.blocked === true);
+  check('devices 项字段齐全', (devices.json ?? []).every((d) => typeof d.deviceId === 'string' && typeof d.online === 'boolean' && typeof d.blocked === 'boolean' && Array.isArray(d.subscriptions) && Array.isArray(d.sharesWithMe) && 'pendingEventCount' in d));
 
   const policy = await getJson(port, '/admin/api/policy');
   check('GET /admin/api/policy 200 + 数组', policy.status === 200 && Array.isArray(policy.json));
   {
     const types = new Set((policy.json ?? []).map((e) => e.type));
     check(
-      '审计含 C1/M1–M3/2b 三类事件（declare/membership/handoff）',
-      ['policy_issuer_declare', 'namespace_membership', 'namespace_handoff'].every((t) => types.has(t)),
+      '审计含订阅/公告/交接三类事件',
+      ['namespace_subscription', 'namespace_declare', 'namespace_handoff'].every((t) => types.has(t)),
       `types=${[...types].sort().join(',')}`,
     );
-    const memberships = (policy.json ?? []).filter((e) => e.type === 'namespace_membership');
+    const subscriptions = (policy.json ?? []).filter((e) => e.type === 'namespace_subscription');
     check(
-      '成员事件字段完整且含在册/注销两态',
-      memberships.length >= 2
-        && memberships.every((e) => e.subject === 'device-peer' && e.namespace === 'notes' && typeof e.active === 'boolean')
-        && memberships.some((e) => e.active === true)
-        && memberships.some((e) => e.active === false),
-      `count=${memberships.length} states=${memberships.map((e) => e.active).join(',')}`,
+      '订阅事件字段完整且含 active 三态',
+      subscriptions.length >= 1
+        && subscriptions.every((e) => e.subject === 'device-console' && e.namespace === 'notes' && typeof e.active === 'boolean')
+        && subscriptions.some((e) => e.active === true),
+      `count=${subscriptions.length} states=${subscriptions.map((e) => e.active).join(',')}`,
     );
   }
   const types = new Set((policy.json ?? []).map((e) => e.type));
-  check('policy 含 grant/revoke/device_revoke', types.has('namespace_grant') && types.has('namespace_revoke') && types.has('device_revoke'));
+  check('policy 含 subscription/declare/device_revoke', types.has('namespace_subscription') && types.has('namespace_declare') && types.has('device_revoke'));
   check('policy 项字段齐全', (policy.json ?? []).every((e) => typeof e.eventId === 'string' && typeof e.issuer === 'string' && typeof e.at === 'number' && typeof e.valid === 'boolean'));
-  const revokedGrant = (policy.json ?? []).find((e) => e.type === 'namespace_revoke');
-  const targetGrant = (policy.json ?? []).find((e) => e.type === 'namespace_grant' && e.grantId === revokedGrant?.grantId);
-  check('被撤销的 grant 标记 valid=false', targetGrant?.valid === false);
 
   const namespaces = await getJson(port, '/admin/api/namespaces');
   check('GET /admin/api/namespaces 200 + 数组', namespaces.status === 200 && Array.isArray(namespaces.json));
@@ -365,14 +362,14 @@ try {
   check('namespaces 含 work（count ≥ 1）', (work?.count ?? 0) >= 1, String(work?.count));
   check('namespaces 项字段齐全', (namespaces.json ?? []).every((n) => typeof n.namespace === 'string' && typeof n.count === 'number' && 'lastUpdatedAt' in n && 'stateHash' in n));
   check(
-    'namespaces 含成员制/订阅/重入扩展字段',
-    (namespaces.json ?? []).every((n) => typeof n.membershipEnabled === 'boolean'
-      && Array.isArray(n.members) && Array.isArray(n.effectiveMembers) && Array.isArray(n.grantedTo)
-      && typeof n.subscribed === 'boolean' && typeof n.rejoinReset === 'boolean'
-      && typeof n.selfAuthorized === 'boolean' && (n.selfMember === null || typeof n.selfMember === 'boolean')),
+    'namespaces 含订阅/公告/重入扩展字段',
+    (namespaces.json ?? []).every((n) => typeof n.subscriptionDeclared === 'boolean'
+      && Array.isArray(n.subscribers)
+      && typeof n.subscribed === 'boolean' && typeof n.selfSubscribed === 'boolean'
+      && typeof n.rejoinReset === 'boolean' && typeof n.declared === 'boolean'),
   );
-  check('notes membershipEnabled=true 且种子成员已注销', notes?.membershipEnabled === true && notes.members.includes('device-peer') === false, `members=${JSON.stringify(notes?.members)}`);
-  check('work membershipEnabled=false（未启用成员制）', work?.membershipEnabled === false, `work.membershipEnabled=${work?.membershipEnabled}`);
+  check('notes 已声明订阅且含本机', notes?.subscriptionDeclared === true && notes.subscribers.includes('device-console'), `subs=${JSON.stringify(notes?.subscribers)}`);
+  check('work 为域公告（declared=true）', work?.declared === true, `declared=${work?.declared}`);
 
   const settings = await getJson(port, '/admin/api/settings');
   check('GET /admin/api/settings 200', settings.status === 200);
@@ -391,18 +388,18 @@ try {
       && Array.isArray(settings.json?.network?.listen)
       && Array.isArray(settings.json?.network?.listenConfigured)
       && Array.isArray(settings.json?.sync?.peerWhitelist)
+      && Array.isArray(settings.json?.declaredNamespaces)
+      && typeof settings.json?.blockedCount === 'number'
       && (settings.json?.identity?.mode === null || typeof settings.json?.identity?.mode === 'string')
       && typeof settings.json?.join?.enabled === 'boolean'
       && typeof settings.json?.join?.port === 'number'
       && typeof settings.json?.fleet?.configured === 'boolean'
       && Array.isArray(settings.json?.tools)
       && typeof settings.json?.mcp?.host === 'string'
-      && typeof settings.json?.semantic?.enabled === 'boolean'
-      && Array.isArray(settings.json?.policyIssuers)
-      && Array.isArray(settings.json?.sync?.configPolicyIssuers),
-    `issuers=${JSON.stringify(settings.json?.policyIssuers)}`,
+      && typeof settings.json?.semantic?.enabled === 'boolean',
+    `declared=${JSON.stringify(settings.json?.declaredNamespaces)}`,
   );
-  check('settings.policyIssuers 含已声明的 device-console', settings.json?.policyIssuers?.includes('device-console') === true);
+  check('settings.declaredNamespaces 含 notes/work', ['notes', 'work'].every((ns) => settings.json?.declaredNamespaces?.includes(ns) === true));
   check('settings.identity.mode = root（本地主密钥）', settings.json?.identity?.mode === 'root', `mode=${settings.json?.identity?.mode}`);
   {
     const { TOOL_NAMES } = await import('../../mcp/src/tools.mjs');
@@ -420,9 +417,9 @@ try {
     `fleet=${JSON.stringify(settings.json?.fleet)}`,
   );
   check('settings.sync.peerWhitelist 反映 config（L5 透传）', settings.json?.sync?.peerWhitelist?.length === 1 && settings.json.sync.peerWhitelist[0] === 'device-peer', `whitelist=${JSON.stringify(settings.json?.sync?.peerWhitelist)}`);
-  check('devices 含 memberships/declaredIssuer 字段', (devices.json ?? []).every((d) => Array.isArray(d.memberships) && typeof d.declaredIssuer === 'boolean'));
-  check('device-console declaredIssuer=true（种子声明）', byId.get('device-console')?.declaredIssuer === true);
-  check('device-peer declaredIssuer=false', byId.get('device-peer')?.declaredIssuer === false);
+  check('devices 含 subscriptions/blocked 字段', (devices.json ?? []).every((d) => Array.isArray(d.subscriptions) && typeof d.blocked === 'boolean'));
+  check('device-console subscriptions 含 notes', byId.get('device-console')?.subscriptions?.includes('notes') === true);
+  check('device-peer subscriptions 为空数组', Array.isArray(byId.get('device-peer')?.subscriptions) && byId.get('device-peer').subscriptions.length === 0);
 
   const plan = await getJson(port, '/admin/api/namespaces/work/handoff-plan?successor=device-peer');
   check(
@@ -444,14 +441,18 @@ try {
   );
 
   // ---------- 写端点未授权 ----------
-  const writeNoCsrf = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, {
+  const writeNoCsrf = await fetch(`http://127.0.0.1:${port}/admin/api/subscriptions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ subject: 'x', namespaces: ['notes'] }),
+    body: JSON.stringify({ namespace: 'notes', active: true }),
   });
-  check('POST /admin/api/grants 未授权 → 403', writeNoCsrf.status === 403, `status=${writeNoCsrf.status}`);
-  const revokeNoCsrf = await fetch(`http://127.0.0.1:${port}/admin/api/grants/abc/revoke`, { method: 'POST' });
-  check('POST /admin/api/grants/:id/revoke 未授权 → 403', revokeNoCsrf.status === 403, `status=${revokeNoCsrf.status}`);
+  check('POST /admin/api/subscriptions 未授权 → 403', writeNoCsrf.status === 403, `status=${writeNoCsrf.status}`);
+  const createNoCsrf = await fetch(`http://127.0.0.1:${port}/admin/api/namespaces`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ namespace: 'ledger' }),
+  });
+  check('POST /admin/api/namespaces 未授权 → 403', createNoCsrf.status === 403, `status=${createNoCsrf.status}`);
   const deviceNoCsrf = await fetch(`http://127.0.0.1:${port}/admin/api/devices/device-peer/revoke`, { method: 'POST' });
   check('POST /admin/api/devices/:id/revoke 未授权 → 403', deviceNoCsrf.status === 403, `status=${deviceNoCsrf.status}`);
 
@@ -461,113 +462,100 @@ try {
   check('CSRF cookie 与响应头成对下发', Boolean(csrf) && Boolean(csrfCookie));
   const writeHeaders = { 'content-type': 'application/json', 'x-mebular-csrf': csrf, cookie: `mebular_csrf=${csrfCookie}` };
 
-  const headerOnly = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, {
+  const headerOnly = await fetch(`http://127.0.0.1:${port}/admin/api/subscriptions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf },
-    body: JSON.stringify({ subject: 'device-x', namespaces: ['notes'] }),
+    body: JSON.stringify({ namespace: 'work', active: true }),
   });
   check('仅 CSRF 头、无 cookie → 403', headerOnly.status === 403, `status=${headerOnly.status}`);
-  const cookieOnly = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, {
+  const cookieOnly = await fetch(`http://127.0.0.1:${port}/admin/api/subscriptions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', cookie: `mebular_csrf=${csrfCookie}` },
-    body: JSON.stringify({ subject: 'device-x', namespaces: ['notes'] }),
+    body: JSON.stringify({ namespace: 'work', active: true }),
   });
   check('仅 cookie、无 CSRF 头 → 403', cookieOnly.status === 403, `status=${cookieOnly.status}`);
 
-  const created = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, {
+  const created = await fetch(`http://127.0.0.1:${port}/admin/api/subscriptions`, {
     method: 'POST',
     headers: writeHeaders,
-    body: JSON.stringify({ subject: 'device-new', namespaces: ['notes'] }),
+    body: JSON.stringify({ namespace: 'work', active: true }),
   });
   const createdJson = (await created.json().catch(() => null));
-  check('CSRF 完整 → 签发 grant 201', created.status === 201 && typeof createdJson?.grantId === 'string', `status=${created.status}`);
+  check('CSRF 完整 → 订阅写入 200 + eventId', created.status === 200 && typeof createdJson?.eventId === 'string', `status=${created.status}`);
 
-  // grantedByMe 语义：只算本机签发；本机行的 grantedByMe 不得出现刚签发的域
   const devicesAfterGrant = await getJson(port, '/admin/api/devices');
-  const peerRow = (devicesAfterGrant.json ?? []).find((d) => d.deviceId === 'device-new');
-  const selfRow = (devicesAfterGrant.json ?? []).find((d) => d.deviceId === 'device-console');
+  const peerRow = (devicesAfterGrant.json ?? []).find((d) => d.deviceId === 'device-peer');
+  const selfRowAfter = (devicesAfterGrant.json ?? []).find((d) => d.deviceId === 'device-console');
   check(
-    'grantedByMe 仅算本机签发（peer 行含 notes、self 行不含）',
-    peerRow?.grantedByMe?.includes('notes') === true && selfRow?.grantedByMe?.includes('notes') !== true,
-    `peer=${JSON.stringify(peerRow?.grantedByMe)} self=${JSON.stringify(selfRow?.grantedByMe)}`,
+    '订阅只改本机（self 含 work；peer 不变）',
+    selfRowAfter?.subscriptions?.includes('work') === true && peerRow?.subscriptions?.includes('work') !== true,
+    `peer=${JSON.stringify(peerRow?.subscriptions)} self=${JSON.stringify(selfRowAfter?.subscriptions)}`,
   );
 
-  const revoked = await fetch(`http://127.0.0.1:${port}/admin/api/grants/${encodeURIComponent(createdJson?.grantId ?? '')}/revoke`, {
+  const revoked = await fetch(`http://127.0.0.1:${port}/admin/api/subscriptions`, {
     method: 'POST',
     headers: writeHeaders,
+    body: JSON.stringify({ namespace: 'work', active: false }),
   });
   const revokedJson = await revoked.json().catch(() => null);
-  check('撤销 grant → 200', revoked.status === 200 && revokedJson?.ok === true, `status=${revoked.status}`);
+  check('退订 → 200', revoked.status === 200 && revokedJson?.ok === true, `status=${revoked.status}`);
 
   const policyAfter = await getJson(port, '/admin/api/policy');
   check(
-    '新 grant 与其撤销均入审计',
-    (policyAfter.json ?? []).some((e) => e.type === 'namespace_grant' && e.grantId === createdJson?.grantId)
-      && (policyAfter.json ?? []).some((e) => e.type === 'namespace_revoke' && e.grantId === createdJson?.grantId),
+    '订阅与退订均入审计',
+    (policyAfter.json ?? []).some((e) => e.type === 'namespace_subscription' && e.namespace === 'work' && e.active === true)
+      && (policyAfter.json ?? []).some((e) => e.type === 'namespace_subscription' && e.namespace === 'work' && e.active === false),
   );
 
-  const badBody = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, {
+  const badBody = await fetch(`http://127.0.0.1:${port}/admin/api/subscriptions`, {
     method: 'POST',
     headers: writeHeaders,
-    body: JSON.stringify({ subject: 'device-new' }),
+    body: JSON.stringify({ active: true }),
   });
-  check('缺 namespaces → 400', badBody.status === 400, `status=${badBody.status}`);
+  check('缺 namespace → 400', badBody.status === 400, `status=${badBody.status}`);
 
-  // ---------- 设置/成员/交接写端点 ----------
-  const issuerResp = await fetch(`http://127.0.0.1:${port}/admin/api/policy-issuers`, {
+  // ---------- 建域 / 订阅 / 交接写端点 ----------
+  const declareResp = await fetch(`http://127.0.0.1:${port}/admin/api/namespaces`, {
     method: 'POST',
     headers: writeHeaders,
-    body: JSON.stringify({ subject: 'device-peer' }),
+    body: JSON.stringify({ namespace: 'ledger' }),
   });
-  const issuerJson = await issuerResp.json().catch(() => null);
-  check('POST policy-issuers → 201 + eventId', issuerResp.status === 201 && issuerJson?.subject === 'device-peer' && typeof issuerJson?.eventId === 'string', `status=${issuerResp.status}`);
-  const devicesAfterIssuer = await getJson(port, '/admin/api/devices');
-  check('新声明签发者在设备卡可见', (devicesAfterIssuer.json ?? []).find((d) => d.deviceId === 'device-peer')?.declaredIssuer === true);
+  const declareJson = await declareResp.json().catch(() => null);
+  check('POST namespaces → 201 + eventId + 默认自订阅', declareResp.status === 201 && typeof declareJson?.eventId === 'string' && declareJson?.subscribed === true, `status=${declareResp.status}`);
+  const nsAfterDeclare = await getJson(port, '/admin/api/namespaces');
+  const ledger = (nsAfterDeclare.json ?? []).find((n) => n.namespace === 'ledger');
+  check('新域立即可见且默认自订阅（count=0）', ledger?.declared === true && ledger?.count === 0 && ledger?.selfSubscribed === true, `ledger=${JSON.stringify(ledger)}`);
 
-  const memberResp = await fetch(`http://127.0.0.1:${port}/admin/api/memberships`, {
+  const selfSubscribe = await fetch(`http://127.0.0.1:${port}/admin/api/subscriptions`, {
     method: 'POST',
     headers: writeHeaders,
-    body: JSON.stringify({ member: 'device-new', namespace: 'notes', active: true }),
+    body: JSON.stringify({ namespace: 'notes', active: true }),
   });
-  const memberJson = await memberResp.json().catch(() => null);
-  check('POST memberships → 201 + eventId', memberResp.status === 201 && typeof memberJson?.eventId === 'string', `status=${memberResp.status}`);
-  const nsAfterMember = await getJson(port, '/admin/api/namespaces');
-  const notesAfterMember = (nsAfterMember.json ?? []).find((n) => n.namespace === 'notes');
-  check(
-    '新成员在册但未生效（缺授权）',
-    notesAfterMember?.members?.includes('device-new') === true && notesAfterMember?.effectiveMembers?.includes('device-new') !== true,
-    `members=${JSON.stringify(notesAfterMember?.members)} effective=${JSON.stringify(notesAfterMember?.effectiveMembers)}`,
-  );
-  const selfFollow = await fetch(`http://127.0.0.1:${port}/admin/api/memberships`, {
-    method: 'POST',
-    headers: writeHeaders,
-    body: JSON.stringify({ member: 'device-console', namespace: 'notes', active: true }),
-  });
-  check('POST memberships 本机在册（关注语义）→ 201', selfFollow.status === 201, `status=${selfFollow.status}`);
+  check('POST subscriptions 本机订阅 → 200', selfSubscribe.status === 200, `status=${selfSubscribe.status}`);
   const nsAfterSelf = await getJson(port, '/admin/api/namespaces');
   check(
-    '本机在册反映在 namespaces.selfMember',
-    (nsAfterSelf.json ?? []).find((n) => n.namespace === 'notes')?.selfMember === true,
-    `selfMember=${(nsAfterSelf.json ?? []).find((n) => n.namespace === 'notes')?.selfMember}`,
+    '本机订阅反映在 namespaces.selfSubscribed',
+    (nsAfterSelf.json ?? []).find((n) => n.namespace === 'notes')?.selfSubscribed === true,
+    `selfSubscribed=${(nsAfterSelf.json ?? []).find((n) => n.namespace === 'notes')?.selfSubscribed}`,
   );
-  await fetch(`http://127.0.0.1:${port}/admin/api/memberships`, {
+  await fetch(`http://127.0.0.1:${port}/admin/api/subscriptions`, {
     method: 'POST',
     headers: writeHeaders,
-    body: JSON.stringify({ member: 'device-console', namespace: 'notes', active: false }),
+    body: JSON.stringify({ namespace: 'notes', active: false }),
   });
   const nsAfterUnfollow = await getJson(port, '/admin/api/namespaces');
   check(
-    '取消关注 → selfMember 回落 false',
-    (nsAfterUnfollow.json ?? []).find((n) => n.namespace === 'notes')?.selfMember === false,
-    `selfMember=${(nsAfterUnfollow.json ?? []).find((n) => n.namespace === 'notes')?.selfMember}`,
+    '退订 → selfSubscribed 回落 false',
+    (nsAfterUnfollow.json ?? []).find((n) => n.namespace === 'notes')?.selfSubscribed === false,
+    `selfSubscribed=${(nsAfterUnfollow.json ?? []).find((n) => n.namespace === 'notes')?.selfSubscribed}`,
   );
 
-  const memberBad = await fetch(`http://127.0.0.1:${port}/admin/api/memberships`, {
+  const memberBad = await fetch(`http://127.0.0.1:${port}/admin/api/subscriptions`, {
     method: 'POST',
     headers: writeHeaders,
-    body: JSON.stringify({ namespace: 'notes' }),
+    body: JSON.stringify({ active: true }),
   });
-  check('memberships 缺 member → 400', memberBad.status === 400, `status=${memberBad.status}`);
+  check('subscriptions 缺 namespace → 400', memberBad.status === 400, `status=${memberBad.status}`);
 
   const rejoin = await fetch(`http://127.0.0.1:${port}/admin/api/namespaces/notes/rejoin`, {
     method: 'POST',
@@ -701,7 +689,7 @@ try {
       deviceId: 'device-pending',
       encryption: { level: 'none' },
       network: { enabled: false, libp2p: { listen: [], relayServers: [] } },
-      sync: { autoSync: true, pushOnWrite: false, antiEntropy: { enabled: false, intervalMs: 600000, jitterRatio: 0.2 }, namespaces: [], peerWhitelist: [], policyIssuers: [] },
+      sync: { autoSync: true, pushOnWrite: false, antiEntropy: { enabled: false, intervalMs: 600000, jitterRatio: 0.2 }, namespaces: [], peerWhitelist: [] },
       semantic: { enabled: false, minScore: 0.2 },
       mcp: { http: { host: '127.0.0.1', port: restartMcpPort, auth: 'none', tls: false } },
       joinService: { enabled: false, bind: '127.0.0.1', port: restartJoinPort },
@@ -785,8 +773,8 @@ try {
       `antiEntropy.enabled reason=${gRow?.reason}`,
     );
     check(
-      'A 暴露面由 schema 驱动载荷（configSchema 16 editable / statusSchema 11 只读 / relayServers 只在只读面）',
-      (gSettings.json?.configSchema ?? []).length === 16 && (gSettings.json?.statusSchema ?? []).length === 11
+      'A 暴露面由 schema 驱动载荷（configSchema 14 editable / statusSchema 10 只读 / relayServers 只在只读面）',
+      (gSettings.json?.configSchema ?? []).length === 14 && (gSettings.json?.statusSchema ?? []).length === 10
         && !(gSettings.json?.configSchema ?? []).some((e) => e.path === 'network.libp2p.relayServers')
         && (gSettings.json?.statusSchema ?? []).some((e) => e.path === 'network.libp2p.relayServers'),
       `editable=${(gSettings.json?.configSchema ?? []).length} status=${(gSettings.json?.statusSchema ?? []).length}`,
@@ -1142,18 +1130,18 @@ try {
     const bcookie = cookieFrom(consoleRes);
     const bWriteHeaders = { 'content-type': 'application/json', 'x-mebular-csrf': bcsrf, cookie: `mebular_csrf=${bcookie}` };
 
-    const readWrite = await fetch(`${base}/admin/api/grants`, {
+    const readWrite = await fetch(`${base}/admin/api/subscriptions`, {
       method: 'POST',
       headers: { ...bWriteHeaders, authorization: `Bearer ${readToken}` },
-      body: JSON.stringify({ subject: 'device-x', namespaces: ['notes'] }),
+      body: JSON.stringify({ namespace: 'notes', active: true }),
     });
     check('bearer：read scope 写 → 403', readWrite.status === 403, `status=${readWrite.status}`);
-    const adminWrite = await fetch(`${base}/admin/api/grants`, {
+    const adminWrite = await fetch(`${base}/admin/api/subscriptions`, {
       method: 'POST',
       headers: { ...bWriteHeaders, authorization: `Bearer ${adminToken}` },
-      body: JSON.stringify({ subject: 'device-x', namespaces: ['notes'] }),
+      body: JSON.stringify({ namespace: 'notes', active: true }),
     });
-    check('bearer：admin scope 写 → 201', adminWrite.status === 201, `status=${adminWrite.status}`);
+    check('bearer：admin scope 写 → 200', adminWrite.status === 200, `status=${adminWrite.status}`);
 
     const bearerSse = await openSse(bport, `/admin/events?token=${readToken}`, 8000);
     check('bearer：SSE ?token= 200 + status', bearerSse.status === 200 && bearerSse.body.includes('event: status'), `status=${bearerSse.status}`);
@@ -1194,9 +1182,10 @@ try {
 
   // ---------- H2：写端点【端点 ↔ scope ↔ 等价面】一致性（逐端点未授权 403） ----------
   const WRITE_ENDPOINTS = [
-    ['POST', '/admin/api/grants'],
-    ['POST', '/admin/api/grants/g-1/revoke'],
+    ['POST', '/admin/api/subscriptions'],
+    ['POST', '/admin/api/namespaces'],
     ['POST', '/admin/api/devices/device-x/revoke'],
+    ['POST', '/admin/api/devices/device-x/restore'],
     ['POST', '/admin/api/devices/device-x/connect'],
     ['POST', '/admin/api/devices/device-x/disconnect'],
     ['POST', '/admin/api/devices/device-x/sync'],
@@ -1204,8 +1193,6 @@ try {
     ['POST', '/admin/api/config'],
     ['POST', '/admin/api/restart'],
     ['POST', '/admin/api/invite'],
-    ['POST', '/admin/api/policy-issuers'],
-    ['POST', '/admin/api/memberships'],
     ['POST', '/admin/api/namespaces/notes/rejoin'],
     ['POST', '/admin/api/namespaces/notes/leave'],
   ];
@@ -1223,12 +1210,12 @@ try {
 
   // ---------- H3：CSRF/回环/写方法/只读降级 ----------
   check('H3 CSRF cookie SameSite=Strict', /SameSite=Strict/i.test(index.headers.get('set-cookie') ?? ''), index.headers.get('set-cookie') ?? '');
-  const methodGet = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, { headers: writeHeaders });
+  const methodGet = await fetch(`http://127.0.0.1:${port}/admin/api/subscriptions`, { headers: writeHeaders });
   check('H3 写端点 GET → 405', methodGet.status === 405, `status=${methodGet.status}`);
-  const crossOrigin = await fetch(`http://127.0.0.1:${port}/admin/api/grants`, {
+  const crossOrigin = await fetch(`http://127.0.0.1:${port}/admin/api/subscriptions`, {
     method: 'POST',
     headers: { ...writeHeaders, origin: 'http://evil.example' },
-    body: JSON.stringify({ subject: 'device-x', namespaces: ['notes'] }),
+    body: JSON.stringify({ namespace: 'notes', active: true }),
   });
   check('H3 跨站点 Origin → 403', crossOrigin.status === 403, `status=${crossOrigin.status}`);
   {
@@ -1246,10 +1233,10 @@ try {
       const csrfResp = await fetch(`http://127.0.0.1:${ro.port}/console/`);
       const roCsrf = csrfResp.headers.get('x-mebular-csrf');
       const roCookie = (csrfResp.headers.get('set-cookie') ?? '').match(/mebular_csrf=([^;]+)/)?.[1];
-      const roWrite = await fetch(`http://127.0.0.1:${ro.port}/admin/api/grants`, {
+      const roWrite = await fetch(`http://127.0.0.1:${ro.port}/admin/api/subscriptions`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-mebular-csrf': roCsrf, cookie: `mebular_csrf=${roCookie}` },
-        body: JSON.stringify({ subject: 'device-x', namespaces: ['notes'] }),
+        body: JSON.stringify({ namespace: 'notes', active: true }),
       });
       const roJson = await roWrite.json().catch(() => null);
       check('H3 MEBULAR_CONSOLE_WRITES=0 → 写降级 403 console_read_only', roWrite.status === 403 && roJson?.reason === 'console_read_only', `status=${roWrite.status} reason=${roJson?.reason}`);
@@ -1433,21 +1420,21 @@ try {
     const schema = await import('../../mcp/src/config-schema.mjs');
     const schemaEditable = [...schema.EDITABLE_PATHS].sort();
     const schemaStatusOnly = [...schema.STATUS_ONLY_PATHS].sort();
-    const iaEditable = [...ia.IA_EDITOR_PATHS].sort(); // 全量可编辑面（设置 15 + 记忆共享 1）
+    const iaEditable = [...ia.IA_EDITOR_PATHS].sort(); // 全量可编辑面（设置 13 + 记忆共享 1）
     const iaStatusOnly = [...ia.IA_STATUS_ONLY_PATHS].sort();
     const diffSets = (a, b) => [...a.filter((x) => !b.includes(x)), ...b.filter((x) => !a.includes(x))];
     const editableDrift = diffSets(schemaEditable, iaEditable);
     const statusDrift = diffSets(schemaStatusOnly, iaStatusOnly);
     check(`schema↔IA 防漂移：editable 集合逐项一致（各 ${schemaEditable.length}）`,
-      schemaEditable.length === 16 && editableDrift.length === 0,
+      schemaEditable.length === 14 && editableDrift.length === 0,
       `schema=${schemaEditable.length} ia=${iaEditable.length} 差异=${editableDrift.join(',') || '无'}`);
     check(`schema↔IA 防漂移：status-only 集合逐项一致（各 ${schemaStatusOnly.length}）`,
-      schemaStatusOnly.length === 11 && statusDrift.length === 0,
+      schemaStatusOnly.length === 10 && statusDrift.length === 0,
       `schema=${schemaStatusOnly.length} ia=${iaStatusOnly.length} 差异=${statusDrift.join(',') || '无'}`);
     // B：收敛回归——relayServers 从编辑面消失（status-only）、relayUnlimited 不再渲染（internal）
     const advancedDrift = [...advancedCardFields, ...mcpFields, ...ia.IA_ADVANCED_FIELDS].filter((p) => ['network.libp2p.relayServers', 'network.libp2p.relayUnlimited'].includes(p));
     check('B 暴露面收敛：relayServers 退出编辑面（→只读自动池）/ relayUnlimited 退出 GUI（→internal）',
-      ia.IA_ADVANCED_FIELDS.length === 6 && advancedDrift.length === 0
+      ia.IA_ADVANCED_FIELDS.length === 4 && advancedDrift.length === 0
         && schema.exposureOf('network.libp2p.relayServers') === 'status-only'
         && schema.exposureOf('network.libp2p.relayUnlimited') === 'internal'
         && schema.isWritable('network.libp2p.relayServers') === false,
@@ -1458,8 +1445,8 @@ try {
     const rendered = new Set([...ia.IA_COMMON_FIELDS, ...advancedCardFields, ...mcpFields, ...ia.IA_ADVANCED_FIELDS]);
     const drifted = ia.IA_EDITOR_PATHS.filter((path) => (ia.IA_MIGRATION[path] === 'common' || ia.IA_MIGRATION[path] === 'advanced' || ia.IA_MIGRATION[path] === 'mcp') !== rendered.has(path));
     const statusWithoutHome = ia.IA_STATUS_ONLY_PATHS.filter((path) => homesOf(path).length !== 1);
-    check('IA 不丢项：16 可编辑 path + 11 只读 path + 10 信息块各有且仅有唯一去处（迁移表驱动）',
-      ia.IA_EDITOR_PATHS.length === 16 && pathsWithoutHome.length === 0 && infoWithoutHome.length === 0 && drifted.length === 0 && statusWithoutHome.length === 0,
+    check('IA 不丢项：14 可编辑 path + 10 只读 path + 10 信息块各有且仅有唯一去处（迁移表驱动）',
+      ia.IA_EDITOR_PATHS.length === 14 && pathsWithoutHome.length === 0 && infoWithoutHome.length === 0 && drifted.length === 0 && statusWithoutHome.length === 0,
       `editorPaths=${ia.IA_EDITOR_PATHS.length} 只读无去处=${statusWithoutHome.join(',') || '无'} 编辑无去处=${pathsWithoutHome.join(',') || '无'} 信息块无去处=${infoWithoutHome.join(',') || '无'} 编辑面漂移=${drifted.join(',') || '无'}`);
 
     const cardFields = advancedCardFields;
@@ -1484,7 +1471,7 @@ try {
         && ia.IA_EDITOR_PATHS.includes('sync.namespaces')
         && ['sync.antiEntropy.intervalMs', 'sync.antiEntropy.jitterRatio', 'sync.snapshotThreshold', 'semantic.minScore']
           .every((p) => schema.exposureOf(p) === 'internal' && schema.isWritable(p) === true)
-        && ia.IA_EDITOR_RENDER_PATHS.length === 15,
+        && ia.IA_EDITOR_RENDER_PATHS.length === 13,
       `render=${ia.IA_EDITOR_RENDER_PATHS.length} namespacesHome=${ia.IA_MIGRATION['sync.namespaces']}`);
     check('简化轮 · 即时生效（无「保存/撤销」按钮；字段 change 即写入；409 自锁走品牌确认卡）',
       !/data-cfg-action="save"/.test(consoleSrc2) && !/data-cfg-action="reset"/.test(consoleSrc2)
@@ -1782,13 +1769,12 @@ try {
     });
     const inviteJson = await inviteRes.json().catch(() => null);
     // 可选依赖在场 → SVG；缺包 → null（只给文本）；两者都合法，字段必须存在
-    check('C7 邀请响应提供二维码（qrSvg：SVG 字符串或缺可选依赖时为 null）+ grantOnJoin',
-      inviteRes.status === 201 && 'qrSvg' in (inviteJson ?? {}) && (inviteJson?.qrSvg === null || String(inviteJson?.qrSvg).startsWith('<svg'))
-        && inviteJson?.grantOnJoin === true,
-      { status: inviteRes.status, qr: inviteJson?.qrSvg === null ? 'null（缺可选依赖）' : 'svg', grantOnJoin: inviteJson?.grantOnJoin });
+    check('C7 邀请响应提供二维码（qrSvg：SVG 字符串或缺可选依赖时为 null）',
+      inviteRes.status === 201 && 'qrSvg' in (inviteJson ?? {}) && (inviteJson?.qrSvg === null || String(inviteJson?.qrSvg).startsWith('<svg')),
+      { status: inviteRes.status, qr: inviteJson?.qrSvg === null ? 'null（缺可选依赖）' : 'svg' });
     const consoleSrc6 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
-    check('C7 控制台邀请面板渲染二维码与自动授权说明',
-      ['扫码即通', 'qrSvg', '自动授权（作用域=令牌记忆域'].every((token) => consoleSrc6.includes(token)));
+    check('C7 控制台邀请面板渲染二维码与订阅说明',
+      ['扫码即通', 'qrSvg', '自行订阅'].every((token) => consoleSrc6.includes(token)));
     const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
     check('C7 二维码依赖为**精确 pin** 的可选依赖（依赖政策）',
       typeof pkg.optionalDependencies?.qrcode === 'string' && /^\d+\.\d+\.\d+$/.test(pkg.optionalDependencies.qrcode),
@@ -1903,29 +1889,24 @@ try {
         && !consoleSrcV4.includes('域级批准'));
     const retiredTokens = ['AUTH →', 'MEMBERS →', '成员制 ACTIVE', '重入恢复', '待重入', '退订交接', '暂无分区', 'HASH ']
       .filter((t) => consoleSrcV4.includes(t) || htmlSrcV4.includes(t));
-    check('v4 UI：术语统一（记忆域/参与中/也在参与/退出并交接/状态指纹；退役词清除）',
-      consoleSrcV4.includes('记忆域') && consoleSrcV4.includes('未参与') && consoleSrcV4.includes('也在参与这个域')
+    check('v4 UI：术语统一（订阅/已订阅/未订阅/也在订阅/退出并交接/状态指纹；退役词清除）',
+      consoleSrcV4.includes('记忆域') && consoleSrcV4.includes('未订阅') && consoleSrcV4.includes('也在订阅这个域')
         && consoleSrcV4.includes('退出并交接') && consoleSrcV4.includes('状态指纹')
         && retiredTokens.length === 0,
       `残留=${retiredTokens.join(',') || '无'}`);
-    check('v4 UI：mock 数据缺口补齐（memories 字段 + 成员制/参与字段）',
+    check('v4 UI：mock 数据缺口补齐（memories 字段 + 订阅字段）',
       consoleSrcV4.includes('MOCK_MEMORIES') && /memories:\s*\{ total:/.test(consoleSrcV4)
-        && consoleSrcV4.includes('membershipEnabled') && consoleSrcV4.includes('selfAuthorized') && consoleSrcV4.includes('effectiveMembers'));
+        && consoleSrcV4.includes('subscriptionDeclared') && consoleSrcV4.includes('subscribers') && consoleSrcV4.includes('selfSubscribed'));
     check('v4 UI：空态重做 + 统计新口径 + 卡尾危险区（scene-1/2 落点）',
       htmlSrcV4.includes('id="domains-empty"') && htmlSrcV4.includes('还没有可以共享的记忆')
         && consoleSrcV4.includes('退出并交接这个域…') && consoleSrcV4.includes('记忆域 ${items.length}')
-        && consoleSrcV4.includes('参与中'));
-    check('v4 UI：订阅自动签发只读行（关于本机 · 只读状态）',
-      consoleSrcV4.includes('订阅自动签发') && consoleSrcV4.includes('autoGrantRowText')
-        && consoleSrcV4.includes('sync?.autoGrant?.enabled'));
-    check('v4 UI：审计 auto-grant 渲染「自动」标记 + grantId 收敛（截断 + 复制）',
-      consoleSrcV4.includes('auditNoteHtml') && consoleSrcV4.includes('>自动</span>')
-        && consoleSrcV4.includes('auditIdHtml') && consoleSrcV4.includes('data-copy-id') && consoleSrcV4.includes('slice(0, 8)'));
-    // §7 补充：自动事件默认折叠为汇总行（结构保留，不拆页）；导航序与命名（星图/共享/记忆/审计）
-    check('§7 UI：审计自动事件折叠为汇总行（自动签发 ×N；展开态跨轮询保持）',
-      consoleSrcV4.includes('isAutoGrantEvent') && consoleSrcV4.includes('auditAutoGroupHtml')
-        && consoleSrcV4.includes('auditAutoOpen') && consoleSrcV4.includes('自动签发 ×')
-        && consoleSrcV4.includes('data-audit-auto'));
+        && consoleSrcV4.includes('已订阅'));
+    check('v4 UI：自动签发入口已删除（无可配置入口）',
+      !consoleSrcV4.includes('订阅自动签发') && !consoleSrcV4.includes('auto' + 'GrantRowText')
+        && !consoleSrcV4.includes('sync?.auto' + 'Grant?.enabled'));
+    check('v4 UI：审计自动签发折叠/自动标记已删除',
+      !consoleSrcV4.includes('auditNoteHtml') && !consoleSrcV4.includes('auditIdHtml')
+        && !consoleSrcV4.includes('isAutoGrantEvent') && !consoleSrcV4.includes('auditAutoGroupHtml'));
     check('§7 UI：导航序与命名（星图/共享/记忆/审计；data-view 切换契约不变）',
       htmlSrcV4.includes('<span class="view-label">共享</span>')
         && !htmlSrcV4.includes('<span class="view-label">记忆共享</span>')
@@ -1933,9 +1914,9 @@ try {
     check('v4 UI：记忆过滤 checkbox 有 accessible name（a11y）',
       htmlSrcV4.includes('id="mem-filter-archived" type="checkbox" aria-label="显示已归档"')
         && htmlSrcV4.includes('id="mem-filter-deleted" type="checkbox" aria-label="显示已删除"'));
-    check('v4 UI：设备卡 interop 段改参与事实（它参与的记忆域 / 参与情况；无第二套开关）',
-      consoleSrcV4.includes('我参与的记忆域') && consoleSrcV4.includes('它参与的记忆域') && consoleSrcV4.includes('参与情况')
-        && consoleSrcV4.includes('双方都在参与') && consoleSrcV4.includes('这个域还没有内容')
+    check('v4 UI：设备卡 interop 段改订阅事实（它订阅的记忆域 / 订阅情况；无第二套开关）',
+      consoleSrcV4.includes('我订阅的记忆域') && consoleSrcV4.includes('它订阅的记忆域') && consoleSrcV4.includes('订阅情况')
+        && consoleSrcV4.includes('双方都已订阅') && consoleSrcV4.includes('这个域还没有内容')
         && !consoleSrcV4.includes('data-follow') && !consoleSrcV4.includes('handleFollowToggle'));
     check('v4 UI：窄屏横幅让位 + 面板视图隐藏设备卡空壳（CSS 落点）',
       (await readFile(join(consoleDir, 'console.css'), 'utf-8')).includes('.stage-wrap.has-banner .panel-view')

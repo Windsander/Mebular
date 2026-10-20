@@ -128,7 +128,7 @@ export const TOOL_SPECS = [
       limit: z.number().optional(),
       offset: z.number().optional(),
       includeHistory: z.boolean().optional(),
-      /** G-ML-1：默认 false（归档不参与召回）；显式 true 才可见已归档 */
+      /** G-ML-1：默认 false（归档不进入召回）；显式 true 才可见已归档 */
       includeArchived: z.boolean().optional(),
       filters: z
         .object({
@@ -166,7 +166,7 @@ export const TOOL_SPECS = [
       types: z.array(z.string()).optional(),
       limit: z.number().optional(),
       includeRelations: z.boolean().optional(),
-      /** G-ML-1：默认 false（归档不参与召回） */
+      /** G-ML-1：默认 false（归档不进入召回） */
       includeArchived: z.boolean().optional(),
       filters: z
         .object({
@@ -331,7 +331,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_delete',
     title: '删除记忆',
-    description: '删除记忆：写墓碑（deletedAt）并随图事件同步到各端；删除后默认不再参与任何召回。不可逆动作（对端已拷贝的旧快照无法强制回收）。需 memory.admin。',
+    description: '删除记忆：写墓碑（deletedAt）并随图事件同步到各端；删除后默认不再出现在任何召回。不可逆动作（对端已拷贝的旧快照无法强制回收）。需 memory.admin。',
     inputSchema: z.object({ ids: z.array(z.string()).min(1) }),
     handler: async (service, args) => {
       try {
@@ -344,7 +344,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_archive',
     title: '归档 / 解除归档记忆',
-    description: '归档记忆：打 metadata.archivedAt 标记（随图同步、无损、可逆），归档后默认不参与召回；archived=false 解除归档。删除（墓碑）节点会被跳过。',
+    description: '归档记忆：打 metadata.archivedAt 标记（随图同步、无损、可逆），归档后默认不进入召回；archived=false 解除归档。删除（墓碑）节点会被跳过。',
     inputSchema: z.object({ ids: z.array(z.string()).min(1), archived: z.boolean().optional() }),
     handler: async (service, args) => {
       try {

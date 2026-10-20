@@ -111,24 +111,11 @@ export interface FleetConfig {
   namespace: string;
   /** 本机监听 multiaddr（libp2p） */
   listen: string;
-  /** 已授权对端（默认拒绝：未列出 = 不发送任何分区） */
+  /** 已登记对端（地址簿；连接准入由 peerWhitelist/信任链决定） */
   peers: FleetPeerConfig[];
-  /**
-   * bootstrap 用配置白名单（可审计的图上 grant 是正路）。**缺省** = 由 `peers` 推导
-   * （每个对端 → `[namespace]`，Step 1b 行为）；显式给出（含 `{}`）则**以它为准**，
-   * 从而支持「对端已登记地址但只有图上 grant、无配置白名单」的 G1 形态。
-   */
-  peerNamespacePolicy?: Record<string, string[]>;
-  /** 引导签发者白名单（R-a） */
-  policyIssuers: string[];
   /** 本机 agent 注册表（按 to.agent 名路由） */
   agents: FleetAgentConfig[];
   quotaLimitPerDevice?: number;
-  /**
-   * `quickstart --auto-approve`（默认 false）：常驻 `fleet node` 自动批准在册未授权成员。
-   * **风险**：任何在册设备都会被授权；仅在受控信任域使用（见 ONBOARDING「一键上车」）。
-   */
-  autoApprove?: boolean;
   /**
    * join 服务（T2）：`fleet node` 启动最小 HTTP 端点 `POST /mebular/join` 以签发委派证书。
    * 令牌是 bearer 凭据（短 TTL + 一次性 nonce）；建议仅在 LAN 绑定。
@@ -157,20 +144,6 @@ export function validateFleetConfig(input: unknown): string[] {
     if (typeof c[key] !== 'string' || (c[key] as string).length === 0) errors.push(`${key} 必须为非空字符串`);
   }
   if (!Array.isArray(c.peers)) errors.push('peers 必须为数组');
-  if (c.peerNamespacePolicy !== undefined) {
-    const policy = c.peerNamespacePolicy;
-    if (typeof policy !== 'object' || policy === null || Array.isArray(policy)) {
-      errors.push('peerNamespacePolicy 必须为对象');
-    } else {
-      for (const [device, namespaces] of Object.entries(policy as Record<string, unknown>)) {
-        if (!Array.isArray(namespaces) || namespaces.some((ns) => typeof ns !== 'string')) {
-          errors.push(`peerNamespacePolicy.${device} 必须为字符串数组`);
-        }
-      }
-    }
-  }
-  if (!Array.isArray(c.policyIssuers)) errors.push('policyIssuers 必须为数组');
-  if (c.autoApprove !== undefined && typeof c.autoApprove !== 'boolean') errors.push('autoApprove 必须为布尔');
   if (c.store !== undefined && c.store !== 'daemon' && c.store !== 'embedded') errors.push('store 必须为 daemon|embedded');
   if (c.daemon !== undefined) {
     const d = c.daemon as Record<string, unknown>;
@@ -269,10 +242,6 @@ export function daemonConfigToFleet(dir: string, cfg: Record<string, unknown>): 
     namespace: namespaces[0] ?? 'tasks',
     listen,
     peers,
-    ...(typeof sync.peerNamespacePolicy === 'object' && sync.peerNamespacePolicy !== null
-      ? { peerNamespacePolicy: sync.peerNamespacePolicy as Record<string, string[]> }
-      : {}),
-    policyIssuers: Array.isArray(sync.policyIssuers) ? sync.policyIssuers.filter((s): s is string => typeof s === 'string') : [],
     // 守护侧只作任务板（board），不注册执行型 agent；占位满足校验（kind 属合法枚举）
     agents: [{ name: 'board', kind: 'echo' }],
     ...(typeof cfg.quotaLimitPerDevice === 'number' ? { quotaLimitPerDevice: cfg.quotaLimitPerDevice } : {}),
@@ -300,15 +269,8 @@ export interface OnboardInput {
   peerAddr?: string;
   namespace?: string;
   listen?: string;
-  policyIssuers?: string[];
   agents?: FleetAgentConfig[];
   quotaLimitPerDevice?: number;
-  /**
-   * 是否写 bootstrap 配置白名单（缺省 true = Step 1b 行为）。
-   * `false` → `peerNamespacePolicy = {}`：对端仍登记（地址可用于拨号），但**不**给配置授权，
-   * 授权完全走图上 grant（G1 的「图上授权为主」形态）。
-   */
-  configGrant?: boolean;
 }
 
 export interface OnboardResult {

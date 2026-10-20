@@ -54,15 +54,15 @@ describe('2b 退订交接', () => {
   /** A 三端：A 授权/成员 B、C；A 造 2 条 nsA 事件。 */
   async function setupABC(): Promise<{ hub: InMemoryHub; a: Mebular; b: Mebular; c: Mebular }> {
     const hub = new InMemoryHub();
-    const a = makeFacade('device-A', hub, { peerNamespacePolicy: { 'device-B': ['nsA'], 'device-C': ['nsA'] } });
+    const a = makeFacade('device-A', hub, { namespaces: ['nsA'] });
     const b = makeFacade('device-B', hub, { namespaces: ['nsA'] });
     const c = makeFacade('device-C', hub, { namespaces: ['nsA'] });
     await a.initialize();
     await b.initialize();
     await c.initialize();
-    for (const m of ['device-A', 'device-B', 'device-C']) {
-      await a.declareNamespaceMembership({ member: m, namespace: 'nsA' });
-    }
+    await a.subscribeNamespace('nsA');
+    await b.subscribeNamespace('nsA');
+    await c.subscribeNamespace('nsA');
     await a.graph.createNode('fact', { text: 'one' }, [], { namespace: 'nsA' });
     await a.graph.createNode('fact', { text: 'two' }, [], { namespace: 'nsA' });
     return { hub, a, b, c };
@@ -76,7 +76,7 @@ describe('2b 退订交接', () => {
     const policyBefore = await policyIds(a);
 
     const plan = await a.planNamespaceHandoff({ namespace: 'nsA', successor: 'device-B' });
-    expect(plan).toMatchObject({ ok: true, successorIsMember: true, pendingTotal: 0 });
+    expect(plan).toMatchObject({ ok: true, successorSubscribed: true, pendingTotal: 0 });
 
     const result = await a.leaveNamespace({ namespace: 'nsA', successor: 'device-B' });
     expect(result.ok).toBe(true);
@@ -169,22 +169,21 @@ describe('2b 退订交接', () => {
     await b.shutdown();
   });
 
-  it('⑤ 清理后成员闸门仍在（legacy-empty 不退化）+ 清理不改变签发者（oracle-free）', async () => {
+  it('⑤ 清理后订阅视图仍在 + 清理不改变域公告（oracle-free）', async () => {
     const { a, b } = await setupABC();
     await syncBetween(a, b);
-    const issuersBefore = (await a.getPolicyIssuers()).sort();
+    const declarationsBefore = await a.getNamespaceDeclarations();
 
     await a.leaveNamespace({ namespace: 'nsA', successor: 'device-B' });
 
-    // 成员记录仍在 → 该分区仍「已启用成员资格」；A 已注销自己，B/C 仍在册
-    const membership = await a.getNamespaceMembership('nsA');
-    expect(membership.active).toBe(true);
-    expect(membership.members).toContain('device-B');
-    expect(membership.members).not.toContain('device-A'); // 退订 = 成员资格退出
-    // 未授权的 device-D 仍不是成员（闸门不退化）
-    expect(membership.members).not.toContain('device-D');
-    // oracle-free：签发者集合不受清理影响
-    expect((await a.getPolicyIssuers()).sort()).toEqual(issuersBefore);
+    // B/C 的订阅记录仍在；A 已退订自己
+    const view = await a.getNamespaceSubscriptions('nsA');
+    expect(view.active).toBe(true);
+    expect(view.subscribers).toContain('device-B');
+    expect(view.subscribers).not.toContain('device-A');
+    expect(view.subscribers).not.toContain('device-D');
+    // oracle-free：域公告不受清理影响
+    expect(await a.getNamespaceDeclarations()).toEqual(declarationsBefore);
     await a.shutdown();
     await b.shutdown();
   });

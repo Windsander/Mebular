@@ -254,14 +254,14 @@ describe('S2 覆盖率补齐 · 摘要/证明/恢复码', () => {
     expect(await verifyCosignProofSignature(proof, 'zz')).toBe(false);
   });
 
-  test('collectRecoveryRegistry 覆盖 tier/revoke/grant/membership 与空记录', () => {
+  test('collectRecoveryRegistry 覆盖 tier/revoke/subscription/restore 与空记录', () => {
     const recovery = generateRecoveryCode();
     const proof = signBreakGlass({ code: recovery.code, op: 'kick', initiator: 'A', subject: 'B' }).proof;
     const events: PolicyEvent[] = [
       { id: '1', type: 'security_tier', timestamp: 1, data: { securityTier: { breakGlass: proof } } },
       { id: '2', type: 'device_revoke', timestamp: 2, data: { deviceRevoke: { breakGlass: { ...proof, nonce: 'n2' } } } },
-      { id: '3', type: 'namespace_grant', timestamp: 3, data: { grant: { breakGlass: { ...proof, nonce: 'n3' } } } },
-      { id: '4', type: 'namespace_membership', timestamp: 4, data: { membership: { breakGlass: { ...proof, nonce: 'n4' } } } },
+      { id: '3', type: 'namespace_subscription', timestamp: 3, data: { subscription: { breakGlass: { ...proof, nonce: 'n3' } } } },
+      { id: '4', type: 'device_restore', timestamp: 4, data: { deviceRestore: { breakGlass: { ...proof, nonce: 'n4' } } } },
       { id: '5', type: 'security_recovery', timestamp: 5, data: { securityRecovery: { keyId: 'k', publicKey: '00', createdAt: 5, mode: 'set' } } },
       { id: '6', type: 'other', timestamp: 6, data: { securityTier: null } },
       { id: '7', type: 'security_tier', timestamp: 1, data: { securityTier: {} } },

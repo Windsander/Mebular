@@ -48,12 +48,11 @@ Mebular 仍在早期：功能可用，API 未稳定，未发 npm 包；生产使
 | 门禁 | 说明 |
 |------|------|
 | 单元/集成测试 | `npm test`（CI 跑 `npm run test:coverage`，覆盖率门槛不降） |
-| fleet 验收 | `npm run verify:fleet:all`（含 local/remote/agents/onboard/quickstart/tasks/grant/service/membership/handoff/rejoin/collab） |
+| fleet 验收 | `npm run verify:fleet:all`（含 local/remote/agents/onboard/tasks/service/handoff/collab） |
 | 守护验收 | `npm run verify:daemon` / `verify:daemon:cluster` |
 | WAN | `npm run verify:wan:l2`（+ `:docker`） |
 | 配对即连 | `npm run verify:connect`（配对 hints 自动连通 / relay 降级与恢复） |
 | LAN 发现 | `npm run verify:lan`（LAN 自动拨号 / 陌生设备不拨号 / LAN↔WAN 切换） |
-| 扫码即通 | `npm run verify:invite`（令牌 grant 语义 / 二维码与降级 / 兑换自动授权 / TTL 撤销） |
 | 依赖政策 | `npm run check:deps`（THIRD-PARTY 登记 + 精确 pin + 无幽灵依赖） |
 | 打洞 | `npm run verify:nat`（AutoNAT/DCUtR 装配与软降级 / 直连升级 / 失败保留 relay） |
 | 表面一致性 | `npm run check:surface-parity`（MCP 工具 ↔ CLI 逐字同名、无孤儿） |

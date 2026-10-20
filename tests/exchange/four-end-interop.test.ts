@@ -26,7 +26,6 @@ import {
   issueCertificate,
   masterPublicKeyBytes,
 } from '../p2p/helpers.js';
-import { grant } from '../helpers/namespace.js';
 
 import { useHeavyTimeout } from '../helpers/timeouts.js';
 // F-HYGIENE-1：重集成用例的显式有界预算（Windows 30s / 其它 15s；断言不变）。
@@ -60,7 +59,6 @@ async function createEnd(deviceId: string, master: CryptoKeyPair): Promise<End> 
     storage,
     deviceId,
     userMasterPublicKey: await masterPublicKeyBytes(master),
-    namespacePolicy: grant(), // 默认拒绝：显式授权对端（互通数据都在 default 分区）
   });
   return { deviceId, storage, memory, syncManager, publicKey: identity.identity.devicePublicKey };
 }

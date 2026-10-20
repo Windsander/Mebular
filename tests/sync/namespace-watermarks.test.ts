@@ -16,8 +16,7 @@ import { GraphStore } from '../../src/core/GraphStore.js';
 import { EventLog, type EventSigner } from '../../src/eventlog/EventLog.js';
 import { MemoryStorage } from '../../src/storage/MemoryStorage.js';
 import { SyncManager, type SyncPeer, type SyncResult } from '../../src/sync/syncmgr/SyncManager.js';
-import type { NamespaceGrantPolicy } from '../../src/sync/namespacePolicy.js';
-import { grant } from '../helpers/namespace.js';
+import type { NamespaceSubscriptionPolicy } from '../../src/sync/namespacePolicy.js';
 import {
   assertValidAck,
   assertValidHello,
@@ -30,12 +29,21 @@ import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
 import type { PeerId } from '../../src/p2p/P2PNetwork.js';
 import type { Node } from '../../src/types/index.js';
 
-/** 可变的授权策略：测试中途「扩权 / 撤销」只需改 mapping */
-class MutablePolicy implements NamespaceGrantPolicy {
-  constructor(public mapping: Record<string, string[]> = {}) {}
+/**
+ * 可变的订阅记录：mapping = 对端 → 它声明订阅的域。
+ * 测试中途「扩订阅 / 退订」只需改 mapping；已被提及的域保持权威模式。
+ */
+class MutableSubscriptions implements NamespaceSubscriptionPolicy {
+  private readonly known = new Set<string>();
+  constructor(public mapping: Record<string, string[]> = {}) {
+    for (const list of Object.values(mapping)) for (const ns of list) this.known.add(ns);
+  }
 
-  async getAuthorizedNamespaces(peerDeviceId: string): Promise<string[]> {
-    return [...(this.mapping[peerDeviceId] ?? [])];
+  async getNamespaceSubscriptions(namespace: string): Promise<{ active: boolean; subscribers: string[]; recorded: string[] }> {
+    const subscribers = Object.entries(this.mapping)
+      .filter(([, list]) => list.includes(namespace))
+      .map(([peer]) => peer);
+    return { active: true, subscribers, recorded: Object.keys(this.mapping) };
   }
 }
 
@@ -50,7 +58,7 @@ interface TestDevice {
 }
 
 interface DeviceOptions {
-  namespacePolicy?: NamespaceGrantPolicy;
+  subscriptionPolicy?: NamespaceSubscriptionPolicy;
   subscriptionNamespaces?: string[];
   snapshotThreshold?: number;
   syncStatePath?: string;
@@ -66,7 +74,7 @@ function newSyncManager(base: Omit<TestDevice, 'syncManager'>, options: DeviceOp
     eventLog: base.eventLog,
     storage: base.storage,
     deviceId: base.deviceId,
-    ...(options.namespacePolicy ? { namespacePolicy: options.namespacePolicy } : {}),
+    ...(options.subscriptionPolicy ? { subscriptionPolicy: options.subscriptionPolicy } : {}),
     ...(options.subscriptionNamespaces ? { subscriptionNamespaces: options.subscriptionNamespaces } : {}),
     ...(options.snapshotThreshold !== undefined ? { snapshotThreshold: options.snapshotThreshold } : {}),
     ...(options.syncStatePath ? { syncStatePath: options.syncStatePath } : {}),
@@ -133,7 +141,7 @@ async function loadState(path: string): Promise<{
 
 describe('授权边界与协议声明', () => {
   it('hello 缺失 subscribeAll → 协议违例，会话被拒绝（发起方视角）', async () => {
-    const a = await createDevice('device-A', { namespacePolicy: new MutablePolicy({ 'device-B': ['nsA'] }) });
+    const a = await createDevice('device-A', { subscriptionPolicy: new MutableSubscriptions({ 'device-B': ['nsA'] }) });
     await a.store.createNode('fact', { text: 'x' }, [], { namespace: 'nsA' });
 
     const b = await createDevice('device-B');
@@ -157,7 +165,7 @@ describe('授权边界与协议声明', () => {
   });
 
   it('hello 的 namespaces 类型错 → 响应方拒绝会话', async () => {
-    const a = await createDevice('device-A', { namespacePolicy: new MutablePolicy({ 'device-B': ['nsA'] }) });
+    const a = await createDevice('device-A', { subscriptionPolicy: new MutableSubscriptions({ 'device-B': ['nsA'] }) });
     const b = await createDevice('device-B');
     const [tA, tB] = await linkedTransports(a, b);
 
@@ -181,7 +189,7 @@ describe('授权边界与协议声明', () => {
   });
 
   it('声明槽 subscribeAll=false + []：明确不订阅任何分区（与「订阅空=全部」不再冲突）', async () => {
-    const a = await createDevice('device-A', { namespacePolicy: new MutablePolicy({ 'device-B': ['nsA'] }) });
+    const a = await createDevice('device-A', { subscriptionNamespaces: ['nsA'] });
     await a.store.createNode('fact', { text: 'x' }, [], { namespace: 'nsA' });
 
     const b = await createDevice('device-B');
@@ -209,11 +217,11 @@ describe('授权边界与协议声明', () => {
     const result = await a.syncManager.acceptSync(tA, peerOf(b));
     expect(await script).toBe(0); // 声明槽 [] 解析为「不订阅任何分区」
     expect(result.sentEvents).toBe(0);
-    expect(result.denied).toBe(true);
+    expect(result.noSubscriptionOverlap).toBe(true);
   });
 
   it('响应方发来缺 namespaceClocks 的快照 → 协议违例，会话被拒绝（F2）', async () => {
-    const a = await createDevice('device-A', { namespacePolicy: grant('default') });
+    const a = await createDevice('device-A', { subscriptionNamespaces: ['default'] });
     const b = await createDevice('device-B');
     const [tA, tB] = await linkedTransports(a, b);
 
@@ -303,8 +311,8 @@ describe('assertValidHello 订阅声明校验', () => {
 
 describe('分区同步水位（缺失判定 per-(对端, 分区)）', () => {
   it('扩权回补（回归锚点 · increment）：先授权 nsA，扩到 nsB 后历史事件补发', async () => {
-    const policy = new MutablePolicy({ 'device-B': ['nsA'] });
-    const a = await createDevice('device-A', { namespacePolicy: policy });
+    const policy = new MutableSubscriptions({ 'device-B': ['nsA'] });
+    const a = await createDevice('device-A', { subscriptionPolicy: policy });
     const b = await createDevice('device-B');
 
     await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
@@ -326,8 +334,8 @@ describe('分区同步水位（缺失判定 per-(对端, 分区)）', () => {
   });
 
   it('扩权回补（快照路径）：新对端在扩权后经快照拿到历史分区', async () => {
-    const policy = new MutablePolicy({ 'device-B': ['nsA'] });
-    const a = await createDevice('device-A', { namespacePolicy: policy, snapshotThreshold: 1 });
+    const policy = new MutableSubscriptions({ 'device-B': ['nsA'] });
+    const a = await createDevice('device-A', { subscriptionPolicy: policy, snapshotThreshold: 1 });
     const b = await createDevice('device-B');
 
     for (let i = 0; i < 3; i++) await a.store.createNode('fact', { text: `a${i}` }, [], { namespace: 'nsA' });
@@ -355,8 +363,8 @@ describe('分区同步水位（缺失判定 per-(对端, 分区)）', () => {
   });
 
   it('快照按分区裁剪边：未授权分区的边不进快照', async () => {
-    const policy = new MutablePolicy({ 'device-B': ['nsA'] });
-    const a = await createDevice('device-A', { namespacePolicy: policy, snapshotThreshold: 1 });
+    const policy = new MutableSubscriptions({ 'device-B': ['nsA'] });
+    const a = await createDevice('device-A', { subscriptionPolicy: policy, snapshotThreshold: 1 });
     const b = await createDevice('device-B');
 
     const na1 = await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
@@ -377,8 +385,8 @@ describe('分区同步水位（缺失判定 per-(对端, 分区)）', () => {
   });
 
   it('撤销/收紧：撤销后不发送、水位不被污染，再扩回仍正确', async () => {
-    const policy = new MutablePolicy({ 'device-B': ['nsA', 'nsB'] });
-    const a = await createDevice('device-A', { namespacePolicy: policy });
+    const policy = new MutableSubscriptions({ 'device-B': ['nsA', 'nsB'] });
+    const a = await createDevice('device-A', { subscriptionPolicy: policy });
     const b = await createDevice('device-B');
 
     const a1 = await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
@@ -409,14 +417,14 @@ describe('上报水位只用作者自身计数（F1）', () => {
     // 三设备：C 在 nsB 有一条事件；D 同步拿到 C 的计数后在 nsA 写入；
     // B 只从 D 拿到 nsA（于是 clock 含 C 的计数，但没有 C 的 nsB 事件）；
     // B 在 nsB 写入，其 vectorClock 因而携带 C 的计数。
-    const cPolicy = new MutablePolicy({ 'device-B': ['nsA', 'nsB'], 'device-D': ['nsA', 'nsB'] });
+    const cPolicy = new MutableSubscriptions({ 'device-B': ['nsA', 'nsB'], 'device-D': ['nsA', 'nsB'] });
     // B→C 只供 nsB：避免 B 把从 D 收到的第三方（D）事件中继给 C（夹具无证书链，中继会验签失败）
-    const bPolicy = new MutablePolicy({ 'device-C': ['nsB'], 'device-D': ['nsA', 'nsB'] });
-    const dPolicy = new MutablePolicy({ 'device-B': ['nsA'], 'device-C': ['nsA', 'nsB'] });
+    const bPolicy = new MutableSubscriptions({ 'device-C': ['nsB'], 'device-D': ['nsA', 'nsB'] });
+    const dPolicy = new MutableSubscriptions({ 'device-B': ['nsA'], 'device-C': ['nsA', 'nsB'] });
 
-    const c = await createDevice('device-C', { namespacePolicy: cPolicy });
-    const d = await createDevice('device-D', { namespacePolicy: dPolicy });
-    const b = await createDevice('device-B', { namespacePolicy: bPolicy });
+    const c = await createDevice('device-C', { subscriptionPolicy: cPolicy });
+    const d = await createDevice('device-D', { subscriptionPolicy: dPolicy });
+    const b = await createDevice('device-B', { subscriptionPolicy: bPolicy });
 
     const cNsB = await c.store.createNode('fact', { text: 'c-nsB' }, [], { namespace: 'nsB' });
     await runSync(c, d); // D 拿到 C 的 nsB 事件与其计数
@@ -438,7 +446,7 @@ describe('上报水位只用作者自身计数（F1）', () => {
 
 describe('对端自报不得抬升水位（R1）', () => {
   it('对端自报高于本机记录：不抬升水位，本机仍发送该分区事件（回归锚点）', async () => {
-    const a = await createDevice('device-A', { namespacePolicy: grant('nsA') });
+    const a = await createDevice('device-A', { subscriptionNamespaces: ['nsA'] });
     await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
     await a.store.createNode('fact', { text: 'a2' }, [], { namespace: 'nsA' });
 
@@ -474,8 +482,8 @@ describe('对端自报不得抬升水位（R1）', () => {
   });
 
   it('对端自报空对象（不含分区）：不触发向下修正；水位不抬升，无 divergence 信号', async () => {
-    const a = await createDevice('device-A', { namespacePolicy: grant('nsA') });
-    const b = await createDevice('device-B', { namespacePolicy: grant('nsA') });
+    const a = await createDevice('device-A', { subscriptionNamespaces: ['nsA'] });
+    const b = await createDevice('device-B', { subscriptionNamespaces: ['nsA'] });
     await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
     await runSync(a, b); // A 的 ack 水位 → {nsA:{'device-A':1}}
 
@@ -505,8 +513,8 @@ describe('对端自报不得抬升水位（R1）', () => {
 
 describe('快照前提与回退保护（R2/R3）', () => {
   it('R2：对端分区水位非空时不发快照，改走增量', async () => {
-    const a = await createDevice('device-A', { namespacePolicy: grant('nsA'), snapshotThreshold: 1 });
-    const b = await createDevice('device-B', { namespacePolicy: grant('nsA') });
+    const a = await createDevice('device-A', { subscriptionNamespaces: ['nsA'], snapshotThreshold: 1 });
+    const b = await createDevice('device-B', { subscriptionNamespaces: ['nsA'] });
     await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
 
     const [firstA] = await runSync(a, b);
@@ -520,7 +528,7 @@ describe('快照前提与回退保护（R2/R3）', () => {
   });
 
   it('R3：旧快照不得回退本地更新的实体', async () => {
-    const a = await createDevice('device-A', { namespacePolicy: grant('default') });
+    const a = await createDevice('device-A', { subscriptionNamespaces: ['default'] });
     const b = await createDevice('device-B');
     const created = await a.store.createNode('fact', { text: 'old' }, [], { namespace: 'default' });
     await a.store.updateNode(created.id, { content: { text: 'new' } });
@@ -558,8 +566,8 @@ describe('快照前提与回退保护（R2/R3）', () => {
 
 describe('同步查询面与传输收尾', () => {
   it('getLocalVectorClock 与事件日志一致；传输可关闭', async () => {
-    const a = await createDevice('device-A', { namespacePolicy: grant('default') });
-    const b = await createDevice('device-B', { namespacePolicy: grant('default') });
+    const a = await createDevice('device-A', { subscriptionNamespaces: ['default'] });
+    const b = await createDevice('device-B', { subscriptionNamespaces: ['default'] });
     await a.store.createNode('fact', { text: 'x' });
     expect(a.syncManager.getLocalVectorClock().toJSON()).toEqual(a.eventLog.getClock().toJSON());
 
@@ -582,8 +590,8 @@ describe('同步水位持久化', () => {
 
   it('per-(peer, ns) 水位落盘；重启后不重发已确认分区、不遗漏新分区', async () => {
     const statePath = join(dir, 'a.sync-state.json');
-    const policy = new MutablePolicy({ 'device-B': ['nsA', 'nsB'] });
-    const a1 = await createDevice('device-A', { namespacePolicy: policy, syncStatePath: statePath });
+    const policy = new MutableSubscriptions({ 'device-B': ['nsA', 'nsB'] });
+    const a1 = await createDevice('device-A', { subscriptionPolicy: policy, syncStatePath: statePath });
     const b = await createDevice('device-B');
 
     await a1.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
@@ -598,7 +606,7 @@ describe('同步水位持久化', () => {
     expect(Object.keys(saved.peerWatermarks['device-B']!).sort()).toEqual(['nsA', 'nsB']);
 
     // 重启：同一 storage/eventLog + 同一状态文件，新 SyncManager 实例
-    const restarted = newSyncManager(a1, { namespacePolicy: policy, syncStatePath: statePath });
+    const restarted = newSyncManager(a1, { subscriptionPolicy: policy, syncStatePath: statePath });
 
     // 重启后新增 nsA 事件：只发这条；旧事件不重发（水位持久化生效）
     const a2 = await a1.store.createNode('fact', { text: 'a2' }, [], { namespace: 'nsA' });
@@ -617,11 +625,10 @@ describe('同步水位持久化', () => {
   it('快照同步：确认 snapshotApplied 后按快照水位推进 peerWatermarks（F4）', async () => {
     const statePath = join(dir, 'a-f4.sync-state.json');
     const a = await createDevice('device-A', {
-      namespacePolicy: grant('nsA'),
       snapshotThreshold: 1,
       syncStatePath: statePath,
     });
-    const b = await createDevice('device-B', { namespacePolicy: grant('nsA') });
+    const b = await createDevice('device-B', { subscriptionNamespaces: ['nsA'] });
     await a.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
     await a.store.createNode('fact', { text: 'a2' }, [], { namespace: 'nsA' });
 
@@ -637,7 +644,6 @@ describe('同步水位持久化', () => {
   it('未确认 snapshotApplied：不乐观推进对端水位（F4）', async () => {
     const statePath = join(dir, 'a-f4-neg.sync-state.json');
     const a = await createDevice('device-A', {
-      namespacePolicy: grant('nsA'),
       snapshotThreshold: 1,
       syncStatePath: statePath,
     });
@@ -667,8 +673,8 @@ describe('同步水位持久化', () => {
 
   it('2c：对端自报向下修正自动解污染；resetPeerWatermarks 仍可显式修复（F3）', async () => {
     const statePath = join(dir, 'a-f3.sync-state.json');
-    const a0 = await createDevice('device-A', { namespacePolicy: grant('nsA') });
-    const b = await createDevice('device-B', { namespacePolicy: grant('nsA') });
+    const a0 = await createDevice('device-A', { subscriptionNamespaces: ['nsA'] });
+    const b = await createDevice('device-B', { subscriptionNamespaces: ['nsA'] });
     const a1 = await a0.store.createNode('fact', { text: 'a1' }, [], { namespace: 'nsA' });
     await runSync(a0, b); // B 拿到 a1
 
@@ -683,7 +689,7 @@ describe('同步水位持久化', () => {
       }),
       'utf-8',
     );
-    const a = newSyncManager(a0, { namespacePolicy: grant('nsA'), syncStatePath: statePath });
+    const a = newSyncManager(a0, { subscriptionNamespaces: ['nsA'], syncStatePath: statePath });
 
     // 新增一条 nsA 事件（A:2）：污染水位（9）本会静默不发——但 2c 起，对端 hello 自报真实
     // 水位（A:1）会**向下修正**本机水位到 1，于是 A:2 被补发（安全方向；自报只可向下）。

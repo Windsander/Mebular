@@ -25,7 +25,6 @@ const relayAddr = `/ip4/${relayIp}/tcp/4001/p2p/${relay.peerId}`;
 console.log(`WAN_RELAYADDR ${JSON.stringify({ role, relayIp, relayAddr })}`);
 
 const deviceId = role === 'A' ? 'device-A' : 'device-B';
-const partner = role === 'A' ? 'device-B' : 'device-A';
 const storagePath = join(state, `${role}.jsonl`);
 const pickCircuit = (m) => (m.node.getLocalMultiaddrs() ?? []).find((a) => a.includes('/p2p-circuit'));
 
@@ -39,7 +38,14 @@ for (let attempt = 1; attempt <= 4 && !circuit; attempt++) {
     deviceId,
     encryption: { userMasterKey, userMasterPrivateKey },
     network: { enabled: true, libp2p: { listen: ['/ip4/0.0.0.0/tcp/0'], relayServers: [relayAddr] } },
-    sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 50, antiEntropy: { enabled: true, intervalMs: 1000, jitterRatio: 0 }, peerNamespacePolicy: { [partner]: ['default'] } },
+    sync: {
+      autoSync: true,
+      pushOnWrite: true,
+      pushOnWriteThrottleMs: 50,
+      antiEntropy: { enabled: true, intervalMs: 1000, jitterRatio: 0 },
+      // B 只订阅 default；secret 未订阅 → 供给链不发送。
+      namespaces: role === 'B' ? ['default'] : ['default', 'secret'],
+    },
   });
   await mebular.initialize();
   circuit = await waitFor(() => pickCircuit(mebular), 10000);
@@ -77,13 +83,13 @@ for (;;) {
         if (sawA) await mebular.graph.createNode('fact', { text: 'reply-from-B' }, [], { namespace: 'default' });
         writeState({ phase: 'sync', sawA: !!sawA });
       }
-    } else if (phase.phase === 'authneg') {
+    } else if (phase.phase === 'subneg') {
       if (role === 'A') {
         if (!createdSecret) { await mebular.graph.createNode('fact', { text: 'secret' }, [], { namespace: 'secret' }); createdSecret = true; }
-        writeState({ phase: 'authneg', secretCreated: true });
+        writeState({ phase: 'subneg', secretCreated: true });
       } else {
         await sleep(3000);
-        writeState({ phase: 'authneg', secretCount: await nsCount('secret') });
+        writeState({ phase: 'subneg', secretCount: await nsCount('secret') });
       }
     }
   }

@@ -40,19 +40,19 @@ you cannot tell who wrote what; go offline and it stops working.
 - **Pair once, then it runs itself.** A QR code (or token) enrolls a device — no master-key copying, no addresses to configure. Your agent manages memory; transport, sync and trust run in the background.
 - **One machine = one node = one daemon.** `mebular serve` is the sole holder of identity, network and trust;
   fleet and agents are local clients sharing that daemon's identity and storage.
-- **Domains (namespaces) are data channels.** Joining a domain is a data obligation (receive + promptly sync your
-  new local memory). There is no read-only membership and no dispatch semantics in a domain.
+- **Domains (namespaces) are data channels.** Subscribing to a domain is a data obligation (receive + promptly sync
+  your new local memory). Each device declares its own subscriptions; there is no per-device domain permission layer.
 - **Tasks are trees.** A task is a DAG: the root is the dispatching agent, children are derived by executors
   (`causedBy`/`chain`, cycle-free). The only remote surface is the memory channel — no general remote query/RPC.
 - **Trust is a certificate chain to the user master key.** Any enrolled device may delegate a certificate to a new
   device (bounded chain length); a short-lived, single-use join token lets a new device enroll without copying the
-  master key. Revocation applies to the revoked device itself (author-level); it does not cascade to delegated
-  certificates, so descendants and new members remain unaffected.
+  master key. Removal (`device_revoke`) applies to that device itself (author-level); it does not cascade to delegated
+  certificates, so descendants and newly enrolled devices remain unaffected.
 
 ![Mebular architecture](assets/architecture-en.svg)
 
 ## How to use
-![Pairing flow: device A starts and invites, device B joins with the QR code, connection and the default grant then happen automatically](assets/pairing-flow-en.svg)
+![Pairing flow: device A starts and invites, device B joins with the QR code, connection then happen automatically; each device subscribes on its own](assets/pairing-flow-en.svg)
 
 ### Start it
 | Path | Get started | Best for |
@@ -81,13 +81,13 @@ fleet invite --dir ~/.mebular                                  # QR code + token
 fleet join --qr "<QR content>" --daemon --dir ~/.mebular --device device-B   # or --token
 ```
 
-First run is fully GUI (**Create new** / **Join existing** — paste the token; no CLI needed) · the CLI stays available for scripts (`fleet join`) · no `fleet approve` is needed by default · grants last 24h and are revocable · try the UI first with `seed-demo.mjs`
+First run is fully GUI (**Create new** / **Join existing** — paste the token; no CLI needed) · the CLI stays available for scripts (`fleet join`) · no extra step is needed — each device subscribes on its own, zero friction · try the UI first with `seed-demo.mjs`
 
 ### Who does what
 | Who | Manages | Typical commands |
 |---|---|---|
 | **Your agent** (you never touch it) | memory read/write/search, executing tasks and returning results | `memory_write` … (full list: skill docs) |
-| **You** (rarely) | one-time pairing; grants / revoke / leave / rejoin; watching; optional dispatch | `fleet invite` · `fleet revoke` · `fleet task_submit` |
+| **You** (rarely) | one-time pairing; subscribe / unsubscribe / leave / rejoin; watching; optional dispatch | `fleet invite` · `fleet subscribe` · `fleet task_submit` |
 | **The framework** (automatic) | discovery & addressing, direct/relay/hole-punch switching, auto bridges, sync retries, certificates & token TTLs, service autostart | — |
 
 The one thing only you decide: when two networks both lack a public entry point, pair one always-on device they can reach — it becomes their bridge automatically.

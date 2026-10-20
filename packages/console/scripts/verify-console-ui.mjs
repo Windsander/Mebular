@@ -79,7 +79,7 @@ async function seedHome(home) {
     deviceId: 'device-ui',
     encryption: { level: 'none', keyFile },
     network: { enabled: false },
-    sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: false }, policyIssuers: ['device-ui'] },
+    sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: false }, namespaces: ['notes', 'work'] },
     mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
     joinService: { enabled: true, bind: '0.0.0.0', port: 4013 },
   }, null, 2), 'utf-8');
@@ -89,11 +89,27 @@ async function seedHome(home) {
       deviceId: 'device-ui',
       encryption: { level: 'none', userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
       network: { enabled: false },
-      sync: { autoSync: true, policyIssuers: ['device-ui'] },
+      sync: { autoSync: true, namespaces: ['notes', 'work'] },
     });
     await app.initialize();
-    await app.grantNamespaces({ subject: 'device-peer', namespaces: ['notes'] });
-    await app.grantNamespaces({ subject: 'device-C', namespaces: ['work'] });
+    await app.declareNamespace({ namespace: 'notes', note: 'ui seed' });
+    await app.declareNamespace({ namespace: 'work', note: 'ui seed' });
+    await app.subscribeNamespace('notes');
+    // device-C：设备卡/移出用例需要在 collectKnownDevices 里可见。它只收
+    // authors / subscriptions / declarations / revokes / restores / handoff / online，
+    // 不收 security_approval.target；用一条 C 自己签名的订阅记录种入（不改产品）。
+    const cStorage = join(home, 'device-C.jsonl');
+    const cApp = new Mebular({
+      storagePath: cStorage,
+      deviceId: 'device-C',
+      encryption: { level: 'none', userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
+      network: { enabled: false },
+      sync: { autoSync: false, namespaces: ['notes'] },
+    });
+    await cApp.initialize();
+    const cSubscription = await cApp.declareNamespaceSubscription({ namespace: 'notes', active: true });
+    await cApp.shutdown();
+    await app.eventLog.appendRemote(cSubscription);
     const now = Date.now();
     const kickNonce = 'ui-seed-kick';
     const kickDigest = securityActionDigest({ op: 'kick', initiator: 'device-peer', subject: 'device-C', nonce: kickNonce });
@@ -387,6 +403,27 @@ async function main() {
       })()`));
     await capture('e2a2-after-topbar-live.jpg');
 
+    // W-B：共享页新建记忆域（零门槛；默认自订阅；0 条 / 0 对端也可用）
+    check('W-B 空态主按钮「新建记忆域」+ 次按钮「邀请设备」',
+      await evalJs(`(() => {
+        const newBtn = document.querySelector('#domains-empty-new');
+        const invite = document.querySelector('#domains-empty-invite');
+        return Boolean(newBtn) && Boolean(invite) && /新建记忆域/.test(newBtn.textContent)
+          && /邀请设备/.test(invite.textContent)
+          && /只有本机也可以新建记忆域并开始记录/.test(document.querySelector('#domains-empty')?.textContent ?? '');
+      })()`));
+    await evalJs('window.prompt = () => "ledger-ui"');
+    await evalJs('document.querySelector("#namespace-new").click()');
+    check('W-B 新建域默认自订阅 + 0 条目录可见',
+      await waitFor(`(() => {
+        const list = document.querySelector('#domains-list')?.textContent ?? '';
+        const detail = document.querySelector('#domain-detail')?.textContent ?? '';
+        const banner = document.querySelector('#banner')?.textContent ?? '';
+        return /ledger-ui/.test(list) && /0 条/.test(list)
+          && (/已订阅/.test(detail) || document.querySelector('#ns-subscribe')?.checked === true)
+          && /已创建并订阅「ledger-ui」/.test(banner);
+      })()`));
+
     // 选项卡切换（曾因误删 setView 失效）
     await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
     check('切换到域视图（#domains-view 可见）', await waitFor('document.querySelector("#domains-view")?.hidden === false'));
@@ -398,8 +435,8 @@ async function main() {
     check('切换到记忆视图（#memories-view 可见）', await waitFor('document.querySelector("#memories-view")?.hidden === false'));
     check('记忆视图含过滤器 + 记忆行 + 归档/删除动作按钮',
       await waitFor('(() => { const v = document.querySelector("#memories-view"); return Boolean(v) && Boolean(v.querySelector("#mem-filter-archived")) && Boolean(v.querySelector("#mem-filter-deleted")) && v.querySelectorAll(".mem-row").length >= 1 && Boolean(v.querySelector("[data-mem-action=archive]")) && Boolean(v.querySelector("[data-mem-action=delete]")); })()'));
-    check('记忆视图说明人话化（归档可逆不参与回忆；删除不可逆；无内部术语）',
-      await evalJs('(() => { const t = document.querySelector("#memories-view")?.textContent ?? ""; return /归档/.test(t) && /不再参与回忆/.test(t) && /不可逆/.test(t) && !/metadata/.test(t) && !/CSRF/.test(t) && !/scope/.test(t); })()'));
+    check('记忆视图说明人话化（归档可逆不再出现在回忆；删除不可逆；无内部术语）',
+      await evalJs('(() => { const t = document.querySelector("#memories-view")?.textContent ?? ""; return /归档/.test(t) && /不再出现在回忆/.test(t) && /不可逆/.test(t) && !/metadata/.test(t) && !/CSRF/.test(t) && !/scope/.test(t); })()'));
     // 归档：默认过滤下该行要么消失，要么按钮翻转为「解除归档」
     await evalJs('(() => { const b = document.querySelector("#memories-list [data-mem-action=archive]"); if (b) b.click(); })()');
     check('记忆视图：归档动作生效（行被过滤或按钮翻转）',
@@ -691,7 +728,7 @@ async function main() {
         return Boolean(p) && Boolean(p.querySelector('[data-task=join-service]'))
           && !p.querySelector('[data-task=mcp]') && !p.querySelector('[data-cfg-path="mcp.http.host"]')
           && Boolean(p.querySelector('[data-cfg-path="network.enabled"]'))
-          && Boolean(p.querySelector('[data-cfg-path="sync.policyIssuers"]'));
+          && !p.querySelector('[data-cfg-path="sync.peerWhitelist"]');
       })()`));
     check('E1 诊断 · 连接排障：手动连接入口在诊断折叠内（文案=传输修复）',
       await evalJs(`(() => {
@@ -1003,8 +1040,25 @@ async function main() {
     await evalJs('document.querySelector("#settings-security-slot [data-security-action=totp-import]").click()');
     check('S3 导入种子弹层（粘贴分组文本 / otpauth）', await waitFor('Boolean(document.querySelector("#security-totp-secret"))'));
     await evalJs(`(() => { document.querySelector('#security-totp-secret').value = ${JSON.stringify(SEC_TOTP_SECRET)}; document.querySelector('#security-action-confirm').click(); })()`);
-    check('S3 导入成功：安全卡显示已导入 + fingerprint；注意项退场',
-      await waitFor(`(() => { const s = document.querySelector('#settings-security-slot'); return Boolean(s) && /已导入/.test(s.textContent) && s.textContent.includes(${JSON.stringify(totpFingerprint(SEC_TOTP_SECRET))}) && !document.querySelector('#attention-card')?.textContent.includes('动态码种子未导入'); })()`, 20000));
+    const totpImportOk = await waitFor(`(() => { const s = document.querySelector('#settings-security-slot'); return Boolean(s) && /已导入/.test(s.textContent) && s.textContent.includes(${JSON.stringify(totpFingerprint(SEC_TOTP_SECRET))}) && !document.querySelector('#attention-card')?.textContent.includes('动态码种子未导入'); })()`, 20000);
+    check('S3 导入成功：安全卡显示已导入 + fingerprint；注意项退场', totpImportOk);
+    if (!totpImportOk) {
+      const diag = await evalJs(`(async () => {
+        const slot = document.querySelector('#settings-security-slot');
+        const attention = document.querySelector('#attention-card');
+        const banner = document.querySelector('#banner');
+        let security = null;
+        try { security = await fetch('/admin/api/security').then((r) => r.json()); } catch (e) { security = { error: String(e) }; }
+        return JSON.stringify({
+          slot: slot?.textContent ?? null,
+          slotLevel: slot?.dataset.securityLevel ?? null,
+          attention: attention?.textContent ?? null,
+          banner: banner?.textContent ?? null,
+          security,
+        });
+      })()`);
+      console.log('  · [诊断] S3 导入:', diag);
+    }
 
     // 中档邀请要码 → 中档移出提级
     await evalJs('document.querySelector("#invite-device").click()');
@@ -1149,17 +1203,17 @@ async function main() {
     check('S3 审计：恢复码行（keyId 前 8 + 登记/轮换）',
       await waitFor(`(() => { const t = document.querySelector('#audit-view')?.textContent ?? ''; return /恢复码/.test(t) && /[0-9a-f]{8}/.test(t) && /(登记|轮换)/.test(t); })()`));
 
-    // ---------- v4 记忆共享（W1-A）：?mock=1 验收路径 + 无审批族 + 参与事实 ----------
+    // ---------- v4 记忆共享：?mock=1 验收路径 + 无审批族 + 订阅事实 ----------
     await send('Page.navigate', { url: `${base}/console/?mock=1` });
-    check('v4 mock：记忆共享统计新口径 + 左列参与标记',
-      await waitFor('(() => { const s = document.querySelector("#domains-stats")?.textContent ?? ""; const list = document.querySelector("#domains-list")?.textContent ?? ""; return /记忆域 3/.test(s) && /参与中 2/.test(s) && /未参与/.test(list); })()'));
+    check('v4 mock：记忆共享统计新口径 + 左列订阅标记',
+      await waitFor('(() => { const s = document.querySelector("#domains-stats")?.textContent ?? ""; const list = document.querySelector("#domains-list")?.textContent ?? ""; return /记忆域 4/.test(s) && /已订阅 3/.test(s) && /未订阅/.test(list); })()'));
     await evalJs('document.querySelector("#domains-list [data-sector=notes]").click()');
-    check('v4 mock：域卡 = 参与事实（关系行 + 参与的设备 + 状态文字化；无批准/撤回）',
+    check('v4 mock：域卡 = 订阅事实（关系行 + 订阅的设备 + 状态文字化；无批准/撤回）',
       await waitFor(`(() => {
         const d = document.querySelector('#domain-detail');
         if (!d) return false;
         const t = d.textContent;
-        return /也在参与这个域/.test(t) && /参与的设备/.test(t) && /参与中/.test(t)
+        return /也在订阅这个域/.test(t) && /订阅的设备/.test(t) && /已订阅/.test(t)
           && /退出并交接这个域/.test(t)
           && !d.querySelector('[data-approve]') && !d.querySelector('[data-approve-member]') && !d.querySelector('[data-revoke-ns]')
           && !/批准/.test(t) && !/撤回/.test(t);
@@ -1174,30 +1228,19 @@ async function main() {
     check('v4 mock：显示已归档后出现归档行（本地过滤生效）',
       await waitFor('(() => { const v = document.querySelector("#memories-view"); return v.querySelectorAll(".mem-row").length >= 3 && /已归档/.test(v.textContent); })()'));
     await evalJs('document.querySelector("#mem-filter-archived").click()');
-    // §7：审计——自动签发默认折叠为汇总行（展开见明细；人工动作保持显眼；跨轮询不丢展开态）
     await evalJs('document.querySelector("#view-nav li:nth-of-type(4) button").click()');
-    check('§7 mock 审计：自动签发折叠为「自动签发 ×3」汇总行，人工行显眼',
+    check('§7 mock 审计：订阅/公告/移出事件可见，无自动签发折叠',
       await waitFor(`(() => {
         const view = document.querySelector('#audit-view');
         if (!view || view.hidden) return false;
-        const toggle = view.querySelector('.audit-auto-toggle');
-        const manual = view.querySelectorAll('.audit-item:not(.audit-auto-head)');
-        return Boolean(toggle) && /自动签发 ×3/.test(toggle.textContent)
-          && view.querySelectorAll('.audit-auto-rows').length === 0
-          && manual.length >= 2
-          && /移出/.test(view.textContent);
+        const t = view.textContent;
+        return /订阅变更/.test(t) && /域公告/.test(t) && /移出设备/.test(t)
+          && !view.querySelector('.audit-auto-toggle') && !/自动签发/.test(t);
       })()`));
-    await evalJs('document.querySelector("#audit-view .audit-auto-toggle").click()');
-    check('§7 mock 审计：展开见明细（3 行，行内「自动」标记）',
-      await waitFor(`(() => {
-        const rows = document.querySelectorAll('#audit-view .audit-auto-rows .audit-item');
-        return rows.length === 3 && Array.from(rows).every((row) => /自动/.test(row.textContent));
-      })()`));
-    await sleep(3600);
-    check('§7 mock 审计：跨 3s 轮询展开态不丢（重渲染不折叠）',
-      await evalJs('document.querySelectorAll("#audit-view .audit-auto-rows .audit-item").length === 3'));
 
     // S3 mock：高档安全卡（待批准 / 恢复码 / 拒绝原因）+ 星图注意 + 审计拒绝原因
+    // 注意卡只在星图视图渲染；前一步停在审计视图，先切回星图再断言（不依赖隐藏卡残留）。
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('S3 mock：顶栏徽章高 + 星图「需要注意」安全项（待批准 / 拒绝）',
       await waitFor(`(() => {
         const t = document.querySelector('#attention-card')?.textContent ?? '';
@@ -1256,23 +1299,23 @@ async function main() {
     await evalJs('document.querySelector("#settings-close").click()');
     await send('Emulation.clearDeviceMetricsOverride');
 
-    // 设备卡（对端）：interop 段为参与事实、无批准/撤回（?select= 深链选中）
+    // 设备卡（对端）：interop 段为订阅事实、无批准/撤回（?select= 深链选中）
     await send('Page.navigate', { url: `${base}/console/?mock=1&select=device-B` });
-    check('v4 mock：设备卡对端 = 参与事实（它参与的记忆域 + 参与情况 + 双方/单方陈述）',
+    check('v4 mock：设备卡对端 = 订阅事实（它订阅的记忆域 + 订阅情况 + 双方/单方陈述）',
       await waitFor(`(() => {
         const b = document.querySelector('#device-card-body');
         if (!b || b.hidden) return false;
         const t = b.textContent;
-        return /它参与的记忆域/.test(t) && /参与情况/.test(t)
-          && /双方都在参与/.test(t) && /本机参与中 · 它未参与/.test(t)
-          && /另有 1 个记忆域双方均未参与/.test(t);
+        return /它订阅的记忆域/.test(t) && /订阅情况/.test(t)
+          && /双方都已订阅/.test(t) && /本机已订阅 · 它未订阅/.test(t)
+          && /它已订阅 · 本机未订阅/.test(t);
       })()`));
-    check('v4 mock：「有参与、零内容」的域在设备卡可见（ledger：不占主列表，协作信号不丢）',
+    check('v4 mock：目录中的空域在设备卡可见（ledger：公告可见、无内容也不丢）',
       await evalJs(`(() => {
         const b = document.querySelector('#device-card-body');
         const domains = document.querySelector('#domains-list')?.textContent ?? '';
         const t = b?.textContent ?? '';
-        return /ledger/.test(t) && /这个域还没有内容/.test(t) && !/ledger/.test(domains);
+        return /ledger/.test(t) && /ledger/.test(domains);
       })()`));
     check('v4 mock：设备卡无域级审批动作（批准/撤回按钮整组删除）',
       await evalJs(`(() => { const b = document.querySelector('#device-card-body'); if (!b || b.hidden) return false; const t = b.textContent; return !b.querySelector('[data-approve]') && !b.querySelector('[data-revoke-ns]') && !/批准/.test(t) && !/撤回/.test(t) && !/待你批准/.test(t); })()`));

@@ -29,7 +29,6 @@ const makeDevice = (deviceId, peerDeviceId) =>
     network: { enabled: true, provider: hub },
     sync: {
       autoSync: true,
-      peerNamespacePolicy: { [peerDeviceId]: ['default'] },
       pushOnWrite: true, // 库形态默认关；常驻（serve/MCP）默认开
       antiEntropy: { enabled: true, intervalMs: 1000, jitterRatio: 0 }, // 演示用短间隔
     },

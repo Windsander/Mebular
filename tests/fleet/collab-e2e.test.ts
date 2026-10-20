@@ -64,8 +64,8 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     const master = await new IdentityManager().generateUserMasterKey();
     masterKeys = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
     hub = new InMemoryHub();
-    a = facade('device-A', { 'device-B': ['tasks'] });
-    b = facade('device-B', { 'device-A': ['tasks'] });
+    a = facade('device-A');
+    b = facade('device-B');
     await a.initialize();
     await b.initialize();
     await b.node!.connectToPeer(a.node!.peerId);
@@ -91,14 +91,14 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 30 });
   });
 
-  function facade(deviceId: string, peerNamespacePolicy: Record<string, string[]>): Mebular {
+  function facade(deviceId: string): Mebular {
     return new Mebular({
       storagePath: join(dir, `${deviceId}.jsonl`),
       deviceId,
       encryption: masterKeys,
       network: { enabled: true, provider: hub },
       sync: {
-        autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 5, namespaces: ['tasks'], peerNamespacePolicy,
+        autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 5, namespaces: ['tasks'],
         // 与 dag-e2e 同构：反熵**由 kicker 显式驱动**。这里**关闭**周期反熵（而非设超长 intervalMs）：
         // `recordSyncOutcome` 仅在 enabled 时记退避，且**退避基数 = intervalMs** ⇒ 开着并把 intervalMs
         // 设长时，一次会话失败就会把反熵兜底封停到远超 90s（F-FLAKE-2 根因：1d-a 负例/1d-b 收到 queued）。

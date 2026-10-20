@@ -155,14 +155,24 @@ export interface SyncFingerprintEvent extends Omit<FingerprintComparison, 'resul
 export function hashPolicyState(state: PolicyState): string {
   const byKey = (a: [string, unknown], b: [string, unknown]): number => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
   const canon = JSON.stringify({
-    authorized: [...state.authorized.entries()]
+    subscriptions: [...state.subscriptions.entries()]
       .sort(byKey)
-      .map(([subject, namespaces]) => [subject, [...namespaces].sort()]),
-    revoked: [...state.revoked].sort(),
-    issuers: [...state.issuers].sort(),
-    members: [...state.members.entries()]
+      .map(([namespace, subscribers]) => [namespace, [...subscribers].sort()]),
+    subscriptionNamespaces: [...state.subscriptionNamespaces].sort(),
+    subscriptionRecords: [...state.subscriptionRecords.entries()]
       .sort(byKey)
-      .map(([ns, members]) => [ns, [...members].sort()]),
+      .map(([namespace, recorded]) => [namespace, [...recorded].sort()]),
+    blocked: [...state.blocked].sort(),
+    declarations: [...state.declarations].sort(),
+    restoreAt: [...state.restoreAt.entries()].sort(),
+    security: state.security === undefined
+      ? null
+      : {
+          level: state.security.level,
+          admitted: [...state.security.admitted].sort(),
+          ...(state.security.recoveryKeyId !== undefined ? { recoveryKeyId: state.security.recoveryKeyId } : {}),
+          rejections: state.security.rejections.map((row) => [row.eventId, row.reason]),
+        },
   });
   return createHash('sha256').update(canon).digest('hex');
 }

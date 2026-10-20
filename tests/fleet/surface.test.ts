@@ -22,7 +22,7 @@ const AGENTS = [{ name: 'echo', kind: 'echo' as const }];
 
 async function setupDir(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), 'fleet-surface-'));
-  await onboardDevice({ dir, device: 'device-A', agents: AGENTS, configGrant: false, policyIssuers: ['device-A'] });
+  await onboardDevice({ dir, device: 'device-A', agents: AGENTS });
   return dir;
 }
 
@@ -97,10 +97,10 @@ describe('W1 工具面（CLI/MCP 同一 handler）', () => {
       const targets = (await toolByName('task_targets')!.handler({}, ctx)) as { ok: boolean; targets: unknown[] };
       expect(targets.ok).toBe(true);
 
-      const board = (await toolByName('board_create')!.handler({ name: 'team', with: ['device-B'] }, ctx)) as { ok: boolean; members: string[]; granted: Array<{ device: string }> };
+      const board = (await toolByName('board_create')!.handler({ name: 'team', with: ['device-B'] }, ctx)) as { ok: boolean; subscribedBy: string[]; invited: string[] };
       expect(board.ok).toBe(true);
-      expect(board.members).toContain('device-A');
-      expect(board.granted[0]!.device).toBe('device-B');
+      expect(board.subscribedBy).toContain('device-A');
+      expect(board.invited).toContain('device-B');
       // 额外分支：payloadRef/expiresAt/causedBy/chain、过滤、unknown、无 with 的 board、statusOfEventType
       const withMeta = (await toolByName('task_submit')!.handler({ intent: 'meta', to: { device: 'device-B', agent: 'echo' }, payloadRef: 'ref-1', expiresAt: 123, causedBy: submit.taskId, chain: [] }, ctx)) as { ok: boolean; state: { trace: { causedBy?: string } } };
       expect(withMeta.ok).toBe(true);
@@ -111,14 +111,15 @@ describe('W1 工具面（CLI/MCP 同一 handler）', () => {
       await expect(toolByName('task_retry')!.handler({ taskId: 'nope' }, ctx)).rejects.toThrow(/不存在/);
       const chat2 = (await toolByName('chatter_send')!.handler({ topic: 't', text: 'x', messageId: 'fixed-1' }, ctx)) as { ok: boolean; messageId: string };
       expect(chat2.messageId).toBe('fixed-1');
-      const board2 = (await toolByName('board_create')!.handler({ name: 'solo' }, ctx)) as { ok: boolean; granted: unknown[] };
+      const board2 = (await toolByName('board_create')!.handler({ name: 'solo' }, ctx)) as { ok: boolean; invited: unknown[] };
       expect(board2.ok).toBe(true);
-      expect(board2.granted).toEqual([]);
-      // targets 走 config.peers 分支（approve 登记 device-B 后遍历）
-      const { approveDevice } = await import('../../packages/fleet/src/index.js');
-      await approveDevice(dir, { device: 'device-B', namespace: 'tasks' });
-      const targets2 = (await toolByName('task_targets')!.handler({}, ctx)) as { authorized: string[] };
-      expect(Array.isArray(targets2.authorized)).toBe(true);
+      expect(board2.invited).toEqual([]);
+      // targets 走 config.peers 分支（登记 device-B 后遍历）
+      const { loadFleetConfig, saveFleetConfig, fleetConfigPath } = await import('../../packages/fleet/src/index.js');
+      const cfg = await loadFleetConfig(fleetConfigPath(dir));
+      await saveFleetConfig(fleetConfigPath(dir), { ...cfg, peers: [{ device: 'device-B' }] });
+      const targets2 = (await toolByName('task_targets')!.handler({}, ctx)) as { subscribed: string[] };
+      expect(Array.isArray(targets2.subscribed)).toBe(true);
       expect(statusOfEventType('done')).toBe('done');
     } finally {
       await rm(dir, { recursive: true, force: true });

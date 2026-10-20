@@ -35,7 +35,6 @@ function sampleCode(overrides: Partial<JoinCode> = {}): JoinCode {
     device: 'device-A',
     namespace: 'tasks',
     multiaddrs: ['/ip4/127.0.0.1/tcp/4001/p2p/peer-a'],
-    policyIssuer: 'device-A',
     fingerprint: 'sha256:deadbeef',
     issuedAt: 1,
     trust: baseTrust,

@@ -71,7 +71,7 @@ try {
     identity: { mode: 'root' },
     encryption: { level: 'none', keyFile: join(homeA, 'master-key.json') },
     network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
-    sync: { autoSync: true, pushOnWrite: true, namespaces: ['tasks'], peerNamespacePolicy: { 'device-B': ['tasks'] }, policyIssuers: ['device-A'], antiEntropy: { enabled: true, intervalMs: 60000, jitterRatio: 0.2 } },
+    sync: { autoSync: true, pushOnWrite: true, namespaces: ['tasks'], antiEntropy: { enabled: true, intervalMs: 60000, jitterRatio: 0.2 } },
     joinService: { enabled: true, bind: '127.0.0.1', port: joinPort },
     mcp: { http: { host: '127.0.0.1', port: portA, auth: 'none' } },
   }, null, 2), { mode: 0o600 });
@@ -105,20 +105,17 @@ try {
     identity: { mode: 'delegated' },
     encryption: { level: 'none', userMasterPublicKeyFile: join(homeB, 'user-master-key.json') },
     network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] }, peers: [{ device: 'device-A', addr: aAddr }] },
-    sync: { autoSync: true, pushOnWrite: true, namespaces: ['tasks'], peerNamespacePolicy: { 'device-A': ['tasks'] }, policyIssuers: ['device-A'], antiEntropy: { enabled: true, intervalMs: 60000, jitterRatio: 0.2 } },
+    sync: { autoSync: true, pushOnWrite: true, namespaces: ['tasks'], antiEntropy: { enabled: true, intervalMs: 60000, jitterRatio: 0.2 } },
     mcp: { http: { host: '127.0.0.1', port: portB, auth: 'none' } },
   }, null, 2), { mode: 0o600 });
   serveB = startServe(homeB);
   const bReady = await waitFor(() => /SERVE_READY/.test(serveB.state.out), 20000);
   check('B 守护就绪（delegated，无主私钥）', bReady && existsSync(join(homeB, 'config.json')) && JSON.parse(readFileSync(join(homeB, 'user-master-key.json'), 'utf-8')).privateKeyPkcs8 === undefined, {});
 
-  // A 授权 B + 成员在册（每机只占一条）
-  await getJson(`http://127.0.0.1:${portA}/app/policy/grant`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ subject: 'device-B', namespaces: ['tasks'] }) });
-  await getJson(`http://127.0.0.1:${portA}/app/policy/member`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ member: 'device-B', namespace: 'tasks', active: true }) });
-  await getJson(`http://127.0.0.1:${portA}/app/policy/member`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ member: 'device-A', namespace: 'tasks', active: true }) });
-  const membership = await getJson(`http://127.0.0.1:${portA}/app/policy/membership?namespace=tasks`);
-  const members = membership.json?.members ?? [];
-  check('成员表每机只占一条（去重、含 A/B）', new Set(members).size === members.length && members.includes('device-A') && members.includes('device-B'), { members });
+  // 两端各自声明订阅（每机只改自己）
+  for (const port of [portA, portB]) {
+    await getJson(`http://127.0.0.1:${port}/app/policy/subscription`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ namespace: 'tasks', active: true }) });
+  }
 
   // 记忆经守护同步（A 写 → B 读）
   await getJson(`http://127.0.0.1:${portA}/app/nodes`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type: 'cluster_note', namespace: 'tasks', content: { text: 'from-A' } }) });
@@ -127,6 +124,16 @@ try {
     return (r.json?.nodes ?? []).some((n) => n.content?.text === 'from-A');
   }, 45000);
   check('记忆经守护同步（A→B）', synced, {});
+
+  // 订阅记录随守护同步到达 A（B 的守护可能晚于 POST 才建连，故在首轮同步后有界等待）。
+  let subscriberList = [];
+  const subscribed = await waitFor(async () => {
+    const subscription = await getJson(`http://127.0.0.1:${portA}/app/policy/subscriptions?namespace=tasks`);
+    subscriberList = subscription.json?.subscribers ?? [];
+    return subscriberList.includes('device-A') && subscriberList.includes('device-B');
+  }, 15000);
+  check('订阅者表每机只占一条（去重、含 A/B）', subscribed && new Set(subscriberList).size === subscriberList.length, { members: subscriberList });
+
   const bNs = await getJson(`http://127.0.0.1:${portB}/app/namespaces`);
   check('B 域名录含 tasks', (bNs.json?.namespaces ?? []).includes('tasks'), bNs.json);
 } finally {

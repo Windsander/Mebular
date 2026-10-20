@@ -69,7 +69,7 @@ check(
 // R2：join 令牌关键符号全仓**定义数 = 1**（防「双实现」漂移）
 // 评审：全仓定义数 = 1（含 joinWithToken/startJoinService 等；createJoinServer 是 mcp 侧别名 → 查 startJoinService）
 const TOKEN_SYMBOLS = ['encodeJoinToken', 'decodeJoinToken', 'describeJoinToken', 'buildJoinToken', 'verifyJoinToken',
-  'applyJoinGrant', 'sweepAutoGrantRevokes', 'joinWithToken', 'requestJoin', 'startJoinService'];
+  'joinWithToken', 'requestJoin', 'startJoinService'];
 const TOKEN_DEF = (name) => new RegExp(`export (?:async )?function ${name}\\b|export const ${name}\\b`, 'g');
 const tokenDefs = [];
 {

@@ -1,7 +1,7 @@
 # Relay 部署与运维（transport-only）
 
 > **定位**：circuit relay 只做**字节转发**，是纯传输；按 [`SEALING_CN.md`](../../SEALING_CN.md) §1.6「传输/集成不构成权威」，
-> relay **不参与**授权、策略、一致性判定。**可自托管、可替换**（换 relay 或改用手动 multiaddr 不影响记忆语义）。
+> relay **不参与**订阅、策略、一致性判定。**可自托管、可替换**（换 relay 或改用手动 multiaddr 不影响记忆语义）。
 
 ## 1. 部署
 
@@ -24,7 +24,7 @@ node scripts/wan-sync.mjs relay --port 4001 --unlimited
   - 帧大小上限 `MAX_FRAME_BYTES = 4 MiB`（`encodeFrame`/解码越界抛错）——`tests/p2p/Libp2pProvider.test.ts`。
   - 连接数上限 `ConnectionManager.maxConnections`（默认 100，超限拒绝新连接）——`tests/p2p/ConnectionManager.test.ts`。
   - 对端白名单 `sync.peerWhitelist`（未列对端的已认证会话被忽略）——`tests/sync/wan-hardening.test.ts`。
-- **监听告警**：`fleet doctor` 对 `0.0.0.0`/公网监听给出 `WARN` + 修复建议（改绑回环/LAN + 经 relay，或防火墙仅放行已授权对端）。
+- **监听告警**：`fleet doctor` 对 `0.0.0.0`/公网监听给出 `WARN` + 修复建议（改绑回环/LAN + 经 relay，或防火墙仅放行已入网对端）。
 
 ## 3. 故障与降级
 

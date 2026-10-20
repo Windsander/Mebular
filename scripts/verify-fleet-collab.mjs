@@ -53,7 +53,7 @@ try {
   console.log('== 1d：三形态 live（真实 libp2p loopback） ==');
   const master = await Mebular.generateUserMasterKey();
   const encryption = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
-  const mk = (deviceId, peer) =>
+  const mk = (deviceId) =>
     new Mebular({
       storagePath: join(root, `${deviceId}.jsonl`),
       deviceId,
@@ -64,7 +64,6 @@ try {
         pushOnWrite: true,
         pushOnWriteThrottleMs: 20,
         namespaces: ['tasks'],
-        peerNamespacePolicy: { [peer]: ['tasks'] },
         // 往返推送可能丢（run 287/291：`1d-b 协商` 卡 queued，B 已回 counter 而 A 一条未收）。
         // 本夹具**由 loop 显式驱动** `runAntiEntropyCycle()`（每轮一次），故**关闭周期反熵定时器**：
         //  - `recordSyncOutcome` 仅在 `enabled` 时记退避，而**退避基数 = intervalMs**（F-FLAKE-1 发现）；

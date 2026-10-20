@@ -92,14 +92,6 @@ describe('F-FLAKE-1 源码锚点：verify 脚本按精确谓词做有界轮询�
     expect(onboard).not.toMatch(/waitFor\(async \(\) => \/"submitted":\\s\*3\/\.test\(serveA\.state\.out\)/);
   });
 
-  it('grant / membership：同一反模式已修（等完整条件而非只等 submitted）', () => {
-    const grant = readFileSync(join(root, 'scripts', 'verify-fleet-grant.mjs'), 'utf-8');
-    const membership = readFileSync(join(root, 'scripts', 'verify-fleet-membership.mjs'), 'utf-8');
-    expect(grant).toMatch(/waitFor\(async \(\) => agentResultsMatch\(serveA\.state\.out, 3\)/);
-    expect(membership).toMatch(/waitFor\(\(\) => agentResultsMatch\(node1\.state\.out, 3\)/);
-    expect(grant).not.toMatch(/waitFor\(async \(\) => \/"submitted":\\s\*3\/\.test\(serveA\.state\.out\)/);
-    expect(membership).not.toMatch(/waitFor\(\(\) => \/"submitted":\\s\*3\/\.test\(node1\.state\.out\)/);
-  });
 });
 
 describe('F-FLAKE-1 夹具恢复界：最坏「卡住→重试」时间必须远小于验收预算', () => {

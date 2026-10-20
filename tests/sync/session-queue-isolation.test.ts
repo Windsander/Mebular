@@ -33,7 +33,6 @@ describe('N4 · 会话队列按连接隔离（多对端不互相饿死）', () =
   });
 
   function makeFacade(deviceId: string, hub: InMemoryHub): Mebular {
-    const all = ['device-A', 'device-B', 'device-C'];
     return new Mebular({
       storagePath: join(dir, `${deviceId}.jsonl`),
       deviceId,
@@ -43,7 +42,6 @@ describe('N4 · 会话队列按连接隔离（多对端不互相饿死）', () =
         autoSync: true,
         pushOnWrite: true,
         pushOnWriteThrottleMs: 20,
-        peerNamespacePolicy: Object.fromEntries(all.map((d) => [d, ['task']])),
       },
     });
   }

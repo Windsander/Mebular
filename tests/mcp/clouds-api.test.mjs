@@ -43,8 +43,6 @@ await fleet.onboardDevice({
   dir: inviterHome,
   device: 'device-inviter',
   agents: [{ name: 'echo', kind: 'echo' }],
-  configGrant: false,
-  policyIssuers: ['device-inviter'],
 });
 const inviterCfg = await fleet.loadFleetConfig(fleet.fleetConfigPath(inviterHome));
 const inviterEnc = await fleet.readMasterKeyFile(inviterCfg.masterKeyFile);
@@ -69,7 +67,7 @@ const app = {
     app.securityCalls += 1;
     return { level: 'high', admitted: [], rejections: [] };
   },
-  getRevokedDevices: async () => [],
+  getBlockedDevices: async () => [],
   getConvergenceStatus: () => null,
 };
 const service = {

@@ -11,7 +11,7 @@
 //  - 网络两项 → 高级（常规字段组）；joinService 三项 → 高级「常驻服务」卡；
 //  - MCP 六项（port/auth/host/tls/tlsKey/tlsCert）→ **独立「MCP 接入」Tab**（危险卡；自救恢复文案随迁）；
 //  - 常用只保留只读状态 + 重启向导 / 邀请设备入口；
-//  - 安全卡（S3）从「常用」迁入独立「安全」Tab；「声明本机为引导签发者」动作从 GUI 移除。
+//  - 安全卡（S3）从「常用」迁入独立「安全」Tab。
 //
 // UX-2 简化轮（用户拍板「自动的东西不保留在 GUI」延伸）：
 //  - Tab 4 → **3** 后再由 E1 增回 **安全 / MCP 接入**（常用 / 安全 / AI 助手 / MCP 接入 / 高级；诊断并入高级底部只读折叠）；
@@ -66,13 +66,11 @@ export const IA_ADVANCED_FIELDS = [
   'network.enabled',
   'network.libp2p.listen',
   'sync.antiEntropy.enabled',
-  'sync.peerWhitelist',
-  'sync.policyIssuers',
   'semantic.enabled',
 ];
 
 /**
- * 只读面（status-only）：值由运行时 / 自动推导（relay 池、LAN 发现、桥、打洞、广播、join、TLS、TTL）。
+ * 只读面（status-only）：值由运行时 / 自动推导（relay 池、LAN 发现、桥、打洞、广播、join、TLS、）。
  * 与 config-schema.mjs 的 STATUS_ONLY_PATHS 逐项一致（E1 防漂移断言；多/少即红）。
  */
 export const IA_STATUS_ONLY_PATHS = [
@@ -86,10 +84,9 @@ export const IA_STATUS_ONLY_PATHS = [
   'status.net.broadcast',
   'status.join.endpoint',
   'status.tls',
-  'status.invite.grantTtl',
 ];
 
-/** 全部「可编辑 path」（高级卡片 3 + 高级散项 6 + MCP 卡 6 + 记忆共享 1 = **16**）——与 schema EDITABLE_PATHS 一致。 */
+/** 全部「可编辑 path」（高级卡片 3 + 高级散项 4 + MCP 卡 6 + 记忆共享 1 = **14**）——与 schema EDITABLE_PATHS 一致。 */
 export const IA_EDITOR_PATHS = [
   ...IA_ADVANCED_CARDS.flatMap((card) => card.fields),
   ...IA_ADVANCED_FIELDS,
@@ -102,7 +99,6 @@ export const IA_INFO_BLOCKS = {
   identity: 'about',      // 身份与存储
   syncRate: 'about',      // 同步节奏真值（自动同步 / 写入即推）
   runtime: 'about',       // 运行状态（含 TLS / 加入服务 / 语义召回）
-  issuer: 'about',        // 签发者状态
   fleet: 'about',         // 舰队摘要
   tools: 'about',         // 能力清单（MCP = CLI 同名）
   statusOnly: 'about',      // 只读状态（自动推导：relay 池 / LAN / 桥 / 打洞 / 广播 / join / TLS）
@@ -118,7 +114,7 @@ export const IA_MIGRATION = {
   ...Object.fromEntries(IA_MCP_CARD.fields.map((p) => [p, 'mcp'])),
   // 内容管理：订阅域 → 主页「记忆共享」
   'sync.namespaces': 'domains',
-  // 只读面：自动同步 / 写入即推（默认常开）+ relay 池 / LAN / 桥 / 打洞 / 广播 / join / TLS / TTL
+  // 只读面：自动同步 / 写入即推（默认常开）+ relay 池 / LAN / 桥 / 打洞 / 广播 / join / TLS
   ...Object.fromEntries(IA_STATUS_ONLY_PATHS.map((p) => [p, 'about'])),
   // 只读信息块
   ...IA_INFO_BLOCKS,
@@ -127,10 +123,10 @@ export const IA_MIGRATION = {
 /** 「常用」字段（E1 三卡迁出后为 0；常用只留只读状态与动作入口）。 */
 export const IA_COMMON_FIELDS = [];
 
-/** 「高级」里承担动作按钮（非配置键）的条目。E1：声明签发者动作已从 GUI 移除。 */
+/** 「高级」里承担动作按钮（非配置键）的条目。E1：已无策略声明动作。 */
 export const IA_ADVANCED_ACTIONS = [];
 
-/** 前端设置页实际渲染的编辑面 path（高级 3+6 + MCP 6 = 15；订阅域在「记忆共享」渲染）。 */
+/** 前端设置页实际渲染的编辑面 path（高级 3+4 + MCP 6 = 13；订阅域在「记忆共享」渲染）。 */
 export const IA_EDITOR_RENDER_PATHS = [
   ...IA_ADVANCED_CARDS.flatMap((card) => card.fields),
   ...IA_ADVANCED_FIELDS,

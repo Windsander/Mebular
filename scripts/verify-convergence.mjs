@@ -113,7 +113,6 @@ async function bootRoot(ctx, deviceId, { sync = {}, withJoin = true } = {}) {
     sync: {
       autoSync: false, // 红样本需要：重连不自动起会话，把触发权交给 anti-entropy/A1
       pushOnWrite: true, namespaces: ['tasks'],
-      policyIssuers: [deviceId],
       antiEntropy: { enabled: true, intervalMs: 1500, jitterRatio: 0 },
       ...sync,
     },
@@ -157,8 +156,6 @@ async function onboardDelegated(ctx, inviter, deviceId, { peers = [], sync = {} 
     sync: {
       autoSync: false,
       pushOnWrite: true, namespaces: ['tasks'],
-      peerNamespacePolicy: { 'device-A': ['tasks'] },
-      policyIssuers: ['device-A'],
       antiEntropy: { enabled: true, intervalMs: 1500, jitterRatio: 0 },
       ...sync,
     },
@@ -169,17 +166,15 @@ async function onboardDelegated(ctx, inviter, deviceId, { peers = [], sync = {} 
   return { home, port, daemon };
 }
 
-/** A 侧预批准（现实姿态）：授权 + 双方在册（M3 闸门起见本机也须在册） */
-async function getRootPreApproved(root, peerDeviceId = 'device-B') {
-  await post(`http://127.0.0.1:${root.port}/app/policy/grant`, { subject: peerDeviceId, namespaces: ['tasks'] });
-  await post(`http://127.0.0.1:${root.port}/app/policy/member`, { member: 'device-A', namespace: 'tasks', active: true });
-  await post(`http://127.0.0.1:${root.port}/app/policy/member`, { member: peerDeviceId, namespace: 'tasks', active: true });
+/** A 侧预订阅（订阅自主：本机只改自己） */
+async function getRootPreApproved(root, _peerDeviceId = 'device-B') {
+  await post(`http://127.0.0.1:${root.port}/app/policy/subscription`, { namespace: 'tasks', active: true });
   const ok = await waitFor(async () => {
-    const m = await getJson(`http://127.0.0.1:${root.port}/app/policy/membership?namespace=tasks`);
-    const members = m.json?.members ?? [];
-    return members.includes('device-A') && members.includes(peerDeviceId);
+    const m = await getJson(`http://127.0.0.1:${root.port}/app/policy/subscriptions?namespace=tasks`);
+    const subscribers = m.json?.subscribers ?? [];
+    return subscribers.includes('device-A');
   }, 15000);
-  if (!ok) throw new Error('预批准失败：成员未在册');
+  if (!ok) throw new Error('预订阅失败：本机未在订阅者集合');
 }
 
 // ---------- P3 帮助函数 ----------
@@ -217,7 +212,7 @@ async function polluteWatermark(rootHome, peerDeviceId, authorDeviceId, ns = 'ta
 /** 基线：连接并收敛（A 摘要 ok ≥ 1；返回双方） */
 async function setupAndConverge(ctx, result, { autoProbe }) {
   const root = await bootRoot(ctx, 'device-A', {
-    sync: { peerNamespacePolicy: { 'device-B': ['tasks'] }, convergence: convergenceConfig(autoProbe) },
+    sync: { convergence: convergenceConfig(autoProbe) },
   });
   await root.daemon.start();
   const aAddr = (await getJson(`http://127.0.0.1:${root.port}/app/network`)).json?.multiaddrs?.find((m) => m.includes('/p2p/'));

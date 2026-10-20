@@ -47,13 +47,13 @@ try {
   console.log('== W1：任务树预算 / 拒收 / 公平 / 目录（真实 libp2p loopback） ==');
   const master = await Mebular.generateUserMasterKey();
   const encryption = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
-  const mk = (deviceId, peer) =>
+  const mk = (deviceId) =>
     new Mebular({
       storagePath: join(root, `${deviceId}.jsonl`),
       deviceId,
       encryption,
       network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
-      sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 20, namespaces: ['tasks', 'agents'], peerNamespacePolicy: { [peer]: ['tasks', 'agents'] } },
+      sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 20, namespaces: ['tasks', 'agents'] },
     });
   a = mk('device-A', 'device-B');
   b = mk('device-B', 'device-A');
@@ -168,7 +168,7 @@ try {
   const firstTwo = log4.all().slice(0, 2).map((e) => e.taskId);
   check('公平轮转：前两拍含 B 发送的任务（单一发送方未占满）', firstTwo.some((id) => bIds.includes(id)), { firstTwo, bIds });
 
-  // ---- ⑤ 目录 → targets（授权 ∩ 目录） ----
+  // ---- ⑤ 目录 → targets（订阅 ∩ 目录） ----
   await agentDirectoryStore(b, 'agents').append({
     v: 1, device: 'device-B', updatedAt: Date.now(), version: 1,
     agents: [{ name: 'echo', kind: 'echo' }, { name: 'hermes', kind: 'hermes' }],
@@ -179,8 +179,8 @@ try {
   await l5.done;
   const entriesA = await agentDirectoryStore(a, 'agents').all();
   const targets = expandTargets(entriesA, ['device-B']);
-  check('目录 → targets：授权对端 ∩ 目录 (device,agent)', syncedDir && targets.some((t) => t.device === 'device-B' && t.agent === 'echo') && targets.some((t) => t.agent === 'hermes'), { targets });
-  check('目录 → targets：未授权设备被排除（默认拒绝）', expandTargets(entriesA, []).length === 0, {});
+  check('目录 → targets：订阅对端 ∩ 目录 (device,agent)', syncedDir && targets.some((t) => t.device === 'device-B' && t.agent === 'echo') && targets.some((t) => t.agent === 'hermes'), { targets });
+  check('目录 → targets：未订阅设备被排除', expandTargets(entriesA, []).length === 0, {});
 
   // ---- ⑥ 工具 ↔ CLI 对等表 ----
   const table = toolCliTable();

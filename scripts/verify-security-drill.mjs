@@ -159,11 +159,10 @@ try {
   const onboardA = await runCli([
     'onboard', '--dir', A, '--device', 'device-A',
     '--listen', `/ip4/127.0.0.1/tcp/${portA}`,
-    '--no-config-grant', '--policy-issuer', 'device-A',
   ], { env });
   check('D-1 前置：A onboard', onboardA.code === 0, { code: onboardA.code });
-  const grant = await runCli(['grant', '--dir', A, '--to', 'device-B'], { env });
-  check('D-1 前置：A 写 namespace_grant', grant.code === 0 && lastJson(grant.out)?.ok === true, {});
+  const subA = await runCli(['subscribers', '--dir', A, '--namespace', 'tasks'], { env });
+  check('D-1 前置：A 已声明本机订阅', subA.code === 0 && (lastJson(subA.out)?.subscribers ?? []).includes('device-A'), {});
 
   const nodeA = startCli(['node', '--dir', A, '--timeout-ms', '60000'], env);
   const aUp = await waitFor(() => listeningAddr(nodeA.state.out) !== null, 20_000);
@@ -173,7 +172,7 @@ try {
   const onboardB = await runCli([
     'onboard', '--dir', B, '--device', 'device-B',
     '--peer-device', 'device-A', '--peer-addr', String(addrA),
-    '--master-key', join(A, 'master-key.json'), '--no-config-grant',
+    '--master-key', join(A, 'master-key.json'),
   ], { env });
   check('D-1 前置：B 用 A 的主密钥 onboard（root 直签）', onboardB.code === 0, { code: onboardB.code });
 
@@ -217,7 +216,6 @@ try {
       'onboard', '--dir', A2, '--device', 'device-A2',
       '--master-key', join(A2, 'master-key.json'),
       '--peer-device', 'device-B', '--peer-addr', String(addrB),
-      '--no-config-grant', '--policy-issuer', 'device-A2',
     ], { env });
     check('D-1 前置：A\' 登记 B 地址', onboardA2.code === 0, { code: onboardA2.code });
     const nodeA2 = startCli(['worker', '--dir', A2, '--print-listen', '--timeout-ms', '40000', '--interval-ms', '50'], env);
@@ -268,7 +266,7 @@ try {
 
   console.log('== D-3 break-glass：生成 / 消费 / nonce 一次 ==');
   const D = join(root, 'D');
-  const onboardD = await runCli(['onboard', '--dir', D, '--device', 'device-D', '--no-config-grant'], { env });
+  const onboardD = await runCli(['onboard', '--dir', D, '--device', 'device-D', ], { env });
   check('D-3 前置：D onboard', onboardD.code === 0, {});
   const gen = await runCli(['security', 'recovery', 'generate', '--dir', D], { env });
   const generated = lastJson(gen.out);

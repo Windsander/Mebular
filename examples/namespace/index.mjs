@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// 记忆分区（namespace）与默认拒绝授权示例（可执行）
+// 记忆分区（namespace）与订阅供给示例（可执行）
 //
 // 演示：
-//   1. A 只授权 B 接收 default 分区 → B 拿不到 private 分区的记忆；
-//   2. 扩权回补：把 private 加进授权后，A 重启（水位从磁盘恢复），
+//   1. A 只订阅 default 分区 → B 拿不到 private 分区的记忆；
+//   2. 扩订阅回补：把 private 加进订阅后，A 重启（水位从磁盘恢复），
 //      B 自动拿到此前被跳过 private 的历史事件——不会永久缺失。
 //
 // 前置：先构建（npm run build）。
@@ -20,14 +20,14 @@ const dir = await mkdtemp(join(tmpdir(), 'mebular-namespace-'));
 const hub = new InMemoryHub();
 const master = await Mebular.generateUserMasterKey();
 
-// A 是数据持有者；这里按需改它对 B 的授权分区
-const makeA = (authorizedNamespaces) =>
+// A 是数据持有者；这里按需改它自己的订阅分区
+const makeA = (subscribedNamespaces) =>
   new Mebular({
     storagePath: join(dir, 'device-A.jsonl'),
     deviceId: 'device-A',
     encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
     network: { enabled: true, provider: hub },
-    sync: { autoSync: true, peerNamespacePolicy: { 'device-B': authorizedNamespaces } },
+    sync: { autoSync: true, namespaces: subscribedNamespaces },
   });
 
 const makeB = () =>
@@ -36,7 +36,7 @@ const makeB = () =>
     deviceId: 'device-B',
     encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
     network: { enabled: true, provider: hub },
-    sync: { autoSync: true, peerNamespacePolicy: { 'device-A': ['default'] } },
+    sync: { autoSync: true, namespaces: ['default', 'private'] },
   });
 
 async function waitForNode(app, nodeId, timeoutMs = 15000) {
@@ -65,17 +65,17 @@ console.log('✓ default 分区已同步到 B');
 
 // 给私有事件的发送留出窗口，再断言 B 侧不存在
 await new Promise((r) => setTimeout(r, 500));
-if (await b.graph.getNode(secret.id)) throw new Error('未授权分区竟然泄漏到了 B');
-console.log('✓ private 分区被拒绝：B 侧不存在该记忆（默认拒绝生效）');
+if (await b.graph.getNode(secret.id)) throw new Error('未订阅分区竟然泄漏到了 B');
+console.log('✓ private 分区被拒绝：B 侧不存在该记忆（未订阅不供给）');
 
-// 2. 扩权回补：A 授权 private 并重启（水位落盘，重启后按正确水位续传）。
+// 2. 扩订阅回补：A 订阅 private 并重启（水位落盘，重启后按正确水位续传）。
 await a.shutdown();
 a = makeA(['default', 'private']);
 await a.initialize();
 await b.node.connectToPeer(a.node.peerId);
 
-if (!(await waitForNode(b, secret.id))) throw new Error('扩权后历史事件未回补');
-console.log('✓ 扩权回补：private 历史事件补发成功，B 现在拿到了它');
+if (!(await waitForNode(b, secret.id))) throw new Error('扩订阅后历史事件未回补');
+console.log('✓ 扩订阅回补：private 历史事件补发成功，B 现在拿到了它');
 
 const nodes = await b.graph.listNodes({ type: 'fact' });
 console.log(`B 当前可见 ${nodes.length} 条 fact：`);

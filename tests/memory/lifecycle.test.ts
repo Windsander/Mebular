@@ -249,14 +249,14 @@ describe('G-ML-1 生命周期：删除（墓碑）与归档（标记）', () => 
       deviceId: 'device-A',
       encryption: masterKeys,
       network: { enabled: true, provider: hub },
-      sync: { ...common, peerNamespacePolicy: { 'device-B': ['default'] } },
+      sync: { ...common },
     });
     const b = new Mebular({
       storagePath: join(dir, `b${suffix}.jsonl`),
       deviceId: 'device-B',
       encryption: masterKeys,
       network: { enabled: true, provider: hub },
-      sync: { ...common, peerNamespacePolicy: { 'device-A': ['default'] } },
+      sync: { ...common },
     });
     await a.initialize();
     await b.initialize();

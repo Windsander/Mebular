@@ -75,8 +75,8 @@ describe('L4/L5 WAN 加固与故障注入', () => {
   it('L4 故障注入：确定性拨号丢包/延迟下仍在有界时间内收敛；丢包可观测', async () => {
     const hub = new InMemoryHub();
     const lossy = new LossyProvider(hub, 3, 5); // 每 3 次丢 1 次
-    const a = facade('device-A', lossy, { peerNamespacePolicy: { 'device-B': ['default'] } });
-    const b = facade('device-B', hub, { peerNamespacePolicy: { 'device-A': ['default'] } });
+    const a = facade('device-A', lossy, {});
+    const b = facade('device-B', hub, {});
     await a.initialize();
     await b.initialize();
     const node = await a.graph.createNode('fact', { text: 'under-loss' }, [], { namespace: 'default' });
@@ -104,8 +104,8 @@ describe('L4/L5 WAN 加固与故障注入', () => {
   it('L5 加固：sync.peerWhitelist 拒绝未列白名单的对端（默认拒绝）', async () => {
     const hub = new InMemoryHub();
     // A 只允许 device-C；device-B 不在白名单 → 会话被忽略
-    const a = facade('device-A', hub, { peerNamespacePolicy: { 'device-B': ['default'] }, peerWhitelist: ['device-C'] });
-    const b = facade('device-B', hub, { peerNamespacePolicy: { 'device-A': ['default'] } });
+    const a = facade('device-A', hub, { peerWhitelist: ['device-C'] });
+    const b = facade('device-B', hub, {});
     await a.initialize();
     await b.initialize();
     const node = await a.graph.createNode('fact', { text: 'blocked' }, [], { namespace: 'default' });
@@ -118,8 +118,8 @@ describe('L4/L5 WAN 加固与故障注入', () => {
 
   it('L5 加固：白名单包含对端时正常同步（对照）', async () => {
     const hub = new InMemoryHub();
-    const a = facade('device-A', hub, { peerNamespacePolicy: { 'device-B': ['default'] }, peerWhitelist: ['device-B'] });
-    const b = facade('device-B', hub, { peerNamespacePolicy: { 'device-A': ['default'] } });
+    const a = facade('device-A', hub, { peerWhitelist: ['device-B'] });
+    const b = facade('device-B', hub, {});
     await a.initialize();
     await b.initialize();
     const node = await a.graph.createNode('fact', { text: 'allowed' }, [], { namespace: 'default' });

@@ -3,7 +3,7 @@
 //
 // 覆盖：① M2 正确性集（N≥20 完成且结果匹配 / 重复投递不重复执行 / 配额账本守恒 /
 //        expiresAt 仅本机展示 / 重启韧性）在真实传输上重跑
-//       ② 授权负例：未授权设备看不到 tasks 分区（默认拒绝）
+//       ② 订阅负例：未订阅设备看不到 tasks 分区
 //       ③ 时延：任务写入 → 对端可见的 p50/p95（原始数据）
 //
 // 前置：`npm run build`（依赖 @mebular/core 与 packages/fleet/dist）。
@@ -53,13 +53,13 @@ function check(name, cond, detail) {
 const dir = await mkdtemp(join(tmpdir(), 'fleet-remote-'));
 const master = await Mebular.generateUserMasterKey();
 const encryption = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
-const makeNode = (deviceId, peerNamespacePolicy) =>
+const makeNode = (deviceId, namespaces = ['tasks']) =>
   new Mebular({
     storagePath: join(dir, `${deviceId}.jsonl`),
     deviceId,
     encryption,
     network: { enabled: true, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
-    sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 20, namespaces: ['tasks'], peerNamespacePolicy },
+    sync: { autoSync: true, pushOnWrite: true, pushOnWriteThrottleMs: 20, namespaces },
   });
 
 function waitBothSynced(a, b, timeoutMs = 10000) {
@@ -94,8 +94,8 @@ const execLogPath = join(dir, 'B.exec.jsonl');
 
 try {
   console.log('== M3 fleet 真实 libp2p（loopback）验收 ==');
-  A = makeNode('device-A', { 'device-B': ['tasks'] });
-  B = makeNode('device-B', { 'device-A': ['tasks'] });
+  A = makeNode('device-A');
+  B = makeNode('device-B');
   await A.initialize();
   await B.initialize();
   const addrA = A.node.getLocalMultiaddrs()[0];
@@ -153,7 +153,7 @@ try {
 
     if (!restarted && terminal >= RESTART_AFTER) {
       await B.shutdown();
-      B2 = makeNode('device-B', { 'device-A': ['tasks'] });
+      B2 = makeNode('device-B');
       await B2.initialize();
       await B2.node.connectToPeer(A.node.peerId, addrA);
       await sleep(300);
@@ -196,14 +196,14 @@ try {
   });
   check('① 重复投递不重复执行（额外轮询不增执行）', execCountAfter === N, { execCountAfter });
 
-  // 授权负例：未授权 C 连上 A 后拿不到 tasks
-  const C = makeNode('device-C', {});
+  // 订阅负例：C 不订阅 tasks，连上 A 后拿不到 tasks
+  const C = makeNode('device-C', ['other']);
   await C.initialize();
   await C.node.connectToPeer(A.node.peerId, addrA);
   await sleep(1200);
   const cStore = new MebularTaskEventStore(C);
   const seenByC = (await cStore.all()).length;
-  check('② 授权负例：未授权设备看不到 tasks（默认拒绝）', seenByC === 0, { seenByC });
+  check('② 订阅负例：未订阅设备看不到 tasks', seenByC === 0, { seenByC });
   await C.shutdown();
 
   // 时延统计（原始）

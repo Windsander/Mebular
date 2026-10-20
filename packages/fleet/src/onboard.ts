@@ -8,7 +8,6 @@ import { constants } from 'node:fs';
 import net from 'node:net';
 import {
   Mebular,
-  POLICY_NAMESPACE,
   type NamespaceHandoffPlan,
   type NamespaceHandoffResult,
   type NamespaceRejoinResult,
@@ -76,14 +75,8 @@ export function buildRegistry(agents: readonly FleetAgentConfig[]): ExecutorRegi
   return registry;
 }
 
-/**
- * 由配置 + 加密材料构造 core `Mebular` 选项（默认拒绝：仅授权 peers）。
- *
- * `peerNamespacePolicy`：显式给出（含 `{}`）→ **以它为准**（G1：可只留图上 grant）；
- * 缺省 → 由 `peers` 推导（每个对端 `[namespace]`，Step 1b bootstrap 行为）。
- */
+/** 由配置 + 加密材料构造 core `Mebular` 选项（订阅自主；对端自行声明）。 */
 export function mebularOptions(config: FleetConfig, encryption: FleetEncryption): Record<string, unknown> {
-  const peerNamespacePolicy = derivedPeerNamespacePolicy(config);
   return {
     storagePath: config.storagePath,
     deviceId: config.device,
@@ -94,30 +87,18 @@ export function mebularOptions(config: FleetConfig, encryption: FleetEncryption)
       pushOnWrite: true,
       pushOnWriteThrottleMs: 20,
       namespaces: [config.namespace],
-      peerNamespacePolicy,
-      policyIssuers: config.policyIssuers,
       antiEntropy: { enabled: true, intervalMs: 600_000, jitterRatio: 0.2 },
     },
   };
 }
 
-/**
- * bootstrap 配置白名单：显式 `peerNamespacePolicy`（含 `{}`）优先；缺省由 `peers` 推导。
- * 联网与离线路径**必须同源**，否则 doctor 与 serve/work 的生效授权会漂移。
- */
-function derivedPeerNamespacePolicy(config: FleetConfig): Record<string, string[]> {
-  return config.peerNamespacePolicy ?? Object.fromEntries(config.peers.map((peer) => [peer.device, [config.namespace]]));
-}
-
-/** 离线（不启网络）`Mebular` 选项：onboard/doctor/grant/revoke 用，只读写本地存储。 */
+/** 离线（不启网络）`Mebular` 选项：onboard/doctor/subscribe 用，只读写本地存储。 */
 export function offlineMebularOptions(config: FleetConfig, encryption: FleetEncryption): Record<string, unknown> {
   return {
     storagePath: config.storagePath,
     deviceId: config.device,
     encryption,
     network: { enabled: false },
-    // 策略（bootstrap 白名单 + R-a 签发者）与联网路径同源，否则离线 doctor 判定会漂移。
-    sync: { policyIssuers: config.policyIssuers, peerNamespacePolicy: derivedPeerNamespacePolicy(config) },
   };
 }
 
@@ -150,8 +131,6 @@ export async function onboardDevice(input: OnboardInput): Promise<OnboardResult>
     namespace: input.namespace ?? 'tasks',
     listen: input.listen ?? '/ip4/0.0.0.0/tcp/0',
     peers: input.peerDevice !== undefined ? [{ device: input.peerDevice, ...(input.peerAddr !== undefined ? { addr: input.peerAddr } : {}) }] : [],
-    ...(input.configGrant === false ? { peerNamespacePolicy: {} } : {}),
-    policyIssuers: input.policyIssuers ?? [],
     agents: input.agents ?? [{ name: 'echo', kind: 'echo' }],
     ...(input.quotaLimitPerDevice !== undefined ? { quotaLimitPerDevice: input.quotaLimitPerDevice } : {}),
   };
@@ -169,73 +148,24 @@ export async function onboardDevice(input: OnboardInput): Promise<OnboardResult>
     network: { enabled: false },
   } as never);
   await mebular.initialize();
-  await mebular.shutdown();
+  try {
+    // 上车即声明本机对该域的订阅（订阅自主、零门槛；其他人仍需自行订阅）。
+    await mebular.subscribeNamespace(config.namespace);
+  } finally {
+    await mebular.shutdown();
+  }
 
   return { config, alreadyOnboarded, masterKeyCreated, masterKeyFingerprint: masterKeyFingerprint(encryption.userMasterKey) };
 }
 
 /**
- * G1：本机签发 namespace grant（落保留命名空间 `__policy__`）。只有链到用户主密钥的
- * 设备签发的记录才被采纳；**不可自授**（core 的 R-a 保证），且 `grantNamespaces` 不接受
- * 指定 grantId（R-d 的恢复必须产生新 id）。只消费 core 公共 API。
+ * 本机订阅/退订某记忆域（**只能改自己**；写 `namespace_subscription` 到 `__policy__`）。
+ * `active=false` 只退订，不清本地数据；退出并交接走 `leaveNamespace`。
  */
-export async function grantNamespace(
+export async function subscribeNamespace(
   dir: string,
-  input: { to: string; namespaces?: string[]; expiresAt?: number; note?: string },
-): Promise<{ grantId: string; eventId: string; subject: string; namespaces: string[] }> {
-  if (typeof input.to !== 'string' || input.to.length === 0) throw new Error('grant 需要 --to <peerDevice>');
-  // M1：统一入口的 home 可能是守护 config.json → 走 loadToolConfig（fleet.config.json 优先）
-  const config = await loadToolConfig(dir);
-  const encryption = await readMasterKeyFile(config.masterKeyFile);
-  const namespaces = input.namespaces ?? [config.namespace];
-  if (namespaces.length === 0) throw new Error('grant 需要至少一个 namespace');
-  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
-  await mebular.initialize();
-  try {
-    const event = await mebular.grantNamespaces({
-      subject: input.to,
-      namespaces,
-      ...(input.expiresAt !== undefined ? { expiresAt: input.expiresAt } : {}),
-      ...(input.note !== undefined ? { note: input.note } : {}),
-    });
-    const grant = (event.data as { grant: { grantId: string } }).grant;
-    return { grantId: grant.grantId, eventId: event.id, subject: input.to, namespaces };
-  } finally {
-    await mebular.shutdown();
-  }
-}
-
-/** G1：按 grantId 撤销授权（R-d：恢复必须用**新** grantId）。 */
-export async function revokeNamespaceGrant(
-  dir: string,
-  input: { grantId: string; subject?: string; note?: string },
-): Promise<{ grantId: string; eventId: string }> {
-  if (typeof input.grantId !== 'string' || input.grantId.length === 0) throw new Error('revoke 需要 --grant-id <id>');
-  const config = await loadToolConfig(dir);
-  const encryption = await readMasterKeyFile(config.masterKeyFile);
-  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
-  await mebular.initialize();
-  try {
-    const event = await mebular.revokeGrant({
-      grantId: input.grantId,
-      ...(input.subject !== undefined ? { subject: input.subject } : {}),
-      ...(input.note !== undefined ? { note: input.note } : {}),
-    });
-    return { grantId: input.grantId, eventId: event.id };
-  } finally {
-    await mebular.shutdown();
-  }
-}
-
-/**
- * M1：声明/注销某设备在某分区的**成员资格**（写 `namespace_membership` 到 `__policy__`）。
- * `active=false` = 注销（本轮只改成员集合，不做数据清理——2b）。
- */
-export async function setNamespaceMembership(
-  dir: string,
-  input: { to: string; namespace?: string; active?: boolean; note?: string },
+  input: { namespace?: string; active?: boolean; note?: string },
 ): Promise<{ member: string; namespace: string; active: boolean; eventId: string }> {
-  if (typeof input.to !== 'string' || input.to.length === 0) throw new Error('member 需要 --to <deviceId>');
   const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const namespace = input.namespace ?? config.namespace;
@@ -243,32 +173,93 @@ export async function setNamespaceMembership(
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
   try {
-    const event = await mebular.declareNamespaceMembership({
-      member: input.to,
-      namespace,
-      active,
-      ...(input.note !== undefined ? { note: input.note } : {}),
-    });
-    return { member: input.to, namespace, active, eventId: event.id };
+    const event = active
+      ? await mebular.subscribeNamespace(namespace)
+      : await mebular.unsubscribeNamespace(namespace);
+    return { member: config.device, namespace, active, eventId: event.id };
   } finally {
     await mebular.shutdown();
   }
 }
 
-/** M2：某分区的**生效成员集合**（图上在册成员 ∩ 生效授权）。只读。 */
-export async function namespaceMembers(dir: string, namespace?: string): Promise<string[]> {
+/** 某分区的 active 订阅者（只读）。 */
+export async function namespaceSubscribers(dir: string, namespace?: string): Promise<string[]> {
   const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
   try {
-    return await mebular.getNamespaceMembers(namespace ?? config.namespace);
+    return await mebular.getNamespaceSubscribers(namespace ?? config.namespace);
   } finally {
     await mebular.shutdown();
   }
 }
 
-/** 2c：重订阅恢复（准入：本机对该分区有生效授权 ∧ 成员在册；写图外 reset 标记）。 */
+/** 某分区订阅视图（只读）。 */
+export async function namespaceSubscriptions(
+  dir: string,
+  namespace?: string,
+): Promise<{ active: boolean; subscribers: string[] }> {
+  const config = await loadToolConfig(dir);
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    return await mebular.getNamespaceSubscriptions(namespace ?? config.namespace);
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/** 建域（零门槛）：写 `namespace_declare`；不自动订阅。 */
+export async function declareNamespace(
+  dir: string,
+  input: { namespace: string; note?: string },
+): Promise<{ namespace: string; eventId: string }> {
+  if (typeof input.namespace !== 'string' || input.namespace.length === 0) throw new Error('namespace 不能为空');
+  const config = await loadToolConfig(dir);
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    const event = await mebular.declareNamespace({ namespace: input.namespace, ...(input.note !== undefined ? { note: input.note } : {}) });
+    return { namespace: input.namespace, eventId: event.id };
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/** 恢复被移出的设备（写 `device_restore`；high 档证明由调用方给出）。 */
+export async function restoreDevice(
+  dir: string,
+  input: {
+    subject: string;
+    note?: string;
+    nonce?: string;
+    cosign?: unknown;
+    breakGlass?: unknown;
+  },
+): Promise<{ subject: string; eventId: string }> {
+  if (typeof input.subject !== 'string' || input.subject.length === 0) throw new Error('restore 需要 --to <deviceId>');
+  const config = await loadToolConfig(dir);
+  const encryption = await readMasterKeyFile(config.masterKeyFile);
+  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+  await mebular.initialize();
+  try {
+    const event = await mebular.restoreDevice({
+      subject: input.subject,
+      ...(input.note !== undefined ? { note: input.note } : {}),
+      ...(input.nonce !== undefined ? { nonce: input.nonce } : {}),
+      ...(input.cosign !== undefined ? { cosign: input.cosign as never } : {}),
+      ...(input.breakGlass !== undefined ? { breakGlass: input.breakGlass as never } : {}),
+    });
+    return { subject: input.subject, eventId: event.id };
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/** 重订阅恢复（准入：曾订阅 ∧ 未被移出；写图外 reset 标记）。 */
 export async function rejoinNamespace(
   dir: string,
   input: { namespace?: string } = {},
@@ -284,7 +275,7 @@ export async function rejoinNamespace(
   }
 }
 
-/** 2c：本机是否已声明某分区重置（读图外标记）。只读。 */
+/** 本机是否已声明某分区重置（读图外标记）。只读。 */
 export async function rejoinReset(dir: string, namespace?: string): Promise<boolean> {
   const config = await loadToolConfig(dir);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
@@ -297,7 +288,7 @@ export async function rejoinReset(dir: string, namespace?: string): Promise<bool
   }
 }
 
-/** 2b：交接前置校验（只读）——继任者是否在册且已 ack 本机在该分区的全部事件。 */
+/** 交接前置校验（只读）——继任者是否订阅且已 ack 本机在该分区的全部事件。 */
 export async function planHandoff(
   dir: string,
   input: { namespace?: string; successor: string },
@@ -313,7 +304,7 @@ export async function planHandoff(
   }
 }
 
-/** 2b：退订交接（默认要求继任者全量 ack；`force` 仅本地 CLI，仍如实记录）。 */
+/** 退出并交接（默认要求继任者全量 ack；`force` 仅本地 CLI，仍如实记录）。 */
 export async function leaveNamespace(
   dir: string,
   input: { namespace?: string; successor: string; force?: boolean; note?: string },
@@ -329,59 +320,6 @@ export async function leaveNamespace(
       ...(input.force !== undefined ? { force: input.force } : {}),
       ...(input.note !== undefined ? { note: input.note } : {}),
     });
-  } finally {
-    await mebular.shutdown();
-  }
-}
-
-/** M1：某分区成员资格（`active=false` = 未启用成员资格；`members` = 图上在册）。只读。 */
-export async function namespaceMembership(
-  dir: string,
-  namespace?: string,
-): Promise<{ active: boolean; members: string[] }> {
-  const config = await loadToolConfig(dir);
-  const encryption = await readMasterKeyFile(config.masterKeyFile);
-  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
-  await mebular.initialize();
-  try {
-    return await mebular.getNamespaceMembership(namespace ?? config.namespace);
-  } finally {
-    await mebular.shutdown();
-  }
-}
-
-/**
- * C1：把某设备声明为**引导签发者**（写 `policy_issuer_declare` 到 `__policy__`）。
- * 新设备同步到该声明后即可采纳其授权，**无需本地 `--policy-issuer` 配置一致**。
- */
-export async function declarePolicyIssuer(
-  dir: string,
-  input: { to: string; note?: string },
-): Promise<{ subject: string; eventId: string }> {
-  if (typeof input.to !== 'string' || input.to.length === 0) throw new Error('declare-issuer 需要 --to <deviceId>');
-  const config = await loadToolConfig(dir);
-  const encryption = await readMasterKeyFile(config.masterKeyFile);
-  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
-  await mebular.initialize();
-  try {
-    const event = await mebular.declarePolicyIssuer({
-      subject: input.to,
-      ...(input.note !== undefined ? { note: input.note } : {}),
-    });
-    return { subject: input.to, eventId: event.id };
-  } finally {
-    await mebular.shutdown();
-  }
-}
-
-/** C1：本机当前生效的引导签发者集合（图上声明 ∪ 本地配置）。只读。 */
-export async function effectivePolicyIssuers(dir: string): Promise<string[]> {
-  const config = await loadToolConfig(dir);
-  const encryption = await readMasterKeyFile(config.masterKeyFile);
-  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
-  await mebular.initialize();
-  try {
-    return await mebular.getPolicyIssuers();
   } finally {
     await mebular.shutdown();
   }
@@ -419,35 +357,6 @@ function tcpReachable(host: string, port: number, timeoutMs = 1500): Promise<boo
     socket.once('timeout', () => done(false));
     socket.once('error', () => done(false));
   });
-}
-
-/** 医生用的最小策略事件形状（只读 `__policy__`；不重造授权语义）。 */
-interface PolicyEventLike {
-  type: string;
-  data?: {
-    grant?: { grantId?: string; subject?: string; namespaces?: string[] };
-    revoke?: { grantId?: string };
-  };
-}
-
-/**
- * 是否「曾有 grant、现被 namespace_revoke 撤销」——仅用于给出 R-d 修复 hint。
- * 生效与否一律以 `getEffectiveNamespaces`（core）为准，此处不参与判定。
- */
-function wasNamespaceGrantRevoked(events: readonly PolicyEventLike[], subject: string, namespace: string): boolean {
-  const grants = events
-    .filter((e) => e.type === 'namespace_grant')
-    .map((e) => e.data?.grant)
-    .filter(
-      (g): g is { grantId: string; subject: string; namespaces: string[] } =>
-        typeof g?.grantId === 'string' &&
-        g.subject === subject &&
-        Array.isArray(g.namespaces) &&
-        g.namespaces.includes(namespace),
-    );
-  if (grants.length === 0) return false;
-  const revoked = new Set(events.filter((e) => e.type === 'namespace_revoke').map((e) => e.data?.revoke?.grantId));
-  return grants.every((g) => revoked.has(g.grantId));
 }
 
 /** 从 multiaddr 取监听主机（`/ip4|ip6/<host>/tcp/<port>`）；无法解析 → null。 */
@@ -553,65 +462,45 @@ export async function doctor(dir: string): Promise<DoctorReport> {
     }
   }
 
-  // 5) namespace 已授权：生效授权 = **图上 grant ∪ 配置白名单**（吊销优先，默认拒绝）。
+  // 5) 订阅：本机自声明 + 对端自声明（没有「授权」项）。
   const peerDevices = config.peers.map((p) => p.device);
-  if (peerDevices.length === 0) {
-    add('namespace 已授权', 'FAIL', '未配置任何对端（默认拒绝）', 'fleet onboard … --peer-device <id>');
-  } else if (encryption === null) {
-    const cfgPolicy =
-      config.peerNamespacePolicy ?? Object.fromEntries(peerDevices.map((d) => [d, [config.namespace]]));
-    const ok = peerDevices.every((d) => (cfgPolicy[d] ?? []).includes(config.namespace));
-    add('namespace 已授权', ok ? 'PASS' : 'FAIL', `仅配置（主密钥不可用）namespace=${config.namespace}`, ok ? undefined : '导入主密钥后重试（--master-key）');
+  if (encryption === null) {
+    add('namespace 订阅', 'SKIP', `主密钥不可用，无法读取图上订阅（namespace=${config.namespace}）`, '导入主密钥后重试（--master-key）');
   } else {
     try {
       const m = new Mebular(offlineMebularOptions(config, encryption) as never);
       await m.initialize();
-      const policyEvents = (await m.eventLog.listEvents({ namespace: POLICY_NAMESPACE })) as unknown as PolicyEventLike[];
-      const parts: string[] = [];
-      let allOk = true;
-      let revokedHint = false;
+      const view = await m.getNamespaceSubscriptions(config.namespace);
+      const blocked = await m.getBlockedDevices();
+      const peerParts: string[] = [];
+      let allPeersSubscribed = peerDevices.length > 0;
       for (const device of peerDevices) {
-        const effective = await m.getEffectiveNamespaces(device);
-        const ok = effective.includes(config.namespace);
-        parts.push(`${device}:${ok ? 'ok' : 'deny'}`);
-        if (!ok) {
-          allOk = false;
-          if (wasNamespaceGrantRevoked(policyEvents, device, config.namespace)) revokedHint = true;
-        }
+        const subscribed = (await m.getSubscriptions(device)).includes(config.namespace);
+        peerParts.push(`${device}:${subscribed ? 'subscribed' : 'not-yet'}`);
+        if (!subscribed) allPeersSubscribed = false;
       }
-      const issuers = await m.getPolicyIssuers();
-      const membership = await m.getNamespaceMembership(config.namespace);
       await m.shutdown();
+      const selfSubscribed = view.subscribers.includes(config.device);
       add(
-        'namespace 已授权',
-        allOk ? 'PASS' : 'FAIL',
-        `namespace=${config.namespace} peers=[${parts.join(', ')}]`,
-        allOk
-          ? undefined
-          : revokedHint
-            ? '曾被 namespace_revoke 撤销；必须用新的 grantId 恢复（R-d）'
-            : '为对端签发 grant（fleet grant --to <peer>）或配置白名单',
+        'namespace 订阅',
+        selfSubscribed ? 'PASS' : 'FAIL',
+        `namespace=${config.namespace} subscribers=[${view.subscribers.join(', ')}] self=${config.device}`,
+        selfSubscribed ? undefined : `fleet subscribe --namespace ${config.namespace}`,
       );
-      // C1 信息项：生效引导签发者集合（图上声明 ∪ 本地配置）。恒 PASS，供审计。
       add(
-        '策略签发者',
-        'PASS',
-        `issuers=[${issuers.join(', ')}]${issuers.length === 0 ? '（空：fleet declare-issuer --to <self> 或 onboard --policy-issuer）' : ''}`,
+        '对端订阅',
+        peerDevices.length === 0 ? 'SKIP' : allPeersSubscribed ? 'PASS' : 'SKIP',
+        peerDevices.length === 0 ? '未登记对端' : `peers=[${peerParts.join(', ')}]`,
+        allPeersSubscribed ? undefined : '对端自行声明订阅后即可互通（订阅零门槛）',
       );
-      // M1–M3：本机在该分区的成员资格（未启用成员资格 → SKIP 明列）。
-      if (!membership.active) {
-        add('namespace 成员资格', 'SKIP', '未启用成员资格（无成员记录）', `fleet member --to ${config.device} --namespace ${config.namespace}`);
-      } else {
-        const isMember = membership.members.includes(config.device);
-        add(
-          'namespace 成员资格',
-          isMember ? 'PASS' : 'FAIL',
-          `namespace=${config.namespace} members=[${membership.members.join(', ')}] self=${config.device}`,
-          isMember ? undefined : '用 `fleet member` 将本机加入该分区',
-        );
-      }
+      add(
+        '移出状态',
+        blocked.includes(config.device) ? 'FAIL' : blocked.length > 0 ? 'WARN' : 'PASS',
+        blocked.length === 0 ? '无设备被移出' : `blocked=[${blocked.join(', ')}]`,
+        blocked.includes(config.device) ? '本机已被移出：请由其他设备执行 device_restore 后重新订阅' : undefined,
+      );
     } catch (error) {
-      add('namespace 已授权', 'FAIL', `读取本地授权失败：${(error as Error).message}`, '确认存储/主密钥可用');
+      add('namespace 订阅', 'FAIL', `读取本地订阅失败：${(error as Error).message}`, '确认存储/主密钥可用');
     }
   }
 

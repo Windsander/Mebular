@@ -5,7 +5,6 @@ import { GraphStore } from '../../src/core/GraphStore.js';
 import { EventLog } from '../../src/eventlog/EventLog.js';
 import { MemoryStorage } from '../../src/storage/MemoryStorage.js';
 import { SyncManager, computeAntiEntropyDelay } from '../../src/sync/syncmgr/SyncManager.js';
-import { ConfigNamespacePolicy } from '../../src/sync/namespacePolicy.js';
 
 describe('computeAntiEntropyDelay', () => {
   it('jitter 落界内（±jitterRatio）', () => {
@@ -36,7 +35,6 @@ describe('anti-entropy（C）', () => {
       eventLog,
       storage,
       deviceId: 'device-A',
-      namespacePolicy: new ConfigNamespacePolicy({ 'device-B': ['nsA'] }),
       ...(antiEntropy ? { antiEntropy } : {}),
     });
   }
@@ -46,14 +44,15 @@ describe('anti-entropy（C）', () => {
     expect(makeManager({ enabled: true }).antiEntropyEnabled).toBe(true);
   });
 
-  it('无 pending 短路跳过；有已授权分区的 pending 才为 true', async () => {
+  it('无 pending 短路跳过；有本机订阅分区的 pending 才为 true', async () => {
     const sm = makeManager({ enabled: true, intervalMs: 1_000_000 });
+    sm.setSubscriptionNamespaces(['nsA']);
     expect(await sm.shouldAntiEntropySync('device-B')).toBe(false); // 无事件
 
-    await store.createNode('fact', { text: 'x' }, [], { namespace: 'nsB' }); // 未授权分区
+    await store.createNode('fact', { text: 'x' }, [], { namespace: 'nsB' }); // 未订阅分区
     expect(await sm.shouldAntiEntropySync('device-B')).toBe(false);
 
-    await store.createNode('fact', { text: 'y' }, [], { namespace: 'nsA' }); // 已授权
+    await store.createNode('fact', { text: 'y' }, [], { namespace: 'nsA' }); // 已订阅
     expect(await sm.shouldAntiEntropySync('device-B')).toBe(true);
   });
 

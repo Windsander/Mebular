@@ -151,12 +151,19 @@
     /* 第二页：设计理念 */
     #page-design .page-inner { max-width:720px; }
 
-    /* 第三页：网络舞台 */
-    #page-network { padding:60px 40px 60px; }
+    /* 第三页：网络舞台
+       面板固定在左上角（.page-inner 默认 margin:auto 会把它垂直居中，
+       这里显式归零并左对齐）。 */
+    #page-network {
+      padding:60px 40px 60px;
+      justify-content:flex-start;
+      align-items:flex-start;
+    }
     #page-network .page-inner {
       width:100%;
       max-width:1100px;
       text-align:left;
+      margin:0;
     }
 
     /* 第四页：定价 */
@@ -617,8 +624,8 @@
       nav a { font-size:0.6rem; letter-spacing:0.08em; }
       nav .brand { margin-right:12px; font-size:0.6rem; }
       section.page { padding:80px 16px 40px; }
-      #page-network { padding:20px; }
-      #page-network .page-inner { max-width:100%; text-align:center; }
+      #page-network { padding:20px; justify-content:center; align-items:center; }
+      #page-network .page-inner { max-width:100%; text-align:center; margin:auto; }
       #page-pricing { padding:78px 16px 36px; }
       .anchor-teaser { padding:16px; gap:10px; }
       .anchor-teaser .anchor-title { font-size:0.74rem; }

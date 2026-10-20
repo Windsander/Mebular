@@ -404,13 +404,18 @@ async function main() {
     await capture('e2a2-after-topbar-live.jpg');
 
     // W-B：共享页新建记忆域（零门槛；默认自订阅；0 条 / 0 对端也可用）
-    check('W-B 空态主按钮「新建记忆域」+ 次按钮「邀请设备」',
+    // U-1 补充 2：共享页只管理记忆域，邀请设备只在顶栏。
+    check('W-B/U-1 空态唯一 CTA「新建记忆域」+ 无邀请按钮/诊断指路',
       await evalJs(`(() => {
         const newBtn = document.querySelector('#domains-empty-new');
-        const invite = document.querySelector('#domains-empty-invite');
-        return Boolean(newBtn) && Boolean(invite) && /新建记忆域/.test(newBtn.textContent)
-          && /邀请设备/.test(invite.textContent)
-          && /只有本机也可以新建记忆域并开始记录/.test(document.querySelector('#domains-empty')?.textContent ?? '');
+        const empty = document.querySelector('#domains-empty');
+        const invites = empty?.querySelectorAll('button') ?? [];
+        return Boolean(newBtn) && !document.querySelector('#domains-empty-invite')
+          && invites.length === 1 && /新建记忆域/.test(newBtn.textContent)
+          && /还没有记忆域/.test(empty?.textContent ?? '')
+          && /只有本机也可以新建一个记忆域并开始记录/.test(empty?.textContent ?? '')
+          && !/邀请设备/.test(empty?.textContent ?? '')
+          && !/诊断与恢复/.test(empty?.textContent ?? '');
       })()`));
     await evalJs('window.prompt = () => "ledger-ui"');
     await evalJs('document.querySelector("#namespace-new").click()');
@@ -427,6 +432,9 @@ async function main() {
     // 选项卡切换（曾因误删 setView 失效）
     await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
     check('切换到域视图（#domains-view 可见）', await waitFor('document.querySelector("#domains-view")?.hidden === false'));
+    check('U-1 共享页无「邀请设备」CTA（顶栏仍保留）',
+      await evalJs('(() => { const v = document.querySelector("#domains-view"); return Boolean(v) && !/邀请设备/.test(v.textContent) && Boolean(document.querySelector("#invite-device")); })()'));
+    await capture('u1-after-shared-list.jpg');
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('切回星图视图', await waitFor('document.querySelector("#domains-view")?.hidden === true'));
 
@@ -502,8 +510,8 @@ async function main() {
       console.log('  · [诊断] 行状态:', await evalJs('document.querySelector("#settings-panel-assistants [data-asst-row=opencode]")?.textContent ?? "（无行）"').catch((e) => String(e)));
       console.log('  · [诊断] 页面异常:', await evalJs('JSON.stringify(window.__pageErrors ?? [])').catch((e) => String(e)));
     }
-    check('验证未过 = 黄态一行 + 「重新验证」+ 详情含输出',
-      await waitFor('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); if (!v || !/验证未过/.test(v.textContent)) return false; if (!v.querySelector("details")) return false; const row = document.querySelector("#settings-panel-assistants [data-asst-row=opencode]"); return Boolean(row) && /重新验证/.test(row.textContent); })()', 20000));
+    check('验证未过 = 黄态一行 + 「重新验证」+ 输出内联（无嵌套折叠）',
+      await waitFor('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); if (!v || !/验证未过/.test(v.textContent)) return false; if (!v.querySelector("[data-asst-output]")) return false; if (v.querySelector("details")) return false; const row = document.querySelector("#settings-panel-assistants [data-asst-row=opencode]"); return Boolean(row) && /重新验证/.test(row.textContent); })()', 20000));
     check('manual（generic 粘片段）行永不出现自动写「接入」',
       await evalJs('(() => { const row = document.querySelector("#settings-panel-assistants [data-asst-row=generic]"); const xp = document.querySelector("#settings-panel-assistants [data-asst-xp=generic]"); if (!row || !/查看片段/.test(row.textContent)) return false; return !row.querySelector("[data-cli-action=connect]") && !(xp && xp.querySelector("[data-cli-action=connect]")); })()'));
 
@@ -649,14 +657,35 @@ async function main() {
       return tabs.join(',') === '常用,安全,AI 助手,MCP 接入,高级' && document.querySelector('#settings')?.hidden === false;
     })()`));
     await evalJs('document.querySelector("[data-settings-tab=common]").click()');
-    check('E1 常用页：三卡迁出后保留只读状态 + 重启向导/邀请入口', await waitFor(`(() => {
+    check('E1 常用页：保留只读状态 + 重启向导；无重复邀请入口', await waitFor(`(() => {
       const common = document.querySelector('#settings-panel-common');
+      const topbarInvite = document.querySelector('#invite-device');
       return Boolean(common) && common.hidden === false
         && !common.querySelector('.cfg-editor') && Boolean(common.querySelector('#settings-resident'))
         && Boolean(common.querySelector('[data-settings-common-status]'))
-        && Boolean(common.querySelector('#settings-invite-device'))
+        && !common.querySelector('#settings-invite-device')
+        && Boolean(topbarInvite)
         && /高级/.test(common.textContent);
     })()`));
+    const foldAudit = await evalJs(`(() => {
+      const details = [...document.querySelectorAll('#settings-body details')];
+      return { count: details.length, keys: details.map((d) => d.dataset.settingsFold ?? d.className) };
+    })()`);
+    check('U1 设置折叠预算：≤5 且均为允许类型', Boolean(foldAudit) && foldAudit.count <= 5
+      && foldAudit.keys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'invite', 'assistants'].includes(key)),
+      JSON.stringify(foldAudit));
+    check('U-1 设置无退役配置项/引导签发者/授权·签发·参与',
+      await evalJs(`(() => {
+        const body = document.querySelector('#settings-body');
+        const t = body?.textContent ?? '';
+        const paths = ['sync.peer' + 'Whitelist', 'sync.' + ['policy', 'Issuers'].join(''), 'sync.' + 'auto' + 'Grant', 'status.invite.' + 'grant' + 'Ttl'];
+        const words = ['peer' + 'Whitelist', ['policy', 'Issuers'].join(''), 'auto' + 'Grant', 'grant' + 'Ttl', '引导签发者', '授权', '签发', '参与'];
+        return Boolean(body)
+          && paths.every((path) => !body.querySelector('[data-cfg-path="' + path + '"]'))
+          && !new RegExp(words.join('|')).test(t);
+      })()`));
+    await capture('u1-after-settings-common.jpg');
+    await capture('u1-after-settings-common-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
 
     // E2-A2 · 忆云卡（设置 · 常用）：每行名字/当前|已归档/根指纹/最近使用/动作；当前不可切换
     check('E2-A2 忆云卡：两行（当前 + 已归档）+ 根指纹/最近使用；当前项无切换；无删除入口',
@@ -704,6 +733,48 @@ async function main() {
     check('E2-A2 改名可改回（忆云 1）',
       await waitFor('(() => { const card = document.querySelector("#settings-cloud-card"); return Boolean(card) && /忆云 1/.test(card.textContent); })()', 20000));
 
+    // U-1：CSRF 403 自愈——旧 token + 错误 cookie → 重取 /console/ → 原表单内容自动重试一次
+    await evalJs('document.querySelector("[data-cloud-rename=default]").click()');
+    await waitFor('Boolean(document.querySelector("[data-cloud-rename-input]"))');
+    await evalJs(`(() => {
+      const input = document.querySelector('[data-cloud-rename-input]');
+      input.value = '自愈工作区';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      window.__u1NoReload = 'yes';
+      window.__u1FetchCalls = [];
+      const orig = window.fetch.bind(window);
+      window.__u1OrigFetch = orig;
+      window.fetch = (...args) => {
+        window.__u1FetchCalls.push(String(args[0]));
+        return orig(...args);
+      };
+      document.cookie = 'mebular_csrf=stale-u1-token; Path=/';
+      document.querySelector('[data-cloud-rename-save]').click();
+    })()`);
+    check('U-1 CSRF 403 自愈：旧 token 自动恢复并成功保存表单内容',
+      await waitFor('(() => { const card = document.querySelector("#settings-cloud-card"); return Boolean(card) && /自愈工作区/.test(card.textContent); })()', 20000));
+    const csrfRecovery = await evalJs(`(() => {
+      const calls = window.__u1FetchCalls ?? [];
+      return {
+        consoleRefresh: calls.filter((path) => path === '/console/').length,
+        renameAttempts: calls.filter((path) => path === '/admin/api/clouds/rename').length,
+        noReload: window.__u1NoReload === 'yes',
+      };
+    })()`);
+    check('U-1 CSRF 自愈：只重取一次 token、只重试一次写、页面不重载（表单不丢）',
+      Boolean(csrfRecovery) && csrfRecovery.consoleRefresh === 1 && csrfRecovery.renameAttempts === 2 && csrfRecovery.noReload === true,
+      JSON.stringify(csrfRecovery));
+    await evalJs('window.fetch = window.__u1OrigFetch; delete window.__u1OrigFetch;');
+    await evalJs('document.querySelector("[data-cloud-rename=default]").click()');
+    await waitFor('Boolean(document.querySelector("[data-cloud-rename-input]"))');
+    await evalJs(`(() => {
+      const input = document.querySelector('[data-cloud-rename-input]');
+      input.value = '忆云 1';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('[data-cloud-rename-save]').click();
+    })()`);
+    await waitFor('(() => { const card = document.querySelector("#settings-cloud-card"); return Boolean(card) && /忆云 1/.test(card.textContent); })()', 20000);
+
     // 已归档切换：危险确认 → 无 App 桥时给 CLI 兜底（当前忆云不变）
     await evalJs('document.querySelector("[data-cloud-row=p_demo0001] [data-cloud-switch]").click()');
     check('E2-A2 已归档切换：危险确认（说明归档保留、不删除）',
@@ -730,6 +801,7 @@ async function main() {
           && Boolean(p.querySelector('[data-cfg-path="network.enabled"]'))
           && !p.querySelector('[data-cfg-path="sync.peerWhitelist"]');
       })()`));
+    await capture('u1-after-settings-advanced.jpg');
     check('E1 诊断 · 连接排障：手动连接入口在诊断折叠内（文案=传输修复）',
       await evalJs(`(() => {
         const fold = document.querySelector('#diag-fold');
@@ -743,10 +815,16 @@ async function main() {
         const p = document.querySelector('#settings-panel-mcp');
         const card = p?.querySelector('[data-task=mcp]');
         const paths = ['mcp.http.port', 'mcp.http.auth', 'mcp.http.host', 'mcp.http.tls', 'mcp.http.tlsKey', 'mcp.http.tlsCert'];
-        return Boolean(card) && card.classList.contains('task-card-danger')
+        return Boolean(card) && card.classList.contains('settings-danger')
           && paths.every((path) => Boolean(card.querySelector('[data-cfg-path="' + path + '"]')))
-          && /token grant|config\\.json/.test(card.textContent);
+          && /token grant|config\\.json/.test(p.querySelector('#mcp-danger-fold')?.textContent ?? '');
       })()`));
+    await capture('u1-after-settings-mcp.jpg');
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await sleep(250);
+    check('U-1 390px 设置（MCP 危险项 + 内联帮助）无横向溢出',
+      await evalJs('(() => { const box = document.querySelector("#settings .modal-box"); const b = document.body; return Boolean(box) && box.scrollWidth <= box.clientWidth + 1 && b.scrollWidth <= b.clientWidth + 1; })()'));
+    await send('Emulation.clearDeviceMetricsOverride');
 
     // 轮询重建回归（修复前：render() 每 3s 整体重建 #settings-body → 原生 <select> 弹层被销毁、选择丢失）
     const authSelector = '#settings-body select[data-cfg-path="mcp.http.auth"]';
@@ -775,12 +853,11 @@ async function main() {
         return ok >= 3 && /✓ 生效中/.test(body.textContent)
           && Boolean(ex) && /已配置/.test(ex.textContent) && /实际/.test(ex.textContent) && /不一致/.test(ex.textContent);
       })()`));
-    check('轮 C 呈现分级：帮助/风险说明收进「详情」，不再与控件平铺',
+    check('U-1 呈现分级：字段帮助/风险内联一行，不再有逐字段「详情」折叠',
       await evalJs(`(() => {
         const card = document.querySelector('#settings-body [data-task=mcp]');
-        const folded = card.querySelector('details.cfg-more .cfg-help');
         const direct = card.querySelector('.cfg-control > .cfg-help');
-        return Boolean(folded) && !direct;
+        return Boolean(direct) && !card.querySelector('details.cfg-more') && !/这是什么/.test(card.textContent);
       })()`));
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
     check('E1 安全 tab：安全卡完整随迁（低/中/高 + 诚实文案 + 当前档）',
@@ -794,6 +871,7 @@ async function main() {
           && /挡不住拿走整台设备的人/.test(t) && /当前：低/.test(t);
       })()`));
     await capture('e1-after-settings-security-tab.jpg');
+    await capture('u1-after-settings-security.jpg');
 
     // 即时生效：改低风险 toggle（joinService.enabled；高级 · 常驻服务卡）→ 无草稿态、3s 跨轮询值持久（已写入）
     await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
@@ -932,9 +1010,19 @@ async function main() {
       await waitFor('document.querySelector("#settings")?.hidden === true && !document.body.classList.contains("modal-open")'));
     // 关于本机（点顶栏本机徽标进入）
     await evalJs('document.querySelector("#self-badge").click()');
-    check('关于本机打开（身份/运行状态区块）', await waitFor('Boolean(document.querySelector("[data-info-block=identity]")) || /关于本机/.test(document.querySelector("#settings-body")?.textContent ?? "")'));
+    check('关于本机打开（身份/存储/收敛；运行状态收一个折叠）', await waitFor(`(() => {
+      const body = document.querySelector('#about-body');
+      const folds = body?.querySelectorAll('details') ?? [];
+      return Boolean(body) && Boolean(body.querySelector('[data-info-block=identity]'))
+        && Boolean(body.querySelector('[data-info-block=convergence]'))
+        && folds.length === 1 && folds[0].dataset.settingsFold === 'about-runtime'
+        && body.textContent.includes('运行状态');
+    })()`));
     check('轮 C 配套：写盘路径/.bak 收进关于本机、设置常用页不再重复',
       await evalJs('(() => { const t = document.querySelector("#about-body")?.textContent ?? ""; const s = document.querySelector("#settings-body")?.textContent ?? ""; return /配置文件/.test(t) && /\\.bak/.test(t) && !/修改写入/.test(s); })()'));
+    check('U-1 关于本机无引导签发者/授权/签发/参与残留',
+      await evalJs('(() => { const t = document.querySelector("#about-body")?.textContent ?? ""; return !/引导签发者|授权|签发|参与/.test(t); })()'));
+    await capture('u1-after-about.jpg');
     await evalJs('document.querySelector("#about-close").click()');
 
     // UX-2：?view=connect 别名重定向 → 设置 · AI 助手自动打开
@@ -945,18 +1033,25 @@ async function main() {
     // 邀请面板（joinService 未启用 → 就地启用；启用 → 令牌。两者都应有内容）
     await evalJs('document.querySelector("#invite-device").click()');
     check('邀请面板打开且渲染内容（令牌或未启用提示）', await waitFor('(() => { const b = document.querySelector("#invite-body"); return Boolean(b?.querySelector("[data-copy]")) || /加入服务未启用/.test(b?.textContent ?? ""); })()'));
-    check('E1 邀请单屏：首屏令牌 + 二维码/降级 + 复制；机制收「详情」', await evalJs(`(() => {
+    check('E1 邀请单屏：首屏令牌 + 二维码/降级 + 复制；机制收「邀请设备 · 详情」', await evalJs(`(() => {
       const body = document.querySelector('#invite-body');
       if (!body) return false;
       const details = body.querySelector('details');
-      if (!details) return false;
+      if (!details || details.dataset.settingsFold !== 'invite') return false;
       const blocks = [...body.children];
       const detailsIndex = blocks.indexOf(details);
       const before = blocks.slice(0, detailsIndex).map((el) => el.textContent + (el.querySelector?.('img') ? ' QR' : '')).join('\\n');
       const tokenBlock = blocks.slice(0, detailsIndex).some((el) => /令牌/.test(el.textContent) && el.querySelector('[data-copy]'));
       const qr = before.includes('QR') || /二维码不可用/.test(before);
-      return tokenBlock && qr && /join 端点/.test(details.textContent) && Boolean(details.querySelector('#invite-endpoint'));
+      return tokenBlock && qr && /join 端点/.test(details.textContent) && Boolean(details.querySelector('#invite-endpoint'))
+        && body.querySelectorAll('details').length === 1;
     })()`));
+    const allFoldKeys = await evalJs(`(() => [...document.querySelectorAll('#settings-body details, #about-body details, #invite-body details')]
+      .map((el) => el.dataset.settingsFold ?? el.className))()`);
+    check('U-1 全域折叠预算：设置 + 关于 + 邀请 ≤5 且均为白名单类型', Array.isArray(allFoldKeys)
+      && allFoldKeys.length <= 5
+      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'invite', 'assistants'].includes(key)),
+      JSON.stringify(allFoldKeys));
     check('E1 邀请面板无「去设置启用」旧指路（未启用时就地一键启用）',
       await evalJs(`(() => {
         const html = document.querySelector('#invite')?.outerHTML ?? '';
@@ -1086,9 +1181,8 @@ async function main() {
     await waitFor('document.querySelector("#security-badge") && /🛡 安全：中/.test(document.querySelector("#security-badge").textContent) && !/…/.test(document.querySelector("#memory-badge")?.textContent ?? "…")', 20000);
     await evalJs('document.querySelector("#open-settings").click()');
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
-    check('S3 中档凭条：设置打开且安全卡就位（降级入口在卡尾折叠）',
+    check('S3 中档凭条：设置打开且安全卡就位（降级入口内联在卡尾）',
       await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]"))', 20000));
-    await evalJs('(() => { const d = document.querySelector("#settings-security-slot .sec-more"); if (d) d.open = true; })()');
     await evalJs('document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]").click()');
     await waitFor('Boolean(document.querySelector("#security-code"))');
     const downCode = totpCodeAt(SEC_TOTP_SECRET, Math.floor(Date.now() / 30_000) + 1);
@@ -1159,7 +1253,6 @@ async function main() {
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
     check('S4 高档降档前置：安全卡为高档 + 降级入口就位',
       await waitFor('document.querySelector("#settings")?.hidden === false && document.querySelector("#settings-security-slot")?.dataset.securityLevel === "high" && Boolean(document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]"))', 20000));
-    await evalJs('(() => { const d = document.querySelector("#settings-security-slot .sec-more"); if (d) d.open = true; })()');
     await evalJs('document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]").click()');
     check('S4 高档降档：会签等待弹层提供「用恢复码执行」入口',
       await waitFor('Boolean(document.querySelector("[data-security-recovery-switch]")) && /降级到低/.test(document.querySelector("#security-action-title")?.textContent ?? "")'));

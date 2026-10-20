@@ -1564,17 +1564,39 @@ try {
         && jsSrc.includes("wizardState.connection === 'connecting'"),
       'Esc/backdrop 全局监听 + 危险语义规则');
 
-    check('轮 C ③ 呈现分级：常态「生效中」/ 异常完整三元组 / 帮助与警告墙折叠',
+    check('轮 C ③ 呈现分级：常态「生效中」/ 异常完整三元组 / 帮助与警告内联一行',
       jsSrc.includes('data-cfg-state="ok"')
         && jsSrc.includes('✓ 生效中')
         && jsSrc.includes('data-cfg-state="exception"')
-        && jsSrc.includes('class="cfg-more"')
+        && !jsSrc.includes('class="cfg-more"')
         && jsSrc.includes('runtimeFoldedReason')
         && jsSrc.includes('cfg-pending')
         && jsSrc.includes('settingsFoldKey')
         && jsSrc.includes('prevScrollTop')
-        && cssSrc.includes('.cfg-more > summary'),
-      '名称+控件+状态常显；帮助/机制/警告入 details；异常自动出现');
+        && cssSrc.includes('.settings-note'),
+      '名称+控件+状态常显；帮助/风险内联；异常自动出现');
+
+    const iaFolds = (await import('../settings-ia.js')).IA_SETTINGS_FOLDS;
+    const foldIds = iaFolds.map((fold) => fold.id);
+    const renderedFolds = ['mcp-danger', 'diagnostics', 'about-runtime', 'invite'].filter((id) => jsSrc.includes(`data-settings-fold="${id}"`));
+    check('U-1 折叠白名单：≤5 且设置/关于/邀请只渲染白名单内类型',
+      iaFolds.length <= 5 && renderedFolds.length === 4
+        && !jsSrc.includes('cfg-more') && !jsSrc.includes('task-card-more') && !jsSrc.includes('page-more')
+        && !/<details/.test(jsSrc.slice(jsSrc.indexOf('function renderCfgField'), jsSrc.indexOf('function fieldOf')))
+        && foldIds.every((id) => ['mcp-danger', 'diagnostics', 'about-runtime', 'invite', 'assistants'].includes(id)),
+      `folds=${JSON.stringify(foldIds)} rendered=${JSON.stringify(renderedFolds)}`);
+
+    const codeOnly = jsSrc.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');
+    const csrfModule = await import('../settings-ia.js');
+    check('U-1 CSRF 403 自愈：一次重取 /console/ + 原请求重试（不整页重载）',
+      jsSrc.includes('withCsrfRetry') && jsSrc.includes('refreshCsrfToken')
+        && csrfModule.CSRF_ERROR_MESSAGE === 'CSRF token 缺失或无效'
+        && csrfModule.CSRF_RETRY_FAILED_MESSAGE === '会话已刷新，请重试；仍失败请重开窗口',
+      'settings-ia 共享 helper + api() 接线');
+    check('U-1 用户可见动作/术语：设置与共享无「添加设备」，无「授权/签发/参与」',
+      !htmlSrc.includes('添加设备') && !codeOnly.includes('添加设备')
+        && !/授权|签发|参与/.test(codeOnly),
+      `console 命中=${(codeOnly.match(/授权|签发|参与/g) ?? []).join(',') || '无'}`);
 
     check('轮 C 配套：页头内部口径删除、写盘路径/.bak 归「关于本机」、邀请帮助去重、帮助行长收窄',
       !htmlSrc.includes('运行时可用项可直接操作')
@@ -1602,12 +1624,14 @@ try {
       '安全卡已接管「安全」页签插槽');
 
     // E1 · 入口收口：顶栏只留邀请；连接已有地址撤下，传输修复移入诊断/设备卡「连不上」语境
-    check('E1 顶栏收口：无「连接已有地址」，仅保留「邀请设备」；空态无旧入口',
+    check('E1/U-1 入口唯一：顶栏保留「邀请设备」；设置与共享页不再重复邀请 CTA',
       !htmlSrc.includes('id="add-device"') && !htmlSrc.includes('domains-empty-connect')
+        && !htmlSrc.includes('domains-empty-invite') && !consoleSrc2.includes('domains-empty-invite')
+        && !htmlSrc.includes('settings-invite-device') && !consoleSrc2.includes('settings-invite-device')
         && !consoleSrc2.includes("$('#add-device')") && !consoleSrc2.includes("$('#domains-empty-connect')")
         && htmlSrc.includes('id="invite-device"')
         && consoleSrc2.includes('diag-open-wizard') && consoleSrc2.includes('manual-connect'),
-      'add-device/空态连接入口已撤下；诊断与设备卡保留手动连接');
+      'add-device/设置与空态邀请入口已撤下；诊断与设备卡保留手动连接');
 
     // E2-A2 · 忆云入口：品牌后徽章 + 对称两按钮；加入弹层与卡片接线
     check('E2-A2 顶栏：品牌后 #cloud-badge + 对称「加入忆云 / 邀请设备」',
@@ -1658,7 +1682,7 @@ try {
         && inviteSrc.indexOf('qrBlock') >= 0 && inviteSrc.indexOf('qrBlock') < inviteDetailsAt
         && inviteSrc.indexOf('二维码不可用') >= 0
         && inviteSrc.indexOf('data-copy=') >= 0
-        && /<details[^>]*>\s*<summary>详情/.test(inviteSrc)
+        && /<details[^>]*>\s*<summary>\$\{escapeHtml\(foldLabel\('invite'\)\)\}/.test(inviteSrc)
         && inviteSrc.slice(inviteDetailsAt).includes('${endpointEditor}'),
       `detailsAt=${inviteDetailsAt}`);
 
@@ -1897,8 +1921,10 @@ try {
     check('v4 UI：mock 数据缺口补齐（memories 字段 + 订阅字段）',
       consoleSrcV4.includes('MOCK_MEMORIES') && /memories:\s*\{ total:/.test(consoleSrcV4)
         && consoleSrcV4.includes('subscriptionDeclared') && consoleSrcV4.includes('subscribers') && consoleSrcV4.includes('selfSubscribed'));
-    check('v4 UI：空态重做 + 统计新口径 + 卡尾危险区（scene-1/2 落点）',
-      htmlSrcV4.includes('id="domains-empty"') && htmlSrcV4.includes('还没有可以共享的记忆')
+    check('v4/U-1 UI：空态只留新建域 + 统计新口径 + 卡尾危险区（scene-1/2 落点）',
+      htmlSrcV4.includes('id="domains-empty"') && htmlSrcV4.includes('还没有记忆域')
+        && htmlSrcV4.includes('只有本机也可以新建一个记忆域并开始记录')
+        && !htmlSrcV4.includes('domains-empty-invite') && !htmlSrcV4.includes('empty-sub')
         && consoleSrcV4.includes('退出并交接这个域…') && consoleSrcV4.includes('记忆域 ${items.length}')
         && consoleSrcV4.includes('已订阅'));
     check('v4 UI：自动签发入口已删除（无可配置入口）',

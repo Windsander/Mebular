@@ -9,7 +9,7 @@
 import { StarStage, namespaceColor, shortId } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_CARDS, IA_MCP_CARD, IA_ADVANCED_FIELDS, IA_MIGRATION, IA_EDITOR_PATHS, IA_INFO_BLOCKS, IA_SETTINGS_EXTRA } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_CARDS, IA_MCP_CARD, IA_ADVANCED_FIELDS, IA_MIGRATION, IA_EDITOR_PATHS, IA_INFO_BLOCKS, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 
@@ -19,6 +19,9 @@ const MOCK = params.get('mock') === '1';
 const POLL_MS = 3000;
 
 const ICONS = { online: '●', offline: '○', revoked: '⊘' };
+
+/** 折叠标题单一真源（IA_SETTINGS_FOLDS）；缺失时回退 id 便于定位。 */
+const foldLabel = (id) => IA_SETTINGS_FOLDS.find((fold) => fold.id === id)?.label ?? id;
 
 const state = {
   view: 'map',
@@ -82,39 +85,48 @@ let refreshSeq = 0;
 let refreshPromise = null;
 
 async function api(path, options = {}) {
-  const headers = { accept: 'application/json', ...(options.headers ?? {}) };
-  if (options.body !== undefined) headers['content-type'] = 'application/json';
-  if (state.token) headers.authorization = `Bearer ${state.token}`;
-  if (options.method && options.method !== 'GET') {
-    if (state.csrf) headers['x-mebular-csrf'] = state.csrf;
-  }
-  const res = await fetch(path, {
-    ...options,
-    credentials: 'same-origin',
-    headers,
-    ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
-    // 有界等待：serve 事件循环被同步探针占住时，慢请求到点中止——
-    // allSettled 得以完结、连接池得以释放（否则刷新永远等不到全部响应，控制台永久卡死）
-    signal: options.signal ?? AbortSignal.timeout(options.timeoutMs ?? 12000),
-  });
-  const csrfHeader = res.headers.get('x-mebular-csrf');
-  if (csrfHeader) state.csrf = csrfHeader;
-  const data = await res.json().catch(() => null);
-  if (!res.ok) {
-    if (res.status === 401 && !state.token) {
-      const token = window.prompt('serve 需要 bearer token（读需 memory.read，写需 memory.admin）：', '');
-      if (token) {
-        state.token = token.trim();
-        localStorage.setItem('mebular_token', state.token);
-        startEvents();
-      }
+  const send = async () => {
+    const headers = { accept: 'application/json', ...(options.headers ?? {}) };
+    if (options.body !== undefined) headers['content-type'] = 'application/json';
+    if (state.token) headers.authorization = `Bearer ${state.token}`;
+    if (options.method && options.method !== 'GET') {
+      if (state.csrf) headers['x-mebular-csrf'] = state.csrf;
     }
-    const error = new Error(data?.message ?? data?.error ?? `HTTP ${res.status}`);
-    error.status = res.status;
-    error.payload = data;
-    throw error;
-  }
-  return data;
+    const res = await fetch(path, {
+      ...options,
+      credentials: 'same-origin',
+      headers,
+      ...(options.body !== undefined ? { body: JSON.stringify(options.body) } : {}),
+      // 有界等待：serve 事件循环被同步探针占住时，慢请求到点中止——
+      // allSettled 得以完结、连接池得以释放（否则刷新永远等不到全部响应，控制台永久卡死）
+      signal: options.signal ?? AbortSignal.timeout(options.timeoutMs ?? 12000),
+    });
+    const csrfHeader = res.headers.get('x-mebular-csrf');
+    if (csrfHeader) state.csrf = csrfHeader;
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      if (res.status === 401 && !state.token) {
+        const token = window.prompt('serve 需要 bearer token（读需 memory.read，写需 memory.admin）：', '');
+        if (token) {
+          state.token = token.trim();
+          localStorage.setItem('mebular_token', state.token);
+          startEvents();
+        }
+      }
+      const error = new Error(data?.message ?? data?.error ?? `HTTP ${res.status}`);
+      error.status = res.status;
+      error.payload = data;
+      throw error;
+    }
+    return data;
+  };
+  // CSRF 403（长开页面 / 守护重启后旧 token）→ 重取一次 token，原样重试一次。
+  // 不刷新页面、不动表单；仍失败由 settings-ia.js 的共享 helper 给统一友好文案。
+  return withCsrfRetry(send, async () => {
+    const token = await refreshCsrfToken({ readCookie });
+    if (token) state.csrf = token;
+    return token;
+  });
 }
 
 function refresh() {
@@ -405,6 +417,7 @@ function renderDomains() {
   const layout = $('#domains-layout');
   const empty = $('#domains-empty');
   const note = $('#domains-note');
+  const newButton = $('#namespace-new');
   const items = state.namespaces ?? [];
 
   if (stats) {
@@ -423,11 +436,13 @@ function renderDomains() {
     if (layout) layout.hidden = true;
     if (empty) empty.hidden = false;
     if (note) note.hidden = true;
+    if (newButton) newButton.hidden = true; // 空态只留一处「新建记忆域」
     return;
   }
   if (layout) layout.hidden = false;
   if (empty) empty.hidden = true;
   if (note) note.hidden = false;
+  if (newButton) newButton.hidden = false;
   if (!items.some((n) => n.namespace === state.selectedNamespace)) {
     state.selectedNamespace = items[0].namespace;
   }
@@ -960,22 +975,18 @@ function renderCfgField(field) {
     control = `<input id="${id}" class="crt-input cfg-input" type="${type}" data-cfg-path="${escapeHtml(field.path)}" value="${escapeHtml(String(value))}" ${attrs} />`;
   }
   const defaultTag = initial.isDefault ? '<span class="cfg-default">默认</span>' : '';
-  const warnMark = field.warn ? '<span class="cfg-warn-mark" title="展开详情查看风险说明" aria-label="有风险说明">⚠</span>' : '';
+  const warnMark = field.warn ? '<span class="cfg-warn-mark" title="风险说明" aria-label="有风险说明">⚠</span>' : '';
   const foldedReason = runtimeFoldedReason(field);
   const helpBits = [
     field.help ? `<p class="cfg-help muted">${escapeHtml(field.help)}</p>` : '',
     foldedReason ? `<p class="cfg-help muted">${escapeHtml(foldedReason)}</p>` : '',
     field.warn ? `<p class="cfg-help cfg-warn">⚠ ${escapeHtml(field.warn)}</p>` : '',
   ].filter(Boolean);
-  // 轮 C：帮助 / 机制 / 警告墙收进「详情」；常显只留名称 + 控件 + 状态。
-  const more = helpBits.length
-    ? `<details class="cfg-more"><summary>详情</summary>${helpBits.join('')}</details>`
-    : '';
   return `<div class="cfg-row">
     <label class="cfg-label" for="${id}">${escapeHtml(field.label)}${defaultTag}${warnMark}</label>
     <div class="cfg-control">${control}
       ${runtimeCompareLine(field)}
-      ${more}
+      ${helpBits.join('')}
     </div>
   </div>`;
 }
@@ -1014,12 +1025,6 @@ function valueWithEffective(mainHtml, { configured, effective }) {
     + '</span>';
 }
 
-function cfgActionsBlock() {
-  // 简化轮：即时生效——改动即写入（无「保存/撤销」按钮）；需重启项写后自动重启生效。
-  // 轮 C：机制说明折叠，常显不占位。
-  return `<details class="page-more"><summary>改动如何生效</summary><p class="muted">改动即生效：需重启的项会自动重启生效（服务托管时 <code>mebular service restart</code>，否则给你手动命令）；即时项就地生效。</p></details>`;
-}
-
 function fieldOf(path) {
   const field = CONFIG_FIELDS_BY_PATH.get(path);
   // 容错：schema 缺项（旧服务端 / 载荷异常）时退化为文本行，不整页崩
@@ -1033,14 +1038,11 @@ function renderEditor(paths) {
 
 function renderCard(card) {
   return `
-    <article class="task-card${card.danger ? ' task-card-danger' : ''}" data-task="${escapeHtml(card.id)}">
-      <header class="task-card-head">
-        <h4>${escapeHtml(card.title)}</h4>
-        ${card.danger ? '<span class="crt-tag crt-tag-warn">危险项</span>' : ''}
-      </header>
-      <details class="task-card-more"><summary>这是什么</summary><p class="muted">${escapeHtml(card.desc)}</p></details>
+    <section class="settings-section${card.danger ? ' settings-danger' : ''}" data-task="${escapeHtml(card.id)}">
+      <h3>${escapeHtml(card.title)}${card.danger ? '<span class="crt-tag crt-tag-warn">危险项</span>' : ''}</h3>
+      <p class="settings-note muted">${escapeHtml(card.desc)}</p>
       ${renderEditor(card.fields)}
-    </article>`;
+    </section>`;
 }
 
 function renderAdvancedCards() {
@@ -1099,13 +1101,10 @@ function settingsSignature(activeTab) {
   ]);
 }
 
-/** 设置页折叠块稳定键（跨轮询保留展开态；不触碰 AI 专区的行内详情）。 */
+/** 设置页折叠块稳定键（跨轮询保留展开态；设置内只保留白名单折叠）。 */
 function settingsFoldKey(el) {
-  if (!el.matches?.('.cfg-more, .task-card-more, .page-more')) return null;
-  const task = el.closest('[data-task]')?.dataset.task ?? '';
-  const path = el.closest('.cfg-row')?.querySelector('[data-cfg-path]')?.dataset.cfgPath ?? '';
-  const summary = el.querySelector(':scope > summary')?.textContent?.trim() ?? '';
-  return `${task}|${path}|${summary}`;
+  const key = el.dataset?.settingsFold;
+  return key ?? null;
 }
 
 function renderSettings(activeTab = state.settingsTab ?? 'common') {
@@ -1160,6 +1159,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     <div class="settings-tabs" role="tablist" aria-label="设置页签">${IA_TABS.map(tabButton).join('')}${
       IA_SETTINGS_EXTRA.map((item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.label)}</button>`).join('')
     }</div>
+    <p class="settings-note muted">改动即生效：需重启的项会自动重启，即时项就地生效。</p>
     ${panel('common', `
       <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
       ${wizardRowHtml(typeof window.mebularDesktop?.openWizard === 'function')}
@@ -1167,30 +1167,29 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
         <h3>本机状态 <span class="badge badge-muted">只读</span></h3>
         ${kvRows([
           kvRow('P2P', s.network.enabled ? '已启用' : '未启用'),
-          kvRow('邀请服务', s.join?.enabled ? '已启用' : '未启用（点「邀请设备」可就地启用）'),
+          kvRow('邀请服务', s.join?.enabled ? '已启用' : '未启用（点顶栏「邀请设备」就地启用）'),
           kvRow('安全等级', securityLevel ? securityLevelLabel(securityLevel) : '—'),
         ])}
-        <div class="domain-actions"><button id="settings-invite-device" class="btn btn-small btn-crt" type="button" ${state.features.writes && !MOCK ? '' : 'disabled'}>＋ 邀请设备</button></div>
-        <p class="muted" style="font-size:11px">可编辑配置已归入「高级」与「MCP 接入」；安全等级、动态码与恢复码在「安全」。</p>
+        <p class="settings-note muted">可编辑配置在「高级」与「MCP 接入」；安全动作在「安全」。</p>
       </section>
       ${cloudCardHtml()}
-      ${cfgActionsBlock()}
     `)}
     ${panel('security', `<section id="settings-security-slot" class="settings-slot security-card" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
     ${panel('assistants', `<div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: { ...state, addForm: state.addForm ? assistantAddFormHtml(state.addForm) : '' } })}</div>`)}
     ${panel('mcp', `
-      <details class="page-more"><summary>MCP 接入说明</summary><p class="muted">Agent 经 MCP 连接本机；端口/鉴权/监听/TLS 改动会立即影响控制台自身访问方式，保存前会做组合校验与自锁确认。</p></details>
-      <div class="task-cards">${renderMcpCard()}</div>
-      ${cfgActionsBlock()}
+      ${renderMcpCard()}
+      <details class="settings-fold" id="mcp-danger-fold" data-settings-fold="mcp-danger">
+        <summary>${escapeHtml(foldLabel('mcp-danger'))}</summary>
+        <p class="muted">Agent 经 MCP 连接本机；端口/鉴权/监听/TLS 改动会立即影响控制台自身访问方式，保存前会做组合校验与自锁确认。</p>
+        <p class="muted">改到不可达时：<b>bearer</b> 可粘贴 <code>mebular token grant --scope memory.read,memory.admin</code> 的 token 自救；<b>oauth</b> 需 env secret，否则只能编辑 <code>config.json</code> 改回并重启。</p>
+      </details>
     `)}
     ${panel('advanced', `
-      <details class="page-more"><summary>高级项说明</summary><p class="muted">高级项改动前请确认理解其安全含义（尤其监听地址与 relay）；MCP 端口/鉴权/TLS 在「MCP 接入」。自动策略（反熵节奏/快照阈值/召回阈值）不在此处暴露，细节请直接编辑 config.json。</p></details>
-      <div class="task-cards">${renderAdvancedCards()}</div>
+      <p class="settings-note muted">高级项改动前请确认理解其安全含义（尤其监听地址与 relay）；自动策略不在 GUI 暴露，细节请直接编辑 config.json。</p>
+      ${renderAdvancedCards()}
       ${renderAdvanced()}
-      ${cfgActionsBlock()}
-      <!-- 简化轮：诊断并入高级底部只读折叠 -->
-      <details class="diag-fold" id="diag-fold">
-        <summary>诊断与恢复（只读）</summary>
+      <details class="settings-fold" id="diag-fold" data-settings-fold="diagnostics">
+        <summary>${escapeHtml(foldLabel('diagnostics'))}</summary>
         ${renderDiagnostics()}
       </details>
     `)}
@@ -1230,7 +1229,7 @@ const SECURITY_LEVEL_TITLE = {
 };
 const SECURITY_LEVEL_NOTE = {
   low: '无额外门槛（信任链仍在）。',
-  medium: '做加入/添加/移出这类敏感动作前，需要输入 6 位动态码。它能挡住拿错你鼠标的手和一时手滑，挡不住拿走整台设备的人（钥匙就在设备里）。要防设备被拿走，请升级到『高 · 设备会签』。',
+  medium: '做加入/移出这类敏感动作前，需要输入 6 位动态码。它能挡住拿错你鼠标的手和一时手滑，挡不住拿走整台设备的人（钥匙就在设备里）。要防设备被拿走，请升级到『高 · 设备会签』。',
   high: '敏感动作需要另一台已受准入的设备批准（人眼核对配对号）；防设备被窃伪造。',
 };
 const SECURITY_REJECTION_LABEL = {
@@ -1361,13 +1360,11 @@ function securityCardHtml() {
 
   const lowerTiers = ['low', 'medium', 'high'].filter((tier) => SECURITY_LEVEL_ORDER[tier] < SECURITY_LEVEL_ORDER[level]);
   const downgrade = lowerTiers.length > 0
-    ? `<details class="cfg-more sec-more">
-        <summary>降级…</summary>
-        <div class="sec-downgrade">
-          ${lowerTiers.map((tier) => `<button class="btn btn-small btn-crt btn-crt-danger" type="button" data-security-action="downgrade" data-level="${tier}" ${writes ? '' : 'disabled'}>降到${securityLevelLabel(tier)}</button>`).join('')}
-          <p class="muted">${level === 'high' ? '高档降级需要另一台已准入设备会签（或离线恢复码）。' : '中档降级需要本机 6 位动态码。'}</p>
-        </div>
-      </details>`
+    ? `<div class="sec-downgrade sec-downgrade-inline">
+        <span class="sec-downgrade-label muted">降级：</span>
+        ${lowerTiers.map((tier) => `<button class="btn btn-small btn-crt btn-crt-danger" type="button" data-security-action="downgrade" data-level="${tier}" ${writes ? '' : 'disabled'}>降到${securityLevelLabel(tier)}</button>`).join('')}
+        <span class="muted">${level === 'high' ? '高档降级需要另一台已准入设备会签（或离线恢复码）。' : '中档降级需要本机 6 位动态码。'}</span>
+      </div>`
     : '';
 
   return `
@@ -1389,12 +1386,12 @@ function securityCardHtml() {
       <dt>恢复码</dt><dd class="kv-value">${recoveryStatus}</dd><dd class="kv-action sec-actions">${recoveryActions}</dd>
     </dl>
     ${rejectionBlock}
-    ${admitted.length > 0 ? `<details class="cfg-more"><summary>有资格的设备（${admitted.length}）</summary><p class="muted">${escapeHtml(admitted.join(' · '))}</p><p class="muted">会签要求批准设备已准入（admitted）；没有资格时先让已准入设备批准它的一条记录。</p></details>` : ''}
-    <details class="cfg-more"><summary>这一档的边界（诚实说明）</summary>
-      <p class="muted">中档的种子就在本机文件里：设备被拿走时，种子一并被拿走——中档防的是顺手和误操作，不防窃。</p>
+    ${admitted.length > 0 ? `<p class="settings-note muted sec-admitted" data-security-admitted>有资格的设备（${admitted.length}）：${escapeHtml(admitted.join(' · '))}。会签要求批准设备已准入；没有资格时先让已准入设备批准它的一条记录。</p>` : ''}
+    <div class="sec-boundary" data-security-boundary>
+      <p class="muted">这一档的边界：中档种子就在本机文件里，设备被拿走时种子一并被拿走——防的是顺手和误操作，不防窃。</p>
       <p class="muted">高档的代价：敏感操作需要另一台你自己的设备在场；它不在时，用你离线保存的恢复码。</p>
       <p class="muted">高档不能追认/否决低档时期的历史动作。全部设备丢失动态码种子时：由 root 重置种子；无主密钥备份则不可恢复。</p>
-    </details>
+    </div>
     ${downgrade}
   `;
 }
@@ -2053,10 +2050,9 @@ function renderDiagnostics() {
     <section class="settings-section" data-info-block="rawConfig">
       <h3>完整配置 <span class="badge badge-muted">只读</span></h3>
       <p class="muted" style="font-size:11px">${escapeHtml(configPath)}${state.rawConfig?.parseError ? `（解析失败：${escapeHtml(state.rawConfig.parseError)}）` : ''}</p>
-      <details class="cfg-raw">
-        <summary>展开 / 收起</summary>
+      <div class="cfg-raw-block">
         <pre class="snippet">${escapeHtml(JSON.stringify(currentConfigFile(), null, 2))}</pre>
-      </details>
+      </div>
       <div class="domain-actions">
         <button id="cfg-copy-all" class="btn btn-small btn-crt" type="button">复制完整配置</button>
         <button id="cfg-download" class="btn btn-small btn-crt" type="button">下载 config.json</button>
@@ -2147,6 +2143,11 @@ function renderAbout() {
       ])}
     </section>
 
+    ${convergenceAboutSection()}
+
+    <details class="settings-fold fold-about-runtime" id="about-runtime-fold" data-settings-fold="about-runtime">
+      <summary>${escapeHtml(foldLabel('about-runtime'))}</summary>
+      <div class="settings-fold-body">
     <section class="settings-section" data-info-block="syncRate">
       <h3>同步节奏 <span class="badge badge-muted">只读 · 默认常开，不建议关闭</span></h3>
       ${kvRows(statusRows().filter((row) => row.path === 'sync.autoSync' || row.path === 'sync.pushOnWrite').map((row) => kvRow(
@@ -2159,8 +2160,6 @@ function renderAbout() {
       )))}
       <p class="muted" style="font-size:11px">默认常开，不建议关闭；如需改动请手工编辑 config.json 的 <code>sync.autoSync</code> / <code>sync.pushOnWrite</code>。</p>
     </section>
-
-    ${convergenceAboutSection()}
 
     <section class="settings-section" data-info-block="statusOnly">
       <h3>只读状态（自动推导） <span class="badge badge-muted">只读</span></h3>
@@ -2240,6 +2239,8 @@ function renderAbout() {
       <p class="muted" style="font-size:11px;margin:0 0 8px">Agent 经 MCP、人类经 <code>mebular &lt;name&gt;</code> 调用同一套 handler；GUI 只做守护与订阅配置，不新增操作。</p>
       <div class="chip-wrap">${(s.tools ?? []).map((t) => `<span class="crt-tag">${escapeHtml(t)}</span>`).join(' ')}</div>
     </section>
+      </div>
+    </details>
   `;
   body.querySelectorAll('[data-copy]').forEach((button) => {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
@@ -3808,12 +3809,6 @@ $('#settings-body').addEventListener('click', (event) => {
     if (typeof window.mebularDesktop?.openWizard === 'function') void window.mebularDesktop.openWizard();
     return;
   }
-  // E1：常用页的邀请入口；未启用 joinService 时由邀请弹层就地一键启用
-  if (event.target.closest('#settings-invite-device')) {
-    $('#settings').hidden = true;
-    void openInvite();
-    return;
-  }
   // E1：诊断内「手动连接已知设备」（网内传输修复，不改变入网信任）
   if (event.target.closest('#diag-open-wizard')) {
     openWizard();
@@ -4018,7 +4013,8 @@ function showInviteResult(res) {
     ${cloudLine}
     <p class="cfg-help muted">对方已用过 Mebular：让 TA 在控制台点「加入忆云」粘贴此令牌；新设备：扫码或粘贴令牌。</p>
     ${res.securityApproval ? '<p class="crt-warn">已随令牌带上会签批准（新设备首现记录内嵌 cosign）。</p>' : ''}
-    <details class="asst-detail"><summary>详情</summary>
+    <details class="settings-fold fold-invite" id="invite-detail-fold" data-settings-fold="invite">
+      <summary>${escapeHtml(foldLabel('invite'))}</summary>
       <p class="cfg-help muted">令牌即入网权限：一次性、短时效，仅当面或可信局域网传递；新设备入网后本页即可关闭。</p>
       ${endpointEditor}
       <dl class="settings-kv">
@@ -4048,8 +4044,7 @@ function showInviteResult(res) {
 }
 
 $('#invite-device').addEventListener('click', openInvite);
-// v4 空态的去向动作（顶栏「邀请设备」同款）
-$('#domains-empty-invite')?.addEventListener('click', openInvite);
+// 共享页只做域管理：空态唯一 CTA = 新建记忆域；邀请只在顶栏。
 $('#domains-empty-new')?.addEventListener('click', () => { void createNamespace(); });
 $('#namespace-new')?.addEventListener('click', () => { void createNamespace(); });
 $('#invite-close').addEventListener('click', () => {
@@ -4620,7 +4615,7 @@ function renderWizard() {
       <p class="wizard-note">一台<strong>已加入同一忆云</strong>的设备一直显示未连接时，可在这里手动粘贴对方地址建立传输。此操作只修复连接，不改变入网信任与订阅。</p>
       <div class="field"><label>对方 deviceId</label><input id="wizard-device" type="text" value="${escapeHtml(wizardState.deviceId)}" placeholder="device-B" /></div>
       <div class="field"><label>对方 multiaddr</label><textarea id="wizard-address" placeholder="/ip4/…/tcp/…/p2p/…">${escapeHtml(wizardState.address)}</textarea></div>
-      <details class="cfg-more">
+      <details class="wizard-more">
         <summary>我的连接信息 ›</summary>
         <div class="field"><label>本机 deviceId</label><div class="copyable"><code>${escapeHtml(device.deviceId ?? '—')}</code><button class="btn btn-small" data-copy="${escapeHtml(device.deviceId ?? '')}">复制</button></div></div>
         <div class="field"><label>本机 peerId</label><div class="copyable"><code>${escapeHtml(device.peerId ?? '—')}</code>${device.peerId ? `<button class="btn btn-small" data-copy="${escapeHtml(device.peerId)}">复制</button>` : ''}</div></div>

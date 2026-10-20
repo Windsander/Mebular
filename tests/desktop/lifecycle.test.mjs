@@ -87,6 +87,10 @@ describe('R-1 中-9 托盘菜单分组', () => {
     ]);
   });
 
+  it('U-1 文案：托盘邀请入口统一为「邀请设备」（id/绑定不变）', () => {
+    expect(model.find((item) => item.id === 'add-device')?.label).toBe('邀请设备');
+  });
+
   it('停止/重启带确认标志；登录时启动为 checkbox 且回显当前值', () => {
     const stop = model.find((i) => i.id === 'daemon-stop');
     const restart = model.find((i) => i.id === 'daemon-restart');

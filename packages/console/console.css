@@ -778,21 +778,44 @@ body.modal-open { overflow: hidden; }
 .sector-list { list-style: none; margin: 0; padding: 6px; display: grid; gap: 4px; }
 .sector-item {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  width: 100%;
+  font-size: 12px;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0;
+  text-shadow: inherit;
+}
+.sector-main {
+  display: grid;
   grid-template-columns: 12px minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
   width: 100%;
   text-align: left;
   font: inherit;
-  font-size: 12px;
   color: inherit;
   background: transparent;
-  border: 1px solid transparent;
-  border-radius: 6px;
+  border: 0;
+  border-radius: 5px;
   padding: 8px 9px;
   cursor: pointer;
-  text-shadow: inherit;
 }
+.sector-main:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.sector-more {
+  align-self: center;
+  background: transparent;
+  border: 0;
+  color: var(--crt-dim);
+  font: inherit;
+  padding: 6px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.sector-more:hover { color: var(--crt-bright, #9dffcf); background: rgba(8, 38, 26, 0.35); }
 .sector-item:hover { border-color: var(--crt-border-soft); background: rgba(8, 38, 26, 0.35); }
 .sector-item.is-active {
   border-color: rgba(120, 255, 190, 0.55);
@@ -926,21 +949,18 @@ body.modal-open { overflow: hidden; }
 .cfg-control .cfg-toggle { order: 0; }
 .cfg-help { flex: 1 1 100%; margin: 0; font-size: 10.5px; line-height: 1.5; }
 .cfg-warn { color: #ffd27a; }
-/* 轮 C · 呈现分级：帮助 / 机制 / 警告墙默认折叠（常显只留名称 + 控件 + 状态） */
-.cfg-more { flex: 1 1 100%; margin: 0; }
-.cfg-more > summary { cursor: pointer; color: var(--crt-dim); font-size: 11px; line-height: 1.5; width: fit-content; }
-.cfg-more > summary:hover { color: var(--crt); }
-.cfg-more[open] > summary { margin-bottom: 2px; }
-.cfg-more .cfg-help + .cfg-help { margin-top: 4px; }
+/* U-1 · 设置折叠统一：只保留白名单折叠（诊断 / MCP 危险 / 关于运行状态 / 邀请详情）。 */
+.settings-note { margin: 0 0 8px; font-size: 11px; line-height: 1.6; }
+.settings-fold { margin: 12px 0 0; padding-top: 8px; border-top: 1px dashed rgba(80, 255, 170, 0.22); }
+.settings-fold > summary { cursor: pointer; color: var(--crt-dim); font-size: 11.5px; letter-spacing: 0.3px; width: fit-content; }
+.settings-fold > summary:hover { color: var(--crt); }
+.settings-fold[open] > summary { margin-bottom: 6px; color: var(--crt-bright, #9dffcf); }
+.settings-fold-body { display: grid; gap: var(--section-gap); }
+.wizard-more { margin: 8px 0; }
+.wizard-more > summary { cursor: pointer; color: var(--muted); font-size: 12px; width: fit-content; }
+.wizard-more > summary:hover { color: var(--text); }
 .cfg-warn-mark { margin-left: 4px; color: #ffd27a; font-size: 11px; }
-.task-card-more { margin: 0 0 4px; }
-.task-card-more > summary { cursor: pointer; color: var(--crt-dim); font-size: 11px; width: fit-content; }
-.task-card-more > summary:hover { color: var(--crt); }
-.task-card-more p { margin: 4px 0 0; font-size: 11px; line-height: 1.6; }
-.page-more { margin: 0 0 8px; }
-.page-more > summary { cursor: pointer; color: var(--crt-dim); font-size: 11px; width: fit-content; }
-.page-more > summary:hover { color: var(--crt); }
-.page-more p { margin: 4px 0 0; font-size: 11px; line-height: 1.6; }
+.cfg-help + .cfg-help { margin-top: 4px; }
 /* 预警常显一行；完整三元组只在异常时展开（见 runtimeCompareLine） */
 .cfg-effective .cfg-ok { color: var(--ok); }
 .cfg-pending { color: #ffd27a; }
@@ -962,9 +982,8 @@ body.modal-open { overflow: hidden; }
 .cfg-reason .cfg-eff-key { color: #ffd27a; opacity: 0.85; }
 .cfg-effective.is-mismatch { color: #ffd27a; }
 .cfg-effective.is-mismatch .cfg-eff-key { color: #ffd27a; }
-.cfg-raw { margin: 4px 0 8px; }
-.cfg-raw summary { cursor: pointer; color: var(--crt-dim); font-size: 11px; margin-bottom: 6px; }
-.cfg-raw .snippet { max-height: 260px; }
+.cfg-raw-block { margin: 4px 0 8px; }
+.cfg-raw-block .snippet { max-height: 260px; }
 
 .crt-input::placeholder { color: rgba(140, 255, 200, 0.26); }
 .cfg-default {
@@ -1029,20 +1048,9 @@ body.modal-open { overflow: hidden; }
 .settings-tab:hover { color: #dbe9ff; }
 .settings-tab.is-active { color: var(--crt-bright, #9dffcf); border-color: var(--border); background: rgba(10, 16, 32, 0.55); }
 .settings-panel[hidden] { display: none; }
-.task-cards { display: grid; gap: var(--section-gap); grid-template-columns: minmax(0, 1fr); }
-.task-card {
-  /* 用 outline（不参与布局）代替 border：保证常用/高级两 Tab 的 control 左边界完全一致 */
-  border: none;
-  outline: 1px solid var(--border);
-  outline-offset: -1px;
-  border-radius: var(--radius);
-  background: rgba(10, 16, 32, 0.55);
-  padding: var(--section-gap) 0;
-}
-.task-card-danger { border-color: rgba(214, 90, 40, 0.5); }
-.task-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
-.task-card-head h4 { margin: 0; font-size: 13px; }
-.task-card-desc { font-size: 11px; margin: 0 0 8px; }
+/* U-1：设置各区统一 section（不再卡片套卡片）；危险区只用标题色与顶部边线区分。 */
+.settings-danger { border-top-color: rgba(214, 90, 40, 0.5); }
+.settings-danger > h3 { color: #ffd27a; }
 .cfg-actions { align-items: center; }
 .cfg-state { color: var(--muted); font-size: 11px; }
 
@@ -1179,10 +1187,10 @@ body.modal-open { overflow: hidden; }
 .asst-line { margin: 2px 0; font-size: 12px; color: var(--muted); }
 .asst-line.todo { color: var(--accent-2); }
 .asst-fold .asst-name { font-size: 12px; }
-.asst-detail { margin-top: 4px; font-size: 12px; }
-.asst-detail > summary { cursor: pointer; color: var(--muted); }
-.asst-detail > summary:hover { color: var(--text); }
+.asst-detail-panel { margin-top: 4px; font-size: 12px; }
+.asst-detail-panel p { margin: 2px 0; }
 .asst-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.asst-output { margin-top: 4px; }
 .settings-resident { margin-bottom: 4px; }
 .settings-tab-extra { margin-left: auto; }
 /* 首屏叠加层：状态总览条（纯只读，不挡星图交互；fixed 钉视口，免受容器定位影响） */
@@ -1246,7 +1254,9 @@ html { scrollbar-gutter: stable; }
 
 /* 简化轮：记忆共享 · 参与开关（v4：状态文字化，开关贴右） */
 .ns-subscribe { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
-.diag-fold { margin-top: 14px; }
+.sec-boundary { margin-top: 8px; border-top: 1px dashed rgba(80, 255, 170, 0.18); padding-top: 6px; }
+.sec-boundary p { margin: 3px 0; font-size: 11px; line-height: 1.6; }
+.sec-admitted { margin-top: 8px; }
 
 /* ---------- v4 记忆共享：参与事实 · 危险区 · 空态（scene-1/2） ---------- */
 .sector-meta.off { color: rgba(140, 255, 200, 0.35); }
@@ -1290,7 +1300,6 @@ details.share[open] summary::before { content: "▾ "; }
 .empty-glyph { font-size: 20px; color: var(--crt-dim); margin-bottom: 10px; }
 .empty-big { color: var(--crt-bright); font-size: 14px; font-weight: 700; margin: 0 0 10px; }
 .empty-text { color: rgba(140, 255, 200, 0.62); font-size: 12.5px; line-height: 1.8; margin: 0 0 18px; }
-.empty-sub { margin: 12px 0 0; font-size: 11px; }
 /* 面板视图收纳设备卡空壳：非星图视图整体隐藏右栏（窄屏不再占底部一行） */
 .layout.is-panel-view .aside { display: none; }
 /* 窄屏：常驻横幅不再压副标题/统计——面板内容随横幅让位（toast 不受影响） */

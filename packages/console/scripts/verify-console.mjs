@@ -1798,7 +1798,7 @@ try {
       method: 'POST', headers: qrHeaders, body: JSON.stringify({ ttlMs: 60000 }),
     });
     const inviteJson = await inviteRes.json().catch(() => null);
-    // 内置 @mebular/qr：邀请响应必须提供 SVG（不再有缺包降级）
+    // 应用层 @mebular/qr：邀请响应必须提供 SVG（不再有缺包降级）
     check('C7 邀请响应提供二维码（qrSvg 为 SVG 字符串）',
       inviteRes.status === 201 && String(inviteJson?.qrSvg ?? '').startsWith('<svg'),
       { status: inviteRes.status, qr: String(inviteJson?.qrSvg ?? '').startsWith('<svg') ? 'svg' : 'missing' });
@@ -1806,10 +1806,12 @@ try {
     check('C7 控制台邀请面板渲染二维码与订阅说明',
       ['扫码即通', 'qrSvg', '自行订阅'].every((token) => consoleSrc6.includes(token)));
     const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
-    const qrVendor = join(rootDir, 'packages', 'qr', 'src', 'third-party', 'qrcode-generator', 'qrcode.ts');
-    check('C7 QR 为内置 app-layer 能力（无 qrcode 运行时依赖）',
-      !pkg.dependencies?.qrcode && !pkg.optionalDependencies?.qrcode && existsSync(qrVendor),
-      { qrcode: pkg.optionalDependencies?.qrcode ?? null });
+    const qrPkg = JSON.parse(await readFile(join(rootDir, 'packages', 'qr', 'package.json'), 'utf-8'));
+    check('C7 QR 为独立 app-layer 包（qrcode-generator 精确 pin，非 vendored）',
+      !pkg.dependencies?.qrcode && !pkg.optionalDependencies?.qrcode
+        && qrPkg.dependencies?.['qrcode-generator'] === '2.0.4'
+        && !existsSync(join(rootDir, 'packages', 'qr', 'src', 'third-party')),
+      { encoder: qrPkg.dependencies?.['qrcode-generator'] ?? null });
   }
 
   // ---------- C4：NAT 打洞（只读渲染断言） ----------

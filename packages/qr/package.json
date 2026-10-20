@@ -1,7 +1,7 @@
 {
   "name": "@mebular/qr",
   "version": "0.1.0",
-  "description": "Mebular app-layer QR capability (zero runtime dependencies; core never imports this package)",
+  "description": "Mebular app-layer QR capability: small package with one direct dependency (qrcode-generator); core never imports it",
   "license": "MIT",
   "private": false,
   "author": "Windsander",
@@ -31,5 +31,7 @@
     "type": "git",
     "url": "https://github.com/Windsander/Mebular.git"
   },
-  "dependencies": {}
+  "dependencies": {
+    "qrcode-generator": "2.0.4"
+  }
 }

@@ -2,7 +2,7 @@
 // C7 验收：扫码即通（一次性令牌 + 二维码 + 委派证书 + 降级）
 //
 // Part A：令牌往返/验签；默认不携带任何自动授权字段；可选 securityApproval 随签名体。
-// Part B：内置零依赖 QR → 终端/SVG（不依赖运行时可选包）。
+// Part B：应用层 QR（qrcode-generator 普通依赖）→ 终端/SVG。
 // Part C：join 服务签发委派证书；二次兑换/过期被拒；响应携带来自身份的 securityApproval。
 // Part E：CLI `--qr` 与 `--token` 等价（解析层）。
 //
@@ -92,7 +92,7 @@ try {
   const inline = encodeJoinToken(plain);
   const terminal = await renderTerminalQr(inline);
   const svg = await renderSvgQr(inline);
-  check('B. 内置编码器 → 终端 + SVG 二维码产出（内容=令牌文本）',
+  check('B. @mebular/qr → 终端 + SVG 二维码产出（内容=令牌文本）',
     Boolean(terminal && svg) && terminal.value.length > 0 && svg.value.startsWith('<svg') && !svg.value.includes('mebular://'),
     { terminalKind: terminal?.kind, svgBytes: svg?.value.length });
 

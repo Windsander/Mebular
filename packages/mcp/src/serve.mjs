@@ -1948,7 +1948,7 @@ export async function startHttpServer({
 
     // 新设备上车：生成一次性加入令牌（需 joinService 已启用；由守护 identity 生成）
     if (path === '/admin/api/invite') {
-      // C7：二维码 + 文本一起给（QR 内容 = 内联令牌文本；内置编码器失败 → 只给文本，不报错）
+      // C7：二维码 + 文本一起给（QR 内容 = 内联令牌文本；QR 编码失败 → 只给文本，不报错）
       if (typeof deviceId !== 'string' || typeof joinEndpoint !== 'string') {
         return sendJson(res, 409, {
           ok: false,
@@ -2014,7 +2014,7 @@ export async function startHttpServer({
       return sendJson(res, 201, {
         ok: true,
         token: inline,
-        // C7：服务端用内置零依赖编码器渲染 SVG（data-uri 由前端组装）；极端失败时回退 null + qrWarnings
+        // C7：服务端用 @mebular/qr 渲染 SVG（data-uri 由前端组装）；极端失败时回退 null + qrWarnings
         qrSvg: qrSvg ? qrSvg.value : null,
         ...(qrWarnings.length > 0 ? { qrWarnings } : {}),
         endpoint,

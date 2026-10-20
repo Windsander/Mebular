@@ -196,8 +196,7 @@
       "!packages/fleet/src/**/*.d.ts",
       "packages/service/src/**/*.ts",
       "!packages/service/src/**/*.d.ts",
-      "packages/qr/src/**/*.ts",
-      "!packages/qr/src/third-party/**"
+      "packages/qr/src/**/*.ts"
     ],
     "coveragePathIgnorePatterns": [
       "/node_modules/",

@@ -3,7 +3,8 @@
 //
 // 1) 對六個可發布套件（@mebular/core / qr / service / fleet / mcp / skill）npm pack；
 //    檢驗 tarball 內容，且 mcp/fleet 內的 `@mebular/*` 已於 prepack 由 `file:` 改寫為
-//    `^0.1.0`，pack 後本地依賴已還原、備份已清除。
+//    `^0.1.0`，pack 後本地依賴已還原、備份已清除。`@mebular/qr` 的
+//    `qrcode-generator@2.0.4` 是普通 npm 依賴（非 vendored），安裝時由 registry 解析。
 // 2) 用產出的 tarball 在乾淨目錄安裝；以安裝後的 `mebular status`、`mebular mcp`
 //    （真实 MCP client）、`fleet --version` 與 `@mebular/skill/scripts/install.mjs` 做冒煙。
 // 乾淨環境退出碼 0。前置：npm run build。
@@ -77,7 +78,9 @@ try {
   const mcpManifest = manifestOf(mcp.file);
   const fleetManifest = manifestOf(fleet.file);
   const coreManifestForDeps = manifestOf(core.file);
+  const qrManifestForDeps = manifestOf(qr.file);
   check('core tarball 依賴 @mebular/qr=^0.1.0', coreManifestForDeps.dependencies?.['@mebular/qr'] === '^0.1.0', coreManifestForDeps.dependencies?.['@mebular/qr']);
+  check('qr tarball 依賴 qrcode-generator=2.0.4（精確 pin）', qrManifestForDeps.dependencies?.['qrcode-generator'] === '2.0.4', qrManifestForDeps.dependencies?.['qrcode-generator']);
   check('mcp tarball 依賴 @mebular/core=^0.1.0', mcpManifest.dependencies?.['@mebular/core'] === '^0.1.0', mcpManifest.dependencies?.['@mebular/core']);
   check('mcp tarball 依賴 @mebular/fleet=^0.1.0', mcpManifest.dependencies?.['@mebular/fleet'] === '^0.1.0', mcpManifest.dependencies?.['@mebular/fleet']);
   check('fleet tarball 依賴 @mebular/core=^0.1.0', fleetManifest.dependencies?.['@mebular/core'] === '^0.1.0', fleetManifest.dependencies?.['@mebular/core']);
@@ -110,10 +113,9 @@ try {
   const fleetFiles = listTarball(fleet.file);
   const mcpFiles = listTarball(mcp.file);
   const skillFiles = listTarball(skill.file);
-  check('qr tarball 含 dist/index.js + LICENSE + vendored LICENSE',
+  check('qr tarball 含 dist/index.js + LICENSE，且不含 vendored 源码',
     qrFiles.includes('package/dist/index.js') && qrFiles.includes('package/LICENSE')
-      && qrFiles.includes('package/src/third-party/qrcode-generator/qrcode.ts')
-      && qrFiles.includes('package/src/third-party/qrcode-generator/LICENSE'));
+      && qrFiles.every((file) => !file.includes('third-party')));
   check('core tarball 含 dist/index.js', coreFiles.includes('package/dist/index.js'));
   check('core tarball 含 package.json', coreFiles.includes('package/package.json'));
   check('service tarball 含 dist/index.js', serviceFiles.includes('package/dist/index.js'));
@@ -126,6 +128,8 @@ try {
   );
 
   // ---------- tarball 安裝冒煙 ----------
+  // @mebular/qr 依賴 qrcode-generator@2.0.4（普通 npm 依賴）：乾淨目錄安裝會從
+  // registry 解析它，因此本步驟需要 registry（CI 有網路）。
   await writeFile(join(work, 'package.json'), '{"name":"mebular-publish-smoke","private":true,"version":"0.0.0"}\n', 'utf-8');
   execFileSync(
     npm,
@@ -152,10 +156,12 @@ try {
   );
   const installedQr = JSON.parse(await readFile(join(work, 'node_modules', '@mebular', 'qr', 'package.json'), 'utf-8'));
   check('tarball 安裝：@mebular/qr@0.1.0', installedQr.version === '0.1.0', installedQr.version);
+  const installedQrEncoder = JSON.parse(await readFile(join(work, 'node_modules', 'qrcode-generator', 'package.json'), 'utf-8'));
+  check('tarball 安裝：qrcode-generator@2.0.4 由 registry 解析', installedQrEncoder.version === '2.0.4', installedQrEncoder.version);
   const qrModule = await import(pathToFileURL(join(work, 'node_modules', '@mebular', 'qr', 'dist', 'index.js')).href);
   const qrSmoke = await qrModule.renderSvgQr('mebular-publish-smoke');
   const qrTerm = await qrModule.renderTerminalQr('mebular-publish-smoke');
-  check('tarball 安裝：QR 内置编码器可渲染 SVG/terminal',
+  check('tarball 安裝：QR 套件可渲染 SVG/terminal',
     Boolean(qrSmoke?.value.startsWith('<svg')) && Boolean(qrTerm?.value.length > 0));
 
   const bin = join(work, 'node_modules', '.bin', 'mebular');
@@ -210,8 +216,8 @@ try {
   check('F-INST-1 根依賴含 mcp 運行時（zod + @modelcontextprotocol/server + qr）',
     Boolean(coreManifest.dependencies?.zod) && Boolean(coreManifest.dependencies?.['@modelcontextprotocol/server']) && coreManifest.dependencies?.['@mebular/qr'] === '^0.1.0');
 
-  // 根 tarball + qr tarball 全域安裝到獨立 prefix（本地 smoke 沒有 registry；
-  // 正式發布時 qr 先於 core 發布，依賴可由 registry 解析）
+  // 根 tarball + qr tarball 全域安裝到獨立 prefix；qr 的 qrcode-generator 依賴
+  // 從 registry 解析（正式發布時 qr 先於 core 發布）。
   const gprefix = join(work, 'gprefix');
   execFileSync(npm, ['install', '-g', '--prefix', gprefix, core.file, qr.file, '--no-audit', '--no-fund', '--loglevel=error'], {
     cwd: work,

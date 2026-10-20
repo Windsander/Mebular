@@ -167,7 +167,7 @@ describe('S2-1 TOTP', () => {
     expect(share.groups.replace(/\s/g, '')).toBe(secret);
     expect(share.otpauth).toContain('otpauth://totp/');
     expect(share.fingerprint).toHaveLength(8);
-    // QR 开启：内置编码器必须可用，同时保留文本/otpauth
+    // QR 开启：app-layer 编码器必须可用，同时保留文本/otpauth
     const withQr = await renderTotpShare(secret, 'device-A', { qr: true });
     expect(withQr.qrText?.length).toBeGreaterThan(0);
     expect(withQr.groups.replace(/\s/g, '')).toBe(secret);

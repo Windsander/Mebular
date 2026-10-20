@@ -21,10 +21,13 @@ extraResources:
     to: packages/service/dist
   - from: ../../packages/fleet/dist
     to: packages/fleet/dist
-  # App-layer QR capability: both fleet CLI and MCP server resolve @mebular/qr
-  # from the resources node_modules tree. The encoder is vendored, zero deps.
+  # App-layer QR capability: fleet CLI and MCP server resolve @mebular/qr from
+  # the resources node_modules tree. @mebular/qr has one direct npm dependency
+  # (qrcode-generator, zero transitive deps), so ship that package too.
   - from: ../../packages/qr
     to: node_modules/@mebular/qr
+  - from: ../../node_modules/qrcode-generator
+    to: node_modules/qrcode-generator
   - from: ../../packages/console
     to: packages/console
   - from: ../../packages/skill

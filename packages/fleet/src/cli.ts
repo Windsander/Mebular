@@ -811,7 +811,7 @@ async function runInvite(args: Args): Promise<number> {
     const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
     if (typeof args['token-file'] === 'string') await writeJoinCodeFile(args['token-file'], inline);
 
-    // C7：二维码 + 文本一起提供（二维码内容 = 内联令牌文本；内置编码器失败时只给文本，不报错）
+    // C7：二维码 + 文本一起提供（二维码内容 = 内联令牌文本；QR 编码失败时只给文本，不报错）
     const warnings: string[] = [];
     const terminalQr = args['no-qr'] === true ? null : await renderTerminalQr(inline, { onWarn: (m) => warnings.push(m) });
     const svgQr = args['no-qr'] === true ? null : await renderSvgQr(inline, { onWarn: (m) => warnings.push(m) });

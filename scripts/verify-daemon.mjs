@@ -147,7 +147,7 @@ try {
       const [fFleetSvg, fMcpSvg, fFleetTerm, fMcpTerm] = await Promise.all([
         fleetJt.renderSvgQr(qrText), mcpQr.renderSvgQr(qrText), fleetJt.renderTerminalQr(qrText), mcpQr.renderTerminalQr(qrText),
       ]);
-      check('C7 二维码渲染跨包一致（内置编码器）',
+      check('C7 二维码渲染跨包一致（同一 @mebular/qr 依赖）',
         Boolean(fFleetSvg && fMcpSvg && fFleetTerm && fMcpTerm)
           && fFleetSvg.value === fMcpSvg.value && fFleetTerm.value === fMcpTerm.value,
         { svg: Boolean(fFleetSvg), term: Boolean(fFleetTerm) });

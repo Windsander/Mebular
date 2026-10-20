@@ -731,7 +731,7 @@ describe('S2 覆盖率补齐 · 备份解析/恢复失败', () => {
 });
 
 describe('S2 覆盖率补齐 · QR 渲染分支', () => {
-  test('renderTotpShare/TotpShareSvg 的 qr 开关与内置编码器', async () => {
+  test('renderTotpShare/TotpShareSvg 的 qr 开关与 app-layer 编码器', async () => {
     const secret = generateTotpSecret();
     const text = await renderTotpShare(secret, 'device-A');
     expect(text.qrText?.length).toBeGreaterThan(0);

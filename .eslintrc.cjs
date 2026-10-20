@@ -6,7 +6,7 @@ module.exports = {
   plugins: ['@typescript-eslint'],
   extends: ['eslint:recommended', 'plugin:@typescript-eslint/recommended'],
   env: { node: true, es2022: true },
-  ignorePatterns: ['dist/', 'node_modules/', 'coverage/', 'packages/qr/src/third-party/'],
+  ignorePatterns: ['dist/', 'node_modules/', 'coverage/'],
   rules: {
     // 与 strict TS 配合后的务实放宽
     '@typescript-eslint/no-explicit-any': 'off', // 图载荷/配置处保留显式 any

@@ -25,3 +25,10 @@ if (missing.length === 0) {
   console.log(`[desktop] 缺少构建产物（${missing.length}），先执行仓库根 npm run build…`);
   execFileSync('npm', ['run', 'build'], { cwd: root, stdio: 'inherit' });
 }
+
+// @mebular/qr 的唯一直接依赖：打包时 extraResources 会从根 node_modules 复制到 App。
+const qrEncoder = join(root, 'node_modules', 'qrcode-generator', 'package.json');
+if (!existsSync(qrEncoder)) {
+  console.error('[desktop] 缺少 node_modules/qrcode-generator（@mebular/qr 的运行时依赖）：请先 npm install');
+  process.exit(1);
+}

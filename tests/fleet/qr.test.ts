@@ -1,6 +1,6 @@
-// C7 · 二维码渲染（内置零依赖 app-layer 能力；QR-only；授权/token 语义已删除）
+// C7 · 二维码渲染（app-layer 能力，qrcode-generator 为普通依赖；QR-only；授权/token 语义已删除）
 import { describe, it, expect } from '@jest/globals';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   renderSvgQr as fleetSvg,
@@ -20,7 +20,7 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 describe('C7 · 二维码渲染与隔离', () => {
-  it('内置编码器：SVG/terminal 产出（内容=令牌文本，无自定义 scheme）', async () => {
+  it('编码器：SVG/terminal 产出（内容=令牌文本，无自定义 scheme）', async () => {
     const fleet = await fleetSvg(token);
     expect(fleet?.kind).toBe('svg');
     expect(fleet?.value.startsWith('<svg')).toBe(true);
@@ -52,12 +52,13 @@ describe('C7 · 二维码渲染与隔离', () => {
     expect(warnings).toEqual([]);
   });
 
-  it('QR 包零运行时依赖（应用层独立）', () => {
+  it('QR 包只声明 qrcode-generator 精确依赖（源码不 vendored）', () => {
     const qrPkg = JSON.parse(readFileSync(join(repoRoot, 'packages', 'qr', 'package.json'), 'utf-8'));
-    expect(qrPkg.dependencies ?? {}).toEqual({});
+    expect(qrPkg.dependencies).toEqual({ 'qrcode-generator': '2.0.4' });
+    expect(existsSync(join(repoRoot, 'packages', 'qr', 'src', 'third-party'))).toBe(false);
   });
 
-  it('core 不 import QR/vendor', () => {
+  it('core 不 import QR/qrcode-generator', () => {
     const coreFiles = walk(join(repoRoot, 'src'));
     const hits = coreFiles.filter((file) => {
       const text = readFileSync(file, 'utf-8');

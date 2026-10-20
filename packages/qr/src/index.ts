@@ -1,4 +1,4 @@
-import qrcode from './third-party/qrcode-generator/qrcode.js';
+import qrcode from 'qrcode-generator';
 
 interface QrCode {
   addData(data: string): void;
@@ -14,7 +14,7 @@ const createQr = qrcode as unknown as (typeNumber: number, errorCorrectionLevel:
  *
  * Boundary: this package is imported only by application packages
  * (`packages/fleet`, `packages/mcp`). `src/**` (core) must never import this
- * package or the vendored encoder.
+ * package or `qrcode-generator`.
  */
 
 export interface QrRenderResult {

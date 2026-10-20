@@ -8,7 +8,7 @@
 | 包 | 目录 | 说明 |
 | --- | --- | --- |
 | `@mebular/core` | `.`（仓库根） | 核心库；tarball 内含 `packages/fleet/dist` 以提供 `fleet` bin |
-| `@mebular/qr` | `packages/qr` | 应用层 QR 能力（vendored `qrcode-generator` 2.0.4，零运行时依赖；core 不引用） |
+| `@mebular/qr` | `packages/qr` | 应用层 QR 能力（普通依赖 `qrcode-generator` 2.0.4，零传递依赖；core 不引用） |
 | `@mebular/service` | `packages/service` | 常驻服务化（launchd/systemd/Task Scheduler） |
 | `@mebular/skill` | `packages/skill` | 行为层：`SKILL.md` / `MEMORY_POLICY.md` / MCP 接入片段 |
 | `@mebular/fleet` | `packages/fleet` | 跨设备多 Agent 协作 |

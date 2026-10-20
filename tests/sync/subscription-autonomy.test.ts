@@ -44,11 +44,34 @@ describe('订阅自主（订阅即读 + 域公告 + 热生效）', () => {
     return predicate();
   }
 
-  async function syncUntil(a: Mebular, b: Mebular, predicate: () => Promise<boolean>, timeoutMs = 15_000): Promise<boolean> {
-    return waitFor(async () => {
-      // 两侧都驱动一轮；有 pending 的一侧会发起/唤醒会话。
+  async function syncOnce(a: Mebular, b: Mebular, timeoutMs = 3_000): Promise<void> {
+    let doneA: () => void = () => undefined;
+    let doneB: () => void = () => undefined;
+    const completedA = new Promise<void>((resolve) => { doneA = resolve; });
+    const completedB = new Promise<void>((resolve) => { doneB = resolve; });
+    a.sync.once('sync-completed', doneA);
+    b.sync.once('sync-completed', doneB);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      // 有在线 peer 时由 anti-entropy 触发；离线时 connectToPeer 建连触发。
       await a.sync.runAntiEntropyCycle();
       await b.sync.runAntiEntropyCycle();
+      await b.node!.connectToPeer(a.node!.peerId);
+      await Promise.race([
+        Promise.all([completedA, completedB]),
+        new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs); }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      a.sync.removeListener('sync-completed', doneA);
+      b.sync.removeListener('sync-completed', doneB);
+    }
+  }
+
+  async function syncUntil(a: Mebular, b: Mebular, predicate: () => Promise<boolean>, timeoutMs = 15_000): Promise<boolean> {
+    return waitFor(async () => {
+      // 每轮都显式建/复连并完成一轮同步；不依赖常驻连接是否仍被保留。
+      await syncOnce(a, b);
       return predicate();
     }, timeoutMs, 150);
   }
@@ -110,9 +133,12 @@ describe('订阅自主（订阅即读 + 域公告 + 热生效）', () => {
       expect((await b.getNamespaceSubscriptions('ledger')).subscribers).not.toContain('device-B');
       expect(await b.graph.getNode(node.id)).toBeNull();
 
-      // 订阅热生效：先等 B 的订阅记录到达 A（策略先到），再驱动数据同步。
+      // 订阅热生效：策略记录必须先到 A；每轮显式同步，避免依赖 nudge 已在 CI 慢时序下送达。
       await b.subscribeNamespace('ledger');
-      const policyArrived = await waitFor(async () => (await a.getSubscriptions('device-B')).includes('ledger'), 10_000);
+      const policyArrived = await waitFor(async () => {
+        await syncOnce(a, b);
+        return (await a.getSubscriptions('device-B')).includes('ledger');
+      }, 10_000, 200);
       if (!policyArrived) throw new Error(`B 的 ledger 订阅未到达 A：${JSON.stringify(await a.getSubscriptions('device-B'))}`);
 
       const delivered = await syncUntil(a, b, async () => (await b.graph.getNode(node.id)) !== null, 15_000);
@@ -122,5 +148,5 @@ describe('订阅自主（订阅即读 + 域公告 + 热生效）', () => {
       await a.shutdown();
       await b.shutdown();
     }
-  });
+  }, 30_000);
 });

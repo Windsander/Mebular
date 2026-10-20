@@ -112,7 +112,7 @@ try {
     const anchors = ['task_submit', 'intent', 'payloadRef', 'causedBy', 'chain', 'budget', 'dispatch',
       'task_status', 'task_children', 'task_summarize', 'task_subscribe', 'task_quota', 'task_targets', 'board_create',
       'task_negotiate', 'chatter_send', 'task_retry', 'task_cancel',
-      '非幂等', '不是记忆', 'L1 授权', '预算', '链长上限', '公平准入'];
+      '非幂等', '不是记忆', '订阅任务域', '预算', '链长上限', '公平准入'];
     const missing = anchors.filter((a) => !tasks.includes(a));
     check(`mebular-tasks 覆盖派活/字段/跟踪/协作/失败/边界/发现/红线锚点（${anchors.length} 个）`, missing.length === 0, missing.join(', ') || '全部命中');
     const installedTasks = join(installTarget, 'mebular-tasks', 'SKILL.md');

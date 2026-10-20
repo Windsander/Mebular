@@ -168,7 +168,7 @@ fleet join --qr "<二维码内容>" --daemon --dir ~/.mebular --device "$(hostna
 ```
 
 - Windows（PowerShell）：`fleet join --qr "<内容>" --daemon --dir "$env:USERPROFILE\.mebular" --device "$env:COMPUTERNAME"`。
-- 一步完成：委派身份（**不复制主密钥**）+ 自动连接 + 按令牌分区自动授权。
+- 一步完成：委派身份（**不复制主密钥**）+ 自动连接 + 按令牌分区自动订阅。
 - **默认不需要批准**：新设备加入后自行 `fleet subscribe` 即可。
 
 判定：退出码 0，JSON 含 `"ok": true`。
@@ -180,7 +180,7 @@ mebular doctor --net     # 网络：地址簿 / LAN 发现 / 打洞 / 桥角色 
 mebular status           # 身份 / 存储 / 计数 / 状态哈希
 ```
 
-常见失败与处置（**不要自行改授权或重置身份**）：
+常见失败与处置（**不要自行改订阅或重置身份**）：
 
 | 症状 | 处置 |
 |---|---|

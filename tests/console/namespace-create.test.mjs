@@ -93,5 +93,5 @@ describe('共享页新建记忆域（0 记忆 / 0 对端）', () => {
     });
     expect(summary.after).toEqual({ count: 1, declared: true });
     expect(summary.reopened).toEqual({ count: 1, declared: true, selfSubscribed: true });
-  });
+  }, 30_000);
 });

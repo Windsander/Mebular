@@ -12,7 +12,7 @@
 //   分开：前者是准入凭据，后者是身份失效。
 // - 服务端验令牌后，用 inviter 设备私钥为请求设备签发**委派证书**（1 跳；链上界由 core 强制）。
 
-import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, open, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
 import http, { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import https from 'node:https';
 import { createHash, randomBytes } from 'node:crypto';
@@ -151,6 +151,11 @@ export function describeJoinToken(token: JoinToken): Record<string, unknown> {
 export interface JoinNonceState {
   used: string[];
   revoked: string[];
+  /**
+   * 当前唯一有效的邀请 nonce（旧状态文件可能没有）。
+   * 生成新令牌时把上一个 active 放入 revoked → 重新生成即让旧令牌失效。
+   */
+  active?: string;
 }
 export function joinNonceStatePath(storagePath: string): string {
   return `${storagePath}.join-tokens.json`;
@@ -158,7 +163,11 @@ export function joinNonceStatePath(storagePath: string): string {
 export async function readJoinNonceState(storagePath: string): Promise<JoinNonceState> {
   try {
     const parsed = JSON.parse(await readFile(joinNonceStatePath(storagePath), 'utf-8')) as Partial<JoinNonceState>;
-    return { used: Array.isArray(parsed.used) ? parsed.used : [], revoked: Array.isArray(parsed.revoked) ? parsed.revoked : [] };
+    return {
+      used: Array.isArray(parsed.used) ? parsed.used : [],
+      revoked: Array.isArray(parsed.revoked) ? parsed.revoked : [],
+      ...(typeof parsed.active === 'string' ? { active: parsed.active } : {}),
+    };
   } catch {
     return { used: [], revoked: [] };
   }
@@ -166,12 +175,40 @@ export async function readJoinNonceState(storagePath: string): Promise<JoinNonce
 export async function writeJoinNonceState(storagePath: string, state: JoinNonceState): Promise<void> {
   const path = joinNonceStatePath(storagePath);
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, JSON.stringify(state, null, 2), { mode: 0o600 });
+  // tmp + rename：进程在写盘中途退出也不会留下半截状态（used/revoked 丢失会重新放行旧令牌）。
+  const tmp = `${path}.tmp-${process.pid}-${randomBytes(4).toString('hex')}`;
+  try {
+    await writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+    await rename(tmp, path);
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw error;
+  }
   try {
     await chmod(path, 0o600);
   } catch {
     // Windows 无 POSIX mode；忽略
   }
+}
+
+/**
+ * 激活新邀请 nonce：把上一个 active 放入 revoked，再落盘新 active。
+ * 生成与兑换共用同一把锁（同进程内存队列 + <state>.lock 跨进程），避免并发丢更新。
+ */
+export async function activateJoinInvite(storagePath: string, nonce: string): Promise<{ revoked: string | null }> {
+  if (typeof nonce !== 'string' || !/^[0-9a-f]{32}$/.test(nonce)) throw new Error('邀请 nonce 非法');
+  return withNonceLock(storagePath, async () => {
+    const state = await readJoinNonceState(storagePath);
+    const previous = state.active;
+    let revoked: string | null = null;
+    if (previous !== undefined && previous !== nonce && !state.used.includes(previous) && !state.revoked.includes(previous)) {
+      state.revoked.push(previous);
+      revoked = previous;
+    }
+    state.active = nonce;
+    await writeJoinNonceState(storagePath, state);
+    return { revoked };
+  });
 }
 
 /** 签发令牌（inviter 设备私钥）。 */
@@ -365,11 +402,65 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
  * 启动 join 服务：`POST /mebular/join {token, deviceId, devicePublicKey}` → 验令牌后签发**委派证书**。
  * `GET /mebular/ping` 用于就绪探测。**不接收、不返回任何主密钥材料**。
  */
-/** 每 storagePath 的非一路串行锁：令牌「先占用后签发」在**单服务进程内**原子（跨进程见文档披露）。 */
+/**
+ * 每 storagePath 的非一路串行锁：同进程内存队列 + 跨进程 `<state>.lock`。
+ * 令牌「先占用后签发」与「生成新令牌时撤销旧 active」共用此锁，避免并发丢更新。
+ */
 const nonceLocks = new Map<string, Promise<unknown>>();
+
+/** 跨进程文件锁；持有时间应远小于 10s，陈旧锁（PID 已退出或超时）自动回收。 */
+async function acquireNonceFileLock(storagePath: string): Promise<() => Promise<void>> {
+  const path = `${joinNonceStatePath(storagePath)}.lock`;
+  await mkdir(dirname(path), { recursive: true });
+  const deadline = Date.now() + 5_000;
+  for (;;) {
+    try {
+      const handle = await open(path, 'wx', 0o600);
+      try {
+        await handle.writeFile(JSON.stringify({ pid: process.pid, at: Date.now() }));
+      } finally {
+        await handle.close();
+      }
+      return async () => {
+        await unlink(path).catch(() => undefined);
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+    }
+    let stale = false;
+    try {
+      const info = JSON.parse(await readFile(path, 'utf-8')) as { pid?: unknown };
+      if (typeof info.pid === 'number' && info.pid !== process.pid) {
+        try {
+          process.kill(info.pid, 0);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === 'ESRCH') stale = true;
+        }
+      }
+      const lockStat = await stat(path);
+      if (Date.now() - lockStat.mtimeMs > 10_000) stale = true;
+    } catch {
+      // 锁文件可能刚被释放或尚未写完：下一轮重试
+    }
+    if (stale) {
+      await unlink(path).catch(() => undefined);
+      continue;
+    }
+    if (Date.now() >= deadline) throw new Error('加入令牌状态被其他进程占用，请稍后重试');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
 function withNonceLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   const prev = nonceLocks.get(key) ?? Promise.resolve();
-  const run = prev.then(() => fn());
+  const run = prev.then(async () => {
+    const release = await acquireNonceFileLock(key);
+    try {
+      return await fn();
+    } finally {
+      await release();
+    }
+  });
   nonceLocks.set(
     key,
     run.then(
@@ -423,6 +514,7 @@ export async function startJoinService(opts: JoinServiceOptions): Promise<JoinSe
           }
           // **先占用**（落盘 used）再签发：签发失败即 fail-closed（令牌已消费，不二次签发）。
           state.used.push(token.nonce);
+          if (state.active === token.nonce) delete state.active;
           await writeJoinNonceState(opts.storagePath, state);
           try {
             const issued = await opts.mebular.identity.issueDelegatedCertificateFor(deviceId, devicePublicKey, opts.deviceId);

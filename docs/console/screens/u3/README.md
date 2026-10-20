@@ -59,7 +59,7 @@
 | `u3-after-settings-{security,mcp,advanced}-390.jpg` | 390px：无横向溢出 |
 | `u3-after-settings-security-dialog.jpg` | 小弹窗居中（安全档位确认；`modal-center`） |
 | `u3-after-dialog-namespace.jpg` | 新建记忆域：与邀请同规格（520、crt 外壳、字段整行） |
-| `u3-after-dialog-invite.jpg` | 邀请设备：小弹窗居中（520） |
+| `u3-after-dialog-invite.jpg` | 邀请设备：小弹窗居中（520），两栏（QR + 令牌/TTL），右上角 X 关闭 |
 | `u3-after-dialog-cloud-join.jpg` | 加入忆云：640 宽，垂直居中，内部滚动 |
 
 ## 5. 边界与取舍

@@ -100,10 +100,10 @@ describe('E2-A2 忆云入口与卡片（静态契约）', () => {
     expect(consoleJs).toMatch(/settingsSignature[\s\S]{0,900}state\.clouds/);
   });
 
-  it('邀请单屏：本忆云 + 根指纹 + 「加入忆云」指路', () => {
-    expect(consoleJs).toContain('本忆云');
+  it('邀请单屏：忆云名 + 根指纹 + 一句引导', () => {
     expect(consoleJs).toContain('invite-cloud-identity');
-    expect(consoleJs).toContain('让 TA 在控制台点「加入忆云」');
+    expect(consoleJs).toContain('让对方扫码，或复制令牌。');
+    expect(consoleJs).not.toContain('本忆云');
   });
 });
 
@@ -229,11 +229,12 @@ describe('UX-2 首屏叠加层（只读；星图本体不改）', () => {
 });
 
 describe('UX-2 邀请单动作页', () => {
-  it('主结果 = QR + 令牌复制；无详情折叠 / 端点编辑 / CLI 命令', () => {
+  it('主结果 = QR + 令牌复制（两栏）；无详情折叠 / 端点编辑 / CLI 命令', () => {
     // S3：结果面板从 renderInvite 抽成 showInviteResult（low 直接出；medium/high 门槛通过后复用）
     expect(consoleJs).toMatch(/function showInviteResult\(res\)/);
-    expect(consoleJs).toContain('令牌即入网权限');
-    expect(consoleJs).toContain('扫码即通');
+    expect(consoleJs).toContain('class="invite-layout"');
+    expect(consoleJs).toContain('让对方扫码，或复制令牌。');
+    expect(consoleJs).toContain('一次性 · 仅当面或可信局域网传递。');
     expect(consoleJs).not.toContain('data-settings-fold="invite"');
     expect(consoleJs).not.toContain("foldLabel('invite')");
     expect(consoleJs).not.toContain('invite-endpoint');
@@ -243,7 +244,8 @@ describe('UX-2 邀请单动作页', () => {
   it('重新生成有简短二次确认；TTL 选择不自动刷新', () => {
     expect(consoleJs).toContain('id="invite-regenerate"');
     expect(consoleJs).toMatch(/invite-regenerate[\s\S]{0,260}confirm\(/);
-    expect(consoleJs).toContain('改档后点「重新生成」才生效');
+    expect(consoleJs).toContain('id="invite-expiry"');
+    expect(consoleJs).not.toContain('改档后点');
   });
 
   it('joinService 未启用 → 弹层内一键启用（复用设置写路径，不再指路常用）', () => {

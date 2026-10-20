@@ -1635,7 +1635,8 @@ try {
         && jsSrc.includes("copyRowOf('配置文件', configPath)")
         && jsSrc.includes('写盘备份')
         && !jsSrc.includes('fold-invite')
-        && jsSrc.includes('改档后点「重新生成」才生效')
+        && !jsSrc.includes('改档后点')
+        && jsSrc.includes('id="invite-expiry"')
         && cssSrc.includes('max-width: 62ch'),
       '页头/写盘/邀请/行长四项配套');
 
@@ -1715,18 +1716,19 @@ try {
         && !inviteSrc.includes('endpointEditor')
         && !inviteSrc.includes('fleet join --token')
         && !inviteSrc.includes('默认记忆域')
-        && inviteSrc.includes('令牌（一次性')
-        && inviteSrc.includes('qrBlock')
+        && inviteSrc.includes('class="invite-token-block"')
+        && inviteSrc.includes('qrMarkup')
         && inviteSrc.includes('二维码不可用')
         && inviteSrc.includes('data-copy=')
         && inviteSrc.includes('invite-cloud-identity')
-        && inviteSrc.includes('令牌即入网权限'),
+        && inviteSrc.includes('一次性 · 仅当面或可信局域网传递。'),
       '无 details / endpointEditor / 命令；首屏令牌+QR+忆云行');
     check('E1 邀请 TTL：档位精确（5/15/20 分钟、2/6/12/24 小时），默认 15 分钟；改档不自动刷新',
       JSON.stringify(ttlIds) === JSON.stringify([300000, 900000, 1200000, 7200000, 21600000, 43200000, 86400000])
         && inviteIa.INVITE_TTL_DEFAULT_MS === 900000
         && consoleSrc2.includes('inviteTtlMs: INVITE_TTL_DEFAULT_MS')
-        && consoleSrc2.includes('改档后点「重新生成」才生效')
+        && consoleSrc2.includes('id="invite-expiry"')
+        && !consoleSrc2.includes('改档后点')
         && /#invite-ttl[\s\S]{0,240}#invite-regenerate/.test(consoleSrc2)
         && /body\.querySelector\('#invite-ttl'\)[\s\S]{0,240}state\.inviteTtlMs = value/.test(consoleSrc2),
       `ttl=${JSON.stringify(ttlIds)} default=${inviteIa.INVITE_TTL_DEFAULT_MS}`);
@@ -1736,6 +1738,12 @@ try {
         && /body: \{ code, ttlMs: selectedTtl \}/.test(consoleSrc2)
         && /body: \{ approvalId, namespace: inviteNamespace\(\), ttlMs: selectedTtl \}/.test(consoleSrc2),
       'low/medium/high 三条生成路径均带 ttlMs');
+    const inviteDialogSrc = htmlSrc.slice(htmlSrc.indexOf('<div id="invite"'), htmlSrc.indexOf('<div id="cloud-join"'));
+    check('E1 邀请关闭：右上角 X（复用 modal-x），无底部「关闭」按钮',
+      /id="invite-close"[^>]*class="modal-x"/.test(inviteDialogSrc)
+        && !inviteDialogSrc.includes('modal-actions')
+        && !inviteDialogSrc.includes('>关闭<'),
+      'modal-head + modal-x；底部动作条已移除');
 
     // E1 · 邀请未启用时就地一键启用（复用设置写路径；不再指路「设置 → 常用」）
     check('E1 邀请未启用：弹层内一键启用并继续（改配置 + 重启提示）',
@@ -1849,7 +1857,7 @@ try {
       { status: inviteRes.status, qr: inviteJson?.qrSvg === null ? 'null（缺可选依赖）' : 'svg' });
     const consoleSrc6 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     check('C7 控制台邀请面板渲染二维码 + TTL/重新生成（无详情/订阅说明）',
-      ['扫码即通', 'qrSvg', 'id="invite-ttl"', 'id="invite-regenerate"'].every((token) => consoleSrc6.includes(token))
+      ['让对方扫码', 'qrSvg', 'id="invite-ttl"', 'id="invite-regenerate"'].every((token) => consoleSrc6.includes(token))
         && !consoleSrc6.includes('fold-invite'));
     const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
     check('C7 二维码依赖为**精确 pin** 的可选依赖（依赖政策）',

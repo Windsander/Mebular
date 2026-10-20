@@ -406,8 +406,25 @@ describe('UX-2 补丁 4 · 控制台：滚动条/拖拽区/交通灯避让（静
     expect(consoleCss).toMatch(/html \{ scrollbar-gutter: stable/);
     // 走查修复：由逐视图 ID 改为 .panel-view 类（审计/域视图此前漏配）
     expect(consoleCss).toMatch(/\.panel-view[^}]*scrollbar-gutter: stable/);
-    expect(consoleCss).toMatch(/#settings-body[^}]*scrollbar-gutter: stable/);
+    expect(consoleCss).toMatch(/\.settings-scroll[^}]*scrollbar-gutter: stable/);
     expect(consoleCss).toMatch(/\.modal[^}]*scrollbar-gutter: stable/);
+  });
+
+  it('U-3 设置壳：提示在标题下 + 仅内容区滚动 + 右上角 X（无底部关闭）', () => {
+    expect(consoleCss).toMatch(/\.modal-head \.settings-apply-note\s*\{[^}]*font-size:\s*11px/);
+    expect(consoleCss).toMatch(/\.modal-box\.modal-settings\s*\{[^}]*overflow:\s*hidden/);
+    expect(consoleCss).toMatch(/\.settings-scroll\s*\{[^}]*overflow-y:\s*auto/);
+    expect(consoleCss).toMatch(/\.settings-scroll[^}]*scrollbar-gutter:\s*stable/);
+    expect(consoleCss).toMatch(/\.settings-scroll::-webkit-scrollbar\s*\{[^}]*width:\s*6px/);
+    const start = indexHtml.indexOf('<div id="settings"');
+    const end = indexHtml.indexOf('<div id="about"', start);
+    const block = indexHtml.slice(start, end);
+    expect(block).toContain('modal-heading');
+    expect(block).toContain('class="settings-apply-note muted"');
+    expect(block).toContain('id="settings-close"');
+    expect(block).toContain('class="modal-x"');
+    expect(block).not.toContain('modal-actions');
+    expect(block).not.toContain('>关闭</button>');
   });
 
   it('走查修复：弹层顶部锚定（切设置选项卡时整层不再垂直跳）', () => {

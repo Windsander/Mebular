@@ -143,8 +143,8 @@
     </div>
   </div>
 
-  <div id="wizard" class="modal" hidden>
-    <div class="modal-box modal-box-wide" role="dialog" aria-modal="true" aria-label="手动连接已知设备（传输修复）">
+  <div id="wizard" class="modal modal-center" hidden>
+    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="手动连接已知设备（传输修复）">
       <h2>手动连接已知设备</h2>
       <div id="wizard-steps" class="wizard-steps"></div>
       <div id="wizard-body"></div>
@@ -158,12 +158,15 @@
   </div>
 
   <div id="settings" class="modal" hidden>
-    <div class="modal-box modal-box-wide crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="本机设置">
-      <h2>本机设置</h2>
-      <div id="settings-body"></div>
-      <div class="modal-actions">
-        <button id="settings-close" class="btn btn-crt" type="button">关闭</button>
+    <div class="modal-box modal-box-wide modal-settings crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="本机设置">
+      <div class="modal-head">
+        <div class="modal-heading">
+          <h2>本机设置</h2>
+          <p class="settings-apply-note muted">改动即生效：需重启的项会自动重启，即时项就地生效。</p>
+        </div>
+        <button id="settings-close" class="modal-x" type="button" title="关闭" aria-label="关闭设置">✕</button>
       </div>
+      <div id="settings-body"></div>
     </div>
   </div>
 
@@ -178,7 +181,7 @@
     </div>
   </div>
 
-  <div id="invite" class="modal" hidden>
+  <div id="invite" class="modal modal-center" hidden>
     <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="邀请设备">
       <h2>邀请设备 <span class="crt-tag"><span class="crt-tag-dot"></span>打开即生成 · 一次性令牌</span></h2>
       <div id="invite-body"></div>
@@ -188,14 +191,18 @@
     </div>
   </div>
 
-  <div id="cloud-join" class="modal" hidden>
+  <div id="cloud-join" class="modal modal-center" hidden>
     <div class="modal-box modal-box-wide crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="cloud-join-title">
       <h2 id="cloud-join-title">加入忆云 <span class="crt-tag">一次性令牌</span></h2>
       <p class="modal-note muted">粘贴邀请方给的一次性令牌。加入不会修改当前忆云；切换后当前忆云会归档保留。</p>
-      <label class="cfg-label" for="cloud-join-token">加入令牌</label>
-      <textarea id="cloud-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…"></textarea>
-      <label class="cfg-label" for="cloud-join-name">忆云名字</label>
-      <input id="cloud-join-name" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="忆云 2" />
+      <div class="field">
+        <label for="cloud-join-token">加入令牌</label>
+        <textarea id="cloud-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…"></textarea>
+      </div>
+      <div class="field">
+        <label for="cloud-join-name">忆云名字</label>
+        <input id="cloud-join-name" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="忆云 2" />
+      </div>
       <div id="cloud-join-inspect" class="cloud-inspect" aria-live="polite"></div>
       <p id="cloud-join-warning" class="cloud-warning muted"></p>
       <p id="cloud-join-steps" class="cloud-steps muted" aria-live="polite" hidden></p>
@@ -208,7 +215,7 @@
     </div>
   </div>
 
-  <div id="cloud-switch" class="modal" hidden>
+  <div id="cloud-switch" class="modal modal-center" hidden>
     <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="cloud-switch-title">
       <h2 id="cloud-switch-title">切换忆云</h2>
       <div id="cloud-switch-body"></div>
@@ -218,7 +225,7 @@
     </div>
   </div>
 
-  <div id="security-action" class="modal" hidden>
+  <div id="security-action" class="modal modal-center" hidden>
     <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="security-action-title">
       <h2 id="security-action-title">安全操作</h2>
       <div id="security-action-body"></div>
@@ -230,7 +237,7 @@
     </div>
   </div>
 
-  <div id="handoff" class="modal" hidden>
+  <div id="handoff" class="modal modal-center" hidden>
     <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="退出并交接">
       <h2 id="handoff-title">退出并交接</h2>
       <p id="handoff-desc" class="modal-note muted"></p>
@@ -245,7 +252,7 @@
   </div>
 
   <div id="modal" class="modal modal-center" hidden>
-    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="modal-title">
       <h2 id="modal-title"></h2>
       <p id="modal-body"></p>
       <div class="modal-actions">
@@ -255,9 +262,26 @@
     </div>
   </div>
 
+  <div id="auth-token" class="modal modal-center" hidden>
+    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="auth-token-title">
+      <h2 id="auth-token-title">输入访问令牌</h2>
+      <p class="modal-note muted">当前 MCP 接入使用 bearer 认证；粘贴 token 后继续。令牌只保存在本机浏览器。</p>
+      <div class="field">
+        <label for="auth-token-input">访问令牌</label>
+        <input id="auth-token-input" class="crt-input" type="password" autocomplete="off" spellcheck="false" />
+      </div>
+      <p id="auth-token-help" class="cfg-help muted"></p>
+      <p id="auth-token-error" class="crt-warn" role="alert" hidden></p>
+      <div class="modal-actions">
+        <button id="auth-token-cancel" class="btn btn-crt" type="button">取消</button>
+        <button id="auth-token-save" class="btn btn-primary" type="button">保存并继续</button>
+      </div>
+    </div>
+  </div>
+
   <div id="namespace-new-modal" class="modal modal-center" hidden>
-    <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="namespace-new-title">
-      <h2 id="namespace-new-title">新建记忆域</h2>
+    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="namespace-new-title">
+      <h2 id="namespace-new-title">新建记忆域 <span class="crt-tag">默认订阅</span></h2>
       <p class="modal-note muted">只有本机也可以开始记录；创建后默认订阅，可随时退订。</p>
       <div class="field">
         <label for="namespace-new-name">名称</label>
@@ -265,7 +289,7 @@
       </div>
       <p id="namespace-new-error" class="crt-warn" role="alert" hidden></p>
       <div class="modal-actions">
-        <button id="namespace-new-cancel" class="btn" type="button">取消</button>
+        <button id="namespace-new-cancel" class="btn btn-crt" type="button">取消</button>
         <button id="namespace-new-create" class="btn btn-primary" type="button">创建并订阅</button>
       </div>
     </div>

@@ -351,7 +351,7 @@ select {
 
 /* ---------- 模态 ---------- */
 /* 走查修复：弹层顶部锚定（原 flex 垂直居中 → 切「选项卡」页面高度变化时整块垂直跳）。
-   轮 C：背板不滚（fixed + overflow hidden），滚动收进 .modal-box（六处弹层共用）。 */
+   轮 C：背板不滚（fixed + overflow hidden），滚动收进 .modal-box（所有弹层共用）。 */
 .modal { position: fixed; inset: 0; background: rgba(2, 4, 10, 0.72); display: flex; align-items: flex-start; justify-content: center; z-index: 50; overflow: hidden; padding: 24px; }
 /* 小弹窗统一垂直居中；大设置/加入忆云仍顶部对齐，避免超高面板上下裁切 */
 .modal.modal-center { align-items: center; }
@@ -363,6 +363,37 @@ select {
 /* 弹层打开时锁住背后的页面滚动（背板本身也不滚） */
 body.modal-open { overflow: hidden; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+
+/* U-3 · 设置壳：提示收进标题，页签固定，只有其下内容滚动 */
+.modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin: 0 0 8px; }
+.modal-heading { min-width: 0; }
+.modal-head h2 { margin: 0; }
+.modal-head .settings-apply-note { margin: 3px 0 0; max-width: 62ch; font-size: 11px; line-height: 1.45; }
+.modal-x {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; flex: 0 0 auto; padding: 0;
+  border: 1px solid transparent; border-radius: 7px;
+  background: none; color: var(--muted);
+  font: inherit; font-size: 16px; line-height: 1; cursor: pointer;
+}
+.modal-x:hover { color: var(--crt-bright, #9dffcf); border-color: var(--border); background: rgba(10, 16, 32, 0.55); }
+.modal-x:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.modal-box.modal-settings { display: flex; flex-direction: column; overflow: hidden; padding: 18px 0 18px 20px; scrollbar-gutter: auto; }
+.modal-settings .modal-head, .modal-settings .settings-tabs { padding-right: 20px; }
+.modal-settings #settings-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+.modal-settings .settings-tabs { flex: 0 0 auto; margin: 0; }
+/* 滚动条贴设置框右边缘：滚动容器贴边，内容右侧留 20px；thumb 收细。 */
+.settings-scroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 20px 12px 0; scrollbar-gutter: stable; }
+.settings-scroll::-webkit-scrollbar { width: 6px; }
+.settings-scroll::-webkit-scrollbar-track { background: transparent; margin: 6px 0; }
+.settings-scroll::-webkit-scrollbar-thumb { border: 0; border-radius: 999px; background: rgba(140, 255, 200, 0.18); }
+.settings-scroll::-webkit-scrollbar-thumb:hover { border: 0; background: rgba(140, 255, 200, 0.32); }
+.settings-scroll > .settings-panel > .settings-section:first-child,
+.settings-scroll > .settings-panel > .settings-slot:first-child > .settings-section:first-child { border-top: 0; padding-top: 0; }
+/* 字段帮助默认收起；聚焦/警告时再出现，空值提示由 placeholder 承担。 */
+.cfg-row .cfg-help { display: none; }
+.cfg-row:focus-within .cfg-help,
+.cfg-row .cfg-help.cfg-warn { display: block; }
 
 /* ---------- 向导 ---------- */
 .modal-box-wide { width: min(640px, 94vw); }
@@ -377,7 +408,7 @@ body.modal-open { overflow: hidden; }
 .wizard-list label { display: flex; align-items: center; gap: 8px; }
 .field { display: grid; gap: 4px; margin: 8px 0; }
 .field label { color: var(--muted); font-size: 11px; }
-.field input[type="text"], .field textarea {
+.field input[type="text"], .field input[type="password"], .field textarea {
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
@@ -418,6 +449,12 @@ body.modal-open { overflow: hidden; }
 .modal-note { font-size: 12px; line-height: 1.6; margin: 6px 0 10px; }
 .settings-section { border-top: 1px solid var(--border); padding: 10px 0; }
 .settings-section h3 { margin: 0 0 8px; font-size: 13px; display: flex; align-items: center; gap: 8px; }
+.settings-section-desc { margin: -2px 0 8px; font-size: 11px; line-height: 1.6; }
+.settings-section-foot { margin: 8px 0 0; font-size: 11px; line-height: 1.6; }
+.settings-diag-block { border-top: 1px dashed rgba(80, 255, 170, 0.18); padding: 10px 0; }
+.settings-diag-block:first-child { border-top: 0; padding-top: 0; }
+.settings-diag-block h4 { margin: 0 0 6px; font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.cfg-diag-path { margin: 0 0 6px; font-size: 11px; }
 /* E2-A2：忆云卡（设置 · 常用） */
 .cloud-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .cloud-intro { margin: 0 0 8px; font-size: 11.5px; }
@@ -458,9 +495,6 @@ body.modal-open { overflow: hidden; }
 .cloud-error-detail { display: block; margin-top: 3px; color: var(--muted); font-size: 11px; }
 .invite-cloud-line { margin-top: 6px; }
 /* E2-A2：加入忆云弹层字段竖排（label 独占一行；textarea/input 满宽） */
-#cloud-join .cfg-label { display: block; margin-top: 8px; }
-#cloud-join textarea.crt-input,
-#cloud-join input.crt-input { width: 100%; margin-top: 4px; box-sizing: border-box; }
 #cloud-join textarea.crt-input { font-family: var(--crt-mono, monospace); font-size: 11px; resize: vertical; }
 #cloud-join .modal-note { margin-bottom: 4px; }
 #cloud-join .modal-actions { margin-top: 10px; }
@@ -1070,6 +1104,9 @@ body.modal-open { overflow: hidden; }
   .settings-kv .kv-action { justify-content: flex-start; min-height: 0; }
   .cfg-row { grid-template-columns: minmax(0, 1fr); }
   .cfg-label { line-height: 1.4; min-height: 0; }
+  .sec-tier { grid-template-columns: minmax(0, 1fr); }
+  .sec-tier-action { justify-content: flex-start; }
+  .sec-kv { grid-template-columns: minmax(0, 1fr); }
   .settings-kv dd, .cfg-help, .cfg-effective, .snippet { overflow-wrap: anywhere; }
   .modal-box { max-width: 100%; }
   .modal { padding: 12px; }
@@ -1253,7 +1290,7 @@ body.modal-open { overflow: hidden; }
 
 /* C. 滚动手感：主滚动容器稳定 gutter（滚动条出现/消失不挤压内容、不跳变） */
 html { scrollbar-gutter: stable; }
-.aside, .modal-box, .wizard-list, .snippet, .connect-diff, .panel-view, #settings-body { scrollbar-gutter: stable; }
+.aside, .modal-box, .wizard-list, .snippet, .connect-diff, .panel-view, .settings-scroll { scrollbar-gutter: stable; }
 /* 走查修复：审计/域视图此前漏了 gutter——切换视图后内容溢出时 10px 滚动条挤动面板（「展开后跳一下」） */
 
 /* 简化轮：记忆共享 · 参与开关（v4：状态文字化，开关贴右） */
@@ -1309,42 +1346,53 @@ details.share[open] summary::before { content: "▾ "; }
   .banner { max-width: calc(100% - 24px); }
 }
 
-/* ---------- S3 · 安全三档（安全卡 / 配对号 / 恢复码 / 等待态） ---------- */
+/* ---------- S3 · 安全三档（安全 tab 三段式；行式布局，无卡片套卡片） ---------- */
 #settings-security-slot,
 .security-card {
-  margin: 10px 0 14px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: rgba(10, 16, 32, 0.55);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
 }
-.crt-surface #settings-security-slot { border-color: rgba(80, 255, 170, 0.22); }
+#settings-security-slot > .settings-section:first-child { border-top: 0; padding-top: 0; }
+.crt-surface #settings-security-slot { border-color: transparent; }
 .sec-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .sec-head h3 { margin: 0; font-size: 13px; }
-.sec-ladder { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 6px; }
+.sec-ladder { list-style: none; margin: 0 0 8px; padding: 0; display: grid; gap: 0; }
 .sec-tier {
-  padding: 8px 10px;
-  border: 1px solid transparent;
-  border-left: 2px solid var(--border);
-  border-radius: 6px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 12px;
+  align-items: center;
+  padding: 8px 0;
+  border: 0;
+  border-top: 1px solid rgba(80, 255, 170, 0.14);
+  border-radius: 0;
 }
-.sec-tier.is-current { border-color: rgba(80, 255, 170, 0.32); background: rgba(80, 255, 170, 0.05); }
+.sec-tier:first-child { border-top: 0; }
+.sec-tier.is-current { background: none; }
+.sec-tier.is-current .sec-tier-title { color: var(--crt-bright, #9dffcf); }
+.sec-tier.is-current .sec-tier-title::before { content: "▸ "; color: var(--crt-dim); }
+.sec-tier-main { min-width: 0; }
 .sec-tier-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sec-tier-title { color: var(--text); font-weight: 600; }
-.sec-tier-note { margin: 4px 0 0; font-size: 11px; line-height: 1.65; max-width: 62ch; }
+.sec-tier-note { margin: 2px 0 0; font-size: 11px; line-height: 1.55; }
+.sec-tier-action { display: flex; justify-content: flex-end; }
 .sec-current { margin: 0 0 10px; font-size: 11.5px; line-height: 1.6; }
-.sec-kv { grid-template-columns: 96px minmax(0, 1fr) auto; align-items: center; }
+.sec-kv { grid-template-columns: 48px minmax(0, 1fr) auto; align-items: center; }
 .sec-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 .sec-ok { color: var(--ok); }
 .sec-anomaly { margin: 0 0 8px; font-size: 11.5px; }
-.sec-pending { margin: 8px 0 10px; padding-top: 8px; border-top: 1px dashed var(--border); }
-.sec-pending h4 { margin: 0 0 6px; font-size: 12px; display: flex; align-items: center; gap: 6px; }
+.sec-pending { margin: 0 0 8px; padding: 8px 10px; border: 1px solid rgba(255, 210, 122, 0.3); border-radius: 6px; background: rgba(60, 42, 8, 0.18); }
+.sec-pending-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 12px; }
 .sec-none { margin: 0; font-size: 11.5px; }
 .sec-outgoing { margin: 6px 0 0; font-size: 11.5px; }
 .sec-approval-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.sec-approval-row { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: rgba(0, 0, 0, 0.18); }
+.sec-approval-row { padding: 0; border: 0; background: none; }
 .sec-approval-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 12px; }
-.sec-approval-meta { font-size: 10.5px; margin-top: 4px; line-height: 1.5; }
+.sec-approval-inline { display: flex; align-items: center; gap: 6px 10px; flex-wrap: wrap; margin-top: 2px; }
+.sec-approval-meta { font-size: 10.5px; line-height: 1.5; }
 .sec-approval-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .sec-pairing {
   display: inline-block;

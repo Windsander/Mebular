@@ -35,7 +35,8 @@ export const IA_SETTINGS_EXTRA = [
 ];
 
 /**
- * U-1 折叠白名单（设置/关于/邀请共用；≤5，当前 4）。
+ * 折叠白名单（设置/关于/邀请共用；≤5，当前 4）。
+ * 设置内只有 2 个（MCP 危险与自救 / 诊断与恢复）；另两个属于关于本机、邀请面板。
  * 每项必须带 data-settings-fold，UI 断言据此防回归；不允许新增其它 <details>。
  */
 export const IA_SETTINGS_FOLDS = [
@@ -46,40 +47,134 @@ export const IA_SETTINGS_FOLDS = [
 ];
 
 /**
- * 「高级」的成组卡片（E1：原「常用」的加入服务三项聚成「常驻服务」）。
- * 网络两项按常规字段组渲染；MCP 六项独立成 Tab（见 IA_MCP_CARD）。
+ * 安全 tab 的三段式结构：等级 / 动态码种子 / 恢复码。
+ * 文案在这里收口（主界面不出现内部错误码；风险说明短句保留）。
  */
-export const IA_ADVANCED_CARDS = [
+export const IA_SECURITY_SECTIONS = {
+  level: {
+    title: '安全等级',
+    desc: '档位越高，敏感操作的门槛越高。',
+  },
+  totp: {
+    title: '动态码种子',
+    desc: '中档敏感操作需要 6 位动态码；种子只存本机。',
+  },
+  recovery: {
+    title: '恢复码',
+    desc: '高档的离线钥匙；只显示一次，请离线保存。',
+  },
+};
+
+export const SECURITY_LEVEL_LABEL = { low: '低', medium: '中', high: '高' };
+export const SECURITY_LEVEL_TITLE = {
+  low: '低（默认）',
+  medium: '中 · 动态码',
+  high: '高 · 设备会签',
+};
+export const SECURITY_LEVEL_NOTE = {
+  low: '无额外门槛。',
+  medium: '6 位动态码，防顺手。',
+  high: '另一台设备核对配对号，防伪造；只对之后的动作生效。',
+};
+export const SECURITY_BOUNDARY = '中档挡手不挡钥匙：设备被拿走，种子也一并被拿走。高档需要另一台设备在场，不在时用离线恢复码。';
+export const SECURITY_TOTP_FOOT = '种子只在本机；全部设备丢失时由 root 重置，无主密钥备份则不可恢复。';
+
+/**
+ * 「高级」三组（每组 = 标题 + 一行说明 + 字段行）。
+ * 字段顺序即展示顺序；能力与 schema 的 editable 集合一一对应。
+ */
+export const IA_ADVANCED_SECTIONS = [
   {
-    id: 'join-service',
+    id: 'resident',
     title: '常驻服务',
-    desc: '邀请设备前先启用加入服务（主密钥不复制）；bind/port 决定新设备可达的 join 端点，改动需重启守护。',
+    desc: '邀请设备前先启用；地址与端口决定新设备能否连上。',
     fields: ['joinService.enabled', 'joinService.bind', 'joinService.port'],
+  },
+  {
+    id: 'network',
+    title: '网络',
+    desc: '本机与忆云之间的连接；关闭后仅本机可用。',
+    fields: ['network.enabled', 'network.libp2p.listen'],
+  },
+  {
+    id: 'automation',
+    title: '自动化',
+    desc: '后台维护与可选能力；默认设置适合多数人。',
+    fields: ['sync.antiEntropy.enabled', 'semantic.enabled'],
   },
 ];
 
 /**
- * 「MCP 接入」独立 Tab 的危险卡：端口/鉴权/监听/TLS 六项。
- * 危险说明与自救恢复文案随迁（改到不可达时的两条出路）。
+ * 「MCP 接入」两组：连接 / TLS。危险与自救收进唯一折叠（IA_MCP_DANGER_LINES）。
  */
-export const IA_MCP_CARD = {
-  id: 'mcp',
-  title: 'MCP 接入',
-  desc: 'Agent 经 MCP 连接本机；改端口/鉴权/监听/TLS 会立即影响控制台自身的访问方式。',
-  danger: true,
-  fields: ['mcp.http.port', 'mcp.http.auth', 'mcp.http.host', 'mcp.http.tls', 'mcp.http.tlsKey', 'mcp.http.tlsCert'],
-};
+export const IA_MCP_SECTIONS = [
+  {
+    id: 'connection',
+    title: '连接',
+    desc: 'Agent 经 MCP 连接本机；改动会立即影响控制台访问。',
+    fields: ['mcp.http.port', 'mcp.http.auth', 'mcp.http.host'],
+  },
+  {
+    id: 'tls',
+    title: 'TLS',
+    desc: '加密 MCP 连接；监听非回环时必需。',
+    fields: ['mcp.http.tls', 'mcp.http.tlsCert', 'mcp.http.tlsKey'],
+  },
+];
+
+/** 折叠内三行：后果 + 两条自救路径（保留命令与备份名）。 */
+export const IA_MCP_DANGER_LINES = [
+  '改认证/监听/TLS 可能让控制台立即失联；提交前会再确认一次。',
+  'bearer 失联：粘贴 token grant 生成的 token 自救。',
+  'oauth/端口失联：改回 config.json，重启 mebular serve。',
+];
 
 /**
- * 「高级」字段（卡片之外的散项；默认收起；风险由文案标注）。
- * E1：网络两项从「常用」迁入；其余 sync.* 保持专家旋钮。
+ * 字段展示文案（覆盖服务端 schema 的长帮助/长警告）。
+ * 只改展示，不改校验、默认值或写入行为；帮助目标 ≤1 行。
  */
-export const IA_ADVANCED_FIELDS = [
-  'network.enabled',
-  'network.libp2p.listen',
-  'sync.antiEntropy.enabled',
-  'semantic.enabled',
-];
+export const IA_FIELD_COPY = {
+  'mcp.http.port': { help: '0 = 自动分配；默认 7331。' },
+  'mcp.http.auth': {
+    label: '认证',
+    help: 'none 仅回环；bearer 用令牌；oauth 用环境密钥。',
+    warn: '',
+  },
+  'mcp.http.host': {
+    help: '默认 127.0.0.1；非回环必须配认证与 TLS。',
+    warn: '',
+  },
+  'mcp.http.tls': { help: '缺证书会启动失败，不会静默降级。' },
+  'mcp.http.tlsCert': {
+    label: '证书路径',
+    help: 'PEM 证书；与私钥同时填写才生效。',
+  },
+  'mcp.http.tlsKey': {
+    label: '私钥路径',
+    help: 'PEM 私钥；与证书同时填写才生效。',
+  },
+  'joinService.enabled': { help: '生成一次性邀请令牌；改动需重启。' },
+  'joinService.bind': { help: '0.0.0.0 允许局域网；仅可信网络使用。' },
+  'joinService.port': { help: '默认 4002；被占用时改这里。' },
+  'network.enabled': { help: '关闭后仅本机离线使用。' },
+  'network.libp2p.listen': { help: '留空用默认；仅回环时局域网不可达。' },
+  'sync.antiEntropy.enabled': {
+    label: '自动对账',
+    help: '周期核对，弥补推送丢失。',
+  },
+  'semantic.enabled': {
+    label: '启用语义召回',
+    help: '需要本地模型；缺失时自动降级关键词。',
+    warn: '',
+    hideStatusReason: true,
+  },
+};
+
+/** 「高级」全部可编辑字段（由三组派生；不再有“卡片之外的散项”）。 */
+export const IA_ADVANCED_FIELDS = IA_ADVANCED_SECTIONS.flatMap((section) => section.fields);
+
+/** 「MCP 接入」全部可编辑字段（由两组派生）。 */
+export const IA_MCP_FIELDS = IA_MCP_SECTIONS.flatMap((section) => section.fields);
 
 /**
  * 只读面（status-only）：值由运行时 / 自动推导（relay 池、LAN 发现、桥、打洞、广播、join、TLS、）。
@@ -98,11 +193,10 @@ export const IA_STATUS_ONLY_PATHS = [
   'status.tls',
 ];
 
-/** 全部「可编辑 path」（高级卡片 3 + 高级散项 4 + MCP 卡 6 + 记忆共享 1 = **14**）——与 schema EDITABLE_PATHS 一致。 */
+/** 全部「可编辑 path」（高级 7 + MCP 6 + 记忆共享 1 = **14**）——与 schema EDITABLE_PATHS 一致。 */
 export const IA_EDITOR_PATHS = [
-  ...IA_ADVANCED_CARDS.flatMap((card) => card.fields),
   ...IA_ADVANCED_FIELDS,
-  ...IA_MCP_CARD.fields,
+  ...IA_MCP_FIELDS,
   'sync.namespaces', // 内容管理：归主页「记忆共享」（不在设置页渲染）
 ];
 
@@ -121,9 +215,8 @@ export const IA_INFO_BLOCKS = {
 
 /** path → 唯一去处（common / advanced / mcp / about / domains；E1 后常用无编辑项）。 */
 export const IA_MIGRATION = {
-  ...Object.fromEntries(IA_ADVANCED_CARDS.flatMap((card) => card.fields.map((p) => [p, 'advanced']))),
   ...Object.fromEntries(IA_ADVANCED_FIELDS.map((p) => [p, 'advanced'])),
-  ...Object.fromEntries(IA_MCP_CARD.fields.map((p) => [p, 'mcp'])),
+  ...Object.fromEntries(IA_MCP_FIELDS.map((p) => [p, 'mcp'])),
   // 内容管理：订阅域 → 主页「记忆共享」
   'sync.namespaces': 'domains',
   // 只读面：自动同步 / 写入即推（默认常开）+ relay 池 / LAN / 桥 / 打洞 / 广播 / join / TLS
@@ -138,11 +231,10 @@ export const IA_COMMON_FIELDS = [];
 /** 「高级」里承担动作按钮（非配置键）的条目。E1：已无策略声明动作。 */
 export const IA_ADVANCED_ACTIONS = [];
 
-/** 前端设置页实际渲染的编辑面 path（高级 3+4 + MCP 6 = 13；订阅域在「记忆共享」渲染）。 */
+/** 前端设置页实际渲染的编辑面 path（高级 7 + MCP 6 = 13；订阅域在「记忆共享」渲染）。 */
 export const IA_EDITOR_RENDER_PATHS = [
-  ...IA_ADVANCED_CARDS.flatMap((card) => card.fields),
   ...IA_ADVANCED_FIELDS,
-  ...IA_MCP_CARD.fields,
+  ...IA_MCP_FIELDS,
 ];
 
 // ---------- U-1 · CSRF 403 自愈（与 IA 同处共享纯逻辑模块：无 DOM、零依赖） ----------

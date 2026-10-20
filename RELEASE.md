@@ -75,7 +75,11 @@ bash scripts/bump_version.sh v0.2.0           # 同步 5 个版本号 + 生成 C
    （开发期源码用 `file:` 本地链接，pack 期由脚本统一改写，故 `file:` 保持不动）；
 3. 在 `CHANGELOG.md` 顶部插入 `## [v0.2.0] - <date>` 章节（已存在则跳过，幂等）。
 
-然后**手工填写** `CHANGELOG.md` 中该章节的 Added / Changed / Fixed（Release notes 取自此章节）。
+然后**手工填写** `CHANGELOG.md` 中该章节（本项目用 `### Highlights (EN)` / `### 亮点（中文）`
+能力清单，也可沿用 Added / Changed / Fixed；Release notes 取自此章节）。
+
+> 章节标题必须带 `v` 前缀（`## [vX.Y.Z]`）：`publish.yml` 与 `bump_version.sh` 都按
+> `## [<tag>]` 逐字匹配，tag 形如 `v0.1.0`。
 
 ### 2.2 本地预检（可选但推荐）
 
@@ -144,3 +148,97 @@ push 后 GitHub Actions `Publish` 流水线自动执行：
 
 npm 不允许覆盖已发布版本。具体步骤见 [1.1 首次发布后回滚指南](#11-首次发布后回滚指南)：
 `npm unpublish` 仅限 72 小时窗口，常规走 `npm deprecate` + 发布更高修复版本。
+
+## 7. v0.1.0 首版发布清单（物料已备齐，由主会话执行）
+
+> 本节只列**待执行**动作；发布分支切割、push 与 tag 由主会话在合并后完成。
+> 版本号已是 `0.1.0`、CHANGELOG 章节已存在，因此**不需要**再跑 `bump_version.sh`
+> （脚本幂等：版本号相同、章节已存在会直接跳过）。
+
+### 7.1 执行前确认
+
+- [ ] 本分支的文档物料已合并进 `main`，且 `main` 工作树干净。
+- [ ] 第 1 节的一次性前置已完成：npm org `mebular`、`NPM_TOKEN`（Automation）、
+      Actions `Read and write permissions`。
+- [ ] 五个 `package.json` 版本均为 `0.1.0`，`CHANGELOG.md` 含 `## [v0.1.0]` 章节。
+- [ ] 本机 `npm run lint` / `test:coverage` / `verify:mcp:publish` / `check:docs` 四项全过
+      （记录见第 8 节）。
+
+### 7.2 精确命令序列
+
+```bash
+# 1) 从最新 main 切出版本分支（分支名即版本号，SSOT）
+git fetch origin
+git switch main
+git pull --ff-only origin main
+git switch -c release/v0.1.0 origin/main
+
+# 2) 只读核对 SSOT（不改任何文件）
+grep -H '"version"' package.json packages/*/package.json
+grep -n '^## \[v0.1.0\]' CHANGELOG.md
+git status --short          # 应为空
+
+# 3) push 触发 Publish 流水线
+git push -u origin release/v0.1.0
+```
+
+### 7.3 观察流水线
+
+```bash
+gh run list --workflow=publish.yml --branch release/v0.1.0 --limit 5
+gh run watch <run-id>       # 或用网页 Actions 页面
+```
+
+预期阶段（任一失败即停，修复后重推同一分支即可，已发布包会 skip）：
+
+1. **verify**：SSOT 校验（分支名 == 5×`package.json` == CHANGELOG 章节）→ `npm run build`
+   → `npm run lint` → `npm run test:coverage` → `npm run verify:mcp:publish`。
+2. **publish**：`@mebular/core` → `@mebular/service` → `@mebular/skill` → `@mebular/mcp`
+   → `@mebular/fleet`（`npm view` 已存在则 skip）。
+3. **release**：从 `CHANGELOG.md` 抽取 `## [v0.1.0]` 章节生成 notes，创建 tag `v0.1.0`
+   与 GitHub Release。
+
+### 7.4 发布后核验
+
+```bash
+for p in core service skill mcp fleet; do npm view "@mebular/$p@0.1.0" version; done
+gh release view v0.1.0
+npm install -g @mebular/mcp@0.1.0
+mebular --help && fleet --version
+mebular init                # 首次运行会提示下一步；路径提示问题见 8.1
+```
+
+<details>
+<summary>回滚</summary>
+
+见 [1.1 首次发布后回滚指南](#11-首次发布后回滚指南)：`npm unpublish` 仅限 72 小时窗口，
+常规走 `npm deprecate` + 发布更高修复版本；GitHub 侧可 `gh release delete v0.1.0 --cleanup-tag`。
+
+</details>
+
+## 8. 发布前验证记录
+
+环境：macOS（darwin）/ Node.js v26.8.1 / npm 11.19.0，依赖由 `npm ci` 从
+`package-lock.json` 安装（`prepare` 自动 build）。
+
+验证对象：分支 `m0/release-v010`，基线 `5a9a273`，执行日期 2026-10-20。
+
+| 命令 | 结果 | 关键输出 |
+| --- | --- | --- |
+| `npm run lint` | ✅ 通过 | ESLint 覆盖 `src` / `tests` / `tests-semantic` / `scripts` / `packages` / `apps/desktop`，无告警 |
+| `npm run test:coverage` | ✅ 通过 | 158 suites / 1391 tests 全过；全局 91.7% stmts、94.13% lines、78.89% branches（门槛 85 / 65） |
+| `npm run verify:mcp:publish` | ✅ 通过 | 5 包 `npm pack` + tarball 安装冒烟；内部依赖改写为 `^0.1.0` 且无 `file:` 泄漏；安装后 `tools/list=29`（13 记忆 + 16 任务）、`memory_write`/`memory_query` 落图命中、`fleet --version` 正常；根 tarball 全域安装双 bin（`mebular` + `fleet`） |
+| `npm run check:docs` | ✅ 通过 | 7/7：README EN/CN 标题结构 `2,2,2,3,3,3,3,2,2` 一致、互链、无手写测试数字、CI badge、工具名在册、本地链接均存在 |
+| SSOT 预演（`publish.yml` 同款脚本，`TAG=v0.1.0`） | ✅ 通过 | 5×`package.json` = `0.1.0`；`CHANGELOG.md` 含 `## [v0.1.0]` |
+
+补充验证：另用 `npm install -g --prefix <tmp>` 安装 `@mebular/mcp` 及其依赖 tarball，
+`<prefix>/bin` 同时生成 `mebular` 与 `fleet`，`mebular tools` 返回 29 项——README /
+QUICKSTART 中的 npm 全局安装说明与实测一致。
+
+### 8.1 已知问题（不阻塞 0.1.0）
+
+- `mebular init` 的“下一步”提示使用仓库相对路径（`node packages/.../mebular.mjs`），
+  对 `npm install -g` 用户不适用；README / QUICKSTART 已给出 npm 安装树下的
+  `install.mjs` 绝对路径，代码提示留待后续版本修正。
+- 部分源码注释仍写“记忆 11 项 / 共 27 工具”，实际注册表已是 13 记忆 + 16 任务 = 29
+  （`check-surface-parity` 断言 29）。本次文档按代码实测的 29 编写；注释清理留待后续版本。

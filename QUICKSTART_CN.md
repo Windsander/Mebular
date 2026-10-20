@@ -9,7 +9,17 @@ Ed25519 签名、内容寻址。没有云、没有协调者。
 
 ## 1. 安装（约 1 分钟）
 
-**A. 从 GitHub 钉住提交（推荐，可复现）：**
+**A. 从 npm 安装（已发布版本的推荐方式）：**
+
+```bash
+npm install -g @mebular/mcp
+command -v mebular && command -v fleet
+```
+
+五个 `@mebular/*` 包按 lockstep 同版本发布，全局安装会一并带上 core、fleet、service、skill。
+`mebular` 负责守护、MCP 服务与控制台，`fleet` 负责上车、邀请与加入。
+
+**B. 从 GitHub 钉住提交（从源码构建，可复现）：**
 
 ```bash
 SHA=$(git ls-remote https://github.com/Windsander/Mebular.git refs/heads/main | cut -f1)
@@ -17,7 +27,7 @@ npm i -g "github:Windsander/Mebular#$SHA"
 command -v mebular && command -v fleet
 ```
 
-**B. 从本地仓库（开发者）：**
+**C. 从本地仓库（开发者）：**
 
 ```bash
 git clone https://github.com/Windsander/Mebular.git && cd Mebular
@@ -65,10 +75,17 @@ mebular print-config --client opencode   # 也可：claude、cursor、dsh、gene
 把它粘进你的 Agent 的 MCP 配置。本地形态通过 stdio 运行 `mebular mcp`；Streamable HTTP 客户端则可指向
 `http://127.0.0.1:7331/mcp`。
 
-可选：把行为层 Skill（记忆规约与工作流）安装到 Agent 的 Skill 目录：
+可选：把行为层 Skill（记忆规约与工作流）安装到 Agent 的 Skill 目录——源码仓库用：
 
 ```bash
 node packages/skill/scripts/install.mjs
+```
+
+从 npm 安装时，Skill 脚本随 `@mebular/core` 一起落地，直接指向那份副本（加 `--global` 会另装到
+`~/.agents/skills`）：
+
+```bash
+node "$(npm root -g)/@mebular/core/packages/skill/scripts/install.mjs" --global
 ```
 
 ## 4. 写入与查询记忆

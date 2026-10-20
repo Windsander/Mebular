@@ -54,6 +54,27 @@ you cannot tell who wrote what; go offline and it stops working.
 ## How to use
 ![Pairing flow: device A starts and invites, device B joins with the QR code, connection then happen automatically; each device subscribes on its own](assets/pairing-flow-en.svg)
 
+### Install
+
+With Node.js >= 20, install the published CLI from npm:
+
+```bash
+npm install -g @mebular/mcp   # provides `mebular`; `fleet` comes with its dependencies
+mebular init                  # identity + config in ~/.mebular
+mebular serve                 # daemon + console at http://127.0.0.1:7331/console
+mebular mcp                   # stdio MCP server for your agent
+```
+
+`mebular init` writes `~/.mebular/config.json` (override the home with `MEBULAR_HOME`);
+`mebular serve` is the only writer for that home. To install the memory / task skills from the
+npm tree:
+
+```bash
+node "$(npm root -g)/@mebular/core/packages/skill/scripts/install.mjs"
+```
+
+Prefer a source checkout? Use the GitHub-pinned or local install in [`QUICKSTART.md`](QUICKSTART.md).
+
 ### Start it
 | Path | Get started | Best for |
 |---|---|---|
@@ -61,7 +82,7 @@ you cannot tell who wrote what; go offline and it stops working.
 | **GUI** | `mebular serve` → console → first run: **Create new / Join existing**; later: ＋ Invite a device | want to watch it happen |
 | **CLI** | `fleet quickstart` → `fleet invite`; new device `fleet join --qr` | scripts / bulk |
 
-**Agent** — install the skills (two: **memory** + **tasks**), then say “deploy Mebular” / “join with this code”; it follows [`packages/skill/SETUP.md`](packages/skill/SETUP.md) and self-checks with `mebular doctor --net`:
+**Agent** — install the skills (two: **memory** + **tasks**) with the checkout command below (npm installs: use the `install.mjs` path in [Install](#install)), then say “deploy Mebular” / “join with this code”; it follows [`packages/skill/SETUP.md`](packages/skill/SETUP.md) and self-checks with `mebular doctor --net`:
 
 ```bash
 node packages/skill/scripts/install.mjs

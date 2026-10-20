@@ -9,7 +9,18 @@ devices, and every write is Ed25519-signed and content-addressed. No cloud, no c
 
 ## 1. Install (about a minute)
 
-**A. From GitHub, pinned to a commit (recommended, reproducible):**
+**A. From npm (recommended for a published release):**
+
+```bash
+npm install -g @mebular/mcp
+command -v mebular && command -v fleet
+```
+
+The five `@mebular/*` packages are published in lockstep, so the global install pulls the core,
+fleet, service and skill packages at the same version. `mebular` covers the daemon, MCP server and
+console; `fleet` covers setup, invite and join.
+
+**B. From GitHub, pinned to a commit (reproducible source build):**
 
 ```bash
 SHA=$(git ls-remote https://github.com/Windsander/Mebular.git refs/heads/main | cut -f1)
@@ -17,7 +28,7 @@ npm i -g "github:Windsander/Mebular#$SHA"
 command -v mebular && command -v fleet
 ```
 
-**B. From a local checkout (developers):**
+**C. From a local checkout (developers):**
 
 ```bash
 git clone https://github.com/Windsander/Mebular.git && cd Mebular
@@ -66,10 +77,18 @@ mebular print-config --client opencode   # also: claude, cursor, dsh, generic
 Paste it into your agent's MCP configuration. The local form runs `mebular mcp` over stdio; a Streamable HTTP
 client can instead point at `http://127.0.0.1:7331/mcp`.
 
-Optionally install the behavior skill (memory policy and workflow) into your agent's skill directory:
+Optionally install the behavior skill (memory policy and workflow) into your agent's skill directory —
+from a source checkout:
 
 ```bash
 node packages/skill/scripts/install.mjs
+```
+
+With the npm install, the skill scripts ship inside `@mebular/core`. Point the installer at that
+copy (add `--global` to also install into `~/.agents/skills`):
+
+```bash
+node "$(npm root -g)/@mebular/core/packages/skill/scripts/install.mjs" --global
 ```
 
 ## 4. Write and query memory

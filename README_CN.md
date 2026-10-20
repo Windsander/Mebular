@@ -47,6 +47,26 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 ## 怎么用
 ![配对流程：设备 A 建新并发出邀请，设备 B 扫码加入，随后连接与默认授权自动完成](assets/pairing-flow-cn.svg)
 
+### 安装
+
+Node.js >= 20，从 npm 安装已发布的命令行：
+
+```bash
+npm install -g @mebular/mcp   # 提供 `mebular`；`fleet` 随依赖一起装上
+mebular init                  # 在 ~/.mebular 生成身份与配置
+mebular serve                 # 守护 + 控制台：http://127.0.0.1:7331/console
+mebular mcp                   # 给 Agent 的 stdio MCP 服务
+```
+
+`mebular init` 写入 `~/.mebular/config.json`（可用 `MEBULAR_HOME` 换目录）；
+同一个 home 只允许一个 `mebular serve` 写者。从 npm 安装树装记忆 / 任务两个 Skill：
+
+```bash
+node "$(npm root -g)/@mebular/core/packages/skill/scripts/install.mjs"
+```
+
+想用仓库源码？见 [`QUICKSTART_CN.md`](QUICKSTART_CN.md) 里的 GitHub 钉版本与本地安装。
+
 ### 开始用
 | 路径 | 怎么开始 | 适合 |
 |---|---|---|
@@ -54,7 +74,7 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 | **GUI** | `mebular serve` → 控制台 → 首次：**建新 / 加入已有**；之后：＋ 邀请新设备 | 想亲眼看着 |
 | **CLI** | `fleet quickstart` → `fleet invite`；新机 `fleet join --qr` | 脚本化/批量 |
 
-**让 Agent 代劳** —— 装好 Skill（**两个：记忆 + 任务**），对它说“部署 Mebular”/“用这个码加入”；它按 [`packages/skill/SETUP.md`](packages/skill/SETUP.md) 执行并用 `mebular doctor --net` 自检：
+**让 Agent 代劳** —— 装好 Skill（**两个：记忆 + 任务**；源码仓库用下面的命令，npm 安装用 [安装](#安装) 里的 `install.mjs` 路径），对它说“部署 Mebular”/“用这个码加入”；它按 [`packages/skill/SETUP.md`](packages/skill/SETUP.md) 执行并用 `mebular doctor --net` 自检：
 
 ```bash
 node packages/skill/scripts/install.mjs

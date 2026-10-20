@@ -789,6 +789,10 @@ async function main() {
       return Boolean(self) && self.name === '演示笔记本';
     })()`));
     await evalJs('document.querySelector("#about-close").click()');
+    // 设备名用例从关于本机返回后，恢复设置弹层（后续 CSRF/待重启用例依赖它保持打开）。
+    await evalJs('document.querySelector("#open-settings").click()');
+    await evalJs('document.querySelector("[data-settings-tab=common]").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === false');
 
     // U-1：CSRF 403 自愈——旧 token + 错误 cookie → 重取 /console/ → 原表单内容自动重试一次
     await evalJs('document.querySelector("[data-cloud-rename=default]").click()');

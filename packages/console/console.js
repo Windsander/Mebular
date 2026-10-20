@@ -2540,6 +2540,9 @@ function renderOverlays() {
   if (onMap && items.length > 0) {
     card.innerHTML = `<h3>需要注意</h3><ul>${items.map((it) =>
       `<li><button class="attention-item" type="button" data-attention-action="${escapeHtml(it.action)}" data-attention-id="${escapeHtml(it.id)}">${escapeHtml(it.label)} ›</button></li>`).join('')}</ul>`;
+  } else {
+    // 注意项退场时同步清空隐藏卡：hidden 只负责视觉，残留文案仍会被读屏/验收读到。
+    card.innerHTML = '';
   }
 }
 

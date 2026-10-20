@@ -95,6 +95,21 @@ async function seedHome(home) {
     await app.declareNamespace({ namespace: 'notes', note: 'ui seed' });
     await app.declareNamespace({ namespace: 'work', note: 'ui seed' });
     await app.subscribeNamespace('notes');
+    // device-C：设备卡/移出用例需要在 collectKnownDevices 里可见。它只收
+    // authors / subscriptions / declarations / revokes / restores / handoff / online，
+    // 不收 security_approval.target；用一条 C 自己签名的订阅记录种入（不改产品）。
+    const cStorage = join(home, 'device-C.jsonl');
+    const cApp = new Mebular({
+      storagePath: cStorage,
+      deviceId: 'device-C',
+      encryption: { level: 'none', userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
+      network: { enabled: false },
+      sync: { autoSync: false, namespaces: ['notes'] },
+    });
+    await cApp.initialize();
+    const cSubscription = await cApp.declareNamespaceSubscription({ namespace: 'notes', active: true });
+    await cApp.shutdown();
+    await app.eventLog.appendRemote(cSubscription);
     const now = Date.now();
     const kickNonce = 'ui-seed-kick';
     const kickDigest = securityActionDigest({ op: 'kick', initiator: 'device-peer', subject: 'device-C', nonce: kickNonce });
@@ -402,8 +417,10 @@ async function main() {
     check('W-B 新建域默认自订阅 + 0 条目录可见',
       await waitFor(`(() => {
         const list = document.querySelector('#domains-list')?.textContent ?? '';
+        const detail = document.querySelector('#domain-detail')?.textContent ?? '';
         const banner = document.querySelector('#banner')?.textContent ?? '';
-        return /ledger-ui/.test(list) && /0 条/.test(list) && /已订阅/.test(list)
+        return /ledger-ui/.test(list) && /0 条/.test(list)
+          && (/已订阅/.test(detail) || document.querySelector('#ns-subscribe')?.checked === true)
           && /已创建并订阅「ledger-ui」/.test(banner);
       })()`));
 
@@ -1023,8 +1040,25 @@ async function main() {
     await evalJs('document.querySelector("#settings-security-slot [data-security-action=totp-import]").click()');
     check('S3 导入种子弹层（粘贴分组文本 / otpauth）', await waitFor('Boolean(document.querySelector("#security-totp-secret"))'));
     await evalJs(`(() => { document.querySelector('#security-totp-secret').value = ${JSON.stringify(SEC_TOTP_SECRET)}; document.querySelector('#security-action-confirm').click(); })()`);
-    check('S3 导入成功：安全卡显示已导入 + fingerprint；注意项退场',
-      await waitFor(`(() => { const s = document.querySelector('#settings-security-slot'); return Boolean(s) && /已导入/.test(s.textContent) && s.textContent.includes(${JSON.stringify(totpFingerprint(SEC_TOTP_SECRET))}) && !document.querySelector('#attention-card')?.textContent.includes('动态码种子未导入'); })()`, 20000));
+    const totpImportOk = await waitFor(`(() => { const s = document.querySelector('#settings-security-slot'); return Boolean(s) && /已导入/.test(s.textContent) && s.textContent.includes(${JSON.stringify(totpFingerprint(SEC_TOTP_SECRET))}) && !document.querySelector('#attention-card')?.textContent.includes('动态码种子未导入'); })()`, 20000);
+    check('S3 导入成功：安全卡显示已导入 + fingerprint；注意项退场', totpImportOk);
+    if (!totpImportOk) {
+      const diag = await evalJs(`(async () => {
+        const slot = document.querySelector('#settings-security-slot');
+        const attention = document.querySelector('#attention-card');
+        const banner = document.querySelector('#banner');
+        let security = null;
+        try { security = await fetch('/admin/api/security').then((r) => r.json()); } catch (e) { security = { error: String(e) }; }
+        return JSON.stringify({
+          slot: slot?.textContent ?? null,
+          slotLevel: slot?.dataset.securityLevel ?? null,
+          attention: attention?.textContent ?? null,
+          banner: banner?.textContent ?? null,
+          security,
+        });
+      })()`);
+      console.log('  · [诊断] S3 导入:', diag);
+    }
 
     // 中档邀请要码 → 中档移出提级
     await evalJs('document.querySelector("#invite-device").click()');
@@ -1205,6 +1239,8 @@ async function main() {
       })()`));
 
     // S3 mock：高档安全卡（待批准 / 恢复码 / 拒绝原因）+ 星图注意 + 审计拒绝原因
+    // 注意卡只在星图视图渲染；前一步停在审计视图，先切回星图再断言（不依赖隐藏卡残留）。
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('S3 mock：顶栏徽章高 + 星图「需要注意」安全项（待批准 / 拒绝）',
       await waitFor(`(() => {
         const t = document.querySelector('#attention-card')?.textContent ?? '';

@@ -172,6 +172,74 @@
       text-align:center;
     }
 
+    /* Trust Anchor 预告条（定价卡片下方，需求信号测试点）
+       沿用星空主题：半透明面板 + 虚线边框区分“即将推出”。 */
+    .anchor-teaser {
+      position:relative;
+      display:flex;
+      align-items:flex-start;
+      gap:14px;
+      margin-top:20px;
+      padding:20px 24px;
+      text-align:left;
+      background:linear-gradient(100deg,
+          rgba(40,70,140,0.18),
+          rgba(90,60,150,0.14));
+      border:1px dashed rgba(120,160,255,0.22);
+      border-radius:var(--radius);
+      backdrop-filter:blur(10px);
+      -webkit-backdrop-filter:blur(10px);
+      overflow:hidden;
+    }
+    .anchor-teaser::before {
+      content:'';
+      position:absolute;
+      top:0; left:0; right:0; height:1px;
+      background:linear-gradient(90deg,
+          transparent,
+          rgba(120,200,255,0.35),
+          rgba(200,160,255,0.3),
+          transparent);
+    }
+    .anchor-teaser .anchor-icon {
+      flex-shrink:0;
+      font-size:1rem;
+      line-height:1.5;
+      color:var(--accent, #8ac8ff);
+      text-shadow:0 0 14px rgba(120,200,255,0.5);
+    }
+    .anchor-teaser .anchor-body {
+      min-width:0;
+      flex:1;
+    }
+    .anchor-teaser .anchor-head {
+      display:flex;
+      align-items:center;
+      flex-wrap:wrap;
+      gap:10px;
+    }
+    .anchor-teaser .anchor-title {
+      font-size:0.82rem;
+      letter-spacing:0.08em;
+      color:var(--text-strong, #aec8f0);
+    }
+    .anchor-teaser .anchor-badge {
+      font-size:0.54rem;
+      letter-spacing:0.16em;
+      color:var(--accent-violet, #c8a0ff);
+      border:1px solid rgba(160,120,255,0.35);
+      background:rgba(120,80,220,0.12);
+      padding:2px 9px;
+      border-radius:20px;
+      white-space:nowrap;
+    }
+    .anchor-teaser .anchor-desc {
+      margin-top:6px;
+      font-size:0.74rem;
+      line-height:1.75;
+      color:var(--text-muted, #8898b0);
+    }
+
     /* ===== Hero ===== */
     .hero {
       padding:60px 0 40px;
@@ -552,6 +620,9 @@
       #page-network { padding:20px; }
       #page-network .page-inner { max-width:100%; text-align:center; }
       #page-pricing { padding:78px 16px 36px; }
+      .anchor-teaser { padding:16px; gap:10px; }
+      .anchor-teaser .anchor-title { font-size:0.74rem; }
+      .anchor-teaser .anchor-desc { font-size:0.68rem; }
       #page-waitlist .page-inner { max-width:100%; }
       .net-stage-panel { width:92%; max-width:320px; padding:14px 12px; }
       .net-panel-stats { gap:4px; }
@@ -756,6 +827,18 @@
 
         </section>
 
+        <!-- Trust Anchor 预告：记忆公证（需求信号测试点） -->
+        <div class="anchor-teaser reveal d4">
+          <span class="anchor-icon" aria-hidden="true">✦</span>
+          <div class="anchor-body">
+            <div class="anchor-head">
+              <span class="anchor-title" data-i18n="pricing.anchor.title">记忆公证 · Trust Anchor</span>
+              <span class="anchor-badge" data-i18n="pricing.anchor.badge">即将推出</span>
+            </div>
+            <p class="anchor-desc" data-i18n="pricing.anchor.desc">举证级时间戳，第三方可验证的记忆存在性证明</p>
+          </div>
+        </div>
+
         <p class="form-note reveal d4" style="margin-top:28px;text-align:center;">
           <span data-i18n="pricing.includes.title">所有套餐均包含</span> ·
           <span data-i18n="pricing.includes.body">端到端加密 · 设备侧记忆存储 · 开源客户端 · 可验证同步</span>
@@ -784,6 +867,10 @@
             <details class="faq-item">
               <summary data-i18n="faq.q5">企业合规与私有部署怎么支持？</summary>
               <div class="faq-body" data-i18n="faq.a5">Team 套餐提供多域管理、完整审计可见性与优先支持。如需私有部署或定制合规方案，请在等待名单中选择「企业合规」与我们联系。</div>
+            </details>
+            <details class="faq-item">
+              <summary data-i18n="faq.q6">什么是记忆公证（Trust Anchor）？</summary>
+              <div class="faq-body" data-i18n="faq.a6">它把你记忆事件的加密指纹定期锚到公链上，任何人都能独立验证‘这些记忆在某时刻已存在’，而你的记忆内容零暴露。即将推出。</div>
             </details>
           </div>
         </section>
@@ -827,6 +914,7 @@
                 <option value="hosted-relay" data-i18n="form.intent.relay">托管 relay</option>
                 <option value="enterprise-compliance" data-i18n="form.intent.enterprise">企业合规</option>
                 <option value="consulting" data-i18n="form.intent.consulting">咨询集成</option>
+                <option value="trust-anchor" data-i18n="form.intent.anchor">记忆公证</option>
               </select>
             </div>
 

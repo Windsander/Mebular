@@ -35,6 +35,24 @@ describe('订阅自主（订阅即读 + 域公告 + 热生效）', () => {
     });
   }
 
+  async function waitFor(predicate: () => Promise<boolean>, timeoutMs = 10_000, pollMs = 100): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await predicate()) return true;
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    return predicate();
+  }
+
+  async function syncUntil(a: Mebular, b: Mebular, predicate: () => Promise<boolean>, timeoutMs = 15_000): Promise<boolean> {
+    return waitFor(async () => {
+      // 两侧都驱动一轮；有 pending 的一侧会发起/唤醒会话。
+      await a.sync.runAntiEntropyCycle();
+      await b.sync.runAntiEntropyCycle();
+      return predicate();
+    }, timeoutMs, 150);
+  }
+
   async function syncBetween(a: Mebular, b: Mebular): Promise<void> {
     const doneA = new Promise((resolve) => a.sync.once('sync-completed', resolve));
     const doneB = new Promise((resolve) => b.sync.once('sync-completed', resolve));
@@ -92,11 +110,13 @@ describe('订阅自主（订阅即读 + 域公告 + 热生效）', () => {
       expect((await b.getNamespaceSubscriptions('ledger')).subscribers).not.toContain('device-B');
       expect(await b.graph.getNode(node.id)).toBeNull();
 
-      // 订阅热生效：不重启，下一轮同步即收到
+      // 订阅热生效：先等 B 的订阅记录到达 A（策略先到），再驱动数据同步。
       await b.subscribeNamespace('ledger');
-      await a.sync.runAntiEntropyCycle();
-      await b.sync.runAntiEntropyCycle();
-      await syncBetween(a, b);
+      const policyArrived = await waitFor(async () => (await a.getSubscriptions('device-B')).includes('ledger'), 10_000);
+      if (!policyArrived) throw new Error(`B 的 ledger 订阅未到达 A：${JSON.stringify(await a.getSubscriptions('device-B'))}`);
+
+      const delivered = await syncUntil(a, b, async () => (await b.graph.getNode(node.id)) !== null, 15_000);
+      if (!delivered) throw new Error('ledger-1 未在超时内送达 B（检查订阅热生效/nudge）');
       expect((await b.graph.getNode(node.id))?.content).toEqual({ text: 'ledger-1' });
     } finally {
       await a.shutdown();

@@ -12,6 +12,11 @@ export function closeAction({ quitting } = {}) {
   return quitting ? 'quit' : 'hide';
 }
 
+/** 退出确认结果 → 动作：只有明确确认（true）才 quit；取消 / 关闭 / 无结果都留在 App。 */
+export function quitDecision({ confirmed } = {}) {
+  return confirmed === true ? 'quit' : 'cancel';
+}
+
 /**
  * 退出确认文案（高-2）：**仅当壳确实托管守护**（child 子进程模式）才声明
  * 「将停止本机 Mebular 守护」；reused（外部已跑）/ service（launchd 常驻）退出不影响守护，不得谎称。

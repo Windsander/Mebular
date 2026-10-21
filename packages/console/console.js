@@ -2938,8 +2938,15 @@ async function clientAction(id, action) {
       say(res.needsManual ? `需要你手动合并：${res.reason ?? ''}` : '');
       return;
     }
-    // R-1 小-11：回滚是不可逆方向的操作 → 二次确认
-    if (action === 'rollback' && !window.confirm('确定回滚？将把该助手的配置还原到接入前（用自动备份恢复）。')) return;
+    // R-1 小-11：回滚是不可逆方向的操作 → 应用内二次确认（取消 / Esc / 点空白 = 不执行）
+    if (action === 'rollback') {
+      const ok = await confirmModal({
+        title: '回滚助手配置？',
+        body: '将把该助手的配置还原到接入前（使用自动备份）。回滚会覆盖接入后写入的 Mebular 条目。',
+        confirmLabel: '回滚',
+      });
+      if (!ok) return;
+    }
     const res = await api(`/admin/api/clients/${id}/${action}`, { method: 'POST', body: {}, timeoutMs: 20000 }); // 写入/CLI 动作给足余量
     if (typeof res.preview === 'string' && res.preview.length > 0) showDiff(res.preview);
     if (!res.ok) { say(`需要你手动处理：${res.reason ?? '请看片段'}`); return; }
@@ -3046,8 +3053,13 @@ function assistantStartEdit(id) {
 }
 
 async function assistantRemove(id) {
-  // 移除自定义条目不可恢复 → 二次确认
-  if (!window.confirm(`确定移除自定义助手「${id}」？只删登记，不动它已有的配置文件。`)) return;
+  // 移除自定义条目不可恢复 → 应用内二次确认
+  const ok = await confirmModal({
+    title: '移除自定义助手？',
+    body: `将移除「${id}」的登记；它已有的配置文件不改动。重新登记后可再次接入。`,
+    confirmLabel: '移除',
+  });
+  if (!ok) return;
   try {
     const res = await api(`/admin/api/assistants/${encodeURIComponent(id)}/remove`, { method: 'POST', body: {} });
     if (!res?.ok) { state.clientMsg[id] = res?.reason ?? '移除失败'; rerenderAssistants(); return; }
@@ -4299,7 +4311,7 @@ async function openInvite(ttlMs = state.inviteTtlMs) {
         },
       });
     } catch (error) {
-      window.alert(`发起会签失败：${error.message}`);
+      showToast(`发起会签失败：${error.message}`);
     }
     return;
   }
@@ -4433,31 +4445,39 @@ function showInviteResult(res) {
     <div class="invite-layout">
       <div class="invite-qr">${qrMarkup}</div>
       <div class="invite-main">
-        <p class="invite-lead">让对方扫码，或复制令牌。</p>
+        <p class="invite-lead">扫码加入，或复制令牌发给对方。</p>
         <div class="invite-token-block">
-          <span class="invite-label">令牌</span>
+          <span class="invite-label">一次性令牌</span>
           <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
         </div>
         <div class="invite-controls">
           <label class="invite-ttl" for="invite-ttl"><span class="invite-label">有效期</span>
             <select id="invite-ttl" class="crt-input">${ttlOptions}</select>
           </label>
-          <button class="btn btn-small btn-crt" id="invite-regenerate" type="button">重新生成</button>
           <span class="invite-expiry" id="invite-expiry">至 ${escapeHtml(formatClock(res.expiresAt))}</span>
+          <button class="btn btn-small btn-crt" id="invite-regenerate" type="button">重新生成</button>
         </div>
         ${warningLine}
       </div>
     </div>
-    ${cloudLine}
-    <p class="invite-safety">一次性 · 仅当面或可信局域网传递。</p>
+    <div class="invite-foot">
+      ${cloudLine}
+      <p class="invite-safety">一次性 · 仅当面或可信局域网传递。换新令牌后旧的立即失效。</p>
+    </div>
   `;
   body.querySelector('#invite-ttl')?.addEventListener('change', (event) => {
     const value = Number(event.currentTarget.value);
     if (INVITE_TTL_OPTIONS.some((option) => option.ttlMs === value)) state.inviteTtlMs = value;
   });
-  body.querySelector('#invite-regenerate')?.addEventListener('click', () => {
-    // 二次确认保留但简短：旧令牌作废是不可逆方向。
-    if (window.confirm('重新生成后旧令牌立即失效。确定？')) void openInvite(state.inviteTtlMs);
+  body.querySelector('#invite-regenerate')?.addEventListener('click', async () => {
+    // 旧令牌作废不可逆：应用内确认；取消 / Esc / 点空白都不重新生成。
+    const ok = await confirmModal({
+      title: '重新生成令牌？',
+      body: '旧令牌会立即失效，已发出的邀请将无法再兑换。',
+      confirmLabel: '重新生成',
+    });
+    if (!ok) return;
+    void openInvite(state.inviteTtlMs);
   });
   body.querySelectorAll('[data-copy]').forEach((button) => {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
@@ -5604,6 +5624,8 @@ async function enterLockedConsole(status) {
     // 极端并发：初始化进行中，入口禁用并给出提示，等待用户重试。
     setOnboardError('#onboard-create-error', '初始化正在进行，请稍候重试。');
   }
+  // 托盘在「向导态 → 首次加载控制台」时带来的 ?view= 目标也要生效（锁定壳只开设置/提示，不取数据面）。
+  await applyConsoleDeepLink(initialViewFromSearch(location.search), { initial: true });
 }
 
 let normalConsolePromise = null;
@@ -5616,25 +5638,24 @@ function enterNormalConsole() {
   return normalConsolePromise;
 }
 
-async function enterNormalConsoleOnce() {
-  // 兼容旧内部路径（P3 起不再用 #provision 遮罩整个 app）。
-  const provisionModal = $('#provision');
-  if (provisionModal) provisionModal.hidden = true;
-  clearLockedChrome();
-  dismissOnboardingCoach();
-  const appEl = $('#app');
-  if (appEl) appEl.hidden = false;
-  // R-1 高-3：?view=<视图> 深链（向导②/托盘「连接 AI 助手」的 ?view=connect 落点）；
-  // step=device → 进连接页后自动开「邀请设备」
-  const deepLink = initialViewFromSearch(location.search);
-  // UX-2 补丁 4：桌面壳 + macOS hiddenInset → 顶栏避让交通灯安全区（body 类驱动 CSS）
-  document.body.classList.toggle(
-    'shell-desktop-darwin',
-    Boolean(deepLink.shellDesktop || window.mebularDesktop) && window.mebularDesktop?.platform === 'darwin',
-  );
-  stage.start();
-  setView(deepLink.view ?? 'map');
-  await refresh();
+/**
+ * 统一应用控制台深链：启动 ?query 与桌面壳托盘原地导航共用（不重建页面）。
+ * initial=true 时只负责启动落点；后续导航先收起无关弹层，再切视图 / 开目标弹层。
+ */
+async function applyConsoleDeepLink(deepLink, { initial = false } = {}) {
+  if (!deepLink) return;
+  if (deepLink.view) setView(deepLink.view);
+  if (!initial) {
+    if (!deepLink.openSettings) $('#settings').hidden = true;
+    if (!deepLink.openInvite) {
+      $('#invite').hidden = true;
+      state.inviteToken = null;
+    }
+    for (const id of ['about', 'cloud-switch', 'handoff', 'namespace-new-modal']) {
+      const el = document.getElementById(id);
+      if (el) el.hidden = true;
+    }
+  }
   // UX-2：?view=connect 别名重定向 → 设置 · AI 助手
   if (deepLink.openSettings) {
     $('#settings').hidden = false;
@@ -5658,7 +5679,35 @@ async function enterNormalConsoleOnce() {
       }, 0);
     }
   }
-  if (deepLink.openInvite) openInvite();
+  if (deepLink.openInvite) {
+    // 锁定态没有可用的邀请数据面：沿用锁定壳的提示，不直接打 409 接口。
+    if (state.locked) showLockedToast();
+    // 弹层已开着就只显示，不重复生成令牌（重复点托盘不应让旧令牌失效）。
+    else if ($('#invite').hidden) await openInvite();
+    else $('#invite').hidden = false;
+  }
+}
+
+async function enterNormalConsoleOnce() {
+  // 兼容旧内部路径（P3 起不再用 #provision 遮罩整个 app）。
+  const provisionModal = $('#provision');
+  if (provisionModal) provisionModal.hidden = true;
+  clearLockedChrome();
+  dismissOnboardingCoach();
+  const appEl = $('#app');
+  if (appEl) appEl.hidden = false;
+  // R-1 高-3：?view=<视图> 深链（向导②/托盘「连接 AI 助手」的 ?view=connect 落点）；
+  // step=device → 进连接页后自动开「邀请设备」
+  const deepLink = initialViewFromSearch(location.search);
+  // UX-2 补丁 4：桌面壳 + macOS hiddenInset → 顶栏避让交通灯安全区（body 类驱动 CSS）
+  document.body.classList.toggle(
+    'shell-desktop-darwin',
+    Boolean(deepLink.shellDesktop || window.mebularDesktop) && window.mebularDesktop?.platform === 'darwin',
+  );
+  stage.start();
+  setView(deepLink.view ?? 'map');
+  await refresh();
+  await applyConsoleDeepLink(deepLink, { initial: true });
   startEvents();
   setInterval(() => {
     if (document.hidden === true) return; // F-PERF-1：隐藏页不轮询，回前台由 visibilitychange 补刷
@@ -5686,4 +5735,12 @@ if (provisionStatus && provisionStatus.phase !== 'READY') {
   await enterLockedConsole(provisionStatus);
 } else {
   await enterNormalConsole();
+}
+
+// 桌面壳托盘原地导航：启动完成后再接；启动期间到达的事件由 preload 缓冲一次。
+if (typeof window.mebularDesktop?.onConsoleNavigate === 'function') {
+  window.mebularDesktop.onConsoleNavigate((search) => {
+    if (typeof search !== 'string' || !search.startsWith('?')) return;
+    void applyConsoleDeepLink(initialViewFromSearch(search));
+  });
 }

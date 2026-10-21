@@ -23,7 +23,8 @@ import {
   computeWizardState, deepLinks, inviteText, inviteViaApi, isLoopbackUrl,
   readDesktopState, writeDesktopState, clientsViaApi, clientActionViaApi, installDecision,
 } from './wizard.mjs';
-import { closeAction, quitConfirm, stopConfirm, trayMenuModel, LOGIN_ITEM_ID } from './lifecycle.mjs';
+import { closeAction, quitConfirm, quitDecision, stopConfirm, trayMenuModel, LOGIN_ITEM_ID } from './lifecycle.mjs';
+import { consoleNavSearch, consoleNavUrl, isConsoleUrl } from './console-nav.mjs';
 import { readDaemonLogs } from './logs.mjs';
 
 
@@ -36,6 +37,7 @@ const serviceHome = homedir();
 
 let win = null;
 let tray = null;
+let quitDialog = null;
 let daemonChild = null;
 let daemonMode = null;
 let healthy = false;
@@ -301,17 +303,97 @@ function showWindow() {
   win.focus();
 }
 
+/**
+ * 托盘控制台入口：已加载 /console → 只发导航事件（原地切视图/开弹层，不重建页面）；
+ * 未加载（向导 / loading / 其他）→ 才加载一次。target 只接受 console-nav 的固定键。
+ */
+async function navigateConsole(target) {
+  const base = consoleUrl(httpConf());
+  const url = consoleNavUrl(base, target);
+  if (!url) {
+    console.log(`[desktop] 拒绝未知控制台导航：${String(target).slice(0, 60)}`);
+    return;
+  }
+  showWindow();
+  if (win && !win.isDestroyed() && isConsoleUrl(win.webContents.getURL(), base)) {
+    win.webContents.send('console:navigate', { target, search: consoleNavSearch(target) });
+    return;
+  }
+  await safeLoad(shellDeepLink(url));
+}
+
+/**
+ * 应用内退出确认：独立无框窗口（不依赖主窗口当前页面），向导 / loading / 隐藏窗口均可用。
+ * 关闭、Esc、点取消都 resolve false；只有「退出」按钮 resolve true。
+ */
+function showQuitConfirmation(plan) {
+  return new Promise((resolve) => {
+    if (quitDialog && !quitDialog.isDestroyed()) {
+      quitDialog.focus();
+      resolve(false);
+      return;
+    }
+    const parent = win && !win.isDestroyed() && win.isVisible() ? win : null;
+    const dialogWin = new BrowserWindow({
+      ...(parent ? { parent, modal: true } : {}),
+      width: 452,
+      height: 296,
+      title: '退出 Mebular',
+      icon: appIconPath(),
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      frame: false,
+      show: false,
+      skipTaskbar: true,
+      alwaysOnTop: !parent,
+      backgroundColor: '#05070f',
+      webPreferences: {
+        preload: join(import.meta.dirname, '..', 'preload', 'quit-confirm.cjs'),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webSecurity: true,
+      },
+    });
+    quitDialog = dialogWin;
+    let settled = false;
+    const finish = (confirmed) => {
+      if (settled) return;
+      settled = true;
+      ipcMain.off('quit-confirm:answer', onAnswer);
+      if (quitDialog === dialogWin) quitDialog = null;
+      if (!dialogWin.isDestroyed()) dialogWin.destroy();
+      resolve(confirmed === true);
+    };
+    const onAnswer = (event, confirmed) => {
+      if (event.sender !== dialogWin.webContents) return;
+      finish(confirmed === true);
+    };
+    ipcMain.on('quit-confirm:answer', onAnswer);
+    dialogWin.once('closed', () => finish(false));
+    dialogWin.once('ready-to-show', () => {
+      if (dialogWin.isDestroyed()) return;
+      // 主窗口隐藏时（托盘退出）独立窗口要主动把 App 带到前台，否则可能落在其他 App 后面。
+      if (!parent && process.platform === 'darwin') app.focus({ steal: true });
+      dialogWin.show();
+      dialogWin.focus();
+      dialogWin.webContents.send('quit-confirm:plan', {
+        title: '退出 Mebular？',
+        message: plan.message,
+        buttons: plan.buttons,
+      });
+    });
+    dialogWin.loadFile(join(import.meta.dirname, '..', 'renderer', 'quit-confirm.html')).catch(() => finish(false));
+  });
+}
+
 /** R-1 高-2：唯一真退出入口（托盘「退出」）；确认文案由 quitConfirm 按托管模式给出（不谎称停守护）。 */
 async function confirmQuit() {
   const plan = quitConfirm({ daemonMode, hasManagedChild: Boolean(daemonChild) });
-  const { response } = await dialog.showMessageBox(win ?? undefined, {
-    type: 'question',
-    message: plan.message,
-    buttons: plan.buttons,
-    defaultId: 0,
-    cancelId: 0,
-  });
-  if (response !== plan.confirmIndex) return;
+  const confirmed = await showQuitConfirmation(plan);
+  if (quitDecision({ confirmed }) !== 'quit') return;
   quitting = true;
   app.quit();
 }
@@ -372,16 +454,14 @@ async function refreshTrayStatus() {
 function trayActions() {
   return {
     // R-1 高-4：壳内入口一律带 ?shell=desktop（控制台据此收编终端指令/显示返回向导）
-    'open-console': () => { showWindow(); void safeLoad(shellConsoleUrl()); },
+    // 导航入口全部原地切换：console 已加载不再 loadURL（刷新会丢当前视图/弹层）。
+    'open-console': () => { void navigateConsole('map'); },
     // E2-B：托盘「管理忆云…」→ 设置·忆云卡（MVP 不做二级菜单）
-    'manage-clouds': () => { showWindow(); void safeLoad(cloudSettingsUrl()); },
+    'manage-clouds': () => { void navigateConsole('clouds'); },
     // S3：只读等级行 → 打开控制台安全卡（不做壳内写操作）
-    'security-level': () => {
-      showWindow();
-      void safeLoad(shellDeepLink(`${consoleUrl(httpConf())}?view=settings&focus=security`));
-    },
-    'connect-assistants': () => { showWindow(); void safeLoad(shellDeepLink(deepLinks(httpConf()).assistants)); },
-    'add-device': () => { showWindow(); void safeLoad(shellDeepLink(deepLinks(httpConf()).device)); },
+    'security-level': () => { void navigateConsole('security'); },
+    'connect-assistants': () => { void navigateConsole('assistants'); },
+    'add-device': () => { void navigateConsole('invite'); },
     'open-wizard': () => { showWindow(); void loadWizardView(); },
     'daemon-start': () => { void ensure().then(() => showConsoleWithRetry()); },
     'daemon-stop': () => { void confirmStop(); },
@@ -722,7 +802,7 @@ function registerIpc() {
     'daemon:start': async () => { await ensure(); return { mode: daemonMode }; }, // F1：向导流水用——只启动，不导航（导航只保留显式 console:open）
     'daemon:stop': () => ({ stopped: stopManaged(daemonChild) }),
     'daemon:restart': async () => { await restart(); return { mode: daemonMode }; }, // F1：只重启，不导航
-    'console:open': async () => { win?.show(); win?.focus(); await safeLoad(shellConsoleUrl()); return { url: shellConsoleUrl() }; },
+    'console:open': async () => { await navigateConsole('map'); return { url: shellConsoleUrl() }; },
     'logs:open': async () => { await shell.openPath(join(home, 'serve.log')); return { path: join(home, 'serve.log') }; },
     'app:diagnostics': () => diagnostics({ appVersion: APP_VERSION, electronVersion: process.versions.electron, mode: daemonMode, home, http: httpConf(), healthy }),
     // M2：向导 / 服务托管（主进程直调，不经 HTTP 写端点）/ 日志 / 邀请 / 深链
@@ -756,16 +836,14 @@ function registerIpc() {
       });
     },
     'invite:create': async () => createInvite(),
-    'deep:assistants': async () => { await safeLoad(shellDeepLink(deepLinks(httpConf()).assistants)); return { url: shellDeepLink(deepLinks(httpConf()).assistants) }; },
-    'deep:device': async () => { await safeLoad(shellDeepLink(deepLinks(httpConf()).device)); return { url: shellDeepLink(deepLinks(httpConf()).device) }; },
+    'deep:assistants': async () => { await navigateConsole('assistants'); return { url: shellDeepLink(deepLinks(httpConf()).assistants) }; },
+    'deep:device': async () => { await navigateConsole('invite'); return { url: shellDeepLink(deepLinks(httpConf()).device) }; },
     // E2-B：忆云（列表 / 切换 / 管理深链）。不提供删除。
     'cloud:list': async () => cloudListNow(),
     'cloud:switch': async (id) => cloudSwitchNow(id),
     'cloud:manage': async () => {
-      showWindow();
-      const url = cloudSettingsUrl();
-      await safeLoad(url);
-      return { url, view: 'settings', focus: 'clouds' };
+      await navigateConsole('clouds');
+      return { url: cloudSettingsUrl(), view: 'settings', focus: 'clouds' };
     },
   });
   for (const [channel, handler] of Object.entries(table)) ipcMain.handle(channel, handler);

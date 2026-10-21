@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self'">
+  <title>退出 Mebular</title>
+  <style>
+    :root {
+      --bg: #05070f;
+      --panel: #0e1428;
+      --border: #1d2740;
+      --text: #dbe4ff;
+      --muted: #8391b4;
+      --accent: #56b4e9;
+      --ok: #9dffcf;
+      --font: "SF Mono", "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font: 13px/1.6 var(--font);
+      user-select: none;
+      overflow: hidden;
+    }
+    .panel {
+      height: 100%;
+      padding: 16px 20px 15px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      background:
+        radial-gradient(120% 90% at 50% -20%, rgba(86, 180, 233, 0.12), transparent 60%),
+        linear-gradient(180deg, #0b1020, #070b16);
+      border: 1px solid var(--border);
+    }
+    .head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      -webkit-app-region: drag;
+    }
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 10.5px;
+      letter-spacing: 1.6px;
+    }
+    .brand-star { color: var(--accent); font-size: 15px; line-height: 1; }
+    .x {
+      -webkit-app-region: no-drag;
+      width: 26px;
+      height: 26px;
+      padding: 0;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: none;
+      color: var(--muted);
+      font: inherit;
+      font-size: 14px;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .x:hover { color: var(--ok); border-color: var(--border); background: rgba(10, 16, 32, 0.55); }
+    .x:focus-visible, .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    h1 { margin: 2px 0 0; font-size: 16px; letter-spacing: 0.2px; }
+    p { margin: 0; }
+    #q-message { color: #c6d3f0; font-size: 12px; line-height: 1.65; }
+    .actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      margin-top: auto;
+      -webkit-app-region: no-drag;
+    }
+    .btn {
+      min-width: 76px;
+      height: 30px;
+      padding: 0 13px;
+      border: 1px solid var(--border);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .btn:hover { border-color: #2f3f63; }
+    .btn-danger { background: #3a1408; border-color: #6a2a12; color: #ffc9a8; }
+    .btn-danger:hover { border-color: #9a3c18; }
+    .hint { color: var(--muted); font-size: 10.5px; letter-spacing: 0.2px; }
+  </style>
+</head>
+<body>
+  <main class="panel" role="dialog" aria-modal="true" aria-labelledby="q-title">
+    <div class="head">
+      <span class="brand"><span class="brand-star">✦</span><span>MEBULAR</span></span>
+      <button id="q-close" class="x" type="button" aria-label="取消退出" title="取消退出">✕</button>
+    </div>
+    <h1 id="q-title">退出 Mebular？</h1>
+    <p id="q-message"></p>
+    <div class="actions">
+      <button id="q-cancel" class="btn" type="button">取消</button>
+      <button id="q-confirm" class="btn btn-danger" type="button">退出</button>
+    </div>
+    <p class="hint">Esc 或关闭窗口 = 取消</p>
+  </main>
+  <script src="./quit-confirm.js"></script>
+</body>
+</html>

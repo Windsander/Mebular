@@ -4,6 +4,17 @@
 
 const { contextBridge, ipcRenderer } = require('electron');
 
+// 主进程 → 控制台原地导航：固定单通道，只接收 query（不接受 URL）。
+// 页面脚本注册回调前到达的导航先缓冲一次，避免控制台刚加载时的点击丢失。
+let consoleNavCallback = null;
+let pendingConsoleNavSearch = null;
+ipcRenderer.on('console:navigate', (_event, payload) => {
+  const search = typeof payload?.search === 'string' && payload.search.startsWith('?') ? payload.search : null;
+  if (!search) return;
+  if (consoleNavCallback) consoleNavCallback(search);
+  else pendingConsoleNavSearch = search;
+});
+
 contextBridge.exposeInMainWorld('mebularDesktop', {
   // UX-2 补丁 4：平台标识（渲染层据此避让 macOS 交通灯安全区；静态值，非函数）
   platform: process.platform,
@@ -12,6 +23,19 @@ contextBridge.exposeInMainWorld('mebularDesktop', {
   stop: () => ipcRenderer.invoke('daemon:stop'),
   restart: () => ipcRenderer.invoke('daemon:restart'),
   openConsole: () => ipcRenderer.invoke('console:open'),
+  // 托盘原地导航（固定通道；主进程只发已知 query，控制台复用启动深链的应用函数）
+  onConsoleNavigate: (callback) => {
+    if (typeof callback !== 'function') return () => {};
+    consoleNavCallback = callback;
+    if (pendingConsoleNavSearch) {
+      const search = pendingConsoleNavSearch;
+      pendingConsoleNavSearch = null;
+      queueMicrotask(() => callback(search));
+    }
+    return () => {
+      if (consoleNavCallback === callback) consoleNavCallback = null;
+    };
+  },
   openLogs: () => ipcRenderer.invoke('logs:open'),
   diagnostics: () => ipcRenderer.invoke('app:diagnostics'),
   // M2：三步向导 / 服务托管 / 日志页 / 邀请（全部固定方法，不透传任意通道）

@@ -14,6 +14,7 @@ import { createJoinServer } from './jointoken.mjs';
 import { clearApplyPending, readApplyPending, writeApplyResult, writeServeReady } from './config-apply.mjs';
 import { buildSettings } from './admin.mjs';
 import { isProvisionHome } from './provision.mjs';
+import { acquireActiveLock, profileIdForHome, resolveCloudRoot } from './profiles.mjs';
 import { advertiseHost, endpointHostname, isLoopbackHost } from './lan-host.mjs';
 
 const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
@@ -24,9 +25,9 @@ const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
 5. 隐私：不要写入密钥、口令、完整身份证件等高敏感信息。
 6. 无结果别编：召回为空就如实说明，不要臆造记忆。`;
 
-export function buildServer(service) {
+export function buildServer(service, options = {}) {
   const server = new McpServer({ name: 'mebular', version: '0.1.0' });
-  registerTools(server, service);
+  registerTools(server, service, options);
   server.registerPrompt(
     'memory_policy',
     {
@@ -117,208 +118,298 @@ export async function startStdioServer() {
   return { handle, app, service };
 }
 
-/**
- * 引导态服务器：空家目录时只服务 /healthz + /console（引导页）+ /app/provision/*（CSRF）。
- * 仅 loopback（fail-closed）；不起 Mebular app / 网络 / store —— 待用户在 GUI 选「建新 / 加入」后再重启进入正常态。
- */
-export async function startProvisionServer(options = {}) {
-  const home = homeDir();
-  const host = options.host ?? '127.0.0.1';
-  const port = options.port ?? 7331;
-  const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
-  if (!isLoopback) {
-    const error = new Error(`引导态仅允许 loopback（当前 host=${host}）：请用 --host 127.0.0.1 完成初始化`);
-    error.code = 'MCP_PROVISION_LOOPBACK_REQUIRED';
-    throw error;
-  }
-  const storagePath = process.env.MEBULAR_STORAGE_PATH ?? join(home, 'store.jsonl');
-  const lock = await acquireLock(home, storagePath);
-  try {
-    const http = await startHttpServer({
-      home,
-      app: null,
-      service: null,
-      config: {},
-      host,
-      port,
-      auth: 'none',
-      tls: false,
-      deviceId: null,
-      provision: true,
-      writesEnabled: true,
-      runtime: null,
-    });
-    const shutdown = async () => {
-      await http.close().catch(() => undefined);
-      await lock.release();
-      process.exit(0);
-    };
-    process.on('SIGINT', shutdown);
-    process.on('SIGTERM', shutdown);
-    return { ...http, lock, provision: true };
-  } catch (error) {
-    await lock.release();
-    throw error;
-  }
+function runtimeMcpPort(config, options = {}) {
+  return options.port ?? config?.mcp?.http?.port ?? 7331;
 }
 
 /**
+ * P1：统一 serve 生命周期（UNINITIALIZED → INITIALIZING → READY）。
+ *
+ * - 无论空 home 还是已初始化 home，都只启动**一个** HTTP server、只取**一次** <home>/lock；
+ * - 空 home 的 create/join 由同一进程热初始化（app / join service / 运行时快照就地切换），不重启、不换端口；
+ * - 失败由 serve.mjs 回滚本次落盘产物，再回到 UNINITIALIZED（锁不释放、不重抢）。
+ *
  * 启动 Streamable HTTP server（G6.3）。
  * 单实例：先取 <home>/lock；被占抛 MCP_STORAGE_LOCKED。
  */
 export async function startServeServer(options = {}) {
-  const provisionHome = homeDir();
-  // 引导态：真正的空家目录（无 config/主密钥/身份）→ 不自举 root；只起最小 HTTP（引导页 + provision API）
-  if (isProvisionHome(provisionHome, { storagePath: process.env.MEBULAR_STORAGE_PATH })) {
-    return await startProvisionServer(options);
-  }
+  const home = homeDir();
+  const provisionStart = isProvisionHome(home, { storagePath: process.env.MEBULAR_STORAGE_PATH });
   // F-NET-1（C）：**先取单实例锁，再初始化网络**——第二写者应在绑定监听端口前就得到
   // 可读的 MCP_STORAGE_LOCKED（此前 createMebular 先启网络 → 抢 4001 → 裸 EADDRINUSE）。
-  const home = homeDir();
-  const preConfig = await loadConfigFile(home).catch(() => ({}));
+  const preConfig = provisionStart ? {} : await loadConfigFile(home).catch(() => ({}));
   const preStoragePath = process.env.MEBULAR_STORAGE_PATH
     ?? preConfig.storagePath
     ?? join(home, (preConfig.storageAdapter ?? 'json') === 'sqlite' ? 'store.sqlite' : 'store.jsonl');
   const lock = await acquireLock(home, preStoragePath);
-  let created;
-  try {
-    created = await createMebular();
-  } catch (error) {
-    await lock.release();
-    throw error;
-  }
-  const { app, storagePath, deviceId, config, effective } = created;
-  let joinServer = null;
-  try {
-    const service = new MemoryService(app);
-    // 参与配置：CLI 优先，其次 config.mcp.http（此前 serve 完全忽略 config，设置卡会失真）
-    const httpCfg = config?.mcp?.http ?? {};
-    const tlsKey = options.tlsKey ?? httpCfg.tlsKey;
-    const tlsCert = options.tlsCert ?? httpCfg.tlsCert;
-    // F-C1（A）：TLS 以**真开关**为准——config.mcp.http.tls===true，或显式提供证书；缺证书即启动报错（不静默降级）
-    const tlsRequested = options.tls === true || httpCfg.tls === true || Boolean(tlsKey && tlsCert);
-    const tlsReady = Boolean(tlsKey && tlsCert);
-    if (tlsRequested && !tlsReady) {
-      const error = new Error(
-        'MCP_INSECURE_CONFIG：mcp.http.tls=true 但缺少证书——请在 config.json 填写 mcp.http.tlsKey 与 mcp.http.tlsCert，或关闭 tls',
-      );
-      error.code = 'MCP_INSECURE_CONFIG';
-      throw error;
+
+  // 热初始化 / 正常启动共用：app、join 服务、运行时快照与生命周期资源。
+  let current = null;
+  let httpServer = null;
+
+  const stopBroadcast = (context) => {
+    if (context?.broadcastInterval) {
+      clearInterval(context.broadcastInterval);
+      context.broadcastInterval = null;
     }
-    const runtime = {
-      ...effective,
-      storagePath,
-      mcp: {
-        host: options.host ?? httpCfg.host ?? '127.0.0.1',
-        port: options.port ?? httpCfg.port ?? 7331,
-        auth: options.auth ?? httpCfg.auth ?? 'none',
-        tls: Boolean(tlsRequested && tlsReady),
-        tlsKeyConfigured: Boolean(tlsKey),
-        tlsCertConfigured: Boolean(tlsCert),
-      },
-    };
-    const joinConf = config.joinService;
-    const joinBind = joinConf?.bind ?? '0.0.0.0';
-    // F-C6：令牌里的 endpoint 必须是新设备可直达地址——bind 通配时取本机 LAN IPv4（无则回环并告警），
-    // 也允许 joinService.endpoint 显式固定（跨网段/NAT 场景）。
-    const joinAdvertise = advertiseHost(joinBind);
-    const joinEndpointDemo = joinConf?.enabled
-      ? (typeof joinConf.endpoint === 'string' && joinConf.endpoint
-        ? joinConf.endpoint
-        : `http://${joinAdvertise}:${joinConf.port ?? 4002}`)
-      : undefined;
-    const joinEndpointHost = joinEndpointDemo !== undefined ? endpointHostname(joinEndpointDemo) : null;
-    const joinEndpointLoopback = joinEndpointHost !== null && isLoopbackHost(joinEndpointHost);
-    const http = await startHttpServer({
-      home,
-      app,
-      service,
-      config,
-      buildServer,
-      host: runtime.mcp.host,
-      port: runtime.mcp.port,
-      auth: runtime.mcp.auth,
-      tls: runtime.mcp.tls,
-      tlsKey,
-      tlsCert,
-      tokensFile: options.tokensFile ?? httpCfg.tokensFile,
-      deviceId,
-      namespace: config.sync?.namespaces?.[0] ?? 'tasks',
-      ...(joinEndpointDemo !== undefined ? { joinEndpoint: joinEndpointDemo } : {}),
-      runtime,
-      // D2：写端点默认开启（仍需 memory.admin scope + CSRF 双提交）；`MEBULAR_CONSOLE_WRITES=0` 可降级为 D1 只读
-      writesEnabled: options.writesEnabled ?? process.env.MEBULAR_CONSOLE_WRITES !== '0',
-    });
-    // 监听端口 0 / 默认值时以实际绑定为准
-    runtime.mcp.host = http.host;
-    runtime.mcp.port = http.port;
-    runtime.mcp.auth = http.auth;
-    // W2 A4：join 服务由守护托管（令牌 → 委派证书）。fleet 不再托管生产 join。
-    if (joinConf?.enabled) {
-      try {
-        joinServer = await createJoinServer({
-          mebular: app,
-          deviceId,
-          storagePath,
-          bind: joinConf.bind ?? '0.0.0.0',
-          port: joinConf.port ?? 4002,
-          log: (m) => console.error(m),
-        });
-      } catch (error) {
-        // E：启动失败根因化——不笼统报「serve 起不来」，明确指出是可执行的修复动作
-        const bind = joinConf.bind ?? '0.0.0.0';
-        const port = joinConf.port ?? 4002;
-        const detail = {
-          at: new Date().toISOString(),
-          code: error?.code === 'EADDRINUSE' ? 'JOIN_PORT_IN_USE' : (error?.code ?? 'JOIN_START_FAILED'),
-          bind,
-          port,
-          message: error?.code === 'EADDRINUSE'
-            ? `joinService.port ${port} 被占（bind=${bind}）：改端口（如 joinService.port=0 由系统分配）或释放占用`
-            : `joinService 启动失败（${error?.code ?? 'ERROR'}，bind=${bind}:${port}）：${error?.message ?? error}`,
-        };
-        await writeFile(join(home, 'join.error.json'), JSON.stringify(detail, null, 2), 'utf-8').catch(() => undefined);
-        const wrapped = new Error(detail.message);
-        wrapped.code = detail.code;
-        wrapped.cause = error;
-        throw wrapped;
-      }
-      await rm(join(home, 'join.error.json'), { force: true }).catch(() => undefined);
-      runtime.join = {
-        enabled: true,
-        bind: joinBind,
-        port: joinServer.port,
-        endpoint: joinEndpointDemo,
-        endpointLoopback: joinEndpointLoopback,
-      };
-      console.error(`JOIN_READY ${JSON.stringify({ endpoint: joinEndpointDemo, port: joinServer.port, loopback: joinEndpointLoopback })}`);
+  };
+
+  const stopRuntime = async (context) => {
+    if (!context) return;
+    stopBroadcast(context);
+    await context.joinServer?.close().catch(() => undefined);
+    await context.activeLock?.release?.().catch(() => undefined);
+    await context.app?.shutdown().catch(() => undefined);
+  };
+
+  const startBroadcast = (context) => {
+    if (typeof context.app.getNetEndpointsStatus !== 'function' || !context.app.getNetEndpointsStatus().enabled) {
+      return null;
     }
-    // G：装配完成后写「已监听」标记——supervisor 用它判定新实例健康（join 失败则不写）
-    await writeServeReady(home).catch(() => undefined);
-    // G：若本次启动是「保存即生效」的候选实例 → 用新实例运行时算生效校验并落 result
-    await finalizePendingApply({ home, app, service, config, runtime }).catch(() => undefined);
     // C5：地址自动广播的「可达性/地址变化」复查（app 侧节奏；库不装计时器）。
     // 只在开启广播时挂载；10 分钟一次（unref，不拖住宿主退出）；地址未变时 publish 自身去抖。
-    const broadcastInterval = typeof app.getNetEndpointsStatus === 'function' && app.getNetEndpointsStatus().enabled
-      ? setInterval(() => { void app.publishNetEndpoints?.('periodic').catch(() => undefined); }, 600_000)
-      : null;
-    broadcastInterval?.unref?.();
+    const interval = setInterval(() => {
+      void context.app.publishNetEndpoints?.('periodic').catch(() => undefined);
+    }, 600_000);
+    interval.unref?.();
+    return interval;
+  };
+
+  const finalizeRuntime = async (context) => {
+    await writeServeReady(home).catch(() => undefined);
+    await finalizePendingApply({
+      home,
+      app: context.app,
+      service: context.service,
+      config: context.config,
+      runtime: context.runtime,
+    }).catch(() => undefined);
+    context.broadcastInterval = startBroadcast(context);
+  };
+
+  /**
+   * 创建 app + join 服务 + 运行时快照。
+   * hot=true：create/join 已写盘，须在同一进程内接管；此时额外取 root 级单活锁并立即写 ready。
+   */
+  const startRuntime = async ({ serverContext, hot = false } = {}) => {
+    let context = null;
+    try {
+      const created = await createMebular();
+      const { app, storagePath, deviceId, config, effective } = created;
+      const service = new MemoryService(app);
+      const httpCfg = config?.mcp?.http ?? {};
+      const tlsKey = serverContext?.tlsKey ?? options.tlsKey ?? httpCfg.tlsKey;
+      const tlsCert = serverContext?.tlsCert ?? options.tlsCert ?? httpCfg.tlsCert;
+      const tlsRequested = serverContext
+        ? Boolean(serverContext.tls)
+        : (options.tls === true || httpCfg.tls === true || Boolean(tlsKey && tlsCert));
+      const tlsReady = Boolean(tlsKey && tlsCert);
+      if (!serverContext && tlsRequested && !tlsReady) {
+        const error = new Error(
+          'MCP_INSECURE_CONFIG：mcp.http.tls=true 但缺少证书——请在 config.json 填写 mcp.http.tlsKey 与 mcp.http.tlsCert，或关闭 tls',
+        );
+        error.code = 'MCP_INSECURE_CONFIG';
+        throw error;
+      }
+      const mcpHost = serverContext?.host ?? options.host ?? httpCfg.host ?? '127.0.0.1';
+      const mcpPort = serverContext?.port ?? runtimeMcpPort(config, options);
+      const mcpAuth = serverContext?.auth ?? options.auth ?? httpCfg.auth ?? 'none';
+      const runtime = {
+        ...effective,
+        storagePath,
+        mcp: {
+          host: mcpHost,
+          port: mcpPort,
+          auth: mcpAuth,
+          tls: Boolean(tlsRequested && tlsReady),
+          tlsKeyConfigured: Boolean(tlsKey),
+          tlsCertConfigured: Boolean(tlsCert),
+        },
+      };
+      const joinConf = config.joinService;
+      const joinBind = joinConf?.bind ?? '0.0.0.0';
+      // F-C6：令牌里的 endpoint 必须是新设备可直达地址——bind 通配时取本机 LAN IPv4（无则回环并告警），
+      // 也允许 joinService.endpoint 显式固定（跨网段/NAT 场景）。
+      const joinAdvertise = advertiseHost(joinBind);
+      const joinEndpointDemo = joinConf?.enabled
+        ? (typeof joinConf.endpoint === 'string' && joinConf.endpoint
+          ? joinConf.endpoint
+          : `http://${joinAdvertise}:${joinConf.port ?? 4002}`)
+        : undefined;
+      const joinEndpointHost = joinEndpointDemo !== undefined ? endpointHostname(joinEndpointDemo) : null;
+      const joinEndpointLoopback = joinEndpointHost !== null && isLoopbackHost(joinEndpointHost);
+
+      context = {
+        app,
+        service,
+        config,
+        runtime,
+        deviceId,
+        storagePath,
+        namespace: config.sync?.namespaces?.[0] ?? 'tasks',
+        joinEndpoint: joinEndpointDemo,
+        joinServer: null,
+        joinPort: null,
+        broadcastInterval: null,
+        activeLock: null,
+      };
+
+      // W2 A4：join 服务由守护托管（令牌 → 委派证书）。fleet 不再托管生产 join。
+      if (joinConf?.enabled) {
+        try {
+          context.joinServer = await createJoinServer({
+            mebular: app,
+            deviceId,
+            storagePath,
+            bind: joinConf.bind ?? '0.0.0.0',
+            port: joinConf.port ?? 4002,
+            log: (m) => console.error(m),
+          });
+        } catch (error) {
+          // E：启动失败根因化——不笼统报「serve 起不来」，明确指出是可执行的修复动作
+          const bind = joinConf.bind ?? '0.0.0.0';
+          const port = joinConf.port ?? 4002;
+          const detail = {
+            at: new Date().toISOString(),
+            code: error?.code === 'EADDRINUSE' ? 'JOIN_PORT_IN_USE' : (error?.code ?? 'JOIN_START_FAILED'),
+            bind,
+            port,
+            message: error?.code === 'EADDRINUSE'
+              ? `joinService.port ${port} 被占（bind=${bind}）：改端口（如 joinService.port=0 由系统分配）或释放占用`
+              : `joinService 启动失败（${error?.code ?? 'ERROR'}，bind=${bind}:${port}）：${error?.message ?? error}`,
+          };
+          await writeFile(join(home, 'join.error.json'), JSON.stringify(detail, null, 2), 'utf-8').catch(() => undefined);
+          const wrapped = new Error(detail.message);
+          wrapped.code = detail.code;
+          wrapped.cause = error;
+          throw wrapped;
+        }
+        await rm(join(home, 'join.error.json'), { force: true }).catch(() => undefined);
+        context.joinPort = context.joinServer.port;
+        runtime.join = {
+          enabled: true,
+          bind: joinBind,
+          port: context.joinServer.port,
+          endpoint: joinEndpointDemo,
+          endpointLoopback: joinEndpointLoopback,
+        };
+        console.error(`JOIN_READY ${JSON.stringify({ endpoint: joinEndpointDemo, port: context.joinServer.port, loopback: joinEndpointLoopback })}`);
+      }
+
+      if (hot) {
+        // P1：同一进程切换，先确认 root 级没有别的活实例，再写 ready。
+        const cloud = resolveCloudRoot({ home, env: process.env });
+        if (cloud.available) {
+          const cloudId = await profileIdForHome(cloud.root, home).catch(() => null);
+          context.activeLock = await acquireActiveLock({ root: cloud.root, home, profileId: cloudId });
+        }
+        await finalizeRuntime(context);
+      }
+      return context;
+    } catch (error) {
+      await stopRuntime(context);
+      throw error;
+    }
+  };
+
+  // TLS 以**真开关**为准——config.mcp.http.tls===true，或显式提供证书；缺证书即启动报错（不静默降级）。
+  const initialHttpCfg = preConfig?.mcp?.http ?? {};
+  const initialTlsKey = options.tlsKey ?? initialHttpCfg.tlsKey;
+  const initialTlsCert = options.tlsCert ?? initialHttpCfg.tlsCert;
+  const initialTlsRequested = options.tls === true || initialHttpCfg.tls === true
+    || Boolean(initialTlsKey && initialTlsCert);
+  const initialTlsReady = Boolean(initialTlsKey && initialTlsCert);
+  if (!provisionStart && initialTlsRequested && !initialTlsReady) {
+    await lock.release();
+    const error = new Error(
+      'MCP_INSECURE_CONFIG：mcp.http.tls=true 但缺少证书——请在 config.json 填写 mcp.http.tlsKey 与 mcp.http.tlsCert，或关闭 tls',
+    );
+    error.code = 'MCP_INSECURE_CONFIG';
+    throw error;
+  }
+  const serverHost = options.host ?? initialHttpCfg.host ?? '127.0.0.1';
+  if (provisionStart) {
+    const loopback = serverHost === '127.0.0.1' || serverHost === 'localhost' || serverHost === '::1';
+    if (!loopback) {
+      await lock.release();
+      const error = new Error(`引导态仅允许 loopback（当前 host=${serverHost}）：请用 --host 127.0.0.1 完成初始化`);
+      error.code = 'MCP_PROVISION_LOOPBACK_REQUIRED';
+      throw error;
+    }
+  }
+
+  // 引导态强制 loopback + auth none（旧 startProvisionServer 契约）：初始化完成后热切换为
+  // create/join 写入的正常配置；避免 --auth bearer 等 CLI 覆盖让 READY 后自己的 admin API 不可用。
+  const serverAuth = provisionStart ? 'none' : (options.auth ?? initialHttpCfg.auth ?? 'none');
+  const serverTls = provisionStart ? false : Boolean(initialTlsRequested && initialTlsReady);
+  const serverTlsKey = provisionStart ? undefined : initialTlsKey;
+  const serverTlsCert = provisionStart ? undefined : initialTlsCert;
+
+  try {
+    if (!provisionStart) {
+      current = await startRuntime({ hot: false });
+    }
+    httpServer = await startHttpServer({
+      home,
+      app: current?.app ?? null,
+      service: current?.service ?? null,
+      config: current?.config ?? {},
+      buildServer,
+      host: serverHost,
+      port: options.port ?? initialHttpCfg.port,
+      auth: serverAuth,
+      tls: serverTls,
+      tlsKey: serverTlsKey,
+      tlsCert: serverTlsCert,
+      tokensFile: options.tokensFile ?? initialHttpCfg.tokensFile,
+      deviceId: current?.deviceId ?? null,
+      namespace: current?.namespace ?? 'tasks',
+      ...(current?.joinEndpoint !== undefined ? { joinEndpoint: current.joinEndpoint } : {}),
+      runtime: current?.runtime ?? null,
+      // D2：写端点默认开启（仍需 memory.admin scope + CSRF 双提交）；`MEBULAR_CONSOLE_WRITES=0` 可降级为 D1 只读
+      writesEnabled: options.writesEnabled ?? process.env.MEBULAR_CONSOLE_WRITES !== '0',
+      provision: provisionStart,
+      initializeRuntime: async ({ action, result, server }) => {
+        const next = await startRuntime({ action, result, serverContext: server, hot: true });
+        current = next;
+        return next;
+      },
+      onClose: async () => {
+        const context = current;
+        current = null;
+        await stopRuntime(context);
+      },
+    });
+    // 监听端口 0 / 默认值时以实际绑定为准
+    if (current) {
+      current.runtime.mcp.host = httpServer.host;
+      current.runtime.mcp.port = httpServer.port;
+      current.runtime.mcp.auth = httpServer.auth;
+      // G：装配完成后写「已监听」标记——supervisor 用它判定新实例健康（join 失败则不写）
+      await finalizeRuntime(current);
+    }
 
     const shutdown = async () => {
-      if (broadcastInterval) clearInterval(broadcastInterval);
-      await joinServer?.close().catch(() => undefined);
-      await http.close().catch(() => undefined);
+      await httpServer?.close().catch(() => undefined);
       await lock.release();
-      await app.shutdown().catch(() => undefined);
       process.exit(0);
     };
     process.on('SIGINT', shutdown);
     process.on('SIGTERM', shutdown);
-    return { ...http, lock, app, service, joinServer, joinPort: joinServer?.port ?? null };
+    return {
+      ...httpServer,
+      lock,
+      provision: provisionStart,
+      getRuntime: () => current,
+      getState: () => ({ ...httpServer.getState(), runtimeReady: current !== null }),
+    };
   } catch (error) {
-    await joinServer?.close().catch(() => undefined);
+    await httpServer?.close().catch(() => undefined);
+    if (!httpServer) {
+      await stopRuntime(current);
+      current = null;
+    }
     await lock.release();
-    await app.shutdown().catch(() => undefined);
     throw error;
   }
 }

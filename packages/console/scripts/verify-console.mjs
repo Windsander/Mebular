@@ -293,9 +293,8 @@ try {
     const ids = [...indexText.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
     const dupIds = [...new Set(ids.filter((id, i) => ids.indexOf(id) !== i))];
     check('index.html 元素 id 全部唯一（面板单实例，无重复块）', dupIds.length === 0, dupIds.join(','));
-    check('provision 待重启面板单实例（provision-restart* 各出现一次）',
-      ['provision-restart', 'provision-restart-note', 'provision-restart-command', 'provision-restart-copy', 'provision-restart-hint']
-        .every((id) => ids.filter((x) => x === id).length === 1));
+    check('provision 待重启面板已下线（P1 热初始化，无 provision-restart* 残留）',
+      ids.every((id) => !id.startsWith('provision-restart')));
   }
   check('/console 下发 CSRF cookie 与响应头', (index.headers.get('set-cookie') ?? '').includes('mebular_csrf=') && Boolean(index.headers.get('x-mebular-csrf')));
 
@@ -802,15 +801,42 @@ try {
     check('正常实例 POST /app/provision/create → 404（引导路径不泄漏）', provCreate.status === 404, `status=${provCreate.status}`);
     const consoleSrcOnboard = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     const htmlSrcOnboard = await readFile(join(consoleDir, 'index.html'), 'utf-8');
-    check('GUI 首次上手接线：控制台含「建新 / 加入」两入口 + provision 客户端逻辑',
-      htmlSrcOnboard.includes('id="provision-create"') && htmlSrcOnboard.includes('id="provision-join"')
-        && htmlSrcOnboard.includes('建新忆云') && htmlSrcOnboard.includes('加入已有忆云')
+    const cssSrcOnboard = await readFile(join(consoleDir, 'console.css'), 'utf-8');
+    check('P3 首次上手接线：锁定主控制台 + 新建/加入两入口 + provision 客户端逻辑',
+      htmlSrcOnboard.includes('id="create-cloud"') && htmlSrcOnboard.includes('id="join-cloud"')
+        && htmlSrcOnboard.includes('id="onboard-create"') && htmlSrcOnboard.includes('id="onboard-join"')
+        && htmlSrcOnboard.includes('id="onboarding-coach"')
+        && htmlSrcOnboard.includes('新建忆云') && htmlSrcOnboard.includes('加入忆云')
         && consoleSrcOnboard.includes('fetchProvisionStatus') && consoleSrcOnboard.includes('/app/provision/create')
-        && consoleSrcOnboard.includes('/app/provision/join') && consoleSrcOnboard.includes('renderProvision'),
-      'index.html 两入口 + console.js provision 客户端');
+        && consoleSrcOnboard.includes('/app/provision/join') && consoleSrcOnboard.includes('enterLockedConsole')
+        && consoleSrcOnboard.includes('submitOnboard') && consoleSrcOnboard.includes('unlockConsole'),
+      'index.html 两入口 + 锁定壳 + console.js provision 客户端');
+    check('P3 锁定壳：主控制台不再整体隐藏（无 app.hidden = true / #provision 遮罩路径）',
+      !/app\.hidden\s*=\s*true/.test(consoleSrcOnboard)
+        && !/renderProvision\s*\(/.test(consoleSrcOnboard)
+        && consoleSrcOnboard.includes("state.locked = true")
+        && consoleSrcOnboard.includes('renderLockedChrome')
+        && consoleSrcOnboard.includes('aria-disabled'),
+      '无整页遮罩；locked 由 state + aria-disabled 驱动');
+    check('P3 锁定态不请求 admin 数据面（refresh 早退 / SSE 不启动）',
+      /async function refreshOnce\(\) \{\s*\/\/[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(state\.locked\) return;/.test(consoleSrcOnboard)
+        && /function startEvents\(\) \{\s*\n\s*if \(state\.locked/.test(consoleSrcOnboard),
+      'refreshOnce/startEvents locked 闸门');
+    check('P3 无 reload 解锁：initialized → unlockConsole → enterNormalConsole（幂等）',
+      /res\?\.initialized === true/.test(consoleSrcOnboard)
+        && /unlockConsole/.test(consoleSrcOnboard)
+        && /normalConsolePromise \?\?=/.test(consoleSrcOnboard)
+        && !/window\.location\.reload\(/.test(consoleSrcOnboard),
+      '同页解锁 + 单飞进入正常控制台');
+    check('P3 强调态克制且尊重 reduced-motion（按钮脉冲 / 引导遮罩）',
+      cssSrcOnboard.includes('.topbar-actions .btn.is-onboarding')
+        && cssSrcOnboard.includes('onboard-button-pulse')
+        && /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.topbar-actions \.btn\.is-onboarding \{ animation: none; \}/.test(cssSrcOnboard)
+        && /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.onboarding-coach[^\n]*\{ transition: none;/.test(cssSrcOnboard),
+      '动画可关；样式复用现有设计语言');
   }
 
-  // ---------- F-ONB-2：引导态建新后的「待重启」UX（前台 vs 服务托管） ----------
+  // ---------- P1：引导态建新 → 同一进程 / 同一端口热初始化（不再重启） ----------
   {
     const onboardHome = join(home, 'onboard');
     await mkdir(onboardHome, { recursive: true });
@@ -819,9 +845,9 @@ try {
     const onboardReady = await waitReady(onboardHandle);
     const obase = `http://127.0.0.1:${onboardReady.port}`;
     const st0 = await (await fetch(`${obase}/app/provision/status`)).json().catch(() => null);
-    check('F-ONB-2 空 home：status provisioned=false / restartRequired=false',
-      st0?.provision === true && st0?.provisioned === false && st0?.restartRequired === false,
-      JSON.stringify({ provision: st0?.provision, provisioned: st0?.provisioned, restartRequired: st0?.restartRequired }));
+    check('P1 空 home：status phase=UNINITIALIZED / provisioned=false / restartRequired=false',
+      st0?.provision === true && st0?.phase === 'UNINITIALIZED' && st0?.provisioned === false && st0?.restartRequired === false,
+      JSON.stringify({ phase: st0?.phase, provisioned: st0?.provisioned, restartRequired: st0?.restartRequired }));
 
     const obPage = await fetch(`${obase}/console/`);
     const obHeaders = {
@@ -831,36 +857,31 @@ try {
     };
     const created = await fetch(`${obase}/app/provision/create`, { method: 'POST', headers: obHeaders, body: JSON.stringify({ confirm: true }) });
     const createdJson = await created.json().catch(() => null);
-    check('F-ONB-2 前台建新：202 + restarting=false + restart.mode=foreground + 手动命令',
-      created.status === 202 && createdJson?.restarting === false && createdJson?.restart?.mode === 'foreground'
-        && typeof createdJson?.restart?.command === 'string' && createdJson.restart.command.includes('mebular serve'),
-      `status=${created.status} restarting=${createdJson?.restarting} mode=${createdJson?.restart?.mode}`);
+    check('P1 建新：200 + initialized=true + phase=READY，无 restart 字段',
+      created.status === 200 && createdJson?.initialized === true && createdJson?.phase === 'READY'
+        && createdJson?.restart === undefined && createdJson?.restarting === undefined,
+      `status=${created.status} initialized=${createdJson?.initialized} phase=${createdJson?.phase}`);
 
-    const st1 = await (await fetch(`${obase}/app/provision/status`)).json().catch(() => null);
-    check('F-ONB-2 建新后仍是引导态：status provisioned=true/restartRequired=true/restart.mode=foreground，且 note 不再称「家目录为空」',
-      st1?.provision === true && st1?.provisioned === true && st1?.restartRequired === true
-        && st1?.restarting === false && st1?.restart?.mode === 'foreground'
-        && !/家目录为空/.test(st1?.note ?? ''),
-      `provisioned=${st1?.provisioned} restartRequired=${st1?.restartRequired} note=${st1?.note}`);
+    const st1 = await fetch(`${obase}/app/provision/status`);
+    check('P1 建新后引导接口消失（同一进程已进入正常态）', st1.status === 404, `status=${st1.status}`);
+    const overview = await fetch(`${obase}/admin/api/overview`);
+    check('P1 建新后同一端口 admin API 200', overview.status === 200, `status=${overview.status}`);
 
     const dup = await fetch(`${obase}/app/provision/create`, { method: 'POST', headers: obHeaders, body: JSON.stringify({ confirm: true }) });
     const dupJson = await dup.json().catch(() => null);
-    check('F-ONB-2 重复建新：409 already_provisioned + restartRequired + restart（结构化，不裸报错）',
-      dup.status === 409 && dupJson?.error === 'already_provisioned' && dupJson?.restartRequired === true
-        && dupJson?.restart?.mode === 'foreground',
-      `status=${dup.status} error=${dupJson?.error}`);
+    check('P1 重复建新：409 already_provisioned + initialized=true + 不重启',
+      dup.status === 409 && dupJson?.error === 'already_provisioned' && dupJson?.initialized === true
+        && dupJson?.restartRequired === false,
+      `status=${dup.status} error=${dupJson?.error} initialized=${dupJson?.initialized}`);
 
     const consoleSrcOnb2 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
-    const htmlSrcOnb2 = await readFile(join(consoleDir, 'index.html'), 'utf-8');
-    check('F-ONB-2 前端分流：restarting 判定 + 前台「无法自动重启」+ already_provisioned → 待重启面板 + 复制按钮',
-      /res\?\.restarting/.test(consoleSrcOnb2) && /already_provisioned/.test(consoleSrcOnb2)
-        && /showProvisionRestart/.test(consoleSrcOnb2) && /无法自动重启/.test(consoleSrcOnb2)
-        && htmlSrcOnb2.includes('id="provision-restart"') && htmlSrcOnb2.includes('id="provision-restart-copy"')
-        && htmlSrcOnb2.includes('id="provision-restart-command"'),
-      'console.js 分流 + index.html 待重启面板');
+    check('P1 前端：initialized → 同页进入控制台（不依赖 location.reload 恢复）',
+      /res\?\.initialized/.test(consoleSrcOnb2) && /enterNormalConsole/.test(consoleSrcOnb2)
+        && /already_provisioned/.test(consoleSrcOnb2) && !/window\.location\.reload\(/.test(consoleSrcOnb2),
+      'console.js 热初始化分流');
   }
 
-  // ---------- F-ONB-2：服务托管分支回归（restarting=true；引导态启动 + 写入 config，不触发真实重启） ----------
+  // ---------- P1：服务托管分支同样不触发重启（外部写入 config 的旧路径仍可读） ----------
   {
     const svcHome = join(home, 'onboard-svc');
     await mkdir(svcHome, { recursive: true });
@@ -873,12 +894,13 @@ try {
     servers.push(svcHandle);
     const svcReady = await waitReady(svcHandle);
     const sbase = `http://127.0.0.1:${svcReady.port}`;
-    // 模拟「建新完成」：写入 config（serve 进程仍处引导态）
+    // 模拟「外部写入 config」：进程仍未加载 app，但状态必须如实说明，且不生成重启计划。
     await writeFile(join(svcHome, 'config.json'), JSON.stringify({ deviceId: 'device-onboard-svc', encryption: { level: 'none' } }, null, 2), 'utf-8');
     const sst = await (await fetch(`${sbase}/app/provision/status`)).json().catch(() => null);
-    check('F-ONB-2 服务托管分支：status restarting=true + restart.mode=service（回归不破）',
-      sst?.provisioned === true && sst?.restartRequired === true && sst?.restarting === true && sst?.restart?.mode === 'service',
-      `restarting=${sst?.restarting} mode=${sst?.restart?.mode}`);
+    check('P1 服务托管分支：status provisioned=true / restartRequired=false / 无 restart 计划',
+      sst?.provisioned === true && sst?.restartRequired === false && sst?.restarting === false
+        && sst?.restart === undefined && !/家目录为空/.test(sst?.note ?? ''),
+      `provisioned=${sst?.provisioned} restartRequired=${sst?.restartRequired} note=${sst?.note}`);
   }
 
   // ---------- H-1：常驻运行 + 连接 AI 助手 ----------
@@ -894,7 +916,13 @@ try {
       sync: { autoSync: false },
       mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
     }, null, 2), 'utf-8');
-    const h1Handle = spawnServe({ home: h1Home, storage: join(h1Home, 'store.jsonl'), deviceId: 'device-h1', env: { MEBULAR_SERVICE_DRY_RUN: '1' } });
+    const h1Handle = spawnServe({
+      home: h1Home,
+      storage: join(h1Home, 'store.jsonl'),
+      deviceId: 'device-h1',
+      // 服务单元/manifest 落 h1Home（隔离），避免 dry-run 测试写真实 ~/Library / ~/.config。
+      env: { MEBULAR_SERVICE_DRY_RUN: '1', MEBULAR_SERVICE_UNIT_HOME: h1Home },
+    });
     servers.push(h1Handle);
     const h1Ready = await waitReady(h1Handle);
     const h1Base = `http://127.0.0.1:${h1Ready.port}`;
@@ -1731,6 +1759,7 @@ try {
         && inviteSrc.includes('二维码不可用')
         && inviteSrc.includes('data-copy=')
         && inviteSrc.includes('invite-cloud-identity')
+        && inviteSrc.includes('扫码加入，或复制令牌发给对方。')
         && inviteSrc.includes('一次性 · 仅当面或可信局域网传递。'),
       '无 details / endpointEditor / 命令；首屏令牌+QR+忆云行');
     check('E1 邀请 TTL：档位精确（5/15/20 分钟、2/6/12/24 小时），默认 15 分钟；改档不自动刷新',
@@ -1742,12 +1771,14 @@ try {
         && /#invite-ttl[\s\S]{0,240}#invite-regenerate/.test(consoleSrc2)
         && /body\.querySelector\('#invite-ttl'\)[\s\S]{0,240}state\.inviteTtlMs = value/.test(consoleSrc2),
       `ttl=${JSON.stringify(ttlIds)} default=${inviteIa.INVITE_TTL_DEFAULT_MS}`);
-    check('E1 重新生成：简短二次确认后把选中 ttlMs 传给 POST /admin/api/invite',
-      /confirm\('重新生成后旧令牌立即失效。确定？'\)\)\s*void openInvite\(state\.inviteTtlMs\)/.test(consoleSrc2)
+    check('E1 重新生成：应用内确认后把选中 ttlMs 传给 POST /admin/api/invite',
+      /await confirmModal\(\{[\s\S]{0,220}title: '重新生成令牌？'/.test(consoleSrc2)
+        && /if \(!ok\) return;\s*\n\s*void openInvite\(state\.inviteTtlMs\)/.test(consoleSrc2)
+        && !consoleSrc2.includes('window.confirm')
         && /async function renderInvite\(ttlMs = state\.inviteTtlMs\)[\s\S]{0,260}body: \{ ttlMs \}/.test(consoleSrc2)
         && /body: \{ code, ttlMs: selectedTtl \}/.test(consoleSrc2)
         && /body: \{ approvalId, namespace: inviteNamespace\(\), ttlMs: selectedTtl \}/.test(consoleSrc2),
-      'low/medium/high 三条生成路径均带 ttlMs');
+      'low/medium/high 三条生成路径均带 ttlMs；无原生 confirm');
     const inviteDialogSrc = htmlSrc.slice(htmlSrc.indexOf('<div id="invite"'), htmlSrc.indexOf('<div id="cloud-join"'));
     check('E1 邀请关闭：右上角 X（复用 modal-x），无底部「关闭」按钮',
       /id="invite-close"[^>]*class="modal-x"/.test(inviteDialogSrc)
@@ -1867,7 +1898,7 @@ try {
       { status: inviteRes.status, qr: String(inviteJson?.qrSvg ?? '').startsWith('<svg') ? 'svg' : 'missing' });
     const consoleSrc6 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     check('C7 控制台邀请面板渲染二维码 + TTL/重新生成（无详情/订阅说明）',
-      ['让对方扫码', 'qrSvg', 'id="invite-ttl"', 'id="invite-regenerate"'].every((token) => consoleSrc6.includes(token))
+      ['扫码加入', 'qrSvg', 'id="invite-ttl"', 'id="invite-regenerate"'].every((token) => consoleSrc6.includes(token))
         && !consoleSrc6.includes('fold-invite'));
     const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
     const fleetPkg = JSON.parse(await readFile(join(rootDir, 'packages', 'fleet', 'package.json'), 'utf-8'));

@@ -59,8 +59,9 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     expect(panel).toContain('class="invite-layout"');
     expect(panel).toContain('class="invite-qr"');
     expect(panel).toContain('class="invite-main"');
-    expect(panel).toContain('让对方扫码，或复制令牌。');
+    expect(panel).toContain('扫码加入，或复制令牌发给对方。');
     expect(panel).toContain('class="invite-token-block"');
+    expect(panel).toContain('一次性令牌');
     expect(panel).toContain('data-copy=');
     expect(panel).toContain('qrSvg');
     expect(panel).toContain('id="invite-ttl"');
@@ -71,6 +72,7 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     const css = readFileSync(join(root, 'packages', 'console', 'console.css'), 'utf-8');
     expect(css).toMatch(/\.qr-img \{[^}]*width: 15[0-9]px[^}]*height: 15[0-9]px/);
     expect(css).toMatch(/\.invite-layout \{[^}]*grid-template-columns: 156px minmax\(0, 1fr\)/);
+    expect(css).toMatch(/\.invite-token-block \{[^}]*border: 1px solid var\(--border\)/);
     expect(css).toMatch(/@media \(max-width: 520px\) \{\s*\.invite-layout \{ grid-template-columns: minmax\(0, 1fr\)/);
   });
 
@@ -115,8 +117,13 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     expect(changeHandler).not.toMatch(/openInvite\(|renderInvite\(|api\(/);
     expect(changeHandler).toContain('state.inviteTtlMs = value');
 
-    expect(consoleJs).toMatch(/invite-regenerate[\s\S]{0,220}confirm\(/);
-    expect(consoleJs).toMatch(/confirm\('重新生成后旧令牌立即失效。确定？'\)\)\s*void openInvite\(state\.inviteTtlMs\)/);
+    expect(invitePanelSource()).not.toContain('window.confirm');
+    expect(consoleJs).toMatch(/invite-regenerate[\s\S]{0,420}addEventListener\('click', async \(\) => \{/);
+    expect(consoleJs).toMatch(/invite-regenerate[\s\S]{0,620}await confirmModal\(\{/);
+    expect(consoleJs).toContain("title: '重新生成令牌？'");
+    expect(consoleJs).toContain('旧令牌会立即失效，已发出的邀请将无法再兑换。');
+    expect(consoleJs).toMatch(/if \(!ok\) return;\s*\n\s*void openInvite\(state\.inviteTtlMs\)/);
+    expect(consoleJs).not.toContain('window.confirm');
     expect(consoleJs).toMatch(/async function renderInvite\(ttlMs = state\.inviteTtlMs\)[\s\S]{0,260}body: \{ ttlMs \}/);
     expect(consoleJs).toMatch(/body: \{ code, ttlMs: selectedTtl \}/);
     expect(consoleJs).toMatch(/body: \{ approvalId, namespace: inviteNamespace\(\), ttlMs: selectedTtl \}/);

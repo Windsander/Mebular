@@ -19,9 +19,9 @@ export const STEP_TITLES = Object.freeze({
  * 计算向导状态（每步 done 由真实检测决定；current = 首个未完成步，全完成则 null）。
  * 入参均为「已探测结果」，本函数不发起 IO。
  *
- * 高-1（W-1）：步骤① done = daemonHealthy && !provisionRequired——
- * 守护进程活着但处于引导/待重启态（/app/provision/status 200 且 provision===true）时
- * 不算完成「启动」，current 停在 start 并给「建新/加入 →」CTA；404 = 正常态。
+ * P4：步骤① done 只看 daemonHealthy——UNINITIALIZED 是正常引导阶段
+ * （建新/加入由 P3 控制台锁定壳的顶栏弹框完成），不再让 provisionRequired 阻塞「启动」。
+ * provision 字段保留在 detail 里作诊断，不参与 done 判定。
  */
 /**
  * R-1 高-1：桌面壳状态文件（<home>/.desktop-state.json）——向导完成态跨进程持久。
@@ -60,9 +60,10 @@ export function computeWizardState({ daemonHealthy, provisionRequired, provision
     {
       id: 'start',
       title: STEP_TITLES.start,
-      done: Boolean(daemonHealthy) && !provisionRequired,
+      done: Boolean(daemonHealthy),
       detail: {
         healthy: Boolean(daemonHealthy),
+        // P4 诊断字段（不参与 start.done）：UNINITIALIZED 不再表示启动未完成
         provision: { required: Boolean(provisionRequired), provisioned: provisionRequired ? Boolean(provisioned) : null },
         // F2a 双保险①：registered/running 保三态（true/false/null=未知）——
         // probeService 模块加载失败/探测异常时 registered 为 undefined，绝不能坍缩成 false（会误显「让 Mebular 常驻」）

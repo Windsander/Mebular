@@ -1,17 +1,17 @@
 # 控制台页面地图（哪个设置在哪个 Tab）
 
-## 首次上手（引导态：建新 / 加入）
+## 首次上手（锁定主控制台：建新 / 加入）
 
-家目录**真正为空**（无 `config.json`、无 `user-master-key.json`、无 `<storagePath>.identity.json`）时，`mebular serve` **不自举 root**，而是进入**引导态**：只服务 `/healthz` + `/console` 引导页 + `/app/provision/*`（其余 admin API 一律 `409 provision_required`），且**仅 loopback**。
+家目录**真正为空**（无 `config.json`、无 `user-master-key.json`、无 `<storagePath>.identity.json`）时，`mebular serve` **不自举 root**，而是进入**锁定主控制台**：星图可见、其它卡片禁用；服务 `/healthz` + `/console` + `/app/provision/*` + MCP `/mcp` facade（未初始化时 `initialize` / `tools/list` 成功，`tools/call` 返回 `NOT_INITIALIZED`），其余 admin API 一律 `409 provision_required`，且**仅 loopback**。桌面 App 的「开始部署」启动守护后直接落到这里。
 
-引导页两个入口（全程 GUI，不需要命令行）：
+顶栏两个入口（全程 GUI，不需要命令行）：
 
 | 入口 | 动作 | 结果 |
 |---|---|---|
-| **建新忆云** | `POST /app/provision/create`（设备名可改；填名字即可，带 `device-` 前缀也不会重复拼接——见「设备名归一化」） | 生成 root 主密钥 + 写 `config.json`（`joinService.enabled=true`、`mcp.http` 回环、`network` 默认）→ **自动重启** → 正常态（「＋ 邀请设备」可用） |
-| **加入已有忆云** | `POST /app/provision/join`（粘贴邀请令牌；复用 fleet 令牌验签/兑换） | 取回**委派证书链**（delegated，**无主私钥**）+ 主公钥（仅公钥）+ inviter hints 入 `<home>/net/peers.json` → **自动重启** → 正常态（授权分区 = 令牌分区） |
+| **新建忆云** | `POST /app/provision/create`（忆云名 + 设备名；填名字即可，带 `device-` 前缀也不会重复拼接——见「设备名归一化」） | 生成 root 主密钥 + 写 `config.json`（`joinService.enabled=true`、`mcp.http` 回环、`network` 默认）→ **同进程热初始化**（UNINITIALIZED → READY）→ **同一页面解锁**（不重启守护、不刷新页面；「＋ 邀请设备」可用） |
+| **加入忆云** | `POST /app/provision/join`（粘贴邀请令牌 + 设备名；复用 fleet 令牌验签/兑换） | 取回**委派证书链**（delegated，**无主私钥**）+ 主公钥（仅公钥）+ inviter hints 入 `<home>/net/peers.json` → **同进程热初始化** → **同一页面解锁**（不重启守护、不刷新页面；授权分区 = 令牌分区） |
 
-错误可读：令牌过期 / 签名不符 / 端点不可达 / 已使用 → 页面直接显示原因；重复调 provision → `409`；失败**不残留半成品**（仍可重试）。未以服务方式运行时给出手动重启命令（`nohup mebular serve …`）。
+错误可读：令牌过期 / 签名不符 / 端点不可达 / 已使用 → 页面直接显示原因；重复调 provision → `409`；失败**不残留半成品**并回滚到 UNINITIALIZED（仍可重试），无需手动重启。
 
 **设备名归一化（F-ONB-1）**：设备名先 sanitize，再去掉**所有重复的 `device-` 前缀**，最后拼一次前缀 —— 输入 `TestB` / `device-TestB` / `device-device-TestB` 都得到 `device-TestB`；空名 → `device-local`。两个输入框带「将使用 deviceId: …」实时预览。
 

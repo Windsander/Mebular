@@ -12,7 +12,7 @@
 | `ulid` | `^2.3.0`（legacy-range） | MIT | 事件/节点 ID 生成（时间有序） | 无（核心必需） |
 | `bonjour` | `^3.5.1`（legacy-range） | MIT | LAN 设备发现（mDNS/C3） | 缺包/初始化失败 → 发现禁用 + 告警（其他连接方式不受影响）；库形态默认不启用真 mDNS |
 | `zod` | `^4.6.5`（legacy-range） | MIT | MCP 工具入参 schema 校验 | 无（CLI 必需） |
-| `@modelcontextprotocol/server` | `^2.0.0`（legacy-range） | MIT | MCP server（stdio / Streamable HTTP），`mebular mcp` / `mebular serve` | 无（CLI 必需） |
+| `@modelcontextprotocol/server` | `^2.3.1`（legacy-range） | Apache-2.0 | MCP server（stdio / Streamable HTTP），`mebular mcp` / `mebular serve` | 无（CLI 必需） |
 | `qrcode-generator` | `2.0.4`（**精确 pin**） | MIT | 邀请令牌/TOTP 二维码（终端/SVG；应用层 fleet/mcp 使用） | 编码失败 → 文本令牌/分组文本兜底 |
 
 ## 可选依赖（optionalDependencies）

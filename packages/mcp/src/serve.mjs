@@ -17,6 +17,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { TOOL_ALL_SCOPES } from './tools.mjs';
 import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 import { configPath } from './config.mjs';
+import { createServiceFacade } from './service-facade.mjs';
 
 // ---------- 控制台配置写入（schema 驱动：editable 可写 / status-only 只读 / internal 默认不可写） ----------
 // 单一真源：packages/mcp/src/config-schema.mjs。写入策略（原子写 + .bak 备份；全部需重启生效）：
@@ -30,6 +31,7 @@ import {
   provisionJoinInto,
   provisionRestore,
   provisionStatus,
+  snapshotProvisionState,
   writeProvisionRecord,
 } from './provision.mjs';
 import {
@@ -769,9 +771,9 @@ function hasScope(granted, required) {
  */
 export async function startHttpServer({
   home,
-  app,
-  service,
-  config,
+  app: initialApp = null,
+  service: initialService = null,
+  config: initialConfig = {},
   buildServer,
   host = '127.0.0.1',
   port = 7331,
@@ -780,18 +782,34 @@ export async function startHttpServer({
   tlsKey,
   tlsCert,
   tokensFile,
-  deviceId,
-  namespace = 'tasks',
-  joinEndpoint,
+  deviceId: initialDeviceId = null,
+  namespace: initialNamespace = 'tasks',
+  joinEndpoint: initialJoinEndpoint,
   // 生效运行时快照（console 设置卡展示用；含 CLI/env 覆盖后的实际值）
-  runtime = null,
+  runtime: initialRuntime = null,
   // D1 只读；D2 打开写端点（仍需 memory.admin scope + CSRF）
-  writesEnabled = false,
+  writesEnabled: initialWritesEnabled = false,
   // C：一键重启执行器（可注入；verify:config 用 MEBULAR_RESTART_DRY_RUN 或注入替身）
   restartRunner = null,
   // 引导态（空家目录）：只服务 /healthz + /console 引导页 + /app/provision/*；其余 409 provision_required
-  provision = false,
+  provision: initialProvision = false,
+  // P1：同一进程内热初始化。返回新的运行时上下文；成功后本 server 从 UNINITIALIZED → READY。
+  initializeRuntime = null,
+  // 关闭钩子：热初始化后由 server.mjs 关闭 app / join / 广播计时器（HTTP server 本身由本函数关闭）
+  onClose = null,
 }) {
+  // P1：生命周期状态。所有路由共用**可变**上下文；create/join 成功后就地切换，不重启进程 / 端口。
+  let app = initialApp;
+  let service = initialService;
+  let config = initialConfig ?? {};
+  let runtime = initialRuntime;
+  let deviceId = initialDeviceId;
+  let namespace = initialNamespace;
+  let joinEndpoint = initialJoinEndpoint;
+  let writesEnabled = initialWritesEnabled;
+  let phase = initialProvision ? 'UNINITIALIZED' : 'READY';
+  let hotInitialized = false;
+  let activeLock = null;
   const isLoopback = host === '127.0.0.1' || host === 'localhost' || host === '::1';
   if (!isLoopback && (auth === 'none' || !tls)) {
     const error = new Error(
@@ -807,15 +825,35 @@ export async function startHttpServer({
   }
 
   // 邀请 nonce 状态与 join 服务共用同一 storagePath（生成新令牌时撤销旧 active）。
-  const joinStateStoragePath = typeof runtime?.storagePath === 'string'
+  const computeJoinStateStoragePath = () => (typeof runtime?.storagePath === 'string'
     ? runtime.storagePath
-    : typeof config?.storagePath === 'string' ? config.storagePath : join(home, 'store.jsonl');
+    : typeof config?.storagePath === 'string' ? config.storagePath : join(home, 'store.jsonl'));
+  let joinStateStoragePath = computeJoinStateStoragePath();
 
   // 忆云档案上下文（root 解析 + 单活）。自定义 home / 危险 env → available:false（档案端点 503/403）。
   const cloud = resolveCloudRoot({ home, env: process.env });
-  const cloudId = app && service && cloud.available
+  let cloudId = app && service && cloud.available
     ? await profileIdForHome(cloud.root, home).catch(() => null)
     : null;
+
+  /** 热初始化成功后把路由可见的上下文整体切换；失败时调用方负责回滚文件并保持 UNINITIALIZED。 */
+  async function activateRuntime(next, { viaHotInit = false } = {}) {
+    if (!next?.app || !next?.service) throw new Error('初始化结果缺少 app/service');
+    app = next.app;
+    service = next.service;
+    config = next.config ?? {};
+    runtime = next.runtime ?? null;
+    deviceId = next.deviceId ?? null;
+    namespace = next.namespace ?? 'tasks';
+    joinEndpoint = next.joinEndpoint;
+    if (next.writesEnabled !== undefined) writesEnabled = Boolean(next.writesEnabled);
+    if (next.activeLock) activeLock = next.activeLock;
+    joinStateStoragePath = computeJoinStateStoragePath();
+    cloudId = cloud.available ? await profileIdForHome(cloud.root, home).catch(() => null) : null;
+    phase = 'READY';
+    if (viaHotInit) hotInitialized = true;
+    return { phase, cloudId };
+  }
 
   const scheme = tls ? 'https' : 'http';
   // D45：OAuth 硬化配置（密钥/secret 不落 config，仅 env）
@@ -837,10 +875,15 @@ export async function startHttpServer({
 
   // W3：**多会话** transport（每个 `mcp-session-id` 一条；CLI 每次调用可各自 initialize）。
   // 无 session 头的请求（如 CLI initialize）新建会话；会话经 `onsessioninitialized` 登记，关闭时回收。
+  //
+  // P2：UNINITIALIZED 也允许 /mcp 完成 initialize / list；server 先持有惰性 service 代理，
+  // 热初始化后同一会话内的 tools/call 直接转发到真实 MemoryService（不重连、不重新 initialize）。
+  const runtimeReady = () => phase === 'READY' && Boolean(service);
+  const serviceFacade = createServiceFacade({ getService: () => service, isReady: runtimeReady });
   const mcpSessions = new Map(); // sessionId → { transport, server }
   async function transportFor(sessionId) {
     if (sessionId) return mcpSessions.get(sessionId)?.transport ?? null;
-    const server = buildServer(service);
+    const server = buildServer(serviceFacade, { isReady: runtimeReady });
     const entry = { transport: null, server };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
@@ -883,6 +926,28 @@ export async function startHttpServer({
       return { ok: false, status: 403, message: `insufficient scope: need ${need}`, challenge: `Bearer error="insufficient_scope", scope="${need}"`, tokenId: grant.tokenId };
     }
     return { ok: true, tokenId: grant.tokenId, scopes: grant.scopes };
+  }
+
+  /**
+   * /mcp：UNINITIALIZED 与 READY 共用同一条路径（loopback + 现有 auth 语义）。
+   * 未初始化时由 service facade + registerTools 的 readiness guard 返回业务错误，
+   * 传输层本身仍正常完成 initialize / tools/list / prompts/list。
+   */
+  async function handleMcp(req, res, body) {
+    const check = await authenticate(req, body);
+    if (!check.ok) {
+      res.statusCode = check.status;
+      if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+      return sendJson(res, check.status, { jsonrpc: '2.0', error: { code: -32001, message: check.message }, id: null });
+    }
+    const sessionId = req.headers['mcp-session-id'];
+    const transport = await transportFor(typeof sessionId === 'string' ? sessionId : undefined);
+    if (!transport) {
+      return sendJson(res, 404, { jsonrpc: '2.0', error: { code: -32001, message: 'unknown session' }, id: null });
+    }
+    const webRequest = toWebRequest(req, body, origin);
+    const response = await transport.handleRequest(webRequest);
+    return writeWebResponse(res, response);
   }
 
   // ---------- 控制台路由（D1 只读 + 写端点 CSRF/scope 门） ----------
@@ -970,7 +1035,8 @@ export async function startHttpServer({
   async function handleAdminRead(req, res, path, url) {
     const builder = READ_ROUTES[path];
     if (!builder) return false;
-    if (!app || !service) {
+    // P2：助手列表只读本机配置，UNINITIALIZED 也开放；其余 admin 读数据面仍需 READY。
+    if ((!app || !service) && path !== '/admin/api/clients') {
       return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
     }
     const check = await authenticate(req, Buffer.alloc(0), 'memory.read');
@@ -1006,8 +1072,8 @@ export async function startHttpServer({
   // ---------- /admin/events（SSE：状态与同步实时脉冲） ----------
 
   async function handleAdminEvents(req, res, url) {
-    if (provision) {
-      return sendJson(res, 409, { error: 'provision_required', provision: true, message: '实例尚未初始化：请先在控制台完成「建新 / 加入」' });
+    if (phase !== 'READY') {
+      return sendJson(res, 409, { error: 'provision_required', provision: true, phase, message: '实例尚未初始化：请先在控制台完成「建新 / 加入」' });
     }
     if (!app || !service) {
       return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
@@ -1134,6 +1200,10 @@ export async function startHttpServer({
     /^\/admin\/api\/assistants\/([^/]+)$/,
     /^\/admin\/api\/assistants\/([^/]+)\/remove$/,
   ];
+
+  // P2：UNINITIALIZED 仅开放本机助手配置所需的读写动作（列表 / 预览 / 接入 / 验证 / 重探）。
+  // 不暴露 memory/network/admin 数据面；写端点仍走 handleAdminWrite 的 Origin + CSRF + scope 门。
+  const UNINITIALIZED_CLIENT_ACTION = /^\/admin\/api\/clients\/([^/]+)\/(connect|preview|verify|recheck)$/;
 
   function parseJsonBody(body) {
     try {
@@ -1505,32 +1575,6 @@ export async function startHttpServer({
   let applyPendingPort = null;
   let applyAttempt = 0;
 
-  /**
-   * 引导态重启计划：服务托管 → 复用 apply 通道（pending + 监督进程 + 分离触发）；
-   * 前台 nohup → 手动指引（restarting:false）。与 A 轮「保存即生效」共用同一条通道。
-   */
-  async function planProvisionRestart({ result }) {
-    const autoRestart = process.env.MEBULAR_CONFIG_AUTORESTART !== '0';
-    const serviceManaged = Boolean(process.env.MEBULAR_SERVICE_KIND) || Boolean(String(process.env.MEBULAR_RESTART_CMD ?? '').trim());
-    if (!autoRestart || !serviceManaged) {
-      return {
-        restarting: false,
-        restart: {
-          mode: 'foreground',
-          // R-1 高-4：命令串用真实 home（不写死 ~/.mebular）
-          command: `nohup mebular serve > ${home}/serve.log 2>&1 &`,
-          manual: `未以服务方式运行：请手动重启（nohup mebular serve > ${home}/serve.log 2>&1 &），重启后控制台进入正常态`,
-        },
-      };
-    }
-    const timeoutMs = Number(process.env.MEBULAR_APPLY_TIMEOUT_MS ?? '') > 0 ? Number(process.env.MEBULAR_APPLY_TIMEOUT_MS) : APPLY_HEALTH_TIMEOUT_MS;
-    return {
-      restarting: true,
-      restart: { mode: 'service', fields: [], timeoutMs },
-      trigger: () => performApplyRestart([], result?.ports?.mcp ?? null, timeoutMs),
-    };
-  }
-
   function scheduleApplyRestart({ fields, port, timeoutMs }) {
     for (const field of fields) applyPendingFields.add(field);
     if (typeof port === 'number' && port > 0) applyPendingPort = port;
@@ -1624,9 +1668,52 @@ export async function startHttpServer({
     };
   }
 
+  // P2：UNINITIALIZED 的助手动作——只读写本机助手配置，不触碰 app/service 数据面。
+  // 返回 false 表示不是受支持的助手动作（调用方继续按原 503 处理）。
+  async function handleUninitializedClientAction(req, res, path, _body) {
+    const match = path.match(UNINITIALIZED_CLIENT_ACTION);
+    if (!match) return false;
+    const { connectClient, previewClient, listAssistantsAsync, assistantUserHome, daemonMcpUrl } = await import('./clients.mjs');
+    const id = decodeURIComponent(match[1]);
+    const action = match[2];
+    const mcpUrl = daemonMcpUrl({ host: req.headers?.host, encrypted: Boolean(req.socket?.encrypted) });
+    const opts = { home, cwd: process.cwd(), mcpUrl };
+    try {
+      if (action === 'preview') {
+        return sendJson(res, 200, previewClient(id, opts));
+      }
+      if (action === 'verify') {
+        // 未初始化不是「连接失败」：返回稳定的待初始化结果，让 UI 保留配置并等待 READY。
+        return sendJson(res, 200, {
+          ok: false,
+          state: 'pending-initialization',
+          needsManual: false,
+          pendingInitialization: true,
+          reason: 'not_initialized',
+          message: '待初始化：请先新建或加入忆云，再验证连接',
+          steps: [],
+        });
+      }
+      if (action === 'recheck') {
+        const out = await listAssistantsAsync({ ...opts, userHome: assistantUserHome(), refresh: true });
+        const client = out.assistants.find((entry) => entry.id === id) ?? null;
+        if (!client) return sendJson(res, 404, { ok: false, error: 'unknown_client', id });
+        return sendJson(res, 200, { ok: true, client, cached: false, pendingInitialization: true });
+      }
+      const result = await connectClient(id, opts);
+      return sendJson(res, result.ok ? 200 : 422, result);
+    } catch (error) {
+      return sendJson(res, 500, { ok: false, error: 'client_action_failed', message: String(error?.message ?? error) });
+    }
+  }
+
   // D2 写端点实现（memory.admin scope + CSRF 已在 handleAdminWrite 校验）
   async function applyAdminWrite(req, res, path, body) {
     if (!app || !service) {
+      if (phase !== 'READY') {
+        const handled = await handleUninitializedClientAction(req, res, path, body);
+        if (handled !== false) return handled;
+      }
       return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
     }
 
@@ -2526,16 +2613,18 @@ export async function startHttpServer({
     // H-1：常驻运行（服务托管，动作式；服务命令带**守护自身 home**）。CI 用 MEBULAR_SERVICE_DRY_RUN=1 替身断言命令序列。
     const svcAction = path.match(/^\/admin\/api\/service\/(install|uninstall)$/);
     if (svcAction) {
-      const { installServiceForHome, uninstallServiceForHome, serviceStatusForHome } = await import('./service-control.mjs');
+      const { installServiceForHome, uninstallServiceForHome, serviceStatusForHome, resolveServiceHome } = await import('./service-control.mjs');
       const dryRun = process.env.MEBULAR_SERVICE_DRY_RUN === '1';
       const commands = [];
       const run = dryRun ? (cmd, args) => { commands.push([cmd, ...(args ?? [])]); return { status: 0, stdout: '', stderr: '' }; } : undefined;
+      // 两套 home：home = 实例身份（descriptor），serviceHome = unit/manifest 落盘（用户 OS home）。
+      const serviceHome = resolveServiceHome();
       try {
         const action = svcAction[1];
         const result = action === 'install'
-          ? installServiceForHome({ home, ...(run ? { run } : {}) })
-          : uninstallServiceForHome({ home, ...(run ? { run } : {}) });
-        const status = serviceStatusForHome({ home, ...(run ? { run } : {}) });
+          ? installServiceForHome({ home, serviceHome, ...(run ? { run } : {}) })
+          : uninstallServiceForHome({ home, serviceHome, ...(run ? { run } : {}) });
+        const status = serviceStatusForHome({ home, serviceHome, ...(run ? { run } : {}) });
         return sendJson(res, 200, { ok: true, action, dryRun, commands, result, status });
       } catch (error) {
         return sendJson(res, 500, { ok: false, action: svcAction[1], error: 'service_action_failed', message: String(error?.message ?? error) });
@@ -2835,21 +2924,45 @@ export async function startHttpServer({
       if (path === '/admin/events' && req.method === 'GET') {
         return handleAdminEvents(req, res, url);
       }
-      if (provision) {
+      // P1：热初始化完成后的重复 create/join —— 本进程曾处于引导态，返回结构化 409（不重启、不重复写盘）。
+      // 普通正常实例仍保持「引导路径不泄漏」的 404 语义。
+      if (phase === 'READY' && hotInitialized
+        && (path === '/app/provision/create' || path === '/app/provision/join' || path === '/app/provision/restore')) {
+        return sendJson(res, 409, {
+          ok: false,
+          error: 'already_provisioned',
+          provisioned: true,
+          initialized: true,
+          restartRequired: false,
+          message: '家目录已完成初始化：守护已在同一进程内进入正常态，无需重复建新 / 加入。',
+        });
+      }
+      if (phase !== 'READY') {
         // 实际绑定端口（--port 0 时 port 参数为 0，但 listen 后系统已分配）
         const boundPort = (() => {
           const addr = server?.address();
           return typeof addr === 'object' && addr !== null ? addr.port : port;
         })();
+        if (path === '/mcp') {
+          // P2：UNINITIALIZED 也允许 MCP 握手/列表；tools/call 由统一 readiness guard 返回业务错误。
+          return handleMcp(req, res, body);
+        }
+        if (path === '/admin/api/clients' && req.method === 'GET') {
+          // P2：引导态只开放本机助手列表（不读 memory/network/admin 数据面）。
+          return handleAdminRead(req, res, path, url);
+        }
+        if (UNINITIALIZED_CLIENT_ACTION.test(path)) {
+          // P2：connect 只写本机助手配置；preview/verify/recheck 不触碰 app/service。
+          // Origin + CSRF + 现有 auth scope 仍在 handleAdminWrite 内校验。
+          const done = await handleAdminWrite(req, res, path, body);
+          if (done !== false) return done;
+        }
         if (path === '/app/provision/status' && req.method === 'GET') {
-          // C（F-ONB-2）：home 已初始化（config 存在）却仍是引导态 → 待重启态（带重启计划）。
-          const provisioned = !isProvisionHome(home);
-          const planned = provisioned ? await planProvisionRestart({ result: null }) : null;
           return sendJson(res, 200, provisionStatus({
             home,
             mcpPort: boundPort,
-            provisioned,
-            ...(planned ? { restarting: planned.restarting, restart: planned.restart } : {}),
+            phase,
+            provisioned: !isProvisionHome(home),
           }));
         }
         if (path === '/app/provision/create' || path === '/app/provision/join' || path === '/app/provision/restore') {
@@ -2859,34 +2972,47 @@ export async function startHttpServer({
             return sendJson(res, 403, { error: 'forbidden', message: `跨站点写被拒（Origin=${reqOrigin}）` });
           }
           if (!csrfValid(req)) return sendJson(res, 403, { error: 'forbidden', message: 'CSRF token 缺失或无效' });
+          if (phase === 'INITIALIZING') {
+            return sendJson(res, 409, { ok: false, error: 'initialization_in_progress', phase, message: '初始化正在进行，请稍候' });
+          }
           if (!isProvisionHome(home)) {
-            // B（F-ONB-2）：已完成但重复调用 → 结构化 409 带「待重启」指引（前端切「已完成」态，不裸报错）
-            const planned = await planProvisionRestart({ result: null });
             return sendJson(res, 409, {
               ok: false,
               error: 'already_provisioned',
               provisioned: true,
-              restartRequired: true,
-              restarting: planned.restarting,
-              restart: planned.restart,
-              message: '家目录已完成初始化：无需重复建新；按指引重启后进入正常态。',
+              initialized: false,
+              restartRequired: false,
+              message: '家目录已完成初始化：无需重复建新 / 加入。',
             });
           }
           const input = parseJsonBody(body) ?? {};
           if (input.confirm !== true) {
-            return sendJson(res, 400, { error: 'confirmation_required', message: '需要 { confirm: true }（写盘 + 自动重启）' });
+            return sendJson(res, 400, { error: 'confirmation_required', message: '需要 { confirm: true }（写入配置并由当前进程完成初始化）' });
           }
+          if (typeof initializeRuntime !== 'function') {
+            return sendJson(res, 500, {
+              ok: false,
+              error: 'initializer_unavailable',
+              message: '当前服务器未装配热初始化执行器：请升级 / 重启 mebular serve',
+            });
+          }
+          const action = path.endsWith('/create') ? 'create' : path.endsWith('/join') ? 'join' : 'restore';
+          // 先占住 INITIALIZING，避免两个并发 create/join 都通过上面的 UNINITIALIZED 检查。
+          phase = 'INITIALIZING';
+          let transaction = null;
           try {
-            const result = path.endsWith('/create')
+            transaction = await snapshotProvisionState(home);
+            const result = action === 'create'
               ? await provisionCreate({
                 home,
                 deviceName: typeof input.deviceName === 'string' ? input.deviceName : undefined,
+                ...(typeof input.cloudName === 'string' ? { cloudName: input.cloudName } : {}),
                 ...(typeof input.deviceId === 'string' ? { deviceId: input.deviceId } : {}),
                 mcpPort: boundPort,
                 joinPort: input.joinPort,
                 listenPort: input.listenPort,
               })
-              : path.endsWith('/join')
+              : action === 'join'
                 ? await provisionJoin({
                   home,
                   token: typeof input.token === 'string' ? input.token : '',
@@ -2901,33 +3027,53 @@ export async function startHttpServer({
                   file: typeof input.file === 'string' ? input.file : '',
                   code: typeof input.code === 'string' ? input.code : '',
                   deviceName: typeof input.deviceName === 'string' ? input.deviceName : undefined,
+                  ...(typeof input.cloudName === 'string' ? { cloudName: input.cloudName } : {}),
                   ...(typeof input.deviceId === 'string' ? { deviceId: input.deviceId } : {}),
                   mcpPort: boundPort,
                   joinPort: input.joinPort,
                   listenPort: input.listenPort,
                 });
             await writeProvisionRecord(home, { ...result, at: new Date().toISOString() });
-            const planned = await planProvisionRestart({ result });
-            sendJson(res, 202, {
+            const next = await initializeRuntime({
+              action,
+              result,
+              server: {
+                host,
+                port: boundPort,
+                auth,
+                tls,
+                tlsKey,
+                tlsCert,
+                tokensFile,
+                writesEnabled,
+              },
+            });
+            await activateRuntime(next, { viaHotInit: true });
+            return sendJson(res, 200, {
               ok: true,
               ...result,
-              restarting: planned.restarting,
-              restart: planned.restart,
+              initialized: true,
+              phase: 'READY',
             });
-            if (planned.restarting) {
-              setImmediate(() => { void planned.trigger().catch(() => undefined); });
-            }
-            return true;
           } catch (error) {
+            // 回滚本次新建的落盘产物；home 锁仍由当前进程持有（不释放/不重抢）。
+            await transaction?.rollback().catch(() => undefined);
+            phase = 'UNINITIALIZED';
             const code = error?.code ?? 'provision_failed';
             const status = code === 'ALREADY_PROVISIONED' ? 409 : 400;
-            return sendJson(res, status, { ok: false, error: code, message: String(error?.message ?? error) });
+            return sendJson(res, status, {
+              ok: false,
+              error: code,
+              phase,
+              message: String(error?.message ?? error),
+            });
           }
         }
         if (path.startsWith('/admin/api/') || path.startsWith('/admin/') || path === '/mcp' || path.startsWith('/app/')) {
           return sendJson(res, 409, {
             error: 'provision_required',
             provision: true,
+            phase,
             message: '实例尚未初始化：请打开控制台完成「建新 Mebular / 加入已有 Mebular」',
           });
         }
@@ -3076,20 +3222,7 @@ export async function startHttpServer({
         return sendJson(res, 404, { ok: false, error: 'not_found', path });
       }
       if (path === '/mcp') {
-        const check = await authenticate(req, body);
-        if (!check.ok) {
-          res.statusCode = check.status;
-          if (check.challenge) res.setHeader('www-authenticate', check.challenge);
-          return sendJson(res, check.status, { jsonrpc: '2.0', error: { code: -32001, message: check.message }, id: null });
-        }
-        const sessionId = req.headers['mcp-session-id'];
-        const transport = await transportFor(typeof sessionId === 'string' ? sessionId : undefined);
-        if (!transport) {
-          return sendJson(res, 404, { jsonrpc: '2.0', error: { code: -32001, message: 'unknown session' }, id: null });
-        }
-        const webRequest = toWebRequest(req, body, origin);
-        const response = await transport.handleRequest(webRequest);
-        return writeWebResponse(res, response);
+        return handleMcp(req, res, body);
       }
       return sendJson(res, 404, { error: 'not_found', path });
     } catch (error) {
@@ -3100,7 +3233,7 @@ export async function startHttpServer({
 
   // root 级硬单活：仅已初始化档案的守护获取（引导态 app/service 为空，不参与）。
   // 被活 PID 占用且 home 不同 → CLOUD_ALREADY_ACTIVE（复用 <home>/lock 的 PID 检查纪律）。
-  const activeLock = app && service && cloud.available
+  activeLock = app && service && cloud.available
     ? await acquireActiveLock({ root: cloud.root, home, profileId: cloudId })
     : null;
 
@@ -3127,6 +3260,15 @@ export async function startHttpServer({
     await new Promise((resolve) => server.close(() => resolve()));
     for (const entry of mcpSessions.values()) await entry.server.close().catch(() => undefined);
     await activeLock?.release?.().catch(() => undefined);
+    await onClose?.().catch(() => undefined);
   };
-  return { server, host, port: actualPort, auth, issuer, close };
+  return {
+    server,
+    host,
+    port: actualPort,
+    auth,
+    issuer,
+    close,
+    getState: () => ({ phase, hotInitialized, app, service, config, runtime, deviceId }),
+  };
 }

@@ -47,6 +47,13 @@ check('IPC 白名单：拒绝任意通道（负例）', !ipc.isAllowedChannel('e
 const table = ipc.buildHandlerTable({ 'daemon:status': () => 'ok', 'exec:arbitrary': () => 'nope' });
 check('handler 表只注册白名单通道（丢弃非白名单）', Boolean(table['daemon:status']) && !table['exec:arbitrary']);
 
+const nav = await import('../src/main/console-nav.mjs');
+check('控制台原地导航：固定目标 / 未知目标拒绝 / 同源 /console 判定',
+  Object.keys(nav.CONSOLE_NAV_TARGETS).join(',') === 'map,clouds,security,assistants,invite'
+    && nav.consoleNavUrl('http://127.0.0.1:7331/console', 'invite') === 'http://127.0.0.1:7331/console?view=connect&step=device'
+    && nav.consoleNavUrl('http://127.0.0.1:7331/console', 'https://evil.example') === null
+    && nav.isConsoleUrl('http://127.0.0.1:7331/console?shell=desktop', 'http://127.0.0.1:7331/console'));
+
 check('healthUrl/consoleUrl 固定 127.0.0.1', daemon.healthUrl({ port: 7331 }) === 'http://127.0.0.1:7331/healthz'
   && daemon.consoleUrl({ port: 7331 }) === 'http://127.0.0.1:7331/console');
 

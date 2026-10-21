@@ -25,6 +25,9 @@ const foldLabel = (id) => IA_SETTINGS_FOLDS.find((fold) => fold.id === id)?.labe
 
 const state = {
   view: 'map',
+  // P3：无 current 时主控制台保持可见但锁定（共享/记忆/审计/设备卡/数据操作禁用）。
+  locked: false,
+  provision: null,
   overview: null,
   devices: [],
   policy: [],
@@ -178,6 +181,9 @@ function refresh() {
 }
 
 async function refreshOnce() {
+  // P3：锁定态不触碰 admin 数据面（除 /admin/api/clients 外的端点均 409 provision_required）。
+  // 解锁时 enterNormalConsole() 会显式刷新一次。
+  if (state.locked) return;
   // 代际号：并发刷新（3s 轮询 vs 动作后即时刷新）时，丢弃先发出后完成的旧数据，防旧列表覆盖新状态
   const seq = ++refreshSeq;
   if (MOCK) {
@@ -268,6 +274,19 @@ function computeDegraded() {
 // ---------- 渲染 ----------
 
 function render() {
+  if (state.locked) {
+    // 锁定态：只渲染壳与星图（背景 + 本机 ghost 地球仪）；不渲染任何依赖 admin 数据面的内容。
+    renderTopbar();
+    renderLockedChrome();
+    renderLegend();
+    renderStageScene();
+    renderDeviceCard();
+    renderOverlays();
+    if (!$('#settings').hidden) renderSettings();
+    if (!$('#about').hidden) renderAbout();
+    renderBanner();
+    return;
+  }
   const selectParam = new URLSearchParams(location.search).get('select');
   if (!state.selected && selectParam) {
     state.selected = state.devices.find((d) => d.deviceId === selectParam) ?? null;
@@ -285,11 +304,80 @@ function render() {
   renderBanner();
 }
 
+/** P3：锁定主控制台的静态外壳（导航禁用 / 顶栏入口切换 / 视觉标记）。 */
+function renderLockedChrome() {
+  document.body.classList.add('is-locked');
+  const app = $('#app');
+  if (app) app.dataset.locked = 'true';
+  document.querySelectorAll('#view-nav .view-btn').forEach((button) => {
+    const disabled = button.dataset.view !== 'map';
+    button.classList.toggle('is-locked', disabled);
+    if (disabled) {
+      button.setAttribute('aria-disabled', 'true');
+      button.title = '新建或加入忆云后可用';
+    } else {
+      button.removeAttribute('aria-disabled');
+      button.removeAttribute('title');
+    }
+  });
+  const create = $('#create-cloud');
+  const invite = $('#invite-device');
+  const join = $('#join-cloud');
+  if (create) create.hidden = false;
+  if (invite) invite.hidden = true;
+  if (join) join.hidden = false;
+  create?.classList.add('is-onboarding');
+  join?.classList.add('is-onboarding');
+  create?.removeAttribute('aria-disabled');
+  join?.removeAttribute('aria-disabled');
+}
+
+function clearLockedChrome() {
+  state.locked = false;
+  document.body.classList.remove('is-locked');
+  const app = $('#app');
+  if (app) delete app.dataset.locked;
+  document.querySelectorAll('#view-nav .view-btn').forEach((button) => {
+    button.classList.remove('is-locked');
+    button.removeAttribute('aria-disabled');
+    button.removeAttribute('title');
+  });
+  const create = $('#create-cloud');
+  const invite = $('#invite-device');
+  const join = $('#join-cloud');
+  if (create) create.hidden = true;
+  if (invite) invite.hidden = false;
+  if (join) join.hidden = false;
+  create?.classList.remove('is-onboarding');
+  join?.classList.remove('is-onboarding');
+}
+
 function renderTopbar() {
   const status = state.overview?.status;
   const selfEl = $('#self-badge');
   const onlineEl = $('#online-badge');
   const memEl = $('#memory-badge');
+  if (state.locked) {
+    // 锁定态只显示「未初始化」真值，不显示任何猜测的设备/记忆数据。
+    const cloudEl = $('#cloud-badge');
+    if (cloudEl) { cloudEl.hidden = true; cloudEl.textContent = ''; }
+    selfEl.textContent = '本机 · 未初始化';
+    selfEl.title = '打开「关于本机」';
+    onlineEl.textContent = `${ICONS.offline} 未初始化`;
+    onlineEl.className = 'badge badge-muted';
+    memEl.textContent = '记忆 —';
+    memEl.className = 'badge badge-muted';
+    const secEl = $('#security-badge');
+    if (secEl) {
+      secEl.textContent = '🛡 安全：—';
+      secEl.className = 'badge badge-button badge-muted';
+      secEl.title = '新建或加入忆云后可用';
+    }
+    const pendingBadge = $('#settings-pending-badge');
+    if (pendingBadge) pendingBadge.hidden = true;
+    renderLockedChrome();
+    return;
+  }
   // E2-A2：忆云名只取 overview.cloud.name；旧守护没有该字段 → 徽章隐藏（绝不用端口/目录猜）。
   const cloudEl = $('#cloud-badge');
   if (cloudEl) {
@@ -379,6 +467,21 @@ function renderLegend() {
 }
 
 function buildScene() {
+  if (state.locked) {
+    // P6A：锁定态保留星图背景，用一个 CRT 虚影地球仪占住「本机」位置；
+    // 只表达「本机尚未初始化」，不映射成任何设备/记忆数据。
+    return {
+      nodes: [{
+        id: 'local-ghost',
+        label: '本机 · 未初始化',
+        self: true,
+        ghost: true,
+        online: false,
+        blocked: false,
+      }],
+      edges: [],
+    };
+  }
   const selfId = state.overview?.device?.deviceId;
   if (!selfId) return { nodes: [], edges: [] };
   const nodes = [{
@@ -434,12 +537,25 @@ function buildScene() {
 function renderStageScene() {
   stage.setScene(buildScene());
   stage.setSelected(state.selected?.deviceId ?? null);
+  const canvas = $('#stage');
+  if (canvas) {
+    // 验收/辅助技术可读的诚实标记；视觉本体仍由 Canvas 绘制。
+    canvas.dataset.scene = state.locked ? 'locked-ghost' : 'ready';
+    canvas.setAttribute('aria-label', state.locked ? '本机星图：本机尚未初始化' : '对端关系星图（本机视角）');
+  }
 }
 
 function renderBanner() {
   const banner = $('#banner');
   // 常驻横幅可见时给 .stage-wrap 打标——窄屏下面板视图据此让位，不被横幅压住标题/统计
   const wrap = document.querySelector('.stage-wrap');
+  if (state.locked) {
+    banner.hidden = false;
+    banner.className = 'banner is-locked';
+    banner.textContent = '忆云尚未初始化：新建或加入后解锁共享、记忆、审计与设备卡。';
+    wrap?.classList.add('has-banner');
+    return;
+  }
   if (state.error) {
     banner.hidden = false;
     banner.className = 'banner is-error';
@@ -1151,6 +1267,55 @@ function renderMcpSections() {
   })).join('');
 }
 
+/**
+ * P3：锁定态设置页 = 排错入口（不请求 admin 数据面，不白屏）。
+ * 给出状态真值 + 两个入口；可复制诊断信息给支持人员。
+ */
+function renderLockedSettings(body) {
+  if (!body) return;
+  const status = state.provision ?? {};
+  body.innerHTML = `
+    <div class="settings-scroll">
+      <section class="settings-section" data-locked-settings>
+        <h3>忆云尚未初始化 <span class="crt-tag crt-tag-warn">锁定</span></h3>
+        <p class="settings-section-desc muted">主控制台已锁定：共享、记忆、审计、设备卡与数据操作在新建或加入忆云后才可用。初始化在当前进程内完成，无需重启。</p>
+        <div class="locked-settings-actions">
+          <button class="btn btn-primary" type="button" data-locked-action="create">新建忆云</button>
+          <button class="btn btn-crt" type="button" data-locked-action="join">加入忆云</button>
+        </div>
+      </section>
+      <section class="settings-section" data-locked-diagnostics>
+        <h3>诊断信息 <span class="badge badge-muted">只读</span></h3>
+        ${kvRows([
+          kvRow('阶段', escapeHtml(String(status.phase ?? 'UNINITIALIZED'))),
+          kvRow('家目录', `<code>${escapeHtml(String(status.home ?? '—'))}</code>`),
+          kvRow('默认设备名', escapeHtml(String(status.defaultDeviceName ?? status.hostname ?? '—'))),
+          kvRow('本机端口', escapeHtml(String(status.mcpPort ?? '—'))),
+        ])}
+        <p class="settings-section-foot muted">若已用命令行初始化但仍显示锁定，请重启守护让当前进程加载新配置。</p>
+        <button class="btn btn-small btn-crt" type="button" id="settings-locked-copy">复制诊断信息</button>
+      </section>
+    </div>
+  `;
+  body.querySelectorAll('[data-locked-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (button.dataset.lockedAction === 'create') openOnboardCreate();
+      else openOnboardJoin();
+    });
+  });
+  body.querySelector('#settings-locked-copy')?.addEventListener('click', (event) => {
+    const payload = {
+      phase: status.phase ?? 'UNINITIALIZED',
+      home: status.home ?? null,
+      deviceName: status.defaultDeviceName ?? status.hostname ?? null,
+      mcpPort: status.mcpPort ?? null,
+      href: location.href,
+      userAgent: navigator.userAgent,
+    };
+    void copyText(JSON.stringify(payload, null, 2), event.currentTarget);
+  });
+}
+
 let lastSettingsSignature = null;
 
 // render() 每 3s 轮询会调用 renderSettings；内容签名用于判断是否真的需要重建 DOM。
@@ -1197,6 +1362,10 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   const prevTab = state.settingsTab ?? 'common';
   state.settingsTab = activeTab;
   const body = $('#settings-body');
+  if (state.locked) {
+    renderLockedSettings(body);
+    return;
+  }
   // 轮询时内容未变则跳过重建，避免原生 <select> 弹层/焦点/选择被销毁
   const signature = settingsSignature(activeTab);
   if (signature === lastSettingsSignature && body.childElementCount > 0) return;
@@ -2220,6 +2389,22 @@ async function saveDeviceRename() {
 
 function renderAbout() {
   const body = $('#about-body');
+  if (state.locked) {
+    lastAboutSignature = null;
+    const status = state.provision ?? {};
+    body.innerHTML = `
+      <section class="settings-section" data-info-block="locked">
+        <h3>本机尚未初始化 <span class="badge badge-muted">锁定</span></h3>
+        <p class="muted" style="font-size:12px;line-height:1.7;margin:0 0 8px">新建或加入忆云后，这里会显示身份、存储与运行状态；当前不展示任何猜测数据。</p>
+        ${kvRows([
+          kvRow('阶段', escapeHtml(String(status.phase ?? 'UNINITIALIZED'))),
+          kvRow('家目录', `<code>${escapeHtml(String(status.home ?? '—'))}</code>`),
+          kvRow('默认设备名', escapeHtml(String(status.defaultDeviceName ?? status.hostname ?? '—'))),
+        ])}
+      </section>
+    `;
+    return;
+  }
   // 同一类轮询重建保护：内容未变则跳过，避免滚动位置/文本选择被冲掉
   const signature = JSON.stringify([
     state.settings ?? null,
@@ -2667,6 +2852,14 @@ function renderOverlays() {
   const pill = $('#status-pill');
   const card = $('#attention-card');
   if (!pill || !card) return;
+  if (state.locked) {
+    // 锁定态没有守护/对端/记忆真值：隐藏总览条与注意卡，避免看起来像有数据。
+    pill.hidden = true;
+    pill.innerHTML = '';
+    card.hidden = true;
+    card.innerHTML = '';
+    return;
+  }
   const onMap = state.view === 'map';
   const selfId = state.overview?.device?.deviceId ?? null;
   pill.hidden = !onMap;
@@ -2745,8 +2938,15 @@ async function clientAction(id, action) {
       say(res.needsManual ? `需要你手动合并：${res.reason ?? ''}` : '');
       return;
     }
-    // R-1 小-11：回滚是不可逆方向的操作 → 二次确认
-    if (action === 'rollback' && !window.confirm('确定回滚？将把该助手的配置还原到接入前（用自动备份恢复）。')) return;
+    // R-1 小-11：回滚是不可逆方向的操作 → 应用内二次确认（取消 / Esc / 点空白 = 不执行）
+    if (action === 'rollback') {
+      const ok = await confirmModal({
+        title: '回滚助手配置？',
+        body: '将把该助手的配置还原到接入前（使用自动备份）。回滚会覆盖接入后写入的 Mebular 条目。',
+        confirmLabel: '回滚',
+      });
+      if (!ok) return;
+    }
     const res = await api(`/admin/api/clients/${id}/${action}`, { method: 'POST', body: {}, timeoutMs: 20000 }); // 写入/CLI 动作给足余量
     if (typeof res.preview === 'string' && res.preview.length > 0) showDiff(res.preview);
     if (!res.ok) { say(`需要你手动处理：${res.reason ?? '请看片段'}`); return; }
@@ -2853,8 +3053,13 @@ function assistantStartEdit(id) {
 }
 
 async function assistantRemove(id) {
-  // 移除自定义条目不可恢复 → 二次确认
-  if (!window.confirm(`确定移除自定义助手「${id}」？只删登记，不动它已有的配置文件。`)) return;
+  // 移除自定义条目不可恢复 → 应用内二次确认
+  const ok = await confirmModal({
+    title: '移除自定义助手？',
+    body: `将移除「${id}」的登记；它已有的配置文件不改动。重新登记后可再次接入。`,
+    confirmLabel: '移除',
+  });
+  if (!ok) return;
   try {
     const res = await api(`/admin/api/assistants/${encodeURIComponent(id)}/remove`, { method: 'POST', body: {} });
     if (!res?.ok) { state.clientMsg[id] = res?.reason ?? '移除失败'; rerenderAssistants(); return; }
@@ -3119,9 +3324,30 @@ function renderDeviceCard() {
   // 走查修复（用户指认：卡片「分区」区在首次轮询补全文案 → 内容变高 → 贴底抽屉顶边瞬跳）：
   // 内容重渲染前后测高，高度有变化则用 FLIP 平滑掉（reduced-motion 跳过）
   const hBefore = asideEl ? asideEl.getBoundingClientRect().height : 0;
-  if (asideEl) asideEl.classList.toggle('is-open', Boolean(state.selected) && state.view === 'map');
+  const cardEl = $('#device-card');
   const empty = $('#device-card-empty');
   const body = $('#device-card-body');
+  if (state.locked) {
+    // P6A：锁定态整张设备卡退场（不展示占位卡/假设备数据）；星图 ghost 地球仪承担唯一本机表达。
+    if (asideEl) {
+      asideEl.hidden = true;
+      asideEl.classList.remove('is-locked', 'is-open');
+    }
+    cardEl?.classList.remove('is-disabled');
+    cardEl?.removeAttribute('aria-disabled');
+    empty.hidden = false;
+    empty.textContent = '新建或加入忆云后，这里会显示设备详情。';
+    body.hidden = true;
+    body.innerHTML = '';
+    lastCardSignature = null;
+    return;
+  }
+  if (asideEl) asideEl.hidden = false;
+  asideEl?.classList.remove('is-locked');
+  cardEl?.classList.remove('is-disabled');
+  cardEl?.removeAttribute('aria-disabled');
+  empty.textContent = '点击星图上的设备查看详情。';
+  if (asideEl) asideEl.classList.toggle('is-open', Boolean(state.selected) && state.view === 'map');
   if (!state.selected) {
     empty.hidden = false;
     body.hidden = true;
@@ -3303,6 +3529,11 @@ function renderDeviceCard() {
 
 stage.onHover = (node, x, y) => {
   const tooltip = $('#tooltip');
+  if (state.locked) {
+    // 锁定态不展示任何设备/记忆悬浮数据（ghost 地球仪只表达「本机未初始化」）。
+    tooltip.hidden = true;
+    return;
+  }
   if (!node) {
     tooltip.hidden = true;
     return;
@@ -3323,6 +3554,11 @@ stage.onHover = (node, x, y) => {
 stage.onSelect = (node) => {
   // 选中/取消时收起悬浮提示（避免被设备卡擦写边缘切断），移动鼠标后会重新出现
   $('#tooltip').hidden = true;
+  if (state.locked) {
+    // 锁定态星图仍可交互（探索感），但点星星/空白统一提示先初始化。
+    showLockedToast();
+    return;
+  }
   if (!node) {
     // 点击星图空白 → 取消选中，设备卡（绿色显示框）收起
     if (!state.selected) return;
@@ -3586,6 +3822,11 @@ stage.onOverlay = (ctx) => {
 $('#view-nav').addEventListener('click', (event) => {
   const button = event.target.closest('.view-btn');
   if (!button) return;
+  // P3：锁定态共享/记忆/审计禁用（aria-disabled + toast），星图始终可用。
+  if (state.locked && button.dataset.view !== 'map') {
+    showLockedToast();
+    return;
+  }
   setView(button.dataset.view);
 });
 
@@ -3747,6 +3988,11 @@ function showToast(message) {
   setTimeout(renderBanner, 2500);
 }
 
+/** P3：锁定态的统一 toast（星图/禁用导航/设备卡）。 */
+function showLockedToast() {
+  showToast('请先新建或加入忆云');
+}
+
 // ---------- 模态 ----------
 
 let modalResolve = null;
@@ -3787,6 +4033,8 @@ function modalCanDismiss(el) {
   if (el.id === 'wizard' && wizardState.connection === 'connecting') return false;
   // E2-A2：加入忆云提交中不可关闭（避免用户以为取消、实际仍完成切换）
   if (el.id === 'cloud-join' && cloudJoinBusy) return false;
+  // P3：首启新建/加入提交中不可关闭（避免同一进程内并发初始化）
+  if ((el.id === 'onboard-create' || el.id === 'onboard-join') && onboardBusy) return false;
   // S3：恢复码一次性展示期间不可关闭（必须先回执「我已抄写」）
   if (el.id === 'security-action' && state.securityFlow?.blockClose === true) return false;
   return true;
@@ -3895,8 +4143,29 @@ $('#open-settings').addEventListener('click', () => {
   renderSettings(state.settingsTab ?? 'common');
 });
 // E2-A2：顶栏忆云徽章 → 设置 · 常用忆云卡；加入忆云 → 弹层。
+// P3：锁定态顶栏改为「新建忆云 + 加入忆云」，分别走首启 create/join；READY 后加入仍用于多忆云。
 $('#cloud-badge')?.addEventListener('click', () => openCloudSettings());
-$('#join-cloud')?.addEventListener('click', () => openCloudJoin());
+$('#join-cloud')?.addEventListener('click', () => {
+  if (state.locked) openOnboardJoin();
+  else openCloudJoin();
+});
+$('#create-cloud')?.addEventListener('click', () => {
+  if (state.locked) openOnboardCreate();
+});
+$('#coach-create')?.addEventListener('click', () => {
+  dismissOnboardingCoach();
+  openOnboardCreate();
+});
+$('#coach-join')?.addEventListener('click', () => {
+  dismissOnboardingCoach();
+  openOnboardJoin();
+});
+$('#onboard-create-close')?.addEventListener('click', () => closeOnboardCreate());
+$('#onboard-create-cancel')?.addEventListener('click', () => closeOnboardCreate());
+$('#onboard-create-submit')?.addEventListener('click', () => { void submitOnboard('create'); });
+$('#onboard-join-close')?.addEventListener('click', () => closeOnboardJoin());
+$('#onboard-join-cancel')?.addEventListener('click', () => closeOnboardJoin());
+$('#onboard-join-submit')?.addEventListener('click', () => { void submitOnboard('join'); });
 $('#cloud-join-close')?.addEventListener('click', () => closeCloudJoin());
 $('#cloud-switch-close')?.addEventListener('click', () => { $('#cloud-switch').hidden = true; });
 $('#settings-close').addEventListener('click', () => {
@@ -4042,7 +4311,7 @@ async function openInvite(ttlMs = state.inviteTtlMs) {
         },
       });
     } catch (error) {
-      window.alert(`发起会签失败：${error.message}`);
+      showToast(`发起会签失败：${error.message}`);
     }
     return;
   }
@@ -4176,31 +4445,39 @@ function showInviteResult(res) {
     <div class="invite-layout">
       <div class="invite-qr">${qrMarkup}</div>
       <div class="invite-main">
-        <p class="invite-lead">让对方扫码，或复制令牌。</p>
+        <p class="invite-lead">扫码加入，或复制令牌发给对方。</p>
         <div class="invite-token-block">
-          <span class="invite-label">令牌</span>
+          <span class="invite-label">一次性令牌</span>
           <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
         </div>
         <div class="invite-controls">
           <label class="invite-ttl" for="invite-ttl"><span class="invite-label">有效期</span>
             <select id="invite-ttl" class="crt-input">${ttlOptions}</select>
           </label>
-          <button class="btn btn-small btn-crt" id="invite-regenerate" type="button">重新生成</button>
           <span class="invite-expiry" id="invite-expiry">至 ${escapeHtml(formatClock(res.expiresAt))}</span>
+          <button class="btn btn-small btn-crt" id="invite-regenerate" type="button">重新生成</button>
         </div>
         ${warningLine}
       </div>
     </div>
-    ${cloudLine}
-    <p class="invite-safety">一次性 · 仅当面或可信局域网传递。</p>
+    <div class="invite-foot">
+      ${cloudLine}
+      <p class="invite-safety">一次性 · 仅当面或可信局域网传递。换新令牌后旧的立即失效。</p>
+    </div>
   `;
   body.querySelector('#invite-ttl')?.addEventListener('change', (event) => {
     const value = Number(event.currentTarget.value);
     if (INVITE_TTL_OPTIONS.some((option) => option.ttlMs === value)) state.inviteTtlMs = value;
   });
-  body.querySelector('#invite-regenerate')?.addEventListener('click', () => {
-    // 二次确认保留但简短：旧令牌作废是不可逆方向。
-    if (window.confirm('重新生成后旧令牌立即失效。确定？')) void openInvite(state.inviteTtlMs);
+  body.querySelector('#invite-regenerate')?.addEventListener('click', async () => {
+    // 旧令牌作废不可逆：应用内确认；取消 / Esc / 点空白都不重新生成。
+    const ok = await confirmModal({
+      title: '重新生成令牌？',
+      body: '旧令牌会立即失效，已发出的邀请将无法再兑换。',
+      confirmLabel: '重新生成',
+    });
+    if (!ok) return;
+    void openInvite(state.inviteTtlMs);
   });
   body.querySelectorAll('[data-copy]').forEach((button) => {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
@@ -4258,11 +4535,11 @@ function cloudNameOf(id) {
   return state.clouds?.profiles?.find((entry) => entry.id === id)?.name ?? id;
 }
 
-/** 新忆云默认名：未占用的最小整数 N >= 2 → 忆云 N（与守护端规则一致）。 */
+/** 新忆云默认名：未占用的最小整数 N >= 1 → 忆云 N（首启默认 忆云 1；多忆云顺延）。 */
 function nextCloudName() {
   const names = new Set((state.clouds?.profiles ?? [])
     .map((entry) => String(entry.name ?? '').trim().toLocaleLowerCase()));
-  for (let n = 2; n < 1000; n += 1) {
+  for (let n = 1; n < 1000; n += 1) {
     const candidate = `忆云 ${n}`;
     if (!names.has(candidate.toLocaleLowerCase())) return candidate;
   }
@@ -4745,6 +5022,13 @@ $('#cloud-join-token')?.addEventListener('paste', () => setTimeout(scheduleCloud
 $('#cloud-join-name')?.addEventListener('input', () => { state.cloudJoinNameAuto = false; });
 $('#cloud-join-submit')?.addEventListener('click', () => { void submitCloudJoin(); });
 
+// P3：锁定态设备卡整卡禁用——点击给统一 toast（含关闭按钮），不展示/不操作数据。
+$('#device-card')?.addEventListener('click', (event) => {
+  if (!state.locked) return;
+  event.preventDefault();
+  showLockedToast();
+});
+
 $('#device-card-close').addEventListener('click', () => {
   state.selected = null;
   const url = new URL(location.href);
@@ -5087,7 +5371,7 @@ function scheduleRefresh() {
 }
 
 function startEvents() {
-  if (MOCK || typeof window.EventSource === 'undefined') return;
+  if (state.locked || MOCK || typeof window.EventSource === 'undefined') return;
   if (eventSource) {
     eventSource.close();
     eventSource = null;
@@ -5129,7 +5413,12 @@ function startEvents() {
 }
 
 
-// ---------- 引导态（首次上手）：建新 / 加入（全程 GUI，不碰 CLI） ----------
+// ---------- P3：锁定主控制台 + 首启入口（新建 / 加入；同页解锁，不 reload） ----------
+
+const ONBOARD_COACH_MS = 6000;
+let onboardBusy = false;
+let onboardCoachTimer = null;
+let onboardCoachHideTimer = null;
 
 async function fetchProvisionStatus() {
   try {
@@ -5142,220 +5431,271 @@ async function fetchProvisionStatus() {
   }
 }
 
-function setProvisionStatus(text, kind = '') {
-  const el = $('#provision-status');
+function setOnboardError(id, message) {
+  const el = $(id);
   if (!el) return;
-  el.textContent = text;
-  el.classList.toggle('is-error', kind === 'error');
-  el.classList.toggle('is-ok', kind === 'ok');
+  el.textContent = message ?? '';
+  el.hidden = !message;
 }
 
-/**
- * 「待重启」面板（F-ONB-2）：restarting:false（前台 nohup）时展示 `restart.command` + 复制按钮，
- * 不再谎称「正在自动重启」；服务托管（mode=service）则提示由服务管理器重启。
- * R-1 高-4：**桌面壳**（?shell=desktop，preload 注入 window.mebularDesktop）下不出现
- * nohup/终端指令 —— 改为一键「重启守护」（走壳 IPC：wizard 第①步同一个 daemon:restart）。
- */
-function showProvisionRestart(restart, { prefix = '已完成', hideChoices = false } = {}) {
-  const box = $('#provision-restart');
-  if (!box) return;
-  box.hidden = false;
-  if (hideChoices) {
-    const choices = $('#provision-choices');
-    if (choices) choices.hidden = true;
-  }
-  const mode = restart?.mode ?? 'foreground';
-  const command = String(restart?.command ?? '');
-  const desktopShell = typeof window !== 'undefined' && typeof window.mebularDesktop?.restart === 'function';
-  const shellBtn = $('#provision-restart-shell');
-  const cmdEl = $('#provision-restart-command');
-  const copyBtn = $('#provision-restart-copy');
-  const noteEl = $('#provision-restart-note');
-  const hintEl = $('#provision-restart-hint');
-  // R-1 补丁：prefix 归一（'已完成' 不再拼出「已完成完成」）
-  const prefixDone = prefix === '已完成' ? '已完成' : `${prefix}完成`;
+function positionOnboardingCoach() {
+  const el = $('#onboarding-coach');
+  const bar = document.querySelector('.topbar');
+  if (!el || !bar || el.hidden) return;
+  // 顶栏会随窄屏换行；锁定横幅也在星图顶端——引导卡放在两者之下，避免互相遮挡。
+  const barBottom = bar.getBoundingClientRect().bottom;
+  const banner = $('#banner');
+  const bannerBottom = banner && !banner.hidden ? banner.getBoundingClientRect().bottom : barBottom;
+  el.style.top = `${Math.round(Math.max(barBottom, bannerBottom) + 10)}px`;
+  el.style.right = window.innerWidth <= 760 ? '12px' : '16px';
+}
 
-  if (desktopShell && mode !== 'service') {
-    // 桌面壳：一键重启（IPC），命令行区域整体收起
-    if (noteEl) noteEl.textContent = `${prefixDone}：点下方「重启守护」一键生效。`;
-    if (cmdEl) cmdEl.hidden = true;
-    if (copyBtn) copyBtn.hidden = true;
-    if (hintEl) hintEl.textContent = '也可回到向导第①步点「重启守护」。';
-    if (shellBtn) {
-      shellBtn.hidden = false;
-      shellBtn.onclick = () => {
-        void (async () => {
-          shellBtn.disabled = true;
-          shellBtn.textContent = '正在重启…';
-          try {
-            await window.mebularDesktop.restart();
-            void waitProvisionRestart();
-          } catch {
-            setProvisionStatus('重启失败：请回到向导第①步点「重启守护」重试。', 'error');
-            shellBtn.disabled = false;
-            shellBtn.textContent = '重启守护';
-          }
-        })();
-      };
-    }
+/** 每次 App 打开（锁定态）展示一次；数秒自动淡出，点击/ESC 可提前关闭。 */
+function showOnboardingCoach() {
+  if (!state.locked) return;
+  const el = $('#onboarding-coach');
+  if (!el) return;
+  el.hidden = false;
+  el.classList.remove('is-leaving');
+  positionOnboardingCoach();
+  requestAnimationFrame(() => el.classList.add('is-visible'));
+  if (onboardCoachTimer) clearTimeout(onboardCoachTimer);
+  onboardCoachTimer = setTimeout(() => dismissOnboardingCoach(), ONBOARD_COACH_MS);
+}
+
+function dismissOnboardingCoach() {
+  const el = $('#onboarding-coach');
+  if (!el || el.hidden) return;
+  if (onboardCoachTimer) { clearTimeout(onboardCoachTimer); onboardCoachTimer = null; }
+  el.classList.remove('is-visible');
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+  if (reduced) {
+    el.hidden = true;
+    el.classList.remove('is-leaving');
     return;
   }
-  if (shellBtn) shellBtn.hidden = true;
-
-  if (noteEl) {
-    noteEl.textContent = mode === 'service'
-      ? `${prefixDone}：正在自动重启（服务托管）；稍候本页会自动进入正常态。`
-      : `${prefixDone}：当前为前台运行，无法自动重启 —— 请在终端执行下面的命令。`;
-  }
-  if (cmdEl) {
-    cmdEl.hidden = false;
-    cmdEl.textContent = command || '（服务托管模式：重启由服务管理器 / supervisor 完成，无手动命令）';
-  }
-  if (hintEl) {
-    hintEl.textContent = restart?.manual
-      ?? (mode === 'service'
-        ? '重启由服务管理器触发；本页会自动刷新进入正常态。'
-        : '若已重启，点下方「已重启？刷新页面」。');
-  }
-  if (copyBtn) {
-    const canCopy = mode !== 'service' && command.length > 0;
-    copyBtn.hidden = !canCopy;
-    if (canCopy) {
-      copyBtn.onclick = () => {
-        void (async () => {
-          try {
-            await navigator.clipboard.writeText(command);
-            setProvisionStatus('命令已复制到剪贴板。', 'ok');
-          } catch {
-            setProvisionStatus(`复制失败，请手动复制：${command}`, 'error');
-          }
-        })();
-      };
-    }
-  }
+  el.classList.add('is-leaving');
+  if (onboardCoachHideTimer) clearTimeout(onboardCoachHideTimer);
+  onboardCoachHideTimer = setTimeout(() => {
+    el.hidden = true;
+    el.classList.remove('is-leaving');
+  }, 320);
 }
 
-/** 重启后轮询：引导接口消失（正常态）即刷新页面。 */
-async function waitProvisionRestart() {
-  const deadline = Date.now() + 90_000;
-  for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    const still = await fetchProvisionStatus();
-    if (!still) { window.location.reload(); return; }
-    if (Date.now() > deadline) {
-      setProvisionStatus('等待重启超时：请确认服务已重启，或点下方「已重启？刷新页面」。', 'error');
-      return;
-    }
-  }
+function openOnboardCreate() {
+  if (!state.locked) return;
+  dismissOnboardingCoach();
+  const modal = $('#onboard-create');
+  const cloud = $('#onboard-create-cloud');
+  const device = $('#onboard-create-device');
+  if (!modal) return;
+  const status = state.provision ?? {};
+  if (cloud) cloud.value = nextCloudName();
+  if (device) device.value = status.defaultDeviceName ?? status.hostname ?? '';
+  setOnboardError('#onboard-create-error', '');
+  modal.hidden = false;
+  setTimeout(() => cloud?.focus(), 0);
 }
 
-async function submitProvision(kind) {
-  const button = kind === 'create' ? $('#provision-create') : $('#provision-join');
-  const nameInput = kind === 'create' ? $('#provision-create-name') : $('#provision-join-name');
-  const deviceName = String(nameInput?.value ?? '').trim();
-  const body = { confirm: true, ...(deviceName ? { deviceName } : {}) };
-  if (kind === 'join') {
-    const token = String($('#provision-join-token')?.value ?? '').trim();
-    if (!token) { setProvisionStatus('请先粘贴加入令牌（邀请面板生成的一次性令牌）。', 'error'); return; }
-    body.token = token;
-  }
-  if (button) button.disabled = true;
-  setProvisionStatus(kind === 'create' ? '正在建新（生成主密钥 + 写配置）…' : '正在加入（校验令牌 + 兑换委派证书）…');
-  try {
-    const res = await api(kind === 'create' ? '/app/provision/create' : '/app/provision/join', { method: 'POST', body });
-    if (res?.restarting) {
-      setProvisionStatus(kind === 'create' ? '已建新：正在自动重启，进入正常态…' : '已加入：正在自动重启，进入正常态…', 'ok');
-      sessionStorage.setItem('mebular_provision', JSON.stringify({ kind, at: Date.now(), result: res }));
-      await waitProvisionRestart();
-      return;
-    }
-    // A（F-ONB-2）：前台运行（restarting:false）→ 面板给手动指引（web）或一键重启（桌面壳）
-    showProvisionRestart(res?.restart, { prefix: kind === 'create' ? '已建新' : '已加入' });
-    setProvisionStatus(kind === 'create'
-      ? '已建新完成：按上方指引重启。'
-      : '已加入完成：按上方指引重启。重启后若忆云启用了「中 · 动态码」，请在「设置 → 安全 → 安全等级」导入种子（两台设备当面出示）；若启用了「高 · 设备会签」，首现记录会带邀请方批准，被拒原因会显示在安全卡/审计。', 'ok');
-    if (button) button.disabled = false;
-  } catch (error) {
-    // B（F-ONB-2）：重复调用（already_provisioned）→ 切「已完成」态，不裸报错
-    if (error?.status === 409 && error?.payload?.error === 'already_provisioned') {
-      const payload = error.payload;
-      $('#provision-choices')?.setAttribute('hidden', '');
-      if (payload.restarting) {
-        setProvisionStatus('已完成：正在自动重启，进入正常态…', 'ok');
-        await waitProvisionRestart();
-        return;
-      }
-      showProvisionRestart(payload.restart, { prefix: '已完成' });
-      setProvisionStatus('已完成：家目录已初始化，无需重复建新；按上方指引重启。', 'ok');
-      if (button) button.disabled = false;
-      return;
-    }
-    setProvisionStatus(`失败：${error.message}`, 'error');
-    if (button) button.disabled = false;
-  }
+function closeOnboardCreate() {
+  if (onboardBusy) return;
+  const modal = $('#onboard-create');
+  if (modal) modal.hidden = true;
+  setOnboardError('#onboard-create-error', '');
+}
+
+function openOnboardJoin() {
+  if (!state.locked) return;
+  dismissOnboardingCoach();
+  const modal = $('#onboard-join');
+  const device = $('#onboard-join-device');
+  const token = $('#onboard-join-token');
+  if (!modal) return;
+  const status = state.provision ?? {};
+  if (device) device.value = status.defaultDeviceName ?? status.hostname ?? '';
+  if (token) token.value = '';
+  setOnboardError('#onboard-join-error', '');
+  modal.hidden = false;
+  setTimeout(() => token?.focus(), 0);
+}
+
+function closeOnboardJoin() {
+  if (onboardBusy) return;
+  const modal = $('#onboard-join');
+  if (modal) modal.hidden = true;
+  setOnboardError('#onboard-join-error', '');
 }
 
 /**
- * 设备名 → deviceId 的**前端镜像**（仅用于实时预览；服务端 provision.mjs 为准）：
- * 先 sanitize（合法字符集 + 去首尾 '-'），再去掉所有重复的 `device-` 前缀，最后拼一次前缀。
+ * P1/P3：初始化成功后在同一页面解锁主控制台（不 window.location.reload、不重启）。
+ * 解锁后进入正常刷新/轮询；enterNormalConsole 自身幂等（重复调用不会叠加定时器/监听）。
  */
-function previewDeviceId(raw) {
-  let core = String(raw ?? '').trim().replace(/[^0-9A-Za-z._-]+/g, '-').replace(/^-+|-+$/g, '');
-  while (/^device-+/i.test(core)) core = core.replace(/^device-+/i, '');
-  if (core.length === 0 || /^device$/i.test(core)) core = 'local';
-  return `device-${core}`;
+async function unlockConsole(kind) {
+  onboardBusy = false;
+  const createModal = $('#onboard-create');
+  const joinModal = $('#onboard-join');
+  if (createModal) createModal.hidden = true;
+  if (joinModal) joinModal.hidden = true;
+  dismissOnboardingCoach();
+  state.locked = false;
+  state.provision = null;
+  clearLockedChrome();
+  lastSettingsSignature = null;
+  lastAboutSignature = null;
+  await enterNormalConsole();
+  showToast(kind === 'create' ? '忆云已建好，控制台已解锁' : '已加入忆云，控制台已解锁');
 }
 
-function bindProvisionPreview(inputSelector, previewSelector, status) {
-  const input = $(inputSelector);
-  const preview = $(previewSelector);
-  if (!input || !preview) return;
-  const update = () => {
-    const suggested = status?.defaultDeviceName ?? status?.hostname ?? 'local';
-    const value = input.value.trim().length > 0 ? input.value : suggested;
-    preview.textContent = `将使用 deviceId：${previewDeviceId(value)}`;
-  };
-  input.addEventListener('input', update);
-  update();
+/**
+ * 共用首启提交路径（P1 端点）：create { cloudName, deviceName } / join { token, deviceName }。
+ * 名称校验交给 P1 API（服务端 normalizeProfileName / normalizeDeviceName），失败内联展示。
+ */
+async function submitOnboard(kind) {
+  if (onboardBusy) return;
+  const isCreate = kind === 'create';
+  const errorId = isCreate ? '#onboard-create-error' : '#onboard-join-error';
+  const submit = $(isCreate ? '#onboard-create-submit' : '#onboard-join-submit');
+  const deviceName = String($(isCreate ? '#onboard-create-device' : '#onboard-join-device')?.value ?? '').trim();
+  const cloudName = String($('#onboard-create-cloud')?.value ?? '').trim();
+  const token = String($('#onboard-join-token')?.value ?? '').trim();
+  setOnboardError(errorId, '');
+  if (isCreate && cloudName.length === 0) {
+    setOnboardError(errorId, '请填写忆云名字（最多 24 个字符）。');
+    return;
+  }
+  if (!isCreate && token.length === 0) {
+    setOnboardError(errorId, '请先粘贴加入令牌（邀请面板生成的一次性令牌）。');
+    return;
+  }
+  onboardBusy = true;
+  if (submit) {
+    submit.disabled = true;
+    submit.dataset.label = submit.textContent;
+    submit.textContent = isCreate ? '正在新建…' : '正在加入…';
+  }
+  try {
+    const res = await api(isCreate ? '/app/provision/create' : '/app/provision/join', {
+      method: 'POST',
+      body: {
+        confirm: true,
+        ...(deviceName ? { deviceName } : {}),
+        ...(isCreate && cloudName ? { cloudName } : {}),
+        ...(!isCreate ? { token } : {}),
+      },
+      timeoutMs: isCreate ? 30000 : 45000,
+    });
+    if (res?.initialized === true) {
+      // 同一进程已完成热初始化；同一页面实例进入正常控制台。
+      sessionStorage.setItem('mebular_provision', JSON.stringify({ kind, at: Date.now(), result: res }));
+      await unlockConsole(kind);
+      return;
+    }
+    setOnboardError(errorId, '初始化未完成（响应未返回 initialized），请重试或检查守护版本。');
+  } catch (error) {
+    // 重复提交（本进程已热初始化）→ 不裸报错，直接解锁。
+    if (error?.status === 409 && error?.payload?.error === 'already_provisioned' && error?.payload?.initialized === true) {
+      await unlockConsole(kind);
+      return;
+    }
+    setOnboardError(errorId, `失败：${error?.payload?.message ?? error?.message ?? '初始化失败'}`);
+  } finally {
+    onboardBusy = false;
+    if (submit) {
+      submit.disabled = false;
+      submit.textContent = submit.dataset.label ?? (isCreate ? '新建忆云' : '加入忆云');
+      delete submit.dataset.label;
+    }
+  }
 }
 
-function renderProvision(status) {
-  const modal = $('#provision');
-  if (!modal) return;
-  modal.hidden = false;
-  // 引导态只显示引导页（隐藏常规控制台外壳）
+/** 锁定态启动：主控制台可见、星图可动，但不取 admin 数据。 */
+async function enterLockedConsole(status) {
+  state.locked = true;
+  state.provision = status ?? null;
+  document.body.classList.add('is-locked');
   const app = $('#app');
-  if (app) app.hidden = true;
-  const createName = $('#provision-create-name');
-  const joinName = $('#provision-join-name');
-  // 预填「设备名」（不是 deviceId：服务端会派生 device-<名>，避免 device-device-XXX）
-  const suggested = status.defaultDeviceName ?? status.hostname ?? '';
-  if (createName && !createName.value) createName.value = suggested;
-  if (joinName && !joinName.value) joinName.value = suggested;
-  const note = $('#provision-note');
-  if (note) {
-    note.textContent = status.provisioned
-      ? `家目录已完成初始化（${status.home ?? '—'}）：重启后进入正常态。`
-      : `${status.note ?? ''}（家目录：${status.home ?? '—'}）`;
+  if (app) app.dataset.locked = 'true';
+  // 星图保留背景 + 本机 ghost 地球仪（不映射任何设备数据）；不请求 /admin/api/overview 等 409 接口。
+  stage.start();
+  setView('map');
+  render();
+  showOnboardingCoach();
+  if (status?.phase === 'INITIALIZING') {
+    // 极端并发：初始化进行中，入口禁用并给出提示，等待用户重试。
+    setOnboardError('#onboard-create-error', '初始化正在进行，请稍候重试。');
   }
-  bindProvisionPreview('#provision-create-name', '#provision-create-preview', status);
-  bindProvisionPreview('#provision-join-name', '#provision-join-preview', status);
-  $('#provision-create')?.addEventListener('click', () => { void submitProvision('create'); });
-  $('#provision-join')?.addEventListener('click', () => { void submitProvision('join'); });
-  $('#provision-reload')?.addEventListener('click', () => window.location.reload());
-  // C（F-ONB-2）：home 已初始化但进程仍是引导态 → 刷新即进入待重启态（隐藏建新/加入，避免重复提交）
-  if (status.provisioned && status.restartRequired) {
-    showProvisionRestart(status.restart, { prefix: '已完成', hideChoices: true });
-    setProvisionStatus(status.restarting
-      ? '已完成：正在自动重启（服务托管），稍候本页自动进入正常态。'
-      : '已完成：家目录已初始化，按上方指引重启即可。', 'ok');
+  // 托盘在「向导态 → 首次加载控制台」时带来的 ?view= 目标也要生效（锁定壳只开设置/提示，不取数据面）。
+  await applyConsoleDeepLink(initialViewFromSearch(location.search), { initial: true });
+}
+
+let normalConsolePromise = null;
+/**
+ * P1：初始化成功后在同一页面进入正常控制台（不依赖 window.location.reload 作为恢复路径）。
+ * 幂等：正常启动与首启解锁共用同一个 promise，不会重复 startEvents/定时器。
+ */
+function enterNormalConsole() {
+  normalConsolePromise ??= enterNormalConsoleOnce();
+  return normalConsolePromise;
+}
+
+/**
+ * 统一应用控制台深链：启动 ?query 与桌面壳托盘原地导航共用（不重建页面）。
+ * initial=true 时只负责启动落点；后续导航先收起无关弹层，再切视图 / 开目标弹层。
+ */
+async function applyConsoleDeepLink(deepLink, { initial = false } = {}) {
+  if (!deepLink) return;
+  if (deepLink.view) setView(deepLink.view);
+  if (!initial) {
+    if (!deepLink.openSettings) $('#settings').hidden = true;
+    if (!deepLink.openInvite) {
+      $('#invite').hidden = true;
+      state.inviteToken = null;
+    }
+    for (const id of ['about', 'cloud-switch', 'handoff', 'namespace-new-modal']) {
+      const el = document.getElementById(id);
+      if (el) el.hidden = true;
+    }
+  }
+  // UX-2：?view=connect 别名重定向 → 设置 · AI 助手
+  if (deepLink.openSettings) {
+    $('#settings').hidden = false;
+    renderSettings(deepLink.openSettings);
+    if (deepLink.focusSecurity) {
+      setTimeout(() => {
+        const slot = $('#settings-security-slot');
+        if (slot) {
+          slot.scrollIntoView({ block: 'start', behavior: 'auto' });
+          slot.focus?.();
+        }
+      }, 0);
+    }
+    if (deepLink.focusClouds) {
+      setTimeout(() => {
+        const card = $('#settings-cloud-card');
+        if (card) {
+          card.scrollIntoView({ block: 'start', behavior: 'auto' });
+          card.focus?.({ preventScroll: true });
+        }
+      }, 0);
+    }
+  }
+  if (deepLink.openInvite) {
+    // 锁定态没有可用的邀请数据面：沿用锁定壳的提示，不直接打 409 接口。
+    if (state.locked) showLockedToast();
+    // 弹层已开着就只显示，不重复生成令牌（重复点托盘不应让旧令牌失效）。
+    else if ($('#invite').hidden) await openInvite();
+    else $('#invite').hidden = false;
   }
 }
 
-const provisionStatus = await fetchProvisionStatus();
-if (provisionStatus) {
-  renderProvision(provisionStatus);
-} else {
+async function enterNormalConsoleOnce() {
+  // 兼容旧内部路径（P3 起不再用 #provision 遮罩整个 app）。
+  const provisionModal = $('#provision');
+  if (provisionModal) provisionModal.hidden = true;
+  clearLockedChrome();
+  dismissOnboardingCoach();
+  const appEl = $('#app');
+  if (appEl) appEl.hidden = false;
   // R-1 高-3：?view=<视图> 深链（向导②/托盘「连接 AI 助手」的 ?view=connect 落点）；
   // step=device → 进连接页后自动开「邀请设备」
   const deepLink = initialViewFromSearch(location.search);
@@ -5366,35 +5706,41 @@ if (provisionStatus) {
   );
   stage.start();
   setView(deepLink.view ?? 'map');
-  refresh().then(() => {
-    // UX-2：?view=connect 别名重定向 → 设置 · AI 助手
-    if (deepLink.openSettings) {
-      $('#settings').hidden = false;
-      renderSettings(deepLink.openSettings);
-      if (deepLink.focusSecurity) {
-        setTimeout(() => {
-          const slot = $('#settings-security-slot');
-          if (slot) {
-            slot.scrollIntoView({ block: 'start', behavior: 'auto' });
-            slot.focus?.();
-          }
-        }, 0);
-      }
-      if (deepLink.focusClouds) {
-        setTimeout(() => {
-          const card = $('#settings-cloud-card');
-          if (card) {
-            card.scrollIntoView({ block: 'start', behavior: 'auto' });
-            card.focus?.({ preventScroll: true });
-          }
-        }, 0);
-      }
-    }
-    if (deepLink.openInvite) openInvite();
-  });
+  await refresh();
+  await applyConsoleDeepLink(deepLink, { initial: true });
   startEvents();
   setInterval(() => {
     if (document.hidden === true) return; // F-PERF-1：隐藏页不轮询，回前台由 visibilitychange 补刷
     refresh();
   }, POLL_MS);
+}
+
+// 引导遮罩：点击任意处/知道了关闭；ESC 在无弹层时关闭。
+$('#onboarding-coach')?.addEventListener('click', () => {
+  dismissOnboardingCoach();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || event.defaultPrevented) return;
+  if (visibleModalElements().length > 0) return;
+  if (!state.locked || $('#onboarding-coach')?.hidden !== false) return;
+  event.preventDefault();
+  dismissOnboardingCoach();
+});
+window.addEventListener('resize', () => {
+  if ($('#onboarding-coach')?.hidden === false) positionOnboardingCoach();
+});
+
+const provisionStatus = await fetchProvisionStatus();
+if (provisionStatus && provisionStatus.phase !== 'READY') {
+  await enterLockedConsole(provisionStatus);
+} else {
+  await enterNormalConsole();
+}
+
+// 桌面壳托盘原地导航：启动完成后再接；启动期间到达的事件由 preload 缓冲一次。
+if (typeof window.mebularDesktop?.onConsoleNavigate === 'function') {
+  window.mebularDesktop.onConsoleNavigate((search) => {
+    if (typeof search !== 'string' || !search.startsWith('?')) return;
+    void applyConsoleDeepLink(initialViewFromSearch(search));
+  });
 }

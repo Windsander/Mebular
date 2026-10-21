@@ -438,10 +438,11 @@ describe('E2-B · IPC / preload 契约', () => {
     const source = await readFile(join(here, '..', '..', 'apps', 'desktop', 'src', 'main', 'index.mjs'), 'utf-8');
     const daemonSource = await readFile(join(here, '..', '..', 'apps', 'desktop', 'src', 'main', 'daemon.mjs'), 'utf-8');
     const cloudSource = await readFile(join(here, '..', '..', 'apps', 'desktop', 'src', 'main', 'clouds.mjs'), 'utf-8');
+    const navSource = await readFile(join(here, '..', '..', 'apps', 'desktop', 'src', 'main', 'console-nav.mjs'), 'utf-8');
     expect(source).toMatch(/let home\s*=/);
     expect(daemonSource).toContain('MEBULAR_CLOUD_ROOT');
     expect(cloudSource).toContain('MEBULAR_CLOUD_ROOT');
-    expect(source).toContain('focus=clouds');
+    expect(navSource).toContain("focus: 'clouds'");
     expect(source).toContain("'manage-clouds'");
     expect(source).toMatch(/updateTray\(\)[\s\S]*showConsoleWithRetry\(\)/);
   });

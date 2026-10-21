@@ -9,7 +9,18 @@ devices, and every write is Ed25519-signed and content-addressed. No cloud, no c
 
 ## 1. Install (about a minute)
 
-**A. From GitHub, pinned to a commit (recommended, reproducible):**
+**A. From npm (recommended for a published release):**
+
+```bash
+npm install -g @mebular/core
+command -v mebular && command -v fleet
+```
+
+The five `@mebular/*` packages are published in lockstep. `@mebular/core` is the root bundle and provides
+both CLIs: `mebular` covers the daemon, MCP server and console; `fleet` covers setup, invite and join.
+Installing `@mebular/mcp` alone provides only `mebular`, not `fleet`.
+
+**B. From GitHub, pinned to a commit (reproducible source build):**
 
 ```bash
 SHA=$(git ls-remote https://github.com/Windsander/Mebular.git refs/heads/main | cut -f1)
@@ -17,7 +28,7 @@ npm i -g "github:Windsander/Mebular#$SHA"
 command -v mebular && command -v fleet
 ```
 
-**B. From a local checkout (developers):**
+**C. From a local checkout (developers):**
 
 ```bash
 git clone https://github.com/Windsander/Mebular.git && cd Mebular
@@ -28,22 +39,44 @@ command -v mebular && command -v fleet
 
 You now have two commands: `mebular` (daemon, MCP server, console) and `fleet` (setup, invite, join).
 
-## 2. Create your identity and start the daemon
+## 2. Start it, then create or join a Cloud
 
 One machine = one node = one daemon. The daemon is the sole holder of identity, network and trust; agents and
 the fleet CLI are local clients that share it.
+
+**Desktop app:** open the app and click **Start deployment**. It starts the local service and connects the AI
+assistants already installed on this machine, then opens the **locked main console**. It does **not** create a
+Cloud for you.
+
+**Browser:** the same console is served by:
 
 ```bash
 mebular serve
 ```
 
-Open the console at `http://127.0.0.1:7331/console`. On an empty home directory it shows the first-run page —
-click **Create new Mebular** (root identity + config, then auto-restart). No CLI required.
+Open `http://127.0.0.1:7331/console`. On an empty home directory the console is locked: the star map is
+visible, the other cards are disabled, and the top bar has two entries — **Create new Cloud** and **Join
+existing Cloud**.
 
-**CLI equivalent** (scripts / bulk), which also starts the join service:
+- **First device** — **Create new Cloud**: enter a Cloud name and a device name. This machine becomes the root.
+- **Later devices** — on a device already in the Cloud, use **Invite device** to get a QR code / one-time
+  token; on the new device, **Join existing Cloud**: paste the token and enter a device name. The delegated
+  certificate is issued without copying the master key.
+
+Create and join complete in the same daemon process and on the same page: no daemon restart, no page reload.
+The console unlocks immediately, and the top bar switches to **Invite device** + **Join Cloud**.
+
+**CLI equivalent** (scripts / bulk; this is a separate path — the desktop wizard does not choose or create a
+Cloud for you):
 
 ```bash
 fleet quickstart --daemon --dir ~/.mebular --device "$(hostname | tr '[:upper:]' '[:lower:]')"
+```
+
+`fleet quickstart` prepares this machine and prints a one-time invite token. A later device joins with:
+
+```bash
+fleet join --qr "<QR content>" --daemon --dir ~/.mebular --device device-B   # or --token
 ```
 
 **Check it is up:**
@@ -64,7 +97,13 @@ mebular print-config --client opencode   # also: claude, cursor, dsh, generic
 ```
 
 Paste it into your agent's MCP configuration. The local form runs `mebular mcp` over stdio; a Streamable HTTP
-client can instead point at `http://127.0.0.1:7331/mcp`.
+client can instead point at `http://127.0.0.1:7331/mcp`. The HTTP `/mcp` form is what the desktop app writes
+when it auto-connects your assistants, so the same path keeps working after setup.
+
+Before a Cloud exists, `/mcp` already accepts `initialize`, `tools/list` and `prompts/list`; `tools/call`
+returns the stable `NOT_INITIALIZED` business error. That is expected, not a broken connection. The tools
+become usable in the same MCP session after **Create new Cloud** or **Join existing Cloud** — no daemon
+restart and no config rewrite.
 
 Optionally install the behavior skill (memory policy and workflow) into your agent's skill directory:
 
@@ -96,16 +135,18 @@ Device A — generate an invitation (terminal QR + text token):
 fleet invite --dir ~/.mebular
 ```
 
-In the GUI: console → **＋ Invite a device**.
+In the GUI: console → **＋ Invite device**.
 
-Device B — join with the QR content (or `--token`):
+Device B — in the GUI, enter the locked console and choose **Join existing Cloud**, then paste the token and a
+device name. Or use the CLI with the QR content (or `--token`):
 
 ```bash
 fleet join --qr "<QR content>" --daemon --dir ~/.mebular --device device-B
 ```
 
-After the join, the new device declares its own subscription (zero friction) and a
-one-time sync runs. Writes on either device converge after reconnect — offline-first, with no central service.
+After the join, the GUI unlocks in the same process (no restart or reload). The new device declares its own
+subscription (zero friction) and a one-time sync runs. Writes on either device converge after reconnect —
+offline-first, with no central service.
 
 ## 6. Verify and troubleshoot
 
@@ -116,6 +157,9 @@ mebular doctor --net    # address book / LAN discovery / NAT / bridge role / nex
 
 | Symptom | What to do |
 |---|---|
+| Console is locked with only the star map | Expected before the first Cloud: use **Create new Cloud** / **Join existing Cloud** in the top bar. |
+| “Start deployment” finished but there is no Cloud | Expected: it starts the daemon and connects assistants; it does not create a Cloud. Use the top bar. |
+| MCP tool call returns `NOT_INITIALIZED` | No Cloud yet: create/join in the locked console. The same session recovers; no restart. |
 | `MCP_STORAGE_LOCKED` | Another instance holds the store lock: reuse it, or stop it first. |
 | `MCP_INSECURE_CONFIG` | Fix `~/.mebular/config.json`: set `mcp.http.host` back to `127.0.0.1`, or supply `auth` + `tls`. |
 | Console API returns 401 after switching `auth` | See console → Settings → Diagnostics; `bearer` is recoverable in the UI, `oauth` needs env secrets. |
@@ -124,6 +168,8 @@ mebular doctor --net    # address book / LAN discovery / NAT / bridge role / nex
 ## Where to next
 
 - **README** — [`README.md`](README.md) · [中文](README_CN.md)
+- **Changelog** — [`CHANGELOG.md`](CHANGELOG.md)
+- **Release SOP** — [`RELEASE.md`](RELEASE.md)
 - **Limits & trade-offs** — [`LIMITATIONS.md`](LIMITATIONS.md)
 - **Sealing contract** — [`SEALING.md`](SEALING.md)
 - **Two-machine ops** — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)

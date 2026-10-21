@@ -806,6 +806,11 @@ export class StarStage {
       const scale = 0.6 + depth * 0.7;
       const hovered = this.hovered === node.id;
       const selected = this.selectedId === node.id;
+      if (node.ghost) {
+        // P6A：锁定态本机虚影（CRT 经纬线地球仪 + 卫星 + 干扰毛刺）——不冒充真实设备星。
+        drawGhostGlobe(ctx, pos.x, pos.y, (node.self ? 9 : 7) * scale, time, this.reducedMotion, hovered || selected, node.label);
+        continue;
+      }
       let radius = (node.self ? 9 : 6) * scale;
       let color = node.self ? '#ffe9a8' : '#9fd0ff';
       if (node.revoked) {
@@ -888,6 +893,254 @@ export class StarStage {
       ctx.globalAlpha = 1;
     }
   }
+}
+
+/**
+ * P6A：锁定态「本机虚影」。用 CRT 绿的低透明度经纬线地球仪（无光环）+
+ * 环绕卫星 + 间隔性干扰毛刺，明确表达「本机尚未初始化」，不与真实设备星/本机信标混淆。
+ */
+function drawGhostGlobe(ctx, x, y, radius, time, reducedMotion, active, label) {
+  const t = reducedMotion ? 0 : time;
+  const R = radius * 2.15;
+  // 地球仪本体：无外发光，只靠线条明暗与扫描感表达 CRT 虚影。
+  const flicker = reducedMotion ? 0.82 : 0.74 + 0.05 * Math.sin(t * 2.2) + 0.02 * Math.sin(t * 8.7);
+  const alpha = Math.max(0.5, Math.min(0.92, flicker + (active ? 0.1 : 0)));
+  const glitch = crtGlitchLevel(t);
+  // 沿用本机信标星的卫星轨道手感：同倾角、同投影比例；轨道略大于球体，卫星始终在轮廓外。
+  const orbit = ghostOrbit(R * 1.7, -0.5, 0.72);
+  // 干扰时整颗地球仪轻微横抖（标签不抖，保持可读）。
+  const jitterX = glitch > 0.12 && !reducedMotion ? Math.sin(t * 95) * 3.2 * glitch : 0;
+  const jitterY = glitch > 0.12 && !reducedMotion ? Math.sin(t * 127) * 1.2 * glitch : 0;
+
+  ctx.save();
+  ctx.translate(jitterX, jitterY);
+  // 轨道后半个弧（在球体后面，暗）
+  strokeGhostOrbit(ctx, x, y, orbit, alpha * 0.55, false);
+  const satelliteA = t * 0.52;
+  const satellite = orbit.point(satelliteA);
+  if (satellite.z < 0) drawGhostSatellite(ctx, x, y, orbit, satelliteA, alpha * 0.62);
+
+  // 经纬线球体
+  drawGhostWireGlobe(ctx, x, y, R, t, alpha);
+
+  // 轨道前半个弧 + 卫星（在球体前面，亮）
+  strokeGhostOrbit(ctx, x, y, orbit, alpha, true);
+  if (satellite.z >= 0) drawGhostSatellite(ctx, x, y, orbit, satelliteA, alpha);
+
+  // CRT 干扰：间隔性横向撕裂/丢行/噪点（reduced-motion 不播放）
+  if (glitch > 0) drawGhostGlitch(ctx, x, y, R, t, alpha, glitch);
+  ctx.restore();
+
+  // 标签：诚实的「本机 · 未初始化」。
+  ctx.save();
+  ctx.font = '11px ui-monospace, Menlo, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = `rgba(140,255,200,${0.68 * alpha})`;
+  ctx.shadowColor = 'rgba(0,0,0,0.85)';
+  ctx.shadowBlur = 4;
+  ctx.fillText(label ?? '本机 · 未初始化', x, y + R + 24);
+  ctx.restore();
+}
+
+/** 经纬线地球仪：外轮廓 + 8 条经线 + 5 条纬线 + 极轴；无填充、无光环。 */
+function drawGhostWireGlobe(ctx, x, y, R, time, alpha) {
+  const TILT = -0.42;
+  const cosT = Math.cos(TILT);
+  const sinT = Math.sin(TILT);
+  const rotate = (px, py, pz) => ({
+    x: px * cosT - py * sinT,
+    y: px * sinT + py * cosT,
+    z: pz,
+  });
+  const project = (p) => ({ x: x + p.x * R, y: y - p.y * R, z: p.z });
+  const lonOffset = time * 0.22;
+
+  // 球体轮廓（不是光环：只有 1px 线）
+  ctx.strokeStyle = `rgba(109,255,184,${0.58 * alpha})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(x, y, R, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // 极轴（虚线，轻微倾斜）
+  const north = project(rotate(0, 1, 0));
+  const south = project(rotate(0, -1, 0));
+  ctx.setLineDash([2, 4]);
+  ctx.strokeStyle = `rgba(109,255,184,${0.22 * alpha})`;
+  ctx.beginPath();
+  ctx.moveTo(north.x, north.y);
+  ctx.lineTo(south.x, south.y);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const drawCurve = (pointAt, steps, backAlpha, frontAlpha, width = 1) => {
+    // 背面整条曲线先暗画一遍，正面再覆盖亮段。
+    ctx.strokeStyle = `rgba(109,255,184,${backAlpha * alpha})`;
+    ctx.lineWidth = width;
+    ctx.beginPath();
+    for (let i = 0; i <= steps; i += 1) {
+      const p = pointAt(i / steps);
+      if (i === 0) ctx.moveTo(p.x, p.y);
+      else ctx.lineTo(p.x, p.y);
+    }
+    ctx.stroke();
+
+    ctx.strokeStyle = `rgba(170,255,210,${frontAlpha * alpha})`;
+    ctx.beginPath();
+    let started = false;
+    for (let i = 0; i < steps; i += 1) {
+      const p1 = pointAt(i / steps);
+      const p2 = pointAt((i + 1) / steps);
+      if ((p1.z + p2.z) / 2 < 0) {
+        started = false;
+        continue;
+      }
+      if (!started) {
+        ctx.moveTo(p1.x, p1.y);
+        started = true;
+      }
+      ctx.lineTo(p2.x, p2.y);
+    }
+    ctx.stroke();
+  };
+
+  // 经线：8 条，随时间绕轴旋转。
+  for (let k = 0; k < 8; k += 1) {
+    const lon = lonOffset + (Math.PI / 4) * k;
+    const pointAt = (u) => {
+      const lat = -Math.PI / 2 + u * Math.PI;
+      const cosLat = Math.cos(lat);
+      return project(rotate(cosLat * Math.sin(lon), Math.sin(lat), cosLat * Math.cos(lon)));
+    };
+    drawCurve(pointAt, 30, 0.16, k === 0 ? 0.68 : 0.48);
+  }
+
+  // 纬线：-60 / -30 / 0 / +30 / +60；赤道稍亮。
+  for (const latDeg of [-60, -30, 0, 30, 60]) {
+    const lat = (latDeg * Math.PI) / 180;
+    const cosLat = Math.cos(lat);
+    const sinLat = Math.sin(lat);
+    const pointAt = (u) => {
+      const lon = u * Math.PI * 2;
+      return project(rotate(cosLat * Math.sin(lon), sinLat, cosLat * Math.cos(lon)));
+    };
+    const equator = latDeg === 0;
+    drawCurve(pointAt, 30, equator ? 0.22 : 0.13, equator ? 0.68 : 0.42);
+  }
+}
+
+/** 卫星轨道几何：圆轨道在倾斜面上投影成椭圆；z > 0 表示在球体前方。 */
+function ghostOrbit(radius, tilt, flatten) {
+  const cosT = Math.cos(tilt);
+  const sinT = Math.sin(tilt);
+  return {
+    radius,
+    point(a) {
+      const lx = Math.cos(a) * radius;
+      const ly = Math.sin(a) * radius * flatten;
+      return {
+        x: lx * cosT - ly * sinT,
+        y: lx * sinT + ly * cosT,
+        z: Math.sin(a),
+      };
+    },
+  };
+}
+
+/** 只描轨道的一半（front=true 描 z>=0，false 描 z<0），断续虚线。 */
+function strokeGhostOrbit(ctx, x, y, orbit, alpha, front) {
+  const steps = 48;
+  ctx.setLineDash([2, 5]);
+  ctx.strokeStyle = `rgba(109,255,184,${(front ? 0.52 : 0.24) * alpha})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  let started = false;
+  for (let i = 0; i < steps; i += 1) {
+    const p1 = orbit.point((i / steps) * Math.PI * 2);
+    const p2 = orbit.point(((i + 1) / steps) * Math.PI * 2);
+    if ((front ? p1.z : -p1.z) < 0) {
+      started = false;
+      continue;
+    }
+    if (!started) {
+      ctx.moveTo(x + p1.x, y + p1.y);
+      started = true;
+    }
+    ctx.lineTo(x + p2.x, y + p2.y);
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+/** 小卫星：短尾迹 + 太阳能板横线 + 亮点；位于球体后方时整体压暗。 */
+function drawGhostSatellite(ctx, x, y, orbit, a, alpha) {
+  const p = orbit.point(a);
+  const tail = orbit.point(a - 0.22);
+  const sx = x + p.x;
+  const sy = y + p.y;
+  ctx.strokeStyle = `rgba(170,255,210,${0.5 * alpha})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(x + tail.x, y + tail.y);
+  ctx.lineTo(sx, sy);
+  ctx.stroke();
+
+  ctx.strokeStyle = `rgba(109,255,184,${0.72 * alpha})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(sx - 5, sy);
+  ctx.lineTo(sx + 5, sy);
+  ctx.stroke();
+
+  ctx.fillStyle = `rgba(210,255,232,${0.95 * alpha})`;
+  ctx.fillRect(sx - 1.6, sy - 1.6, 3.2, 3.2);
+}
+
+/** CRT 干扰强度：约每 4.2s 一次 180ms 撕裂，另每 7.3s 一次 70ms 短闪。导出供视觉契约单测。 */
+export function crtGlitchLevel(t) {
+  if (t <= 0) return 0;
+  const first = t % 4.2;
+  const second = (t + 2.15) % 7.3;
+  const a = first < 0.18 ? 1 - first / 0.18 : 0;
+  const b = second < 0.07 ? 1 - second / 0.07 : 0;
+  return Math.max(a, b * 0.8);
+}
+
+/** 干扰毛刺：横向丢行 + 位移重绘（切片错位）+ 亮线 + 少量噪点；只作用在球体附近。 */
+function drawGhostGlitch(ctx, x, y, R, t, alpha, level) {
+  const seed = Math.floor(t * 24);
+  const rand = (n) => {
+    const v = Math.sin(seed * 12.9898 + n * 78.233) * 43758.5453;
+    return v - Math.floor(v);
+  };
+  ctx.save();
+  for (let i = 0; i < 4; i += 1) {
+    const by = y + (rand(i) - 0.5) * R * 1.6;
+    const bh = 1 + rand(i + 8) * 3;
+    const shift = (rand(i + 16) - 0.5) * R * 1.25;
+    // 先丢行，再把该切片的地球仪横向错位重绘：经典 CRT tracking 故障感。
+    ctx.clearRect(x - R * 1.35, by, R * 2.7, bh);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x - R * 1.35, by, R * 2.7, bh);
+    ctx.clip();
+    ctx.translate(shift, 0);
+    drawGhostWireGlobe(ctx, x, y, R, t, alpha * 0.92);
+    ctx.restore();
+    ctx.strokeStyle = `rgba(190,255,225,${0.85 * level * alpha})`;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x - R * 1.25 + shift, by + bh * 0.5);
+    ctx.lineTo(x + R * 1.25 + shift, by + bh * 0.5);
+    ctx.stroke();
+  }
+  for (let i = 0; i < 6; i += 1) {
+    const bx = x + (rand(i + 30) - 0.5) * R * 2.3;
+    const by = y + (rand(i + 40) - 0.5) * R * 1.9;
+    ctx.fillStyle = `rgba(109,255,184,${0.22 * level * alpha})`;
+    ctx.fillRect(bx, by, 1 + rand(i + 50) * 7, 1);
+  }
+  ctx.restore();
 }
 
 /**

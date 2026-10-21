@@ -377,7 +377,7 @@ async function main() {
     check('页面加载完成（标题 / #stage）', await waitFor('document.title.includes("控制台") && Boolean(document.querySelector("#stage"))'));
     check('弹窗对齐规范：小弹窗 + 加入忆云 modal-center；其余大面板顶部对齐',
       await evalJs(`(() => {
-        const small = ['wizard', 'invite', 'cloud-switch', 'security-action', 'handoff', 'modal', 'auth-token', 'namespace-new-modal', 'cloud-join'];
+        const small = ['wizard', 'invite', 'cloud-switch', 'security-action', 'handoff', 'modal', 'auth-token', 'namespace-new-modal', 'cloud-join', 'onboard-create', 'onboard-join'];
         const large = ['settings', 'about', 'provision'];
         const boxes = [...document.querySelectorAll('.modal .modal-box')];
         return small.every((id) => document.querySelector('#' + id)?.classList.contains('modal-center'))
@@ -543,8 +543,9 @@ async function main() {
       console.log('  · [诊断] 行状态:', await evalJs('document.querySelector("#settings-panel-assistants [data-asst-row=opencode]")?.textContent ?? "（无行）"').catch((e) => String(e)));
       console.log('  · [诊断] 页面异常:', await evalJs('JSON.stringify(window.__pageErrors ?? [])').catch((e) => String(e)));
     }
-    check('验证未过 = 黄态一行 + 「重新验证」+ 输出内联（无嵌套折叠）',
-      await waitFor('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); if (!v || !/验证未过/.test(v.textContent)) return false; if (!v.querySelector("[data-asst-output]")) return false; if (v.querySelector("details")) return false; const row = document.querySelector("#settings-panel-assistants [data-asst-row=opencode]"); return Boolean(row) && /重新验证/.test(row.textContent); })()', 20000));
+    const verifyFailedOk = await waitFor('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); if (!v || !/验证未过/.test(v.textContent)) return false; if (!v.querySelector("[data-asst-output]")) return false; if (v.querySelector("details")) return false; const row = document.querySelector("#settings-panel-assistants [data-asst-row=opencode]"); return Boolean(row) && /重新验证/.test(row.textContent); })()', 20000);
+    check('验证未过 = 黄态一行 + 「重新验证」+ 输出内联（无嵌套折叠）', verifyFailedOk,
+      verifyFailedOk ? '' : await evalJs('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); const row = document.querySelector("#settings-panel-assistants [data-asst-row=opencode]"); return JSON.stringify({ verify: v?.textContent?.slice(0, 240) ?? null, row: row?.textContent?.slice(0, 240) ?? null, state: window.__mebularDebug?.clientVerify?.["opencode"] ?? null }); })()').catch((e) => String(e)));
     check('manual（generic 粘片段）行永不出现自动写「接入」',
       await evalJs('(() => { const row = document.querySelector("#settings-panel-assistants [data-asst-row=generic]"); const xp = document.querySelector("#settings-panel-assistants [data-asst-xp=generic]"); if (!row || !/查看片段/.test(row.textContent)) return false; return !row.querySelector("[data-cli-action=connect]") && !(xp && xp.querySelector("[data-cli-action=connect]")); })()'));
 
@@ -577,8 +578,10 @@ async function main() {
     await evalJs('(() => { document.querySelector("#asst-add-name").value = "UI 测试助手改"; document.querySelector("#asst-add-submit").click(); })()');
     check('保存修改后列表即时更新（PUT 生效）',
       await waitFor('(() => { const r = document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]"); return Boolean(r) && /UI 测试助手改/.test(r.textContent); })()', 30000));
-    await evalJs('window.confirm = () => true'); // 移除的二次确认桩住（headless 无对话框）
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-remove=ui-test-asst]"); if (b) b.click(); })()');
+    check('移除走应用内确认（#modal，非原生 confirm）',
+      await waitFor('(() => { const m = document.querySelector("#modal"); return Boolean(m) && m.hidden === false && /移除自定义助手/.test(document.querySelector("#modal-title")?.textContent ?? ""); })()'));
+    await evalJs('document.querySelector("#modal-confirm").click()');
     check('移除后行消失（POST remove 生效）',
       await waitFor('!document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]")', 30000));
 
@@ -597,9 +600,11 @@ async function main() {
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-row=ui-broken-asst] [data-cli-action=connect]"); if (b) b.click(); })()');
     check('接入失败 →「接入失败」+ 一行原因（配置不是合法 JSON）+「重试」，不显示「待生效」',
       await waitFor('(() => { const r = document.querySelector("#settings-panel-assistants [data-asst-row=ui-broken-asst]"); const xp = document.querySelector("#settings-panel-assistants [data-asst-xp=ui-broken-asst]"); if (!r || !/接入失败/.test(r.textContent)) return false; if (/待生效/.test(r.textContent)) return false; return Boolean(xp) && /配置不是合法 JSON|无法解析/.test(xp.textContent) && /重试/.test(r.textContent); })()', 30000));
-    // 清理：展开详情移除（confirm 已桩住）
+    // 清理：展开详情移除（应用内确认）
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=details][data-cli-id=ui-broken-asst]"); if (b) b.click(); })()');
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-remove=ui-broken-asst]"); if (b) b.click(); })()');
+    await waitFor('document.querySelector("#modal")?.hidden === false');
+    await evalJs('document.querySelector("#modal-confirm").click()');
     check('失败用料移除（场地清理）',
       await waitFor('!document.querySelector("#settings-panel-assistants [data-asst-row=ui-broken-asst]")', 30000));
     await evalJs('document.querySelector("#settings-close").click()');
@@ -1145,6 +1150,7 @@ async function main() {
     await evalJs('document.querySelector("#invite-device").click()');
     check('邀请面板打开且渲染内容（令牌或未启用提示）', await waitFor('(() => { const b = document.querySelector("#invite-body"); return Boolean(b?.querySelector("[data-copy]")) || /加入服务未启用/.test(b?.textContent ?? ""); })()'));
     await capture('u3-after-dialog-invite.jpg');
+    await capture('p6b-invite-desktop.jpg');
     check('E1 邀请单屏：令牌 + 二维码/降级 + 忆云身份 + TTL；无详情/端点编辑/CLI 命令', await evalJs(`(() => {
       const body = document.querySelector('#invite-body');
       if (!body) return false;
@@ -1158,7 +1164,7 @@ async function main() {
         && !/join 端点|默认记忆域|订阅/.test(body.textContent)
         && !/对方已用过|新设备|当前令牌有效至|改档后点|令牌即入网权限|扫码即通|本忆云/.test(body.textContent)
         && tokenBlock && qr && /忆云 1/.test(body.textContent) && /根指纹/.test(body.textContent)
-        && /让对方扫码，或复制令牌。/.test(body.textContent)
+        && /扫码加入，或复制令牌发给对方。/.test(body.textContent)
         && /一次性 · 仅当面或可信局域网传递。/.test(body.textContent)
         && /至 \\d{2}:\\d{2}/.test(body.textContent)
         && Boolean(body.querySelector('.invite-layout .invite-qr'))
@@ -1177,14 +1183,34 @@ async function main() {
       if (!qr || !main) return false;
       return main.getBoundingClientRect().top >= qr.getBoundingClientRect().bottom - 1;
     })()`));
+    check('E1 邀请 ≤520：弹框与页面无横向溢出', await evalJs(`(() => {
+      const box = document.querySelector('#invite .modal-box');
+      return Boolean(box) && box.scrollWidth <= box.clientWidth + 1
+        && document.documentElement.scrollWidth <= window.innerWidth + 1;
+    })()`));
+    await capture('p6b-invite-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await send('Emulation.clearDeviceMetricsOverride');
     await evalJs(`(() => {
       const select = document.querySelector('#invite-ttl');
       select.value = '7200000';
       select.dispatchEvent(new Event('change', { bubbles: true }));
-      window.confirm = () => true;
       document.querySelector('#invite-regenerate').click();
     })()`);
+    check('E1 重新生成走应用内确认（#modal，非原生 confirm）',
+      await waitFor(`(() => {
+        const modal = document.querySelector('#modal');
+        const body = document.querySelector('#modal-body')?.textContent ?? '';
+        return Boolean(modal) && modal.hidden === false && /旧令牌/.test(body) && /无法再兑换/.test(body);
+      })()`));
+    await evalJs('document.querySelector("#modal-cancel").click()');
+    check('E1 取消重新生成：确认弹框关闭、旧令牌不变（取消不执行）',
+      await waitFor(`(() => {
+        const token = document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '';
+        return document.querySelector('#modal')?.hidden === true && token === ${JSON.stringify(beforeTtlToken)};
+      })()`));
+    await evalJs('document.querySelector("#invite-regenerate").click()');
+    await waitFor('document.querySelector("#modal")?.hidden === false');
+    await evalJs('document.querySelector("#modal-confirm").click()');
     check('E1 重新生成：选中 2 小时后新令牌，选择保持（ttlMs 透传生效）',
       await waitFor(`(() => {
         const select = document.querySelector('#invite-ttl');
@@ -1208,7 +1234,7 @@ async function main() {
         return Boolean(line) && /忆云 1/.test(line.textContent)
           && /sha256:[0-9a-f]{12}/.test(line.textContent)
           && !/本忆云/.test(line.textContent)
-          && /让对方扫码/.test(body);
+          && /扫码加入/.test(body);
       })()`));
     await capture('e2a2-after-invite-cloud-line.jpg');
     await capture('e1-after-invite-single-screen.jpg');
@@ -1597,8 +1623,10 @@ async function main() {
         await waitFor('(() => { const b = document.querySelector("#banner"); return Boolean(b) && b.hidden === false && document.querySelector(".stage-wrap")?.classList.contains("has-banner"); })()'));
       check('E2-A2 窄屏：两枚入口折叠为图标（等宽）+ 忆云徽章可见 + 无横向溢出',
         await waitFor(`(() => {
-          const labels = [...document.querySelectorAll('.topbar-actions .btn-label')];
-          const buttons = [...document.querySelectorAll('.topbar-actions .btn')];
+          // P3：READY 下 #create-cloud 隐藏，只检查可见入口（设置/加入/邀请）
+          const buttons = [...document.querySelectorAll('.topbar-actions .btn')].filter((el) => !el.hidden);
+          const labels = [...document.querySelectorAll('.topbar-actions .btn-label')]
+            .filter((el) => !el.closest('.btn')?.hidden);
           return labels.length >= 3 && labels.every((el) => getComputedStyle(el).display === 'none')
             && buttons.every((el) => Math.abs(el.getBoundingClientRect().width - 34) <= 2)
             && document.querySelector('#cloud-badge')?.hidden === false
@@ -1636,32 +1664,295 @@ async function main() {
       pageErrors.length === 0,
       pageErrors.slice(0, 2).map((event) => event.params?.exceptionDetails?.exception?.description ?? event.params?.entry?.text ?? event.method).join(' | '),
     );
-    // ---------- F-ONB-2：引导态「建新 → 待重启」UX（前台进程无法自动重启） ----------
+    // ---------- P3：锁定主控制台 → 新建/加入同页解锁（无 reload / 无 restart） ----------
     {
       const onboardHome = await mkdtemp(join(tmpdir(), 'mebular-ui-onboard-'));
       const onboardPort = await freePort();
       const onboardHandle = spawnServe(onboardHome, onboardPort);
+      const joinHome = await mkdtemp(join(tmpdir(), 'mebular-ui-join-'));
+      const joinPort = await freePort();
+      let joinHandle = null;
       try {
         const obReady = await waitReady(onboardHandle);
         const obBase = `http://127.0.0.1:${obReady.port}`;
         await send('Page.navigate', { url: `${obBase}/console/` });
-        check('F-ONB-2 UI 引导页呈现（建新/加入两入口）',
-          await waitFor('Boolean(document.querySelector("#provision")) && !document.querySelector("#provision").hidden && Boolean(document.querySelector("#provision-create"))'));
-        await evalJs('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
-        check('轮 C 引导态不响应 Esc（必须先建新/加入）',
-          await evalJs('document.querySelector("#provision")?.hidden === false'));
-        await evalJs('document.querySelector("#provision-create").click()');
-        check('F-ONB-2 UI ① 前台建新 → 呈现手动重启命令（不得出现「正在自动重启」）',
-          await waitFor('(() => { const panel = document.querySelector("#provision-restart"); const cmd = document.querySelector("#provision-restart-command")?.textContent ?? ""; const all = document.querySelector("#provision")?.textContent ?? ""; return Boolean(panel) && panel.hidden === false && /mebular serve/.test(cmd) && !/正在自动重启/.test(all); })()'));
-        await evalJs('document.querySelector("#provision-create").click()');
-        check('F-ONB-2 UI ② 重复建新 → 显示「已完成 + 重启指引」（非裸错误）',
-          await waitFor('(() => { const t = document.querySelector("#provision")?.textContent ?? ""; return /已完成/.test(t) && /mebular serve/.test(t) && !/失败：/.test(t); })()'));
+
+        // —— 锁定态：主控制台 + 星图 + 导航/卡片禁用 + toast ——
+        check('P3 锁定态：主控制台可见（不再用 #provision 遮罩整个 app）', await waitFor(`(() => {
+          const app = document.querySelector('#app');
+          return Boolean(app) && app.hidden === false && app.dataset.locked === 'true'
+            && document.body.classList.contains('is-locked')
+            && !document.querySelector('#provision');
+        })()`));
+        check('P6A 锁定态：星图保留背景，并渲染 ghost 本机地球仪', await waitFor(`(() => {
+          const c = document.querySelector('#stage');
+          if (!c || c.width <= 0 || c.height <= 0 || c.dataset.scene !== 'locked-ghost') return false;
+          const ctx = c.getContext('2d');
+          const size = Math.max(40, Math.min(100, Math.floor(c.width * 0.16)));
+          const x = Math.floor(c.width / 2 - size / 2);
+          const y = Math.floor(c.height / 2 - size / 2);
+          const data = ctx.getImageData(x, y, size, size).data;
+          let green = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            if (data[i + 3] > 8 && data[i + 1] > data[i] && data[i + 1] > 60) green += 1;
+          }
+          return green > 20;
+        })()`, 6000));
+        check('P3 顶栏：新建忆云替换邀请设备；加入忆云始终显示', await evalJs(`(() => {
+          const create = document.querySelector('#create-cloud');
+          const invite = document.querySelector('#invite-device');
+          const join = document.querySelector('#join-cloud');
+          return Boolean(create) && create.hidden === false && /新建忆云/.test(create.textContent)
+            && Boolean(invite) && invite.hidden === true
+            && Boolean(join) && join.hidden === false && /加入忆云/.test(join.textContent);
+        })()`));
+        check('P3 锁定导航：共享/记忆/审计 aria-disabled + 星图可用', await evalJs(`(() => {
+          const buttons = [...document.querySelectorAll('#view-nav .view-btn')];
+          const map = buttons.find((b) => b.dataset.view === 'map');
+          const others = buttons.filter((b) => b.dataset.view !== 'map');
+          return others.every((b) => b.getAttribute('aria-disabled') === 'true' && b.classList.contains('is-locked'))
+            && map.getAttribute('aria-disabled') === null;
+        })()`));
+        check('P6A 锁定态：设备卡/侧栏整卡退场（不展示占位卡）', await evalJs(`(() => {
+          const aside = document.querySelector('.aside');
+          const card = document.querySelector('#device-card');
+          if (!aside || !card) return false;
+          const rect = card.getBoundingClientRect();
+          return aside.hidden === true && getComputedStyle(aside).display === 'none'
+            && rect.width === 0 && rect.height === 0;
+        })()`));
+        check('P3 锁定态不请求 admin 数据面（overview/devices/settings 等 409 接口）', await evalJs(`(() => {
+          const names = performance.getEntriesByType('resource').map((e) => e.name);
+          return !names.some((n) => /\\/admin\\/api\\/(overview|devices|policy|namespaces|settings|config|memories|service|security|clouds)/.test(n));
+        })()`));
+        check('P3 锁定状态条只显示「未初始化」真值', await evalJs(`(() => {
+          const online = document.querySelector('#online-badge')?.textContent ?? '';
+          const mem = document.querySelector('#memory-badge')?.textContent ?? '';
+          return /未初始化/.test(online) && /记忆 —/.test(mem) && document.querySelector('#status-pill')?.hidden === true;
+        })()`));
+
+        // 设置 = 锁定态排错入口（不白屏）
+        await evalJs('document.querySelector("#open-settings").click()');
+        check('P3 锁定设置：不白屏，给出锁定说明 + 两个入口 + 诊断信息', await waitFor(`(() => {
+          const body = document.querySelector('#settings-body');
+          return /忆云尚未初始化/.test(body?.textContent ?? '')
+            && Boolean(body.querySelector('[data-locked-action="create"]'))
+            && Boolean(body.querySelector('[data-locked-action="join"]'))
+            && /诊断信息/.test(body.textContent);
+        })()`));
+        await evalJs('document.querySelector("#settings-close").click()');
+
+        // 禁用导航 → toast（不切视图）
+        await evalJs('document.querySelector("#view-nav [data-view=domains]").click()');
+        check('P3 点击禁用导航 → toast「请先新建或加入忆云」且不切视图', await waitFor(`(() => {
+          const banner = document.querySelector('#banner');
+          return document.querySelector('#domains-view')?.hidden === true
+            && /请先新建或加入忆云/.test(banner?.textContent ?? '');
+        })()`));
+        // 星图 ghost 地球仪 → toast
+        await evalJs(`(() => {
+          const c = document.querySelector('#stage');
+          const r = c.getBoundingClientRect();
+          c.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
+        })()`);
+        check('P6A 点击 ghost 本机地球仪 → toast「请先新建或加入忆云」', await waitFor('/请先新建或加入忆云/.test(document.querySelector("#banner")?.textContent ?? "")'));
+
+        // 引导遮罩：非阻塞、指向两个入口、不盖按钮；ESC 关闭；再次打开自动淡出
+        check('P3 引导遮罩：无 current 时出现且指向两个入口（不盖顶栏按钮）', await waitFor(`(() => {
+          const coach = document.querySelector('#onboarding-coach');
+          if (!coach || coach.hidden || !coach.classList.contains('is-visible')) return false;
+          const bar = document.querySelector('.topbar').getBoundingClientRect();
+          const create = document.querySelector('#create-cloud').getBoundingClientRect();
+          const join = document.querySelector('#join-cloud').getBoundingClientRect();
+          const c = coach.getBoundingClientRect();
+          return /新建忆云/.test(coach.textContent) && /加入忆云/.test(coach.textContent)
+            && c.top >= Math.max(bar.bottom, create.bottom, join.bottom)
+            && coach.getAttribute('aria-live') === 'polite';
+        })()`));
+        await capture('p3-locked-console.jpg');
+        await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+        await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+        check('P3 引导遮罩：ESC 可提前关闭', await waitFor('document.querySelector("#onboarding-coach")?.hidden === true', 3000));
+        await capture('p6a-locked-ghost.jpg');
+        await send('Page.navigate', { url: `${obBase}/console/?coach=auto` });
+        check('P3 引导遮罩：再次打开 App 会显示（每次打开一次）',
+          await waitFor('document.querySelector("#onboarding-coach")?.hidden === false'));
+        check('P3 引导遮罩：数秒自动淡出（不阻塞）',
+          await waitFor('document.querySelector("#onboarding-coach")?.hidden === true', 9000));
+
+        // 窄屏：锁定壳与引导卡可用、无横向溢出
+        await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+        await send('Page.navigate', { url: `${obBase}/console/?locked=narrow` });
+        await waitFor('document.querySelector("#app")?.dataset.locked === "true"');
+        check('P3 窄屏：锁定壳无横向溢出 + 新建/加入入口可用 + 设备卡退场', await evalJs(`(() => {
+          const create = document.querySelector('#create-cloud');
+          const join = document.querySelector('#join-cloud');
+          return document.documentElement.scrollWidth <= window.innerWidth + 1
+            && Boolean(create) && create.hidden === false && create.getBoundingClientRect().width > 0
+            && Boolean(join) && join.hidden === false
+            && document.querySelector('.aside')?.hidden === true;
+        })()`));
+        check('P3 窄屏：引导卡在视口内且不盖顶栏按钮', await waitFor(`(() => {
+          const coach = document.querySelector('#onboarding-coach');
+          if (!coach || coach.hidden || !coach.classList.contains('is-visible')) return false;
+          const r = coach.getBoundingClientRect();
+          const bar = document.querySelector('.topbar').getBoundingClientRect();
+          return r.left >= 0 && r.right <= window.innerWidth + 1 && r.top >= bar.bottom;
+        })()`));
+        await send('Emulation.clearDeviceMetricsOverride');
         await send('Page.navigate', { url: `${obBase}/console/` });
-        check('F-ONB-2 UI ③ 刷新 → 进入待重启态（命令 + 隐藏入口）',
-          await waitFor('(() => { const panel = document.querySelector("#provision-restart"); const cmd = document.querySelector("#provision-restart-command")?.textContent ?? ""; const choices = document.querySelector("#provision-choices"); return Boolean(panel) && panel.hidden === false && /mebular serve/.test(cmd) && Boolean(choices) && choices.hidden === true; })()'));
+        await waitFor('document.querySelector("#app")?.dataset.locked === "true"');
+
+        // —— 新建：默认名/设备名 → API 校验失败内联 → 成功同页解锁 ——
+        await evalJs('window.__p3PageToken = "create-same-page"');
+        const navsBeforeCreate = cdp.events.filter((event) => event.method === 'Page.frameNavigated').length;
+        await evalJs('document.querySelector("#create-cloud").click()');
+        check('P3 新建弹框：忆云名 + 设备名（默认 忆云 N / hostname；复用 modal-center/head/x）', await waitFor(`(() => {
+          const modal = document.querySelector('#onboard-create');
+          const cloud = document.querySelector('#onboard-create-cloud');
+          const device = document.querySelector('#onboard-create-device');
+          return Boolean(modal) && modal.hidden === false && modal.classList.contains('modal-center')
+            && Boolean(modal.querySelector('.modal-head')) && Boolean(modal.querySelector('.modal-x'))
+            && /^忆云 \\d+$/.test(cloud?.value ?? '') && (device?.value ?? '').length > 0;
+        })()`));
+        await evalJs(`(() => {
+          const input = document.querySelector('#onboard-create-cloud');
+          input.value = 'bad/name';
+          input.dispatchEvent(new Event('input', { bubbles: true }));
+          document.querySelector('#onboard-create-submit').click();
+        })()`);
+        check('P3 新建名称校验走 P1 API：失败内联错误且保持锁定', await waitFor(`(() => {
+          const err = document.querySelector('#onboard-create-error');
+          return Boolean(err) && err.hidden === false && /不能包含/.test(err.textContent)
+            && document.body.classList.contains('is-locked')
+            && document.querySelector('#onboard-create')?.hidden === false;
+        })()`, 20000));
+        await evalJs(`(() => {
+          const cloud = document.querySelector('#onboard-create-cloud');
+          cloud.value = 'P3 测试忆云';
+          cloud.dispatchEvent(new Event('input', { bubbles: true }));
+          const device = document.querySelector('#onboard-create-device');
+          device.value = 'p3-create-device';
+          device.dispatchEvent(new Event('input', { bubbles: true }));
+          document.querySelector('#onboard-create-submit').click();
+        })()`);
+        check('P3 新建成功 → 同页解锁（无 reload / 无 restart / 遮罩消失）', await waitFor(`(() => {
+          const app = document.querySelector('#app');
+          return Boolean(app) && app.dataset.locked === undefined
+            && document.body.classList.contains('is-locked') === false
+            && document.querySelector('#onboard-create').hidden === true
+            && document.querySelector('#onboarding-coach').hidden === true
+            && document.querySelector('#invite-device').hidden === false
+            && document.querySelector('#create-cloud').hidden === true
+            && document.querySelectorAll('#view-nav .view-btn[aria-disabled="true"]').length === 0
+            && window.__p3PageToken === 'create-same-page';
+        })()`, 30000));
+        check('P3 解锁后：记忆徽标/状态条取真实数据，设备卡恢复可交互', await waitFor(`(() => {
+          const mem = document.querySelector('#memory-badge')?.textContent ?? '';
+          return /记忆 \\d+/.test(mem)
+            && document.querySelector('#status-pill')?.hidden === false
+            && document.querySelector('#device-card')?.getAttribute('aria-disabled') === null;
+        })()`, 20000));
+        check('P6A READY 后：ghost 地球仪消失、星图恢复正常场景、设备卡归位', await waitFor(`(() => {
+          const stage = document.querySelector('#stage');
+          const aside = document.querySelector('.aside');
+          const card = document.querySelector('#device-card');
+          if (!stage || !aside || !card) return false;
+          const rect = aside.getBoundingClientRect();
+          return stage.dataset.scene === 'ready'
+            && stage.getAttribute('aria-label') === '对端关系星图（本机视角）'
+            && aside.hidden === false && getComputedStyle(aside).display !== 'none'
+            && rect.width > 0;
+        })()`, 20000));
+        const navsAfterCreate = cdp.events.filter((event) => event.method === 'Page.frameNavigated').length;
+        check('P3 无 reload 证据：页面实例/导航次数不变（create）', navsAfterCreate === navsBeforeCreate,
+          `navigations=${navsBeforeCreate}→${navsAfterCreate}`);
+        const stAfter = await (await fetch(`${obBase}/app/provision/status`)).status;
+        const ovAfter = await fetch(`${obBase}/admin/api/overview`);
+        check('P3 create 同进程/同端口：引导接口消失 + admin 200 + 进程存活',
+          stAfter === 404 && ovAfter.status === 200 && onboardHandle.proc.exitCode === null,
+          `status=${stAfter} overview=${ovAfter.status}`);
+        await capture('p3-unlocked-console.jpg');
+        await capture('p6a-ready-console.jpg');
+
+        // —— 加入：用 create 实例邀请 → 新空 home 同页解锁 ——
+        const joinToken = await evalJs(`(async () => {
+          const m = document.cookie.match(/(?:^|; )mebular_csrf=([^;]*)/);
+          const csrf = m ? decodeURIComponent(m[1]) : '';
+          const res = await fetch('/admin/api/invite', { method: 'POST', headers: { 'content-type': 'application/json', 'x-mebular-csrf': csrf }, body: JSON.stringify({ ttlMs: 120000 }) });
+          const data = await res.json().catch(() => null);
+          return data?.token ?? null;
+        })()`);
+        check('P3 准备加入令牌（create 实例邀请）', typeof joinToken === 'string' && joinToken.length > 40);
+
+        joinHandle = spawnServe(joinHome, joinPort);
+        const jr = await waitReady(joinHandle);
+        const jBase = `http://127.0.0.1:${jr.port}`;
+        await send('Page.navigate', { url: `${jBase}/console/` });
+        check('P3 加入侧锁定态就位', await waitFor('document.querySelector("#app")?.dataset.locked === "true"'));
+        await evalJs('document.querySelector("#join-cloud").click()');
+        check('P3 加入弹框：设备名 + token（复用 modal-center/head/x）', await waitFor(`(() => {
+          const modal = document.querySelector('#onboard-join');
+          const device = document.querySelector('#onboard-join-device');
+          return Boolean(modal) && modal.hidden === false && modal.classList.contains('modal-center')
+            && Boolean(modal.querySelector('.modal-head')) && Boolean(modal.querySelector('.modal-x'))
+            && Boolean(document.querySelector('#onboard-join-token'))
+            && (device?.value ?? '').length > 0;
+        })()`));
+        // 坏令牌：保持锁定 + 内联错误
+        await evalJs(`(() => {
+          const token = document.querySelector('#onboard-join-token');
+          token.value = 'not-a-valid-token';
+          token.dispatchEvent(new Event('input', { bubbles: true }));
+          document.querySelector('#onboard-join-submit').click();
+        })()`);
+        check('P3 加入失败保持锁定（坏令牌内联错误，不跳转/不刷新）', await waitFor(`(() => {
+          const err = document.querySelector('#onboard-join-error');
+          return Boolean(err) && err.hidden === false && /失败/.test(err.textContent)
+            && document.body.classList.contains('is-locked')
+            && document.querySelector('#onboard-join')?.hidden === false;
+        })()`, 20000));
+        await evalJs('window.__p3JoinPageToken = "join-same-page"');
+        const navsBeforeJoin = cdp.events.filter((event) => event.method === 'Page.frameNavigated').length;
+        await evalJs(`(() => {
+          const token = document.querySelector('#onboard-join-token');
+          token.value = ${JSON.stringify(joinToken)};
+          token.dispatchEvent(new Event('input', { bubbles: true }));
+          const device = document.querySelector('#onboard-join-device');
+          device.value = 'p3-join-device';
+          device.dispatchEvent(new Event('input', { bubbles: true }));
+          document.querySelector('#onboard-join-submit').click();
+        })()`);
+        check('P3 加入成功 → 同页解锁（无 reload / 无 restart）', await waitFor(`(() => {
+          const app = document.querySelector('#app');
+          return Boolean(app) && app.dataset.locked === undefined
+            && document.body.classList.contains('is-locked') === false
+            && document.querySelector('#onboard-join').hidden === true
+            && document.querySelector('#onboarding-coach').hidden === true
+            && document.querySelector('#invite-device').hidden === false
+            && document.querySelector('#create-cloud').hidden === true
+            && window.__p3JoinPageToken === 'join-same-page';
+        })()`, 60000));
+        const navsAfterJoin = cdp.events.filter((event) => event.method === 'Page.frameNavigated').length;
+        check('P3 无 reload 证据：页面实例/导航次数不变（join）', navsAfterJoin === navsBeforeJoin,
+          `navigations=${navsBeforeJoin}→${navsAfterJoin}`);
+        const jst = await (await fetch(`${jBase}/app/provision/status`)).status;
+        const jov = await fetch(`${jBase}/admin/api/overview`);
+        check('P3 join 同进程/同端口：引导接口消失 + admin 200 + 进程存活',
+          jst === 404 && jov.status === 200 && joinHandle.proc.exitCode === null,
+          `status=${jst} overview=${jov.status}`);
+        await send('Page.navigate', { url: `${jBase}/console/` });
+        check('P3 解锁后刷新 → 直接进入正常控制台（引导接口已消失）', await waitFor(`(() => {
+          const app = document.querySelector('#app');
+          return Boolean(app) && app.dataset.locked === undefined
+            && document.querySelector('#invite-device').hidden === false
+            && document.querySelector('#create-cloud').hidden === true;
+        })()`));
       } finally {
         try { onboardHandle.proc.kill('SIGKILL'); } catch { /* 已退出 */ }
+        try { joinHandle?.proc.kill('SIGKILL'); } catch { /* 已退出 */ }
         await rm(onboardHome, { recursive: true, force: true }).catch(() => undefined);
+        await rm(joinHome, { recursive: true, force: true }).catch(() => undefined);
       }
     }
   } catch (error) {

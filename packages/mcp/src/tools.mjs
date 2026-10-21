@@ -9,6 +9,7 @@
 import { z } from 'zod';
 import { json, fail } from './tool-envelope.mjs';
 import { TASK_TOOL_SPECS, TASK_TOOL_SCOPES } from './task-tools.mjs';
+import { NOT_INITIALIZED_CODE, NOT_INITIALIZED_MESSAGE } from './service-facade.mjs';
 
 export { TASK_TOOL_SPECS } from './task-tools.mjs';
 
@@ -370,13 +371,23 @@ export function toolByName(name) {
   return ALL_TOOL_SPECS.find((t) => t.name === name) ?? null;
 }
 
-/** 把工具注册到 McpServer；service 为 MemoryService 实例 */
-export function registerTools(server, service) {
+/**
+ * 把工具注册到 McpServer；service 为 MemoryService 实例（或 UNINITIALIZED 时的惰性代理）。
+ *
+ * `isReady` 是所有工具（含不访问 service 的任务 / 闲聊 / board 工具）的统一就绪门槛：
+ * 未就绪时直接返回稳定的 NOT_INITIALIZED 业务错误，绝不让任何 handler 触碰实际 task/memory 数据。
+ */
+export function registerTools(server, service, { isReady } = {}) {
   for (const spec of ALL_TOOL_SPECS) {
     server.registerTool(
       spec.name,
       { title: spec.title, description: spec.description, inputSchema: spec.inputSchema },
-      (args) => spec.handler(service, args),
+      (args) => {
+        if (typeof isReady === 'function' && !isReady()) {
+          return fail(NOT_INITIALIZED_MESSAGE, NOT_INITIALIZED_CODE);
+        }
+        return spec.handler(service, args);
+      },
     );
   }
 }

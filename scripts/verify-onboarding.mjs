@@ -1,7 +1,7 @@
 // verify:onboarding —— GUI 首次上手（引导态 + 建新 + 加入），全程不碰 CLI。
 //
 //   O1 引导态：空家目录 serve → PROVISION_READY；**不自举 root**（无 user-master-key.json）；
-//      admin API 409 provision_required；/console 首屏含「建新 / 加入」两入口；/app/provision/status 可用
+//      admin API 409 provision_required；/mcp 可 initialize（tools/call 待初始化）；/console 首屏含「建新 / 加入」两入口；/app/provision/status 可用
 //   O2 建新：POST /app/provision/create → root 主密钥 + config（joinService 开 / mcp 回环）→ 自动重启
 //      → 正常态（/admin/api/overview 200、邀请面板可用）；重复调 → 409
 //   O3 加入：inviter 签发令牌 → 新空 home POST /app/provision/join → 委派身份（**无主私钥**）+ hints
@@ -176,8 +176,41 @@ async function main() {
   const adminWhileProvision = await getJson(portA, '/admin/api/overview');
   check('O1 引导态下 admin API → 409 provision_required',
     adminWhileProvision.status === 409 && adminWhileProvision.json?.error === 'provision_required', `status=${adminWhileProvision.status}`);
-  const mcpWhileProvision = await getJson(portA, '/mcp');
-  check('O1 引导态下 /mcp → 409 provision_required', mcpWhileProvision.status === 409, `status=${mcpWhileProvision.status}`);
+  const mcpInitRes = await fetch(`http://127.0.0.1:${portA}/mcp`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-06-18',
+        capabilities: {},
+        clientInfo: { name: 'verify-onboarding', version: '1.0.0' },
+      },
+    }),
+  }).catch(() => null);
+  const mcpInit = mcpInitRes ? await mcpInitRes.json().catch(() => null) : null;
+  const mcpSessionId = mcpInitRes?.headers.get('mcp-session-id') ?? '';
+  const mcpCallRes = mcpSessionId
+    ? await fetch(`http://127.0.0.1:${portA}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'mcp-session-id': mcpSessionId,
+        'mcp-protocol-version': String(mcpInit?.result?.protocolVersion ?? '2025-06-18'),
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'memory_status', arguments: {} } }),
+    }).catch(() => null)
+    : null;
+  const mcpCall = mcpCallRes ? await mcpCallRes.json().catch(() => null) : null;
+  check('O1 引导态下 /mcp 可 initialize（不再 409）',
+    mcpInitRes?.status === 200 && mcpInit?.result?.serverInfo?.name === 'mebular',
+    `status=${mcpInitRes?.status ?? 0}`);
+  check('O1 引导态下 tools/call → 200 + NOT_INITIALIZED 业务错误（无 409/500）',
+    mcpCallRes?.status === 200 && mcpCall?.result?.structuredContent?.error?.code === 'NOT_INITIALIZED',
+    `status=${mcpCallRes?.status ?? 0} code=${mcpCall?.result?.structuredContent?.error?.code ?? ''}`);
   const statusA = await getJson(portA, '/app/provision/status');
   check('O1 /app/provision/status 可用（含默认设备名 / 家目录 / 引导提示）',
     statusA.status === 200 && statusA.json?.provision === true && typeof statusA.json?.defaultDeviceName === 'string' && /建新|加入/.test(String(statusA.json?.note)),

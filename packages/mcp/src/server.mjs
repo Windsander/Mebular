@@ -25,9 +25,9 @@ const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
 5. 隐私：不要写入密钥、口令、完整身份证件等高敏感信息。
 6. 无结果别编：召回为空就如实说明，不要臆造记忆。`;
 
-export function buildServer(service) {
+export function buildServer(service, options = {}) {
   const server = new McpServer({ name: 'mebular', version: '0.1.0' });
-  registerTools(server, service);
+  registerTools(server, service, options);
   server.registerPrompt(
     'memory_policy',
     {

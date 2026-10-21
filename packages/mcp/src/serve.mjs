@@ -17,6 +17,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { TOOL_ALL_SCOPES } from './tools.mjs';
 import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 import { configPath } from './config.mjs';
+import { createServiceFacade } from './service-facade.mjs';
 
 // ---------- 控制台配置写入（schema 驱动：editable 可写 / status-only 只读 / internal 默认不可写） ----------
 // 单一真源：packages/mcp/src/config-schema.mjs。写入策略（原子写 + .bak 备份；全部需重启生效）：
@@ -874,10 +875,15 @@ export async function startHttpServer({
 
   // W3：**多会话** transport（每个 `mcp-session-id` 一条；CLI 每次调用可各自 initialize）。
   // 无 session 头的请求（如 CLI initialize）新建会话；会话经 `onsessioninitialized` 登记，关闭时回收。
+  //
+  // P2：UNINITIALIZED 也允许 /mcp 完成 initialize / list；server 先持有惰性 service 代理，
+  // 热初始化后同一会话内的 tools/call 直接转发到真实 MemoryService（不重连、不重新 initialize）。
+  const runtimeReady = () => phase === 'READY' && Boolean(service);
+  const serviceFacade = createServiceFacade({ getService: () => service, isReady: runtimeReady });
   const mcpSessions = new Map(); // sessionId → { transport, server }
   async function transportFor(sessionId) {
     if (sessionId) return mcpSessions.get(sessionId)?.transport ?? null;
-    const server = buildServer(service);
+    const server = buildServer(serviceFacade, { isReady: runtimeReady });
     const entry = { transport: null, server };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
@@ -920,6 +926,28 @@ export async function startHttpServer({
       return { ok: false, status: 403, message: `insufficient scope: need ${need}`, challenge: `Bearer error="insufficient_scope", scope="${need}"`, tokenId: grant.tokenId };
     }
     return { ok: true, tokenId: grant.tokenId, scopes: grant.scopes };
+  }
+
+  /**
+   * /mcp：UNINITIALIZED 与 READY 共用同一条路径（loopback + 现有 auth 语义）。
+   * 未初始化时由 service facade + registerTools 的 readiness guard 返回业务错误，
+   * 传输层本身仍正常完成 initialize / tools/list / prompts/list。
+   */
+  async function handleMcp(req, res, body) {
+    const check = await authenticate(req, body);
+    if (!check.ok) {
+      res.statusCode = check.status;
+      if (check.challenge) res.setHeader('www-authenticate', check.challenge);
+      return sendJson(res, check.status, { jsonrpc: '2.0', error: { code: -32001, message: check.message }, id: null });
+    }
+    const sessionId = req.headers['mcp-session-id'];
+    const transport = await transportFor(typeof sessionId === 'string' ? sessionId : undefined);
+    if (!transport) {
+      return sendJson(res, 404, { jsonrpc: '2.0', error: { code: -32001, message: 'unknown session' }, id: null });
+    }
+    const webRequest = toWebRequest(req, body, origin);
+    const response = await transport.handleRequest(webRequest);
+    return writeWebResponse(res, response);
   }
 
   // ---------- 控制台路由（D1 只读 + 写端点 CSRF/scope 门） ----------
@@ -1007,7 +1035,8 @@ export async function startHttpServer({
   async function handleAdminRead(req, res, path, url) {
     const builder = READ_ROUTES[path];
     if (!builder) return false;
-    if (!app || !service) {
+    // P2：助手列表只读本机配置，UNINITIALIZED 也开放；其余 admin 读数据面仍需 READY。
+    if ((!app || !service) && path !== '/admin/api/clients') {
       return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
     }
     const check = await authenticate(req, Buffer.alloc(0), 'memory.read');
@@ -1171,6 +1200,10 @@ export async function startHttpServer({
     /^\/admin\/api\/assistants\/([^/]+)$/,
     /^\/admin\/api\/assistants\/([^/]+)\/remove$/,
   ];
+
+  // P2：UNINITIALIZED 仅开放本机助手配置所需的读写动作（列表 / 预览 / 接入 / 验证 / 重探）。
+  // 不暴露 memory/network/admin 数据面；写端点仍走 handleAdminWrite 的 Origin + CSRF + scope 门。
+  const UNINITIALIZED_CLIENT_ACTION = /^\/admin\/api\/clients\/([^/]+)\/(connect|preview|verify|recheck)$/;
 
   function parseJsonBody(body) {
     try {
@@ -1635,9 +1668,52 @@ export async function startHttpServer({
     };
   }
 
+  // P2：UNINITIALIZED 的助手动作——只读写本机助手配置，不触碰 app/service 数据面。
+  // 返回 false 表示不是受支持的助手动作（调用方继续按原 503 处理）。
+  async function handleUninitializedClientAction(req, res, path, _body) {
+    const match = path.match(UNINITIALIZED_CLIENT_ACTION);
+    if (!match) return false;
+    const { connectClient, previewClient, listAssistantsAsync, assistantUserHome, daemonMcpUrl } = await import('./clients.mjs');
+    const id = decodeURIComponent(match[1]);
+    const action = match[2];
+    const mcpUrl = daemonMcpUrl({ host: req.headers?.host, encrypted: Boolean(req.socket?.encrypted) });
+    const opts = { home, cwd: process.cwd(), mcpUrl };
+    try {
+      if (action === 'preview') {
+        return sendJson(res, 200, previewClient(id, opts));
+      }
+      if (action === 'verify') {
+        // 未初始化不是「连接失败」：返回稳定的待初始化结果，让 UI 保留配置并等待 READY。
+        return sendJson(res, 200, {
+          ok: false,
+          state: 'pending-initialization',
+          needsManual: false,
+          pendingInitialization: true,
+          reason: 'not_initialized',
+          message: '待初始化：请先新建或加入忆云，再验证连接',
+          steps: [],
+        });
+      }
+      if (action === 'recheck') {
+        const out = await listAssistantsAsync({ ...opts, userHome: assistantUserHome(), refresh: true });
+        const client = out.assistants.find((entry) => entry.id === id) ?? null;
+        if (!client) return sendJson(res, 404, { ok: false, error: 'unknown_client', id });
+        return sendJson(res, 200, { ok: true, client, cached: false, pendingInitialization: true });
+      }
+      const result = await connectClient(id, opts);
+      return sendJson(res, result.ok ? 200 : 422, result);
+    } catch (error) {
+      return sendJson(res, 500, { ok: false, error: 'client_action_failed', message: String(error?.message ?? error) });
+    }
+  }
+
   // D2 写端点实现（memory.admin scope + CSRF 已在 handleAdminWrite 校验）
   async function applyAdminWrite(req, res, path, body) {
     if (!app || !service) {
+      if (phase !== 'READY') {
+        const handled = await handleUninitializedClientAction(req, res, path, body);
+        if (handled !== false) return handled;
+      }
       return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
     }
 
@@ -2865,6 +2941,20 @@ export async function startHttpServer({
           const addr = server?.address();
           return typeof addr === 'object' && addr !== null ? addr.port : port;
         })();
+        if (path === '/mcp') {
+          // P2：UNINITIALIZED 也允许 MCP 握手/列表；tools/call 由统一 readiness guard 返回业务错误。
+          return handleMcp(req, res, body);
+        }
+        if (path === '/admin/api/clients' && req.method === 'GET') {
+          // P2：引导态只开放本机助手列表（不读 memory/network/admin 数据面）。
+          return handleAdminRead(req, res, path, url);
+        }
+        if (UNINITIALIZED_CLIENT_ACTION.test(path)) {
+          // P2：connect 只写本机助手配置；preview/verify/recheck 不触碰 app/service。
+          // Origin + CSRF + 现有 auth scope 仍在 handleAdminWrite 内校验。
+          const done = await handleAdminWrite(req, res, path, body);
+          if (done !== false) return done;
+        }
         if (path === '/app/provision/status' && req.method === 'GET') {
           return sendJson(res, 200, provisionStatus({
             home,
@@ -3130,20 +3220,7 @@ export async function startHttpServer({
         return sendJson(res, 404, { ok: false, error: 'not_found', path });
       }
       if (path === '/mcp') {
-        const check = await authenticate(req, body);
-        if (!check.ok) {
-          res.statusCode = check.status;
-          if (check.challenge) res.setHeader('www-authenticate', check.challenge);
-          return sendJson(res, check.status, { jsonrpc: '2.0', error: { code: -32001, message: check.message }, id: null });
-        }
-        const sessionId = req.headers['mcp-session-id'];
-        const transport = await transportFor(typeof sessionId === 'string' ? sessionId : undefined);
-        if (!transport) {
-          return sendJson(res, 404, { jsonrpc: '2.0', error: { code: -32001, message: 'unknown session' }, id: null });
-        }
-        const webRequest = toWebRequest(req, body, origin);
-        const response = await transport.handleRequest(webRequest);
-        return writeWebResponse(res, response);
+        return handleMcp(req, res, body);
       }
       return sendJson(res, 404, { error: 'not_found', path });
     } catch (error) {

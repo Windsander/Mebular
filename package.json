@@ -117,7 +117,7 @@
     "verify:invite": "node scripts/verify-invite.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.3.1",
     "bonjour": "^3.5.1",
     "qrcode-generator": "2.0.4",
     "ulid": "^2.3.0",
@@ -146,7 +146,7 @@
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "^2.3.1",
-    "@modelcontextprotocol/server": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.3.1",
     "@types/jest": "^29.5.12",
     "@types/node": "^20.11.24",
     "@typescript-eslint/eslint-plugin": "^7.0.2",

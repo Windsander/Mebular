@@ -543,8 +543,9 @@ async function main() {
       console.log('  · [诊断] 行状态:', await evalJs('document.querySelector("#settings-panel-assistants [data-asst-row=opencode]")?.textContent ?? "（无行）"').catch((e) => String(e)));
       console.log('  · [诊断] 页面异常:', await evalJs('JSON.stringify(window.__pageErrors ?? [])').catch((e) => String(e)));
     }
-    check('验证未过 = 黄态一行 + 「重新验证」+ 输出内联（无嵌套折叠）',
-      await waitFor('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); if (!v || !/验证未过/.test(v.textContent)) return false; if (!v.querySelector("[data-asst-output]")) return false; if (v.querySelector("details")) return false; const row = document.querySelector("#settings-panel-assistants [data-asst-row=opencode]"); return Boolean(row) && /重新验证/.test(row.textContent); })()', 20000));
+    const verifyFailedOk = await waitFor('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); if (!v || !/验证未过/.test(v.textContent)) return false; if (!v.querySelector("[data-asst-output]")) return false; if (v.querySelector("details")) return false; const row = document.querySelector("#settings-panel-assistants [data-asst-row=opencode]"); return Boolean(row) && /重新验证/.test(row.textContent); })()', 20000);
+    check('验证未过 = 黄态一行 + 「重新验证」+ 输出内联（无嵌套折叠）', verifyFailedOk,
+      verifyFailedOk ? '' : await evalJs('(() => { const v = document.querySelector("#settings-panel-assistants [data-asst-verify=opencode]"); const row = document.querySelector("#settings-panel-assistants [data-asst-row=opencode]"); return JSON.stringify({ verify: v?.textContent?.slice(0, 240) ?? null, row: row?.textContent?.slice(0, 240) ?? null, state: window.__mebularDebug?.clientVerify?.["opencode"] ?? null }); })()').catch((e) => String(e)));
     check('manual（generic 粘片段）行永不出现自动写「接入」',
       await evalJs('(() => { const row = document.querySelector("#settings-panel-assistants [data-asst-row=generic]"); const xp = document.querySelector("#settings-panel-assistants [data-asst-xp=generic]"); if (!row || !/查看片段/.test(row.textContent)) return false; return !row.querySelector("[data-cli-action=connect]") && !(xp && xp.querySelector("[data-cli-action=connect]")); })()'));
 

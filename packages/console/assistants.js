@@ -67,9 +67,11 @@ function verifyBlockHtml(client, verify) {
   const rows = steps.map((s) => {
     const icon = s.ok ? '✓' : '✗';
     const cls = s.ok ? 'ok' : 'todo';
+    // 验证失败但命令没有 stdout/stderr 时也要给出一行可诊断原因：
+    // 否则界面只有“未通过（rc=…）”，用户看不到为什么，验收也无法确认输出区存在。
     const out = typeof s.output === 'string' && s.output.trim().length > 0
       ? `<pre class="connect-diff asst-output" data-asst-output>${esc(s.output)}</pre>`
-      : '';
+      : (!s.ok ? `<pre class="connect-diff asst-output" data-asst-output>（验证命令没有返回输出；${esc(s.detail ?? '未通过')}）</pre>` : '');
     return `<p class="asst-line ${cls}">${icon} ${esc(s.label ?? s.name ?? '')}：${esc(s.detail ?? '')}</p>${out}`;
   }).join('');
   let stateLine = '';

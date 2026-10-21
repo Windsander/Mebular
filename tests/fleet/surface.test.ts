@@ -11,7 +11,9 @@ import {
   toolCliTable,
   onboardDevice,
 } from '../../packages/fleet/src/index.js';
-import { execFileSync, spawnSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { Client } from '@modelcontextprotocol/client';
+import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 // jest 以仓库根为 cwd
 const MCP_BIN = join(process.cwd(), 'packages', 'mcp', 'bin', 'mebular.mjs');
@@ -126,30 +128,28 @@ describe('W1 工具面（CLI/MCP 同一 handler）', () => {
     }
   });
 
-  it('统一 MCP 入口（mebular mcp）：27 工具 + 任务 handler 同源 + 结构化错误信封', async () => {
+  it('统一 MCP 入口（mebular mcp）：29 工具 + 任务 handler 同源 + 结构化错误信封', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'mebular-unified-mcp-'));
+    let client: Client | null = null;
     try {
       // 守护 home（config.json + user-master-key.json）——记忆面与任务面都可服务
       // 不设 MEBULAR_DEVICE_ID：init 与后续 mcp 用同一派生 deviceId（避免身份文件与 config 不一致）
       const env = { ...process.env, MEBULAR_HOME: dir, MEBULAR_USER_HOME: dir, MEBULAR_STORAGE_PATH: join(dir, 'store.jsonl') };
       execFileSync(process.execPath, [MCP_BIN, 'init'], { env, encoding: 'utf-8' });
-      // SDK 不保证响应顺序：按 JSON-RPC id 取响应（CI 上曾因顺序不同而误判）
-      const rpc = (messages: unknown[]): Map<number, Record<string, unknown>> => {
-        const input = messages.map((m) => JSON.stringify(m)).join('\n') + '\n';
-        const out = spawnSync(process.execPath, [MCP_BIN, 'mcp'], { env, input, encoding: 'utf-8', timeout: 30000 });
-        const byId = new Map<number, Record<string, unknown>>();
-        for (const line of out.stdout.trim().split('\n')) {
-          if (!line) continue;
-          const parsed = JSON.parse(line) as { id?: number };
-          if (typeof parsed.id === 'number') byId.set(parsed.id, parsed as Record<string, unknown>);
-        }
-        return byId;
-      };
-      const resultOf = (byId: Map<number, Record<string, unknown>>, id: number): Record<string, unknown> =>
-        ((byId.get(id) as { result?: Record<string, unknown> })?.result ?? {});
 
-      const listed = rpc([{ jsonrpc: '2.0', id: 2, method: 'tools/list' }]);
-      const names = ((resultOf(listed, 2).tools as Array<{ name: string }>) ?? []).map((t) => t.name);
+      // 真实 MCP client：connect() 完成 initialize → initialized 握手；之后按顺序 list/call。
+      // SDK 2.3.1 只处理初始化后的调用，不能再用 raw stdio 一次灌入 tools/call。
+      client = new Client({ name: 'mebular-surface-test', version: '0.1.0' });
+      const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: [MCP_BIN, 'mcp'],
+        env,
+        stderr: 'pipe',
+      });
+      await client.connect(transport);
+
+      const { tools } = await client.listTools();
+      const names = tools.map((t) => t.name);
       expect(names).toHaveLength(29);
       expect(names).toContain('memory_status');
       expect(names).toContain('memory_delete');
@@ -157,29 +157,30 @@ describe('W1 工具面（CLI/MCP 同一 handler）', () => {
       expect(names).toContain('task_submit');
       expect(names).toContain('task_status');
 
-      const called = rpc([
-        { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'task_quota', arguments: {} } },
-        { jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'memory_status', arguments: {} } },
-        { jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'task_submit', arguments: { to: { device: 'device-B', agent: 'echo' } } } },
-        { jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'board_create', arguments: { name: 'board-x' } } },
-      ]);
       // 任务 handler 与 fleet 同源：task_quota 在守护 home 上可读
-      const quota = resultOf(called, 3).structuredContent as { ok?: boolean; device?: string } | undefined;
+      const quota = (await client.callTool({ name: 'task_quota', arguments: {} })).structuredContent as { ok?: boolean; device?: string } | undefined;
       expect(quota?.ok).toBe(true);
       expect(typeof quota?.device).toBe('string');
-      const memory = resultOf(called, 4).structuredContent as { deviceId?: string } | undefined;
+      const memory = (await client.callTool({ name: 'memory_status', arguments: {} })).structuredContent as { deviceId?: string } | undefined;
       expect(typeof memory?.deviceId).toBe('string');
       // R3.3：错误信封（缺必填 intent → E_INPUT）
-      const bad = resultOf(called, 5) as { isError?: boolean; structuredContent?: { ok?: boolean; error?: { code?: string; message?: string } } };
+      const bad = (await client.callTool({ name: 'task_submit', arguments: { to: { device: 'device-B', agent: 'echo' } } })) as {
+        isError?: boolean;
+        structuredContent?: { ok?: boolean; error?: { code?: string; message?: string } };
+      };
       expect(bad.isError).toBe(true);
       expect(bad.structuredContent?.ok).toBe(false);
       expect(bad.structuredContent?.error?.code).toBe('E_INPUT');
       // 评审 M1：board_create 在**守护 home**（仅 config.json）上不再 ENOENT（onboard 辅助走 loadToolConfig）
-      const board = resultOf(called, 6) as { isError?: boolean; structuredContent?: { ok?: boolean; namespace?: string } };
+      const board = (await client.callTool({ name: 'board_create', arguments: { name: 'board-x' } })) as {
+        isError?: boolean;
+        structuredContent?: { ok?: boolean; namespace?: string };
+      };
       expect(board.isError).toBeUndefined();
       expect(board.structuredContent?.ok).toBe(true);
       expect(board.structuredContent?.namespace).toBe('board-x');
     } finally {
+      await client?.close().catch(() => undefined);
       await rm(dir, { recursive: true, force: true });
     }
   });

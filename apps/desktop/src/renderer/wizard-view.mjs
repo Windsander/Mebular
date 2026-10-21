@@ -74,7 +74,7 @@ function startStepView(step, { healthy, registered, assistantsDone = false }) {
     detailText = registered === true
       ? '守护运行中（常驻已装 · 开机自启）。'
       : registered === false
-        ? '守护运行中。当前是临时运行——关机/退出后不会自动拉起，想开机自启可让 Mebular 常驻。'
+        ? '守护运行中（App 托管）：退出 App 后停止；想开机自启可让 Mebular 常驻。'
         : '守护运行中。（常驻状态读取中或不可用）';
   } else {
     // 设计稿（01-setup）① 正文
@@ -91,7 +91,7 @@ function startStepView(step, { healthy, registered, assistantsDone = false }) {
   return {
     detailText,
     flow,
-    serviceBadge: step.done && registered === false ? '临时运行' : null,
+    serviceBadge: step.done && registered === false ? 'App 托管' : null,
     doneLine: step.done
       ? { main: '✓ 已就绪', sub: registered === true ? '常驻已装 · 开机自启' : '这台机器已在跑你的 Mebular' }
       : null,

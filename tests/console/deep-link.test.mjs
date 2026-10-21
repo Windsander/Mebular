@@ -104,6 +104,18 @@ describe('E2-A2 忆云入口与卡片（静态契约）', () => {
     expect(consoleJs).toContain('window.mebularDesktop?.cloudSwitch');
   });
 
+  it('加入忆云标题与邀请一致：无「一次性令牌」tag；warning 一行短文案（归档保留）', () => {
+    for (const id of ['cloud-join-title', 'onboard-join-title']) {
+      const heading = indexHtml.match(new RegExp(`<h2 id="${id}">[\\s\\S]*?</h2>`))?.[0] ?? '';
+      expect(heading).toContain('加入忆云');
+      expect(heading).not.toContain('crt-tag');
+      expect(heading.match(/一次性令牌/g)).toBeNull();
+    }
+    expect(consoleJs).toContain('加入后切换到新忆云；当前忆云「${current}」归档保留。');
+    expect(consoleJs).toContain('加入后仍需按提示切换；当前忆云「${current}」归档保留。');
+    expect(consoleJs).not.toContain('⚠ 加入后本机会切换到新忆云');
+  });
+
   it('忆云卡：当前不可切换 / 仅当前可改名 / 归档提示切换后改 / 无删除入口', () => {
     expect(consoleJs).toContain('settings-cloud-card');
     expect(consoleJs).toContain('const renameUi = current');

@@ -136,7 +136,7 @@ describe('W-1/UX-2 ③ 当前段高亮 / done 段收编（视图契约）', () =
     expect(wizardHtml).toMatch(/\.flow li\[data-state="active"\] > i[^}]*box-shadow/);
   });
 
-  it('done 段按钮收编（用户定稿去运维化）：常驻/重启/仅启动退出向导——入口归托盘与设置；保留临时运行徽章', () => {
+  it('done 段按钮收编（用户定稿去运维化）：常驻/重启/仅启动退出向导——入口归托盘与设置；保留 App 托管徽章', () => {
     const running = wizardView(computeWizardState({
       daemonHealthy: true,
       service: { registered: false, running: true },
@@ -145,7 +145,11 @@ describe('W-1/UX-2 ③ 当前段高亮 / done 段收编（视图契约）', () =
     expect(start.actions.install).toBeUndefined();
     expect(start.actions.restart).toBeUndefined();
     expect(start.actions.startOnly).toBeUndefined();
-    expect(start.serviceBadge).toBe('临时运行');
+    expect(start.serviceBadge).toBe('App 托管');
+    expect(start.detailText).toContain('退出 App 后停止');
+    expect(start.detailText).toContain('想开机自启可让 Mebular 常驻');
+    expect(wizardHtml).toMatch(/id="start-service-badge"[^>]*>App 托管<\/span>/);
+    expect(wizardHtml).not.toContain('>临时运行</span>');
     const registered = wizardView(computeWizardState({
       daemonHealthy: true,
       service: { registered: true, running: true },
@@ -363,18 +367,21 @@ describe('F1 向导流水不导航：daemon:start / daemon:restart 处理器去�
 });
 
 describe('F2 常驻语义：三态 registered（徽章/文案；安装入口已退出向导——归托盘/设置）+ 幂等', () => {
-  it('registered=null（probe 失败/未知）→ 无「临时运行」徽章、文案中性；向导不再提供安装动作', () => {
+  it('registered=null（probe 失败/未知）→ 无「App 托管」徽章、文案中性；向导不再提供安装动作', () => {
     const unknown = wizardView(computeWizardState({ daemonHealthy: true, service: { available: false } }));
     const start = unknown.steps.find((s) => s.id === 'start');
     expect(start.actions.install).toBeUndefined();
     expect(start.serviceBadge).toBeNull();
-    expect(start.detailText).not.toContain('临时运行——');
+    expect(start.detailText).not.toContain('App 托管');
+    expect(start.detailText).toContain('常驻状态读取中或不可用');
   });
 
-  it('registered=false → 临时运行徽章（安装入口归托盘/设置）；registered=true → 常驻已装', () => {
+  it('registered=false → App 托管徽章（安装入口归托盘/设置）；registered=true → 常驻已装', () => {
     const unreg = wizardView(computeWizardState({ daemonHealthy: true, service: { registered: false, running: true } }));
-    expect(unreg.steps.find((s) => s.id === 'start').serviceBadge).toBe('临时运行');
-    expect(unreg.steps.find((s) => s.id === 'start').actions.install).toBeUndefined();
+    const unregStart = unreg.steps.find((s) => s.id === 'start');
+    expect(unregStart.serviceBadge).toBe('App 托管');
+    expect(unregStart.detailText).toBe('守护运行中（App 托管）：退出 App 后停止；想开机自启可让 Mebular 常驻。');
+    expect(unregStart.actions.install).toBeUndefined();
     const reg = wizardView(computeWizardState({ daemonHealthy: true, service: { registered: true, running: true } }));
     expect(reg.steps.find((s) => s.id === 'start').serviceBadge).toBeNull();
     expect(reg.steps.find((s) => s.id === 'start').detailText).toContain('常驻已装');

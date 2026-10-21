@@ -384,7 +384,7 @@ async function main() {
           && large.every((id) => !document.querySelector('#' + id)?.classList.contains('modal-center'))
           && boxes.every((box) => box.classList.contains('crt-surface') && box.classList.contains('crt-corners'));
       })()`));
-    check('弹窗宽度：邀请/新建域 520（非 wide）；加入忆云 wide（≤640）',
+    check('弹窗宽度类别：邀请/新建域 非 wide；加入忆云 wide（打开态宽度另测）',
       await evalJs(`(() => {
         const wide = (id) => document.querySelector('#' + id + ' .modal-box')?.classList.contains('modal-box-wide');
         return wide('invite') === false && wide('namespace-new-modal') === false && wide('cloud-join') === true;
@@ -1052,7 +1052,7 @@ async function main() {
         return Boolean(modal) && modal.hidden === false
           && document.querySelector('#cloud-join-name')?.value === '忆云 3'
           && /当前忆云(?:仍是)?「忆云 1」/.test(document.querySelector('#cloud-join-warning')?.textContent ?? '')
-          && /归档保留，不删除/.test(modal.textContent);
+          && /归档保留/.test(modal.textContent);
       })()`);
     if (!joinModalOk) {
       const diag = await evalJs(`(() => {
@@ -1091,6 +1091,7 @@ async function main() {
         tokenFirst: token.getBoundingClientRect().top < name.getBoundingClientRect().top,
         fullWidthFields: Math.abs(token.getBoundingClientRect().width - name.getBoundingClientRect().width) <= 1,
         hasX: Boolean(x) && x.getBoundingClientRect().width > 0,
+        boxWidth: Math.round(box.getBoundingClientRect().width),
         noOverflow: box.scrollWidth <= box.clientWidth + 1
           && document.documentElement.scrollWidth <= window.innerWidth + 1,
       };
@@ -1101,6 +1102,7 @@ async function main() {
         && joinDesktop.noPreviewCopy
         && joinDesktop.inspectHidden
         && joinDesktop.hasX
+        && joinDesktop.boxWidth === 560
         && joinDesktop.tokenFirst
         && joinDesktop.fullWidthFields
         && joinDesktop.labels.length === 2
@@ -1120,6 +1122,28 @@ async function main() {
         && document.querySelector('#cloud-join-error')?.hidden === true
         && document.querySelector('#cloud-join-steps')?.hidden === true;
     })()`));
+    check('加入忆云标题无「一次性令牌」tag：标题/lead 左对齐、X 与标题同排', await evalJs(`(() => {
+      const h2 = document.querySelector('#cloud-join-title');
+      const lead = document.querySelector('#cloud-join .cloud-join-lead');
+      const x = document.querySelector('#cloud-join-x');
+      return Boolean(h2) && !h2.querySelector('.crt-tag') && !/一次性令牌/.test(h2.textContent)
+        && Math.abs(h2.getBoundingClientRect().left - lead.getBoundingClientRect().left) <= 1
+        && x.getBoundingClientRect().top <= h2.getBoundingClientRect().top + 8;
+    })()`));
+    const warningLine = await evalJs(`(() => {
+      const warning = document.querySelector('#cloud-join-warning');
+      const style = warning ? getComputedStyle(warning) : null;
+      return {
+        ok: Boolean(warning)
+          && /加入后(?:切换到新忆云|仍需按提示切换)；当前忆云「忆云 1」归档保留。/.test(warning.textContent)
+          && warning.getBoundingClientRect().height <= 22
+          && style?.whiteSpace !== 'nowrap',
+        text: warning?.textContent ?? '',
+        height: warning?.getBoundingClientRect().height ?? 0,
+        whiteSpace: style?.whiteSpace ?? '',
+      };
+    })()`);
+    check('加入忆云提示（560px 桌面）单行：加入后切换 + 当前忆云归档保留', warningLine.ok, JSON.stringify(warningLine));
     await capture('e2a2-after-cloud-join-modal.jpg');
     await capture('u3-after-dialog-cloud-join.jpg');
     await capture('p8-cloud-join-desktop.jpg');
@@ -1245,6 +1269,9 @@ async function main() {
       await waitFor('document.querySelector("#settings")?.hidden === false && document.querySelector("#settings-panel-assistants")?.hidden === false'));
     await evalJs('document.querySelector("#settings-close").click()');
     // 邀请面板（joinService 未启用 → 就地启用；启用 → 令牌。两者都应有内容）
+    // 延迟邀请请求，让骨架停留足够久以截图（截完立即恢复）。
+    await send('Network.enable');
+    await send('Network.emulateNetworkConditions', { offline: false, latency: 2500, downloadThroughput: -1, uploadThroughput: -1 });
     const inviteOpen = await evalJs(`(() => {
       document.querySelector('#invite-device').click();
       const body = document.querySelector('#invite-body');
@@ -1258,6 +1285,8 @@ async function main() {
     check('邀请首次打开：先出稳定骨架（QR 占位 + 多行占位），不是一行加载提示',
       inviteOpen.skeleton && inviteOpen.lines >= 4 && inviteOpen.height >= 300,
       JSON.stringify(inviteOpen));
+    await capture('p6b-invite-skeleton-desktop.jpg');
+    await send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
     check('邀请面板打开且渲染内容（令牌或未启用提示）', await waitFor('(() => { const b = document.querySelector("#invite-body"); return Boolean(b?.querySelector("[data-copy]")) || /加入服务未启用/.test(b?.textContent ?? ""); })()'));
     const inviteFinalHeight = await evalJs('document.querySelector("#invite .modal-box")?.getBoundingClientRect().height ?? 0');
     check('邀请首次打开：骨架 → 结果高度差 ≤12px（弹框无明显跳动）',
@@ -1303,7 +1332,38 @@ async function main() {
         && Boolean(box) && box.scrollWidth <= box.clientWidth + 1
         && document.documentElement.scrollWidth <= window.innerWidth + 1;
     })()`));
-    const beforeTtlToken = await evalJs('document.querySelector("#invite-body [data-copy]")?.dataset.copy ?? ""');
+    const inviteControls = await evalJs(`(() => {
+      const select = document.querySelector('#invite-ttl');
+      const expiry = document.querySelector('#invite-expiry');
+      const regen = document.querySelector('#invite-regenerate');
+      const box = document.querySelector('#invite .modal-box');
+      if (!select || !expiry || !regen) return { ok: false };
+      const s = select.getBoundingClientRect();
+      const e = expiry.getBoundingClientRect();
+      const r = regen.getBoundingClientRect();
+      const mid = (b) => b.top + b.height / 2;
+      return {
+        ok: Math.abs(mid(s) - mid(e)) <= 2 && Math.abs(mid(s) - mid(r)) <= 3 && e.right <= r.left
+          && Math.round(box?.getBoundingClientRect().width ?? 0) === 560,
+        boxWidth: box?.getBoundingClientRect().width ?? 0,
+        select: [Math.round(s.left), Math.round(s.top), Math.round(s.width)],
+        expiry: [Math.round(e.left), Math.round(e.top), Math.round(e.width)],
+        regen: [Math.round(r.left), Math.round(r.top), Math.round(r.width)],
+      };
+    })()`);
+    check('E1 邀请控件同排：有效期 / 到期时刻 / 重新生成在同一条线上（桌面 560px）', inviteControls.ok, JSON.stringify(inviteControls));
+    const beforeTokenMeta = await evalJs(`(() => ({
+      token: document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '',
+      fingerprint: document.querySelector('#invite-token-fingerprint')?.textContent ?? '',
+      shown: document.querySelector('#invite-body .invite-token-code')?.textContent ?? '',
+      qr: document.querySelector('#invite-body .qr-img')?.src ?? '',
+    }))()`);
+    const beforeTtlToken = beforeTokenMeta.token;
+    check('E1 令牌块可见短指纹：格式「令牌 #8位十六进制」；代码块只显示截断值',
+      /^令牌 #[0-9a-f]{8}$/.test(beforeTokenMeta.fingerprint)
+        && beforeTokenMeta.shown.length < beforeTokenMeta.token.length
+        && beforeTokenMeta.shown.includes('…'),
+      beforeTokenMeta.fingerprint);
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await sleep(150);
     check('E1 邀请 ≤520：两栏上下堆叠（QR 在上、引导/令牌/TTL 在下）', await evalJs(`(() => {
@@ -1369,7 +1429,7 @@ async function main() {
         && regenBusy.ttlDisabled
         && regenBusy.label === '正在更新…' && regenBusy.confirmOpen === false
         && Math.abs(regenBusy.after - regenBusy.before) <= 12,
-      JSON.stringify(regenBusy));
+      `before=${Math.round(regenBusy.before)} after=${Math.round(regenBusy.after)}`);
     check('E1 重新生成：选中 2 小时后新令牌，选择保持（ttlMs 透传生效）',
       await waitFor(`(() => {
         const select = document.querySelector('#invite-ttl');
@@ -1385,6 +1445,9 @@ async function main() {
         busy: body.classList.contains('is-busy'),
         ariaBusy: body.getAttribute('aria-busy'),
         token,
+        fingerprint: document.querySelector('#invite-token-fingerprint')?.textContent ?? '',
+        qr: document.querySelector('#invite-body .qr-img')?.src ?? '',
+        toast: document.querySelector('#banner')?.textContent ?? '',
         expiry: document.querySelector('#invite-expiry')?.textContent ?? '',
         confirmOpen: document.querySelector('#modal')?.hidden === false,
       };
@@ -1394,6 +1457,15 @@ async function main() {
         && Math.abs(regenAfter.height - regenBusy.before) <= 12
         && regenAfter.token.length > 0,
       `before=${Math.round(regenBusy.before)} after=${Math.round(regenAfter.height)}`);
+    check('E1 重新生成后指纹/令牌都变：肉眼可确认旧令牌已失效（token 不同、指纹不同）',
+      /^令牌 #[0-9a-f]{8}$/.test(regenAfter.fingerprint)
+        && regenAfter.fingerprint !== beforeTokenMeta.fingerprint
+        && regenAfter.token !== beforeTtlToken,
+      `${beforeTokenMeta.fingerprint} → ${regenAfter.fingerprint}`);
+    check('E1 重新生成后二维码与 toast 同步：新二维码 +「已重新生成，旧令牌已失效」',
+      Boolean(beforeTokenMeta.qr) && regenAfter.qr !== beforeTokenMeta.qr
+        && /已重新生成，旧令牌已失效/.test(regenAfter.toast),
+      regenAfter.toast);
     const tokenState = await (async () => {
       const { decodeJoinToken, readJoinNonceState } = await import('@mebular/fleet');
       const oldToken = decodeJoinToken(beforeTtlToken);

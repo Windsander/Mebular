@@ -4489,6 +4489,20 @@ function showInviteError(error) {
   }
 }
 
+/**
+ * 令牌短指纹（FNV-1a 32-bit → 8 位十六进制）：只用于人眼核对「是否换了一枚令牌」，
+ * 不是安全摘要，也不回显完整令牌。同一令牌稳定、不同令牌几乎必然不同。
+ */
+function inviteTokenFingerprint(token) {
+  let hash = 2166136261;
+  const text = String(token ?? '');
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
 /** 邀请有效期文案：当前 TTL = 已出令牌 TTL 时显示现令牌到期；改档后显示预估的「重新生成后至」。 */
 function inviteExpiryLabel(ttlMs = state.inviteTtlMs) {
   const current = state.inviteToken;
@@ -4506,6 +4520,8 @@ function showInviteResult(res) {
   $('#invite').hidden = false;
   // 令牌很长：显示截断，复制按钮携带完整值
   const shortToken = res.token.length > 40 ? `${res.token.slice(0, 24)}…${res.token.slice(-8)}` : res.token;
+  // 截断后新旧令牌肉眼几乎一样（nonce 在中间）；短指纹让人一眼确认「已换新」。
+  const tokenFingerprint = inviteTokenFingerprint(res.token);
   // C7：二维码（服务端用 qrcode-generator 渲染 SVG → data-uri；编码失败为 null → 只显示文本）
   const qrMarkup = res.qrSvg
     ? `<img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />`
@@ -4540,7 +4556,10 @@ function showInviteResult(res) {
       <div class="invite-main">
         <p class="invite-lead">扫码加入，或复制令牌发给对方。</p>
         <div class="invite-token-block">
-          <span class="invite-label">一次性令牌</span>
+          <div class="invite-token-head">
+            <span class="invite-label">一次性令牌</span>
+            <span class="invite-fingerprint" id="invite-token-fingerprint" title="令牌指纹：换新令牌后编号会变">令牌 #${tokenFingerprint}</span>
+          </div>
           <code class="invite-token-code">${escapeHtml(shortToken)}</code>
           <button class="btn btn-small btn-primary invite-copy" data-copy="${escapeHtml(res.token)}" title="复制完整令牌">复制令牌</button>
         </div>
@@ -4880,8 +4899,8 @@ function updateCloudJoinWarning() {
   if (!el) return;
   const current = cloudCurrentName();
   el.textContent = hasCloudSwitchBridge()
-    ? `⚠ 加入后本机会切换到新忆云；当前忆云「${current}」将归档保留，不删除。`
-    : `加入后当前忆云仍是「${current}」；按提示执行切换命令后，原忆云归档保留，不删除。`;
+    ? `加入后切换到新忆云；当前忆云「${current}」归档保留。`
+    : `加入后仍需按提示切换；当前忆云「${current}」归档保留。`;
 }
 
 /** 首轮数据晚于弹层打开时，补齐当前忆云名与默认名字（用户已编辑则不改名）。 */

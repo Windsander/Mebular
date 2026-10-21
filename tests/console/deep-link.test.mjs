@@ -53,6 +53,20 @@ describe('R-1 高-3 view 深链映射（initialViewFromSearch）', () => {
     expect(consoleJs).toMatch(/deepLink\.openSettings[\s\S]{0,160}renderSettings\(deepLink\.openSettings\)/);
   });
 
+  it('托盘原地导航：启动深链与固定 IPC 共用 applyConsoleDeepLink（不刷新页面）', () => {
+    expect(consoleJs).toMatch(/async function applyConsoleDeepLink\(/);
+    expect(consoleJs).toMatch(/applyConsoleDeepLink\(deepLink, \{ initial: true \}\)/);
+    expect(consoleJs).toContain('onConsoleNavigate');
+    expect(consoleJs).toMatch(/initialViewFromSearch\(search\)/);
+    // 锁定态邀请沿用锁定壳提示，不直接打 409 数据面；已开时只显示、不重复生成令牌
+    expect(consoleJs).toMatch(/if \(state\.locked\) showLockedToast\(\);[\s\S]{0,120}else if \(\$\('#invite'\)\.hidden\) await openInvite\(\)/);
+    expect(consoleJs).toMatch(/else\s+\$\('#invite'\)\.hidden = false;/);
+    // 向导态 → 首次加载控制台：?view= 落点同样生效（设置开锁定壳，邀请只提示）
+    const lockedFn = consoleJs.match(/async function enterLockedConsole\([\s\S]*?\n\}/)?.[0] ?? '';
+    expect(lockedFn).toContain('applyConsoleDeepLink(initialViewFromSearch(location.search), { initial: true })');
+    expect(consoleJs).not.toContain('window.confirm');
+  });
+
   it('console.js 的全部本地模块 import 都在 serve 静态白名单（CONSOLE_FILES）内', () => {
     const imports = [...consoleJs.matchAll(/from\s*'\.\/([\w-]+\.js)'/g)].map((m) => m[1]);
     expect(imports.length).toBeGreaterThan(0);
@@ -104,7 +118,7 @@ describe('E2-A2 忆云入口与卡片（静态契约）', () => {
 
   it('邀请单屏：忆云名 + 根指纹 + 一句引导', () => {
     expect(consoleJs).toContain('invite-cloud-identity');
-    expect(consoleJs).toContain('让对方扫码，或复制令牌。');
+    expect(consoleJs).toContain('扫码加入，或复制令牌发给对方。');
     expect(consoleJs).not.toContain('本忆云');
   });
 });
@@ -199,8 +213,8 @@ describe('UX-2 设置 · AI 助手专区（单列表，静态契约）', () => {
     expect(assistantsJs).toContain('我们不会替你重启它');
   });
 
-  it('回滚有二次确认（小-11 保持）；详情行内展开（判据/路径/次级动作）', () => {
-    expect(consoleJs).toMatch(/action\s*===\s*'rollback'[\s\S]{0,200}confirm\(/);
+  it('回滚有应用内二次确认（小-11 保持）；详情行内展开（判据/路径/次级动作）', () => {
+    expect(consoleJs).toMatch(/action\s*===\s*'rollback'[\s\S]{0,260}confirmModal\(/);
     expect(assistantsJs).toContain('data-cli-action="details"');
     expect(assistantsJs).toContain('查看改动');
     expect(assistantsJs).toContain('回滚');
@@ -260,7 +274,7 @@ describe('UX-2 邀请单动作页', () => {
     // S3：结果面板从 renderInvite 抽成 showInviteResult（low 直接出；medium/high 门槛通过后复用）
     expect(consoleJs).toMatch(/function showInviteResult\(res\)/);
     expect(consoleJs).toContain('class="invite-layout"');
-    expect(consoleJs).toContain('让对方扫码，或复制令牌。');
+    expect(consoleJs).toContain('扫码加入，或复制令牌发给对方。');
     expect(consoleJs).toContain('一次性 · 仅当面或可信局域网传递。');
     expect(consoleJs).not.toContain('data-settings-fold="invite"');
     expect(consoleJs).not.toContain("foldLabel('invite')");
@@ -268,9 +282,9 @@ describe('UX-2 邀请单动作页', () => {
     expect(consoleJs).not.toContain('fleet join --token');
   });
 
-  it('重新生成有简短二次确认；TTL 选择不自动刷新', () => {
+  it('重新生成走应用内确认（confirmModal）；TTL 选择不自动刷新', () => {
     expect(consoleJs).toContain('id="invite-regenerate"');
-    expect(consoleJs).toMatch(/invite-regenerate[\s\S]{0,260}confirm\(/);
+    expect(consoleJs).toMatch(/invite-regenerate[\s\S]{0,420}confirmModal\(/);
     expect(consoleJs).toContain('id="invite-expiry"');
     expect(consoleJs).not.toContain('改档后点');
   });
@@ -412,9 +426,11 @@ describe('UX-2 收口 ④ ＋新增助手 CRUD 表单与端点接线', () => {
     expect(fn).toContain("verify: { configReadback: true }");
   });
 
-  it('移除需二次确认（window.confirm）', () => {
+  it('移除需应用内二次确认（confirmModal；取消 / Esc / 点空白不执行）', () => {
     const fn = consoleJs.match(/async function assistantRemove[\s\S]*?\n}/)?.[0] ?? '';
-    expect(fn).toContain('window.confirm');
+    expect(fn).toContain('await confirmModal(');
+    expect(fn).toContain('if (!ok) return;');
+    expect(fn).not.toContain('window.confirm');
   });
 });
 

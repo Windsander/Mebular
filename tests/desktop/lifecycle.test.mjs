@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeWizardState, readDesktopState, writeDesktopState } from '../../apps/desktop/src/main/wizard.mjs';
-import { closeAction, quitConfirm, trayMenuModel, LOGIN_ITEM_ID } from '../../apps/desktop/src/main/lifecycle.mjs';
+import { closeAction, quitConfirm, quitDecision, trayMenuModel, LOGIN_ITEM_ID } from '../../apps/desktop/src/main/lifecycle.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -69,6 +69,13 @@ describe('R-1 高-2 关窗生命周期（决策纯函数）', () => {
       const plan = quitConfirm({ daemonMode: mode, hasManagedChild: false });
       expect(plan.message).not.toContain('将停止本机 Mebular 守护');
     }
+  });
+
+  it('退出决策：只有明确确认（true）才 quit；取消 / 关闭 / 无结果都留在 App', () => {
+    expect(quitDecision({ confirmed: true })).toBe('quit');
+    expect(quitDecision({ confirmed: false })).toBe('cancel');
+    expect(quitDecision({})).toBe('cancel');
+    expect(quitDecision()).toBe('cancel');
   });
 });
 
@@ -139,6 +146,43 @@ describe('R-1 高-2 薄壳接线（index.mjs 静态契约）', () => {
     expect(mainSrc).toMatch(/quitting = true;\s*app\.quit\(\)/);
   });
 
+  it('退出确认不用原生 dialog：应用内窗口 + 显式决策（取消不退出，确认才退出）', () => {
+    const fn = mainSrc.match(/async function confirmQuit\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(fn).not.toContain('showMessageBox');
+    expect(fn).toContain('showQuitConfirmation(plan)');
+    expect(fn).toMatch(/quitDecision\(\{ confirmed \}\) !== 'quit'\) return;/);
+    expect(fn.indexOf('quitting = true')).toBeGreaterThan(fn.indexOf("!== 'quit'"));
+  });
+
+  it('退出确认窗口 preload 白名单：只收 plan / 只答 answer（无任意 channel）', () => {
+    const preload = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'preload', 'quit-confirm.cjs'), 'utf-8');
+    expect(preload).toContain("ipcRenderer.on('quit-confirm:plan'");
+    expect(preload).toContain("ipcRenderer.send('quit-confirm:answer'");
+    expect(preload).not.toContain('invoke');
+    expect(preload).not.toMatch(/ipcRenderer\.(on|send)\(\s*channel/);
+    expect(preload).not.toMatch(/ipcRenderer\.(on|send)\([^'"]/);
+  });
+
+  it('退出确认窗口复用 quitConfirm 文案/按钮；关闭窗口 = 取消；校验 sender', () => {
+    const fn = mainSrc.match(/function showQuitConfirmation\(plan\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(fn).toContain('event.sender !== dialogWin.webContents');
+    expect(fn).toContain('message: plan.message');
+    expect(fn).toContain('buttons: plan.buttons');
+    expect(fn).toContain("dialogWin.once('closed', () => finish(false))");
+    expect(fn).toContain("'quit-confirm:plan'");
+  });
+
+  it('退出确认窗口 HTML/JS：暗色对话框、取消/退出、Esc/关闭 = 取消', () => {
+    const html = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'renderer', 'quit-confirm.html'), 'utf-8');
+    const js = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'renderer', 'quit-confirm.js'), 'utf-8');
+    expect(html).toContain('role="dialog"');
+    expect(html).toContain('id="q-cancel"');
+    expect(html).toContain('id="q-confirm"');
+    expect(html).toContain("script-src 'self'");
+    expect(js).toMatch(/event\.key !== 'Escape'[\s\S]{0,120}answer\(false\)/);
+    expect(js).toContain('answer(true)');
+  });
+
   it('停止后窗口内横幅「守护已停止（托盘可重启）」', () => {
     expect(mainSrc).toContain('守护已停止（托盘可重启）');
   });
@@ -148,9 +192,11 @@ describe('R-1 高-2 薄壳接线（index.mjs 静态契约）', () => {
     expect(mainSrc).toMatch(/setLoginItemSettings\(\{ openAtLogin/);
   });
 
-  it('S3：托盘等级只读（probeSecurityLevel）+ 点击打开控制台安全卡', () => {
+  it('S3：托盘等级只读（probeSecurityLevel）+ 点击原地打开控制台安全卡', () => {
+    const navSrc = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'main', 'console-nav.mjs'), 'utf-8');
     expect(mainSrc).toMatch(/probeSecurityLevel\(/);
-    expect(mainSrc).toMatch(/view=settings&focus=security/);
+    expect(mainSrc).toContain("navigateConsole('security')");
+    expect(navSrc).toMatch(/focus: 'security'/);
     expect(mainSrc).toMatch(/securityLevel/);
   });
 });

@@ -341,8 +341,8 @@ describe('F1 向导流水不导航：daemon:start / daemon:restart 处理器去�
     const confirmRestartFn = indexMjs.match(/async function confirmRestart\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
     expect(confirmRestartFn).toContain('await restart()');
     expect(confirmRestartFn).toContain('showConsoleWithRetry');
-    // 导航仍只经显式通道：console:open 处理器在
-    expect(indexMjs).toMatch(/'console:open':\s*async \(\) => \{[^}]*safeLoad/);
+    // 导航仍只经显式通道：console:open 走原地导航（console 已加载不 loadURL）
+    expect(indexMjs).toMatch(/'console:open':\s*async \(\) => \{[^}]*navigateConsole\('map'\)/);
   });
 
   it('P4：流水结束自动打开控制台一次（不再等待初始设置）；无 write/recover/restart', () => {

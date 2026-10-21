@@ -1753,6 +1753,7 @@ try {
         && inviteSrc.includes('二维码不可用')
         && inviteSrc.includes('data-copy=')
         && inviteSrc.includes('invite-cloud-identity')
+        && inviteSrc.includes('扫码加入，或复制令牌发给对方。')
         && inviteSrc.includes('一次性 · 仅当面或可信局域网传递。'),
       '无 details / endpointEditor / 命令；首屏令牌+QR+忆云行');
     check('E1 邀请 TTL：档位精确（5/15/20 分钟、2/6/12/24 小时），默认 15 分钟；改档不自动刷新',
@@ -1764,12 +1765,14 @@ try {
         && /#invite-ttl[\s\S]{0,240}#invite-regenerate/.test(consoleSrc2)
         && /body\.querySelector\('#invite-ttl'\)[\s\S]{0,240}state\.inviteTtlMs = value/.test(consoleSrc2),
       `ttl=${JSON.stringify(ttlIds)} default=${inviteIa.INVITE_TTL_DEFAULT_MS}`);
-    check('E1 重新生成：简短二次确认后把选中 ttlMs 传给 POST /admin/api/invite',
-      /confirm\('重新生成后旧令牌立即失效。确定？'\)\)\s*void openInvite\(state\.inviteTtlMs\)/.test(consoleSrc2)
+    check('E1 重新生成：应用内确认后把选中 ttlMs 传给 POST /admin/api/invite',
+      /await confirmModal\(\{[\s\S]{0,220}title: '重新生成令牌？'/.test(consoleSrc2)
+        && /if \(!ok\) return;\s*\n\s*void openInvite\(state\.inviteTtlMs\)/.test(consoleSrc2)
+        && !consoleSrc2.includes('window.confirm')
         && /async function renderInvite\(ttlMs = state\.inviteTtlMs\)[\s\S]{0,260}body: \{ ttlMs \}/.test(consoleSrc2)
         && /body: \{ code, ttlMs: selectedTtl \}/.test(consoleSrc2)
         && /body: \{ approvalId, namespace: inviteNamespace\(\), ttlMs: selectedTtl \}/.test(consoleSrc2),
-      'low/medium/high 三条生成路径均带 ttlMs');
+      'low/medium/high 三条生成路径均带 ttlMs；无原生 confirm');
     const inviteDialogSrc = htmlSrc.slice(htmlSrc.indexOf('<div id="invite"'), htmlSrc.indexOf('<div id="cloud-join"'));
     check('E1 邀请关闭：右上角 X（复用 modal-x），无底部「关闭」按钮',
       /id="invite-close"[^>]*class="modal-x"/.test(inviteDialogSrc)
@@ -1889,7 +1892,7 @@ try {
       { status: inviteRes.status, qr: String(inviteJson?.qrSvg ?? '').startsWith('<svg') ? 'svg' : 'missing' });
     const consoleSrc6 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     check('C7 控制台邀请面板渲染二维码 + TTL/重新生成（无详情/订阅说明）',
-      ['让对方扫码', 'qrSvg', 'id="invite-ttl"', 'id="invite-regenerate"'].every((token) => consoleSrc6.includes(token))
+      ['扫码加入', 'qrSvg', 'id="invite-ttl"', 'id="invite-regenerate"'].every((token) => consoleSrc6.includes(token))
         && !consoleSrc6.includes('fold-invite'));
     const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
     const fleetPkg = JSON.parse(await readFile(join(rootDir, 'packages', 'fleet', 'package.json'), 'utf-8'));

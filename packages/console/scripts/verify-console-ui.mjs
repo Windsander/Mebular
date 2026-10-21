@@ -577,8 +577,10 @@ async function main() {
     await evalJs('(() => { document.querySelector("#asst-add-name").value = "UI 测试助手改"; document.querySelector("#asst-add-submit").click(); })()');
     check('保存修改后列表即时更新（PUT 生效）',
       await waitFor('(() => { const r = document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]"); return Boolean(r) && /UI 测试助手改/.test(r.textContent); })()', 30000));
-    await evalJs('window.confirm = () => true'); // 移除的二次确认桩住（headless 无对话框）
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-remove=ui-test-asst]"); if (b) b.click(); })()');
+    check('移除走应用内确认（#modal，非原生 confirm）',
+      await waitFor('(() => { const m = document.querySelector("#modal"); return Boolean(m) && m.hidden === false && /移除自定义助手/.test(document.querySelector("#modal-title")?.textContent ?? ""); })()'));
+    await evalJs('document.querySelector("#modal-confirm").click()');
     check('移除后行消失（POST remove 生效）',
       await waitFor('!document.querySelector("#settings-panel-assistants [data-asst-row=ui-test-asst]")', 30000));
 
@@ -597,9 +599,11 @@ async function main() {
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-row=ui-broken-asst] [data-cli-action=connect]"); if (b) b.click(); })()');
     check('接入失败 →「接入失败」+ 一行原因（配置不是合法 JSON）+「重试」，不显示「待生效」',
       await waitFor('(() => { const r = document.querySelector("#settings-panel-assistants [data-asst-row=ui-broken-asst]"); const xp = document.querySelector("#settings-panel-assistants [data-asst-xp=ui-broken-asst]"); if (!r || !/接入失败/.test(r.textContent)) return false; if (/待生效/.test(r.textContent)) return false; return Boolean(xp) && /配置不是合法 JSON|无法解析/.test(xp.textContent) && /重试/.test(r.textContent); })()', 30000));
-    // 清理：展开详情移除（confirm 已桩住）
+    // 清理：展开详情移除（应用内确认）
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-cli-action=details][data-cli-id=ui-broken-asst]"); if (b) b.click(); })()');
     await evalJs('(() => { const b = document.querySelector("#settings-panel-assistants [data-asst-remove=ui-broken-asst]"); if (b) b.click(); })()');
+    await waitFor('document.querySelector("#modal")?.hidden === false');
+    await evalJs('document.querySelector("#modal-confirm").click()');
     check('失败用料移除（场地清理）',
       await waitFor('!document.querySelector("#settings-panel-assistants [data-asst-row=ui-broken-asst]")', 30000));
     await evalJs('document.querySelector("#settings-close").click()');
@@ -1145,6 +1149,7 @@ async function main() {
     await evalJs('document.querySelector("#invite-device").click()');
     check('邀请面板打开且渲染内容（令牌或未启用提示）', await waitFor('(() => { const b = document.querySelector("#invite-body"); return Boolean(b?.querySelector("[data-copy]")) || /加入服务未启用/.test(b?.textContent ?? ""); })()'));
     await capture('u3-after-dialog-invite.jpg');
+    await capture('p6b-invite-desktop.jpg');
     check('E1 邀请单屏：令牌 + 二维码/降级 + 忆云身份 + TTL；无详情/端点编辑/CLI 命令', await evalJs(`(() => {
       const body = document.querySelector('#invite-body');
       if (!body) return false;
@@ -1158,7 +1163,7 @@ async function main() {
         && !/join 端点|默认记忆域|订阅/.test(body.textContent)
         && !/对方已用过|新设备|当前令牌有效至|改档后点|令牌即入网权限|扫码即通|本忆云/.test(body.textContent)
         && tokenBlock && qr && /忆云 1/.test(body.textContent) && /根指纹/.test(body.textContent)
-        && /让对方扫码，或复制令牌。/.test(body.textContent)
+        && /扫码加入，或复制令牌发给对方。/.test(body.textContent)
         && /一次性 · 仅当面或可信局域网传递。/.test(body.textContent)
         && /至 \\d{2}:\\d{2}/.test(body.textContent)
         && Boolean(body.querySelector('.invite-layout .invite-qr'))
@@ -1177,14 +1182,34 @@ async function main() {
       if (!qr || !main) return false;
       return main.getBoundingClientRect().top >= qr.getBoundingClientRect().bottom - 1;
     })()`));
+    check('E1 邀请 ≤520：弹框与页面无横向溢出', await evalJs(`(() => {
+      const box = document.querySelector('#invite .modal-box');
+      return Boolean(box) && box.scrollWidth <= box.clientWidth + 1
+        && document.documentElement.scrollWidth <= window.innerWidth + 1;
+    })()`));
+    await capture('p6b-invite-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await send('Emulation.clearDeviceMetricsOverride');
     await evalJs(`(() => {
       const select = document.querySelector('#invite-ttl');
       select.value = '7200000';
       select.dispatchEvent(new Event('change', { bubbles: true }));
-      window.confirm = () => true;
       document.querySelector('#invite-regenerate').click();
     })()`);
+    check('E1 重新生成走应用内确认（#modal，非原生 confirm）',
+      await waitFor(`(() => {
+        const modal = document.querySelector('#modal');
+        const body = document.querySelector('#modal-body')?.textContent ?? '';
+        return Boolean(modal) && modal.hidden === false && /旧令牌/.test(body) && /无法再兑换/.test(body);
+      })()`));
+    await evalJs('document.querySelector("#modal-cancel").click()');
+    check('E1 取消重新生成：确认弹框关闭、旧令牌不变（取消不执行）',
+      await waitFor(`(() => {
+        const token = document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '';
+        return document.querySelector('#modal')?.hidden === true && token === ${JSON.stringify(beforeTtlToken)};
+      })()`));
+    await evalJs('document.querySelector("#invite-regenerate").click()');
+    await waitFor('document.querySelector("#modal")?.hidden === false');
+    await evalJs('document.querySelector("#modal-confirm").click()');
     check('E1 重新生成：选中 2 小时后新令牌，选择保持（ttlMs 透传生效）',
       await waitFor(`(() => {
         const select = document.querySelector('#invite-ttl');
@@ -1208,7 +1233,7 @@ async function main() {
         return Boolean(line) && /忆云 1/.test(line.textContent)
           && /sha256:[0-9a-f]{12}/.test(line.textContent)
           && !/本忆云/.test(line.textContent)
-          && /让对方扫码/.test(body);
+          && /扫码加入/.test(body);
       })()`));
     await capture('e2a2-after-invite-cloud-line.jpg');
     await capture('e1-after-invite-single-screen.jpg');

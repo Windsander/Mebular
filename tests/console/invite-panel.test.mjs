@@ -151,7 +151,26 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     expect(consoleJs).not.toContain('改档后点');
   });
 
-  it('首次打开先渲染稳定骨架（QR 占位 + 多行占位），不显示一行「正在生成令牌」小框', () => {
+  it('令牌块带可见短指纹：同令牌稳定、换令牌必变；不只靠截断区分新旧', () => {
+    const start = consoleJs.indexOf('function inviteTokenFingerprint');
+    const end = start >= 0 ? consoleJs.indexOf('\n}', start) : -1;
+    const source = start >= 0 && end > start ? consoleJs.slice(start, end + 2) : '';
+    expect(source.length).toBeGreaterThan(0);
+    const fingerprintOf = new Function(`${source}\nreturn inviteTokenFingerprint;`)();
+    const first = 'mebular-join.v1.aaaabbbbccccddddeeeeffff00001111';
+    const second = 'mebular-join.v1.aaaabbbbccccddddeeeeffff22223333';
+    expect(fingerprintOf(first)).toMatch(/^[0-9a-f]{8}$/);
+    expect(fingerprintOf(first)).toBe(fingerprintOf(first));
+    expect(fingerprintOf(first)).not.toBe(fingerprintOf(second));
+
+    const panel = invitePanelSource();
+    expect(panel).toContain('id="invite-token-fingerprint"');
+    expect(panel).toContain('令牌 #${tokenFingerprint}');
+    expect(panel).toContain('const tokenFingerprint = inviteTokenFingerprint(res.token)');
+    expect(panel).toContain('escapeHtml(shortToken)');
+  });
+
+  it('邀请首次打开先渲染稳定骨架（QR 占位 + 多行占位），不显示一行「正在生成令牌」小框', () => {
     const start = consoleJs.indexOf('function inviteSkeletonHtml');
     const end = consoleJs.indexOf('async function openInvite', start);
     const skeleton = start >= 0 && end > start ? consoleJs.slice(start, end) : '';
@@ -163,8 +182,18 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     expect(skeleton).toContain('换新令牌后旧的立即失效');
     expect(consoleJs).toMatch(/body\.innerHTML = inviteSkeletonHtml\(\)/);
     const css = readFileSync(join(root, 'packages', 'console', 'console.css'), 'utf-8');
-    expect(css).toMatch(/#invite \.modal-box \{[^}]*min-height: min\(390px, calc\(100vh - 48px\)\)/);
+    // 高度由内容决定：不再用固定 min-height 撑底部空白；稳定性由 live 对话高度差 ≤12px 断言
+    expect(css).not.toMatch(/#invite \.modal-box \{[^}]*min-height/);
     expect(css).toMatch(/\.invite-skeleton-qr \{[^}]*width: 156px[^}]*height: 156px/);
+  });
+
+  it('有效期 / 到期时刻 / 重新生成同排 flex：空间不足才换行，重新生成靠右且为次级动作', () => {
+    const css = readFileSync(join(root, 'packages', 'console', 'console.css'), 'utf-8');
+    expect(css).toMatch(/\.invite-controls \{[^}]*display: flex;[^}]*flex-wrap: wrap;[^}]*gap: 8px 10px/);
+    expect(css).toMatch(/\.invite-controls #invite-regenerate \{ margin-left: auto; \}/);
+    expect(css).not.toMatch(/\.invite-controls #invite-regenerate \{[^}]*grid-column/);
+    expect(css).not.toMatch(/\.invite-expiry \{[^}]*grid-column/);
+    expect(css).toMatch(/\.invite-fingerprint \{[^}]*white-space: nowrap/);
   });
 
   it('守护生成令牌时激活 nonce（撤销旧 active）；回环提示指向高级设置而非面板编辑', () => {

@@ -13,6 +13,7 @@ import {
   APP_VERSION, consoleUrl, ensureDaemon, resolveCliBin, resolveHome, resolveHttp,
   serviceEnabledFor, stopManaged, waitForDaemonDetail, parseArgs, probeHealthDetail, probeProvision,
   probeRuntimeIdentity, probeSecurityLevel, serviceDescriptorFor, homeKey, isPortOpen,
+  reconcileManagedState, isManagedChildAlive,
 } from './daemon.mjs';
 import {
   loadCloudModules, migrateLegacyService, performCloudSwitch, recoverSwitchIntent,
@@ -23,7 +24,7 @@ import {
   computeWizardState, deepLinks, inviteText, inviteViaApi, isLoopbackUrl,
   readDesktopState, writeDesktopState, clientsViaApi, clientActionViaApi, installDecision,
 } from './wizard.mjs';
-import { closeAction, quitConfirm, quitDecision, stopConfirm, trayMenuModel, LOGIN_ITEM_ID } from './lifecycle.mjs';
+import { closeAction, quitConfirm, quitDecision, stopConfirm, trayMenuModel, trayStatusLine, LOGIN_ITEM_ID } from './lifecycle.mjs';
 import { consoleNavSearch, consoleNavUrl, isConsoleUrl } from './console-nav.mjs';
 import { readDaemonLogs } from './logs.mjs';
 
@@ -50,6 +51,12 @@ let cloudId = null;
 let cloudName = null;
 let cloudUnavailable = null;
 let startupDiagnostic = null;
+// 异步健康探测的世代号：显式改变托管状态（退出/停止/重启/切换）后，旧探测结果直接丢弃。
+let trayStateEpoch = 0;
+
+function markTrayStateChanged() {
+  trayStateEpoch += 1;
+}
 
 function readConfig() {
   try {
@@ -146,16 +153,38 @@ async function ensure() {
     spawnFn: (exec, args, opts) => spawnChild(exec, args, opts),
   });
   if (result.mode === 'conflict') {
+    markTrayStateChanged();
     healthy = false;
     securityLevel = null;
     updateTray();
     console.log(`[desktop] 守护未启动（${result.reason}）：${result.message}`);
     return result;
   }
-  daemonMode = result.mode;
-  daemonChild = result.child ?? null;
-  console.log(`[desktop] 守护托管模式：${result.mode}（home=${home}, http=${http.host}:${http.port}）`);
-  return result;
+  // 首启自己 spawn 的 child 在后续 ensure 里会被判成 reused；只要它还活着就保留托管身份，
+  // 不能把控制权改认成外部守护（否则托盘/退出确认/控制台状态互相矛盾）。
+  const managed = reconcileManagedState({
+    resultMode: result.mode,
+    resultChild: result.child ?? null,
+    existingChild: daemonChild,
+  });
+  markTrayStateChanged();
+  daemonMode = managed.mode;
+  daemonChild = managed.child;
+  // reused 代表 ensureDaemon 已用实例身份探测过 /healthz：健康是确定的，可立即同步托盘。
+  if (result.mode === 'reused') healthy = true;
+  else if (result.mode === 'child' || result.mode === 'service') healthy = false;
+  // spawn 后立即退出（CLI 报错等）时 exit 事件可能早于 daemonChild 赋值；这里补一次清理。
+  if (daemonChild && !isManagedChildAlive(daemonChild)) {
+    daemonChild = null;
+    daemonMode = null;
+    healthy = false;
+    securityLevel = null;
+  }
+  const modeNote = managed.mode !== result.mode ? ` → ${managed.mode}（保留 App 托管的 child）` : '';
+  const deadNote = !daemonChild && result.mode === 'child' ? '（child 已退出）' : '';
+  console.log(`[desktop] 守护托管模式：${result.mode}${modeNote}${deadNote}（home=${home}, http=${http.host}:${http.port}）`);
+  updateTray();
+  return { ...result, mode: daemonMode, child: daemonChild };
 }
 
 function spawnChild(exec, args, opts) {
@@ -169,7 +198,17 @@ function spawnChild(exec, args, opts) {
     // 落盘失败不阻断；退回管道
   }
   const child = spawn(exec, args, { ...opts, stdio });
-  child.on('exit', (code) => console.log(`[desktop] 子进程托管守护退出（code=${code}）—— 详情见 ${join(childHome, 'serve.log')}`));
+  child.on('exit', (code) => {
+    console.log(`[desktop] 子进程托管守护退出（code=${code}）—— 详情见 ${join(childHome, 'serve.log')}`);
+    // 只处理当前托管的 child；旧 child 的迟到 exit 不得清掉新 child 的状态。
+    if (daemonChild !== child) return;
+    markTrayStateChanged();
+    daemonChild = null;
+    daemonMode = null;
+    healthy = false;
+    securityLevel = null;
+    updateTray();
+  });
   return child;
 }
 
@@ -410,7 +449,9 @@ async function confirmStop() {
   });
   if (response !== 1) return;
   stopManaged(daemonChild);
+  markTrayStateChanged();
   daemonChild = null;
+  daemonMode = null;
   healthy = false;
   securityLevel = null;
   updateTray();
@@ -429,16 +470,43 @@ async function confirmRestart() {
 }
 
 /**
- * 只读刷新托盘等级 + 运行期展示名（失败保持上一值；旧值不冒充新值）。
- * 忆云名从 overview 的网络派生读取：另一台设备改名同步后，本机 registry 尚未刷新也能更新托盘/标题。
+ * 只读刷新托盘健康 / 等级 / 运行期展示名（失败保持上一值；旧值不冒充新值）。
+ * 每 20s 由定时器调用：先重新探测 /healthz（不能只在 healthy=true 时刷等级，
+ * 否则 child 退出/外部守护停止后托盘会一直显示「运行中」）。
+ * 瞬时网络失败容忍：连续 2 次失败才判定掉线；实例不匹配等终态立即生效。
  */
+let healthProbeFailures = 0;
+const HEALTH_PROBE_GRACE = 2;
+
 async function refreshTrayStatus() {
-  if (!healthy) return;
+  const epoch = trayStateEpoch;
+  const health = await probeHealthDetail(fetch, httpConf(), { expectedInstance: homeKey(home) });
+  if (epoch !== trayStateEpoch) return; // 探测期间托管状态已变（退出/停止/重启/切换）：丢弃过期结果
+  if (!health.ok) {
+    const terminal = ['instance_mismatch', 'instance_missing', 'cloud_mismatch'].includes(health.reason);
+    if (healthy && !terminal) {
+      healthProbeFailures += 1;
+      if (healthProbeFailures < HEALTH_PROBE_GRACE) return; // 单次瞬时失败保留旧状态，避免托盘乱闪
+    }
+    healthProbeFailures = 0;
+    const hadLevel = securityLevel !== null;
+    const wasHealthy = healthy;
+    healthy = false;
+    securityLevel = null; // 不冒充旧档位；cloudName 保留，避免名字闪烁
+    if (wasHealthy || hadLevel) updateTray();
+    return;
+  }
+  healthProbeFailures = 0;
+  let changed = false;
+  if (!healthy) {
+    healthy = true;
+    changed = true;
+  }
   const [level, runtimeIdentity] = await Promise.all([
     probeSecurityLevel(fetch, httpConf()),
     probeRuntimeIdentity(fetch, httpConf()),
   ]);
-  let changed = false;
+  if (epoch !== trayStateEpoch) return; // 等级/云名探测期间状态又变了：同样不覆盖新状态
   if (level !== null && level !== securityLevel) {
     securityLevel = level;
     changed = true;
@@ -473,10 +541,10 @@ function trayActions() {
 }
 
 function updateTray() {
-  if (!tray) return;
+  if (!tray || (typeof tray.isDestroyed === 'function' && tray.isDestroyed())) return;
   // 图标 = 品牌星章（状态语义在 tooltip 与菜单；不再分色）
   tray.setImage(trayImage());
-  tray.setToolTip(`Mebular${cloudName ? ` · ${cloudName}` : ''} · ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}`);
+  tray.setToolTip(`Mebular · ${trayStatusLine({ healthy, daemonMode, cloudName })}`);
   // R-1 中-9：分组菜单模型（lifecycle.mjs 纯数据）→ 绑定 click 后交给 Electron
   const actions = trayActions();
   const loginChecked = (() => { try { return Boolean(app.getLoginItemSettings().openAtLogin); } catch { return false; } })();
@@ -491,6 +559,7 @@ function updateTray() {
 /** 重启守护本体（F1：不导航；托盘「重启」的导航由 confirmRestart 显式追加）。 */
 async function restart() {
   if (daemonChild) { stopManaged(daemonChild); daemonChild = null; }
+  markTrayStateChanged();
   healthy = false; daemonMode = null; securityLevel = null; updateTray();
   await new Promise((r) => setTimeout(r, 800));
   await ensure();
@@ -744,6 +813,7 @@ async function cloudSwitchNow(rawId) {
     // 回滚成功时引擎会重新拉起旧守护：把返回的 child 收编，避免脱离 App 生命周期。
     if (Object.prototype.hasOwnProperty.call(error, 'child')) daemonChild = error.child;
     if (error.mode) daemonMode = error.mode;
+    markTrayStateChanged();
     securityLevel = null;
     healthy = (await probeHealthDetail(fetch, httpConf(), { expectedInstance: homeKey(home) })).ok;
     try { await refreshCloudIdentity(); } catch { /* 保留旧值 */ }
@@ -770,6 +840,7 @@ async function cloudSwitchNow(rawId) {
   home = result.home;
   await refreshCloudIdentity();
   if (result.profile?.name) cloudName = result.profile.name;
+  markTrayStateChanged();
   daemonChild = result.child ?? null;
   daemonMode = result.mode ?? (result.child ? 'child' : 'service');
   healthy = true;

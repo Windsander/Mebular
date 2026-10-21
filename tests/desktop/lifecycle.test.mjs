@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeWizardState, readDesktopState, writeDesktopState } from '../../apps/desktop/src/main/wizard.mjs';
-import { closeAction, quitConfirm, quitDecision, trayMenuModel, LOGIN_ITEM_ID } from '../../apps/desktop/src/main/lifecycle.mjs';
+import { closeAction, quitConfirm, quitDecision, trayMenuModel, trayStatusLine, daemonModeLabel, LOGIN_ITEM_ID } from '../../apps/desktop/src/main/lifecycle.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -115,6 +115,28 @@ describe('R-1 中-9 托盘菜单分组', () => {
     expect(down.find((i) => i.id === 'status').label).toContain('未运行');
   });
 
+  it('托盘 mode 文案：child/service/reused 映射人话，空 → 未运行（不展示裸值）', () => {
+    expect(daemonModeLabel('child')).toBe('临时运行（App 托管）');
+    expect(daemonModeLabel('service')).toBe('常驻服务');
+    expect(daemonModeLabel('reused')).toBe('已有守护');
+    expect(daemonModeLabel(null)).toBe('未运行');
+    for (const [mode, text] of [['child', '临时运行（App 托管）'], ['service', '常驻服务'], ['reused', '已有守护']]) {
+      const label = trayMenuModel({ healthy: true, daemonMode: mode, loginOpenAtLogin: false })
+        .find((i) => i.id === 'status').label;
+      expect(label).toContain(text);
+      expect(label).not.toMatch(new RegExp(`[（(]${mode}[）)]`));
+      expect(label).not.toContain(` · ${mode}`);
+    }
+  });
+
+  it('状态行保留圆点/运行中/启动中/未运行语义；tooltip 与菜单共用同一文案', () => {
+    expect(trayStatusLine({ healthy: true, daemonMode: 'child' })).toBe('● 运行中 · 临时运行（App 托管）');
+    expect(trayStatusLine({ healthy: false, daemonMode: 'service' })).toBe('○ 启动中 · 常驻服务');
+    expect(trayStatusLine({ healthy: false, daemonMode: null })).toBe('○ 未运行');
+    expect(trayStatusLine({ healthy: true, daemonMode: 'reused', cloudName: '云名' }))
+      .toBe('● 运行中 · 已有守护 · 云名');
+  });
+
   it('UX-2：托盘「重启向导」改名（回想入口，不再是「返回向导」）', () => {
     expect(model.find((i) => i.id === 'open-wizard').label).toBe('重启向导');
   });
@@ -198,5 +220,33 @@ describe('R-1 高-2 薄壳接线（index.mjs 静态契约）', () => {
     expect(mainSrc).toContain("navigateConsole('security')");
     expect(navSrc).toMatch(/focus: 'security'/);
     expect(mainSrc).toMatch(/securityLevel/);
+  });
+
+  it('ensure() 合并 ensureDaemon 结果：存活的 App 托管 child 不被 reused 覆盖', () => {
+    const fn = mainSrc.match(/async function ensure\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(fn).toContain('reconcileManagedState({');
+    expect(fn).toMatch(/existingChild: daemonChild/);
+    expect(fn).toMatch(/daemonMode = managed\.mode;/);
+    expect(fn).toMatch(/daemonChild = managed\.child;/);
+  });
+
+  it('child exit：立即清空托管状态并重绘托盘；旧 child 迟到事件不误伤新 child', () => {
+    const fn = mainSrc.match(/function spawnChild\([\s\S]*?\n\}/)?.[0] ?? '';
+    expect(fn).toContain("child.on('exit'");
+    expect(fn).toMatch(/if \(daemonChild !== child\) return;/);
+    expect(fn).toMatch(/daemonChild = null;[\s\S]*daemonMode = null;[\s\S]*healthy = false;[\s\S]*securityLevel = null;[\s\S]*updateTray\(\)/);
+  });
+
+  it('20s 刷新会重新探测 /healthz；掉线清安全等级并更新托盘', () => {
+    const fn = mainSrc.match(/async function refreshTrayStatus\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(fn).toContain('probeHealthDetail(fetch, httpConf(), { expectedInstance: homeKey(home) })');
+    expect(fn).toMatch(/healthy = false;/);
+    expect(fn).toMatch(/securityLevel = null;/);
+    expect(fn).toMatch(/if \(wasHealthy \|\| hadLevel\) updateTray\(\)/);
+    expect(mainSrc).toMatch(/setInterval\(\(\) => \{ void refreshTrayStatus\(\); \}, 20_000\)/);
+  });
+
+  it('tooltip 与菜单共用 trayStatusLine（不展示裸 child/reused）', () => {
+    expect(mainSrc).toMatch(/setToolTip\(`Mebular · \$\{trayStatusLine\(\{ healthy, daemonMode, cloudName \}\)\}`\)/);
   });
 });

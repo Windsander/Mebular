@@ -293,6 +293,35 @@ export async function ensureDaemon({
   return { mode: 'child', home, child };
 }
 
+/** child 是否仍由本 App 托管且存活（exitCode 为 null 且未发过 kill；被信号杀死也算已退出）。 */
+export function isManagedChildAlive(child) {
+  if (!child || child.killed === true) return false;
+  // Node：进程被信号杀死时 exitCode 仍为 null，signalCode 才有值。
+  const exitedBySignal = typeof child.signalCode === 'string' && child.signalCode.length > 0;
+  return child.exitCode === null && !exitedBySignal;
+}
+
+/**
+ * 合并「本次 ensure 结果」与「App 已托管的 child」。
+ *
+ * 背景：首启时 ensureDaemon 由 App 自己 spawn child；用户随后再点部署，ensureDaemon
+ * 看到这个 child 已健康 → 返回 reused。若直接采用 reused，App 会丢掉 child 身份
+ * （托盘误报「已有守护」、控制台仍显示临时运行、退出确认不停止自己的子进程）。
+ *
+ * 规则：
+ *   - ensureDaemon 新拉起的 child → child（托管身份以本次结果为准）；
+ *   - reused/service 但现有 child 仍存活 → 保留 child（它是 App 拉起的，不能改认外部守护）；
+ *   - 现有 child 已退出/已 kill → 接受 reused/service。
+ *
+ * @param {{ resultMode?: string|null, resultChild?: object|null, existingChild?: object|null }} input
+ * @returns {{ mode: string|null, child: object|null }}
+ */
+export function reconcileManagedState({ resultMode = null, resultChild = null, existingChild = null } = {}) {
+  if (resultMode === 'child') return { mode: 'child', child: resultChild ?? existingChild ?? null };
+  if (isManagedChildAlive(existingChild)) return { mode: 'child', child: existingChild };
+  return { mode: resultMode, child: resultChild ?? null };
+}
+
 /**
  * 退出策略（M1）：仅停止**子进程托管**的守护；服务托管不动（App 退出不影响常驻）。
  * 返回 true 表示停了自己托管的子进程。

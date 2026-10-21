@@ -54,11 +54,56 @@ you cannot tell who wrote what; go offline and it stops working.
 ## How to use
 ![Pairing flow: device A starts and invites, device B joins with the QR code, connection then happen automatically; each device subscribes on its own](assets/pairing-flow-en.svg)
 
+### Install
+
+With Node.js >= 20, install the published CLI from npm:
+
+```bash
+npm install -g @mebular/core   # root bundle: provides both `mebular` and `fleet`
+command -v mebular && command -v fleet
+```
+
+`@mebular/core` is the root bundle and the install that provides both CLIs: `mebular` covers the daemon,
+MCP server and console; `fleet` covers setup, invite and join. Installing `@mebular/mcp` alone provides
+only `mebular` — it does not bring `fleet`. To install the memory / task skills from the npm tree:
+
+```bash
+node "$(npm root -g)/@mebular/core/packages/skill/scripts/install.mjs"
+```
+
+Prefer a source checkout? Use the GitHub-pinned or local install in [`QUICKSTART.md`](QUICKSTART.md).
+
+### First run: create or join a Cloud
+
+A **Cloud** (忆云) is one shared memory space. It is not a hosted service: its data lives on the devices
+that belong to it. The **first device** creates the Cloud; **later devices** join it.
+
+The desktop app's **Start deployment** is the one-click path: it starts the local daemon, connects the AI
+assistants already installed on this machine, and then opens the **locked main console** — the star map is
+visible, the other cards are disabled, and the top bar shows **Create new Cloud** and **Join existing
+Cloud**. It does **not** create a Cloud for you.
+
+- **First device** — top bar → **Create new Cloud**; enter a Cloud name and a device name. This machine
+  becomes the root.
+- **Later devices** — on a device already in the Cloud, top bar → **Invite device** for a QR code /
+  one-time token; on the new device, top bar → **Join existing Cloud**, paste the token and enter a device
+  name. The new device receives a delegated certificate; the master key is never copied.
+
+Create and join complete in the same daemon process and on the same page: there is no daemon restart and no
+page reload, and the console unlocks as soon as initialization returns. Once a Cloud is current, the top bar
+switches to **Invite device** + **Join Cloud**.
+
+The browser path is the same console: run `mebular serve` and open `http://127.0.0.1:7331/console`.
+Before a Cloud exists, the MCP facade at `/mcp` already accepts `initialize` and `tools/list`; `tools/call`
+returns a stable `NOT_INITIALIZED` error. That is expected — the same session recovers after create/join,
+with no restart or config rewrite.
+
 ### Start it
 | Path | Get started | Best for |
 |---|---|---|
 | **Agent** (recommended) | install the skill, then say “deploy Mebular” / “join with this code” | hands-off |
-| **GUI** | `mebular serve` → console → first run: **Create new / Join existing**; later: ＋ Invite a device | want to watch it happen |
+| **Desktop app** | **Start deployment** → locked main console → **Create new Cloud** / **Join existing Cloud** | one-click first run |
+| **GUI (browser)** | `mebular serve` → console → the same two entries; later: ＋ Invite device | want to watch it happen |
 | **CLI** | `fleet quickstart` → `fleet invite`; new device `fleet join --qr` | scripts / bulk |
 
 **Agent** — install the skills (two: **memory** + **tasks**), then say “deploy Mebular” / “join with this code”; it follows [`packages/skill/SETUP.md`](packages/skill/SETUP.md) and self-checks with `mebular doctor --net`:
@@ -67,7 +112,7 @@ you cannot tell who wrote what; go offline and it stops working.
 node packages/skill/scripts/install.mjs
 ```
 
-**GUI** — the console is at `http://127.0.0.1:7331/console`. On an empty home directory it opens the first-run page with two entries — **Create new Mebular** (root identity + config, then auto-restart) or **Join existing Mebular** (paste the invite token; the delegated certificate is fetched, no master key is copied). After onboarding, use ＋ Invite a device to onboard the next machine the same way:
+**GUI** — the desktop app's **Start deployment** is the one-click path above. In the browser, `mebular serve` serves the same locked main console at `http://127.0.0.1:7331/console`: the first device uses **Create new Cloud**, later devices use **Join existing Cloud** (paste the invite token; the delegated certificate is fetched, no master key is copied). Both unlock the same page without a restart. After onboarding, use ＋ Invite a device to onboard the next machine the same way:
 
 ```bash
 mebular serve
@@ -81,7 +126,7 @@ fleet invite --dir ~/.mebular                                  # QR code + token
 fleet join --qr "<QR content>" --daemon --dir ~/.mebular --device device-B   # or --token
 ```
 
-First run is fully GUI (**Create new** / **Join existing** — paste the token; no CLI needed) · the CLI stays available for scripts (`fleet join`) · no extra step is needed — each device subscribes on its own, zero friction · try the UI first with `seed-demo.mjs`
+First run is fully GUI (desktop app or browser: **Create new Cloud** / **Join existing Cloud** — paste the token; no CLI needed) · after a Cloud is current, invite the next machine from the top bar · the CLI stays available for scripts (`fleet quickstart` / `fleet join`), and the GUI never chooses a Cloud for you · no extra step is needed — each device subscribes on its own, zero friction · try the UI first with `seed-demo.mjs`
 
 ### Who does what
 | Who | Manages | Typical commands |
@@ -114,6 +159,8 @@ Runnable example: [`examples/quickstart`](examples/quickstart/index.mjs) — it 
 ## Links & docs
 
 - **Quickstart (5 minutes)** — [`QUICKSTART.md`](QUICKSTART.md) · [中文](QUICKSTART_CN.md)
+- **Changelog / release notes** — [`CHANGELOG.md`](CHANGELOG.md)
+- **Release SOP** — [`RELEASE.md`](RELEASE.md)
 - **Limits & trade-offs** — [`LIMITATIONS.md`](LIMITATIONS.md)
 - **Sealing contract** (red lines, protocol semantics, deferrals) — [`SEALING.md`](SEALING.md)
 - **Fleet runbook** (two-machine ops, WAN commands, acceptance) — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)

@@ -47,11 +47,50 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 ## 怎么用
 ![配对流程：设备 A 建新并发出邀请，设备 B 扫码加入，随后连接与默认授权自动完成](assets/pairing-flow-cn.svg)
 
+### 安装
+
+Node.js >= 20，从 npm 安装已发布的命令行：
+
+```bash
+npm install -g @mebular/core   # 根包：同时提供 `mebular` 和 `fleet`
+command -v mebular && command -v fleet
+```
+
+`@mebular/core` 是根包，也是同时提供两个命令的安装方式：`mebular` 负责守护、MCP 服务与控制台，
+`fleet` 负责上车、邀请与加入。只装 `@mebular/mcp` 时只有 `mebular`，没有 `fleet`。从 npm 安装树
+装记忆 / 任务两个 Skill：
+
+```bash
+node "$(npm root -g)/@mebular/core/packages/skill/scripts/install.mjs"
+```
+
+想用仓库源码？见 [`QUICKSTART_CN.md`](QUICKSTART_CN.md) 里的 GitHub 钉版本与本地安装。
+
+### 首次运行：新建或加入忆云
+
+**忆云**是一份共享记忆空间，不是托管云服务：数据只留在属于它的设备上。**第一台设备**新建忆云，
+**后续设备**加入已有忆云。
+
+桌面 App 的「开始部署」是一键路径：启动本机服务、自动接入本机已装的 AI 助手，然后进入**锁定主
+控制台**——星图可见，其它卡片禁用，顶栏显示「新建忆云」和「加入忆云」。它**不会**替你新建忆云。
+
+- **第一台设备** —— 顶栏「新建忆云」：填忆云名 + 设备名，本机成为根。
+- **后续设备** —— 在已加入该忆云的设备上点顶栏「邀请设备」拿二维码 / 一次性令牌；新设备顶栏
+  「加入忆云」，粘贴令牌并填设备名。新设备拿到委派证书，**不复制主密钥**。
+
+新建 / 加入都在**同一守护进程、同一页面**完成：不重启守护、不刷新页面，初始化返回后立即解锁。
+有当前忆云后，顶栏恢复为「邀请设备」+「加入忆云」。
+
+浏览器路径是同一个控制台：运行 `mebular serve`，打开 `http://127.0.0.1:7331/console`。未初始化时，
+`/mcp` 已能完成 `initialize` 与 `tools/list`；`tools/call` 返回稳定的 `NOT_INITIALIZED` 错误。这是
+预期行为——建新 / 加入后同一会话自动恢复，无需重启或重写配置。
+
 ### 开始用
 | 路径 | 怎么开始 | 适合 |
 |---|---|---|
 | **让 Agent 代劳**（推荐） | 装好 Skill，然后说“部署 Mebular”/“用这个码加入” | 不想碰命令 |
-| **GUI** | `mebular serve` → 控制台 → 首次：**建新 / 加入已有**；之后：＋ 邀请新设备 | 想亲眼看着 |
+| **桌面 App** | 「开始部署」→ 锁定主控制台 → 「新建忆云」/「加入忆云」 | 一键首次运行 |
+| **GUI（浏览器）** | `mebular serve` → 控制台 → 同样两个入口；之后：＋ 邀请设备 | 想亲眼看着 |
 | **CLI** | `fleet quickstart` → `fleet invite`；新机 `fleet join --qr` | 脚本化/批量 |
 
 **让 Agent 代劳** —— 装好 Skill（**两个：记忆 + 任务**），对它说“部署 Mebular”/“用这个码加入”；它按 [`packages/skill/SETUP.md`](packages/skill/SETUP.md) 执行并用 `mebular doctor --net` 自检：
@@ -60,7 +99,7 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 node packages/skill/scripts/install.mjs
 ```
 
-**GUI** —— 控制台在 `http://127.0.0.1:7331/console`。家目录为空时先进入**首次上手页**，两个入口：**建新 Mebular**（root 身份 + 写配置，随后自动重启）或**加入已有 Mebular**（粘贴邀请令牌，取回委派证书，**不复制主密钥**）。完成后点「＋ 邀请新设备」即可用同样方式接入下一台机器：
+**GUI** —— 桌面 App 的「开始部署」就是上面的一键路径。浏览器里，`mebular serve` 在 `http://127.0.0.1:7331/console` 提供同一个锁定主控制台：第一台设备用「新建忆云」，后续设备用「加入忆云」（粘贴邀请令牌，取回委派证书，**不复制主密钥**）。两者都在同一页面解锁，不需要重启。完成后点「＋ 邀请设备」即可用同样方式接入下一台机器：
 
 ```bash
 mebular serve
@@ -74,7 +113,7 @@ fleet invite --dir ~/.mebular                                  # 给新设备的
 fleet join --qr "<二维码内容>" --daemon --dir ~/.mebular --device device-B   # 也可用 --token
 ```
 
-首次上手全程 GUI（**建新** / **加入已有** —— 粘贴令牌即可，不需要命令行） · 命令行仍保留给脚本（`fleet join`） · 无需批准——每台设备自行订阅，零门槛 · 想先看界面用 `seed-demo.mjs`
+首次上手全程 GUI（桌面 App 或浏览器：**新建忆云** / **加入忆云** —— 粘贴令牌即可，不需要命令行） · 有当前忆云后从顶栏邀请下一台设备 · 命令行仍保留给脚本（`fleet quickstart` / `fleet join`），向导不会替你选云 · 无需批准——每台设备自行订阅，零门槛 · 想先看界面用 `seed-demo.mjs`
 
 ### 谁做什么
 | 谁 | 管什么 | 代表命令 |
@@ -108,6 +147,8 @@ await mebular.initialize();
 ## 链接与文档
 
 - **快速上手（5 分钟）** — [`QUICKSTART_CN.md`](QUICKSTART_CN.md) · [English](QUICKSTART.md)
+- **变更日志 / 发布说明** — [`CHANGELOG.md`](CHANGELOG.md)
+- **发布 SOP** — [`RELEASE.md`](RELEASE.md)
 - **限制与取舍** — [`LIMITATIONS_CN.md`](LIMITATIONS_CN.md)
 - **封板契约**（红线 / 协议语义 / 推迟项） — [`SEALING_CN.md`](SEALING_CN.md)
 - **fleet 运维手册**（双机操作、WAN 命令、验收） — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)

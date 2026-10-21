@@ -14,6 +14,8 @@
 | `@mebular/mcp` | `packages/mcp` | MCP server（stdio + Streamable HTTP） |
 
 - **版本策略**：lockstep，5 个包永远同版本号。
+- **安装入口**：`npm install -g @mebular/core` 是根包，同时提供 `mebular` + `fleet` 两个 bin；
+  `@mebular/mcp` 单独安装只有 `mebular`，**不能**当作双 bin 安装入口。
 - **触发方式**：push 到 `release/v*` 分支（例如 `release/v0.2.0`），**不使用 tag 触发**。
 - **发布分支即真相**：`release/vX.Y.Z` 的 `X.Y.Z` 必须等于 5 个 `package.json` 的版本，
   且等于 `CHANGELOG.md` 中 `## [vX.Y.Z]` 章节。
@@ -85,6 +87,7 @@ npm run build
 npm run lint
 npm run test:coverage        # 覆盖率门槛在 package.json#jest.coverageThreshold
 npm run verify:mcp:publish   # 5 包 npm pack + tarball 干净安装冒烟
+npm run check:docs           # 文档一致性 7/7
 ```
 
 ### 2.3 提交并触发
@@ -144,3 +147,124 @@ push 后 GitHub Actions `Publish` 流水线自动执行：
 
 npm 不允许覆盖已发布版本。具体步骤见 [1.1 首次发布后回滚指南](#11-首次发布后回滚指南)：
 `npm unpublish` 仅限 72 小时窗口，常规走 `npm deprecate` + 发布更高修复版本。
+
+## 7. v0.1.0 首版发布清单（物料已备齐，待主控执行）
+
+> 本节只列**待执行**动作；发布分支切割、push 与 tag 由主控在合并后完成。
+> 版本号已是 `0.1.0`、`CHANGELOG.md` 已含 `## [v0.1.0]` 章节，因此**不需要**再跑
+> `bump_version.sh`（脚本幂等：版本号相同、章节已存在会直接跳过）。
+
+### 7.1 执行前确认
+
+- [ ] 本分支的文档物料已合并进 `main`，且 `main` 工作树干净。
+- [ ] 第 1 节的一次性前置已完成：npm org `mebular`、`NPM_TOKEN`（Automation）、
+      Actions `Read and write permissions`。
+- [ ] 五个 `package.json` 版本均为 `0.1.0`，`CHANGELOG.md` 含 `## [v0.1.0]` 章节。
+- [ ] 当前 integration 的 P1–P4 门禁记录已核对（见第 8 节）；release 分支 push 后由
+      Publish verify 重跑 `build` / `lint` / `test:coverage` / `verify:mcp:publish`。
+- [ ] `npm run check:docs` 为 7/7。
+- [ ] 发布说明按 7.5 的口径撰写，不写旧流程（自动重启 / 去写入初始设置）。
+
+### 7.2 精确命令序列
+
+```bash
+# 1) 从最新 main 切出版本分支（分支名即版本号，SSOT）
+git fetch origin
+git switch main
+git pull --ff-only origin main
+git switch -c release/v0.1.0 origin/main
+
+# 2) 只读核对 SSOT（不改任何文件）
+grep -H '"version"' package.json packages/*/package.json
+grep -n '^## \[v0.1.0\]' CHANGELOG.md
+git status --short          # 应为空
+
+# 3) push 触发 Publish 流水线
+git push -u origin release/v0.1.0
+```
+
+### 7.3 观察流水线
+
+```bash
+gh run list --workflow=publish.yml --branch release/v0.1.0 --limit 5
+gh run watch <run-id>       # 或用网页 Actions 页面
+```
+
+预期阶段（任一失败即停，修复后重推同一分支即可，已发布包会 skip）：
+
+1. **verify**：SSOT 校验（分支名 == 5×`package.json` == CHANGELOG 章节）→ `npm run build`
+   → `npm run lint` → `npm run test:coverage` → `npm run verify:mcp:publish`。
+2. **publish**：`@mebular/core` → `@mebular/service` → `@mebular/skill` → `@mebular/mcp`
+   → `@mebular/fleet`（`npm view` 已存在则 skip）。
+3. **release**：从 `CHANGELOG.md` 抽取 `## [v0.1.0]` 章节生成 notes，创建 tag `v0.1.0`
+   与 GitHub Release。
+
+### 7.4 发布后核验
+
+```bash
+for p in core service skill mcp fleet; do npm view "@mebular/$p@0.1.0" version; done
+gh release view v0.1.0
+
+# 根包双 bin：mebular + fleet
+npm install -g @mebular/core@0.1.0
+command -v mebular && command -v fleet
+mebular tools >/dev/null && fleet --version
+```
+
+> 不要用 `npm install -g @mebular/mcp@0.1.0` 冒充双 bin 安装：`@mebular/mcp` 只提供
+> `mebular`，`fleet` 必须来自根包（或单独安装 `@mebular/fleet`）。
+
+如需首启冒烟，用一次性 home（不要碰真实 `~/.mebular`）：
+
+```bash
+MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
+# 浏览器打开 http://127.0.0.1:7399/console：
+# 锁定主控制台 → 新建忆云（忆云名 + 设备名）→ 同页解锁，不重启、不刷新
+# 完成后 Ctrl-C，并删除临时目录
+```
+
+### 7.5 发布说明口径（Release notes / CHANGELOG）
+
+发布说明必须写清以下事实，不要回到旧流程：
+
+1. **首次 setup 不需要重启**：桌面「开始部署」启动本机守护并自动接入已装助手，然后进入锁定主
+   控制台；首次新建 / 加入忆云由顶栏弹框完成，**不需要重启守护**。
+2. **建新 / 加入后立即解锁**：初始化在同一进程、同一页面完成，控制台立即解锁；不刷新页面、
+   不重载守护。完成后顶栏恢复「邀请设备 + 加入忆云」。
+3. **MCP 未初始化行为**：HTTP `/mcp` 在未初始化时 `initialize` / `tools/list` 成功；
+   `tools/call` 返回稳定的 `NOT_INITIALIZED`。建新 / 加入后同一 session 恢复，不需要重写助手
+   配置或重启守护。
+4. **备份与根密钥丢失处置**：首次 setup 生成主密钥后，第一时间离线备份
+   `~/.mebular/user-master-key.json`（以及 `config.json` / 存储文件）；主密钥永不离开本机。
+   v0.1.0 未实现主密钥轮换 / 换锚，丢失或被盗没有产品内恢复路径，详见
+   [`LIMITATIONS.md`](LIMITATIONS.md) 的 Root compromise 一节。
+5. **CLI 仍可用**：`fleet quickstart` / `fleet join` 保留给脚本与批量场景；GUI 向导不会替用户
+   选择或新建忆云。
+
+不要把「自动重启」「去写入初始设置」写回发布说明，也不要把 `@mebular/mcp` 说成自带 `fleet`。
+
+## 8. 发布前验证记录
+
+验证对象：**当前 integration** `feat/onboarding-v2`（P1 `838eafa` + P2 `dd15e2c` + P3 `1037a85`
++ P4 `9b45e96`），基线 `5daf4fe`，执行日期 2026-10-21。以下记录以当前 ONBOARDING 门禁为准，
+不复用旧 `m0/release-v010` 基线数字。
+
+| 命令 | 结果 | 关键输出 |
+| --- | --- | --- |
+| `npm run test:coverage` | ✅ P4 独立复核 | **165 suites / 1455 tests** 全过；覆盖率门槛保持 package.json 配置 |
+| `npm run verify:console:ui` | ✅ P4 独立复核 | **210/210** checks |
+| `npm run desktop:smoke` | ✅ P4 独立复核 | **17/17** checks |
+| `npm run verify:onboarding` | ✅ P4 独立复核 | **36/36** checks；覆盖引导态 / 建新 / 加入 / 错误可读，含同进程热初始化与 MCP 未初始化行为 |
+| `npm run check:docs` | ✅ P5 本次 | 7/7；README EN/CN 标题结构、互链、无手写测试数字、CI badge、工具名在册、本地链接存在 |
+| `npm run lint` / `npm run verify:mcp:publish` | ⏳ 待 release 流水线 | 本次 P5 只改文档；发布前必须在 `release/v0.1.0` 由 Publish verify 重跑 |
+
+> 第 8 节记录的是当前 integration 已完成的 P4 独立复核 + P5 文档校验；它**不替代**发布分支上的
+> `build` / `lint` / `test:coverage` / `verify:mcp:publish` 门禁。
+
+### 8.1 已知问题（不阻塞 0.1.0）
+
+- `mebular init` 的“下一步”提示仍使用仓库相对路径（`node packages/.../mebular.mjs`），对
+  `npm install -g` 用户不适用；当前 README / QUICKSTART 的首次运行已改为 `mebular serve` +
+  锁定控制台，不再依赖该提示。
+- 部分源码注释仍写“记忆 11 项 / 共 27 工具”，实际注册表已是 13 记忆 + 16 任务 = 29
+  （`check-surface-parity` 断言 29）。文档按代码实测的 29 编写；注释清理留待后续版本。

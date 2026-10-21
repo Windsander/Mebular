@@ -5150,105 +5150,6 @@ function setProvisionStatus(text, kind = '') {
   el.classList.toggle('is-ok', kind === 'ok');
 }
 
-/**
- * 「待重启」面板（F-ONB-2）：restarting:false（前台 nohup）时展示 `restart.command` + 复制按钮，
- * 不再谎称「正在自动重启」；服务托管（mode=service）则提示由服务管理器重启。
- * R-1 高-4：**桌面壳**（?shell=desktop，preload 注入 window.mebularDesktop）下不出现
- * nohup/终端指令 —— 改为一键「重启守护」（走壳 IPC：wizard 第①步同一个 daemon:restart）。
- */
-function showProvisionRestart(restart, { prefix = '已完成', hideChoices = false } = {}) {
-  const box = $('#provision-restart');
-  if (!box) return;
-  box.hidden = false;
-  if (hideChoices) {
-    const choices = $('#provision-choices');
-    if (choices) choices.hidden = true;
-  }
-  const mode = restart?.mode ?? 'foreground';
-  const command = String(restart?.command ?? '');
-  const desktopShell = typeof window !== 'undefined' && typeof window.mebularDesktop?.restart === 'function';
-  const shellBtn = $('#provision-restart-shell');
-  const cmdEl = $('#provision-restart-command');
-  const copyBtn = $('#provision-restart-copy');
-  const noteEl = $('#provision-restart-note');
-  const hintEl = $('#provision-restart-hint');
-  // R-1 补丁：prefix 归一（'已完成' 不再拼出「已完成完成」）
-  const prefixDone = prefix === '已完成' ? '已完成' : `${prefix}完成`;
-
-  if (desktopShell && mode !== 'service') {
-    // 桌面壳：一键重启（IPC），命令行区域整体收起
-    if (noteEl) noteEl.textContent = `${prefixDone}：点下方「重启守护」一键生效。`;
-    if (cmdEl) cmdEl.hidden = true;
-    if (copyBtn) copyBtn.hidden = true;
-    if (hintEl) hintEl.textContent = '也可回到向导第①步点「重启守护」。';
-    if (shellBtn) {
-      shellBtn.hidden = false;
-      shellBtn.onclick = () => {
-        void (async () => {
-          shellBtn.disabled = true;
-          shellBtn.textContent = '正在重启…';
-          try {
-            await window.mebularDesktop.restart();
-            void waitProvisionRestart();
-          } catch {
-            setProvisionStatus('重启失败：请回到向导第①步点「重启守护」重试。', 'error');
-            shellBtn.disabled = false;
-            shellBtn.textContent = '重启守护';
-          }
-        })();
-      };
-    }
-    return;
-  }
-  if (shellBtn) shellBtn.hidden = true;
-
-  if (noteEl) {
-    noteEl.textContent = mode === 'service'
-      ? `${prefixDone}：正在自动重启（服务托管）；稍候本页会自动进入正常态。`
-      : `${prefixDone}：当前为前台运行，无法自动重启 —— 请在终端执行下面的命令。`;
-  }
-  if (cmdEl) {
-    cmdEl.hidden = false;
-    cmdEl.textContent = command || '（服务托管模式：重启由服务管理器 / supervisor 完成，无手动命令）';
-  }
-  if (hintEl) {
-    hintEl.textContent = restart?.manual
-      ?? (mode === 'service'
-        ? '重启由服务管理器触发；本页会自动刷新进入正常态。'
-        : '若已重启，点下方「已重启？刷新页面」。');
-  }
-  if (copyBtn) {
-    const canCopy = mode !== 'service' && command.length > 0;
-    copyBtn.hidden = !canCopy;
-    if (canCopy) {
-      copyBtn.onclick = () => {
-        void (async () => {
-          try {
-            await navigator.clipboard.writeText(command);
-            setProvisionStatus('命令已复制到剪贴板。', 'ok');
-          } catch {
-            setProvisionStatus(`复制失败，请手动复制：${command}`, 'error');
-          }
-        })();
-      };
-    }
-  }
-}
-
-/** 重启后轮询：引导接口消失（正常态）即刷新页面。 */
-async function waitProvisionRestart() {
-  const deadline = Date.now() + 90_000;
-  for (;;) {
-    await new Promise((resolve) => setTimeout(resolve, 1500));
-    const still = await fetchProvisionStatus();
-    if (!still) { window.location.reload(); return; }
-    if (Date.now() > deadline) {
-      setProvisionStatus('等待重启超时：请确认服务已重启，或点下方「已重启？刷新页面」。', 'error');
-      return;
-    }
-  }
-}
-
 async function submitProvision(kind) {
   const button = kind === 'create' ? $('#provision-create') : $('#provision-join');
   const nameInput = kind === 'create' ? $('#provision-create-name') : $('#provision-join-name');
@@ -5263,30 +5164,27 @@ async function submitProvision(kind) {
   setProvisionStatus(kind === 'create' ? '正在建新（生成主密钥 + 写配置）…' : '正在加入（校验令牌 + 兑换委派证书）…');
   try {
     const res = await api(kind === 'create' ? '/app/provision/create' : '/app/provision/join', { method: 'POST', body });
-    if (res?.restarting) {
-      setProvisionStatus(kind === 'create' ? '已建新：正在自动重启，进入正常态…' : '已加入：正在自动重启，进入正常态…', 'ok');
+    if (res?.initialized === true) {
+      // P1：同一进程已完成热初始化；直接进入正常控制台（不重启、不刷新页面）。
       sessionStorage.setItem('mebular_provision', JSON.stringify({ kind, at: Date.now(), result: res }));
-      await waitProvisionRestart();
+      setProvisionStatus(kind === 'create' ? '已建新：正在进入控制台…' : '已加入：正在进入控制台…', 'ok');
+      await enterNormalConsole();
       return;
     }
-    // A（F-ONB-2）：前台运行（restarting:false）→ 面板给手动指引（web）或一键重启（桌面壳）
-    showProvisionRestart(res?.restart, { prefix: kind === 'create' ? '已建新' : '已加入' });
     setProvisionStatus(kind === 'create'
-      ? '已建新完成：按上方指引重启。'
-      : '已加入完成：按上方指引重启。重启后若忆云启用了「中 · 动态码」，请在「设置 → 安全 → 安全等级」导入种子（两台设备当面出示）；若启用了「高 · 设备会签」，首现记录会带邀请方批准，被拒原因会显示在安全卡/审计。', 'ok');
+      ? '已建新完成：守护已进入正常态。'
+      : '已加入完成：守护已进入正常态。若忆云启用了「中 · 动态码」，请在「设置 → 安全 → 安全等级」导入种子（两台设备当面出示）；若启用了「高 · 设备会签」，首现记录会带邀请方批准，被拒原因会显示在安全卡/审计。', 'ok');
     if (button) button.disabled = false;
   } catch (error) {
-    // B（F-ONB-2）：重复调用（already_provisioned）→ 切「已完成」态，不裸报错
+    // B（F-ONB-2）：重复调用（already_provisioned）→ 不裸报错；本进程已热初始化时直接进入正常态。
     if (error?.status === 409 && error?.payload?.error === 'already_provisioned') {
       const payload = error.payload;
-      $('#provision-choices')?.setAttribute('hidden', '');
-      if (payload.restarting) {
-        setProvisionStatus('已完成：正在自动重启，进入正常态…', 'ok');
-        await waitProvisionRestart();
+      if (payload.initialized === true) {
+        await enterNormalConsole();
         return;
       }
-      showProvisionRestart(payload.restart, { prefix: '已完成' });
-      setProvisionStatus('已完成：家目录已初始化，无需重复建新；按上方指引重启。', 'ok');
+      $('#provision-choices')?.setAttribute('hidden', '');
+      setProvisionStatus('已完成：家目录已初始化，无需重复建新 / 加入。', 'ok');
       if (button) button.disabled = false;
       return;
     }
@@ -5334,28 +5232,27 @@ function renderProvision(status) {
   if (joinName && !joinName.value) joinName.value = suggested;
   const note = $('#provision-note');
   if (note) {
-    note.textContent = status.provisioned
-      ? `家目录已完成初始化（${status.home ?? '—'}）：重启后进入正常态。`
-      : `${status.note ?? ''}（家目录：${status.home ?? '—'}）`;
+    note.textContent = `${status.note ?? ''}（家目录：${status.home ?? '—'}）`;
   }
   bindProvisionPreview('#provision-create-name', '#provision-create-preview', status);
   bindProvisionPreview('#provision-join-name', '#provision-join-preview', status);
   $('#provision-create')?.addEventListener('click', () => { void submitProvision('create'); });
   $('#provision-join')?.addEventListener('click', () => { void submitProvision('join'); });
-  $('#provision-reload')?.addEventListener('click', () => window.location.reload());
-  // C（F-ONB-2）：home 已初始化但进程仍是引导态 → 刷新即进入待重启态（隐藏建新/加入，避免重复提交）
-  if (status.provisioned && status.restartRequired) {
-    showProvisionRestart(status.restart, { prefix: '已完成', hideChoices: true });
-    setProvisionStatus(status.restarting
-      ? '已完成：正在自动重启（服务托管），稍候本页自动进入正常态。'
-      : '已完成：家目录已初始化，按上方指引重启即可。', 'ok');
+  if (status.phase === 'INITIALIZING') {
+    $('#provision-choices')?.setAttribute('hidden', '');
+    setProvisionStatus('正在当前进程内完成初始化…', 'ok');
   }
 }
 
-const provisionStatus = await fetchProvisionStatus();
-if (provisionStatus) {
-  renderProvision(provisionStatus);
-} else {
+/**
+ * P1：初始化成功后在同一页面进入正常控制台（不依赖 window.location.reload 作为恢复路径）。
+ * 只执行一次：submitProvision 成功后调用；正常启动时也走这里。
+ */
+async function enterNormalConsole() {
+  const provisionModal = $('#provision');
+  if (provisionModal) provisionModal.hidden = true;
+  const appEl = $('#app');
+  if (appEl) appEl.hidden = false;
   // R-1 高-3：?view=<视图> 深链（向导②/托盘「连接 AI 助手」的 ?view=connect 落点）；
   // step=device → 进连接页后自动开「邀请设备」
   const deepLink = initialViewFromSearch(location.search);
@@ -5366,35 +5263,41 @@ if (provisionStatus) {
   );
   stage.start();
   setView(deepLink.view ?? 'map');
-  refresh().then(() => {
-    // UX-2：?view=connect 别名重定向 → 设置 · AI 助手
-    if (deepLink.openSettings) {
-      $('#settings').hidden = false;
-      renderSettings(deepLink.openSettings);
-      if (deepLink.focusSecurity) {
-        setTimeout(() => {
-          const slot = $('#settings-security-slot');
-          if (slot) {
-            slot.scrollIntoView({ block: 'start', behavior: 'auto' });
-            slot.focus?.();
-          }
-        }, 0);
-      }
-      if (deepLink.focusClouds) {
-        setTimeout(() => {
-          const card = $('#settings-cloud-card');
-          if (card) {
-            card.scrollIntoView({ block: 'start', behavior: 'auto' });
-            card.focus?.({ preventScroll: true });
-          }
-        }, 0);
-      }
+  await refresh();
+  // UX-2：?view=connect 别名重定向 → 设置 · AI 助手
+  if (deepLink.openSettings) {
+    $('#settings').hidden = false;
+    renderSettings(deepLink.openSettings);
+    if (deepLink.focusSecurity) {
+      setTimeout(() => {
+        const slot = $('#settings-security-slot');
+        if (slot) {
+          slot.scrollIntoView({ block: 'start', behavior: 'auto' });
+          slot.focus?.();
+        }
+      }, 0);
     }
-    if (deepLink.openInvite) openInvite();
-  });
+    if (deepLink.focusClouds) {
+      setTimeout(() => {
+        const card = $('#settings-cloud-card');
+        if (card) {
+          card.scrollIntoView({ block: 'start', behavior: 'auto' });
+          card.focus?.({ preventScroll: true });
+        }
+      }, 0);
+    }
+  }
+  if (deepLink.openInvite) openInvite();
   startEvents();
   setInterval(() => {
     if (document.hidden === true) return; // F-PERF-1：隐藏页不轮询，回前台由 visibilitychange 补刷
     refresh();
   }, POLL_MS);
+}
+
+const provisionStatus = await fetchProvisionStatus();
+if (provisionStatus) {
+  renderProvision(provisionStatus);
+} else {
+  await enterNormalConsole();
 }

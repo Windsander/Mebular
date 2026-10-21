@@ -12,7 +12,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -41,23 +41,6 @@ function freePort() {
     });
   });
 }
-
-/** 测试用重启通道：杀掉旧 pid → 用同一 env 重新拉起（生产走 launchd/systemd）。 */
-const RESTART_HELPER = `import { spawn } from 'node:child_process';
-import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-const home = process.argv[2];
-const state = JSON.parse(readFileSync(join(home, 'test-serve.json'), 'utf-8'));
-appendFileSync(join(home, 'restart-count.log'), 'restart\\n');
-try { process.kill(state.pid, 'SIGTERM'); } catch {}
-setTimeout(() => {
-  const proc = spawn(process.execPath, [state.bin, 'serve', '--port', String(state.port)], {
-    env: { ...process.env, ...state.env }, detached: true, stdio: 'ignore',
-  });
-  proc.unref();
-  writeFileSync(join(home, 'test-serve.json'), JSON.stringify({ ...state, pid: proc.pid }));
-}, 250);
-`;
 
 function spawnServe({ home, port, env = {}, args = [] }) {
   const proc = spawn(process.execPath, [bin, 'serve', '--port', String(port), ...args], {
@@ -142,21 +125,6 @@ async function waitForSettings(port, predicate, { timeoutMs = 20000, pollMs = 30
     await sleep(pollMs);
   }
 }
-/** 等重启完成：新 pid + 健康 + 引导接口消失（进入正常态）。 */
-async function waitNormal(port, home, oldPid, timeoutMs = 30000) {
-  const started = Date.now();
-  for (;;) {
-    const state = await readJson(join(home, 'test-serve.json'));
-    if (state?.pid && state.pid !== oldPid) {
-      const health = await getJson(port, '/healthz');
-      const prov = await getJson(port, '/app/provision/status');
-      if (health.status === 200 && prov.status !== 200) return state;
-    }
-    if (Date.now() - started > timeoutMs) return null;
-    await sleep(300);
-  }
-}
-
 async function main() {
   console.log('Mebular 首次上手验证（verify:onboarding：引导态 / 建新 / 加入 / 错误可读）\n');
   const provision = await import('../packages/mcp/src/provision.mjs');
@@ -196,13 +164,10 @@ async function main() {
   // ============================================================ O1 引导态
   const homeA = join(workspace, 'A');
   await mkdir(homeA, { recursive: true });
-  await writeFile(join(homeA, 'restart-helper.mjs'), RESTART_HELPER, 'utf-8');
   const portA = await freePort();
-  const envA = { ...workspaceEnv, MEBULAR_RESTART_CMD: `"${process.execPath}" "${join(homeA, 'restart-helper.mjs')}" "${homeA}"` };
-  const a = track(spawnServe({ home: homeA, port: portA, env: envA }));
+  const a = track(spawnServe({ home: homeA, port: portA, env: workspaceEnv }));
   const readyA = await waitReady(a, { provision: true });
   check('O1 空家目录 serve → 引导态（PROVISION_READY，非 SERVE_READY）', readyA.provision === true, `port=${portA}`);
-  await writeFile(join(homeA, 'test-serve.json'), JSON.stringify({ pid: a.proc.pid, bin, port: portA, env: envA }), 'utf-8');
   check('O1 引导态**不自举 root**（未生成 user-master-key.json / 身份文件 / config.json）',
     !existsSync(join(homeA, 'user-master-key.json'))
       && !existsSync(join(homeA, 'store.jsonl.identity.json'))
@@ -243,26 +208,32 @@ async function main() {
 
   // ============================================================ O2 建新
   {
+    const pidBefore = a.proc.pid;
     const created = await post(portA, '/app/provision/create', { confirm: true, deviceName: 'Mac-A' });
-    check('O2 建新 → 202 + restarting:true（服务托管自动重启）',
-      created.status === 202 && created.json?.ok === true && created.json?.restarting === true,
-      `status=${created.status} deviceId=${created.json?.deviceId}`);
+    const healthAfter = await getJson(portA, '/healthz');
+    const provisionAfter = await getJson(portA, '/app/provision/status');
+    check('O2 建新 → 200 + initialized:true + phase:READY；同一 PID / 同一端口（不重启）',
+      created.status === 200 && created.json?.ok === true && created.json?.initialized === true
+        && created.json?.phase === 'READY' && created.json?.restarting === undefined
+        && a.proc.pid === pidBefore && a.proc.exitCode === null
+        && healthAfter.status === 200 && provisionAfter.status === 404
+        && created.json?.ports?.mcp === portA,
+      `status=${created.status} pid=${a.proc.pid} port=${created.json?.ports?.mcp}`);
     const cfgA = await readJson(join(homeA, 'config.json'));
     const masterA = await readJson(join(homeA, 'user-master-key.json'));
     check('O2 落盘：root 主密钥（含 privateKeyPkcs8）+ config 开 joinService / mcp 回环',
       typeof masterA?.privateKeyPkcs8 === 'string'
         && cfgA?.joinService?.enabled === true
         && cfgA?.mcp?.http?.host === '127.0.0.1' && cfgA?.mcp?.http?.auth === 'none'
+        && cfgA?.mcp?.http?.port === portA
         && cfgA?.deviceId === created.json?.deviceId,
       `deviceId=${cfgA?.deviceId} joinPort=${cfgA?.joinService?.port}`);
     check('F-ONB-1 建新（普通名 Mac-A）→ deviceId=device-Mac-A（单前缀）',
       cfgA?.deviceId === 'device-Mac-A', `deviceId=${cfgA?.deviceId}`);
     const repeated = await post(portA, '/app/provision/create', { confirm: true });
-    check('O2 重复调 provision → 409', repeated.status === 409 && repeated.json?.error === 'already_provisioned', `status=${repeated.status}`);
-    const stateAfter = await waitNormal(portA, homeA, a.proc.pid);
-    track({ proc: { pid: stateAfter?.pid } });
-    livePids.add(stateAfter?.pid);
-    check('O2 自动重启 → 正常态（/healthz 200 且引导接口消失）', Boolean(stateAfter), `newPid=${stateAfter?.pid}`);
+    check('O2 重复调 provision → 409 already_provisioned（initialized=true）',
+      repeated.status === 409 && repeated.json?.error === 'already_provisioned' && repeated.json?.initialized === true,
+      `status=${repeated.status}`);
     const overview = await getJson(portA, '/admin/api/overview');
     check('O2 正常态 admin API 可用（overview 200）', overview.status === 200, `status=${overview.status}`);
     const invite = await post(portA, '/admin/api/invite', { namespace: 'tasks' }, { withCsrf: true });
@@ -292,18 +263,21 @@ async function main() {
 
     const homeB = join(workspace, 'B');
     await mkdir(homeB, { recursive: true });
-    await writeFile(join(homeB, 'restart-helper.mjs'), RESTART_HELPER, 'utf-8');
     const portB = await freePort();
-    const envB = { ...workspaceEnv, MEBULAR_RESTART_CMD: `"${process.execPath}" "${join(homeB, 'restart-helper.mjs')}" "${homeB}"` };
-    const b = track(spawnServe({ home: homeB, port: portB, env: envB }));
+    const b = track(spawnServe({ home: homeB, port: portB, env: workspaceEnv }));
     await waitReady(b, { provision: true });
-    await writeFile(join(homeB, 'test-serve.json'), JSON.stringify({ pid: b.proc.pid, bin, port: portB, env: envB }), 'utf-8');
+    const pidBBefore = b.proc.pid;
 
     const joined = await post(portB, '/app/provision/join', { confirm: true, deviceName: 'device-Mac-B', token: token.token });
-    check('O3 加入 → 202 + restarting:true + inviter/分区/hints 回报',
-      joined.status === 202 && joined.json?.restarting === true && joined.json?.inviterDeviceId
+    const healthB = await getJson(portB, '/healthz');
+    const provisionB = await getJson(portB, '/app/provision/status');
+    check('O3 加入 → 200 + initialized:true + 同一 PID / 端口 + inviter/分区/hints 回报',
+      joined.status === 200 && joined.json?.initialized === true && joined.json?.phase === 'READY'
+        && b.proc.pid === pidBBefore && b.proc.exitCode === null
+        && healthB.status === 200 && provisionB.status === 404
+        && joined.json?.inviterDeviceId
         && joined.json?.namespace === 'tasks' && Number(joined.json?.hinted) > 0,
-      `status=${joined.status} inviter=${joined.json?.inviterDeviceId} hinted=${joined.json?.hinted}`);
+      `status=${joined.status} pid=${b.proc.pid} inviter=${joined.json?.inviterDeviceId} hinted=${joined.json?.hinted}`);
     const cfgB = await readJson(join(homeB, 'config.json'));
     const masterB = await readJson(join(homeB, 'master-key.json'));
     const identityB = await readJson(join(homeB, 'store.jsonl.identity.json'));
@@ -320,10 +294,8 @@ async function main() {
       `chain=${identityB?.certificateChain?.length}`);
     const hints = await readJson(join(homeB, 'net', 'peers.json'));
     check('O3 inviter 地址 hints 已入地址簿（<home>/net/peers.json）', Boolean(hints) && Object.keys(hints).length > 0, `keys=${Object.keys(hints ?? {}).join(',')}`);
-    const stateB = await waitNormal(portB, homeB, b.proc.pid);
-    livePids.add(stateB?.pid);
-    check('O3 自动重启 → 正常态（引导接口消失 + overview 200）',
-      Boolean(stateB) && (await getJson(portB, '/admin/api/overview')).status === 200, `newPid=${stateB?.pid}`);
+    check('O3 热初始化后 overview 200（无需重启）',
+      (await getJson(portB, '/admin/api/overview')).status === 200, `port=${portB}`);
     const s3 = await waitForSettings(portB, (j) => j.identity?.mode === 'delegated');
     const settingsB = s3.settings;
     check('O3 正常态身份为 delegated（控制台显示委派模式）',

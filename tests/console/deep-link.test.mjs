@@ -137,19 +137,23 @@ describe('UX-2 定稿：图例默认收起（无首访自动展开）', () => {
   });
 });
 
-describe('R-1 高-4 桌面壳感知（provision 引导页不给终端指令）', () => {
-  it('index.html 待重启面板有一键「重启守护」壳按钮（默认隐藏）', () => {
-    expect(indexHtml).toMatch(/id="provision-restart-shell"[^>]*hidden|hidden[^>]*id="provision-restart-shell"/);
+describe('P1：引导页热初始化（不再重启 / 不再展示终端指令）', () => {
+  it('index.html 不再有待重启面板；建新 / 加入按钮改为进入控制台', () => {
+    expect(indexHtml).not.toContain('id="provision-restart"');
+    expect(indexHtml).toContain('建新并进入控制台');
+    expect(indexHtml).toContain('加入并进入控制台');
   });
 
-  it('console.js：desktop 壳下待重启走 window.mebularDesktop.restart，不展示 nohup', () => {
-    expect(consoleJs).toMatch(/window\.mebularDesktop\?\.restart/);
-    expect(consoleJs).toMatch(/provision-restart-shell/);
+  it('console.js：initialized → 同页进入控制台，不调用桌面壳重启 / location.reload', () => {
+    expect(consoleJs).toMatch(/res\?\.initialized/);
+    expect(consoleJs).toMatch(/enterNormalConsole/);
+    expect(consoleJs).not.toMatch(/window\.mebularDesktop\?\.restart/);
+    expect(consoleJs).not.toMatch(/window\.location\.reload\(/);
   });
 
-  it('serve.mjs / console.js 不再写死 ~/.mebular 路径（用真实 home）', () => {
+  it('serve.mjs 不再有 provision 重启计划；路径不写死 ~/.mebular', () => {
+    expect(serveSrc).not.toContain('planProvisionRestart');
     expect(serveSrc).not.toContain('~/.mebular/serve.log');
-    expect(serveSrc).toContain('${home}/serve.log');
     expect(consoleJs).not.toContain('~/.mebular/serve.log');
   });
 });

@@ -304,13 +304,13 @@
       <div class="provision-grid" id="provision-choices">
         <section class="provision-card crt-screen" data-provision-card="create">
           <h3>① 建新忆云</h3>
-          <p class="muted provision-desc">生成 root 主密钥（本机是根），写入配置并自动重启；完成后「邀请设备」可用。</p>
+          <p class="muted provision-desc">生成 root 主密钥（本机是根），写入配置并在当前进程内完成初始化（无需重启）；完成后「邀请设备」可用。</p>
           <label class="cfg-label" for="provision-create-name">设备名</label>
           <input id="provision-create-name" class="crt-input" type="text" autocomplete="off"
                  placeholder="填名字即可，如 MacBookPro；带 device- 前缀也可以" />
           <p class="muted provision-preview" id="provision-create-preview" aria-live="polite"></p>
           <div class="provision-actions">
-            <button id="provision-create" class="btn btn-crt" type="button">建新并重启</button>
+            <button id="provision-create" class="btn btn-crt" type="button">建新并进入控制台</button>
           </div>
         </section>
         <section class="provision-card crt-screen" data-provision-card="join">
@@ -323,24 +323,11 @@
           <label class="cfg-label" for="provision-join-token">加入令牌</label>
           <textarea id="provision-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…"></textarea>
           <div class="provision-actions">
-            <button id="provision-join" class="btn btn-crt" type="button">加入并重启</button>
+            <button id="provision-join" class="btn btn-crt" type="button">加入并进入控制台</button>
           </div>
         </section>
       </div>
-      <div id="provision-restart" class="provision-restart" hidden>
-        <p class="muted" id="provision-restart-note"></p>
-        <div class="provision-restart-cmd">
-          <code id="provision-restart-command"></code>
-          <button id="provision-restart-copy" class="btn btn-small btn-crt" type="button">复制命令</button>
-          <!-- R-1 高-4：桌面壳下用一键 IPC 重启替代终端命令（由 console.js 切换显示） -->
-          <button id="provision-restart-shell" class="btn btn-crt" type="button" hidden>重启守护</button>
-        </div>
-        <p class="muted" id="provision-restart-hint"></p>
-      </div>
       <p id="provision-status" class="muted" aria-live="polite"></p>
-      <div class="modal-actions">
-        <button id="provision-reload" class="btn" type="button">已重启？刷新页面</button>
-      </div>
     </div>
   </div>
 

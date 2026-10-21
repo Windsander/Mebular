@@ -3,7 +3,7 @@
 // UX-2：段①「一键开始」原位展开子步骤流水（失败定位 + 从此处续跑）；
 //       段②行级接入（名称+状态词+一个动作；「已接入 ✓」不自动翻段，「已完成」显式确认）。
 
-import { wizardView, flapGate, wizardRowStatus } from './wizard-view.mjs';
+import { wizardView, flapGate, wizardRowStatus, WIZARD_SUBSTEPS } from './wizard-view.mjs';
 
 const api = window.mebularDesktop;
 
@@ -25,8 +25,8 @@ function renderState(state) {
 
   // 三态（用户定稿）：
   //   引导首页 = 全屏居中仅「开始部署」（外开已完成机器也回到这里——重启向导=从头走，部署幂等）
-  //   部署中   = 标题上浮 + 阶段框（两步流水 + 旁白）
-  //   完成     = 阶段框简述（两步全 ✓）+ 已就绪卡（仅本次会话刚完成时呈现——完成即奖励，再进=首页）
+  //   部署中   = 标题上浮 + 阶段框（五步流水 + 旁白）
+  //   完成     = 阶段框简述（五步全 ✓）+ 已就绪卡（仅本次会话刚完成时呈现——完成即奖励，再进=首页）
   // 流水运行中优先走「部署」呈现（已完工机器上重复点「开始部署」也完整走一遍动画）；
   // 仅「本次会话刚完成、且没在跑」才切完成简述
   const deployView = flow.running || (!complete && flow.everRan);
@@ -50,7 +50,6 @@ function renderState(state) {
   }
 
   const start = view.steps.find((s) => s.id === 'start');
-  const assistantsDone = Boolean(state.steps?.find((s) => s.id === 'assistants')?.done);
   if (start && (deployView || doneView)) {
     setText('#start-detail', start.detailText);
     const startDetail = $('#start-detail');
@@ -63,10 +62,9 @@ function renderState(state) {
     if (btnGo) btnGo.hidden = Boolean(start.actions.go.hidden) || flow.running || doneView;
 
     if (doneView && !doneFxPlayed) { doneFxPlayed = true; playDoneFx(); } // 收尾动效：一次锁定（含已就绪入场）
-    // 阶段框：两步现状（未跑流水时按状态静态推导；跑流水时由 runFlow 实时接管）
+    // 阶段框：五步现状（未跑流水时按状态静态推导；跑流水时由 runFlow 实时接管）
     if (!flow.running && !flow.everRan) {
-      for (const sub of ['launch', 'connect']) setSubState(sub, start.flow[sub] ?? 'todo');
-      setSubState('connect', assistantsDone ? 'done' : (start.status === 'done' ? 'active' : 'todo'));
+      for (const sub of SUBSTEPS) setSubState(sub, start.flow[sub] ?? 'todo');
     }
   }
 
@@ -141,12 +139,12 @@ async function refresh() {
   } catch (error) { setText('#start-detail', `状态读取失败：${error.message}`); }
 }
 
-// ---------- 段① 一键开始：子步骤流水（启动 → 接入 AI 助手 → 进入控制台） ----------
+// ---------- 段① 一键开始：五步真实流水（启动 → 就绪 → 检查助手 → 接入 MCP → 控制台） ----------
 
-const SUBSTEPS = ['launch', 'connect'];
+const SUBSTEPS = WIZARD_SUBSTEPS;
 // 过程可见性：每个子步最小停留（太快等于没展示）；汇总行读完再收尾
 const SUB_MIN_DWELL_MS = 900;
-const flow = { running: false, everRan: false, failedSub: null };
+const flow = { running: false, everRan: false, failedSub: null, probe: null };
 // P4：自动流程结束只导航一次；按钮兜底也复用同一入口，避免重复打开/重复加载。
 let consoleOpened = false;
 async function openConsoleOnce() {
@@ -164,10 +162,15 @@ function connectTargets(clients) {
   return (clients ?? []).filter((c) => c.installed && !c.connected
     && c.state !== 'manual' && c.needsManual !== true && c.state !== 'detect-failed');
 }
-/** 逐个自动接入（旁白式进度：一次只报当前一个；失败非阻断，收尾汇总）。返回 { ok:[], failed:[] }。 */
-async function autoConnectAll() {
-  let clients = [];
-  try { clients = (await api.clientsList())?.clients ?? []; } catch { return { ok: [], failed: [] }; }
+/** 逐个自动接入（旁白式进度：一次只报当前一个；失败非阻断，收尾汇总）。返回 { ok:[], failed:[], targets:number }。 */
+async function autoConnectAll(clientsInput) {
+  let clients = clientsInput;
+  if (!Array.isArray(clients)) {
+    // 续跑兜底：没有本轮 probe 结果时，重新读取真实列表；读不到即失败（不伪造 0 个）。
+    const res = await api.clientsList();
+    if (!res?.ok) throw new Error(res?.warning ?? '读取 AI 助手列表失败');
+    clients = res.clients ?? [];
+  }
   const targets = connectTargets(clients);
   const ok = [];
   const failed = [];
@@ -186,7 +189,7 @@ async function autoConnectAll() {
       failed.push(`${c.name}（${error?.message ?? error}）`);
     }
   }
-  return { ok, failed };
+  return { ok, failed, targets: targets.length };
 }
 
 function setSubState(sub, state) {
@@ -216,6 +219,7 @@ async function runFlow(fromSub = 'launch') {
   flow.running = true;
   flow.everRan = true;
   flow.failedSub = null;
+  if (fromSub === 'launch') flow.probe = null;
   $('#start-flow').hidden = false;
   $('#btn-go').hidden = true;
   $('#btn-resume').hidden = true;
@@ -250,20 +254,47 @@ async function runFlow(fromSub = 'launch') {
       if (sub === 'launch') {
         flowMsg('正在启动本机守护…');
         await api.start();
+      } else if (sub === 'ready') {
+        flowMsg('等待本机就绪…（最多 60 秒）');
         const ok = await pollState((s) => Boolean(s?.steps?.[0]?.detail?.healthy));
         if (!ok) throw new Error('守护未在 60s 内就绪');
+      } else if (sub === 'probe') {
+        // 真实检查：读取 clients 列表并统计已装/需要接入；读不到即失败，绝不伪造 0 个。
+        flowMsg('正在检查已装的 AI 助手…');
+        let res;
+        try {
+          res = await api.clientsList();
+        } catch (error) {
+          throw new Error(`读取 AI 助手列表失败：${error?.message ?? error}`);
+        }
+        if (!res?.ok) throw new Error(`读取 AI 助手列表失败：${res?.warning ?? '未知原因'}`);
+        const clients = Array.isArray(res.clients) ? res.clients : [];
+        const installed = clients.filter((c) => c.installed).length;
+        const targets = connectTargets(clients);
+        flow.probe = { clients, installed, targets: targets.length };
+        flowMsg(installed === 0
+          ? '检查完成：未检测到已装的 AI 助手（0 个需要接入）。'
+          : `检查完成：检测到 ${installed} 个已装助手，${targets.length} 个需要接入。`);
       } else if (sub === 'connect') {
-        // 一键启动的核心自动化：把已装的 AI 助手全部接上（行内实时翻状态；失败非阻断）。
+        // 一键启动的核心自动化：把 probe 找到的已装助手 MCP 配置全部接上（失败非阻断）。
         // P2：UNINITIALIZED 下 /admin/api/clients 与 connect 均可用；MCP 未初始化不再误报连接失败。
-        flowMsg('正在接入 AI 助手…');
-        const { ok, failed } = await autoConnectAll();
+        const probe = flow.probe;
+        if (!probe) flowMsg('正在读取 AI 助手并接入 MCP 配置…');
+        else if (probe.targets === 0) flowMsg('检查完成：0 个需要接入，无需改动 MCP 配置。');
+        else flowMsg(`正在接入 ${probe.targets} 个 AI 助手的 MCP 配置…`);
+        const { ok, failed } = await autoConnectAll(probe?.clients);
         if (failed.length > 0) {
           flowMsg(`已自动接入 ${ok.length} 个；${failed.join('；')}——可在 设置 → AI 助手 重试。`, true);
         } else if (ok.length > 0) {
           flowMsg(`已接入 ${ok.length} 个 AI 助手——重启对应软件后生效。`);
         } else {
-          flowMsg('没有需要接入的助手。');
+          flowMsg('0 个需要接入，无需改动 MCP 配置。');
         }
+      } else if (sub === 'console') {
+        // 用户点过「开始部署」= 对 ② 的显式确认：统一 ack（个别未成功的已给原因，重试归设置·AI 助手）。
+        flowMsg('正在打开控制台…');
+        try { await api.ackAssistants(); } catch { /* 落盘失败不阻断 */ }
+        await openConsoleOnce();
       }
       setSubState(sub, 'done');
       await sleep(SUB_MIN_DWELL_MS); // 最小停留：让每一步看得见
@@ -271,14 +302,6 @@ async function runFlow(fromSub = 'launch') {
     flowMsg('已就绪 ✓');
     flow.failedSub = null;
     await sleep(SUB_MIN_DWELL_MS + 600); // 汇总行停留：读完再进完成态
-    // 用户点过「开始部署」= 对 ② 的显式确认：统一 ack 收尾（个别未成功的已给原因，重试归设置·AI 助手）
-    try { await api.ackAssistants(); } catch { /* 落盘失败不阻断 */ }
-    // P4：自动流程结束直接进入控制台（锁定壳；建新/加入由控制台顶栏弹框完成），只导航一次。
-    try {
-      await openConsoleOnce();
-    } catch (error) {
-      flowMsg(`进入控制台失败：${error.message}——可点「进入控制台」重试。`, true);
-    }
   } catch (error) {
     setSubState(currentSub, 'failed');
     flow.failedSub = currentSub;

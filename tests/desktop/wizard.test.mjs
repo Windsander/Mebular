@@ -20,6 +20,7 @@ import {
   clientActionViaApi,
 } from '../../apps/desktop/src/main/wizard.mjs';
 import { readDaemonLogs } from '../../apps/desktop/src/main/logs.mjs';
+import { WIZARD_SUBSTEPS, wizardView } from '../../apps/desktop/src/renderer/wizard-view.mjs';
 
 const http = { host: '127.0.0.1', port: 7331 };
 const here = dirname(fileURLToPath(import.meta.url));
@@ -66,6 +67,22 @@ describe('M2/UX-2 向导：状态机（两段；幂等可重入，逐步检测�
     expect(s.steps[0].done).toBe(true);
     expect(s.current).toBe('assistants');
     expect(s.steps[0].detail.provision).toEqual({ required: true, provisioned: false });
+  });
+});
+
+describe('P6A 部署流水五步（与向导视图模型同一契约）', () => {
+  it('顺序固定：启动守护 → 等待就绪 → 检查助手 → 接入 MCP → 打开控制台', () => {
+    expect(WIZARD_SUBSTEPS).toEqual(['launch', 'ready', 'probe', 'connect', 'console']);
+    const view = wizardView(computeWizardState({ daemonHealthy: true }));
+    expect(Object.keys(view.steps[0].flow)).toEqual(WIZARD_SUBSTEPS);
+  });
+
+  it('静态视图五步齐全；无 write/recover/restart 子步骤', () => {
+    const html = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'renderer', 'wizard.html'), 'utf-8');
+    for (const sub of WIZARD_SUBSTEPS) expect(html).toContain(`data-sub="${sub}"`);
+    expect(html).not.toContain('data-sub="write"');
+    expect(html).not.toContain('data-sub="recover"');
+    expect(html).not.toContain('data-sub="restart"');
   });
 });
 

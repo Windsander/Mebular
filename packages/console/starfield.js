@@ -806,6 +806,11 @@ export class StarStage {
       const scale = 0.6 + depth * 0.7;
       const hovered = this.hovered === node.id;
       const selected = this.selectedId === node.id;
+      if (node.ghost) {
+        // P6A：锁定态本机虚影（CRT ghost）——低透明度 + 扫描线，不冒充真实设备星。
+        drawGhostBeacon(ctx, pos.x, pos.y, (node.self ? 9 : 7) * scale, time, this.reducedMotion, hovered || selected, node.label);
+        continue;
+      }
       let radius = (node.self ? 9 : 6) * scale;
       let color = node.self ? '#ffe9a8' : '#9fd0ff';
       if (node.revoked) {
@@ -888,6 +893,99 @@ export class StarStage {
       ctx.globalAlpha = 1;
     }
   }
+}
+
+/**
+ * P6A：锁定态「本机虚影」星。用 CRT 绿的低透明度星形 + 断续轨道 + 扫描线，
+ * 明确表达「本机尚未初始化」，不与真实设备星/本机信标混淆。
+ */
+function drawGhostBeacon(ctx, x, y, radius, time, reducedMotion, active, label) {
+  const t = reducedMotion ? 0 : time;
+  // 轻微 CRT 闪烁：幅度小、频率错落；reduced-motion 固定亮度。
+  const flicker = reducedMotion ? 0.72 : 0.62 + 0.08 * Math.sin(t * 2.6) + 0.05 * Math.sin(t * 9.1);
+  const alpha = Math.max(0.38, Math.min(0.82, flicker + (active ? 0.12 : 0)));
+  ctx.save();
+
+  // 外层柔光：只给一点 CRT 荧光，不点亮成设备星。
+  const halo = ctx.createRadialGradient(x, y, 1, x, y, radius * 3.2);
+  halo.addColorStop(0, `rgba(109,255,184,${0.13 * alpha})`);
+  halo.addColorStop(0.55, `rgba(109,255,184,${0.05 * alpha})`);
+  halo.addColorStop(1, 'rgba(109,255,184,0)');
+  ctx.fillStyle = halo;
+  ctx.beginPath();
+  ctx.arc(x, y, radius * 3.2, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 断续轨道环：像未校准的扫描轨道。
+  const spin = t * 0.32;
+  ctx.setLineDash([3, 7]);
+  ctx.strokeStyle = `rgba(109,255,184,${0.28 * alpha})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(x, y, radius * 2.1, spin, spin + Math.PI * 1.55);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(x, y, radius * 2.1, spin + Math.PI, spin + Math.PI * 2.55);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // 星形本体：淡填充 + 清楚但偏暗的描边（虚影，不是实体）。
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(t * 0.08);
+  traceStarPath(ctx, 0, 0, radius * 1.55, 5, 0.46);
+  ctx.fillStyle = `rgba(109,255,184,${0.20 * alpha})`;
+  ctx.fill();
+  ctx.strokeStyle = `rgba(180,255,214,${0.62 * alpha})`;
+  ctx.lineWidth = 1.1;
+  ctx.stroke();
+  ctx.restore();
+
+  // 扫描线：只覆盖星体周围圆形视场，低对比，避免变成整屏噪声。
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(x, y, radius * 2.35, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.strokeStyle = `rgba(109,255,184,${0.10 * alpha})`;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let yy = y - radius * 2.35; yy <= y + radius * 2.35; yy += 3) {
+    ctx.moveTo(x - radius * 2.35, yy);
+    ctx.lineTo(x + radius * 2.35, yy);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  // 中心留一个暗核：像还没完成初始化的信号。
+  ctx.beginPath();
+  ctx.arc(x, y, radius * 0.22, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(200,255,227,${0.5 * alpha})`;
+  ctx.fill();
+  ctx.restore();
+
+  // 标签：诚实的「本机 · 未初始化」。
+  ctx.save();
+  ctx.font = '11px ui-monospace, Menlo, monospace';
+  ctx.textAlign = 'center';
+  ctx.fillStyle = `rgba(140,255,200,${0.68 * alpha})`;
+  ctx.shadowColor = 'rgba(0,0,0,0.85)';
+  ctx.shadowBlur = 4;
+  ctx.fillText(label ?? '本机 · 未初始化', x, y + radius * 2.9);
+  ctx.restore();
+}
+
+function traceStarPath(ctx, x, y, radius, spikes = 5, innerRatio = 0.45) {
+  const inner = radius * innerRatio;
+  ctx.beginPath();
+  for (let i = 0; i < spikes * 2; i += 1) {
+    const r = i % 2 === 0 ? radius : inner;
+    const angle = (Math.PI / spikes) * i - Math.PI / 2;
+    const px = x + Math.cos(angle) * r;
+    const py = y + Math.sin(angle) * r;
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.closePath();
 }
 
 /**

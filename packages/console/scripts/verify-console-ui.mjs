@@ -1658,10 +1658,20 @@ async function main() {
             && document.body.classList.contains('is-locked')
             && !document.querySelector('#provision');
         })()`));
-        check('P3 锁定态：星图正常渲染（空场景也有背景星野）', await evalJs(`(() => {
+        check('P6A 锁定态：星图保留背景，并渲染 ghost 本机星', await waitFor(`(() => {
           const c = document.querySelector('#stage');
-          return Boolean(c) && c.width > 0 && c.height > 0;
-        })()`));
+          if (!c || c.width <= 0 || c.height <= 0 || c.dataset.scene !== 'locked-ghost') return false;
+          const ctx = c.getContext('2d');
+          const size = Math.max(40, Math.min(100, Math.floor(c.width * 0.16)));
+          const x = Math.floor(c.width / 2 - size / 2);
+          const y = Math.floor(c.height / 2 - size / 2);
+          const data = ctx.getImageData(x, y, size, size).data;
+          let green = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            if (data[i + 3] > 8 && data[i + 1] > data[i] && data[i + 1] > 60) green += 1;
+          }
+          return green > 20;
+        })()`, 6000));
         check('P3 顶栏：新建忆云替换邀请设备；加入忆云始终显示', await evalJs(`(() => {
           const create = document.querySelector('#create-cloud');
           const invite = document.querySelector('#invite-device');
@@ -1677,11 +1687,13 @@ async function main() {
           return others.every((b) => b.getAttribute('aria-disabled') === 'true' && b.classList.contains('is-locked'))
             && map.getAttribute('aria-disabled') === null;
         })()`));
-        check('P3 锁定卡片：设备卡禁用占位，不显示假数据', await evalJs(`(() => {
+        check('P6A 锁定态：设备卡/侧栏整卡退场（不展示占位卡）', await evalJs(`(() => {
+          const aside = document.querySelector('.aside');
           const card = document.querySelector('#device-card');
-          return card?.getAttribute('aria-disabled') === 'true'
-            && /新建或加入忆云后/.test(document.querySelector('#device-card-empty')?.textContent ?? '')
-            && document.querySelector('#device-card-body')?.hidden === true;
+          if (!aside || !card) return false;
+          const rect = card.getBoundingClientRect();
+          return aside.hidden === true && getComputedStyle(aside).display === 'none'
+            && rect.width === 0 && rect.height === 0;
         })()`));
         check('P3 锁定态不请求 admin 数据面（overview/devices/settings 等 409 接口）', await evalJs(`(() => {
           const names = performance.getEntriesByType('resource').map((e) => e.name);
@@ -1711,16 +1723,13 @@ async function main() {
           return document.querySelector('#domains-view')?.hidden === true
             && /请先新建或加入忆云/.test(banner?.textContent ?? '');
         })()`));
-        // 星图 → toast
+        // 星图 ghost 星 → toast
         await evalJs(`(() => {
           const c = document.querySelector('#stage');
           const r = c.getBoundingClientRect();
           c.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
         })()`);
-        check('P3 点击星图 → toast「请先新建或加入忆云」', await waitFor('/请先新建或加入忆云/.test(document.querySelector("#banner")?.textContent ?? "")'));
-        // 设备卡 → toast
-        await evalJs('document.querySelector("#device-card").click()');
-        check('P3 点击禁用设备卡 → toast「请先新建或加入忆云」', await waitFor('/请先新建或加入忆云/.test(document.querySelector("#banner")?.textContent ?? "")'));
+        check('P6A 点击 ghost 本机星 → toast「请先新建或加入忆云」', await waitFor('/请先新建或加入忆云/.test(document.querySelector("#banner")?.textContent ?? "")'));
 
         // 引导遮罩：非阻塞、指向两个入口、不盖按钮；ESC 关闭；再次打开自动淡出
         check('P3 引导遮罩：无 current 时出现且指向两个入口（不盖顶栏按钮）', await waitFor(`(() => {
@@ -1738,6 +1747,7 @@ async function main() {
         await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
         await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
         check('P3 引导遮罩：ESC 可提前关闭', await waitFor('document.querySelector("#onboarding-coach")?.hidden === true', 3000));
+        await capture('p6a-locked-ghost.jpg');
         await send('Page.navigate', { url: `${obBase}/console/?coach=auto` });
         check('P3 引导遮罩：再次打开 App 会显示（每次打开一次）',
           await waitFor('document.querySelector("#onboarding-coach")?.hidden === false'));
@@ -1748,12 +1758,13 @@ async function main() {
         await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
         await send('Page.navigate', { url: `${obBase}/console/?locked=narrow` });
         await waitFor('document.querySelector("#app")?.dataset.locked === "true"');
-        check('P3 窄屏：锁定壳无横向溢出 + 新建/加入入口可用', await evalJs(`(() => {
+        check('P3 窄屏：锁定壳无横向溢出 + 新建/加入入口可用 + 设备卡退场', await evalJs(`(() => {
           const create = document.querySelector('#create-cloud');
           const join = document.querySelector('#join-cloud');
           return document.documentElement.scrollWidth <= window.innerWidth + 1
             && Boolean(create) && create.hidden === false && create.getBoundingClientRect().width > 0
-            && Boolean(join) && join.hidden === false;
+            && Boolean(join) && join.hidden === false
+            && document.querySelector('.aside')?.hidden === true;
         })()`));
         check('P3 窄屏：引导卡在视口内且不盖顶栏按钮', await waitFor(`(() => {
           const coach = document.querySelector('#onboarding-coach');
@@ -1816,6 +1827,17 @@ async function main() {
             && document.querySelector('#status-pill')?.hidden === false
             && document.querySelector('#device-card')?.getAttribute('aria-disabled') === null;
         })()`, 20000));
+        check('P6A READY 后：ghost 星消失、星图恢复正常场景、设备卡归位', await waitFor(`(() => {
+          const stage = document.querySelector('#stage');
+          const aside = document.querySelector('.aside');
+          const card = document.querySelector('#device-card');
+          if (!stage || !aside || !card) return false;
+          const rect = aside.getBoundingClientRect();
+          return stage.dataset.scene === 'ready'
+            && stage.getAttribute('aria-label') === '对端关系星图（本机视角）'
+            && aside.hidden === false && getComputedStyle(aside).display !== 'none'
+            && rect.width > 0;
+        })()`, 20000));
         const navsAfterCreate = cdp.events.filter((event) => event.method === 'Page.frameNavigated').length;
         check('P3 无 reload 证据：页面实例/导航次数不变（create）', navsAfterCreate === navsBeforeCreate,
           `navigations=${navsBeforeCreate}→${navsAfterCreate}`);
@@ -1825,6 +1847,7 @@ async function main() {
           stAfter === 404 && ovAfter.status === 200 && onboardHandle.proc.exitCode === null,
           `status=${stAfter} overview=${ovAfter.status}`);
         await capture('p3-unlocked-console.jpg');
+        await capture('p6a-ready-console.jpg');
 
         // —— 加入：用 create 实例邀请 → 新空 home 同页解锁 ——
         const joinToken = await evalJs(`(async () => {

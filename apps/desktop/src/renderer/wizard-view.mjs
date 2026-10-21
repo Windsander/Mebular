@@ -4,9 +4,13 @@
 // （徽章文案 / 每段状态·折叠·动作收编 / 段①子步骤流水进度 / 段②「已完成」解锁 / 完成态通关 CTA / 日志区折叠与结论）。
 // DOM 契约：status 'current' → .is-current；check '✓' → 段标题前置对勾；
 // collapsed → 段折叠为回顾（可再展开）；logs.open → <details id="logs-panel"> 的 open 属性；
-// flow.* → 段①子步骤流水（launch/connect）的 todo/active/done/failed 图标。
+// flow.* → 段①子步骤流水（launch/ready/probe/connect/console）的 todo/active/done/failed 图标。
 
 const STEP_NAME = { start: '一键开始', assistants: '连接 AI 助手' };
+
+// P6A：部署流水单一真源（渲染层与静态视图模型共用）。每条都对应真实动作：
+// launch=api.start / ready=health poll / probe=clientsList / connect=autoConnectAll / console=openConsoleOnce。
+export const WIZARD_SUBSTEPS = ['launch', 'ready', 'probe', 'connect', 'console'];
 
 /**
  * 向导视图模型。
@@ -63,7 +67,7 @@ export function wizardView(state) {
   };
 }
 
-/** 段①：文案 + 动作收编 + 子步骤流水（启动 → 接入 AI 助手）静态进度。 */
+/** 段①：文案 + 动作收编 + 子步骤流水（启动 → 就绪 → 检查 → 接入 → 控制台）静态进度。 */
 function startStepView(step, { healthy, registered, assistantsDone = false }) {
   let detailText;
   if (step.done) {
@@ -79,7 +83,10 @@ function startStepView(step, { healthy, registered, assistantsDone = false }) {
   // 子步骤流水进度（静态推导；渲染层在跑流水时以运行时状态覆盖）
   const flow = {
     launch: healthy ? 'done' : 'todo',
-    connect: assistantsDone ? 'done' : (step.done ? 'active' : 'todo'),
+    ready: healthy ? 'done' : 'todo',
+    probe: healthy ? 'done' : 'todo',
+    connect: assistantsDone ? 'done' : (healthy ? 'active' : 'todo'),
+    console: assistantsDone ? 'done' : 'todo',
   };
   return {
     detailText,

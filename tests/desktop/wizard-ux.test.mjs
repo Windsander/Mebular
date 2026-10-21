@@ -21,6 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const rendererDir = join(here, '..', '..', 'apps', 'desktop', 'src', 'renderer');
 const wizardHtml = readFileSync(join(rendererDir, 'wizard.html'), 'utf-8');
 const wizardJs = readFileSync(join(rendererDir, 'wizard.js'), 'utf-8');
+const wizardViewSrc = readFileSync(join(rendererDir, 'wizard-view.mjs'), 'utf-8');
 
 describe('P4 ① 状态机：daemonHealthy 即 start done（UNINITIALIZED 不阻塞）', () => {
   it('daemonHealthy + provisionRequired（UNINITIALIZED）→ ① done、current=assistants（核心用例）', () => {
@@ -65,7 +66,7 @@ describe('P4 一键启动 → 锁定控制台（UNINITIALIZED 可用；一次导
   });
 
   it('自动接入走 P2 受限 clients API：UNINITIALIZED 列表 / connect 均可用', () => {
-    const fn = wizardJs.match(/async function autoConnectAll\(\)[\s\S]*?\n\}/)?.[0] ?? '';
+    const fn = wizardJs.match(/async function autoConnectAll\([^)]*\)[\s\S]*?\n\}/)?.[0] ?? '';
     expect(fn).toContain('api.clientsList()');
     expect(fn).toMatch(/api\.clientsAction\(c\.id, 'connect'\)/);
     // P2 服务端契约（不改端点）：列表读面 + connect 动作在 UNINITIALIZED 开放
@@ -181,23 +182,28 @@ describe('W-1 ④ 日志区：默认折叠，异常才自动展开 + 人话结�
   });
 });
 
-describe('P4 ⑤ 段① 一键开始：两步流水（启动 → 自动接入 → 进入控制台）', () => {
-  it('视图模型：静态流水进度（健康 → launch done；接入中 → connect active；已确认 → done）', () => {
+describe('P6A ⑤ 段① 一键开始：五步真实流水（启动 → 就绪 → 检查 → 接入 → 控制台）', () => {
+  const allTodo = { launch: 'todo', ready: 'todo', probe: 'todo', connect: 'todo', console: 'todo' };
+  it('视图模型：静态流水进度（健康 → 前3步 done；接入中 → connect active；已确认 → 全 done）', () => {
     const fresh = wizardView(computeWizardState({}));
-    expect(fresh.steps[0].flow).toEqual({ launch: 'todo', connect: 'todo' });
+    expect(fresh.steps[0].flow).toEqual(allTodo);
     const healthy = wizardView(computeWizardState({ daemonHealthy: true }));
-    expect(healthy.steps[0].flow).toEqual({ launch: 'done', connect: 'active' });
+    expect(healthy.steps[0].flow).toEqual({ ...allTodo, launch: 'done', ready: 'done', probe: 'done', connect: 'active' });
     const acked = wizardView(computeWizardState({ daemonHealthy: true, wizard: { assistantsAcked: true } }));
-    expect(acked.steps[0].flow).toEqual({ launch: 'done', connect: 'done' });
+    expect(acked.steps[0].flow).toEqual({ launch: 'done', ready: 'done', probe: 'done', connect: 'done', console: 'done' });
     // P4：UNINITIALIZED 不改变流水进度（不再有 write/recover）
     const uninitialized = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true }));
-    expect(uninitialized.steps[0].flow).toEqual({ launch: 'done', connect: 'active' });
+    expect(uninitialized.steps[0].flow).toEqual({ ...allTodo, launch: 'done', ready: 'done', probe: 'done', connect: 'active' });
   });
 
-  it('静态契约：流水两子步骤（启动 + 自动接入）+ 一键开始 + 从此处续跑 + 失败图标态', () => {
-    for (const sub of ['launch', 'connect']) {
+  it('静态契约：五条真实子步骤 + 一键开始 + 从此处续跑 + 失败图标态', () => {
+    for (const sub of ['launch', 'ready', 'probe', 'connect', 'console']) {
       expect(wizardHtml).toContain(`data-sub="${sub}"`);
     }
+    expect(wizardHtml).toContain('等待本机就绪');
+    expect(wizardHtml).toContain('检查已装 AI 助手');
+    expect(wizardHtml).toContain('接入 MCP 配置（自动）');
+    expect(wizardHtml).toContain('打开控制台');
     expect(wizardHtml).not.toContain('data-sub="write"');
     expect(wizardHtml).not.toContain('data-sub="recover"');
     expect(wizardHtml).toContain('id="btn-go"');
@@ -205,13 +211,39 @@ describe('P4 ⑤ 段① 一键开始：两步流水（启动 → 自动接入 �
     expect(wizardHtml).toMatch(/data-state="failed"/);
   });
 
+  it('运行层五步各自对应真实动作，且不伪造 0 个助手', () => {
+    expect(wizardViewSrc).toMatch(/export const WIZARD_SUBSTEPS = \['launch', 'ready', 'probe', 'connect', 'console'\]/);
+    expect(wizardJs).toMatch(/const SUBSTEPS = WIZARD_SUBSTEPS/);
+    const runFlowFn = wizardJs.match(/async function runFlow[\s\S]*?\n\}/)?.[0] ?? '';
+    for (const sub of ['launch', 'ready', 'probe', 'connect', 'console']) {
+      expect(runFlowFn).toContain(`sub === '${sub}'`);
+    }
+    const order = [
+      runFlowFn.indexOf('await api.start()'),
+      runFlowFn.indexOf('await pollState('),
+      runFlowFn.indexOf('await api.clientsList()'),
+      runFlowFn.indexOf('await autoConnectAll('),
+      runFlowFn.indexOf('await openConsoleOnce()'),
+    ];
+    expect(order.every((index) => index >= 0)).toBe(true);
+    expect([...order].sort((a, b) => a - b)).toEqual(order);
+    expect(runFlowFn).toContain('检查完成：未检测到已装的 AI 助手（0 个需要接入）。');
+    expect(runFlowFn).toContain('0 个需要接入，无需改动 MCP 配置。');
+    expect(runFlowFn).toMatch(/if \(!res\?\.ok\) throw new Error/);
+  });
+
   it('回归：.flow 的 [hidden] 不被 display:grid 覆盖（未跑流水前流水面板必须真隐藏）', () => {
     expect(wizardHtml).toMatch(/\.flow\[hidden\][^{]*\{[^}]*display:\s*none/);
   });
 
-  it('有界轮询：子步骤等待 ≤60s 上限（40 × 1.5s），超时即失败定位', () => {
+  it('有界轮询：等待本机就绪 ≤60s 上限（40 × 1.5s），超时即失败定位', () => {
     expect(wizardJs).toMatch(/for \(let i = 0; i < 40; i \+= 1\)/);
     expect(wizardJs).toMatch(/60s/);
+    const runFlowFn = wizardJs.match(/async function runFlow[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(runFlowFn).toMatch(/setSubState\(currentSub, 'failed'\)/);
+    expect(runFlowFn).toContain('flow.failedSub = currentSub');
+    expect(runFlowFn).toContain("$('#btn-resume').hidden = false");
+    expect(wizardJs).toMatch(/runFlow\(flow\.failedSub \?\? 'launch'\)/);
   });
 });
 
@@ -369,8 +401,9 @@ describe('F2 常驻语义：三态 registered（徽章/文案；安装入口已�
 });
 
 describe('P4 去 write/recover/restart：向导不再等待初始设置或重启', () => {
-  it('渲染层契约：流水只有 launch/connect；无 armGrace/recover/restart', () => {
-    expect(wizardJs).toMatch(/const SUBSTEPS = \['launch', 'connect'\]/);
+  it('渲染层契约：流水五步（launch/ready/probe/connect/console）；无 armGrace/recover/restart', () => {
+    expect(wizardJs).toMatch(/const SUBSTEPS = WIZARD_SUBSTEPS/);
+    expect(wizardViewSrc).toMatch(/export const WIZARD_SUBSTEPS = \['launch', 'ready', 'probe', 'connect', 'console'\]/);
     expect(wizardJs).not.toContain('armGrace');
     expect(wizardJs).not.toContain('graceUntil');
     expect(wizardJs).not.toContain("sub === 'recover'");
@@ -643,7 +676,7 @@ describe('补丁 3 · 行状态机（wizardRowStatus → 共享 helper projectAs
   });
 
   it('渲染层契约（自动化模型·旁白式）：接入进度一次只报当前一个；失败非阻断并入汇总', () => {
-    const fn = wizardJs.match(/async function autoConnectAll\(\)[\s\S]*?\n\}/)?.[0] ?? '';
+    const fn = wizardJs.match(/async function autoConnectAll\([^)]*\)[\s\S]*?\n\}/)?.[0] ?? '';
     expect(fn).toMatch(/正在接入 \$\{c\.name\}…（\$\{i \+ 1\}\/\$\{targets\.length\}）/);
     expect(fn).toMatch(/failed\.push/);
     expect(wizardJs).toContain('可在 设置 → AI 助手 重试');
@@ -881,19 +914,20 @@ describe('简化轮走查修复 6 · 收尾动效（用户定稿 2：卡片「�
 });
 
 describe('简化轮走查修复 4 · 一键启动（①②全自动跑给你看）', () => {
-  it('P4 流水两步：启动 → 接入 AI 助手（自动）→ 一次进入控制台；HTML/JS 契约', () => {
-    for (const sub of ['launch', 'connect']) {
+  it('P6A 流水五步：启动 → 就绪 → 检查助手 → 接入 MCP → 控制台；HTML/JS 契约', () => {
+    for (const sub of ['launch', 'ready', 'probe', 'connect', 'console']) {
       expect(wizardHtml).toContain(`data-sub="${sub}"`);
     }
-    expect(wizardHtml).toContain('接入 AI 助手（自动）');
-    expect(wizardJs).toMatch(/const SUBSTEPS = \['launch', 'connect'\]/);
+    expect(wizardHtml).toContain('接入 MCP 配置（自动）');
+    expect(wizardJs).toMatch(/const SUBSTEPS = WIZARD_SUBSTEPS/);
     expect(wizardJs).toContain('autoConnectAll');
-    expect(wizardJs).toMatch(/sub === 'connect'[\s\S]{0,260}autoConnectAll\(\)/);
-    expect(wizardJs).toMatch(/await openConsoleOnce\(\)/);
+    expect(wizardJs).toMatch(/sub === 'probe'[\s\S]{0,420}clientsList\(\)/);
+    expect(wizardJs).toMatch(/sub === 'connect'[\s\S]{0,420}autoConnectAll\(/);
+    expect(wizardJs).toMatch(/sub === 'console'[\s\S]{0,240}openConsoleOnce\(\)/);
   });
 
   it('一键启动核心自动化：connect 子步逐个接入（非阻断，失败行进「重试」）+ 行在流程中被动（无按钮）', () => {
-    const fn = wizardJs.match(/async function autoConnectAll\(\)[\s\S]*?\n\}/)?.[0] ?? '';
+    const fn = wizardJs.match(/async function autoConnectAll\([^)]*\)[\s\S]*?\n\}/)?.[0] ?? '';
     expect(fn).toMatch(/clientsAction\(c\.id, 'connect'\)/);
     expect(fn).toMatch(/failed\.push/); // 失败非阻断
     expect(wizardJs).not.toContain('data-asst-act'); // 全程零按钮（含流程中）

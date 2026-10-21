@@ -275,7 +275,7 @@ function computeDegraded() {
 
 function render() {
   if (state.locked) {
-    // 锁定态：只渲染壳与星图（空场景）；不渲染任何依赖 admin 数据面的内容。
+    // 锁定态：只渲染壳与星图（背景 + 本机 ghost 星）；不渲染任何依赖 admin 数据面的内容。
     renderTopbar();
     renderLockedChrome();
     renderLegend();
@@ -467,6 +467,21 @@ function renderLegend() {
 }
 
 function buildScene() {
+  if (state.locked) {
+    // P6A：锁定态保留星图背景，用一个 CRT 虚影星占住「本机」位置；
+    // 只表达「本机尚未初始化」，不映射成任何设备/记忆数据。
+    return {
+      nodes: [{
+        id: 'local-ghost',
+        label: '本机 · 未初始化',
+        self: true,
+        ghost: true,
+        online: false,
+        blocked: false,
+      }],
+      edges: [],
+    };
+  }
   const selfId = state.overview?.device?.deviceId;
   if (!selfId) return { nodes: [], edges: [] };
   const nodes = [{
@@ -522,6 +537,12 @@ function buildScene() {
 function renderStageScene() {
   stage.setScene(buildScene());
   stage.setSelected(state.selected?.deviceId ?? null);
+  const canvas = $('#stage');
+  if (canvas) {
+    // 验收/辅助技术可读的诚实标记；视觉本体仍由 Canvas 绘制。
+    canvas.dataset.scene = state.locked ? 'locked-ghost' : 'ready';
+    canvas.setAttribute('aria-label', state.locked ? '本机星图：本机尚未初始化' : '对端关系星图（本机视角）');
+  }
 }
 
 function renderBanner() {
@@ -3295,13 +3316,13 @@ function renderDeviceCard() {
   const empty = $('#device-card-empty');
   const body = $('#device-card-body');
   if (state.locked) {
-    // 锁定态：设备卡留在原位但整卡禁用，显示诚实的空态，不展示任何设备数据。
+    // P6A：锁定态整张设备卡退场（不展示占位卡/假设备数据）；星图 ghost 星承担唯一本机表达。
     if (asideEl) {
-      asideEl.classList.add('is-locked');
-      asideEl.classList.toggle('is-open', state.view === 'map');
+      asideEl.hidden = true;
+      asideEl.classList.remove('is-locked', 'is-open');
     }
-    cardEl?.classList.add('is-disabled');
-    cardEl?.setAttribute('aria-disabled', 'true');
+    cardEl?.classList.remove('is-disabled');
+    cardEl?.removeAttribute('aria-disabled');
     empty.hidden = false;
     empty.textContent = '新建或加入忆云后，这里会显示设备详情。';
     body.hidden = true;
@@ -3309,6 +3330,7 @@ function renderDeviceCard() {
     lastCardSignature = null;
     return;
   }
+  if (asideEl) asideEl.hidden = false;
   asideEl?.classList.remove('is-locked');
   cardEl?.classList.remove('is-disabled');
   cardEl?.removeAttribute('aria-disabled');
@@ -3495,6 +3517,11 @@ function renderDeviceCard() {
 
 stage.onHover = (node, x, y) => {
   const tooltip = $('#tooltip');
+  if (state.locked) {
+    // 锁定态不展示任何设备/记忆悬浮数据（ghost 星只表达「本机未初始化」）。
+    tooltip.hidden = true;
+    return;
+  }
   if (!node) {
     tooltip.hidden = true;
     return;
@@ -5568,7 +5595,7 @@ async function enterLockedConsole(status) {
   document.body.classList.add('is-locked');
   const app = $('#app');
   if (app) app.dataset.locked = 'true';
-  // 星图空场景（带背景星野）正常渲染；不请求 /admin/api/overview 等 409 接口。
+  // 星图保留背景 + 本机 ghost 星（不映射任何设备数据）；不请求 /admin/api/overview 等 409 接口。
   stage.start();
   setView('map');
   render();

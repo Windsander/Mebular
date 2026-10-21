@@ -70,7 +70,7 @@
     details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
     details[open] summary { margin-bottom: 6px; }
 
-    /* 流水（部署四步）：全自动叙事 */
+    /* 流水（部署五步）：全自动叙事 */
     .flow { list-style: none; margin: 10px 0 4px; padding: 0; display: grid; gap: 4px; }
     .flow[hidden] { display: none; }
     .flow li { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
@@ -147,14 +147,17 @@
       <button id="btn-go" class="primary big">开始部署</button>
     </div>
 
-    <!-- ===== 状态 2：阶段框（点击后出现，四步进度 + 旁白；完成后同框「变身」为已就绪） ===== -->
+    <!-- ===== 状态 2：阶段框（点击后出现，五步进度 + 旁白；完成后同框「变身」为已就绪） ===== -->
     <section class="panel" id="deploy-panel" hidden>
       <div id="deploy-flow">
         <h2>开始部署 <span id="start-service-badge" class="badge service" hidden>临时运行</span></h2>
         <p class="muted" id="start-detail" hidden></p>
         <ol id="start-flow" class="flow">
           <li data-sub="launch" data-state="todo"><i></i>启动本机守护</li>
-          <li data-sub="connect" data-state="todo"><i></i>接入 AI 助手（自动）</li>
+          <li data-sub="ready" data-state="todo"><i></i>等待本机就绪</li>
+          <li data-sub="probe" data-state="todo"><i></i>检查已装 AI 助手</li>
+          <li data-sub="connect" data-state="todo"><i></i>接入 MCP 配置（自动）</li>
+          <li data-sub="console" data-state="todo"><i></i>打开控制台</li>
         </ol>
         <p class="muted" id="flow-msg"></p>
         <div class="row" id="go-row" hidden>

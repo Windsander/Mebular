@@ -4143,21 +4143,15 @@ function showInviteResult(res) {
   state.inviteToken = res;
   $('#invite').hidden = false;
   // 令牌很长：显示截断，复制按钮携带完整值
-  const shortToken = res.token.length > 56 ? `${res.token.slice(0, 42)}…${res.token.slice(-12)}` : res.token;
-  const endpointWarning = res.warning
-    ? `<p class="crt-warn">⚠ ${escapeHtml(res.warning)}</p>`
-    : '';
+  const shortToken = res.token.length > 40 ? `${res.token.slice(0, 24)}…${res.token.slice(-8)}` : res.token;
   // C7：二维码（服务端用 qrcode-generator 渲染 SVG → data-uri；编码失败为 null → 只显示文本）
-  const qrBlock = res.qrSvg
-    ? `<div class="readout-block qr-block">
-        <span class="domain-label">扫码即通（QR 内容 = 令牌文本）</span>
-        <img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />
-      </div>`
-    : '<p class="cfg-help muted">二维码不可用（生成失败）：请使用上方文本令牌。</p>';
+  const qrMarkup = res.qrSvg
+    ? `<img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />`
+    : '<p class="cfg-help muted invite-qr-fallback">二维码不可用，请复制令牌。</p>';
   // E2-A2：邀请方忆云名 + 根指纹取 overview.cloud（加入方核对指纹的唯一可靠来源）。
   const cloud = state.overview?.cloud ?? null;
   const cloudLine = cloud?.name
-    ? `<p class="cfg-help muted invite-cloud-line" id="invite-cloud-identity">本忆云：<b>${escapeHtml(cloud.name)}</b> · 根指纹 ${cloud.masterFingerprint ? `<code>${escapeHtml(cloud.masterFingerprint)}</code>` : '<span class="kv-empty">未知</span>'}</p>`
+    ? `<p class="cfg-help muted invite-cloud-line" id="invite-cloud-identity"><b>${escapeHtml(cloud.name)}</b> · 根指纹 ${cloud.masterFingerprint ? `<code>${escapeHtml(cloud.masterFingerprint)}</code>` : '<span class="kv-empty">未知</span>'}</p>`
     : '';
   const selectedTtl = INVITE_TTL_OPTIONS.some((option) => option.ttlMs === res.ttlMs)
     ? res.ttlMs
@@ -4166,25 +4160,39 @@ function showInviteResult(res) {
   const ttlOptions = INVITE_TTL_OPTIONS.map((option) => (
     `<option value="${option.ttlMs}"${option.ttlMs === selectedTtl ? ' selected' : ''}>${escapeHtml(option.label)}</option>`
   )).join('');
-  // 单动作面板：令牌 + 二维码 + 忆云身份 + 有效期/重新生成；不再有详情折叠。
+  // endpoint 回环/非法与会签批准都只留一条短警告（长说明归设置页）。
+  const warnings = [];
+  if (res.warning) {
+    if (/回环/.test(res.warning)) warnings.push('端点仅本机可达：把 joinService.bind 设为 0.0.0.0 后重新生成。');
+    else if (/不是有效地址/.test(res.warning)) warnings.push('端点地址无效：请在「设置 → 高级」检查加入服务。');
+    else warnings.push('端点不可达：请检查加入服务设置。');
+  }
+  if (res.securityApproval) warnings.push('已带上会签批准。');
+  const warningLine = warnings.length > 0
+    ? `<p class="crt-warn invite-warning">⚠ ${escapeHtml(warnings.join(' '))}</p>`
+    : '';
+  // 两栏：左 QR，右引导 + 令牌 + TTL；窄屏自动堆叠（见 console.css）。
   body.innerHTML = `
-    <div class="readout-block invite-token-block">
-      <span class="domain-label">令牌（一次性）</span>
-      <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
+    <div class="invite-layout">
+      <div class="invite-qr">${qrMarkup}</div>
+      <div class="invite-main">
+        <p class="invite-lead">让对方扫码，或复制令牌。</p>
+        <div class="invite-token-block">
+          <span class="invite-label">令牌</span>
+          <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
+        </div>
+        <div class="invite-controls">
+          <label class="invite-ttl" for="invite-ttl"><span class="invite-label">有效期</span>
+            <select id="invite-ttl" class="crt-input">${ttlOptions}</select>
+          </label>
+          <button class="btn btn-small btn-crt" id="invite-regenerate" type="button">重新生成</button>
+          <span class="invite-expiry" id="invite-expiry">至 ${escapeHtml(formatClock(res.expiresAt))}</span>
+        </div>
+        ${warningLine}
+      </div>
     </div>
-    ${qrBlock}
     ${cloudLine}
-    <div class="invite-controls">
-      <label class="invite-ttl" for="invite-ttl">有效期
-        <select id="invite-ttl" class="crt-input">${ttlOptions}</select>
-      </label>
-      <button class="btn btn-small btn-crt" id="invite-regenerate" type="button">重新生成</button>
-    </div>
-    <p class="cfg-help muted">当前令牌有效至 ${escapeHtml(formatTime(res.expiresAt))}；改档后点「重新生成」才生效。</p>
-    ${endpointWarning}
-    <p class="cfg-help muted">对方已用过 Mebular：让 TA 在控制台点「加入忆云」粘贴此令牌；新设备：扫码或粘贴令牌。</p>
-    <p class="cfg-help muted">令牌即入网权限：仅当面或可信局域网传递；重新生成后旧令牌立即失效。</p>
-    ${res.securityApproval ? '<p class="crt-warn">已随令牌带上会签批准（新设备首现记录内嵌 cosign）。</p>' : ''}
+    <p class="invite-safety">一次性 · 仅当面或可信局域网传递。</p>
   `;
   body.querySelector('#invite-ttl')?.addEventListener('change', (event) => {
     const value = Number(event.currentTarget.value);
@@ -4928,6 +4936,16 @@ function formatTime(ts) {
   if (!ts) return '—';
   try {
     return new Date(ts).toLocaleString('zh-CN', { hour12: false });
+  } catch {
+    return String(ts);
+  }
+}
+
+/** 只取时分（邀请面板的「至 18:34」）。 */
+function formatClock(ts) {
+  if (!ts) return '—';
+  try {
+    return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
   } catch {
     return String(ts);
   }

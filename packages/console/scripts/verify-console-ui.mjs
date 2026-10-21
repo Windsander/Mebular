@@ -1152,15 +1152,32 @@ async function main() {
       const options = ttl ? [...ttl.options].map((o) => [o.value, o.textContent]) : [];
       const expected = [['300000','5 分钟'],['900000','15 分钟'],['1200000','20 分钟'],['7200000','2 小时'],['21600000','6 小时'],['43200000','12 小时'],['86400000','24 小时']];
       const tokenBlock = Boolean(body.querySelector('.invite-token-block [data-copy]'));
-      const qr = Boolean(body.querySelector('.qr-img')) || /二维码不可用/.test(body.textContent);
+      const qr = Boolean(body.querySelector('.invite-qr .qr-img')) || /二维码不可用/.test(body.textContent);
       return body.querySelectorAll('details').length === 0
         && !body.querySelector('#invite-endpoint') && !/fleet join/.test(body.textContent)
         && !/join 端点|默认记忆域|订阅/.test(body.textContent)
-        && tokenBlock && qr && /本忆云/.test(body.textContent) && /根指纹/.test(body.textContent)
+        && !/对方已用过|新设备|当前令牌有效至|改档后点|令牌即入网权限|扫码即通|本忆云/.test(body.textContent)
+        && tokenBlock && qr && /忆云 1/.test(body.textContent) && /根指纹/.test(body.textContent)
+        && /让对方扫码，或复制令牌。/.test(body.textContent)
+        && /一次性 · 仅当面或可信局域网传递。/.test(body.textContent)
+        && /至 \\d{2}:\\d{2}/.test(body.textContent)
+        && Boolean(body.querySelector('.invite-layout .invite-qr'))
+        && Boolean(body.querySelector('.invite-layout .invite-main'))
+        && Boolean(document.querySelector('#invite .modal-head #invite-close.modal-x'))
+        && !document.querySelector('#invite .modal-actions')
         && Boolean(ttl) && ttl.value === '900000' && JSON.stringify(options) === JSON.stringify(expected)
         && Boolean(document.querySelector('#invite-regenerate'));
     })()`));
     const beforeTtlToken = await evalJs('document.querySelector("#invite-body [data-copy]")?.dataset.copy ?? ""');
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await sleep(150);
+    check('E1 邀请 ≤520：两栏上下堆叠（QR 在上、引导/令牌/TTL 在下）', await evalJs(`(() => {
+      const qr = document.querySelector('.invite-layout .invite-qr');
+      const main = document.querySelector('.invite-layout .invite-main');
+      if (!qr || !main) return false;
+      return main.getBoundingClientRect().top >= qr.getBoundingClientRect().bottom - 1;
+    })()`));
+    await send('Emulation.clearDeviceMetricsOverride');
     await evalJs(`(() => {
       const select = document.querySelector('#invite-ttl');
       select.value = '7200000';
@@ -1185,19 +1202,21 @@ async function main() {
         const html = document.querySelector('#invite')?.outerHTML ?? '';
         return !/去设置启用/.test(html) && !/设置 → 常用/.test(html);
       })()`));
-    check('E2-A2 邀请单屏：本忆云名 + 根指纹 + 「加入忆云」指路（取 overview.cloud）',
-      await evalJs(`(() => {
+    check('E2-A2 邀请单屏：忆云名 + 根指纹（取 overview.cloud）', await evalJs(`(() => {
         const line = document.querySelector('#invite-cloud-identity');
         const body = document.querySelector('#invite-body')?.textContent ?? '';
-        return Boolean(line) && /本忆云：忆云 1/.test(line.textContent)
+        return Boolean(line) && /忆云 1/.test(line.textContent)
           && /sha256:[0-9a-f]{12}/.test(line.textContent)
-          && /让 TA 在控制台点「加入忆云」粘贴此令牌/.test(body);
+          && !/本忆云/.test(line.textContent)
+          && /让对方扫码/.test(body);
       })()`));
     await capture('e2a2-after-invite-cloud-line.jpg');
     await capture('e1-after-invite-single-screen.jpg');
     check('E1 邀请卡：详情/端点/命令/默认域与订阅说明不再出现',
       await evalJs('(() => { const t = document.querySelector("#invite-body")?.textContent ?? ""; return !/join 端点|默认记忆域|新设备.*fleet join|订阅/.test(t) && /有效期/.test(t) && /重新生成/.test(t); })()'));
-    await evalJs('document.querySelector("#invite-close").click()');
+    await evalJs('document.querySelector("#invite .modal-head #invite-close").click()');
+    check('E1 邀请右上角 X：关闭弹框；无底部「关闭」按钮',
+      await waitFor('document.querySelector("#invite")?.hidden === true && !document.querySelector("#invite .modal-actions")'));
 
     // ---------- S3 · 安全三档（活体：真实端点；先红后绿） ----------
     const { totpFingerprint, totpCodeAt, generateRecoveryCode } = await import('@mebular/fleet');

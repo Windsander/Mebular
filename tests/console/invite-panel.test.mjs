@@ -1,4 +1,4 @@
-// 邀请面板：单动作（令牌 + 二维码 + 忆云身份 + 有效期/重新生成），不再有详情折叠。
+// 邀请面板：两栏精简（左 QR / 右引导 + 令牌 + TTL），右上角 X 关闭；不再堆说明段落。
 // 静态契约 + TTL 档位单一真源断言（不启浏览器；活体见 verify:console / verify:console:ui）。
 
 import { describe, expect, it } from '@jest/globals';
@@ -14,6 +14,7 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
 const consoleJs = readFileSync(join(root, 'packages', 'console', 'console.js'), 'utf-8');
+const indexHtml = readFileSync(join(root, 'packages', 'console', 'index.html'), 'utf-8');
 const serveSrc = readFileSync(join(root, 'packages', 'mcp', 'src', 'serve.mjs'), 'utf-8');
 
 function invitePanelSource() {
@@ -22,7 +23,7 @@ function invitePanelSource() {
   return start >= 0 && end > start ? consoleJs.slice(start, end) : '';
 }
 
-describe('邀请面板 · TTL 档位与单动作结构', () => {
+describe('邀请面板 · TTL 档位与两栏结构', () => {
   it('令牌有效期档位精确：5/15/20 分钟、2/6/12/24 小时；默认 15 分钟', () => {
     expect(INVITE_TTL_OPTIONS).toEqual([
       { label: '5 分钟', ttlMs: 300_000 },
@@ -53,17 +54,57 @@ describe('邀请面板 · TTL 档位与单动作结构', () => {
     expect(IA_SETTINGS_FOLDS.map((fold) => fold.id)).toEqual(['mcp-danger', 'diagnostics', 'about-runtime']);
   });
 
-  it('保留令牌/二维码/本忆云名 + 根指纹/一句安全提示；TTL 选择 + 重新生成在面板内', () => {
+  it('两栏结构：左二维码（150–160px），右引导 + 令牌 + TTL 控件', () => {
     const panel = invitePanelSource();
+    expect(panel).toContain('class="invite-layout"');
+    expect(panel).toContain('class="invite-qr"');
+    expect(panel).toContain('class="invite-main"');
+    expect(panel).toContain('让对方扫码，或复制令牌。');
+    expect(panel).toContain('class="invite-token-block"');
     expect(panel).toContain('data-copy=');
-    expect(panel).toContain('qrBlock');
-    expect(panel).toContain('invite-cloud-identity');
-    expect(panel).toContain('根指纹');
-    expect(panel).toContain('令牌即入网权限');
-    expect(panel).toContain('重新生成后旧令牌立即失效');
+    expect(panel).toContain('qrSvg');
     expect(panel).toContain('id="invite-ttl"');
     expect(panel).toContain('id="invite-regenerate"');
+    expect(panel).toContain('id="invite-expiry"');
+    expect(panel).toContain('formatClock(res.expiresAt)');
     expect(panel).toContain('INVITE_TTL_OPTIONS');
+    const css = readFileSync(join(root, 'packages', 'console', 'console.css'), 'utf-8');
+    expect(css).toMatch(/\.qr-img \{[^}]*width: 15[0-9]px[^}]*height: 15[0-9]px/);
+    expect(css).toMatch(/\.invite-layout \{[^}]*grid-template-columns: 156px minmax\(0, 1fr\)/);
+    expect(css).toMatch(/@media \(max-width: 520px\) \{\s*\.invite-layout \{ grid-template-columns: minmax\(0, 1fr\)/);
+  });
+
+  it('细节段落已移除：无「对方已用过 / 新设备 / 当前令牌有效至 / 改档后点 / 令牌即入网权限 / 扫码即通」', () => {
+    const panel = invitePanelSource();
+    const removed = [
+      '对方已用过',
+      '新设备',
+      '当前令牌有效至',
+      '改档后点',
+      '令牌即入网权限',
+      '扫码即通',
+      '本忆云',
+      'QR 内容 = 令牌文本',
+    ];
+    for (const text of removed) expect(panel).not.toContain(text);
+    expect(panel).toContain('一次性 · 仅当面或可信局域网传递。');
+  });
+
+  it('底部一行忆云身份 + 一行安全提示；端点/会签只留短警告', () => {
+    const panel = invitePanelSource();
+    expect(panel).toContain('id="invite-cloud-identity"');
+    expect(panel).toContain('根指纹');
+    expect(panel).toContain('端点仅本机可达');
+    expect(panel).toContain('已带上会签批准。');
+    expect(panel).not.toContain('请在「设置 → 高级 → 常驻服务」');
+  });
+
+  it('右上角 X 关闭（复用 modal-x），无底部关闭按钮；点击清空 token', () => {
+    expect(indexHtml).toMatch(/<div class="modal-head">[\s\S]*?id="invite-close"[^>]*class="modal-x"/);
+    const inviteDialog = indexHtml.slice(indexHtml.indexOf('<div id="invite"'), indexHtml.indexOf('<div id="cloud-join"'));
+    expect(inviteDialog).not.toContain('modal-actions');
+    expect(inviteDialog).not.toContain('>关闭<');
+    expect(consoleJs).toMatch(/\$\('#invite-close'\)\.addEventListener\('click',[\s\S]{0,160}\$\('#invite'\)\.hidden = true;[\s\S]{0,80}state\.inviteToken = null;/);
   });
 
   it('改档不自动刷新；点重新生成才把选中的 ttlMs 传给 /admin/api/invite', () => {

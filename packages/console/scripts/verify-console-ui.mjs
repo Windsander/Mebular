@@ -384,7 +384,7 @@ async function main() {
           && large.every((id) => !document.querySelector('#' + id)?.classList.contains('modal-center'))
           && boxes.every((box) => box.classList.contains('crt-surface') && box.classList.contains('crt-corners'));
       })()`));
-    check('弹窗宽度：邀请/新建域 520（非 wide）；加入忆云 640（wide）',
+    check('弹窗宽度：邀请/新建域 520（非 wide）；加入忆云 wide（≤640）',
       await evalJs(`(() => {
         const wide = (id) => document.querySelector('#' + id + ' .modal-box')?.classList.contains('modal-box-wide');
         return wide('invite') === false && wide('namespace-new-modal') === false && wide('cloud-join') === true;
@@ -1045,6 +1045,7 @@ async function main() {
     await evalJs('document.querySelector("#settings-close").click()');
 
     // E2-A2 · 加入忆云弹层：预填名字、当前忆云提示、坏令牌可读错误、当前忆云不变
+    await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await evalJs('document.querySelector("#join-cloud").click()');
     const joinModalOk = await waitFor(`(() => {
         const modal = document.querySelector('#cloud-join');
@@ -1068,8 +1069,90 @@ async function main() {
       console.log('  [diag] E2-A2 join modal:', JSON.stringify(diag));
     }
     check('E2-A2 加入弹层：名字预填「忆云 3」+ 当前忆云归档提示 + 终端兜底文案', joinModalOk);
+    const joinDesktop = await evalJs(`(() => {
+      const modal = document.querySelector('#cloud-join');
+      const box = modal?.querySelector('.modal-box');
+      const fields = modal?.querySelector('.cloud-join-fields');
+      const inspect = modal?.querySelector('#cloud-join-inspect');
+      const x = modal?.querySelector('.modal-head #cloud-join-x.modal-x');
+      if (!box || !fields || !inspect) return { ok: false };
+      const labels = [...fields.querySelectorAll('label')].map((el) => el.textContent.trim());
+      const token = modal.querySelector('#cloud-join-token');
+      const name = modal.querySelector('#cloud-join-name');
+      return {
+        ok: true,
+        vw: window.innerWidth,
+        singleColumn: !modal.querySelector('.cloud-join-side')
+          && !modal.querySelector('.cloud-join-grid')
+          && !modal.querySelector('.cloud-join-preview'),
+        noPreviewCopy: !/令牌预览/.test(modal.textContent),
+        inspectHidden: inspect.hidden === true,
+        labels,
+        tokenFirst: token.getBoundingClientRect().top < name.getBoundingClientRect().top,
+        fullWidthFields: Math.abs(token.getBoundingClientRect().width - name.getBoundingClientRect().width) <= 1,
+        hasX: Boolean(x) && x.getBoundingClientRect().width > 0,
+        noOverflow: box.scrollWidth <= box.clientWidth + 1
+          && document.documentElement.scrollWidth <= window.innerWidth + 1,
+      };
+    })()`);
+    check('加入忆云桌面：标题/关闭 X + 单列输入流（无空预览侧栏）+ token→name + 无横向溢出',
+      joinDesktop.ok
+        && joinDesktop.singleColumn
+        && joinDesktop.noPreviewCopy
+        && joinDesktop.inspectHidden
+        && joinDesktop.hasX
+        && joinDesktop.tokenFirst
+        && joinDesktop.fullWidthFields
+        && joinDesktop.labels.length === 2
+        && joinDesktop.labels[0].includes('加入令牌')
+        && joinDesktop.labels[1].includes('忆云名字')
+        && joinDesktop.noOverflow,
+      JSON.stringify(joinDesktop));
+    check('加入忆云按钮层级：底部仅取消 + 一个主操作；结果/状态/错误不同时出现', await evalJs(`(() => {
+      const modal = document.querySelector('#cloud-join');
+      const actions = [...modal.querySelectorAll('.modal-actions .btn')];
+      const primary = [...modal.querySelectorAll('.btn-primary')];
+      return actions.length === 2
+        && actions[0].id === 'cloud-join-close' && actions[0].hidden === false && actions[0].disabled === false
+        && actions[1].id === 'cloud-join-submit' && actions[1].classList.contains('btn-primary')
+        && primary.length === 1 && primary[0] === actions[1]
+        && document.querySelector('#cloud-join-result')?.hidden === true
+        && document.querySelector('#cloud-join-error')?.hidden === true
+        && document.querySelector('#cloud-join-steps')?.hidden === true;
+    })()`));
     await capture('e2a2-after-cloud-join-modal.jpg');
     await capture('u3-after-dialog-cloud-join.jpg');
+    await capture('p8-cloud-join-desktop.jpg');
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await sleep(150);
+    const join390 = await evalJs(`(() => {
+      const modal = document.querySelector('#cloud-join');
+      const box = modal?.querySelector('.modal-box');
+      const fields = modal?.querySelector('.cloud-join-fields');
+      const inspect = modal?.querySelector('#cloud-join-inspect');
+      const token = document.querySelector('#cloud-join-token');
+      const name = document.querySelector('#cloud-join-name');
+      if (!box || !fields || !inspect || !token || !name) return { ok: false };
+      const x = modal.querySelector('.modal-head #cloud-join-x.modal-x');
+      return {
+        ok: true,
+        singleColumn: !modal.querySelector('.cloud-join-side') && !modal.querySelector('.cloud-join-grid'),
+        inspectHidden: inspect.hidden === true,
+        fieldsStacked: name.getBoundingClientRect().top >= token.getBoundingClientRect().bottom - 1,
+        tokenFirst: token.getBoundingClientRect().top < name.getBoundingClientRect().top,
+        xVisible: Boolean(x) && x.getBoundingClientRect().width > 0 && x.getBoundingClientRect().right <= window.innerWidth,
+        noBoxOverflow: box.scrollWidth <= box.clientWidth + 1,
+        noPageOverflow: document.documentElement.scrollWidth <= window.innerWidth + 1,
+      };
+    })()`);
+    check('加入忆云 390px：单列字段 token→name + 无空预览侧栏 + 关闭 X 可见 + 弹框/页面无横向溢出',
+      join390.ok && join390.singleColumn && join390.inspectHidden && join390.fieldsStacked
+        && join390.tokenFirst && join390.xVisible
+        && join390.noBoxOverflow && join390.noPageOverflow,
+      JSON.stringify(join390));
+    await capture('p8-cloud-join-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await send('Emulation.clearDeviceMetricsOverride');
+    await sleep(100);
     await evalJs(`(() => {
       document.querySelector('#cloud-join-token').value = 'not-a-join-token';
       document.querySelector('#cloud-join-token').dispatchEvent(new Event('input', { bubbles: true }));
@@ -1082,8 +1165,18 @@ async function main() {
           && document.querySelector('#cloud-join-token')?.value === 'not-a-join-token'
           && /忆云 1/.test(document.querySelector('#cloud-badge')?.textContent ?? '');
       })()`));
-    await evalJs('document.querySelector("#cloud-join-close").click()');
-    check('E2-A2 加入弹层可关闭且清空令牌', await waitFor('document.querySelector("#cloud-join")?.hidden === true && document.querySelector("#cloud-join-token")?.value === ""'));
+    check('加入忆云错误态：只显示错误，不叠状态/结果；底部仍是取消 + 主操作', await evalJs(`(() => {
+      const err = document.querySelector('#cloud-join-error');
+      const steps = document.querySelector('#cloud-join-steps');
+      const result = document.querySelector('#cloud-join-result');
+      const actions = [...document.querySelectorAll('#cloud-join .modal-actions .btn')];
+      return Boolean(err) && err.hidden === false
+        && steps?.hidden === true && result?.hidden === true
+        && actions.length === 2 && actions[0].hidden === false && actions[1].classList.contains('btn-primary');
+    })()`));
+    await evalJs('document.querySelector("#cloud-join-x").click()');
+    check('E2-A2 加入弹层关闭 X：关闭并清空令牌',
+      await waitFor('document.querySelector("#cloud-join")?.hidden === true && document.querySelector("#cloud-join-token")?.value === ""'));
 
     // E2-A2 · 深链：?view=settings&focus=clouds 直接打开常用并聚焦忆云卡
     await send('Page.navigate', { url: `${base}/console/?view=settings&focus=clouds` });
@@ -1105,8 +1198,13 @@ async function main() {
       await waitFor(`(() => {
         const box = document.querySelector('#cloud-join-inspect');
         return /这台设备已加入「忆云 1」/.test(box?.textContent ?? '')
+          && box?.hidden === false
+          && /根指纹/.test(box.textContent) && /邀请设备/.test(box.textContent)
+          && /共享域/.test(box.textContent) && /有效期至/.test(box.textContent)
+          && !document.querySelector('#cloud-join .cloud-join-side')
           && /切换到「忆云 1」/.test(document.querySelector('#cloud-join-submit')?.textContent ?? '');
       })()`, 20000));
+    await capture('p8-cloud-join-inspect-desktop.jpg');
     await evalJs('document.querySelector("#cloud-join-close").click()');
 
     // 轮 C 症状②：Esc 只关最上层；点空白关闭；设置/关于叠加时顺序正确
@@ -1147,8 +1245,24 @@ async function main() {
       await waitFor('document.querySelector("#settings")?.hidden === false && document.querySelector("#settings-panel-assistants")?.hidden === false'));
     await evalJs('document.querySelector("#settings-close").click()');
     // 邀请面板（joinService 未启用 → 就地启用；启用 → 令牌。两者都应有内容）
-    await evalJs('document.querySelector("#invite-device").click()');
+    const inviteOpen = await evalJs(`(() => {
+      document.querySelector('#invite-device').click();
+      const body = document.querySelector('#invite-body');
+      const box = document.querySelector('#invite .modal-box');
+      return {
+        skeleton: Boolean(body?.querySelector('.invite-skeleton-qr')),
+        lines: body?.querySelectorAll('.invite-skeleton-line').length ?? 0,
+        height: box?.getBoundingClientRect().height ?? 0,
+      };
+    })()`);
+    check('邀请首次打开：先出稳定骨架（QR 占位 + 多行占位），不是一行加载提示',
+      inviteOpen.skeleton && inviteOpen.lines >= 4 && inviteOpen.height >= 300,
+      JSON.stringify(inviteOpen));
     check('邀请面板打开且渲染内容（令牌或未启用提示）', await waitFor('(() => { const b = document.querySelector("#invite-body"); return Boolean(b?.querySelector("[data-copy]")) || /加入服务未启用/.test(b?.textContent ?? ""); })()'));
+    const inviteFinalHeight = await evalJs('document.querySelector("#invite .modal-box")?.getBoundingClientRect().height ?? 0');
+    check('邀请首次打开：骨架 → 结果高度差 ≤12px（弹框无明显跳动）',
+      Math.abs(inviteFinalHeight - inviteOpen.height) <= 12,
+      `skeleton=${Math.round(inviteOpen.height)} result=${Math.round(inviteFinalHeight)}`);
     await capture('u3-after-dialog-invite.jpg');
     await capture('p6b-invite-desktop.jpg');
     check('E1 邀请单屏：令牌 + 二维码/降级 + 忆云身份 + TTL；无详情/端点编辑/CLI 命令', await evalJs(`(() => {
@@ -1174,6 +1288,21 @@ async function main() {
         && Boolean(ttl) && ttl.value === '900000' && JSON.stringify(options) === JSON.stringify(expected)
         && Boolean(document.querySelector('#invite-regenerate'));
     })()`));
+    check('E1 邀请按钮层级：复制令牌唯一主操作；重新生成次级；关闭只留右上角 X', await evalJs(`(() => {
+      const copy = document.querySelector('#invite-body .invite-token-block [data-copy]');
+      const regen = document.querySelector('#invite-regenerate');
+      const primary = [...document.querySelectorAll('#invite .btn-primary')];
+      const box = document.querySelector('#invite .modal-box');
+      return Boolean(copy) && copy.classList.contains('invite-copy')
+        && copy.textContent.trim() === '复制令牌' && copy.classList.contains('btn-primary')
+        && primary.length === 1 && primary[0] === copy
+        && Boolean(regen) && !regen.classList.contains('btn-primary')
+        && !regen.classList.contains('btn-crt') && regen.textContent.trim() === '重新生成'
+        && !document.querySelector('#invite .modal-actions')
+        && /^当前令牌至 \\d{2}:\\d{2}$/.test(document.querySelector('#invite-expiry')?.textContent ?? '')
+        && Boolean(box) && box.scrollWidth <= box.clientWidth + 1
+        && document.documentElement.scrollWidth <= window.innerWidth + 1;
+    })()`));
     const beforeTtlToken = await evalJs('document.querySelector("#invite-body [data-copy]")?.dataset.copy ?? ""');
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await sleep(150);
@@ -1190,33 +1319,104 @@ async function main() {
     })()`));
     await capture('p6b-invite-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await send('Emulation.clearDeviceMetricsOverride');
-    await evalJs(`(() => {
+    await sleep(100);
+    const ttlChanged = await evalJs(`(() => {
       const select = document.querySelector('#invite-ttl');
+      const tokenBefore = document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '';
+      const clock = (ts) => new Date(ts).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
+      const beforeExpected = '重新生成后至 ' + clock(Date.now() + 7200000);
       select.value = '7200000';
       select.dispatchEvent(new Event('change', { bubbles: true }));
-      document.querySelector('#invite-regenerate').click();
+      const afterExpected = '重新生成后至 ' + clock(Date.now() + 7200000);
+      const label = document.querySelector('#invite-expiry')?.textContent ?? '';
+      return {
+        label,
+        expected: [beforeExpected, afterExpected],
+        tokenBefore,
+        tokenAfter: document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '',
+        ttl: select.value,
+        confirmOpen: document.querySelector('#modal')?.hidden === false,
+      };
     })()`);
-    check('E1 重新生成走应用内确认（#modal，非原生 confirm）',
-      await waitFor(`(() => {
-        const modal = document.querySelector('#modal');
-        const body = document.querySelector('#modal-body')?.textContent ?? '';
-        return Boolean(modal) && modal.hidden === false && /旧令牌/.test(body) && /无法再兑换/.test(body);
-      })()`));
-    await evalJs('document.querySelector("#modal-cancel").click()');
-    check('E1 取消重新生成：确认弹框关闭、旧令牌不变（取消不执行）',
-      await waitFor(`(() => {
-        const token = document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '';
-        return document.querySelector('#modal')?.hidden === true && token === ${JSON.stringify(beforeTtlToken)};
-      })()`));
-    await evalJs('document.querySelector("#invite-regenerate").click()');
-    await waitFor('document.querySelector("#modal")?.hidden === false');
-    await evalJs('document.querySelector("#modal-confirm").click()');
+    check('E1 改档只更新「重新生成后至 now+2h」预估：旧 token 不变、不弹确认',
+      ttlChanged.ttl === '7200000'
+        && ttlChanged.expected.includes(ttlChanged.label)
+        && ttlChanged.tokenAfter === ttlChanged.tokenBefore
+        && ttlChanged.confirmOpen === false,
+      JSON.stringify(ttlChanged.label));
+    await sleep(900);
+    check('E1 改档后等待仍不自动生成：旧 token 原样保留',
+      await evalJs(`document.querySelector('#invite-body [data-copy]')?.dataset.copy === ${JSON.stringify(beforeTtlToken)}`));
+    const regenBusy = await evalJs(`(() => {
+      const box = document.querySelector('#invite .modal-box');
+      const before = box.getBoundingClientRect().height;
+      const button = document.querySelector('#invite-regenerate');
+      button.click();
+      const body = document.querySelector('#invite-body');
+      return {
+        before,
+        after: box.getBoundingClientRect().height,
+        busy: body.classList.contains('is-busy'),
+        ariaBusy: body.getAttribute('aria-busy'),
+        disabled: button.disabled,
+        ttlDisabled: document.querySelector('#invite-ttl')?.disabled === true,
+        label: button.textContent,
+        confirmOpen: document.querySelector('#modal')?.hidden === false,
+      };
+    })()`);
+    check('E1 重新生成：无二次确认，点击即进入 is-busy/aria-busy + 按钮「正在更新…」',
+      regenBusy.busy && regenBusy.ariaBusy === 'true' && regenBusy.disabled
+        && regenBusy.ttlDisabled
+        && regenBusy.label === '正在更新…' && regenBusy.confirmOpen === false
+        && Math.abs(regenBusy.after - regenBusy.before) <= 12,
+      JSON.stringify(regenBusy));
     check('E1 重新生成：选中 2 小时后新令牌，选择保持（ttlMs 透传生效）',
       await waitFor(`(() => {
         const select = document.querySelector('#invite-ttl');
         const token = document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '';
         return select?.value === '7200000' && token.length > 0 && token !== ${JSON.stringify(beforeTtlToken)};
       })()`, 20000));
+    const regenAfter = await evalJs(`(() => {
+      const box = document.querySelector('#invite .modal-box');
+      const body = document.querySelector('#invite-body');
+      const token = document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '';
+      return {
+        height: box.getBoundingClientRect().height,
+        busy: body.classList.contains('is-busy'),
+        ariaBusy: body.getAttribute('aria-busy'),
+        token,
+        expiry: document.querySelector('#invite-expiry')?.textContent ?? '',
+        confirmOpen: document.querySelector('#modal')?.hidden === false,
+      };
+    })()`);
+    check('E1 重新生成：成功后原地替换结果，高度差 ≤12px，无确认弹框',
+      !regenAfter.busy && regenAfter.ariaBusy === null && regenAfter.confirmOpen === false
+        && Math.abs(regenAfter.height - regenBusy.before) <= 12
+        && regenAfter.token.length > 0,
+      `before=${Math.round(regenBusy.before)} after=${Math.round(regenAfter.height)}`);
+    const tokenState = await (async () => {
+      const { decodeJoinToken, readJoinNonceState } = await import('@mebular/fleet');
+      const oldToken = decodeJoinToken(beforeTtlToken);
+      const newToken = decodeJoinToken(regenAfter.token);
+      const joinState = await readJoinNonceState(join(home, 'store.jsonl'));
+      return {
+        oldNonce: oldToken.nonce,
+        newNonce: newToken.nonce,
+        newExpiresAt: newToken.expiresAt,
+        joinState,
+      };
+    })();
+    const newExpiryLabel = `当前令牌至 ${new Date(tokenState.newExpiresAt).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })}`;
+    const newTtlDistance = tokenState.newExpiresAt - Date.now();
+    check('E1 重新生成后「当前令牌至」对应新令牌 2h 到期',
+      regenAfter.expiry === newExpiryLabel
+        && newTtlDistance > 7000000 && newTtlDistance < 7300000,
+      `expiry=${regenAfter.expiry} distance=${Math.round(newTtlDistance / 60000)}min`);
+    check('E1 重新生成后旧令牌服务端立即失效（active=新 nonce；旧 nonce 进 revoked）',
+      tokenState.oldNonce !== tokenState.newNonce
+        && tokenState.joinState.active === tokenState.newNonce
+        && tokenState.joinState.revoked.includes(tokenState.oldNonce),
+      `active=${tokenState.joinState.active?.slice(0, 8)}… revoked=${tokenState.joinState.revoked.length}`);
     const allFoldKeys = await evalJs(`(() => [...document.querySelectorAll('#settings-body details, #about-body details, #invite-body details')]
       .map((el) => el.dataset.settingsFold ?? el.className))()`);
     check('U-1 全域折叠预算：设置 + 关于 ≤5 且均为白名单类型（邀请无折叠）', Array.isArray(allFoldKeys)
@@ -1891,13 +2091,19 @@ async function main() {
         await send('Page.navigate', { url: `${jBase}/console/` });
         check('P3 加入侧锁定态就位', await waitFor('document.querySelector("#app")?.dataset.locked === "true"'));
         await evalJs('document.querySelector("#join-cloud").click()');
-        check('P3 加入弹框：设备名 + token（复用 modal-center/head/x）', await waitFor(`(() => {
+        check('P3 加入弹框：设备名 + token（复用 modal-center/head/x）+ 字段顺序 + 必填语义', await waitFor(`(() => {
           const modal = document.querySelector('#onboard-join');
           const device = document.querySelector('#onboard-join-device');
+          const token = document.querySelector('#onboard-join-token');
+          const labels = [...(modal?.querySelectorAll('.onboard-join-fields .field label') ?? [])].map((el) => el.textContent.trim());
           return Boolean(modal) && modal.hidden === false && modal.classList.contains('modal-center')
             && Boolean(modal.querySelector('.modal-head')) && Boolean(modal.querySelector('.modal-x'))
-            && Boolean(document.querySelector('#onboard-join-token'))
-            && (device?.value ?? '').length > 0;
+            && Boolean(token) && Boolean(device)
+            && (device?.value ?? '').length > 0
+            && labels.length === 2 && labels[0].includes('设备名') && labels[1].includes('加入令牌')
+            && device.required === true && token.required === true
+            && device.getBoundingClientRect().top < token.getBoundingClientRect().top
+            && modal.querySelector('.modal-box').scrollWidth <= modal.querySelector('.modal-box').clientWidth + 1;
         })()`));
         // 坏令牌：保持锁定 + 内联错误
         await evalJs(`(() => {

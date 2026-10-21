@@ -195,21 +195,28 @@
   </div>
 
   <div id="cloud-join" class="modal modal-center" hidden>
-    <div class="modal-box modal-box-wide crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="cloud-join-title">
-      <h2 id="cloud-join-title">加入忆云 <span class="crt-tag">一次性令牌</span></h2>
-      <p class="modal-note muted">粘贴邀请方给的一次性令牌。加入不会修改当前忆云；切换后当前忆云会归档保留。</p>
-      <div class="field">
-        <label for="cloud-join-token">加入令牌</label>
-        <textarea id="cloud-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…"></textarea>
+    <div class="modal-box modal-box-wide cloud-join-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="cloud-join-title">
+      <div class="modal-head cloud-join-head">
+        <div class="modal-heading">
+          <h2 id="cloud-join-title">加入忆云 <span class="crt-tag">一次性令牌</span></h2>
+          <p class="modal-note muted cloud-join-lead">粘贴邀请方生成的一次性令牌；主密钥不会复制。</p>
+        </div>
+        <button id="cloud-join-x" class="modal-x" type="button" title="关闭" aria-label="关闭加入忆云">✕</button>
       </div>
-      <div class="field">
-        <label for="cloud-join-name">忆云名字</label>
-        <input id="cloud-join-name" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="忆云 2" />
+      <div class="cloud-join-fields">
+        <div class="field">
+          <label for="cloud-join-token">加入令牌</label>
+          <textarea id="cloud-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…"></textarea>
+        </div>
+        <div class="field">
+          <label for="cloud-join-name">忆云名字</label>
+          <input id="cloud-join-name" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="忆云 2" />
+        </div>
       </div>
-      <div id="cloud-join-inspect" class="cloud-inspect" aria-live="polite"></div>
+      <div id="cloud-join-inspect" class="cloud-inspect cloud-join-inspect" aria-live="polite" hidden></div>
       <p id="cloud-join-warning" class="cloud-warning muted"></p>
       <p id="cloud-join-steps" class="cloud-steps muted" aria-live="polite" hidden></p>
-      <div id="cloud-join-result" class="cloud-result" hidden></div>
+      <div id="cloud-join-result" class="cloud-result" aria-live="polite" hidden></div>
       <p id="cloud-join-error" class="crt-warn" role="alert" hidden></p>
       <div class="modal-actions">
         <button id="cloud-join-close" class="btn btn-crt" type="button">取消</button>
@@ -337,21 +344,23 @@
 
   <!-- P3：锁定态加入忆云（设备名 + 一次性令牌；成功同页解锁，不刷新） -->
   <div id="onboard-join" class="modal modal-center" hidden>
-    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="onboard-join-title">
+    <div class="modal-box onboard-join-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="onboard-join-title">
       <div class="modal-head">
         <div class="modal-heading">
           <h2 id="onboard-join-title">加入忆云 <span class="crt-tag">一次性令牌</span></h2>
+          <p class="modal-note muted">粘贴邀请方「邀请设备」生成的一次性令牌；不复制主密钥，加入后本机直接进入正常控制台。</p>
         </div>
         <button id="onboard-join-close" class="modal-x" type="button" title="关闭" aria-label="关闭加入忆云">✕</button>
       </div>
-      <p class="modal-note muted">粘贴邀请方「邀请设备」生成的一次性令牌。加入后取得委派证书（不复制主密钥），当前进程直接进入正常态。</p>
-      <div class="field">
-        <label for="onboard-join-device">设备名</label>
-        <input id="onboard-join-device" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="如 MacBookPro" />
-      </div>
-      <div class="field">
-        <label for="onboard-join-token">加入令牌</label>
-        <textarea id="onboard-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…"></textarea>
+      <div class="onboard-join-fields">
+        <div class="field">
+          <label for="onboard-join-device">设备名 <span class="field-required">必填</span></label>
+          <input id="onboard-join-device" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="如 MacBookPro" required aria-required="true" />
+        </div>
+        <div class="field">
+          <label for="onboard-join-token">加入令牌 <span class="field-required">必填</span></label>
+          <textarea id="onboard-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…" required aria-required="true"></textarea>
+        </div>
       </div>
       <p id="onboard-join-error" class="crt-warn" role="alert" hidden></p>
       <div class="modal-actions">

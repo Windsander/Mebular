@@ -67,8 +67,11 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     expect(panel).toContain('id="invite-ttl"');
     expect(panel).toContain('id="invite-regenerate"');
     expect(panel).toContain('id="invite-expiry"');
-    expect(panel).toContain('formatClock(res.expiresAt)');
+    expect(panel).toContain('inviteExpiryLabel(selectedTtl)');
     expect(panel).toContain('INVITE_TTL_OPTIONS');
+    expect(panel).toContain('class="btn btn-small btn-primary invite-copy"');
+    expect(panel).toContain('class="btn btn-small invite-regenerate"');
+    expect((panel.match(/btn-primary/g) ?? []).length).toBe(1);
     const css = readFileSync(join(root, 'packages', 'console', 'console.css'), 'utf-8');
     expect(css).toMatch(/\.qr-img \{[^}]*width: 15[0-9]px[^}]*height: 15[0-9]px/);
     expect(css).toMatch(/\.invite-layout \{[^}]*grid-template-columns: 156px minmax\(0, 1fr\)/);
@@ -109,24 +112,59 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     expect(consoleJs).toMatch(/\$\('#invite-close'\)\.addEventListener\('click',[\s\S]{0,160}\$\('#invite'\)\.hidden = true;[\s\S]{0,80}state\.inviteToken = null;/);
   });
 
-  it('改档不自动刷新；点重新生成才把选中的 ttlMs 传给 /admin/api/invite', () => {
-    const changeAt = consoleJs.indexOf("body.querySelector('#invite-ttl')");
-    const regenAt = consoleJs.indexOf("body.querySelector('#invite-regenerate')");
+  it('改档不自动刷新；点重新生成直接执行（无 confirmModal / window.confirm），成功后原地换结果', () => {
+    const panelStart = consoleJs.indexOf('function showInviteResult');
+    const changeAt = consoleJs.indexOf("body.querySelector('#invite-ttl')", panelStart);
+    const regenAt = changeAt >= 0 ? consoleJs.indexOf("body.querySelector('#invite-regenerate')", changeAt) : -1;
     const changeHandler = changeAt >= 0 && regenAt > changeAt ? consoleJs.slice(changeAt, regenAt) : '';
     expect(changeHandler.length).toBeGreaterThan(0);
     expect(changeHandler).not.toMatch(/openInvite\(|renderInvite\(|api\(/);
     expect(changeHandler).toContain('state.inviteTtlMs = value');
+    expect(changeHandler).toContain("expiry.textContent = inviteExpiryLabel(value)");
 
     expect(invitePanelSource()).not.toContain('window.confirm');
-    expect(consoleJs).toMatch(/invite-regenerate[\s\S]{0,420}addEventListener\('click', async \(\) => \{/);
-    expect(consoleJs).toMatch(/invite-regenerate[\s\S]{0,620}await confirmModal\(\{/);
-    expect(consoleJs).toContain("title: '重新生成令牌？'");
-    expect(consoleJs).toContain('旧令牌会立即失效，已发出的邀请将无法再兑换。');
-    expect(consoleJs).toMatch(/if \(!ok\) return;\s*\n\s*void openInvite\(state\.inviteTtlMs\)/);
-    expect(consoleJs).not.toContain('window.confirm');
-    expect(consoleJs).toMatch(/async function renderInvite\(ttlMs = state\.inviteTtlMs\)[\s\S]{0,260}body: \{ ttlMs \}/);
+    expect(consoleJs).not.toContain('重新生成令牌？');
+    const regenHandler = regenAt >= 0 ? consoleJs.slice(regenAt, regenAt + 700) : '';
+    expect(regenHandler).toContain("renderInvite(state.inviteTtlMs, { keepPanel: true })");
+    expect(regenHandler).not.toContain('confirmModal');
+    expect(regenHandler).not.toContain('window.confirm');
+    expect(consoleJs).toContain('已重新生成，旧令牌已失效');
+    expect(consoleJs).toContain('换新令牌后旧的立即失效，已发出的邀请将无法再兑换。');
+    expect(consoleJs).toMatch(/async function renderInvite\(ttlMs = state\.inviteTtlMs, \{ keepPanel = false \} = \{\}\)/);
+    expect(consoleJs).toMatch(/body\.classList\.add\('is-busy'\)/);
+    expect(consoleJs).toMatch(/body\.setAttribute\('aria-busy', 'true'\)/);
+    expect(consoleJs).toContain("button.textContent = '正在更新…'");
+    expect(consoleJs).toContain('重新生成失败：');
+    expect(consoleJs).toMatch(/async function renderInvite\(ttlMs = state\.inviteTtlMs[\s\S]{0,1800}body: \{ ttlMs \}/);
     expect(consoleJs).toMatch(/body: \{ code, ttlMs: selectedTtl \}/);
     expect(consoleJs).toMatch(/body: \{ approvalId, namespace: inviteNamespace\(\), ttlMs: selectedTtl \}/);
+  });
+
+  it('TTL 改档只更新「重新生成后至」预估，不重新生成；当前 TTL 显示现令牌到期', () => {
+    const start = consoleJs.indexOf('function inviteExpiryLabel');
+    const end = consoleJs.indexOf('/** 令牌结果面板', start);
+    const helper = start >= 0 && end > start ? consoleJs.slice(start, end) : '';
+    expect(helper.length).toBeGreaterThan(0);
+    expect(helper).toContain('当前令牌至 ${formatClock(current.expiresAt)}');
+    expect(helper).toContain('重新生成后至 ${formatClock(Date.now() + ttlMs)}');
+    expect(helper).toContain('Number(current.ttlMs) === Number(ttlMs)');
+    expect(consoleJs).not.toContain('改档后点');
+  });
+
+  it('首次打开先渲染稳定骨架（QR 占位 + 多行占位），不显示一行「正在生成令牌」小框', () => {
+    const start = consoleJs.indexOf('function inviteSkeletonHtml');
+    const end = consoleJs.indexOf('async function openInvite', start);
+    const skeleton = start >= 0 && end > start ? consoleJs.slice(start, end) : '';
+    expect(skeleton.length).toBeGreaterThan(0);
+    expect(skeleton).toContain('invite-skeleton-qr');
+    expect(skeleton).toContain('invite-skeleton-line-lg');
+    expect((skeleton.match(/invite-skeleton-line/g) ?? []).length).toBeGreaterThanOrEqual(4);
+    expect(skeleton).toContain('正在生成令牌…');
+    expect(skeleton).toContain('换新令牌后旧的立即失效');
+    expect(consoleJs).toMatch(/body\.innerHTML = inviteSkeletonHtml\(\)/);
+    const css = readFileSync(join(root, 'packages', 'console', 'console.css'), 'utf-8');
+    expect(css).toMatch(/#invite \.modal-box \{[^}]*min-height: min\(390px, calc\(100vh - 48px\)\)/);
+    expect(css).toMatch(/\.invite-skeleton-qr \{[^}]*width: 156px[^}]*height: 156px/);
   });
 
   it('守护生成令牌时激活 nonce（撤销旧 active）；回环提示指向高级设置而非面板编辑', () => {

@@ -4276,6 +4276,40 @@ $('#handoff-confirm').addEventListener('click', confirmHandoff);
 
 // ---------- 邀请设备（T2 令牌加入：主密钥不复制） ----------
 
+function clearInviteBusy() {
+  const body = $('#invite-body');
+  if (!body) return;
+  body.classList.remove('is-busy');
+  body.removeAttribute('aria-busy');
+}
+
+/** 首次打开的稳定骨架：QR 占位 + 多行占位，高度与结果面板近似，避免弹框先小后大。 */
+function inviteSkeletonHtml() {
+  return `
+    <div class="invite-layout is-skeleton" aria-hidden="true">
+      <div class="invite-qr"><div class="invite-skeleton-qr"></div></div>
+      <div class="invite-main">
+        <p class="invite-skeleton-line invite-skeleton-line-lg"></p>
+        <div class="invite-token-block">
+          <span class="invite-label">一次性令牌</span>
+          <p class="invite-skeleton-line invite-skeleton-code"></p>
+          <p class="invite-skeleton-line invite-skeleton-copy"></p>
+        </div>
+        <div class="invite-controls invite-skeleton-controls">
+          <span class="invite-skeleton-line invite-skeleton-ttl"></span>
+          <span class="invite-skeleton-line invite-skeleton-expiry"></span>
+          <span class="invite-skeleton-line invite-skeleton-regen"></span>
+        </div>
+      </div>
+    </div>
+    <div class="invite-foot" aria-hidden="true">
+      <p class="invite-skeleton-line invite-skeleton-line-sm"></p>
+      <p class="invite-safety">一次性 · 仅当面或可信局域网传递。换新令牌后旧的立即失效，已发出的邀请将无法再兑换。</p>
+    </div>
+    <p class="invite-loading-note muted" role="status">正在生成令牌…</p>
+  `;
+}
+
 async function openInvite(ttlMs = state.inviteTtlMs) {
   const selectedTtl = INVITE_TTL_OPTIONS.some((option) => option.ttlMs === ttlMs)
     ? ttlMs
@@ -4319,18 +4353,64 @@ async function openInvite(ttlMs = state.inviteTtlMs) {
   await renderInvite(selectedTtl);
 }
 
-async function renderInvite(ttlMs = state.inviteTtlMs) {
+/**
+ * 生成/刷新令牌。
+ * - 首次打开（或没有可保留的结果面板）：先渲染稳定骨架；
+ * - 重新生成（keepPanel=true）：不替换现有结果 DOM，只标记 is-busy/aria-busy 并禁用按钮；
+ *   成功后原地替换结果，失败保留旧面板并给 inline 错误。
+ */
+async function renderInvite(ttlMs = state.inviteTtlMs, { keepPanel = false } = {}) {
   const body = $('#invite-body');
+  const canKeep = keepPanel && Boolean(body?.querySelector('.invite-layout'));
   $('#invite').hidden = false;
-  body.innerHTML = '<p class="muted">正在生成令牌…</p>';
+  let button = null;
+  let ttlSelect = null;
+  if (canKeep) {
+    body.classList.add('is-busy');
+    body.setAttribute('aria-busy', 'true');
+    button = body.querySelector('#invite-regenerate');
+    if (button) {
+      button.disabled = true;
+      button.dataset.label = button.textContent;
+      button.textContent = '正在更新…';
+    }
+    ttlSelect = body.querySelector('#invite-ttl');
+    if (ttlSelect) ttlSelect.disabled = true;
+    const regenError = body.querySelector('#invite-regen-error');
+    if (regenError) {
+      regenError.hidden = true;
+      regenError.textContent = '';
+    }
+  } else {
+    clearInviteBusy();
+    body.innerHTML = inviteSkeletonHtml();
+  }
   try {
     const res = await api('/admin/api/invite', {
       method: 'POST',
       body: { ttlMs },
     });
     showInviteResult(res);
+    if (canKeep) showToast('已重新生成，旧令牌已失效');
   } catch (error) {
-    showInviteError(error);
+    if (!canKeep) {
+      showInviteError(error);
+      return;
+    }
+    clearInviteBusy();
+    if (button) {
+      button.disabled = false;
+      button.textContent = button.dataset.label ?? '重新生成';
+      delete button.dataset.label;
+    }
+    if (ttlSelect) ttlSelect.disabled = false;
+    const regenError = body.querySelector('#invite-regen-error');
+    if (regenError) {
+      regenError.textContent = `重新生成失败：${error.message}。仍显示上一个令牌。`;
+      regenError.hidden = false;
+    } else {
+      showToast(`重新生成失败：${error.message}`);
+    }
   }
 }
 
@@ -4338,6 +4418,7 @@ async function renderInvite(ttlMs = state.inviteTtlMs) {
 async function inviteEnableJoinService(button) {
   if (MOCK) { showToast('mock 模式不执行写操作。'); return; }
   const body = $('#invite-body');
+  clearInviteBusy();
   const field = fieldOf('joinService.enabled');
   if (button) {
     button.disabled = true;
@@ -4367,6 +4448,7 @@ async function inviteEnableJoinService(button) {
 /** 配置已写入但当前实例未重启：给出既有「一键重启」与「重试」两条路。 */
 function showInvitePendingRestart() {
   const body = $('#invite-body');
+  clearInviteBusy();
   const pending = pendingRestartItems().some((item) => item.path === 'joinService.enabled');
   const writes = state.features?.writes && !MOCK;
   body.innerHTML = `
@@ -4388,6 +4470,7 @@ function showInvitePendingRestart() {
 function showInviteError(error) {
   const body = $('#invite-body');
   state.inviteToken = null;
+  clearInviteBusy();
   $('#invite').hidden = false;
   if (error.payload?.error === 'join_disabled' || error.status === 409) {
     const writes = state.features?.writes && !MOCK;
@@ -4406,10 +4489,20 @@ function showInviteError(error) {
   }
 }
 
+/** 邀请有效期文案：当前 TTL = 已出令牌 TTL 时显示现令牌到期；改档后显示预估的「重新生成后至」。 */
+function inviteExpiryLabel(ttlMs = state.inviteTtlMs) {
+  const current = state.inviteToken;
+  if (current && current.expiresAt && Number(current.ttlMs) === Number(ttlMs)) {
+    return `当前令牌至 ${formatClock(current.expiresAt)}`;
+  }
+  return `重新生成后至 ${formatClock(Date.now() + ttlMs)}`;
+}
+
 /** 令牌结果面板（low 直接出；medium/high 门槛通过后复用同一面板）。 */
 function showInviteResult(res) {
   const body = $('#invite-body');
   state.inviteToken = res;
+  clearInviteBusy();
   $('#invite').hidden = false;
   // 令牌很长：显示截断，复制按钮携带完整值
   const shortToken = res.token.length > 40 ? `${res.token.slice(0, 24)}…${res.token.slice(-8)}` : res.token;
@@ -4448,36 +4541,35 @@ function showInviteResult(res) {
         <p class="invite-lead">扫码加入，或复制令牌发给对方。</p>
         <div class="invite-token-block">
           <span class="invite-label">一次性令牌</span>
-          <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
+          <code class="invite-token-code">${escapeHtml(shortToken)}</code>
+          <button class="btn btn-small btn-primary invite-copy" data-copy="${escapeHtml(res.token)}" title="复制完整令牌">复制令牌</button>
         </div>
         <div class="invite-controls">
           <label class="invite-ttl" for="invite-ttl"><span class="invite-label">有效期</span>
             <select id="invite-ttl" class="crt-input">${ttlOptions}</select>
           </label>
-          <span class="invite-expiry" id="invite-expiry">至 ${escapeHtml(formatClock(res.expiresAt))}</span>
-          <button class="btn btn-small btn-crt" id="invite-regenerate" type="button">重新生成</button>
+          <span class="invite-expiry" id="invite-expiry">${escapeHtml(inviteExpiryLabel(selectedTtl))}</span>
+          <button class="btn btn-small invite-regenerate" id="invite-regenerate" type="button">重新生成</button>
         </div>
         ${warningLine}
+        <p class="invite-regen-error crt-warn" id="invite-regen-error" role="alert" hidden></p>
       </div>
     </div>
     <div class="invite-foot">
       ${cloudLine}
-      <p class="invite-safety">一次性 · 仅当面或可信局域网传递。换新令牌后旧的立即失效。</p>
+      <p class="invite-safety">一次性 · 仅当面或可信局域网传递。换新令牌后旧的立即失效，已发出的邀请将无法再兑换。</p>
     </div>
   `;
   body.querySelector('#invite-ttl')?.addEventListener('change', (event) => {
     const value = Number(event.currentTarget.value);
-    if (INVITE_TTL_OPTIONS.some((option) => option.ttlMs === value)) state.inviteTtlMs = value;
+    if (!INVITE_TTL_OPTIONS.some((option) => option.ttlMs === value)) return;
+    state.inviteTtlMs = value;
+    const expiry = body.querySelector('#invite-expiry');
+    if (expiry) expiry.textContent = inviteExpiryLabel(value);
   });
-  body.querySelector('#invite-regenerate')?.addEventListener('click', async () => {
-    // 旧令牌作废不可逆：应用内确认；取消 / Esc / 点空白都不重新生成。
-    const ok = await confirmModal({
-      title: '重新生成令牌？',
-      body: '旧令牌会立即失效，已发出的邀请将无法再兑换。',
-      confirmLabel: '重新生成',
-    });
-    if (!ok) return;
-    void openInvite(state.inviteTtlMs);
+  body.querySelector('#invite-regenerate')?.addEventListener('click', () => {
+    // 不再二次确认：点击即生成新令牌；旧令牌由服务端 activateJoinInvite 立即撤销。
+    void renderInvite(state.inviteTtlMs, { keepPanel: true });
   });
   body.querySelectorAll('[data-copy]').forEach((button) => {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
@@ -4806,6 +4898,11 @@ function syncCloudJoinMeta() {
 function updateCloudJoinSubmitState() {
   const button = $('#cloud-join-submit');
   if (!button) return;
+  const cancel = $('#cloud-join-close');
+  if (cancel) {
+    cancel.hidden = Boolean(state.cloudJoinResult);
+    cancel.disabled = cloudJoinBusy;
+  }
   const duplicate = state.cloudJoinInspect?.data?.alreadyJoined ?? null;
   if (state.cloudJoinResult) {
     button.disabled = false;
@@ -4827,7 +4924,7 @@ function resetCloudJoin() {
   const token = $('#cloud-join-token');
   if (token) token.value = '';
   const inspect = $('#cloud-join-inspect');
-  if (inspect) inspect.innerHTML = '';
+  if (inspect) { inspect.innerHTML = ''; inspect.hidden = true; }
   const error = $('#cloud-join-error');
   if (error) { error.hidden = true; error.innerHTML = ''; }
   const steps = $('#cloud-join-steps');
@@ -4867,6 +4964,10 @@ function showCloudJoinError(error) {
   const el = $('#cloud-join-error');
   const { title, detail } = cloudErrorCopy(error);
   if (!el) return;
+  const steps = $('#cloud-join-steps');
+  if (steps) { steps.hidden = true; steps.textContent = ''; }
+  const result = $('#cloud-join-result');
+  if (result) result.hidden = true;
   el.innerHTML = `<strong>${escapeHtml(title)}</strong>${detail ? `<span class="cloud-error-detail">${escapeHtml(detail)}</span>` : ''}`;
   el.hidden = false;
 }
@@ -4875,13 +4976,20 @@ function renderCloudJoinInspect() {
   const el = $('#cloud-join-inspect');
   if (!el) return;
   const inspected = state.cloudJoinInspect;
-  if (!inspected) { el.innerHTML = ''; updateCloudJoinSubmitState(); return; }
-  if (inspected.error) {
-    // 预览只负责成功态（指纹/重复检测）；令牌错误在提交时给一条可读错误，避免同一文案出现两次。
+  if (!inspected) {
     el.innerHTML = '';
+    el.hidden = true;
     updateCloudJoinSubmitState();
     return;
   }
+  if (inspected.error) {
+    // 预览只负责成功态（指纹/重复检测）；令牌错误在提交时给一条可读错误，避免同一文案出现两次。
+    el.innerHTML = '';
+    el.hidden = true;
+    updateCloudJoinSubmitState();
+    return;
+  }
+  el.hidden = false;
   const fingerprint = inspected.data.masterFingerprint
     ? `<code>${escapeHtml(inspected.data.masterFingerprint)}</code>`
     : '<span class="kv-empty">未知</span>';
@@ -4925,6 +5033,10 @@ function renderCloudJoinResult() {
   const result = $('#cloud-join-result');
   const joined = state.cloudJoinResult;
   if (!result || !joined?.profile) return;
+  const errorEl = $('#cloud-join-error');
+  if (errorEl) { errorEl.hidden = true; errorEl.innerHTML = ''; }
+  const stepsEl = $('#cloud-join-steps');
+  if (stepsEl) { stepsEl.hidden = true; stepsEl.textContent = ''; }
   const name = joined.profile.name;
   const oldName = state.clouds?.profiles?.find((entry) => entry.id === joined.current)?.name
     ?? state.overview?.cloud?.name
@@ -4992,14 +5104,13 @@ async function submitCloudJoin() {
     const input = $('#cloud-join-token');
     if (input) input.value = '';
     renderCloudJoinInspect();
-    cloudJoinStep(hasCloudSwitchBridge() ? '正在切换…' : '已加入；当前忆云未变');
+    cloudJoinStep('');
     renderCloudJoinResult();
     cloudJoinBusy = false;
     updateCloudJoinSubmitState();
     if (!hasCloudSwitchBridge()) await refresh();
     if (hasCloudSwitchBridge()) {
       await performCloudSwitch(res.profile.id, res.profile.name);
-      cloudJoinStep('');
     }
   } catch (error) {
     cloudJoinBusy = false;
@@ -5020,6 +5131,7 @@ async function submitCloudJoin() {
 $('#cloud-join-token')?.addEventListener('input', scheduleCloudInspect);
 $('#cloud-join-token')?.addEventListener('paste', () => setTimeout(scheduleCloudInspect, 0));
 $('#cloud-join-name')?.addEventListener('input', () => { state.cloudJoinNameAuto = false; });
+$('#cloud-join-x')?.addEventListener('click', () => closeCloudJoin());
 $('#cloud-join-submit')?.addEventListener('click', () => { void submitCloudJoin(); });
 
 // P3：锁定态设备卡整卡禁用——点击给统一 toast（含关闭按钮），不展示/不操作数据。

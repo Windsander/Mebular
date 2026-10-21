@@ -13,7 +13,7 @@
 <body>
   <div id="app" class="app">
     <header class="topbar">
-      <div class="brand"><span class="brand-star">✦</span> Mebular 控制台</div>
+      <div class="brand"><span class="brand-star">✦</span> <span data-i18n="app.brand">Mebular 控制台</span></div>
       <button id="cloud-badge" class="badge badge-cloud badge-button" type="button" title="打开设置 · 忆云" aria-label="打开设置 · 忆云" hidden></button>
       <div class="topbar-identity">
         <button id="self-badge" class="badge badge-self badge-button" type="button" title="打开「关于本机」" aria-label="打开关于本机">本机 · …</button>
@@ -22,20 +22,20 @@
         <span id="memory-badge" class="badge badge-muted">记忆 …</span>
       </div>
       <div class="topbar-actions">
-        <button id="open-settings" class="btn" type="button" title="设置" aria-label="设置"><span class="btn-ico">⚙</span><span class="btn-label">设置</span><span id="settings-pending-badge" class="badge badge-warn" hidden></span></button>
-        <button id="join-cloud" class="btn" type="button" title="加入忆云" aria-label="加入忆云"><span class="btn-ico" aria-hidden="true"><svg class="cloud-mark" viewBox="0 0 16 16" fill="none"><path d="M4.6 12.2h6.9a2.7 2.7 0 0 0 .4-5.37A4.2 4.2 0 0 0 3.4 7.1a2.6 2.6 0 0 0 1.2 5.1Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="btn-label">加入忆云</span></button>
-        <button id="invite-device" class="btn btn-primary" type="button" title="邀请设备" aria-label="邀请设备"><span class="btn-ico">＋</span><span class="btn-label">邀请设备</span></button>
-        <button id="create-cloud" class="btn btn-primary" type="button" title="新建忆云" aria-label="新建忆云" hidden><span class="btn-ico">＋</span><span class="btn-label">新建忆云</span></button>
+        <button id="open-settings" class="btn" type="button" title="设置" aria-label="设置" data-i18n-title="topbar.settings" data-i18n-aria-label="topbar.settings"><span class="btn-ico">⚙</span><span class="btn-label" data-i18n="topbar.settings">设置</span><span id="settings-pending-badge" class="badge badge-warn" hidden></span></button>
+        <button id="join-cloud" class="btn" type="button" title="加入忆云" aria-label="加入忆云" data-i18n-title="topbar.joinCloud" data-i18n-aria-label="topbar.joinCloud"><span class="btn-ico" aria-hidden="true"><svg class="cloud-mark" viewBox="0 0 16 16" fill="none"><path d="M4.6 12.2h6.9a2.7 2.7 0 0 0 .4-5.37A4.2 4.2 0 0 0 3.4 7.1a2.6 2.6 0 0 0 1.2 5.1Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="btn-label" data-i18n="topbar.joinCloud">加入忆云</span></button>
+        <button id="invite-device" class="btn btn-primary" type="button" title="邀请设备" aria-label="邀请设备" data-i18n-title="topbar.invite" data-i18n-aria-label="topbar.invite"><span class="btn-ico">＋</span><span class="btn-label" data-i18n="topbar.invite">邀请设备</span></button>
+        <button id="create-cloud" class="btn btn-primary" type="button" title="新建忆云" aria-label="新建忆云" data-i18n-title="topbar.createCloud" data-i18n-aria-label="topbar.createCloud" hidden><span class="btn-ico">＋</span><span class="btn-label" data-i18n="topbar.createCloud">新建忆云</span></button>
       </div>
     </header>
 
     <div class="layout">
       <nav class="sidebar">
         <ul id="view-nav" class="view-tabs">
-          <li><button class="view-btn is-active" data-view="map" type="button"><span class="view-icon">●</span><span class="view-label">星图</span></button></li>
-          <li><button class="view-btn" data-view="domains" type="button"><span class="view-icon">○</span><span class="view-label">共享</span></button></li>
-          <li><button class="view-btn" data-view="memories" type="button"><span class="view-icon">○</span><span class="view-label">记忆</span></button></li>
-          <li><button class="view-btn" data-view="audit" type="button"><span class="view-icon">○</span><span class="view-label">审计</span></button></li>
+          <li><button class="view-btn is-active" data-view="map" type="button"><span class="view-icon">●</span><span class="view-label" data-i18n="nav.map">星图</span></button></li>
+          <li><button class="view-btn" data-view="domains" type="button"><span class="view-icon">○</span><span class="view-label" data-i18n="nav.domains">共享</span></button></li>
+          <li><button class="view-btn" data-view="memories" type="button"><span class="view-icon">○</span><span class="view-label" data-i18n="nav.memories">记忆</span></button></li>
+          <li><button class="view-btn" data-view="audit" type="button"><span class="view-icon">○</span><span class="view-label" data-i18n="nav.audit">审计</span></button></li>
         </ul>
         <section id="legend-panel" class="legend-panel crt-surface crt-corners is-collapsed">
           <button id="legend-toggle" class="legend-head" type="button" aria-expanded="false" aria-controls="legend-body">
@@ -159,10 +159,10 @@
   </div>
 
   <div id="settings" class="modal" hidden>
-    <div class="modal-box modal-box-wide modal-settings crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="本机设置">
+    <div class="modal-box modal-box-wide modal-settings crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="本机设置" data-i18n-aria-label="settings.aria">
       <div class="modal-head">
         <div class="modal-heading">
-          <h2>本机设置</h2>
+          <h2 data-i18n="settings.title">本机设置</h2>
           <p class="settings-apply-note muted">改动即生效：需重启的项会自动重启，即时项就地生效。</p>
         </div>
         <button id="settings-close" class="modal-x" type="button" title="关闭" aria-label="关闭设置">✕</button>

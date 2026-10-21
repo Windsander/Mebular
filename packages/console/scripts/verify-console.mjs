@@ -298,7 +298,7 @@ try {
   }
   check('/console 下发 CSRF cookie 与响应头', (index.headers.get('set-cookie') ?? '').includes('mebular_csrf=') && Boolean(index.headers.get('x-mebular-csrf')));
 
-  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['assistants.js', 'text/javascript'], ['settings-ia.js', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript'], ['nebula.js', 'text/javascript'], ['stars.js', 'text/javascript']]) {
+  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['assistants.js', 'text/javascript'], ['settings-ia.js', 'text/javascript'], ['i18n.mjs', 'text/javascript'], ['messages/zh-CN.mjs', 'text/javascript'], ['messages/en-US.mjs', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript'], ['nebula.js', 'text/javascript'], ['stars.js', 'text/javascript']]) {
     const res = await fetch(`http://127.0.0.1:${port}/console/${file}`);
     check(`静态资源 /console/${file} 200`, res.status === 200 && (res.headers.get('content-type') ?? '').includes(mime), `status=${res.status}`);
   }
@@ -2041,8 +2041,8 @@ try {
       !consoleSrcV4.includes('auditNoteHtml') && !consoleSrcV4.includes('auditIdHtml')
         && !consoleSrcV4.includes('isAutoGrantEvent') && !consoleSrcV4.includes('auditAutoGroupHtml'));
     check('§7 UI：导航序与命名（星图/共享/记忆/审计；data-view 切换契约不变）',
-      htmlSrcV4.includes('<span class="view-label">共享</span>')
-        && !htmlSrcV4.includes('<span class="view-label">记忆共享</span>')
+      htmlSrcV4.includes('<span class="view-label" data-i18n="nav.domains">共享</span>')
+        && !htmlSrcV4.includes('>记忆共享</span>')
         && htmlSrcV4.indexOf('data-view="memories"') < htmlSrcV4.indexOf('data-view="audit"'));
     check('v4 UI：记忆过滤 checkbox 有 accessible name（a11y）',
       htmlSrcV4.includes('id="mem-filter-archived" type="checkbox" aria-label="显示已归档"')

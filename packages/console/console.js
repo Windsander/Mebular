@@ -12,6 +12,7 @@ import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
 import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINES, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE, SECURITY_LEVEL_NOTE, SECURITY_BOUNDARY, SECURITY_TOTP_FOOT, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
+import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, isI18nReady, formatTime as formatLocaleTime, formatDateTime as formatLocaleDateTime } from './i18n.mjs';
 
 const $ = (selector) => document.querySelector(selector);
 const params = new URLSearchParams(location.search);
@@ -78,6 +79,18 @@ const state = {
 };
 
 const stage = new StarStage($('#stage'));
+
+// i18n foundation：首帧同步静态顶栏/导航；语言变化时重渲染当前页与已开设置/关于弹层（不 reload）。
+// catalog 未就绪时强制停留在 zh-CN（即使系统语言是英文），避免普通用户看到半套英文；
+// ?lang= / ?i18n=1 / 桌面壳 i18nReady 会打开就绪开关，此时才采用系统语言。
+if (!isI18nReady() && getLocale() !== 'zh-CN') setLocale('zh-CN', { persist: false });
+applyStaticI18n(document);
+onLocaleChange(() => {
+  applyStaticI18n(document);
+  lastSettingsSignature = null;
+  lastAboutSignature = null;
+  render();
+});
 
 // ---------- 网络 ----------
 
@@ -1324,6 +1337,7 @@ let lastSettingsSignature = null;
 function settingsSignature(activeTab) {
   return JSON.stringify([
     activeTab,
+    getLocale(),
     state.settings ?? null,
     state.security ?? null,
     state.rawConfig ?? null,
@@ -1382,15 +1396,20 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     ? new Set([...body.querySelectorAll('details[open]')].map(settingsFoldKey).filter(Boolean))
     : new Set();
   const s = state.settings;
+  const tabLabel = (tab) => {
+    const key = `settings.tab.${tab.id}`;
+    const label = t(key);
+    return label === key ? tab.label : label;
+  };
   const tabButton = (tab) => `<button id="settings-tab-${tab.id}" class="settings-tab${tab.id === activeTab ? ' is-active' : ''}"`
-    + ` data-settings-tab="${tab.id}" type="button" role="tab" aria-selected="${tab.id === activeTab}" aria-controls="settings-panel-${tab.id}">${escapeHtml(tab.label)}</button>`;
+    + ` data-settings-tab="${tab.id}" type="button" role="tab" aria-selected="${tab.id === activeTab}" aria-controls="settings-panel-${tab.id}">${escapeHtml(tabLabel(tab))}</button>`;
   const panel = (id, inner) => `<section id="settings-panel-${id}" class="settings-panel" data-settings-panel="${id}" role="tabpanel"`
     + ` aria-labelledby="settings-tab-${id}"${id === activeTab ? '' : ' hidden'}>${inner}</section>`;
   if (!s) {
     // ?mock=1 无 settings 载荷：仍渲染五页签与安全卡（无网络验收路径；其余设置保持加载态）
     if (MOCK && state.security) {
       body.innerHTML = `
-        <div class="settings-tabs" role="tablist" aria-label="设置页签">${IA_TABS.map(tabButton).join('')}${
+        <div class="settings-tabs" role="tablist" aria-label="设置页签" data-i18n-aria-label="settings.tabsAria">${IA_TABS.map(tabButton).join('')}${
           IA_SETTINGS_EXTRA.map((item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.label)}</button>`).join('')
         }</div>
         <div class="settings-scroll">
@@ -1413,11 +1432,12 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   body.innerHTML = `
     ${pendingRestartBanner()}
     ${applyResultBanner()}
-    <div class="settings-tabs" role="tablist" aria-label="设置页签">${IA_TABS.map(tabButton).join('')}${
+    <div class="settings-tabs" role="tablist" aria-label="设置页签" data-i18n-aria-label="settings.tabsAria">${IA_TABS.map(tabButton).join('')}${
       IA_SETTINGS_EXTRA.map((item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.label)}</button>`).join('')
     }</div>
     <div class="settings-scroll">
     ${panel('common', `
+      ${languageSettingsRowHtml()}
       <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
       ${wizardRowHtml(typeof window.mebularDesktop?.openWizard === 'function')}
       <section class="settings-section" data-settings-common-status>
@@ -2407,6 +2427,7 @@ function renderAbout() {
   }
   // 同一类轮询重建保护：内容未变则跳过，避免滚动位置/文本选择被冲掉
   const signature = JSON.stringify([
+    getLocale(),
     state.settings ?? null,
     state.rawConfig ?? null,
     state.healthz ?? null,
@@ -4233,6 +4254,12 @@ $('#settings-body').addEventListener('click', (event) => {
     return;
   }
 });
+$('#settings-body').addEventListener('change', (event) => {
+  const select = event.target.closest?.('[data-language-select]');
+  if (!select) return;
+  // 选择即生效：setLocale → onLocaleChange 重渲染当前页/已开设置与关于弹层；不 reload、不跳页。
+  setLocale(select.value, { persist: true });
+});
 $('#settings-body').addEventListener('input', (event) => {
   if (event.target?.matches?.('[data-cloud-rename-input]')) {
     if (state.cloudRename) state.cloudRename.name = event.target.value;
@@ -5349,21 +5376,13 @@ async function wizardNext() {
 
 function formatTime(ts) {
   if (!ts) return '—';
-  try {
-    return new Date(ts).toLocaleString('zh-CN', { hour12: false });
-  } catch {
-    return String(ts);
-  }
+  return formatLocaleDateTime(ts);
 }
 
 /** 只取时分（邀请面板的「至 18:34」）。 */
 function formatClock(ts) {
   if (!ts) return '—';
-  try {
-    return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
-  } catch {
-    return String(ts);
-  }
+  return formatLocaleTime(ts);
 }
 
 function escapeHtml(value) {

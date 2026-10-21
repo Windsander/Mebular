@@ -245,21 +245,25 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 
 ## 8. 发布前验证记录
 
-验证对象：**当前 integration** `feat/onboarding-v2`（P1 `838eafa` + P2 `dd15e2c` + P3 `1037a85`
-+ P4 `9b45e96`），基线 `5daf4fe`，执行日期 2026-10-21。以下记录以当前 ONBOARDING 门禁为准，
-不复用旧 `m0/release-v010` 基线数字。
+验证对象：**当前 integration** `feat/onboarding-v2`（P1–P6 + service-home 修复 + MCP SDK 2.3.1），
+基线 `5daf4fe`，执行日期 2026-10-21。以下记录以当前 ONBOARDING 门禁为准，不复用旧
+`m0/release-v010` 基线数字。
 
 | 命令 | 结果 | 关键输出 |
 | --- | --- | --- |
-| `npm run test:coverage` | ✅ P4 独立复核 | **165 suites / 1455 tests** 全过；覆盖率门槛保持 package.json 配置 |
-| `npm run verify:console:ui` | ✅ P4 独立复核 | **210/210** checks |
-| `npm run desktop:smoke` | ✅ P4 独立复核 | **17/17** checks |
-| `npm run verify:onboarding` | ✅ P4 独立复核 | **36/36** checks；覆盖引导态 / 建新 / 加入 / 错误可读，含同进程热初始化与 MCP 未初始化行为 |
-| `npm run check:docs` | ✅ P5 本次 | 7/7；README EN/CN 标题结构、互链、无手写测试数字、CI badge、工具名在册、本地链接存在 |
-| `npm run lint` / `npm run verify:mcp:publish` | ⏳ 待 release 流水线 | 本次 P5 只改文档；发布前必须在 `release/v0.1.0` 由 Publish verify 重跑 |
+| `npm test -- --runInBand` | ✅ 最终 integration | **166 suites / 1474 tests** 全过 |
+| `npm run verify:console:ui` | ✅ 最终 integration | **214/214** checks（含 P6A/P6B 锁定态、邀请确认、无 reload） |
+| `npm run desktop:smoke` | ✅ 最终 integration | **21/21** checks（本机 Electron 可用；含原地导航/确认逻辑） |
+| `npm run verify:onboarding` | ✅ 最终 integration | **36/36** checks；覆盖引导态 / 建新 / 加入 / 错误可读，含同进程热初始化与 MCP 未初始化行为 |
+| P2 MCP facade | ✅ 最终 integration | **3 suites / 18 tests**；SDK 2.3.1 下 initialize/list 与 READY 恢复 |
+| `npm audit --omit=dev` | ✅ 最终 integration | **0 vulnerabilities**（2.0.0 的 high 已由 2.3.1 修复） |
+| `npm run check:docs` | ✅ P6B | 7/7；README EN/CN 标题结构、互链、无手写测试数字、CI badge、工具名在册、本地链接存在 |
+| 真实 Electron E2E | ✅ 独立走查 | 一键部署 → 锁定控制台 → 新建「E2E 忆云」→ 同页解锁；daemon PID 不变，导航仅 wizard→console 1 次 |
+| `npm run lint` / `npm run verify:mcp:publish` | ⏳ 待 release 流水线 | 发布前必须在 `release/v0.1.0` 由 Publish verify 重跑 |
 
-> 第 8 节记录的是当前 integration 已完成的 P4 独立复核 + P5 文档校验；它**不替代**发布分支上的
+> 第 8 节记录的是当前 integration 已完成的最终门禁；它**不替代**发布分支上的
 > `build` / `lint` / `test:coverage` / `verify:mcp:publish` 门禁。
+> 真实 Electron 的托盘菜单点击与退出弹框人工走查仍需在最终 App 预览里确认（静态/单元覆盖已通过）。
 
 ### 8.1 已知问题（不阻塞 0.1.0）
 

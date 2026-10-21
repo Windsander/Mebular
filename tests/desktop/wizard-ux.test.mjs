@@ -1,10 +1,10 @@
 // W-1/UX-2：一屏两段向导交互断言（纯逻辑 + 静态契约；不启 GUI、不引依赖）
 //
-// ① 状态机漏 provision 步（高-1）：daemonHealthy 但 provisionRequired → ① 不 done、current=start
+// ① 状态机（P4）：daemonHealthy 即 ① done——UNINITIALIZED 不再阻塞启动
 // ② 完成态通关（高-2）：主 CTA「进入控制台 ✦」+ 两段折叠为回顾（可再展开）
 // ③ 当前段高亮（中-3）：current → .is-current 契约；done 段 → ✓
-// ④ 日志默认折叠（中-5）：<details> 无 open；异常（引导/未就绪）才自动展开 + 人话结论
-// ⑤ UX-2 段① 子步骤流水：启动 → 写入初始设置 → 重启恢复；失败定位 + 从此处续跑
+// ④ 日志默认折叠（中-5）：<details> 无 open；异常（守护未运行）才自动展开 + 人话结论
+// ⑤ P4 段① 两步流水：启动 → 自动接入；完成后一次 openConsole（无 write/recover/restart）
 // ⑥ UX-2 段② 行级接入：「已接入 ✓」不自动翻段；「已完成」≥1 已接入才可用
 // ⑦ UX-2 邀请移出引导：完成页只提一句；wizard 内不再出现邀请按钮
 
@@ -22,16 +22,18 @@ const rendererDir = join(here, '..', '..', 'apps', 'desktop', 'src', 'renderer')
 const wizardHtml = readFileSync(join(rendererDir, 'wizard.html'), 'utf-8');
 const wizardJs = readFileSync(join(rendererDir, 'wizard.js'), 'utf-8');
 
-describe('W-1 ① 状态机：provision 步（引导/待重启不算完成启动）', () => {
-  it('daemonHealthy + provisionRequired → ① 不 done、current=start（核心用例）', () => {
+describe('P4 ① 状态机：daemonHealthy 即 start done（UNINITIALIZED 不阻塞）', () => {
+  it('daemonHealthy + provisionRequired（UNINITIALIZED）→ ① done、current=assistants（核心用例）', () => {
     const s = computeWizardState({ daemonHealthy: true, provisionRequired: true });
-    expect(s.steps[0].done).toBe(false);
-    expect(s.current).toBe('start');
+    expect(s.steps[0].done).toBe(true);
+    expect(s.current).toBe('assistants');
     expect(s.complete).toBe(false);
+    expect(s.steps[0].detail.provision).toEqual({ required: true, provisioned: false });
   });
 
-  it('provision 细节入 detail（provisioned 区分待建新 vs 待重启）', () => {
+  it('provision 细节仅作诊断（provisioned 区分待建新 vs 已初始化），不影响 done', () => {
     const s = computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned: true });
+    expect(s.steps[0].done).toBe(true);
     expect(s.steps[0].detail.provision).toEqual({ required: true, provisioned: true });
   });
 
@@ -49,6 +51,36 @@ describe('W-1 ① 状态机：provision 步（引导/待重启不算完成启动
   it('回归：无 provision 入参时 daemonHealthy=true 仍判 done', () => {
     const s = computeWizardState({ daemonHealthy: true });
     expect(s.steps[0].done).toBe(true);
+  });
+});
+
+describe('P4 一键启动 → 锁定控制台（UNINITIALIZED 可用；一次导航）', () => {
+  it('UNINITIALIZED 不再阻塞向导：start done 只取决于 daemonHealthy', () => {
+    for (const provisioned of [false, true]) {
+      const s = computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned });
+      expect(s.steps[0].done).toBe(true);
+      expect(s.current).toBe('assistants');
+    }
+    expect(computeWizardState({ daemonHealthy: false, provisionRequired: true }).steps[0].done).toBe(false);
+  });
+
+  it('自动接入走 P2 受限 clients API：UNINITIALIZED 列表 / connect 均可用', () => {
+    const fn = wizardJs.match(/async function autoConnectAll\(\)[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(fn).toContain('api.clientsList()');
+    expect(fn).toMatch(/api\.clientsAction\(c\.id, 'connect'\)/);
+    // P2 服务端契约（不改端点）：列表读面 + connect 动作在 UNINITIALIZED 开放
+    const serveSrc = readFileSync(join(here, '..', '..', 'packages', 'mcp', 'src', 'serve.mjs'), 'utf-8');
+    expect(serveSrc).toContain("path === '/admin/api/clients' && req.method === 'GET'");
+    expect(serveSrc).toContain('const UNINITIALIZED_CLIENT_ACTION');
+    expect(serveSrc).toContain('(connect|preview|verify|recheck)');
+  });
+
+  it('openConsole 恰好一次、无 location.reload、无 restart/write/recover', () => {
+    expect(wizardJs.match(/api\.openConsole\(\)/g)).toHaveLength(1);
+    expect(wizardJs).not.toContain('location.reload');
+    expect(wizardJs).not.toContain('api.restart');
+    expect(wizardJs).not.toContain("sub === 'write'");
+    expect(wizardJs).not.toContain("sub === 'recover'");
   });
 });
 
@@ -135,35 +167,39 @@ describe('W-1 ④ 日志区：默认折叠，异常才自动展开 + 人话结�
     expect(tag[0]).not.toMatch(/\bopen\b/);
   });
 
-  it('一切正常 → logs.open=false 且无结论；引导态 → 自动展开 + 人话结论', () => {
+  it('一切正常 / UNINITIALIZED → logs.open=false 且无结论；守护未运行才自动展开 + 人话结论', () => {
     const ok = wizardView(computeWizardState({ daemonHealthy: true }));
     expect(ok.logs.open).toBe(false);
     expect(ok.logs.conclusion).toBeNull();
-    const provision = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true }));
-    expect(provision.logs.open).toBe(true);
-    expect(provision.logs.conclusion).toMatch(/初始设置|建新/);
+    // P4：UNINITIALIZED 是正常引导阶段，不再当异常
+    const uninitialized = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true }));
+    expect(uninitialized.logs.open).toBe(false);
+    expect(uninitialized.logs.conclusion).toBeNull();
     const down = wizardView(computeWizardState({ daemonHealthy: false }));
     expect(down.logs.open).toBe(true);
     expect(down.logs.conclusion).toMatch(/未运行|启动/);
   });
 });
 
-describe('UX-2 ⑤ 段① 一键开始：子步骤流水（启动 → 写入 → 重启恢复）', () => {
-  it('视图模型：静态流水进度（健康 → launch done；待写入 → write active；待重启 → recover active）', () => {
+describe('P4 ⑤ 段① 一键开始：两步流水（启动 → 自动接入 → 进入控制台）', () => {
+  it('视图模型：静态流水进度（健康 → launch done；接入中 → connect active；已确认 → done）', () => {
     const fresh = wizardView(computeWizardState({}));
-    expect(fresh.steps[0].flow).toEqual({ launch: 'todo', write: 'todo', recover: 'todo' });
+    expect(fresh.steps[0].flow).toEqual({ launch: 'todo', connect: 'todo' });
     const healthy = wizardView(computeWizardState({ daemonHealthy: true }));
-    expect(healthy.steps[0].flow).toEqual({ launch: 'done', write: 'done', recover: 'done' });
-    const needWrite = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned: false }));
-    expect(needWrite.steps[0].flow).toEqual({ launch: 'done', write: 'active', recover: 'todo' });
-    const needRestart = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned: true }));
-    expect(needRestart.steps[0].flow).toEqual({ launch: 'done', write: 'done', recover: 'active' });
+    expect(healthy.steps[0].flow).toEqual({ launch: 'done', connect: 'active' });
+    const acked = wizardView(computeWizardState({ daemonHealthy: true, wizard: { assistantsAcked: true } }));
+    expect(acked.steps[0].flow).toEqual({ launch: 'done', connect: 'done' });
+    // P4：UNINITIALIZED 不改变流水进度（不再有 write/recover）
+    const uninitialized = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true }));
+    expect(uninitialized.steps[0].flow).toEqual({ launch: 'done', connect: 'active' });
   });
 
-  it('静态契约：流水四子步骤（含自动接入）+ 一键开始 + 从此处续跑 + 失败图标态', () => {
-    for (const sub of ['launch', 'write', 'recover', 'connect']) {
+  it('静态契约：流水两子步骤（启动 + 自动接入）+ 一键开始 + 从此处续跑 + 失败图标态', () => {
+    for (const sub of ['launch', 'connect']) {
       expect(wizardHtml).toContain(`data-sub="${sub}"`);
     }
+    expect(wizardHtml).not.toContain('data-sub="write"');
+    expect(wizardHtml).not.toContain('data-sub="recover"');
     expect(wizardHtml).toContain('id="btn-go"');
     expect(wizardHtml).toContain('id="btn-resume"');
     expect(wizardHtml).toMatch(/data-state="failed"/);
@@ -227,13 +263,16 @@ describe('UX-2 ⑦ 邀请移出引导（归控制台单动作页）', () => {
   });
 });
 
-describe('W-1 ① 渲染层接线（provision CTA / ② 先完成第①步）', () => {
-  it('引导态 → 段①给「去写入初始设置 →」CTA（openConsole），② 文案「先完成第①步」', () => {
+describe('P4 渲染层接线（无 provision CTA；② 先完成第①步）', () => {
+  it('UNINITIALIZED 健康 → 段①已完成且无 provision/join 动作；② 由 daemonHealthy 解锁', () => {
     const view = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned: false }));
     const start = view.steps.find((s) => s.id === 'start');
-    expect(start.actions.provision.hidden).toBe(false);
-    expect(start.actions.provision.label).toContain('写入初始设置');
-    expect(view.steps.find((s) => s.id === 'assistants').detailText).toContain('先完成第①步');
+    expect(start.status).toBe('done');
+    expect(start.actions.provision).toBeUndefined();
+    expect(start.actions.join).toBeUndefined();
+    expect(view.steps.find((s) => s.id === 'assistants').detailText).not.toContain('初始设置');
+    const blocked = wizardView(computeWizardState({ daemonHealthy: false }));
+    expect(blocked.steps.find((s) => s.id === 'assistants').detailText).toContain('先完成第①步');
   });
 
   it('渲染层绑定契约：wizard.js 消费 wizardView / 驱动单面板两态与 logs 折叠', () => {
@@ -251,7 +290,7 @@ describe('W-1 ① 渲染层接线（provision CTA / ② 先完成第①步）', 
 });
 
 // ---------------------------------------------------------------------------
-// UX-2 收口 · 引导三连环修复（F1 不导航 / F2 安装按钮语义 / F3 不擅自离开向导 / F4 宽限窗）
+// UX-2 收口 · 引导修复（F1 守护动作不导航 / F2 安装语义；P4：流水结束一次显式导航）
 // ---------------------------------------------------------------------------
 
 const indexMjs = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'main', 'index.mjs'), 'utf-8');
@@ -274,16 +313,20 @@ describe('F1 向导流水不导航：daemon:start / daemon:restart 处理器去�
     expect(indexMjs).toMatch(/'console:open':\s*async \(\) => \{[^}]*safeLoad/);
   });
 
-  it('F3：向导流程内不自动打开控制台（write 子步只给显式按钮；导航点 = skip / 进入控制台 ✦ / 显式按钮）', () => {
+  it('P4：流水结束自动打开控制台一次（不再等待初始设置）；无 write/recover/restart', () => {
     const runFlowFn = wizardJs.match(/async function runFlow[\s\S]*?\n\}/)?.[0] ?? '';
-    expect(runFlowFn).not.toContain('openConsole');
-    // 渲染层全部导航调用均为显式按钮绑定
-    for (const m of wizardJs.matchAll(/api\.(openConsole|skipWizard|deepAssistants|deepDevice)\(\)/g)) {
-      expect(['openConsole', 'skipWizard', 'deepAssistants', 'deepDevice']).toContain(m[1]);
-    }
-    expect(wizardJs).toMatch(/\$\('#btn-provision'\)\?\.addEventListener\('click', \(\) => \{ void api\.openConsole\(\); \}\)/);
-    expect(wizardJs).toMatch(/\$\('#btn-enter-console'\)\?\.addEventListener\('click', \(\) => \{ void api\.openConsole\(\); \}\)/);
+    expect(runFlowFn).toContain('openConsoleOnce');
+    expect(runFlowFn).not.toMatch(/\bsub === 'write'/);
+    expect(runFlowFn).not.toMatch(/\bsub === 'recover'/);
+    expect(runFlowFn).not.toContain('api.restart');
+    expect(wizardJs).not.toContain('api.restart');
+    expect(wizardJs).not.toContain('location.reload');
+    // openConsole 只有一个调用点（helper 内），自动流程 / 完成 CTA 复用 → 实际最多一次
+    expect(wizardJs.match(/api\.openConsole\(\)/g)).toHaveLength(1);
+    // 导航仍只经显式通道：跳过 / 进入控制台（复用一次性 helper）
+    expect(wizardJs).toMatch(/\$\('#btn-enter-console'\)\?\.addEventListener\('click', \(\) => \{ void openConsoleOnce\(\); \}\)/);
     expect(wizardJs).toMatch(/\$\('#btn-skip'\)\?\.addEventListener\('click', \(\) => \{ void api\.skipWizard\(\); \}\)/);
+    expect(wizardJs).not.toContain('#btn-provision');
   });
 });
 
@@ -325,33 +368,27 @@ describe('F2 常驻语义：三态 registered（徽章/文案；安装入口已�
   });
 });
 
-describe('F4④ 宽限窗：重启/安装窗口内 ① 不翻回未完成（grace 呈现）', () => {
-  it('state.grace + ① 暂不健康 → 过渡呈现：current 不报警、日志不自动展开、宽限文案到位', () => {
-    const state = computeWizardState({ daemonHealthy: false, service: { registered: true } });
-    state.grace = true;
-    const view = wizardView(state);
-    const start = view.steps.find((s) => s.id === 'start');
-    expect(view.logs.open).toBe(false); // 宽限窗内不算异常
-    expect(view.logs.conclusion).toBeNull();
-    expect(start.status).toBe('current');
-    expect(start.detailText).toContain('重启生效中');
-    expect(start.flow.launch).toBe('active');
-    expect(start.actions.go.hidden).toBe(true);
+describe('P4 去 write/recover/restart：向导不再等待初始设置或重启', () => {
+  it('渲染层契约：流水只有 launch/connect；无 armGrace/recover/restart', () => {
+    expect(wizardJs).toMatch(/const SUBSTEPS = \['launch', 'connect'\]/);
+    expect(wizardJs).not.toContain('armGrace');
+    expect(wizardJs).not.toContain('graceUntil');
+    expect(wizardJs).not.toContain("sub === 'recover'");
+    expect(wizardJs).not.toContain('api.restart');
+    expect(wizardJs).toMatch(/await api\.start\(\)/);
+    expect(wizardJs).toContain('autoConnectAll');
+    expect(wizardJs).toContain('openConsoleOnce');
   });
 
-  it('无 grace 时健康瞬断仍按未完成呈现（不减弱原语义）', () => {
-    const view = wizardView(computeWizardState({ daemonHealthy: false, service: { registered: true } }));
-    expect(view.logs.open).toBe(true);
-    expect(view.steps.find((s) => s.id === 'start').status).toBe('current');
-  });
-
-  it('渲染层契约：宽限窗由 recover 子步（流水）arm；向导不再有安装/重启按钮', () => {
-    expect(wizardJs).toMatch(/function armGrace\(ms = 60000\)/);
-    expect(wizardJs).toMatch(/sub === 'recover'[\s\S]{0,340}armGrace\(\)/);
-    expect(wizardJs).toMatch(/Date\.now\(\) < graceUntil[\s\S]{0,120}state\.grace = true/);
-    expect(wizardJs).not.toContain('#btn-install');
-    expect(wizardJs).not.toContain('#btn-restart');
-    expect(wizardJs).not.toContain('#btn-start');
+  it('静态契约：HTML 无 write/recover 子步骤、无 provision/join 动作，保留续跑与进入控制台', () => {
+    expect(wizardHtml).not.toContain('data-sub="write"');
+    expect(wizardHtml).not.toContain('data-sub="recover"');
+    expect(wizardHtml).not.toContain('id="btn-provision"');
+    expect(wizardHtml).not.toContain('alt-join');
+    expect(wizardHtml).not.toContain('去写入初始设置');
+    expect(wizardHtml).not.toContain('加入已有忆云');
+    expect(wizardHtml).toContain('id="btn-resume"');
+    expect(wizardHtml).toContain('id="btn-enter-console"');
   });
 });
 
@@ -400,7 +437,7 @@ describe('设计稿 ② 里程碑轨道（左轨线 + 节点灯 active/done/lock
   });
 
   it('渲染层契约（三态·用户定稿）：is-idle 居中 → 部署阶段框 → 完成缩略卡（含 CTA）', () => {
-    expect(wizardJs).toMatch(/const deployView = flow\.running \|\| \(!complete && \(flow\.everRan \|\| Date\.now\(\) < graceUntil\)\)/);
+    expect(wizardJs).toMatch(/const deployView = flow\.running \|\| \(!complete && flow\.everRan\)/);
     expect(wizardJs).toMatch(/const doneView = !deployView && complete && flow\.everRan/);
     expect(wizardJs).toMatch(/classList\.toggle\('is-idle', idleView\)/);
     expect(wizardJs).toMatch(/idleCta\.hidden = !idleView/);
@@ -453,12 +490,17 @@ describe('设计稿 ④ 段② 文案与空态（以设计稿为准）', () => {
     expect(wizardHtml).not.toContain('id="assist-note"');
   });
 
-  it('「或加入已有忆云 ›」：仅引导态显示、显式点击 openConsole', () => {
-    const provision = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned: false }));
-    expect(provision.steps.find((s) => s.id === 'start').actions.join.hidden).toBe(false);
-    const normal = wizardView(computeWizardState({ daemonHealthy: true }));
-    expect(normal.steps.find((s) => s.id === 'start').actions.join.hidden).toBe(true);
-    expect(wizardJs).toMatch(/#alt-join'\)\?\.addEventListener\('click', \(\) => \{ void api\.openConsole\(\); \}\)/);
+  it('P4：向导不再出现「去写入初始设置 / 加入已有忆云」入口（建新/加入归控制台弹框）', () => {
+    const uninitialized = wizardView(computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned: false }));
+    const start = uninitialized.steps.find((s) => s.id === 'start');
+    expect(start.actions.provision).toBeUndefined();
+    expect(start.actions.join).toBeUndefined();
+    expect(start.actions.go).toBeDefined();
+    expect(wizardJs).not.toContain('btn-provision');
+    expect(wizardJs).not.toContain('alt-join');
+    expect(wizardHtml).not.toContain('btn-provision');
+    expect(wizardHtml).not.toContain('alt-join');
+    expect(wizardHtml).not.toContain('或加入已有忆云');
   });
 });
 
@@ -494,7 +536,7 @@ describe('设计稿 ⑤ 完成时刻与已设置过·直达 + 星野省电纪律
 describe('设计稿 ⑥ [hidden] 语义兜底（author display 不得覆盖 hidden）', () => {
   it('置末位的 [hidden]{display:none} 守卫（author display 不得覆盖 hidden）', () => {
     expect(wizardHtml).toMatch(/\[hidden\] \{ display: none; \}/);
-    expect(wizardHtml.indexOf('[hidden] { display: none; }')).toBeGreaterThan(wizardHtml.indexOf('.alt {'));
+    expect(wizardHtml.lastIndexOf('[hidden] { display: none; }')).toBeGreaterThan(wizardHtml.lastIndexOf('details {'));
   });
 });
 
@@ -793,10 +835,11 @@ describe('简化轮走查修复 2 · 极简（用户定调：完成即终态、�
 });
 
 describe('简化轮走查修复 3 · 日志折条不常驻（① 就绪即隐藏，异常才出现）', () => {
-  it('渲染层契约：日志是异常件（未开始不出现；部署中失败/引导态才出现并自动展开一次）', () => {
-    // 异常件判据：失败(failedSub)/引导态(provisionRequired)/失败收场；健康部署中不弹（旧式 everRan||running 会全程挂着）
-    expect(wizardJs).toMatch(/const showLogs = deployView && start\?\.status !== 'done'[\s\S]{0,160}Boolean\(flow\.failedSub\) \|\| provisionRequired \|\| \(!flow\.running && flow\.everRan\)/);
+  it('渲染层契约：日志是异常件（未开始不出现；失败/守护未就绪才出现并自动展开一次）', () => {
+    // P4：UNINITIALIZED 不是异常；流水任一步失败或守护未就绪才亮
+    expect(wizardJs).toMatch(/const showLogs = deployView && \(\s*Boolean\(flow\.failedSub\)\s*\|\| \(start\?\.status !== 'done' && !flow\.running && flow\.everRan\)\s*\)/);
     expect(wizardJs).toMatch(/logsPanel\.hidden = !showLogs/);
+    expect(wizardJs).not.toContain('provisionRequired');
     expect(wizardHtml).toMatch(/<details[^>]*id="logs-panel"[^>]*>/);
   });
 });
@@ -838,14 +881,15 @@ describe('简化轮走查修复 6 · 收尾动效（用户定稿 2：卡片「�
 });
 
 describe('简化轮走查修复 4 · 一键启动（①②全自动跑给你看）', () => {
-  it('流水四步：启动 → 写入 → 重启恢复 → 接入 AI 助手（自动）；HTML/JS 契约', () => {
-    for (const sub of ['launch', 'write', 'recover', 'connect']) {
+  it('P4 流水两步：启动 → 接入 AI 助手（自动）→ 一次进入控制台；HTML/JS 契约', () => {
+    for (const sub of ['launch', 'connect']) {
       expect(wizardHtml).toContain(`data-sub="${sub}"`);
     }
     expect(wizardHtml).toContain('接入 AI 助手（自动）');
-    expect(wizardJs).toMatch(/const SUBSTEPS = \['launch', 'write', 'recover', 'connect'\]/);
+    expect(wizardJs).toMatch(/const SUBSTEPS = \['launch', 'connect'\]/);
     expect(wizardJs).toContain('autoConnectAll');
     expect(wizardJs).toMatch(/sub === 'connect'[\s\S]{0,260}autoConnectAll\(\)/);
+    expect(wizardJs).toMatch(/await openConsoleOnce\(\)/);
   });
 
   it('一键启动核心自动化：connect 子步逐个接入（非阻断，失败行进「重试」）+ 行在流程中被动（无按钮）', () => {

@@ -4,7 +4,7 @@
 // （徽章文案 / 每段状态·折叠·动作收编 / 段①子步骤流水进度 / 段②「已完成」解锁 / 完成态通关 CTA / 日志区折叠与结论）。
 // DOM 契约：status 'current' → .is-current；check '✓' → 段标题前置对勾；
 // collapsed → 段折叠为回顾（可再展开）；logs.open → <details id="logs-panel"> 的 open 属性；
-// flow.* → 段①子步骤流水（launch/write/recover）的 todo/active/done/failed 图标。
+// flow.* → 段①子步骤流水（launch/connect）的 todo/active/done/failed 图标。
 
 const STEP_NAME = { start: '一键开始', assistants: '连接 AI 助手' };
 
@@ -18,12 +18,10 @@ export function wizardView(state) {
   const currentIndex = steps.findIndex((s) => s.id === state?.current);
 
   const start = steps.find((s) => s.id === 'start');
-  const provision = start?.detail?.provision ?? { required: false, provisioned: null };
   const healthy = Boolean(start?.detail?.healthy);
   // F2a 双保险②：三态（true/false/null=未知）——未知一律按「不显示安装按钮」处理
   const registered = start?.detail?.registered === true ? true : start?.detail?.registered === false ? false : null;
-  // F4④ 重启/安装宽限窗（渲染层 state.grace，≤60s）：① 已完成期间的健康瞬断不翻回未完成
-  const grace = Boolean(state?.grace) && !complete;
+  const assistantsDone = Boolean(steps.find((s) => s.id === 'assistants')?.done);
 
   const badge = complete
     ? '已就绪'
@@ -36,15 +34,12 @@ export function wizardView(state) {
       ? '正在接入 AI 助手…'
       : '点一下，接入设备';
 
-  // 异常（① 未完成 = 守护未就绪 / 引导态 / 待重启）→ 日志自动展开 + 一行人话结论；宽限窗内不算异常
-  const abnormal = Boolean(start) && !start.done && !grace;
+  // 异常（① 未完成 = 守护未就绪）→ 日志自动展开 + 一行人话结论。
+  // P4：UNINITIALIZED 不再算异常（它只是还没建新/加入，交给控制台锁定壳）。
+  const abnormal = Boolean(start) && !start.done;
   const logsConclusion = !abnormal
     ? null
-    : provision.required
-      ? (provision.provisioned
-        ? '初始设置已写入，等待重启生效；重启后向导自动继续。'
-        : '还差一步初始设置：点「去写入初始设置 →」，在控制台里选「建新」或「加入」，完成后向导自动继续。')
-      : '守护未运行：点①的「一键开始」；反复失败先看下面的日志。';
+    : '守护未运行：点「开始部署」重试；反复失败先看下面的日志。';
 
   return {
     badge,
@@ -62,36 +57,16 @@ export function wizardView(state) {
         // ① 在旅程未完时保持展开（「一键开始」入口可达——重开未 ack 态的唯一动作）；全部完成才折叠成终态单行
         collapsed: step.id === 'start' ? (step.done && complete) : step.done,
       };
-      if (step.id === 'start') return { ...base, ...startStepView(step, { healthy, provision, registered, grace }) };
+      if (step.id === 'start') return { ...base, ...startStepView(step, { healthy, registered, assistantsDone }) };
       return { ...base, ...assistantsStepView(step, start) };
     }),
   };
 }
 
-/** 段①：文案 + 动作收编 + 子步骤流水（启动 → 写入初始设置 → 重启恢复）静态进度。 */
-function startStepView(step, { healthy, provision, registered, grace = false }) {
-  // F4④ 宽限窗：① 曾完成、此刻健康瞬断（安装常驻/重启中）→ 过渡呈现，不翻回未完成
-  if (grace && !step.done) {
-    return {
-      detailText: '正在重启生效中：健康瞬时波动属预期（最长约 60 秒），无需操作。',
-      flow: { launch: 'active', write: 'todo', recover: 'todo' },
-      serviceBadge: null,
-      doneLine: null,
-      actions: {
-        go: { label: '一键开始', kind: 'primary', hidden: true },
-        provision: { label: '去写入初始设置 →', kind: 'primary', hidden: true },
-        install: { label: '重启中…', kind: 'ghost', hidden: false, disabled: true },
-        restart: { label: '重启守护', kind: 'ghost', area: 'troubleshoot', hidden: false },
-        startOnly: { label: '仅启动守护', kind: 'ghost', area: 'troubleshoot', hidden: false },
-      },
-    };
-  }
+/** 段①：文案 + 动作收编 + 子步骤流水（启动 → 接入 AI 助手）静态进度。 */
+function startStepView(step, { healthy, registered, assistantsDone = false }) {
   let detailText;
-  if (provision.required) {
-    detailText = provision.provisioned
-      ? '初始设置已写入，等待重启生效：向导会自动续跑；也可点「出问题了？」里的重启。'
-      : '还差一步初始设置（建新或加入一个忆云，数据都在本机）：';
-  } else if (step.done) {
+  if (step.done) {
     detailText = registered === true
       ? '守护运行中（常驻已装 · 开机自启）。'
       : registered === false
@@ -104,8 +79,7 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
   // 子步骤流水进度（静态推导；渲染层在跑流水时以运行时状态覆盖）
   const flow = {
     launch: healthy ? 'done' : 'todo',
-    write: !healthy ? 'todo' : (provision.required ? (provision.provisioned ? 'done' : 'active') : 'done'),
-    recover: provision.required ? (provision.provisioned ? 'active' : 'todo') : (healthy ? 'done' : 'todo'),
+    connect: assistantsDone ? 'done' : (step.done ? 'active' : 'todo'),
   };
   return {
     detailText,
@@ -115,11 +89,8 @@ function startStepView(step, { healthy, provision, registered, grace = false }) 
       ? { main: '✓ 已就绪', sub: registered === true ? '常驻已装 · 开机自启' : '这台机器已在跑你的 Mebular' }
       : null,
     actions: {
-      // 完成前恒在：② 未收尾时它仍是唯一动作入口（点一次跑完剩余全部自动化）
+      // 完成前恒在：点一次跑完剩余全部自动化
       go: { label: '开始部署', kind: 'primary', hidden: false },
-      provision: { label: '去写入初始设置 →', kind: 'primary', hidden: !(provision.required && !provision.provisioned) },
-      // 设计稿：「或加入已有忆云 ›」——与「去写入初始设置」同路（控制台 provision），仅引导态显示
-      join: { label: '或加入已有忆云 ›', kind: 'alt', hidden: !(provision.required && !provision.provisioned) },
     },
   };
 }
@@ -133,7 +104,7 @@ function assistantsStepView(step, start) {
   // 已装数（installedCount）——列表只显示已装，文案口径必须一致（旧载荷回退 total）
   const installed = Number(detail?.installedCount ?? detail?.total ?? 0);
   let detailText;
-  if (!startDone) detailText = '先完成第①步：Mebular 跑起来（并完成初始设置）后才能连接助手。';
+  if (!startDone) detailText = '先完成第①步：Mebular 跑起来后才能连接助手。';
   else if (!detail) detailText = '助手列表加载中…';
   else if (detail.readError) detailText = `状态读取受限：${detail.readError}（不阻断）。`;
   else if (installed === 0) detailText = '没检测到已装的 AI 助手 —— 装好后回来点「一键开始」即可。';

@@ -114,7 +114,7 @@ let quitting = false;
 
 async function wizardStateNow() {
   const healthy = (await probeHealthDetail(fetch, httpConf(), { expectedInstance: homeKey(home) })).ok;
-  // W-1 高-1：守护活着但处引导/待重启态 → 步骤①不算完成（404 = 正常态）
+  // P4：provision 仅作诊断（UNINITIALIZED 是正常引导阶段，不再阻塞步骤①完成）
   const provision = await probeProvision(fetch, httpConf());
   const service = await probeService();
   const assistants = await probeAssistants();

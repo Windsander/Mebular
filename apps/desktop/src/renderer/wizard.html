@@ -65,8 +65,6 @@
     button.primary { background: rgba(12, 52, 36, 0.85); border-color: var(--crt); color: var(--crt-bright); box-shadow: 0 0 14px -4px rgba(80, 255, 170, 0.5); }
     button.big { font-size: 15px; padding: 11px 26px; border-radius: 8px; letter-spacing: 1px; }
     button.small { padding: 4px 10px; font-size: 12px; }
-    .alt { display: inline-block; margin-left: 14px; font-size: 12px; color: var(--muted); text-decoration: none; border-bottom: 1px dashed var(--border); cursor: pointer; background: none; border-top: none; border-left: none; border-right: none; padding: 0 0 1px; }
-    .alt:hover { color: var(--text); }
 
     details { border: 1px dashed var(--border); border-radius: 6px; padding: 8px 10px; margin-top: 10px; }
     details summary { cursor: pointer; color: var(--muted); font-size: 12px; }
@@ -156,15 +154,11 @@
         <p class="muted" id="start-detail" hidden></p>
         <ol id="start-flow" class="flow">
           <li data-sub="launch" data-state="todo"><i></i>启动本机守护</li>
-          <li data-sub="write" data-state="todo"><i></i>写入本机设置</li>
-          <li data-sub="recover" data-state="todo"><i></i>重启生效（页面会自动恢复）</li>
           <li data-sub="connect" data-state="todo"><i></i>接入 AI 助手（自动）</li>
         </ol>
         <p class="muted" id="flow-msg"></p>
         <div class="row" id="go-row" hidden>
           <button id="btn-resume" class="primary" hidden>从此处续跑</button>
-          <button id="btn-provision" class="primary" hidden>去写入初始设置 →</button>
-          <a class="alt" id="alt-join" hidden>或加入已有忆云 ›</a>
         </div>
       </div>
       <!-- 完成态（用户定稿 2）：同框变身内容——不再另起卡、不再出现「已完成/已就绪」两个完成词 -->

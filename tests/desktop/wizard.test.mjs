@@ -60,6 +60,13 @@ describe('M2/UX-2 向导：状态机（两段；幂等可重入，逐步检测�
     expect(computeWizardState({ daemonHealthy: true }).steps[0].detail.healthy).toBe(true);
     expect(computeWizardState({ daemonHealthy: false }).steps[0].detail.healthy).toBe(false);
   });
+
+  it('P4：UNINITIALIZED（provisionRequired）不阻塞 start——daemonHealthy 即 done', () => {
+    const s = computeWizardState({ daemonHealthy: true, provisionRequired: true, provisioned: false });
+    expect(s.steps[0].done).toBe(true);
+    expect(s.current).toBe('assistants');
+    expect(s.steps[0].detail.provision).toEqual({ required: true, provisioned: false });
+  });
 });
 
 describe('UX-2 段②行级接入：clientsViaApi / clientActionViaApi（假 fetch，不真发）', () => {

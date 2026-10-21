@@ -3,7 +3,7 @@
 // 运行环境为 node，注入最小 DOM/rAF 假件；CPU 实测数据另入性能报告（不做 flaky 断言）。
 
 import { describe, test, expect, beforeEach, afterEach } from '@jest/globals';
-import { StarStage } from '../../packages/console/starfield.js';
+import { StarStage, crtGlitchLevel } from '../../packages/console/starfield.js';
 
 function makeCtx(canvas) {
   return new Proxy(
@@ -141,5 +141,23 @@ describe('StarStage.setPaused（F-PERF-1 空闲省电）', () => {
     stage.setPaused(false);
     expect(stage.lastTickAt).toBe(0);
     expect(stage.degradeStreak).toBe(0);
+  });
+});
+
+describe('P6A 锁定态 CRT 地球仪：干扰毛刺节律（crtGlitchLevel）', () => {
+  test('安静期无干扰；约每 4.2s 一次短促撕裂，随后归零', () => {
+    expect(crtGlitchLevel(0)).toBe(0);
+    expect(crtGlitchLevel(1)).toBe(0);
+    expect(crtGlitchLevel(2.5)).toBe(0);
+    expect(crtGlitchLevel(4.2)).toBe(1);
+    expect(crtGlitchLevel(4.26)).toBeGreaterThan(0.5);
+    expect(crtGlitchLevel(4.45)).toBe(0);
+  });
+
+  test('第二轮短闪独立存在，且不会持续抖动', () => {
+    expect(crtGlitchLevel(5.15)).toBeGreaterThan(0.7);
+    expect(crtGlitchLevel(5.25)).toBe(0);
+    expect(crtGlitchLevel(8.4)).toBe(1);
+    expect(crtGlitchLevel(8.7)).toBe(0);
   });
 });

@@ -275,7 +275,7 @@ function computeDegraded() {
 
 function render() {
   if (state.locked) {
-    // 锁定态：只渲染壳与星图（背景 + 本机 ghost 星）；不渲染任何依赖 admin 数据面的内容。
+    // 锁定态：只渲染壳与星图（背景 + 本机 ghost 地球仪）；不渲染任何依赖 admin 数据面的内容。
     renderTopbar();
     renderLockedChrome();
     renderLegend();
@@ -468,7 +468,7 @@ function renderLegend() {
 
 function buildScene() {
   if (state.locked) {
-    // P6A：锁定态保留星图背景，用一个 CRT 虚影星占住「本机」位置；
+    // P6A：锁定态保留星图背景，用一个 CRT 虚影地球仪占住「本机」位置；
     // 只表达「本机尚未初始化」，不映射成任何设备/记忆数据。
     return {
       nodes: [{
@@ -3316,7 +3316,7 @@ function renderDeviceCard() {
   const empty = $('#device-card-empty');
   const body = $('#device-card-body');
   if (state.locked) {
-    // P6A：锁定态整张设备卡退场（不展示占位卡/假设备数据）；星图 ghost 星承担唯一本机表达。
+    // P6A：锁定态整张设备卡退场（不展示占位卡/假设备数据）；星图 ghost 地球仪承担唯一本机表达。
     if (asideEl) {
       asideEl.hidden = true;
       asideEl.classList.remove('is-locked', 'is-open');
@@ -3518,7 +3518,7 @@ function renderDeviceCard() {
 stage.onHover = (node, x, y) => {
   const tooltip = $('#tooltip');
   if (state.locked) {
-    // 锁定态不展示任何设备/记忆悬浮数据（ghost 星只表达「本机未初始化」）。
+    // 锁定态不展示任何设备/记忆悬浮数据（ghost 地球仪只表达「本机未初始化」）。
     tooltip.hidden = true;
     return;
   }
@@ -5595,7 +5595,7 @@ async function enterLockedConsole(status) {
   document.body.classList.add('is-locked');
   const app = $('#app');
   if (app) app.dataset.locked = 'true';
-  // 星图保留背景 + 本机 ghost 星（不映射任何设备数据）；不请求 /admin/api/overview 等 409 接口。
+  // 星图保留背景 + 本机 ghost 地球仪（不映射任何设备数据）；不请求 /admin/api/overview 等 409 接口。
   stage.start();
   setView('map');
   render();

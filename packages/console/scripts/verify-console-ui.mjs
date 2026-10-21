@@ -1658,7 +1658,7 @@ async function main() {
             && document.body.classList.contains('is-locked')
             && !document.querySelector('#provision');
         })()`));
-        check('P6A 锁定态：星图保留背景，并渲染 ghost 本机星', await waitFor(`(() => {
+        check('P6A 锁定态：星图保留背景，并渲染 ghost 本机地球仪', await waitFor(`(() => {
           const c = document.querySelector('#stage');
           if (!c || c.width <= 0 || c.height <= 0 || c.dataset.scene !== 'locked-ghost') return false;
           const ctx = c.getContext('2d');
@@ -1723,13 +1723,13 @@ async function main() {
           return document.querySelector('#domains-view')?.hidden === true
             && /请先新建或加入忆云/.test(banner?.textContent ?? '');
         })()`));
-        // 星图 ghost 星 → toast
+        // 星图 ghost 地球仪 → toast
         await evalJs(`(() => {
           const c = document.querySelector('#stage');
           const r = c.getBoundingClientRect();
           c.dispatchEvent(new MouseEvent('click', { bubbles: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 }));
         })()`);
-        check('P6A 点击 ghost 本机星 → toast「请先新建或加入忆云」', await waitFor('/请先新建或加入忆云/.test(document.querySelector("#banner")?.textContent ?? "")'));
+        check('P6A 点击 ghost 本机地球仪 → toast「请先新建或加入忆云」', await waitFor('/请先新建或加入忆云/.test(document.querySelector("#banner")?.textContent ?? "")'));
 
         // 引导遮罩：非阻塞、指向两个入口、不盖按钮；ESC 关闭；再次打开自动淡出
         check('P3 引导遮罩：无 current 时出现且指向两个入口（不盖顶栏按钮）', await waitFor(`(() => {
@@ -1827,7 +1827,7 @@ async function main() {
             && document.querySelector('#status-pill')?.hidden === false
             && document.querySelector('#device-card')?.getAttribute('aria-disabled') === null;
         })()`, 20000));
-        check('P6A READY 后：ghost 星消失、星图恢复正常场景、设备卡归位', await waitFor(`(() => {
+        check('P6A READY 后：ghost 地球仪消失、星图恢复正常场景、设备卡归位', await waitFor(`(() => {
           const stage = document.querySelector('#stage');
           const aside = document.querySelector('.aside');
           const card = document.querySelector('#device-card');

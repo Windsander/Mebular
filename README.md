@@ -59,12 +59,13 @@ you cannot tell who wrote what; go offline and it stops working.
 With Node.js >= 20, install the published CLI from npm:
 
 ```bash
-npm install -g @mebular/mcp   # provides `mebular`; `fleet` comes with its dependencies
+npm install -g @mebular/core  # root bundle: provides both `mebular` and `fleet`
 mebular init                  # identity + config in ~/.mebular
 mebular serve                 # daemon + console at http://127.0.0.1:7331/console
 mebular mcp                   # stdio MCP server for your agent
 ```
 
+`@mebular/core` is the root bundle; installing `@mebular/mcp` alone only provides `mebular`.
 `mebular init` writes `~/.mebular/config.json` (override the home with `MEBULAR_HOME`);
 `mebular serve` is the only writer for that home. To install the memory / task skills from the
 npm tree:

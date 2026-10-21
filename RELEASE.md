@@ -203,7 +203,7 @@ gh run watch <run-id>       # 或用网页 Actions 页面
 ```bash
 for p in core service skill mcp fleet; do npm view "@mebular/$p@0.1.0" version; done
 gh release view v0.1.0
-npm install -g @mebular/mcp@0.1.0
+npm install -g @mebular/core@0.1.0
 mebular --help && fleet --version
 mebular init                # 首次运行会提示下一步；路径提示问题见 8.1
 ```
@@ -221,19 +221,20 @@ mebular init                # 首次运行会提示下一步；路径提示问�
 环境：macOS（darwin）/ Node.js v26.8.1 / npm 11.19.0，依赖由 `npm ci` 从
 `package-lock.json` 安装（`prepare` 自动 build）。
 
-验证对象：分支 `m0/release-v010`，基线 `5a9a273`，执行日期 2026-10-20。
+验证对象：分支 `m0/release-v010`，基线 `5daf4fe`，执行日期 2026-10-21。
 
 | 命令 | 结果 | 关键输出 |
 | --- | --- | --- |
 | `npm run lint` | ✅ 通过 | ESLint 覆盖 `src` / `tests` / `tests-semantic` / `scripts` / `packages` / `apps/desktop`，无告警 |
-| `npm run test:coverage` | ✅ 通过 | 158 suites / 1391 tests 全过；全局 91.7% stmts、94.13% lines、78.89% branches（门槛 85 / 65） |
+| `npm run test:coverage` | ✅ 通过 | 163 suites / 1436 tests 全过；全局 91.78% stmts、79.13% branches、82.39% funcs、94.29% lines（门槛 85 / 65） |
 | `npm run verify:mcp:publish` | ✅ 通过 | 5 包 `npm pack` + tarball 安装冒烟；内部依赖改写为 `^0.1.0` 且无 `file:` 泄漏；安装后 `tools/list=29`（13 记忆 + 16 任务）、`memory_write`/`memory_query` 落图命中、`fleet --version` 正常；根 tarball 全域安装双 bin（`mebular` + `fleet`） |
 | `npm run check:docs` | ✅ 通过 | 7/7：README EN/CN 标题结构 `2,2,2,3,3,3,3,2,2` 一致、互链、无手写测试数字、CI badge、工具名在册、本地链接均存在 |
 | SSOT 预演（`publish.yml` 同款脚本，`TAG=v0.1.0`） | ✅ 通过 | 5×`package.json` = `0.1.0`；`CHANGELOG.md` 含 `## [v0.1.0]` |
 
-补充验证：另用 `npm install -g --prefix <tmp>` 安装 `@mebular/mcp` 及其依赖 tarball，
+补充验证：另用 `npm install -g --prefix <tmp>` 安装根 tarball `@mebular/core`，
 `<prefix>/bin` 同时生成 `mebular` 与 `fleet`，`mebular tools` 返回 29 项——README /
-QUICKSTART 中的 npm 全局安装说明与实测一致。
+QUICKSTART 中的 npm 全局安装说明与实测一致。只安装 `@mebular/mcp` 时只有 `mebular`
+bin；`fleet` 必须来自根包（或单独安装 `@mebular/fleet`）。
 
 ### 8.1 已知问题（不阻塞 0.1.0）
 

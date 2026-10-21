@@ -12,13 +12,13 @@ devices, and every write is Ed25519-signed and content-addressed. No cloud, no c
 **A. From npm (recommended for a published release):**
 
 ```bash
-npm install -g @mebular/mcp
+npm install -g @mebular/core
 command -v mebular && command -v fleet
 ```
 
-The five `@mebular/*` packages are published in lockstep, so the global install pulls the core,
-fleet, service and skill packages at the same version. `mebular` covers the daemon, MCP server and
-console; `fleet` covers setup, invite and join.
+The five `@mebular/*` packages are published in lockstep. `@mebular/core` is the root bundle and
+provides both CLIs: `mebular` covers the daemon, MCP server and console; `fleet` covers setup,
+invite and join. Installing `@mebular/mcp` alone only provides `mebular`.
 
 **B. From GitHub, pinned to a commit (reproducible source build):**
 

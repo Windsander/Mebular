@@ -12,12 +12,13 @@ Ed25519 签名、内容寻址。没有云、没有协调者。
 **A. 从 npm 安装（已发布版本的推荐方式）：**
 
 ```bash
-npm install -g @mebular/mcp
+npm install -g @mebular/core
 command -v mebular && command -v fleet
 ```
 
-五个 `@mebular/*` 包按 lockstep 同版本发布，全局安装会一并带上 core、fleet、service、skill。
-`mebular` 负责守护、MCP 服务与控制台，`fleet` 负责上车、邀请与加入。
+五个 `@mebular/*` 包按 lockstep 同版本发布。`@mebular/core` 是根包，同时提供两个命令：
+`mebular` 负责守护、MCP 服务与控制台，`fleet` 负责上车、邀请与加入。只装
+`@mebular/mcp` 时只有 `mebular`，没有 `fleet`。
 
 **B. 从 GitHub 钉住提交（从源码构建，可复现）：**
 

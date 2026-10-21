@@ -52,12 +52,13 @@ Agent 的记忆大多还躺在单个进程里：一个列表或键值存储，�
 Node.js >= 20，从 npm 安装已发布的命令行：
 
 ```bash
-npm install -g @mebular/mcp   # 提供 `mebular`；`fleet` 随依赖一起装上
+npm install -g @mebular/core  # 根包：同时提供 `mebular` 和 `fleet`
 mebular init                  # 在 ~/.mebular 生成身份与配置
 mebular serve                 # 守护 + 控制台：http://127.0.0.1:7331/console
 mebular mcp                   # 给 Agent 的 stdio MCP 服务
 ```
 
+`@mebular/core` 是根包；只装 `@mebular/mcp` 时只有 `mebular`，没有 `fleet`。
 `mebular init` 写入 `~/.mebular/config.json`（可用 `MEBULAR_HOME` 换目录）；
 同一个 home 只允许一个 `mebular serve` 写者。从 npm 安装树装记忆 / 任务两个 Skill：
 

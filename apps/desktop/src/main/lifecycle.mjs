@@ -45,12 +45,30 @@ export function stopConfirm({ daemonMode, hasManagedChild } = {}) {
   };
 }
 
+/** daemonMode → 人话（托盘不得展示裸 child/reused/service）。 */
+export function daemonModeLabel(mode) {
+  switch (mode) {
+    case 'child': return '临时运行（App 托管）';
+    case 'service': return '常驻服务';
+    case 'reused': return '已有守护';
+    default: return '未运行';
+  }
+}
+
+/** 状态行：圆点 + 运行/启动/未运行语义 + 人话托管方式 + 忆云名（菜单与 tooltip 共用）。 */
+export function trayStatusLine({ healthy = false, daemonMode = null, cloudName = null } = {}) {
+  const state = healthy ? '运行中' : daemonMode ? '启动中' : '未运行';
+  const label = daemonModeLabel(daemonMode);
+  const mode = daemonMode && label !== '未运行' ? ` · ${label}` : '';
+  return `${healthy ? '●' : '○'} ${state}${mode}${cloudName ? ` · ${cloudName}` : ''}`;
+}
+
 /**
  * 托盘菜单模型（中-9 分组：导航 / 守护控制 / 诊断 / 登录时启动 / 退出）。
  * 返回纯数据模板；index.mjs 按 id 绑定 click，再交给 Menu.buildFromTemplate。
  */
 export function trayMenuModel({ healthy, daemonMode, loginOpenAtLogin, securityLevel = null, cloudName = null } = {}) {
-  const statusLabel = `${healthy ? '●' : '○'} ${healthy ? '运行中' : daemonMode ? '启动中' : '未运行'}（${daemonMode ?? '—'}）${cloudName ? ` · ${cloudName}` : ''}`;
+  const statusLabel = trayStatusLine({ healthy, daemonMode, cloudName });
   const levelLabel = securityLevel === 'high' ? '高' : securityLevel === 'medium' ? '中' : securityLevel === 'low' ? '低' : '—';
   return [
     { id: 'status', label: statusLabel, enabled: false },

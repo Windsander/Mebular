@@ -16,6 +16,7 @@ import {
   resolveHttp,
   homeKey,
   serviceDescriptorFor,
+  reconcileManagedState,
 } from '../../apps/desktop/src/main/daemon.mjs';
 import { IPC_CHANNELS, isAllowedChannel, buildHandlerTable, diagnostics } from '../../apps/desktop/src/main/ipc.mjs';
 import { iconDataUrl, iconDataUrl2x, TRAY_STATES } from '../../apps/desktop/src/main/tray-icons.mjs';
@@ -61,6 +62,36 @@ describe('M1 桌面 App：守护托管', () => {
     const r = await ensureDaemon({ home: '/h', http, fetchImpl: running, service: {}, spawnFn: () => { throw new Error('no'); } });
     expect(r.mode).toBe('reused');
     expect(r.child).toBeNull();
+  });
+
+  it('reconcileManagedState：App 托管的 child 仍存活时，reused 不得覆盖 child 身份', () => {
+    const alive = { exitCode: null, killed: false };
+    expect(reconcileManagedState({ resultMode: 'reused', resultChild: null, existingChild: alive }))
+      .toEqual({ mode: 'child', child: alive });
+    // service 同理：child 是本 App 拉起的，不能改认外部托管
+    expect(reconcileManagedState({ resultMode: 'service', resultChild: null, existingChild: alive }))
+      .toEqual({ mode: 'child', child: alive });
+  });
+
+  it('reconcileManagedState：child 已退出/已 kill → 接受 reused/service', () => {
+    const exited = { exitCode: 1, killed: false };
+    const killed = { exitCode: null, killed: true };
+    const signaled = { exitCode: null, signalCode: 'SIGTERM', killed: false };
+    expect(reconcileManagedState({ resultMode: 'reused', existingChild: exited }))
+      .toEqual({ mode: 'reused', child: null });
+    expect(reconcileManagedState({ resultMode: 'service', existingChild: killed }))
+      .toEqual({ mode: 'service', child: null });
+    expect(reconcileManagedState({ resultMode: 'reused', existingChild: signaled }))
+      .toEqual({ mode: 'reused', child: null });
+    expect(reconcileManagedState({ resultMode: 'reused' }))
+      .toEqual({ mode: 'reused', child: null });
+  });
+
+  it('reconcileManagedState：ensureDaemon 新拉起 child → child（以本次结果为准）', () => {
+    const spawned = { exitCode: null, killed: false };
+    const old = { exitCode: null, killed: false };
+    expect(reconcileManagedState({ resultMode: 'child', resultChild: spawned, existingChild: old }))
+      .toEqual({ mode: 'child', child: spawned });
   });
 
   it('服务托管已登记 → service（优先于子进程）', async () => {

@@ -1768,17 +1768,18 @@ try {
         && consoleSrc2.includes('inviteTtlMs: INVITE_TTL_DEFAULT_MS')
         && consoleSrc2.includes('id="invite-expiry"')
         && !consoleSrc2.includes('改档后点')
-        && /#invite-ttl[\s\S]{0,240}#invite-regenerate/.test(consoleSrc2)
-        && /body\.querySelector\('#invite-ttl'\)[\s\S]{0,240}state\.inviteTtlMs = value/.test(consoleSrc2),
+        && /#invite-ttl[\s\S]{0,600}#invite-regenerate/.test(consoleSrc2)
+        && /body\.querySelector\('#invite-ttl'\)[\s\S]{0,240}state\.inviteTtlMs = value/.test(consoleSrc2)
+        && /inviteExpiryLabel\(value\)/.test(consoleSrc2),
       `ttl=${JSON.stringify(ttlIds)} default=${inviteIa.INVITE_TTL_DEFAULT_MS}`);
-    check('E1 重新生成：应用内确认后把选中 ttlMs 传给 POST /admin/api/invite',
-      /await confirmModal\(\{[\s\S]{0,220}title: '重新生成令牌？'/.test(consoleSrc2)
-        && /if \(!ok\) return;\s*\n\s*void openInvite\(state\.inviteTtlMs\)/.test(consoleSrc2)
+    check('E1 重新生成：无二次确认，点击即把选中 ttlMs 传给 POST /admin/api/invite（原地更新）',
+      /body\.querySelector\('#invite-regenerate'\)[\s\S]{0,260}renderInvite\(state\.inviteTtlMs, \{ keepPanel: true \}\)/.test(consoleSrc2)
+        && !/title: '重新生成令牌？'/.test(consoleSrc2)
         && !consoleSrc2.includes('window.confirm')
-        && /async function renderInvite\(ttlMs = state\.inviteTtlMs\)[\s\S]{0,260}body: \{ ttlMs \}/.test(consoleSrc2)
+        && /async function renderInvite\(ttlMs = state\.inviteTtlMs, \{ keepPanel = false \} = \{\}\)[\s\S]{0,1800}body: \{ ttlMs \}/.test(consoleSrc2)
         && /body: \{ code, ttlMs: selectedTtl \}/.test(consoleSrc2)
         && /body: \{ approvalId, namespace: inviteNamespace\(\), ttlMs: selectedTtl \}/.test(consoleSrc2),
-      'low/medium/high 三条生成路径均带 ttlMs；无原生 confirm');
+      'low/medium/high 三条生成路径均带 ttlMs；无 confirmModal / 原生 confirm');
     const inviteDialogSrc = htmlSrc.slice(htmlSrc.indexOf('<div id="invite"'), htmlSrc.indexOf('<div id="cloud-join"'));
     check('E1 邀请关闭：右上角 X（复用 modal-x），无底部「关闭」按钮',
       /id="invite-close"[^>]*class="modal-x"/.test(inviteDialogSrc)

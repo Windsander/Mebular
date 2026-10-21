@@ -508,10 +508,29 @@ body.modal-open { overflow: hidden; }
 .device-rename-input { width: 170px; min-width: 0; }
 .device-rename-error { display: block; margin-top: 4px; font-size: 11px; }
 .device-name-value { margin-right: 8px; }
-/* E2-A2：加入忆云弹层字段竖排（label 独占一行；textarea/input 满宽） */
+/* E2-A2：加入忆云弹层 = 标题/X + 单列输入流；令牌核对信息仅在解析成功后出现 */
+.cloud-join-box { width: min(560px, 94vw); }
+.cloud-join-head { margin-bottom: 12px; }
+.cloud-join-head .modal-note { margin: 4px 0 0; }
+.cloud-join-lead { font-size: 11.5px; }
+.cloud-join-fields { display: grid; gap: 10px; }
+.cloud-join-fields .field { margin: 0; }
+.cloud-join-inspect {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(5, 7, 15, 0.42);
+}
+.cloud-join-inspect[hidden] { display: none; }
+.cloud-join-inspect p { margin: 0; }
+.cloud-join-inspect p + p { margin-top: 2px; }
+#cloud-join #cloud-join-warning,
+#cloud-join .cloud-steps,
+#cloud-join .cloud-result,
+#cloud-join #cloud-join-error { margin: 10px 0 0; }
 #cloud-join textarea.crt-input { font-family: var(--crt-mono, monospace); font-size: 11px; resize: vertical; }
-#cloud-join .modal-note { margin-bottom: 4px; }
-#cloud-join .modal-actions { margin-top: 10px; }
+#cloud-join .modal-actions { margin-top: 14px; }
 @media (max-width: 760px) {
   .cloud-row { grid-template-columns: minmax(0, 1fr); }
   .cloud-actions { grid-column: 1; grid-row: auto; justify-content: flex-start; }
@@ -1148,26 +1167,46 @@ body.modal-open { overflow: hidden; }
 @media (max-width: 760px) { .path-row { grid-template-columns: minmax(0, 1fr); } }
 
 /* ---------- C7：邀请二维码 / 两栏精简面板 ---------- */
-/* 邀请是单动作弹框：加深底色，避免背后星图/浮卡文字透进二维码与令牌区 */
-#invite .modal-box { background-color: #07120d; }
+/* 邀请是单动作弹框：加深底色，避免背后星图/浮卡文字透进二维码与令牌区。
+   固定最小高度 = 首次打开先用与结果同高的骨架，避免「先极小再撑开」。 */
+#invite .modal-box { background-color: #07120d; min-height: min(390px, calc(100vh - 48px)); }
 .invite-layout { display: grid; grid-template-columns: 156px minmax(0, 1fr); gap: 18px; align-items: start; }
 .invite-qr { display: flex; align-items: flex-start; justify-content: center; min-width: 0; }
 .qr-img { width: 156px; height: 156px; background: #fff; border-radius: 8px; padding: 6px; image-rendering: pixelated; }
 .invite-qr-fallback { margin: 0; font-size: 11px; line-height: 1.6; }
 .invite-main { display: grid; gap: 10px; align-content: start; min-width: 0; }
 .invite-lead { margin: 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
+/* 首次打开的稳定骨架：QR 占位 + 多行占位，高度与结果面板近似 */
+.invite-skeleton-qr { width: 156px; height: 156px; border-radius: 8px; border: 1px dashed rgba(140, 255, 200, 0.22); background: rgba(80, 255, 170, 0.05); animation: invite-skeleton-pulse 1.6s ease-in-out infinite; }
+.invite-skeleton-line { width: 100%; height: 11px; border-radius: 999px; background: rgba(140, 255, 200, 0.11); animation: invite-skeleton-pulse 1.6s ease-in-out infinite; }
+.invite-skeleton-line-lg { width: 78%; height: 14px; }
+.invite-skeleton-line-sm { width: 42%; height: 10px; }
+.invite-skeleton-ttl { width: 92px; height: 28px; }
+.invite-skeleton-expiry { width: 118px; justify-self: start; }
+.invite-skeleton-regen { width: 86px; justify-self: end; grid-column: 2; }
+.invite-skeleton-code { height: 16px; width: 88%; }
+.invite-skeleton-copy { height: 26px; }
+.invite-loading-note { margin: 10px 0 0; font-size: 11px; }
+@keyframes invite-skeleton-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
+/* 重新生成：不替换现有 DOM，只把当前面板标记为忙，成功后再原地换结果 */
+#invite-body.is-busy .invite-layout { opacity: 0.72; }
+#invite-body.is-busy #invite-regenerate { cursor: progress; }
+#invite-body.is-busy .invite-ttl select { cursor: progress; opacity: 0.6; }
+#invite-regenerate { min-width: 86px; }
+.invite-regen-error { margin: 0; font-size: 11px; line-height: 1.6; }
 /* 令牌是主信息：单独一块微凹面板，和下方 TTL 控件拉开层级 */
 .invite-token-block { display: grid; gap: 5px; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: rgba(5, 7, 15, 0.55); }
 .invite-label { color: var(--muted); font-size: 10.5px; letter-spacing: 0.8px; }
-.invite-token-block .copyable { min-width: 0; }
-.invite-token-block .copyable code { font-size: 11px; }
-.invite-token-block .copyable .btn { flex: 0 0 auto; white-space: nowrap; }
-/* 邀请单动作：有效期 + 到期时刻 + 重新生成同一行；重新生成靠右，改档不自动刷新 */
-.invite-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.invite-token-code { display: block; min-width: 0; font-size: 11px; color: var(--accent); overflow-wrap: anywhere; }
+.invite-token-block .invite-copy { width: 100%; }
+/* 邀请单动作：有效期 + 到期时刻一行；重新生成是次级动作，单独靠右一行 */
+.invite-controls { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 10px; align-items: center; }
 .invite-ttl { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
 .invite-ttl select.crt-input { width: auto; min-width: 92px; padding: 4px 6px; }
-.invite-expiry { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
-.invite-controls #invite-regenerate { margin-left: auto; }
+.invite-expiry { grid-column: 2; font-size: 10.5px; color: var(--muted); white-space: nowrap; justify-self: start; }
+.invite-controls #invite-regenerate { grid-column: 2; justify-self: end; }
+.invite-regenerate { color: var(--muted); border-color: var(--border); background: transparent; text-shadow: none; }
+.invite-regenerate:hover:not(:disabled) { color: #c8ffe3; border-color: rgba(80, 255, 170, 0.45); background: rgba(8, 38, 26, 0.4); }
 .invite-warning { margin: 0; font-size: 11px; line-height: 1.6; }
 /* 底部身份 / 安全提示收成一条页脚：一行忆云名 + 指纹，一行传递边界 */
 .invite-foot { display: grid; gap: 3px; margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border); }
@@ -1176,7 +1215,9 @@ body.modal-open { overflow: hidden; }
 @media (max-width: 520px) {
   .invite-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .invite-qr { justify-content: flex-start; }
-  .invite-controls #invite-regenerate { margin-left: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .invite-skeleton-qr, .invite-skeleton-line { animation: none; }
 }
 
 /* ---------- 引导态（首次上手）：建新 / 加入 ---------- */
@@ -1559,8 +1600,12 @@ details.share[open] summary::before { content: "▾ "; }
 
 /* 锁定态弹框：令牌输入与加入忆云一致（等宽、可换行）；字段仍复用 .field */
 #onboard-join textarea.crt-input { font-family: var(--crt-mono, monospace); font-size: 11px; resize: vertical; }
-#onboard-create .modal-note, #onboard-join .modal-note { margin-bottom: 4px; }
-#onboard-create .modal-actions, #onboard-join .modal-actions { margin-top: 10px; }
+#onboard-create .modal-note, #onboard-join .modal-note { margin: 4px 0 0; }
+.onboard-join-fields { display: grid; gap: 10px; margin-top: 12px; }
+.onboard-join-fields .field { margin: 0; }
+.field-required { margin-left: 4px; color: var(--muted); font-size: 10px; letter-spacing: 0.4px; opacity: 0.85; }
+#onboard-join-error { margin: 10px 0 0; }
+#onboard-create .modal-actions, #onboard-join .modal-actions { margin-top: 12px; }
 
 @media (prefers-reduced-motion: reduce) {
   .topbar-actions .btn.is-onboarding { animation: none; }

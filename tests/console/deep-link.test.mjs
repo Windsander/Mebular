@@ -282,9 +282,10 @@ describe('UX-2 邀请单动作页', () => {
     expect(consoleJs).not.toContain('fleet join --token');
   });
 
-  it('重新生成走应用内确认（confirmModal）；TTL 选择不自动刷新', () => {
+  it('重新生成不弹确认（直接 keepPanel 原地更新）；TTL 选择不自动刷新', () => {
     expect(consoleJs).toContain('id="invite-regenerate"');
-    expect(consoleJs).toMatch(/invite-regenerate[\s\S]{0,420}confirmModal\(/);
+    expect(consoleJs).toMatch(/invite-regenerate[\s\S]{0,260}renderInvite\(state\.inviteTtlMs, \{ keepPanel: true \}\)/);
+    expect(consoleJs).not.toContain('重新生成令牌？');
     expect(consoleJs).toContain('id="invite-expiry"');
     expect(consoleJs).not.toContain('改档后点');
   });

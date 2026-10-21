@@ -1236,26 +1236,30 @@ export async function buildNetStatusView({ app }) {
 }
 
 /** H-1 · GET /admin/api/service：常驻运行状态（registered/running/autostart/heartbeat）。 */
-export async function buildServiceView({ home }) {
-  const { serviceStatusForHome, registeredForHome, SERVICE_KIND } = await import('./service-control.mjs');
+export async function buildServiceView({ home: instanceHome }) {
+  const { serviceStatusForHome, registeredForHome, resolveServiceHome, SERVICE_KIND } = await import('./service-control.mjs');
   const platform = process.platform;
+  // 两套 home：home 是实例身份（descriptor 的 MEBULAR_HOME/心跳），serviceHome 是 unit/manifest 落盘位置。
+  // 旧实现把两者混用 → 控制台去实例 home 下找 unit，对 CLI 装在 OS home 的服务误报「未常驻」。
+  const serviceHome = resolveServiceHome();
   let status = null;
   let error = null;
   try {
-    status = serviceStatusForHome({ home, platform });
+    status = serviceStatusForHome({ home: instanceHome, serviceHome, platform });
   } catch (cause) {
     error = String(cause?.message ?? cause);
   }
   let registeredKinds = [];
   try {
-    registeredKinds = registeredForHome({ home, platform });
+    registeredKinds = registeredForHome({ home: instanceHome, serviceHome, platform });
   } catch {
     registeredKinds = [];
   }
   return {
     platform,
     kind: SERVICE_KIND,
-    home,
+    home: instanceHome,
+    serviceHome,
     serviceManaged: Boolean(process.env.MEBULAR_SERVICE_KIND || process.env.MEBULAR_SERVICE_SHA),
     registered: status?.registered ?? registeredKinds.includes(SERVICE_KIND),
     running: status?.running ?? false,

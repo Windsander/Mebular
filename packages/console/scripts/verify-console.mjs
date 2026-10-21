@@ -916,7 +916,13 @@ try {
       sync: { autoSync: false },
       mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
     }, null, 2), 'utf-8');
-    const h1Handle = spawnServe({ home: h1Home, storage: join(h1Home, 'store.jsonl'), deviceId: 'device-h1', env: { MEBULAR_SERVICE_DRY_RUN: '1' } });
+    const h1Handle = spawnServe({
+      home: h1Home,
+      storage: join(h1Home, 'store.jsonl'),
+      deviceId: 'device-h1',
+      // 服务单元/manifest 落 h1Home（隔离），避免 dry-run 测试写真实 ~/Library / ~/.config。
+      env: { MEBULAR_SERVICE_DRY_RUN: '1', MEBULAR_SERVICE_UNIT_HOME: h1Home },
+    });
     servers.push(h1Handle);
     const h1Ready = await waitReady(h1Handle);
     const h1Base = `http://127.0.0.1:${h1Ready.port}`;

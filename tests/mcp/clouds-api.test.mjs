@@ -63,12 +63,47 @@ const makeToken = async (extra) => {
 const app = {
   deviceId: 'device-local',
   securityCalls: 0,
+  cloudNameEvents: 0,
+  cloudName: null,
+  deviceNames: {},
+  eventLog: { listEvents: async () => [] },
   getSecurityTier: async () => {
     app.securityCalls += 1;
     return { level: 'high', admitted: [], rejections: [] };
   },
   getBlockedDevices: async () => [],
   getConvergenceStatus: () => null,
+  setCloudName: async ({ name }) => {
+    app.cloudNameEvents += 1;
+    app.cloudName = {
+      name,
+      author: 'device-local',
+      eventId: 'event-cloud-' + app.cloudNameEvents,
+      issuedAt: Date.now(),
+      at: Date.now(),
+    };
+    return { id: app.cloudName.eventId };
+  },
+  getCloudName: async () => app.cloudName,
+  setDeviceName: async ({ name }) => {
+    const normalized = core.normalizeDisplayName(name);
+    if (normalized === null) {
+      const error = new Error('设备名需为 1–24 个字符，且不能包含 /、\\ 或 ..');
+      error.code = 'VALIDATION_INVALID_ARGUMENT';
+      throw error;
+    }
+    app.deviceNames['device-local'] = {
+      deviceId: 'device-local',
+      name: normalized,
+      author: 'device-local',
+      eventId: 'event-device-1',
+      issuedAt: Date.now(),
+      at: Date.now(),
+    };
+    return { id: 'event-device-1' };
+  },
+  getDeviceName: async (deviceId) => app.deviceNames[deviceId] ?? null,
+  getDeviceNames: async () => app.deviceNames,
 };
 const service = {
   status: async () => ({ running: true, peerId: 'peer-local', listenAddrs: [], relays: [], nodeCount: 1, pendingEventCount: 0 }),
@@ -155,12 +190,24 @@ try {
   out.provisioningGone = provisioningGone;
   out.securityCallsAfterJoin = app.securityCalls;
 
-  out.rename = await post('/admin/api/clouds/rename', { id, name: ' 工作室 ' });
-  out.renameTaken = await post('/admin/api/clouds/rename', { id, name: '忆云 1' });
-  out.renameInvalid = await post('/admin/api/clouds/rename', { id, name: 'a/b' });
+  out.renameArchived = await post('/admin/api/clouds/rename', { id, name: ' 工作室 ' });
+  out.rename = await post('/admin/api/clouds/rename', { id: 'default', name: ' 工作室 ' });
+  out.renameTaken = await post('/admin/api/clouds/rename', { id: 'default', name: '忆云 2' });
+  out.renameInvalid = await post('/admin/api/clouds/rename', { id: 'default', name: 'a/b' });
   out.renameMissing = await post('/admin/api/clouds/rename', { id: 'p_ffffffff', name: 'x' });
+  out.deviceRename = await post('/admin/api/devices/self/name', { name: ' 主控笔记本 ' });
+  out.deviceRenameInvalid = await post('/admin/api/devices/self/name', { name: 'a/b' });
   out.overviewAfter = await get('/admin/api/overview');
+  out.devicesAfter = await get('/admin/api/devices');
+  out.settingsAfter = await get('/admin/api/settings');
   out.listRenamed = await get('/admin/api/clouds');
+  // 模拟“另一台设备把当前忆云改成与已归档项同名”（网络事件；本机 registry 仍为旧名）。
+  const savedCloudName = app.cloudName;
+  app.cloudName = {
+    name: '忆云 2', author: 'device-peer', eventId: 'event-remote', issuedAt: Date.now(), at: Date.now(),
+  };
+  out.listConflict = await get('/admin/api/clouds');
+  app.cloudName = savedCloudName;
   out.lockAfter = JSON.parse(await readFile(join(root, 'active.lock'), 'utf-8'));
 
   let activeConflict = null;
@@ -326,17 +373,53 @@ describe('E2-A1 GET /admin/api/clouds + healthz 身份 + active.lock', () => {
     expect(result.profileDirCount).toBe(1);
   });
 
-  it('rename：成功 / NAME_TAKEN / INVALID_NAME / PROFILE_NOT_FOUND；overview 立即反映', () => {
+  it('rename：仅当前忆云可写网络名；归档拒绝 / NAME_TAKEN / INVALID_NAME / PROFILE_NOT_FOUND', () => {
+    expect(result.renameArchived.status).toBe(409);
+    expect(result.renameArchived.body.error).toBe('CLOUD_ARCHIVED');
     expect(result.rename.status).toBe(200);
     expect(result.rename.body.profile.name).toBe('工作室');
+    expect(result.rename.body.profile.nameUpdatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(result.rename.body.cloud).toMatchObject({ id: 'default', name: '工作室', nameSource: 'network' });
     expect(result.renameTaken.status).toBe(400);
     expect(result.renameTaken.body.error).toBe('NAME_TAKEN');
     expect(result.renameInvalid.status).toBe(400);
     expect(result.renameInvalid.body.error).toBe('INVALID_NAME');
     expect(result.renameMissing.status).toBe(404);
     expect(result.renameMissing.body.error).toBe('PROFILE_NOT_FOUND');
-    expect(result.listRenamed.body.profiles.find((profile) => profile.id === result.join.body.profile.id).name).toBe('工作室');
-    expect(result.overviewAfter.body.cloud).toMatchObject({ id: 'default', name: '忆云 1', current: true });
+    expect(result.listRenamed.body.profiles.find((profile) => profile.id === 'default').name).toBe('工作室');
+    expect(result.listRenamed.body.profiles.find((profile) => profile.id === result.join.body.profile.id).name).toBe('忆云 2');
+    // overview / clouds 都以网络派生为准，而不是 registry 缓存。
+    expect(result.overviewAfter.body.cloud).toMatchObject({
+      id: 'default', name: '工作室', current: true, nameSource: 'network',
+    });
+    expect(result.listRenamed.body.profiles.find((profile) => profile.id === 'default')).toMatchObject({
+      name: '工作室', nameSource: 'network', duplicateName: false,
+    });
+  });
+
+  it('设备名：本人可改、显示最新名、非法名称拒绝', () => {
+    expect(result.deviceRename.status).toBe(200);
+    expect(result.deviceRename.body).toMatchObject({ ok: true, deviceId: 'device-local', name: '主控笔记本' });
+    expect(result.deviceRenameInvalid.status).toBe(400);
+    expect(result.deviceRenameInvalid.body.error).toBe('VALIDATION_INVALID_ARGUMENT');
+    expect(result.overviewAfter.body.device.name).toBe('主控笔记本');
+    expect(result.devicesAfter.body.find((device) => device.deviceId === 'device-local').name).toBe('主控笔记本');
+    expect(result.settingsAfter.body.identity).toMatchObject({
+      name: '主控笔记本', nameSource: 'network',
+    });
+  });
+
+  it('网络改名导致本机重名：两项都标重名，最近更新项建议改名，当前项警告', () => {
+    expect(result.listConflict.status).toBe(200);
+    const current = result.listConflict.body.profiles.find((profile) => profile.id === 'default');
+    const archived = result.listConflict.body.profiles.find(
+      (profile) => profile.id === result.join.body.profile.id,
+    );
+    expect(current).toMatchObject({ name: '忆云 2', duplicateName: true, suggestedRename: true });
+    expect(archived).toMatchObject({ name: '忆云 2', duplicateName: true, suggestedRename: false });
+    expect(result.listConflict.body.nameConflicts).toMatchObject({
+      currentDuplicate: true, suggestedIds: ['default'],
+    });
   });
 
   it('CLOUD_UNAVAILABLE（自定义 home）→ 503；join → 403 CLOUD_DISABLED；注册表损坏 → 500 CLOUD_REGISTRY_INVALID', () => {

@@ -40,6 +40,7 @@ import {
   type SyncFingerprintEvent,
 } from './sync/convergence.js';
 import { computeStateHashByNamespace } from './core/stateHash.js';
+import { normalizeDisplayName } from './core/displayName.js';
 import type { SyncStateFingerprints } from './sync/protocol.js';
 import {
   GraphNamespacePolicy,
@@ -49,12 +50,18 @@ import {
   DEVICE_REVOKE_EVENT,
   DEVICE_RESTORE_EVENT,
   NAMESPACE_HANDOFF_EVENT,
+  CLOUD_NAME_EVENT,
+  DEVICE_NAME_EVENT,
   SECURITY_TIER_EVENT,
   type NamespaceSubscriptionRecord,
   type NamespaceDeclareRecord,
   type DeviceRevokeRecord,
   type DeviceRestoreRecord,
   type NamespaceHandoffRecord,
+  type CloudNameRecord,
+  type DeviceNameRecord,
+  type CloudNameState,
+  type DeviceNameState,
   type SecurityTierRecord,
   type SecurityLevel,
   type SecurityPolicyState,
@@ -827,6 +834,84 @@ export class Mebular {
   /** 域公告集合（不含本地节点）。 */
   async getNamespaceDeclarations(): Promise<string[]> {
     return this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getDeclaredNamespaces();
+  }
+
+  // ---------- 展示名（忆云名 / 设备名） ----------
+
+  /**
+   * 设置**网络级**忆云名：写本机签名 `cloud_name` 到 `__policy__`。
+   * 任意已准入设备可改；latest-writer-wins（按事件定序，不按 issuedAt 墙钟）。
+   * 不改根指纹/信任/身份。调用方负责本机注册表缓存与“仅当前 Cloud”约束。
+   */
+  async setCloudName(input: { name: string }): Promise<Event> {
+    const name = normalizeDisplayName(input.name);
+    if (name === null) {
+      throw new MebularError(
+        '忆云名字需为 1–24 个字符，且不能包含 /、\\ 或 ..',
+        ErrorCodes.VALIDATION_INVALID_ARGUMENT,
+      );
+    }
+    const blocked = await this.getBlockedDevices();
+    if (blocked.includes(this.config.deviceId)) {
+      throw new MebularError(
+        '本机已被移出当前忆云，不能改名',
+        ErrorCodes.VALIDATION_INVALID_ARGUMENT,
+      );
+    }
+    const cloudName: CloudNameRecord = { v: 1, name, issuedAt: Date.now() };
+    return this.eventLog.append({
+      type: CLOUD_NAME_EVENT,
+      data: { cloudName },
+      namespace: POLICY_NAMESPACE,
+    });
+  }
+
+  /** 网络级忆云名（无共享事件 → null；调用方回退本机注册表）。 */
+  async getCloudName(): Promise<CloudNameState | null> {
+    return this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getCloudName();
+  }
+
+  /**
+   * 设置**本机设备名**：写自签名 `device_name`（`subject === author`）。
+   * 只改展示名，不重签证书；被移出的设备不能改名。
+   */
+  async setDeviceName(input: { name: string }): Promise<Event> {
+    const name = normalizeDisplayName(input.name);
+    if (name === null) {
+      throw new MebularError(
+        '设备名需为 1–24 个字符，且不能包含 /、\\ 或 ..',
+        ErrorCodes.VALIDATION_INVALID_ARGUMENT,
+      );
+    }
+    const blocked = await this.getBlockedDevices();
+    if (blocked.includes(this.config.deviceId)) {
+      throw new MebularError(
+        '本机已被移出当前网络，不能改名',
+        ErrorCodes.VALIDATION_INVALID_ARGUMENT,
+      );
+    }
+    const deviceName: DeviceNameRecord = {
+      v: 1,
+      subject: this.config.deviceId,
+      name,
+      issuedAt: Date.now(),
+    };
+    return this.eventLog.append({
+      type: DEVICE_NAME_EVENT,
+      data: { deviceName },
+      namespace: POLICY_NAMESPACE,
+    });
+  }
+
+  /** 某设备的最新展示名（无事件 → null；UI 以 deviceId 为唯一标识）。 */
+  async getDeviceName(deviceId: string): Promise<DeviceNameState | null> {
+    return this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getDeviceName(deviceId);
+  }
+
+  /** 全部设备展示名（deviceId → 最新记录）。 */
+  async getDeviceNames(): Promise<Record<string, DeviceNameState>> {
+    const map = await this.assertReady(this.graphPolicyImpl, 'namespacePolicy').getDeviceNames();
+    return Object.fromEntries(map.entries());
   }
 
   // ---------- 移出 / 恢复 ----------

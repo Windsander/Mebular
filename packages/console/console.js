@@ -39,6 +39,9 @@ const state = {
   cloudsError: null,
   cloudRename: null,
   cloudRenameError: '',
+  // 本机设备名编辑（关于本机 → 身份与存储）
+  deviceRename: null,
+  deviceRenameError: '',
   cloudJoinInspect: null,
   cloudJoinResult: null,
   cloudJoinNameAuto: true,
@@ -292,10 +295,16 @@ function renderTopbar() {
   if (cloudEl) {
     const cloud = state.overview?.cloud ?? null;
     if (typeof cloud?.name === 'string' && cloud.name.trim().length > 0) {
+      const currentConflict = state.clouds?.nameConflicts?.currentDuplicate === true
+        || (state.clouds?.profiles ?? []).some((profile) => profile.current && profile.duplicateName);
       cloudEl.hidden = false;
-      cloudEl.innerHTML = `<svg class="cloud-mark" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.6 12.2h6.9a2.7 2.7 0 0 0 .4-5.37A4.2 4.2 0 0 0 3.4 7.1a2.6 2.6 0 0 0 1.2 5.1Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="cloud-name">${escapeHtml(cloud.name)}</span>`;
-      cloudEl.title = `当前忆云：${cloud.name}（点击打开设置 · 忆云）`;
-      cloudEl.setAttribute('aria-label', `当前忆云：${cloud.name}；打开设置 · 忆云`);
+      cloudEl.innerHTML = `<svg class="cloud-mark" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.6 12.2h6.9a2.7 2.7 0 0 0 .4-5.37A4.2 4.2 0 0 0 3.4 7.1a2.6 2.6 0 0 0 1.2 5.1Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="cloud-name">${escapeHtml(cloud.name)}</span>${currentConflict ? '<span class="cloud-warning-dot" title="本机有同名忆云，建议改名" aria-label="重名警告"></span>' : ''}`;
+      cloudEl.title = currentConflict
+        ? `当前忆云：${cloud.name}（有同名忆云，建议改名；点击打开设置 · 忆云）`
+        : `当前忆云：${cloud.name}（点击打开设置 · 忆云）`;
+      cloudEl.setAttribute('aria-label', currentConflict
+        ? `当前忆云：${cloud.name}；有同名忆云警告；打开设置 · 忆云`
+        : `当前忆云：${cloud.name}；打开设置 · 忆云`);
     } else {
       cloudEl.hidden = true;
       cloudEl.textContent = '';
@@ -2174,6 +2183,41 @@ function renderDiagnostics() {
 
 let lastAboutSignature = null;
 
+/** 本机设备名编辑（关于本机 → 身份与存储）。 */
+function startDeviceRename() {
+  state.deviceRename = { name: state.settings?.identity?.name ?? '' };
+  state.deviceRenameError = '';
+  renderAbout();
+  setTimeout(() => {
+    const input = document.querySelector('[data-device-rename-input]');
+    if (!input) return;
+    input.focus?.();
+    input.select?.();
+  }, 0);
+}
+
+async function saveDeviceRename() {
+  if (!state.deviceRename) return;
+  const name = String(state.deviceRename.name ?? '').trim();
+  if (name.length === 0) {
+    state.deviceRenameError = '设备名不能为空。';
+    renderAbout();
+    return;
+  }
+  state.deviceRenameError = '';
+  renderAbout();
+  try {
+    await api('/admin/api/devices/self/name', { method: 'POST', body: { name } });
+    state.deviceRename = null;
+    await refresh();
+    renderAbout();
+    showToast(`设备名已改为「${name}」；会同步到同一忆云的其他设备。`);
+  } catch (error) {
+    state.deviceRenameError = error?.payload?.message ?? error?.message ?? String(error);
+    renderAbout();
+  }
+}
+
 function renderAbout() {
   const body = $('#about-body');
   // 同一类轮询重建保护：内容未变则跳过，避免滚动位置/文本选择被冲掉
@@ -2183,9 +2227,12 @@ function renderAbout() {
     state.healthz ?? null,
     state.features?.writes ?? null,
     state.overview?.device?.deviceId ?? null,
+    state.overview?.device?.name ?? null,
     state.service?.unitPath ?? null,
     state.overview?.convergence ?? null,
-    (state.devices ?? []).map((d) => [d.deviceId, d.convergence ?? null]),
+    (state.devices ?? []).map((d) => [d.deviceId, d.name ?? null, d.convergence ?? null]),
+    state.deviceRename ? 'editing' : null,
+    state.deviceRenameError,
   ]);
   if (signature === lastAboutSignature && body.childElementCount > 0) return;
   lastAboutSignature = signature;
@@ -2204,12 +2251,27 @@ function renderAbout() {
   const addrRows = s.identity.multiaddrs.length
     ? s.identity.multiaddrs.map((a) => copyRowOf('multiaddr', a))
     : [emptyRowOf('multiaddr', '（未启用 P2P，无监听地址）')];
+  const writes = state.features.writes && !MOCK;
+  const renamingDevice = state.deviceRename !== null;
+  const deviceName = s.identity.name ?? '';
+  const deviceNameRow = renamingDevice
+    ? kvRow('设备名', `<span class="device-rename-inline">
+        <input class="crt-input device-rename-input" data-device-rename-input type="text" maxlength="24"
+          value="${escapeHtml(state.deviceRename?.name ?? deviceName)}" aria-label="设备名" />
+        <button class="btn btn-small btn-crt" data-device-rename-save type="button" ${writes ? '' : 'disabled'}>保存</button>
+        <button class="btn btn-small" data-device-rename-cancel type="button">取消</button>
+      </span>${state.deviceRenameError ? `<span class="crt-warn device-rename-error" role="alert">${escapeHtml(state.deviceRenameError)}</span>` : ''}`)
+    : kvRow('设备名', `${deviceName
+      ? `<span class="device-name-value">${escapeHtml(deviceName)}</span>`
+      : '<span class="kv-empty">未设置（列表按 deviceId 显示）</span>'}
+      <button class="btn btn-small btn-crt" data-device-rename type="button" ${writes ? '' : 'disabled'}>改名</button>
+      <span class="cfg-help muted">只有本人可改；会同步到同一忆云的其他设备，不重签证书。</span>`);
   body.innerHTML = `
     <section class="settings-section" data-info-block="identity">
-      <h3>身份与存储 <span class="badge badge-muted">只读</span></h3>
+      <h3>身份与存储 <span class="badge badge-muted">身份只读 · 设备名可改</span></h3>
       ${kvRows([
         copyRowOf('deviceId', s.identity.deviceId),
-        ...(s.identity.name ? [kvRow('名称', escapeHtml(s.identity.name))] : []),
+        deviceNameRow,
         kvRow('身份模式', s.identity.mode === 'delegated'
           ? 'delegated（委派证书链，无主私钥）'
           : 'root（持有用户主密钥，可为任意设备颁发证书）'),
@@ -3100,7 +3162,7 @@ function renderDeviceCard() {
   const selfRow0 = state.devices.find((d) => d.deviceId === state.overview?.device?.deviceId);
   // 轮询每 3s 触发 render；内容未变时跳过重渲染，避免冲掉「更多操作」展开态与点击
   const cardSignature = JSON.stringify([
-    device.deviceId, device.online, device.blocked, device.pendingEventCount ?? null,
+    device.deviceId, device.name ?? null, device.online, device.blocked, device.pendingEventCount ?? null,
     device.lastSyncAt ?? null, device.subscriptions ?? [], device.sharesWithMe ?? [],
     isSelf, writes,
     state.security?.level ?? 'low',
@@ -3195,6 +3257,7 @@ function renderDeviceCard() {
   const conv = isSelf ? null : device.convergence ?? null;
   body.innerHTML = `
     <div class="card-identity">
+      ${device.name ? `<span class="card-name">${escapeHtml(device.name)}</span>` : ''}
       <span class="card-id"><span class="dev-led ${status.cls}" aria-hidden="true"></span>${escapeHtml(device.deviceId)}</span>
       <span class="crt-tag card-status ${status.cls}">${status.text}</span>
     </div>
@@ -3914,6 +3977,21 @@ $('#self-badge').addEventListener('click', () => {
 $('#about-close').addEventListener('click', () => {
   $('#about').hidden = true;
 });
+$('#about-body').addEventListener('click', (event) => {
+  if (event.target.closest('[data-device-rename]')) { startDeviceRename(); return; }
+  if (event.target.closest('[data-device-rename-save]')) { void saveDeviceRename(); return; }
+  if (event.target.closest('[data-device-rename-cancel]')) {
+    state.deviceRename = null;
+    state.deviceRenameError = '';
+    renderAbout();
+  }
+});
+$('#about-body').addEventListener('input', (event) => {
+  if (event.target?.matches?.('[data-device-rename-input]') && state.deviceRename) {
+    state.deviceRename.name = event.target.value;
+    state.deviceRenameError = '';
+  }
+});
 $('#about-to-diagnostics').addEventListener('click', () => {
   $('#about').hidden = true;
   $('#settings').hidden = false;
@@ -4194,6 +4272,8 @@ function cloudErrorCopy(error) {
     CONFIRMATION_REQUIRED: '需要确认后才能加入。',
     INVALID_NAME: '忆云名字需为 1–24 个字符，且不能包含 /、\\ 或 ..。',
     NAME_TAKEN: '已有同名忆云，请换一个名字。',
+    CLOUD_ARCHIVED: '归档忆云不支持改名；请先切换到该忆云后再改。',
+    CLOUD_BLOCKED: '本机已被移出当前忆云，不能改名。',
     PROFILE_NOT_FOUND: '未找到这个忆云；列表可能已变化，请刷新后重试。',
     PROFILE_JOIN_FAILED: '本机无法创建忆云；令牌可能已在对方处兑换，请让邀请方重新生成。',
     ENDPOINT_UNREACHABLE: '连不上邀请方：确认对方守护在运行、地址可达，然后重试。',
@@ -4216,27 +4296,38 @@ function cloudRowHtml(entry) {
   const id = escapeHtml(entry.id);
   const current = entry.current === true;
   const renaming = state.cloudRename?.id === entry.id;
+  const duplicate = entry.duplicateName === true;
+  const suggested = entry.suggestedRename === true;
   const fingerprint = entry.masterFingerprint
     ? `<code>${escapeHtml(entry.masterFingerprint)}</code>`
     : '<span class="kv-empty">未知（需要修复）</span>';
   const lastUsed = entry.lastUsedAt ? formatTime(entry.lastUsedAt) : '—';
-  const renameUi = renaming
-    ? `<input class="crt-input cloud-rename-input" data-cloud-rename-input type="text" maxlength="24"
-         value="${escapeHtml(state.cloudRename?.name ?? entry.name)}" aria-label="忆云名字" />
-       <button class="btn btn-small btn-crt" data-cloud-rename-save type="button" ${cloudRenameBusy ? 'disabled' : ''}>保存</button>
-       <button class="btn btn-small" data-cloud-rename-cancel type="button">取消</button>`
-    : `${current ? '' : `<button class="btn btn-small btn-crt btn-crt-danger" data-cloud-switch="${id}" type="button">切换</button>`}
-       <button class="btn btn-small btn-crt" data-cloud-rename="${id}" type="button">改名</button>`;
-  return `<div class="cloud-row${current ? ' is-current' : ''}" data-cloud-row="${id}">
+  const conflictBadges = duplicate
+    ? `<span class="badge badge-warn cloud-dup-badge">重名</span>${suggested ? '<span class="badge badge-warn cloud-suggest-badge">最近更新 · 建议改名</span>' : ''}`
+    : '';
+  // 第一版：只有当前忆云能写网络级名字；归档项提示切换后再改。
+  const renameUi = current
+    ? (renaming
+      ? `<input class="crt-input cloud-rename-input" data-cloud-rename-input type="text" maxlength="24"
+           value="${escapeHtml(state.cloudRename?.name ?? entry.name)}" aria-label="忆云名字" />
+         <button class="btn btn-small btn-crt" data-cloud-rename-save type="button" ${cloudRenameBusy ? 'disabled' : ''}>保存</button>
+         <button class="btn btn-small" data-cloud-rename-cancel type="button">取消</button>`
+      : `<button class="btn btn-small btn-crt" data-cloud-rename="${id}" type="button">改名</button>`)
+    : `<button class="btn btn-small btn-crt btn-crt-danger" data-cloud-switch="${id}" type="button">切换</button>
+       <span class="cloud-rename-hint muted">切换到该忆云后可改名</span>`;
+  return `<div class="cloud-row${current ? ' is-current' : ''}${duplicate ? ' is-duplicate' : ''}" data-cloud-row="${id}">
     <div class="cloud-main">
       <span class="cloud-name">${escapeHtml(entry.name)}</span>
       <span class="badge ${current ? 'badge-ok' : 'badge-muted'}">${current ? '当前' : '已归档'}</span>
+      ${conflictBadges}
     </div>
     <div class="cloud-meta">
       <span>根指纹 ${fingerprint}</span>
       <span>最近使用 ${escapeHtml(lastUsed)}</span>
+      ${entry.nameUpdatedAt ? `<span>名字更新 ${escapeHtml(formatTime(entry.nameUpdatedAt))}</span>` : ''}
     </div>
     <div class="cloud-actions">${renameUi}</div>
+    ${current ? '<p class="cfg-help muted cloud-rename-note">改名会同步到所有设备（不改根指纹/信任）。</p>' : ''}
     ${renaming && state.cloudRenameError ? `<p class="crt-warn cloud-rename-error" role="alert">${escapeHtml(state.cloudRenameError)}</p>` : ''}
   </div>`;
 }
@@ -4248,7 +4339,10 @@ function cloudCardHtml() {
     const rows = (state.clouds.profiles ?? []).map(cloudRowHtml).join('');
     body = `${state.clouds.warning ? `<p class="crt-warn">${escapeHtml(state.clouds.warning)}</p>` : ''}
       <div class="cloud-rows">${rows || '<p class="muted">还没有忆云记录。</p>'}</div>
-      <p class="cfg-help muted">当前忆云不可切换；已归档忆云切换前会确认。改名即时生效，不需要重启。</p>`;
+      <p class="cfg-help muted">当前忆云不可切换；已归档忆云切换前会确认。改名会同步到所有设备，不需要重启；已归档忆云需切换后再改名。</p>
+      ${state.clouds.nameConflicts?.currentDuplicate
+        ? '<p class="crt-warn">本机有同名忆云：当前忆云已加警告点。请给「最近更新 · 建议改名」的那一项换一个名字。</p>'
+        : ''}`;
   } else if (state.cloudsError) {
     const { title, detail } = cloudErrorCopy(state.cloudsError);
     body = `<p class="cloud-unavailable">${escapeHtml(title)}</p>${detail ? `<p class="cfg-help muted">${escapeHtml(detail)}</p>` : ''}`;
@@ -4279,6 +4373,10 @@ function openCloudSettings() {
 function startCloudRename(id) {
   const entry = state.clouds?.profiles?.find((item) => item.id === id);
   if (!entry) return;
+  if (!entry.current) {
+    showToast('归档忆云不支持改名；请切换到该忆云后再改。');
+    return;
+  }
   state.cloudRename = { id, name: entry.name };
   state.cloudRenameError = '';
   renderSettings(state.settingsTab ?? 'common');

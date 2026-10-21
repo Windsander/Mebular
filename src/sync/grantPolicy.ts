@@ -7,7 +7,8 @@
 //   - 移出：`device_revoke`，只作用于被移出设备本人（作者级，不沿证书链连坐）；
 //   - 恢复：`device_restore` + 恢复纪元 E-1（恢复位次之前的策略记录不采纳）；
 //   - 域公告：`namespace_declare`（自签名，零门槛，供目录展示）；
-//   - 安全档：`security_tier` / `security_approval` / `security_recovery`。
+//   - 安全档：`security_tier` / `security_approval` / `security_recovery`；
+//   - 展示名：`cloud_name` / `device_name`（只作展示元数据，不参与前四轴推导）。
 //
 // 没有 grant / revoke / issuer / 自动签发 / 按对端×按域的授权白名单。
 
@@ -15,6 +16,7 @@ import { createHash } from 'node:crypto';
 import type { Event } from '../types/event.js';
 import type { EventLog } from '../eventlog/EventLog.js';
 import { normalizeNamespace } from '../core/namespace.js';
+import { normalizeDisplayName } from '../core/displayName.js';
 import type { NamespaceSubscriptionPolicy } from './namespacePolicy.js';
 import { verifyIssuedByUser } from './trust.js';
 import {
@@ -42,6 +44,10 @@ export const DEVICE_REVOKE_EVENT = 'device_revoke';
 export const DEVICE_RESTORE_EVENT = 'device_restore';
 /** 交接记录（审计产物；不参与订阅/移出推导）。 */
 export const NAMESPACE_HANDOFF_EVENT = 'namespace_handoff';
+/** 网络级忆云名（自签名；latest-writer-wins，仅展示元数据）。 */
+export const CLOUD_NAME_EVENT = 'cloud_name';
+/** 设备展示名（自签名；`subject === author`，仅展示元数据）。 */
+export const DEVICE_NAME_EVENT = 'device_name';
 
 // ---------------------------------------------------------------------------
 // 安全等级（low / medium / high）与会签证明
@@ -195,6 +201,41 @@ export interface NamespaceHandoffRecord {
   note?: string;
 }
 
+/** 网络级忆云名记录（任意已准入设备可写；latest-writer-wins）。 */
+export interface CloudNameRecord {
+  v?: 1;
+  name: string;
+  issuedAt: number;
+}
+
+/** 设备展示名记录（只能改本人：`subject === author`）。 */
+export interface DeviceNameRecord {
+  v?: 1;
+  subject: string;
+  name: string;
+  issuedAt: number;
+}
+
+/** 推导后的忆云名视图（eventId/author 供审计；排序不看 issuedAt/at）。 */
+export interface CloudNameState {
+  name: string;
+  author: string;
+  eventId: string;
+  issuedAt: number;
+  /** 事件时间戳（展示“最近更新”用；不参与排序）。 */
+  at: number;
+}
+
+/** 推导后的设备名视图。 */
+export interface DeviceNameState {
+  deviceId: string;
+  name: string;
+  author: string;
+  eventId: string;
+  issuedAt: number;
+  at: number;
+}
+
 /** 从图上推导出的策略快照。 */
 export interface PolicyState {
   /** namespace → active 订阅者集合 */
@@ -209,6 +250,10 @@ export interface PolicyState {
   declarations: Set<string>;
   /** 恢复纪元：deviceId → 最近一次被采纳 restore 的 R-c 位次 */
   restoreAt: Map<string, number>;
+  /** 网络级忆云名（无共享事件时缺省；调用方回退本机注册表）。 */
+  cloudName?: CloudNameState;
+  /** deviceId → 最新设备名（无记录 = 不显示名字，UI 仍以 deviceId 为准）。 */
+  deviceNames?: Map<string, DeviceNameState>;
   converged: boolean;
   iterations: number;
   security?: SecurityPolicyState;
@@ -229,16 +274,20 @@ interface Authority {
   blocked: Set<string>;
   declarations: Set<string>;
   restoreAt: Map<string, number>;
+  cloudName?: CloudNameState;
+  deviceNames: Map<string, DeviceNameState>;
   security: SecurityPassResult;
 }
 
 interface ParsedEntry {
-  kind: 'subscription' | 'declare' | 'device' | 'restore' | 'tier' | 'approval' | 'recovery';
+  kind: 'subscription' | 'declare' | 'device' | 'restore' | 'tier' | 'approval' | 'recovery' | 'cloud_name' | 'device_name';
   author: string;
   seq: number;
   logical: number;
   /** R-c 定序后的位次（deriveOnce 内填；测试构造时可缺省） */
   order?: number;
+  /** 事件时间戳（展示用；不参与排序）。 */
+  at?: number;
   id: string;
   subscription?: NamespaceSubscriptionRecord;
   declaration?: NamespaceDeclareRecord;
@@ -247,6 +296,8 @@ interface ParsedEntry {
   tier?: SecurityTierRecord;
   approval?: SecurityApprovalRecord;
   recovery?: SecurityRecoveryRecord;
+  cloudName?: CloudNameRecord;
+  deviceName?: DeviceNameRecord;
   cosign?: CosignProof;
   breakGlass?: BreakGlassProof;
   cosignWellFormed?: boolean;
@@ -262,7 +313,9 @@ function isPolicyType(type: string): boolean {
     type === DEVICE_RESTORE_EVENT ||
     type === SECURITY_TIER_EVENT ||
     type === SECURITY_APPROVAL_EVENT ||
-    type === SECURITY_RECOVERY_EVENT
+    type === SECURITY_RECOVERY_EVENT ||
+    type === CLOUD_NAME_EVENT ||
+    type === DEVICE_NAME_EVENT
   );
 }
 
@@ -302,7 +355,8 @@ function parseEntries(events: Event[]): ParsedEntry[] {
     const author = event.author;
     const seq = eventSeq(event);
     const logical = eventLogical(event);
-    const data = event.data as Record<string, unknown>;
+    const data = event.data as Record<string, unknown> | null | undefined;
+    if (!data || typeof data !== 'object') continue;
     if (event.type === NAMESPACE_SUBSCRIPTION_EVENT) {
       const subscription = (data as { subscription?: NamespaceSubscriptionRecord }).subscription;
       if (
@@ -386,6 +440,34 @@ function parseEntries(events: Event[]): ParsedEntry[] {
           id: event.id,
           recovery: securityRecovery,
           ...proofFields(securityRecovery),
+        });
+      }
+    } else if (event.type === CLOUD_NAME_EVENT) {
+      const cloudName = (data as { cloudName?: CloudNameRecord }).cloudName;
+      if (cloudName && typeof cloudName.name === 'string') {
+        entries.push({
+          kind: 'cloud_name',
+          author,
+          seq,
+          logical,
+          order: 0,
+          at: event.timestamp,
+          id: event.id,
+          cloudName,
+        });
+      }
+    } else if (event.type === DEVICE_NAME_EVENT) {
+      const deviceName = (data as { deviceName?: DeviceNameRecord }).deviceName;
+      if (deviceName && typeof deviceName.subject === 'string' && typeof deviceName.name === 'string') {
+        entries.push({
+          kind: 'device_name',
+          author,
+          seq,
+          logical,
+          order: 0,
+          at: event.timestamp,
+          id: event.id,
+          deviceName,
         });
       }
     }
@@ -626,6 +708,57 @@ function deriveSubscriptions(
     set.add(member);
   }
   return { subscriptions, namespaces: authoritative, records };
+}
+
+interface NamesAxis {
+  cloudName?: CloudNameState;
+  deviceNames: Map<string, DeviceNameState>;
+}
+
+/**
+ * 展示名轴（只读元数据）：
+ * - 严格按 R-c 定序（vector clock/logical order，不看 issuedAt 墙钟）逐条覆盖 → latest-writer-wins；
+ * - 最终 blocked 作者的事件不生效（`verifyIssuedByUser` 只验证书链，不验移出）；
+ * - E-1：恢复位次之前的记录不采纳（与其它策略轴一致）；
+ * - `device_name` 必须 `subject === author`（只能改本人），伪造 subject 直接忽略；
+ * - 非法名称忽略，不影响 snapshot 的其余部分。
+ */
+function deriveNames(
+  sorted: ParsedEntry[],
+  blocked: ReadonlySet<string>,
+  restoreAt: ReadonlyMap<string, number>,
+): NamesAxis {
+  let cloudName: CloudNameState | undefined;
+  const deviceNames = new Map<string, DeviceNameState>();
+  for (const entry of sorted) {
+    if (blocked.has(entry.author)) continue; // R-b（最终移出态）
+    if (beforeRestore(entry, restoreAt)) continue; // E-1
+    const at = entry.at ?? 0;
+    if (entry.kind === 'cloud_name' && entry.cloudName) {
+      const name = normalizeDisplayName(entry.cloudName.name);
+      if (name === null) continue;
+      cloudName = {
+        name,
+        author: entry.author,
+        eventId: entry.id,
+        issuedAt: Number.isFinite(entry.cloudName.issuedAt) ? entry.cloudName.issuedAt : at,
+        at,
+      };
+    } else if (entry.kind === 'device_name' && entry.deviceName) {
+      if (entry.deviceName.subject !== entry.author) continue; // 只能改本人
+      const name = normalizeDisplayName(entry.deviceName.name);
+      if (name === null) continue;
+      deviceNames.set(entry.author, {
+        deviceId: entry.author,
+        name,
+        author: entry.author,
+        eventId: entry.id,
+        issuedAt: Number.isFinite(entry.deviceName.issuedAt) ? entry.deviceName.issuedAt : at,
+        at,
+      });
+    }
+  }
+  return { ...(cloudName !== undefined ? { cloudName } : {}), deviceNames };
 }
 
 /** 域公告轴：作者未被移出、E-1 通过；自签名记录本身即声明。 */
@@ -1074,6 +1207,7 @@ function deriveOnce(sorted: ParsedEntry[], blockedIn: ReadonlySet<string>): Auth
   const pass = runSecurityPass(sorted, blockedIn, first.restoreAt);
   const subscriptionAxis = deriveSubscriptions(sorted, blockedIn, pass.blocked, pass.restoreAt, pass.rejectedJoinIds);
   const declarations = deriveDeclarations(sorted, blockedIn, pass.restoreAt);
+  const names = deriveNames(sorted, pass.blocked, pass.restoreAt);
   return {
     subscriptions: subscriptionAxis.subscriptions,
     subscriptionNamespaces: subscriptionAxis.namespaces,
@@ -1081,6 +1215,8 @@ function deriveOnce(sorted: ParsedEntry[], blockedIn: ReadonlySet<string>): Auth
     blocked: pass.blocked,
     declarations,
     restoreAt: pass.restoreAt,
+    ...(names.cloudName !== undefined ? { cloudName: names.cloudName } : {}),
+    deviceNames: names.deviceNames,
     security: pass,
   };
 }
@@ -1156,6 +1292,8 @@ export function derivePolicyState(entries: ParsedEntry[], options: DerivePolicyO
     blocked: chosen.blocked,
     declarations: chosen.declarations,
     restoreAt: chosen.restoreAt,
+    ...(chosen.cloudName !== undefined ? { cloudName: chosen.cloudName } : {}),
+    deviceNames: chosen.deviceNames,
     converged,
     iterations,
     ...(securityOut !== undefined ? { security: securityOut } : {}),
@@ -1265,5 +1403,20 @@ export class GraphNamespacePolicy implements NamespaceSubscriptionPolicy {
 
   async getBlockedDevices(): Promise<ReadonlySet<string>> {
     return (await this.snapshot()).blocked;
+  }
+
+  /** 网络级忆云名（无共享 `cloud_name` 事件 → null，调用方回退本机注册表）。 */
+  async getCloudName(): Promise<CloudNameState | null> {
+    return (await this.snapshot()).cloudName ?? null;
+  }
+
+  /** 单台设备的最新展示名（无事件 → null）。 */
+  async getDeviceName(deviceId: string): Promise<DeviceNameState | null> {
+    return (await this.snapshot()).deviceNames?.get(deviceId) ?? null;
+  }
+
+  /** 全部设备展示名（deviceId → 最新记录）。 */
+  async getDeviceNames(): Promise<Map<string, DeviceNameState>> {
+    return new Map((await this.snapshot()).deviceNames ?? []);
   }
 }

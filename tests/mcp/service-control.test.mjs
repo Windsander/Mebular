@@ -74,7 +74,7 @@ describe('H-1 service-control：常驻运行', () => {
     // 平台无关：home 可能被 systemdQuote 转义（Windows 路径含反斜杠）；用 token + 唯一目录名断言
     expect(unit).toContain('MEBULAR_HOME');
     expect(unit).toContain('WorkingDirectory=');
-    expect(unit).toContain(instanceHome);
+    // Windows unit 会转义反斜杠，不能直接比原始绝对路径；唯一目录名足以证明实例身份。
     expect(unit).toContain(tailOf(instanceHome));
     expect(rec.commands[0]).toEqual(['systemctl', '--user', 'daemon-reload']);
     expect(rec.commands.some((c) => c[0] === 'systemctl' && c.includes('enable'))).toBe(true);
@@ -91,7 +91,7 @@ describe('H-1 service-control：常驻运行', () => {
     expect(res.unitPath.endsWith('.plist')).toBe(true);
     const plist = readFileSync(res.unitPath, 'utf-8');
     expect(plist).toContain('MEBULAR_HOME');
-    expect(plist).toContain(instanceHome);
+    // 同上：Windows plist 文本会转义反斜杠。
     expect(plist).toContain(tailOf(instanceHome));
     expect(existsSync(join(instanceHome, 'service.heartbeat'))).toBe(true);
     expect(existsSync(join(serviceHome, 'service.heartbeat'))).toBe(false);
@@ -125,8 +125,8 @@ describe('H-1 service-control：常驻运行', () => {
     expect(status.registered).toBe(true);
     expect(status.unitPath.startsWith(serviceHome)).toBe(true);
     expect(registeredForHome({ home: instanceHome, serviceHome, platform: 'darwin', run: rec.run })).toContain(SERVICE_KIND);
-    // 实例身份/心跳仍在 instanceHome，不能被 serviceHome 顶替
-    expect(readFileSync(status.unitPath, 'utf-8')).toContain(instanceHome);
+    // 实例身份/心跳仍在 instanceHome，不能被 serviceHome 顶替；unit 文本按平台转义，用唯一尾名断言。
+    expect(readFileSync(status.unitPath, 'utf-8')).toContain(tailOf(instanceHome));
     expect(existsSync(join(instanceHome, 'service.heartbeat'))).toBe(true);
     expect(existsSync(join(serviceHome, 'service.heartbeat'))).toBe(false);
 

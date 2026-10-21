@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 const HARNESS = String.raw`
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -103,7 +103,11 @@ const getJson = async (base, path) => {
 // ---------- 2) 失败回滚：config 已写但 app 起不来 → 清干净并允许原地重试 ----------
 {
   const home = useHome('rollback');
-  process.env.MEBULAR_STORAGE_PATH = '/dev/null/no-such-dir/store.jsonl';
+  // 跨平台失败注入：父路径是一个普通文件，mkdir/打开 storage 必失败。
+  // （旧的 /dev/null/... 在 Windows 会变成普通路径，导致 create 反而成功。）
+  const blockedStorageParent = join(workspace, 'blocked-storage-parent');
+  await writeFile(blockedStorageParent, 'not a directory');
+  process.env.MEBULAR_STORAGE_PATH = join(blockedStorageParent, 'store.jsonl');
   const srv = await startServeServer({ host: '127.0.0.1', port: 0, auth: 'none' });
   const base = 'http://127.0.0.1:' + srv.port;
   out.cases.rollback = { port: srv.port, pid: process.pid };

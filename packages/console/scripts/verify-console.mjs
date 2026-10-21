@@ -1843,18 +1843,21 @@ try {
       method: 'POST', headers: qrHeaders, body: JSON.stringify({ ttlMs: 60000 }),
     });
     const inviteJson = await inviteRes.json().catch(() => null);
-    // 可选依赖在场 → SVG；缺包 → null（只给文本）；两者都合法，字段必须存在
-    check('C7 邀请响应提供二维码（qrSvg：SVG 字符串或缺可选依赖时为 null）',
-      inviteRes.status === 201 && 'qrSvg' in (inviteJson ?? {}) && (inviteJson?.qrSvg === null || String(inviteJson?.qrSvg).startsWith('<svg')),
-      { status: inviteRes.status, qr: inviteJson?.qrSvg === null ? 'null（缺可选依赖）' : 'svg' });
+    // 普通依赖 qrcode-generator：邀请响应必须提供 SVG（不再有缺包降级）
+    check('C7 邀请响应提供二维码（qrSvg 为 SVG 字符串）',
+      inviteRes.status === 201 && String(inviteJson?.qrSvg ?? '').startsWith('<svg'),
+      { status: inviteRes.status, qr: String(inviteJson?.qrSvg ?? '').startsWith('<svg') ? 'svg' : 'missing' });
     const consoleSrc6 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     check('C7 控制台邀请面板渲染二维码 + TTL/重新生成（无详情/订阅说明）',
       ['扫码即通', 'qrSvg', 'id="invite-ttl"', 'id="invite-regenerate"'].every((token) => consoleSrc6.includes(token))
         && !consoleSrc6.includes('fold-invite'));
     const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
-    check('C7 二维码依赖为**精确 pin** 的可选依赖（依赖政策）',
-      typeof pkg.optionalDependencies?.qrcode === 'string' && /^\d+\.\d+\.\d+$/.test(pkg.optionalDependencies.qrcode),
-      { qrcode: pkg.optionalDependencies?.qrcode });
+    const fleetPkg = JSON.parse(await readFile(join(rootDir, 'packages', 'fleet', 'package.json'), 'utf-8'));
+    check('C7 二维码依赖为精确 pin 的普通依赖（qrcode-generator）',
+      !pkg.optionalDependencies?.qrcode
+        && pkg.dependencies?.['qrcode-generator'] === '2.0.4'
+        && fleetPkg.dependencies?.['qrcode-generator'] === '2.0.4',
+      { root: pkg.dependencies?.['qrcode-generator'] ?? null, fleet: fleetPkg.dependencies?.['qrcode-generator'] ?? null });
   }
 
   // ---------- C4：NAT 打洞（只读渲染断言） ----------

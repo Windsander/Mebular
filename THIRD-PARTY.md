@@ -13,12 +13,12 @@
 | `bonjour` | `^3.5.1`（legacy-range） | MIT | LAN 设备发现（mDNS/C3） | 缺包/初始化失败 → 发现禁用 + 告警（其他连接方式不受影响）；库形态默认不启用真 mDNS |
 | `zod` | `^4.6.5`（legacy-range） | MIT | MCP 工具入参 schema 校验 | 无（CLI 必需） |
 | `@modelcontextprotocol/server` | `^2.0.0`（legacy-range） | MIT | MCP server（stdio / Streamable HTTP），`mebular mcp` / `mebular serve` | 无（CLI 必需） |
+| `qrcode-generator` | `2.0.4`（**精确 pin**） | MIT | 邀请令牌/TOTP 二维码（终端/SVG；应用层 fleet/mcp 使用） | 编码失败 → 文本令牌/分组文本兜底 |
 
 ## 可选依赖（optionalDependencies）
 
 | 包 | 版本 | 许可 | 用途 | 降级行为 |
 |---|---|---|---|---|
-| `qrcode` | `1.5.4`（**精确 pin**） | MIT | 邀请令牌二维码（C7：终端/SVG/PNG；QR 内容 = 内联令牌文本） | 缺包 → **只给文本令牌**（`fleet invite` 打印文本、控制台不显示二维码），不报错 |
 | `libp2p` | `^2.x`（legacy-range） | Apache-2.0 OR MIT | libp2p 核心（真实网络栈装配） | 缺包 → `NETWORK_LIBP2P_NOT_AVAILABLE`（诚实报错，不静默降级） |
 | `@chainsafe/libp2p-noise` | `^17.0.0`（legacy-range） | Apache-2.0 OR MIT | libp2p 连接加密 | 缺包 → `NETWORK_LIBP2P_NOT_AVAILABLE`（诚实报错，不静默降级） |
 | `@chainsafe/libp2p-yamux` | `^8.0.1`（legacy-range） | Apache-2.0 OR MIT | libp2p 流复用 | 同上 |
@@ -52,5 +52,5 @@
 ```bash
 npm run check:deps     # ① 所有 runtime/optional 依赖都在本清单；② 新依赖必须精确 pin；③ 清单条目字段齐备
 ```
-CI 在 `build / test / lint` job 中执行 `npm run check:deps`；另有「无 QR 库」降级路径由
-`npm run verify:invite`（注入缺失模块）与单测覆盖。
+CI 在 `build / test / lint` job 中执行 `npm run check:deps`；QR 正常路径由普通依赖
+`qrcode-generator` 覆盖，编码失败时回退文本令牌/分组文本（`npm run verify:invite` 与单测覆盖）。

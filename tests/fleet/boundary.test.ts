@@ -33,11 +33,11 @@ function moduleSpecifiers(source: string): string[] {
 }
 
 describe('fleet 边界（红线）', () => {
-  it('core `src/**` 不得依赖 fleet', () => {
+  it('core `src/**` 不得依赖 fleet 或 QR 编码器', () => {
     const violations: string[] = [];
     for (const file of listFiles(join(ROOT, 'src'))) {
       for (const spec of moduleSpecifiers(readFileSync(file, 'utf-8'))) {
-        if (spec === '@mebular/fleet' || spec.includes('packages/fleet')) {
+        if (spec === '@mebular/fleet' || spec === 'qrcode-generator' || spec.includes('packages/fleet')) {
           violations.push(`${relative(ROOT, file)} → ${spec}`);
         }
       }
@@ -67,7 +67,8 @@ describe('fleet 边界（红线）', () => {
     const allowed = ['@mebular/core', '@mebular/service'];
     const deps = Object.keys(pkg.dependencies ?? {});
     expect(deps).toContain('@mebular/core');
-    for (const dep of deps) {
+    expect(deps).toContain('qrcode-generator');
+    for (const dep of deps.filter((name) => name.startsWith('@mebular/'))) {
       expect(allowed).toContain(dep);
     }
   });

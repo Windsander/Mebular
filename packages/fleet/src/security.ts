@@ -1620,7 +1620,7 @@ async function exportEd25519PublicFromPrivate(privateKey: CryptoKey): Promise<Ui
 }
 
 // ---------------------------------------------------------------------------
-// 分发展示（QR 可选依赖缺失 → 分组文本降级）
+// 分发展示（QR 编码失败 → 分组文本降级）
 // ---------------------------------------------------------------------------
 
 export interface TotpShareResult {
@@ -1633,8 +1633,6 @@ export interface TotpShareResult {
 
 export interface TotpShareOptions {
   qr?: boolean;
-  /** 测试注入：可选依赖 qrcode 加载器；缺省同步加载真实模块。 */
-  loadQrModule?: () => unknown;
 }
 
 export async function renderTotpShare(
@@ -1646,9 +1644,7 @@ export async function renderTotpShare(
   const groups = secret.replace(/(.{4})/g, '$1 ').trim();
   const result: TotpShareResult = { secret, fingerprint: totpFingerprint(secret), otpauth, groups };
   if (options.qr === false) return result;
-  const qr = await renderTerminalQr(otpauth, {
-    ...(options.loadQrModule !== undefined ? { loadModule: options.loadQrModule } : {}),
-  }).catch(() => null);
+  const qr = await renderTerminalQr(otpauth).catch(() => null);
   if (qr !== null) result.qrText = qr.value;
   return result;
 }
@@ -1659,8 +1655,6 @@ export async function renderTotpShareSvg(
   options: TotpShareOptions = {},
 ): Promise<string | null> {
   if (options.qr === false) return null;
-  const qr = await renderSvgQr(totpOtpauthUri(secret, deviceId), {
-    ...(options.loadQrModule !== undefined ? { loadModule: options.loadQrModule } : {}),
-  }).catch(() => null);
+  const qr = await renderSvgQr(totpOtpauthUri(secret, deviceId)).catch(() => null);
   return qr === null ? null : qr.value;
 }

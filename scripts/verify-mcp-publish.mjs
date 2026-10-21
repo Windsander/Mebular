@@ -6,6 +6,7 @@
 //    `^0.1.0`，pack 後本地依賴已還原、備份已清除。
 // 2) 用產出的 tarball 在乾淨目錄安裝；以安裝後的 `mebular status`、`mebular mcp`
 //    （真实 MCP client）、`fleet --version` 與 `@mebular/skill/scripts/install.mjs` 做冒煙。
+//    `qrcode-generator@2.0.4` 是 fleet/core 的普通 npm 依賴，安裝時由 registry 解析。
 // 乾淨環境退出碼 0。前置：npm run build。
 
 import { execFileSync } from 'node:child_process';
@@ -13,7 +14,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
@@ -74,10 +75,13 @@ try {
   // D41：packed manifest 內的內部依賴均為版本號引用
   const mcpManifest = manifestOf(mcp.file);
   const fleetManifest = manifestOf(fleet.file);
+  const coreManifestForDeps = manifestOf(core.file);
   check('mcp tarball 依賴 @mebular/core=^0.1.0', mcpManifest.dependencies?.['@mebular/core'] === '^0.1.0', mcpManifest.dependencies?.['@mebular/core']);
   check('mcp tarball 依賴 @mebular/fleet=^0.1.0', mcpManifest.dependencies?.['@mebular/fleet'] === '^0.1.0', mcpManifest.dependencies?.['@mebular/fleet']);
   check('fleet tarball 依賴 @mebular/core=^0.1.0', fleetManifest.dependencies?.['@mebular/core'] === '^0.1.0', fleetManifest.dependencies?.['@mebular/core']);
   check('fleet tarball 依賴 @mebular/service=^0.1.0', fleetManifest.dependencies?.['@mebular/service'] === '^0.1.0', fleetManifest.dependencies?.['@mebular/service']);
+  check('fleet tarball 依賴 qrcode-generator=2.0.4', fleetManifest.dependencies?.['qrcode-generator'] === '2.0.4', fleetManifest.dependencies?.['qrcode-generator']);
+  check('core tarball 依賴 qrcode-generator=2.0.4', coreManifestForDeps.dependencies?.['qrcode-generator'] === '2.0.4', coreManifestForDeps.dependencies?.['qrcode-generator']);
   const leaks = [
     ...Object.values(mcpManifest.dependencies ?? {}),
     ...Object.values(fleetManifest.dependencies ?? {}),
@@ -112,6 +116,7 @@ try {
   );
 
   // ---------- tarball 安裝冒煙 ----------
+  // qrcode-generator 是普通 npm 依賴：乾淨目錄安裝會從 registry 解析它（CI 有網路）。
   await writeFile(join(work, 'package.json'), '{"name":"mebular-publish-smoke","private":true,"version":"0.0.0"}\n', 'utf-8');
   execFileSync(
     npm,
@@ -135,6 +140,11 @@ try {
     'tarball 安裝：五包齊備',
     ['core', 'service', 'fleet', 'mcp', 'skill'].every((name) => existsSync(join(work, 'node_modules', '@mebular', name))),
   );
+  const installedEncoder = JSON.parse(await readFile(join(work, 'node_modules', 'qrcode-generator', 'package.json'), 'utf-8'));
+  check('tarball 安裝：qrcode-generator@2.0.4 由 registry 解析', installedEncoder.version === '2.0.4', installedEncoder.version);
+  const installedFleet = await import(pathToFileURL(join(work, 'node_modules', '@mebular', 'fleet', 'dist', 'index.js')).href);
+  const installedQr = await installedFleet.renderSvgQr('mebular-publish-smoke');
+  check('tarball 安裝：fleet QR 可渲染 SVG', Boolean(installedQr?.value.startsWith('<svg')));
 
   const bin = join(work, 'node_modules', '.bin', 'mebular');
   const env = { ...process.env, MEBULAR_HOME: home, MEBULAR_STORAGE_PATH: join(home, 'store.jsonl'), MEBULAR_DEVICE_ID: 'device-publish-smoke' };
@@ -185,8 +195,9 @@ try {
   check('F-INST-1 根 package.json bin = mebular + fleet',
     Boolean(coreManifest.bin?.mebular) && Boolean(coreManifest.bin?.fleet),
     JSON.stringify(coreManifest.bin));
-  check('F-INST-1 根依賴含 mcp 運行時（zod + @modelcontextprotocol/server）',
-    Boolean(coreManifest.dependencies?.zod) && Boolean(coreManifest.dependencies?.['@modelcontextprotocol/server']));
+  check('F-INST-1 根依賴含 mcp 運行時（zod + @modelcontextprotocol/server + qrcode-generator）',
+    Boolean(coreManifest.dependencies?.zod) && Boolean(coreManifest.dependencies?.['@modelcontextprotocol/server'])
+      && coreManifest.dependencies?.['qrcode-generator'] === '2.0.4');
 
   // 根 tarball 全域安裝到獨立 prefix → 雙 bin + tools + home 預設
   const gprefix = join(work, 'gprefix');
@@ -202,6 +213,10 @@ try {
   check('F-INST-1 全域安裝：`mebular tools` = 29', (gTools?.tools?.length ?? 0) === 29, `count=${gTools?.tools?.length}`);
   const gFleetOut = execFileSync(process.execPath, [gFleet, '--version'], { cwd: work, encoding: 'utf-8', env });
   check('F-INST-1 全域安裝：fleet --version 可執行', /^@mebular\/fleet /.test(gFleetOut.trim()), gFleetOut.trim());
+  const gCoreDir = join(gprefix, 'lib', 'node_modules', '@mebular', 'core');
+  const gFleetModule = await import(pathToFileURL(join(gCoreDir, 'packages', 'fleet', 'dist', 'index.js')).href);
+  const gQr = await gFleetModule.renderSvgQr('mebular-publish-smoke');
+  check('F-INST-1 全域安裝：qrcode-generator 可解析并渲染 QR', Boolean(gQr?.value.startsWith('<svg')));
 
   // home 預設統一：不設 MEBULAR_HOME → $HOME/.mebular（而非 <cwd>/.mebular）
   const gHome = join(work, 'ghome');

@@ -141,24 +141,16 @@ try {
       const same = mcpJt.canonicalJoinTokenData(tFleet) === fleetJt.canonicalJoinTokenData(tFleet);
       check('令牌跨包互验（fleet↔daemon）+ canonical 一致', fleetInMcp.ok === true && mcpInFleet.ok === true && same, { fleetInMcp, mcpInFleet, same });
 
-      // C7：二维码渲染跨包一致（同一可选依赖）+ 缺包降级一致（null + 告警）
+      // C7：二维码渲染跨包一致（mcp 复用 fleet 的 qrcode-generator 实现）
       const mcpQr = await import('../packages/mcp/src/qr.mjs');
       const qrText = Buffer.from(JSON.stringify(tFleet), 'utf-8').toString('base64');
       const [fFleetSvg, fMcpSvg, fFleetTerm, fMcpTerm] = await Promise.all([
         fleetJt.renderSvgQr(qrText), mcpQr.renderSvgQr(qrText), fleetJt.renderTerminalQr(qrText), mcpQr.renderTerminalQr(qrText),
       ]);
-      const qrSame = (!fFleetSvg && !fMcpSvg) || (fFleetSvg?.value === fMcpSvg?.value);
-      const termSame = (!fFleetTerm && !fMcpTerm) || (fFleetTerm?.value === fMcpTerm?.value);
-      check('C7 二维码渲染跨包一致（或缺包时两侧同为 null）', qrSame && termSame, { svg: Boolean(fFleetSvg), term: Boolean(fFleetTerm) });
-
-      const boom = () => { throw new Error("Cannot find module 'qrcode'"); };
-      const warns = [];
-      const [fleetNull, mcpNull] = await Promise.all([
-        fleetJt.renderSvgQr(qrText, { loadModule: boom, onWarn: () => warns.push('fleet') }),
-        mcpQr.renderSvgQr(qrText, { loadModule: boom, onWarn: () => warns.push('daemon') }),
-      ]);
-      check('C7 缺 QR 可选依赖：两侧都软降级（null + 告警，不抛错）',
-        fleetNull === null && mcpNull === null && warns.includes('fleet') && warns.includes('daemon'), { warns });
+      check('C7 二维码渲染跨包一致（mcp re-export fleet）',
+        Boolean(fFleetSvg && fMcpSvg && fFleetTerm && fMcpTerm)
+          && fFleetSvg.value === fMcpSvg.value && fFleetTerm.value === fMcpTerm.value,
+        { svg: Boolean(fFleetSvg), term: Boolean(fFleetTerm) });
     } finally {
       await m.shutdown();
     }
@@ -369,7 +361,8 @@ try {
   const eStatus = await runCli({ ...process.env, MEBULAR_HOME: homeE }, ['status']);
   const eStatusJson = firstJson(eStatus.out) ?? {};
   check('join --daemon：delegated 守护 home + fleet daemon 客户端 + 令牌', joinRes.code === 0 && eDaemonCfg.identity?.mode === 'delegated' && eFleetCfg.store === 'daemon' && typeof eFleetCfg.daemon?.token === 'string', { identity: eDaemonCfg.identity?.mode, store: eFleetCfg.store, endpoint: joinOut.daemon?.endpoint });
-  check('join --daemon：B 无主私钥且守护可跑（identityMode=delegated）', eStatus.code === 0 && eStatusJson.identityMode === 'delegated' && JSON.parse(readFileSync(join(homeE, 'user-master-key.json'), 'utf-8')).privateKeyPkcs8 === undefined, { identityMode: eStatusJson.identityMode });
+  const eMaster = JSON.parse(readFileSync(join(homeE, 'user-master-key.json'), 'utf-8'));
+  check('join --daemon：B 无主私钥且守护可跑（identityMode=delegated）', eStatus.code === 0 && eStatusJson.identityMode === 'delegated' && eMaster.privateKeyPkcs8 === undefined, { code: eStatus.code, identityMode: eStatusJson.identityMode, hasPrivate: eMaster.privateKeyPkcs8 !== undefined, err: eStatus.err.trim().slice(0, 300) });
   check('join --daemon：输出 Agent MCP 配置片段', joinOut.agentMcp?.mcp?.mebular?.command?.[0] === 'mebular', { agentMcp: joinOut.agentMcp });
 
   console.log('== B2 上车统一：quickstart --daemon 写守护 home + fleet 客户端 ==');

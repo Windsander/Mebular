@@ -137,16 +137,37 @@ describe('UX-2 定稿：图例默认收起（无首访自动展开）', () => {
   });
 });
 
-describe('P1：引导页热初始化（不再重启 / 不再展示终端指令）', () => {
-  it('index.html 不再有待重启面板；建新 / 加入按钮改为进入控制台', () => {
+describe('P1/P3：引导态热初始化（不再重启 / 不再展示终端指令）', () => {
+  it('index.html 无待重启面板；新建 / 加入改为锁定主控制台的两个入口', () => {
     expect(indexHtml).not.toContain('id="provision-restart"');
-    expect(indexHtml).toContain('建新并进入控制台');
-    expect(indexHtml).toContain('加入并进入控制台');
+    expect(indexHtml).not.toContain('id="provision"');
+    expect(indexHtml).toContain('id="create-cloud"');
+    expect(indexHtml).toContain('id="onboard-create"');
+    expect(indexHtml).toContain('id="onboard-create-cloud"');
+    expect(indexHtml).toContain('id="onboard-create-device"');
+    expect(indexHtml).toContain('id="onboard-join"');
+    expect(indexHtml).toContain('id="onboard-join-token"');
+    expect(indexHtml).toContain('id="onboarding-coach"');
+    expect(indexHtml).toContain('新建忆云');
+    expect(indexHtml).toContain('加入忆云');
+  });
+
+  it('P3：锁定主控制台（state.locked + aria-disabled + 不隐藏 #app）', () => {
+    expect(consoleJs).toMatch(/state\.locked = true/);
+    expect(consoleJs).toMatch(/enterLockedConsole/);
+    expect(consoleJs).toMatch(/renderLockedChrome/);
+    expect(consoleJs).toMatch(/aria-disabled/);
+    expect(consoleJs).not.toMatch(/app\.hidden\s*=\s*true/);
+    expect(consoleJs).toMatch(/if \(state\.locked\) return;/);
+    expect(consoleJs).toMatch(/showOnboardingCoach/);
+    expect(consoleJs).toMatch(/dismissOnboardingCoach/);
+    expect(consoleJs).toMatch(/ONBOARD_COACH_MS/);
   });
 
   it('console.js：initialized → 同页进入控制台，不调用桌面壳重启 / location.reload', () => {
     expect(consoleJs).toMatch(/res\?\.initialized/);
     expect(consoleJs).toMatch(/enterNormalConsole/);
+    expect(consoleJs).toMatch(/unlockConsole/);
     expect(consoleJs).not.toMatch(/window\.mebularDesktop\?\.restart/);
     expect(consoleJs).not.toMatch(/window\.location\.reload\(/);
   });

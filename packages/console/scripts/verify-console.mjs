@@ -801,12 +801,39 @@ try {
     check('正常实例 POST /app/provision/create → 404（引导路径不泄漏）', provCreate.status === 404, `status=${provCreate.status}`);
     const consoleSrcOnboard = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     const htmlSrcOnboard = await readFile(join(consoleDir, 'index.html'), 'utf-8');
-    check('GUI 首次上手接线：控制台含「建新 / 加入」两入口 + provision 客户端逻辑',
-      htmlSrcOnboard.includes('id="provision-create"') && htmlSrcOnboard.includes('id="provision-join"')
-        && htmlSrcOnboard.includes('建新忆云') && htmlSrcOnboard.includes('加入已有忆云')
+    const cssSrcOnboard = await readFile(join(consoleDir, 'console.css'), 'utf-8');
+    check('P3 首次上手接线：锁定主控制台 + 新建/加入两入口 + provision 客户端逻辑',
+      htmlSrcOnboard.includes('id="create-cloud"') && htmlSrcOnboard.includes('id="join-cloud"')
+        && htmlSrcOnboard.includes('id="onboard-create"') && htmlSrcOnboard.includes('id="onboard-join"')
+        && htmlSrcOnboard.includes('id="onboarding-coach"')
+        && htmlSrcOnboard.includes('新建忆云') && htmlSrcOnboard.includes('加入忆云')
         && consoleSrcOnboard.includes('fetchProvisionStatus') && consoleSrcOnboard.includes('/app/provision/create')
-        && consoleSrcOnboard.includes('/app/provision/join') && consoleSrcOnboard.includes('renderProvision'),
-      'index.html 两入口 + console.js provision 客户端');
+        && consoleSrcOnboard.includes('/app/provision/join') && consoleSrcOnboard.includes('enterLockedConsole')
+        && consoleSrcOnboard.includes('submitOnboard') && consoleSrcOnboard.includes('unlockConsole'),
+      'index.html 两入口 + 锁定壳 + console.js provision 客户端');
+    check('P3 锁定壳：主控制台不再整体隐藏（无 app.hidden = true / #provision 遮罩路径）',
+      !/app\.hidden\s*=\s*true/.test(consoleSrcOnboard)
+        && !/renderProvision\s*\(/.test(consoleSrcOnboard)
+        && consoleSrcOnboard.includes("state.locked = true")
+        && consoleSrcOnboard.includes('renderLockedChrome')
+        && consoleSrcOnboard.includes('aria-disabled'),
+      '无整页遮罩；locked 由 state + aria-disabled 驱动');
+    check('P3 锁定态不请求 admin 数据面（refresh 早退 / SSE 不启动）',
+      /async function refreshOnce\(\) \{\s*\/\/[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(state\.locked\) return;/.test(consoleSrcOnboard)
+        && /function startEvents\(\) \{\s*\n\s*if \(state\.locked/.test(consoleSrcOnboard),
+      'refreshOnce/startEvents locked 闸门');
+    check('P3 无 reload 解锁：initialized → unlockConsole → enterNormalConsole（幂等）',
+      /res\?\.initialized === true/.test(consoleSrcOnboard)
+        && /unlockConsole/.test(consoleSrcOnboard)
+        && /normalConsolePromise \?\?=/.test(consoleSrcOnboard)
+        && !/window\.location\.reload\(/.test(consoleSrcOnboard),
+      '同页解锁 + 单飞进入正常控制台');
+    check('P3 强调态克制且尊重 reduced-motion（按钮脉冲 / 引导遮罩）',
+      cssSrcOnboard.includes('.topbar-actions .btn.is-onboarding')
+        && cssSrcOnboard.includes('onboard-button-pulse')
+        && /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.topbar-actions \.btn\.is-onboarding \{ animation: none; \}/.test(cssSrcOnboard)
+        && /@media \(prefers-reduced-motion: reduce\) \{[\s\S]*?\.onboarding-coach[^\n]*\{ transition: none;/.test(cssSrcOnboard),
+      '动画可关；样式复用现有设计语言');
   }
 
   // ---------- P1：引导态建新 → 同一进程 / 同一端口热初始化（不再重启） ----------

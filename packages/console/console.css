@@ -1470,3 +1470,92 @@ details.share[open] summary::before { content: "▾ "; }
 .sec-pairing-inline { color: #ffd27a; letter-spacing: 1px; font-variant-numeric: tabular-nums; }
 .sec-pending-top { margin: 0 0 10px; padding: 8px 10px; border: 1px solid rgba(255, 210, 122, 0.35); border-radius: 6px; background: rgba(60, 42, 8, 0.22); border-top: 1px solid rgba(255, 210, 122, 0.35); }
 .sec-pending-top h4 { color: #ffd27a; }
+
+/* ===== P3 · 锁定主控制台：入口 / 引导遮罩 / 禁用态 ===== */
+/* 锁定横幅：与错误/降级分离，明确「未初始化」而非「连不上」 */
+.banner.is-locked { background: rgba(10, 24, 44, 0.94); border-color: #29456b; color: #cfe4ff; }
+
+/* 顶栏：无 current 时「新建忆云」替换「邀请设备」；克制强调（reduced-motion 关闭） */
+.topbar-actions .btn.is-onboarding {
+  border-color: rgba(80, 255, 170, 0.42);
+  box-shadow: 0 0 0 1px rgba(80, 255, 170, 0.10), 0 0 14px -6px rgba(80, 255, 170, 0.45);
+}
+@keyframes onboard-button-pulse {
+  0%, 100% { box-shadow: 0 0 0 1px rgba(80, 255, 170, 0.10), 0 0 14px -6px rgba(80, 255, 170, 0.45); }
+  50% { box-shadow: 0 0 0 1px rgba(80, 255, 170, 0.28), 0 0 18px -4px rgba(80, 255, 170, 0.62); }
+}
+.topbar-actions .btn.is-onboarding { animation: onboard-button-pulse 3.2s ease-in-out infinite; }
+
+/* 禁用导航：aria-disabled 为语义真源，样式只做呈现 */
+#view-nav .view-btn.is-locked { color: rgba(140, 255, 200, 0.28); cursor: not-allowed; text-shadow: none; border-bottom-color: transparent; }
+#view-nav .view-btn.is-locked:hover { color: rgba(140, 255, 200, 0.36); }
+#view-nav .view-btn.is-locked::after { content: "🔒"; font-size: 9px; opacity: 0.55; margin-left: 1px; }
+
+/* 锁定设备卡：保留位置与信息层级，整卡禁用 */
+#device-card.is-disabled { opacity: 0.72; }
+#device-card.is-disabled .card-head h2::after { content: " · 锁定"; color: var(--muted); font-size: 10px; letter-spacing: 1px; }
+#device-card.is-disabled #device-card-empty { color: var(--muted); }
+
+/* 非阻塞引导遮罩（固定顶栏下缘；不覆盖顶栏两个按钮） */
+.onboarding-coach {
+  position: fixed;
+  z-index: 45;
+  width: min(360px, calc(100vw - 24px));
+  padding: 11px 13px 10px;
+  border: 1px solid rgba(80, 255, 170, 0.32);
+  border-radius: 10px;
+  background: rgba(5, 12, 22, 0.94);
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55), 0 0 22px -10px rgba(80, 255, 170, 0.5);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition: opacity 0.28s ease, transform 0.28s ease;
+  pointer-events: auto;
+}
+.onboarding-coach::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  right: 42px;
+  width: 10px;
+  height: 10px;
+  background: rgba(5, 12, 22, 0.94);
+  border-left: 1px solid rgba(80, 255, 170, 0.32);
+  border-top: 1px solid rgba(80, 255, 170, 0.32);
+  transform: rotate(45deg);
+}
+.onboarding-coach.is-visible { opacity: 1; transform: none; }
+.onboarding-coach.is-leaving { opacity: 0; transform: translateY(-4px); }
+.onboarding-coach-title { margin: 0 0 3px; font-size: 12.5px; color: #c8ffe3; font-weight: 600; }
+.onboarding-coach-body { margin: 0 0 8px; font-size: 11.5px; line-height: 1.6; color: var(--muted); }
+.onboarding-coach-body b { color: var(--text); font-weight: 600; }
+.onboarding-coach-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.onboarding-coach-close {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.onboarding-coach-close:hover { color: #c8ffe3; }
+@media (max-width: 760px) {
+  .onboarding-coach { right: 12px; }
+  .onboarding-coach::before { right: 32px; }
+}
+
+/* 锁定态设置：两个入口 + 诊断信息 */
+.locked-settings-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 2px; }
+
+/* 锁定态弹框：令牌输入与加入忆云一致（等宽、可换行）；字段仍复用 .field */
+#onboard-join textarea.crt-input { font-family: var(--crt-mono, monospace); font-size: 11px; resize: vertical; }
+#onboard-create .modal-note, #onboard-join .modal-note { margin-bottom: 4px; }
+#onboard-create .modal-actions, #onboard-join .modal-actions { margin-top: 10px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .topbar-actions .btn.is-onboarding { animation: none; }
+  .onboarding-coach, .onboarding-coach.is-visible, .onboarding-coach.is-leaving { transition: none; transform: none; }
+}

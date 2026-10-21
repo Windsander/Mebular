@@ -219,10 +219,11 @@ async function main() {
     statusA.json?.defaultDeviceId === provision.deriveDeviceId(statusA.json?.defaultDeviceName),
     `defaultDeviceId=${statusA.json?.defaultDeviceId}`);
   const consoleHtml = await (await fetch(`http://127.0.0.1:${portA}/console/`)).text();
-  check('O1 首屏含两入口（建新忆云 / 加入已有忆云）',
-    consoleHtml.includes('建新忆云') && consoleHtml.includes('加入已有忆云')
-      && consoleHtml.includes('id="provision-create"') && consoleHtml.includes('id="provision-join"'),
-    'index.html 引导页两入口');
+  check('O1 首屏锁定主控制台含两入口（新建忆云 / 加入忆云）',
+    consoleHtml.includes('新建忆云') && consoleHtml.includes('加入忆云')
+      && consoleHtml.includes('id="create-cloud"') && consoleHtml.includes('id="join-cloud"')
+      && consoleHtml.includes('id="onboard-create"') && consoleHtml.includes('id="onboard-join"'),
+    'index.html 锁定壳两入口');
 
   // 非回环 fail closed（引导态仅 loopback）
   {

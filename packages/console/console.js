@@ -25,6 +25,9 @@ const foldLabel = (id) => IA_SETTINGS_FOLDS.find((fold) => fold.id === id)?.labe
 
 const state = {
   view: 'map',
+  // P3：无 current 时主控制台保持可见但锁定（共享/记忆/审计/设备卡/数据操作禁用）。
+  locked: false,
+  provision: null,
   overview: null,
   devices: [],
   policy: [],
@@ -178,6 +181,9 @@ function refresh() {
 }
 
 async function refreshOnce() {
+  // P3：锁定态不触碰 admin 数据面（除 /admin/api/clients 外的端点均 409 provision_required）。
+  // 解锁时 enterNormalConsole() 会显式刷新一次。
+  if (state.locked) return;
   // 代际号：并发刷新（3s 轮询 vs 动作后即时刷新）时，丢弃先发出后完成的旧数据，防旧列表覆盖新状态
   const seq = ++refreshSeq;
   if (MOCK) {
@@ -268,6 +274,19 @@ function computeDegraded() {
 // ---------- 渲染 ----------
 
 function render() {
+  if (state.locked) {
+    // 锁定态：只渲染壳与星图（空场景）；不渲染任何依赖 admin 数据面的内容。
+    renderTopbar();
+    renderLockedChrome();
+    renderLegend();
+    renderStageScene();
+    renderDeviceCard();
+    renderOverlays();
+    if (!$('#settings').hidden) renderSettings();
+    if (!$('#about').hidden) renderAbout();
+    renderBanner();
+    return;
+  }
   const selectParam = new URLSearchParams(location.search).get('select');
   if (!state.selected && selectParam) {
     state.selected = state.devices.find((d) => d.deviceId === selectParam) ?? null;
@@ -285,11 +304,80 @@ function render() {
   renderBanner();
 }
 
+/** P3：锁定主控制台的静态外壳（导航禁用 / 顶栏入口切换 / 视觉标记）。 */
+function renderLockedChrome() {
+  document.body.classList.add('is-locked');
+  const app = $('#app');
+  if (app) app.dataset.locked = 'true';
+  document.querySelectorAll('#view-nav .view-btn').forEach((button) => {
+    const disabled = button.dataset.view !== 'map';
+    button.classList.toggle('is-locked', disabled);
+    if (disabled) {
+      button.setAttribute('aria-disabled', 'true');
+      button.title = '新建或加入忆云后可用';
+    } else {
+      button.removeAttribute('aria-disabled');
+      button.removeAttribute('title');
+    }
+  });
+  const create = $('#create-cloud');
+  const invite = $('#invite-device');
+  const join = $('#join-cloud');
+  if (create) create.hidden = false;
+  if (invite) invite.hidden = true;
+  if (join) join.hidden = false;
+  create?.classList.add('is-onboarding');
+  join?.classList.add('is-onboarding');
+  create?.removeAttribute('aria-disabled');
+  join?.removeAttribute('aria-disabled');
+}
+
+function clearLockedChrome() {
+  state.locked = false;
+  document.body.classList.remove('is-locked');
+  const app = $('#app');
+  if (app) delete app.dataset.locked;
+  document.querySelectorAll('#view-nav .view-btn').forEach((button) => {
+    button.classList.remove('is-locked');
+    button.removeAttribute('aria-disabled');
+    button.removeAttribute('title');
+  });
+  const create = $('#create-cloud');
+  const invite = $('#invite-device');
+  const join = $('#join-cloud');
+  if (create) create.hidden = true;
+  if (invite) invite.hidden = false;
+  if (join) join.hidden = false;
+  create?.classList.remove('is-onboarding');
+  join?.classList.remove('is-onboarding');
+}
+
 function renderTopbar() {
   const status = state.overview?.status;
   const selfEl = $('#self-badge');
   const onlineEl = $('#online-badge');
   const memEl = $('#memory-badge');
+  if (state.locked) {
+    // 锁定态只显示「未初始化」真值，不显示任何猜测的设备/记忆数据。
+    const cloudEl = $('#cloud-badge');
+    if (cloudEl) { cloudEl.hidden = true; cloudEl.textContent = ''; }
+    selfEl.textContent = '本机 · 未初始化';
+    selfEl.title = '打开「关于本机」';
+    onlineEl.textContent = `${ICONS.offline} 未初始化`;
+    onlineEl.className = 'badge badge-muted';
+    memEl.textContent = '记忆 —';
+    memEl.className = 'badge badge-muted';
+    const secEl = $('#security-badge');
+    if (secEl) {
+      secEl.textContent = '🛡 安全：—';
+      secEl.className = 'badge badge-button badge-muted';
+      secEl.title = '新建或加入忆云后可用';
+    }
+    const pendingBadge = $('#settings-pending-badge');
+    if (pendingBadge) pendingBadge.hidden = true;
+    renderLockedChrome();
+    return;
+  }
   // E2-A2：忆云名只取 overview.cloud.name；旧守护没有该字段 → 徽章隐藏（绝不用端口/目录猜）。
   const cloudEl = $('#cloud-badge');
   if (cloudEl) {
@@ -440,6 +528,13 @@ function renderBanner() {
   const banner = $('#banner');
   // 常驻横幅可见时给 .stage-wrap 打标——窄屏下面板视图据此让位，不被横幅压住标题/统计
   const wrap = document.querySelector('.stage-wrap');
+  if (state.locked) {
+    banner.hidden = false;
+    banner.className = 'banner is-locked';
+    banner.textContent = '忆云尚未初始化：新建或加入后解锁共享、记忆、审计与设备卡。';
+    wrap?.classList.add('has-banner');
+    return;
+  }
   if (state.error) {
     banner.hidden = false;
     banner.className = 'banner is-error';
@@ -1151,6 +1246,55 @@ function renderMcpSections() {
   })).join('');
 }
 
+/**
+ * P3：锁定态设置页 = 排错入口（不请求 admin 数据面，不白屏）。
+ * 给出状态真值 + 两个入口；可复制诊断信息给支持人员。
+ */
+function renderLockedSettings(body) {
+  if (!body) return;
+  const status = state.provision ?? {};
+  body.innerHTML = `
+    <div class="settings-scroll">
+      <section class="settings-section" data-locked-settings>
+        <h3>忆云尚未初始化 <span class="crt-tag crt-tag-warn">锁定</span></h3>
+        <p class="settings-section-desc muted">主控制台已锁定：共享、记忆、审计、设备卡与数据操作在新建或加入忆云后才可用。初始化在当前进程内完成，无需重启。</p>
+        <div class="locked-settings-actions">
+          <button class="btn btn-primary" type="button" data-locked-action="create">新建忆云</button>
+          <button class="btn btn-crt" type="button" data-locked-action="join">加入忆云</button>
+        </div>
+      </section>
+      <section class="settings-section" data-locked-diagnostics>
+        <h3>诊断信息 <span class="badge badge-muted">只读</span></h3>
+        ${kvRows([
+          kvRow('阶段', escapeHtml(String(status.phase ?? 'UNINITIALIZED'))),
+          kvRow('家目录', `<code>${escapeHtml(String(status.home ?? '—'))}</code>`),
+          kvRow('默认设备名', escapeHtml(String(status.defaultDeviceName ?? status.hostname ?? '—'))),
+          kvRow('本机端口', escapeHtml(String(status.mcpPort ?? '—'))),
+        ])}
+        <p class="settings-section-foot muted">若已用命令行初始化但仍显示锁定，请重启守护让当前进程加载新配置。</p>
+        <button class="btn btn-small btn-crt" type="button" id="settings-locked-copy">复制诊断信息</button>
+      </section>
+    </div>
+  `;
+  body.querySelectorAll('[data-locked-action]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (button.dataset.lockedAction === 'create') openOnboardCreate();
+      else openOnboardJoin();
+    });
+  });
+  body.querySelector('#settings-locked-copy')?.addEventListener('click', (event) => {
+    const payload = {
+      phase: status.phase ?? 'UNINITIALIZED',
+      home: status.home ?? null,
+      deviceName: status.defaultDeviceName ?? status.hostname ?? null,
+      mcpPort: status.mcpPort ?? null,
+      href: location.href,
+      userAgent: navigator.userAgent,
+    };
+    void copyText(JSON.stringify(payload, null, 2), event.currentTarget);
+  });
+}
+
 let lastSettingsSignature = null;
 
 // render() 每 3s 轮询会调用 renderSettings；内容签名用于判断是否真的需要重建 DOM。
@@ -1197,6 +1341,10 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   const prevTab = state.settingsTab ?? 'common';
   state.settingsTab = activeTab;
   const body = $('#settings-body');
+  if (state.locked) {
+    renderLockedSettings(body);
+    return;
+  }
   // 轮询时内容未变则跳过重建，避免原生 <select> 弹层/焦点/选择被销毁
   const signature = settingsSignature(activeTab);
   if (signature === lastSettingsSignature && body.childElementCount > 0) return;
@@ -2220,6 +2368,22 @@ async function saveDeviceRename() {
 
 function renderAbout() {
   const body = $('#about-body');
+  if (state.locked) {
+    lastAboutSignature = null;
+    const status = state.provision ?? {};
+    body.innerHTML = `
+      <section class="settings-section" data-info-block="locked">
+        <h3>本机尚未初始化 <span class="badge badge-muted">锁定</span></h3>
+        <p class="muted" style="font-size:12px;line-height:1.7;margin:0 0 8px">新建或加入忆云后，这里会显示身份、存储与运行状态；当前不展示任何猜测数据。</p>
+        ${kvRows([
+          kvRow('阶段', escapeHtml(String(status.phase ?? 'UNINITIALIZED'))),
+          kvRow('家目录', `<code>${escapeHtml(String(status.home ?? '—'))}</code>`),
+          kvRow('默认设备名', escapeHtml(String(status.defaultDeviceName ?? status.hostname ?? '—'))),
+        ])}
+      </section>
+    `;
+    return;
+  }
   // 同一类轮询重建保护：内容未变则跳过，避免滚动位置/文本选择被冲掉
   const signature = JSON.stringify([
     state.settings ?? null,
@@ -2667,6 +2831,14 @@ function renderOverlays() {
   const pill = $('#status-pill');
   const card = $('#attention-card');
   if (!pill || !card) return;
+  if (state.locked) {
+    // 锁定态没有守护/对端/记忆真值：隐藏总览条与注意卡，避免看起来像有数据。
+    pill.hidden = true;
+    pill.innerHTML = '';
+    card.hidden = true;
+    card.innerHTML = '';
+    return;
+  }
   const onMap = state.view === 'map';
   const selfId = state.overview?.device?.deviceId ?? null;
   pill.hidden = !onMap;
@@ -3119,9 +3291,29 @@ function renderDeviceCard() {
   // 走查修复（用户指认：卡片「分区」区在首次轮询补全文案 → 内容变高 → 贴底抽屉顶边瞬跳）：
   // 内容重渲染前后测高，高度有变化则用 FLIP 平滑掉（reduced-motion 跳过）
   const hBefore = asideEl ? asideEl.getBoundingClientRect().height : 0;
-  if (asideEl) asideEl.classList.toggle('is-open', Boolean(state.selected) && state.view === 'map');
+  const cardEl = $('#device-card');
   const empty = $('#device-card-empty');
   const body = $('#device-card-body');
+  if (state.locked) {
+    // 锁定态：设备卡留在原位但整卡禁用，显示诚实的空态，不展示任何设备数据。
+    if (asideEl) {
+      asideEl.classList.add('is-locked');
+      asideEl.classList.toggle('is-open', state.view === 'map');
+    }
+    cardEl?.classList.add('is-disabled');
+    cardEl?.setAttribute('aria-disabled', 'true');
+    empty.hidden = false;
+    empty.textContent = '新建或加入忆云后，这里会显示设备详情。';
+    body.hidden = true;
+    body.innerHTML = '';
+    lastCardSignature = null;
+    return;
+  }
+  asideEl?.classList.remove('is-locked');
+  cardEl?.classList.remove('is-disabled');
+  cardEl?.removeAttribute('aria-disabled');
+  empty.textContent = '点击星图上的设备查看详情。';
+  if (asideEl) asideEl.classList.toggle('is-open', Boolean(state.selected) && state.view === 'map');
   if (!state.selected) {
     empty.hidden = false;
     body.hidden = true;
@@ -3323,6 +3515,11 @@ stage.onHover = (node, x, y) => {
 stage.onSelect = (node) => {
   // 选中/取消时收起悬浮提示（避免被设备卡擦写边缘切断），移动鼠标后会重新出现
   $('#tooltip').hidden = true;
+  if (state.locked) {
+    // 锁定态星图仍可交互（探索感），但点星星/空白统一提示先初始化。
+    showLockedToast();
+    return;
+  }
   if (!node) {
     // 点击星图空白 → 取消选中，设备卡（绿色显示框）收起
     if (!state.selected) return;
@@ -3586,6 +3783,11 @@ stage.onOverlay = (ctx) => {
 $('#view-nav').addEventListener('click', (event) => {
   const button = event.target.closest('.view-btn');
   if (!button) return;
+  // P3：锁定态共享/记忆/审计禁用（aria-disabled + toast），星图始终可用。
+  if (state.locked && button.dataset.view !== 'map') {
+    showLockedToast();
+    return;
+  }
   setView(button.dataset.view);
 });
 
@@ -3747,6 +3949,11 @@ function showToast(message) {
   setTimeout(renderBanner, 2500);
 }
 
+/** P3：锁定态的统一 toast（星图/禁用导航/设备卡）。 */
+function showLockedToast() {
+  showToast('请先新建或加入忆云');
+}
+
 // ---------- 模态 ----------
 
 let modalResolve = null;
@@ -3787,6 +3994,8 @@ function modalCanDismiss(el) {
   if (el.id === 'wizard' && wizardState.connection === 'connecting') return false;
   // E2-A2：加入忆云提交中不可关闭（避免用户以为取消、实际仍完成切换）
   if (el.id === 'cloud-join' && cloudJoinBusy) return false;
+  // P3：首启新建/加入提交中不可关闭（避免同一进程内并发初始化）
+  if ((el.id === 'onboard-create' || el.id === 'onboard-join') && onboardBusy) return false;
   // S3：恢复码一次性展示期间不可关闭（必须先回执「我已抄写」）
   if (el.id === 'security-action' && state.securityFlow?.blockClose === true) return false;
   return true;
@@ -3895,8 +4104,29 @@ $('#open-settings').addEventListener('click', () => {
   renderSettings(state.settingsTab ?? 'common');
 });
 // E2-A2：顶栏忆云徽章 → 设置 · 常用忆云卡；加入忆云 → 弹层。
+// P3：锁定态顶栏改为「新建忆云 + 加入忆云」，分别走首启 create/join；READY 后加入仍用于多忆云。
 $('#cloud-badge')?.addEventListener('click', () => openCloudSettings());
-$('#join-cloud')?.addEventListener('click', () => openCloudJoin());
+$('#join-cloud')?.addEventListener('click', () => {
+  if (state.locked) openOnboardJoin();
+  else openCloudJoin();
+});
+$('#create-cloud')?.addEventListener('click', () => {
+  if (state.locked) openOnboardCreate();
+});
+$('#coach-create')?.addEventListener('click', () => {
+  dismissOnboardingCoach();
+  openOnboardCreate();
+});
+$('#coach-join')?.addEventListener('click', () => {
+  dismissOnboardingCoach();
+  openOnboardJoin();
+});
+$('#onboard-create-close')?.addEventListener('click', () => closeOnboardCreate());
+$('#onboard-create-cancel')?.addEventListener('click', () => closeOnboardCreate());
+$('#onboard-create-submit')?.addEventListener('click', () => { void submitOnboard('create'); });
+$('#onboard-join-close')?.addEventListener('click', () => closeOnboardJoin());
+$('#onboard-join-cancel')?.addEventListener('click', () => closeOnboardJoin());
+$('#onboard-join-submit')?.addEventListener('click', () => { void submitOnboard('join'); });
 $('#cloud-join-close')?.addEventListener('click', () => closeCloudJoin());
 $('#cloud-switch-close')?.addEventListener('click', () => { $('#cloud-switch').hidden = true; });
 $('#settings-close').addEventListener('click', () => {
@@ -4258,11 +4488,11 @@ function cloudNameOf(id) {
   return state.clouds?.profiles?.find((entry) => entry.id === id)?.name ?? id;
 }
 
-/** 新忆云默认名：未占用的最小整数 N >= 2 → 忆云 N（与守护端规则一致）。 */
+/** 新忆云默认名：未占用的最小整数 N >= 1 → 忆云 N（首启默认 忆云 1；多忆云顺延）。 */
 function nextCloudName() {
   const names = new Set((state.clouds?.profiles ?? [])
     .map((entry) => String(entry.name ?? '').trim().toLocaleLowerCase()));
-  for (let n = 2; n < 1000; n += 1) {
+  for (let n = 1; n < 1000; n += 1) {
     const candidate = `忆云 ${n}`;
     if (!names.has(candidate.toLocaleLowerCase())) return candidate;
   }
@@ -4745,6 +4975,13 @@ $('#cloud-join-token')?.addEventListener('paste', () => setTimeout(scheduleCloud
 $('#cloud-join-name')?.addEventListener('input', () => { state.cloudJoinNameAuto = false; });
 $('#cloud-join-submit')?.addEventListener('click', () => { void submitCloudJoin(); });
 
+// P3：锁定态设备卡整卡禁用——点击给统一 toast（含关闭按钮），不展示/不操作数据。
+$('#device-card')?.addEventListener('click', (event) => {
+  if (!state.locked) return;
+  event.preventDefault();
+  showLockedToast();
+});
+
 $('#device-card-close').addEventListener('click', () => {
   state.selected = null;
   const url = new URL(location.href);
@@ -5087,7 +5324,7 @@ function scheduleRefresh() {
 }
 
 function startEvents() {
-  if (MOCK || typeof window.EventSource === 'undefined') return;
+  if (state.locked || MOCK || typeof window.EventSource === 'undefined') return;
   if (eventSource) {
     eventSource.close();
     eventSource = null;
@@ -5129,7 +5366,12 @@ function startEvents() {
 }
 
 
-// ---------- 引导态（首次上手）：建新 / 加入（全程 GUI，不碰 CLI） ----------
+// ---------- P3：锁定主控制台 + 首启入口（新建 / 加入；同页解锁，不 reload） ----------
+
+const ONBOARD_COACH_MS = 6000;
+let onboardBusy = false;
+let onboardCoachTimer = null;
+let onboardCoachHideTimer = null;
 
 async function fetchProvisionStatus() {
   try {
@@ -5142,115 +5384,217 @@ async function fetchProvisionStatus() {
   }
 }
 
-function setProvisionStatus(text, kind = '') {
-  const el = $('#provision-status');
+function setOnboardError(id, message) {
+  const el = $(id);
   if (!el) return;
-  el.textContent = text;
-  el.classList.toggle('is-error', kind === 'error');
-  el.classList.toggle('is-ok', kind === 'ok');
+  el.textContent = message ?? '';
+  el.hidden = !message;
 }
 
-async function submitProvision(kind) {
-  const button = kind === 'create' ? $('#provision-create') : $('#provision-join');
-  const nameInput = kind === 'create' ? $('#provision-create-name') : $('#provision-join-name');
-  const deviceName = String(nameInput?.value ?? '').trim();
-  const body = { confirm: true, ...(deviceName ? { deviceName } : {}) };
-  if (kind === 'join') {
-    const token = String($('#provision-join-token')?.value ?? '').trim();
-    if (!token) { setProvisionStatus('请先粘贴加入令牌（邀请面板生成的一次性令牌）。', 'error'); return; }
-    body.token = token;
+function positionOnboardingCoach() {
+  const el = $('#onboarding-coach');
+  const bar = document.querySelector('.topbar');
+  if (!el || !bar || el.hidden) return;
+  // 顶栏会随窄屏换行；锁定横幅也在星图顶端——引导卡放在两者之下，避免互相遮挡。
+  const barBottom = bar.getBoundingClientRect().bottom;
+  const banner = $('#banner');
+  const bannerBottom = banner && !banner.hidden ? banner.getBoundingClientRect().bottom : barBottom;
+  el.style.top = `${Math.round(Math.max(barBottom, bannerBottom) + 10)}px`;
+  el.style.right = window.innerWidth <= 760 ? '12px' : '16px';
+}
+
+/** 每次 App 打开（锁定态）展示一次；数秒自动淡出，点击/ESC 可提前关闭。 */
+function showOnboardingCoach() {
+  if (!state.locked) return;
+  const el = $('#onboarding-coach');
+  if (!el) return;
+  el.hidden = false;
+  el.classList.remove('is-leaving');
+  positionOnboardingCoach();
+  requestAnimationFrame(() => el.classList.add('is-visible'));
+  if (onboardCoachTimer) clearTimeout(onboardCoachTimer);
+  onboardCoachTimer = setTimeout(() => dismissOnboardingCoach(), ONBOARD_COACH_MS);
+}
+
+function dismissOnboardingCoach() {
+  const el = $('#onboarding-coach');
+  if (!el || el.hidden) return;
+  if (onboardCoachTimer) { clearTimeout(onboardCoachTimer); onboardCoachTimer = null; }
+  el.classList.remove('is-visible');
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
+  if (reduced) {
+    el.hidden = true;
+    el.classList.remove('is-leaving');
+    return;
   }
-  if (button) button.disabled = true;
-  setProvisionStatus(kind === 'create' ? '正在建新（生成主密钥 + 写配置）…' : '正在加入（校验令牌 + 兑换委派证书）…');
-  try {
-    const res = await api(kind === 'create' ? '/app/provision/create' : '/app/provision/join', { method: 'POST', body });
-    if (res?.initialized === true) {
-      // P1：同一进程已完成热初始化；直接进入正常控制台（不重启、不刷新页面）。
-      sessionStorage.setItem('mebular_provision', JSON.stringify({ kind, at: Date.now(), result: res }));
-      setProvisionStatus(kind === 'create' ? '已建新：正在进入控制台…' : '已加入：正在进入控制台…', 'ok');
-      await enterNormalConsole();
-      return;
-    }
-    setProvisionStatus(kind === 'create'
-      ? '已建新完成：守护已进入正常态。'
-      : '已加入完成：守护已进入正常态。若忆云启用了「中 · 动态码」，请在「设置 → 安全 → 安全等级」导入种子（两台设备当面出示）；若启用了「高 · 设备会签」，首现记录会带邀请方批准，被拒原因会显示在安全卡/审计。', 'ok');
-    if (button) button.disabled = false;
-  } catch (error) {
-    // B（F-ONB-2）：重复调用（already_provisioned）→ 不裸报错；本进程已热初始化时直接进入正常态。
-    if (error?.status === 409 && error?.payload?.error === 'already_provisioned') {
-      const payload = error.payload;
-      if (payload.initialized === true) {
-        await enterNormalConsole();
-        return;
-      }
-      $('#provision-choices')?.setAttribute('hidden', '');
-      setProvisionStatus('已完成：家目录已初始化，无需重复建新 / 加入。', 'ok');
-      if (button) button.disabled = false;
-      return;
-    }
-    setProvisionStatus(`失败：${error.message}`, 'error');
-    if (button) button.disabled = false;
-  }
+  el.classList.add('is-leaving');
+  if (onboardCoachHideTimer) clearTimeout(onboardCoachHideTimer);
+  onboardCoachHideTimer = setTimeout(() => {
+    el.hidden = true;
+    el.classList.remove('is-leaving');
+  }, 320);
+}
+
+function openOnboardCreate() {
+  if (!state.locked) return;
+  dismissOnboardingCoach();
+  const modal = $('#onboard-create');
+  const cloud = $('#onboard-create-cloud');
+  const device = $('#onboard-create-device');
+  if (!modal) return;
+  const status = state.provision ?? {};
+  if (cloud) cloud.value = nextCloudName();
+  if (device) device.value = status.defaultDeviceName ?? status.hostname ?? '';
+  setOnboardError('#onboard-create-error', '');
+  modal.hidden = false;
+  setTimeout(() => cloud?.focus(), 0);
+}
+
+function closeOnboardCreate() {
+  if (onboardBusy) return;
+  const modal = $('#onboard-create');
+  if (modal) modal.hidden = true;
+  setOnboardError('#onboard-create-error', '');
+}
+
+function openOnboardJoin() {
+  if (!state.locked) return;
+  dismissOnboardingCoach();
+  const modal = $('#onboard-join');
+  const device = $('#onboard-join-device');
+  const token = $('#onboard-join-token');
+  if (!modal) return;
+  const status = state.provision ?? {};
+  if (device) device.value = status.defaultDeviceName ?? status.hostname ?? '';
+  if (token) token.value = '';
+  setOnboardError('#onboard-join-error', '');
+  modal.hidden = false;
+  setTimeout(() => token?.focus(), 0);
+}
+
+function closeOnboardJoin() {
+  if (onboardBusy) return;
+  const modal = $('#onboard-join');
+  if (modal) modal.hidden = true;
+  setOnboardError('#onboard-join-error', '');
 }
 
 /**
- * 设备名 → deviceId 的**前端镜像**（仅用于实时预览；服务端 provision.mjs 为准）：
- * 先 sanitize（合法字符集 + 去首尾 '-'），再去掉所有重复的 `device-` 前缀，最后拼一次前缀。
+ * P1/P3：初始化成功后在同一页面解锁主控制台（不 window.location.reload、不重启）。
+ * 解锁后进入正常刷新/轮询；enterNormalConsole 自身幂等（重复调用不会叠加定时器/监听）。
  */
-function previewDeviceId(raw) {
-  let core = String(raw ?? '').trim().replace(/[^0-9A-Za-z._-]+/g, '-').replace(/^-+|-+$/g, '');
-  while (/^device-+/i.test(core)) core = core.replace(/^device-+/i, '');
-  if (core.length === 0 || /^device$/i.test(core)) core = 'local';
-  return `device-${core}`;
+async function unlockConsole(kind) {
+  onboardBusy = false;
+  const createModal = $('#onboard-create');
+  const joinModal = $('#onboard-join');
+  if (createModal) createModal.hidden = true;
+  if (joinModal) joinModal.hidden = true;
+  dismissOnboardingCoach();
+  state.locked = false;
+  state.provision = null;
+  clearLockedChrome();
+  lastSettingsSignature = null;
+  lastAboutSignature = null;
+  await enterNormalConsole();
+  showToast(kind === 'create' ? '忆云已建好，控制台已解锁' : '已加入忆云，控制台已解锁');
 }
 
-function bindProvisionPreview(inputSelector, previewSelector, status) {
-  const input = $(inputSelector);
-  const preview = $(previewSelector);
-  if (!input || !preview) return;
-  const update = () => {
-    const suggested = status?.defaultDeviceName ?? status?.hostname ?? 'local';
-    const value = input.value.trim().length > 0 ? input.value : suggested;
-    preview.textContent = `将使用 deviceId：${previewDeviceId(value)}`;
-  };
-  input.addEventListener('input', update);
-  update();
+/**
+ * 共用首启提交路径（P1 端点）：create { cloudName, deviceName } / join { token, deviceName }。
+ * 名称校验交给 P1 API（服务端 normalizeProfileName / normalizeDeviceName），失败内联展示。
+ */
+async function submitOnboard(kind) {
+  if (onboardBusy) return;
+  const isCreate = kind === 'create';
+  const errorId = isCreate ? '#onboard-create-error' : '#onboard-join-error';
+  const submit = $(isCreate ? '#onboard-create-submit' : '#onboard-join-submit');
+  const deviceName = String($(isCreate ? '#onboard-create-device' : '#onboard-join-device')?.value ?? '').trim();
+  const cloudName = String($('#onboard-create-cloud')?.value ?? '').trim();
+  const token = String($('#onboard-join-token')?.value ?? '').trim();
+  setOnboardError(errorId, '');
+  if (isCreate && cloudName.length === 0) {
+    setOnboardError(errorId, '请填写忆云名字（最多 24 个字符）。');
+    return;
+  }
+  if (!isCreate && token.length === 0) {
+    setOnboardError(errorId, '请先粘贴加入令牌（邀请面板生成的一次性令牌）。');
+    return;
+  }
+  onboardBusy = true;
+  if (submit) {
+    submit.disabled = true;
+    submit.dataset.label = submit.textContent;
+    submit.textContent = isCreate ? '正在新建…' : '正在加入…';
+  }
+  try {
+    const res = await api(isCreate ? '/app/provision/create' : '/app/provision/join', {
+      method: 'POST',
+      body: {
+        confirm: true,
+        ...(deviceName ? { deviceName } : {}),
+        ...(isCreate && cloudName ? { cloudName } : {}),
+        ...(!isCreate ? { token } : {}),
+      },
+      timeoutMs: isCreate ? 30000 : 45000,
+    });
+    if (res?.initialized === true) {
+      // 同一进程已完成热初始化；同一页面实例进入正常控制台。
+      sessionStorage.setItem('mebular_provision', JSON.stringify({ kind, at: Date.now(), result: res }));
+      await unlockConsole(kind);
+      return;
+    }
+    setOnboardError(errorId, '初始化未完成（响应未返回 initialized），请重试或检查守护版本。');
+  } catch (error) {
+    // 重复提交（本进程已热初始化）→ 不裸报错，直接解锁。
+    if (error?.status === 409 && error?.payload?.error === 'already_provisioned' && error?.payload?.initialized === true) {
+      await unlockConsole(kind);
+      return;
+    }
+    setOnboardError(errorId, `失败：${error?.payload?.message ?? error?.message ?? '初始化失败'}`);
+  } finally {
+    onboardBusy = false;
+    if (submit) {
+      submit.disabled = false;
+      submit.textContent = submit.dataset.label ?? (isCreate ? '新建忆云' : '加入忆云');
+      delete submit.dataset.label;
+    }
+  }
 }
 
-function renderProvision(status) {
-  const modal = $('#provision');
-  if (!modal) return;
-  modal.hidden = false;
-  // 引导态只显示引导页（隐藏常规控制台外壳）
+/** 锁定态启动：主控制台可见、星图可动，但不取 admin 数据。 */
+async function enterLockedConsole(status) {
+  state.locked = true;
+  state.provision = status ?? null;
+  document.body.classList.add('is-locked');
   const app = $('#app');
-  if (app) app.hidden = true;
-  const createName = $('#provision-create-name');
-  const joinName = $('#provision-join-name');
-  // 预填「设备名」（不是 deviceId：服务端会派生 device-<名>，避免 device-device-XXX）
-  const suggested = status.defaultDeviceName ?? status.hostname ?? '';
-  if (createName && !createName.value) createName.value = suggested;
-  if (joinName && !joinName.value) joinName.value = suggested;
-  const note = $('#provision-note');
-  if (note) {
-    note.textContent = `${status.note ?? ''}（家目录：${status.home ?? '—'}）`;
-  }
-  bindProvisionPreview('#provision-create-name', '#provision-create-preview', status);
-  bindProvisionPreview('#provision-join-name', '#provision-join-preview', status);
-  $('#provision-create')?.addEventListener('click', () => { void submitProvision('create'); });
-  $('#provision-join')?.addEventListener('click', () => { void submitProvision('join'); });
-  if (status.phase === 'INITIALIZING') {
-    $('#provision-choices')?.setAttribute('hidden', '');
-    setProvisionStatus('正在当前进程内完成初始化…', 'ok');
+  if (app) app.dataset.locked = 'true';
+  // 星图空场景（带背景星野）正常渲染；不请求 /admin/api/overview 等 409 接口。
+  stage.start();
+  setView('map');
+  render();
+  showOnboardingCoach();
+  if (status?.phase === 'INITIALIZING') {
+    // 极端并发：初始化进行中，入口禁用并给出提示，等待用户重试。
+    setOnboardError('#onboard-create-error', '初始化正在进行，请稍候重试。');
   }
 }
 
+let normalConsolePromise = null;
 /**
  * P1：初始化成功后在同一页面进入正常控制台（不依赖 window.location.reload 作为恢复路径）。
- * 只执行一次：submitProvision 成功后调用；正常启动时也走这里。
+ * 幂等：正常启动与首启解锁共用同一个 promise，不会重复 startEvents/定时器。
  */
-async function enterNormalConsole() {
+function enterNormalConsole() {
+  normalConsolePromise ??= enterNormalConsoleOnce();
+  return normalConsolePromise;
+}
+
+async function enterNormalConsoleOnce() {
+  // 兼容旧内部路径（P3 起不再用 #provision 遮罩整个 app）。
   const provisionModal = $('#provision');
   if (provisionModal) provisionModal.hidden = true;
+  clearLockedChrome();
+  dismissOnboardingCoach();
   const appEl = $('#app');
   if (appEl) appEl.hidden = false;
   // R-1 高-3：?view=<视图> 深链（向导②/托盘「连接 AI 助手」的 ?view=connect 落点）；
@@ -5295,9 +5639,24 @@ async function enterNormalConsole() {
   }, POLL_MS);
 }
 
+// 引导遮罩：点击任意处/知道了关闭；ESC 在无弹层时关闭。
+$('#onboarding-coach')?.addEventListener('click', () => {
+  dismissOnboardingCoach();
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape' || event.defaultPrevented) return;
+  if (visibleModalElements().length > 0) return;
+  if (!state.locked || $('#onboarding-coach')?.hidden !== false) return;
+  event.preventDefault();
+  dismissOnboardingCoach();
+});
+window.addEventListener('resize', () => {
+  if ($('#onboarding-coach')?.hidden === false) positionOnboardingCoach();
+});
+
 const provisionStatus = await fetchProvisionStatus();
-if (provisionStatus) {
-  renderProvision(provisionStatus);
+if (provisionStatus && provisionStatus.phase !== 'READY') {
+  await enterLockedConsole(provisionStatus);
 } else {
   await enterNormalConsole();
 }

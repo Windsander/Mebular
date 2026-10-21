@@ -2613,16 +2613,18 @@ export async function startHttpServer({
     // H-1：常驻运行（服务托管，动作式；服务命令带**守护自身 home**）。CI 用 MEBULAR_SERVICE_DRY_RUN=1 替身断言命令序列。
     const svcAction = path.match(/^\/admin\/api\/service\/(install|uninstall)$/);
     if (svcAction) {
-      const { installServiceForHome, uninstallServiceForHome, serviceStatusForHome } = await import('./service-control.mjs');
+      const { installServiceForHome, uninstallServiceForHome, serviceStatusForHome, resolveServiceHome } = await import('./service-control.mjs');
       const dryRun = process.env.MEBULAR_SERVICE_DRY_RUN === '1';
       const commands = [];
       const run = dryRun ? (cmd, args) => { commands.push([cmd, ...(args ?? [])]); return { status: 0, stdout: '', stderr: '' }; } : undefined;
+      // 两套 home：home = 实例身份（descriptor），serviceHome = unit/manifest 落盘（用户 OS home）。
+      const serviceHome = resolveServiceHome();
       try {
         const action = svcAction[1];
         const result = action === 'install'
-          ? installServiceForHome({ home, ...(run ? { run } : {}) })
-          : uninstallServiceForHome({ home, ...(run ? { run } : {}) });
-        const status = serviceStatusForHome({ home, ...(run ? { run } : {}) });
+          ? installServiceForHome({ home, serviceHome, ...(run ? { run } : {}) })
+          : uninstallServiceForHome({ home, serviceHome, ...(run ? { run } : {}) });
+        const status = serviceStatusForHome({ home, serviceHome, ...(run ? { run } : {}) });
         return sendJson(res, 200, { ok: true, action, dryRun, commands, result, status });
       } catch (error) {
         return sendJson(res, 500, { ok: false, action: svcAction[1], error: 'service_action_failed', message: String(error?.message ?? error) });

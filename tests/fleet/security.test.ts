@@ -167,14 +167,9 @@ describe('S2-1 TOTP', () => {
     expect(share.groups.replace(/\s/g, '')).toBe(secret);
     expect(share.otpauth).toContain('otpauth://totp/');
     expect(share.fingerprint).toHaveLength(8);
-    // QR 开启但 qrcode 缺失时也必须有文本/otpauth（不阻断）
-    const withQr = await renderTotpShare(secret, 'device-A', {
-      qr: true,
-      loadQrModule: () => {
-        throw new Error('Cannot find module qrcode');
-      },
-    });
-    expect(withQr.qrText).toBeUndefined();
+    // QR 开启：app-layer 编码器必须可用，同时保留文本/otpauth
+    const withQr = await renderTotpShare(secret, 'device-A', { qr: true });
+    expect(withQr.qrText?.length).toBeGreaterThan(0);
     expect(withQr.groups.replace(/\s/g, '')).toBe(secret);
     expect(withQr.otpauth).toContain('otpauth://totp/');
   });

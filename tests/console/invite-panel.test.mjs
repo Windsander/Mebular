@@ -1,0 +1,133 @@
+// 邀请面板：两栏精简（左 QR / 右引导 + 令牌 + TTL），右上角 X 关闭；不再堆说明段落。
+// 静态契约 + TTL 档位单一真源断言（不启浏览器；活体见 verify:console / verify:console:ui）。
+
+import { describe, expect, it } from '@jest/globals';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  IA_SETTINGS_FOLDS,
+  INVITE_TTL_DEFAULT_MS,
+  INVITE_TTL_OPTIONS,
+} from '../../packages/console/settings-ia.js';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const root = join(here, '..', '..');
+const consoleJs = readFileSync(join(root, 'packages', 'console', 'console.js'), 'utf-8');
+const indexHtml = readFileSync(join(root, 'packages', 'console', 'index.html'), 'utf-8');
+const serveSrc = readFileSync(join(root, 'packages', 'mcp', 'src', 'serve.mjs'), 'utf-8');
+
+function invitePanelSource() {
+  const start = consoleJs.indexOf('function showInviteResult');
+  const end = consoleJs.indexOf("$('#invite-device')", start);
+  return start >= 0 && end > start ? consoleJs.slice(start, end) : '';
+}
+
+describe('邀请面板 · TTL 档位与两栏结构', () => {
+  it('令牌有效期档位精确：5/15/20 分钟、2/6/12/24 小时；默认 15 分钟', () => {
+    expect(INVITE_TTL_OPTIONS).toEqual([
+      { label: '5 分钟', ttlMs: 300_000 },
+      { label: '15 分钟', ttlMs: 900_000 },
+      { label: '20 分钟', ttlMs: 1_200_000 },
+      { label: '2 小时', ttlMs: 7_200_000 },
+      { label: '6 小时', ttlMs: 21_600_000 },
+      { label: '12 小时', ttlMs: 43_200_000 },
+      { label: '24 小时', ttlMs: 86_400_000 },
+    ]);
+    expect(INVITE_TTL_DEFAULT_MS).toBe(900_000);
+    expect(consoleJs).toContain('inviteTtlMs: INVITE_TTL_DEFAULT_MS');
+    expect(consoleJs).toMatch(/state\.inviteTtlMs = INVITE_TTL_DEFAULT_MS;\s*\n\s*void openInvite\(\)/);
+  });
+
+  it('邀请面板不再有 details / endpoint 编辑器 / CLI 命令 / 默认域与订阅说明', () => {
+    const panel = invitePanelSource();
+    expect(panel.length).toBeGreaterThan(0);
+    expect(panel).not.toContain('<details');
+    expect(panel).not.toContain('data-settings-fold="invite"');
+    expect(panel).not.toContain('invite-detail-fold');
+    expect(panel).not.toContain('invite-endpoint');
+    expect(panel).not.toContain('endpointEditor');
+    expect(panel).not.toContain('fleet join --token');
+    expect(panel).not.toContain('默认记忆域');
+    expect(panel).not.toContain('兑换只建立入网信任');
+    expect(consoleJs).not.toContain("foldLabel('invite')");
+    expect(IA_SETTINGS_FOLDS.map((fold) => fold.id)).toEqual(['mcp-danger', 'diagnostics', 'about-runtime']);
+  });
+
+  it('两栏结构：左二维码（150–160px），右引导 + 令牌 + TTL 控件', () => {
+    const panel = invitePanelSource();
+    expect(panel).toContain('class="invite-layout"');
+    expect(panel).toContain('class="invite-qr"');
+    expect(panel).toContain('class="invite-main"');
+    expect(panel).toContain('让对方扫码，或复制令牌。');
+    expect(panel).toContain('class="invite-token-block"');
+    expect(panel).toContain('data-copy=');
+    expect(panel).toContain('qrSvg');
+    expect(panel).toContain('id="invite-ttl"');
+    expect(panel).toContain('id="invite-regenerate"');
+    expect(panel).toContain('id="invite-expiry"');
+    expect(panel).toContain('formatClock(res.expiresAt)');
+    expect(panel).toContain('INVITE_TTL_OPTIONS');
+    const css = readFileSync(join(root, 'packages', 'console', 'console.css'), 'utf-8');
+    expect(css).toMatch(/\.qr-img \{[^}]*width: 15[0-9]px[^}]*height: 15[0-9]px/);
+    expect(css).toMatch(/\.invite-layout \{[^}]*grid-template-columns: 156px minmax\(0, 1fr\)/);
+    expect(css).toMatch(/@media \(max-width: 520px\) \{\s*\.invite-layout \{ grid-template-columns: minmax\(0, 1fr\)/);
+  });
+
+  it('细节段落已移除：无「对方已用过 / 新设备 / 当前令牌有效至 / 改档后点 / 令牌即入网权限 / 扫码即通」', () => {
+    const panel = invitePanelSource();
+    const removed = [
+      '对方已用过',
+      '新设备',
+      '当前令牌有效至',
+      '改档后点',
+      '令牌即入网权限',
+      '扫码即通',
+      '本忆云',
+      'QR 内容 = 令牌文本',
+    ];
+    for (const text of removed) expect(panel).not.toContain(text);
+    expect(panel).toContain('一次性 · 仅当面或可信局域网传递。');
+  });
+
+  it('底部一行忆云身份 + 一行安全提示；端点/会签只留短警告', () => {
+    const panel = invitePanelSource();
+    expect(panel).toContain('id="invite-cloud-identity"');
+    expect(panel).toContain('根指纹');
+    expect(panel).toContain('端点仅本机可达');
+    expect(panel).toContain('已带上会签批准。');
+    expect(panel).not.toContain('请在「设置 → 高级 → 常驻服务」');
+  });
+
+  it('右上角 X 关闭（复用 modal-x），无底部关闭按钮；点击清空 token', () => {
+    expect(indexHtml).toMatch(/<div class="modal-head">[\s\S]*?id="invite-close"[^>]*class="modal-x"/);
+    const inviteDialog = indexHtml.slice(indexHtml.indexOf('<div id="invite"'), indexHtml.indexOf('<div id="cloud-join"'));
+    expect(inviteDialog).not.toContain('modal-actions');
+    expect(inviteDialog).not.toContain('>关闭<');
+    expect(consoleJs).toMatch(/\$\('#invite-close'\)\.addEventListener\('click',[\s\S]{0,160}\$\('#invite'\)\.hidden = true;[\s\S]{0,80}state\.inviteToken = null;/);
+  });
+
+  it('改档不自动刷新；点重新生成才把选中的 ttlMs 传给 /admin/api/invite', () => {
+    const changeAt = consoleJs.indexOf("body.querySelector('#invite-ttl')");
+    const regenAt = consoleJs.indexOf("body.querySelector('#invite-regenerate')");
+    const changeHandler = changeAt >= 0 && regenAt > changeAt ? consoleJs.slice(changeAt, regenAt) : '';
+    expect(changeHandler.length).toBeGreaterThan(0);
+    expect(changeHandler).not.toMatch(/openInvite\(|renderInvite\(|api\(/);
+    expect(changeHandler).toContain('state.inviteTtlMs = value');
+
+    expect(consoleJs).toMatch(/invite-regenerate[\s\S]{0,220}confirm\(/);
+    expect(consoleJs).toMatch(/confirm\('重新生成后旧令牌立即失效。确定？'\)\)\s*void openInvite\(state\.inviteTtlMs\)/);
+    expect(consoleJs).toMatch(/async function renderInvite\(ttlMs = state\.inviteTtlMs\)[\s\S]{0,260}body: \{ ttlMs \}/);
+    expect(consoleJs).toMatch(/body: \{ code, ttlMs: selectedTtl \}/);
+    expect(consoleJs).toMatch(/body: \{ approvalId, namespace: inviteNamespace\(\), ttlMs: selectedTtl \}/);
+  });
+
+  it('守护生成令牌时激活 nonce（撤销旧 active）；回环提示指向高级设置而非面板编辑', () => {
+    expect(serveSrc).toContain("import { activateJoinInvite, buildJoinToken } from './jointoken.mjs';");
+    expect(serveSrc).toMatch(/const nonce = randomBytes\(16\)\.toString\('hex'\)/);
+    expect(serveSrc).toMatch(/await activateJoinInvite\(joinStateStoragePath, nonce\)/);
+    expect(serveSrc).toContain('请在「设置 → 高级 → 常驻服务」将 joinService.bind 设为 0.0.0.0');
+    expect(serveSrc).toContain('邀请端点不是有效地址');
+    expect(serveSrc).not.toContain('或在本面板填写新设备可达地址');
+  });
+});

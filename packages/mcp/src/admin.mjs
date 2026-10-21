@@ -408,7 +408,7 @@ export function collectOnlinePeers(app) {
 }
 
 /** GET /admin/api/overview */
-export async function buildOverview({ app, service, cloud }) {
+export async function buildOverview({ app, service, cloud, config, runtime }) {
   const status = await service.status();
   const { peers } = collectOnlinePeers(app);
   let blockedCount = 0;
@@ -425,6 +425,17 @@ export async function buildOverview({ app, service, cloud }) {
   } catch {
     convergence = null;
   }
+  // 设备展示名：网络派生优先；无共享事件 → 本机 config/runtime 回退。
+  let deviceNames = {};
+  try {
+    deviceNames = (await app.getDeviceNames?.()) ?? {};
+  } catch {
+    deviceNames = {};
+  }
+  const selfDeviceName = deviceNames[app.deviceId]?.name
+    ?? runtime?.deviceName
+    ?? config?.deviceName
+    ?? null;
   // 忆云身份：旧守护无此字段 → 前端自行隐藏；注册表不可读时同样省略（不阻塞总览）。
   let cloudView = null;
   if (cloud?.available) {
@@ -432,11 +443,22 @@ export async function buildOverview({ app, service, cloud }) {
       const state = await readRegistry(cloud.root);
       const current = state.registry.profiles.find((profile) => profile.id === state.registry.current) ?? null;
       if (current) {
+        // 网络级名字优先（任意设备改名后同步到这里）；registry 只做 fallback。
+        let derived = null;
+        try {
+          derived = (await app.getCloudName?.()) ?? null;
+        } catch {
+          derived = null;
+        }
         cloudView = {
           id: current.id,
-          name: current.name,
+          name: derived?.name ?? current.name,
           masterFingerprint: current.masterFingerprint ?? null,
           current: true,
+          nameSource: derived ? 'network' : 'registry',
+          nameUpdatedAt: derived
+            ? (derived.at ? new Date(derived.at).toISOString() : (current.nameUpdatedAt ?? null))
+            : (current.nameUpdatedAt ?? current.createdAt ?? null),
         };
       }
     } catch {
@@ -446,7 +468,7 @@ export async function buildOverview({ app, service, cloud }) {
   return {
     device: {
       deviceId: app.deviceId,
-      name: app.deviceId,
+      name: selfDeviceName ?? app.deviceId,
       peerId: status.peerId,
       multiaddrs: status.listenAddrs,
       relays: status.relays,
@@ -459,8 +481,57 @@ export async function buildOverview({ app, service, cloud }) {
   };
 }
 
+const sameDisplayName = (a, b) => String(a ?? '').trim().toLocaleLowerCase()
+  === String(b ?? '').trim().toLocaleLowerCase();
+
+const parsedTime = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+};
+
+/**
+ * 本机多忆云重名标记（app 层计算；跨网络允许同名，但本机列表内重名要提示）：
+ * - 同名项都标 `duplicateName`；
+ * - 其中名字更新时间最近的一项标 `suggestedRename`；
+ * - 当前忆云被标记时，UI 在顶栏徽章加警告点。
+ */
+function markNameConflicts(rows) {
+  const groups = new Map();
+  for (const row of rows) {
+    const key = String(row.name ?? '').trim().toLocaleLowerCase();
+    const list = groups.get(key) ?? [];
+    list.push(row);
+    groups.set(key, list);
+  }
+  const duplicateNames = [];
+  const suggestedIds = [];
+  for (const [key, list] of groups) {
+    if (list.length < 2 || key.length === 0) continue;
+    duplicateNames.push(list[0].name);
+    let suggested = list[0];
+    for (const row of list.slice(1)) {
+      if (row._updatedAt > suggested._updatedAt) {
+        suggested = row;
+      } else if (row._updatedAt === suggested._updatedAt && row.id < suggested.id) {
+        suggested = row;
+      }
+    }
+    suggestedIds.push(suggested.id);
+  }
+  for (const row of rows) {
+    row.duplicateName = duplicateNames.some((name) => sameDisplayName(name, row.name));
+    row.suggestedRename = row.duplicateName && suggestedIds.includes(row.id);
+    delete row._updatedAt;
+  }
+  return { duplicateNames, suggestedIds };
+}
+
 /** GET /admin/api/clouds：注册表 v1 的只读视图（不含秘密）。 */
-export async function buildClouds({ cloud }) {
+export async function buildClouds({ app, cloud }) {
   if (!cloud?.available) {
     throw cloudError(
       'CLOUD_UNAVAILABLE',
@@ -470,21 +541,48 @@ export async function buildClouds({ cloud }) {
   }
   const state = await readRegistry(cloud.root);
   const current = state.registry.current;
-  return {
-    ok: true,
-    root: displayPath(cloud.root),
-    current,
-    profiles: state.registry.profiles.map((profile) => ({
+  // 当前忆云的名字优先读网络派生（remote rename 后本机 registry 可能尚未刷新）。
+  let derived = null;
+  try {
+    derived = (await app?.getCloudName?.()) ?? null;
+  } catch {
+    derived = null;
+  }
+  const rows = state.registry.profiles.map((profile) => {
+    const isCurrent = profile.id === current;
+    const name = isCurrent && derived ? derived.name : profile.name;
+    const updatedAt = isCurrent && derived
+      ? parsedTime(derived.at || derived.issuedAt)
+      : parsedTime(profile.nameUpdatedAt) || parsedTime(profile.createdAt);
+    return {
       id: profile.id,
-      name: profile.name,
+      name,
       home: profile.home,
       kind: profile.kind,
       createdAt: profile.createdAt ?? null,
       lastUsedAt: profile.lastUsedAt ?? null,
+      nameUpdatedAt: isCurrent && derived
+        ? (derived.at ? new Date(derived.at).toISOString() : profile.nameUpdatedAt ?? null)
+        : (profile.nameUpdatedAt ?? null),
       masterFingerprint: profile.masterFingerprint ?? null,
       deviceId: profile.deviceId ?? null,
-      current: profile.id === current,
-    })),
+      current: isCurrent,
+      nameSource: isCurrent && derived ? 'network' : 'registry',
+      _updatedAt: updatedAt,
+    };
+  });
+  const conflicts = markNameConflicts(rows);
+  const currentRow = rows.find((row) => row.current) ?? null;
+  return {
+    ok: true,
+    root: displayPath(cloud.root),
+    current,
+    profiles: rows,
+    nameConflicts: {
+      names: conflicts.duplicateNames,
+      suggestedIds: conflicts.suggestedIds,
+      currentDuplicate: Boolean(currentRow?.duplicateName),
+    },
     ...(state.warning ? { warning: state.warning } : {}),
   };
 }
@@ -510,11 +608,19 @@ export async function collectKnownDevices(app, policy, online) {
 }
 
 /** GET /admin/api/devices */
-export async function buildDevices({ app, config: _config }) {
+export async function buildDevices({ app, config, runtime }) {
   const self = app.deviceId;
   const online = collectOnlinePeers(app);
   const policy = await collectPolicy(app);
   const known = await collectKnownDevices(app, policy, online);
+  // 设备名来自网络派生（本人可改）；无事件时本机用 config/runtime 回退，其他设备只显示 deviceId。
+  let deviceNames = {};
+  try {
+    deviceNames = (await app.getDeviceNames?.()) ?? {};
+  } catch {
+    deviceNames = {};
+  }
+  const selfNameFallback = runtime?.deviceName ?? config?.deviceName ?? null;
 
   let syncStatus = null;
   try {
@@ -570,8 +676,11 @@ export async function buildDevices({ app, config: _config }) {
     } catch {
       pendingEventCount = null;
     }
+    const name = deviceNames[deviceId]?.name
+      ?? (deviceId === self ? selfNameFallback : null);
     devices.push({
       deviceId,
+      ...(name ? { name } : {}),
       online: Boolean(connection),
       ...(connection ? { peerId: connection.peerId, addrs: [connection.remoteAddress] } : {}),
       ...(lastSyncPeer === deviceId && syncStatus?.lastSyncAt ? { lastSyncAt: syncStatus.lastSyncAt } : {}),
@@ -780,12 +889,21 @@ export async function buildSettings({ app, service, config, runtime, home }) {
   } catch {
     // 忽略：门面未就绪
   }
+  // 设备名：网络派生优先；无共享事件时回退 config/runtime（旧安装迁移）。
+  let selfDeviceName = null;
+  try {
+    const names = (await app.getDeviceNames?.()) ?? {};
+    selfDeviceName = names[app.deviceId]?.name ?? null;
+  } catch {
+    selfDeviceName = null;
+  }
   const sync = config?.sync ?? {};
   const antiEntropy = sync.antiEntropy ?? { enabled: true, intervalMs: 600000, jitterRatio: 0.2 };
   const payload = {
     identity: {
       deviceId: app.deviceId,
-      name: runtime?.deviceName ?? config?.deviceName ?? null,
+      name: selfDeviceName ?? runtime?.deviceName ?? config?.deviceName ?? null,
+      nameSource: selfDeviceName ? 'network' : (runtime?.deviceName ?? config?.deviceName ? 'local' : null),
       // W2：root（持主私钥）/ delegated（仅委派链）
       mode: runtime?.identityMode ?? config?.identity?.mode ?? null,
       peerId: status.peerId,

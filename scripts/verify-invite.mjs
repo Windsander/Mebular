@@ -2,7 +2,7 @@
 // C7 验收：扫码即通（一次性令牌 + 二维码 + 委派证书 + 降级）
 //
 // Part A：令牌往返/验签；默认不携带任何自动授权字段；可选 securityApproval 随签名体。
-// Part B：真 qrcode（可选依赖在场）→ 终端/SVG；缺模块 → null + 告警（只给文本，不报错）。
+// Part B：应用层 QR（qrcode-generator 普通依赖）→ 终端/SVG。
 // Part C：join 服务签发委派证书；二次兑换/过期被拒；响应携带来自身份的 securityApproval。
 // Part E：CLI `--qr` 与 `--token` 等价（解析层）。
 //
@@ -13,6 +13,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Mebular, IdentityManager } from '@mebular/core';
 import {
+  activateJoinInvite,
   buildJoinToken,
   decodeJoinToken,
   encodeJoinToken,
@@ -29,10 +30,6 @@ const check = (label, ok, detail = '') => {
   console.log(`${ok ? '  ✓' : '  ✗'} ${label}${detail ? `（${typeof detail === 'string' ? detail : JSON.stringify(detail)}）` : ''}`);
   if (ok) passed += 1;
   else failed += 1;
-};
-const skip = (label, reason) => {
-  console.log(`  - SKIP ${label}：${reason}`);
-  skipped.push(label);
 };
 const freePort = async () => {
   const net = await import('node:net');
@@ -92,21 +89,13 @@ try {
     decodedApproval.securityApproval?.approvalId === 'ap-invite' && (await verifyJoinToken(decodedApproval)).ok === true,
     { approvalId: decodedApproval.securityApproval?.approvalId });
 
-  // ---------- Part B：二维码渲染与降级 ----------
+  // ---------- Part B：二维码渲染（qrcode-generator 普通依赖） ----------
   const inline = encodeJoinToken(plain);
   const terminal = await renderTerminalQr(inline);
   const svg = await renderSvgQr(inline);
-  if (terminal && svg) {
-    check('B. 可选依赖在场 → 终端 + SVG 二维码产出（内容=令牌文本）',
-      terminal.value.length > 0 && svg.value.startsWith('<svg') && !svg.value.includes('mebular://'),
-      { terminalKind: terminal.kind, svgBytes: svg.value.length });
-  } else {
-    skip('B. 二维码渲染', '本机未安装可选依赖 qrcode（只给文本，属预期降级）');
-  }
-  const warnings = [];
-  const missing = await renderTerminalQr(inline, { loadModule: () => { throw new Error("Cannot find module 'qrcode'"); }, onWarn: (m) => warnings.push(m) });
-  check('B. 缺可选依赖 → null + 告警（只给文本，不报错）',
-    missing === null && warnings.some((m) => m.includes('qrcode')), { warnings });
+  check('B. fleet QR → 终端 + SVG 二维码产出（内容=令牌文本）',
+    Boolean(terminal && svg) && terminal.value.length > 0 && svg.value.startsWith('<svg') && !svg.value.includes('mebular://'),
+    { terminalKind: terminal?.kind, svgBytes: svg?.value.length });
 
   // ---------- Part C：兑换（委派证书 + 一次性 + 过期） ----------
   const joinerKey = new IdentityManager();
@@ -121,6 +110,15 @@ try {
     log: () => undefined,
   });
   try {
+    const storagePath = inviter.storagePath ?? join(dir, 'device-inviter.jsonl');
+    const stale = await buildJoinToken({
+      mebular: inviter,
+      deviceId: 'device-inviter',
+      namespace: 'tasks',
+      endpoint: `http://127.0.0.1:${joinPort}`,
+      ttlMs: 60_000,
+    });
+    await activateJoinInvite(storagePath, stale.nonce);
     const token = await buildJoinToken({
       mebular: inviter,
       deviceId: 'device-inviter',
@@ -129,6 +127,8 @@ try {
       ttlMs: 60_000,
       securityApproval: approval,
     });
+    const activation = await activateJoinInvite(storagePath, token.nonce);
+    check('C. 新令牌激活 → 旧 active nonce 进入 revoked', activation.revoked === stale.nonce, { revoked: activation.revoked });
     const redeem = async (t) => {
       const res = await fetch(`http://127.0.0.1:${joinPort}/mebular/join`, {
         method: 'POST',
@@ -137,6 +137,11 @@ try {
       });
       return { status: res.status, body: await res.json().catch(() => null) };
     };
+
+    const revoked = await redeem(stale);
+    check('C. 重新生成后旧 token 兑换被拒（revoked）',
+      revoked.status === 403 && String(revoked.body?.error ?? '').includes('revoked'),
+      { status: revoked.status, error: revoked.body?.error });
 
     const first = await redeem(token);
     check('C. 首次兑换：签发委派证书',

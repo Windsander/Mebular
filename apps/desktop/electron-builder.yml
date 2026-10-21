@@ -21,6 +21,9 @@ extraResources:
     to: packages/service/dist
   - from: ../../packages/fleet/dist
     to: packages/fleet/dist
+  # fleet/mcp 的 QR 运行时依赖：fleet dist 从 resources/node_modules 解析它
+  - from: ../../node_modules/qrcode-generator
+    to: node_modules/qrcode-generator
   - from: ../../packages/console
     to: packages/console
   - from: ../../packages/skill

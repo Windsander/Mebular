@@ -119,6 +119,7 @@
   "dependencies": {
     "@modelcontextprotocol/server": "^2.0.0",
     "bonjour": "^3.5.1",
+    "qrcode-generator": "2.0.4",
     "ulid": "^2.3.0",
     "zod": "^4.6.5"
   },
@@ -133,8 +134,7 @@
     "@libp2p/peer-id": "^6.0.15",
     "@libp2p/tcp": "^11.0.27",
     "@multiformats/multiaddr": "^13.0.3",
-    "libp2p": "^3.3.9",
-    "qrcode": "1.5.4"
+    "libp2p": "^3.3.9"
   },
   "peerDependencies": {
     "@huggingface/transformers": ">=3.0.0"

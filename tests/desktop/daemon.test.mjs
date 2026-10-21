@@ -7,6 +7,7 @@ import { describe, it, expect } from '@jest/globals';
 import {
   parseArgs,
   probeHealth,
+  probeRuntimeIdentity,
   ensureDaemon,
   stopManaged,
   diagnosePort,
@@ -32,6 +33,21 @@ describe('M1 桌面 App：参数 / URL', () => {
     expect(consoleUrl(http)).toBe('http://127.0.0.1:7331/console');
     expect(resolveHttp({ mcp: { http: { port: 7444 } } }, {}).port).toBe(7444);
     expect(resolveHttp({}, { MEBULAR_HTTP_PORT: '7555' }).port).toBe(7555);
+  });
+});
+
+describe('M1 桌面 App：运行期展示名', () => {
+  it('probeRuntimeIdentity 读 overview 的网络派生名；失败返回 null（保留上一值）', async () => {
+    const okFetch = async (url) => {
+      expect(url).toBe('http://127.0.0.1:7331/admin/api/overview');
+      return {
+        ok: true,
+        json: async () => ({ cloud: { name: '网络名' }, device: { name: '本机名' } }),
+      };
+    };
+    expect(await probeRuntimeIdentity(okFetch, http)).toEqual({ cloudName: '网络名', deviceName: '本机名' });
+    expect(await probeRuntimeIdentity(refused, http)).toBeNull();
+    expect(await probeRuntimeIdentity(async () => ({ ok: false }), http)).toBeNull();
   });
 });
 

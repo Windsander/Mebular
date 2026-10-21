@@ -9,7 +9,7 @@
 import { StarStage, namespaceColor, shortId } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINES, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE, SECURITY_LEVEL_NOTE, SECURITY_BOUNDARY, SECURITY_TOTP_FOOT, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINES, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE, SECURITY_LEVEL_NOTE, SECURITY_BOUNDARY, SECURITY_TOTP_FOOT, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 
@@ -39,6 +39,9 @@ const state = {
   cloudsError: null,
   cloudRename: null,
   cloudRenameError: '',
+  // 本机设备名编辑（关于本机 → 身份与存储）
+  deviceRename: null,
+  deviceRenameError: '',
   cloudJoinInspect: null,
   cloudJoinResult: null,
   cloudJoinNameAuto: true,
@@ -50,6 +53,7 @@ const state = {
   rawConfig: null,
   cfgDraft: {},
   inviteToken: null,
+  inviteTtlMs: INVITE_TTL_DEFAULT_MS,
   selected: null,
   degraded: null,
   error: null,
@@ -291,10 +295,16 @@ function renderTopbar() {
   if (cloudEl) {
     const cloud = state.overview?.cloud ?? null;
     if (typeof cloud?.name === 'string' && cloud.name.trim().length > 0) {
+      const currentConflict = state.clouds?.nameConflicts?.currentDuplicate === true
+        || (state.clouds?.profiles ?? []).some((profile) => profile.current && profile.duplicateName);
       cloudEl.hidden = false;
-      cloudEl.innerHTML = `<svg class="cloud-mark" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.6 12.2h6.9a2.7 2.7 0 0 0 .4-5.37A4.2 4.2 0 0 0 3.4 7.1a2.6 2.6 0 0 0 1.2 5.1Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="cloud-name">${escapeHtml(cloud.name)}</span>`;
-      cloudEl.title = `当前忆云：${cloud.name}（点击打开设置 · 忆云）`;
-      cloudEl.setAttribute('aria-label', `当前忆云：${cloud.name}；打开设置 · 忆云`);
+      cloudEl.innerHTML = `<svg class="cloud-mark" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M4.6 12.2h6.9a2.7 2.7 0 0 0 .4-5.37A4.2 4.2 0 0 0 3.4 7.1a2.6 2.6 0 0 0 1.2 5.1Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="cloud-name">${escapeHtml(cloud.name)}</span>${currentConflict ? '<span class="cloud-warning-dot" title="本机有同名忆云，建议改名" aria-label="重名警告"></span>' : ''}`;
+      cloudEl.title = currentConflict
+        ? `当前忆云：${cloud.name}（有同名忆云，建议改名；点击打开设置 · 忆云）`
+        : `当前忆云：${cloud.name}（点击打开设置 · 忆云）`;
+      cloudEl.setAttribute('aria-label', currentConflict
+        ? `当前忆云：${cloud.name}；有同名忆云警告；打开设置 · 忆云`
+        : `当前忆云：${cloud.name}；打开设置 · 忆云`);
     } else {
       cloudEl.hidden = true;
       cloudEl.textContent = '';
@@ -1822,7 +1832,7 @@ function securitySeedDisplay(seed, { generated = false } = {}) {
   const qr = typeof seed.qrSvg === 'string' && seed.qrSvg.length > 0
     ? `<div class="readout-block qr-block"><span class="domain-label">扫码导入（内容 = otpauth URI）</span>
        <img class="qr-img" alt="动态码种子二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(seed.qrSvg)))}" /></div>`
-    : '<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用下方分组文本。</p>';
+    : '<p class="cfg-help muted">二维码不可用（生成失败）：请使用下方分组文本。</p>';
   securityModalConfig({
     title: generated ? '共享动态码种子（只显示这一次）' : '动态码种子',
     hideClose: false,
@@ -2173,6 +2183,41 @@ function renderDiagnostics() {
 
 let lastAboutSignature = null;
 
+/** 本机设备名编辑（关于本机 → 身份与存储）。 */
+function startDeviceRename() {
+  state.deviceRename = { name: state.settings?.identity?.name ?? '' };
+  state.deviceRenameError = '';
+  renderAbout();
+  setTimeout(() => {
+    const input = document.querySelector('[data-device-rename-input]');
+    if (!input) return;
+    input.focus?.();
+    input.select?.();
+  }, 0);
+}
+
+async function saveDeviceRename() {
+  if (!state.deviceRename) return;
+  const name = String(state.deviceRename.name ?? '').trim();
+  if (name.length === 0) {
+    state.deviceRenameError = '设备名不能为空。';
+    renderAbout();
+    return;
+  }
+  state.deviceRenameError = '';
+  renderAbout();
+  try {
+    await api('/admin/api/devices/self/name', { method: 'POST', body: { name } });
+    state.deviceRename = null;
+    await refresh();
+    renderAbout();
+    showToast(`设备名已改为「${name}」；会同步到同一忆云的其他设备。`);
+  } catch (error) {
+    state.deviceRenameError = error?.payload?.message ?? error?.message ?? String(error);
+    renderAbout();
+  }
+}
+
 function renderAbout() {
   const body = $('#about-body');
   // 同一类轮询重建保护：内容未变则跳过，避免滚动位置/文本选择被冲掉
@@ -2182,9 +2227,12 @@ function renderAbout() {
     state.healthz ?? null,
     state.features?.writes ?? null,
     state.overview?.device?.deviceId ?? null,
+    state.overview?.device?.name ?? null,
     state.service?.unitPath ?? null,
     state.overview?.convergence ?? null,
-    (state.devices ?? []).map((d) => [d.deviceId, d.convergence ?? null]),
+    (state.devices ?? []).map((d) => [d.deviceId, d.name ?? null, d.convergence ?? null]),
+    state.deviceRename ? 'editing' : null,
+    state.deviceRenameError,
   ]);
   if (signature === lastAboutSignature && body.childElementCount > 0) return;
   lastAboutSignature = signature;
@@ -2203,12 +2251,27 @@ function renderAbout() {
   const addrRows = s.identity.multiaddrs.length
     ? s.identity.multiaddrs.map((a) => copyRowOf('multiaddr', a))
     : [emptyRowOf('multiaddr', '（未启用 P2P，无监听地址）')];
+  const writes = state.features.writes && !MOCK;
+  const renamingDevice = state.deviceRename !== null;
+  const deviceName = s.identity.name ?? '';
+  const deviceNameRow = renamingDevice
+    ? kvRow('设备名', `<span class="device-rename-inline">
+        <input class="crt-input device-rename-input" data-device-rename-input type="text" maxlength="24"
+          value="${escapeHtml(state.deviceRename?.name ?? deviceName)}" aria-label="设备名" />
+        <button class="btn btn-small btn-crt" data-device-rename-save type="button" ${writes ? '' : 'disabled'}>保存</button>
+        <button class="btn btn-small" data-device-rename-cancel type="button">取消</button>
+      </span>${state.deviceRenameError ? `<span class="crt-warn device-rename-error" role="alert">${escapeHtml(state.deviceRenameError)}</span>` : ''}`)
+    : kvRow('设备名', `${deviceName
+      ? `<span class="device-name-value">${escapeHtml(deviceName)}</span>`
+      : '<span class="kv-empty">未设置（列表按 deviceId 显示）</span>'}
+      <button class="btn btn-small btn-crt" data-device-rename type="button" ${writes ? '' : 'disabled'}>改名</button>
+      <span class="cfg-help muted">只有本人可改；会同步到同一忆云的其他设备，不重签证书。</span>`);
   body.innerHTML = `
     <section class="settings-section" data-info-block="identity">
-      <h3>身份与存储 <span class="badge badge-muted">只读</span></h3>
+      <h3>身份与存储 <span class="badge badge-muted">身份只读 · 设备名可改</span></h3>
       ${kvRows([
         copyRowOf('deviceId', s.identity.deviceId),
-        ...(s.identity.name ? [kvRow('名称', escapeHtml(s.identity.name))] : []),
+        deviceNameRow,
         kvRow('身份模式', s.identity.mode === 'delegated'
           ? 'delegated（委派证书链，无主私钥）'
           : 'root（持有用户主密钥，可为任意设备颁发证书）'),
@@ -3099,7 +3162,7 @@ function renderDeviceCard() {
   const selfRow0 = state.devices.find((d) => d.deviceId === state.overview?.device?.deviceId);
   // 轮询每 3s 触发 render；内容未变时跳过重渲染，避免冲掉「更多操作」展开态与点击
   const cardSignature = JSON.stringify([
-    device.deviceId, device.online, device.blocked, device.pendingEventCount ?? null,
+    device.deviceId, device.name ?? null, device.online, device.blocked, device.pendingEventCount ?? null,
     device.lastSyncAt ?? null, device.subscriptions ?? [], device.sharesWithMe ?? [],
     isSelf, writes,
     state.security?.level ?? 'low',
@@ -3194,6 +3257,7 @@ function renderDeviceCard() {
   const conv = isSelf ? null : device.convergence ?? null;
   body.innerHTML = `
     <div class="card-identity">
+      ${device.name ? `<span class="card-name">${escapeHtml(device.name)}</span>` : ''}
       <span class="card-id"><span class="dev-led ${status.cls}" aria-hidden="true"></span>${escapeHtml(device.deviceId)}</span>
       <span class="crt-tag card-status ${status.cls}">${status.text}</span>
     </div>
@@ -3913,6 +3977,21 @@ $('#self-badge').addEventListener('click', () => {
 $('#about-close').addEventListener('click', () => {
   $('#about').hidden = true;
 });
+$('#about-body').addEventListener('click', (event) => {
+  if (event.target.closest('[data-device-rename]')) { startDeviceRename(); return; }
+  if (event.target.closest('[data-device-rename-save]')) { void saveDeviceRename(); return; }
+  if (event.target.closest('[data-device-rename-cancel]')) {
+    state.deviceRename = null;
+    state.deviceRenameError = '';
+    renderAbout();
+  }
+});
+$('#about-body').addEventListener('input', (event) => {
+  if (event.target?.matches?.('[data-device-rename-input]') && state.deviceRename) {
+    state.deviceRename.name = event.target.value;
+    state.deviceRenameError = '';
+  }
+});
 $('#about-to-diagnostics').addEventListener('click', () => {
   $('#about').hidden = true;
   $('#settings').hidden = false;
@@ -3928,7 +4007,11 @@ $('#handoff-confirm').addEventListener('click', confirmHandoff);
 
 // ---------- 邀请设备（T2 令牌加入：主密钥不复制） ----------
 
-async function openInvite() {
+async function openInvite(ttlMs = state.inviteTtlMs) {
+  const selectedTtl = INVITE_TTL_OPTIONS.some((option) => option.ttlMs === ttlMs)
+    ? ttlMs
+    : INVITE_TTL_DEFAULT_MS;
+  state.inviteTtlMs = selectedTtl;
   const level = state.security?.level ?? 'low';
   if (level === 'medium') {
     securityCodeModal({
@@ -3936,7 +4019,7 @@ async function openInvite() {
       intro: '中档在生成一次性令牌前需要输入本机 6 位动态码。',
       confirmLabel: '验证并生成令牌',
       onSubmit: async (code) => {
-        const res = await api('/admin/api/invite', { method: 'POST', body: { code } });
+        const res = await api('/admin/api/invite', { method: 'POST', body: { code, ttlMs: selectedTtl } });
         closeSecurityAction();
         showInviteResult(res);
       },
@@ -3952,7 +4035,7 @@ async function openInvite() {
         onApproved: async (approvalId) => {
           const res = await api('/admin/api/invite', {
             method: 'POST',
-            body: { approvalId, namespace: inviteNamespace() },
+            body: { approvalId, namespace: inviteNamespace(), ttlMs: selectedTtl },
           });
           closeSecurityAction();
           showInviteResult(res);
@@ -3964,20 +4047,17 @@ async function openInvite() {
     return;
   }
   $('#invite').hidden = false;
-  await renderInvite();
+  await renderInvite(selectedTtl);
 }
 
-async function renderInvite(overrideEndpoint = null) {
+async function renderInvite(ttlMs = state.inviteTtlMs) {
   const body = $('#invite-body');
-  const typedEndpoint = overrideEndpoint
-    ?? $('#invite-endpoint')?.value?.trim()
-    ?? null;
   $('#invite').hidden = false;
   body.innerHTML = '<p class="muted">正在生成令牌…</p>';
   try {
     const res = await api('/admin/api/invite', {
       method: 'POST',
-      body: typedEndpoint ? { endpoint: typedEndpoint } : {},
+      body: { ttlMs },
     });
     showInviteResult(res);
   } catch (error) {
@@ -4063,72 +4143,74 @@ function showInviteResult(res) {
   state.inviteToken = res;
   $('#invite').hidden = false;
   // 令牌很长：显示截断，复制按钮携带完整值
-  const shortToken = res.token.length > 56 ? `${res.token.slice(0, 42)}…${res.token.slice(-12)}` : res.token;
-  const cmd = `fleet join --token ${res.token} --daemon --dir ~/.mebular --device <新设备ID>`;
-  const shortCmd = `fleet join --token ${shortToken} --daemon --dir ~/.mebular --device <新设备ID>`;
-  const endpointWarning = res.warning
-    ? `<p class="crt-warn">⚠ ${escapeHtml(res.warning)}</p>`
-    : '';
-  // C7：二维码（服务端渲染 SVG → data-uri；缺可选依赖时为 null → 只显示文本）
-  const qrBlock = res.qrSvg
-    ? `<div class="readout-block qr-block">
-        <span class="domain-label">扫码即通（QR 内容 = 令牌文本）</span>
-        <img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />
-      </div>`
-    : '<p class="cfg-help muted">二维码不可用（未安装可选依赖 qrcode）：请使用上方文本令牌。</p>';
-  const endpointEditor = `
-    <div class="readout-block">
-      <span class="domain-label">join 端点（写死进令牌，须为新设备可达地址）</span>
-      <input id="invite-endpoint" class="crt-input" type="text" value="${escapeHtml(res.endpoint)}" />
-      <p class="cfg-help muted">默认由守护按 joinService.bind 计算：通配时取本机 LAN IPv4。跨网段/NAT 时可改为新设备可达地址后重新生成。</p>
-      ${endpointWarning}
-    </div>`;
+  const shortToken = res.token.length > 40 ? `${res.token.slice(0, 24)}…${res.token.slice(-8)}` : res.token;
+  // C7：二维码（服务端用 qrcode-generator 渲染 SVG → data-uri；编码失败为 null → 只显示文本）
+  const qrMarkup = res.qrSvg
+    ? `<img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />`
+    : '<p class="cfg-help muted invite-qr-fallback">二维码不可用，请复制令牌。</p>';
   // E2-A2：邀请方忆云名 + 根指纹取 overview.cloud（加入方核对指纹的唯一可靠来源）。
   const cloud = state.overview?.cloud ?? null;
   const cloudLine = cloud?.name
-    ? `<p class="cfg-help muted invite-cloud-line" id="invite-cloud-identity">本忆云：<b>${escapeHtml(cloud.name)}</b> · 根指纹 ${cloud.masterFingerprint ? `<code>${escapeHtml(cloud.masterFingerprint)}</code>` : '<span class="kv-empty">未知</span>'}</p>`
+    ? `<p class="cfg-help muted invite-cloud-line" id="invite-cloud-identity"><b>${escapeHtml(cloud.name)}</b> · 根指纹 ${cloud.masterFingerprint ? `<code>${escapeHtml(cloud.masterFingerprint)}</code>` : '<span class="kv-empty">未知</span>'}</p>`
     : '';
-  // E1 单屏：打开即见「令牌 + 二维码 + 复制」；端点/命令/兑换机制/重新生成全部收进「详情」。
+  const selectedTtl = INVITE_TTL_OPTIONS.some((option) => option.ttlMs === res.ttlMs)
+    ? res.ttlMs
+    : state.inviteTtlMs;
+  state.inviteTtlMs = selectedTtl;
+  const ttlOptions = INVITE_TTL_OPTIONS.map((option) => (
+    `<option value="${option.ttlMs}"${option.ttlMs === selectedTtl ? ' selected' : ''}>${escapeHtml(option.label)}</option>`
+  )).join('');
+  // endpoint 回环/非法与会签批准都只留一条短警告（长说明归设置页）。
+  const warnings = [];
+  if (res.warning) {
+    if (/回环/.test(res.warning)) warnings.push('端点仅本机可达：把 joinService.bind 设为 0.0.0.0 后重新生成。');
+    else if (/不是有效地址/.test(res.warning)) warnings.push('端点地址无效：请在「设置 → 高级」检查加入服务。');
+    else warnings.push('端点不可达：请检查加入服务设置。');
+  }
+  if (res.securityApproval) warnings.push('已带上会签批准。');
+  const warningLine = warnings.length > 0
+    ? `<p class="crt-warn invite-warning">⚠ ${escapeHtml(warnings.join(' '))}</p>`
+    : '';
+  // 两栏：左 QR，右引导 + 令牌 + TTL；窄屏自动堆叠（见 console.css）。
   body.innerHTML = `
-    <div class="readout-block invite-token-block">
-      <span class="domain-label">令牌（一次性，默认 15 分钟有效）</span>
-      <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
+    <div class="invite-layout">
+      <div class="invite-qr">${qrMarkup}</div>
+      <div class="invite-main">
+        <p class="invite-lead">让对方扫码，或复制令牌。</p>
+        <div class="invite-token-block">
+          <span class="invite-label">令牌</span>
+          <div class="copyable"><code>${escapeHtml(shortToken)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(res.token)}">复制</button></div>
+        </div>
+        <div class="invite-controls">
+          <label class="invite-ttl" for="invite-ttl"><span class="invite-label">有效期</span>
+            <select id="invite-ttl" class="crt-input">${ttlOptions}</select>
+          </label>
+          <button class="btn btn-small btn-crt" id="invite-regenerate" type="button">重新生成</button>
+          <span class="invite-expiry" id="invite-expiry">至 ${escapeHtml(formatClock(res.expiresAt))}</span>
+        </div>
+        ${warningLine}
+      </div>
     </div>
-    ${qrBlock}
     ${cloudLine}
-    <p class="cfg-help muted">对方已用过 Mebular：让 TA 在控制台点「加入忆云」粘贴此令牌；新设备：扫码或粘贴令牌。</p>
-    ${res.securityApproval ? '<p class="crt-warn">已随令牌带上会签批准（新设备首现记录内嵌 cosign）。</p>' : ''}
-    <details class="settings-fold fold-invite" id="invite-detail-fold" data-settings-fold="invite">
-      <summary>${escapeHtml(foldLabel('invite'))}</summary>
-      <p class="cfg-help muted">令牌即入网权限：一次性、短时效，仅当面或可信局域网传递；新设备入网后本页即可关闭。</p>
-      ${endpointEditor}
-      <dl class="settings-kv">
-        <dt>join 端点</dt><dd><code>${escapeHtml(res.endpoint)}</code>（来源：${escapeHtml(res.endpointSource === 'override' ? '面板填写' : '守护计算')}）</dd>
-        <dt>默认记忆域</dt><dd><code>${escapeHtml(res.namespace)}</code></dd>
-        <dt>订阅</dt><dd>兑换只建立入网信任；新设备加入后自行订阅，零门槛、无需批准</dd>
-        <dt>有效期至</dt><dd>${escapeHtml(formatTime(res.expiresAt))}（一次性）</dd>
-      </dl>
-      <p class="cfg-help muted">兑换只建立入网信任，之后按各自的订阅选择收发；不复制主密钥。</p>
-      <div class="readout-block">
-        <span class="domain-label">新设备</span>
-        <div class="copyable"><code>${escapeHtml(shortCmd)}</code><button class="btn btn-small btn-crt" data-copy="${escapeHtml(cmd)}">复制命令</button></div>
-      </div>
-      <p class="crt-warn">⚠ 请勿把令牌写入工单或公开日志；旧令牌在重新生成后立即失效。</p>
-      <div class="asst-detail-actions">
-        <button class="btn btn-small" id="invite-regen-inline" type="button">重新生成邀请（旧令牌立即失效）</button>
-      </div>
-    </details>
+    <p class="invite-safety">一次性 · 仅当面或可信局域网传递。</p>
   `;
-  body.querySelector('#invite-regen-inline')?.addEventListener('click', () => {
-    // UX-2：重新生成收详情且二次确认（旧令牌作废是不可逆方向）
-    if (window.confirm('重新生成会使当前令牌立即失效。确定？')) void openInvite();
+  body.querySelector('#invite-ttl')?.addEventListener('change', (event) => {
+    const value = Number(event.currentTarget.value);
+    if (INVITE_TTL_OPTIONS.some((option) => option.ttlMs === value)) state.inviteTtlMs = value;
+  });
+  body.querySelector('#invite-regenerate')?.addEventListener('click', () => {
+    // 二次确认保留但简短：旧令牌作废是不可逆方向。
+    if (window.confirm('重新生成后旧令牌立即失效。确定？')) void openInvite(state.inviteTtlMs);
   });
   body.querySelectorAll('[data-copy]').forEach((button) => {
     button.addEventListener('click', () => copyText(button.dataset.copy, button));
   });
 }
 
-$('#invite-device').addEventListener('click', openInvite);
+$('#invite-device').addEventListener('click', () => {
+  state.inviteTtlMs = INVITE_TTL_DEFAULT_MS;
+  void openInvite();
+});
 // 共享页只做域管理：唯一入口 = 新建记忆域；邀请只在顶栏。
 $('#namespace-new')?.addEventListener('click', openNamespaceNew);
 $('#namespace-new-cancel')?.addEventListener('click', closeNamespaceNew);
@@ -4198,6 +4280,8 @@ function cloudErrorCopy(error) {
     CONFIRMATION_REQUIRED: '需要确认后才能加入。',
     INVALID_NAME: '忆云名字需为 1–24 个字符，且不能包含 /、\\ 或 ..。',
     NAME_TAKEN: '已有同名忆云，请换一个名字。',
+    CLOUD_ARCHIVED: '归档忆云不支持改名；请先切换到该忆云后再改。',
+    CLOUD_BLOCKED: '本机已被移出当前忆云，不能改名。',
     PROFILE_NOT_FOUND: '未找到这个忆云；列表可能已变化，请刷新后重试。',
     PROFILE_JOIN_FAILED: '本机无法创建忆云；令牌可能已在对方处兑换，请让邀请方重新生成。',
     ENDPOINT_UNREACHABLE: '连不上邀请方：确认对方守护在运行、地址可达，然后重试。',
@@ -4220,27 +4304,38 @@ function cloudRowHtml(entry) {
   const id = escapeHtml(entry.id);
   const current = entry.current === true;
   const renaming = state.cloudRename?.id === entry.id;
+  const duplicate = entry.duplicateName === true;
+  const suggested = entry.suggestedRename === true;
   const fingerprint = entry.masterFingerprint
     ? `<code>${escapeHtml(entry.masterFingerprint)}</code>`
     : '<span class="kv-empty">未知（需要修复）</span>';
   const lastUsed = entry.lastUsedAt ? formatTime(entry.lastUsedAt) : '—';
-  const renameUi = renaming
-    ? `<input class="crt-input cloud-rename-input" data-cloud-rename-input type="text" maxlength="24"
-         value="${escapeHtml(state.cloudRename?.name ?? entry.name)}" aria-label="忆云名字" />
-       <button class="btn btn-small btn-crt" data-cloud-rename-save type="button" ${cloudRenameBusy ? 'disabled' : ''}>保存</button>
-       <button class="btn btn-small" data-cloud-rename-cancel type="button">取消</button>`
-    : `${current ? '' : `<button class="btn btn-small btn-crt btn-crt-danger" data-cloud-switch="${id}" type="button">切换</button>`}
-       <button class="btn btn-small btn-crt" data-cloud-rename="${id}" type="button">改名</button>`;
-  return `<div class="cloud-row${current ? ' is-current' : ''}" data-cloud-row="${id}">
+  const conflictBadges = duplicate
+    ? `<span class="badge badge-warn cloud-dup-badge">重名</span>${suggested ? '<span class="badge badge-warn cloud-suggest-badge">最近更新 · 建议改名</span>' : ''}`
+    : '';
+  // 第一版：只有当前忆云能写网络级名字；归档项提示切换后再改。
+  const renameUi = current
+    ? (renaming
+      ? `<input class="crt-input cloud-rename-input" data-cloud-rename-input type="text" maxlength="24"
+           value="${escapeHtml(state.cloudRename?.name ?? entry.name)}" aria-label="忆云名字" />
+         <button class="btn btn-small btn-crt" data-cloud-rename-save type="button" ${cloudRenameBusy ? 'disabled' : ''}>保存</button>
+         <button class="btn btn-small" data-cloud-rename-cancel type="button">取消</button>`
+      : `<button class="btn btn-small btn-crt" data-cloud-rename="${id}" type="button">改名</button>`)
+    : `<button class="btn btn-small btn-crt btn-crt-danger" data-cloud-switch="${id}" type="button">切换</button>
+       <span class="cloud-rename-hint muted">切换到该忆云后可改名</span>`;
+  return `<div class="cloud-row${current ? ' is-current' : ''}${duplicate ? ' is-duplicate' : ''}" data-cloud-row="${id}">
     <div class="cloud-main">
       <span class="cloud-name">${escapeHtml(entry.name)}</span>
       <span class="badge ${current ? 'badge-ok' : 'badge-muted'}">${current ? '当前' : '已归档'}</span>
+      ${conflictBadges}
     </div>
     <div class="cloud-meta">
       <span>根指纹 ${fingerprint}</span>
       <span>最近使用 ${escapeHtml(lastUsed)}</span>
+      ${entry.nameUpdatedAt ? `<span>名字更新 ${escapeHtml(formatTime(entry.nameUpdatedAt))}</span>` : ''}
     </div>
     <div class="cloud-actions">${renameUi}</div>
+    ${current ? '<p class="cfg-help muted cloud-rename-note">改名会同步到所有设备（不改根指纹/信任）。</p>' : ''}
     ${renaming && state.cloudRenameError ? `<p class="crt-warn cloud-rename-error" role="alert">${escapeHtml(state.cloudRenameError)}</p>` : ''}
   </div>`;
 }
@@ -4252,7 +4347,10 @@ function cloudCardHtml() {
     const rows = (state.clouds.profiles ?? []).map(cloudRowHtml).join('');
     body = `${state.clouds.warning ? `<p class="crt-warn">${escapeHtml(state.clouds.warning)}</p>` : ''}
       <div class="cloud-rows">${rows || '<p class="muted">还没有忆云记录。</p>'}</div>
-      <p class="cfg-help muted">当前忆云不可切换；已归档忆云切换前会确认。改名即时生效，不需要重启。</p>`;
+      <p class="cfg-help muted">当前忆云不可切换；已归档忆云切换前会确认。改名会同步到所有设备，不需要重启；已归档忆云需切换后再改名。</p>
+      ${state.clouds.nameConflicts?.currentDuplicate
+        ? '<p class="crt-warn">本机有同名忆云：当前忆云已加警告点。请给「最近更新 · 建议改名」的那一项换一个名字。</p>'
+        : ''}`;
   } else if (state.cloudsError) {
     const { title, detail } = cloudErrorCopy(state.cloudsError);
     body = `<p class="cloud-unavailable">${escapeHtml(title)}</p>${detail ? `<p class="cfg-help muted">${escapeHtml(detail)}</p>` : ''}`;
@@ -4283,6 +4381,10 @@ function openCloudSettings() {
 function startCloudRename(id) {
   const entry = state.clouds?.profiles?.find((item) => item.id === id);
   if (!entry) return;
+  if (!entry.current) {
+    showToast('归档忆云不支持改名；请切换到该忆云后再改。');
+    return;
+  }
   state.cloudRename = { id, name: entry.name };
   state.cloudRenameError = '';
   renderSettings(state.settingsTab ?? 'common');
@@ -4834,6 +4936,16 @@ function formatTime(ts) {
   if (!ts) return '—';
   try {
     return new Date(ts).toLocaleString('zh-CN', { hour12: false });
+  } catch {
+    return String(ts);
+  }
+}
+
+/** 只取时分（邀请面板的「至 18:34」）。 */
+function formatClock(ts) {
+  if (!ts) return '—';
+  try {
+    return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
   } catch {
     return String(ts);
   }

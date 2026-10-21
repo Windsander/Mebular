@@ -9,7 +9,7 @@
 | `before-settings-common-mock.jpg` | 改动前 · `?mock=1` 设置 | 安全卡占「常用」顶部；无独立安全 tab |
 | `before-topbar-narrow-390.jpg` | 改动前 · 390px 顶栏 | 基线窄屏 |
 | `after-topbar-live.jpg` | 改动后 · 活体顶栏 | 仅「设置 / ＋ 邀请设备」 |
-| `after-invite-single-screen.jpg` | 改动后 · 活体邀请面板 | 首屏 = 令牌 + 二维码 + 复制 + 一行安全提示；端点/命令/机制收「详情」 |
+| `after-invite-single-screen.jpg` | 改动后 · 活体邀请面板（历史截图） | 首屏 = 令牌 + 二维码 + 复制 + 一行安全提示；后续已移除「详情」，改为 TTL 选择 + 重新生成 |
 | `after-settings-security-tab.jpg` | 改动后 · 活体「安全」tab | S3 安全卡完整随迁（低/中/高、动态码种子、恢复码、边界说明） |
 | `after-settings-security-mock.jpg` | 改动后 · `?mock=1` 高档安全卡 | 离线验收路径；待批准 + 恢复码 + 拒绝原因同屏 |
 | `after-settings-mcp-tab.jpg` | 改动后 · 活体「MCP 接入」tab | 六项 MCP 字段独立成危险卡（port/auth/host/tls/tlsKey/tlsCert） |

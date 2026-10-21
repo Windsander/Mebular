@@ -74,6 +74,7 @@ async function seedHome(home) {
     privateKeyPkcs8: await IdentityManager.exportPrivateKey(master.privateKey),
     createdAt: new Date().toISOString(),
   }, null, 2), 'utf-8');
+  const joinServicePort = await freePort();
   await writeFile(join(home, 'config.json'), JSON.stringify({
     storagePath,
     deviceId: 'device-ui',
@@ -81,7 +82,7 @@ async function seedHome(home) {
     network: { enabled: false },
     sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: false }, namespaces: ['notes', 'work'] },
     mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
-    joinService: { enabled: true, bind: '0.0.0.0', port: 4013 },
+    joinService: { enabled: true, bind: '0.0.0.0', port: joinServicePort },
   }, null, 2), 'utf-8');
   {
     const app = new Mebular({
@@ -703,8 +704,8 @@ async function main() {
       const details = [...document.querySelectorAll('#settings-body details')];
       return { count: details.length, keys: details.map((d) => d.dataset.settingsFold ?? d.className) };
     })()`);
-    check('U1 设置折叠预算：≤5 且均为允许类型', Boolean(foldAudit) && foldAudit.count <= 5
-      && foldAudit.keys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'invite', 'assistants'].includes(key)),
+    check('U1 设置折叠预算：≤5 且均为允许类型（邀请无折叠）', Boolean(foldAudit) && foldAudit.count <= 5
+      && foldAudit.keys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(key)),
       JSON.stringify(foldAudit));
     check('U-1 设置无退役配置项/引导签发者/授权·签发·参与',
       await evalJs(`(() => {
@@ -732,7 +733,8 @@ async function main() {
           && /忆云 2/.test(archived.textContent) && /已归档/.test(archived.textContent)
           && /sha256:[0-9a-f]{12}/.test(current.textContent) && /最近使用/.test(current.textContent)
           && !current.querySelector('[data-cloud-switch]')
-          && Boolean(archived.querySelector('[data-cloud-switch]')) && Boolean(archived.querySelector('[data-cloud-rename]'))
+          && Boolean(archived.querySelector('[data-cloud-switch]')) && !archived.querySelector('[data-cloud-rename]')
+          && /切换到该忆云后可改名/.test(archived.textContent)
           && !card.querySelector('[data-cloud-delete]') && !/删除忆云/.test(card.textContent)
           && /归档保留，不删除/.test(card.textContent)
           && Boolean(common) && common.contains(card)
@@ -764,6 +766,33 @@ async function main() {
     })()`);
     check('E2-A2 改名可改回（忆云 1）',
       await waitFor('(() => { const card = document.querySelector("#settings-cloud-card"); return Boolean(card) && /忆云 1/.test(card.textContent); })()', 20000));
+
+    // 设备名：关于本机 → 身份与存储 → 改名；保存后设备列表/概览都显示新名字
+    await evalJs('document.querySelector("#settings-close").click()');
+    await evalJs('document.querySelector("#self-badge").click()');
+    check('设备名：关于本机提供「改名」入口',
+      await waitFor('Boolean(document.querySelector("#about-body [data-device-rename]"))'));
+    await evalJs('document.querySelector("#about-body [data-device-rename]").click()');
+    check('设备名：行内输入就位', await waitFor('Boolean(document.querySelector("[data-device-rename-input]"))'));
+    await evalJs(`(() => {
+      const input = document.querySelector('[data-device-rename-input]');
+      input.value = '演示笔记本';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      document.querySelector('[data-device-rename-save]').click();
+    })()`);
+    check('设备名：保存后关于本机显示新名字',
+      await waitFor('(() => { const body = document.querySelector("#about-body"); return Boolean(body) && /演示笔记本/.test(body.textContent); })()', 20000));
+    check('设备名：设备列表返回最新 name（deviceId 仍是唯一标识）', await evalJs(`(async () => {
+      const res = await fetch('/admin/api/devices', { headers: { accept: 'application/json' } });
+      const rows = await res.json();
+      const self = rows.find((row) => row.deviceId === 'device-ui');
+      return Boolean(self) && self.name === '演示笔记本';
+    })()`));
+    await evalJs('document.querySelector("#about-close").click()');
+    // 设备名用例从关于本机返回后，恢复设置弹层（后续 CSRF/待重启用例依赖它保持打开）。
+    await evalJs('document.querySelector("#open-settings").click()');
+    await evalJs('document.querySelector("[data-settings-tab=common]").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === false');
 
     // U-1：CSRF 403 自愈——旧 token + 错误 cookie → 重取 /console/ → 原表单内容自动重试一次
     await evalJs('document.querySelector("[data-cloud-rename=default]").click()');
@@ -1116,43 +1145,78 @@ async function main() {
     await evalJs('document.querySelector("#invite-device").click()');
     check('邀请面板打开且渲染内容（令牌或未启用提示）', await waitFor('(() => { const b = document.querySelector("#invite-body"); return Boolean(b?.querySelector("[data-copy]")) || /加入服务未启用/.test(b?.textContent ?? ""); })()'));
     await capture('u3-after-dialog-invite.jpg');
-    check('E1 邀请单屏：首屏令牌 + 二维码/降级 + 复制；机制收「邀请设备 · 详情」', await evalJs(`(() => {
+    check('E1 邀请单屏：令牌 + 二维码/降级 + 忆云身份 + TTL；无详情/端点编辑/CLI 命令', await evalJs(`(() => {
       const body = document.querySelector('#invite-body');
       if (!body) return false;
-      const details = body.querySelector('details');
-      if (!details || details.dataset.settingsFold !== 'invite') return false;
-      const blocks = [...body.children];
-      const detailsIndex = blocks.indexOf(details);
-      const before = blocks.slice(0, detailsIndex).map((el) => el.textContent + (el.querySelector?.('img') ? ' QR' : '')).join('\\n');
-      const tokenBlock = blocks.slice(0, detailsIndex).some((el) => /令牌/.test(el.textContent) && el.querySelector('[data-copy]'));
-      const qr = before.includes('QR') || /二维码不可用/.test(before);
-      return tokenBlock && qr && /join 端点/.test(details.textContent) && Boolean(details.querySelector('#invite-endpoint'))
-        && body.querySelectorAll('details').length === 1;
+      const ttl = document.querySelector('#invite-ttl');
+      const options = ttl ? [...ttl.options].map((o) => [o.value, o.textContent]) : [];
+      const expected = [['300000','5 分钟'],['900000','15 分钟'],['1200000','20 分钟'],['7200000','2 小时'],['21600000','6 小时'],['43200000','12 小时'],['86400000','24 小时']];
+      const tokenBlock = Boolean(body.querySelector('.invite-token-block [data-copy]'));
+      const qr = Boolean(body.querySelector('.invite-qr .qr-img')) || /二维码不可用/.test(body.textContent);
+      return body.querySelectorAll('details').length === 0
+        && !body.querySelector('#invite-endpoint') && !/fleet join/.test(body.textContent)
+        && !/join 端点|默认记忆域|订阅/.test(body.textContent)
+        && !/对方已用过|新设备|当前令牌有效至|改档后点|令牌即入网权限|扫码即通|本忆云/.test(body.textContent)
+        && tokenBlock && qr && /忆云 1/.test(body.textContent) && /根指纹/.test(body.textContent)
+        && /让对方扫码，或复制令牌。/.test(body.textContent)
+        && /一次性 · 仅当面或可信局域网传递。/.test(body.textContent)
+        && /至 \\d{2}:\\d{2}/.test(body.textContent)
+        && Boolean(body.querySelector('.invite-layout .invite-qr'))
+        && Boolean(body.querySelector('.invite-layout .invite-main'))
+        && Boolean(document.querySelector('#invite .modal-head #invite-close.modal-x'))
+        && !document.querySelector('#invite .modal-actions')
+        && Boolean(ttl) && ttl.value === '900000' && JSON.stringify(options) === JSON.stringify(expected)
+        && Boolean(document.querySelector('#invite-regenerate'));
     })()`));
+    const beforeTtlToken = await evalJs('document.querySelector("#invite-body [data-copy]")?.dataset.copy ?? ""');
+    await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await sleep(150);
+    check('E1 邀请 ≤520：两栏上下堆叠（QR 在上、引导/令牌/TTL 在下）', await evalJs(`(() => {
+      const qr = document.querySelector('.invite-layout .invite-qr');
+      const main = document.querySelector('.invite-layout .invite-main');
+      if (!qr || !main) return false;
+      return main.getBoundingClientRect().top >= qr.getBoundingClientRect().bottom - 1;
+    })()`));
+    await send('Emulation.clearDeviceMetricsOverride');
+    await evalJs(`(() => {
+      const select = document.querySelector('#invite-ttl');
+      select.value = '7200000';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      window.confirm = () => true;
+      document.querySelector('#invite-regenerate').click();
+    })()`);
+    check('E1 重新生成：选中 2 小时后新令牌，选择保持（ttlMs 透传生效）',
+      await waitFor(`(() => {
+        const select = document.querySelector('#invite-ttl');
+        const token = document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '';
+        return select?.value === '7200000' && token.length > 0 && token !== ${JSON.stringify(beforeTtlToken)};
+      })()`, 20000));
     const allFoldKeys = await evalJs(`(() => [...document.querySelectorAll('#settings-body details, #about-body details, #invite-body details')]
       .map((el) => el.dataset.settingsFold ?? el.className))()`);
-    check('U-1 全域折叠预算：设置 + 关于 + 邀请 ≤5 且均为白名单类型', Array.isArray(allFoldKeys)
+    check('U-1 全域折叠预算：设置 + 关于 ≤5 且均为白名单类型（邀请无折叠）', Array.isArray(allFoldKeys)
       && allFoldKeys.length <= 5
-      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'invite', 'assistants'].includes(key)),
+      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(key)),
       JSON.stringify(allFoldKeys));
     check('E1 邀请面板无「去设置启用」旧指路（未启用时就地一键启用）',
       await evalJs(`(() => {
         const html = document.querySelector('#invite')?.outerHTML ?? '';
         return !/去设置启用/.test(html) && !/设置 → 常用/.test(html);
       })()`));
-    check('E2-A2 邀请单屏：本忆云名 + 根指纹 + 「加入忆云」指路（取 overview.cloud）',
-      await evalJs(`(() => {
+    check('E2-A2 邀请单屏：忆云名 + 根指纹（取 overview.cloud）', await evalJs(`(() => {
         const line = document.querySelector('#invite-cloud-identity');
         const body = document.querySelector('#invite-body')?.textContent ?? '';
-        return Boolean(line) && /本忆云：忆云 1/.test(line.textContent)
+        return Boolean(line) && /忆云 1/.test(line.textContent)
           && /sha256:[0-9a-f]{12}/.test(line.textContent)
-          && /让 TA 在控制台点「加入忆云」粘贴此令牌/.test(body);
+          && !/本忆云/.test(line.textContent)
+          && /让对方扫码/.test(body);
       })()`));
     await capture('e2a2-after-invite-cloud-line.jpg');
     await capture('e1-after-invite-single-screen.jpg');
-    check('轮 C 邀请卡：帮助去重（兑换语义只讲一次）',
-      await evalJs('(() => { const t = document.querySelector("#invite-body")?.textContent ?? ""; const hits = (t.match(/兑换/g) ?? []).length; return hits <= 2 && !/兑换后自动授权（作用域=令牌记忆域；默认 24h 后自动撤销）\\s*让新设备/.test(t); })()'));
-    await evalJs('document.querySelector("#invite-close").click()');
+    check('E1 邀请卡：详情/端点/命令/默认域与订阅说明不再出现',
+      await evalJs('(() => { const t = document.querySelector("#invite-body")?.textContent ?? ""; return !/join 端点|默认记忆域|新设备.*fleet join|订阅/.test(t) && /有效期/.test(t) && /重新生成/.test(t); })()'));
+    await evalJs('document.querySelector("#invite .modal-head #invite-close").click()');
+    check('E1 邀请右上角 X：关闭弹框；无底部「关闭」按钮',
+      await waitFor('document.querySelector("#invite")?.hidden === true && !document.querySelector("#invite .modal-actions")'));
 
     // ---------- S3 · 安全三档（活体：真实端点；先红后绿） ----------
     const { totpFingerprint, totpCodeAt, generateRecoveryCode } = await import('@mebular/fleet');
@@ -1342,8 +1406,9 @@ async function main() {
     check('S4 错码后输入框已清空（不回显、不保留）',
       (await evalJs('document.querySelector("#security-recovery-code")?.value ?? ""')) === '');
     await evalJs(`(() => { document.querySelector('#security-recovery-code').value = ${JSON.stringify(onceText)}; document.querySelector('#security-action-confirm').click(); })()`);
-    check('S4 正确恢复码 → 移出写入并关闭弹层（toast 标注恢复码）',
-      await waitFor('document.querySelector("#security-action")?.hidden === true && /恢复码/.test(document.querySelector("#banner")?.textContent ?? "")', 20000));
+    // toast 只存活 2.5s（CI 慢时可能错过）；稳定断言是弹层关闭 + 下方审计行带 breakGlassKeyId。
+    check('S4 正确恢复码 → 移出写入并关闭弹层',
+      await waitFor('document.querySelector("#security-action")?.hidden === true', 20000));
     const kickAudit = await evalJs(`(async () => {
       const rows = await fetch('/admin/api/policy').then((r) => r.json());
       const row = (rows ?? []).find((e) => e.type === 'device_revoke' && e.subject === 'device-C');

@@ -1,1 +1,8 @@
-github: Windsander
+# 赞助渠道占位 / Sponsorship placeholder
+#
+# 暂未开通任何赞助渠道：GitHub Sponsors 在当前所在地不可用，
+# 因此不声明 `github:` 条目，避免展示无法使用的赞助按钮。
+#
+# 未来接入爱发电或 Open Collective 时，取消对应注释并填入实际地址：
+#   custom: ["https://afdian.com/a/<handle>"]
+#   open_collective: <slug>

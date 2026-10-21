@@ -5,7 +5,7 @@
 // - fail closed：非环回必须 TLS 且 auth != none，否则拒绝启动。
 // - 单实例：<home>/lock O_EXCL + PID 存活检测 + 陈旧回收。
 
-import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { chmod, copyFile, mkdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
@@ -178,7 +178,7 @@ function deleteAtPath(root, path) {
   }
 }
 import { endpointHostname, isLoopbackHost } from './lan-host.mjs';
-import { buildJoinToken } from './jointoken.mjs';
+import { activateJoinInvite, buildJoinToken } from './jointoken.mjs';
 import { renderSvgQr } from './qr.mjs';
 
 // R1.3：记忆面 memory.* + 任务面 task.*（两轴独立；同一轴内 write ⇒ read、admin ⇒ 其余）
@@ -806,6 +806,11 @@ export async function startHttpServer({
     throw error;
   }
 
+  // 邀请 nonce 状态与 join 服务共用同一 storagePath（生成新令牌时撤销旧 active）。
+  const joinStateStoragePath = typeof runtime?.storagePath === 'string'
+    ? runtime.storagePath
+    : typeof config?.storagePath === 'string' ? config.storagePath : join(home, 'store.jsonl');
+
   // 忆云档案上下文（root 解析 + 单活）。自定义 home / 危险 env → available:false（档案端点 503/403）。
   const cloud = resolveCloudRoot({ home, env: process.env });
   const cloudId = app && service && cloud.available
@@ -1111,6 +1116,7 @@ export async function startHttpServer({
     /^\/admin\/api\/clouds\/(join|rename|inspect)$/,
     /^\/admin\/api\/subscriptions$/,
     /^\/admin\/api\/namespaces$/,
+    /^\/admin\/api\/devices\/self\/name$/,
     /^\/admin\/api\/devices\/([^/]+)\/(revoke|restore|connect|disconnect|sync|reset-watermarks)$/,
     /^\/admin\/api\/config$/,
     /^\/admin\/api\/restart$/,
@@ -1147,6 +1153,7 @@ export async function startHttpServer({
     kind: profile.kind,
     createdAt: profile.createdAt ?? null,
     lastUsedAt: profile.lastUsedAt ?? null,
+    nameUpdatedAt: profile.nameUpdatedAt ?? null,
     masterFingerprint: profile.masterFingerprint ?? null,
     deviceId: profile.deviceId ?? null,
     ...(currentId !== null ? { current: profile.id === currentId } : {}),
@@ -1166,6 +1173,8 @@ export async function startHttpServer({
       TOKEN_REJECTED: 400,
       INVALID_NAME: 400,
       NAME_TAKEN: 400,
+      CLOUD_ARCHIVED: 409,
+      CLOUD_BLOCKED: 403,
       PROFILE_NOT_FOUND: 404,
       CLOUD_ALREADY_JOINED: 409,
       ALREADY_PROVISIONED: 409,
@@ -1430,10 +1439,47 @@ export async function startHttpServer({
     const id = typeof input.id === 'string' ? input.id : '';
     if (id.length === 0) return sendCloudError(res, cloudError('PROFILE_NOT_FOUND', '需要忆云 id'));
     try {
-      const result = await renameProfile(cloud.root, id, input.name);
+      const state = await readRegistry(cloud.root);
+      if (!state.registry.profiles.some((profile) => profile.id === id)) {
+        throw cloudError('PROFILE_NOT_FOUND', `未找到忆云：${id}`);
+      }
+      // 第一版：只有当前忆云能写网络级 `cloud_name`；归档忆云不广播旧名。
+      if (id !== state.registry.current) {
+        throw cloudError(
+          'CLOUD_ARCHIVED',
+          '归档忆云不支持网络改名；请先切换到该忆云后再改名',
+          { id, current: state.registry.current },
+        );
+      }
+      const name = normalizeProfileName(input.name);
+      if (state.registry.profiles.some((profile) => profile.id !== id
+        && String(profile.name).trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
+        throw cloudError('NAME_TAKEN', '已有同名忆云，请换一个名字');
+      }
+      const blocked = await app.getBlockedDevices();
+      if (blocked.includes(app.deviceId)) {
+        throw cloudError('CLOUD_BLOCKED', '本机已被移出当前忆云，不能改名');
+      }
+      // 先写网络事件，再更新本机 registry 缓存；失败时 registry 不变（fallback 仍可用）。
+      const event = await app.setCloudName({ name });
+      const result = await renameProfile(cloud.root, id, name);
+      let derived = null;
+      try {
+        derived = await app.getCloudName();
+      } catch {
+        derived = null;
+      }
       return sendJson(res, 200, {
         ok: true,
         profile: publicProfile(result.value, result.registry.current),
+        cloud: {
+          id,
+          name,
+          nameSource: 'network',
+          nameUpdatedAt: result.value.nameUpdatedAt ?? null,
+          eventId: event.id,
+        },
+        derived: derived ?? null,
       });
     } catch (error) {
       return sendCloudError(res, error, { disabled: true });
@@ -1997,17 +2043,22 @@ export async function startHttpServer({
       const endpoint = override ?? joinEndpoint;
       // C2：令牌携带邀请方可达端点（hints），新设备 join 后写入地址簿 → 自动选路
       const hints = collectInviteHints(app, config);
+      const nonce = randomBytes(16).toString('hex');
       const token = await buildJoinToken({
         mebular: app,
         deviceId,
         namespace: ns,
         endpoint,
         ttlMs,
+        nonce,
         ...(securityApproval !== null ? { securityApproval } : {}),
         ...hints,
       });
+      // 单一有效邀请：新令牌激活时把上一个 active nonce 放进 revoked（join 服务验证时拒绝）。
+      await activateJoinInvite(joinStateStoragePath, nonce);
       const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
       const endpointHost = endpointHostname(endpoint);
+      const invalidEndpoint = endpointHost === null;
       const loopback = endpointHost !== null && isLoopbackHost(endpointHost);
       const qrWarnings = [];
       const qrSvg = await renderSvgQr(inline, { onWarn: (m) => qrWarnings.push(m) });
@@ -2023,9 +2074,11 @@ export async function startHttpServer({
         expiresAt: token.expiresAt,
         ttlMs,
         ...(securityApproval !== null ? { securityApproval } : {}),
-        ...(loopback
-          ? { warning: '该端点是回环地址，另一台机器无法访问：请把 joinService.bind 设为 0.0.0.0（自动取本机 LAN IPv4），或在本面板填写新设备可达地址（如 http://<本机LAN IP>:端口）' }
-          : {}),
+        ...(invalidEndpoint
+          ? { warning: '邀请端点不是有效地址：请在「设置 → 高级 → 常驻服务」检查 joinService.bind/port，或手工修正 config.json 中的 joinService.endpoint。' }
+          : loopback
+            ? { warning: '该端点是回环地址，其他设备无法访问：请在「设置 → 高级 → 常驻服务」将 joinService.bind 设为 0.0.0.0。' }
+            : {}),
       });
     }
 
@@ -2214,6 +2267,32 @@ export async function startHttpServer({
         eventId: event.id,
         subscriptions: app.sync.getSubscriptionNamespaces(),
       });
+    }
+
+    // 本机设备名（只有本人可改；写自签名 device_name，不重签证书）。
+    if (path === '/admin/api/devices/self/name') {
+      const input = parseJsonBody(body) ?? {};
+      if (typeof input.name !== 'string' || input.name.trim().length === 0) {
+        return sendJson(res, 400, { error: 'invalid_name', message: '需要 { name }（1–24 个字符）' });
+      }
+      try {
+        const event = await app.setDeviceName({ name: input.name });
+        const derived = await app.getDeviceName(app.deviceId);
+        return sendJson(res, 200, {
+          ok: true,
+          deviceId: app.deviceId,
+          name: derived?.name ?? input.name,
+          eventId: event.id,
+          deviceName: derived ?? null,
+        });
+      } catch (error) {
+        const status = error?.code === 'VALIDATION_INVALID_ARGUMENT' ? 400 : 500;
+        return sendJson(res, status, {
+          ok: false,
+          error: error?.code ?? 'device_name_failed',
+          message: error?.message ?? String(error),
+        });
+      }
     }
 
     const deviceMatch = path.match(/^\/admin\/api\/devices\/([^/]+)\/(revoke|restore|connect|disconnect|sync|reset-watermarks)$/);
@@ -2955,6 +3034,7 @@ export async function startHttpServer({
             ttlMs,
             ...collectInviteHints(app, config),
           });
+          await activateJoinInvite(joinStateStoragePath, token.nonce);
           const inline = Buffer.from(JSON.stringify(token), 'utf-8').toString('base64');
           return sendJson(res, 200, { ok: true, token: inline, endpoint, namespace: ns, expiresAt: token.expiresAt, nonce: token.nonce });
         }

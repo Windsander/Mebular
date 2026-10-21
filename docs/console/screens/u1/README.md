@@ -7,7 +7,7 @@
 | 范围 | before | after |
 |---|---:|---:|
 | 设置弹层 `#settings-body details` | 24 | **2**（MCP 危险与自救 / 诊断与恢复） |
-| 设置 + 关于 + 邀请 | 24+ | **4**（再加关于·运行状态、邀请·详情） |
+| 设置 + 关于（邀请无折叠） | 24+ | **3**（关于·运行状态） |
 
 白名单单一真源：`packages/console/settings-ia.js` 的 `IA_SETTINGS_FOLDS`（≤5）。
 
@@ -22,7 +22,7 @@
 | `after-about-runtime.jpg` | 关于本机：身份/存储/收敛 + 单一「运行状态（只读）」折叠 |
 | `before-shared-empty.jpg` / `after-shared-empty.jpg` | 共享页空态：只留「＋ 新建记忆域」 |
 | `before-shared-list.jpg` / `after-shared-list.jpg` | 共享页有域：域目录/订阅状态/参与设备；无邀请 CTA |
-| `before-invite.jpg` / `after-invite.jpg` | 邀请单屏 + 单一「邀请设备 · 详情」折叠 |
+| `before-invite.jpg` / `after-invite.jpg` | 历史截图：邀请单屏（当时含「邀请设备 · 详情」；该折叠已移除，现为 TTL + 重新生成） |
 | `after-settings-common-390.jpg` | 390px 设置·常用：无横向溢出 |
 
 ## 文案/动作断言

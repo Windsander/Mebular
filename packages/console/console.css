@@ -1309,6 +1309,10 @@ body.modal-open { overflow: hidden; }
 .asst-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .asst-output { margin-top: 4px; }
 .settings-resident { margin-bottom: 4px; }
+/* 语言行：与常用其他项同款单行 + 虚线分隔，不另起卡片。 */
+.settings-language-row { flex-wrap: nowrap; }
+.settings-language-row .asst-name { min-width: 0; }
+.settings-language-select { flex: 0 0 auto; width: auto; min-width: 104px; max-width: 100%; font-size: 12px; padding: 4px 8px; }
 .settings-tab-extra { margin-left: auto; }
 /* 首屏叠加层：状态总览条（纯只读，不挡星图交互；fixed 钉视口，免受容器定位影响） */
 .status-pill { position: fixed; top: 104px; left: 50%; transform: translateX(-50%); z-index: 5;

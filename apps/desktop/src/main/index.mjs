@@ -861,8 +861,20 @@ async function cloudSwitchNow(rawId) {
 
 // ---------- IPC（白名单） ----------
 
+/** i18n foundation 预留：主进程只存语言标签，渲染层负责 normalize / 文案。 */
+function normalizeDesktopLocale(raw) {
+  return String(raw ?? '').trim().toLowerCase().startsWith('en') ? 'en-US' : 'zh-CN';
+}
+
 function registerIpc() {
   const table = buildHandlerTable({
+    // i18n foundation 预留：当前 locale / 固定写入口；向导/tray 文案本阶段不翻译。
+    'locale:get': () => ({ locale: normalizeDesktopLocale(readDesktopState(home).locale || app.getLocale()) }),
+    'locale:set': (locale) => {
+      const normalized = normalizeDesktopLocale(locale);
+      writeDesktopState(home, { locale: normalized });
+      return { locale: normalized };
+    },
     'daemon:status': async () => ({
       mode: daemonMode,
       healthy,

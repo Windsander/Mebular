@@ -1921,6 +1921,40 @@ async function main() {
       await waitFor('document.querySelector("#domains-view")?.hidden === true');
     }
 
+    // i18n foundation：默认隐藏语言行；?lang= 打开英文并可在设置内切回中文（不 reload）
+    await send('Page.navigate', { url: `${base}/console/?i18n=1&lang=en-US` });
+    check('i18n 深链：html lang=en-US + 顶栏/导航英文', await waitFor(`document.documentElement.lang === 'en-US' && document.querySelector('.brand')?.textContent.includes('Mebular Console') && /Star map/.test(document.querySelector('[data-view=map] .view-label')?.textContent ?? '')`));
+    await evalJs('document.querySelector("#open-settings").click()');
+    check('i18n 语言行：设置·常用单行 + 位于常驻运行之前 + 虚线分隔', await waitFor(`(() => {
+      const row = document.querySelector('#settings-language');
+      const resident = document.querySelector('#settings-resident');
+      const panel = document.querySelector('#settings-panel-common');
+      if (!row || !resident || !panel) return false;
+      const s = getComputedStyle(row);
+      return panel.hidden === false && row.parentElement === panel
+        && row === panel.querySelector('.settings-language-row')
+        && row.querySelectorAll('select[data-language-select]').length === 1
+        && row.querySelectorAll('option').length === 2
+        && row.querySelector('select').value === 'en-US'
+        && row.getBoundingClientRect().top < resident.getBoundingClientRect().top
+        && parseFloat(s.borderBottomWidth) >= 1;
+    })()`));
+    const navsBeforeLocale = cdp.events.filter((event) => event.method === 'Page.frameNavigated').length;
+    await evalJs(`(() => { const s = document.querySelector('[data-language-select]'); s.value = 'zh-CN'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    check('i18n 选择即重渲染：中文行/页签/顶栏就地切换，无 reload', await waitFor(`(() => {
+      const row = document.querySelector('#settings-language');
+      return document.documentElement.lang === 'zh-CN'
+        && /Mebular 控制台/.test(document.querySelector('.brand')?.textContent ?? '')
+        && document.querySelector('[data-language-select]')?.value === 'zh-CN'
+        && row !== null
+        && /常用/.test(document.querySelector('[data-settings-tab=common]')?.textContent ?? '');
+    })()`));
+    const navsAfterLocale = cdp.events.filter((event) => event.method === 'Page.frameNavigated').length;
+    check('i18n 无 reload 证据：导航次数不变', navsAfterLocale === navsBeforeLocale, `navigations=${navsBeforeLocale}→${navsAfterLocale}`);
+    await evalJs('document.querySelector("#settings-close").click()');
+    await send('Page.navigate', { url: `${base}/console/` });
+    await waitFor('document.querySelector("#settings")?.hidden === true');
+
     // 页面异常（pageerror / console.error / Log error）
     const pageErrors = cdp.events.filter((event) => {
       if (event.method === 'Runtime.exceptionThrown') return true;

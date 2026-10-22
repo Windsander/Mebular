@@ -18,6 +18,10 @@ ipcRenderer.on('console:navigate', (_event, payload) => {
 contextBridge.exposeInMainWorld('mebularDesktop', {
   // UX-2 补丁 4：平台标识（渲染层据此避让 macOS 交通灯安全区；静态值，非函数）
   platform: process.platform,
+  // i18n foundation 预留：语言偏好固定通道；最终开放由 i18nReady 总开关控制（当前默认关闭）。
+  i18nReady: false,
+  getLocale: () => ipcRenderer.invoke('locale:get'),
+  setLocale: (locale) => ipcRenderer.invoke('locale:set', String(locale ?? '')),
   status: () => ipcRenderer.invoke('daemon:status'),
   start: () => ipcRenderer.invoke('daemon:start'),
   stop: () => ipcRenderer.invoke('daemon:stop'),

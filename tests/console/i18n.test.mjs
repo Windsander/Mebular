@@ -230,15 +230,18 @@ describe('i18n locale pack · 语言行与就绪开关', () => {
     expect(isI18nReady({ search: '', desktop: { i18nReady: true } })).toBe(true);
   });
 
-  it('语言行默认可见；显式 ready=false 才隐藏；就绪为单行 select（复用 asst-row，无独立卡片）', () => {
+  it('语言行默认可见；显式 ready=false 才隐藏；专用单行控件（不复用 asst-row，无独立卡片）', () => {
     expect(languageSettingsRowHtml({ locales: manifest.locales })).toContain('id="settings-language"');
     expect(languageSettingsRowHtml({ ready: false })).toBe('');
     const html = languageSettingsRowHtml({ ready: true, locale: 'zh-CN', locales: manifest.locales });
     expect(html).toContain('id="settings-language"');
-    expect(html).toContain('class="asst-row settings-language-row"');
-    expect(html.match(/class="asst-row /g)).toHaveLength(1);
+    expect(html).toContain('class="settings-language-row"');
+    expect(html).not.toContain('asst-row');
+    expect(html).not.toContain('asst-name');
     expect(html).not.toContain('settings-section');
     expect(html).not.toContain('<section');
+    expect(html).toContain('class="settings-language-control"');
+    expect(html).toContain('class="settings-language-chevron"');
     expect(html).toContain('data-language-select');
     expect(html).toContain('<option value="zh-CN" selected>简体中文</option>');
     expect(html).toContain('<option value="en-US">English</option>');
@@ -254,6 +257,25 @@ describe('i18n locale pack · 语言行与就绪开关', () => {
     expect(enHtml).toContain('>Language</span>');
     expect(enHtml).toContain('<option value="en-US" selected>English</option>');
     expect(enHtml).toContain('aria-label="Interface language"');
+  });
+
+  it('顶栏英文短标签：可见文案更短，aria-label/title 仍保留完整动作名', () => {
+    const en = realI18n({ search: '?lang=en-US', languages: [] });
+    expect(en.t('topbar.joinCloudShort')).toBe('Join');
+    expect(en.t('topbar.inviteShort')).toBe('Invite');
+    expect(en.t('topbar.createCloudShort')).toBe('New');
+    expect(en.t('topbar.joinCloud')).toBe('Join cloud');
+    expect(en.t('topbar.invite')).toBe('Invite device');
+    expect(en.t('topbar.createCloud')).toBe('New cloud');
+    for (const [shortKey, fullKey] of [
+      ['topbar.joinCloudShort', 'topbar.joinCloud'],
+      ['topbar.inviteShort', 'topbar.invite'],
+      ['topbar.createCloudShort', 'topbar.createCloud'],
+    ]) {
+      expect(indexHtml).toContain(`data-i18n="${shortKey}"`);
+      expect(indexHtml).toContain(`data-i18n-aria-label="${fullKey}"`);
+      expect(indexHtml).toContain(`data-i18n-title="${fullKey}"`);
+    }
   });
 
   it('设置页接线：语言行在 #settings-resident 之前；选择只 setLocale + 重渲染，不 reload', () => {

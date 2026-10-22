@@ -12,6 +12,7 @@ const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 const HARNESS = String.raw`
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -38,6 +39,28 @@ delete process.env.MEBULAR_SERVICE_KIND;
 
 const readJson = async (path) => {
   try { return JSON.parse(await readFile(path, 'utf-8')); } catch { return null; }
+};
+
+// 并行 Jest worker 里 provision-lifecycle 也用默认 4001/4002；
+// 两边同时探测会踩到 TOCTOU（探测时空闲、绑定前被占），create 偶发 400。
+// 本 suite 自己保留一对端口再交给 create/join，和默认端口彻底隔离。
+const reservePortPair = async () => {
+  const open = () => new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once('error', reject);
+    server.listen(0, '0.0.0.0', () => resolve(server));
+  });
+  const first = await open();
+  let second;
+  try {
+    second = await open();
+  } catch (error) {
+    await new Promise((resolve) => first.close(resolve));
+    throw error;
+  }
+  const ports = { join: first.address().port, listen: second.address().port };
+  await Promise.all([first, second].map((server) => new Promise((resolve) => server.close(resolve))));
+  return ports;
 };
 
 const csrf = async (base) => {
@@ -122,10 +145,13 @@ try {
   out.cases.phaseBefore = srv.getState().phase;
   out.cases.portBefore = srv.port;
 
+  out.cases.createPorts = await reservePortPair();
   out.cases.create = await post(base, '/app/provision/create', {
     confirm: true,
     deviceName: 'P2 测试机',
     cloudName: 'P2 测试忆云',
+    joinPort: out.cases.createPorts.join,
+    listenPort: out.cases.createPorts.listen,
   }, auth);
   out.cases.opencodeConfigAfterCreate = await readJson(join(userHome, '.config', 'opencode', 'opencode.json'));
 
@@ -193,10 +219,13 @@ try {
     const sessionIdBefore = joinTransport.sessionId ?? null;
     const before = await joinClient.callTool({ name: 'memory_status', arguments: {} });
     const joinAuth = await csrf(joinBase);
+    out.cases.joinPorts = await reservePortPair();
     const response = await post(joinBase, '/app/provision/join', {
       confirm: true,
       deviceName: '加入机',
       token,
+      joinPort: out.cases.joinPorts.join,
+      listenPort: out.cases.joinPorts.listen,
     }, joinAuth);
     // 关键：不 reconnect / 不重新 initialize。
     const after = await joinClient.callTool({ name: 'memory_status', arguments: {} });
@@ -301,7 +330,8 @@ describe('P2 UNINITIALIZED MCP facade', () => {
 
   it('create 后同一 MCP session 原地恢复：不 reconnect / 不重新 initialize', () => {
     const c = result.cases;
-    expect(c.create.status).toBe(200);
+    // 断言仍要求 200；把 body/端口一并放进匹配对象，下一次失败能直接看到服务端真实 error。
+    expect({ status: c.create.status, body: c.create.body, ports: c.createPorts }).toMatchObject({ status: 200 });
     expect(c.create.body).toMatchObject({ ok: true, action: 'create', initialized: true, phase: 'READY' });
     expect(c.portAfter).toBe(c.portBefore);
     expect(c.phaseBefore).toBe('UNINITIALIZED');
@@ -320,7 +350,7 @@ describe('P2 UNINITIALIZED MCP facade', () => {
 
   it('join 后同一 MCP session 原地恢复：tools/call 从 NOT_INITIALIZED 变为成功', () => {
     const c = result.cases.join;
-    expect(c.response.status).toBe(200);
+    expect({ status: c.response.status, body: c.response.body, ports: result.cases.joinPorts }).toMatchObject({ status: 200 });
     expect(c.response.body).toMatchObject({ ok: true, action: 'join', initialized: true, phase: 'READY' });
     expect(c.phase).toBe('READY');
     expect(c.sessionIdAfter).toBe(c.sessionIdBefore);

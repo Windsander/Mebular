@@ -3,23 +3,27 @@
 //   - 每个 section 说明 ≤1 行；
 //   - 安全三档短句 + 一段边界，MCP 危险折叠 3 行；
 //   - 主界面文案不出现内部错误码，禁用词为 0。
+// 轮 i18n：用户可见文案真源迁到 locales/zh-CN/console.json；IA 常量只保留 key。
 
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from '@jest/globals';
 import {
   IA_ADVANCED_FIELDS,
   IA_ADVANCED_SECTIONS,
   IA_EDITOR_RENDER_PATHS,
   IA_FIELD_COPY,
-  IA_MCP_DANGER_LINES,
+  IA_MCP_DANGER_LINE_KEYS,
   IA_MCP_FIELDS,
   IA_MCP_SECTIONS,
   IA_SECURITY_SECTIONS,
-  SECURITY_BOUNDARY,
-  SECURITY_LEVEL_NOTE,
-  SECURITY_LEVEL_TITLE,
-  SECURITY_TOTP_FOOT,
+  SECURITY_BOUNDARY_KEY,
+  SECURITY_LEVEL_NOTE_KEY,
+  SECURITY_LEVEL_TITLE_KEY,
+  SECURITY_TOTP_FOOT_KEY,
 } from '../../packages/console/settings-ia.js';
 
+const zhPack = JSON.parse(readFileSync(new URL('../../locales/zh-CN/console.json', import.meta.url), 'utf-8')).messages;
+const msg = (key) => zhPack[key];
 const BANNED_WORDS = ['授权', '签发', '参与', '屏蔽', '踢出', '吊销'];
 const INTERNAL_CODES = ['totp_not_configured', 'MCP_INSECURE_CONFIG', 'MCP_STORAGE_LOCKED'];
 const compactLength = (text) => [...String(text).replace(/\s+/g, '')].length;
@@ -37,40 +41,44 @@ describe('U-3 设置页文案预算', () => {
   it('每个 section 说明 ≤1 行（≤40 字）', () => {
     const sections = [...IA_ADVANCED_SECTIONS, ...IA_MCP_SECTIONS, ...Object.values(IA_SECURITY_SECTIONS)];
     for (const section of sections) {
-      expect(compactLength(section.desc)).toBeLessThanOrEqual(40);
+      expect(typeof section.descKey).toBe('string');
+      expect(compactLength(msg(section.descKey))).toBeLessThanOrEqual(40);
     }
   });
 
   it('每个可编辑字段都有 ≤1 行帮助（≤36 字），且覆盖全部渲染字段', () => {
     expect(Object.keys(IA_FIELD_COPY).sort()).toEqual([...IA_EDITOR_RENDER_PATHS].sort());
     for (const copy of Object.values(IA_FIELD_COPY)) {
-      expect(compactLength(copy.help)).toBeLessThanOrEqual(36);
+      expect(compactLength(msg(copy.helpKey))).toBeLessThanOrEqual(36);
     }
   });
 
   it('安全三档短句 + 一段边界；MCP 危险折叠恰好 3 行', () => {
     for (const tier of ['low', 'medium', 'high']) {
-      expect(compactLength(SECURITY_LEVEL_TITLE[tier])).toBeLessThanOrEqual(12);
-      expect(compactLength(SECURITY_LEVEL_NOTE[tier])).toBeLessThanOrEqual(30);
+      expect(compactLength(msg(SECURITY_LEVEL_TITLE_KEY[tier]))).toBeLessThanOrEqual(12);
+      expect(compactLength(msg(SECURITY_LEVEL_NOTE_KEY[tier]))).toBeLessThanOrEqual(30);
     }
-    expect(compactLength(SECURITY_BOUNDARY)).toBeLessThanOrEqual(80);
-    expect(compactLength(SECURITY_TOTP_FOOT)).toBeLessThanOrEqual(40);
-    expect(IA_MCP_DANGER_LINES).toHaveLength(3);
-    expect(IA_MCP_DANGER_LINES.every((line) => compactLength(line) <= 40)).toBe(true);
+    expect(compactLength(msg(SECURITY_BOUNDARY_KEY))).toBeLessThanOrEqual(80);
+    expect(compactLength(msg(SECURITY_TOTP_FOOT_KEY))).toBeLessThanOrEqual(40);
+    expect(IA_MCP_DANGER_LINE_KEYS).toHaveLength(3);
+    expect(IA_MCP_DANGER_LINE_KEYS.every((key) => compactLength(msg(key)) <= 40)).toBe(true);
   });
 
   it('主界面文案禁用词与内部错误码均为 0', () => {
     const copy = [
-      ...Object.values(IA_FIELD_COPY).flatMap((entry) => [entry.label, entry.help, entry.warn].filter(Boolean)),
-      ...IA_ADVANCED_SECTIONS.flatMap((section) => [section.title, section.desc]),
-      ...IA_MCP_SECTIONS.flatMap((section) => [section.title, section.desc]),
-      ...Object.values(IA_SECURITY_SECTIONS).flatMap((section) => [section.title, section.desc]),
-      ...Object.values(SECURITY_LEVEL_TITLE),
-      ...Object.values(SECURITY_LEVEL_NOTE),
-      SECURITY_BOUNDARY,
-      SECURITY_TOTP_FOOT,
-      ...IA_MCP_DANGER_LINES,
+      ...Object.values(IA_FIELD_COPY).flatMap((entry) => [entry.labelKey, entry.helpKey, entry.warnKey]
+        .filter(Boolean)
+        .map((key) => msg(key))),
+      ...IA_ADVANCED_SECTIONS.flatMap((section) => [msg(section.titleKey), msg(section.descKey)]),
+      ...IA_MCP_SECTIONS.flatMap((section) => [msg(section.titleKey), msg(section.descKey)]),
+      ...Object.values(IA_SECURITY_SECTIONS).flatMap((section) => [msg(section.titleKey), msg(section.descKey)]),
+      ...Object.values(SECURITY_LEVEL_TITLE_KEY).map((key) => msg(key)),
+      ...Object.values(SECURITY_LEVEL_NOTE_KEY).map((key) => msg(key)),
+      msg(SECURITY_BOUNDARY_KEY),
+      msg(SECURITY_TOTP_FOOT_KEY),
+      ...IA_MCP_DANGER_LINE_KEYS.map((key) => msg(key)),
     ].join('\n');
+    expect(copy).not.toContain('undefined');
     for (const word of BANNED_WORDS) expect(copy).not.toContain(word);
     for (const code of INTERNAL_CODES) expect(copy).not.toContain(code);
   });

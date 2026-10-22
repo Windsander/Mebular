@@ -22,6 +22,7 @@ export function projectAssistantStatus(client = {}, ui = {}) {
     return {
       key: 'busy',
       label: ui.busy === 'verify' || ui.busy === 'verify-confirm' ? '验证中…' : '写入中…',
+      labelKey: ui.busy === 'verify' || ui.busy === 'verify-confirm' ? 'assistants.status.busyVerify' : 'assistants.status.busyWrite',
       tone: 'todo',
       busy: true,
       ...noHint,
@@ -30,32 +31,32 @@ export function projectAssistantStatus(client = {}, ui = {}) {
   // 失败态：接入失败 / 验证未过（绝不落入「待生效」）
   if (ui.failed) {
     return ui.failed.kind === 'verify'
-      ? { key: 'verify-failed', label: '验证未过', tone: 'todo', ...noHint }
-      : { key: 'connect-failed', label: '接入失败', tone: 'todo', ...noHint };
+      ? { key: 'verify-failed', label: '验证未过', labelKey: 'assistants.status.verifyFailed', tone: 'todo', ...noHint }
+      : { key: 'connect-failed', label: '接入失败', labelKey: 'assistants.status.connectFailed', tone: 'todo', ...noHint };
   }
   // 最近一次服务端 verify 真值
   if (ui.verifyState === 'verify-failed') {
-    return { key: 'verify-failed', label: '验证未过', tone: 'todo', ...noHint };
+    return { key: 'verify-failed', label: '验证未过', labelKey: 'assistants.status.verifyFailed', tone: 'todo', ...noHint };
   }
   if (ui.verifyState === 'pending-restart') {
     // 唯一正当的「待生效」：服务端 verify 判定配置在、运行时未生效
-    return { key: 'pending-reload', label: '待生效', tone: 'todo', reloadHint: true };
+    return { key: 'pending-reload', label: '待生效', labelKey: 'assistants.status.pendingReload', tone: 'todo', reloadHint: true };
   }
   // 服务端 list 真值
   const state = client.state ?? null;
   const manual = client.manual === true || client.needsManual === true || state === 'manual';
   const installed = state ? state !== 'not-installed' && state !== 'detect-failed' : Boolean(client.installed);
   const connected = state ? state === 'connected' : Boolean(client.installed && client.connected);
-  if (state === 'detect-failed') return { key: 'detect-failed', label: '检测失败', tone: 'todo', ...noHint };
+  if (state === 'detect-failed') return { key: 'detect-failed', label: '检测失败', labelKey: 'assistants.status.detectFailed', tone: 'todo', ...noHint };
   // F-FIX-B（#116）：已写入但过时（stdio 形态）→ 需升级为 HTTP 直连（待处理黄色，非「未接入」）
-  if (state === 'stale') return { key: 'stale', label: '已写入·需升级为直连', tone: 'todo', ...noHint };
-  if (manual) return { key: 'manual', label: '需手动', tone: 'muted', ...noHint };
-  if (!installed) return { key: 'not-installed', label: '未安装', tone: 'muted', ...noHint };
+  if (state === 'stale') return { key: 'stale', label: '已写入·需升级为直连', labelKey: 'assistants.status.stale', tone: 'todo', ...noHint };
+  if (manual) return { key: 'manual', label: '需手动', labelKey: 'assistants.status.manual', tone: 'muted', ...noHint };
+  if (!installed) return { key: 'not-installed', label: '未安装', labelKey: 'assistants.status.notInstalled', tone: 'muted', ...noHint };
   if (connected) {
     // 已接入 ✓；刚写入未验证时 reloadHint=true（提示层：小字「已写入 · 请重载助手后生效」）
-    return { key: 'connected', label: '已接入 ✓', tone: 'ok', reloadHint: Boolean(ui.reloadHint) };
+    return { key: 'connected', label: '已接入 ✓', labelKey: 'assistants.status.connected', tone: 'ok', reloadHint: Boolean(ui.reloadHint) };
   }
-  return { key: 'not-connected', label: '未接入', tone: 'muted', ...noHint };
+  return { key: 'not-connected', label: '未接入', labelKey: 'assistants.status.notConnected', tone: 'muted', ...noHint };
 }
 
 /**

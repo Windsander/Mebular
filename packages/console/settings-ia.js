@@ -31,18 +31,19 @@ export const IA_TABS = [
 
 /** 设置弹层的附加导航（非 Tab：点击打开既有「关于本机」弹层）。 */
 export const IA_SETTINGS_EXTRA = [
-  { id: 'about', label: '关于本机', opens: 'about-modal' },
+  { id: 'about', label: '关于本机', labelKey: 'settings.extra.about', opens: 'about-modal' },
 ];
 
 /**
  * 折叠白名单（设置/关于共用；≤5，当前 3）。
  * 设置内 2 个（MCP 危险与自救 / 诊断与恢复）；关于本机 1 个（运行状态）。
  * 邀请面板不再有详情折叠。每项必须带 data-settings-fold，UI 断言据此防回归。
+ * labelKey 是用户可见文案真源；label 只作 catalog 缺 key 时的中文兜底。
  */
 export const IA_SETTINGS_FOLDS = [
-  { id: 'mcp-danger', label: 'MCP 接入 · 危险与自救', home: 'mcp' },
-  { id: 'diagnostics', label: '诊断与恢复', home: 'advanced' },
-  { id: 'about-runtime', label: '运行状态（只读）', home: 'about' },
+  { id: 'mcp-danger', label: 'MCP 接入 · 危险与自救', labelKey: 'settings.fold.mcpDanger', home: 'mcp' },
+  { id: 'diagnostics', label: '诊断与恢复', labelKey: 'settings.fold.diagnostics', home: 'advanced' },
+  { id: 'about-runtime', label: '运行状态（只读）', labelKey: 'settings.fold.aboutRuntime', home: 'about' },
 ];
 
 /** 邀请令牌有效期档位（UI 与断言共用；默认 15 分钟 = 服务端默认）。 */
@@ -60,122 +61,152 @@ export const INVITE_TTL_DEFAULT_MS = 900_000;
 /**
  * 安全 tab 的三段式结构：等级 / 动态码种子 / 恢复码。
  * 文案在这里收口（主界面不出现内部错误码；风险说明短句保留）。
+ * titleKey / descKey 指向 locales/<locale>/console.json 的 messages。
  */
 export const IA_SECURITY_SECTIONS = {
   level: {
     title: '安全等级',
+    titleKey: 'settings.security.level.title',
     desc: '档位越高，敏感操作的门槛越高。',
+    descKey: 'settings.security.level.desc',
   },
   totp: {
     title: '动态码种子',
+    titleKey: 'settings.security.totp.title',
     desc: '中档敏感操作需要 6 位动态码；种子只存本机。',
+    descKey: 'settings.security.totp.desc',
   },
   recovery: {
     title: '恢复码',
+    titleKey: 'settings.security.recovery.title',
     desc: '高档的离线钥匙；只显示一次，请离线保存。',
+    descKey: 'settings.security.recovery.desc',
   },
 };
 
 export const SECURITY_LEVEL_LABEL = { low: '低', medium: '中', high: '高' };
-export const SECURITY_LEVEL_TITLE = {
-  low: '低（默认）',
-  medium: '中 · 动态码',
-  high: '高 · 设备会签',
+export const SECURITY_LEVEL_TITLE_KEY = {
+  low: 'settings.security.tier.low.title',
+  medium: 'settings.security.tier.medium.title',
+  high: 'settings.security.tier.high.title',
 };
-export const SECURITY_LEVEL_NOTE = {
-  low: '无额外门槛。',
-  medium: '6 位动态码，防顺手。',
-  high: '另一台设备核对配对号，防伪造；只对之后的动作生效。',
+export const SECURITY_LEVEL_NOTE_KEY = {
+  low: 'settings.security.tier.low.note',
+  medium: 'settings.security.tier.medium.note',
+  high: 'settings.security.tier.high.note',
 };
-export const SECURITY_BOUNDARY = '中档挡手不挡钥匙：设备被拿走，种子也一并被拿走。高档需要另一台设备在场，不在时用离线恢复码。';
-export const SECURITY_TOTP_FOOT = '种子只在本机；全部设备丢失时由 root 重置，无主密钥备份则不可恢复。';
+export const SECURITY_BOUNDARY_KEY = 'settings.security.boundary';
+export const SECURITY_TOTP_FOOT_KEY = 'settings.security.totp.foot';
 
 /**
  * 「高级」三组（每组 = 标题 + 一行说明 + 字段行）。
  * 字段顺序即展示顺序；能力与 schema 的 editable 集合一一对应。
+ * titleKey / descKey 指向 locale pack；title / desc 为中文兜底。
  */
 export const IA_ADVANCED_SECTIONS = [
   {
     id: 'resident',
     title: '常驻服务',
+    titleKey: 'settings.section.resident.title',
     desc: '邀请设备前先启用；地址与端口决定新设备能否连上。',
+    descKey: 'settings.section.resident.desc',
     fields: ['joinService.enabled', 'joinService.bind', 'joinService.port'],
   },
   {
     id: 'network',
     title: '网络',
+    titleKey: 'settings.section.network.title',
     desc: '本机与忆云之间的连接；关闭后仅本机可用。',
+    descKey: 'settings.section.network.desc',
     fields: ['network.enabled', 'network.libp2p.listen'],
   },
   {
     id: 'automation',
     title: '自动化',
+    titleKey: 'settings.section.automation.title',
     desc: '后台维护与可选能力；默认设置适合多数人。',
+    descKey: 'settings.section.automation.desc',
     fields: ['sync.antiEntropy.enabled', 'semantic.enabled'],
   },
 ];
 
 /**
- * 「MCP 接入」两组：连接 / TLS。危险与自救收进唯一折叠（IA_MCP_DANGER_LINES）。
+ * 「MCP 接入」两组：连接 / TLS。危险与自救收进唯一折叠（IA_MCP_DANGER_LINE_KEYS）。
  */
 export const IA_MCP_SECTIONS = [
   {
     id: 'connection',
     title: '连接',
+    titleKey: 'settings.section.mcp.connection.title',
     desc: 'Agent 经 MCP 连接本机；改动会立即影响控制台访问。',
+    descKey: 'settings.section.mcp.connection.desc',
     fields: ['mcp.http.port', 'mcp.http.auth', 'mcp.http.host'],
   },
   {
     id: 'tls',
     title: 'TLS',
+    titleKey: 'settings.section.mcp.tls.title',
     desc: '加密 MCP 连接；监听非回环时必需。',
+    descKey: 'settings.section.mcp.tls.desc',
     fields: ['mcp.http.tls', 'mcp.http.tlsCert', 'mcp.http.tlsKey'],
   },
 ];
 
 /** 折叠内三行：后果 + 两条自救路径（保留命令与备份名）。 */
-export const IA_MCP_DANGER_LINES = [
-  '改认证/监听/TLS 可能让控制台立即失联；提交前会再确认一次。',
-  'bearer 失联：粘贴 token grant 生成的 token 自救。',
-  'oauth/端口失联：改回 config.json，重启 mebular serve。',
+export const IA_MCP_DANGER_LINE_KEYS = [
+  'settings.mcp.danger.1',
+  'settings.mcp.danger.2',
+  'settings.mcp.danger.3',
 ];
 
 /**
  * 字段展示文案（覆盖服务端 schema 的长帮助/长警告）。
  * 只改展示，不改校验、默认值或写入行为；帮助目标 ≤1 行。
+ * labelKey / helpKey / warnKey 指向 locale pack；label / help / warn 为中文兜底。
  */
 export const IA_FIELD_COPY = {
-  'mcp.http.port': { help: '0 = 自动分配；默认 7331。' },
+  'mcp.http.port': { help: '0 = 自动分配；默认 7331。', helpKey: 'settings.fields.mcpPort.help' },
   'mcp.http.auth': {
     label: '认证',
+    labelKey: 'settings.fields.mcpAuth.label',
     help: 'none 仅回环；bearer 用令牌；oauth 用环境密钥。',
+    helpKey: 'settings.fields.mcpAuth.help',
     warn: '',
   },
   'mcp.http.host': {
     help: '默认 127.0.0.1；非回环必须配认证与 TLS。',
+    helpKey: 'settings.fields.mcpHost.help',
     warn: '',
   },
-  'mcp.http.tls': { help: '缺证书会启动失败，不会静默降级。' },
+  'mcp.http.tls': { help: '缺证书会启动失败，不会静默降级。', helpKey: 'settings.fields.mcpTls.help' },
   'mcp.http.tlsCert': {
     label: '证书路径',
+    labelKey: 'settings.fields.mcpTlsCert.label',
     help: 'PEM 证书；与私钥同时填写才生效。',
+    helpKey: 'settings.fields.mcpTlsCert.help',
   },
   'mcp.http.tlsKey': {
     label: '私钥路径',
+    labelKey: 'settings.fields.mcpTlsKey.label',
     help: 'PEM 私钥；与证书同时填写才生效。',
+    helpKey: 'settings.fields.mcpTlsKey.help',
   },
-  'joinService.enabled': { help: '生成一次性邀请令牌；改动需重启。' },
-  'joinService.bind': { help: '0.0.0.0 允许局域网；仅可信网络使用。' },
-  'joinService.port': { help: '默认 4002；被占用时改这里。' },
-  'network.enabled': { help: '关闭后仅本机离线使用。' },
-  'network.libp2p.listen': { help: '留空用默认；仅回环时局域网不可达。' },
+  'joinService.enabled': { help: '生成一次性邀请令牌；改动需重启。', helpKey: 'settings.fields.joinEnabled.help' },
+  'joinService.bind': { help: '0.0.0.0 允许局域网；仅可信网络使用。', helpKey: 'settings.fields.joinBind.help' },
+  'joinService.port': { help: '默认 4002；被占用时改这里。', helpKey: 'settings.fields.joinPort.help' },
+  'network.enabled': { help: '关闭后仅本机离线使用。', helpKey: 'settings.fields.networkEnabled.help' },
+  'network.libp2p.listen': { help: '留空用默认；仅回环时局域网不可达。', helpKey: 'settings.fields.networkListen.help' },
   'sync.antiEntropy.enabled': {
     label: '自动对账',
+    labelKey: 'settings.fields.antiEntropy.label',
     help: '周期核对，弥补推送丢失。',
+    helpKey: 'settings.fields.antiEntropy.help',
   },
   'semantic.enabled': {
     label: '启用语义召回',
+    labelKey: 'settings.fields.semantic.label',
     help: '需要本地模型；缺失时自动降级关键词。',
+    helpKey: 'settings.fields.semantic.help',
     warn: '',
     hideStatusReason: true,
   },

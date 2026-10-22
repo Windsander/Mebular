@@ -9,7 +9,7 @@
 import { StarStage, namespaceColor, shortId } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINES, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE, SECURITY_LEVEL_NOTE, SECURITY_BOUNDARY, SECURITY_TOTP_FOOT, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SECURITY_TOTP_FOOT_KEY, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, LOCALE_STORAGE_KEY, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
@@ -31,7 +31,11 @@ const POLL_MS = 3000;
 const ICONS = { online: '●', offline: '○', revoked: '⊘' };
 
 /** 折叠标题单一真源（IA_SETTINGS_FOLDS）；缺失时回退 id 便于定位。 */
-const foldLabel = (id) => IA_SETTINGS_FOLDS.find((fold) => fold.id === id)?.label ?? id;
+const foldLabel = (id) => {
+  const fold = IA_SETTINGS_FOLDS.find((entry) => entry.id === id);
+  if (!fold) return id;
+  return fold.labelKey ? t(fold.labelKey) : fold.label;
+};
 
 const state = {
   view: 'map',
@@ -276,7 +280,7 @@ async function refreshOnce() {
     const payload = cloudsView.reason?.payload ?? null;
     state.cloudsError = {
       code: payload?.error ?? (cloudsView.reason?.status === 404 ? 'CLOUD_UNSUPPORTED' : 'CLOUD_LIST_FAILED'),
-      message: payload?.message ?? cloudsView.reason?.message ?? '忆云列表不可用',
+      message: payload?.message ?? cloudsView.reason?.message ?? t('cloud.error.cloudListFailed'),
     };
   }
   // 补丁 3 增补 · 对账：每轮刷新清掉与服务端真值矛盾的客户端残留
@@ -934,6 +938,19 @@ async function confirmHandoff() {
 
 let CONFIG_FIELDS_BY_PATH = new Map();
 
+/** IA 字段展示文案：key 优先（locale pack），缺 key 时回退中文兜底。 */
+function localizedFieldCopy(path) {
+  const copy = IA_FIELD_COPY[path];
+  if (!copy) return {};
+  const { labelKey = null, helpKey = null, warnKey = null, ...rest } = copy;
+  return {
+    ...rest,
+    ...(labelKey ? { label: t(labelKey) } : {}),
+    ...(helpKey ? { help: t(helpKey) } : {}),
+    ...(warnKey ? { warn: t(warnKey) } : {}),
+  };
+}
+
 function rebuildConfigFields() {
   const list = Array.isArray(state.settings?.configSchema) ? state.settings.configSchema : [];
   CONFIG_FIELDS_BY_PATH = new Map(list.map((entry) => [entry.path, {
@@ -942,7 +959,7 @@ function rebuildConfigFields() {
     requiresRestart: entry.requiresRestart !== false,
     ...(entry.ui ?? {}),
     // 展示层覆盖：短帮助/统一词；校验、默认值与写入行为仍由服务端 schema 决定。
-    ...(IA_FIELD_COPY[entry.path] ?? {}),
+    ...localizedFieldCopy(entry.path),
   }]));
 }
 
@@ -964,8 +981,8 @@ function statusRows() {
 // 服务端 settings.pendingRestart 列出「磁盘值与启动快照不一致」的 curated 配置项（形如 { path, file, running }）。
 
 const RESTART_LABELS = {
-  'sync.autoSync': '自动同步',
-  'sync.pushOnWrite': '写入即推送',
+  'sync.autoSync': 'settings.restartLabel.autoSync',
+  'sync.pushOnWrite': 'settings.restartLabel.pushOnWrite',
 };
 
 function pendingRestartItems() {
@@ -973,7 +990,8 @@ function pendingRestartItems() {
 }
 
 function restartLabel(path) {
-  return CONFIG_FIELDS_BY_PATH.get(path)?.label ?? RESTART_LABELS[path] ?? path;
+  const key = RESTART_LABELS[path];
+  return CONFIG_FIELDS_BY_PATH.get(path)?.label ?? (key ? t(key) : path);
 }
 
 // 服务由 launchd/systemd/计划任务拉起（注入 MEBULAR_SERVICE_KIND/SHA）→ service restart；否则给 nohup 启动命令。
@@ -986,9 +1004,9 @@ function restartCommand() {
 }
 
 function formatRestartValue(value) {
-  if (value === null || value === undefined) return '未设置';
-  if (Array.isArray(value)) return value.length ? value.join(', ') : '未设置';
-  if (typeof value === 'boolean') return value ? '启用' : '未启用';
+  if (value === null || value === undefined) return t('settings.editor.unset');
+  if (Array.isArray(value)) return value.length ? value.join(', ') : t('settings.editor.unset');
+  if (typeof value === 'boolean') return value ? t('settings.editor.on') : t('settings.editor.off');
   return String(value);
 }
 
@@ -1003,11 +1021,11 @@ function applyResultBanner() {
   if (!apply || typeof apply.status !== 'string') return '';
   const labelOf = (path) => CONFIG_FIELDS_BY_PATH.get(path)?.label ?? path;
   const fields = Array.isArray(apply.fields) ? apply.fields : [];
-  const fieldText = fields.length ? fields.map(labelOf).join('、') : '（无字段记录）';
+  const fieldText = fields.length ? fields.map(labelOf).join(t('common.listSeparator')) : t('settings.apply.fieldsNone');
   if (apply.status === 'in-progress') {
     return `<div class="pending-restart" data-apply-result="in-progress">
-      <div class="pending-restart-head"><span class="crt-tag crt-tag-warn">正在重启…重连中…</span><span class="muted">让已保存的配置生效</span></div>
-      <p class="muted pending-restart-note">守护正在重启（fields=${escapeHtml(fields.join(', '))}）；恢复后本横幅会显示「已生效」或回滚结果。</p>
+      <div class="pending-restart-head"><span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.apply.inProgress.tag'))}</span><span class="muted">${escapeHtml(t('settings.apply.inProgress.short'))}</span></div>
+      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.inProgress.note', { fields: fields.join(', ') }))}</p>
     </div>`;
   }
   if (apply.status === 'applied') {
@@ -1015,25 +1033,25 @@ function applyResultBanner() {
     const failed = verify.filter((row) => row.ok === false);
     if (failed.length > 0) {
       const detail = failed.map((row) => `<li><b>${escapeHtml(labelOf(row.path))}</b> <code>${escapeHtml(row.path)}</code>`
-        + `<span class="muted">：已配置 ${escapeHtml(formatRestartValue(row.configured))} / 实际 ${escapeHtml(formatRestartValue(row.actual))}</span>`
-        + (row.reason ? `<span class="pending-restart-reason">原因：${escapeHtml(String(row.reason))}</span>` : '')
+        + `<span class="muted">${escapeHtml(t('settings.apply.fieldDetail', { configured: formatRestartValue(row.configured), actual: formatRestartValue(row.actual) }))}</span>`
+        + (row.reason ? `<span class="pending-restart-reason">${escapeHtml(t('settings.apply.reason', { reason: String(row.reason) }))}</span>` : '')
         + '</li>').join('');
       return `<div class="pending-restart is-error" data-apply-result="mismatch">
-        <div class="pending-restart-head"><span class="crt-tag crt-tag-error">未按预期生效</span><span class="muted">重启后 ${failed.length} 项与保存值不一致</span></div>
+        <div class="pending-restart-head"><span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span><span class="muted">${escapeHtml(t('settings.apply.mismatch.summary', { count: failed.length }))}</span></div>
         <ul class="pending-restart-list">${detail}</ul>
       </div>`;
     }
     return `<div class="pending-restart is-ok" data-apply-result="applied">
-      <div class="pending-restart-head"><span class="crt-tag crt-tag-ok">已生效</span><span class="muted">${escapeHtml(fieldText)}</span></div>
-      <p class="muted pending-restart-note">已按保存值生效（${escapeHtml(String(apply.at ?? ''))}）；待重启清单已清空。</p>
+      <div class="pending-restart-head"><span class="crt-tag crt-tag-ok">${escapeHtml(t('settings.apply.applied.tag'))}</span><span class="muted">${escapeHtml(fieldText)}</span></div>
+      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.applied.note', { time: String(apply.at ?? '') }))}</p>
     </div>`;
   }
   if (apply.status === 'rolled-back' || apply.status === 'rollback-failed' || apply.status === 'failed') {
     const rolled = apply.status === 'rolled-back';
     return `<div class="pending-restart is-error" data-apply-result="${escapeHtml(apply.status)}">
-      <div class="pending-restart-head"><span class="crt-tag crt-tag-error">新配置未生效</span><span class="muted">${rolled ? '已回滚到上一次可用配置' : '回滚失败：请手动恢复'}</span></div>
-      <p class="muted pending-restart-note">原因：${escapeHtml(String(apply.reason ?? '未知'))}</p>
-      <p class="muted pending-restart-note">涉及字段（${escapeHtml(fieldText)}）${apply.backup ? `；备份：<code>${escapeHtml(String(apply.backup))}</code>` : ''}</p>
+      <div class="pending-restart-head"><span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span><span class="muted">${escapeHtml(t(rolled ? 'settings.apply.rolledBack' : 'settings.apply.rollbackFailed'))}</span></div>
+      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.reason', { reason: String(apply.reason ?? t('settings.apply.unknownReason')) }))}</p>
+      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.fieldsInvolved', { fields: fieldText }))}${apply.backup ? `；${escapeHtml(t('settings.apply.backupLabel'))}<code>${escapeHtml(String(apply.backup))}</code>` : ''}</p>
     </div>`;
   }
   return '';
@@ -1041,7 +1059,7 @@ function applyResultBanner() {
 
 function pendingRestartBadge() {
   const count = pendingRestartItems().length;
-  return count > 0 ? `<span class="crt-tag crt-tag-warn">待重启 ${count} 项</span>` : '';
+  return count > 0 ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.pending.count', { count }))}</span>` : '';
 }
 
 function pendingRestartBanner() {
@@ -1052,22 +1070,22 @@ function pendingRestartBanner() {
   const managed = state.settings?.restart?.serviceManaged === true;
   const rows = items.map((item) => `<li><b>${escapeHtml(item.label ?? restartLabel(item.path))}</b>`
     + ` <code>${escapeHtml(item.path)}</code>`
-    + `<span class="muted">：已配置 ${escapeHtml(formatRestartValue(item.file))} / 实际 ${escapeHtml(formatRestartValue(item.running))}</span>`
-    + `<span class="pending-restart-reason">未生效原因：${escapeHtml(String(item.reason ?? '待重启：已保存的值将在重启后生效'))}</span></li>`).join('');
+    + `<span class="muted">${escapeHtml(t('settings.apply.fieldDetail', { configured: formatRestartValue(item.file), actual: formatRestartValue(item.running) }))}</span>`
+    + `<span class="pending-restart-reason">${escapeHtml(t('settings.pending.reason', { reason: String(item.reason ?? t('settings.pending.reasonFallback')) }))}</span></li>`).join('');
   return `<div class="pending-restart" data-pending-restart="1">
     <div class="pending-restart-head">
-      <span class="crt-tag crt-tag-warn">待重启 ${items.length} 项</span>
-      <span class="muted">配置已保存，当前实例仍按上次启动的配置工作</span>
+      <span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.pending.count', { count: items.length }))}</span>
+      <span class="muted">${escapeHtml(t('settings.pending.head'))}</span>
     </div>
-    <p class="muted pending-restart-note">守护只在启动时读取配置；保存后当前实例仍按上次启动的配置工作，重启后生效。${envOverrides.length > 0 ? `环境变量优先时以环境变量为准（当前：${escapeHtml(envOverrides.join(', '))}）。` : ''}</p>
+    <p class="muted pending-restart-note">${escapeHtml(t('settings.pending.note'))}${envOverrides.length > 0 ? escapeHtml(t('settings.pending.noteEnv', { vars: envOverrides.join(', ') })) : ''}</p>
     <ul class="pending-restart-list">${rows}</ul>
     <div class="pending-restart-cmd">
-      <button class="btn btn-small btn-crt" type="button" data-cfg-action="restart" ${state.features?.writes && !MOCK ? '' : 'disabled'}>一键重启</button>
+      <button class="btn btn-small btn-crt" type="button" data-cfg-action="restart" ${state.features?.writes && !MOCK ? '' : 'disabled'}>${escapeHtml(t('settings.pending.restart'))}</button>
       <code>${escapeHtml(cmd)}</code>
-      <button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(cmd)}">复制重启命令</button>
+      <button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(cmd)}">${escapeHtml(t('settings.pending.copyCommand'))}</button>
       <span class="cfg-restart-state muted"></span>
     </div>
-    ${managed ? '' : '<p class="muted" style="font-size:11px">未以服务方式运行（前台 nohup）：一键重启不可用，请按上方命令手动重启。</p>'}
+    ${managed ? '' : `<p class="muted" style="font-size:11px">${escapeHtml(t('settings.pending.manual'))}</p>`}
   </div>`;
 }
 
@@ -1091,8 +1109,8 @@ function currentConfigFile() {
 
 function formatRuntimeValue(value) {
   if (value === undefined || value === null) return '—';
-  if (Array.isArray(value)) return value.length ? value.join(', ') : '（空 = 默认）';
-  if (typeof value === 'boolean') return value ? '启用' : '未启用';
+  if (Array.isArray(value)) return value.length ? value.join(', ') : t('settings.editor.emptyDefault');
+  if (typeof value === 'boolean') return value ? t('settings.editor.on') : t('settings.editor.off');
   return String(value);
 }
 
@@ -1172,12 +1190,12 @@ function runtimeCompareLine(field) {
   // 常态不占行：没有异常就是生效；只有待重启/不一致/未生效时才在字段下展开。
   if (normal) return '';
   return `<p class="cfg-effective${mismatch ? ' is-mismatch' : ''}" data-cfg-state="exception">`
-    + `<span><span class="cfg-eff-key">已配置</span> ${escapeHtml(formatRuntimeValue(configured))}</span>`
+    + `<span><span class="cfg-eff-key">${escapeHtml(t('settings.editor.configured'))}</span> ${escapeHtml(formatRuntimeValue(configured))}</span>`
     + '<span>/</span>'
-    + `<span><span class="cfg-eff-key">实际</span> ${escapeHtml(formatRuntimeValue(actual))}</span>`
-    + (pendingItem ? `<span class="cfg-pending"><span class="cfg-eff-key">待重启</span> 已保存 ${escapeHtml(formatRestartValue(pendingItem.file))} / 当前 ${escapeHtml(formatRestartValue(pendingItem.running))}</span>` : '')
-    + (showReason ? `<span class="cfg-reason"><span class="cfg-eff-key">未生效原因</span> ${escapeHtml(reason)}</span>` : '')
-    + (mismatch && !showReason ? '<span class="cfg-warn">⚠ 不一致：写入值未生效，实际以运行时为准</span>' : '')
+    + `<span><span class="cfg-eff-key">${escapeHtml(t('settings.editor.actual'))}</span> ${escapeHtml(formatRuntimeValue(actual))}</span>`
+    + (pendingItem ? `<span class="cfg-pending"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.pendingKey'))}</span> ${escapeHtml(t('settings.editor.pendingValue', { saved: formatRestartValue(pendingItem.file), current: formatRestartValue(pendingItem.running) }))}</span>` : '')
+    + (showReason ? `<span class="cfg-reason"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.reasonKey'))}</span> ${escapeHtml(reason)}</span>` : '')
+    + (mismatch && !showReason ? `<span class="cfg-warn">${escapeHtml(t('settings.editor.mismatch'))}</span>` : '')
     + '</p>';
 }
 
@@ -1209,7 +1227,7 @@ function renderCfgField(field) {
   const controlTitle = helpTitle ? ` title="${escapeHtml(helpTitle)}"` : '';
   // 空输入时把「默认值 / 短提示」收进 placeholder；有值时 placeholder 不显示，帮助在聚焦时展开。
   const defaultHint = initial.isDefault && field.default !== null && field.default !== undefined
-    ? `默认 ${field.default}` : '';
+    ? t('settings.editor.defaultHint', { value: field.default }) : '';
   const placeholderText = field.placeholder || defaultHint || field.help || '';
   let control;
   if (field.type === 'bool') {
@@ -1230,8 +1248,8 @@ function renderCfgField(field) {
     control = `<input id="${id}" class="crt-input cfg-input" type="${type}" data-cfg-path="${escapeHtml(field.path)}" value="${escapeHtml(String(value))}" ${attrs} />`;
   }
   const hasDefault = field.default !== null && field.default !== undefined && field.default !== '';
-  const defaultTag = initial.isDefault && hasDefault ? '<span class="cfg-default">默认</span>' : '';
-  const warnMark = field.warn ? '<span class="cfg-warn-mark" title="风险说明" aria-label="有风险说明">⚠</span>' : '';
+  const defaultTag = initial.isDefault && hasDefault ? `<span class="cfg-default">${escapeHtml(t('settings.editor.default'))}</span>` : '';
+  const warnMark = field.warn ? `<span class="cfg-warn-mark" title="${escapeHtml(t('settings.editor.riskTitle'))}" aria-label="${escapeHtml(t('settings.editor.riskAria'))}">⚠</span>` : '';
   const foldedReason = runtimeFoldedReason(field);
   const helpBits = [
     field.help ? `<p class="cfg-help muted">${escapeHtml(field.help)}</p>` : '',
@@ -1265,7 +1283,7 @@ function kvRows(rows) {
     + `<dd class="kv-value">${row.value}</dd>`
     + `<dd class="kv-action">${row.copyPayload === null || row.copyPayload === undefined
       ? ''
-      : `<button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(row.copyPayload)}">复制</button>`}</dd>`).join('');
+      : `<button class="btn btn-small btn-crt" type="button" data-copy="${escapeHtml(row.copyPayload)}">${escapeHtml(t('common.copy'))}</button>`}</dd>`).join('');
   return `<dl class="settings-kv">${cells}</dl>`;
 }
 
@@ -1274,17 +1292,17 @@ function valueWithEffective(mainHtml, { configured, effective }) {
   const mismatch = configured !== undefined && JSON.stringify(configured ?? null) !== JSON.stringify(effective ?? null);
   return `<span class="kv-main">${mainHtml}</span>`
     + `<span class="kv-sub${mismatch ? ' is-mismatch' : ''}">`
-    + `<span>已配置 ${escapeHtml(formatRuntimeValue(configured))}</span>`
+    + `<span>${escapeHtml(t('settings.editor.configured'))} ${escapeHtml(formatRuntimeValue(configured))}</span>`
     + `<span>/</span>`
-    + `<span>实际 ${escapeHtml(formatRuntimeValue(effective))}</span>`
-    + (mismatch ? '<span class="cfg-warn">⚠ 不一致：写入值未生效，实际以运行时为准</span>' : '')
+    + `<span>${escapeHtml(t('settings.editor.actual'))} ${escapeHtml(formatRuntimeValue(effective))}</span>`
+    + (mismatch ? `<span class="cfg-warn">${escapeHtml(t('settings.editor.mismatch'))}</span>` : '')
     + '</span>';
 }
 
 function fieldOf(path) {
   const field = CONFIG_FIELDS_BY_PATH.get(path);
   // 容错：schema 缺项（旧服务端 / 载荷异常）时退化为文本行，不整页崩
-  if (!field) return { path, type: 'text', label: path, help: '（该字段未在 schema 中声明）' };
+  if (!field) return { path, type: 'text', label: path, help: t('settings.editor.notInSchema') };
   return field;
 }
 
@@ -1303,22 +1321,37 @@ function settingsSectionHtml({ id, title, desc = '', chip = '', body = '', foot 
     </section>`;
 }
 
+/** IA 分区标题/说明：key 优先（locale pack），缺 key 时回退中文兜底。 */
+function localizedSection(section) {
+  return {
+    ...section,
+    title: section.titleKey ? t(section.titleKey) : section.title,
+    desc: section.descKey ? t(section.descKey) : section.desc,
+  };
+}
+
 function renderAdvancedSections() {
-  return IA_ADVANCED_SECTIONS.map((section) => settingsSectionHtml({
-    id: section.id,
-    title: section.title,
-    desc: section.desc,
-    body: renderEditor(section.fields),
-  })).join('');
+  return IA_ADVANCED_SECTIONS.map((section) => {
+    const copy = localizedSection(section);
+    return settingsSectionHtml({
+      id: copy.id,
+      title: copy.title,
+      desc: copy.desc,
+      body: renderEditor(copy.fields),
+    });
+  }).join('');
 }
 
 function renderMcpSections() {
-  return IA_MCP_SECTIONS.map((section) => settingsSectionHtml({
-    id: section.id,
-    title: section.title,
-    desc: section.desc,
-    body: renderEditor(section.fields),
-  })).join('');
+  return IA_MCP_SECTIONS.map((section) => {
+    const copy = localizedSection(section);
+    return settingsSectionHtml({
+      id: copy.id,
+      title: copy.title,
+      desc: copy.desc,
+      body: renderEditor(copy.fields),
+    });
+  }).join('');
 }
 
 /**
@@ -1444,27 +1477,28 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   };
   const tabButton = (tab) => `<button id="settings-tab-${tab.id}" class="settings-tab${tab.id === activeTab ? ' is-active' : ''}"`
     + ` data-settings-tab="${tab.id}" type="button" role="tab" aria-selected="${tab.id === activeTab}" aria-controls="settings-panel-${tab.id}">${escapeHtml(tabLabel(tab))}</button>`;
+  const extraButton = (item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.labelKey ? t(item.labelKey) : item.label)}</button>`;
   const panel = (id, inner) => `<section id="settings-panel-${id}" class="settings-panel" data-settings-panel="${id}" role="tabpanel"`
     + ` aria-labelledby="settings-tab-${id}"${id === activeTab ? '' : ' hidden'}>${inner}</section>`;
   if (!s) {
     // ?mock=1 无 settings 载荷：仍渲染五页签与安全卡（无网络验收路径；其余设置保持加载态）
     if (MOCK && state.security) {
       body.innerHTML = `
-        <div class="settings-tabs" role="tablist" aria-label="设置页签" data-i18n-aria-label="settings.tabsAria">${IA_TABS.map(tabButton).join('')}${
-          IA_SETTINGS_EXTRA.map((item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.label)}</button>`).join('')
+        <div class="settings-tabs" role="tablist" aria-label="${escapeHtml(t('settings.tabsAria'))}" data-i18n-aria-label="settings.tabsAria">${IA_TABS.map(tabButton).join('')}${
+          IA_SETTINGS_EXTRA.map(extraButton).join('')
         }</div>
         <div class="settings-scroll">
-          ${panel('common', '<section class="settings-section" data-settings-common-status><h3>本机状态 <span class="badge badge-muted">只读</span></h3><p class="muted">?mock=1 仅提供安全卡与只读演示；可编辑设置需连接真实守护。</p></section>')}
+          ${panel('common', `<section class="settings-section" data-settings-common-status><h3>${escapeHtml(t('settings.mock.commonTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3><p class="muted">${escapeHtml(t('settings.mock.commonNote'))}</p></section>`)}
           ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
-          ${panel('assistants', '<p class="muted">?mock=1 不提供 AI 助手演示数据。</p>')}
-          ${panel('mcp', '<p class="muted">?mock=1 不提供可编辑配置。</p>')}
-          ${panel('advanced', '<p class="muted">?mock=1 不提供可编辑配置。</p>')}
+          ${panel('assistants', `<p class="muted">${escapeHtml(t('settings.mock.assistants'))}</p>`)}
+          ${panel('mcp', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
+          ${panel('advanced', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
         </div>
       `;
       bindSecurityCard(body);
       return;
     }
-    body.innerHTML = '<p class="muted">设置加载中…（若持续如此，检查 serve 是否运行）</p>';
+    body.innerHTML = `<p class="muted">${escapeHtml(t('settings.loading'))}</p>`;
     return;
   }
   rebuildConfigFields();
@@ -1473,8 +1507,8 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   body.innerHTML = `
     ${pendingRestartBanner()}
     ${applyResultBanner()}
-    <div class="settings-tabs" role="tablist" aria-label="设置页签" data-i18n-aria-label="settings.tabsAria">${IA_TABS.map(tabButton).join('')}${
-      IA_SETTINGS_EXTRA.map((item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.label)}</button>`).join('')
+    <div class="settings-tabs" role="tablist" aria-label="${escapeHtml(t('settings.tabsAria'))}" data-i18n-aria-label="settings.tabsAria">${IA_TABS.map(tabButton).join('')}${
+      IA_SETTINGS_EXTRA.map(extraButton).join('')
     }</div>
     <div class="settings-scroll">
     ${panel('common', `
@@ -1482,13 +1516,13 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
       <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
       ${wizardRowHtml(typeof window.mebularDesktop?.openWizard === 'function')}
       <section class="settings-section" data-settings-common-status>
-        <h3>本机状态 <span class="badge badge-muted">只读</span></h3>
+        <h3>${escapeHtml(t('settings.common.statusTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
         ${kvRows([
-          kvRow('P2P', s.network.enabled ? '已启用' : '未启用'),
-          kvRow('邀请服务', s.join?.enabled ? '已启用' : '未启用（点顶栏「邀请设备」就地启用）'),
-          kvRow('安全等级', securityLevel ? securityLevelLabel(securityLevel) : '—'),
+          kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled')),
+          kvRow(t('settings.common.inviteService'), s.join?.enabled ? t('settings.common.enabled') : t('settings.common.inviteDisabled')),
+          kvRow(t('settings.common.securityLevel'), securityLevel ? securityLevelLabel(securityLevel) : '—'),
         ])}
-        <p class="settings-note muted">可编辑配置在「高级」与「MCP 接入」；安全动作在「安全」。</p>
+        <p class="settings-note muted">${escapeHtml(t('settings.common.note'))}</p>
       </section>
       ${cloudCardHtml()}
     `)}
@@ -1498,7 +1532,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
       ${renderMcpSections()}
       <details class="settings-fold" id="mcp-danger-fold" data-settings-fold="mcp-danger">
         <summary>${escapeHtml(foldLabel('mcp-danger'))}</summary>
-        ${IA_MCP_DANGER_LINES.map((line) => `<p class="muted">${escapeHtml(line)}</p>`).join('')}
+        ${IA_MCP_DANGER_LINE_KEYS.map((key) => `<p class="muted">${escapeHtml(t(key))}</p>`).join('')}
       </details>
     `)}
     ${panel('advanced', `
@@ -1540,18 +1574,20 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
 // ---------- S3 · 安全三档（安全卡 / 三操作改道 / 批准侧 / 恢复码） ----------
 
 const SECURITY_LEVEL_ORDER = { low: 0, medium: 1, high: 2 };
-const SECURITY_REJECTION_LABEL = {
-  'missing-proof': '缺少会签证明',
-  'invalid-proof': '证明无效',
-  'approval-missing-or-not-causal': '批准不存在或晚于动作',
-  'approval-approver-revoked-at-its-order': '批准人当时已被移出',
-  'approver-not-admitted-at-approval': '批准设备当时尚未准入',
-  'approver-equals-author': '批准人 = 发起人',
-  'approver-equals-subject': '批准人 = 被操作设备',
-  'stale-or-replayed-nonce': '随机数已重放',
+const SECURITY_REJECTION_KEYS = {
+  'missing-proof': 'settings.security.rejection.missingProof',
+  'invalid-proof': 'settings.security.rejection.invalidProof',
+  'approval-missing-or-not-causal': 'settings.security.rejection.approvalMissing',
+  'approval-approver-revoked-at-its-order': 'settings.security.rejection.approverRevoked',
+  'approver-not-admitted-at-approval': 'settings.security.rejection.approverNotAdmitted',
+  'approver-equals-author': 'settings.security.rejection.approverEqualsAuthor',
+  'approver-equals-subject': 'settings.security.rejection.approverEqualsSubject',
+  'stale-or-replayed-nonce': 'settings.security.rejection.nonceReplayed',
 };
 
 function securityLevelLabel(level) {
+  const key = `security.level.${level}`;
+  if (t.has(key)) return t(key);
   return SECURITY_LEVEL_LABEL[level] ?? '—';
 }
 
@@ -1560,14 +1596,21 @@ function securityLevelTag(level) {
 }
 
 function securityReasonLabel(reason) {
-  return SECURITY_REJECTION_LABEL[reason] ?? String(reason ?? '未知原因');
+  const key = SECURITY_REJECTION_KEYS[reason];
+  if (key) return t(key);
+  return String(reason ?? t('settings.security.unknownReason'));
 }
 
 function securityOpText(record) {
-  if (record?.op === 'kick') return `移出设备 ${record.target ?? '—'}`;
-  if (record?.op === 'restore') return `恢复设备 ${record.target ?? '—'}`;
-  if (record?.op === 'join') return `加入忆云${record.namespace ? `（${record.namespace}）` : ''}`;
-  if (record?.op === 'tier') return `安全等级 → ${securityLevelLabel(record.level)}`;
+  const target = record?.target ?? '—';
+  if (record?.op === 'kick') return t('settings.security.op.kick', { target });
+  if (record?.op === 'restore') return t('settings.security.op.restore', { target });
+  if (record?.op === 'join') {
+    return record.namespace
+      ? t('settings.security.op.joinNs', { namespace: record.namespace })
+      : t('settings.security.op.join');
+  }
+  if (record?.op === 'tier') return t('settings.security.op.tier', { level: securityLevelLabel(record.level) });
   return record?.op ?? '—';
 }
 
@@ -1586,9 +1629,9 @@ function securityCardHtml() {
   if (!sec) {
     return settingsSectionHtml({
       id: 'security-level',
-      title: IA_SECURITY_SECTIONS.level.title,
-      desc: IA_SECURITY_SECTIONS.level.desc,
-      body: '<p class="muted sec-loading">安全状态加载中…（旧版守护或读取失败时显示 —，不影响其他设置）</p>',
+      title: t(IA_SECURITY_SECTIONS.level.titleKey),
+      desc: t(IA_SECURITY_SECTIONS.level.descKey),
+      body: `<p class="muted sec-loading">${escapeHtml(t('settings.security.loading'))}</p>`,
     });
   }
   const level = sec.level ?? 'low';
@@ -1611,12 +1654,12 @@ function securityCardHtml() {
     const current = tier === level;
     const canUpgrade = SECURITY_LEVEL_ORDER[tier] > SECURITY_LEVEL_ORDER[level];
     const action = canUpgrade
-      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="upgrade" data-level="${tier}" ${writes ? '' : 'disabled'}>升级到${securityLevelLabel(tier)} ›</button>`
-      : current ? `<span class="crt-tag ${securityLevelTag(level)}" data-security-current>当前</span>` : '';
+      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="upgrade" data-level="${tier}" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.upgradeTo', { level: securityLevelLabel(tier) }))}</button>`
+      : current ? `<span class="crt-tag ${securityLevelTag(level)}" data-security-current>${escapeHtml(t('settings.security.current'))}</span>` : '';
     return `<li class="sec-tier${current ? ' is-current' : ''}" data-security-tier="${tier}">
       <div class="sec-tier-main">
-        <div class="sec-tier-head"><span class="sec-tier-title">${escapeHtml(SECURITY_LEVEL_TITLE[tier])}</span></div>
-        <p class="sec-tier-note muted">${escapeHtml(SECURITY_LEVEL_NOTE[tier])}</p>
+        <div class="sec-tier-head"><span class="sec-tier-title">${escapeHtml(t(SECURITY_LEVEL_TITLE_KEY[tier]))}</span></div>
+        <p class="sec-tier-note muted">${escapeHtml(t(SECURITY_LEVEL_NOTE_KEY[tier]))}</p>
       </div>
       <div class="sec-tier-action">${action}</div>
     </li>`;
@@ -1624,47 +1667,50 @@ function securityCardHtml() {
 
   const fingerprint = totp.fingerprint ?? null;
   const totpStatus = totp.imported === true
-    ? `<span class="sec-ok">已导入 ✓</span> <code>${escapeHtml(fingerprint ?? '—')}</code>`
-    : '<span class="crt-warn">未导入</span> <span class="muted">中档敏感操作会被拒绝</span>';
+    ? `<span class="sec-ok">${escapeHtml(t('settings.security.totp.imported'))}</span> <code>${escapeHtml(fingerprint ?? '—')}</code>`
+    : `<span class="crt-warn">${escapeHtml(t('settings.security.totp.notImported'))}</span> <span class="muted">${escapeHtml(t('settings.security.totp.notImportedNote'))}</span>`;
   const totpActions = `${totp.imported === true
-    ? `<button class="btn btn-small btn-crt" type="button" data-security-action="totp-show" ${writes ? '' : 'disabled'}>显示种子</button>`
+    ? `<button class="btn btn-small btn-crt" type="button" data-security-action="totp-show" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.totp.show'))}</button>`
     : ''}
-    <button class="btn btn-small btn-crt" type="button" data-security-action="totp-import" ${writes ? '' : 'disabled'}>导入种子</button>
+    <button class="btn btn-small btn-crt" type="button" data-security-action="totp-import" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.totp.import'))}</button>
     ${totp.imported !== true && isRoot
-      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="totp-generate" ${writes ? '' : 'disabled'}>生成共享种子</button>`
+      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="totp-generate" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.totp.generate'))}</button>`
       : ''}`;
 
   const recoveryStatus = recovery.registered === true
-    ? `<span class="sec-ok">已生成</span> <code>${escapeHtml(String(recovery.keyId ?? '').slice(0, 8))}</code>
-       <span class="muted">${recovery.mode === 'rotate' ? '最近轮换' : '登记'} ${escapeHtml(formatTime(recovery.createdAt))}</span>
-       ${recovery.lastUsedAt ? `<span class="muted">· 最近使用 ${escapeHtml(formatTime(recovery.lastUsedAt))}</span>` : ''}
-       ${recovery.current === false ? '<span class="crt-tag crt-tag-warn">keyId 不一致</span>' : ''}`
-    : '<span class="muted">未生成（升到高档时生成）</span>';
+    ? `<span class="sec-ok">${escapeHtml(t('settings.security.recovery.generated'))}</span> <code>${escapeHtml(String(recovery.keyId ?? '').slice(0, 8))}</code>
+       <span class="muted">${escapeHtml(t(recovery.mode === 'rotate' ? 'settings.security.recovery.rotated' : 'settings.security.recovery.registered'))} ${escapeHtml(formatTime(recovery.createdAt))}</span>
+       ${recovery.lastUsedAt ? `<span class="muted">${escapeHtml(t('settings.security.recovery.lastUsed', { time: formatTime(recovery.lastUsedAt) }))}</span>` : ''}
+       ${recovery.current === false ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.security.recovery.keyMismatch'))}</span>` : ''}`
+    : `<span class="muted">${escapeHtml(t('settings.security.recovery.notGenerated'))}</span>`;
   const recoveryActions = recovery.registered === true
-    ? `<button class="btn btn-small btn-crt" type="button" data-security-action="recovery-rotate" ${writes ? '' : 'disabled'}>轮换恢复码</button>`
+    ? `<button class="btn btn-small btn-crt" type="button" data-security-action="recovery-rotate" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.recovery.rotate'))}</button>`
     : level === 'high'
-      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="recovery-generate" ${writes ? '' : 'disabled'}>生成恢复码</button>`
+      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="recovery-generate" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.recovery.generate'))}</button>`
       : '';
 
   const incomingRows = incoming.map((a) => `
     <li class="sec-approval-row" data-approval-id="${escapeHtml(a.approvalId)}">
       <div class="sec-approval-head">
         <b>${escapeHtml(securityOpText(a))}</b>
-        <span class="muted">来自 ${escapeHtml(a.initiator ?? '—')}</span>
+        <span class="muted">${escapeHtml(t('settings.security.approval.from', { device: a.initiator ?? '—' }))}</span>
       </div>
       <div class="sec-approval-inline">
         <span class="sec-pairing" data-security-pairing aria-live="polite">${escapeHtml(a.pairingCode ?? '—')}</span>
-        <span class="sec-approval-meta muted">与另一台设备逐位核对 · 有效至 ${escapeHtml(formatTime(a.expiresAt))}</span>
-        <button class="btn btn-small btn-crt" type="button" data-security-approve="${escapeHtml(a.approvalId)}" ${writes ? '' : 'disabled'}>配对号一致，批准</button>
-        <button class="btn btn-small btn-crt btn-crt-danger" type="button" data-security-deny="${escapeHtml(a.approvalId)}" ${writes ? '' : 'disabled'}>拒绝</button>
+        <span class="sec-approval-meta muted">${escapeHtml(t('settings.security.approval.verifyMeta', { time: formatTime(a.expiresAt) }))}</span>
+        <button class="btn btn-small btn-crt" type="button" data-security-approve="${escapeHtml(a.approvalId)}" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.approval.approve'))}</button>
+        <button class="btn btn-small btn-crt btn-crt-danger" type="button" data-security-deny="${escapeHtml(a.approvalId)}" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.approval.deny'))}</button>
       </div>
     </li>`).join('');
   const outgoingRows = outgoing.length > 0
-    ? `<p class="sec-outgoing muted">等待另一台设备批准：${outgoing.map((a) => `${escapeHtml(securityOpText(a))}（配对号 <span class="sec-pairing-inline">${escapeHtml(a.pairingCode ?? '—')}</span>）`).join('、')}</p>`
+    ? `<p class="sec-outgoing muted">${escapeHtml(t('settings.security.approval.waitingPrefix'))}${outgoing.map((a) => t('settings.security.approval.item', {
+      op: escapeHtml(securityOpText(a)),
+      code: `<span class="sec-pairing-inline">${escapeHtml(a.pairingCode ?? '—')}</span>`,
+    })).join(escapeHtml(t('common.listSeparator')))}</p>`
     : '';
   const pendingBlock = incoming.length > 0 || outgoing.length > 0
     ? `<div class="sec-pending sec-pending-top" data-security-pending>
-        ${incoming.length > 0 ? `<div class="sec-pending-head"><b>待批准</b><span class="crt-tag crt-tag-warn">${incoming.length} 项</span></div>` : ''}
+        ${incoming.length > 0 ? `<div class="sec-pending-head"><b>${escapeHtml(t('settings.security.approval.pending'))}</b><span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.security.approval.pendingCount', { count: incoming.length }))}</span></div>` : ''}
         ${incomingRows ? `<ul class="sec-approval-list">${incomingRows}</ul>` : ''}
         ${outgoingRows}
       </div>`
@@ -1672,53 +1718,61 @@ function securityCardHtml() {
 
   const rejectionReasons = [...new Set(rejections.map((r) => securityReasonLabel(r.reason)))];
   const rejectionBlock = rejections.length > 0
-    ? `<p class="crt-warn sec-rejections" data-security-rejections>${rejections.length} 条安全操作被拒绝：${escapeHtml(rejectionReasons.slice(0, 3).join('、'))}${rejectionReasons.length > 3 ? ' 等' : ''}（详见审计）</p>`
+    ? `<p class="crt-warn sec-rejections" data-security-rejections>${escapeHtml(t('settings.security.rejections', {
+      count: rejections.length,
+      reasons: rejectionReasons.length > 3
+        ? t('settings.security.rejectionsMore', { reasons: rejectionReasons.slice(0, 3).join(t('common.listSeparator')) })
+        : rejectionReasons.join(t('common.listSeparator')),
+    }))}</p>`
     : '';
 
   const admittedLine = admitted.length > 0
-    ? `<p class="settings-section-foot muted" data-security-admitted>可会签设备 ${admitted.length} 台：${escapeHtml(admitted.join(' · '))}。</p>`
+    ? `<p class="settings-section-foot muted" data-security-admitted>${escapeHtml(t('settings.security.admitted', {
+      count: admitted.length,
+      devices: admitted.join(' · '),
+    }))}</p>`
     : '';
 
   const lowerTiers = ['low', 'medium', 'high'].filter((tier) => SECURITY_LEVEL_ORDER[tier] < SECURITY_LEVEL_ORDER[level]);
   const downgrade = lowerTiers.length > 0
     ? `<div class="sec-downgrade sec-downgrade-inline">
-        <span class="sec-downgrade-label muted">降级</span>
-        ${lowerTiers.map((tier) => `<button class="btn btn-small btn-crt btn-crt-danger" type="button" data-security-action="downgrade" data-level="${tier}" ${writes ? '' : 'disabled'}>降到${securityLevelLabel(tier)}</button>`).join('')}
-        <span class="muted">${level === 'high' ? '需另一台设备会签或恢复码。' : '需本机 6 位动态码。'}</span>
+        <span class="sec-downgrade-label muted">${escapeHtml(t('settings.security.downgrade'))}</span>
+        ${lowerTiers.map((tier) => `<button class="btn btn-small btn-crt btn-crt-danger" type="button" data-security-action="downgrade" data-level="${tier}" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.downgradeTo', { level: securityLevelLabel(tier) }))}</button>`).join('')}
+        <span class="muted">${escapeHtml(t(level === 'high' ? 'settings.security.downgrade.highNote' : 'settings.security.downgrade.mediumNote'))}</span>
       </div>`
     : '';
 
   const mismatchLine = mismatch
-    ? '<p class="crt-warn sec-anomaly">请从持有同一颗种子的设备重新导入；不一致的种子会被拒绝。</p>'
+    ? `<p class="crt-warn sec-anomaly">${escapeHtml(t('settings.security.totp.mismatch'))}</p>`
     : '';
 
   return `
     ${settingsSectionHtml({
       id: 'security-level',
-      title: IA_SECURITY_SECTIONS.level.title,
-      desc: IA_SECURITY_SECTIONS.level.desc,
-      body: `${pendingBlock}<ol class="sec-ladder" aria-label="安全等级三档">${ladder}</ol>
+      title: t(IA_SECURITY_SECTIONS.level.titleKey),
+      desc: t(IA_SECURITY_SECTIONS.level.descKey),
+      body: `${pendingBlock}<ol class="sec-ladder" aria-label="${escapeHtml(t('settings.security.ladderAria'))}">${ladder}</ol>
         ${admittedLine}
-        <p class="settings-section-foot muted" data-security-boundary>${escapeHtml(SECURITY_BOUNDARY)}</p>
+        <p class="settings-section-foot muted" data-security-boundary>${escapeHtml(t(SECURITY_BOUNDARY_KEY))}</p>
         ${downgrade}${rejectionBlock}`,
     })}
     ${settingsSectionHtml({
       id: 'security-totp',
-      title: IA_SECURITY_SECTIONS.totp.title,
-      desc: IA_SECURITY_SECTIONS.totp.desc,
-      chip: mismatch ? '<span class="crt-tag crt-tag-error">种子不一致</span>' : '',
+      title: t(IA_SECURITY_SECTIONS.totp.titleKey),
+      desc: t(IA_SECURITY_SECTIONS.totp.descKey),
+      chip: mismatch ? `<span class="crt-tag crt-tag-error">${escapeHtml(t('settings.security.totp.mismatchTag'))}</span>` : '',
       body: `${mismatchLine}
         <dl class="settings-kv sec-kv">
-          <dt>状态</dt><dd class="kv-value">${totpStatus}</dd><dd class="kv-action sec-actions">${totpActions}</dd>
+          <dt>${escapeHtml(t('settings.security.status'))}</dt><dd class="kv-value">${totpStatus}</dd><dd class="kv-action sec-actions">${totpActions}</dd>
         </dl>`,
-      foot: SECURITY_TOTP_FOOT,
+      foot: t(SECURITY_TOTP_FOOT_KEY),
     })}
     ${settingsSectionHtml({
       id: 'security-recovery',
-      title: IA_SECURITY_SECTIONS.recovery.title,
-      desc: IA_SECURITY_SECTIONS.recovery.desc,
+      title: t(IA_SECURITY_SECTIONS.recovery.titleKey),
+      desc: t(IA_SECURITY_SECTIONS.recovery.descKey),
       body: `<dl class="settings-kv sec-kv">
-          <dt>状态</dt><dd class="kv-value">${recoveryStatus}</dd><dd class="kv-action sec-actions">${recoveryActions}</dd>
+          <dt>${escapeHtml(t('settings.security.status'))}</dt><dd class="kv-value">${recoveryStatus}</dd><dd class="kv-action sec-actions">${recoveryActions}</dd>
         </dl>`,
     })}
   `;
@@ -1773,7 +1827,7 @@ function closeSecurityAction({ silent = false } = {}) {
   }
 }
 
-function securityModalConfig({ title, body, confirmLabel = '确认', onConfirm = null, hideClose = false, blockClose = false, recovery = null } = {}) {
+function securityModalConfig({ title, body, confirmLabel = t('common.confirm'), onConfirm = null, hideClose = false, blockClose = false, recovery = null } = {}) {
   stopSecurityPoll();
   state.securityFlow = {
     ...(state.securityFlow ?? {}),
@@ -1801,7 +1855,7 @@ async function securityConfirmHandler() {
   const confirm = $('#security-action-confirm');
   const label = confirm.textContent;
   confirm.disabled = true;
-  confirm.textContent = '处理中…';
+  confirm.textContent = t('security.dialog.busy');
   securitySetError('');
   try {
     await flow.onConfirm();
@@ -1815,18 +1869,18 @@ async function securityConfirmHandler() {
   }
 }
 
-function securityCodeModal({ title, intro, confirmLabel = '验证', onSubmit }) {
+function securityCodeModal({ title, intro, confirmLabel = t('security.code.confirm'), onSubmit }) {
   securityModalConfig({
     title,
     body: `<p class="muted">${escapeHtml(intro)}</p>
-      <div class="field"><label for="security-code">6 位动态码</label>
+      <div class="field"><label for="security-code">${escapeHtml(t('security.code.label'))}</label>
       <input id="security-code" class="crt-input" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000" aria-describedby="security-code-help" /></div>
-      <p id="security-code-help" class="cfg-help muted">打开认证器 App 读取当前 6 位数字；同一码不能用两次。</p>`,
+      <p id="security-code-help" class="cfg-help muted">${escapeHtml(t('security.code.help'))}</p>`,
     confirmLabel,
     onConfirm: async () => {
       const code = $('#security-code')?.value?.trim() ?? '';
       if (!/^\d{6}$/.test(code)) {
-        securitySetError('请输入 6 位动态码（只含数字）。');
+        securitySetError(t('security.code.invalid'));
         return;
       }
       await onSubmit(code);
@@ -1840,11 +1894,11 @@ async function securityPostTier(level, extra = {}) {
   await refresh();
   if (result?.recoveryCode) {
     securityShowRecoveryOnce(result.recoveryCodeFormatted ?? result.recoveryCode, {
-      title: '升级到高 · 离线恢复码（只显示这一次）',
-      intro: '已启用「高 · 设备会签」。恢复码是另一台设备不在场时的离线钥匙。',
+      title: t('security.upgrade.recoveryOnce.title'),
+      intro: t('security.upgrade.recoveryOnce.intro'),
     });
   } else {
-    showToast(`安全等级已设为「${securityLevelLabel(level)}」`);
+    showToast(t('security.tier.set', { level: securityLevelLabel(level) }));
     closeSecurityAction();
   }
   return result;
@@ -1858,9 +1912,9 @@ async function securityStartLevelChange(targetLevel) {
     if (SECURITY_LEVEL_ORDER[targetLevel] > SECURITY_LEVEL_ORDER[current]) {
       if (current === 'medium') {
         securityCodeModal({
-          title: `升级到${targetLabel}`,
-          intro: '输入本机 6 位动态码。',
-          confirmLabel: `升级到${targetLabel}`,
+          title: t('security.upgrade.title', { level: targetLabel }),
+          intro: t('security.upgrade.codeIntro'),
+          confirmLabel: t('security.upgrade.title', { level: targetLabel }),
           onSubmit: async (code) => {
             closeSecurityAction();
             await securityPostTier(targetLevel, { code });
@@ -1869,11 +1923,11 @@ async function securityStartLevelChange(targetLevel) {
         return;
       }
       const ok = await confirmModal({
-        title: `升级到${targetLabel}`,
+        title: t('security.upgrade.title', { level: targetLabel }),
         body: targetLevel === 'high'
-          ? '之后加入、移出与降级都需要另一台已准入设备核对配对号；本机会生成一次性恢复码。'
-          : '之后加入、移出与降级需要本机 6 位动态码；它挡顺手，不挡设备被拿走。',
-        confirmLabel: `升级到${targetLabel}`,
+          ? t('security.upgrade.highBody')
+          : t('security.upgrade.mediumBody'),
+        confirmLabel: t('security.upgrade.title', { level: targetLabel }),
       });
       if (!ok) return;
       await securityPostTier(targetLevel);
@@ -1882,31 +1936,31 @@ async function securityStartLevelChange(targetLevel) {
     // 降级
     if (current === 'high') {
       await securityStartApproval({
-        title: `降级到${targetLabel} · 设备会签`,
+        title: t('security.downgrade.coSignTitle', { level: targetLabel }),
         op: 'tier',
         level: targetLevel,
-        intro: '高档降级需要另一台已准入设备会签（或恢复码）。',
+        intro: t('security.downgrade.coSignIntro'),
         onApproved: async (approvalId) => {
-          const result = await api('/admin/api/security/tier', { method: 'POST', body: { level: targetLevel, approvalId } });
+          await api('/admin/api/security/tier', { method: 'POST', body: { level: targetLevel, approvalId } });
           closeSecurityAction();
           await refresh();
-          showToast(`安全等级已设为「${targetLabel}」${result?.ok ? '' : ''}`);
+          showToast(t('security.tier.set', { level: targetLabel }));
         },
         recovery: () => securityTierViaRecovery(targetLevel),
       });
       return;
     }
     securityCodeModal({
-      title: `降级到${targetLabel}`,
-      intro: '中档降级需要本机 6 位动态码。',
-      confirmLabel: `降到${targetLabel}`,
+      title: t('security.downgrade.title', { level: targetLabel }),
+      intro: t('security.downgrade.codeIntro'),
+      confirmLabel: t('security.downgrade.confirm', { level: targetLabel }),
       onSubmit: async (code) => {
         closeSecurityAction();
         await securityPostTier(targetLevel, { code });
       },
     });
   } catch (error) {
-    window.alert(`安全等级变更失败：${error.message}`);
+    window.alert(t('security.tier.failed', { message: error.message }));
   }
 }
 
@@ -1926,18 +1980,18 @@ async function securityStartApproval({ title, op, target, level, intro, onApprov
     hideClose: false,
     body: `<p class="muted">${escapeHtml(intro ?? '')}</p>
       <div class="sec-pairing sec-pairing-lg" data-security-pairing aria-live="polite">${escapeHtml(request.pairingCode ?? '—')}</div>
-      <p class="cfg-help muted">在另一台已准入设备上打开「设置 → 安全 → 安全等级」，核对同一配对号后点「配对号一致，批准」。</p>
+      <p class="cfg-help muted">${escapeHtml(t('security.approval.pairingHelp'))}</p>
       ${kvRows([
-        kvRow('动作', escapeHtml(securityOpText(request))),
-        kvRow('发起设备', `<code>${escapeHtml(self ?? '—')}</code>`),
-        kvRow('有效至', escapeHtml(formatTime(request.expiresAt))),
-        kvRow('有资格的设备', admitted.length ? escapeHtml(admitted.join(' · ')) : '<span class="muted">（尚未取得 admitted 列表）</span>'),
+        kvRow(t('security.approval.kvAction'), escapeHtml(securityOpText(request))),
+        kvRow(t('security.approval.kvInitiator'), `<code>${escapeHtml(self ?? '—')}</code>`),
+        kvRow(t('security.approval.kvExpires'), escapeHtml(formatTime(request.expiresAt))),
+        kvRow(t('security.approval.kvAdmitted'), admitted.length ? escapeHtml(admitted.join(' · ')) : `<span class="muted">${escapeHtml(t('security.approval.noAdmitted'))}</span>`),
       ])}
-      <p class="sec-wait" id="security-wait-status" aria-live="polite"><span class="sec-wait-dot" aria-hidden="true"></span>等待另一台设备批准…</p>
-      <p class="cfg-help muted">配对号不经过任何通道传输：两台设备各自从动作摘要算出，人眼比对即可。</p>
+      <p class="sec-wait" id="security-wait-status" aria-live="polite"><span class="sec-wait-dot" aria-hidden="true"></span>${escapeHtml(t('security.approval.waitingDots'))}</p>
+      <p class="cfg-help muted">${escapeHtml(t('security.approval.whySafe'))}</p>
       ${typeof recovery === 'function'
-        ? `<div class="domain-actions"><button class="btn btn-small btn-crt" type="button" data-security-recovery-switch>另一台设备不在？用恢复码执行</button></div>
-           <p class="cfg-help muted">切到恢复码后，这次会签请求会留待过期；恢复码只在本次本机签名时使用。</p>`
+        ? `<div class="domain-actions"><button class="btn btn-small btn-crt" type="button" data-security-recovery-switch>${escapeHtml(t('security.approval.useRecovery'))}</button></div>
+           <p class="cfg-help muted">${escapeHtml(t('security.approval.recoverySwitchNote'))}</p>`
         : ''}`,
     recovery,
   });
@@ -1951,12 +2005,12 @@ async function securityStartApproval({ title, op, target, level, intro, onApprov
       if (decided?.decision === 'approve') {
         stopSecurityPoll();
         const status = $('#security-wait-status');
-        if (status) status.innerHTML = '<span class="sec-ok">✓ 已批准，正在执行…</span>';
+        if (status) status.innerHTML = `<span class="sec-ok">${escapeHtml(t('security.approval.approved'))}</span>`;
         try {
           await onApproved(request.approvalId, decided);
         } catch (error) {
-          if (status) status.innerHTML = `<span class="crt-warn">已批准，但执行失败：${escapeHtml(error.message)}</span>`;
-          securitySetError(`执行失败：${error.message}`);
+          if (status) status.innerHTML = `<span class="crt-warn">${escapeHtml(t('security.approval.approvedFailed', { message: error.message }))}</span>`;
+          securitySetError(t('security.approval.executeFailed', { message: error.message }));
         }
         return;
       }
@@ -1964,7 +2018,7 @@ async function securityStartApproval({ title, op, target, level, intro, onApprov
         stopSecurityPoll();
         const status = $('#security-wait-status');
         if (status) {
-          status.innerHTML = '<span class="crt-warn">已被拒绝</span> <span class="muted">（发起设备可见；本版本拒绝记录不附文字理由）</span>';
+          status.innerHTML = `<span class="crt-warn">${escapeHtml(t('security.approval.denied'))}</span> <span class="muted">${escapeHtml(t('security.approval.deniedNote'))}</span>`;
           status.dataset.securityDenied = '1';
         }
         void refresh();
@@ -1974,13 +2028,13 @@ async function securityStartApproval({ title, op, target, level, intro, onApprov
       if (expired) {
         stopSecurityPoll();
         const status = $('#security-wait-status');
-        if (status) status.innerHTML = '<span class="crt-warn">请求已过期</span> <span class="muted">请关闭后重新发起。</span>';
+        if (status) status.innerHTML = `<span class="crt-warn">${escapeHtml(t('security.approval.expired'))}</span> <span class="muted">${escapeHtml(t('security.approval.expiredNote'))}</span>`;
         return;
       }
       const status = $('#security-wait-status');
       if (status) {
         const left = Math.max(0, Math.ceil((request.expiresAt - Date.now()) / 1000));
-        status.innerHTML = `<span class="sec-wait-dot" aria-hidden="true"></span>等待另一台设备批准… <span class="muted">（剩余 ${left}s）</span>`;
+        status.innerHTML = `<span class="sec-wait-dot" aria-hidden="true"></span>${escapeHtml(t('security.approval.waitingDots'))} <span class="muted">${escapeHtml(t('security.approval.waitingLeft', { seconds: left }))}</span>`;
       }
     } catch {
       // 轮询失败保持等待，下轮再试（不把瞬时网络错误当拒绝）
@@ -1996,17 +2050,21 @@ async function securityApprove(approvalId) {
   const record = (state.security?.pendingApprovals ?? []).find((a) => a?.approvalId === approvalId);
   if (!record) return;
   const ok = await confirmModal({
-    title: `批准：${securityOpText(record)}`,
-    body: `发起设备：${record.initiator}\n配对号：${record.pairingCode}\n有效至：${formatTime(record.expiresAt)}\n\n请在另一台设备屏幕上核对配对号，完全一致再批准。`,
-    confirmLabel: '配对号一致，批准',
+    title: t('security.approval.confirmTitle', { op: securityOpText(record) }),
+    body: t('security.approval.confirmBody', {
+      device: record.initiator,
+      code: record.pairingCode,
+      time: formatTime(record.expiresAt),
+    }),
+    confirmLabel: t('settings.security.approval.approve'),
   });
   if (!ok) return;
   try {
     await api(`/admin/api/security/approvals/${encodeURIComponent(approvalId)}/approve`, { method: 'POST', body: {} });
     await refresh();
-    showToast('已批准；发起设备会自动继续');
+    showToast(t('security.approval.approvedToast'));
   } catch (error) {
-    window.alert(`批准失败：${error.message}`);
+    window.alert(t('security.approval.approveFailed', { message: error.message }));
   }
 }
 
@@ -2014,34 +2072,34 @@ async function securityDeny(approvalId) {
   const record = (state.security?.pendingApprovals ?? []).find((a) => a?.approvalId === approvalId);
   if (!record) return;
   const ok = await confirmModal({
-    title: '拒绝这次请求？',
-    body: `动作：${securityOpText(record)}\n发起设备：${record.initiator}\n\n发起设备会看到「已被拒绝」。本版本拒绝记录不附文字理由。`,
-    confirmLabel: '拒绝',
+    title: t('security.deny.title'),
+    body: t('security.deny.body', { op: securityOpText(record), device: record.initiator }),
+    confirmLabel: t('settings.security.approval.deny'),
   });
   if (!ok) return;
   try {
     await api(`/admin/api/security/approvals/${encodeURIComponent(approvalId)}/deny`, { method: 'POST', body: {} });
     await refresh();
-    showToast('已拒绝该请求');
+    showToast(t('security.deny.toast'));
   } catch (error) {
-    window.alert(`拒绝失败：${error.message}`);
+    window.alert(t('security.deny.failed', { message: error.message }));
   }
 }
 
 function securityTotpImport() {
   securityModalConfig({
-    title: '导入动态码种子',
-    body: `<p class="muted">从持有种子的另一台设备「显示种子」处，粘贴分组文本或 <code>otpauth://</code> URI。种子绝不经过忆云。</p>
-      <div class="field"><label for="security-totp-secret">种子（分组文本 / otpauth URI）</label>
-      <textarea id="security-totp-secret" class="crt-input" rows="3" spellcheck="false" placeholder="ABCD EFGH IJKL … 或 otpauth://totp/…"></textarea></div>
-      <div class="field"><label for="security-totp-fingerprint">期望 fingerprint（可选，8 hex）</label>
+    title: t('security.totp.import.title'),
+    body: `<p class="muted">${escapeHtml(t('security.totp.import.body'))}</p>
+      <div class="field"><label for="security-totp-secret">${escapeHtml(t('security.totp.import.secretLabel'))}</label>
+      <textarea id="security-totp-secret" class="crt-input" rows="3" spellcheck="false" placeholder="${escapeHtml(t('security.totp.import.secretPlaceholder'))}"></textarea></div>
+      <div class="field"><label for="security-totp-fingerprint">${escapeHtml(t('security.totp.import.fingerprintLabel'))}</label>
       <input id="security-totp-fingerprint" class="crt-input" type="text" maxlength="16" placeholder="a1b2c3d4" /></div>
-      <p class="cfg-help muted">导入前请与另一台设备上的 fingerprint 对账；不一致会拒绝导入。</p>`,
-    confirmLabel: '导入',
+      <p class="cfg-help muted">${escapeHtml(t('security.totp.import.help'))}</p>`,
+    confirmLabel: t('security.totp.import.confirm'),
     onConfirm: async () => {
       const secret = $('#security-totp-secret')?.value?.trim() ?? '';
       if (!secret) {
-        securitySetError('请粘贴种子文本或 otpauth URI。');
+        securitySetError(t('security.totp.import.missing'));
         return;
       }
       const expectedFingerprint = $('#security-totp-fingerprint')?.value?.trim() ?? '';
@@ -2051,7 +2109,7 @@ function securityTotpImport() {
       });
       await refresh();
       closeSecurityAction();
-      showToast(`动态码种子已导入（fingerprint ${result.fingerprint}）`);
+      showToast(t('security.totp.import.done', { fingerprint: result.fingerprint }));
     },
   });
   setTimeout(() => $('#security-totp-secret')?.focus(), 0);
@@ -2062,19 +2120,19 @@ function securitySeedDisplay(seed, { generated = false } = {}) {
     ? seed.groups.join(' ')
     : String(seed.groups ?? seed.secret ?? '');
   const qr = typeof seed.qrSvg === 'string' && seed.qrSvg.length > 0
-    ? `<div class="readout-block qr-block"><span class="domain-label">扫码导入（内容 = otpauth URI）</span>
-       <img class="qr-img" alt="动态码种子二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(seed.qrSvg)))}" /></div>`
-    : '<p class="cfg-help muted">二维码不可用（生成失败）：请使用下方分组文本。</p>';
+    ? `<div class="readout-block qr-block"><span class="domain-label">${escapeHtml(t('security.totp.qrIntro'))}</span>
+       <img class="qr-img" alt="${escapeHtml(t('security.totp.qrAlt'))}" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(seed.qrSvg)))}" /></div>`
+    : `<p class="cfg-help muted">${escapeHtml(t('security.totp.qrUnavailable'))}</p>`;
   securityModalConfig({
-    title: generated ? '共享动态码种子（只显示这一次）' : '动态码种子',
+    title: generated ? t('security.totp.seed.sharedTitle') : t('security.totp.seed.title'),
     hideClose: false,
     body: `<div id="totp-seed-display" class="sec-seed" tabindex="-1">
-        <p class="crt-warn">${escapeHtml(seed.warning ?? '种子等于这一档的钥匙：谁看到它，谁就能过这档的码。只在两台你自己的设备之间当面出示。')}</p>
+        <p class="crt-warn">${escapeHtml(seed.warning ?? t('security.totp.seed.warningDefault'))}</p>
         ${qr}
-        <div class="readout-block"><span class="domain-label">分组文本</span><code class="sec-seed-groups">${escapeHtml(groupText)}</code></div>
-        <div class="readout-block"><span class="domain-label">otpauth URI</span><code class="sec-seed-uri">${escapeHtml(seed.otpauth ?? '')}</code></div>
-        <p class="muted">fingerprint：<code>${escapeHtml(seed.fingerprint ?? '—')}</code>（可与另一台设备对账；不含种子本身）</p>
-        <p class="cfg-help muted">不要截图、不要发聊天工具；当面出示后即可关闭。</p>
+        <div class="readout-block"><span class="domain-label">${escapeHtml(t('security.totp.seed.groups'))}</span><code class="sec-seed-groups">${escapeHtml(groupText)}</code></div>
+        <div class="readout-block"><span class="domain-label">${escapeHtml(t('security.totp.seed.uri'))}</span><code class="sec-seed-uri">${escapeHtml(seed.otpauth ?? '')}</code></div>
+        <p class="muted">${escapeHtml(t('security.totp.seed.fingerprintLabel'))}<code>${escapeHtml(seed.fingerprint ?? '—')}</code>${escapeHtml(t('security.totp.seed.fingerprintNote'))}</p>
+        <p class="cfg-help muted">${escapeHtml(t('security.totp.seed.noScreenshot'))}</p>
       </div>`,
   });
   setTimeout(() => { $('#totp-seed-display')?.focus(); }, 0);
@@ -2082,9 +2140,9 @@ function securitySeedDisplay(seed, { generated = false } = {}) {
 
 async function securityTotpShow() {
   securityCodeModal({
-    title: '显示动态码种子',
-    intro: '显示种子前先输入一次本机动态码（防顺手窥屏）。',
-    confirmLabel: '验证并显示',
+    title: t('security.totp.show.title'),
+    intro: t('security.totp.show.intro'),
+    confirmLabel: t('security.totp.show.confirm'),
     onSubmit: async (code) => {
       const seed = await api('/admin/api/security/totp/show', { method: 'POST', body: { code } });
       securitySeedDisplay(seed);
@@ -2094,9 +2152,9 @@ async function securityTotpShow() {
 
 async function securityTotpGenerate() {
   const ok = await confirmModal({
-    title: '生成共享动态码种子？',
-    body: '仅 root 可生成。新种子会写在本机，并需要你在其他设备上「导入种子」后，中档门槛才在各设备一致生效。',
-    confirmLabel: '生成',
+    title: t('security.totp.generate.title'),
+    body: t('security.totp.generate.body'),
+    confirmLabel: t('security.totp.generate.confirm'),
   });
   if (!ok) return;
   try {
@@ -2104,7 +2162,7 @@ async function securityTotpGenerate() {
     await refresh();
     securitySeedDisplay(seed, { generated: true });
   } catch (error) {
-    window.alert(`生成失败：${error.message}`);
+    window.alert(t('security.totp.generate.failed', { message: error.message }));
   }
 }
 
@@ -2115,9 +2173,9 @@ function securityShowRecoveryOnce(codeFormatted, { title, intro = '' } = {}) {
     blockClose: true,
     body: `<p class="muted">${escapeHtml(intro)}</p>
       <div id="security-recovery-once" class="sec-once-code" data-security-once tabindex="-1" aria-live="polite">${escapeHtml(codeFormatted)}</div>
-      <p class="crt-warn">恢复码只在屏幕上出现这一次：请抄写到离线介质（纸/金属/密码器），与主密钥备份分开存放。不要截图、不要发聊天工具。丢失只能轮换。</p>
-      <p class="muted">抄写完成后点下方按钮继续；页面销毁后无法再次显示。</p>
-      <div class="domain-actions"><button class="btn btn-crt" type="button" data-security-ack>我已抄写，继续</button></div>`,
+      <p class="crt-warn">${escapeHtml(t('security.recovery.once.warning'))}</p>
+      <p class="muted">${escapeHtml(t('security.recovery.once.after'))}</p>
+      <div class="domain-actions"><button class="btn btn-crt" type="button" data-security-ack>${escapeHtml(t('security.recovery.once.ack'))}</button></div>`,
   });
   setTimeout(() => {
     const once = $('#security-recovery-once');
@@ -2127,23 +2185,23 @@ function securityShowRecoveryOnce(codeFormatted, { title, intro = '' } = {}) {
 
 async function securityRecoveryRotate() {
   securityModalConfig({
-    title: '轮换恢复码',
-    body: `<p class="muted">用当前恢复码签名换一张新码。旧码的新签名立即失效（已采纳的历史不回撤）。</p>
-      <div class="field"><label for="security-recovery-old">当前恢复码</label>
+    title: t('security.recovery.rotate.title'),
+    body: `<p class="muted">${escapeHtml(t('security.recovery.rotate.body'))}</p>
+      <div class="field"><label for="security-recovery-old">${escapeHtml(t('security.recovery.rotate.oldLabel'))}</label>
       <input id="security-recovery-old" class="crt-input" type="text" autocomplete="off" spellcheck="false" placeholder="XXXX XXXX …" /></div>
-      <p class="cfg-help muted">新码只显示一次；请准备好离线介质。</p>`,
-    confirmLabel: '轮换',
+      <p class="cfg-help muted">${escapeHtml(t('security.recovery.rotate.help'))}</p>`,
+    confirmLabel: t('security.recovery.rotate.confirm'),
     onConfirm: async () => {
       const oldCode = $('#security-recovery-old')?.value?.trim() ?? '';
       if (!oldCode) {
-        securitySetError('请输入当前恢复码。');
+        securitySetError(t('security.recovery.rotate.missing'));
         return;
       }
       const result = await api('/admin/api/security/recovery/rotate', { method: 'POST', body: { oldCode } });
       await refresh();
       securityShowRecoveryOnce(result.codeFormatted ?? result.code, {
-        title: '新恢复码（只显示这一次）',
-        intro: `旧 keyId ${String(result.oldKeyId ?? '').slice(0, 8)} 已轮换；旧码的新签名不再被采纳。`,
+        title: t('security.recovery.rotate.newTitle'),
+        intro: t('security.recovery.rotate.newIntro', { keyId: String(result.oldKeyId ?? '').slice(0, 8) }),
       });
     },
   });
@@ -2152,46 +2210,48 @@ async function securityRecoveryRotate() {
 
 async function securityRecoveryGenerate() {
   const ok = await confirmModal({
-    title: '生成恢复码？',
-    body: '恢复码用于高档下「另一台设备不在场」时替代会签。只在屏幕上出现一次；请准备离线介质抄写。',
-    confirmLabel: '生成',
+    title: t('security.recovery.generate.title'),
+    body: t('security.recovery.generate.body'),
+    confirmLabel: t('security.recovery.generate.confirm'),
   });
   if (!ok) return;
   try {
     const result = await api('/admin/api/security/recovery/generate', { method: 'POST', body: {} });
     await refresh();
-    securityShowRecoveryOnce(result.codeFormatted ?? result.code, { title: '离线恢复码（只显示这一次）' });
+    securityShowRecoveryOnce(result.codeFormatted ?? result.code, { title: t('security.recovery.once.offlineTitle') });
   } catch (error) {
-    window.alert(`生成失败：${error.message}`);
+    window.alert(t('security.recovery.generate.failed', { message: error.message }));
   }
 }
 
-const SECURITY_RECOVERY_ERROR_TEXT = {
-  recovery_mismatch: '恢复码不匹配当前 keyId（可能已被轮换）：请使用最新恢复码。',
-  recovery_missing: '尚未生成恢复码：请先在安全卡生成/轮换恢复码。',
-  recovery_invalid: '恢复码格式不正确：请完整输入 34 位（连字符可省略）。',
-  recovery_not_applicable: '当前不是高档：恢复码只用于替代高档会签，无需输入。',
-  recovery_sign_failed: '恢复码签名校验失败：请重试；若持续失败请轮换恢复码。',
+const SECURITY_RECOVERY_ERROR_KEYS = {
+  recovery_mismatch: 'security.recovery.error.mismatch',
+  recovery_missing: 'security.recovery.error.missing',
+  recovery_invalid: 'security.recovery.error.invalid',
+  recovery_not_applicable: 'security.recovery.error.notApplicable',
+  recovery_sign_failed: 'security.recovery.error.signFailed',
 };
 
 function securityRecoveryErrorText(error) {
-  return SECURITY_RECOVERY_ERROR_TEXT[error?.payload?.error] ?? error?.message ?? '恢复码执行失败';
+  const key = SECURITY_RECOVERY_ERROR_KEYS[error?.payload?.error];
+  if (key) return t(key);
+  return error?.message ?? t('security.recovery.error.fallback');
 }
 
 /** 恢复码输入（高档「另一台设备不在」路径）：只用于本次签名，不回显、不进 localStorage。 */
-function securityRecoveryCodeModal({ title, intro, confirmLabel = '用恢复码执行', onSubmit }) {
+function securityRecoveryCodeModal({ title, intro, confirmLabel = t('security.recovery.code.confirm'), onSubmit }) {
   securityModalConfig({
     title,
     body: `<p class="muted">${escapeHtml(intro)}</p>
-      <div class="field"><label for="security-recovery-code">恢复码</label>
+      <div class="field"><label for="security-recovery-code">${escapeHtml(t('security.recovery.code.label'))}</label>
       <input id="security-recovery-code" class="crt-input" type="password" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-…" aria-describedby="security-recovery-help" /></div>
-      <p id="security-recovery-help" class="cfg-help muted">离线保存的 34 位码；只在本机用于签名，不上传、不写入浏览器存储，提交后输入框即清空。</p>`,
+      <p id="security-recovery-help" class="cfg-help muted">${escapeHtml(t('security.recovery.code.help'))}</p>`,
     confirmLabel,
     onConfirm: async () => {
       const input = $('#security-recovery-code');
       const code = input?.value?.trim() ?? '';
       if (!code) {
-        securitySetError('请输入离线恢复码。');
+        securitySetError(t('security.recovery.code.missing'));
         return;
       }
       if (input) input.value = '';
@@ -2208,8 +2268,8 @@ function securityRecoveryCodeModal({ title, intro, confirmLabel = '用恢复码�
 
 async function securityRevokeViaRecovery(device) {
   securityRecoveryCodeModal({
-    title: `移出设备 · 恢复码`,
-    intro: '当前为高 · 设备会签。用离线恢复码在本机签名后立即写入移出记录；恢复码不经过忆云。',
+    title: t('security.revoke.viaRecovery.title'),
+    intro: t('security.revoke.viaRecovery.intro'),
     onSubmit: async (code) => {
       await api(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, {
         method: 'POST',
@@ -2217,7 +2277,7 @@ async function securityRevokeViaRecovery(device) {
       });
       closeSecurityAction();
       await refresh();
-      showToast('已在本地移出该设备（恢复码）');
+      showToast(t('security.revoke.viaRecovery.toast'));
     },
   });
 }
@@ -2225,13 +2285,13 @@ async function securityRevokeViaRecovery(device) {
 async function securityTierViaRecovery(targetLevel) {
   const targetLabel = securityLevelLabel(targetLevel);
   securityRecoveryCodeModal({
-    title: `降级到${targetLabel} · 恢复码`,
-    intro: '当前为高 · 设备会签。用离线恢复码签署本次降档；恢复码不经过忆云。',
+    title: t('security.tier.viaRecovery.title', { level: targetLabel }),
+    intro: t('security.tier.viaRecovery.intro'),
     onSubmit: async (code) => {
       await api('/admin/api/security/tier', { method: 'POST', body: { level: targetLevel, recoveryCode: code } });
       closeSecurityAction();
       await refresh();
-      showToast(`安全等级已设为「${targetLabel}」（恢复码）`);
+      showToast(t('security.tier.setRecovery', { level: targetLabel }));
     },
   });
 }
@@ -2240,83 +2300,83 @@ async function securityTierViaRecovery(targetLevel) {
 async function securityRevokeFlow(device) {
   const level = state.security?.level ?? 'low';
   const ok = await confirmModal({
-    title: '移出设备',
-    body: `${device.deviceId} 署名的政策记录将不再被本机采纳，本机也不再向它发送数据；已同步的数据不回收；可由其他设备恢复。\n\n`
+    title: t('security.revoke.title'),
+    body: `${t('security.revoke.bodyIntro', { device: device.deviceId })}\n\n`
       + (level === 'high'
-        ? '当前为高 · 设备会签：需要另一台已准入设备核对配对号并批准，批准后本机自动完成移出。'
+        ? t('security.revoke.gate.high')
         : level === 'medium'
-          ? '当前为中 · 动态码：下一步需要输入本机 6 位动态码。'
-          : '当前为低（默认）：无额外门槛。'),
-    confirmLabel: '移出设备',
+          ? t('security.revoke.gate.medium')
+          : t('security.revoke.gate.low')),
+    confirmLabel: t('security.revoke.title'),
   });
   if (!ok) return;
   if (level === 'high') {
     try {
       await securityStartApproval({
-        title: `移出设备 · 设备会签`,
+        title: t('security.revoke.coSignTitle'),
         op: 'kick',
         target: device.deviceId,
-        intro: `${device.deviceId} 署名的政策记录将不再被本机采纳；会签批准后自动执行。`,
+        intro: t('security.revoke.intro', { device: device.deviceId }),
         onApproved: async (approvalId) => {
           await api(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, { method: 'POST', body: { approvalId } });
           closeSecurityAction();
           await refresh();
-          showToast(`已在本地移出该设备（会签）`);
+          showToast(t('security.revoke.coSignToast'));
         },
         recovery: () => securityRevokeViaRecovery(device),
       });
     } catch (error) {
-      window.alert(`发起会签失败：${error.message}`);
+      window.alert(t('security.revoke.startFailed', { message: error.message }));
     }
     return;
   }
   if (level === 'medium') {
     securityCodeModal({
-      title: `移出设备 · 动态码`,
-      intro: '输入本机 6 位动态码后写入移出记录。',
-      confirmLabel: '移出设备',
+      title: t('security.revoke.codeTitle'),
+      intro: t('security.revoke.codeIntro'),
+      confirmLabel: t('security.revoke.title'),
       onSubmit: async (code) => {
         await api(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, { method: 'POST', body: { code } });
         closeSecurityAction();
         await refresh();
-        showToast('已在本地移出该设备');
+        showToast(t('security.revoke.toast'));
       },
     });
     return;
   }
-  await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, {}, '已在本地移出该设备');
+  await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/revoke`, {}, t('security.revoke.toast'));
 }
 
 /** 恢复改道：low 直接确认；medium 要码；high 会签或恢复码。 */
 async function securityRestoreFlow(device) {
   const level = state.security?.level ?? 'low';
   const ok = await confirmModal({
-    title: '恢复设备',
-    body: `${device.deviceId} 将重新被本机接受。恢复建立新的纪元：该设备在恢复前署名的订阅/移出等策略记录不复活，需要它重新声明订阅。\n\n`
+    title: t('security.restore.title'),
+    body: `${t('security.restore.bodyIntro', { device: device.deviceId })}\n\n`
       + (level === 'high'
-        ? '当前为高 · 设备会签：需要另一台已准入设备核对配对号并批准，批准后本机自动完成恢复。'
+        ? t('security.restore.gate.high')
         : level === 'medium'
-          ? '当前为中 · 动态码：下一步需要输入本机 6 位动态码。'
-          : '当前为低（默认）：无额外门槛。'),
-    confirmLabel: '恢复设备',
+          ? t('security.revoke.gate.medium')
+          : t('security.revoke.gate.low')),
+    confirmLabel: t('security.restore.title'),
   });
   if (!ok) return;
   if (level === 'high') {
     await securityStartApproval({
-      title: '恢复设备 · 设备会签',
+      title: t('security.restore.coSignTitle'),
       op: 'restore',
       target: device.deviceId,
-      intro: `${device.deviceId} 将被恢复；旧纪元策略记录不复活。`,
+      intro: t('security.restore.intro', { device: device.deviceId }),
       onApproved: async (approvalId) => {
         await api(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/restore`, { method: 'POST', body: { approvalId } });
         closeSecurityAction();
         await refresh();
-        showToast('已恢复该设备（会签）');
+        showToast(t('security.restore.coSignToast'));
       },
       recovery: async () => {
         securityRecoveryCodeModal({
-          title: '恢复设备 · 恢复码',
-          intro: '用离线恢复码在本机签名后立即写入恢复记录；恢复码不经过忆云。',
+          title: t('security.restore.viaRecovery.title'),
+          intro: t('security.restore.viaRecovery.intro'),
           onSubmit: async (code) => {
             await api(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/restore`, {
               method: 'POST',
@@ -2324,7 +2384,7 @@ async function securityRestoreFlow(device) {
             });
             closeSecurityAction();
             await refresh();
-            showToast('已恢复该设备（恢复码）');
+            showToast(t('security.restore.viaRecovery.toast'));
           },
         });
       },
@@ -2333,19 +2393,19 @@ async function securityRestoreFlow(device) {
   }
   if (level === 'medium') {
     securityCodeModal({
-      title: '恢复设备 · 动态码',
-      intro: '输入本机 6 位动态码后写入恢复记录。',
-      confirmLabel: '恢复设备',
+      title: t('security.restore.codeTitle'),
+      intro: t('security.restore.codeIntro'),
+      confirmLabel: t('security.restore.title'),
       onSubmit: async (code) => {
         await api(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/restore`, { method: 'POST', body: { code } });
         closeSecurityAction();
         await refresh();
-        showToast('已恢复该设备');
+        showToast(t('security.restore.toast'));
       },
     });
     return;
   }
-  await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/restore`, {}, '已恢复该设备');
+  await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/restore`, {}, t('security.restore.toast'));
 }
 
 function diagBlock(id, title, body, { chip = '' } = {}) {
@@ -2361,55 +2421,61 @@ function renderDiagnostics() {
   const health = state.healthz ?? null;
   const apply = state.settings?.lastApply;
   const applyBody = (() => {
-    if (!apply) return '<p class="muted">本次进程内尚无「保存即生效」记录。</p>';
-    const statusText = {
-      applied: '已生效', 'in-progress': '重启中', mismatch: '未按预期生效',
-      'rolled-back': '新配置未生效：已回滚', 'rollback-failed': '回滚失败（需手动恢复）', failed: '应用失败',
-    }[apply.status] ?? String(apply.status);
+    if (!apply) return `<p class="muted">${escapeHtml(t('settings.diag.noApply'))}</p>`;
+    const statusKey = {
+      applied: 'settings.diag.applyStatus.applied',
+      'in-progress': 'settings.diag.applyStatus.inProgress',
+      mismatch: 'settings.diag.applyStatus.mismatch',
+      'rolled-back': 'settings.diag.applyStatus.rolledBack',
+      'rollback-failed': 'settings.diag.applyStatus.rollbackFailed',
+      failed: 'settings.diag.applyStatus.failed',
+    }[apply.status];
+    const statusText = statusKey ? t(statusKey) : String(apply.status);
     const verify = Array.isArray(apply.verify) ? apply.verify : [];
     return kvRows([
-      kvRow('状态', escapeHtml(statusText)),
-      kvRow('时间', escapeHtml(String(apply.at ?? '—'))),
-      kvRow('字段', escapeHtml((apply.fields ?? []).join(', ') || '—')),
-      ...(apply.reason ? [kvRow('原因', escapeHtml(String(apply.reason)))] : []),
-      ...(apply.backup ? [copyRowOf('备份', String(apply.backup))] : []),
-      ...(verify.length ? [kvRow('逐项校验', verify.map((row) => `${escapeHtml(row.path)}：${row.ok === true ? '✓' : row.ok === false ? '✗' : '—'}`).join(' · '))] : []),
+      kvRow(t('settings.diag.status'), escapeHtml(statusText)),
+      kvRow(t('settings.diag.time'), escapeHtml(String(apply.at ?? '—'))),
+      kvRow(t('settings.diag.fields'), escapeHtml((apply.fields ?? []).join(', ') || '—')),
+      ...(apply.reason ? [kvRow(t('settings.diag.reason'), escapeHtml(String(apply.reason)))] : []),
+      ...(apply.backup ? [copyRowOf(t('settings.diag.backup'), String(apply.backup))] : []),
+      ...(verify.length ? [kvRow(t('settings.diag.verify'), verify.map((row) => `${escapeHtml(row.path)}: ${row.ok === true ? '✓' : row.ok === false ? '✗' : '—'}`).join(' · '))] : []),
     ]);
   })();
 
+  const readonlyChip = `<span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span>`;
   return `
-    ${diagBlock('version', '版本与服务状态', kvRows([
-      kvRow('serve', health ? escapeHtml(`${health.name ?? 'mebular'} @ ${health.version ?? '—'}`) : '（未取到 /healthz）'),
-      kvRow('服务状态', health?.status ? escapeHtml(String(health.status)) : '—'),
-      kvRow('MCP 监听', `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`),
-      kvRow('TLS', s.mcp.tls ? '已启用' : '未启用（明文 HTTP）'),
-      kvRow('控制台写入', state.features.writes ? '可写（需 memory.admin + CSRF）' : '只读（D1 / MEBULAR_CONSOLE_WRITES=0）'),
-      kvRow('P2P', s.network.enabled ? '已启用' : '未启用'),
-      kvRow('状态指纹', (state.namespaces ?? []).filter((n) => n.stateHash).length
+    ${diagBlock('version', t('settings.diag.block.version'), kvRows([
+      kvRow('serve', health ? escapeHtml(`${health.name ?? 'mebular'} @ ${health.version ?? '—'}`) : escapeHtml(t('settings.diag.healthMissing'))),
+      kvRow(t('settings.diag.serviceStatus'), health?.status ? escapeHtml(String(health.status)) : '—'),
+      kvRow(t('settings.diag.mcpListen'), `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`),
+      kvRow('TLS', s.mcp.tls ? t('settings.diag.tlsOn') : t('settings.diag.tlsOff')),
+      kvRow(t('settings.diag.writes'), state.features.writes ? t('settings.diag.writesOn') : t('settings.diag.writesOff')),
+      kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled')),
+      kvRow(t('settings.diag.stateHash'), (state.namespaces ?? []).filter((n) => n.stateHash).length
         ? escapeHtml((state.namespaces ?? []).filter((n) => n.stateHash).map((n) => `${n.namespace} ${String(n.stateHash).slice(0, 10)}`).join(' · '))
         : '—'),
-    ]), { chip: '<span class="badge badge-muted">只读</span>' })}
+    ]), { chip: readonlyChip })}
 
-    ${diagBlock('rawConfig', '完整配置', `
-      <p class="muted cfg-diag-path">${escapeHtml(configPath)}${state.rawConfig?.parseError ? `（解析失败：${escapeHtml(state.rawConfig.parseError)}）` : ''}</p>
+    ${diagBlock('rawConfig', t('settings.diag.raw.title'), `
+      <p class="muted cfg-diag-path">${escapeHtml(configPath)}${state.rawConfig?.parseError ? escapeHtml(t('settings.diag.raw.parseFailed', { error: state.rawConfig.parseError })) : ''}</p>
       <div class="cfg-raw-block"><pre class="snippet">${escapeHtml(JSON.stringify(currentConfigFile(), null, 2))}</pre></div>
       <div class="domain-actions">
-        <button id="cfg-copy-all" class="btn btn-small btn-crt" type="button">复制完整配置</button>
-        <button id="cfg-download" class="btn btn-small btn-crt" type="button">下载 config.json</button>
-      </div>`, { chip: '<span class="badge badge-muted">只读</span>' })}
+        <button id="cfg-copy-all" class="btn btn-small btn-crt" type="button">${escapeHtml(t('settings.diag.raw.copy'))}</button>
+        <button id="cfg-download" class="btn btn-small btn-crt" type="button">${escapeHtml(t('settings.diag.raw.download'))}</button>
+      </div>`, { chip: readonlyChip })}
 
-    ${diagBlock('lastApply', '最近一次应用结果', applyBody, { chip: '<span class="badge badge-muted">只读</span>' })}
+    ${diagBlock('lastApply', t('settings.diag.lastApply.title'), applyBody, { chip: readonlyChip })}
 
-    ${diagBlock('connectionRepair', '手动连接', `
-      <p class="muted">同忆云设备一直未连接时，粘贴对方 multiaddr 建立传输；不改变入网信任与订阅。</p>
-      <div class="domain-actions"><button id="diag-open-wizard" class="btn btn-small btn-crt" type="button" ${state.features.writes && !MOCK ? '' : 'disabled'}>手动连接已知设备…</button></div>`)}
+    ${diagBlock('connectionRepair', t('settings.diag.connection.title'), `
+      <p class="muted">${escapeHtml(t('settings.diag.connection.note'))}</p>
+      <div class="domain-actions"><button id="diag-open-wizard" class="btn btn-small btn-crt" type="button" ${state.features.writes && !MOCK ? '' : 'disabled'}>${escapeHtml(t('settings.diag.connection.action'))}</button></div>`)}
 
-    ${diagBlock('recovery', '恢复指引', kvRows([
-      kvRow('auth 误切', '<b>bearer</b>：粘贴 <code>mebular token grant --scope memory.read,memory.admin</code> 的 token 自救；<b>oauth</b>：静态 token 401 invalid token、<code>/register</code> 默认 404（缺 <code>MEBULAR_OAUTH_ADMIN_SECRET</code> / <code>MEBULAR_OAUTH_REGISTER_SECRET</code>）——编辑 <code>config.json</code> 把 <code>mcp.http.auth</code> 改回 <code>none</code>（仅回环），重启 <code>mebular serve</code>。'),
-      kvRow('host 误设', '非回环必须 <code>auth≠none</code> + TLS + 证书，否则 serve 拒绝启动；改回 <code>127.0.0.1</code>，或补齐三件套后重启。'),
-      kvRow('缺证书', '<code>tls=true</code> 但缺 <code>tlsKey</code>/<code>tlsCert</code> → 启动报 <code>MCP_INSECURE_CONFIG</code>（不静默降级）：补路径或关闭 tls。'),
-      kvRow('控制台打不开', '看 <code>mebular status</code> 与 serve 日志：<code>MCP_STORAGE_LOCKED</code> = 已有实例持锁；<code>MCP_INSECURE_CONFIG</code> = host/auth/tls 组合非法。'),
-    ]), { chip: '<span class="crt-tag">手改 config.json 后重启</span>' })}
+    ${diagBlock('recovery', t('settings.diag.recovery.title'), kvRows([
+      kvRow(t('settings.diag.recovery.auth'), t('settings.diag.recovery.authBody')),
+      kvRow(t('settings.diag.recovery.host'), t('settings.diag.recovery.hostBody')),
+      kvRow(t('settings.diag.recovery.cert'), t('settings.diag.recovery.certBody')),
+      kvRow(t('settings.diag.recovery.console'), t('settings.diag.recovery.consoleBody')),
+    ]), { chip: `<span class="crt-tag">${escapeHtml(t('settings.diag.recovery.chip'))}</span>` })}
   `;
 }
 
@@ -2679,16 +2745,20 @@ async function submitConfigPatch(patch, warning = '') {
     // G4：自锁防护（auth/host/tls）→ 服务端要求二次确认（品牌确认卡，不发系统弹窗）
     if (error?.status === 409 && error?.payload?.needsConfirmation) {
       const lockPaths = Array.isArray(error.payload.paths) ? error.payload.paths : [];
-      const warnText = typeof warning === 'string' && warning.trim().length > 0
-        ? `\n\n风险说明：${warning.trim()}`
+      const riskText = typeof warning === 'string' && warning.trim().length > 0
+        ? `\n\n${t('settings.write.riskNote', { warning: warning.trim() })}`
         : '';
       const ok = await confirmModal({
-        title: '写入并重启（可能失联）',
-        body: `${error.payload.message ?? ''}${warnText}\n\n命中：${lockPaths.join(', ')}\n如重启后控制台打不开，请手工编辑 config.json 改回并重启。确定继续？`,
-        confirmLabel: '确认并重启',
+        title: t('settings.write.confirmTitle'),
+        body: t('settings.write.confirmBody', {
+          message: error.payload.message ?? '',
+          risk: riskText,
+          paths: lockPaths.join(', '),
+        }),
+        confirmLabel: t('settings.write.confirmLabel'),
       });
       if (!ok) {
-        const cancel = new Error('已取消（未写入）');
+        const cancel = new Error(t('settings.write.cancelled'));
         cancel.uiHandled = true;
         throw cancel;
       }
@@ -2703,7 +2773,7 @@ async function onConfigSaved(res) {
   state.rawConfig = { path: res.path, exists: true, parseError: null, config: res.config };
   lastSettingsSignature = null;
   if (res.restarting) {
-    showToast('正在自动重启使配置生效…');
+    showToast(t('settings.write.restarting'));
     await refresh().catch(() => undefined);
     renderSettings();
     await waitForServeBack();
@@ -2714,17 +2784,19 @@ async function onConfigSaved(res) {
     renderAbout();
     const applied = state.settings?.lastApply?.status;
     showToast(applied === 'rolled-back' || applied === 'rollback-failed'
-      ? '新配置未生效：已回滚（详见横幅 / 高级 · 诊断）'
-      : '已生效');
+      ? t('settings.write.rolledBack')
+      : t('settings.write.applied'));
   } else if (res.effectiveImmediately) {
-    showToast('已生效（即时生效项）');
+    showToast(t('settings.write.appliedImmediate'));
     await refresh();
     renderSettings();
     renderAbout();
   } else {
     // 前台模式：手动指引
     const cmd = res.restart?.command ?? restartCommand();
-    showToast(`已写入 ${res.path}${res.backup ? '（.bak 已备份）' : ''}；请手动重启：${cmd}`);
+    showToast(res.backup
+      ? t('settings.write.manualRestart', { path: res.path, command: cmd })
+      : t('settings.write.manualRestartNoBackup', { path: res.path, command: cmd }));
     await refresh();
     renderSettings();
   }
@@ -2734,14 +2806,14 @@ async function onConfigSaved(res) {
 async function applyConfigField(field, next) {
   const current = normalizedFieldValue(field);
   if (JSON.stringify(next) === JSON.stringify(current)) return;
-  if (MOCK) { showToast('mock 模式不执行写操作。'); return; }
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
   const patch = {};
   cfgSet(patch, field.path, next);
   try {
     const res = await submitConfigPatch(patch, field.warn ?? '');
     await onConfigSaved(res);
   } catch (error) {
-    if (!error?.uiHandled) showToast(`没保存成功：${error.message}`);
+    if (!error?.uiHandled) showToast(t('settings.write.failed', { message: error.message }));
   } finally {
     lastSettingsSignature = null;
     renderSettings();
@@ -2755,41 +2827,41 @@ async function applyConfigField(field, next) {
  */
 async function restartServeFromUi(event) {
   if (MOCK) {
-    window.alert('mock 模式不执行写操作。');
+    window.alert(t('common.mockReadOnly'));
     return;
   }
   const stateEl = document.querySelector('.cfg-restart-state');
   const btn = event?.currentTarget ?? null;
   const ok = await confirmModal({
-    title: '一键重启守护',
-    body: '将重启本机守护（mebular serve），让已保存但「待重启」的配置生效。期间控制台短暂不可用，恢复后页面自动刷新。确定？',
-    confirmLabel: '重启',
+    title: t('settings.restart.confirmTitle'),
+    body: t('settings.restart.confirmBody'),
+    confirmLabel: t('settings.restart.confirmLabel'),
   });
   if (!ok) return;
   if (btn) btn.disabled = true;
-  if (stateEl) stateEl.textContent = '正在重启…';
+  if (stateEl) stateEl.textContent = t('settings.restart.running');
   try {
     const res = await api('/admin/api/restart', { method: 'POST', body: { confirm: true } });
     if (res?.dryRun) {
-      if (stateEl) stateEl.textContent = `已排程（dry-run，未真正执行）：${res.command ?? ''}`;
+      if (stateEl) stateEl.textContent = t('settings.restart.dryRun', { command: res.command ?? '' });
       if (btn) btn.disabled = false;
       return;
     }
-    if (stateEl) stateEl.textContent = '已触发重启，等待守护恢复…';
-    showToast('已触发重启；等待守护恢复…');
+    if (stateEl) stateEl.textContent = t('settings.restart.triggered');
+    showToast(t('settings.restart.triggered'));
     await waitForServeBack();
     lastSettingsSignature = null;
     lastAboutSignature = null;
     await refresh();
     renderSettings();
     if (stateEl) stateEl.textContent = '';
-    showToast('守护已恢复');
+    showToast(t('settings.restart.restored'));
   } catch (error) {
     const manual = error?.payload?.manual ?? null;
-    if (stateEl) stateEl.textContent = manual ?? `重启失败：${error.message}`;
+    if (stateEl) stateEl.textContent = manual ?? t('settings.restart.failed', { message: error.message });
     if (btn) btn.disabled = false;
-    if (manual) window.alert(`一键重启不可用：${manual}`);
-    else window.alert(`重启失败：${error.message}`);
+    if (manual) window.alert(t('settings.restart.unavailable', { message: manual }));
+    else window.alert(t('settings.restart.failed', { message: error.message }));
   }
 }
 
@@ -2947,30 +3019,30 @@ function renderOverlays() {
 }
 
 async function serviceAction(action) {
-  const say = (t) => { state.serviceMsg = t; rerenderAssistants(); };
+  const say = (message) => { state.serviceMsg = message; rerenderAssistants(); };
   try {
-    if (action === 'recheck') { await refresh(); say('已刷新'); return; }
+    if (action === 'recheck') { await refresh(); say(t('settings.service.msg.refreshed')); return; }
     if (action === 'restart') {
       await api('/admin/api/restart', { method: 'POST', body: {} });
-      say('已请求重启；稍后本页会自动恢复。');
+      say(t('settings.service.msg.restartRequested'));
       return;
     }
     const res = await api(`/admin/api/service/${action}`, { method: 'POST', body: {}, timeoutMs: 30000 }); // launchd 安装/重启可能较慢
     if (res?.dryRun) {
       const cmds = (res.commands ?? []).map((c) => c.join(' ')).join('；');
-      say(`（试运行）将执行：${cmds}`);
+      say(t('settings.service.msg.dryRun', { commands: cmds }));
     } else {
-      say(action === 'install' ? '已开启常驻运行。' : '已取消常驻运行。');
+      say(action === 'install' ? t('settings.service.msg.installed') : t('settings.service.msg.uninstalled'));
     }
     await refresh();
   } catch (error) {
-    say(`没能完成：${error.message}。可点「重新检测」或复制诊断。`);
+    say(t('settings.service.msg.failed', { message: error.message }));
   }
 }
 
 async function clientAction(id, action) {
-  const say = (t) => { state.clientMsg[id] = t; rerenderAssistants(); };
-  const showDiff = (t) => { state.clientDiff[id] = t; rerenderAssistants(); };
+  const say = (message) => { state.clientMsg[id] = message; rerenderAssistants(); };
+  const showDiff = (message) => { state.clientDiff[id] = message; rerenderAssistants(); };
   const busyActions = ['connect', 'verify', 'verify-confirm', 'recheck', 'rollback', 'skills'];
   if (busyActions.includes(action)) { state.clientBusy[id] = action; rerenderAssistants(); } // 补丁 3：在途禁用 + 「写入中…/验证中…」
   try {
@@ -2984,40 +3056,40 @@ async function clientAction(id, action) {
         timeoutMs: 40000, // 服务端 verify CLI 最长 30s（hermes mcp test）
       });
       state.clientVerify[id] = res;
-      if (res?.state === 'connected') { state.clientRestart[id] = false; say('验证通过，已接入 ✓'); }
-      else if (res?.state === 'pending-restart') say('配置已就绪——重启该软件后生效；好了点「我已重载，验证」。');
-      else say('验证未过：展开看失败步骤与输出。');
+      if (res?.state === 'connected') { state.clientRestart[id] = false; say(t('assistants.action.verifyOk')); }
+      else if (res?.state === 'pending-restart') say(t('assistants.action.verifyReady'));
+      else say(t('assistants.action.verifyNotPassed'));
       return;
     }
-    if (action === 'recheck') { state.clientRestart[id] = false; state.clientVerify[id] = null; delete state.clientFailed[id]; await refresh(); say('已重新检测'); return; }
+    if (action === 'recheck') { state.clientRestart[id] = false; state.clientVerify[id] = null; delete state.clientFailed[id]; await refresh(); say(t('assistants.action.rechecked')); return; }
     if (action === 'copy') {
       const client = (state.clients ?? []).find((c) => c.id === id);
       await navigator.clipboard.writeText(client?.snippet ?? '');
-      say('片段已复制，粘贴到该助手的 MCP 配置即可。');
+      say(t('assistants.action.copied'));
       return;
     }
     if (action === 'preview') {
       const res = await api(`/admin/api/clients/${id}/preview`, { method: 'POST', body: {} });
-      showDiff(res.preview || '（与当前一致，无需改动）');
-      say(res.needsManual ? `需要你手动合并：${res.reason ?? ''}` : '');
+      showDiff(res.preview || t('assistants.preview.unchanged'));
+      say(res.needsManual ? t('assistants.preview.manual', { reason: res.reason ?? '' }) : '');
       return;
     }
     // R-1 小-11：回滚是不可逆方向的操作 → 应用内二次确认（取消 / Esc / 点空白 = 不执行）
     if (action === 'rollback') {
       const ok = await confirmModal({
-        title: '回滚助手配置？',
-        body: '将把该助手的配置还原到接入前（使用自动备份）。回滚会覆盖接入后写入的 Mebular 条目。',
-        confirmLabel: '回滚',
+        title: t('assistants.rollback.title'),
+        body: t('assistants.rollback.body'),
+        confirmLabel: t('assistants.rollback.confirm'),
       });
       if (!ok) return;
     }
     const res = await api(`/admin/api/clients/${id}/${action}`, { method: 'POST', body: {}, timeoutMs: 20000 }); // 写入/CLI 动作给足余量
     if (typeof res.preview === 'string' && res.preview.length > 0) showDiff(res.preview);
-    if (!res.ok) { say(`需要你手动处理：${res.reason ?? '请看片段'}`); return; }
+    if (!res.ok) { say(t('assistants.manualNeeded', { reason: res.reason ?? t('assistants.preview.chooseSnippet') })); return; }
     delete state.clientFailed[id]; // 成功/重试成功 → 清失败态
     say(action === 'connect'
-      ? (res.changed ? '接入完成（已备份原配置）。重启该助手后生效。' : '已接入（无需改动）。')
-      : action === 'rollback' ? '已还原到接入前。' : '已安装。');
+      ? (res.changed ? t('assistants.done.connectChanged') : t('assistants.done.connectUnchanged'))
+      : action === 'rollback' ? t('assistants.done.rolledBack') : t('assistants.done.installed'));
     // R-1 中-6 → UX-2 行内闭环：接入成功后挂重载提醒，「我已重载，验证」可消
     if (action === 'connect' && res.changed) { state.clientRestart[id] = true; state.clientVerify[id] = null; }
     await refresh();
@@ -3036,7 +3108,7 @@ async function clientAction(id, action) {
       state.clientRestart[id] = false;
       rerenderAssistants();
     } else {
-      say(`没能完成：${error.message}`);
+      say(t('assistants.form.failed', { message: error.message }));
     }
   } finally {
     delete state.clientBusy[id];
@@ -3053,8 +3125,8 @@ function readAssistantForm() {
   const mode = root.querySelector('input[name="asst-mode"]:checked')?.value ?? 'file';
   const id = $('#asst-add-id')?.value?.trim() ?? '';
   const name = $('#asst-add-name')?.value?.trim() ?? '';
-  if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return { error: '标识需为小写 kebab-case（如 my-assistant）' };
-  if (name === '') return { error: '名称必填' };
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return { error: t('assistants.form.error.id') };
+  if (name === '') return { error: t('assistants.form.error.name') };
   if (mode === 'snippet') {
     return {
       editId: root.dataset.editId || null,
@@ -3069,7 +3141,7 @@ function readAssistantForm() {
     };
   }
   const primaryPath = $('#asst-add-path')?.value?.trim() ?? '';
-  if (primaryPath === '') return { error: '配置文件路径必填（选文件模式）' };
+  if (primaryPath === '') return { error: t('assistants.form.error.path') };
   const format = $('#asst-add-format')?.value ?? 'mcpServers';
   return {
     editId: root.dataset.editId || null,
@@ -3092,12 +3164,12 @@ async function assistantSubmitForm() {
     const res = read.editId
       ? await api(`/admin/api/assistants/${encodeURIComponent(read.editId)}`, { method: 'PUT', body: read.descriptor })
       : await api('/admin/api/assistants', { method: 'POST', body: read.descriptor });
-    if (!res?.ok) { state.addForm = { ...(state.addForm ?? {}), error: res?.reason ?? '登记失败' }; rerenderAssistants(); return; }
+    if (!res?.ok) { state.addForm = { ...(state.addForm ?? {}), error: res?.reason ?? t('assistants.registerFailed') }; rerenderAssistants(); return; }
     state.addForm = null;
     await refresh();
     if ($('#settings') && !$('#settings').hidden) { lastSettingsSignature = null; renderSettings('assistants'); }
   } catch (error) {
-    state.addForm = { ...(state.addForm ?? {}), error: `没能完成：${error.message}` };
+    state.addForm = { ...(state.addForm ?? {}), error: t('assistants.form.failed', { message: error.message }) };
     rerenderAssistants();
   }
 }
@@ -3119,18 +3191,18 @@ function assistantStartEdit(id) {
 async function assistantRemove(id) {
   // 移除自定义条目不可恢复 → 应用内二次确认
   const ok = await confirmModal({
-    title: '移除自定义助手？',
-    body: `将移除「${id}」的登记；它已有的配置文件不改动。重新登记后可再次接入。`,
-    confirmLabel: '移除',
+    title: t('assistants.remove.title'),
+    body: t('assistants.remove.body', { id }),
+    confirmLabel: t('assistants.remove.confirm'),
   });
   if (!ok) return;
   try {
     const res = await api(`/admin/api/assistants/${encodeURIComponent(id)}/remove`, { method: 'POST', body: {} });
-    if (!res?.ok) { state.clientMsg[id] = res?.reason ?? '移除失败'; rerenderAssistants(); return; }
+    if (!res?.ok) { state.clientMsg[id] = res?.reason ?? t('assistants.remove.failed'); rerenderAssistants(); return; }
     await refresh();
     if ($('#settings') && !$('#settings').hidden) { lastSettingsSignature = null; renderSettings('assistants'); }
   } catch (error) {
-    state.clientMsg[id] = `没能完成：${error.message}`;
+    state.clientMsg[id] = t('assistants.form.failed', { message: error.message });
     rerenderAssistants();
   }
 }
@@ -4797,34 +4869,34 @@ function cloudRowHtml(entry) {
   const suggested = entry.suggestedRename === true;
   const fingerprint = entry.masterFingerprint
     ? `<code>${escapeHtml(entry.masterFingerprint)}</code>`
-    : '<span class="kv-empty">未知（需要修复）</span>';
+    : `<span class="kv-empty">${escapeHtml(t('settings.cloud.row.unknownRepair'))}</span>`;
   const lastUsed = entry.lastUsedAt ? formatTime(entry.lastUsedAt) : '—';
   const conflictBadges = duplicate
-    ? `<span class="badge badge-warn cloud-dup-badge">重名</span>${suggested ? '<span class="badge badge-warn cloud-suggest-badge">最近更新 · 建议改名</span>' : ''}`
+    ? `<span class="badge badge-warn cloud-dup-badge">${escapeHtml(t('settings.cloud.row.duplicate'))}</span>${suggested ? `<span class="badge badge-warn cloud-suggest-badge">${escapeHtml(t('settings.cloud.row.suggestRename'))}</span>` : ''}`
     : '';
   // 第一版：只有当前忆云能写网络级名字；归档项提示切换后再改。
   const renameUi = current
     ? (renaming
       ? `<input class="crt-input cloud-rename-input" data-cloud-rename-input type="text" maxlength="24"
-           value="${escapeHtml(state.cloudRename?.name ?? entry.name)}" aria-label="忆云名字" />
-         <button class="btn btn-small btn-crt" data-cloud-rename-save type="button" ${cloudRenameBusy ? 'disabled' : ''}>保存</button>
-         <button class="btn btn-small" data-cloud-rename-cancel type="button">取消</button>`
-      : `<button class="btn btn-small btn-crt" data-cloud-rename="${id}" type="button">改名</button>`)
-    : `<button class="btn btn-small btn-crt btn-crt-danger" data-cloud-switch="${id}" type="button">切换</button>
-       <span class="cloud-rename-hint muted">切换到该忆云后可改名</span>`;
+           value="${escapeHtml(state.cloudRename?.name ?? entry.name)}" aria-label="${escapeHtml(t('settings.cloud.rename.aria'))}" />
+         <button class="btn btn-small btn-crt" data-cloud-rename-save type="button" ${cloudRenameBusy ? 'disabled' : ''}>${escapeHtml(t('settings.cloud.rename.save'))}</button>
+         <button class="btn btn-small" data-cloud-rename-cancel type="button">${escapeHtml(t('common.cancel'))}</button>`
+      : `<button class="btn btn-small btn-crt" data-cloud-rename="${id}" type="button">${escapeHtml(t('settings.cloud.rename.action'))}</button>`)
+    : `<button class="btn btn-small btn-crt btn-crt-danger" data-cloud-switch="${id}" type="button">${escapeHtml(t('settings.cloud.row.switch'))}</button>
+       <span class="cloud-rename-hint muted">${escapeHtml(t('settings.cloud.row.switchHint'))}</span>`;
   return `<div class="cloud-row${current ? ' is-current' : ''}${duplicate ? ' is-duplicate' : ''}" data-cloud-row="${id}">
     <div class="cloud-main">
       <span class="cloud-name">${escapeHtml(entry.name)}</span>
-      <span class="badge ${current ? 'badge-ok' : 'badge-muted'}">${current ? '当前' : '已归档'}</span>
+      <span class="badge ${current ? 'badge-ok' : 'badge-muted'}">${escapeHtml(t(current ? 'settings.cloud.row.current' : 'settings.cloud.row.archived'))}</span>
       ${conflictBadges}
     </div>
     <div class="cloud-meta">
-      <span>根指纹 ${fingerprint}</span>
-      <span>最近使用 ${escapeHtml(lastUsed)}</span>
-      ${entry.nameUpdatedAt ? `<span>名字更新 ${escapeHtml(formatTime(entry.nameUpdatedAt))}</span>` : ''}
+      <span>${t('settings.cloud.row.rootFingerprint', { fingerprint })}</span>
+      <span>${escapeHtml(t('settings.cloud.row.lastUsed', { time: lastUsed }))}</span>
+      ${entry.nameUpdatedAt ? `<span>${escapeHtml(t('settings.cloud.row.nameUpdated', { time: formatTime(entry.nameUpdatedAt) }))}</span>` : ''}
     </div>
     <div class="cloud-actions">${renameUi}</div>
-    ${current ? '<p class="cfg-help muted cloud-rename-note">改名会同步到所有设备（不改根指纹/信任）。</p>' : ''}
+    ${current ? `<p class="cfg-help muted cloud-rename-note">${escapeHtml(t('settings.cloud.row.renameNote'))}</p>` : ''}
     ${renaming && state.cloudRenameError ? `<p class="crt-warn cloud-rename-error" role="alert">${escapeHtml(state.cloudRenameError)}</p>` : ''}
   </div>`;
 }
@@ -4835,20 +4907,20 @@ function cloudCardHtml() {
   if (state.clouds) {
     const rows = (state.clouds.profiles ?? []).map(cloudRowHtml).join('');
     body = `${state.clouds.warning ? `<p class="crt-warn">${escapeHtml(state.clouds.warning)}</p>` : ''}
-      <div class="cloud-rows">${rows || '<p class="muted">还没有忆云记录。</p>'}</div>
-      <p class="cfg-help muted">当前忆云不可切换；已归档忆云切换前会确认。改名会同步到所有设备，不需要重启；已归档忆云需切换后再改名。</p>
+      <div class="cloud-rows">${rows || `<p class="muted">${escapeHtml(t('settings.cloud.empty'))}</p>`}</div>
+      <p class="cfg-help muted">${escapeHtml(t('settings.cloud.note'))}</p>
       ${state.clouds.nameConflicts?.currentDuplicate
-        ? '<p class="crt-warn">本机有同名忆云：当前忆云已加警告点。请给「最近更新 · 建议改名」的那一项换一个名字。</p>'
+        ? `<p class="crt-warn">${escapeHtml(t('settings.cloud.duplicate'))}</p>`
         : ''}`;
   } else if (state.cloudsError) {
     const { title, detail } = cloudErrorCopy(state.cloudsError);
     body = `<p class="cloud-unavailable">${escapeHtml(title)}</p>${detail ? `<p class="cfg-help muted">${escapeHtml(detail)}</p>` : ''}`;
   } else {
-    body = '<p class="muted">正在读取忆云…</p>';
+    body = `<p class="muted">${escapeHtml(t('settings.cloud.loading'))}</p>`;
   }
   return `<section id="settings-cloud-card" class="settings-section cloud-card" data-settings-clouds tabindex="-1">
-    <h3>忆云 <span class="badge badge-muted">归档保留，不删除</span></h3>
-    <p class="muted cloud-intro">加入忆云不会修改当前忆云；切换后原忆云归档保留，随时可以切回。</p>
+    <h3>${escapeHtml(t('settings.cloud.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.cloud.keepArchived'))}</span></h3>
+    <p class="muted cloud-intro">${escapeHtml(t('settings.cloud.intro'))}</p>
     ${body}
   </section>`;
 }
@@ -4871,7 +4943,7 @@ function startCloudRename(id) {
   const entry = state.clouds?.profiles?.find((item) => item.id === id);
   if (!entry) return;
   if (!entry.current) {
-    showToast('归档忆云不支持改名；请切换到该忆云后再改。');
+    showToast(t('cloud.error.cloudArchived'));
     return;
   }
   state.cloudRename = { id, name: entry.name };
@@ -4890,7 +4962,7 @@ async function saveCloudRename() {
   const { id } = state.cloudRename;
   const name = String(state.cloudRename.name ?? '').trim();
   if (name.length === 0) {
-    state.cloudRenameError = '忆云名字不能为空。';
+    state.cloudRenameError = t('settings.cloud.rename.empty');
     renderSettings(state.settingsTab ?? 'common');
     return;
   }
@@ -4902,7 +4974,7 @@ async function saveCloudRename() {
     state.cloudRename = null;
     state.cloudRenameError = '';
     await refresh();
-    showToast(`已改名为「${name}」；不需要重启。`);
+    showToast(t('settings.cloud.rename.success', { name }));
   } catch (error) {
     const { title, detail } = cloudErrorCopy(error);
     state.cloudRenameError = detail ? `${title}（${detail}）` : title;

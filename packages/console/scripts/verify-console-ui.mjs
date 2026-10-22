@@ -2448,6 +2448,100 @@ async function main() {
       JSON.stringify(language390));
     await captureNow('i18n-en-language-390.jpg');
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+
+    // B · 设置深度页（常用 / 安全 / AI 助手 / MCP / 高级 / 诊断）：英文文案 + 无中文兜底。
+    const settingsPanelsProbe = `(() => {
+      const panel = (id) => document.querySelector('#settings-panel-' + id)?.innerText ?? '';
+      const hasCjk = (text) => /[\\u3400-\\u9fff]/.test(text ?? '');
+      const tabs = [...document.querySelectorAll('#settings-body .settings-tab:not(.settings-tab-extra)')].map((el) => el.textContent.trim());
+      const extra = document.querySelector('#settings-body .settings-tab-extra')?.textContent.trim() ?? '';
+      const out = { lang: document.documentElement.lang, tabs, extra, panels: {}, cjk: {}, open: {} };
+      const full = {};
+      for (const id of ['common', 'security', 'assistants', 'mcp', 'advanced']) {
+        document.querySelector('[data-settings-tab=' + id + ']')?.click();
+        const text = panel(id);
+        full[id] = text;
+        out.panels[id] = text.slice(0, 400);
+        out.cjk[id] = hasCjk(text);
+      }
+      const fold = document.querySelector('#diag-fold');
+      if (fold) fold.open = true;
+      const diag = document.querySelector('#diag-fold')?.innerText ?? '';
+      out.diag = diag.slice(0, 600);
+      out.diagCjk = hasCjk(diag);
+      out.has = {
+        language: /Language/.test(full.common),
+        commonStatus: /This device/.test(full.common),
+        service: /Resident/.test(full.common),
+        securitySections: /Security level/.test(full.security) && /Authenticator seed/.test(full.security) && /Recovery code/.test(full.security),
+        assistants: /Add assistant/.test(full.assistants),
+        mcp: /Connection/.test(full.mcp) && /TLS/.test(full.mcp) && /Risks and recovery/.test(full.mcp),
+        advanced: /Resident service/.test(full.advanced) && /Network/.test(full.advanced) && /Automation/.test(full.advanced) && /Diagnostics and recovery/.test(full.advanced),
+        diagnostics: /Version and service status/.test(diag) && /Recovery guide/.test(diag) && /Full configuration/.test(diag),
+      };
+      document.querySelector('[data-settings-tab=common]')?.click();
+      return out;
+    })()`;
+    const settingsPanels = await evalJs(settingsPanelsProbe);
+    check('i18n 设置深度页英文：五个页签 + 通用/安全/AI 助手/MCP/高级 段落文案全英文',
+      settingsPanels.lang === 'en-US'
+        && settingsPanels.tabs.join(',') === 'General,Security,AI assistants,MCP access,Advanced'
+        && settingsPanels.extra === 'About this device'
+        && Object.values(settingsPanels.has).every(Boolean)
+        && settingsPanels.cjk.security === false,
+      JSON.stringify(settingsPanels));
+    check('i18n 设置深度页英文：诊断与恢复折叠（版本/完整配置/恢复指引）无中文兜底',
+      settingsPanels.has.diagnostics === true
+        && !/恢复指引|完整配置|版本与服务状态|最近一次应用结果/.test(settingsPanels.diag ?? ''),
+      JSON.stringify({ cjk: settingsPanels.diagCjk, sample: settingsPanels.diag?.slice(0, 200) }));
+    await captureNow('i18n-en-settings-deep-1440.jpg');
+
+    // 安全流程弹层：TOTP 导入弹层（标题/字段/占位/按钮/帮助全英文，无中文兜底）
+    await evalJs(`(() => {
+      document.querySelector('[data-settings-tab=security]')?.click();
+      document.querySelector('[data-security-action=totp-import]')?.click();
+    })()`);
+    const securityDialogProbe = `(() => {
+      const modal = document.querySelector('#security-action');
+      if (!modal || modal.hidden) return { open: false };
+      const body = modal.querySelector('#security-action-body');
+      const values = [
+        document.querySelector('#security-action-title')?.textContent,
+        body?.innerText,
+        document.querySelector('#security-action-close')?.textContent,
+        document.querySelector('#security-action-confirm')?.textContent,
+        body?.querySelector('textarea')?.placeholder,
+      ];
+      return {
+        open: true,
+        title: document.querySelector('#security-action-title')?.textContent.trim() ?? '',
+        body: body?.innerText ?? '',
+        placeholder: body?.querySelector('textarea')?.placeholder ?? '',
+        close: document.querySelector('#security-action-close')?.textContent.trim() ?? '',
+        confirm: document.querySelector('#security-action-confirm')?.textContent.trim() ?? '',
+        cjk: values.some((value) => /[\\u3400-\\u9fff]/.test(value ?? '')),
+      };
+    })()`;
+    const securityDialog = await (async () => {
+      for (let i = 0; i < 20; i += 1) {
+        const probe = await evalJs(securityDialogProbe);
+        if (probe.open) return probe;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      return evalJs(securityDialogProbe);
+    })();
+    check('i18n 安全流程弹层英文：TOTP 导入标题/字段/占位/按钮/帮助无中文兜底',
+      securityDialog.open === true && securityDialog.cjk === false
+        && securityDialog.title === 'Import authenticator seed'
+        && /Seed \(grouped text \/ otpauth URI\)/.test(securityDialog.body)
+        && /ABCD EFGH IJKL/.test(securityDialog.placeholder)
+        && securityDialog.confirm === 'Import' && securityDialog.close === 'Close',
+      JSON.stringify(securityDialog));
+    await captureNow('i18n-en-security-dialog-1440.jpg');
+    await evalJs('document.querySelector("#security-action-close")?.click()');
+    await waitFor('document.querySelector("#security-action")?.hidden === true');
+    await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
+
     await evalJs('document.querySelector("#settings-close").click()');
     await waitFor('document.querySelector("#settings")?.hidden === true');
 

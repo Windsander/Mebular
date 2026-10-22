@@ -803,11 +803,17 @@ try {
     // 前台模式：无 lastApply（未发生自动重启）；控制台接线齐备
     check('G 前台模式不产生自动重启记录（lastApply 为空）', !gSettings.json?.lastApply);
     const consoleSrc3 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const zhCopy3 = JSON.parse(await readFile(join(rootDir, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
     check(
       'G 控制台接线：写入并重启 / 自动重启中 / 已生效 / 已回滚 / 最近一次应用结果（简化轮即时生效）',
-      consoleSrc3.includes('确认并重启') && consoleSrc3.includes('正在自动重启使配置生效…')
-        && consoleSrc3.includes('已生效') && consoleSrc3.includes('已回滚')
-        && consoleSrc3.includes('最近一次应用结果') && consoleSrc3.includes('needsConfirmation'),
+      consoleSrc3.includes("t('settings.write.confirmLabel')") && consoleSrc3.includes("t('settings.write.restarting')")
+        && consoleSrc3.includes("t('settings.write.applied')") && consoleSrc3.includes("t('settings.write.rolledBack')")
+        && consoleSrc3.includes("t('settings.diag.lastApply.title')") && consoleSrc3.includes('needsConfirmation')
+        && zhCopy3['settings.write.confirmLabel'] === '确认并重启'
+        && zhCopy3['settings.write.restarting'] === '正在自动重启使配置生效…'
+        && zhCopy3['settings.write.applied'] === '已生效'
+        && zhCopy3['settings.write.rolledBack'].includes('已回滚')
+        && zhCopy3['settings.diag.lastApply.title'] === '最近一次应用结果',
     );
   }
 
@@ -1451,27 +1457,39 @@ try {
       `config.enabled=${rawSemantic.json?.config?.semantic?.enabled} runtime.enabled=${runtimeSemantic} transformers=${transformersInstalled}`);
     await writeFile(join(home, 'config.json'), JSON.stringify(cfgRaw, null, 2), 'utf-8');
     const consoleSrc = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const zhCopyFc4 = JSON.parse(await readFile(join(rootDir, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
     // A：编辑器文案已随单一真源迁到 config-schema.mjs（serve 端），控制台只保留运行状态/恢复指引类文案
     const schemaSrc = await readFile(join(rootDir, 'packages', 'mcp', 'src', 'config-schema.mjs'), 'utf-8');
     const neededInConsole = [
-      'MEBULAR_OAUTH_ADMIN_SECRET', // 恢复指引：auth 误切（oauth）
-      'tlsKey',                      // 证书可编辑/恢复
+      "t('settings.diag.recovery.authBody')", // 恢复指引：auth 误切（oauth）
+      'localizedFieldCopy',          // 证书可编辑/恢复（IA_FIELD_COPY → locale key）
       'TLS',                         // 实际运行状态展示
-      '已配置',                       // F-C8 双行：已配置 X / 实际 Y
-      '实际',                         // F-C8
+      "t('settings.editor.configured')", // F-C8 双行：已配置 X / 实际 Y
+      "t('settings.editor.actual')", // F-C8
       'endpoint',                    // F-C6 邀请端点可编辑/展示
       'token grant',                 // F-C7 auth 误切恢复步骤
-      '未生效原因',                    // D：三元组第三列
+      "t('settings.editor.reasonKey')", // D：三元组第三列
+    ];
+    const neededInConsoleCopy = [
+      'MEBULAR_OAUTH_ADMIN_SECRET',
+      'token grant',
     ];
     const neededInSchema = [
       '@huggingface/transformers',  // semantic warn（单一真源）
       'quickstart 依赖 LAN 可达',    // joinService.bind 文案诚实
       '非回环',                      // mcp.http.host warn
     ];
+    const iaSrcFc4 = await readFile(join(consoleDir, 'settings-ia.js'), 'utf-8');
+    const neededInIa = ["'settings.fields.mcpTlsKey.label'", "'settings.fields.mcpTlsCert.label'", "'settings.fields.mcpAuth.label'"];
     check('F-C4 文案/工具面诚实化（oauth/semantic/joinService.bind/host/TLS）',
       neededInConsole.every((token) => consoleSrc.includes(token))
+        && neededInIa.every((token) => iaSrcFc4.includes(token))
+        && zhCopyFc4['settings.editor.configured'] === '已配置'
+        && zhCopyFc4['settings.editor.actual'] === '实际'
+        && zhCopyFc4['settings.editor.reasonKey'] === '未生效原因'
+        && neededInConsoleCopy.every((token) => zhCopyFc4['settings.diag.recovery.authBody'].includes(token))
         && neededInSchema.every((token) => schemaSrc.includes(token)),
-      `console 缺=${neededInConsole.filter((t) => !consoleSrc.includes(t)).join(',') || '无'} schema 缺=${neededInSchema.filter((t) => !schemaSrc.includes(t)).join(',') || '无'}`);
+      `console 缺=${neededInConsole.filter((token) => !consoleSrc.includes(token)).join(',') || '无'} schema 缺=${neededInSchema.filter((token) => !schemaSrc.includes(token)).join(',') || '无'}`);
   }
 
   // ---------- IA（设置页信息架构：常用/高级/诊断 + 关于本机） ----------
@@ -1539,6 +1557,7 @@ try {
 
     const htmlSrc = await readFile(join(consoleDir, 'index.html'), 'utf-8');
     const consoleSrc2 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const zhCopy2 = JSON.parse(await readFile(join(rootDir, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
     const dropdownSrc = await readFile(join(consoleDir, 'dropdown.mjs'), 'utf-8');
     const i18nSrc = await readFile(join(consoleDir, 'i18n.mjs'), 'utf-8');
     const assistantsSrc = await readFile(join(consoleDir, 'assistants.js'), 'utf-8');
@@ -1615,13 +1634,25 @@ try {
     check('C 一键重启接线（按钮 + POST /admin/api/restart + 二次确认 + 手动指引回退）',
       consoleSrc2.includes("data-cfg-action=\"restart\"") && consoleSrc2.includes('/admin/api/restart')
         && consoleSrc2.includes('confirmModal') && consoleSrc2.includes('not_service_managed') === false
-        && consoleSrc2.includes('手动重启'),
+        && consoleSrc2.includes("t('settings.pending.manual')"),
       'restart 按钮/接口/确认/回退齐备');
 
     const recoveryTokens = ['auth 误切', 'host 误设', '缺证书', '控制台打不开', 'MCP_INSECURE_CONFIG', 'MCP_STORAGE_LOCKED', 'token grant'];
+    const recoveryCopy = [
+      zhCopy2['settings.diag.recovery.auth'],
+      zhCopy2['settings.diag.recovery.host'],
+      zhCopy2['settings.diag.recovery.cert'],
+      zhCopy2['settings.diag.recovery.console'],
+      zhCopy2['settings.diag.recovery.authBody'],
+      zhCopy2['settings.diag.recovery.hostBody'],
+      zhCopy2['settings.diag.recovery.certBody'],
+      zhCopy2['settings.diag.recovery.consoleBody'],
+    ].join('\n');
     check('IA 诊断恢复指引文案完整（auth 误切 / host 误设 / 缺证书 / 控制台打不开）',
-      recoveryTokens.every((token) => consoleSrc2.includes(token)),
-      recoveryTokens.filter((token) => !consoleSrc2.includes(token)).join(',') || '全部命中');
+      recoveryTokens.every((token) => recoveryCopy.includes(token))
+        && ["t('settings.diag.recovery.auth')", "t('settings.diag.recovery.host')", "t('settings.diag.recovery.cert')", "t('settings.diag.recovery.console')"]
+          .every((call) => consoleSrc2.includes(call)),
+      recoveryTokens.filter((token) => !recoveryCopy.includes(token)).join(',') || '全部命中');
   }
 
   // ---------- 排版不变量：单一 kv 行模板 / cfg 行同构 / token 化间距 / 无内联宽 ----------
@@ -1664,6 +1695,7 @@ try {
     const htmlSrc = await readFile(join(consoleDir, 'index.html'), 'utf-8');
     // E1 断言沿用 consoleSrc2 命名（与本段 jsSrc 同源）
     const consoleSrc2 = jsSrc;
+    const zhCopy2 = JSON.parse(await readFile(join(rootDir, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
 
     check('轮 C ① 弹层壳：背板固定不滚 + .modal-box 限高内滚（六处弹层共用）',
       /\.modal \{[^}]*overflow: hidden;[^}]*padding: 24px;/.test(cssSrc)
@@ -1771,18 +1803,23 @@ try {
     check('E2-A2 忆云卡：设置·常用只读状态之后 / 当前不可切换 / 仅当前项可改名 / 无删除入口',
       consoleSrc2.includes('settings-cloud-card')
         && consoleSrc2.includes('/admin/api/clouds/rename')
-        && consoleSrc2.includes('归档保留，不删除')
+        && consoleSrc2.includes("t('settings.cloud.keepArchived')")
+        && zhCopy2['settings.cloud.keepArchived'] === '归档保留，不删除'
         && !consoleSrc2.includes('data-cloud-delete')
         && !consoleSrc2.includes('删除忆云')
         && /cloudRowHtml[\s\S]{0,1800}const renameUi = current/.test(consoleSrc2)
-        && consoleSrc2.includes('切换到该忆云后可改名')
-        && consoleSrc2.includes('改名会同步到所有设备')
+        && consoleSrc2.includes("t('settings.cloud.row.switchHint')")
+        && zhCopy2['settings.cloud.row.switchHint'] === '切换到该忆云后可改名'
+        && consoleSrc2.includes("t('settings.cloud.row.renameNote')")
+        && zhCopy2['settings.cloud.row.renameNote'].startsWith('改名会同步到所有设备')
         && consoleSrc2.indexOf('settings-common-status') < consoleSrc2.indexOf('cloudCardHtml()'),
       '当前项无切换按钮；归档项不提供改名；无删除');
     check('云名重名：重名 / 最近更新·建议改名 / 顶栏警告点 / 设备名编辑入口',
       consoleSrc2.includes('duplicateName') && consoleSrc2.includes('suggestedRename')
-        && consoleSrc2.includes('cloud-warning-dot') && consoleSrc2.includes('重名')
-        && consoleSrc2.includes('最近更新 · 建议改名')
+        && consoleSrc2.includes('cloud-warning-dot')
+        && zhCopy2['settings.cloud.row.duplicate'] === '重名'
+        && zhCopy2['settings.cloud.row.suggestRename'] === '最近更新 · 建议改名'
+        && consoleSrc2.includes("t('settings.cloud.row.suggestRename')")
         && consoleSrc2.includes('/admin/api/devices/self/name')
         && consoleSrc2.includes('data-device-rename')
         && consoleSrc2.includes('只有本人可改'),
@@ -2391,17 +2428,21 @@ try {
     const consoleSrcSec = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     const htmlSec = await readFile(join(consoleDir, 'index.html'), 'utf-8');
     const cssSec = await readFile(join(consoleDir, 'console.css'), 'utf-8');
+    const zhCopySec = JSON.parse(await readFile(join(rootDir, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
     check('S3 前端锚点：安全卡（设置·安全 tab），插槽不再隐藏',
       /id="settings-security-slot"/.test(consoleSrcSec) && !/settings-slot[^>]*hidden/.test(consoleSrcSec)
         && /securityCardHtml/.test(consoleSrcSec)
-        && /中 · 动态码/.test(consoleSrcSec)
-        && /高 · 设备会签/.test(consoleSrcSec)
-        && /挡顺手/.test(consoleSrcSec) && /不挡设备被拿走/.test(consoleSrcSec));
+        && zhCopySec['settings.security.tier.medium.title'] === '中 · 动态码'
+        && zhCopySec['settings.security.tier.high.title'] === '高 · 设备会签'
+        && consoleSrcSec.includes('SECURITY_LEVEL_TITLE_KEY')
+        && zhCopySec['security.upgrade.mediumBody'].includes('挡顺手')
+        && zhCopySec['security.upgrade.mediumBody'].includes('不挡设备被拿走'));
     check('S3 前端锚点：三操作改道（邀请 medium 码 / high 会签；移出按档位分级；批准侧）',
       /async function openInvite/.test(consoleSrcSec) && /securityCodeModal/.test(consoleSrcSec)
         && /securityStartApproval/.test(consoleSrcSec) && /securityRevokeFlow/.test(consoleSrcSec)
         && /data-security-action/.test(consoleSrcSec) && /pendingApprovals/.test(consoleSrcSec)
-        && /配对号一致，批准/.test(consoleSrcSec));
+        && consoleSrcSec.includes("t('settings.security.approval.approve')")
+        && zhCopySec['settings.security.approval.approve'] === '配对号一致，批准');
     check('S4 前端锚点：高档移出/降档「用恢复码执行」入口 + 码输入不回显/不落 localStorage',
       /securityRecoveryCodeModal/.test(consoleSrcSec)
         && /data-security-recovery-switch/.test(consoleSrcSec)
@@ -2415,8 +2456,9 @@ try {
         && /待批准/.test(await readFile(join(consoleDir, 'assistants.js'), 'utf-8')));
     check('S3 前端锚点：审计安全过滤器/标签/拒绝原因映射',
       htmlSec.includes('value="security_tier"') && htmlSec.includes('value="security_approval"')
-        && /安全等级变更/.test(consoleSrcSec) && /设备会签/.test(consoleSrcSec)
-        && /缺少会签证明/.test(consoleSrcSec));
+        && /安全等级变更/.test(consoleSrcSec) && /设备会签/.test(zhCopySec['settings.security.tier.high.title'])
+        && consoleSrcSec.includes("'settings.security.rejection.missingProof'")
+        && zhCopySec['settings.security.rejection.missingProof'] === '缺少会签证明');
     check('S3 前端锚点：a11y（配对号 aria-live / 恢复码焦点）+ reduced-motion + 窄屏样式',
       /aria-live="polite"/.test(consoleSrcSec) && /tabindex="-1"/.test(consoleSrcSec)
         && /prefers-reduced-motion/.test(cssSec) && /settings-security-slot/.test(cssSec)

@@ -514,9 +514,8 @@ function showQuitConfirmation(plan) {
       resolve(false);
       return;
     }
-    let dialogWin;
     try {
-      dialogWin = ensureQuitDialog();
+      ensureQuitDialog();
     } catch (error) {
       console.log(`[desktop] 退出确认窗口创建失败：${error?.message ?? error}`);
       resolve(false);

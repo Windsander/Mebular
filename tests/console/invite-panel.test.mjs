@@ -145,28 +145,45 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     const end = consoleJs.indexOf('/** 令牌结果面板', start);
     const helper = start >= 0 && end > start ? consoleJs.slice(start, end) : '';
     expect(helper.length).toBeGreaterThan(0);
-    expect(helper).toContain('当前令牌至 ${formatClock(current.expiresAt)}');
-    expect(helper).toContain('重新生成后至 ${formatClock(Date.now() + ttlMs)}');
+    expect(helper).toContain('当前令牌至 ${formatExpiry(current.expiresAt)}');
+    expect(helper).toContain('重新生成后至 ${formatExpiry(Date.now() + ttlMs)}');
     expect(helper).toContain('Number(current.ttlMs) === Number(ttlMs)');
     expect(consoleJs).not.toContain('改档后点');
   });
 
-  it('令牌块带可见短指纹：同令牌稳定、换令牌必变；不只靠截断区分新旧', () => {
-    const start = consoleJs.indexOf('function inviteTokenFingerprint');
-    const end = start >= 0 ? consoleJs.indexOf('\n}', start) : -1;
-    const source = start >= 0 && end > start ? consoleJs.slice(start, end + 2) : '';
-    expect(source.length).toBeGreaterThan(0);
-    const fingerprintOf = new Function(`${source}\nreturn inviteTokenFingerprint;`)();
-    const first = 'mebular-join.v1.aaaabbbbccccddddeeeeffff00001111';
-    const second = 'mebular-join.v1.aaaabbbbccccddddeeeeffff22223333';
-    expect(fingerprintOf(first)).toMatch(/^[0-9a-f]{8}$/);
-    expect(fingerprintOf(first)).toBe(fingerprintOf(first));
-    expect(fingerprintOf(first)).not.toBe(fingerprintOf(second));
+  it('令牌块带可见短指纹：同令牌稳定、换令牌必变；蓝色文本中段嵌入指纹', () => {
+    const fingerprintStart = consoleJs.indexOf('function inviteTokenFingerprint');
+    const fingerprintEnd = fingerprintStart >= 0 ? consoleJs.indexOf('\n}', fingerprintStart) : -1;
+    const fingerprintSource = fingerprintStart >= 0 && fingerprintEnd > fingerprintStart
+      ? consoleJs.slice(fingerprintStart, fingerprintEnd + 2)
+      : '';
+    const shortStart = consoleJs.indexOf('function inviteTokenShortText');
+    const shortEnd = shortStart >= 0 ? consoleJs.indexOf('\n}', shortStart) : -1;
+    const shortSource = shortStart >= 0 && shortEnd > shortStart
+      ? consoleJs.slice(shortStart, shortEnd + 2)
+      : '';
+    expect(fingerprintSource.length).toBeGreaterThan(0);
+    expect(shortSource.length).toBeGreaterThan(0);
+    const { inviteTokenFingerprint, inviteTokenShortText } = new Function(
+      `${fingerprintSource}\n${shortSource}\nreturn { inviteTokenFingerprint, inviteTokenShortText };`,
+    )();
+    const prefix = 'mebular-join.v1.';
+    const first = `${prefix}${'a'.repeat(24)}${'f'.repeat(8)}`;
+    const second = `${prefix}${'b'.repeat(24)}${'f'.repeat(8)}`;
+    expect(inviteTokenFingerprint(first)).toMatch(/^[0-9a-f]{8}$/);
+    expect(inviteTokenFingerprint(first)).toBe(inviteTokenFingerprint(first));
+    expect(inviteTokenFingerprint(first)).not.toBe(inviteTokenFingerprint(second));
+    // 前缀与后 8 位完全相同，只有中段 nonce 不同：蓝色文本仍必须肉眼不同。
+    expect(inviteTokenShortText(first)).toContain(`#${inviteTokenFingerprint(first)}`);
+    expect(inviteTokenShortText(second)).toContain(`#${inviteTokenFingerprint(second)}`);
+    expect(inviteTokenShortText(first)).not.toBe(inviteTokenShortText(second));
+    expect(inviteTokenShortText(first)).toContain('…');
 
     const panel = invitePanelSource();
     expect(panel).toContain('id="invite-token-fingerprint"');
     expect(panel).toContain('令牌 #${tokenFingerprint}');
     expect(panel).toContain('const tokenFingerprint = inviteTokenFingerprint(res.token)');
+    expect(panel).toContain('const shortToken = inviteTokenShortText(res.token)');
     expect(panel).toContain('escapeHtml(shortToken)');
   });
 
@@ -189,7 +206,7 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
 
   it('有效期 / 到期时刻 / 重新生成同排 flex：空间不足才换行，重新生成靠右且为次级动作', () => {
     const css = readFileSync(join(root, 'packages', 'console', 'console.css'), 'utf-8');
-    expect(css).toMatch(/\.invite-controls \{[^}]*display: flex;[^}]*flex-wrap: wrap;[^}]*gap: 8px 10px/);
+    expect(css).toMatch(/\.invite-controls \{[^}]*display: flex;[^}]*flex-wrap: wrap;[^}]*gap: 8px/);
     expect(css).toMatch(/\.invite-controls #invite-regenerate \{ margin-left: auto; \}/);
     expect(css).not.toMatch(/\.invite-controls #invite-regenerate \{[^}]*grid-column/);
     expect(css).not.toMatch(/\.invite-expiry \{[^}]*grid-column/);

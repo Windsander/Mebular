@@ -12,7 +12,7 @@ import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
 import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINES, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE, SECURITY_LEVEL_NOTE, SECURITY_BOUNDARY, SECURITY_TOTP_FOOT, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
-import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, isI18nReady, formatTime as formatLocaleTime, formatDateTime as formatLocaleDateTime } from './i18n.mjs';
+import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, LOCALE_STORAGE_KEY, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
 
 const $ = (selector) => document.querySelector(selector);
 const params = new URLSearchParams(location.search);
@@ -81,9 +81,10 @@ const state = {
 const stage = new StarStage($('#stage'));
 
 // i18n foundation：首帧同步静态顶栏/导航；语言变化时重渲染当前页与已开设置/关于弹层（不 reload）。
-// catalog 未就绪时强制停留在 zh-CN（即使系统语言是英文），避免普通用户看到半套英文；
-// ?lang= / ?i18n=1 / 桌面壳 i18nReady 会打开就绪开关，此时才采用系统语言。
-if (!isI18nReady() && getLocale() !== 'zh-CN') setLocale('zh-CN', { persist: false });
+// 语言行已默认开放；只有 ?lang= 或已保存偏好才覆盖默认 zh-CN。
+// 未选择时不跟随英文系统语言，避免首次打开就落入半翻译界面。
+const hasExplicitLocale = Boolean(params.get('lang')?.trim()) || Boolean(localStorage.getItem(LOCALE_STORAGE_KEY));
+if (!hasExplicitLocale && getLocale() !== 'zh-CN') setLocale('zh-CN', { persist: false });
 applyStaticI18n(document);
 onLocaleChange(() => {
   applyStaticI18n(document);
@@ -4534,9 +4535,16 @@ function inviteTokenFingerprint(token) {
 function inviteExpiryLabel(ttlMs = state.inviteTtlMs) {
   const current = state.inviteToken;
   if (current && current.expiresAt && Number(current.ttlMs) === Number(ttlMs)) {
-    return `当前令牌至 ${formatClock(current.expiresAt)}`;
+    return `当前令牌至 ${formatExpiry(current.expiresAt)}`;
   }
-  return `重新生成后至 ${formatClock(Date.now() + ttlMs)}`;
+  return `重新生成后至 ${formatExpiry(Date.now() + ttlMs)}`;
+}
+
+/** 蓝色代码块文本：长令牌显示「前缀…指纹…后8」，保证重新生成后肉眼可辨。 */
+function inviteTokenShortText(token) {
+  const text = String(token ?? '');
+  if (text.length <= 40) return text;
+  return `${text.slice(0, 12)}…#${inviteTokenFingerprint(text)}…${text.slice(-8)}`;
 }
 
 /** 令牌结果面板（low 直接出；medium/high 门槛通过后复用同一面板）。 */
@@ -4545,10 +4553,9 @@ function showInviteResult(res) {
   state.inviteToken = res;
   clearInviteBusy();
   $('#invite').hidden = false;
-  // 令牌很长：显示截断，复制按钮携带完整值
-  const shortToken = res.token.length > 40 ? `${res.token.slice(0, 24)}…${res.token.slice(-8)}` : res.token;
-  // 截断后新旧令牌肉眼几乎一样（nonce 在中间）；短指纹让人一眼确认「已换新」。
+  // 令牌很长：显示截断；指纹放在蓝色文本中段，避免新旧 nonce 都被截掉。
   const tokenFingerprint = inviteTokenFingerprint(res.token);
+  const shortToken = inviteTokenShortText(res.token);
   // C7：二维码（服务端用 qrcode-generator 渲染 SVG → data-uri；编码失败为 null → 只显示文本）
   const qrMarkup = res.qrSvg
     ? `<img class="qr-img" alt="邀请令牌二维码" src="data:image/svg+xml;base64,${btoa(unescape(encodeURIComponent(res.qrSvg)))}" />`
@@ -4592,7 +4599,7 @@ function showInviteResult(res) {
         </div>
         <div class="invite-controls">
           <label class="invite-ttl" for="invite-ttl"><span class="invite-label">有效期</span>
-            <select id="invite-ttl" class="crt-input">${ttlOptions}</select>
+            <select id="invite-ttl" class="crt-input" aria-label="有效期" title="有效期">${ttlOptions}</select>
           </label>
           <span class="invite-expiry" id="invite-expiry">${escapeHtml(inviteExpiryLabel(selectedTtl))}</span>
           <button class="btn btn-small invite-regenerate" id="invite-regenerate" type="button">重新生成</button>
@@ -5377,12 +5384,6 @@ async function wizardNext() {
 function formatTime(ts) {
   if (!ts) return '—';
   return formatLocaleDateTime(ts);
-}
-
-/** 只取时分（邀请面板的「至 18:34」）。 */
-function formatClock(ts) {
-  if (!ts) return '—';
-  return formatLocaleTime(ts);
 }
 
 function escapeHtml(value) {

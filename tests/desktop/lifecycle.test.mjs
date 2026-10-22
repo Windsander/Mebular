@@ -13,9 +13,17 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { computeWizardState, readDesktopState, writeDesktopState } from '../../apps/desktop/src/main/wizard.mjs';
+import { loadDesktopI18n } from '../../apps/desktop/src/main/i18n.mjs';
 import { closeAction, quitConfirm, quitDecision, trayMenuModel, trayStatusLine, daemonModeLabel, LOGIN_ITEM_ID } from '../../apps/desktop/src/main/lifecycle.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
+// 壳层文案唯一真源 = locales/zh-CN/desktop.json；测试显式传 translator（模块本身不内置中文表）。
+const zh = loadDesktopI18n({ localesDir: join(here, '..', '..', 'locales'), locale: 'zh-CN' });
+const t = zh.t;
+const quitConfirmT = (args) => quitConfirm(args, t);
+const trayStatusLineT = (args) => trayStatusLine(args, t);
+const trayMenuModelT = (args) => trayMenuModel(args, t);
+const daemonModeLabelT = (mode) => daemonModeLabel(mode, t);
 
 const doneStart = { daemonHealthy: true, service: { registered: true, running: true } };
 
@@ -63,10 +71,10 @@ describe('R-1 高-2 关窗生命周期（决策纯函数）', () => {
   });
 
   it('退出确认：仅当壳确实托管守护（child）才说「将停止本机 Mebular 守护」', () => {
-    const child = quitConfirm({ daemonMode: 'child', hasManagedChild: true });
+    const child = quitConfirmT({ daemonMode: 'child', hasManagedChild: true });
     expect(child.message).toContain('将停止本机 Mebular 守护');
     for (const mode of ['reused', 'service', null]) {
-      const plan = quitConfirm({ daemonMode: mode, hasManagedChild: false });
+      const plan = quitConfirmT({ daemonMode: mode, hasManagedChild: false });
       expect(plan.message).not.toContain('将停止本机 Mebular 守护');
     }
   });
@@ -80,7 +88,7 @@ describe('R-1 高-2 关窗生命周期（决策纯函数）', () => {
 });
 
 describe('R-1 中-9 托盘菜单分组', () => {
-  const model = trayMenuModel({ healthy: true, daemonMode: 'child', loginOpenAtLogin: false });
+  const model = trayMenuModelT({ healthy: true, daemonMode: 'child', loginOpenAtLogin: false });
   const flat = model.map((i) => (i.type === 'separator' ? '|' : i.id ?? i.label));
 
   it('分组顺序：导航 → 守护控制 → 诊断 → 登录时启动 → 退出', () => {
@@ -106,22 +114,22 @@ describe('R-1 中-9 托盘菜单分组', () => {
     expect(restart.confirm).toBe(true);
     expect(login.type).toBe('checkbox');
     expect(login.checked).toBe(false);
-    expect(trayMenuModel({ healthy: true, daemonMode: 'child', loginOpenAtLogin: true })
+    expect(trayMenuModelT({ healthy: true, daemonMode: 'child', loginOpenAtLogin: true })
       .find((i) => i.id === LOGIN_ITEM_ID).checked).toBe(true);
   });
 
   it('未运行态：状态行显示未运行，启动可用', () => {
-    const down = trayMenuModel({ healthy: false, daemonMode: null, loginOpenAtLogin: false });
+    const down = trayMenuModelT({ healthy: false, daemonMode: null, loginOpenAtLogin: false });
     expect(down.find((i) => i.id === 'status').label).toContain('未运行');
   });
 
   it('托盘 mode 文案：child/service/reused 映射人话，空 → 未运行（不展示裸值）', () => {
-    expect(daemonModeLabel('child')).toBe('临时运行（App 托管）');
-    expect(daemonModeLabel('service')).toBe('常驻服务');
-    expect(daemonModeLabel('reused')).toBe('已有守护');
-    expect(daemonModeLabel(null)).toBe('未运行');
+    expect(daemonModeLabelT('child')).toBe('临时运行（App 托管）');
+    expect(daemonModeLabelT('service')).toBe('常驻服务');
+    expect(daemonModeLabelT('reused')).toBe('已有守护');
+    expect(daemonModeLabelT(null)).toBe('未运行');
     for (const [mode, text] of [['child', '临时运行（App 托管）'], ['service', '常驻服务'], ['reused', '已有守护']]) {
-      const label = trayMenuModel({ healthy: true, daemonMode: mode, loginOpenAtLogin: false })
+      const label = trayMenuModelT({ healthy: true, daemonMode: mode, loginOpenAtLogin: false })
         .find((i) => i.id === 'status').label;
       expect(label).toContain(text);
       expect(label).not.toMatch(new RegExp(`[（(]${mode}[）)]`));
@@ -130,10 +138,10 @@ describe('R-1 中-9 托盘菜单分组', () => {
   });
 
   it('状态行保留圆点/运行中/启动中/未运行语义；tooltip 与菜单共用同一文案', () => {
-    expect(trayStatusLine({ healthy: true, daemonMode: 'child' })).toBe('● 运行中 · 临时运行（App 托管）');
-    expect(trayStatusLine({ healthy: false, daemonMode: 'service' })).toBe('○ 启动中 · 常驻服务');
-    expect(trayStatusLine({ healthy: false, daemonMode: null })).toBe('○ 未运行');
-    expect(trayStatusLine({ healthy: true, daemonMode: 'reused', cloudName: '云名' }))
+    expect(trayStatusLineT({ healthy: true, daemonMode: 'child' })).toBe('● 运行中 · 临时运行（App 托管）');
+    expect(trayStatusLineT({ healthy: false, daemonMode: 'service' })).toBe('○ 启动中 · 常驻服务');
+    expect(trayStatusLineT({ healthy: false, daemonMode: null })).toBe('○ 未运行');
+    expect(trayStatusLineT({ healthy: true, daemonMode: 'reused', cloudName: '云名' }))
       .toBe('● 运行中 · 已有守护 · 云名');
   });
 
@@ -145,7 +153,7 @@ describe('R-1 中-9 托盘菜单分组', () => {
     expect(model.find((i) => i.id === 'security-level').label).toBe('安全等级：—');
     expect(model.find((i) => i.id === 'security-level').enabled).toBe(false);
     for (const [level, label] of [['low', '低'], ['medium', '中'], ['high', '高']]) {
-      const item = trayMenuModel({ healthy: true, daemonMode: 'child', loginOpenAtLogin: false, securityLevel: level })
+      const item = trayMenuModelT({ healthy: true, daemonMode: 'child', loginOpenAtLogin: false, securityLevel: level })
         .find((i) => i.id === 'security-level');
       expect(item.label).toBe(`安全等级：${label}`);
       expect(item.enabled).toBe(true);
@@ -230,7 +238,7 @@ describe('R-1 高-2 薄壳接线（index.mjs 静态契约）', () => {
   });
 
   it('停止后窗口内横幅「守护已停止（托盘可重启）」', () => {
-    expect(mainSrc).toContain('守护已停止（托盘可重启）');
+    expect(mainSrc).toContain("t('loading.stopped')");
   });
 
   it('托盘菜单由 trayMenuModel 驱动；登录时启动走 setLoginItemSettings', () => {
@@ -271,6 +279,6 @@ describe('R-1 高-2 薄壳接线（index.mjs 静态契约）', () => {
   });
 
   it('tooltip 与菜单共用 trayStatusLine（不展示裸 child/reused）', () => {
-    expect(mainSrc).toMatch(/setToolTip\(`Mebular · \$\{trayStatusLine\(\{ healthy, daemonMode, cloudName \}\)\}`\)/);
+    expect(mainSrc).toMatch(/setToolTip\(t\('tray\.tooltip', \{ status: trayStatusLine\(\{ healthy, daemonMode, cloudName \}, t\) \}\)\)/);
   });
 });

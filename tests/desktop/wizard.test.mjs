@@ -21,9 +21,11 @@ import {
 } from '../../apps/desktop/src/main/wizard.mjs';
 import { readDaemonLogs } from '../../apps/desktop/src/main/logs.mjs';
 import { WIZARD_SUBSTEPS, wizardView } from '../../apps/desktop/src/renderer/wizard-view.mjs';
+import { loadDesktopI18n } from '../../apps/desktop/src/main/i18n.mjs';
 
 const http = { host: '127.0.0.1', port: 7331 };
 const here = dirname(fileURLToPath(import.meta.url));
+const zh = loadDesktopI18n({ localesDir: join(here, '..', '..', 'locales'), locale: 'zh-CN' });
 
 describe('M2/UX-2 向导：状态机（两段；幂等可重入，逐步检测）', () => {
   it('无守护 → current=start；守护健康 → 前进到 assistants', () => {
@@ -73,7 +75,7 @@ describe('M2/UX-2 向导：状态机（两段；幂等可重入，逐步检测�
 describe('P6A 部署流水五步（与向导视图模型同一契约）', () => {
   it('顺序固定：启动守护 → 等待就绪 → 检查助手 → 接入 MCP → 打开控制台', () => {
     expect(WIZARD_SUBSTEPS).toEqual(['launch', 'ready', 'probe', 'connect', 'console']);
-    const view = wizardView(computeWizardState({ daemonHealthy: true }));
+    const view = wizardView(computeWizardState({ daemonHealthy: true }), zh.t);
     expect(Object.keys(view.steps[0].flow)).toEqual(WIZARD_SUBSTEPS);
   });
 
@@ -154,7 +156,7 @@ describe('UX-2 段②行级接入：clientsViaApi / clientActionViaApi（假 fet
   it('UX-2 收口（自动化模型修订）：向导②零按钮——验证/重试归 设置 · AI 助手（console 侧承担）', () => {
     const wizardJs = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'renderer', 'wizard.js'), 'utf-8');
     expect(wizardJs).not.toContain('data-asst-act'); // 向导内无行内动作
-    expect(wizardJs).toMatch(/失败非阻断并入汇总|可在 设置 → AI 助手 重试/);
+    expect(wizardJs).toMatch(/t\('wizard\.flowMsg\.connectPartial'/);
     // console 侧仍是验证闭环（同一语言；deep-link.test 另有全量契约）
     const assistantsJs = readFileSync(join(here, '..', '..', 'packages', 'console', 'assistants.js'), 'utf-8');
     expect(assistantsJs).toContain('我已重载，验证');

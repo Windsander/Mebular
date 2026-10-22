@@ -4,8 +4,24 @@
 //       段②行级接入（名称+状态词+一个动作；「已接入 ✓」不自动翻段，「已完成」显式确认）。
 
 import { wizardView, flapGate, wizardRowStatus, WIZARD_SUBSTEPS } from './wizard-view.mjs';
+import { applyStaticI18nWith, createTranslator, DEFAULT_LOCALE } from '../shared/i18n-core.mjs';
 
 const api = window.mebularDesktop;
+
+// 壳层 i18n：catalogs 由主进程经 preload 的 locale:get 下发（唯一真源 locales/<locale>/desktop.json）。
+// 加载失败不阻断：HTML 内的中文静态兜底仍在，动态文案回退 key（数据层随包分发，正常不会走到）。
+const localeBundle = await Promise.resolve(api?.getLocale?.()).catch(() => null);
+const i18n = createTranslator({
+  catalogs: localeBundle?.catalogs ?? {},
+  locale: localeBundle?.locale ?? DEFAULT_LOCALE,
+  fallbackLocale: localeBundle?.fallbackLocale ?? DEFAULT_LOCALE,
+  defaultLocale: localeBundle?.defaultLocale ?? DEFAULT_LOCALE,
+  supportedLocales: localeBundle?.supportedLocales ?? null,
+});
+const t = (key, vars) => i18n.t(key, vars);
+document.documentElement.lang = i18n.locale;
+applyStaticI18nWith(t, document);
+document.title = t('wizard.windowTitle');
 
 const $ = (sel) => document.querySelector(sel);
 const setText = (sel, text) => { const el = $(sel); if (el) el.textContent = text ?? ''; };
@@ -20,7 +36,7 @@ let logsAutoOpened = false;
 
 function renderState(state) {
   if (!state) return;
-  const view = wizardView(state);
+  const view = wizardView(state, t);
   const complete = Boolean(state.complete);
 
   // 三态（用户定稿）：
@@ -34,7 +50,7 @@ function renderState(state) {
   const idleView = !deployView && !doneView;
   document.body.classList.toggle('is-idle', idleView);
 
-  setText('#tagline', idleView ? '点一下，接入设备' : (flow.running ? '正在部署…' : view.tagline));
+  setText('#tagline', idleView ? t('wizard.tagline.idle') : (flow.running ? t('wizard.tagline.deploying') : view.tagline));
   const idleCta = $('#idle-cta');
   if (idleCta) idleCta.hidden = !idleView;
   const panel = $('#deploy-panel');
@@ -44,9 +60,16 @@ function renderState(state) {
   const finishNote = $('#finish-note');
   if (finishNote && complete) {
     const pending = [...reloadHints];
+    const appList = (() => {
+      try {
+        return new Intl.ListFormat(i18n.locale, { style: 'short', type: 'conjunction' }).format(pending);
+      } catch {
+        return pending.join(', ');
+      }
+    })();
     finishNote.innerHTML = (pending.length > 0
-      ? `<span class="warn-text">提醒：重启 ${pending.map((n) => escapeHtml(n)).join('、')} 这个软件后，mebular 才会出现在它的工具列表。</span><br />`
-      : '') + '之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请设备」随时可用。';
+      ? `<span class="warn-text">${escapeHtml(t('wizard.complete.restartNotice', { apps: appList }))}</span><br />`
+      : '') + `${escapeHtml(t('wizard.complete.note.line1'))}<br />${escapeHtml(t('wizard.complete.note.line2'))}`;
   }
 
   const start = view.steps.find((s) => s.id === 'start');
@@ -136,7 +159,7 @@ async function refresh() {
     lastStartDone = gate.lastDone;
     if (gate.hold) return; // 单次 miss：不翻段、不自动展开日志（其他区随下一轮更新）
     renderState(state);
-  } catch (error) { setText('#start-detail', `状态读取失败：${error.message}`); }
+  } catch (error) { setText('#start-detail', t('wizard.state.readFailed', { error: error.message })); }
 }
 
 // ---------- 段① 一键开始：五步真实流水（启动 → 就绪 → 检查助手 → 接入 MCP → 控制台） ----------
@@ -168,7 +191,7 @@ async function autoConnectAll(clientsInput) {
   if (!Array.isArray(clients)) {
     // 续跑兜底：没有本轮 probe 结果时，重新读取真实列表；读不到即失败（不伪造 0 个）。
     const res = await api.clientsList();
-    if (!res?.ok) throw new Error(res?.warning ?? '读取 AI 助手列表失败');
+    if (!res?.ok) throw new Error(res?.warning ?? t('wizard.error.readClients'));
     clients = res.clients ?? [];
   }
   const targets = connectTargets(clients);
@@ -176,14 +199,17 @@ async function autoConnectAll(clientsInput) {
   const failed = [];
   for (let i = 0; i < targets.length; i += 1) {
     const c = targets[i];
-    flowMsg(`正在接入 ${c.name}…（${i + 1}/${targets.length}）`);
+    flowMsg(t('wizard.flowMsg.connectingOne', { name: c.name, index: i + 1, total: targets.length }));
     try {
       const r = await api.clientsAction(c.id, 'connect');
       if (r?.ok) {
         ok.push(c.name);
         reloadHints.add(c.id); // 完成页提醒名单（重启对应软件后生效）
       } else {
-        failed.push(`${c.name}（${r?.warning ?? '未成功'}）`);
+        failed.push(t('wizard.flowMsg.connectFailedItem', {
+          name: c.name,
+          reason: r?.warning ?? t('wizard.flowMsg.connectFailed'),
+        }));
       }
     } catch (error) {
       failed.push(`${c.name}（${error?.message ?? error}）`);
@@ -252,60 +278,63 @@ async function runFlow(fromSub = 'launch') {
       currentSub = sub;
       setSubState(sub, 'active');
       if (sub === 'launch') {
-        flowMsg('正在启动本机守护…');
+        flowMsg(t('wizard.flowMsg.launching'));
         await api.start();
       } else if (sub === 'ready') {
-        flowMsg('等待本机就绪…（最多 60 秒）');
+        flowMsg(t('wizard.flowMsg.waiting'));
         const ok = await pollState((s) => Boolean(s?.steps?.[0]?.detail?.healthy));
-        if (!ok) throw new Error('守护未在 60s 内就绪');
+        if (!ok) throw new Error(t('wizard.flowMsg.notReady'));
       } else if (sub === 'probe') {
         // 真实检查：读取 clients 列表并统计已装/需要接入；读不到即失败，绝不伪造 0 个。
-        flowMsg('正在检查已装的 AI 助手…');
+        flowMsg(t('wizard.flowMsg.probing'));
         let res;
         try {
           res = await api.clientsList();
         } catch (error) {
-          throw new Error(`读取 AI 助手列表失败：${error?.message ?? error}`);
+          throw new Error(t('wizard.error.readClientsDetail', { error: error?.message ?? error }));
         }
-        if (!res?.ok) throw new Error(`读取 AI 助手列表失败：${res?.warning ?? '未知原因'}`);
+        if (!res?.ok) throw new Error(t('wizard.error.readClientsUnknown', { reason: res?.warning ?? t('wizard.error.readClients') }));
         const clients = Array.isArray(res.clients) ? res.clients : [];
         const installed = clients.filter((c) => c.installed).length;
         const targets = connectTargets(clients);
         flow.probe = { clients, installed, targets: targets.length };
         flowMsg(installed === 0
-          ? '检查完成：未检测到已装的 AI 助手（0 个需要接入）。'
-          : `检查完成：检测到 ${installed} 个已装助手，${targets.length} 个需要接入。`);
+          ? t('wizard.flowMsg.probeEmpty')
+          : t('wizard.flowMsg.probeCount', { installed, targets: targets.length }));
       } else if (sub === 'connect') {
         // 一键启动的核心自动化：把 probe 找到的已装助手 MCP 配置全部接上（失败非阻断）。
         // P2：UNINITIALIZED 下 /admin/api/clients 与 connect 均可用；MCP 未初始化不再误报连接失败。
         const probe = flow.probe;
-        if (!probe) flowMsg('正在读取 AI 助手并接入 MCP 配置…');
-        else if (probe.targets === 0) flowMsg('检查完成：0 个需要接入，无需改动 MCP 配置。');
-        else flowMsg(`正在接入 ${probe.targets} 个 AI 助手的 MCP 配置…`);
+        if (!probe) flowMsg(t('wizard.flowMsg.connecting'));
+        else if (probe.targets === 0) flowMsg(t('wizard.flowMsg.nothingToDo'));
+        else flowMsg(t('wizard.flowMsg.connectCount', { count: probe.targets }));
         const { ok, failed } = await autoConnectAll(probe?.clients);
         if (failed.length > 0) {
-          flowMsg(`已自动接入 ${ok.length} 个；${failed.join('；')}——可在 设置 → AI 助手 重试。`, true);
+          flowMsg(t('wizard.flowMsg.connectPartial', {
+            ok: ok.length,
+            failed: failed.join(t('wizard.flowMsg.failedSeparator')),
+          }), true);
         } else if (ok.length > 0) {
-          flowMsg(`已接入 ${ok.length} 个 AI 助手——重启对应软件后生效。`);
+          flowMsg(t('wizard.flowMsg.connectOk', { ok: ok.length }));
         } else {
-          flowMsg('0 个需要接入，无需改动 MCP 配置。');
+          flowMsg(t('wizard.flowMsg.connectNone'));
         }
       } else if (sub === 'console') {
         // 用户点过「开始部署」= 对 ② 的显式确认：统一 ack（个别未成功的已给原因，重试归设置·AI 助手）。
-        flowMsg('正在打开控制台…');
+        flowMsg(t('wizard.flowMsg.openConsole'));
         try { await api.ackAssistants(); } catch { /* 落盘失败不阻断 */ }
         await openConsoleOnce();
       }
       setSubState(sub, 'done');
       await sleep(SUB_MIN_DWELL_MS); // 最小停留：让每一步看得见
     }
-    flowMsg('已就绪 ✓');
+    flowMsg(t('wizard.flowMsg.ready'));
     flow.failedSub = null;
     await sleep(SUB_MIN_DWELL_MS + 600); // 汇总行停留：读完再进完成态
   } catch (error) {
     setSubState(currentSub, 'failed');
     flow.failedSub = currentSub;
-    flowMsg(`这一步没走完：${error.message}。可「从此处续跑」，或开下方日志看原因。`, true);
+    flowMsg(t('wizard.flowMsg.failed', { error: error.message }), true);
     $('#btn-resume').hidden = false;
     $('#logs-panel').open = true;
   } finally {
@@ -336,10 +365,10 @@ $('#btn-enter-console')?.addEventListener('click', () => { void openConsoleOnce(
 async function loadLogs() {
   try {
     const res = await api.readLogs();
-    setText('#logs-source', res?.source === 'service' ? '来源：常驻服务日志' : res?.source === 'file' ? '来源：serve.log' : '暂无日志');
-    setText('#log', res?.text || '(空)');
+    setText('#logs-source', res?.source === 'service' ? t('wizard.logs.source.service') : res?.source === 'file' ? t('wizard.logs.source.file') : t('wizard.logs.source.none'));
+    setText('#log', res?.text || t('wizard.logs.empty'));
   } catch (error) {
-    setText('#log', `读取失败：${error.message}`);
+    setText('#log', t('wizard.logs.readFailed', { error: error.message }));
   }
 }
 $('#btn-logs')?.addEventListener('click', () => { void loadLogs(); });

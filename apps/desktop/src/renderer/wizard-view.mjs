@@ -2,11 +2,13 @@
 //
 // 输入 = computeWizardState 的输出；输出 = 渲染所需的全部展示决策
 // （徽章文案 / 每段状态·折叠·动作收编 / 段①子步骤流水进度 / 段②「已完成」解锁 / 完成态通关 CTA / 日志区折叠与结论）。
+// 文案 i18n：所有面向用户的字符串由调用方传入 translator（t，来自 locales/<locale>/desktop.json）。
+// 本模块不内置中文替换表；未传 t 时回退 key。
 // DOM 契约：status 'current' → .is-current；check '✓' → 段标题前置对勾；
 // collapsed → 段折叠为回顾（可再展开）；logs.open → <details id="logs-panel"> 的 open 属性；
 // flow.* → 段①子步骤流水（launch/ready/probe/connect/console）的 todo/active/done/failed 图标。
 
-const STEP_NAME = { start: '一键开始', assistants: '连接 AI 助手' };
+const keyOnly = (key) => String(key);
 
 // P6A：部署流水单一真源（渲染层与静态视图模型共用）。每条都对应真实动作：
 // launch=api.start / ready=health poll / probe=clientsList / connect=autoConnectAll / console=openConsoleOnce。
@@ -15,8 +17,9 @@ export const WIZARD_SUBSTEPS = ['launch', 'ready', 'probe', 'connect', 'console'
 /**
  * 向导视图模型。
  * @param state computeWizardState({...}) 的返回（两段：start / assistants）
+ * @param t desktop pack translator（缺省回退 key）
  */
-export function wizardView(state) {
+export function wizardView(state, t = keyOnly) {
   const steps = Array.isArray(state?.steps) ? state.steps : [];
   const complete = Boolean(state?.complete);
   const currentIndex = steps.findIndex((s) => s.id === state?.current);
@@ -27,58 +30,57 @@ export function wizardView(state) {
   const registered = start?.detail?.registered === true ? true : start?.detail?.registered === false ? false : null;
   const assistantsDone = Boolean(steps.find((s) => s.id === 'assistants')?.done);
 
+  const stepName = (id) => (id ? t(`wizard.stepName.${id}`) : '');
   const badge = complete
-    ? '已就绪'
-    : `第 ${currentIndex + 1}/2 步 · ${STEP_NAME[state?.current] ?? ''}`.trim();
+    ? t('wizard.badge.complete')
+    : t('wizard.badge.step', { current: currentIndex + 1, total: 2, name: stepName(state?.current) });
 
   // 设计稿（01-setup）：hero tagline 随进度变化
   const tagline = complete
     ? ''
     : start?.done
-      ? '正在接入 AI 助手…'
-      : '点一下，接入设备';
+      ? t('wizard.tagline.connecting')
+      : t('wizard.tagline.idle');
 
   // 异常（① 未完成 = 守护未就绪）→ 日志自动展开 + 一行人话结论。
   // P4：UNINITIALIZED 不再算异常（它只是还没建新/加入，交给控制台锁定壳）。
   const abnormal = Boolean(start) && !start.done;
-  const logsConclusion = !abnormal
-    ? null
-    : '守护未运行：点「开始部署」重试；反复失败先看下面的日志。';
+  const logsConclusion = !abnormal ? null : t('wizard.logs.conclusion');
 
   return {
     badge,
     tagline,
-    complete: complete ? { cta: '进入控制台 ✦' } : null,
+    complete: complete ? { cta: t('wizard.complete.cta') } : null,
     logs: { open: abnormal, conclusion: logsConclusion },
     steps: steps.map((step) => {
       const status = step.done ? 'done' : (step.id === state?.current ? 'current' : 'todo');
       const base = {
         id: step.id,
-        title: step.title,
+        title: t(step.titleKey ?? step.title ?? `wizard.step.${step.id}.title`),
         status,
         // 里程碑轨道节点态：当前=呼吸(active)、完成=✓(done)、未到=暗(locked)
         node: step.done ? 'done' : status === 'current' ? 'active' : 'locked',
         // ① 在旅程未完时保持展开（「一键开始」入口可达——重开未 ack 态的唯一动作）；全部完成才折叠成终态单行
         collapsed: step.id === 'start' ? (step.done && complete) : step.done,
       };
-      if (step.id === 'start') return { ...base, ...startStepView(step, { healthy, registered, assistantsDone }) };
-      return { ...base, ...assistantsStepView(step, start) };
+      if (step.id === 'start') return { ...base, ...startStepView(step, { healthy, registered, assistantsDone }, t) };
+      return { ...base, ...assistantsStepView(step, start, t) };
     }),
   };
 }
 
 /** 段①：文案 + 动作收编 + 子步骤流水（启动 → 就绪 → 检查 → 接入 → 控制台）静态进度。 */
-function startStepView(step, { healthy, registered, assistantsDone = false }) {
+function startStepView(step, { healthy, registered, assistantsDone = false }, t) {
   let detailText;
   if (step.done) {
     detailText = registered === true
-      ? '守护运行中（常驻已装 · 开机自启）。'
+      ? t('wizard.start.detail.doneRegistered')
       : registered === false
-        ? '守护运行中（App 托管）：退出 App 后停止；想开机自启可让 Mebular 常驻。'
-        : '守护运行中。（常驻状态读取中或不可用）';
+        ? t('wizard.start.detail.doneManaged')
+        : t('wizard.start.detail.doneUnknown');
   } else {
     // 设计稿（01-setup）① 正文
-    detailText = '一键完成：启动 Mebular、接上你已装的 AI 助手。数据只存在这台机器上，不上云。';
+    detailText = t('wizard.start.detail.idle');
   }
   // 子步骤流水进度（静态推导；渲染层在跑流水时以运行时状态覆盖）
   const flow = {
@@ -91,19 +93,24 @@ function startStepView(step, { healthy, registered, assistantsDone = false }) {
   return {
     detailText,
     flow,
-    serviceBadge: step.done && registered === false ? 'App 托管' : null,
+    serviceBadge: step.done && registered === false ? t('wizard.start.serviceBadge') : null,
     doneLine: step.done
-      ? { main: '✓ 已就绪', sub: registered === true ? '常驻已装 · 开机自启' : '这台机器已在跑你的 Mebular' }
+      ? {
+        main: t('wizard.start.doneLine.main'),
+        sub: registered === true
+          ? t('wizard.start.doneLine.subRegistered')
+          : t('wizard.start.doneLine.subManaged'),
+      }
       : null,
     actions: {
       // 完成前恒在：点一次跑完剩余全部自动化
-      go: { label: '开始部署', kind: 'primary', hidden: false },
+      go: { label: t('wizard.start.go'), kind: 'primary', hidden: false },
     },
   };
 }
 
 /** 段②：行级接入 + 「已完成」解锁（≥1 已接入才可用；① 未完成先拦住）+ 设计稿文案与「先不接 ›」。 */
-function assistantsStepView(step, start) {
+function assistantsStepView(step, start, t) {
   const startDone = Boolean(start?.done);
   const detail = step?.detail;
   const connected = Number(detail?.connectedCount ?? 0);
@@ -111,12 +118,12 @@ function assistantsStepView(step, start) {
   // 已装数（installedCount）——列表只显示已装，文案口径必须一致（旧载荷回退 total）
   const installed = Number(detail?.installedCount ?? detail?.total ?? 0);
   let detailText;
-  if (!startDone) detailText = '先完成第①步：Mebular 跑起来后才能连接助手。';
-  else if (!detail) detailText = '助手列表加载中…';
-  else if (detail.readError) detailText = `状态读取受限：${detail.readError}（不阻断）。`;
-  else if (installed === 0) detailText = '没检测到已装的 AI 助手 —— 装好后回来点「一键开始」即可。';
-  else if (connected >= installed) detailText = `已接入 ${connected} 个 AI 助手。`;
-  else detailText = `检测到 ${installed} 个已装助手（已接入 ${connected} 个）——点「开始部署」接上；未成功的会在下方给出原因。`;
+  if (!startDone) detailText = t('wizard.assistants.detail.blocked');
+  else if (!detail) detailText = t('wizard.assistants.detail.loading');
+  else if (detail.readError) detailText = t('wizard.assistants.detail.readError', { error: detail.readError });
+  else if (installed === 0) detailText = t('wizard.assistants.detail.empty');
+  else if (connected >= installed) detailText = t('wizard.assistants.detail.connectedAll', { connected });
+  else detailText = t('wizard.assistants.detail.partial', { installed, connected });
   return {
     detailText,
     connected,
@@ -125,8 +132,8 @@ function assistantsStepView(step, start) {
     // 自动化（用户定调）：第二步纯过程展示、零按钮——确认收尾由渲染层在流水尾部统一执行
     doneLine: step.done
       ? (connected >= 1
-        ? { main: '✓ 已接好', sub: '重启对应软件后生效' }
-        : { main: '— 无需接入', sub: '这台机器没有已装的 AI 助手' })
+        ? { main: t('wizard.assistants.doneLine.main'), sub: t('wizard.assistants.doneLine.sub') }
+        : { main: t('wizard.assistants.doneLine.noneMain'), sub: t('wizard.assistants.doneLine.noneSub') })
       : null,
   };
 }

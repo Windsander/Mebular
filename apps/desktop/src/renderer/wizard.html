@@ -139,53 +139,53 @@
     <header class="hero">
       <div class="mark">✦</div>
       <h1>MEBULAR</h1>
-      <p class="tagline" id="tagline">点一下，接入设备</p>
+      <p class="tagline" id="tagline" data-i18n="wizard.tagline.idle">点一下，接入设备</p>
     </header>
 
     <!-- ===== 状态 1：初始（仅一个按钮，全部居中、无附加元素） ===== -->
     <div class="idle-cta" id="idle-cta">
-      <button id="btn-go" class="primary big">开始部署</button>
+      <button id="btn-go" class="primary big" data-i18n="wizard.start.go">开始部署</button>
     </div>
 
     <!-- ===== 状态 2：阶段框（点击后出现，五步进度 + 旁白；完成后同框「变身」为已就绪） ===== -->
     <section class="panel" id="deploy-panel" hidden>
       <div id="deploy-flow">
-        <h2>开始部署 <span id="start-service-badge" class="badge service" hidden>App 托管</span></h2>
+        <h2><span data-i18n="wizard.start.go">开始部署</span> <span id="start-service-badge" class="badge service" hidden data-i18n="wizard.start.serviceBadge">App 托管</span></h2>
         <p class="muted" id="start-detail" hidden></p>
         <ol id="start-flow" class="flow">
-          <li data-sub="launch" data-state="todo"><i></i>启动本机守护</li>
-          <li data-sub="ready" data-state="todo"><i></i>等待本机就绪</li>
-          <li data-sub="probe" data-state="todo"><i></i>检查已装 AI 助手</li>
-          <li data-sub="connect" data-state="todo"><i></i>接入 MCP 配置（自动）</li>
-          <li data-sub="console" data-state="todo"><i></i>打开控制台</li>
+          <li data-sub="launch" data-state="todo"><i></i><span data-i18n="wizard.flow.launch">启动本机守护</span></li>
+          <li data-sub="ready" data-state="todo"><i></i><span data-i18n="wizard.flow.ready">等待本机就绪</span></li>
+          <li data-sub="probe" data-state="todo"><i></i><span data-i18n="wizard.flow.probe">检查已装 AI 助手</span></li>
+          <li data-sub="connect" data-state="todo"><i></i><span data-i18n="wizard.flow.connect">接入 MCP 配置（自动）</span></li>
+          <li data-sub="console" data-state="todo"><i></i><span data-i18n="wizard.flow.console">打开控制台</span></li>
         </ol>
         <p class="muted" id="flow-msg"></p>
         <div class="row" id="go-row" hidden>
-          <button id="btn-resume" class="primary" hidden>从此处续跑</button>
+          <button id="btn-resume" class="primary" hidden data-i18n="wizard.flow.resume">从此处续跑</button>
         </div>
       </div>
       <!-- 完成态（用户定稿 2）：同框变身内容——不再另起卡、不再出现「已完成/已就绪」两个完成词 -->
       <div class="done-card" id="complete-cta" hidden>
-        <p class="done-word">已就绪 ✦</p>
-        <p class="muted" id="finish-note">之后想接更多助手、邀请其他设备，都在控制台里：<br />顶栏「＋ 邀请设备」随时可用。</p>
-        <button id="btn-enter-console" class="primary big">进入控制台 ✦</button>
+        <p class="done-word" data-i18n="wizard.complete.doneWord">已就绪 ✦</p>
+        <p class="muted" id="finish-note"><span data-i18n="wizard.complete.note.line1">之后想接更多助手、邀请其他设备，都在控制台里：</span><br /><span data-i18n="wizard.complete.note.line2">顶栏「＋ 邀请设备」随时可用。</span></p>
+        <button id="btn-enter-console" class="primary big" data-i18n="wizard.complete.cta">进入控制台 ✦</button>
       </div>
     </section>
 
   </div>
 
   <details id="logs-panel" hidden>
-    <summary>诊断与日志</summary>
+    <summary data-i18n="wizard.logs.summary">诊断与日志</summary>
     <p id="logs-conclusion" hidden></p>
     <p class="muted" id="logs-source">—</p>
     <div class="row">
-      <button id="btn-logs">刷新日志</button>
-      <button id="btn-logs-open" class="ghost">打开日志文件</button>
+      <button id="btn-logs" data-i18n="wizard.logs.refresh">刷新日志</button>
+      <button id="btn-logs-open" class="ghost" data-i18n="wizard.logs.open">打开日志文件</button>
     </div>
     <pre id="log"></pre>
   </details>
 
-  <button class="skip" id="btn-skip">跳过引导 ›</button>
+  <button class="skip" id="btn-skip" data-i18n="wizard.skip">跳过引导 ›</button>
 
   <script type="module" src="./wizard.js"></script>
 </body>

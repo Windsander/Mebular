@@ -459,7 +459,7 @@ describe('i18n locale pack · 主路径（顶栏/锁定/新建/加入/邀请/向
   });
 });
 
-describe('i18n locale pack · 桌面壳 locale 预留', () => {
+describe('i18n locale pack · 桌面壳 locale 已启用', () => {
   it('IPC 白名单含 locale:get / locale:set；set 只收 1 个字符串参数', () => {
     expect(IPC_CHANNELS).toEqual(expect.arrayContaining(['locale:get', 'locale:set']));
     expect(sanitizeArgs([], 'locale:get')).toEqual([]);
@@ -467,11 +467,11 @@ describe('i18n locale pack · 桌面壳 locale 预留', () => {
     expect(sanitizeArgs(['en-US', 'EXTRA'], 'locale:set')).toEqual(['en-US']);
   });
 
-  it('preload 暴露固定 getLocale / setLocale / i18nReady（不透传 channel）', () => {
+  it('preload 暴露固定 getLocale / setLocale / i18nReady=true（不透传 channel）', () => {
     const preload = readFileSync(join(rootDir, 'apps', 'desktop', 'src', 'preload', 'index.cjs'), 'utf-8');
     expect(preload).toContain("getLocale: () => ipcRenderer.invoke('locale:get')");
     expect(preload).toContain("setLocale: (locale) => ipcRenderer.invoke('locale:set', String(locale ?? ''))");
-    expect(preload).toContain('i18nReady: false');
+    expect(preload).toContain('i18nReady: true');
     expect(preload).not.toMatch(/ipcRenderer\.invoke\(\s*channel/);
   });
 });

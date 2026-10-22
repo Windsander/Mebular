@@ -15,11 +15,35 @@ ipcRenderer.on('console:navigate', (_event, payload) => {
   else pendingConsoleNavSearch = search;
 });
 
+// 语言偏好同步（极小机制，复用既有 locale:set IPC）：
+// 控制台的语言选择落在**同源 localStorage**（mebular.locale），主进程读不到 localStorage；
+// 这里在共享 preload 里只读观察该 key 的变化并回写主进程，托盘/退出确认/下次向导随即可用。
+// 不新增 IPC 通道、不劫持控制台代码；读取失败（data: 等 opaque origin）直接忽略。
+const LOCALE_STORAGE_KEY = 'mebular.locale';
+let localeSyncLast = null;
+function syncLocaleFromConsole() {
+  try {
+    const value = window.localStorage?.getItem?.(LOCALE_STORAGE_KEY);
+    if (typeof value !== 'string' || !value.trim() || value === localeSyncLast) return;
+    localeSyncLast = value;
+    ipcRenderer.invoke('locale:set', value).catch(() => { localeSyncLast = null; });
+  } catch {
+    // localStorage 不可用：保持主进程 manifest 默认语言。
+  }
+}
+window.addEventListener('load', syncLocaleFromConsole, { once: true });
+window.addEventListener('focus', syncLocaleFromConsole);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') syncLocaleFromConsole();
+});
+const localeSyncTimer = setInterval(syncLocaleFromConsole, 1500);
+localeSyncTimer.unref?.();
+
 contextBridge.exposeInMainWorld('mebularDesktop', {
   // UX-2 补丁 4：平台标识（渲染层据此避让 macOS 交通灯安全区；静态值，非函数）
   platform: process.platform,
-  // i18n foundation 预留：语言偏好固定通道；最终开放由 i18nReady 总开关控制（当前默认关闭）。
-  i18nReady: false,
+  // 壳层 i18n：渲染层经 getLocale 取 locale + desktop pack catalogs（向导用同一套 translator）。
+  i18nReady: true,
   getLocale: () => ipcRenderer.invoke('locale:get'),
   setLocale: (locale) => ipcRenderer.invoke('locale:set', String(locale ?? '')),
   status: () => ipcRenderer.invoke('daemon:status'),

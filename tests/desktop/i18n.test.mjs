@@ -251,10 +251,15 @@ describe('locale 偏好同步（Console → Desktop 壳层）', () => {
     const preload = readFileSync(join(ROOT, 'apps', 'desktop', 'src', 'preload', 'index.cjs'), 'utf-8');
     expect(preload).toContain("const LOCALE_STORAGE_KEY = 'mebular.locale'");
     expect(preload).toContain('syncLocaleFromConsole');
+    expect(preload).toContain('bootstrapLocaleFromShell');
+    expect(preload).toContain("ipcRenderer.invoke('locale:get')");
     expect(preload).toContain("ipcRenderer.invoke('locale:set'");
     expect(preload).toContain("window.addEventListener('focus'");
     expect(preload).toContain("document.addEventListener('visibilitychange'");
     expect(preload).not.toContain("ipcRenderer.invoke('locale:sync'");
+    // 启动先以壳层偏好对齐，再允许 localStorage 回推（防陈旧值反写）。
+    expect(preload).toContain('void bootstrapLocaleFromShell()');
+    expect(preload).toContain('if (!localeBootstrapped) return;');
   });
 
   it('主进程 locale:get 下发 catalogs；locale:set 落到 translator + 托盘/窗口标题', () => {

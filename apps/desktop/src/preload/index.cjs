@@ -21,7 +21,39 @@ ipcRenderer.on('console:navigate', (_event, payload) => {
 // 不新增 IPC 通道、不劫持控制台代码；读取失败（data: 等 opaque origin）直接忽略。
 const LOCALE_STORAGE_KEY = 'mebular.locale';
 let localeSyncLast = null;
+let localeBootstrapped = false;
+
+/**
+ * 启动时以壳层偏好为准做一次双向对齐（locale:get，不新增通道）：
+ * - localStorage 缺失（清站点数据 / 端口变化）→ 用主进程 locale 补写；
+ * - localStorage 陈旧（崩溃/强杀导致未落盘）→ 主进程 locale 覆盖它，避免旧值反写主进程。
+ * 之后才允许把 localStorage 变化回推主进程。
+ */
+async function bootstrapLocaleFromShell() {
+  let mainLocale = null;
+  try {
+    const bundle = await ipcRenderer.invoke('locale:get');
+    if (typeof bundle?.locale === 'string' && bundle.locale.trim()) mainLocale = bundle.locale.trim();
+  } catch {
+    // 主进程不可用：保持 localStorage 原值，后续轮询仍按原逻辑兜底。
+  }
+  try {
+    const stored = window.localStorage?.getItem?.(LOCALE_STORAGE_KEY) ?? null;
+    if (mainLocale) {
+      if (stored !== mainLocale) window.localStorage?.setItem?.(LOCALE_STORAGE_KEY, mainLocale);
+      localeSyncLast = mainLocale;
+    } else if (stored) {
+      localeSyncLast = null; // 无主进程偏好：把已有选择回推一次。
+    }
+  } catch {
+    // localStorage 不可用：主进程偏好仍经 locale:get 生效（渲染层自行读取）。
+  }
+  localeBootstrapped = true;
+  if (!mainLocale) syncLocaleFromConsole();
+}
+
 function syncLocaleFromConsole() {
+  if (!localeBootstrapped) return;
   try {
     const value = window.localStorage?.getItem?.(LOCALE_STORAGE_KEY);
     if (typeof value !== 'string' || !value.trim() || value === localeSyncLast) return;
@@ -31,7 +63,11 @@ function syncLocaleFromConsole() {
     // localStorage 不可用：保持主进程 manifest 默认语言。
   }
 }
-window.addEventListener('load', syncLocaleFromConsole, { once: true });
+void bootstrapLocaleFromShell();
+window.addEventListener('load', () => {
+  if (localeBootstrapped) syncLocaleFromConsole();
+  else void bootstrapLocaleFromShell();
+}, { once: true });
 window.addEventListener('focus', syncLocaleFromConsole);
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') syncLocaleFromConsole();

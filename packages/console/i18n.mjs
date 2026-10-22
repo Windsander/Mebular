@@ -223,6 +223,33 @@ export function syncDesktopLocale(locale) {
 }
 
 /**
+ * 桌面壳启动对齐：以主进程 locale（<home>/.desktop-state.json）为准，补写/覆盖同源 localStorage。
+ * - 缺失（首启 / 清站点数据 / 端口变化）→ 补写；
+ * - 陈旧（崩溃强杀前未落盘）→ 覆盖，避免旧值随后反写主进程。
+ * 返回生效 locale；web 无 preload、?lang= 深链或主进程不可用时返回 null（保持原逻辑）。
+ */
+export async function reconcileDesktopLocale({
+  bridge = globalThis.window?.mebularDesktop,
+  storage = safeStorage(),
+  hasQueryLocale = false,
+} = {}) {
+  if (hasQueryLocale || typeof bridge?.getLocale !== 'function') return null;
+  try {
+    const raw = (await bridge.getLocale())?.locale;
+    if (typeof raw !== 'string' || !raw.trim()) return null;
+    const locale = raw.trim();
+    try {
+      if (storage?.getItem?.(LOCALE_STORAGE_KEY) !== locale) storage?.setItem?.(LOCALE_STORAGE_KEY, locale);
+    } catch {
+      // 存储被禁：仍返回主进程 locale，页面可先按它渲染。
+    }
+    return locale;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 解析初始 locale（优先级：?lang= > localStorage > 系统语言 > 默认 locale）。
  * 未知系统语言不会提前截断列表（例如 ['fr-FR','en-US'] 仍会命中 en-US）。
  */

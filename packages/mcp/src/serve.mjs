@@ -212,6 +212,7 @@ const CONSOLE_FILES = {
   'shell-boot.js': 'text/javascript; charset=utf-8', // 走查修复 B：壳安全区首帧引导脚本
   'console.css': 'text/css; charset=utf-8',
   'console.js': 'text/javascript; charset=utf-8',
+  'dropdown.mjs': 'text/javascript; charset=utf-8',
   'assistants.js': 'text/javascript; charset=utf-8',
   'assistant-status.js': 'text/javascript; charset=utf-8',
   'deep-link.js': 'text/javascript; charset=utf-8',

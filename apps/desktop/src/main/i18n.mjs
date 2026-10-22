@@ -15,6 +15,7 @@ import {
 } from '../shared/i18n-core.mjs';
 
 export const DESKTOP_PACK = 'desktop';
+export const ERRORS_PACK = 'errors';
 
 /** 解析 locales 根目录（确定性；不依赖 cwd）。 */
 export function resolveLocalesDir({
@@ -60,7 +61,18 @@ export function loadDesktopCatalogs({ localesDir = resolveLocalesDir() } = {}) {
       errors.push({ locale: code, path: relative, reason: 'missing or invalid pack' });
       continue;
     }
-    catalogs[code] = json.messages;
+    // 错误 pack 与 desktop 文案合并：主进程对话框 / 向导可共用同一套错误码文案。
+    const messages = { ...json.messages };
+    const errorsPath = entry?.files?.[ERRORS_PACK];
+    if (typeof errorsPath === 'string') {
+      const extra = readJson(join(localesDir, errorsPath));
+      if (extra?.messages && typeof extra.messages === 'object' && !Array.isArray(extra.messages)) {
+        Object.assign(messages, extra.messages);
+      } else {
+        errors.push({ locale: code, path: errorsPath, reason: 'missing or invalid errors pack' });
+      }
+    }
+    catalogs[code] = messages;
   }
   const supportedLocales = entries.map((entry) => entry?.locale).filter(Boolean);
   // default / fallback 来自 manifest，并在已注册语言内归一化（不在 loader 里硬编码 en/zh）。

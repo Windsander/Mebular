@@ -198,10 +198,23 @@ export async function inviteViaApi(fetchImpl, http = { host: '127.0.0.1', port: 
     });
     const data = await res.json().catch(() => ({}));
     if (res.status === 409 && data?.error === 'join_disabled') {
-      return { token: null, qrSvg: null, endpoint: null, warning: '未启用加入服务：在控制台点「邀请设备」可就地启用加入服务并继续（将重启守护）。' };
+      return {
+        token: null,
+        qrSvg: null,
+        endpoint: null,
+        warning: '未启用加入服务：在控制台点「邀请设备」可就地启用加入服务并继续（将重启守护）。',
+        warningKey: 'errors.join_disabled',
+      };
     }
     if (!res.ok) {
-      return { token: null, qrSvg: null, endpoint: null, warning: `邀请失败（HTTP ${res.status}）：${data?.message ?? '请看诊断日志'}` };
+      return {
+        token: null,
+        qrSvg: null,
+        endpoint: null,
+        warning: `邀请失败（HTTP ${res.status}）：${data?.message ?? '请看诊断日志'}`,
+        warningKey: 'errors.invite_failed',
+        warningVars: { status: res.status },
+      };
     }
     return {
       token: typeof data?.token === 'string' ? data.token : null,
@@ -210,7 +223,13 @@ export async function inviteViaApi(fetchImpl, http = { host: '127.0.0.1', port: 
       warning: typeof data?.warning === 'string' ? data.warning : null,
     };
   } catch (error) {
-    return { token: null, qrSvg: null, endpoint: null, warning: `邀请失败：${error?.message ?? error}` };
+    return {
+      token: null,
+      qrSvg: null,
+      endpoint: null,
+      warning: `邀请失败：${error?.message ?? error}`,
+      warningKey: 'errors.unknown',
+    };
   }
 }
 
@@ -251,10 +270,21 @@ export async function clientsViaApi(fetchImpl, http = { host: '127.0.0.1', port:
   try {
     const res = await fetchImpl(`${base}/admin/api/clients`, { signal: AbortSignal.timeout(timeoutMs) });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) return { ok: false, clients: [], warning: `助手列表读取失败（HTTP ${res.status}）` };
+    if (!res.ok) return {
+      ok: false,
+      clients: [],
+      warning: `助手列表读取失败（HTTP ${res.status}）`,
+      warningKey: 'errors.clients_read_failed',
+      warningVars: { status: res.status },
+    };
     return { ok: true, clients: Array.isArray(data?.clients) ? data.clients : [] };
   } catch (error) {
-    return { ok: false, clients: [], warning: `助手列表读取失败：${error?.message ?? error}` };
+    return {
+      ok: false,
+      clients: [],
+      warning: `助手列表读取失败：${error?.message ?? error}`,
+      warningKey: 'errors.unknown',
+    };
   }
 }
 
@@ -265,7 +295,7 @@ export async function clientsViaApi(fetchImpl, http = { host: '127.0.0.1', port:
  */
 export async function clientActionViaApi(fetchImpl, http = { host: '127.0.0.1', port: 7331 }, id, action, timeoutMs = 15000) {
   if (!/^[\w-]{1,64}$/.test(String(id ?? '')) || !/^(connect|recheck|verify)$/.test(String(action ?? ''))) {
-    return { ok: false, warning: '非法的助手动作参数' };
+    return { ok: false, warning: '非法的助手动作参数', warningKey: 'errors.invalid_action' };
   }
   const base = `http://${http.host}:${http.port}`;
   try {
@@ -300,7 +330,7 @@ export async function clientActionViaApi(fetchImpl, http = { host: '127.0.0.1', 
       reason: data?.reason ?? null,
     };
   } catch (error) {
-    return { ok: false, warning: `动作失败：${error?.message ?? error}` };
+    return { ok: false, warning: `动作失败：${error?.message ?? error}`, warningKey: 'errors.unknown' };
   }
 }
 

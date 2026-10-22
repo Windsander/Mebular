@@ -1165,6 +1165,7 @@
     "namespaceNew.name": "Name",
     "namespaceNew.namePlaceholder": "e.g. reading, work, ideas",
     "namespaceNew.create": "Create and subscribe",
-    "domains.rejoin.confirmAction": "Resync"
+    "domains.rejoin.confirmAction": "Resync",
+    "settings.schema.reason.dynamicFallback": "The reason could not be shown. Check the diagnostics."
   }
 }

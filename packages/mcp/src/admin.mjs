@@ -1098,7 +1098,7 @@ function buildNatView(app) {
 /** GET /admin/api/namespaces/:ns/handoff-plan?successor=…（只读预检） */
 export async function buildHandoffPlan({ app }, namespace, successor) {
   if (typeof successor !== 'string' || successor.length === 0) {
-    return { status: 400, body: { error: 'bad_request', message: '需要 ?successor=<deviceId>' } };
+    return { status: 400, body: { error: 'bad_request', errorKey: 'handoff_successor_required', message: '需要 ?successor=<deviceId>' } };
   }
   try {
     const plan = await app.planNamespaceHandoff({ namespace, successor });

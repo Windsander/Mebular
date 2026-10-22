@@ -16,6 +16,8 @@ export const LOCALE_STORAGE_KEY = 'mebular.locale';
 export const MANIFEST_URL = '/locales/manifest.json';
 export const LOCALES_BASE_URL = '/locales';
 export const CONSOLE_PACK = 'console';
+/** 错误码 → 文案数据层（与 console 同一 catalog 合并，错误码 key 可直接取）。 */
+export const ERRORS_PACK = 'errors';
 
 /** 语言行默认开放；catalog 未全量翻译期间，未选英文的普通用户仍默认 zh-CN。 */
 export const I18N_FOUNDATION_READY = true;
@@ -558,9 +560,21 @@ export async function loadI18n({
       catalogs[code] = {};
       return;
     }
+    // 错误 pack 是可选的第二数据层：加载失败不抹掉 console 文案，只记录诊断。
+    const extraPacks = [ERRORS_PACK].filter((pack) => safePackPath(entry.files?.[pack]));
     try {
       const json = await fetchJson(fetchImpl, joinUrl(localesBaseUrl, path));
-      catalogs[code] = extractMessages(json);
+      const messages = extractMessages(json);
+      for (const pack of extraPacks) {
+        const extraPath = safePackPath(entry.files?.[pack]);
+        try {
+          const extra = await fetchJson(fetchImpl, joinUrl(localesBaseUrl, extraPath));
+          Object.assign(messages, extractMessages(extra));
+        } catch (error) {
+          errors.push({ scope: 'pack', locale: code, pack, path: extraPath, message: String(error?.message ?? error) });
+        }
+      }
+      catalogs[code] = messages;
     } catch (error) {
       errors.push({ scope: 'pack', locale: code, path, message: String(error?.message ?? error) });
       catalogs[code] = {};

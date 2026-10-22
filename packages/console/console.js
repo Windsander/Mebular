@@ -303,7 +303,7 @@ async function refreshOnce() {
 }
 
 function computeDegraded() {
-  if (state.error) return t('status.degraded.disconnected', { message: state.error.message });
+  if (state.error) return t('status.degraded.disconnected', { message: localizeError(state.error, 'errors.unknown') });
   const status = state.overview?.status;
   if (!status) return t('status.degraded.noStatus');
   if (!status.running) return t('status.degraded.p2pOff');
@@ -312,12 +312,69 @@ function computeDegraded() {
 
 // ---------- 渲染 ----------
 
-/** 服务端动态消息：中文界面保留原文；英文界面遇到中文原文时退回本地化通用文案。 */
+const CJK_TEXT = /[\u3400-\u9fff]/;
+const isChineseLocale = () => String(getLocale()).toLowerCase().startsWith('zh');
+
+/** 错误码 → errors.<code> key（大写/小写/连字符统一成小写蛇形）。 */
+function errorTranslationKey(code) {
+  const raw = typeof code === 'string' ? code.trim() : '';
+  if (!raw) return null;
+  if (raw.startsWith('errors.')) return raw;
+  const slug = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return slug ? `errors.${slug}` : null;
+}
+
+function errorCodeOf(error) {
+  const payload = error?.payload ?? null;
+  const candidate = payload?.errorKey ?? payload?.code ?? payload?.error ?? error?.code;
+  return typeof candidate === 'string' ? candidate : null;
+}
+
+function translateOrFallback(key, fallbackKey) {
+  if (key && t.has(key)) return t(key);
+  if (fallbackKey && t.has(fallbackKey)) return t(fallbackKey);
+  if (t.has('errors.unknown')) return t('errors.unknown');
+  return t('common.actionFailed');
+}
+
+/**
+ * 服务端动态错误 → 界面文案：
+ * - 中文界面保留服务端原文（语义最完整）；
+ * - 英文界面优先使用稳定错误码（payload.errorKey / error）对应的 errors pack；
+ * - 非中文原文（技术英文）原样保留；
+ * - 未知中文错误绝不透出，退回本动作的英文兜底（再退 errors.unknown）。
+ */
+function localizeError(error, fallbackKey = 'common.actionFailed') {
+  const message = String(typeof error === 'string'
+    ? error
+    : (error?.payload?.message ?? error?.message ?? ''))
+    .replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, '')
+    .trim();
+  const code = errorCodeOf(error);
+  const key = errorTranslationKey(code);
+  if (isChineseLocale()) return message || translateOrFallback(key, fallbackKey);
+  const messageIsCode = typeof code === 'string' && message.toLowerCase() === code.toLowerCase();
+  const genericHttp = /^HTTP\s+\d+$/i.test(message);
+  if (message && !CJK_TEXT.test(message) && !messageIsCode && !genericHttp) return message;
+  return translateOrFallback(key, fallbackKey);
+}
+
+/** 兼容旧调用点：动态错误详情。 */
 function displayErrorDetail(error, fallbackKey = 'common.actionFailed') {
-  const message = String(error?.payload?.message ?? error?.message ?? '').trim();
-  if (!message) return t(fallbackKey);
-  if (getLocale() === 'zh-CN' || !/[\u3400-\u9fff]/.test(message)) return message;
+  return localizeError(error, fallbackKey);
+}
+
+/** 配置原因等服务端纯文本：英文界面遇到未映射的中文原文时给通用英文兜底。 */
+function localizeReasonText(reason, fallbackKey = 'settings.schema.reason.dynamicFallback') {
+  const text = String(reason ?? '').trim();
+  if (!text) return '';
+  if (isChineseLocale() || !CJK_TEXT.test(text)) return text;
   return t(fallbackKey);
+}
+
+/** config-schema reason：先按已知模板本地化，未命中的中文再走通用兜底。 */
+function localizeEffectiveReason(path, reason) {
+  return localizeReasonText(localizeSchemaReason(path, reason, t));
 }
 
 function render() {
@@ -618,7 +675,7 @@ function renderBanner() {
   if (state.error) {
     banner.hidden = false;
     banner.className = 'banner is-error';
-    banner.textContent = t('banner.error', { message: state.error.message });
+    banner.textContent = t('banner.error', { message: localizeError(state.error, 'errors.unknown') });
     wrap?.classList.add('has-banner');
     return;
   }
@@ -803,7 +860,7 @@ async function applySubscription(ns, active, nextNamespaces) {
     showToast(active ? t('domains.toast.subscribed', { namespace: ns }) : t('domains.toast.unsubscribed', { namespace: ns }));
     await refresh();
   } catch (error) {
-    window.alert(t('common.operationFailed', { message: error.message }));
+    window.alert(t('common.operationFailed', { message: localizeError(error, 'errors.unknown') }));
     await refresh();
   }
 }
@@ -852,7 +909,7 @@ async function createNamespace(rawName) {
     await refresh();
     showToast(t('domains.create.success', { namespace }));
   } catch (err) {
-    showError(t('domains.create.failed', { message: err.message }));
+    showError(t('domains.create.failed', { message: localizeError(err, 'errors.unknown') }));
   }
 }
 
@@ -874,10 +931,10 @@ async function doRejoin(ns) {
   try {
     const result = await api(`/admin/api/namespaces/${encodeURIComponent(ns)}/rejoin`, { method: 'POST', body: {} });
     if (result?.ok) showToast(t('domains.rejoin.toast.done', { namespace: ns }));
-    else showToast(t('domains.rejoin.toast.failed', { reason: result?.reason ?? t('domains.rejoin.failedFallback') }));
+    else showToast(t('domains.rejoin.toast.failed', { reason: localizeReasonText(result?.reason, 'domains.rejoin.failedFallback') || t('domains.rejoin.failedFallback') }));
     await refresh();
   } catch (error) {
-    window.alert(t('common.operationFailed', { message: error.message }));
+    window.alert(t('common.operationFailed', { message: localizeError(error, 'errors.unknown') }));
   }
 }
 
@@ -915,7 +972,7 @@ async function runHandoffPlan() {
     $('#handoff-confirm').disabled = plan?.ok !== true;
   } catch (error) {
     pre.hidden = false;
-    pre.textContent = t('handoff.planFailed', { message: error.message });
+    pre.textContent = t('handoff.planFailed', { message: localizeError(error, 'errors.unknown') });
     $('#handoff-confirm').disabled = true;
   }
 }
@@ -934,11 +991,11 @@ async function confirmHandoff() {
     const result = await api(`/admin/api/namespaces/${encodeURIComponent(ns)}/leave`, { method: 'POST', body: { successor } });
     showToast(result?.ok
       ? t('handoff.toast.done', { namespace: ns })
-      : t('handoff.toast.aborted', { reason: result?.reason ?? t('handoff.abortedFallback') }));
+      : t('handoff.toast.aborted', { reason: localizeReasonText(result?.reason, 'handoff.abortedFallback') || t('handoff.abortedFallback') }));
     $('#handoff').hidden = true;
     await refresh();
   } catch (error) {
-    window.alert(t('common.operationFailed', { message: error.message }));
+    window.alert(t('common.operationFailed', { message: localizeError(error, 'errors.unknown') }));
   }
 }
 
@@ -1012,7 +1069,7 @@ function statusRows() {
     const ui = localizeSchemaUi(entry.ui ?? {});
     const row = { ...entry, ...(effectiveRowOf(entry.path) ?? {}), label: ui.label ?? entry.path };
     // reason 保持服务端原文（逻辑判定/诊断导出仍用它）；reasonText 只负责界面文案。
-    return { ...row, reasonText: localizeSchemaReason(entry.path, row.reason, t) };
+    return { ...row, reasonText: localizeEffectiveReason(entry.path, row.reason) };
   });
 }
 
@@ -1091,7 +1148,7 @@ function applyResultBanner() {
     if (failed.length > 0) {
       const detail = failed.map((row) => `<li><b>${escapeHtml(labelOf(row.path))}</b> <code>${escapeHtml(row.path)}</code>`
         + `<span class="muted">${escapeHtml(t('settings.apply.fieldDetail', { configured: formatRestartValue(row.configured), actual: formatRestartValue(row.actual) }))}</span>`
-        + (row.reason ? `<span class="pending-restart-reason">${escapeHtml(t('settings.apply.reason', { reason: localizeSchemaReason(row.path, String(row.reason), t) }))}</span>` : '')
+        + (row.reason ? `<span class="pending-restart-reason">${escapeHtml(t('settings.apply.reason', { reason: localizeEffectiveReason(row.path, String(row.reason)) }))}</span>` : '')
         + '</li>').join('');
       return `<div class="pending-restart is-error" data-apply-result="mismatch">
         <div class="pending-restart-head"><span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span><span class="muted">${escapeHtml(t('settings.apply.mismatch.summary', { count: failed.length }))}</span></div>
@@ -1107,7 +1164,7 @@ function applyResultBanner() {
     const rolled = apply.status === 'rolled-back';
     return `<div class="pending-restart is-error" data-apply-result="${escapeHtml(apply.status)}">
       <div class="pending-restart-head"><span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span><span class="muted">${escapeHtml(t(rolled ? 'settings.apply.rolledBack' : 'settings.apply.rollbackFailed'))}</span></div>
-      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.reason', { reason: String(apply.reason ?? t('settings.apply.unknownReason')) }))}</p>
+      <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.reason', { reason: localizeReasonText(apply.reason) || t('settings.apply.unknownReason') }))}</p>
       <p class="muted pending-restart-note">${escapeHtml(t('settings.apply.fieldsInvolved', { fields: fieldText }))}${apply.backup ? `；${escapeHtml(t('settings.apply.backupLabel'))}<code>${escapeHtml(String(apply.backup))}</code>` : ''}</p>
     </div>`;
   }
@@ -1128,7 +1185,7 @@ function pendingRestartBanner() {
   const rows = items.map((item) => `<li><b>${escapeHtml(restartLabel(item.path))}</b>`
     + ` <code>${escapeHtml(item.path)}</code>`
     + `<span class="muted">${escapeHtml(t('settings.apply.fieldDetail', { configured: formatRestartValue(item.file), actual: formatRestartValue(item.running) }))}</span>`
-    + `<span class="pending-restart-reason">${escapeHtml(t('settings.pending.reason', { reason: String(localizeSchemaReason(item.path, item.reason, t) || t('settings.pending.reasonFallback')) }))}</span></li>`).join('');
+    + `<span class="pending-restart-reason">${escapeHtml(t('settings.pending.reason', { reason: String(localizeEffectiveReason(item.path, item.reason) || t('settings.pending.reasonFallback')) }))}</span></li>`).join('');
   return `<div class="pending-restart" data-pending-restart="1">
     <div class="pending-restart-head">
       <span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.pending.count', { count: items.length }))}</span>
@@ -1239,7 +1296,7 @@ function runtimeCompareLine(field) {
   const mismatch = configured !== null && configured !== undefined
     && JSON.stringify(configured ?? null) !== JSON.stringify(actual ?? null);
   const reason = typeof row.reason === 'string' && row.reason.length > 0 ? row.reason : '';
-  const reasonText = localizeSchemaReason(field.path, reason, t);
+  const reasonText = localizeEffectiveReason(field.path, reason);
   // 「已生效：… / 已装配：…」是生效说明，不是未生效原因；其它原因才作为异常自动出现。
   // 布尔开关本就关闭时（如语义召回未启用），原因属于「为什么没开」的说明 → 收进详情，不占常显。
   const infoReason = reason.length > 0 && /^(已生效|已装配)/.test(reason);
@@ -1269,7 +1326,7 @@ function runtimeFoldedReason(field) {
   if (configured === true || actual === true) return '';
   const reason = typeof row.reason === 'string' ? row.reason.trim() : '';
   if (!reason || /^(已生效|已装配)/.test(reason) || reasonIsFatal(reason)) return '';
-  return localizeSchemaReason(field.path, reason, t);
+  return localizeEffectiveReason(field.path, reason);
 }
 
 function renderCfgField(field) {
@@ -1654,7 +1711,7 @@ function securityLevelTag(level) {
 function securityReasonLabel(reason) {
   const key = SECURITY_REJECTION_KEYS[reason];
   if (key) return t(key);
-  return String(reason ?? t('settings.security.unknownReason'));
+  return localizeReasonText(reason, 'settings.security.unknownReason') || t('settings.security.unknownReason');
 }
 
 function securityOpText(record) {
@@ -1916,7 +1973,7 @@ async function securityConfirmHandler() {
   try {
     await flow.onConfirm();
   } catch (error) {
-    securitySetError(error?.message ?? String(error));
+    securitySetError(localizeError(error, 'errors.unknown'));
   } finally {
     if (state.securityFlow) {
       confirm.disabled = false;
@@ -2016,7 +2073,7 @@ async function securityStartLevelChange(targetLevel) {
       },
     });
   } catch (error) {
-    window.alert(t('security.tier.failed', { message: error.message }));
+    window.alert(t('security.tier.failed', { message: localizeError(error, 'errors.unknown') }));
   }
 }
 
@@ -2065,8 +2122,8 @@ async function securityStartApproval({ title, op, target, level, intro, onApprov
         try {
           await onApproved(request.approvalId, decided);
         } catch (error) {
-          if (status) status.innerHTML = `<span class="crt-warn">${escapeHtml(t('security.approval.approvedFailed', { message: error.message }))}</span>`;
-          securitySetError(t('security.approval.executeFailed', { message: error.message }));
+          if (status) status.innerHTML = `<span class="crt-warn">${escapeHtml(t('security.approval.approvedFailed', { message: localizeError(error, 'errors.unknown') }))}</span>`;
+          securitySetError(t('security.approval.executeFailed', { message: localizeError(error, 'errors.unknown') }));
         }
         return;
       }
@@ -2120,7 +2177,7 @@ async function securityApprove(approvalId) {
     await refresh();
     showToast(t('security.approval.approvedToast'));
   } catch (error) {
-    window.alert(t('security.approval.approveFailed', { message: error.message }));
+    window.alert(t('security.approval.approveFailed', { message: localizeError(error, 'errors.unknown') }));
   }
 }
 
@@ -2138,7 +2195,7 @@ async function securityDeny(approvalId) {
     await refresh();
     showToast(t('security.deny.toast'));
   } catch (error) {
-    window.alert(t('security.deny.failed', { message: error.message }));
+    window.alert(t('security.deny.failed', { message: localizeError(error, 'errors.unknown') }));
   }
 }
 
@@ -2183,7 +2240,7 @@ function securitySeedDisplay(seed, { generated = false } = {}) {
     title: generated ? t('security.totp.seed.sharedTitle') : t('security.totp.seed.title'),
     hideClose: false,
     body: `<div id="totp-seed-display" class="sec-seed" tabindex="-1">
-        <p class="crt-warn">${escapeHtml(seed.warning ?? t('security.totp.seed.warningDefault'))}</p>
+        <p class="crt-warn">${escapeHtml(localizeReasonText(seed.warning, 'security.totp.seed.warningDefault') || t('security.totp.seed.warningDefault'))}</p>
         ${qr}
         <div class="readout-block"><span class="domain-label">${escapeHtml(t('security.totp.seed.groups'))}</span><code class="sec-seed-groups">${escapeHtml(groupText)}</code></div>
         <div class="readout-block"><span class="domain-label">${escapeHtml(t('security.totp.seed.uri'))}</span><code class="sec-seed-uri">${escapeHtml(seed.otpauth ?? '')}</code></div>
@@ -2218,7 +2275,7 @@ async function securityTotpGenerate() {
     await refresh();
     securitySeedDisplay(seed, { generated: true });
   } catch (error) {
-    window.alert(t('security.totp.generate.failed', { message: error.message }));
+    window.alert(t('security.totp.generate.failed', { message: localizeError(error, 'errors.unknown') }));
   }
 }
 
@@ -2276,7 +2333,7 @@ async function securityRecoveryGenerate() {
     await refresh();
     securityShowRecoveryOnce(result.codeFormatted ?? result.code, { title: t('security.recovery.once.offlineTitle') });
   } catch (error) {
-    window.alert(t('security.recovery.generate.failed', { message: error.message }));
+    window.alert(t('security.recovery.generate.failed', { message: localizeError(error, 'errors.unknown') }));
   }
 }
 
@@ -2291,7 +2348,7 @@ const SECURITY_RECOVERY_ERROR_KEYS = {
 function securityRecoveryErrorText(error) {
   const key = SECURITY_RECOVERY_ERROR_KEYS[error?.payload?.error];
   if (key) return t(key);
-  return error?.message ?? t('security.recovery.error.fallback');
+  return localizeError(error, 'security.recovery.error.fallback');
 }
 
 /** 恢复码输入（高档「另一台设备不在」路径）：只用于本次签名，不回显、不进 localStorage。 */
@@ -2382,7 +2439,7 @@ async function securityRevokeFlow(device) {
         recovery: () => securityRevokeViaRecovery(device),
       });
     } catch (error) {
-      window.alert(t('security.revoke.startFailed', { message: error.message }));
+      window.alert(t('security.revoke.startFailed', { message: localizeError(error, 'errors.unknown') }));
     }
     return;
   }
@@ -2492,7 +2549,7 @@ function renderDiagnostics() {
       kvRow(t('settings.diag.status'), escapeHtml(statusText)),
       kvRow(t('settings.diag.time'), escapeHtml(String(apply.at ?? '—'))),
       kvRow(t('settings.diag.fields'), escapeHtml((apply.fields ?? []).join(', ') || '—')),
-      ...(apply.reason ? [kvRow(t('settings.diag.reason'), escapeHtml(String(apply.reason)))] : []),
+      ...(apply.reason ? [kvRow(t('settings.diag.reason'), escapeHtml(localizeReasonText(apply.reason, 'settings.apply.unknownReason')))] : []),
       ...(apply.backup ? [copyRowOf(t('settings.diag.backup'), String(apply.backup))] : []),
       ...(verify.length ? [kvRow(t('settings.diag.verify'), verify.map((row) => `${escapeHtml(row.path)}: ${row.ok === true ? '✓' : row.ok === false ? '✗' : '—'}`).join(' · '))] : []),
     ]);
@@ -2567,7 +2624,7 @@ async function saveDeviceRename() {
     renderAbout();
     showToast(t('about.identity.renameSuccess', { name }));
   } catch (error) {
-    state.deviceRenameError = error?.payload?.message ?? error?.message ?? String(error);
+    state.deviceRenameError = localizeError(error, 'errors.unknown');
     renderAbout();
   }
 }
@@ -2711,7 +2768,7 @@ function renderAbout() {
         kvRow(t('about.runtime.relay'), s.relay
           ? t('about.runtime.relayValue', {
             state: s.relay.serving ? t('about.runtime.on') : t('about.runtime.off'),
-            reason: escapeHtml(String(s.relay.reason ?? '—')),
+            reason: escapeHtml(localizeReasonText(s.relay.reason, 'settings.schema.reason.dynamicFallback') || '—'),
           })
           : '—'),
         kvRow(t('about.runtime.bridge'), s.relay?.bridge
@@ -2824,7 +2881,7 @@ async function submitConfigPatch(patch, warning = '') {
       const ok = await confirmModal({
         title: t('settings.write.confirmTitle'),
         body: t('settings.write.confirmBody', {
-          message: error.payload.message ?? '',
+          message: localizeError(error, 'errors.needs_confirmation'),
           risk: riskText,
           paths: lockPaths.join(', '),
         }),
@@ -2886,7 +2943,7 @@ async function applyConfigField(field, next) {
     const res = await submitConfigPatch(patch, field.warn ?? '');
     await onConfigSaved(res);
   } catch (error) {
-    if (!error?.uiHandled) showToast(t('settings.write.failed', { message: error.message }));
+    if (!error?.uiHandled) showToast(t('settings.write.failed', { message: localizeError(error, 'errors.unknown') }));
   } finally {
     lastSettingsSignature = null;
     renderSettings();
@@ -2930,11 +2987,11 @@ async function restartServeFromUi(event) {
     if (stateEl) stateEl.textContent = '';
     showToast(t('settings.restart.restored'));
   } catch (error) {
-    const manual = error?.payload?.manual ?? null;
-    if (stateEl) stateEl.textContent = manual ?? t('settings.restart.failed', { message: error.message });
+    const manual = localizeReasonText(error?.payload?.manual, 'errors.manual_restart_required');
+    if (stateEl) stateEl.textContent = manual ?? t('settings.restart.failed', { message: localizeError(error, 'errors.unknown') });
     if (btn) btn.disabled = false;
     if (manual) window.alert(t('settings.restart.unavailable', { message: manual }));
-    else window.alert(t('settings.restart.failed', { message: error.message }));
+    else window.alert(t('settings.restart.failed', { message: localizeError(error, 'errors.unknown') }));
   }
 }
 
@@ -2992,7 +3049,7 @@ async function memAction(id, action) {
       : action === 'archive' ? t('memories.toast.archived', { id }) : t('memories.toast.unarchived', { id }));
     await refresh();
   } catch (error) {
-    window.alert(t('common.operationFailed', { message: error.message }));
+    window.alert(t('common.operationFailed', { message: localizeError(error, 'errors.unknown') }));
   }
 }
 
@@ -3114,7 +3171,7 @@ async function serviceAction(action) {
     }
     await refresh();
   } catch (error) {
-    say(t('settings.service.msg.failed', { message: error.message }));
+    say(t('settings.service.msg.failed', { message: localizeError(error, 'errors.unknown') }));
   }
 }
 
@@ -3149,7 +3206,7 @@ async function clientAction(id, action) {
     if (action === 'preview') {
       const res = await api(`/admin/api/clients/${id}/preview`, { method: 'POST', body: {} });
       showDiff(res.preview || t('assistants.preview.unchanged'));
-      say(res.needsManual ? t('assistants.preview.manual', { reason: res.reason ?? '' }) : '');
+      say(res.needsManual ? t('assistants.preview.manual', { reason: localizeReasonText(res.reason, 'errors.unknown') }) : '');
       return;
     }
     // R-1 小-11：回滚是不可逆方向的操作 → 应用内二次确认（取消 / Esc / 点空白 = 不执行）
@@ -3163,7 +3220,7 @@ async function clientAction(id, action) {
     }
     const res = await api(`/admin/api/clients/${id}/${action}`, { method: 'POST', body: {}, timeoutMs: 20000 }); // 写入/CLI 动作给足余量
     if (typeof res.preview === 'string' && res.preview.length > 0) showDiff(res.preview);
-    if (!res.ok) { say(t('assistants.manualNeeded', { reason: res.reason ?? t('assistants.preview.chooseSnippet') })); return; }
+    if (!res.ok) { say(t('assistants.manualNeeded', { reason: localizeReasonText(res.reason, 'errors.unknown') || t('assistants.preview.chooseSnippet') })); return; }
     delete state.clientFailed[id]; // 成功/重试成功 → 清失败态
     say(action === 'connect'
       ? (res.changed ? t('assistants.done.connectChanged') : t('assistants.done.connectUnchanged'))
@@ -3178,7 +3235,7 @@ async function clientAction(id, action) {
       state.clientFailed[id] = {
         kind: 'connect',
         at: Date.now(),
-        reason: p.reason ?? error.message,
+        reason: localizeReasonText(p.reason ?? localizeError(error, 'errors.unknown'), 'errors.unknown'),
         rolledBack: p.rolledBack === true,
         backupPath: typeof p.backupPath === 'string' ? p.backupPath : null,
         commands: Array.isArray(p.commands) ? p.commands : null,
@@ -3186,7 +3243,7 @@ async function clientAction(id, action) {
       state.clientRestart[id] = false;
       rerenderAssistants();
     } else {
-      say(t('assistants.form.failed', { message: error.message }));
+      say(t('assistants.form.failed', { message: localizeError(error, 'errors.unknown') }));
     }
   } finally {
     delete state.clientBusy[id];
@@ -3242,12 +3299,12 @@ async function assistantSubmitForm() {
     const res = read.editId
       ? await api(`/admin/api/assistants/${encodeURIComponent(read.editId)}`, { method: 'PUT', body: read.descriptor })
       : await api('/admin/api/assistants', { method: 'POST', body: read.descriptor });
-    if (!res?.ok) { state.addForm = { ...(state.addForm ?? {}), error: res?.reason ?? t('assistants.registerFailed') }; rerenderAssistants(); return; }
+    if (!res?.ok) { state.addForm = { ...(state.addForm ?? {}), error: localizeReasonText(res?.reason, 'errors.unknown') || t('assistants.registerFailed') }; rerenderAssistants(); return; }
     state.addForm = null;
     await refresh();
     if ($('#settings') && !$('#settings').hidden) { lastSettingsSignature = null; renderSettings('assistants'); }
   } catch (error) {
-    state.addForm = { ...(state.addForm ?? {}), error: t('assistants.form.failed', { message: error.message }) };
+    state.addForm = { ...(state.addForm ?? {}), error: t('assistants.form.failed', { message: localizeError(error, 'errors.unknown') }) };
     rerenderAssistants();
   }
 }
@@ -3276,11 +3333,11 @@ async function assistantRemove(id) {
   if (!ok) return;
   try {
     const res = await api(`/admin/api/assistants/${encodeURIComponent(id)}/remove`, { method: 'POST', body: {} });
-    if (!res?.ok) { state.clientMsg[id] = res?.reason ?? t('assistants.remove.failed'); rerenderAssistants(); return; }
+    if (!res?.ok) { state.clientMsg[id] = localizeReasonText(res?.reason, 'errors.unknown') || t('assistants.remove.failed'); rerenderAssistants(); return; }
     await refresh();
     if ($('#settings') && !$('#settings').hidden) { lastSettingsSignature = null; renderSettings('assistants'); }
   } catch (error) {
-    state.clientMsg[id] = t('assistants.form.failed', { message: error.message });
+    state.clientMsg[id] = t('assistants.form.failed', { message: localizeError(error, 'errors.unknown') });
     rerenderAssistants();
   }
 }
@@ -4249,7 +4306,7 @@ async function runWrite(path, body, successMessage) {
     await refresh();
     showToast(successMessage);
   } catch (error) {
-    window.alert(t('common.operationFailed', { message: error.message }));
+    window.alert(t('common.operationFailed', { message: localizeError(error, 'errors.unknown') }));
   }
 }
 
@@ -4624,7 +4681,7 @@ async function openInvite(ttlMs = state.inviteTtlMs) {
         },
       });
     } catch (error) {
-      showToast(`发起会签失败：${error.message}`);
+      showToast(t('security.revoke.startFailed', { message: localizeError(error, 'errors.unknown') }));
     }
     return;
   }
@@ -5045,7 +5102,7 @@ function cloudCardHtml() {
   let body;
   if (state.clouds) {
     const rows = (state.clouds.profiles ?? []).map(cloudRowHtml).join('');
-    body = `${state.clouds.warning ? `<p class="crt-warn">${escapeHtml(state.clouds.warning)}</p>` : ''}
+    body = `${state.clouds.warning ? `<p class="crt-warn">${escapeHtml(localizeReasonText(state.clouds.warning, 'errors.unknown'))}</p>` : ''}
       <div class="cloud-rows">${rows || `<p class="muted">${escapeHtml(t('settings.cloud.empty'))}</p>`}</div>
       <p class="cfg-help muted">${escapeHtml(t('settings.cloud.note'))}</p>
       ${state.clouds.nameConflicts?.currentDuplicate
@@ -5642,7 +5699,7 @@ async function doWizardConnect() {
     wizardSet({ type: 'CONNECT_SUCCESS' });
     await refresh();
   } catch (error) {
-    wizardSet({ type: 'CONNECT_FAILURE', message: error.message });
+    wizardSet({ type: 'CONNECT_FAILURE', message: localizeError(error, 'errors.unknown') });
   }
 }
 

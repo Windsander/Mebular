@@ -1165,6 +1165,7 @@
     "namespaceNew.name": "名称",
     "namespaceNew.namePlaceholder": "例如：阅读、工作、灵感",
     "namespaceNew.create": "创建并订阅",
-    "domains.rejoin.confirmAction": "重新同步"
+    "domains.rejoin.confirmAction": "重新同步",
+    "settings.schema.reason.dynamicFallback": "状态原因无法解析，请查看诊断。"
   }
 }

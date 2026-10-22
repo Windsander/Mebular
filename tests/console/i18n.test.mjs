@@ -336,6 +336,12 @@ describe('i18n locale pack · 新增语言只读注入', () => {
           json: async () => ({ schemaVersion: 1, locale: 'eo', pack: 'console', messages: eoMessages }),
         };
       }
+      if (url === '/locales/eo/errors.json') {
+        return {
+          ok: true,
+          json: async () => ({ schemaVersion: 1, locale: 'eo', pack: 'errors', messages: {} }),
+        };
+      }
       throw new Error(`unexpected fetch: ${url}`);
     };
 
@@ -350,7 +356,7 @@ describe('i18n locale pack · 新增语言只读注入', () => {
       onMissing: () => {},
     });
 
-    expect(fetched).toEqual(['/locales/eo/console.json']);
+    expect(fetched).toEqual(['/locales/eo/console.json', '/locales/eo/errors.json']);
     expect(loaded.supportedLocales).toEqual(['zh-CN', 'en-US', 'eo']);
     expect(loaded.i18n.getLocale()).toBe('eo');
     expect(loaded.i18n.t('nav.map')).toBe('Stelmapo');

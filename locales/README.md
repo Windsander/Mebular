@@ -8,7 +8,7 @@ locales/
   zh-CN/
     console.json         # 控制台文案
     desktop.json         # 桌面壳文案（托盘 / 退出确认 / 向导 / 加载态 / 主进程对话框）
-    errors.json          # 错误文案预留（本阶段为空结构）
+    errors.json          # 错误码 → 文案（Console / Desktop 共用）
   en-US/
     console.json
     desktop.json
@@ -60,6 +60,9 @@ locales/
 - 插值占位符用 `{name}`；同一 key 在所有语言中的占位符集合必须一致。
 - 缺 key 时 `t()` 回退 key（不返回空字符串）；运行期按
   `请求 locale → manifest.fallbackLocale → defaultLocale` 查找。
+- `errors` pack 与 console / desktop pack 合并到同一 catalog：key 形如
+  `errors.<error_code>`（服务端 `payload.error` / `payload.errorKey` 归一化为小写蛇形）。
+  未知错误由调用方给通用英文兜底（`errors.unknown`），英文界面绝不透出中文原文。
 - 用户数据（设备名、忆云名、命名空间、记忆正文、审计原文、错误原文）不进入 pack。
 
 ## 新增语言
@@ -87,7 +90,7 @@ locales/
 ## 校验
 
 `npm run check:i18n` 扫描 manifest + 所有 pack，校验文件存在、envelope 元数据、
-console / desktop key 对等、占位符一致、值非空、非默认语言不含中文（白名单），以及
+console / desktop / errors key 对等、占位符一致、值非空、非默认语言不含中文（白名单），以及
 loader / fallback / 静态引用。主路径（顶栏 / 导航 / 锁定态 / 新建 / 加入 / 邀请 / 向导）
 另有 key 组完整性与 `data-i18n` 挂载检查；桌面壳另有托盘 / 退出确认 / 向导 / 加载态
 key 组与 `data-i18n` / 字面 `t()` 引用检查。`tests/console/i18n.test.mjs` 用只读注入

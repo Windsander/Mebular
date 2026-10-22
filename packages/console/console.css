@@ -447,6 +447,15 @@ body.modal-open { overflow: hidden; }
 
 /* ---------- 域视图卡片 / 成员 / 设置卡 ---------- */
 .panel-note { font-size: 11px; line-height: 1.6; margin: 0 0 12px; }
+/* 英文数据面：长句/长命令在面板、关于本机与设备卡里收缩换行，不撑出横向滚动。 */
+.panel-view, .panel-view > *, .panel-note, .panel-view .audit-item,
+.panel-view .domain-card, .panel-view .mem-row, .audit-detail, #about-body,
+#device-card, .modal-heading { min-width: 0; max-width: 100%; }
+.panel-view :where(p, li, dd), .audit-detail, .domain-row, .panel-note,
+#about-body :where(p, dd, li), #device-card .card-help { overflow-wrap: anywhere; }
+.panel-view :where(p, li, dd) code, .audit-detail code,
+#about-body :where(p, dd, li) code, #device-card code { overflow-wrap: anywhere; }
+.domain-row > :where(span, div) { min-width: 0; }
 .domain-list { display: grid; gap: 10px; }
 .domain-card { border: 1px solid var(--border); border-radius: 10px; background: rgba(10, 16, 32, 0.55); padding: 10px 12px; }
 .domain-card header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }

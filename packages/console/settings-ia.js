@@ -20,13 +20,16 @@
 //  - 反熵间隔/抖动、快照阈值、召回阈值 → internal（config.json 文档级，GUI 只留「自动对账」总开关）；
 //  - 保存即生效（toggle 点击即写、文本/数字失焦即写；保存后守护自动重启生效）——「保存」按钮从用户路径消失。
 
-/** 设置弹层的 Tab（顺序即展示顺序；`common` 为默认）。E1：增「安全」「MCP 接入」专区。 */
+/**
+ * 设置弹层的 Tab（顺序即展示顺序；`common` 为默认）。E1：增「安全」「MCP 接入」专区。
+ * labelKey 是用户可见文案真源；label 只作 catalog 缺 key 时的中文兜底。
+ */
 export const IA_TABS = [
-  { id: 'common', label: '常用' },
-  { id: 'security', label: '安全' },
-  { id: 'assistants', label: 'AI 助手' },
-  { id: 'mcp', label: 'MCP 接入' },
-  { id: 'advanced', label: '高级' },
+  { id: 'common', label: '常用', labelKey: 'settings.tab.common' },
+  { id: 'security', label: '安全', labelKey: 'settings.tab.security' },
+  { id: 'assistants', label: 'AI 助手', labelKey: 'settings.tab.assistants' },
+  { id: 'mcp', label: 'MCP 接入', labelKey: 'settings.tab.mcp' },
+  { id: 'advanced', label: '高级', labelKey: 'settings.tab.advanced' },
 ];
 
 /** 设置弹层的附加导航（非 Tab：点击打开既有「关于本机」弹层）。 */
@@ -46,15 +49,18 @@ export const IA_SETTINGS_FOLDS = [
   { id: 'about-runtime', label: '运行状态（只读）', labelKey: 'settings.fold.aboutRuntime', home: 'about' },
 ];
 
-/** 邀请令牌有效期档位（UI 与断言共用；默认 15 分钟 = 服务端默认）。 */
+/**
+ * 邀请令牌有效期档位（UI 与断言共用；默认 15 分钟 = 服务端默认）。
+ * labelKey / labelVars 是用户可见文案真源；label 只作 catalog 缺 key 时的中文兜底。
+ */
 export const INVITE_TTL_OPTIONS = [
-  { label: '5 分钟', ttlMs: 300_000 },
-  { label: '15 分钟', ttlMs: 900_000 },
-  { label: '20 分钟', ttlMs: 1_200_000 },
-  { label: '2 小时', ttlMs: 7_200_000 },
-  { label: '6 小时', ttlMs: 21_600_000 },
-  { label: '12 小时', ttlMs: 43_200_000 },
-  { label: '24 小时', ttlMs: 86_400_000 },
+  { label: '5 分钟', labelKey: 'invite.ttl.minutes', labelVars: { n: 5 }, ttlMs: 300_000 },
+  { label: '15 分钟', labelKey: 'invite.ttl.minutes', labelVars: { n: 15 }, ttlMs: 900_000 },
+  { label: '20 分钟', labelKey: 'invite.ttl.minutes', labelVars: { n: 20 }, ttlMs: 1_200_000 },
+  { label: '2 小时', labelKey: 'invite.ttl.hours', labelVars: { n: 2 }, ttlMs: 7_200_000 },
+  { label: '6 小时', labelKey: 'invite.ttl.hours', labelVars: { n: 6 }, ttlMs: 21_600_000 },
+  { label: '12 小时', labelKey: 'invite.ttl.hours', labelVars: { n: 12 }, ttlMs: 43_200_000 },
+  { label: '24 小时', labelKey: 'invite.ttl.hours', labelVars: { n: 24 }, ttlMs: 86_400_000 },
 ];
 export const INVITE_TTL_DEFAULT_MS = 900_000;
 
@@ -278,6 +284,115 @@ export const IA_EDITOR_RENDER_PATHS = [
   ...IA_ADVANCED_FIELDS,
   ...IA_MCP_FIELDS,
 ];
+
+// ---------- config-schema reason 文案（Console 侧映射；不改 CLI/服务端契约） ----------
+// config-schema.mjs 的 reason() 由服务端计算并作为**中文纯文本**下发（CLI / 终端输出仍按原文）。
+// Console 只按已知模板翻译静态说明；未命中的动态错误原文原样返回（下一批处理）。
+export const SCHEMA_REASON_RULES = [
+  // 服务端三元组通用状态
+  { pattern: /^已生效$/, key: 'settings.schema.reason.active' },
+  { pattern: /^已声明为热生效/, key: 'settings.schema.reason.hot' },
+  { pattern: /^环境变量优先/, key: 'settings.schema.reason.envOverride' },
+  { pattern: /^待重启：已保存的值将在重启后生效（当前实例/, key: 'settings.schema.reason.pendingRestartCurrent' },
+  { pattern: /^待重启：已保存的值将在重启后生效$/, key: 'settings.schema.reason.pendingRestart' },
+  { pattern: /^状态不可读$/, key: 'settings.schema.reason.unreadable' },
+
+  // editable
+  { path: 'network.libp2p.listen', pattern: /^仅回环监听/, key: 'settings.schema.reason.networkListenLoopback' },
+  { path: 'joinService.enabled', pattern: /^join 端点解析为回环地址/, key: 'settings.schema.reason.joinLoopback' },
+  { path: 'mcp.http.auth', pattern: /^已生效：控制台 API 现需凭证/, key: 'settings.schema.reason.authActive' },
+  { path: 'semantic.enabled', pattern: /^缺可选依赖/, key: 'settings.schema.reason.semanticMissing' },
+  {
+    path: 'joinService.port',
+    pattern: /^join 端口被占（上次启动失败：([^）]*)）/,
+    key: 'settings.schema.reason.joinPortBusy',
+    vars: (match) => ({ port: match[1] }),
+  },
+  { path: 'mcp.http.tls', pattern: /^缺证书/, key: 'settings.schema.reason.tlsMissing' },
+
+  // status-only
+  { path: 'network.libp2p.relayServers', pattern: /^已生效：自动池/, key: 'settings.schema.reason.relayAutoActive' },
+  { path: 'network.libp2p.relayServers', pattern: /^空：无已知 relay/, key: 'settings.schema.reason.relayEmpty' },
+  { path: 'sync.autoSync', pattern: /^已生效：常驻模式默认常开/, key: 'settings.schema.reason.alwaysOn' },
+  { path: 'sync.pushOnWrite', pattern: /^已生效：常驻模式默认常开/, key: 'settings.schema.reason.alwaysOn' },
+  { path: 'status.lan.discovery', pattern: /^网络未启用：LAN 发现/, key: 'settings.schema.reason.lanNetOff' },
+  { path: 'status.lan.discovery', pattern: /^已生效：随网络启用/, key: 'settings.schema.reason.lanActive' },
+  {
+    path: 'status.relay.role',
+    pattern: /^未提供中转：([\s\S]*)$/,
+    key: 'settings.schema.reason.relayRoleOff',
+    vars: (match) => ({ detail: match[1] }),
+  },
+  { path: 'status.relay.role', pattern: /^已生效：本机对外提供中转/, key: 'settings.schema.reason.relayRoleServing' },
+  {
+    path: 'status.relay.role',
+    pattern: /^待条件满足：([\s\S]*)$/,
+    key: 'settings.schema.reason.relayRoleWaiting',
+    vars: (match) => ({ detail: match[1] }),
+  },
+  {
+    path: 'status.relay.bridge',
+    pattern: /^已生效：经 ([\s\S]*) 中转$/,
+    key: 'settings.schema.reason.relayBridgeActive',
+    vars: (match) => ({ detail: match[1] }),
+  },
+  { path: 'status.relay.bridge', pattern: /^直连优先/, key: 'settings.schema.reason.relayBridgeDirect' },
+  { path: 'status.nat.holepunch', pattern: /^未启用：网络未开启/, key: 'settings.schema.reason.natNetOff' },
+  {
+    path: 'status.nat.holepunch',
+    pattern: /^打洞不可用：([\s\S]*)$/,
+    key: 'settings.schema.reason.natUnavailable',
+    vars: (match) => ({ detail: match[1] }),
+  },
+  {
+    path: 'status.nat.holepunch',
+    pattern: /^已生效：已直连升级 ([\s\S]+) 次$/,
+    key: 'settings.schema.reason.natUpgraded',
+    vars: (match) => ({ count: match[1] }),
+  },
+  { path: 'status.nat.holepunch', pattern: /^已装配：尚无打洞升级/, key: 'settings.schema.reason.natIdle' },
+  {
+    path: 'status.net.broadcast',
+    pattern: /^已生效：档位 ([\s\S]+?)（已发布 ([\s\S]+?) \/ 已采用 ([\s\S]+?)）$/,
+    key: 'settings.schema.reason.broadcastActive',
+    vars: (match) => ({ mode: match[1], published: match[2], applied: match[3] }),
+  },
+  { path: 'status.net.broadcast', pattern: /^未启用（opt-in）/, key: 'settings.schema.reason.broadcastOff' },
+  { path: 'status.join.endpoint', pattern: /^未启用：joinService\.enabled=false$/, key: 'settings.schema.reason.joinOff' },
+  { path: 'status.join.endpoint', pattern: /^不可达：端点回环/, key: 'settings.schema.reason.joinLoopbackUnreachable' },
+  {
+    path: 'status.join.endpoint',
+    pattern: /^上次启动失败：([\s\S]*)$/,
+    key: 'settings.schema.reason.joinLastError',
+    vars: (match) => ({ detail: match[1] }),
+  },
+  { path: 'status.join.endpoint', pattern: /^已生效：端点对新设备可达$/, key: 'settings.schema.reason.joinReachable' },
+  { path: 'status.tls', pattern: /^已生效：TLS 实际启用$/, key: 'settings.schema.reason.tlsActive' },
+  { path: 'status.tls', pattern: /^未启用：明文 HTTP/, key: 'settings.schema.reason.tlsOff' },
+];
+
+/**
+ * Console 渲染 config-schema 的「未生效原因」：命中已知静态模板时用 t()，
+ * 动态错误原文（未命中）原样返回，避免把用户数据/服务端错误误当文案。
+ * @param {string} path 配置 path
+ * @param {unknown} reason 服务端 reason 文本
+ * @param {(key: string, vars?: object) => string} translate t()
+ */
+export function localizeSchemaReason(path, reason, translate) {
+  const text = typeof reason === 'string' ? reason : '';
+  if (!text) return '';
+  for (const rule of SCHEMA_REASON_RULES) {
+    if (rule.path && rule.path !== path) continue;
+    const match = rule.pattern.exec(text);
+    if (!match) continue;
+    if (typeof translate !== 'function') return text;
+    return translate(rule.key, rule.vars ? rule.vars(match) : undefined);
+  }
+  return text;
+}
+
+/** config-schema `effective` 的「已配置」哨兵值（文本字段只读展示用）。 */
+export const SCHEMA_CONFIGURED_VALUE = '（已配置）';
 
 // ---------- U-1 · CSRF 403 自愈（与 IA 同处共享纯逻辑模块：无 DOM、零依赖） ----------
 // 长开页面 / 守护重启后旧 token 失效时，重取一次 /console/ 的 token（响应头 + cookie），

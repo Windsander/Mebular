@@ -9,7 +9,7 @@
 import { StarStage, namespaceColor, shortId } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SECURITY_TOTP_FOOT_KEY, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SECURITY_TOTP_FOOT_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, LOCALE_STORAGE_KEY, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
@@ -965,13 +965,32 @@ function localizedFieldCopy(path) {
   };
 }
 
+/**
+ * config-schema 的 ui 文案：labelKey / helpKey / warnKey / optionKeys 优先（t 渲染）；
+ * 中文 label/help/warn/options 仅作 catalog 缺 key 时的兜底，不进入英文界面。
+ */
+function localizeSchemaUi(ui = {}) {
+  const { labelKey = null, helpKey = null, warnKey = null, optionKeys = null, ...rest } = ui;
+  const localized = { ...rest };
+  if (labelKey) localized.label = t(labelKey);
+  if (helpKey) localized.help = t(helpKey);
+  if (warnKey) localized.warn = t(warnKey);
+  if (Array.isArray(ui.options)) {
+    localized.options = ui.options.map(([value, label]) => [
+      value,
+      optionKeys?.[value] ? t(optionKeys[value]) : label,
+    ]);
+  }
+  return localized;
+}
+
 function rebuildConfigFields() {
   const list = Array.isArray(state.settings?.configSchema) ? state.settings.configSchema : [];
   CONFIG_FIELDS_BY_PATH = new Map(list.map((entry) => [entry.path, {
     path: entry.path,
     kind: entry.kind,
     requiresRestart: entry.requiresRestart !== false,
-    ...(entry.ui ?? {}),
+    ...localizeSchemaUi(entry.ui ?? {}),
     // 展示层覆盖：短帮助/统一词；校验、默认值与写入行为仍由服务端 schema 决定。
     ...localizedFieldCopy(entry.path),
   }]));
@@ -989,7 +1008,31 @@ function effectiveRowOf(path) {
 
 function statusRows() {
   const schema = Array.isArray(state.settings?.statusSchema) ? state.settings.statusSchema : [];
-  return schema.map((entry) => ({ ...entry, ...(effectiveRowOf(entry.path) ?? {}) }));
+  return schema.map((entry) => {
+    const ui = localizeSchemaUi(entry.ui ?? {});
+    const row = { ...entry, ...(effectiveRowOf(entry.path) ?? {}), label: ui.label ?? entry.path };
+    // reason 保持服务端原文（逻辑判定/诊断导出仍用它）；reasonText 只负责界面文案。
+    return { ...row, reasonText: localizeSchemaReason(entry.path, row.reason, t) };
+  });
+}
+
+// configSchema/statusSchema 不包含 internal；待重启横幅仍可能列出「可写 internal」（API 写入）。
+const INTERNAL_LABEL_KEYS = {
+  'sync.antiEntropy.intervalMs': 'settings.schema.internal.antiEntropyInterval.label',
+  'sync.antiEntropy.jitterRatio': 'settings.schema.internal.jitterRatio.label',
+  'sync.snapshotThreshold': 'settings.schema.internal.snapshotThreshold.label',
+  'semantic.minScore': 'settings.schema.internal.semanticMinScore.label',
+  'network.libp2p.relayUnlimited': 'settings.schema.internal.relayUnlimited.label',
+};
+
+/** 字段展示名（可编辑 / 只读 / 可写 internal 三套来源；均缺时返回 null）。 */
+function schemaLabelFor(path) {
+  const editable = CONFIG_FIELDS_BY_PATH.get(path);
+  if (editable?.label) return editable.label;
+  const status = statusRows().find((row) => row.path === path);
+  if (status?.label) return status.label;
+  const internalKey = INTERNAL_LABEL_KEYS[path];
+  return internalKey ? t(internalKey) : null;
 }
 // ---------- 待重启（pendingRestart）：配置已保存，但当前实例尚未重启 ----------
 // 服务端 settings.pendingRestart 列出「磁盘值与启动快照不一致」的 curated 配置项（形如 { path, file, running }）。
@@ -1005,7 +1048,7 @@ function pendingRestartItems() {
 
 function restartLabel(path) {
   const key = RESTART_LABELS[path];
-  return CONFIG_FIELDS_BY_PATH.get(path)?.label ?? (key ? t(key) : path);
+  return schemaLabelFor(path) ?? (key ? t(key) : path);
 }
 
 // 服务由 launchd/systemd/计划任务拉起（注入 MEBULAR_SERVICE_KIND/SHA）→ service restart；否则给 nohup 启动命令。
@@ -1048,7 +1091,7 @@ function applyResultBanner() {
     if (failed.length > 0) {
       const detail = failed.map((row) => `<li><b>${escapeHtml(labelOf(row.path))}</b> <code>${escapeHtml(row.path)}</code>`
         + `<span class="muted">${escapeHtml(t('settings.apply.fieldDetail', { configured: formatRestartValue(row.configured), actual: formatRestartValue(row.actual) }))}</span>`
-        + (row.reason ? `<span class="pending-restart-reason">${escapeHtml(t('settings.apply.reason', { reason: String(row.reason) }))}</span>` : '')
+        + (row.reason ? `<span class="pending-restart-reason">${escapeHtml(t('settings.apply.reason', { reason: localizeSchemaReason(row.path, String(row.reason), t) }))}</span>` : '')
         + '</li>').join('');
       return `<div class="pending-restart is-error" data-apply-result="mismatch">
         <div class="pending-restart-head"><span class="crt-tag crt-tag-error">${escapeHtml(t('settings.apply.mismatch.tag'))}</span><span class="muted">${escapeHtml(t('settings.apply.mismatch.summary', { count: failed.length }))}</span></div>
@@ -1082,10 +1125,10 @@ function pendingRestartBanner() {
   const envOverrides = Array.isArray(state.settings?.pendingRestartEnvOverrides) ? state.settings.pendingRestartEnvOverrides : [];
   const cmd = restartCommand();
   const managed = state.settings?.restart?.serviceManaged === true;
-  const rows = items.map((item) => `<li><b>${escapeHtml(item.label ?? restartLabel(item.path))}</b>`
+  const rows = items.map((item) => `<li><b>${escapeHtml(restartLabel(item.path))}</b>`
     + ` <code>${escapeHtml(item.path)}</code>`
     + `<span class="muted">${escapeHtml(t('settings.apply.fieldDetail', { configured: formatRestartValue(item.file), actual: formatRestartValue(item.running) }))}</span>`
-    + `<span class="pending-restart-reason">${escapeHtml(t('settings.pending.reason', { reason: String(item.reason ?? t('settings.pending.reasonFallback')) }))}</span></li>`).join('');
+    + `<span class="pending-restart-reason">${escapeHtml(t('settings.pending.reason', { reason: String(localizeSchemaReason(item.path, item.reason, t) || t('settings.pending.reasonFallback')) }))}</span></li>`).join('');
   return `<div class="pending-restart" data-pending-restart="1">
     <div class="pending-restart-head">
       <span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.pending.count', { count: items.length }))}</span>
@@ -1123,6 +1166,8 @@ function currentConfigFile() {
 
 function formatRuntimeValue(value) {
   if (value === undefined || value === null) return '—';
+  // config-schema 对敏感文本字段只回「已配置」哨兵值；按当前 locale 渲染。
+  if (value === SCHEMA_CONFIGURED_VALUE) return t('settings.schema.value.configured');
   if (Array.isArray(value)) return value.length ? value.join(', ') : t('settings.editor.emptyDefault');
   if (typeof value === 'boolean') return value ? t('settings.editor.on') : t('settings.editor.off');
   return String(value);
@@ -1194,6 +1239,7 @@ function runtimeCompareLine(field) {
   const mismatch = configured !== null && configured !== undefined
     && JSON.stringify(configured ?? null) !== JSON.stringify(actual ?? null);
   const reason = typeof row.reason === 'string' && row.reason.length > 0 ? row.reason : '';
+  const reasonText = localizeSchemaReason(field.path, reason, t);
   // 「已生效：… / 已装配：…」是生效说明，不是未生效原因；其它原因才作为异常自动出现。
   // 布尔开关本就关闭时（如语义召回未启用），原因属于「为什么没开」的说明 → 收进详情，不占常显。
   const infoReason = reason.length > 0 && /^(已生效|已装配)/.test(reason);
@@ -1208,7 +1254,7 @@ function runtimeCompareLine(field) {
     + '<span>/</span>'
     + `<span><span class="cfg-eff-key">${escapeHtml(t('settings.editor.actual'))}</span> ${escapeHtml(formatRuntimeValue(actual))}</span>`
     + (pendingItem ? `<span class="cfg-pending"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.pendingKey'))}</span> ${escapeHtml(t('settings.editor.pendingValue', { saved: formatRestartValue(pendingItem.file), current: formatRestartValue(pendingItem.running) }))}</span>` : '')
-    + (showReason ? `<span class="cfg-reason"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.reasonKey'))}</span> ${escapeHtml(reason)}</span>` : '')
+    + (showReason ? `<span class="cfg-reason"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.reasonKey'))}</span> ${escapeHtml(reasonText)}</span>` : '')
     + (mismatch && !showReason ? `<span class="cfg-warn">${escapeHtml(t('settings.editor.mismatch'))}</span>` : '')
     + '</p>';
 }
@@ -1223,7 +1269,7 @@ function runtimeFoldedReason(field) {
   if (configured === true || actual === true) return '';
   const reason = typeof row.reason === 'string' ? row.reason.trim() : '';
   if (!reason || /^(已生效|已装配)/.test(reason) || reasonIsFatal(reason)) return '';
-  return reason;
+  return localizeSchemaReason(field.path, reason, t);
 }
 
 function renderCfgField(field) {
@@ -1484,11 +1530,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     ? new Set([...body.querySelectorAll('details[open]')].map(settingsFoldKey).filter(Boolean))
     : new Set();
   const s = state.settings;
-  const tabLabel = (tab) => {
-    const key = `settings.tab.${tab.id}`;
-    const label = t(key);
-    return label === key ? tab.label : label;
-  };
+  const tabLabel = (tab) => t(tab.labelKey ?? `settings.tab.${tab.id}`);
   const tabButton = (tab) => `<button id="settings-tab-${tab.id}" class="settings-tab${tab.id === activeTab ? ' is-active' : ''}"`
     + ` data-settings-tab="${tab.id}" type="button" role="tab" aria-selected="${tab.id === activeTab}" aria-controls="settings-panel-${tab.id}">${escapeHtml(tabLabel(tab))}</button>`;
   const extraButton = (item) => `<button class="settings-tab settings-tab-extra" type="button" data-settings-extra="${escapeHtml(item.opens)}">${escapeHtml(item.labelKey ? t(item.labelKey) : item.label)}</button>`;
@@ -2637,7 +2679,7 @@ function renderAbout() {
       <p class="muted" style="font-size:11px;margin:0 0 8px">${escapeHtml(t('about.statusOnly.desc'))}</p>
       ${kvRows(statusRows().filter((row) => row.path !== 'sync.autoSync' && row.path !== 'sync.pushOnWrite').map((row) => kvRow(
         row.label ?? row.path,
-        `${escapeHtml(formatRuntimeValue(row.actual))}${row.reason && row.reason !== '已生效' ? `<span class="cfg-reason"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.reasonKey'))}</span> ${escapeHtml(row.reason)}</span>` : ''}`,
+        `${escapeHtml(formatRuntimeValue(row.actual))}${row.reason && row.reason !== '已生效' ? `<span class="cfg-reason"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.reasonKey'))}</span> ${escapeHtml(row.reasonText ?? row.reason)}</span>` : ''}`,
       )))}
     </section>
 
@@ -4758,8 +4800,10 @@ function inviteExpiryLabel(ttlMs = state.inviteTtlMs) {
   return t('invite.expiry.next', { time: formatExpiry(Date.now() + ttlMs) });
 }
 
-/** TTL 档位文案（数据仍来自 INVITE_TTL_OPTIONS；中文/英文只换标签）。 */
+/** TTL 档位文案（数据仍来自 INVITE_TTL_OPTIONS；labelKey 优先，中文/英文只换标签）。 */
 function inviteTtlLabel(ttlMs) {
+  const option = INVITE_TTL_OPTIONS.find((entry) => entry.ttlMs === ttlMs);
+  if (option?.labelKey) return t(option.labelKey, option.labelVars);
   const minutes = Math.round(ttlMs / 60_000);
   return minutes < 60
     ? t('invite.ttl.minutes', { n: minutes })

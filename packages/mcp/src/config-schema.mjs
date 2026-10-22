@@ -34,7 +34,13 @@ export const CONFIG_SCHEMA = [
     requiresRestart: true,
     default: false,
     envVar: 'MEBULAR_NETWORK_ENABLED',
-    ui: { type: 'bool', label: '启用 P2P', help: '关闭后仅本机离线使用' },
+    ui: {
+      type: 'bool',
+      label: '启用 P2P',
+      labelKey: 'settings.schema.network.enabled.label',
+      help: '关闭后仅本机离线使用',
+      helpKey: 'settings.fields.networkEnabled.help',
+    },
     effective: (s) => s?.network?.enabled === true,
   },
   {
@@ -48,8 +54,10 @@ export const CONFIG_SCHEMA = [
     ui: {
       type: 'list',
       label: '监听地址',
+      labelKey: 'settings.schema.network.listen.label',
       placeholder: '/ip4/127.0.0.1/tcp/14001',
       help: 'multiaddr 列表；留空 = 默认监听',
+      helpKey: 'settings.fields.networkListen.help',
     },
     effective: (s) => (s?.network?.listenConfigured?.length ? s.network.listenConfigured : (s?.network?.listen ?? [])),
     reason: (ctx) => {
@@ -71,8 +79,10 @@ export const CONFIG_SCHEMA = [
     ui: {
       type: 'list',
       label: '订阅的记忆域',
+      labelKey: 'settings.schema.sync.namespaces.label',
       placeholder: 'default, notes',
       help: '订阅 = 阅读权 + 维持义务：接收该域的更新，并把本机新增同步给其他订阅设备。留空 = 订阅全部。控制台开关热生效，无需重启',
+      helpKey: 'settings.schema.sync.namespaces.help',
     },
     effective: (s) => (s?.sync?.subscriptions?.length ? s.sync.subscriptions : null),
   },
@@ -83,7 +93,13 @@ export const CONFIG_SCHEMA = [
     exposure: 'editable',
     requiresRestart: true,
     default: false,
-    ui: { type: 'bool', label: '启用加入服务', help: '开启后可由「＋ 邀请新设备」生成一次性令牌（需重启）' },
+    ui: {
+      type: 'bool',
+      label: '启用加入服务',
+      labelKey: 'settings.schema.join.enabled.label',
+      help: '开启后可由「＋ 邀请新设备」生成一次性令牌（需重启）',
+      helpKey: 'settings.fields.joinEnabled.help',
+    },
     effective: (s) => s?.join?.enabled === true,
     reason: (ctx) => (ctx.settings?.join?.enabled === true && ctx.settings?.join?.endpointLoopback === true
       ? 'join 端点解析为回环地址：LAN 内新设备不可达（joinService.bind 设 0.0.0.0）'
@@ -97,7 +113,14 @@ export const CONFIG_SCHEMA = [
     exposure: 'editable',
     requiresRestart: true,
     default: 7331,
-    ui: { type: 'number', label: '端口', min: 0, max: 65535 },
+    ui: {
+      type: 'number',
+      label: '端口',
+      labelKey: 'settings.schema.mcp.port.label',
+      min: 0,
+      max: 65535,
+      helpKey: 'settings.fields.mcpPort.help',
+    },
     effective: (s) => s?.mcp?.port,
   },
   {
@@ -111,8 +134,16 @@ export const CONFIG_SCHEMA = [
     ui: {
       type: 'select',
       label: '鉴权模式',
+      labelKey: 'settings.fields.mcpAuth.label',
       options: [['none', 'none（仅回环）'], ['bearer', 'bearer（token）'], ['oauth', 'oauth']],
+      optionKeys: {
+        none: 'settings.schema.mcpAuth.option.none',
+        bearer: 'settings.schema.mcpAuth.option.bearer',
+        oauth: 'settings.schema.mcpAuth.option.oauth',
+      },
+      helpKey: 'settings.fields.mcpAuth.help',
       warn: '切换后控制台 API 立即需要凭证：bearer 需先 `mebular token grant --scope memory.read,memory.admin` 并在页面粘贴 token（否则 401 missing bearer token）；oauth 需在 env 提供 MEBULAR_OAUTH_ADMIN_SECRET / MEBULAR_OAUTH_REGISTER_SECRET，否则 /register 默认 404、静态 token 会 401 invalid token，控制台内无法自救。误切后恢复：编辑 config.json 把 mcp.http.auth 改回 none（仅回环），或补齐凭证后重启 mebular serve',
+      warnKey: 'settings.schema.mcpAuth.warn',
     },
     effective: (s) => s?.mcp?.auth,
     reason: (ctx) => (ctx.settings?.mcp?.auth !== 'none'
@@ -128,7 +159,14 @@ export const CONFIG_SCHEMA = [
     exposure: 'editable',
     requiresRestart: true,
     default: true,
-    ui: { group: '反熵与快照', type: 'bool', label: '周期反熵', help: '周期性对账，弥补推送丢失' },
+    ui: {
+      group: '反熵与快照',
+      type: 'bool',
+      label: '周期反熵',
+      labelKey: 'settings.fields.antiEntropy.label',
+      help: '周期性对账，弥补推送丢失',
+      helpKey: 'settings.fields.antiEntropy.help',
+    },
     effective: (s) => s?.sync?.antiEntropy?.enabled ?? true,
   },
   {
@@ -267,8 +305,11 @@ export const CONFIG_SCHEMA = [
     envVar: 'MEBULAR_SEMANTIC_ENABLED',
     ui: { group: '语义召回（可选依赖）',       type: 'bool',
       label: '启用语义召回',
+      labelKey: 'settings.fields.semantic.label',
       help: '需要本地 embedding 模型（可选依赖）',
+      helpKey: 'settings.fields.semantic.help',
       warn: '需可选依赖 @huggingface/transformers；缺失时自动降级关键词并告警',
+      warnKey: 'settings.schema.semantic.warn',
     },
     effective: (s) => s?.semantic?.enabled === true,
     reason: (ctx) => (ctx.settings?.semantic?.enabled === true
@@ -297,8 +338,10 @@ export const CONFIG_SCHEMA = [
     default: '0.0.0.0',
     ui: { group: '设备接入（高级）',       type: 'text',
       label: '绑定地址',
+      labelKey: 'settings.schema.join.bind.label',
       placeholder: '0.0.0.0',
       help: '令牌 join 端点绑定；默认即 0.0.0.0（quickstart 依赖 LAN 可达），仅可信 LAN 使用。它同时决定邀请令牌里写死的 endpoint：通配时自动取本机 LAN IPv4（无 LAN 时回环并在邀请面板告警）',
+      helpKey: 'settings.fields.joinBind.help',
     },
     effective: (s) => s?.join?.bind,
   },
@@ -310,7 +353,15 @@ export const CONFIG_SCHEMA = [
     exposure: 'editable',
     requiresRestart: true,
     default: 4002,
-    ui: { type: 'number', label: '端口', min: 0, max: 65535, help: '默认 4002' },
+    ui: {
+      type: 'number',
+      label: '端口',
+      labelKey: 'settings.schema.join.port.label',
+      min: 0,
+      max: 65535,
+      help: '默认 4002',
+      helpKey: 'settings.fields.joinPort.help',
+    },
     effective: (s) => s?.join?.port,
     reason: (ctx) => {
       const lastError = ctx.settings?.join?.lastError;
@@ -330,9 +381,12 @@ export const CONFIG_SCHEMA = [
     default: '127.0.0.1',
     ui: { group: 'MCP 接入（高级）',       type: 'text',
       label: '监听地址',
+      labelKey: 'settings.schema.mcp.host.label',
       placeholder: '127.0.0.1',
       help: '仅回环可 auth=none/无 TLS',
+      helpKey: 'settings.fields.mcpHost.help',
       warn: '非回环（如 0.0.0.0）必须 auth≠none 且启用 TLS 并配证书，否则 serve 拒绝启动',
+      warnKey: 'settings.schema.mcpHost.warn',
     },
     effective: (s) => s?.mcp?.host,
   },
@@ -346,7 +400,9 @@ export const CONFIG_SCHEMA = [
     ui: {
       type: 'bool',
       label: '启用 TLS',
+      labelKey: 'settings.schema.mcp.tls.label',
       help: '真开关：true 但缺证书时 serve 启动即报错（不静默降级）；证书齐备即实际启用（与运行状态同一真值）',
+      helpKey: 'settings.fields.mcpTls.help',
     },
     effective: (s) => s?.mcp?.tls === true,
     reason: (ctx) => (ctx.config?.mcp?.http?.tls === true && !(ctx.config?.mcp?.http?.tlsKey && ctx.config?.mcp?.http?.tlsCert)
@@ -361,7 +417,14 @@ export const CONFIG_SCHEMA = [
     exposure: 'editable',
     requiresRestart: true,
     default: null,
-    ui: { type: 'text', label: 'TLS 证书私钥路径', placeholder: '/path/to/key.pem', help: '与证书路径同时填写即实际启用 TLS（tls=true 则强制要求）' },
+    ui: {
+      type: 'text',
+      label: 'TLS 证书私钥路径',
+      labelKey: 'settings.fields.mcpTlsKey.label',
+      placeholder: '/path/to/key.pem',
+      help: '与证书路径同时填写即实际启用 TLS（tls=true 则强制要求）',
+      helpKey: 'settings.fields.mcpTlsKey.help',
+    },
     effective: (s) => (s?.mcp?.tlsKeyConfigured ? '（已配置）' : null),
   },
   {
@@ -372,7 +435,14 @@ export const CONFIG_SCHEMA = [
     exposure: 'editable',
     requiresRestart: true,
     default: null,
-    ui: { type: 'text', label: 'TLS 证书路径', placeholder: '/path/to/cert.pem', help: '与证书路径同时填写即实际启用 TLS（tls=true 则强制要求）' },
+    ui: {
+      type: 'text',
+      label: 'TLS 证书路径',
+      labelKey: 'settings.fields.mcpTlsCert.label',
+      placeholder: '/path/to/cert.pem',
+      help: '与证书路径同时填写即实际启用 TLS（tls=true 则强制要求）',
+      helpKey: 'settings.fields.mcpTlsCert.help',
+    },
     effective: (s) => (s?.mcp?.tlsCertConfigured ? '（已配置）' : null),
   },
 
@@ -385,7 +455,13 @@ export const CONFIG_SCHEMA = [
     exposure: 'status-only',
     requiresRestart: true,
     default: null,
-    ui: { type: 'list', label: 'Relay 池（自动）', help: '自动来源：config seeds ∪ 配对令牌 hints ∪ 地址簿学习；只读展示，手工配置请编辑 config.json' },
+    ui: {
+      type: 'list',
+      label: 'Relay 池（自动）',
+      labelKey: 'settings.schema.status.relayServers.label',
+      help: '自动来源：config seeds ∪ 配对令牌 hints ∪ 地址簿学习；只读展示，手工配置请编辑 config.json',
+      helpKey: 'settings.schema.status.relayServers.help',
+    },
     effective: (s) => (s?.network?.relays?.length ? s.network.relays : null),
     reason: (ctx) => (ctx.settings?.network?.relays?.length ? '已生效：自动池（seeds/hints/学习）' : '空：无已知 relay（配对或提供 relay 后自动填充）'),
   },
@@ -397,7 +473,13 @@ export const CONFIG_SCHEMA = [
     exposure: 'status-only',
     requiresRestart: true,
     default: true,
-    ui: { type: 'bool', label: '自动同步', help: '连接建立或事件到达时自动触发一次收敛（默认常开）' },
+    ui: {
+      type: 'bool',
+      label: '自动同步',
+      labelKey: 'settings.schema.status.autoSync.label',
+      help: '连接建立或事件到达时自动触发一次收敛（默认常开）',
+      helpKey: 'settings.schema.status.autoSync.help',
+    },
     effective: (s) => s?.sync?.autoSync ?? true,
     reason: (() => '已生效：常驻模式默认常开'),
   },
@@ -409,7 +491,13 @@ export const CONFIG_SCHEMA = [
     requiresRestart: true,
     default: true,
     envVar: 'MEBULAR_PUSH_ON_WRITE',
-    ui: { type: 'bool', label: '写入即推送', help: '本机写入后即时推给对端（常驻模式默认开）' },
+    ui: {
+      type: 'bool',
+      label: '写入即推送',
+      labelKey: 'settings.schema.status.pushOnWrite.label',
+      help: '本机写入后即时推给对端（常驻模式默认开）',
+      helpKey: 'settings.schema.status.pushOnWrite.help',
+    },
     effective: (s) => s?.sync?.pushOnWrite ?? true,
     reason: (() => '已生效：常驻模式默认常开'),
   },
@@ -418,7 +506,7 @@ export const CONFIG_SCHEMA = [
     kind: 'status',
     exposure: 'status-only',
     requiresRestart: false,
-    ui: { type: 'status', label: 'LAN 自动发现（mDNS）' },
+    ui: { type: 'status', label: 'LAN 自动发现（mDNS）', labelKey: 'settings.schema.status.lanDiscovery.label' },
     effective: (s) => s?.net?.mode ?? 'off',
     reason: (ctx) => (ctx.settings?.network?.enabled !== true
       ? '网络未启用：LAN 发现为 no-op'
@@ -429,7 +517,7 @@ export const CONFIG_SCHEMA = [
     kind: 'status',
     exposure: 'status-only',
     requiresRestart: false,
-    ui: { type: 'status', label: '内建 relay 角色（桥）' },
+    ui: { type: 'status', label: '内建 relay 角色（桥）', labelKey: 'settings.schema.status.relayRole.label' },
     effective: (s) => s?.relay?.mode ?? 'off',
     reason: (ctx) => {
       const relay = ctx.settings?.relay;
@@ -443,7 +531,7 @@ export const CONFIG_SCHEMA = [
     kind: 'status',
     exposure: 'status-only',
     requiresRestart: false,
-    ui: { type: 'status', label: '当前中转（经谁）' },
+    ui: { type: 'status', label: '当前中转（经谁）', labelKey: 'settings.schema.status.relayBridge.label' },
     effective: (s) => s?.relay?.bridge?.peer ?? null,
     reason: (ctx) => (ctx.settings?.relay?.bridge
       ? `已生效：经 ${ctx.settings.relay.bridge.address ?? ctx.settings.relay.bridge.peer} 中转`
@@ -454,7 +542,7 @@ export const CONFIG_SCHEMA = [
     kind: 'status',
     exposure: 'status-only',
     requiresRestart: false,
-    ui: { type: 'status', label: 'NAT 穿透（AutoNAT/DCUtR）' },
+    ui: { type: 'status', label: 'NAT 穿透（AutoNAT/DCUtR）', labelKey: 'settings.schema.status.holepunch.label' },
     effective: (s) => (s?.nat?.dcutrEnabled ? 'on' : 'off'),
     reason: (ctx) => {
       const nat = ctx.settings?.nat;
@@ -469,7 +557,7 @@ export const CONFIG_SCHEMA = [
     kind: 'status',
     exposure: 'status-only',
     requiresRestart: false,
-    ui: { type: 'status', label: '地址自动广播（只作 hints）' },
+    ui: { type: 'status', label: '地址自动广播（只作 hints）', labelKey: 'settings.schema.status.broadcast.label' },
     effective: (s) => s?.net?.mode ?? 'off',
     reason: (ctx) => (ctx.settings?.net?.enabled
       ? `已生效：档位 ${ctx.settings.net.mode}（已发布 ${ctx.settings.net.published} / 已采用 ${ctx.settings.net.applied}）`
@@ -480,7 +568,7 @@ export const CONFIG_SCHEMA = [
     kind: 'status',
     exposure: 'status-only',
     requiresRestart: false,
-    ui: { type: 'status', label: '邀请端点（join）' },
+    ui: { type: 'status', label: '邀请端点（join）', labelKey: 'settings.schema.status.joinEndpoint.label' },
     effective: (s) => s?.join?.endpoint ?? (s?.join?.port ? `:${s.join.port}` : null),
     reason: (ctx) => {
       const join = ctx.settings?.join;
@@ -495,7 +583,7 @@ export const CONFIG_SCHEMA = [
     kind: 'status',
     exposure: 'status-only',
     requiresRestart: false,
-    ui: { type: 'status', label: 'TLS（实际）' },
+    ui: { type: 'status', label: 'TLS（实际）', labelKey: 'settings.schema.status.tls.label' },
     effective: (s) => (s?.mcp?.tls === true ? 'on' : 'off'),
     reason: (ctx) => (ctx.settings?.mcp?.tls ? '已生效：TLS 实际启用' : '未启用：明文 HTTP（仅回环安全）'),
   },

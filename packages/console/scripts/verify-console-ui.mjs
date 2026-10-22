@@ -12,7 +12,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -2534,12 +2534,187 @@ async function main() {
       securityDialog.open === true && securityDialog.cjk === false
         && securityDialog.title === 'Import authenticator seed'
         && /Seed \(grouped text \/ otpauth URI\)/.test(securityDialog.body)
+        && /otpauth:\/\//.test(securityDialog.body) && !/<code>|<\/code>/.test(securityDialog.body)
         && /ABCD EFGH IJKL/.test(securityDialog.placeholder)
         && securityDialog.confirm === 'Import' && securityDialog.close === 'Close',
       JSON.stringify(securityDialog));
     await captureNow('i18n-en-security-dialog-1440.jpg');
     await evalJs('document.querySelector("#security-action-close")?.click()');
     await waitFor('document.querySelector("#security-action")?.hidden === true');
+
+    // B · 英文设置页密度：1440 / 1024 / 390 三档无横向溢出，长文案块不撑破弹框。
+    // 英文比中文长约 1.8×，只看页面 scrollWidth 会漏掉「弹框内部被长句撑开」；
+    // 因此同时断言弹框 / 滚动区 / 页面，以及每个可见文案块自身 scrollWidth <= clientWidth。
+    const settingsDensityProbe = `(() => {
+      const visible = (el) => {
+        const style = getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0;
+      };
+      const box = document.querySelector('#settings .modal-box');
+      const scroller = document.querySelector('#settings .settings-scroll');
+      const texts = [...document.querySelectorAll(
+        '#settings .settings-section-desc, #settings .settings-section-foot, #settings .cfg-help, '
+        + '#settings .settings-kv .kv-value, #settings .cloud-intro, #settings .settings-note',
+      )].filter(visible);
+      const overflow = texts
+        .filter((el) => el.scrollWidth > el.clientWidth + 1)
+        .map((el) => ({
+          cls: String(el.className || ''),
+          over: el.scrollWidth - el.clientWidth,
+          text: (el.textContent || '').trim().slice(0, 48),
+        }));
+      const boxRight = box ? box.getBoundingClientRect().right : 0;
+      const outside = texts.filter((el) => el.getBoundingClientRect().right > boxRight + 1).length;
+      const scrollerRight = scroller ? scroller.getBoundingClientRect().right : 0;
+      const offenders = scroller
+        ? [...scroller.querySelectorAll('*')].filter(visible)
+          .map((el) => {
+            const rect = el.getBoundingClientRect();
+            return {
+              tag: el.tagName.toLowerCase(),
+              cls: String(el.className || '').slice(0, 60),
+              over: el.scrollWidth - el.clientWidth,
+              rightOver: Math.round(rect.right - scrollerRight),
+              width: Math.round(rect.width),
+            };
+          })
+          .filter((entry) => entry.rightOver > 1 || entry.over > 1)
+          .slice(0, 10)
+        : [];
+      return {
+        viewport: window.innerWidth,
+        boxOver: box ? box.scrollWidth - box.clientWidth : null,
+        scrollerOver: scroller ? scroller.scrollWidth - scroller.clientWidth : null,
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+        outside,
+        textCount: texts.length,
+        overflow: overflow.slice(0, 6),
+        offenders,
+      };
+    })()`;
+    const densityViewports = [
+      ['1440', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }],
+      ['1024', { width: 1024, height: 768, deviceScaleFactor: 1, mobile: false }],
+      ['390', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }],
+    ];
+    await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const density = await evalJs(settingsDensityProbe);
+      check(`i18n 设置页密度 ${label}：弹框/滚动区/页面无横向溢出，文案块不越界`,
+        density.boxOver <= 0 && density.scrollerOver <= 0 && density.pageOver <= 0
+          && density.outside === 0 && density.overflow.length === 0,
+        JSON.stringify(density));
+      await captureNow(`i18n-en-settings-density-${label}.jpg`);
+    }
+
+    // 高级 → 诊断与恢复折叠：四条恢复指引（含命令/错误码）不得横向越界。
+    await setViewport(densityViewports[0][1]);
+    await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
+    await waitFor('document.querySelector("#settings-panel-advanced")?.hidden === false');
+    await evalJs('document.querySelector("#diag-fold").open = true');
+    const recoveryDensityProbe = `(() => {
+      const block = document.querySelector('#diag-fold [data-info-block=recovery]');
+      const box = document.querySelector('#settings .modal-box');
+      if (!block || !box) return { ok: false };
+      const values = [...block.querySelectorAll('.kv-value')];
+      const boxRight = box.getBoundingClientRect().right;
+      return {
+        ok: true,
+        viewport: window.innerWidth,
+        count: values.length,
+        over: values.filter((el) => el.scrollWidth > el.clientWidth + 1)
+          .map((el) => el.scrollWidth - el.clientWidth),
+        outside: values.filter((el) => el.getBoundingClientRect().right > boxRight + 1).length,
+        lengths: values.map((el) => (el.textContent || '').trim().length),
+        boxOver: box.scrollWidth - box.clientWidth,
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+      };
+    })()`;
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      await evalJs('document.querySelector("#diag-fold").scrollIntoView({ block: "start" })');
+      const recovery = await evalJs(recoveryDensityProbe);
+      check(`i18n 高级诊断/恢复折叠 ${label}：四条指引不横向越界`,
+        recovery.ok && recovery.count === 4 && recovery.over.length === 0
+          && recovery.outside === 0 && recovery.boxOver <= 0 && recovery.pageOver <= 0,
+        JSON.stringify(recovery));
+      await captureNow(`i18n-en-settings-recovery-${label}.jpg`);
+    }
+    await evalJs('document.querySelector("#diag-fold").open = false');
+
+    // 文案预算：精简后仍保留恢复命令 / 错误码 / 环境变量，且段落已分行（不再是一整句 400+ 字符）。
+    const enMessages = JSON.parse(readFileSync(join(__dirname, '..', '..', '..', 'locales', 'en-US', 'console.json'), 'utf-8')).messages;
+    const copyBudget = {
+      'settings.diag.recovery.authBody': 430,
+      'settings.diag.recovery.hostBody': 170,
+      'settings.diag.recovery.certBody': 200,
+      'settings.diag.recovery.consoleBody': 210,
+      'settings.cloud.note': 150,
+      'settings.restart.confirmBody': 160,
+      'settings.security.boundary': 160,
+      'settings.security.totp.foot': 140,
+      'settings.write.confirmBody': 140,
+    };
+    const copyOver = Object.entries(copyBudget)
+      .filter(([key, max]) => String(enMessages[key] ?? '').length > max)
+      .map(([key, max]) => ({ key, length: String(enMessages[key] ?? '').length, max }));
+    const authBody = String(enMessages['settings.diag.recovery.authBody'] ?? '');
+    const authTokens = [
+      'mebular token grant --scope memory.read,memory.admin',
+      '401 invalid token',
+      '/register',
+      '404',
+      'MEBULAR_OAUTH_ADMIN_SECRET',
+      'MEBULAR_OAUTH_REGISTER_SECRET',
+      'mcp.http.auth=none',
+      'config.json',
+      'mebular serve',
+    ];
+    const missingTokens = authTokens.filter((token) => !authBody.includes(token));
+    check('i18n 英文设置长文案：恢复指引分行、超长段落已收短，命令/错误码/环境变量全部保留',
+      copyOver.length === 0 && missingTokens.length === 0
+        && (authBody.match(/<br>/g) ?? []).length >= 3
+        && String(enMessages['settings.diag.recovery.consoleBody']).includes('MCP_STORAGE_LOCKED')
+        && String(enMessages['settings.diag.recovery.certBody']).includes('MCP_INSECURE_CONFIG'),
+      JSON.stringify({ copyOver, missingTokens, authLength: authBody.length }));
+
+    // 安全弹层（TOTP 导入）：三档视口内不横向溢出，正文不越界。
+    const securityDensityProbe = `(() => {
+      const modal = document.querySelector('#security-action');
+      const box = modal?.querySelector('.modal-box');
+      if (!modal || modal.hidden || !box) return { open: false };
+      const visible = (el) => {
+        const style = getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0;
+      };
+      const texts = [...box.querySelectorAll('p, li, label, .crt-warn')].filter(visible);
+      const boxRight = box.getBoundingClientRect().right;
+      return {
+        open: true,
+        viewport: window.innerWidth,
+        boxOver: box.scrollWidth - box.clientWidth,
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+        outside: texts.filter((el) => el.getBoundingClientRect().right > boxRight + 1).length,
+        overflow: texts.filter((el) => el.scrollWidth > el.clientWidth + 1)
+          .map((el) => ({ cls: String(el.className || ''), over: el.scrollWidth - el.clientWidth })),
+      };
+    })()`;
+    await evalJs('document.querySelector("[data-settings-tab=security]").click()');
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      await evalJs('document.querySelector("[data-security-action=totp-import]")?.click()');
+      await waitFor('document.querySelector("#security-action")?.hidden === false');
+      const securityDensity = await evalJs(securityDensityProbe);
+      check(`i18n 安全弹层密度 ${label}：弹框与正文不横向越界`,
+        securityDensity.open && securityDensity.boxOver <= 0 && securityDensity.pageOver <= 0
+          && securityDensity.outside === 0 && securityDensity.overflow.length === 0,
+        JSON.stringify(securityDensity));
+      await captureNow(`i18n-en-settings-security-${label}.jpg`);
+      await evalJs('document.querySelector("#security-action-close")?.click()');
+      await waitFor('document.querySelector("#security-action")?.hidden === true');
+    }
+    await setViewport(densityViewports[0][1]);
     await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
 
     await evalJs('document.querySelector("#settings-close").click()');
@@ -2695,6 +2870,195 @@ async function main() {
     await evalJs('document.querySelector("#cloud-join-x").click()');
     await waitFor('document.querySelector("#cloud-join")?.hidden === true');
 
+    // B · 数据面英文密度（#181）：about / domains / handoff / memories / audit / 设备卡。
+    // 英文长句 + 长命令不得把面板或弹层撑出横向滚动；三档视口逐一面板断言。
+    const surfaceProbe = (rootSel, textSel) => `(() => {
+      const root = document.querySelector(${JSON.stringify(rootSel)});
+      const visible = (el) => {
+        const style = getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0;
+      };
+      if (!root || root.hidden) return { ok: false, lang: document.documentElement.lang, viewport: window.innerWidth };
+      const texts = [...root.querySelectorAll(${JSON.stringify(textSel)})].filter(visible);
+      const overflow = texts.filter((el) => el.scrollWidth > el.clientWidth + 1)
+        .map((el) => ({ cls: String(el.className || '').slice(0, 60), over: el.scrollWidth - el.clientWidth }));
+      return {
+        ok: true,
+        lang: document.documentElement.lang,
+        viewport: window.innerWidth,
+        rootOver: root.scrollWidth - root.clientWidth,
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+        outside: texts.filter((el) => el.getBoundingClientRect().right > window.innerWidth + 1).length,
+        textCount: texts.length,
+        overflow: overflow.slice(0, 6),
+      };
+    })()`;
+    const surfaceOk = (report) => report.ok && report.lang === 'en-US'
+      && report.rootOver <= 0 && report.pageOver <= 0
+      && report.outside === 0 && report.overflow.length === 0;
+    const surfaceText = async (selector) => (await evalJs(`document.querySelector(${JSON.stringify(selector)})?.innerText ?? ''`)) ?? '';
+
+    // about：长说明（task plane / runtime / paths / tools）与命令
+    await send('Page.navigate', { url: `${base}/console/?lang=en-US` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1" && document.querySelector("#open-settings") !== null');
+    await evalJs('document.querySelector("#open-settings").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("[data-settings-extra=about-modal]"))');
+    await evalJs('document.querySelector("[data-settings-extra=about-modal]").click()');
+    await waitFor('document.querySelector("#about")?.hidden === false && document.querySelectorAll("#about-body .settings-section").length >= 4');
+    // 运行状态/路径/任务面/工具都在「运行状态」折叠内；展开后再测长文案。
+    await evalJs('document.querySelector("#about-runtime-fold").open = true');
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const about = await evalJs(surfaceProbe('#about', '#about-body p, #about-body dd, #about-body .chip-wrap'));
+      const aboutText = await surfaceText('#about-body');
+      check(`i18n 数据面 about ${label}：长说明/命令不横向越界`,
+        surfaceOk(about)
+          && /Task plane, not a memory domain/.test(aboutText)
+          && /Set at runtime: relay pool/.test(aboutText)
+          && /Paths come from the core address book/.test(aboutText)
+          && /Agents call the same handlers over MCP/.test(aboutText),
+        JSON.stringify({ ...about, sample: aboutText.slice(0, 120) }));
+      await captureNow(`i18n-en-data-about-${label}.jpg`);
+    }
+    await setViewport(densityViewports[0][1]);
+    await evalJs('document.querySelector("#about-close").click()');
+    await waitFor('document.querySelector("#about")?.hidden === true');
+    await evalJs('document.querySelector("#settings-close").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === true');
+
+    // domains：面板说明 + 域卡 / 详情行
+    await send('Page.navigate', { url: `${base}/console/?lang=en-US` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1" && document.querySelector("#domains-view") !== null');
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
+    await waitFor('document.querySelector("#domains-view")?.hidden === false && /Who you share with/.test(document.querySelector("#domains-note")?.textContent ?? "")');
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const domains = await evalJs(surfaceProbe('#domains-view', '#domains-note, .domain-card, .domain-row, .readout-head, .relation, .subscribe-note, .share-hint, .danger-zone .hint'));
+      check(`i18n 数据面 domains ${label}：面板/域卡长文案不横向越界`,
+        surfaceOk(domains), JSON.stringify(domains));
+      await captureNow(`i18n-en-data-domains-${label}.jpg`);
+    }
+
+    // handoff：长说明（281 字符）+ 不可逆警告，三档弹层内不越界
+    await setViewport(densityViewports[0][1]);
+    await evalJs('document.querySelector("#domains-list [data-sector]")?.click()');
+    await waitFor('Boolean(document.querySelector("#domain-detail [data-handoff]"))');
+    await evalJs('document.querySelector("#domain-detail [data-handoff]").click()');
+    await waitFor('document.querySelector("#handoff")?.hidden === false');
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const handoff = await evalJs(surfaceProbe('#handoff', '#handoff-desc, #handoff .modal-note, #handoff .modal-actions'));
+      const handoffText = await surfaceText('#handoff-desc');
+      check(`i18n 数据面 handoff ${label}：长说明/警告不横向越界`,
+        surfaceOk(handoff)
+          && /Leave and hand off/.test(handoffText)
+          && /The successor must ack everything first/.test(handoffText),
+        JSON.stringify(handoff));
+      await captureNow(`i18n-en-data-handoff-${label}.jpg`);
+    }
+    await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await evalJs('document.querySelector("#handoff-close")?.click()');
+    await waitFor('document.querySelector("#handoff")?.hidden === true');
+
+    // memories：说明 + 行预览 + 删除确认（含“旧快照不可回收”警告）
+    await setViewport(densityViewports[0][1]);
+    await send('Page.navigate', { url: `${base}/console/?lang=en-US` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1" && document.querySelector("#memories-view") !== null');
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(3) button").click()');
+    await waitFor('document.querySelector("#memories-view")?.hidden === false && document.querySelectorAll("#memories-list .mem-row").length >= 1');
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const memories = await evalJs(surfaceProbe('#memories-view', '.panel-note, .mem-row, .mem-preview, .mem-meta, .mem-actions'));
+      const memoriesText = await surfaceText('#memories-view .panel-note');
+      check(`i18n 数据面 memories ${label}：说明/行内容不横向越界`,
+        surfaceOk(memories) && /Archive/.test(memoriesText) && /irreversible/.test(memoriesText),
+        JSON.stringify(memories));
+      await captureNow(`i18n-en-data-memories-${label}.jpg`);
+    }
+    await evalJs('document.querySelector("#memories-list [data-mem-action=delete]")?.click()');
+    await waitFor('document.querySelector("#modal")?.hidden === false');
+    const deleteDensity = await evalJs(surfaceProbe('#modal', '#modal-body, #modal-title, #modal .modal-actions'));
+    const deleteText = await surfaceText('#modal-body');
+    check('i18n 数据面删除确认 390：长警告不横向越界',
+      surfaceOk(deleteDensity)
+        && /Synced tombstone|tombstone/.test(deleteText)
+        && /Snapshots already copied by peers cannot be reclaimed/.test(deleteText),
+      JSON.stringify({ ...deleteDensity, sample: deleteText.slice(0, 120) }));
+    await captureNow('i18n-en-data-delete-390.jpg');
+    await evalJs('document.querySelector("#modal-cancel").click()');
+    await waitFor('document.querySelector("#modal")?.hidden === true');
+
+    // audit：长事件行（会签/恢复码/移交/移出）三档不越界
+    await setViewport(densityViewports[0][1]);
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(4) button").click()');
+    await waitFor('document.querySelector("#audit-view")?.hidden === false && document.querySelectorAll("#audit-view .audit-item").length >= 1');
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const audit = await evalJs(surfaceProbe('#audit-view', '.audit-item, .audit-detail, .audit-toolbar'));
+      check(`i18n 数据面 audit ${label}：长事件文案不横向越界`,
+        surfaceOk(audit), JSON.stringify(audit));
+      await captureNow(`i18n-en-data-audit-${label}.jpg`);
+    }
+
+    // device card：移除说明 / 本机说明 / 长路径三档不越界
+    await setViewport(densityViewports[0][1]);
+    await send('Page.navigate', { url: `${base}/console/?lang=en-US&select=device-C` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1" && document.querySelector("#device-card-body") && document.querySelector("#device-card-body").hidden === false');
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const card = await evalJs(surfaceProbe('#device-card', '#device-card-body, .card-help, .path-value, .chip-list li, .kv dd'));
+      const cardText = label === '1440' ? await surfaceText('#device-card') : 'This device was removed';
+      check(`i18n 数据面 device card ${label}：长说明/路径不横向越界`,
+        surfaceOk(card) && /This device was removed/.test(cardText),
+        JSON.stringify(card));
+      await captureNow(`i18n-en-data-device-card-${label}.jpg`);
+    }
+
+    // #181 数据面文案预算：长句已收短，但 DAG / tombstone / epoch / 命令与占位符全部保留。
+    const dataCopyBudget = {
+      'about.fleet.note': 250,
+      'about.statusOnly.desc': 190,
+      'about.paths.note': 180,
+      'about.tools.note': 190,
+      'about.runtime.listenAlarm': 160,
+      'about.syncRate.note': 150,
+      'handoff.desc': 240,
+      'handoff.descStatic': 240,
+      'handoff.confirmBody': 165,
+      'domains.note': 180,
+      'domains.rejoin.confirmBody': 200,
+      'domains.unsubscribeSome.body': 190,
+      'domains.task.note': 180,
+      'memories.delete.body': 180,
+      'deviceCard.help.blocked': 175,
+      'deviceCard.mine.help': 160,
+      'deviceCard.reset.body': 150,
+      'audit.event.handoff': 140,
+      'audit.event.revoke': 135,
+    };
+    const dataOver = Object.entries(dataCopyBudget)
+      .filter(([key, max]) => String(enMessages[key] ?? '').length > max)
+      .map(([key, max]) => ({ key, length: String(enMessages[key] ?? '').length, max }));
+    const dataTokens = [
+      ['about.fleet.note', ['fleet.config.json', 'DAG']],
+      ['handoff.descStatic', ['__policy__', 'watermark', 'ack']],
+      ['handoff.confirmBody', ['{namespace}', '{successor}', 'irreversible']],
+      ['domains.rejoin.confirmBody', ['{namespace}', 'watermark']],
+      ['domains.unsubscribeSome.body', ['{namespace}', '{count}', 'default to unsubscribed']],
+      ['memories.delete.body', ['{id}', 'tombstone', 'cannot be reclaimed']],
+      ['deviceCard.reset.body', ['{device}', 'watermark']],
+      ['audit.event.revoke', ['{issuer}', '{subject}', '{extra}']],
+    ];
+    const dataMissing = dataTokens.flatMap(([key, tokens]) => tokens
+      .filter((token) => !String(enMessages[key] ?? '').includes(token))
+      .map((token) => `${key}:${token}`));
+    check('i18n 英文数据面长文案：预算内且保留 DAG/墓碑/水位/占位符/危险警告',
+      dataOver.length === 0 && dataMissing.length === 0,
+      JSON.stringify({ dataOver, dataMissing }));
+
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await send('Page.navigate', { url: `${base}/console/?lang=en-US` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1" && document.querySelector("#open-settings") !== null');
     await evalJs('document.querySelector("#open-settings").click()');
     check('i18n 语言行：设置·常用单行 + 位于常驻运行之前 + 虚线分隔', await waitFor(`(() => {
       const row = document.querySelector('#settings-language');

@@ -28,7 +28,6 @@ import { closeAction, quitConfirm, quitDecision, stopConfirm, trayMenuModel, tra
 import { consoleNavSearch, consoleNavUrl, isConsoleUrl } from './console-nav.mjs';
 import { readDaemonLogs } from './logs.mjs';
 import { loadDesktopI18n, resolveLocalesDir } from './i18n.mjs';
-import { DEFAULT_LOCALE, normalizeDesktopLocale } from '../shared/i18n-core.mjs';
 
 
 const cliArgs = parseArgs(process.argv.slice(1));
@@ -39,10 +38,11 @@ const cliBin = resolveCliBin();
 const serviceHome = homedir();
 
 // 壳层 i18n：语言偏好保存在 <home>/.desktop-state.json（Console 选择后由 preload 同步）；
-// 默认 zh-CN。文案唯一真源 = locales/<locale>/desktop.json（随 extraResources 打包）。
+// 默认 / 回退来自 locales/manifest.json（不在主进程硬编码语言集合）。
+// 文案唯一真源 = locales/<locale>/desktop.json（随 extraResources 打包）。
 let desktopI18n = loadDesktopI18n({
   localesDir: resolveLocalesDir(),
-  locale: normalizeDesktopLocale(readDesktopState(home).locale || DEFAULT_LOCALE),
+  locale: readDesktopState(home).locale || null,
 });
 const t = (key, vars) => desktopI18n.t(key, vars);
 
@@ -81,8 +81,7 @@ function readConfig() {
 
 /** 应用壳层 locale：更新 translator / 托盘 / 窗口标题 / 退出确认窗口标题。 */
 function applyDesktopLocale(raw, { persist = false } = {}) {
-  const normalized = normalizeDesktopLocale(raw);
-  desktopI18n.setLocale(normalized);
+  const normalized = desktopI18n.setLocale(raw);
   if (persist) writeDesktopState(home, { locale: normalized });
   updateTray();
   setWindowTitle();
@@ -94,22 +93,23 @@ function applyDesktopLocale(raw, { persist = false } = {}) {
 function reloadDesktopLocale() {
   desktopI18n = loadDesktopI18n({
     localesDir: resolveLocalesDir(),
-    locale: normalizeDesktopLocale(readDesktopState(home).locale || DEFAULT_LOCALE),
+    locale: readDesktopState(home).locale || null,
   });
   updateTray();
   setWindowTitle();
 }
 
 const CJK_TEXT = /[\u3400-\u9fff]/;
+const isChineseLocale = (code) => String(code ?? '').trim().toLowerCase().startsWith('zh');
 
 /**
- * 壳层展示 core/daemon 给的诊断文本：中文 locale 保留原文；英文 locale 遇到中文原文
+ * 壳层展示 core/daemon 给的诊断文本：中文 locale 保留原文；其他 locale 遇到中文原文
  * 改用 desktop pack 的翻译兜底（英文界面不出现中文兜底）。
  */
 function shellMessage(raw, key, vars) {
   const text = typeof raw === 'string' && raw.trim() ? raw : null;
   if (!text) return t(key, vars);
-  if (desktopI18n.locale !== 'zh-CN' && CJK_TEXT.test(text)) return t(key, vars);
+  if (!isChineseLocale(desktopI18n.locale) && CJK_TEXT.test(text)) return t(key, vars);
   return text;
 }
 
@@ -1024,8 +1024,8 @@ function registerIpc() {
     'locale:get': () => ({
       locale: desktopI18n.locale,
       supportedLocales: desktopI18n.supportedLocales,
-      defaultLocale: DEFAULT_LOCALE,
-      fallbackLocale: DEFAULT_LOCALE,
+      defaultLocale: desktopI18n.defaultLocale,
+      fallbackLocale: desktopI18n.fallbackLocale,
       catalogs: desktopI18n.exportCatalogs(),
     }),
     'locale:set': (locale) => ({ locale: applyDesktopLocale(locale, { persist: true }) }),

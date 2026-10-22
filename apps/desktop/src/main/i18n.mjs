@@ -11,7 +11,7 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
-  createTranslator, DEFAULT_LOCALE, FALLBACK_LOCALE, normalizeDesktopLocale,
+  createTranslator, normalizeDesktopLocale,
 } from '../shared/i18n-core.mjs';
 
 export const DESKTOP_PACK = 'desktop';
@@ -62,8 +62,16 @@ export function loadDesktopCatalogs({ localesDir = resolveLocalesDir() } = {}) {
     }
     catalogs[code] = json.messages;
   }
-  const defaultLocale = normalizeDesktopLocale(manifest?.defaultLocale ?? DEFAULT_LOCALE);
-  const fallbackLocale = normalizeDesktopLocale(manifest?.fallbackLocale ?? FALLBACK_LOCALE);
+  const supportedLocales = entries.map((entry) => entry?.locale).filter(Boolean);
+  // default / fallback 来自 manifest，并在已注册语言内归一化（不在 loader 里硬编码 en/zh）。
+  const defaultLocale = normalizeDesktopLocale(manifest?.defaultLocale, {
+    supportedLocales,
+    defaultLocale: manifest?.defaultLocale,
+  });
+  const fallbackLocale = normalizeDesktopLocale(manifest?.fallbackLocale ?? defaultLocale, {
+    supportedLocales,
+    defaultLocale,
+  });
   return {
     manifest: manifest ?? {
       schemaVersion: 1,
@@ -73,7 +81,7 @@ export function loadDesktopCatalogs({ localesDir = resolveLocalesDir() } = {}) {
       locales: [],
     },
     catalogs,
-    supportedLocales: entries.map((entry) => entry?.locale).filter(Boolean),
+    supportedLocales,
     defaultLocale,
     fallbackLocale,
     errors,
@@ -81,7 +89,7 @@ export function loadDesktopCatalogs({ localesDir = resolveLocalesDir() } = {}) {
 }
 
 /** 构造主进程 translator（catalogs 常驻内存；setLocale 不重新读盘）。 */
-export function loadDesktopI18n({ localesDir = resolveLocalesDir(), locale = DEFAULT_LOCALE } = {}) {
+export function loadDesktopI18n({ localesDir = resolveLocalesDir(), locale = null } = {}) {
   const loaded = loadDesktopCatalogs({ localesDir });
   return createTranslator({
     catalogs: loaded.catalogs,

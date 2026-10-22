@@ -10,7 +10,7 @@ import { quitConfirm, trayMenuModel, trayStatusLine } from '../../apps/desktop/s
 import { loadDesktopCatalogs, loadDesktopI18n, resolveLocalesDir } from '../../apps/desktop/src/main/i18n.mjs';
 import { applyStaticI18nWith, createTranslator, normalizeDesktopLocale } from '../../apps/desktop/src/shared/i18n-core.mjs';
 import { wizardView } from '../../apps/desktop/src/renderer/wizard-view.mjs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -20,6 +20,10 @@ const CJK = /[\u3400-\u9fff]/;
 
 const zh = loadDesktopI18n({ localesDir, locale: 'zh-CN' });
 const en = loadDesktopI18n({ localesDir, locale: 'en-US' });
+const productionRegistry = {
+  supportedLocales: ['zh-CN', 'en-US'],
+  defaultLocale: 'zh-CN',
+};
 const manifest = JSON.parse(readFileSync(join(localesDir, 'manifest.json'), 'utf-8'));
 const zhPack = JSON.parse(readFileSync(join(localesDir, 'zh-CN', 'desktop.json'), 'utf-8'));
 const enPack = JSON.parse(readFileSync(join(localesDir, 'en-US', 'desktop.json'), 'utf-8'));
@@ -75,14 +79,69 @@ describe('desktop loader / translator', () => {
     expect(Object.keys(loaded.catalogs).sort()).toEqual(['en-US', 'zh-CN']);
     expect(loaded.defaultLocale).toBe('zh-CN');
     expect(loaded.errors).toEqual([]);
+    expect(loadDesktopI18n({ localesDir, locale: 'en-GB' }).locale).toBe('en-US');
+    expect(loadDesktopI18n({ localesDir, locale: 'fr-FR' }).locale).toBe('zh-CN');
   });
 
-  it('normalize：en / en-GB → en-US；未知 / 空 → zh-CN', () => {
-    expect(normalizeDesktopLocale('en')).toBe('en-US');
-    expect(normalizeDesktopLocale('en-GB')).toBe('en-US');
-    expect(normalizeDesktopLocale('EN_us')).toBe('en-US');
+  it('normalize：注册表内精确 / 语言 / 地区匹配；未知 / 空 → manifest default', () => {
+    expect(normalizeDesktopLocale('zh-CN', productionRegistry)).toBe('zh-CN');
+    expect(normalizeDesktopLocale('en', productionRegistry)).toBe('en-US');
+    expect(normalizeDesktopLocale('en-GB', productionRegistry)).toBe('en-US');
+    expect(normalizeDesktopLocale('EN_us', productionRegistry)).toBe('en-US');
+    expect(normalizeDesktopLocale('fr-FR', productionRegistry)).toBe('zh-CN');
+    expect(normalizeDesktopLocale('', productionRegistry)).toBe('zh-CN');
+    // 无注册表时未知 / 空才回落 zh-CN（最后兜底，不参与语言选择）。
     expect(normalizeDesktopLocale('fr-FR')).toBe('zh-CN');
     expect(normalizeDesktopLocale('')).toBe('zh-CN');
+  });
+
+  it('合成 ja-JP：normalize / loader 完全由 manifest 驱动（不改生产语言列表）', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'mebular-desktop-locales-'));
+    const manifest = {
+      schemaVersion: 1,
+      defaultLocale: 'ja-JP',
+      fallbackLocale: 'ja-JP',
+      packs: ['desktop'],
+      locales: [
+        { locale: 'ja-JP', nativeName: '日本語', files: { desktop: 'ja-JP/desktop.json' } },
+        { locale: 'zh-CN', nativeName: '简体中文', files: { desktop: 'zh-CN/desktop.json' } },
+      ],
+    };
+    try {
+      await mkdir(join(dir, 'ja-JP'), { recursive: true });
+      await mkdir(join(dir, 'zh-CN'), { recursive: true });
+      await writeFile(join(dir, 'manifest.json'), JSON.stringify(manifest));
+      await writeFile(join(dir, 'ja-JP', 'desktop.json'), JSON.stringify({
+        schemaVersion: 1, locale: 'ja-JP', pack: 'desktop', messages: { 'probe.key': '日本語' },
+      }));
+      await writeFile(join(dir, 'zh-CN', 'desktop.json'), JSON.stringify({
+        schemaVersion: 1, locale: 'zh-CN', pack: 'desktop', messages: { 'probe.key': '中文' },
+      }));
+
+      const registration = { supportedLocales: ['ja-JP', 'zh-CN'], defaultLocale: 'ja-JP' };
+      expect(normalizeDesktopLocale('ja', registration)).toBe('ja-JP');
+      expect(normalizeDesktopLocale('ja-JP', registration)).toBe('ja-JP');
+      expect(normalizeDesktopLocale('ja-JP-u-ca-japanese', registration)).toBe('ja-JP');
+      expect(normalizeDesktopLocale('fr-FR', registration)).toBe('ja-JP');
+
+      const loaded = loadDesktopCatalogs({ localesDir: dir });
+      expect(loaded.supportedLocales).toEqual(['ja-JP', 'zh-CN']);
+      expect(loaded.defaultLocale).toBe('ja-JP');
+      expect(loaded.fallbackLocale).toBe('ja-JP');
+      expect(loaded.errors).toEqual([]);
+
+      const jaByLanguage = loadDesktopI18n({ localesDir: dir, locale: 'ja' });
+      expect(jaByLanguage.locale).toBe('ja-JP');
+      expect(jaByLanguage.defaultLocale).toBe('ja-JP');
+      expect(jaByLanguage.supportedLocales).toEqual(['ja-JP', 'zh-CN']);
+      expect(jaByLanguage.t('probe.key')).toBe('日本語');
+
+      const unknown = loadDesktopI18n({ localesDir: dir, locale: 'fr-FR' });
+      expect(unknown.locale).toBe('ja-JP');
+      expect(unknown.t('probe.key')).toBe('日本語');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it('缺 key 回退 key；目标语言缺 key 时按 manifest fallback 回退 zh', () => {
@@ -163,7 +222,7 @@ describe('locale 偏好同步（Console → Desktop 壳层）', () => {
       expect(desktopStatePath(home)).toBe(join(home, '.desktop-state.json'));
       writeDesktopState(home, { locale: 'en-US' });
       expect(readDesktopState(home).locale).toBe('en-US');
-      expect(normalizeDesktopLocale(readDesktopState(home).locale)).toBe('en-US');
+      expect(normalizeDesktopLocale(readDesktopState(home).locale, productionRegistry)).toBe('en-US');
     } finally {
       await rm(home, { recursive: true, force: true });
     }

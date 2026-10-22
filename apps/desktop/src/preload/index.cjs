@@ -28,7 +28,7 @@ function syncLocaleFromConsole() {
     localeSyncLast = value;
     ipcRenderer.invoke('locale:set', value).catch(() => { localeSyncLast = null; });
   } catch {
-    // localStorage 不可用：保持主进程默认 zh-CN。
+    // localStorage 不可用：保持主进程 manifest 默认语言。
   }
 }
 window.addEventListener('load', syncLocaleFromConsole, { once: true });

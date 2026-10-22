@@ -27,6 +27,8 @@ import {
 import { closeAction, quitConfirm, quitDecision, stopConfirm, trayMenuModel, trayStatusLine, LOGIN_ITEM_ID } from './lifecycle.mjs';
 import { consoleNavSearch, consoleNavUrl, isConsoleUrl } from './console-nav.mjs';
 import { readDaemonLogs } from './logs.mjs';
+import { loadDesktopI18n, resolveLocalesDir } from './i18n.mjs';
+import { DEFAULT_LOCALE, normalizeDesktopLocale } from '../shared/i18n-core.mjs';
 
 
 const cliArgs = parseArgs(process.argv.slice(1));
@@ -35,6 +37,14 @@ let home = typeof cliArgs.home === 'string' ? cliArgs.home : resolveHome();
 const cliBin = resolveCliBin();
 // @mebular/service 的落盘位置 = OS 用户 home（plist/manifest），不是忆云 home（profiles/<id>）。
 const serviceHome = homedir();
+
+// 壳层 i18n：语言偏好保存在 <home>/.desktop-state.json（Console 选择后由 preload 同步）；
+// 默认 zh-CN。文案唯一真源 = locales/<locale>/desktop.json（随 extraResources 打包）。
+let desktopI18n = loadDesktopI18n({
+  localesDir: resolveLocalesDir(),
+  locale: normalizeDesktopLocale(readDesktopState(home).locale || DEFAULT_LOCALE),
+});
+const t = (key, vars) => desktopI18n.t(key, vars);
 
 let win = null;
 let tray = null;
@@ -67,6 +77,40 @@ function readConfig() {
   } catch {
     return {};
   }
+}
+
+/** 应用壳层 locale：更新 translator / 托盘 / 窗口标题 / 退出确认窗口标题。 */
+function applyDesktopLocale(raw, { persist = false } = {}) {
+  const normalized = normalizeDesktopLocale(raw);
+  desktopI18n.setLocale(normalized);
+  if (persist) writeDesktopState(home, { locale: normalized });
+  updateTray();
+  setWindowTitle();
+  if (quitDialog && !quitDialog.isDestroyed()) quitDialog.setTitle(t('quit.windowTitle'));
+  return normalized;
+}
+
+/** home 切换（忆云）后重读该 home 的语言偏好。 */
+function reloadDesktopLocale() {
+  desktopI18n = loadDesktopI18n({
+    localesDir: resolveLocalesDir(),
+    locale: normalizeDesktopLocale(readDesktopState(home).locale || DEFAULT_LOCALE),
+  });
+  updateTray();
+  setWindowTitle();
+}
+
+const CJK_TEXT = /[\u3400-\u9fff]/;
+
+/**
+ * 壳层展示 core/daemon 给的诊断文本：中文 locale 保留原文；英文 locale 遇到中文原文
+ * 改用 desktop pack 的翻译兜底（英文界面不出现中文兜底）。
+ */
+function shellMessage(raw, key, vars) {
+  const text = typeof raw === 'string' && raw.trim() ? raw : null;
+  if (!text) return t(key, vars);
+  if (desktopI18n.locale !== 'zh-CN' && CJK_TEXT.test(text)) return t(key, vars);
+  return text;
 }
 
 function httpConf() {
@@ -104,9 +148,9 @@ async function probeAssistants() {
   const http = httpConf();
   try {
     const res = await fetch(`http://${http.host}:${http.port}/admin/api/clients`, { signal: AbortSignal.timeout(2000) });
-    if (res.status === 401) return { readError: '需要令牌（设置 MEBULAR_TOKEN 后重试）', connectedCount: 0, total: null };
+    if (res.status === 401) return { readError: t('wizard.error.needsToken'), connectedCount: 0, total: null };
     // W-1 小-6：409 = 控制台还在初始设置 → 人话（不抛黑话状态码）
-    if (res.status === 409) return { readError: '先完成第①步（控制台还在初始设置）', connectedCount: 0, total: null };
+    if (res.status === 409) return { readError: t('wizard.error.needsProvision'), connectedCount: 0, total: null };
     if (!res.ok) return { readError: `HTTP ${res.status}`, connectedCount: 0, total: null };
     const data = await res.json().catch(() => ({}));
     const clients = Array.isArray(data?.clients) ? data.clients : [];
@@ -118,7 +162,7 @@ async function probeAssistants() {
     }).length;
     return { connectedCount: clients.filter((c) => c.connected).length, total: clients.length, installedCount, needsManual: clients.filter((c) => c.needsManual).length };
   } catch (error) {
-    return { readError: `无法读取（${error?.message ?? error}）`, connectedCount: 0, total: null };
+    return { readError: t('wizard.error.readFailed', { error: error?.message ?? error }), connectedCount: 0, total: null };
   }
 }
 
@@ -228,9 +272,9 @@ function shellDeepLink(url) {
 
 /** E2-B：端口 200 但身份不符时的人话（不冒充目标忆云）。 */
 function healthMessage(health, http) {
-  if (health?.reason === 'instance_mismatch') return `端口 ${http.port} 上是另一张忆云，请先停止它。`;
-  if (health?.reason === 'instance_missing') return `端口 ${http.port} 上的守护没有实例身份，无法确认是当前忆云。`;
-  return 'Mebular 未就绪：请查看日志，或点托盘「重启」重试。';
+  if (health?.reason === 'instance_mismatch') return t('loading.portMismatch', { port: http.port });
+  if (health?.reason === 'instance_missing') return t('loading.instanceMissing', { port: http.port });
+  return t('loading.notReady');
 }
 
 function loadingHtml(message) {
@@ -238,7 +282,7 @@ function loadingHtml(message) {
     `<!doctype html><meta charset="utf-8"><title>Mebular</title>
      <body style="margin:0;display:grid;place-items:center;height:100vh;background:#0b0f0d;color:#d7ffe9;font:14px -apple-system,system-ui,sans-serif">
      <div style="text-align:center"><div style="font-size:28px">⬡</div><p>${message}</p>
-     <p style="opacity:.6;font-size:12px">守护 home：${home}</p></div></body>`,
+     <p style="opacity:.6;font-size:12px">${t('loading.home', { home })}</p></div></body>`,
   )}`;
 }
 
@@ -267,7 +311,7 @@ async function showConsoleWithRetry() {
   if (!win || win.isDestroyed()) return;
   const seq = ++loadingSeq;
   const http = httpConf();
-  await safeLoad(loadingHtml('正在启动 Mebular…'));
+  await safeLoad(loadingHtml(t('loading.starting')));
   const health = await waitForDaemonDetail({
     fetchImpl: fetch, http, attempts: 120, intervalMs: 500, expectedInstance: homeKey(home),
   });
@@ -281,7 +325,7 @@ async function showConsoleWithRetry() {
   } else if (health.reason === 'instance_mismatch') {
     await safeLoad(loadingHtml(healthMessage(health, http)));
   } else {
-    await safeLoad(loadingHtml('Mebular 未就绪：请查看日志，或点托盘「重启」重试。'));
+    await safeLoad(loadingHtml(t('loading.notReady')));
   }
 }
 
@@ -310,7 +354,7 @@ function createWindow() {
     // R-1 小-12：默认 1280（1180 顶栏临界拥挤）
     width: 1280,
     height: 760,
-    title: 'Mebular',
+    title: t('app.windowTitle'),
     icon: appIconPath(), // Windows/Linux 窗口图标（macOS 走 Dock/bundle）
     backgroundColor: '#0b0f0d',
     // UX-2 补丁 4：macOS 交通灯内嵌（hiddenInset）——内容区与 CRT 风格连续；
@@ -415,7 +459,7 @@ function createQuitDialog() {
   const dialogWin = new BrowserWindow({
     width: 452,
     height: 296,
-    title: '退出 Mebular',
+    title: t('quit.windowTitle'),
     icon: appIconPath(),
     resizable: false,
     minimizable: false,
@@ -498,10 +542,14 @@ function presentQuitDialog(dialogWin, plan) {
   if (!dialogWin || dialogWin.isDestroyed()) return;
   centerQuitDialog(dialogWin);
   if (!dialogWin.webContents.isDestroyed()) {
+    if (typeof dialogWin.setTitle === 'function') dialogWin.setTitle(t('quit.windowTitle'));
     dialogWin.webContents.send('quit-confirm:plan', {
-      title: '退出 Mebular？',
+      locale: desktopI18n.locale,
+      title: t('quit.title'),
       message: plan.message,
       buttons: plan.buttons,
+      hint: t('quit.hint'),
+      closeLabel: t('quit.closeAria'),
     });
   }
   bringQuitDialogToFront(dialogWin);
@@ -538,7 +586,7 @@ function showQuitConfirmation(plan) {
 
 /** R-1 高-2：唯一真退出入口（托盘「退出」）；确认文案由 quitConfirm 按托管模式给出（不谎称停守护）。 */
 async function confirmQuit() {
-  const plan = quitConfirm({ daemonMode, hasManagedChild: Boolean(daemonChild) });
+  const plan = quitConfirm({ daemonMode, hasManagedChild: Boolean(daemonChild) }, t);
   const confirmed = await showQuitConfirmation(plan);
   if (quitDecision({ confirmed }) !== 'quit') return;
   quitting = true;
@@ -547,13 +595,13 @@ async function confirmQuit() {
 
 /** R-1 中-9：停止需确认；停止后窗口内横幅（守护已停止，托盘可重启）。 */
 async function confirmStop() {
-  const plan = stopConfirm({ daemonMode, hasManagedChild: Boolean(daemonChild) });
+  const plan = stopConfirm({ daemonMode, hasManagedChild: Boolean(daemonChild) }, t);
   if (!plan.canStop) {
-    await dialog.showMessageBox(win ?? undefined, { type: 'info', message: plan.message, buttons: ['知道了'] });
+    await dialog.showMessageBox(win ?? undefined, { type: 'info', message: plan.message, buttons: [t('stop.ack')] });
     return;
   }
   const { response } = await dialog.showMessageBox(win ?? undefined, {
-    type: 'warning', message: plan.message, buttons: ['取消', '停止'], defaultId: 0, cancelId: 0,
+    type: 'warning', message: plan.message, buttons: [t('stop.cancel'), t('stop.confirm')], defaultId: 0, cancelId: 0,
   });
   if (response !== 1) return;
   stopManaged(daemonChild);
@@ -564,13 +612,13 @@ async function confirmStop() {
   securityLevel = null;
   updateTray();
   if (win && !win.isDestroyed() && win.isVisible()) {
-    await safeLoad(loadingHtml('守护已停止（托盘可重启）'));
+    await safeLoad(loadingHtml(t('loading.stopped')));
   }
 }
 
 async function confirmRestart() {
   const { response } = await dialog.showMessageBox(win ?? undefined, {
-    type: 'question', message: '重启本机 Mebular 守护？', buttons: ['取消', '重启'], defaultId: 0, cancelId: 0,
+    type: 'question', message: t('restart.message'), buttons: [t('restart.cancel'), t('restart.confirm')], defaultId: 0, cancelId: 0,
   });
   if (response !== 1) return;
   await restart();
@@ -652,11 +700,11 @@ function updateTray() {
   if (!tray || (typeof tray.isDestroyed === 'function' && tray.isDestroyed())) return;
   // 图标 = 品牌星章（状态语义在 tooltip 与菜单；不再分色）
   tray.setImage(trayImage());
-  tray.setToolTip(`Mebular · ${trayStatusLine({ healthy, daemonMode, cloudName })}`);
+  tray.setToolTip(t('tray.tooltip', { status: trayStatusLine({ healthy, daemonMode, cloudName }, t) }));
   // R-1 中-9：分组菜单模型（lifecycle.mjs 纯数据）→ 绑定 click 后交给 Electron
   const actions = trayActions();
   const loginChecked = (() => { try { return Boolean(app.getLoginItemSettings().openAtLogin); } catch { return false; } })();
-  const template = trayMenuModel({ healthy, daemonMode, loginOpenAtLogin: loginChecked, securityLevel, cloudName }).map((item) => {
+  const template = trayMenuModel({ healthy, daemonMode, loginOpenAtLogin: loginChecked, securityLevel, cloudName }, t).map((item) => {
     if (item.type === 'separator') return item;
     const { id, confirm: _confirm, ...rest } = item;
     return { ...rest, click: actions[id] ? (_menuItem) => actions[id](_menuItem) : undefined };
@@ -737,7 +785,7 @@ function cloudSettingsUrl() {
 
 function setWindowTitle() {
   if (!win || win.isDestroyed()) return;
-  win.setTitle(cloudName ? `Mebular · ${cloudName}` : 'Mebular');
+  win.setTitle(cloudName ? `${t('app.windowTitle')} · ${cloudName}` : t('app.windowTitle'));
 }
 
 /** 从注册表重读当前项，更新 home / id / name（切换成功的唯一真源是注册表 current）。 */
@@ -930,7 +978,7 @@ async function cloudSwitchNow(rawId) {
     if (healthy) {
       await showConsoleWithRetry();
     } else if (win && !win.isDestroyed()) {
-      await safeLoad(loadingHtml(error?.message ?? '忆云切换失败；请查看日志后重试。'));
+      await safeLoad(loadingHtml(shellMessage(error?.message, 'loading.cloudSwitchFailed')));
     }
     throw error;
   }
@@ -948,6 +996,7 @@ async function cloudSwitchNow(rawId) {
   home = result.home;
   await refreshCloudIdentity();
   if (result.profile?.name) cloudName = result.profile.name;
+  reloadDesktopLocale();
   markTrayStateChanged();
   daemonChild = result.child ?? null;
   daemonMode = result.mode ?? (result.child ? 'child' : 'service');
@@ -969,20 +1018,17 @@ async function cloudSwitchNow(rawId) {
 
 // ---------- IPC（白名单） ----------
 
-/** i18n foundation 预留：主进程只存语言标签，渲染层负责 normalize / 文案。 */
-function normalizeDesktopLocale(raw) {
-  return String(raw ?? '').trim().toLowerCase().startsWith('en') ? 'en-US' : 'zh-CN';
-}
-
 function registerIpc() {
   const table = buildHandlerTable({
-    // i18n foundation 预留：当前 locale / 固定写入口；向导/tray 文案本阶段不翻译。
-    'locale:get': () => ({ locale: normalizeDesktopLocale(readDesktopState(home).locale || app.getLocale()) }),
-    'locale:set': (locale) => {
-      const normalized = normalizeDesktopLocale(locale);
-      writeDesktopState(home, { locale: normalized });
-      return { locale: normalized };
-    },
+    // 壳层 i18n：locale + catalogs（渲染层用同一套 shared/i18n-core 构造 translator）。
+    'locale:get': () => ({
+      locale: desktopI18n.locale,
+      supportedLocales: desktopI18n.supportedLocales,
+      defaultLocale: DEFAULT_LOCALE,
+      fallbackLocale: DEFAULT_LOCALE,
+      catalogs: desktopI18n.exportCatalogs(),
+    }),
+    'locale:set': (locale) => ({ locale: applyDesktopLocale(locale, { persist: true }) }),
     'daemon:status': async () => ({
       mode: daemonMode,
       healthy,
@@ -1059,6 +1105,7 @@ if (!gotLock) {
     } catch (error) {
       console.log(`[desktop] 忆云初始化失败（壳继续启动）：${error?.message ?? error}`);
     }
+    reloadDesktopLocale();
     registerIpc();
     createTray();
     createWindow();
@@ -1076,13 +1123,13 @@ if (!gotLock) {
       if (startupDiagnostic) {
         // 切换崩溃且两张忆云都不健康：只显示诊断，不删 intent/档案，也不猜要起哪张。
         updateTray();
-        await safeLoad(loadingHtml(startupDiagnostic));
+        await safeLoad(loadingHtml(shellMessage(startupDiagnostic, 'loading.notReady')));
         return;
       }
       const ensured = await ensure();
       if (ensured.mode === 'conflict') {
         updateTray();
-        await safeLoad(loadingHtml(ensured.message ?? '端口被另一张忆云占用，请先停止它。'));
+        await safeLoad(loadingHtml(shellMessage(ensured.message, 'loading.conflict')));
         return;
       }
       const state = await wizardStateNow();
@@ -1096,7 +1143,7 @@ if (!gotLock) {
         if (healthy) void refreshTrayStatus();
       }
     } catch (error) {
-      dialog.showErrorBox('Mebular 启动失败', String(error?.message ?? error));
+      dialog.showErrorBox(t('startup.error.title'), String(error?.message ?? error));
       updateTray();
     }
   });

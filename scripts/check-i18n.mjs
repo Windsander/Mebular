@@ -21,6 +21,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createI18n, loadI18n } from '../packages/console/i18n.mjs';
+import { loadDesktopI18n } from '../apps/desktop/src/main/i18n.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const LOCALES_DIR = join(ROOT, 'locales');
@@ -308,6 +309,81 @@ check('主路径英文 key 完整且无中文兜底（en-US）',
   missingPathEnglish.length === 0 && pathCjk.length === 0,
   { missing: missingPathEnglish, cjk: pathCjk });
 
+// ---------- ⑩ Desktop 壳层 pack（tray / quit / wizard / loading / 主进程对话框） ----------
+const desktopDefault = packs.get(`${defaultCode}/desktop`) ?? {};
+const desktopKeys = Object.keys(desktopDefault);
+check('desktop pack 非空（zh-CN 默认）', desktopKeys.length > 0, { keys: desktopKeys.length });
+
+const desktopParity = [];
+const desktopPlaceholderMismatch = [];
+const desktopCjk = [];
+for (const entry of locales) {
+  if (!isObject(entry) || entry.locale === defaultCode) continue;
+  const messages = packs.get(`${entry.locale}/desktop`) ?? {};
+  const keys = Object.keys(messages);
+  const missing = desktopKeys.filter((key) => !keys.includes(key));
+  const extra = keys.filter((key) => !desktopKeys.includes(key));
+  if (missing.length > 0 || extra.length > 0) desktopParity.push({ locale: entry.locale, missing, extra });
+  for (const key of desktopKeys) {
+    if (!(key in messages)) continue;
+    if (placeholders(desktopDefault[key]) !== placeholders(messages[key])) {
+      desktopPlaceholderMismatch.push({
+        locale: entry.locale,
+        key,
+        expected: placeholders(desktopDefault[key]),
+        actual: placeholders(messages[key]),
+      });
+    }
+    if (entry.locale === 'en-US' && CJK.test(messages[key])) desktopCjk.push({ key, value: messages[key] });
+  }
+}
+check('desktop key 完全对等（所有 locale vs zh-CN）', desktopParity.length === 0, { mismatch: desktopParity });
+check('desktop 插值占位符一致', desktopPlaceholderMismatch.length === 0, { mismatch: desktopPlaceholderMismatch });
+check('desktop 非默认语言值不含中文（en-US）', desktopCjk.length === 0, { cjk: desktopCjk });
+
+const DESKTOP_PATH_PREFIXES = [
+  'app.', 'loading.', 'startup.', 'tray.', 'quit.', 'stop.', 'restart.', 'wizard.',
+];
+const missingDesktopPrefixes = DESKTOP_PATH_PREFIXES.filter((prefix) => (
+  !desktopKeys.some((key) => key.startsWith(prefix))
+));
+check('desktop 主路径 key 组完整（窗口/加载/托盘/退出/停止/重启/向导）',
+  missingDesktopPrefixes.length === 0, { missing: missingDesktopPrefixes });
+
+// 静态引用：wizard.html 的 data-i18n + 渲染层/主进程字面 t('key')。
+const desktopReferenced = new Set();
+const desktopStaticFiles = [
+  'apps/desktop/src/renderer/wizard.html',
+  'apps/desktop/src/renderer/wizard.js',
+  'apps/desktop/src/renderer/wizard-view.mjs',
+  'apps/desktop/src/main/index.mjs',
+  'apps/desktop/src/main/lifecycle.mjs',
+];
+for (const relative of desktopStaticFiles) {
+  const source = readFileSync(join(ROOT, relative), 'utf-8');
+  for (const match of source.matchAll(/data-i18n(?:-title|-aria-label|-placeholder)?="([^"]+)"/g)) {
+    desktopReferenced.add(match[1]);
+  }
+  for (const match of source.matchAll(/\bt\(\s*'([^']+)'/g)) {
+    desktopReferenced.add(match[1]);
+  }
+}
+const unknownDesktopKeys = [...desktopReferenced].filter((key) => !desktopKeys.includes(key));
+check('desktop 静态 data-i18n / 字面 t() key 均在默认 desktop pack 内',
+  unknownDesktopKeys.length === 0, { unknown: unknownDesktopKeys });
+
+const desktopZh = loadDesktopI18n({ localesDir: LOCALES_DIR, locale: 'zh-CN' });
+const desktopEn = loadDesktopI18n({ localesDir: LOCALES_DIR, locale: 'en-US' });
+check('desktop loader：zh/en 按 manifest 加载且插值生效',
+  desktopZh.locale === 'zh-CN'
+    && desktopEn.locale === 'en-US'
+    && desktopZh.t('tray.menu.quit') === '退出 Mebular'
+    && desktopEn.t('tray.menu.quit') === 'Quit Mebular'
+    && desktopZh.t('wizard.badge.step', { current: 1, total: 2, name: 'x' }).includes('/2'),
+  { zh: desktopZh.t('tray.menu.quit'), en: desktopEn.t('tray.menu.quit') });
+check('desktop t() 缺 key 回退 key（不返回空字符串）',
+  desktopEn.t('__desktop_missing_key_probe__') === '__desktop_missing_key_probe__', {});
+
 const failed = results.filter((result) => !result.ok);
 console.log('== check:i18n ==');
 console.log(`I18N_SUMMARY ${JSON.stringify({
@@ -316,6 +392,7 @@ console.log(`I18N_SUMMARY ${JSON.stringify({
   fallbackLocale: fallbackCode,
   packs: manifest?.packs ?? [],
   keys: defaultKeys.length,
+  desktopKeys: desktopKeys.length,
   checks: results.length,
   failed: failed.map((result) => result.name),
 })}`);

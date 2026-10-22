@@ -10,9 +10,10 @@ import { join } from 'node:path';
 /** 步骤（唯一真源）。UX-2：两段（邀请移出引导）。 */
 export const WIZARD_STEPS = Object.freeze(['start', 'assistants']);
 
+// 展示文案不放在逻辑层：title / titleKey 是 desktop pack key，渲染层用 t() 翻译。
 export const STEP_TITLES = Object.freeze({
-  start: '① 一键开始',
-  assistants: '② 连接 AI 助手',
+  start: 'wizard.step.start.title',
+  assistants: 'wizard.step.assistants.title',
 });
 
 /**
@@ -60,6 +61,7 @@ export function computeWizardState({ daemonHealthy, provisionRequired, provision
     {
       id: 'start',
       title: STEP_TITLES.start,
+      titleKey: STEP_TITLES.start,
       done: Boolean(daemonHealthy),
       detail: {
         healthy: Boolean(daemonHealthy),
@@ -79,6 +81,7 @@ export function computeWizardState({ daemonHealthy, provisionRequired, provision
     {
       id: 'assistants',
       title: STEP_TITLES.assistants,
+      titleKey: STEP_TITLES.assistants,
       done: Boolean(wizard?.assistantsAcked),
       detail: assistants ?? null,
     },

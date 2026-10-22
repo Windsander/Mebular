@@ -1309,7 +1309,7 @@ async function main() {
         && tokenBlock && qr && /忆云 1/.test(body.textContent) && /根指纹/.test(body.textContent)
         && /扫码加入，或复制令牌发给对方。/.test(body.textContent)
         && /一次性 · 仅当面或可信局域网传递。/.test(body.textContent)
-        && /至 \\d{2}:\\d{2}/.test(body.textContent)
+        && /至 (?:\\d{2}\\/\\d{2} )?\\d{2}:\\d{2}/.test(body.textContent)
         && Boolean(body.querySelector('.invite-layout .invite-qr'))
         && Boolean(body.querySelector('.invite-layout .invite-main'))
         && Boolean(document.querySelector('#invite .modal-head #invite-close.modal-x'))
@@ -1328,10 +1328,40 @@ async function main() {
         && Boolean(regen) && !regen.classList.contains('btn-primary')
         && !regen.classList.contains('btn-crt') && regen.textContent.trim() === '重新生成'
         && !document.querySelector('#invite .modal-actions')
-        && /^当前令牌至 \\d{2}:\\d{2}$/.test(document.querySelector('#invite-expiry')?.textContent ?? '')
+        && /^当前令牌至 (?:\\d{2}\\/\\d{2} )?\\d{2}:\\d{2}$/.test(document.querySelector('#invite-expiry')?.textContent ?? '')
         && Boolean(box) && box.scrollWidth <= box.clientWidth + 1
         && document.documentElement.scrollWidth <= window.innerWidth + 1;
     })()`));
+    const crossDayExpiry = await evalJs(`(() => {
+      const select = document.querySelector('#invite-ttl');
+      const expiry = document.querySelector('#invite-expiry');
+      const regen = document.querySelector('#invite-regenerate');
+      select.value = '86400000';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      const label = expiry.textContent;
+      const mid = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+      const sameRow = Math.abs(mid(select) - mid(expiry)) <= 2 && Math.abs(mid(select) - mid(regen)) <= 3;
+      select.value = '900000';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return { label, restored: expiry.textContent, ttl: select.value, sameRow };
+    })()`);
+    check('E1 跨天到期：选 24 小时必须显示日期（MM/DD HH:mm），控件仍同排，恢复 15 分钟后回到当前令牌文案',
+      /^重新生成后至 \d{2}\/\d{2} \d{2}:\d{2}$/.test(crossDayExpiry.label)
+        && crossDayExpiry.sameRow
+        && crossDayExpiry.ttl === '900000'
+        && /^当前令牌至 /.test(crossDayExpiry.restored),
+      crossDayExpiry.label);
+    await evalJs(`(() => {
+      const select = document.querySelector('#invite-ttl');
+      select.value = '86400000';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
+    await capture('e1-invite-expiry-cross-day.jpg');
+    await evalJs(`(() => {
+      const select = document.querySelector('#invite-ttl');
+      select.value = '900000';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
     const inviteControls = await evalJs(`(() => {
       const select = document.querySelector('#invite-ttl');
       const expiry = document.querySelector('#invite-expiry');
@@ -1377,17 +1407,50 @@ async function main() {
       return Boolean(box) && box.scrollWidth <= box.clientWidth + 1
         && document.documentElement.scrollWidth <= window.innerWidth + 1;
     })()`));
+    const mobileCrossDay = await evalJs(`(() => {
+      const select = document.querySelector('#invite-ttl');
+      const regen = document.querySelector('#invite-regenerate');
+      const expiry = document.querySelector('#invite-expiry');
+      select.value = '86400000';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      const mid = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
+      return {
+        ok: Math.abs(mid(select) - mid(expiry)) <= 2 && Math.abs(mid(select) - mid(regen)) <= 3,
+        label: expiry.textContent,
+        rects: [select, expiry, regen].map((el) => {
+          const r = el.getBoundingClientRect();
+          return [Math.round(r.left), Math.round(r.top), Math.round(r.width)];
+        }),
+      };
+    })()`);
+    check('E1 邀请 ≤520 跨天：日期文案出现且「重新生成」不换行', mobileCrossDay.ok,
+      `${mobileCrossDay.label} ${JSON.stringify(mobileCrossDay.rects)}`);
+    await capture('p6b-invite-390-cross-day.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    await evalJs(`(() => {
+      const select = document.querySelector('#invite-ttl');
+      select.value = '900000';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    })()`);
     await capture('p6b-invite-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await send('Emulation.clearDeviceMetricsOverride');
     await sleep(100);
     const ttlChanged = await evalJs(`(() => {
       const select = document.querySelector('#invite-ttl');
       const tokenBefore = document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '';
-      const clock = (ts) => new Date(ts).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
-      const beforeExpected = '重新生成后至 ' + clock(Date.now() + 7200000);
+      const expiryText = (ts) => {
+        const date = new Date(ts);
+        const now = new Date();
+        const sameDay = date.getFullYear() === now.getFullYear()
+          && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+        const options = sameDay
+          ? { hour: '2-digit', minute: '2-digit', hour12: false }
+          : { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false };
+        return new Intl.DateTimeFormat('zh-CN', options).format(date);
+      };
+      const beforeExpected = '重新生成后至 ' + expiryText(Date.now() + 7200000);
       select.value = '7200000';
       select.dispatchEvent(new Event('change', { bubbles: true }));
-      const afterExpected = '重新生成后至 ' + clock(Date.now() + 7200000);
+      const afterExpected = '重新生成后至 ' + expiryText(Date.now() + 7200000);
       const label = document.querySelector('#invite-expiry')?.textContent ?? '';
       return {
         label,
@@ -1398,7 +1461,7 @@ async function main() {
         confirmOpen: document.querySelector('#modal')?.hidden === false,
       };
     })()`);
-    check('E1 改档只更新「重新生成后至 now+2h」预估：旧 token 不变、不弹确认',
+    check('E1 改档只更新「重新生成后至 now+2h」预估（跨天自动带日期）：旧 token 不变、不弹确认',
       ttlChanged.ttl === '7200000'
         && ttlChanged.expected.includes(ttlChanged.label)
         && ttlChanged.tokenAfter === ttlChanged.tokenBefore
@@ -1446,6 +1509,7 @@ async function main() {
         ariaBusy: body.getAttribute('aria-busy'),
         token,
         fingerprint: document.querySelector('#invite-token-fingerprint')?.textContent ?? '',
+        shown: document.querySelector('#invite-body .invite-token-code')?.textContent ?? '',
         qr: document.querySelector('#invite-body .qr-img')?.src ?? '',
         toast: document.querySelector('#banner')?.textContent ?? '',
         expiry: document.querySelector('#invite-expiry')?.textContent ?? '',
@@ -1457,11 +1521,16 @@ async function main() {
         && Math.abs(regenAfter.height - regenBusy.before) <= 12
         && regenAfter.token.length > 0,
       `before=${Math.round(regenBusy.before)} after=${Math.round(regenAfter.height)}`);
-    check('E1 重新生成后指纹/令牌都变：肉眼可确认旧令牌已失效（token 不同、指纹不同）',
+    check('E1 重新生成后指纹/蓝字/令牌都变：肉眼可确认旧令牌已失效（token 不同、指纹不同、蓝色 code 不同）',
       /^令牌 #[0-9a-f]{8}$/.test(regenAfter.fingerprint)
         && regenAfter.fingerprint !== beforeTokenMeta.fingerprint
-        && regenAfter.token !== beforeTtlToken,
+        && regenAfter.token !== beforeTtlToken
+        && regenAfter.shown !== beforeTokenMeta.shown
+        && regenAfter.shown.includes(`#${regenAfter.fingerprint.slice(-8)}`),
       `${beforeTokenMeta.fingerprint} → ${regenAfter.fingerprint}`);
+    check('E1 重新生成后到期时间跟随新令牌 TTL（2 小时）',
+      /^当前令牌至 (?:\d{2}\/\d{2} )?\d{2}:\d{2}$/.test(regenAfter.expiry),
+      regenAfter.expiry);
     check('E1 重新生成后二维码与 toast 同步：新二维码 +「已重新生成，旧令牌已失效」',
       Boolean(beforeTokenMeta.qr) && regenAfter.qr !== beforeTokenMeta.qr
         && /已重新生成，旧令牌已失效/.test(regenAfter.toast),
@@ -1478,7 +1547,15 @@ async function main() {
         joinState,
       };
     })();
-    const newExpiryLabel = `当前令牌至 ${new Date(tokenState.newExpiresAt).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' })}`;
+    const newExpiryLabel = `当前令牌至 ${(() => {
+      const date = new Date(tokenState.newExpiresAt);
+      const now = new Date();
+      const sameDay = date.getFullYear() === now.getFullYear()
+        && date.getMonth() === now.getMonth() && date.getDate() === now.getDate();
+      return new Intl.DateTimeFormat('zh-CN', sameDay
+        ? { hour: '2-digit', minute: '2-digit', hour12: false }
+        : { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
+    })()}`;
     const newTtlDistance = tokenState.newExpiresAt - Date.now();
     check('E1 重新生成后「当前令牌至」对应新令牌 2h 到期',
       regenAfter.expiry === newExpiryLabel
@@ -1921,7 +1998,34 @@ async function main() {
       await waitFor('document.querySelector("#domains-view")?.hidden === true');
     }
 
-    // i18n foundation：默认隐藏语言行；?lang= 打开英文并可在设置内切回中文（不 reload）
+    // i18n：语言行默认可见（不再依赖 ?i18n=1）；?lang= 打开英文并可在设置内切回中文（不 reload）
+    await send('Page.navigate', { url: `${base}/console/` });
+    check('i18n 默认入口：html lang=zh-CN（普通用户不被系统英文带入半翻译界面）',
+      await waitFor(`document.documentElement.lang === 'zh-CN' && Boolean(document.querySelector('#open-settings')) && document.title.includes('控制台')`));
+    await evalJs('document.querySelector("#open-settings").click()');
+    check('i18n 语言行默认可见：设置·常用单行、位于常驻运行之前', await waitFor(`(() => {
+      const row = document.querySelector('#settings-language');
+      const resident = document.querySelector('#settings-resident');
+      const panel = document.querySelector('#settings-panel-common');
+      return Boolean(row) && Boolean(resident) && panel?.hidden === false
+        && row.parentElement === panel && row === panel.querySelector('.settings-language-row')
+        && row.querySelectorAll('select[data-language-select]').length === 1
+        && row.querySelector('select').value === 'zh-CN'
+        && row.getBoundingClientRect().top < resident.getBoundingClientRect().top;
+    })()`));
+    await capture('i18n-settings-language-default.jpg');
+    const navsBeforeEnglish = cdp.events.filter((event) => event.method === 'Page.frameNavigated').length;
+    await evalJs(`(() => { const s = document.querySelector('[data-language-select]'); s.value = 'en-US'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    check('i18n 默认语言行选择 English：html lang / 设置页就地切英文，无 reload', await waitFor(`(() => {
+      const row = document.querySelector('#settings-language');
+      return document.documentElement.lang === 'en-US'
+        && document.querySelector('[data-language-select]')?.value === 'en-US'
+        && /Language/.test(row?.textContent ?? '')
+        && /General/.test(document.querySelector('[data-settings-tab=common]')?.textContent ?? '');
+    })()`) && cdp.events.filter((event) => event.method === 'Page.frameNavigated').length === navsBeforeEnglish);
+    await evalJs(`(() => { const s = document.querySelector('[data-language-select]'); s.value = 'zh-CN'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await waitFor(`document.documentElement.lang === 'zh-CN' && /语言/.test(document.querySelector('#settings-language')?.textContent ?? '')`);
+    await evalJs('document.querySelector("#settings-close").click()');
     await send('Page.navigate', { url: `${base}/console/?i18n=1&lang=en-US` });
     check('i18n 深链：html lang=en-US + 顶栏/导航英文', await waitFor(`document.documentElement.lang === 'en-US' && document.querySelector('.brand')?.textContent.includes('Mebular Console') && /Star map/.test(document.querySelector('[data-view=map] .view-label')?.textContent ?? '')`));
     await evalJs('document.querySelector("#open-settings").click()');

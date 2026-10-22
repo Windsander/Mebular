@@ -13,8 +13,8 @@ export const SUPPORTED_LOCALES = Object.freeze(['zh-CN', 'en-US']);
 export const DEFAULT_LOCALE = 'zh-CN';
 export const LOCALE_STORAGE_KEY = 'mebular.locale';
 
-/** 全量 catalog 完成前，普通用户默认看不到语言行；finalize PR 再把总开关打开。 */
-export const I18N_FOUNDATION_READY = false;
+/** 语言行默认开放；catalog 未全量翻译期间，未选英文的普通用户仍默认 zh-CN。 */
+export const I18N_FOUNDATION_READY = true;
 
 export const CATALOGS = Object.freeze({
   'zh-CN': zhCN,
@@ -23,6 +23,9 @@ export const CATALOGS = Object.freeze({
 
 const DATE_OPTIONS = Object.freeze({ year: 'numeric', month: '2-digit', day: '2-digit' });
 const TIME_OPTIONS = Object.freeze({ hour: '2-digit', minute: '2-digit', hour12: false });
+const EXPIRY_DAY_TIME_OPTIONS = Object.freeze({
+  month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+});
 const DATETIME_OPTIONS = Object.freeze({
   year: 'numeric', month: '2-digit', day: '2-digit',
   hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
@@ -175,6 +178,30 @@ function formatWith(locale, options, value) {
   }
 }
 
+function sameCalendarDay(a, b) {
+  return a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate();
+}
+
+/**
+ * 到期时刻：同一日历日只显示 HH:mm；跨天补 MM/DD（由 Intl 按 locale 排列）。
+ * now 可注入，便于测试「同日 / 跨天」边界。
+ */
+function formatExpiryWith(locale, value, now = Date.now()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '—';
+  const base = now instanceof Date ? now : new Date(now);
+  const options = !Number.isNaN(base.getTime()) && sameCalendarDay(date, base)
+    ? TIME_OPTIONS
+    : EXPIRY_DAY_TIME_OPTIONS;
+  try {
+    return new Intl.DateTimeFormat(locale, options).format(date);
+  } catch {
+    return String(value);
+  }
+}
+
 /**
  * 创建独立的 i18n 实例（测试 / 多窗口可注入 storage/search/languages）。
  * 模块底部的默认导出是控制台实际使用的单例。
@@ -244,6 +271,9 @@ export function createI18n({
     formatDateTime(value) {
       return formatWith(locale, DATETIME_OPTIONS, value);
     },
+    formatExpiry(value, now = Date.now()) {
+      return formatExpiryWith(locale, value, now);
+    },
   };
   return api;
 }
@@ -257,12 +287,13 @@ export const onLocaleChange = defaultI18n.onLocaleChange;
 export const formatDate = defaultI18n.formatDate;
 export const formatTime = defaultI18n.formatTime;
 export const formatDateTime = defaultI18n.formatDateTime;
+export const formatExpiry = defaultI18n.formatExpiry;
 
 export function applyStaticI18n(root = globalThis.document) {
   return defaultI18n.applyStaticI18n(root);
 }
 
-/** 就绪开关：默认关闭；?lang= / ?i18n=1 / 桌面壳显式 i18nReady 时打开。 */
+/** 就绪开关：默认开放；?lang= / ?i18n=1 / 桌面壳显式 i18nReady 仍然兼容。 */
 export function isI18nReady({
   search = safeSearch(),
   desktop = globalThis.mebularDesktop,
@@ -275,7 +306,7 @@ export function isI18nReady({
 
 /**
  * 设置 · 常用页的语言行（单行，复用 .asst-row 的虚线分隔）。
- * 未就绪时返回空字符串——不向普通用户暴露半套英文。
+ * 默认开放；catalog 尚未全量翻译时也保留入口，避免用户找不到语言开关。
  */
 export function languageSettingsRowHtml({
   ready = isI18nReady(),

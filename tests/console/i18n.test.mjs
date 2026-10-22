@@ -105,6 +105,22 @@ describe('i18n foundation · locale', () => {
     i18n.setLocale('en-US');
     expect(seen).toEqual(['en-US', 'zh-CN']);
   });
+
+  it('setLocale 立即同步 document.documentElement.lang（不 reload）', () => {
+    const previousDocument = globalThis.document;
+    globalThis.document = { documentElement: { lang: '' } };
+    try {
+      const i18n = createI18n({ storage: memoryStorage(), search: '', languages: ['zh-CN'] });
+      expect(globalThis.document.documentElement.lang).toBe('zh-CN');
+      i18n.setLocale('en-US');
+      expect(globalThis.document.documentElement.lang).toBe('en-US');
+      i18n.setLocale('zh-CN');
+      expect(globalThis.document.documentElement.lang).toBe('zh-CN');
+    } finally {
+      if (previousDocument === undefined) delete globalThis.document;
+      else globalThis.document = previousDocument;
+    }
+  });
 });
 
 describe('i18n foundation · 文案与静态属性', () => {
@@ -139,18 +155,35 @@ describe('i18n foundation · 文案与静态属性', () => {
     expect(zh.formatDateTime(date)).not.toBe(en.formatDateTime(date));
     expect(zh.formatDate('not-a-date')).toBe('—');
   });
+
+  it('formatExpiry：同一日历日只显示 HH:mm；跨天补日期（按 locale，不硬编码）', () => {
+    const now = new Date(2026, 9, 22, 9, 0);
+    const sameDay = new Date(2026, 9, 22, 18, 30);
+    const nextDay = new Date(2026, 9, 23, 9, 30);
+    const zh = createI18n({ search: '?lang=zh-CN', languages: [] });
+    const en = createI18n({ search: '?lang=en-US', languages: [] });
+
+    expect(zh.formatExpiry(sameDay, now)).toBe(zh.formatTime(sameDay));
+    expect(zh.formatExpiry(sameDay, now)).not.toContain('/');
+    expect(zh.formatExpiry(nextDay, now)).toContain('10/23');
+    expect(zh.formatExpiry(nextDay, now)).toContain('09:30');
+    expect(en.formatExpiry(nextDay, now)).toContain('10/23');
+    expect(en.formatExpiry(nextDay, now)).not.toBe(en.formatTime(nextDay));
+    expect(zh.formatExpiry('not-a-date', now)).toBe('—');
+  });
 });
 
 describe('i18n foundation · 语言行与就绪开关', () => {
-  it('默认关闭；?i18n=1 / ?lang= / 桌面壳显式 i18nReady 才开启', () => {
-    expect(isI18nReady({ search: '', desktop: null })).toBe(false);
-    expect(isI18nReady({ search: '?mock=1', desktop: {} })).toBe(false);
+  it('默认开放；?i18n=1 / ?lang= / 桌面壳显式 i18nReady 仍为 true', () => {
+    expect(isI18nReady({ search: '', desktop: null })).toBe(true);
+    expect(isI18nReady({ search: '?mock=1', desktop: {} })).toBe(true);
     expect(isI18nReady({ search: '?i18n=1', desktop: null })).toBe(true);
     expect(isI18nReady({ search: '?lang=en-US', desktop: null })).toBe(true);
     expect(isI18nReady({ search: '', desktop: { i18nReady: true } })).toBe(true);
   });
 
-  it('语言行：未就绪返回空；就绪为单行 select（复用 asst-row，无独立卡片）', () => {
+  it('语言行默认可见；显式 ready=false 才隐藏；就绪为单行 select（复用 asst-row，无独立卡片）', () => {
+    expect(languageSettingsRowHtml()).toContain('id="settings-language"');
     expect(languageSettingsRowHtml({ ready: false })).toBe('');
     const html = languageSettingsRowHtml({ ready: true, locale: 'zh-CN' });
     expect(html).toContain('id="settings-language"');
@@ -177,7 +210,8 @@ describe('i18n foundation · 语言行与就绪开关', () => {
     expect(residentAt).toBeGreaterThan(-1);
     expect(rowAt).toBeLessThan(residentAt);
 
-    expect(consoleJs).toContain("if (!isI18nReady() && getLocale() !== 'zh-CN') setLocale('zh-CN', { persist: false });");
+    expect(consoleJs).toContain("const hasExplicitLocale = Boolean(params.get('lang')?.trim()) || Boolean(localStorage.getItem(LOCALE_STORAGE_KEY));");
+    expect(consoleJs).toContain("if (!hasExplicitLocale && getLocale() !== 'zh-CN') setLocale('zh-CN', { persist: false });");
     expect(consoleJs).toContain("setLocale(select.value, { persist: true })");
     expect(consoleJs).toMatch(/onLocaleChange\(\(\) => \{[\s\S]*?applyStaticI18n\(document\)[\s\S]*?render\(\);[\s\S]*?\}\);/);
     expect(consoleJs).not.toMatch(/location\.reload\s*\(/);

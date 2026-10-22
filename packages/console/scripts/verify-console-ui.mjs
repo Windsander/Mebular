@@ -390,7 +390,7 @@ async function main() {
     };
 
     await send('Page.navigate', { url: `${base}/console/` });
-    check('页面加载完成（标题 / #stage）', await waitFor('document.title.includes("控制台") && Boolean(document.querySelector("#stage"))'));
+    check('页面加载完成（标题 / #stage）', await waitFor('document.title === "Mebular" && Boolean(document.querySelector("#stage"))'));
     check('弹窗对齐规范：小弹窗 + 加入忆云 modal-center；其余大面板顶部对齐',
       await evalJs(`(() => {
         const small = ['wizard', 'invite', 'cloud-switch', 'security-action', 'handoff', 'modal', 'auth-token', 'namespace-new-modal', 'cloud-join', 'onboard-create', 'onboard-join'];
@@ -2017,7 +2017,7 @@ async function main() {
     // i18n：语言行默认可见（不再依赖 ?i18n=1）；?lang= 打开英文并可在设置内切回中文（不 reload）
     await send('Page.navigate', { url: `${base}/console/` });
     check('i18n 默认入口：html lang=zh-CN（普通用户不被系统英文带入半翻译界面）',
-      await waitFor(`document.documentElement.lang === 'zh-CN' && document.documentElement.dataset.consoleReady === '1' && Boolean(document.querySelector('#open-settings')) && document.title.includes('控制台')`));
+      await waitFor(`document.documentElement.lang === 'zh-CN' && document.documentElement.dataset.consoleReady === '1' && Boolean(document.querySelector('#open-settings')) && document.title === 'Mebular'`));
     await evalJs('document.querySelector("#open-settings").click()');
     check('i18n 语言行默认可见：设置·常用专用单行控件、位于常驻运行之前', await waitFor(`(() => {
       const row = document.querySelector('#settings-language');

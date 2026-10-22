@@ -193,7 +193,7 @@ async function waitReady(handle, timeoutMs = 20000) {
     if (handle.proc.exitCode !== null) throw new Error(`serve 提前退出：${handle.getErr().slice(-400)}`);
     await sleep(120);
   }
-  throw new Error(`serve 就绪超时：${handle.getErr().slice(-400)}`);
+  throw new Error(`serve 就绪超时：${handle.getErr().slice(-400)} / out=${handle.getOut().slice(-400)}`);
 }
 
 function waitHttp(url, timeoutMs = 10000) {
@@ -2429,7 +2429,7 @@ async function main() {
         && language1440.dedicated && language1440.wrapper && language1440.oneLine
         && language1440.order && language1440.divider
         && language1440.appearance === 'none' && language1440.nativeHidden
-        && language1440.triggerRole === 'combobox' && language1440.triggerHeight === 28
+        && language1440.triggerRole === 'combobox' && language1440.triggerHeight === 26
         && language1440.radius === '8px' && language1440.focusShadow !== 'none'
         && language1440.options === 2 && language1440.value === 'en-US'
         && language1440.inRow && language1440.overflow === false,
@@ -2485,8 +2485,8 @@ async function main() {
     const settingsPanels = await evalJs(settingsPanelsProbe);
     check('i18n 设置深度页英文：五个页签 + 通用/安全/AI 助手/MCP/高级 段落文案全英文',
       settingsPanels.lang === 'en-US'
-        && settingsPanels.tabs.join(',') === 'General,Security,AI assistants,MCP access,Advanced'
-        && settingsPanels.extra === 'About this device'
+        && settingsPanels.tabs.join(',') === 'General,Security,Assistants,MCP,Advanced'
+        && settingsPanels.extra === 'About device'
         && Object.values(settingsPanels.has).every(Boolean)
         && settingsPanels.cjk.security === false,
       JSON.stringify(settingsPanels));
@@ -2495,6 +2495,46 @@ async function main() {
         && !/恢复指引|完整配置|版本与服务状态|最近一次应用结果/.test(settingsPanels.diag ?? ''),
       JSON.stringify({ cjk: settingsPanels.diagCjk, sample: settingsPanels.diag?.slice(0, 200) }));
     await captureNow('i18n-en-settings-deep-1440.jpg');
+
+    // 英文设置页签：每个标签必须单行（不被空格拆成两行），三档视口都不横向溢出。
+    const settingsTabsProbe = `(() => {
+      const tabs = [...document.querySelectorAll('#settings-body .settings-tab')];
+      const container = document.querySelector('#settings-body .settings-tabs');
+      if (!container || tabs.length === 0) return { ok: false, why: 'missing' };
+      const box = container.getBoundingClientRect();
+      return {
+        ok: true,
+        labels: tabs.map((el) => {
+          const rect = el.getBoundingClientRect();
+          return {
+            text: el.textContent.trim(),
+            height: Math.round(rect.height),
+            width: Math.round(rect.width),
+            wrapped: rect.height > 32 || el.scrollWidth > el.clientWidth + 1,
+            outside: rect.right > box.right + 1 || rect.left < box.left - 1,
+          };
+        }),
+        rows: new Set(tabs.map((el) => Math.round(el.getBoundingClientRect().top))).size,
+        containerOverflow: container.scrollWidth > container.clientWidth + 1,
+        pageOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+      };
+    })()`;
+    for (const [label, viewport] of [
+      ['1440', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }],
+      ['1024', { width: 1024, height: 768, deviceScaleFactor: 1, mobile: false }],
+      ['390', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }],
+    ]) {
+      await setViewport(viewport);
+      const tabsLayout = await evalJs(settingsTabsProbe);
+      check(`i18n 设置页签英文 ${label}：每个标签单行、页签条不溢出（1440/1024 同排）`,
+        tabsLayout.ok
+          && tabsLayout.labels.every((item) => item.wrapped === false && item.outside === false)
+          && tabsLayout.containerOverflow === false && tabsLayout.pageOverflow === false
+          && (label === '390' || tabsLayout.rows === 1),
+        JSON.stringify(tabsLayout));
+      await captureNow(`i18n-en-settings-tabs-${label}.jpg`);
+    }
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
 
     // 安全流程弹层：TOTP 导入弹层（标题/字段/占位/按钮/帮助全英文，无中文兜底）
     await evalJs(`(() => {
@@ -2778,6 +2818,58 @@ async function main() {
       invite1440.open && invite1440.spread <= 8 && invite1440.boxOverflow === false && invite1440.pageOverflow === false,
       JSON.stringify(invite1440));
     await captureNow('i18n-en-invite-1440.jpg');
+    // 重新生成前后：令牌块左边界/宽度必须稳定（英文 Renew ↔ Updating… 按钮宽度变化不得推动布局）。
+    const tokenRect = `(el) => {
+      const rect = el.getBoundingClientRect();
+      return [Math.round(rect.left), Math.round(rect.width), Math.round(rect.right)];
+    }`;
+    const inviteStabilityProbe = `(() => {
+      const block = document.querySelector('#invite-body .invite-token-block');
+      const controls = document.querySelector('#invite-body .invite-controls');
+      const box = document.querySelector('#invite .modal-box');
+      if (!block || !controls || !box) return { ok: false, why: 'missing' };
+      return {
+        ok: true,
+        block: (${tokenRect})(block),
+        controls: (${tokenRect})(controls),
+        box: (${tokenRect})(box),
+        boxOverflow: box.scrollWidth > box.clientWidth + 1,
+        pageOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+      };
+    })()`;
+    const inviteBeforeRenew = await evalJs(inviteStabilityProbe);
+    await captureNow('i18n-en-invite-renew-before-1440.jpg');
+    await send('Network.enable');
+    await send('Network.emulateNetworkConditions', { offline: false, latency: 1200, downloadThroughput: -1, uploadThroughput: -1 });
+    await evalJs('document.querySelector("#invite-regenerate").click()');
+    const inviteBusyRenew = await evalJs(`(() => {
+      const probe = ${inviteStabilityProbe};
+      const button = document.querySelector('#invite-regenerate');
+      return {
+        ...probe,
+        label: button?.textContent.trim() ?? '',
+        buttonWidth: button ? Math.round(button.getBoundingClientRect().width) : 0,
+        busy: document.querySelector('#invite-body').classList.contains('is-busy'),
+      };
+    })()`);
+    await captureNow('i18n-en-invite-renew-busy-1440.jpg');
+    await send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
+    check('i18n 邀请重新生成（英文）：按钮进入忙态且令牌块左边界/宽度不跳动',
+      inviteBusyRenew.busy === true && inviteBusyRenew.label === 'Updating…'
+        && Math.abs(inviteBusyRenew.block[0] - inviteBeforeRenew.block[0]) <= 1
+        && Math.abs(inviteBusyRenew.block[1] - inviteBeforeRenew.block[1]) <= 1
+        && inviteBusyRenew.boxOverflow === false && inviteBusyRenew.pageOverflow === false,
+      JSON.stringify({ before: inviteBeforeRenew, busy: inviteBusyRenew }));
+    check('i18n 邀请重新生成（英文）：成功后令牌块回到同一左边界/宽度',
+      await waitFor('document.querySelector("#invite-body")?.classList.contains("is-busy") === false && Boolean(document.querySelector("#invite-body [data-copy]"))', 20000));
+    const inviteAfterRenew = await evalJs(inviteStabilityProbe);
+    check('i18n 邀请重新生成后布局稳定：令牌块左边界/宽度与忙态、生成前一致，弹框无横向滚动',
+      Math.abs(inviteAfterRenew.block[0] - inviteBeforeRenew.block[0]) <= 1
+        && Math.abs(inviteAfterRenew.block[1] - inviteBeforeRenew.block[1]) <= 1
+        && Math.abs(inviteAfterRenew.controls[0] - inviteBeforeRenew.controls[0]) <= 1
+        && inviteAfterRenew.boxOverflow === false && inviteAfterRenew.pageOverflow === false,
+      JSON.stringify({ before: inviteBeforeRenew, after: inviteAfterRenew }));
+    await captureNow('i18n-en-invite-renew-after-1440.jpg');
     await setViewport({ width: 1024, height: 768, deviceScaleFactor: 1, mobile: false });
     const invite1024 = await evalJs(controlsProbe);
     check('i18n 邀请动作行 1024：同排且无横向溢出',
@@ -2793,6 +2885,109 @@ async function main() {
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     await evalJs('document.querySelector("#invite .modal-head #invite-close").click()');
     await waitFor('document.querySelector("#invite")?.hidden === true');
+
+    // 自定义下拉框统一高度：按上下文实测 9 个 trigger 与相邻控件（设置输入/同排按钮）≤1px。
+    const dropdownProbe = (pairs) => `(() => {
+      const pick = (selector) => {
+        const el = selector ? document.querySelector(selector) : null;
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        return { height: rect.height, top: rect.top, width: rect.width };
+      };
+      const out = {};
+      for (const [name, triggerSelector, referenceSelector] of ${JSON.stringify(pairs)}) {
+        const trigger = pick(triggerSelector);
+        const reference = pick(referenceSelector);
+        out[name] = trigger ? {
+          height: Math.round(trigger.height * 10) / 10,
+          refHeight: reference ? Math.round(reference.height * 10) / 10 : null,
+          sameRow: reference ? Math.abs((trigger.top + trigger.height / 2) - (reference.top + reference.height / 2)) <= 8 : null,
+        } : null;
+      }
+      return out;
+    })()`;
+    const dropdownViewports = [
+      ['1440', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }],
+      ['1024', { width: 1024, height: 768, deviceScaleFactor: 1, mobile: false }],
+      ['390', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }],
+    ];
+    for (const [label, viewport] of dropdownViewports) {
+      await setViewport(viewport);
+      const measured = {};
+      // 设置 · 常用：语言下拉（标准 26px；与同行标签基线对齐/不撑高行）
+      await evalJs('document.querySelector("#open-settings").click()');
+      await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("#settings-language-select-trigger"))');
+      await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
+      Object.assign(measured, await evalJs(dropdownProbe([['settingsLanguage', '#settings-language-select-trigger', null]])));
+      await captureNow(`i18n-en-dropdown-settings-${label}.jpg`);
+      // 设置 · MCP：auth 下拉 vs 同组 port 输入框
+      await evalJs('document.querySelector("[data-settings-tab=mcp]")?.click()');
+      await waitFor('Boolean(document.querySelector("#cfg-mcp-http-auth-trigger")) && Boolean(document.querySelector("#cfg-mcp-http-port"))');
+      Object.assign(measured, await evalJs(dropdownProbe([
+        ['mcpAuth', '#cfg-mcp-http-auth-trigger', '#cfg-mcp-http-port'],
+      ])));
+      await captureNow(`i18n-en-dropdown-mcp-${label}.jpg`);
+      // 设置 · 助手：配置格式下拉 vs 同排配置文件路径输入框
+      await evalJs('document.querySelector("[data-settings-tab=assistants]")?.click()');
+      await waitFor('Boolean(document.querySelector("#asst-add"))');
+      await evalJs('document.querySelector("#asst-add")?.click()');
+      await waitFor('Boolean(document.querySelector("#asst-add-format-trigger")) && Boolean(document.querySelector("#asst-add-path"))');
+      Object.assign(measured, await evalJs(dropdownProbe([
+        ['assistantFormat', '#asst-add-format-trigger', '#asst-add-path'],
+      ])));
+      await captureNow(`i18n-en-dropdown-assistants-${label}.jpg`);
+      await evalJs('document.querySelector("#asst-add-cancel")?.click()');
+      await evalJs('document.querySelector("#settings-close").click()');
+      await waitFor('document.querySelector("#settings")?.hidden === true');
+      // 审计 4 个 filter vs 同排导出按钮（compact 32px）
+      await evalJs('document.querySelector("[data-view=audit]").click()');
+      await waitFor('document.querySelector("#audit-view")?.hidden === false && Boolean(document.querySelector("#audit-filter-action-trigger"))');
+      Object.assign(measured, await evalJs(dropdownProbe([
+        ['auditAction', '#audit-filter-action-trigger', '#audit-export'],
+        ['auditDevice', '#audit-filter-device-trigger', '#audit-export'],
+        ['auditNamespace', '#audit-filter-namespace-trigger', '#audit-export'],
+        ['auditTime', '#audit-filter-time-trigger', '#audit-export'],
+      ])));
+      await captureNow(`i18n-en-dropdown-audit-${label}.jpg`);
+      // 记忆 filter vs 同排刷新按钮（compact 32px）
+      await evalJs('document.querySelector("[data-view=memories]").click()');
+      await waitFor('document.querySelector("#memories-view")?.hidden === false && Boolean(document.querySelector("#mem-filter-namespace-trigger"))');
+      Object.assign(measured, await evalJs(dropdownProbe([
+        ['memFilter', '#mem-filter-namespace-trigger', '#mem-refresh'],
+      ])));
+      await captureNow(`i18n-en-dropdown-memories-${label}.jpg`);
+      // 邀请 TTL vs 同排「重新生成」按钮（26px）
+      await evalJs('document.querySelector("#invite-device").click()');
+      await waitFor('document.querySelector("#invite")?.hidden === false && Boolean(document.querySelector("#invite-ttl-trigger"))', 20000);
+      Object.assign(measured, await evalJs(dropdownProbe([
+        ['inviteTtl', '#invite-ttl-trigger', '#invite-regenerate'],
+      ])));
+      await captureNow(`i18n-en-dropdown-invite-${label}.jpg`);
+      await evalJs('document.querySelector("#invite .modal-head #invite-close").click()');
+      await waitFor('document.querySelector("#invite")?.hidden === true');
+      await evalJs('document.querySelector("[data-view=map]").click()');
+
+      const expected = {
+        settingsLanguage: 26,
+        mcpAuth: 26,
+        assistantFormat: 26,
+        auditAction: 32,
+        auditDevice: 32,
+        auditNamespace: 32,
+        auditTime: 32,
+        memFilter: 32,
+        inviteTtl: 26,
+      };
+      const offenders = Object.entries(expected).filter(([name, height]) => {
+        const item = measured[name];
+        return !item || Math.abs(item.height - height) > 1
+          || (item.refHeight !== null && Math.abs(item.height - item.refHeight) > 1);
+      });
+      check(`i18n 下拉高度统一 ${label}：9 个控件命中标准/紧凑档，且与相邻输入框/按钮 ≤1px`,
+        offenders.length === 0,
+        JSON.stringify({ offenders: offenders.map(([name]) => name), measured }));
+    }
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
 
     const joinActionsProbe = `(() => {
       const modal = document.querySelector('#cloud-join');

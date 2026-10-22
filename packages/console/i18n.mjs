@@ -207,6 +207,22 @@ function persistLocale(storage, locale) {
 }
 
 /**
+ * 桌面壳：语言选择后立即经 preload 现有的 setLocale 桥回写主进程（托盘/退出确认/窗口标题）。
+ * 不新增 IPC；web 端无 preload 时静默跳过。preload 的 localStorage 观察仍是兜底路径。
+ */
+export function syncDesktopLocale(locale) {
+  try {
+    const bridge = globalThis.window?.mebularDesktop;
+    if (typeof bridge?.setLocale !== 'function') return false;
+    const result = bridge.setLocale(locale);
+    if (result && typeof result.catch === 'function') result.catch(() => {});
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 解析初始 locale（优先级：?lang= > localStorage > 系统语言 > 默认 locale）。
  * 未知系统语言不会提前截断列表（例如 ['fr-FR','en-US'] 仍会命中 en-US）。
  */
@@ -370,6 +386,7 @@ export function createI18n({
   manifest = null,
   locale: initialLocale = null,
   onMissing = null,
+  onPersist = null,
   documentLang = true,
 } = {}) {
   let registry = normalizeManifest(manifest, { catalogs });
@@ -430,7 +447,15 @@ export function createI18n({
       const normalized = normalizeLocale(next, registry);
       const changed = normalized !== locale;
       locale = normalized;
-      if (persist && changed) persistLocale(storage, normalized);
+      if (persist && changed) {
+        persistLocale(storage, normalized);
+        // 桌面壳内选择语言：立即同步主进程（托盘），不等 1.5s 轮询；web 无桥则跳过。
+        try {
+          (onPersist ?? syncDesktopLocale)(normalized);
+        } catch {
+          // 桥异常不得阻断页面内的语言切换。
+        }
+      }
       syncDocument();
       if (changed) notify();
       return normalized;
@@ -460,6 +485,7 @@ export function createI18n({
     configure(next = {}) {
       registry = normalizeManifest(next.manifest ?? registry.manifest, { catalogs: next.catalogs ?? catalogState });
       catalogState = normalizeCatalogMap(next.catalogs ?? catalogState);
+      if (next.storage !== undefined) storage = next.storage;
       if (next.onMissing !== undefined) missingHandler = next.onMissing;
       if (next.documentLang !== undefined) syncLang = next.documentLang;
       const normalized = next.locale === undefined
@@ -511,6 +537,7 @@ export async function loadI18n({
   languages = safeLanguages(),
   requestLocale = null,
   onMissing = null,
+  onPersist = null,
   documentLang = true,
 } = {}) {
   const errors = [];
@@ -585,7 +612,7 @@ export async function loadI18n({
   const locale = requestLocale === null
     ? resolveLocale({ search, storage, languages, manifest: registry })
     : normalizeLocale(requestLocale, registry);
-  const i18n = createI18n({ manifest, catalogs, locale, onMissing, documentLang });
+  const i18n = createI18n({ manifest, catalogs, locale, storage, search, languages, onMissing, onPersist, documentLang });
   const defaultMessages = catalogs[manifest.defaultLocale] ?? {};
   return {
     i18n,
@@ -612,13 +639,14 @@ export async function initI18n(options = {}) {
     manifest: loaded.manifest,
     catalogs: loaded.catalogs,
     locale: loaded.locale,
+    ...(options.storage === undefined ? {} : { storage: options.storage }),
     onMissing: options.onMissing,
     documentLang: options.documentLang,
   });
   return loaded;
 }
 
-const defaultI18n = createI18n({ storage: null, search: '', languages: [], documentLang: true });
+const defaultI18n = createI18n({ documentLang: true });
 
 export const getLocale = () => defaultI18n.getLocale();
 export const setLocale = (locale, options) => defaultI18n.setLocale(locale, options);

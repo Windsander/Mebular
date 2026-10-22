@@ -4,7 +4,7 @@
 // 加载 127.0.0.1:<port>/console（引导态亦可）→ 托盘最小集 → IPC 白名单。
 // 业务逻辑在 daemon.mjs / ipc.mjs（不 import electron，可单测）。
 
-import { openSync, readFileSync } from 'node:fs';
+import { openSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -731,11 +731,28 @@ function updateTray() {
   if (!tray || (typeof tray.isDestroyed === 'function' && tray.isDestroyed())) return;
   // 图标 = 品牌星章（状态语义在 tooltip 与菜单；不再分色）
   tray.setImage(trayImage());
-  tray.setToolTip(t('tray.tooltip', { status: trayStatusLine({ healthy, daemonMode, cloudName }, t) }));
+  const tooltip = t('tray.tooltip', { status: trayStatusLine({ healthy, daemonMode, cloudName }, t) });
+  tray.setToolTip(tooltip);
   // R-1 中-9：分组菜单模型（lifecycle.mjs 纯数据）→ 绑定 click 后交给 Electron
   const actions = trayActions();
   const loginChecked = (() => { try { return Boolean(app.getLoginItemSettings().openAtLogin); } catch { return false; } })();
-  const template = trayMenuModel({ healthy, daemonMode, loginOpenAtLogin: loginChecked, securityLevel, cloudName }, t).map((item) => {
+  const model = trayMenuModel({ healthy, daemonMode, loginOpenAtLogin: loginChecked, securityLevel, cloudName }, t);
+  // 自动化/手工验收：仅在显式指定快照路径时落盘托盘真值（默认不写、不影响运行）。
+  if (process.env.MEBULAR_TRAY_SNAPSHOT) {
+    try {
+      writeFileSync(process.env.MEBULAR_TRAY_SNAPSHOT, JSON.stringify({
+        locale: desktopI18n.locale,
+        tooltip,
+        menu: model.map((item) => (item.type === 'separator'
+          ? { type: 'separator' }
+          : { id: item.id, label: item.label, type: item.type ?? 'normal', enabled: item.enabled !== false, checked: item.checked ?? null })),
+        at: Date.now(),
+      }, null, 2));
+    } catch {
+      // 快照写盘失败不阻断托盘刷新。
+    }
+  }
+  const template = model.map((item) => {
     if (item.type === 'separator') return item;
     const { id, confirm: _confirm, ...rest } = item;
     return { ...rest, click: actions[id] ? (_menuItem) => actions[id](_menuItem) : undefined };

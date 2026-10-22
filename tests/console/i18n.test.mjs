@@ -19,6 +19,8 @@ import {
   interpolate,
   isI18nReady,
   languageSettingsRowHtml,
+  setLocale,
+  syncDesktopLocale,
 } from '../../packages/console/i18n.mjs';
 import { IPC_CHANNELS, sanitizeArgs } from '../../apps/desktop/src/main/ipc.mjs';
 
@@ -473,11 +475,49 @@ describe('i18n locale pack · 桌面壳 locale 已启用', () => {
     expect(sanitizeArgs(['en-US', 'EXTRA'], 'locale:set')).toEqual(['en-US']);
   });
 
-  it('preload 暴露固定 getLocale / setLocale / i18nReady=true（不透传 channel）', () => {
+  it('preload 暴露固定 getLocale / setLocale / i18nReady=true（不透传 channel；setLocale 去重轮询）', () => {
     const preload = readFileSync(join(rootDir, 'apps', 'desktop', 'src', 'preload', 'index.cjs'), 'utf-8');
     expect(preload).toContain("getLocale: () => ipcRenderer.invoke('locale:get')");
-    expect(preload).toContain("setLocale: (locale) => ipcRenderer.invoke('locale:set', String(locale ?? ''))");
+    expect(preload).toContain("ipcRenderer.invoke('locale:set', value)");
+    expect(preload).toContain('localeSyncLast = value');
     expect(preload).toContain('i18nReady: true');
     expect(preload).not.toMatch(/ipcRenderer\.invoke\(\s*channel/);
+  });
+
+  it('控制台选择语言：立即经 preload setLocale 回写壳层（不等 1.5s 轮询），web 无桥静默跳过', () => {
+    const previousWindow = globalThis.window;
+    const calls = [];
+    globalThis.window = { mebularDesktop: { setLocale: (locale) => { calls.push(locale); return Promise.resolve({ locale }); } } };
+    try {
+      expect(syncDesktopLocale('en-US')).toBe(true);
+      expect(calls).toEqual(['en-US']);
+      globalThis.window = {};
+      expect(syncDesktopLocale('zh-CN')).toBe(false);
+    } finally {
+      globalThis.window = previousWindow;
+    }
+    const storage = memoryStorage();
+    const i18n = realI18n({ storage, search: '', languages: ['zh-CN'], onPersist: (locale) => calls.push(`persist:${locale}`) });
+    i18n.setLocale('en-US', { persist: false });
+    expect(calls.filter((value) => value.startsWith('persist:'))).toEqual([]);
+    i18n.setLocale('zh-CN');
+    expect(calls).toContain('persist:zh-CN');
+    expect(storage.data.get(LOCALE_STORAGE_KEY)).toBe('zh-CN');
+  });
+
+  it('initI18n 注入的 storage 会接管单例持久化（桌面壳读同源 mebular.locale）', async () => {
+    const storage = memoryStorage();
+    await initI18n({
+      manifest,
+      catalogs,
+      search: '',
+      storage,
+      languages: [manifest.defaultLocale],
+      documentLang: false,
+      onMissing: () => {},
+    });
+    setLocale('en-US');
+    expect(storage.data.get(LOCALE_STORAGE_KEY)).toBe('en-US');
+    setLocale('zh-CN');
   });
 });

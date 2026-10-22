@@ -45,7 +45,15 @@ contextBridge.exposeInMainWorld('mebularDesktop', {
   // 壳层 i18n：渲染层经 getLocale 取 locale + desktop pack catalogs（向导用同一套 translator）。
   i18nReady: true,
   getLocale: () => ipcRenderer.invoke('locale:get'),
-  setLocale: (locale) => ipcRenderer.invoke('locale:set', String(locale ?? '')),
+  // 控制台 setLocale 会直接调用这里（立即刷新托盘）；同步记下值，避免 1.5s 轮询重复 invoke。
+  setLocale: (locale) => {
+    const value = String(locale ?? '');
+    localeSyncLast = value;
+    return ipcRenderer.invoke('locale:set', value).catch((error) => {
+      localeSyncLast = null;
+      throw error;
+    });
+  },
   status: () => ipcRenderer.invoke('daemon:status'),
   start: () => ipcRenderer.invoke('daemon:start'),
   stop: () => ipcRenderer.invoke('daemon:stop'),

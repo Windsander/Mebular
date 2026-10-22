@@ -213,6 +213,25 @@ describe('英文壳层：向导视图与托盘/退出确认不含中文', () => 
         .not.toMatch(/stops the local Mebular daemon/i);
     }
   });
+
+  it('同一托盘状态切换 zh→en：菜单/状态行/退出确认全量换语言，id 与结构不变', () => {
+    const state = { healthy: true, daemonMode: 'service', loginOpenAtLogin: true, securityLevel: 'medium' };
+    const zhModel = trayMenuModel(state, zh.t);
+    const enModel = trayMenuModel(state, en.t);
+    const ids = (model) => model.map((item) => item.type === 'separator' ? '|' : item.id);
+    expect(ids(enModel)).toEqual(ids(zhModel));
+    expect(zhModel.find((item) => item.id === 'open-console')?.label).toBe('打开控制台');
+    expect(enModel.find((item) => item.id === 'open-console')?.label).toBe('Open console');
+    expect(zhModel[0].label).toContain('运行中');
+    expect(enModel[0].label).toContain('Running');
+    expect(zhModel.find((item) => item.id === 'add-device')?.label).toBe('邀请设备');
+    expect(enModel.find((item) => item.id === 'add-device')?.label).toBe('Invite a device');
+    expect(trayStatusLine({ healthy: true, daemonMode: 'service' }, zh.t)).toContain('常驻服务');
+    expect(trayStatusLine({ healthy: true, daemonMode: 'service' }, en.t)).toContain('Background service');
+    expect(quitConfirm({ daemonMode: 'service', hasManagedChild: false }, en.t).buttons).not.toEqual(
+      quitConfirm({ daemonMode: 'service', hasManagedChild: false }, zh.t).buttons,
+    );
+  });
 });
 
 describe('locale 偏好同步（Console → Desktop 壳层）', () => {

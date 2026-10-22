@@ -279,6 +279,7 @@ describe('R-1 高-2 薄壳接线（index.mjs 静态契约）', () => {
   });
 
   it('tooltip 与菜单共用 trayStatusLine（不展示裸 child/reused）', () => {
-    expect(mainSrc).toMatch(/setToolTip\(t\('tray\.tooltip', \{ status: trayStatusLine\(\{ healthy, daemonMode, cloudName \}, t\) \}\)\)/);
+    expect(mainSrc).toMatch(/const tooltip = t\('tray\.tooltip', \{ status: trayStatusLine\(\{ healthy, daemonMode, cloudName \}, t\) \}\)/);
+    expect(mainSrc).toContain('tray.setToolTip(tooltip)');
   });
 });

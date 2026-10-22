@@ -64,6 +64,8 @@ locales/
   `errors.<error_code>`（服务端 `payload.error` / `payload.errorKey` 归一化为小写蛇形）。
   未知错误由调用方给通用英文兜底（`errors.unknown`），英文界面绝不透出中文原文。
 - 用户数据（设备名、忆云名、命名空间、记忆正文、审计原文、错误原文）不进入 pack。
+- 服务端 descriptor（AI 助手名称 / 激活说明 / 验证步骤 / 证据）也不进入 pack：Console 在英文界面
+  按稳定 id/name 映射到 `assistants.*` key，未知中文退回英文通用文案，绝不把中文原文透到英文界面。
 
 ## 新增语言
 

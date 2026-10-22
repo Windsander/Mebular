@@ -108,6 +108,7 @@ onLocaleChange(() => {
   lastAboutSignature = null;
   render();
   if (!$('#wizard').hidden) renderWizard();
+  if (!$('#handoff').hidden) renderHandoffCopy();
   if (!$('#invite').hidden && state.inviteToken) showInviteResult(state.inviteToken);
   if (!$('#cloud-join').hidden) {
     updateCloudJoinWarning();
@@ -142,7 +143,7 @@ function requestAuthToken() {
   if (!modal || !input) return Promise.resolve(null);
   input.value = '';
   if (error) { error.hidden = true; error.textContent = ''; }
-  if (help) help.innerHTML = '在终端运行 <code>mebular token grant --scope memory.read,memory.admin</code> 生成。';
+  if (help) help.innerHTML = t('authToken.help', { command: '<code>mebular token grant --scope memory.read,memory.admin</code>' });
   modal.hidden = false;
   setTimeout(() => input.focus(), 0);
   authTokenPromise = new Promise((resolve) => { authTokenResolve = resolve; });
@@ -161,7 +162,7 @@ function submitAuthToken() {
   const value = $('#auth-token-input')?.value?.trim() ?? '';
   if (!value) {
     const error = $('#auth-token-error');
-    if (error) { error.textContent = '请粘贴访问令牌。'; error.hidden = false; }
+    if (error) { error.textContent = t('authToken.error.required'); error.hidden = false; }
     return;
   }
   settleAuthToken(value);
@@ -643,11 +644,11 @@ function renderDomains() {
 
   if (stats) {
     if (items.length === 0) {
-      stats.innerHTML = '<span class="crt-tag">本机视角</span>';
+      stats.innerHTML = `<span class="crt-tag">${escapeHtml(t('domains.stats.localView'))}</span>`;
     } else {
       const subscribed = items.filter((n) => n.subscribed).length;
-      stats.innerHTML = `<span class="crt-tag">记忆域 ${items.length}</span>`
-        + (subscribed > 0 ? `<span class="crt-tag">已订阅 ${subscribed}</span>` : '');
+      stats.innerHTML = `<span class="crt-tag">${escapeHtml(t('domains.stats.total', { count: items.length }))}</span>`
+        + (subscribed > 0 ? `<span class="crt-tag">${escapeHtml(t('domains.stats.subscribed', { count: subscribed }))}</span>` : '');
     }
   }
   if (items.length === 0) {
@@ -670,14 +671,16 @@ function renderDomains() {
   list.innerHTML = items.map((n) => {
     const active = n.namespace === state.selectedNamespace;
     const isTask = taskNs !== null && n.namespace === taskNs;
-    const meta = `${n.count} 条${n.subscribed ? '' : ' · 未订阅'}${isTask ? ' · 任务域' : ''}`;
+    const meta = t('domains.item.count', { count: n.count })
+      + (n.subscribed ? '' : t('domains.item.unsubscribed'))
+      + (isTask ? t('domains.item.task') : '');
     return `<div class="sector-item${active ? ' is-active' : ''}">
       <button class="sector-main" data-sector="${escapeHtml(n.namespace)}" type="button">
         <span class="sector-dot${n.subscribed ? ' is-on' : ''}"></span>
         <span class="sector-name"><span class="ns-chip" style="background:${namespaceColor(n.namespace)}">${escapeHtml(n.namespace)}</span></span>
         <span class="sector-meta${n.subscribed ? '' : ' off'}">${meta}</span>
       </button>
-      <button class="sector-more" type="button" data-domain-menu="${escapeHtml(n.namespace)}" title="更多" aria-label="更多操作">⋯</button>
+      <button class="sector-more" type="button" data-domain-menu="${escapeHtml(n.namespace)}" title="${escapeHtml(t('common.more'))}" aria-label="${escapeHtml(t('common.moreActions'))}">⋯</button>
     </div>`;
   }).join('');
   renderDomainDetail(selected);
@@ -707,40 +710,43 @@ function renderDomainDetail(n) {
   const selfId = state.overview?.device?.deviceId ?? null;
   const subscribers = Array.isArray(n.subscribers) ? n.subscribers : [];
   const others = subscribers.filter((m) => m !== selfId);
-  const othersText = others.slice(0, 4).map((m) => escapeHtml(m)).join('、')
-    + (others.length > 4 ? ` 等 ${others.length} 台设备` : '');
-  const relation = others.length === 0 ? '没有其他设备订阅这个域' : `${othersText} 也在订阅这个域`;
+  const othersText = others.slice(0, 4).map((m) => escapeHtml(m)).join(t('common.listSeparator'))
+    + (others.length > 4 ? escapeHtml(t('domains.detail.andMore', { count: others.length })) : '');
+  const relation = others.length === 0
+    ? t('domains.detail.relationNone')
+    : t('domains.detail.relationOthers', { devices: othersText });
   const ordered = [...subscribers].sort((a, b) => (a === selfId ? -1 : 0) - (b === selfId ? -1 : 0));
   const subscriberChips = subscribers.length
-    ? ordered.map((m) => `<span class="member-chip is-effective">${m === selfId ? '本机' : escapeHtml(m)}</span>`).join(' ')
-    : '<span class="muted">暂无订阅记录（订阅是每台设备自己的决定）</span>';
+    ? ordered.map((m) => `<span class="member-chip is-effective">${m === selfId ? escapeHtml(t('common.self')) : escapeHtml(m)}</span>`).join(' ')
+    : `<span class="muted">${escapeHtml(t('domains.detail.noSubscribers'))}</span>`;
 
   const rejoin = n.rejoinReset
     ? `<div class="ctx-row">
-        <span>⟳ 上次退出后本机水位已清空：重新同步后，对端会从头重发这个记忆域（或发初始快照）</span>
-        <button class="link-btn" type="button" data-rejoin="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="${writes ? '对端将从头重发这个记忆域' : '只读模式'}">重新同步…</button>
+        <span>⟳ ${escapeHtml(t('domains.rejoin.note'))}</span>
+        <button class="link-btn" type="button" data-rejoin="${escapeHtml(ns)}" ${writes ? '' : 'disabled'} title="${escapeHtml(writes ? t('domains.rejoin.title') : t('common.readOnlyMode'))}">${escapeHtml(t('domains.rejoin.action'))}</button>
       </div>`
     : '';
 
   const isTaskNs = (state.settings?.fleet?.namespace ?? null) === ns;
+  const subscribeState = n.subscribed ? t('domains.subscribed') : t('domains.unsubscribed');
   detail.innerHTML = `<article class="sector-readout crt-surface crt-corners">
     <header class="readout-head">
-      <span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>${isTaskNs ? '<span class="crt-tag">任务域</span>' : ''}
-      <span class="readout-meta">${n.count} 条 · 最近更新 ${n.lastUpdatedAt ? formatTime(n.lastUpdatedAt) : '—'}</span>
-      <span class="ns-subscribe"><label class="toggle" title="订阅 = 接收这个记忆域的全部更新，并把本机的新增同步给其他订阅设备"><input id="ns-subscribe" type="checkbox" data-ns-subscribe="${escapeHtml(ns)}" aria-label="订阅这个记忆域（当前${n.subscribed ? '已订阅' : '未订阅'}）" ${n.subscribed ? 'checked' : ''} ${writes ? '' : 'disabled'}><span class="slider"></span></label><span class="readout-meta">${n.subscribed ? '已订阅' : '未订阅'}</span></span>
+      <span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>${isTaskNs ? `<span class="crt-tag">${escapeHtml(t('domains.taskTag'))}</span>` : ''}
+      <span class="readout-meta">${escapeHtml(t('domains.detail.meta', { count: n.count, time: n.lastUpdatedAt ? formatTime(n.lastUpdatedAt) : '—' }))}</span>
+      <span class="ns-subscribe"><label class="toggle" title="${escapeHtml(t('domains.subscribe.title'))}"><input id="ns-subscribe" type="checkbox" data-ns-subscribe="${escapeHtml(ns)}" aria-label="${escapeHtml(t('domains.subscribe.aria', { state: subscribeState }))}" ${n.subscribed ? 'checked' : ''} ${writes ? '' : 'disabled'}><span class="slider"></span></label><span class="readout-meta">${escapeHtml(subscribeState)}</span></span>
     </header>
-    ${isTaskNs ? '<p class="muted" style="font-size:11px;margin:6px 0 0">任务面：发起节点为根派发任务树，远端 Agent 执行后回传结果（有向无环）；订阅即可收发该任务域。</p>' : ''}
+    ${isTaskNs ? `<p class="muted" style="font-size:11px;margin:6px 0 0">${escapeHtml(t('domains.task.note'))}</p>` : ''}
     <p class="relation">${relation}</p>
-    <p class="subscribe-note">订阅 = 接收这个记忆域的全部更新；本机新增也同步给其他订阅设备（阅读权 + 维持义务）。</p>
+    <p class="subscribe-note">${escapeHtml(t('domains.subscribe.note'))}</p>
     <details class="share" open>
-      <summary>订阅的设备</summary>
-      <div class="share-row"><span class="lbl">已订阅</span><div class="chip-wrap">${subscriberChips}</div></div>
-      <div class="share-row"><span class="lbl"></span><span class="share-hint">订阅是每台设备自己的决定；图上记录，本机视角。</span></div>
+      <summary>${escapeHtml(t('domains.detail.subscribers'))}</summary>
+      <div class="share-row"><span class="lbl">${escapeHtml(t('domains.subscribed'))}</span><div class="chip-wrap">${subscriberChips}</div></div>
+      <div class="share-row"><span class="lbl"></span><span class="share-hint">${escapeHtml(t('domains.detail.subscribersHint'))}</span></div>
     </details>
     ${rejoin}
     <div class="danger-zone">
-      <button class="danger-link" type="button" data-handoff="${escapeHtml(ns)}" ${writes ? '' : 'disabled'}>退出并交接这个域…</button>
-      <span class="hint">仅清本机数据与水位，需继任者 ack · 已同步给别人的不回撤</span>
+      <button class="danger-link" type="button" data-handoff="${escapeHtml(ns)}" ${writes ? '' : 'disabled'}>${escapeHtml(t('domains.handoff.action'))}</button>
+      <span class="hint">${escapeHtml(t('domains.handoff.hint'))}</span>
     </div>
   </article>`;
 
@@ -761,9 +767,9 @@ function bindDomainActions() {
       if (!on && current.length === 0) {
         void (async () => {
           const ok = await confirmModal({
-            title: '改为只订阅部分记忆域',
-            body: `当前本机订阅全部记忆域。退订「${ns}」后，将改为只订阅其余 ${all.length} 个记忆域；之后新出现的记忆域默认不再订阅。`,
-            confirmLabel: '确认',
+            title: t('domains.unsubscribeSome.title'),
+            body: t('domains.unsubscribeSome.body', { namespace: ns, count: all.length }),
+            confirmLabel: t('common.confirm'),
           });
           if (!ok) {
             el.checked = true;
@@ -786,7 +792,7 @@ function bindDomainActions() {
 
 async function applySubscription(ns, active, nextNamespaces) {
   if (MOCK) {
-    window.alert('mock 模式不执行写操作。');
+    window.alert(t('common.mockReadOnly'));
     return;
   }
   try {
@@ -794,17 +800,17 @@ async function applySubscription(ns, active, nextNamespaces) {
       method: 'POST',
       body: { namespace: ns, active, ...(nextNamespaces !== undefined ? { nextNamespaces } : {}) },
     });
-    showToast(active ? `已订阅「${ns}」` : `已退订「${ns}」`);
+    showToast(active ? t('domains.toast.subscribed', { namespace: ns }) : t('domains.toast.unsubscribed', { namespace: ns }));
     await refresh();
   } catch (error) {
-    window.alert(`操作失败：${error.message}`);
+    window.alert(t('common.operationFailed', { message: error.message }));
     await refresh();
   }
 }
 
 function openNamespaceNew() {
   if (MOCK) {
-    window.alert('mock 模式不执行写操作。');
+    window.alert(t('common.mockReadOnly'));
     return;
   }
   const modal = $('#namespace-new-modal');
@@ -824,7 +830,7 @@ function closeNamespaceNew() {
 
 async function createNamespace(rawName) {
   if (MOCK) {
-    window.alert('mock 模式不执行写操作。');
+    window.alert(t('common.mockReadOnly'));
     return;
   }
   const namespace = String(rawName ?? '').trim();
@@ -835,7 +841,7 @@ async function createNamespace(rawName) {
     error.hidden = false;
   };
   if (namespace.length === 0) {
-    showError('请先填写记忆域名称。');
+    showError(t('domains.create.error.empty'));
     return;
   }
   try {
@@ -844,9 +850,9 @@ async function createNamespace(rawName) {
     state.selectedNamespace = namespace;
     closeNamespaceNew();
     await refresh();
-    showToast(`已创建并订阅「${namespace}」；本机即可开始记录`);
+    showToast(t('domains.create.success', { namespace }));
   } catch (err) {
-    showError(`创建失败：${err.message}`);
+    showError(t('domains.create.failed', { message: err.message }));
   }
 }
 
@@ -856,22 +862,22 @@ function submitNamespaceNew() {
 
 async function doRejoin(ns) {
   if (MOCK) {
-    window.alert('mock 模式不执行写操作。');
+    window.alert(t('common.mockReadOnly'));
     return;
   }
   const ok = await confirmModal({
-    title: `重新同步 ${ns}`,
-    body: `将对「${ns}」声明重置：清空本机水位，对端会从头重发这个记忆域（或发初始快照）。本机未订阅该记忆域时会被拒绝。确定继续？`,
-    confirmLabel: '重新同步',
+    title: t('domains.rejoin.confirmTitle', { namespace: ns }),
+    body: t('domains.rejoin.confirmBody', { namespace: ns }),
+    confirmLabel: t('domains.rejoin.confirmAction'),
   });
   if (!ok) return;
   try {
     const result = await api(`/admin/api/namespaces/${encodeURIComponent(ns)}/rejoin`, { method: 'POST', body: {} });
-    if (result?.ok) showToast(`已重新同步「${ns}」`);
-    else showToast(`重新同步失败：${result?.reason ?? '条件不满足'}`);
+    if (result?.ok) showToast(t('domains.rejoin.toast.done', { namespace: ns }));
+    else showToast(t('domains.rejoin.toast.failed', { reason: result?.reason ?? t('domains.rejoin.failedFallback') }));
     await refresh();
   } catch (error) {
-    window.alert(`操作失败：${error.message}`);
+    window.alert(t('common.operationFailed', { message: error.message }));
   }
 }
 
@@ -879,11 +885,17 @@ async function doRejoin(ns) {
 
 let handoffNs = null;
 
+function renderHandoffCopy() {
+  if (!handoffNs) return;
+  const title = $('#handoff-title');
+  const desc = $('#handoff-desc');
+  if (title) title.textContent = t('handoff.title', { namespace: handoffNs });
+  if (desc) desc.textContent = t('handoff.desc');
+}
+
 function openHandoff(ns) {
   handoffNs = ns;
-  $('#handoff-title').textContent = `退出并交接 · ${ns}`;
-  $('#handoff-desc').textContent =
-    '退出并交接：本机彻底清理该记忆域数据与水位（无 tombstone；__policy__ 保留）。清理前必须继任者全量 ack；门禁不过则中止。如需再次订阅并从头重发，需本机重新订阅该记忆域。';
+  renderHandoffCopy();
   $('#handoff-successor').value = '';
   $('#handoff-result').hidden = true;
   $('#handoff-result').textContent = '';
@@ -903,7 +915,7 @@ async function runHandoffPlan() {
     $('#handoff-confirm').disabled = plan?.ok !== true;
   } catch (error) {
     pre.hidden = false;
-    pre.textContent = `预检失败：${error.message}`;
+    pre.textContent = t('handoff.planFailed', { message: error.message });
     $('#handoff-confirm').disabled = true;
   }
 }
@@ -913,18 +925,20 @@ async function confirmHandoff() {
   const successor = ($('#handoff-successor').value ?? '').trim();
   if (!ns || !successor) return;
   const ok = await confirmModal({
-    title: `退出并交接 ${ns}`,
-    body: `将把「${ns}」交接给 ${successor}，并从本机彻底清理该记忆域数据（不可撤销）；已同步给别人的不回撤。确定继续？`,
-    confirmLabel: '退出并清理',
+    title: t('handoff.confirmTitle', { namespace: ns }),
+    body: t('handoff.confirmBody', { namespace: ns, successor }),
+    confirmLabel: t('handoff.confirmLabel'),
   });
   if (!ok) return;
   try {
     const result = await api(`/admin/api/namespaces/${encodeURIComponent(ns)}/leave`, { method: 'POST', body: { successor } });
-    showToast(result?.ok ? `已退出并清理「${ns}」` : `交接中止：${result?.reason ?? '未满足门禁'}`);
+    showToast(result?.ok
+      ? t('handoff.toast.done', { namespace: ns })
+      : t('handoff.toast.aborted', { reason: result?.reason ?? t('handoff.abortedFallback') }));
     $('#handoff').hidden = true;
     await refresh();
   } catch (error) {
-    window.alert(`操作失败：${error.message}`);
+    window.alert(t('common.operationFailed', { message: error.message }));
   }
 }
 
@@ -2498,7 +2512,7 @@ async function saveDeviceRename() {
   if (!state.deviceRename) return;
   const name = String(state.deviceRename.name ?? '').trim();
   if (name.length === 0) {
-    state.deviceRenameError = '设备名不能为空。';
+    state.deviceRenameError = t('about.identity.nameEmpty');
     renderAbout();
     return;
   }
@@ -2509,7 +2523,7 @@ async function saveDeviceRename() {
     state.deviceRename = null;
     await refresh();
     renderAbout();
-    showToast(`设备名已改为「${name}」；会同步到同一忆云的其他设备。`);
+    showToast(t('about.identity.renameSuccess', { name }));
   } catch (error) {
     state.deviceRenameError = error?.payload?.message ?? error?.message ?? String(error);
     renderAbout();
@@ -2523,12 +2537,12 @@ function renderAbout() {
     const status = state.provision ?? {};
     body.innerHTML = `
       <section class="settings-section" data-info-block="locked">
-        <h3>本机尚未初始化 <span class="badge badge-muted">锁定</span></h3>
-        <p class="muted" style="font-size:12px;line-height:1.7;margin:0 0 8px">新建或加入忆云后，这里会显示身份、存储与运行状态；当前不展示任何猜测数据。</p>
+        <h3>${escapeHtml(t('about.locked.title'))} <span class="badge badge-muted">${escapeHtml(t('about.locked.tag'))}</span></h3>
+        <p class="muted" style="font-size:12px;line-height:1.7;margin:0 0 8px">${escapeHtml(t('about.locked.desc'))}</p>
         ${kvRows([
-          kvRow('阶段', escapeHtml(String(status.phase ?? 'UNINITIALIZED'))),
-          kvRow('家目录', `<code>${escapeHtml(String(status.home ?? '—'))}</code>`),
-          kvRow('默认设备名', escapeHtml(String(status.defaultDeviceName ?? status.hostname ?? '—'))),
+          kvRow(t('about.identity.phase'), escapeHtml(String(status.phase ?? 'UNINITIALIZED'))),
+          kvRow(t('about.identity.home'), `<code>${escapeHtml(String(status.home ?? '—'))}</code>`),
+          kvRow(t('about.identity.defaultDeviceName'), escapeHtml(String(status.defaultDeviceName ?? status.hostname ?? '—'))),
         ])}
       </section>
     `;
@@ -2553,7 +2567,7 @@ function renderAbout() {
   lastAboutSignature = signature;
   const s = state.settings;
   if (!s) {
-    body.innerHTML = '<p class="muted">关于本机加载中…（若持续如此，检查 serve 是否运行）</p>';
+    body.innerHTML = `<p class="muted">${escapeHtml(t('about.loading'))}</p>`;
     return;
   }
   rebuildConfigFields();
@@ -2565,38 +2579,38 @@ function renderAbout() {
   });
   const addrRows = s.identity.multiaddrs.length
     ? s.identity.multiaddrs.map((a) => copyRowOf('multiaddr', a))
-    : [emptyRowOf('multiaddr', '（未启用 P2P，无监听地址）')];
+    : [emptyRowOf('multiaddr', t('about.identity.noMultiaddrs'))];
   const writes = state.features.writes && !MOCK;
   const renamingDevice = state.deviceRename !== null;
   const deviceName = s.identity.name ?? '';
   const deviceNameRow = renamingDevice
-    ? kvRow('设备名', `<span class="device-rename-inline">
+    ? kvRow(t('about.identity.deviceName'), `<span class="device-rename-inline">
         <input class="crt-input device-rename-input" data-device-rename-input type="text" maxlength="24"
-          value="${escapeHtml(state.deviceRename?.name ?? deviceName)}" aria-label="设备名" />
-        <button class="btn btn-small btn-crt" data-device-rename-save type="button" ${writes ? '' : 'disabled'}>保存</button>
-        <button class="btn btn-small" data-device-rename-cancel type="button">取消</button>
+          value="${escapeHtml(state.deviceRename?.name ?? deviceName)}" aria-label="${escapeHtml(t('about.identity.deviceNameAria'))}" />
+        <button class="btn btn-small btn-crt" data-device-rename-save type="button" ${writes ? '' : 'disabled'}>${escapeHtml(t('common.save'))}</button>
+        <button class="btn btn-small" data-device-rename-cancel type="button">${escapeHtml(t('common.cancel'))}</button>
       </span>${state.deviceRenameError ? `<span class="crt-warn device-rename-error" role="alert">${escapeHtml(state.deviceRenameError)}</span>` : ''}`)
-    : kvRow('设备名', `${deviceName
+    : kvRow(t('about.identity.deviceName'), `${deviceName
       ? `<span class="device-name-value">${escapeHtml(deviceName)}</span>`
-      : '<span class="kv-empty">未设置（列表按 deviceId 显示）</span>'}
-      <button class="btn btn-small btn-crt" data-device-rename type="button" ${writes ? '' : 'disabled'}>改名</button>
-      <span class="cfg-help muted">只有本人可改；会同步到同一忆云的其他设备，不重签证书。</span>`);
+      : `<span class="kv-empty">${escapeHtml(t('about.identity.nameUnset'))}</span>`}
+      <button class="btn btn-small btn-crt" data-device-rename type="button" ${writes ? '' : 'disabled'}>${escapeHtml(t('about.identity.rename'))}</button>
+      <span class="cfg-help muted">${escapeHtml(t('about.identity.renameNote'))}</span>`);
   body.innerHTML = `
     <section class="settings-section" data-info-block="identity">
-      <h3>身份与存储 <span class="badge badge-muted">身份只读 · 设备名可改</span></h3>
+      <h3>${escapeHtml(t('about.identity.title'))} <span class="badge badge-muted">${escapeHtml(t('about.identity.tag'))}</span></h3>
       ${kvRows([
         copyRowOf('deviceId', s.identity.deviceId),
         deviceNameRow,
-        kvRow('身份模式', s.identity.mode === 'delegated'
-          ? 'delegated（委派证书链，无主私钥）'
-          : 'root（持有用户主密钥，可为任意设备颁发证书）'),
+        kvRow(t('about.identity.mode'), s.identity.mode === 'delegated'
+          ? t('about.identity.modeDelegated')
+          : t('about.identity.modeRoot')),
         ...(s.identity.peerId ? [copyRowOf('peerId', s.identity.peerId)] : []),
         ...addrRows,
         copyRowOf('storagePath', s.storage.path ?? '—'),
-        copyRowOf('配置文件', configPath),
-        kvRow('写盘备份', `<code>${escapeHtml(configPath)}.bak</code><span class="muted">（每次写入前自动保留）</span>`),
+        copyRowOf(t('about.identity.configFile'), configPath),
+        kvRow(t('about.identity.backup'), `<code>${escapeHtml(configPath)}.bak</code><span class="muted">${escapeHtml(t('about.identity.backupNote'))}</span>`),
         kvRow('storageAdapter', escapeHtml(s.storage.adapter)),
-        kvRow('加密级别', `${escapeHtml(s.encryption.level)}${s.encryption.atRest ? '（静态加密生效）' : ''}`),
+        kvRow(t('about.identity.encryption'), `${escapeHtml(s.encryption.level)}${s.encryption.atRest ? escapeHtml(t('about.identity.atRest')) : ''}`),
       ])}
     </section>
 
@@ -2606,7 +2620,7 @@ function renderAbout() {
       <summary>${escapeHtml(foldLabel('about-runtime'))}</summary>
       <div class="settings-fold-body">
     <section class="settings-section" data-info-block="syncRate">
-      <h3>同步节奏 <span class="badge badge-muted">只读 · 默认常开，不建议关闭</span></h3>
+      <h3>${escapeHtml(t('about.syncRate.title'))} <span class="badge badge-muted">${escapeHtml(t('about.syncRate.tag'))}</span></h3>
       ${kvRows(statusRows().filter((row) => row.path === 'sync.autoSync' || row.path === 'sync.pushOnWrite').map((row) => kvRow(
         row.label ?? row.path,
         valueWithEffective(escapeHtml(formatRuntimeValue(row.actual)), {
@@ -2615,86 +2629,103 @@ function renderAbout() {
           reason: row.reason,
         }),
       )))}
-      <p class="muted" style="font-size:11px">默认常开，不建议关闭；如需改动请手工编辑 config.json 的 <code>sync.autoSync</code> / <code>sync.pushOnWrite</code>。</p>
+      <p class="muted" style="font-size:11px">${t('about.syncRate.note')}</p>
     </section>
 
     <section class="settings-section" data-info-block="statusOnly">
-      <h3>只读状态（自动推导） <span class="badge badge-muted">只读</span></h3>
-      <p class="muted" style="font-size:11px;margin:0 0 8px">这些项由运行时自动决定（relay 池 / LAN 发现 / 桥 / 打洞 / 广播 / join / TLS）：控制台只展示真值与原因，不提供编辑。</p>
+      <h3>${escapeHtml(t('about.statusOnly.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
+      <p class="muted" style="font-size:11px;margin:0 0 8px">${escapeHtml(t('about.statusOnly.desc'))}</p>
       ${kvRows(statusRows().filter((row) => row.path !== 'sync.autoSync' && row.path !== 'sync.pushOnWrite').map((row) => kvRow(
         row.label ?? row.path,
-        `${escapeHtml(formatRuntimeValue(row.actual))}${row.reason && row.reason !== '已生效' ? `<span class="cfg-reason"><span class="cfg-eff-key">未生效原因</span> ${escapeHtml(row.reason)}</span>` : ''}`,
+        `${escapeHtml(formatRuntimeValue(row.actual))}${row.reason && row.reason !== '已生效' ? `<span class="cfg-reason"><span class="cfg-eff-key">${escapeHtml(t('settings.editor.reasonKey'))}</span> ${escapeHtml(row.reason)}</span>` : ''}`,
       )))}
     </section>
 
     <section class="settings-section" data-info-block="runtime">
-      <h3>运行状态 <span class="badge badge-muted">只读</span>${pendingRestartBadge()}${listenAlarm.length ? '<span class="crt-tag crt-tag-warn">公网监听</span>' : ''}</h3>
+      <h3>${escapeHtml(t('about.runtime.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span>${pendingRestartBadge()}${listenAlarm.length ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('about.runtime.publicListen'))}</span>` : ''}</h3>
       ${kvRows([
         ...(pendingRestartItems().length > 0
-          ? [kvRow('待重启', `${pendingRestartItems().length} 项配置改动已保存但未生效（当前实例按上次启动配置工作，重启后生效）`)]
+          ? [kvRow(t('about.runtime.pendingRestart'), t('about.runtime.pendingRestartBody', { count: pendingRestartItems().length }))]
           : []),
-        kvRow('P2P', s.network.enabled ? '已启用' : '未启用'),
-        kvRow('实际监听', escapeHtml(s.network.listen.join(', ') || '—')),
-        kvRow('MCP 监听', `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`),
+        kvRow('P2P', s.network.enabled ? t('settings.common.enabled') : t('settings.common.disabled')),
+        kvRow(t('about.runtime.listen'), escapeHtml(s.network.listen.join(', ') || '—')),
+        kvRow(t('about.runtime.mcpListen'), `${escapeHtml(s.mcp.host)}:${escapeHtml(String(s.mcp.port))} · auth=${escapeHtml(s.mcp.auth)}`),
         // R-1 中-5：常驻 plist 全路径从连接页卡片收编到这里
-        ...(state.service?.unitPath ? [kvRow('常驻服务文件', `<code>${escapeHtml(state.service.unitPath)}</code>`)] : []),
-        kvRow('TLS', s.mcp.tls ? `已启用（key=${s.mcp.tlsKeyConfigured ? '有' : '缺'} / cert=${s.mcp.tlsCertConfigured ? '有' : '缺'}）` : '未启用（明文 HTTP）'),
-        kvRow('加入服务', s.join?.enabled ? `已启用 · ${escapeHtml(String(s.join.bind))}:${escapeHtml(String(s.join.port))}` : '未启用'),
-        kvRow('语义召回', `${s.semantic.enabled ? '已启用' : '未启用'}（minScore ${s.semantic.minScore}）`),
+        ...(state.service?.unitPath ? [kvRow(t('about.runtime.serviceUnit'), `<code>${escapeHtml(state.service.unitPath)}</code>`)] : []),
+        kvRow('TLS', s.mcp.tls
+          ? t('about.runtime.tlsOn', {
+            key: s.mcp.tlsKeyConfigured ? t('about.runtime.present') : t('about.runtime.missing'),
+            cert: s.mcp.tlsCertConfigured ? t('about.runtime.present') : t('about.runtime.missing'),
+          })
+          : t('about.runtime.tlsOff')),
+        kvRow(t('about.runtime.joinService'), s.join?.enabled
+          ? t('about.runtime.joinOn', { bind: escapeHtml(String(s.join.bind)), port: escapeHtml(String(s.join.port)) })
+          : t('settings.common.disabled')),
+        kvRow(t('about.runtime.semantic'), t('about.runtime.semanticValue', {
+          state: s.semantic.enabled ? t('settings.common.enabled') : t('settings.common.disabled'),
+          score: s.semantic.minScore,
+        })),
         // C6：内建 relay 角色（只读；桥的选举自动完成，此处仅展示）
-        kvRow('本机当桥', s.relay ? `${s.relay.serving ? '开' : '关'}（${escapeHtml(String(s.relay.reason ?? '—'))}）` : '—'),
-        kvRow('当前经桥', s.relay?.bridge
+        kvRow(t('about.runtime.relay'), s.relay
+          ? t('about.runtime.relayValue', {
+            state: s.relay.serving ? t('about.runtime.on') : t('about.runtime.off'),
+            reason: escapeHtml(String(s.relay.reason ?? '—')),
+          })
+          : '—'),
+        kvRow(t('about.runtime.bridge'), s.relay?.bridge
           ? `<code>${escapeHtml(String(s.relay.bridge.address))}</code> <span class="muted">· ${escapeHtml(String(s.relay.bridge.peer))}</span>`
-          : '未经桥（直连 / LAN）'),
-        kvRow('桥白名单', s.relay ? `${s.relay.allowedClients ?? 0} 个已配对对端` : '—'),
+          : t('about.runtime.bridgeNone')),
+        kvRow(t('about.runtime.bridgeAllowed'), s.relay
+          ? t('about.runtime.bridgeAllowedValue', { count: s.relay.allowedClients ?? 0 })
+          : '—'),
         // C5：地址自动广播（只读；提示类信息，不影响订阅）
-        kvRow('地址广播', s.net
-          ? `${s.net.enabled ? `${escapeHtml(String(s.net.mode))} 档` : '未开启（opt-in：把 __net__ 加入 sync.namespaces 或配置 network.broadcast）'} · 已发布 ${s.net.published} · 已采用 ${s.net.applied}`
+        kvRow(t('about.runtime.broadcast'), s.net
+          ? `${s.net.enabled ? t('about.runtime.broadcastMode', { mode: escapeHtml(String(s.net.mode)) }) : t('about.runtime.broadcastOff')}${t('about.runtime.broadcastStats', { published: s.net.published, applied: s.net.applied })}`
           : '—'),
         // C4：NAT 穿透（只读）
-        kvRow('NAT 打洞', s.nat
-          ? `${s.nat.dcutrEnabled ? 'DCUtR 开' : 'DCUtR 关'} · ${s.nat.autonatEnabled ? 'AutoNAT 开' : 'AutoNAT 关'} · 直连升级 ${s.nat.directUpgrades ?? 0} 次${s.nat.loadError ? ` ⚠ ${escapeHtml(String(s.nat.loadError))}` : ''}`
-          : '未启用（libp2p 未装配）'),
-        kvRow('广播忽略', s.net && Object.values(s.net.ignored ?? {}).some((v) => v > 0)
+        kvRow(t('about.runtime.nat'), s.nat
+          ? `${s.nat.dcutrEnabled ? t('about.runtime.dcutrOn') : t('about.runtime.dcutrOff')} · ${s.nat.autonatEnabled ? t('about.runtime.autonatOn') : t('about.runtime.autonatOff')} · ${t('about.runtime.natUpgrades', { count: s.nat.directUpgrades ?? 0 })}${s.nat.loadError ? ` ⚠ ${escapeHtml(String(s.nat.loadError))}` : ''}`
+          : t('about.runtime.natOff')),
+        kvRow(t('about.runtime.ignored'), s.net && Object.values(s.net.ignored ?? {}).some((v) => v > 0)
           ? escapeHtml(Object.entries(s.net.ignored).filter(([, v]) => v > 0).map(([k, v]) => `${k} ${v}`).join(' / '))
-          : '无'),
+          : t('common.none')),
       ])}
-      ${listenAlarm.length ? `<p class="crt-warn">⚠ 监听地址含非回环（${escapeHtml(listenAlarm.join(', '))}）：建议改绑回环 / LAN，或经 relay 并仅以防火墙放行已入网设备。</p>` : ''}
+      ${listenAlarm.length ? `<p class="crt-warn">${escapeHtml(t('about.runtime.listenAlarm', { addresses: listenAlarm.join(', ') }))}</p>` : ''}
     </section>
 
     <section class="settings-section" data-info-block="paths">
-      <h3>对端连接路径 <span class="badge badge-muted">只读 · core 地址簿</span></h3>
+      <h3>${escapeHtml(t('about.paths.title'))} <span class="badge badge-muted">${escapeHtml(t('about.paths.tag'))}</span></h3>
       ${(() => {
         const peers = s.peers ?? { enabled: false, paths: [] };
-        if (!peers.enabled) return '<p class="muted" style="font-size:11px">地址簿未启用（network.autoConnect=false 或 network.enabled=false）。</p>';
-        if (peers.paths.length === 0) return '<p class="muted" style="font-size:11px">地址簿暂无记录：等待配对 hints（邀请令牌）或对端首次连通。</p>';
+        if (!peers.enabled) return `<p class="muted" style="font-size:11px">${escapeHtml(t('about.paths.disabled'))}</p>`;
+        if (peers.paths.length === 0) return `<p class="muted" style="font-size:11px">${escapeHtml(t('about.paths.empty'))}</p>`;
         return `<ul class="path-list">${peers.paths.map((p) => `<li class="path-row">
           <span class="path-key"><code>${escapeHtml(p.key)}</code></span>
           <span class="path-value">${p.connected
-            ? `<span class="path-kind path-kind-${escapeHtml(String(p.kind ?? 'unknown'))}">${escapeHtml(String(p.kind ?? '未知'))}</span> <code>${escapeHtml(String(p.address ?? '—'))}</code> <span class="muted">${p.since ? `最近切换 ${formatTime(p.since)}` : ''}</span>`
-            : `<span class="muted">未连接</span>${p.lastError ? ` <span class="crt-warn">⚠ ${escapeHtml(String(p.lastError))}</span>` : ''}`} <span class="muted">· 候选 ${p.candidates}</span></span>
+            ? `<span class="path-kind path-kind-${escapeHtml(String(p.kind ?? 'unknown'))}">${escapeHtml(String(p.kind ?? t('common.unknown')))}</span> <code>${escapeHtml(String(p.address ?? '—'))}</code> <span class="muted">${p.since ? escapeHtml(t('about.paths.switched', { time: formatTime(p.since) })) : ''}</span>`
+            : `<span class="muted">${escapeHtml(t('common.notConnected'))}</span>${p.lastError ? ` <span class="crt-warn">⚠ ${escapeHtml(String(p.lastError))}</span>` : ''}`} <span class="muted">· ${escapeHtml(t('about.paths.candidates', { count: p.candidates }))}</span></span>
         </li>`).join('')}</ul>`;
       })()}
-      <p class="muted" style="font-size:11px">路径由 core 候选地址簿维护（direct &gt; lan &gt; relay，失败自动换候选并退避重试）；此处仅展示，不改变订阅。</p>
+      <p class="muted" style="font-size:11px">${escapeHtml(t('about.paths.note'))}</p>
     </section>
 
     <section class="settings-section" data-info-block="fleet">
-      <h3>舰队摘要（Fleet） <span class="badge badge-muted">只读</span></h3>
+      <h3>${escapeHtml(t('about.fleet.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
       ${s.fleet?.configured
         ? kvRows([
-          kvRow('任务域', s.fleet.namespace ? `<code>${escapeHtml(s.fleet.namespace)}</code>` : '(未设置)'),
-          kvRow('已登记对端', String(s.fleet.peers ?? 0)),
-          kvRow('本机 Agent', String(s.fleet.agents ?? 0)),
-          kvRow('配置', escapeHtml(s.fleet.path ?? 'fleet.config.json')),
+          kvRow(t('about.fleet.namespace'), s.fleet.namespace ? `<code>${escapeHtml(s.fleet.namespace)}</code>` : t('about.fleet.unset')),
+          kvRow(t('about.fleet.peers'), String(s.fleet.peers ?? 0)),
+          kvRow(t('about.fleet.agents'), String(s.fleet.agents ?? 0)),
+          kvRow(t('about.fleet.config'), escapeHtml(s.fleet.path ?? 'fleet.config.json')),
         ])
-        : '<p class="muted" style="font-size:11px">尚未配置舰队。</p>'}
-      <p class="muted" style="font-size:11px">任务面 ≠ 记忆域：任务树以发起节点为根派发，远端 Agent 执行后回传结果（有向无环树；经记忆通道传输，但不是共享记忆池）。任务配置由 <code>fleet</code> CLI 管理（<code>fleet.config.json</code>）。${s.fleet?.configured ? '' : ' 上车：<code>fleet quickstart --daemon --dir ~/.mebular --device &lt;ID&gt;</code>'}</p>
+        : `<p class="muted" style="font-size:11px">${escapeHtml(t('about.fleet.empty'))}</p>`}
+      <p class="muted" style="font-size:11px">${t('about.fleet.note')}${s.fleet?.configured ? '' : t('about.fleet.onboard')}</p>
     </section>
 
     <section class="settings-section" data-info-block="tools">
-      <h3>能力清单 <span class="badge badge-muted">${(s.tools ?? []).length} 工具 · MCP = CLI 同名</span></h3>
-      <p class="muted" style="font-size:11px;margin:0 0 8px">Agent 经 MCP、人类经 <code>mebular &lt;name&gt;</code> 调用同一套 handler；GUI 只做守护与订阅配置，不新增操作。</p>
-      <div class="chip-wrap">${(s.tools ?? []).map((t) => `<span class="crt-tag">${escapeHtml(t)}</span>`).join(' ')}</div>
+      <h3>${escapeHtml(t('about.tools.title'))} <span class="badge badge-muted">${escapeHtml(t('about.tools.tag', { count: (s.tools ?? []).length }))}</span></h3>
+      <p class="muted" style="font-size:11px;margin:0 0 8px">${t('about.tools.note')}</p>
+      <div class="chip-wrap">${(s.tools ?? []).map((tool) => `<span class="crt-tag">${escapeHtml(tool)}</span>`).join(' ')}</div>
     </section>
       </div>
     </details>
@@ -2893,28 +2924,33 @@ function memQuery() {
 }
 
 function memActionLabel(action) {
-  return { archive: '归档', unarchive: '解除归档', delete: '删除' }[action] ?? action;
+  if (action === 'archive') return t('memories.action.archive');
+  if (action === 'unarchive') return t('memories.action.unarchive');
+  if (action === 'delete') return t('memories.action.delete');
+  return action;
 }
 
 async function memAction(id, action) {
   if (MOCK) {
-    window.alert('mock 模式不执行写操作。');
+    window.alert(t('common.mockReadOnly'));
     return;
   }
   if (action === 'delete') {
     const ok = await confirmModal({
-      title: '删除记忆（不可逆）',
-      body: `将删除 ${id}：写墓碑并随图同步，删除后默认不再召回。\n注意：对端已拷贝的旧快照无法强制回收。确定？`,
-      confirmLabel: '删除',
+      title: t('memories.delete.title'),
+      body: t('memories.delete.body', { id }),
+      confirmLabel: t('memories.action.delete'),
     });
     if (!ok) return;
   }
   try {
     await api(`/admin/api/memories/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: {} });
-    showToast(action === 'delete' ? `已删除 ${id}` : action === 'archive' ? `已归档 ${id}` : `已解除归档 ${id}`);
+    showToast(action === 'delete'
+      ? t('memories.toast.deleted', { id })
+      : action === 'archive' ? t('memories.toast.archived', { id }) : t('memories.toast.unarchived', { id }));
     await refresh();
   } catch (error) {
-    window.alert(`操作失败：${error.message}`);
+    window.alert(t('common.operationFailed', { message: error.message }));
   }
 }
 
@@ -2923,7 +2959,7 @@ function populateMemFilters() {
   if (!select) return;
   const current = state.memoryFilters.namespace;
   const names = [...new Set((state.namespaces ?? []).map((n) => n.namespace))].sort();
-  select.innerHTML = '<option value="">全部域</option>'
+  select.innerHTML = `<option value="">${escapeHtml(t('memories.filter.allNamespaces'))}</option>`
     + names.map((name) => `<option value="${escapeHtml(name)}"${name === current ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('');
 }
 
@@ -2937,25 +2973,25 @@ function renderMemories() {
   populateMemFilters();
   const data = state.memories;
   if (!data) {
-    list.innerHTML = '<p class="muted">记忆加载中…</p>';
+    list.innerHTML = `<p class="muted">${escapeHtml(t('memories.loading'))}</p>`;
     return;
   }
   if (data.memories.length === 0) {
-    list.innerHTML = `<p class="muted">没有匹配的记忆（默认不显示已删除/已归档；共 ${data.total} 条）。</p>`;
+    list.innerHTML = `<p class="muted">${escapeHtml(t('memories.empty', { total: data.total }))}</p>`;
     return;
   }
   list.innerHTML = data.memories.map((memory) => {
     const badges = [
-      memory.archived ? '<span class="crt-tag crt-tag-warn">已归档</span>' : '',
-      memory.deleted ? '<span class="crt-tag crt-tag-error">已删除</span>' : '',
+      memory.archived ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('memories.badge.archived'))}</span>` : '',
+      memory.deleted ? `<span class="crt-tag crt-tag-error">${escapeHtml(t('memories.badge.deleted'))}</span>` : '',
     ].filter(Boolean).join(' ');
     const canArchive = state.features.writes && !memory.deleted;
     const actions = [
       canArchive
-        ? `<button class="btn btn-small btn-crt" type="button" data-mem-action="${memory.archived ? 'unarchive' : 'archive'}" data-mem-id="${escapeHtml(memory.id)}">${memory.archived ? '解除归档' : '归档'}</button>`
+        ? `<button class="btn btn-small btn-crt" type="button" data-mem-action="${memory.archived ? 'unarchive' : 'archive'}" data-mem-id="${escapeHtml(memory.id)}">${escapeHtml(memory.archived ? t('memories.action.unarchive') : t('memories.action.archive'))}</button>`
         : '',
       !memory.deleted && state.features.writes
-        ? `<button class="btn btn-small btn-crt" type="button" data-mem-action="delete" data-mem-id="${escapeHtml(memory.id)}">删除</button>`
+        ? `<button class="btn btn-small btn-crt" type="button" data-mem-action="delete" data-mem-id="${escapeHtml(memory.id)}">${escapeHtml(t('memories.action.delete'))}</button>`
         : '',
     ].filter(Boolean).join(' ');
     return `<article class="mem-row crt-surface" data-mem-row="${escapeHtml(memory.id)}">
@@ -2966,8 +3002,8 @@ function renderMemories() {
           ${badges}
           <code class="mem-id">${escapeHtml(memory.id)}</code>
         </div>
-        <p class="mem-preview">${escapeHtml(memory.preview || '（空）')}</p>
-        <p class="muted mem-meta">创建 ${formatTime(memory.createdAt)}${memory.archivedAt ? ` · 归档 ${formatTime(memory.archivedAt)}` : ''}${memory.deletedAt ? ` · 删除 ${formatTime(memory.deletedAt)}` : ''}</p>
+        <p class="mem-preview">${escapeHtml(memory.preview || t('memories.emptyPreview'))}</p>
+        <p class="muted mem-meta">${escapeHtml(t('memories.meta.created', { time: formatTime(memory.createdAt) }))}${memory.archivedAt ? escapeHtml(t('memories.meta.archived', { time: formatTime(memory.archivedAt) })) : ''}${memory.deletedAt ? escapeHtml(t('memories.meta.deleted', { time: formatTime(memory.deletedAt) })) : ''}</p>
       </div>
       <div class="mem-actions">${actions}</div>
     </article>`;
@@ -3010,7 +3046,7 @@ function renderOverlays() {
   const items = attentionItems({ clients: state.clients, ui: state, devices: state.devices, selfId, security: state.security });
   card.hidden = !onMap || items.length === 0;
   if (onMap && items.length > 0) {
-    card.innerHTML = `<h3>需要注意</h3><ul>${items.map((it) =>
+    card.innerHTML = `<h3>${escapeHtml(t('attention.title'))}</h3><ul>${items.map((it) =>
       `<li><button class="attention-item" type="button" data-attention-action="${escapeHtml(it.action)}" data-attention-id="${escapeHtml(it.id)}">${escapeHtml(it.label)} ›</button></li>`).join('')}</ul>`;
   } else {
     // 注意项退场时同步清空隐藏卡：hidden 只负责视觉，残留文案仍会被读屏/验收读到。
@@ -3225,7 +3261,7 @@ function renderAudit() {
     return true;
   });
   if (events.length === 0) {
-    list.innerHTML = '<li class="muted">没有匹配的政策事件。</li>';
+    list.innerHTML = `<li class="muted">${escapeHtml(t('audit.empty'))}</li>`;
     return;
   }
   list.innerHTML = events.map((event) => auditItemHtml(event)).join('');
@@ -3246,7 +3282,7 @@ function auditItemHtml(event) {
   return `<li class="audit-item${event.valid ? '' : ' invalid'}">
     <span class="audit-time">${escapeHtml(formatTime(event.at))}</span>
     <span class="audit-action ${actionClass}">${escapeHtml(actionLabel(event.type))}</span>
-    <span class="audit-detail">${describeEvent(event)}${event.rejectReason ? ` · <span class="crt-warn">被拒绝：${escapeHtml(securityReasonLabel(event.rejectReason))}</span>` : ''}</span>
+    <span class="audit-detail">${describeEvent(event)}${event.rejectReason ? ` · <span class="crt-warn">${escapeHtml(t('audit.rejected', { reason: securityReasonLabel(event.rejectReason) }))}</span>` : ''}</span>
   </li>`;
 }
 
@@ -3277,73 +3313,110 @@ function populateAuditFilters() {
 }
 
 function actionLabel(type) {
-  if (type === 'namespace_subscription') return '订阅变更';
-  if (type === 'namespace_declare') return '域公告';
-  if (type === 'device_revoke') return '移出设备';
-  if (type === 'device_restore') return '恢复设备';
-  if (type === 'namespace_handoff') return '退出并交接';
-  if (type === 'security_tier') return '安全等级变更';
-  if (type === 'security_approval') return '设备会签';
-  if (type === 'security_recovery') return '恢复码';
-  if (type === 'security_totp') return '动态码';
+  if (type === 'namespace_subscription') return t('audit.type.subscription');
+  if (type === 'namespace_declare') return t('audit.type.declare');
+  if (type === 'device_revoke') return t('audit.type.deviceRevoke');
+  if (type === 'device_restore') return t('audit.type.deviceRestore');
+  if (type === 'namespace_handoff') return t('audit.type.handoff');
+  if (type === 'security_tier') return t('audit.type.securityTier');
+  if (type === 'security_approval') return t('audit.type.securityApproval');
+  if (type === 'security_recovery') return t('audit.type.securityRecovery');
+  if (type === 'security_totp') return t('audit.type.securityTotp');
   return type;
 }
 
 function describeEvent(event) {
+  const cosign = event.cosignApprover
+    ? t('audit.event.cosign', { approver: `<b>${escapeHtml(event.cosignApprover)}</b>` })
+    : '';
+  const recoveryCode = event.breakGlassKeyId
+    ? t('audit.event.recoveryCode', { keyId: escapeHtml(String(event.breakGlassKeyId).slice(0, 8)) })
+    : '';
+  const invalid = event.valid ? '' : t('audit.event.invalid');
   if (event.type === 'namespace_subscription') {
     const ns = `<span class="ns-chip" style="background:${namespaceColor(event.namespace ?? 'default')}">${escapeHtml(event.namespace ?? 'default')}</span>`;
-    return `<b>${escapeHtml(event.issuer === event.subject ? '本机' : event.subject)}</b> ${event.active === false ? '退订' : '订阅'} ${ns}`
-      + `${event.cosignApprover ? ` · 会签：<b>${escapeHtml(event.cosignApprover)}</b>` : ''}`
-      + `${event.valid ? '' : ' · 未生效'}`;
+    const actor = escapeHtml(event.issuer === event.subject ? t('common.self') : event.subject);
+    return t('audit.event.subscription', {
+      actor: `<b>${actor}</b>`,
+      verb: event.active === false ? t('audit.event.unsubscribe') : t('audit.event.subscribe'),
+      namespace: ns,
+      extra: `${cosign}${invalid}`,
+    });
   }
   if (event.type === 'namespace_declare') {
     const ns = `<span class="ns-chip" style="background:${namespaceColor(event.namespace ?? 'default')}">${escapeHtml(event.namespace ?? 'default')}</span>`;
-    return `声明者 <b>${escapeHtml(event.issuer)}</b> 公告记忆域 ${ns}`;
+    return t('audit.event.declare', { issuer: `<b>${escapeHtml(event.issuer)}</b>`, namespace: ns });
   }
   if (event.type === 'device_restore') {
-    return `记录者 <b>${escapeHtml(event.issuer)}</b> 恢复设备 <b>${escapeHtml(event.subject)}</b>（旧纪元策略记录不复活）`
-      + `${event.cosignApprover ? ` · 会签：<b>${escapeHtml(event.cosignApprover)}</b>` : ''}`
-      + `${event.breakGlassKeyId ? ` · <span class="crt-warn">恢复码 ${escapeHtml(String(event.breakGlassKeyId).slice(0, 8))}</span>` : ''}`
-      + `${event.valid ? '' : ' · 未生效'}`;
+    return t('audit.event.restore', {
+      issuer: `<b>${escapeHtml(event.issuer)}</b>`,
+      subject: `<b>${escapeHtml(event.subject)}</b>`,
+      extra: `${cosign}${recoveryCode}${invalid}`,
+    });
   }
   if (event.type === 'device_revoke') {
-    return `记录者 <b>${escapeHtml(event.issuer)}</b> 移出设备 <b>${escapeHtml(event.subject)}</b>（本机不再采纳其政策记录）`
-      + `${event.cosignApprover ? ` · 会签：<b>${escapeHtml(event.cosignApprover)}</b>` : ''}`
-      + `${event.breakGlassKeyId ? ` · <span class="crt-warn">恢复码 ${escapeHtml(String(event.breakGlassKeyId).slice(0, 8))}</span>` : ''}`
-      + `${event.valid ? '' : ' · 未生效'}`;
+    return t('audit.event.revoke', {
+      issuer: `<b>${escapeHtml(event.issuer)}</b>`,
+      subject: `<b>${escapeHtml(event.subject)}</b>`,
+      extra: `${cosign}${recoveryCode}${invalid}`,
+    });
   }
   if (event.type === 'security_tier') {
     const from = event.fromLevel ? securityLevelLabel(event.fromLevel) : '—';
     const to = securityLevelLabel(event.level);
-    return `记录者 <b>${escapeHtml(event.issuer)}</b> 将安全等级 <b>${escapeHtml(from)} → ${escapeHtml(to)}</b>`
-      + `${event.cosignApprover ? ` · 会签：<b>${escapeHtml(event.cosignApprover)}</b>` : ''}`
-      + `${event.breakGlassKeyId ? ` · <span class="crt-warn">恢复码 ${escapeHtml(String(event.breakGlassKeyId).slice(0, 8))}</span>` : ''}`;
+    return t('audit.event.tier', {
+      issuer: `<b>${escapeHtml(event.issuer)}</b>`,
+      from: `<b>${escapeHtml(from)} → ${escapeHtml(to)}</b>`,
+      extra: `${cosign}${recoveryCode}`,
+    });
   }
   if (event.type === 'security_approval') {
-    const decision = event.decision === 'approve' ? '批准' : event.decision === 'deny' ? '拒绝' : '请求';
-    const pair = event.pairingCode ? ` · 配对号 <code>${escapeHtml(event.pairingCode)}</code>` : '';
+    const decision = event.decision === 'approve'
+      ? t('audit.event.decision.approve')
+      : event.decision === 'deny' ? t('audit.event.decision.deny') : t('audit.event.decision.request');
+    const pair = event.pairingCode ? t('audit.event.pairing', { code: escapeHtml(event.pairingCode) }) : '';
+    const op = escapeHtml(securityOpText(event));
     if (event.decision === 'deny') {
-      return `设备会签：<b>${escapeHtml(securityOpText(event))}</b> 已被拒绝${pair}`;
+      return t('audit.event.approvalDeny', { op, pair });
     }
     if (event.decision === 'approve') {
-      return `设备会签：批准设备 <b>${escapeHtml(event.issuer)}</b> ${decision} <b>${escapeHtml(securityOpText(event))}</b>${pair}`;
+      return t('audit.event.approvalApprove', {
+        issuer: `<b>${escapeHtml(event.issuer)}</b>`,
+        decision,
+        op: `<b>${op}</b>`,
+        pair,
+      });
     }
-    return `设备会签：发起设备 <b>${escapeHtml(event.initiator)}</b> 请求 <b>${escapeHtml(securityOpText(event))}</b>${pair}`
-      + `${event.expiresAt ? ` · 有效至 ${escapeHtml(formatTime(event.expiresAt))}` : ''}`;
+    return t('audit.event.approvalRequest', {
+      initiator: `<b>${escapeHtml(event.initiator)}</b>`,
+      op: `<b>${op}</b>`,
+      pair,
+      expires: event.expiresAt ? t('audit.event.expires', { time: escapeHtml(formatTime(event.expiresAt)) }) : '',
+    });
   }
   if (event.type === 'security_recovery') {
-    return `恢复码${event.mode === 'rotate' ? '轮换' : '登记'}：<code>${escapeHtml(String(event.keyId ?? '').slice(0, 8))}</code>`
-      + `${event.breakGlassKeyId ? ` · 旧码签名 ${escapeHtml(String(event.breakGlassKeyId).slice(0, 8))}` : ''}`
-      + `${event.cosignApprover ? ` · 会签：${escapeHtml(event.cosignApprover)}` : ''}`;
+    const extra = `${event.breakGlassKeyId ? t('audit.event.oldCode', { keyId: escapeHtml(String(event.breakGlassKeyId).slice(0, 8)) }) : ''}${cosign ? t('audit.event.cosignPlain', { approver: escapeHtml(event.cosignApprover) }) : ''}`;
+    const keyId = escapeHtml(String(event.keyId ?? '').slice(0, 8));
+    return event.mode === 'rotate'
+      ? t('audit.event.recoveryRotate', { keyId, extra })
+      : t('audit.event.recoveryRegister', { keyId, extra });
   }
   if (event.type === 'security_totp') {
-    const action = /show/i.test(String(event.note ?? '')) ? '展示' : '导入';
-    return `设备 <b>${escapeHtml(event.device ?? event.issuer)}</b> ${action}动态码种子 · fingerprint <code>${escapeHtml(event.fingerprint ?? '—')}</code>`;
+    const device = `<b>${escapeHtml(event.device ?? event.issuer)}</b>`;
+    const fingerprint = escapeHtml(event.fingerprint ?? '—');
+    return /show/i.test(String(event.note ?? ''))
+      ? t('audit.event.totpShow', { device, fingerprint })
+      : t('audit.event.totpImport', { device, fingerprint });
   }
   if (event.type === 'namespace_handoff') {
     const ns = `<span class="ns-chip" style="background:${namespaceColor(event.namespace ?? 'default')}">${escapeHtml(event.namespace ?? 'default')}</span>`;
-    return `记录者 <b>${escapeHtml(event.issuer)}</b> 将 ${ns} 交接给 <b>${escapeHtml(event.subject ?? '—')}</b>`
-      + `<span class="muted">${event.forced ? ' · forced' : ''} · 未覆盖 ${event.pendingCount ?? 0}</span>`;
+    return t('audit.event.handoff', {
+      issuer: `<b>${escapeHtml(event.issuer)}</b>`,
+      namespace: ns,
+      subject: `<b>${escapeHtml(event.subject ?? '—')}</b>`,
+      forced: event.forced ? ' · forced' : '',
+      count: event.pendingCount ?? 0,
+    });
   }
   return '';
 }
@@ -3366,13 +3439,19 @@ function peerPathFor(device) {
 // ---------- P3 · 收敛健康（只读；状态来自 /admin/api/devices.convergence） ----------
 
 const CONVERGENCE_STATE_META = {
-  ok: { text: '已收敛', cls: 'crt-tag-ok' },
-  stalled: { text: '停滞', cls: 'crt-tag-error' },
-  diverged: { text: '未收敛', cls: 'crt-tag-error' },
-  unverifiable: { text: '未对账', cls: 'crt-tag-warn' },
-  syncing: { text: '同步中', cls: 'crt-tag-warn' },
-  offline: { text: '未连接', cls: 'is-off' },
+  ok: { key: 'convergence.state.ok', text: '已收敛', cls: 'crt-tag-ok' },
+  stalled: { key: 'convergence.state.stalled', text: '停滞', cls: 'crt-tag-error' },
+  diverged: { key: 'convergence.state.diverged', text: '未收敛', cls: 'crt-tag-error' },
+  unverifiable: { key: 'convergence.state.unverifiable', text: '未对账', cls: 'crt-tag-warn' },
+  syncing: { key: 'convergence.state.syncing', text: '同步中', cls: 'crt-tag-warn' },
+  offline: { key: 'convergence.state.offline', text: '未连接', cls: 'is-off' },
 };
+
+function convergenceStateMeta(state) {
+  const meta = CONVERGENCE_STATE_META[state];
+  if (!meta) return { text: String(state ?? '—'), cls: 'is-off' };
+  return { text: t.has(meta.key) ? t(meta.key) : meta.text, cls: meta.cls };
+}
 
 function fmtClock(at) {
   const d = new Date(at);
@@ -3382,24 +3461,26 @@ function fmtClock(at) {
 
 /** P3：收敛原因 → 人话（与 src/sync/convergence.ts 的 reason code 对齐；只读展示） */
 function convergenceReasonText(reason) {
-  const domains = Array.isArray(reason?.domains) ? reason.domains.join('、') : '';
+  const domains = Array.isArray(reason?.domains) ? reason.domains.join(t('common.listSeparator')) : '';
   switch (reason?.code) {
     case 'fingerprint-mismatch':
       return reason.detail === '策略视图指纹不一致'
-        ? '策略视图指纹不一致'
-        : `${domains || '共同'}的记忆域状态指纹不一致`;
-    case 'session-failures': return `会话连续失败 ${reason.count ?? ''} 次`;
-    case 'no-ack-progress': return '已发出的数据一直未被确认';
-    case 'backlog-mismatch': return `${reason.count ?? 0} 条已发出但水位记账认为无需发送`;
-    case 'keying-drop': return '键控异常（身份缺失的帧被丢弃）';
-    case 'keying-drops': return `键控告警（nudge/stale 丢弃 ${reason.count ?? ''}）`;
-    case 'probe-ineffective': return '自动探测多轮仍未恢复';
-    case 'peer-claims-ahead': return '对端自报超前（本机记账落后，提示）';
-    case 'peer-state-loss': return `对端状态反复回退 ${reason.count ?? ''} 次（提示）`;
-    case 'unknown-event-types': return `收到未知事件类型 ${reason.count ?? ''} 条（日志有、图无）`;
-    case 'no-fingerprints': return '对端未提供状态指纹（旧版本 / 未启用）';
-    case 'awaiting-session': return '尚未完成首轮对账';
-    case 'expected-yet-unverifiable': return `期望订阅${domains ? `「${domains}」` : ''}，但无法跨端自证`;
+        ? t('convergence.reason.fingerprintPolicy')
+        : t('convergence.reason.fingerprintDomains', { domains: domains || t('convergence.reason.shared') });
+    case 'session-failures': return t('convergence.reason.sessionFailures', { count: reason.count ?? '' });
+    case 'no-ack-progress': return t('convergence.reason.noAckProgress');
+    case 'backlog-mismatch': return t('convergence.reason.backlogMismatch', { count: reason.count ?? 0 });
+    case 'keying-drop': return t('convergence.reason.keyingDrop');
+    case 'keying-drops': return t('convergence.reason.keyingDrops', { count: reason.count ?? '' });
+    case 'probe-ineffective': return t('convergence.reason.probeIneffective');
+    case 'peer-claims-ahead': return t('convergence.reason.peerClaimsAhead');
+    case 'peer-state-loss': return t('convergence.reason.peerStateLoss', { count: reason.count ?? '' });
+    case 'unknown-event-types': return t('convergence.reason.unknownEventTypes', { count: reason.count ?? '' });
+    case 'no-fingerprints': return t('convergence.reason.noFingerprints');
+    case 'awaiting-session': return t('convergence.reason.awaitingSession');
+    case 'expected-yet-unverifiable': return t('convergence.reason.expectedYetUnverifiable', {
+      domains: domains ? t('convergence.reason.domainsQuoted', { domains }) : '',
+    });
     default: return String(reason?.code ?? '');
   }
 }
@@ -3411,9 +3492,9 @@ function convergencePrimaryText(conv) {
 
 /** 设备卡（对端）：状态 chip 一行 + 至多两条人话原因（只读；不设第二套开关） */
 function convergenceChipRows(conv, shortTimeFn) {
-  const meta = CONVERGENCE_STATE_META[conv?.state] ?? { text: String(conv?.state ?? '—'), cls: 'is-off' };
+  const meta = convergenceStateMeta(conv?.state);
   const when = conv?.state === 'ok' && conv.lastConvergedAt
-    ? `<span class="muted" style="margin-left:6px">${shortTimeFn(conv.lastConvergedAt)} 对账</span>`
+    ? `<span class="muted" style="margin-left:6px">${escapeHtml(t('convergence.chipReconciled', { time: shortTimeFn(conv.lastConvergedAt) }))}</span>`
     : '';
   const rows = [`<li><span class="crt-tag ${meta.cls}">${meta.text}</span>${when}</li>`];
   for (const reason of (conv?.reasons ?? []).slice(0, 2)) {
@@ -3431,27 +3512,37 @@ function convergenceAboutSection() {
   if (!s && peers.length === 0) {
     return `
     <section class="settings-section" data-info-block="convergence">
-      <h3>收敛健康 <span class="badge badge-muted">只读</span></h3>
-      <p class="muted" style="font-size:11px;margin:0">未启用（config.json 置 <code>sync.convergence.enabled</code> 后重启）。</p>
+      <h3>${escapeHtml(t('about.convergence.title'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
+      <p class="muted" style="font-size:11px;margin:0">${t('about.convergence.disabled')}</p>
     </section>`;
   }
   const summary = s
-    ? `对端 ${s.peers} 个 · 已收敛 ${s.ok} · 停滞 ${s.stalled} · 未收敛 ${s.diverged} · 未对账 ${s.unverifiable} · 未连接 ${s.offline}`
+    ? t('about.convergence.summary', {
+      peers: s.peers,
+      ok: s.ok,
+      stalled: s.stalled,
+      diverged: s.diverged,
+      unverifiable: s.unverifiable,
+      offline: s.offline,
+    })
     : '';
   const rows = peers.map((d) => {
     const conv = d.convergence;
-    const meta = CONVERGENCE_STATE_META[conv.state] ?? { text: String(conv.state), cls: 'is-off' };
-    const detail = [convergencePrimaryText(conv), conv.state === 'ok' && conv.lastConvergedAt ? `${fmtClock(conv.lastConvergedAt)} 对账` : '']
+    const meta = convergenceStateMeta(conv.state);
+    const detail = [
+      convergencePrimaryText(conv),
+      conv.state === 'ok' && conv.lastConvergedAt ? t('convergence.chipReconciled', { time: fmtClock(conv.lastConvergedAt) }) : '',
+    ]
       .filter(Boolean)
       .join(' · ');
     return kvRow(d.deviceId, `<span class="crt-tag ${meta.cls}">${meta.text}</span>${detail ? ` <span class="muted">${escapeHtml(detail)}</span>` : ''}`);
   });
   return `
     <section class="settings-section" data-info-block="convergence">
-      <h3>收敛健康 <span class="badge badge-muted">只读 · 本机视角</span></h3>
+      <h3>${escapeHtml(t('about.convergence.title'))} <span class="badge badge-muted">${escapeHtml(t('about.convergence.tag'))}</span></h3>
       ${summary ? `<p class="muted" style="font-size:11px;margin:0 0 8px">${escapeHtml(summary)}</p>` : ''}
-      ${peers.length ? kvRows(rows) : '<p class="muted" style="font-size:11px;margin:0">暂无对端对账记录</p>'}
-      <p class="muted" style="font-size:11px;margin:8px 0 0">「状态指纹」对账得出；差异只告警，不改变订阅与同步行为。</p>
+      ${peers.length ? kvRows(rows) : `<p class="muted" style="font-size:11px;margin:0">${escapeHtml(t('about.convergence.empty'))}</p>`}
+      <p class="muted" style="font-size:11px;margin:8px 0 0">${escapeHtml(t('about.convergence.note'))}</p>
     </section>`;
 }
 
@@ -3472,7 +3563,7 @@ function renderDeviceCard() {
     cardEl?.classList.remove('is-disabled');
     cardEl?.removeAttribute('aria-disabled');
     empty.hidden = false;
-    empty.textContent = '新建或加入忆云后，这里会显示设备详情。';
+    empty.textContent = t('deviceCard.emptyLocked');
     body.hidden = true;
     body.innerHTML = '';
     lastCardSignature = null;
@@ -3482,7 +3573,7 @@ function renderDeviceCard() {
   asideEl?.classList.remove('is-locked');
   cardEl?.classList.remove('is-disabled');
   cardEl?.removeAttribute('aria-disabled');
-  empty.textContent = '点击星图上的设备查看详情。';
+  empty.textContent = t('deviceCard.empty');
   if (asideEl) asideEl.classList.toggle('is-open', Boolean(state.selected) && state.view === 'map');
   if (!state.selected) {
     empty.hidden = false;
@@ -3495,35 +3586,37 @@ function renderDeviceCard() {
   const device = state.devices.find((d) => d.deviceId === state.selected.deviceId) ?? state.selected;
   const isSelf = device.deviceId === state.overview?.device?.deviceId;
   const status = isSelf
-    ? { text: `${ICONS.online} 本机`, cls: 'is-ok' }
+    ? { text: `${ICONS.online} ${t('deviceCard.status.self')}`, cls: 'is-ok' }
     : device.blocked
-      ? { text: `${ICONS.revoked} 已移出`, cls: 'is-danger' }
+      ? { text: `${ICONS.revoked} ${t('deviceCard.status.blocked')}`, cls: 'is-danger' }
       : device.online
-        ? { text: `${ICONS.online} 在线`, cls: 'is-ok' }
-        : { text: `${ICONS.offline} 离线`, cls: 'is-off' };
+        ? { text: `${ICONS.online} ${t('deviceCard.status.online')}`, cls: 'is-ok' }
+        : { text: `${ICONS.offline} ${t('deviceCard.status.offline')}`, cls: 'is-off' };
   const shortTime = (at) => {
     const d = new Date(at);
     const p2 = (n) => String(n).padStart(2, '0');
     return `${p2(d.getHours())}:${p2(d.getMinutes())}`;
   };
   const metaParts = [];
-  if (!isSelf && device.pendingEventCount) metaParts.push(`待发 ${device.pendingEventCount}`);
-  if (!isSelf && device.lastSyncAt) metaParts.push(`最近同步 ${shortTime(device.lastSyncAt)}`);
+  if (!isSelf && device.pendingEventCount) metaParts.push(t('deviceCard.meta.pending', { count: device.pendingEventCount }));
+  if (!isSelf && device.lastSyncAt) metaParts.push(t('deviceCard.meta.lastSync', { time: shortTime(device.lastSyncAt) }));
   // C2：连接路径（只读；核心地址簿 → settings.peers.paths）
   const pathInfo = isSelf ? null : peerPathFor(device);
+  const pathLabel = escapeHtml(t('deviceCard.path.key'));
   const pathRow = isSelf
-    ? '<li class="path-row"><span class="path-key">当前路径</span><span class="path-value">本机（无需拨号）</span></li>'
+    ? `<li class="path-row"><span class="path-key">${pathLabel}</span><span class="path-value">${escapeHtml(t('deviceCard.path.self'))}</span></li>`
     : pathInfo
-      ? `<li class="path-row"><span class="path-key">当前路径</span><span class="path-value">${pathInfo.connected
-          ? `<span class="path-kind path-kind-${escapeHtml(String(pathInfo.kind ?? 'unknown'))}">${escapeHtml(String(pathInfo.kind ?? '未知'))}</span> <code>${escapeHtml(String(pathInfo.address ?? '—'))}</code> <span class="muted">${pathInfo.since ? `自 ${shortTime(pathInfo.since)} 起` : ''}</span>`
-          : `<span class="muted">未连接</span>${pathInfo.lastError ? ` <span class="crt-warn">⚠ ${escapeHtml(String(pathInfo.lastError))}</span>` : ''}`}</span></li>`
-      : '<li class="path-row"><span class="path-key">当前路径</span><span class="path-value muted">地址簿未启用 / 无记录</span></li>';
+      ? `<li class="path-row"><span class="path-key">${pathLabel}</span><span class="path-value">${pathInfo.connected
+          ? `<span class="path-kind path-kind-${escapeHtml(String(pathInfo.kind ?? 'unknown'))}">${escapeHtml(String(pathInfo.kind ?? t('common.unknown')))}</span> <code>${escapeHtml(String(pathInfo.address ?? '—'))}</code> <span class="muted">${pathInfo.since ? escapeHtml(t('deviceCard.path.since', { time: shortTime(pathInfo.since) })) : ''}</span>`
+          : `<span class="muted">${escapeHtml(t('common.notConnected'))}</span>${pathInfo.lastError ? ` <span class="crt-warn">⚠ ${escapeHtml(String(pathInfo.lastError))}</span>` : ''}`}</span></li>`
+      : `<li class="path-row"><span class="path-key">${pathLabel}</span><span class="path-value muted">${escapeHtml(t('deviceCard.path.unavailable'))}</span></li>`;
 
   const allNamespaces = allNamespaceNames();
   const writes = state.features.writes && !MOCK;
   const selfRow0 = state.devices.find((d) => d.deviceId === state.overview?.device?.deviceId);
   // 轮询每 3s 触发 render；内容未变时跳过重渲染，避免冲掉「更多操作」展开态与点击
   const cardSignature = JSON.stringify([
+    getLocale(),
     device.deviceId, device.name ?? null, device.online, device.blocked, device.pendingEventCount ?? null,
     device.lastSyncAt ?? null, device.subscriptions ?? [], device.sharesWithMe ?? [],
     isSelf, writes,
@@ -3547,19 +3640,19 @@ function renderDeviceCard() {
 
   // 本机：我订阅的记忆域（只读；调整订阅的唯一入口在「记忆共享」）
   const followRows = allNamespaces.length === 0
-    ? '<li class="muted">暂无已知记忆域</li>'
+    ? `<li class="muted">${escapeHtml(t('deviceCard.follow.none'))}</li>`
     : allNamespaces.map((ns) => `<li>
         <span><span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
-          <span class="muted" style="margin-left:6px">${iFollow(ns) ? '已订阅' : '未订阅'}</span></span>
+          <span class="muted" style="margin-left:6px">${escapeHtml(iFollow(ns) ? t('domains.subscribed') : t('domains.unsubscribed'))}</span></span>
       </li>`).join('');
 
   // 对端：它订阅的记忆域（对端自声明，只读）
   const peerFollowRows = (device.subscriptions ?? []).length
     ? device.subscriptions.map((ns) => `<li>
         <span><span class="ns-chip" style="background:${namespaceColor(ns)}">${escapeHtml(ns)}</span>
-          <span class="muted" style="margin-left:6px">已订阅</span></span>
+          <span class="muted" style="margin-left:6px">${escapeHtml(t('domains.subscribed'))}</span></span>
       </li>`).join('')
-    : '<li class="muted">对端尚未声明订阅任何记忆域</li>';
+    : `<li class="muted">${escapeHtml(t('deviceCard.peerFollow.none'))}</li>`;
 
   // 对端：订阅交集 = 双方都能读写的域
   const peerFollowSet = new Set(device.subscriptions ?? []);
@@ -3569,10 +3662,10 @@ function renderDeviceCard() {
     const mineIn = iFollow(ns);
     const noContent = !allNamespaces.includes(ns);
     let fact = '';
-    if (peerIn && mineIn) fact = '双方都已订阅';
-    else if (peerIn) fact = '它已订阅 · 本机未订阅';
-    else if (mineIn) fact = '本机已订阅 · 它未订阅';
-    if (fact && noContent) fact += ' · 这个域还没有内容';
+    if (peerIn && mineIn) fact = t('deviceCard.interop.both');
+    else if (peerIn) fact = t('deviceCard.interop.peerOnly');
+    else if (mineIn) fact = t('deviceCard.interop.mineOnly');
+    if (fact && noContent) fact += t('deviceCard.interop.noContent');
     return { ns, fact };
   });
   const visibleInterop = interop.filter((row) => row.fact !== '');
@@ -3580,40 +3673,42 @@ function renderDeviceCard() {
   const interopRows = (visibleInterop.length > 0
     ? visibleInterop.map((row) => `<li>
         <span><span class="ns-chip" style="background:${namespaceColor(row.ns)}">${escapeHtml(row.ns)}</span>
-          <span class="muted" style="margin-left:6px">${row.fact}</span></span>
+          <span class="muted" style="margin-left:6px">${escapeHtml(row.fact)}</span></span>
       </li>`).join('')
-    : '<li class="muted">暂无需处理的记忆域</li>')
-    + (hiddenCount > 0 ? `<li class="muted">另有 ${hiddenCount} 个记忆域双方均未订阅</li>` : '');
+    : `<li class="muted">${escapeHtml(t('deviceCard.interop.none'))}</li>`)
+    + (hiddenCount > 0 ? `<li class="muted">${escapeHtml(t('deviceCard.interop.hidden', { count: hiddenCount }))}</li>` : '');
 
   // S3 · 移出分级（SPEC §5.2 v1.1）：low 维持「更多操作」折叠（防误触）；
   // medium/high 提级为一等动作（与同步/断开同排，危险样式），门槛由动态码/会签提供。
   const secLevel = state.security?.level ?? 'low';
   const elevatedKick = secLevel === 'medium' || secLevel === 'high';
-  const kickButton = `<button class="btn btn-small btn-crt btn-crt-danger" data-action="revoke-device" ${writes ? '' : 'disabled'}>移出</button>`;
-  const restoreButton = `<button class="btn btn-small btn-crt" data-action="restore-device" ${writes ? '' : 'disabled'}>恢复设备</button>`;
+  const kickButton = `<button class="btn btn-small btn-crt btn-crt-danger" data-action="revoke-device" ${writes ? '' : 'disabled'}>${escapeHtml(t('deviceCard.action.kick'))}</button>`;
+  const restoreButton = `<button class="btn btn-small btn-crt" data-action="restore-device" ${writes ? '' : 'disabled'}>${escapeHtml(t('deviceCard.action.restore'))}</button>`;
   const primaryDanger = device.blocked ? restoreButton : kickButton;
   const actions = isSelf ? '' : `
     <div class="card-actions">
-      <button class="btn btn-small btn-crt" data-action="sync" ${writes && device.online ? '' : 'disabled'}>立即同步</button>
+      <button class="btn btn-small btn-crt" data-action="sync" ${writes && device.online ? '' : 'disabled'}>${escapeHtml(t('deviceCard.action.sync'))}</button>
       ${device.online
-        ? `<button class="btn btn-small btn-crt" data-action="disconnect" ${writes ? '' : 'disabled'}>断开连接</button>`
-        : `<button class="btn btn-small btn-crt" data-action="connect" ${writes ? '' : 'disabled'}>连接</button>`}
+        ? `<button class="btn btn-small btn-crt" data-action="disconnect" ${writes ? '' : 'disabled'}>${escapeHtml(t('deviceCard.action.disconnect'))}</button>`
+        : `<button class="btn btn-small btn-crt" data-action="connect" ${writes ? '' : 'disabled'}>${escapeHtml(t('deviceCard.action.connect'))}</button>`}
       ${device.blocked || elevatedKick ? primaryDanger : ''}
     </div>
     ${device.blocked
-      ? '<p class="card-help muted">该设备已被移出。恢复只恢复身份：旧纪元的订阅/移出策略记录不复活，需要它重新声明订阅。</p>'
+      ? `<p class="card-help muted">${escapeHtml(t('deviceCard.help.blocked'))}</p>`
       : elevatedKick
-        ? `<p class="card-help muted">移出后，本机不再采纳它的记录；已同步的数据不回收。${secLevel === 'high' ? '高档需要另一台已准入设备会签。' : '中档需要本机 6 位动态码。'}</p>`
+        ? `<p class="card-help muted">${escapeHtml(t('deviceCard.help.elevated', {
+          gate: secLevel === 'high' ? t('deviceCard.help.gateHigh') : t('deviceCard.help.gateMedium'),
+        }))}</p>`
         : ''}
     <details class="card-advanced">
-      <summary>更多操作</summary>
+      <summary>${escapeHtml(t('deviceCard.more'))}</summary>
       <div class="card-actions">
-        ${device.online ? '' : `<button class="btn btn-small btn-crt" data-action="manual-connect" ${writes ? '' : 'disabled'}>连不上？手动连接…</button>`}
-        <button class="btn btn-small btn-crt" data-action="reset-watermarks" ${writes ? '' : 'disabled'}>重置水位</button>
+        ${device.online ? '' : `<button class="btn btn-small btn-crt" data-action="manual-connect" ${writes ? '' : 'disabled'}>${escapeHtml(t('deviceCard.action.manualConnect'))}</button>`}
+        <button class="btn btn-small btn-crt" data-action="reset-watermarks" ${writes ? '' : 'disabled'}>${escapeHtml(t('deviceCard.action.resetWatermarks'))}</button>
         ${device.blocked || elevatedKick ? '' : primaryDanger}
       </div>
     </details>
-    ${writes ? '' : '<p class="muted" style="margin-top:10px">当前为只读模式（写操作需 memory.admin + CSRF）。</p>'}`;
+    ${writes ? '' : `<p class="muted" style="margin-top:10px">${escapeHtml(t('deviceCard.readOnly'))}</p>`}`;
 
   const advancedOpen = body.querySelector('.card-advanced')?.open === true;
   const conv = isSelf ? null : device.convergence ?? null;
@@ -3621,23 +3716,23 @@ function renderDeviceCard() {
     <div class="card-identity">
       ${device.name ? `<span class="card-name">${escapeHtml(device.name)}</span>` : ''}
       <span class="card-id"><span class="dev-led ${status.cls}" aria-hidden="true"></span>${escapeHtml(device.deviceId)}</span>
-      <span class="crt-tag card-status ${status.cls}">${status.text}</span>
+      <span class="crt-tag card-status ${status.cls}">${escapeHtml(status.text)}</span>
     </div>
     ${metaParts.length > 0 ? `<p class="card-meta muted">${escapeHtml(metaParts.join(' · '))}</p>` : '<p class="card-meta muted"></p>'}
-    <ul class="path-list" aria-label="连接路径（只读）">${pathRow}</ul>
+    <ul class="path-list" aria-label="${escapeHtml(t('deviceCard.path.aria'))}">${pathRow}</ul>
     ${conv ? `
-    <h3>同步健康 <span class="h3-note">本机视角 · 只读</span></h3>
+    <h3>${escapeHtml(t('deviceCard.syncHealth.title'))} <span class="h3-note">${escapeHtml(t('deviceCard.syncHealth.note'))}</span></h3>
     <ul class="chip-list">${convergenceChipRows(conv, shortTime)}</ul>
     ` : ''}
     ${isSelf ? `
-    <h3>我订阅的记忆域 <span class="h3-note">阅读权 + 维持义务</span></h3>
-    <p class="card-help muted">订阅 = 接收该记忆域的更新，本机新增也同步给其他订阅设备。此处只读；调整订阅请到「记忆共享」。</p>
+    <h3>${escapeHtml(t('deviceCard.mine.title'))} <span class="h3-note">${escapeHtml(t('deviceCard.mine.note'))}</span></h3>
+    <p class="card-help muted">${escapeHtml(t('deviceCard.mine.help'))}</p>
     <ul class="chip-list">${followRows}</ul>
-    <div class="card-actions"><button class="btn btn-small btn-crt" type="button" data-action="goto-domains">去「记忆共享」调整 ›</button></div>
+    <div class="card-actions"><button class="btn btn-small btn-crt" type="button" data-action="goto-domains">${escapeHtml(t('deviceCard.mine.goto'))}</button></div>
     ` : `
-    <h3>它订阅的记忆域 <span class="h3-note">对端自声明 · 图上记录</span></h3>
+    <h3>${escapeHtml(t('deviceCard.peer.title'))} <span class="h3-note">${escapeHtml(t('deviceCard.peer.note'))}</span></h3>
     <ul class="chip-list">${peerFollowRows}</ul>
-    <h3>订阅情况 <span class="h3-note">本机视角</span></h3>
+    <h3>${escapeHtml(t('deviceCard.interop.title'))} <span class="h3-note">${escapeHtml(t('deviceCard.interop.note'))}</span></h3>
     <ul class="chip-list">${interopRows}</ul>
     `}
     ${actions}
@@ -3679,10 +3774,10 @@ stage.onHover = (node, x, y) => {
   tooltip.style.left = `${Math.min(x + 14, stage.width - 290)}px`;
   tooltip.style.top = `${Math.min(y + 14, Math.max(0, stage.height - 120))}px`;
   tooltip.innerHTML = `
-    <div class="tt-title">${escapeHtml(node.self ? '本机' : node.id)}</div>
-    <div class="tt-row">${node.blocked ? '已被我移出' : node.online ? '与我连接中' : '未连接'}</div>
+    <div class="tt-title">${escapeHtml(node.self ? t('common.self') : node.id)}</div>
+    <div class="tt-row">${escapeHtml(node.blocked ? t('tooltip.removed') : node.online ? t('tooltip.connected') : t('common.notConnected'))}</div>
     ${device && (device.sharesWithMe ?? []).length
-      ? `<div class="tt-row">共同订阅：${escapeHtml((device.sharesWithMe ?? []).join(', ') || '—')}</div>`
+      ? `<div class="tt-row">${escapeHtml(t('tooltip.shared', { namespaces: (device.sharesWithMe ?? []).join(', ') || '—' }))}</div>`
       : ''}
   `;
 };
@@ -4079,7 +4174,7 @@ async function handleDeviceAction(action, device) {
   if (action === 'sync') {
     const self = state.overview?.device?.deviceId;
     if (self) stage.launchFleet(self, device.deviceId, { kind: 'mine', ships: 3 });
-    await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/sync`, {}, '已触发同步（有 pending 时立即开会话）');
+    await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/sync`, {}, t('deviceCard.toast.sync'));
   } else if (action === 'connect' || action === 'manual-connect') {
     // E1：网内传输修复（不改变入网信任与订阅）；Electron 无 window.prompt，统一走 App 内向导。
     openWizard({
@@ -4087,14 +4182,14 @@ async function handleDeviceAction(action, device) {
       address: peerPathFor(device)?.address ?? '',
     });
   } else if (action === 'disconnect') {
-    await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/disconnect`, {}, '已断开');
+    await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/disconnect`, {}, t('deviceCard.toast.disconnected'));
   } else if (action === 'reset-watermarks') {
     const ok = await confirmModal({
-      title: '重置同步水位',
-      body: `将清除与 ${device.deviceId} 的本机同步水位。已同步内容不会回撤；最多导致已确认事件冗余重发一次。`,
-      confirmLabel: '重置',
+      title: t('deviceCard.reset.title'),
+      body: t('deviceCard.reset.body', { device: device.deviceId }),
+      confirmLabel: t('deviceCard.reset.confirm'),
     });
-    if (ok) await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/reset-watermarks`, {}, '水位已重置');
+    if (ok) await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/reset-watermarks`, {}, t('deviceCard.reset.toast'));
   } else if (action === 'revoke-device') {
     await securityRevokeFlow(device);
   } else if (action === 'restore-device') {
@@ -4104,7 +4199,7 @@ async function handleDeviceAction(action, device) {
 
 async function runWrite(path, body, successMessage) {
   if (MOCK) {
-    window.alert('mock 模式不执行写操作。');
+    window.alert(t('common.mockReadOnly'));
     return;
   }
   try {
@@ -4112,7 +4207,7 @@ async function runWrite(path, body, successMessage) {
     await refresh();
     showToast(successMessage);
   } catch (error) {
-    window.alert(`操作失败：${error.message}`);
+    window.alert(t('common.operationFailed', { message: error.message }));
   }
 }
 

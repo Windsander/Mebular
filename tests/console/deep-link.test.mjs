@@ -252,7 +252,9 @@ describe('UX-2 常驻卡归设置 · 常用 + 重启向导', () => {
 
   it('常驻卡不展示 plist 全路径；仍在「关于本机 · 常驻服务文件」', () => {
     expect(assistantsJs).not.toContain('unitPath');
-    expect(consoleJs).toMatch(/常驻服务文件[\s\S]{0,120}unitPath|unitPath[\s\S]{0,120}常驻服务文件/);
+    const zhPack = JSON.parse(readFileSync(join(here, '..', '..', 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
+    expect(zhPack['about.runtime.serviceUnit']).toBe('常驻服务文件');
+    expect(consoleJs).toMatch(/about\.runtime\.serviceUnit[\s\S]{0,120}unitPath|unitPath[\s\S]{0,120}about\.runtime\.serviceUnit/);
   });
 
   it('重启向导：设置 · 常用行 + desktop 桥（web 无桥不渲染）', () => {

@@ -1750,8 +1750,9 @@ try {
     check('轮 C 配套：页头内部口径删除、写盘路径/.bak 归「关于本机」、邀请帮助去重、帮助行长收窄',
       !htmlSrc.includes('运行时可用项可直接操作')
         && !jsSrc.includes('修改写入 <code>')
-        && jsSrc.includes("copyRowOf('配置文件', configPath)")
-        && jsSrc.includes('写盘备份')
+        && jsSrc.includes("copyRowOf(t('about.identity.configFile'), configPath)")
+        && zhCopy2['about.identity.backup'] === '写盘备份'
+        && jsSrc.includes("t('about.identity.backup')")
         && !jsSrc.includes('fold-invite')
         && !jsSrc.includes('改档后点')
         && jsSrc.includes('id="invite-expiry"')
@@ -1822,7 +1823,8 @@ try {
         && consoleSrc2.includes("t('settings.cloud.row.suggestRename')")
         && consoleSrc2.includes('/admin/api/devices/self/name')
         && consoleSrc2.includes('data-device-rename')
-        && consoleSrc2.includes('只有本人可改'),
+        && consoleSrc2.includes("t('about.identity.renameNote')")
+        && zhCopy2['about.identity.renameNote'].startsWith('只有本人可改'),
       '重名标记与设备名编辑均走 API');
     check('E2-A2 深链 focus=clouds：常用页滚到忆云卡（纯函数 + 启动接线）',
       (await import('../deep-link.js')).initialViewFromSearch('?view=settings&focus=clouds').focusClouds === true
@@ -1897,11 +1899,14 @@ try {
     const htmlCode = htmlSrc.replace(/<!--[\s\S]*?-->/g, '');
     const assistantsCode = stripComments(await readFile(join(consoleDir, 'assistants.js'), 'utf-8'));
     const bannedWords = [['屏', '蔽'].join(''), ['踢', '出'].join(''), ['吊', '销'].join('')];
+    const zhCopyTerm = JSON.parse(await readFile(join(rootDir, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
     check('E1 术语：「忆云 / 移出 / 加入」；禁用词=0（注释除外）',
       !consoleCode.includes('网络') && !htmlCode.includes('网络') && !assistantsCode.includes('网络')
         && bannedWords.every((word) => !consoleCode.includes(word) && !htmlCode.includes(word) && !assistantsCode.includes(word))
-        && consoleCode.includes('加入忆云') && consoleCode.includes('移出后')
-        && htmlCode.includes('没加入忆云') && htmlCode.includes('移出设备'),
+        && htmlCode.includes('没加入忆云') && htmlCode.includes('移出设备')
+        && consoleCode.includes("t('deviceCard.help.elevated'")
+        && zhCopyTerm['onboard.join.title'] === '加入忆云'
+        && zhCopyTerm['deviceCard.help.elevated'].includes('移出后'),
       `console=${(consoleCode.match(/网络/g) ?? []).length} html=${(htmlCode.match(/网络/g) ?? []).length}`);
   }
 
@@ -1916,10 +1921,14 @@ try {
 
     const consoleSrc3 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     const cssSrc3 = await readFile(join(consoleDir, 'console.css'), 'utf-8');
-    const tokensC2 = ['对端连接路径', 'path-row', 'path-kind-', '最近切换', '地址簿'];
+    const zhCopyC2 = JSON.parse(await readFile(join(rootDir, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
+    const tokensC2 = ['path-row', 'path-kind-'];
+    const copyC2 = [zhCopyC2['about.paths.title'], zhCopyC2['about.paths.switched'], zhCopyC2['about.paths.note']].join('\n');
     check('C2 控制台渲染对端路径行（设备卡 + 关于本机只读区）',
-      tokensC2.every((token) => consoleSrc3.includes(token)),
-      tokensC2.filter((token) => !consoleSrc3.includes(token)).join(',') || '全部命中');
+      tokensC2.every((token) => consoleSrc3.includes(token))
+        && ["t('about.paths.title')", "t('about.paths.switched'", "t('about.paths.candidates'"].every((call) => consoleSrc3.includes(call))
+        && ['对端连接路径', '最近切换', '地址簿'].every((token) => copyC2.includes(token)),
+      [ ...tokensC2.filter((token) => !consoleSrc3.includes(token)), ...['对端连接路径', '最近切换', '地址簿'].filter((token) => !copyC2.includes(token)) ].join(',') || '全部命中');
     check('C2 路径行沿用统一行模板（label 列宽 token + 窄屏单列）',
       cssSrc3.includes('.path-row { display: grid; grid-template-columns: var(--row-label-w, 150px) minmax(0, 1fr);')
         && cssSrc3.includes('@media (max-width: 760px) { .path-row { grid-template-columns: minmax(0, 1fr); } }'),
@@ -1935,10 +1944,13 @@ try {
         && typeof relay.reason === 'string' && Array.isArray(relay.publicAddrs) && typeof relay.allowedClients === 'number',
       relay);
     const consoleSrc4 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const zhCopyC6 = JSON.parse(await readFile(join(rootDir, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
     const tokensC6 = ['本机当桥', '当前经桥', '桥白名单'];
+    const relayCopyC6 = [zhCopyC6['about.runtime.relay'], zhCopyC6['about.runtime.bridge'], zhCopyC6['about.runtime.bridgeAllowed']].join('\n');
     check('C6 控制台只读展示「本机当桥/当前经桥/桥白名单」',
-      tokensC6.every((token) => consoleSrc4.includes(token)),
-      tokensC6.filter((token) => !consoleSrc4.includes(token)).join(',') || '全部命中');
+      tokensC6.every((token) => relayCopyC6.includes(token))
+        && ["t('about.runtime.relay')", "t('about.runtime.bridge')", "t('about.runtime.bridgeAllowed')"].every((call) => consoleSrc4.includes(call)),
+      tokensC6.filter((token) => !relayCopyC6.includes(token)).join(',') || '全部命中');
     const binSrc = await readFile(join(rootDir, 'packages', 'mcp', 'bin', 'mebular.mjs'), 'utf-8');
     // 注意：用拼接构造被禁字样，避免本文件自身命中「无残留引用」扫描
     const forbidden = [['case ', "'relay'"].join(''), ['runRelay', 'Host'].join(''), ['MEBULAR_', 'RELAY_'].join('')];
@@ -1956,10 +1968,13 @@ try {
         && net.ignored && typeof net.ignored === 'object',
       net);
     const consoleSrc5 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const zhCopyC5 = JSON.parse(await readFile(join(rootDir, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
     const tokensC5 = ['地址广播', '__net__', '广播忽略'];
+    const netCopyC5 = [zhCopyC5['about.runtime.broadcast'], zhCopyC5['about.runtime.broadcastOff'], zhCopyC5['about.runtime.ignored']].join('\n');
     check('C5 控制台只读展示「地址广播」（档位/已发布/已采用/忽略原因）',
-      tokensC5.every((token) => consoleSrc5.includes(token)),
-      tokensC5.filter((token) => !consoleSrc5.includes(token)).join(',') || '全部命中');
+      tokensC5.every((token) => netCopyC5.includes(token))
+        && ["t('about.runtime.broadcast')", "t('about.runtime.broadcastOff')", "t('about.runtime.ignored')"].every((call) => consoleSrc5.includes(call)),
+      tokensC5.filter((token) => !netCopyC5.includes(token)).join(',') || '全部命中');
   }
 
   // ---------- C7：扫码即通（邀请响应带二维码 + 控制台渲染断言） ----------
@@ -2015,8 +2030,12 @@ try {
         && typeof nat.relayConnections === 'number' && 'loadError' in nat,
       nat);
     const consoleSrc7 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const zhCopyC4 = JSON.parse(await readFile(join(rootDir, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
+    const natCopyC4 = [zhCopyC4['about.runtime.nat'], zhCopyC4['about.runtime.natUpgrades']].join('\n');
     check('C4 控制台只读展示「NAT 打洞」（AutoNAT/DCUtR/直连升级）',
-      ['NAT 打洞', 'DCUtR', '直连升级'].every((token) => consoleSrc7.includes(token)));
+      ['NAT 打洞', '直连升级'].every((token) => natCopyC4.includes(token))
+        && zhCopyC4['about.runtime.dcutrOn'].includes('DCUtR') && zhCopyC4['about.runtime.autonatOn'].includes('AutoNAT')
+        && ["t('about.runtime.nat')", "t('about.runtime.natUpgrades'"].every((call) => consoleSrc7.includes(call)));
   }
 
   // ---------- G-ML-1：记忆生命周期（读面默认过滤 + 动作式写端点 + 前端锚点） ----------
@@ -2113,9 +2132,12 @@ try {
         && !consoleSrcV4.includes('域级批准'));
     const retiredTokens = ['AUTH →', 'MEMBERS →', '成员制 ACTIVE', '重入恢复', '待重入', '退订交接', '暂无分区', 'HASH ']
       .filter((t) => consoleSrcV4.includes(t) || htmlSrcV4.includes(t));
+    const zhCopyV4 = JSON.parse(await readFile(join(rootDir, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
     check('v4 UI：术语统一（订阅/已订阅/未订阅/也在订阅/退出并交接/状态指纹；退役词清除）',
-      consoleSrcV4.includes('记忆域') && consoleSrcV4.includes('未订阅') && consoleSrcV4.includes('也在订阅这个域')
-        && consoleSrcV4.includes('退出并交接') && consoleSrcV4.includes('状态指纹')
+      zhCopyV4['domains.unsubscribed'] === '未订阅' && zhCopyV4['domains.detail.relationOthers'].includes('也在订阅这个域')
+        && zhCopyV4['handoff.titleStatic'] === '退出并交接' && zhCopyV4['about.convergence.note'].includes('状态指纹')
+        && consoleSrcV4.includes("t('domains.unsubscribed')") && consoleSrcV4.includes("t('domains.detail.relationOthers'")
+        && htmlSrcV4.includes('data-i18n="handoff.titleStatic"') && consoleSrcV4.includes("t('about.convergence.note')")
         && retiredTokens.length === 0,
       `残留=${retiredTokens.join(',') || '无'}`);
     check('v4 UI：mock 数据缺口补齐（memories 字段 + 订阅字段）',
@@ -2127,8 +2149,9 @@ try {
         && htmlSrcV4.includes('id="namespace-new"') && htmlSrcV4.includes('audit-toolbar')
         && !htmlSrcV4.includes('domains-empty-invite') && !htmlSrcV4.includes('domains-empty-new')
         && !htmlSrcV4.includes('empty-sub')
-        && consoleSrcV4.includes('退出并交接这个域…') && consoleSrcV4.includes('记忆域 ${items.length}')
-        && consoleSrcV4.includes('已订阅'));
+        && consoleSrcV4.includes("t('domains.handoff.action')") && zhCopyV4['domains.handoff.action'] === '退出并交接这个域…'
+        && consoleSrcV4.includes("t('domains.stats.total'") && zhCopyV4['domains.stats.total'] === '记忆域 {count}'
+        && zhCopyV4['domains.subscribed'] === '已订阅' && consoleSrcV4.includes("t('domains.subscribed')"));
     check('v4 UI：自动签发入口已删除（无可配置入口）',
       !consoleSrcV4.includes('订阅自动签发') && !consoleSrcV4.includes('auto' + 'GrantRowText')
         && !consoleSrcV4.includes('sync?.auto' + 'Grant?.enabled'));
@@ -2143,8 +2166,11 @@ try {
       htmlSrcV4.includes('id="mem-filter-archived" type="checkbox" aria-label="显示已归档"')
         && htmlSrcV4.includes('id="mem-filter-deleted" type="checkbox" aria-label="显示已删除"'));
     check('v4 UI：设备卡 interop 段改订阅事实（它订阅的记忆域 / 订阅情况；无第二套开关）',
-      consoleSrcV4.includes('我订阅的记忆域') && consoleSrcV4.includes('它订阅的记忆域') && consoleSrcV4.includes('订阅情况')
-        && consoleSrcV4.includes('双方都已订阅') && consoleSrcV4.includes('这个域还没有内容')
+      zhCopyV4['deviceCard.mine.title'] === '我订阅的记忆域' && zhCopyV4['deviceCard.peer.title'] === '它订阅的记忆域'
+        && zhCopyV4['deviceCard.interop.title'] === '订阅情况'
+        && zhCopyV4['deviceCard.interop.both'] === '双方都已订阅' && zhCopyV4['deviceCard.interop.noContent'].includes('这个域还没有内容')
+        && ["t('deviceCard.mine.title')", "t('deviceCard.peer.title')", "t('deviceCard.interop.title')",
+          "t('deviceCard.interop.both')", "t('deviceCard.interop.noContent')"].every((call) => consoleSrcV4.includes(call))
         && !consoleSrcV4.includes('data-follow') && !consoleSrcV4.includes('handleFollowToggle'));
     check('v4 UI：窄屏横幅让位 + 面板视图隐藏设备卡空壳（CSS 落点）',
       (await readFile(join(consoleDir, 'console.css'), 'utf-8')).includes('.stage-wrap.has-banner .panel-view')
@@ -2160,11 +2186,14 @@ try {
         && typeof overviewConv.json?.convergence?.summary?.ok === 'number',
       JSON.stringify(overviewConv.json?.convergence ?? null));
     const consoleSrcP3 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const zhCopyP3 = JSON.parse(await readFile(join(rootDir, 'locales', 'zh-CN', 'console.json'), 'utf-8')).messages;
     check('P3 收敛健康：控制台锚点（设备卡同步健康 / 关于本机汇总 / SSE convergence / 人话原因）',
-      consoleSrcP3.includes('收敛健康') && consoleSrcP3.includes('同步健康')
+      zhCopyP3['about.convergence.title'] === '收敛健康' && zhCopyP3['deviceCard.syncHealth.title'] === '同步健康'
+        && zhCopyP3['about.convergence.note'].includes('状态指纹')
         && consoleSrcP3.includes('CONVERGENCE_STATE_META') && consoleSrcP3.includes('convergenceChipRows')
         && consoleSrcP3.includes('convergenceAboutSection') && consoleSrcP3.includes("addEventListener('convergence'")
-        && consoleSrcP3.includes('状态指纹') && consoleSrcP3.includes('backlog-mismatch'));
+        && consoleSrcP3.includes("t('about.convergence.title')") && consoleSrcP3.includes("t('deviceCard.syncHealth.title')")
+        && consoleSrcP3.includes('backlog-mismatch'));
   }
 
   // ---------- S3 · 安全三档（只消费 S2 端点；控制台审计/卡片契约） ----------
@@ -2456,7 +2485,9 @@ try {
         && /待批准/.test(await readFile(join(consoleDir, 'assistants.js'), 'utf-8')));
     check('S3 前端锚点：审计安全过滤器/标签/拒绝原因映射',
       htmlSec.includes('value="security_tier"') && htmlSec.includes('value="security_approval"')
-        && /安全等级变更/.test(consoleSrcSec) && /设备会签/.test(zhCopySec['settings.security.tier.high.title'])
+        && zhCopySec['audit.type.securityTier'] === '安全等级变更'
+        && consoleSrcSec.includes("t('audit.type.securityTier')")
+        && /设备会签/.test(zhCopySec['settings.security.tier.high.title'])
         && consoleSrcSec.includes("'settings.security.rejection.missingProof'")
         && zhCopySec['settings.security.rejection.missingProof'] === '缺少会签证明');
     check('S3 前端锚点：a11y（配对号 aria-live / 恢复码焦点）+ reduced-motion + 窄屏样式',

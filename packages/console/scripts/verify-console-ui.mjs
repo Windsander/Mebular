@@ -2001,7 +2001,7 @@ async function main() {
     // i18n：语言行默认可见（不再依赖 ?i18n=1）；?lang= 打开英文并可在设置内切回中文（不 reload）
     await send('Page.navigate', { url: `${base}/console/` });
     check('i18n 默认入口：html lang=zh-CN（普通用户不被系统英文带入半翻译界面）',
-      await waitFor(`document.documentElement.lang === 'zh-CN' && Boolean(document.querySelector('#open-settings')) && document.title.includes('控制台')`));
+      await waitFor(`document.documentElement.lang === 'zh-CN' && document.documentElement.dataset.consoleReady === '1' && Boolean(document.querySelector('#open-settings')) && document.title.includes('控制台')`));
     await evalJs('document.querySelector("#open-settings").click()');
     check('i18n 语言行默认可见：设置·常用单行、位于常驻运行之前', await waitFor(`(() => {
       const row = document.querySelector('#settings-language');
@@ -2027,7 +2027,7 @@ async function main() {
     await waitFor(`document.documentElement.lang === 'zh-CN' && /语言/.test(document.querySelector('#settings-language')?.textContent ?? '')`);
     await evalJs('document.querySelector("#settings-close").click()');
     await send('Page.navigate', { url: `${base}/console/?i18n=1&lang=en-US` });
-    check('i18n 深链：html lang=en-US + 顶栏/导航英文', await waitFor(`document.documentElement.lang === 'en-US' && document.querySelector('.brand')?.textContent.includes('Mebular Console') && /Star map/.test(document.querySelector('[data-view=map] .view-label')?.textContent ?? '')`));
+    check('i18n 深链：html lang=en-US + 顶栏/导航英文', await waitFor(`document.documentElement.dataset.consoleReady === '1' && document.documentElement.lang === 'en-US' && document.querySelector('.brand')?.textContent.includes('Mebular Console') && /Star map/.test(document.querySelector('[data-view=map] .view-label')?.textContent ?? '')`));
     await evalJs('document.querySelector("#open-settings").click()');
     check('i18n 语言行：设置·常用单行 + 位于常驻运行之前 + 虚线分隔', await waitFor(`(() => {
       const row = document.querySelector('#settings-language');

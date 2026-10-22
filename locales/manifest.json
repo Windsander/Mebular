@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "defaultLocale": "zh-CN",
+  "fallbackLocale": "zh-CN",
+  "packs": [
+    "console",
+    "desktop",
+    "errors"
+  ],
+  "locales": [
+    {
+      "locale": "zh-CN",
+      "nativeName": "简体中文",
+      "files": {
+        "console": "zh-CN/console.json",
+        "desktop": "zh-CN/desktop.json",
+        "errors": "zh-CN/errors.json"
+      }
+    },
+    {
+      "locale": "en-US",
+      "nativeName": "English",
+      "files": {
+        "console": "en-US/console.json",
+        "desktop": "en-US/desktop.json",
+        "errors": "en-US/errors.json"
+      }
+    }
+  ]
+}

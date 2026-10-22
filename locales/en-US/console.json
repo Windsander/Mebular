@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "locale": "en-US",
+  "pack": "console",
+  "messages": {
+    "app.title": "Mebular Console",
+    "app.brand": "Mebular Console",
+    "nav.map": "Star map",
+    "nav.domains": "Sharing",
+    "nav.memories": "Memories",
+    "nav.audit": "Audit",
+    "topbar.settings": "Settings",
+    "topbar.joinCloud": "Join cloud",
+    "topbar.invite": "Invite device",
+    "topbar.createCloud": "New cloud",
+    "settings.title": "Local settings",
+    "settings.aria": "Local settings",
+    "settings.tabsAria": "Settings tabs",
+    "settings.tab.common": "General",
+    "settings.tab.security": "Security",
+    "settings.tab.assistants": "AI assistants",
+    "settings.tab.mcp": "MCP access",
+    "settings.tab.advanced": "Advanced",
+    "settings.language": "Language",
+    "settings.language.aria": "Interface language",
+    "settings.language.title": "Interface language (applies immediately)",
+    "settings.language.current": "Current language: {language}",
+    "locale.zh-CN": "简体中文",
+    "locale.en-US": "English"
+  }
+}

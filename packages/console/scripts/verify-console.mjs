@@ -298,13 +298,35 @@ try {
   }
   check('/console 下发 CSRF cookie 与响应头', (index.headers.get('set-cookie') ?? '').includes('mebular_csrf=') && Boolean(index.headers.get('x-mebular-csrf')));
 
-  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['assistants.js', 'text/javascript'], ['settings-ia.js', 'text/javascript'], ['i18n.mjs', 'text/javascript'], ['messages/zh-CN.mjs', 'text/javascript'], ['messages/en-US.mjs', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript'], ['nebula.js', 'text/javascript'], ['stars.js', 'text/javascript']]) {
+  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['assistants.js', 'text/javascript'], ['settings-ia.js', 'text/javascript'], ['i18n.mjs', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript'], ['nebula.js', 'text/javascript'], ['stars.js', 'text/javascript']]) {
     const res = await fetch(`http://127.0.0.1:${port}/console/${file}`);
     check(`静态资源 /console/${file} 200`, res.status === 200 && (res.headers.get('content-type') ?? '').includes(mime), `status=${res.status}`);
   }
 
   const missing = await fetch(`http://127.0.0.1:${port}/console/nope.js`);
   check('未知静态文件 404', missing.status === 404);
+
+  // ---------- locale pack 静态托管（唯一注册表 + 各语言 JSON） ----------
+  const manifestRes = await getJson(port, '/locales/manifest.json');
+  check('GET /locales/manifest.json 200 + JSON',
+    manifestRes.status === 200
+      && (manifestRes.headers.get('content-type') ?? '').includes('application/json')
+      && manifestRes.json?.schemaVersion === 1
+      && Array.isArray(manifestRes.json?.locales),
+    `status=${manifestRes.status}`);
+  const zhPack = await getJson(port, '/locales/zh-CN/console.json');
+  const enPack = await getJson(port, '/locales/en-US/console.json');
+  check('GET /locales/{zh-CN,en-US}/console.json 200 + messages',
+    zhPack.status === 200 && enPack.status === 200
+      && typeof zhPack.json?.messages?.['nav.map'] === 'string'
+      && typeof enPack.json?.messages?.['nav.map'] === 'string',
+    `${zhPack.status}/${enPack.status}`);
+  const localeTraversal = await rawRequest(port, '/locales/%2e%2e/package.json');
+  const localeTraversal2 = await rawRequest(port, '/locales/..%2Fpackage.json');
+  const localeBadExt = await rawRequest(port, '/locales/zh-CN/console.mjs');
+  check('locale 路径穿越 / 非白名单扩展名被拒',
+    localeTraversal.status === 404 && localeTraversal2.status === 404 && localeBadExt.status === 404,
+    `${localeTraversal.status}/${localeTraversal2.status}/${localeBadExt.status}`);
 
   const traversal = await rawRequest(port, '/console/%2e%2e/package.json');
   const traversal2 = await rawRequest(port, '/console/..%2Fpackage.json');

@@ -10,7 +10,6 @@
     "console.css",
     "console.js",
     "i18n.mjs",
-    "messages",
     "starfield.js",
     "wizard.js"
   ],

@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "locale": "zh-CN",
+  "pack": "console",
+  "messages": {
+    "app.title": "Mebular 控制台",
+    "app.brand": "Mebular 控制台",
+    "nav.map": "星图",
+    "nav.domains": "共享",
+    "nav.memories": "记忆",
+    "nav.audit": "审计",
+    "topbar.settings": "设置",
+    "topbar.joinCloud": "加入忆云",
+    "topbar.invite": "邀请设备",
+    "topbar.createCloud": "新建忆云",
+    "settings.title": "本机设置",
+    "settings.aria": "本机设置",
+    "settings.tabsAria": "设置页签",
+    "settings.tab.common": "常用",
+    "settings.tab.security": "安全",
+    "settings.tab.assistants": "AI 助手",
+    "settings.tab.mcp": "MCP 接入",
+    "settings.tab.advanced": "高级",
+    "settings.language": "语言",
+    "settings.language.aria": "界面语言",
+    "settings.language.title": "界面语言（选择后立即生效）",
+    "settings.language.current": "当前语言：{language}",
+    "locale.zh-CN": "简体中文",
+    "locale.en-US": "English"
+  }
+}

@@ -106,6 +106,9 @@ try {
   const skillFiles = listTarball(skill.file);
   check('core tarball 含 dist/index.js', coreFiles.includes('package/dist/index.js'));
   check('core tarball 含 package.json', coreFiles.includes('package/package.json'));
+  check('core tarball 含 locales manifest + console packs',
+    ['package/locales/manifest.json', 'package/locales/zh-CN/console.json', 'package/locales/en-US/console.json']
+      .every((file) => coreFiles.includes(file)));
   check('service tarball 含 dist/index.js', serviceFiles.includes('package/dist/index.js'));
   check('service tarball 含 dist/cli.js', serviceFiles.includes('package/dist/cli.js'));
   check('fleet tarball 含 dist/cli.js/protocol', fleetFiles.includes('package/dist/cli.js') && fleetFiles.includes('package/protocol/state-machine.json'));

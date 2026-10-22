@@ -98,21 +98,21 @@ describe('E2-A2 忆云入口与卡片（静态契约）', () => {
     expect(consoleJs).toContain('/admin/api/clouds/inspect');
     expect(consoleJs).toContain('/admin/api/clouds/join');
     expect(consoleJs).toMatch(/body:\s*\{\s*token,\s*name,\s*confirm:\s*true\s*\}/);
-    expect(consoleJs).toContain('正在校验令牌');
-    expect(consoleJs).toContain('正在创建忆云');
+    expect(consoleJs).toContain("t('cloudJoin.steps.validating')");
+    expect(consoleJs).toContain("t('cloudJoin.steps.creating')");
     expect(consoleJs).toContain('mebular cloud use');
     expect(consoleJs).toContain('window.mebularDesktop?.cloudSwitch');
   });
 
   it('加入忆云标题与邀请一致：无「一次性令牌」tag；warning 一行短文案（归档保留）', () => {
     for (const id of ['cloud-join-title', 'onboard-join-title']) {
-      const heading = indexHtml.match(new RegExp(`<h2 id="${id}">[\\s\\S]*?</h2>`))?.[0] ?? '';
+      const heading = indexHtml.match(new RegExp(`<h2 id="${id}"[^>]*>[\\s\\S]*?</h2>`))?.[0] ?? '';
       expect(heading).toContain('加入忆云');
       expect(heading).not.toContain('crt-tag');
       expect(heading.match(/一次性令牌/g)).toBeNull();
     }
-    expect(consoleJs).toContain('加入后切换到新忆云；当前忆云「${current}」归档保留。');
-    expect(consoleJs).toContain('加入后仍需按提示切换；当前忆云「${current}」归档保留。');
+    expect(consoleJs).toContain("t('cloudJoin.warning.switch', { name: current })");
+    expect(consoleJs).toContain("t('cloudJoin.warning.manual', { name: current })");
     expect(consoleJs).not.toContain('⚠ 加入后本机会切换到新忆云');
   });
 
@@ -130,7 +130,7 @@ describe('E2-A2 忆云入口与卡片（静态契约）', () => {
 
   it('邀请单屏：忆云名 + 根指纹 + 一句引导', () => {
     expect(consoleJs).toContain('invite-cloud-identity');
-    expect(consoleJs).toContain('扫码加入，或复制令牌发给对方。');
+    expect(consoleJs).toContain("t('invite.lead')");
     expect(consoleJs).not.toContain('本忆云');
   });
 });
@@ -286,8 +286,8 @@ describe('UX-2 邀请单动作页', () => {
     // S3：结果面板从 renderInvite 抽成 showInviteResult（low 直接出；medium/high 门槛通过后复用）
     expect(consoleJs).toMatch(/function showInviteResult\(res\)/);
     expect(consoleJs).toContain('class="invite-layout"');
-    expect(consoleJs).toContain('扫码加入，或复制令牌发给对方。');
-    expect(consoleJs).toContain('一次性 · 仅当面或可信局域网传递。');
+    expect(consoleJs).toContain("t('invite.lead')");
+    expect(consoleJs).toContain("t('invite.safety')");
     expect(consoleJs).not.toContain('data-settings-fold="invite"');
     expect(consoleJs).not.toContain("foldLabel('invite')");
     expect(consoleJs).not.toContain('invite-endpoint');

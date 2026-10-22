@@ -2204,7 +2204,44 @@ async function main() {
     })()`;
     await evalJs('document.querySelector("#invite-device").click()');
     check('i18n 邀请弹框打开（结果面板就位）',
-      await waitFor('document.querySelector("#invite")?.hidden === false && Boolean(document.querySelector("#invite-body .invite-controls"))', 20000));
+      await waitFor('document.querySelector("#invite")?.hidden === false && Boolean(document.querySelector("#invite-body .invite-copy"))', 20000));
+    const inviteCopyProbe = `(() => {
+      const body = document.querySelector('#invite-body');
+      const ttl = body?.querySelector('#invite-ttl');
+      const label = body?.querySelector('.invite-label')?.textContent.trim() ?? '';
+      const lead = body?.querySelector('.invite-lead')?.textContent.trim() ?? '';
+      const safety = body?.querySelector('.invite-safety')?.textContent.trim() ?? '';
+      const copy = body?.querySelector('.invite-copy');
+      const ttlLabel = body?.querySelector('.invite-ttl .invite-label')?.textContent.trim() ?? '';
+      const regen = body?.querySelector('#invite-regenerate')?.textContent.trim() ?? '';
+      const options = [...(ttl?.options ?? [])].map((option) => option.textContent.trim());
+      const values = [label, lead, safety, copy?.textContent, ttlLabel, regen, ...options];
+      return {
+        lang: document.documentElement.lang,
+        title: document.querySelector('#invite h2')?.textContent.trim() ?? '',
+        closeAria: document.querySelector('#invite-close')?.getAttribute('aria-label') ?? '',
+        label, lead, safety,
+        copyLabel: copy?.textContent.trim() ?? '',
+        copyTitle: copy?.getAttribute('title') ?? '',
+        ttlLabel,
+        ttlOptions: options,
+        expiry: body?.querySelector('#invite-expiry')?.textContent.trim() ?? '',
+        regen,
+        cjk: values.some((value) => /[\\u3400-\\u9fff]/.test(value ?? '')),
+      };
+    })()`;
+    const inviteCopy = await evalJs(inviteCopyProbe);
+    check('i18n 邀请英文文案：标题/引导/令牌/有效期/重新生成/安全提示无中文兜底',
+      inviteCopy.lang === 'en-US' && inviteCopy.cjk === false
+        && inviteCopy.title === 'Invite device' && inviteCopy.closeAria === 'Close Invite device'
+        && inviteCopy.label === 'One-time token' && inviteCopy.lead === 'Scan to join, or copy the token.'
+        && inviteCopy.copyLabel === 'Copy token' && inviteCopy.copyTitle === 'Copy full token'
+        && /^One-time use ·/.test(inviteCopy.safety)
+        && inviteCopy.ttlLabel === 'Valid'
+        && inviteCopy.ttlOptions.join(',') === '5 min,15 min,20 min,2 h,6 h,12 h,24 h'
+        && /^(Current|After regeneration): /.test(inviteCopy.expiry)
+        && inviteCopy.regen === 'Renew',
+      JSON.stringify(inviteCopy));
     const invite1440 = await evalJs(controlsProbe);
     check('i18n 邀请动作行 1440：有效期/到期时刻/重新生成同排，无横向溢出',
       invite1440.open && invite1440.spread <= 8 && invite1440.boxOverflow === false && invite1440.pageOverflow === false,
@@ -2244,6 +2281,40 @@ async function main() {
     await evalJs('document.querySelector("#join-cloud").click()');
     check('i18n 加入弹框打开（底部动作行就位）',
       await waitFor('document.querySelector("#cloud-join")?.hidden === false && document.querySelectorAll("#cloud-join .modal-actions .btn").length === 2'));
+    const joinCopyProbe = `(() => {
+      const modal = document.querySelector('#cloud-join');
+      const labels = [...(modal?.querySelectorAll('.cloud-join-fields .field label') ?? [])].map((el) => el.textContent.trim());
+      const placeholders = [...(modal?.querySelectorAll('.cloud-join-fields input, .cloud-join-fields textarea') ?? [])].map((el) => el.placeholder);
+      const values = [
+        document.querySelector('#cloud-join-title')?.textContent,
+        document.querySelector('.cloud-join-lead')?.textContent,
+        ...labels, ...placeholders,
+        document.querySelector('#cloud-join-close')?.textContent,
+        document.querySelector('#cloud-join-submit')?.textContent,
+      ];
+      return {
+        lang: document.documentElement.lang,
+        title: document.querySelector('#cloud-join-title')?.textContent.trim() ?? '',
+        lead: modal?.querySelector('.cloud-join-lead')?.textContent.trim() ?? '',
+        labels, placeholders,
+        warning: document.querySelector('#cloud-join-warning')?.textContent.trim() ?? '',
+        cancel: document.querySelector('#cloud-join-close')?.textContent.trim() ?? '',
+        submit: document.querySelector('#cloud-join-submit')?.textContent.trim() ?? '',
+        closeAria: document.querySelector('#cloud-join-x')?.getAttribute('aria-label') ?? '',
+        cjk: values.some((value) => /[\\u3400-\\u9fff]/.test(value ?? '')),
+      };
+    })()`;
+    const joinCopy = await evalJs(joinCopyProbe);
+    check('i18n 加入英文文案：标题/说明/字段/占位/按钮无中文兜底',
+      joinCopy.lang === 'en-US' && joinCopy.cjk === false
+        && joinCopy.title === 'Join cloud'
+        && /^Paste the one-time token/.test(joinCopy.lead)
+        && joinCopy.labels.join('|') === 'Join token|Cloud name'
+        && joinCopy.placeholders[0] === 'Paste the token text (or the text from the QR code)…'
+        && /^After joining, (this console switches|follow the prompt to switch)/.test(joinCopy.warning)
+        && joinCopy.cancel === 'Cancel' && joinCopy.submit === 'Join cloud'
+        && joinCopy.closeAria === 'Close Join cloud',
+      JSON.stringify(joinCopy));
     const i18nJoin1440 = await evalJs(joinActionsProbe);
     check('i18n 加入动作行 1440：取消 + 加入同排、无横向溢出',
       i18nJoin1440.open && i18nJoin1440.rows === 1 && i18nJoin1440.actionRight <= i18nJoin1440.viewport + 1
@@ -2330,6 +2401,190 @@ async function main() {
       try {
         const obReady = await waitReady(onboardHandle);
         const obBase = `http://127.0.0.1:${obReady.port}`;
+
+        // —— 英文锁定态：顶栏 / 导航 / 横幅 / coach / 新建 / 加入（1440 / 1024 / 390）——
+        const lockedLayoutProbe = `(() => {
+          const actions = document.querySelector('.topbar-actions');
+          const buttons = [...actions.querySelectorAll('.btn')].filter((el) => !el.hidden);
+          const tops = buttons.map((el) => Math.round(el.getBoundingClientRect().top));
+          return {
+            rows: new Set(tops).size,
+            overflow: document.documentElement.scrollWidth <= window.innerWidth + 1,
+            labelsHidden: buttons.every((el) => getComputedStyle(el.querySelector('.btn-label')).display === 'none'),
+          };
+        })()`;
+        const modalLayoutProbe = `((id) => {
+          const modal = document.querySelector('#' + id);
+          const box = modal?.querySelector('.modal-box');
+          if (!modal || !box || modal.hidden) return { open: false };
+          const r = box.getBoundingClientRect();
+          return {
+            open: true,
+            boxOverflow: box.scrollWidth > box.clientWidth + 1,
+            pageOverflow: document.documentElement.scrollWidth <= window.innerWidth + 1,
+            inViewport: r.top >= 0 && r.left >= 0 && r.right <= window.innerWidth + 1 && r.bottom <= window.innerHeight + 1,
+          };
+        })`;
+
+        await send('Page.navigate', { url: `${obBase}/console/?lang=en-US` });
+        check('i18n 锁定英文：顶栏/导航/横幅/状态词全英文，无中文兜底', await waitFor(`(() => {
+          const app = document.querySelector('#app');
+          const text = app?.innerText ?? '';
+          const navTitles = [...document.querySelectorAll('#view-nav .view-btn[aria-disabled="true"]')].map((el) => el.title);
+          const create = document.querySelector('#create-cloud');
+          const join = document.querySelector('#join-cloud');
+          return document.documentElement.lang === 'en-US'
+            && app?.dataset.locked === 'true'
+            && create?.getAttribute('aria-label') === 'New cloud'
+            && join?.getAttribute('aria-label') === 'Join cloud'
+            && create?.querySelector('.btn-label')?.textContent.trim() === 'New'
+            && join?.querySelector('.btn-label')?.textContent.trim() === 'Join'
+            && /Device · Not initialized/.test(document.querySelector('#self-badge')?.textContent ?? '')
+            && /Not initialized/.test(document.querySelector('#online-badge')?.textContent ?? '')
+            && /Memories —/.test(document.querySelector('#memory-badge')?.textContent ?? '')
+            && /Security: —/.test(document.querySelector('#security-badge')?.textContent ?? '')
+            && navTitles.length === 3 && navTitles.every((title) => title === 'Available after you create or join a cloud')
+            && /Cloud not initialized/.test(document.querySelector('#banner')?.textContent ?? '')
+            && !/[\\u3400-\\u9fff]/.test(text);
+        })()`));
+        check('i18n 锁定英文：coach 文案英文且指向两个入口', await waitFor(`(() => {
+          const coach = document.querySelector('#onboarding-coach');
+          const text = coach?.innerText ?? '';
+          return Boolean(coach) && coach.hidden === false
+            && /Create a cloud or join an existing one/.test(text)
+            && /New cloud/.test(text) && /Join cloud/.test(text) && /Got it/.test(text)
+            && !/[\\u3400-\\u9fff]/.test(text)
+            && coach.getAttribute('aria-live') === 'polite';
+        })()`));
+        await capture('i18n-en-coach-1440.jpg');
+        await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+        const locked1440 = await evalJs(lockedLayoutProbe);
+        check('i18n 锁定英文 1440：动作同排、无横向溢出',
+          locked1440.rows === 1 && locked1440.overflow === true && locked1440.labelsHidden === false,
+          JSON.stringify(locked1440));
+        await captureNow('i18n-en-locked-1440.jpg');
+        await setViewport({ width: 1024, height: 768, deviceScaleFactor: 1, mobile: false });
+        const locked1024 = await evalJs(lockedLayoutProbe);
+        check('i18n 锁定英文 1024：动作同排且折叠为图标、无横向溢出',
+          locked1024.rows === 1 && locked1024.overflow === true && locked1024.labelsHidden === true,
+          JSON.stringify(locked1024));
+        await captureNow('i18n-en-locked-1024.jpg');
+        await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+        await send('Page.navigate', { url: `${obBase}/console/?lang=en-US&coach=auto` });
+        check('i18n 锁定英文 390：coach 在视口内、无横向溢出', await waitFor(`(() => {
+          const coach = document.querySelector('#onboarding-coach');
+          if (!coach || coach.hidden || !coach.classList.contains('is-visible')) return false;
+          const r = coach.getBoundingClientRect();
+          return r.left >= 0 && r.right <= window.innerWidth + 1
+            && r.top >= document.querySelector('.topbar').getBoundingClientRect().bottom
+            && !/[\\u3400-\\u9fff]/.test(coach.innerText)
+            && document.documentElement.scrollWidth <= window.innerWidth + 1;
+        })()`));
+        await captureNow('i18n-en-coach-390.jpg');
+        await captureNow('i18n-en-locked-390.jpg');
+        await clearViewport();
+
+        await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+        await send('Page.navigate', { url: `${obBase}/console/?lang=en-US` });
+        await waitFor('document.querySelector("#app")?.dataset.locked === "true"');
+        await evalJs('document.querySelector("#create-cloud").click()');
+        const createCopyProbe = `(() => {
+          const modal = document.querySelector('#onboard-create');
+          const labels = [...(modal?.querySelectorAll('.field label') ?? [])].map((el) => el.textContent.trim());
+          const inputs = [...(modal?.querySelectorAll('input') ?? [])];
+          return {
+            open: Boolean(modal) && modal.hidden === false,
+            title: document.querySelector('#onboard-create-title')?.textContent.trim() ?? '',
+            desc: modal?.querySelector('.modal-note')?.textContent.trim() ?? '',
+            labels,
+            placeholders: inputs.map((el) => el.placeholder),
+            cloudValue: inputs[0]?.value ?? '',
+            cancel: document.querySelector('#onboard-create-cancel')?.textContent.trim() ?? '',
+            submit: document.querySelector('#onboard-create-submit')?.textContent.trim() ?? '',
+            closeAria: document.querySelector('#onboard-create-close')?.getAttribute('aria-label') ?? '',
+            cjk: /[\\u3400-\\u9fff]/.test(modal?.innerText ?? ''),
+          };
+        })()`;
+        const createCopy = await evalJs(createCopyProbe);
+        check('i18n 锁定英文：新建弹框标题/标签/说明/按钮/默认名全英文',
+          createCopy.open && createCopy.cjk === false
+            && /New cloud/.test(createCopy.title) && /This device is root/.test(createCopy.title)
+            && /^Generates the root master key/.test(createCopy.desc)
+            && createCopy.labels.join('|') === 'Cloud name|Device name'
+            && createCopy.placeholders[0] === 'Cloud 1' && createCopy.placeholders[1] === 'e.g. MacBookPro'
+            && /^Cloud \d+$/.test(createCopy.cloudValue)
+            && createCopy.cancel === 'Cancel' && createCopy.submit === 'Create cloud'
+            && createCopy.closeAria === 'Close New cloud',
+          JSON.stringify(createCopy));
+        const create1440 = await evalJs(`${modalLayoutProbe}('onboard-create')`);
+        check('i18n 锁定英文新建 1440：弹框在视口内、无横向溢出',
+          create1440.open && create1440.boxOverflow === false && create1440.pageOverflow === true && create1440.inViewport === true,
+          JSON.stringify(create1440));
+        await captureNow('i18n-en-onboard-create-1440.jpg');
+        await setViewport({ width: 1024, height: 768, deviceScaleFactor: 1, mobile: false });
+        const create1024 = await evalJs(`${modalLayoutProbe}('onboard-create')`);
+        check('i18n 锁定英文新建 1024：无横向溢出',
+          create1024.open && create1024.boxOverflow === false && create1024.pageOverflow === true,
+          JSON.stringify(create1024));
+        await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+        const create390 = await evalJs(`${modalLayoutProbe}('onboard-create')`);
+        check('i18n 锁定英文新建 390：弹框在视口内、无横向溢出',
+          create390.open && create390.boxOverflow === false && create390.pageOverflow === true && create390.inViewport === true,
+          JSON.stringify(create390));
+        await captureNow('i18n-en-onboard-create-390.jpg');
+        await clearViewport();
+        await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+        await evalJs('document.querySelector("#onboard-create-cancel").click()');
+        await waitFor('document.querySelector("#onboard-create")?.hidden === true');
+        await evalJs('document.querySelector("#join-cloud").click()');
+        const joinOnboardCopyProbe = `(() => {
+          const modal = document.querySelector('#onboard-join');
+          const labels = [...(modal?.querySelectorAll('.field label') ?? [])].map((el) => el.textContent.trim());
+          const fields = [...(modal?.querySelectorAll('input, textarea') ?? [])];
+          return {
+            open: Boolean(modal) && modal.hidden === false,
+            title: document.querySelector('#onboard-join-title')?.textContent.trim() ?? '',
+            lead: modal?.querySelector('.modal-note')?.textContent.trim() ?? '',
+            labels,
+            placeholders: fields.map((el) => el.placeholder),
+            cancel: document.querySelector('#onboard-join-cancel')?.textContent.trim() ?? '',
+            submit: document.querySelector('#onboard-join-submit')?.textContent.trim() ?? '',
+            closeAria: document.querySelector('#onboard-join-close')?.getAttribute('aria-label') ?? '',
+            cjk: /[\\u3400-\\u9fff]/.test(modal?.innerText ?? ''),
+          };
+        })()`;
+        const joinOnboardCopy = await evalJs(joinOnboardCopyProbe);
+        check('i18n 锁定英文：加入弹框标题/说明/必填/字段/按钮全英文',
+          joinOnboardCopy.open && joinOnboardCopy.cjk === false
+            && joinOnboardCopy.title === 'Join cloud'
+            && /^Paste the one-time token/.test(joinOnboardCopy.lead)
+            && joinOnboardCopy.labels.length === 2
+            && /Device name/.test(joinOnboardCopy.labels[0]) && /Required/.test(joinOnboardCopy.labels[0])
+            && /Join token/.test(joinOnboardCopy.labels[1]) && /Required/.test(joinOnboardCopy.labels[1])
+            && joinOnboardCopy.placeholders[0] === 'e.g. MacBookPro'
+            && joinOnboardCopy.placeholders[1] === 'Paste the token text (or the text from the QR code)…'
+            && joinOnboardCopy.cancel === 'Cancel' && joinOnboardCopy.submit === 'Join cloud'
+            && joinOnboardCopy.closeAria === 'Close Join cloud',
+          JSON.stringify(joinOnboardCopy));
+        const joinOnboard1440 = await evalJs(`${modalLayoutProbe}('onboard-join')`);
+        check('i18n 锁定英文加入 1440：弹框在视口内、无横向溢出',
+          joinOnboard1440.open && joinOnboard1440.boxOverflow === false && joinOnboard1440.pageOverflow === true && joinOnboard1440.inViewport === true,
+          JSON.stringify(joinOnboard1440));
+        await captureNow('i18n-en-onboard-join-1440.jpg');
+        await setViewport({ width: 1024, height: 768, deviceScaleFactor: 1, mobile: false });
+        const joinOnboard1024 = await evalJs(`${modalLayoutProbe}('onboard-join')`);
+        check('i18n 锁定英文加入 1024：无横向溢出',
+          joinOnboard1024.open && joinOnboard1024.boxOverflow === false && joinOnboard1024.pageOverflow === true,
+          JSON.stringify(joinOnboard1024));
+        await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+        const joinOnboard390 = await evalJs(`${modalLayoutProbe}('onboard-join')`);
+        check('i18n 锁定英文加入 390：弹框在视口内、无横向溢出',
+          joinOnboard390.open && joinOnboard390.boxOverflow === false && joinOnboard390.pageOverflow === true && joinOnboard390.inViewport === true,
+          JSON.stringify(joinOnboard390));
+        await captureNow('i18n-en-onboard-join-390.jpg');
+        await clearViewport();
+        await evalJs('document.querySelector("#onboard-join-cancel").click()');
+
         await send('Page.navigate', { url: `${obBase}/console/` });
 
         // —— 锁定态：主控制台 + 星图 + 导航/卡片禁用 + toast ——

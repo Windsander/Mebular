@@ -1728,7 +1728,7 @@ try {
         && consoleSrc2.includes('/admin/api/clouds/inspect')
         && consoleSrc2.includes('/admin/api/clouds/join')
         && /body:\s*\{\s*token,\s*name,\s*confirm:\s*true\s*\}/.test(consoleSrc2)
-        && consoleSrc2.includes('正在校验令牌') && consoleSrc2.includes('正在创建忆云')
+        && consoleSrc2.includes("t('cloudJoin.steps.validating')") && consoleSrc2.includes("t('cloudJoin.steps.creating')")
         && consoleSrc2.includes('mebular cloud use')
         && consoleSrc2.includes('window.mebularDesktop?.cloudSwitch'),
       'inspect 不消费 nonce；join confirm:true；无 App 桥给 CLI 兜底');
@@ -1757,7 +1757,7 @@ try {
       '?view=settings&focus=clouds → 常用 + 卡片聚焦');
     check('E2-A2 术语：忆云 / 加入忆云 / 邀请设备 / 切换忆云 / 已归档 / 加入令牌；无「档案」「删除忆云」',
       !htmlSrc.includes('档案') && !consoleSrc2.includes('档案') && !consoleSrc2.includes('删除忆云')
-        && consoleSrc2.includes('切换忆云') && consoleSrc2.includes('已归档') && consoleSrc2.includes('加入令牌'),
+        && htmlSrc.includes('切换忆云') && consoleSrc2.includes('已归档') && htmlSrc.includes('加入令牌'),
       '用户可见词表零违例');
 
     // E1/U-1 · 邀请单屏：令牌 + 二维码（缺依赖降级）+ 忆云身份 + TTL/重新生成；无详情折叠。
@@ -1778,11 +1778,11 @@ try {
         && !inviteSrc.includes('默认记忆域')
         && inviteSrc.includes('class="invite-token-block"')
         && inviteSrc.includes('qrMarkup')
-        && inviteSrc.includes('二维码不可用')
+        && inviteSrc.includes("t('invite.qrUnavailable')")
         && inviteSrc.includes('data-copy=')
         && inviteSrc.includes('invite-cloud-identity')
-        && inviteSrc.includes('扫码加入，或复制令牌发给对方。')
-        && inviteSrc.includes('一次性 · 仅当面或可信局域网传递。'),
+        && inviteSrc.includes("t('invite.lead')")
+        && inviteSrc.includes("t('invite.safety')"),
       '无 details / endpointEditor / 命令；首屏令牌+QR+忆云行');
     check('E1 邀请 TTL：档位精确（5/15/20 分钟、2/6/12/24 小时），默认 15 分钟；改档不自动刷新',
       JSON.stringify(ttlIds) === JSON.stringify([300000, 900000, 1200000, 7200000, 21600000, 43200000, 86400000])
@@ -1814,7 +1814,7 @@ try {
       consoleSrc2.includes('invite-enable-service')
         && consoleSrc2.includes("fieldOf('joinService.enabled')")
         && consoleSrc2.includes('applyConfigField')
-        && /将重启守护/.test(consoleSrc2)
+        && consoleSrc2.includes("t('invite.enablingNote')")
         && !htmlSrc.includes('invite-to-settings'),
       '就地启用按钮 + applyConfigField + 重启提示；旧设置指路已删');
     const stripComments = (src) => src
@@ -1921,7 +1921,7 @@ try {
       { status: inviteRes.status, qr: String(inviteJson?.qrSvg ?? '').startsWith('<svg') ? 'svg' : 'missing' });
     const consoleSrc6 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
     check('C7 控制台邀请面板渲染二维码 + TTL/重新生成（无详情/订阅说明）',
-      ['扫码加入', 'qrSvg', 'id="invite-ttl"', 'id="invite-regenerate"'].every((token) => consoleSrc6.includes(token))
+      ['invite.lead', 'qrSvg', 'id="invite-ttl"', 'id="invite-regenerate"'].every((token) => consoleSrc6.includes(token))
         && !consoleSrc6.includes('fold-invite'));
     const pkg = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
     const fleetPkg = JSON.parse(await readFile(join(rootDir, 'packages', 'fleet', 'package.json'), 'utf-8'));
@@ -2374,7 +2374,7 @@ try {
         && /type="password"/.test(consoleSrcSec)
         && !/recovery[^\n]*localStorage|localStorage[^\n]*recovery/i.test(consoleSrcSec));
     check('S3 前端锚点：顶栏只读徽章 + 星图「需要注意」安全项',
-      htmlSec.includes('id="security-badge"') && /🛡 安全：/.test(consoleSrcSec)
+      htmlSec.includes('id="security-badge"') && consoleSrcSec.includes("t('topbar.security.badge'")
         && /动态码种子未导入/.test(await readFile(join(consoleDir, 'assistants.js'), 'utf-8'))
         && /待批准/.test(await readFile(join(consoleDir, 'assistants.js'), 'utf-8')));
     check('S3 前端锚点：审计安全过滤器/标签/拒绝原因映射',

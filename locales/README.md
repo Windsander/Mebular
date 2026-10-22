@@ -83,5 +83,6 @@ locales/
 
 `npm run check:i18n` 扫描 manifest + 所有 pack，校验文件存在、envelope 元数据、
 console key 对等、占位符一致、值非空、非默认语言不含中文（白名单），以及 loader /
-fallback / 静态引用。`tests/console/i18n.test.mjs` 用只读注入临时 locale 证明
-“加目录 + manifest 即可新增语言”。
+fallback / 静态引用。主路径（顶栏 / 导航 / 锁定态 / 新建 / 加入 / 邀请 / 向导）
+另有 key 组完整性与 `data-i18n` 挂载检查。`tests/console/i18n.test.mjs` 用只读注入
+临时 locale 证明“加目录 + manifest 即可新增语言”。

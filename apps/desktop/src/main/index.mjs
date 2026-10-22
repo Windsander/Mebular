@@ -8,7 +8,7 @@ import { openSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog, session } from 'electron';
+import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog, session, screen } from 'electron';
 import {
   APP_VERSION, consoleUrl, ensureDaemon, resolveCliBin, resolveHome, resolveHttp,
   serviceEnabledFor, stopManaged, waitForDaemonDetail, parseArgs, probeHealthDetail, probeProvision,
@@ -39,6 +39,9 @@ const serviceHome = homedir();
 let win = null;
 let tray = null;
 let quitDialog = null;
+let quitDialogReady = null;
+let quitDialogSession = null;
+let quitDialogIpcBound = false;
 let daemonChild = null;
 let daemonMode = null;
 let healthy = false;
@@ -362,69 +365,175 @@ async function navigateConsole(target) {
 }
 
 /**
- * 应用内退出确认：独立无框窗口（不依赖主窗口当前页面），向导 / loading / 隐藏窗口均可用。
+ * 应用内退出确认：应用启动时预热并复用独立无框窗口。
+ *
+ * 之前每次点「退出」才构造 BrowserWindow + loadFile，窗口首次出现要等页面加载；
+ * 主窗口隐藏时也没有 parent，单靠 focus() 在 macOS 上无法稳定把 App 带到前台。
+ * 这里在启动时预加载一次，展示时再显式解除隐藏、激活 App、切到当前 Space 并置顶。
  * 关闭、Esc、点取消都 resolve false；只有「退出」按钮 resolve true。
  */
+function centerQuitDialog(dialogWin) {
+  const parent = win && !win.isDestroyed() && win.isVisible() ? win : null;
+  const display = parent
+    ? screen.getDisplayMatching(parent.getBounds())
+    : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const area = display.workArea;
+  const [width, height] = dialogWin.getSize();
+  dialogWin.setPosition(
+    Math.round(area.x + (area.width - width) / 2),
+    Math.round(area.y + (area.height - height) / 2),
+    false,
+  );
+}
+
+function bringQuitDialogToFront(dialogWin) {
+  if (!dialogWin || dialogWin.isDestroyed()) return;
+  if (dialogWin.isMinimized()) dialogWin.restore();
+  // Cmd+H / app.hide() 之后仅 focus 不会自动解除隐藏；先 show App，再激活并聚焦窗口。
+  if (process.platform === 'darwin' && app.isHidden()) app.show();
+  dialogWin.show();
+  if (process.platform === 'darwin') app.focus({ steal: true });
+  dialogWin.moveTop();
+  dialogWin.focus();
+}
+
+function onQuitDialogAnswer(event, confirmed) {
+  if (!quitDialog || quitDialog.isDestroyed()) return;
+  if (event.sender !== quitDialog.webContents) return;
+  finishQuitDialog(confirmed === true);
+}
+
+function finishQuitDialog(confirmed) {
+  const session = quitDialogSession;
+  if (!session) return;
+  quitDialogSession = null;
+  if (quitDialog && !quitDialog.isDestroyed()) quitDialog.hide();
+  session.resolve(confirmed === true);
+}
+
+function createQuitDialog() {
+  const dialogWin = new BrowserWindow({
+    width: 452,
+    height: 296,
+    title: '退出 Mebular',
+    icon: appIconPath(),
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    frame: false,
+    show: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    backgroundColor: '#05070f',
+    webPreferences: {
+      preload: join(import.meta.dirname, '..', 'preload', 'quit-confirm.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+  quitDialog = dialogWin;
+  if (process.platform === 'darwin') {
+    dialogWin.setAlwaysOnTop(true, 'floating');
+    // 应用在另一个 Space / 全屏应用后面时，退出确认也应出现在用户当前所在的 Space。
+    dialogWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  }
+  dialogWin.on('close', (event) => {
+    // 真退出时允许 close；其余时候关闭 = 取消，窗口保留给下一次复用。
+    if (quitting) return;
+    event.preventDefault();
+    if (quitDialogSession) finishQuitDialog(false);
+    else dialogWin.hide();
+  });
+  dialogWin.on('closed', () => {
+    if (quitDialog !== dialogWin) return;
+    quitDialog = null;
+    quitDialogReady = null;
+    if (quitDialogSession) finishQuitDialog(false);
+  });
+  dialogWin.webContents.on('render-process-gone', () => {
+    if (quitDialog !== dialogWin) return;
+    if (quitDialogSession) finishQuitDialog(false);
+    if (!dialogWin.isDestroyed()) dialogWin.destroy();
+  });
+  dialogWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  dialogWin.webContents.on('will-navigate', (event) => event.preventDefault());
+  if (!quitDialogIpcBound) {
+    ipcMain.on('quit-confirm:answer', onQuitDialogAnswer);
+    quitDialogIpcBound = true;
+  }
+  quitDialogReady = new Promise((resolve) => {
+    let settled = false;
+    const settle = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    dialogWin.once('ready-to-show', () => settle(dialogWin));
+    dialogWin.loadFile(join(import.meta.dirname, '..', 'renderer', 'quit-confirm.html'))
+      .then(() => settle(dialogWin))
+      .catch((error) => {
+        console.log(`[desktop] 退出确认页面加载失败：${error?.message ?? error}`);
+        settle(null);
+      });
+  });
+  return dialogWin;
+}
+
+function resetQuitDialog() {
+  const dialogWin = quitDialog;
+  quitDialog = null;
+  quitDialogReady = null;
+  if (dialogWin && !dialogWin.isDestroyed()) dialogWin.destroy();
+}
+
+function ensureQuitDialog() {
+  if (quitDialog && !quitDialog.isDestroyed()) return quitDialog;
+  return createQuitDialog();
+}
+
+function presentQuitDialog(dialogWin, plan) {
+  if (!dialogWin || dialogWin.isDestroyed()) return;
+  centerQuitDialog(dialogWin);
+  if (!dialogWin.webContents.isDestroyed()) {
+    dialogWin.webContents.send('quit-confirm:plan', {
+      title: '退出 Mebular？',
+      message: plan.message,
+      buttons: plan.buttons,
+    });
+  }
+  bringQuitDialogToFront(dialogWin);
+}
+
 function showQuitConfirmation(plan) {
   return new Promise((resolve) => {
-    if (quitDialog && !quitDialog.isDestroyed()) {
-      quitDialog.focus();
+    if (quitDialogSession) {
+      if (quitDialog && !quitDialog.isDestroyed() && quitDialog.isVisible()) bringQuitDialogToFront(quitDialog);
       resolve(false);
       return;
     }
-    const parent = win && !win.isDestroyed() && win.isVisible() ? win : null;
-    const dialogWin = new BrowserWindow({
-      ...(parent ? { parent, modal: true } : {}),
-      width: 452,
-      height: 296,
-      title: '退出 Mebular',
-      icon: appIconPath(),
-      resizable: false,
-      minimizable: false,
-      maximizable: false,
-      fullscreenable: false,
-      frame: false,
-      show: false,
-      skipTaskbar: true,
-      alwaysOnTop: !parent,
-      backgroundColor: '#05070f',
-      webPreferences: {
-        preload: join(import.meta.dirname, '..', 'preload', 'quit-confirm.cjs'),
-        contextIsolation: true,
-        nodeIntegration: false,
-        sandbox: true,
-        webSecurity: true,
-      },
-    });
-    quitDialog = dialogWin;
-    let settled = false;
-    const finish = (confirmed) => {
-      if (settled) return;
-      settled = true;
-      ipcMain.off('quit-confirm:answer', onAnswer);
-      if (quitDialog === dialogWin) quitDialog = null;
-      if (!dialogWin.isDestroyed()) dialogWin.destroy();
-      resolve(confirmed === true);
-    };
-    const onAnswer = (event, confirmed) => {
-      if (event.sender !== dialogWin.webContents) return;
-      finish(confirmed === true);
-    };
-    ipcMain.on('quit-confirm:answer', onAnswer);
-    dialogWin.once('closed', () => finish(false));
-    dialogWin.once('ready-to-show', () => {
-      if (dialogWin.isDestroyed()) return;
-      // 主窗口隐藏时（托盘退出）独立窗口要主动把 App 带到前台，否则可能落在其他 App 后面。
-      if (!parent && process.platform === 'darwin') app.focus({ steal: true });
-      dialogWin.show();
-      dialogWin.focus();
-      dialogWin.webContents.send('quit-confirm:plan', {
-        title: '退出 Mebular？',
-        message: plan.message,
-        buttons: plan.buttons,
-      });
-    });
-    dialogWin.loadFile(join(import.meta.dirname, '..', 'renderer', 'quit-confirm.html')).catch(() => finish(false));
+    let dialogWin;
+    try {
+      dialogWin = ensureQuitDialog();
+    } catch (error) {
+      console.log(`[desktop] 退出确认窗口创建失败：${error?.message ?? error}`);
+      resolve(false);
+      return;
+    }
+    const session = { resolve, plan };
+    quitDialogSession = session;
+    quitDialogReady.then((ready) => {
+      if (quitDialogSession !== session) return;
+      if (!ready || ready.isDestroyed()) {
+        // 加载失败的窗口不可复用：清掉引用，下次退出时重新创建（自愈）。
+        resetQuitDialog();
+        finishQuitDialog(false);
+        return;
+      }
+      presentQuitDialog(ready, plan);
+    }).catch(() => finishQuitDialog(false));
   });
 }
 
@@ -954,6 +1063,12 @@ if (!gotLock) {
     registerIpc();
     createTray();
     createWindow();
+    // 预热退出确认页：首次托盘「退出」直接显示，不再等 BrowserWindow + loadFile。
+    try {
+      ensureQuitDialog();
+    } catch (error) {
+      console.log(`[desktop] 退出确认窗口预热失败：${error?.message ?? error}`);
+    }
     setWindowTitle();
     // S3：托盘只读等级每 20s 刷新一次（轻量 GET；失败保持旧值，不阻断壳）
     const securityTimer = setInterval(() => { void refreshTrayStatus(); }, 20_000);
@@ -993,6 +1108,10 @@ if (!gotLock) {
   });
 
   app.on('before-quit', () => {
+    if (quitDialog && !quitDialog.isDestroyed()) {
+      quitDialog.destroy();
+      quitDialog = null;
+    }
     stopManaged(daemonChild);
   });
 }

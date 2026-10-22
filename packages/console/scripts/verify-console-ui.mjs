@@ -12,7 +12,7 @@
 
 import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -2534,12 +2534,187 @@ async function main() {
       securityDialog.open === true && securityDialog.cjk === false
         && securityDialog.title === 'Import authenticator seed'
         && /Seed \(grouped text \/ otpauth URI\)/.test(securityDialog.body)
+        && /otpauth:\/\//.test(securityDialog.body) && !/<code>|<\/code>/.test(securityDialog.body)
         && /ABCD EFGH IJKL/.test(securityDialog.placeholder)
         && securityDialog.confirm === 'Import' && securityDialog.close === 'Close',
       JSON.stringify(securityDialog));
     await captureNow('i18n-en-security-dialog-1440.jpg');
     await evalJs('document.querySelector("#security-action-close")?.click()');
     await waitFor('document.querySelector("#security-action")?.hidden === true');
+
+    // B · 英文设置页密度：1440 / 1024 / 390 三档无横向溢出，长文案块不撑破弹框。
+    // 英文比中文长约 1.8×，只看页面 scrollWidth 会漏掉「弹框内部被长句撑开」；
+    // 因此同时断言弹框 / 滚动区 / 页面，以及每个可见文案块自身 scrollWidth <= clientWidth。
+    const settingsDensityProbe = `(() => {
+      const visible = (el) => {
+        const style = getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0;
+      };
+      const box = document.querySelector('#settings .modal-box');
+      const scroller = document.querySelector('#settings .settings-scroll');
+      const texts = [...document.querySelectorAll(
+        '#settings .settings-section-desc, #settings .settings-section-foot, #settings .cfg-help, '
+        + '#settings .settings-kv .kv-value, #settings .cloud-intro, #settings .settings-note',
+      )].filter(visible);
+      const overflow = texts
+        .filter((el) => el.scrollWidth > el.clientWidth + 1)
+        .map((el) => ({
+          cls: String(el.className || ''),
+          over: el.scrollWidth - el.clientWidth,
+          text: (el.textContent || '').trim().slice(0, 48),
+        }));
+      const boxRight = box ? box.getBoundingClientRect().right : 0;
+      const outside = texts.filter((el) => el.getBoundingClientRect().right > boxRight + 1).length;
+      const scrollerRight = scroller ? scroller.getBoundingClientRect().right : 0;
+      const offenders = scroller
+        ? [...scroller.querySelectorAll('*')].filter(visible)
+          .map((el) => {
+            const rect = el.getBoundingClientRect();
+            return {
+              tag: el.tagName.toLowerCase(),
+              cls: String(el.className || '').slice(0, 60),
+              over: el.scrollWidth - el.clientWidth,
+              rightOver: Math.round(rect.right - scrollerRight),
+              width: Math.round(rect.width),
+            };
+          })
+          .filter((entry) => entry.rightOver > 1 || entry.over > 1)
+          .slice(0, 10)
+        : [];
+      return {
+        viewport: window.innerWidth,
+        boxOver: box ? box.scrollWidth - box.clientWidth : null,
+        scrollerOver: scroller ? scroller.scrollWidth - scroller.clientWidth : null,
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+        outside,
+        textCount: texts.length,
+        overflow: overflow.slice(0, 6),
+        offenders,
+      };
+    })()`;
+    const densityViewports = [
+      ['1440', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }],
+      ['1024', { width: 1024, height: 768, deviceScaleFactor: 1, mobile: false }],
+      ['390', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }],
+    ];
+    await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const density = await evalJs(settingsDensityProbe);
+      check(`i18n 设置页密度 ${label}：弹框/滚动区/页面无横向溢出，文案块不越界`,
+        density.boxOver <= 0 && density.scrollerOver <= 0 && density.pageOver <= 0
+          && density.outside === 0 && density.overflow.length === 0,
+        JSON.stringify(density));
+      await captureNow(`i18n-en-settings-density-${label}.jpg`);
+    }
+
+    // 高级 → 诊断与恢复折叠：四条恢复指引（含命令/错误码）不得横向越界。
+    await setViewport(densityViewports[0][1]);
+    await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
+    await waitFor('document.querySelector("#settings-panel-advanced")?.hidden === false');
+    await evalJs('document.querySelector("#diag-fold").open = true');
+    const recoveryDensityProbe = `(() => {
+      const block = document.querySelector('#diag-fold [data-info-block=recovery]');
+      const box = document.querySelector('#settings .modal-box');
+      if (!block || !box) return { ok: false };
+      const values = [...block.querySelectorAll('.kv-value')];
+      const boxRight = box.getBoundingClientRect().right;
+      return {
+        ok: true,
+        viewport: window.innerWidth,
+        count: values.length,
+        over: values.filter((el) => el.scrollWidth > el.clientWidth + 1)
+          .map((el) => el.scrollWidth - el.clientWidth),
+        outside: values.filter((el) => el.getBoundingClientRect().right > boxRight + 1).length,
+        lengths: values.map((el) => (el.textContent || '').trim().length),
+        boxOver: box.scrollWidth - box.clientWidth,
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+      };
+    })()`;
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      await evalJs('document.querySelector("#diag-fold").scrollIntoView({ block: "start" })');
+      const recovery = await evalJs(recoveryDensityProbe);
+      check(`i18n 高级诊断/恢复折叠 ${label}：四条指引不横向越界`,
+        recovery.ok && recovery.count === 4 && recovery.over.length === 0
+          && recovery.outside === 0 && recovery.boxOver <= 0 && recovery.pageOver <= 0,
+        JSON.stringify(recovery));
+      await captureNow(`i18n-en-settings-recovery-${label}.jpg`);
+    }
+    await evalJs('document.querySelector("#diag-fold").open = false');
+
+    // 文案预算：精简后仍保留恢复命令 / 错误码 / 环境变量，且段落已分行（不再是一整句 400+ 字符）。
+    const enMessages = JSON.parse(readFileSync(join(__dirname, '..', '..', '..', 'locales', 'en-US', 'console.json'), 'utf-8')).messages;
+    const copyBudget = {
+      'settings.diag.recovery.authBody': 430,
+      'settings.diag.recovery.hostBody': 170,
+      'settings.diag.recovery.certBody': 200,
+      'settings.diag.recovery.consoleBody': 210,
+      'settings.cloud.note': 150,
+      'settings.restart.confirmBody': 160,
+      'settings.security.boundary': 160,
+      'settings.security.totp.foot': 140,
+      'settings.write.confirmBody': 140,
+    };
+    const copyOver = Object.entries(copyBudget)
+      .filter(([key, max]) => String(enMessages[key] ?? '').length > max)
+      .map(([key, max]) => ({ key, length: String(enMessages[key] ?? '').length, max }));
+    const authBody = String(enMessages['settings.diag.recovery.authBody'] ?? '');
+    const authTokens = [
+      'mebular token grant --scope memory.read,memory.admin',
+      '401 invalid token',
+      '/register',
+      '404',
+      'MEBULAR_OAUTH_ADMIN_SECRET',
+      'MEBULAR_OAUTH_REGISTER_SECRET',
+      'mcp.http.auth=none',
+      'config.json',
+      'mebular serve',
+    ];
+    const missingTokens = authTokens.filter((token) => !authBody.includes(token));
+    check('i18n 英文设置长文案：恢复指引分行、超长段落已收短，命令/错误码/环境变量全部保留',
+      copyOver.length === 0 && missingTokens.length === 0
+        && (authBody.match(/<br>/g) ?? []).length >= 3
+        && String(enMessages['settings.diag.recovery.consoleBody']).includes('MCP_STORAGE_LOCKED')
+        && String(enMessages['settings.diag.recovery.certBody']).includes('MCP_INSECURE_CONFIG'),
+      JSON.stringify({ copyOver, missingTokens, authLength: authBody.length }));
+
+    // 安全弹层（TOTP 导入）：三档视口内不横向溢出，正文不越界。
+    const securityDensityProbe = `(() => {
+      const modal = document.querySelector('#security-action');
+      const box = modal?.querySelector('.modal-box');
+      if (!modal || modal.hidden || !box) return { open: false };
+      const visible = (el) => {
+        const style = getComputedStyle(el);
+        return style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0;
+      };
+      const texts = [...box.querySelectorAll('p, li, label, .crt-warn')].filter(visible);
+      const boxRight = box.getBoundingClientRect().right;
+      return {
+        open: true,
+        viewport: window.innerWidth,
+        boxOver: box.scrollWidth - box.clientWidth,
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+        outside: texts.filter((el) => el.getBoundingClientRect().right > boxRight + 1).length,
+        overflow: texts.filter((el) => el.scrollWidth > el.clientWidth + 1)
+          .map((el) => ({ cls: String(el.className || ''), over: el.scrollWidth - el.clientWidth })),
+      };
+    })()`;
+    await evalJs('document.querySelector("[data-settings-tab=security]").click()');
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      await evalJs('document.querySelector("[data-security-action=totp-import]")?.click()');
+      await waitFor('document.querySelector("#security-action")?.hidden === false');
+      const securityDensity = await evalJs(securityDensityProbe);
+      check(`i18n 安全弹层密度 ${label}：弹框与正文不横向越界`,
+        securityDensity.open && securityDensity.boxOver <= 0 && securityDensity.pageOver <= 0
+          && securityDensity.outside === 0 && securityDensity.overflow.length === 0,
+        JSON.stringify(securityDensity));
+      await captureNow(`i18n-en-settings-security-${label}.jpg`);
+      await evalJs('document.querySelector("#security-action-close")?.click()');
+      await waitFor('document.querySelector("#security-action")?.hidden === true');
+    }
+    await setViewport(densityViewports[0][1]);
     await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
 
     await evalJs('document.querySelector("#settings-close").click()');

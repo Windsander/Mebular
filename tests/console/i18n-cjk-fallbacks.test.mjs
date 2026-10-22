@@ -20,6 +20,8 @@ import {
 } from '../../packages/console/settings-ia.js';
 import { CONFIG_SCHEMA } from '../../packages/mcp/src/config-schema.mjs';
 import { projectAssistantStatus } from '../../packages/console/assistant-status.js';
+import { assistantsPanelHtml } from '../../packages/console/assistants.js';
+import { initI18n, setLocale } from '../../packages/console/i18n.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -136,6 +138,53 @@ describe('英文界面 · 代码兜底中文清理', () => {
       projectAssistantStatus({ state: 'not-connected' }, {}),
     ];
     for (const status of states) expectLocalizedKey(status.labelKey);
+  });
+
+  it('AI 助手服务端中文不透出：通用名称 / 激活说明 / 验证步骤 / 证据在英文界面全部本地化', async () => {
+    const manifest = {
+      schemaVersion: 1,
+      defaultLocale: 'zh-CN',
+      fallbackLocale: 'zh-CN',
+      packs: ['console'],
+      locales: [
+        { locale: 'zh-CN', nativeName: '简体中文', files: { console: 'zh-CN/console.json' } },
+        { locale: 'en-US', nativeName: 'English', files: { console: 'en-US/console.json' } },
+      ],
+    };
+    await initI18n({ manifest, catalogs: { 'zh-CN': zh, 'en-US': en }, storage: null, search: '', languages: [], documentLang: false });
+    setLocale('en-US', { persist: false });
+    try {
+      const clients = [
+        { id: 'generic', name: '其他 AI 助手（复制片段）', kind: 'builtin', state: 'manual', type: 'snippet', writer: { strategy: 'manual' } },
+        {
+          id: 'cursor', name: 'Cursor', kind: 'builtin', state: 'connected', hasVerify: true,
+          activation: { kind: 'user-reload', note: '重启 Cursor 后生效' },
+          evidence: [{ kind: 'config-path', detail: '存在：/tmp/cursor.json' }],
+        },
+      ];
+      const ui = {
+        clientOpen: { cursor: true },
+        clientVerify: {
+          cursor: {
+            state: 'pending-restart',
+            steps: [
+              { name: 'readback', label: '回读校验', ok: true, detail: 'mebular 条目已写入，其余键无损' },
+              { name: 'cli', label: 'CLI 验证', ok: false, detail: '未通过（rc=1）' },
+            ],
+          },
+        },
+      };
+      const html = assistantsPanelHtml({ clients, ui });
+      expect(html).toContain('Other AI assistant (copy snippet)');
+      expect(html).toContain('Readback check');
+      expect(html).toContain('CLI check');
+      expect(html).toContain('Not passed (rc=1)');
+      expect(html).toContain('Takes effect after you restart Cursor');
+      expect(html).toContain('Present: /tmp/cursor.json');
+      expect(CJK.test(html)).toBe(false);
+    } finally {
+      setLocale('zh-CN', { persist: false });
+    }
   });
 
   it('Console 渲染层确实使用 key（不是直接打印 schema 中文）', () => {

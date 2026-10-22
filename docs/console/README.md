@@ -17,3 +17,5 @@
 - [`page-map.md`](./page-map.md) —— 页面地图：哪个设置在哪个 Tab（常用/高级/诊断）与「关于本机」。
 - [`interaction-draft.md`](./interaction-draft.md) —— 交互草稿（视图/动作/状态）。
 - [`e2-manual-acceptance.md`](./e2-manual-acceptance.md) —— 人工验收手册（E2）。
+- [`i18n-finalize-acceptance.md`](./i18n-finalize-acceptance.md) —— v0.1.0 双语发布门禁验收
+  （静态/测试、三档布局、真实 Electron 隔离验证、已知缺口）。

@@ -355,7 +355,14 @@ async function main() {
     const waitFor = async (expression, timeoutMs = 15000) => {
       const started = Date.now();
       while (Date.now() - started < timeoutMs) {
-        if (await evalJs(expression)) return true;
+        try {
+          if (await evalJs(expression)) return true;
+        } catch (error) {
+          // 导航/重载的瞬间 documentElement 可能为 null，或旧执行上下文已销毁：
+          // 这是等待条件尚未成立，不是断言失败；下一轮重新求值即可。
+          const transient = /Cannot read properties of null|Execution context was destroyed|Cannot find context|Inspected target navigated/.test(String(error?.message ?? error));
+          if (!transient) throw error;
+        }
         await sleep(200);
       }
       return false;

@@ -7,7 +7,7 @@
 // i18n：用户可见文案走 console pack（t）；catalog 未加载（单测 / 静态兜底）时回退本文件的中文字面量。
 
 import { projectAssistantStatus } from './assistant-status.js';
-import { t, interpolate } from './i18n.mjs';
+import { t, interpolate, getLocale } from './i18n.mjs';
 
 const esc = (s) => String(s ?? '')
   .replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
@@ -15,6 +15,63 @@ const esc = (s) => String(s ?? '')
 
 /** 文案：key 命中 catalog 用译文，否则回退中文兜底（单测无 catalog 时保持原有断言）。 */
 const tr = (key, fallback, vars) => (t.has(key) ? t(key, vars) : interpolate(fallback, vars));
+
+const CJK_TEXT = /[\u3400-\u9fff]/;
+const isEnglishUi = () => !String(getLocale?.() ?? 'zh-CN').trim().toLowerCase().startsWith('zh');
+
+/**
+ * 服务端（@mebular/mcp clients.mjs）的 descriptor 不区分界面语言，部分 name / note /
+ * evidence / verify 文案是中文。英文界面不能把这些原文透出去：
+ * - 已知稳定字段按 id/name 映射 i18n key；
+ * - 未知中文按领域退回英文通用文案（保留路径等非中文值）。
+ */
+function localizeServerName(client) {
+  const name = String(client.name ?? client.id ?? '');
+  if (client.id === 'generic' && client.builtin !== false) {
+    return tr('assistants.generic.name', name);
+  }
+  return name;
+}
+
+function localizeActivationNote(client) {
+  const note = String(client.activation?.note ?? '');
+  if (!note || !CJK_TEXT.test(note) || !isEnglishUi()) return note;
+  const key = `assistants.activation.${client.id}`;
+  return t.has(key) ? t(key) : '';
+}
+
+function localizeVerifyLabel(step) {
+  const label = String(step.label ?? step.name ?? '');
+  if (!isEnglishUi() || !CJK_TEXT.test(label)) return label;
+  if (step.name === 'readback') return tr('assistants.verify.step.readback', 'Readback check');
+  if (step.name === 'cli') return tr('assistants.verify.step.cli', 'CLI check');
+  return tr('assistants.verify.step.generic', 'Step');
+}
+
+function localizeServerDetail(raw, fallbackKey = 'assistants.detail.evidenceUnavailable', fallbackText = 'Details unavailable in English') {
+  const text = String(raw ?? '');
+  if (!isEnglishUi() || !CJK_TEXT.test(text)) return text;
+  const notPassed = text.match(/^未通过（rc=(\d+)(?:[,，]\s*tools=(\d+))?）$/);
+  if (notPassed) {
+    return notPassed[2] === undefined
+      ? tr('assistants.verify.detail.notPassed', 'Not passed (rc={rc})', { rc: notPassed[1] })
+      : tr('assistants.verify.detail.notPassedTools', 'Not passed (rc={rc}, tools={tools})', { rc: notPassed[1], tools: notPassed[2] });
+  }
+  const matched = text.match(/^命中\s*(.*)$/);
+  if (matched) return tr('assistants.verify.detail.matched', 'Matched {value}', { value: matched[1] });
+  if (/^mebular 条目已写入/.test(text)) {
+    return tr('assistants.verify.detail.readbackWritten', 'mebular entry written; other keys intact');
+  }
+  const present = text.match(/^存在[:：]\s*(.+)$/);
+  if (present) return tr('assistants.detail.evidencePresent', 'Present: {value}', { value: present[1] });
+  const missing = text.match(/^不存在[:：]?\s*(.*)$/);
+  if (missing) return tr('assistants.detail.evidenceMissing', 'Missing: {value}', { value: missing[1] });
+  const probeError = text.match(/^探测异常[:：]?\s*(.*)$/);
+  if (probeError && !CJK_TEXT.test(probeError[1])) {
+    return tr('assistants.detail.evidenceProbeError', 'Probe error: {value}', { value: probeError[1] });
+  }
+  return tr(fallbackKey, fallbackText);
+}
 
 /** 归一化客户端条目：轮 A 新形状优先，旧形状推导，未知字段容忍。 */
 export function normalizeClient(c = {}) {
@@ -27,7 +84,7 @@ export function normalizeClient(c = {}) {
     ? c.state !== 'not-installed' && c.state !== 'detect-failed'
     : Boolean(c.installed);
   const connected = c.state ? c.state === 'connected' : Boolean(c.installed && c.connected);
-  return {
+  const client = {
     id: String(c.id ?? ''),
     name: String(c.name ?? c.id ?? ''),
     custom: (c.kind ?? c.registryKind) === 'custom',
@@ -45,6 +102,8 @@ export function normalizeClient(c = {}) {
     skillsDirs: c.skillsDirs ?? [],
     skillsInstalled: Boolean(c.skillsInstalled),
   };
+  client.name = localizeServerName(client);
+  return client;
 }
 
 /** 状态词投影（共享 helper 薄封装；clientRestart 语义 = reloadHint 提示层，不再驱动「待生效」）。 */
@@ -78,19 +137,21 @@ function verifyBlockHtml(client, verify) {
   const rows = steps.map((s) => {
     const icon = s.ok ? '✓' : '✗';
     const cls = s.ok ? 'ok' : 'todo';
+    const detail = localizeServerDetail(s.detail, 'assistants.verify.detail.unavailable', 'Details unavailable');
     // 验证失败但命令没有 stdout/stderr 时也要给出一行可诊断原因：
     // 否则界面只有“未通过（rc=…）”，用户看不到为什么，验收也无法确认输出区存在。
     const out = typeof s.output === 'string' && s.output.trim().length > 0
       ? `<pre class="connect-diff asst-output" data-asst-output>${esc(s.output)}</pre>`
       : (!s.ok ? `<pre class="connect-diff asst-output" data-asst-output>${esc(tr('assistants.verify.noOutput', '（验证命令没有返回输出；{detail}）', {
-        detail: s.detail ?? tr('assistants.verify.notPassed', '未通过'),
+        detail: detail || tr('assistants.verify.notPassed', '未通过'),
       }))}</pre>` : '');
-    return `<p class="asst-line ${cls}">${icon} ${esc(s.label ?? s.name ?? '')}：${esc(s.detail ?? '')}</p>${out}`;
+    return `<p class="asst-line ${cls}">${icon} ${esc(localizeVerifyLabel(s))}${isEnglishUi() ? ': ' : '：'}${esc(detail)}</p>${out}`;
   }).join('');
   let stateLine = '';
   if (verify.state === 'pending-restart') {
-    stateLine = client.activation?.note
-      ? `<p class="asst-line todo">${esc(tr('assistants.verify.pendingWithNote', '已接好——重启 {name} 这个软件后生效（{note}）', { name: client.name, note: client.activation.note }))}</p>`
+    const note = localizeActivationNote(client);
+    stateLine = note
+      ? `<p class="asst-line todo">${esc(tr('assistants.verify.pendingWithNote', '已接好——重启 {name} 这个软件后生效（{note}）', { name: client.name, note }))}</p>`
       : `<p class="asst-line todo">${esc(tr('assistants.verify.pending', '已接好——重启 {name} 这个软件后生效', { name: client.name }))}</p>`;
   } else if (verify.state === 'connected') {
     stateLine = `<p class="asst-line ok">${esc(tr('assistants.verify.ok', '验证通过，已接入 ✓'))}</p>`;
@@ -102,7 +163,7 @@ function verifyBlockHtml(client, verify) {
 
 function rowHtml(client, ui, status) {
   const id = esc(client.id);
-  const msg = ui.clientMsg?.[client.id] ?? '';
+  const msg = localizeServerDetail(ui.clientMsg?.[client.id] ?? '', 'assistants.failed.label', 'Connection failed');
   const diff = ui.clientDiff?.[client.id] ?? '';
   const verify = ui.clientVerify?.[client.id] ?? null;
   const failed = ui.clientFailed?.[client.id] ?? null;
@@ -131,7 +192,11 @@ function rowHtml(client, ui, status) {
   }
   // 补丁 3：接入失败反馈——一行原因（人话/脱敏）+ rolledBack 明示「已自动还原原配置」+ 查看详情（备份/命令摘要）
   if (failed) {
-    detailBits.push(`<p class="asst-line todo">${esc(failed.reason ?? tr('assistants.failed.label', '接入失败'))}</p>`);
+    detailBits.push(`<p class="asst-line todo">${esc(localizeServerDetail(
+      failed.reason,
+      'assistants.failed.label',
+      'Connection failed',
+    ) || tr('assistants.failed.label', '接入失败'))}</p>`);
     if (failed.rolledBack) {
       const cmds = Array.isArray(failed.commands) && failed.commands.length > 0
         ? `<br />${esc(tr('assistants.failed.commands', '命令摘要：{commands}', {
@@ -159,9 +224,11 @@ function rowHtml(client, ui, status) {
     const bits = [];
     if (client.configPath) bits.push(tr('assistants.detail.criteria', '判据/落面：{path}', { path: `<code>${esc(client.configPath)}</code>` }));
     if (Array.isArray(client.evidence) && client.evidence.length > 0) {
-      bits.push(client.evidence.map((e) => esc(`${e?.kind ?? ''}: ${e?.detail ?? ''}`)).join('；'));
+      bits.push(client.evidence
+        .map((e) => esc(`${e?.kind ?? ''}: ${localizeServerDetail(e?.detail)}`))
+        .join(isEnglishUi() ? '; ' : '；'));
     } else if (client.evidence) {
-      bits.push(esc(typeof client.evidence === 'string' ? client.evidence : JSON.stringify(client.evidence)));
+      bits.push(esc(typeof client.evidence === 'string' ? localizeServerDetail(client.evidence) : JSON.stringify(client.evidence)));
     }
     if (!client.hasVerify && status.key === 'connected') bits.push(esc(tr('assistants.detail.configOnly', '仅配置级验证（该助手未提供验证命令）')));
     const customActions = client.custom

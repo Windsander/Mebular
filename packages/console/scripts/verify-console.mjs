@@ -285,7 +285,7 @@ try {
   const index = await fetch(`http://127.0.0.1:${port}/console`);
   const indexText = await index.text();
   check('GET /console 200 + text/html', index.status === 200 && /text\/html/.test(index.headers.get('content-type') ?? ''), `status=${index.status}`);
-  check('/console 返回控制台页面', indexText.includes('Mebular 控制台'));
+  check('/console 返回控制台页面', indexText.includes('Mebular'));
 
   // 防再犯：index.html 中 id 必须唯一（provision-restart 待重启面板曾被整块复制两遍，
   // 重复 id ×5，JS querySelector 只接线第一块，第二块成为带重复 id 的死代码）

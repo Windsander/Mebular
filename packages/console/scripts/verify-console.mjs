@@ -246,7 +246,7 @@ function openSse(port, path, timeoutMs = 8000) {
   });
 }
 
-console.log('Mebular 控制台 E1 验证（D1+D2，含 D3 向导状态机）');
+console.log('Mebular E1 验证（D1+D2，含 D3 向导状态机）');
 console.log('===============================');
 
 // ---------- E1 · 手动连接（网内传输修复）状态机（纯函数，无需起服务） ----------
@@ -298,7 +298,7 @@ try {
   }
   check('/console 下发 CSRF cookie 与响应头', (index.headers.get('set-cookie') ?? '').includes('mebular_csrf=') && Boolean(index.headers.get('x-mebular-csrf')));
 
-  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['assistants.js', 'text/javascript'], ['settings-ia.js', 'text/javascript'], ['i18n.mjs', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript'], ['nebula.js', 'text/javascript'], ['stars.js', 'text/javascript']]) {
+  for (const [file, mime] of [['console.css', 'text/css'], ['console.js', 'text/javascript'], ['dropdown.mjs', 'text/javascript'], ['assistants.js', 'text/javascript'], ['settings-ia.js', 'text/javascript'], ['i18n.mjs', 'text/javascript'], ['starfield.js', 'text/javascript'], ['wizard.js', 'text/javascript'], ['nebula.js', 'text/javascript'], ['stars.js', 'text/javascript']]) {
     const res = await fetch(`http://127.0.0.1:${port}/console/${file}`);
     check(`静态资源 /console/${file} 200`, res.status === 200 && (res.headers.get('content-type') ?? '').includes(mime), `status=${res.status}`);
   }
@@ -1539,6 +1539,42 @@ try {
 
     const htmlSrc = await readFile(join(consoleDir, 'index.html'), 'utf-8');
     const consoleSrc2 = await readFile(join(consoleDir, 'console.js'), 'utf-8');
+    const dropdownSrc = await readFile(join(consoleDir, 'dropdown.mjs'), 'utf-8');
+    const i18nSrc = await readFile(join(consoleDir, 'i18n.mjs'), 'utf-8');
+    const assistantsSrc = await readFile(join(consoleDir, 'assistants.js'), 'utf-8');
+    const dropdownCss = await readFile(join(consoleDir, 'console.css'), 'utf-8');
+
+    // 自定义下拉框：9 个可见原生 select 全部走共享组件；原生 select 只留值/事件兼容层。
+    check('下拉框 · 9 个可见控件覆盖（语言/邀请 TTL/助手格式/4 审计/记忆域/MCP auth）',
+      ['settings-language-select'].every((id) => i18nSrc.includes(`id="${id}"`))
+        && ['invite-ttl'].every((id) => consoleSrc2.includes(`id="${id}"`))
+        && ['asst-add-format'].every((id) => assistantsSrc.includes(`id="${id}"`))
+        && ['audit-filter-action', 'audit-filter-device', 'audit-filter-namespace', 'audit-filter-time', 'mem-filter-namespace']
+          .every((id) => htmlSrc.includes(`id="${id}"`))
+        && /field\.type === 'select'[\s\S]{0,500}id="\$\{id\}"/.test(consoleSrc2)
+        && consoleSrc2.includes("from './dropdown.mjs'")
+        && consoleSrc2.includes('enhanceFilterSelects()')
+        && consoleSrc2.includes('enhanceSelects(body)')
+        && consoleSrc2.includes("enhanceSelect(body.querySelector('#invite-ttl'))"),
+      '5 静态 + 语言 + 邀请 + 助手 + MCP auth');
+    check('下拉框 · 零依赖组件 API / combobox + listbox / 固定定位 / 键盘与动态选项',
+      !/^import\s/m.test(dropdownSrc)
+        && /export function enhanceSelect\(select, options = \{\}\)/.test(dropdownSrc)
+        && /export function enhanceSelects\(root = globalThis\.document\)/.test(dropdownSrc)
+        && dropdownSrc.includes("setAttribute('role', 'combobox')")
+        && dropdownSrc.includes("setAttribute('role', 'listbox')")
+        && dropdownSrc.includes("aria-activedescendant")
+        && dropdownSrc.includes('triggerRect.bottom + gap')
+        && dropdownSrc.includes('const gap = 6;')
+        && ['ArrowDown', 'ArrowUp', 'Home', 'End', 'Escape'].every((key) => dropdownSrc.includes(`'${key}'`))
+        && dropdownSrc.includes('rebuildMenu(record')
+        && dropdownSrc.includes("new Event('change', { bubbles: true })")
+        && dropdownSrc.includes('records.get(select)')
+        && dropdownCss.includes('.crt-select-menu {\n  position: fixed;')
+        && /\.crt-select-trigger \{[\s\S]*?border-radius: 8px;/.test(dropdownCss)
+        && dropdownCss.includes('.crt-select > select.crt-select-native')
+        && dropdownCss.includes('.crt-select[data-variant="compact"] .crt-select-trigger'),
+      'menu fixed / trigger 8px / compact / 隐藏原生层');
 
     // UX-2 简化轮：内容管理出设置（订阅域归「记忆共享」）；自动策略出 GUI（internal）；即时生效无「保存」按钮
     check('简化轮 · 订阅域归主页「记忆共享」（设置页不渲染）且黑盒自动策略 internal（GUI 不渲染，API 仍可写）',

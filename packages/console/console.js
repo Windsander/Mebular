@@ -13,8 +13,17 @@ import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTI
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, LOCALE_STORAGE_KEY, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
+import { enhanceSelect, enhanceSelects } from './dropdown.mjs';
 
 const $ = (selector) => document.querySelector(selector);
+// 静态筛选器使用紧凑 variant；动态设置/邀请/助手表单在渲染后统一 enhance。
+const FILTER_SELECT_IDS = ['audit-filter-action', 'audit-filter-device', 'audit-filter-namespace', 'audit-filter-time', 'mem-filter-namespace'];
+function enhanceFilterSelects() {
+  for (const id of FILTER_SELECT_IDS) {
+    const select = document.getElementById(id);
+    if (select) enhanceSelect(select, { variant: 'compact' });
+  }
+}
 const params = new URLSearchParams(location.search);
 const MOCK = params.get('mock') === '1';
 const POLL_MS = 3000;
@@ -88,6 +97,7 @@ const hasExplicitLocale = Boolean(params.get('lang')?.trim()) || Boolean(localSt
 await initI18n({ languages: hasExplicitLocale ? undefined : [] });
 if (!hasExplicitLocale && getLocale() !== 'zh-CN') setLocale('zh-CN', { persist: false });
 applyStaticI18n(document);
+enhanceFilterSelects();
 onLocaleChange(() => {
   applyStaticI18n(document);
   lastSettingsSignature = null;
@@ -1512,6 +1522,8 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   });
   bindSecurityCard(body);
   bindConfigEditor();
+  // 设置页整体重建后重新增强：语言行 / MCP auth select / 助手配置格式等动态控件。
+  enhanceSelects(body);
   if (prevPath) {
     const el = body.querySelector(`[data-cfg-path="${CSS.escape(prevPath)}"]`);
     if (el && typeof el.focus === 'function') {
@@ -4433,7 +4445,10 @@ async function renderInvite(ttlMs = state.inviteTtlMs, { keepPanel = false } = {
       button.textContent = t('invite.regenerating');
     }
     ttlSelect = body.querySelector('#invite-ttl');
-    if (ttlSelect) ttlSelect.disabled = true;
+    if (ttlSelect) {
+      ttlSelect.disabled = true;
+      enhanceSelect(ttlSelect);
+    }
     const regenError = body.querySelector('#invite-regen-error');
     if (regenError) {
       regenError.hidden = true;
@@ -4461,7 +4476,10 @@ async function renderInvite(ttlMs = state.inviteTtlMs, { keepPanel = false } = {
       button.textContent = button.dataset.label ?? t('invite.regenerate');
       delete button.dataset.label;
     }
-    if (ttlSelect) ttlSelect.disabled = false;
+    if (ttlSelect) {
+      ttlSelect.disabled = false;
+      enhanceSelect(ttlSelect);
+    }
     const message = displayErrorDetail(error);
     const regenError = body.querySelector('#invite-regen-error');
     if (regenError) {
@@ -4657,6 +4675,7 @@ function showInviteResult(res) {
       <p class="invite-safety">${escapeHtml(t('invite.safety'))}</p>
     </div>
   `;
+  enhanceSelect(body.querySelector('#invite-ttl'));
   body.querySelector('#invite-ttl')?.addEventListener('change', (event) => {
     const value = Number(event.currentTarget.value);
     if (!INVITE_TTL_OPTIONS.some((option) => option.ttlMs === value)) return;

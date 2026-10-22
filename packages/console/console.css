@@ -834,6 +834,136 @@ body.modal-open { overflow: hidden; }
   padding: 5px 8px;
 }
 .crt-input:focus { outline: none; border-color: rgba(120, 255, 190, 0.6); box-shadow: 0 0 0 2px rgba(80, 255, 170, 0.12); }
+
+/* ---------- 自定义下拉框（原生 select 仅作隐藏值/事件兼容层） ---------- */
+.crt-select {
+  position: relative;
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  vertical-align: middle;
+}
+.crt-select > select.crt-select-native {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  margin: -1px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+}
+.crt-select-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(80, 255, 170, 0.28);
+  border-radius: 8px;
+  background: rgba(6, 24, 17, 0.75);
+  color: #d6ffea;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+}
+.crt-select-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crt-select-chevron {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  margin-top: -3px;
+  border-right: 1.5px solid rgba(140, 255, 200, 0.7);
+  border-bottom: 1.5px solid rgba(140, 255, 200, 0.7);
+  transform: rotate(45deg);
+  transition: transform 0.15s ease;
+}
+.crt-select.is-open .crt-select-chevron { transform: rotate(225deg); margin-top: 2px; }
+.crt-select-trigger:hover:not(:disabled) { border-color: rgba(120, 255, 190, 0.45); }
+.crt-select-trigger:focus-visible,
+.crt-select.is-open .crt-select-trigger {
+  outline: none;
+  border-color: rgba(120, 255, 190, 0.6);
+  box-shadow: 0 0 0 2px rgba(80, 255, 170, 0.14);
+}
+.crt-select-trigger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.crt-select--compact .crt-select-trigger,
+.crt-select[data-variant="compact"] .crt-select-trigger {
+  height: 28px;
+  padding: 0 8px;
+}
+.crt-select-menu {
+  position: fixed;
+  z-index: 120;
+  display: grid;
+  gap: 2px;
+  min-width: 120px;
+  padding: 5px;
+  border: 1px solid rgba(80, 255, 170, 0.32);
+  border-radius: 8px;
+  background: #07120d;
+  color: #d6ffea;
+  font: inherit;
+  font-size: 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(0, 0, 0, 0.35);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.crt-select-menu[hidden] { display: none; }
+.crt-select-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 26px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.crt-select-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.crt-select-option-check {
+  flex: none;
+  margin-left: auto;
+  color: #6dffb8;
+  opacity: 0;
+}
+.crt-select-option[aria-selected="true"] { color: #eafff5; }
+.crt-select-option[aria-selected="true"] .crt-select-option-check { opacity: 1; }
+.crt-select-option.is-active {
+  background: rgba(80, 255, 170, 0.13);
+  color: #eafff5;
+}
+.crt-select-option.is-disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.crt-select-empty {
+  padding: 6px 8px;
+  color: rgba(140, 255, 200, 0.45);
+}
 .crt-divider { border: none; border-top: 1px dashed rgba(80, 255, 170, 0.25); }
 
 /* ---------- 域视图：扇区扫描台 ---------- */
@@ -1030,6 +1160,8 @@ body.modal-open { overflow: hidden; }
 .cfg-control { display: flex; flex-wrap: wrap; align-items: center; gap: var(--field-gap) 8px; min-width: 0; min-height: var(--control-h); }
 .cfg-control .cfg-input,
 .cfg-control select { width: 100%; max-width: none; font-size: 12px; }
+.cfg-control .crt-select,
+.cfg-control .crt-select-trigger { width: 100%; max-width: none; font-size: 12px; }
 .cfg-control .cfg-toggle { order: 0; }
 .cfg-help { flex: 1 1 100%; margin: 0; font-size: 10.5px; line-height: 1.5; }
 .cfg-warn { color: #ffd27a; }
@@ -1210,7 +1342,7 @@ body.modal-open { overflow: hidden; }
 /* 重新生成：不替换现有 DOM，只把当前面板标记为忙，成功后再原地换结果 */
 #invite-body.is-busy .invite-layout { opacity: 0.72; }
 #invite-body.is-busy #invite-regenerate { cursor: progress; }
-#invite-body.is-busy .invite-ttl select { cursor: progress; opacity: 0.6; }
+#invite-body.is-busy .invite-ttl .crt-select-trigger { cursor: progress; opacity: 0.6; }
 #invite-regenerate { min-width: 68px; padding-left: 6px; padding-right: 6px; }
 .invite-regen-error { margin: 0; font-size: 11px; line-height: 1.6; }
 /* 令牌是主信息：单独一块微凹面板，和下方 TTL 控件拉开层级 */
@@ -1224,7 +1356,7 @@ body.modal-open { overflow: hidden; }
 .invite-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 @media (min-width: 521px) { .invite-controls { flex-wrap: nowrap; } }
 .invite-ttl { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); }
-.invite-ttl select.crt-input { width: auto; min-width: 78px; padding: 4px 6px; }
+.invite-ttl .crt-select-trigger { width: auto; min-width: 78px; height: 26px; padding: 0 8px; font-size: 11px; }
 .invite-expiry { font-size: 10px; color: var(--muted); white-space: nowrap; }
 .invite-controls #invite-regenerate { margin-left: auto; }
 .invite-regenerate { color: var(--muted); border-color: var(--border); background: transparent; text-shadow: none; }
@@ -1381,6 +1513,7 @@ body.modal-open { overflow: hidden; }
   box-shadow: 0 0 0 2px rgba(80, 255, 170, 0.12);
 }
 .settings-language-select option { background: #07120d; color: #d6ffea; }
+/* 旧 wrapper 的定位 chevron 保留在 DOM 兼容断言；视觉箭头由自定义 trigger 承担。 */
 .settings-language-chevron {
   position: absolute;
   right: 10px;
@@ -1392,6 +1525,12 @@ body.modal-open { overflow: hidden; }
   border-bottom: 1.5px solid rgba(140, 255, 200, 0.7);
   transform: rotate(45deg);
   pointer-events: none;
+  display: none;
+}
+.settings-language-control .crt-select-trigger {
+  height: 28px;
+  min-width: 118px;
+  padding: 0 10px;
 }
 .settings-tab-extra { margin-left: auto; }
 /* 首屏叠加层：状态总览条（纯只读，不挡星图交互；fixed 钉视口，免受容器定位影响） */
@@ -1424,6 +1563,8 @@ body.modal-open { overflow: hidden; }
 .asst-form-modes { display: flex; gap: 14px; margin: 6px 0; font-size: 12px; color: var(--muted); }
 .asst-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; font-size: 12px; color: var(--muted); margin-top: 6px; }
 .asst-form-grid label { display: grid; gap: 3px; }
+.asst-form-grid .crt-select,
+.asst-form-grid .crt-select-trigger { width: 100%; }
 .asst-tag { font-size: 10px; border: 1px solid var(--crt-border-soft); border-radius: 999px; padding: 1px 6px; margin-left: 6px; color: var(--crt-dim); vertical-align: 1px; }
 
 /* ===== UX-2 补丁 4 · 窗口外框与滚动条（控制台） ===== */

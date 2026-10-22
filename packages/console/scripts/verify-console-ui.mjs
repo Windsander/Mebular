@@ -304,7 +304,7 @@ function connectCdp(wsUrl) {
 }
 
 async function main() {
-  console.log('Mebular 控制台 UI 冒烟（headless Chrome / CDP）');
+  console.log('Mebular UI 冒烟（headless Chrome / CDP）');
 
   const chrome = findChrome();
   if (!chrome) {
@@ -390,7 +390,7 @@ async function main() {
     };
 
     await send('Page.navigate', { url: `${base}/console/` });
-    check('页面加载完成（标题 / #stage）', await waitFor('document.title.includes("控制台") && Boolean(document.querySelector("#stage"))'));
+    check('页面加载完成（标题 / #stage）', await waitFor('document.title.includes("Mebular") && Boolean(document.querySelector("#stage"))'));
     check('弹窗对齐规范：小弹窗 + 加入忆云 modal-center；其余大面板顶部对齐',
       await evalJs(`(() => {
         const small = ['wizard', 'invite', 'cloud-switch', 'security-action', 'handoff', 'modal', 'auth-token', 'namespace-new-modal', 'cloud-join', 'onboard-create', 'onboard-join'];
@@ -481,6 +481,30 @@ async function main() {
     check('切换到记忆视图（#memories-view 可见）', await waitFor('document.querySelector("#memories-view")?.hidden === false'));
     check('记忆视图含过滤器 + 记忆行 + 归档/删除动作按钮',
       await waitFor('(() => { const v = document.querySelector("#memories-view"); return Boolean(v) && Boolean(v.querySelector("#mem-filter-archived")) && Boolean(v.querySelector("#mem-filter-deleted")) && v.querySelectorAll(".mem-row").length >= 1 && Boolean(v.querySelector("[data-mem-action=archive]")) && Boolean(v.querySelector("[data-mem-action=delete]")); })()'));
+    const memDropdown = await evalJs(`(() => {
+      const select = document.querySelector('#mem-filter-namespace');
+      const trigger = document.querySelector('#mem-filter-namespace-trigger');
+      const menu = document.querySelector('#mem-filter-namespace-menu');
+      if (!select || !trigger || !menu) return { ok: false };
+      const before = select.value;
+      trigger.click();
+      const result = {
+        ok: true,
+        options: menu.querySelectorAll('[role=option]').length,
+        nativeOptions: select.options.length,
+        text: menu.textContent,
+        selected: menu.querySelector('[role=option][aria-selected=true]')?.textContent.trim() ?? '',
+        fixed: getComputedStyle(menu).position === 'fixed',
+      };
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      result.closed = menu.hidden && document.activeElement === trigger && select.value === before;
+      return result;
+    })()`);
+    check('下拉框 · 记忆域筛选：动态域选项镜像原生 select，Esc 关闭且不改筛选值',
+      memDropdown.ok && memDropdown.options === memDropdown.nativeOptions
+        && memDropdown.options >= 2 && /全部域/.test(memDropdown.text)
+        && /全部域/.test(memDropdown.selected) && memDropdown.fixed && memDropdown.closed,
+      JSON.stringify(memDropdown));
     check('记忆视图说明人话化（归档可逆不再出现在回忆；删除不可逆；无内部术语）',
       await evalJs('(() => { const t = document.querySelector("#memories-view")?.textContent ?? ""; return /归档/.test(t) && /不再出现在回忆/.test(t) && /不可逆/.test(t) && !/metadata/.test(t) && !/CSRF/.test(t) && !/scope/.test(t); })()'));
     // 归档：默认过滤下该行要么消失，要么按钮翻转为「解除归档」
@@ -569,6 +593,41 @@ async function main() {
     await evalJs('document.querySelector("#asst-add").click()');
     check('＋新增助手表单出现（选文件 / 粘片段双模式）',
       await waitFor('(() => { const f = document.querySelector("#asst-add-form"); return Boolean(f) && f.querySelectorAll("input[name=asst-mode]").length === 2 && Boolean(f.querySelector("#asst-add-path")); })()'));
+    const asstDropdown = await evalJs(`(() => {
+      const select = document.querySelector('#asst-add-format');
+      const trigger = document.querySelector('#asst-add-format-trigger');
+      const menu = document.querySelector('#asst-add-format-menu');
+      if (!select || !trigger || !menu) return { ok: false };
+      trigger.click();
+      const opened = {
+        options: menu.querySelectorAll('[role=option]').length,
+        nativeOptions: select.options.length,
+        labels: [...menu.querySelectorAll('[role=option]')].map((el) => el.textContent.trim()),
+        fixed: getComputedStyle(menu).position === 'fixed',
+        below: menu.getBoundingClientRect().top >= trigger.getBoundingClientRect().bottom,
+        flipped: menu.getBoundingClientRect().bottom <= trigger.getBoundingClientRect().top - 2,
+        menuTop: menu.getBoundingClientRect().top,
+        triggerBottom: trigger.getBoundingClientRect().bottom,
+      };
+      menu.querySelectorAll('[role=option]')[1].click();
+      const after = {
+        value: select.value,
+        text: trigger.textContent.trim(),
+        closed: menu.hidden,
+        focused: document.activeElement === trigger,
+      };
+      trigger.click();
+      menu.querySelectorAll('[role=option]')[0].click();
+      return { ok: true, opened, after, restored: select.value };
+    })()`);
+    check('下拉框 · 助手配置格式：表单渲染后增强，菜单选项 = 原生 options，选中回写并保持表单可用',
+      asstDropdown.ok && asstDropdown.opened.options === asstDropdown.opened.nativeOptions
+        && asstDropdown.opened.fixed && (asstDropdown.opened.below || asstDropdown.opened.flipped)
+        && asstDropdown.opened.labels.some((label) => /opencode/.test(label))
+        && asstDropdown.after.value === 'opencode' && /opencode/.test(asstDropdown.after.text)
+        && asstDropdown.after.closed && asstDropdown.after.focused
+        && asstDropdown.restored === 'mcpServers',
+      JSON.stringify(asstDropdown));
     await evalJs(`(() => {
       document.querySelector('#asst-add-name').value = 'UI 测试助手';
       document.querySelector('#asst-add-id').value = 'ui-test-asst';
@@ -676,6 +735,98 @@ async function main() {
     // 滚动稳定性：审计视图滚到底部后扫描线仍钉住（fixed ⇒ 不随内容移走）
     await evalJs('document.querySelector("#view-nav li:nth-of-type(4) button").click()');
     await waitFor('document.getElementById("audit-view")?.hidden === false');
+    check('下拉框 · 静态审计/记忆筛选器均已增强（原生 select 保留为隐藏兼容层）',
+      await waitFor(`(() => {
+        const ids = ['audit-filter-action', 'audit-filter-device', 'audit-filter-namespace', 'audit-filter-time', 'mem-filter-namespace'];
+        return ids.every((id) => {
+          const select = document.getElementById(id);
+          const trigger = document.getElementById(id + '-trigger');
+          return Boolean(select && trigger)
+            && select.getAttribute('aria-hidden') === 'true' && select.tabIndex === -1
+            && trigger.getAttribute('role') === 'combobox'
+            && trigger.getAttribute('aria-haspopup') === 'listbox'
+            && document.getElementById(id + '-menu')?.parentElement === document.body;
+        });
+      })()`));
+    const auditDropdown = await evalJs(`(() => {
+      const select = document.querySelector('#audit-filter-action');
+      const trigger = document.querySelector('#audit-filter-action-trigger');
+      const menu = document.querySelector('#audit-filter-action-menu');
+      trigger.focus();
+      trigger.click();
+      const t = trigger.getBoundingClientRect();
+      const m = menu.getBoundingClientRect();
+      const opened = {
+        expanded: trigger.getAttribute('aria-expanded'),
+        role: menu.getAttribute('role'),
+        options: menu.querySelectorAll('[role=option]').length,
+        nativeOptions: select.options.length,
+        fixed: getComputedStyle(menu).position === 'fixed',
+        below: Math.abs(m.top - (t.bottom + 6)) <= 2,
+        flipped: m.bottom <= t.top - 2,
+        menuTop: m.top,
+        triggerBottom: t.bottom,
+        innerHeight: window.innerHeight,
+        active: trigger.getAttribute('aria-activedescendant') === menu.querySelector('[role=option].is-active')?.id,
+      };
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }));
+      const moved = trigger.getAttribute('aria-activedescendant') === menu.querySelectorAll('[role=option]')[1]?.id;
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+      const selected = {
+        value: select.value,
+        closed: menu.hidden,
+        focused: document.activeElement === trigger,
+        filtered: /订阅变更/.test(document.querySelector('#audit-list')?.textContent ?? ''),
+      };
+      trigger.focus();
+      trigger.click();
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      const escaped = { closed: menu.hidden, focused: document.activeElement === trigger };
+      trigger.click();
+      document.body.click();
+      const outside = { closed: menu.hidden, expanded: trigger.getAttribute('aria-expanded') };
+      select.value = '';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return { opened, moved, selected, escaped, outside };
+    })()`);
+    check('下拉框 · 审计动作：打开重建/固定定位在 trigger 下方/↑↓+Enter/Esc/点击外部关闭/焦点回 trigger',
+      auditDropdown.opened.expanded === 'true' && auditDropdown.opened.role === 'listbox'
+        && auditDropdown.opened.options === auditDropdown.opened.nativeOptions
+        && auditDropdown.opened.fixed && (auditDropdown.opened.below || auditDropdown.opened.flipped)
+        && auditDropdown.opened.active
+        && auditDropdown.moved
+        && auditDropdown.selected.value === 'namespace_subscription' && auditDropdown.selected.closed
+        && auditDropdown.selected.focused && auditDropdown.selected.filtered
+        && auditDropdown.escaped.closed && auditDropdown.escaped.focused
+        && auditDropdown.outside.closed && auditDropdown.outside.expanded === 'false',
+      JSON.stringify(auditDropdown));
+    const auditDynamic = await evalJs(`(() => {
+      const select = document.querySelector('#audit-filter-device');
+      const trigger = document.querySelector('#audit-filter-device-trigger');
+      const menu = document.querySelector('#audit-filter-device-menu');
+      const option = document.createElement('option');
+      option.value = 'device-dynamic-probe';
+      option.textContent = '动态设备探针';
+      select.append(option);
+      const nativeOptions = select.options.length;
+      trigger.click();
+      const seen = {
+        options: menu.querySelectorAll('[role=option]').length,
+        text: /动态设备探针/.test(menu.textContent),
+        lastText: [...menu.querySelectorAll('[role=option]')].at(-1)?.textContent.trim() ?? '',
+      };
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      option.remove();
+      trigger.click();
+      const gone = !/动态设备探针/.test(menu.textContent);
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      return { nativeOptions, seen, gone };
+    })()`);
+    check('下拉框 · 动态选项：每次打开从原生 select 重建（新增设备/域立即可见，移除即消失）',
+      auditDynamic.seen.options === auditDynamic.nativeOptions
+        && auditDynamic.seen.text && /动态设备探针/.test(auditDynamic.seen.lastText)
+        && auditDynamic.gone,
+      JSON.stringify(auditDynamic));
     const scrollProbe = await evalJs(`(() => {
       const view = document.getElementById('audit-view');
       // 垫片**确定性制造溢出**，测完移除并还原滚动位——断言强度（scrollTop>0 && fixed）不变。
@@ -952,6 +1103,42 @@ async function main() {
     await sleep(3600);
     check('跨 3s 轮询设置容器节点引用不变（DOM 未重建）', await evalJs('Boolean(window.__settingsProbe) && window.__settingsProbe === document.querySelector("#settings-body .settings-tabs")'));
     check('跨 3s 轮询 auth 下拉节点引用不变', await evalJs(`Boolean(window.__authProbe) && window.__authProbe === document.querySelector('${authSelector}')`));
+    const mcpDropdown = await evalJs(`(() => {
+      const select = document.querySelector('${authSelector}');
+      const trigger = document.querySelector('#cfg-mcp-http-auth-trigger');
+      const menu = document.querySelector('#cfg-mcp-http-auth-menu');
+      if (!select || !trigger || !menu) return { ok: false };
+      const before = select.value;
+      trigger.click();
+      const result = {
+        ok: true,
+        fixed: getComputedStyle(menu).position === 'fixed',
+        options: menu.querySelectorAll('[role=option]').length,
+        nativeOptions: select.options.length,
+        labels: [...menu.querySelectorAll('[role=option]')].map((el) => el.textContent.trim()),
+        selected: menu.querySelector('[role=option][aria-selected=true]')?.textContent.trim() ?? '',
+        width: Math.round(trigger.getBoundingClientRect().width),
+        controlWidth: Math.round(trigger.closest('.cfg-control').getBoundingClientRect().width),
+        nativeHidden: select.getAttribute('aria-hidden') === 'true' && select.tabIndex === -1,
+        menuCount: document.querySelectorAll('#cfg-mcp-http-auth-menu').length,
+        triggerCount: document.querySelectorAll('#cfg-mcp-http-auth-trigger').length,
+        menuSelectId: menu.id,
+        triggerOpen: trigger.getAttribute('aria-expanded'),
+      };
+      trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      result.closed = menu.hidden && document.activeElement === trigger;
+      result.valueUnchanged = select.value === before;
+      return result;
+    })()`);
+    check('下拉框 · MCP auth：配置 select 渲染后增强（全宽 trigger / 选项镜像 / Esc 不改值）',
+      mcpDropdown.ok && mcpDropdown.fixed && mcpDropdown.nativeHidden
+        && mcpDropdown.options === mcpDropdown.nativeOptions
+        && mcpDropdown.labels.some((label) => /none/.test(label))
+        && mcpDropdown.labels.some((label) => /bearer/.test(label))
+        && mcpDropdown.selected.length > 0
+        && Math.abs(mcpDropdown.width - mcpDropdown.controlWidth) <= 2
+        && mcpDropdown.closed && mcpDropdown.valueUnchanged,
+      JSON.stringify(mcpDropdown));
 
     // E1 · 设置分层：5 tab；诊断并入高级；订阅域移出；反熵细节不出屏；无「保存」按钮
     check('E1 设置 5 页签（常用/安全/AI 助手/MCP 接入/高级）且无诊断页签/保存按钮',
@@ -1350,13 +1537,14 @@ async function main() {
     })()`));
     const crossDayExpiry = await evalJs(`(() => {
       const select = document.querySelector('#invite-ttl');
+      const trigger = document.querySelector('#invite-ttl-trigger');
       const expiry = document.querySelector('#invite-expiry');
       const regen = document.querySelector('#invite-regenerate');
       select.value = '86400000';
       select.dispatchEvent(new Event('change', { bubbles: true }));
       const label = expiry.textContent;
       const mid = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
-      const sameRow = Math.abs(mid(select) - mid(expiry)) <= 2 && Math.abs(mid(select) - mid(regen)) <= 3;
+      const sameRow = Math.abs(mid(trigger) - mid(expiry)) <= 2 && Math.abs(mid(trigger) - mid(regen)) <= 3;
       select.value = '900000';
       select.dispatchEvent(new Event('change', { bubbles: true }));
       return { label, restored: expiry.textContent, ttl: select.value, sameRow };
@@ -1380,11 +1568,12 @@ async function main() {
     })()`);
     const inviteControls = await evalJs(`(() => {
       const select = document.querySelector('#invite-ttl');
+      const trigger = document.querySelector('#invite-ttl-trigger');
       const expiry = document.querySelector('#invite-expiry');
       const regen = document.querySelector('#invite-regenerate');
       const box = document.querySelector('#invite .modal-box');
-      if (!select || !expiry || !regen) return { ok: false };
-      const s = select.getBoundingClientRect();
+      if (!select || !trigger || !expiry || !regen) return { ok: false };
+      const s = trigger.getBoundingClientRect();
       const e = expiry.getBoundingClientRect();
       const r = regen.getBoundingClientRect();
       const mid = (b) => b.top + b.height / 2;
@@ -1398,6 +1587,60 @@ async function main() {
       };
     })()`);
     check('E1 邀请控件同排：有效期 / 到期时刻 / 重新生成在同一条线上（桌面 560px）', inviteControls.ok, JSON.stringify(inviteControls));
+    const inviteDropdown = await evalJs(`(() => {
+      const select = document.querySelector('#invite-ttl');
+      const trigger = document.querySelector('#invite-ttl-trigger');
+      const tokenBefore = document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '';
+      trigger.click();
+      const menu = document.querySelector('#invite-ttl-menu');
+      const t = trigger.getBoundingClientRect();
+      const m = menu.getBoundingClientRect();
+      const opened = {
+        hidden: menu.hidden,
+        expanded: trigger.getAttribute('aria-expanded'),
+        controls: trigger.getAttribute('aria-controls'),
+        role: menu.getAttribute('role'),
+        options: menu.querySelectorAll('[role=option]').length,
+        selected: menu.querySelector('[role=option][aria-selected=true]')?.textContent.trim() ?? '',
+        parentBody: menu.parentElement === document.body,
+        fixed: getComputedStyle(menu).position === 'fixed',
+        below: Math.abs(m.top - (t.bottom + 6)) <= 2,
+        flipped: m.bottom <= t.top - 2,
+        menuTop: m.top,
+        triggerBottom: t.bottom,
+        menuCount: document.querySelectorAll('#invite-ttl-menu').length,
+        active: trigger.getAttribute('aria-activedescendant') === menu.querySelector('[role=option][aria-selected=true]')?.id,
+        firstOption: menu.querySelector('[role=option]')?.textContent.trim() ?? '',
+      };
+      menu.querySelectorAll('[role=option]')[6].click();
+      const after = {
+        value: select.value,
+        label: trigger.textContent.trim(),
+        expiry: document.querySelector('#invite-expiry')?.textContent ?? '',
+        closed: menu.hidden,
+        expanded: trigger.getAttribute('aria-expanded'),
+        focused: document.activeElement === trigger,
+        tokenSame: (document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '') === tokenBefore,
+      };
+      select.value = '900000';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      return { opened, after, triggerText: trigger.textContent.trim() };
+    })()`);
+    check('下拉框 · 邀请 TTL：trigger/listbox/fixed 定位/选中回写与 change/焦点回 trigger/不重发令牌',
+      inviteDropdown.opened.hidden === false && inviteDropdown.opened.expanded === 'true'
+        && inviteDropdown.opened.controls === 'invite-ttl-menu'
+        && inviteDropdown.opened.role === 'listbox' && inviteDropdown.opened.options === 7
+        && /15 分钟/.test(inviteDropdown.opened.selected)
+        && inviteDropdown.opened.parentBody && inviteDropdown.opened.fixed
+        && (inviteDropdown.opened.below || inviteDropdown.opened.flipped)
+        && inviteDropdown.opened.active
+        && inviteDropdown.after.value === '86400000'
+        && /24 小时/.test(inviteDropdown.after.label)
+        && /^重新生成后至 /.test(inviteDropdown.after.expiry)
+        && inviteDropdown.after.closed && inviteDropdown.after.expanded === 'false'
+        && inviteDropdown.after.focused && inviteDropdown.after.tokenSame
+        && /15 分钟/.test(inviteDropdown.triggerText),
+      JSON.stringify(inviteDropdown));
     const beforeTokenMeta = await evalJs(`(() => ({
       token: document.querySelector('#invite-body [data-copy]')?.dataset.copy ?? '',
       fingerprint: document.querySelector('#invite-token-fingerprint')?.textContent ?? '',
@@ -1425,15 +1668,16 @@ async function main() {
     })()`));
     const mobileCrossDay = await evalJs(`(() => {
       const select = document.querySelector('#invite-ttl');
+      const trigger = document.querySelector('#invite-ttl-trigger');
       const regen = document.querySelector('#invite-regenerate');
       const expiry = document.querySelector('#invite-expiry');
       select.value = '86400000';
       select.dispatchEvent(new Event('change', { bubbles: true }));
       const mid = (el) => { const r = el.getBoundingClientRect(); return r.top + r.height / 2; };
       return {
-        ok: Math.abs(mid(select) - mid(expiry)) <= 2 && Math.abs(mid(select) - mid(regen)) <= 3,
+        ok: Math.abs(mid(trigger) - mid(expiry)) <= 2 && Math.abs(mid(trigger) - mid(regen)) <= 3,
         label: expiry.textContent,
-        rects: [select, expiry, regen].map((el) => {
+        rects: [trigger, expiry, regen].map((el) => {
           const r = el.getBoundingClientRect();
           return [Math.round(r.left), Math.round(r.top), Math.round(r.width)];
         }),
@@ -1499,13 +1743,14 @@ async function main() {
         ariaBusy: body.getAttribute('aria-busy'),
         disabled: button.disabled,
         ttlDisabled: document.querySelector('#invite-ttl')?.disabled === true,
+        ttlTriggerDisabled: document.querySelector('#invite-ttl-trigger')?.disabled === true,
         label: button.textContent,
         confirmOpen: document.querySelector('#modal')?.hidden === false,
       };
     })()`);
     check('E1 重新生成：无二次确认，点击即进入 is-busy/aria-busy + 按钮「正在更新…」',
       regenBusy.busy && regenBusy.ariaBusy === 'true' && regenBusy.disabled
-        && regenBusy.ttlDisabled
+        && regenBusy.ttlDisabled && regenBusy.ttlTriggerDisabled
         && regenBusy.label === '正在更新…' && regenBusy.confirmOpen === false
         && Math.abs(regenBusy.after - regenBusy.before) <= 12,
       `before=${Math.round(regenBusy.before)} after=${Math.round(regenBusy.after)}`);
@@ -2017,7 +2262,7 @@ async function main() {
     // i18n：语言行默认可见（不再依赖 ?i18n=1）；?lang= 打开英文并可在设置内切回中文（不 reload）
     await send('Page.navigate', { url: `${base}/console/` });
     check('i18n 默认入口：html lang=zh-CN（普通用户不被系统英文带入半翻译界面）',
-      await waitFor(`document.documentElement.lang === 'zh-CN' && document.documentElement.dataset.consoleReady === '1' && Boolean(document.querySelector('#open-settings')) && document.title.includes('控制台')`));
+      await waitFor(`document.documentElement?.lang === 'zh-CN' && document.documentElement?.dataset?.consoleReady === '1' && Boolean(document.querySelector('#open-settings')) && document.title.includes('Mebular')`, 30000));
     await evalJs('document.querySelector("#open-settings").click()');
     check('i18n 语言行默认可见：设置·常用专用单行控件、位于常驻运行之前', await waitFor(`(() => {
       const row = document.querySelector('#settings-language');
@@ -2025,19 +2270,30 @@ async function main() {
       const panel = document.querySelector('#settings-panel-common');
       const control = row?.querySelector('.settings-language-control');
       const select = row?.querySelector('select[data-language-select]');
+      const trigger = row?.querySelector('#settings-language-select-trigger');
       return Boolean(row) && Boolean(resident) && panel?.hidden === false
         && row.parentElement === panel && row === panel.querySelector('.settings-language-row')
         && !row.classList.contains('asst-row') && !row.querySelector('.asst-name, .asst-sp')
-        && Boolean(control) && control.querySelector('select[data-language-select]') === select
+        && Boolean(control) && control.querySelector('.crt-select > select[data-language-select]') === select
+        && Boolean(trigger) && trigger.getAttribute('role') === 'combobox'
         && Boolean(control.querySelector('.settings-language-chevron'))
         && row.querySelectorAll('select[data-language-select]').length === 1
         && select.value === 'zh-CN'
         && getComputedStyle(select).appearance === 'none'
+        && getComputedStyle(select).position === 'absolute'
+        && select.getAttribute('aria-hidden') === 'true' && select.tabIndex === -1
         && row.getBoundingClientRect().top < resident.getBoundingClientRect().top;
     })()`));
     await capture('i18n-settings-language-default.jpg');
     const navsBeforeEnglish = cdp.events.filter((event) => event.method === 'Page.frameNavigated').length;
-    await evalJs(`(() => { const s = document.querySelector('[data-language-select]'); s.value = 'en-US'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+    await evalJs(`(() => {
+      const t = document.querySelector('#settings-language-select-trigger');
+      t.click();
+      const menu = document.querySelector('#settings-language-select-menu');
+      const options = [...document.querySelector('#settings-language-select').options];
+      const index = options.findIndex((o) => o.value === 'en-US');
+      menu.querySelectorAll('[role=option]')[index].click();
+    })()`);
     check('i18n 默认语言行选择 English：html lang / 设置页就地切英文，无 reload', await waitFor(`(() => {
       const row = document.querySelector('#settings-language');
       return document.documentElement.lang === 'en-US'
@@ -2049,7 +2305,7 @@ async function main() {
     await waitFor(`document.documentElement.lang === 'zh-CN' && /语言/.test(document.querySelector('#settings-language')?.textContent ?? '')`);
     await evalJs('document.querySelector("#settings-close").click()');
     await send('Page.navigate', { url: `${base}/console/?i18n=1&lang=en-US` });
-    check('i18n 深链：html lang=en-US + 顶栏/导航英文', await waitFor(`document.documentElement.dataset.consoleReady === '1' && document.documentElement.lang === 'en-US' && document.querySelector('.brand')?.textContent.includes('Mebular') && /Star map/.test(document.querySelector('[data-view=map] .view-label')?.textContent ?? '')`));
+    check('i18n 深链：html lang=en-US + 顶栏/导航英文', await waitFor(`document.documentElement?.dataset?.consoleReady === '1' && document.documentElement?.lang === 'en-US' && document.querySelector('.brand')?.textContent.includes('Mebular') && /Star map/.test(document.querySelector('[data-view=map] .view-label')?.textContent ?? '')`));
     // B · 英文长文案：顶栏动作不产生第二行 / 不横向溢出（1440 / 1024 / 390 三档）。
     const topbarProbe = `(() => {
       const bar = document.querySelector('.topbar');
@@ -2130,35 +2386,40 @@ async function main() {
       const panel = document.querySelector('#settings-panel-common');
       const control = row?.querySelector('.settings-language-control');
       const select = row?.querySelector('select[data-language-select]');
-      if (!row || !resident || !panel || !control || !select) return { ok: false, why: 'missing' };
+      const trigger = row?.querySelector('#settings-language-select-trigger');
+      if (!row || !resident || !panel || !control || !select || !trigger) return { ok: false, why: 'missing' };
       const rowRect = row.getBoundingClientRect();
       const labelRect = row.querySelector('.settings-language-label').getBoundingClientRect();
       const controlRect = control.getBoundingClientRect();
-      const selectRect = select.getBoundingClientRect();
+      const triggerRect = trigger.getBoundingClientRect();
       const rowStyle = getComputedStyle(row);
       const selectStyle = getComputedStyle(select);
-      select.focus();
-      const focusShadow = getComputedStyle(select).boxShadow;
-      select.blur();
+      const triggerStyle = getComputedStyle(trigger);
+      trigger.focus();
+      const focusShadow = getComputedStyle(trigger).boxShadow;
+      trigger.blur();
       return {
         ok: true,
         lang: document.documentElement.lang,
         panelVisible: panel.hidden === false,
         dedicated: row.classList.contains('settings-language-row') && !row.classList.contains('asst-row')
           && !row.querySelector('.asst-name, .asst-sp'),
-        wrapper: control.querySelector('select[data-language-select]') === select
+        wrapper: control.querySelector('.crt-select > select[data-language-select]') === select
           && Boolean(control.querySelector('.settings-language-chevron')),
         oneLine: Math.abs((labelRect.top + labelRect.height / 2) - (controlRect.top + controlRect.height / 2)) <= 1
           && rowRect.height <= 44,
         order: rowRect.top < resident.getBoundingClientRect().top,
         divider: rowStyle.borderBottomStyle === 'dashed' && parseFloat(rowStyle.borderBottomWidth) >= 1,
         appearance: selectStyle.appearance,
-        selectHeight: Math.round(selectRect.height),
-        radius: selectStyle.borderRadius,
+        nativeHidden: selectStyle.position === 'absolute' && select.getAttribute('aria-hidden') === 'true'
+          && select.tabIndex === -1,
+        triggerRole: trigger.getAttribute('role'),
+        triggerHeight: Math.round(triggerRect.height),
+        radius: triggerStyle.borderRadius,
         focusShadow,
         options: select.querySelectorAll('option').length,
         value: select.value,
-        inRow: selectRect.right <= rowRect.right + 1 && selectRect.left >= rowRect.left - 1,
+        inRow: triggerRect.right <= rowRect.right + 1 && triggerRect.left >= rowRect.left - 1,
         overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
       };
     })()`;
@@ -2167,8 +2428,9 @@ async function main() {
       language1440.ok && language1440.lang === 'en-US' && language1440.panelVisible
         && language1440.dedicated && language1440.wrapper && language1440.oneLine
         && language1440.order && language1440.divider
-        && language1440.appearance === 'none' && language1440.selectHeight === 28
-        && language1440.radius === '5px' && language1440.focusShadow !== 'none'
+        && language1440.appearance === 'none' && language1440.nativeHidden
+        && language1440.triggerRole === 'combobox' && language1440.triggerHeight === 28
+        && language1440.radius === '8px' && language1440.focusShadow !== 'none'
         && language1440.options === 2 && language1440.value === 'en-US'
         && language1440.inRow && language1440.overflow === false,
       JSON.stringify(language1440));
@@ -2349,7 +2611,8 @@ async function main() {
       return panel.hidden === false && row.parentElement === panel
         && row === panel.querySelector('.settings-language-row')
         && !row.classList.contains('asst-row')
-        && Boolean(row.querySelector('.settings-language-control > select[data-language-select]'))
+        && Boolean(row.querySelector('.settings-language-control .crt-select > select[data-language-select]'))
+        && Boolean(row.querySelector('#settings-language-select-trigger[role=combobox]'))
         && Boolean(row.querySelector('.settings-language-control .settings-language-chevron'))
         && row.querySelectorAll('select[data-language-select]').length === 1
         && row.querySelectorAll('option').length === 2
@@ -2374,6 +2637,78 @@ async function main() {
     await clearViewport();
     await send('Page.navigate', { url: `${base}/console/` });
     await waitFor('document.querySelector("#settings")?.hidden === true');
+
+    // 下拉框三档截图：语言 / 邀请 TTL / 审计筛选 / 记忆筛选 / 助手格式（打开态，无横向溢出）。
+    for (const [name, viewport] of [
+      ['1440', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }],
+      ['1024', { width: 1024, height: 768, deviceScaleFactor: 1, mobile: false }],
+      ['390', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }],
+    ]) {
+      await send('Page.navigate', { url: `${base}/console/` });
+      await waitFor('document.documentElement?.dataset?.consoleReady === "1" && document.querySelector("#memories-list") !== null', 20000);
+      await setViewport(viewport);
+      const probeOpen = (triggerSelector, menuSelector) => evalJs(`(() => {
+        const trigger = document.querySelector(${JSON.stringify(triggerSelector)});
+        const menu = document.querySelector(${JSON.stringify(menuSelector)});
+        if (!trigger || !menu) return { open: false };
+        trigger.click();
+        const r = menu.getBoundingClientRect();
+        const t = trigger.getBoundingClientRect();
+        return {
+          open: menu.hidden === false,
+          role: menu.getAttribute('role'),
+          placed: Math.abs(r.top - (t.bottom + 6)) <= 2 || r.bottom <= t.top - 2,
+          overflow: document.documentElement.scrollWidth > window.innerWidth + 1
+            || r.left < -1 || r.right > window.innerWidth + 1,
+        };
+      })()`);
+      const closeMenu = (triggerSelector) => evalJs(`document.querySelector(${JSON.stringify(triggerSelector)}).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+
+      await evalJs('document.querySelector("#open-settings").click()');
+      await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("#settings-language"))');
+      const languageMenu = await probeOpen('#settings-language-select-trigger', '#settings-language-select-menu');
+      await captureNow(`dropdown-language-${name}.jpg`);
+      await closeMenu('#settings-language-select-trigger');
+      await evalJs('document.querySelector("#settings-close").click()');
+
+      await evalJs('document.querySelector("#invite-device").click()');
+      await waitFor('document.querySelector("#invite")?.hidden === false && Boolean(document.querySelector("#invite-body .invite-copy"))', 20000);
+      const inviteMenu = await probeOpen('#invite-ttl-trigger', '#invite-ttl-menu');
+      await captureNow(`dropdown-invite-ttl-${name}.jpg`);
+      await closeMenu('#invite-ttl-trigger');
+      await evalJs('document.querySelector("#invite .modal-head #invite-close").click()');
+
+      await evalJs('document.querySelector("#view-nav li:nth-of-type(4) button").click()');
+      await waitFor('document.querySelector("#audit-view")?.hidden === false && Boolean(document.querySelector("#audit-filter-action-trigger"))');
+      const auditMenu = await probeOpen('#audit-filter-action-trigger', '#audit-filter-action-menu');
+      await captureNow(`dropdown-audit-filter-${name}.jpg`);
+      await closeMenu('#audit-filter-action-trigger');
+
+      await evalJs('document.querySelector("#view-nav li:nth-of-type(3) button").click()');
+      await waitFor('document.querySelector("#memories-view")?.hidden === false && Boolean(document.querySelector("#mem-filter-namespace-trigger"))');
+      const memoryMenu = await probeOpen('#mem-filter-namespace-trigger', '#mem-filter-namespace-menu');
+      await captureNow(`dropdown-memory-filter-${name}.jpg`);
+      await closeMenu('#mem-filter-namespace-trigger');
+
+      await evalJs('document.querySelector("#open-settings").click()');
+      await waitFor('document.querySelector("#settings")?.hidden === false');
+      await evalJs('document.querySelector("[data-settings-tab=assistants]").click()');
+      await waitFor('Boolean(document.querySelector("#asst-add"))');
+      await evalJs('document.querySelector("#asst-add").click()');
+      await waitFor('Boolean(document.querySelector("#asst-add-format-trigger"))');
+      const assistantMenu = await probeOpen('#asst-add-format-trigger', '#asst-add-format-menu');
+      await captureNow(`dropdown-assistant-format-${name}.jpg`);
+      await closeMenu('#asst-add-format-trigger');
+      await evalJs('document.querySelector("#settings-close").click()');
+
+      const states = { languageMenu, inviteMenu, auditMenu, memoryMenu, assistantMenu };
+      check(`下拉框截图 ${name}：语言/邀请/审计/记忆/助手格式菜单均可打开且无横向溢出`,
+        Object.values(states).every((state) => state.open === true && state.role === 'listbox' && state.placed === true && state.overflow === false),
+        JSON.stringify(states));
+    }
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await send('Page.navigate', { url: `${base}/console/` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1"');
 
     // 页面异常（pageerror / console.error / Log error）
     const pageErrors = cdp.events.filter((event) => {

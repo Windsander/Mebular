@@ -59,9 +59,9 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     expect(panel).toContain('class="invite-layout"');
     expect(panel).toContain('class="invite-qr"');
     expect(panel).toContain('class="invite-main"');
-    expect(panel).toContain('扫码加入，或复制令牌发给对方。');
+    expect(panel).toContain("t('invite.lead')");
     expect(panel).toContain('class="invite-token-block"');
-    expect(panel).toContain('一次性令牌');
+    expect(panel).toContain("t('invite.token.label')");
     expect(panel).toContain('data-copy=');
     expect(panel).toContain('qrSvg');
     expect(panel).toContain('id="invite-ttl"');
@@ -92,15 +92,15 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
       'QR 内容 = 令牌文本',
     ];
     for (const text of removed) expect(panel).not.toContain(text);
-    expect(panel).toContain('一次性 · 仅当面或可信局域网传递。');
+    expect(panel).toContain("t('invite.safety')");
   });
 
   it('底部一行忆云身份 + 一行安全提示；端点/会签只留短警告', () => {
     const panel = invitePanelSource();
     expect(panel).toContain('id="invite-cloud-identity"');
-    expect(panel).toContain('根指纹');
-    expect(panel).toContain('端点仅本机可达');
-    expect(panel).toContain('已带上会签批准。');
+    expect(panel).toContain("t('invite.cloud.rootFingerprint')");
+    expect(panel).toContain("t('invite.warning.loopback')");
+    expect(panel).toContain("t('invite.warning.approval')");
     expect(panel).not.toContain('请在「设置 → 高级 → 常驻服务」');
   });
 
@@ -128,13 +128,13 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     expect(regenHandler).toContain("renderInvite(state.inviteTtlMs, { keepPanel: true })");
     expect(regenHandler).not.toContain('confirmModal');
     expect(regenHandler).not.toContain('window.confirm');
-    expect(consoleJs).toContain('已重新生成，旧令牌已失效');
-    expect(consoleJs).toContain('换新令牌后旧的立即失效，已发出的邀请将无法再兑换。');
+    expect(consoleJs).toContain("t('invite.regen.success')");
+    expect(consoleJs).toContain("t('invite.safety')");
     expect(consoleJs).toMatch(/async function renderInvite\(ttlMs = state\.inviteTtlMs, \{ keepPanel = false \} = \{\}\)/);
     expect(consoleJs).toMatch(/body\.classList\.add\('is-busy'\)/);
     expect(consoleJs).toMatch(/body\.setAttribute\('aria-busy', 'true'\)/);
-    expect(consoleJs).toContain("button.textContent = '正在更新…'");
-    expect(consoleJs).toContain('重新生成失败：');
+    expect(consoleJs).toContain("button.textContent = t('invite.regenerating')");
+    expect(consoleJs).toContain("t('invite.regen.failed', { message })");
     expect(consoleJs).toMatch(/async function renderInvite\(ttlMs = state\.inviteTtlMs[\s\S]{0,1800}body: \{ ttlMs \}/);
     expect(consoleJs).toMatch(/body: \{ code, ttlMs: selectedTtl \}/);
     expect(consoleJs).toMatch(/body: \{ approvalId, namespace: inviteNamespace\(\), ttlMs: selectedTtl \}/);
@@ -145,8 +145,8 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     const end = consoleJs.indexOf('/** 令牌结果面板', start);
     const helper = start >= 0 && end > start ? consoleJs.slice(start, end) : '';
     expect(helper.length).toBeGreaterThan(0);
-    expect(helper).toContain('当前令牌至 ${formatExpiry(current.expiresAt)}');
-    expect(helper).toContain('重新生成后至 ${formatExpiry(Date.now() + ttlMs)}');
+    expect(helper).toContain("t('invite.expiry.current', { time: formatExpiry(current.expiresAt) })");
+    expect(helper).toContain("t('invite.expiry.next', { time: formatExpiry(Date.now() + ttlMs) })");
     expect(helper).toContain('Number(current.ttlMs) === Number(ttlMs)');
     expect(consoleJs).not.toContain('改档后点');
   });
@@ -181,7 +181,7 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
 
     const panel = invitePanelSource();
     expect(panel).toContain('id="invite-token-fingerprint"');
-    expect(panel).toContain('令牌 #${tokenFingerprint}');
+    expect(panel).toContain("t('invite.token.fingerprint', { fingerprint: tokenFingerprint })");
     expect(panel).toContain('const tokenFingerprint = inviteTokenFingerprint(res.token)');
     expect(panel).toContain('const shortToken = inviteTokenShortText(res.token)');
     expect(panel).toContain('escapeHtml(shortToken)');
@@ -195,8 +195,8 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
     expect(skeleton).toContain('invite-skeleton-qr');
     expect(skeleton).toContain('invite-skeleton-line-lg');
     expect((skeleton.match(/invite-skeleton-line/g) ?? []).length).toBeGreaterThanOrEqual(4);
-    expect(skeleton).toContain('正在生成令牌…');
-    expect(skeleton).toContain('换新令牌后旧的立即失效');
+    expect(skeleton).toContain("t('invite.loading')");
+    expect(skeleton).toContain("t('invite.safety')");
     expect(consoleJs).toMatch(/body\.innerHTML = inviteSkeletonHtml\(\)/);
     const css = readFileSync(join(root, 'packages', 'console', 'console.css'), 'utf-8');
     // 高度由内容决定：不再用固定 min-height 撑底部空白；稳定性由 live 对话高度差 ≤12px 断言

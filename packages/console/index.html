@@ -14,12 +14,12 @@
   <div id="app" class="app">
     <header class="topbar">
       <div class="brand"><span class="brand-star">✦</span> <span data-i18n="app.brand">Mebular 控制台</span></div>
-      <button id="cloud-badge" class="badge badge-cloud badge-button" type="button" title="打开设置 · 忆云" aria-label="打开设置 · 忆云" hidden></button>
+      <button id="cloud-badge" class="badge badge-cloud badge-button" type="button" title="打开设置 · 忆云" aria-label="打开设置 · 忆云" data-i18n-title="topbar.cloud.openSettings" data-i18n-aria-label="topbar.cloud.openSettings" hidden></button>
       <div class="topbar-identity">
-        <button id="self-badge" class="badge badge-self badge-button" type="button" title="打开「关于本机」" aria-label="打开关于本机">本机 · …</button>
-        <span id="online-badge" class="badge badge-muted">○ 未知</span>
-        <button id="security-badge" class="badge badge-muted badge-button" type="button" title="查看安全等级" aria-label="查看安全等级">🛡 安全：—</button>
-        <span id="memory-badge" class="badge badge-muted">记忆 …</span>
+        <button id="self-badge" class="badge badge-self badge-button" type="button" title="打开「关于本机」" aria-label="打开关于本机" data-i18n-title="topbar.self.openAbout" data-i18n-aria-label="topbar.self.openAbout" data-i18n="topbar.self.placeholder">本机 · …</button>
+        <span id="online-badge" class="badge badge-muted" data-i18n="topbar.online.unknown">○ 未知</span>
+        <button id="security-badge" class="badge badge-muted badge-button" type="button" title="查看安全等级" aria-label="查看安全等级" data-i18n-title="topbar.security.view" data-i18n-aria-label="topbar.security.view" data-i18n="topbar.security.none">🛡 安全：—</button>
+        <span id="memory-badge" class="badge badge-muted" data-i18n="topbar.memory.placeholder">记忆 …</span>
       </div>
       <div class="topbar-actions">
         <button id="open-settings" class="btn" type="button" title="设置" aria-label="设置" data-i18n-title="topbar.settings" data-i18n-aria-label="topbar.settings"><span class="btn-ico">⚙</span><span class="btn-label" data-i18n="topbar.settings">设置</span><span id="settings-pending-badge" class="badge badge-warn" hidden></span></button>
@@ -39,19 +39,19 @@
         </ul>
         <section id="legend-panel" class="legend-panel crt-surface crt-corners is-collapsed">
           <button id="legend-toggle" class="legend-head" type="button" aria-expanded="false" aria-controls="legend-body">
-            <span>图例</span>
+            <span data-i18n="legend.title">图例</span>
             <span class="legend-chevron">▾</span>
           </button>
           <div id="legend-body" class="legend-body">
             <ul id="namespace-legend" class="legend-list"></ul>
-            <h2>边</h2>
+            <h2 data-i18n="legend.edges">边</h2>
             <ul class="legend-list legend-edges">
-              <li><span class="edge-swatch edge-mine"></span>我订阅它</li>
-              <li><span class="edge-swatch edge-theirs"></span>它订阅我</li>
-              <li><span class="edge-swatch edge-offline"></span>未连接 / 待接通</li>
-              <li><span class="edge-swatch edge-revoked"></span>已撤销</li>
+              <li><span class="edge-swatch edge-mine"></span><span data-i18n="legend.edge.mine">我订阅它</span></li>
+              <li><span class="edge-swatch edge-theirs"></span><span data-i18n="legend.edge.theirs">它订阅我</span></li>
+              <li><span class="edge-swatch edge-offline"></span><span data-i18n="legend.edge.offline">未连接 / 待接通</span></li>
+              <li><span class="edge-swatch edge-revoked"></span><span data-i18n="legend.edge.revoked">已撤销</span></li>
             </ul>
-            <p class="legend-note muted">本机视角：只展示你与已知对端的关系，不代表全网拓扑。</p>
+            <p class="legend-note muted" data-i18n="legend.note">本机视角：只展示你与已知对端的关系，不代表全网拓扑。</p>
           </div>
         </section>
       </nav>
@@ -59,7 +59,7 @@
       <main class="stage-wrap">
         <div id="banner" class="banner" hidden></div>
         <canvas class="stage-bg" aria-hidden="true"></canvas>
-        <canvas id="stage" class="stage" aria-label="对端关系星图（本机视角）"></canvas>
+        <canvas id="stage" class="stage" aria-label="对端关系星图（本机视角）" data-i18n-aria-label="stage.aria"></canvas>
         <div id="tooltip" class="tooltip" hidden></div>
         <!-- UX-2 首屏叠加层（只读；星图本体不改）：状态总览条 + 「需要注意」条件浮卡 -->
         <div id="status-pill" class="status-pill" hidden></div>
@@ -145,15 +145,15 @@
   </div>
 
   <div id="wizard" class="modal modal-center" hidden>
-    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="手动连接已知设备（传输修复）">
-      <h2>手动连接已知设备</h2>
+    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="手动连接已知设备（传输修复）" data-i18n-aria-label="wizard.aria">
+      <h2 data-i18n="wizard.title">手动连接已知设备</h2>
       <div id="wizard-steps" class="wizard-steps"></div>
       <div id="wizard-body"></div>
       <p id="wizard-error" class="wizard-error" hidden></p>
       <div class="modal-actions">
-        <button id="wizard-close" class="btn" type="button">关闭</button>
-        <button id="wizard-back" class="btn" type="button">上一步</button>
-        <button id="wizard-next" class="btn btn-primary" type="button">下一步</button>
+        <button id="wizard-close" class="btn" type="button" data-i18n="wizard.close">关闭</button>
+        <button id="wizard-back" class="btn" type="button" data-i18n="wizard.back">上一步</button>
+        <button id="wizard-next" class="btn btn-primary" type="button" data-i18n="wizard.next">下一步</button>
       </div>
     </div>
   </div>
@@ -163,9 +163,9 @@
       <div class="modal-head">
         <div class="modal-heading">
           <h2 data-i18n="settings.title">本机设置</h2>
-          <p class="settings-apply-note muted">改动即生效：需重启的项会自动重启，即时项就地生效。</p>
+          <p class="settings-apply-note muted" data-i18n="settings.applyNote">改动即生效：需重启的项会自动重启，即时项就地生效。</p>
         </div>
-        <button id="settings-close" class="modal-x" type="button" title="关闭" aria-label="关闭设置">✕</button>
+        <button id="settings-close" class="modal-x" type="button" title="关闭" aria-label="关闭设置" data-i18n-title="common.close" data-i18n-aria-label="settings.closeAria">✕</button>
       </div>
       <div id="settings-body"></div>
     </div>
@@ -183,12 +183,12 @@
   </div>
 
   <div id="invite" class="modal modal-center" hidden>
-    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="邀请设备">
+    <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-label="邀请设备" data-i18n-aria-label="invite.aria">
       <div class="modal-head">
         <div class="modal-heading">
-          <h2>邀请设备</h2>
+          <h2 data-i18n="invite.title">邀请设备</h2>
         </div>
-        <button id="invite-close" class="modal-x" type="button" title="关闭" aria-label="关闭邀请设备">✕</button>
+        <button id="invite-close" class="modal-x" type="button" title="关闭" aria-label="关闭邀请设备" data-i18n-title="common.close" data-i18n-aria-label="invite.closeAria">✕</button>
       </div>
       <div id="invite-body"></div>
     </div>
@@ -198,19 +198,19 @@
     <div class="modal-box modal-box-wide cloud-join-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="cloud-join-title">
       <div class="modal-head cloud-join-head">
         <div class="modal-heading">
-          <h2 id="cloud-join-title">加入忆云</h2>
-          <p class="modal-note muted cloud-join-lead">粘贴邀请方生成的一次性令牌；主密钥不会复制。</p>
+          <h2 id="cloud-join-title" data-i18n="cloudJoin.title">加入忆云</h2>
+          <p class="modal-note muted cloud-join-lead" data-i18n="cloudJoin.lead">粘贴邀请方生成的一次性令牌；主密钥不会复制。</p>
         </div>
-        <button id="cloud-join-x" class="modal-x" type="button" title="关闭" aria-label="关闭加入忆云">✕</button>
+        <button id="cloud-join-x" class="modal-x" type="button" title="关闭" aria-label="关闭加入忆云" data-i18n-title="common.close" data-i18n-aria-label="cloudJoin.closeAria">✕</button>
       </div>
       <div class="cloud-join-fields">
         <div class="field">
-          <label for="cloud-join-token">加入令牌</label>
-          <textarea id="cloud-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…"></textarea>
+          <label for="cloud-join-token" data-i18n="cloudJoin.tokenLabel">加入令牌</label>
+          <textarea id="cloud-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…" data-i18n-placeholder="cloudJoin.tokenPlaceholder"></textarea>
         </div>
         <div class="field">
-          <label for="cloud-join-name">忆云名字</label>
-          <input id="cloud-join-name" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="忆云 2" />
+          <label for="cloud-join-name" data-i18n="cloudJoin.nameLabel">忆云名字</label>
+          <input id="cloud-join-name" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="忆云 2" data-i18n-placeholder="cloudJoin.namePlaceholder" />
         </div>
       </div>
       <div id="cloud-join-inspect" class="cloud-inspect cloud-join-inspect" aria-live="polite" hidden></div>
@@ -219,18 +219,18 @@
       <div id="cloud-join-result" class="cloud-result" aria-live="polite" hidden></div>
       <p id="cloud-join-error" class="crt-warn" role="alert" hidden></p>
       <div class="modal-actions">
-        <button id="cloud-join-close" class="btn btn-crt" type="button">取消</button>
-        <button id="cloud-join-submit" class="btn btn-primary" type="button">加入忆云</button>
+        <button id="cloud-join-close" class="btn btn-crt" type="button" data-i18n="cloudJoin.cancel">取消</button>
+        <button id="cloud-join-submit" class="btn btn-primary" type="button" data-i18n="cloudJoin.submit">加入忆云</button>
       </div>
     </div>
   </div>
 
   <div id="cloud-switch" class="modal modal-center" hidden>
     <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="cloud-switch-title">
-      <h2 id="cloud-switch-title">切换忆云</h2>
+      <h2 id="cloud-switch-title" data-i18n="cloudSwitch.titleStatic">切换忆云</h2>
       <div id="cloud-switch-body"></div>
       <div class="modal-actions">
-        <button id="cloud-switch-close" class="btn btn-crt" type="button">关闭</button>
+        <button id="cloud-switch-close" class="btn btn-crt" type="button" data-i18n="common.close">关闭</button>
       </div>
     </div>
   </div>
@@ -266,8 +266,8 @@
       <h2 id="modal-title"></h2>
       <p id="modal-body"></p>
       <div class="modal-actions">
-        <button id="modal-cancel" class="btn" type="button">取消</button>
-        <button id="modal-confirm" class="btn btn-danger" type="button">确认</button>
+        <button id="modal-cancel" class="btn" type="button" data-i18n="common.cancel">取消</button>
+        <button id="modal-confirm" class="btn btn-danger" type="button" data-i18n="common.confirm">确认</button>
       </div>
     </div>
   </div>
@@ -307,12 +307,12 @@
 
   <!-- P3：无 current 时的非阻塞上手引导（指向顶栏两个入口；数秒自动淡出，可点/ESC 关闭） -->
   <div id="onboarding-coach" class="onboarding-coach" role="status" aria-live="polite" hidden>
-    <p class="onboarding-coach-title">先新建一个忆云，或加入已有忆云</p>
-    <p class="onboarding-coach-body">忆云是本机记忆的共享空间。从右上角开始：<b>新建忆云</b> 或 <b>加入忆云</b>。</p>
+    <p class="onboarding-coach-title" data-i18n="onboard.coach.title">先新建一个忆云，或加入已有忆云</p>
+    <p class="onboarding-coach-body"><span data-i18n="onboard.coach.bodyBefore">忆云是本机记忆的共享空间。从右上角开始：</span><b data-i18n="onboard.coach.bodyCreate">新建忆云</b> <span data-i18n="onboard.coach.bodyOr">或</span> <b data-i18n="onboard.coach.bodyJoin">加入忆云</b><span data-i18n="onboard.coach.bodyAfter">。</span></p>
     <div class="onboarding-coach-actions">
-      <button id="coach-create" class="btn btn-primary btn-small" type="button">新建忆云</button>
-      <button id="coach-join" class="btn btn-small" type="button">加入忆云</button>
-      <button id="coach-dismiss" class="onboarding-coach-close" type="button" title="关闭引导" aria-label="关闭引导">知道了</button>
+      <button id="coach-create" class="btn btn-primary btn-small" type="button" data-i18n="onboard.coach.create">新建忆云</button>
+      <button id="coach-join" class="btn btn-small" type="button" data-i18n="onboard.coach.join">加入忆云</button>
+      <button id="coach-dismiss" class="onboarding-coach-close" type="button" title="关闭引导" aria-label="关闭引导" data-i18n-title="onboard.coach.closeTitle" data-i18n-aria-label="onboard.coach.closeTitle" data-i18n="onboard.coach.dismiss">知道了</button>
     </div>
   </div>
 
@@ -321,23 +321,23 @@
     <div class="modal-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="onboard-create-title">
       <div class="modal-head">
         <div class="modal-heading">
-          <h2 id="onboard-create-title">新建忆云 <span class="crt-tag">本机为根</span></h2>
+          <h2 id="onboard-create-title"><span data-i18n="onboard.create.title">新建忆云</span> <span class="crt-tag" data-i18n="onboard.create.tag">本机为根</span></h2>
         </div>
-        <button id="onboard-create-close" class="modal-x" type="button" title="关闭" aria-label="关闭新建忆云">✕</button>
+        <button id="onboard-create-close" class="modal-x" type="button" title="关闭" aria-label="关闭新建忆云" data-i18n-title="common.close" data-i18n-aria-label="onboard.create.closeAria">✕</button>
       </div>
-      <p class="modal-note muted">生成 root 主密钥并在当前进程内完成初始化；完成后共享、记忆、审计与设备卡立即解锁，无需重启。</p>
+      <p class="modal-note muted" data-i18n="onboard.create.desc">生成 root 主密钥并在当前进程内完成初始化；完成后共享、记忆、审计与设备卡立即解锁，无需重启。</p>
       <div class="field">
-        <label for="onboard-create-cloud">忆云名字</label>
-        <input id="onboard-create-cloud" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="忆云 1" />
+        <label for="onboard-create-cloud" data-i18n="onboard.create.cloudLabel">忆云名字</label>
+        <input id="onboard-create-cloud" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="忆云 1" data-i18n-placeholder="onboard.create.cloudPlaceholder" />
       </div>
       <div class="field">
-        <label for="onboard-create-device">设备名</label>
-        <input id="onboard-create-device" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="如 MacBookPro" />
+        <label for="onboard-create-device" data-i18n="onboard.create.deviceLabel">设备名</label>
+        <input id="onboard-create-device" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="如 MacBookPro" data-i18n-placeholder="onboard.create.devicePlaceholder" />
       </div>
       <p id="onboard-create-error" class="crt-warn" role="alert" hidden></p>
       <div class="modal-actions">
-        <button id="onboard-create-cancel" class="btn btn-crt" type="button">取消</button>
-        <button id="onboard-create-submit" class="btn btn-primary" type="button">新建忆云</button>
+        <button id="onboard-create-cancel" class="btn btn-crt" type="button" data-i18n="common.cancel">取消</button>
+        <button id="onboard-create-submit" class="btn btn-primary" type="button" data-i18n="onboard.create.submit">新建忆云</button>
       </div>
     </div>
   </div>
@@ -347,25 +347,25 @@
     <div class="modal-box onboard-join-box crt-surface crt-corners" role="dialog" aria-modal="true" aria-labelledby="onboard-join-title">
       <div class="modal-head">
         <div class="modal-heading">
-          <h2 id="onboard-join-title">加入忆云</h2>
-          <p class="modal-note muted">粘贴邀请方「邀请设备」生成的一次性令牌；不复制主密钥，加入后本机直接进入正常控制台。</p>
+          <h2 id="onboard-join-title" data-i18n="onboard.join.title">加入忆云</h2>
+          <p class="modal-note muted" data-i18n="onboard.join.lead">粘贴邀请方「邀请设备」生成的一次性令牌；不复制主密钥，加入后本机直接进入正常控制台。</p>
         </div>
-        <button id="onboard-join-close" class="modal-x" type="button" title="关闭" aria-label="关闭加入忆云">✕</button>
+        <button id="onboard-join-close" class="modal-x" type="button" title="关闭" aria-label="关闭加入忆云" data-i18n-title="common.close" data-i18n-aria-label="onboard.join.closeAria">✕</button>
       </div>
       <div class="onboard-join-fields">
         <div class="field">
-          <label for="onboard-join-device">设备名 <span class="field-required">必填</span></label>
-          <input id="onboard-join-device" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="如 MacBookPro" required aria-required="true" />
+          <label for="onboard-join-device"><span data-i18n="onboard.join.deviceLabel">设备名</span> <span class="field-required" data-i18n="common.required">必填</span></label>
+          <input id="onboard-join-device" class="crt-input" type="text" maxlength="24" autocomplete="off" placeholder="如 MacBookPro" data-i18n-placeholder="onboard.join.devicePlaceholder" required aria-required="true" />
         </div>
         <div class="field">
-          <label for="onboard-join-token">加入令牌 <span class="field-required">必填</span></label>
-          <textarea id="onboard-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…" required aria-required="true"></textarea>
+          <label for="onboard-join-token"><span data-i18n="onboard.join.tokenLabel">加入令牌</span> <span class="field-required" data-i18n="common.required">必填</span></label>
+          <textarea id="onboard-join-token" class="crt-input" rows="4" spellcheck="false" placeholder="粘贴令牌文本（或二维码里的文本）…" data-i18n-placeholder="onboard.join.tokenPlaceholder" required aria-required="true"></textarea>
         </div>
       </div>
       <p id="onboard-join-error" class="crt-warn" role="alert" hidden></p>
       <div class="modal-actions">
-        <button id="onboard-join-cancel" class="btn btn-crt" type="button">取消</button>
-        <button id="onboard-join-submit" class="btn btn-primary" type="button">加入忆云</button>
+        <button id="onboard-join-cancel" class="btn btn-crt" type="button" data-i18n="common.cancel">取消</button>
+        <button id="onboard-join-submit" class="btn btn-primary" type="button" data-i18n="onboard.join.submit">加入忆云</button>
       </div>
     </div>
   </div>

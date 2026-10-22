@@ -398,6 +398,67 @@ describe('i18n locale pack · 新增语言只读注入', () => {
   });
 });
 
+describe('i18n locale pack · 主路径（顶栏/锁定/新建/加入/邀请/向导）', () => {
+  const pathPrefixes = [
+    'topbar.cloud.', 'topbar.self.', 'topbar.online.', 'topbar.memory.', 'topbar.security.',
+    'topbar.pendingRestart', 'nav.lockedHint', 'lock.', 'stage.', 'legend.',
+    'onboard.coach.', 'onboard.create.', 'onboard.join.', 'onboard.error.',
+    'cloudJoin.', 'cloudSwitch.', 'invite.', 'wizard.',
+  ];
+  const isPathKey = (key) => pathPrefixes.some((prefix) => key === prefix || key.startsWith(prefix));
+
+  it('主路径 key 在中英文完整对等，英文值无中文兜底', () => {
+    const zh = catalogs['zh-CN'];
+    const en = catalogs['en-US'];
+    const pathKeys = Object.keys(zh).filter(isPathKey);
+    expect(pathKeys.length).toBeGreaterThan(120);
+    for (const key of pathKeys) {
+      expect(typeof zh[key]).toBe('string');
+      expect(typeof en[key]).toBe('string');
+      expect(en[key]).not.toMatch(/[\u3400-\u9fff]/);
+    }
+    expect(en['onboard.create.title']).toBe('New cloud');
+    expect(en['onboard.join.title']).toBe('Join cloud');
+    expect(en['invite.token.copy']).toBe('Copy token');
+    expect(en['wizard.title']).toBe('Connect a known device');
+  });
+
+  it('中文主路径保持现有文案与行为（关键句不变）', () => {
+    const zh = catalogs['zh-CN'];
+    expect(zh['onboard.coach.title']).toBe('先新建一个忆云，或加入已有忆云');
+    expect(zh['lock.banner']).toBe('忆云尚未初始化：新建或加入后解锁共享、记忆、审计与设备卡。');
+    expect(zh['onboard.join.lead']).toBe('粘贴邀请方「邀请设备」生成的一次性令牌；不复制主密钥，加入后本机直接进入正常控制台。');
+    expect(zh['invite.safety']).toBe('一次性 · 仅当面或可信局域网传递。换新令牌后旧的立即失效，已发出的邀请将无法再兑换。');
+    expect(zh['invite.expiry.current']).toBe('当前令牌至 {time}');
+    expect(zh['invite.expiry.next']).toBe('重新生成后至 {time}');
+    expect(zh['topbar.security.title']).toBe('安全等级：{level}{pending}{rejected}（点击打开安全卡）');
+    expect(zh['cloudJoin.warning.switch']).toBe('加入后切换到新忆云；当前忆云「{name}」归档保留。');
+  });
+
+  it('index.html 主路径静态文案均挂 data-i18n / title / placeholder', () => {
+    const required = [
+      'topbar.cloud.openSettings', 'topbar.self.openAbout', 'topbar.online.unknown',
+      'topbar.security.none', 'topbar.memory.placeholder',
+      'legend.title', 'stage.aria',
+      'wizard.title', 'wizard.aria', 'wizard.close',
+      'invite.title', 'invite.aria', 'invite.closeAria',
+      'cloudJoin.title', 'cloudJoin.lead', 'cloudJoin.tokenLabel', 'cloudJoin.nameLabel',
+      'cloudJoin.tokenPlaceholder', 'cloudJoin.namePlaceholder', 'cloudJoin.cancel', 'cloudJoin.submit',
+      'cloudSwitch.titleStatic',
+      'onboard.coach.title', 'onboard.coach.bodyBefore', 'onboard.coach.bodyCreate',
+      'onboard.coach.bodyJoin', 'onboard.coach.dismiss',
+      'onboard.create.title', 'onboard.create.tag', 'onboard.create.desc',
+      'onboard.create.cloudLabel', 'onboard.create.deviceLabel', 'onboard.create.submit',
+      'onboard.join.title', 'onboard.join.lead', 'onboard.join.deviceLabel',
+      'onboard.join.tokenLabel', 'onboard.join.submit', 'common.required',
+    ];
+    for (const key of required) {
+      expect(indexHtml).toContain(key);
+      expect(indexHtml).toMatch(new RegExp(`data-i18n(?:-title|-placeholder|-aria-label)?="${key}"`));
+    }
+  });
+});
+
 describe('i18n locale pack · 桌面壳 locale 预留', () => {
   it('IPC 白名单含 locale:get / locale:set；set 只收 1 个字符串参数', () => {
     expect(IPC_CHANNELS).toEqual(expect.arrayContaining(['locale:get', 'locale:set']));

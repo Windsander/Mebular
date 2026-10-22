@@ -243,6 +243,71 @@ const unknownKeys = [...referenced].filter((key) => !defaultKeys.includes(key) &
 check('静态 data-i18n / 字面 t() key 均在默认 console pack 内',
   unknownKeys.length === 0, { unknown: unknownKeys });
 
+// ---------- ⑨ 本批主路径覆盖（顶栏/导航/锁定/新建/加入/邀请/向导） ----------
+const PATH_KEY_PREFIXES = [
+  'topbar.cloud.', 'topbar.self.', 'topbar.online.', 'topbar.memory.', 'topbar.security.',
+  'topbar.pendingRestart', 'nav.lockedHint', 'lock.', 'stage.', 'legend.',
+  'onboard.coach.', 'onboard.create.', 'onboard.join.', 'onboard.error.',
+  'cloudJoin.', 'cloudSwitch.', 'invite.', 'wizard.',
+];
+const inPath = (key) => PATH_KEY_PREFIXES.some((prefix) => key === prefix || key.startsWith(prefix));
+const missingPathPrefixes = PATH_KEY_PREFIXES.filter((prefix) => (
+  !defaultKeys.some((key) => key === prefix || key.startsWith(prefix))
+));
+check('主路径 key 组完整（顶栏/导航/锁定/新建/加入/邀请/向导）',
+  missingPathPrefixes.length === 0, { missing: missingPathPrefixes });
+
+const REQUIRED_PATH_STATIC_KEYS = [
+  'topbar.cloud.openSettings', 'topbar.self.openAbout', 'topbar.self.placeholder',
+  'topbar.online.unknown', 'topbar.security.none', 'topbar.security.view', 'topbar.memory.placeholder',
+  'legend.title', 'legend.edges', 'legend.edge.mine', 'legend.edge.theirs', 'legend.edge.offline',
+  'legend.edge.revoked', 'legend.note', 'stage.aria',
+  'wizard.aria', 'wizard.title', 'wizard.close', 'wizard.back', 'wizard.next',
+  'invite.aria', 'invite.title', 'invite.closeAria',
+  'cloudJoin.title', 'cloudJoin.lead', 'cloudJoin.tokenLabel', 'cloudJoin.tokenPlaceholder',
+  'cloudJoin.nameLabel', 'cloudJoin.namePlaceholder', 'cloudJoin.cancel', 'cloudJoin.submit',
+  'cloudJoin.closeAria', 'cloudSwitch.titleStatic',
+  'onboard.coach.title', 'onboard.coach.bodyBefore', 'onboard.coach.bodyCreate', 'onboard.coach.bodyOr',
+  'onboard.coach.bodyJoin', 'onboard.coach.bodyAfter', 'onboard.coach.create', 'onboard.coach.join',
+  'onboard.coach.dismiss', 'onboard.coach.closeTitle',
+  'onboard.create.title', 'onboard.create.tag', 'onboard.create.desc', 'onboard.create.cloudLabel',
+  'onboard.create.cloudPlaceholder', 'onboard.create.deviceLabel', 'onboard.create.devicePlaceholder',
+  'onboard.create.submit', 'onboard.create.closeAria',
+  'onboard.join.title', 'onboard.join.lead', 'onboard.join.deviceLabel', 'onboard.join.tokenLabel',
+  'onboard.join.devicePlaceholder', 'onboard.join.tokenPlaceholder', 'onboard.join.submit',
+  'onboard.join.closeAria', 'common.required',
+];
+const missingPathStatic = REQUIRED_PATH_STATIC_KEYS.filter((key) => !referenced.has(key));
+check('主路径静态 DOM 已挂 data-i18n（顶栏/锁定/新建/加入/邀请/向导）',
+  missingPathStatic.length === 0, { missing: missingPathStatic });
+
+const REQUIRED_RUNTIME_PATH_KEYS = [
+  'wizard.step.local', 'wizard.step.connect',
+  'security.level.low', 'security.level.medium', 'security.level.high',
+  'cloud.error.tokenRequired', 'cloud.error.tokenInvalid', 'cloud.error.tokenExpired',
+  'cloud.error.tokenRejected', 'cloud.error.confirmationRequired', 'cloud.error.invalidName',
+  'cloud.error.nameTaken', 'cloud.error.cloudArchived', 'cloud.error.cloudBlocked',
+  'cloud.error.profileNotFound', 'cloud.error.profileJoinFailed', 'cloud.error.endpointUnreachable',
+  'cloud.error.cloudAlreadyJoined', 'cloud.error.cloudDisabled', 'cloud.error.cloudUnavailable',
+  'cloud.error.cloudUnsupported', 'cloud.error.cloudListFailed', 'cloud.error.cloudRegistryInvalid',
+  'cloud.error.cloudRegistryLocked', 'cloud.error.cloudProfilePathInvalid',
+  'onboard.error.failed', 'onboard.error.failedFallback', 'onboard.error.invalidName',
+  'onboard.error.tokenInvalid', 'onboard.error.tokenExpired', 'onboard.error.tokenRejected',
+  'onboard.error.endpointUnreachable', 'onboard.error.notInitialized',
+];
+const missingRuntimePath = REQUIRED_RUNTIME_PATH_KEYS.filter((key) => !defaultKeys.includes(key));
+check('主路径动态 key 完整（安全等级 / 云错误 / 引导错误 / 向导步骤）',
+  missingRuntimePath.length === 0, { missing: missingRuntimePath });
+
+const englishMessages = packs.get('en-US/console') ?? {};
+const missingPathEnglish = defaultKeys.filter((key) => inPath(key) && typeof englishMessages[key] !== 'string');
+const pathCjk = Object.entries(englishMessages)
+  .filter(([key, value]) => inPath(key) && CJK.test(value))
+  .map(([key, value]) => ({ key, value }));
+check('主路径英文 key 完整且无中文兜底（en-US）',
+  missingPathEnglish.length === 0 && pathCjk.length === 0,
+  { missing: missingPathEnglish, cjk: pathCjk });
+
 const failed = results.filter((result) => !result.ok);
 console.log('== check:i18n ==');
 console.log(`I18N_SUMMARY ${JSON.stringify({

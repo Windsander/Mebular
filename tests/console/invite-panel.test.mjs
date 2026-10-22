@@ -26,13 +26,13 @@ function invitePanelSource() {
 describe('邀请面板 · TTL 档位与两栏结构', () => {
   it('令牌有效期档位精确：5/15/20 分钟、2/6/12/24 小时；默认 15 分钟', () => {
     expect(INVITE_TTL_OPTIONS).toEqual([
-      { label: '5 分钟', ttlMs: 300_000 },
-      { label: '15 分钟', ttlMs: 900_000 },
-      { label: '20 分钟', ttlMs: 1_200_000 },
-      { label: '2 小时', ttlMs: 7_200_000 },
-      { label: '6 小时', ttlMs: 21_600_000 },
-      { label: '12 小时', ttlMs: 43_200_000 },
-      { label: '24 小时', ttlMs: 86_400_000 },
+      { label: '5 分钟', labelKey: 'invite.ttl.minutes', labelVars: { n: 5 }, ttlMs: 300_000 },
+      { label: '15 分钟', labelKey: 'invite.ttl.minutes', labelVars: { n: 15 }, ttlMs: 900_000 },
+      { label: '20 分钟', labelKey: 'invite.ttl.minutes', labelVars: { n: 20 }, ttlMs: 1_200_000 },
+      { label: '2 小时', labelKey: 'invite.ttl.hours', labelVars: { n: 2 }, ttlMs: 7_200_000 },
+      { label: '6 小时', labelKey: 'invite.ttl.hours', labelVars: { n: 6 }, ttlMs: 21_600_000 },
+      { label: '12 小时', labelKey: 'invite.ttl.hours', labelVars: { n: 12 }, ttlMs: 43_200_000 },
+      { label: '24 小时', labelKey: 'invite.ttl.hours', labelVars: { n: 24 }, ttlMs: 86_400_000 },
     ]);
     expect(INVITE_TTL_DEFAULT_MS).toBe(900_000);
     expect(consoleJs).toContain('inviteTtlMs: INVITE_TTL_DEFAULT_MS');

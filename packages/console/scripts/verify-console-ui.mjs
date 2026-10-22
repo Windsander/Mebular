@@ -372,6 +372,22 @@ async function main() {
       await send('Emulation.clearDeviceMetricsOverride');
       return join(shotDir, name);
     };
+    // 当前视口截图（不改 device metrics）；用于同一档位先断言后落盘，避免断言与截图视口不一致。
+    const captureNow = async (name) => {
+      if (!shotDir) return null;
+      await sleep(200);
+      const shot = await send('Page.captureScreenshot', { format: 'jpeg', quality: 90 });
+      await writeFile(join(shotDir, name), Buffer.from(shot.data, 'base64'));
+      return join(shotDir, name);
+    };
+    const setViewport = async (viewport) => {
+      await send('Emulation.setDeviceMetricsOverride', viewport);
+      await sleep(250);
+    };
+    const clearViewport = async () => {
+      await send('Emulation.clearDeviceMetricsOverride');
+      await sleep(100);
+    };
 
     await send('Page.navigate', { url: `${base}/console/` });
     check('页面加载完成（标题 / #stage）', await waitFor('document.title.includes("控制台") && Boolean(document.querySelector("#stage"))'));
@@ -2003,14 +2019,20 @@ async function main() {
     check('i18n 默认入口：html lang=zh-CN（普通用户不被系统英文带入半翻译界面）',
       await waitFor(`document.documentElement.lang === 'zh-CN' && document.documentElement.dataset.consoleReady === '1' && Boolean(document.querySelector('#open-settings')) && document.title.includes('控制台')`));
     await evalJs('document.querySelector("#open-settings").click()');
-    check('i18n 语言行默认可见：设置·常用单行、位于常驻运行之前', await waitFor(`(() => {
+    check('i18n 语言行默认可见：设置·常用专用单行控件、位于常驻运行之前', await waitFor(`(() => {
       const row = document.querySelector('#settings-language');
       const resident = document.querySelector('#settings-resident');
       const panel = document.querySelector('#settings-panel-common');
+      const control = row?.querySelector('.settings-language-control');
+      const select = row?.querySelector('select[data-language-select]');
       return Boolean(row) && Boolean(resident) && panel?.hidden === false
         && row.parentElement === panel && row === panel.querySelector('.settings-language-row')
+        && !row.classList.contains('asst-row') && !row.querySelector('.asst-name, .asst-sp')
+        && Boolean(control) && control.querySelector('select[data-language-select]') === select
+        && Boolean(control.querySelector('.settings-language-chevron'))
         && row.querySelectorAll('select[data-language-select]').length === 1
-        && row.querySelector('select').value === 'zh-CN'
+        && select.value === 'zh-CN'
+        && getComputedStyle(select).appearance === 'none'
         && row.getBoundingClientRect().top < resident.getBoundingClientRect().top;
     })()`));
     await capture('i18n-settings-language-default.jpg');
@@ -2028,6 +2050,224 @@ async function main() {
     await evalJs('document.querySelector("#settings-close").click()');
     await send('Page.navigate', { url: `${base}/console/?i18n=1&lang=en-US` });
     check('i18n 深链：html lang=en-US + 顶栏/导航英文', await waitFor(`document.documentElement.dataset.consoleReady === '1' && document.documentElement.lang === 'en-US' && document.querySelector('.brand')?.textContent.includes('Mebular Console') && /Star map/.test(document.querySelector('[data-view=map] .view-label')?.textContent ?? '')`));
+    // B · 英文长文案：顶栏动作不产生第二行 / 不横向溢出（1440 / 1024 / 390 三档）。
+    const topbarProbe = `(() => {
+      const bar = document.querySelector('.topbar');
+      const actions = document.querySelector('.topbar-actions');
+      const visibleButtons = [...actions.querySelectorAll('.btn')].filter((el) => !el.hidden);
+      const labels = visibleButtons.map((el) => el.querySelector('.btn-label')).filter(Boolean);
+      const rect = (el) => el.getBoundingClientRect();
+      const tops = visibleButtons.map((el) => Math.round(rect(el).top));
+      const byId = (id) => document.querySelector('#' + id);
+      const labelText = (id) => byId(id)?.querySelector('.btn-label')?.textContent.trim();
+      return {
+        lang: document.documentElement.lang,
+        rows: new Set(tops).size,
+        labelsDisplay: labels.length ? getComputedStyle(labels[0]).display : 'none',
+        widths: visibleButtons.map((el) => Math.round(rect(el).width)),
+        actionRight: Math.round(rect(actions).right),
+        actionBottom: Math.round(rect(actions).bottom),
+        barBottom: Math.round(rect(bar).bottom),
+        barHeight: Math.round(rect(bar).height),
+        overflow: bar.scrollWidth > bar.clientWidth + 1
+          || document.documentElement.scrollWidth > window.innerWidth + 1,
+        invite: { label: labelText('invite-device'), aria: byId('invite-device')?.getAttribute('aria-label'), title: byId('invite-device')?.getAttribute('title') },
+        join: { label: labelText('join-cloud'), aria: byId('join-cloud')?.getAttribute('aria-label'), title: byId('join-cloud')?.getAttribute('title') },
+        create: { label: labelText('create-cloud'), aria: byId('create-cloud')?.getAttribute('aria-label'), title: byId('create-cloud')?.getAttribute('title') },
+      };
+    })()`;
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    const topbar1440 = await evalJs(topbarProbe);
+    check('i18n 顶栏 1440：英文动作同一行、无横向溢出、短标签 + 完整 aria/title',
+      topbar1440.lang === 'en-US' && topbar1440.rows === 1
+        && topbar1440.labelsDisplay !== 'none'
+        && topbar1440.actionBottom <= topbar1440.barBottom
+        && topbar1440.barHeight <= 60 && topbar1440.overflow === false
+        && topbar1440.invite.label === 'Invite' && topbar1440.invite.aria === 'Invite device' && topbar1440.invite.title === 'Invite device'
+        && topbar1440.join.label === 'Join' && topbar1440.join.aria === 'Join cloud' && topbar1440.join.title === 'Join cloud'
+        && topbar1440.create.label === 'New' && topbar1440.create.aria === 'New cloud' && topbar1440.create.title === 'New cloud',
+      JSON.stringify(topbar1440));
+    await captureNow('i18n-en-topbar-1440.jpg');
+    await setViewport({ width: 1024, height: 768, deviceScaleFactor: 1, mobile: false });
+    const topbar1024 = await evalJs(topbarProbe);
+    check('i18n 顶栏 1024：英文更早折叠为图标，动作仍同一行、无第二行/横向溢出',
+      topbar1024.rows === 1 && topbar1024.labelsDisplay === 'none'
+        && topbar1024.widths.every((width) => Math.abs(width - 34) <= 2)
+        && topbar1024.actionBottom <= topbar1024.barBottom
+        && topbar1024.barHeight <= 60 && topbar1024.overflow === false,
+      JSON.stringify(topbar1024));
+    await captureNow('i18n-en-topbar-1024.jpg');
+    await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    const topbar390 = await evalJs(topbarProbe);
+    check('i18n 顶栏 390：动作保持一行、图标等宽、无横向溢出',
+      topbar390.rows === 1 && topbar390.labelsDisplay === 'none'
+        && topbar390.widths.every((width) => Math.abs(width - 34) <= 2)
+        && topbar390.overflow === false,
+      JSON.stringify(topbar390));
+    const nav390 = await evalJs(`(() => {
+      const nav = document.querySelector('#view-nav');
+      const labels = [...document.querySelectorAll('#view-nav .view-label')];
+      return {
+        labels: labels.map((el) => el.textContent.trim()),
+        split: labels.some((el) => el.getBoundingClientRect().height > 18),
+        navOverflow: Boolean(nav) && nav.scrollWidth > nav.clientWidth + 1,
+        pageOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+      };
+    })()`);
+    check('i18n 导航 390：英文标签整词显示（Star map 不拆行）+ 无横向溢出',
+      nav390.labels.join(',') === 'Star map,Sharing,Memories,Audit'
+        && nav390.split === false && nav390.navOverflow === false && nav390.pageOverflow === false,
+      JSON.stringify(nav390));
+    await captureNow('i18n-en-topbar-390.jpg');
+
+    // B · 设置语言行：专用 wrapper + 固定 chevron，三档都保持单行。
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs('document.querySelector("#open-settings").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("#settings-language"))');
+    const languageProbe = `(() => {
+      const row = document.querySelector('#settings-language');
+      const resident = document.querySelector('#settings-resident');
+      const panel = document.querySelector('#settings-panel-common');
+      const control = row?.querySelector('.settings-language-control');
+      const select = row?.querySelector('select[data-language-select]');
+      if (!row || !resident || !panel || !control || !select) return { ok: false, why: 'missing' };
+      const rowRect = row.getBoundingClientRect();
+      const labelRect = row.querySelector('.settings-language-label').getBoundingClientRect();
+      const controlRect = control.getBoundingClientRect();
+      const selectRect = select.getBoundingClientRect();
+      const rowStyle = getComputedStyle(row);
+      const selectStyle = getComputedStyle(select);
+      select.focus();
+      const focusShadow = getComputedStyle(select).boxShadow;
+      select.blur();
+      return {
+        ok: true,
+        lang: document.documentElement.lang,
+        panelVisible: panel.hidden === false,
+        dedicated: row.classList.contains('settings-language-row') && !row.classList.contains('asst-row')
+          && !row.querySelector('.asst-name, .asst-sp'),
+        wrapper: control.querySelector('select[data-language-select]') === select
+          && Boolean(control.querySelector('.settings-language-chevron')),
+        oneLine: Math.abs((labelRect.top + labelRect.height / 2) - (controlRect.top + controlRect.height / 2)) <= 1
+          && rowRect.height <= 44,
+        order: rowRect.top < resident.getBoundingClientRect().top,
+        divider: rowStyle.borderBottomStyle === 'dashed' && parseFloat(rowStyle.borderBottomWidth) >= 1,
+        appearance: selectStyle.appearance,
+        selectHeight: Math.round(selectRect.height),
+        radius: selectStyle.borderRadius,
+        focusShadow,
+        options: select.querySelectorAll('option').length,
+        value: select.value,
+        inRow: selectRect.right <= rowRect.right + 1 && selectRect.left >= rowRect.left - 1,
+        overflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+      };
+    })()`;
+    const language1440 = await evalJs(languageProbe);
+    check('i18n 语言行 1440：专用控件、固定 chevron、单行、虚线分隔、焦点环',
+      language1440.ok && language1440.lang === 'en-US' && language1440.panelVisible
+        && language1440.dedicated && language1440.wrapper && language1440.oneLine
+        && language1440.order && language1440.divider
+        && language1440.appearance === 'none' && language1440.selectHeight === 28
+        && language1440.radius === '5px' && language1440.focusShadow !== 'none'
+        && language1440.options === 2 && language1440.value === 'en-US'
+        && language1440.inRow && language1440.overflow === false,
+      JSON.stringify(language1440));
+    await captureNow('i18n-en-language-1440.jpg');
+    await setViewport({ width: 1024, height: 768, deviceScaleFactor: 1, mobile: false });
+    const language1024 = await evalJs(languageProbe);
+    check('i18n 语言行 1024：仍为单行控件，无横向溢出',
+      language1024.ok && language1024.oneLine && language1024.inRow && language1024.overflow === false,
+      JSON.stringify(language1024));
+    await captureNow('i18n-en-language-1024.jpg');
+    await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    const language390 = await evalJs(languageProbe);
+    check('i18n 语言行 390：仍为单行控件，无横向溢出',
+      language390.ok && language390.oneLine && language390.inRow && language390.overflow === false,
+      JSON.stringify(language390));
+    await captureNow('i18n-en-language-390.jpg');
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs('document.querySelector("#settings-close").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === true');
+
+    // B · 邀请 / 加入弹框动作行：桌面同排，窄屏才允许 wrap；全程无横向溢出。
+    const controlsProbe = `(() => {
+      const modal = document.querySelector('#invite');
+      const box = modal?.querySelector('.modal-box');
+      const controls = modal?.querySelector('.invite-controls');
+      const tops = controls ? [...controls.children].map((el) => Math.round(el.getBoundingClientRect().top)) : [];
+      return {
+        open: Boolean(modal) && modal.hidden === false && Boolean(controls),
+        spread: tops.length ? Math.max(...tops) - Math.min(...tops) : 999,
+        boxOverflow: Boolean(box) && box.scrollWidth > box.clientWidth + 1,
+        pageOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+      };
+    })()`;
+    await evalJs('document.querySelector("#invite-device").click()');
+    check('i18n 邀请弹框打开（结果面板就位）',
+      await waitFor('document.querySelector("#invite")?.hidden === false && Boolean(document.querySelector("#invite-body .invite-controls"))', 20000));
+    const invite1440 = await evalJs(controlsProbe);
+    check('i18n 邀请动作行 1440：有效期/到期时刻/重新生成同排，无横向溢出',
+      invite1440.open && invite1440.spread <= 8 && invite1440.boxOverflow === false && invite1440.pageOverflow === false,
+      JSON.stringify(invite1440));
+    await captureNow('i18n-en-invite-1440.jpg');
+    await setViewport({ width: 1024, height: 768, deviceScaleFactor: 1, mobile: false });
+    const invite1024 = await evalJs(controlsProbe);
+    check('i18n 邀请动作行 1024：同排且无横向溢出',
+      invite1024.open && invite1024.spread <= 8 && invite1024.boxOverflow === false && invite1024.pageOverflow === false,
+      JSON.stringify(invite1024));
+    await captureNow('i18n-en-invite-1024.jpg');
+    await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    const invite390 = await evalJs(controlsProbe);
+    check('i18n 邀请动作行 390：窄屏仍无横向溢出（同排或自然换行）',
+      invite390.open && invite390.boxOverflow === false && invite390.pageOverflow === false,
+      JSON.stringify(invite390));
+    await captureNow('i18n-en-invite-390.jpg');
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs('document.querySelector("#invite .modal-head #invite-close").click()');
+    await waitFor('document.querySelector("#invite")?.hidden === true');
+
+    const joinActionsProbe = `(() => {
+      const modal = document.querySelector('#cloud-join');
+      const box = modal?.querySelector('.modal-box');
+      const actions = [...(modal?.querySelectorAll('.modal-actions .btn') ?? [])];
+      const tops = actions.map((el) => Math.round(el.getBoundingClientRect().top));
+      return {
+        open: Boolean(modal) && modal.hidden === false && actions.length === 2,
+        rows: new Set(tops).size,
+        rowsCount: actions.length,
+        actionRight: actions.length ? Math.round(Math.max(...actions.map((el) => el.getBoundingClientRect().right))) : 0,
+        boxOverflow: Boolean(box) && box.scrollWidth > box.clientWidth + 1,
+        pageOverflow: document.documentElement.scrollWidth > window.innerWidth + 1,
+        viewport: window.innerWidth,
+      };
+    })()`;
+    await evalJs('document.querySelector("#join-cloud").click()');
+    check('i18n 加入弹框打开（底部动作行就位）',
+      await waitFor('document.querySelector("#cloud-join")?.hidden === false && document.querySelectorAll("#cloud-join .modal-actions .btn").length === 2'));
+    const i18nJoin1440 = await evalJs(joinActionsProbe);
+    check('i18n 加入动作行 1440：取消 + 加入同排、无横向溢出',
+      i18nJoin1440.open && i18nJoin1440.rows === 1 && i18nJoin1440.actionRight <= i18nJoin1440.viewport + 1
+        && i18nJoin1440.boxOverflow === false && i18nJoin1440.pageOverflow === false,
+      JSON.stringify(i18nJoin1440));
+    await captureNow('i18n-en-join-1440.jpg');
+    await setViewport({ width: 1024, height: 768, deviceScaleFactor: 1, mobile: false });
+    const i18nJoin1024 = await evalJs(joinActionsProbe);
+    check('i18n 加入动作行 1024：仍同排、无横向溢出',
+      i18nJoin1024.open && i18nJoin1024.rows === 1 && i18nJoin1024.actionRight <= i18nJoin1024.viewport + 1
+        && i18nJoin1024.boxOverflow === false && i18nJoin1024.pageOverflow === false,
+      JSON.stringify(i18nJoin1024));
+    await captureNow('i18n-en-join-1024.jpg');
+    await setViewport({ width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
+    const i18nJoin390 = await evalJs(joinActionsProbe);
+    check('i18n 加入动作行 390：窄屏允许 wrap，但无横向溢出',
+      i18nJoin390.open && i18nJoin390.rows <= 2 && i18nJoin390.actionRight <= i18nJoin390.viewport + 1
+        && i18nJoin390.boxOverflow === false && i18nJoin390.pageOverflow === false,
+      JSON.stringify(i18nJoin390));
+    await captureNow('i18n-en-join-390.jpg');
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs('document.querySelector("#cloud-join-x").click()');
+    await waitFor('document.querySelector("#cloud-join")?.hidden === true');
+
     await evalJs('document.querySelector("#open-settings").click()');
     check('i18n 语言行：设置·常用单行 + 位于常驻运行之前 + 虚线分隔', await waitFor(`(() => {
       const row = document.querySelector('#settings-language');
@@ -2037,9 +2277,13 @@ async function main() {
       const s = getComputedStyle(row);
       return panel.hidden === false && row.parentElement === panel
         && row === panel.querySelector('.settings-language-row')
+        && !row.classList.contains('asst-row')
+        && Boolean(row.querySelector('.settings-language-control > select[data-language-select]'))
+        && Boolean(row.querySelector('.settings-language-control .settings-language-chevron'))
         && row.querySelectorAll('select[data-language-select]').length === 1
         && row.querySelectorAll('option').length === 2
         && row.querySelector('select').value === 'en-US'
+        && getComputedStyle(row.querySelector('select')).appearance === 'none'
         && row.getBoundingClientRect().top < resident.getBoundingClientRect().top
         && parseFloat(s.borderBottomWidth) >= 1;
     })()`));
@@ -2056,6 +2300,7 @@ async function main() {
     const navsAfterLocale = cdp.events.filter((event) => event.method === 'Page.frameNavigated').length;
     check('i18n 无 reload 证据：导航次数不变', navsAfterLocale === navsBeforeLocale, `navigations=${navsBeforeLocale}→${navsAfterLocale}`);
     await evalJs('document.querySelector("#settings-close").click()');
+    await clearViewport();
     await send('Page.navigate', { url: `${base}/console/` });
     await waitFor('document.querySelector("#settings")?.hidden === true');
 

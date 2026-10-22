@@ -646,7 +646,7 @@ export function isI18nReady({
 }
 
 /**
- * 设置 · 常用页的语言行（单行，复用 .asst-row 的虚线分隔）。
+ * 设置 · 常用页的语言行（专用单行控件，虚线分隔；不复用助手行模板）。
  * 默认开放；catalog 尚未全量翻译时也保留入口，避免用户找不到语言开关。
  * 语言名称来自 manifest.nativeName（新增语言不需要新增 locale.* 文案 key）。
  */
@@ -670,13 +670,15 @@ export function languageSettingsRowHtml({
     const label = nativeName || translate(`locale.${code}`) || code;
     return `<option value="${escapeHtml(code)}"${code === current ? ' selected' : ''}>${escapeHtml(label)}</option>`;
   }).join('');
-  return `<div class="asst-row settings-language-row" id="settings-language" data-settings-language>
-      <span class="asst-name" data-i18n="settings.language">${escapeHtml(translate('settings.language'))}</span>
-      <span class="asst-sp"></span>
-      <select id="settings-language-select" class="crt-input settings-language-select" data-language-select
-        aria-label="${escapeHtml(translate('settings.language.aria'))}"
-        data-i18n-aria-label="settings.language.aria"
-        title="${escapeHtml(translate('settings.language.title'))}"
-        data-i18n-title="settings.language.title">${options}</select>
+  return `<div class="settings-language-row" id="settings-language" data-settings-language>
+      <span class="settings-language-label" data-i18n="settings.language">${escapeHtml(translate('settings.language'))}</span>
+      <span class="settings-language-control">
+        <select id="settings-language-select" class="crt-input settings-language-select" data-language-select
+          aria-label="${escapeHtml(translate('settings.language.aria'))}"
+          data-i18n-aria-label="settings.language.aria"
+          title="${escapeHtml(translate('settings.language.title'))}"
+          data-i18n-title="settings.language.title">${options}</select>
+        <span class="settings-language-chevron" aria-hidden="true"></span>
+      </span>
     </div>`;
 }

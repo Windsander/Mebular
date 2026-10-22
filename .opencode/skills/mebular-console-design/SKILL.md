@@ -132,8 +132,9 @@ license: MIT（与仓库一致）
 - **全量 catalog 完成前不向普通用户暴露半套英文**：语言行由明确就绪开关控制，
   默认关闭；仅 `?lang=` / `?i18n=1` / 桌面壳显式 `i18nReady` 时可见。
   语言行在「设置 · 常用」的「常驻运行」之上，单行 `语言 [简体中文 / English]`，
-  复用 `.asst-row` 的虚线分隔，不另起卡片；选择即生效（持久化到 localStorage，
-  不 reload、不跳页、不设保存按钮）。
+  使用专用 `.settings-language-row` / `.settings-language-control`（`select` 隐藏原生
+  箭头 + wrapper 固定 chevron），以虚线分隔，不另起卡片；选择即生效（持久化到
+  localStorage，不 reload、不跳页、不设保存按钮）。
 - 英文文案仍遵守本契约：零依赖、暗色唯一主题、系统字体栈、既有布局 token；
   不因英文变长而引入第二套组件或缩小正文对比度。
 

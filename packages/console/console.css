@@ -52,8 +52,10 @@ html, body {
 }
 .brand { font-weight: 700; letter-spacing: 0.5px; white-space: nowrap; }
 .brand-star { color: var(--accent); }
-.topbar-identity { display: flex; gap: 8px; flex: 1 1 auto; flex-wrap: wrap; }
-.topbar-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 8px; }
+/* identity 可收缩（英文文案更长时先让徽章内部换行/截断），actions 始终作为一个整体，
+   不把按钮拆到第二行。 */
+.topbar-identity { display: flex; gap: 8px; flex: 1 1 auto; min-width: 0; flex-wrap: wrap; }
+.topbar-actions { flex: 0 0 auto; min-width: 0; display: flex; align-items: center; gap: 8px; flex-wrap: nowrap; }
 /* 走查修正（用户实拍：三个操作按钮"大小感觉不一致"）：统一几何——
    固定高 + flex 居中 + 统一图标槽（消除 ⚙/＋ 字形度量与行内基线差异导致的视觉漂移） */
 .topbar-actions .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 34px; padding: 0 12px; line-height: 1; }
@@ -91,6 +93,14 @@ html, body {
   .topbar-actions .btn #settings-pending-badge { position: absolute; transform: translate(13px, -10px); }
   .topbar-actions .btn { position: relative; }
   #cloud-badge { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; }
+}
+/* 英文文案更长：比中文更早折叠为图标（aria-label/title 仍保留完整动作名），
+   避免顶栏动作在 1024 档被 identity 挤到第二行。 */
+@media (max-width: 1180px) {
+  html[lang="en-US"] .topbar { gap: 10px; }
+  html[lang="en-US"] .topbar-actions .btn { position: relative; width: 34px; padding: 0; }
+  html[lang="en-US"] .topbar-actions .btn .btn-label { display: none; }
+  html[lang="en-US"] .topbar-actions .btn #settings-pending-badge { position: absolute; transform: translate(13px, -10px); }
 }
 
 
@@ -158,6 +168,7 @@ html, body {
   display: inline-flex;
   align-items: center;
   gap: 7px;
+  white-space: nowrap;
   transition: color 0.15s, border-color 0.15s, text-shadow 0.15s;
 }
 .view-btn:hover { color: #c8ffe3; }
@@ -342,6 +353,8 @@ select {
   padding: 7px 11px;
   font: inherit;
   cursor: pointer;
+  /* 按钮文字作为整体，不在按钮内部掉成两行/单字；动作行由容器决定是否换行。 */
+  white-space: nowrap;
 }
 .btn:hover { border-color: #2f3f63; }
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
@@ -362,7 +375,7 @@ select {
 .modal-box p, .modal-note, .cfg-help, .cfg-effective, .wizard-note { max-width: 62ch; }
 /* 弹层打开时锁住背后的页面滚动（背板本身也不滚） */
 body.modal-open { overflow: hidden; }
-.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; flex-wrap: nowrap; }
 
 /* U-3 · 设置壳：提示收进标题，页签固定，只有其下内容滚动 */
 .modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin: 0 0 8px; }
@@ -1129,6 +1142,9 @@ body.modal-open { overflow: hidden; }
 
 /* ---------- 响应式：≤760px 行模板转为上下布局（无横向滚动） ---------- */
 @media (max-width: 760px) {
+  /* 英文导航标签（Star map / Sharing / Memories）保持整词不拆行；窄屏收紧间距。 */
+  .view-tabs { flex-wrap: wrap; column-gap: 8px; row-gap: 4px; }
+  .view-btn { font-size: 11px; letter-spacing: 1px; }
   .settings-tabs { flex-wrap: wrap; }
   .settings-kv {
     grid-template-columns: minmax(0, 1fr);
@@ -1146,6 +1162,8 @@ body.modal-open { overflow: hidden; }
   .modal-box { max-width: 100%; }
   .modal { padding: 12px; }
   .modal-box { max-height: calc(100vh - 24px); }
+  /* 桌面动作行保持一行；窄屏才允许换行（按钮文字仍不拆行）。 */
+  .modal-actions { flex-wrap: wrap; }
   /* 窄屏：常驻行/动作按钮不把文字挤成竖排 */
   #settings-resident .asst-row { flex-wrap: wrap; }
   #settings-resident .asst-name { min-width: 0; }
@@ -1202,8 +1220,9 @@ body.modal-open { overflow: hidden; }
 .invite-fingerprint { color: var(--crt-dim, rgba(140, 255, 200, 0.52)); font-size: 10px; letter-spacing: 0.3px; white-space: nowrap; }
 .invite-token-code { display: block; min-width: 0; font-size: 11px; color: var(--accent); overflow-wrap: anywhere; }
 .invite-token-block .invite-copy { width: 100%; }
-/* 邀请单动作：有效期 → 到期时刻 → 重新生成同排；空间不足才自然换行（不 nowrap 溢出） */
+/* 邀请单动作：窄屏默认允许换行（不横向溢出）；桌面单独锁定同排。 */
 .invite-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+@media (min-width: 521px) { .invite-controls { flex-wrap: nowrap; } }
 .invite-ttl { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); }
 .invite-ttl select.crt-input { width: auto; min-width: 78px; padding: 4px 6px; }
 .invite-expiry { font-size: 10px; color: var(--muted); white-space: nowrap; }
@@ -1218,7 +1237,7 @@ body.modal-open { overflow: hidden; }
 @media (max-width: 520px) {
   .invite-layout { grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .invite-qr { justify-content: flex-start; }
-  /* 窄屏省掉「有效期」标签，值本身可读；让跨天日期与重新生成仍保持同排。 */
+  /* 窄屏省掉「有效期」标签，值本身可读；空间不足时动作行才换行。 */
   .invite-ttl .invite-label { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -1311,10 +1330,69 @@ body.modal-open { overflow: hidden; }
 .asst-detail-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .asst-output { margin-top: 4px; }
 .settings-resident { margin-bottom: 4px; }
-/* 语言行：与常用其他项同款单行 + 虚线分隔，不另起卡片。 */
-.settings-language-row { flex-wrap: nowrap; }
-.settings-language-row .asst-name { min-width: 0; }
-.settings-language-select { flex: 0 0 auto; width: auto; min-width: 104px; max-width: 100%; font-size: 12px; padding: 4px 8px; }
+/* 语言行：专用单行控件 + 虚线分隔（不复用 .asst-row，不另起卡片）。
+   控件外观对齐 .crt-input：同高、同边框/圆角/底色/focus ring；原生箭头隐藏后
+   由 wrapper 的固定 chevron 承担，避免各平台 select 外观漂移。 */
+.settings-language-row {
+  display: flex;
+  align-items: center;
+  gap: var(--row-gap);
+  flex-wrap: nowrap;
+  min-height: var(--btn-h);
+  padding: 7px 2px;
+  border-bottom: 1px dashed var(--border);
+}
+.settings-language-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--text);
+  white-space: nowrap;
+}
+.settings-language-control {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  margin-left: auto;
+}
+.settings-language-select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: auto;
+  min-width: 118px;
+  max-width: 100%;
+  height: 28px;
+  margin: 0;
+  padding: 0 28px 0 10px;
+  background: rgba(6, 24, 17, 0.75);
+  border: 1px solid rgba(80, 255, 170, 0.28);
+  border-radius: 5px;
+  color: #d6ffea;
+  font: inherit;
+  font-size: 12px;
+  line-height: 26px;
+  cursor: pointer;
+}
+.settings-language-select:hover { border-color: rgba(120, 255, 190, 0.45); }
+.settings-language-select:focus {
+  outline: none;
+  border-color: rgba(120, 255, 190, 0.6);
+  box-shadow: 0 0 0 2px rgba(80, 255, 170, 0.12);
+}
+.settings-language-select option { background: #07120d; color: #d6ffea; }
+.settings-language-chevron {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -5px;
+  border-right: 1.5px solid rgba(140, 255, 200, 0.7);
+  border-bottom: 1.5px solid rgba(140, 255, 200, 0.7);
+  transform: rotate(45deg);
+  pointer-events: none;
+}
 .settings-tab-extra { margin-left: auto; }
 /* 首屏叠加层：状态总览条（纯只读，不挡星图交互；fixed 钉视口，免受容器定位影响） */
 .status-pill { position: fixed; top: 104px; left: 50%; transform: translateX(-50%); z-index: 5;

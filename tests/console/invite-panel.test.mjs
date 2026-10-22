@@ -207,6 +207,7 @@ describe('邀请面板 · TTL 档位与两栏结构', () => {
   it('有效期 / 到期时刻 / 重新生成同排 flex：空间不足才换行，重新生成靠右且为次级动作', () => {
     const css = readFileSync(join(root, 'packages', 'console', 'console.css'), 'utf-8');
     expect(css).toMatch(/\.invite-controls \{[^}]*display: flex;[^}]*flex-wrap: wrap;[^}]*gap: 8px/);
+    expect(css).toMatch(/@media \(min-width: 521px\) \{ \.invite-controls \{ flex-wrap: nowrap; \} \}/);
     expect(css).toMatch(/\.invite-controls #invite-regenerate \{ margin-left: auto; \}/);
     expect(css).not.toMatch(/\.invite-controls #invite-regenerate \{[^}]*grid-column/);
     expect(css).not.toMatch(/\.invite-expiry \{[^}]*grid-column/);

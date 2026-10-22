@@ -12,7 +12,7 @@ import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
 import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SECURITY_TOTP_FOOT_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
-import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, LOCALE_STORAGE_KEY, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
+import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, reconcileDesktopLocale, LOCALE_STORAGE_KEY, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
 import { enhanceSelect, enhanceSelects } from './dropdown.mjs';
 
 const $ = (selector) => document.querySelector(selector);
@@ -97,7 +97,13 @@ const stage = new StarStage($('#stage'));
 // 语言行已默认开放；只有 ?lang= 或已保存偏好才覆盖默认 zh-CN。
 // 未选择时不跟随英文系统语言，避免首次打开就落入半翻译界面。
 // 加载失败不抛：保留 index.html 的静态中文兜底，设置/语言行在下次成功加载后恢复。
-const hasExplicitLocale = Boolean(params.get('lang')?.trim()) || Boolean(localStorage.getItem(LOCALE_STORAGE_KEY));
+let hasExplicitLocale = Boolean(params.get('lang')?.trim()) || Boolean(localStorage.getItem(LOCALE_STORAGE_KEY));
+// 桌面壳：localStorage 可能缺失（首启 / 清站点数据 / 端口变化）或陈旧（崩溃前未落盘）。
+// 以壳层 <home>/.desktop-state.json 的 locale 为准做一次对齐（既有 preload getLocale）；
+// 重启后既不会回中文，也不会让旧 localStorage 反写主进程。?lang= 深链仍优先。
+if (await reconcileDesktopLocale({ hasQueryLocale: Boolean(params.get('lang')?.trim()) })) {
+  hasExplicitLocale = true;
+}
 await initI18n({ languages: hasExplicitLocale ? undefined : [] });
 if (!hasExplicitLocale && getLocale() !== 'zh-CN') setLocale('zh-CN', { persist: false });
 applyStaticI18n(document);

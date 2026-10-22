@@ -5,6 +5,8 @@
   --row-gap: 10px;        /* 列间距 */
   --row-gap-y: 6px;       /* 行间距 */
   --control-h: 26px;      /* 控件基准高（label 行高与控件对齐） */
+  --select-h: 26px;       /* 自定义下拉 trigger 标准高（= 设置输入框/按钮） */
+  --select-h-compact: 32px; /* 列表页 filter 行：与相邻 .btn-crt 同高（不显扁） */
   --btn-h: 27px;
   --section-gap: 10px;    /* section 垂直间距 */
   --group-gap: 8px;       /* 组内间距 */
@@ -880,7 +882,7 @@ body.modal-open { overflow: hidden; }
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  height: 30px;
+  height: var(--select-h);
   padding: 0 10px;
   border: 1px solid rgba(80, 255, 170, 0.28);
   border-radius: 8px;
@@ -923,8 +925,8 @@ body.modal-open { overflow: hidden; }
 }
 .crt-select--compact .crt-select-trigger,
 .crt-select[data-variant="compact"] .crt-select-trigger {
-  height: 28px;
-  padding: 0 8px;
+  height: var(--select-h-compact);
+  padding: 0 10px;
 }
 .crt-select-menu {
   position: fixed;
@@ -1175,6 +1177,8 @@ body.modal-open { overflow: hidden; }
 .cfg-control { display: flex; flex-wrap: wrap; align-items: center; gap: var(--field-gap) 8px; min-width: 0; min-height: var(--control-h); }
 .cfg-control .cfg-input,
 .cfg-control select { width: 100%; max-width: none; font-size: 12px; }
+/* 设置行内：输入框与下拉同高（26px），再与动作按钮对齐；避免 dropdown 比相邻控件高半行。 */
+.cfg-control .cfg-input { height: var(--select-h); }
 .cfg-control .crt-select,
 .cfg-control .crt-select-trigger { width: 100%; max-width: none; font-size: 12px; }
 .cfg-control .cfg-toggle { order: 0; }
@@ -1277,6 +1281,10 @@ body.modal-open { overflow: hidden; }
 .settings-tab {
   background: transparent; border: 1px solid transparent; border-bottom: none;
   color: var(--muted); font: inherit; font-size: 12px; padding: 6px 12px; cursor: pointer; border-radius: 8px 8px 0 0;
+  /* 英文页签（Assistants / MCP / About device）保持整词单行；容器在 ≤760 才换行。 */
+  flex: 0 0 auto;
+  white-space: nowrap;
+  min-width: 0;
 }
 .settings-tab:hover { color: #dbe9ff; }
 .settings-tab.is-active { color: var(--crt-bright, #9dffcf); border-color: var(--border); background: rgba(10, 16, 32, 0.55); }
@@ -1340,7 +1348,7 @@ body.modal-open { overflow: hidden; }
 .invite-qr { display: flex; align-items: flex-start; justify-content: center; min-width: 0; }
 .qr-img { width: 156px; height: 156px; background: #fff; border-radius: 8px; padding: 6px; image-rendering: pixelated; }
 .invite-qr-fallback { margin: 0; font-size: 11px; line-height: 1.6; }
-.invite-main { display: grid; gap: 10px; align-content: start; min-width: 0; }
+.invite-main { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; align-content: start; min-width: 0; }
 .invite-lead { margin: 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
 /* 首次打开的稳定骨架：QR 占位 + 多行占位，高度与结果面板近似 */
 .invite-skeleton-qr { width: 156px; height: 156px; border-radius: 8px; border: 1px dashed rgba(140, 255, 200, 0.22); background: rgba(80, 255, 170, 0.05); animation: invite-skeleton-pulse 1.6s ease-in-out infinite; }
@@ -1358,22 +1366,23 @@ body.modal-open { overflow: hidden; }
 #invite-body.is-busy .invite-layout { opacity: 0.72; }
 #invite-body.is-busy #invite-regenerate { cursor: progress; }
 #invite-body.is-busy .invite-ttl .crt-select-trigger { cursor: progress; opacity: 0.6; }
-#invite-regenerate { min-width: 68px; padding-left: 6px; padding-right: 6px; }
+#invite-regenerate { padding-left: 6px; padding-right: 6px; }
 .invite-regen-error { margin: 0; font-size: 11px; line-height: 1.6; }
 /* 令牌是主信息：单独一块微凹面板，和下方 TTL 控件拉开层级 */
-.invite-token-block { display: grid; gap: 5px; min-width: 0; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: rgba(5, 7, 15, 0.55); }
+.invite-token-block { display: grid; gap: 5px; min-width: 0; width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; background: rgba(5, 7, 15, 0.55); }
 .invite-token-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .invite-label { color: var(--muted); font-size: 10.5px; letter-spacing: 0.8px; }
 .invite-fingerprint { color: var(--crt-dim, rgba(140, 255, 200, 0.52)); font-size: 10px; letter-spacing: 0.3px; white-space: nowrap; }
 .invite-token-code { display: block; min-width: 0; font-size: 11px; color: var(--accent); overflow-wrap: anywhere; }
 .invite-token-block .invite-copy { width: 100%; }
-/* 邀请单动作：窄屏默认允许换行（不横向溢出）；桌面单独锁定同排。 */
-.invite-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+/* 邀请单动作：窄屏默认允许换行（不横向溢出）；桌面单独锁定同排。
+   按钮预留「Renew ↔ Updating…」两态宽度：重新生成期间文字变长也不推动令牌块/左边界。 */
+.invite-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
 @media (min-width: 521px) { .invite-controls { flex-wrap: nowrap; } }
 .invite-ttl { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); }
-.invite-ttl .crt-select-trigger { width: auto; min-width: 78px; height: 26px; padding: 0 8px; font-size: 11px; }
+.invite-ttl .crt-select-trigger { width: auto; min-width: 78px; height: var(--select-h); padding: 0 8px; font-size: 11px; }
 .invite-expiry { font-size: 10px; color: var(--muted); white-space: nowrap; }
-.invite-controls #invite-regenerate { margin-left: auto; }
+.invite-controls #invite-regenerate { margin-left: auto; flex: 0 0 auto; min-width: 84px; height: var(--select-h); justify-content: center; }
 .invite-regenerate { color: var(--muted); border-color: var(--border); background: transparent; text-shadow: none; }
 .invite-regenerate:hover:not(:disabled) { color: #c8ffe3; border-color: rgba(80, 255, 170, 0.45); background: rgba(8, 38, 26, 0.4); }
 .invite-warning { margin: 0; font-size: 11px; line-height: 1.6; }
@@ -1543,7 +1552,7 @@ body.modal-open { overflow: hidden; }
   display: none;
 }
 .settings-language-control .crt-select-trigger {
-  height: 28px;
+  height: var(--select-h);
   min-width: 118px;
   padding: 0 10px;
 }
@@ -1580,6 +1589,8 @@ body.modal-open { overflow: hidden; }
 .asst-form-grid label { display: grid; gap: 3px; }
 .asst-form-grid .crt-select,
 .asst-form-grid .crt-select-trigger { width: 100%; }
+/* 助手表单：文本框与配置格式下拉同高（26px），与表单按钮一致。 */
+.asst-form-grid .crt-input { height: var(--select-h); }
 .asst-tag { font-size: 10px; border: 1px solid var(--crt-border-soft); border-radius: 999px; padding: 1px 6px; margin-left: 6px; color: var(--crt-dim); vertical-align: 1px; }
 
 /* ===== UX-2 补丁 4 · 窗口外框与滚动条（控制台） ===== */

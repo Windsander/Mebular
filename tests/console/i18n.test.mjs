@@ -19,6 +19,9 @@ import {
   interpolate,
   isI18nReady,
   languageSettingsRowHtml,
+  setLocale,
+  syncDesktopLocale,
+  reconcileDesktopLocale,
 } from '../../packages/console/i18n.mjs';
 import { IPC_CHANNELS, sanitizeArgs } from '../../apps/desktop/src/main/ipc.mjs';
 
@@ -285,7 +288,10 @@ describe('i18n locale pack · 语言行与就绪开关', () => {
     expect(residentAt).toBeGreaterThan(-1);
     expect(rowAt).toBeLessThan(residentAt);
 
-    expect(consoleJs).toContain("const hasExplicitLocale = Boolean(params.get('lang')?.trim()) || Boolean(localStorage.getItem(LOCALE_STORAGE_KEY));");
+    expect(consoleJs).toContain("let hasExplicitLocale = Boolean(params.get('lang')?.trim()) || Boolean(localStorage.getItem(LOCALE_STORAGE_KEY));");
+    // 桌面壳：以 .desktop-state.json 的 locale 为准对齐 localStorage（缺失补写、陈旧覆盖）。
+    expect(consoleJs).toContain('reconcileDesktopLocale({ hasQueryLocale:');
+    expect(consoleJs.indexOf('reconcileDesktopLocale({ hasQueryLocale:')).toBeLessThan(consoleJs.indexOf('await initI18n('));
     expect(consoleJs).toContain('await initI18n({ languages: hasExplicitLocale ? undefined : [] });');
     expect(consoleJs).toContain("if (!hasExplicitLocale && getLocale() !== 'zh-CN') setLocale('zh-CN', { persist: false });");
     expect(consoleJs).toContain('setLocale(select.value, { persist: true })');
@@ -473,11 +479,93 @@ describe('i18n locale pack · 桌面壳 locale 已启用', () => {
     expect(sanitizeArgs(['en-US', 'EXTRA'], 'locale:set')).toEqual(['en-US']);
   });
 
-  it('preload 暴露固定 getLocale / setLocale / i18nReady=true（不透传 channel）', () => {
+  it('preload 暴露固定 getLocale / setLocale / i18nReady=true（不透传 channel；setLocale 去重轮询）', () => {
     const preload = readFileSync(join(rootDir, 'apps', 'desktop', 'src', 'preload', 'index.cjs'), 'utf-8');
     expect(preload).toContain("getLocale: () => ipcRenderer.invoke('locale:get')");
-    expect(preload).toContain("setLocale: (locale) => ipcRenderer.invoke('locale:set', String(locale ?? ''))");
+    expect(preload).toContain("ipcRenderer.invoke('locale:set', value)");
+    expect(preload).toContain('localeSyncLast = value');
     expect(preload).toContain('i18nReady: true');
     expect(preload).not.toMatch(/ipcRenderer\.invoke\(\s*channel/);
+  });
+
+  it('控制台选择语言：立即经 preload setLocale 回写壳层（不等 1.5s 轮询），web 无桥静默跳过', () => {
+    const previousWindow = globalThis.window;
+    const calls = [];
+    globalThis.window = { mebularDesktop: { setLocale: (locale) => { calls.push(locale); return Promise.resolve({ locale }); } } };
+    try {
+      expect(syncDesktopLocale('en-US')).toBe(true);
+      expect(calls).toEqual(['en-US']);
+      globalThis.window = {};
+      expect(syncDesktopLocale('zh-CN')).toBe(false);
+    } finally {
+      globalThis.window = previousWindow;
+    }
+    const storage = memoryStorage();
+    const i18n = realI18n({ storage, search: '', languages: ['zh-CN'], onPersist: (locale) => calls.push(`persist:${locale}`) });
+    i18n.setLocale('en-US', { persist: false });
+    expect(calls.filter((value) => value.startsWith('persist:'))).toEqual([]);
+    i18n.setLocale('zh-CN');
+    expect(calls).toContain('persist:zh-CN');
+    expect(storage.data.get(LOCALE_STORAGE_KEY)).toBe('zh-CN');
+  });
+
+  it('initI18n 注入的 storage 会接管单例持久化（桌面壳读同源 mebular.locale）', async () => {
+    const storage = memoryStorage();
+    await initI18n({
+      manifest,
+      catalogs,
+      search: '',
+      storage,
+      languages: [manifest.defaultLocale],
+      documentLang: false,
+      onMissing: () => {},
+    });
+    setLocale('en-US');
+    expect(storage.data.get(LOCALE_STORAGE_KEY)).toBe('en-US');
+    setLocale('zh-CN');
+  });
+
+  it('locale 跨重启持久：同一 storage 重新加载实例仍是上次选择（en-US / zh-CN）', async () => {
+    const storage = memoryStorage();
+    const boot = () => loadI18n({
+      manifest,
+      catalogs,
+      storage,
+      search: '',
+      languages: [],
+      documentLang: false,
+      onMissing: () => {},
+    });
+    const first = await boot();
+    expect(first.i18n.getLocale()).toBe('zh-CN');
+    first.i18n.setLocale('en-US');
+    expect(storage.data.get(LOCALE_STORAGE_KEY)).toBe('en-US');
+    const second = await boot();
+    expect(second.i18n.getLocale()).toBe('en-US');
+    second.i18n.setLocale('zh-CN');
+    const third = await boot();
+    expect(third.i18n.getLocale()).toBe('zh-CN');
+  });
+
+  it('桌面壳启动对齐：localStorage 缺失补写 / 陈旧覆盖 / ?lang= 与 web 不干预', async () => {
+    const shell = (locale) => ({ getLocale: async () => ({ locale }) });
+    const missing = memoryStorage();
+    expect(await reconcileDesktopLocale({ bridge: shell('en-US'), storage: missing })).toBe('en-US');
+    expect(missing.data.get(LOCALE_STORAGE_KEY)).toBe('en-US');
+
+    const stale = memoryStorage({ [LOCALE_STORAGE_KEY]: 'en-US' });
+    expect(await reconcileDesktopLocale({ bridge: shell('zh-CN'), storage: stale })).toBe('zh-CN');
+    expect(stale.data.get(LOCALE_STORAGE_KEY)).toBe('zh-CN');
+
+    const query = memoryStorage({ [LOCALE_STORAGE_KEY]: 'zh-CN' });
+    expect(await reconcileDesktopLocale({ bridge: shell('en-US'), storage: query, hasQueryLocale: true })).toBeNull();
+    expect(query.data.get(LOCALE_STORAGE_KEY)).toBe('zh-CN');
+
+    const web = memoryStorage();
+    expect(await reconcileDesktopLocale({ bridge: null, storage: web })).toBeNull();
+    expect(web.writes).toEqual([]);
+
+    const broken = memoryStorage();
+    expect(await reconcileDesktopLocale({ bridge: { getLocale: async () => { throw new Error('no ipc'); } }, storage: broken })).toBeNull();
   });
 });

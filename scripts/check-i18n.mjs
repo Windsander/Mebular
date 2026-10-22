@@ -240,7 +240,8 @@ for (const relative of files) {
     referenced.add(match[1]);
   }
 }
-const unknownKeys = [...referenced].filter((key) => !defaultKeys.includes(key) && !key.includes('${'));
+const errorMessages = packs.get(`${defaultCode}/errors`) ?? {};
+const unknownKeys = [...referenced].filter((key) => !defaultKeys.includes(key) && !(key in errorMessages) && !key.includes('${'));
 check('静态 data-i18n / 字面 t() key 均在默认 console pack 内',
   unknownKeys.length === 0, { unknown: unknownKeys });
 
@@ -384,6 +385,38 @@ check('desktop loader：zh/en 按 manifest 加载且插值生效',
 check('desktop t() 缺 key 回退 key（不返回空字符串）',
   desktopEn.t('__desktop_missing_key_probe__') === '__desktop_missing_key_probe__', {});
 
+// ---------- ⑪ errors pack（错误码 → 文案；Console / Desktop 共用） ----------
+const errorsDefault = packs.get(`${defaultCode}/errors`) ?? {};
+const errorsKeys = Object.keys(errorsDefault);
+const errorsParity = [];
+const errorsPlaceholderMismatch = [];
+const errorsCjk = [];
+for (const entry of locales) {
+  if (!isObject(entry) || entry.locale === defaultCode) continue;
+  const messages = packs.get(`${entry.locale}/errors`) ?? {};
+  const keys = Object.keys(messages);
+  const missing = errorsKeys.filter((key) => !keys.includes(key));
+  const extra = keys.filter((key) => !errorsKeys.includes(key));
+  if (missing.length > 0 || extra.length > 0) errorsParity.push({ locale: entry.locale, missing, extra });
+  for (const key of errorsKeys) {
+    if (!(key in messages)) continue;
+    if (placeholders(errorsDefault[key]) !== placeholders(messages[key])) {
+      errorsPlaceholderMismatch.push({
+        locale: entry.locale,
+        key,
+        expected: placeholders(errorsDefault[key]),
+        actual: placeholders(messages[key]),
+      });
+    }
+    if (entry.locale === 'en-US' && CJK.test(messages[key])) errorsCjk.push({ key, value: messages[key] });
+  }
+}
+check('errors pack 非空（zh-CN 默认）', errorsKeys.length > 0, { keys: errorsKeys.length });
+check('errors key 完全对等（所有 locale vs zh-CN）', errorsParity.length === 0, { mismatch: errorsParity });
+check('errors 插值占位符一致', errorsPlaceholderMismatch.length === 0, { mismatch: errorsPlaceholderMismatch });
+check('errors 非默认语言值不含中文（en-US）', errorsCjk.length === 0, { cjk: errorsCjk });
+check('errors 含通用兜底 key', errorsKeys.includes('errors.unknown') && errorsKeys.includes('errors.bad_request'), {});
+
 const failed = results.filter((result) => !result.ok);
 console.log('== check:i18n ==');
 console.log(`I18N_SUMMARY ${JSON.stringify({
@@ -393,6 +426,7 @@ console.log(`I18N_SUMMARY ${JSON.stringify({
   packs: manifest?.packs ?? [],
   keys: defaultKeys.length,
   desktopKeys: desktopKeys.length,
+  errorKeys: errorsKeys.length,
   checks: results.length,
   failed: failed.map((result) => result.name),
 })}`);

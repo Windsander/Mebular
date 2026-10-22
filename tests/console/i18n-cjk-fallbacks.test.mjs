@@ -152,3 +152,57 @@ describe('英文界面 · 代码兜底中文清理', () => {
     for (const key of internalKeys) expectLocalizedKey(key);
   });
 });
+
+describe('运行时错误 · 错误码文案层（errors pack）', () => {
+  const readErrors = (locale) => JSON.parse(
+    readFileSync(join(root, 'locales', locale, 'errors.json'), 'utf-8'),
+  ).messages;
+  const zhErrors = readErrors('zh-CN');
+  const enErrors = readErrors('en-US');
+
+  it('errors pack：双语 key 对等、占位符一致、英文无中文', () => {
+    expect(Object.keys(zhErrors).sort()).toEqual(Object.keys(enErrors).sort());
+    for (const key of Object.keys(zhErrors)) {
+      expect(placeholderSet(enErrors[key])).toEqual(placeholderSet(zhErrors[key]));
+      expect(CJK.test(enErrors[key])).toBe(false);
+    }
+    expect(zhErrors['errors.unknown']).toBeTruthy();
+  });
+
+  it('Console 错误路径统一走 localizeError，不再直接透出服务端 message', () => {
+    const consoleSrc = readFileSync(join(root, 'packages', 'console', 'console.js'), 'utf-8');
+    expect(consoleSrc).toContain('function localizeError');
+    expect(consoleSrc).toContain('function localizeEffectiveReason');
+    expect(consoleSrc).toContain("t('errors.unknown')");
+    // 已知动态错误使用 helper；原始 error.message 只允许出现在错误对象构造/内部逻辑。
+    expect(consoleSrc).not.toMatch(/\{ message: error\.message \}/);
+    expect(consoleSrc).not.toContain('${error.message}');
+    for (const key of [...consoleSrc.matchAll(/t\('(errors\.[^']+)'/g)].map((m) => m[1])) {
+      expect(Object.prototype.hasOwnProperty.call(zhErrors, key)).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(enErrors, key)).toBe(true);
+    }
+  });
+
+  it('服务端错误响应带稳定 errorKey（配置 / 记忆 / 交接 / 邀请）', () => {
+    const serve = readFileSync(join(root, 'packages', 'mcp', 'src', 'serve.mjs'), 'utf-8');
+    for (const code of [
+      'invite_endpoint_invalid', 'memory_not_found', 'memory_deleted_archive',
+      'namespace_required', 'address_required', 'handoff_force_local_only',
+      'handoff_successor_required', 'config_patch_invalid',
+    ]) {
+      expect(serve).toContain(`errorKey: '${code}'`);
+      expect(Object.prototype.hasOwnProperty.call(zhErrors, `errors.${code}`)).toBe(true);
+      expect(Object.prototype.hasOwnProperty.call(enErrors, `errors.${code}`)).toBe(true);
+    }
+  });
+
+  it('Desktop 主进程 / 向导错误详情有英文兜底，不直接展示中文原文', () => {
+    const main = readFileSync(join(root, 'apps', 'desktop', 'src', 'main', 'index.mjs'), 'utf-8');
+    expect(main).toContain('function localizeErrorDetail');
+    expect(main).toContain('localizeErrorDetail(error');
+    const wizard = readFileSync(join(root, 'apps', 'desktop', 'src', 'renderer', 'wizard.js'), 'utf-8');
+    expect(wizard).toContain('function safeDetail');
+    expect(wizard).toContain('function detailFrom');
+    expect(wizard).not.toMatch(/error:\s*error\.message/);
+  });
+});

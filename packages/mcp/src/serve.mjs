@@ -2180,7 +2180,7 @@ export async function startHttpServer({
       // （控制台邀请面板可填写），令牌内 endpoint 与返回 endpoint 始终一致。
       const override = typeof input.endpoint === 'string' && input.endpoint.trim() ? input.endpoint.trim() : null;
       if (override && endpointHostname(override) === null) {
-        return sendJson(res, 400, { error: 'bad_request', message: 'endpoint 需为 http(s) URL，例如 http://192.168.1.20:4002' });
+        return sendJson(res, 400, { error: 'bad_request', errorKey: 'invite_endpoint_invalid', message: 'endpoint 需为 http(s) URL，例如 http://192.168.1.20:4002' });
       }
       const endpoint = override ?? joinEndpoint;
       // C2：令牌携带邀请方可达端点（hints），新设备 join 后写入地址簿 → 自动选路
@@ -2228,11 +2228,11 @@ export async function startHttpServer({
     if (path === '/admin/api/config') {
       const input = parseJsonBody(body);
       if (!input || typeof input.patch !== 'object') {
-        return sendJson(res, 400, { error: 'bad_request', message: '需要 { patch: { ... } }' });
+        return sendJson(res, 400, { error: 'bad_request', errorKey: 'config_patch_invalid', message: '需要 { patch: { ... } }' });
       }
       const { errors, entries } = validateConfigPatch(input.patch);
       if (errors.length > 0) {
-        return sendJson(res, 400, { error: 'bad_request', message: errors.join('；'), details: errors });
+        return sendJson(res, 400, { error: 'bad_request', errorKey: 'config_patch_invalid', message: errors.join('；'), details: errors });
       }
       const cfgFile = configPath(home);
       let current = {};
@@ -2249,7 +2249,7 @@ export async function startHttpServer({
       // F-C2：组合校验（基于合并结果；拒绝会把自己搞挂的 host/auth/tls 组合）
       const comboErrors = validateConfigCombination(merged);
       if (comboErrors.length > 0) {
-        return sendJson(res, 400, { error: 'bad_request', message: comboErrors.join('；'), details: comboErrors });
+        return sendJson(res, 400, { error: 'bad_request', errorKey: 'config_patch_invalid', message: comboErrors.join('；'), details: comboErrors });
       }
       const changedPaths = entries.map((e) => e.path);
       const { restart: restartPaths, immediate: immediatePaths, selfLock } = classifyChanges(changedPaths, hotPaths());
@@ -2320,16 +2320,16 @@ export async function startHttpServer({
       if (action === 'delete') {
         const result = await service.delete([id]);
         if (result.deleted.length === 0) {
-          return sendJson(res, 404, { ok: false, error: 'not_found', message: `记忆不存在：${id}` });
+          return sendJson(res, 404, { ok: false, error: 'not_found', errorKey: 'memory_not_found', message: `记忆不存在：${id}` });
         }
         return sendJson(res, 200, { ok: true, action: 'delete', id, ...result });
       }
       const result = await service.archive([id], action === 'archive');
       if (result.notFound.length > 0) {
-        return sendJson(res, 404, { ok: false, error: 'not_found', message: `记忆不存在：${id}` });
+        return sendJson(res, 404, { ok: false, error: 'not_found', errorKey: 'memory_not_found', message: `记忆不存在：${id}` });
       }
       if (result.skipped.length > 0) {
-        return sendJson(res, 409, { ok: false, error: 'conflict', message: '已删除（墓碑）的记忆不可归档', id });
+        return sendJson(res, 409, { ok: false, error: 'conflict', errorKey: 'memory_deleted_archive', message: '已删除（墓碑）的记忆不可归档', id });
       }
       return sendJson(res, 200, { ok: true, action, id, ...result });
     }
@@ -2368,7 +2368,7 @@ export async function startHttpServer({
     if (path === '/admin/api/namespaces') {
       const input = parseJsonBody(body);
       if (!input || typeof input.namespace !== 'string' || input.namespace.trim().length === 0) {
-        return sendJson(res, 400, { error: 'bad_request', message: '需要 { namespace }' });
+        return sendJson(res, 400, { error: 'bad_request', errorKey: 'namespace_required', message: '需要 { namespace }' });
       }
       const event = await app.declareNamespace({
         namespace: input.namespace,
@@ -2388,7 +2388,7 @@ export async function startHttpServer({
     if (path === '/admin/api/subscriptions') {
       const input = parseJsonBody(body);
       if (!input || typeof input.namespace !== 'string' || input.namespace.trim().length === 0) {
-        return sendJson(res, 400, { error: 'bad_request', message: '需要 { namespace, active?, nextNamespaces? }' });
+        return sendJson(res, 400, { error: 'bad_request', errorKey: 'namespace_required', message: '需要 { namespace, active?, nextNamespaces? }' });
       }
       const ns = input.namespace;
       const active = input.active !== false;
@@ -2603,7 +2603,7 @@ export async function startHttpServer({
       if (action === 'connect') {
         const input = parseJsonBody(body) ?? {};
         if (typeof input.address !== 'string' || input.address.length === 0) {
-          return sendJson(res, 400, { error: 'bad_request', message: '需要 { address }（对端 multiaddr，含 /p2p/…）' });
+          return sendJson(res, 400, { error: 'bad_request', errorKey: 'address_required', message: '需要 { address }（对端 multiaddr，含 /p2p/…）' });
         }
         const peerId = { multihash: new Uint8Array(), pubKey: new Uint8Array(), id: deviceId };
         const connection = await node.connectToPeer(peerId, input.address);
@@ -2652,10 +2652,10 @@ export async function startHttpServer({
       }
       if (input.force === true) {
         // SEALING §3：force 仅限本地 CLI，不经 MCP/远程
-        return sendJson(res, 400, { error: 'bad_request', message: 'force 仅限本地 CLI（SEALING §3），控制台不提供' });
+        return sendJson(res, 400, { error: 'bad_request', errorKey: 'handoff_force_local_only', message: 'force 仅限本地 CLI（SEALING §3），控制台不提供' });
       }
       if (typeof input.successor !== 'string' || input.successor.length === 0) {
-        return sendJson(res, 400, { error: 'bad_request', message: '需要 { successor }（继任者 deviceId）' });
+        return sendJson(res, 400, { error: 'bad_request', errorKey: 'handoff_successor_required', message: '需要 { successor }（继任者 deviceId）' });
       }
       const result = await app.leaveNamespace({
         namespace,
@@ -2707,7 +2707,7 @@ export async function startHttpServer({
           const result = await updateCustomAssistant(id, input, opts);
           return sendJson(res, result.ok ? 200 : 422, result);
         }
-        return sendJson(res, 405, { error: 'method_not_allowed', message: '新增用 POST /admin/api/assistants；更新用 PUT/PATCH …/:id；删除用 POST …/:id/remove' });
+        return sendJson(res, 405, { error: 'method_not_allowed', errorKey: 'invalid_action', message: '新增用 POST /admin/api/assistants；更新用 PUT/PATCH …/:id；删除用 POST …/:id/remove' });
       } catch (error) {
         return sendJson(res, 500, { ok: false, error: 'assistant_registry_failed', message: String(error?.message ?? error) });
       }

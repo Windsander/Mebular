@@ -113,6 +113,37 @@ function shellMessage(raw, key, vars) {
   return text;
 }
 
+function errorTranslationKey(code) {
+  const raw = typeof code === 'string' ? code.trim() : '';
+  if (!raw) return null;
+  if (raw.startsWith('errors.')) return raw;
+  const slug = raw.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  return slug ? `errors.${slug}` : null;
+}
+
+/**
+ * 主进程展示给用户的错误：中文界面保留原文；英文界面优先错误码 → errors pack，
+ * 非中文技术原文保留，未知中文错误退回本动作兜底（绝不把中文原文透到英文界面）。
+ */
+function localizeErrorDetail(error, fallbackKey = 'errors.unknown') {
+  const message = String(typeof error === 'string'
+    ? error
+    : (error?.payload?.message ?? error?.message ?? ''))
+    .replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/, '')
+    .trim();
+  const payload = error?.payload ?? null;
+  const code = typeof payload?.errorKey === 'string' ? payload.errorKey
+    : typeof payload?.error === 'string' ? payload.error
+      : typeof error?.code === 'string' ? error.code : null;
+  const key = errorTranslationKey(code);
+  if (isChineseLocale(desktopI18n.locale)) return message || t(fallbackKey);
+  const messageIsCode = typeof code === 'string' && message.toLowerCase() === code.toLowerCase();
+  const genericHttp = /^HTTP\s+\d+$/i.test(message);
+  if (message && !CJK_TEXT.test(message) && !messageIsCode && !genericHttp) return message;
+  if (key && typeof t.has === 'function' && t.has(key)) return t(key);
+  return t(fallbackKey);
+}
+
 function httpConf() {
   const base = resolveHttp(readConfig());
   if (typeof cliArgs.port === 'string' || typeof cliArgs.port === 'number') {
@@ -162,7 +193,7 @@ async function probeAssistants() {
     }).length;
     return { connectedCount: clients.filter((c) => c.connected).length, total: clients.length, installedCount, needsManual: clients.filter((c) => c.needsManual).length };
   } catch (error) {
-    return { readError: t('wizard.error.readFailed', { error: error?.message ?? error }), connectedCount: 0, total: null };
+    return { readError: t('wizard.error.readFailed', { error: localizeErrorDetail(error, 'errors.unknown') }), connectedCount: 0, total: null };
   }
 }
 
@@ -1143,7 +1174,7 @@ if (!gotLock) {
         if (healthy) void refreshTrayStatus();
       }
     } catch (error) {
-      dialog.showErrorBox(t('startup.error.title'), String(error?.message ?? error));
+      dialog.showErrorBox(t('startup.error.title'), localizeErrorDetail(error, 'errors.unknown'));
       updateTray();
     }
   });

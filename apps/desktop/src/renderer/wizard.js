@@ -23,6 +23,24 @@ document.documentElement.lang = i18n.locale;
 applyStaticI18nWith(t, document);
 document.title = t('wizard.windowTitle');
 
+const CJK_TEXT = /[\u3400-\u9fff]/;
+const isChineseLocale = () => String(i18n.locale).toLowerCase().startsWith('zh');
+
+/** 主进程 warning/错误：优先稳定 warningKey；英文界面遇到未知中文原文时退回本动作兜底。 */
+function detailFrom(result, fallbackKey = 'errors.unknown', vars = undefined) {
+  if (result && typeof result.warningKey === 'string') {
+    return t(result.warningKey, result.warningVars ?? vars);
+  }
+  return safeDetail(result?.warning, fallbackKey);
+}
+
+function safeDetail(raw, fallbackKey = 'errors.unknown') {
+  const text = String(raw ?? '').trim();
+  if (!text) return t(fallbackKey);
+  if (isChineseLocale() || !CJK_TEXT.test(text)) return text;
+  return t(fallbackKey);
+}
+
 const $ = (sel) => document.querySelector(sel);
 const setText = (sel, text) => { const el = $(sel); if (el) el.textContent = text ?? ''; };
 const sleep = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -159,7 +177,7 @@ async function refresh() {
     lastStartDone = gate.lastDone;
     if (gate.hold) return; // 单次 miss：不翻段、不自动展开日志（其他区随下一轮更新）
     renderState(state);
-  } catch (error) { setText('#start-detail', t('wizard.state.readFailed', { error: error.message })); }
+  } catch (error) { setText('#start-detail', t('wizard.state.readFailed', { error: safeDetail(error?.message, 'errors.unknown') })); }
 }
 
 // ---------- 段① 一键开始：五步真实流水（启动 → 就绪 → 检查助手 → 接入 MCP → 控制台） ----------
@@ -191,7 +209,7 @@ async function autoConnectAll(clientsInput) {
   if (!Array.isArray(clients)) {
     // 续跑兜底：没有本轮 probe 结果时，重新读取真实列表；读不到即失败（不伪造 0 个）。
     const res = await api.clientsList();
-    if (!res?.ok) throw new Error(res?.warning ?? t('wizard.error.readClients'));
+    if (!res?.ok) throw new Error(detailFrom(res, 'wizard.error.readClients'));
     clients = res.clients ?? [];
   }
   const targets = connectTargets(clients);
@@ -208,11 +226,11 @@ async function autoConnectAll(clientsInput) {
       } else {
         failed.push(t('wizard.flowMsg.connectFailedItem', {
           name: c.name,
-          reason: r?.warning ?? t('wizard.flowMsg.connectFailed'),
+          reason: detailFrom(r, 'wizard.flowMsg.connectFailed'),
         }));
       }
     } catch (error) {
-      failed.push(`${c.name}（${error?.message ?? error}）`);
+      failed.push(`${c.name}（${safeDetail(error?.message, 'errors.unknown')}）`);
     }
   }
   return { ok, failed, targets: targets.length };
@@ -291,9 +309,9 @@ async function runFlow(fromSub = 'launch') {
         try {
           res = await api.clientsList();
         } catch (error) {
-          throw new Error(t('wizard.error.readClientsDetail', { error: error?.message ?? error }));
+          throw new Error(t('wizard.error.readClientsDetail', { error: safeDetail(error?.message, 'errors.unknown') }));
         }
-        if (!res?.ok) throw new Error(t('wizard.error.readClientsUnknown', { reason: res?.warning ?? t('wizard.error.readClients') }));
+        if (!res?.ok) throw new Error(t('wizard.error.readClientsUnknown', { reason: detailFrom(res, 'wizard.error.readClients') }));
         const clients = Array.isArray(res.clients) ? res.clients : [];
         const installed = clients.filter((c) => c.installed).length;
         const targets = connectTargets(clients);
@@ -334,7 +352,7 @@ async function runFlow(fromSub = 'launch') {
   } catch (error) {
     setSubState(currentSub, 'failed');
     flow.failedSub = currentSub;
-    flowMsg(t('wizard.flowMsg.failed', { error: error.message }), true);
+    flowMsg(t('wizard.flowMsg.failed', { error: safeDetail(error?.message, 'errors.unknown') }), true);
     $('#btn-resume').hidden = false;
     $('#logs-panel').open = true;
   } finally {
@@ -368,7 +386,7 @@ async function loadLogs() {
     setText('#logs-source', res?.source === 'service' ? t('wizard.logs.source.service') : res?.source === 'file' ? t('wizard.logs.source.file') : t('wizard.logs.source.none'));
     setText('#log', res?.text || t('wizard.logs.empty'));
   } catch (error) {
-    setText('#log', t('wizard.logs.readFailed', { error: error.message }));
+    setText('#log', t('wizard.logs.readFailed', { error: safeDetail(error?.message, 'errors.unknown') }));
   }
 }
 $('#btn-logs')?.addEventListener('click', () => { void loadLogs(); });

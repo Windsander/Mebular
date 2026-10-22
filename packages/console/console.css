@@ -1220,8 +1220,9 @@ body.modal-open { overflow: hidden; }
 .invite-fingerprint { color: var(--crt-dim, rgba(140, 255, 200, 0.52)); font-size: 10px; letter-spacing: 0.3px; white-space: nowrap; }
 .invite-token-code { display: block; min-width: 0; font-size: 11px; color: var(--accent); overflow-wrap: anywhere; }
 .invite-token-block .invite-copy { width: 100%; }
-/* 邀请单动作：有效期 → 到期时刻 → 重新生成桌面同排；≤520 窄屏才允许换行。 */
-.invite-controls { display: flex; flex-wrap: nowrap; align-items: center; gap: 8px; }
+/* 邀请单动作：窄屏默认允许换行（不横向溢出）；桌面单独锁定同排。 */
+.invite-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+@media (min-width: 521px) { .invite-controls { flex-wrap: nowrap; } }
 .invite-ttl { display: flex; align-items: center; gap: 5px; font-size: 10.5px; color: var(--muted); }
 .invite-ttl select.crt-input { width: auto; min-width: 78px; padding: 4px 6px; }
 .invite-expiry { font-size: 10px; color: var(--muted); white-space: nowrap; }
@@ -1238,7 +1239,6 @@ body.modal-open { overflow: hidden; }
   .invite-qr { justify-content: flex-start; }
   /* 窄屏省掉「有效期」标签，值本身可读；空间不足时动作行才换行。 */
   .invite-ttl .invite-label { display: none; }
-  .invite-controls { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   .invite-skeleton-qr, .invite-skeleton-line { animation: none; }

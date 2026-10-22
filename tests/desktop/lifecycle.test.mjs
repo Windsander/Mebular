@@ -186,15 +186,38 @@ describe('R-1 高-2 薄壳接线（index.mjs 静态契约）', () => {
   });
 
   it('退出确认窗口复用 quitConfirm 文案/按钮；关闭窗口 = 取消；校验 sender', () => {
-    const fn = mainSrc.match(/function showQuitConfirmation\(plan\) \{[\s\S]*?\n\}/)?.[0] ?? '';
-    expect(fn).toContain('event.sender !== dialogWin.webContents');
-    expect(fn).toContain('message: plan.message');
-    expect(fn).toContain('buttons: plan.buttons');
-    expect(fn).toContain("dialogWin.once('closed', () => finish(false))");
-    expect(fn).toContain("'quit-confirm:plan'");
+    const present = mainSrc.match(/function presentQuitDialog\(dialogWin, plan\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    const answer = mainSrc.match(/function onQuitDialogAnswer\(event, confirmed\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    const finish = mainSrc.match(/function finishQuitDialog\(confirmed\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(answer).toContain('event.sender !== quitDialog.webContents');
+    expect(present).toContain('message: plan.message');
+    expect(present).toContain('buttons: plan.buttons');
+    expect(present).toContain("'quit-confirm:plan'");
+    expect(finish).toContain('quitDialog.hide()');
+    expect(mainSrc).toMatch(/dialogWin\.on\('close'[\s\S]{0,160}finishQuitDialog\(false\)/);
   });
 
-  it('退出确认窗口 HTML/JS：暗色对话框、取消/退出、Esc/关闭 = 取消', () => {
+  it('退出确认窗口启动时预热并复用，避免首次创建/加载延迟', () => {
+    const create = mainSrc.match(/function createQuitDialog\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(mainSrc).toMatch(/createWindow\(\);[\s\S]{0,260}ensureQuitDialog\(\)/);
+    expect(create).toContain('show: false');
+    expect(create).toContain('alwaysOnTop: true');
+    expect(create).toContain('quitDialogReady = new Promise');
+    expect(create).toContain('loadFile(join(import.meta.dirname');
+    expect(mainSrc).toMatch(/function ensureQuitDialog\(\) \{[\s\S]{0,120}createQuitDialog\(\)/);
+  });
+
+  it('后台退出确认：解除 App 隐藏、激活 App、切到当前 Space 并置顶', () => {
+    const fn = mainSrc.match(/function bringQuitDialogToFront\(dialogWin\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    expect(fn).toContain('app.isHidden()');
+    expect(fn).toContain('app.show()');
+    expect(fn).toContain('app.focus({ steal: true })');
+    expect(fn).toContain('dialogWin.moveTop()');
+    expect(fn).toContain('dialogWin.focus()');
+    expect(mainSrc).toContain('setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })');
+  });
+
+  it('退出确认窗口 HTML/JS：暗色对话框、取消/退出、Esc/关闭 = 取消、复用后可再次回答', () => {
     const html = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'renderer', 'quit-confirm.html'), 'utf-8');
     const js = readFileSync(join(here, '..', '..', 'apps', 'desktop', 'src', 'renderer', 'quit-confirm.js'), 'utf-8');
     expect(html).toContain('role="dialog"');
@@ -203,6 +226,7 @@ describe('R-1 高-2 薄壳接线（index.mjs 静态契约）', () => {
     expect(html).toContain("script-src 'self'");
     expect(js).toMatch(/event\.key !== 'Escape'[\s\S]{0,120}answer\(false\)/);
     expect(js).toContain('answer(true)');
+    expect(js).toMatch(/onPlan\([\s\S]{0,140}answered = false/);
   });
 
   it('停止后窗口内横幅「守护已停止（托盘可重启）」', () => {

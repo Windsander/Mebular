@@ -14,11 +14,14 @@ function answer(confirmed) {
 }
 
 window.mebularQuit?.onPlan((plan) => {
+  // 窗口跨多次退出请求复用：每个新 plan 都必须重新允许回答。
+  answered = false;
   if (typeof plan.title === 'string' && plan.title) titleEl.textContent = plan.title;
   if (typeof plan.message === 'string') messageEl.textContent = plan.message;
   const buttons = Array.isArray(plan.buttons) ? plan.buttons : [];
   if (typeof buttons[0] === 'string' && buttons[0]) cancelEl.textContent = buttons[0];
   if (typeof buttons[1] === 'string' && buttons[1]) confirmEl.textContent = buttons[1];
+  cancelEl.focus();
 });
 
 cancelEl.addEventListener('click', () => answer(false));

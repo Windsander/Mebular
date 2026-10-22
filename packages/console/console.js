@@ -12,7 +12,7 @@ import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
 import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINES, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE, SECURITY_LEVEL_NOTE, SECURITY_BOUNDARY, SECURITY_TOTP_FOOT, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
-import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, LOCALE_STORAGE_KEY, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
+import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, LOCALE_STORAGE_KEY, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
 
 const $ = (selector) => document.querySelector(selector);
 const params = new URLSearchParams(location.search);
@@ -80,10 +80,12 @@ const state = {
 
 const stage = new StarStage($('#stage'));
 
-// i18n foundation：首帧同步静态顶栏/导航；语言变化时重渲染当前页与已开设置/关于弹层（不 reload）。
+// i18n foundation：先等 manifest + locale pack 加载完成，再同步静态顶栏/导航（避免首屏 key 闪烁）。
 // 语言行已默认开放；只有 ?lang= 或已保存偏好才覆盖默认 zh-CN。
 // 未选择时不跟随英文系统语言，避免首次打开就落入半翻译界面。
+// 加载失败不抛：保留 index.html 的静态中文兜底，设置/语言行在下次成功加载后恢复。
 const hasExplicitLocale = Boolean(params.get('lang')?.trim()) || Boolean(localStorage.getItem(LOCALE_STORAGE_KEY));
+await initI18n({ languages: hasExplicitLocale ? undefined : [] });
 if (!hasExplicitLocale && getLocale() !== 'zh-CN') setLocale('zh-CN', { persist: false });
 applyStaticI18n(document);
 onLocaleChange(() => {
@@ -5895,3 +5897,7 @@ if (typeof window.mebularDesktop?.onConsoleNavigate === 'function') {
     void applyConsoleDeepLink(initialViewFromSearch(search));
   });
 }
+
+// 启动完成标记：locale pack 已加载、静态文案已应用、事件已接线。
+// UI 冒烟 / 外部壳只在该标记出现后交互，避免在 top-level await 期间点到尚未接线的按钮。
+document.documentElement.dataset.consoleReady = '1';

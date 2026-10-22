@@ -26,6 +26,9 @@ extraResources:
     to: node_modules/qrcode-generator
   - from: ../../packages/console
     to: packages/console
+  # locale pack 数据层（manifest + 各语言 console/desktop/errors JSON）
+  - from: ../../locales
+    to: locales
   - from: ../../packages/skill
     to: packages/skill
 asar: true

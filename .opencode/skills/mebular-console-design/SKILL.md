@@ -117,13 +117,16 @@ license: MIT（与仓库一致）
 
 ### 7.1 locale-aware 文案契约
 
-- **默认 zh-CN，支持 en-US**。语言解析优先级：`?lang=`（测试 / 深链）>
-  `localStorage['mebular.locale']` > `navigator.languages` > `zh-CN`；
-  无法识别的语言一律回退 `zh-CN`。
-- 文案 key 稳定、扁平（`<区域>.<语义>`），zh-CN / en-US 必须 key 完全一致、
+- **默认 zh-CN，当前注册 en-US**。语言注册表唯一真源是 `locales/manifest.json`；
+  每种语言的文案在 `locales/<locale>/console.json`（`desktop.json` / `errors.json`
+  为后续预留）。应用代码只依赖 manifest + `t()`，新增语言不需要改业务代码。
+  语言解析优先级：`?lang=`（测试 / 深链）>
+  `localStorage['mebular.locale']` > `navigator.languages` > manifest 默认 locale；
+  无法识别的语言按 manifest fallback（当前 `zh-CN`）回退。
+- 文案 key 稳定、扁平（`<区域>.<语义>`），所有语言 console key 完全一致、
   插值占位符一致；缺 key 回退 key，不返回空字符串。校验：`npm run check:i18n`。
 - **用户数据不翻译**：设备名、忆云名、命名空间、记忆正文、审计原文、错误原文
-  一律按原样显示。语言名称（简体中文 / English）用该语言自身写法。
+  一律按原样显示。语言名称来自 manifest 的 `nativeName`（用该语言自身写法）。
 - 日期与时间统一走 `formatDate` / `formatTime` / `formatDateTime`（`Intl.DateTimeFormat`
   使用当前 locale）；禁止再硬编码 `zh-CN`。
 - **全量 catalog 完成前不向普通用户暴露半套英文**：语言行由明确就绪开关控制，
@@ -164,8 +167,8 @@ license: MIT（与仓库一致）
       展开/收起、选中行、滚动位置、过滤器选择）不得被重置；重渲染前先 diff
       或保留 DOM 状态，失败保留上次数据并提示（见 interaction-draft「降级与空态」）
 - [ ] 用语符合第七节词表，计数标"本机视角"
-- [ ] 新增 / 迁移文案走 i18n key，未翻译用户数据；日期时间走
-      `formatDate` / `formatTime` / `formatDateTime`，无硬编码 `zh-CN`；
+- [ ] 新增 / 迁移文案走 i18n key（`locales/<locale>/console.json`），未翻译用户数据；
+      日期时间走 `formatDate` / `formatTime` / `formatDateTime`，无硬编码 `zh-CN`；
       `npm run check:i18n` 通过；全量 catalog 未完成时语言行保持就绪开关关闭
 - [ ] 动效：≤0.5s、有 reduce 分支、接入帧率降级链（canvas 类）
 - [ ] 辉光符合第五节预算；正文无 text-shadow；对比度达标

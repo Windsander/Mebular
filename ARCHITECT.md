@@ -149,6 +149,7 @@ UNINITIALIZED ── create/join ──▶ INITIALIZING ──▶ READY
 | `src/exchange/` | CMF 与外部记忆格式适配 |
 | `packages/mcp/` | 守护、MCP、admin、provision、profiles、join、console 静态服务 |
 | `packages/console/` | 控制台 SPA 与 UI 验证脚本 |
+| `locales/` | locale pack 数据层：manifest 注册表 + 各语言 console/desktop/errors JSON |
 | `packages/fleet/` | 任务 DAG、join token、安全、配额、CLI |
 | `packages/service/` | 跨平台常驻服务管理 |
 | `apps/desktop/` | Electron 壳、向导、守护托管、云切换 |

@@ -201,6 +201,12 @@ const RATE_WINDOW_MS = 60_000;
 // 路径白名单：只认识这几个确切文件名，天然防目录穿越。允许 MEBULAR_CONSOLE_DIR 覆盖。
 const CONSOLE_DIR =
   process.env.MEBULAR_CONSOLE_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'console');
+// locale pack 数据层：唯一注册表 + 每语言目录（只读 JSON）。
+// 允许 MEBULAR_LOCALES_DIR 覆盖（桌面打包时 extraResources 落在 <resources>/locales）。
+const LOCALES_DIR =
+  process.env.MEBULAR_LOCALES_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'locales');
+const LOCALE_CODE_RE = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/;
+const LOCALE_PACK_FILES = new Set(['console.json', 'desktop.json', 'errors.json']);
 const CONSOLE_FILES = {
   'index.html': 'text/html; charset=utf-8',
   'shell-boot.js': 'text/javascript; charset=utf-8', // 走查修复 B：壳安全区首帧引导脚本
@@ -211,8 +217,6 @@ const CONSOLE_FILES = {
   'deep-link.js': 'text/javascript; charset=utf-8',
   'settings-ia.js': 'text/javascript; charset=utf-8',
   'i18n.mjs': 'text/javascript; charset=utf-8',
-  'messages/zh-CN.mjs': 'text/javascript; charset=utf-8',
-  'messages/en-US.mjs': 'text/javascript; charset=utf-8',
   'starfield.js': 'text/javascript; charset=utf-8',
   'wizard.js': 'text/javascript; charset=utf-8',
   'nebula.js': 'text/javascript; charset=utf-8',
@@ -983,6 +987,53 @@ export async function startHttpServer({
       return sendJson(res, 404, { error: 'console_not_found', path });
     }
     return sendJson(res, 404, { error: 'not_found', path });
+  }
+
+  /**
+   * /locales/*：只读 locale pack 数据层。
+   * 白名单：manifest.json 或 <locale>/<console|desktop|errors>.json；只允许 JSON 扩展名。
+   * 目录内 realpath 校验，拒绝 traversal / 符号链接逃逸。
+   */
+  async function handleLocales(req, res, url) {
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      return sendJson(res, 405, { error: 'method_not_allowed' });
+    }
+    let relative;
+    try {
+      relative = decodeURIComponent(url.pathname.slice('/locales/'.length));
+    } catch {
+      return sendJson(res, 404, { error: 'locale_not_found', path: url.pathname });
+    }
+    if (!relative || relative.includes('\0') || relative.includes('\\')) {
+      return sendJson(res, 404, { error: 'locale_not_found', path: url.pathname });
+    }
+    const parts = relative.split('/');
+    const valid = relative === 'manifest.json'
+      || (parts.length === 2 && LOCALE_CODE_RE.test(parts[0]) && LOCALE_PACK_FILES.has(parts[1]));
+    if (!valid) return sendJson(res, 404, { error: 'locale_not_found', path: url.pathname });
+
+    let root;
+    let resolved;
+    try {
+      root = realpathSync(LOCALES_DIR);
+      resolved = realpathSync(join(root, relative));
+    } catch {
+      return sendJson(res, 404, { error: 'locale_not_found', path: url.pathname });
+    }
+    if (resolved !== root && !resolved.startsWith(`${root}${sep}`)) {
+      return sendJson(res, 404, { error: 'locale_not_found', path: url.pathname });
+    }
+    let content;
+    try {
+      content = await readFile(resolved);
+    } catch {
+      return sendJson(res, 404, { error: 'locale_not_found', path: url.pathname });
+    }
+    res.statusCode = 200;
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.setHeader('cache-control', 'no-cache');
+    consoleSecurityHeaders(res);
+    res.end(content);
   }
 
   async function handleSecurityRead(req, res) {
@@ -2923,6 +2974,9 @@ export async function startHttpServer({
       }
       if (path === '/console' || path.startsWith('/console/')) {
         return handleConsole(req, res, url);
+      }
+      if (path === '/locales' || path.startsWith('/locales/')) {
+        return handleLocales(req, res, url);
       }
       if (path === '/admin/events' && req.method === 'GET') {
         return handleAdminEvents(req, res, url);

@@ -13,6 +13,7 @@
   },
   "files": [
     "dist",
+    "locales",
     "packages/mcp/bin",
     "packages/mcp/src",
     "packages/mcp/package.json",

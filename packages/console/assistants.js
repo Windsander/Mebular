@@ -284,13 +284,17 @@ export function wizardRowHtml(hasBridge) {
 /** 首屏状态总览条（纯只读；对端计数不含本机）。 */
 export function statusPillHtml({ service, devices, memoryCount, selfId = null } = {}) {
   const daemon = service
-    ? (service.running ? `运行中 · ${service.registered ? '常驻' : '临时'}` : '未运行')
+    ? (service.running
+      ? (service.registered
+        ? tr('statusPill.daemonRunningRegistered', '运行中 · 常驻')
+        : tr('statusPill.daemonRunningTemporary', '运行中 · 临时'))
+      : tr('statusPill.daemonStopped', '未运行'))
     : '—';
   const peers = (Array.isArray(devices) ? devices : []).filter((d) => d.deviceId && d.deviceId !== selfId);
   const online = peers.filter((d) => d.connected || d.online).length;
-  return `<span>守护 <b>${esc(daemon)}</b></span><span class="dotsep"></span>
-    <span>对端 <b>${online}</b>/${peers.length} 已连</span><span class="dotsep"></span>
-    <span>记忆 <b>${memoryCount ?? '—'}</b></span>`;
+  return `<span>${esc(tr('statusPill.daemon', '守护'))} <b>${esc(daemon)}</b></span><span class="dotsep"></span>
+    <span>${tr('statusPill.peers', '对端 <b>{online}</b>/{total} 已连', { online, total: peers.length })}</span><span class="dotsep"></span>
+    <span>${tr('statusPill.memory', '记忆 <b>{count}</b>', { count: memoryCount ?? '—' })}</span>`;
 }
 
 /** 「需要注意」条目（条件渲染，无事不出现；本机不计入对端未连接）。
@@ -300,26 +304,26 @@ export function attentionItems({ clients, ui = {}, devices, selfId = null, secur
   for (const raw of clients ?? []) {
     const c = normalizeClient(raw);
     const st = assistantStatus(c, ui);
-    if (st.key === 'pending-reload') items.push({ id: `asst-${c.id}`, label: `${c.name} 待生效`, action: 'assistants' });
-    if (st.key === 'verify-failed') items.push({ id: `asst-${c.id}`, label: `${c.name} 验证未过`, action: 'assistants' });
+    if (st.key === 'pending-reload') items.push({ id: `asst-${c.id}`, label: tr('attention.asstPendingReload', '{name} 待生效', { name: c.name }), action: 'assistants' });
+    if (st.key === 'verify-failed') items.push({ id: `asst-${c.id}`, label: tr('attention.asstVerifyFailed', '{name} 验证未过', { name: c.name }), action: 'assistants' });
   }
   if (security !== null && security !== undefined) {
     if (security.level === 'medium' && security.totp?.imported !== true) {
-      items.push({ id: 'security-totp', label: '动态码种子未导入', action: 'security' });
+      items.push({ id: 'security-totp', label: tr('attention.securityTotp', '动态码种子未导入'), action: 'security' });
     }
     const pending = (security.pendingApprovals ?? []).filter((a) => a?.initiator !== selfId);
     if (pending.length > 0) {
-      items.push({ id: 'security-approvals', label: `待批准 ${pending.length} 项`, action: 'security-approvals' });
+      items.push({ id: 'security-approvals', label: tr('attention.securityApprovals', '待批准 {count} 项', { count: pending.length }), action: 'security-approvals' });
     }
     const rejected = (security.rejections ?? []).length;
     if (rejected > 0) {
-      items.push({ id: 'security-rejections', label: `${rejected} 条安全操作被拒绝`, action: 'security' });
+      items.push({ id: 'security-rejections', label: tr('attention.securityRejections', '{count} 条安全操作被拒绝', { count: rejected }), action: 'security' });
     }
   }
   for (const d of devices ?? []) {
     if (!d.deviceId || d.deviceId === selfId) continue;
     const online = d.connected || d.online;
-    if (online === false) items.push({ id: `dev-${d.deviceId}`, label: `${d.deviceId} 未连接`, action: 'device' });
+    if (online === false) items.push({ id: `dev-${d.deviceId}`, label: tr('attention.deviceOffline', '{device} 未连接', { device: d.deviceId }), action: 'device' });
   }
   return items;
 }

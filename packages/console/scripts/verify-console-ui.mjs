@@ -2049,7 +2049,7 @@ async function main() {
     await waitFor(`document.documentElement.lang === 'zh-CN' && /语言/.test(document.querySelector('#settings-language')?.textContent ?? '')`);
     await evalJs('document.querySelector("#settings-close").click()');
     await send('Page.navigate', { url: `${base}/console/?i18n=1&lang=en-US` });
-    check('i18n 深链：html lang=en-US + 顶栏/导航英文', await waitFor(`document.documentElement.dataset.consoleReady === '1' && document.documentElement.lang === 'en-US' && document.querySelector('.brand')?.textContent.includes('Mebular Console') && /Star map/.test(document.querySelector('[data-view=map] .view-label')?.textContent ?? '')`));
+    check('i18n 深链：html lang=en-US + 顶栏/导航英文', await waitFor(`document.documentElement.dataset.consoleReady === '1' && document.documentElement.lang === 'en-US' && document.querySelector('.brand')?.textContent.includes('Mebular') && /Star map/.test(document.querySelector('[data-view=map] .view-label')?.textContent ?? '')`));
     // B · 英文长文案：顶栏动作不产生第二行 / 不横向溢出（1440 / 1024 / 390 三档）。
     const topbarProbe = `(() => {
       const bar = document.querySelector('.topbar');
@@ -2363,7 +2363,7 @@ async function main() {
     check('i18n 选择即重渲染：中文行/页签/顶栏就地切换，无 reload', await waitFor(`(() => {
       const row = document.querySelector('#settings-language');
       return document.documentElement.lang === 'zh-CN'
-        && /Mebular 控制台/.test(document.querySelector('.brand')?.textContent ?? '')
+        && /Mebular/.test(document.querySelector('.brand')?.textContent ?? '')
         && document.querySelector('[data-language-select]')?.value === 'zh-CN'
         && row !== null
         && /常用/.test(document.querySelector('[data-settings-tab=common]')?.textContent ?? '');

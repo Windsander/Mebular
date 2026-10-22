@@ -3,8 +3,8 @@
   "locale": "zh-CN",
   "pack": "console",
   "messages": {
-    "app.title": "Mebular 控制台",
-    "app.brand": "Mebular 控制台",
+    "app.title": "Mebular",
+    "app.brand": "Mebular",
     "nav.map": "星图",
     "nav.domains": "共享",
     "nav.memories": "记忆",

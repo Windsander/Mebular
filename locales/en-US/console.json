@@ -3,8 +3,8 @@
   "locale": "en-US",
   "pack": "console",
   "messages": {
-    "app.title": "Mebular Console",
-    "app.brand": "Mebular Console",
+    "app.title": "Mebular",
+    "app.brand": "Mebular",
     "nav.map": "Star map",
     "nav.domains": "Sharing",
     "nav.memories": "Memories",

@@ -24,12 +24,15 @@
 - `concurrency` 以 PR 号（无 PR 时用 `github.ref`）分组；仅 `pull_request` 事件 `cancel-in-progress`，PR 更新会取消旧 run，而 main / release push 不会被后续合入取消。
 - job 名称即 required status checks 的 context，修改 job `name` 时必须同步更新 `.github/rulesets/main.json`。
 
-## 仓库设置建议
+## 仓库设置：合入后不自动删除分支
 
-合入本类配置后建议将「合并后自动删除分支」打开：
+项目决定**保持「合并后自动删除分支」关闭**（`delete_branch_on_merge` = `false`）：合入 PR 后保留
+head 分支，便于本地回看与后续跟进。请不要开启该设置。
+
+以下旧命令**已废弃，不要执行**（它会把该开关重新打开）：
 
 ```bash
-gh api -X PATCH repos/Windsander/Mebular -f delete_branch_on_merge=true
+# 不要执行：gh api -X PATCH repos/Windsander/Mebular -f delete_branch_on_merge=true
 ```
 
 未开启自动合并（auto-merge）。

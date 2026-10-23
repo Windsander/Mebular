@@ -3,7 +3,7 @@
 From zero to an assistant that reads and writes shared memory — then sync that memory to a second device.
 
 Mebular is a local-first memory layer for AI assistants. One machine runs one node (the daemon), your data
-stays on your devices, and every write is signed and content-addressed. No cloud, no coordinator.
+stays on your devices, and every write is signed and content-addressed. No hosted service, no coordinator.
 
 **Prerequisites:** a 64-bit macOS, Windows or Linux machine for the desktop app. The browser, CLI, agent and
 source paths need Node.js >= 20; check with `node -v`.

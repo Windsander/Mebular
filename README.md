@@ -25,7 +25,7 @@ Node.js install: the app sets the service up for you.
 1. **Get the app.** Download it from [GitHub Releases](https://github.com/Windsander/Mebular/releases) and open
    it. It runs on macOS, Windows and Linux.
 2. **Start deployment.** Mebular starts the local service on this machine and connects the AI assistants already
-   installed on it. That is the whole setup — nothing leaves the machine.
+   installed on it. That is the whole setup — nothing is uploaded to a hosted service.
 3. **Choose one.** The console opens locked: **Create new Cloud** on your first device, **Join existing Cloud**
    on any later one. A Cloud (忆云) is one shared memory space — not a hosted service.
 
@@ -67,7 +67,7 @@ to the next machine after it syncs. You keep one place to look when you want to 
 
 ## Why local-first
 
-- **Your data stays on your devices.** There is no Mebular cloud and no account: memory is written to local
+- **Your data stays on your devices.** There is no hosted Mebular service and no account: memory is written to local
   storage that you own and can back up.
 - **You can audit every change.** Every write is signed and content-addressed, so you can always tell who
   changed what.

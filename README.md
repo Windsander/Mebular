@@ -14,9 +14,9 @@ Memory and tasks stay on your devices.<br>Devices sync directly. One shared grap
 
 ---
 
-![Mebular network overview: two machines, each running a local node, syncing one graph for the assistants connected to them](assets/network-overview-en.svg)
+![The Mebular console on a laptop: star map, daemon status and memory count](assets/console-starmap-en.jpg)
 
-<p align="center"><sub>One node per machine. One graph across them.</sub></p>
+<p align="center"><sub>The console on a real machine: star map, device status and memory count.</sub></p>
 
 ## What it is
 
@@ -46,11 +46,32 @@ The app runs on 64-bit macOS, Windows and Linux. If there is no build for your p
 
 ### Other paths
 
-| Path | Start with |
-|---|---|
-| **Browser** | `npm install -g @mebular/core` → `mebular serve` |
-| **CLI** | `fleet quickstart` → `fleet invite` / `fleet join` |
-| **Agent** | [Install the skill](packages/skill/SETUP.md), then say “deploy Mebular” |
+<table width="100%">
+  <thead>
+    <tr>
+      <th align="left">Path</th>
+      <th align="left">Start with</th>
+      <th align="left">Best for</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Browser</strong></td>
+      <td><code>npm install -g @mebular/core</code> → <code>mebular serve</code></td>
+      <td>The same console, no app</td>
+    </tr>
+    <tr>
+      <td><strong>CLI</strong></td>
+      <td><code>fleet quickstart</code> → <code>fleet invite</code> / <code>fleet join</code></td>
+      <td>Scripts and headless machines</td>
+    </tr>
+    <tr>
+      <td><strong>Agent</strong></td>
+      <td><a href="packages/skill/SETUP.md">Install the skill</a>, then say “deploy Mebular”</td>
+      <td>Hands-off setup</td>
+    </tr>
+  </tbody>
+</table>
 
 Browser, CLI and agent paths need Node.js 20 or newer.
 
@@ -72,19 +93,46 @@ mebular print-config --client opencode         # MCP config
 
 ## How it works
 
-![Pairing flow: device A starts and invites, device B joins with the QR code, then connection and the default grant happen automatically](assets/pairing-flow-en.svg)
+![Mebular network overview: two machines, each running a local node, syncing one graph for the assistants connected to them](assets/network-overview-en.svg)
 
-One QR code or token enrolls a device. The master key stays on the root machine; each device then syncs on its own, with no central coordinator in the path.
+<p align="center"><sub>One node per machine. One graph across them.</sub></p>
+
+Each machine runs one node; nodes sync memory and tasks directly. Add a device with one QR code or token — the master key stays on the root machine.
+
+![Pairing flow: device A starts and invites, device B joins with the QR code, then connection and the default grant happen automatically](assets/pairing-flow-en.svg)
 
 ## Docs
 
-| Start | Go deeper |
-|---|---|
-| [Quickstart](docs/getting-started/QUICKSTART.md) | [Architecture](docs/architecture/ARCHITECT.md) |
-| [Console](docs/console/README.md) | [Limitations](docs/limitations/LIMITATIONS.md) |
-| [Changelog](CHANGELOG.md) | [Fleet runbook](packages/fleet/RUNBOOK.md) |
-| [Contributing](CONTRIBUTING.md) | [Agent skills](packages/skill/SETUP.md) |
-| [Release SOP](docs/operations/RELEASE.md) | [Sealing contract](SEALING.md) |
+<table width="100%">
+  <thead>
+    <tr>
+      <th align="left">Start</th>
+      <th align="left">Go deeper</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong><a href="docs/getting-started/QUICKSTART.md">Quickstart</a></strong><br><sub>Install, pair, and sync a second device</sub></td>
+      <td><strong><a href="docs/architecture/ARCHITECT.md">Architecture</a></strong><br><sub>Nodes, sync, and trust boundaries</sub></td>
+    </tr>
+    <tr>
+      <td><strong><a href="docs/console/README.md">Console</a></strong><br><sub>The local GUI and its pages</sub></td>
+      <td><strong><a href="docs/limitations/LIMITATIONS.md">Limitations</a></strong><br><sub>Read before storing sensitive data</sub></td>
+    </tr>
+    <tr>
+      <td><strong><a href="CHANGELOG.md">Changelog</a></strong><br><sub>Release notes</sub></td>
+      <td><strong><a href="packages/fleet/RUNBOOK.md">Fleet runbook</a></strong><br><sub>Two-machine operations and WAN checks</sub></td>
+    </tr>
+    <tr>
+      <td><strong><a href="CONTRIBUTING.md">Contributing</a></strong><br><sub>Quality gates and how to help</sub></td>
+      <td><strong><a href="packages/skill/SETUP.md">Agent skills</a></strong><br><sub>Setup, memory policy, task playbook</sub></td>
+    </tr>
+    <tr>
+      <td><strong><a href="docs/operations/RELEASE.md">Release SOP</a></strong><br><sub>How a release is cut</sub></td>
+      <td><strong><a href="SEALING.md">Sealing contract</a></strong><br><sub>Protocol red lines and deferrals</sub></td>
+    </tr>
+  </tbody>
+</table>
 
 <details>
 <summary>Who does what</summary>
@@ -117,8 +165,6 @@ Runnable examples: [`examples/quickstart`](examples/quickstart/index.mjs) writes
 </details>
 
 <div align="center">
-
-[Website](https://mebular.cyberfederal.io) · [GitHub](https://github.com/Windsander/Mebular)
 
 v0.1.0 · early · MIT
 

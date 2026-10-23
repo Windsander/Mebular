@@ -33,6 +33,7 @@ Prefer **image > table > prose**.
 - If a section has no visual, make its content a table.
 - If neither a visual nor a table is possible, keep the prose to two sentences.
 - Use a diagram for a concept. Use a real screenshot only for current UI.
+- Use a current console screenshot as the hero when one is available; use diagrams to explain the network and setup.
 - Never fake UI, never reuse an expired screenshot, and never link to an image that does not exist yet.
 - Put captions in `<sub>` under the image; keep them to one line.
 - Mebular visual anchors: banner, horizontal network overview, three-step desktop flow, pairing flow, and a four-column feature strip. Reuse them instead of inventing a new visual language.
@@ -89,6 +90,7 @@ If the draft is over budget, remove a section before shortening every sentence.
 - Short header, short cells.
 - No paragraphs in cells.
 - Use tables for comparisons, paths, outcomes, and docs links.
+- Use `<table width="100%">` when a compact table must align with the full-width tables around it.
 - Do not use a table for a sequence. A sequence belongs in a numbered list or a step diagram.
 
 ## Layout
@@ -114,7 +116,8 @@ If the draft is over budget, remove a section before shortening every sentence.
 - Category: **distributed memory network / 分布式记忆网络**.
 - Desktop app is the shortest path, but browser, CLI, and agent paths must remain available.
 - Do not make the GitHub Releases download the only entry point; a desktop build may not exist yet.
-- Current UI screenshots are pending the UI freeze. Until then, use diagrams only.
+- Use current, localized console screenshots for the hero. Capture a clean state: `Daemon Running`, P2P on, no warning banner, friendly device name, no temp paths or tokens.
+- Never reuse `console-starmap-about.jpg` or `console-settings-common.jpg`; they show the old console.
 - Keep `assets/banner.svg` unchanged.
 - Do not put protocol details (DAG, fleet, CMF, sealing, certificate chains) on the first screen.
 

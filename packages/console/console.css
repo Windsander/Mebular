@@ -310,7 +310,8 @@ select {
   display: grid;
   grid-template-columns: 150px 110px minmax(0, 1fr);
   gap: 10px;
-  align-items: baseline;
+  /* 三项相对整行垂直居中：详情换行时不再按首行基线把时间/动作顶到行首。 */
+  align-items: center;
   padding: 8px 10px;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -324,6 +325,8 @@ select {
 .audit-action.revoke { color: var(--warn); }
 .audit-action.device { color: var(--danger); }
 .audit-detail { color: var(--text); }
+/* 局部对齐：三列各自垂直居中并允许在网格列内收缩（长详情不撑破行）。 */
+.audit-time, .audit-action, .audit-detail { align-self: center; min-width: 0; }
 .audit-detail .muted { color: var(--muted); }
 /* A-3：grantId 收敛——截断 8 位 + 点击复制（协议面保留 id，不再全量平铺） */
 .id-copy {

@@ -3578,12 +3578,93 @@ async function main() {
     await setViewport(densityViewports[0][1]);
     await evalJs('document.querySelector("#view-nav li:nth-of-type(4) button").click()');
     await waitFor('document.querySelector("#audit-view")?.hidden === false && document.querySelectorAll("#audit-view .audit-item").length >= 1');
+    // 审计行对齐探针：三列时三项相对整行垂直居中（详情换行不再按首行基线顶起时间/动作）；
+    // 单列（≤900px）时按时间 → 动作 → 详情堆叠、保持左对齐，不强行整行居中。
+    const auditAlignProbe = `(() => {
+      const items = [...document.querySelectorAll('#audit-view .audit-item')].filter((el) => el.getClientRects().length > 0);
+      const box = (el) => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, height: r.height }; };
+      const part = (item, sel) => {
+        const el = item.querySelector(sel);
+        if (!el) return null;
+        const b = box(el);
+        const row = box(item);
+        const cs = getComputedStyle(el);
+        return {
+          top: +(b.top - row.top).toFixed(2),
+          left: +b.left.toFixed(2),
+          height: +b.height.toFixed(2),
+          delta: +Math.abs((b.top + b.bottom) / 2 - (row.top + row.bottom) / 2).toFixed(2),
+          over: el.scrollWidth - el.clientWidth,
+          rightOver: +(b.right - row.right).toFixed(2),
+          fontSize: parseFloat(cs.fontSize),
+          lineHeight: cs.lineHeight,
+        };
+      };
+      const rows = items.map((item) => ({
+        align: getComputedStyle(item).alignItems,
+        columns: getComputedStyle(item).gridTemplateColumns.trim().split(/\\s+/).length,
+        time: part(item, '.audit-time'),
+        action: part(item, '.audit-action'),
+        detail: part(item, '.audit-detail'),
+        over: item.scrollWidth - item.clientWidth,
+      }));
+      return {
+        ok: rows.length >= 1,
+        lang: document.documentElement.lang,
+        viewport: window.innerWidth,
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+        rows,
+      };
+    })()`;
+    const auditAlignCheck = (report, label, lang) => {
+      if (!report?.ok || report.lang !== lang) return false;
+      const multi = report.viewport > 900;
+      const partsOk = report.rows.every((row) => {
+        if (row.align !== 'center') return false;
+        const parts = [row.time, row.action, row.detail];
+        if (parts.some((p) => !p || p.over > 1 || p.rightOver > 1)) return false;
+        if (multi) {
+          // 三列同排：三项中心与行中心误差 ≤1px（含 1px 下边框造成的 0.5px 固有偏差）。
+          if (row.columns !== 3) return false;
+          if (parts.some((p) => p.delta > 1)) return false;
+        } else {
+          // 单列：时间 → 动作 → 详情逐行堆叠、左对齐，不把整行内容强行居中。
+          if (row.columns !== 1) return false;
+          if (!(row.time.top < row.action.top && row.action.top < row.detail.top)) return false;
+          if (Math.abs(row.time.left - row.action.left) > 1
+            || Math.abs(row.action.left - row.detail.left) > 1) return false;
+        }
+        return row.over <= 0;
+      });
+      // 1024 / 390 至少有一条详情换行，证明对齐不是只对单行文本生效。
+      const wrapped = report.rows.some((row) => row.detail && row.detail.height > row.detail.fontSize * 1.6);
+      return partsOk && report.pageOver <= 0 && (label === '1440' || wrapped);
+    };
     for (const [label, viewport] of densityViewports) {
       await setViewport(viewport);
       const audit = await evalJs(surfaceProbe('#audit-view', '.audit-item, .audit-detail, .audit-toolbar'));
       check(`i18n 数据面 audit ${label}：长事件文案不横向越界`,
         surfaceOk(audit), JSON.stringify(audit));
+      const align = await evalJs(auditAlignProbe);
+      check(`审计行 en-US ${label}：时间/动作/详情垂直居中（≤1px）且长详情不溢出`,
+        auditAlignCheck(align, label, 'en-US'),
+        JSON.stringify(align.rows.slice(0, 3)));
       await captureNow(`i18n-en-data-audit-${label}.jpg`);
+      await captureNow(`i18n-en-audit-align-${label}.jpg`);
+    }
+    // 中文同口径：同一批审计事件（三列 1440/1024，单列 390）。
+    await setViewport(densityViewports[0][1]);
+    await send('Page.navigate', { url: `${base}/console/?lang=zh-CN` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1" && document.querySelector("#view-nav") !== null');
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(4) button").click()');
+    await waitFor('document.querySelector("#audit-view")?.hidden === false && document.querySelectorAll("#audit-view .audit-item").length >= 1');
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const align = await evalJs(auditAlignProbe);
+      check(`审计行 zh-CN ${label}：时间/动作/详情垂直居中（≤1px）且长详情不溢出`,
+        auditAlignCheck(align, label, 'zh-CN'),
+        JSON.stringify(align.rows.slice(0, 3)));
+      await captureNow(`i18n-zh-audit-align-${label}.jpg`);
     }
 
     // device card：移除说明 / 本机说明 / 长路径三档不越界

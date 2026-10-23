@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 260" width="980" height="260" role="img" aria-label="Desktop app setup: 1 Start deployment, 2 Create or join a Cloud, 3 Invite the next device">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="40%" r="70%">
+      <stop offset="0%" stop-color="#dceaff" stop-opacity="0.75"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 z" fill="#7fa6d9"/>
+    </marker>
+    <style>
+      .card{fill:#f7faff;stroke:#c9d8ee;stroke-width:1.2}
+      .num{fill:#e6f0ff;stroke:#7fa6d9;stroke-width:1.2}
+      .n{font-family:'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace;font-size:14px;font-weight:700;fill:#2f6fce}
+      .h{font-family:'SF Pro Display','Segoe UI',ui-sans-serif,system-ui,sans-serif;font-size:18px;font-weight:600;fill:#0b1a33}
+      .s{font-family:'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif;font-size:13px;fill:#5a7290}
+      .step{stroke:#7fa6d9;stroke-width:1.3;stroke-dasharray:5 5;fill:none}
+    </style>
+  </defs>
+
+  <rect width="980" height="260" fill="#ffffff"/>
+  <ellipse cx="490" cy="130" rx="470" ry="150" fill="url(#glow)"/>
+
+  <rect class="card" x="30" y="42" width="270" height="166" rx="14"/>
+  <rect class="card" x="355" y="42" width="270" height="166" rx="14"/>
+  <rect class="card" x="680" y="42" width="270" height="166" rx="14"/>
+
+  <circle class="num" cx="64" cy="78" r="16"/>
+  <text class="n" x="64" y="83" text-anchor="middle">1</text>
+  <text class="h" x="92" y="84">Start deployment</text>
+  <text class="s" x="58" y="120">Starts the local service</text>
+  <text class="s" x="58" y="140">and connects your</text>
+  <text class="s" x="58" y="160">installed assistants.</text>
+
+  <circle class="num" cx="389" cy="78" r="16"/>
+  <text class="n" x="389" y="83" text-anchor="middle">2</text>
+  <text class="h" x="417" y="84">Create or join a Cloud</text>
+  <text class="s" x="383" y="120">Name it on the first device.</text>
+  <text class="s" x="383" y="140">Paste a one-time token</text>
+  <text class="s" x="383" y="160">on later ones.</text>
+
+  <circle class="num" cx="714" cy="78" r="16"/>
+  <text class="n" x="714" y="83" text-anchor="middle">3</text>
+  <text class="h" x="742" y="84">Invite the next device</text>
+  <text class="s" x="708" y="120">Open Invite device in the</text>
+  <text class="s" x="708" y="140">top bar and hand the</text>
+  <text class="s" x="708" y="160">token to the next machine.</text>
+
+  <line class="step" x1="300" y1="125" x2="347" y2="125" marker-end="url(#arrow)"/>
+  <line class="step" x1="625" y1="125" x2="672" y2="125" marker-end="url(#arrow)"/>
+</svg>

@@ -101,10 +101,18 @@ let hasExplicitLocale = Boolean(params.get('lang')?.trim()) || Boolean(localStor
 // 桌面壳：localStorage 可能缺失（首启 / 清站点数据 / 端口变化）或陈旧（崩溃前未落盘）。
 // 以壳层 <home>/.desktop-state.json 的 locale 为准做一次对齐（既有 preload getLocale）；
 // 重启后既不会回中文，也不会让旧 localStorage 反写主进程。?lang= 深链仍优先。
-if (await reconcileDesktopLocale({ hasQueryLocale: Boolean(params.get('lang')?.trim()) })) {
-  hasExplicitLocale = true;
+try {
+  if (await reconcileDesktopLocale({ hasQueryLocale: Boolean(params.get('lang')?.trim()) })) {
+    hasExplicitLocale = true;
+  }
+  await initI18n({ languages: hasExplicitLocale ? undefined : [] });
+} catch (error) {
+  // i18n 启动异常：立刻解除首帧门，露出 index.html 的静态中文兜底（不能停在占位）。
+  // 异常继续上抛并记录 —— 不吞错误，界面与诊断信息都保留。
+  document.documentElement.classList.remove('console-booting');
+  console.error('[console] i18n init failed; showing static zh-CN fallback', error);
+  throw error;
 }
-await initI18n({ languages: hasExplicitLocale ? undefined : [] });
 if (!hasExplicitLocale && getLocale() !== 'zh-CN') setLocale('zh-CN', { persist: false });
 applyStaticI18n(document);
 enhanceFilterSelects();
@@ -6318,3 +6326,6 @@ if (typeof window.mebularDesktop?.onConsoleNavigate === 'function') {
 // 启动完成标记：locale pack 已加载、静态文案已应用、事件已接线。
 // UI 冒烟 / 外部壳只在该标记出现后交互，避免在 top-level await 期间点到尚未接线的按钮。
 document.documentElement.dataset.consoleReady = '1';
+// i18n 首帧门：与 ready 同处解除。此时静态文案已按 locale 应用，主界面替换占位，
+// en-US 用户不会看到 index.html 的中文兜底首帧。
+document.documentElement.classList.remove('console-booting');

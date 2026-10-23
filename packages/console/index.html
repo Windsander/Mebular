@@ -11,6 +11,14 @@
   <link rel="stylesheet" href="./console.css" />
 </head>
 <body>
+  <!-- i18n 首帧门（无语言文本）：shell-boot.js 在解析期给 <html> 加 console-booting，
+       CSS 隐藏 #app，只画品牌占位；console.js 在 consoleReady 处移除该类。 -->
+  <div id="boot-screen" aria-hidden="true">
+    <span class="boot-mark">✦</span>
+    <span class="boot-wordmark">Mebular</span>
+    <span class="boot-line"></span>
+  </div>
+
   <div id="app" class="app">
     <header class="topbar">
       <div class="brand"><span class="brand-star">✦</span> <span data-i18n="app.brand">Mebular</span></div>

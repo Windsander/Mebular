@@ -2,13 +2,16 @@
 
 ![Mebular](assets/banner.svg)
 
-**面向 AI 助手的分布式记忆网络。**
+**一份记忆，每个助手，每台设备。**
 
-记忆和任务留在你的设备上。<br>设备直接同步，共用一份图记忆。
+面向 AI 助手的分布式记忆网络。<br>
+记忆和任务留在你的设备上，设备之间直接同步。
 
-[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Node.js >=20](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white)](docs/getting-started/QUICKSTART_CN.md) [![MCP](https://img.shields.io/badge/MCP-5A67D8)](docs/getting-started/QUICKSTART_CN.md)
+[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE) [![Node.js >=20](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white&style=flat-square)](docs/getting-started/QUICKSTART_CN.md) [![MCP](https://img.shields.io/badge/MCP-5A67D8?style=flat-square)](docs/getting-started/QUICKSTART_CN.md)
 
-[官网](https://mebular.cyberfederal.io) · [快速上手](docs/getting-started/QUICKSTART_CN.md) · [English](README.md)
+[5 分钟开始](docs/getting-started/QUICKSTART_CN.md) · [了解架构](docs/architecture/ARCHITECT.md) · [官网](https://mebular.cyberfederal.io) · [English](README.md)
+
+<sub>不需要托管账号 · 没有中心协调者</sub>
 
 </div>
 

@@ -56,6 +56,10 @@ docs.design/
 # npm pack 發布期備份（transient）
 packages/*/package.json.packbak
 *.tgz
+# 桌面安裝包 runtime（prepare-runtime 從 release-pack tarball 安裝，不入庫）
+/apps/desktop/runtime/
+# npm pack 產出的發布 tarball 暫存目錄
+/release-pack/
 
 # 示例執行時產物（本地留存）
 examples/quickstart/.data/

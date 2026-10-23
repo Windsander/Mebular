@@ -10,10 +10,15 @@
   "main": "src/main/index.mjs",
   "scripts": {
     "prepare:build": "node scripts/prepare-build.mjs",
+    "prepare:runtime": "node scripts/prepare-runtime.mjs",
     "dev": "node scripts/dev.mjs",
     "start": "electron .",
     "smoke": "node scripts/smoke.mjs",
-    "dist:stub": "electron-builder --config electron-builder.yml --dir"
+    "smoke:runtime": "node scripts/smoke-runtime.mjs",
+    "dist:dir": "node scripts/prepare-runtime.mjs && node scripts/prepare-build.mjs && electron-builder --config electron-builder.yml --dir --publish never",
+    "dist:mac": "node scripts/prepare-runtime.mjs && node scripts/prepare-build.mjs && electron-builder --config electron-builder.yml --mac --universal --publish never",
+    "dist:win": "node scripts/prepare-runtime.mjs && node scripts/prepare-build.mjs && electron-builder --config electron-builder.yml --win --x64 --publish never",
+    "dist:linux": "node scripts/prepare-runtime.mjs && node scripts/prepare-build.mjs && electron-builder --config electron-builder.yml --linux --x64 --publish never"
   },
   "devDependencies": {
     "electron": "42.11.9",

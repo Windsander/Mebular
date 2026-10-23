@@ -8,7 +8,9 @@
 #   2. 这些 manifest 中任何“已是版本号区间”的内部 @mebular/* 依赖 -> ^<new version>
 #      （源码开发期使用 file: 本地链接，pack 期由 scripts/publish-manifest.mjs 统一改写为
 #       ^<version>，故 file: 依赖保持不动、无需在此改写）；
-#   3. CHANGELOG.md 插入 `## [vX.Y.Z] - <date>` 章节占位（幂等，已存在则跳过）。
+#   3. apps/desktop/package.json（桌面 App 与 npm 包 lockstep）+ package-lock 根 version
+#      + src/main/daemon.mjs 的 APP_VERSION（打包态 / 诊断共用）；
+#   4. CHANGELOG.md 插入 `## [vX.Y.Z] - <date>` 章节占位（幂等，已存在则跳过）。
 #
 # 发布分支命名（版本 SSOT）：release/vX.Y.Z，工作流据此校验版本一致。
 
@@ -53,6 +55,7 @@ const TARGETS = [
   'packages/mcp',
   'packages/service',
   'packages/skill',
+  'apps/desktop',
 ];
 const INTERNAL = new Set([
   '@mebular/core',
@@ -85,6 +88,39 @@ for (const rel of TARGETS) {
   console.log(`  version -> ${version}  ${rel === '.' ? '@mebular/core' : rel}`);
 }
 
+// ---- 桌面 App：package-lock 根 version + main 进程 APP_VERSION ----
+const desktopLockFile = path.join(root, 'apps/desktop/package-lock.json');
+if (fs.existsSync(desktopLockFile)) {
+  const lock = JSON.parse(fs.readFileSync(desktopLockFile, 'utf8'));
+  const rootEntry = lock.packages?.[''] ?? null;
+  const lockChanged = lock.version !== version || (rootEntry !== null && rootEntry.version !== version);
+  lock.version = version;
+  if (rootEntry !== null) rootEntry.version = version;
+  if (lockChanged) {
+    fs.writeFileSync(desktopLockFile, `${JSON.stringify(lock, null, 2)}\n`, 'utf8');
+    console.log(`  version -> ${version}  apps/desktop/package-lock.json`);
+  }
+}
+
+const desktopDaemon = path.join(root, 'apps', 'desktop', 'src', 'main', 'daemon.mjs');
+if (fs.existsSync(desktopDaemon)) {
+  const before = fs.readFileSync(desktopDaemon, 'utf8');
+  const after = before.replace(
+    /(export const APP_VERSION = ')[^']+(';)/,
+    `$1${version}$2`,
+  );
+  if (after === before) {
+    if (!/export const APP_VERSION = '/.test(before)) {
+      console.error('ERROR: apps/desktop/src/main/daemon.mjs 缺少 APP_VERSION 导出');
+      process.exit(1);
+    }
+    console.log(`  APP_VERSION 已是 ${version}，跳过`);
+  } else {
+    fs.writeFileSync(desktopDaemon, after, 'utf8');
+    console.log(`  APP_VERSION -> ${version}  apps/desktop/src/main/daemon.mjs`);
+  }
+}
+
 // ---- CHANGELOG 章节占位 ----
 const clFile = path.join(root, 'CHANGELOG.md');
 const HEADER =
@@ -115,4 +151,4 @@ if (new RegExp(`^## \\[${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\]`, 'm').t
 console.log(`  内部依赖版本号同步：${changedDeps} 处（file: 本地依赖由 pack 期改写）`);
 NODE
 
-echo "✓ 已同步为 $TAG（版本号 ×5 + CHANGELOG；请填写章节内容后提交，并将分支命名为 release/$TAG）"
+echo "✓ 已同步为 ${TAG}（5 个 npm 包 + 桌面 App + CHANGELOG；请填写章节内容后提交，并将分支命名为 release/${TAG}）"

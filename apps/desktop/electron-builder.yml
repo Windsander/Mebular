@@ -1,4 +1,7 @@
-# Mebular 桌面 App · 打包配置（M1：仅留配置，不做签名/公证/自动更新——M3/M4）
+# Mebular 桌面 App · 打包配置
+#
+# R1：安装包运行时来自发布 tarball（apps/desktop/runtime，由 prepare-runtime 安装），
+# 不再复制仓库 dist / packages 源码。签名、公证、自动更新留给 R2/R6。
 appId: com.mebular.desktop
 productName: Mebular
 copyright: Copyright © 2026 Windsander
@@ -11,34 +14,29 @@ files:
   - src/**/*
   - resources/**/*
   - package.json
+  # 运行时依赖只走 extraResources/runtime；禁止 electron-builder 把仓库根的生产依赖
+  # 再塞进 app.asar（apps/desktop 在 monorepo 内，默认会向上发现根 node_modules）。
+  - '!**/node_modules/**'
 extraResources:
-  # 复用仓库既有构建产物（App 不复制逻辑，只编排）
-  - from: ../../dist
-    to: core-dist
-  - from: ../../packages/mcp
-    to: packages/mcp
-  - from: ../../packages/service/dist
-    to: packages/service/dist
-  - from: ../../packages/fleet/dist
-    to: packages/fleet/dist
-  # fleet/mcp 的 QR 运行时依赖：fleet dist 从 resources/node_modules 解析它
-  - from: ../../node_modules/qrcode-generator
-    to: node_modules/qrcode-generator
-  - from: ../../packages/console
-    to: packages/console
-  # locale pack 数据层（manifest + 各语言 console/desktop/errors JSON）
-  - from: ../../locales
-    to: locales
-  - from: ../../packages/skill
-    to: packages/skill
+  # 发布 tarball 安装出的完整运行时（@mebular/core + fleet/service/mcp/skill + 依赖）。
+  # @mebular/core 包内自带 packages/console / locales / packages/mcp / fleet / service，
+  # 因此 packaged 态不再单独复制这些仓库目录。
+  - from: runtime/node_modules
+    to: node_modules
 asar: true
 mac:
   target: [dmg]
   category: public.app-category.productivity
+  artifactName: Mebular-${version}-${arch}.${ext}
+  # R1 明确不签名（即使本机钥匙串里有 Apple Development 证书也不自动发现）；
+  # R2 接入 CSC_LINK / APPLE_* 时移除此项并做条件签名。
+  identity: null
 win:
   target: [nsis]
+  artifactName: Mebular-Setup-${version}.${ext}
 linux:
   target: [AppImage, deb]
   category: Utility
-# M1 不做：签名/公证/发布/自动更新（见 plan §9：M3/M4）
+  artifactName: Mebular-${version}-${arch}.${ext}
+# R1 不做：签名/公证/发布/自动更新（R2/R6 处理）
 publish: null

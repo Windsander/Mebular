@@ -1,6 +1,6 @@
 # Mebular 桌面 App（apps/desktop）
 
-> M1：**壳 + 守护托管 + 内嵌控制台**。不做签名/公证/自动更新/安装包分发（M3/M4）。
+> R1：**壳 + 守护托管 + 内嵌控制台 + 发布 tarball 运行时打包**。签名/公证/自动更新未启用（R2/R6）。
 > 方案来源：`plan/electron-app-architecture-v0.1.md`。
 
 ## 这是什么
@@ -12,11 +12,12 @@ Electron 薄壳：把**既有控制台**（`127.0.0.1:<port>/console`）装进�
 
 ```
 apps/desktop/
-├── package.json            # private + 0.1.0（与 npm 六包 lockstep）
-├── electron-builder.yml    # M1 stub（无签名/公证/更新）
+├── package.json            # private + 0.1.0（与 npm 五个 lockstep 包同版本）
+├── electron-builder.yml    # 安装包配置（runtime/node_modules → resources/node_modules）
+├── runtime/                # 发布 tarball 安装出的运行时（不入库）
 ├── src/main/               # Electron 主进程：daemon.mjs（托管逻辑，纯可测）/ index.mjs（壳）/ ipc.mjs / tray-icons.mjs
 ├── src/preload/index.cjs   # contextBridge 白名单（contextIsolation + sandbox）
-├── scripts/                # prepare-build（复用仓库产物）/ dev（一键启动）/ smoke（无 GUI 有界冒烟）
+├── scripts/                # prepare-runtime / prepare-build / dev / smoke / smoke-runtime
 └── resources/              # 图标/许可证（占位）
 ```
 
@@ -30,12 +31,49 @@ npm run dev -- --home ~/.mebular --port 7331   # 透传参数（可选）
 npm run smoke                     # 无 GUI 有界冒烟（CI 用）
 ```
 
+## 安装包（R1）
+
+安装包里的 Mebular 运行时**不来自仓库源码目录**，而是先用 `npm pack` 产出五个发布
+tarball，再由 `prepare-runtime` 一次性 `npm install --omit=dev --ignore-scripts` 到
+`apps/desktop/runtime`，最后经 `extraResources` 复制成 `<resources>/node_modules`。
+
+```bash
+# 仓库根：build + 五个 lockstep tarball（core/fleet/service/mcp/skill）
+npm run build
+mkdir -p release-pack
+npm pack --pack-destination release-pack
+for p in packages/fleet packages/service packages/mcp packages/skill; do
+  (cd "$p" && npm pack --pack-destination ../../release-pack)
+done
+
+# apps/desktop：安装 runtime → 冒烟 → 本机目录包
+npm run smoke:runtime             # 从 runtime 起 serve，校验 /healthz 与 embed 安全头
+npm run dist:dir                  # runtime → prepare-build → electron-builder --dir
+
+# 三平台 target（签名/公证等由 CI/R2 接管；本机只构建当前平台）
+npm run dist:mac                  # DMG（universal）
+npm run dist:win                  # NSIS（x64）
+npm run dist:linux                # AppImage + deb（x64）
+```
+
+`runtime/`、`release-pack/`、`dist/` 都是本地产物，已加入 `.gitignore`，不提交。
+打包后的冒烟可直接指向 `<resources>`：
+
+```bash
+node scripts/smoke-runtime.mjs --runtime dist/mac-arm64/Mebular.app/Contents/Resources
+```
+
+> 当前产物未签名/未公证；macOS Gatekeeper 与 Windows SmartScreen 会提示。发布签名、
+> 三平台 CI、自动更新在 R2/R6 处理。
+
 ## 守护托管（两条路径，默认优先服务）
 
 1. **服务托管可用**（`@mebular/service` 已登记 `mebular-serve`）→ 调 `restartService`；未装时可先用
    CLI/GUI 的「常驻运行」安装（等价 `mebular service install` 语义）。
-2. **兜底**：子进程 `spawn(<electron-node>, <repo>/packages/mcp/bin/mebular.mjs serve)`，显式传
-   `MEBULAR_HOME`（禁止 cwd）。**M1 退出策略**：App 退出即停**自己托管**的子进程；服务托管不动。
+2. **兜底**：子进程 `spawn(<electron-node>, <cliBin> serve)`，显式传
+   `MEBULAR_HOME`（禁止 cwd）。`cliBin` 在打包态优先
+   `<resources>/node_modules/@mebular/core/packages/mcp/bin/mebular.mjs`，开发态回退仓库
+   `packages/mcp/bin/mebular.mjs`。**退出策略**：App 退出即停**自己托管**的子进程；服务托管不动。
 3. 已有实例在跑（lock + `/healthz` 200 **且 instance 匹配**）→ **直接复用**，不重复启动；端口被非 Mebular 程序占用时给人话处置。
 
 ## 忆云切换（E2-B）
@@ -70,3 +108,4 @@ IPC **白名单**（`daemon:status|start|stop|restart`、`console:open`、`logs:
 
 `apps/desktop` **不并入根 workspaces**（独立 `package-lock.json`）→ 现有四 job 不会安装 Electron，
 零影响。新增独立 `desktop` job 跑 `npm run smoke`（无 GUI；`ELECTRON_SKIP_BINARY_DOWNLOAD=1` 时自动 SKIP 二进制冒烟）。
+R2 会在桌面 job 里补 `prepare-runtime` + `smoke:runtime` + `dist:dir` / 三平台安装包。

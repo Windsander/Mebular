@@ -25,14 +25,14 @@ if (missing.length === 0) {
   execFileSync('npm', ['run', 'build'], { cwd: root, stdio: 'inherit' });
 }
 
-// fleet 的 QR 运行时依赖；extraResources 会从根 node_modules 复制到 App。
+// fleet 的 QR 运行时依赖；开发态从仓库 node_modules 解析（打包态由 runtime 自带）。
 const qrEncoder = join(root, 'node_modules', 'qrcode-generator', 'package.json');
 if (!existsSync(qrEncoder)) {
-  console.error('[desktop] 缺少 node_modules/qrcode-generator（fleet QR 运行时依赖）：请先 npm install');
+  console.error('[desktop] 缺少 node_modules/qrcode-generator（开发态 fleet QR 运行时依赖）：请先 npm install');
   process.exit(1);
 }
 
-// locale pack 是运行时数据（extraResources → <resources>/locales），构建前校验 manifest + 文件齐全。
+// 开发态 locale pack 从仓库 locales/ 读取（打包态由 runtime 内 @mebular/core/locales 提供）。
 const localesManifestPath = join(root, 'locales', 'manifest.json');
 if (!existsSync(localesManifestPath)) {
   console.error('[desktop] 缺少 locales/manifest.json（locale pack 数据层）');

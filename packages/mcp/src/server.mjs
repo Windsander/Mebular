@@ -106,7 +106,8 @@ export async function startStdioServer() {
   }
   const { app } = await createMebular();
   const service = new MemoryService(app);
-  const handle = serveStdio(() => buildServer(service));
+  // stdio 也是「本进程唯一写者」：任务工具复用同一个 app（同一 EventLog），不再另开离线实例。
+  const handle = serveStdio(() => buildServer(service, { toolContext: { home, mebular: app } }));
 
   const shutdown = async () => {
     await handle.close().catch(() => undefined);

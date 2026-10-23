@@ -892,7 +892,12 @@ export async function startHttpServer({
   const mcpSessions = new Map(); // sessionId → { transport, server }
   async function transportFor(sessionId) {
     if (sessionId) return mcpSessions.get(sessionId)?.transport ?? null;
-    const server = buildServer(serviceFacade, { isReady: runtimeReady });
+    const server = buildServer(serviceFacade, {
+      isReady: runtimeReady,
+      // 任务工具复用**当前** live app（热初始化后 app 会切换，故用 getter）：同一 EventLog 才会触发
+      // 本地 append / push-on-write / fleet SSE，而不是另开一个离线实例写同一份库。
+      toolContext: () => ({ home, ...(app ? { mebular: app } : {}) }),
+    });
     const entry = { transport: null, server };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),

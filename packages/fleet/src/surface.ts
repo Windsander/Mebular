@@ -26,6 +26,16 @@ export interface ToolContext {
   dir: string;
   namespace?: string;
   agent?: string;
+  /**
+   * 运行中 daemon 的 live app（由 MCP server 注入）。
+   *
+   * 提供时 **复用它**：不 `initialize`、不 `shutdown`、不新建第二个离线 Mebular。
+   * 这样任务事件写入的是 daemon 自己的 EventLog —— 本地 append / push-on-write / SSE 都能感知；
+   * 若另开离线实例写同一 JSONL，daemon 的 EventLog 不感知 append，远端与 SSE 都收不到。
+   *
+   * 缺省（CLI / stdio 离线路径）：维持原有行为，按 `dir` 新建并关闭一个离线实例。
+   */
+  mebular?: Mebular;
 }
 
 export interface TaskTool {
@@ -55,14 +65,23 @@ interface Session {
 async function openSession(ctx: ToolContext): Promise<Session> {
   // F-UNI：fleet home（fleet.config.json）或守护 home（config.json）都可作为工具上下文
   const config = await loadToolConfig(ctx.dir);
-  const encryption = await readMasterKeyFile(config.masterKeyFile);
   const namespace = ctx.namespace ?? config.namespace;
   const agent = ctx.agent ?? 'board';
-  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
-  await mebular.initialize();
+  const live = ctx.mebular;
+  let mebular: Mebular;
+  if (live !== undefined) {
+    // 运行中 daemon：复用 live app（同一实例 / 同一 EventLog）——写入即本地 append，推送与 SSE 正常。
+    mebular = live;
+  } else {
+    const encryption = await readMasterKeyFile(config.masterKeyFile);
+    mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
+    await mebular.initialize();
+  }
+  const ownsMebular = live === undefined;
+  const device = live?.deviceId ?? config.device;
   const store = new MebularTaskEventStore(mebular, { namespace });
   const node = new FleetNode({
-    device: config.device,
+    device,
     agent,
     store,
     transport: new NullTransport(),
@@ -72,11 +91,12 @@ async function openSession(ctx: ToolContext): Promise<Session> {
     mebular,
     store,
     node,
-    device: config.device,
+    device,
     agent,
     namespace,
     close: async () => {
-      await mebular.shutdown();
+      // live app 的生命周期归 daemon（MCP serve）所有：工具调用只结束会话，不关闭它。
+      if (ownsMebular) await mebular.shutdown();
     },
   };
 }
@@ -477,9 +497,11 @@ export const TASK_TOOLS: TaskTool[] = [
       const name = requiredString(input, 'name');
       const withDevices = Array.isArray(input.with) ? (input.with as string[]) : [];
       const config = await loadToolConfig(ctx.dir);
+      const live = ctx.mebular !== undefined ? { mebular: ctx.mebular } : {};
       // 建域 = 公告（零门槛）+ 本机订阅；其他设备自行订阅（不能代订）。
-      const declaration = await declareNamespace(ctx.dir, { namespace: name, note: `board ${name}` });
-      const subscription = await subscribeNamespace(ctx.dir, { namespace: name, note: `board ${name}` });
+      // 运行中 daemon 注入 live app 时复用同一 EventLog（不另开离线写者）。
+      const declaration = await declareNamespace(ctx.dir, { namespace: name, note: `board ${name}`, ...live });
+      const subscription = await subscribeNamespace(ctx.dir, { namespace: name, note: `board ${name}`, ...live });
       return {
         ok: true,
         namespace: name,

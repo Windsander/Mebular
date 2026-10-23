@@ -681,7 +681,9 @@ export async function buildDevices({ app, config, runtime }) {
     devices.push({
       deviceId,
       ...(name ? { name } : {}),
-      online: Boolean(connection),
+      // 本机是本地节点：不依赖入站连接，始终 online（否则前端可达性会把 self 算成离线）。
+      // 对端仍按真实已认证连接判定。
+      online: deviceId === self ? true : Boolean(connection),
       ...(connection ? { peerId: connection.peerId, addrs: [connection.remoteAddress] } : {}),
       ...(lastSyncPeer === deviceId && syncStatus?.lastSyncAt ? { lastSyncAt: syncStatus.lastSyncAt } : {}),
       ...(pendingEventCount !== null ? { pendingEventCount } : {}),

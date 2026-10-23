@@ -160,9 +160,11 @@ npm 不允许覆盖已发布版本。具体步骤见 [1.1 首次发布后回滚�
 - [ ] 第 1 节的一次性前置已完成：npm org `mebular`、`NPM_TOKEN`（Automation）、
       Actions `Read and write permissions`。
 - [ ] 五个 `package.json` 版本均为 `0.1.0`，`CHANGELOG.md` 含 `## [v0.1.0]` 章节。
-- [ ] 当前 integration 的 P1–P4 门禁记录已核对（见第 8 节）；release 分支 push 后由
-      Publish verify 重跑 `build` / `lint` / `test:coverage` / `verify:mcp:publish`。
-- [ ] `npm run check:docs` 为 7/7。
+- [ ] 当前 `main` 的发布门禁记录已核对（见第 8 节）；release 分支 push 后由 Publish verify
+      重跑 `build` / `lint` / `test:coverage` / `verify:mcp:publish`。
+- [ ] `npm run verify:star-map:multinode` 通过；六台真实守护、远端 `task_submit`、`fleet` SSE
+      和 hover 航道均有记录。
+- [ ] `npm run check:i18n`、`npm run check:deps`、`npm run check:docs` 均通过。
 - [ ] 发布说明按 7.5 的口径撰写，不写旧流程（自动重启 / 去写入初始设置）。
 
 ### 7.2 精确命令序列
@@ -240,33 +242,41 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
    [`LIMITATIONS.md`](../limitations/LIMITATIONS.md) 的 Root compromise 一节。
 5. **CLI 仍可用**：`fleet quickstart` / `fleet join` 保留给脚本与批量场景；GUI 向导不会替用户
    选择或新建忆云。
+6. **星图是主控制台**：主控制台展示忆云内全部设备、共同订阅基础边、hover 任务域航道与真实
+   fleet 事件；蓝 / 金是任务域可达性，不是设备互连。README 截图只做展示，不能替代六台真实守护
+   的 E2E 证据。
 
 不要把「自动重启」「去写入初始设置」写回发布说明，也不要把 `@mebular/mcp` 说成自带 `fleet`。
 
 ## 8. 发布前验证记录
 
-验证对象：**当前 integration** `feat/onboarding-v2`（P1–P6 + service-home 修复 + MCP SDK 2.3.1），
-基线 `5daf4fe`，执行日期 2026-10-21。以下记录以当前 ONBOARDING 门禁为准，不复用旧
-`m0/release-v010` 基线数字。
+验证对象：**当前 `main`**，执行日期 2026-10-23。基线包含 onboarding v2、星图 / fleet
+网络、`#227` 四张 README 截图、`#228` 主题化配图和 `#229` 脉冲边缘渐隐。以下记录以本轮
+真实门禁为准，不复用旧 `m0/release-v010` 基线数字。
 
 | 命令 | 结果 | 关键输出 |
 | --- | --- | --- |
-| `npm test -- --runInBand` | ✅ 最终 integration | **166 suites / 1474 tests** 全过 |
-| `npm run verify:console:ui` | ✅ 最终 integration | **214/214** checks（含 P6A/P6B 锁定态、邀请确认、无 reload） |
-| `npm run desktop:smoke` | ✅ 最终 integration | **21/21** checks（本机 Electron 可用；含原地导航/确认逻辑） |
-| `npm run verify:onboarding` | ✅ 最终 integration | **36/36** checks；覆盖引导态 / 建新 / 加入 / 错误可读，含同进程热初始化与 MCP 未初始化行为 |
-| P2 MCP facade | ✅ 最终 integration | **3 suites / 18 tests**；SDK 2.3.1 下 initialize/list 与 READY 恢复 |
-| `npm audit --omit=dev` | ✅ 最终 integration | **0 vulnerabilities**（2.0.0 的 high 已由 2.3.1 修复） |
-| `npm run check:docs` | ✅ P6B | 7/7；README EN/CN 标题结构、互链、无手写测试数字、CI badge、工具名在册、本地链接存在 |
-| 真实 Electron E2E | ✅ 独立走查 | 一键部署 → 锁定控制台 → 新建「E2E 忆云」→ 同页解锁；daemon PID 不变，导航仅 wizard→console 1 次 |
-| `npm run lint` / `npm run verify:mcp:publish` | ⏳ 待 release 流水线 | 发布前必须在 `release/v0.1.0` 由 Publish verify 重跑 |
+| `npm run build` | ✅ 当前 main | core / service / fleet 构建完成 |
+| `npm test -- --runInBand` | ✅ 当前 main | **177 suites / 1613 tests** 全过 |
+| `npm run verify:console:ui` | ✅ 当前 main | **388/388** checks（headless Chromium；1440 / 1024 / 390，含 i18n、安全流程、星图图例） |
+| `npm run verify:star-map:multinode` | ✅ 当前 main | **37/37**；6 台真实 daemon，`baseEdgeCount=15`、`solid=10`、`dashed=5`；hover B 9 条 / hover F 5 条；真实 MCP `task_submit` 与 `fleet` SSE |
+| `npm run check:i18n` | ✅ 当前 main | **32 checks / 0 failed**；console / desktop / errors 三套 locale pack |
+| `npm run check:deps` | ✅ 当前 main | **4/4**；16 项运行时依赖均在 `THIRD-PARTY.md` |
+| `npm run lint` | ✅ 当前 main | eslint 通过 |
+| `npm audit --omit=dev` | ✅ 当前 main | **0 vulnerabilities** |
+| `npm run check:docs` | ✅ 当前 main | **7/7**；README EN/CN 结构、互链、无手写测试数字、CI badge、工具名、本地链接 |
+| README 视觉走查 | ✅ 当前 main | 四张星图均 1600×1000、6 颗星；baseline 灰虚线 / 压暗实线 / 声波脉冲；lanes 旧版弧线航道；亮色 banner + 三组示意图使用 `<picture>` 切换 |
+| `npm run verify:mcp:publish` | ⏳ 待 release 流水线 | 发布前必须在 `release/v0.1.0` 由 Publish verify 重跑 |
 
-> 第 8 节记录的是当前 integration 已完成的最终门禁；它**不替代**发布分支上的
+> 第 8 节记录的是当前 `main` 已完成的发布门禁；它**不替代**发布分支上的
 > `build` / `lint` / `test:coverage` / `verify:mcp:publish` 门禁。
-> 真实 Electron 的托盘菜单点击与退出弹框人工走查仍需在最终 App 预览里确认（静态/单元覆盖已通过）。
+> `desktop:smoke` / `verify:onboarding` 的上一轮集成结果仍保留在历史记录中；本轮星图变更
+> 未改动守护、引导和 Electron 主进程，因此不重复计入本轮数字。
 
 ### 8.1 已知问题（不阻塞 0.1.0）
 
+- **桌面 App 在 v0.1.0 仍是源码运行（M1 壳）**，不附带签名 / 公证安装包；README 的桌面
+  路径从源码启动，浏览器 / CLI 是当前的一键安装路径。安装包分发与自动更新留待后续版本。
 - `mebular init` 的“下一步”提示仍使用仓库相对路径（`node packages/.../mebular.mjs`），对
   `npm install -g` 用户不适用；当前 README / QUICKSTART 的首次运行已改为 `mebular serve` +
   锁定控制台，不再依赖该提示。

@@ -71,10 +71,12 @@ describe('PeerFrames', () => {
     await tick();
     // 会话中不立即触发（避免打断帧序），但必须记住
     expect(nudges).toBe(0);
+    expect(frames.hasPendingNudge).toBe(true);
 
     frames.setSessionActive(false);
     // 多次 nudge 合并为一次补发
     expect(nudges).toBe(1);
+    expect(frames.hasPendingNudge).toBe(false);
 
     // 空闲时再来的 nudge 正常触发（不会因上次补发被吞）
     it0.push({ type: 'sync-nudge' });

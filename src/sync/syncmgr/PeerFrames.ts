@@ -116,4 +116,12 @@ export class PeerFrames {
   get isClosed(): boolean {
     return this.closed;
   }
+
+  /**
+   * 诊断/测试：会话进行中是否收到过待补发的 nudge（会话结束补发后清零）。
+   * 用于确定性验证“nudge 确实在会话中抵达”，而不是事后才到。
+   */
+  get hasPendingNudge(): boolean {
+    return this.nudgePending;
+  }
 }

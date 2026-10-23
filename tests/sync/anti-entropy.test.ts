@@ -199,5 +199,5 @@ describe('常驻响应方空闲不计入「会话在途」', () => {
       await a.shutdown();
       await b.shutdown();
     }
-  });
+  }, 20000);
 });

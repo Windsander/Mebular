@@ -181,15 +181,27 @@ describe('push-on-write', () => {
       // 「B 的 nudge 在 A 的会话期间到达」的时序。只改 PeerFrames 的会话标记，
       // 不注入消息、不改 store、不伪造协商轮次；写入仍由 B 真实 append + pushOnWrite 发出。
       const onlinePeers = (a.sync as unknown as {
-        onlinePeers: Map<string, { initiate: boolean; frames?: { setSessionActive(active: boolean): void } }>;
+        onlinePeers: Map<string, {
+          initiate: boolean;
+          frames?: { setSessionActive(active: boolean): void; readonly hasPendingNudge?: boolean };
+        }>;
       }).onlinePeers;
       const entry = [...onlinePeers.values()].find((candidate) => candidate.initiate);
       expect(entry?.frames).toBeDefined();
       entry!.frames!.setSessionActive(true);
 
       const node = await b.graph.createNode('fact', { text: 'nudge-during-session' }, [], { namespace: 'task' });
-      // 给 B 的 nudge 足够时间抵达 A（旧实现：会话中直接丢弃，且没有后续写入可再触发）
-      await sleep(300);
+      // 确定性钩子：等到 B 的 nudge **确实已在会话进行中抵达**（新实现的诊断位，
+      // 不注入任何业务消息/状态）。旧实现会话中直接丢弃、也没有该状态位 → 这里超时，
+      // 从而排除“nudge 恰好晚到、旧实现也能过”的假通过。
+      const arrivedDuringSession = await waitFor(
+        async () => entry!.frames!.hasPendingNudge === true,
+        3000,
+      );
+      // 不在这里提前失败：旧实现没有该状态位，仍继续走下面的行为断言，
+      // 让红灯首先来自“会话结束后仍收不到”，而不是“只缺一个新 getter”。
+      // 会话内没有会话在跑：A 此时不应已有该节点（证明下面不是 push 已直接送达）
+      expect(await a.graph.getNode(node.id)).toBeNull();
 
       // 会话结束：修复后补发一次 onNudge → A 的发起方循环开会话 → 拉取 B 的新节点。
       // 旧实现无补发；A 无本地 pending、B 也无新写入 ⇒ 节点永远到不了 A。
@@ -197,11 +209,13 @@ describe('push-on-write', () => {
       const received = await waitFor(async () => (await a.graph.getNode(node.id)) !== null, 5000);
       expect(received).toBe(true);
       expect(await a.graph.getNode(node.id)).not.toBeNull();
+      // 确定性：nudge 必须是在会话进行中抵达的（排除“晚到后被空闲路径接住”的假通过）。
+      expect(arrivedDuringSession).toBe(true);
     } finally {
       await a.shutdown();
       await b.shutdown();
     }
-  });
+  }, 20000);
 
   it('未订阅不发（H）：本机写入未订阅分区不供给对端', async () => {
     const hub = new InMemoryHub();

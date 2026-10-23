@@ -105,23 +105,18 @@ try {
     let stop = false;
     const done = (async () => {
       for (let i = 0; i < iterations && !stop; i++) {
-        // 确定性收敛驱动：显式让**既有**常驻连接再开一轮会话（发起方唤醒 / 响应方 nudge）。
-        // 旧写法每 20 轮调用 `connectToPeer`：连接仍活着时是 no-op；而一旦某一侧重拨把
-        // 上一代连接退役，另一侧下次拨号就会真的新建连接并整体替换常驻会话——约每 10 轮
-        // 一次，系统性制造「nudge / 触发落在被替换 entry」的窗口。那是夹具制造的重连风暴，
-        // 不是本用例要验收的产品语义（`tests/fleet/collab-e2e.test.ts` 亦注明“不重复
-        // connectToPeer：重复建连会拆掉常驻会话，反而丢推送”）。
-        // 这里改用生产路径 `requestSession` 驱动；仅在确实没有在线对端时补一次拨号恢复连接。
-        if (i % 20 === 1) {
-          a.sync.requestSession('device-B');
-          if (a.sync.getOnlinePeers().length === 0) {
-            await a.node.connectToPeer(b.node.peerId, b.node.getLocalMultiaddrs()[0]).catch(() => undefined);
-          }
-        } else if (i % 20 === 11) {
-          b.sync.requestSession('device-A');
-          if (b.sync.getOnlinePeers().length === 0) {
-            await b.node.connectToPeer(a.node.peerId, a.node.getLocalMultiaddrs()[0]).catch(() => undefined);
-          }
+        // 只做「连接确实断了」的恢复：**绝不**定时主动 requestSession。
+        // 本验收必须由真实自动路径收敛（本机写入 push-on-write / 响应方 nudge /
+        // 两端 anti-entropy）；外部强制开会话会掩盖「nudge 或 anti-entropy 丢触发」，
+        // 使核心修复被回退后仍可能全绿。
+        // （旧写法还用过 connectToPeer：连接活着时是 no-op，但一旦对侧重拨把上一代连接
+        // 退役，下一次拨号会真的新建连接并整体替换常驻会话——约每 10 轮一次的重连风暴，
+        // 同样不是本用例要验收的语义。`tests/fleet/collab-e2e.test.ts` 亦注明重复建连
+        // 会拆掉常驻会话、反而丢推送。）
+        if (i % 20 === 1 && a.sync.getOnlinePeers().length === 0) {
+          await a.node.connectToPeer(b.node.peerId, b.node.getLocalMultiaddrs()[0]).catch(() => undefined);
+        } else if (i % 20 === 11 && b.sync.getOnlinePeers().length === 0) {
+          await b.node.connectToPeer(a.node.peerId, a.node.getLocalMultiaddrs()[0]).catch(() => undefined);
         }
         await a.sync.runAntiEntropyCycle().catch(() => undefined);
         await b.sync.runAntiEntropyCycle().catch(() => undefined);

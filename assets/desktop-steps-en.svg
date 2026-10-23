@@ -1,50 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 260" width="980" height="260" role="img" aria-label="Desktop app setup: 1 Start deployment, 2 Create or join a Cloud, 3 Invite the next device">
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="310" viewBox="0 0 980 310" role="img" aria-label="DESKTOP APP">
   <defs>
-    <radialGradient id="glow" cx="50%" cy="40%" r="70%">
-      <stop offset="0%" stop-color="#0d2140" stop-opacity="0.75"/>
+    <radialGradient id="glow" cx="50%" cy="38%" r="72%">
+      <stop offset="0%" stop-color="#0d2140" stop-opacity="0.85"/>
       <stop offset="100%" stop-color="#03050a" stop-opacity="0"/>
     </radialGradient>
-    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
-      <path d="M0,0 L6,3 L0,6 z" fill="#4a8acf"/>
-    </marker>
-    <style>
-      .card{fill:#081322;stroke:#1a3a60;stroke-width:1.2}
-      .num{fill:#0d2a4a;stroke:#4a8acf;stroke-width:1.2}
-      .n{font-family:'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace;font-size:14px;font-weight:700;fill:#8ac8ff}
-      .h{font-family:'SF Pro Display','Segoe UI',ui-sans-serif,system-ui,sans-serif;font-size:18px;font-weight:600;fill:#e2ecff}
-      .s{font-family:'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif;font-size:13px;fill:#8aa8c8}
-      .step{stroke:#4a8acf;stroke-width:1.3;stroke-dasharray:5 5;fill:none}
-    </style>
   </defs>
-
-  <rect width="980" height="260" fill="#03050a"/>
-  <ellipse cx="490" cy="130" rx="470" ry="150" fill="url(#glow)"/>
-
-  <rect class="card" x="30" y="42" width="270" height="166" rx="14"/>
-  <rect class="card" x="355" y="42" width="270" height="166" rx="14"/>
-  <rect class="card" x="680" y="42" width="270" height="166" rx="14"/>
-
-  <circle class="num" cx="64" cy="78" r="16"/>
-  <text class="n" x="64" y="83" text-anchor="middle">1</text>
-  <text class="h" x="92" y="84">Start deployment</text>
-  <text class="s" x="58" y="120">Starts the local service</text>
-  <text class="s" x="58" y="140">and connects your</text>
-  <text class="s" x="58" y="160">installed assistants.</text>
-
-  <circle class="num" cx="389" cy="78" r="16"/>
-  <text class="n" x="389" y="83" text-anchor="middle">2</text>
-  <text class="h" x="417" y="84">Create or join a Cloud</text>
-  <text class="s" x="383" y="120">Name it on the first device.</text>
-  <text class="s" x="383" y="140">Paste a one-time token</text>
-  <text class="s" x="383" y="160">on later ones.</text>
-
-  <circle class="num" cx="714" cy="78" r="16"/>
-  <text class="n" x="714" y="83" text-anchor="middle">3</text>
-  <text class="h" x="742" y="84">Invite the next device</text>
-  <text class="s" x="708" y="120">Open Invite device in the</text>
-  <text class="s" x="708" y="140">top bar and hand the</text>
-  <text class="s" x="708" y="160">token to the next machine.</text>
-
-  <line class="step" x1="300" y1="125" x2="347" y2="125" marker-end="url(#arrow)"/>
-  <line class="step" x1="625" y1="125" x2="672" y2="125" marker-end="url(#arrow)"/>
+  <rect width="980" height="310" fill="#03050a"/>
+  <ellipse cx="490" cy="124" rx="539" ry="161.20000000000002" fill="url(#glow)"/>
+  <text x="40" y="44" font-family="'SF Pro Display','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#e2ecff" font-weight="700" letter-spacing="1.2">DESKTOP APP</text><text x="40" y="72" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#8aa8c8">From install to a locked, ready console.</text><rect x="30" y="92" width="270" height="154" rx="14" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/><circle cx="64" cy="122" r="16" fill="#0d1e35" stroke="#4a8acf" stroke-width="1.2"/><text x="64" y="127" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="14" fill="#8ac8ff" font-weight="700" text-anchor="middle">1</text><text x="92" y="128" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#e2ecff" font-weight="700">Start deployment</text><text x="58" y="158" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8">Starts the local service</text><text x="58" y="178" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8">and connects your</text><text x="58" y="198" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8">installed assistants.</text><rect x="355" y="92" width="270" height="154" rx="14" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/><circle cx="389" cy="122" r="16" fill="#0d1e35" stroke="#4a8acf" stroke-width="1.2"/><text x="389" y="127" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="14" fill="#8ac8ff" font-weight="700" text-anchor="middle">2</text><text x="417" y="128" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#e2ecff" font-weight="700">Create or join a Cloud</text><text x="383" y="158" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8">Name it on the first device.</text><text x="383" y="178" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8">Paste a one-time token</text><text x="383" y="198" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8">on later ones.</text><rect x="680" y="92" width="270" height="154" rx="14" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/><circle cx="714" cy="122" r="16" fill="#0d1e35" stroke="#4a8acf" stroke-width="1.2"/><text x="714" y="127" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="14" fill="#8ac8ff" font-weight="700" text-anchor="middle">3</text><text x="742" y="128" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#e2ecff" font-weight="700">Invite the next device</text><text x="708" y="158" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8">Open Invite device in the</text><text x="708" y="178" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8">top bar and hand the</text><text x="708" y="198" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8">token to the next machine.</text><path d="M300,168 L345,168" stroke="#4a8acf" stroke-width="1.3" stroke-dasharray="4 5" fill="none"/><path d="M340,164 L347,168 L340,172" fill="#4a8acf"/><path d="M625,168 L670,168" stroke="#4a8acf" stroke-width="1.3" stroke-dasharray="4 5" fill="none"/><path d="M665,164 L672,168 L665,172" fill="#4a8acf"/><text x="490" y="278" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" text-anchor="middle">v0.1.0 runs from source · 64-bit macOS, Windows and Linux</text><text x="490" y="296" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#6f93b6" text-anchor="middle">Signed installers are coming in a later release.</text>
 </svg>

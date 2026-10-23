@@ -26,21 +26,14 @@ Memory and tasks stay on your devices; devices sync directly.
 </p>
 <p align="center"><sub>The map at rest: devices and their shared-subscription edges. · On hover: task-domain lanes plus live fleet traffic.<br>Blue and gold show this device's two-way task-domain reachability, not peer-to-peer links.</sub></p>
 
-## What it is
+## One graph
 
-| Local-first | Direct sync | Auditable | MCP |
-|---|---|---|---|
-| Memory and tasks stay on your devices and keep working offline. | Devices sync directly. No hosted account, no central coordinator. | Every write is signed and content-addressed, so history can be checked. | Your existing assistants connect over stdio or HTTP. |
-
-A Cloud (忆云) is one shared memory space in the network — not a hosted service.
-
-## Why Mebular
-
-| The usual setup | Mebular |
-|---|---|
-| Context stays inside one assistant or one machine. | Every connected assistant reads and writes the same graph. |
-| Sync needs an account and a hosted service. | Each machine runs a node; devices exchange memory directly. |
-| You cannot tell who changed what. | Signed writes with an auditable history. |
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/one-graph-en-light.svg">
+    <img src="assets/one-graph-en.svg" alt="Why Mebular: one shared graph instead of a silo; local-first, direct sync, auditable, MCP">
+  </picture>
+</p>
 
 ## Get started
 
@@ -53,40 +46,14 @@ A Cloud (忆云) is one shared memory space in the network — not a hosted serv
   </picture>
 </p>
 
-**Start deployment** → **Create new Cloud** / **Join existing Cloud** → **Invite device**.
-
-The app runs on 64-bit macOS, Windows and Linux. If there is no build for your platform yet, use the browser or CLI path below.
-
 ### Other paths
 
-<table width="100%">
-  <thead>
-    <tr>
-      <th align="left">Path</th>
-      <th align="left">Start with</th>
-      <th align="left">Best for</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td><strong>Browser</strong></td>
-      <td><code>npm install -g @mebular/core</code> → <code>mebular serve</code></td>
-      <td>The same console, no app</td>
-    </tr>
-    <tr>
-      <td><strong>CLI</strong></td>
-      <td><code>fleet quickstart</code> → <code>fleet invite</code> / <code>fleet join</code></td>
-      <td>Scripts and headless machines</td>
-    </tr>
-    <tr>
-      <td><strong>Agent</strong></td>
-      <td><a href="packages/skill/SETUP.md">Install the skill</a>, then say “deploy Mebular”</td>
-      <td>Hands-off setup</td>
-    </tr>
-  </tbody>
-</table>
-
-Browser, CLI and agent paths need Node.js 20 or newer.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/other-paths-en-light.svg">
+    <img src="assets/other-paths-en.svg" alt="Other ways to start: Browser, CLI and Agent, all sharing one graph">
+  </picture>
+</p>
 
 ```bash
 npm install -g @mebular/core
@@ -95,32 +62,21 @@ fleet quickstart --daemon                      # CLI start
 mebular print-config --client opencode         # MCP config
 ```
 
-## What you get
-
-| You get | In practice |
-|---|---|
-| **Context that follows you** | Write once with `memory_write`; any connected assistant recalls it with `memory_query`. |
-| **Work that moves** | `task_submit` hands a task to another assistant; progress stays on one chain. |
-| **History you can check** | See who wrote a fact, when it changed, and what was true then. |
-| **Memory you can take** | Canonical Memory Format and adapters for Obsidian, logs and JSON memo. |
-
 ## How it works
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/network-overview-en-light.svg">
-    <img src="assets/network-overview-en.svg" alt="Mebular network overview: two machines, each running a local node, syncing one graph for the assistants connected to them">
+    <img src="assets/network-overview-en.svg" alt="Mebular network overview: each machine runs one node; nodes sync memory and tasks directly; add devices with a QR code or token">
   </picture>
 </p>
 
-<p align="center"><sub>One node per machine. One graph across them.</sub></p>
-
-Each machine runs one node; nodes sync memory and tasks directly. Add a device with one QR code or token — the master key stays on the root machine.
+<p align="center"><sub>Write with <code>memory_write</code>, hand off with <code>task_submit</code> — the same graph, from any assistant.</sub></p>
 
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/pairing-flow-en-light.svg">
-    <img src="assets/pairing-flow-en.svg" alt="Pairing flow: device A starts and invites, device B joins with the QR code, then connection and the default grant happen automatically">
+    <img src="assets/pairing-flow-en.svg" alt="Pairing flow: device A invites, device B joins with the QR code or token, then connection and the default grant happen automatically">
   </picture>
 </p>
 
@@ -130,29 +86,29 @@ Each machine runs one node; nodes sync memory and tasks directly. Add a device w
   <thead>
     <tr>
       <th align="left">Start</th>
-      <th align="left">Go deeper</th>
+      <th align="left">Understand</th>
+      <th align="left">Operate</th>
+      <th align="left">Trust</th>
     </tr>
   </thead>
   <tbody>
     <tr>
-      <td><strong><a href="docs/getting-started/QUICKSTART.md">Quickstart</a></strong><br><sub>Install, pair, and sync a second device</sub></td>
-      <td><strong><a href="docs/architecture/ARCHITECT.md">Architecture</a></strong><br><sub>Nodes, sync, and trust boundaries</sub></td>
+      <td><strong><a href="docs/getting-started/QUICKSTART.md">Quickstart</a></strong><br><sub>Install, pair, sync</sub></td>
+      <td><strong><a href="docs/architecture/ARCHITECT.md">Architecture</a></strong><br><sub>Nodes, sync, trust</sub></td>
+      <td><strong><a href="docs/console/README.md">Console</a></strong><br><sub>The local GUI</sub></td>
+      <td><strong><a href="docs/limitations/LIMITATIONS.md">Limitations</a></strong><br><sub>Read before sensitive data</sub></td>
     </tr>
     <tr>
-      <td><strong><a href="docs/console/README.md">Console</a></strong><br><sub>The local GUI and its pages</sub></td>
-      <td><strong><a href="docs/limitations/LIMITATIONS.md">Limitations</a></strong><br><sub>Read before storing sensitive data</sub></td>
+      <td><strong><a href="packages/skill/SETUP.md">Agent skills</a></strong><br><sub>Setup and playbooks</sub></td>
+      <td><strong><a href="packages/fleet/RUNBOOK.md">Fleet runbook</a></strong><br><sub>Two-machine ops</sub></td>
+      <td><strong><a href="docs/operations/RELEASE.md">Release SOP</a></strong><br><sub>How a release is cut</sub></td>
+      <td><strong><a href="SEALING.md">Sealing contract</a></strong><br><sub>Protocol red lines</sub></td>
     </tr>
     <tr>
       <td><strong><a href="CHANGELOG.md">Changelog</a></strong><br><sub>Release notes</sub></td>
-      <td><strong><a href="packages/fleet/RUNBOOK.md">Fleet runbook</a></strong><br><sub>Two-machine operations and WAN checks</sub></td>
-    </tr>
-    <tr>
-      <td><strong><a href="CONTRIBUTING.md">Contributing</a></strong><br><sub>Quality gates and how to help</sub></td>
-      <td><strong><a href="packages/skill/SETUP.md">Agent skills</a></strong><br><sub>Setup, memory policy, task playbook</sub></td>
-    </tr>
-    <tr>
-      <td><strong><a href="docs/operations/RELEASE.md">Release SOP</a></strong><br><sub>How a release is cut</sub></td>
-      <td><strong><a href="SEALING.md">Sealing contract</a></strong><br><sub>Protocol red lines and deferrals</sub></td>
+      <td><strong><a href="CONTRIBUTING.md">Contributing</a></strong><br><sub>Quality gates</sub></td>
+      <td><strong><a href="SECURITY.md">Security</a></strong><br><sub>Report a vulnerability</sub></td>
+      <td><strong><a href="https://mebular.cyberfederal.io">Website</a></strong><br><sub>Product site</sub></td>
     </tr>
   </tbody>
 </table>

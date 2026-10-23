@@ -167,10 +167,10 @@ mebular doctor --net    # address book / LAN discovery / NAT / bridge role / nex
 
 ## Where to next
 
-- **README** — [`README.md`](README.md) · [中文](README_CN.md)
-- **Changelog** — [`CHANGELOG.md`](CHANGELOG.md)
-- **Release SOP** — [`RELEASE.md`](RELEASE.md)
-- **Limits & trade-offs** — [`LIMITATIONS.md`](LIMITATIONS.md)
-- **Sealing contract** — [`SEALING.md`](SEALING.md)
-- **Two-machine ops** — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
-- **Runnable library example** — [`examples/quickstart`](examples/quickstart/index.mjs)
+- **README** — [`README.md`](../../README.md) · [中文](../../README_CN.md)
+- **Changelog** — [`CHANGELOG.md`](../../CHANGELOG.md)
+- **Release SOP** — [`RELEASE.md`](../operations/RELEASE.md)
+- **Limits & trade-offs** — [`LIMITATIONS.md`](../limitations/LIMITATIONS.md)
+- **Sealing contract** — [`SEALING.md`](../../SEALING.md)
+- **Two-machine ops** — [`packages/fleet/RUNBOOK.md`](../../packages/fleet/RUNBOOK.md)
+- **Runnable library example** — [`examples/quickstart`](../../examples/quickstart/index.mjs)

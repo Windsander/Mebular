@@ -39,7 +39,8 @@ chore(scripts): 新增 wan-l2 relay-only 驗證腳本
 ## 文档边界
 
 - `README.md` / 本文件 / 代码注释：随仓库发布
-- `docs/`、`docs.design/`、`design-notes/`：本地设计文档，**不进入远端**（已被 gitignore 排除，请勿提交）；对外法律文件 `docs/DCO.md` 除外，随仓库发布
+- `docs/`：公开 tracked 文档，随仓库发布；新增/移动文档请同步更新 [`docs/README.md`](docs/README.md) 索引与入链
+- `docs.design/`、`design-notes/`：本地设计草稿，已被 gitignore 排除，**不进入远端**（请勿提交）
 
 ## 项目状态与质量门禁
 
@@ -58,6 +59,7 @@ Mebular 仍在早期：功能可用，API 未稳定，未发 npm 包；生产使
 | 表面一致性 | `npm run check:surface-parity`（MCP 工具 ↔ CLI 逐字同名、无孤儿） |
 | 整洁性 | `npm run check:cleanliness`（孤儿模块 / 失效引用 / 裸 throw） |
 | 文档一致性 | `npm run check:docs`（EN/CN 结构对齐、链接存在、工具名一致、无手写数字） |
+| 国际化 | `npm run check:i18n`（locale pack 键对齐、占位符一致、默认可控文案无中文） |
 | 类型/Lint | `tsc`（strict + `noUncheckedIndexedAccess`）与 ESLint 零告警 |
 | CI | 四 job：build/test/lint · WAN NAT（docker）· Windows · 真实语义（live badge 见 README） |
 

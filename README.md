@@ -71,7 +71,7 @@ only `mebular` — it does not bring `fleet`. To install the memory / task skill
 node "$(npm root -g)/@mebular/core/packages/skill/scripts/install.mjs"
 ```
 
-Prefer a source checkout? Use the GitHub-pinned or local install in [`QUICKSTART.md`](QUICKSTART.md).
+Prefer a source checkout? Use the GitHub-pinned or local install in [`QUICKSTART.md`](docs/getting-started/QUICKSTART.md).
 
 ### First run: create or join a Cloud
 
@@ -158,10 +158,10 @@ Runnable example: [`examples/quickstart`](examples/quickstart/index.mjs) — it 
 
 ## Links & docs
 
-- **Quickstart (5 minutes)** — [`QUICKSTART.md`](QUICKSTART.md) · [中文](QUICKSTART_CN.md)
+- **Quickstart (5 minutes)** — [`QUICKSTART.md`](docs/getting-started/QUICKSTART.md) · [中文](docs/getting-started/QUICKSTART_CN.md)
 - **Changelog / release notes** — [`CHANGELOG.md`](CHANGELOG.md)
-- **Release SOP** — [`RELEASE.md`](RELEASE.md)
-- **Limits & trade-offs** — [`LIMITATIONS.md`](LIMITATIONS.md)
+- **Release SOP** — [`RELEASE.md`](docs/operations/RELEASE.md)
+- **Limits & trade-offs** — [`LIMITATIONS.md`](docs/limitations/LIMITATIONS.md)
 - **Sealing contract** (red lines, protocol semantics, deferrals) — [`SEALING.md`](SEALING.md)
 - **Fleet runbook** (two-machine ops, WAN commands, acceptance) — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
 - **Memory policy for agents** — [`packages/skill/MEMORY_POLICY.md`](packages/skill/MEMORY_POLICY.md)

@@ -159,10 +159,10 @@ mebular doctor --net    # 地址簿 / LAN 发现 / NAT / 桥角色 / 下一步�
 
 ## 接下来
 
-- **README** —— [中文](README_CN.md) · [English](README.md)
-- **变更日志** —— [`CHANGELOG.md`](CHANGELOG.md)
-- **发布 SOP** —— [`RELEASE.md`](RELEASE.md)
-- **限制与取舍** —— [`LIMITATIONS_CN.md`](LIMITATIONS_CN.md)
-- **封板契约** —— [`SEALING_CN.md`](SEALING_CN.md)
-- **双机运维** —— [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
-- **可运行库示例** —— [`examples/quickstart`](examples/quickstart/index.mjs)
+- **README** —— [中文](../../README_CN.md) · [English](../../README.md)
+- **变更日志** —— [`CHANGELOG.md`](../../CHANGELOG.md)
+- **发布 SOP** —— [`RELEASE.md`](../operations/RELEASE.md)
+- **限制与取舍** —— [`LIMITATIONS_CN.md`](../limitations/LIMITATIONS_CN.md)
+- **封板契约** —— [`SEALING_CN.md`](../../SEALING_CN.md)
+- **双机运维** —— [`packages/fleet/RUNBOOK.md`](../../packages/fleet/RUNBOOK.md)
+- **可运行库示例** —— [`examples/quickstart`](../../examples/quickstart/index.mjs)

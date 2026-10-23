@@ -49,8 +49,7 @@ Thumbs.db
 coverage
 .nyc_output
 
-# Mebular 設計文件（本地留存，不進遠端）
-docs/
+# 公開文件：docs/ 隨倉庫提交（tracked）；本地設計草稿放 design-notes/ 或 docs.design/
 design-notes/
 docs.design/
 

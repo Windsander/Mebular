@@ -237,7 +237,7 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 4. **备份与根密钥丢失处置**：首次 setup 生成主密钥后，第一时间离线备份
    `~/.mebular/user-master-key.json`（以及 `config.json` / 存储文件）；主密钥永不离开本机。
    v0.1.0 未实现主密钥轮换 / 换锚，丢失或被盗没有产品内恢复路径，详见
-   [`LIMITATIONS.md`](LIMITATIONS.md) 的 Root compromise 一节。
+   [`LIMITATIONS.md`](../limitations/LIMITATIONS.md) 的 Root compromise 一节。
 5. **CLI 仍可用**：`fleet quickstart` / `fleet join` 保留给脚本与批量场景；GUI 向导不会替用户
    选择或新建忆云。
 

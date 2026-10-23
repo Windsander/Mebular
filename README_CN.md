@@ -64,7 +64,7 @@ command -v mebular && command -v fleet
 node "$(npm root -g)/@mebular/core/packages/skill/scripts/install.mjs"
 ```
 
-想用仓库源码？见 [`QUICKSTART_CN.md`](QUICKSTART_CN.md) 里的 GitHub 钉版本与本地安装。
+想用仓库源码？见 [`QUICKSTART_CN.md`](docs/getting-started/QUICKSTART_CN.md) 里的 GitHub 钉版本与本地安装。
 
 ### 首次运行：新建或加入忆云
 
@@ -146,10 +146,10 @@ await mebular.initialize();
 
 ## 链接与文档
 
-- **快速上手（5 分钟）** — [`QUICKSTART_CN.md`](QUICKSTART_CN.md) · [English](QUICKSTART.md)
+- **快速上手（5 分钟）** — [`QUICKSTART_CN.md`](docs/getting-started/QUICKSTART_CN.md) · [English](docs/getting-started/QUICKSTART.md)
 - **变更日志 / 发布说明** — [`CHANGELOG.md`](CHANGELOG.md)
-- **发布 SOP** — [`RELEASE.md`](RELEASE.md)
-- **限制与取舍** — [`LIMITATIONS_CN.md`](LIMITATIONS_CN.md)
+- **发布 SOP** — [`RELEASE.md`](docs/operations/RELEASE.md)
+- **限制与取舍** — [`LIMITATIONS_CN.md`](docs/limitations/LIMITATIONS_CN.md)
 - **封板契约**（红线 / 协议语义 / 推迟项） — [`SEALING_CN.md`](SEALING_CN.md)
 - **fleet 运维手册**（双机操作、WAN 命令、验收） — [`packages/fleet/RUNBOOK.md`](packages/fleet/RUNBOOK.md)
 - **Agent 记忆规约** — [`packages/skill/MEMORY_POLICY.md`](packages/skill/MEMORY_POLICY.md)

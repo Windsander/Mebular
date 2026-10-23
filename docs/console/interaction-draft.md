@@ -1,5 +1,7 @@
 # Mebular 人类控制台 · 交互规格（draft）
 
+> Historical: early interaction notes; current guidance is page-map.md.
+
 > 本地控制台：每台设备各自运行，只管理「本机给谁看什么」与「与谁连接」，
 > 不替其他设备做决定。视觉参考官网第二页的『网络舞台』（星空 + 节点 + 同步粒子，
 > vanilla Canvas2D）；控制台复用其视觉语言但不依赖站点代码。

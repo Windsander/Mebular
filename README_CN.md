@@ -109,6 +109,10 @@ mebular print-config --client opencode         # MCP 配置
   </tbody>
 </table>
 
+<p align="center"><strong>与 DSH 一起使用</strong><br>
+保持 Mebular App 运行，然后把 <code>@mebular/dsh-plugin</code> 加入 DSH 的 web profile —— DSH 通过 HTTP MCP 连接到 <code>127.0.0.1:7331</code> 的同一张图。<br>
+<a href="docs/integrations/DSH_CN.md">DSH 集成指南 →</a></p>
+
 <details>
 <summary>谁做什么</summary>
 

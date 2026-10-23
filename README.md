@@ -109,6 +109,10 @@ mebular print-config --client opencode         # MCP config
   </tbody>
 </table>
 
+<p align="center"><strong>Use with DSH</strong><br>
+Keep the Mebular app running, then add <code>@mebular/dsh-plugin</code> to DSH's web profile — DSH reaches the same graph over HTTP MCP at <code>127.0.0.1:7331</code>.<br>
+<a href="docs/integrations/DSH.md">DSH integration guide →</a></p>
+
 <details>
 <summary>Who does what</summary>
 

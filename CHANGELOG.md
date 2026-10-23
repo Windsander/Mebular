@@ -41,6 +41,7 @@ in this release; signed installers are not included.
 - **Fleet task collaboration across devices** — tasks are a DAG inside shared memory (`causedBy`, cycle-free): dispatch, claim, progress, result and negotiation (clarify / counter / accept / reject), with the memory channel as the only remote surface — no general remote RPC.
 - **Distributed star-map console** — the main console shows every device in the Cloud, with shared-subscription base edges, hover task-domain lanes (blue = can send, gold = can receive, gray = unreachable), and live fleet traffic driven by real task events. Offline or no-shared-subscription devices stay gray dashed; online shared edges are subdued and emit a low-frequency sound-wave pulse that fades back into the base edge, so the stars remain the visual focus.
 - **Assistant onboarding in one pass** — 7 built-in descriptors (OpenChamber, Hermes, OpenCode, Claude Code, Claude Desktop, Cursor, DSH) plus a custom snippet path; each goes through detect → apply → verify, and the desktop one-click flow can connect installed assistants before a Cloud exists.
+- **DSH plugin on its own version line** — `@mebular/dsh-plugin` brings the same memory and task graph into DeepSeek Harness over HTTP MCP, with a panel entry that opens the existing console in a new tab. The app stays the control plane; the plugin ships 0.1.0 alongside this release but outside the five-package lockstep.
 - **Portable by design** — Canonical Memory Format (CMF) v1 with adapters for Obsidian, log journals, json-memo and Hermes, plus installable memory / task skills so the behaviour layer travels with the data.
 
 ### 亮点（中文）
@@ -60,6 +61,7 @@ in this release; signed installers are not included.
 - **跨设备 fleet 任务协作** —— 任务是共享记忆里的 DAG（`causedBy`，禁环）：派发、认领、进度、结果与协商（clarify / counter / accept / reject），唯一远程面就是记忆通道，不提供通用远程调用。
 - **分布式星图控制台** —— 主控制台显示忆云内所有设备、共同订阅的基础边、悬停任务域航道（蓝 = 可发出、金 = 可接收、灰 = 不可达），以及真实任务事件驱动的实时 fleet 流量。离线或无共同订阅设备保持灰色虚线；在线共同订阅边压暗，并以低频声波脉冲提示，两端渐隐回基础线，让星体保持主视觉。
 - **助手一键接入** —— 7 个内置描述符（OpenChamber、Hermes、OpenCode、Claude Code、Claude Desktop、Cursor、DSH）加自定义片段；统一走探测 → 写入 → 验证三步；桌面一键流程可以在忆云存在之前先接好已装助手。
+- **DSH 插件，独立版本线** —— `@mebular/dsh-plugin` 通过 HTTP MCP 把同一张记忆与任务图接入 DeepSeek Harness；面板入口在新标签页打开现有控制台。App 仍是控制面；插件随本版发布 0.1.0，但不进入五包 lockstep。
 - **可带走的设计** —— Canonical Memory Format（CMF）v1，配 Obsidian、日志型端、json-memo、Hermes 适配器；记忆 / 任务两个 Skill 可安装，行为层随数据一起迁移。
 
 [Unreleased]: https://github.com/Windsander/Mebular/compare/v0.1.0...HEAD

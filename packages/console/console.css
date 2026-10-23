@@ -1266,10 +1266,10 @@ body.modal-open { overflow: hidden; }
 #device-card h3:first-of-type { margin-top: 4px; }
 #device-card .h3-note {
   margin-left: 6px;
-  font-size: 10px;
+  font-size: var(--type-micro);
   letter-spacing: 0;
   text-transform: none;
-  color: rgba(140, 255, 200, 0.45);
+  color: var(--crt-muted);
 }
 #device-card .card-help { font-size: 10.5px; line-height: 1.6; margin: 0 0 6px; }
 #device-card .chip-list { gap: 5px; }
@@ -1934,18 +1934,14 @@ html[lang="en-US"] .panel-note { max-width: 72ch; }
 /* 小按钮行高可控：英文不再比中文矮 3px（24 → 28） */
 html[lang="en-US"] .btn-small { line-height: 1.5; }
 
-/* 窄屏页面壳层：标题独占第一行，筛选区预留统一高度（三视图内容起点一致）。
-   只在窄屏启用，桌面仍用单行工具栏（标题在 34px 基线内居中）。 */
+/* 窄屏页面壳层（仅英文）：标题独占第一行，筛选区按内容自然换行；
+   不预留固定高度，中文仍走基础单行工具栏。 */
 @media (max-width: 820px) {
-  .audit-toolbar {
+  html[lang="en-US"] .audit-toolbar {
     flex-direction: column;
     align-items: stretch;
     justify-content: flex-start;
     gap: 8px;
     min-height: 0;
-  }
-  .audit-toolbar .audit-filters {
-    min-height: 74px;
-    align-content: center;
   }
 }

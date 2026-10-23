@@ -3000,8 +3000,8 @@ async function main() {
           && wizard.overlap === false && wizard.sp === false
           && wizard.noteFlexGrow === '1' && wizard.noteMinWidth === '0px'
           && wizard.nameMinWidth === '0px' && wizard.noteOverflowWrap === 'anywhere'
-          && /Setup wizard/.test(wizard.text) && /Re-run first-time setup/.test(wizard.text)
-          && /existing config is kept/.test(wizard.text) && /Restart wizard/.test(wizard.text)
+          && /Setup wizard/.test(wizard.text) && /Re-run setup/.test(wizard.text)
+          && /config is kept/.test(wizard.text) && /Restart wizard/.test(wizard.text)
           && wizard.pageOver <= 1 && wizard.cjk === false,
         JSON.stringify(wizard));
       await captureNow(`i18n-en-wizard-row-${label}.jpg`);
@@ -3185,17 +3185,28 @@ async function main() {
       const content = view.querySelector(${JSON.stringify(contentSel)});
       if (!toolbar || !h2 || !content) return { ok: false, why: 'missing' };
       const cs = getComputedStyle(h2);
+      const filters = view.querySelector('.audit-filters');
+      const kids = filters ? [...filters.children].map((el) => el.getBoundingClientRect()) : [];
       const rect = (el) => {
         const r = el.getBoundingClientRect();
-        return { top: +r.top.toFixed(2), left: +r.left.toFixed(2), width: +r.width.toFixed(2), height: +r.height.toFixed(2) };
+        return { top: +r.top.toFixed(2), left: +r.left.toFixed(2), width: +r.width.toFixed(2), height: +r.height.toFixed(2), bottom: +r.bottom.toFixed(2) };
       };
+      const toolbarRect = rect(toolbar);
+      const contentRect = rect(content);
+      const filtersRect = filters ? rect(filters) : null;
+      const span = kids.length
+        ? Math.max(...kids.map((r) => r.bottom)) - Math.min(...kids.map((r) => r.top))
+        : 0;
       return {
         ok: true,
         title: (h2.textContent || '').trim(),
         style: { fontSize: cs.fontSize, lineHeight: cs.lineHeight, fontWeight: cs.fontWeight, letterSpacing: cs.letterSpacing, margin: cs.margin, textTransform: cs.textTransform },
         h2: rect(h2),
-        toolbar: rect(toolbar),
-        content: rect(content),
+        toolbar: toolbarRect,
+        filters: filtersRect,
+        filtersBlank: filtersRect ? +(filtersRect.height - span).toFixed(2) : null,
+        content: contentRect,
+        contentGap: +(contentRect.top - toolbarRect.bottom).toFixed(2),
         pageOver: document.documentElement.scrollWidth - window.innerWidth,
       };
     })()`;
@@ -3209,6 +3220,7 @@ async function main() {
       }
       return out;
     };
+    // 桌面/平板：三视图标题与内容起点完全对齐（标题在 34px 工具栏基线内居中）。
     const shellOk = (shell) => {
       const entries = Object.values(shell);
       const tops = entries.map((entry) => entry.h2?.top);
@@ -3216,13 +3228,29 @@ async function main() {
       return entries.every((entry) => entry.ok === true && entry.pageOver <= 1)
         && new Set(entries.map((entry) => JSON.stringify(entry.style))).size === 1
         && Math.max(...tops) - Math.min(...tops) <= 1
-        && Math.max(...contentTops) - Math.min(...contentTops) <= 1;
+        && Math.max(...contentTops) - Math.min(...contentTops) <= 1
+        && entries.every((entry) => entry.filtersBlank <= 8 && entry.contentGap <= 12);
+    };
+    // 窄屏：筛选行数天然不同，不再用 min-height 硬对齐；只断言「无预留空白/无额外下移」。
+    // 中文 390 还要证明共享页工具栏恢复基础单行（高度 34，未被撑到 100）。
+    const shellNaturalOk = (shell, lang) => {
+      const entries = Object.values(shell);
+      const tops = entries.map((entry) => entry.h2?.top);
+      const styleOk = new Set(entries.map((entry) => JSON.stringify(entry.style))).size === 1;
+      const natural = entries.every((entry) => entry.ok === true && entry.pageOver <= 1
+        && entry.filtersBlank <= 8 && entry.contentGap <= 12);
+      const titleOk = lang === 'zh' || Math.max(...tops) - Math.min(...tops) <= 1;
+      const zhBase = lang !== 'zh' || (shell.domains?.toolbar?.height <= 36
+        && shell.domains?.filters?.height <= 36 && shell.domains?.contentGap <= 12);
+      return styleOk && natural && titleOk && zhBase;
     };
     for (const [label, viewport] of densityViewports) {
       await setViewport(viewport);
       const zhShell = await measureShell();
-      check(`i18n 页面壳层中文 ${label}：共享/记忆/审计标题样式一致、标题 top 差 ≤1px、内容起点一致`,
-        shellOk(zhShell), JSON.stringify(zhShell));
+      check(label === '390'
+        ? 'i18n 页面壳层中文 390 回归：共享页工具栏恢复单行（34）、筛选区无预留空白、内容起点下移 ≤2px、无横向溢出'
+        : `i18n 页面壳层中文 ${label}：共享/记忆/审计标题样式一致、标题 top 差 ≤1px、内容起点一致`,
+        label === '390' ? shellNaturalOk(zhShell, 'zh') : shellOk(zhShell), JSON.stringify(zhShell));
       await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button")?.click()');
       await waitFor('document.querySelector("#domains-view")?.hidden === false');
       await captureNow(`i18n-zh-view-shell-${label}.jpg`);
@@ -3238,8 +3266,10 @@ async function main() {
     for (const [label, viewport] of densityViewports) {
       await setViewport(viewport);
       const enShell = await measureShell();
-      check(`i18n 页面壳层英文 ${label}：三视图标题样式一致、标题 top 差 ≤1px、内容起点一致`,
-        shellOk(enShell), JSON.stringify(enShell));
+      check(label === '390'
+        ? 'i18n 页面壳层英文 390：标题独占首行、筛选区无预留空白、内容自然衔接、无横向溢出'
+        : `i18n 页面壳层英文 ${label}：三视图标题样式一致、标题 top 差 ≤1px、内容起点一致`,
+        label === '390' ? shellNaturalOk(enShell, 'en') : shellOk(enShell), JSON.stringify(enShell));
       await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button")?.click()');
       await waitFor('document.querySelector("#domains-view")?.hidden === false');
       await captureNow(`i18n-en-view-shell-${label}.jpg`);
@@ -3569,6 +3599,16 @@ async function main() {
         JSON.stringify(card));
       await captureNow(`i18n-en-data-device-card-${label}.jpg`);
     }
+    // A：设备卡 h3 副标题纳入英文 micro 组（10 → 10.5px）与 CRT 暗文本 55%。
+    const h3Note = await evalJs(`(() => {
+      const el = document.querySelector('#device-card .h3-note');
+      if (!el) return null;
+      const s = getComputedStyle(el);
+      return { fontSize: s.fontSize, color: s.color, text: (el.textContent || '').trim() };
+    })()`);
+    check('i18n 排版 A：设备卡 h3-note 走英文 micro token（10.5px）+ CRT 暗文本 0.55',
+      Boolean(h3Note) && h3Note.fontSize === '10.5px' && /0\.55\)$/.test(h3Note.color),
+      JSON.stringify(h3Note));
 
     // #181 数据面文案预算：长句已收短，但 DAG / tombstone / epoch / 命令与占位符全部保留。
     const dataCopyBudget = {

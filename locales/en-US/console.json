@@ -452,7 +452,7 @@
     "settings.service.msg.uninstalled": "No longer running as a resident service.",
     "settings.service.msg.failed": "Could not finish: {message}. Try Recheck or copy the diagnostics.",
     "settings.wizard.title": "Setup wizard",
-    "settings.wizard.note": "Re-run first-time setup; existing config is kept",
+    "settings.wizard.note": "Re-run setup; config is kept",
     "settings.wizard.action": "Restart wizard ›",
     "settings.cloud.title": "Cloud",
     "settings.cloud.keepArchived": "Archived, never deleted",

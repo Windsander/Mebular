@@ -1,8 +1,8 @@
 // MemoryStorage 测试
 
 import { describe, it, expect } from '@jest/globals';
-import { MemoryStorage } from '../../src/storage/MemoryStorage';
-import type { Node } from '../../src/types/index';
+import { MemoryStorage } from '../../src/storage/MemoryStorage.js';
+import type { Node } from '../../src/types/index.js';
 
 describe('MemoryStorage', () => {
   it('should store and retrieve a node', async () => {

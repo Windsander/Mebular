@@ -1,0 +1,17 @@
+{
+  // 测试专用 TS 配置：让 ts-jest 的类型解析与 Jest 运行时的 moduleNameMapper 保持一致。
+  //
+  // package.json 的 moduleNameMapper 把 @mebular/core、@mebular/service 映射到各自的
+  // src，但 TS 默认会经 node_modules/@mebular/* 的 package.json "types" 解析到 dist。
+  // ts-jest 29.4.15（#5216：resolve modules with tsconfig options regardless of cache
+  // state）在冷缓存下不再用上一次的解析模式兜底，于是同一测试里会同时出现 src 与 dist
+  // 两份 Mebular，触发 private property 类型冲突。这里用 paths 统一指向 src。
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@mebular/core": ["src/index.ts"],
+      "@mebular/service": ["packages/service/src/index.ts"]
+    }
+  }
+}

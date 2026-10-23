@@ -226,7 +226,22 @@ html, body {
   cursor: pointer;
   text-align: left;
 }
-.legend-chevron { font-size: 10px; color: rgba(160, 255, 210, 0.8); transition: transform 0.2s; }
+.legend-chevron {
+  /* 固定尺寸 + 自身 flex 居中：chevron 的盒中心与 .legend-head 的垂直中心对齐，
+     不再随文案长度 / 字体回退（中英文行高不同）漂移。旋转围绕盒中心，折叠后同样居中。 */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 8px;
+  height: 12px;
+  line-height: 1;
+  letter-spacing: 0;
+  font-size: 10px;
+  color: rgba(160, 255, 210, 0.8);
+  transform-origin: center;
+  transition: transform 0.2s;
+}
 .legend-panel.is-collapsed .legend-chevron { transform: rotate(-90deg); }
 .legend-panel.is-collapsed { width: auto; }
 .legend-panel.is-collapsed .legend-head { padding: 5px 9px; border-bottom: none; }

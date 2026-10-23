@@ -111,7 +111,7 @@ function createApply(React) {
       h(
         'p',
         { style: styles.hint },
-        'Mebular runs separately from DSH. To use a custom port, update the URL in packages/dsh-plugin/cordis.patch.yml.',
+        'Mebular runs separately from DSH. To use a custom port, update the MCP URL in your DSH profile patch (or the plugin’s cordis.patch.yml before installing).',
       ),
     );
   }

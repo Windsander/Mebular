@@ -306,6 +306,7 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 | README 视觉走查 | ✅ 当前 main | 四张星图均 1600×1000、6 颗星；baseline 灰虚线 / 压暗实线 / 声波脉冲；lanes 旧版弧线航道；亮色 banner + 三组示意图使用 `<picture>` 切换 |
 | `npm run verify:mcp:publish` | ⏳ 待 release 流水线 | 发布前必须在 `release/v0.1.0` 由 Publish verify 重跑 |
 | `npm run verify:dsh-plugin` | ✅ 当前 main | **57 checks**：bundle / HTTP patch / host entry / no core imports / tarball |
+| 真实 DSH `0.2.1-rc.2` | ✅ 当前 main | `dsh plugin add link:`；host + MCP client 运行；Settings 出现 Mebular 面板；29 个 `mcp__mebular__*` 工具；console 独立可开；App/daemon 不受影响 |
 
 > 第 8 节记录的是当前 `main` 已完成的发布门禁；它**不替代**发布分支上的
 > `build` / `lint` / `test:coverage` / `verify:mcp:publish` / `verify:dsh-plugin` 门禁。

@@ -1323,13 +1323,14 @@ describe('P3 @mebular/dsh-plugin：attach / managed 生命周期', () => {
 });
 
 describe('P3 @mebular/dsh-plugin：CLI 解析', () => {
-  it('cliPath → MEBULAR_CLI → PATH，第一个存在的胜出（POSIX）', () => {
-    const existing = new Set(['/opt/mebular', '/env/mebular', '/usr/local/bin/mebular']);
+  it('cliPath → MEBULAR_CLI → PATH，第一个存在的胜出（POSIX PATH 语义）', () => {
+    const pathEntry = join('/usr/local/bin', 'mebular');
+    const existing = new Set(['/opt/mebular', '/env/mebular', pathEntry]);
     const exists = (file) => existing.has(file);
     const posix = { platform: 'linux' };
     expect(resolveCliPath({ ...posix, cliPath: '/opt/mebular', env: { PATH: '/usr/local/bin' }, exists })).toBe('/opt/mebular');
     expect(resolveCliPath({ ...posix, env: { MEBULAR_CLI: '/env/mebular', PATH: '/usr/local/bin' }, exists })).toBe('/env/mebular');
-    expect(resolveCliPath({ ...posix, env: { PATH: '/usr/bin:/usr/local/bin' }, exists })).toBe('/usr/local/bin/mebular');
+    expect(resolveCliPath({ ...posix, env: { PATH: '/usr/bin:/usr/local/bin' }, exists })).toBe(pathEntry);
     expect(resolveCliPath({ ...posix, env: { PATH: '/usr/bin' }, exists })).toBeNull();
   });
 

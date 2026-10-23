@@ -8,7 +8,10 @@ import { Starfield } from './stars.js';
 //
 // 公开接口：
 //   const stage = new StarStage(canvas);
-//   stage.setScene({ nodes, edges });
+//   stage.setScene({ nodes, edges });       // edges = 无向基础边（共同/无共同订阅）
+//   stage.setRoutes(routes);                // 仅 hover 的任务域航道；scene 不掺业务路由
+//   stage.launchFleet(fromId, toId, opts);  // fleet 事件：航道 + 舰队（端点每帧绑星位）
+//   stage.launchCourier(fromId, toId);      // 手动同步的本地反馈（独立白色信使）
 //   stage.onHover = (node|null, x, y) => {};
 //   stage.onSelect = (node) => {};
 
@@ -35,14 +38,22 @@ export function namespaceColor(name) {
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 const COLORS = {
-  mine: '#56b4e9',
-  theirs: '#e69f00',
-  revoked: '#7a8399',
-  offline: '#5a6785',
   text: '#dbe4ff',
   muted: '#8391b4',
   revokedNode: '#a06a6a',
   warning: '#d55e00',
+  // 基础边：中性银灰，不用蓝/金（蓝金只属于任务域航道）。
+  baseShared: '#c1c8d6',
+  baseUnshared: '#7c8598',
+  // 悬停航道：蓝 = 可发出，金 = 可接收，灰 = 任务域不可达。
+  routeSend: '#56b4e9',
+  routeReceive: '#f0c46a',
+  routeBlocked: '#8993a8',
+  // fleet 事件：本机发出 / 本机接收 / peer 间转运。
+  fleetSend: '#56b4e9',
+  fleetReceive: '#f0c46a',
+  fleetTransit: '#d9e2f2',
+  syncCourier: '#e8eef8',
 };
 
 function hsla(h, s, l, alpha) {
@@ -66,6 +77,224 @@ function hashString(text) {
 function shortId(id) {
   const text = String(id ?? '?');
   return text.length <= 14 ? text : `${text.slice(0, 8)}…${text.slice(-4)}`;
+}
+
+// ---------- 星图设备网络场景（纯函数，零 DOM） ----------
+//
+// 忆云设备网络：节点 = 当前忆云所有已知设备（含本机与离线设备），
+// 基础边 = 所有设备两两之间的无向连线（共同订阅 = 实线，无共同订阅 = 虚线）。
+// 航道 = 仅在悬停设备时计算的「任务域可达」方向线，不写回 scene。
+// 坐标不在这里烘焙：StarStage 每帧按星体当前位置（含视差/深度）计算端点。
+// 这些纯函数与渲染同文件导出，避免控制台静态白名单新增文件（serve.mjs 不变）。
+
+export const DEFAULT_TASK_NAMESPACE = 'tasks';
+
+const stringList = (value) => (Array.isArray(value)
+  ? [...new Set(value.filter((item) => typeof item === 'string' && item.trim().length > 0))]
+  : []);
+
+/** 任务域：settings.fleet.namespace，缺省 tasks。 */
+export function resolveTaskNamespace(settings) {
+  const configured = settings?.fleet?.namespace;
+  return typeof configured === 'string' && configured.trim().length > 0
+    ? configured.trim()
+    : DEFAULT_TASK_NAMESPACE;
+}
+
+/** 设备订阅（兼容 nodes 同时带 subscriptions / namespaces 的旧形状）。 */
+export function subscriptionsOf(node) {
+  return stringList(node?.subscriptions ?? node?.namespaces);
+}
+
+export function sharedNamespaces(a, b) {
+  const right = new Set(subscriptionsOf(b));
+  return subscriptionsOf(a).filter((name) => right.has(name));
+}
+
+/**
+ * 单台设备能否参与任务域航道：订阅任务域 + 在线。
+ * 注意：这是「任务域可达」的参与者门槛，不代表完整 fleet 路由。
+ */
+export function taskDomainState(node, taskNamespace = DEFAULT_TASK_NAMESPACE) {
+  const namespace = String(taskNamespace || DEFAULT_TASK_NAMESPACE);
+  const subscribed = subscriptionsOf(node).includes(namespace);
+  const online = node?.online === true;
+  return {
+    namespace,
+    subscribed,
+    online,
+    reachable: subscribed && online,
+  };
+}
+
+/**
+ * 构建节点：state.devices 全量（含本机/离线/已移除），self 固定排在最前。
+ * labelFor 由调用方注入（控制台用 shortId），纯函数不依赖 i18n。
+ */
+export function buildNetworkNodes({ devices = [], selfId = null, selfLabel = '★', labelFor = null } = {}) {
+  const byId = new Map();
+  for (const device of Array.isArray(devices) ? devices : []) {
+    const id = typeof device?.deviceId === 'string' ? device.deviceId : '';
+    if (!id) continue;
+    byId.set(id, {
+      id,
+      label: id === selfId
+        ? selfLabel
+        : (typeof labelFor === 'function' ? labelFor(device) : id),
+      self: id === selfId,
+      online: device.online === true,
+      blocked: device.blocked === true,
+      subscriptions: subscriptionsOf(device),
+      pendingEventCount: Number.isFinite(device.pendingEventCount) ? Math.max(0, device.pendingEventCount) : 0,
+    });
+  }
+  // 设备列表偶尔晚于 overview 到达：本机仍要有星位，避免整张图空白。
+  if (selfId && !byId.has(selfId)) {
+    byId.set(selfId, {
+      id: selfId,
+      label: selfLabel,
+      self: true,
+      online: true,
+      blocked: false,
+      subscriptions: [],
+      pendingEventCount: 0,
+    });
+  }
+  const nodes = [...byId.values()];
+  nodes.sort((a, b) => {
+    if (a.self !== b.self) return a.self ? -1 : 1;
+    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+  });
+  return nodes;
+}
+
+/** 所有设备两两之间的基础边；无方向、无箭头。 */
+export function buildBaseEdges(nodes = []) {
+  const edges = [];
+  const list = Array.isArray(nodes) ? nodes : [];
+  for (let i = 0; i < list.length; i += 1) {
+    for (let j = i + 1; j < list.length; j += 1) {
+      const shared = sharedNamespaces(list[i], list[j]);
+      edges.push({
+        from: list[i].id,
+        to: list[j].id,
+        kind: 'base',
+        shared: shared.length > 0,
+        namespaces: shared,
+      });
+    }
+  }
+  return edges;
+}
+
+export function buildNetworkScene({ devices = [], selfId = null, selfLabel = '★', labelFor = null } = {}) {
+  const nodes = buildNetworkNodes({ devices, selfId, selfLabel, labelFor });
+  return { nodes, edges: buildBaseEdges(nodes) };
+}
+
+/** 基础边计数（验收/测试信号）。 */
+export function summarizeSceneEdges(edges = []) {
+  const list = Array.isArray(edges) ? edges : [];
+  const solidEdgeCount = list.filter((edge) => edge?.shared === true).length;
+  return {
+    baseEdgeCount: list.length,
+    solidEdgeCount,
+    dashedEdgeCount: list.length - solidEdgeCount,
+  };
+}
+
+/**
+ * 悬停 H 的任务域航道（只含 H 与其他设备）：
+ * - 双方都订阅任务域且都在线 → 两条方向航道：H→T 蓝（可发出）、T→H 金（可接收）
+ * - 否则 → 一条灰色不可达线（不伪造方向）
+ */
+export function buildHoverRoutes({
+  nodes = [],
+  hoveredId = null,
+  taskNamespace = DEFAULT_TASK_NAMESPACE,
+} = {}) {
+  const list = Array.isArray(nodes) ? nodes : [];
+  const hovered = list.find((node) => node?.id === hoveredId && !node.ghost);
+  if (!hovered) return [];
+  const namespace = String(taskNamespace || DEFAULT_TASK_NAMESPACE);
+  const hoveredState = taskDomainState(hovered, namespace);
+  const routes = [];
+  for (const target of list) {
+    if (!target || target.ghost || target.id === hovered.id) continue;
+    const targetState = taskDomainState(target, namespace);
+    const reachable = hoveredState.reachable && targetState.reachable;
+    if (reachable) {
+      routes.push({
+        from: hovered.id,
+        to: target.id,
+        direction: 'out',
+        reachable: true,
+        namespace,
+      });
+      routes.push({
+        from: target.id,
+        to: hovered.id,
+        direction: 'in',
+        reachable: true,
+        namespace,
+      });
+    } else {
+      routes.push({
+        from: hovered.id,
+        to: target.id,
+        direction: 'blocked',
+        reachable: false,
+        namespace,
+        reason: !hoveredState.subscribed || !targetState.subscribed
+          ? 'namespace'
+          : 'offline',
+      });
+    }
+  }
+  return routes;
+}
+
+/** 悬停航道统计（tooltip / 测试用）。 */
+export function summarizeHoverRoutes(routes = []) {
+  const list = Array.isArray(routes) ? routes : [];
+  // 蓝色 H→T 的目标是 to，金色 T→H 的目标是 from（两者都相对悬停设备 H）。
+  const targetOf = (route) => (route.reachable && route.direction === 'in' ? route.from : route.to);
+  const reachableTargets = new Set(list.filter((route) => route.reachable).map(targetOf));
+  const blockedTargets = new Set(list.filter((route) => !route.reachable).map(targetOf));
+  return {
+    laneCount: list.length,
+    reachableTargets: reachableTargets.size,
+    blockedTargets: blockedTargets.size,
+  };
+}
+
+/**
+ * 远端/本机一致的 fleet 事件契约：
+ * { at, fromDeviceId, toDeviceId, taskId, eventType:'created', namespace }
+ * 仅当 from/to 都在当前场景且不同时返回航线；否则返回 null（不画假线）。
+ */
+export function normalizeFleetEvent(raw, { nodeIds = null, selfId = null } = {}) {
+  if (!raw || typeof raw !== 'object') return null;
+  if (raw.eventType !== undefined && raw.eventType !== 'created') return null;
+  const from = typeof raw.fromDeviceId === 'string' ? raw.fromDeviceId.trim() : '';
+  const to = typeof raw.toDeviceId === 'string' ? raw.toDeviceId.trim() : '';
+  if (!from || !to || from === to) return null;
+  if (nodeIds && !(nodeIds.has ? nodeIds.has(from) && nodeIds.has(to) : nodeIds.includes?.(from) && nodeIds.includes?.(to))) {
+    return null;
+  }
+  const namespace = typeof raw.namespace === 'string' && raw.namespace.trim().length > 0
+    ? raw.namespace.trim()
+    : DEFAULT_TASK_NAMESPACE;
+  return {
+    at: Number.isFinite(raw.at) ? raw.at : null,
+    from,
+    to,
+    taskId: typeof raw.taskId === 'string' ? raw.taskId : null,
+    namespace,
+    eventType: 'created',
+    // 方向只用于选择本地可读的色相：本机发出 / 本机接收 / peer 间转运。
+    direction: from === selfId ? 'out' : to === selfId ? 'in' : 'transit',
+  };
 }
 
 export class StarStage {
@@ -105,6 +334,10 @@ export class StarStage {
     this.depths = new Map();
     this.screen = new Map();
     this.fleets = [];
+    this.couriers = [];
+    // 悬停任务域航道：只由 console.js 通过 setRoutes 注入，场景本身保持纯设备数据。
+    this.routes = [];
+    this._reducedTimers = [];
     this.pointerNx = 0.5;
     this.pointerNy = 0.5;
     this.targetNx = 0.5;
@@ -118,6 +351,7 @@ export class StarStage {
 
     this._resize();
     this._initBackdrop();
+    this._updateSignals();
     window.addEventListener('resize', this._resize);
     canvas.addEventListener('pointermove', this._pointerMove);
     canvas.addEventListener('pointerleave', this._pointerLeave);
@@ -130,8 +364,42 @@ export class StarStage {
       edges: Array.isArray(scene?.edges) ? scene.edges : [],
     };
     this.selfId = this.scene.nodes.find((n) => n.self)?.id ?? null;
+    // 场景重建后旧航道可能引用已消失的节点；console.js 会立刻按当前 hover 重算。
+    this.routes = [];
     this._layout();
+    this._updateSignals();
     if (!this.running || this.reducedMotion) this._draw(performance.now() / 1000);
+  }
+
+  /** 悬停航道（仅 hover 时由 console.js 注入；不写回 scene）。 */
+  setRoutes(routes) {
+    this.routes = (Array.isArray(routes) ? routes : [])
+      .filter((route) => route && route.from && route.to && route.from !== route.to)
+      .map((route) => ({
+        from: route.from,
+        to: route.to,
+        direction: route.direction === 'out' || route.direction === 'in' ? route.direction : 'blocked',
+        reachable: route.reachable === true,
+        namespace: route.namespace ?? null,
+      }));
+    this._updateSignals();
+    if (!this.running || this.reducedMotion) this._draw(performance.now() / 1000);
+  }
+
+  /** 画布上的只读验收信号（不含设备名/地址等敏感数据）。 */
+  _updateSignals() {
+    const dataset = this.canvas?.dataset;
+    if (!dataset) return;
+    const edges = this.scene.edges;
+    const solid = edges.filter((edge) => edge?.shared === true).length;
+    const eventRoutes = this.fleets.filter((fleet) => fleet.event).length;
+    dataset.baseEdgeCount = String(edges.length);
+    dataset.solidEdgeCount = String(solid);
+    dataset.dashedEdgeCount = String(edges.length - solid);
+    dataset.routeCount = String(this.routes.length + eventRoutes);
+    dataset.hoverRouteCount = String(this.routes.length);
+    dataset.fleetRouteCount = String(eventRoutes);
+    dataset.hoveredDevice = this.hovered ?? '';
   }
 
   setSelected(deviceId) {
@@ -187,6 +455,8 @@ export class StarStage {
 
   destroy() {
     this.stop();
+    for (const timer of this._reducedTimers) clearTimeout(timer);
+    this._reducedTimers = [];
     window.removeEventListener('resize', this._resize);
     this.canvas.removeEventListener('pointermove', this._pointerMove);
     this.canvas.removeEventListener('pointerleave', this._pointerLeave);
@@ -296,6 +566,7 @@ export class StarStage {
     if (hit !== this.hovered) {
       this.hovered = hit ? hit.id : null;
       this.canvas.style.cursor = hit ? 'pointer' : 'crosshair';
+      this._updateSignals();
     }
     if (this.onHover) this.onHover(hit, x, y);
     const nx = rect.width ? x / rect.width : 0.5;
@@ -306,6 +577,7 @@ export class StarStage {
 
   _pointerLeave() {
     this.hovered = null;
+    this._updateSignals();
     if (this.onHover) this.onHover(null, 0, 0);
   }
 
@@ -387,8 +659,10 @@ export class StarStage {
     ctx.clearRect(0, 0, this.width, this.height);
     this._computeScreen(time);
     this._drawStars(time);
-    this._drawEdges(time);
+    this._drawBaseEdges(time);
+    this._drawRoutes(time);
     this._drawFleets(time);
+    this._drawCouriers();
     this._drawNodes(time);
     if (this.onOverlay) this.onOverlay(ctx, time);
   }
@@ -418,91 +692,70 @@ export class StarStage {
     this.starsField.render(bg);
   }
 
-  _edgePoints(edge) {
-    const from = this.screen.get(edge.from) ?? this.positions.get(edge.from);
-    const to = this.screen.get(edge.to) ?? this.positions.get(edge.to);
+  /** 当前星位（已含 parallax/depth/bob）→ 直线端点；绝不使用烘焙坐标。 */
+  _lineGeometry(fromId, toId, options = {}) {
+    const from = this.screen.get(fromId) ?? this.positions.get(fromId);
+    const to = this.screen.get(toId) ?? this.positions.get(toId);
     if (!from || !to) return null;
-    return { from, to };
-  }
-
-  _edgeStyle(edge) {
-    if (edge.revoked) return { color: COLORS.revoked, dashed: true, width: 1 };
-    if (!edge.online) return { color: COLORS.offline, dashed: true, width: 1.2 };
-    if (edge.kind === 'theirs') return { color: COLORS.theirs, dashed: false, width: 1.8 };
-    return { color: COLORS.mine, dashed: false, width: 1.8 };
-  }
-
-  /** 航道几何：端点留白 + 双向平行偏移 + 弧线（含深度差偏置） */
-  _laneGeometry(edge) {
-    const points = this._edgePoints(edge);
-    if (!points) return null;
-    const { from, to } = points;
     const dx = to.x - from.x;
     const dy = to.y - from.y;
-    const dist = Math.hypot(dx, dy) || 1;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1) return null;
     const ux = dx / dist;
     const uy = dy / dist;
-    const bothWays = this.scene.edges.some(
-      (other) => other.from === edge.to && other.to === edge.from && other.kind !== edge.kind,
-    );
-    const side = edge.kind === 'theirs' ? 1 : -1;
-    let nx = 0;
-    let ny = 0;
-    if (bothWays) {
-      // 偏移按规范方向计算，双向各自平行
-      const forward = edge.from <= edge.to;
-      const cdx = forward ? dx : -dx;
-      const cdy = forward ? dy : -dy;
-      const cdist = Math.hypot(cdx, cdy) || 1;
-      const off = 7 * side;
-      nx = (-cdy / cdist) * off;
-      ny = (cdx / cdist) * off;
-    }
-    const pad = 24;
-    const sx = from.x + ux * pad + nx;
-    const sy = from.y + uy * pad + ny;
-    const ex = to.x - ux * pad + nx;
-    const ey = to.y - uy * pad + ny;
-    // 空间弧线：中点法线弓高（模拟 3D 航道）+ 深度差纵向偏置（远端更低/更高）
-    const mx = (sx + ex) / 2;
-    const my = (sy + ey) / 2;
-    const bow = Math.min(48, dist * 0.15) * side;
-    const depthBias = ((to.depth ?? 0.6) - (from.depth ?? 0.6)) * 26;
-    const cx = mx - uy * bow + nx * 0.5;
-    const cy = my + ux * bow + ny * 0.5 + depthBias;
-    return { sx, sy, ex, ey, cx, cy, ux, uy, dist, bothWays, from, to };
-  }
-
-  _bezierAt(g, p) {
-    const q = 1 - p;
+    const offset = options.offset ?? 0;
+    // 法线方向偏移：out/in 两个方向各占一侧，形成成对平行航道。
+    const nx = -uy * offset;
+    const ny = ux * offset;
+    const padFrom = options.pad === false ? 0 : (options.padFrom ?? ((from.r ?? 0) + 4));
+    const padTo = options.pad === false ? 0 : (options.padTo ?? ((to.r ?? 0) + 4));
     return {
-      x: q * q * g.sx + 2 * q * p * g.cx + p * p * g.ex,
-      y: q * q * g.sy + 2 * q * p * g.cy + p * p * g.ey,
+      sx: from.x + ux * padFrom + nx,
+      sy: from.y + uy * padFrom + ny,
+      ex: to.x - ux * padTo + nx,
+      ey: to.y - uy * padTo + ny,
+      ux,
+      uy,
+      nx: -uy,
+      ny: ux,
+      dist: Math.max(1, dist - padFrom - padTo),
+      from,
+      to,
     };
   }
 
-  _bezierTangent(g, p) {
-    const q = 1 - p;
+  _pointAt(g, p) {
     return {
-      x: 2 * q * (g.cx - g.sx) + 2 * p * (g.ex - g.cx),
-      y: 2 * q * (g.cy - g.sy) + 2 * p * (g.ey - g.cy),
+      x: g.sx + (g.ex - g.sx) * p,
+      y: g.sy + (g.ey - g.sy) * p,
     };
   }
 
-  /** 触发一次“舰队出航”（同步完成/手动同步时调用）；编队随机，稀有彩蛋 */
+  /**
+   * 触发一次舰队出航（fleet 事件）。端点不落盘：每帧按当前星位重新取几何。
+   * kind: mine（本机发出）/ theirs（本机接收）/ transit（peer 之间）。
+   */
   launchFleet(fromId, toId, options = {}) {
-    if (this.reducedMotion || fromId === toId) return;
-    const kind = options.kind === 'theirs' ? 'theirs' : 'mine';
-    const g = this._laneGeometry({ from: fromId, to: toId, kind, online: true, revoked: false, pending: 0 });
-    if (!g) return;
+    if (fromId === toId) return;
+    const ids = new Set(this.scene.nodes.map((node) => node.id));
+    if (!ids.has(fromId) || !ids.has(toId)) return;
+    const kind = options.kind === 'theirs' ? 'theirs'
+      : options.kind === 'transit' ? 'transit'
+        : 'mine';
+    const event = options.event === true;
+    const reduced = this.reducedMotion === true;
 
-    // 彩蛋：2% 彗星、5% 彩虹信使、8% 旗舰；其余常规编队
+    // 彩蛋：2% 彗星、5% 彩虹信使、8% 旗舰；其余常规编队（事件航道不掷彩蛋）
     const roll = Math.random();
-    const egg = roll < 0.02 ? 'comet' : roll < 0.07 ? 'rainbow' : roll < 0.15 ? 'flagship' : null;
-    const count = egg === 'comet'
-      ? 1
-      : Math.max(2, Math.min(6, options.ships ?? 2 + Math.floor(Math.random() * 5)));
-    const formation = ['line', 'wedge', 'scatter'][Math.floor(Math.random() * 3)];
+    const egg = !event && !reduced
+      ? (roll < 0.02 ? 'comet' : roll < 0.07 ? 'rainbow' : roll < 0.15 ? 'flagship' : null)
+      : null;
+    const count = reduced
+      ? 2
+      : egg === 'comet'
+        ? 1
+        : Math.max(2, Math.min(6, options.ships ?? 2 + Math.floor(Math.random() * 5)));
+    const formation = reduced ? 'line' : ['line', 'wedge', 'scatter'][Math.floor(Math.random() * 3)];
 
     const ships = Array.from({ length: count }, (_, i) => {
       let lat;
@@ -519,137 +772,251 @@ export class StarStage {
       };
     });
 
-    this.fleets.push({
-      geometry: g,
+    const duration = (egg === 'comet' ? 1150 : 1700) * (0.92 + Math.random() * 0.16);
+    const fleet = {
+      fromId,
+      toId,
       kind,
       egg,
       formation,
+      event,
+      namespace: options.namespace ?? null,
+      taskId: options.taskId ?? null,
       startedAt: performance.now(),
-      duration: (egg === 'comet' ? 1150 : 1700) * (0.92 + Math.random() * 0.16),
+      duration,
       ships,
-    });
+      reduced,
+    };
+    this.fleets.push(fleet);
     if (this.fleets.length > 8) this.fleets.splice(0, this.fleets.length - 8);
-  }
+    this._updateSignals();
 
-  _drawEdges(time) {
-    const ctx = this.ctx;
-    ctx.lineCap = 'round';
-    for (const edge of this.scene.edges) {
-      const g = this._laneGeometry(edge);
-      if (!g) continue;
-      const avgDepth = ((g.from.depth ?? 0.6) + (g.to.depth ?? 0.6)) / 2;
-      const depthFade = 0.45 + avgDepth * 0.75;
-      const online = edge.online && !edge.revoked;
-      const baseColor = edge.revoked ? COLORS.revoked
-        : !edge.online ? COLORS.offline
-        : edge.kind === 'theirs' ? COLORS.theirs : COLORS.mine;
-      const alpha = (edge.revoked ? 0.45 : edge.online ? 0.85 : 0.5) * depthFade;
-      const width = (edge.revoked ? 1 : edge.online ? 1.8 : 1.2) * (0.55 + avgDepth * 0.75);
-
-      // 航道：外发光底 + 细点状航线 + 沿线渐变
-      if (online) {
-        ctx.beginPath();
-        ctx.moveTo(g.sx, g.sy);
-        ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
-        ctx.strokeStyle = rgba(baseColor, 0.07 * depthFade);
-        ctx.lineWidth = width * 3.4;
-        ctx.stroke();
-      }
-
-      // 远近明暗过渡：两端亮度按各自深度取值（本机端亮、远端暗），
-      // 形成“由近及远”的纵深；两端极短渐隐仅用于软化接点
-      const fromDepth = g.from.depth ?? 0.6;
-      const toDepth = g.to.depth ?? 0.6;
-      const endAlpha = (d) => alpha * (0.4 + d * 1.0);
-      // 较远（深度更低）的一端再按航道长度衰减，强化“由近及远”（更狠）
-      const dimEnd = Math.max(0.12, 1 - Math.min(0.68, g.dist / ((Math.min(this.width, this.height) || 720) * 0.8)));
-      let aFrom = endAlpha(fromDepth);
-      let aTo = endAlpha(toDepth);
-      if (fromDepth >= toDepth) aTo *= dimEnd;
-      else aFrom *= dimEnd;
-      const breathe = online && !this.reducedMotion
-        ? 0.95 + 0.05 * Math.sin(time * 0.9 + (hashString(`${edge.from}->${edge.to}`) % 628) / 100)
-        : 1;
-      const grad = ctx.createLinearGradient(g.sx, g.sy, g.ex, g.ey);
-      grad.addColorStop(0, rgba(baseColor, aFrom * 0.55 * breathe));
-      grad.addColorStop(0.08, rgba(baseColor, aFrom * breathe));
-      grad.addColorStop(0.5, rgba(baseColor, ((aFrom + aTo) / 2) * breathe));
-      grad.addColorStop(0.92, rgba(baseColor, aTo * breathe));
-      grad.addColorStop(1, rgba(baseColor, aTo * 0.55 * breathe));
-      ctx.beginPath();
-      ctx.setLineDash(online ? [1.5, 6] : [5, 6]);
-      // 航线持续流动：虚线沿航道方向缓移（在线时；reduced-motion 静止）
-      if (online && !this.reducedMotion) {
-        const period = 7.5; // 与 [1.5,6] 的点距一致，保证无缝
-        ctx.lineDashOffset = -((time * 6) % period);
-      } else {
-        ctx.lineDashOffset = 0;
-      }
-      ctx.strokeStyle = grad;
-      ctx.lineWidth = width;
-      ctx.moveTo(g.sx, g.sy);
-      ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
-      ctx.stroke();
-      ctx.lineDashOffset = 0;
-      ctx.setLineDash([]);
-
-      // 航向标：小箭标（替代大箭头）
-      const tip = this._bezierAt(g, 0.93);
-      const tan = this._bezierTangent(g, 0.93);
-      const ang = Math.atan2(tan.y, tan.x);
-      const size = (edge.revoked ? 4 : 6) * (0.6 + avgDepth * 0.6);
-      ctx.globalAlpha = (edge.revoked ? 0.45 : edge.online ? 0.85 : 0.55) * depthFade;
-      ctx.fillStyle = baseColor;
-      ctx.beginPath();
-      ctx.moveTo(tip.x, tip.y);
-      ctx.lineTo(tip.x - size * Math.cos(ang - 0.42), tip.y - size * Math.sin(ang - 0.42));
-      ctx.lineTo(tip.x - size * 0.55 * Math.cos(ang), tip.y - size * 0.55 * Math.sin(ang));
-      ctx.lineTo(tip.x - size * Math.cos(ang + 0.42), tip.y - size * Math.sin(ang + 0.42));
-      ctx.closePath();
-      ctx.fill();
-      ctx.globalAlpha = 1;
-
-      // 航线灯：在线且有待发事件时沿航道流动
-      if (online && (edge.pending ?? 0) > 0) {
-        const speed = 0.18;
-        const count = Math.min(4, 1 + Math.floor((edge.pending ?? 0) / 4));
-        for (let i = 0; i < count; i += 1) {
-          const p = (time * speed + i / count) % 1;
-          const pos = this._bezierAt(g, p);
-          ctx.beginPath();
-          ctx.fillStyle = baseColor;
-          ctx.globalAlpha = 0.85 * Math.sin(Math.PI * p) * depthFade;
-          ctx.arc(pos.x, pos.y, 2.1, 0, Math.PI * 2);
-          ctx.fill();
-        }
-        ctx.globalAlpha = 1;
-      }
+    if (reduced) {
+      // reduced-motion：航道 + 静止编队各画一帧；结束后移除（不做淡出）
+      this.redraw();
+      const timer = setTimeout(() => {
+        this.fleets = this.fleets.filter((item) => item !== fleet);
+        this._reducedTimers = this._reducedTimers.filter((item) => item !== timer);
+        this._updateSignals();
+        this.redraw();
+      }, duration + 600);
+      this._reducedTimers.push(timer);
     }
   }
 
-  /** 舰队：随机编队沿航道出航；旗舰/彩虹信使/彗星为稀有彩蛋；抵达后绽放 */
+  /** 手动同步的本地反馈：独立白色信使，不复用任务舰队视觉。 */
+  launchCourier(fromId, toId, options = {}) {
+    if (fromId === toId) return;
+    const ids = new Set(this.scene.nodes.map((node) => node.id));
+    if (!ids.has(fromId) || !ids.has(toId)) return;
+    const courier = {
+      fromId,
+      toId,
+      startedAt: performance.now(),
+      duration: options.duration ?? 950,
+    };
+    this.couriers.push(courier);
+    if (this.couriers.length > 4) this.couriers.splice(0, this.couriers.length - 4);
+    if (this.reducedMotion) {
+      this.redraw();
+      const timer = setTimeout(() => {
+        this.couriers = this.couriers.filter((item) => item !== courier);
+        this._reducedTimers = this._reducedTimers.filter((item) => item !== timer);
+        this.redraw();
+      }, courier.duration);
+      this._reducedTimers.push(timer);
+    }
+  }
+
+  /** 基础边：所有设备两两相连；共同订阅实线、无共同订阅虚线；无方向箭头。 */
+  _drawBaseEdges(time) {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (const edge of this.scene.edges) {
+      const g = this._lineGeometry(edge.from, edge.to);
+      if (!g) continue;
+      const avgDepth = ((g.from.depth ?? 0.6) + (g.to.depth ?? 0.6)) / 2;
+      const depthFade = 0.4 + avgDepth * 0.7;
+      const shared = edge.shared === true;
+      const color = shared ? COLORS.baseShared : COLORS.baseUnshared;
+      const phase = (hashString(`${edge.from}~${edge.to}`) % 628) / 100;
+      const breathe = this.reducedMotion
+        ? 0.92
+        : 0.78 + 0.22 * Math.sin(time * 0.75 + phase);
+      const alpha = (shared ? 0.42 : 0.24) * depthFade * breathe;
+
+      if (shared) {
+        // 共同订阅：细实线 + 极淡外发光（比无共同订阅更亮，但仍保持中性色）。
+        ctx.beginPath();
+        ctx.moveTo(g.sx, g.sy);
+        ctx.lineTo(g.ex, g.ey);
+        ctx.strokeStyle = rgba(color, alpha * 0.18);
+        ctx.lineWidth = 3.2;
+        ctx.stroke();
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(g.sx, g.sy);
+      ctx.lineTo(g.ex, g.ey);
+      ctx.strokeStyle = rgba(color, alpha);
+      ctx.lineWidth = (shared ? 1.25 : 1) * (0.6 + avgDepth * 0.6);
+      if (!shared) {
+        ctx.setLineDash([3, 7]);
+        ctx.lineDashOffset = this.reducedMotion ? 0 : -((time * 3) % 10);
+      } else {
+        ctx.setLineDash([]);
+        ctx.lineDashOffset = 0;
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.lineDashOffset = 0;
+    }
+    ctx.restore();
+  }
+
+  /** 悬停航道：只画 console.js 注入的 routes；离开即 setRoutes([])。 */
+  _drawRoutes(time) {
+    if (this.routes.length === 0) return;
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (const route of this.routes) {
+      // out / in 各偏移一侧；blocked 单线居中。偏移按各自方向计算，双向自然分开。
+      const offset = route.direction === 'blocked' ? 0 : 2.4;
+      const g = this._lineGeometry(route.from, route.to, { offset });
+      if (!g) continue;
+      const color = route.direction === 'out'
+        ? COLORS.routeSend
+        : route.direction === 'in' ? COLORS.routeReceive : COLORS.routeBlocked;
+      const reachable = route.reachable === true;
+      const phase = (hashString(`${route.from}~${route.to}~${route.direction}`) % 628) / 100;
+
+      if (reachable) {
+        ctx.beginPath();
+        ctx.moveTo(g.sx, g.sy);
+        ctx.lineTo(g.ex, g.ey);
+        ctx.strokeStyle = rgba(color, 0.12);
+        ctx.lineWidth = 4;
+        ctx.stroke();
+      }
+
+      ctx.beginPath();
+      ctx.moveTo(g.sx, g.sy);
+      ctx.lineTo(g.ex, g.ey);
+      ctx.strokeStyle = rgba(color, reachable ? 0.72 : 0.34);
+      ctx.lineWidth = reachable ? 1.4 : 1;
+      if (reachable) {
+        ctx.setLineDash([]);
+      } else {
+        ctx.setLineDash([2, 6]);
+        ctx.lineDashOffset = this.reducedMotion ? 0 : -((time * 2.4) % 8);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.lineDashOffset = 0;
+
+      if (reachable) {
+        // 流动信标指示方向（无箭头）；reduced-motion 时固定在航道中点。
+        const p = this.reducedMotion ? 0.5 : (time * 0.26 + phase / 6.283) % 1;
+        const point = this._pointAt(g, p);
+        ctx.beginPath();
+        ctx.fillStyle = rgba(color, 0.95 * Math.sin(Math.PI * p));
+        ctx.arc(point.x, point.y, 1.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+  }
+
+  _drawCouriers() {
+    if (this.couriers.length === 0) return;
+    const ctx = this.ctx;
+    const now = performance.now();
+    ctx.save();
+    ctx.lineCap = 'round';
+    for (const courier of this.couriers) {
+      const g = this._lineGeometry(courier.fromId, courier.toId);
+      if (!g) continue;
+      const p = this.reducedMotion ? 0.5 : Math.min(1, Math.max(0, (now - courier.startedAt) / courier.duration));
+      // 白色细线 + 单颗信使光点：明确的「本机手动同步」本地反馈，与任务舰队分开。
+      ctx.beginPath();
+      ctx.moveTo(g.sx, g.sy);
+      ctx.lineTo(g.ex, g.ey);
+      ctx.strokeStyle = rgba(COLORS.syncCourier, 0.16 * (1 - p * 0.35));
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      const point = this._pointAt(g, p);
+      const glow = ctx.createRadialGradient(point.x, point.y, 0, point.x, point.y, 9);
+      glow.addColorStop(0, rgba(COLORS.syncCourier, 0.55));
+      glow.addColorStop(1, rgba(COLORS.syncCourier, 0));
+      ctx.fillStyle = glow;
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = rgba(COLORS.syncCourier, 0.95);
+      ctx.beginPath();
+      ctx.arc(point.x, point.y, 1.6, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+    this.couriers = this.couriers.filter((courier) => (
+      this.reducedMotion ? true : now - courier.startedAt < courier.duration + 120
+    ));
+  }
+
+
+  /** 舰队：沿事件方向出航；端点每帧绑当前星位；旗舰/彩虹信使/彗星为稀有彩蛋。 */
   _drawFleets(time) {
     if (this.fleets.length === 0) return;
     const ctx = this.ctx;
     const now = performance.now();
+    const before = this.fleets.length;
     for (const fleet of this.fleets) {
       const elapsed = now - fleet.startedAt;
-      const g = fleet.geometry;
-      const baseColor = fleet.kind === 'theirs' ? COLORS.theirs : COLORS.mine;
+      // 不烘焙几何：每帧按星体当前屏幕位置（parallax/depth/bob 之后）重新取线。
+      const g = this._lineGeometry(fleet.fromId, fleet.toId);
+      if (!g) continue;
+      const baseColor = fleet.kind === 'theirs'
+        ? COLORS.fleetReceive
+        : fleet.kind === 'transit' ? COLORS.fleetTransit : COLORS.fleetSend;
       const flagship = fleet.egg === 'flagship';
-      const norm = { x: -(g.ey - g.sy), y: g.ex - g.sx };
-      const nlen = Math.hypot(norm.x, norm.y) || 1;
-      norm.x /= nlen;
-      norm.y /= nlen;
+      const norm = { x: g.nx, y: g.ny };
+      const ang = Math.atan2(g.uy, g.ux);
+
+      if (fleet.event) {
+        // 事件航道：舰队结束后淡出移除；无 hover 也可见。
+        const fadeWindow = 700;
+        const fade = elapsed <= fleet.duration
+          ? 1
+          : Math.max(0, 1 - (elapsed - fleet.duration) / fadeWindow);
+        if (fade > 0) {
+          ctx.save();
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(g.sx, g.sy);
+          ctx.lineTo(g.ex, g.ey);
+          ctx.strokeStyle = rgba(baseColor, 0.10 * fade);
+          ctx.lineWidth = 4;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(g.sx, g.sy);
+          ctx.lineTo(g.ex, g.ey);
+          ctx.strokeStyle = rgba(baseColor, 0.46 * fade);
+          ctx.lineWidth = 1.3;
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
 
       for (const ship of fleet.ships) {
         const dur = fleet.duration * ship.durFactor;
-        const p = (elapsed / dur - ship.stagger) / (1 - 0.09 * (fleet.ships.length - 1));
+        const raw = (elapsed / dur - ship.stagger) / (1 - 0.09 * (fleet.ships.length - 1));
+        const p = fleet.reduced ? 0.62 : raw;
         if (p <= 0 || p > 1.02) continue;
         const pc = Math.min(1, p);
-        const pos = this._bezierAt(g, pc);
-        const tan = this._bezierTangent(g, pc);
-        const ang = Math.atan2(tan.y, tan.x);
+        const pos = this._pointAt(g, pc);
         // 编队横向错位 + 轻微蛇形摆动（随机相位）
         const lat = ship.lat * (1 - pc * 0.25) * 0.7 + Math.sin(pc * 9 + ship.wiggle) * 2.2;
         const px = pos.x + norm.x * lat;
@@ -664,7 +1031,7 @@ export class StarStage {
 
         // 尾迹（彗星最长、旗舰更亮）：宽晕 + 细亮线
         const tailLen = fleet.egg === 'comet' ? 0.14 : flagship ? 0.08 : 0.05;
-        const tail = this._bezierAt(g, Math.max(0, pc - tailLen));
+        const tail = this._pointAt(g, Math.max(0, pc - tailLen));
         ctx.beginPath();
         ctx.moveTo(tail.x + norm.x * lat, tail.y + norm.y * lat);
         ctx.lineTo(px, py);
@@ -748,9 +1115,9 @@ export class StarStage {
         ctx.restore();
       }
 
-      // 抵达绽放（旗舰双环 + 更大；彗星短促闪光）
+      // 抵达绽放（旗舰双环 + 更大；彗星短促闪光；reduced-motion 不播放）
       const bloomWindow = fleet.egg === 'comet' ? 300 : 420;
-      const bp = (elapsed - fleet.duration) / bloomWindow;
+      const bp = fleet.reduced ? 0 : (elapsed - fleet.duration) / bloomWindow;
       if (bp > 0 && bp < 1) {
         const big = fleet.egg === 'comet' ? 1.4 : flagship ? 1.5 : 1;
         const radius = (5 + bp * 16) * big;
@@ -776,6 +1143,7 @@ export class StarStage {
       }
     }
     this.fleets = this.fleets.filter((f) => now - f.startedAt < f.duration + 700);
+    if (this.fleets.length !== before) this._updateSignals();
   }
 
   _drawNodes(time) {

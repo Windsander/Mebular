@@ -262,8 +262,8 @@ check('主路径 key 组完整（顶栏/导航/锁定/新建/加入/邀请/向�
 const REQUIRED_PATH_STATIC_KEYS = [
   'topbar.cloud.openSettings', 'topbar.self.openAbout', 'topbar.self.placeholder',
   'topbar.online.unknown', 'topbar.security.none', 'topbar.security.view', 'topbar.memory.placeholder',
-  'legend.title', 'legend.edges', 'legend.edge.mine', 'legend.edge.theirs', 'legend.edge.offline',
-  'legend.edge.revoked', 'legend.note', 'stage.aria',
+  'legend.title', 'legend.edges', 'legend.edge.shared', 'legend.edge.unshared',
+  'legend.routes', 'legend.route.send', 'legend.route.receive', 'legend.route.blocked', 'legend.note', 'stage.aria',
   'wizard.aria', 'wizard.title', 'wizard.close', 'wizard.back', 'wizard.next',
   'invite.aria', 'invite.title', 'invite.closeAria',
   'cloudJoin.title', 'cloudJoin.lead', 'cloudJoin.tokenLabel', 'cloudJoin.tokenPlaceholder',

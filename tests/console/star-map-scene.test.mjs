@@ -309,7 +309,16 @@ describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
 
   const recordingContext = () => {
     const log = [];
-    const gradient = () => ({ addColorStop: () => undefined });
+    const gradient = () => {
+      const stops = [];
+      return {
+        stops,
+        addColorStop: (offset, color) => {
+          stops.push({ offset, color });
+          log.push({ method: 'gradientStop', args: [offset, color] });
+        },
+      };
+    };
     const proxy = new Proxy({}, {
       get(target, prop) {
         if (prop in target) return target[prop];
@@ -433,9 +442,20 @@ describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
     expect(methods('lineTo')).toHaveLength(2 + pulseSegments);
     expect(methods('arc')).toHaveLength(0);
     expect(methods('createRadialGradient')).toHaveLength(0);
+
+    // 波形用沿段线性渐变：两端 alpha=0（露出基础线），中间最亮。
+    expect(methods('createLinearGradient')).toHaveLength(1);
     const pulseStrokes = calls.filter((call) => call.method === 'set:strokeStyle'
-      && String(call.args[0]).startsWith('rgba(156,198,208'));
+      && call.args[0] && Array.isArray(call.args[0].stops));
     expect(pulseStrokes).toHaveLength(1);
+    const stops = pulseStrokes[0].args[0].stops;
+    expect(stops.length).toBeGreaterThanOrEqual(5);
+    expect(stops[0].color).toBe('rgba(156,198,208,0)');
+    expect(stops.at(-1).color).toBe('rgba(156,198,208,0)');
+    const center = stops.find((stop) => stop.offset === 0.5);
+    expect(center).toBeDefined();
+    const centerAlpha = Number(center.color.split(',')[3].replace(')', ''));
+    expect(centerAlpha).toBeGreaterThan(0.1);
     expect(JSON.stringify(edges)).toBe(before);
     expect(summarizeSceneEdges(edges)).toEqual({ baseEdgeCount: 2, solidEdgeCount: 1, dashedEdgeCount: 1 });
   });

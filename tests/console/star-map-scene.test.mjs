@@ -259,10 +259,16 @@ describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
     const proxy = new Proxy({}, {
       get(target, prop) {
         if (prop in target) return target[prop];
-        if (prop === 'createLinearGradient' || prop === 'createRadialGradient') return gradient;
+        if (prop === 'createLinearGradient' || prop === 'createRadialGradient') {
+          return (...args) => { log.push({ method: prop, args }); return gradient(); };
+        }
         return (...args) => { log.push({ method: prop, args }); };
       },
-      set(target, prop, value) { target[prop] = value; return true; },
+      set(target, prop, value) {
+        log.push({ method: `set:${prop}`, args: [value] });
+        target[prop] = value;
+        return true;
+      },
     });
     return { proxy, log };
   };
@@ -331,25 +337,33 @@ describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
     expect(stage._laneTangent(noDepth, 0.5).x).not.toBe(0);
   });
 
-  test('双向航道：out/in 平行偏移且弯向弦的两侧', () => {
+  test('旧版几何：pad=24、双向 offset=7、bow=min(48, dist*0.15)', () => {
     place({ A: [100, 300, 0.6, 8], B: [700, 300, 0.6, 8] });
-    const out = stage._laneGeometry('A', 'B', { offset: 2.4 });
-    const inbound = stage._laneGeometry('B', 'A', { offset: 2.4 });
+    const g = stage._laneGeometry('A', 'B');
+    // 端点沿 A→B 各留白 24，不压在星体上。
+    expect(g.sx).toBeCloseTo(124, 6);
+    expect(g.ex).toBeCloseTo(676, 6);
+    // 600px 距离 → bow = min(48, 90) = 48。
+    expect(g.bow).toBeCloseTo(48, 6);
+
+    const out = stage._laneGeometry('A', 'B', { offset: 7 });
+    const inbound = stage._laneGeometry('B', 'A', { offset: 7 });
+    // 双向航道平行偏移 7，且方向相反自然落在弦两侧。
+    expect(out.sy).toBeCloseTo(307, 6);
+    expect(out.ey).toBeCloseTo(307, 6);
+    expect(inbound.sy).toBeCloseTo(293, 6);
+    expect(inbound.ey).toBeCloseTo(293, 6);
     const midOut = stage._lanePoint(out, 0.5);
     const midIn = stage._lanePoint(inbound, 0.5);
-    // 以 A→B 弦为准，两条航道的中点应分居两侧。
     expect((midOut.y - 300) * (midIn.y - 300)).toBeLessThan(0);
     expect(midOut.y).not.toBeCloseTo(midIn.y, 1);
+
+    // 近距离航道：bow 按距离线性缩小（200px → 30）。
+    place({ A: [100, 300, 0.6, 8], B: [300, 300, 0.6, 8] });
+    expect(stage._laneGeometry('A', 'B').bow).toBeCloseTo(30, 6);
   });
 
-  test('航道端点贴合星体：按各自半径留白，不压在星上', () => {
-    place({ A: [100, 300, 0.6, 8], B: [700, 300, 0.6, 14] });
-    const g = stage._laneGeometry('A', 'B');
-    expect(Math.hypot(g.sx - 100, g.sy - 300)).toBeGreaterThanOrEqual(8 + 4 - 1e-9);
-    expect(Math.hypot(g.ex - 700, g.ey - 300)).toBeGreaterThanOrEqual(14 + 4 - 1e-9);
-  });
-
-  test('hover 航道（含灰色不可达）用二次曲线绘制', () => {
+  test('hover 航道用旧版视觉：外发光 + 沿线渐变 + 流动点状虚线 + 航向标', () => {
     place({ A: [100, 300, 0.6, 8], B: [700, 300, 0.6, 8] });
     stage.routes = [
       { from: 'A', to: 'B', direction: 'out', reachable: true },
@@ -357,12 +371,40 @@ describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
       { from: 'A', to: 'B', direction: 'blocked', reachable: false },
     ];
     calls.length = 0;
-    stage._drawRoutes(0);
+    stage._drawRoutes(4.2);
     expect(methods('quadraticCurveTo').length).toBeGreaterThanOrEqual(3);
-    expect(methods('lineTo')).toHaveLength(0);
+    // 沿线渐变。
+    expect(methods('createLinearGradient').length).toBeGreaterThanOrEqual(3);
+    // 外发光底：约 3.4x 宽度。
+    expect(calls.some((call) => call.method === 'set:lineWidth' && call.args[0] >= 3)).toBe(true);
+    // 可发出/接收航道用旧版流动点状虚线 [1.5,6]，且随时间移动。
+    expect(calls.some((call) => call.method === 'setLineDash'
+      && call.args[0]?.[0] === 1.5 && call.args[0]?.[1] === 6)).toBe(true);
+    expect(calls.some((call) => call.method === 'set:lineDashOffset'
+      && call.args[0] < 0)).toBe(true);
+    // 灰色不可达仍是虚线降级（不是纯细实线）。
+    expect(calls.some((call) => call.method === 'setLineDash'
+      && call.args[0]?.[0] === 5 && call.args[0]?.[1] === 6)).toBe(true);
+    // 航向标：箭标三角用 lineTo 绘制在曲线之外。
+    expect(methods('lineTo').length).toBeGreaterThan(0);
   });
 
-  test('fleet 事件航道用曲线绘制，且几何每帧从星位取（不烘焙）', () => {
+  test('待发事件时沿航道流动数据灯', () => {
+    place({ A: [100, 300, 0.6, 8], B: [700, 300, 0.6, 8] });
+    stage.routes = [
+      { from: 'A', to: 'B', direction: 'out', reachable: true, pending: 4 },
+    ];
+    calls.length = 0;
+    stage._drawRoutes(4.2);
+    expect(methods('arc').length).toBeGreaterThan(0);
+
+    stage.routes = [{ from: 'A', to: 'B', direction: 'out', reachable: true }];
+    calls.length = 0;
+    stage._drawRoutes(4.2);
+    expect(methods('arc')).toHaveLength(0);
+  });
+
+  test('fleet 事件航道沿用旧航道视觉，且几何每帧从星位取（不烘焙）', () => {
     place({ A: [100, 300, 0.6, 8], B: [700, 300, 0.6, 8] });
     stage.scene = { nodes: [{ id: 'A' }, { id: 'B' }], edges: [] };
     stage.launchFleet('A', 'B', { event: true, ships: 2 });
@@ -373,9 +415,13 @@ describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
 
     fleet.ships = [];
     calls.length = 0;
-    stage._drawFleets(0);
+    stage._drawFleets(4.2);
     expect(methods('quadraticCurveTo').length).toBeGreaterThan(0);
-    expect(methods('lineTo')).toHaveLength(0);
+    expect(methods('createLinearGradient').length).toBeGreaterThan(0);
+    expect(calls.some((call) => call.method === 'setLineDash'
+      && call.args[0]?.[0] === 1.5 && call.args[0]?.[1] === 6)).toBe(true);
+    // 航向标也保留在事件航道上。
+    expect(methods('lineTo').length).toBeGreaterThan(0);
 
     const before = stage._laneGeometry(fleet.fromId, fleet.toId, { bowSign: -1 });
     place({ A: [140, 340, 0.6, 8], B: [700, 300, 0.6, 8] });

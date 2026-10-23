@@ -386,6 +386,8 @@ export class StarStage {
         to: route.to,
         direction: route.direction === 'out' || route.direction === 'in' ? route.direction : 'blocked',
         reachable: route.reachable === true,
+        // 待发事件数：>0 时沿线流动数据灯（旧版 _drawEdges 的 pending 视觉）。
+        pending: Math.max(0, Number(route.pending ?? 0) || 0),
         namespace: route.namespace ?? null,
       }));
     this._updateSignals();
@@ -740,8 +742,9 @@ export class StarStage {
 
   /**
    * 航道几何（hover 蓝/金/灰航道、fleet 事件航道与舰队）：
-   * 端点每帧取星位 + 端点留白 + 双向平行偏移 + 二次曲线中点法线弓高 +
-   * 深度差纵向偏置。基础边与手动同步信使仍用 _lineGeometry 的直线几何。
+   * 端点每帧取星位 + 端点留白 pad=24 + 双向平行偏移 offset=7 +
+   * 二次曲线弓高 bow=min(48, dist*0.15) + 深度差纵向偏置 *26。
+   * 基础边与手动同步信使仍用 _lineGeometry 的直线几何。
    */
   _laneGeometry(fromId, toId, options = {}) {
     const from = this.screen.get(fromId) ?? this.positions.get(fromId);
@@ -753,8 +756,8 @@ export class StarStage {
     if (dist < 1) return null;
     const ux = dx / dist;
     const uy = dy / dist;
-    const padFrom = options.pad === false ? 0 : (options.padFrom ?? ((from.r ?? 0) + 4));
-    const padTo = options.pad === false ? 0 : (options.padTo ?? ((to.r ?? 0) + 4));
+    const padFrom = options.pad === false ? 0 : (options.padFrom ?? options.pad ?? 24);
+    const padTo = options.pad === false ? 0 : (options.padTo ?? options.pad ?? 24);
     const offset = options.offset ?? 0;
     // out/in 各自沿行进方向取同一侧法线；方向相反即自然落在弦两侧，形成平行航道。
     const nx = -uy * offset;
@@ -765,9 +768,9 @@ export class StarStage {
     const ey = to.y - uy * padTo + ny;
     const mx = (sx + ex) / 2;
     const my = (sy + ey) / 2;
-    const span = Math.max(0, dist - padFrom - padTo);
     const bowSign = options.bowSign === -1 ? -1 : 1;
-    const bow = Math.min(48, span * 0.15) * bowSign;
+    // 旧航道视觉：弓高按整条星间距离取比例，与端点留白无关。
+    const bow = Math.min(48, dist * 0.15) * bowSign;
     // 深度差纵向偏置：远端更低/更高，读起来像有落差的 3D 航道。
     const depthBias = ((to.depth ?? 0.6) - (from.depth ?? 0.6)) * 26;
     const cx = mx - uy * bow + nx * 0.5;
@@ -777,7 +780,6 @@ export class StarStage {
       nx: -uy,
       ny: ux,
       dist,
-      span,
       bow,
       bowSign,
       depthBias,
@@ -802,6 +804,116 @@ export class StarStage {
       x: 2 * q * (g.cx - g.sx) + 2 * p * (g.ex - g.cx),
       y: 2 * q * (g.cy - g.sy) + 2 * p * (g.ey - g.cy),
     };
+  }
+
+  /**
+   * 旧版航道视觉语言（b961e87 的 _drawEdges）：外发光底 + 沿线渐变 +
+   * 流动点状航线 + 航向标 + 待发事件数据灯。
+   * 蓝色 hover 可发出 / 金色可接收 / 灰色不可达（降级虚线）与 fleet 事件共用。
+   */
+  _drawLaneVisual(g, options = {}) {
+    const ctx = this.ctx;
+    if (!ctx || !g) return;
+    const time = options.time ?? 0;
+    const color = options.color ?? COLORS.routeSend;
+    const dashed = options.dashed === true;
+    const strength = Math.max(0, Math.min(1, options.strength ?? 1));
+    const opacity = Math.max(0, Math.min(1, options.opacity ?? 1));
+    if (strength <= 0 || opacity <= 0) return;
+    const pending = Math.max(0, Math.floor(options.pending ?? 0));
+    const seed = options.seed ?? `${g.sx}~${g.sy}~${g.ex}~${g.ey}`;
+
+    const avgDepth = ((g.from.depth ?? 0.6) + (g.to.depth ?? 0.6)) / 2;
+    const depthFade = (0.45 + avgDepth * 0.75) * opacity;
+    const fromDepth = g.from.depth ?? 0.6;
+    const toDepth = g.to.depth ?? 0.6;
+    const endAlpha = (depth) => 0.85 * (0.4 + depth * 1.0);
+    // 较远（深度更低）的一端再按航道长度衰减，强化「由近及远」。
+    const dimEnd = Math.max(0.12, 1 - Math.min(
+      0.68,
+      g.dist / ((Math.min(this.width, this.height) || 720) * 0.8),
+    ));
+    let aFrom = endAlpha(fromDepth);
+    let aTo = endAlpha(toDepth);
+    if (fromDepth >= toDepth) aTo *= dimEnd;
+    else aFrom *= dimEnd;
+    const phase = (hashString(seed) % 628) / 100;
+    const breathe = dashed || this.reducedMotion
+      ? 1
+      : 0.95 + 0.05 * Math.sin(time * 0.9 + phase);
+    const laneAlpha = (dashed ? 0.5 : 1) * depthFade * strength;
+    const width = (dashed ? 1 : 1.8) * (0.55 + avgDepth * 0.75);
+
+    ctx.save();
+    ctx.lineCap = 'round';
+
+    // 外发光底：比航线宽 3.4 倍的低透明底层（不可达航道降级为无发光）。
+    if (!dashed) {
+      ctx.beginPath();
+      ctx.moveTo(g.sx, g.sy);
+      ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
+      ctx.strokeStyle = rgba(color, 0.07 * depthFade * strength);
+      ctx.lineWidth = width * 3.4;
+      ctx.stroke();
+    }
+
+    // 沿线渐变：两端更淡、中间按端点深度取值，保留「由近及远」的纵深。
+    const grad = ctx.createLinearGradient(g.sx, g.sy, g.ex, g.ey);
+    grad.addColorStop(0, rgba(color, aFrom * 0.55 * breathe * laneAlpha));
+    grad.addColorStop(0.08, rgba(color, aFrom * breathe * laneAlpha));
+    grad.addColorStop(0.5, rgba(color, ((aFrom + aTo) / 2) * breathe * laneAlpha));
+    grad.addColorStop(0.92, rgba(color, aTo * breathe * laneAlpha));
+    grad.addColorStop(1, rgba(color, aTo * 0.55 * breathe * laneAlpha));
+
+    ctx.beginPath();
+    ctx.setLineDash(dashed ? [5, 6] : [1.5, 6]);
+    // 航线持续流动：点距周期与 [1.5,6] 对齐，保证无缝；reduced-motion 静止。
+    if (!dashed && !this.reducedMotion) {
+      ctx.lineDashOffset = -((time * 6) % 7.5);
+    } else {
+      ctx.lineDashOffset = 0;
+    }
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = width;
+    ctx.moveTo(g.sx, g.sy);
+    ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
+    ctx.stroke();
+    ctx.lineDashOffset = 0;
+    ctx.setLineDash([]);
+
+    // 航向标：旧版小箭标（不是箭头线），标出航道终点方向。
+    const tip = this._lanePoint(g, 0.93);
+    const tan = this._laneTangent(g, 0.93);
+    const ang = Math.atan2(tan.y, tan.x);
+    const size = (dashed ? 4 : 6) * (0.6 + avgDepth * 0.6);
+    ctx.globalAlpha = (dashed ? 0.5 : 0.85) * depthFade * strength;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(tip.x, tip.y);
+    ctx.lineTo(tip.x - size * Math.cos(ang - 0.42), tip.y - size * Math.sin(ang - 0.42));
+    ctx.lineTo(tip.x - size * 0.55 * Math.cos(ang), tip.y - size * 0.55 * Math.sin(ang));
+    ctx.lineTo(tip.x - size * Math.cos(ang + 0.42), tip.y - size * Math.sin(ang + 0.42));
+    ctx.closePath();
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    // 沿线数据灯：只有可发出/接收且有待发事件时才流动。
+    if (!dashed && pending > 0) {
+      const speed = 0.18;
+      const count = Math.min(4, 1 + Math.floor(pending / 4));
+      ctx.fillStyle = color;
+      for (let i = 0; i < count; i += 1) {
+        const p = (time * speed + i / count) % 1;
+        const point = this._lanePoint(g, p);
+        ctx.globalAlpha = 0.85 * Math.sin(Math.PI * p) * depthFade * strength;
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 2.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    ctx.restore();
   }
 
   /**
@@ -976,55 +1088,28 @@ export class StarStage {
   /** 悬停航道：只画 console.js 注入的 routes；离开即 setRoutes([])。 */
   _drawRoutes(time) {
     if (this.routes.length === 0) return;
-    const ctx = this.ctx;
-    ctx.save();
-    ctx.lineCap = 'round';
     for (const route of this.routes) {
-      // out / in 各偏移一侧并沿各自行进方向弯向同侧；blocked 单线居中但仍是弧线。
-      const offset = route.direction === 'blocked' ? 0 : 2.4;
-      const g = this._laneGeometry(route.from, route.to, { offset });
+      const reachable = route.reachable === true;
+      // 双向航道（H→T 蓝 + T→H 金）平行偏移 7；灰色不可达单线居中。
+      const paired = reachable && this.routes.some(
+        (other) => other.from === route.to && other.to === route.from,
+      );
+      const offset = paired ? 7 : 0;
+      // out 与 in 沿各自行进方向弯向同一侧，方向相反对称落在弦两侧。
+      const bowSign = route.direction === 'in' ? 1 : -1;
+      const g = this._laneGeometry(route.from, route.to, { offset, bowSign });
       if (!g) continue;
       const color = route.direction === 'out'
         ? COLORS.routeSend
         : route.direction === 'in' ? COLORS.routeReceive : COLORS.routeBlocked;
-      const reachable = route.reachable === true;
-      const phase = (hashString(`${route.from}~${route.to}~${route.direction}`) % 628) / 100;
-
-      if (reachable) {
-        ctx.beginPath();
-        ctx.moveTo(g.sx, g.sy);
-        ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
-        ctx.strokeStyle = rgba(color, 0.12);
-        ctx.lineWidth = 4;
-        ctx.stroke();
-      }
-
-      ctx.beginPath();
-      ctx.moveTo(g.sx, g.sy);
-      ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
-      ctx.strokeStyle = rgba(color, reachable ? 0.72 : 0.34);
-      ctx.lineWidth = reachable ? 1.4 : 1;
-      if (reachable) {
-        ctx.setLineDash([]);
-      } else {
-        ctx.setLineDash([2, 6]);
-        ctx.lineDashOffset = this.reducedMotion ? 0 : -((time * 2.4) % 8);
-      }
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.lineDashOffset = 0;
-
-      if (reachable) {
-        // 流动信标指示方向（无箭头）；reduced-motion 时固定在航道中点。
-        const p = this.reducedMotion ? 0.5 : (time * 0.26 + phase / 6.283) % 1;
-        const point = this._lanePoint(g, p);
-        ctx.beginPath();
-        ctx.fillStyle = rgba(color, 0.95 * Math.sin(Math.PI * p));
-        ctx.arc(point.x, point.y, 1.8, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      this._drawLaneVisual(g, {
+        time,
+        color,
+        dashed: !reachable,
+        pending: route.pending,
+        seed: `${route.from}~${route.to}~${route.direction}`,
+      });
     }
-    ctx.restore();
   }
 
   _drawCouriers() {
@@ -1085,27 +1170,19 @@ export class StarStage {
       const norm = { x: g.nx, y: g.ny };
 
       if (fleet.event) {
-        // 事件航道：舰队结束后淡出移除；无 hover 也可见。
+        // 事件航道：舰队结束后淡出移除；无 hover 也可见，沿用旧航道视觉语言。
         const fadeWindow = 700;
         const fade = elapsed <= fleet.duration
           ? 1
           : Math.max(0, 1 - (elapsed - fleet.duration) / fadeWindow);
         if (fade > 0) {
-          ctx.save();
-          ctx.lineCap = 'round';
-          ctx.beginPath();
-          ctx.moveTo(g.sx, g.sy);
-          ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
-          ctx.strokeStyle = rgba(baseColor, 0.10 * fade);
-          ctx.lineWidth = 4;
-          ctx.stroke();
-          ctx.beginPath();
-          ctx.moveTo(g.sx, g.sy);
-          ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
-          ctx.strokeStyle = rgba(baseColor, 0.46 * fade);
-          ctx.lineWidth = 1.3;
-          ctx.stroke();
-          ctx.restore();
+          this._drawLaneVisual(g, {
+            time,
+            color: baseColor,
+            strength: fade,
+            opacity: 0.65,
+            seed: `${fleet.fromId}~${fleet.toId}~event`,
+          });
         }
       }
 

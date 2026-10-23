@@ -15,10 +15,10 @@
 ---
 
 <p align="center">
-  <img src="assets/console-onboarding-cn.jpg" width="49%" alt="在 Mebular 控制台新建忆云">
-  <img src="assets/console-starmap-cn.jpg" width="49%" alt="本机星图视角：5 台设备已连接到本机">
+  <img src="assets/star-map-baseline-cn.jpg" width="49%" alt="星空基准视图：未悬停时的设备网络">
+  <img src="assets/star-map-lanes-cn.jpg" width="49%" alt="任务航道与 fleet 事件：蓝色可发出、金色可接收、灰色不可达">
 </p>
-<p align="center"><sub>第一台设备新建忆云 · 本机视角：5 台设备已连接到本机。<br>蓝线与金线表示本机 ↔ 各设备的双向授权/连接关系，不是设备之间的互连。</sub></p>
+<p align="center"><sub>静止时的星图：设备与共同订阅关系。 · 悬停时：任务域航道与实时 fleet 流量。<br>蓝线与金线表示本机 ↔ 各设备的任务域双向可达关系，不是设备之间的互连。</sub></p>
 
 ## 是什么
 

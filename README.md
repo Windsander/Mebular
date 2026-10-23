@@ -15,10 +15,10 @@ Memory and tasks stay on your devices.<br>Devices sync directly. One shared grap
 ---
 
 <p align="center">
-  <img src="assets/console-onboarding-en.jpg" width="49%" alt="Create a Cloud in the Mebular console">
-  <img src="assets/console-starmap-en.jpg" width="49%" alt="Local star map view: five devices connected to this machine">
+  <img src="assets/star-map-baseline-en.jpg" width="49%" alt="Star map baseline: the device network before hovering">
+  <img src="assets/star-map-lanes-en.jpg" width="49%" alt="Task lanes and a fleet event: blue can send, gold can receive, gray unreachable">
 </p>
-<p align="center"><sub>Create a Cloud on the first device · local view: five devices connected to this machine.<br>Blue and gold lines show each device's two-way authorization/connection to this machine, not peer-to-peer links.</sub></p>
+<p align="center"><sub>The map at rest: devices and their shared-subscription edges. · On hover: task-domain lanes plus live fleet traffic.<br>Blue and gold show this device's two-way task-domain reachability, not peer-to-peer links.</sub></p>
 
 ## What it is
 

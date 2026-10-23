@@ -158,6 +158,7 @@ await mebular.initialize();
 - **Fleet** — [`packages/fleet`](packages/fleet)
 - **控制台 GUI** — [`packages/console`](packages/console)
 - **贡献与质量门禁** — [`CONTRIBUTING.md`](CONTRIBUTING.md)
+- **安全策略** — [`SECURITY.md`](SECURITY.md)
 
 <div align="center">
 

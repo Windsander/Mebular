@@ -170,7 +170,7 @@ jobs:
             echo "skip   @mebular/dsh-plugin@${VERSION}（已发布）"
           else
             echo "publish @mebular/dsh-plugin@${VERSION}"
-            npm publish packages/dsh-plugin --access public
+            (cd packages/dsh-plugin && npm publish --access public)
           fi
 
   release:

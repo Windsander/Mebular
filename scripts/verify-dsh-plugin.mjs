@@ -95,7 +95,7 @@ for (const entry of expectedFiles) {
 
 check(
   'repository.url points at Windsander/Mebular',
-  pkg.repository?.url === 'https://github.com/Windsander/Mebular.git',
+  pkg.repository?.url === 'git+https://github.com/Windsander/Mebular.git',
   String(pkg.repository?.url),
 );
 check(

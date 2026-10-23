@@ -117,7 +117,7 @@ push 后 GitHub Actions `Publish` 流水线自动执行：
    - 每个包先 `npm view <name>@<version>`：已存在则 **skip**（幂等），否则 `npm publish`
 3. **publish-dsh**（`needs: publish`，独立版本）：
    - 从 `packages/dsh-plugin/package.json` 读取版本，先 `npm view @mebular/dsh-plugin@<version>`：
-     已存在则 **skip**，否则 `npm publish packages/dsh-plugin --access public`。
+     已存在则 **skip**，否则 `(cd packages/dsh-plugin && npm publish --access public)`。
    - 不进入 5 包 SSOT 校验，也不由 `bump_version.sh` 改写版本。
 4. **release**（`needs: [publish, publish-dsh]`）：从 `CHANGELOG.md` 抽取 `## [v0.2.0]` 章节生成
    Release notes，创建 GitHub Release 并回打 tag `v0.2.0`（已存在则 skip）。

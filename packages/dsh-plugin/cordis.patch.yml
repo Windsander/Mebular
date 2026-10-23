@@ -1,9 +1,16 @@
+# @mebular/dsh-plugin bundle patch.
+#
+# This file is the only composition surface the plugin owns: one `mebular` host
+# row (status route + client panel + official MCP bridge). The MCP client is
+# mounted inside the host plugin from the same discovered daemon URL, so the
+# panel and the MCP bridge cannot disagree about the port.
+#
+# daemonUrl is intentionally omitted: the host resolves it as
+# explicit daemonUrl > MEBULAR_HTTP_PORT > <home>/runtime.json > 7331.
+# Set daemonUrl here only to pin one instance explicitly.
 - insert:
     - id: mebular
       name: '@mebular/dsh-plugin'
-    - id: mcp-mebular
-      name: '@deepseek-ai/dsh-mcp-client'
       config:
-        serverName: mebular
-        transport: streamable-http
-        url: http://127.0.0.1:7331/mcp
+        lifecycle: attach
+        panel: true

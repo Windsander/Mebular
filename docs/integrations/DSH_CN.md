@@ -3,85 +3,135 @@
 [English](DSH.md) · [返回文档索引](../README.md)
 
 `@mebular/dsh-plugin` 把 Mebular 的记忆与任务图接入
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH）。它是一个轻量
-DSH bundle：把官方的 `@deepseek-ai/dsh-mcp-client` 注册到**已经在运行**的 Mebular 守护进程上，
-固定使用 **Streamable HTTP**。
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（DSH），并在 DSH
+侧边栏嵌入共享的 Mebular Console。它是零构建 DSH bundle：一条 `mebular` host row 在运行时
+发现 daemon，动态挂载官方 `@deepseek-ai/dsh-mcp-client`（Streamable HTTP），并让 iframe
+指向与桌面 App 相同的 Console。
 
-## 两个面，同一张图
+## 一套 Console，两个壳
 
 | 面 | 职责 |
 | --- | --- |
-| **Mebular App / 守护进程** | 控制面：身份、存储锁、信任、同步、星图控制台。 |
-| **DSH** | Agent 面：在会话里理解并调用 Mebular 的记忆与任务工具。 |
+| **Mebular App / 守护进程** | 控制面：身份、存储锁、信任、同步、星图 Console。 |
+| **DSH** | Agent 面：理解并调用 Mebular 工具，同时在侧边栏显示同一套 Console。 |
 
-插件不会替换 App：它不另起 Mebular 进程、不直接读本地存储、不 import `@mebular/*`，唯一
-契约是守护进程公开的 HTTP `/mcp`。DSH 面板里的控制台入口会**在新浏览器标签页**打开
-`http://127.0.0.1:7331/console`，**不使用 iframe** —— 控制台仍由 App 拥有（鉴权、存储、
-星图、邀请）。
+插件不会替换 App：它不另起第二套 Mebular Console、不直接读本地存储、不 import
+`@mebular/*`。唯一契约是守护进程公开的 HTTP 接口：`/healthz`、`/app/embed/info`、
+`/mcp` 和 `/console/?embed=dsh`。
 
 ## 前提
 
 1. 先启动 Mebular App，或单独运行守护进程：
 
    ```bash
-   mebular serve            # 默认 MCP + 控制台端口 7331
+   mebular serve            # 默认 HTTP / MCP / Console 端口 7331
    curl -sS http://127.0.0.1:7331/healthz
    ```
 
-2. 确认默认端点为 `http://127.0.0.1:7331/mcp`。
+2. 确认默认 MCP 端点为 `http://127.0.0.1:7331/mcp`。
 
 > **用 HTTP，不要用 stdio。** stdio 会另起一个 Mebular 进程，和 App 的守护进程抢 storage
-> lock（`MCP_STORAGE_LOCKED`）。插件的 `cordis.patch.yml` 固定
-> `transport: streamable-http`；不要改成 `stdio`，也不要给条目加 `command:`。
+> lock（`MCP_STORAGE_LOCKED`）。本插件不声明 stdio transport，也不写 `command:`。
 
 ## 安装
 
+npm 包**尚未发布**（`npm view @mebular/dsh-plugin` 返回 404）。从仓库工作树安装：
+
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin
+dsh plugin --profile web add ./packages/dsh-plugin
 ```
 
-包内自带 `cordis.patch.yml`；安装后会向 web profile 插入插件 host entry，
-以及一个 `@deepseek-ai/dsh-mcp-client` 实例，`serverName: mebular`、
-`transport: streamable-http`，URL 指向默认 `/mcp`。重启 DSH 会话使 profile 生效。
+包内自带 `cordis.patch.yml`，只插入一条 host row：
+
+```yaml
+- id: mebular
+  name: '@mebular/dsh-plugin'
+  config:
+    lifecycle: attach
+    panel: true
+```
+
+没有静态 MCP row，也没有写死的 `daemonUrl`。host 激活时解析 daemon URL，用同一个 origin
+挂载官方 MCP client，并注册 sidebar / main 面板。重启 DSH 会话使 profile 生效。
 
 ## 验证
 
 ```bash
-dsh web --dump-config | grep -A3 mebular
+dsh --profile web --dump-config | grep -A6 mebular
 ```
 
-输出块里应包含 `serverName: mebular`、`transport: streamable-http` 和
-`url: http://127.0.0.1:7331/mcp`。DSH 会话里的工具名形如 `mcp__mebular__*`（例如某个记忆
-读写或任务工具）。调用一次并拿到 Mebular 的数据，就说明图已接通。
+输出块里应只有 `mebular` host row（`name: '@mebular/dsh-plugin'`），没有
+`@deepseek-ai/dsh-mcp-client` row，也没有 `url:`。
 
-如果调用返回 `NOT_INITIALIZED`，先在锁定控制台里新建 / 加入忆云；同一个 MCP 会话会自动
-恢复，不需要重启守护进程。如果 App 根本没运行，请先启动它 —— 插件不会替你启动。
+DSH 会话里的工具名形如 `mcp__mebular__*`（例如某个记忆读写或任务工具）。调用一次并拿到
+Mebular 的数据，就说明图已接通。侧边栏 Mebular 面板应显示同一套 Console；它的状态来自
+仅限 loopback 的 `GET /mebular/embed-info`。
 
-## 自定义端口
+如果调用返回 `NOT_INITIALIZED`，先在 Console 里新建 / 加入忆云；同一个 MCP 会话会自动
+恢复，不需要重启守护进程。如果 App 根本没运行，请先启动它 —— `attach` 不会替你启动。
 
-默认端口是 `7331`。如果 Mebular 不在默认位置，两端要改成同一个端口：
+## daemon 发现与端口
 
-- App / 守护进程：改 `~/.mebular/config.json` 的 `mcp.http.port`（或用
-  `mebular serve --port <port>` 启动；`0` 表示自动分配）。
-- 插件：修改安装后 profile 里的 patch（或改包内 `cordis.patch.yml` 后重装），让 `url`
-  与之一致，例如：
+默认端口是 `7331`。host 按以下顺序解析 daemon：
 
-  ```yaml
-  - id: mcp-mebular
-    name: '@deepseek-ai/dsh-mcp-client'
-    config:
-      serverName: mebular
-      transport: streamable-http
-      url: http://127.0.0.1:12345/mcp
-  ```
+1. 插件配置里显式的 `daemonUrl`（拒绝含凭据的 URL）；
+2. `MEBULAR_HTTP_PORT`；
+3. `<home>/runtime.json`（daemon 在 HTTP listener 绑定后写入；`pid` 已不存在则视为 stale
+   并跳过）；
+4. `http://127.0.0.1:7331`。
 
-控制台地址跟随同一个守护端口：`http://127.0.0.1:<port>/console`。
+`<home>` 与 Mebular CLI 一致：`MEBULAR_HOME`，缺省 `~/.mebular`。host 只读取非敏感发现
+字段（`version`、`pid`、`http.host`、`http.port`、`consolePath`、`mcpPath`、
+`embedProtocol`），不读 `config.json`、身份、token 或 store。
+
+换端口时让 daemon 与 DSH 保持一致：
+
+```bash
+MEBULAR_HTTP_PORT=7332 dsh --profile web
+```
+
+面板、`/mebular/embed-info` 与 MCP 桥都跟随同一个解析结果，不需要单独改 MCP URL。
+
+## 生命周期：attach 或 managed
+
+`attach` 是默认值：只探测 `/healthz`，绝不启动或停止进程。没有 daemon 时，面板显示引导，
+官方 MCP client 等待/重连。
+
+`managed` 复用健康 daemon；没有 daemon 时只启动一个
+`mebular serve --port <port>` 子进程，等待 `/healthz`，dispose 时只停止这个 child：
+
+```yaml
+- id: mebular
+  name: '@mebular/dsh-plugin'
+  config:
+    lifecycle: managed
+    cliPath: /absolute/path/to/mebular
+    panel: true
+```
+
+不安装系统服务；不覆盖 `MEBULAR_HOME`；外部 daemon（桌面 App、系统服务、手动
+`mebular serve`）永远不会被停止。CLI 无法解析时降级为 `attach`，状态带
+`reason: managed_cli_missing`。
+
+只想保留 MCP、不显示侧边栏面板时，设置 `panel: false`（适用于 headless / TUI profile）。
+
+## 安全
+
+- `GET /mebular/embed-info` 只接受 loopback 请求；其他来源返回 `404`。
+- 响应不含 token、密钥、home 路径、CLI 路径或进程环境。
+- 只有 daemon、它的 loopback 标记、embed protocol `1` 和
+  `capabilities.embedConsole` 全部满足时才创建 iframe；否则显示占位页。
+- iframe sandbox 为 `allow-scripts allow-same-origin allow-forms`，不授予 top navigation。
+- Console 只在 loopback daemon 的 `?embed=dsh` 下移除 `X-Frame-Options`，并把
+  `frame-ancestors` 限制为 loopback HTTP 祖先。
+- managed child 的日志先脱敏再进入 DSH logger。
 
 ## 插件位置
 
-包代码在本仓库的 `packages/dsh-plugin`，以 `@mebular/dsh-plugin` 发布。GitHub topic 是
-**仓库级**的：`dsh-plugin`、`deepseek-harness`、`agent-memory` 等关键词描述整个 Mebular
-仓库，而不是一个独立包仓库，所以搜索会回到这里。
+包代码在本仓库的 `packages/dsh-plugin`，npm 包名预留为 `@mebular/dsh-plugin`。GitHub
+topic 是**仓库级**的：`dsh-plugin`、`deepseek-harness`、`agent-memory` 等关键词描述整个
+Mebular 仓库，而不是一个独立包仓库，所以搜索会回到这里。完整配置参考见
+[插件 README](../../packages/dsh-plugin/README.md)。
 
 ## 发布与版本
 
@@ -99,4 +149,4 @@ dsh web --dump-config | grep -A3 mebular
 dsh plugin --profile web remove @mebular/dsh-plugin
 ```
 
-这只移除 DSH 侧的 MCP 客户端；Mebular App、数据和运行中的控制台不受影响。
+这只移除 DSH 插件；Mebular App、数据和运行中的 Console 不受影响。

@@ -9,6 +9,7 @@
     "index.html",
     "console.css",
     "console.js",
+    "host.js",
     "dropdown.mjs",
     "i18n.mjs",
     "starfield.js",

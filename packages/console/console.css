@@ -264,6 +264,28 @@ html.console-booting #boot-screen::after {
   text-shadow: 0 0 8px rgba(90, 255, 180, 0.55);
   box-shadow: 0 8px 14px -10px rgba(80, 255, 170, 0.8);
 }
+/* DSH embed：侧栏设置入口（topbar 隐藏时仍可进设置） */
+.embed-only { display: none; }
+.sidebar-settings-btn {
+  background: transparent;
+  border: none;
+  color: rgba(150, 255, 205, 0.55);
+  font: inherit;
+  font-size: 12px;
+  letter-spacing: 2px;
+  padding: 5px 2px 4px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  white-space: nowrap;
+}
+.sidebar-settings-btn:hover { color: #c8ffe3; }
+.sidebar-settings-ico { font-size: 11px; line-height: 1; }
+[data-embed='dsh'] .embed-only { display: list-item; }
+[data-embed='dsh'] .topbar { display: none; }
+[data-embed='dsh'] .app { height: 100vh; }
+[data-embed='dsh'] .layout { flex: 1 1 auto; min-height: 0; }
 .legend-panel {
   width: 230px;
   max-width: 100%;

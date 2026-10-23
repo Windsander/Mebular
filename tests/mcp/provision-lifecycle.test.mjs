@@ -298,7 +298,9 @@ describe('P1 单进程热初始化生命周期', () => {
     expect(c.configAfterInvalidName).toBeNull();
     expect(c.failed.status).toBe(400);
     expect(c.failed.body).toMatchObject({ error: 'STORAGE_INIT_FAILED', phase: 'UNINITIALIZED' });
-    expect(c.filesAfterFailure).toEqual(['lock']);
+    // runtime.json 是「HTTP 监听成功后」的发现文件，失败回滚不会停止仍在运行的 server。
+    expect(c.filesAfterFailure).toContain('runtime.json');
+    expect(c.filesAfterFailure.filter((name) => name !== 'runtime.json')).toEqual(['lock']);
     expect(c.configAfterFailure).toBeNull();
     expect(c.keyAfterFailure).toBeNull();
     expect(c.registryAfterFailure).toBeNull();

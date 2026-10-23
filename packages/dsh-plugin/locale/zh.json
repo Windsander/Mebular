@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Mebular",
+    "description": "将 DSH 连接到已运行的 Mebular daemon：提供 MCP 记忆工具，并在侧边栏嵌入共享的 Mebular Console。"
+  }
+}

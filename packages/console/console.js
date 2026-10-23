@@ -12,6 +12,7 @@ import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
 import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
+import { createConsoleHost, markEmbeddedDocument } from './host.js';
 import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, reconcileDesktopLocale, LOCALE_STORAGE_KEY, formatDate as formatLocaleDate, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
 import { enhanceSelect, enhanceSelects } from './dropdown.mjs';
 
@@ -27,6 +28,10 @@ function enhanceFilterSelects() {
 const params = new URLSearchParams(location.search);
 const MOCK = params.get('mock') === '1';
 const POLL_MS = 3000;
+// 宿主能力统一收敛到 host adapter（desktop preload / DSH iframe / 普通浏览器）。
+// `?embed=dsh` 优先于 preload；data-embed 在任何渲染与 i18n 初始化之前落位。
+const host = createConsoleHost({ search: location.search, win: window });
+markEmbeddedDocument(document, host.kind);
 
 const ICONS = { online: '●', offline: '○', revoked: '⊘' };
 
@@ -1621,7 +1626,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     ${panel('common', `
       ${languageSettingsRowHtml()}
       <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
-      ${wizardRowHtml(typeof window.mebularDesktop?.openWizard === 'function')}
+      ${wizardRowHtml(host.capabilities.openWizard)}
       <section class="settings-section" data-settings-common-status>
         <h3>${escapeHtml(t('settings.common.statusTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
         ${kvRows([
@@ -4541,10 +4546,13 @@ $('#security-badge')?.addEventListener('click', () => {
   }, 0);
 });
 
-$('#open-settings').addEventListener('click', () => {
+function openSettingsModal() {
   $('#settings').hidden = false;
   renderSettings(state.settingsTab ?? 'common');
-});
+}
+$('#open-settings').addEventListener('click', openSettingsModal);
+// DSH embed：topbar 隐藏后侧栏设置入口仍可用（非 .view-btn，不进入 setView 委托）。
+$('#embed-open-settings')?.addEventListener('click', openSettingsModal);
 // E2-A2：顶栏忆云徽章 → 设置 · 常用忆云卡；加入忆云 → 弹层。
 // P3：锁定态顶栏改为「新建忆云 + 加入忆云」，分别走首启 create/join；READY 后加入仍用于多忆云。
 $('#cloud-badge')?.addEventListener('click', () => openCloudSettings());
@@ -4625,9 +4633,9 @@ $('#settings-body').addEventListener('click', (event) => {
     renderSettings(state.settingsTab ?? 'common');
     return;
   }
-  // UX-2：重启向导（设置 · 常用；web 无 preload 桥时该按钮不渲染）
+  // UX-2：重启向导（设置 · 常用；宿主不提供 openWizard 能力时该按钮不渲染）
   if (event.target.closest('#settings-open-wizard')) {
-    if (typeof window.mebularDesktop?.openWizard === 'function') void window.mebularDesktop.openWizard();
+    if (host.capabilities.openWizard) void host.openWizard();
     return;
   }
   // E1：诊断内「手动连接已知设备」（网内传输修复，不改变入网信任）
@@ -5071,7 +5079,7 @@ let cloudInspectTimer = null;
 let cloudRenameBusy = false;
 
 function hasCloudSwitchBridge() {
-  return typeof window.mebularDesktop?.cloudSwitch === 'function';
+  return host.capabilities.cloudSwitch;
 }
 
 function cloudCurrentName() {
@@ -5296,7 +5304,7 @@ function openCloudSwitch(id, name = cloudNameOf(id)) {
 async function performCloudSwitch(id, name = cloudNameOf(id)) {
   const body = $('#cloud-switch-body');
   try {
-    await window.mebularDesktop.cloudSwitch(id);
+    await host.cloudSwitch(id);
     if (body && $('#cloud-switch')?.hidden === false) {
       body.innerHTML = `<p class="cloud-switch-ok" aria-live="polite">${t('cloudSwitch.submitted', { name: escapeHtml(name) })}</p>
         <p class="muted">${t('cloudSwitch.submittedNote')}</p>`;
@@ -6284,7 +6292,7 @@ async function enterNormalConsoleOnce() {
   // UX-2 补丁 4：桌面壳 + macOS hiddenInset → 顶栏避让交通灯安全区（body 类驱动 CSS）
   document.body.classList.toggle(
     'shell-desktop-darwin',
-    Boolean(deepLink.shellDesktop || window.mebularDesktop) && window.mebularDesktop?.platform === 'darwin',
+    Boolean(deepLink.shellDesktop || host.kind === 'desktop') && host.platform === 'darwin',
   );
   stage.start();
   setView(deepLink.view ?? 'map');
@@ -6319,13 +6327,11 @@ if (provisionStatus && provisionStatus.phase !== 'READY') {
   await enterNormalConsole();
 }
 
-// 桌面壳托盘原地导航：启动完成后再接；启动期间到达的事件由 preload 缓冲一次。
-if (typeof window.mebularDesktop?.onConsoleNavigate === 'function') {
-  window.mebularDesktop.onConsoleNavigate((search) => {
-    if (typeof search !== 'string' || !search.startsWith('?')) return;
-    void applyConsoleDeepLink(initialViewFromSearch(search));
-  });
-}
+// 宿主原地导航（桌面托盘 / DSH 桥）：启动完成后再接；启动期间到达的事件由宿主缓冲一次。
+host.onConsoleNavigate((search) => {
+  if (typeof search !== 'string' || !search.startsWith('?')) return;
+  void applyConsoleDeepLink(initialViewFromSearch(search));
+});
 
 // 启动完成标记：locale pack 已加载、静态文案已应用、事件已接线。
 // UI 冒烟 / 外部壳只在该标记出现后交互，避免在 top-level await 期间点到尚未接线的按钮。

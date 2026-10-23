@@ -1,0 +1,192 @@
+// P2 · @mebular/dsh-plugin client 契约：ModuleLoader 包装、slot 形状、无 JSX/构建依赖、无 Mebular import。
+
+import { describe, it, expect } from '@jest/globals';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { runInNewContext } from 'node:vm';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const clientPath = join(here, '..', '..', 'packages', 'dsh-plugin', 'client.js');
+const source = readFileSync(clientPath, 'utf-8');
+
+function loadClientModule(hostConfig) {
+  let registration = null;
+  const fakeWindow = {
+    __ModuleLoader__: {
+      load(value) {
+        registration = value;
+      },
+    },
+  };
+  if (hostConfig !== undefined) fakeWindow.__MEBULAR_DSH__ = hostConfig;
+  runInNewContext(source, { window: fakeWindow }, { filename: clientPath });
+  expect(registration).not.toBeNull();
+  return registration;
+}
+
+function fakeReact() {
+  return {
+    createElement() {
+      return null;
+    },
+  };
+}
+
+describe('P2 @mebular/dsh-plugin client：静态契约', () => {
+  it('使用 window.__ModuleLoader__.load 手写包装，id 为包名', () => {
+    expect(source).toContain('window.__ModuleLoader__.load({');
+    expect(source).toMatch(/id:\s*'@mebular\/dsh-plugin'/);
+    expect(source).toMatch(/factory:\s*\(require\)\s*=>/);
+  });
+
+  it('只 require react，不 require DSH/Mebular 包或 JSX runtime', () => {
+    const required = [...source.matchAll(/require\(\s*(['"])([^'"]+)\1\s*\)/g)].map((match) => match[2]);
+    expect(required).toEqual(['react']);
+    expect(source).not.toContain('react/jsx-runtime');
+    expect(source).not.toMatch(/from\s+['"]react['"]/);
+    expect(source).toContain('React.createElement');
+  });
+
+  it('没有 JSX 语法，不需要构建步骤', () => {
+    expect(source).not.toMatch(/<[A-Za-z][A-Za-z0-9]*[\s/>]/);
+    expect(source).not.toMatch(/\.jsx?['"]/);
+  });
+
+  it('注册 sidebar.panellist（id）与根级 main（key）', () => {
+    expect(source).toContain("ctx.slots.inject('sidebar.panellist'");
+    expect(source).toContain("name: 'sidebar.panellist'");
+    expect(source).toContain("id: 'mebular'");
+    expect(source).toContain('order: 10');
+    expect(source).toContain("label: 'Mebular'");
+    expect(source).toContain("ctx.slots.inject('main'");
+    expect(source).toContain("name: 'main'");
+    expect(source).toContain("key: 'mebular'");
+  });
+
+  it('iframe 使用 embed=dsh、sandbox 白名单与固定发现路由', () => {
+    expect(source).toContain("/mebular/embed-info");
+    expect(source).toContain('?embed=dsh');
+    expect(source).toContain("sandbox: 'allow-scripts allow-same-origin allow-forms'");
+    expect(source).toContain('referrerPolicy:');
+    expect(source).toContain('在浏览器打开 Console');
+    expect(source).toContain('frameFailed');
+  });
+
+  it('处理 starting / managed_cli_missing / managed_start_failed，且不发 host 写请求', () => {
+    expect(source).toContain("info?.status === 'starting'");
+    expect(source).toContain('startingTitle');
+    expect(source).toContain('startingBody');
+    expect(source).toContain('managed_cli_missing');
+    expect(source).toContain('managed_start_failed');
+    expect(source).toContain('cliMissingTitle');
+    expect(source).not.toContain('mebular:request');
+    expect(source).not.toContain('postMessage');
+  });
+
+  it('读取 host tapIndex 注入的 panel 全局，且只在 panel === false 时跳过注册', () => {
+    expect(source).toContain('__MEBULAR_DSH__');
+    expect(source).toMatch(/panel\s*===\s*false/);
+    expect(source).toContain('if (!panelEnabled()) return;');
+  });
+
+  it('版本不兼容时显示升级提示，并要求 embedProtocol === 1', () => {
+    expect(source).toContain('info?.embedProtocol === 1');
+    expect(source).toContain('embed_protocol_unsupported');
+    expect(source).toContain('升级插件或 Mebular');
+  });
+
+  it('不 import @mebular/* 或 Console 资源', () => {
+    const specifiers = [
+      ...[...source.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((match) => match[1]),
+      ...[...source.matchAll(/(?:^|\n)\s*import\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]/g)].map(
+        (match) => match[1],
+      ),
+    ];
+    expect(specifiers.filter((specifier) => specifier.startsWith('@mebular/'))).toEqual([]);
+    expect(source).not.toMatch(/packages\/console/);
+    expect(source).not.toContain('console.js');
+  });
+});
+
+describe('P2 @mebular/dsh-plugin client：运行时注册形状', () => {
+  it('factory 暴露 apply + inject，apply 注册两个槽位', () => {
+    const registration = loadClientModule();
+    expect(registration.id).toBe('@mebular/dsh-plugin');
+    expect(typeof registration.factory).toBe('function');
+
+    const exportsObject = registration.factory((name) => {
+      expect(name).toBe('react');
+      return fakeReact();
+    });
+    expect(exportsObject.inject).toEqual(['slots']);
+    expect(typeof exportsObject.apply).toBe('function');
+
+    const events = [];
+    const ctx = {
+      slots: {
+        inject(name, factory) {
+          events.push({ type: 'inject', name });
+          const dispose = factory();
+          events.push({ type: 'dispose', value: typeof dispose });
+          return dispose;
+        },
+        register(options) {
+          events.push({ type: 'register', options });
+          return () => {};
+        },
+      },
+    };
+
+    exportsObject.apply(ctx);
+
+    expect(events.filter((event) => event.type === 'inject').map((event) => event.name)).toEqual([
+      'sidebar.panellist',
+      'main',
+    ]);
+    const registrations = events.filter((event) => event.type === 'register').map((event) => event.options);
+    expect(registrations).toHaveLength(2);
+    expect(registrations[0]).toMatchObject({
+      name: 'sidebar.panellist',
+      id: 'mebular',
+      order: 10,
+      label: 'Mebular',
+    });
+    expect(registrations[1]).toMatchObject({
+      name: 'main',
+      key: 'mebular',
+    });
+    expect(events.filter((event) => event.type === 'dispose').every((event) => event.value === 'function')).toBe(true);
+  });
+
+  it('host 全局 panel:false 时 apply 不注册 sidebar/main；缺省仍注册', () => {
+    for (const [hostConfig, expectedCalls] of [
+      [{ panel: false }, 0],
+      [{ panel: true }, 2],
+      [undefined, 2],
+      [{ panel: 'false' }, 2],
+    ]) {
+      const registration = loadClientModule(hostConfig);
+      const exportsObject = registration.factory((name) => {
+        expect(name).toBe('react');
+        return fakeReact();
+      });
+      const events = [];
+      const ctx = {
+        slots: {
+          inject(name, factory) {
+            events.push({ type: 'inject', name });
+            factory();
+          },
+          register() {
+            events.push({ type: 'register' });
+            return () => {};
+          },
+        },
+      };
+      exportsObject.apply(ctx);
+      expect(events.filter((event) => event.type === 'inject')).toHaveLength(expectedCalls);
+      expect(events.filter((event) => event.type === 'register')).toHaveLength(expectedCalls);
+    }
+  });
+});

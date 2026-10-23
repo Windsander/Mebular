@@ -1,28 +1,35 @@
 {
   "name": "@mebular/dsh-plugin",
   "version": "0.1.0",
-  "description": "Mebular memory and task graph for DeepSeek Harness",
+  "description": "Mebular memory, task graph, and shared Console for DeepSeek Harness",
   "license": "MIT",
+  "author": "Windsander",
   "type": "module",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
-    "./client": "./client/index.cjs",
-    "./package.json": "./package.json"
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*": "./locale/*"
   },
   "files": [
     "index.js",
+    "client.js",
     "cordis.patch.yml",
-    "client",
+    "locale",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "icon.svg",
+    "screenshots.json",
+    "assets"
   ],
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
     "mebular",
     "mcp",
-    "agent-memory"
+    "agent-memory",
+    "console"
   ],
   "repository": {
     "type": "git",
@@ -40,5 +47,12 @@
       "platform": "web",
       "inject": []
     }
+  },
+  "engines": {
+    "node": ">=22.19",
+    "dsh": ">=0.2.1-rc.2 <0.3.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-mcp-client": ">=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-rc.1 <0.3.0-0"
   }
 }

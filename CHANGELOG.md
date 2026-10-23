@@ -17,11 +17,12 @@ next `## [` heading. Keep that section self-contained.
 
 Nothing yet.
 
-## [v0.1.0] - 2026-10-21
+## [v0.1.0] - 2026-10-23
 
 Initial release. Five lockstep packages: `@mebular/core`, `@mebular/service`,
 `@mebular/fleet`, `@mebular/mcp`, `@mebular/skill`. The root bundle `@mebular/core`
-provides both the `mebular` and `fleet` CLIs.
+provides both the `mebular` and `fleet` CLIs. The desktop app is a source-run M1 shell
+in this release; signed installers are not included.
 
 ### Highlights (EN)
 
@@ -38,6 +39,7 @@ provides both the `mebular` and `fleet` CLIs.
 - **MCP SDK 2.3.1 security upgrade** — the vulnerable 2.0.0 production dependency is replaced; `npm audit --omit=dev` is clean, and the real MCP client handshake is covered by tests.
 - **One MCP surface for any assistant** — 29 tools (13 memory + 16 task) over stdio and Streamable HTTP, with OAuth / bearer hardening, per-tool scopes and the same registry behind the CLI and the console.
 - **Fleet task collaboration across devices** — tasks are a DAG inside shared memory (`causedBy`, cycle-free): dispatch, claim, progress, result and negotiation (clarify / counter / accept / reject), with the memory channel as the only remote surface — no general remote RPC.
+- **Distributed star-map console** — the main console shows every device in the Cloud, with shared-subscription base edges, hover task-domain lanes (blue = can send, gold = can receive, gray = unreachable), and live fleet traffic driven by real task events. Offline or no-shared-subscription devices stay gray dashed; online shared edges are subdued and emit a low-frequency sound-wave pulse that fades back into the base edge, so the stars remain the visual focus.
 - **Assistant onboarding in one pass** — 7 built-in descriptors (OpenChamber, Hermes, OpenCode, Claude Code, Claude Desktop, Cursor, DSH) plus a custom snippet path; each goes through detect → apply → verify, and the desktop one-click flow can connect installed assistants before a Cloud exists.
 - **Portable by design** — Canonical Memory Format (CMF) v1 with adapters for Obsidian, log journals, json-memo and Hermes, plus installable memory / task skills so the behaviour layer travels with the data.
 
@@ -56,6 +58,7 @@ provides both the `mebular` and `fleet` CLIs.
 - **MCP SDK 2.3.1 安全升级** —— 替换存在漏洞的 2.0.0 生产依赖；`npm audit --omit=dev` 清零，真实 MCP client 握手纳入测试。
 - **面向任意助手的统一 MCP 工具面** —— stdio 与 Streamable HTTP 两种接入，29 个工具（13 记忆 + 16 任务），带 OAuth / bearer 加固与逐工具 scope；CLI 与控制台共用同一份注册表。
 - **跨设备 fleet 任务协作** —— 任务是共享记忆里的 DAG（`causedBy`，禁环）：派发、认领、进度、结果与协商（clarify / counter / accept / reject），唯一远程面就是记忆通道，不提供通用远程调用。
+- **分布式星图控制台** —— 主控制台显示忆云内所有设备、共同订阅的基础边、悬停任务域航道（蓝 = 可发出、金 = 可接收、灰 = 不可达），以及真实任务事件驱动的实时 fleet 流量。离线或无共同订阅设备保持灰色虚线；在线共同订阅边压暗，并以低频声波脉冲提示，两端渐隐回基础线，让星体保持主视觉。
 - **助手一键接入** —— 7 个内置描述符（OpenChamber、Hermes、OpenCode、Claude Code、Claude Desktop、Cursor、DSH）加自定义片段；统一走探测 → 写入 → 验证三步；桌面一键流程可以在忆云存在之前先接好已装助手。
 - **可带走的设计** —— Canonical Memory Format（CMF）v1，配 Obsidian、日志型端、json-memo、Hermes 适配器；记忆 / 任务两个 Skill 可安装，行为层随数据一起迁移。
 

@@ -14,9 +14,11 @@
 
 ---
 
-![Mebular 实机控制台：星图、守护状态和记忆数量](assets/console-starmap-cn.jpg)
-
-<p align="center"><sub>实机控制台：星图、守护状态和记忆数量。</sub></p>
+<p align="center">
+  <img src="assets/console-onboarding-cn.jpg" width="49%" alt="在 Mebular 控制台新建忆云">
+  <img src="assets/console-starmap-cn.jpg" width="49%" alt="本机星图视角：5 台设备已连接到本机">
+</p>
+<p align="center"><sub>第一台设备新建忆云 · 本机视角：5 台设备已连接到本机。<br>蓝线与金线表示本机 ↔ 各设备的双向授权/连接关系，不是设备之间的互连。</sub></p>
 
 ## 是什么
 

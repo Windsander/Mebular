@@ -34,6 +34,8 @@ Prefer **image > table > prose**.
 - If neither a visual nor a table is possible, keep the prose to two sentences.
 - Use a diagram for a concept. Use a real screenshot only for current UI.
 - Use a current console screenshot as the hero when one is available; use diagrams to explain the network and setup.
+- Use two screenshots side by side: onboarding/new Cloud on the left, a populated star map on the right. Keep both screenshots in the README language.
+- Show a real multi-device star map (4–7 devices) when demonstrating the network; a one-node map undersells it.
 - Never fake UI, never reuse an expired screenshot, and never link to an image that does not exist yet.
 - Put captions in `<sub>` under the image; keep them to one line.
 - Mebular visual anchors: banner, horizontal network overview, three-step desktop flow, pairing flow, and a four-column feature strip. Reuse them instead of inventing a new visual language.
@@ -117,6 +119,7 @@ If the draft is over budget, remove a section before shortening every sentence.
 - Desktop app is the shortest path, but browser, CLI, and agent paths must remain available.
 - Do not make the GitHub Releases download the only entry point; a desktop build may not exist yet.
 - Use current, localized console screenshots for the hero. Capture a clean state: `Daemon Running`, P2P on, no warning banner, friendly device name, no temp paths or tokens.
+- Pair the onboarding screenshot with a populated star map (4–7 devices) so the fleet is visible.
 - Never reuse `console-starmap-about.jpg` or `console-settings-common.jpg`; they show the old console.
 - The star map is an ego network: the local node ↔ peers. Caption it as a local view, and explain blue/gold lines as two-way local ↔ device authorization/connection, never as a full mesh.
 - Do not modify `starfield.js` / `console.js` or draw fake peer-to-peer edges for a README screenshot. A network view is a product change with backend semantics and tests.

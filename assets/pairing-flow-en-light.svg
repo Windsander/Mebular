@@ -1,44 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 320" width="980" height="320" role="img" aria-label="Pairing flow: device A starts and invites, device B joins with the QR code, connection and the default grant then happen automatically">
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="410" viewBox="0 0 1080 410" role="img" aria-label="PAIRING">
   <defs>
-    <style>
-      .bg{fill:#ffffff}.card{fill:#f8fbff;stroke:#d1d9e0;stroke-width:1.5;rx:10}
-      .step{fill:#f1f6ff;stroke:#7fa6d9;stroke-width:1.4;rx:8}
-      .code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;fill:#1e3a5f;font-size:12px}
-      .t{font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Helvetica,Arial;fill:#1f2328;font-size:14px}
-      .h{font-size:16px;font-weight:700;fill:#0b1a33}.s{font-size:12px;fill:#5a7290}
-      .drop{fill:#ecfdf5;stroke:#0f9f6e;stroke-width:1.5;rx:8}
-      .l{stroke:#7a8ba3;stroke-width:1.6;fill:none;marker-end:url(#a)}
-      .lg{stroke:#0f9f6e;stroke-width:1.8;fill:none;marker-end:url(#g)}
-      .lb{font-size:12px;fill:#5a7290}
-    </style>
-    <marker id="a" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#7a8ba3"/></marker>
-    <marker id="g" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto"><path d="M0,0 L8,3 L0,6 z" fill="#0f9f6e"/></marker>
+    <radialGradient id="glow" cx="50%" cy="38%" r="72%">
+      <stop offset="0%" stop-color="#dceaff" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
   </defs>
-  <rect class="bg" width="980" height="320"/>
-  <text class="h" x="24" y="32">Pairing: invite once, join once, everything else is automatic</text>
-  <text class="s" x="24" y="52">Any step can be run by your agent (skill: packages/skill/SETUP.md).</text>
-
-  <!-- Device A -->
-  <rect class="card" x="24" y="72" width="420" height="150"/>
-  <text class="t" x="44" y="98">Device A — trust root</text>
-  <rect class="step" x="44" y="112" width="380" height="28"/><text class="code" x="56" y="131">fleet quickstart --daemon --dir ~/.mebular --device A</text>
-  <rect class="step" x="44" y="148" width="380" height="28"/><text class="code" x="56" y="167">fleet invite --dir ~/.mebular</text>
-  <rect class="step" x="44" y="184" width="380" height="28"/><text class="code" x="56" y="203">prints a QR code + a token (hand them over)</text>
-
-  <!-- Device B -->
-  <rect class="card" x="536" y="72" width="420" height="150"/>
-  <text class="t" x="556" y="98">Device B — new device</text>
-  <rect class="step" x="556" y="112" width="380" height="28"/><text class="code" x="568" y="131">scan the QR code (or paste the token)</text>
-  <rect class="step" x="556" y="148" width="380" height="28"/><text class="code" x="568" y="167">fleet join --qr "&lt;content&gt;" --daemon \</text>
-  <rect class="step" x="556" y="184" width="380" height="28"/><text class="code" x="568" y="203">  --dir ~/.mebular --device B</text>
-
-  <!-- handoff -->
-  <path class="l" d="M444,124 L532,124"/>
-  <text class="lb" x="446" y="116">QR / token</text>
-
-  <!-- automatic result -->
-  <path class="lg" d="M234,226 L234,254 L746,254 L746,226"/>
-  <rect class="drop" x="234" y="256" width="512" height="44"/>
-  <text class="t" x="252" y="276">Automatically: connect (LAN / direct / relay / hole-punch chosen for you)</text>
-  <text class="t" x="252" y="294">+ default grant on the token’s domain — 24h, revocable</text>
+  <rect width="1080" height="410" fill="#ffffff"/>
+  <ellipse cx="540" cy="164" rx="594" ry="213.20000000000002" fill="url(#glow)"/>
+  <text x="40" y="44" font-family="'SF Pro Display','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#0b1a33" font-weight="700" letter-spacing="1.2">PAIRING</text><text x="40" y="72" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#5a7290">Invite once, join once, everything else is automatic.</text><rect x="40" y="104" width="480" height="184" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/><text x="64" y="134" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="17" fill="#0b1a33" font-weight="700">Device A · trust root</text><rect x="64" y="150" width="432" height="30" rx="8" fill="#f2f7ff" stroke="#c9d8ee" stroke-width="1.2"/><text x="78" y="170" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="12" fill="#2f6fce">fleet quickstart --daemon</text><rect x="64" y="188" width="432" height="30" rx="8" fill="#f2f7ff" stroke="#c9d8ee" stroke-width="1.2"/><text x="78" y="208" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="12" fill="#1e4f8a">fleet invite</text><rect x="64" y="226" width="432" height="30" rx="8" fill="#f2f7ff" stroke="#c9d8ee" stroke-width="1.2"/><text x="78" y="246" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="12" fill="#1e4f8a">prints QR + token</text><rect x="560" y="104" width="480" height="184" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/><text x="584" y="134" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="17" fill="#0b1a33" font-weight="700">Device B · new device</text><rect x="584" y="150" width="432" height="30" rx="8" fill="#f2f7ff" stroke="#c9d8ee" stroke-width="1.2"/><text x="598" y="170" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="12" fill="#2f6fce">scan QR / paste token</text><rect x="584" y="188" width="432" height="30" rx="8" fill="#f2f7ff" stroke="#c9d8ee" stroke-width="1.2"/><text x="598" y="208" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="12" fill="#1e4f8a">fleet join --qr …</text><rect x="584" y="226" width="432" height="30" rx="8" fill="#f2f7ff" stroke="#c9d8ee" stroke-width="1.2"/><text x="598" y="246" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="12" fill="#1e4f8a">connects automatically</text><path d="M520,196 H556" stroke="#7fa6d9" stroke-width="1.4" stroke-dasharray="4 4"/><path d="M552,191 L560,196 L552,201" fill="#7fa6d9"/><text x="538" y="184" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="10.5" fill="#2f6fce" text-anchor="middle">QR / token</text><rect x="40" y="314" width="1000" height="68" rx="12" fill="#ecfdf5" stroke="#0f9f6e" stroke-width="1.2"/><path d="M62,342 L68,348 L78,334" stroke="#0f9f6e" stroke-width="2" fill="none"/><text x="94" y="343" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12.5" fill="#0b1a33">Automatic: connect over LAN / direct / relay / hole-punch</text><text x="94" y="365" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12.5" fill="#0b1a33">+ default grant on the token’s domain — 24h, revocable</text>
 </svg>

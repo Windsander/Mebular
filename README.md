@@ -2,13 +2,16 @@
 
 ![Mebular](assets/banner.svg)
 
-**A distributed memory network for your AI assistants.**
+**One memory. Every assistant. Every device.**
 
-Memory and tasks stay on your devices.<br>Devices sync directly. One shared graph.
+A distributed memory network for your AI assistants.<br>
+Memory and tasks stay on your devices; devices sync directly.
 
-[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE) [![Node.js >=20](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white)](docs/getting-started/QUICKSTART.md) [![MCP](https://img.shields.io/badge/MCP-5A67D8)](docs/getting-started/QUICKSTART.md)
+[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE) [![Node.js >=20](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white&style=flat-square)](docs/getting-started/QUICKSTART.md) [![MCP](https://img.shields.io/badge/MCP-5A67D8?style=flat-square)](docs/getting-started/QUICKSTART.md)
 
-[Website](https://mebular.cyberfederal.io) · [Quickstart](docs/getting-started/QUICKSTART.md) · [中文](README_CN.md)
+[Start in 5 minutes](docs/getting-started/QUICKSTART.md) · [How it works](docs/architecture/ARCHITECT.md) · [Website](https://mebular.cyberfederal.io) · [中文](README_CN.md)
+
+<sub>No hosted account · No central coordinator</sub>
 
 </div>
 

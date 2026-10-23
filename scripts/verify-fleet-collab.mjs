@@ -167,8 +167,16 @@ try {
   check('1d-a 负例：成环被拒（DAG_CYCLE）', bad.ok && dagCycleRejected(bad.state), { status: bad.state?.status, reason: bad.state?.reason });
 
   // ---------------- 1d-b 协商 ----------------
+  // 消息级证据（L1）：协商不是「只看最终 status」。每个用例都保留
+  //   B 发起 counter → A 经真实同步收到 → A 自己的 policy 回应 → B 应用后裁定
+  // 这条链上的每一条消息/事件；屏障只**观察**这些真实产物，不注入任何消息。
+  const negA = negotiationMessageStore(a);
   const negB = negotiationMessageStore(b);
-  const n2 = node({ store: negotiationMessageStore(a), maxRounds: 3, policy: 'accept' });
+  const kindsOf = async (store, taskId) =>
+    (await store.all())
+      .filter((m) => m.taskId === taskId)
+      .map((m) => `${m.kind}#${m.round}@${m.from.device}`);
+  const n2 = node({ store: negA, maxRounds: 3, policy: 'accept' });
   const { taskId: nid } = await n2.submit({ intent: 'nego:x', to: { device: 'device-B', agent: 'echo' } });
   const { worker: w3 } = await makeWorker({ negotiation: { store: negB, maxRounds: 3, enabled: (s) => s.intent.startsWith('nego:') } });
   const l3 = loop(w3);
@@ -178,27 +186,72 @@ try {
   const neg = await waitForTaskState(n2, nid, negotiationDone);
   l3.stop();
   await l3.done;
+  const doneKindsA = await kindsOf(negA, nid);
+  const doneKindsB = await kindsOf(negB, nid);
   check('1d-b 协商：counter → accept → 完成', neg.ok && negotiationDone(neg.state), {
     ok: neg.ok,
     status: neg.state?.status,
     reason: neg.state?.reason,
-    bKinds: (await negB.all()).map((m) => `${m.kind}#${m.round}@${m.from.device}`),
-    aKinds: (await negotiationMessageStore(a).all()).map((m) => `${m.kind}#${m.round}@${m.from.device}`),
+    aKinds: doneKindsA,
+    bKinds: doneKindsB,
   });
+  check(
+    '1d-b 协商：消息级链路（B counter#1 → A 同步收到 → A accept#1 → B 同步收到）',
+    doneKindsB.includes('counter#1@device-B')
+      && doneKindsA.includes('counter#1@device-B')
+      && doneKindsA.includes('accept#1@device-A')
+      && doneKindsB.includes('accept#1@device-A'),
+    { aKinds: doneKindsA, bKinds: doneKindsB },
+  );
 
-  const n3 = node({ store: negotiationMessageStore(a), maxRounds: 1, policy: 'counter' });
+  const n3 = node({ store: negA, maxRounds: 1, policy: 'counter' });
   const { taskId: oid } = await n3.submit({ intent: 'nego:over', to: { device: 'device-B', agent: 'echo' } });
   const { worker: w4 } = await makeWorker({ negotiation: { store: negB, maxRounds: 1, enabled: (s) => s.intent.startsWith('nego:') } });
   const l4 = loop(w4);
+  // **只观察**真实复制/协商产物：驱动仅用公开的 pollOnce + applyNegotiationPolicy
+  // （counter#2 由 A 自己的 policy 计算并 append）与两端 anti-entropy。超时即 FAIL。
+  const driveOver = async () => {
+    await n3.pollOnce();
+    await n3.applyNegotiationPolicy();
+    await a.sync.runAntiEntropyCycle().catch(() => undefined);
+    await b.sync.runAntiEntropyCycle().catch(() => undefined);
+  };
+  const waitForOver = (predicate, timeoutMs = 15000) =>
+    waitFor(async () => {
+      await driveOver();
+      return predicate(await kindsOf(negA, oid), await kindsOf(negB, oid));
+    }, timeoutMs);
+  const bProducedCounter1 = await waitFor(async () => (await kindsOf(negB, oid)).includes('counter#1@device-B'), 15000);
+  check('1d-b 超限：B 端存在 over task 的 counter#1@device-B', bProducedCounter1, { bKinds: await kindsOf(negB, oid) });
+  const aSawBCounter = await waitForOver((ak) => ak.includes('counter#1@device-B'));
+  check('1d-b 超限：A 经真实同步收到 B 的 counter#1@device-B', aSawBCounter, { aKinds: await kindsOf(negA, oid) });
+  const aProducedCounter2 = await waitForOver((ak) => ak.includes('counter#2@device-A'));
+  check('1d-b 超限：A 的 policy 产出 counter#2@device-A（未被替身注入）', aProducedCounter2, { aKinds: await kindsOf(negA, oid) });
+  const bSawCounter2 = await waitForOver((_ak, bk) => bk.includes('counter#2@device-A'));
+  check('1d-b 超限：B 经真实同步收到 counter#2@device-A', bSawCounter2, { bKinds: await kindsOf(negB, oid) });
+  const bFailed = await waitFor(async () => {
+    await driveOver();
+    return (await storeB.byTask(oid)).some(
+      (e) => e.type === 'failed' && e.actor?.device === 'device-B' && e.reason === 'NEGOTIATION_LIMIT: 2>1',
+    );
+  }, 15000);
+  check('1d-b 超限：B 的 worker 依 counter#2 裁定 NEGOTIATION_LIMIT: 2>1', bFailed, {
+    bEvents: (await storeB.byTask(oid)).map((e) => `${e.type}@${e.actor?.device}:${e.reason ?? ''}`),
+  });
   const limit = await waitForTaskState(n3, oid, negotiationLimit);
   l4.stop();
   await l4.done;
-  check('1d-b 超限 → failed NEGOTIATION_LIMIT', limit.ok && negotiationLimit(limit.state), {
+  check('1d-b 超限 → failed NEGOTIATION_LIMIT', limit.ok && negotiationLimit(limit.state) && bProducedCounter1 && aSawBCounter && aProducedCounter2 && bSawCounter2 && bFailed, {
     ok: limit.ok,
     status: limit.state?.status,
     reason: limit.state?.reason,
-    bKinds: (await negB.all()).map((m) => `${m.kind}#${m.round}@${m.from.device}`),
-    aKinds: (await negotiationMessageStore(a).all()).map((m) => `${m.kind}#${m.round}@${m.from.device}`),
+    bProducedCounter1,
+    aSawBCounter,
+    aProducedCounter2,
+    bSawCounter2,
+    bFailed,
+    bKinds: await kindsOf(negB, oid),
+    aKinds: await kindsOf(negA, oid),
   });
 
   // ---------------- 1d-c 闲聊 ----------------

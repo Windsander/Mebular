@@ -1800,7 +1800,6 @@ details.share[open] summary::before { content: "▾ "; }
 @media (max-width: 900px) {
   .sec-kv { grid-template-columns: minmax(0, 1fr); }
   .sec-actions { justify-content: flex-start; }
-  #settings-security-slot { padding: 10px; }
   .sec-pairing-lg { font-size: 18px; letter-spacing: 4px; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -1950,4 +1949,178 @@ html[lang="en-US"] .btn-small { line-height: 1.5; }
     gap: 8px;
     min-height: 0;
   }
+}
+
+/* ---------- S3 · 安全 tab：B 方案（状态卡 + 弹框，不内联展开） ---------- */
+/* 首屏只有状态 + 一句后果 + 动作；三档差异/边界/降级进「更改等级」弹框，
+   配对号/批准/拒绝进「核对处理」弹框。卡片边框用 ::after 绘制，section 自身 border 保持 0
+   （设置壳首段无上边框的契约不变）。 */
+#settings-security-slot {
+  display: grid;
+  gap: 8px;
+  align-content: start;
+}
+#settings-security-slot > .settings-section.sec-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 0 11px;
+  align-items: start;
+  border: 0;
+  border-radius: var(--radius);
+  padding: 9px 12px 8px 10px;
+  background: linear-gradient(90deg, rgba(109, 255, 184, 0.035), rgba(2, 16, 11, 0.25));
+}
+#settings-security-slot > .settings-section.sec-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 1px solid rgba(80, 255, 170, 0.18);
+  border-radius: inherit;
+  pointer-events: none;
+}
+#settings-security-slot > .settings-section.sec-card::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 9px;
+  bottom: 9px;
+  width: 2px;
+  border-radius: 2px;
+  background: rgba(109, 255, 184, 0.5);
+  box-shadow: 0 0 8px rgba(60, 255, 160, 0.35);
+}
+.sec-card-idx {
+  padding-top: 2px;
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--crt-faint);
+  font-variant-numeric: tabular-nums;
+}
+.sec-card-main { min-width: 0; }
+.sec-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 19px; }
+.sec-card-head h3 { margin: 0; font-size: 13px; text-shadow: none; }
+.sec-card-value { display: flex; align-items: baseline; gap: 8px; margin: 5px 0 0; }
+.sec-card-value strong {
+  font-size: 19px;
+  line-height: 1.15;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #d6ffea;
+  text-shadow: none;
+}
+.sec-card-value span { font-size: 12px; color: var(--crt-dim); }
+.sec-card-line {
+  margin: 4px 0 0;
+  max-width: 62ch;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--crt-dim);
+  text-shadow: none;
+}
+.sec-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--crt-dim);
+  text-shadow: none;
+}
+.sec-card-meta code {
+  padding: 1px 5px;
+  border: 1px solid rgba(80, 255, 170, 0.14);
+  border-radius: 3px;
+  background: rgba(109, 255, 184, 0.06);
+  color: #bfffe0;
+  font: inherit;
+  overflow-wrap: anywhere;
+}
+.sec-sep { color: var(--crt-faint); }
+.sec-card-warn { color: #ffd27a; }
+.sec-card-actions { display: flex; align-items: flex-start; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.sec-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: #6dffb8;
+  box-shadow: 0 0 6px rgba(109, 255, 184, 0.7);
+}
+.sec-dot.is-off { background: transparent; border: 1px solid rgba(160, 255, 205, 0.45); box-shadow: none; }
+.sec-tag-current {
+  border-color: rgba(109, 255, 184, 0.55);
+  background: rgba(109, 255, 184, 0.08);
+  color: var(--crt-bright);
+}
+
+/* 「更改等级」弹框内的三档列表（复用原档位行） */
+.sec-ladder-modal { margin: 8px 0 4px; }
+.sec-ladder-modal .sec-tier { padding: 7px 0; }
+.sec-tier-note { margin: 2px 0 0; font-size: 11.5px; line-height: 1.5; color: var(--crt-muted); text-shadow: none; }
+
+/* 待批准：页面只留一行；详情在「核对处理」弹框 */
+.sec-pending {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 9px 11px;
+  border: 1px solid rgba(255, 210, 122, 0.34);
+  border-left: 2px solid #ffd27a;
+  border-radius: 7px;
+  background: rgba(60, 42, 8, 0.26);
+}
+.sec-pending .btn { justify-self: end; }
+.sec-pending-ico { color: #ffd27a; font-size: 14px; line-height: 1; }
+.sec-pending-copy { min-width: 0; }
+.sec-pending-copy b { display: block; font-size: 12px; font-weight: 650; color: #ffe2a6; }
+.sec-pending-copy span {
+  display: block;
+  margin-top: 2px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: rgba(255, 226, 166, 0.72);
+  overflow-wrap: anywhere;
+}
+
+/* 「核对处理」弹框内的审批行 */
+.sec-review-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 0;
+  border-top: 1px dashed rgba(255, 210, 122, 0.22);
+}
+.sec-review-row:first-child { border-top: 0; padding-top: 0; }
+.sec-review-row .sec-pairing { justify-self: start; width: fit-content; }
+.sec-approval-head { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 12px; }
+.sec-approval-head b { color: #ffe2a6; }
+.sec-approval-head span { color: rgba(255, 226, 166, 0.72); }
+.sec-approval-meta { margin: 0; font-size: 11px; line-height: 1.5; color: rgba(255, 226, 166, 0.72); }
+.sec-approval-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+.sec-outgoing { margin: 6px 0 0; font-size: 11.5px; line-height: 1.5; color: rgba(255, 226, 166, 0.72); overflow-wrap: anywhere; }
+.sec-rejections-line {
+  margin: 0;
+  max-width: none;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #ffd27a;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 900px) {
+  #settings-security-slot > .settings-section.sec-card {
+    grid-template-columns: 20px minmax(0, 1fr);
+    padding: 9px 11px 8px 9px;
+  }
+  .sec-card-actions {
+    grid-column: 2 / -1;
+    justify-content: flex-start;
+    padding-top: 9px;
+  }
+  .sec-card-actions .btn { flex: 0 0 auto; }
+  .sec-pending { grid-template-columns: auto minmax(0, 1fr); }
+  .sec-pending .btn { grid-column: 1 / -1; justify-self: start; margin-left: 20px; }
 }

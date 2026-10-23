@@ -297,7 +297,16 @@ check(
   readme.includes('dsh plugin --profile web add ./packages/dsh-plugin'),
 );
 check('README documents the npm name', readme.includes('@mebular/dsh-plugin'));
-check('README states npm is not published yet', /未发布|not published/i.test(readme));
+check(
+  'README documents npm install',
+  readme.includes('dsh plugin --profile web add @mebular/dsh-plugin@0.1.0'),
+);
+check(
+  'README does not claim the npm package is unpublished',
+  !readme
+    .split(/\n\s*\n/)
+    .some((paragraph) => /@mebular\/dsh-plugin/.test(paragraph) && /未发布|not published/i.test(paragraph)),
+);
 check('README documents mcp__mebular__* tools', readme.includes('mcp__mebular__*'));
 check('README documents the shared Console', /共享.*Console|Console.*同一/.test(readme));
 check('README documents app independence', /App.*(继续|独立)|Mebular daemon.*(继续|独立)/.test(readme));

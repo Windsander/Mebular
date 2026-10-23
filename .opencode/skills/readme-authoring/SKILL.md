@@ -118,6 +118,8 @@ If the draft is over budget, remove a section before shortening every sentence.
 - Do not make the GitHub Releases download the only entry point; a desktop build may not exist yet.
 - Use current, localized console screenshots for the hero. Capture a clean state: `Daemon Running`, P2P on, no warning banner, friendly device name, no temp paths or tokens.
 - Never reuse `console-starmap-about.jpg` or `console-settings-common.jpg`; they show the old console.
+- The star map is an ego network: the local node ↔ peers. Caption it as a local view, and explain blue/gold lines as two-way local ↔ device authorization/connection, never as a full mesh.
+- Do not modify `starfield.js` / `console.js` or draw fake peer-to-peer edges for a README screenshot. A network view is a product change with backend semantics and tests.
 - Keep `assets/banner.svg` unchanged.
 - Do not put protocol details (DAG, fleet, CMF, sealing, certificate chains) on the first screen.
 

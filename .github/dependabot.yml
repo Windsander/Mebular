@@ -1,5 +1,6 @@
 version: 2
 updates:
+  # ── 根目录：npm workspace ────────────────────────────────────────────────
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
@@ -8,10 +9,65 @@ updates:
     commit-message:
       prefix: "build(deps)"
     groups:
-      # minor/patch 合并为一个 PR；major 不匹配此分组，仍按依赖单独提 PR
-      npm-minor-patch:
+      # TypeScript 工具链单独成组：parser 与 eslint-plugin 必须同版本一起升，
+      # 否则 parser 解析到新语法而 plugin 规则滞后，lint 会假报错。
+      typescript-eslint:
         patterns:
-          - "*"
+          - "@typescript-eslint/*"
         update-types:
           - "minor"
           - "patch"
+      # 其余依赖的 minor/patch 合并为一个 PR；major 不匹配此分组，仍按依赖单独提 PR。
+      # 显式排除 @typescript-eslint/*，交给上面的小组，避免被拆散。
+      npm-minor-patch:
+        patterns:
+          - "*"
+        exclude-patterns:
+          - "@typescript-eslint/*"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # 主版本一律人工评估，minor/patch 不受影响。
+      - dependency-name: "typescript"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "eslint"
+        update-types:
+          - "version-update:semver-major"
+      # 根目录目前没有 electron，预留：日后从根目录引用时也不会自动跨大版本。
+      - dependency-name: "electron"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "@types/node"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "@typescript-eslint/parser"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "@typescript-eslint/eslint-plugin"
+        update-types:
+          - "version-update:semver-major"
+
+  # ── 桌面端：独立 npm 项目（不参与根 workspace）──────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/apps/desktop"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      # Electron 运行时与打包器同步升级，避免二者版本组合不兼容。
+      electron-minor-patch:
+        patterns:
+          - "electron"
+          - "electron-builder"
+        update-types:
+          - "minor"
+          - "patch"
+    ignore:
+      # Electron 大版本（如 41 → 42）需要人工迁移与真机验证，不自动提 PR。
+      - dependency-name: "electron"
+        update-types:
+          - "version-update:semver-major"

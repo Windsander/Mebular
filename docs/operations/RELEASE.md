@@ -177,7 +177,7 @@ npm 不允许覆盖已发布版本。具体步骤见 [1.1 首次发布后回滚�
       Actions `Read and write permissions`。
 - [ ] 五个 `package.json` 版本均为 `0.1.0`，`CHANGELOG.md` 含 `## [v0.1.0]` 章节。
 - [ ] `packages/dsh-plugin/package.json` 版本为 `0.1.0`，`npm run verify:dsh-plugin` 通过
-      （脚本由插件包会话提供，合入后随 `main` 生效）。
+      （57 项：manifest / HTTP patch / host entry / 无 `@mebular/*` import / tarball）。
 - [ ] 插件发布前确认 `@mebular/dsh-plugin` 包名可用；同版本重跑会被 `publish-dsh` 的
       `npm view` 检查跳过。
 - [ ] 当前 `main` 的发布门禁记录已核对（见第 8 节）；release 分支 push 后由 Publish verify
@@ -295,7 +295,7 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 | 命令 | 结果 | 关键输出 |
 | --- | --- | --- |
 | `npm run build` | ✅ 当前 main | core / service / fleet 构建完成 |
-| `npm test -- --runInBand` | ✅ 当前 main | **177 suites / 1613 tests** 全过 |
+| `npm test -- --runInBand` | ✅ 当前 main | **177 suites / 1616 tests** 全过 |
 | `npm run verify:console:ui` | ✅ 当前 main | **388/388** checks（headless Chromium；1440 / 1024 / 390，含 i18n、安全流程、星图图例） |
 | `npm run verify:star-map:multinode` | ✅ 当前 main | **37/37**；6 台真实 daemon，`baseEdgeCount=15`、`solid=10`、`dashed=5`；hover B 9 条 / hover F 5 条；真实 MCP `task_submit` 与 `fleet` SSE |
 | `npm run check:i18n` | ✅ 当前 main | **32 checks / 0 failed**；console / desktop / errors 三套 locale pack |
@@ -305,7 +305,7 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 | `npm run check:docs` | ✅ 当前 main | **7/7**；README EN/CN 结构、互链、无手写测试数字、CI badge、工具名、本地链接 |
 | README 视觉走查 | ✅ 当前 main | 四张星图均 1600×1000、6 颗星；baseline 灰虚线 / 压暗实线 / 声波脉冲；lanes 旧版弧线航道；亮色 banner + 三组示意图使用 `<picture>` 切换 |
 | `npm run verify:mcp:publish` | ⏳ 待 release 流水线 | 发布前必须在 `release/v0.1.0` 由 Publish verify 重跑 |
-| `npm run verify:dsh-plugin` | ⏳ 待插件脚本合入 | `scripts/verify-dsh-plugin.mjs` 由插件包会话提供；脚本落地后本机与发布分支都须通过 |
+| `npm run verify:dsh-plugin` | ✅ 当前 main | **57 checks**：bundle / HTTP patch / host entry / no core imports / tarball |
 
 > 第 8 节记录的是当前 `main` 已完成的发布门禁；它**不替代**发布分支上的
 > `build` / `lint` / `test:coverage` / `verify:mcp:publish` / `verify:dsh-plugin` 门禁。

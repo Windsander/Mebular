@@ -75,6 +75,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: DSH plugin contract (manifest / HTTP patch / no core imports)
+        run: npm run verify:dsh-plugin
+
       - name: Lint
         run: npm run lint
 

@@ -42,8 +42,8 @@ stays owned by the app (auth, storage, star map, invites).
 dsh plugin --profile web add @mebular/dsh-plugin
 ```
 
-The package ships `cordis.patch.yml`; installing it inserts one
-`@deepseek-ai/dsh-mcp-client` instance into the web profile with
+The package ships `cordis.patch.yml`; installing it inserts the plugin host
+entry plus one `@deepseek-ai/dsh-mcp-client` instance into the web profile with
 `serverName: mebular`, `transport: streamable-http` and the default `/mcp` URL.
 Restart the DSH session so the profile is reloaded.
 
@@ -73,13 +73,12 @@ plugin URL in sync:
   reinstall) so `url` matches, for example:
 
   ```yaml
-  - insert:
-      - id: mebular
-        name: '@deepseek-ai/dsh-mcp-client'
-        config:
-          serverName: mebular
-          transport: streamable-http
-          url: http://127.0.0.1:12345/mcp
+  - id: mcp-mebular
+    name: '@deepseek-ai/dsh-mcp-client'
+    config:
+      serverName: mebular
+      transport: streamable-http
+      url: http://127.0.0.1:12345/mcp
   ```
 
 The console URL follows the same daemon port:

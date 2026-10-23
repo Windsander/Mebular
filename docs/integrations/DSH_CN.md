@@ -40,8 +40,8 @@ DSH bundle：把官方的 `@deepseek-ai/dsh-mcp-client` 注册到**已经在运�
 dsh plugin --profile web add @mebular/dsh-plugin
 ```
 
-包内自带 `cordis.patch.yml`；安装后会向 web profile 插入一个
-`@deepseek-ai/dsh-mcp-client` 实例，`serverName: mebular`、
+包内自带 `cordis.patch.yml`；安装后会向 web profile 插入插件 host entry，
+以及一个 `@deepseek-ai/dsh-mcp-client` 实例，`serverName: mebular`、
 `transport: streamable-http`，URL 指向默认 `/mcp`。重启 DSH 会话使 profile 生效。
 
 ## 验证
@@ -67,13 +67,12 @@ dsh web --dump-config | grep -A3 mebular
   与之一致，例如：
 
   ```yaml
-  - insert:
-      - id: mebular
-        name: '@deepseek-ai/dsh-mcp-client'
-        config:
-          serverName: mebular
-          transport: streamable-http
-          url: http://127.0.0.1:12345/mcp
+  - id: mcp-mebular
+    name: '@deepseek-ai/dsh-mcp-client'
+    config:
+      serverName: mebular
+      transport: streamable-http
+      url: http://127.0.0.1:12345/mcp
   ```
 
 控制台地址跟随同一个守护端口：`http://127.0.0.1:<port>/console`。

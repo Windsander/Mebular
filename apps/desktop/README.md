@@ -1,7 +1,8 @@
 # Mebular 桌面 App（apps/desktop）
 
-> R1：**壳 + 守护托管 + 内嵌控制台 + 发布 tarball 运行时打包**。签名/公证/自动更新未启用（R2/R6）。
-> 方案来源：`plan/electron-app-architecture-v0.1.md`。
+> v0.1.0：**壳 + 守护托管 + 内嵌控制台 + 发布 tarball 运行时 + 三平台 unsigned 安装包**。
+> 安装包 runtime 来自与 npm 发布同一批 verify tarball；签名、公证与自动更新留到后续版本。
+> 发布操作见 [`docs/operations/DESKTOP_RELEASE.md`](../../docs/operations/DESKTOP_RELEASE.md)。
 
 ## 这是什么
 
@@ -18,7 +19,7 @@ apps/desktop/
 ├── src/main/               # Electron 主进程：daemon.mjs（托管逻辑，纯可测）/ index.mjs（壳）/ ipc.mjs / tray-icons.mjs
 ├── src/preload/index.cjs   # contextBridge 白名单（contextIsolation + sandbox）
 ├── scripts/                # prepare-runtime / prepare-build / dev / smoke / smoke-runtime
-└── resources/              # 图标/许可证（占位）
+└── resources/              # 图标/许可证
 ```
 
 ## 一键开发
@@ -31,40 +32,53 @@ npm run dev -- --home ~/.mebular --port 7331   # 透传参数（可选）
 npm run smoke                     # 无 GUI 有界冒烟（CI 用）
 ```
 
-## 安装包（R1）
+## 安装包（v0.1.0，unsigned）
 
 安装包里的 Mebular 运行时**不来自仓库源码目录**，而是先用 `npm pack` 产出五个发布
 tarball，再由 `prepare-runtime` 一次性 `npm install --omit=dev --ignore-scripts` 到
 `apps/desktop/runtime`，最后经 `extraResources` 复制成 `<resources>/node_modules`。
+安装包自带 Electron，用户机器不需要安装 Node.js。
 
 ```bash
 # 仓库根：build + 五个 lockstep tarball（core/fleet/service/mcp/skill）
 npm run build
-mkdir -p release-pack
+rm -rf release-pack && mkdir -p release-pack
 npm pack --pack-destination release-pack
 for p in packages/fleet packages/service packages/mcp packages/skill; do
   (cd "$p" && npm pack --pack-destination ../../release-pack)
 done
 
 # apps/desktop：安装 runtime → 冒烟 → 本机目录包
-npm run smoke:runtime             # 从 runtime 起 serve，校验 /healthz 与 embed 安全头
-npm run dist:dir                  # runtime → prepare-build → electron-builder --dir
+npm --prefix apps/desktop run prepare:runtime   # 默认读 <repo>/release-pack
+npm --prefix apps/desktop run smoke:runtime     # 从 runtime 起 serve，校验 /healthz 与 embed 安全头
+npm --prefix apps/desktop run dist:dir          # runtime → prepare-build → electron-builder --dir
 
-# 三平台 target（签名/公证等由 CI/R2 接管；本机只构建当前平台）
-npm run dist:mac                  # DMG（universal）
-npm run dist:win                  # NSIS（x64）
-npm run dist:linux                # AppImage + deb（x64）
+# 三平台 target（本机只构建当前平台；正式三平台由 CI matrix 构建）
+npm --prefix apps/desktop run dist:mac          # DMG（universal）
+npm --prefix apps/desktop run dist:win          # NSIS（x64）
+npm --prefix apps/desktop run dist:linux        # AppImage + deb（x64）
 ```
+
+发布资产名：
+
+- `Mebular-<version>-universal.dmg`
+- `Mebular-Setup-<version>.exe`
+- `Mebular-<version>-x86_64.AppImage`
+- `Mebular-<version>-amd64.deb`
 
 `runtime/`、`release-pack/`、`dist/` 都是本地产物，已加入 `.gitignore`，不提交。
 打包后的冒烟可直接指向 `<resources>`：
 
 ```bash
-node scripts/smoke-runtime.mjs --runtime dist/mac-arm64/Mebular.app/Contents/Resources
+node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/mac-arm64/Mebular.app/Contents/Resources
+node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/win-unpacked/resources
+node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/linux-unpacked/resources
 ```
 
-> 当前产物未签名/未公证；macOS Gatekeeper 与 Windows SmartScreen 会提示。发布签名、
-> 三平台 CI、自动更新在 R2/R6 处理。
+> v0.1.0 产物**未签名、未公证**：macOS Gatekeeper 要求右键 → 打开（或系统设置 → 隐私与
+> 安全性 → 仍要打开），Windows SmartScreen 要求「更多信息 → 仍要运行」。发布前先用
+> Release 的 `SHA256SUMS.txt` 校验。签名、公证与自动更新留到后续版本；完整说明见
+> [`docs/operations/DESKTOP_RELEASE.md`](../../docs/operations/DESKTOP_RELEASE.md)。
 
 ## 守护托管（两条路径，默认优先服务）
 
@@ -106,6 +120,21 @@ IPC **白名单**（`daemon:status|start|stop|restart`、`console:open`、`logs:
 
 ## CI
 
-`apps/desktop` **不并入根 workspaces**（独立 `package-lock.json`）→ 现有四 job 不会安装 Electron，
-零影响。新增独立 `desktop` job 跑 `npm run smoke`（无 GUI；`ELECTRON_SKIP_BINARY_DOWNLOAD=1` 时自动 SKIP 二进制冒烟）。
-R2 会在桌面 job 里补 `prepare-runtime` + `smoke:runtime` + `dist:dir` / 三平台安装包。
+`apps/desktop` **不并入根 workspaces**（独立 `package-lock.json`），因此根 job 不会安装
+Electron。
+
+- **CI（`.github/workflows/ci.yml` 的 `desktop` job，ubuntu-latest）**：`npm ci` → 根
+  `npm run build` → `npm ci --prefix apps/desktop` → pack 5 个 tarball →
+  `prepare-runtime` → `smoke:runtime` → `dist:dir` → packaged runtime smoke →
+  `npm run smoke`（无 GUI；`ELECTRON_SKIP_BINARY_DOWNLOAD=1` 时自动 SKIP 二进制冒烟）。
+- **Publish（`.github/workflows/publish.yml`）**：`verify` 只 pack 一次 6 个 tarball，三个
+  desktop job 分别用同一批 tarball 构建安装包：
+  - `desktop-macos`（macos-latest）：Universal DMG + packaged smoke；
+  - `desktop-windows`（windows-latest）：NSIS x64 + `win-unpacked` resources smoke；
+  - `desktop-linux`（ubuntu-latest）：AppImage + deb x64 + `linux-unpacked` resources smoke。
+  三个 job 全部成功后才允许 `publish` 发 npm；`release` job 再上传安装包与
+  `SHA256SUMS.txt`。手动 `workflow_dispatch` 是 dry-run：只构建并上传 artifacts，不发布。
+
+版本 SSOT：`apps/desktop/package.json`、`package-lock.json` 根 version 与
+`src/main/daemon.mjs` 的 `APP_VERSION` 必须与 5 个 lockstep 包一致；`prepare-runtime.mjs`
+和 Publish verify 都会检查。

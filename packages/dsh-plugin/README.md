@@ -32,7 +32,13 @@ curl -sS http://127.0.0.1:7331/healthz
 
 ## 安装
 
-当前从本地工作树安装到 DSH 的 Web profile：
+v0.1.0 起从 npm 安装到 DSH 的 Web profile：
+
+```bash
+dsh plugin --profile web add @mebular/dsh-plugin@0.1.0
+```
+
+插件开发时仍可从仓库工作树安装：
 
 ```bash
 dsh plugin --profile web add ./packages/dsh-plugin
@@ -41,8 +47,9 @@ dsh plugin --profile web add ./packages/dsh-plugin
 安装后 `$DSH_HOME/profiles/web/package.json` 的 `dsh.profile.bundles` 会包含
 `@mebular/dsh-plugin`。重启 DSH Web 后，侧边栏出现 Mebular 图标；点击后进入全局面板。
 
-> **npm 尚未发布。** 包名 `@mebular/dsh-plugin` 只是预留；`npm view @mebular/dsh-plugin`
-> 当前返回 404。请使用本地路径安装，不要按“已上架 npm”或“已进官方列表”来使用本文档。
+> `@mebular/dsh-plugin` 是**独立版本线**：v0.1.0 与 Mebular v0.1.0 同一 release train，
+> 但版本号只由 `packages/dsh-plugin/package.json` 决定，不进入五包 lockstep。官方插件列表
+> 尚未提交、尚未收录；不要按“已进官方列表”来使用本文档。
 
 插件零构建：安装不会触发 `prepare` / `allowBuilds`。`@deepseek-ai/dsh-mcp-client` 声明为
 peer（兼容范围 `>=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-rc.1 <0.3.0-0`），由 DSH host 在运行时
@@ -272,7 +279,6 @@ DSH host                         Mebular daemon
   `webServer.tapIndex(transform)`；若未来 DSH 移除该 API，client 会因全局缺失而回退为
   `panel:true`。`dsh.client` / slot API 仍在 developer preview，升级 DSH 后需要重新验证
   `sidebar.panellist` 与 `main` keyed slot。
-- **npm 尚未发布**：当前只能本地路径安装；包名 `@mebular/dsh-plugin` 只是预留。
 - **MCP 工具数量随 daemon 版本变化**：插件不承诺固定数量。
 - **Desktop origin 未验证**：`@deepseek-ai/dsh-desktop-host` 不在 npm 上，也未出现在公开
   DSH 仓库可检索的 tree 中。当前 CSP 只放行 HTTP loopback；若 DSH Desktop 使用 HTTPS 或
@@ -318,10 +324,11 @@ npm run verify:dsh-plugin
 ## 发布状态
 
 - 版本：`0.1.0`
-- npm：**未发布**
+- npm：`@mebular/dsh-plugin@0.1.0`（随 Mebular v0.1.0 release train，独立版本线）
 - 官方插件列表：**未提交、未收录**
-- 当前安装方式：`./packages/dsh-plugin`
-- 预留 npm 名称：`@mebular/dsh-plugin`
+- 正式安装：`dsh plugin --profile web add @mebular/dsh-plugin@0.1.0`
+- 开发安装：`dsh plugin --profile web add ./packages/dsh-plugin`
+- 版本线：不进入 `core` / `service` / `skill` / `mcp` / `fleet` 五包 lockstep
 
 ## License
 

@@ -37,12 +37,22 @@ surface: `/healthz`, `/app/embed/info`, `/mcp` and `/console/?embed=dsh`.
 
 ## Install
 
-The npm package is **not published yet** (`npm view @mebular/dsh-plugin` returns 404).
-Install from the repository checkout:
+From v0.1.0, install the plugin from npm into DSH's web profile:
+
+```bash
+dsh plugin --profile web add @mebular/dsh-plugin@0.1.0
+```
+
+For plugin development, install from the repository checkout instead:
 
 ```bash
 dsh plugin --profile web add ./packages/dsh-plugin
 ```
+
+`@mebular/dsh-plugin` has its own version line: it ships with the Mebular v0.1.0 release
+train, but its version comes only from `packages/dsh-plugin/package.json` and it is not part
+of the five-package lockstep. The plugin is not yet submitted to, or listed by,
+awesome-dsh-plugin.
 
 The package ships `cordis.patch.yml` with exactly one host row:
 
@@ -138,7 +148,7 @@ headless or TUI-only profile.
 
 ## Where the plugin lives
 
-The package is developed in `packages/dsh-plugin` inside this repository and reserved as
+The package is developed in `packages/dsh-plugin` inside this repository and published as
 `@mebular/dsh-plugin` on npm. GitHub topics are **repository-level**: keywords such as
 `dsh-plugin`, `deepseek-harness` and `agent-memory` describe the Mebular repository as a
 whole, not a separate package repo, so discovery points back here. See the

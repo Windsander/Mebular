@@ -10,9 +10,9 @@
 
 `main` 的当前策略：
 
-- 必须通过 PR 合入，`required_approving_review_count` 为 **0**：单人维护正常流程无需 reviewer 批准，也不再需要 admin bypass。
+- 必须通过 PR 合入，`required_approving_review_count` 为 **1**：至少一个 reviewer 批准。
+- 单人维护时，维护者自己的 PR 通过管理员 bypass（RepositoryRole 5，`bypass_mode: always`）合入；bypass 仅用于本人 PR 或紧急兜底，不是常规审批替代。
 - 保留 required status checks、review thread resolution、禁止删除分支与 non-fast-forward，合入前 CI 仍必须通过。
-- 管理员（RepositoryRole 5）保留 `always` bypass，仅作为紧急兜底；正常合入不应使用。
 - 不引入 signed commit、code owner review 等额外门槛。
 
 ## CI 触发与去重

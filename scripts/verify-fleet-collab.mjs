@@ -105,9 +105,24 @@ try {
     let stop = false;
     const done = (async () => {
       for (let i = 0; i < iterations && !stop; i++) {
-        // 确定性恢复：交替强制新会话（双向）+ anti-entropy，兜底丢失的 push（慢 runner）
-        if (i % 20 === 1) await b.node.connectToPeer(a.node.peerId, a.node.getLocalMultiaddrs()[0]).catch(() => undefined);
-        else if (i % 20 === 11) await a.node.connectToPeer(b.node.peerId, b.node.getLocalMultiaddrs()[0]).catch(() => undefined);
+        // 确定性收敛驱动：显式让**既有**常驻连接再开一轮会话（发起方唤醒 / 响应方 nudge）。
+        // 旧写法每 20 轮调用 `connectToPeer`：连接仍活着时是 no-op；而一旦某一侧重拨把
+        // 上一代连接退役，另一侧下次拨号就会真的新建连接并整体替换常驻会话——约每 10 轮
+        // 一次，系统性制造「nudge / 触发落在被替换 entry」的窗口。那是夹具制造的重连风暴，
+        // 不是本用例要验收的产品语义（`tests/fleet/collab-e2e.test.ts` 亦注明“不重复
+        // connectToPeer：重复建连会拆掉常驻会话，反而丢推送”）。
+        // 这里改用生产路径 `requestSession` 驱动；仅在确实没有在线对端时补一次拨号恢复连接。
+        if (i % 20 === 1) {
+          a.sync.requestSession('device-B');
+          if (a.sync.getOnlinePeers().length === 0) {
+            await a.node.connectToPeer(b.node.peerId, b.node.getLocalMultiaddrs()[0]).catch(() => undefined);
+          }
+        } else if (i % 20 === 11) {
+          b.sync.requestSession('device-A');
+          if (b.sync.getOnlinePeers().length === 0) {
+            await b.node.connectToPeer(a.node.peerId, a.node.getLocalMultiaddrs()[0]).catch(() => undefined);
+          }
+        }
         await a.sync.runAntiEntropyCycle().catch(() => undefined);
         await b.sync.runAntiEntropyCycle().catch(() => undefined);
         await worker.pollOnce();

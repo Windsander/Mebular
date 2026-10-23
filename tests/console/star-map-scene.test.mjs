@@ -8,10 +8,12 @@
 import { describe, test, expect, beforeEach, afterEach } from '@jest/globals';
 import {
   BASE_EDGE_DIM_ON_HOVER,
+  BASE_EDGE_WAVE,
   DEFAULT_TASK_NAMESPACE,
   StarStage,
   baseEdgePulse,
   baseEdgePulseTiming,
+  baseEdgePulseWaveform,
   buildBaseEdges,
   buildHoverRoutes,
   buildNetworkNodes,
@@ -369,7 +371,7 @@ describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
     expect(methods('quadraticCurveTo')).toHaveLength(0);
   });
 
-  test('solid 为非灰冷青实线；offline / 无共同订阅为灰虚线（同色系不同亮度）', () => {
+  test('solid 为压暗冷青实线（无外发光）；offline / 无共同订阅为灰虚线', () => {
     place({ A: [100, 300, 0.6, 8], B: [500, 300, 0.6, 8], C: [700, 300, 0.6, 8] });
     stage.scene = {
       nodes: [{ id: 'A' }, { id: 'B' }, { id: 'C' }],
@@ -384,10 +386,18 @@ describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
     stage._drawBaseEdges(3.2);
 
     const strokes = calls.filter((call) => call.method === 'set:strokeStyle').map((call) => call.args[0]);
-    // 冷青白：rgb(159,230,242)；灰虚线两档：rgb(124,133,152) / rgb(95,103,121)。
-    expect(strokes.some((color) => color.startsWith('rgba(159,230,242'))).toBe(true);
+    // 冷青灰实线：rgb(122,166,178)；灰虚线两档：rgb(124,133,152) / rgb(95,103,121)。
+    const solidStroke = strokes.find((color) => color.startsWith('rgba(122,166,178'));
+    expect(solidStroke).toBeDefined();
+    // 基础实线亮度约 0.22：明显低于星体，也不与虚线混同。
+    const solidAlpha = Number(solidStroke.split(',')[3].replace(')', ''));
+    expect(solidAlpha).toBeGreaterThanOrEqual(0.2);
+    expect(solidAlpha).toBeLessThanOrEqual(0.3);
     expect(strokes.some((color) => color.startsWith('rgba(124,133,152'))).toBe(true);
     expect(strokes.some((color) => color.startsWith('rgba(95,103,121'))).toBe(true);
+    // 已取消 3.2x 外发光：所有基础边都在 ~1px 细线以内，不产生径向光晕。
+    expect(calls.some((call) => call.method === 'set:lineWidth' && call.args[0] > 2)).toBe(false);
+    expect(methods('createRadialGradient')).toHaveLength(0);
     // 虚线只用于非 solid；solid 线段不带 dash。
     const dashSets = calls.filter((call) => call.method === 'setLineDash').map((call) => call.args[0]);
     expect(dashSets.some((pattern) => Array.isArray(pattern) && pattern[0] === 3 && pattern[1] === 7)).toBe(true);
@@ -395,7 +405,7 @@ describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
       .every((call) => call.args[0] === 0)).toBe(true);
   });
 
-  test('脉冲只对 solid 边且 reduced-motion 关闭；不改变 solid/dashed 状态', () => {
+  test('脉冲只对 solid 边且 reduced-motion 关闭；形态是沿边一小段声波，不是光点', () => {
     place({ A: [100, 300, 0.6, 8], B: [500, 300, 0.6, 8], C: [700, 300, 0.6, 8] });
     const edges = [
       { from: 'A', to: 'B', shared: true, online: true, solid: true },
@@ -410,17 +420,64 @@ describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
     stage.reducedMotion = true;
     calls.length = 0;
     stage._drawBaseEdges(activeAt);
-    expect(methods('createRadialGradient')).toHaveLength(0);
+    // reduced-motion 只画 2 条基础边，没有额外波形折线，也没有圆点光晕。
+    expect(methods('lineTo')).toHaveLength(2);
     expect(methods('arc')).toHaveLength(0);
+    expect(methods('createRadialGradient')).toHaveLength(0);
 
     stage.reducedMotion = false;
     calls.length = 0;
     stage._drawBaseEdges(activeAt);
-    // 只有 solid 边产生一个脉冲光点（dashed 边不脉冲）。
-    expect(methods('createRadialGradient')).toHaveLength(1);
-    expect(methods('arc')).toHaveLength(1);
+    // 只有 solid 边产生一段波形：额外 samples-1 个 lineTo；dashed 边不脉冲。
+    const pulseSegments = BASE_EDGE_WAVE.samples - 1;
+    expect(methods('lineTo')).toHaveLength(2 + pulseSegments);
+    expect(methods('arc')).toHaveLength(0);
+    expect(methods('createRadialGradient')).toHaveLength(0);
+    const pulseStrokes = calls.filter((call) => call.method === 'set:strokeStyle'
+      && String(call.args[0]).startsWith('rgba(156,198,208'));
+    expect(pulseStrokes).toHaveLength(1);
     expect(JSON.stringify(edges)).toBe(before);
     expect(summarizeSceneEdges(edges)).toEqual({ baseEdgeCount: 2, solidEdgeCount: 1, dashedEdgeCount: 1 });
+  });
+
+  test('声波形态：30–70px 一段、垂直 ±1.5–3px、两端包络归零、沿边移动', () => {
+    const g = { sx: 100, sy: 300, ex: 700, ey: 300 };
+    const pulse = { active: true, intensity: 1, position: 0.5 };
+    const points = baseEdgePulseWaveform(g, pulse);
+    expect(points.length).toBeGreaterThanOrEqual(16);
+
+    // 一小段，而不是整条边。
+    const span = Math.max(...points.map((p) => p.along)) - Math.min(...points.map((p) => p.along));
+    expect(span).toBeGreaterThanOrEqual(30);
+    expect(span).toBeLessThanOrEqual(70);
+
+    // 垂直正弦：有正有负、振幅小，两端 envelope 归零。
+    const offsets = points.map((p) => p.offset);
+    const maxAbs = Math.max(...offsets.map((value) => Math.abs(value)));
+    expect(maxAbs).toBeGreaterThanOrEqual(1.5);
+    expect(maxAbs).toBeLessThanOrEqual(3);
+    expect(offsets.some((value) => value > 0.5)).toBe(true);
+    expect(offsets.some((value) => value < -0.5)).toBe(true);
+    expect(Math.abs(offsets[0])).toBeLessThan(0.01);
+    expect(Math.abs(offsets[offsets.length - 1])).toBeLessThan(0.01);
+
+    // 多次穿过中线 = 波形，而不是单峰/光点。
+    let crossings = 0;
+    for (let i = 1; i < offsets.length; i += 1) {
+      if ((offsets[i - 1] < 0 && offsets[i] >= 0) || (offsets[i - 1] > 0 && offsets[i] <= 0)) crossings += 1;
+    }
+    expect(crossings).toBeGreaterThanOrEqual(4);
+
+    // pulse.position 前移 → 波形段沿边移动。
+    const moved = baseEdgePulseWaveform(g, { ...pulse, position: 0.8 });
+    expect(moved[0].along).toBeGreaterThan(points[0].along);
+
+    // 短边按比例收缩，不越出边段。
+    const short = baseEdgePulseWaveform({ sx: 0, sy: 0, ex: 40, ey: 0 }, pulse);
+    for (const point of short) {
+      expect(point.x).toBeGreaterThanOrEqual(0);
+      expect(point.x).toBeLessThanOrEqual(40);
+    }
   });
 
   test('航道几何是曲线：控制点/中点偏离弦，且深度差带来纵向偏置', () => {

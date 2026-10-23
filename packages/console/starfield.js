@@ -45,8 +45,10 @@ const COLORS = {
   muted: '#8391b4',
   revokedNode: '#a06a6a',
   warning: '#d55e00',
-  // 基础边：solid = 两端在线 + 有共同订阅（冷青白，明显区别于灰虚线）；虚线分两档灰。
-  baseSolid: '#9fe6f2',
+  // 基础边：solid = 两端在线 + 有共同订阅（冷青灰，亮度压到星体之下）；虚线分两档灰。
+  baseSolid: '#7aa6b2',
+  // 脉冲波形：同色系略亮，但仍低于星体高光。
+  basePulse: '#9cc6d0',
   baseDashed: '#7c8598',
   baseDashedOffline: '#5f6779',
   // 悬停航道：蓝 = 可发出，金 = 可接收，灰 = 任务域不可达。
@@ -250,11 +252,65 @@ export function baseEdgePulse(edgeOrSeed, time) {
   return {
     ...timing,
     active: true,
-    // sin 包络：0 → 1 → 0，避免光点突然出现/消失。
+    // sin 包络：0 → 1 → 0，避免波形突然出现/消失。
     intensity: Math.sin(Math.PI * progress),
-    // 沿线移动，并留出端点余量（光点不压在星体上）。
-    position: 0.15 + 0.7 * progress,
+    // 波形沿边缓慢移动，并留出端点余量（不压在星体上）。
+    position: 0.3 + 0.4 * progress,
   };
+}
+
+// 声波脉冲的形态常量：沿线一小段（56px）、垂直振幅 2.2px、约 2.5 个周期。
+export const BASE_EDGE_WAVE = Object.freeze({
+  length: 56,
+  amplitude: 2.2,
+  cycles: 2.5,
+  samples: 28,
+});
+
+/**
+ * solid 基础边脉冲的「声波」采样点（边局部坐标系 → 画布绝对坐标）。
+ *
+ * 沿边取一小段（居中于 pulse.position），垂直方向做正弦位移：
+ * - 两端用 sin(π·u) 包络归零，波形淡入淡出，不会突然截断；
+ * - phase 随 pulse.position 前移，波形本身的波峰也在缓慢流动；
+ * - 线段长度按边长收缩，短边不会画出边界。
+ * 返回点列供 canvas lineTo 折线绘制（不使用 arc/圆点）。
+ */
+export function baseEdgePulseWaveform(g, pulse, wave = BASE_EDGE_WAVE) {
+  if (!g) return [];
+  const dx = g.ex - g.sx;
+  const dy = g.ey - g.sy;
+  const edgeLength = Math.hypot(dx, dy);
+  if (!(edgeLength > 1)) return [];
+  const ux = dx / edgeLength;
+  const uy = dy / edgeLength;
+  const nx = -uy;
+  const ny = ux;
+
+  const length = Math.min(wave.length, Math.max(8, edgeLength * 0.7));
+  const half = length / 2;
+  const position = Math.min(1, Math.max(0, Number(pulse?.position) || 0));
+  const center = position * edgeLength;
+  const start = Math.min(Math.max(center - half, 0), Math.max(0, edgeLength - length));
+  const phaseShift = position * Math.PI * 2;
+  const samples = Math.max(4, Math.round(wave.samples));
+
+  const points = [];
+  for (let i = 0; i < samples; i += 1) {
+    const u = i / (samples - 1);
+    const along = start + length * u;
+    const envelope = Math.sin(Math.PI * u);
+    const offset = wave.amplitude
+      * Math.sin(Math.PI * 2 * wave.cycles * u + phaseShift)
+      * envelope;
+    points.push({
+      x: g.sx + ux * along + nx * offset,
+      y: g.sy + uy * along + ny * offset,
+      along,
+      offset,
+    });
+  }
+  return points;
 }
 
 /**
@@ -1090,7 +1146,7 @@ export class StarStage {
 
   /**
    * 基础边：所有设备两两相连，端点每帧取星位（直线，无方向箭头）。
-   * - solid（两端在线 + 有共同订阅）：冷青白实线 + 低频间歇脉冲；
+   * - solid（两端在线 + 有共同订阅）：压暗的冷青灰细实线（无外发光）+ 低频声波脉冲；
    * - 其余（任一端离线/被移除，或无共同订阅）：灰色虚线，静态不流动。
    */
   _drawBaseEdges(time) {
@@ -1116,23 +1172,15 @@ export class StarStage {
         : (solid
           ? 0.9 + 0.1 * Math.sin(time * 0.75 + phase)
           : 0.82 + 0.12 * Math.sin(time * 0.75 + phase));
-      const alpha = (solid ? 0.5 : (shared ? 0.17 : 0.22)) * depthFade * breathe * this.baseEdgeDim;
-
-      if (solid) {
-        // 冷青白细实线 + 极淡外发光（明显区别于灰虚线，但仍不抢航道蓝/金）。
-        ctx.beginPath();
-        ctx.moveTo(g.sx, g.sy);
-        ctx.lineTo(g.ex, g.ey);
-        ctx.strokeStyle = rgba(color, alpha * 0.18);
-        ctx.lineWidth = 3.2;
-        ctx.stroke();
-      }
+      // solid 目标亮度 ≈0.22（深度/呼吸后），明显低于星体；虚线略暗但保持可读。
+      const alpha = (solid ? 0.3 : (shared ? 0.15 : 0.2)) * depthFade * breathe * this.baseEdgeDim;
 
       ctx.beginPath();
       ctx.moveTo(g.sx, g.sy);
       ctx.lineTo(g.ex, g.ey);
       ctx.strokeStyle = rgba(color, alpha);
-      ctx.lineWidth = (solid ? 1.35 : 1) * (0.6 + avgDepth * 0.6);
+      // 基础边保持 ~1px 细线；星星/标签亮度不受影响。
+      ctx.lineWidth = 0.6 + avgDepth * 0.6;
       if (solid) {
         ctx.setLineDash([]);
         ctx.lineDashOffset = 0;
@@ -1150,30 +1198,31 @@ export class StarStage {
     ctx.restore();
   }
 
-  /** solid 基础边的低频脉冲：短促光点沿线移动 + 极淡拖尾；不影响航道/fleet。 */
+  /**
+   * solid 基础边的低频脉冲：沿边一小段动态声波（正弦折线），
+   * 两端包络淡出、沿边缓慢移动；颜色略亮于基础线但仍低于星体。
+   * 不影响航道/fleet，reduced-motion 下完全不绘制。
+   */
   _drawBaseEdgePulse(g, edge, time, alpha) {
     if (this.reducedMotion) return;
     const pulse = baseEdgePulse(edge, time);
     if (!pulse.active || pulse.intensity <= 0) return;
+    const points = baseEdgePulseWaveform(g, pulse);
+    if (points.length < 2) return;
     const ctx = this.ctx;
-    const x = g.sx + (g.ex - g.sx) * pulse.position;
-    const y = g.sy + (g.ey - g.sy) * pulse.position;
-    const strength = pulse.intensity * alpha;
-    const radius = 7 + 7 * pulse.intensity;
-    const trail = 12 + 14 * pulse.intensity;
+    // 基础线 alpha 越高，波形越亮；hover 降亮时波形同步变淡。
+    const strength = Math.min(0.42, alpha * 1.8) * pulse.intensity;
+    if (strength <= 0.01) return;
     ctx.beginPath();
-    ctx.moveTo(x - g.ux * trail, y - g.uy * trail);
-    ctx.lineTo(x, y);
-    ctx.strokeStyle = rgba(COLORS.baseSolid, Math.min(0.5, strength * 0.9));
-    ctx.lineWidth = 1.4;
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i += 1) {
+      ctx.lineTo(points[i].x, points[i].y);
+    }
+    ctx.strokeStyle = rgba(COLORS.basePulse, strength);
+    ctx.lineWidth = 1.2;
+    ctx.setLineDash([]);
+    ctx.lineDashOffset = 0;
     ctx.stroke();
-    const glow = ctx.createRadialGradient(x, y, 0, x, y, radius);
-    glow.addColorStop(0, rgba(COLORS.baseSolid, Math.min(0.75, strength * 1.6)));
-    glow.addColorStop(1, rgba(COLORS.baseSolid, 0));
-    ctx.fillStyle = glow;
-    ctx.beginPath();
-    ctx.arc(x, y, radius, 0, Math.PI * 2);
-    ctx.fill();
   }
 
   /** 悬停航道：只画 console.js 注入的 routes；离开即 setRoutes([])。 */

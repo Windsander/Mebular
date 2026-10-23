@@ -14,9 +14,9 @@
 
 ---
 
-![Mebular 网络概览：两台机器各跑一个本地节点，为接入的助手同步同一份图记忆](assets/network-overview-cn.svg)
+![Mebular 实机控制台：星图、守护状态和记忆数量](assets/console-starmap-cn.jpg)
 
-<p align="center"><sub>一台机器一个节点，所有节点共用一份图记忆。</sub></p>
+<p align="center"><sub>实机控制台：星图、守护状态和记忆数量。</sub></p>
 
 ## 是什么
 
@@ -46,11 +46,32 @@ App 支持 64 位 macOS、Windows 和 Linux。暂时没有你所用平台的安�
 
 ### 其他路径
 
-| 路径 | 从这里开始 |
-|---|---|
-| **浏览器** | `npm install -g @mebular/core` → `mebular serve` |
-| **命令行** | `fleet quickstart` → `fleet invite` / `fleet join` |
-| **Agent** | [装好 Skill](packages/skill/SETUP.md)，然后说“部署 Mebular” |
+<table width="100%">
+  <thead>
+    <tr>
+      <th align="left">路径</th>
+      <th align="left">从这里开始</th>
+      <th align="left">适合</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>浏览器</strong></td>
+      <td><code>npm install -g @mebular/core</code> → <code>mebular serve</code></td>
+      <td>不装 App，用同一个控制台</td>
+    </tr>
+    <tr>
+      <td><strong>命令行</strong></td>
+      <td><code>fleet quickstart</code> → <code>fleet invite</code> / <code>fleet join</code></td>
+      <td>脚本化、无图形界面的机器</td>
+    </tr>
+    <tr>
+      <td><strong>Agent</strong></td>
+      <td><a href="packages/skill/SETUP.md">装好 Skill</a>，然后说“部署 Mebular”</td>
+      <td>让助手代跑安装</td>
+    </tr>
+  </tbody>
+</table>
 
 浏览器、命令行和 Agent 路径需要 Node.js 20 或更高版本。
 
@@ -72,19 +93,46 @@ mebular print-config --client opencode         # MCP 配置
 
 ## 它如何工作
 
-![配对流程：设备 A 新建并发出邀请，设备 B 用二维码加入，随后连接和默认授权自动完成](assets/pairing-flow-cn.svg)
+![Mebular 网络概览：两台机器各跑一个本地节点，为接入的助手同步同一份图记忆](assets/network-overview-cn.svg)
 
-一个二维码或令牌就能让设备入网。主密钥留在根设备；之后每台设备各自同步，中间没有中心协调者。
+<p align="center"><sub>一台机器一个节点，所有节点共用一份图记忆。</sub></p>
+
+每台机器跑一个节点，节点之间直接同步记忆和任务。加设备只需要一个二维码或令牌——主密钥留在根设备。
+
+![配对流程：设备 A 新建并发出邀请，设备 B 用二维码加入，随后连接和默认授权自动完成](assets/pairing-flow-cn.svg)
 
 ## 文档
 
-| 从这里开始 | 深入看 |
-|---|---|
-| [快速上手](docs/getting-started/QUICKSTART_CN.md) | [架构](docs/architecture/ARCHITECT.md) |
-| [控制台](docs/console/README.md) | [限制与取舍](docs/limitations/LIMITATIONS_CN.md) |
-| [变更日志](CHANGELOG.md) | [Fleet 运维手册](packages/fleet/RUNBOOK.md) |
-| [参与贡献](CONTRIBUTING.md) | [Agent Skill](packages/skill/SETUP.md) |
-| [发布 SOP](docs/operations/RELEASE.md) | [封板契约](SEALING_CN.md) |
+<table width="100%">
+  <thead>
+    <tr>
+      <th align="left">从这里开始</th>
+      <th align="left">深入看</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong><a href="docs/getting-started/QUICKSTART_CN.md">快速上手</a></strong><br><sub>安装、配对、同步第二台设备</sub></td>
+      <td><strong><a href="docs/architecture/ARCHITECT.md">架构</a></strong><br><sub>节点、同步与信任边界</sub></td>
+    </tr>
+    <tr>
+      <td><strong><a href="docs/console/README.md">控制台</a></strong><br><sub>本地界面与页面地图</sub></td>
+      <td><strong><a href="docs/limitations/LIMITATIONS_CN.md">限制与取舍</a></strong><br><sub>存敏感数据前先读</sub></td>
+    </tr>
+    <tr>
+      <td><strong><a href="CHANGELOG.md">变更日志</a></strong><br><sub>发布说明</sub></td>
+      <td><strong><a href="packages/fleet/RUNBOOK.md">Fleet 运维手册</a></strong><br><sub>双机操作与 WAN 排查</sub></td>
+    </tr>
+    <tr>
+      <td><strong><a href="CONTRIBUTING.md">参与贡献</a></strong><br><sub>质量门禁与参与方式</sub></td>
+      <td><strong><a href="packages/skill/SETUP.md">Agent Skill</a></strong><br><sub>部署、记忆规约、任务手册</sub></td>
+    </tr>
+    <tr>
+      <td><strong><a href="docs/operations/RELEASE.md">发布 SOP</a></strong><br><sub>发布流程</sub></td>
+      <td><strong><a href="SEALING_CN.md">封板契约</a></strong><br><sub>协议红线与推迟项</sub></td>
+    </tr>
+  </tbody>
+</table>
 
 <details>
 <summary>谁做什么</summary>
@@ -117,8 +165,6 @@ await mebular.initialize();
 </details>
 
 <div align="center">
-
-[官网](https://mebular.cyberfederal.io) · [GitHub](https://github.com/Windsander/Mebular)
 
 v0.1.0 · early · MIT
 

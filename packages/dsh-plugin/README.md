@@ -161,6 +161,11 @@ mcp__mebular__*
 DSH 与 Mebular App 同时保持运行，Mebular App 继续独立运行、继续负责存储与控制台，不会因为
 安装插件而退出或消失。
 
+P7.3 在 `@deepseek-ai/dsh@0.2.1-rc.2`、临时 home 与非默认端口上实测：侧边栏出现 Mebular，
+iframe 为 `/console/?embed=dsh`，Console 内 `dataset.embed='dsh'`、星图与设置正常；
+临时 probe 插件从 `ctx.tools.schemas()` 读到 29 个 `mcp__mebular__*` 工具（总计 33 个，
+其余为 DSH 自带工具）。工具数量会随 daemon 版本变化，不承诺固定值。
+
 面板状态可单独检查（只接受 loopback 请求）：
 
 ```bash
@@ -269,8 +274,14 @@ DSH host                         Mebular daemon
   `sidebar.panellist` 与 `main` keyed slot。
 - **npm 尚未发布**：当前只能本地路径安装；包名 `@mebular/dsh-plugin` 只是预留。
 - **MCP 工具数量随 daemon 版本变化**：插件不承诺固定数量。
+- **Desktop origin 未验证**：`@deepseek-ai/dsh-desktop-host` 不在 npm 上，也未出现在公开
+  DSH 仓库可检索的 tree 中。当前 CSP 只放行 HTTP loopback；若 DSH Desktop 使用 HTTPS 或
+  自定义 scheme，需要扩展 `frame-ancestors` 并重跑 E2E。
 - **卸载残留**：`dsh plugin remove` 后 pnpm 可能保留 `node_modules/@mebular/dsh-plugin`
   符号链接；它不在 profile bundles 中，不会被加载。
+- **截图状态**：`assets/dsh-panel.jpg` 来自隔离的临时 daemon。Console 顶部显示“守护
+  未运行 / 未启用 P2P / 记忆 0”是临时实例真值，DSH 面板 header 同时显示“已连接”；
+  截图不是 mock。
 
 ## 卸载
 

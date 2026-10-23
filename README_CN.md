@@ -110,7 +110,7 @@ mebular print-config --client opencode         # MCP 配置
 </table>
 
 <p align="center"><strong>与 DSH 一起使用</strong><br>
-保持 Mebular App 运行，然后从 <code>packages/dsh-plugin</code> 把 <code>@mebular/dsh-plugin</code> 加入 DSH 的 web profile：侧边栏 Mebular 面板嵌入同一套 Console，官方 MCP client 通过 <code>127.0.0.1:7331</code> 连接同一张图。<br>
+保持 Mebular App 运行，然后从 <code>packages/dsh-plugin</code> 把 <code>@mebular/dsh-plugin</code> 加入 DSH 的 web profile：侧边栏 Mebular 面板嵌入同一套 Console，官方 MCP client 连接同一张图。插件通过 <code>runtime.json</code> 或 <code>MEBULAR_HTTP_PORT</code> 发现 daemon，自定义端口会自动跟随。<br>
 当前仅支持本地安装，npm 尚未发布。<a href="packages/dsh-plugin/README.md">DSH 插件指南 →</a> · <a href="docs/integrations/DSH_CN.md">集成说明 →</a></p>
 
 <details>

@@ -110,7 +110,7 @@ mebular print-config --client opencode         # MCP config
 </table>
 
 <p align="center"><strong>Use with DSH</strong><br>
-Keep the Mebular app running, then add <code>@mebular/dsh-plugin</code> from <code>packages/dsh-plugin</code> to DSH's web profile: a Mebular sidebar panel embeds the same Console, and the official MCP client reaches the same graph at <code>127.0.0.1:7331</code>.<br>
+Keep the Mebular app running, then add <code>@mebular/dsh-plugin</code> from <code>packages/dsh-plugin</code> to DSH's web profile: a Mebular sidebar panel embeds the same Console, and the official MCP client reaches the same graph. The plugin discovers the daemon from <code>runtime.json</code> or <code>MEBULAR_HTTP_PORT</code>, so custom ports follow automatically.<br>
 Local install only; the npm package is not published yet. <a href="packages/dsh-plugin/README.md">DSH plugin guide →</a> · <a href="docs/integrations/DSH.md">Integration notes →</a></p>
 
 <details>

@@ -159,27 +159,44 @@ export async function onboardDevice(input: OnboardInput): Promise<OnboardResult>
 }
 
 /**
- * 本机订阅/退订某记忆域（**只能改自己**；写 `namespace_subscription` 到 `__policy__`）。
- * `active=false` 只退订，不清本地数据；退出并交接走 `leaveNamespace`。
+ * 工具/CLI 共用的 app 生命周期：注入 live app（运行中 daemon）时**复用它**——不 initialize、
+ * 不 shutdown；否则按目录新建离线实例并在结束时关闭。这样同一份 handler 既能服务 daemon，也能离线跑。
  */
-export async function subscribeNamespace(
+async function withToolMebular<T>(
   dir: string,
-  input: { namespace?: string; active?: boolean; note?: string },
-): Promise<{ member: string; namespace: string; active: boolean; eventId: string }> {
+  live: Mebular | undefined,
+  run: (mebular: Mebular, config: FleetConfig) => Promise<T>,
+): Promise<T> {
   const config = await loadToolConfig(dir);
+  if (live !== undefined) return run(live, config);
   const encryption = await readMasterKeyFile(config.masterKeyFile);
-  const namespace = input.namespace ?? config.namespace;
-  const active = input.active ?? true;
   const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
   await mebular.initialize();
   try {
+    return await run(mebular, config);
+  } finally {
+    await mebular.shutdown();
+  }
+}
+
+/**
+ * 本机订阅/退订某记忆域（**只能改自己**；写 `namespace_subscription` 到 `__policy__`）。
+ * `active=false` 只退订，不清本地数据；退出并交接走 `leaveNamespace`。
+ *
+ * `mebular`：运行中 daemon 的 live app（可选）；提供时写入同一 EventLog，不另开离线实例。
+ */
+export async function subscribeNamespace(
+  dir: string,
+  input: { namespace?: string; active?: boolean; note?: string; mebular?: Mebular },
+): Promise<{ member: string; namespace: string; active: boolean; eventId: string }> {
+  const active = input.active ?? true;
+  return withToolMebular(dir, input.mebular, async (mebular, config) => {
+    const namespace = input.namespace ?? config.namespace;
     const event = active
       ? await mebular.subscribeNamespace(namespace)
       : await mebular.unsubscribeNamespace(namespace);
     return { member: config.device, namespace, active, eventId: event.id };
-  } finally {
-    await mebular.shutdown();
-  }
+  });
 }
 
 /** 某分区的 active 订阅者（只读）。 */
@@ -211,22 +228,16 @@ export async function namespaceSubscriptions(
   }
 }
 
-/** 建域（零门槛）：写 `namespace_declare`；不自动订阅。 */
+/** 建域（零门槛）：写 `namespace_declare`；不自动订阅。`mebular` 为运行中 daemon 的 live app（可选）。 */
 export async function declareNamespace(
   dir: string,
-  input: { namespace: string; note?: string },
+  input: { namespace: string; note?: string; mebular?: Mebular },
 ): Promise<{ namespace: string; eventId: string }> {
   if (typeof input.namespace !== 'string' || input.namespace.length === 0) throw new Error('namespace 不能为空');
-  const config = await loadToolConfig(dir);
-  const encryption = await readMasterKeyFile(config.masterKeyFile);
-  const mebular = new Mebular(offlineMebularOptions(config, encryption) as never);
-  await mebular.initialize();
-  try {
+  return withToolMebular(dir, input.mebular, async (mebular) => {
     const event = await mebular.declareNamespace({ namespace: input.namespace, ...(input.note !== undefined ? { note: input.note } : {}) });
     return { namespace: input.namespace, eventId: event.id };
-  } finally {
-    await mebular.shutdown();
-  }
+  });
 }
 
 /** 恢复被移出的设备（写 `device_restore`；high 档证明由调用方给出）。 */

@@ -376,8 +376,11 @@ export function toolByName(name) {
  *
  * `isReady` 是所有工具（含不访问 service 的任务 / 闲聊 / board 工具）的统一就绪门槛：
  * 未就绪时直接返回稳定的 NOT_INITIALIZED 业务错误，绝不让任何 handler 触碰实际 task/memory 数据。
+ *
+ * `toolContext` 交给每个 handler 作为第三个参数（记忆面忽略）。任务面用它拿运行中 daemon 的
+ * live app：对象或 getter（热初始化后 `app` 会切换，用 getter 才能拿到当前实例）。
  */
-export function registerTools(server, service, { isReady } = {}) {
+export function registerTools(server, service, { isReady, toolContext } = {}) {
   for (const spec of ALL_TOOL_SPECS) {
     server.registerTool(
       spec.name,
@@ -386,7 +389,8 @@ export function registerTools(server, service, { isReady } = {}) {
         if (typeof isReady === 'function' && !isReady()) {
           return fail(NOT_INITIALIZED_MESSAGE, NOT_INITIALIZED_CODE);
         }
-        return spec.handler(service, args);
+        const context = typeof toolContext === 'function' ? toolContext() : toolContext;
+        return spec.handler(service, args, context);
       },
     );
   }

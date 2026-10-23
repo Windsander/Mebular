@@ -45,7 +45,7 @@
 ## 远端 fleet 的写法
 
 任务事件由 **B 的真实 daemon** 经 `POST /app/nodes` 写入
-（`type=task_event`、`content.type=created`，与 `fleet task_submit` 落库形状一致），
+（`type=task event`、`content.type=created`，与 `fleet task_submit` 落库形状一致），
 随后走生产同步链路：B daemon `pushOnWrite` → libp2p → A 的 sync 应用 →
 A 的 `/admin/events` 广播 `fleet`。脚本同时断言该任务事件确实出现在 A 的图里，
 因此不是用 `sync` 事件或本地伪造数据冒充 fleet。
@@ -78,7 +78,7 @@ npm run verify:star-map:multinode
 2. **`/mcp task_submit` 在已运行的 daemon 上不会触发同步。**
    任务工具用 `offlineMebularOptions` + 同一个 storage 另开一个 `Mebular` 实例写
    JSONL；daemon 的 `EventLog`（`JsonFileStorage extends MemoryStorage`）只在启动时
-   装载，收不到这次 append。实测 B 的 store 有 `task_event/created`，但 A/C 在
+   装载，收不到这次 append。实测 B 的 store 有 `task event/created`，但 A/C 在
    30s 内都没有该事件（anti-entropy 5s 一轮），A 的 SSE 也没有 `fleet`。因此本
    E2E 改用守护自身的 `/app/nodes` 写入，保证走真实的 daemon → sync → SSE 链路。
 3. **视觉观察（不列为测试失败）：当前基线的 hover/fleet 航道是直线偏移。**

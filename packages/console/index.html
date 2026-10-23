@@ -52,14 +52,18 @@
           </button>
           <div id="legend-body" class="legend-body">
             <ul id="namespace-legend" class="legend-list"></ul>
-            <h2 data-i18n="legend.edges">边</h2>
+            <h2 data-i18n="legend.edges">设备连接</h2>
             <ul class="legend-list legend-edges">
-              <li><span class="edge-swatch edge-mine"></span><span data-i18n="legend.edge.mine">我订阅它</span></li>
-              <li><span class="edge-swatch edge-theirs"></span><span data-i18n="legend.edge.theirs">它订阅我</span></li>
-              <li><span class="edge-swatch edge-offline"></span><span data-i18n="legend.edge.offline">未连接 / 待接通</span></li>
-              <li><span class="edge-swatch edge-revoked"></span><span data-i18n="legend.edge.revoked">已撤销</span></li>
+              <li><span class="edge-swatch edge-base-shared"></span><span data-i18n="legend.edge.shared">共同订阅</span></li>
+              <li><span class="edge-swatch edge-base-unshared"></span><span data-i18n="legend.edge.unshared">无共同订阅</span></li>
             </ul>
-            <p class="legend-note muted" data-i18n="legend.note">本机视角：只展示你与已知对端的关系，不代表全网拓扑。</p>
+            <h2 data-i18n="legend.routes">任务域航道（悬停）</h2>
+            <ul class="legend-list legend-edges">
+              <li><span class="edge-swatch edge-route-send"></span><span data-i18n="legend.route.send">可达 · 可发出</span></li>
+              <li><span class="edge-swatch edge-route-receive"></span><span data-i18n="legend.route.receive">可达 · 可接收</span></li>
+              <li><span class="edge-swatch edge-route-blocked"></span><span data-i18n="legend.route.blocked">任务不可达</span></li>
+            </ul>
+            <p class="legend-note muted" data-i18n="legend.note">基础边按共同订阅绘制；悬停设备查看任务域可达性（双方在线且都订阅任务域），不代表完整 fleet 路由。</p>
           </div>
         </section>
       </nav>
@@ -67,7 +71,7 @@
       <main class="stage-wrap">
         <div id="banner" class="banner" hidden></div>
         <canvas class="stage-bg" aria-hidden="true"></canvas>
-        <canvas id="stage" class="stage" aria-label="对端关系星图（本机视角）" data-i18n-aria-label="stage.aria"></canvas>
+        <canvas id="stage" class="stage" aria-label="忆云设备星图（全设备）" data-i18n-aria-label="stage.aria"></canvas>
         <div id="tooltip" class="tooltip" hidden></div>
         <!-- UX-2 首屏叠加层（只读；星图本体不改）：状态总览条 + 「需要注意」条件浮卡 -->
         <div id="status-pill" class="status-pill" hidden></div>

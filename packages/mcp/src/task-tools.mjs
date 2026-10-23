@@ -3,6 +3,10 @@
 // 守护本机 home 即工具上下文（fleet.config.json 或 config.json，见 fleet 的 loadToolConfig）。
 //
 // scope（R1.3）：读取类 task.read / 写入类 task.write。
+//
+// live app（运行中 daemon）：server 通过第三个参数注入 `{ home, mebular }`。
+// 有 `mebular` 时 fleet 复用它（同一 EventLog：本地 append / push-on-write / SSE 都能感知）；
+// 缺省时沿用离线 `dir` 路径（CLI / 无 daemon 的 stdio）。
 
 import { TASK_TOOLS } from '../../fleet/dist/index.js';
 import { homeDir } from './config.mjs';
@@ -13,16 +17,25 @@ export const TASK_TOOL_SCOPES = Object.fromEntries(
   TASK_TOOLS.map((tool) => [tool.name, tool.scope]),
 );
 
-/** 任务工具规格：与记忆面同形（name/title/description/inputSchema/handler(service,args)）。 */
+/**
+ * 任务工具规格：与记忆面同形（name/title/description/inputSchema/handler(service,args,context)）。
+ *
+ * `context.home`：工具上下文目录（默认 homeDir()）。
+ * `context.mebular`：运行中 daemon 的 live app（缺省 = 离线新建）。
+ */
 export const TASK_TOOL_SPECS = TASK_TOOLS.map((tool) => ({
   name: tool.name,
   title: tool.name,
   description: tool.description,
   inputSchema: jsonSchemaAdapter(tool.inputSchema),
   surface: 'task',
-  handler: async (_service, args) => {
+  handler: async (_service, args, context = {}) => {
     try {
-      const result = await tool.handler(args ?? {}, { dir: homeDir(), agent: 'board' });
+      const result = await tool.handler(args ?? {}, {
+        dir: context.home ?? homeDir(),
+        agent: 'board',
+        ...(context.mebular ? { mebular: context.mebular } : {}),
+      });
       return json(result);
     } catch (error) {
       const message = String(error?.message ?? error);

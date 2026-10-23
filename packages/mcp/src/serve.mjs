@@ -15,6 +15,7 @@ import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/server';
 import { TOOL_ALL_SCOPES } from './tools.mjs';
+import { attachFleetEvents, resolveFleetNamespace } from './fleet-events.mjs';
 import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 import { configPath } from './config.mjs';
 import { createServiceFacade } from './service-facade.mjs';
@@ -891,7 +892,12 @@ export async function startHttpServer({
   const mcpSessions = new Map(); // sessionId → { transport, server }
   async function transportFor(sessionId) {
     if (sessionId) return mcpSessions.get(sessionId)?.transport ?? null;
-    const server = buildServer(serviceFacade, { isReady: runtimeReady });
+    const server = buildServer(serviceFacade, {
+      isReady: runtimeReady,
+      // 任务工具复用**当前** live app（热初始化后 app 会切换，故用 getter）：同一 EventLog 才会触发
+      // 本地 append / push-on-write / fleet SSE，而不是另开一个离线实例写同一份库。
+      toolContext: () => ({ home, ...(app ? { mebular: app } : {}) }),
+    });
     const entry = { transport: null, server };
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
@@ -1143,6 +1149,8 @@ export async function startHttpServer({
       if (check.challenge) res.setHeader('www-authenticate', check.challenge);
       return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
     }
+    // 任务域在写响应头前解析，避免 hello 之后到监听接入之间漏掉短暂窗口内的事件。
+    const fleetNamespace = await resolveFleetNamespace({ home, fallback: namespace });
     res.writeHead(200, {
       'content-type': 'text/event-stream; charset=utf-8',
       'cache-control': 'no-cache, no-transform',
@@ -1157,6 +1165,21 @@ export async function startHttpServer({
       }
     };
     send('hello', { at: Date.now() });
+
+    // fleet：真实任务 `created` 事件 → 控制台实时绘制航道/舰队（只读广播；契约见 fleet-events.mjs）。
+    // 本地 append 与远端同步应用（events-applied）都接入；清理时统一移除监听。
+    let detachFleet = null;
+    try {
+      detachFleet = attachFleetEvents({
+        eventLog: app.eventLog,
+        sync: app.sync,
+        namespace: fleetNamespace,
+        send,
+      });
+    } catch {
+      // 任务面不可用时不影响其余 SSE 事件
+      detachFleet = null;
+    }
 
     const onSync = (result) => send('sync', {
       at: Date.now(),
@@ -1226,6 +1249,7 @@ export async function startHttpServer({
         // ignore
       }
       try { offConvergence?.(); } catch { /* ignore */ }
+      try { detachFleet?.(); } catch { /* ignore */ }
       try { res.end(); } catch { /* ignore */ }
     };
     req.on('close', cleanup);

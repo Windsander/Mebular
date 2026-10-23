@@ -2241,6 +2241,22 @@ async function main() {
     await send('Page.navigate', { url: `${base}/console/?mock=1` });
     check('v4 mock：记忆共享统计新口径 + 左列订阅标记',
       await waitFor('(() => { const s = document.querySelector("#domains-stats")?.textContent ?? ""; const list = document.querySelector("#domains-list")?.textContent ?? ""; return /记忆域 4/.test(s) && /已订阅 3/.test(s) && /未订阅/.test(list); })()'));
+    check('星图网络基础边：4 设备 → 6 条全连接，2 实线 / 4 虚线，未 hover 时无航道',
+      await waitFor(`(() => {
+        const c = document.querySelector('#stage');
+        if (!c) return false;
+        return c.dataset.baseEdgeCount === '6'
+          && c.dataset.solidEdgeCount === '2'
+          && c.dataset.dashedEdgeCount === '4'
+          && c.dataset.routeCount === '0'
+          && c.dataset.hoveredDevice === '';
+      })()`));
+    check('星图图例：基础边（共同/无共同订阅）+ 悬停任务域航道三色',
+      await evalJs(`(() => {
+        const t = document.querySelector('#legend-body')?.textContent ?? '';
+        return /共同订阅/.test(t) && /无共同订阅/.test(t)
+          && /任务域航道/.test(t) && /可发出/.test(t) && /可接收/.test(t) && /任务不可达/.test(t);
+      })()`));
     await evalJs('document.querySelector("#domains-list [data-sector=notes]").click()');
     check('v4 mock：域卡 = 订阅事实（关系行 + 订阅的设备 + 状态文字化；无批准/撤回）',
       await waitFor(`(() => {
@@ -4614,7 +4630,7 @@ async function main() {
           if (!stage || !aside || !card) return false;
           const rect = aside.getBoundingClientRect();
           return stage.dataset.scene === 'ready'
-            && stage.getAttribute('aria-label') === '对端关系星图（本机视角）'
+            && stage.getAttribute('aria-label') === '忆云设备星图（全设备）'
             && aside.hidden === false && getComputedStyle(aside).display !== 'none'
             && rect.width > 0;
         })()`, 20000));

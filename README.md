@@ -170,7 +170,6 @@ Runnable example: [`examples/quickstart`](examples/quickstart/index.mjs) — it 
 - **Fleet** — [`packages/fleet`](packages/fleet)
 - **Console GUI** — [`packages/console`](packages/console)
 - **Contributing & quality gates** — [`CONTRIBUTING.md`](CONTRIBUTING.md)
-- **Security policy** — [`SECURITY.md`](SECURITY.md)
 
 <div align="center">
 

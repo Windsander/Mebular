@@ -249,9 +249,9 @@ jobs:
         run: node --test tests-semantic/real-semantic.test.mjs
 
   desktop:
-    name: desktop smoke (no GUI)
+    name: desktop smoke (runtime + unpacked package, no GUI)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -261,6 +261,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/desktop/package-lock.json
 
       # 复用仓库既有产物：App 只编排，不复制逻辑（同时让 ELECTRON_RUN_AS_NODE 的 CLI 加载检查可跑）
       - name: Install root dependencies
@@ -271,8 +274,32 @@ jobs:
 
       # apps/desktop 独立安装（不并入根 workspaces → 现有四 job 零影响）
       - name: Install desktop dependencies
-        working-directory: apps/desktop
-        run: npm install --no-audit --no-fund
+        run: npm ci --prefix apps/desktop
+
+      # 与发布流水线同路径：先 pack 发布 tarball，再由它安装 runtime（不读仓库源码目录）。
+      - name: Pack release tarballs (prepare-runtime input)
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf release-pack
+          mkdir -p release-pack
+          ROOT="$PWD"
+          npm pack --pack-destination "$ROOT/release-pack"
+          for p in packages/fleet packages/service packages/mcp packages/skill; do
+            (cd "$p" && npm pack --pack-destination "$ROOT/release-pack")
+          done
+
+      - name: Desktop runtime from release tarballs
+        run: node apps/desktop/scripts/prepare-runtime.mjs --tarballs release-pack
+
+      - name: Runtime smoke (serve /healthz / embed headers)
+        run: npm --prefix apps/desktop run smoke:runtime
+
+      - name: Package unpacked app (electron-builder --dir)
+        run: npm --prefix apps/desktop run dist:dir
+
+      - name: Packaged runtime smoke (linux-unpacked resources)
+        run: node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/linux-unpacked/resources
 
       - name: Desktop smoke (bounded, no GUI process left behind)
         working-directory: apps/desktop

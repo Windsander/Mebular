@@ -1,6 +1,9 @@
 <div align="center">
 
-![Mebular](assets/banner.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="assets/banner-light.svg">
+  <img src="assets/banner.svg" alt="Mebular">
+</picture>
 
 **一份记忆，每个助手，每台设备。**
 
@@ -43,7 +46,12 @@
 
 ### 桌面 App
 
-![桌面 App 三步：1 开始部署，2 新建或加入忆云，3 邀请下一台设备](assets/desktop-steps-cn.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/desktop-steps-cn-light.svg">
+    <img src="assets/desktop-steps-cn.svg" alt="桌面 App 三步：1 开始部署，2 新建或加入忆云，3 邀请下一台设备">
+  </picture>
+</p>
 
 **开始部署** → **新建忆云** / **加入忆云** → **邀请设备**。
 
@@ -98,13 +106,23 @@ mebular print-config --client opencode         # MCP 配置
 
 ## 它如何工作
 
-![Mebular 网络概览：两台机器各跑一个本地节点，为接入的助手同步同一份图记忆](assets/network-overview-cn.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/network-overview-cn-light.svg">
+    <img src="assets/network-overview-cn.svg" alt="Mebular 网络概览：两台机器各跑一个本地节点，为接入的助手同步同一份图记忆">
+  </picture>
+</p>
 
 <p align="center"><sub>一台机器一个节点，所有节点共用一份图记忆。</sub></p>
 
 每台机器跑一个节点，节点之间直接同步记忆和任务。加设备只需要一个二维码或令牌——主密钥留在根设备。
 
-![配对流程：设备 A 新建并发出邀请，设备 B 用二维码加入，随后连接和默认授权自动完成](assets/pairing-flow-cn.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/pairing-flow-cn-light.svg">
+    <img src="assets/pairing-flow-cn.svg" alt="配对流程：设备 A 新建并发出邀请，设备 B 用二维码加入，随后连接和默认授权自动完成">
+  </picture>
+</p>
 
 ## 文档
 

@@ -1,6 +1,9 @@
 <div align="center">
 
-![Mebular](assets/banner.svg)
+<picture>
+  <source media="(prefers-color-scheme: light)" srcset="assets/banner-light.svg">
+  <img src="assets/banner.svg" alt="Mebular">
+</picture>
 
 **One memory. Every assistant. Every device.**
 
@@ -43,7 +46,12 @@ A Cloud (忆云) is one shared memory space in the network — not a hosted serv
 
 ### Desktop app
 
-![Desktop app setup: 1 Start deployment, 2 Create or join a Cloud, 3 Invite the next device](assets/desktop-steps-en.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/desktop-steps-en-light.svg">
+    <img src="assets/desktop-steps-en.svg" alt="Desktop app setup: 1 Start deployment, 2 Create or join a Cloud, 3 Invite the next device">
+  </picture>
+</p>
 
 **Start deployment** → **Create new Cloud** / **Join existing Cloud** → **Invite device**.
 
@@ -98,13 +106,23 @@ mebular print-config --client opencode         # MCP config
 
 ## How it works
 
-![Mebular network overview: two machines, each running a local node, syncing one graph for the assistants connected to them](assets/network-overview-en.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/network-overview-en-light.svg">
+    <img src="assets/network-overview-en.svg" alt="Mebular network overview: two machines, each running a local node, syncing one graph for the assistants connected to them">
+  </picture>
+</p>
 
 <p align="center"><sub>One node per machine. One graph across them.</sub></p>
 
 Each machine runs one node; nodes sync memory and tasks directly. Add a device with one QR code or token — the master key stays on the root machine.
 
-![Pairing flow: device A starts and invites, device B joins with the QR code, then connection and the default grant happen automatically](assets/pairing-flow-en.svg)
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/pairing-flow-en-light.svg">
+    <img src="assets/pairing-flow-en.svg" alt="Pairing flow: device A starts and invites, device B joins with the QR code, then connection and the default grant happen automatically">
+  </picture>
+</p>
 
 ## Docs
 

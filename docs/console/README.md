@@ -14,8 +14,11 @@
 
 ## 设计文档
 
-- [`page-map.md`](./page-map.md) —— 页面地图：哪个设置在哪个 Tab（常用/高级/诊断）与「关于本机」。
-- [`interaction-draft.md`](./interaction-draft.md) —— 交互草稿（视图/动作/状态）。
-- [`e2-manual-acceptance.md`](./e2-manual-acceptance.md) —— 人工验收手册（E2）。
-- [`i18n-finalize-acceptance.md`](./i18n-finalize-acceptance.md) —— v0.1.0 双语发布门禁验收
-  （静态/测试、三档布局、真实 Electron 隔离验证、已知缺口）。
+**当前**
+
+- [`page-map.md`](./page-map.md) —— 页面地图：哪个设置在哪个 Tab（常用/安全/AI 助手/MCP 接入/高级）与「关于本机」；安全 Tab 的状态卡与两个弹框以本文为准。
+
+**历史**（保留作背景，不代表当前实现）
+
+- [`interaction-draft.md`](./interaction-draft.md) —— 早期交互草稿（视图/动作/状态）。
+- [`e2-manual-acceptance.md`](./e2-manual-acceptance.md) —— 早期人工验收手册（E2，双实例手测流程）。

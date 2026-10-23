@@ -1,5 +1,7 @@
 # 控制台 E2 · 双实例手工验收
 
+> Historical: early manual E2 acceptance notes; current acceptance is scripted (npm run verify:console / verify:console:ui, npm run verify:fleet:*).
+
 目标：在两台设备（或同一台机器的两个 `MEBULAR_HOME`）上，用真实 serve +
 真实 libp2p 完成「连接 → 授权 → 同步 → 撤销 → 再同步」的闭环，并核对审计导出。
 

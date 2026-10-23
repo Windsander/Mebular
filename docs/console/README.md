@@ -12,6 +12,10 @@
 - 设置页：常用（常驻状态 + 忆云卡 + 邀请/重启入口）/ 安全 / AI 助手 / MCP 接入 / 高级（含诊断与恢复）；只读信息在「关于本机」（顶栏徽章）。
 - 运行手册：[`../../packages/fleet/RUNBOOK.md`](../../packages/fleet/RUNBOOK.md) §6；限制见 [`../limitations/LIMITATIONS.md`](../limitations/LIMITATIONS.md)。
 
+## 测试
+
+- [`star-map-multinode-e2e.md`](./star-map-multinode-e2e.md) —— 6 台真实 daemon + 远端 fleet 的星图 E2E（`npm run verify:star-map:multinode`）。
+
 ## 设计文档
 
 **当前**

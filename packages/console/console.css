@@ -317,7 +317,7 @@ html.console-booting #boot-screen::after {
 .legend-list li { display: flex; align-items: center; gap: 7px; color: var(--text); }
 .legend-chip { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
 .edge-swatch { width: 22px; height: 0; border-top: 2px solid var(--accent); flex: 0 0 auto; }
-.edge-base-shared { border-color: #c1c8d6; }
+.edge-base-shared { border-color: #9fe6f2; }
 .edge-base-unshared { border-color: #7c8598; border-top-style: dashed; }
 .edge-route-send { border-color: #56b4e9; }
 .edge-route-receive { border-color: #f0c46a; }

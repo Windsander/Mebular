@@ -2241,20 +2241,36 @@ async function main() {
     await send('Page.navigate', { url: `${base}/console/?mock=1` });
     check('v4 mock：记忆共享统计新口径 + 左列订阅标记',
       await waitFor('(() => { const s = document.querySelector("#domains-stats")?.textContent ?? ""; const list = document.querySelector("#domains-list")?.textContent ?? ""; return /记忆域 4/.test(s) && /已订阅 3/.test(s) && /未订阅/.test(list); })()'));
-    check('星图网络基础边：4 设备 → 6 条全连接，2 实线 / 4 虚线，未 hover 时无航道',
+    check('星图网络基础边：4 设备 → 6 条全连接；仅 A-B 为在线共同订阅实线（1 实线 / 5 虚线），未 hover 时无航道',
       await waitFor(`(() => {
         const c = document.querySelector('#stage');
         if (!c) return false;
         return c.dataset.baseEdgeCount === '6'
-          && c.dataset.solidEdgeCount === '2'
-          && c.dataset.dashedEdgeCount === '4'
+          && c.dataset.solidEdgeCount === '1'
+          && c.dataset.dashedEdgeCount === '5'
           && c.dataset.routeCount === '0'
           && c.dataset.hoveredDevice === '';
       })()`));
-    check('星图图例：基础边（共同/无共同订阅）+ 悬停任务域航道三色',
+    check('星图网络基础边：C 离线 → C 相关 3 条边全部 dashed（A-C 虽有 work 共同订阅也不画实线）',
+      await waitFor(`(() => {
+        const scene = window.__mebularMockStarScene;
+        if (!scene || !Array.isArray(scene.edges)) return false;
+        const pairs = new Map(scene.edges.map((edge) => [edge.from + '~' + edge.to, edge]));
+        const ac = pairs.get('device-A~device-C');
+        const cEdges = scene.edges.filter((edge) => edge.from === 'device-C' || edge.to === 'device-C');
+        return Boolean(ac)
+          && ac.shared === true
+          && ac.solid === false
+          && ac.dashed === true
+          && cEdges.length === 3
+          && cEdges.every((edge) => edge.solid === false && edge.dashed === true)
+          && pairs.get('device-A~device-B')?.solid === true;
+      })()`));
+    check('星图图例：基础边（在线·共同订阅 / 离线·无共同订阅）+ 悬停任务域航道三色',
       await evalJs(`(() => {
         const t = document.querySelector('#legend-body')?.textContent ?? '';
-        return /共同订阅/.test(t) && /无共同订阅/.test(t)
+        return /在线 · 共同订阅/.test(t) && /离线 \\/ 无共同订阅/.test(t)
+          && /实线要求两端在线且共同订阅/.test(t)
           && /任务域航道/.test(t) && /可发出/.test(t) && /可接收/.test(t) && /任务不可达/.test(t);
       })()`));
     await evalJs('document.querySelector("#domains-list [data-sector=notes]").click()');

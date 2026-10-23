@@ -651,6 +651,8 @@ function renderStageScene() {
     canvas.dataset.scene = state.locked ? 'locked-ghost' : 'ready';
     canvas.setAttribute('aria-label', state.locked ? t('lock.canvasAria') : t('stage.aria'));
   }
+  // E2E：仅 ?mock=1 演示模式暴露只读场景，用于断言逐边 solid/dashed；真实设备数据不落到 window。
+  if (MOCK && typeof window !== 'undefined') window.__mebularMockStarScene = stage.scene;
 }
 
 function renderBanner() {

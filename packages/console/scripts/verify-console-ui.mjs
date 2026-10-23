@@ -490,9 +490,11 @@ async function main() {
     };
 
     await send('Page.navigate', { url: `${base}/console/` });
-    check('页面加载完成（标题 / #stage）', await waitFor('document.title.includes("Mebular") && Boolean(document.querySelector("#stage"))'));
+    // #stage 在 HTML 前部，后面的 modal 仍可能尚未解析；先等文档完成，避免把解析竞态
+    // 误报成弹窗对齐回归（Linux CI 上曾出现 1/381 的间歇失败）。
+    check('页面加载完成（标题 / #stage / DOM 就绪）', await waitFor('document.title.includes("Mebular") && Boolean(document.querySelector("#stage")) && document.readyState === "complete"'));
     check('弹窗对齐规范：小弹窗 + 加入忆云 modal-center；其余大面板顶部对齐',
-      await evalJs(`(() => {
+      await waitFor(`(() => {
         const small = ['wizard', 'invite', 'cloud-switch', 'security-action', 'handoff', 'modal', 'auth-token', 'namespace-new-modal', 'cloud-join', 'onboard-create', 'onboard-join'];
         const large = ['settings', 'about', 'provision'];
         const boxes = [...document.querySelectorAll('.modal .modal-box')];

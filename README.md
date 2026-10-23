@@ -14,9 +14,11 @@ Memory and tasks stay on your devices.<br>Devices sync directly. One shared grap
 
 ---
 
-![The Mebular console on a laptop: star map, daemon status and memory count](assets/console-starmap-en.jpg)
-
-<p align="center"><sub>The console on a real machine: star map, device status and memory count.</sub></p>
+<p align="center">
+  <img src="assets/console-onboarding-en.jpg" width="49%" alt="Create a Cloud in the Mebular console">
+  <img src="assets/console-starmap-en.jpg" width="49%" alt="Local star map view: five devices connected to this machine">
+</p>
+<p align="center"><sub>Create a Cloud on the first device · local view: five devices connected to this machine.<br>Blue and gold lines show each device's two-way authorization/connection to this machine, not peer-to-peer links.</sub></p>
 
 ## What it is
 

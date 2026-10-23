@@ -1218,7 +1218,19 @@ export class StarStage {
     for (let i = 1; i < points.length; i += 1) {
       ctx.lineTo(points[i].x, points[i].y);
     }
-    ctx.strokeStyle = rgba(COLORS.basePulse, strength);
+    // 波形两端渐隐到透明，露出下面的基础线；颜色过渡是连续的，
+    // 不会在左右边缘留下比基础线更亮的一小截硬边。
+    const first = points[0];
+    const last = points[points.length - 1];
+    const gradient = ctx.createLinearGradient(first.x, first.y, last.x, last.y);
+    gradient.addColorStop(0, rgba(COLORS.basePulse, 0));
+    gradient.addColorStop(0.1, rgba(COLORS.basePulse, strength * 0.1));
+    gradient.addColorStop(0.3, rgba(COLORS.basePulse, strength * 0.5));
+    gradient.addColorStop(0.5, rgba(COLORS.basePulse, strength));
+    gradient.addColorStop(0.7, rgba(COLORS.basePulse, strength * 0.5));
+    gradient.addColorStop(0.9, rgba(COLORS.basePulse, strength * 0.1));
+    gradient.addColorStop(1, rgba(COLORS.basePulse, 0));
+    ctx.strokeStyle = gradient;
     ctx.lineWidth = 1.2;
     ctx.setLineDash([]);
     ctx.lineDashOffset = 0;

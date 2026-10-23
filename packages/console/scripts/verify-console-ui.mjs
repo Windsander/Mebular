@@ -14,6 +14,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { inflateSync } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +37,98 @@ const check = (name, ok, detail = '') => {
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const round2 = (value) => Math.round(value * 100) / 100;
+
+/**
+ * 极简 PNG 解码（零依赖）：只处理 8-bit RGB/RGBA + 标准 filter。
+ * 图例 chevron 的“视觉居中”不能只看 DOM 盒——三角字的着墨在行盒里并不居中，
+ * 中英文行高不同时更明显；这里直接读渲染截图的像素，找三角的着墨行中心。
+ */
+function decodePng(buffer) {
+  if (buffer.readUInt32BE(0) !== 0x89504e47) throw new Error('不是 PNG');
+  let pos = 8;
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  const chunks = [];
+  while (pos < buffer.length) {
+    const length = buffer.readUInt32BE(pos);
+    const type = buffer.toString('ascii', pos + 4, pos + 8);
+    const data = buffer.subarray(pos + 8, pos + 8 + length);
+    if (type === 'IHDR') {
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      bitDepth = data[8];
+      colorType = data[9];
+    } else if (type === 'IDAT') {
+      chunks.push(data);
+    } else if (type === 'IEND') {
+      break;
+    }
+    pos += 12 + length;
+  }
+  const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : 0;
+  if (bitDepth !== 8 || channels === 0) throw new Error(`不支持的 PNG（depth=${bitDepth} color=${colorType}）`);
+  const raw = inflateSync(Buffer.concat(chunks));
+  const stride = width * channels;
+  const pixels = Buffer.alloc(stride * height);
+  let previous = Buffer.alloc(stride);
+  let offset = 0;
+  for (let y = 0; y < height; y += 1) {
+    const filter = raw[offset];
+    offset += 1;
+    const line = raw.subarray(offset, offset + stride);
+    offset += stride;
+    const current = Buffer.alloc(stride);
+    for (let x = 0; x < stride; x += 1) {
+      const left = x >= channels ? current[x - channels] : 0;
+      const up = previous[x];
+      const upLeft = x >= channels ? previous[x - channels] : 0;
+      let value = line[x];
+      if (filter === 1) value += left;
+      else if (filter === 2) value += up;
+      else if (filter === 3) value += (left + up) >> 1;
+      else if (filter === 4) {
+        const p = left + up - upLeft;
+        const pa = Math.abs(p - left);
+        const pb = Math.abs(p - up);
+        const pc = Math.abs(p - upLeft);
+        value += pa <= pb && pa <= pc ? left : pb <= pc ? up : upLeft;
+      } else if (filter !== 0) {
+        throw new Error(`未知 PNG filter ${filter}`);
+      }
+      current[x] = value & 0xff;
+    }
+    current.copy(pixels, y * stride);
+    previous = current;
+  }
+  return { width, height, channels, pixels };
+}
+
+/** 在 legend-head 截图里找 chevron 三角的着墨行中心（跳过上下 20% 的卡片发光边）。 */
+function inkCenterY(png) {
+  const { width, height, channels, pixels } = png;
+  const luminance = (x, y) => {
+    const i = (y * width + x) * channels;
+    return 0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2];
+  };
+  let darkest = 255;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) darkest = Math.min(darkest, luminance(x, y));
+  }
+  const threshold = Math.max(90, darkest + 60);
+  const rows = [];
+  for (let y = Math.floor(height * 0.2); y < Math.ceil(height * 0.8); y += 1) {
+    let bright = 0;
+    for (let x = 0; x < width; x += 1) {
+      if (luminance(x, y) > threshold) bright += 1;
+    }
+    if (bright > 0) rows.push(y);
+  }
+  if (rows.length === 0) return null;
+  return { center: (rows[0] + rows[rows.length - 1] + 1) / 2, rows: rows.length, threshold };
+}
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -2357,6 +2450,93 @@ async function main() {
     await evalJs('document.querySelector("#settings-close").click()');
     await send('Page.navigate', { url: `${base}/console/?i18n=1&lang=en-US` });
     check('i18n 深链：html lang=en-US + 顶栏/导航英文', await waitFor(`document.documentElement?.dataset?.consoleReady === '1' && document.documentElement?.lang === 'en-US' && document.querySelector('.brand')?.textContent.includes('Mebular') && /Star map/.test(document.querySelector('[data-view=map] .view-label')?.textContent ?? '')`));
+
+    // 图例 chevron 垂直居中：中英文 × 1440/1024/390 × 折叠/展开。
+    // 断言基于渲染像素（三角着墨中心 vs legend-head 中心），而不是只看 DOM 盒——
+    // 三角字的着墨在行盒里天然偏下，仅靠 flex 居中不足以证明“看起来居中”。
+    const legendGeometryProbe = `(() => {
+      const head = document.querySelector('#legend-toggle');
+      const chev = document.querySelector('.legend-chevron');
+      if (!head || !chev) return { ok: false, why: 'missing' };
+      const rect = (el) => {
+        const box = el.getBoundingClientRect();
+        return { left: box.left, top: box.top, right: box.right, bottom: box.bottom, width: box.width, height: box.height, cy: (box.top + box.bottom) / 2 };
+      };
+      const style = getComputedStyle(chev);
+      const headBox = rect(head);
+      const chevBox = rect(chev);
+      return {
+        ok: headBox.width > 0 && headBox.height > 0,
+        lang: document.documentElement.lang,
+        collapsed: document.querySelector('#legend-panel').classList.contains('is-collapsed'),
+        head: headBox,
+        chev: chevBox,
+        display: style.display,
+        lineHeight: style.lineHeight,
+        transformOrigin: style.transformOrigin,
+        alignItems: style.alignItems,
+        justifyContent: style.justifyContent,
+        flex: style.flex,
+      };
+    })()`;
+    for (const lang of ['zh-CN', 'en-US']) {
+      await send('Page.navigate', { url: `${base}/console/?i18n=1&lang=${lang}` });
+      check(`图例 chevron 用例前置：${lang} 控制台就绪（星图视图）`,
+        await waitFor(`document.documentElement?.dataset?.consoleReady === '1' && document.documentElement?.lang === '${lang}' && Boolean(document.querySelector('#legend-toggle'))`));
+      for (const [label, viewport] of [
+        ['1440', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }],
+        ['1024', { width: 1024, height: 768, deviceScaleFactor: 1, mobile: false }],
+        ['390', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }],
+      ]) {
+        await setViewport(viewport);
+        for (const collapsed of [true, false]) {
+          await evalJs(`(() => {
+            const panel = document.querySelector('#legend-panel');
+            if (panel.classList.contains('is-collapsed') !== ${collapsed}) document.querySelector('#legend-toggle').click();
+          })()`);
+          await sleep(350);
+          const geometry = await evalJs(legendGeometryProbe);
+          const clip = {
+            x: Math.min(geometry.chev.left, geometry.chev.right) - 6,
+            y: geometry.head.top,
+            width: Math.abs(geometry.chev.width) + 12,
+            height: geometry.head.height,
+            scale: 4,
+          };
+          const shot = await send('Page.captureScreenshot', { format: 'png', clip });
+          const png = decodePng(Buffer.from(shot.data, 'base64'));
+          const ink = inkCenterY(png);
+          const headCenter = png.height / clip.scale / 2;
+          const inkCenter = ink ? ink.center / clip.scale : null;
+          const inkDiff = inkCenter === null ? Infinity : Math.abs(inkCenter - headCenter);
+          const boxDiff = Math.abs(geometry.chev.cy - geometry.head.cy);
+          const state = collapsed ? 'collapsed' : 'expanded';
+          const langName = lang === 'zh-CN' ? 'zh' : 'en';
+          check(`图例 chevron 垂直居中 ${langName} ${label} ${state}：三角着墨中心 / 盒中心与 legend-head 中心差 ≤1px`,
+            geometry.ok && geometry.lang === lang && geometry.collapsed === collapsed
+              && geometry.display === 'flex'
+              && geometry.alignItems === 'center' && geometry.justifyContent === 'center'
+              && boxDiff <= 1 && inkDiff <= 1,
+            JSON.stringify({
+              headH: round2(geometry.head.height),
+              chevBox: [round2(geometry.chev.top), round2(geometry.chev.bottom)],
+              headCenter: round2(geometry.head.cy),
+              boxDiff: round2(boxDiff),
+              inkCenter: inkCenter === null ? null : round2(inkCenter),
+              inkDiff: Number.isFinite(inkDiff) ? round2(inkDiff) : 'n/a',
+              inkRows: ink?.rows ?? 0,
+              display: geometry.display,
+            }));
+          await captureNow(`i18n-legend-chevron-${langName}-${label}-${state}.jpg`);
+        }
+      }
+    }
+    // 后续顶栏用例只关心布局，不依赖图例状态：先折叠回默认态并复位视口。
+    await evalJs(`(() => {
+      const panel = document.querySelector('#legend-panel');
+      if (!panel.classList.contains('is-collapsed')) document.querySelector('#legend-toggle').click();
+    })()`);
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
     // B · 英文长文案：顶栏动作不产生第二行 / 不横向溢出（1440 / 1024 / 390 三档）。
     const topbarProbe = `(() => {
       const bar = document.querySelector('.topbar');

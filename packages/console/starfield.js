@@ -36,6 +36,9 @@ export function namespaceColor(name) {
   return NAMESPACE_PALETTE[Math.abs(hash) % NAMESPACE_PALETTE.length];
 }
 
+// 悬停航道出现时，基础边降到正常亮度的 20%（保留网络结构感，但让蓝/金/灰航道成为主视觉）。
+export const BASE_EDGE_DIM_ON_HOVER = 0.2;
+
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
 const COLORS = {
   text: '#dbe4ff',
@@ -342,6 +345,9 @@ export class StarStage {
     this.pointerNy = 0.5;
     this.targetNx = 0.5;
     this.targetNy = 0.5;
+    // 基础边亮度：hover 航道出现时平滑降到 BASE_EDGE_DIM_ON_HOVER，离开恢复。
+    this.baseEdgeDim = 1;
+    this.lastDimAt = 0;
 
     this._tick = this._tick.bind(this);
     this._resize = this._resize.bind(this);
@@ -659,6 +665,7 @@ export class StarStage {
     ctx.clearRect(0, 0, this.width, this.height);
     this._computeScreen(time);
     this._drawStars(time);
+    this._updateBaseEdgeDim(time);
     this._drawBaseEdges(time);
     this._drawRoutes(time);
     this._drawFleets(time);
@@ -728,6 +735,72 @@ export class StarStage {
     return {
       x: g.sx + (g.ex - g.sx) * p,
       y: g.sy + (g.ey - g.sy) * p,
+    };
+  }
+
+  /**
+   * 航道几何（hover 蓝/金/灰航道、fleet 事件航道与舰队）：
+   * 端点每帧取星位 + 端点留白 + 双向平行偏移 + 二次曲线中点法线弓高 +
+   * 深度差纵向偏置。基础边与手动同步信使仍用 _lineGeometry 的直线几何。
+   */
+  _laneGeometry(fromId, toId, options = {}) {
+    const from = this.screen.get(fromId) ?? this.positions.get(fromId);
+    const to = this.screen.get(toId) ?? this.positions.get(toId);
+    if (!from || !to) return null;
+    const dx = to.x - from.x;
+    const dy = to.y - from.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1) return null;
+    const ux = dx / dist;
+    const uy = dy / dist;
+    const padFrom = options.pad === false ? 0 : (options.padFrom ?? ((from.r ?? 0) + 4));
+    const padTo = options.pad === false ? 0 : (options.padTo ?? ((to.r ?? 0) + 4));
+    const offset = options.offset ?? 0;
+    // out/in 各自沿行进方向取同一侧法线；方向相反即自然落在弦两侧，形成平行航道。
+    const nx = -uy * offset;
+    const ny = ux * offset;
+    const sx = from.x + ux * padFrom + nx;
+    const sy = from.y + uy * padFrom + ny;
+    const ex = to.x - ux * padTo + nx;
+    const ey = to.y - uy * padTo + ny;
+    const mx = (sx + ex) / 2;
+    const my = (sy + ey) / 2;
+    const span = Math.max(0, dist - padFrom - padTo);
+    const bowSign = options.bowSign === -1 ? -1 : 1;
+    const bow = Math.min(48, span * 0.15) * bowSign;
+    // 深度差纵向偏置：远端更低/更高，读起来像有落差的 3D 航道。
+    const depthBias = ((to.depth ?? 0.6) - (from.depth ?? 0.6)) * 26;
+    const cx = mx - uy * bow + nx * 0.5;
+    const cy = my + ux * bow + ny * 0.5 + depthBias;
+    return {
+      sx, sy, ex, ey, cx, cy, ux, uy,
+      nx: -uy,
+      ny: ux,
+      dist,
+      span,
+      bow,
+      bowSign,
+      depthBias,
+      from,
+      to,
+    };
+  }
+
+  /** 二次曲线上的点（p ∈ [0,1]）。 */
+  _lanePoint(g, p) {
+    const q = 1 - p;
+    return {
+      x: q * q * g.sx + 2 * q * p * g.cx + p * p * g.ex,
+      y: q * q * g.sy + 2 * q * p * g.cy + p * p * g.ey,
+    };
+  }
+
+  /** 二次曲线在 p 处的切线（用于舰体朝向）。 */
+  _laneTangent(g, p) {
+    const q = 1 - p;
+    return {
+      x: 2 * q * (g.cx - g.sx) + 2 * p * (g.ex - g.cx),
+      y: 2 * q * (g.cy - g.sy) + 2 * p * (g.ey - g.cy),
     };
   }
 
@@ -828,6 +901,30 @@ export class StarStage {
     }
   }
 
+  /** hover 航道出现时基础边的目标亮度；离开恢复 1。 */
+  baseEdgeDimTarget() {
+    return this.routes.length > 0 ? BASE_EDGE_DIM_ON_HOVER : 1;
+  }
+
+  /**
+   * 基础边亮度平滑过渡（时间常数 60ms，约 120ms 内基本到位；与帧率无关）。
+   * reduced-motion 直接切换，避免任何渐变。
+   */
+  _updateBaseEdgeDim(time) {
+    const target = this.baseEdgeDimTarget();
+    if (this.reducedMotion) {
+      this.baseEdgeDim = target;
+      return this.baseEdgeDim;
+    }
+    const last = this.lastDimAt || time - 0.016;
+    const dt = Math.max(0, Math.min(0.1, time - last));
+    this.lastDimAt = time;
+    const k = 1 - Math.exp(-dt / 0.06);
+    this.baseEdgeDim += (target - this.baseEdgeDim) * k;
+    if (Math.abs(target - this.baseEdgeDim) < 0.001) this.baseEdgeDim = target;
+    return this.baseEdgeDim;
+  }
+
   /** 基础边：所有设备两两相连；共同订阅实线、无共同订阅虚线；无方向箭头。 */
   _drawBaseEdges(time) {
     const ctx = this.ctx;
@@ -845,7 +942,7 @@ export class StarStage {
       const breathe = this.reducedMotion
         ? 0.92
         : 0.78 + 0.22 * Math.sin(time * 0.75 + phase);
-      const alpha = (shared ? 0.42 : 0.24) * depthFade * breathe;
+      const alpha = (shared ? 0.42 : 0.24) * depthFade * breathe * this.baseEdgeDim;
 
       if (shared) {
         // 共同订阅：细实线 + 极淡外发光（比无共同订阅更亮，但仍保持中性色）。
@@ -883,9 +980,9 @@ export class StarStage {
     ctx.save();
     ctx.lineCap = 'round';
     for (const route of this.routes) {
-      // out / in 各偏移一侧；blocked 单线居中。偏移按各自方向计算，双向自然分开。
+      // out / in 各偏移一侧并沿各自行进方向弯向同侧；blocked 单线居中但仍是弧线。
       const offset = route.direction === 'blocked' ? 0 : 2.4;
-      const g = this._lineGeometry(route.from, route.to, { offset });
+      const g = this._laneGeometry(route.from, route.to, { offset });
       if (!g) continue;
       const color = route.direction === 'out'
         ? COLORS.routeSend
@@ -896,7 +993,7 @@ export class StarStage {
       if (reachable) {
         ctx.beginPath();
         ctx.moveTo(g.sx, g.sy);
-        ctx.lineTo(g.ex, g.ey);
+        ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
         ctx.strokeStyle = rgba(color, 0.12);
         ctx.lineWidth = 4;
         ctx.stroke();
@@ -904,7 +1001,7 @@ export class StarStage {
 
       ctx.beginPath();
       ctx.moveTo(g.sx, g.sy);
-      ctx.lineTo(g.ex, g.ey);
+      ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
       ctx.strokeStyle = rgba(color, reachable ? 0.72 : 0.34);
       ctx.lineWidth = reachable ? 1.4 : 1;
       if (reachable) {
@@ -920,7 +1017,7 @@ export class StarStage {
       if (reachable) {
         // 流动信标指示方向（无箭头）；reduced-motion 时固定在航道中点。
         const p = this.reducedMotion ? 0.5 : (time * 0.26 + phase / 6.283) % 1;
-        const point = this._pointAt(g, p);
+        const point = this._lanePoint(g, p);
         ctx.beginPath();
         ctx.fillStyle = rgba(color, 0.95 * Math.sin(Math.PI * p));
         ctx.arc(point.x, point.y, 1.8, 0, Math.PI * 2);
@@ -975,15 +1072,17 @@ export class StarStage {
     const before = this.fleets.length;
     for (const fleet of this.fleets) {
       const elapsed = now - fleet.startedAt;
-      // 不烘焙几何：每帧按星体当前屏幕位置（parallax/depth/bob 之后）重新取线。
-      const g = this._lineGeometry(fleet.fromId, fleet.toId);
+      // 不烘焙几何：每帧按星体当前屏幕位置（parallax/depth/bob 之后）重新取弧线航道。
+      // mine / transit 弯向一侧，theirs 弯向另一侧，双向航道自然分开。
+      const g = this._laneGeometry(fleet.fromId, fleet.toId, {
+        bowSign: fleet.kind === 'theirs' ? 1 : -1,
+      });
       if (!g) continue;
       const baseColor = fleet.kind === 'theirs'
         ? COLORS.fleetReceive
         : fleet.kind === 'transit' ? COLORS.fleetTransit : COLORS.fleetSend;
       const flagship = fleet.egg === 'flagship';
       const norm = { x: g.nx, y: g.ny };
-      const ang = Math.atan2(g.uy, g.ux);
 
       if (fleet.event) {
         // 事件航道：舰队结束后淡出移除；无 hover 也可见。
@@ -996,13 +1095,13 @@ export class StarStage {
           ctx.lineCap = 'round';
           ctx.beginPath();
           ctx.moveTo(g.sx, g.sy);
-          ctx.lineTo(g.ex, g.ey);
+          ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
           ctx.strokeStyle = rgba(baseColor, 0.10 * fade);
           ctx.lineWidth = 4;
           ctx.stroke();
           ctx.beginPath();
           ctx.moveTo(g.sx, g.sy);
-          ctx.lineTo(g.ex, g.ey);
+          ctx.quadraticCurveTo(g.cx, g.cy, g.ex, g.ey);
           ctx.strokeStyle = rgba(baseColor, 0.46 * fade);
           ctx.lineWidth = 1.3;
           ctx.stroke();
@@ -1016,7 +1115,9 @@ export class StarStage {
         const p = fleet.reduced ? 0.62 : raw;
         if (p <= 0 || p > 1.02) continue;
         const pc = Math.min(1, p);
-        const pos = this._pointAt(g, pc);
+        const pos = this._lanePoint(g, pc);
+        const tan = this._laneTangent(g, pc);
+        const ang = Math.atan2(tan.y, tan.x);
         // 编队横向错位 + 轻微蛇形摆动（随机相位）
         const lat = ship.lat * (1 - pc * 0.25) * 0.7 + Math.sin(pc * 9 + ship.wiggle) * 2.2;
         const px = pos.x + norm.x * lat;
@@ -1031,7 +1132,7 @@ export class StarStage {
 
         // 尾迹（彗星最长、旗舰更亮）：宽晕 + 细亮线
         const tailLen = fleet.egg === 'comet' ? 0.14 : flagship ? 0.08 : 0.05;
-        const tail = this._pointAt(g, Math.max(0, pc - tailLen));
+        const tail = this._lanePoint(g, Math.max(0, pc - tailLen));
         ctx.beginPath();
         ctx.moveTo(tail.x + norm.x * lat, tail.y + norm.y * lat);
         ctx.lineTo(px, py);

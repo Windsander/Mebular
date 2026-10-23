@@ -5,6 +5,7 @@
 
 import { describe, test, expect, beforeEach, afterEach } from '@jest/globals';
 import {
+  BASE_EDGE_DIM_ON_HOVER,
   DEFAULT_TASK_NAMESPACE,
   StarStage,
   buildBaseEdges,
@@ -233,5 +234,180 @@ describe('画布只读测试信号', () => {
 
     stage.setRoutes([]);
     expect(canvas.dataset.routeCount).toBe('0');
+  });
+});
+
+describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
+  let stage;
+  let calls;
+
+  const fakeCanvas = (ctx) => ({
+    width: 0,
+    height: 0,
+    style: {},
+    dataset: {},
+    getBoundingClientRect: () => ({ width: 800, height: 600, left: 0, top: 0 }),
+    addEventListener: () => undefined,
+    removeEventListener: () => undefined,
+    parentElement: { querySelector: () => null },
+    getContext: () => ctx,
+  });
+
+  const recordingContext = () => {
+    const log = [];
+    const gradient = () => ({ addColorStop: () => undefined });
+    const proxy = new Proxy({}, {
+      get(target, prop) {
+        if (prop in target) return target[prop];
+        if (prop === 'createLinearGradient' || prop === 'createRadialGradient') return gradient;
+        return (...args) => { log.push({ method: prop, args }); };
+      },
+      set(target, prop, value) { target[prop] = value; return true; },
+    });
+    return { proxy, log };
+  };
+
+  const place = (entries) => {
+    stage.screen = new Map(Object.entries(entries).map(([id, [x, y, depth, r]]) => [
+      id,
+      { x, y, depth: depth ?? 0.6, r: r ?? 8 },
+    ]));
+  };
+
+  const methods = (name) => calls.filter((call) => call.method === name);
+
+  beforeEach(() => {
+    globalThis.window = {
+      devicePixelRatio: 1,
+      matchMedia: () => ({ matches: false }),
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+    };
+    const recorder = recordingContext();
+    calls = recorder.log;
+    stage = new StarStage(fakeCanvas(recorder.proxy));
+    stage.ctx = recorder.proxy;
+  });
+
+  afterEach(() => {
+    stage.destroy();
+    delete globalThis.window;
+  });
+
+  test('基础边仍是直线：_lineGeometry 无曲线控制点，_drawBaseEdges 只用 lineTo', () => {
+    place({ A: [100, 300, 0.5, 8], B: [700, 300, 0.8, 10] });
+    stage.scene = {
+      nodes: [{ id: 'A' }, { id: 'B' }],
+      edges: [{ from: 'A', to: 'B', shared: true }],
+    };
+
+    const g = stage._lineGeometry('A', 'B');
+    expect(g.cx).toBeUndefined();
+    expect(g.cy).toBeUndefined();
+
+    calls.length = 0;
+    stage._drawBaseEdges(0);
+    expect(methods('lineTo').length).toBeGreaterThan(0);
+    expect(methods('quadraticCurveTo')).toHaveLength(0);
+  });
+
+  test('航道几何是曲线：控制点/中点偏离弦，且深度差带来纵向偏置', () => {
+    place({ A: [100, 300, 0.4, 8], B: [700, 300, 0.8, 8] });
+    const g = stage._laneGeometry('A', 'B');
+    const chordMid = { x: (g.sx + g.ex) / 2, y: (g.sy + g.ey) / 2 };
+    const controlOffset = Math.hypot(g.cx - chordMid.x, g.cy - chordMid.y);
+    const mid = stage._lanePoint(g, 0.5);
+    const midOffset = Math.hypot(mid.x - chordMid.x, mid.y - chordMid.y);
+
+    expect(controlOffset).toBeGreaterThan(8);
+    expect(midOffset).toBeGreaterThan(4);
+    // 深度差 0.4 → 控制点纵向偏置 10.4，公式保持不变式。
+    expect(g.depthBias).toBeCloseTo((0.8 - 0.4) * 26, 6);
+    const flat = stage._laneGeometry('A', 'B', { bowSign: 1 });
+    place({ A: [100, 300, 0.6, 8], B: [700, 300, 0.6, 8] });
+    const noDepth = stage._laneGeometry('A', 'B');
+    expect(noDepth.depthBias).toBe(0);
+    expect(flat.bow).toBeGreaterThan(0);
+    expect(stage._laneTangent(noDepth, 0.5).x).not.toBe(0);
+  });
+
+  test('双向航道：out/in 平行偏移且弯向弦的两侧', () => {
+    place({ A: [100, 300, 0.6, 8], B: [700, 300, 0.6, 8] });
+    const out = stage._laneGeometry('A', 'B', { offset: 2.4 });
+    const inbound = stage._laneGeometry('B', 'A', { offset: 2.4 });
+    const midOut = stage._lanePoint(out, 0.5);
+    const midIn = stage._lanePoint(inbound, 0.5);
+    // 以 A→B 弦为准，两条航道的中点应分居两侧。
+    expect((midOut.y - 300) * (midIn.y - 300)).toBeLessThan(0);
+    expect(midOut.y).not.toBeCloseTo(midIn.y, 1);
+  });
+
+  test('航道端点贴合星体：按各自半径留白，不压在星上', () => {
+    place({ A: [100, 300, 0.6, 8], B: [700, 300, 0.6, 14] });
+    const g = stage._laneGeometry('A', 'B');
+    expect(Math.hypot(g.sx - 100, g.sy - 300)).toBeGreaterThanOrEqual(8 + 4 - 1e-9);
+    expect(Math.hypot(g.ex - 700, g.ey - 300)).toBeGreaterThanOrEqual(14 + 4 - 1e-9);
+  });
+
+  test('hover 航道（含灰色不可达）用二次曲线绘制', () => {
+    place({ A: [100, 300, 0.6, 8], B: [700, 300, 0.6, 8] });
+    stage.routes = [
+      { from: 'A', to: 'B', direction: 'out', reachable: true },
+      { from: 'B', to: 'A', direction: 'in', reachable: true },
+      { from: 'A', to: 'B', direction: 'blocked', reachable: false },
+    ];
+    calls.length = 0;
+    stage._drawRoutes(0);
+    expect(methods('quadraticCurveTo').length).toBeGreaterThanOrEqual(3);
+    expect(methods('lineTo')).toHaveLength(0);
+  });
+
+  test('fleet 事件航道用曲线绘制，且几何每帧从星位取（不烘焙）', () => {
+    place({ A: [100, 300, 0.6, 8], B: [700, 300, 0.6, 8] });
+    stage.scene = { nodes: [{ id: 'A' }, { id: 'B' }], edges: [] };
+    stage.launchFleet('A', 'B', { event: true, ships: 2 });
+    const fleet = stage.fleets[0];
+    expect(fleet.geometry).toBeUndefined();
+    expect(fleet.fromId).toBe('A');
+    expect(fleet.toId).toBe('B');
+
+    fleet.ships = [];
+    calls.length = 0;
+    stage._drawFleets(0);
+    expect(methods('quadraticCurveTo').length).toBeGreaterThan(0);
+    expect(methods('lineTo')).toHaveLength(0);
+
+    const before = stage._laneGeometry(fleet.fromId, fleet.toId, { bowSign: -1 });
+    place({ A: [140, 340, 0.6, 8], B: [700, 300, 0.6, 8] });
+    const after = stage._laneGeometry(fleet.fromId, fleet.toId, { bowSign: -1 });
+    expect(after.sx).not.toBeCloseTo(before.sx, 6);
+    expect(after.sy).not.toBeCloseTo(before.sy, 6);
+  });
+
+  test('hover 时基础边目标亮度降到 20%，离开恢复；reduced-motion 直接切换', () => {
+    expect(BASE_EDGE_DIM_ON_HOVER).toBeGreaterThanOrEqual(0.15);
+    expect(BASE_EDGE_DIM_ON_HOVER).toBeLessThanOrEqual(0.25);
+
+    stage.routes = [];
+    expect(stage.baseEdgeDimTarget()).toBe(1);
+    stage.routes = [{ from: 'A', to: 'B', direction: 'out', reachable: true }];
+    expect(stage.baseEdgeDimTarget()).toBe(BASE_EDGE_DIM_ON_HOVER);
+
+    stage.reducedMotion = true;
+    stage._updateBaseEdgeDim(10);
+    expect(stage.baseEdgeDim).toBe(BASE_EDGE_DIM_ON_HOVER);
+    stage.routes = [];
+    stage._updateBaseEdgeDim(11);
+    expect(stage.baseEdgeDim).toBe(1);
+
+    stage.reducedMotion = false;
+    stage.baseEdgeDim = 1;
+    stage.lastDimAt = 0;
+    stage.routes = [{ from: 'A', to: 'B', direction: 'out', reachable: true }];
+    stage._updateBaseEdgeDim(10);
+    expect(stage.baseEdgeDim).toBeLessThan(1);
+    expect(stage.baseEdgeDim).toBeGreaterThan(BASE_EDGE_DIM_ON_HOVER);
+    for (let t = 10.02; t <= 11; t += 0.02) stage._updateBaseEdgeDim(t);
+    expect(stage.baseEdgeDim).toBeCloseTo(BASE_EDGE_DIM_ON_HOVER, 2);
   });
 });

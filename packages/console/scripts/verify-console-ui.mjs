@@ -2450,8 +2450,70 @@ async function main() {
     await evalJs(`(() => { const s = document.querySelector('[data-language-select]'); s.value = 'zh-CN'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
     await waitFor(`document.documentElement.lang === 'zh-CN' && /语言/.test(document.querySelector('#settings-language')?.textContent ?? '')`);
     await evalJs('document.querySelector("#settings-close").click()');
+    // i18n 首帧门：在导航前注入探针，记录「console-booting 何时出现 / 解除瞬间的 locale」。
+    // 断言不依赖截图：直接证明主界面首次可见时已是 en-US，而不是先画一帧中文兜底。
+    const bootProbeScript = await send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `(() => {
+        const probe = window.__bootGateProbe = { seenBooting: false, revealed: null };
+        // addScriptToEvaluateOnNewDocument 在 documentElement 出现前执行：
+        // 不能提前 return，改为观察 document 子树，等 <html> 出现后再记录。
+        const record = () => {
+          const el = document.documentElement;
+          if (!el) return;
+          if (el.classList.contains('console-booting')) {
+            probe.seenBooting = true;
+            return;
+          }
+          if (!probe.seenBooting || probe.revealed) return;
+          const app = document.querySelector('#app');
+          const boot = document.querySelector('#boot-screen');
+          probe.revealed = {
+            lang: el.lang,
+            ready: el.dataset.consoleReady ?? null,
+            appDisplay: app ? getComputedStyle(app).display : null,
+            appVisibility: app ? getComputedStyle(app).visibility : null,
+            bootDisplay: boot ? getComputedStyle(boot).display : null,
+            mapLabel: document.querySelector('[data-view="map"] .view-label')?.textContent ?? null,
+          };
+        };
+        new MutationObserver(record).observe(document, { attributes: true, attributeFilter: ['class'], subtree: true });
+        record();
+        document.addEventListener('readystatechange', record);
+        document.addEventListener('DOMContentLoaded', record);
+      })();`,
+    });
     await send('Page.navigate', { url: `${base}/console/?i18n=1&lang=en-US` });
     check('i18n 深链：html lang=en-US + 顶栏/导航英文', await waitFor(`document.documentElement?.dataset?.consoleReady === '1' && document.documentElement?.lang === 'en-US' && document.querySelector('.brand')?.textContent.includes('Mebular') && /Star map/.test(document.querySelector('[data-view=map] .view-label')?.textContent ?? '')`));
+    const bootProbe = await evalJs('window.__bootGateProbe ?? null');
+    const bootNow = await evalJs(`(() => {
+      const root = document.documentElement;
+      const boot = document.querySelector('#boot-screen');
+      const app = document.querySelector('#app');
+      return {
+        booting: root.classList.contains('console-booting'),
+        bootDisplay: boot ? getComputedStyle(boot).display : null,
+        appDisplay: app ? getComputedStyle(app).display : null,
+        appVisibility: app ? getComputedStyle(app).visibility : null,
+      };
+    })()`);
+    check('i18n 首帧门：加载期确实上锁（console-booting 出现后被解除）',
+      bootProbe?.seenBooting === true && bootProbe?.revealed?.ready === '1', JSON.stringify(bootProbe));
+    check('i18n 首帧门：解除瞬间已是 en-US，且占位退场 / 主界面可见（无中文首帧）',
+      bootProbe?.revealed?.lang === 'en-US'
+        && /Star map/.test(bootProbe?.revealed?.mapLabel ?? '')
+        && bootProbe?.revealed?.appVisibility === 'visible'
+        && bootProbe?.revealed?.bootDisplay === 'none', JSON.stringify(bootProbe?.revealed));
+    check('i18n 首帧门：ready 后 html 不含 console-booting、boot 占位隐藏、主界面可见',
+      bootNow.booting === false && bootNow.bootDisplay === 'none'
+        && bootNow.appDisplay !== 'none' && bootNow.appVisibility === 'visible', JSON.stringify(bootNow));
+    const firstPaintCopy = await evalJs(`(() => ['.brand', '#open-settings', '#invite-device', '#join-cloud',
+      '[data-view="map"] .view-label', '[data-view="domains"] .view-label',
+      '[data-view="memories"] .view-label', '[data-view="audit"] .view-label']
+      .map((selector) => document.querySelector(selector)?.textContent?.trim() ?? ''))()`);
+    check('i18n 首帧门：en-US ready 后首屏关键文案无中文',
+      firstPaintCopy.length === 8 && firstPaintCopy.every((text) => text.length > 0 && !/[\u3400-\u9fff]/.test(text)),
+      JSON.stringify(firstPaintCopy));
+    await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: bootProbeScript.identifier });
 
     // 图例 chevron 垂直居中：中英文 × 1440/1024/390 × 折叠/展开。
     // 断言基于渲染像素（三角着墨中心 vs legend-head 中心），而不是只看 DOM 盒——

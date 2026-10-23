@@ -61,6 +61,70 @@ html, body {
 
 .app { display: flex; flex-direction: column; height: 100vh; }
 
+/* ================= i18n 首帧门（boot 占位） =================
+   shell-boot.js 在 <head> 解析期同步给 <html> 加 console-booting：这里让整块静态
+   #app（含 index.html 的中文兜底文案）不参与绘制，只显示无语言文本的品牌占位，
+   避免 en-US 用户先看到一帧中文再切换。
+   console.js 只在 locale pack 加载、applyStaticI18n 完成、consoleReady=1 的同处移除该类。 */
+#boot-screen { display: none; }
+
+/* 用 visibility 而非 display:none：门控期 #app 仍完成布局与画布尺寸测量
+   （星图/引导卡在 consoleReady 前已经 start/定位），只是不参与绘制。 */
+html.console-booting #app { visibility: hidden; }
+
+html.console-booting #boot-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 200; /* 高于弹层（50）：门控期任何深链弹层都不抢先绘制 */
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  background:
+    radial-gradient(120% 70% at 50% 0%, rgba(26, 96, 64, 0.24), transparent 62%),
+    radial-gradient(90% 60% at 50% 110%, rgba(20, 56, 96, 0.22), transparent 65%),
+    var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+/* 轻量 CRT（扫描线 + 暗角）：纯装饰，不承载任何语言文案 */
+html.console-booting #boot-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    repeating-linear-gradient(180deg, rgba(140, 255, 200, 0.05) 0 1px, transparent 1px 3px),
+    radial-gradient(120% 90% at 50% 50%, transparent 55%, rgba(0, 0, 0, 0.45) 100%);
+}
+.boot-mark {
+  font-size: 34px;
+  line-height: 1;
+  color: var(--accent);
+  text-shadow: 0 0 18px rgba(86, 180, 233, 0.6), 0 0 42px rgba(86, 180, 233, 0.28);
+  animation: boot-breathe 2.4s ease-in-out infinite;
+}
+.boot-wordmark {
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.28em;
+  text-indent: 0.28em; /* 补 letter-spacing 的尾部空隙，视觉居中 */
+  color: rgba(140, 255, 200, 0.78);
+}
+.boot-line {
+  width: 88px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(140, 255, 200, 0.6), transparent);
+}
+@keyframes boot-breathe {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .boot-mark { animation: none; }
+}
+
 /* ---------- 顶栏 ---------- */
 .topbar {
   display: flex;

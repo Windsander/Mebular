@@ -13,3 +13,34 @@
     /* 首帧适配失败不阻断页面 */
   }
 })();
+
+// i18n 首帧门：index.html 的静态文案是中文兜底，而 locale pack 要等 console.js
+// 的异步 initI18n 才能确定。若直接绘制，#app 会先闪一帧中文再切成 en-US。
+// 这里在解析阶段（早于样式与首帧）给 <html> 加 console-booting：
+// CSS 据此隐藏 #app、只显示无语言文本的品牌占位；console.js 在 locale pack 加载、
+// applyStaticI18n 完成、dataset.consoleReady='1' 的同一处移除本类。
+// 与 console.js 解耦：即使模块脚本加载失败，占位也不会永久停留（见下方超时兜底）。
+(function bootI18nGate() {
+  var root = document.documentElement;
+  var BOOT_GATE_TIMEOUT_MS = 9000;
+  try {
+    root.classList.add('console-booting');
+  } catch (_e) {
+    /* classList 不可用不阻断页面 */
+  }
+  // 失败兜底：初始化异常或长期未 ready 时不能永远停在占位/黑屏。
+  // 到点只解除视觉门控、露出既有静态中文兜底；真实异常仍由 console.js / 浏览器上报（不吞）。
+  try {
+    setTimeout(function () {
+      if (!root || root.dataset.consoleReady === '1') return;
+      root.classList.remove('console-booting');
+      try {
+        console.warn('[console] boot gate released by timeout before consoleReady');
+      } catch (_e) {
+        /* 无 console 环境 */
+      }
+    }, BOOT_GATE_TIMEOUT_MS);
+  } catch (_e) {
+    /* setTimeout 不可用不阻断页面 */
+  }
+})();

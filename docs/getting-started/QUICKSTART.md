@@ -1,26 +1,79 @@
 # Mebular Quickstart (5 minutes)
 
-From zero to an agent that reads and writes shared memory — then sync that memory to a second device.
+From zero to an assistant that reads and writes shared memory — then sync that memory to a second device.
 
-Mebular is a decentralized memory network: one machine runs one node (the daemon), your data stays on your
-devices, and every write is Ed25519-signed and content-addressed. No cloud, no coordinator.
+Mebular is a local-first memory layer for AI assistants. One machine runs one node (the daemon), your data
+stays on your devices, and every write is signed and content-addressed. No hosted service, no coordinator.
 
-**Prerequisite:** Node.js >= 20. Check with `node -v`.
+**Prerequisites:** a 64-bit macOS, Windows or Linux machine for the desktop app. The browser, CLI, agent and
+source paths need Node.js >= 20; check with `node -v`.
 
-## 1. Install (about a minute)
+## 1. Desktop app (recommended)
 
-**A. From npm (recommended for a published release):**
+1. Download the app from [GitHub Releases](https://github.com/Windsander/Mebular/releases) and open it.
+2. Click **Start deployment**. It starts the local service on this machine, connects the AI assistants already
+   installed here, and opens the **locked main console**.
+3. Choose **Create new Cloud** on your first device, or **Join existing Cloud** on a later one.
+
+A **Cloud** (忆云) is one shared memory space. It is not a hosted service: its data lives on the devices that
+belong to it.
+
+- **First device** — **Create new Cloud**: enter a Cloud name and a device name. This machine becomes the root.
+- **Later devices** — on a device already in the Cloud, use **Invite device** to get a QR code / one-time
+  token; on the new device, **Join existing Cloud**: paste the token and enter a device name. The new device
+  receives a delegated certificate; the master key is never copied.
+
+Create and join complete in the same daemon process and on the same page: no daemon restart, no page reload.
+The console unlocks as soon as initialization returns, and the top bar switches to **Invite device** + **Join
+Cloud**. The app never picks or creates a Cloud for you.
+
+The app writes the HTTP `/mcp` form into the assistants it connects, so those connections keep working after
+setup — no config rewrite is needed.
+
+On an empty home directory the console is locked: the star map is visible, the other cards are disabled, and
+the top bar has the two entries above. That is expected, not a broken install.
+
+## 2. Other ways to run it
+
+**Browser console** — the desktop app hosts the same console; you can also serve it yourself:
+
+```bash
+npm install -g @mebular/core
+mebular serve
+```
+
+Open `http://127.0.0.1:7331/console` and use the same two entries: **Create new Cloud** for the first device,
+**Join existing Cloud** for later ones. Both unlock the same page without a restart.
+
+**CLI** — three commands to start, invite and join:
+
+```bash
+fleet quickstart --daemon --dir ~/.mebular --device "$(hostname | tr '[:upper:]' '[:lower:]')"
+fleet invite --dir ~/.mebular                                  # QR code + token for the new device
+fleet join --qr "<QR content>" --daemon --dir ~/.mebular --device device-B   # or --token
+```
+
+`fleet quickstart` prepares this machine and prints a one-time invite token. `fleet quickstart` and
+`mebular serve` share the same home (`~/.mebular` by default; override with `MEBULAR_HOME`). The daemon holds a
+store lock — run one writer per home.
+
+**Agent** — install the skills (memory + tasks), then say “deploy Mebular” or “join with this code”. The agent
+follows [`packages/skill/SETUP.md`](../../packages/skill/SETUP.md) and self-checks with `mebular doctor --net`:
+
+```bash
+node packages/skill/scripts/install.mjs
+```
+
+**Source checkout** — for development or a pinned build.
+
+From npm (published release):
 
 ```bash
 npm install -g @mebular/core
 command -v mebular && command -v fleet
 ```
 
-The five `@mebular/*` packages are published in lockstep. `@mebular/core` is the root bundle and provides
-both CLIs: `mebular` covers the daemon, MCP server and console; `fleet` covers setup, invite and join.
-Installing `@mebular/mcp` alone provides only `mebular`, not `fleet`.
-
-**B. From GitHub, pinned to a commit (reproducible source build):**
+From GitHub, pinned to a commit (reproducible):
 
 ```bash
 SHA=$(git ls-remote https://github.com/Windsander/Mebular.git refs/heads/main | cut -f1)
@@ -28,7 +81,7 @@ npm i -g "github:Windsander/Mebular#$SHA"
 command -v mebular && command -v fleet
 ```
 
-**C. From a local checkout (developers):**
+From a local clone:
 
 ```bash
 git clone https://github.com/Windsander/Mebular.git && cd Mebular
@@ -37,56 +90,13 @@ npm i -g .
 command -v mebular && command -v fleet
 ```
 
-You now have two commands: `mebular` (daemon, MCP server, console) and `fleet` (setup, invite, join).
-
-## 2. Start it, then create or join a Cloud
-
-One machine = one node = one daemon. The daemon is the sole holder of identity, network and trust; agents and
-the fleet CLI are local clients that share it.
-
-**Desktop app:** open the app and click **Start deployment**. It starts the local service and connects the AI
-assistants already installed on this machine, then opens the **locked main console**. It does **not** create a
-Cloud for you.
-
-**Browser:** the same console is served by:
+`@mebular/core` is the root bundle and the install that provides both CLIs: `mebular` covers the daemon, MCP
+server and console; `fleet` covers setup, invite and join. Installing `@mebular/mcp` alone provides only
+`mebular`, not `fleet`. To install the memory / task skills from the npm tree instead of a checkout:
 
 ```bash
-mebular serve
+node "$(npm root -g)/@mebular/core/packages/skill/scripts/install.mjs"
 ```
-
-Open `http://127.0.0.1:7331/console`. On an empty home directory the console is locked: the star map is
-visible, the other cards are disabled, and the top bar has two entries — **Create new Cloud** and **Join
-existing Cloud**.
-
-- **First device** — **Create new Cloud**: enter a Cloud name and a device name. This machine becomes the root.
-- **Later devices** — on a device already in the Cloud, use **Invite device** to get a QR code / one-time
-  token; on the new device, **Join existing Cloud**: paste the token and enter a device name. The delegated
-  certificate is issued without copying the master key.
-
-Create and join complete in the same daemon process and on the same page: no daemon restart, no page reload.
-The console unlocks immediately, and the top bar switches to **Invite device** + **Join Cloud**.
-
-**CLI equivalent** (scripts / bulk; this is a separate path — the desktop wizard does not choose or create a
-Cloud for you):
-
-```bash
-fleet quickstart --daemon --dir ~/.mebular --device "$(hostname | tr '[:upper:]' '[:lower:]')"
-```
-
-`fleet quickstart` prepares this machine and prints a one-time invite token. A later device joins with:
-
-```bash
-fleet join --qr "<QR content>" --daemon --dir ~/.mebular --device device-B   # or --token
-```
-
-**Check it is up:**
-
-```bash
-mebular status
-```
-
-`fleet quickstart` and `mebular serve` share the same home (`~/.mebular` by default; override with `MEBULAR_HOME`).
-The daemon holds a store lock — run one writer per home.
 
 ## 3. Connect an MCP agent
 
@@ -99,11 +109,6 @@ mebular print-config --client opencode   # also: claude, cursor, dsh, generic
 Paste it into your agent's MCP configuration. The local form runs `mebular mcp` over stdio; a Streamable HTTP
 client can instead point at `http://127.0.0.1:7331/mcp`. The HTTP `/mcp` form is what the desktop app writes
 when it auto-connects your assistants, so the same path keeps working after setup.
-
-Before a Cloud exists, `/mcp` already accepts `initialize`, `tools/list` and `prompts/list`; `tools/call`
-returns the stable `NOT_INITIALIZED` business error. That is expected, not a broken connection. The tools
-become usable in the same MCP session after **Create new Cloud** or **Join existing Cloud** — no daemon
-restart and no config rewrite.
 
 Optionally install the behavior skill (memory policy and workflow) into your agent's skill directory:
 
@@ -173,4 +178,5 @@ mebular doctor --net    # address book / LAN discovery / NAT / bridge role / nex
 - **Limits & trade-offs** — [`LIMITATIONS.md`](../limitations/LIMITATIONS.md)
 - **Sealing contract** — [`SEALING.md`](../../SEALING.md)
 - **Two-machine ops** — [`packages/fleet/RUNBOOK.md`](../../packages/fleet/RUNBOOK.md)
+- **Architecture** — [`ARCHITECT.md`](../architecture/ARCHITECT.md)
 - **Runnable library example** — [`examples/quickstart`](../../examples/quickstart/index.mjs)

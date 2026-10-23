@@ -26,8 +26,6 @@
 </p>
 <p align="center"><sub>静止时的星图：设备与共同订阅关系。 · 悬停时：任务域航道与实时 fleet 流量。<br>蓝线与金线表示本机 ↔ 各设备的任务域双向可达关系，不是设备之间的互连。</sub></p>
 
-## 一张图
-
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/one-graph-cn-light.svg">
@@ -37,16 +35,12 @@
 
 ## 开始使用
 
-### 桌面 App
-
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/desktop-steps-cn-light.svg">
     <img src="assets/desktop-steps-cn.svg" alt="桌面 App 三步：1 开始部署，2 新建或加入忆云，3 邀请下一台设备">
   </picture>
 </p>
-
-### 其他路径
 
 <p align="center">
   <picture>

@@ -26,8 +26,6 @@ Memory and tasks stay on your devices; devices sync directly.
 </p>
 <p align="center"><sub>The map at rest: devices and their shared-subscription edges. · On hover: task-domain lanes plus live fleet traffic.<br>Blue and gold show this device's two-way task-domain reachability, not peer-to-peer links.</sub></p>
 
-## One graph
-
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/one-graph-en-light.svg">
@@ -37,16 +35,12 @@ Memory and tasks stay on your devices; devices sync directly.
 
 ## Get started
 
-### Desktop app
-
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/desktop-steps-en-light.svg">
     <img src="assets/desktop-steps-en.svg" alt="Desktop app setup: 1 Start deployment, 2 Create or join a Cloud, 3 Invite the next device">
   </picture>
 </p>
-
-### Other paths
 
 <p align="center">
   <picture>

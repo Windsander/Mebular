@@ -944,7 +944,8 @@ function drawGhostGlobe(ctx, x, y, radius, time, reducedMotion, active, label) {
 
 /** 经纬线地球仪：外轮廓 + 8 条经线 + 5 条纬线 + 极轴；无填充、无光环。 */
 function drawGhostWireGlobe(ctx, x, y, R, time, alpha) {
-  const TILT = -0.42;
+  // 锁定态地轴朝左：北极在左上、南极在右下（north.x < 0）。
+  const TILT = 0.42;
   const cosT = Math.cos(TILT);
   const sinT = Math.sin(TILT);
   const rotate = (px, py, pz) => ({

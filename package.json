@@ -90,6 +90,7 @@
     "verify:mcp:cross:selftest": "node scripts/verify-mcp-cross.mjs --selftest",
     "verify:mcp:skill": "node scripts/verify-mcp-skill.mjs",
     "verify:mcp:publish": "node scripts/verify-mcp-publish.mjs",
+    "verify:dsh-plugin": "node scripts/verify-dsh-plugin.mjs",
     "verify:fleet:local": "node scripts/verify-fleet-local.mjs",
     "verify:fleet:remote": "node scripts/verify-fleet-remote.mjs",
     "verify:fleet:agents": "node scripts/verify-fleet-agents.mjs",

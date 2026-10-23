@@ -1799,7 +1799,7 @@ try {
         && /body:\s*\{\s*token,\s*name,\s*confirm:\s*true\s*\}/.test(consoleSrc2)
         && consoleSrc2.includes("t('cloudJoin.steps.validating')") && consoleSrc2.includes("t('cloudJoin.steps.creating')")
         && consoleSrc2.includes('mebular cloud use')
-        && consoleSrc2.includes('window.mebularDesktop?.cloudSwitch'),
+        && consoleSrc2.includes('host.capabilities.cloudSwitch'),
       'inspect 不消费 nonce；join confirm:true；无 App 桥给 CLI 兜底');
     check('E2-A2 忆云卡：设置·常用只读状态之后 / 当前不可切换 / 仅当前项可改名 / 无删除入口',
       consoleSrc2.includes('settings-cloud-card')

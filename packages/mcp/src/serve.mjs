@@ -183,6 +183,7 @@ function deleteAtPath(root, path) {
 import { endpointHostname, isLoopbackHost } from './lan-host.mjs';
 import { activateJoinInvite, buildJoinToken } from './jointoken.mjs';
 import { renderSvgQr } from './qr.mjs';
+import { clearRuntimeFile, writeRuntimeFile } from './runtime-file.mjs';
 
 // R1.3：记忆面 memory.* + 任务面 task.*（两轴独立；同一轴内 write ⇒ read、admin ⇒ 其余）
 const SCOPES = ['memory.read', 'memory.write', 'memory.admin', 'task.read', 'task.write'];
@@ -197,6 +198,31 @@ const DEFAULT_SCOPES = ['memory.read'];
 const ACCESS_TTL = 900; // 15min
 const REFRESH_TTL = 30 * 24 * 3600; // 30d
 const RATE_WINDOW_MS = 60_000;
+// 优雅停止的有限兜底：MCP/SSE/keep-alive 连接可能一直不主动断开。
+// 先收 MCP sessions 与连接，再等 listener；最坏情况下整体不超过该值。
+const CLOSE_TIMEOUT_MS = 5_000;
+const SESSION_CLOSE_TIMEOUT_MS = 1_000;
+
+/** 等待 promise 落定，最多 ms；用于关闭流程里不阻塞后续步骤。 */
+function settleWithin(promise, ms) {
+  return new Promise((resolve) => {
+    let done = false;
+    let timer = null;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    timer = setTimeout(finish, Math.max(0, ms));
+    Promise.resolve(promise).then(finish, finish);
+  });
+}
+
+// /healthz、/app/embed/info 与 <home>/runtime.json 共用的对外版本号与 embed 协议版本。
+// 单一真源：不要在 buildEmbedInfo / runtime 写入处再写字面量。
+export const APP_VERSION = '0.1.0';
+export const EMBED_PROTOCOL = 1;
 
 // ---------- 控制台静态托管（D1） ----------
 // 路径白名单：只认识这几个确切文件名，天然防目录穿越。允许 MEBULAR_CONSOLE_DIR 覆盖。
@@ -213,6 +239,7 @@ const CONSOLE_FILES = {
   'shell-boot.js': 'text/javascript; charset=utf-8', // 走查修复 B：壳安全区首帧引导脚本
   'console.css': 'text/css; charset=utf-8',
   'console.js': 'text/javascript; charset=utf-8',
+  'host.js': 'text/javascript; charset=utf-8',
   'dropdown.mjs': 'text/javascript; charset=utf-8',
   'assistants.js': 'text/javascript; charset=utf-8',
   'assistant-status.js': 'text/javascript; charset=utf-8',
@@ -263,18 +290,22 @@ function csrfValid(req) {
   return cookie === token;
 }
 
-function consoleSecurityHeaders(res, { tls = false } = {}) {
+export function consoleSecurityHeaders(res, { tls = false, embed = false, loopback = false } = {}) {
   res.setHeader('x-content-type-options', 'nosniff');
   res.setHeader('referrer-policy', 'no-referrer');
-  res.setHeader('x-frame-options', 'DENY');
+  const frameable = embed === true && loopback === true;
+  if (!frameable) res.setHeader('x-frame-options', 'DENY');
+  const frameAncestors = frameable
+    ? 'http://127.0.0.1:* http://localhost:*'
+    : "'none'";
   res.setHeader(
     'content-security-policy',
-    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+    `default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors ${frameAncestors}`,
   );
   void tls;
 }
 
-async function sendConsoleFile(res, file) {
+async function sendConsoleFile(res, file, { embed = false, loopback = false } = {}) {
   const resolved = join(CONSOLE_DIR, file);
   let content;
   try {
@@ -288,8 +319,37 @@ async function sendConsoleFile(res, file) {
   res.statusCode = 200;
   res.setHeader('content-type', CONSOLE_FILES[file]);
   res.setHeader('cache-control', file === 'index.html' ? 'no-store' : 'no-cache');
-  consoleSecurityHeaders(res);
+  consoleSecurityHeaders(res, { embed, loopback });
   res.end(content);
+}
+
+/**
+ * Client-usable host for runtime.json. Wildcard binds are reachable on loopback;
+ * `localhost` is normalized so the file never depends on resolver behavior.
+ * @param {string} host
+ */
+function runtimeHost(host) {
+  if (host === '0.0.0.0') return '127.0.0.1';
+  if (host === '::' || host === '::0') return '::1';
+  if (host === 'localhost') return '127.0.0.1';
+  return host;
+}
+
+/** DSH 发现契约：只暴露非敏感信息；非 loopback 明确不提供嵌入。 */
+export function buildEmbedInfo({ origin, loopback = false } = {}) {
+  const base = String(origin ?? '').replace(/\/+$/, '');
+  const canEmbed = loopback === true;
+  return {
+    ok: true,
+    name: 'mebular',
+    version: APP_VERSION,
+    embedProtocol: EMBED_PROTOCOL,
+    consoleUrl: `${base}/console`,
+    embedUrl: `${base}/console/?embed=dsh`,
+    mcpUrl: `${base}/mcp`,
+    loopback: canEmbed,
+    capabilities: { embedConsole: canEmbed },
+  };
 }
 
 function safeEqual(a, b) {
@@ -974,6 +1034,7 @@ export async function startHttpServer({
 
   async function handleConsole(req, res, url) {
     const path = url.pathname;
+    const embed = url.searchParams.get('embed') === 'dsh';
     // 目录语义：无尾斜杠时补一个，保证 HTML 内相对资源（./console.css 等）解析到 /console/ 下
     if (path === '/console') {
       res.statusCode = 308;
@@ -984,12 +1045,12 @@ export async function startHttpServer({
       const token = issueCsrf();
       setCsrfCookie(res, token);
       res.setHeader('x-mebular-csrf', token);
-      return sendConsoleFile(res, 'index.html');
+      return sendConsoleFile(res, 'index.html', { embed, loopback: isLoopback });
     }
     if (path.startsWith('/console/')) {
       const file = path.slice('/console/'.length);
       if (Object.prototype.hasOwnProperty.call(CONSOLE_FILES, file)) {
-        return sendConsoleFile(res, file);
+        return sendConsoleFile(res, file, { embed, loopback: isLoopback });
       }
       return sendJson(res, 404, { error: 'console_not_found', path });
     }
@@ -2832,13 +2893,19 @@ export async function startHttpServer({
         return sendJson(res, 200, {
           status: 'ok',
           name: 'mebular',
-          version: '0.1.0',
+          version: APP_VERSION,
           auth,
           tls,
           // 实例身份：App 用 instance 校验端口上是不是目标忆云（200 但 instance 不符 = 另一张忆云）。
           instance: homeKey(home),
           ...(cloudId !== null ? { cloudId } : {}),
         });
+      }
+      // DSH 嵌入发现：匿名只读、无敏感信息；同样在 OAuth / /app 鉴权之前。
+      if (path === '/app/embed/info') {
+        if (req.method !== 'GET') return sendJson(res, 405, { error: 'method_not_allowed' });
+        res.setHeader('cache-control', 'no-store');
+        return sendJson(res, 200, buildEmbedInfo({ origin, loopback: isLoopback }));
       }
       if (auth === 'oauth') {
         if (path === '/.well-known/oauth-protected-resource' && req.method === 'GET') {
@@ -3334,15 +3401,70 @@ export async function startHttpServer({
     await activeLock?.release?.().catch(() => undefined);
     throw error;
   }
-  const actualPort = server.address().port;
+  const bound = server.address();
+  const actualPort = bound.port;
+  const actualHost = runtimeHost(typeof bound.address === 'string' && bound.address.length > 0 ? bound.address : host);
   origin = `${scheme}://${isLoopback ? '127.0.0.1' : host}:${actualPort}`;
   issuer = process.env.MEBULAR_OAUTH_ISSUER ?? origin;
   metadata = metadataFor(issuer, { registrationEnabled });
-  const close = async () => {
-    await new Promise((resolve) => server.close(() => resolve()));
-    for (const entry of mcpSessions.values()) await entry.server.close().catch(() => undefined);
-    await activeLock?.release?.().catch(() => undefined);
-    await onClose?.().catch(() => undefined);
+  // 发现信息只在 listen 成功后落盘；失败只影响自动发现，不影响守护启动。
+  await writeRuntimeFile(home, {
+    version: APP_VERSION,
+    host: actualHost,
+    port: actualPort,
+    embedProtocol: EMBED_PROTOCOL,
+  }).catch((error) => {
+    console.error(`RUNTIME_FILE_WRITE_FAILED ${error?.code ?? 'ERROR'}`);
+  });
+  let closePromise = null;
+  const close = () => {
+    if (closePromise) return closePromise;
+    closePromise = (async () => {
+      // 优雅停止的顺序很重要：MCP/SSE/keep-alive 连接不会自己断，
+      // 先收 MCP sessions，再主动结束连接，最后才等 listener（带有限超时）。
+      const deadline = Date.now() + CLOSE_TIMEOUT_MS;
+      try {
+        // 1) 先让每个 MCP session 的 transport/server 正常收尾。
+        //    单个 session 卡住也不能拖死整个停止流程：最多等 SESSION_CLOSE_TIMEOUT_MS。
+        const sessions = [...mcpSessions.values()];
+        mcpSessions.clear();
+        const sessionBudget = Math.max(0, Math.min(SESSION_CLOSE_TIMEOUT_MS, deadline - Date.now()));
+        await Promise.all(sessions.map((entry) => settleWithin(
+          Promise.resolve().then(() => entry.server.close()),
+          sessionBudget,
+        )));
+        // 2) 结束空闲 keep-alive 与仍活跃的 SSE/streaming 连接，避免 server.close 永久等待。
+        server.closeIdleConnections?.();
+        server.closeAllConnections?.();
+        // 3) 停止接受新连接；有限超时兜底，超时后强制断开并继续清理。
+        await new Promise((resolve) => {
+          let done = false;
+          let timer = null;
+          const finish = () => {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            resolve();
+          };
+          timer = setTimeout(() => {
+            server.closeAllConnections?.();
+            finish();
+          }, Math.max(0, deadline - Date.now()));
+          try {
+            server.close(() => finish());
+          } catch {
+            finish();
+          }
+        });
+      } finally {
+        // 4) 无论前面如何都要清理；pid 守卫保证不误删新实例的 runtime.json。
+        await clearRuntimeFile(home, { pid: process.pid }).catch(() => undefined);
+        // 5) 保留最新 main 的生命周期收尾：root 单活锁 + 热初始化上下文（app/join/广播）。
+        await activeLock?.release?.().catch(() => undefined);
+        await onClose?.().catch(() => undefined);
+      }
+    })();
+    return closePromise;
   };
   return {
     server,

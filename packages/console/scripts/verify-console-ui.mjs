@@ -3267,8 +3267,8 @@ async function main() {
     await waitFor('document.documentElement?.dataset?.consoleReady === "1" && Boolean(document.querySelector("#open-settings"))');
     await evalJs('document.querySelector("#open-settings").click()');
     await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("#settings-language"))');
-    // 设置·常用「Setup wizard」行：英文说明不得把按钮挤出可视区（web 控制台无桌面桥，
-    // 这里注入最小 openWizard 桩后重开设置，让真实的 wizardRowHtml 渲染出来）。
+    // 设置·常用「Setup wizard」行：英文说明不得把按钮挤出可视区。host adapter 在
+    // console.js 模块加载时定型，因此先注入 preload 桩，再重新加载页面（而不是加载后改 window）。
     const wizardProbe = `(() => {
       const row = document.querySelector('#settings-panel-common .settings-wizard-row');
       const name = row?.querySelector('.asst-name');
@@ -3303,13 +3303,13 @@ async function main() {
         cjk: /[\\u3400-\\u9fff]/.test(row.innerText),
       };
     })()`;
-    await evalJs('window.mebularDesktop = { openWizard: () => true }');
+    const wizardPreload = await send('Page.addScriptToEvaluateOnNewDocument', {
+      source: 'window.mebularDesktop = { openWizard: () => true };',
+    });
+    await send('Page.navigate', { url: `${base}/console/?lang=en-US` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1" && Boolean(document.querySelector("#open-settings"))');
     await evalJs('document.querySelector("#open-settings").click()');
     await waitFor('document.querySelector("#settings")?.hidden === false');
-    // renderSettings 在签名不变时跳过重建：借切页签强制重渲染，让注入的桌面桥进入 wizardRowHtml。
-    await evalJs('document.querySelector("[data-settings-tab=advanced]")?.click()');
-    await sleep(200);
-    await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
     check('i18n 设置向导行：桌面桥下渲染 .settings-wizard-row（专用行类）',
       await waitFor('Boolean(document.querySelector("#settings-panel-common .settings-wizard-row #settings-open-wizard"))'));
     for (const [label, viewport] of densityViewports) {
@@ -3327,6 +3327,7 @@ async function main() {
       await captureNow(`i18n-en-wizard-row-${label}.jpg`);
     }
     await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await send('Page.removeScriptToEvaluateOnNewDocument', { identifier: wizardPreload.identifier });
     await evalJs('delete window.mebularDesktop');
 
     await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');

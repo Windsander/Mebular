@@ -44,6 +44,8 @@
           <li><button class="view-btn" data-view="domains" type="button"><span class="view-icon">○</span><span class="view-label" data-i18n="nav.domains">共享</span></button></li>
           <li><button class="view-btn" data-view="memories" type="button"><span class="view-icon">○</span><span class="view-label" data-i18n="nav.memories">记忆</span></button></li>
           <li><button class="view-btn" data-view="audit" type="button"><span class="view-icon">○</span><span class="view-label" data-i18n="nav.audit">审计</span></button></li>
+          <!-- DSH embed：topbar 隐藏后，设置入口留在侧栏（非 .view-btn，避免进入 setView 事件委托） -->
+          <li class="embed-only"><button id="embed-open-settings" class="sidebar-settings-btn" type="button" title="设置" aria-label="设置" data-i18n-title="topbar.settings" data-i18n-aria-label="topbar.settings"><span class="sidebar-settings-ico" aria-hidden="true">⚙</span><span data-i18n="topbar.settings">设置</span></button></li>
         </ul>
         <section id="legend-panel" class="legend-panel crt-surface crt-corners is-collapsed">
           <button id="legend-toggle" class="legend-head" type="button" aria-expanded="false" aria-controls="legend-body">

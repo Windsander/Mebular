@@ -5,6 +5,9 @@
 (function bootShellClass() {
   try {
     var query = /(?:^|[?&])shell=desktop(?:&|$)/.test(location.search);
+    var embedded = /(?:^|[?&])embed=dsh(?:&|$)/.test(location.search);
+    // DSH embed：在首帧前落 data-embed，避免 topbar 先画一帧再被 CSS 隐藏。
+    if (embedded) document.documentElement.dataset.embed = 'dsh';
     var api = window.mebularDesktop;
     var isShell = query || Boolean(api);
     var isDarwin = Boolean(api) && api.platform === 'darwin';

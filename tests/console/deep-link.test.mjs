@@ -41,9 +41,12 @@ describe('R-1 高-3 view 深链映射（initialViewFromSearch）', () => {
     expect(initialViewFromSearch('?view=map&focus=clouds').focusClouds).toBe(false);
   });
 
-  it('?shell=desktop → shellDesktop 标志', () => {
+  it('?shell=desktop → shellDesktop 标志；?embed=dsh 不改变 shellDesktop 语义', () => {
     expect(initialViewFromSearch('?shell=desktop').shellDesktop).toBe(true);
     expect(initialViewFromSearch('?view=connect&shell=desktop')).toMatchObject({ view: null, shellDesktop: true });
+    expect(initialViewFromSearch('?embed=dsh')).toMatchObject({ shellDesktop: false, embedDsh: true });
+    expect(initialViewFromSearch('?shell=desktop&embed=dsh')).toMatchObject({ shellDesktop: true, embedDsh: true });
+    expect(initialViewFromSearch('?view=map')).toMatchObject({ shellDesktop: false, embedDsh: false });
   });
 
   it('接线：console.js 消费 initialViewFromSearch 并以深链视图启动 + 别名重定向开设置', () => {
@@ -101,7 +104,7 @@ describe('E2-A2 忆云入口与卡片（静态契约）', () => {
     expect(consoleJs).toContain("t('cloudJoin.steps.validating')");
     expect(consoleJs).toContain("t('cloudJoin.steps.creating')");
     expect(consoleJs).toContain('mebular cloud use');
-    expect(consoleJs).toContain('window.mebularDesktop?.cloudSwitch');
+    expect(consoleJs).toContain('host.capabilities.cloudSwitch');
   });
 
   it('加入忆云标题与邀请一致：无「一次性令牌」tag；warning 一行短文案（归档保留）', () => {
@@ -257,10 +260,11 @@ describe('UX-2 常驻卡归设置 · 常用 + 重启向导', () => {
     expect(consoleJs).toMatch(/about\.runtime\.serviceUnit[\s\S]{0,120}unitPath|unitPath[\s\S]{0,120}about\.runtime\.serviceUnit/);
   });
 
-  it('重启向导：设置 · 常用行 + desktop 桥（web 无桥不渲染）', () => {
+  it('重启向导：设置 · 常用行 + host 能力（web 无桥不渲染）', () => {
     expect(assistantsJs).toContain('重启向导');
     expect(assistantsJs).toContain('settings-open-wizard');
-    expect(consoleJs).toMatch(/window\.mebularDesktop\?\.openWizard/);
+    expect(consoleJs).toMatch(/host\.capabilities\.openWizard/);
+    expect(consoleJs).toMatch(/host\.openWizard\(\)/);
     expect(assistantsJs).toContain('不动已有配置');
   });
 });
@@ -502,7 +506,7 @@ describe('UX-2 补丁 4 · 控制台：滚动条/拖拽区/交通灯避让（静
     expect(consoleCss).toMatch(/\.topbar button[^{]*\{[^}]*-webkit-app-region: no-drag/);
     expect(consoleCss).toMatch(/\.shell-desktop-darwin \.topbar \{[^}]*padding-left: 84px/);
     expect(consoleJs).toContain('shell-desktop-darwin');
-    expect(consoleJs).toMatch(/window\.mebularDesktop\?\.platform === 'darwin'/);
+    expect(consoleJs).toMatch(/host\.platform === 'darwin'/);
     // 走查修复 B：首帧前就位——shell-boot.js 同步于 <head>（先于样式/首帧），且已登记服务白名单
     const bootJs = readFileSync(join(here, '..', '..', 'packages', 'console', 'shell-boot.js'), 'utf-8');
     expect(bootJs).toContain("document.documentElement.classList.add('shell-desktop-darwin')");

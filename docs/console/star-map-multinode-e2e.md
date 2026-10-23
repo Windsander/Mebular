@@ -26,7 +26,7 @@
 | `solidEdgeCount` | `10`（A..E 共享 `tasks`） |
 | `dashedEdgeCount` | `5`（F 无共同订阅域，至少 1 条虚线） |
 | 未 hover `routeCount` | `0` |
-| hover B（可达） | `hoverRouteCount = 2 × 可达目标数 + 不可达目标数`，出现蓝/金双向航道 |
+| hover B（可达） | `hoverRouteCount = 2 × 可达目标数 + 不可达目标数`（本场景为 `4×2+1=9`），出现蓝/金双向航道 |
 | hover F（不可达） | `hoverRouteCount = 5`，全部为灰色（单条、无方向） |
 | 远端 fleet | A 的 SSE 收到 `fleet`，payload `from=B / to=C / eventType=created / namespace=tasks`；`fleetRouteCount` 从 0 增长，生命周期结束后回 0 |
 
@@ -44,14 +44,20 @@
 
 ## 远端 fleet 的写法
 
-任务事件由 **B 的真实 daemon** 经 `POST /app/nodes` 写入
-（`type=task event`、`content.type=created`，与 `fleet task_submit` 落库形状一致），
-随后走生产同步链路：B daemon `pushOnWrite` → libp2p → A 的 sync 应用 →
-A 的 `/admin/events` 广播 `fleet`。脚本同时断言该任务事件确实出现在 A 的图里，
-因此不是用 `sync` 事件或本地伪造数据冒充 fleet。
+脚本用真实 MCP client 连接 B 的 `/mcp`（initialize → `tools/call` `task_submit`），
+向 C 派任务。自 #215 起 HTTP `/mcp` 会把运行中 daemon 的 live app 注入任务工具，
+任务工具与守护共用同一 EventLog：B 的本地 append 触发 `pushOnWrite` → libp2p →
+A 的 sync 应用 → A 的 `/admin/events` 广播 `fleet`。
 
-不使用 `/mcp task_submit` 的原因见下节「未解决项」；这不是星图契约，而是守护与
-任务工具共用 home 时的写入可见性问题。
+断言链：
+
+1. `task_submit` 返回 `ok=true` 与 `taskId`；
+2. B 的 live graph / 事件日志含该 `taskId`（同一 daemon 的 `task_status` 返回 `queued`）；
+3. 经真实 daemon sync，A 的 `task_status` 也返回该任务（from=B / to=C）；
+4. A 的 console 收到 `fleet` SSE，payload `from=B / to=C / eventType=created / namespace=tasks`；
+5. 画布 `fleetRouteCount` 0 → 1 → 生命周期结束回 0。
+
+不使用 `POST` 节点接口绕开任务工具；任务由 B 的 daemon 自己产生。
 
 ## 运行
 
@@ -66,24 +72,16 @@ npm run verify:star-map:multinode
 - 失败时保留 6 台 daemon 的 stdout/stderr、临时 root 路径与截图；成功时删除临时 home。
 - 脚本按顺序启动 6 个 daemon，串行加入，避免端口/令牌竞争。
 
-## 未解决项（仅报告，不在本测试内改生产代码）
+## 基线修复记录（本 E2E 复验）
 
-1. **本机设备在 `/admin/api/devices` 中 `online=false`。**
-   `collectOnlinePeers()` 只统计已建立连接的 peer，root 自身不在其中；前端
-   `taskDomainState()` 要求 `online === true`，于是 hover 任意设备时本机被算作
-   「任务域不可达」。实测 hover B 的 tooltip 为「3 台可达，2 台不可达」（应为
-   4 台可达、仅 F 不可达），画面上本机到 B 也是灰色。最小复现：任意单机 daemon
-   `GET /admin/api/devices`，本机条目 `online:false`。mock 数据把 self 写成了
-   `online:true`，两边不一致。
-2. **`/mcp task_submit` 在已运行的 daemon 上不会触发同步。**
-   任务工具用 `offlineMebularOptions` + 同一个 storage 另开一个 `Mebular` 实例写
-   JSONL；daemon 的 `EventLog`（`JsonFileStorage extends MemoryStorage`）只在启动时
-   装载，收不到这次 append。实测 B 的 store 有 `task event/created`，但 A/C 在
-   30s 内都没有该事件（anti-entropy 5s 一轮），A 的 SSE 也没有 `fleet`。因此本
-   E2E 改用守护自身的 `/app/nodes` 写入，保证走真实的 daemon → sync → SSE 链路。
-3. **视觉观察（不列为测试失败）：当前基线的 hover/fleet 航道是直线偏移。**
-   `packages/console/starfield.js` 的 `_lineGeometry` + `_drawRoutes` 用
-   `moveTo/lineTo` + 法线偏移绘制；按新的视觉契约，基础边是直线，但 hover 蓝/金、
-   灰色不可达与 fleet 航线应保留旧版弧线（二次曲线/双向偏移）。本 E2E 只断言
-   存在/方向/计数，不检查几何，因此不会把直线或弧线任一实现判失败；需要实现侧
-   修复后以截图目检为准。
+- **self online**：`/admin/api/devices` 现在把本机标为 `online:true`（#215）；脚本断言 6 台全部在线。
+  hover B 的航道为 4 台可达（双向）+ F 不可达（灰色）。
+- **live task tools**：`/mcp task_submit` 复用运行中 daemon 的 app / EventLog（#215），不再另开
+  离线 writer；本 E2E 全程走真实 MCP 路径，B 的 append 能触发 push-on-write 与 fleet SSE。
+- **弧线航道**：hover 蓝/金、灰色不可达与 fleet 航线已恢复弧线几何（#216）；基础边保持直线。
+  E2E 只断言计数/方向/可达性，不断言几何，避免把任一实现写死。
+
+## 未解决项
+
+无。若真实 `task_submit` 在后续改动中不再同步，脚本会保留 daemon 日志、A/B 图查询结果与截图，
+并以 FAIL 退出，不会回退到节点接口伪造数据。

@@ -8,8 +8,9 @@
 //       canvas.dataset.baseEdgeCount / solidEdgeCount / dashedEdgeCount
 //       routeCount / hoverRouteCount / fleetRouteCount / hoveredDevice
 //   - hover 可达设备 → 双向航道；hover F → 仅不可达（灰色）航道；未 hover → 0。
-//   - 在 SSE 建立后，从 B 的真实 daemon（MCP tool task_submit）向 C 派一个任务，
-//     断言 A 的 console 收到 `fleet` SSE，且 payload 的 from/to 都在场景内。
+//   - 在 SSE 建立后，从 B 的 daemon 经真实 MCP `/mcp` 的 `task_submit` 向 C 派一个任务
+//     （live app：同一 EventLog / push-on-write），断言 A 的 console 收到 `fleet` SSE，
+//     且 payload 的 from/to 都在场景内。
 //
 // 只读验收：不改生产 UI / 协议。任何契约不满足 → FAIL 并保留日志/截图，不伪造通过。
 //
@@ -18,7 +19,6 @@
 //   CHROME_PATH 可显式指定 Chrome/Chromium；找不到浏览器时明确 SKIP。
 
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import net from 'node:net';
@@ -26,6 +26,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { IdentityManager } from '@mebular/core';
+import { Client } from '@modelcontextprotocol/client';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..');
@@ -356,16 +358,12 @@ try {
 
   const byId = new Map(devices.map((d) => [d.deviceId, d]));
   const online = devices.filter((d) => d.online === true).length;
-  check('设备在线数符合预期（除 root 自身外 5 台已认证直连）', online === 5, { online });
+  check('6 台设备均在线（self 本地节点 + 5 台已认证直连）', online === 6, { online });
+  check('本机 self 在设备表中 online=true（#215 修复）', byId.get('device-A')?.online === true, {
+    selfOnline: byId.get('device-A')?.online ?? null,
+  });
   const fDevice = byId.get('device-F');
   check('F 与其余设备没有共同订阅域', (fDevice?.sharesWithMe ?? []).length === 0, { sharesWithMe: fDevice?.sharesWithMe });
-  // 记录一个契约异常（不阻断 E2E）：真实 /admin/api/devices 把 self 标成 offline，
-  // 会让本机星在星图上被画成离线、且任务域悬停时本机被算作不可达。
-  if (byId.get('device-A')?.online !== true) {
-    warnings.push(warn('本机（self）在 /admin/api/devices 中 online=false（mock 为 true）', {
-      selfOnline: byId.get('device-A')?.online ?? null,
-    }));
-  }
 
   // ---------- 浏览器验收 ----------
   if (skipBrowser) {
@@ -544,45 +542,66 @@ try {
           && event.params?.eventName === 'hello'), 15000, 100);
         check('SSE 收到 hello（连接已进入事件流）', helloSeen);
 
-        // 从 B 的真实 daemon 向 C 派一个 task。这里走守护自身的 app API（写入
-        // `task_event` / `type=created` 节点，形状与 fleet task_submit 落库一致）：
-        // 由 B 的守护进程自己 append → pushOnWrite → A 的 sync 应用 → A 的 /admin/events
-        // 广播 `fleet`。注意：/mcp 的 task_submit 在**已运行**的守护上会另开离线 store
-        // 写同一 JSONL，守护进程内的 eventLog 不会收到 append（见最终报告的未解决项），
-        // 因此那条路不能代表「daemon 实时发任务」。
-        const taskId = `task-device-B-${randomUUID().slice(0, 8)}`;
-        const taskCreatedAt = Date.now();
-        const taskNode = {
-          type: 'task_event',
-          namespace: TASK_NS,
-          content: {
-            v: 1,
-            eventId: `${taskId}#created`,
-            taskId,
-            type: 'created',
-            actor: { device: 'device-B', agent: 'board' },
-            at: taskCreatedAt,
-            toStatus: 'queued',
-            trace: { chain: [] },
-            to: { device: 'device-C', agent: 'echo' },
-            intent: 'star-map-multinode-e2e',
-          },
+        // 从 B 的 daemon 经真实 MCP `/mcp` 发起任务（initialize → tools/call task_submit）。
+        // #215 起 HTTP /mcp 把当前 live app 注入任务工具：与 daemon 共用同一 EventLog，
+        // 本地 append → pushOnWrite → A 的 sync 应用 → A 的 /admin/events 广播 `fleet`。
+        const parseToolPayload = (call) => {
+          const structured = call?.structuredContent ?? null;
+          if (structured) return structured;
+          const text = Array.isArray(call?.content)
+            ? call.content.map((item) => (item?.type === 'text' ? item.text : '')).join('')
+            : '';
+          try { return text ? JSON.parse(text) : null; } catch { return null; }
         };
-        const submit = await postJson(`http://127.0.0.1:${ports.get('device-B')}/app/nodes`, taskNode);
-        check('B 的 daemon 真实写入任务事件（task_event/created，目标 C）', submit.status === 200 && submit.json?.ok === true, {
-          status: submit.status, taskId, nodeId: submit.json?.node?.id ?? null,
+        const withMcp = async (port, fn) => {
+          const client = new Client({ name: 'star-map-multinode-e2e', version: '0.1.0' });
+          const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
+          await client.connect(transport);
+          try {
+            return await fn(client);
+          } finally {
+            await client.close();
+          }
+        };
+
+        const submit = await withMcp(ports.get('device-B'), async (client) => parseToolPayload(
+          await client.callTool({
+            name: 'task_submit',
+            arguments: { intent: 'star-map-multinode-e2e', to: { device: 'device-C', agent: 'echo' } },
+          }),
+        ));
+        const taskId = typeof submit?.taskId === 'string' ? submit.taskId : null;
+        check('B 经真实 MCP /mcp task_submit 向 C 提交成功并返回 taskId', submit?.ok === true && Boolean(taskId), {
+          ok: submit?.ok ?? null, decision: submit?.decision ?? null, taskId,
+        });
+        if (!taskId) throw new Error('task_submit 未返回 taskId，后续 fleet 断言无法定位');
+
+        const bStatus = await withMcp(ports.get('device-B'), async (client) => parseToolPayload(
+          await client.callTool({ name: 'task_status', arguments: { taskId } }),
+        ));
+        check('B 的 live graph/事件日志含该任务（同一 daemon 的 EventLog）', bStatus?.ok === true
+          && bStatus?.state?.taskId === taskId, {
+          ok: bStatus?.ok ?? null,
+          status: bStatus?.state?.status ?? null,
+          from: bStatus?.state?.from ?? null,
+          to: bStatus?.state?.to ?? null,
+        });
+
+        let aStatus = null;
+        const aMirrored = await withMcp(portA, async (client) => waitFor(async () => {
+          aStatus = parseToolPayload(await client.callTool({ name: 'task_status', arguments: { taskId } }));
+          return aStatus?.ok === true && aStatus?.state?.taskId === taskId;
+        }, 30000, 250));
+        check('任务事件经真实 daemon sync 到达 A（fleet SSE 的数据源）', aMirrored, {
+          ok: aStatus?.ok ?? null,
+          status: aStatus?.state?.status ?? null,
+          from: aStatus?.state?.from ?? null,
+          to: aStatus?.state?.to ?? null,
         });
 
         const fleetSeen = await waitFor(() => cdp.events.some((event) => event.method === 'Network.eventSourceMessageReceived'
           && event.params?.eventName === 'fleet'), 30000, 100);
         check('console 收到 fleet SSE（不是 sync 事件冒充）', fleetSeen);
-
-        const aTaskNodes = await httpJson(`${baseA}/app/nodes?namespace=${TASK_NS}&type=task_event&limit=50`);
-        const mirroredTask = (aTaskNodes.json?.nodes ?? []).find((node) => node.content?.taskId === taskId);
-        check('任务事件已由 B 真实同步到 A（SSE 的数据源，非本地伪造）', Boolean(mirroredTask), {
-          count: aTaskNodes.json?.count ?? null,
-          nodeId: mirroredTask?.id ?? null,
-        });
 
         const fleetMessages = cdpEvent('Network.eventSourceMessageReceived', (p) => p?.eventName === 'fleet');
         const fleetPayloads = fleetMessages.map((p) => {
@@ -622,7 +641,7 @@ try {
           scene: await dataset(),
           devices: devices.map((d) => ({ id: d.deviceId, online: d.online, subscriptions: d.subscriptions, sharesWithMe: d.sharesWithMe })),
           fleetPayloads,
-          submit: { taskId, at: taskCreatedAt, path: '/app/nodes' },
+          submit: { taskId, decision: submit?.decision ?? null, path: '/mcp task_submit' },
         }, null, 2));
       } finally {
         if (chromeHandle?.proc) {

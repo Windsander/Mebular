@@ -3484,6 +3484,82 @@ async function main() {
       && report.outside === 0 && report.overflow.length === 0;
     const surfaceText = async (selector) => (await evalJs(`document.querySelector(${JSON.stringify(selector)})?.innerText ?? ''`)) ?? '';
 
+    // D · 说明行宽：Sharing / Memories 的英文说明不再被 72ch 压成 3 行。
+    // 1440 单行、1024 自然换行 ≤2 行、390 正常折行且无横向溢出；中文行数不回归。
+    const noteViews = [
+      ['Sharing', 2, '#domains-view', '#domains-note'],
+      ['Memories', 3, '#memories-view', '#memories-view > .panel-note'],
+    ];
+    const noteLinesProbe = (viewSel, noteSel) => `(() => {
+      const view = document.querySelector(${JSON.stringify(viewSel)});
+      const note = view?.querySelector(${JSON.stringify(noteSel)});
+      if (!view || view.hidden || !note) return { ok: false, lang: document.documentElement.lang, viewport: window.innerWidth };
+      const cs = getComputedStyle(note);
+      const rect = note.getBoundingClientRect();
+      const lineHeight = Number.parseFloat(cs.lineHeight);
+      return {
+        ok: true,
+        lang: document.documentElement.lang,
+        viewport: window.innerWidth,
+        maxWidth: cs.maxWidth,
+        width: +rect.width.toFixed(2),
+        height: +rect.height.toFixed(2),
+        lineHeight,
+        lines: lineHeight > 0 ? Math.round(rect.height / lineHeight) : 0,
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+      };
+    })()`;
+    const measureNotes = async (lang) => {
+      await send('Page.navigate', { url: `${base}/console/?lang=${lang}` });
+      await waitFor('document.documentElement?.dataset?.consoleReady === "1"');
+      const out = {};
+      for (const [name, nth, viewSel, noteSel] of noteViews) {
+        await evalJs(`document.querySelector('#view-nav li:nth-of-type(${nth}) button')?.click()`);
+        await waitFor(`document.querySelector('${viewSel}')?.hidden === false`);
+        for (const [label, viewport] of densityViewports) {
+          await setViewport(viewport);
+          await sleep(200);
+          out[`${name}-${label}`] = await evalJs(noteLinesProbe(viewSel, noteSel));
+        }
+      }
+      return out;
+    };
+    const enNotes = await measureNotes('en-US');
+    for (const [name] of noteViews) {
+      const single = enNotes[`${name}-1440`];
+      check(`i18n 说明宽度 ${name} en-US 1440：说明单行（不再被 72ch 压成 3 行）`,
+        single.ok && single.lang === 'en-US' && single.viewport === 1440
+          && single.height <= single.lineHeight * 1.5
+          && single.maxWidth === '100%' && single.pageOver <= 1,
+        JSON.stringify(single));
+      const medium = enNotes[`${name}-1024`];
+      check(`i18n 说明宽度 ${name} en-US 1024：自然换行不超过 2 行`,
+        medium.ok && medium.viewport === 1024 && medium.lines <= 2
+          && medium.maxWidth === '100%' && medium.pageOver <= 1,
+        JSON.stringify(medium));
+      const narrow = enNotes[`${name}-390`];
+      check(`i18n 说明宽度 ${name} en-US 390：正常折行、无横向溢出`,
+        narrow.ok && narrow.viewport === 390 && narrow.lines >= 2
+          && narrow.maxWidth === '100%' && narrow.pageOver <= 1,
+        JSON.stringify(narrow));
+    }
+    const zhNotes = await measureNotes('zh-CN');
+    // 中文未改文案/布局：行数保持既有基线（1440/1024/390）。
+    const zhNoteBaseline = {
+      'Sharing-1440': 1, 'Sharing-1024': 1, 'Sharing-390': 3,
+      'Memories-1440': 1, 'Memories-1024': 1, 'Memories-390': 2,
+    };
+    for (const [name] of noteViews) {
+      for (const [label] of densityViewports) {
+        const note = zhNotes[`${name}-${label}`];
+        check(`i18n 说明宽度 ${name} zh-CN ${label}：行数不回归（基线 ${zhNoteBaseline[`${name}-${label}`]} 行）`,
+          note.ok && note.lang === 'zh-CN' && note.lines <= zhNoteBaseline[`${name}-${label}`]
+            && note.maxWidth === '100%' && note.pageOver <= 1,
+          JSON.stringify(note));
+      }
+    }
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+
     // about：长说明（task plane / runtime / paths / tools）与命令
     await send('Page.navigate', { url: `${base}/console/?lang=en-US` });
     await waitFor('document.documentElement?.dataset?.consoleReady === "1" && document.querySelector("#open-settings") !== null');

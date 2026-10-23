@@ -6,7 +6,7 @@
 //
 // `?mock=1` 使用内置演示数据，便于无网络验收。
 
-import { StarStage, namespaceColor, shortId } from './starfield.js';
+import { StarStage, namespaceColor, shortId, buildHoverRoutes, buildNetworkScene, normalizeFleetEvent, resolveTaskNamespace, summarizeHoverRoutes } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
 import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
@@ -614,59 +614,37 @@ function buildScene() {
   }
   const selfId = state.overview?.device?.deviceId;
   if (!selfId) return { nodes: [], edges: [] };
-  const nodes = [{
-    id: selfId,
-    label: t('stage.selfLabel'),
-    self: true,
-    online: true,
-    blocked: false,
-  }];
-  const edges = [];
-  for (const device of state.devices) {
-    if (device.deviceId === selfId) continue;
-    const shared = device.sharesWithMe ?? [];
-    nodes.push({
-      id: device.deviceId,
-      label: shortId(device.deviceId),
-      online: device.online,
-      blocked: device.blocked === true,
-      namespaces: device.subscriptions ?? [],
-      pendingEventCount: device.pendingEventCount ?? 0,
-    });
-    if (shared.length > 0) {
-      edges.push({
-        from: selfId,
-        to: device.deviceId,
-        kind: 'mine',
-        online: device.online,
-        revoked: false,
-        pending: device.pendingEventCount ?? 0,
-      });
-      edges.push({
-        from: device.deviceId,
-        to: selfId,
-        kind: 'theirs',
-        online: device.online,
-        revoked: false,
-        pending: 0,
-      });
-    } else if (device.blocked === true) {
-      edges.push({
-        from: selfId,
-        to: device.deviceId,
-        kind: 'mine',
-        online: device.online,
-        revoked: true,
-        pending: 0,
-      });
-    }
+  // 忆云设备网络：本机 + 所有已知设备（含离线/已移除）都在图上；
+  // 基础边由纯函数两两生成，坐标留给 starfield 每帧绑定星位。
+  return buildNetworkScene({
+    devices: state.devices,
+    selfId,
+    selfLabel: t('stage.selfLabel'),
+    labelFor: (device) => shortId(device.deviceId),
+  });
+}
+
+/** 悬停 H 的任务域航道：仅 hover 时存在；scene 中不保留路由业务数据。 */
+function syncHoverRoutes(node) {
+  if (state.locked || !node) {
+    stage.setRoutes([]);
+    return;
   }
-  return { nodes, edges };
+  stage.setRoutes(buildHoverRoutes({
+    nodes: stage.scene.nodes,
+    hoveredId: node.id,
+    taskNamespace: resolveTaskNamespace(state.settings),
+  }));
 }
 
 function renderStageScene() {
   stage.setScene(buildScene());
   stage.setSelected(state.selected?.deviceId ?? null);
+  // setScene 会清空旧航道；若指针仍停在星星上，按新场景重算（设备列表 3s 刷新时不闪断）。
+  if (stage.hovered) {
+    const hoveredNode = stage.scene.nodes.find((node) => node.id === stage.hovered) ?? null;
+    syncHoverRoutes(hoveredNode);
+  }
   const canvas = $('#stage');
   if (canvas) {
     // 验收/辅助技术可读的诚实标记；视觉本体仍由 Canvas 绘制。
@@ -3932,24 +3910,41 @@ function renderDeviceCard() {
 
 // ---------- 交互 ----------
 
+let hoveredRouteId = null;
+
 stage.onHover = (node, x, y) => {
   const tooltip = $('#tooltip');
   if (state.locked) {
     // 锁定态不展示任何设备/记忆悬浮数据（ghost 地球仪只表达「本机未初始化」）。
+    hoveredRouteId = null;
+    stage.setRoutes([]);
     tooltip.hidden = true;
     return;
   }
   if (!node) {
+    hoveredRouteId = null;
+    stage.setRoutes([]);
     tooltip.hidden = true;
     return;
   }
+  if (hoveredRouteId !== node.id) {
+    hoveredRouteId = node.id;
+    syncHoverRoutes(node);
+  }
   const device = state.devices.find((d) => d.deviceId === node.id);
+  const taskNamespace = resolveTaskNamespace(state.settings);
+  const taskSummary = summarizeHoverRoutes(stage.routes);
   tooltip.hidden = false;
   tooltip.style.left = `${Math.min(x + 14, stage.width - 290)}px`;
-  tooltip.style.top = `${Math.min(y + 14, Math.max(0, stage.height - 120))}px`;
+  tooltip.style.top = `${Math.min(y + 14, Math.max(0, stage.height - 150))}px`;
   tooltip.innerHTML = `
     <div class="tt-title">${escapeHtml(node.self ? t('common.self') : node.id)}</div>
     <div class="tt-row">${escapeHtml(node.blocked ? t('tooltip.removed') : node.online ? t('tooltip.connected') : t('common.notConnected'))}</div>
+    <div class="tt-row">${escapeHtml(t('tooltip.task.summary', {
+      namespace: taskNamespace,
+      reachable: taskSummary.reachableTargets,
+      blocked: taskSummary.blockedTargets,
+    }))}</div>
     ${device && (device.sharesWithMe ?? []).length
       ? `<div class="tt-row">${escapeHtml(t('tooltip.shared', { namespaces: (device.sharesWithMe ?? []).join(', ') || '—' }))}</div>`
       : ''}
@@ -4347,7 +4342,8 @@ async function handleDeviceAction(action, device) {
   }
   if (action === 'sync') {
     const self = state.overview?.device?.deviceId;
-    if (self) stage.launchFleet(self, device.deviceId, { kind: 'mine', ships: 3 });
+    // 手动同步 = 独立白色信使，不复用任务舰队视觉。
+    if (self) stage.launchCourier(self, device.deviceId);
     await runWrite(`/admin/api/devices/${encodeURIComponent(device.deviceId)}/sync`, {}, t('deviceCard.toast.sync'));
   } else if (action === 'connect' || action === 'manual-connect') {
     // E1：网内传输修复（不改变入网信任与订阅）；Electron 无 window.prompt，统一走 App 内向导。
@@ -5952,25 +5948,31 @@ function startEvents() {
     stage.pulse();
     scheduleRefresh();
   };
-  // 同步完成 → 按数据流方向让舰队沿航道出航（发/收可各自成队）
-  const onSyncPulse = (event) => {
-    onPulse();
+  // fleet 事件（本机与远端同一契约）：只画 from/to 都在当前场景的真实方向；
+  // 不依赖 hover，也不从 sync 事件推断任务舰队。
+  const onFleetEvent = (event) => {
+    let data = null;
     try {
-      const data = JSON.parse(event?.data ?? '{}');
-      const self = state.overview?.device?.deviceId;
-      const peer = data.peerDeviceId;
-      if (!self || !peer || self === peer) return;
-      const sent = Number(data.sentEvents ?? 0);
-      const received = Number(data.receivedEvents ?? 0);
-      if (sent > 0) stage.launchFleet(self, peer, { kind: 'mine', ships: Math.min(5, 2 + sent) });
-      if (received > 0) stage.launchFleet(peer, self, { kind: 'theirs', ships: Math.min(5, 2 + received) });
-      if (sent === 0 && received === 0) stage.launchFleet(self, peer, { kind: 'mine', ships: 2 });
+      data = JSON.parse(event?.data ?? '{}');
     } catch {
-      // 非 JSON 负载：仅做脉冲
+      return;
     }
+    const selfId = state.overview?.device?.deviceId ?? null;
+    const nodeIds = new Set(stage.scene.nodes.map((node) => node.id));
+    const fleet = normalizeFleetEvent(data, { nodeIds, selfId });
+    if (!fleet) return;
+    const kind = fleet.direction === 'out' ? 'mine' : fleet.direction === 'in' ? 'theirs' : 'transit';
+    stage.launchFleet(fleet.from, fleet.to, {
+      kind,
+      event: true,
+      namespace: fleet.namespace,
+      taskId: fleet.taskId,
+      ships: 3,
+    });
   };
   eventSource.addEventListener('status', onPulse);
-  eventSource.addEventListener('sync', onSyncPulse);
+  eventSource.addEventListener('sync', onPulse);
+  eventSource.addEventListener('fleet', onFleetEvent);
   eventSource.addEventListener('sync-failed', onPulse);
   eventSource.addEventListener('convergence', onPulse);
   eventSource.onerror = () => {

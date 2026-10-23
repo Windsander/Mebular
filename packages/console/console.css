@@ -317,10 +317,11 @@ html.console-booting #boot-screen::after {
 .legend-list li { display: flex; align-items: center; gap: 7px; color: var(--text); }
 .legend-chip { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 auto; }
 .edge-swatch { width: 22px; height: 0; border-top: 2px solid var(--accent); flex: 0 0 auto; }
-.edge-mine { border-color: var(--accent); }
-.edge-theirs { border-color: var(--accent-2); }
-.edge-offline { border-color: #5a6785; border-top-style: dashed; }
-.edge-revoked { border-color: var(--revoked); border-top-style: dashed; }
+.edge-base-shared { border-color: #c1c8d6; }
+.edge-base-unshared { border-color: #7c8598; border-top-style: dashed; }
+.edge-route-send { border-color: #56b4e9; }
+.edge-route-receive { border-color: #f0c46a; }
+.edge-route-blocked { border-color: #8993a8; border-top-style: dashed; }
 
 /* ---------- 星图 ---------- */
 .stage { display: block; position: relative; z-index: 1; width: 100%; height: 100%; cursor: crosshair; }

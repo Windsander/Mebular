@@ -67,7 +67,10 @@ updates:
           - "minor"
           - "patch"
     ignore:
-      # Electron 大版本（如 41 → 42）需要人工迁移与真机验证，不自动提 PR。
+      # Electron / electron-builder 大版本需要人工迁移与真机验证，不自动提 PR。
       - dependency-name: "electron"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "electron-builder"
         update-types:
           - "version-update:semver-major"

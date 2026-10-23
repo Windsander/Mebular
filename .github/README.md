@@ -19,9 +19,9 @@
 
 `.github/workflows/ci.yml`：
 
-- `push` 只监听 `main`：feature branch 的验证只由 `pull_request` 产生，同一 commit 不会出现两套 run。
+- `push` 监听 `main` 与 `release/v*`：main 合入与 release 分支发布前都跑完整 CI；feature branch 的验证只由 `pull_request` 产生，同一 commit 不会出现两套 run。
 - `pull_request`、`merge_group`、`workflow_dispatch` 保留。
-- `concurrency` 以 PR 号（无 PR 时用 `github.ref`）分组并 `cancel-in-progress: true`，PR 更新会取消旧 run，旧失败不会继续挂在 PR 上。
+- `concurrency` 以 PR 号（无 PR 时用 `github.ref`）分组；仅 `pull_request` 事件 `cancel-in-progress`，PR 更新会取消旧 run，而 main / release push 不会被后续合入取消。
 - job 名称即 required status checks 的 context，修改 job `name` 时必须同步更新 `.github/rulesets/main.json`。
 
 ## 仓库设置建议
@@ -32,4 +32,8 @@
 gh api -X PATCH repos/Windsander/Mebular -f delete_branch_on_merge=true
 ```
 
-未开启自动合并（auto-merge），也不修改 Dependabot 配置。
+未开启自动合并（auto-merge）。
+
+## Dependabot
+
+- minor/patch 分组自动提 PR；`electron` 与 `electron-builder` 的 **major 一律人工处理**（`version-update:semver-major` ignore），避免打包/签名链路被自动跨大版本。

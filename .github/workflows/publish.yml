@@ -75,6 +75,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: DSH plugin contract (manifest / HTTP patch / no core imports)
+        run: npm run verify:dsh-plugin
+
       - name: Lint
         run: npm run lint
 
@@ -137,9 +140,42 @@ jobs:
           publish packages/mcp     "@mebular/mcp"
           publish packages/fleet   "@mebular/fleet"
 
+  # 插件独立版本：不参与 5 包 lockstep，也不进入 verify 的 SSOT 校验。
+  # 版本唯一来源是 packages/dsh-plugin/package.json；已发布则跳过（幂等）。
+  publish-dsh:
+    name: npm publish (@mebular/dsh-plugin, independent version)
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish plugin (idempotent, skip published)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(node -p "require('./packages/dsh-plugin/package.json').version")"
+          if npm view "@mebular/dsh-plugin@${VERSION}" version >/dev/null 2>&1; then
+            echo "skip   @mebular/dsh-plugin@${VERSION}（已发布）"
+          else
+            echo "publish @mebular/dsh-plugin@${VERSION}"
+            (cd packages/dsh-plugin && npm publish --access public)
+          fi
+
   release:
     name: GitHub Release (tag v*)
-    needs: publish
+    needs: [publish, publish-dsh]
     runs-on: ubuntu-latest
     permissions:
       contents: write

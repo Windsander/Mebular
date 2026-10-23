@@ -12,8 +12,12 @@
 | `@mebular/skill` | `packages/skill` | 行为层：`SKILL.md` / `MEMORY_POLICY.md` / MCP 接入片段 |
 | `@mebular/fleet` | `packages/fleet` | 跨设备多 Agent 协作 |
 | `@mebular/mcp` | `packages/mcp` | MCP server（stdio + Streamable HTTP） |
+| `@mebular/dsh-plugin` | `packages/dsh-plugin` | DeepSeek Harness 插件；**独立版本线**，不参与 lockstep |
 
-- **版本策略**：lockstep，5 个包永远同版本号。
+- **版本策略**：5 个 lockstep 包（`core` / `service` / `skill` / `mcp` / `fleet`）永远同版本号。
+- **独立版本包**：`@mebular/dsh-plugin` 与 v0.1.0 同一 release train 首发（自身版本 `0.1.0`），
+  但版本号只取自 `packages/dsh-plugin/package.json`；`bump_version.sh` 不改它，verify 的
+  5 包 SSOT 校验也不包含它。
 - **安装入口**：`npm install -g @mebular/core` 是根包，同时提供 `mebular` + `fleet` 两个 bin；
   `@mebular/mcp` 单独安装只有 `mebular`，**不能**当作双 bin 安装入口。
 - **触发方式**：push 到 `release/v*` 分支（例如 `release/v0.2.0`），**不使用 tag 触发**。
@@ -34,7 +38,7 @@
       `npm org ls mebular` 可见。
 - [ ] **首次发布注意**：`@mebular/core` 虽为仓库根包，仍以普通包发布；其 tarball 携带
       `packages/fleet/dist`（`files` 已声明）以支撑 `fleet` bin。首次发布会占用 5 个包名，
-      之后版本仅需递增。
+      之后版本仅需递增。`@mebular/dsh-plugin` 独立发布，首发同时占用该包名。
 - [ ] **分支保护**：`main` 保持受保护；发布只走 `release/v*` 分支，勿直接向 `main` 提交版本号。
 
 ### 1.1 首次发布后回滚指南
@@ -77,6 +81,9 @@ bash scripts/bump_version.sh v0.2.0           # 同步 5 个版本号 + 生成 C
    （开发期源码用 `file:` 本地链接，pack 期由脚本统一改写，故 `file:` 保持不动）；
 3. 在 `CHANGELOG.md` 顶部插入 `## [v0.2.0] - <date>` 章节（已存在则跳过，幂等）。
 
+`bump_version.sh` 只处理 5 个 lockstep 包；`@mebular/dsh-plugin` 的版本单独在
+`packages/dsh-plugin/package.json` 维护，不随 `bump_version.sh` 变化。
+
 然后**手工填写** `CHANGELOG.md` 中该章节的 Added / Changed / Fixed（Release notes 取自此章节）。
 
 ### 2.2 本地预检（可选但推荐）
@@ -87,6 +94,7 @@ npm run build
 npm run lint
 npm run test:coverage        # 覆盖率门槛在 package.json#jest.coverageThreshold
 npm run verify:mcp:publish   # 5 包 npm pack + tarball 干净安装冒烟
+npm run verify:dsh-plugin    # 插件契约：package.json / patch / 无 @mebular import / tarball
 npm run check:docs           # 文档一致性 7/7
 ```
 
@@ -107,8 +115,12 @@ push 后 GitHub Actions `Publish` 流水线自动执行：
 2. **publish**（依赖序，token 用 `secrets.NPM_TOKEN`）：
    - `@mebular/core` → `@mebular/service` → `@mebular/skill` → `@mebular/mcp` → `@mebular/fleet`
    - 每个包先 `npm view <name>@<version>`：已存在则 **skip**（幂等），否则 `npm publish`
-3. **release**：从 `CHANGELOG.md` 抽取 `## [v0.2.0]` 章节生成 Release notes，
-   创建 GitHub Release 并回打 tag `v0.2.0`（已存在则 skip）。
+3. **publish-dsh**（`needs: publish`，独立版本）：
+   - 从 `packages/dsh-plugin/package.json` 读取版本，先 `npm view @mebular/dsh-plugin@<version>`：
+     已存在则 **skip**，否则 `(cd packages/dsh-plugin && npm publish --access public)`。
+   - 不进入 5 包 SSOT 校验，也不由 `bump_version.sh` 改写版本。
+4. **release**（`needs: [publish, publish-dsh]`）：从 `CHANGELOG.md` 抽取 `## [v0.2.0]` 章节生成
+   Release notes，创建 GitHub Release 并回打 tag `v0.2.0`（已存在则 skip）。
 
 > 串行保证：`concurrency.group = publish-${{ github.ref }}`，`cancel-in-progress: false`，
 > 同一 release 分支重复 push 不会并行发布。
@@ -127,6 +139,7 @@ push 后 GitHub Actions `Publish` 流水线自动执行：
 - 重跑流水线（删除分支重建、或重推同名分支）安全：
   - 版本 SSOT 校验只读；
   - `publish` 已发布版本自动 skip；
+  - `publish-dsh` 同样先查 `npm view`，插件版本已发布则 skip；
   - `release` 已存在则跳过创建。
 - 若某包发布失败：修复后重新 push 同一 `release/v*` 分支即可，已成功的包会 skip。
 
@@ -140,6 +153,9 @@ push 后 GitHub Actions `Publish` 流水线自动执行：
 | publish 报 `E403` / scope 无权 | token 缺少 `@mebular` scope 的 read/write 权限，或 npm org 不存在。 |
 | publish 报 `EPUBLISHCONFLICT` | 该版本已存在（幂等应已 skip）；确认版本号是否递增正确。 |
 | 安装 tarball 报找不到 `@mebular/*` | 检查 `scripts/publish-manifest.mjs` 是否在 prepack 生效、发布顺序是否完整。 |
+| DSH 里看不到 `mcp__mebular__*` 工具 | App/daemon 未运行或端口不一致。先 `curl http://127.0.0.1:7331/healthz`，再核对 profile patch 的 `url` 与 `mcp.http.port`。 |
+| DSH 工具调用报 `MCP_STORAGE_LOCKED` | 条目被改成 stdio，另起了第二个 Mebular 进程。改回 `streamable-http`；stdio 会与 App 抢 storage lock。 |
+| DSH 工具调用报 `NOT_INITIALIZED` | 尚未建新 / 加入忆云。在锁定控制台完成初始化，同一 MCP 会话自动恢复，无需重启。 |
 | release 报 `contents: write` 被拒 | 仓库 Actions 权限未开读写；见第 1 节。 |
 | 本地 pack 后残留 `package.json.packbak` | 某次 pack 异常中断；删除该文件并检查 prepack/postpack 是否成对。 |
 
@@ -160,6 +176,10 @@ npm 不允许覆盖已发布版本。具体步骤见 [1.1 首次发布后回滚�
 - [ ] 第 1 节的一次性前置已完成：npm org `mebular`、`NPM_TOKEN`（Automation）、
       Actions `Read and write permissions`。
 - [ ] 五个 `package.json` 版本均为 `0.1.0`，`CHANGELOG.md` 含 `## [v0.1.0]` 章节。
+- [ ] `packages/dsh-plugin/package.json` 版本为 `0.1.0`，`npm run verify:dsh-plugin` 通过
+      （57 项：manifest / HTTP patch / host entry / 无 `@mebular/*` import / tarball）。
+- [ ] 插件发布前确认 `@mebular/dsh-plugin` 包名可用；同版本重跑会被 `publish-dsh` 的
+      `npm view` 检查跳过。
 - [ ] 当前 `main` 的发布门禁记录已核对（见第 8 节）；release 分支 push 后由 Publish verify
       重跑 `build` / `lint` / `test:coverage` / `verify:mcp:publish`。
 - [ ] `npm run verify:star-map:multinode` 通过；六台真实守护、远端 `task_submit`、`fleet` SSE
@@ -198,13 +218,16 @@ gh run watch <run-id>       # 或用网页 Actions 页面
    → `npm run lint` → `npm run test:coverage` → `npm run verify:mcp:publish`。
 2. **publish**：`@mebular/core` → `@mebular/service` → `@mebular/skill` → `@mebular/mcp`
    → `@mebular/fleet`（`npm view` 已存在则 skip）。
-3. **release**：从 `CHANGELOG.md` 抽取 `## [v0.1.0]` 章节生成 notes，创建 tag `v0.1.0`
-   与 GitHub Release。
+3. **publish-dsh**：读取 `packages/dsh-plugin/package.json` 的版本，`@mebular/dsh-plugin`
+   已存在则 skip，否则单独发布（不参与 5 包 lockstep / SSOT）。
+4. **release**：`needs: [publish, publish-dsh]`；从 `CHANGELOG.md` 抽取 `## [v0.1.0]` 章节生成
+   notes，创建 tag `v0.1.0` 与 GitHub Release。
 
 ### 7.4 发布后核验
 
 ```bash
 for p in core service skill mcp fleet; do npm view "@mebular/$p@0.1.0" version; done
+npm view @mebular/dsh-plugin@0.1.0 version
 gh release view v0.1.0
 
 # 根包双 bin：mebular + fleet
@@ -215,6 +238,17 @@ mebular tools >/dev/null && fleet --version
 
 > 不要用 `npm install -g @mebular/mcp@0.1.0` 冒充双 bin 安装：`@mebular/mcp` 只提供
 > `mebular`，`fleet` 必须来自根包（或单独安装 `@mebular/fleet`）。
+
+插件独立验证（先让 App / 守护运行）：
+
+```bash
+dsh plugin --profile web add @mebular/dsh-plugin@0.1.0
+dsh web --dump-config | grep -A3 mebular    # transport: streamable-http，url .../mcp
+# DSH 会话中确认 mcp__mebular__* 可调用；App 与控制台仍在运行
+```
+
+> 插件只走 HTTP MCP，不要改成 stdio；stdio 会另起 Mebular 进程并抢占 storage lock。
+> 细节见 [`docs/integrations/DSH.md`](../integrations/DSH.md)。
 
 如需首启冒烟，用一次性 home（不要碰真实 `~/.mebular`）：
 
@@ -245,6 +279,10 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 6. **星图是主控制台**：主控制台展示忆云内全部设备、共同订阅基础边、hover 任务域航道与真实
    fleet 事件；蓝 / 金是任务域可达性，不是设备互连。README 截图只做展示，不能替代六台真实守护
    的 E2E 证据。
+7. **DSH 不改变控制面**：App 仍是控制面，继续独立运行并持有存储、身份与控制台；DSH 是 agent
+   面，只通过 HTTP MCP（`http://127.0.0.1:7331/mcp`）接入，不使用 stdio，也不替换 App。
+   控制台入口从 DSH 面板在新标签页打开，不做 iframe。`@mebular/dsh-plugin` 独立版本 `0.1.0`，
+   不进入五包 lockstep。
 
 不要把「自动重启」「去写入初始设置」写回发布说明，也不要把 `@mebular/mcp` 说成自带 `fleet`。
 
@@ -257,7 +295,7 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 | 命令 | 结果 | 关键输出 |
 | --- | --- | --- |
 | `npm run build` | ✅ 当前 main | core / service / fleet 构建完成 |
-| `npm test -- --runInBand` | ✅ 当前 main | **177 suites / 1613 tests** 全过 |
+| `npm test -- --runInBand` | ✅ 当前 main | **177 suites / 1616 tests** 全过 |
 | `npm run verify:console:ui` | ✅ 当前 main | **388/388** checks（headless Chromium；1440 / 1024 / 390，含 i18n、安全流程、星图图例） |
 | `npm run verify:star-map:multinode` | ✅ 当前 main | **37/37**；6 台真实 daemon，`baseEdgeCount=15`、`solid=10`、`dashed=5`；hover B 9 条 / hover F 5 条；真实 MCP `task_submit` 与 `fleet` SSE |
 | `npm run check:i18n` | ✅ 当前 main | **32 checks / 0 failed**；console / desktop / errors 三套 locale pack |
@@ -267,9 +305,11 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 | `npm run check:docs` | ✅ 当前 main | **7/7**；README EN/CN 结构、互链、无手写测试数字、CI badge、工具名、本地链接 |
 | README 视觉走查 | ✅ 当前 main | 四张星图均 1600×1000、6 颗星；baseline 灰虚线 / 压暗实线 / 声波脉冲；lanes 旧版弧线航道；亮色 banner + 三组示意图使用 `<picture>` 切换 |
 | `npm run verify:mcp:publish` | ⏳ 待 release 流水线 | 发布前必须在 `release/v0.1.0` 由 Publish verify 重跑 |
+| `npm run verify:dsh-plugin` | ✅ 当前 main | **57 checks**：bundle / HTTP patch / host entry / no core imports / tarball |
+| 真实 DSH `0.2.1-rc.2` | ✅ 当前 main | `dsh plugin add link:`；host + MCP client 运行；Settings 出现 Mebular 面板；29 个 `mcp__mebular__*` 工具；console 独立可开；App/daemon 不受影响 |
 
 > 第 8 节记录的是当前 `main` 已完成的发布门禁；它**不替代**发布分支上的
-> `build` / `lint` / `test:coverage` / `verify:mcp:publish` 门禁。
+> `build` / `lint` / `test:coverage` / `verify:mcp:publish` / `verify:dsh-plugin` 门禁。
 > `desktop:smoke` / `verify:onboarding` 的上一轮集成结果仍保留在历史记录中；本轮星图变更
 > 未改动守护、引导和 Electron 主进程，因此不重复计入本轮数字。
 

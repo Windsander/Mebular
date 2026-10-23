@@ -1,0 +1,9 @@
+- insert:
+    - id: mebular
+      name: '@mebular/dsh-plugin'
+    - id: mcp-mebular
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: mebular
+        transport: streamable-http
+        url: http://127.0.0.1:7331/mcp

@@ -178,6 +178,11 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
 
   it('1d-b 协商：counter → accept → 完成；超限 → NEGOTIATION_LIMIT；messageId 幂等', async () => {
     const negB = negotiationMessageStore(b);
+    const negA = negotiationMessageStore(a);
+    // 消息级证据（唯一可信链路）：B 发起 → A 经真实同步收到 → A 自己的 policy 回应
+    // → B 应用后裁定。屏障只**观察**这些真实产物，不注入消息、不改状态。
+    const kindsOf = async (store: { all(): Promise<NegotiationMessage[]> }, taskId: string): Promise<string[]> =>
+      (await store.all()).filter((m) => m.taskId === taskId).map((m) => `${m.kind}#${m.round}@${m.from.device}`);
     const node = makeNode({ policy: 'accept', maxRounds: 3 });
 
     const { taskId } = await node.submit({ intent: 'nego:please', to: { device: 'device-B', agent: 'echo' } });
@@ -191,9 +196,11 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     await loop.done;
     expect(doneWait.ok).toBe(true);
     expect(doneWait.state?.status).toBe('done');
-    const msgs = await negB.all();
-    expect(msgs.some((m) => m.kind === 'counter')).toBe(true);
-    expect(msgs.some((m) => m.kind === 'accept')).toBe(true);
+    const doneKindsA = await kindsOf(negA, taskId!);
+    const doneKindsB = await kindsOf(negB, taskId!);
+    // A 端出现 B 署名的 counter#1 只可能来自真实同步；accept#1 由 A 的 policy 产生。
+    expect(doneKindsB).toEqual(expect.arrayContaining(['counter#1@device-B', 'accept#1@device-A']));
+    expect(doneKindsA).toEqual(expect.arrayContaining(['counter#1@device-B', 'accept#1@device-A']));
 
     // 超限：node 不响应，worker maxRounds=1 → 发到 2 轮 → NEGOTIATION_LIMIT
     const node2 = makeNode({ policy: 'counter', maxRounds: 1 });
@@ -202,6 +209,27 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
       negotiation: { store: negB, maxRounds: 1, enabled: (s: TaskState) => s.intent.startsWith('nego:') },
     });
     const loop2 = startLoop(worker2);
+    // 驱动仅用公开的 pollOnce + applyNegotiationPolicy（counter#2 由 A 的 policy 计算并 append），
+    // 同步由既有 anti-entropy kicker 提供；超时即断言 FAIL。
+    const waitForEvidence = async (
+      predicate: (aKinds: string[], bKinds: string[]) => boolean,
+      timeoutMs = 15000,
+    ): Promise<boolean> => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        await node2.pollOnce();
+        await node2.applyNegotiationPolicy();
+        if (predicate(await kindsOf(negA, overId!), await kindsOf(negB, overId!))) return true;
+        if (Date.now() >= deadline) return false;
+        await sleep(10);
+      }
+    };
+    const aSawBCounter = await waitForEvidence((ak) => ak.includes('counter#1@device-B'));
+    expect(aSawBCounter).toBe(true); // B 已写入 → A 经真实同步收到
+    const aProducedCounter2 = await waitForEvidence((ak) => ak.includes('counter#2@device-A'));
+    expect(aProducedCounter2).toBe(true); // A 自己的 policy 产出第 2 轮
+    const bSawCounter2 = await waitForEvidence((_ak, bk) => bk.includes('counter#2@device-A'));
+    expect(bSawCounter2).toBe(true); // B 经真实同步收到 A 的第 2 轮
     // F-FLAKE-2：按精确谓词（reason==='NEGOTIATION_LIMIT: 2>1'）有界等待。
     const over = await waitForTaskState(node2, overId!, negotiationLimit);
     loop2.stop();
@@ -209,6 +237,14 @@ describe('1d 三形态 live E2E（真实记忆同步）', () => {
     expect(over.ok).toBe(true);
     expect(over.state?.status).toBe('failed');
     expect(over.state?.reason).toBe('NEGOTIATION_LIMIT: 2>1');
+    const overKindsA = await kindsOf(negA, overId!);
+    const overKindsB = await kindsOf(negB, overId!);
+    expect(overKindsA).toEqual(expect.arrayContaining(['counter#1@device-B', 'counter#2@device-A']));
+    expect(overKindsB).toEqual(expect.arrayContaining(['counter#1@device-B', 'counter#2@device-A']));
+    // reason 必须由 B 的 worker 依 counter#2 裁定（而不是 A 端自说自话）
+    const bFailed = (await new MebularTaskEventStore(b).byTask(overId!)).find((e) => e.type === 'failed');
+    expect(bFailed?.actor.device).toBe('device-B');
+    expect(bFailed?.reason).toBe('NEGOTIATION_LIMIT: 2>1');
 
     // messageId 幂等
     const before = (await negB.all()).length;

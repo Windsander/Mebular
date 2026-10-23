@@ -8,7 +8,7 @@
 - [ ] 影响范围已说明（受影响包 / 用户可见行为 / 是否需要发布）
 - [ ] 涉及 UI 文案时已更新 i18n catalog（`npm run check:i18n`）
 - [ ] 安全 / 数据迁移影响已说明（无影响请写「无」）
-- [ ] 本次合入是否需要 admin bypass（正常流程不需要 reviewer 批准）
+- [ ] 本次合入是否需要 admin bypass（正常流程需要 1 个 reviewer 批准；admin bypass 仅用于本人 PR 或紧急兜底）
 
 ## 关联
 

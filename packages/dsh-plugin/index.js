@@ -13,4 +13,11 @@
 export const name = '@mebular/dsh-plugin';
 export const version = '0.1.0';
 
-export default { name, version };
+/**
+ * Empty host plugin. The bundle mounts this entry so DSH can discover the
+ * package (including its `dsh.client` surface); tools come from the MCP
+ * client entry in the same patch.
+ */
+export function apply() {}
+
+export default { name, version, apply };

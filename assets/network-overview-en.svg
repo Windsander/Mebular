@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 320" width="1080" height="320" role="img" aria-label="Two machines, each running a Mebular node, syncing one graph peer-to-peer for the AI assistants connected to them">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="45%" r="70%">
+      <stop offset="0%" stop-color="#0d2140" stop-opacity="0.85"/>
+      <stop offset="55%" stop-color="#071022" stop-opacity="0.5"/>
+      <stop offset="100%" stop-color="#03050a" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="card" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0a1628"/>
+      <stop offset="100%" stop-color="#060d18"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 z" fill="#4a8acf"/>
+    </marker>
+    <marker id="arrowStart" markerWidth="8" markerHeight="8" refX="2" refY="3" orient="auto">
+      <path d="M6,0 L0,3 L6,6 z" fill="#4a8acf"/>
+    </marker>
+    <style>
+      .h{font-family:'SF Pro Display','Segoe UI',ui-sans-serif,system-ui,sans-serif;font-size:20px;font-weight:600;fill:#e2ecff}
+      .chip{font-family:'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif;font-size:14px;fill:#bcd7ff}
+      .node{font-family:'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace;font-size:15px;font-weight:600;fill:#e2ecff}
+      .sub{font-family:'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif;font-size:11px;fill:#6f93b6}
+      .sync{font-family:'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif;font-size:11px;fill:#8ac8ff}
+      .foot{font-family:'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif;font-size:12px;fill:#6f93b6}
+    </style>
+  </defs>
+
+  <rect width="1080" height="320" fill="#03050a"/>
+  <ellipse cx="540" cy="160" rx="520" ry="190" fill="url(#glow)"/>
+
+  <g fill="#cfe0ff" opacity="0.35">
+    <circle cx="92" cy="22" r="0.8"/><circle cx="980" cy="30" r="0.7"/>
+    <circle cx="1012" cy="270" r="0.9"/><circle cx="34" cy="292" r="0.6"/>
+    <circle cx="532" cy="14" r="0.7"/><circle cx="520" cy="300" r="0.6"/>
+  </g>
+
+  <rect x="40" y="44" width="430" height="232" rx="18" fill="url(#card)" stroke="#1a3a60" stroke-width="1.2"/>
+  <rect x="610" y="44" width="430" height="232" rx="18" fill="url(#card)" stroke="#1a3a60" stroke-width="1.2"/>
+
+  <text class="h" x="68" y="80">Your laptop</text>
+  <text class="h" x="638" y="80">Your desktop</text>
+
+  <rect x="68" y="98" width="110" height="34" rx="9" fill="#0d1e35" stroke="#264c79"/>
+  <text class="chip" x="123" y="120" text-anchor="middle">Claude</text>
+  <rect x="188" y="98" width="126" height="34" rx="9" fill="#0d1e35" stroke="#264c79"/>
+  <text class="chip" x="251" y="120" text-anchor="middle">OpenCode</text>
+  <rect x="324" y="98" width="82" height="34" rx="9" fill="#0d1e35" stroke="#264c79"/>
+  <text class="chip" x="365" y="120" text-anchor="middle">+ more</text>
+
+  <rect x="638" y="98" width="104" height="34" rx="9" fill="#0d1e35" stroke="#264c79"/>
+  <text class="chip" x="690" y="120" text-anchor="middle">Cursor</text>
+  <rect x="752" y="98" width="108" height="34" rx="9" fill="#0d1e35" stroke="#264c79"/>
+  <text class="chip" x="806" y="120" text-anchor="middle">Hermes</text>
+  <rect x="870" y="98" width="82" height="34" rx="9" fill="#0d1e35" stroke="#264c79"/>
+  <text class="chip" x="911" y="120" text-anchor="middle">+ more</text>
+
+  <rect x="68" y="158" width="374" height="54" rx="12" fill="#0b1c33" stroke="#2f6fce" stroke-width="1.2"/>
+  <g stroke="#7fb6ff" stroke-width="1.2" fill="none" opacity="0.9">
+    <path d="M96 185 L112 176 M96 185 L112 194"/>
+    <circle cx="96" cy="185" r="3" fill="#8ac8ff" stroke="none"/>
+    <circle cx="112" cy="176" r="2.2" fill="#8ac8ff" stroke="none"/>
+    <circle cx="112" cy="194" r="2.2" fill="#8ac8ff" stroke="none"/>
+  </g>
+  <text class="node" x="132" y="184">mebular serve</text>
+  <text class="sub" x="132" y="201">memory · tasks · signed history</text>
+
+  <rect x="638" y="158" width="374" height="54" rx="12" fill="#0b1c33" stroke="#2f6fce" stroke-width="1.2"/>
+  <g stroke="#7fb6ff" stroke-width="1.2" fill="none" opacity="0.9">
+    <path d="M666 185 L682 176 M666 185 L682 194"/>
+    <circle cx="666" cy="185" r="3" fill="#8ac8ff" stroke="none"/>
+    <circle cx="682" cy="176" r="2.2" fill="#8ac8ff" stroke="none"/>
+    <circle cx="682" cy="194" r="2.2" fill="#8ac8ff" stroke="none"/>
+  </g>
+  <text class="node" x="702" y="184">mebular serve</text>
+  <text class="sub" x="702" y="201">memory · tasks · signed history</text>
+
+  <line x1="480" y1="185" x2="600" y2="185" stroke="#4a8acf" stroke-width="1.4" stroke-dasharray="5 5" marker-start="url(#arrowStart)" marker-end="url(#arrow)"/>
+  <text class="sync" x="540" y="168" text-anchor="middle">peer-to-peer</text>
+  <text class="sync" x="540" y="205" text-anchor="middle">offline-first</text>
+
+  <text class="foot" x="540" y="304" text-anchor="middle">No hosted account · no central coordinator</text>
+</svg>

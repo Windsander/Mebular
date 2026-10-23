@@ -50,7 +50,7 @@ check('README 提及核心工具（memory_write / task_submit）', /\bmemory_wri
 
 // ④ 本地链接存在性
 const missing = [];
-for (const [file, md] of [['README.md', en], ['README_CN.md', cn], ['LIMITATIONS.md', read('LIMITATIONS.md')]]) {
+for (const [file, md] of [['README.md', en], ['README_CN.md', cn], ['docs/limitations/LIMITATIONS.md', read('docs/limitations/LIMITATIONS.md')]]) {
   for (const m of md.matchAll(/\]\(([^)]+)\)/g)) {
     const target = m[1];
     if (/^(https?:|mailto:|#)/.test(target)) continue;

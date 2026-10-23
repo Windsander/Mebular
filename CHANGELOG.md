@@ -31,7 +31,7 @@ provides both the `mebular` and `fleet` CLIs.
 - **Verifiable, tamper-evident history** — every write is an Ed25519-signed, content-addressed event; who changed what is always auditable, and deletes are tombstones rather than silent erasure.
 - **Offline-first incremental sync** — vector clocks exchange only what the peer is missing; devices converge on reconnect with no central service, and direct / relay / hole-punch transitions plus automatic bridges are handled for you.
 - **One machine, one node, one daemon** — `mebular serve` is the sole holder of identity, network and trust; fleet and agents are local clients. Device enrollment uses a QR code or a short-lived single-use token, and trust is a bounded certificate chain to the user master key, so the master key can stay offline.
-- **Back up the root key** — the user master key is the trust root and never leaves the device. Back up `~/.mebular/user-master-key.json` offline after the first setup. v0.1.0 has no master-key rotation or re-anchoring; if the key is lost or stolen, there is no in-product recovery path (see [`LIMITATIONS.md`](https://github.com/Windsander/Mebular/blob/main/LIMITATIONS.md)).
+- **Back up the root key** — the user master key is the trust root and never leaves the device. Back up `~/.mebular/user-master-key.json` offline after the first setup. v0.1.0 has no master-key rotation or re-anchoring; if the key is lost or stolen, there is no in-product recovery path (see [`LIMITATIONS.md`](https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS.md)).
 - **Cloud and device names** — give the current Cloud and your own device readable names; changes sync as signed policy metadata to every admitted device, with blocked-author filtering and local duplicate-name warnings.
 - **Compact invite panel** — QR, token, TTL and expiry in one small panel; regenerating invalidates the old token, and the panel closes with a top-right X.
 - **In-app desktop confirmations** — regenerate, rollback and remove use the console's own confirmation dialog; quitting uses a CRT-styled window instead of a native dialog. Tray navigation switches the loaded console in place instead of reloading it.
@@ -49,7 +49,7 @@ provides both the `mebular` and `fleet` CLIs.
 - **可验证、抗篡改的历史** —— 每次写入都是 Ed25519 签名、内容寻址的事件；谁改了什么随时可审计，删除落墓碑而非静默抹除。
 - **离线优先的增量同步** —— 向量时钟只交换对端缺失的部分；重连即收敛，不依赖中心服务；直连 / 中继 / 打洞的切换与自动当桥都由框架完成。
 - **一机一节点一守护** —— `mebular serve` 是身份、网络与信任的唯一持有者，fleet 与 Agent 都是本机客户端；设备凭二维码或短时效一次性令牌入网，信任是链到用户主密钥的有界证书链，主密钥可以一直离线。
-- **备份根密钥** —— 用户主密钥是信任根，且永不离开本机。首次 setup 后请离线备份 `~/.mebular/user-master-key.json`。v0.1.0 未实现主密钥轮换 / 换锚；丢失或被盗没有产品内恢复路径（见 [`LIMITATIONS.md`](https://github.com/Windsander/Mebular/blob/main/LIMITATIONS.md)）。
+- **备份根密钥** —— 用户主密钥是信任根，且永不离开本机。首次 setup 后请离线备份 `~/.mebular/user-master-key.json`。v0.1.0 未实现主密钥轮换 / 换锚；丢失或被盗没有产品内恢复路径（见 [`LIMITATIONS.md`](https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS.md)）。
 - **忆云与设备名同步** —— 当前忆云和本人设备名可改为易读名称；名称作为签名策略元数据同步到所有已准入设备，过滤被移出作者，并在本机重名时给出提示。
 - **精简邀请面板** —— 二维码、令牌、有效期和到期时间收进一个小面板；重新生成会作废旧令牌，右上角 X 关闭。
 - **应用内桌面确认** —— 重新生成、回滚、移除使用控制台自己的确认弹框；退出改为 CRT 风格确认窗口，不再使用原生对话框。托盘导航在已加载的控制台内原地切换，不再刷新页面。

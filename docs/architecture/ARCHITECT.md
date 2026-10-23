@@ -1,13 +1,13 @@
 # Mebular 架构
 
 > 本文描述稳定架构与边界，不记录发布状态、PR 或测试数字。
-> 产品定位、安装与首次运行见 [`README.md`](README.md) / [`README_CN.md`](README_CN.md)；
-> 封板语义见 [`SEALING.md`](SEALING.md)，已知边界见 [`LIMITATIONS.md`](LIMITATIONS.md)。
+> 产品定位、安装与首次运行见 [`README.md`](../../README.md) / [`README_CN.md`](../../README_CN.md)；
+> 封板语义见 [`SEALING.md`](../../SEALING.md)，已知边界见 [`LIMITATIONS.md`](../limitations/LIMITATIONS.md)。
 
 Mebular 是一套**本地优先的跨设备记忆与任务协作层**。它不把记忆托管到中心服务，而是让每台机器运行一个守护，
 由守护持有身份、网络、同步与信任；Agent、fleet、控制台都只是这个守护的客户端。
 
-![一机一节点一守护](assets/architecture-cn.svg)
+![一机一节点一守护](../../assets/architecture-cn.svg)
 
 ## 1. 设计约束
 
@@ -133,8 +133,8 @@ UNINITIALIZED ── create/join ──▶ INITIALIZING ──▶ READY
   - 根密钥轮换/换锚未实现，丢失或被盗没有产品内恢复；
   - 没有混版兼容层。
 
-这些是产品语义，不是实现遗漏；对外说明必须与 [`LIMITATIONS.md`](LIMITATIONS.md) 和
-[`SEALING.md`](SEALING.md) 保持一致。
+这些是产品语义，不是实现遗漏；对外说明必须与 [`LIMITATIONS.md`](../limitations/LIMITATIONS.md) 和
+[`SEALING.md`](../../SEALING.md) 保持一致。
 
 ## 5. 代码地图
 
@@ -157,9 +157,9 @@ UNINITIALIZED ── create/join ──▶ INITIALIZING ──▶ READY
 
 ## 6. 延伸阅读
 
-- 产品与使用：[`README_CN.md`](README_CN.md) / [`README.md`](README.md)
-- 快速上手：[`QUICKSTART_CN.md`](QUICKSTART_CN.md)
-- 封板契约：[`SEALING_CN.md`](SEALING_CN.md) / [`SEALING.md`](SEALING.md)
-- 已知边界：[`LIMITATIONS_CN.md`](LIMITATIONS_CN.md) / [`LIMITATIONS.md`](LIMITATIONS.md)
-- fleet 设计：[`packages/fleet/DESIGN.md`](packages/fleet/DESIGN.md)
-- 发布流程：[`RELEASE.md`](RELEASE.md)
+- 产品与使用：[`README_CN.md`](../../README_CN.md) / [`README.md`](../../README.md)
+- 快速上手：[`QUICKSTART_CN.md`](../getting-started/QUICKSTART_CN.md)
+- 封板契约：[`SEALING_CN.md`](../../SEALING_CN.md) / [`SEALING.md`](../../SEALING.md)
+- 已知边界：[`LIMITATIONS_CN.md`](../limitations/LIMITATIONS_CN.md) / [`LIMITATIONS.md`](../limitations/LIMITATIONS.md)
+- fleet 设计：[`packages/fleet/DESIGN.md`](../../packages/fleet/DESIGN.md)
+- 发布流程：[`RELEASE.md`](../operations/RELEASE.md)

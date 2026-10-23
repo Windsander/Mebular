@@ -1931,8 +1931,11 @@ html[lang="en-US"] .sector-name .ns-chip {
   white-space: nowrap;
 }
 
-/* 桌面数据面说明不再一行 140+ 字符（1440 下 72ch ≈ 477px） */
+/* 桌面数据面说明不再一行 140+ 字符（1440 下 72ch ≈ 477px）。
+   Sharing / Memories 的整句说明除外：它们需要铺满面板（1440 单行、1024 自然两行），
+   其余 .panel-note 仍保留 72ch 可读上限。 */
 html[lang="en-US"] .panel-note { max-width: 72ch; }
+html[lang="en-US"] .panel-note-wide { max-width: 100%; }
 
 /* 小按钮行高可控：英文不再比中文矮 3px（24 → 28） */
 html[lang="en-US"] .btn-small { line-height: 1.5; }

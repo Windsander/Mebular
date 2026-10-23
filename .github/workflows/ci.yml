@@ -1,10 +1,11 @@
 name: CI
 
 on:
+  # main 与 release/* 的 push 产生完整 CI；feature branch 的验证走 pull_request，避免同一 commit 两套 run。
   push:
-    branches-ignore:
-      - 'site'
-      - 'site-*'
+    branches:
+      - main
+      - 'release/v*'
   pull_request:
   merge_group:
   workflow_dispatch:
@@ -12,9 +13,11 @@ on:
 permissions:
   contents: read
 
+# PR 更新（synchronize）复用同一 PR 号 → 取消该 PR 的旧 run；main / release push 与 merge_group 不取消，
+# 避免连续合入时前一个已合入 commit 的完整 CI 被跳过。
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-test-lint:

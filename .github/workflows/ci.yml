@@ -1,10 +1,10 @@
 name: CI
 
 on:
+  # 只有 main 的 push 产生 push run；feature branch 的验证走 pull_request，避免同一 commit 两套 run。
   push:
-    branches-ignore:
-      - 'site'
-      - 'site-*'
+    branches:
+      - main
   pull_request:
   merge_group:
   workflow_dispatch:
@@ -12,8 +12,9 @@ on:
 permissions:
   contents: read
 
+# PR 更新（synchronize）复用同一 PR 号 → 取消该 PR 的旧 run；merge_group / main push 各自独立。
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:

@@ -8,7 +8,7 @@ import { Starfield } from './stars.js';
 //
 // 公开接口：
 //   const stage = new StarStage(canvas);
-//   stage.setScene({ nodes, edges });       // edges = 无向基础边（共同/无共同订阅）
+//   stage.setScene({ nodes, edges });       // edges = 无向基础边（solid = 两端在线 + 共同订阅）
 //   stage.setRoutes(routes);                // 仅 hover 的任务域航道；scene 不掺业务路由
 //   stage.launchFleet(fromId, toId, opts);  // fleet 事件：航道 + 舰队（端点每帧绑星位）
 //   stage.launchCourier(fromId, toId);      // 手动同步的本地反馈（独立白色信使）
@@ -45,9 +45,10 @@ const COLORS = {
   muted: '#8391b4',
   revokedNode: '#a06a6a',
   warning: '#d55e00',
-  // 基础边：中性银灰，不用蓝/金（蓝金只属于任务域航道）。
-  baseShared: '#c1c8d6',
-  baseUnshared: '#7c8598',
+  // 基础边：solid = 两端在线 + 有共同订阅（冷青白，明显区别于灰虚线）；虚线分两档灰。
+  baseSolid: '#9fe6f2',
+  baseDashed: '#7c8598',
+  baseDashedOffline: '#5f6779',
   // 悬停航道：蓝 = 可发出，金 = 可接收，灰 = 任务域不可达。
   routeSend: '#56b4e9',
   routeReceive: '#f0c46a',
@@ -85,7 +86,7 @@ function shortId(id) {
 // ---------- 星图设备网络场景（纯函数，零 DOM） ----------
 //
 // 忆云设备网络：节点 = 当前忆云所有已知设备（含本机与离线设备），
-// 基础边 = 所有设备两两之间的无向连线（共同订阅 = 实线，无共同订阅 = 虚线）。
+// 基础边 = 所有设备两两之间的无向连线（两端在线且有共同订阅 = 实线，否则灰色虚线）。
 // 航道 = 仅在悬停设备时计算的「任务域可达」方向线，不写回 scene。
 // 坐标不在这里烘焙：StarStage 每帧按星体当前位置（含视差/深度）计算端点。
 // 这些纯函数与渲染同文件导出，避免控制台静态白名单新增文件（serve.mjs 不变）。
@@ -171,18 +172,35 @@ export function buildNetworkNodes({ devices = [], selfId = null, selfLabel = '�
   return nodes;
 }
 
-/** 所有设备两两之间的基础边；无方向、无箭头。 */
+/**
+ * 所有设备两两之间的基础边；无方向、无箭头。
+ *
+ * 视觉语义只由两个事实决定：
+ * - online：两端都在线且未被移除（blocked 视为不可用）；
+ * - shared：两端存在共同订阅域。
+ * solid = online && shared；其余（任一端不可用，或无共同订阅）一律虚线。
+ * `shared` 单独保留，便于图例/排障区分「有共同订阅但离线」。
+ */
 export function buildBaseEdges(nodes = []) {
   const edges = [];
   const list = Array.isArray(nodes) ? nodes : [];
   for (let i = 0; i < list.length; i += 1) {
     for (let j = i + 1; j < list.length; j += 1) {
-      const shared = sharedNamespaces(list[i], list[j]);
+      const a = list[i];
+      const b = list[j];
+      const shared = sharedNamespaces(a, b);
+      const online = a?.online === true && a?.blocked !== true
+        && b?.online === true && b?.blocked !== true;
+      const hasShared = shared.length > 0;
+      const solid = online && hasShared;
       edges.push({
-        from: list[i].id,
-        to: list[j].id,
+        from: a.id,
+        to: b.id,
         kind: 'base',
-        shared: shared.length > 0,
+        shared: hasShared,
+        online,
+        solid,
+        dashed: !solid,
         namespaces: shared,
       });
     }
@@ -195,14 +213,47 @@ export function buildNetworkScene({ devices = [], selfId = null, selfLabel = '�
   return { nodes, edges: buildBaseEdges(nodes) };
 }
 
-/** 基础边计数（验收/测试信号）。 */
+/** 基础边计数（验收/测试信号）；solid 以显式 `solid` 字段为准，离线边必计虚线。 */
 export function summarizeSceneEdges(edges = []) {
   const list = Array.isArray(edges) ? edges : [];
-  const solidEdgeCount = list.filter((edge) => edge?.shared === true).length;
+  const solidEdgeCount = list.filter((edge) => edge?.solid === true).length;
   return {
     baseEdgeCount: list.length,
     solidEdgeCount,
     dashedEdgeCount: list.length - solidEdgeCount,
+  };
+}
+
+/**
+ * 基础边脉冲节奏：稳定 hash → 每条边独立的 6–14s 周期、0.6–0.9s 持续时间与相位。
+ * 目的是低频、间歇、彼此错开的「呼吸」，不是持续流动；reduced-motion 下不绘制。
+ */
+export function baseEdgePulseTiming(edgeOrSeed) {
+  const seed = typeof edgeOrSeed === 'string'
+    ? edgeOrSeed
+    : `${edgeOrSeed?.from ?? ''}~${edgeOrSeed?.to ?? ''}`;
+  const period = 6 + (hashString(`base-pulse:period:${seed}`) % 8000) / 1000;
+  const duration = 0.6 + (hashString(`base-pulse:duration:${seed}`) % 300) / 1000;
+  const offset = (hashString(`base-pulse:offset:${seed}`) % 1000000) / 1000000 * period;
+  return { period, duration, offset };
+}
+
+/** 某条边在 time（秒）时的脉冲状态；active=false 表示当前不在脉冲窗口内。 */
+export function baseEdgePulse(edgeOrSeed, time) {
+  const timing = baseEdgePulseTiming(edgeOrSeed);
+  const t = Number.isFinite(time) ? time : 0;
+  const cycle = (((t + timing.offset) % timing.period) + timing.period) % timing.period;
+  if (cycle >= timing.duration) {
+    return { ...timing, active: false, intensity: 0, position: 0 };
+  }
+  const progress = cycle / timing.duration;
+  return {
+    ...timing,
+    active: true,
+    // sin 包络：0 → 1 → 0，避免光点突然出现/消失。
+    intensity: Math.sin(Math.PI * progress),
+    // 沿线移动，并留出端点余量（光点不压在星体上）。
+    position: 0.15 + 0.7 * progress,
   };
 }
 
@@ -399,7 +450,7 @@ export class StarStage {
     const dataset = this.canvas?.dataset;
     if (!dataset) return;
     const edges = this.scene.edges;
-    const solid = edges.filter((edge) => edge?.shared === true).length;
+    const solid = edges.filter((edge) => edge?.solid === true).length;
     const eventRoutes = this.fleets.filter((fleet) => fleet.event).length;
     dataset.baseEdgeCount = String(edges.length);
     dataset.solidEdgeCount = String(solid);
@@ -1037,7 +1088,11 @@ export class StarStage {
     return this.baseEdgeDim;
   }
 
-  /** 基础边：所有设备两两相连；共同订阅实线、无共同订阅虚线；无方向箭头。 */
+  /**
+   * 基础边：所有设备两两相连，端点每帧取星位（直线，无方向箭头）。
+   * - solid（两端在线 + 有共同订阅）：冷青白实线 + 低频间歇脉冲；
+   * - 其余（任一端离线/被移除，或无共同订阅）：灰色虚线，静态不流动。
+   */
   _drawBaseEdges(time) {
     const ctx = this.ctx;
     ctx.save();
@@ -1048,16 +1103,23 @@ export class StarStage {
       if (!g) continue;
       const avgDepth = ((g.from.depth ?? 0.6) + (g.to.depth ?? 0.6)) / 2;
       const depthFade = 0.4 + avgDepth * 0.7;
+      const solid = edge.solid === true;
       const shared = edge.shared === true;
-      const color = shared ? COLORS.baseShared : COLORS.baseUnshared;
+      // 虚线同色系两档：有共同订阅但不可用 → 更暗；无共同订阅 → 常规灰。
+      const color = solid
+        ? COLORS.baseSolid
+        : (shared ? COLORS.baseDashedOffline : COLORS.baseDashed);
       const phase = (hashString(`${edge.from}~${edge.to}`) % 628) / 100;
+      // solid 只保留极轻的呼吸（脉冲才是主信号）；虚线明暗也保持静态感。
       const breathe = this.reducedMotion
-        ? 0.92
-        : 0.78 + 0.22 * Math.sin(time * 0.75 + phase);
-      const alpha = (shared ? 0.42 : 0.24) * depthFade * breathe * this.baseEdgeDim;
+        ? 0.94
+        : (solid
+          ? 0.9 + 0.1 * Math.sin(time * 0.75 + phase)
+          : 0.82 + 0.12 * Math.sin(time * 0.75 + phase));
+      const alpha = (solid ? 0.5 : (shared ? 0.17 : 0.22)) * depthFade * breathe * this.baseEdgeDim;
 
-      if (shared) {
-        // 共同订阅：细实线 + 极淡外发光（比无共同订阅更亮，但仍保持中性色）。
+      if (solid) {
+        // 冷青白细实线 + 极淡外发光（明显区别于灰虚线，但仍不抢航道蓝/金）。
         ctx.beginPath();
         ctx.moveTo(g.sx, g.sy);
         ctx.lineTo(g.ex, g.ey);
@@ -1070,19 +1132,48 @@ export class StarStage {
       ctx.moveTo(g.sx, g.sy);
       ctx.lineTo(g.ex, g.ey);
       ctx.strokeStyle = rgba(color, alpha);
-      ctx.lineWidth = (shared ? 1.25 : 1) * (0.6 + avgDepth * 0.6);
-      if (!shared) {
-        ctx.setLineDash([3, 7]);
-        ctx.lineDashOffset = this.reducedMotion ? 0 : -((time * 3) % 10);
-      } else {
+      ctx.lineWidth = (solid ? 1.35 : 1) * (0.6 + avgDepth * 0.6);
+      if (solid) {
         ctx.setLineDash([]);
+        ctx.lineDashOffset = 0;
+      } else {
+        ctx.setLineDash([3, 7]);
+        // 虚线不滚动：离线/无共同订阅应读作「不可用」，而不是持续流动。
         ctx.lineDashOffset = 0;
       }
       ctx.stroke();
       ctx.setLineDash([]);
       ctx.lineDashOffset = 0;
+
+      if (solid) this._drawBaseEdgePulse(g, edge, time, alpha);
     }
     ctx.restore();
+  }
+
+  /** solid 基础边的低频脉冲：短促光点沿线移动 + 极淡拖尾；不影响航道/fleet。 */
+  _drawBaseEdgePulse(g, edge, time, alpha) {
+    if (this.reducedMotion) return;
+    const pulse = baseEdgePulse(edge, time);
+    if (!pulse.active || pulse.intensity <= 0) return;
+    const ctx = this.ctx;
+    const x = g.sx + (g.ex - g.sx) * pulse.position;
+    const y = g.sy + (g.ey - g.sy) * pulse.position;
+    const strength = pulse.intensity * alpha;
+    const radius = 7 + 7 * pulse.intensity;
+    const trail = 12 + 14 * pulse.intensity;
+    ctx.beginPath();
+    ctx.moveTo(x - g.ux * trail, y - g.uy * trail);
+    ctx.lineTo(x, y);
+    ctx.strokeStyle = rgba(COLORS.baseSolid, Math.min(0.5, strength * 0.9));
+    ctx.lineWidth = 1.4;
+    ctx.stroke();
+    const glow = ctx.createRadialGradient(x, y, 0, x, y, radius);
+    glow.addColorStop(0, rgba(COLORS.baseSolid, Math.min(0.75, strength * 1.6)));
+    glow.addColorStop(1, rgba(COLORS.baseSolid, 0));
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
   }
 
   /** 悬停航道：只画 console.js 注入的 routes；离开即 setRoutes([])。 */

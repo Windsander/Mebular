@@ -1,5 +1,7 @@
 // 星图设备网络 / 任务域航道的纯函数契约：
-// - 所有设备两两之间都有基础边（6 节点 = 15 条），共同订阅实线、否则虚线
+// - 所有设备两两之间都有基础边（6 节点 = 15 条）
+// - 基础边视觉只由 online（两端在线且未移除）与 shared（共同订阅）决定：
+//   solid = online && shared，其余一律灰色虚线
 // - 悬停航道只在 hover 时存在；任务域可达 = 双方在线 + 双方都订阅任务域
 // - fleet 事件只接受 from/to 都在场景内的真实方向
 
@@ -8,6 +10,8 @@ import {
   BASE_EDGE_DIM_ON_HOVER,
   DEFAULT_TASK_NAMESPACE,
   StarStage,
+  baseEdgePulse,
+  baseEdgePulseTiming,
   buildBaseEdges,
   buildHoverRoutes,
   buildNetworkNodes,
@@ -46,19 +50,66 @@ describe('星图设备网络：节点与基础边', () => {
     expect(new Set(edges.map((edge) => `${edge.from}-${edge.to}`)).size).toBe(15);
   });
 
-  test('共同订阅 = 实线，无共同订阅 = 虚线；计数稳定', () => {
+  test('online + 共同订阅 = 实线；离线/被移除/无共同订阅 = 虚线；计数稳定', () => {
     const { edges } = scene();
     expect(summarizeSceneEdges(edges)).toEqual({
       baseEdgeCount: 15,
-      solidEdgeCount: 8,
-      dashedEdgeCount: 7,
+      solidEdgeCount: 5,
+      dashedEdgeCount: 10,
     });
     const byPair = new Map(edges.map((edge) => [`${edge.from}-${edge.to}`, edge]));
-    expect(byPair.get('A-B').shared).toBe(true);
-    expect(byPair.get('A-B').namespaces).toEqual(['tasks', 'notes']);
-    expect(byPair.get('C-D').shared).toBe(false);
-    expect(byPair.get('B-D').shared).toBe(true);
-    expect(byPair.get('E-F').shared).toBe(false);
+    // A/B/C/D 均在线：共同订阅才实线。
+    expect(byPair.get('A-B')).toMatchObject({
+      shared: true, online: true, solid: true, dashed: false, namespaces: ['tasks', 'notes'],
+    });
+    expect(byPair.get('A-C')).toMatchObject({ shared: true, online: true, solid: true });
+    expect(byPair.get('A-D')).toMatchObject({ shared: true, online: true, solid: true });
+    expect(byPair.get('B-D')).toMatchObject({ shared: true, online: true, solid: true });
+    // 有共同订阅但一端不可用 → 虚线。
+    expect(byPair.get('A-E')).toMatchObject({ shared: true, online: false, solid: false, dashed: true });
+    expect(byPair.get('C-E')).toMatchObject({ shared: true, online: false, solid: false, dashed: true });
+    // 无共同订阅 → 虚线。
+    expect(byPair.get('C-D')).toMatchObject({ shared: false, online: true, solid: false, dashed: true });
+    expect(byPair.get('E-F')).toMatchObject({ shared: false, online: false, solid: false, dashed: true });
+  });
+
+  test('任一端 offline / blocked → 相关基础边全部 dashed（即使有共同订阅）', () => {
+    const { edges } = scene();
+    const offlineEdges = edges.filter((edge) => edge.from === 'E' || edge.to === 'E'
+      || edge.from === 'F' || edge.to === 'F');
+    expect(offlineEdges).toHaveLength(9); // 5 + 5 - E-F 重复
+    expect(offlineEdges.every((edge) => edge.solid === false && edge.dashed === true)).toBe(true);
+    // 离线设备即使有共同订阅域，也不会被渲染成实线。
+    expect(edges.filter((edge) => edge.from === 'E' || edge.to === 'E')
+      .some((edge) => edge.shared === true)).toBe(true);
+  });
+
+  test('solid / dashed 与稳定脉冲节奏：周期 6–14s、持续 0.6–0.9s、各边错开', () => {
+    const { edges } = scene();
+    const solidEdges = edges.filter((edge) => edge.solid === true);
+    const timings = solidEdges.map((edge) => baseEdgePulseTiming(edge));
+    for (const timing of timings) {
+      expect(timing.period).toBeGreaterThanOrEqual(6);
+      expect(timing.period).toBeLessThanOrEqual(14);
+      expect(timing.duration).toBeGreaterThanOrEqual(0.6);
+      expect(timing.duration).toBeLessThanOrEqual(0.9);
+      expect(timing.offset).toBeGreaterThanOrEqual(0);
+      expect(timing.offset).toBeLessThan(timing.period);
+    }
+    // 稳定：同一条边任何时候算出的节奏都一样。
+    expect(baseEdgePulseTiming(solidEdges[0])).toEqual(timings[0]);
+    // 不是所有边同一节奏/同相位（避免整张图一起闪）。
+    expect(new Set(timings.map((timing) => timing.period)).size).toBeGreaterThan(1);
+    expect(new Set(timings.map((timing) => timing.offset)).size).toBeGreaterThan(1);
+
+    // 脉冲计算不改变边的 solid/dashed 语义。
+    const before = JSON.stringify(edges);
+    const edge = solidEdges[0];
+    const activeAt = baseEdgePulseTiming(edge);
+    const t = (((activeAt.duration / 2 - activeAt.offset) % activeAt.period) + activeAt.period) % activeAt.period;
+    expect(baseEdgePulse(edge, t).active).toBe(true);
+    expect(baseEdgePulse(edge, t + activeAt.duration).active).toBe(false);
+    expect(JSON.stringify(edges)).toBe(before);
   });
 
   test('基础边无方向（每对只出现一次），且不依赖 sharesWithMe', () => {
@@ -215,9 +266,10 @@ describe('画布只读测试信号', () => {
     stage.setScene({
       nodes: [],
       edges: [
-        { from: 'A', to: 'B', shared: true },
-        { from: 'A', to: 'C', shared: false },
-        { from: 'B', to: 'C', shared: false },
+        { from: 'A', to: 'B', shared: true, online: true, solid: true },
+        // 有共同订阅但一端离线：必须计入虚线。
+        { from: 'A', to: 'C', shared: true, online: false, solid: false },
+        { from: 'B', to: 'C', shared: false, online: true, solid: false },
       ],
     });
     expect(canvas.dataset.baseEdgeCount).toBe('3');
@@ -304,7 +356,7 @@ describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
     place({ A: [100, 300, 0.5, 8], B: [700, 300, 0.8, 10] });
     stage.scene = {
       nodes: [{ id: 'A' }, { id: 'B' }],
-      edges: [{ from: 'A', to: 'B', shared: true }],
+      edges: [{ from: 'A', to: 'B', shared: true, online: true, solid: true }],
     };
 
     const g = stage._lineGeometry('A', 'B');
@@ -315,6 +367,60 @@ describe('航道几何：曲线不变式 + 基础边直线/降亮', () => {
     stage._drawBaseEdges(0);
     expect(methods('lineTo').length).toBeGreaterThan(0);
     expect(methods('quadraticCurveTo')).toHaveLength(0);
+  });
+
+  test('solid 为非灰冷青实线；offline / 无共同订阅为灰虚线（同色系不同亮度）', () => {
+    place({ A: [100, 300, 0.6, 8], B: [500, 300, 0.6, 8], C: [700, 300, 0.6, 8] });
+    stage.scene = {
+      nodes: [{ id: 'A' }, { id: 'B' }, { id: 'C' }],
+      edges: [
+        { from: 'A', to: 'B', shared: true, online: true, solid: true },
+        { from: 'A', to: 'C', shared: true, online: false, solid: false },
+        { from: 'B', to: 'C', shared: false, online: true, solid: false },
+      ],
+    };
+    stage.reducedMotion = true;
+    calls.length = 0;
+    stage._drawBaseEdges(3.2);
+
+    const strokes = calls.filter((call) => call.method === 'set:strokeStyle').map((call) => call.args[0]);
+    // 冷青白：rgb(159,230,242)；灰虚线两档：rgb(124,133,152) / rgb(95,103,121)。
+    expect(strokes.some((color) => color.startsWith('rgba(159,230,242'))).toBe(true);
+    expect(strokes.some((color) => color.startsWith('rgba(124,133,152'))).toBe(true);
+    expect(strokes.some((color) => color.startsWith('rgba(95,103,121'))).toBe(true);
+    // 虚线只用于非 solid；solid 线段不带 dash。
+    const dashSets = calls.filter((call) => call.method === 'setLineDash').map((call) => call.args[0]);
+    expect(dashSets.some((pattern) => Array.isArray(pattern) && pattern[0] === 3 && pattern[1] === 7)).toBe(true);
+    expect(calls.filter((call) => call.method === 'set:lineDashOffset')
+      .every((call) => call.args[0] === 0)).toBe(true);
+  });
+
+  test('脉冲只对 solid 边且 reduced-motion 关闭；不改变 solid/dashed 状态', () => {
+    place({ A: [100, 300, 0.6, 8], B: [500, 300, 0.6, 8], C: [700, 300, 0.6, 8] });
+    const edges = [
+      { from: 'A', to: 'B', shared: true, online: true, solid: true },
+      { from: 'B', to: 'C', shared: true, online: false, solid: false },
+    ];
+    stage.scene = { nodes: [{ id: 'A' }, { id: 'B' }, { id: 'C' }], edges };
+
+    const timing = baseEdgePulseTiming(edges[0]);
+    const activeAt = ((((timing.duration / 2) - timing.offset) % timing.period) + timing.period) % timing.period;
+    const before = JSON.stringify(edges);
+
+    stage.reducedMotion = true;
+    calls.length = 0;
+    stage._drawBaseEdges(activeAt);
+    expect(methods('createRadialGradient')).toHaveLength(0);
+    expect(methods('arc')).toHaveLength(0);
+
+    stage.reducedMotion = false;
+    calls.length = 0;
+    stage._drawBaseEdges(activeAt);
+    // 只有 solid 边产生一个脉冲光点（dashed 边不脉冲）。
+    expect(methods('createRadialGradient')).toHaveLength(1);
+    expect(methods('arc')).toHaveLength(1);
+    expect(JSON.stringify(edges)).toBe(before);
+    expect(summarizeSceneEdges(edges)).toEqual({ baseEdgeCount: 2, solidEdgeCount: 1, dashedEdgeCount: 1 });
   });
 
   test('航道几何是曲线：控制点/中点偏离弦，且深度差带来纵向偏置', () => {

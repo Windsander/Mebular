@@ -26,6 +26,8 @@
 </p>
 <p align="center"><sub>静止时的星图：设备与共同订阅关系。 · 悬停时：任务域航道与实时 fleet 流量。<br>蓝线与金线表示本机 ↔ 各设备的任务域双向可达关系，不是设备之间的互连。</sub></p>
 
+## 一份记忆
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/one-graph-cn-light.svg">
@@ -87,15 +89,15 @@ mebular print-config --client opencode         # MCP 配置
   </thead>
   <tbody>
     <tr>
-      <td><strong><a href="docs/getting-started/QUICKSTART_CN.md">快速上手</a></strong><br><sub>安装、配对、同步</sub></td>
-      <td><strong><a href="docs/architecture/ARCHITECT.md">架构</a></strong><br><sub>节点、同步、信任</sub></td>
+      <td><strong><a href="docs/getting-started/QUICKSTART_CN.md">快速上手</a></strong><br><sub>安装与配对</sub></td>
+      <td><strong><a href="docs/architecture/ARCHITECT.md">架构</a></strong><br><sub>节点与同步</sub></td>
       <td><strong><a href="docs/console/README.md">控制台</a></strong><br><sub>本地界面</sub></td>
-      <td><strong><a href="docs/limitations/LIMITATIONS_CN.md">限制与取舍</a></strong><br><sub>存敏感数据前先读</sub></td>
+      <td><strong><a href="docs/limitations/LIMITATIONS_CN.md">限制</a></strong><br><sub>敏感数据</sub></td>
     </tr>
     <tr>
-      <td><strong><a href="packages/skill/SETUP.md">Agent Skill</a></strong><br><sub>部署与记忆规约</sub></td>
-      <td><strong><a href="packages/fleet/RUNBOOK.md">Fleet 运维手册</a></strong><br><sub>双机操作</sub></td>
-      <td><strong><a href="docs/operations/RELEASE.md">发布 SOP</a></strong><br><sub>发布流程</sub></td>
+      <td><strong><a href="packages/skill/SETUP.md">Agent</a></strong><br><sub>部署规约</sub></td>
+      <td><strong><a href="packages/fleet/RUNBOOK.md">Fleet</a></strong><br><sub>多机操作</sub></td>
+      <td><strong><a href="docs/operations/RELEASE.md">发布流程</a></strong><br><sub>发布步骤</sub></td>
       <td><strong><a href="SEALING_CN.md">封板契约</a></strong><br><sub>协议红线</sub></td>
     </tr>
     <tr>

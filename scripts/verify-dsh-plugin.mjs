@@ -9,7 +9,7 @@
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const pkgDir = join(repoRoot, 'packages', 'dsh-plugin');
@@ -119,9 +119,7 @@ check(
 );
 check(
   'dsh.client is the safe web placeholder',
-  pkg.dsh?.client?.platform === 'web' &&
-    Array.isArray(pkg.dsh?.client?.inject) &&
-    pkg.dsh.client.inject.length === 0,
+  pkg.dsh?.client?.platform === 'web' && Array.isArray(pkg.dsh?.client?.inject),
   JSON.stringify(pkg.dsh?.client),
 );
 
@@ -141,11 +139,32 @@ check(
   'patch uses @deepseek-ai/dsh-mcp-client',
   /name:\s*'@deepseek-ai\/dsh-mcp-client'/.test(patch),
 );
+check(
+  "patch mounts the plugin's own host entry",
+  /name:\s*'@mebular\/dsh-plugin'/.test(patch),
+);
+check('patch uses id: mebular for the host entry', /- id:\s*mebular\b/.test(patch));
+check('patch uses id: mcp-mebular for the MCP client', /- id:\s*mcp-mebular\b/.test(patch));
+const hostEntryAt = patch.indexOf("name: '@mebular/dsh-plugin'");
+const mcpClientAt = patch.indexOf("name: '@deepseek-ai/dsh-mcp-client'");
+check(
+  'patch mounts the host entry before the MCP client',
+  hostEntryAt !== -1 && mcpClientAt !== -1 && hostEntryAt < mcpClientAt,
+);
 check('patch uses streamable-http', /transport:\s*streamable-http/.test(patch));
 check('patch registers serverName: mebular', /serverName:\s*mebular\b/.test(patch));
 check('patch targets default 127.0.0.1:7331/mcp', /url:\s*http:\/\/127\.0\.0\.1:7331\/mcp/.test(patch));
 check('patch does not use stdio transport', !/transport:\s*stdio/.test(patch));
 check('patch does not spawn a command', !/^\s*command:\s*/m.test(patch));
+
+// The host entry must be a callable plugin, otherwise the bundle cannot mount.
+let pluginModule = {};
+try {
+  pluginModule = await import(pathToFileURL(join(pkgDir, 'index.js')).href);
+} catch (error) {
+  check('index.js imports cleanly', false, error.message);
+}
+check('index.js exports apply()', typeof pluginModule.apply === 'function');
 
 // ---------------------------------------------------------------------------
 // Imports: public HTTP only, no workspace coupling

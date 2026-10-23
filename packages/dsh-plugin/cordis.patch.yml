@@ -1,5 +1,7 @@
 - insert:
     - id: mebular
+      name: '@mebular/dsh-plugin'
+    - id: mcp-mebular
       name: '@deepseek-ai/dsh-mcp-client'
       config:
         serverName: mebular

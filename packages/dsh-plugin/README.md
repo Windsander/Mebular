@@ -25,8 +25,10 @@ curl -sS http://127.0.0.1:7331/healthz
 dsh plugin --profile web add @mebular/dsh-plugin
 ```
 
-插件包内自带 `cordis.patch.yml`，安装后会向 profile 插入一个
-`@deepseek-ai/dsh-mcp-client` 实例（`serverName: mebular`、`transport: streamable-http`）。
+插件包内自带 `cordis.patch.yml`。安装后会向 profile 的同一个 `insert` 列表先挂载插件
+host（`@mebular/dsh-plugin`），再插入 `@deepseek-ai/dsh-mcp-client` 实例
+（`serverName: mebular`、`transport: streamable-http`）。host 让 DSH 能发现并加载本包的
+`dsh.client` 面板；工具面仍由 MCP client 提供。
 
 ## 验证
 
@@ -47,6 +49,8 @@ DSH 与 Mebular App 同时保持运行，App 不会因为安装插件而退出�
 ```yaml
 - insert:
     - id: mebular
+      name: '@mebular/dsh-plugin'
+    - id: mcp-mebular
       name: '@deepseek-ai/dsh-mcp-client'
       config:
         serverName: mebular

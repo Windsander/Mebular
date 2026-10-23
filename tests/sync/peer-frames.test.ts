@@ -1,6 +1,6 @@
 // H · 双向 push 的帧路由与 nudge 校验（PeerFrames）。
 //
-// 覆盖反向用例：nudge 风暴控制（会话中忽略 / 非法 nudge 拒绝）、读取路由、
+// 覆盖反向用例：nudge 风暴控制（会话中合并补发 / 非法 nudge 拒绝）、读取路由、
 // 连接关闭唤醒。
 
 import { describe, it, expect } from '@jest/globals';
@@ -60,7 +60,7 @@ describe('PeerFrames', () => {
     expect(first).toEqual({ value: hello, done: false });
   });
 
-  it('会话进行中收到的 nudge 被忽略（不风暴）', async () => {
+  it('会话进行中收到的 nudge 合并 → 会话结束后补发一次（不丢失、不风暴）', async () => {
     const it0 = fakeIterator();
     let nudges = 0;
     const frames = new PeerFrames(it0.iterator, { onNudge: () => { nudges += 1; } });
@@ -69,12 +69,36 @@ describe('PeerFrames', () => {
     it0.push({ type: 'sync-nudge' });
     it0.push({ type: 'sync-nudge' });
     await tick();
+    // 会话中不立即触发（避免打断帧序），但必须记住
     expect(nudges).toBe(0);
 
     frames.setSessionActive(false);
+    // 多次 nudge 合并为一次补发
+    expect(nudges).toBe(1);
+
+    // 空闲时再来的 nudge 正常触发（不会因上次补发被吞）
     it0.push({ type: 'sync-nudge' });
     await tick();
+    expect(nudges).toBe(2);
+  });
+
+  it('会话结束补发只发生一次；无 nudge 的会话结束不触发', async () => {
+    const it0 = fakeIterator();
+    let nudges = 0;
+    const frames = new PeerFrames(it0.iterator, { onNudge: () => { nudges += 1; } });
+
+    frames.setSessionActive(true);
+    frames.setSessionActive(false);
+    expect(nudges).toBe(0); // 没有 nudge → 不补发
+
+    frames.setSessionActive(true);
+    it0.push({ type: 'sync-nudge' });
+    await tick();
+    frames.setSessionActive(false);
     expect(nudges).toBe(1);
+    frames.setSessionActive(true);
+    frames.setSessionActive(false);
+    expect(nudges).toBe(1); // 已补发过，不重复
   });
 
   it('非法 nudge → onInvalidNudge，且不触发会话', async () => {

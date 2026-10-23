@@ -1,10 +1,16 @@
 // C · 周期 anti-entropy：core 默认关、无 pending 短路、jitter 界内、失败退避。
 
-import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
+import { mkdtemp, rm } from 'fs/promises';
+import { tmpdir } from 'os';
+import { join } from 'path';
 import { GraphStore } from '../../src/core/GraphStore.js';
 import { EventLog } from '../../src/eventlog/EventLog.js';
 import { MemoryStorage } from '../../src/storage/MemoryStorage.js';
 import { SyncManager, computeAntiEntropyDelay } from '../../src/sync/syncmgr/SyncManager.js';
+import { Mebular } from '../../src/mebular.js';
+import { IdentityManager } from '../../src/crypto/IdentityManager.js';
+import { InMemoryHub } from '../../src/p2p/transport/InMemoryTransport.js';
 
 describe('computeAntiEntropyDelay', () => {
   it('jitter 落界内（±jitterRatio）', () => {
@@ -113,5 +119,85 @@ describe('anti-entropy（C）', () => {
     expect(spy).toHaveBeenCalledTimes(1);
     await jest.advanceTimersByTimeAsync(1000);
     expect(spy).toHaveBeenCalledTimes(2);
+  });
+});
+
+// F-FLAKE-1（collab 1d-b 超限）红锚点：常驻响应方在**两次会话之间**等待 hello，
+// 旧实现把它整体包进 runSession（syncing=true）→ `shouldAntiEntropySync()` 恒假，
+// 响应方无法用 anti-entropy 兜底丢失的 push/nudge。判别性断言：空闲响应方
+// `isSyncing === false`（旧实现为 true），且显式 anti-entropy 周期不因该门被短路。
+describe('常驻响应方空闲不计入「会话在途」', () => {
+  let dir: string;
+  let masterKeys: { userMasterKey: Uint8Array; userMasterPrivateKey: CryptoKey };
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'mebular-responder-idle-'));
+    const master = await new IdentityManager().generateUserMasterKey();
+    masterKeys = { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey };
+  });
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  function makeFacade(deviceId: string, hub: InMemoryHub): Mebular {
+    return new Mebular({
+      storagePath: join(dir, `${deviceId}.jsonl`),
+      deviceId,
+      encryption: masterKeys,
+      network: { enabled: true, provider: hub },
+      sync: {
+        autoSync: true,
+        pushOnWrite: true,
+        pushOnWriteThrottleMs: 5,
+        // 与 collab 夹具同构：反熵由外部显式驱动，关闭周期定时器与退避
+        antiEntropy: { enabled: false },
+        syncTimeout: 5000,
+      },
+    });
+  }
+
+  async function waitFor(fn: () => Promise<boolean>, timeoutMs: number, pollMs = 10): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (await fn()) return true;
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    return fn();
+  }
+
+  it('空闲响应方 isSyncing=false（anti-entropy 门不因空闲会话恒关）', async () => {
+    const hub = new InMemoryHub();
+    // device-A < device-B：B 是响应方（常驻等待 hello）
+    const a = makeFacade('device-A', hub);
+    const b = makeFacade('device-B', hub);
+    await a.initialize();
+    await b.initialize();
+    try {
+      await b.node!.connectToPeer(a.node!.peerId);
+      // 等首轮双向会话结束（双方各记一次 sync-completed）
+      await waitFor(async () => (await a.sync.getSyncStatus()).lastSyncAt !== null
+        && (await b.sync.getSyncStatus()).lastSyncAt !== null, 8000);
+
+      // 静置到双方都回到空闲；响应方不得因「等待下一次 hello」而被记为在途
+      const idle = await waitFor(async () => {
+        const [sa, sb] = [await a.sync.getSyncStatus(), await b.sync.getSyncStatus()];
+        return !sa.isSyncing && !sb.isSyncing;
+      }, 5000);
+      expect(idle).toBe(true);
+
+      // B 写入（响应方只能靠 nudge 通知 A 来拉）：写入仍应经既有推送到达，
+      // 且空闲响应方不再把 anti-entropy 门永久关死（上一断言已覆盖 isSyncing）。
+      const node = await b.graph.createNode('fact', { text: 'responder-push' }, [], { namespace: 'task' });
+      await waitFor(async () => (await a.graph.getNode(node.id)) !== null, 5000);
+      expect(await a.graph.getNode(node.id)).not.toBeNull();
+
+      // 已收敛：无 pending 时短路为 false（不因修复而变成「永远发起」）
+      const drained = await waitFor(async () => (await b.sync.shouldAntiEntropySync('device-A')) === false, 3000);
+      expect(drained).toBe(true);
+    } finally {
+      await a.shutdown();
+      await b.shutdown();
+    }
   });
 });

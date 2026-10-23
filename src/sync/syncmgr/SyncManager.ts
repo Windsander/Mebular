@@ -1019,10 +1019,12 @@ export class SyncManager extends EventEmitter {
     peer: SyncPeer,
     iterator: AsyncIterator<SyncMessage>,
     firstHelloTimeout: number | undefined,
+    /** 常驻循环已读取的 hello（不计入会话在途；见 runResponderLoop 注释） */
+    firstHello?: Extract<SyncMessage, { type: 'sync-hello' }>,
   ): Promise<SyncResult> {
     const timeout = this.syncTimeout;
     try {
-      const hello = await nextSyncMessage(iterator, 'sync-hello', firstHelloTimeout);
+      const hello = firstHello ?? await nextSyncMessage(iterator, 'sync-hello', firstHelloTimeout);
       assertValidHello(hello);
       const helloOutcome = await this.recordPeerHello(peer.deviceId, hello);
       const reportedAhead = helloOutcome.ahead;
@@ -1098,6 +1100,14 @@ export class SyncManager extends EventEmitter {
   /**
    * 常驻响应方循环：等待对端发起的会话并处理（H/C 用）。
    * 单次会话失败不终止监听（除连接关闭外），保证后续推送仍可被接受。
+   *
+   * **空闲等待 hello 不属于「会话在途」**：旧实现把 `runResponder(…, undefined)`
+   * 整体包进 `runSession`，而 `runSession` 一开始就置 `syncing = true` ——
+   * 响应方在两次会话之间（实际上几乎全部时间）都处于「在途」，于是
+   * `shouldAntiEntropySync()` 恒假：响应方永远无法用 anti-entropy 兜底
+   * 「推送/ nudge 丢失」。collab 1d-b 超限用例正是响应方（device-B）写入的
+   * counter 单次通知丢失后无人重试 → A 侧 90s 读到 queued。
+   * 现在先读出 hello（连接关闭才结束），再把**真正的会话**交给 runSession 计数。
    */
   private async runResponderLoop(
     transport: SyncTransport,
@@ -1107,10 +1117,20 @@ export class SyncManager extends EventEmitter {
     const reader = frames.reader();
     for (;;) {
       if (this.onlinePeers.get(entry.peerId.id) !== entry || frames.isClosed) return;
+      let firstHello: Extract<SyncMessage, { type: 'sync-hello' }>;
+      try {
+        firstHello = await nextSyncMessage(reader, 'sync-hello', undefined);
+      } catch (error) {
+        if ((error as { code?: string }).code === ErrorCodes.SYNC_CONNECTION_FAILED) return;
+        // 空闲期收到协议违例/远端错误：如实上报，继续等待下一次会话
+        this.emit('sync-failed', { peerDeviceId: entry.peer.deviceId, error });
+        continue;
+      }
+      if (this.onlinePeers.get(entry.peerId.id) !== entry || frames.isClosed) return;
       frames.setSessionActive(true);
       try {
         await this.enqueue(this.connectionQueueKey(entry.connection, transport), () =>
-          this.runSession(entry.peer, () => this.runResponder(transport, entry.peer, reader, undefined)),
+          this.runSession(entry.peer, () => this.runResponder(transport, entry.peer, reader, this.syncTimeout, firstHello)),
         );
       } catch (error) {
         if ((error as { code?: string }).code === ErrorCodes.SYNC_CONNECTION_FAILED) return;

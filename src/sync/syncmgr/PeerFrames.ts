@@ -7,9 +7,16 @@
 // 本类持有唯一的底层 iterator：
 // - 非 nudge 帧进入内部缓冲，供会话以 `reader()`（AsyncIterator<SyncMessage>）读取，
 //   与 `nextSyncMessage` 完全兼容；
-// - `sync-nudge` 在**空闲**时触发 onNudge；**会话进行中**直接丢弃（那一轮本就会同步）；
+// - `sync-nudge` 在**空闲**时触发 onNudge；**会话进行中**合并为一次「会话结束后补发」
+//   （绝不能直接丢弃——见下）；
 // - 非法 nudge 丢弃并回调 onInvalidNudge（不因此中止会话）；
 // - 连接关闭时唤醒所有等待者并回调 onClosed。
+//
+// **会话中为什么必须补发（F-FLAKE-1 collab 1d-b 根因）**：nudge 是响应方唯一的
+// 「我有新写入，请你来拉」信号。若会话开始后才到达（例如对端在本轮 offer 计算完
+// 之后才 append），本轮会话不会包含该事件；此时直接丢弃 = 永久丢失唤醒——发起方
+// 没有本地 pending 就不会再开会话，响应方也未必还有下一次写入 → 收敛停摆到超时。
+// 合并（布尔）保证 nudge 风暴不会放大：一次会话最多补发一次。
 
 import { assertValidNudge, type SyncMessage } from '../protocol.js';
 
@@ -27,6 +34,8 @@ export class PeerFrames {
   private readonly waiters: Array<(result: IteratorResult<SyncMessage>) => void> = [];
   private closed = false;
   private sessionActive = false;
+  /** 会话进行中收到的合法 nudge 合并于此，会话结束（setSessionActive(false)）时补发一次 */
+  private nudgePending = false;
   private failure: Error | null = null;
 
   constructor(
@@ -43,11 +52,15 @@ export class PeerFrames {
         if (result.done) break;
         const message = result.value;
         if (message.type === 'sync-nudge') {
-          if (this.sessionActive) continue; // 会话进行中忽略
           try {
             assertValidNudge(message);
           } catch (error) {
             this.handlers.onInvalidNudge?.(error);
+            continue;
+          }
+          if (this.sessionActive) {
+            // 会话中：本轮不处理，但**不能丢**——布尔合并成「结束后补发一次」。
+            this.nudgePending = true;
             continue;
           }
           this.handlers.onNudge();
@@ -86,9 +99,18 @@ export class PeerFrames {
     return new Promise((resolve) => this.waiters.push(resolve));
   }
 
-  /** 标记会话是否进行中（进行中时 nudge 被丢弃） */
+  /**
+   * 标记会话是否进行中。
+   * 会话结束（true→false）时，若期间收到过 nudge，则**补发一次** onNudge：
+   * 那些 nudge 描述的写入可能晚于本轮 offer 的快照，直接丢弃会造成永久丢唤醒。
+   */
   setSessionActive(active: boolean): void {
+    const wasActive = this.sessionActive;
     this.sessionActive = active;
+    if (wasActive && !active && this.nudgePending && !this.closed) {
+      this.nudgePending = false;
+      this.handlers.onNudge();
+    }
   }
 
   get isClosed(): boolean {

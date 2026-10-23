@@ -1,8 +1,8 @@
 // 集成测试：GraphStore + MemoryStorage
 
 import { describe, it, expect } from '@jest/globals';
-import { GraphStore } from '../../src/core/GraphStore';
-import { MemoryStorage } from '../../src/storage/MemoryStorage';
+import { GraphStore } from '../../src/core/GraphStore.js';
+import { MemoryStorage } from '../../src/storage/MemoryStorage.js';
 
 describe('GraphStore Integration', () => {
   it('should create and retrieve a node', async () => {

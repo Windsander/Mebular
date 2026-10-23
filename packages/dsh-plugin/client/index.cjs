@@ -9,6 +9,9 @@
  *
  * The panel is only an entry point. Mebular keeps running as its own app/daemon;
  * nothing here fetches state or embeds the console.
+ *
+ * The module must declare `inject: ['slots']` so DSH provides `ctx.slots`;
+ * without it the client entry fails to activate at web boot.
  */
 
 const PLUGIN_ID = '@mebular/dsh-plugin';
@@ -132,6 +135,6 @@ window.__ModuleLoader__.load({
   id: PLUGIN_ID,
   factory: (require) => {
     const React = require('react');
-    return { apply: createApply(React) };
+    return { inject: ['slots'], apply: createApply(React) };
   },
 });

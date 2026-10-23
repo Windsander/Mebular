@@ -281,7 +281,9 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
    的 E2E 证据。
 7. **DSH 不改变控制面**：App 仍是控制面，继续独立运行并持有存储、身份与控制台；DSH 是 agent
    面，只通过 HTTP MCP（`http://127.0.0.1:7331/mcp`）接入，不使用 stdio，也不替换 App。
-   控制台入口从 DSH 面板在新标签页打开，不做 iframe。`@mebular/dsh-plugin` 独立版本 `0.1.0`，
+   DSH 侧边栏 Mebular 面板以 iframe 嵌入同一套 Console（`?embed=dsh`，仅 loopback），不是
+   第二套控制台；daemon 地址由 host 按 `daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331`
+   在运行时发现，MCP client 也由 host 动态挂载。`@mebular/dsh-plugin` 独立版本 `0.1.0`，
    不进入五包 lockstep。
 
 不要把「自动重启」「去写入初始设置」写回发布说明，也不要把 `@mebular/mcp` 说成自带 `fleet`。
@@ -305,8 +307,9 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 | `npm run check:docs` | ✅ 当前 main | **7/7**；README EN/CN 结构、互链、无手写测试数字、CI badge、工具名、本地链接 |
 | README 视觉走查 | ✅ 当前 main | 四张星图均 1600×1000、6 颗星；baseline 灰虚线 / 压暗实线 / 声波脉冲；lanes 旧版弧线航道；亮色 banner + 三组示意图使用 `<picture>` 切换 |
 | `npm run verify:mcp:publish` | ⏳ 待 release 流水线 | 发布前必须在 `release/v0.1.0` 由 Publish verify 重跑 |
-| `npm run verify:dsh-plugin` | ✅ 当前 main | **57 checks**：bundle / HTTP patch / host entry / no core imports / tarball |
-| 真实 DSH `0.2.1-rc.2` | ✅ 当前 main | `dsh plugin add link:`；host + MCP client 运行；Settings 出现 Mebular 面板；29 个 `mcp__mebular__*` 工具；console 独立可开；App/daemon 不受影响 |
+| `npm run verify:dsh-plugin` | ✅ P7.2 分支 | **128 checks**：bundle / patch / runtime bridge / client contract / tarball |
+| 真实 DSH `0.2.1-rc.2` 临时 profile | ✅ P7.2 分支 | `dsh plugin --profile web add ./packages/dsh-plugin` 安装成功；`--dump-config` 只有一条 `mebular` host row，无静态 MCP row |
+| 真实 DSH 面板 / MCP E2E | ⏳ P7.3 | 需在真实 daemon 上验证侧边栏 iframe、`/mebular/embed-info` 与 `mcp__mebular__*` 工具 |
 
 > 第 8 节记录的是当前 `main` 已完成的发布门禁；它**不替代**发布分支上的
 > `build` / `lint` / `test:coverage` / `verify:mcp:publish` / `verify:dsh-plugin` 门禁。

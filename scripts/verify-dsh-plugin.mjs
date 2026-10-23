@@ -2,6 +2,12 @@
 /**
  * Deterministic contract checks for packages/dsh-plugin.
  *
+ * The plugin is a zero-build DSH bundle that:
+ *   - mounts one `mebular` host row;
+ *   - discovers the daemon at runtime (no daemonUrl in the patch);
+ *   - dynamically mounts the official @deepseek-ai/dsh-mcp-client peer;
+ *   - embeds the shared Mebular Console through GET /mebular/embed-info.
+ *
  * Uses Node standard library only (plus the locally installed `npm` binary for
  * a dry-run tarball listing). Never touches the network and never writes files.
  */
@@ -64,7 +70,7 @@ check('name is @mebular/dsh-plugin', pkg.name === '@mebular/dsh-plugin', String(
 check('version is 0.1.0', pkg.version === '0.1.0', String(pkg.version));
 check(
   'description is present',
-  pkg.description === 'Mebular memory and task graph for DeepSeek Harness',
+  typeof pkg.description === 'string' && pkg.description.length > 0,
   String(pkg.description),
 );
 check('license is MIT', pkg.license === 'MIT', String(pkg.license));
@@ -78,8 +84,8 @@ check(
   JSON.stringify(pkg.exports?.['.']),
 );
 check(
-  'exports["./client"] points at ./client/index.cjs',
-  pkg.exports?.['./client'] === './client/index.cjs',
+  'exports["./client"] points at ./client.js',
+  pkg.exports?.['./client'] === './client.js',
   JSON.stringify(pkg.exports?.['./client']),
 );
 check(
@@ -87,8 +93,23 @@ check(
   pkg.exports?.['./package.json'] === './package.json',
   JSON.stringify(pkg.exports?.['./package.json']),
 );
+check(
+  'exports["./locale/*"] points at ./locale/*',
+  pkg.exports?.['./locale/*'] === './locale/*',
+  JSON.stringify(pkg.exports?.['./locale/*']),
+);
 
-const expectedFiles = ['index.js', 'cordis.patch.yml', 'client', 'README.md', 'LICENSE'];
+const expectedFiles = [
+  'index.js',
+  'client.js',
+  'cordis.patch.yml',
+  'locale',
+  'README.md',
+  'LICENSE',
+  'icon.svg',
+  'screenshots.json',
+  'assets',
+];
 for (const entry of expectedFiles) {
   check(`files includes ${entry}`, Array.isArray(pkg.files) && pkg.files.includes(entry));
 }
@@ -119,9 +140,39 @@ check(
 );
 check(
   'dsh.client is the safe web placeholder',
-  pkg.dsh?.client?.platform === 'web' && Array.isArray(pkg.dsh?.client?.inject),
+  pkg.dsh?.client?.platform === 'web'
+    && Array.isArray(pkg.dsh?.client?.inject)
+    && pkg.dsh.client.inject.length === 0,
   JSON.stringify(pkg.dsh?.client),
 );
+
+check(
+  'engines.node is >=22.19',
+  pkg.engines?.node === '>=22.19',
+  String(pkg.engines?.node),
+);
+check(
+  'engines.dsh is >=0.2.1-rc.2 <0.3.0',
+  pkg.engines?.dsh === '>=0.2.1-rc.2 <0.3.0',
+  String(pkg.engines?.dsh),
+);
+
+const expectedPeer = {
+  '@deepseek-ai/dsh-mcp-client': '>=0.2.1-rc.2 <0.2.2-0 || >=0.2.2-rc.1 <0.3.0-0',
+};
+check(
+  'only the official MCP client is a peer',
+  JSON.stringify(pkg.peerDependencies ?? {}) === JSON.stringify(expectedPeer),
+  JSON.stringify(pkg.peerDependencies),
+);
+check('no dependencies', Object.keys(pkg.dependencies ?? {}).length === 0, JSON.stringify(pkg.dependencies));
+check(
+  'no optional dependencies',
+  Object.keys(pkg.optionalDependencies ?? {}).length === 0,
+  JSON.stringify(pkg.optionalDependencies),
+);
+check('no dev dependencies', Object.keys(pkg.devDependencies ?? {}).length === 0, JSON.stringify(pkg.devDependencies));
+check('peerDependenciesMeta is absent', pkg.peerDependenciesMeta === undefined);
 
 // The root manifest must stay untouched: no `dsh` field on @mebular/core.
 const rootPkg = readJson(join(repoRoot, 'package.json'));
@@ -135,27 +186,22 @@ const patchPath = join(pkgDir, 'cordis.patch.yml');
 check('cordis.patch.yml exists', existsSync(patchPath));
 const patch = existsSync(patchPath) ? readFileSync(patchPath, 'utf8') : '';
 
-check(
-  'patch uses @deepseek-ai/dsh-mcp-client',
-  /name:\s*'@deepseek-ai\/dsh-mcp-client'/.test(patch),
-);
-check(
-  "patch mounts the plugin's own host entry",
-  /name:\s*'@mebular\/dsh-plugin'/.test(patch),
-);
+check('patch inserts a plugin row', /^-\s+insert:/m.test(patch));
+check("patch mounts the plugin's host entry", /name:\s*'@mebular\/dsh-plugin'/.test(patch));
 check('patch uses id: mebular for the host entry', /- id:\s*mebular\b/.test(patch));
-check('patch uses id: mcp-mebular for the MCP client', /- id:\s*mcp-mebular\b/.test(patch));
-const hostEntryAt = patch.indexOf("name: '@mebular/dsh-plugin'");
-const mcpClientAt = patch.indexOf("name: '@deepseek-ai/dsh-mcp-client'");
-check(
-  'patch mounts the host entry before the MCP client',
-  hostEntryAt !== -1 && mcpClientAt !== -1 && hostEntryAt < mcpClientAt,
-);
-check('patch uses streamable-http', /transport:\s*streamable-http/.test(patch));
-check('patch registers serverName: mebular', /serverName:\s*mebular\b/.test(patch));
-check('patch targets default 127.0.0.1:7331/mcp', /url:\s*http:\/\/127\.0\.0\.1:7331\/mcp/.test(patch));
+check('patch uses lifecycle: attach', /lifecycle:\s*attach/.test(patch));
+check('patch uses panel: true', /panel:\s*true/.test(patch));
+// The MCP client is mounted by the host at apply time from the discovered URL.
+// A static row or a URL here would let the panel and the bridge disagree.
+check('patch does not mount @deepseek-ai/dsh-mcp-client statically', !patch.includes('@deepseek-ai/dsh-mcp-client'));
+check('patch has no MCP row id', !/id:\s*mcp-mebular\b/.test(patch));
+check('patch has no daemonUrl config', !/daemonUrl\s*:/.test(patch));
+check('patch has no url config', !/^\s*url\s*:/m.test(patch));
+check('patch has no serverName/transport', !/serverName:|transport:/.test(patch));
 check('patch does not use stdio transport', !/transport:\s*stdio/.test(patch));
 check('patch does not spawn a command', !/^\s*command:\s*/m.test(patch));
+check('patch does not use dynamic !!js values', !/!!js/.test(patch));
+check('patch contains no store/auth/secret settings', !/store\.jsonl|auth|token|secret/i.test(patch));
 
 // The host entry must be a callable plugin, otherwise the bundle cannot mount.
 let pluginModule = {};
@@ -164,7 +210,12 @@ try {
 } catch (error) {
   check('index.js imports cleanly', false, error.message);
 }
+check('index.js exports name', pluginModule.name === '@mebular/dsh-plugin', String(pluginModule.name));
 check('index.js exports apply()', typeof pluginModule.apply === 'function');
+check('index.js exports mountMcp()', typeof pluginModule.mountMcp === 'function');
+check('index.js exports resolveConfig()', typeof pluginModule.resolveConfig === 'function');
+check('index.js exports createDaemonLifecycle()', typeof pluginModule.createDaemonLifecycle === 'function');
+check('index.js exports createEmbedInfoHandler()', typeof pluginModule.createEmbedInfoHandler === 'function');
 
 // ---------------------------------------------------------------------------
 // Imports: public HTTP only, no workspace coupling
@@ -174,6 +225,7 @@ const codeFiles = walkFiles(pkgDir).filter((file) => /\.(?:js|cjs|mjs)$/.test(fi
 check('found plugin code files', codeFiles.length > 0, `${codeFiles.length} files`);
 
 const importPattern = /(?:from\s*|require\(\s*|import\(\s*)['"]([^'"]+)['"]/g;
+const staticImportPattern = /(?:^|\n)\s*import\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]/g;
 for (const file of codeFiles) {
   const source = readFileSync(file, 'utf8');
   const rel = relative(repoRoot, file);
@@ -189,21 +241,72 @@ for (const file of codeFiles) {
   }
 }
 
+const hostSource = readFileSync(join(pkgDir, 'index.js'), 'utf8');
+const staticHostImports = [...hostSource.matchAll(staticImportPattern)].map((match) => match[1]);
+check(
+  'host static imports are Node builtins only',
+  staticHostImports.length > 0 && staticHostImports.every((specifier) => specifier.startsWith('node:')),
+  staticHostImports.join(', '),
+);
+const dynamicHostImports = [...hostSource.matchAll(/await import\(\s*['"]([^'"]+)['"]\s*\)/g)]
+  .map((match) => match[1]);
+check(
+  'host dynamically imports only the official MCP client',
+  dynamicHostImports.length === 1 && dynamicHostImports[0] === '@deepseek-ai/dsh-mcp-client',
+  dynamicHostImports.join(', '),
+);
+
 // ---------------------------------------------------------------------------
-// README contract (install / verify / port / app independence)
+// client.js contract
+// ---------------------------------------------------------------------------
+
+const clientPath = join(pkgDir, 'client.js');
+check('client.js exists', existsSync(clientPath));
+const clientSource = existsSync(clientPath) ? readFileSync(clientPath, 'utf8') : '';
+check('client uses window.__ModuleLoader__.load', clientSource.includes('window.__ModuleLoader__.load({'));
+check(
+  "client registers the package id '@mebular/dsh-plugin'",
+  /id:\s*'@mebular\/dsh-plugin'/.test(clientSource),
+);
+check('client has a factory(require) wrapper', /factory:\s*\(require\)\s*=>/.test(clientSource));
+check('client registers sidebar.panellist', clientSource.includes("ctx.slots.inject('sidebar.panellist'"));
+check('client registers main', clientSource.includes("ctx.slots.inject('main'"));
+check('client uses sidebar id mebular', /id:\s*'mebular'/.test(clientSource));
+check('client uses main key mebular', /key:\s*'mebular'/.test(clientSource));
+check('client reads /mebular/embed-info', clientSource.includes('/mebular/embed-info'));
+check('client embeds the shared Console (?embed=dsh)', clientSource.includes('?embed=dsh'));
+check('client uses a sandboxed iframe', clientSource.includes("sandbox: 'allow-scripts allow-same-origin allow-forms'"));
+check('client honours panel:false', clientSource.includes('__MEBULAR_DSH__') && /panel\s*===\s*false/.test(clientSource));
+check('client handles managed start states', clientSource.includes('managed_cli_missing') && clientSource.includes('managed_start_failed'));
+check('client does not post write requests to the host', !clientSource.includes('mebular:request') && !clientSource.includes('postMessage'));
+
+const clientRequires = [...clientSource.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)]
+  .map((match) => match[1]);
+check('client requires only react', clientRequires.length === 1 && clientRequires[0] === 'react', clientRequires.join(', '));
+check('client has no JSX build dependency', !clientSource.includes('react/jsx-runtime') && !clientSource.includes('from \'react\''));
+
+// ---------------------------------------------------------------------------
+// README contract (install / verify / tools / shared Console / port / lifecycle)
 // ---------------------------------------------------------------------------
 
 const readmePath = join(pkgDir, 'README.md');
 check('README.md exists', existsSync(readmePath));
 const readme = existsSync(readmePath) ? readFileSync(readmePath, 'utf8') : '';
 check(
-  'README documents dsh plugin --profile web add',
-  readme.includes('dsh plugin --profile web add @mebular/dsh-plugin'),
+  'README documents local install from ./packages/dsh-plugin',
+  readme.includes('dsh plugin --profile web add ./packages/dsh-plugin'),
 );
+check('README documents the npm name', readme.includes('@mebular/dsh-plugin'));
+check('README states npm is not published yet', /未发布|not published/i.test(readme));
 check('README documents mcp__mebular__* tools', readme.includes('mcp__mebular__*'));
+check('README documents the shared Console', /共享.*Console|Console.*同一/.test(readme));
+check('README documents app independence', /App.*(继续|独立)|Mebular daemon.*(继续|独立)/.test(readme));
 check('README documents default port 7331', readme.includes('7331'));
-check('README documents custom URL override', /自定义端口|url:/.test(readme));
-check('README states the App keeps running', /App 不会因为安装插件而退出|App 同时保持运行/.test(readme));
+check('README documents runtime discovery', readme.includes('runtime.json'));
+check('README documents MEBULAR_HTTP_PORT', readme.includes('MEBULAR_HTTP_PORT'));
+check('README documents attach and managed', /attach/.test(readme) && /managed/.test(readme));
+check('README documents panel:false', /panel\s*:\s*false|panel:false/.test(readme));
+check('README documents uninstall', readme.includes('dsh plugin --profile web remove'));
 
 // ---------------------------------------------------------------------------
 // Publish payload: required files plus an actual npm pack dry run
@@ -212,10 +315,17 @@ check('README states the App keeps running', /App 不会因为安装插件而退
 const requiredArtifacts = [
   'package.json',
   'index.js',
+  'client.js',
   'cordis.patch.yml',
-  'client/index.cjs',
+  'locale/en.json',
+  'locale/zh.json',
   'README.md',
   'LICENSE',
+  'icon.svg',
+  'screenshots.json',
+  'assets/icon-180.png',
+  'assets/dsh-panel.jpg',
+  'assets/console-starmap.jpg',
 ];
 for (const artifact of requiredArtifacts) {
   check(`artifact ${artifact} exists`, existsSync(join(pkgDir, artifact)));
@@ -244,14 +354,16 @@ if (pack.error) {
 }
 
 if (packedPaths) {
+  const normalized = packedPaths.map((path) => path.replace(/^package\//, ''));
   for (const artifact of requiredArtifacts) {
-    check(
-      `tarball contains ${artifact}`,
-      packedPaths.some((path) => path === artifact || path === `package/${artifact}`),
-      packedPaths.join(', '),
-    );
+    check(`tarball contains ${artifact}`, normalized.includes(artifact), normalized.join(', '));
   }
-  const unexpected = packedPaths.filter((path) => !requiredArtifacts.includes(path.replace(/^package\//, '')));
+  check(
+    'tarball does not contain the old client/index.cjs',
+    !normalized.includes('client/index.cjs'),
+    normalized.join(', '),
+  );
+  const unexpected = normalized.filter((path) => !requiredArtifacts.includes(path));
   check('tarball contains only declared artifacts', unexpected.length === 0, unexpected.join(', '));
 }
 

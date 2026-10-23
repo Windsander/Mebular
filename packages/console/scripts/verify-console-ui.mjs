@@ -3580,8 +3580,16 @@ async function main() {
     await waitFor('document.querySelector("#audit-view")?.hidden === false && document.querySelectorAll("#audit-view .audit-item").length >= 1');
     // 审计行对齐探针：三列时三项相对整行垂直居中（详情换行不再按首行基线顶起时间/动作）；
     // 单列（≤900px）时按时间 → 动作 → 详情堆叠、保持左对齐，不强行整行居中。
-    const auditAlignProbe = `(() => {
+    // 固定长详情 fixture：主动写入首行 .audit-detail，不依赖 seed 事件文案长度，
+    // 保证 1024/390（以及 1440）都能稳定出现多行详情。
+    const auditLongDetails = {
+      'en-US': 'By device-ui: handed namespace archive-2026-quarterly-retention-and-audit-review to device-C · 12 not covered · co-signed by device-audit-review-board-west · recovery code registered and awaiting operator review',
+      'zh-CN': '记录者 device-ui 将域 archive-2026-quarterly-retention-and-audit-review 交接给 device-C · 未覆盖 12 · 由设备 device-audit-review-board-west 共同签署 · 恢复码已登记，等待运维负责人复核',
+    };
+    const auditAlignProbe = (fixture) => `(() => {
       const items = [...document.querySelectorAll('#audit-view .audit-item')].filter((el) => el.getClientRects().length > 0);
+      const injected = items[0]?.querySelector('.audit-detail') ?? null;
+      if (injected) injected.textContent = ${JSON.stringify(fixture)};
       const box = (el) => { const r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, height: r.height }; };
       const part = (item, sel) => {
         const el = item.querySelector(sel);
@@ -3600,7 +3608,8 @@ async function main() {
           lineHeight: cs.lineHeight,
         };
       };
-      const rows = items.map((item) => ({
+      const rows = items.map((item, index) => ({
+        injected: index === 0,
         align: getComputedStyle(item).alignItems,
         columns: getComputedStyle(item).gridTemplateColumns.trim().split(/\\s+/).length,
         time: part(item, '.audit-time'),
@@ -3609,7 +3618,7 @@ async function main() {
         over: item.scrollWidth - item.clientWidth,
       }));
       return {
-        ok: rows.length >= 1,
+        ok: rows.length >= 1 && Boolean(injected),
         lang: document.documentElement.lang,
         viewport: window.innerWidth,
         pageOver: document.documentElement.scrollWidth - window.innerWidth,
@@ -3636,8 +3645,9 @@ async function main() {
         }
         return row.over <= 0;
       });
-      // 1024 / 390 至少有一条详情换行，证明对齐不是只对单行文本生效。
-      const wrapped = report.rows.some((row) => row.detail && row.detail.height > row.detail.fontSize * 1.6);
+      // 注入的长详情必须真的换行；1024 / 390 用这一点证明对齐不是只对单行文本生效。
+      const injected = report.rows.find((row) => row.injected);
+      const wrapped = Boolean(injected?.detail) && injected.detail.height > injected.detail.fontSize * 1.6;
       return partsOk && report.pageOver <= 0 && (label === '1440' || wrapped);
     };
     for (const [label, viewport] of densityViewports) {
@@ -3645,8 +3655,8 @@ async function main() {
       const audit = await evalJs(surfaceProbe('#audit-view', '.audit-item, .audit-detail, .audit-toolbar'));
       check(`i18n 数据面 audit ${label}：长事件文案不横向越界`,
         surfaceOk(audit), JSON.stringify(audit));
-      const align = await evalJs(auditAlignProbe);
-      check(`审计行 en-US ${label}：时间/动作/详情垂直居中（≤1px）且长详情不溢出`,
+      const align = await evalJs(auditAlignProbe(auditLongDetails['en-US']));
+      check(`审计行 en-US ${label}：注入长详情换行后时间/动作/详情仍垂直居中（≤1px）且不溢出`,
         auditAlignCheck(align, label, 'en-US'),
         JSON.stringify(align.rows.slice(0, 3)));
       await captureNow(`i18n-en-data-audit-${label}.jpg`);
@@ -3660,8 +3670,8 @@ async function main() {
     await waitFor('document.querySelector("#audit-view")?.hidden === false && document.querySelectorAll("#audit-view .audit-item").length >= 1');
     for (const [label, viewport] of densityViewports) {
       await setViewport(viewport);
-      const align = await evalJs(auditAlignProbe);
-      check(`审计行 zh-CN ${label}：时间/动作/详情垂直居中（≤1px）且长详情不溢出`,
+      const align = await evalJs(auditAlignProbe(auditLongDetails['zh-CN']));
+      check(`审计行 zh-CN ${label}：注入长详情换行后时间/动作/详情仍垂直居中（≤1px）且不溢出`,
         auditAlignCheck(align, label, 'zh-CN'),
         JSON.stringify(align.rows.slice(0, 3)));
       await captureNow(`i18n-zh-audit-align-${label}.jpg`);

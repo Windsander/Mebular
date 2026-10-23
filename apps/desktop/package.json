@@ -16,7 +16,7 @@
     "dist:stub": "electron-builder --config electron-builder.yml --dir"
   },
   "devDependencies": {
-    "electron": "41.10.6",
+    "electron": "41.10.7",
     "electron-builder": "26.15.3"
   }
 }

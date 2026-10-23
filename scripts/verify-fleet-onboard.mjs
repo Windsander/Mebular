@@ -78,6 +78,15 @@ function startCli(args) {
 
 const root = await mkdtemp(join(tmpdir(), 'fleet-onboard-verify-'));
 
+// 长驻进程（serve/worker）由脚本显式回收：即便断言抛错也不留下孤儿、不拖住 temp 目录清理。
+let serveA = null;
+let workB = null;
+const killLongRunning = () => {
+  for (const p of [serveA, workB]) {
+    if (p?.child.exitCode === null && p?.child.signalCode === null) p.child.kill('SIGKILL');
+  }
+};
+
 try {
   console.log('== Step 1b：onboard → 双节点派活 → doctor ==');
   const A = join(root, 'A');
@@ -100,7 +109,11 @@ try {
     });
   }
 
-  const serveA = startCli(['node', '--dir', A, '--submit', String(N), '--target-agent', 'fake', '--wait-sync-ms', '30000', '--timeout-ms', '40000', '--linger-ms', '30000', '--expect-prefix', 'FAKE:']);
+  // CI 稳定性：旧窗口是 timeout 40s / linger 30s。慢机上 3 个任务的「同步 → 执行 → 回传」可能逼近 40s，
+  // 且 linger 结束后 A 会退出，doctor(B) 的「peer 可达 / 同步已收敛」就会把正常收尾误判成不可达。
+  // 这里放宽到 timeout 60s / linger 90s：60s 给执行回传更宽的预算；linger 覆盖 doctor 自身的 60s 上限
+  // 再加余量。脚本在 doctor 完成后立即 kill，所以正常与失败路径都不会因此变长。
+  serveA = startCli(['node', '--dir', A, '--submit', String(N), '--target-agent', 'fake', '--wait-sync-ms', '30000', '--timeout-ms', '60000', '--linger-ms', '90000', '--expect-prefix', 'FAKE:']);
   await waitFor(async () => /listening/.test(serveA.state.out), 45000);
   const listen = lastJson(serveA.state.out.match(/\{[^\n]*listening[^\n]*\}/)?.[0] ?? '');
   const addr = listen?.multiaddr;
@@ -109,17 +122,26 @@ try {
   const onboardB = await runCli(['onboard', '--dir', B, '--device', 'device-B', '--peer-device', 'device-A', '--peer-addr', addr, '--master-key', join(A, 'master-key.json'), ...agentArgs]);
   check('onboard B（导入同一主密钥）成功', onboardB.code === 0 && lastJson(onboardB.out)?.ok === true, { code: onboardB.code });
 
-  const workB = startCli(['worker', '--dir', B, '--timeout-ms', '30000', '--interval-ms', '10']);
+  // CI 稳定性：worker 原先 `--timeout-ms 30000` 定时退出。CI 慢时它会在 A 收齐结果前退出：
+  //   · done 事件只回传了一部分 → A 永远等不到 3/3 terminal；
+  //   · 心跳停在退出时刻，doctor 随后看到 age≈45s 判「心跳陈旧 / peer 不可达」。
+  // 改为 `--run-forever`：执行与回传期间心跳持续刷新，由本脚本在 doctor 完成后显式 kill。
+  workB = startCli(['worker', '--dir', B, '--run-forever', '--interval-ms', '10']);
   const execLog = join(B, 'exec.jsonl');
   const executed = await waitFor(async () => existsSync(execLog) && lineCount(execLog) >= N, 75000);
   // F-FLAKE-1：等**完整断言条件**（submitted+done+resultsMatch 三者同时成立），而非只等 submitted
   const aDone = await waitFor(async () => onboardAgentDone(serveA.state.out), 75000);
   check('B 执行 N 次（fake agent）', executed && lineCount(execLog) === N, { lines: existsSync(execLog) ? lineCount(execLog) : 0 });
 
+  // 先等 worker 心跳确实新鲜（判定阈值 15s，这里留 5s 余量到 10s），再跑 doctor：
+  // doctor 在 worker 存活期间检查「心跳新鲜 / peer 可达 / 同步已收敛」，而不是等它退出后读陈旧文件。
+  // 这里只等待前置条件，不放宽 doctor 的任何断言；等不到仍会让 doctor 如实 FAIL。
+  const heartbeatFresh = await waitForFreshHeartbeat(B, 30000);
   const doctorB = await runCli(['doctor', '--dir', B, '--json']);
   const report = lastJson(doctorB.out);
   check('doctor(B) 全绿', doctorB.code === 0 && report?.ok === true, {
     ok: report?.ok,
+    heartbeatFresh,
     skipped: report?.skipped,
     failed: (report?.checks ?? []).filter((c) => c.status === 'FAIL').map((c) => `${c.name}:${c.detail}`),
   });
@@ -139,8 +161,8 @@ try {
   const haystack = serveA.state.out + serveA.state.err + workB.state.out + workB.state.err + doctorB.out + onboardA.out + onboardB.out;
   check('日志不含主密钥私钥材料（脱敏）', !haystack.includes(secret), {});
 
-  serveA.child.kill('SIGKILL');
-  workB.child.kill('SIGKILL');
+  // doctor 与日志检查都已结束（worker 全程存活）→ 这里才回收长驻进程。
+  killLongRunning();
   await sleep(50);
 
   // --- 失败矩阵（每条附期望错误语义） ---
@@ -202,6 +224,7 @@ try {
   const f7r = lastJson(f7.out);
   check('F7 配置损坏 → doctor FAIL(config)', f7.code !== 0 && f7r?.checks?.[0]?.name === 'config' && f7r.checks[0].status === 'FAIL', { code: f7.code });
 } finally {
+  killLongRunning();
   await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 }
 
@@ -221,4 +244,20 @@ function mode(path) {
 }
 function lineCount(path) {
   return readFileSync(path, 'utf-8').split('\n').filter((l) => l.trim() !== '').length;
+}
+/**
+ * 等常驻 worker 的心跳落到「明显新鲜」区间再跑 doctor。
+ * `service/dist` 的判定阈值是 15s（`HEARTBEAT_DEFAULT_MAX_AGE_MS`），心跳每 5s 刷新一次；
+ * 这里要求 age ≤ 10s，留 5s 余量吸收 CI 的调度抖动，但不改变 doctor 自身的判定。
+ */
+async function waitForFreshHeartbeat(dir, timeoutMs = 30000) {
+  const heartbeatFile = join(dir, 'service.heartbeat');
+  return waitFor(() => {
+    try {
+      const record = JSON.parse(readFileSync(heartbeatFile, 'utf-8'));
+      return typeof record.ts === 'number' && Date.now() - record.ts <= 10000;
+    } catch {
+      return false;
+    }
+  }, timeoutMs);
 }

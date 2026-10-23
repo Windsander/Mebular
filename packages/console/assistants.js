@@ -340,10 +340,9 @@ export function serviceRowHtml(service, serviceMsg = '') {
 /** 重启向导行（设置 · 常用；web 无 preload 桥时隐藏）。 */
 export function wizardRowHtml(hasBridge) {
   if (!hasBridge) return '';
-  return `<div class="asst-row">
+  return `<div class="asst-row settings-wizard-row">
     <span class="asst-name">${esc(tr('settings.wizard.title', '重启向导'))}</span>
     <span class="asst-st">${esc(tr('settings.wizard.note', '重新走一遍首次设置（不动已有配置）'))}</span>
-    <span class="asst-sp"></span>
     <button class="btn btn-small" type="button" id="settings-open-wizard">${esc(tr('settings.wizard.action', '重启向导 ›'))}</button>
   </div>`;
 }

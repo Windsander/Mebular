@@ -1,26 +1,73 @@
 # Mebular 快速上手（5 分钟）
 
-从零到一个能用记忆的 Agent——再把这份记忆同步到第二台设备。
+从零到一个能用记忆的助手——再把这份记忆同步到第二台设备。
 
-Mebular 是一个去中心化的记忆网络：一台机器跑一个节点（守护进程），数据只留在你自己的设备上，每次写入都经
-Ed25519 签名、内容寻址。没有云、没有协调者。
+Mebular 是给 AI 助手用的本地优先记忆层：一台机器跑一个节点（守护进程），数据只留在你自己的设备上，
+每次写入都经 Ed25519 签名、内容寻址。没有云、没有协调者。
 
-**前置条件：** Node.js >= 20。用 `node -v` 检查。
+**前置条件：** 桌面 App 需要一台 64 位的 macOS、Windows 或 Linux 机器。浏览器、命令行、Agent 与源码
+路径需要 Node.js >= 20，用 `node -v` 检查。
 
-## 1. 安装（约 1 分钟）
+## 1. 桌面 App（推荐）
 
-**A. 从 npm 安装（已发布版本的推荐方式）：**
+1. 从 [GitHub Releases](https://github.com/Windsander/Mebular/releases) 下载 App 并打开。
+2. 点「开始部署」。它会启动本机服务、自动接入本机已装的 AI 助手，然后进入**锁定主控制台**。
+3. 第一台设备点「新建忆云」，后续设备点「加入忆云」。
+
+**忆云**是一份共享记忆空间，不是托管云服务：数据只留在属于它的设备上。
+
+- **第一台设备** —— 「新建忆云」：填忆云名 + 设备名，本机成为根。
+- **后续设备** —— 在已加入该忆云的设备上用「邀请设备」拿二维码 / 一次性令牌；新设备点「加入忆云」，
+  粘贴令牌并填设备名。新设备拿到委派证书，**不复制主密钥**。
+
+新建 / 加入都在**同一守护进程、同一页面**完成：不重启守护、不刷新页面，初始化返回后控制台立即解锁，
+顶栏恢复为「邀请设备」+「加入忆云」。向导不会替你选云或建云。
+
+App 在自动接入助手时写的是 HTTP `/mcp` 形态，所以初始化之后同一条路径继续可用，不需要重写助手配置。
+
+家目录为空时控制台处于锁定态：星图可见，其它卡片禁用，顶栏只有上面两个入口。这是预期状态，不是装坏了。
+
+## 2. 其他启动方式
+
+**浏览器控制台** —— 桌面 App 装的就是同一个控制台，也可以自己跑起来：
+
+```bash
+npm install -g @mebular/core
+mebular serve
+```
+
+打开 `http://127.0.0.1:7331/console`，用同样的两个入口：第一台设备「新建忆云」，后续设备「加入忆云」。
+两者都在同一页面解锁，不需要重启。
+
+**命令行** —— 建新 / 邀请 / 加入这三条命令：
+
+```bash
+fleet quickstart --daemon --dir ~/.mebular --device "$(hostname | tr '[:upper:]' '[:lower:]')"
+fleet invite --dir ~/.mebular                                  # 给新设备的二维码 + 令牌
+fleet join --qr "<二维码内容>" --daemon --dir ~/.mebular --device device-B   # 也可用 --token
+```
+
+`fleet quickstart` 会准备好本机，并打印给后续设备用的一次性邀请令牌。`fleet quickstart` 与
+`mebular serve` 共用同一个 home（默认 `~/.mebular`，可用 `MEBULAR_HOME` 覆盖）。守护持有 store 锁——
+同一个 home 只跑一个写者。
+
+**让 Agent 代劳** —— 装好 Skill（记忆 + 任务两个），对它说“部署 Mebular”/“用这个码加入”。它按
+[`packages/skill/SETUP.md`](../../packages/skill/SETUP.md) 执行，并用 `mebular doctor --net` 自检：
+
+```bash
+node packages/skill/scripts/install.mjs
+```
+
+**源码安装** —— 开发或钉版本构建时用。
+
+从 npm 安装（已发布版本）：
 
 ```bash
 npm install -g @mebular/core
 command -v mebular && command -v fleet
 ```
 
-五个 `@mebular/*` 包按 lockstep 同版本发布。`@mebular/core` 是根包，同时提供两个命令：`mebular`
-负责守护、MCP 服务与控制台，`fleet` 负责上车、邀请与加入。只装 `@mebular/mcp` 时只有 `mebular`，
-没有 `fleet`。
-
-**B. 从 GitHub 钉住提交（从源码构建，可复现）：**
+从 GitHub 钉住提交（可复现）：
 
 ```bash
 SHA=$(git ls-remote https://github.com/Windsander/Mebular.git refs/heads/main | cut -f1)
@@ -28,7 +75,7 @@ npm i -g "github:Windsander/Mebular#$SHA"
 command -v mebular && command -v fleet
 ```
 
-**C. 从本地仓库（开发者）：**
+从本地仓库：
 
 ```bash
 git clone https://github.com/Windsander/Mebular.git && cd Mebular
@@ -37,51 +84,13 @@ npm i -g .
 command -v mebular && command -v fleet
 ```
 
-现在你有两个命令：`mebular`（守护、MCP 服务、控制台）与 `fleet`（上车、邀请、加入）。
-
-## 2. 启动，然后新建或加入忆云
-
-一机 = 一节点 = 一守护。守护是身份/网络/信任的唯一持有者；Agent 与 fleet 命令行都是本机客户端，共用它。
-
-**桌面 App：** 打开 App，点「开始部署」。它会启动本机服务、自动接入本机已装的 AI 助手，然后进入
-**锁定主控制台**。它**不会**替你新建忆云。
-
-**浏览器：** 同一个控制台也可以由下面的命令提供：
+`@mebular/core` 是根包，也是同时提供两个命令的安装方式：`mebular` 负责守护、MCP 服务与控制台，
+`fleet` 负责上车、邀请与加入。只装 `@mebular/mcp` 时只有 `mebular`，没有 `fleet`。从 npm 安装树装
+记忆 / 任务两个 Skill：
 
 ```bash
-mebular serve
+node "$(npm root -g)/@mebular/core/packages/skill/scripts/install.mjs"
 ```
-
-打开 `http://127.0.0.1:7331/console`。家目录为空时控制台处于锁定态：星图可见，其它卡片禁用，顶栏
-只有两个入口——**新建忆云** 与 **加入忆云**。
-
-- **第一台设备** —— 「新建忆云」：填忆云名 + 设备名，本机成为根。
-- **后续设备** —— 在已加入该忆云的设备上用「邀请设备」拿二维码 / 一次性令牌；新设备点「加入忆云」，
-  粘贴令牌并填设备名。新设备拿到委派证书，**不复制主密钥**。
-
-新建 / 加入都在**同一守护进程、同一页面**完成：不重启守护、不刷新页面。初始化返回后控制台立即解锁，
-顶栏恢复为「邀请设备」+「加入忆云」。
-
-**命令行等价写法**（脚本化 / 批量；这是另一条路径——桌面向导不会替你选云或建云）：
-
-```bash
-fleet quickstart --daemon --dir ~/.mebular --device "$(hostname | tr '[:upper:]' '[:lower:]')"
-```
-
-`fleet quickstart` 会准备好本机，并打印给后续设备用的一次性邀请令牌。后续设备用下面的命令加入：
-
-```bash
-fleet join --qr "<二维码内容>" --daemon --dir ~/.mebular --device device-B   # 也可用 --token
-```
-
-**确认已就绪：**
-
-```bash
-mebular status
-```
-
-`fleet quickstart` 与 `mebular serve` 共用同一个 home（默认 `~/.mebular`，可用 `MEBULAR_HOME` 覆盖）。
-守护持有 store 锁——同一个 home 只跑一个写者。
 
 ## 3. 连接 MCP Agent
 
@@ -165,4 +174,5 @@ mebular doctor --net    # 地址簿 / LAN 发现 / NAT / 桥角色 / 下一步�
 - **限制与取舍** —— [`LIMITATIONS_CN.md`](../limitations/LIMITATIONS_CN.md)
 - **封板契约** —— [`SEALING_CN.md`](../../SEALING_CN.md)
 - **双机运维** —— [`packages/fleet/RUNBOOK.md`](../../packages/fleet/RUNBOOK.md)
+- **架构** —— [`ARCHITECT.md`](../architecture/ARCHITECT.md)
 - **可运行库示例** —— [`examples/quickstart`](../../examples/quickstart/index.mjs)

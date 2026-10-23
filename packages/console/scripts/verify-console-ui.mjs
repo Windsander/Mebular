@@ -2893,6 +2893,360 @@ async function main() {
     await evalJs('document.querySelector("#invite .modal-head #invite-close").click()');
     await waitFor('document.querySelector("#invite")?.hidden === true');
 
+    // C · 英文排版/版面（A+C）：辅助文本 10.5→11、微文本 10→10.5、长标签行距 1.35、
+    // 数据面名称/元信息不再重叠、说明行长 72ch、小按钮行高稳定；中文保持原值。
+    const nearPx = (value, expected) => Number.isFinite(parseFloat(value))
+      && Math.abs(parseFloat(value) - expected) <= 0.6;
+    const settingsTypeProbe = (extra = '') => `(() => {
+      const rootStyle = getComputedStyle(document.documentElement);
+      const tokens = {};
+      for (const name of ['--type-help', '--type-help-leading', '--type-micro', '--type-label-leading', '--crt-muted']) {
+        tokens[name] = rootStyle.getPropertyValue(name).trim();
+      }
+      const styleOf = (selector) => {
+        const el = document.querySelector(selector);
+        if (!el) return null;
+        const s = getComputedStyle(el);
+        return { fontSize: s.fontSize, lineHeight: s.lineHeight };
+      };
+      return {
+        lang: document.documentElement.lang,
+        tokens,
+        label: styleOf('#settings .settings-kv dt'),
+        kvSub: styleOf('#settings .settings-kv .kv-sub'),
+        cfgHelp: styleOf('#settings .cfg-help'),
+        cfgEffective: styleOf('#settings .cfg-effective'),
+        cfgLabel: styleOf('#settings .cfg-label'),
+        cfgDefault: styleOf('#settings .cfg-default'),
+        smallBtn: styleOf('#settings .btn-small'),
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+        cjk: /[\\u3400-\\u9fff]/.test(document.querySelector('#settings')?.innerText ?? ''),
+        ${extra}
+      };
+    })()`;
+    const settingsTypeOk = (probe, { labelLh, lang }) => probe.lang === lang
+      && probe.tokens['--type-help'] === '11px'
+      && probe.tokens['--type-help-leading'] === '1.55'
+      && probe.tokens['--type-micro'] === '10.5px'
+      && probe.tokens['--type-label-leading'] === '1.35'
+      && /0\.55\)$/.test(probe.tokens['--crt-muted'])
+      && Boolean(probe.label) && probe.label.fontSize === '12px'
+      && nearPx(probe.label.lineHeight, labelLh)
+      && (!probe.kvSub || (probe.kvSub.fontSize === '11px' && nearPx(probe.kvSub.lineHeight, 17.05)))
+      && Boolean(probe.cfgHelp) && probe.cfgHelp.fontSize === '11px'
+      && nearPx(probe.cfgHelp.lineHeight, 17.05)
+      && Boolean(probe.cfgEffective) && probe.cfgEffective.fontSize === '11px'
+      && nearPx(probe.cfgEffective.lineHeight, 17.05)
+      && Boolean(probe.cfgLabel) && probe.cfgLabel.fontSize === '12px'
+      && nearPx(probe.cfgLabel.lineHeight, labelLh)
+      && (!probe.cfgDefault || probe.cfgDefault.fontSize === '10px')
+      && Boolean(probe.smallBtn) && probe.smallBtn.fontSize === '12px'
+      && nearPx(probe.smallBtn.lineHeight, 18)
+      && probe.pageOver <= 1 && probe.cjk === false;
+    await send('Page.navigate', { url: `${base}/console/?lang=en-US` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1" && Boolean(document.querySelector("#open-settings"))');
+    await evalJs('document.querySelector("#open-settings").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("#settings-language"))');
+    // 设置·常用「Setup wizard」行：英文说明不得把按钮挤出可视区（web 控制台无桌面桥，
+    // 这里注入最小 openWizard 桩后重开设置，让真实的 wizardRowHtml 渲染出来）。
+    const wizardProbe = `(() => {
+      const row = document.querySelector('#settings-panel-common .settings-wizard-row');
+      const name = row?.querySelector('.asst-name');
+      const note = row?.querySelector('.asst-st');
+      const button = row?.querySelector('#settings-open-wizard');
+      if (!row || !name || !note || !button) return { ok: false, why: 'missing' };
+      const rowRect = row.getBoundingClientRect();
+      const noteRect = note.getBoundingClientRect();
+      const btnRect = button.getBoundingClientRect();
+      const boxRect = document.querySelector('#settings .modal-box')?.getBoundingClientRect() ?? null;
+      const noteStyle = getComputedStyle(note);
+      const nameStyle = getComputedStyle(name);
+      const btnStyle = getComputedStyle(button);
+      return {
+        ok: true,
+        text: row.innerText.replace(/\\s+/g, ' ').trim(),
+        visible: btnStyle.display !== 'none' && btnStyle.visibility !== 'hidden'
+          && btnRect.width > 0 && btnRect.height > 0,
+        button: { left: Math.round(btnRect.left), right: Math.round(btnRect.right), height: Math.round(btnRect.height) },
+        row: { left: Math.round(rowRect.left), right: Math.round(rowRect.right) },
+        boxRight: boxRect ? Math.round(boxRect.right) : null,
+        insideRow: btnRect.left >= rowRect.left - 1 && btnRect.right <= rowRect.right + 1,
+        insideBox: !boxRect || btnRect.right <= boxRect.right + 1,
+        overlap: noteRect.right > btnRect.left + 1 && noteRect.bottom > btnRect.top + 1
+          && noteRect.top < btnRect.bottom - 1,
+        noteFlexGrow: noteStyle.flexGrow,
+        noteMinWidth: noteStyle.minWidth,
+        noteOverflowWrap: noteStyle.overflowWrap,
+        nameMinWidth: nameStyle.minWidth,
+        sp: Boolean(row.querySelector('.asst-sp')),
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+        cjk: /[\\u3400-\\u9fff]/.test(row.innerText),
+      };
+    })()`;
+    await evalJs('window.mebularDesktop = { openWizard: () => true }');
+    await evalJs('document.querySelector("#open-settings").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === false');
+    // renderSettings 在签名不变时跳过重建：借切页签强制重渲染，让注入的桌面桥进入 wizardRowHtml。
+    await evalJs('document.querySelector("[data-settings-tab=advanced]")?.click()');
+    await sleep(200);
+    await evalJs('document.querySelector("[data-settings-tab=common]")?.click()');
+    check('i18n 设置向导行：桌面桥下渲染 .settings-wizard-row（专用行类）',
+      await waitFor('Boolean(document.querySelector("#settings-panel-common .settings-wizard-row #settings-open-wizard"))'));
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const wizard = await evalJs(wizardProbe);
+      check(`i18n 设置向导行 ${label}：英文说明可收缩，按钮可见且在行/弹框内、无横向溢出`,
+        wizard.ok && wizard.visible && wizard.insideRow && wizard.insideBox
+          && wizard.overlap === false && wizard.sp === false
+          && wizard.noteFlexGrow === '1' && wizard.noteMinWidth === '0px'
+          && wizard.nameMinWidth === '0px' && wizard.noteOverflowWrap === 'anywhere'
+          && /Setup wizard/.test(wizard.text) && /Re-run first-time setup/.test(wizard.text)
+          && /existing config is kept/.test(wizard.text) && /Restart wizard/.test(wizard.text)
+          && wizard.pageOver <= 1 && wizard.cjk === false,
+        JSON.stringify(wizard));
+      await captureNow(`i18n-en-wizard-row-${label}.jpg`);
+    }
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs('delete window.mebularDesktop');
+
+    await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
+    await sleep(300);
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const settingsType = await evalJs(settingsTypeProbe());
+      check(`i18n 排版 A ${label}：辅助文本 11px / 微文本 10.5px / 标签行距 1.35，无横向溢出且无中文兜底`,
+        settingsTypeOk(settingsType, { labelLh: 16.2, lang: 'en-US' }), JSON.stringify(settingsType));
+      await captureNow(`i18n-en-type-settings-${label}.jpg`);
+    }
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs('document.querySelector("#settings-close").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === true');
+
+    // C · 数据面列表：名称/元信息分两行（英文元信息更长），不再互相挤压/重叠。
+    const sectorProbe = `(() => {
+      const items = [...document.querySelectorAll('#domains-list .sector-item')];
+      const rows = items.map((item) => {
+        const main = item.querySelector('.sector-main');
+        const name = item.querySelector('.sector-name');
+        const meta = item.querySelector('.sector-meta');
+        const chip = item.querySelector('.sector-name .ns-chip');
+        if (!main || !name || !meta) return { ok: false, why: 'missing' };
+        const n = name.getBoundingClientRect();
+        const m = meta.getBoundingClientRect();
+        const mainRect = main.getBoundingClientRect();
+        return {
+          ok: (m.top >= n.bottom - 1 || n.right <= m.left + 1)
+            && m.left >= mainRect.left - 1 && m.right <= mainRect.right + 1
+            && n.right <= mainRect.right + 1
+            && Boolean(meta) && meta.scrollWidth <= meta.clientWidth + 1
+            && (!chip || chip.getBoundingClientRect().right <= mainRect.right + 1),
+          columns: getComputedStyle(main).gridTemplateColumns,
+          nameW: Math.round(n.width),
+          nameBottom: Math.round(n.bottom),
+          metaTop: Math.round(m.top),
+          metaW: Math.round(m.width),
+          text: (item.querySelector('.sector-name')?.textContent ?? '').trim(),
+        };
+      });
+      return {
+        viewport: window.innerWidth,
+        count: rows.length,
+        rows,
+        bad: rows.filter((row) => !row.ok),
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+        cjk: /[\\u3400-\\u9fff]/.test(document.querySelector('#domains-view')?.innerText ?? ''),
+      };
+    })()`;
+    await send('Page.navigate', { url: `${base}/console/?lang=en-US` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1" && Boolean(document.querySelector("#domains-view"))');
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
+    await waitFor('document.querySelector("#domains-view")?.hidden === false && document.querySelectorAll("#domains-list .sector-item").length >= 2');
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const sectors = await evalJs(sectorProbe);
+      const twoTracks = sectors.rows.every((row) => row.columns && row.columns.trim().split(/\s+/).length === 2);
+      check(`i18n 数据面列表 ${label}：名称独占一行、元信息下沉，名称/元信息不重叠不越界`,
+        sectors.count >= 2 && sectors.bad.length === 0 && twoTracks
+          && sectors.pageOver <= 1 && sectors.cjk === false,
+        JSON.stringify(sectors));
+      await captureNow(`i18n-en-type-domains-${label}.jpg`);
+    }
+
+    // C · 邀请弹层：辅助文本 11px / 微文本 10.5px，三档无横向溢出、无中文兜底。
+    const inviteTypeProbe = `(() => {
+      const body = document.querySelector('#invite-body');
+      const box = document.querySelector('#invite .modal-box');
+      const styleOf = (selector) => {
+        const el = document.querySelector(selector);
+        if (!el) return null;
+        const s = getComputedStyle(el);
+        return { fontSize: s.fontSize, lineHeight: s.lineHeight };
+      };
+      return {
+        open: Boolean(body) && document.querySelector('#invite')?.hidden === false,
+        label: styleOf('#invite-body .invite-label'),
+        safety: styleOf('#invite-body .invite-safety'),
+        fingerprint: styleOf('#invite-body .invite-fingerprint'),
+        expiry: styleOf('#invite-body #invite-expiry'),
+        boxOver: box ? box.scrollWidth - box.clientWidth : null,
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+        cjk: [
+          document.querySelector('#invite h2')?.textContent,
+          body?.querySelector('.invite-lead')?.textContent,
+          body?.querySelector('.invite-label')?.textContent,
+          body?.querySelector('.invite-safety')?.textContent,
+          body?.querySelector('.invite-copy')?.textContent,
+          body?.querySelector('#invite-expiry')?.textContent,
+          body?.querySelector('#invite-regenerate')?.textContent,
+        ].some((value) => /[\\u3400-\\u9fff]/.test(value ?? '')),
+      };
+    })()`;
+    const inviteTypeOk = (probe) => probe.open
+      && Boolean(probe.label) && probe.label.fontSize === '11px'
+      && Boolean(probe.safety) && probe.safety.fontSize === '11px'
+      && nearPx(probe.safety.lineHeight, 17.05)
+      && Boolean(probe.fingerprint) && probe.fingerprint.fontSize === '10.5px'
+      && Boolean(probe.expiry) && probe.expiry.fontSize === '10.5px'
+      && probe.boxOver <= 0 && probe.pageOver <= 1 && probe.cjk === false;
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs('document.querySelector("#invite-device").click()');
+    check('i18n 排版 C：邀请面板打开（英文令牌就位）', await waitFor('document.querySelector("#invite")?.hidden === false && Boolean(document.querySelector("#invite-body .invite-label"))', 20000));
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const inviteType = await evalJs(inviteTypeProbe);
+      check(`i18n 排版 C 邀请 ${label}：辅助 11px / 微文本 10.5px，弹框无横向溢出且无中文兜底`,
+        inviteTypeOk(inviteType), JSON.stringify(inviteType));
+      await captureNow(`i18n-en-type-invite-${label}.jpg`);
+    }
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await evalJs('document.querySelector("#invite .modal-head #invite-close").click()');
+    await waitFor('document.querySelector("#invite")?.hidden === true');
+
+    // A+C 只作用于 en-US：中文保持现有 10.5/10/26px 与三列数据面布局。
+    await send('Page.navigate', { url: `${base}/console/?lang=zh-CN` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1" && document.documentElement?.lang === "zh-CN" && Boolean(document.querySelector("#open-settings"))');
+    await evalJs('document.querySelector("#open-settings").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("#settings-language"))');
+    await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
+    await sleep(300);
+    const zhSettingsType = await evalJs(settingsTypeProbe());
+    const zhSectorProbe = `(() => {
+      const main = document.querySelector('#domains-list .sector-main');
+      const item = main?.closest('.sector-item');
+      const name = item?.querySelector('.sector-name');
+      const meta = item?.querySelector('.sector-meta');
+      const note = document.querySelector('#domains-note');
+      if (!main || !name || !meta || !note) return { ok: false };
+      const n = name.getBoundingClientRect();
+      const m = meta.getBoundingClientRect();
+      return {
+        ok: true,
+        columns: getComputedStyle(main).gridTemplateColumns,
+        sameRow: m.top < n.bottom,
+        noteMaxWidth: getComputedStyle(note).maxWidth,
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+      };
+    })()`;
+    await evalJs('document.querySelector("#settings-close").click()');
+    await waitFor('document.querySelector("#settings")?.hidden === true');
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button").click()');
+    await waitFor('document.querySelector("#domains-view")?.hidden === false && Boolean(document.querySelector("#domains-note"))');
+    const zhSector = await evalJs(zhSectorProbe);
+    check('i18n 排版 A+C 中文不变：辅助文本仍 10.5px、微文本 10px、标签行高 26px、按钮行高 normal',
+      zhSettingsType.lang === 'zh-CN'
+        && zhSettingsType.tokens['--type-help'] === '10.5px'
+        && zhSettingsType.tokens['--type-help-leading'] === '1.5'
+        && zhSettingsType.tokens['--type-micro'] === '10px'
+        && zhSettingsType.tokens['--type-label-leading'] === '26px'
+        && /0\.45\)$/.test(zhSettingsType.tokens['--crt-muted'])
+        && Boolean(zhSettingsType.label) && nearPx(zhSettingsType.label.lineHeight, 26)
+        && (!zhSettingsType.kvSub || zhSettingsType.kvSub.fontSize === '10.5px')
+        && Boolean(zhSettingsType.cfgHelp) && zhSettingsType.cfgHelp.fontSize === '10.5px'
+        && (!zhSettingsType.cfgDefault || zhSettingsType.cfgDefault.fontSize === '9px')
+        && Boolean(zhSettingsType.smallBtn) && zhSettingsType.smallBtn.lineHeight === 'normal'
+        && zhSettingsType.pageOver <= 1,
+      JSON.stringify(zhSettingsType));
+    check('i18n 排版 A+C 中文数据面不变：仍三列（名称与元信息同排）、说明不设 72ch 上限',
+      zhSector.ok && zhSector.columns.trim().split(/\s+/).length === 3
+        && zhSector.sameRow === true && zhSector.noteMaxWidth === '100%'
+        && zhSector.pageOver <= 1,
+      JSON.stringify(zhSector));
+    // 页面壳层（共享 / 记忆 / 审计）：标题字号/行高/基线一致，切页内容起点不跳。
+    const shellViews = [
+      ['domains', 2, '#domains-view', '#domains-note'],
+      ['memories', 3, '#memories-view', '#memories-view > .panel-note'],
+      ['audit', 4, '#audit-view', '#audit-list'],
+    ];
+    const shellProbe = (viewSel, contentSel) => `(() => {
+      const view = document.querySelector(${JSON.stringify(viewSel)});
+      if (!view || view.hidden) return { ok: false, why: 'hidden' };
+      const toolbar = view.querySelector('.audit-toolbar');
+      const h2 = toolbar?.querySelector('.view-head h2');
+      const content = view.querySelector(${JSON.stringify(contentSel)});
+      if (!toolbar || !h2 || !content) return { ok: false, why: 'missing' };
+      const cs = getComputedStyle(h2);
+      const rect = (el) => {
+        const r = el.getBoundingClientRect();
+        return { top: +r.top.toFixed(2), left: +r.left.toFixed(2), width: +r.width.toFixed(2), height: +r.height.toFixed(2) };
+      };
+      return {
+        ok: true,
+        title: (h2.textContent || '').trim(),
+        style: { fontSize: cs.fontSize, lineHeight: cs.lineHeight, fontWeight: cs.fontWeight, letterSpacing: cs.letterSpacing, margin: cs.margin, textTransform: cs.textTransform },
+        h2: rect(h2),
+        toolbar: rect(toolbar),
+        content: rect(content),
+        pageOver: document.documentElement.scrollWidth - window.innerWidth,
+      };
+    })()`;
+    const measureShell = async () => {
+      const out = {};
+      for (const [name, nth, viewSel, contentSel] of shellViews) {
+        await evalJs(`document.querySelector('#view-nav li:nth-of-type(${nth}) button')?.click()`);
+        await waitFor(`document.querySelector('${viewSel}')?.hidden === false`);
+        await sleep(250);
+        out[name] = await evalJs(shellProbe(viewSel, contentSel));
+      }
+      return out;
+    };
+    const shellOk = (shell) => {
+      const entries = Object.values(shell);
+      const tops = entries.map((entry) => entry.h2?.top);
+      const contentTops = entries.map((entry) => entry.content?.top);
+      return entries.every((entry) => entry.ok === true && entry.pageOver <= 1)
+        && new Set(entries.map((entry) => JSON.stringify(entry.style))).size === 1
+        && Math.max(...tops) - Math.min(...tops) <= 1
+        && Math.max(...contentTops) - Math.min(...contentTops) <= 1;
+    };
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const zhShell = await measureShell();
+      check(`i18n 页面壳层中文 ${label}：共享/记忆/审计标题样式一致、标题 top 差 ≤1px、内容起点一致`,
+        shellOk(zhShell), JSON.stringify(zhShell));
+      await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button")?.click()');
+      await waitFor('document.querySelector("#domains-view")?.hidden === false');
+      await captureNow(`i18n-zh-view-shell-${label}.jpg`);
+    }
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await captureNow('i18n-zh-typography-1440.jpg');
+    // 恢复英文页面，避免把中文 locale 留给后续英文用例（下拉/加入弹层）。
+    await clearViewport();
+    await send('Page.navigate', { url: `${base}/console/?lang=en-US` });
+    await waitFor('document.documentElement?.dataset?.consoleReady === "1" && document.documentElement?.lang === "en-US"');
+    // 英文同样三档：页面壳层一致 + 无横向溢出（截图留档）。
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    for (const [label, viewport] of densityViewports) {
+      await setViewport(viewport);
+      const enShell = await measureShell();
+      check(`i18n 页面壳层英文 ${label}：三视图标题样式一致、标题 top 差 ≤1px、内容起点一致`,
+        shellOk(enShell), JSON.stringify(enShell));
+      await evalJs('document.querySelector("#view-nav li:nth-of-type(2) button")?.click()');
+      await waitFor('document.querySelector("#domains-view")?.hidden === false');
+      await captureNow(`i18n-en-view-shell-${label}.jpg`);
+    }
+    await setViewport({ width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+
+
     // 自定义下拉框统一高度：按上下文实测 9 个 trigger 与相邻控件（设置输入/同排按钮）≤1px。
     const dropdownProbe = (pairs) => `(() => {
       const pick = (selector) => {

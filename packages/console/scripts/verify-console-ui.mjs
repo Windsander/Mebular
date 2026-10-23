@@ -1182,7 +1182,7 @@ async function main() {
           && !panel.querySelector('details.cfg-more') && !/这是什么/.test(panel.textContent);
       })()`));
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
-    check('U-3 安全 tab：三段式（等级/动态码种子/恢复码）+ 当前档 + 短边界',
+    check('U-3 安全 tab：三段式（等级/动态码种子/恢复码）+ 当前档',
       await evalJs(`(() => {
         const panel = document.querySelector('#settings-panel-security');
         const s = document.querySelector('#settings-security-slot');
@@ -1191,12 +1191,25 @@ async function main() {
         const t = s.textContent;
         return s.dataset.settingsSlot === 'security'
           && sections.map((el) => el.dataset.settingsSection).join(',') === 'security-level,security-totp,security-recovery'
-          && /安全等级/.test(t) && /低（默认）/.test(t) && /中 · 动态码/.test(t) && /高 · 设备会签/.test(t)
-          && /防顺手/.test(t) && /挡手不挡钥匙/.test(t)
+          && /安全等级/.test(t) && /动态码种子/.test(t) && /恢复码/.test(t)
           && Boolean(s.querySelector('[data-security-current]')) && /当前/.test(s.querySelector('[data-security-current]').textContent)
-          && Boolean(s.querySelector('[data-security-tier=low].is-current'))
+          && !s.querySelector('details')
           && !/totp_not_configured/.test(t);
       })()`));
+    // B 方案：三档差异/边界/降级入口收进「更改等级」弹框（不内联展开）
+    await evalJs('document.querySelector("[data-security-change-level]").click()');
+    check('U-3 安全 tab：更改等级弹框含三档 + 当前档 + 边界警告',
+      await waitFor(`(() => {
+        const modal = document.querySelector('#security-action');
+        const b = document.querySelector('#security-action-body');
+        const t = b?.textContent ?? '';
+        return Boolean(modal) && modal.hidden === false && Boolean(b)
+          && Boolean(b.querySelector('[data-security-tier=low].is-current'))
+          && /低（默认）/.test(t) && /中 · 动态码/.test(t) && /高 · 设备会签/.test(t)
+          && /防顺手/.test(t) && /挡手不挡钥匙/.test(t)
+          && Boolean(b.querySelector('[data-security-action=upgrade][data-level=medium]'));
+      })()`));
+    await evalJs('document.querySelector("#security-action-close").click()');
 
     // 即时生效：改低风险 toggle（joinService.enabled；高级 · 常驻服务组）→ 无草稿态、3s 跨轮询值持久（已写入）
     await evalJs('document.querySelector("[data-settings-tab=advanced]").click()');
@@ -1889,36 +1902,50 @@ async function main() {
     await waitFor('document.querySelector("#settings")?.hidden === false');
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
 
-    // 批准侧：种子请求（他机发起）→ 配对号核对 → 批准/拒绝写入
-    check('S3 批准侧：安全卡顶部待批准入口 + 配对号 aria-live',
+    // 批准侧：种子请求（他机发起）→ 核对处理弹框配对号 → 批准/拒绝写入
+    check('S3 批准侧：安全卡待批准条 + 核对处理入口',
       await waitFor(`(() => {
         const s = document.querySelector('#settings-security-slot');
-        const rows = s?.querySelectorAll('[data-security-approve]') ?? [];
-        const pair = s?.querySelector('[data-security-pairing]');
-        return rows.length >= 2 && Boolean(pair) && pair.getAttribute('aria-live') === 'polite' && /^\\d{3}-\\d{3}$/.test(pair.textContent.trim());
+        return Boolean(s?.querySelector('[data-security-pending]'))
+          && Boolean(s.querySelector('[data-security-pending-review]'))
+          && /2 项待批准/.test(s.textContent);
       })()`));
-    await evalJs('document.querySelector("#settings-security-slot [data-security-approve]").click()');
+    await evalJs('document.querySelector("[data-security-pending-review]").click()');
+    check('S3 批准侧：核对弹框展示 2 条配对号 aria-live',
+      await waitFor(`(() => {
+        const modal = document.querySelector('#security-action');
+        const b = document.querySelector('#security-action-body');
+        const rows = b?.querySelectorAll('[data-security-approve]') ?? [];
+        const pair = b?.querySelector('[data-security-pairing]');
+        return Boolean(modal) && modal.hidden === false && rows.length >= 2
+          && Boolean(pair) && pair.getAttribute('aria-live') === 'polite' && /^\\d{3}-\\d{3}$/.test(pair.textContent.trim());
+      })()`));
+    await evalJs('document.querySelector("#security-action-body [data-security-approve]").click()');
     check('S3 批准：确认卡展示配对号与「配对号一致，批准」',
       await waitFor('document.querySelector("#modal")?.hidden === false && /配对号一致，批准/.test(document.querySelector("#modal-confirm")?.textContent ?? "")'));
     await evalJs('document.querySelector("#modal-confirm").click()');
     check('S3 批准写入生效（待批准行减少）',
-      await waitFor('document.querySelectorAll("#settings-security-slot [data-security-approve]").length === 1', 20000));
-    await evalJs('document.querySelector("#settings-security-slot [data-security-deny]").click()');
+      await waitFor('/1 项待批准/.test(document.querySelector("#settings-security-slot [data-security-pending]")?.textContent ?? "")', 20000));
+    await evalJs('if (document.querySelector("#security-action")?.hidden === false) document.querySelector("#security-action-close").click()');
+    await evalJs('document.querySelector("[data-security-pending-review]").click()');
+    await waitFor('document.querySelector("#security-action")?.hidden === false && Boolean(document.querySelector("#security-action-body [data-security-deny]"))');
+    await evalJs('document.querySelector("#security-action-body [data-security-deny]").click()');
     check('S3 拒绝：确认卡出现（拒绝写入前二次确认）',
       await waitFor('document.querySelector("#modal")?.hidden === false && /拒绝/.test(document.querySelector("#modal-confirm")?.textContent ?? "")'));
     await evalJs('document.querySelector("#modal-confirm").click()');
     check('S3 拒绝写入生效（待批准清零；发起侧可见「已被拒绝」）',
-      await waitFor('document.querySelectorAll("#settings-security-slot [data-security-approve]").length === 0', 20000));
+      await waitFor('!document.querySelector("#settings-security-slot [data-security-pending]")', 20000));
 
     // 中档动态码：导入 → 卡片显示 fingerprint；未导入时用一句人话说明
     check('U-3 动态码未导入：提示会拒绝敏感动作，不显示内部错误码',
       await waitFor('(() => { const s = document.querySelector("#settings-security-slot"); return Boolean(s) && /未导入/.test(s.textContent) && /中档敏感操作会被拒绝/.test(s.textContent) && !/totp_not_configured/.test(s.textContent); })()'));
     const securityText = await evalJs(`(() => {
-      const s = document.querySelector('#settings-panel-security');
-      const text = (s.textContent ?? '').replace(/\\s+/g, '');
+      const panel = document.querySelector('#settings-panel-security');
+      // B 方案：页面本身不再内联展开，首屏文本预算按可见文本统计。
+      const text = (panel.textContent ?? '').replace(/\\s+/g, '');
       return { ok: text.length <= 350, length: text.length };
     })()`);
-    check('U-3 安全 tab 文本 ≤350 字（待批准已清零）', securityText.ok, `${securityText.length} 字`);
+    check('U-3 安全 tab 首屏文本 ≤350 字（待批准已清零）', securityText.ok, `${securityText.length} 字`);
     await capture('u3-after-settings-security.jpg');
     await capture('u3-after-settings-security-390.jpg', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
@@ -1934,7 +1961,9 @@ async function main() {
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
 
     // 低→中（显式确认）→ 未导入种子进入星图「需要注意」→ 导入 → 异常退场
-    await evalJs('document.querySelector("#settings-security-slot [data-security-action=upgrade][data-level=medium]").click()');
+    await evalJs('document.querySelector("[data-security-change-level]").click()');
+    await waitFor('document.querySelector("#security-action")?.hidden === false && Boolean(document.querySelector("#security-action-body [data-security-action=upgrade][data-level=medium]"))');
+    await evalJs('document.querySelector("#security-action-body [data-security-action=upgrade][data-level=medium]").click()');
     await waitFor('document.querySelector("#modal")?.hidden === false');
     await capture('u3-after-settings-security-dialog.jpg');
     await evalJs('document.querySelector("#modal-confirm").click()');
@@ -1991,15 +2020,19 @@ async function main() {
     await waitFor('document.querySelector("#security-badge") && /🛡 安全：中/.test(document.querySelector("#security-badge").textContent) && !/…/.test(document.querySelector("#memory-badge")?.textContent ?? "…")', 20000);
     await evalJs('document.querySelector("#open-settings").click()');
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
-    check('S3 中档凭条：设置打开且安全卡就位（降级入口内联在卡尾）',
-      await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]"))', 20000));
-    await evalJs('document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]").click()');
+    check('S3 中档凭条：设置打开且安全卡就位（更改等级弹框可打开）',
+      await waitFor('document.querySelector("#settings")?.hidden === false && Boolean(document.querySelector("#settings-security-slot [data-security-change-level]"))', 20000));
+    await evalJs('document.querySelector("[data-security-change-level]").click()');
+    await waitFor('document.querySelector("#security-action")?.hidden === false && Boolean(document.querySelector("#security-action-body [data-security-action=downgrade][data-level=low]"))');
+    await evalJs('document.querySelector("#security-action-body [data-security-action=downgrade][data-level=low]").click()');
     await waitFor('Boolean(document.querySelector("#security-code"))');
     const downCode = totpCodeAt(SEC_TOTP_SECRET, Math.floor(Date.now() / 30_000) + 1);
     await evalJs(`(() => { document.querySelector('#security-code').value = ${JSON.stringify(downCode)}; document.querySelector('#security-action-confirm').click(); })()`);
     check('S3 中→低：动态码通过后回到低档',
       await waitFor('document.querySelector("#settings-security-slot")?.dataset.securityLevel === "low"', 20000));
-    await evalJs('document.querySelector("#settings-security-slot [data-security-action=upgrade][data-level=high]").click()');
+    await evalJs('document.querySelector("[data-security-change-level]").click()');
+    await waitFor('document.querySelector("#security-action")?.hidden === false && Boolean(document.querySelector("#security-action-body [data-security-action=upgrade][data-level=high]"))');
+    await evalJs('document.querySelector("#security-action-body [data-security-action=upgrade][data-level=high]").click()');
     await waitFor('document.querySelector("#modal")?.hidden === false');
     await evalJs('document.querySelector("#modal-confirm").click()');
     const onceOk = await waitFor('Boolean(document.querySelector("[data-security-once]"))', 20000);
@@ -2062,9 +2095,11 @@ async function main() {
     // S4：高档降档「用恢复码执行」路径
     await evalJs('document.querySelector("#open-settings").click()');
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
-    check('S4 高档降档前置：安全卡为高档 + 降级入口就位',
-      await waitFor('document.querySelector("#settings")?.hidden === false && document.querySelector("#settings-security-slot")?.dataset.securityLevel === "high" && Boolean(document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]"))', 20000));
-    await evalJs('document.querySelector("#settings-security-slot [data-security-action=downgrade][data-level=low]").click()');
+    check('S4 高档降档前置：安全卡为高档 + 更改等级入口就位',
+      await waitFor('document.querySelector("#settings")?.hidden === false && document.querySelector("#settings-security-slot")?.dataset.securityLevel === "high" && Boolean(document.querySelector("#settings-security-slot [data-security-change-level]"))', 20000));
+    await evalJs('document.querySelector("[data-security-change-level]").click()');
+    await waitFor('document.querySelector("#security-action")?.hidden === false && Boolean(document.querySelector("#security-action-body [data-security-action=downgrade][data-level=low]"))');
+    await evalJs('document.querySelector("#security-action-body [data-security-action=downgrade][data-level=low]").click()');
     check('S4 高档降档：会签等待弹层提供「用恢复码执行」入口',
       await waitFor('Boolean(document.querySelector("[data-security-recovery-switch]")) && /降级到低/.test(document.querySelector("#security-action-title")?.textContent ?? "")'));
     await evalJs('document.querySelector("[data-security-recovery-switch]").click()');
@@ -2158,18 +2193,27 @@ async function main() {
         const s = document.querySelector('#settings-security-slot');
         const t = s?.textContent ?? '';
         return s?.dataset.securityLevel === 'high' && /当前/.test(s.querySelector('[data-security-current]')?.textContent ?? '')
-          && Boolean(s.querySelector('[data-security-tier=high].is-current'))
-          && /恢复码/.test(t) && /a1b2c3d4/.test(t) && /可会签设备/.test(t);
+          && /恢复码/.test(t) && /a1b2c3d4/.test(t);
       })()`));
-    await capture('e1-after-settings-security-mock.jpg');
-    check('S3 mock：待批准行（配对号 aria-live + 批准/拒绝 + 到期提示）',
+    await evalJs('document.querySelector("[data-security-change-level]").click()');
+    check('S3 mock：更改等级弹框 = 当前高档 + 可会签设备',
       await waitFor(`(() => {
-        const s = document.querySelector('#settings-security-slot');
-        const p = s?.querySelector('[data-security-pairing]');
-        return Boolean(p) && p.getAttribute('aria-live') === 'polite' && /^\\d{3}-\\d{3}$/.test(p.textContent.trim())
-          && Boolean(s.querySelector('[data-security-approve]')) && Boolean(s.querySelector('[data-security-deny]'))
-          && /有效至|过期/.test(s.textContent);
+        const b = document.querySelector('#security-action-body');
+        const t = b?.textContent ?? '';
+        return Boolean(b?.querySelector('[data-security-tier=high].is-current')) && /可会签设备/.test(t);
       })()`));
+    await evalJs('document.querySelector("#security-action-close").click()');
+    await capture('e1-after-settings-security-mock.jpg');
+    await evalJs('document.querySelector("[data-security-pending-review]").click()');
+    check('S3 mock：核对弹框（配对号 aria-live + 批准/拒绝 + 到期提示）',
+      await waitFor(`(() => {
+        const b = document.querySelector('#security-action-body');
+        const p = b?.querySelector('[data-security-pairing]');
+        return Boolean(b) && Boolean(p) && p.getAttribute('aria-live') === 'polite' && /^\\d{3}-\\d{3}$/.test(p.textContent.trim())
+          && Boolean(b.querySelector('[data-security-approve]')) && Boolean(b.querySelector('[data-security-deny]'))
+          && /有效至|过期/.test(b.textContent);
+      })()`));
+    await evalJs('document.querySelector("#security-action-close").click()');
     check('S3 mock：拒绝原因抬头可见（映射为中文，不静默）',
       await evalJs('(() => { const s = document.querySelector("#settings-security-slot"); return /1 条安全操作被拒绝/.test(s.textContent) && /缺少会签证明/.test(s.textContent); })()'));
     await evalJs('document.querySelector("#settings-close").click()');

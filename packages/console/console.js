@@ -9,10 +9,10 @@
 import { StarStage, namespaceColor, shortId } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SECURITY_TOTP_FOOT_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
-import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, reconcileDesktopLocale, LOCALE_STORAGE_KEY, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
+import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, reconcileDesktopLocale, LOCALE_STORAGE_KEY, formatDate as formatLocaleDate, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
 import { enhanceSelect, enhanceSelects } from './dropdown.mjs';
 
 const $ = (selector) => document.querySelector(selector);
@@ -1742,7 +1742,119 @@ function securitySelfId() {
   return state.overview?.device?.deviceId ?? state.settings?.identity?.deviceId ?? null;
 }
 
-/** 安全 tab：等级 / 动态码种子 / 恢复码（三段式；风险短句内联，不藏折叠）。 */
+/** 安全状态卡外壳（section 保持 data-settings-section，E2 断言按顺序查询）。 */
+function securitySectionCard({ id, index, titleId, title, chip = '', body = '', actions = '' }) {
+  return `
+    <section class="settings-section sec-card" data-settings-section="${escapeHtml(id)}" aria-labelledby="${escapeHtml(titleId)}">
+      <span class="sec-card-idx" aria-hidden="true">${escapeHtml(index)}</span>
+      <div class="sec-card-main">
+        <div class="sec-card-head"><h3 id="${escapeHtml(titleId)}">${escapeHtml(title)}</h3>${chip}</div>
+        ${body}
+      </div>
+      ${actions ? `<div class="sec-card-actions">${actions}</div>` : ''}
+    </section>`;
+}
+
+/** 三档列表：只在「更改等级」弹框里出现（页面保持简洁，不内联展开）。 */
+function securityTierList(level, writes) {
+  const disabled = writes ? '' : 'disabled';
+  return ['low', 'medium', 'high'].map((tier) => {
+    const current = tier === level;
+    const canUpgrade = SECURITY_LEVEL_ORDER[tier] > SECURITY_LEVEL_ORDER[level];
+    const action = current
+      ? `<span class="crt-tag sec-tag-current">${escapeHtml(t('settings.security.current'))}</span>`
+      : `<button class="btn btn-small ${canUpgrade ? 'btn-crt' : 'btn-crt btn-crt-danger'}" type="button" data-security-action="${canUpgrade ? 'upgrade' : 'downgrade'}" data-level="${tier}" ${disabled}>${escapeHtml(t(canUpgrade ? 'settings.security.upgradeTo' : 'settings.security.downgradeTo', { level: securityLevelLabel(tier) }))}</button>`;
+    return `<li class="sec-tier${current ? ' is-current' : ''}" data-security-tier="${tier}">
+      <div class="sec-tier-main">
+        <div class="sec-tier-head"><span class="sec-tier-title">${escapeHtml(t(SECURITY_LEVEL_TITLE_KEY[tier]))}</span></div>
+        <p class="sec-tier-note">${escapeHtml(t(SECURITY_LEVEL_NOTE_KEY[tier]))}</p>
+      </div>
+      <div class="sec-tier-action">${action}</div>
+    </li>`;
+  }).join('');
+}
+
+/** 「更改等级」弹框：三档差异 + 可会签设备 + 边界/降级门槛；按钮仍走既有确认与会签流程。 */
+function securityLevelChooser() {
+  const sec = state.security ?? {};
+  const level = sec.level ?? 'low';
+  const writes = Boolean(state.features?.writes) && !MOCK;
+  const admitted = Array.isArray(sec.admitted) ? sec.admitted : [];
+  const body = securityModalConfig({
+    title: t('settings.security.card.level.change'),
+    hideClose: false,
+    body: `<p class="muted">${escapeHtml(t(`settings.security.card.level.line.${level}`))}</p>
+      <ol class="sec-ladder sec-ladder-modal" aria-label="${escapeHtml(t('settings.security.ladderAria'))}">${securityTierList(level, writes)}</ol>
+      <p class="crt-warn">${escapeHtml(t(SECURITY_BOUNDARY_KEY))}</p>
+      ${admitted.length > 0 ? `<p class="cfg-help muted">${escapeHtml(t('settings.security.admitted', { count: admitted.length, devices: admitted.join(' · ') }))}</p>` : ''}
+      ${level !== 'low' ? `<p class="cfg-help muted">${escapeHtml(t('settings.security.details.gate'))}</p>` : ''}`,
+  });
+  body.querySelectorAll('[data-security-action]').forEach((button) => {
+    button.addEventListener('click', () => void securityStartLevelChange(button.dataset.level));
+  });
+}
+
+/** 「核对处理」弹框：配对号/到期/批准/拒绝；写操作仍复用 securityApprove / securityDeny。 */
+function securityPendingReview() {
+  const sec = state.security ?? {};
+  const selfId = securitySelfId();
+  const pending = Array.isArray(sec.pendingApprovals) ? sec.pendingApprovals : [];
+  const incoming = pending.filter((a) => a?.initiator !== selfId);
+  const outgoing = pending.filter((a) => a?.initiator === selfId);
+  const writes = Boolean(state.features?.writes) && !MOCK;
+  const disabled = writes ? '' : 'disabled';
+  const rows = incoming.map((a) => `
+    <div class="sec-review-row" data-approval-id="${escapeHtml(a.approvalId)}">
+      <div class="sec-approval-head"><b>${escapeHtml(securityOpText(a))}</b><span>${escapeHtml(t('settings.security.approval.from', { device: a.initiator ?? '—' }))}</span></div>
+      <div class="sec-pairing sec-pairing-lg" data-security-pairing aria-live="polite">${escapeHtml(a.pairingCode ?? '—')}</div>
+      <p class="sec-approval-meta">${escapeHtml(t('settings.security.approval.verifyMeta', { time: formatTime(a.expiresAt) }))}</p>
+      <div class="sec-approval-actions">
+        <button class="btn btn-small btn-crt" type="button" data-security-approve="${escapeHtml(a.approvalId)}" ${disabled}>${escapeHtml(t('settings.security.approval.approve'))}</button>
+        <button class="btn btn-small btn-crt btn-crt-danger" type="button" data-security-deny="${escapeHtml(a.approvalId)}" ${disabled}>${escapeHtml(t('settings.security.approval.deny'))}</button>
+      </div>
+    </div>`).join('');
+  const outgoingHtml = outgoing.length > 0
+    ? `<p class="sec-outgoing">${escapeHtml(t('settings.security.approval.waitingPrefix'))}${outgoing.map((a) => t('settings.security.approval.item', {
+      op: escapeHtml(securityOpText(a)),
+      code: `<span class="sec-pairing-inline">${escapeHtml(a.pairingCode ?? '—')}</span>`,
+    })).join(escapeHtml(t('common.listSeparator')))}</p>`
+    : '';
+  const body = securityModalConfig({
+    title: t('settings.security.approval.pending'),
+    hideClose: false,
+    body: `${rows}${outgoingHtml}`,
+  });
+  const bindDecision = (button, approve) => {
+    button.addEventListener('click', async () => {
+      const id = approve ? button.dataset.securityApprove : button.dataset.securityDeny;
+      const had = (state.security?.pendingApprovals ?? []).some((a) => a?.approvalId === id);
+      await (approve ? securityApprove(id) : securityDeny(id));
+      const still = (state.security?.pendingApprovals ?? []).some((a) => a?.approvalId === id);
+      if (had && !still) closeSecurityAction();
+    });
+  };
+  body.querySelectorAll('[data-security-approve]').forEach((button) => bindDecision(button, true));
+  body.querySelectorAll('[data-security-deny]').forEach((button) => bindDecision(button, false));
+}
+
+/** 待批准条：页面只留一行；配对号/批准/拒绝进「核对处理」弹框。 */
+function securityPendingStrip({ incoming, outgoing }) {
+  const first = incoming[0] ?? null;
+  const more = incoming.length > 1 ? ` ${t('settings.security.pending.more', { count: incoming.length - 1 })}` : '';
+  const title = incoming.length > 0
+    ? t('settings.security.pending.title', { count: incoming.length })
+    : t('settings.security.pending.waiting');
+  const sub = first
+    ? `${t('settings.security.pending.sub', { op: securityOpText(first), device: first.initiator ?? '—' })}${more}`
+    : outgoing.map((a) => securityOpText(a)).join(t('common.listSeparator'));
+  return `<div class="sec-pending" data-security-pending>
+      <span class="sec-pending-ico" aria-hidden="true">!</span>
+      <span class="sec-pending-copy"><b>${escapeHtml(title)}</b><span>${escapeHtml(sub)}</span></span>
+      <button class="btn btn-small btn-crt" type="button" data-security-pending-review>${escapeHtml(t('settings.security.pending.review'))}</button>
+    </div>`;
+}
+
+/** 安全 tab：待批准条 + 三张状态卡（不内联展开；详情/危险动作统一进弹框）。 */
 function securityCardHtml() {
   const sec = state.security;
   if (!sec) {
@@ -1756,6 +1868,7 @@ function securityCardHtml() {
   const level = sec.level ?? 'low';
   const selfId = securitySelfId();
   const writes = Boolean(state.features?.writes) && !MOCK;
+  const disabled = writes ? '' : 'disabled';
   const isRoot = state.settings?.identity?.mode === 'root';
   const pending = Array.isArray(sec.pendingApprovals) ? sec.pendingApprovals : [];
   const incoming = pending.filter((a) => a?.initiator !== selfId);
@@ -1763,81 +1876,68 @@ function securityCardHtml() {
   const rejections = Array.isArray(sec.rejections) ? sec.rejections : [];
   const totp = sec.totp ?? { imported: false };
   const recovery = sec.recovery ?? { registered: false };
-  const admitted = Array.isArray(sec.admitted) ? sec.admitted : [];
   const fps = [...new Set((state.policy ?? [])
     .filter((event) => event.type === 'security_totp' && typeof event.fingerprint === 'string')
     .map((event) => event.fingerprint))];
   const mismatch = totp.imported === true && fps.some((fp) => fp !== totp.fingerprint);
 
-  const ladder = ['low', 'medium', 'high'].map((tier) => {
-    const current = tier === level;
-    const canUpgrade = SECURITY_LEVEL_ORDER[tier] > SECURITY_LEVEL_ORDER[level];
-    const action = canUpgrade
-      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="upgrade" data-level="${tier}" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.upgradeTo', { level: securityLevelLabel(tier) }))}</button>`
-      : current ? `<span class="crt-tag ${securityLevelTag(level)}" data-security-current>${escapeHtml(t('settings.security.current'))}</span>` : '';
-    return `<li class="sec-tier${current ? ' is-current' : ''}" data-security-tier="${tier}">
-      <div class="sec-tier-main">
-        <div class="sec-tier-head"><span class="sec-tier-title">${escapeHtml(t(SECURITY_LEVEL_TITLE_KEY[tier]))}</span></div>
-        <p class="sec-tier-note muted">${escapeHtml(t(SECURITY_LEVEL_NOTE_KEY[tier]))}</p>
-      </div>
-      <div class="sec-tier-action">${action}</div>
-    </li>`;
-  }).join('');
+  const levelCard = securitySectionCard({
+    id: 'security-level',
+    index: '01',
+    titleId: 'settings-security-level-title',
+    title: t(IA_SECURITY_SECTIONS.level.titleKey),
+    chip: `<span class="crt-tag sec-tag-current" data-security-current>${escapeHtml(t('settings.security.current'))}</span>`,
+    body: `<p class="sec-card-value"><strong>${escapeHtml(securityLevelLabel(level))}</strong><span>${escapeHtml(t(`settings.security.card.level.mech.${level}`))}</span></p>
+      <p class="sec-card-line">${escapeHtml(t(`settings.security.card.level.line.${level}`))}</p>`,
+    actions: `<button class="btn btn-small btn-crt" type="button" data-security-change-level>${escapeHtml(t('settings.security.card.level.change'))}</button>`,
+  });
 
   const fingerprint = totp.fingerprint ?? null;
-  const totpStatus = totp.imported === true
-    ? `<span class="sec-ok">${escapeHtml(t('settings.security.totp.imported'))}</span> <code>${escapeHtml(fingerprint ?? '—')}</code>`
-    : `<span class="crt-warn">${escapeHtml(t('settings.security.totp.notImported'))}</span> <span class="muted">${escapeHtml(t('settings.security.totp.notImportedNote'))}</span>`;
-  const totpActions = `${totp.imported === true
-    ? `<button class="btn btn-small btn-crt" type="button" data-security-action="totp-show" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.totp.show'))}</button>`
-    : ''}
-    <button class="btn btn-small btn-crt" type="button" data-security-action="totp-import" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.totp.import'))}</button>
-    ${totp.imported !== true && isRoot
-      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="totp-generate" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.totp.generate'))}</button>`
-      : ''}`;
+  const seedImported = totp.imported === true;
+  const seedChip = seedImported
+    ? `<span class="crt-tag crt-tag-ok"><span class="sec-dot" aria-hidden="true"></span>${escapeHtml(t('settings.security.totp.imported'))}</span>${mismatch ? `<span class="crt-tag crt-tag-error">${escapeHtml(t('settings.security.totp.mismatchTag'))}</span>` : ''}`
+    : `<span class="crt-tag"><span class="sec-dot is-off" aria-hidden="true"></span>${escapeHtml(t('settings.security.totp.notImported'))}</span>`;
+  const seedMeta = seedImported
+    ? `<p class="sec-card-meta"><code>${escapeHtml(fingerprint ?? '—')}</code><span class="sec-sep" aria-hidden="true">·</span><span>${escapeHtml(t('settings.security.card.seed.meta'))}</span></p>`
+    : `<p class="sec-card-meta"><span class="sec-card-warn">${escapeHtml(t('settings.security.totp.notImported'))}</span><span class="sec-sep" aria-hidden="true">·</span><span>${escapeHtml(t('settings.security.totp.notImportedNote'))}</span></p>`;
+  const seedCard = securitySectionCard({
+    id: 'security-totp',
+    index: '02',
+    titleId: 'settings-security-totp-title',
+    title: t(IA_SECURITY_SECTIONS.totp.titleKey),
+    chip: seedChip,
+    body: seedMeta,
+    actions: `${seedImported
+      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="totp-show" ${disabled}>${escapeHtml(t('settings.security.totp.show'))}</button>`
+      : ''}
+      <button class="btn btn-small btn-crt" type="button" data-security-action="totp-import" ${disabled}>${escapeHtml(t('settings.security.totp.import'))}</button>`,
+  });
 
-  const recoveryStatus = recovery.registered === true
-    ? `<span class="sec-ok">${escapeHtml(t('settings.security.recovery.generated'))}</span> <code>${escapeHtml(String(recovery.keyId ?? '').slice(0, 8))}</code>
-       <span class="muted">${escapeHtml(t(recovery.mode === 'rotate' ? 'settings.security.recovery.rotated' : 'settings.security.recovery.registered'))} ${escapeHtml(formatTime(recovery.createdAt))}</span>
-       ${recovery.lastUsedAt ? `<span class="muted">${escapeHtml(t('settings.security.recovery.lastUsed', { time: formatTime(recovery.lastUsedAt) }))}</span>` : ''}
-       ${recovery.current === false ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.security.recovery.keyMismatch'))}</span>` : ''}`
-    : `<span class="muted">${escapeHtml(t('settings.security.recovery.notGenerated'))}</span>`;
-  const recoveryActions = recovery.registered === true
-    ? `<button class="btn btn-small btn-crt" type="button" data-security-action="recovery-rotate" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.recovery.rotate'))}</button>`
+  const registered = recovery.registered === true;
+  const recoveryChip = registered
+    ? `<span class="crt-tag crt-tag-ok"><span class="sec-dot" aria-hidden="true"></span>${escapeHtml(t('settings.security.recovery.generated'))}</span>`
+    : `<span class="crt-tag"><span class="sec-dot is-off" aria-hidden="true"></span>${escapeHtml(t('settings.security.recovery.notGeneratedShort'))}</span>`;
+  const recoveryMeta = registered
+    ? `<p class="sec-card-meta"><code>${escapeHtml(String(recovery.keyId ?? '').slice(0, 8))}</code><span class="sec-sep" aria-hidden="true">·</span><span>${escapeHtml(t('settings.security.card.recovery.meta', { time: formatLocaleDate(recovery.createdAt) }))}</span>${recovery.current === false ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.security.recovery.keyMismatch'))}</span>` : ''}</p>`
+    : `<p class="sec-card-meta"><span>${escapeHtml(t('settings.security.recovery.whenHigh'))}</span></p>`;
+  const recoveryActions = registered
+    ? `<button class="btn btn-small btn-crt" type="button" data-security-action="recovery-rotate" ${disabled}>${escapeHtml(t('settings.security.recovery.rotate'))}</button>`
     : level === 'high'
-      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="recovery-generate" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.recovery.generate'))}</button>`
+      ? `<button class="btn btn-small btn-crt" type="button" data-security-action="recovery-generate" ${disabled}>${escapeHtml(t('settings.security.recovery.generate'))}</button>`
       : '';
-
-  const incomingRows = incoming.map((a) => `
-    <li class="sec-approval-row" data-approval-id="${escapeHtml(a.approvalId)}">
-      <div class="sec-approval-head">
-        <b>${escapeHtml(securityOpText(a))}</b>
-        <span class="muted">${escapeHtml(t('settings.security.approval.from', { device: a.initiator ?? '—' }))}</span>
-      </div>
-      <div class="sec-approval-inline">
-        <span class="sec-pairing" data-security-pairing aria-live="polite">${escapeHtml(a.pairingCode ?? '—')}</span>
-        <span class="sec-approval-meta muted">${escapeHtml(t('settings.security.approval.verifyMeta', { time: formatTime(a.expiresAt) }))}</span>
-        <button class="btn btn-small btn-crt" type="button" data-security-approve="${escapeHtml(a.approvalId)}" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.approval.approve'))}</button>
-        <button class="btn btn-small btn-crt btn-crt-danger" type="button" data-security-deny="${escapeHtml(a.approvalId)}" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.approval.deny'))}</button>
-      </div>
-    </li>`).join('');
-  const outgoingRows = outgoing.length > 0
-    ? `<p class="sec-outgoing muted">${escapeHtml(t('settings.security.approval.waitingPrefix'))}${outgoing.map((a) => t('settings.security.approval.item', {
-      op: escapeHtml(securityOpText(a)),
-      code: `<span class="sec-pairing-inline">${escapeHtml(a.pairingCode ?? '—')}</span>`,
-    })).join(escapeHtml(t('common.listSeparator')))}</p>`
-    : '';
-  const pendingBlock = incoming.length > 0 || outgoing.length > 0
-    ? `<div class="sec-pending sec-pending-top" data-security-pending>
-        ${incoming.length > 0 ? `<div class="sec-pending-head"><b>${escapeHtml(t('settings.security.approval.pending'))}</b><span class="crt-tag crt-tag-warn">${escapeHtml(t('settings.security.approval.pendingCount', { count: incoming.length }))}</span></div>` : ''}
-        ${incomingRows ? `<ul class="sec-approval-list">${incomingRows}</ul>` : ''}
-        ${outgoingRows}
-      </div>`
-    : '';
+  const recoveryCard = securitySectionCard({
+    id: 'security-recovery',
+    index: '03',
+    titleId: 'settings-security-recovery-title',
+    title: t(IA_SECURITY_SECTIONS.recovery.titleKey),
+    chip: recoveryChip,
+    body: recoveryMeta,
+    actions: recoveryActions,
+  });
 
   const rejectionReasons = [...new Set(rejections.map((r) => securityReasonLabel(r.reason)))];
-  const rejectionBlock = rejections.length > 0
-    ? `<p class="crt-warn sec-rejections" data-security-rejections>${escapeHtml(t('settings.security.rejections', {
+  const rejectionFoot = rejections.length > 0
+    ? `<p class="sec-rejections-line" data-security-rejections>${escapeHtml(t('settings.security.rejections', {
       count: rejections.length,
       reasons: rejectionReasons.length > 3
         ? t('settings.security.rejectionsMore', { reasons: rejectionReasons.slice(0, 3).join(t('common.listSeparator')) })
@@ -1845,60 +1945,21 @@ function securityCardHtml() {
     }))}</p>`
     : '';
 
-  const admittedLine = admitted.length > 0
-    ? `<p class="settings-section-foot muted" data-security-admitted>${escapeHtml(t('settings.security.admitted', {
-      count: admitted.length,
-      devices: admitted.join(' · '),
-    }))}</p>`
-    : '';
-
-  const lowerTiers = ['low', 'medium', 'high'].filter((tier) => SECURITY_LEVEL_ORDER[tier] < SECURITY_LEVEL_ORDER[level]);
-  const downgrade = lowerTiers.length > 0
-    ? `<div class="sec-downgrade sec-downgrade-inline">
-        <span class="sec-downgrade-label muted">${escapeHtml(t('settings.security.downgrade'))}</span>
-        ${lowerTiers.map((tier) => `<button class="btn btn-small btn-crt btn-crt-danger" type="button" data-security-action="downgrade" data-level="${tier}" ${writes ? '' : 'disabled'}>${escapeHtml(t('settings.security.downgradeTo', { level: securityLevelLabel(tier) }))}</button>`).join('')}
-        <span class="muted">${escapeHtml(t(level === 'high' ? 'settings.security.downgrade.highNote' : 'settings.security.downgrade.mediumNote'))}</span>
-      </div>`
-    : '';
-
-  const mismatchLine = mismatch
-    ? `<p class="crt-warn sec-anomaly">${escapeHtml(t('settings.security.totp.mismatch'))}</p>`
-    : '';
-
-  return `
-    ${settingsSectionHtml({
-      id: 'security-level',
-      title: t(IA_SECURITY_SECTIONS.level.titleKey),
-      desc: t(IA_SECURITY_SECTIONS.level.descKey),
-      body: `${pendingBlock}<ol class="sec-ladder" aria-label="${escapeHtml(t('settings.security.ladderAria'))}">${ladder}</ol>
-        ${admittedLine}
-        <p class="settings-section-foot muted" data-security-boundary>${escapeHtml(t(SECURITY_BOUNDARY_KEY))}</p>
-        ${downgrade}${rejectionBlock}`,
-    })}
-    ${settingsSectionHtml({
-      id: 'security-totp',
-      title: t(IA_SECURITY_SECTIONS.totp.titleKey),
-      desc: t(IA_SECURITY_SECTIONS.totp.descKey),
-      chip: mismatch ? `<span class="crt-tag crt-tag-error">${escapeHtml(t('settings.security.totp.mismatchTag'))}</span>` : '',
-      body: `${mismatchLine}
-        <dl class="settings-kv sec-kv">
-          <dt>${escapeHtml(t('settings.security.status'))}</dt><dd class="kv-value">${totpStatus}</dd><dd class="kv-action sec-actions">${totpActions}</dd>
-        </dl>`,
-      foot: t(SECURITY_TOTP_FOOT_KEY),
-    })}
-    ${settingsSectionHtml({
-      id: 'security-recovery',
-      title: t(IA_SECURITY_SECTIONS.recovery.titleKey),
-      desc: t(IA_SECURITY_SECTIONS.recovery.descKey),
-      body: `<dl class="settings-kv sec-kv">
-          <dt>${escapeHtml(t('settings.security.status'))}</dt><dd class="kv-value">${recoveryStatus}</dd><dd class="kv-action sec-actions">${recoveryActions}</dd>
-        </dl>`,
-    })}
-  `;
+  return `${incoming.length > 0 || outgoing.length > 0 ? securityPendingStrip({ incoming, outgoing }) : ''}
+    ${levelCard}
+    ${seedCard}
+    ${recoveryCard}
+    ${rejectionFoot}`;
 }
 
 /** 安全卡事件（settings 每次重建都重新绑定；全部委托在本节点内）。 */
 function bindSecurityCard(root) {
+  root.querySelectorAll('[data-security-change-level]').forEach((button) => {
+    button.addEventListener('click', () => securityLevelChooser());
+  });
+  root.querySelectorAll('[data-security-pending-review]').forEach((button) => {
+    button.addEventListener('click', () => securityPendingReview());
+  });
   root.querySelectorAll('[data-security-action]').forEach((button) => {
     button.addEventListener('click', () => {
       const action = button.dataset.securityAction;
@@ -2058,7 +2119,7 @@ async function securityStartLevelChange(targetLevel) {
         title: t('security.downgrade.coSignTitle', { level: targetLabel }),
         op: 'tier',
         level: targetLevel,
-        intro: t('security.downgrade.coSignIntro'),
+        intro: `${t('security.downgrade.coSignIntro')}\n${t('security.downgrade.warnHigh')}`,
         onApproved: async (approvalId) => {
           await api('/admin/api/security/tier', { method: 'POST', body: { level: targetLevel, approvalId } });
           closeSecurityAction();
@@ -2071,7 +2132,7 @@ async function securityStartLevelChange(targetLevel) {
     }
     securityCodeModal({
       title: t('security.downgrade.title', { level: targetLabel }),
-      intro: t('security.downgrade.codeIntro'),
+      intro: `${t('security.downgrade.codeIntro')}\n${t('security.downgrade.warnMedium')}`,
       confirmLabel: t('security.downgrade.confirm', { level: targetLabel }),
       onSubmit: async (code) => {
         closeSecurityAction();

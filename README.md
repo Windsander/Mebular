@@ -26,7 +26,7 @@ Memory and tasks stay on your devices; devices sync directly.
 </p>
 <p align="center"><sub>The map at rest: devices and their shared-subscription edges. · On hover: task-domain lanes plus live fleet traffic.<br>Blue and gold show this device's two-way task-domain reachability, not peer-to-peer links.</sub></p>
 
-## One graph
+## One memory
 
 <p align="center">
   <picture>
@@ -37,16 +37,12 @@ Memory and tasks stay on your devices; devices sync directly.
 
 ## Get started
 
-### Desktop app
-
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/desktop-steps-en-light.svg">
     <img src="assets/desktop-steps-en.svg" alt="Desktop app setup: 1 Start deployment, 2 Create or join a Cloud, 3 Invite the next device">
   </picture>
 </p>
-
-### Other paths
 
 <p align="center">
   <picture>
@@ -86,28 +82,28 @@ mebular print-config --client opencode         # MCP config
   <thead>
     <tr>
       <th align="left">Start</th>
-      <th align="left">Understand</th>
-      <th align="left">Operate</th>
+      <th align="left">Learn</th>
+      <th align="left">Run</th>
       <th align="left">Trust</th>
     </tr>
   </thead>
   <tbody>
     <tr>
-      <td><strong><a href="docs/getting-started/QUICKSTART.md">Quickstart</a></strong><br><sub>Install, pair, sync</sub></td>
-      <td><strong><a href="docs/architecture/ARCHITECT.md">Architecture</a></strong><br><sub>Nodes, sync, trust</sub></td>
-      <td><strong><a href="docs/console/README.md">Console</a></strong><br><sub>The local GUI</sub></td>
-      <td><strong><a href="docs/limitations/LIMITATIONS.md">Limitations</a></strong><br><sub>Read before sensitive data</sub></td>
+      <td><strong><a href="docs/getting-started/QUICKSTART.md">Quickstart</a></strong><br><sub>Install &amp; pair</sub></td>
+      <td><strong><a href="docs/architecture/ARCHITECT.md">Architecture</a></strong><br><sub>Nodes &amp; sync</sub></td>
+      <td><strong><a href="docs/console/README.md">Console</a></strong><br><sub>Local GUI</sub></td>
+      <td><strong><a href="docs/limitations/LIMITATIONS.md">Limitations</a></strong><br><sub>Sensitive data</sub></td>
     </tr>
     <tr>
-      <td><strong><a href="packages/skill/SETUP.md">Agent skills</a></strong><br><sub>Setup and playbooks</sub></td>
-      <td><strong><a href="packages/fleet/RUNBOOK.md">Fleet runbook</a></strong><br><sub>Two-machine ops</sub></td>
-      <td><strong><a href="docs/operations/RELEASE.md">Release SOP</a></strong><br><sub>How a release is cut</sub></td>
-      <td><strong><a href="SEALING.md">Sealing contract</a></strong><br><sub>Protocol red lines</sub></td>
+      <td><strong><a href="packages/skill/SETUP.md">Agent skills</a></strong><br><sub>Setup playbooks</sub></td>
+      <td><strong><a href="packages/fleet/RUNBOOK.md">Fleet ops</a></strong><br><sub>Multi-machine</sub></td>
+      <td><strong><a href="docs/operations/RELEASE.md">Release SOP</a></strong><br><sub>Release steps</sub></td>
+      <td><strong><a href="SEALING.md">Sealing docs</a></strong><br><sub>Protocol rules</sub></td>
     </tr>
     <tr>
       <td><strong><a href="CHANGELOG.md">Changelog</a></strong><br><sub>Release notes</sub></td>
       <td><strong><a href="CONTRIBUTING.md">Contributing</a></strong><br><sub>Quality gates</sub></td>
-      <td><strong><a href="SECURITY.md">Security</a></strong><br><sub>Report a vulnerability</sub></td>
+      <td><strong><a href="SECURITY.md">Security</a></strong><br><sub>Report a vuln</sub></td>
       <td><strong><a href="https://mebular.cyberfederal.io">Website</a></strong><br><sub>Product site</sub></td>
     </tr>
   </tbody>

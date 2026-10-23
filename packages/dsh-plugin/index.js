@@ -18,7 +18,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter as pathDelimiter, isAbsolute, join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 
 export const name = '@mebular/dsh-plugin';
 
@@ -402,7 +402,7 @@ export function resolveCliPath(options = {}) {
     ? (typeof env.PATHEXT === 'string' ? env.PATHEXT.split(';') : ['.EXE', '.CMD', '.BAT', '.COM']).filter(Boolean)
     : [''];
   const searchDirs = String(env.PATH ?? '')
-    .split(isWindows ? ';' : pathDelimiter)
+    .split(isWindows ? ';' : ':')
     .filter((dir) => dir.length > 0);
 
   /** @type {Array<{ name: string, direct: boolean }>} */

@@ -1334,6 +1334,16 @@ describe('P3 @mebular/dsh-plugin：CLI 解析', () => {
     expect(resolveCliPath({ ...posix, env: { PATH: '/usr/bin' }, exists })).toBeNull();
   });
 
+  it('Windows：按 ; 与 PATHEXT 解析 PATH', () => {
+    const expected = join('C:\\bin', 'mebular.EXE');
+    const exists = (file) => file === expected;
+    expect(resolveCliPath({
+      platform: 'win32',
+      env: { PATH: 'C:\\bin', PATHEXT: '.EXE;.CMD' },
+      exists,
+    })).toBe(expected);
+  });
+
   it('daemonPortFromUrl 从 daemonUrl 取端口', () => {
     expect(daemonPortFromUrl('http://127.0.0.1:7331')).toBe(7331);
     expect(daemonPortFromUrl('http://127.0.0.1:9000/base')).toBe(9000);

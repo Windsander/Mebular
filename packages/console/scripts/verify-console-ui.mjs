@@ -4630,7 +4630,7 @@ async function main() {
           if (!stage || !aside || !card) return false;
           const rect = aside.getBoundingClientRect();
           return stage.dataset.scene === 'ready'
-            && stage.getAttribute('aria-label') === '忆云设备网络星图（全设备）'
+            && stage.getAttribute('aria-label') === '忆云设备星图（全设备）'
             && aside.hidden === false && getComputedStyle(aside).display !== 'none'
             && rect.width > 0;
         })()`, 20000));

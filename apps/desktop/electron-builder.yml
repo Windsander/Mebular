@@ -37,6 +37,11 @@ win:
 linux:
   target: [AppImage, deb]
   category: Utility
+  # package name 是 @mebular/desktop，默认 executableName 会派生为 @mebulardesktop；
+  # AppImage 拒绝该字符集（只允许字母/数字/连字符/下划线/点/空格），故显式指定。
+  executableName: mebular
+  # .desktop 文件名对齐 package.json desktopName（Electron app_id / WM_CLASS）。
+  syncDesktopName: true
   artifactName: Mebular-${version}-${arch}.${ext}
 # R1 不做：签名/公证/发布/自动更新（R2/R6 处理）
 publish: null

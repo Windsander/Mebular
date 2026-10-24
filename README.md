@@ -39,6 +39,14 @@ Memory and tasks stay on your devices; devices sync directly.
 
 <p align="center">
   <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/dsh-plugin-en-light.svg">
+    <img src="assets/dsh-plugin-en.svg" alt="DSH plugin integration: the DSH sidebar loads the same Mebular Console, and the official MCP client reaches the same daemon">
+  </picture>
+</p>
+<p align="center"><sub>DSH sidebar + official MCP client, one daemon.</sub></p>
+
+<p align="center">
+  <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/desktop-steps-en-light.svg">
     <img src="assets/desktop-steps-en.svg" alt="Desktop app setup: 1 Start deployment, 2 Create or join a Cloud, 3 Invite the next device">
   </picture>
@@ -51,7 +59,7 @@ Memory and tasks stay on your devices; devices sync directly.
   </picture>
 </p>
 
-**Desktop app (v0.1.0, unsigned).** [Download from GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.1.0): macOS Universal DMG, Windows x64 NSIS, Linux x64 AppImage and deb. Verify every file against `SHA256SUMS.txt` first. macOS needs right-click → **Open** (or Privacy & Security → **Open Anyway**); Windows SmartScreen needs **More info → Run anyway**. The app bundles Electron and its runtime, so it needs no local Node.js.
+**Desktop app (v0.1.0, unsigned).** [Download from GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.1.0): macOS Universal DMG, Windows x64 NSIS, Linux x64 AppImage/deb. Verify with `SHA256SUMS.txt`; macOS right-click → **Open**, Windows SmartScreen → **More info → Run anyway**. Bundles Electron and its runtime.
 
 **Or install the CLI and server:**
 

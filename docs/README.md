@@ -23,7 +23,8 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 ## Operations
 
-- [Release SOP](operations/RELEASE.md)
+- [Release SOP](operations/RELEASE.md) — npm packages, desktop matrix, release assets
+- [Desktop release](operations/DESKTOP_RELEASE.md) — runtime packaging, asset names, unsigned installs
 - [Changelog](../CHANGELOG.md)
 - [Third-party notices](../THIRD-PARTY.md)
 

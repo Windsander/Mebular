@@ -17,12 +17,16 @@ next `## [` heading. Keep that section self-contained.
 
 Nothing yet.
 
-## [v0.1.0] - 2026-10-23
+## [v0.1.0] - 2026-10-24
 
-Initial release. Five lockstep packages: `@mebular/core`, `@mebular/service`,
-`@mebular/fleet`, `@mebular/mcp`, `@mebular/skill`. The root bundle `@mebular/core`
-provides both the `mebular` and `fleet` CLIs. The desktop app is a source-run M1 shell
-in this release; signed installers are not included.
+Initial release. Five lockstep packages at `0.1.0`: `@mebular/core`, `@mebular/service`,
+`@mebular/fleet`, `@mebular/mcp`, `@mebular/skill`; the root bundle `@mebular/core`
+provides both the `mebular` and `fleet` CLIs. `@mebular/dsh-plugin@0.1.0` ships on its own
+version line. The release also includes unsigned desktop installers for macOS (Universal
+DMG), Windows (NSIS x64) and Linux (AppImage + deb x64). Each installer bundles Electron and
+a Mebular runtime installed from the same verified release tarballs, so it needs neither a
+local Node.js install nor a repository checkout. `SHA256SUMS.txt` is published with the
+installers.
 
 ### Highlights (EN)
 
@@ -41,8 +45,24 @@ in this release; signed installers are not included.
 - **Fleet task collaboration across devices** — tasks are a DAG inside shared memory (`causedBy`, cycle-free): dispatch, claim, progress, result and negotiation (clarify / counter / accept / reject), with the memory channel as the only remote surface — no general remote RPC.
 - **Distributed star-map console** — the main console shows every device in the Cloud, with shared-subscription base edges, hover task-domain lanes (blue = can send, gold = can receive, gray = unreachable), and live fleet traffic driven by real task events. Offline or no-shared-subscription devices stay gray dashed; online shared edges are subdued and emit a low-frequency sound-wave pulse that fades back into the base edge, so the stars remain the visual focus.
 - **Assistant onboarding in one pass** — 7 built-in descriptors (OpenChamber, Hermes, OpenCode, Claude Code, Claude Desktop, Cursor, DSH) plus a custom snippet path; each goes through detect → apply → verify, and the desktop one-click flow can connect installed assistants before a Cloud exists.
-- **DSH plugin on its own version line** — `@mebular/dsh-plugin` brings the same memory and task graph into DeepSeek Harness over HTTP MCP, with a panel entry that opens the existing console in a new tab. The app stays the control plane; the plugin ships 0.1.0 alongside this release but outside the five-package lockstep.
+- **DSH plugin on its own version line** — `@mebular/dsh-plugin` brings the same memory and task graph into DeepSeek Harness over HTTP MCP. Its sidebar Mebular panel loads the existing console in place through `?embed=dsh` (loopback only); it is not a second console. The host discovers the daemon by `daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331`, and mounts the official MCP client against the same origin. The app stays the control plane; the plugin ships 0.1.0 alongside this release but outside the five-package lockstep.
 - **Portable by design** — Canonical Memory Format (CMF) v1 with adapters for Obsidian, log journals, json-memo and Hermes, plus installable memory / task skills so the behaviour layer travels with the data.
+
+### Desktop installers (unsigned)
+
+- **Download** — from [GitHub Releases v0.1.0](https://github.com/Windsander/Mebular/releases/tag/v0.1.0):
+  `Mebular-0.1.0-universal.dmg` (macOS), `Mebular-Setup-0.1.0.exe` (Windows x64),
+  `Mebular-0.1.0-x86_64.AppImage` and `Mebular-0.1.0-amd64.deb` (Linux x64).
+- **Verify first** — compare every file with `SHA256SUMS.txt` before installing
+  (`shasum -a 256 -c SHA256SUMS.txt` on macOS, `sha256sum -c SHA256SUMS.txt` on Linux).
+- **macOS Gatekeeper** — the DMG is unsigned. On first launch, right-click the app and choose
+  **Open**, or use **System Settings → Privacy & Security → Open Anyway**.
+- **Windows SmartScreen** — the NSIS installer is unsigned. Choose **More info → Run anyway**.
+- **Self-contained runtime** — Electron and the Mebular runtime are inside the package; no
+  Node.js or repository checkout is required. The five `@mebular/*` packages come from the
+  same verified tarballs used for the npm release.
+- **Scope** — signing, notarization and auto-update are not part of v0.1.0; they are planned
+  for follow-up releases.
 
 ### 亮点（中文）
 
@@ -61,8 +81,22 @@ in this release; signed installers are not included.
 - **跨设备 fleet 任务协作** —— 任务是共享记忆里的 DAG（`causedBy`，禁环）：派发、认领、进度、结果与协商（clarify / counter / accept / reject），唯一远程面就是记忆通道，不提供通用远程调用。
 - **分布式星图控制台** —— 主控制台显示忆云内所有设备、共同订阅的基础边、悬停任务域航道（蓝 = 可发出、金 = 可接收、灰 = 不可达），以及真实任务事件驱动的实时 fleet 流量。离线或无共同订阅设备保持灰色虚线；在线共同订阅边压暗，并以低频声波脉冲提示，两端渐隐回基础线，让星体保持主视觉。
 - **助手一键接入** —— 7 个内置描述符（OpenChamber、Hermes、OpenCode、Claude Code、Claude Desktop、Cursor、DSH）加自定义片段；统一走探测 → 写入 → 验证三步；桌面一键流程可以在忆云存在之前先接好已装助手。
-- **DSH 插件，独立版本线** —— `@mebular/dsh-plugin` 通过 HTTP MCP 把同一张记忆与任务图接入 DeepSeek Harness；面板入口在新标签页打开现有控制台。App 仍是控制面；插件随本版发布 0.1.0，但不进入五包 lockstep。
+- **DSH 插件，独立版本线** —— `@mebular/dsh-plugin` 通过 HTTP MCP 把同一张记忆与任务图接入 DeepSeek Harness。侧边栏 Mebular 面板用 `?embed=dsh`（仅 loopback）就地加载现有控制台，不是第二套 Console。host 按 `daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331` 发现 daemon，并在同一个 origin 挂载官方 MCP client。App 仍是控制面；插件随本版发布 0.1.0，但不进入五包 lockstep。
 - **可带走的设计** —— Canonical Memory Format（CMF）v1，配 Obsidian、日志型端、json-memo、Hermes 适配器；记忆 / 任务两个 Skill 可安装，行为层随数据一起迁移。
+
+### 桌面安装包（unsigned）
+
+- **下载** —— 从 [GitHub Releases v0.1.0](https://github.com/Windsander/Mebular/releases/tag/v0.1.0) 获取：
+  `Mebular-0.1.0-universal.dmg`（macOS）、`Mebular-Setup-0.1.0.exe`（Windows x64）、
+  `Mebular-0.1.0-x86_64.AppImage` 与 `Mebular-0.1.0-amd64.deb`（Linux x64）。
+- **先校验** —— 安装前用 `SHA256SUMS.txt` 核对每个文件（macOS 用
+  `shasum -a 256 -c SHA256SUMS.txt`，Linux 用 `sha256sum -c SHA256SUMS.txt`）。
+- **macOS Gatekeeper** —— DMG 未签名。首次打开请右键 App 选择「打开」，或在
+  「系统设置 → 隐私与安全性」中选「仍要打开」。
+- **Windows SmartScreen** —— NSIS 安装包未签名。请选择「更多信息 → 仍要运行」。
+- **自带运行时** —— Electron 与 Mebular runtime 都在安装包内，不需要本机 Node.js，也不依赖
+  仓库源码；五个 `@mebular/*` 包来自与 npm 发布相同的已验证 tarball。
+- **范围** —— v0.1.0 不做签名、公证与自动更新，留到后续版本。
 
 [Unreleased]: https://github.com/Windsander/Mebular/compare/v0.1.0...HEAD
 [v0.1.0]: https://github.com/Windsander/Mebular/releases/tag/v0.1.0

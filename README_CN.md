@@ -51,6 +51,10 @@
   </picture>
 </p>
 
+**桌面 App（v0.1.0，unsigned）。** 从 [GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.1.0) 下载：macOS Universal DMG、Windows x64 NSIS、Linux x64 AppImage 与 deb。安装前先用 `SHA256SUMS.txt` 校验每个文件。macOS 首次打开需右键 →「打开」（或「系统设置 → 隐私与安全性 → 仍要打开」）；Windows SmartScreen 需「更多信息 → 仍要运行」。安装包自带 Electron 与 runtime，不需要本机 Node.js。
+
+**或者安装 CLI 与服务端：**
+
 ```bash
 npm install -g @mebular/core
 mebular serve                                  # 浏览器控制台
@@ -110,8 +114,10 @@ mebular print-config --client opencode         # MCP 配置
 </table>
 
 <p align="center"><strong>与 DSH 一起使用</strong><br>
-保持 Mebular App 运行，然后从 <code>packages/dsh-plugin</code> 把 <code>@mebular/dsh-plugin</code> 加入 DSH 的 web profile：侧边栏 Mebular 面板嵌入同一套 Console，官方 MCP client 连接同一张图。插件通过 <code>runtime.json</code> 或 <code>MEBULAR_HTTP_PORT</code> 发现 daemon，自定义端口会自动跟随。<br>
-当前仅支持本地安装，npm 尚未发布。<a href="packages/dsh-plugin/README.md">DSH 插件指南 →</a> · <a href="docs/integrations/DSH_CN.md">集成说明 →</a></p>
+保持 Mebular App 运行，然后从 npm 把插件装入 DSH 的 web profile：<br>
+<code>dsh plugin --profile web add @mebular/dsh-plugin@0.1.0</code><br>
+侧边栏 Mebular 面板通过 <code>?embed=dsh</code>（仅 loopback）嵌入同一套 Console，官方 MCP client 连接同一张图。插件按 <code>daemonUrl &gt; MEBULAR_HTTP_PORT &gt; runtime.json &gt; 7331</code> 发现 daemon，自定义端口会自动跟随。插件有独立版本线，不进入五包 lockstep；开发时仍可从 <code>packages/dsh-plugin</code> 本地安装。<br>
+<a href="packages/dsh-plugin/README.md">DSH 插件指南 →</a> · <a href="docs/integrations/DSH_CN.md">集成说明 →</a></p>
 
 <details>
 <summary>谁做什么</summary>

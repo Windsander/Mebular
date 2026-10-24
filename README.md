@@ -51,6 +51,10 @@ Memory and tasks stay on your devices; devices sync directly.
   </picture>
 </p>
 
+**Desktop app (v0.1.0, unsigned).** [Download from GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.1.0): macOS Universal DMG, Windows x64 NSIS, Linux x64 AppImage and deb. Verify every file against `SHA256SUMS.txt` first. macOS needs right-click → **Open** (or Privacy & Security → **Open Anyway**); Windows SmartScreen needs **More info → Run anyway**. The app bundles Electron and its runtime, so it needs no local Node.js.
+
+**Or install the CLI and server:**
+
 ```bash
 npm install -g @mebular/core
 mebular serve                                  # browser console
@@ -110,8 +114,10 @@ mebular print-config --client opencode         # MCP config
 </table>
 
 <p align="center"><strong>Use with DSH</strong><br>
-Keep the Mebular app running, then add <code>@mebular/dsh-plugin</code> from <code>packages/dsh-plugin</code> to DSH's web profile: a Mebular sidebar panel embeds the same Console, and the official MCP client reaches the same graph. The plugin discovers the daemon from <code>runtime.json</code> or <code>MEBULAR_HTTP_PORT</code>, so custom ports follow automatically.<br>
-Local install only; the npm package is not published yet. <a href="packages/dsh-plugin/README.md">DSH plugin guide →</a> · <a href="docs/integrations/DSH.md">Integration notes →</a></p>
+Keep the Mebular app running, then install the plugin from npm into DSH's web profile:<br>
+<code>dsh plugin --profile web add @mebular/dsh-plugin@0.1.0</code><br>
+A Mebular sidebar panel embeds the same Console through <code>?embed=dsh</code> (loopback only), and the official MCP client reaches the same graph. The plugin discovers the daemon by <code>daemonUrl &gt; MEBULAR_HTTP_PORT &gt; runtime.json &gt; 7331</code>, so custom ports follow automatically. It has its own version line and is not part of the five-package lockstep. For plugin development, install from <code>packages/dsh-plugin</code> instead.<br>
+<a href="packages/dsh-plugin/README.md">DSH plugin guide →</a> · <a href="docs/integrations/DSH.md">Integration notes →</a></p>
 
 <details>
 <summary>Who does what</summary>

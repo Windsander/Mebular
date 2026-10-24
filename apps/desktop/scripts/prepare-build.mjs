@@ -17,22 +17,43 @@ const required = [
   join(root, 'packages', 'fleet', 'dist', 'cli.js'),
 ];
 
+// Windows 不能直接 execFile('npm.cmd')；通过 npm run 调用时优先走 npm-cli.js，
+// 直接调用时退回 npm.cmd（与 prepare-runtime.mjs 的 runNpm 保持一致）。
+function runRepoBuild() {
+  const npmExecPath = process.env.npm_execpath;
+  if (typeof npmExecPath === 'string' && npmExecPath.endsWith('.js')) {
+    execFileSync(process.execPath, [npmExecPath, 'run', 'build'], {
+      cwd: root,
+      stdio: 'inherit',
+      env: process.env,
+    });
+    return;
+  }
+  const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  execFileSync(npm, ['run', 'build'], {
+    cwd: root,
+    stdio: 'inherit',
+    env: process.env,
+    shell: process.platform === 'win32',
+  });
+}
+
 const missing = required.filter((p) => !existsSync(p));
 if (missing.length === 0) {
   console.log('[desktop] 构建产物已就绪');
 } else {
   console.log(`[desktop] 缺少构建产物（${missing.length}），先执行仓库根 npm run build…`);
-  execFileSync('npm', ['run', 'build'], { cwd: root, stdio: 'inherit' });
+  runRepoBuild();
 }
 
-// fleet 的 QR 运行时依赖；extraResources 会从根 node_modules 复制到 App。
+// fleet 的 QR 运行时依赖；开发态从仓库 node_modules 解析（打包态由 runtime 自带）。
 const qrEncoder = join(root, 'node_modules', 'qrcode-generator', 'package.json');
 if (!existsSync(qrEncoder)) {
-  console.error('[desktop] 缺少 node_modules/qrcode-generator（fleet QR 运行时依赖）：请先 npm install');
+  console.error('[desktop] 缺少 node_modules/qrcode-generator（开发态 fleet QR 运行时依赖）：请先 npm install');
   process.exit(1);
 }
 
-// locale pack 是运行时数据（extraResources → <resources>/locales），构建前校验 manifest + 文件齐全。
+// 开发态 locale pack 从仓库 locales/ 读取（打包态由 runtime 内 @mebular/core/locales 提供）。
 const localesManifestPath = join(root, 'locales', 'manifest.json');
 if (!existsSync(localesManifestPath)) {
   console.error('[desktop] 缺少 locales/manifest.json（locale pack 数据层）');

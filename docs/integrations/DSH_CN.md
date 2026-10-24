@@ -35,11 +35,21 @@
 
 ## 安装
 
-npm 包**尚未发布**（`npm view @mebular/dsh-plugin` 返回 404）。从仓库工作树安装：
+v0.1.0 起从 npm 安装到 DSH 的 Web profile：
+
+```bash
+dsh plugin --profile web add @mebular/dsh-plugin@0.1.0
+```
+
+插件开发时仍可从仓库工作树安装：
 
 ```bash
 dsh plugin --profile web add ./packages/dsh-plugin
 ```
+
+`@mebular/dsh-plugin` 是独立版本线：随 Mebular v0.1.0 release train 发布，但版本号只取自
+`packages/dsh-plugin/package.json`，不进入五包 lockstep。插件尚未提交到 awesome-dsh-plugin，
+也未被其收录。
 
 包内自带 `cordis.patch.yml`，只插入一条 host row：
 
@@ -128,7 +138,7 @@ MEBULAR_HTTP_PORT=7332 dsh --profile web
 
 ## 插件位置
 
-包代码在本仓库的 `packages/dsh-plugin`，npm 包名预留为 `@mebular/dsh-plugin`。GitHub
+包代码在本仓库的 `packages/dsh-plugin`，npm 包名为 `@mebular/dsh-plugin`。GitHub
 topic 是**仓库级**的：`dsh-plugin`、`deepseek-harness`、`agent-memory` 等关键词描述整个
 Mebular 仓库，而不是一个独立包仓库，所以搜索会回到这里。完整配置参考见
 [插件 README](../../packages/dsh-plugin/README.md)。

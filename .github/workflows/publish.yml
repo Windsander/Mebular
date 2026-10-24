@@ -1,26 +1,42 @@
 name: Publish
 
-# 版本 SSOT：release/vX.Y.Z 分支名即版本号（对齐 ADI-Stable-Diffusion auto-publish 模式）。
-# 仅 push 到 release/v* 分支触发；不依赖 tag。
+# 发布顺序（push 到 release/v*）：
+#   verify（版本 SSOT + lint/test + 6 个发布 tarball）
+#     → preflight（npm token 可用性；失败则后续全部不启动）
+#     → desktop-macos / desktop-windows / desktop-linux
+#         （同一批 tarball → runtime → 安装包 → packaged runtime smoke）
+#     → publish（直接发布 verify 产出的 5 个 lockstep tarball）
+#     → publish-dsh（独立版本插件 tarball）
+#     → release（三平台安装包 + SHA256SUMS.txt，幂等上传）
+#
+# workflow_dispatch 是 packaging dry-run：只跑 verify + desktop matrix 并上传 artifacts，
+# publish / publish-dsh / release 全部跳过；TAG 从根 package.json 版本生成。
+run-name: Publish ${{ github.ref_name }} · ${{ github.event_name == 'push' && 'release' || 'dry-run (no publish)' }}
+
 on:
   push:
     branches:
       - 'release/v*'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# 同一 release 分支的重复 push 不并行发布；旧的一次跑完为止。
-# 幂等性由 npm view 已发布即跳过保证，因此无需 cancel-in-progress。
+# 同一 ref 串行；dry-run 与正式 release 排队等待，不互相取消。
+# 幂等性由 npm view 已发布即跳过 + gh release --clobber 保证。
 concurrency:
   group: publish-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   verify:
-    name: verify (SSOT / lint / test / pack)
+    name: verify (SSOT / lint / test / 6 tarballs)
     runs-on: ubuntu-latest
     timeout-minutes: 40
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      mode: ${{ steps.version.outputs.mode }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,26 +48,62 @@ jobs:
           cache: npm
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Resolve version (branch SSOT / package.json on dry-run)
+        id: version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            TAG="${GITHUB_REF#refs/heads/release/}"   # release/v0.2.0 -> v0.2.0
+            MODE="release"
+          else
+            VERSION="$(node -p "require('./package.json').version")"
+            TAG="v${VERSION}"
+            MODE="dry-run"
+          fi
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$'; then
+            echo "::error::版本号非法：$TAG"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          {
+            echo "TAG=$TAG"
+            echo "VERSION=$VERSION"
+            echo "MODE=$MODE"
+          } >> "$GITHUB_ENV"
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+            echo "mode=$MODE"
+          } >> "$GITHUB_OUTPUT"
+          echo "版本 SSOT：$GITHUB_REF -> TAG=$TAG VERSION=$VERSION MODE=$MODE"
 
-      - name: Extract version from branch (SSOT)
+      - name: Announce mode
         shell: bash
         run: |
-          TAG="${GITHUB_REF#refs/heads/release/}"   # v0.2.0
-          VERSION="${TAG#v}"                        # 0.2.0
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
-          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "版本 SSOT：$GITHUB_REF -> TAG=$TAG VERSION=$VERSION"
+          if [ "$MODE" = "dry-run" ]; then
+            echo "::notice title=Packaging dry-run::$TAG · 只构建三平台安装包并上传 artifacts；不发布 npm、不创建 GitHub Release。"
+          else
+            echo "::notice title=Release::$TAG · 安装包全部通过后发布 npm，最后上传 GitHub Release 资产。"
+          fi
 
-      - name: Verify version consistency (branch == 5×package.json == CHANGELOG)
+      - name: Verify version consistency (branch / 6 manifests / desktop / CHANGELOG)
         shell: bash
         run: |
           node - <<'NODE'
           const fs = require('node:fs');
           const version = process.env.VERSION;
           const tag = process.env.TAG;
-          const targets = ['.', 'packages/fleet', 'packages/mcp', 'packages/service', 'packages/skill'];
+          const targets = [
+            '.',
+            'packages/fleet',
+            'packages/mcp',
+            'packages/service',
+            'packages/skill',
+            'apps/desktop',
+          ];
           let ok = true;
           for (const rel of targets) {
             const pkg = JSON.parse(fs.readFileSync(`${rel}/package.json`, 'utf8'));
@@ -60,17 +112,42 @@ jobs:
               ok = false;
             }
           }
+
+          // 桌面 App 独立 lockfile（不属于根 workspaces）也必须与发布版本一致。
+          const lock = JSON.parse(fs.readFileSync('apps/desktop/package-lock.json', 'utf8'));
+          if (lock.version !== version || lock.packages?.['']?.version !== version) {
+            console.error(
+              `ERROR: apps/desktop/package-lock.json version=${lock.version} / packages[""].version=` +
+              `${lock.packages?.['']?.version} != ${version}`,
+            );
+            ok = false;
+          }
+
+          // 打包态 / 诊断共用的 APP_VERSION。
+          const daemon = fs.readFileSync('apps/desktop/src/main/daemon.mjs', 'utf8');
+          const appVersion = /export const APP_VERSION = '([^']+)'/.exec(daemon)?.[1];
+          if (appVersion !== version) {
+            console.error(`ERROR: apps/desktop/src/main/daemon.mjs APP_VERSION=${String(appVersion)} != ${version}`);
+            ok = false;
+          }
+
           const changelog = fs.readFileSync('CHANGELOG.md', 'utf8');
           if (!changelog.split('\n').some((line) => line.startsWith(`## [${tag}]`))) {
             console.error(`ERROR: CHANGELOG.md 缺少 [${tag}] 章节（release notes 取自该章节）`);
             ok = false;
           }
+
           if (!ok) {
             console.error(`修复：在 release 分支上运行 \`bash scripts/bump_version.sh ${tag}\`，或重命名分支。`);
             process.exit(1);
           }
-          console.log(`version consistency OK: ${tag}（branch + 5×package.json + CHANGELOG）`);
+          console.log(
+            `version consistency OK: ${tag}（branch + 6×package.json + desktop lock/APP_VERSION + CHANGELOG）`,
+          );
           NODE
+
+      - name: Install dependencies
+        run: npm ci
 
       - name: Build
         run: npm run build
@@ -87,11 +164,71 @@ jobs:
       - name: Pack smoke (5 packages + tarball install)
         run: npm run verify:mcp:publish
 
-  publish:
-    name: npm publish (core -> service/skill -> mcp -> fleet)
+      # 只 pack 一次：desktop matrix 与 npm publish 都使用这里的 tarball，保证“测什么发什么”。
+      - name: Pack release tarballs (5 lockstep + dsh-plugin)
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf release-pack
+          mkdir -p release-pack
+          ROOT="$PWD"
+          npm pack --pack-destination "$ROOT/release-pack"
+          for p in packages/fleet packages/service packages/mcp packages/skill packages/dsh-plugin; do
+            (cd "$p" && npm pack --pack-destination "$ROOT/release-pack")
+          done
+          ls -lh release-pack
+
+      - name: Check tarball set (exactly 6, versions match)
+        shell: bash
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const targets = [
+            '.',
+            'packages/fleet',
+            'packages/service',
+            'packages/mcp',
+            'packages/skill',
+            'packages/dsh-plugin',
+          ];
+          let ok = true;
+          for (const rel of targets) {
+            const manifest = JSON.parse(fs.readFileSync(path.join(rel, 'package.json'), 'utf8'));
+            const bare = manifest.name.replace(/^@[^/]+\//, '');
+            const scope = manifest.name.startsWith('@') ? manifest.name.slice(1).split('/')[0] : null;
+            const filename = `${scope ? `${scope}-` : ''}${bare}-${manifest.version}.tgz`;
+            const file = path.join('release-pack', filename);
+            if (!fs.existsSync(file) || fs.statSync(file).size === 0) {
+              console.error(`✗ 缺少 tarball：${file}`);
+              ok = false;
+              continue;
+            }
+            console.log(`✓ ${filename}（${(fs.statSync(file).size / 1024).toFixed(0)} KiB）`);
+          }
+          const tgz = fs.readdirSync('release-pack').filter((name) => name.endsWith('.tgz'));
+          if (tgz.length !== 6) {
+            console.error(`✗ release-pack 应恰好 6 个 tgz，实际 ${tgz.length}：${tgz.join(', ')}`);
+            ok = false;
+          }
+          if (!ok) process.exit(1);
+          console.log('release-pack OK：5 个 lockstep + 1 个 dsh-plugin');
+          NODE
+
+      - name: Upload release tarballs
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-tarballs
+          path: release-pack/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  preflight:
+    name: preflight (npm token, push only)
     needs: verify
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 10
     permissions:
       contents: read
     env:
@@ -104,47 +241,286 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          cache: npm
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Extract version
-        shell: bash
-        run: |
-          TAG="${GITHUB_REF#refs/heads/release/}"
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
-          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
-
-      - name: Publish packages (idempotent, skip published)
+      # 只验证 token 能认证；不打印 token（GitHub 也会 mask secret）。
+      - name: Verify npm token (npm whoami)
         shell: bash
         run: |
           set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret 未配置，停止发布"
+            exit 1
+          fi
+          WHOAMI="$(npm whoami)"
+          echo "npm token 可用：${WHOAMI}（scope 写入权限由首次 publish 验证）"
+
+  desktop-macos:
+    name: desktop macOS universal DMG
+    needs: verify
+    runs-on: macos-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      # v0.1.0 明确 unsigned：即使 runner 钥匙串里有证书也不自动发现。
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/desktop/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Download verified tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: release-tarballs
+          path: release-pack
+
+      - name: Build repo artifacts
+        run: npm run build
+
+      - name: Prepare desktop runtime from tarballs
+        run: node apps/desktop/scripts/prepare-runtime.mjs --tarballs release-pack
+
+      - name: Runtime smoke (tarball install)
+        run: npm --prefix apps/desktop run smoke:runtime
+
+      - name: Build macOS universal DMG (unsigned)
+        run: npm --prefix apps/desktop run dist:mac
+
+      - name: Packaged runtime smoke (Mebular.app resources)
+        shell: bash
+        run: |
+          set -euo pipefail
+          RES="$(find apps/desktop/dist -type d -path '*Mebular.app/Contents/Resources' -print -quit)"
+          if [ -z "$RES" ]; then
+            echo "::error::未找到 Mebular.app/Contents/Resources"
+            ls -la apps/desktop/dist
+            exit 1
+          fi
+          echo "resources: $RES"
+          node apps/desktop/scripts/smoke-runtime.mjs --runtime "$RES"
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos
+          path: apps/desktop/dist/*.dmg
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  desktop-windows:
+    name: desktop Windows NSIS x64
+    needs: verify
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/desktop/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Download verified tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: release-tarballs
+          path: release-pack
+
+      - name: Build repo artifacts
+        run: npm run build
+
+      - name: Prepare desktop runtime from tarballs
+        run: node apps/desktop/scripts/prepare-runtime.mjs --tarballs release-pack
+
+      - name: Runtime smoke (tarball install)
+        run: npm --prefix apps/desktop run smoke:runtime
+
+      - name: Build Windows NSIS x64 (unsigned)
+        run: npm --prefix apps/desktop run dist:win
+
+      - name: Packaged runtime smoke (win-unpacked resources)
+        shell: pwsh
+        working-directory: apps/desktop
+        run: |
+          $resources = Join-Path $PWD 'dist/win-unpacked/resources'
+          if (-not (Test-Path $resources)) {
+            Write-Error "未找到 $resources"
+            Get-ChildItem dist -Directory | Select-Object FullName
+            exit 1
+          }
+          Write-Host "resources: $resources"
+          node scripts/smoke-runtime.mjs --runtime $resources
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows
+          path: apps/desktop/dist/*.exe
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  desktop-linux:
+    name: desktop Linux AppImage + deb x64
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            apps/desktop/package-lock.json
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install desktop dependencies
+        run: npm ci --prefix apps/desktop
+
+      - name: Download verified tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: release-tarballs
+          path: release-pack
+
+      - name: Build repo artifacts
+        run: npm run build
+
+      - name: Prepare desktop runtime from tarballs
+        run: node apps/desktop/scripts/prepare-runtime.mjs --tarballs release-pack
+
+      - name: Runtime smoke (tarball install)
+        run: npm --prefix apps/desktop run smoke:runtime
+
+      - name: Build Linux AppImage + deb x64
+        run: npm --prefix apps/desktop run dist:linux
+
+      - name: Packaged runtime smoke (linux-unpacked resources)
+        shell: bash
+        working-directory: apps/desktop
+        run: |
+          set -euo pipefail
+          RES="dist/linux-unpacked/resources"
+          if [ ! -d "$RES" ]; then
+            echo "::error::未找到 $RES"
+            ls -la dist
+            exit 1
+          fi
+          node scripts/smoke-runtime.mjs --runtime "$RES"
+
+      - name: Upload Linux installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux
+          path: |
+            apps/desktop/dist/*.AppImage
+            apps/desktop/dist/*.deb
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: npm publish lockstep tarballs (push only)
+    needs: [preflight, verify, desktop-macos, desktop-windows, desktop-linux]
+    if: github.event_name == 'push' && needs.preflight.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download verified tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: release-tarballs
+          path: release-pack
+
+      # 直接发布 verify 产出的 tarball（不重新 pack）；顺序：core -> service -> skill -> mcp -> fleet。
+      - name: Publish lockstep tarballs (idempotent, skip published)
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret 未配置，停止发布"
+            exit 1
+          fi
           publish() {
-            local dir="$1" name="$2"
+            local file="$1" name="$2"
+            if [ ! -f "$file" ]; then
+              echo "::error::缺少 tarball：$file"
+              ls -l release-pack
+              exit 1
+            fi
             if npm view "${name}@${VERSION}" version >/dev/null 2>&1; then
-              echo "skip   ${name}@${VERSION}（已发布）"
+              echo "skip    ${name}@${VERSION}（已发布）"
             else
-              echo "publish ${name}@${VERSION}"
-              (cd "$dir" && npm publish --access public)
+              echo "publish ${name}@${VERSION}  <- $file"
+              npm publish "$file" --access public --tag latest
             fi
           }
-          # prepack/postpack 会把内部 file: 依赖改写为 ^$VERSION 再发布。
-          publish .                "@mebular/core"
-          publish packages/service "@mebular/service"
-          publish packages/skill   "@mebular/skill"
-          publish packages/mcp     "@mebular/mcp"
-          publish packages/fleet   "@mebular/fleet"
+          publish "release-pack/mebular-core-${VERSION}.tgz"    "@mebular/core"
+          publish "release-pack/mebular-service-${VERSION}.tgz" "@mebular/service"
+          publish "release-pack/mebular-skill-${VERSION}.tgz"   "@mebular/skill"
+          publish "release-pack/mebular-mcp-${VERSION}.tgz"     "@mebular/mcp"
+          publish "release-pack/mebular-fleet-${VERSION}.tgz"   "@mebular/fleet"
 
-  # 插件独立版本：不参与 5 包 lockstep，也不进入 verify 的 SSOT 校验。
-  # 版本唯一来源是 packages/dsh-plugin/package.json；已发布则跳过（幂等）。
+  # 插件独立版本：不参与 lockstep，版本只取 packages/dsh-plugin/package.json；已发布则跳过。
   publish-dsh:
-    name: npm publish (@mebular/dsh-plugin, independent version)
+    name: npm publish dsh-plugin tarball (push only)
     needs: publish
+    if: github.event_name == 'push' && needs.publish.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -161,33 +537,80 @@ jobs:
           node-version: 24
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Publish plugin (idempotent, skip published)
+      - name: Download verified tarballs
+        uses: actions/download-artifact@v4
+        with:
+          name: release-tarballs
+          path: release-pack
+
+      - name: Publish dsh-plugin tarball (idempotent, skip published)
         shell: bash
         run: |
           set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error::NPM_TOKEN secret 未配置，停止发布"
+            exit 1
+          fi
           VERSION="$(node -p "require('./packages/dsh-plugin/package.json').version")"
+          FILE="release-pack/mebular-dsh-plugin-${VERSION}.tgz"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::缺少 tarball：$FILE"
+            ls -l release-pack
+            exit 1
+          fi
           if npm view "@mebular/dsh-plugin@${VERSION}" version >/dev/null 2>&1; then
-            echo "skip   @mebular/dsh-plugin@${VERSION}（已发布）"
+            echo "skip    @mebular/dsh-plugin@${VERSION}（已发布）"
           else
-            echo "publish @mebular/dsh-plugin@${VERSION}"
-            (cd packages/dsh-plugin && npm publish --access public)
+            echo "publish @mebular/dsh-plugin@${VERSION}  <- $FILE"
+            npm publish "$FILE" --access public --tag latest
           fi
 
   release:
-    name: GitHub Release (tag v*)
-    needs: [publish, publish-dsh]
+    name: GitHub Release installers + checksums (push only)
+    needs: [verify, publish, publish-dsh, desktop-macos, desktop-windows, desktop-linux]
+    if: github.event_name == 'push' && needs.publish.result == 'success' && needs.publish-dsh.result == 'success'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: write
+    env:
+      TAG: ${{ needs.verify.outputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Extract version
+      - name: Download all desktop installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: desktop-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Verify asset set (1 dmg / 1 exe / 1 AppImage / 1 deb)
         shell: bash
         run: |
-          TAG="${GITHUB_REF#refs/heads/release/}"
-          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          set -euo pipefail
+          for ext in dmg exe AppImage deb; do
+            count="$(find release-assets -maxdepth 1 -type f -name "*.${ext}" | wc -l | tr -d ' ')"
+            if [ "$count" -ne 1 ]; then
+              echo "::error::期望 1 个 *.${ext}，实际 ${count} 个"
+              ls -l release-assets
+              exit 1
+            fi
+          done
+          ls -lh release-assets
+
+      - name: Generate SHA256SUMS.txt (installers only, stable order)
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd release-assets
+            find . -maxdepth 1 -type f \
+              \( -name '*.dmg' -o -name '*.exe' -o -name '*.AppImage' -o -name '*.deb' \) \
+              -printf '%f\n' | LC_ALL=C sort | xargs sha256sum
+          ) > SHA256SUMS.txt
+          cat SHA256SUMS.txt
 
       - name: Extract release notes from CHANGELOG
         shell: bash
@@ -210,17 +633,33 @@ jobs:
           console.log('RELEASE_NOTES.md 已生成');
           NODE
 
-      - name: Create GitHub Release (idempotent, tags v*)
+      - name: Create GitHub Release (idempotent, tag v*)
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG 已存在，跳过创建"
+            echo "Release $TAG 已存在，跳过创建（稍后 --clobber 覆盖资产）"
           else
             gh release create "$TAG" \
               --title "Mebular $TAG" \
               --notes-file RELEASE_NOTES.md \
               --target "$GITHUB_SHA"
           fi
+
+      - name: Upload installers + checksums (idempotent, --clobber)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            release-assets/*.dmg \
+            release-assets/*.exe \
+            release-assets/*.AppImage \
+            release-assets/*.deb \
+            SHA256SUMS.txt \
+            --clobber
+          echo "Release $TAG 资产："
+          gh release view "$TAG" --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'

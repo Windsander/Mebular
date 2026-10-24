@@ -29,7 +29,7 @@ Mebular 是一套**本地优先的跨设备记忆与任务协作层**。它不�
 | **控制面** | 装配并守护唯一实例；暴露 HTTP / MCP / admin / console / join | `packages/mcp/src/serve.mjs`、`server.mjs`、`provision.mjs`、`admin.mjs` | 不实现记忆业务；业务一律委托领域面 |
 | **领域面** | 记忆、图、事件、任务、同步、信任与策略 | `src/mebular.ts`、`src/memory/*`、`src/sync/*`、`packages/fleet/src/*` | 不依赖具体 UI、不直接绑定某个传输 |
 | **基础面** | 可替换的落盘、密码学、网络和系统能力 | `src/storage/*`、`src/crypto/*`、`src/p2p/*`、`packages/service/*`、`src/exchange/*` | 不决定产品语义；通过接口被领域面使用 |
-| **交付面** | 包、桌面壳、Skill、文档与流水线 | 5 个 npm 包、`apps/desktop`、`packages/skill`、`.github/workflows` | 不改变运行时协议；只负责分发和验证 |
+| **交付面** | 包、桌面壳、Skill、文档与流水线 | 6 个 npm 包（5 lockstep + 1 独立插件）、`apps/desktop`、`packages/skill`、`.github/workflows` | 不改变运行时协议；只负责分发和验证 |
 
 ### 2.1 入口面
 
@@ -93,9 +93,11 @@ UNINITIALIZED ── create/join ──▶ INITIALIZING ──▶ READY
 
 - 5 个 lockstep npm 包：`@mebular/core`、`@mebular/service`、`@mebular/fleet`、`@mebular/mcp`、
   `@mebular/skill`；根包提供 `mebular` + `fleet` 双 bin。
+- `@mebular/dsh-plugin` 独立版本线，与 v0.1.0 同批发布，但不进入五包 lockstep。
 - `packages/console` 与 `apps/desktop` 为 private 工作包，不单独发布；控制台随根包/守护分发。
-- Electron 桌面目前是开发/试用壳：窗口、托盘、守护托管和云切换已实现；签名、公证、安装包和
-  自动更新不在 v0.1.0 范围内。
+- Electron 桌面壳包含窗口、托盘、守护托管和云切换；v0.1.0 已纳入三平台 **unsigned** 安装包
+  （macOS Universal DMG、Windows NSIS x64、Linux AppImage/deb x64）。安装包 runtime 来自与
+  npm 发布同一批 verify tarball，并自带 Electron。签名、公证、自动更新在后续版本处理。
 
 ## 3. 表面契约
 

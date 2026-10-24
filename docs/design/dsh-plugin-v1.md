@@ -4,7 +4,7 @@ Status: final（P7.1 / P7.2 已实现，P7.3 完成真实 E2E、截图与上架�
 Branch: `feat/dsh-shared-console`
 Base: `origin/main@7c03798`
 DSH baseline: `0.2.1-rc.2`
-Package: `packages/dsh-plugin`（`@mebular/dsh-plugin@0.1.0`，npm 未发布）
+Package: `packages/dsh-plugin`（`@mebular/dsh-plugin@0.1.0`，独立版本线，随 v0.1.0 release train）
 
 ## 1. 目标
 
@@ -412,9 +412,10 @@ ctx.plugin(module, {
 
 ## 12. 已知限制与风险
 
-1. **npm 未发布**：`@mebular/dsh-plugin` 只是预留名，`npm view` 返回 404；当前只能从
-   `./packages/dsh-plugin` 或 GitHub 子目录安装。
-2. **未进官方列表**：`docs/dsh/awesome-dsh-plugin-entry.yml` 是草稿，未提交、未收录。
+1. **npm 发布状态**：`@mebular/dsh-plugin@0.1.0` 随 v0.1.0 release train 发布，使用独立
+   版本线；正式安装为 `dsh plugin --profile web add @mebular/dsh-plugin@0.1.0`。插件开发
+   仍可从 `./packages/dsh-plugin` 或 GitHub 子目录安装。
+2. **未进官方列表**：`docs/dsh/awesome-dsh-plugin-entry.yml` 是待提交草稿，未提交、未收录。
 3. **仅 loopback**：公网 DSH、HTTPS loopback、非 HTTP 自定义协议不在当前
    `frame-ancestors` 白名单。
 4. **Desktop origin 未在本轮验证**：`@deepseek-ai/dsh-desktop-host` 不在 npm 上，也未
@@ -461,12 +462,13 @@ dsh plugin --profile web remove @mebular/dsh-plugin
 ## 14. 发布 / 上架后续
 
 1. 合并本分支，确认 `main` 上 `packages/dsh-plugin` 可访问。
-2. 按 `docs/operations/RELEASE.md` 的 `publish-dsh` job 发布 npm（当前未发布）。
+2. 按 `docs/operations/RELEASE.md` 的 `publish-dsh` job 发布 npm；v0.1.0 使用独立版本
+   `0.1.0`，不随五包 lockstep。
 3. 给仓库加 `dsh-plugin` GitHub topic（代码无法完成）。
 4. 用 `docs/dsh/awesome-dsh-plugin-entry.yml` 向 `awesome-dsh-plugin` 提交**一个**条目；
-   不要直接改目标仓库 README。
+   不要直接改目标仓库 README。提交前确认 npm 包可见，未收录前不要写“已上架”。
 5. 确认 `screenshots.json` 与 `assets/icon-180.png` 在 `main` 的 raw URL 可访问；awesome
    的 `icon:` 只接受 GitHub 托管位图，SVG 不接受。
-6. 发布后再更新 README 的“npm 未发布”措辞；在确认收录前不要写“已上架”。
+6. README 已按 v0.1.0 的 npm 安装方式更新；在确认收录前继续写明“未提交、未收录”。
 7. 后续验证：DSH Desktop origin、HTTPS loopback、DSH 新 preview 版本的 slot/tapIndex、
    系统服务停止链路。

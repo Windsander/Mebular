@@ -2,8 +2,9 @@
 //
 // 路径优先级：
 //   ① MEBULAR_LOCALES_DIR（测试 / 自定义分发）
-//   ② <resources>/locales（打包态：electron-builder extraResources）
-//   ③ 仓库根 locales/（开发态：apps/desktop/src/main → ../../../..）
+//   ② <resources>/locales（旧 M1 布局：electron-builder extraResources）
+//   ③ <resources>/node_modules/@mebular/core/locales（R1 发布 runtime）
+//   ④ 仓库根 locales/（开发态：apps/desktop/src/main → ../../../..）
 //
 // 只读取 manifest 注册的 desktop pack；文件缺失 / 解析失败不抛异常，
 // 返回空 catalog（translator 回退 key，界面仍有 wizard.html 静态中文兜底）。
@@ -26,8 +27,13 @@ export function resolveLocalesDir({
   const override = env?.MEBULAR_LOCALES_DIR;
   if (typeof override === 'string' && override.trim()) return override;
   if (typeof resourcesPath === 'string' && resourcesPath.trim()) {
-    const packaged = join(resourcesPath, 'locales');
-    if (existsSync(join(packaged, 'manifest.json'))) return packaged;
+    const candidates = [
+      join(resourcesPath, 'locales'),
+      join(resourcesPath, 'node_modules', '@mebular', 'core', 'locales'),
+    ];
+    for (const packaged of candidates) {
+      if (existsSync(join(packaged, 'manifest.json'))) return packaged;
+    }
   }
   return join(moduleDir, '..', '..', '..', '..', 'locales');
 }

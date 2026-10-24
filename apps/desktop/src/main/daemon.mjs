@@ -22,13 +22,17 @@ export function repoRootFromModule() {
 
 /**
  * 内置 CLI（`mebular serve` 入口）。
- *   开发态：仓库 packages/mcp/bin/mebular.mjs；
- *   打包态：extraResources 落在 <resources>/packages/mcp/bin（app.asar 内没有 packages）。
+ *   打包态（R1）：<resources>/node_modules/@mebular/core/packages/mcp/bin/mebular.mjs
+ *                （runtime 由发布 tarball 安装，extraResources 原样复制 node_modules）；
+ *   旧 M1 布局：<resources>/packages/mcp/bin（保留兼容）；
+ *   开发态：仓库 packages/mcp/bin/mebular.mjs。
+ * app.asar 内没有 packages，所以不能只依赖 module 相对路径。
  */
-export function resolveCliBin(root = repoRootFromModule()) {
+export function resolveCliBin(root = repoRootFromModule(), { resourcesPath = process.resourcesPath } = {}) {
   const candidates = [];
-  if (typeof process.resourcesPath === 'string' && process.resourcesPath.length > 0) {
-    candidates.push(join(process.resourcesPath, 'packages', 'mcp', 'bin', 'mebular.mjs'));
+  if (typeof resourcesPath === 'string' && resourcesPath.length > 0) {
+    candidates.push(join(resourcesPath, 'node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs'));
+    candidates.push(join(resourcesPath, 'packages', 'mcp', 'bin', 'mebular.mjs'));
   }
   candidates.push(join(root, 'packages', 'mcp', 'bin', 'mebular.mjs'));
   return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0];

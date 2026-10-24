@@ -43,7 +43,6 @@ Memory and tasks stay on your devices; devices sync directly.
     <img src="assets/dsh-plugin-en.svg" alt="DSH plugin integration: the DSH sidebar loads the same Mebular Console, and the official MCP client reaches the same daemon">
   </picture>
 </p>
-<p align="center"><sub>DSH sidebar + official MCP client, one daemon.</sub></p>
 
 <p align="center">
   <picture>
@@ -59,7 +58,20 @@ Memory and tasks stay on your devices; devices sync directly.
   </picture>
 </p>
 
-**Desktop app (v0.1.0, unsigned).** [Download from GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.1.0): macOS Universal DMG, Windows x64 NSIS, Linux x64 AppImage/deb. Verify with `SHA256SUMS.txt`; macOS right-click → **Open**, Windows SmartScreen → **More info → Run anyway**. Bundles Electron and its runtime.
+<table width="100%">
+  <thead>
+    <tr>
+      <th align="left" width="30%">Desktop app · v0.1.0</th>
+      <th align="left">Download &amp; first launch</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Unsigned first release</strong><br><sub>macOS Universal · Windows x64 · Linux x64</sub></td>
+      <td><a href="https://github.com/Windsander/Mebular/releases/tag/v0.1.0">Download from GitHub Releases</a><br><sub>Verify with <code>SHA256SUMS.txt</code>. macOS: right-click → <strong>Open</strong>. Windows: <strong>More info → Run anyway</strong>. Bundles Electron and its runtime.</sub></td>
+    </tr>
+  </tbody>
+</table>
 
 **Or install the CLI and server:**
 

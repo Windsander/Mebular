@@ -43,7 +43,6 @@
     <img src="assets/dsh-plugin-cn.svg" alt="DSH 插件接入：DSH 侧边栏加载同一套 Mebular Console，官方 MCP client 连接同一个守护">
   </picture>
 </p>
-<p align="center"><sub>DSH 侧边栏 + 官方 MCP client，共用一个守护。</sub></p>
 
 <p align="center">
   <picture>
@@ -59,7 +58,20 @@
   </picture>
 </p>
 
-**桌面 App（v0.1.0，unsigned）。** 从 [GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.1.0) 下载 macOS Universal DMG、Windows x64 NSIS、Linux x64 AppImage/deb；先用 `SHA256SUMS.txt` 校验。macOS 右键 →「打开」，Windows SmartScreen →「更多信息 → 仍要运行」。安装包自带 Electron 与 runtime。
+<table width="100%">
+  <thead>
+    <tr>
+      <th align="left" width="30%">桌面 App · v0.1.0</th>
+      <th align="left">下载与首次打开</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>首发版 · 未签名</strong><br><sub>macOS Universal · Windows x64 · Linux x64</sub></td>
+      <td><a href="https://github.com/Windsander/Mebular/releases/tag/v0.1.0">从 GitHub Releases 下载</a><br><sub>用 <code>SHA256SUMS.txt</code> 校验。macOS：右键 →「打开」；Windows：「更多信息 → 仍要运行」。自带 Electron 与 runtime。</sub></td>
+    </tr>
+  </tbody>
+</table>
 
 **或者安装 CLI 与服务端：**
 

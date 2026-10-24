@@ -10,7 +10,7 @@
 A distributed memory network for your AI assistants.<br>
 Memory and tasks stay on your devices; devices sync directly.
 
-[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE) [![Node.js >=20](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white&style=flat-square)](docs/getting-started/QUICKSTART.md) [![MCP](https://img.shields.io/badge/MCP-5A67D8?style=flat-square)](docs/getting-started/QUICKSTART.md)
+[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE) [![Node.js >=20](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white&style=flat-square)](docs/getting-started/QUICKSTART.md) [![MCP server](https://img.shields.io/badge/MCP-server-5A67D8?logo=modelcontextprotocol&logoColor=white&style=flat-square)](docs/getting-started/QUICKSTART.md) [![DSH plugin](https://img.shields.io/badge/DSH-plugin-4D6BFE?logo=deepseek&logoColor=white&style=flat-square)](packages/dsh-plugin/README.md)
 
 [Start in 5 minutes](docs/getting-started/QUICKSTART.md) · [How it works](docs/architecture/ARCHITECT.md) · [Website](https://mebular.cyberfederal.io) · [中文](README_CN.md)
 
@@ -43,7 +43,6 @@ Memory and tasks stay on your devices; devices sync directly.
     <img src="assets/dsh-plugin-en.svg" alt="DSH plugin integration: the DSH sidebar loads the same Mebular Console, and the official MCP client reaches the same daemon">
   </picture>
 </p>
-<p align="center"><sub>DSH sidebar + official MCP client, one daemon.</sub></p>
 
 <p align="center">
   <picture>
@@ -59,7 +58,20 @@ Memory and tasks stay on your devices; devices sync directly.
   </picture>
 </p>
 
-**Desktop app (v0.1.0, unsigned).** [Download from GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.1.0): macOS Universal DMG, Windows x64 NSIS, Linux x64 AppImage/deb. Verify with `SHA256SUMS.txt`; macOS right-click → **Open**, Windows SmartScreen → **More info → Run anyway**. Bundles Electron and its runtime.
+<table width="100%">
+  <thead>
+    <tr>
+      <th align="left" width="30%">Desktop app · v0.1.0</th>
+      <th align="left">Download &amp; first launch</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Unsigned first release</strong><br><sub>macOS Universal · Windows x64 · Linux x64</sub></td>
+      <td><a href="https://github.com/Windsander/Mebular/releases/tag/v0.1.0">Download from GitHub Releases</a><br><sub>Verify with <code>SHA256SUMS.txt</code>. macOS: right-click → <strong>Open</strong>. Windows: <strong>More info → Run anyway</strong>. Bundles Electron and its runtime.</sub></td>
+    </tr>
+  </tbody>
+</table>
 
 **Or install the CLI and server:**
 

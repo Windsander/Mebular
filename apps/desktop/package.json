@@ -26,7 +26,7 @@
     "dist:linux": "node scripts/prepare-runtime.mjs && node scripts/prepare-build.mjs && electron-builder --config electron-builder.yml --linux --x64 --publish never"
   },
   "devDependencies": {
-    "electron": "42.11.9",
+    "electron": "42.11.16",
     "electron-builder": "26.15.3"
   }
 }

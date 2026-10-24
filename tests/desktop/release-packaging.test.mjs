@@ -12,6 +12,7 @@ import { resolveLocalesDir } from '../../apps/desktop/src/main/i18n.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..', '..');
 const desktopPackage = JSON.parse(readFileSync(join(repoRoot, 'apps', 'desktop', 'package.json'), 'utf-8'));
+const desktopLock = JSON.parse(readFileSync(join(repoRoot, 'apps', 'desktop', 'package-lock.json'), 'utf-8'));
 const rootPackage = JSON.parse(readFileSync(join(repoRoot, 'package.json'), 'utf-8'));
 const electronBuilderYaml = readFileSync(join(repoRoot, 'apps', 'desktop', 'electron-builder.yml'), 'utf-8');
 
@@ -166,5 +167,38 @@ describe('R4.2 Debian 元数据契约', () => {
   it('Linux executableName / artifactName 保持不变', () => {
     expect(yamlScalar(linux, 'executableName')).toBe('mebular');
     expect(yamlScalar(linux, 'artifactName')).toBe('Mebular-${version}-${arch}.${ext}');
+  });
+});
+
+// R4.3：Electron < 42.11.16 存在高危证书校验 advisory，修复版本 42.11.18；
+// Electron 虽在 devDependencies，但会被 electron-builder 打进安装包，故锁定精确版本并设下限。
+describe('R4.3 Electron 安装包版本下限', () => {
+  const MINIMUM_ELECTRON = '42.11.18';
+
+  function parseVersion(value) {
+    const match = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(String(value));
+    return match ? match.slice(1, 4).map(Number) : null;
+  }
+
+  function compareVersions(left, right) {
+    const a = parseVersion(left);
+    const b = parseVersion(right);
+    if (!a || !b) return NaN;
+    for (let i = 0; i < 3; i += 1) {
+      if (a[i] !== b[i]) return a[i] - b[i];
+    }
+    return 0;
+  }
+
+  it('electron 是精确版本且不低于 42.11.18（不含 ^/~ 回退空间）', () => {
+    const electron = desktopPackage.devDependencies?.electron;
+    expect(electron).toMatch(/^\d+\.\d+\.\d+$/);
+    expect(compareVersions(electron, MINIMUM_ELECTRON)).toBeGreaterThanOrEqual(0);
+  });
+
+  it('package-lock 中 electron 与 package.json 一致', () => {
+    const locked = desktopLock.packages?.['node_modules/electron']?.version;
+    expect(locked).toBe(desktopPackage.devDependencies.electron);
+    expect(compareVersions(locked, MINIMUM_ELECTRON)).toBeGreaterThanOrEqual(0);
   });
 });

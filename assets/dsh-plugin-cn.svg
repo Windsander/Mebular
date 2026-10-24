@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="300" viewBox="0 0 1080 300" role="img" aria-label="DSH 插件接入：DSH 侧边栏加载同一套 Mebular Console，官方 MCP client 连接同一个守护">
+  <defs>
+    <radialGradient id="glow" cx="50%" cy="38%" r="72%">
+      <stop offset="0%" stop-color="#0d2140" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#03050a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1080" height="300" fill="#03050a"/>
+  <ellipse cx="540" cy="120" rx="594" ry="156" fill="url(#glow)"/>
+  <text x="40" y="44" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="21" fill="#e2ecff" font-weight="700"><tspan letter-spacing="1.2">DSH 插件</tspan></text>
+  <text x="40" y="72" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#8aa8c8" font-weight="400">同一个守护、同一套 Console、两个壳。</text>
+
+  <rect x="36" y="92" width="300" height="160" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+  <text x="58" y="118" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8ac8ff" font-weight="700">MEBULAR 守护</text>
+  <text x="58" y="150" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="20" fill="#e2ecff" font-weight="700">同一张图</text>
+  <text x="58" y="180" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8" font-weight="400">Console 在 /console</text>
+  <text x="58" y="200" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8" font-weight="400">MCP 在 /mcp</text>
+  <text x="58" y="232" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="12" fill="#8ac8ff" font-weight="500">127.0.0.1:7331</text>
+
+  <rect x="744" y="92" width="300" height="160" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
+  <text x="766" y="118" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8ac8ff" font-weight="700">DSH WEB</text>
+  <text x="766" y="150" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="20" fill="#e2ecff" font-weight="700">Mebular 面板</text>
+  <text x="766" y="180" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8" font-weight="400">侧边栏 iframe</text>
+  <text x="766" y="200" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8" font-weight="400">官方 MCP client</text>
+  <text x="766" y="220" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="12" fill="#8aa8c8" font-weight="400">同一份记忆与任务</text>
+
+  <line x1="700" y1="142" x2="384" y2="142" stroke="#4a8acf" stroke-width="1.3" stroke-dasharray="4 5"/>
+  <path d="M384,142 l10,-4 v8 z" fill="#4a8acf"/>
+  <circle cx="700" cy="142" r="2.5" fill="#8ac8ff"/>
+  <line x1="700" y1="202" x2="384" y2="202" stroke="#4a8acf" stroke-width="1.3" stroke-dasharray="4 5"/>
+  <path d="M384,202 l10,-4 v8 z" fill="#4a8acf"/>
+  <circle cx="700" cy="202" r="2.5" fill="#8ac8ff"/>
+  <text x="540" y="128" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8ac8ff" font-weight="500" text-anchor="middle">iframe · ?embed=dsh</text>
+  <text x="540" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8ac8ff" font-weight="500" text-anchor="middle">官方 MCP client · /mcp</text>
+  <text x="540" y="170" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="10" fill="#8aa8c8" font-weight="400" text-anchor="middle">同一个守护</text>
+
+  <text x="540" y="282" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="middle">发现顺序：daemonUrl &gt; MEBULAR_HTTP_PORT &gt; runtime.json &gt; 7331</text>
+  <text x="540" y="296" font-family="'SF Pro Text','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="middle">App 仍是控制面；DSH 是 agent 壳。</text>
+</svg>

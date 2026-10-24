@@ -39,6 +39,14 @@
 
 <p align="center">
   <picture>
+    <source media="(prefers-color-scheme: light)" srcset="assets/dsh-plugin-cn-light.svg">
+    <img src="assets/dsh-plugin-cn.svg" alt="DSH 插件接入：DSH 侧边栏加载同一套 Mebular Console，官方 MCP client 连接同一个守护">
+  </picture>
+</p>
+<p align="center"><sub>DSH 侧边栏 + 官方 MCP client，共用一个守护。</sub></p>
+
+<p align="center">
+  <picture>
     <source media="(prefers-color-scheme: light)" srcset="assets/desktop-steps-cn-light.svg">
     <img src="assets/desktop-steps-cn.svg" alt="桌面 App 三步：1 开始部署，2 新建或加入忆云，3 邀请下一台设备">
   </picture>
@@ -51,7 +59,7 @@
   </picture>
 </p>
 
-**桌面 App（v0.1.0，unsigned）。** 从 [GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.1.0) 下载：macOS Universal DMG、Windows x64 NSIS、Linux x64 AppImage 与 deb。安装前先用 `SHA256SUMS.txt` 校验每个文件。macOS 首次打开需右键 →「打开」（或「系统设置 → 隐私与安全性 → 仍要打开」）；Windows SmartScreen 需「更多信息 → 仍要运行」。安装包自带 Electron 与 runtime，不需要本机 Node.js。
+**桌面 App（v0.1.0，unsigned）。** 从 [GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.1.0) 下载 macOS Universal DMG、Windows x64 NSIS、Linux x64 AppImage/deb；先用 `SHA256SUMS.txt` 校验。macOS 右键 →「打开」，Windows SmartScreen →「更多信息 → 仍要运行」。安装包自带 Electron 与 runtime。
 
 **或者安装 CLI 与服务端：**
 

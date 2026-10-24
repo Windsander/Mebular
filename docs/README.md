@@ -25,6 +25,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 - [Release SOP](operations/RELEASE.md) — npm packages, desktop matrix, release assets
 - [Desktop release](operations/DESKTOP_RELEASE.md) — runtime packaging, asset names, unsigned installs
+- [Dependency overrides](operations/DEPENDENCY_OVERRIDES.md) — transitive advisories and when to remove each override
 - [Changelog](../CHANGELOG.md)
 - [Third-party notices](../THIRD-PARTY.md)
 

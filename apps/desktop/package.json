@@ -6,7 +6,11 @@
   "private": true,
   "description": "Mebular 桌面应用（Electron 壳 + 内嵌控制台 + 守护托管）",
   "license": "MIT",
-  "author": "Windsander",
+  "homepage": "https://github.com/Windsander/Mebular",
+  "author": {
+    "name": "Windsander",
+    "email": "Windsander@users.noreply.github.com"
+  },
   "type": "module",
   "main": "src/main/index.mjs",
   "scripts": {

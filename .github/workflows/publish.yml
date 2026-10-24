@@ -507,7 +507,9 @@ jobs:
               echo "skip    ${name}@${VERSION}（已发布）"
             else
               echo "publish ${name}@${VERSION}  <- $file"
-              npm publish "$file" --access public --tag latest
+              # 必须传绝对路径：npm 会把以 release-pack/... 开头的裸相对路径当成 GitHub shorthand，
+              # 转而去 git ls-remote，导致 Permission denied (publickey)。realpath 让 npm 按本地 tarball 处理。
+              npm publish "$(realpath "$file")" --access public --tag latest
             fi
           }
           publish "release-pack/mebular-core-${VERSION}.tgz"    "@mebular/core"
@@ -562,7 +564,8 @@ jobs:
             echo "skip    @mebular/dsh-plugin@${VERSION}（已发布）"
           else
             echo "publish @mebular/dsh-plugin@${VERSION}  <- $FILE"
-            npm publish "$FILE" --access public --tag latest
+            # 同 publish job：绝对路径避免 npm 将相对 tarball 路径解析为 GitHub shorthand。
+            npm publish "$(realpath "$FILE")" --access public --tag latest
           fi
 
   release:

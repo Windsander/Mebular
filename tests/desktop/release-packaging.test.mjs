@@ -139,3 +139,32 @@ describe('R4.1 Linux executableName / desktopName 契约', () => {
       .toBe('Mebular-Setup-${version}.${ext}');
   });
 });
+
+// R4.2：.deb 需要 homepage / author.email / linux.maintainer，缺一即拒绝构建；
+// 静态契约固定元数据，同时防止 Linux 产物名在补齐元数据时被改动。
+describe('R4.2 Debian 元数据契约', () => {
+  const linux = yamlSection(electronBuilderYaml, 'linux');
+
+  it('package homepage 是 https URL', () => {
+    expect(typeof desktopPackage.homepage).toBe('string');
+    expect(() => new URL(desktopPackage.homepage)).not.toThrow();
+    expect(new URL(desktopPackage.homepage).protocol).toBe('https:');
+  });
+
+  it('author email 存在且是合法 email', () => {
+    expect(desktopPackage.author).toMatchObject({ name: 'Windsander' });
+    expect(desktopPackage.author.email).toMatch(/^[^\s@]+@[^\s@]+\.[^\s@]+$/);
+  });
+
+  it('linux.maintainer 含与 package author 相同的 email', () => {
+    const maintainer = yamlScalar(linux, 'maintainer');
+    expect(maintainer).not.toBeNull();
+    expect(maintainer).toContain(desktopPackage.author.email);
+    expect(maintainer).toMatch(/^.+\s<[^\s@]+@[^\s@]+\.[^\s@]+>$/);
+  });
+
+  it('Linux executableName / artifactName 保持不变', () => {
+    expect(yamlScalar(linux, 'executableName')).toBe('mebular');
+    expect(yamlScalar(linux, 'artifactName')).toBe('Mebular-${version}-${arch}.${ext}');
+  });
+});

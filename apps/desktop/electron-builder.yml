@@ -37,6 +37,8 @@ win:
 linux:
   target: [AppImage, deb]
   category: Utility
+  # .deb 要求维护者；显式声明与 package.json author.email 一致，避免依赖派生。
+  maintainer: Windsander <Windsander@users.noreply.github.com>
   # package name 是 @mebular/desktop，默认 executableName 会派生为 @mebulardesktop；
   # AppImage 拒绝该字符集（只允许字母/数字/连字符/下划线/点/空格），故显式指定。
   executableName: mebular

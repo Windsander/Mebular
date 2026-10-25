@@ -49,9 +49,9 @@ For plugin development, install from the repository checkout instead:
 dsh plugin --profile web add ./packages/dsh-plugin
 ```
 
-`@mebular/dsh-plugin` has its own version line: it ships with the Mebular v0.1.1 release
-train, but its version comes only from `packages/dsh-plugin/package.json` and it is not part
-of the five-package lockstep. The plugin is listed in
+`@mebular/dsh-plugin` is an independent adapter: its code stays isolated in
+`packages/dsh-plugin`, and it is published by its own npm job. Its version follows the
+unified Mebular release train, so all six npm packages share one version. The plugin is listed in
 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) under **memory**
 (PR [#9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)).
 
@@ -168,11 +168,11 @@ whole, not a separate package repo, so discovery points back here. See the
 
 ## Release and versioning
 
-- The plugin has its own version, `0.1.1`, and its own npm lifecycle.
-- It ships on the **same release train** as Mebular v0.1.1; both packages are at `0.1.1`
-  in this release.
-- It is **not** part of the five-package lockstep (`core`, `service`, `skill`, `mcp`,
-  `fleet`). Those five always share one version; the plugin can move independently.
+- The plugin is an independent adapter: its code is isolated in `packages/dsh-plugin`, and its
+  npm publish runs in its own `publish-dsh` job.
+- All six npm packages (`core`, `service`, `skill`, `mcp`, `fleet`, `dsh-plugin`) share one
+  version from the unified Mebular release train. The plugin is included in every release;
+  no release ships the DSH plugin alone.
 - Publish is idempotent: the `publish-dsh` workflow job reads the version from
   `packages/dsh-plugin/package.json`, skips it if `npm view` already sees that version, and
   otherwise publishes the package. See [the release SOP](../operations/RELEASE.md).

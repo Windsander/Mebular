@@ -5,12 +5,12 @@
 
 当前发布线 v0.1.1（历史记录）：
 
-- 6 个 npm 包统一为 `0.1.1`（5 个 lockstep 包 + `@mebular/dsh-plugin`）；
+- 6 个 npm 包统一为 `0.1.1`（单版本 umbrella：`core` / `service` / `skill` / `mcp` / `fleet` / `dsh-plugin`）；
 - macOS Universal DMG、Windows NSIS x64、Linux AppImage + deb x64（unsigned）；
 - `SHA256SUMS.txt`（仅 GitHub Release 资产生成）。
 
-从下一版本起，`@mebular/dsh-plugin` 仍由独立 npm job 发布，但版本号随发布列车统一 bump
-并由发布 gate 校验；不再需要手工补齐。
+从下一版本起，`@mebular/dsh-plugin` 仍由独立 npm job 发布，但版本号随统一 release train bump，
+六个 npm 包同版本，并由发布 gate 校验；不存在只发布 DSH 插件的批次。
 
 ## 0. 发布对象
 
@@ -21,7 +21,7 @@
 | `@mebular/skill` | `packages/skill` | 行为层：`SKILL.md` / `MEMORY_POLICY.md` / MCP 接入片段 |
 | `@mebular/fleet` | `packages/fleet` | 跨设备多 Agent 协作 |
 | `@mebular/mcp` | `packages/mcp` | MCP server（stdio + Streamable HTTP） |
-| `@mebular/dsh-plugin` | `packages/dsh-plugin` | DeepSeek Harness 插件；独立 npm job 发布，版本随发布列车统一 |
+| `@mebular/dsh-plugin` | `packages/dsh-plugin` | DeepSeek Harness 插件；独立适配器，独立 npm job 发布，版本随统一 release train |
 
 - **版本策略**：6 个可发布包（`core` / `service` / `skill` / `mcp` / `fleet` / `dsh-plugin`）
   共用同一发布版本；`scripts/bump_version.sh` 一次同步全部 manifest 与版本源。
@@ -42,7 +42,7 @@
 
 | 产物 | 来源 | 说明 |
 | --- | --- | --- |
-| 6 个 `.tgz` | verify 的 `release-pack` | 5 个 lockstep + `mebular-dsh-plugin-<version>.tgz` |
+| 6 个 `.tgz` | verify 的 `release-pack` | 六个同版本包：`core` / `service` / `skill` / `mcp` / `fleet` / `dsh-plugin` |
 | `Mebular-<version>-universal.dmg` | `desktop-macos` | macOS Universal（arm64 + x64），unsigned |
 | `Mebular-Setup-<version>.exe` | `desktop-windows` | Windows NSIS x64，unsigned |
 | `Mebular-<version>-x86_64.AppImage` | `desktop-linux` | Linux x64，unsigned |
@@ -63,8 +63,8 @@
 - [ ] **GitHub Actions 权限**：仓库 Settings → Actions → General，Workflow permissions 至少
       勾选 **Read and write permissions**；`release` job 另有 job-level `contents: write`。
 - [ ] **首次发布注意**：`@mebular/core` 虽为仓库根包，仍以普通包发布；其 tarball 携带
-      `packages/fleet/dist`（`files` 已声明）以支撑 `fleet` bin。首次发布会占用 5 个包名，
-      同时占用 `@mebular/dsh-plugin`。
+      `packages/fleet/dist`（`files` 已声明）以支撑 `fleet` bin。首次发布会占用六个包名
+      （含 `@mebular/dsh-plugin`）。
 - [ ] **分支保护**：`main` 保持受保护；发布只走 `release/v*` 分支，勿直接向 `main` 提交版本号。
 - [ ] **2027 迁移计划**：npm 已公布自 **2027-01** 起收紧长期 token 的直接发布路径。R6 应切换到
       **trusted publishing（OIDC）**，让 GitHub Actions 以短期身份发布，不再依赖长期
@@ -75,17 +75,16 @@
 发布是不可逆的，仅在版本号尚未被下游依赖时使用「删除」，否则一律「标记废弃」：
 
 - **npm unpublish（72 小时窗口）**：仅能删除**发布后 72 小时内**、且**无人依赖**的版本；
-  超时或被依赖一律 400。按包执行，lockstep 需 5 个包各跑一次，插件单独一次：
+  超时或被依赖一律 400。六个包各执行一次（同一版本）：
   ```bash
-  npm unpublish @mebular/core@0.2.0     # 重复 core → service → skill → mcp → fleet
-  npm unpublish @mebular/dsh-plugin@0.2.0
+  npm unpublish @mebular/core@0.2.0     # 重复 core → service → skill → mcp → fleet → dsh-plugin
   ```
   同一版本被删除后**不可再以相同版本号重新发布**，后续必须升号。
 - **npm deprecate（常规手段）**：标记问题版本，安装时会打印警告但不阻断：
   ```bash
   npm deprecate @mebular/mcp@0.2.0 "broken: use 0.2.1"
   ```
-  lockstep 建议 5 个包同一条消息一并废弃；插件单独废弃，再发布更高修复版本。
+  建议六个包用同一条消息一并废弃，再发布更高修复版本。
 - **回退 GitHub Release**：
   ```bash
   gh release delete v0.2.0 --yes            # 仅删 Release
@@ -111,10 +110,10 @@ verify（SSOT / build / lint / test / 6 tarballs）
   └─ desktop-linux  ─┘
         │
         ▼（三平台全部成功 + preflight 成功）
-     publish（5 个 lockstep tarball）
+     publish（core/service/skill/mcp/fleet tarball）
         │
         ▼
-     publish-dsh（dsh-plugin tarball）
+     publish-dsh（dsh-plugin tarball，同一版本）
         │
         ▼
      visibility（npm view 六包 + dist-tags.latest；失败不创建 Release）

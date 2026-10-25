@@ -1,8 +1,9 @@
 # Changelog
 
 All notable changes to Mebular are documented here.
-The six release packages share one release version; `@mebular/dsh-plugin` is still published
-by its own npm job, but its manifest is bumped and verified with the rest of the train.
+Mebular uses a single-version umbrella: the six npm packages (`core`, `service`, `skill`, `mcp`,
+`fleet`, `dsh-plugin`) share one release version. `@mebular/dsh-plugin` is an isolated adapter
+published by its own npm job, and it follows the same unified release train.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -26,6 +27,9 @@ next `## [` heading. Keep that section self-contained.
   `npm view <pkg>@<version> version` and `dist-tags.latest` for all six packages before
   creating the GitHub Release. The previous v0.1.1 run could create the Release while a
   package was still propagating.
+- **Single-version umbrella** — all six npm packages share one release version. The DSH
+  adapter keeps its code isolated in `packages/dsh-plugin` and is published by its own npm
+  job, but it follows the unified release train; no release ships the DSH plugin alone.
 - **Release SOP** — the fixed flow is now `release-prep/vX.Y.Z` → packaging dry-run →
   `release/vX.Y.Z` → back-merge `main` → delete release/prep branches. A dry-run-only
   branch cleanup helper is documented for merged remote branches.

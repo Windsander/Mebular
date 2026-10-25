@@ -136,7 +136,7 @@ mebular print-config --client opencode         # MCP config
 <p align="center"><strong>Use with DSH</strong><br>
 Keep the Mebular app running, then install the plugin from npm into DSH's web profile:<br>
 <code>dsh plugin --profile web add @mebular/dsh-plugin@0.1.1</code><br>
-A Mebular sidebar panel embeds the same Console through <code>?embed=dsh</code> (loopback only), and the official MCP client reaches the same graph. The plugin discovers the daemon by <code>daemonUrl &gt; MEBULAR_HTTP_PORT &gt; runtime.json &gt; 7331</code>, so custom ports follow automatically. It has its own version line and is not part of the five-package lockstep. For plugin development, install from <code>packages/dsh-plugin</code> instead.<br>
+A Mebular sidebar panel embeds the same Console through <code>?embed=dsh</code> (loopback only), and the official MCP client reaches the same graph. The plugin discovers the daemon by <code>daemonUrl &gt; MEBULAR_HTTP_PORT &gt; runtime.json &gt; 7331</code>, so custom ports follow automatically. The plugin is an independent adapter with its code isolated in <code>packages/dsh-plugin</code>; it is published by its own npm job, while its version follows the unified release train, so all six npm packages share one version. For plugin development, install from <code>packages/dsh-plugin</code> instead.<br>
 Listed on <a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin">awesome-dsh-plugin</a> under <code>memory</code>.<br>
 <a href="packages/dsh-plugin/README.md">DSH plugin guide →</a> · <a href="docs/integrations/DSH.md">Integration notes →</a></p>
 

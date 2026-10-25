@@ -415,7 +415,7 @@ ctx.plugin(module, {
 1. **npm 发布状态**：`@mebular/dsh-plugin@0.1.0` 随 v0.1.0 release train 发布，使用独立
    版本线；正式安装为 `dsh plugin --profile web add @mebular/dsh-plugin@0.1.0`。插件开发
    仍可从 `./packages/dsh-plugin` 或 GitHub 子目录安装。
-2. **未进官方列表**：`docs/dsh/awesome-dsh-plugin-entry.yml` 是待提交草稿，未提交、未收录。
+2. **官方列表**：已收录于 awesome-dsh-plugin 的 `memory` 分类（[PR #9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)，2026-10-24 合并）；`docs/dsh/awesome-dsh-plugin-entry.yml` 保留为条目源与审计记录。
 3. **仅 loopback**：公网 DSH、HTTPS loopback、非 HTTP 自定义协议不在当前
    `frame-ancestors` 白名单。
 4. **Desktop origin 未在本轮验证**：`@deepseek-ai/dsh-desktop-host` 不在 npm 上，也未
@@ -461,14 +461,16 @@ dsh plugin --profile web remove @mebular/dsh-plugin
 
 ## 14. 发布 / 上架后续
 
+> 2026-10-25 状态：本节的 npm 发布与 awesome-dsh-plugin 收录均已完成（PR [#9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167) 已合并）；以下步骤保留为发布记录。
+
 1. 合并本分支，确认 `main` 上 `packages/dsh-plugin` 可访问。
 2. 按 `docs/operations/RELEASE.md` 的 `publish-dsh` job 发布 npm；v0.1.0 使用独立版本
    `0.1.0`，不随五包 lockstep。
 3. 给仓库加 `dsh-plugin` GitHub topic（代码无法完成）。
 4. 用 `docs/dsh/awesome-dsh-plugin-entry.yml` 向 `awesome-dsh-plugin` 提交**一个**条目；
-   不要直接改目标仓库 README。提交前确认 npm 包可见，未收录前不要写“已上架”。
+   不要直接改目标仓库 README。提交前确认 npm 包可见；本条已完成（PR #9167）。
 5. 确认 `screenshots.json` 与 `assets/icon-180.png` 在 `main` 的 raw URL 可访问；awesome
    的 `icon:` 只接受 GitHub 托管位图，SVG 不接受。
-6. README 已按 v0.1.0 的 npm 安装方式更新；在确认收录前继续写明“未提交、未收录”。
+6. README 已按 v0.1.0 的 npm 安装方式更新；收录后已改为“已收录”。
 7. 后续验证：DSH Desktop origin、HTTPS loopback、DSH 新 preview 版本的 slot/tapIndex、
    系统服务停止链路。

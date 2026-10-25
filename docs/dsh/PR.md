@@ -256,7 +256,7 @@ scheme，需要扩展 CSP 并重跑 E2E。这是合并前仍待确认的风险�
    `docs/dsh/awesome-dsh-plugin-entry.yml` 草稿；不要直接改 README。
 6. 提交前确认 `screenshots.json` 与 `assets/icon-180.png` 在 `main` 的 raw URL 可访问；
    awesome 的 `icon:` 只接受 GitHub 托管位图，SVG 不接受。
-7. 可选：发布到 dsh-market / 其他市场；在确认收录前，文档不要写“已上架”。
+7. 可选：发布到 dsh-market / 其他市场；awesome-dsh-plugin 已收录（PR #9167），其他市场在确认前不要写“已上架”。
 8. 后续验证：DSH Desktop origin、HTTPS loopback、DSH 新 preview 版本的 slot/tapIndex
    兼容性、系统服务停止链路。
 
@@ -300,6 +300,6 @@ dsh plugin --profile web remove @mebular/dsh-plugin
 - [x] 设计文档、插件 README、根 README/README_CN 入口、列表草稿、PR 草稿。
 - [x] 截图与 180px 图标为真实文件，`screenshots.json` 路径有效。
 - [x] npm pack dry-run 包含全部声明产物。
-- [ ] npm 发布 / GitHub Release tarball（合并后）。
-- [ ] `dsh-plugin` topic 与 awesome-dsh-plugin PR（合并后）。
+- [x] npm 发布 / GitHub Release tarball（已随 v0.1.0 发布）。
+- [x] `dsh-plugin` topic 与 awesome-dsh-plugin PR（已合并：[#9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)）。
 - [ ] DSH Desktop origin / HTTPS loopback / 系统服务停止链路（后续）。

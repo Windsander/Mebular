@@ -1,26 +1,18 @@
-# awesome-dsh-plugin 条目草稿（待提交，尚未收录；不直接修改目标仓库）
+# awesome-dsh-plugin 条目（已收录；保留为条目源与审计记录，不直接修改目标仓库）
 #
-# 目标文件：data/plugins/Windsander__Mebular--packages-dsh-plugin.yml
-# 说明：这是 monorepo 子包条目，url 指向 packages/dsh-plugin；name 使用
-# owner/repo#subname。提交前必须确认 main 上该目录可访问。
+# 收录 PR: https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167
+# 合并时间: 2026-10-24
+# 目标文件: data/plugins/Windsander__Mebular--packages-dsh-plugin.yml
+# 说明: 这是 monorepo 子包条目，url 指向 packages/dsh-plugin；name 使用
+# owner/repo#subname。以下字段与目标仓库当前条目保持一致。
 #
-# 提交前检查：
-# 1. PR 已合入 main，且
-#    https://github.com/Windsander/Mebular/tree/main/packages/dsh-plugin 可访问；
-# 2. 仓库已添加 `dsh-plugin` GitHub topic（代码里无法完成）；
-# 3. npm 包 `@mebular/dsh-plugin@0.1.0` 随 v0.1.0 release train 发布（R5 执行）；
-#    提交前用 `npm view @mebular/dsh-plugin@0.1.0 version` 确认 registry 可见；
-#    安装命令：`dsh plugin --profile web add @mebular/dsh-plugin@0.1.0`；
-# 4. 需要 DSH >=0.2.1-rc.2 <0.3.0、Node.js >=22.19；
-# 5. 一次 PR 只提交这一条；确认 category 仍为 memory，描述与实现一致；
-# 6. icon 只接受 GitHub 托管的位图；启用前确认 main 上已有该文件。
-#
-# 可选图标：
-# icon: https://raw.githubusercontent.com/Windsander/Mebular/main/packages/dsh-plugin/assets/icon-180.png
+# 安装: dsh plugin --profile web add @mebular/dsh-plugin@0.1.0
+# 兼容: DSH >=0.2.1-rc.2 <0.3.0, Node.js >=22.19
 
 url: https://github.com/Windsander/Mebular/tree/main/packages/dsh-plugin
 name: Windsander/Mebular#packages/dsh-plugin
 category: memory
+icon: https://raw.githubusercontent.com/Windsander/Mebular/main/packages/dsh-plugin/assets/icon-180.png
 description:
-  en: 'Decentralized, offline-first graph memory and task graph for DSH, with signed facts, multi-device sync, and the shared Mebular Console embedded in a sidebar panel.'
-  zh: '去中心化、离线优先的 DSH 图式记忆与任务图：签名事实、多设备同步，并在侧边栏复用 Mebular 共享控制台。'
+  en: 'Decentralized, offline-first graph memory and task graph for DSH, with signed facts, multi-device sync, and the shared Mebular Console embedded in a sidebar panel. Requires a running Mebular daemon (the Mebular desktop app, or mebular serve from @mebular/core); this plugin only attaches its memory tools and Console panel to it.'
+  zh: '去中心化、离线优先的 DSH 图式记忆与任务图：签名事实、多设备同步，并在侧边栏复用 Mebular 共享控制台。需本机已运行 Mebular 守护进程（Mebular 桌面 App，或 @mebular/core 的 mebular serve）；本插件只把它的记忆工具与控制台面板接入 DSH。'

@@ -48,8 +48,9 @@ dsh plugin --profile web add ./packages/dsh-plugin
 ```
 
 `@mebular/dsh-plugin` 是独立版本线：随 Mebular v0.1.0 release train 发布，但版本号只取自
-`packages/dsh-plugin/package.json`，不进入五包 lockstep。插件尚未提交到 awesome-dsh-plugin，
-也未被其收录。
+`packages/dsh-plugin/package.json`，不进入五包 lockstep。插件已收录于
+[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 的 **memory**
+分类（PR [#9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)）。
 
 包内自带 `cordis.patch.yml`，只插入一条 host row：
 

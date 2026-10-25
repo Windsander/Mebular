@@ -101,6 +101,9 @@ UNINITIALIZED ── create/join ──▶ INITIALIZING ──▶ READY
 
 ## 3. 表面契约
 
+跨表面的状态、capability、reason 与恢复语义见 [`SURFACES.md`](SURFACES.md)；
+本节只列各入口面的结构职责。
+
 ### 3.1 MCP
 
 当前工具面为 **29 个**：13 个记忆工具 + 16 个任务工具。MCP 适配器和 CLI 共用 `TOOL_SPECS` /

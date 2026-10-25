@@ -78,6 +78,11 @@ DSH 会话里的工具名形如 `mcp__mebular__*`（例如某个记忆读写或�
 Mebular 的数据，就说明图已接通。侧边栏 Mebular 面板应显示同一套 Console；它的状态来自
 仅限 loopback 的 `GET /mebular/embed-info`。
 
+即使面板没有打开，Mebular 侧边栏图标也会带一个小状态点：绿色表示已连接，琥珀色表示启动中
+或降级，红色表示未运行，灰色表示首次检查尚未返回。状态点与面板共用同一个轮询和状态源；
+悬停状态点可看到当前状态。共享状态与恢复规则见
+[表面状态契约](../architecture/SURFACES.md)。
+
 如果调用返回 `NOT_INITIALIZED`，先在 Console 里新建 / 加入忆云；同一个 MCP 会话会自动
 恢复，不需要重启守护进程。
 

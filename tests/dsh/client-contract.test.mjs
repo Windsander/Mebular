@@ -96,6 +96,33 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).toContain('升级插件或 Mebular');
   });
 
+  it('sidebar 状态点与面板共用同一个模块级 store，只有一处轮询', () => {
+    expect(source).toContain('function createEmbedInfoStore');
+    expect(source).toContain('const embedInfoStore = createEmbedInfoStore();');
+    expect(source).toContain('function useEmbedInfo()');
+    expect(source).toMatch(/function MebularStatusIcon[\s\S]*?useEmbedInfo\(\)/);
+    expect(source).toMatch(/function MebularPanel[\s\S]*?useEmbedInfo\(\)/);
+    expect(source).toContain('embedInfoStore.refresh()');
+    expect((source.match(/setInterval\(/g) ?? []).length).toBe(1);
+    expect(source).not.toContain('window.setInterval(tick');
+  });
+
+  it('状态点保留可读 title，并继续使用 label 作为 DSH 按钮名称', () => {
+    expect(source).toContain('function statusTitle');
+    expect(source).toContain('title: statusTitle(t, status)');
+    expect(source).toContain("'data-mebular-status': status");
+    expect(source).toContain("label: 'Mebular'");
+    expect(source).toContain("'aria-hidden': 'true'");
+    expect(source).not.toContain('aria-label');
+  });
+
+  it('daemon down 文案说明 MCP 工具暂不可用且会自动恢复', () => {
+    expect(source).toContain('MCP tools are unavailable until it starts');
+    expect(source).toContain('MCP 工具暂时不可用');
+    expect(source).toContain('tools recover automatically');
+    expect(source).toContain('工具会自动恢复');
+  });
+
   it('不 import @mebular/* 或 Console 资源', () => {
     const specifiers = [
       ...[...source.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((match) => match[1]),

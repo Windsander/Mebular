@@ -83,6 +83,12 @@ memory read/write or task tool). Calling one and getting Mebular data back means
 is connected. The sidebar Mebular panel should show the same Console; its status comes
 from the loopback-only `GET /mebular/embed-info` route.
 
+The Mebular sidebar icon carries a small status dot even while the panel is closed: green
+means connected, amber means starting or degraded, red means offline, and gray means the
+first check is still pending. The dot and the panel share one poll and one status source;
+hovering the dot shows the current status. See the
+[surface contract](../architecture/SURFACES.md) for the shared state and recovery rules.
+
 If a call returns `NOT_INITIALIZED`, finish creating or joining a Cloud in the Console;
 the same MCP session recovers without restarting the daemon.
 

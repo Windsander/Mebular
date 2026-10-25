@@ -12,6 +12,8 @@
 - 用官方 `@deepseek-ai/dsh-mcp-client` 连接 Mebular 的 `/mcp`，把记忆工具注册给 DSH；
   连接、重连、工具发现与注册都归官方 peer，插件只负责按同一套 daemon 发现结果挂载；
 - 在 DSH 侧边栏加入 **Mebular** 面板，用 iframe 加载共享 Console 的 `?embed=dsh`；
+- 在侧边栏图标上显示状态点（绿=已连接、琥珀=启动中/降级、红=未运行、灰=待检查），
+  面板关闭时也能看到；状态点与面板共用同一个 store 和轮询；
 - 提供只读的 `GET /mebular/embed-info`，供面板判断 daemon 状态与可嵌入性；
 - 默认 `attach` 只探测已有 daemon；可选 `managed` 在 daemon 不存在时启动并托管一个
   `mebular serve` 子进程。

@@ -47,8 +47,8 @@ dsh plugin --profile web add ./packages/dsh-plugin
 安装后 `$DSH_HOME/profiles/web/package.json` 的 `dsh.profile.bundles` 会包含
 `@mebular/dsh-plugin`。重启 DSH Web 后，侧边栏出现 Mebular 图标；点击后进入全局面板。
 
-> `@mebular/dsh-plugin` 是**独立版本线**：v0.1.1 与 Mebular v0.1.1 同一 release train，
-> 但版本号只由 `packages/dsh-plugin/package.json` 决定，不进入五包 lockstep。已收录于
+> `@mebular/dsh-plugin` 由独立 npm job 发布；从 v0.1.1 起版本随 Mebular release train
+> 统一 bump，并由 `scripts/verify-release-version.mjs` 校验，不再单独手工维护。已收录于
 > [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 的 `memory`
 > 分类（PR [#9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)）。
 
@@ -335,11 +335,11 @@ npm run verify:dsh-plugin
 ## 发布状态
 
 - 版本：`0.1.1`
-- npm：`@mebular/dsh-plugin@0.1.1`（随 Mebular v0.1.1 release train，独立版本线）
+- npm：`@mebular/dsh-plugin@0.1.1`（随 Mebular v0.1.1 release train）
 - 官方插件列表：已收录（[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 的 `memory` 分类，PR [#9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)）
 - 正式安装：`dsh plugin --profile web add @mebular/dsh-plugin@0.1.1`
 - 开发安装：`dsh plugin --profile web add ./packages/dsh-plugin`
-- 版本线：不进入 `core` / `service` / `skill` / `mcp` / `fleet` 五包 lockstep
+- 版本线：由独立 npm job 发布，但 manifest 随 `core` / `service` / `skill` / `mcp` / `fleet` 一起 bump 与校验
 
 ## License
 

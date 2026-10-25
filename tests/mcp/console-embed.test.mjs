@@ -2,9 +2,11 @@
 // /app/embed/info 匿名只读且不含敏感信息，并且在 bearer/OAuth 鉴权之前。
 
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
   APP_VERSION,
   buildEmbedInfo,
@@ -12,6 +14,11 @@ import {
   startHttpServer,
 } from '../../packages/mcp/src/serve.mjs';
 import { readRuntimeFile } from '../../packages/mcp/src/runtime-file.mjs';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const rootVersion = JSON.parse(
+  readFileSync(join(here, '..', '..', 'package.json'), 'utf8'),
+).version;
 
 function headerRecorder() {
   const headers = {};
@@ -115,7 +122,7 @@ describe('P1 console embed：真实 HTTP server', () => {
       loopback: true,
       capabilities: { embedConsole: true },
     });
-    expect(APP_VERSION).toBe('0.1.1');
+    expect(APP_VERSION).toBe(rootVersion);
     const serialized = JSON.stringify(info).toLowerCase();
     for (const word of ['token', 'secret', 'key', 'config', 'home']) {
       expect(serialized).not.toContain(word);

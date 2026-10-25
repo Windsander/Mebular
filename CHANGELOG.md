@@ -1,23 +1,35 @@
 # Changelog
 
 All notable changes to Mebular are documented here.
-The five lockstep packages always share one version; `@mebular/dsh-plugin` keeps its own
-version line.
+The six release packages share one release version; `@mebular/dsh-plugin` is still published
+by its own npm job, but its manifest is bumped and verified with the rest of the train.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Version headings carry the `v` prefix (`## [v0.1.1]`) because it is the release SSOT:
-> the branch name (`release/v0.1.1`), the five lockstep `package.json` versions and the Git
-> tag must all agree with this section. `@mebular/dsh-plugin` keeps its own version line but
-> ships `0.1.1` with this release.
+> the branch name (`release/vX.Y.Z`), the six `package.json` versions, the locks, the MCP
+> version source and the Git tag must all agree with this section.
 
 The GitHub Release body is extracted from this file: everything between `## [v0.1.1]` and the
 next `## [` heading. Keep that section self-contained.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Release engineering** — `scripts/bump_version.sh` now bumps all six release packages,
+  both lockfiles, the desktop `APP_VERSION` and the single MCP version source in
+  `packages/mcp/src/version.mjs`. `npm run verify:release-version` checks the same SSOT
+  locally and in the publish workflow.
+- **npm visibility gate** — after `publish` / `publish-dsh`, the workflow polls
+  `npm view <pkg>@<version> version` and `dist-tags.latest` for all six packages before
+  creating the GitHub Release. The previous v0.1.1 run could create the Release while a
+  package was still propagating.
+- **Release SOP** — the fixed flow is now `release-prep/vX.Y.Z` → packaging dry-run →
+  `release/vX.Y.Z` → back-merge `main` → delete release/prep branches. A dry-run-only
+  branch cleanup helper is documented for merged remote branches.
+
 
 ## [v0.1.1] - 2026-10-25
 

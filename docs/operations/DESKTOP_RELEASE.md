@@ -226,9 +226,10 @@ AppImage 需要 FUSE；没有 FUSE 时可使用 `--appimage-extract-and-run`。d
 | preflight（npm whoami） | ❌ | ✅ |
 | desktop matrix（三平台） | ✅ | ✅ |
 | npm publish（5 + 1） | ❌ | ✅ |
+| npm visibility gate（6 包 + latest） | ❌ | ✅ |
 | GitHub Release + 资产 | ❌ | ✅ |
 | `SHA256SUMS.txt` | ❌（仅 artifacts） | ✅ |
-| 版本来源 | 根 `package.json` | 分支名 `release/vX.Y.Z` |
+| 版本来源 | prep 分支根 `package.json` | 分支名 `release/vX.Y.Z` |
 
 dry-run 的 artifacts：
 
@@ -238,7 +239,8 @@ dry-run 的 artifacts：
 - `desktop-linux`：AppImage + deb。
 
 正式流水线中，`publish` / `publish-dsh` 依赖三个 desktop job 全部成功，因此**安装包没全绿
-就不会发 npm**。`release` job 再下载三平台 artifacts，校验每种扩展名恰好 1 个，生成
+就不会发 npm**。`visibility` job 再确认六包均可 `npm view` 且 `dist-tags.latest` 指向本次
+版本；只有它通过后，`release` job 才下载三平台 artifacts，校验每种扩展名恰好 1 个，生成
 `SHA256SUMS.txt`，创建/更新 GitHub Release 并 `--clobber` 上传。
 
 本地或 CI 都可以对解包目录跑 packaged runtime smoke：

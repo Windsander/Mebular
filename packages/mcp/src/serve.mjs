@@ -19,6 +19,10 @@ import { attachFleetEvents, resolveFleetNamespace } from './fleet-events.mjs';
 import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 import { configPath } from './config.mjs';
 import { createServiceFacade } from './service-facade.mjs';
+import { APP_VERSION } from './version.mjs';
+
+// 兼容既有导入方：APP_VERSION 的真源是 ./version.mjs。
+export { APP_VERSION } from './version.mjs';
 
 // ---------- 控制台配置写入（schema 驱动：editable 可写 / status-only 只读 / internal 默认不可写） ----------
 // 单一真源：packages/mcp/src/config-schema.mjs。写入策略（原子写 + .bak 备份；全部需重启生效）：
@@ -220,8 +224,7 @@ function settleWithin(promise, ms) {
 }
 
 // /healthz、/app/embed/info 与 <home>/runtime.json 共用的对外版本号与 embed 协议版本。
-// 单一真源：不要在 buildEmbedInfo / runtime 写入处再写字面量。
-export const APP_VERSION = '0.1.1';
+// APP_VERSION 的唯一真源是 ./version.mjs；不要在 buildEmbedInfo / runtime 写入处再写字面量。
 export const EMBED_PROTOCOL = 1;
 
 // ---------- 控制台静态托管（D1） ----------

@@ -91,11 +91,12 @@ UNINITIALIZED ── create/join ──▶ INITIALIZING ──▶ READY
 
 ### 2.5 交付面
 
-- 5 个 lockstep npm 包：`@mebular/core`、`@mebular/service`、`@mebular/fleet`、`@mebular/mcp`、
-  `@mebular/skill`；根包提供 `mebular` + `fleet` 双 bin。
-- `@mebular/dsh-plugin` 独立版本线，与 v0.1.1 同批发布，但不进入五包 lockstep。
+- 6 个 npm 包统一为同一发布版本：`@mebular/core`、`@mebular/service`、`@mebular/fleet`、
+  `@mebular/mcp`、`@mebular/skill`、`@mebular/dsh-plugin`；根包提供 `mebular` + `fleet` 双 bin。
+- `@mebular/dsh-plugin` 代码隔离在 `packages/dsh-plugin`，由独立 npm job 发布，但版本随统一
+  release train；不存在 DSH-only release。
 - `packages/console` 与 `apps/desktop` 为 private 工作包，不单独发布；控制台随根包/守护分发。
-- Electron 桌面壳包含窗口、托盘、守护托管和云切换；v0.1.1 已纳入三平台 **unsigned** 安装包
+- Electron 桌面壳包含窗口、托盘、守护托管和云切换；v0.1.2 已纳入三平台 **unsigned** 安装包
   （macOS Universal DMG、Windows NSIS x64、Linux AppImage/deb x64）。安装包 runtime 来自与
   npm 发布同一批 verify tarball，并自带 Electron。签名、公证、自动更新在后续版本处理。
 

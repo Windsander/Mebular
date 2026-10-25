@@ -8,31 +8,105 @@ published by its own npm job, and it follows the same unified release train.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-> Version headings carry the `v` prefix (`## [v0.1.1]`) because it is the release SSOT:
+> Version headings carry the `v` prefix (`## [vX.Y.Z]`) because it is the release SSOT:
 > the branch name (`release/vX.Y.Z`), the six `package.json` versions, the locks, the MCP
 > version source and the Git tag must all agree with this section.
 
-The GitHub Release body is extracted from this file: everything between `## [v0.1.1]` and the
-next `## [` heading. Keep that section self-contained.
+The GitHub Release body is extracted from this file: everything between the release's
+`## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
-## [Unreleased]
+## [v0.1.2] - 2026-10-25
+
+v0.1.2 is a DSH usability release on the v0.1.x line. It makes Mebular's availability
+visible in the DSH sidebar and to the Agent, and documents the state contract shared by the
+desktop app, Console, CLI, MCP clients and DSH. All six npm packages and the desktop app
+ship as `0.1.2`; the DSH adapter stays code-isolated but follows the same release train, so
+there is no DSH-only release. Desktop installers remain **unsigned**, and auto-update is
+not part of this release.
+
+### Added
+
+- **DSH sidebar status dot** — the Mebular sidebar icon now carries a status dot even while
+  the panel is closed: green when the daemon is connected, amber while starting or degraded,
+  red when offline, and gray before the first check returns. Hover text states the current
+  status; color is never the only signal.
+- **Agent-visible daemon status in DSH** — the host registers one DSH system-prompt section,
+  `mebular:status`. While the daemon is `up` its text is empty, so it adds no prompt tokens.
+  When the daemon is `down`, the Agent is told that Mebular memory is unavailable, asked to
+  start the Mebular app or run `mebular serve`, and told not to claim memory is available.
+  `starting`, `managed_cli_missing` and `managed_start_failed` carry their own short recovery
+  text. The hint is derived from the same lifecycle snapshot as the MCP bridge, not a second
+  poller, and DSH is notified only when the text changes.
+- **Shared surface state contract** — `docs/architecture/SURFACES.md` defines the shared
+  status vocabulary, capabilities, stable reason codes and recovery paths, with a surface
+  matrix for the Desktop App, Console, CLI, MCP clients and DSH. It records known gaps
+  instead of adding new wire fields.
 
 ### Changed
 
+- **One poll for the DSH icon and panel** — the DSH client keeps a module-level embed-info
+  store; the sidebar icon and the panel read the same status and share one polling loop.
+  The panel remains the detailed view, and both recover automatically when the daemon comes
+  back.
 - **Release engineering** — `scripts/bump_version.sh` now bumps all six release packages,
   both lockfiles, the desktop `APP_VERSION` and the single MCP version source in
   `packages/mcp/src/version.mjs`. `npm run verify:release-version` checks the same SSOT
-  locally and in the publish workflow.
-- **npm visibility gate** — after `publish` / `publish-dsh`, the workflow polls
-  `npm view <pkg>@<version> version` and `dist-tags.latest` for all six packages before
-  creating the GitHub Release. The previous v0.1.1 run could create the Release while a
-  package was still propagating.
-- **Single-version umbrella** — all six npm packages share one release version. The DSH
-  adapter keeps its code isolated in `packages/dsh-plugin` and is published by its own npm
-  job, but it follows the unified release train; no release ships the DSH plugin alone.
-- **Release SOP** — the fixed flow is now `release-prep/vX.Y.Z` → packaging dry-run →
-  `release/vX.Y.Z` → back-merge `main` → delete release/prep branches. A dry-run-only
-  branch cleanup helper is documented for merged remote branches.
+  locally and in the publish workflow. The npm visibility gate polls all six packages and
+  `dist-tags.latest` before creating a GitHub Release, and the release SOP is now
+  `release-prep/vX.Y.Z` → packaging dry-run → `release/vX.Y.Z` → back-merge `main` →
+  branch cleanup.
+- **Single-version umbrella** — all six npm packages share one release version.
+  `@mebular/dsh-plugin` keeps its code isolated in `packages/dsh-plugin` and is published by
+  its own npm job, but it follows the unified release train; no release ships the DSH plugin
+  alone.
+
+### Verified
+
+- **Real DSH Web session** — with the daemon up, the sidebar dot is green and the shared
+  Console loads in the panel. Stopping the daemon turns the dot red and shows the offline
+  panel guidance; starting it again returns the dot to green and remounts the MCP tools
+  without restarting DSH. The `mebular:status` prompt is empty while the daemon is `up`,
+  switches to the down guidance when it stops, and clears again after recovery.
+
+### Desktop installers (unsigned)
+
+- Rebuilt installers for macOS (Universal DMG), Windows (NSIS x64) and Linux (AppImage + deb
+  x64). `SHA256SUMS.txt` is published with them; verify it before installing.
+- v0.1.2 is **unsigned and not notarized**. On macOS, right-click the app and choose
+  **Open** (or **System Settings → Privacy & Security → Open Anyway**). On Windows, choose
+  **More info → Run anyway**.
+- **No auto-update** in this release. Signing, notarization and auto-update remain follow-up
+  work.
+
+### Install
+
+- Desktop: download from [GitHub Releases v0.1.2](https://github.com/Windsander/Mebular/releases/tag/v0.1.2).
+- CLI and server: `npm install -g @mebular/core@0.1.2`.
+- DSH plugin: `dsh plugin --profile web add @mebular/dsh-plugin@0.1.2` (keep the Mebular app
+  or `mebular serve` running; the plugin uses HTTP MCP).
+
+### 中文摘要
+
+- **DSH 侧边栏状态点** —— 面板关闭时图标也带状态点：绿=已连接，琥珀=启动中/降级，
+  红=未运行，灰=首次检查尚未返回；悬停显示当前状态，颜色不是唯一信息。
+- **Agent 可见状态** —— DSH 注册唯一的 system prompt section `mebular:status`。daemon
+  `up` 时文本为空，不增加 token；`down` 时明确告诉 Agent 记忆不可用、请用户启动 Mebular
+  App 或运行 `mebular serve`，且不得声称记忆可用；`starting`、`managed_cli_missing`、
+  `managed_start_failed` 各有简短恢复提示。提示复用 MCP bridge 的同一份生命周期快照，
+  不新增轮询，只在文本变化时通知 DSH。
+- **共享状态契约** —— 新增 `docs/architecture/SURFACES.md`，统一状态词汇、能力、稳定
+  reason 码与恢复路径，并给出 Desktop App / Console / CLI / MCP / DSH 的 surface matrix；
+  只记录已知缺口，不新增 wire 字段。
+- **图标与面板共用一次轮询** —— DSH client 使用模块级 embed-info store，侧边栏图标与面板
+  读取同一状态、共用同一个轮询；daemon 恢复后两者自动恢复。
+- **真实 DSH Web 验证** —— daemon 运行时为绿点并加载共享 Console；停止 daemon 后变红点并
+  显示离线引导；重新启动后恢复绿点，MCP 工具自动重挂，无需重启 DSH。system prompt 在
+  `up` 时为空，掉线时切换为恢复提示，恢复后再次清空。
+- **版本统一** —— 六个 npm 包与桌面 App 全部为 `0.1.2`。DSH 适配器代码隔离在
+  `packages/dsh-plugin`、由独立 npm job 发布，但版本随统一 release train；不存在
+  DSH-only release。
+- **桌面安装包** —— 三平台 unsigned 安装包，附 `SHA256SUMS.txt`；未签名、未公证，也不包含
+  自动更新。签名、公证与自动更新留待后续版本。
 
 
 ## [v0.1.1] - 2026-10-25

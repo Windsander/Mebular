@@ -3,9 +3,9 @@
 面向 `@mebular/*` npm 包与三平台桌面安装包的发布操作手册。核心约束：**分支名即版本号
 （SSOT）**、**先构建安装包再发 npm**、**幂等发布**、**按 ref 串行**。
 
-当前发布线 v0.1.1（历史记录）：
+当前发布线 v0.1.2：
 
-- 6 个 npm 包统一为 `0.1.1`（单版本 umbrella：`core` / `service` / `skill` / `mcp` / `fleet` / `dsh-plugin`）；
+- 6 个 npm 包统一为 `0.1.2`（单版本 umbrella：`core` / `service` / `skill` / `mcp` / `fleet` / `dsh-plugin`）；
 - macOS Universal DMG、Windows NSIS x64、Linux AppImage + deb x64（unsigned）；
 - `SHA256SUMS.txt`（仅 GitHub Release 资产生成）。
 
@@ -189,7 +189,8 @@ npm run verify:release-version                  # 只读校验；也可带 --ver
 5. 改写 `packages/mcp/src/version.mjs` 的 `APP_VERSION`（MCP 唯一版本源）；
 6. 在 `CHANGELOG.md` 顶部插入 `## [v0.2.0] - <date>` 章节（已存在则跳过，幂等）。
 
-> v0.1.1 的版本号与 CHANGELOG 章节已存在，**不需要**再跑 `bump_version.sh`。
+> 若版本号与 CHANGELOG 章节已存在（例如当前 `release-prep/v0.1.2`），**不需要**再跑
+> `bump_version.sh`；只有从新版本开始时才执行上面的 bump。
 
 ### 3.2 本地预检（推荐）
 
@@ -380,7 +381,7 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 - macOS 打开 DMG 后能启动；Windows NSIS 能安装并启动；Linux AppImage 可执行，deb 可安装；
 - 首次启动能进入锁定控制台，`/healthz` 正常；
 - 全部为 **unsigned** 发布：macOS Gatekeeper 与 Windows SmartScreen 会拦截，按 Release
-  notes 的绕过步骤操作。签名、公证与自动更新不在 v0.1.1 范围。
+  notes 的绕过步骤操作。签名、公证与自动更新不在 v0.1.2 范围。
 
 安装包内的 runtime 结构、本地打包与签名后续见
 [`DESKTOP_RELEASE.md`](DESKTOP_RELEASE.md)。

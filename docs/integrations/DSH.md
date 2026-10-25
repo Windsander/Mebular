@@ -40,7 +40,7 @@ surface: `/healthz`, `/app/embed/info`, `/mcp` and `/console/?embed=dsh`.
 Install the plugin from npm into DSH's web profile:
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.1.1
+dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
 ```
 
 For plugin development, install from the repository checkout instead:

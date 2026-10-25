@@ -51,8 +51,9 @@ dsh plugin --profile web add ./packages/dsh-plugin
 
 `@mebular/dsh-plugin` has its own version line: it ships with the Mebular v0.1.0 release
 train, but its version comes only from `packages/dsh-plugin/package.json` and it is not part
-of the five-package lockstep. The plugin is not yet submitted to, or listed by,
-awesome-dsh-plugin.
+of the five-package lockstep. The plugin is listed in
+[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) under **memory**
+(PR [#9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)).
 
 The package ships `cordis.patch.yml` with exactly one host row:
 

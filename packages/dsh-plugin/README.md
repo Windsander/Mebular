@@ -95,6 +95,11 @@ DSH 启动失败。
 | `attach`（默认） | 复用，只探测 | 不启动，状态 `down`，面板显示启动引导 | 不停止任何进程 |
 | `managed` | 复用，不启动（`managed: false`） | 解析 CLI 后启动 `mebular serve --port <port>`，有界等待 `/healthz`；失败时清理自己的 child | 只对自己启动的 child 发 `SIGTERM`，2s 后仍未退出则 `SIGKILL` |
 
+MCP bridge 只在 lifecycle 状态为 `up` 时挂载官方 client。`starting` 与 `down` 时不挂载，
+也不会保留上一次的工具；daemon 掉线后 host 等待官方 client 子 fiber dispose（工具随之注销），
+daemon 恢复后由健康检查自动重新挂载，不需要重启 DSH。`managed` 启动失败或 CLI 缺失时只记录
+稳定原因，不会提前挂载 MCP。
+
 `managed` 是子进程兜底，不是服务安装：
 
 - 不 import `@mebular/service`，不调用系统服务管理器；
@@ -124,9 +129,10 @@ DSH 启动失败。
     panel: false
 ```
 
-`panel: false` 时 sidebar 入口与 `main` 面板都不注册；`/mebular/embed-info` 仍可访问，官方
-MCP client 仍在 `apply` 时挂载。host 通过 DSH `webServer.tapIndex` 注入
-`window.__MEBULAR_DSH__={"panel":false}`，client 在 `apply` 时读取。
+`panel: false` 时 sidebar 入口与 `main` 面板都不注册；`/mebular/embed-info` 仍可访问，MCP
+bridge supervisor 也照常运行：daemon 健康时自动挂载官方 client，掉线时注销工具，恢复后再挂载。
+host 通过 DSH `webServer.tapIndex` 注入 `window.__MEBULAR_DSH__={"panel":false}`，client 在
+`apply` 时读取。
 
 ### 端口与环境变量
 
@@ -143,9 +149,11 @@ MCP client 仍在 `apply` 时挂载。host 通过 DSH `webServer.tapIndex` 注�
 MEBULAR_HTTP_PORT=7332 dsh --profile web
 ```
 
-`managed` 启动的 `--port` 取自最终解析出的 `daemonUrl` 端口。MCP client 不自己读端口、
-不自己重连：连接、重连与工具注册全部归官方 peer；daemon 未启动时它按
-`failOnStartupError: false` 等待并重试。
+`managed` 启动的 `--port` 取自最终解析出的 `daemonUrl` 端口。MCP client 不自己读端口：
+host 只在对 lifecycle 健康探测为 `up` 时，用同一个 origin 挂载官方 peer。每挂载一次，
+连接、重连与工具注册归官方 peer；host 在 daemon 掉线时 dispose 该子 fiber，工具立即注销，
+daemon 恢复后重新挂载。因此 `starting` / `down` 期间不存在“静默等待”的 MCP 工具，日志会给出
+`mcp bridge unavailable (<reason>)` 或 `mcp bridge detached (<reason>)`。
 
 ## 验证
 
@@ -237,7 +245,8 @@ DSH host                         Mebular daemon
 - Console 只有一套实现，由 Mebular daemon 提供；DSH 只负责 iframe 容器。
 - 插件不打开 `store.jsonl`、不读密钥/token、不写 `~/.mebular`。
 - 插件只动态 import 官方 `@deepseek-ai/dsh-mcp-client` peer；MCP 连接、重连、工具发现与
-  注册仍归该官方包，host 只负责用发现的 origin 挂载它，不实现 MCP 客户端。
+  注册仍归该官方包。host 只负责在 lifecycle 为 `up` 时用发现的 origin 挂载它，并在掉线时
+  dispose 子 fiber；host 不实现 MCP 客户端。
 - 面板与 MCP 桥共享同一次 daemon 解析；不会出现“面板连 7332、工具连 7331”。
 
 ## 安全
@@ -264,13 +273,14 @@ DSH host                         Mebular daemon
 ## 已知限制
 
 - **默认不托管**：默认 `attach` 不启动、不停止 Mebular。daemon 未运行时面板显示引导与
-  “在浏览器打开 Console”，官方 MCP client 保持等待/重连。只有显式 `lifecycle: managed`
-  才会启动子进程，且只停止自己启动的 child。
+  “在浏览器打开 Console”，MCP bridge 记录 `mcp bridge unavailable (daemon_unreachable)` 且
+  不挂载工具；daemon 启动后自动挂载并恢复工具，无需重启 DSH。只有显式
+  `lifecycle: managed` 才会启动子进程，且只停止自己启动的 child。
 - **仅 loopback 可嵌入**：DSH 或 Mebular 任一侧不在 loopback（例如公网 HTTPS DSH）时，
   面板只显示占位页。这是有意设计；当前 `frame-ancestors` 也只放行 HTTP loopback。
 - **MCP peer 由 DSH 提供**：`@deepseek-ai/dsh-mcp-client` 是 peerDependency，不在插件内
-  打包。正常 DSH 安装下 host 能在 `apply` 时解析并挂载；在 Jest、普通 Node 或缺少该 peer
-  的宿主里，`import` 会失败并记录 `mcp client mount failed (ERR_MODULE_NOT_FOUND)`，面板
+  打包。正常 DSH 安装下 host 能在 daemon 健康后解析并挂载；在 Jest、普通 Node 或缺少该
+  peer 的宿主里，`import` 会失败并记录一次 `mcp bridge unavailable (peer_missing)`，面板
   与 `/mebular/embed-info` 不受影响，但 MCP 工具不可用。
 - **runtime home**：host 用 `MEBULAR_HOME`（缺省 `~/.mebular`）定位 runtime.json；如果 DSH
   与 daemon 运行在不同 home，自动发现不会命中，请显式设置 `daemonUrl` 或

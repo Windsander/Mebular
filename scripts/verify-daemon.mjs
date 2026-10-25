@@ -51,6 +51,19 @@ async function waitFor(fn, timeoutMs, pollMs = 100) {
   }
   return fn();
 }
+function parseLine(text, prefix) {
+  return text.split('\n').find((line) => line.startsWith(prefix)) ?? null;
+}
+/** 解析完整可 JSON 的 ready 行；行未收全/损坏时返回 null。 */
+function parseReadyLine(text, marker) {
+  const line = parseLine(text, `${marker} `);
+  if (!line) return null;
+  try {
+    return JSON.parse(line.slice(marker.length + 1));
+  } catch {
+    return null;
+  }
+}
 function firstJson(text) {
   const a = text.indexOf('{');
   const b = text.lastIndexOf('}');
@@ -384,10 +397,28 @@ try {
   check('quickstart --daemon：守护 home 配置（root 身份 + joinService + 订阅）', daemonCfg.identity?.mode === 'root' && daemonCfg.joinService?.enabled === true && Array.isArray(daemonCfg.sync?.namespaces), { identity: daemonCfg.identity, joinService: daemonCfg.joinService });
   // 用写好的 config.json 默认值启动守护（host/port/auth/tokensFile 来自配置）
   const dserve = startCli({ ...process.env, MEBULAR_HOME: homeD }, ['serve']);
-  const dready = await waitFor(() => /SERVE_READY/.test(dserve.state.out) || /JOIN_READY/.test(dserve.state.err + dserve.state.out), 15000);
+  // 只等 SERVE_READY：JOIN_READY 在 HTTP 监听前就打印，不能当作 HTTP 就绪信号。
+  const dready = await waitFor(() => Boolean(parseReadyLine(dserve.state.out, 'SERVE_READY')), 15000);
+  const dReady = parseReadyLine(dserve.state.out, 'SERVE_READY');
+  const dHealth = dready ? await waitFor(async () => {
+    try {
+      const res = await fetch(`http://127.0.0.1:${daemonPort}/healthz`, { signal: AbortSignal.timeout(1000) });
+      await res.text().catch(() => {});
+      return res.status === 200;
+    } catch {
+      return false;
+    }
+  }, 5000) : false;
   const dToken = fleetCfg.daemon.token;
   const dcall = await fetch(`http://127.0.0.1:${daemonPort}/app/nodes`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${dToken}` }, body: JSON.stringify({ type: 'app_note', namespace: 'tasks', content: { text: 'unified' } }) }).catch(() => ({ status: 0 }));
-  check('写好的守护 home 可 serve（配置默认 port/auth）+ app 调用通', dready && dcall.status === 200, { ready: dready, status: dcall.status });
+  const dOut = dserve.state.out + dserve.state.err;
+  check('写好的守护 home 可 serve（配置默认 port/auth）+ app 调用通', dready && dHealth && dReady?.port === daemonPort && dcall.status === 200, {
+    ready: dready, health: dHealth, port: dReady?.port ?? null, expectedPort: daemonPort, status: dcall.status,
+    serveReady: parseLine(dserve.state.out, 'SERVE_READY'),
+    joinReady: parseLine(dOut, 'JOIN_READY'),
+    exitCode: dserve.child.exitCode,
+    err: dserve.state.err.trim().slice(-300),
+  });
   dserve.child.kill('SIGKILL');
 
   console.log('== C3① 单机：守护 + fleet 客户端（daemon 模式）+ 任务往返 ==');

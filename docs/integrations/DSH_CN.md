@@ -79,7 +79,13 @@ Mebular 的数据，就说明图已接通。侧边栏 Mebular 面板应显示同
 仅限 loopback 的 `GET /mebular/embed-info`。
 
 如果调用返回 `NOT_INITIALIZED`，先在 Console 里新建 / 加入忆云；同一个 MCP 会话会自动
-恢复，不需要重启守护进程。如果 App 根本没运行，请先启动它 —— `attach` 不会替你启动。
+恢复，不需要重启守护进程。
+
+守护进程未运行时，插件根本不会挂载 MCP client，因此不存在需要等待或调用的
+`mcp__mebular__*` 工具。面板仍会加载并显示引导，日志会给出
+`mcp bridge unavailable (daemon_unreachable): start the Mebular app or run "mebular serve"`。
+启动守护进程（或运行 `mebular serve`）后，插件会在下一次健康检查时自动挂载工具，面板也随
+之恢复，不需要重启 DSH。`attach` 永远不会替你启动守护进程。
 
 ## daemon 发现与端口
 
@@ -106,10 +112,13 @@ MEBULAR_HTTP_PORT=7332 dsh --profile web
 ## 生命周期：attach 或 managed
 
 `attach` 是默认值：只探测 `/healthz`，绝不启动或停止进程。没有 daemon 时，面板显示引导，
-官方 MCP client 等待/重连。
+MCP bridge 不挂载，日志给出稳定的 `daemon_unreachable` 提示。daemon 启动后自动挂载；
+daemon 停止后 dispose 子 fiber 并注销工具。
 
 `managed` 复用健康 daemon；没有 daemon 时只启动一个
-`mebular serve --port <port>` 子进程，等待 `/healthz`，dispose 时只停止这个 child：
+`mebular serve --port <port>` 子进程，等待 `/healthz`，dispose 时只停止这个 child。
+child 处于 `starting` 时不挂载 MCP bridge；`managed_start_failed` / `managed_cli_missing`
+后也不挂载，并记录对应的稳定 reason。daemon 变为健康后自动挂载，不需要重启 DSH：
 
 ```yaml
 - id: mebular

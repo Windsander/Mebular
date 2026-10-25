@@ -84,8 +84,14 @@ is connected. The sidebar Mebular panel should show the same Console; its status
 from the loopback-only `GET /mebular/embed-info` route.
 
 If a call returns `NOT_INITIALIZED`, finish creating or joining a Cloud in the Console;
-the same MCP session recovers without restarting the daemon. If the app is not running at
-all, start it first — `attach` does not start it for you.
+the same MCP session recovers without restarting the daemon.
+
+When no daemon is running, the plugin does not mount the MCP client at all, so there are no
+`mcp__mebular__*` tools to wait on or call. The panel still loads and shows guidance, and the
+log reports `mcp bridge unavailable (daemon_unreachable): start the Mebular app or run
+"mebular serve"`. Start the daemon (or run `mebular serve`); the plugin discovers it on the
+next health check, mounts the tools automatically, and the panel recovers without restarting
+DSH. `attach` never starts the daemon for you.
 
 ## Daemon discovery and ports
 
@@ -114,10 +120,15 @@ There is no separate MCP URL to edit.
 ## Lifecycle: attach or managed
 
 `attach` is the default: probe `/healthz` only, never start or stop a process. If no
-daemon is running, the panel shows guidance and the official MCP client waits/reconnects.
+daemon is running, the panel shows guidance, the MCP bridge stays unmounted, and the log
+reports a stable `daemon_unreachable` notice. When the daemon starts, the bridge mounts
+automatically; when it stops, the bridge fiber is disposed and its tools are unregistered.
 
 `managed` reuses a healthy daemon, or starts one `mebular serve --port <port>` child when
-none is running, waits for `/healthz`, and stops only that child on dispose:
+none is running, waits for `/healthz`, and stops only that child on dispose. The MCP bridge
+is not mounted while the child is `starting`, and is not mounted after
+`managed_start_failed` / `managed_cli_missing`; those states are logged with their stable
+reason. Once the daemon becomes healthy, the bridge mounts without a DSH restart.
 
 ```yaml
 - id: mebular

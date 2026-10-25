@@ -36,6 +36,7 @@ const DEFAULT_CACHE_TTL_MS = 1000;
 const DEFAULT_MANAGED_START_TIMEOUT_MS = 20000;
 const DEFAULT_MANAGED_POLL_INTERVAL_MS = 500;
 const DEFAULT_MANAGED_KILL_GRACE_MS = 2000;
+const DEFAULT_BRIDGE_POLL_INTERVAL_MS = 2000;
 const DEFAULT_CLI_NAME = 'mebular';
 const RUNTIME_FILE = 'runtime.json';
 const MAX_LOG_LINE = 500;
@@ -1257,14 +1258,35 @@ export function injectPanelGlobal(html, panel) {
 }
 
 /**
+ * Dispose a cordis fiber (or a plain disposer returned by a test double).
+ * Never throws.
+ * @param {unknown} fiber
+ * @returns {Promise<void>}
+ */
+async function disposeFiber(fiber) {
+  if (fiber === null || fiber === undefined) return;
+  try {
+    if (typeof fiber.dispose === 'function') await fiber.dispose();
+    else if (typeof fiber === 'function') await fiber();
+  } catch {
+    // Disposal is best-effort; the supervisor still records the detach.
+  }
+}
+
+/**
  * Mount the official DSH MCP client against the discovered daemon.
  *
  * The module is imported lazily so this package stays installable without the
- * DSH peer: Jest and plain Node simply fail the import, which is logged with a
- * stable code while the status route and panel keep working. Inside DSH the
- * host resolves the peer from its own installation. The MCP client owns
- * connection, reconnection, and tool registration; this plugin never speaks
- * MCP itself and never retries on its own.
+ * DSH peer: Jest and plain Node fail the import with a stable code while the
+ * status route and panel keep working. Inside DSH the host resolves the peer
+ * from its own installation.
+ *
+ * `failOnStartupError: true` makes the child fiber reject when the initial MCP
+ * connection or tool sync fails. Cordis keeps that failure inside the child
+ * fiber, so activation of this host continues; mountMcp awaits that fiber,
+ * disposes it on failure, and returns a stable code. The caller retries only
+ * after a later health check. The returned handle is the only way this plugin
+ * can unregister tools when the daemon goes away.
  *
  * @param {import('@deepseek-ai/cordis').Context} ctx
  * @param {string} daemonUrl
@@ -1272,33 +1294,281 @@ export function injectPanelGlobal(html, panel) {
  *   log?: (level: 'info' | 'warn', message: string) => void,
  *   importModule?: (specifier: string) => Promise<unknown>,
  * }} [options]
- * @returns {Promise<boolean>} whether the bridge plugin was mounted
+ * @returns {Promise<
+ *   { ok: true, dispose: () => Promise<void> } |
+ *   { ok: false, code: 'ctx_unavailable' | 'peer_missing' | 'peer_import_failed' | 'mcp_client_mount_failed' | 'mcp_client_start_failed' }
+ * >}
  */
 export async function mountMcp(ctx, daemonUrl, options = {}) {
   const opts = isObject(options) ? options : {};
   const log = typeof opts.log === 'function' ? opts.log : () => {};
   if (ctx === null || typeof ctx !== 'object' || typeof ctx.plugin !== 'function') {
-    log('warn', 'mcp client mount skipped: ctx.plugin is unavailable');
-    return false;
+    log('warn', 'mcp client mount failed (ctx_unavailable)');
+    return { ok: false, code: 'ctx_unavailable' };
   }
+
+  let module;
   try {
-    const module = typeof opts.importModule === 'function'
+    module = typeof opts.importModule === 'function'
       ? await opts.importModule(MCP_CLIENT_PACKAGE)
       : await import('@deepseek-ai/dsh-mcp-client');
-    ctx.plugin(module, {
+  } catch (error) {
+    // Outside a DSH host the peer is absent (ERR_MODULE_NOT_FOUND). Keep the
+    // return code stable and never echo the resolver message (it contains
+    // absolute paths).
+    const code = error?.code === 'ERR_MODULE_NOT_FOUND' || error?.code === 'MODULE_NOT_FOUND'
+      ? 'peer_missing'
+      : 'peer_import_failed';
+    log('warn', `mcp client mount failed (${code})`);
+    return { ok: false, code };
+  }
+
+  let fiber;
+  try {
+    fiber = ctx.plugin(module, {
       serverName: 'mebular',
       transport: 'streamable-http',
       url: joinUrl(daemonUrl, '/mcp'),
-      failOnStartupError: false,
+      failOnStartupError: true,
     });
-    log('info', 'mcp client mounted');
-    return true;
-  } catch (error) {
-    // Outside a DSH host the peer is absent (ERR_MODULE_NOT_FOUND). That must
-    // not fail plugin activation: the panel and /mebular/embed-info stay up.
-    log('warn', `mcp client mount failed (${safeErrorCode(error)})`);
-    return false;
+  } catch {
+    log('warn', 'mcp client mount failed (mcp_client_mount_failed)');
+    return { ok: false, code: 'mcp_client_mount_failed' };
   }
+
+  // cordis `ctx.plugin()` returns a Fiber that is also PromiseLike; awaiting it
+  // settles activation and rethrows a startup error. Only after that may the
+  // bridge count as mounted. A plain plugin double has no `then`, so it is
+  // already settled.
+  try {
+    if (fiber !== null && (typeof fiber === 'object' || typeof fiber === 'function') && typeof fiber.then === 'function') {
+      await fiber;
+    }
+    // Pending dependencies keep a cordis fiber in state 0 without rejecting
+    // `await`. Treat that (and any other non-active state) as a failed mount so
+    // the supervisor retries instead of claiming tools exist.
+    if (fiber !== null && typeof fiber === 'object' && typeof fiber.state === 'number' && fiber.state !== 2) {
+      throw new Error('inactive fiber');
+    }
+  } catch {
+    await disposeFiber(fiber);
+    log('warn', 'mcp client mount failed (mcp_client_start_failed)');
+    return { ok: false, code: 'mcp_client_start_failed' };
+  }
+
+  let disposed = false;
+  const dispose = async () => {
+    if (disposed) return;
+    disposed = true;
+    await disposeFiber(fiber);
+  };
+  log('info', 'mcp client mounted');
+  return { ok: true, dispose };
+}
+
+/**
+ * Stable bridge notice for a lifecycle snapshot.
+ * @param {Record<string, unknown> | null | undefined} snapshot
+ * @returns {string}
+ */
+function bridgeReason(snapshot) {
+  const reason = snapshot?.reason;
+  if (reason === 'managed_cli_missing' || reason === 'managed_start_failed') return reason;
+  return 'daemon_unreachable';
+}
+
+/**
+ * Human-readable log line for an unavailable bridge. Codes are stable and
+ * contain no home, token, or CLI path.
+ * @param {string} code
+ * @returns {string}
+ */
+function bridgeUnavailableMessage(code) {
+  switch (code) {
+    case 'daemon_unreachable':
+      return 'mcp bridge unavailable (daemon_unreachable): start the Mebular app or run "mebular serve"';
+    case 'daemon_starting':
+      return 'mcp bridge unavailable (daemon_starting): waiting for the managed daemon to become healthy';
+    case 'managed_cli_missing':
+      return 'mcp bridge unavailable (managed_cli_missing): install Mebular or set MEBULAR_CLI/cliPath, then restart DSH';
+    case 'managed_start_failed':
+      return 'mcp bridge unavailable (managed_start_failed): the managed daemon did not become healthy; start Mebular manually';
+    case 'peer_missing':
+      return 'mcp bridge unavailable (peer_missing): install @deepseek-ai/dsh-mcp-client in the DSH host';
+    case 'ctx_unavailable':
+      return 'mcp bridge unavailable (ctx_unavailable): the DSH context cannot mount plugins';
+    default:
+      return `mcp bridge unavailable (${code}): the official MCP client could not start; retrying while the daemon is healthy`;
+  }
+}
+
+/**
+ * Keep the official MCP client mounted exactly while the lifecycle says `up`.
+ *
+ * The supervisor polls `lifecycle.inspect()` on one unref'd interval. It mounts
+ * nothing while the daemon is down or starting, waits for the child fiber to
+ * settle before reporting success, and disposes that fiber as soon as the
+ * daemon leaves `up` so last-known tools cannot linger and hang calls. A later
+ * `up` mounts a fresh fiber with the same `serverName`; the previous fiber was
+ * disposed first, so the official namespace reservation is free again.
+ * Notices are deduplicated by state/error code, not repeated every tick.
+ *
+ * @param {{
+ *   lifecycle: { inspect: () => Promise<unknown> },
+ *   daemonUrl: string,
+ *   mount: (daemonUrl: string) => Promise<
+ *     { ok: true, dispose: () => Promise<void> } |
+ *     { ok: false, code: string }
+ *   >,
+ *   log?: (level: 'info' | 'warn', message: string) => void,
+ *   intervalMs?: number,
+ *   setIntervalFn?: typeof setInterval,
+ *   clearIntervalFn?: typeof clearInterval,
+ * }} options
+ * @returns {{
+ *   start: () => Promise<void>,
+ *   check: () => Promise<void>,
+ *   dispose: () => Promise<void>,
+ *   getState: () => { mounted: boolean, timer: boolean, disposed: boolean },
+ * }}
+ */
+export function createMcpBridgeSupervisor(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const lifecycle = isObject(opts.lifecycle) ? opts.lifecycle : null;
+  const daemonUrl = typeof opts.daemonUrl === 'string' ? opts.daemonUrl : '';
+  const mount = typeof opts.mount === 'function' ? opts.mount : null;
+  const log = typeof opts.log === 'function' ? opts.log : () => {};
+  const intervalMs = Number.isFinite(opts.intervalMs) && opts.intervalMs > 0
+    ? opts.intervalMs
+    : DEFAULT_BRIDGE_POLL_INTERVAL_MS;
+  const setIntervalFn = typeof opts.setIntervalFn === 'function' ? opts.setIntervalFn : setInterval;
+  const clearIntervalFn = typeof opts.clearIntervalFn === 'function' ? opts.clearIntervalFn : clearInterval;
+
+  /** @type {{ ok: true, dispose: () => Promise<void> } | null} */
+  let mounted = null;
+  /** @type {ReturnType<typeof setInterval> | null} */
+  let timer = null;
+  /** @type {Promise<void> | null} */
+  let running = null;
+  /** @type {Promise<void> | null} */
+  let disposal = null;
+  let disposed = false;
+  /** Last down/starting code that was logged. */
+  let lastNotice = null;
+  /** Last mount error code that was logged while the daemon stayed up. */
+  let lastMountFailure = null;
+
+  async function reconcile() {
+    if (lifecycle === null || mount === null) return;
+    let snapshot;
+    try {
+      snapshot = await lifecycle.inspect();
+    } catch {
+      snapshot = { status: 'down', reason: null };
+    }
+    if (disposed) return;
+
+    const status = snapshot?.status;
+    if (status === 'up') {
+      lastNotice = null;
+      if (mounted !== null) return;
+      let result;
+      try {
+        result = await mount(daemonUrl);
+      } catch (error) {
+        const code = safeErrorCode(error);
+        result = { ok: false, code: code === 'error' ? 'mcp_client_start_failed' : code };
+      }
+      if (disposed) {
+        if (result?.ok === true) await disposeFiber(result);
+        return;
+      }
+      if (result?.ok === true && typeof result.dispose === 'function') {
+        mounted = result;
+        lastMountFailure = null;
+        return;
+      }
+      let code = 'mcp_client_start_failed';
+      if (result?.ok === true) code = 'mcp_client_mount_failed';
+      else if (typeof result?.code === 'string' && result.code.length > 0) code = result.code;
+      if (lastMountFailure !== code) {
+        lastMountFailure = code;
+        log('warn', bridgeUnavailableMessage(code));
+      }
+      return;
+    }
+
+    lastMountFailure = null;
+    if (mounted !== null) {
+      const handle = mounted;
+      mounted = null;
+      try {
+        await handle.dispose();
+      } catch {
+        log('warn', 'mcp bridge detach failed (mcp_client_dispose_failed): MCP tools may remain registered');
+      }
+      const code = bridgeReason(snapshot);
+      log('warn', `mcp bridge detached (${code}): MCP tools unregistered`);
+      lastNotice = code;
+      return;
+    }
+
+    const code = status === 'starting' ? 'daemon_starting' : bridgeReason(snapshot);
+    if (lastNotice !== code) {
+      lastNotice = code;
+      log(status === 'starting' ? 'info' : 'warn', bridgeUnavailableMessage(code));
+    }
+  }
+
+  function tick() {
+    if (disposed) return Promise.resolve();
+    if (running !== null) return running;
+    const task = reconcile()
+      .catch((error) => {
+        if (!disposed) log('warn', `mcp bridge reconcile failed (${safeErrorCode(error)})`);
+      })
+      .finally(() => {
+        if (running === task) running = null;
+      });
+    running = task;
+    return task;
+  }
+
+  function start() {
+    if (disposed) return Promise.resolve();
+    if (timer === null) {
+      timer = setIntervalFn(tick, intervalMs);
+      timer?.unref?.();
+    }
+    return tick();
+  }
+
+  function dispose() {
+    if (disposal !== null) return disposal;
+    disposed = true;
+    if (timer !== null) {
+      clearIntervalFn(timer);
+      timer = null;
+    }
+    const pending = running;
+    disposal = Promise.resolve(pending)
+      .catch(() => {})
+      .then(async () => {
+        if (mounted !== null) {
+          const handle = mounted;
+          mounted = null;
+          await handle.dispose().catch(() => {});
+        }
+      });
+    return disposal;
+  }
+
+  return {
+    start,
+    check: tick,
+    dispose,
+    getState: () => ({ mounted: mounted !== null, timer: timer !== null, disposed }),
+  };
 }
 
 /**
@@ -1314,6 +1584,14 @@ export async function mountMcp(ctx, daemonUrl, options = {}) {
  *   runtime?: unknown,
  *   pidAlive?: (pid: number) => boolean,
  *   importModule?: (specifier: string) => Promise<unknown>,
+ *   lifecycle?: { start?: () => Promise<unknown>, inspect: () => Promise<unknown>, dispose?: () => void },
+ *   probe?: typeof probeDaemon,
+ *   fetchImpl?: typeof fetch,
+ *   now?: () => number,
+ *   cacheTtlMs?: number,
+ *   bridgeIntervalMs?: number,
+ *   setIntervalFn?: typeof setInterval,
+ *   clearIntervalFn?: typeof clearInterval,
  * }} [options] Test seams; DSH passes only (ctx, config).
  */
 export function apply(ctx, config = {}, options = {}) {
@@ -1338,31 +1616,58 @@ export function apply(ctx, config = {}, options = {}) {
     if (opts[key] !== undefined) configOptions[key] = opts[key];
   }
   const resolved = resolveConfig(raw, configOptions);
-  const lifecycle = createDaemonLifecycle({
+
+  const lifecycleOptions = {
     config: resolved,
     logger: {
       info: (message) => log('info', message),
       warn: (message) => log('warn', message),
     },
+  };
+  for (const key of [
+    'probe', 'fetchImpl', 'spawnFn', 'resolveCli', 'exists', 'env', 'home', 'platform',
+    'now', 'sleep', 'timeoutMs', 'cacheTtlMs', 'startTimeoutMs', 'pollIntervalMs', 'killGraceMs',
+  ]) {
+    if (opts[key] !== undefined) lifecycleOptions[key] = opts[key];
+  }
+  const lifecycle = isObject(opts.lifecycle) && typeof opts.lifecycle.inspect === 'function'
+    ? opts.lifecycle
+    : createDaemonLifecycle(lifecycleOptions);
+
+  // Keep the bridge aligned with the lifecycle: mount only after a health probe
+  // says `up`, dispose the fiber as soon as the daemon leaves `up`, and retry
+  // after recovery. Failure notices are deduplicated inside the supervisor.
+  const bridge = createMcpBridgeSupervisor({
+    lifecycle,
+    daemonUrl: resolved.daemonUrl,
+    intervalMs: opts.bridgeIntervalMs,
+    setIntervalFn: opts.setIntervalFn,
+    clearIntervalFn: opts.clearIntervalFn,
+    log: (level, message) => log(level, message),
+    mount: (daemonUrl) => mountMcp(ctx, daemonUrl, {
+      // Success is logged once by mountMcp; failures are logged by the
+      // supervisor only when the stable code changes.
+      log: (level, message) => {
+        if (level === 'info') log(level, message);
+      },
+      ...(typeof opts.importModule === 'function' ? { importModule: opts.importModule } : {}),
+    }),
   });
 
   if (typeof ctx.effect === 'function') {
     ctx.effect(
       () => () => {
-        lifecycle.dispose();
+        const pending = bridge.dispose();
+        lifecycle.dispose?.();
+        return pending;
       },
-      '@mebular/dsh-plugin: daemon lifecycle',
+      '@mebular/dsh-plugin: daemon lifecycle and MCP bridge',
     );
   }
-  void lifecycle.start();
-
-  // Mount the official bridge on the same discovered origin as the panel. A
-  // failure is logged, never fatal; the official client reconnects on its own
-  // when the daemon is down at activation time.
-  void mountMcp(ctx, resolved.daemonUrl, {
-    log: (level, message) => log(level, message),
-    ...(typeof opts.importModule === 'function' ? { importModule: opts.importModule } : {}),
-  });
+  const lifecycleStart = Promise.resolve().then(() => lifecycle.start?.());
+  lifecycleStart.catch((error) => log('warn', `lifecycle start failed (${safeErrorCode(error)})`));
+  void lifecycleStart;
+  void bridge.start();
 
   const handler = createEmbedInfoHandler({ config: resolved, lifecycle });
   if (typeof ctx.inject !== 'function') return;

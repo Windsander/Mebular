@@ -13,6 +13,7 @@ import {
   buildEmbedInfo,
   createDaemonLifecycle,
   createEmbedInfoHandler,
+  createMcpBridgeSupervisor,
   daemonPortFromUrl,
   injectPanelGlobal,
   isLoopbackAddress,
@@ -185,17 +186,41 @@ function applyHarness(fetchHandler, {
   const taps = [];
   const plugins = [];
   const warnings = [];
+  const infos = [];
+  const intervals = [];
+  const effects = [];
+  const activeNames = new Set();
+  let cleaned = false;
   const ctx = {
-    logger: { warn: (message) => warnings.push(message) },
+    logger: {
+      info: (message) => infos.push(message),
+      warn: (message) => warnings.push(message),
+    },
     plugin(module, pluginConfig) {
-      plugins.push({ module, config: pluginConfig });
-      return () => {};
+      const serverName = pluginConfig?.serverName;
+      if (serverName !== undefined && activeNames.has(serverName)) {
+        throw new Error(`duplicate serverName ${serverName}`);
+      }
+      if (serverName !== undefined) activeNames.add(serverName);
+      const entry = { module, config: pluginConfig, disposed: false };
+      plugins.push(entry);
+      return () => {
+        entry.disposed = true;
+        if (serverName !== undefined) activeNames.delete(serverName);
+      };
+    },
+    effect(run, label) {
+      const disposer = run();
+      effects.push({ label, disposer });
+      return disposer;
     },
     inject(deps, callback) {
       expect(deps).toEqual(['webServer']);
       callback({
         effect(run) {
-          return run();
+          const disposer = run();
+          effects.push({ label: 'web', disposer });
+          return disposer;
         },
         webServer: {
           register(route) {
@@ -214,14 +239,69 @@ function applyHarness(fetchHandler, {
       });
     },
   };
-  apply(ctx, config ?? { daemonUrl: BASE, panel }, { runtime: null, importModule, ...applyOptions });
+  const harnessOptions = {
+    runtime: null,
+    importModule,
+    bridgeIntervalMs: 5,
+    cacheTtlMs: 0,
+    setIntervalFn(callback, ms) {
+      const handle = {
+        callback,
+        ms,
+        cleared: false,
+        dispose() {
+          this.cleared = true;
+          clearInterval(this.id);
+        },
+        unref() {
+          return this;
+        },
+      };
+      handle.id = setInterval(callback, ms);
+      intervals.push(handle);
+      return handle;
+    },
+    clearIntervalFn(handle) {
+      handle?.dispose?.();
+    },
+    ...applyOptions,
+  };
+  apply(ctx, config ?? { daemonUrl: BASE, panel }, harnessOptions);
   const route = routes.find((entry) => entry.path === EMBED_INFO_PATH);
-  return { mock, route, routes, taps, plugins, warnings, ctx };
+  const harness = {
+    mock,
+    route,
+    routes,
+    taps,
+    plugins,
+    warnings,
+    infos,
+    intervals,
+    effects,
+    activeNames,
+    ctx,
+    async cleanup() {
+      if (cleaned) return;
+      cleaned = true;
+      for (const effect of effects.slice().reverse()) {
+        try {
+          await effect.disposer?.();
+        } catch {
+          // Test cleanup is best-effort.
+        }
+      }
+    },
+  };
+  activeHarness = harness;
+  return harness;
 }
 
 let activeMock = null;
+let activeHarness = null;
 
-afterEach(() => {
+afterEach(async () => {
+  await activeHarness?.cleanup();
+  activeHarness = null;
   activeMock?.restore();
   activeMock = null;
 });
@@ -574,7 +654,7 @@ describe('P5 @mebular/dsh-plugin host：运行时挂载官方 MCP client', () =>
     const logs = [];
     const mcpModule = { name: 'fake-mcp-client' };
     const specifiers = [];
-    const ok = await mountMcp(
+    const result = await mountMcp(
       { plugin: (module, config) => plugins.push({ module, config }) },
       'http://127.0.0.1:9123/',
       {
@@ -586,7 +666,8 @@ describe('P5 @mebular/dsh-plugin host：运行时挂载官方 MCP client', () =>
       },
     );
 
-    expect(ok).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(typeof result.dispose).toBe('function');
     expect(specifiers).toEqual([MCP_CLIENT_PACKAGE]);
     expect(MCP_CLIENT_PACKAGE).toBe('@deepseek-ai/dsh-mcp-client');
     expect(plugins).toEqual([{
@@ -595,18 +676,105 @@ describe('P5 @mebular/dsh-plugin host：运行时挂载官方 MCP client', () =>
         serverName: 'mebular',
         transport: 'streamable-http',
         url: 'http://127.0.0.1:9123/mcp',
-        failOnStartupError: false,
+        failOnStartupError: true,
       },
     }]);
     expect(logs).toEqual(['info:mcp client mounted']);
   });
 
+  it('mountMcp 等待 fiber settle 后才记录 mounted，并返回可 dispose 的 handle', async () => {
+    const logs = [];
+    const plugins = [];
+    let settle;
+    let disposeCalls = 0;
+    const fiber = new Promise((resolve) => {
+      settle = resolve;
+    });
+    fiber.dispose = () => {
+      disposeCalls += 1;
+    };
+    const pending = mountMcp(
+      {
+        plugin: (module, config) => {
+          plugins.push({ module, config });
+          return fiber;
+        },
+      },
+      BASE,
+      {
+        importModule: async () => ({ name: 'fake-mcp-client' }),
+        log: (level, message) => logs.push(`${level}:${message}`),
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(plugins).toHaveLength(1);
+    expect(logs).toEqual([]);
+
+    settle();
+    const result = await pending;
+    expect(result.ok).toBe(true);
+    expect(logs).toEqual(['info:mcp client mounted']);
+    await result.dispose();
+    await result.dispose();
+    expect(disposeCalls).toBe(1);
+  });
+
+  it('fiber 启动失败时 dispose 子 fiber 并返回稳定错误码', async () => {
+    const logs = [];
+    let disposeCalls = 0;
+    const fiber = Promise.reject(new Error('/Users/me/.mebular token=secret'));
+    fiber.dispose = () => {
+      disposeCalls += 1;
+    };
+    const result = await mountMcp(
+      { plugin: () => fiber },
+      BASE,
+      {
+        importModule: async () => ({ name: 'fake-mcp-client' }),
+        log: (level, message) => logs.push(`${level}:${message}`),
+      },
+    );
+
+    expect(result).toEqual({ ok: false, code: 'mcp_client_start_failed' });
+    expect(disposeCalls).toBe(1);
+    expect(logs).toEqual(['warn:mcp client mount failed (mcp_client_start_failed)']);
+    expect(logs.join('\n')).not.toContain('/Users/me');
+    expect(logs.join('\n')).not.toContain('secret');
+  });
+
+  it('fiber 未进入 active 状态时不记录 mounted', async () => {
+    const logs = [];
+    let disposeCalls = 0;
+    const fiber = {
+      state: 0,
+      then(resolve) {
+        resolve({ settled: true });
+      },
+      dispose() {
+        disposeCalls += 1;
+      },
+    };
+    const result = await mountMcp(
+      { plugin: () => fiber },
+      BASE,
+      {
+        importModule: async () => ({ name: 'fake-mcp-client' }),
+        log: (level, message) => logs.push(`${level}:${message}`),
+      },
+    );
+
+    expect(result).toEqual({ ok: false, code: 'mcp_client_start_failed' });
+    expect(disposeCalls).toBe(1);
+    expect(logs).toEqual(['warn:mcp client mount failed (mcp_client_start_failed)']);
+  });
+
   it('peer 缺失（Jest/普通 Node）不抛错、不激活 plugin，只记稳定错误码', async () => {
     const plugins = [];
     const logs = [];
-    const error = new Error('Cannot find package');
+    const error = new Error('Cannot find package at /Users/me/.dsh/node_modules');
     error.code = 'ERR_MODULE_NOT_FOUND';
-    const ok = await mountMcp(
+    const result = await mountMcp(
       { plugin: (module, config) => plugins.push({ module, config }) },
       BASE,
       {
@@ -617,21 +785,22 @@ describe('P5 @mebular/dsh-plugin host：运行时挂载官方 MCP client', () =>
       },
     );
 
-    expect(ok).toBe(false);
+    expect(result).toEqual({ ok: false, code: 'peer_missing' });
     expect(plugins).toHaveLength(0);
-    expect(logs).toEqual(['warn:mcp client mount failed (ERR_MODULE_NOT_FOUND)']);
+    expect(logs).toEqual(['warn:mcp client mount failed (peer_missing)']);
+    expect(logs.join('\n')).not.toContain('/Users/me');
   });
 
   it('没有 ctx.plugin 时跳过挂载，不影响其他能力', async () => {
     const logs = [];
-    const ok = await mountMcp({}, BASE, {
+    const result = await mountMcp({}, BASE, {
       importModule: async () => {
         throw new Error('must not import without ctx.plugin');
       },
       log: (level, message) => logs.push(`${level}:${message}`),
     });
-    expect(ok).toBe(false);
-    expect(logs).toEqual(['warn:mcp client mount skipped: ctx.plugin is unavailable']);
+    expect(result).toEqual({ ok: false, code: 'ctx_unavailable' });
+    expect(logs).toEqual(['warn:mcp client mount failed (ctx_unavailable)']);
   });
 
   it('apply 用 runtime.json 发现的非默认端口挂载 MCP（panel:false 也挂载）', async () => {
@@ -668,8 +837,9 @@ describe('P5 @mebular/dsh-plugin host：运行时挂载官方 MCP client', () =>
         serverName: 'mebular',
         transport: 'streamable-http',
         url: 'http://127.0.0.1:9123/mcp',
-        failOnStartupError: false,
+        failOnStartupError: true,
       });
+      expect(harness.intervals).toHaveLength(1);
 
       const res = makeResponse();
       await harness.route.handler(makeRequest(), res);
@@ -684,7 +854,7 @@ describe('P5 @mebular/dsh-plugin host：运行时挂载官方 MCP client', () =>
     }
   });
 
-  it('apply 的 MCP 挂载失败仍注册只读路由并记录 warn', async () => {
+  it('apply 的 MCP 挂载失败仍注册只读路由，只记录一次稳定错误码', async () => {
     const harness = applyHarness(
       (url) => {
         if (url === `${BASE}/healthz`) return jsonResponse(HEALTH);
@@ -693,7 +863,7 @@ describe('P5 @mebular/dsh-plugin host：运行时挂载官方 MCP client', () =>
       },
       {
         importModule: async () => {
-          const error = new Error('missing peer');
+          const error = new Error('missing peer at /Users/me/.dsh');
           error.code = 'ERR_MODULE_NOT_FOUND';
           throw error;
         },
@@ -701,14 +871,299 @@ describe('P5 @mebular/dsh-plugin host：运行时挂载官方 MCP client', () =>
     );
     activeMock = harness.mock;
 
-    await waitFor(() => harness.warnings.some((line) => line.includes('mcp client mount failed')));
-    expect(harness.warnings.join('\n')).toContain('mcp client mount failed (ERR_MODULE_NOT_FOUND)');
+    await waitFor(() => harness.warnings.some((line) => line.includes('peer_missing')));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(harness.warnings.filter((line) => line.includes('peer_missing'))).toHaveLength(1);
+    expect(harness.warnings.join('\n')).not.toContain('/Users/me');
     expect(harness.route).toBeDefined();
 
     const res = makeResponse();
     await harness.route.handler(makeRequest(), res);
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).status).toBe('up');
+  });
+});
+
+describe('P6 @mebular/dsh-plugin host：MCP bridge supervisor', () => {
+  it('attach + daemon down：不挂载、路由仍为 down、只记一次 unavailable 且只有一个 timer', async () => {
+    const harness = applyHarness(() => {
+      throw new Error('ECONNREFUSED');
+    });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.warnings.some((line) => line.includes('mcp bridge unavailable')));
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(harness.plugins).toHaveLength(0);
+    expect(harness.intervals).toHaveLength(1);
+    expect(harness.warnings).toEqual([
+      expect.stringContaining('mcp bridge unavailable (daemon_unreachable): start the Mebular app or run "mebular serve"'),
+    ]);
+
+    const res = makeResponse();
+    await harness.route.handler(makeRequest(), res);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: false,
+      status: 'down',
+      reason: 'daemon_unreachable',
+      embedUrl: null,
+    });
+
+    await harness.cleanup();
+    expect(harness.intervals[0].cleared).toBe(true);
+  });
+
+  it('daemon down→up：自动挂载一次，只有 mount 成功后才记录 mounted', async () => {
+    let reachable = false;
+    const harness = applyHarness((url) => {
+      if (url === `${BASE}/healthz`) return reachable ? jsonResponse(HEALTH) : jsonResponse({ status: 'down' });
+      if (url === `${BASE}/app/embed/info`) return reachable ? jsonResponse(EMBED) : jsonResponse({ ok: false });
+      throw new Error(`unexpected ${url}`);
+    });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.warnings.some((line) => line.includes('daemon_unreachable')));
+    expect(harness.plugins).toHaveLength(0);
+    expect(harness.infos.filter((line) => line.includes('mcp client mounted'))).toHaveLength(0);
+
+    reachable = true;
+    await waitFor(() => harness.plugins.length === 1);
+    await waitFor(() => harness.infos.some((line) => line.includes('mcp client mounted')));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(harness.plugins).toHaveLength(1);
+    expect(harness.infos.filter((line) => line.includes('mcp client mounted'))).toHaveLength(1);
+    expect(harness.plugins[0].config.serverName).toBe('mebular');
+  });
+
+  it('daemon up→down：dispose bridge、工具注销；再次 up 重新挂载且 serverName 不重复', async () => {
+    let reachable = true;
+    const harness = applyHarness((url) => {
+      if (url === `${BASE}/healthz`) return reachable ? jsonResponse(HEALTH) : jsonResponse({ status: 'down' });
+      if (url === `${BASE}/app/embed/info`) return reachable ? jsonResponse(EMBED) : jsonResponse({ ok: false });
+      throw new Error(`unexpected ${url}`);
+    });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.plugins.length === 1);
+    expect(harness.plugins[0].disposed).toBe(false);
+
+    reachable = false;
+    await waitFor(() => harness.plugins[0].disposed);
+    expect(harness.warnings.join('\n')).toContain('mcp bridge detached (daemon_unreachable): MCP tools unregistered');
+    expect(harness.plugins).toHaveLength(1);
+
+    reachable = true;
+    await waitFor(() => harness.plugins.length === 2);
+    expect(harness.plugins[0].disposed).toBe(true);
+    expect(harness.plugins[1].disposed).toBe(false);
+    expect(harness.plugins[1].config.serverName).toBe('mebular');
+    expect(harness.activeNames.has('mebular')).toBe(true);
+
+    await harness.cleanup();
+    expect(harness.plugins[1].disposed).toBe(true);
+    expect(harness.activeNames.size).toBe(0);
+  });
+
+  it('managed starting：不提前挂载；失败后记录明确原因且不挂载', async () => {
+    let snapshot = {
+      status: 'starting',
+      mode: 'managed',
+      managed: true,
+      reason: null,
+      reachable: false,
+      health: null,
+      embed: null,
+    };
+    const lifecycle = {
+      start: async () => snapshot,
+      inspect: async () => snapshot,
+      dispose: () => {},
+    };
+    const harness = applyHarness(() => {
+      throw new Error('fetch must not run with a fake lifecycle');
+    }, {
+      config: { daemonUrl: BASE, lifecycle: 'managed' },
+      applyOptions: { lifecycle },
+    });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.infos.some((line) => line.includes('daemon_starting')));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(harness.plugins).toHaveLength(0);
+    expect(harness.infos.filter((line) => line.includes('daemon_starting'))).toHaveLength(1);
+
+    snapshot = {
+      ...snapshot,
+      status: 'down',
+      managed: false,
+      reason: 'managed_start_failed',
+    };
+    await waitFor(() => harness.warnings.some((line) => line.includes('managed_start_failed')));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(harness.plugins).toHaveLength(0);
+    expect(harness.warnings.filter((line) => line.includes('managed_start_failed'))).toHaveLength(1);
+  });
+
+  it('managed CLI 缺失：不挂载并记录稳定 reason', async () => {
+    const snapshot = {
+      status: 'down',
+      mode: 'attach',
+      managed: false,
+      reason: 'managed_cli_missing',
+      reachable: false,
+      health: null,
+      embed: null,
+    };
+    const lifecycle = {
+      start: async () => snapshot,
+      inspect: async () => snapshot,
+      dispose: () => {},
+    };
+    const harness = applyHarness(() => {
+      throw new Error('fetch must not run with a fake lifecycle');
+    }, {
+      config: { daemonUrl: BASE, lifecycle: 'managed' },
+      applyOptions: { lifecycle },
+    });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.warnings.some((line) => line.includes('managed_cli_missing')));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(harness.plugins).toHaveLength(0);
+    expect(harness.warnings.join('\n')).toContain('mcp bridge unavailable (managed_cli_missing)');
+    expect(harness.warnings.join('\n')).not.toContain('/opt/');
+  });
+
+  it('peer 缺失：不崩溃、不刷日志，面板路由仍工作', async () => {
+    const harness = applyHarness((url) => {
+      if (url === `${BASE}/healthz`) return jsonResponse(HEALTH);
+      if (url === `${BASE}/app/embed/info`) return jsonResponse(EMBED);
+      throw new Error(`unexpected ${url}`);
+    }, {
+      importModule: async () => {
+        const error = new Error('missing peer at /Users/me/.dsh');
+        error.code = 'ERR_MODULE_NOT_FOUND';
+        throw error;
+      },
+    });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.warnings.some((line) => line.includes('peer_missing')));
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(harness.plugins).toHaveLength(0);
+    expect(harness.warnings.filter((line) => line.includes('peer_missing'))).toHaveLength(1);
+
+    const res = makeResponse();
+    await harness.route.handler(makeRequest(), res);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({ ok: true, status: 'up' });
+  });
+
+  it('panel:false 仍运行 bridge supervisor', async () => {
+    const harness = applyHarness((url) => {
+      if (url === `${BASE}/healthz`) return jsonResponse(HEALTH);
+      if (url === `${BASE}/app/embed/info`) return jsonResponse(EMBED);
+      throw new Error(`unexpected ${url}`);
+    }, { panel: false });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.plugins.length === 1);
+    expect(harness.intervals).toHaveLength(1);
+    expect(harness.taps).toHaveLength(1);
+    expect(harness.plugins[0].config.serverName).toBe('mebular');
+  });
+
+  it('supervisor start 幂等，mount 失败按稳定 code 去重', async () => {
+    let intervalCalls = 0;
+    let clearCalls = 0;
+    const warnings = [];
+    const supervisor = createMcpBridgeSupervisor({
+      lifecycle: {
+        inspect: async () => ({
+          status: 'up',
+          mode: 'attach',
+          managed: false,
+          reason: null,
+          reachable: true,
+          health: HEALTH,
+          embed: EMBED,
+        }),
+      },
+      daemonUrl: BASE,
+      mount: async () => ({ ok: false, code: 'peer_missing' }),
+      log: (level, message) => {
+        if (level === 'warn') warnings.push(message);
+      },
+      intervalMs: 1000,
+      setIntervalFn: () => {
+        intervalCalls += 1;
+        return { unref() {} };
+      },
+      clearIntervalFn: () => {
+        clearCalls += 1;
+      },
+    });
+
+    await supervisor.start();
+    await supervisor.start();
+    await supervisor.check();
+    await supervisor.check();
+    expect(intervalCalls).toBe(1);
+    expect(warnings.filter((line) => line.includes('peer_missing'))).toHaveLength(1);
+    expect(supervisor.getState()).toMatchObject({ mounted: false, timer: true, disposed: false });
+
+    await supervisor.dispose();
+    await supervisor.dispose();
+    expect(clearCalls).toBe(1);
+    expect(supervisor.getState()).toMatchObject({ timer: false, disposed: true });
+  });
+
+  it('apply dispose：清 timer、dispose bridge、dispose lifecycle，且不再探测', async () => {
+    let inspectCalls = 0;
+    let lifecycleDisposed = 0;
+    const snapshot = {
+      status: 'up',
+      mode: 'attach',
+      managed: false,
+      reason: null,
+      reachable: true,
+      health: HEALTH,
+      embed: EMBED,
+    };
+    const lifecycle = {
+      start: async () => snapshot,
+      inspect: async () => {
+        inspectCalls += 1;
+        return snapshot;
+      },
+      dispose: () => {
+        lifecycleDisposed += 1;
+      },
+    };
+    const harness = applyHarness(() => {
+      throw new Error('fetch must not run with a fake lifecycle');
+    }, {
+      config: { daemonUrl: BASE },
+      applyOptions: { lifecycle },
+    });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.plugins.length === 1);
+    expect(harness.intervals).toHaveLength(1);
+
+    await harness.cleanup();
+    expect(harness.intervals[0].cleared).toBe(true);
+    expect(harness.plugins[0].disposed).toBe(true);
+    expect(lifecycleDisposed).toBe(1);
+
+    const before = inspectCalls;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(inspectCalls).toBe(before);
+
+    await harness.cleanup();
+    expect(lifecycleDisposed).toBe(1);
   });
 });
 
@@ -791,7 +1246,7 @@ describe('P2 @mebular/dsh-plugin host：探测与 /mebular/embed-info 路由', (
       if (url === `${BASE}/healthz`) return jsonResponse(HEALTH);
       if (url === `${BASE}/app/embed/info`) return jsonResponse(EMBED);
       throw new Error(`unexpected ${url}`);
-    });
+    }, { applyOptions: { bridgeIntervalMs: 60000 } });
     activeMock = harness.mock;
 
     expect(harness.routes).toHaveLength(1);
@@ -853,12 +1308,14 @@ describe('P2 @mebular/dsh-plugin host：探测与 /mebular/embed-info 路由', (
       if (url === `${BASE}/healthz`) return jsonResponse(HEALTH);
       if (url === `${BASE}/app/embed/info`) return jsonResponse(EMBED);
       throw new Error(`unexpected ${url}`);
-    });
+    }, { applyOptions: { bridgeIntervalMs: 60000, cacheTtlMs: 60000 } });
     activeMock = harness.mock;
 
+    await waitFor(() => harness.plugins.length === 1);
+    harness.mock.calls.length = 0;
     await harness.route.handler(makeRequest(), makeResponse());
     await harness.route.handler(makeRequest(), makeResponse());
-    expect(harness.mock.calls).toHaveLength(2);
+    expect(harness.mock.calls).toHaveLength(0);
   });
 
   it('非 loopback 请求返回 404 且路由不触发探测（任何方法）', async () => {

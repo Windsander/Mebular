@@ -3,7 +3,11 @@
   "version": "0.1.2",
   "description": "Mebular memory, task graph, and shared Console for DeepSeek Harness",
   "license": "MIT",
-  "author": "Windsander",
+  "author": {
+    "name": "Sobert Li (Windsander)",
+    "email": "Windsander@users.noreply.github.com",
+    "url": "https://github.com/Windsander"
+  },
   "type": "module",
   "main": "index.js",
   "exports": {

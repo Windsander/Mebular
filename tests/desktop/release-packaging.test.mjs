@@ -153,7 +153,7 @@ describe('R4.2 Debian 元数据契约', () => {
   });
 
   it('author email 存在且是合法 email', () => {
-    expect(desktopPackage.author).toMatchObject({ name: 'Windsander' });
+    expect(desktopPackage.author).toMatchObject({ name: 'Sobert Li (Windsander)' });
     expect(desktopPackage.author.email).toMatch(/^[^\s@]+@[^\s@]+\.[^\s@]+$/);
   });
 

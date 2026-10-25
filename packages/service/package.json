@@ -3,6 +3,11 @@
   "version": "0.1.2",
   "description": "Mebular 常驻组件服务化：平台单元生成（launchd/systemd/Task Scheduler）+ install/uninstall/status/logs + 进程心跳",
   "license": "MIT",
+  "author": {
+    "name": "Sobert Li (Windsander)",
+    "email": "Windsander@users.noreply.github.com",
+    "url": "https://github.com/Windsander"
+  },
   "private": false,
   "type": "module",
   "main": "./dist/index.js",

@@ -3,6 +3,11 @@
   "version": "0.1.2",
   "description": "Mebular 跨设备多 Agent 协作（任务=记忆）：task-as-memory 的派发与回收，无中心协调",
   "license": "MIT",
+  "author": {
+    "name": "Sobert Li (Windsander)",
+    "email": "Windsander@users.noreply.github.com",
+    "url": "https://github.com/Windsander"
+  },
   "private": false,
   "type": "module",
   "bin": {

@@ -4,7 +4,7 @@
 # 不再复制仓库 dist / packages 源码。签名、公证、自动更新留给 R2/R6。
 appId: com.mebular.desktop
 productName: Mebular
-copyright: Copyright © 2026 Windsander
+copyright: Copyright © 2026 Sobert Li (Windsander)
 # App 图标（与网页版 favicon 同源的 ✦ 星）：electron-builder 自动派生 icns/ico
 icon: resources/icon.png
 directories:
@@ -38,7 +38,7 @@ linux:
   target: [AppImage, deb]
   category: Utility
   # .deb 要求维护者；显式声明与 package.json author.email 一致，避免依赖派生。
-  maintainer: Windsander <Windsander@users.noreply.github.com>
+  maintainer: Sobert Li (Windsander) <Windsander@users.noreply.github.com>
   # package name 是 @mebular/desktop，默认 executableName 会派生为 @mebulardesktop；
   # AppImage 拒绝该字符集（只允许字母/数字/连字符/下划线/点/空格），故显式指定。
   executableName: mebular

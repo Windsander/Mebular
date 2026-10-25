@@ -172,6 +172,6 @@ await mebular.initialize();
 
 <div align="center">
 
-v0.1.2 · early · MIT
+v0.1.2 · early · MIT · © 2026 Sobert Li
 
 </div>

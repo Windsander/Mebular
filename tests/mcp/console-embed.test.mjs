@@ -115,7 +115,7 @@ describe('P1 console embed：真实 HTTP server', () => {
       loopback: true,
       capabilities: { embedConsole: true },
     });
-    expect(APP_VERSION).toBe('0.1.0');
+    expect(APP_VERSION).toBe('0.1.1');
     const serialized = JSON.stringify(info).toLowerCase();
     for (const word of ['token', 'secret', 'key', 'config', 'home']) {
       expect(serialized).not.toContain(word);

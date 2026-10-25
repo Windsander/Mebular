@@ -35,10 +35,10 @@
 
 ## 安装
 
-v0.1.0 起从 npm 安装到 DSH 的 Web profile：
+从 npm 安装到 DSH 的 Web profile：
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.1.0
+dsh plugin --profile web add @mebular/dsh-plugin@0.1.1
 ```
 
 插件开发时仍可从仓库工作树安装：
@@ -47,7 +47,7 @@ dsh plugin --profile web add @mebular/dsh-plugin@0.1.0
 dsh plugin --profile web add ./packages/dsh-plugin
 ```
 
-`@mebular/dsh-plugin` 是独立版本线：随 Mebular v0.1.0 release train 发布，但版本号只取自
+`@mebular/dsh-plugin` 是独立版本线：随 Mebular v0.1.1 release train 发布，但版本号只取自
 `packages/dsh-plugin/package.json`，不进入五包 lockstep。插件已收录于
 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 的 **memory**
 分类（PR [#9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)）。
@@ -155,9 +155,8 @@ Mebular 仓库，而不是一个独立包仓库，所以搜索会回到这里。
 
 ## 发布与版本
 
-- 插件独立版本 `0.1.0`，有独立的 npm 生命周期。
-- 它和 Mebular v0.1.0 走**同一条 release train**，首个公开插件与首个公开 Mebular 版本一起
-  落地。
+- 插件独立版本 `0.1.1`，有独立的 npm 生命周期。
+- 它和 Mebular v0.1.1 走**同一条 release train**；本版两者都是 `0.1.1`。
 - 它**不进入**五包 lockstep（`core`、`service`、`skill`、`mcp`、`fleet`）：那五个包永远同
   版本，插件可以单独前进。
 - 发布是幂等的：`publish-dsh` job 从 `packages/dsh-plugin/package.json` 读取版本，

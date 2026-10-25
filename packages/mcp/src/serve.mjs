@@ -221,7 +221,7 @@ function settleWithin(promise, ms) {
 
 // /healthz、/app/embed/info 与 <home>/runtime.json 共用的对外版本号与 embed 协议版本。
 // 单一真源：不要在 buildEmbedInfo / runtime 写入处再写字面量。
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.1.1';
 export const EMBED_PROTOCOL = 1;
 
 // ---------- 控制台静态托管（D1） ----------

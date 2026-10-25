@@ -2,7 +2,7 @@
 // G6.5 / D41：發布期改寫 @mebular/core 依賴。
 //
 // 開發期以 `file:../..` 本地連結（根包非 workspace 成員、本環境 npm 不支援 `workspace:`）；
-// `npm pack`/`npm publish` 的 prepack 階段改為 `^0.1.0`，postpack 還原。
+// `npm pack`/`npm publish` 的 prepack 階段改為 `^0.1.1`，postpack 還原。
 //
 // 用法：node scripts/publish-manifest.mjs set|restore
 
@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 const pkgDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const pkgFile = join(pkgDir, 'package.json');
 const backupFile = `${pkgFile}.packbak`;
-const PUBLISH_RANGE = '^0.1.0';
+const PUBLISH_RANGE = '^0.1.1';
 
 const action = process.argv[2];
 

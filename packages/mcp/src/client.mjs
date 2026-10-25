@@ -39,7 +39,7 @@ export async function callToolViaHttp({ endpoint, token, name, args, timeoutMs =
     jsonrpc: '2.0',
     id: 1,
     method: 'initialize',
-    params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'mebular-cli', version: '0.1.0' } },
+    params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'mebular-cli', version: '0.1.1' } },
   }, null, timeoutMs);
   const sessionId = init.sessionId;
   await rpc(url, token, { jsonrpc: '2.0', method: 'notifications/initialized' }, sessionId, timeoutMs);

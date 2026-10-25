@@ -26,7 +26,7 @@ const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
 6. 无结果别编：召回为空就如实说明，不要臆造记忆。`;
 
 export function buildServer(service, options = {}) {
-  const server = new McpServer({ name: 'mebular', version: '0.1.0' });
+  const server = new McpServer({ name: 'mebular', version: '0.1.1' });
   registerTools(server, service, options);
   server.registerPrompt(
     'memory_policy',

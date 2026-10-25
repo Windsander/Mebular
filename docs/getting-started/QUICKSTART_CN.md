@@ -10,11 +10,11 @@ Mebular 是给 AI 助手用的本地优先记忆层：一台机器跑一个节�
 
 ## 1. 桌面 App（推荐）
 
-1. 从 [GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.1.0) 下载 App 并打开。
+1. 从 [GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.1.1) 下载 App 并打开。
 2. 点「开始部署」。它会启动本机服务、自动接入本机已装的 AI 助手，然后进入**锁定主控制台**。
 3. 第一台设备点「新建忆云」，后续设备点「加入忆云」。
 
-> v0.1.0 安装包未签名。请先用 `SHA256SUMS.txt` 校验，再在 macOS 上右键 →「打开」，
+> v0.1.1 安装包未签名。请先用 `SHA256SUMS.txt` 校验，再在 macOS 上右键 →「打开」，
 > 或在 Windows 上选「更多信息 → 仍要运行」。安装包自带 Electron 与 runtime，不需要本机
 > Node.js。详见[桌面安装包发布](../operations/DESKTOP_RELEASE.md)。
 

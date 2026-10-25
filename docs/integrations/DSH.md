@@ -37,10 +37,10 @@ surface: `/healthz`, `/app/embed/info`, `/mcp` and `/console/?embed=dsh`.
 
 ## Install
 
-From v0.1.0, install the plugin from npm into DSH's web profile:
+Install the plugin from npm into DSH's web profile:
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.1.0
+dsh plugin --profile web add @mebular/dsh-plugin@0.1.1
 ```
 
 For plugin development, install from the repository checkout instead:
@@ -49,7 +49,7 @@ For plugin development, install from the repository checkout instead:
 dsh plugin --profile web add ./packages/dsh-plugin
 ```
 
-`@mebular/dsh-plugin` has its own version line: it ships with the Mebular v0.1.0 release
+`@mebular/dsh-plugin` has its own version line: it ships with the Mebular v0.1.1 release
 train, but its version comes only from `packages/dsh-plugin/package.json` and it is not part
 of the five-package lockstep. The plugin is listed in
 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) under **memory**
@@ -168,9 +168,9 @@ whole, not a separate package repo, so discovery points back here. See the
 
 ## Release and versioning
 
-- The plugin has its own version, `0.1.0`, and its own npm lifecycle.
-- It ships on the **same release train** as Mebular v0.1.0, so the first public plugin and
-  the first public Mebular release land together.
+- The plugin has its own version, `0.1.1`, and its own npm lifecycle.
+- It ships on the **same release train** as Mebular v0.1.1; both packages are at `0.1.1`
+  in this release.
 - It is **not** part of the five-package lockstep (`core`, `service`, `skill`, `mcp`,
   `fleet`). Those five always share one version; the plugin can move independently.
 - Publish is idempotent: the `publish-dsh` workflow job reads the version from

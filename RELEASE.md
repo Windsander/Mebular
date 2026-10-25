@@ -9,6 +9,6 @@ The release operations for this repository live under `docs/operations/`:
 - [Changelog](CHANGELOG.md) — release notes; the `## [vX.Y.Z]` section is the source of the
   GitHub Release body.
 
-The current release line is **v0.1.0**: five lockstep npm packages plus the independently
-versioned `@mebular/dsh-plugin@0.1.0`, and unsigned desktop installers for macOS, Windows
-and Linux.
+The current release line is **v0.1.1**: five lockstep npm packages plus the independently
+versioned `@mebular/dsh-plugin@0.1.1`, and unsigned desktop installers for macOS, Windows
+and Linux. Signing, notarization, and auto-update are not part of this release.

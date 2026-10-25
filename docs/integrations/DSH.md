@@ -93,11 +93,12 @@ If a call returns `NOT_INITIALIZED`, finish creating or joining a Cloud in the C
 the same MCP session recovers without restarting the daemon.
 
 When no daemon is running, the plugin does not mount the MCP client at all, so there are no
-`mcp__mebular__*` tools to wait on or call. The panel still loads and shows guidance, and the
-log reports `mcp bridge unavailable (daemon_unreachable): start the Mebular app or run
-"mebular serve"`. Start the daemon (or run `mebular serve`); the plugin discovers it on the
-next health check, mounts the tools automatically, and the panel recovers without restarting
-DSH. `attach` never starts the daemon for you.
+`mcp__mebular__*` tools to wait on or call. The panel still loads and shows guidance, the
+Agent receives a short status note (see below), and the log reports `mcp bridge unavailable
+(daemon_unreachable): start the Mebular app or run "mebular serve"`. Start the daemon (or run
+`mebular serve`); the plugin discovers it on the next health check, mounts the tools
+automatically, and the panel recovers without restarting DSH. `attach` never starts the
+daemon for you.
 
 ## Daemon discovery and ports
 
@@ -152,6 +153,28 @@ If the CLI cannot be resolved, the plugin degrades to `attach` with
 
 Set `panel: false` to keep MCP tools but hide the sidebar/main panel, for example on a
 headless or TUI-only profile.
+
+## Agent-visible status (DSH only)
+
+Mebular's availability is visible to the Agent too, not only to the sidebar. The host
+registers one DSH system-prompt section named `mebular:status`:
+
+- while the daemon is `up`, the section text is empty, so it adds no prompt tokens;
+- when it is `down`, the Agent is told that Mebular memory is unavailable, to ask you to
+  start the Mebular app or run `mebular serve`, and not to claim memory is available;
+- `starting` says memory tools are temporarily unavailable; `managed_cli_missing` and
+  `managed_start_failed` give their own recovery action.
+
+The section is derived from the same lifecycle snapshot as the MCP bridge; it does not add a
+poller or a second status source. DSH is notified through `system-prompt/change` only when
+the text changes, not on every health tick. It is profile-level prompt text, so every agent
+in that DSH profile may see it.
+
+This is an adapter feature, not a wire field and not a general MCP capability. The host
+injects the optional `systemPrompt` service with `ctx.inject(['systemPrompt'])` and silently
+skips the section on older DSH versions or profiles without that service; activation, the
+panel, and the MCP bridge keep working. `panel: false` does not disable it. Other MCP clients
+are not promised this hint, and Mebular does not add a `mebular_status` tool.
 
 ## Security
 

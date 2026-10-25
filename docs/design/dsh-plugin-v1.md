@@ -292,6 +292,22 @@ ctx.plugin(module, {
 - 工具公开名为 `mcp__mebular__<rawName>`，例如 `mcp__mebular__memory_write`；
 - 不使用 stdio，不会另起第二个 Mebular 进程抢 storage lock。
 
+### 6.7 Agent 可见状态
+
+host 在 `apply` 时通过 `ctx.inject(['systemPrompt'])` 注入 DSH 可选的 system prompt 服务，
+注册唯一 section `mebular:status`（order `3200`，位于 first-party MCP server guidance
+`3100` 与 tools SDK `5000` 之间）：
+
+- 文本由 MCP bridge supervisor 已有的 lifecycle snapshot 派生，不新增轮询或状态源；
+- `up` 时文本为空，section 在 prompt 渲染时被丢弃，不增加 token；
+- `down` 时说明本地 daemon 未运行，提示启动 Mebular App 或运行 `mebular serve`，并禁止
+  Agent 声称记忆可用；`starting` 说明工具暂时不可用；`managed_cli_missing` /
+  `managed_start_failed` 使用具体 reason 给出对应恢复动作；
+- 文本变化时才 `ctx.emit('system-prompt/change')`，2s tick 不重复刷新；
+- `systemPrompt` 服务不存在时安全跳过；`panel: false` 不影响它，因为它不是 UI 面板；
+- 不注册 `mebular_status` MCP 工具，不改 `/mebular/embed-info` wire shape。该提示仅属于
+  DSH adapter，其他 MCP 客户端不保证存在。
+
 ## 7. 故障隔离
 
 | 故障 | 行为 |

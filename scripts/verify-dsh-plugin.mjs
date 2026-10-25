@@ -216,6 +216,8 @@ check('index.js exports mountMcp()', typeof pluginModule.mountMcp === 'function'
 check('index.js exports resolveConfig()', typeof pluginModule.resolveConfig === 'function');
 check('index.js exports createDaemonLifecycle()', typeof pluginModule.createDaemonLifecycle === 'function');
 check('index.js exports createEmbedInfoHandler()', typeof pluginModule.createEmbedInfoHandler === 'function');
+check('index.js exports agentStatusText()', typeof pluginModule.agentStatusText === 'function');
+check('index.js exports createAgentStatus()', typeof pluginModule.createAgentStatus === 'function');
 
 // ---------------------------------------------------------------------------
 // Imports: public HTTP only, no workspace coupling
@@ -242,6 +244,17 @@ for (const file of codeFiles) {
 }
 
 const hostSource = readFileSync(join(pkgDir, 'index.js'), 'utf8');
+check(
+  'host registers the mebular:status prompt section',
+  hostSource.includes("AGENT_STATUS_SECTION = 'mebular:status'"),
+);
+check('host feature-detects the optional systemPrompt service', /ctx\.systemPrompt/.test(hostSource));
+check(
+  "host injects the optional systemPrompt service",
+  /ctx\.inject\(\['systemPrompt'\]/.test(hostSource),
+);
+check('host notifies system-prompt/change', hostSource.includes("'system-prompt/change'"));
+check('host adds no mebular_status MCP tool', !hostSource.includes('mebular_status'));
 const staticHostImports = [...hostSource.matchAll(staticImportPattern)].map((match) => match[1]);
 check(
   'host static imports are Node builtins only',

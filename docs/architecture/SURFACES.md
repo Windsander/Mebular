@@ -4,8 +4,9 @@
 > 中共享的**状态语义**。共享的是语义，不是 React 组件、Console 代码或 DSH UI；
 > 各表面可以有不同的颜色、文案与交互，但不得把同一事实解释成互相矛盾的状态。
 >
-> 本文只描述**已经存在**的 wire 契约（`/healthz`、`/app/embed/info`、DSH
-> `/mebular/embed-info`）。本轮不新增 endpoint、字段或核心状态，只记录缺口。
+> 本文描述**已经存在**的 wire 契约（`/healthz`、`/app/embed/info`、DSH
+> `/mebular/embed-info`），以及 DSH adapter 私有的 Agent 可见提示（非 wire）。
+> 本轮不新增 endpoint、字段或核心状态，只记录缺口。
 
 ## 1. 状态词汇
 
@@ -33,10 +34,28 @@
 |---|---|---|
 | Console / embed | `/app/embed/info` 的 `capabilities.embedConsole`、`loopback`、`embedProtocol` | 只有 `loopback: true`、`embedProtocol: 1`、`capabilities.embedConsole: true` 且 URL 为 loopback HTTP(S) 时才允许 iframe。 |
 | MCP tools | `/mcp`，以及 DSH host 的 MCP bridge 生命周期 | 没有单独的 capability 布尔值。DSH 只在 daemon `up` 时挂载官方 MCP client；`uninitialized` 时 `initialize` / `tools/list` 可用，`tools/call` 返回 `NOT_INITIALIZED`。 |
+| Agent status hint | DSH host 的 system prompt section `mebular:status`（非 wire） | 仅 DSH adapter。daemon `up` 时为空；非 `up` 时给出短恢复动作。不注册 MCP 工具，其他 MCP 客户端不保证存在。 |
 | Sync / ready | 无 discovery 字段 | `/healthz`、`/app/embed/info` 和 `runtime.json` 都不暴露同步进度或应用层 ready。不要从 `status: "ok"` 推断同步已完成；以 Console/Admin 数据面为准。 |
-| 面板开关 | DSH `/mebular/embed-info` 的 `panel` | 只表示 DSH 是否注册 sidebar/main 槽位，不影响 daemon 的 MCP 工具。 |
+| 面板开关 | DSH `/mebular/embed-info` 的 `panel` | 只表示 DSH 是否注册 sidebar/main 槽位，不影响 daemon 的 MCP 工具，也不影响 Agent 提示。 |
 
 本轮不新增 `capabilities.mcpTools`、`capabilities.sync` 或 `ready` 字段。
+
+### Agent 可见状态（仅 DSH adapter）
+
+DSH host 通过 `ctx.inject(['systemPrompt'])` 注册唯一 section `mebular:status`，把
+lifecycle 快照中的非 `up` 状态解释成一句短提示：`down` 时告诉 Agent 不要声称记忆可用，
+并提示用户启动 Mebular App 或运行 `mebular serve`；`starting` 时说明工具暂不可用；
+managed 失败时按 `managed_cli_missing` / `managed_start_failed` 给出对应恢复动作。
+`up` 时 section 文本为空，不增加 token。
+
+这条提示不是新的状态源：它只从 MCP bridge 已有的 2s 快照派生，文本变化时才发
+`system-prompt/change`，不会每个 tick 刷新。它是 DSH profile 级别的 system prompt，同一
+profile 的 Agent 都可能看到，因此文案保持短，只描述 Mebular 自身可用性。
+
+- `systemPrompt` 服务不存在时（旧 DSH / 无该服务的 profile）安全跳过，不影响插件激活、
+  面板或 MCP bridge；`panel: false` 也不会关闭它，因为它是 prompt 文本而不是 UI。
+- 它是 DSH adapter 能力，不是 wire 字段，也不是通用 MCP 能力。不要假设所有 MCP 客户端
+  都会收到这条提示；Mebular 不新增 `mebular_status` 工具。
 
 ## 3. Reason 码
 
@@ -69,7 +88,7 @@ DSH MCP bridge 另有日志诊断码 `daemon_starting`、`peer_missing`、`ctx_u
 | Console（浏览器） | 自身 origin 的 `/healthz` 与 Admin API | 完整控制台 | 不适用（页面随 daemon 启动） | 页面不可达 | 只读/受限能力按 Console 自身状态展示 | 刷新页面；启动 daemon |
 | CLI | `mebular status` / `doctor` / `service status`；`/healthz` | 正常输出 | managed/服务启动中 | 非零退出或结构化错误 | 按具体命令输出 | `mebular serve`、`service install`、`doctor` |
 | MCP 客户端 | `/mcp` 握手与工具调用 | 工具可调用 | DSH 不挂载客户端 | 连接失败 | `NOT_INITIALIZED`（协议层可用、业务调用被拒） | 启动 daemon；完成 provisioning |
-| DSH Web/Desktop | `/healthz` + `/app/embed/info` → `/mebular/embed-info` | 绿点；embed 就绪时加载共享 Console | 琥珀点；启动占位页 | 红点；离线占位页与 CTA | 琥珀点；说明具体 `embed_*` reason | 启动 daemon / 修复配置；面板与 MCP 自动恢复 |
+| DSH Web/Desktop | `/healthz` + `/app/embed/info` → `/mebular/embed-info` | 绿点；embed 就绪时加载共享 Console；Agent 提示为空 | 琥珀点；启动占位页；Agent 提示说明暂不可用 | 红点；离线占位页与 CTA；Agent 提示说明未运行 | 琥珀点；说明具体 `embed_*` reason | 启动 daemon / 修复配置；面板、MCP 与 Agent 提示自动恢复 |
 
 DSH 客户端把 `connected` / `starting` / `unavailable` / `offline` / `checking` 映射为
 绿 / 琥珀 / 琥珀 / 红 / 灰，并在状态点上提供 `title`（例如 `Mebular: Connected`）。
@@ -143,5 +162,7 @@ DSH 的 `status` 只有 `up` / `down` / `starting`；`ok` 为 `true` 仅当 `sta
 - 本契约覆盖状态、能力与恢复语义，不覆盖视觉规范、组件结构或轮询实现。
 - Console、DSH client 与 Desktop App 不互相 import；DSH client 只依赖 React 和
   loopback HTTP，不 import `@mebular/*`。
+- Agent 可见状态属于 DSH adapter；Mebular 核心、daemon、Console 与桌面 App 不提供、
+  也不依赖这条提示，其他 MCP 客户端不应假设它存在。
 - 任何新状态或 capability 必须先落在这个矩阵里，再进入 wire；禁止只在某一个 UI 中
   发明无法映射到 daemon/DSH 的事实。

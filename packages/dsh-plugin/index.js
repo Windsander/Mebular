@@ -30,6 +30,16 @@ export const EMBED_PROTOCOL = 1;
 /** Browser global injected by the host through DSH's webServer.tapIndex. */
 export const PANEL_GLOBAL = '__MEBULAR_DSH__';
 
+/** DSH system-prompt section name for Agent-visible Mebular availability. */
+export const AGENT_STATUS_SECTION = 'mebular:status';
+
+/**
+ * Explicit section order. Sits after first-party MCP server guidance (3100)
+ * and before the generated tools SDK (5000), without taking an existing named
+ * first-party slot.
+ */
+export const AGENT_STATUS_ORDER = 3200;
+
 const DEFAULT_PORT = 7331;
 const DEFAULT_PROBE_TIMEOUT_MS = 1200;
 const DEFAULT_CACHE_TTL_MS = 1000;
@@ -1367,6 +1377,171 @@ export async function mountMcp(ctx, daemonUrl, options = {}) {
 }
 
 /**
+ * Short Agent-facing text for a lifecycle snapshot.
+ *
+ * The text is empty while the daemon is `up`, so the normal case adds no
+ * tokens. Non-up states explain why Mebular memory is missing and give one
+ * recovery action; they never let the model claim memory is available.
+ *
+ * @param {Record<string, unknown> | null | undefined} snapshot
+ * @returns {string}
+ */
+export function agentStatusText(snapshot) {
+  const status = snapshot?.status;
+  if (status !== 'down' && status !== 'starting') return '';
+  if (status === 'starting') {
+    return 'Mebular is starting; memory tools are temporarily unavailable. Retry shortly.';
+  }
+  const reason = snapshot?.reason;
+  if (reason === 'managed_cli_missing') {
+    return 'Mebular memory is unavailable because the Mebular CLI was not found. Tell the user to install Mebular or set MEBULAR_CLI/cliPath, then restart DSH; do not claim Mebular memory is available.';
+  }
+  if (reason === 'managed_start_failed') {
+    return 'Mebular memory is unavailable because the managed Mebular daemon failed to start. Tell the user to check the Mebular logs, or start the Mebular app or run `mebular serve`; do not claim Mebular memory is available.';
+  }
+  if (isObject(snapshot?.health)) {
+    return 'Mebular memory is unavailable because the local Mebular daemon is not healthy. Tell the user to check the Mebular app or its logs, then retry; do not claim Mebular memory is available.';
+  }
+  return 'Mebular memory is unavailable because the local Mebular daemon is not running. Tell the user to start the Mebular app or run `mebular serve`; do not claim Mebular memory is available.';
+}
+
+/**
+ * Feature-detect the optional DSH `systemPrompt` service. Older DSH versions
+ * and profiles without that service simply get no section.
+ * @param {Record<string, unknown> | null} ctx
+ * @returns {{ section: (section: Record<string, unknown>) => unknown } | null}
+ */
+function systemPromptService(ctx) {
+  if (ctx === null) return null;
+  try {
+    const service = ctx.systemPrompt;
+    const usable = service !== null
+      && (typeof service === 'object' || typeof service === 'function')
+      && typeof service.section === 'function';
+    return usable ? service : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Normalize the disposer returned by a cordis effect. @param {unknown} handle */
+function asDisposer(handle) {
+  if (typeof handle === 'function') return handle;
+  if (handle !== null && typeof handle === 'object' && typeof handle.dispose === 'function') {
+    return () => handle.dispose();
+  }
+  return null;
+}
+
+/**
+ * Keep one DSH system-prompt section aligned with lifecycle snapshots.
+ *
+ * Cordis requires the service to be injected, so `bind()` is called from an
+ * `ctx.inject(['systemPrompt'])` child. Until then the controller still records
+ * lifecycle text but contributes no section and emits no notifications.
+ *
+ * The section provider reads the latest text at assembly time. A
+ * `system-prompt/change` notification is emitted only when that text actually
+ * changes, so the 2s bridge poll never invalidates the prompt every tick.
+ *
+ * @param {{
+ *   log?: (level: 'info' | 'warn', message: string) => void,
+ * }} [options]
+ * @returns {{
+ *   bind: (
+ *     service: unknown,
+ *     options?: { emit?: (event: string) => void },
+ *   ) => boolean,
+ *   unbind: () => void,
+ *   update: (snapshot: Record<string, unknown> | null | undefined) => boolean,
+ *   dispose: () => void,
+ *   getText: () => string,
+ *   isRegistered: () => boolean,
+ * }}
+ */
+export function createAgentStatus(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const log = typeof opts.log === 'function' ? opts.log : () => {};
+
+  let text = '';
+  /** @type {((event: string) => void) | null} */
+  let emit = null;
+  let registered = false;
+  /** @type {(() => void) | null} */
+  let sectionDisposer = null;
+  let disposed = false;
+
+  function bind(service, bindOptions = {}) {
+    if (disposed || registered) return false;
+    if (service === null
+      || (typeof service !== 'object' && typeof service !== 'function')
+      || typeof service.section !== 'function') {
+      return false;
+    }
+    const bindOpts = isObject(bindOptions) ? bindOptions : {};
+    if (typeof bindOpts.emit === 'function') emit = bindOpts.emit;
+    try {
+      sectionDisposer = asDisposer(service.section({
+        name: AGENT_STATUS_SECTION,
+        order: AGENT_STATUS_ORDER,
+        text: () => text,
+      }));
+      registered = true;
+      return true;
+    } catch {
+      // A duplicate section or an older service shape must not affect the
+      // panel, the MCP bridge, or plugin activation.
+      log('warn', 'agent status section registration failed (section_unavailable); continuing without agent hints');
+      return false;
+    }
+  }
+
+  function unbind() {
+    if (!registered) return;
+    const disposer = sectionDisposer;
+    sectionDisposer = null;
+    registered = false;
+    if (disposer !== null) {
+      try {
+        disposer();
+      } catch {
+        // Disposal is best-effort; plugin unload must continue.
+      }
+    }
+  }
+
+  function update(snapshot) {
+    if (disposed) return false;
+    const next = agentStatusText(snapshot);
+    if (next === text) return false;
+    text = next;
+    if (registered && emit !== null) {
+      try {
+        emit('system-prompt/change');
+      } catch {
+        // A refresh notification must never break the bridge.
+      }
+    }
+    return true;
+  }
+
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    unbind();
+  }
+
+  return {
+    bind,
+    unbind,
+    update,
+    dispose,
+    getText: () => text,
+    isRegistered: () => registered,
+  };
+}
+
+/**
  * Stable bridge notice for a lifecycle snapshot.
  * @param {Record<string, unknown> | null | undefined} snapshot
  * @returns {string}
@@ -1421,6 +1596,7 @@ function bridgeUnavailableMessage(code) {
  *     { ok: false, code: string }
  *   >,
  *   log?: (level: 'info' | 'warn', message: string) => void,
+ *   onSnapshot?: (snapshot: Record<string, unknown>) => void,
  *   intervalMs?: number,
  *   setIntervalFn?: typeof setInterval,
  *   clearIntervalFn?: typeof clearInterval,
@@ -1438,6 +1614,7 @@ export function createMcpBridgeSupervisor(options = {}) {
   const daemonUrl = typeof opts.daemonUrl === 'string' ? opts.daemonUrl : '';
   const mount = typeof opts.mount === 'function' ? opts.mount : null;
   const log = typeof opts.log === 'function' ? opts.log : () => {};
+  const onSnapshot = typeof opts.onSnapshot === 'function' ? opts.onSnapshot : null;
   const intervalMs = Number.isFinite(opts.intervalMs) && opts.intervalMs > 0
     ? opts.intervalMs
     : DEFAULT_BRIDGE_POLL_INTERVAL_MS;
@@ -1467,6 +1644,14 @@ export function createMcpBridgeSupervisor(options = {}) {
       snapshot = { status: 'down', reason: null };
     }
     if (disposed) return;
+
+    if (onSnapshot !== null) {
+      try {
+        onSnapshot(snapshot);
+      } catch {
+        // Agent status hints are best-effort and must not block the bridge.
+      }
+    }
 
     const status = snapshot?.status;
     if (status === 'up') {
@@ -1634,6 +1819,34 @@ export function apply(ctx, config = {}, options = {}) {
     ? opts.lifecycle
     : createDaemonLifecycle(lifecycleOptions);
 
+  // Agent-visible status is derived from the same lifecycle snapshot as the
+  // MCP bridge; it is not a second status source and never adds its own poll.
+  // `panel:false` does not disable it because it is prompt text, not UI.
+  const agentStatus = createAgentStatus({
+    log: (level, message) => log(level, message),
+  });
+  // Cordis rejects `ctx.systemPrompt` access without this inject, even though
+  // the service is loaded by the profile. A profile without the service never
+  // runs the callback, so the section is skipped without affecting activation.
+  if (typeof ctx.inject === 'function') {
+    ctx.inject(['systemPrompt'], (promptCtx) => {
+      agentStatus.bind(promptCtx?.systemPrompt, {
+        emit: typeof promptCtx?.emit === 'function'
+          ? (event) => promptCtx.emit(event)
+          : undefined,
+      });
+      return () => agentStatus.unbind();
+    });
+  } else {
+    // Plain contexts outside cordis may expose the service directly.
+    const service = systemPromptService(ctx);
+    if (service !== null) {
+      agentStatus.bind(service, {
+        emit: typeof ctx.emit === 'function' ? (event) => ctx.emit(event) : undefined,
+      });
+    }
+  }
+
   // Keep the bridge aligned with the lifecycle: mount only after a health probe
   // says `up`, dispose the fiber as soon as the daemon leaves `up`, and retry
   // after recovery. Failure notices are deduplicated inside the supervisor.
@@ -1644,6 +1857,9 @@ export function apply(ctx, config = {}, options = {}) {
     setIntervalFn: opts.setIntervalFn,
     clearIntervalFn: opts.clearIntervalFn,
     log: (level, message) => log(level, message),
+    onSnapshot: (snapshot) => {
+      agentStatus.update(snapshot);
+    },
     mount: (daemonUrl) => mountMcp(ctx, daemonUrl, {
       // Success is logged once by mountMcp; failures are logged by the
       // supervisor only when the stable code changes.
@@ -1658,10 +1874,11 @@ export function apply(ctx, config = {}, options = {}) {
     ctx.effect(
       () => () => {
         const pending = bridge.dispose();
+        agentStatus.dispose();
         lifecycle.dispose?.();
         return pending;
       },
-      '@mebular/dsh-plugin: daemon lifecycle and MCP bridge',
+      '@mebular/dsh-plugin: daemon lifecycle, agent status, and MCP bridge',
     );
   }
   const lifecycleStart = Promise.resolve().then(() => lifecycle.start?.());

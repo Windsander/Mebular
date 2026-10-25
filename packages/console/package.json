@@ -4,6 +4,11 @@
   "private": true,
   "description": "Mebular 人类控制台：本地只读的星图 / 域视图 / 审计时间线（vanilla JS + Canvas2D，零运行时依赖）",
   "license": "MIT",
+  "author": {
+    "name": "Sobert Li (Windsander)",
+    "email": "Windsander@users.noreply.github.com",
+    "url": "https://github.com/Windsander"
+  },
   "type": "module",
   "files": [
     "index.html",

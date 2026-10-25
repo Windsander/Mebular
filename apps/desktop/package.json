@@ -8,8 +8,9 @@
   "license": "MIT",
   "homepage": "https://github.com/Windsander/Mebular",
   "author": {
-    "name": "Windsander",
-    "email": "Windsander@users.noreply.github.com"
+    "name": "Sobert Li (Windsander)",
+    "email": "Windsander@users.noreply.github.com",
+    "url": "https://github.com/Windsander"
   },
   "type": "module",
   "main": "src/main/index.mjs",

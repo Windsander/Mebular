@@ -3,6 +3,11 @@
   "version": "0.1.2",
   "description": "Mebular 行为层：可移植的 SKILL.md + MEMORY_POLICY.md 与各 MCP client 接入片段",
   "license": "MIT",
+  "author": {
+    "name": "Sobert Li (Windsander)",
+    "email": "Windsander@users.noreply.github.com",
+    "url": "https://github.com/Windsander"
+  },
   "private": false,
   "type": "module",
   "files": [

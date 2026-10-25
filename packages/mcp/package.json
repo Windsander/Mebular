@@ -3,6 +3,11 @@
   "version": "0.1.2",
   "description": "Mebular MCP server（stdio + Streamable HTTP）：把 Mebular 记忆能力暴露给任意 MCP client",
   "license": "MIT",
+  "author": {
+    "name": "Sobert Li (Windsander)",
+    "email": "Windsander@users.noreply.github.com",
+    "url": "https://github.com/Windsander"
+  },
   "private": false,
   "type": "module",
   "bin": {

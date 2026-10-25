@@ -1,6 +1,6 @@
 # Mebular 桌面 App（apps/desktop）
 
-> v0.1.1：**壳 + 守护托管 + 内嵌控制台 + 发布 tarball 运行时 + 三平台 unsigned 安装包**。
+> v0.1.2：**壳 + 守护托管 + 内嵌控制台 + 发布 tarball 运行时 + 三平台 unsigned 安装包**。
 > 安装包 runtime 来自与 npm 发布同一批 verify tarball；签名、公证与自动更新留到后续版本。
 > 发布操作见 [`docs/operations/DESKTOP_RELEASE.md`](../../docs/operations/DESKTOP_RELEASE.md)。
 
@@ -13,7 +13,7 @@ Electron 薄壳：把**既有控制台**（`127.0.0.1:<port>/console`）装进�
 
 ```
 apps/desktop/
-├── package.json            # private + 0.1.1（与 npm 五个 lockstep 包同版本）
+├── package.json            # private + 0.1.2（与六个 npm 包同版本）
 ├── electron-builder.yml    # 安装包配置（runtime/node_modules → resources/node_modules）
 ├── runtime/                # 发布 tarball 安装出的运行时（不入库）
 ├── src/main/               # Electron 主进程：daemon.mjs（托管逻辑，纯可测）/ index.mjs（壳）/ ipc.mjs / tray-icons.mjs
@@ -32,7 +32,7 @@ npm run dev -- --home ~/.mebular --port 7331   # 透传参数（可选）
 npm run smoke                     # 无 GUI 有界冒烟（CI 用）
 ```
 
-## 安装包（v0.1.1，unsigned）
+## 安装包（v0.1.2，unsigned）
 
 安装包里的 Mebular 运行时**不来自仓库源码目录**，而是先用 `npm pack` 产出五个发布
 tarball，再由 `prepare-runtime` 一次性 `npm install --omit=dev --ignore-scripts` 到
@@ -75,7 +75,7 @@ node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/win-unpa
 node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/linux-unpacked/resources
 ```
 
-> v0.1.1 产物**未签名、未公证**：macOS Gatekeeper 要求右键 → 打开（或系统设置 → 隐私与
+> v0.1.2 产物**未签名、未公证**：macOS Gatekeeper 要求右键 → 打开（或系统设置 → 隐私与
 > 安全性 → 仍要打开），Windows SmartScreen 要求「更多信息 → 仍要运行」。发布前先用
 > Release 的 `SHA256SUMS.txt` 校验。签名、公证与自动更新留到后续版本；完整说明见
 > [`docs/operations/DESKTOP_RELEASE.md`](../../docs/operations/DESKTOP_RELEASE.md)。
@@ -136,5 +136,5 @@ Electron。
   `SHA256SUMS.txt`。手动 `workflow_dispatch` 是 dry-run：只构建并上传 artifacts，不发布。
 
 版本 SSOT：`apps/desktop/package.json`、`package-lock.json` 根 version 与
-`src/main/daemon.mjs` 的 `APP_VERSION` 必须与 5 个 lockstep 包一致；`prepare-runtime.mjs`
-和 Publish verify 都会检查。
+`src/main/daemon.mjs` 的 `APP_VERSION` 必须与六个 npm 包（含 `dsh-plugin`）一致；
+`prepare-runtime.mjs` 校验 runtime 使用的五个包，Publish verify 校验六个包与桌面版本。

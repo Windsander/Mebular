@@ -2,7 +2,7 @@
   "name": "@mebular/desktop",
   "productName": "Mebular",
   "desktopName": "mebular",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "description": "Mebular 桌面应用（Electron 壳 + 内嵌控制台 + 守护托管）",
   "license": "MIT",

@@ -39,7 +39,7 @@ curl -sS http://127.0.0.1:7331/healthz
 从 npm 安装到 DSH 的 Web profile：
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.1.1
+dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
 ```
 
 插件开发时仍可从仓库工作树安装：
@@ -227,7 +227,7 @@ curl -sS http://127.0.0.1:<dsh-port>/mebular/embed-info
   "mode": "attach",
   "managed": false,
   "panel": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "embedProtocol": 1,
   "consoleUrl": "http://127.0.0.1:7331/console",
   "embedUrl": "http://127.0.0.1:7331/console/?embed=dsh",
@@ -358,12 +358,11 @@ npm run verify:dsh-plugin
 
 ## 发布状态
 
-- 版本：`0.1.1`
-- npm：`@mebular/dsh-plugin@0.1.1`（随 Mebular v0.1.1 release train）
+- 版本：`0.1.2`，随统一 Mebular v0.1.2 release train（六个 npm 包同版本）
+- npm：`@mebular/dsh-plugin@0.1.2`
 - 官方插件列表：已收录（[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 的 `memory` 分类，PR [#9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)）
-- 正式安装：`dsh plugin --profile web add @mebular/dsh-plugin@0.1.1`
+- 正式安装：`dsh plugin --profile web add @mebular/dsh-plugin@0.1.2`
 - 开发安装：`dsh plugin --profile web add ./packages/dsh-plugin`
-- 版本：随统一 Mebular release train，六个 npm 包同版本
 - 发布：独立 npm job（`publish-dsh`）；代码：独立适配器，隔离在 `packages/dsh-plugin`
 
 ## License

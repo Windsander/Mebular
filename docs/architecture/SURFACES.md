@@ -102,7 +102,7 @@ DSH 客户端把 `connected` / `starting` / `unavailable` / `offline` / `checkin
 {
   "status": "ok",
   "name": "mebular",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "auth": "none",
   "tls": false,
   "instance": "<home-key>"
@@ -115,7 +115,7 @@ DSH 客户端把 `connected` / `starting` / `unavailable` / `offline` / `checkin
 {
   "ok": true,
   "name": "mebular",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "embedProtocol": 1,
   "consoleUrl": "http://127.0.0.1:7331/console",
   "embedUrl": "http://127.0.0.1:7331/console/?embed=dsh",
@@ -134,7 +134,7 @@ DSH 客户端把 `connected` / `starting` / `unavailable` / `offline` / `checkin
   "mode": "attach",
   "managed": false,
   "panel": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "embedProtocol": 1,
   "consoleUrl": "http://127.0.0.1:7331/console",
   "embedUrl": "http://127.0.0.1:7331/console/?embed=dsh",

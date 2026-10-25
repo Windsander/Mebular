@@ -38,7 +38,7 @@
 从 npm 安装到 DSH 的 Web profile：
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.1.1
+dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
 ```
 
 插件开发时仍可从仓库工作树安装：

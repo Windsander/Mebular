@@ -37,6 +37,16 @@ head 分支，便于本地回看与后续跟进。请不要开启该设置。
 
 未开启自动合并（auto-merge）。
 
+已合并分支的清理只走 dry-run 清单，确认后再删：
+
+```bash
+npm run branches:merged                  # 只列已合并进 origin/main 的候选
+npm run branches:merged -- --apply --yes # 明确确认后才删除
+```
+
+脚本保护 `main` / `release/*` / `release-prep/*` / `site*`、当前分支、worktree 分支和
+open PR head；细节见 [`docs/operations/RELEASE.md`](../docs/operations/RELEASE.md#81-已合并远端分支清理)。
+
 ## Dependabot
 
 - minor/patch 分组自动提 PR；`electron` 与 `electron-builder` 的 **major 一律人工处理**（`version-update:semver-major` ignore），避免打包/签名链路被自动跨大版本。

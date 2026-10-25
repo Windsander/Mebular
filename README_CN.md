@@ -136,7 +136,7 @@ mebular print-config --client opencode         # MCP 配置
 <p align="center"><strong>与 DSH 一起使用</strong><br>
 保持 Mebular App 运行，然后从 npm 把插件装入 DSH 的 web profile：<br>
 <code>dsh plugin --profile web add @mebular/dsh-plugin@0.1.1</code><br>
-侧边栏 Mebular 面板通过 <code>?embed=dsh</code>（仅 loopback）嵌入同一套 Console，官方 MCP client 连接同一张图。插件按 <code>daemonUrl &gt; MEBULAR_HTTP_PORT &gt; runtime.json &gt; 7331</code> 发现 daemon，自定义端口会自动跟随。插件有独立版本线，不进入五包 lockstep；开发时仍可从 <code>packages/dsh-plugin</code> 本地安装。<br>
+侧边栏 Mebular 面板通过 <code>?embed=dsh</code>（仅 loopback）嵌入同一套 Console，官方 MCP client 连接同一张图。插件按 <code>daemonUrl &gt; MEBULAR_HTTP_PORT &gt; runtime.json &gt; 7331</code> 发现 daemon，自定义端口会自动跟随。插件是独立适配器，代码隔离在 <code>packages/dsh-plugin</code>；它由独立 npm job 发布，版本随统一 release train，六个 npm 包同版本；开发时仍可从 <code>packages/dsh-plugin</code> 本地安装。<br>
 已收录于 <a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin">awesome-dsh-plugin</a> 的 <code>memory</code> 分类。<br>
 <a href="packages/dsh-plugin/README.md">DSH 插件指南 →</a> · <a href="docs/integrations/DSH_CN.md">集成说明 →</a></p>
 

@@ -67,7 +67,7 @@ if (existsSync(pkgJsonPath)) {
 }
 
 check('name is @mebular/dsh-plugin', pkg.name === '@mebular/dsh-plugin', String(pkg.name));
-check('version is 0.1.1', pkg.version === '0.1.1', String(pkg.version));
+check('version is a semver string', /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(String(pkg.version)), String(pkg.version));
 check(
   'description is present',
   typeof pkg.description === 'string' && pkg.description.length > 0,
@@ -299,7 +299,7 @@ check(
 check('README documents the npm name', readme.includes('@mebular/dsh-plugin'));
 check(
   'README documents npm install',
-  readme.includes('dsh plugin --profile web add @mebular/dsh-plugin@0.1.1'),
+  /dsh plugin --profile web add @mebular\/dsh-plugin@\d+\.\d+\.\d+/.test(readme),
 );
 check(
   'README does not claim the npm package is unpublished',

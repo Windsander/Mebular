@@ -19,7 +19,7 @@ const client = read('client.js');
 describe('P2 @mebular/dsh-plugin manifest：DSH bundle 形状', () => {
   it('package.json 标识、入口与 exports 完整', () => {
     expect(pkg.name).toBe('@mebular/dsh-plugin');
-    expect(pkg.version).toBe('0.1.1');
+    expect(pkg.version).toMatch(/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/);
     expect(pkg.license).toBe('MIT');
     expect(pkg.type).toBe('module');
     expect(pkg.main).toBe('index.js');

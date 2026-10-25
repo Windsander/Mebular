@@ -10,6 +10,7 @@ import { MemoryService } from '@mebular/core';
 import { createMebular, homeDir, loadConfigFile } from './config.mjs';
 import { registerTools } from './tools.mjs';
 import { startHttpServer, acquireLock, pidAlive } from './serve.mjs';
+import { APP_VERSION } from './version.mjs';
 import { createJoinServer } from './jointoken.mjs';
 import { clearApplyPending, readApplyPending, writeApplyResult, writeServeReady } from './config-apply.mjs';
 import { buildSettings } from './admin.mjs';
@@ -26,7 +27,7 @@ const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
 6. 无结果别编：召回为空就如实说明，不要臆造记忆。`;
 
 export function buildServer(service, options = {}) {
-  const server = new McpServer({ name: 'mebular', version: '0.1.1' });
+  const server = new McpServer({ name: 'mebular', version: APP_VERSION });
   registerTools(server, service, options);
   server.registerPrompt(
     'memory_policy',

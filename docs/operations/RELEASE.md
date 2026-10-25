@@ -3,11 +3,14 @@
 面向 `@mebular/*` npm 包与三平台桌面安装包的发布操作手册。核心约束：**分支名即版本号
 （SSOT）**、**先构建安装包再发 npm**、**幂等发布**、**按 ref 串行**。
 
-当前 v0.1.1 交付：
+当前发布线 v0.1.1（历史记录）：
 
-- 5 个 lockstep npm 包 + 1 个独立版本插件；
+- 6 个 npm 包统一为 `0.1.1`（单版本 umbrella：`core` / `service` / `skill` / `mcp` / `fleet` / `dsh-plugin`）；
 - macOS Universal DMG、Windows NSIS x64、Linux AppImage + deb x64（unsigned）；
 - `SHA256SUMS.txt`（仅 GitHub Release 资产生成）。
+
+从下一版本起，`@mebular/dsh-plugin` 仍由独立 npm job 发布，但版本号随统一 release train bump，
+六个 npm 包同版本，并由发布 gate 校验；不存在只发布 DSH 插件的批次。
 
 ## 0. 发布对象
 
@@ -18,26 +21,28 @@
 | `@mebular/skill` | `packages/skill` | 行为层：`SKILL.md` / `MEMORY_POLICY.md` / MCP 接入片段 |
 | `@mebular/fleet` | `packages/fleet` | 跨设备多 Agent 协作 |
 | `@mebular/mcp` | `packages/mcp` | MCP server（stdio + Streamable HTTP） |
-| `@mebular/dsh-plugin` | `packages/dsh-plugin` | DeepSeek Harness 插件；**独立版本线**，不参与 lockstep |
+| `@mebular/dsh-plugin` | `packages/dsh-plugin` | DeepSeek Harness 插件；独立适配器，独立 npm job 发布，版本随统一 release train |
 
-- **版本策略**：5 个 lockstep 包（`core` / `service` / `skill` / `mcp` / `fleet`）永远同版本号。
-- **独立版本包**：`@mebular/dsh-plugin` 在 v0.1.1 与五包同版本发布（自身版本 `0.1.1`），
-  但仍保留独立版本线；版本号只取自 `packages/dsh-plugin/package.json`；`bump_version.sh`
-  不改它，verify 的 lockstep 校验也不包含它。
+- **版本策略**：6 个可发布包（`core` / `service` / `skill` / `mcp` / `fleet` / `dsh-plugin`）
+  共用同一发布版本；`scripts/bump_version.sh` 一次同步全部 manifest 与版本源。
+- **MCP 版本源**：`packages/mcp/src/version.mjs` 是唯一真源；`serve.mjs` / `server.mjs` /
+  `client.mjs` 从它导入，`packages/mcp/scripts/publish-manifest.mjs` 从自己的
+  `package.json` 取版本。禁止再手写 `0.x.y`。
 - **安装入口**：`npm install -g @mebular/core` 是根包，同时提供 `mebular` + `fleet` 两个 bin；
   `@mebular/mcp` 单独安装只有 `mebular`，**不能**当作双 bin 安装入口。
 - **桌面版本**：`apps/desktop/package.json`、`apps/desktop/package-lock.json` 与
-  `apps/desktop/src/main/daemon.mjs` 的 `APP_VERSION` 必须等于 5 包 lockstep 版本。
+  `apps/desktop/src/main/daemon.mjs` 的 `APP_VERSION` 必须等于发布版本。
 - **触发方式**：push 到 `release/v*` 分支（例如 `release/v0.2.0`），**不使用 tag 触发**。
   手动 `workflow_dispatch` 是 packaging dry-run。
-- **发布分支即真相**：`release/vX.Y.Z` 的 `X.Y.Z` 必须等于 5 个 `package.json` 的版本、
-  桌面三处版本，以及 `CHANGELOG.md` 中 `## [vX.Y.Z]` 章节。
+- **发布分支即真相**：`release/vX.Y.Z` 的 `X.Y.Z` 必须等于 6 个 `package.json` 的版本、
+  根 `package-lock.json` 的 workspace 条目、桌面三处版本、MCP 版本源，以及
+  `CHANGELOG.md` 中 `## [vX.Y.Z]` 章节。`npm run verify:release-version` 一次校验全部。
 
 ### 0.1 发布产物
 
 | 产物 | 来源 | 说明 |
 | --- | --- | --- |
-| 6 个 `.tgz` | verify 的 `release-pack` | 5 个 lockstep + `mebular-dsh-plugin-<version>.tgz` |
+| 6 个 `.tgz` | verify 的 `release-pack` | 六个同版本包：`core` / `service` / `skill` / `mcp` / `fleet` / `dsh-plugin` |
 | `Mebular-<version>-universal.dmg` | `desktop-macos` | macOS Universal（arm64 + x64），unsigned |
 | `Mebular-Setup-<version>.exe` | `desktop-windows` | Windows NSIS x64，unsigned |
 | `Mebular-<version>-x86_64.AppImage` | `desktop-linux` | Linux x64，unsigned |
@@ -58,8 +63,8 @@
 - [ ] **GitHub Actions 权限**：仓库 Settings → Actions → General，Workflow permissions 至少
       勾选 **Read and write permissions**；`release` job 另有 job-level `contents: write`。
 - [ ] **首次发布注意**：`@mebular/core` 虽为仓库根包，仍以普通包发布；其 tarball 携带
-      `packages/fleet/dist`（`files` 已声明）以支撑 `fleet` bin。首次发布会占用 5 个包名，
-      同时占用 `@mebular/dsh-plugin`。
+      `packages/fleet/dist`（`files` 已声明）以支撑 `fleet` bin。首次发布会占用六个包名
+      （含 `@mebular/dsh-plugin`）。
 - [ ] **分支保护**：`main` 保持受保护；发布只走 `release/v*` 分支，勿直接向 `main` 提交版本号。
 - [ ] **2027 迁移计划**：npm 已公布自 **2027-01** 起收紧长期 token 的直接发布路径。R6 应切换到
       **trusted publishing（OIDC）**，让 GitHub Actions 以短期身份发布，不再依赖长期
@@ -70,17 +75,16 @@
 发布是不可逆的，仅在版本号尚未被下游依赖时使用「删除」，否则一律「标记废弃」：
 
 - **npm unpublish（72 小时窗口）**：仅能删除**发布后 72 小时内**、且**无人依赖**的版本；
-  超时或被依赖一律 400。按包执行，lockstep 需 5 个包各跑一次，插件单独一次：
+  超时或被依赖一律 400。六个包各执行一次（同一版本）：
   ```bash
-  npm unpublish @mebular/core@0.2.0     # 重复 core → service → skill → mcp → fleet
-  npm unpublish @mebular/dsh-plugin@0.2.0
+  npm unpublish @mebular/core@0.2.0     # 重复 core → service → skill → mcp → fleet → dsh-plugin
   ```
   同一版本被删除后**不可再以相同版本号重新发布**，后续必须升号。
 - **npm deprecate（常规手段）**：标记问题版本，安装时会打印警告但不阻断：
   ```bash
   npm deprecate @mebular/mcp@0.2.0 "broken: use 0.2.1"
   ```
-  lockstep 建议 5 个包同一条消息一并废弃；插件单独废弃，再发布更高修复版本。
+  建议六个包用同一条消息一并废弃，再发布更高修复版本。
 - **回退 GitHub Release**：
   ```bash
   gh release delete v0.2.0 --yes            # 仅删 Release
@@ -96,7 +100,7 @@
 
 ## 2. 发布流水线
 
-`.github/workflows/publish.yml` 的 8 个 job：
+`.github/workflows/publish.yml` 的 9 个 job：
 
 ```text
 verify（SSOT / build / lint / test / 6 tarballs）
@@ -106,10 +110,13 @@ verify（SSOT / build / lint / test / 6 tarballs）
   └─ desktop-linux  ─┘
         │
         ▼（三平台全部成功 + preflight 成功）
-     publish（5 个 lockstep tarball）
+     publish（core/service/skill/mcp/fleet tarball）
         │
         ▼
-     publish-dsh（独立版本 tarball）
+     publish-dsh（dsh-plugin tarball，同一版本）
+        │
+        ▼
+     visibility（npm view 六包 + dist-tags.latest；失败不创建 Release）
         │
         ▼
      release（4 个安装包 + SHA256SUMS.txt）
@@ -119,18 +126,48 @@ verify（SSOT / build / lint / test / 6 tarballs）
 
 1. **verify** 是唯一一次 pack：6 个 tarball 上传为 artifact `release-tarballs`，后续 npm
    publish 与三平台 runtime 都消费这同一批文件，保证「测什么发什么」。
-2. **preflight** 只在 push 时运行，用 `npm whoami` 验证 token 能认证；失败则后续 job 不启动。
-3. **desktop matrix** 在 macOS / Windows / Linux runner 上各自下载 `release-tarballs`，
+2. **verify 版本 SSOT** 调用 `node scripts/verify-release-version.mjs`，校验 6 个 manifest、
+   根 lock、桌面三处、MCP 版本源与 CHANGELOG；dry-run 与正式发布走同一段代码。
+3. **preflight** 只在 push 时运行，用 `npm whoami` 验证 token 能认证；失败则后续 job 不启动。
+4. **desktop matrix** 在 macOS / Windows / Linux runner 上各自下载 `release-tarballs`，
    执行 `prepare-runtime` → `smoke:runtime` → `dist:*` → packaged runtime smoke，并上传
    `desktop-macos` / `desktop-windows` / `desktop-linux`。
-4. **publish** 依赖 `preflight` + `verify` + 三个 desktop job，因此**安装包全部通过后才发 npm**。
-5. **publish-dsh** 依赖 `publish`，版本只读 `packages/dsh-plugin/package.json`。
-6. **release** 依赖全部 job，下载三个 `desktop-*` artifact，校验恰好 1 个 `.dmg` / `.exe` /
+5. **publish** 依赖 `preflight` + `verify` + 三个 desktop job，因此**安装包全部通过后才发 npm**。
+6. **publish-dsh** 依赖 `publish`，发布 `packages/dsh-plugin` tarball；版本与六包 SSOT 一致。
+7. **visibility** 依赖 `publish` + `publish-dsh`，用
+   `scripts/verify-release-visibility.mjs` 有界轮询六个包的 `npm view <pkg>@<version> version`
+   与 `dist-tags.latest`。只有六包可见且 latest 指向本次版本，`release` 才会启动。
+8. **release** 依赖全部 job，下载三个 `desktop-*` artifact，校验恰好 1 个 `.dmg` / `.exe` /
    `.AppImage` / `.deb`，生成 `SHA256SUMS.txt`，从 CHANGELOG 抽取 notes，创建 Release 并
    `gh release upload --clobber`。
 
 > 串行保证：`concurrency.group = publish-${{ github.ref }}`，`cancel-in-progress: false`；
-> 同一 release 分支重复 push 不会并行发布。
+> 同一 release 分支重复 push 不会并行发布。dry-run（`workflow_dispatch`）不运行
+> preflight / publish / publish-dsh / visibility / release。
+
+### 2.1 分支生命周期（固定流程）
+
+发布分支与 dry-run 必须分开，避免「push 即发布」：
+
+```text
+origin/main
+  └─ release-prep/vX.Y.Z        # bump + 文档 + 本地预检
+       ├─ workflow_dispatch     # packaging dry-run（不发布）
+       └─ release/vX.Y.Z        # 从 prep 分支创建；push 即正式发布
+            └─ PR 回合并 main   # 保留版本提交与 CHANGELOG
+                 └─ 删除 release/vX.Y.Z 与 release-prep/vX.Y.Z
+```
+
+1. 从最新 `origin/main` 创建 `release-prep/vX.Y.Z`，提交版本与 CHANGELOG。
+2. 在 `release-prep/vX.Y.Z` 上跑 `gh workflow run publish.yml --ref release-prep/vX.Y.Z`，
+   确认三平台安装包与 6 个 tarball 全绿。**不要**用 push `release/v*` 代替 dry-run。
+3. dry-run 通过后，从 prep 分支创建 `release/vX.Y.Z` 并 push；这会触发正式发布。
+4. 发布成功后，用 PR 把 `release/vX.Y.Z` 回合并到 `main`（历史 v0.1.1 的 PR #251 即此步骤）。
+5. 回合并后删除 `release/vX.Y.Z` 与 `release-prep/vX.Y.Z`；远端已合并分支用第 8.1 节的
+   dry-run 清单确认后再清理。
+
+> 不要直接向 `main` push 版本号，也不要长期保留 release 分支；分支名是版本 SSOT，合并后
+> 以 tag / CHANGELOG / npm 版本为准。
 
 ## 3. 本地准备与预检
 
@@ -138,21 +175,21 @@ verify（SSOT / build / lint / test / 6 tarballs）
 
 ```bash
 git fetch origin
-git switch -c release/v0.2.0 origin/main      # 分支名即版本号
-bash scripts/bump_version.sh v0.2.0           # 同步 5 包 + 桌面版本 + CHANGELOG 章节
+git switch -c release-prep/v0.2.0 origin/main  # 先 prep，dry-run 后再建 release 分支
+bash scripts/bump_version.sh v0.2.0             # 同步 6 包 + 版本源 + CHANGELOG 章节
+npm run verify:release-version                  # 只读校验；也可带 --version/--tag
 ```
 
 `bump_version.sh` 会：
 
-1. 将 5 个 `package.json` 的 `version` 改为 `0.2.0`；
-2. 同步桌面 `package.json` / `package-lock.json` / `APP_VERSION`；
-3. 同步任何「已是版本号区间」的内部 `@mebular/*` 依赖为 `^0.2.0`；
-4. 在 `CHANGELOG.md` 顶部插入 `## [v0.2.0] - <date>` 章节（已存在则跳过，幂等）。
+1. 将 6 个 `package.json`（core / fleet / mcp / service / skill / dsh-plugin）改为 `0.2.0`；
+2. 同步根 `package-lock.json` 的根版本与 6 个 workspace 条目；
+3. 同步桌面 `package.json` / `package-lock.json` / `APP_VERSION`；
+4. 同步任何「已是版本号区间」的内部 `@mebular/*` 依赖为 `^0.2.0`；
+5. 改写 `packages/mcp/src/version.mjs` 的 `APP_VERSION`（MCP 唯一版本源）；
+6. 在 `CHANGELOG.md` 顶部插入 `## [v0.2.0] - <date>` 章节（已存在则跳过，幂等）。
 
-`bump_version.sh` 只处理 lockstep 包与桌面版本；`@mebular/dsh-plugin` 的版本单独在
-`packages/dsh-plugin/package.json` 维护。
-
-v0.1.1 的版本号已就位、CHANGELOG 章节已存在，**不需要**再跑 `bump_version.sh`。
+> v0.1.1 的版本号与 CHANGELOG 章节已存在，**不需要**再跑 `bump_version.sh`。
 
 ### 3.2 本地预检（推荐）
 
@@ -163,9 +200,16 @@ npm run lint
 npm run test:coverage          # 覆盖率门槛在 package.json#jest.coverageThreshold
 npm run verify:mcp:publish     # 5 包 npm pack + tarball 干净安装冒烟
 npm run verify:dsh-plugin      # 插件契约 + tarball
+npm run verify:release-version # 六包 / lock / 桌面 / MCP / CHANGELOG SSOT
 npm run check:docs             # 文档一致性 7/7
 npm run check:i18n
 npm run check:deps
+```
+
+发布后可见性 gate 也可以独立预演（对已发布版本只读）：
+
+```bash
+npm run verify:release-visibility -- --version 0.2.0 --timeout-seconds 60 --interval-seconds 5
 ```
 
 桌面链路（与 CI 同路径）：
@@ -194,16 +238,17 @@ node apps/desktop/scripts/smoke-runtime.mjs --runtime "apps/desktop/dist/<unpack
 ## 4. Packaging dry-run
 
 `workflow_dispatch` 只跑 `verify` + 三平台 desktop matrix，上传 artifacts；**不**运行
-`preflight`、`publish`、`publish-dsh`、`release`，不发布 npm，也不创建 GitHub Release。
-TAG 从根 `package.json` 版本生成。
+`preflight`、`publish`、`publish-dsh`、`visibility`、`release`，不发布 npm，也不创建
+GitHub Release。TAG 从根 `package.json` 版本生成，因此必须先在 `release-prep` 分支完成
+版本 bump。
 
-> `workflow_dispatch` 需要该 workflow 已在默认分支注册。R2 的 `publish.yml` 合入 `main`
-> 之前，GitHub 不会提供手动触发入口；此时不要用 `release/v*` 分支 push 代替 dry-run，
-> 那会进入正式发布。先完成合并，再在候选分支上触发。
+> `workflow_dispatch` 需要该 workflow 已在默认分支注册。若 `publish.yml` 尚未合入 `main`，
+> GitHub 不会提供手动触发入口；此时不要用 `release/v*` 分支 push 代替 dry-run，那会进入
+> 正式发布。先完成 workflow 合并，再在 prep 分支上触发。
 
 ```bash
-# 在待验证分支上触发
-gh workflow run publish.yml --ref <branch>
+# 在 release-prep 分支上触发（workflow 已在 main 注册）
+gh workflow run publish.yml --ref release-prep/v0.2.0
 
 # 观察
 gh run list --workflow=publish.yml --limit 5
@@ -215,6 +260,9 @@ gh run download <run-id> -n desktop-macos -D release-assets
 gh run download <run-id> -n desktop-windows -D release-assets
 gh run download <run-id> -n desktop-linux -D release-assets
 ```
+
+dry-run 必须全绿后才创建 `release/vX.Y.Z`；不要在 `release/vX.Y.Z` 上重跑 dry-run，
+push 该分支即正式发布。
 
 dry-run 的 artifacts 保留 **7 天**；没有官方 `SHA256SUMS.txt`（它由 `release` job 生成）。
 需要在本地核对时，对 `release-assets` 自行计算：
@@ -228,46 +276,65 @@ sha256sum release-assets/*              # Linux
 
 ### 5.1 触发
 
+dry-run 通过后，从 prep 分支创建正式发布分支并 push：
+
 ```bash
-git add -A
-git commit -m "release: v0.1.1"
-git push -u origin release/v0.1.1
+git switch release-prep/v0.2.0
+git switch -c release/v0.2.0
+git push -u origin release/v0.2.0
 ```
 
-push 后自动执行第 2 节的完整流水线。任一 job 失败即停；安装包未全绿时不会发 npm。
+push 后自动执行第 2 节的完整流水线。任一 job 失败即停；安装包未全绿时不会发 npm；
+六包未全部可见（visibility gate）时不会创建 GitHub Release。
 
 ### 5.2 观察
 
 ```bash
-gh run list --workflow=publish.yml --branch release/v0.1.1 --limit 5
+gh run list --workflow=publish.yml --branch release/v0.2.0 --limit 5
 gh run watch <run-id>
 gh run view <run-id> --log-failed       # 失败时
+
+# 单独查看 visibility gate
+gh run view <run-id> --json jobs --jq '.jobs[] | select(.name | contains("visibility"))'
 ```
 
 ### 5.3 发布后核验
 
 ```bash
-# npm 六包
-for p in core service skill mcp fleet; do npm view "@mebular/$p@0.1.1" version; done
-npm view @mebular/dsh-plugin@0.1.1 version
+# npm 六包：version 与 latest 都必须指向本次版本
+for p in core service skill mcp fleet dsh-plugin; do
+  npm view "@mebular/$p@0.2.0" version
+  npm view "@mebular/$p" dist-tags.latest
+done
+
+# 或复用流水线同一个 gate（只读轮询；已可见时立即通过）
+npm run verify:release-visibility -- --version 0.2.0 --dsh-version 0.2.0
 
 # GitHub Release
-gh release view v0.1.1
-gh release view v0.1.1 --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
+gh release view v0.2.0
+gh release view v0.2.0 --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
 
 # 根包双 bin
-npm install -g @mebular/core@0.1.1
+npm install -g @mebular/core@0.2.0
 command -v mebular && command -v fleet
 mebular tools >/dev/null && fleet --version
 ```
 
-> 不要用 `npm install -g @mebular/mcp@0.1.1` 冒充双 bin 安装：`@mebular/mcp` 只提供
+发布后核验清单：
+
+- [ ] 六个包的 `version` 与 `dist-tags.latest` 都等于本次发布版本（或直接看 visibility job）；
+- [ ] GitHub Release 资产 = 4 个安装包（`.dmg` / `.exe` / `.AppImage` / `.deb`）+
+      `SHA256SUMS.txt`，release notes 来自 CHANGELOG 的 `## [vX.Y.Z]` 章节；
+- [ ] 下载资产后按第 6 节校验 checksum；`SHA256SUMS.txt` 恰好 4 行；
+- [ ] `release/vX.Y.Z` 已通过 PR 回合并 `main`，随后删除 release / prep 分支。
+
+> 不要用 `npm install -g @mebular/mcp@0.2.0` 冒充双 bin 安装：`@mebular/mcp` 只提供
 > `mebular`，`fleet` 必须来自根包（或单独安装 `@mebular/fleet`）。
 
 插件独立验证（先让 App / 守护运行）：
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.1.1
+dsh plugin --profile web add @mebular/dsh-plugin@0.2.0
 dsh --profile web --dump-config | grep -A3 mebular   # host row；transport 由官方 MCP client 挂载
 # DSH 会话中确认 mcp__mebular__* 可调用；侧边栏面板加载 /console/?embed=dsh
 ```
@@ -289,7 +356,7 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 从 Release 下载并校验：
 
 ```bash
-gh release download v0.1.1 -D release-assets
+gh release download v0.2.0 -D release-assets
 cd release-assets
 
 # Linux
@@ -325,8 +392,10 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 - 重跑流水线（重推同名分支或 Rerun failed jobs）安全：
   - 版本 SSOT 校验只读；
   - `publish` / `publish-dsh` 先 `npm view`，已发布版本自动 skip；
+  - `visibility` 只读轮询，已可见时立即通过；
   - `release` 已存在则跳过创建；资产用 `--clobber` 覆盖。
 - 若某包发布失败：修复后重新 push 同一 `release/v*` 分支即可，已成功的包会 skip。
+- 若只是 registry 传播慢：重跑 `visibility` job 即可，不会重复发布。
 
 ### 7.2 失败重跑
 
@@ -337,6 +406,7 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 | 单个 desktop job | 先看 packaged runtime smoke 日志；修 runtime / builder 配置后重跑。其余平台成功产物保留。 |
 | publish 部分包已发 | 直接重跑；已发布包 skip，未发布包继续。 |
 | publish-dsh | 独立 job，重跑即可；不会重复发布同版本。 |
+| visibility 超时 | 先看逐包状态：E404 = 版本未可见，latest 不符 = 传播未完成。等待后重跑 visibility；若某包确实没发成功，重跑 publish / publish-dsh。 |
 | release | 重跑 `release` job；`gh release upload --clobber` 重传资产与 checksum。 |
 
 ### 7.3 回滚
@@ -353,8 +423,9 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 
 | 现象 | 原因 / 处理 |
 | --- | --- |
-| verify 报 `version=... != ...` | 分支名、6 个 manifest、桌面版本或 CHANGELOG 不一致。核对后重推。 |
+| verify 报 `version=... != ...` | 分支名、6 个 manifest、lock、桌面版本、MCP 版本源或 CHANGELOG 不一致。先跑 `npm run verify:release-version` 定位。 |
 | verify 报 `CHANGELOG.md 缺少 [vX.Y.Z]` | 未生成/未提交 CHANGELOG 章节；补内容并提交。 |
+| verify 报 MCP `version.mjs` / 手写版本 | 用 `bash scripts/bump_version.sh` 重跑，或把新增版本使用点改为从 `packages/mcp/src/version.mjs` 导入。 |
 | preflight 报 `NPM_TOKEN secret 未配置` | GitHub Secret 缺失或 job 无权限；补 secret。 |
 | preflight 报 `E401` / `npm whoami` 失败 | token 过期、被 revoke 或不属于有权限的账号；重新生成 granular token。 |
 | publish 报 `EOTP` / 需要一次性密码 | token 未勾选 **Bypass 2FA**，重新生成。 |
@@ -372,8 +443,39 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 | release 报 `contents: write` 被拒 | 仓库 Actions 权限未开读写；见第 1 节。 |
 | 本地 pack 后残留 `package.json.packbak` | 某次 pack 异常中断；删除该文件并检查 prepack/postpack 是否成对。 |
 
-## 9. v0.1.0 首版发布清单
+### 8.1 已合并远端分支清理
 
+仓库**不开启** GitHub 的「合并后自动删除分支」（见 `.github/GITHUB_MAINTENANCE.md`），因此
+清理必须手动、可审计。先 dry-run 列清单，确认后再删除：
+
+```bash
+git fetch --prune origin
+node scripts/prune-merged-branches.mjs                 # 只列清单（默认）
+node scripts/prune-merged-branches.mjs --json          # 机器可读清单
+node scripts/prune-merged-branches.mjs --apply --yes   # 确认后删除
+```
+
+脚本的保护范围：
+
+- 只列出已合并进 `--base`（默认 `origin/main`）的远端分支；
+- 保护 `main` / `master` / `trunk` / `release/*` / `release-prep/*` / `site*` / `gh-pages`；
+- 保护当前分支、所有 worktree 已检出的分支、仍有 open PR 的 head 分支；
+- `gh` 不可用或未登录时，dry-run 会提示无法排除 open PR，`--apply` 会拒绝执行
+  （除非显式 `--skip-open-pr-check`）。
+
+发布分支本身在回合并 main 后，再用同一脚本或显式命令删除：
+
+```bash
+git push origin --delete release/v0.2.0 release-prep/v0.2.0
+```
+
+> 不要未经确认批量删除；不要删除 `site-*`（Pages 部署源）或仍有 open PR 的分支。
+
+## 9. v0.1.0 首版发布清单（历史记录）
+
+> 以下保留 v0.1.0 当时的操作记录，不再作为当前流程；新版本以第 2 节的
+> `release-prep → dry-run → release → back-merge` 为准。
+>
 > 版本号已是 `0.1.0`、`CHANGELOG.md` 已含 `## [v0.1.0]` 章节，因此**不需要**再跑
 > `bump_version.sh`。
 

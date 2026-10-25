@@ -1,23 +1,39 @@
 # Changelog
 
 All notable changes to Mebular are documented here.
-The five lockstep packages always share one version; `@mebular/dsh-plugin` keeps its own
-version line.
+Mebular uses a single-version umbrella: the six npm packages (`core`, `service`, `skill`, `mcp`,
+`fleet`, `dsh-plugin`) share one release version. `@mebular/dsh-plugin` is an isolated adapter
+published by its own npm job, and it follows the same unified release train.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 > Version headings carry the `v` prefix (`## [v0.1.1]`) because it is the release SSOT:
-> the branch name (`release/v0.1.1`), the five lockstep `package.json` versions and the Git
-> tag must all agree with this section. `@mebular/dsh-plugin` keeps its own version line but
-> ships `0.1.1` with this release.
+> the branch name (`release/vX.Y.Z`), the six `package.json` versions, the locks, the MCP
+> version source and the Git tag must all agree with this section.
 
 The GitHub Release body is extracted from this file: everything between `## [v0.1.1]` and the
 next `## [` heading. Keep that section self-contained.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Release engineering** — `scripts/bump_version.sh` now bumps all six release packages,
+  both lockfiles, the desktop `APP_VERSION` and the single MCP version source in
+  `packages/mcp/src/version.mjs`. `npm run verify:release-version` checks the same SSOT
+  locally and in the publish workflow.
+- **npm visibility gate** — after `publish` / `publish-dsh`, the workflow polls
+  `npm view <pkg>@<version> version` and `dist-tags.latest` for all six packages before
+  creating the GitHub Release. The previous v0.1.1 run could create the Release while a
+  package was still propagating.
+- **Single-version umbrella** — all six npm packages share one release version. The DSH
+  adapter keeps its code isolated in `packages/dsh-plugin` and is published by its own npm
+  job, but it follows the unified release train; no release ships the DSH plugin alone.
+- **Release SOP** — the fixed flow is now `release-prep/vX.Y.Z` → packaging dry-run →
+  `release/vX.Y.Z` → back-merge `main` → delete release/prep branches. A dry-run-only
+  branch cleanup helper is documented for merged remote branches.
+
 
 ## [v0.1.1] - 2026-10-25
 

@@ -3,7 +3,7 @@
 //
 // 1) 對五個可發布套件（@mebular/core / service / fleet / mcp / skill）npm pack；
 //    檢驗 tarball 內容，且 mcp/fleet 內的 `@mebular/*` 已於 prepack 由 `file:` 改寫為
-//    `^0.1.1`，pack 後本地依賴已還原、備份已清除。
+//    `^<根 package.json version>`，pack 後本地依賴已還原、備份已清除。
 // 2) 用產出的 tarball 在乾淨目錄安裝；以安裝後的 `mebular status`、`mebular mcp`
 //    （真实 MCP client）、`fleet --version` 與 `@mebular/skill/scripts/install.mjs` 做冒煙。
 //    `qrcode-generator@2.0.4` 是 fleet/core 的普通 npm 依賴，安裝時由 registry 解析。
@@ -20,6 +20,8 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = join(__dirname, '..');
+const version = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8')).version;
+const range = `^${version}`;
 // F-UNI：统一 MCP 入口让 mcp 依赖 fleet → 发布面 = core + service + fleet + mcp + skill
 const serviceDir = join(rootDir, 'packages', 'service');
 const fleetDir = join(rootDir, 'packages', 'fleet');
@@ -76,10 +78,10 @@ try {
   const mcpManifest = manifestOf(mcp.file);
   const fleetManifest = manifestOf(fleet.file);
   const coreManifestForDeps = manifestOf(core.file);
-  check('mcp tarball 依賴 @mebular/core=^0.1.1', mcpManifest.dependencies?.['@mebular/core'] === '^0.1.1', mcpManifest.dependencies?.['@mebular/core']);
-  check('mcp tarball 依賴 @mebular/fleet=^0.1.1', mcpManifest.dependencies?.['@mebular/fleet'] === '^0.1.1', mcpManifest.dependencies?.['@mebular/fleet']);
-  check('fleet tarball 依賴 @mebular/core=^0.1.1', fleetManifest.dependencies?.['@mebular/core'] === '^0.1.1', fleetManifest.dependencies?.['@mebular/core']);
-  check('fleet tarball 依賴 @mebular/service=^0.1.1', fleetManifest.dependencies?.['@mebular/service'] === '^0.1.1', fleetManifest.dependencies?.['@mebular/service']);
+  check(`mcp tarball 依賴 @mebular/core=${range}`, mcpManifest.dependencies?.['@mebular/core'] === range, mcpManifest.dependencies?.['@mebular/core']);
+  check(`mcp tarball 依賴 @mebular/fleet=${range}`, mcpManifest.dependencies?.['@mebular/fleet'] === range, mcpManifest.dependencies?.['@mebular/fleet']);
+  check(`fleet tarball 依賴 @mebular/core=${range}`, fleetManifest.dependencies?.['@mebular/core'] === range, fleetManifest.dependencies?.['@mebular/core']);
+  check(`fleet tarball 依賴 @mebular/service=${range}`, fleetManifest.dependencies?.['@mebular/service'] === range, fleetManifest.dependencies?.['@mebular/service']);
   check('fleet tarball 依賴 qrcode-generator=2.0.4', fleetManifest.dependencies?.['qrcode-generator'] === '2.0.4', fleetManifest.dependencies?.['qrcode-generator']);
   check('core tarball 依賴 qrcode-generator=2.0.4', coreManifestForDeps.dependencies?.['qrcode-generator'] === '2.0.4', coreManifestForDeps.dependencies?.['qrcode-generator']);
   const leaks = [
@@ -138,7 +140,7 @@ try {
     { cwd: work, stdio: ['ignore', 'ignore', 'inherit'], env: process.env },
   );
   const installedCore = JSON.parse(await readFile(join(work, 'node_modules', '@mebular', 'core', 'package.json'), 'utf-8'));
-  check('tarball 安裝：@mebular/core@0.1.1', installedCore.version === '0.1.1', installedCore.version);
+  check(`tarball 安裝：@mebular/core@${version}`, installedCore.version === version, installedCore.version);
   check(
     'tarball 安裝：五包齊備',
     ['core', 'service', 'fleet', 'mcp', 'skill'].every((name) => existsSync(join(work, 'node_modules', '@mebular', name))),
@@ -156,7 +158,7 @@ try {
   check('安裝後 mebular status', /^[0-9a-f]{64}$/.test(statusOut.stateHash ?? ''), `deviceId=${statusOut.deviceId}`);
 
   // 安裝後的 stdio MCP 冒煙（真实 MCP client）
-  client = new Client({ name: 'mebular-publish-smoke', version: '0.1.1' });
+  client = new Client({ name: 'mebular-publish-smoke', version });
   const transport = new StdioClientTransport({ command: process.execPath, args: [bin, 'mcp'], env, stderr: 'pipe' });
   await client.connect(transport);
   const { tools } = await client.listTools();
@@ -183,7 +185,7 @@ try {
   // 安裝後的 fleet CLI（來自 fleet tarball）
   const fleetBin = join(work, 'node_modules', '.bin', 'fleet');
   const fleetOut = execFileSync(process.execPath, [fleetBin, '--version'], { cwd: work, encoding: 'utf-8', env });
-  check('安裝後 fleet --version', /0\.1\.1/.test(fleetOut), fleetOut.trim().split('\n').pop());
+  check('安裝後 fleet --version', new RegExp(version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).test(fleetOut), fleetOut.trim().split('\n').pop());
 
   // ---------- F-INST-1：根包自足（`npm i -g github:…#<sha>` 一條命令裝出可用 CLI） ----------
   const coreManifest = manifestOf(core.file);

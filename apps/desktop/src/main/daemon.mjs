@@ -12,7 +12,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.1.1';
 export const SERVICE_KIND = 'mebular-serve';
 
 /** 仓库根（apps/desktop/src/main → 上溯 4 层）；打包态由 resources 决定。 */

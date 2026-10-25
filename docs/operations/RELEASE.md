@@ -3,7 +3,7 @@
 面向 `@mebular/*` npm 包与三平台桌面安装包的发布操作手册。核心约束：**分支名即版本号
 （SSOT）**、**先构建安装包再发 npm**、**幂等发布**、**按 ref 串行**。
 
-v0.1.0 一次交付：
+当前 v0.1.1 交付：
 
 - 5 个 lockstep npm 包 + 1 个独立版本插件；
 - macOS Universal DMG、Windows NSIS x64、Linux AppImage + deb x64（unsigned）；
@@ -21,9 +21,9 @@ v0.1.0 一次交付：
 | `@mebular/dsh-plugin` | `packages/dsh-plugin` | DeepSeek Harness 插件；**独立版本线**，不参与 lockstep |
 
 - **版本策略**：5 个 lockstep 包（`core` / `service` / `skill` / `mcp` / `fleet`）永远同版本号。
-- **独立版本包**：`@mebular/dsh-plugin` 与 v0.1.0 同一 release train 首发（自身版本 `0.1.0`），
-  但版本号只取自 `packages/dsh-plugin/package.json`；`bump_version.sh` 不改它，verify 的
-  lockstep 校验也不包含它。
+- **独立版本包**：`@mebular/dsh-plugin` 在 v0.1.1 与五包同版本发布（自身版本 `0.1.1`），
+  但仍保留独立版本线；版本号只取自 `packages/dsh-plugin/package.json`；`bump_version.sh`
+  不改它，verify 的 lockstep 校验也不包含它。
 - **安装入口**：`npm install -g @mebular/core` 是根包，同时提供 `mebular` + `fleet` 两个 bin；
   `@mebular/mcp` 单独安装只有 `mebular`，**不能**当作双 bin 安装入口。
 - **桌面版本**：`apps/desktop/package.json`、`apps/desktop/package-lock.json` 与
@@ -73,7 +73,7 @@ v0.1.0 一次交付：
   超时或被依赖一律 400。按包执行，lockstep 需 5 个包各跑一次，插件单独一次：
   ```bash
   npm unpublish @mebular/core@0.2.0     # 重复 core → service → skill → mcp → fleet
-  npm unpublish @mebular/dsh-plugin@0.1.0
+  npm unpublish @mebular/dsh-plugin@0.2.0
   ```
   同一版本被删除后**不可再以相同版本号重新发布**，后续必须升号。
 - **npm deprecate（常规手段）**：标记问题版本，安装时会打印警告但不阻断：
@@ -152,7 +152,7 @@ bash scripts/bump_version.sh v0.2.0           # 同步 5 包 + 桌面版本 + CH
 `bump_version.sh` 只处理 lockstep 包与桌面版本；`@mebular/dsh-plugin` 的版本单独在
 `packages/dsh-plugin/package.json` 维护。
 
-v0.1.0 的版本号已就位、CHANGELOG 章节已存在，**不需要**再跑 `bump_version.sh`。
+v0.1.1 的版本号已就位、CHANGELOG 章节已存在，**不需要**再跑 `bump_version.sh`。
 
 ### 3.2 本地预检（推荐）
 
@@ -230,8 +230,8 @@ sha256sum release-assets/*              # Linux
 
 ```bash
 git add -A
-git commit -m "release: v0.1.0"
-git push -u origin release/v0.1.0
+git commit -m "release: v0.1.1"
+git push -u origin release/v0.1.1
 ```
 
 push 后自动执行第 2 节的完整流水线。任一 job 失败即停；安装包未全绿时不会发 npm。
@@ -239,7 +239,7 @@ push 后自动执行第 2 节的完整流水线。任一 job 失败即停；安�
 ### 5.2 观察
 
 ```bash
-gh run list --workflow=publish.yml --branch release/v0.1.0 --limit 5
+gh run list --workflow=publish.yml --branch release/v0.1.1 --limit 5
 gh run watch <run-id>
 gh run view <run-id> --log-failed       # 失败时
 ```
@@ -248,26 +248,26 @@ gh run view <run-id> --log-failed       # 失败时
 
 ```bash
 # npm 六包
-for p in core service skill mcp fleet; do npm view "@mebular/$p@0.1.0" version; done
-npm view @mebular/dsh-plugin@0.1.0 version
+for p in core service skill mcp fleet; do npm view "@mebular/$p@0.1.1" version; done
+npm view @mebular/dsh-plugin@0.1.1 version
 
 # GitHub Release
-gh release view v0.1.0
-gh release view v0.1.0 --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
+gh release view v0.1.1
+gh release view v0.1.1 --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
 
 # 根包双 bin
-npm install -g @mebular/core@0.1.0
+npm install -g @mebular/core@0.1.1
 command -v mebular && command -v fleet
 mebular tools >/dev/null && fleet --version
 ```
 
-> 不要用 `npm install -g @mebular/mcp@0.1.0` 冒充双 bin 安装：`@mebular/mcp` 只提供
+> 不要用 `npm install -g @mebular/mcp@0.1.1` 冒充双 bin 安装：`@mebular/mcp` 只提供
 > `mebular`，`fleet` 必须来自根包（或单独安装 `@mebular/fleet`）。
 
 插件独立验证（先让 App / 守护运行）：
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.1.0
+dsh plugin --profile web add @mebular/dsh-plugin@0.1.1
 dsh --profile web --dump-config | grep -A3 mebular   # host row；transport 由官方 MCP client 挂载
 # DSH 会话中确认 mcp__mebular__* 可调用；侧边栏面板加载 /console/?embed=dsh
 ```
@@ -289,7 +289,7 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 从 Release 下载并校验：
 
 ```bash
-gh release download v0.1.0 -D release-assets
+gh release download v0.1.1 -D release-assets
 cd release-assets
 
 # Linux
@@ -312,8 +312,8 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 - 文件名与第 0.1 节一致；没有额外平台包或调试产物；
 - macOS 打开 DMG 后能启动；Windows NSIS 能安装并启动；Linux AppImage 可执行，deb 可安装；
 - 首次启动能进入锁定控制台，`/healthz` 正常；
-- 全部为 **unsigned** 首发：macOS Gatekeeper 与 Windows SmartScreen 会拦截，按 Release
-  notes 的绕过步骤操作。签名、公证与自动更新不在 v0.1.0 范围。
+- 全部为 **unsigned** 发布：macOS Gatekeeper 与 Windows SmartScreen 会拦截，按 Release
+  notes 的绕过步骤操作。签名、公证与自动更新不在 v0.1.1 范围。
 
 安装包内的 runtime 结构、本地打包与签名后续见
 [`DESKTOP_RELEASE.md`](DESKTOP_RELEASE.md)。

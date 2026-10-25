@@ -263,7 +263,7 @@ jobs:
     permissions:
       contents: read
     env:
-      # v0.1.0 明确 unsigned：即使 runner 钥匙串里有证书也不自动发现。
+      # v0.1.1 明确 unsigned：即使 runner 钥匙串里有证书也不自动发现。
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - name: Checkout

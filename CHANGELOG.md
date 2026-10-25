@@ -1,21 +1,82 @@
 # Changelog
 
 All notable changes to Mebular are documented here.
-All published packages share a single lockstep version.
+The five lockstep packages always share one version; `@mebular/dsh-plugin` keeps its own
+version line.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-> Version headings carry the `v` prefix (`## [v0.1.0]`) because it is the release SSOT:
-> the branch name (`release/v0.1.0`), the five `package.json` versions and the Git tag must
-> all agree with this section.
+> Version headings carry the `v` prefix (`## [v0.1.1]`) because it is the release SSOT:
+> the branch name (`release/v0.1.1`), the five lockstep `package.json` versions and the Git
+> tag must all agree with this section. `@mebular/dsh-plugin` keeps its own version line but
+> ships `0.1.1` with this release.
 
-The GitHub Release body is extracted from this file: everything between `## [v0.1.0]` and the
+The GitHub Release body is extracted from this file: everything between `## [v0.1.1]` and the
 next `## [` heading. Keep that section self-contained.
 
 ## [Unreleased]
 
 Nothing yet.
+
+## [v0.1.1] - 2026-10-25
+
+v0.1.1 is a maintenance release for the v0.1.0 line. It fixes the DSH attach MCP bridge
+lifecycle, aligns the six published npm packages at `0.1.1`, and refreshes the install
+documentation. The desktop installers are rebuilt and remain **unsigned**; code signing,
+notarization and auto-update are not part of this release.
+
+### Fixed
+
+- **DSH attach MCP bridge** — the bridge now mounts only while the daemon health is `up`.
+  When the daemon is down, no `mcp__mebular__*` tools are registered, so calls no longer
+  wait silently or fail after a 60-second timeout. A daemon disconnect disposes the client
+  fiber and unregisters its tools; when the daemon recovers, the bridge remounts
+  automatically without restarting DSH. `managed` mode does not mount while the child is
+  `starting`, and does not mount after `managed_start_failed` / `managed_cli_missing`.
+  The panel and logs now state that MCP tools are temporarily unavailable and why.
+- **CI `verify:daemon`** — removed a `JOIN_READY` race in the daemon verification, so the
+  gate is deterministic. This is an internal test fix, not a user-facing feature.
+
+### Changed
+
+- **Six npm packages at `0.1.1`** — `@mebular/core`, `@mebular/service`, `@mebular/fleet`,
+  `@mebular/mcp`, `@mebular/skill`, and `@mebular/dsh-plugin`. The five lockstep packages
+  remain lockstep; the DSH plugin keeps its own version line and is aligned at `0.1.1` for
+  this release.
+- **Install documentation** — README, quickstart, DSH integration guide, desktop release
+  guide and release SOP now point at `0.1.1` and the v0.1.1 installers.
+
+### Desktop installers (unsigned)
+
+- Rebuilt installers for macOS (Universal DMG), Windows (NSIS x64) and Linux (AppImage + deb
+  x64). `SHA256SUMS.txt` is published with them; verify it before installing.
+- v0.1.1 is **unsigned and not notarized**. On macOS, right-click the app and choose
+  **Open** (or **System Settings → Privacy & Security → Open Anyway**). On Windows, choose
+  **More info → Run anyway**.
+- **No auto-update** in this release. Signing, notarization and auto-update remain follow-up
+  work.
+
+### Install
+
+- Desktop: download from [GitHub Releases v0.1.1](https://github.com/Windsander/Mebular/releases/tag/v0.1.1).
+- CLI and server: `npm install -g @mebular/core@0.1.1`.
+- DSH plugin: `dsh plugin --profile web add @mebular/dsh-plugin@0.1.1` (keep the Mebular app
+  or `mebular serve` running; the plugin uses HTTP MCP).
+
+### 中文摘要
+
+- **DSH attach MCP bridge 修复** —— 仅在 daemon 健康状态为 `up` 时挂载；daemon down 时不注册
+  任何 `mcp__mebular__*` 工具，不会静默等待或 60s 超时。掉线时 dispose 并注销工具，daemon
+  恢复后自动重挂，无需重启 DSH。`managed` 在 `starting`、`managed_start_failed`、
+  `managed_cli_missing` 时不提前挂载；面板和日志会明确说明 MCP 工具暂不可用及原因。
+- **六个 npm 包统一 `0.1.1`** —— 五个 lockstep 包加 `@mebular/dsh-plugin`；插件仍保留独立
+  版本线。
+- **安装文档已更新** —— README、快速上手、DSH 集成说明、桌面发布指南与发布 SOP 均指向
+  `0.1.1`。
+- **CI `verify:daemon`** —— 修复 `JOIN_READY` 竞态，仅为内部测试稳定性，不是用户功能。
+- **桌面安装包** —— 三平台 unsigned 安装包重建，附 `SHA256SUMS.txt`；未签名、未公证，也不
+  包含自动更新。
 
 ## [v0.1.0] - 2026-10-24
 
@@ -98,5 +159,6 @@ installers.
   仓库源码；五个 `@mebular/*` 包来自与 npm 发布相同的已验证 tarball。
 - **范围** —— v0.1.0 不做签名、公证与自动更新，留到后续版本。
 
-[Unreleased]: https://github.com/Windsander/Mebular/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Windsander/Mebular/compare/v0.1.1...HEAD
+[v0.1.1]: https://github.com/Windsander/Mebular/releases/tag/v0.1.1
 [v0.1.0]: https://github.com/Windsander/Mebular/releases/tag/v0.1.0

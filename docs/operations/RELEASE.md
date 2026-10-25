@@ -321,6 +321,14 @@ command -v mebular && command -v fleet
 mebular tools >/dev/null && fleet --version
 ```
 
+发布后核验清单：
+
+- [ ] 六个包的 `version` 与 `dist-tags.latest` 都等于本次发布版本（或直接看 visibility job）；
+- [ ] GitHub Release 资产 = 4 个安装包（`.dmg` / `.exe` / `.AppImage` / `.deb`）+
+      `SHA256SUMS.txt`，release notes 来自 CHANGELOG 的 `## [vX.Y.Z]` 章节；
+- [ ] 下载资产后按第 6 节校验 checksum；`SHA256SUMS.txt` 恰好 4 行；
+- [ ] `release/vX.Y.Z` 已通过 PR 回合并 `main`，随后删除 release / prep 分支。
+
 > 不要用 `npm install -g @mebular/mcp@0.2.0` 冒充双 bin 安装：`@mebular/mcp` 只提供
 > `mebular`，`fleet` 必须来自根包（或单独安装 `@mebular/fleet`）。
 

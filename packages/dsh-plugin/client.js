@@ -44,7 +44,7 @@ window.__ModuleLoader__.load({
         loadingFrame: 'Loading Console…',
         error: 'The DSH host could not read Mebular status: {error}',
         reasons: {
-          daemon_unreachable: 'No Mebular daemon answered on the configured loopback address. MCP tools stay unavailable until the daemon starts; start Mebular or run "mebular serve" and the panel and tools recover automatically.',
+          daemon_unreachable: 'No Mebular daemon answered on the configured loopback address. MCP tools are unavailable until it starts; start Mebular or run "mebular serve", then the panel and tools recover automatically.',
           daemon_unhealthy: 'Mebular answered, but its health check did not report ready. Check the Mebular logs, then refresh.',
           embed_info_unavailable: 'Mebular is running but does not expose /app/embed/info. Update Mebular to a version that supports DSH embedding.',
           embed_not_ok: 'Mebular refused the embed discovery request. Check the Mebular version and status.',
@@ -80,7 +80,7 @@ window.__ModuleLoader__.load({
         loadingFrame: '正在加载 Console…',
         error: 'DSH 主机无法读取 Mebular 状态：{error}',
         reasons: {
-          daemon_unreachable: '配置的 loopback 地址上没有 Mebular daemon。daemon 启动前 MCP 工具不可用；请启动 Mebular 或运行 "mebular serve"，面板与工具会自动恢复。',
+          daemon_unreachable: '配置的 loopback 地址上没有 Mebular daemon。MCP 工具暂时不可用；请启动 Mebular 或运行 "mebular serve"，就绪后面板与工具会自动恢复。',
           daemon_unhealthy: 'Mebular 已响应，但健康检查未就绪。请检查 Mebular 日志后刷新。',
           embed_info_unavailable: 'Mebular 正在运行，但没有提供 /app/embed/info。请升级到支持 DSH 嵌入的版本。',
           embed_not_ok: 'Mebular 拒绝了嵌入发现请求。请检查 Mebular 版本与状态。',
@@ -122,6 +122,24 @@ window.__ModuleLoader__.load({
         borderRadius: '50%',
         flex: 'none',
         background: 'var(--dsw-alias-label-tertiary, #888)',
+      },
+      statusIcon: {
+        position: 'relative',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flex: 'none',
+      },
+      statusDot: {
+        position: 'absolute',
+        right: -1,
+        bottom: -1,
+        width: 7,
+        height: 7,
+        borderRadius: '50%',
+        border: '1.5px solid var(--dsw-alias-bg-layer-1, rgba(10,10,18,.9))',
+        boxSizing: 'content-box',
+        pointerEvents: 'none',
       },
       title: {
         fontSize: 13,
@@ -273,25 +291,165 @@ window.__ModuleLoader__.load({
     }
 
     function statusOf(info, loading, ready, error) {
-      if (loading && info === null) return 'checking';
-      if (ready) return 'connected';
       if (error !== null) return 'offline';
+      if (ready) return 'connected';
       if (info?.status === 'starting') return 'starting';
-      return info?.status === 'up' ? 'unavailable' : 'offline';
+      if (info?.status === 'up') return 'unavailable';
+      if (loading && info === null) return 'checking';
+      return info === null ? 'checking' : 'offline';
     }
 
     function dotColor(status) {
       if (status === 'connected') return 'var(--dsw-alias-state-success-primary, #22c55e)';
-      if (status === 'starting') return 'var(--dsw-alias-state-info-primary, #38bdf8)';
-      if (status === 'unavailable') return 'var(--dsw-alias-state-warn-primary, #d97706)';
+      if (status === 'starting' || status === 'unavailable') {
+        return 'var(--dsw-alias-state-warn-primary, #d97706)';
+      }
       if (status === 'offline') return 'var(--dsw-alias-state-error-primary, #ef4444)';
       return 'var(--dsw-alias-label-tertiary, #888)';
+    }
+
+    function statusTitle(t, status) {
+      return `${t.title}: ${t[status] ?? t.checking}`;
+    }
+
+    function isReadyInfo(info) {
+      const embedUrl = safeHttpUrl(info?.embedUrl);
+      return Boolean(
+        info?.ok === true &&
+          info?.status === 'up' &&
+          info?.loopback === true &&
+          info?.embedProtocol === 1 &&
+          embedUrl !== null &&
+          isLoopbackHttpUrl(embedUrl),
+      );
     }
 
     function reasonMessage(t, info, error) {
       if (typeof error === 'string' && error.length > 0) return t.error.replace('{error}', error);
       const reason = typeof info?.reason === 'string' ? info.reason : 'unknown';
       return t.reasons[reason] ?? t.reasons.unknown;
+    }
+
+    // One module-level store feeds both the sidebar status dot and the panel.
+    // It polls /mebular/embed-info only while at least one React subscriber is
+    // mounted, shares an in-flight request, and never requires anything beyond
+    // React and the browser globals already used by this client.
+    function createEmbedInfoStore(options = {}) {
+      const fetchImpl = typeof options.fetchImpl === 'function'
+        ? options.fetchImpl
+        : (url, init) => fetch(url, init);
+      const setIntervalFn = typeof options.setIntervalFn === 'function'
+        ? options.setIntervalFn
+        : (fn, ms) => window.setInterval(fn, ms);
+      const clearIntervalFn = typeof options.clearIntervalFn === 'function'
+        ? options.clearIntervalFn
+        : (timer) => window.clearInterval(timer);
+      const intervalMs = Number.isFinite(options.intervalMs) ? options.intervalMs : POLL_MS;
+      const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : FETCH_TIMEOUT_MS;
+
+      const listeners = new Set();
+      let snapshot = {
+        info: null,
+        error: null,
+        loading: true,
+        ready: false,
+        status: 'checking',
+      };
+      let timer = null;
+      let inFlight = null;
+
+      function publish(patch) {
+        const next = { ...snapshot, ...patch };
+        next.ready = next.error === null && isReadyInfo(next.info);
+        next.status = statusOf(next.info, next.loading, next.ready, next.error);
+        snapshot = next;
+        for (const listener of listeners) {
+          try {
+            listener();
+          } catch {
+            // A subscriber must never break the shared poll.
+          }
+        }
+      }
+
+      function load() {
+        if (inFlight !== null) return inFlight;
+        const request = (async () => {
+          const signal =
+            typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+              ? AbortSignal.timeout(timeoutMs)
+              : undefined;
+          try {
+            const response = await fetchImpl(
+              EMBED_INFO_PATH,
+              signal === undefined
+                ? { cache: 'no-store', headers: { accept: 'application/json' } }
+                : { cache: 'no-store', headers: { accept: 'application/json' }, signal },
+            );
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const next = await response.json();
+            publish({
+              info: next !== null && typeof next === 'object' ? next : null,
+              error: null,
+              loading: false,
+            });
+          } catch (cause) {
+            publish({
+              info: null,
+              error: cause instanceof Error ? cause.message : String(cause),
+              loading: false,
+            });
+          }
+        })();
+        inFlight = request;
+        request.finally(() => {
+          if (inFlight === request) inFlight = null;
+        });
+        return request;
+      }
+
+      function start() {
+        if (timer !== null) return;
+        void load();
+        timer = setIntervalFn(() => {
+          void load();
+        }, intervalMs);
+      }
+
+      function stop() {
+        if (timer === null) return;
+        clearIntervalFn(timer);
+        timer = null;
+      }
+
+      function subscribe(listener) {
+        if (typeof listener !== 'function') return () => {};
+        listeners.add(listener);
+        if (listeners.size === 1) start();
+        return () => {
+          if (!listeners.delete(listener)) return;
+          if (listeners.size === 0) stop();
+        };
+      }
+
+      return {
+        subscribe,
+        getSnapshot: () => snapshot,
+        refresh: load,
+      };
+    }
+
+    const embedInfoStore = createEmbedInfoStore();
+
+    function useEmbedInfo() {
+      const [snapshot, setSnapshot] = React.useState(() => embedInfoStore.getSnapshot());
+      React.useEffect(() => {
+        const sync = () => setSnapshot(embedInfoStore.getSnapshot());
+        const unsubscribe = embedInfoStore.subscribe(sync);
+        sync();
+        return unsubscribe;
+      }, []);
+      return snapshot;
     }
 
     function MebularIcon(props) {
@@ -315,67 +473,40 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function MebularStatusIcon(props) {
+      const t = currentText();
+      const { status } = useEmbedInfo();
+      const size = Number.isFinite(props?.size) ? props.size : 18;
+      return h(
+        'span',
+        {
+          style: { ...styles.statusIcon, width: size, height: size },
+          'data-mebular-status': status,
+        },
+        h(MebularIcon, { size }),
+        h('span', {
+          title: statusTitle(t, status),
+          'aria-hidden': 'true',
+          style: { ...styles.statusDot, background: dotColor(status) },
+        }),
+      );
+    }
+
     function MebularPanel() {
       const t = currentText();
-      const [info, setInfo] = React.useState(null);
-      const [error, setError] = React.useState(null);
-      const [loading, setLoading] = React.useState(true);
+      const { info, error, loading, ready, status } = useEmbedInfo();
       const [refreshToken, setRefreshToken] = React.useState(0);
       const [frameState, setFrameState] = React.useState('idle');
 
-      React.useEffect(() => {
-        let active = true;
-        let timer = null;
-
-        const tick = async () => {
-          const signal =
-            typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
-              ? AbortSignal.timeout(FETCH_TIMEOUT_MS)
-              : undefined;
-          try {
-            const response = await fetch(
-              EMBED_INFO_PATH,
-              signal === undefined
-                ? { cache: 'no-store', headers: { accept: 'application/json' } }
-                : { cache: 'no-store', headers: { accept: 'application/json' }, signal },
-            );
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            const next = await response.json();
-            if (!active) return;
-            setInfo(next !== null && typeof next === 'object' ? next : null);
-            setError(null);
-          } catch (cause) {
-            if (!active) return;
-            setError(cause instanceof Error ? cause.message : String(cause));
-          } finally {
-            if (active) setLoading(false);
-          }
-        };
-
-        setLoading(true);
-        tick();
-        timer = window.setInterval(tick, POLL_MS);
-        return () => {
-          active = false;
-          if (timer !== null) window.clearInterval(timer);
-        };
-      }, [refreshToken]);
-
       const embedUrl = safeHttpUrl(info?.embedUrl);
-      const ready = Boolean(
-        info?.ok === true &&
-          info?.status === 'up' &&
-          info?.loopback === true &&
-          info?.embedProtocol === 1 &&
-          embedUrl !== null &&
-          isLoopbackHttpUrl(embedUrl),
-      );
       const frameFailed = frameState === 'failed';
       const showFrame = ready && !frameFailed;
       const consoleUrl = safeHttpUrl(info?.consoleUrl) ?? DEFAULT_CONSOLE_URL;
       const version = typeof info?.version === 'string' && info.version.length > 0 ? info.version : null;
-      const status = statusOf(info, loading, ready, error);
-      const refresh = () => setRefreshToken((value) => value + 1);
+      const refresh = () => {
+        setRefreshToken((value) => value + 1);
+        void embedInfoStore.refresh();
+      };
 
       React.useEffect(() => {
         if (!ready) setFrameState('idle');
@@ -391,7 +522,11 @@ window.__ModuleLoader__.load({
       const header = h(
         'div',
         { style: styles.header },
-        h('span', { style: { ...styles.dot, background: dotColor(status) }, 'aria-hidden': 'true' }),
+        h('span', {
+          style: { ...styles.dot, background: dotColor(status) },
+          title: statusTitle(t, status),
+          'aria-hidden': 'true',
+        }),
         h('span', { style: styles.title }, t.title),
         version === null ? null : h('span', { style: styles.version }, `v${version.replace(/^v/, '')}`),
         h('span', { style: styles.spacer }),
@@ -502,7 +637,7 @@ window.__ModuleLoader__.load({
             order: 10,
             label: 'Mebular',
           },
-          MebularIcon,
+          MebularStatusIcon,
         ),
       );
       ctx.slots.inject('main', () =>
@@ -516,6 +651,24 @@ window.__ModuleLoader__.load({
       );
     }
 
-    return { apply, inject };
+    const plugin = { apply, inject };
+
+    // Opt-in test seam for the zero-build client: tests can inspect the pure
+    // status mapping and construct isolated stores. DSH never sets this global.
+    try {
+      if (typeof window !== 'undefined' && window.__MEBULAR_DSH_TEST__ === true) {
+        plugin.__test = {
+          createEmbedInfoStore,
+          dotColor,
+          isReadyInfo,
+          statusOf,
+          statusTitle,
+        };
+      }
+    } catch {
+      // A blocked window global must not affect plugin registration.
+    }
+
+    return plugin;
   },
 });

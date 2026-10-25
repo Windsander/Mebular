@@ -78,11 +78,17 @@ DSH 会话里的工具名形如 `mcp__mebular__*`（例如某个记忆读写或�
 Mebular 的数据，就说明图已接通。侧边栏 Mebular 面板应显示同一套 Console；它的状态来自
 仅限 loopback 的 `GET /mebular/embed-info`。
 
+即使面板没有打开，Mebular 侧边栏图标也会带一个小状态点：绿色表示已连接，琥珀色表示启动中
+或降级，红色表示未运行，灰色表示首次检查尚未返回。状态点与面板共用同一个轮询和状态源；
+悬停状态点可看到当前状态。共享状态与恢复规则见
+[表面状态契约](../architecture/SURFACES.md)。
+
 如果调用返回 `NOT_INITIALIZED`，先在 Console 里新建 / 加入忆云；同一个 MCP 会话会自动
 恢复，不需要重启守护进程。
 
 守护进程未运行时，插件根本不会挂载 MCP client，因此不存在需要等待或调用的
-`mcp__mebular__*` 工具。面板仍会加载并显示引导，日志会给出
+`mcp__mebular__*` 工具。面板仍会加载并显示引导，Agent 也会收到一条短状态提示（见下文），
+日志会给出
 `mcp bridge unavailable (daemon_unreachable): start the Mebular app or run "mebular serve"`。
 启动守护进程（或运行 `mebular serve`）后，插件会在下一次健康检查时自动挂载工具，面板也随
 之恢复，不需要重启 DSH。`attach` 永远不会替你启动守护进程。
@@ -134,6 +140,26 @@ child 处于 `starting` 时不挂载 MCP bridge；`managed_start_failed` / `mana
 `reason: managed_cli_missing`。
 
 只想保留 MCP、不显示侧边栏面板时，设置 `panel: false`（适用于 headless / TUI profile）。
+
+## Agent 可见状态（仅 DSH）
+
+Mebular 的可用性不仅显示在侧边栏，也会告诉 Agent。host 注册一个 DSH system prompt
+section `mebular:status`：
+
+- daemon `up` 时文本为空，不增加 prompt token；
+- `down` 时告诉 Agent Mebular 记忆不可用，请用户启动 Mebular App 或运行
+  `mebular serve`，并且不要声称记忆可用；
+- `starting` 说明记忆工具暂时不可用；`managed_cli_missing` / `managed_start_failed`
+  给出各自的恢复动作。
+
+该 section 与 MCP bridge 使用同一份 lifecycle 快照，不新增轮询或第二个状态源。只有文本
+变化时才通过 `system-prompt/change` 通知 DSH，不会每个健康检查 tick 都刷新。它是 profile
+级别的 prompt 文本，该 profile 下所有 Agent 都可能看到。
+
+这是 DSH adapter 的能力，不是 wire 字段，也不是通用 MCP 能力。host 通过
+`ctx.inject(['systemPrompt'])` 注入可选服务；旧 DSH 或没有该服务的 profile 会安全跳过，
+插件激活、面板与 MCP bridge 不受影响。`panel: false` 不会关闭它。不要假设其他 MCP
+客户端也有这条提示；Mebular 不新增 `mebular_status` 工具。
 
 ## 安全
 

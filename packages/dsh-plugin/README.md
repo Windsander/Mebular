@@ -7,11 +7,15 @@
 `/console` 提供；桌面 App、浏览器和 DSH 插件打开的是同一个页面。插件本身零构建、零运行时
 依赖，也不 import 任何 `@mebular/*` 包。
 
-插件做四件事：
+插件做这些事：
 
 - 用官方 `@deepseek-ai/dsh-mcp-client` 连接 Mebular 的 `/mcp`，把记忆工具注册给 DSH；
   连接、重连、工具发现与注册都归官方 peer，插件只负责按同一套 daemon 发现结果挂载；
 - 在 DSH 侧边栏加入 **Mebular** 面板，用 iframe 加载共享 Console 的 `?embed=dsh`；
+- 在侧边栏图标上显示状态点（绿=已连接、琥珀=启动中/降级、红=未运行、灰=待检查），
+  面板关闭时也能看到；状态点与面板共用同一个 store 和轮询；
+- 在 daemon 非 `up` 时通过 DSH system prompt section 向 Agent 说明 Mebular 不可用与恢复
+  动作；`up` 时文本为空，不增加 token；
 - 提供只读的 `GET /mebular/embed-info`，供面板判断 daemon 状态与可嵌入性；
 - 默认 `attach` 只探测已有 daemon；可选 `managed` 在 daemon 不存在时启动并托管一个
   `mebular serve` 子进程。
@@ -135,6 +139,25 @@ daemon 恢复后由健康检查自动重新挂载，不需要重启 DSH。`manag
 bridge supervisor 也照常运行：daemon 健康时自动挂载官方 client，掉线时注销工具，恢复后再挂载。
 host 通过 DSH `webServer.tapIndex` 注入 `window.__MEBULAR_DSH__={"panel":false}`，client 在
 `apply` 时读取。
+
+### Agent 可见状态
+
+host 通过 `ctx.inject(['systemPrompt'])` 注册唯一 section `mebular:status`，从 MCP bridge
+已有的 lifecycle 快照派生一句短提示，不新增轮询或第二个状态源：
+
+- `up`：section 文本为空，不增加 prompt token；
+- `down`：说明本地 Mebular daemon 未运行，提示用户启动 Mebular App 或运行
+  `mebular serve`，并要求 Agent 不要声称记忆可用；
+- `starting`：说明记忆工具暂时不可用；
+- `managed_cli_missing` / `managed_start_failed`：按具体 reason 给出安装、配置或手动启动
+  的恢复动作。
+
+只有文本变化时才发 `system-prompt/change`，不会每个 tick 都刷新。该 section 是 DSH
+profile 级别 prompt，同一 profile 的所有 Agent 都可能看到；它属于 DSH adapter，不是 wire
+字段，也不是通用 MCP 能力，Mebular 不新增 `mebular_status` 工具。
+
+`systemPrompt` 服务不存在时（旧 DSH / 无该服务的 profile）安全跳过，不影响插件激活、
+面板或 MCP bridge。`panel: false` 也不会关闭 Agent 提示，因为它不是 UI 面板。
 
 ### 端口与环境变量
 

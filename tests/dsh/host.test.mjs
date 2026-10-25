@@ -5,12 +5,16 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  AGENT_STATUS_ORDER,
+  AGENT_STATUS_SECTION,
   EMBED_INFO_PATH,
   EMBED_PROTOCOL,
   MCP_CLIENT_PACKAGE,
   PANEL_GLOBAL,
+  agentStatusText,
   apply,
   buildEmbedInfo,
+  createAgentStatus,
   createDaemonLifecycle,
   createEmbedInfoHandler,
   createMcpBridgeSupervisor,
@@ -177,6 +181,7 @@ function lifecycleHarness({
 function applyHarness(fetchHandler, {
   panel = true,
   tapIndex = true,
+  systemPrompt = true,
   importModule = async () => ({ name: 'fake-mcp-client' }),
   applyOptions = {},
   config,
@@ -189,12 +194,33 @@ function applyHarness(fetchHandler, {
   const infos = [];
   const intervals = [];
   const effects = [];
+  const events = [];
   const activeNames = new Set();
+  const agentSections = new Map();
+  const promptService = systemPrompt === false
+    ? null
+    : systemPrompt === true || systemPrompt === undefined
+      ? {
+          sections: agentSections,
+          section(section) {
+            if (agentSections.has(section.name)) {
+              throw new Error(`duplicate prompt section ${section.name}`);
+            }
+            agentSections.set(section.name, section);
+            return () => {
+              if (agentSections.get(section.name) === section) agentSections.delete(section.name);
+            };
+          },
+        }
+      : systemPrompt;
   let cleaned = false;
   const ctx = {
     logger: {
       info: (message) => infos.push(message),
       warn: (message) => warnings.push(message),
+    },
+    emit(event) {
+      events.push(event);
     },
     plugin(module, pluginConfig) {
       const serverName = pluginConfig?.serverName;
@@ -215,6 +241,36 @@ function applyHarness(fetchHandler, {
       return disposer;
     },
     inject(deps, callback) {
+      if (deps.length === 1 && deps[0] === 'systemPrompt') {
+        if (promptService === null) return undefined;
+        const childEffects = [];
+        const injected = callback({
+          systemPrompt: promptService,
+          emit(event) {
+            events.push(event);
+          },
+          effect(run) {
+            const disposer = run();
+            childEffects.push(disposer);
+            return disposer;
+          },
+        });
+        effects.push({
+          label: 'systemPrompt',
+          disposer: typeof injected === 'function'
+            ? injected
+            : () => {
+                for (const disposer of childEffects.slice().reverse()) {
+                  try {
+                    disposer?.();
+                  } catch {
+                    // Test cleanup is best-effort.
+                  }
+                }
+              },
+        });
+        return undefined;
+      }
       expect(deps).toEqual(['webServer']);
       callback({
         effect(run) {
@@ -279,6 +335,9 @@ function applyHarness(fetchHandler, {
     intervals,
     effects,
     activeNames,
+    agentSections,
+    events,
+    systemPrompt: promptService,
     ctx,
     async cleanup() {
       if (cleaned) return;
@@ -1164,6 +1223,214 @@ describe('P6 @mebular/dsh-plugin host：MCP bridge supervisor', () => {
 
     await harness.cleanup();
     expect(lifecycleDisposed).toBe(1);
+  });
+});
+
+describe('P7 @mebular/dsh-plugin host：Agent 可见状态', () => {
+  it('agentStatusText：up 为空；非 up 给出短且可行动的恢复文案', () => {
+    expect(agentStatusText({ status: 'up', reason: null })).toBe('');
+    expect(agentStatusText(null)).toBe('');
+    expect(agentStatusText({ status: 'unknown' })).toBe('');
+
+    const starting = agentStatusText({ status: 'starting' });
+    expect(starting).toContain('temporarily unavailable');
+    expect(starting).not.toContain('do not claim');
+
+    const down = agentStatusText({ status: 'down', reason: null });
+    expect(down).toContain('not running');
+    expect(down).toContain('mebular serve');
+    expect(down).toContain('do not claim Mebular memory is available');
+
+    const unhealthy = agentStatusText({ status: 'down', reason: null, health: { status: 'degraded' } });
+    expect(unhealthy).toContain('not healthy');
+    expect(unhealthy).toContain('do not claim Mebular memory is available');
+
+    const cliMissing = agentStatusText({ status: 'down', reason: 'managed_cli_missing' });
+    expect(cliMissing).toContain('CLI was not found');
+    expect(cliMissing).toContain('MEBULAR_CLI');
+    expect(cliMissing).toContain('install Mebular');
+
+    const startFailed = agentStatusText({ status: 'down', reason: 'managed_start_failed' });
+    expect(startFailed).toContain('failed to start');
+    expect(startFailed).toContain('logs');
+    expect(startFailed).toContain('mebular serve');
+
+    for (const text of [starting, down, unhealthy, cliMissing, startFailed]) {
+      expect(text.length).toBeLessThan(360);
+    }
+  });
+
+  it('apply 注册唯一的 mebular:status section；down 只 emit 一次', async () => {
+    const harness = applyHarness(() => {
+      throw new Error('ECONNREFUSED');
+    });
+    activeMock = harness.mock;
+
+    expect(harness.agentSections.size).toBe(1);
+    const section = harness.agentSections.get(AGENT_STATUS_SECTION);
+    expect(section).toBeDefined();
+    expect(section.order).toBe(AGENT_STATUS_ORDER);
+    expect(typeof section.text).toBe('function');
+
+    await waitFor(() => section.text({}).includes('mebular serve'));
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(section.text({})).toContain('not running');
+    expect(section.text({})).toContain('do not claim Mebular memory is available');
+    expect(harness.events.filter((event) => event === 'system-prompt/change')).toHaveLength(1);
+  });
+
+  it('up 时 section 文本为空，不产生 prompt token 或 change 事件', async () => {
+    const harness = applyHarness((url) => {
+      if (url === `${BASE}/healthz`) return jsonResponse(HEALTH);
+      if (url === `${BASE}/app/embed/info`) return jsonResponse(EMBED);
+      throw new Error(`unexpected ${url}`);
+    }, { applyOptions: { bridgeIntervalMs: 60000 } });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.plugins.length === 1);
+    const section = harness.agentSections.get(AGENT_STATUS_SECTION);
+    expect(section).toBeDefined();
+    expect(section.text({})).toBe('');
+    expect(harness.events).toHaveLength(0);
+  });
+
+  it('状态切换只在文本变化时 emit，持续轮询不刷屏', async () => {
+    let snapshot = {
+      status: 'down',
+      mode: 'attach',
+      managed: false,
+      reason: null,
+      reachable: false,
+      health: null,
+      embed: null,
+    };
+    const lifecycle = {
+      start: async () => snapshot,
+      inspect: async () => snapshot,
+      dispose: () => {},
+    };
+    const harness = applyHarness(() => {
+      throw new Error('fetch must not run with a fake lifecycle');
+    }, {
+      applyOptions: { lifecycle, bridgeIntervalMs: 5 },
+    });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.events.length === 1);
+    expect(harness.agentSections.get(AGENT_STATUS_SECTION).text({})).toContain('not running');
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(harness.events).toHaveLength(1);
+
+    snapshot = {
+      ...snapshot,
+      status: 'up',
+      reachable: true,
+      health: HEALTH,
+      embed: EMBED,
+    };
+    await waitFor(() => harness.agentSections.get(AGENT_STATUS_SECTION).text({}) === '');
+    expect(harness.events).toHaveLength(2);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(harness.events).toHaveLength(2);
+
+    snapshot = {
+      ...snapshot,
+      status: 'down',
+      reachable: false,
+      health: null,
+      embed: null,
+    };
+    await waitFor(() => harness.agentSections.get(AGENT_STATUS_SECTION).text({}).length > 0);
+    expect(harness.events).toHaveLength(3);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(harness.events).toHaveLength(3);
+  });
+
+  it('panel:false 仍注册 Agent 状态 section（它不是 UI 面板）', async () => {
+    const harness = applyHarness(() => {
+      throw new Error('ECONNREFUSED');
+    }, { panel: false });
+    activeMock = harness.mock;
+
+    expect(harness.agentSections.get(AGENT_STATUS_SECTION)).toBeDefined();
+    await waitFor(() => harness.agentSections.get(AGENT_STATUS_SECTION).text({}).length > 0);
+    expect(harness.taps).toHaveLength(1);
+    expect(harness.plugins).toHaveLength(0);
+  });
+
+  it('没有 systemPrompt 服务时安全跳过，面板/MCP/状态路由不受影响', async () => {
+    const harness = applyHarness((url) => {
+      if (url === `${BASE}/healthz`) return jsonResponse(HEALTH);
+      if (url === `${BASE}/app/embed/info`) return jsonResponse(EMBED);
+      throw new Error(`unexpected ${url}`);
+    }, { systemPrompt: false });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.plugins.length === 1);
+    expect(harness.agentSections.size).toBe(0);
+    expect(harness.events).toHaveLength(0);
+    expect(harness.warnings).toHaveLength(0);
+
+    const res = makeResponse();
+    await harness.route.handler(makeRequest(), res);
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).status).toBe('up');
+  });
+
+  it('systemPrompt 服务晚于状态更新可用时，section 仍读取最新文本', () => {
+    const sections = new Map();
+    const service = {
+      section(section) {
+        sections.set(section.name, section);
+        return () => sections.delete(section.name);
+      },
+    };
+    const status = createAgentStatus();
+    expect(status.update({ status: 'down', reason: null })).toBe(true);
+    expect(status.isRegistered()).toBe(false);
+
+    expect(status.bind(service, { emit: () => {} })).toBe(true);
+    expect(status.isRegistered()).toBe(true);
+    expect(sections.get(AGENT_STATUS_SECTION).text({})).toContain('not running');
+    status.dispose();
+    expect(sections.size).toBe(0);
+  });
+
+  it('重复挂载安全：同名 section 只注册一次，dispose 后移除', () => {
+    const sections = new Map();
+    const service = {
+      section(section) {
+        if (sections.has(section.name)) throw new Error('duplicate');
+        sections.set(section.name, section);
+        return () => {
+          sections.delete(section.name);
+        };
+      },
+    };
+    const eventsA = [];
+    const eventsB = [];
+    const first = createAgentStatus();
+    const second = createAgentStatus();
+    expect(first.bind(service, { emit: (event) => eventsA.push(event) })).toBe(true);
+    expect(second.bind(service, { emit: (event) => eventsB.push(event) })).toBe(false);
+
+    expect(first.isRegistered()).toBe(true);
+    expect(second.isRegistered()).toBe(false);
+    expect(sections.size).toBe(1);
+    expect(sections.get(AGENT_STATUS_SECTION).text({})).toBe('');
+
+    expect(first.update({ status: 'down', reason: null })).toBe(true);
+    expect(second.update({ status: 'down', reason: null })).toBe(true);
+    expect(eventsA).toEqual(['system-prompt/change']);
+    expect(eventsB).toEqual([]);
+    expect(first.update({ status: 'down', reason: null })).toBe(false);
+    expect(eventsA).toEqual(['system-prompt/change']);
+
+    first.dispose();
+    expect(sections.size).toBe(0);
+    expect(first.update({ status: 'starting' })).toBe(false);
+    second.dispose();
   });
 });
 

@@ -19,6 +19,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 ## Architecture
 
 - [ARCHITECT.md](architecture/ARCHITECT.md) — runtime layers, trust/sync model, code map
+- [SURFACES.md](architecture/SURFACES.md) — shared status/capability/recovery contract across surfaces
 - [SEALING.md](../SEALING.md) · [SEALING_CN.md](../SEALING_CN.md) — sealing contract (repository root)
 
 ## Operations

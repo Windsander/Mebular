@@ -135,9 +135,17 @@ child 处于 `starting` 时不挂载 MCP bridge；`managed_start_failed` / `mana
     panel: true
 ```
 
-不安装系统服务；不覆盖 `MEBULAR_HOME`；外部 daemon（桌面 App、系统服务、手动
-`mebular serve`）永远不会被停止。CLI 无法解析时降级为 `attach`，状态带
-`reason: managed_cli_missing`。
+`managed` 是子进程兜底，不是服务安装：
+
+- 已有健康 daemon（服务托管、桌面 App 或手动 `mebular serve`）只复用，绝不抢占或停止；
+- 无 daemon 时解析 CLI，启动 `mebular serve --port <port>`，有界等待 `/healthz`（默认 20s）；
+- 超时、spawn error 或 child 提前退出时，只停止自己启动的 child，状态 `down`、
+  `reason: managed_start_failed`，不会自动无限重试；
+- 停止顺序固定为 `SIGTERM` → 2s grace → `SIGKILL`；外部 daemon 永远不会被 host 停止；
+- CLI 无法解析时降级为 `attach`，状态 `down`、`reason: managed_cli_missing`；
+- child 的 stdout/stderr 先脱敏再写入 DSH logger。
+
+不安装系统服务，也不覆盖 `MEBULAR_HOME`。
 
 只想保留 MCP、不显示侧边栏面板时，设置 `panel: false`（适用于 headless / TUI profile）。
 
@@ -161,6 +169,57 @@ section `mebular:status`：
 插件激活、面板与 MCP bridge 不受影响。`panel: false` 不会关闭它。不要假设其他 MCP
 客户端也有这条提示；Mebular 不新增 `mebular_status` 工具。
 
+## `/mebular/embed-info` 状态契约
+
+```json
+{
+  "ok": true,
+  "status": "up",
+  "mode": "attach",
+  "managed": false,
+  "panel": true,
+  "version": "0.1.2",
+  "embedProtocol": 1,
+  "consoleUrl": "http://127.0.0.1:7331/console",
+  "embedUrl": "http://127.0.0.1:7331/console/?embed=dsh",
+  "mcpUrl": "http://127.0.0.1:7331/mcp",
+  "loopback": true,
+  "reason": null
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `status` | `up`（健康）、`down`（不可达/未健康）、`starting`（managed 正在启动并等待 healthz）。`starting` 时 `embedUrl` 为 `null`，面板不加载 iframe。 |
+| `mode` | 当前生效的生命周期。CLI 缺失时从 `managed` 降级为 `attach`。 |
+| `managed` | 仅当当前 daemon 由本插件启动且 child 仍在运行时为 `true`；复用外部 daemon 时始终为 `false`。 |
+| `reason` | 稳定诊断码，成功为 `null`。 |
+
+其余字段为 `ok`、`panel`、`version`、`embedProtocol`、`consoleUrl`、`embedUrl`、`mcpUrl`、
+`loopback`。只有 daemon、`/app/embed/info` 的 `loopback`、`embedProtocol` 与
+`capabilities.embedConsole` 全部满足时才返回 `embedUrl`；否则面板显示占位页，不加载 iframe。
+
+## 架构边界
+
+```text
+DSH host                         Mebular daemon
+  ├─ cordis.patch.yml            ├─ /healthz
+  │   └─ mebular (index.js)      ├─ /app/embed/info
+  │       ├─ GET /mebular/embed-info
+  │       └─ mounts official mcp-client ──┼─ /mcp
+  └─ client.js
+      └─ iframe ─────────────────┼─ /console/?embed=dsh
+```
+
+- 本包**不 import** `@mebular/core`、`@mebular/console`、`@mebular/desktop`，也不复制
+  Console 的任何 UI 或静态资源。
+- Console 只有一套实现，由 Mebular daemon 提供；DSH 只负责 iframe 容器。
+- 插件不打开 `store.jsonl`、不读密钥/token、不写 `~/.mebular`。
+- 插件只动态 import 官方 `@deepseek-ai/dsh-mcp-client` peer；MCP 连接、重连、工具发现与
+  注册仍归该官方包。host 只负责在 lifecycle 为 `up` 时用发现的 origin 挂载它，并在掉线时
+  dispose 子 fiber；host 不实现 MCP 客户端。
+- 面板与 MCP 桥共享同一次 daemon 解析；不会出现“面板连 7332、工具连 7331”。
+
 ## 安全
 
 - `GET /mebular/embed-info` 只接受 loopback 请求；其他来源返回 `404`。
@@ -172,17 +231,39 @@ section `mebular:status`：
   `frame-ancestors` 限制为 loopback HTTP 祖先。
 - managed child 的日志先脱敏再进入 DSH logger。
 
+## 开发与测试
+
+```sh
+# host 纯函数 + HTTP handler + 生命周期 + 客户端契约
+npm test -- --runInBand tests/dsh
+
+# 相关回归（Console embed / MCP / runtime / shutdown）
+npm test -- --runInBand tests/dsh tests/console tests/mcp
+
+# 插件打包契约（无网络、不写文件）
+npm run verify:dsh-plugin
+```
+
+`index.js` 是纯 ESM host plugin；`client.js` 是手写
+`window.__ModuleLoader__.load({ id: '@mebular/dsh-plugin', factory })` 包装，仅
+`require('react')`。两者都没有构建步骤。
+
 ## 插件位置
 
 包代码在本仓库的 `packages/dsh-plugin`，npm 包名为 `@mebular/dsh-plugin`。GitHub
 topic 是**仓库级**的：`dsh-plugin`、`deepseek-harness`、`agent-memory` 等关键词描述整个
-Mebular 仓库，而不是一个独立包仓库，所以搜索会回到这里。完整配置参考见
-[插件 README](../../packages/dsh-plugin/README.md)。
+Mebular 仓库，而不是一个独立包仓库，所以搜索会回到这里。快速开始与能力概览见
+[插件 README](../../packages/dsh-plugin/README.md)；完整配置与生命周期以本文为准。
 
 ## 发布与版本
 
+- 版本：`0.1.2`，随统一 Mebular v0.1.2 release train（六个 npm 包同版本）
+- npm：[`@mebular/dsh-plugin@0.1.2`](https://www.npmjs.com/package/@mebular/dsh-plugin)
 - 插件是独立适配器：代码隔离在 `packages/dsh-plugin`，npm 发布由独立的 `publish-dsh`
   job 执行。
+- 官方插件列表：已收录于
+  [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/)
+  的 `memory` 分类（PR [#9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)）。
 - 六个 npm 包（`core`、`service`、`skill`、`mcp`、`fleet`、`dsh-plugin`）共用统一
   Mebular release train 的同一版本。每次发布都包含该插件，不单独为 DSH 插件发版。
 - 发布是幂等的：`publish-dsh` job 从 `packages/dsh-plugin/package.json` 读取版本，
@@ -194,4 +275,12 @@ Mebular 仓库，而不是一个独立包仓库，所以搜索会回到这里。
 dsh plugin --profile web remove @mebular/dsh-plugin
 ```
 
-这只移除 DSH 插件；Mebular App、数据和运行中的 Console 不受影响。
+确认 profile 中已无插件：
+
+```bash
+dsh --profile web --dump-config | grep -i mebular   # 应无输出
+```
+
+卸载只移除 DSH 插件；Mebular App、数据与运行中的 Console 不受影响，`/healthz` 与
+`/console/` 仍可用。不要删除 Mebular home 或 store。`dsh plugin remove` 后 pnpm 可能保留
+`node_modules/@mebular/dsh-plugin` 符号链接；它不在 profile bundles 中，不会被加载。

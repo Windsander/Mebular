@@ -82,11 +82,13 @@ function createFakeLifecycle({
   startStatus = 'up',
   startReason = 'start_failed',
   managed = true,
+  state = null,
+  reason = null,
 } = {}) {
-  let state = {
+  let currentState = {
     status,
-    state: status === 'up' ? 'up' : 'download_required',
-    reason: status === 'up' ? null : 'download_required',
+    state: status === 'up' ? 'up' : (state ?? 'download_required'),
+    reason: status === 'up' ? null : (reason ?? 'download_required'),
     provider: discoveredProvider,
     service: { registered: service, running: service, foreign: false },
     managed: false,
@@ -97,17 +99,17 @@ function createFakeLifecycle({
   return {
     calls,
     get current() {
-      return state;
+      return currentState;
     },
     setStart(value) {
       nextStart = value;
     },
-    inspect: async () => ({ ...state }),
+    inspect: async () => ({ ...currentState }),
     startAfterInstall: async (options = {}) => {
       calls.push(options);
       if (nextStart === 'up') {
-        state = {
-          ...state,
+        currentState = {
+          ...currentState,
           status: 'up',
           state: 'up',
           reason: null,
@@ -115,8 +117,8 @@ function createFakeLifecycle({
           downloadRequired: false,
         };
       } else {
-        state = {
-          ...state,
+        currentState = {
+          ...currentState,
           status: 'down',
           state: 'down',
           reason: startReason,
@@ -124,7 +126,7 @@ function createFakeLifecycle({
           downloadRequired: true,
         };
       }
-      return { ...state };
+      return { ...currentState };
     },
   };
 }
@@ -239,6 +241,8 @@ function createFakeTools(root, {
   const npmCalls = () => calls.filter((call) => call.args[0] === 'install' && call.args.includes('--prefix'));
   const cliCalls = () => calls.filter((call) => call.command === process.execPath);
   const providerCalls = () => calls.filter((call) => call.args[2] === 'provider');
+  const providerAdds = () => calls.filter((call) => call.args[2] === 'provider' && call.args[3] === 'add');
+  const providerRemoves = () => calls.filter((call) => call.args[2] === 'provider' && call.args[3] === 'remove');
   const initCalls = () => calls.filter((call) => call.args[1] === 'init');
   return {
     calls,
@@ -247,6 +251,8 @@ function createFakeTools(root, {
     npmCalls,
     cliCalls,
     providerCalls,
+    providerAdds,
+    providerRemoves,
     initCalls,
     failInit(value = true) {
       initFailure = value;
@@ -291,7 +297,7 @@ function request({ method = 'POST', remoteAddress = '127.0.0.1', body = null, co
   return {
     method,
     body: body === null ? '' : typeof body === 'string' ? body : JSON.stringify(body),
-    headers: body === null ? {} : { 'content-type': contentType },
+    headers: contentType === null ? {} : { 'content-type': contentType },
     socket: { remoteAddress },
   };
 }
@@ -446,6 +452,35 @@ describe('Phase 4b install controller: explicit install only', () => {
     expect(tools.npmCalls()).toHaveLength(0);
     expect(lifecycle.calls).toHaveLength(1);
   });
+});
+
+describe('Phase 4b install controller: terminal runtime conflicts block download', () => {
+  const cases = [
+    { state: 'profile_mismatch', reason: 'instance_mismatch', expected: 'instance_mismatch' },
+    { state: 'service_conflict', reason: 'service_unknown', expected: 'service_unknown' },
+    { state: 'version_mismatch', reason: 'version_mismatch', expected: 'version_mismatch' },
+    { state: 'down', reason: 'port_in_use', expected: 'port_in_use' },
+    { state: 'down', reason: 'CLOUD_ALREADY_ACTIVE', expected: 'CLOUD_ALREADY_ACTIVE' },
+  ];
+
+  for (const entry of cases) {
+    it(`${entry.reason}: fails without npm, provider, init or start`, async () => {
+      const root = await tempRoot();
+      const lifecycle = createFakeLifecycle({ state: entry.state, reason: entry.reason });
+      const tools = createFakeTools(root);
+      const manager = managerFor(root, lifecycle, () => discovery(null), tools);
+
+      manager.start('install');
+      const state = await waitSettled(manager);
+
+      expect(state).toMatchObject({ state: 'failed', reason: entry.expected, installed: false });
+      expect(tools.npmCalls()).toHaveLength(0);
+      expect(tools.providerCalls()).toHaveLength(0);
+      expect(tools.initCalls()).toHaveLength(0);
+      expect(lifecycle.calls).toHaveLength(0);
+      expect(await runtimeEntries(root)).toEqual([]);
+    });
+  }
 });
 
 describe('Phase 4b install controller: failure mapping and recovery', () => {
@@ -638,6 +673,197 @@ describe('Phase 4b install controller: failure mapping and recovery', () => {
     expect(entries.filter((entry) => entry.startsWith('.tmp-install-'))).toEqual([]);
   });
 
+  it('reinstall start failure restores old files/provider and restarts the owned daemon', async () => {
+    const root = await tempRoot();
+    const cliPath = join(root, 'runtime', RUNTIME_INSTALL_VERSION, 'node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs');
+
+    const first = createFakeTools(root, { npmContent: '// v1\n' });
+    const firstManager = managerFor(root, createFakeLifecycle(), () => discovery(null), first);
+    firstManager.start('install');
+    expect((await waitSettled(firstManager)).state).toBe('done');
+    const marker = join(root, 'runtime', RUNTIME_INSTALL_VERSION, 'old-marker');
+    await writeFile(marker, 'keep me', 'utf-8');
+
+    const lifecycleCalls = [];
+    let state = {
+      status: 'up',
+      state: 'up',
+      reason: null,
+      managed: true,
+      downloadRequired: false,
+      service: { registered: false, running: false, foreign: false },
+      provider: null,
+    };
+    const restartFailureLifecycle = {
+      calls: lifecycleCalls,
+      inspect: async () => ({ ...state }),
+      startAfterInstall: async (options = {}) => {
+        lifecycleCalls.push(options);
+        if (options.restartOwned === true) {
+          // The explicit reinstall stopped the owned supervise, then the new
+          // runtime failed to become ready.
+          state = {
+            ...state,
+            status: 'down',
+            state: 'down',
+            reason: 'managed_start_failed',
+            managed: false,
+            downloadRequired: true,
+          };
+        } else {
+          state = { ...state, status: 'up', state: 'up', reason: null, managed: true, downloadRequired: false };
+        }
+        return { ...state };
+      },
+    };
+    const selected = { kind: 'shared', path: cliPath, source: 'registry', version: '0.1.1' };
+    const second = createFakeTools(root, { npmContent: '// v2\n' });
+    const reinstaller = managerFor(root, restartFailureLifecycle, () => discovery(selected), second);
+
+    reinstaller.start('reinstall');
+    const failed = await waitSettled(reinstaller);
+
+    expect(failed.state).toBe('failed');
+    expect(failed.reason).toBe('start_failed');
+    expect(failed.detail).toContain('previous_daemon_restarted');
+    expect(lifecycleCalls).toEqual([{ restartOwned: true }, { restartOwned: false }]);
+    expect(existsSync(marker)).toBe(true);
+    const restored = await readFile(cliPath, 'utf-8');
+    expect(restored).toContain('// v1');
+
+    const adds = second.providerAdds();
+    expect(adds).toHaveLength(2);
+    expect(adds[0].args).toEqual(expect.arrayContaining(['--version', RUNTIME_INSTALL_VERSION]));
+    expect(adds[1].args).toEqual(expect.arrayContaining(['--path', cliPath, '--version', '0.1.1']));
+    expect(second.providerRemoves()).toHaveLength(0);
+    await expectCleanRuntimeDir(root);
+  });
+
+  it('reinstall start failure removes the new provider path and re-registers the old one', async () => {
+    const root = await tempRoot();
+    const oldCli = join(root, 'old-runtime', 'mebular.mjs');
+    await mkdir(join(root, 'old-runtime'), { recursive: true });
+    await writeFile(oldCli, '// old runtime\n', 'utf-8');
+    const newCli = join(root, 'runtime', RUNTIME_INSTALL_VERSION, 'node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs');
+
+    let state = {
+      status: 'up',
+      state: 'up',
+      reason: null,
+      managed: true,
+      downloadRequired: false,
+      service: { registered: false, running: false, foreign: false },
+      provider: null,
+    };
+    const lifecycleCalls = [];
+    const lifecycle = {
+      calls: lifecycleCalls,
+      inspect: async () => ({ ...state }),
+      startAfterInstall: async (options = {}) => {
+        lifecycleCalls.push(options);
+        if (options.restartOwned === true) {
+          state = {
+            ...state,
+            status: 'down',
+            state: 'down',
+            reason: 'managed_start_failed',
+            managed: false,
+            downloadRequired: true,
+          };
+        } else {
+          state = { ...state, status: 'up', state: 'up', reason: null, managed: true };
+        }
+        return { ...state };
+      },
+    };
+    const tools = createFakeTools(root, { npmContent: '// v2\n' });
+    const manager = managerFor(
+      root,
+      lifecycle,
+      () => discovery({ kind: 'shared', path: oldCli, source: 'registry', version: '0.1.1' }),
+      tools,
+    );
+
+    manager.start('reinstall');
+    const failed = await waitSettled(manager);
+
+    expect(failed).toMatchObject({ state: 'failed', reason: 'start_failed' });
+    expect(lifecycleCalls).toEqual([{ restartOwned: true }, { restartOwned: false }]);
+    expect(existsSync(newCli)).toBe(true);
+    expect(await readFile(oldCli, 'utf-8')).toContain('// old runtime');
+
+    const adds = tools.providerAdds();
+    expect(adds.map((call) => call.args[call.args.indexOf('--version') + 1])).toEqual(['0.1.2', '0.1.1']);
+    expect(adds[1].args).toEqual(expect.arrayContaining(['--path', oldCli]));
+    const removes = tools.providerRemoves();
+    expect(removes.map((call) => call.args[call.args.indexOf('--path') + 1])).toEqual([oldCli, newCli]);
+    expect(await runtimeEntries(root)).toContain('0.1.2');
+  });
+
+  it('reinstall recovery failure is reported when the old daemon cannot be restarted', async () => {
+    const root = await tempRoot();
+    const cliPath = join(root, 'runtime', RUNTIME_INSTALL_VERSION, 'node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs');
+    const first = createFakeTools(root, { npmContent: '// v1\n' });
+    const firstManager = managerFor(root, createFakeLifecycle(), () => discovery(null), first);
+    firstManager.start('install');
+    expect((await waitSettled(firstManager)).state).toBe('done');
+
+    let state = {
+      status: 'up',
+      state: 'up',
+      reason: null,
+      managed: true,
+      downloadRequired: false,
+      service: { registered: false, running: false, foreign: false },
+      provider: null,
+    };
+    const lifecycle = {
+      calls: [],
+      inspect: async () => ({ ...state }),
+      startAfterInstall: async (options = {}) => {
+        lifecycle.calls.push(options);
+        state = {
+          ...state,
+          status: 'down',
+          state: 'down',
+          reason: 'managed_start_failed',
+          managed: false,
+          downloadRequired: true,
+        };
+        return { ...state };
+      },
+    };
+    const tools = createFakeTools(root, { npmContent: '// v2\n' });
+    const manager = managerFor(
+      root,
+      lifecycle,
+      () => discovery({ kind: 'shared', path: cliPath, source: 'registry', version: '0.1.1' }),
+      tools,
+    );
+
+    manager.start('reinstall');
+    const failed = await waitSettled(manager);
+
+    expect(failed.state).toBe('failed');
+    expect(failed.reason).toBe('start_failed');
+    expect(failed.detail).toContain('previous_daemon_restart_failed');
+    expect(lifecycle.calls).toEqual([{ restartOwned: true }, { restartOwned: false }]);
+  });
+
+  it('service registration is attached, not reinstalled or restarted', async () => {
+    const root = await tempRoot();
+    const lifecycle = createFakeLifecycle({ service: true, startStatus: 'up' });
+    const tools = createFakeTools(root);
+    const manager = managerFor(root, lifecycle, () => discovery(provider('shared', '/opt/mebular/bin/mebular.mjs')), tools);
+
+    manager.start('reinstall');
+    const state = await waitSettled(manager);
+
+    expect(state.state).toBe('done');
+    expect(tools.npmCalls()).toHaveLength(0);
+    expect(lifecycle.calls).toEqual([{ restartOwned: false }]);
+  });
+
   it('repeated clicks are single-flight: one npm install, one start', async () => {
     const root = await tempRoot();
     const lifecycle = createFakeLifecycle();
@@ -699,8 +925,37 @@ describe('Phase 4b install route: loopback-only explicit POST', () => {
     }
     const empty = response();
     await handler(request(), empty);
-    expect(empty.statusCode).toBe(202);
-    expect(JSON.parse(empty.body).action).toBe('install');
+    expect(empty.statusCode).toBe(400);
+    expect(JSON.parse(empty.body).error).toBe('invalid_json');
+  });
+
+  it('requires application/json even for an empty body; explicit {} installs once', async () => {
+    const manager = fakeManager();
+    const handler = createRuntimeInstallHandler({ config, manager });
+
+    for (const options of [
+      { body: null, contentType: null },
+      { body: null, contentType: 'text/plain' },
+      { body: null, contentType: 'application/x-www-form-urlencoded' },
+    ]) {
+      const res = response();
+      await handler(request(options), res);
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toBe('invalid_content_type');
+    }
+    expect(manager.startCalls).toHaveLength(0);
+
+    const emptyJson = response();
+    await handler(request(), emptyJson);
+    expect(emptyJson.statusCode).toBe(400);
+    expect(JSON.parse(emptyJson.body).error).toBe('invalid_json');
+    expect(manager.startCalls).toHaveLength(0);
+
+    const json = response();
+    await handler(request({ body: {} }), json);
+    expect(json.statusCode).toBe(202);
+    expect(JSON.parse(json.body)).toMatchObject({ ok: true, accepted: true, action: 'install' });
+    expect(manager.startCalls).toEqual(['install']);
   });
 
   it('remote peers get 404 for every method; loopback non-POST gets 405', async () => {
@@ -993,6 +1248,29 @@ describe('Phase 4b lifecycle: explicit startAfterInstall/retry', () => {
     expect(handles[0].stopCalls).toBe(1);
     await lifecycle.dispose();
     expect(handles[1].stopCalls).toBe(1);
+  });
+
+  it('restartOwned never stops or restarts an external healthy daemon', async () => {
+    let starts = 0;
+    const lifecycle = createDaemonLifecycle({
+      config: { lifecycle: 'attach' },
+      env: {},
+      discoverProviders: async () => discovery(provider('shared', '/opt/mebular/bin/mebular.mjs')),
+      runResolve: async () => ({ ok: true, data: { ...resolveDoc(), mode: 'reused' } }),
+      startSupervise: () => {
+        starts += 1;
+        return supervise(resolveDoc());
+      },
+      probe: async () => ({ reachable: true, health: HEALTH, embed: EMBED }),
+      startTimeoutMs: 200,
+      pollIntervalMs: 5,
+      cacheTtlMs: 0,
+    });
+
+    const state = await lifecycle.startAfterInstall({ restartOwned: true });
+    expect(state).toMatchObject({ status: 'up', managed: false });
+    expect(starts).toBe(0);
+    await lifecycle.dispose();
   });
 
   it('retry re-inspects an attach-only lifecycle without starting', async () => {

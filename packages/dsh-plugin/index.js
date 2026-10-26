@@ -121,6 +121,28 @@ const INSTALL_REASON_SET = new Set([
   'download_required',
 ]);
 
+/**
+ * Lifecycle conflicts that make an install unsafe. These are never followed by
+ * an npm download: the panel remains in its conflict state and the POST returns
+ * a stable failure instead.
+ */
+const INSTALL_CONFLICT_REASONS = new Set([
+  'profile_mismatch',
+  'service_conflict',
+  'version_mismatch',
+  'port_in_use',
+  'instance_mismatch',
+  'instance_missing',
+  'cloud_mismatch',
+  'CLOUD_ALREADY_ACTIVE',
+  'service_unknown',
+  'service_foreign',
+  'service_not_registered',
+  'start_locked',
+]);
+
+for (const reason of INSTALL_CONFLICT_REASONS) INSTALL_REASON_SET.add(reason);
+
 
 /** Standard App bundle runtime entry, mirroring the shared supervisor layout. */
 const APP_PROVIDER_TAIL = ['node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs'];
@@ -1889,6 +1911,16 @@ export function sanitizeRuntimeInstallState(value, fallback = null) {
   };
 }
 
+/** Stable conflict reason from a lifecycle snapshot, or null. */
+function installConflictReason(snapshot) {
+  if (!isObject(snapshot) || snapshot.status === 'up') return null;
+  const reason = typeof snapshot.reason === 'string' ? snapshot.reason : null;
+  if (reason !== null && INSTALL_CONFLICT_REASONS.has(reason)) return reason;
+  const state = typeof snapshot.state === 'string' ? snapshot.state : null;
+  if (state !== null && INSTALL_CONFLICT_REASONS.has(state)) return state;
+  return null;
+}
+
 /**
  * Create the install controller. It only runs on an explicit user action; it
  * never downloads from `start()`/`inspect()`/timers. A missing runtime is
@@ -2034,7 +2066,11 @@ export function createRuntimeInstallManager(options = {}) {
       snapshot = null;
     }
     const up = snapshot?.status === 'up';
-    if (up && !includeProviderForUp) return { up: true, snapshot, provider: null, service: false };
+    const conflict = up ? null : installConflictReason(snapshot);
+    if (conflict !== null) {
+      return { up: false, snapshot, conflict, provider: null, service: false };
+    }
+    if (up && !includeProviderForUp) return { up: true, snapshot, conflict: null, provider: null, service: false };
     const provider = await discoverProvider();
     let service = snapshot?.service?.registered === true;
     if (!service) {
@@ -2047,6 +2083,7 @@ export function createRuntimeInstallManager(options = {}) {
     return {
       up,
       snapshot,
+      conflict: null,
       provider: provider ?? (isObject(snapshot?.provider) ? snapshot.provider : null),
       service,
     };
@@ -2074,21 +2111,53 @@ export function createRuntimeInstallManager(options = {}) {
     };
   }
 
-  async function registerProvider(cliPath) {
-    const result = await runCli(cliPath, [
+  function normalizeProviderRecord(value) {
+    if (!isObject(value) || value.kind !== 'shared') return null;
+    if (typeof value.path !== 'string' || !isAbsolute(value.path)) return null;
+    return {
+      kind: 'shared',
+      path: value.path,
+      version: typeof value.version === 'string' && value.version.length > 0 ? value.version : null,
+      capabilities: Array.isArray(value.capabilities) && value.capabilities.length > 0
+        ? value.capabilities.filter((entry) => typeof entry === 'string')
+        : ['serve'],
+    };
+  }
+
+  async function findSharedProviderFallback() {
+    try {
+      const raw = JSON.parse(await readFile(join(cloudRoot, 'runtime-providers.json'), 'utf-8'));
+      if (raw?.v !== 1 || !Array.isArray(raw.providers)) return null;
+      for (const entry of raw.providers) {
+        const record = normalizeProviderRecord(entry);
+        if (record !== null && exists(record.path)) return record;
+      }
+    } catch {
+      // Missing/corrupt registry: discovery already told us there is no usable
+      // provider, so there is no old record to preserve.
+    }
+    return null;
+  }
+
+  async function addProviderRecord(cliPath, record) {
+    const providerRecord = normalizeProviderRecord(record);
+    if (providerRecord === null) {
+      throw installError('provider_registration_failed', 'invalid shared runtime provider record');
+    }
+    const args = [
       'runtime',
       'provider',
       'add',
       '--kind',
-      'shared',
+      providerRecord.kind,
       '--path',
-      cliPath,
-      '--version',
-      version,
+      providerRecord.path,
+      ...(providerRecord.version === null ? [] : ['--version', providerRecord.version]),
       '--capabilities',
-      'serve',
+      providerRecord.capabilities.join(','),
       '--json',
-    ]);
+    ];
+    const result = await runCli(cliPath, args);
     const data = parseJsonDocument(result.stdout);
     if (!result.ok || data?.ok !== true) {
       throw installError('provider_registration_failed', 'runtime provider registration failed', {
@@ -2098,6 +2167,37 @@ export function createRuntimeInstallManager(options = {}) {
         }),
       });
     }
+  }
+
+  async function removeProviderRecord(cliPath, providerPath) {
+    const result = await runCli(cliPath, [
+      'runtime',
+      'provider',
+      'remove',
+      '--kind',
+      'shared',
+      '--path',
+      providerPath,
+      '--json',
+    ]);
+    const data = parseJsonDocument(result.stdout);
+    if (!result.ok || data?.ok !== true) {
+      throw installError('provider_registration_failed', 'runtime provider removal failed', {
+        detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? result.spawnError?.message ?? 'provider_removal_failed', {
+          home: cloudRoot,
+          cliPath,
+        }),
+      });
+    }
+  }
+
+  async function registerProvider(cliPath) {
+    await addProviderRecord(cliPath, {
+      kind: 'shared',
+      path: cliPath,
+      version,
+      capabilities: ['serve'],
+    });
   }
 
   async function resolveInstalledHome(cliPath) {
@@ -2273,6 +2373,11 @@ export function createRuntimeInstallManager(options = {}) {
   async function execute(action) {
     const existing = await inspectExisting({ includeProviderForUp: action === 'reinstall' });
     if (disposed) return;
+    if (existing.conflict !== null && existing.conflict !== undefined) {
+      throw installError(existing.conflict, 'runtime conflict blocks installation', {
+        detail: sanitizeDetail(existing.conflict),
+      });
+    }
     if (existing.up && action !== 'reinstall') {
       publish({
         state: 'done',
@@ -2318,43 +2423,129 @@ export function createRuntimeInstallManager(options = {}) {
       return;
     }
 
+    let previousProvider = null;
+    let previousOwned = false;
+    if (sharedReinstall) {
+      previousProvider = normalizeProviderRecord(existing.provider) ?? await findSharedProviderFallback();
+      previousOwned = existing.up === true && existing.snapshot?.managed === true;
+    }
+
     publish({ state: 'installing', reason: 'provisioning', detail: null });
     let backupPath = null;
+    let newProviderPath = null;
+    let providerRegistered = false;
+    let startAttempted = false;
+
     const restoreBackup = async () => {
-      if (backupPath === null) return;
+      if (backupPath === null) return true;
       const targetPath = runtimeInstallTarget(cloudRoot, version);
       await rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
       try {
         await rename(backupPath, targetPath);
         backupPath = null;
         log('warn', 'reinstall did not complete; previous shared runtime restored');
+        return true;
       } catch {
         log('warn', 'reinstall did not complete and the previous shared runtime could not be restored automatically');
+        return false;
       }
     };
+
+    const restorePreviousProvider = async () => {
+      if (action !== 'reinstall' || !providerRegistered) return true;
+      const cliPath = newProviderPath;
+      let ok = true;
+      if (previousProvider !== null) {
+        if (cliPath !== null && cliPath !== previousProvider.path) {
+          try {
+            await removeProviderRecord(cliPath, cliPath);
+          } catch (error) {
+            ok = false;
+            log('warn', `new runtime provider could not be removed (${error?.code ?? 'error'})`);
+          }
+        }
+        try {
+          await addProviderRecord(previousProvider.path, previousProvider);
+        } catch (firstError) {
+          try {
+            // The old CLI path may be gone after a failed swap; the restored
+            // target CLI can still write the same registry atomically.
+            if (cliPath === null || !exists(cliPath)) throw firstError;
+            await addProviderRecord(cliPath, previousProvider);
+          } catch {
+            ok = false;
+            log('warn', 'previous runtime provider could not be re-registered');
+          }
+        }
+      } else if (cliPath !== null) {
+        try {
+          await removeProviderRecord(cliPath, cliPath);
+        } catch (error) {
+          ok = false;
+          log('warn', `new runtime provider could not be removed (${error?.code ?? 'error'})`);
+        }
+      }
+      return ok;
+    };
+
+    const restartPreviousDaemon = async () => {
+      try {
+        const result = await lifecycle.startAfterInstall({ restartOwned: false });
+        if (isObject(result) && result.status === 'up') return true;
+        const snapshot = await lifecycle.inspect().catch(() => null);
+        return snapshot?.status === 'up';
+      } catch (error) {
+        log('warn', `previous Mebular runtime could not be restarted (${safeErrorCode(error)})`);
+        return false;
+      }
+    };
+
+    const rollback = async ({ allowRestart }) => {
+      const filesRestored = await restoreBackup();
+      const providerRestored = await restorePreviousProvider();
+      const notes = [];
+      if (!filesRestored) notes.push('previous_runtime_restore_failed');
+      if (!providerRestored) notes.push('previous_provider_restore_failed');
+      if (allowRestart && startAttempted && previousOwned) {
+        if (!providerRestored) {
+          notes.push('previous_daemon_restart_skipped');
+        } else {
+          const restarted = await restartPreviousDaemon();
+          notes.push(restarted ? 'previous_daemon_restarted' : 'previous_daemon_restart_failed');
+        }
+      }
+      return notes;
+    };
+
     try {
       const files = await installFiles(action === 'reinstall');
       backupPath = files.backupPath ?? null;
+      newProviderPath = files.cliPath;
       if (disposed) {
-        await restoreBackup();
+        await rollback({ allowRestart: false });
         return;
       }
       await registerProvider(files.cliPath);
+      providerRegistered = true;
+      if (sharedReinstall && previousProvider !== null && previousProvider.path !== files.cliPath) {
+        await removeProviderRecord(files.cliPath, previousProvider.path);
+      }
       if (disposed) {
-        await restoreBackup();
+        await rollback({ allowRestart: false });
         return;
       }
       const home = await resolveInstalledHome(files.cliPath);
       if (disposed) {
-        await restoreBackup();
+        await rollback({ allowRestart: false });
         return;
       }
       await ensureInit(files.cliPath, home);
       if (disposed) {
-        await restoreBackup();
+        await rollback({ allowRestart: false });
         return;
       }
       publish({ state: 'installing', reason: 'provisioning', detail: 'starting' });
+      startAttempted = true;
       await startExisting({
         installed: true,
         reused: files.reused === true,
@@ -2362,7 +2553,11 @@ export function createRuntimeInstallManager(options = {}) {
       });
       backupPath = null;
     } catch (error) {
-      await restoreBackup();
+      const notes = await rollback({ allowRestart: !disposed });
+      if (notes.length > 0) {
+        const base = typeof error?.detail === 'string' && error.detail.length > 0 ? `${error.detail}; ` : '';
+        error.detail = `${base}${notes.join('; ')}`;
+      }
       throw error;
     }
   }
@@ -2527,27 +2722,29 @@ export function createRuntimeInstallHandler(options = {}) {
       return;
     }
     let input = {};
-    if (body.text.trim().length > 0) {
-      const contentType = String(req.headers?.['content-type'] ?? req.headers?.['Content-Type'] ?? '');
-      if (!/^application\/json\b/i.test(contentType)) {
-        sendJson(res, 400, { ok: false, error: 'invalid_content_type' });
-        return;
-      }
-      try {
-        input = JSON.parse(body.text);
-      } catch {
-        sendJson(res, 400, { ok: false, error: 'invalid_json' });
-        return;
-      }
-      if (!isObject(input)) {
-        sendJson(res, 400, { ok: false, error: 'invalid_json' });
-        return;
-      }
-      const keys = Object.keys(input);
-      if (keys.some((key) => key !== 'action')) {
-        sendJson(res, 400, { ok: false, error: 'unsupported_parameters' });
-        return;
-      }
+    const contentType = String(req.headers?.['content-type'] ?? req.headers?.['Content-Type'] ?? '');
+    if (!/^application\/json\b/i.test(contentType)) {
+      sendJson(res, 400, { ok: false, error: 'invalid_content_type' });
+      return;
+    }
+    if (body.text.trim().length === 0) {
+      sendJson(res, 400, { ok: false, error: 'invalid_json' });
+      return;
+    }
+    try {
+      input = JSON.parse(body.text);
+    } catch {
+      sendJson(res, 400, { ok: false, error: 'invalid_json' });
+      return;
+    }
+    if (!isObject(input)) {
+      sendJson(res, 400, { ok: false, error: 'invalid_json' });
+      return;
+    }
+    const keys = Object.keys(input);
+    if (keys.some((key) => key !== 'action')) {
+      sendJson(res, 400, { ok: false, error: 'unsupported_parameters' });
+      return;
     }
     const action = input.action === undefined ? 'install' : input.action;
     if (typeof action !== 'string' || !RUNTIME_INSTALL_ACTIONS.includes(action)) {

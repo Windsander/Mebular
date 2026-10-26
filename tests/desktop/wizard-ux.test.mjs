@@ -407,7 +407,8 @@ describe('F2 常驻语义：三态 registered（徽章/文案；安装入口已�
     const fn = indexMjs.match(/async function installServiceDirect\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
     expect(fn).toContain('serviceStatus');
     expect(fn).toContain('installDecision(status).already');
-    expect(fn.indexOf('serviceStatus')).toBeLessThan(fn.indexOf('installService(descriptor'));
+    expect(fn).toContain('appServiceFallbackBlock');
+    expect(fn.indexOf('serviceStatus')).toBeLessThan(fn.indexOf('installLegacyAppService'));
   });
 });
 

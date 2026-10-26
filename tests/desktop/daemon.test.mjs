@@ -26,6 +26,8 @@ import {
   serviceDescriptorFor,
   reconcileManagedState,
   resolveAppServiceRuntime,
+  appServiceFallbackBlock,
+  installLegacyAppService,
 } from '../../apps/desktop/src/main/daemon.mjs';
 import * as runtimeProviders from '../../packages/mcp/src/runtime-providers.mjs';
 import * as runtimeSupervisor from '../../packages/mcp/src/runtime-supervisor.mjs';
@@ -478,6 +480,55 @@ describe('Phase 2 · App 专属 service adapter / provider 注册', () => {
 
     const missing = createAppServiceAdapter({ service: {}, home: '/cloud', cliBin: '/x/mebular.mjs', http });
     expect(await missing.status()).toMatchObject({ ok: true, registered: false, available: false });
+  });
+
+  it('current 存在 + runtime-service 不可用：legacy App service install 被阻断，不调用 installService', async () => {
+    const root = await tempDir();
+    await mkdir(join(root, 'runtime'), { recursive: true });
+    await writeFile(join(root, 'runtime', 'current.json'), JSON.stringify({ v: 1 }), 'utf-8');
+    let calls = 0;
+    const service = {
+      installService: () => {
+        calls += 1;
+        return { ok: true, started: true, unitPath: '/unit' };
+      },
+    };
+    const descriptor = serviceDescriptorFor({ home: '/cloud', cliBin: '/x/mebular.mjs', cloudRoot: root });
+    const blocked = await installLegacyAppService({
+      service,
+      descriptor,
+      cloudRoot: root,
+      serviceHome: '/os-home',
+      runtimeServiceAvailable: false,
+    });
+    expect(blocked).toMatchObject({ ok: false, reason: 'RUNTIME_SERVICE_UNAVAILABLE' });
+    expect(calls).toBe(0);
+    expect(appServiceFallbackBlock({ cloudRoot: root, runtimeServiceAvailable: false })).toMatchObject({
+      ok: false,
+      reason: 'RUNTIME_SERVICE_UNAVAILABLE',
+    });
+  });
+
+  it('current 不存在：legacy App service fallback 保持可用（调用 installService）', async () => {
+    const root = await tempDir();
+    let calls = 0;
+    const service = {
+      installService: () => {
+        calls += 1;
+        return { ok: true, started: true, unitPath: '/unit' };
+      },
+    };
+    const descriptor = serviceDescriptorFor({ home: '/cloud', cliBin: '/x/mebular.mjs', cloudRoot: root });
+    expect(appServiceFallbackBlock({ cloudRoot: root, runtimeServiceAvailable: false })).toBe(null);
+    const installed = await installLegacyAppService({
+      service,
+      descriptor,
+      cloudRoot: root,
+      serviceHome: '/os-home',
+      runtimeServiceAvailable: false,
+    });
+    expect(installed).toMatchObject({ ok: true, registered: true, unitPath: '/unit' });
+    expect(calls).toBe(1);
   });
 
   it('App service 来源：current 可用指向共享 runtime；缺失时保留 App provider 且不下载', async () => {

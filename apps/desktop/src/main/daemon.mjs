@@ -377,6 +377,53 @@ function runtimeError(code, message, extra = {}) {
   return error;
 }
 
+/** shared runtime current 是否存在（只读文件存在性，不读秘密/配置）。 */
+export function sharedRuntimeCurrentPresent(cloudRoot) {
+  if (typeof cloudRoot !== 'string' || cloudRoot.length === 0) return false;
+  return existsSync(join(cloudRoot, 'runtime', 'current.json'));
+}
+
+/**
+ * App service fallback 的 fail-safe：current 存在但 runtime-service 不可用时，
+ * 不允许用 App descriptor 覆盖共享 mebular-serve。
+ */
+export function appServiceFallbackBlock({ cloudRoot = null, runtimeServiceAvailable = false } = {}) {
+  if (runtimeServiceAvailable === true) return null;
+  if (!sharedRuntimeCurrentPresent(cloudRoot)) return null;
+  return {
+    ok: false,
+    reason: 'RUNTIME_SERVICE_UNAVAILABLE',
+    message: '共享 runtime current 存在，但 runtime-service 不可用：拒绝用 App descriptor 覆盖共享 service',
+  };
+}
+
+/** legacy App service 安装（仅在无 shared current 或 runtime-service 可用时由调用方进入）。 */
+export async function installLegacyAppService({
+  service = null,
+  descriptor,
+  cloudRoot = null,
+  serviceHome = homedir(),
+  autostart = true,
+  runtimeServiceAvailable = false,
+} = {}) {
+  const blocked = appServiceFallbackBlock({ cloudRoot, runtimeServiceAvailable });
+  if (blocked !== null) return blocked;
+  if (typeof service?.installService !== 'function') {
+    return { ok: false, reason: '@mebular/service 不可用' };
+  }
+  try {
+    const result = service.installService(descriptor, { home: serviceHome, autostart });
+    return {
+      ok: true,
+      already: false,
+      registered: true,
+      unitPath: result?.unitPath ?? null,
+    };
+  } catch (error) {
+    return { ok: false, reason: String(error?.message ?? error) };
+  }
+}
+
 /**
  * App 专属 service adapter：描述符必须保留 App 现有行为（args 带 --port、execPath、ELECTRON_RUN_AS_NODE、
  * MEBULAR_HOME/MEBULAR_CLOUD_ROOT），serviceHome 仍是 OS 用户 home。

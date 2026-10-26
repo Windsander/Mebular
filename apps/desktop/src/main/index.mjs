@@ -14,6 +14,7 @@ import {
   serviceEnabledFor, stopManaged, waitForDaemonDetail, parseArgs, probeHealthDetail, probeProvision,
   probeRuntimeIdentity, probeSecurityLevel, serviceDescriptorFor, homeKey, isPortOpen,
   reconcileManagedState, isManagedChildAlive, registerAppRuntimeProvider, resolveAppServiceRuntime,
+  appServiceFallbackBlock, installLegacyAppService,
 } from './daemon.mjs';
 import {
   loadCloudModules, migrateLegacyService, performCloudSwitch, recoverSwitchIntent, appFallbackProvider,
@@ -885,6 +886,9 @@ async function installServiceDirect() {
       return { ok: false, reason: String(error?.message ?? error) };
     }
   }
+  // fail-safe：current 存在而 runtime-service 不可用时，绝不用 App descriptor 覆盖共享 service。
+  const blocked = appServiceFallbackBlock({ cloudRoot, runtimeServiceAvailable: false });
+  if (blocked !== null) return blocked;
   const fallbackService = await loadServiceModule();
   if (!fallbackService?.installService) return { ok: false, reason: '@mebular/service 不可用' };
   const descriptor = serviceDescriptorFor({
@@ -901,8 +905,14 @@ async function installServiceDirect() {
     if (installDecision(status).already) {
       return { ok: true, already: true, registered: true, running: Boolean(status.running), unitPath: status.unitPath ?? null };
     }
-    const res = fallbackService.installService(descriptor, { home: serviceHome, autostart: true });
-    return { ok: true, already: false, registered: true, unitPath: res?.unitPath ?? null };
+    return await installLegacyAppService({
+      service: fallbackService,
+      descriptor,
+      cloudRoot,
+      serviceHome,
+      autostart: true,
+      runtimeServiceAvailable: false,
+    });
   } catch (error) {
     return { ok: false, reason: String(error?.message ?? error) };
   }

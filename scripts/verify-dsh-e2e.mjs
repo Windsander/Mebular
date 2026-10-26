@@ -1,40 +1,50 @@
 #!/usr/bin/env node
 /**
- * Real DSH happy-path E2E (Phase 1).
+ * Real DSH E2E: P0 failure/recovery matrix (Phase 2).
  *
- * One command that builds a disposable world and exercises the whole chain:
- *   seed temp Mebular home -> real `mebular serve` -> real npm tarball ->
- *   real @deepseek-ai/dsh -> real plugin install -> real DSH Web ->
- *   headless Chrome/CDP -> sidebar / status / iframe / Console dataset ->
- *   test-only probe plugin -> DSH ctx.tools.schemas() + ctx.tools.execute().
+ * Preserves the Phase 1 happy path and adds five isolated scenarios on top of
+ * reusable world primitives (scripts/lib/dsh-e2e-world.mjs):
  *
- * No mocks of DSH, no Playwright, no real DeepSeek model call, and no reads or
- * writes under the developer's ~/.mebular or ~/.dsh.
+ *   happy-path             sidebar / connected / iframe / Console / real tool call
+ *   daemon-down-recovery   down at boot -> up -> down -> up, without restarting DSH
+ *   panel-false            separate profile, no sidebar/iframe, MCP tools still work
+ *   custom-port            MEBULAR_HTTP_PORT wins over a conflicting runtime.json;
+ *                          panel, /mebular/embed-info, and MCP use one origin
+ *   uninstall              dsh plugin remove leaves the external daemon untouched
+ *   security-headers       plain Console stays DENY; ?embed=dsh loosens only on
+ *                          loopback; discovery documents carry no secrets/paths
+ *
+ * Every scenario gets its own MEBULAR_HOME, DSH_HOME, profile, random ports,
+ * temp directory, probe output, and artifacts. Artifacts are redacted before
+ * they are kept (scripts/lib/redact.mjs) and audited after writing.
  *
  * Usage:
- *   node scripts/verify-dsh-e2e.mjs [--dsh-version <version>] [--keep]
+ *   node scripts/verify-dsh-e2e.mjs [--scenario <name>]... [--keep]
+ *     [--dsh-version <version>] [--list]
  *
- * Exit codes: 0 all checks passed; 1 any failure (artifacts kept and printed).
+ * Exit codes: 0 all selected scenarios passed; 1 any failure or artifact leak.
  */
 
-import { execFileSync, spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { once } from 'node:events';
-import net from 'node:net';
 
-import { seedHome } from '../tests/dsh/e2e/fixtures/seed-home.mjs';
+import { findChrome } from './lib/cdp.mjs';
+import { createWorld } from './lib/dsh-e2e-world.mjs';
 import {
-  connectCdp,
-  findChrome,
-  launchChrome,
-  openPage,
+  countMatches,
+  fetchJson,
+  fetchRaw,
+  freePort,
+  packPackage,
+  readJsonIfExists,
+  runCommand,
   sleep,
-} from './lib/cdp.mjs';
+  tail,
+} from './lib/e2e-process.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const mebularBin = join(repoRoot, 'packages', 'mcp', 'bin', 'mebular.mjs');
@@ -42,8 +52,13 @@ const pluginDir = join(repoRoot, 'packages', 'dsh-plugin');
 const probeDir = join(repoRoot, 'tests', 'dsh', 'e2e', 'fixtures', 'probe-plugin');
 const versionsPath = join(repoRoot, 'tests', 'dsh', 'e2e', 'versions.json');
 
+const IFRAME_SELECTOR = 'iframe[title="Mebular Console"]';
+const SIDEBAR_SELECTOR = 'button[aria-label="Mebular"]';
+const STATUS_SELECTOR = '[data-mebular-status]';
+
 let passed = 0;
 let failed = 0;
+
 const check = (name, ok, detail = '') => {
   if (ok) {
     passed += 1;
@@ -62,17 +77,21 @@ function requireCheck(name, ok, detail = '') {
   return true;
 }
 
-function tail(text, max = 3000) {
-  const value = String(text ?? '');
-  return value.length <= max ? value : `…${value.slice(-max)}`;
-}
-
 function parseArgs(argv) {
-  const options = { dshVersion: null, keep: false };
+  const options = { scenarios: [], keep: false, dshVersion: null, list: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--keep') {
       options.keep = true;
+    } else if (arg === '--list') {
+      options.list = true;
+    } else if (arg === '--scenario') {
+      const value = argv[index + 1] ?? '';
+      if (value.length === 0) throw new Error('--scenario 需要名称');
+      options.scenarios.push(value);
+      index += 1;
+    } else if (arg.startsWith('--scenario=')) {
+      options.scenarios.push(arg.slice('--scenario='.length));
     } else if (arg === '--dsh-version') {
       options.dshVersion = argv[index + 1] ?? null;
       index += 1;
@@ -85,545 +104,639 @@ function parseArgs(argv) {
   return options;
 }
 
-function freePort() {
-  return new Promise((resolvePromise, reject) => {
-    const server = net.createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const port = server.address().port;
-      server.close(() => resolvePromise(port));
-    });
-  });
+function probeSummary(probe) {
+  if (probe === null || probe === undefined) return 'probe=missing';
+  return `phase=${probe.phase ?? '?'} mcpTools=${probe.mebularToolCount ?? '?'} schemas=${probe.schemaCount ?? '?'} done=${probe.done === true}`;
 }
 
-function runCommand(label, command, args, options = {}) {
-  const timeoutMs = options.timeoutMs ?? 120000;
-  return new Promise((resolvePromise) => {
-    const started = Date.now();
-    const child = spawn(command, args, {
-      cwd: options.cwd ?? repoRoot,
-      env: options.env ?? process.env,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      try { child.kill('SIGKILL'); } catch { /* Already gone. */ }
-    }, timeoutMs);
-    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
-    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
-    child.once('error', (error) => {
-      clearTimeout(timer);
-      resolvePromise({ label, code: null, stdout, stderr: `${stderr}${error.message}`, timedOut, elapsedMs: Date.now() - started });
-    });
-    child.once('close', (code, signal) => {
-      clearTimeout(timer);
-      resolvePromise({
-        label,
-        code,
-        signal,
-        stdout,
-        stderr,
-        timedOut,
-        elapsedMs: Date.now() - started,
-      });
-    });
-  });
-}
-
-function spawnLogged(label, command, args, options = {}) {
-  const handle = {
-    label,
-    command,
-    args,
-    stdout: '',
-    stderr: '',
-    exitCode: null,
-    signal: null,
-    startedAt: Date.now(),
-  };
-  handle.proc = spawn(command, args, {
-    cwd: options.cwd ?? repoRoot,
-    env: options.env ?? process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  handle.proc.stdout.on('data', (chunk) => { handle.stdout += chunk.toString(); });
-  handle.proc.stderr.on('data', (chunk) => { handle.stderr += chunk.toString(); });
-  handle.proc.once('exit', (code, signal) => {
-    handle.exitCode = code;
-    handle.signal = signal;
-  });
-  return handle;
-}
-
-async function stopProcess(handle, { timeoutMs = 5000 } = {}) {
-  if (!handle?.proc || handle.proc.exitCode !== null) return;
-  try { handle.proc.kill('SIGTERM'); } catch { return; }
-  const exited = await Promise.race([
-    once(handle.proc, 'exit').then(() => true).catch(() => true),
-    sleep(timeoutMs).then(() => false),
-  ]);
-  if (exited) return;
-  try { handle.proc.kill('SIGKILL'); } catch { /* Already gone. */ }
-  await Promise.race([
-    once(handle.proc, 'exit').catch(() => undefined),
-    sleep(2000),
-  ]);
-}
-
-async function waitForValue(read, predicate, { timeoutMs = 30000, intervalMs = 150, describe = '条件' } = {}) {
-  const started = Date.now();
-  let last = null;
-  let lastError = null;
-  while (Date.now() - started < timeoutMs) {
-    try {
-      last = await read();
-      if (predicate(last)) return { ok: true, value: last };
-    } catch (error) {
-      lastError = error;
-    }
-    await sleep(intervalMs);
-  }
-  return { ok: false, value: last, error: lastError, describe };
-}
-
-async function waitForServeReady(handle, timeoutMs = 45000) {
-  const result = await waitForValue(
-    async () => {
-      if (handle.exitCode !== null) throw new Error(`serve 提前退出（code=${handle.exitCode}）：${tail(handle.stderr, 600)}`);
-      const match = handle.stdout.match(/SERVE_READY (\{.*\})/);
-      return match ? JSON.parse(match[1]) : null;
-    },
-    (value) => value !== null,
-    { timeoutMs, describe: 'SERVE_READY' },
-  );
-  if (!result.ok) throw new Error(`serve 就绪超时：${result.error?.message ?? tail(handle.stderr, 600)}`);
+async function waitProbeOrFail(world, predicate, description, timeoutMs = 60000, detailFn = probeSummary) {
+  const result = await world.waitForProbe(predicate, { timeoutMs, describe: description });
+  const detail = result.ok ? detailFn(result.value) : `${detailFn(result.value)} timeout=${timeoutMs}ms`;
+  requireCheck(description, result.ok, detail);
   return result.value;
 }
 
-async function waitForDshUrl(handle, timeoutMs = 90000) {
-  const result = await waitForValue(
-    async () => {
-      if (handle.exitCode !== null) throw new Error(`DSH 提前退出（code=${handle.exitCode}）：${tail(handle.stderr, 900)}`);
-      const match = handle.stdout.match(/dsh web:\s+(http:\/\/\S+)/);
-      return match ? match[1] : null;
-    },
-    (value) => typeof value === 'string' && value.length > 0,
-    { timeoutMs, describe: 'DSH Web URL' },
+async function statusDetail(world) {
+  return world.state.page.evalJs(
+    `document.querySelector(${JSON.stringify(STATUS_SELECTOR)})?.getAttribute('data-mebular-status') ?? '(missing)'`,
   );
-  if (!result.ok) throw new Error(`DSH Web URL 超时：${result.error?.message ?? tail(handle.stderr, 900)}`);
-  return result.value;
 }
 
-async function fetchJson(url, timeoutMs = 5000) {
-  const response = await fetch(url, {
-    redirect: 'follow',
-    signal: AbortSignal.timeout(timeoutMs),
-    headers: { accept: 'application/json' },
-  });
-  return { status: response.status, json: await response.json().catch(() => null) };
+async function assertNoPageExceptions(world) {
+  const exceptions = world.state.page.errors.filter((entry) => entry.kind === 'exception');
+  check('页面没有未捕获异常', exceptions.length === 0, JSON.stringify(exceptions).slice(0, 500));
 }
 
-async function waitForHttpOk(url, timeoutMs = 30000) {
-  const result = await waitForValue(
-    async () => {
-      // The printed URL carries a one-time token; a cookie-less redirect would
-      // land on 401. Accept the token entry (200) or its redirect (3xx); the
-      // browser load below proves the authenticated page actually renders.
-      const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(5000) });
-      return response.status;
-    },
-    (status) => status >= 200 && status < 400,
-    { timeoutMs, intervalMs: 200, describe: `HTTP ${url}` },
-  );
-  return result;
-}
-
-async function packPackage(directory, packDir, label) {
-  const result = await runCommand(`npm pack ${label}`, 'npm', [
-    'pack', directory,
-    '--pack-destination', packDir,
-    '--json',
-  ], { cwd: repoRoot, timeoutMs: 120000 });
-  if (result.code !== 0) throw new Error(`npm pack ${label} 失败：${tail(result.stderr, 1200)}`);
-  let entries = null;
-  try {
-    entries = JSON.parse(result.stdout.trim());
-  } catch {
-    entries = null;
+async function assertNoSensitive(world, value, label) {
+  const text = JSON.stringify(value ?? null);
+  const leaks = [];
+  const needles = [
+    ['seed-token', world.seed.memoryToken],
+    ['mebular-home', world.state.mebularHome],
+    ['dsh-home', world.state.dshHome],
+    ['scenario-dir', world.state.scenarioDir],
+    ['repo-root', repoRoot],
+  ];
+  for (const [name, needle] of needles) {
+    if (typeof needle === 'string' && needle.length > 1 && text.includes(needle)) leaks.push(name);
   }
-  const file = Array.isArray(entries) && entries[0]?.filename
-    ? join(packDir, entries[0].filename)
-    : await (async () => {
-      const files = (await readdir(packDir)).filter((name) => name.endsWith('.tgz'));
-      return files.length === 1 ? join(packDir, files[0]) : null;
-    })();
-  if (file === null || !existsSync(file)) throw new Error(`npm pack ${label} 未产出 tarball`);
-  const info = await stat(file);
-  return { path: file, size: info.size, filename: file.split('/').pop() };
+  if (/[?&;]token=/.test(text)) leaks.push('token-query');
+  if (/\bBearer\s+/i.test(text)) leaks.push('bearer');
+  if (/\bAuthorization\b/i.test(text)) leaks.push('authorization');
+  if (/\bcliPath\b/i.test(text)) leaks.push('cliPath');
+  check(label, leaks.length === 0, leaks.length === 0 ? '' : leaks.join(', '));
 }
 
-function countMatches(text, pattern) {
-  return [...String(text ?? '').matchAll(pattern)].length;
+function panelFalsePatch() {
+  return [
+    '# E2E profile patch: keep the MCP bridge, disable only the DSH panel.',
+    '# A profile patch replaces the whole config for the matched row.',
+    '- id: mebular',
+    '  config:',
+    '    lifecycle: attach',
+    '    panel: false',
+    '',
+  ].join('\n');
 }
 
-async function readJsonIfExists(path) {
-  try {
-    return JSON.parse(await readFile(path, 'utf-8'));
-  } catch {
-    return null;
-  }
-}
+const scenarios = [
+  {
+    name: 'happy-path',
+    title: 'Happy path（Phase 1 回归）',
+    run: async (world, context) => {
+      const daemon = await world.startDaemon();
+      check('daemon SERVE_READY', daemon.ready.port === daemon.port, `port=${daemon.port}`);
+      check('GET /healthz 200 + status ok', daemon.health.status === 200 && daemon.health.json?.status === 'ok', `status=${daemon.health.status}`);
+      const runtime = await readJsonIfExists(join(world.state.mebularHome, 'runtime.json'));
+      check('runtime.json 指向同一个 daemon 端口', runtime?.http?.port === daemon.port, JSON.stringify(runtime?.http ?? null));
 
-async function waitForProbe(path, timeoutMs = 150000) {
-  const result = await waitForValue(
-    async () => readJsonIfExists(path),
-    (value) => value !== null && value.done === true,
-    { timeoutMs, intervalMs: 500, describe: 'probe 输出' },
-  );
-  return result.value;
-}
+      const bundles = await world.installProfile();
+      check(
+        'profile bundles 包含插件与 probe',
+        bundles.includes('@mebular/dsh-plugin') && bundles.includes('@mebular/dsh-e2e-probe'),
+        JSON.stringify(bundles),
+      );
 
-async function waitForFrameEval(page, urlPrefix, expression, predicate, timeoutMs = 30000) {
-  const started = Date.now();
-  let lastValue;
-  let lastError = null;
-  while (Date.now() - started < timeoutMs) {
-    try {
-      const frames = await page.frameTree();
-      const frame = frames.find((entry) => typeof entry.url === 'string' && entry.url.startsWith(urlPrefix));
-      if (frame) {
-        lastValue = await page.evalInFrameByUrl(urlPrefix, expression);
-        if (predicate(lastValue)) return { ok: true, value: lastValue };
+      const dump = await world.dumpConfig();
+      check('只有一条 mebular host row', countMatches(dump, /^\s*-\s*id:\s*mebular\s*$/gm) === 1);
+      check('mebular host 只出现一次', countMatches(dump, /^\s*name:\s*'@mebular\/dsh-plugin'\s*$/gm) === 1);
+      check('probe row 只出现一次', countMatches(dump, /^\s*-\s*id:\s*mebular-e2e-probe\s*$/gm) === 1);
+      check('没有静态 MCP client row', countMatches(dump, /@deepseek-ai\/dsh-mcp-client/gm) === 0);
+      check('没有静态 serverName: mebular', countMatches(dump, /serverName:\s*['"]?mebular['"]?/gm) === 0);
+
+      const dshUrl = await world.startDsh({ probeExpect: 'up' });
+      check('DSH Web 打印 loopback URL', /^http:\/\/127\.0\.0\.1:\d+\//.test(dshUrl), world.redact(dshUrl));
+
+      await world.openBrowser({ chromePath: context.chromePath, url: dshUrl });
+      const title = await world.state.page.evalJs('document.title');
+      check('DSH Web 页面已加载', title === 'DeepSeek Harness', title);
+
+      check('侧边栏存在唯一的 Mebular 入口', await world.state.page.waitFor(
+        `document.querySelectorAll(${JSON.stringify(SIDEBAR_SELECTOR)}).length === 1`,
+        { timeout: 45000 },
+      ));
+      check('侧边栏状态为 connected', await world.waitForStatus('connected', 45000), await statusDetail(world));
+
+      check('点击侧边栏打开面板', await world.openPanel());
+      check('Mebular 面板 iframe 已挂载', await world.waitForIframe());
+      const iframeSrc = await world.iframeSrc();
+      const expectedEmbedUrl = `http://127.0.0.1:${daemon.port}/console/?embed=dsh`;
+      check('iframe src 指向 /console/?embed=dsh', iframeSrc === expectedEmbedUrl, iframeSrc);
+
+      const embedFlag = await world.waitForFrameEval(
+        `http://127.0.0.1:${daemon.port}/console/`,
+        'document.documentElement.dataset.embed',
+        (value) => value === 'dsh',
+      );
+      check('iframe 内 documentElement.dataset.embed === "dsh"', embedFlag.ok, String(embedFlag.value ?? embedFlag.error?.message ?? 'missing'));
+
+      const consoleReady = await world.waitForFrameEval(
+        `http://127.0.0.1:${daemon.port}/console/`,
+        'document.readyState === "complete" && Boolean(document.querySelector("#app, main, .console-root, #starfield, canvas"))',
+        (value) => value === true,
+        15000,
+      );
+      check('Console 文档已就绪并渲染主容器', consoleReady.ok);
+
+      const probe = await waitProbeOrFail(world, (value) => value.done === true, 'probe 完成工具读取与调用', 90000);
+      check('probe 通过 ctx.tools.schemas() 看到工具', probe.schemaCount > 0, `count=${probe.schemaCount}`);
+      check(
+        '关键 Mebular 工具已注册',
+        probe.required?.['mcp__mebular__memory_write'] === true
+          && probe.required?.['mcp__mebular__memory_query'] === true,
+        `missing=${JSON.stringify(probe.missingRequired ?? [])}`,
+      );
+      check('不硬编码工具总数（只要求 > 0）', probe.mebularToolCount > 0, `mebular=${probe.mebularToolCount}`);
+      const invocation = probe.invocation;
+      check('probe 通过 ctx.tools.execute() 调用只读工具', invocation?.tool === 'mcp__mebular__memory_query' && invocation?.ok === true, invocation?.tool ?? '(none)');
+      check('工具调用不是错误结果', invocation?.isError === false, String(invocation?.error ?? ''));
+      const invocationText = typeof invocation?.text === 'string' ? invocation.text : '';
+      check('调用返回临时 home 的真实记忆（含本次 token）', invocationText.includes(world.seed.memoryToken));
+      check('调用返回本次 seed 的记忆 id', invocationText.includes(world.seed.memoryId), world.seed.memoryId);
+
+      await assertNoPageExceptions(world);
+
+      console.log('\n  证据');
+      console.log(`    侧边栏：${SIDEBAR_SELECTOR} × 1；状态=connected`);
+      console.log(`    iframe：${iframeSrc}`);
+      console.log(`    Console：dataset.embed=${embedFlag.value}`);
+      console.log(`    工具：schemas=${probe.schemaCount}，mebular=${probe.mebularToolCount}`);
+      console.log(`    真实调用：${invocation.tool} -> ${world.redact(tail(invocationText, 180))}`);
+      console.log(`    seed：memoryId=${world.seed.memoryId} token=<redacted>（已命中）`);
+    },
+  },
+  {
+    name: 'daemon-down-recovery',
+    title: 'Daemon down 启动 → 恢复 → 掉线 → 再恢复',
+    run: async (world, context) => {
+      const port = await freePort();
+      // No daemon yet: the port is reserved but closed. MEBULAR_HTTP_PORT
+      // points the plugin at it, so the fallback 7331 is never involved.
+      await world.installProfile();
+      await world.startDsh({ probeExpect: 'recover', env: { MEBULAR_HTTP_PORT: String(port) } });
+      await world.openBrowser({ chromePath: context.chromePath });
+      check('DSH Web 页面已加载', (await world.state.page.evalJs('document.title')) === 'DeepSeek Harness');
+      check('down 时侧边栏仍存在', await world.state.page.waitFor(
+        `document.querySelectorAll(${JSON.stringify(SIDEBAR_SELECTOR)}).length === 1`,
+        { timeout: 45000 },
+      ));
+      check('down 时状态为 offline', await world.waitForStatus('offline', 45000), await statusDetail(world));
+      check('down 时点击侧边栏打开面板', await world.openPanel());
+      check('down 时没有 iframe', await world.waitForNoIframe(15000));
+      const placeholderVisible = await world.state.page.waitFor(
+        `/Mebular is not running|Mebular 未运行|No Mebular daemon answered|没有 Mebular daemon/.test(document.body?.innerText ?? "")`,
+        { timeout: 30000 },
+      );
+      check('down 时面板显示启动引导占位', placeholderVisible);
+      const placeholderHeading = await world.state.page.evalJs(
+        '[...document.querySelectorAll("h2")].map((node) => node.textContent?.trim() ?? "").find((text) => /Mebular/.test(text)) ?? ""',
+      );
+      check(
+        'down 时占位标题为未运行',
+        /not running|未运行/i.test(placeholderHeading),
+        placeholderHeading || '(no Mebular heading)',
+      );
+      const downAtBoot = await waitProbeOrFail(
+        world,
+        (value) => value.pollCount >= 3 && value.mebularToolCount === 0,
+        'down 时没有 mcp__mebular__* 工具',
+        30000,
+      );
+      check(
+        'down 时关键工具均未注册',
+        downAtBoot.required?.['mcp__mebular__memory_write'] === false
+          && downAtBoot.required?.['mcp__mebular__memory_query'] === false,
+        JSON.stringify(downAtBoot.required ?? {}),
+      );
+
+      const dshPid = world.state.dsh.proc.pid;
+      const firstDaemon = await world.startDaemon({ port });
+      check('运行中启动 daemon 成功', firstDaemon.port === port, `port=${firstDaemon.port}`);
+
+      const firstUp = await waitProbeOrFail(
+        world,
+        (value) => value.firstUpAt !== null,
+        'daemon 启动后工具自动重挂',
+        45000,
+      );
+      check('恢复后状态 connected', await world.waitForStatus('connected', 45000), await statusDetail(world));
+      check('恢复后 iframe 自动出现', await world.waitForIframe(45000));
+      check('恢复后 iframe 指向同一 daemon', (await world.iframeSrc()) === `http://127.0.0.1:${port}/console/?embed=dsh`, await world.iframeSrc());
+
+      const stopped = await world.stopDaemon();
+      check('运行中停止 daemon', stopped !== null, `pid=${stopped?.pid ?? '?'}`);
+      const runtimeDown = await waitProbeOrFail(
+        world,
+        (value) => value.downAt !== null,
+        'daemon 掉线后工具自动注销',
+        45000,
+      );
+      check('掉线后工具数为 0', runtimeDown.mebularToolCount === 0, `mebular=${runtimeDown.mebularToolCount}`);
+      check('掉线后状态 offline', await world.waitForStatus('offline', 45000), await statusDetail(world));
+      check('掉线后 iframe 消失', await world.waitForNoIframe(45000));
+
+      const secondDaemon = await world.startDaemon({ port });
+      check('同一端口重启 daemon', secondDaemon.port === port, `port=${secondDaemon.port}`);
+      const recovered = await waitProbeOrFail(
+        world,
+        (value) => value.recoveredAt !== null && value.done === true,
+        'daemon 重启后工具再次挂载并完成真实调用',
+        60000,
+      );
+      check('再次恢复后状态 connected', await world.waitForStatus('connected', 45000), await statusDetail(world));
+      check('再次恢复后 iframe 重新出现', await world.waitForIframe(45000));
+      const invocation = recovered.invocation;
+      check('恢复后的真实调用成功', invocation?.ok === true, String(invocation?.error ?? ''));
+      check('恢复后的调用仍返回本次 seed token', typeof invocation?.text === 'string' && invocation.text.includes(world.seed.memoryToken));
+      check('恢复后的调用仍返回 memory id', typeof invocation?.text === 'string' && invocation.text.includes(world.seed.memoryId));
+      check('全程未重启 DSH', world.state.dsh.proc.pid === dshPid && world.state.dsh.proc.exitCode === null, `pid=${dshPid}`);
+      await assertNoPageExceptions(world);
+
+      console.log('\n  证据');
+      console.log(`    启动：无 daemon，状态=offline，工具=${downAtBoot.mebularToolCount}`);
+      console.log(`    第一次恢复：状态=connected，工具=${firstUp.mebularToolCount}，iframe 已加载`);
+      console.log(`    掉线：状态=offline，工具=${runtimeDown.mebularToolCount}，iframe 已移除`);
+      console.log(`    第二次恢复：状态=connected，工具=${recovered.mebularToolCount}，真实调用=${invocation.tool} ok`);
+      console.log(`    DSH pid 全程=${dshPid}`);
+    },
+  },
+  {
+    name: 'panel-false',
+    title: 'panel:false（独立 profile，仅关面板）',
+    run: async (world, context) => {
+      const daemon = await world.startDaemon();
+      const bundles = await world.installProfile({ patch: panelFalsePatch() });
+      check('panel:false profile 已安装插件', bundles.includes('@mebular/dsh-plugin'), JSON.stringify(bundles));
+      const dump = await world.dumpConfig();
+      check('dump-config 中只有一条 mebular row', countMatches(dump, /^\s*-\s*id:\s*mebular\s*$/gm) === 1);
+      check('dump-config 中 mebular row 为 panel: false', /id:\s*mebular\b[\s\S]*?panel:\s*false/.test(dump));
+
+      await world.startDsh({ probeExpect: 'up' });
+      await world.openBrowser({ chromePath: context.chromePath });
+      check('DSH Web 页面已加载', (await world.state.page.evalJs('document.title')) === 'DeepSeek Harness');
+      const panelGlobal = await world.state.page.waitFor(
+        'window.__MEBULAR_DSH__?.panel === false',
+        { timeout: 45000 },
+      );
+      check('host 注入 window.__MEBULAR_DSH__ = { panel: false }', panelGlobal, JSON.stringify(await world.state.page.evalJs('window.__MEBULAR_DSH__ ?? null')));
+
+      // Give the client bundle time to apply; absence is only meaningful after
+      // the page and the bootstrap global are both ready.
+      await sleep(3000);
+      check('DSH 侧边栏基础 UI 已渲染', await world.state.page.waitFor(
+        'document.querySelectorAll("button[aria-label]").length > 0',
+        { timeout: 15000 },
+      ));
+      check('没有 Mebular 侧边栏', (await world.state.page.evalJs(`document.querySelectorAll(${JSON.stringify(SIDEBAR_SELECTOR)}).length`)) === 0);
+      check('没有 Mebular iframe', (await world.state.page.evalJs(`document.querySelectorAll(${JSON.stringify(IFRAME_SELECTOR)}).length`)) === 0);
+      check('DSH 页面主体已渲染', (await world.pageText()).trim().length > 0);
+
+      const embedInfo = await world.fetchDshJson('/mebular/embed-info');
+      check('/mebular/embed-info 200', embedInfo.status === 200, `status=${embedInfo.status}`);
+      check('embed-info 报告 panel=false + up', embedInfo.json?.panel === false && embedInfo.json?.status === 'up' && embedInfo.json?.ok === true, JSON.stringify(embedInfo.json));
+      check('embed-info 与 daemon 同源', embedInfo.json?.consoleUrl === `http://127.0.0.1:${daemon.port}/console`, embedInfo.json?.consoleUrl ?? '(missing)');
+
+      const probe = await waitProbeOrFail(world, (value) => value.done === true, 'panel:false 时工具仍注册并可调用', 90000);
+      check('panel:false 时工具数 > 0', probe.mebularToolCount > 0, `mebular=${probe.mebularToolCount}`);
+      check('panel:false 时关键工具存在', probe.required?.['mcp__mebular__memory_write'] === true && probe.required?.['mcp__mebular__memory_query'] === true);
+      check('panel:false 时真实调用成功', probe.invocation?.ok === true, String(probe.invocation?.error ?? ''));
+      check('panel:false 时调用返回 seed token', typeof probe.invocation?.text === 'string' && probe.invocation.text.includes(world.seed.memoryToken));
+      await assertNoPageExceptions(world);
+
+      console.log('\n  证据');
+      console.log(`    panel global：${JSON.stringify(await world.state.page.evalJs('window.__MEBULAR_DSH__ ?? null'))}`);
+      console.log(`    sidebar=${await world.state.page.evalJs(`document.querySelectorAll(${JSON.stringify(SIDEBAR_SELECTOR)}).length`)} iframe=${await world.state.page.evalJs(`document.querySelectorAll(${JSON.stringify(IFRAME_SELECTOR)}).length`)}`);
+      console.log(`    工具：mebular=${probe.mebularToolCount}；真实调用=${probe.invocation?.tool} ok`);
+      console.log(`    embed-info：${JSON.stringify(embedInfo.json)}`);
+    },
+  },
+  {
+    name: 'custom-port',
+    title: '自定义端口/发现（env 覆盖冲突的 runtime.json）',
+    run: async (world, context) => {
+      const daemon = await world.startDaemon();
+      let conflictPort = await freePort();
+      while (conflictPort === daemon.port) conflictPort = await freePort();
+      // Make runtime.json point at a *live pid* but a closed port. The plugin
+      // contract says MEBULAR_HTTP_PORT wins; a green bridge proves it did.
+      await writeFile(
+        join(world.state.mebularHome, 'runtime.json'),
+        JSON.stringify({
+          version: '0.0.0-conflict',
+          pid: process.pid,
+          http: { host: '127.0.0.1', port: conflictPort },
+          consolePath: '/console',
+          mcpPath: '/mcp',
+          embedProtocol: 1,
+        }, null, 2),
+        'utf-8',
+      );
+
+      await world.installProfile();
+      await world.startDsh({ probeExpect: 'up', env: { MEBULAR_HTTP_PORT: String(daemon.port) } });
+      await world.openBrowser({ chromePath: context.chromePath });
+      check('DSH Web 页面已加载', (await world.state.page.evalJs('document.title')) === 'DeepSeek Harness');
+      check('显式端口下状态 connected', await world.waitForStatus('connected', 45000), await statusDetail(world));
+      check('点击侧边栏打开面板', await world.openPanel());
+      check('显式端口下 iframe 已挂载', await world.waitForIframe());
+      const expectedOrigin = `http://127.0.0.1:${daemon.port}`;
+      const iframeSrc = await world.iframeSrc();
+      check('iframe 使用 MEBULAR_HTTP_PORT 的 origin', iframeSrc === `${expectedOrigin}/console/?embed=dsh`, iframeSrc);
+
+      const dshInfo = await world.fetchDshJson('/mebular/embed-info');
+      check('/mebular/embed-info 200', dshInfo.status === 200, `status=${dshInfo.status}`);
+      check('/mebular/embed-info 与 daemon 同源', dshInfo.json?.consoleUrl === `${expectedOrigin}/console`, dshInfo.json?.consoleUrl ?? '(missing)');
+      check('/mebular/embed-info mcpUrl 同源', dshInfo.json?.mcpUrl === `${expectedOrigin}/mcp`, dshInfo.json?.mcpUrl ?? '(missing)');
+      check('/mebular/embed-info embedUrl 同源', dshInfo.json?.embedUrl === `${expectedOrigin}/console/?embed=dsh`, dshInfo.json?.embedUrl ?? '(missing)');
+
+      const daemonInfo = await fetchJson(`${expectedOrigin}/app/embed/info`);
+      check('daemon /app/embed/info 200', daemonInfo.status === 200, `status=${daemonInfo.status}`);
+      check('daemon embed-info 三处同源', daemonInfo.json?.consoleUrl === `${expectedOrigin}/console`
+        && daemonInfo.json?.embedUrl === `${expectedOrigin}/console/?embed=dsh`
+        && daemonInfo.json?.mcpUrl === `${expectedOrigin}/mcp`, JSON.stringify(daemonInfo.json));
+
+      const probe = await waitProbeOrFail(world, (value) => value.done === true, '显式端口下工具可用', 90000);
+      check('MCP 工具来自同一 daemon', probe.invocation?.ok === true && typeof probe.invocation?.text === 'string' && probe.invocation.text.includes(world.seed.memoryToken));
+      check('未误用冲突 runtime.json 的端口', !JSON.stringify({ iframeSrc, dshInfo: dshInfo.json, daemonInfo: daemonInfo.json }).includes(`:${conflictPort}`), `conflictPort=${conflictPort}`);
+      await assertNoPageExceptions(world);
+
+      console.log('\n  证据');
+      console.log(`    daemon 端口=${daemon.port}；runtime.json 冲突端口=${conflictPort}（无监听）`);
+      console.log(`    iframe：${iframeSrc}`);
+      console.log(`    /mebular/embed-info：console=${dshInfo.json?.consoleUrl} embed=${dshInfo.json?.embedUrl} mcp=${dshInfo.json?.mcpUrl}`);
+      console.log(`    daemon /app/embed/info：console=${daemonInfo.json?.consoleUrl} mcp=${daemonInfo.json?.mcpUrl}`);
+      console.log(`    MCP 调用：${probe.invocation?.tool} ok；token 命中=${probe.invocation?.text?.includes(world.seed.memoryToken) === true}`);
+    },
+  },
+  {
+    name: 'uninstall',
+    title: '卸载隔离（plugin remove 不误停外部 daemon）',
+    run: async (world, context) => {
+      const daemon = await world.startDaemon();
+      await world.installProfile({ withProbe: false });
+      await world.startDsh({ probeExpect: null });
+      await world.openBrowser({ chromePath: context.chromePath });
+      check('卸载前状态 connected', await world.waitForStatus('connected', 45000), await statusDetail(world));
+      const daemonPid = daemon.pid;
+      const dshPid = world.state.dsh.proc.pid;
+
+      await world.removePlugin('@mebular/dsh-plugin');
+      const profilePkg = await readJsonIfExists(join(world.state.dshHome, 'profiles', 'web', 'package.json'));
+      const bundles = profilePkg?.dsh?.profile?.bundles ?? [];
+      check('profile bundles 不再包含插件', !bundles.includes('@mebular/dsh-plugin'), JSON.stringify(bundles));
+
+      let removed = false;
+      let lastDump = '';
+      for (let attempt = 0; attempt < 30; attempt += 1) {
+        lastDump = await world.dumpConfig();
+        if (!/\bid:\s*mebular\b/.test(lastDump)) {
+          removed = true;
+          break;
+        }
+        await sleep(1000);
       }
-    } catch (error) {
-      lastError = error;
+      check('dump-config 不再包含 mebular row', removed);
+      check('daemon 进程仍存活', world.isProcessAlive(daemonPid), `pid=${daemonPid}`);
+      const health = await fetchRaw(`http://127.0.0.1:${daemon.port}/healthz`);
+      const consolePage = await fetchRaw(`http://127.0.0.1:${daemon.port}/console/`);
+      check('daemon /healthz 仍 200', health.status === 200, `status=${health.status}`);
+      check('daemon /console/ 仍 200', consolePage.status === 200, `status=${consolePage.status}`);
+      check('DSH 进程未退出', world.state.dsh.proc.pid === dshPid && world.state.dsh.proc.exitCode === null, `pid=${dshPid}`);
+      check('DSH 页面仍可用', (await world.state.page.evalJs('document.title')) === 'DeepSeek Harness');
+      await assertNoPageExceptions(world);
+
+      console.log('\n  证据');
+      console.log(`    plugin remove 后 bundles=${JSON.stringify(bundles)}`);
+      console.log(`    dump-config 无 mebular row=${removed}`);
+      console.log(`    daemon pid=${daemonPid} alive=${world.isProcessAlive(daemonPid)}；/healthz=${health.status}；/console/=${consolePage.status}`);
+      console.log(`    DSH pid=${dshPid} alive=${world.state.dsh.proc.exitCode === null}`);
+    },
+  },
+  {
+    name: 'security-headers',
+    title: '安全头与发现文档脱敏',
+    run: async (world, context) => {
+      const daemon = await world.startDaemon();
+      await world.installProfile({ withProbe: false });
+      await world.startDsh({ probeExpect: null });
+      await world.openBrowser({ chromePath: context.chromePath });
+      check('安全头场景状态 connected', await world.waitForStatus('connected', 45000), await statusDetail(world));
+
+      const origin = `http://127.0.0.1:${daemon.port}`;
+      const plain = await fetchRaw(`${origin}/console/`);
+      const embed = await fetchRaw(`${origin}/console/?embed=dsh`);
+      world.state.headers = {
+        plainConsole: { status: plain.status, headers: plain.headers },
+        embedConsole: { status: embed.status, headers: embed.headers },
+      };
+
+      check('普通 /console/ 200', plain.status === 200, `status=${plain.status}`);
+      check('普通 /console/ X-Frame-Options: DENY', plain.headers['x-frame-options'] === 'DENY', plain.headers['x-frame-options'] ?? '(missing)');
+      check("普通 /console/ frame-ancestors 'none'", (plain.headers['content-security-policy'] ?? '').includes("frame-ancestors 'none'"));
+      check('?embed=dsh /console/ 200', embed.status === 200, `status=${embed.status}`);
+      check('?embed=dsh 不发送 X-Frame-Options', embed.headers['x-frame-options'] === undefined, embed.headers['x-frame-options'] ?? '(absent)');
+      const embedCsp = embed.headers['content-security-policy'] ?? '';
+      check(
+        '?embed=dsh 的 frame-ancestors 只放开 loopback',
+        embedCsp.includes('frame-ancestors http://127.0.0.1:* http://localhost:*'),
+        embedCsp,
+      );
+
+      const daemonInfo = await fetchJson(`${origin}/app/embed/info`);
+      check('daemon /app/embed/info 200', daemonInfo.status === 200, `status=${daemonInfo.status}`);
+      await assertNoSensitive(world, daemonInfo.json, 'daemon /app/embed/info 不含 token/密钥/home/CLI 路径');
+
+      const dshInfo = await world.fetchDshJson('/mebular/embed-info');
+      check('/mebular/embed-info 200', dshInfo.status === 200, `status=${dshInfo.status}`);
+      const allowedKeys = [
+        'ok', 'status', 'mode', 'managed', 'panel', 'version', 'embedProtocol',
+        'consoleUrl', 'embedUrl', 'mcpUrl', 'loopback', 'reason',
+      ];
+      const keys = Object.keys(dshInfo.json ?? {}).sort();
+      check('/mebular/embed-info 字段白名单', keys.every((key) => allowedKeys.includes(key)), JSON.stringify(keys));
+      const requiredKeys = ['ok', 'status', 'panel', 'consoleUrl', 'embedUrl', 'mcpUrl', 'loopback'];
+      check('/mebular/embed-info 包含契约字段', requiredKeys.every((key) => keys.includes(key)), JSON.stringify(requiredKeys));
+      await assertNoSensitive(world, dshInfo.json, '/mebular/embed-info 不含 token/密钥/home/CLI 路径');
+      check('/mebular/embed-info 同源', dshInfo.json?.consoleUrl === `${origin}/console` && dshInfo.json?.embedUrl === `${origin}/console/?embed=dsh`, JSON.stringify(dshInfo.json));
+
+      await assertNoPageExceptions(world);
+
+      console.log('\n  证据');
+      console.log(`    普通 /console/：status=${plain.status} X-Frame-Options=${plain.headers['x-frame-options']}`);
+      console.log(`    普通 CSP：${plain.headers['content-security-policy']}`);
+      console.log(`    ?embed=dsh：status=${embed.status} X-Frame-Options=${embed.headers['x-frame-options'] ?? '(absent)'}`);
+      console.log(`    embed CSP：${embedCsp}`);
+      console.log(`    /mebular/embed-info：${JSON.stringify(dshInfo.json)}`);
+      console.log(`    daemon /app/embed/info keys=${Object.keys(daemonInfo.json ?? {}).join(',')}`);
+    },
+  },
+];
+
+function selectScenarios(requested) {
+  if (requested.length === 0) return scenarios;
+  const selected = [];
+  for (const value of requested) {
+    const matches = scenarios.filter((scenario) => scenario.name === value || scenario.name.startsWith(value));
+    if (matches.length === 0) {
+      throw new Error(`未知场景 ${value}；可选：${scenarios.map((scenario) => scenario.name).join(', ')}`);
     }
-    await sleep(250);
+    for (const match of matches) if (!selected.includes(match)) selected.push(match);
   }
-  return { ok: false, value: lastValue, error: lastError };
+  return selected;
 }
 
-function countLines(text, pattern) {
-  return countMatches(text, pattern);
+async function runScenario(scenario, context) {
+  console.log(`\n────────────────────────────────────────`);
+  console.log(`▶ ${scenario.name}：${scenario.title}`);
+  console.log(`────────────────────────────────────────`);
+  const before = { passed, failed };
+  let world = null;
+  let failure = null;
+  let artifacts = null;
+
+  try {
+    world = await createWorld({
+      name: scenario.name,
+      root: context.root,
+      repoRoot,
+      dshBin: context.dshBin,
+      dshInstall: context.dshInstall,
+      dshVersion: context.dshVersion,
+      pluginTarball: context.pluginTarball,
+      probeTarball: context.probeTarball,
+    });
+    await scenario.run(world, context);
+  } catch (error) {
+    failure = error;
+    const message = world === null ? String(error?.message ?? error) : world.redact(error?.message ?? error);
+    console.log(`\n✗ 场景失败：${message}`);
+  } finally {
+    if (world !== null) {
+      const failedChecks = failed - before.failed;
+      const needsArtifacts = failure !== null || failedChecks > 0 || context.keep;
+      if (needsArtifacts) {
+        artifacts = await world.collectArtifacts(failure?.message ?? (failedChecks > 0 ? `${failedChecks} check(s) failed` : 'keep'));
+        if (artifacts.leaks.length > 0) {
+          check('artifacts 已脱敏（无敏感片段）', false, JSON.stringify(artifacts.leaks));
+          failure ??= new Error('artifact redaction leak');
+        } else {
+          check('artifacts 已脱敏（无敏感片段）', true, `files=${artifacts.files.length}`);
+        }
+        console.log(`  artifacts: ${artifacts.dir}`);
+        if (failure !== null) {
+          console.log(`  daemon log（tail）: ${world.redact(tail(`${world.state.daemon?.stdout ?? ''}\n${world.state.daemon?.stderr ?? ''}`, 1200))}`);
+          console.log(`  DSH log（tail）: ${world.redact(tail(`${world.state.dsh?.stdout ?? ''}\n${world.state.dsh?.stderr ?? ''}`, 1200))}`);
+        }
+      }
+      const cleanup = await world.cleanup({ keep: needsArtifacts });
+      if (cleanup.retained) console.log(`  临时目录保留：${cleanup.dir}`);
+    }
+  }
+
+  const passedDelta = passed - before.passed;
+  const failedDelta = failed - before.failed;
+  const ok = failure === null && failedDelta === 0;
+  return {
+    name: scenario.name,
+    ok,
+    passed: passedDelta,
+    failed: failedDelta,
+    artifacts: artifacts?.dir ?? null,
+    failure: failure === null ? null : (world?.redact(failure.message) ?? failure.message),
+  };
 }
 
 async function main() {
   const options = parseArgs(process.argv.slice(2));
+  if (options.list) {
+    for (const scenario of scenarios) console.log(`${scenario.name}\t${scenario.title}`);
+    return 0;
+  }
+  const selected = selectScenarios(options.scenarios);
   const versions = JSON.parse(await readFile(versionsPath, 'utf-8'));
   const dshVersion = options.dshVersion ?? versions.minimum ?? versions.current;
   if (typeof dshVersion !== 'string' || dshVersion.length === 0) {
     throw new Error('versions.json 缺少 minimum/current；请用 --dsh-version 指定');
   }
 
-  console.log('DSH 真实 E2E（Phase 1 happy path）');
-  console.log('==================================');
+  console.log('DSH 真实 E2E（Phase 2 P0 失败/恢复矩阵）');
+  console.log('========================================');
+  console.log(`场景：${selected.map((scenario) => scenario.name).join(', ')}`);
 
   // Static prerequisites. E2E is allowed to fail; it is never allowed to skip.
+  const preflight = [];
   const distEntry = join(repoRoot, 'dist', 'index.js');
-  requireCheck(
-    'repo build present（dist/index.js）',
-    existsSync(distEntry),
-    existsSync(distEntry) ? 'dist/index.js' : '先运行 npm ci / npm run build',
-  );
-  requireCheck('Mebular CLI present', existsSync(mebularBin));
-  requireCheck('Console assets present', existsSync(join(repoRoot, 'packages', 'console', 'index.html')));
+  preflight.push(check('repo build present（dist/index.js）', existsSync(distEntry), existsSync(distEntry) ? 'dist/index.js' : '先运行 npm ci / npm run build'));
+  preflight.push(check('Mebular CLI present', existsSync(mebularBin)));
+  preflight.push(check('Console assets present', existsSync(join(repoRoot, 'packages', 'console', 'index.html'))));
   let pnpmVersion = null;
   try {
     pnpmVersion = execFileSync('pnpm', ['--version'], { encoding: 'utf-8' }).trim();
   } catch {
     pnpmVersion = null;
   }
-  requireCheck('pnpm available（dsh plugin add 需要）', Boolean(pnpmVersion), pnpmVersion ?? '未找到 pnpm');
+  preflight.push(check('pnpm available（dsh plugin add 需要）', Boolean(pnpmVersion), pnpmVersion ?? '未找到 pnpm'));
   const chromePath = findChrome();
-  requireCheck('Chrome/Chromium available', Boolean(chromePath), chromePath ?? '设置 CHROME_PATH');
-
-  const tempRoot = await mkdtemp(join(tmpdir(), 'mebular-dsh-e2e-'));
-  const mebularHome = join(tempRoot, 'mebular-home');
-  const dshHome = join(tempRoot, 'dsh-home');
-  const dshInstall = join(tempRoot, 'dsh-install');
-  const packDir = join(tempRoot, 'pack');
-  const artifactsDir = join(tempRoot, 'artifacts');
-  const probeOut = join(artifactsDir, 'probe.json');
-  await mkdir(packDir, { recursive: true });
-  await mkdir(artifactsDir, { recursive: true });
-
-  let daemon = null;
-  let dsh = null;
-  let chrome = null;
-  let cdp = null;
-  let page = null;
-  let dumpConfigText = '';
-  let seed = null;
-  let dshUrl = null;
-  let daemonPort = null;
-  let probeResult = null;
-  let failure = null;
-
-  const mebularEnv = {
-    ...process.env,
-    MEBULAR_HOME: mebularHome,
-    MEBULAR_USER_HOME: mebularHome,
-    MEBULAR_CLOUD_ROOT: mebularHome,
-  };
-
-  async function collectArtifacts(reason) {
-    const result = { reason, at: new Date().toISOString(), files: [] };
-    const record = async (name, content) => {
-      try {
-        const path = join(artifactsDir, name);
-        await writeFile(path, content, 'utf-8');
-        result.files.push(name);
-      } catch {
-        // Best effort.
-      }
-    };
-    try {
-      await record('seed.json', JSON.stringify(seed, null, 2));
-      await record('dsh-log.txt', `${dsh?.stdout ?? ''}\n${dsh?.stderr ?? ''}`);
-      await record('daemon-log.txt', `${daemon?.stdout ?? ''}\n${daemon?.stderr ?? ''}`);
-      await record('dsh-dump-config.yml', dumpConfigText);
-      const runtime = await readJsonIfExists(join(mebularHome, 'runtime.json'));
-      await record('runtime.json', JSON.stringify(runtime, null, 2));
-      const profiles = await readJsonIfExists(join(mebularHome, 'profiles.json'));
-      await record('profiles.json', JSON.stringify(profiles, null, 2));
-      if (daemonPort !== null) {
-        const origin = `http://127.0.0.1:${daemonPort}`;
-        const health = await fetchJson(`${origin}/healthz`).catch(() => null);
-        const embed = await fetchJson(`${origin}/app/embed/info`).catch(() => null);
-        await record('healthz.json', JSON.stringify(health, null, 2));
-        await record('embed-info.json', JSON.stringify(embed, null, 2));
-      }
-      const probe = await readJsonIfExists(probeOut);
-      await record('probe.json', JSON.stringify(probe, null, 2));
-      if (page !== null) {
-        const errors = page.errors;
-        await record('browser-errors.json', JSON.stringify(errors, null, 2));
-        const dom = await page.dom().catch(() => '');
-        await record('browser-dom.html', dom);
-        const shot = await page.screenshot().catch(() => null);
-        if (shot !== null) {
-          const path = join(artifactsDir, 'screenshot.png');
-          await writeFile(path, shot);
-          result.files.push('screenshot.png');
-        }
-      }
-    } catch (error) {
-      result.error = String(error?.message ?? error);
-    }
-    return result;
+  preflight.push(check('Chrome/Chromium available', Boolean(chromePath), chromePath ?? '设置 CHROME_PATH'));
+  if (preflight.some((value) => value !== true)) {
+    console.log('\n前置条件不满足，未启动任何场景。');
+    return 1;
   }
 
+  const root = await mkdtemp(join(tmpdir(), 'mebular-dsh-e2e-'));
+  const packDir = join(root, 'pack');
+  const dshInstall = join(root, 'dsh-install');
+  await mkdir(packDir, { recursive: true });
+
+  let exitCode = 0;
   try {
-    console.log('\n→ 准备临时 Mebular home');
-    seed = await seedHome(mebularHome, { memoryToken: `dsh-e2e-${randomUUID()}` });
-    requireCheck('seed-home：身份 + 一个忆云 + 一条测试记忆', Boolean(seed.memoryId), `${seed.memoryId} / ${seed.memoryToken}`);
-    requireCheck('seed-home：未使用默认 ~/.mebular', seed.home === mebularHome, seed.home);
-
-    console.log('\n→ 启动真实 mebular serve');
-    daemonPort = await freePort();
-    daemon = spawnLogged('daemon', process.execPath, [
-      mebularBin, 'serve', '--host', '127.0.0.1', '--port', String(daemonPort),
-    ], { env: mebularEnv });
-    const ready = await waitForServeReady(daemon);
-    requireCheck('daemon SERVE_READY', ready.port === daemonPort, `port=${ready.port}`);
-    const health = await fetchJson(`http://127.0.0.1:${daemonPort}/healthz`);
-    requireCheck('GET /healthz 200 + status ok', health.status === 200 && health.json?.status === 'ok', `status=${health.status}`);
-    const runtime = await readJsonIfExists(join(mebularHome, 'runtime.json'));
-    requireCheck('runtime.json 指向同一个 daemon 端口', runtime?.http?.port === daemonPort, JSON.stringify(runtime?.http ?? null));
-
-    console.log('\n→ 打包 @mebular/dsh-plugin 与 probe');
+    console.log('\n→ 打包 @mebular/dsh-plugin 与 probe（一次，供所有场景使用）');
     const pluginTarball = await packPackage(pluginDir, packDir, '@mebular/dsh-plugin');
     requireCheck('npm pack @mebular/dsh-plugin', pluginTarball.size > 0, `${pluginTarball.filename} (${pluginTarball.size}B)`);
     const probeTarball = await packPackage(probeDir, packDir, '@mebular/dsh-e2e-probe');
     requireCheck('npm pack probe（测试专用）', probeTarball.size > 0, `${probeTarball.filename} (${probeTarball.size}B)`);
 
-    console.log(`\n→ 安装真实 @deepseek-ai/dsh@${dshVersion} 到临时 prefix`);
+    console.log(`\n→ 安装真实 @deepseek-ai/dsh@${dshVersion} 到临时 prefix（一次）`);
     const install = await runCommand('npm install dsh', 'npm', [
       'install', '--prefix', dshInstall,
       '--no-audit', '--no-fund', '--prefer-offline',
       `@deepseek-ai/dsh@${dshVersion}`,
     ], { timeoutMs: 900000 });
-    requireCheck(
+    const installOk = check(
       `npm install @deepseek-ai/dsh@${dshVersion}`,
       install.code === 0,
-      install.code === 0 ? `${Math.round(install.elapsedMs / 1000)}s` : tail(install.stderr, 600),
+      install.code === 0 ? `${Math.round(install.elapsedMs / 1000)}s` : tail(install.stderr, 900),
     );
+    if (!installOk) {
+      console.log(`\nDSH 安装失败，临时根目录保留：${root}`);
+      return 1;
+    }
     const dshBin = join(dshInstall, 'node_modules', '.bin', 'dsh');
-    requireCheck('dsh binary present', existsSync(dshBin), dshBin);
-
-    console.log('\n→ 用 dsh 自身的 plugin 命令安装插件');
-    const dshEnv = { ...process.env, DSH_HOME: dshHome, MEBULAR_HOME: mebularHome };
-    const addPlugin = await runCommand('dsh plugin add mebular', dshBin, [
-      'plugin', '--profile', 'web', 'add', pluginTarball.path,
-    ], { env: dshEnv, timeoutMs: 300000 });
-    requireCheck('dsh plugin add @mebular/dsh-plugin', addPlugin.code === 0, addPlugin.code === 0 ? '' : tail(addPlugin.stderr, 500));
-    const addProbe = await runCommand('dsh plugin add probe', dshBin, [
-      'plugin', '--profile', 'web', 'add', probeTarball.path,
-    ], { env: dshEnv, timeoutMs: 300000 });
-    requireCheck('dsh plugin add probe', addProbe.code === 0, addProbe.code === 0 ? '' : tail(addProbe.stderr, 500));
-
-    const profilePkg = await readJsonIfExists(join(dshHome, 'profiles', 'web', 'package.json'));
-    const bundles = profilePkg?.dsh?.profile?.bundles ?? [];
-    requireCheck('profile bundles 包含两个插件', bundles.includes('@mebular/dsh-plugin') && bundles.includes('@mebular/dsh-e2e-probe'), JSON.stringify(bundles));
-
-    console.log('\n→ 断言 dsh --dump-config');
-    const dump = await runCommand('dsh --dump-config', dshBin, ['--profile', 'web', '--dump-config'], { env: dshEnv, timeoutMs: 120000 });
-    dumpConfigText = `${dump.stdout}\n${dump.stderr}`;
-    requireCheck('dsh --dump-config exits 0', dump.code === 0, tail(dump.stderr, 500));
-    const mebularRows = countLines(dumpConfigText, /^\s*-\s*id:\s*mebular\s*$/gm);
-    requireCheck('只有一条 mebular host row', mebularRows === 1, `rows=${mebularRows}`);
-    const mebularNames = countLines(dumpConfigText, /^\s*name:\s*'@mebular\/dsh-plugin'\s*$/gm);
-    requireCheck('mebular host 只出现一次', mebularNames === 1, `names=${mebularNames}`);
-    const probeRows = countLines(dumpConfigText, /^\s*-\s*id:\s*mebular-e2e-probe\s*$/gm);
-    requireCheck('probe row 只出现一次', probeRows === 1, `rows=${probeRows}`);
-    const staticMcp = countLines(dumpConfigText, /@deepseek-ai\/dsh-mcp-client/gm);
-    requireCheck('没有静态 MCP client row', staticMcp === 0, `mentions=${staticMcp}`);
-    const staticServer = countLines(dumpConfigText, /serverName:\s*['"]?mebular['"]?/gm);
-    requireCheck('没有静态 serverName: mebular', staticServer === 0, `mentions=${staticServer}`);
-
-    console.log('\n→ 启动真实 DSH Web');
-    dsh = spawnLogged('dsh-web', dshBin, [
-      '--profile', 'web', '--no-open', '--host', '127.0.0.1', '--port', '0',
-    ], {
-      env: {
-        ...dshEnv,
-        PROBE_OUT: probeOut,
-        PROBE_QUERY: seed.memoryToken,
-      },
-    });
-    dshUrl = await waitForDshUrl(dsh);
-    requireCheck('DSH Web 打印 URL', /^http:\/\/127\.0\.0\.1:\d+\//.test(dshUrl), dshUrl.replace(/token=[^&]+/, 'token=<redacted>'));
-    const dshHttp = await waitForHttpOk(dshUrl, 30000);
-    requireCheck('DSH Web 响应 token 入口', dshHttp.ok, `status=${dshHttp.value}`);
-
-    console.log('\n→ headless Chrome / CDP 断言');
-    chrome = await launchChrome(chromePath);
-    cdp = connectCdp(chrome.wsUrl);
-    await cdp.ready;
-    page = await openPage(cdp, { url: dshUrl, timeoutMs: 60000 });
-    const title = await page.evalJs('document.title');
-    requireCheck('DSH Web 页面已加载', title === 'DeepSeek Harness', title);
-
-    const sidebarPresent = await page.waitFor(
-      'document.querySelectorAll(\'button[aria-label="Mebular"]\').length === 1',
-      { timeout: 45000 },
-    );
-    requireCheck('侧边栏存在唯一的 Mebular 入口', sidebarPresent);
-
-    const connected = await page.waitFor(
-      'document.querySelector("[data-mebular-status]")?.getAttribute("data-mebular-status") === "connected"',
-      { timeout: 30000 },
-    );
-    const statusDetail = await page.evalJs('document.querySelector("[data-mebular-status]")?.getAttribute("data-mebular-status") ?? "(missing)"');
-    requireCheck('侧边栏状态为 connected', connected, statusDetail);
-
-    await page.evalJs(`(() => {
-      const button = document.querySelector('button[aria-label="Mebular"]');
-      if (button && button.getAttribute('aria-current') !== 'page') button.click();
-      return true;
-    })()`);
-    const iframePresent = await page.waitFor(
-      '!!document.querySelector(\'iframe[title="Mebular Console"]\')',
-      { timeout: 30000 },
-    );
-    requireCheck('Mebular 面板 iframe 已挂载', iframePresent);
-
-    const iframeSrc = await page.evalJs('document.querySelector(\'iframe[title="Mebular Console"]\')?.src ?? ""');
-    const expectedEmbedUrl = `http://127.0.0.1:${daemonPort}/console/?embed=dsh`;
-    requireCheck('iframe src 指向 /console/?embed=dsh', iframeSrc === expectedEmbedUrl, iframeSrc);
-
-    const embedFlag = await waitForFrameEval(
-      page,
-      `http://127.0.0.1:${daemonPort}/console/`,
-      'document.documentElement.dataset.embed',
-      (value) => value === 'dsh',
-    );
-    requireCheck('iframe 内 documentElement.dataset.embed === "dsh"', embedFlag.ok, String(embedFlag.value ?? embedFlag.error?.message ?? 'missing'));
-
-    const consoleReady = await waitForFrameEval(
-      page,
-      `http://127.0.0.1:${daemonPort}/console/`,
-      'document.readyState === "complete" && Boolean(document.querySelector("#app, main, .console-root, #starfield, canvas"))',
-      (value) => value === true,
-      15000,
-    );
-    requireCheck('Console 文档已就绪并渲染主容器', consoleReady.ok, String(consoleReady.value ?? ''));
-
-    console.log('\n→ 等待 probe 通过真实 DSH registry 读工具');
-    probeResult = await waitForProbe(probeOut);
-    requireCheck('probe 写出结果', probeResult !== null);
-    requireCheck('probe 通过 ctx.tools.schemas() 看到工具', probeResult.schemaCount > 0, `count=${probeResult.schemaCount}`);
-    requireCheck(
-      '关键 Mebular 工具已注册',
-      probeResult.required?.['mcp__mebular__memory_write'] === true
-        && probeResult.required?.['mcp__mebular__memory_query'] === true,
-      `missing=${JSON.stringify(probeResult.missingRequired ?? [])}`,
-    );
-    requireCheck('不硬编码工具总数（只要求 > 0）', probeResult.schemaCount > 0, `count=${probeResult.schemaCount}`);
-    const invocation = probeResult.invocation;
-    requireCheck('probe 通过 ctx.tools.execute() 调用只读工具', invocation?.tool === 'mcp__mebular__memory_query' && invocation?.ok === true, invocation?.tool ?? '(none)');
-    requireCheck('工具调用不是错误结果', invocation?.isError === false, String(invocation?.error ?? ''));
-    const invocationText = typeof invocation?.text === 'string' ? invocation.text : '';
-    requireCheck(
-      '调用返回临时 home 的真实记忆（含本次 token）',
-      invocationText.includes(seed.memoryToken),
-      tail(invocationText, 300),
-    );
-    requireCheck(
-      '调用返回本次 seed 的记忆 id',
-      invocationText.includes(seed.memoryId),
-      seed.memoryId,
-    );
-
-    const exceptions = page.errors.filter((entry) => entry.kind === 'exception');
-    requireCheck('页面没有未捕获异常', exceptions.length === 0, JSON.stringify(exceptions).slice(0, 500));
-
-    console.log('\n证据');
-    console.log(`  侧边栏：button[aria-label="Mebular"] × 1；状态=${statusDetail}`);
-    console.log(`  iframe：${iframeSrc}`);
-    console.log(`  Console：dataset.embed=${embedFlag.value}`);
-    console.log(`  工具：schemas=${probeResult.schemaCount}，必需工具=${Object.values(probeResult.required ?? {}).every(Boolean) ? 'present' : 'missing'}`);
-    console.log(`  真实调用：${invocation.tool} -> ${tail(invocationText, 220)}`);
-    console.log(`  seed：memoryId=${seed.memoryId} token=${seed.memoryToken}`);
-  } catch (error) {
-    failure = error;
-    console.log(`\n✗ E2E 失败：${error?.message ?? error}`);
-  } finally {
-    if (failure !== null || options.keep) {
-      const artifacts = await collectArtifacts(failure?.message ?? 'keep');
-      console.log(`\nartifacts: ${artifactsDir}`);
-      if (artifacts.error) console.log(`  artifact 收集告警：${artifacts.error}`);
-      if (failure !== null) {
-        console.log(`\ndaemon log（tail）:\n${tail(`${daemon?.stdout ?? ''}\n${daemon?.stderr ?? ''}`, 2500)}`);
-        console.log(`\nDSH log（tail）:\n${tail(`${dsh?.stdout ?? ''}\n${dsh?.stderr ?? ''}`, 2500)}`);
-        const probe = await readJsonIfExists(probeOut);
-        if (probe !== null) console.log(`\nprobe（tail）:\n${tail(JSON.stringify(probe, null, 2), 2500)}`);
-      }
+    const binOk = check('dsh binary present', existsSync(dshBin), dshBin);
+    if (!binOk) {
+      console.log(`\ndsh binary 缺失，临时根目录保留：${root}`);
+      return 1;
     }
 
-    await page?.close().catch(() => undefined);
-    await cdp?.close().catch(() => undefined);
-    await chrome?.close().catch(() => undefined);
-    await stopProcess(dsh);
-    await stopProcess(daemon);
+    const context = {
+      root,
+      repoRoot,
+      dshBin,
+      dshInstall,
+      dshVersion,
+      chromePath,
+      keep: options.keep,
+      pluginTarball,
+      probeTarball,
+    };
 
-    if (failure === null && !options.keep) {
-      await rm(tempRoot, { recursive: true, force: true }).catch(() => undefined);
+    const results = [];
+    for (const scenario of selected) {
+      results.push(await runScenario(scenario, context));
+    }
+
+    console.log('\n========================================');
+    console.log('场景汇总：');
+    for (const result of results) {
+      console.log(`  ${result.ok ? '✓' : '✗'} ${result.name}: ${result.passed} passed, ${result.failed} failed${result.failure ? `（${result.failure}）` : ''}`);
+    }
+    const scenarioFailures = results.filter((result) => !result.ok).length;
+    console.log(`${scenarioFailures === 0 ? '✓' : '✗'} DSH E2E：${passed} passed, ${failed} failed；场景 ${results.length - scenarioFailures}/${results.length} 通过`);
+
+    const keepRoot = options.keep || scenarioFailures > 0;
+    if (!keepRoot) {
+      await rm(root, { recursive: true, force: true }).catch(() => undefined);
     } else {
-      console.log(`\n临时目录保留：${tempRoot}`);
+      console.log(`临时根目录保留：${root}`);
+    }
+    exitCode = scenarioFailures === 0 ? 0 : 1;
+  } finally {
+    if (exitCode !== 0 && !options.keep) {
+      // Keep a failed root for debugging; success removed above.
+      console.log(`若需清理失败现场：rm -rf ${root}`);
     }
   }
-
-  console.log('\n==================================');
-  console.log(`${failure === null ? '✓' : '✗'} DSH E2E：${passed} passed, ${failed} failed`);
-  if (failure !== null) {
-    console.log(`失败原因：${failure.message}`);
-    return 1;
-  }
-  return 0;
+  return exitCode;
 }
 
 main()

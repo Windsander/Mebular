@@ -59,7 +59,7 @@ async function makeRoot() {
 }
 
 function envFor(root) {
-  return { PATH: process.env.PATH ?? '', MEBULAR_CLOUD_ROOT: root };
+  return { PATH: '', MEBULAR_CLOUD_ROOT: root };
 }
 
 function fakeNpm(writeVersion) {

@@ -78,6 +78,7 @@ async function makeRoot({ current = 'default' } = {}) {
 function envFor(root, serviceHome, { includeHome = true, extra = {} } = {}) {
   const env = {
     ...process.env,
+    PATH: '',
     MEBULAR_CLOUD_ROOT: root,
     MEBULAR_SERVICE_UNIT_HOME: serviceHome,
     ...extra,

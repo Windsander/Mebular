@@ -81,7 +81,7 @@ async function makeRoot({ current = 'default', port = 17331 } = {}) {
 }
 
 function envFor(root, extra = {}) {
-  return { PATH: process.env.PATH ?? '', MEBULAR_CLOUD_ROOT: root, ...extra };
+  return { PATH: '', MEBULAR_CLOUD_ROOT: root, ...extra };
 }
 
 const down = async () => ({ ok: false, reason: 'unreachable' });
@@ -249,7 +249,7 @@ describe('resolveRuntimeContext：root / profile / home', () => {
     const root = join(userHome, 'custom-cloud');
     await mkdir(root, { recursive: true });
     const context = await resolveRuntimeContext({
-      env: { PATH: process.env.PATH ?? '', MEBULAR_CLOUD_ROOT: root },
+      env: { PATH: '', MEBULAR_CLOUD_ROOT: root },
       userHome,
     });
     expect(context.ok).toBe(true);
@@ -261,7 +261,7 @@ describe('resolveRuntimeContext：root / profile / home', () => {
   it('自定义 home / 受限 env → 不可用（不误闯新档案）', async () => {
     const userHome = await tempDir('runtime-user-');
     const context = await resolveRuntimeContext({
-      env: { PATH: process.env.PATH ?? '', MEBULAR_HOME: join(userHome, 'custom-home') },
+      env: { PATH: '', MEBULAR_HOME: join(userHome, 'custom-home') },
       userHome,
     });
     expect(context.ok).toBe(false);

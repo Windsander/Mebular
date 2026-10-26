@@ -25,6 +25,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 ## Operations
 
+- [Shared runtime operations](operations/SHARED_RUNTIME.md) — status, install/upgrade, service, rollout and rollback
 - [Release SOP](operations/RELEASE.md) — npm packages, desktop matrix, release assets
 - [DSH real E2E](operations/DSH_E2E.md) — nightly matrix, CI artifacts, release gate
 - [Desktop release](operations/DESKTOP_RELEASE.md) — runtime packaging, asset names, unsigned installs

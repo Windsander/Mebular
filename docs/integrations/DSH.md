@@ -59,9 +59,12 @@ For plugin development, install from the repository checkout instead:
 dsh plugin --profile web add ./packages/dsh-plugin
 ```
 
-Installing the plugin does not start the daemon: the default `attach` only probes. If the
-Mebular app is already running, skip this; otherwise start the app or `mebular serve`, or set
-`lifecycle: managed` to let the plugin start it.
+The plugin does not install the daemon or Console, and installing it does not start the
+daemon: the default `attach` only probes. If the Mebular app is already running, skip this;
+otherwise install and open the app, or install the CLI and run `mebular serve`; alternatively
+set `lifecycle: managed` to let the plugin start it (the CLI is required). When the daemon is
+running but not initialized, the Console in the panel shows the same create/join Cloud
+onboarding as the app.
 
 `@mebular/dsh-plugin` is an independent adapter: its code stays isolated in
 `packages/dsh-plugin`, and it is published by its own npm job. Its version follows the

@@ -24,7 +24,7 @@ Shared Console, official MCP tools, status and lifecycle — all in one.
 
 ![Three steps: start the daemon, install the plugin, restart DSH.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en.svg)
 
-**Prerequisites**: Node `>=22.19` · DSH `>=0.2.1-rc.2 <0.3.0` · the Mebular app is running (or run `mebular serve`)
+**Prerequisites**: Node `>=22.19` · DSH `>=0.2.1-rc.2 <0.3.0` · the Mebular app or Mebular CLI (`@mebular/core`) is available on this machine
 
 ```bash
 mebular serve                                            # 1. start the daemon if the app is not running; default :7331
@@ -32,7 +32,7 @@ dsh plugin --profile web add @mebular/dsh-plugin@0.1.2   # 2. install
 # 3. restart DSH Web, open the Mebular panel; call any mcp__mebular__* tool to verify
 ```
 
-The plugin's default `attach` only probes; installing it does not start the daemon, and `managed` is the opt-in that starts it. The Mebular app keeps running independently; development install: `dsh plugin --profile web add ./packages/dsh-plugin`.
+The plugin does not install the daemon or Console: the default `attach` only probes; installing it does not start the daemon, and `managed` is the opt-in that starts it. When the daemon is running but not initialized, the panel shows the same create/join Cloud onboarding as the app. The Mebular app keeps running independently; development install: `dsh plugin --profile web add ./packages/dsh-plugin`.
 
 ## How it connects
 

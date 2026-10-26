@@ -56,8 +56,10 @@ dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
 dsh plugin --profile web add ./packages/dsh-plugin
 ```
 
-安装插件不会启动 daemon：默认 `attach` 只探测。Mebular App 已在运行则直接跳过；否则启动
-App 或 `mebular serve`，或显式设置 `lifecycle: managed` 让插件代启动。
+插件不安装 daemon/Console，也不会启动 daemon：默认 `attach` 只探测。Mebular App 已在运行则
+直接跳过；否则先安装并打开 App，或安装 CLI 后运行 `mebular serve`；也可以显式设置
+`lifecycle: managed` 让插件代启动（需要 CLI）。daemon 已运行但尚未初始化时，面板里的
+Console 会显示与 App 相同的创建/加入忆云引导。
 
 `@mebular/dsh-plugin` 是独立适配器：代码隔离在 `packages/dsh-plugin`，由独立 npm job
 发布；版本随统一 Mebular release train，六个 npm 包同版本。插件已收录于

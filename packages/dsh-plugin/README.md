@@ -24,7 +24,7 @@ Mebular 是 Agent 与设备之间的记忆与任务互通层；`@mebular/dsh-plu
 
 ![三步接入：启动 daemon、安装插件、重启 DSH。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn.svg)
 
-**前提**：Node `>=22.19` · DSH `>=0.2.1-rc.2 <0.3.0` · Mebular App 已运行（或可运行 `mebular serve`）
+**前提**：Node `>=22.19` · DSH `>=0.2.1-rc.2 <0.3.0` · 本机已有 Mebular App 或 Mebular CLI（`@mebular/core`）
 
 ```bash
 mebular serve                                            # 1. 没有 App 时启动 daemon；默认 :7331
@@ -32,7 +32,7 @@ dsh plugin --profile web add @mebular/dsh-plugin@0.1.2   # 2. 安装
 # 3. 重启 DSH Web，打开 Mebular 面板；调用任意 mcp__mebular__* 工具验证
 ```
 
-插件默认 `attach` 只探测，安装不会自动启动 daemon；`managed` 模式下才会代启动。Mebular App 继续独立运行；开发安装：`dsh plugin --profile web add ./packages/dsh-plugin`。
+插件不安装 daemon/Console，默认 `attach` 只探测，安装不会自动启动 daemon；`managed` 模式下才会代启动。daemon 已运行但未初始化时，面板会显示与 App 相同的创建/加入忆云引导。Mebular App 继续独立运行；开发安装：`dsh plugin --profile web add ./packages/dsh-plugin`。
 
 ## 它如何连接
 

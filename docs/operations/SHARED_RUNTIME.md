@@ -53,12 +53,16 @@ Plugin 的可选配置（`cordis.patch.yml`）：
 只有确认没有 App/CLI provider、且用户同意时才安装：
 
 ```bash
-# 固定版本（与插件版本一致）
+# 固定版本（CLI/App 默认取 core APP_VERSION；Plugin 面板取插件 package version）
 mebular runtime install --version 0.1.2 --json
 
 # 同版本损坏/需要覆盖时
 mebular runtime reinstall --version 0.1.2 --json
 ```
+
+Plugin 面板触发的安装使用**插件自身 `package.json` 的 `version`**（运行时读取，发布 bump 无需改
+插件源码）；同一 release train 中它与 `@mebular/core` 版本一致。CLI/App 安装器默认版本仍是 core 的
+`APP_VERSION`。
 
 成功后：
 

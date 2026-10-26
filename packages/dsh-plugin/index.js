@@ -46,12 +46,34 @@ export const RUNTIME_UPGRADE_PATH = '/mebular/runtime/upgrade';
 
 export const RUNTIME_UPGRADE_ACTIONS = Object.freeze(['update', 'later', 'skip', 'prompted']);
 
+const SEMVER_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
 /**
- * Pinned `@mebular/core` version for the plugin-only bootstrap. It must track
- * this package's version (enforced by scripts/verify-dsh-plugin.mjs); clients
- * can never supply a version, tag, URL or registry.
+ * Pinned `@mebular/core` version for the plugin-only bootstrap.
+ *
+ * It is read from this package's own `package.json` at module load, so a
+ * release bump does not require editing source (the tarball always contains
+ * `package.json`). Clients can never supply a version, tag, URL or registry.
+ * `scripts/verify-dsh-plugin.mjs` still checks the derived value.
  */
-export const RUNTIME_INSTALL_VERSION = '0.1.2';
+function readPluginPackageVersion() {
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf-8'));
+  } catch (error) {
+    throw new Error(`@mebular/dsh-plugin: cannot read package.json (${error?.code ?? 'error'})`);
+  }
+  if (manifest?.name !== name) {
+    throw new Error(`@mebular/dsh-plugin: unexpected package.json name ${String(manifest?.name)}`);
+  }
+  const version = typeof manifest.version === 'string' ? manifest.version.trim() : '';
+  if (version.length === 0 || version.length > 128 || !SEMVER_RE.test(version)) {
+    throw new Error(`@mebular/dsh-plugin: invalid package.json version ${String(manifest?.version)}`);
+  }
+  return version;
+}
+
+export const RUNTIME_INSTALL_VERSION = readPluginPackageVersion();
 
 export const RUNTIME_INSTALL_ACTIONS = Object.freeze(['install', 'retry', 'reinstall', 'redetect']);
 
@@ -109,7 +131,6 @@ const DEFAULT_UPGRADE_RECONNECT_TIMEOUT_MS = 30_000;
 const DEFAULT_INSTALL_KILL_GRACE_MS = 500;
 const MAX_INSTALL_LOG_BYTES = 64 * 1024;
 const MAX_INSTALL_BODY_BYTES = 8 * 1024;
-const SEMVER_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 
 /** Stable install failure reasons surfaced by the panel and Agent logs. */
 export const RUNTIME_INSTALL_REASONS = Object.freeze([

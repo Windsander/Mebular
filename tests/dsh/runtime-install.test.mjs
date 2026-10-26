@@ -9,6 +9,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   RUNTIME_INSTALL_VERSION,
   buildEmbedInfo,
@@ -20,8 +21,11 @@ import {
   discoverRuntimeProviders,
   readRegisteredRuntimeService,
   readRuntimeCurrentProvider,
+  runtimeManualInstallCommand,
   sanitizeRuntimeInstallState,
 } from '../../packages/dsh-plugin/index.js';
+
+const PLUGIN_DIR = fileURLToPath(new URL('../../packages/dsh-plugin/', import.meta.url));
 
 const HEALTH = { status: 'ok', name: 'mebular', version: '0.1.2' };
 const EMBED = {
@@ -363,7 +367,7 @@ function fakeManager(overrides = {}) {
     state: 'installing',
     reason: null,
     detail: null,
-    manualCommand: 'npm install -g @mebular/core@0.1.2',
+    manualCommand: runtimeManualInstallCommand(),
     targetVersion: RUNTIME_INSTALL_VERSION,
     allowed: true,
     ...overrides.state,
@@ -861,11 +865,11 @@ describe('Phase 4b install controller: failure mapping and recovery', () => {
     expect(await readFile(oldCli, 'utf-8')).toContain('// old runtime');
 
     const adds = tools.providerAdds();
-    expect(adds.map((call) => call.args[call.args.indexOf('--version') + 1])).toEqual(['0.1.2', '0.1.1']);
+    expect(adds.map((call) => call.args[call.args.indexOf('--version') + 1])).toEqual([RUNTIME_INSTALL_VERSION, '0.1.1']);
     expect(adds[1].args).toEqual(expect.arrayContaining(['--path', oldCli]));
     const removes = tools.providerRemoves();
     expect(removes.map((call) => call.args[call.args.indexOf('--path') + 1])).toEqual([oldCli, newCli]);
-    expect(await runtimeEntries(root)).toContain('0.1.2');
+    expect(await runtimeEntries(root)).toContain(RUNTIME_INSTALL_VERSION);
   });
 
   it('reinstall recovery failure is reported when the old daemon cannot be restarted', async () => {
@@ -1129,8 +1133,8 @@ describe('Phase 4b embed-info contract', () => {
         state: 'failed',
         reason: 'offline',
         detail: 'registry unreachable',
-        manualCommand: 'npm install -g @mebular/core@0.1.2',
-        targetVersion: '0.1.2',
+        manualCommand: runtimeManualInstallCommand(),
+        targetVersion: RUNTIME_INSTALL_VERSION,
         startedAt: '2026-01-01T00:00:00.000Z',
         finishedAt: '2026-01-01T00:01:00.000Z',
         allowed: true,
@@ -1142,8 +1146,8 @@ describe('Phase 4b embed-info contract', () => {
       state: 'failed',
       reason: 'offline',
       detail: 'registry unreachable',
-      manualCommand: 'npm install -g @mebular/core@0.1.2',
-      targetVersion: '0.1.2',
+      manualCommand: runtimeManualInstallCommand(),
+      targetVersion: RUNTIME_INSTALL_VERSION,
       action: null,
       startedAt: '2026-01-01T00:00:00.000Z',
       finishedAt: '2026-01-01T00:01:00.000Z',
@@ -1175,6 +1179,52 @@ describe('Phase 4b fixed npm command and classifier', () => {
     });
     const win = buildRuntimeInstallCommand({ version: '0.1.2', prefix: 'C:\\tmp\\p', platform: 'win32' });
     expect(win).toMatchObject({ command: 'npm.cmd', shell: true });
+  });
+
+  it('derives the pinned runtime version from its own package.json', async () => {
+    const dir = await tempRoot('dsh-dynamic-version-');
+    await writeFile(join(dir, 'index.js'), await readFile(join(PLUGIN_DIR, 'index.js'), 'utf-8'));
+    await writeFile(join(dir, 'package.json'), JSON.stringify({
+      name: '@mebular/dsh-plugin',
+      version: '1.2.3',
+    }));
+    const moduleUrl = `${pathToFileURL(join(dir, 'index.js')).href}?v=${Date.now()}-${Math.random()}`;
+    const dynamic = await import(moduleUrl);
+
+    expect(dynamic.RUNTIME_INSTALL_VERSION).toBe('1.2.3');
+    expect(dynamic.runtimeManualInstallCommand()).toBe('npm install -g @mebular/core@1.2.3');
+    expect(dynamic.buildRuntimeInstallCommand({ prefix: '/tmp/prefix', platform: 'linux' }).args)
+      .toContain('@mebular/core@1.2.3');
+  });
+
+  it('injected plugin version drives npm command, provider and current registration', async () => {
+    const root = await tempRoot();
+    const lifecycle = createFakeLifecycle();
+    const tools = createFakeTools(root);
+    const manager = managerFor(root, lifecycle, () => discovery(null), tools, { version: '1.2.3' });
+
+    expect(manager.getState()).toMatchObject({
+      targetVersion: '1.2.3',
+      manualCommand: 'npm install -g @mebular/core@1.2.3',
+    });
+    manager.start('install');
+    const state = await waitSettled(manager);
+
+    expect(state).toMatchObject({
+      state: 'done',
+      targetVersion: '1.2.3',
+      manualCommand: 'npm install -g @mebular/core@1.2.3',
+    });
+    expect(tools.npmCalls()[0].args).toContain('@mebular/core@1.2.3');
+    expect(tools.providerCalls()[0].args).toEqual(expect.arrayContaining(['--version', '1.2.3']));
+    const current = JSON.parse(await readFile(join(root, 'runtime', 'current.json'), 'utf-8'));
+    expect(current).toMatchObject({
+      version: '1.2.3',
+      runtimePath: join(root, 'runtime', '1.2.3'),
+      provider: 'shared',
+      owner: 'shared',
+    });
+    expect(await runtimeEntries(root)).toContain('1.2.3');
   });
 
   it('classifies stable reasons without leaking secrets', () => {

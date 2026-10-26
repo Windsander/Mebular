@@ -318,6 +318,9 @@ child 提前退出返回 `child_exited`，不留下孤儿，也不接管外部 d
 | `daemonUrl` | URL | 无 | 显式固定一个实例；固定后始终 attach-only |
 
 - 默认 attach + prompt：安装插件不会静默启动/下载；面板显示 profile/daemon 版本/service/provider。
+- 插件面板「安装」使用的固定版本 = **插件自身 `package.json` 的 `version`**。index.js 在模块加载时从
+  自身包内 `package.json` 读取（tarball 必含），因此发布版本 bump 不需要改插件源码；同一 release
+  train 中该版本等于 `@mebular/core` 版本。CLI/App 的安装器默认版本仍取 core 的 `APP_VERSION`。
 - 只有用户点「安装」才执行固定版本安装；失败显示稳定 reason、重试/重装/手动安装命令，
   旧 runtime 与数据保留。
 - 更新/升级走共享 `check-update` / `upgrade --to latest` / `update-state`；busy 时有界等待并

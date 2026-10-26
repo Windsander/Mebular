@@ -230,6 +230,17 @@ check(
   `${String(pluginModule.RUNTIME_INSTALL_VERSION)} != ${String(pkg.version)}`,
 );
 check(
+  'index.js manual install command uses the derived version',
+  pluginModule.runtimeManualInstallCommand?.() === `npm install -g @mebular/core@${pkg.version}`,
+  String(pluginModule.runtimeManualInstallCommand?.()),
+);
+check(
+  'index.js npm install command uses the derived version',
+  pluginModule.buildRuntimeInstallCommand?.({ prefix: '/tmp/runtime-prefix', platform: 'linux' })
+    ?.args?.includes(`@mebular/core@${pkg.version}`) === true,
+  JSON.stringify(pluginModule.buildRuntimeInstallCommand?.({ prefix: '/tmp/runtime-prefix', platform: 'linux' })?.args),
+);
+check(
   'index.js exposes the loopback install route',
   pluginModule.RUNTIME_INSTALL_PATH === '/mebular/runtime/install',
   String(pluginModule.RUNTIME_INSTALL_PATH),
@@ -272,6 +283,11 @@ for (const file of codeFiles) {
 }
 
 const hostSource = readFileSync(join(pkgDir, 'index.js'), 'utf8');
+check(
+  'index.js derives pinned runtime version from package.json',
+  hostSource.includes("new URL('./package.json', import.meta.url)")
+    && !/RUNTIME_INSTALL_VERSION\s*=\s*['"]\s*\d/.test(hostSource),
+);
 check(
   'host registers the mebular:status prompt section',
   hostSource.includes("AGENT_STATUS_SECTION = 'mebular:status'"),

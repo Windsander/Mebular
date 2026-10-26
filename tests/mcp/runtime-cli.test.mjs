@@ -263,7 +263,7 @@ describe('mebular runtime CLI：current / service / upgrade', () => {
 
   it('upgrade 非法版本 / service 未知子命令 → exit 2 + 稳定 reason/usage', async () => {
     const { root, serviceHome } = await makeRoot();
-    const invalid = runCli(envFor(root, serviceHome), 'upgrade', '--to', 'latest');
+    const invalid = runCli(envFor(root, serviceHome), 'upgrade', '--to', 'v1.2.3');
     expect(invalid.status).toBe(2);
     expect(JSON.parse(invalid.stdout)).toMatchObject({ ok: false, reason: 'unsupported_version' });
 

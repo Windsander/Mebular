@@ -1259,19 +1259,37 @@ async function runRuntimeCheckUpdate(flags) {
   printRuntimeJson(result, runtimeUpdateExitCode(result));
 }
 
-async function runRuntimeUpdateState(args) {
+async function runRuntimeUpdateState(args, flags = {}) {
   const sub = args[0] ?? 'show';
-  if (sub !== 'show') {
-    const error = new Error('用法：mebular runtime update-state show [--json]');
-    error.code = 'USAGE';
-    throw error;
-  }
   const {
     publicRuntimeUpdateState,
     readRuntimeUpdateState,
     runtimeUpdateStatePath,
+    setRuntimeUpdateSkippedVersion,
   } = await import('../src/runtime-update.mjs');
   const root = await runtimeRootForCli();
+  if (sub === 'skip') {
+    if (typeof flags.version !== 'string' || flags.version.length === 0) {
+      const error = new Error('用法：mebular runtime update-state skip --version V [--json]');
+      error.code = 'USAGE';
+      throw error;
+    }
+    const result = await setRuntimeUpdateSkippedVersion(root, flags.version);
+    printRuntimeJson({
+      ok: true,
+      root,
+      path: runtimeUpdateStatePath(root),
+      source: result.source,
+      state: publicRuntimeUpdateState(result.state),
+      warnings: result.warnings,
+    });
+    return;
+  }
+  if (sub !== 'show') {
+    const error = new Error('用法：mebular runtime update-state <show|skip --version V> [--json]');
+    error.code = 'USAGE';
+    throw error;
+  }
   const state = await readRuntimeUpdateState(root);
   printRuntimeJson({
     ok: true,
@@ -1283,11 +1301,75 @@ async function runRuntimeUpdateState(args) {
   });
 }
 
+async function runRuntimeUpgradeState(args) {
+  const sub = args[0] ?? 'show';
+  if (sub !== 'show') {
+    const error = new Error('用法：mebular runtime upgrade-state show [--json]');
+    error.code = 'USAGE';
+    throw error;
+  }
+  const {
+    publicRuntimeUpgradeState,
+    readRuntimeUpgradeState,
+    runtimeUpgradeStatePath,
+  } = await import('../src/runtime-upgrade.mjs');
+  const root = await runtimeRootForCli();
+  const state = await readRuntimeUpgradeState(root);
+  printRuntimeJson({
+    ok: true,
+    root,
+    path: runtimeUpgradeStatePath(root),
+    source: state.source,
+    state: publicRuntimeUpgradeState(state.state),
+    warnings: state.warnings,
+  });
+}
+
+/** `--to latest`：只接受共享 check 缓存里的 stable 目标，不接受任意 URL/registry。 */
+async function resolveUpgradeTarget(to) {
+  if (to !== 'latest') return { target: to, check: null };
+  const { checkRuntimeUpdate } = await import('../src/runtime-update.mjs');
+  const check = await checkRuntimeUpdate({
+    env: process.env,
+    entry: 'cli',
+    detectRunningVersion: detectRunningRuntimeVersion,
+  });
+  if (check.available !== true || typeof check.latestVersion !== 'string') {
+    return {
+      target: null,
+      check,
+      error: {
+        ok: false,
+        action: 'upgrade',
+        command: 'upgrade',
+        reason: check.reason ?? check.decision ?? check.status ?? 'no_update_available',
+        message: check.message ?? '没有可用的共享 runtime 更新；请先运行 runtime check-update',
+        to: 'latest',
+        status: check.status,
+        currentVersion: check.currentVersion ?? null,
+        latestVersion: check.latestVersion ?? null,
+        available: false,
+        busy: check.busy === true,
+        runtimeChanged: false,
+        serviceChanged: false,
+      },
+    };
+  }
+  return { target: check.latestVersion, check };
+}
+
 async function runRuntimeUpgrade(flags) {
   const { upgradeRuntime } = await import('../src/runtime-upgrade.mjs');
   const context = await runtimeContextForService().catch(() => null);
+  const requested = typeof flags.to === 'string' ? flags.to : undefined;
+  const resolved = await resolveUpgradeTarget(requested);
+  if (resolved.error) {
+    printRuntimeJson(resolved.error, 2);
+    return;
+  }
   const result = await upgradeRuntime({
-    to: typeof flags.to === 'string' ? flags.to : undefined,
+    to: resolved.target,
+    entry: 'cli',
     env: process.env,
     ...(context ? { root: context.cloudRoot, home: context.home } : {}),
   });
@@ -1312,12 +1394,16 @@ async function runRuntime(action, args, flags) {
       await runRuntimeUpgrade(flags);
       return;
     }
+    if (action === 'upgrade-state') {
+      await runRuntimeUpgradeState(args);
+      return;
+    }
     if (action === 'check-update') {
       await runRuntimeCheckUpdate(flags);
       return;
     }
     if (action === 'update-state') {
-      await runRuntimeUpdateState(args);
+      await runRuntimeUpdateState(args, flags);
       return;
     }
     if (action === 'install' || action === 'reinstall') {
@@ -1366,7 +1452,7 @@ async function runRuntime(action, args, flags) {
       printRuntimeJson(toPublicRuntimeResult(result), result.ok ? 0 : 2);
     }
     const error = new Error(
-      '用法：mebular runtime <resolve|ensure|status|supervise|provider|install|reinstall|current|service|upgrade|check-update|update-state> [--start auto|child|service] [--port N] [--version V] [--to V] [--force] [--json]',
+      '用法：mebular runtime <resolve|ensure|status|supervise|provider|install|reinstall|current|service|upgrade|upgrade-state|check-update|update-state> [--start auto|child|service] [--port N] [--version V] [--to V|latest] [--force] [--json]',
     );
     error.code = 'USAGE';
     throw error;
@@ -1476,9 +1562,11 @@ async function main() {
           '  cloud list|use|rename [id] [name] [--force]   忆云管理（use 停旧/起新/失败回滚）',
           '  runtime resolve|ensure|status|supervise [--start auto|child|service] [--port N] [--json]  共享 runtime（supervise 持有 child）',
           '  runtime install|reinstall [--version V] [--json]  安装/重装共享 runtime（固定 @mebular/core 版本）',
-          '  runtime upgrade --to V [--json]  显式升级共享 runtime（复用 installer；service 存在时更新并重启）',
+          '  runtime upgrade --to V|latest [--json]  显式升级共享 runtime（复用 installer；service 存在时更新并重启；跨入口 upgrade.lock）',
+          '  runtime upgrade-state show [--json]  查看共享升级状态（只读诊断，不联网）',
           '  runtime check-update [--force] [--json]  只读检查官方 npm @mebular/core stable 更新（24h 节流；不安装）',
           '  runtime update-state show [--json]  查看共享更新状态（只读诊断，不联网）',
+          '  runtime update-state skip --version V [--json]  跳过此版本（写共享 skippedVersion，两个入口都遵守）',
           '  runtime current show|set|clear [--version V --runtime-path P --cli C --provider shared --owner O --installed-at ISO]  current 指针（非敏感）',
           '  runtime service install|uninstall|restart|status [--json]  共享 mebular-serve 所有权/生命周期',
           '  runtime provider list|add|remove [--kind app|cli|shared --path P --version V --capabilities a,b --id ID]  runtime provider 注册表',

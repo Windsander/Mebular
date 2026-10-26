@@ -7,6 +7,7 @@
 import { openSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog, session, screen } from 'electron';
 import {
@@ -29,6 +30,17 @@ import { closeAction, quitConfirm, quitDecision, stopConfirm, trayMenuModel, tra
 import { consoleNavSearch, consoleNavUrl, isConsoleUrl } from './console-nav.mjs';
 import { readDaemonLogs } from './logs.mjs';
 import { loadDesktopI18n, resolveLocalesDir } from './i18n.mjs';
+import {
+  buildRuntimeUpdateFailurePrompt,
+  buildRuntimeUpdatePrompt,
+  buildRuntimeUpgradeBusyPrompt,
+  createRuntimeUpdateSession,
+  inspectSharedUpgradeStatus,
+  maybePromptForRuntimeUpdate,
+  performRuntimeUpdate,
+  runtimeUpdateActionForResponse,
+  startStartupRuntimeUpdateCheck,
+} from './runtime-updates.mjs';
 
 
 const cliArgs = parseArgs(process.argv.slice(1));
@@ -67,6 +79,9 @@ let cloudUnavailable = null;
 let startupDiagnostic = null;
 // 异步健康探测的世代号：显式改变托管状态（退出/停止/重启/切换）后，旧探测结果直接丢弃。
 let trayStateEpoch = 0;
+// Phase 5b2a：App 侧“忙”计数（ensure / 云切换 / 升级），更新提示只在空闲且健康时出现。
+let appBusy = 0;
+const runtimeUpdateSession = createRuntimeUpdateSession();
 
 function markTrayStateChanged() {
   trayStateEpoch += 1;
@@ -262,6 +277,15 @@ async function wizardStateNow() {
     // UX-2：② 完成 = 用户显式「已完成」（assistantsAcked）；邀请不再参与完成推导
     wizard: { assistantsAcked: Boolean(desktop.assistantsAcked), skipped: Boolean(desktop.skipped) },
   });
+}
+
+async function ensureWithBusy() {
+  appBusy += 1;
+  try {
+    return await ensure();
+  } finally {
+    appBusy = Math.max(0, appBusy - 1);
+  }
 }
 
 async function ensure() {
@@ -766,7 +790,7 @@ function trayActions() {
     'connect-assistants': () => { void navigateConsole('assistants'); },
     'add-device': () => { void navigateConsole('invite'); },
     'open-wizard': () => { showWindow(); void loadWizardView(); },
-    'daemon-start': () => { void ensure().then(() => showConsoleWithRetry()); },
+    'daemon-start': () => { void ensureWithBusy().then(() => showConsoleWithRetry()); },
     'daemon-stop': () => { void confirmStop(); },
     'daemon-restart': () => { void confirmRestart(); },
     'open-logs': () => { shell.openPath(join(home, 'serve.log')).catch(() => undefined); },
@@ -814,7 +838,7 @@ async function restart() {
   markTrayStateChanged();
   healthy = false; daemonMode = null; securityLevel = null; updateTray();
   await new Promise((r) => setTimeout(r, 800));
-  await ensure();
+  await ensureWithBusy();
 }
 
 function createTray() {
@@ -1105,8 +1129,17 @@ async function cloudListNow() {
   }
 }
 
-/** 控制台 A2 的 cloudSwitch 桥：主进程停旧/起新/校验/回滚，成功后重载控制台。 */
 async function cloudSwitchNow(rawId) {
+  appBusy += 1;
+  try {
+    return await cloudSwitchNowInner(rawId);
+  } finally {
+    appBusy = Math.max(0, appBusy - 1);
+  }
+}
+
+/** 控制台 A2 的 cloudSwitch 桥：主进程停旧/起新/校验/回滚，成功后重载控制台。 */
+async function cloudSwitchNowInner(rawId) {
   const id = String(rawId ?? '');
   if (!cloudModules || !cloudRoot) {
     throw new Error(cloudUnavailable ?? '忆云管理不可用：当前为自定义 home 或受限环境');
@@ -1180,6 +1213,226 @@ async function cloudSwitchNow(rawId) {
     home: result.home,
     name: result.profile?.name ?? cloudName,
   };
+}
+
+// ---------- Phase 5b2a：共享 Runtime 更新检查 / 提示 / 受控升级 ----------
+
+/** 从当前 runtime 动态加载共享 update/upgrade 模块（与 daemon/clouds 同一发现方式）。 */
+async function loadRuntimeUpdateModules() {
+  if (typeof cliBin !== 'string' || cliBin.length === 0) return null;
+  const src = join(dirname(cliBin), '..', 'src');
+  try {
+    const [update, upgrade] = await Promise.all([
+      import(pathToFileURL(join(src, 'runtime-update.mjs')).href),
+      import(pathToFileURL(join(src, 'runtime-upgrade.mjs')).href),
+    ]);
+    return { ...update, ...upgrade };
+  } catch (error) {
+    console.log(`[desktop] runtime 更新模块不可用（跳过更新提示）：${error?.message ?? error}`);
+    return null;
+  }
+}
+
+/** 运行中 daemon 的版本（/healthz）；不可用返回 null，check 会回退到共享 state。 */
+async function currentDaemonVersion() {
+  try {
+    const health = await probeHealthDetail(fetch, httpConf(), {
+      expectedInstance: homeKey(home),
+      cloudId,
+    });
+    return health.ok === true && typeof health.body?.version === 'string'
+      ? health.body.version
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function showAppDialog(options) {
+  if (win && !win.isDestroyed()) return dialog.showMessageBox(win, options);
+  return dialog.showMessageBox(options);
+}
+
+function waitForManagedChildExit(child, timeoutMs = 5_000) {
+  // 注意：不能用 isManagedChildAlive —— kill() 后 child.killed 立刻为 true，
+  // 但进程/端口可能还没退出；升级前必须等到 exit/close，避免第二个 daemon 抢端口。
+  const processStillRunning = (target) => {
+    if (!target) return false;
+    const exitedBySignal = typeof target.signalCode === 'string' && target.signalCode.length > 0;
+    return target.exitCode === null && !exitedBySignal;
+  };
+  if (!processStillRunning(child)) return Promise.resolve(true);
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.removeListener?.('exit', onExit);
+      child.removeListener?.('close', onClose);
+      resolvePromise(ok);
+    };
+    const onExit = () => finish(true);
+    const onClose = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref?.();
+    child.once?.('exit', onExit);
+    child.once?.('close', onClose);
+  });
+}
+
+/** 升级前只停 App 自己托管的 child；service/外部 daemon 不碰。 */
+async function stopAppChildForUpgrade() {
+  const child = daemonChild;
+  if (!child) return true;
+  if (!isManagedChildAlive(child)) {
+    const exited = await waitForManagedChildExit(child);
+    if (exited !== true) return false;
+    if (daemonChild === child) {
+      daemonChild = null;
+      daemonMode = null;
+    }
+    return true;
+  }
+  const stopped = stopManaged(child);
+  if (stopped !== true) return false;
+  const exited = await waitForManagedChildExit(child);
+  if (exited !== true) return false; // 仍存活：保留托管身份，取消升级，避免第二个 daemon
+  if (daemonChild === child) {
+    daemonChild = null;
+    daemonMode = null;
+    healthy = false;
+    securityLevel = null;
+    markTrayStateChanged();
+    updateTray();
+  }
+  return true;
+}
+
+/** 用户点「更新」后才进入：共享 upgradeRuntime + ensure/reconnect，绝不静默。 */
+async function upgradeRuntimeFromApp({ to, check } = {}) {
+  appBusy += 1;
+  try {
+    return await upgradeRuntimeFromAppInner({ to, check });
+  } finally {
+    appBusy = Math.max(0, appBusy - 1);
+  }
+}
+
+async function upgradeRuntimeFromAppInner({ to, check } = {}) {
+  const modules = await loadRuntimeUpdateModules();
+  if (!modules?.upgradeRuntime) {
+    const result = { ok: false, action: 'upgrade', reason: 'upgrade_unavailable', message: '共享升级模块不可用' };
+    await showAppDialog(buildRuntimeUpdateFailurePrompt({ check, result, t }));
+    return result;
+  }
+  const result = await performRuntimeUpdate({
+    root: cloudRoot,
+    home,
+    to,
+    entry: 'app',
+    isChildAlive: () => daemonChild !== null,
+    stopChild: stopAppChildForUpgrade,
+    upgradeFn: (options) => modules.upgradeRuntime({ ...options, env: process.env }),
+    ensureFn: async () => {
+      const ensured = await ensureWithBusy();
+      if (ensured.mode !== 'conflict') await showConsoleWithRetry();
+      return ensured;
+    },
+    upgradeStatusFn: () => inspectSharedUpgradeStatus({ root: cloudRoot, modules }),
+  });
+
+  if (result?.busy === true) {
+    await showAppDialog(buildRuntimeUpgradeBusyPrompt({ t }));
+    return result;
+  }
+  const ensureFailed = result?.ok === true
+    && (result.ensure?.ok === false || result.ensure?.mode === 'conflict');
+  if (ensureFailed) {
+    const shown = {
+      ...result,
+      ok: false,
+      reason: result.ensure?.reason ?? 'ensure_failed',
+    };
+    await showAppDialog({
+      type: 'error',
+      message: t('update.reconnect.title'),
+      detail: t('update.reconnect.message', {
+        latest: result.version ?? to,
+        reason: shown.reason,
+      }),
+      buttons: [t('update.action.ok')],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    return shown;
+  }
+  if (result?.ok !== true) {
+    await showAppDialog(buildRuntimeUpdateFailurePrompt({ check, result, t }));
+    return result;
+  }
+  console.log(`[desktop] 共享 runtime 已升级到 ${result.version ?? to}（service=${result.serviceChanged === true ? 'updated' : 'unchanged'}）`);
+  return result;
+}
+
+/**
+ * 启动更新检查：24h 节流/离线/busy 都由共享 check 处理；这里只做 App 侧 gating：
+ * 向导完成、daemon 健康、App 不忙、没有另一个入口在升级。
+ *
+ * 注：任务队列目前没有公开只读 API；`hasRunningTasks` 作为显式 hook 保留，
+ * 5b2b/Console 接线后可直接传入，不影响本阶段的“daemon 启动中不弹”。
+ */
+async function maybeCheckRuntimeUpdates({ wizardComplete = false } = {}) {
+  if (typeof cloudRoot !== 'string' || cloudRoot.length === 0) return { shown: false, reason: 'cloud_unavailable' };
+  if (!win || win.isDestroyed()) return { shown: false, reason: 'window_unavailable' };
+  const modules = await loadRuntimeUpdateModules();
+  if (!modules?.checkRuntimeUpdate) return { shown: false, reason: 'module_unavailable' };
+
+  const runningVersion = await currentDaemonVersion();
+  const result = await maybePromptForRuntimeUpdate({
+    root: cloudRoot,
+    session: runtimeUpdateSession,
+    checkFn: () => modules.checkRuntimeUpdate({
+      root: cloudRoot,
+      runningVersion,
+      entry: 'app',
+      fetchImpl: fetch,
+    }),
+    upgradeStatusFn: () => inspectSharedUpgradeStatus({ root: cloudRoot, modules }),
+    isBusy: () => appBusy > 0 || healthy !== true,
+    hasRunningTasks: () => false,
+    wizardComplete,
+    serviceRestart: async () => {
+      try {
+        const service = await probeService();
+        return service?.registered === true || daemonMode === 'service';
+      } catch {
+        return daemonMode === 'service';
+      }
+    },
+    showPromptFn: async ({ check, serviceRestart }) => {
+      const prompt = buildRuntimeUpdatePrompt({ check, serviceRestart, t });
+      const answer = await showAppDialog(prompt);
+      return runtimeUpdateActionForResponse(answer?.response);
+    },
+    skipVersionFn: (root, version) => modules.setRuntimeUpdateSkippedVersion(root, version),
+    performUpgradeFn: (options) => upgradeRuntimeFromApp(options),
+  });
+  if (result?.shown === true) {
+    console.log(`[desktop] runtime 更新提示：${result.action ?? result.reason ?? 'unknown'}`);
+  } else if (result?.reason && result.reason !== 'not_available' && result.reason !== 'up_to_date') {
+    console.log(`[desktop] runtime 更新检查跳过：${result.reason}`);
+  }
+  return result;
+}
+
+/** 非阻塞调度：窗口/向导/托盘已就绪后下一轮事件循环再检查。 */
+function scheduleStartupRuntimeUpdateCheck() {
+  startStartupRuntimeUpdateCheck({
+    run: () => maybeCheckRuntimeUpdates({ wizardComplete: true }),
+    onError: (error) => console.log(`[desktop] runtime 更新检查失败（静默跳过）：${error?.message ?? error}`),
+  });
 }
 
 // ---------- IPC（白名单） ----------
@@ -1292,7 +1545,7 @@ if (!gotLock) {
         await safeLoad(loadingHtml(shellMessage(startupDiagnostic, 'loading.notReady')));
         return;
       }
-      const ensured = await ensure();
+      const ensured = await ensureWithBusy();
       if (ensured.mode === 'conflict') {
         updateTray();
         await safeLoad(loadingHtml(shellMessage(ensured.message, 'loading.conflict')));
@@ -1301,6 +1554,8 @@ if (!gotLock) {
       const state = await wizardStateNow();
       if (state.complete) {
         await showConsoleWithRetry();
+        // Phase 5b2a：窗口/控制台已就绪后再做非阻塞更新检查（不改变启动主流程）。
+        scheduleStartupRuntimeUpdateCheck();
       } else {
         console.log(`[desktop] 未完成首次上手（待办：${state.current}）→ 打开向导`);
         await loadWizardView(); // 清缓存 + 缓存破坏参数：HTML/ESM 双保险（走查事故：旧版向导复活）

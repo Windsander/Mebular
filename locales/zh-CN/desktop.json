@@ -35,6 +35,21 @@
 
     "startup.error.title": "Mebular 启动失败",
 
+    "update.title": "Mebular Runtime 更新",
+    "update.message": "共享 Runtime 有新版本：{current} → {latest}。更新只在您确认后执行，不会静默安装。",
+    "update.message.service": "当前使用常驻服务：更新会短暂重启守护（几秒），期间控制台可能不可用。",
+    "update.message.child": "更新后会重启本机守护；正在运行的任务可能被中断。",
+    "update.action.update": "更新",
+    "update.action.later": "稍后",
+    "update.action.skip": "跳过此版本",
+    "update.action.ok": "知道了",
+    "update.failed.title": "Runtime 更新失败",
+    "update.failed.message": "更新到 {latest} 失败（{reason}）。当前仍使用 {current}；旧 runtime、服务和数据均已保留。",
+    "update.reconnect.title": "Runtime 已更新，连接失败",
+    "update.reconnect.message": "共享 Runtime 已升级到 {latest}，但本入口未能重新连接（{reason}）。请重启 App 或查看日志。",
+    "update.busy.title": "Runtime 正在更新",
+    "update.busy.message": "另一个入口正在更新共享 Runtime；本入口不会重复安装。",
+
     "tray.tooltip": "Mebular · {status}",
     "tray.status.running": "运行中",
     "tray.status.starting": "启动中",

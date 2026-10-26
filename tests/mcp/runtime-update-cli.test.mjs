@@ -115,8 +115,33 @@ describe('mebular runtime check-update / update-state CLI', () => {
     expect(result.stdout).not.toMatch(/token|secret|authorization/i);
   });
 
-  it('update-state show 只读诊断；非法子命令 exit 2 + USAGE', async () => {
+  it('update-state skip --version 写共享 skippedVersion 并同步 available=false', async () => {
     const root = await makeRoot();
+    await writeRuntimeUpdateState(root, {
+      lastCheckedAt: '2026-10-26T00:00:00.000Z',
+      lastAttemptAt: '2026-10-26T00:00:00.000Z',
+      lastAttemptOk: true,
+      latest: '0.2.0',
+      current: '0.1.2',
+      available: true,
+      skippedVersion: null,
+      reason: null,
+      failureReason: null,
+    });
+    const env = cleanEnv({ MEBULAR_CLOUD_ROOT: root, MEBULAR_HOME: root });
+    const skip = run(env, ['runtime', 'update-state', 'skip', '--version', '0.2.0', '--json']);
+    expect(skip.status).toBe(0);
+    expect(JSON.parse(skip.stdout)).toMatchObject({
+      ok: true,
+      state: { skippedVersion: '0.2.0', available: false, reason: 'skipped' },
+    });
+
+    const missing = run(env, ['runtime', 'update-state', 'skip', '--json']);
+    expect(missing.status).toBe(2);
+    expect(JSON.parse(missing.stdout)).toMatchObject({ ok: false, reason: 'USAGE' });
+  });
+
+  it('update-state show 只读诊断；非法子命令 exit 2 + USAGE', async () => {    const root = await makeRoot();
     await writeRuntimeUpdateState(root, {
       lastCheckedAt: '2026-10-26T00:00:00.000Z',
       lastAttemptAt: '2026-10-26T00:00:00.000Z',
@@ -165,5 +190,6 @@ describe('mebular runtime check-update / update-state CLI', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain('runtime check-update');
     expect(result.stdout).toContain('runtime update-state show');
+    expect(result.stdout).toContain('runtime update-state skip');
   });
 });

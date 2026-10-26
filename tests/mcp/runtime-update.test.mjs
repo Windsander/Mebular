@@ -264,6 +264,23 @@ describe('runtime update check', () => {
     });
   });
 
+  it('跳过 latest 同步 available=false/reason=skipped；取消跳过保留原 available', async () => {
+    const root = await makeRoot();
+    const clock = makeClock();
+    await checkRuntimeUpdate(baseOptions(root, clock, registryFetch('0.2.0')));
+    expect(await readStateFile(root)).toMatchObject({ available: true, reason: null });
+
+    const skipped = await setRuntimeUpdateSkippedVersion(root, '0.2.0', { now: clock.now().toISOString() });
+    expect(skipped.state).toMatchObject({
+      skippedVersion: '0.2.0',
+      available: false,
+      reason: 'skipped',
+    });
+
+    const cleared = await setRuntimeUpdateSkippedVersion(root, null, { now: clock.now().toISOString() });
+    expect(cleared.state).toMatchObject({ skippedVersion: null, available: false, reason: 'skipped' });
+  });
+
   it('24h 节流返回缓存，不重复请求；--force 绕过；过期后重新请求', async () => {
     const root = await makeRoot();
     const clock = makeClock();

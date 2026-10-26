@@ -35,6 +35,21 @@
 
     "startup.error.title": "Mebular failed to start",
 
+    "update.title": "Mebular Runtime update",
+    "update.message": "A new shared Runtime is available: {current} → {latest}. Nothing is installed until you confirm.",
+    "update.message.service": "The resident service is in use: the update briefly restarts the daemon (a few seconds); the console may be unavailable meanwhile.",
+    "update.message.child": "The update restarts the local daemon; running tasks may be interrupted.",
+    "update.action.update": "Update",
+    "update.action.later": "Later",
+    "update.action.skip": "Skip this version",
+    "update.action.ok": "OK",
+    "update.failed.title": "Runtime update failed",
+    "update.failed.message": "Updating to {latest} failed ({reason}). {current} is still in use; the previous runtime, service and data were kept.",
+    "update.reconnect.title": "Runtime updated, reconnect failed",
+    "update.reconnect.message": "The shared Runtime was updated to {latest}, but this entry could not reconnect ({reason}). Restart the app or check the logs.",
+    "update.busy.title": "Runtime update in progress",
+    "update.busy.message": "Another entry is updating the shared Runtime; this entry will not install it again.",
+
     "tray.tooltip": "Mebular · {status}",
     "tray.status.running": "Running",
     "tray.status.starting": "Starting",

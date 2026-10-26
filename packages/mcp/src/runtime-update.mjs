@@ -489,9 +489,15 @@ export async function setRuntimeUpdateSkippedVersion(root, version, { now = new 
   }
   const skippedVersion = version === null || version === undefined ? null : assertStableVersion(version);
   const current = await readRuntimeUpdateState(root);
+  // 跳过当前 latest 时同步把 available 置 false，让直接读 state 的另一入口也不会再提示；
+  // 取消跳过（null）不动 available，交给下一次 check 重新计算。
+  const skippingLatest = skippedVersion !== null
+    && current.state.latest !== null
+    && compareSemver(skippedVersion, current.state.latest) === 0;
   const state = await writeRuntimeUpdateState(root, {
     ...current.state,
     skippedVersion,
+    ...(skippingLatest ? { available: false, reason: 'skipped' } : {}),
     updatedAt: now,
   }, { now });
   return { state, source: current.source, warnings: current.warnings, path: runtimeUpdateStatePath(root) };

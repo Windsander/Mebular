@@ -1,0 +1,176 @@
+name: DSH E2E
+
+# Real DSH E2E: real daemon + real @deepseek-ai/dsh + real Chrome/CDP + real MCP
+# tool calls. Missing prerequisites fail the job; they never silently skip.
+#
+# Triggers:
+#   schedule          nightly (UTC 03:00 / 北京时间 11:00)
+#   workflow_dispatch manual reproduction
+#   workflow_call     release gate from publish.yml
+#   pull_request      path-filtered changes that can break the integration
+#   push main         main baseline with the same path filter
+#
+# The two matrix legs are the minimum supported DSH version and npm `latest`.
+# Keep the minimum leg in sync with tests/dsh/e2e/versions.json (checked below).
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+  workflow_call:
+  pull_request:
+    paths:
+      - 'packages/dsh-plugin/**'
+      - 'packages/mcp/**'
+      - 'packages/console/**'
+      - 'tests/dsh/**'
+      - 'scripts/verify-dsh-e2e.mjs'
+      - 'scripts/lib/**'
+      - '.github/workflows/dsh-e2e.yml'
+      # Runtime inputs used by the daemon and the embedded Console.
+      - 'src/**'
+      - 'packages/service/**'
+      - 'packages/fleet/**'
+      - 'package.json'
+      - 'package-lock.json'
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/dsh-plugin/**'
+      - 'packages/mcp/**'
+      - 'packages/console/**'
+      - 'tests/dsh/**'
+      - 'scripts/verify-dsh-e2e.mjs'
+      - 'scripts/lib/**'
+      - '.github/workflows/dsh-e2e.yml'
+      - 'src/**'
+      - 'packages/service/**'
+      - 'packages/fleet/**'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  e2e:
+    name: dsh-e2e (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: minimum
+            dsh: 0.2.1-rc.2
+          - label: latest
+            dsh: latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Cache pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-store-${{ runner.os }}-v1-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-v1-
+
+      - name: Prepare Chrome/Chromium
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+          install-chromedriver: false
+
+      - name: Prepare pnpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `dsh plugin add` forwards to pnpm. Pin the major validated locally
+          # (12.x) so a future pnpm major cannot silently change plugin installs.
+          npm install --global pnpm@12 --no-audit --no-fund
+          pnpm --version
+
+      - name: Verify prerequisites (fail, never skip)
+        shell: bash
+        env:
+          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
+        run: |
+          set -euo pipefail
+          NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+          if [ "$NODE_MAJOR" != "24" ]; then
+            echo "::error::DSH E2E requires Node 24, got $(node --version)"
+            exit 1
+          fi
+          if [ -z "${CHROME_PATH:-}" ] || [ ! -x "$CHROME_PATH" ]; then
+            echo "::error::Chrome/Chromium binary missing; DSH E2E must not skip"
+            exit 1
+          fi
+          "$CHROME_PATH" --version
+          if ! command -v pnpm >/dev/null 2>&1; then
+            echo "::error::pnpm missing; dsh plugin add requires it"
+            exit 1
+          fi
+          pnpm --version
+          echo "CHROME_PATH=$CHROME_PATH" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify DSH version matrix SSOT
+        if: matrix.label == 'minimum'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MIN="$(node -p "require('./tests/dsh/e2e/versions.json').minimum")"
+          if [ "$MIN" != "${{ matrix.dsh }}" ]; then
+            echo "::error::tests/dsh/e2e/versions.json minimum=$MIN 与 workflow matrix=${{ matrix.dsh }} 不一致"
+            exit 1
+          fi
+
+      - name: Run real DSH E2E (${{ matrix.label }})
+        id: e2e
+        shell: bash
+        env:
+          E2E_ROOT: ${{ runner.temp }}/dsh-e2e/${{ matrix.dsh }}
+          E2E_LOG: ${{ runner.temp }}/dsh-e2e-${{ matrix.dsh }}-harness.log
+        run: |
+          set -euo pipefail
+          node scripts/verify-dsh-e2e.mjs --dsh-version "${{ matrix.dsh }}" --root "$E2E_ROOT" 2>&1 | tee "$E2E_LOG"
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-e2e-${{ matrix.label }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/dsh-e2e/${{ matrix.dsh }}/scenario-*/artifacts
+            ${{ runner.temp }}/dsh-e2e-${{ matrix.dsh }}-harness.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Clean up success artifacts
+        if: success()
+        shell: bash
+        env:
+          E2E_ROOT: ${{ runner.temp }}/dsh-e2e/${{ matrix.dsh }}
+          E2E_LOG: ${{ runner.temp }}/dsh-e2e-${{ matrix.dsh }}-harness.log
+        run: |
+          rm -rf "$E2E_ROOT" "$E2E_LOG"
+          rmdir "$(dirname "$E2E_ROOT")" 2>/dev/null || true

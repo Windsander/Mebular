@@ -20,16 +20,22 @@
  *
  * Usage:
  *   node scripts/verify-dsh-e2e.mjs [--scenario <name>]... [--keep]
- *     [--dsh-version <version>] [--list]
+ *     [--dsh-version <version|minimum|current|latest>] [--root <dir>] [--list]
+ *
+ * `--root` (or MEBULAR_DSH_E2E_ROOT) pins the harness root so CI can upload a
+ * stable failure path ($RUNNER_TEMP/dsh-e2e/<version>). The directory must not
+ * overlap the repository, the home directory, or the filesystem root. The
+ * harness only removes roots it created, or entries it owns under a directory
+ * carrying its marker file; success cleans up, failure keeps the scene.
  *
  * Exit codes: 0 all selected scenarios passed; 1 any failure or artifact leak.
  */
 
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { homedir, tmpdir } from 'node:os';
+import { dirname, join, parse as parsePath, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { findChrome } from './lib/cdp.mjs';
@@ -56,6 +62,11 @@ const IFRAME_SELECTOR = 'iframe[title="Mebular Console"]';
 const SIDEBAR_SELECTOR = 'button[aria-label="Mebular"]';
 const STATUS_SELECTOR = '[data-mebular-status]';
 
+// Ownership marker for an explicit --root. Only entries matching this pattern
+// are ever removed from a directory the harness did not create itself.
+const ROOT_MARKER = '.mebular-dsh-e2e-root.json';
+const HARNESS_ROOT_ENTRY = /^(?:scenario-.+|pack|dsh-install|\.mebular-dsh-e2e-root\.json)$/;
+
 let passed = 0;
 let failed = 0;
 
@@ -78,7 +89,7 @@ function requireCheck(name, ok, detail = '') {
 }
 
 function parseArgs(argv) {
-  const options = { scenarios: [], keep: false, dshVersion: null, list: false };
+  const options = { scenarios: [], keep: false, dshVersion: null, root: null, list: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--keep') {
@@ -97,11 +108,113 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg.startsWith('--dsh-version=')) {
       options.dshVersion = arg.slice('--dsh-version='.length);
+    } else if (arg === '--root') {
+      const value = argv[index + 1] ?? '';
+      if (value.length === 0) throw new Error('--root 需要目录');
+      options.root = value;
+      index += 1;
+    } else if (arg.startsWith('--root=')) {
+      const value = arg.slice('--root='.length);
+      if (value.length === 0) throw new Error('--root 需要目录');
+      options.root = value;
     } else {
       throw new Error(`未知参数：${arg}`);
     }
   }
   return options;
+}
+
+function resolveDshVersion(value, versions) {
+  if (value === 'minimum') return versions.minimum;
+  if (value === 'current') return versions.current;
+  return value;
+}
+
+function isSameOrInside(parent, child) {
+  return child === parent || child.startsWith(`${parent}${sep}`);
+}
+
+/**
+ * Create or validate the harness root.
+ *
+ * Default: a fresh mkdtemp directory (Phase 1/2 behavior, removed on success).
+ * Explicit root: must be absent, empty, or a previous harness root carrying the
+ * marker (only harness-owned entries). Never a repository ancestor/descendant,
+ * the home directory, or the filesystem root.
+ */
+async function prepareRoot(requested) {
+  if (requested === null || requested === undefined) {
+    const dir = await mkdtemp(join(tmpdir(), 'mebular-dsh-e2e-'));
+    await writeRootMarker(dir, true);
+    return { dir, explicit: false, created: true };
+  }
+
+  const dir = resolve(requested);
+  if (dir === parsePath(dir).root) {
+    throw new Error(`--root 不能是文件系统根目录：${dir}`);
+  }
+  if (dir === resolve(homedir())) {
+    throw new Error(`--root 不能是用户主目录：${dir}`);
+  }
+  if (isSameOrInside(dir, repoRoot) || isSameOrInside(repoRoot, dir)) {
+    throw new Error(`--root 不能与仓库目录重叠：${dir}`);
+  }
+
+  let exists = true;
+  try {
+    const info = await stat(dir);
+    if (!info.isDirectory()) throw new Error(`--root 不是目录：${dir}`);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    exists = false;
+  }
+
+  if (!exists) {
+    await mkdir(dir, { recursive: true });
+    await writeRootMarker(dir, true);
+    return { dir, explicit: true, created: true };
+  }
+
+  const entries = await readdir(dir);
+  if (entries.length > 0) {
+    if (!entries.includes(ROOT_MARKER)) {
+      throw new Error(`--root 目录非空且缺少 ${ROOT_MARKER} 标记，拒绝使用/清理：${dir}`);
+    }
+    const unknown = entries.filter((name) => !HARNESS_ROOT_ENTRY.test(name));
+    if (unknown.length > 0) {
+      throw new Error(`--root 目录含非 harness 文件（${unknown.join(', ')}），拒绝清理：${dir}`);
+    }
+    // Previous failed run: clear only harness-owned entries, keep the directory.
+    for (const name of entries) {
+      await rm(join(dir, name), { recursive: true, force: true });
+    }
+  }
+  await writeRootMarker(dir, false);
+  return { dir, explicit: true, created: false };
+}
+
+async function writeRootMarker(dir, created) {
+  await writeFile(
+    join(dir, ROOT_MARKER),
+    `${JSON.stringify({ tool: 'verify-dsh-e2e', createdAt: new Date().toISOString(), created }, null, 2)}\n`,
+    'utf-8',
+  );
+}
+
+async function cleanupRoot(rootInfo, { keep }) {
+  if (keep) return { removed: false, dir: rootInfo.dir };
+  if (rootInfo.created) {
+    await rm(rootInfo.dir, { recursive: true, force: true }).catch(() => undefined);
+    return { removed: true, dir: rootInfo.dir };
+  }
+  // The directory existed before this run: remove only entries the harness owns.
+  const entries = await readdir(rootInfo.dir).catch(() => []);
+  for (const name of entries) {
+    if (HARNESS_ROOT_ENTRY.test(name)) {
+      await rm(join(rootInfo.dir, name), { recursive: true, force: true }).catch(() => undefined);
+    }
+  }
+  return { removed: true, dir: rootInfo.dir };
 }
 
 function probeSummary(probe) {
@@ -634,14 +747,19 @@ async function main() {
   }
   const selected = selectScenarios(options.scenarios);
   const versions = JSON.parse(await readFile(versionsPath, 'utf-8'));
-  const dshVersion = options.dshVersion ?? versions.minimum ?? versions.current;
+  const dshVersion = resolveDshVersion(options.dshVersion ?? versions.minimum ?? versions.current, versions);
   if (typeof dshVersion !== 'string' || dshVersion.length === 0) {
     throw new Error('versions.json 缺少 minimum/current；请用 --dsh-version 指定');
   }
+  const envRoot = typeof process.env.MEBULAR_DSH_E2E_ROOT === 'string'
+    ? process.env.MEBULAR_DSH_E2E_ROOT.trim()
+    : '';
+  const rootRequest = options.root ?? (envRoot.length > 0 ? envRoot : null);
 
-  console.log('DSH 真实 E2E（Phase 2 P0 失败/恢复矩阵）');
+  console.log('DSH 真实 E2E（P0 失败/恢复矩阵 + CI 门禁）');
   console.log('========================================');
   console.log(`场景：${selected.map((scenario) => scenario.name).join(', ')}`);
+  console.log(`DSH 版本：${dshVersion}`);
 
   // Static prerequisites. E2E is allowed to fail; it is never allowed to skip.
   const preflight = [];
@@ -663,10 +781,12 @@ async function main() {
     return 1;
   }
 
-  const root = await mkdtemp(join(tmpdir(), 'mebular-dsh-e2e-'));
+  const rootInfo = await prepareRoot(rootRequest);
+  const root = rootInfo.dir;
   const packDir = join(root, 'pack');
   const dshInstall = join(root, 'dsh-install');
   await mkdir(packDir, { recursive: true });
+  console.log(`临时根目录：${root}${rootInfo.explicit ? '（显式 --root / MEBULAR_DSH_E2E_ROOT）' : ''}`);
 
   let exitCode = 0;
   try {
@@ -725,7 +845,10 @@ async function main() {
 
     const keepRoot = options.keep || scenarioFailures > 0;
     if (!keepRoot) {
-      await rm(root, { recursive: true, force: true }).catch(() => undefined);
+      const cleaned = await cleanupRoot(rootInfo, { keep: false });
+      console.log(cleaned.removed
+        ? `临时根目录已清理：${root}`
+        : `临时根目录保留：${root}`);
     } else {
       console.log(`临时根目录保留：${root}`);
     }

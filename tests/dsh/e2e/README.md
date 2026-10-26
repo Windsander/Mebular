@@ -1,16 +1,24 @@
-# DSH 真实 E2E（Phase 2：P0 失败/恢复矩阵）
+# DSH 真实 E2E（P0 失败/恢复矩阵 + CI 门禁）
 
 一条命令在“真 daemon + 真 DSH + 真浏览器 + 真工具调用”上跑完首发 P0：
 
 ```bash
-npm run verify:dsh:e2e                 # 全部 P0 场景
+npm run verify:dsh:e2e                 # versions.json 的 minimum
+npm run verify:dsh:e2e:min             # 最低支持版本
+npm run verify:dsh:e2e:latest          # npm latest
 npm run verify:dsh:e2e -- --scenario daemon-down-recovery
 npm run verify:dsh:e2e -- --scenario panel-false --keep
 npm run verify:dsh:e2e -- --list       # 列出场景名
-node scripts/verify-dsh-e2e.mjs --dsh-version 0.2.1-rc.2
+node scripts/verify-dsh-e2e.mjs --dsh-version minimum
+node scripts/verify-dsh-e2e.mjs --dsh-version latest --root "$TMPDIR/dsh-e2e/latest"
 ```
 
 `--keep` 在成功时也保留临时目录和 artifacts。失败时无论是否加 `--keep` 都会保留现场。
+`--root`（或 `MEBULAR_DSH_E2E_ROOT`）把现场固定到指定目录，CI 用它上传稳定路径；
+目录必须不存在、为空，或带 harness 标记，且不能与仓库/主目录重叠。
+
+CI 触发、矩阵、artifacts 与 release gate 见
+[`docs/operations/DSH_E2E.md`](../../../docs/operations/DSH_E2E.md)。
 
 ## 前置
 
@@ -45,7 +53,11 @@ node scripts/verify-dsh-e2e.mjs --dsh-version 0.2.1-rc.2
 - 独立 probe 输出与 artifacts 目录。
 
 DSH 安装包和两个 npm tarball 在场景之间复用，避免每个场景重复安装；profile、home、进程和端口
-仍完全隔离。所有场景都只读写临时目录，不碰 `~/.mebular` / `~/.dsh`。
+仍完全隔离。所有场景都只读写临时目录，不碰 `~/.mebular` / `~/.dsh`。每个场景的目录位于
+harness 根目录下（默认随机 tmp，CI 为 `$RUNNER_TEMP/dsh-e2e/<version>`）。
+
+成功时清理根目录；失败时保留。显式 `--root` 只清理 harness 自己创建/标记的条目，
+不会删除用户预先创建的空目录本身，也不会使用非空且无标记的目录。
 
 ## Probe
 
@@ -80,12 +92,25 @@ artifacts 包括：`scenario.json`、`seed.json`、`dsh-log.txt`、`daemon-log.t
 `dsh-embed-info.json`、`probe.json`、`browser-errors.json`、`browser-dom.html`、
 `headers.json`（安全头场景）、`redaction-audit.json`、`screenshot.png`（能采集时）。
 
+## CI 与 release gate
+
+- `.github/workflows/dsh-e2e.yml`：nightly、`workflow_dispatch`、`workflow_call`、相关路径
+  PR / `main` push；矩阵为最低版 + `latest`，`fail-fast: false`，Node 24，
+  job 超时 45 分钟。
+- 缺 pnpm / Chrome / 构建产物时显式失败，不静默 SKIP。
+- 失败上传 `scenario-*/artifacts` 与 harness 日志；成功清理固定根目录。
+- `.github/workflows/publish.yml` 的 `publish` / `release` 依赖 DSH E2E；E2E 失败不发六个
+  npm 包，也不创建 GitHub Release。dry-run 同样执行 E2E，但保持不发布。
+- 操作细节与升级步骤见 [`docs/operations/DSH_E2E.md`](../../../docs/operations/DSH_E2E.md)。
+
 ## 边界与已知缺口
 
 - 不引入 Playwright；直接使用 Chrome/CDP。
 - 不改生产插件；`panel:false` 只通过 DSH 的 profile `cordis.patch.yml` 覆盖。
 - 非 loopback 的 `X-Frame-Options` / `frame-ancestors` 需要 daemon 以 TLS + 非 none auth 启动，
   本 E2E 只覆盖 loopback；非 loopback 分支由 `tests/mcp/console-embed.test.mjs` 单测覆盖。
-- DSH Desktop 的 origin/HTTPS/自定义 scheme 仍不在 P0（Phase 3+ 记录）。
-- managed 生命周期、Agent 状态文本、版本矩阵与 CI/release gate 属于 Phase 3/4，本阶段不测。
+- DSH Desktop 的 origin/HTTPS/自定义 scheme 仍不在 P0。
+- managed 生命周期、Agent 状态文本、Node 22.19 smoke 属于后续阶段，当前不测。
 - 不验证真实 DeepSeek 模型对话；probe 走 DSH tool registry，不发模型请求。
+- workflow 已接入；首次 GitHub Actions 真实运行需在默认分支注册后手动 dispatch 或等
+  nightly，本 README 不声称 CI 已绿。

@@ -155,6 +155,7 @@ export async function createWorld(options) {
       { value: mebularHome, label: '<mebular-home>' },
       { value: dshHome, label: '<dsh-home>' },
       { value: options.dshInstall, label: '<dsh-install>' },
+      { value: options.root, label: '<e2e-root>' },
       { value: options.repoRoot, label: '<repo>' },
     ];
   }

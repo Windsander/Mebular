@@ -95,6 +95,7 @@
     "verify:mcp:skill": "node scripts/verify-mcp-skill.mjs",
     "verify:mcp:publish": "node scripts/verify-mcp-publish.mjs",
     "verify:dsh-plugin": "node scripts/verify-dsh-plugin.mjs",
+    "verify:dsh:e2e": "node scripts/verify-dsh-e2e.mjs",
     "verify:release-version": "node scripts/verify-release-version.mjs",
     "verify:release-visibility": "node scripts/verify-release-visibility.mjs",
     "branches:merged": "node scripts/prune-merged-branches.mjs",

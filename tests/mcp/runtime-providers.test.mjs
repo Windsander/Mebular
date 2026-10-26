@@ -6,7 +6,8 @@
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +15,7 @@ import {
   RUNTIME_PROVIDERS_LOCK_FILE,
   listRuntimeProviders,
   readRuntimeProviders,
+  registerExclusiveRuntimeProvider,
   registerRuntimeProvider,
   removeRuntimeProvider,
   runtimeProviderId,
@@ -104,6 +106,61 @@ describe('runtime provider 注册表：写入 / 读取 / 移除', () => {
     const state = await readRuntimeProviders(root);
     expect(state.registry.providers).toHaveLength(1);
     expect(state.registry.providers[0].version).toBe('0.2.0');
+  });
+
+  it('单实例 kind（App）：路径 A→B 原子替换旧记录，版本不变保留 registeredAt，CLI/shared 不动', async () => {
+    const root = await tempDir();
+    const pathA = await fakeProvider(root, 'a-old-app.mjs');
+    const pathB = await fakeProvider(root, 'z-new-app.mjs');
+    const cliPath = await fakeProvider(root, 'cli-bin.mjs');
+    const sharedPath = await fakeProvider(root, 'shared-bin.mjs');
+    await registerRuntimeProvider(root, { kind: 'cli', path: cliPath, version: '9.9.9' });
+    await registerRuntimeProvider(root, { kind: 'shared', path: sharedPath, version: '9.9.9' });
+
+    const first = await registerExclusiveRuntimeProvider(root, {
+      kind: 'app',
+      path: pathA,
+      version: '1.0.0',
+      capabilities: ['serve'],
+    }, { now: '2026-01-01T00:00:00.000Z' });
+    expect(first).toMatchObject({ created: true, unchanged: false, replaced: [] });
+    const registeredAt = first.provider.registeredAt;
+
+    const same = await registerExclusiveRuntimeProvider(root, {
+      kind: 'app',
+      path: pathA,
+      version: '1.0.0',
+      capabilities: ['serve'],
+    }, { now: '2026-02-01T00:00:00.000Z' });
+    expect(same).toMatchObject({ created: false, unchanged: true });
+    expect(same.provider.registeredAt).toBe(registeredAt);
+
+    const moved = await registerExclusiveRuntimeProvider(root, {
+      kind: 'app',
+      path: pathB,
+      version: '2.0.0',
+      capabilities: ['serve'],
+    }, { now: '2026-03-01T00:00:00.000Z' });
+    expect(moved).toMatchObject({ created: false, unchanged: false });
+    expect(moved.provider).toMatchObject({ kind: 'app', path: pathB, version: '2.0.0' });
+    expect(moved.replaced).toHaveLength(1);
+    expect(moved.replaced[0]).toMatchObject({ kind: 'app', path: pathA });
+
+    const state = await readRuntimeProviders(root);
+    const appProviders = state.registry.providers.filter((entry) => entry.kind === 'app');
+    expect(appProviders).toHaveLength(1);
+    expect(appProviders[0].path).toBe(pathB);
+    expect(state.registry.providers.find((entry) => entry.kind === 'cli')?.path).toBe(cliPath);
+    expect(state.registry.providers.find((entry) => entry.kind === 'shared')?.path).toBe(sharedPath);
+  });
+
+  it('单实例 kind：损坏注册表 fail-closed，不覆盖文件', async () => {
+    const root = await tempDir();
+    const path = await fakeProvider(root);
+    await writeFile(runtimeProvidersPath(root), '{broken', 'utf-8');
+    await expect(registerExclusiveRuntimeProvider(root, { kind: 'app', path }))
+      .rejects.toMatchObject({ code: 'RUNTIME_PROVIDERS_INVALID' });
+    expect(await readFile(runtimeProvidersPath(root), 'utf-8')).toBe('{broken');
   });
 
   it('按 id 或 kind+path 移除；不存在时 RUNTIME_PROVIDER_NOT_FOUND', async () => {
@@ -233,6 +290,74 @@ describe('mebular runtime provider CLI', () => {
       timeout: 20_000,
     });
   }
+
+  async function freePort() {
+    const server = createServer();
+    await new Promise((resolvePromise, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', resolvePromise);
+    });
+    const port = server.address().port;
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+    return port;
+  }
+
+  it('替换 App path 后：provider list / runtime resolve 不会选到旧 path，CLI/shared 保留', async () => {
+    const root = await tempDir('runtime-provider-cli-');
+    const serviceHome = await tempDir('runtime-provider-cli-service-');
+    const port = await freePort();
+    await mkdir(root, { recursive: true });
+    await writeFile(join(root, 'config.json'), JSON.stringify({
+      deviceId: 'device-test',
+      mcp: { http: { host: '127.0.0.1', port, auth: 'none' } },
+    }, null, 2), 'utf-8');
+
+    // path A 字典序小于 B：若旧记录残留，discover 会优先选中 A。
+    const pathA = await fakeProvider(root, 'a-old-app.mjs');
+    const pathB = await fakeProvider(root, 'z-new-app.mjs');
+    const cliPath = await fakeProvider(root, 'cli-bin.mjs');
+    const sharedPath = await fakeProvider(root, 'shared-bin.mjs');
+    await registerRuntimeProvider(root, { kind: 'cli', path: cliPath, version: '9.9.9' });
+    await registerRuntimeProvider(root, { kind: 'shared', path: sharedPath, version: '9.9.9' });
+    await registerExclusiveRuntimeProvider(root, { kind: 'app', path: pathA, version: '1.0.0', capabilities: ['serve'] });
+    await registerExclusiveRuntimeProvider(root, { kind: 'app', path: pathB, version: '2.0.0', capabilities: ['serve'] });
+
+    const env = {
+      ...process.env,
+      MEBULAR_CLOUD_ROOT: root,
+      MEBULAR_HOME: root,
+      MEBULAR_SERVICE_UNIT_HOME: serviceHome,
+    };
+    delete env.MEBULAR_HTTP_PORT;
+    delete env.MEBULAR_HTTP_HOST;
+
+    const list = spawnSync(process.execPath, [CLI, 'runtime', 'provider', 'list', '--json'], {
+      env,
+      encoding: 'utf-8',
+      timeout: 20_000,
+    });
+    expect(list.status).toBe(0);
+    const listed = JSON.parse(list.stdout);
+    const appProviders = listed.providers.filter((entry) => entry.kind === 'app');
+    expect(appProviders).toHaveLength(1);
+    expect(appProviders[0]).toMatchObject({ path: pathB, version: '2.0.0' });
+    expect(listed.providers.some((entry) => entry.path === pathA)).toBe(false);
+    expect(listed.providers.find((entry) => entry.kind === 'cli')?.path).toBe(cliPath);
+    expect(listed.providers.find((entry) => entry.kind === 'shared')?.path).toBe(sharedPath);
+
+    const resolved = spawnSync(process.execPath, [CLI, 'runtime', 'resolve', '--json'], {
+      env,
+      encoding: 'utf-8',
+      timeout: 20_000,
+    });
+    expect(resolved.status).toBe(0);
+    const json = JSON.parse(resolved.stdout);
+    expect(json).toMatchObject({
+      ok: true,
+      mode: 'child',
+      provider: { kind: 'app', path: pathB, version: '2.0.0' },
+    });
+  });
 
   it('add → list → remove 输出稳定 JSON', async () => {
     const root = await tempDir('runtime-provider-cli-');

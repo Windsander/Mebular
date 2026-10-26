@@ -5,7 +5,7 @@
 
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -529,13 +529,31 @@ describe('Phase 2 · App 专属 service adapter / provider 注册', () => {
     expect(listed.providers).toHaveLength(1);
     expect(listed.providers[0].version).toBe('0.1.3');
 
+    // 路径变化：同一把写锁内替换 kind:app，旧路径记录不保留（避免 Plugin 选中旧 runtime）。
+    const movedCli = join(root, 'Mebular-moved.app', 'mebular.mjs');
+    await mkdir(join(root, 'Mebular-moved.app'), { recursive: true });
+    await writeFile(movedCli, '// relocated app runtime entry\n', 'utf-8');
+    const moved = await registerAppRuntimeProvider({
+      cloudRoot: root,
+      cliBin: movedCli,
+      version: '0.1.4',
+      providers: runtimeProviders,
+    });
+    expect(moved).toMatchObject({ ok: true, created: false });
+    expect(moved.replaced).toHaveLength(1);
+    expect(moved.replaced[0].path).toBe(cliBin);
+    listed = await runtimeProviders.listRuntimeProviders(root);
+    expect(listed.providers).toHaveLength(1);
+    expect(listed.providers[0]).toMatchObject({ kind: 'app', path: movedCli, version: '0.1.4' });
+
     const discovery = await runtimeSupervisor.discoverRuntimeProviders({
       root,
       env: { PATH: '' },
       includeSelf: false,
       includeStandardApp: false,
     });
-    expect(discovery.selected).toMatchObject({ kind: 'app', path: cliBin, version: '0.1.3' });
+    expect(discovery.selected).toMatchObject({ kind: 'app', path: movedCli, version: '0.1.4' });
+    expect(discovery.available.map((entry) => entry.path)).not.toContain(cliBin);
   });
 
   it('provider 注册：cloudRoot 不可用跳过；损坏注册表返回错误且不改文件', async () => {

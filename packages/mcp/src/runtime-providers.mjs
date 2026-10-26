@@ -278,6 +278,62 @@ export async function registerRuntimeProvider(root, input, { now = new Date().to
   });
 }
 
+function sameCapabilities(left, right) {
+  const a = Array.isArray(left) ? left : [];
+  const b = Array.isArray(right) ? right : [];
+  return a.length === b.length && a.every((item, index) => item === b[index]);
+}
+
+/**
+ * 注册**单实例 kind** 的 provider：在同一把 `runtime-providers.lock` 内原子替换该 kind 的全部记录。
+ *
+ * 语义（App = kind:app 单入口）：
+ *   - 同一 kind+path：更新 version/capabilities，保留 registeredAt；
+ *   - 路径变化：删除该 kind 的旧 path 记录，只保留当前一条（避免旧 App runtime 被优先选中）；
+ *   - 只影响输入 provider 的 kind；CLI/shared 等其他 kind 原样保留；
+ *   - 内容完全一致时返回 unchanged，不重写文件；
+ *   - 注册表损坏 → assertWritable fail-closed，不覆盖。
+ *
+ * 不使用方必须保证该 kind 在本机确实单实例；多实例 kind 用 registerRuntimeProvider。
+ */
+export async function registerExclusiveRuntimeProvider(root, input, { now = new Date().toISOString() } = {}) {
+  return withRuntimeProvidersLock(root, async () => {
+    const state = await readRuntimeProviders(root);
+    assertWritable(state);
+    const provider = normalizeRuntimeProvider(input, { now });
+    const previous = state.registry.providers;
+    const samePath = previous.find((entry) => entry.id === provider.id) ?? null;
+    if (samePath !== null) provider.registeredAt = samePath.registeredAt;
+
+    const sameKind = previous.filter((entry) => entry.kind === provider.kind);
+    const unchanged = sameKind.length === 1
+      && samePath !== null
+      && samePath.version === provider.version
+      && sameCapabilities(samePath.capabilities, provider.capabilities);
+    if (unchanged) {
+      return {
+        provider: { ...samePath },
+        created: false,
+        unchanged: true,
+        replaced: [],
+        warnings: state.warnings,
+      };
+    }
+
+    const replaced = sameKind.filter((entry) => entry.id !== provider.id);
+    const providers = previous.filter((entry) => entry.kind !== provider.kind);
+    providers.push(provider);
+    await writeRuntimeProviders(root, { v: RUNTIME_PROVIDERS_VERSION, providers });
+    return {
+      provider,
+      created: sameKind.length === 0,
+      unchanged: false,
+      replaced,
+      warnings: state.warnings,
+    };
+  });
+}
+
 /**
  * 移除 provider：按 id，或按 kind + path。
  * 不存在 → RUNTIME_PROVIDER_NOT_FOUND（调用方显式处理，不静默成功）。

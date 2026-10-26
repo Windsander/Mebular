@@ -120,10 +120,16 @@ App 已安装但未启动时，应启动 App provider，不得下载第二个 ru
 - **只存** kind/path/version/capabilities 与时间戳；未知字段（token、身份、私钥等）写入时丢弃。
 - 写入/移除：`runtime-providers.lock` + tmp → rename 原子落盘，权限 0600。
 - 读取：不阻塞 attach/service；文件损坏时返回空 provider + warning；写入/移除 fail-closed，不覆盖损坏文件。
-- 注册/更新按 `kind + path` 去重，保留 `registeredAt`；移除需显式 `id` 或 `kind + path`。
+- 注册/更新：
+  - 通用 `registerRuntimeProvider` 按 `kind + path` 去重，保留 `registeredAt`；用于 CLI/shared 等可多实例 kind。
+  - 单实例 `registerExclusiveRuntimeProvider` 在同一把 `runtime-providers.lock` 内**原子替换该 kind 的全部记录**；
+    用于 App（`kind:app`）。同一 path 的版本更新保留 `registeredAt`；path 变化会删除旧 App 记录、只保留
+    当前一条（避免 Plugin/CLI 按字典序选中旧 App runtime）；其他 kind 原样保留。内容未变化时返回
+    `unchanged` 且不重写文件。
+  - 移除需显式 `id` 或 `kind + path`。
 - 标准 App 路径发现集中在 `standardAppProviderPaths()`，打包布局变化只改这一处。
 - App 在 Phase 2 启动时注册 `kind: app`（路径 = 内置 CLI、版本 = `APP_VERSION`、能力 = `serve`），
-  路径/版本变化时更新同一条；注册失败只告警，不阻塞 App。Phase 1 已支持 CLI PATH、self 与注册表读取。
+  调用单实例注册原子替换旧的 App 记录；注册失败只告警，不阻塞 App。Phase 1 已支持 CLI PATH、self 与注册表读取。
 
 ## 5. CLI 契约（稳定 JSON）
 
@@ -203,7 +209,8 @@ active lock、instance mismatch、service 注册与不可覆盖优先级、provi
 启动锁、ensure attach/service/child、`supervise` child 所有权与 SIGTERM/SIGKILL 升级、
 无 provider → `download_required`、CLI 稳定 JSON。
 Phase 2 自动化覆盖：App `ensureDaemon` 委托 supervisor 的 reused/service/child/conflict 映射、App 专属
-service descriptor、child 句柄归 App 所有、`kind:app` provider 注册/版本更新/失败不阻塞、第二入口 attach。
+service descriptor、child 句柄归 App 所有、`kind:app` provider 注册/版本更新/**路径变化原子替换**/失败不阻塞、
+第二入口 attach；CLI `provider list` / `runtime resolve` 不会选到旧 App path。
 B 下载/更新/升级/卸载矩阵行在对应阶段补齐。
 
 ## 7. child 与 service

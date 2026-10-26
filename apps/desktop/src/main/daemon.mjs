@@ -391,17 +391,12 @@ export function appRuntimeProvider({ cliBin, version = APP_VERSION } = {}) {
   };
 }
 
-function sameProvider(entry, record) {
-  if (!entry || entry.kind !== record.kind || resolve(entry.path) !== resolve(record.path)) return false;
-  const capabilities = Array.isArray(entry.capabilities) ? entry.capabilities : [];
-  return entry.version === record.version
-    && capabilities.length === record.capabilities.length
-    && capabilities.every((item, index) => item === record.capabilities[index]);
-}
-
 /**
  * 启动时注册/更新 `kind:app` provider（供 Plugin/CLI 发现 App runtime）。
- * 失败只返回结果、不抛出：注册失败不得阻塞 App；cloudRoot/自定义 home 不可用时跳过。
+ *
+ * App 是单入口：调用 runtime-providers 的 `registerExclusiveRuntimeProvider`，在同一把写锁内
+ * 原子替换所有 kind:app 记录；路径变化不会留下旧 App runtime，版本变化保留 registeredAt。
+ * 只影响 kind:app，CLI/shared 不动。失败只返回结果、不抛出：注册失败不得阻塞 App。
  */
 export async function registerAppRuntimeProvider({
   cloudRoot,
@@ -418,18 +413,19 @@ export async function registerAppRuntimeProvider({
   const loaded = providers !== null
     ? { module: providers, error: null }
     : await loadRuntimeProviders(cliBin);
-  if (!loaded.module?.registerRuntimeProvider) {
+  if (typeof loaded.module?.registerExclusiveRuntimeProvider !== 'function') {
     return { ok: false, skipped: true, reason: 'providers_unavailable', error: loaded.error ?? null };
   }
   const record = appRuntimeProvider({ cliBin, version });
   try {
-    if (typeof loaded.module.listRuntimeProviders === 'function') {
-      const current = await loaded.module.listRuntimeProviders(cloudRoot);
-      const existing = (current?.providers ?? []).find((entry) => sameProvider(entry, record)) ?? null;
-      if (existing) return { ok: true, unchanged: true, provider: existing };
-    }
-    const result = await loaded.module.registerRuntimeProvider(cloudRoot, record);
-    return { ok: true, created: result.created === true, provider: result.provider };
+    const result = await loaded.module.registerExclusiveRuntimeProvider(cloudRoot, record);
+    return {
+      ok: true,
+      created: result.created === true,
+      unchanged: result.unchanged === true,
+      replaced: Array.isArray(result.replaced) ? result.replaced : [],
+      provider: result.provider,
+    };
   } catch (error) {
     return { ok: false, error: String(error?.message ?? error) };
   }

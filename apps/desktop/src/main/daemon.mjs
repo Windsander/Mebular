@@ -10,10 +10,12 @@ import { existsSync, readFileSync } from 'node:fs';
 import { connect } from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 export const APP_VERSION = '0.1.2';
 export const SERVICE_KIND = 'mebular-serve';
+/** App 注册到 <cloudRoot>/runtime-providers.json 的能力（只写发现信息，不写 token/身份）。 */
+export const APP_RUNTIME_PROVIDER_CAPABILITIES = Object.freeze(['serve']);
 
 /** 仓库根（apps/desktop/src/main → 上溯 4 层）；打包态由 resources 决定。 */
 export function repoRootFromModule() {
@@ -239,13 +241,311 @@ export function serviceDescriptorFor({ home, cliBin, execPath, http, cloudRoot =
 }
 
 /**
+ * 从 CLI 入口动态加载同仓库的共享 runtime 模块（开发态/打包 extraResources 同构）。
+ * 与 loadServiceModule/loadCloudModules 一样不新增打包依赖；加载失败由调用方决定兜底。
+ */
+async function importRuntimeSource(cliBin, file) {
+  const src = join(dirname(cliBin), '..', 'src');
+  return import(pathToFileURL(join(src, file)).href);
+}
+
+async function loadRuntimeSupervisor(cliBin) {
+  if (typeof cliBin !== 'string' || cliBin.length === 0) {
+    return { module: null, error: '缺少 cliBin' };
+  }
+  try {
+    return { module: await importRuntimeSource(cliBin, 'runtime-supervisor.mjs'), error: null };
+  } catch (error) {
+    return { module: null, error: String(error?.message ?? error) };
+  }
+}
+
+async function loadRuntimeProviders(cliBin) {
+  if (typeof cliBin !== 'string' || cliBin.length === 0) {
+    return { module: null, error: '缺少 cliBin' };
+  }
+  try {
+    return { module: await importRuntimeSource(cliBin, 'runtime-providers.mjs'), error: null };
+  } catch (error) {
+    return { module: null, error: String(error?.message ?? error) };
+  }
+}
+
+function runtimeError(code, message, extra = {}) {
+  const error = new Error(message);
+  error.code = code;
+  Object.assign(error, extra);
+  return error;
+}
+
+/**
+ * App 专属 service adapter：描述符必须保留 App 现有行为（args 带 --port、execPath、ELECTRON_RUN_AS_NODE、
+ * MEBULAR_HOME/MEBULAR_CLOUD_ROOT），serviceHome 仍是 OS 用户 home。
+ *
+ * 契约：
+ *   - serviceStatus 抛错 → ok:false（supervisor fail-closed：不 restart、不 fallback child）；
+ *   - foreign 原样上报（supervisor 拒绝对他人作业 restart/spawn）；
+ *   - 完全没有 @mebular/service（自定义安装/测试替身）→ ok:true、未登记：保留 App 既有 child 兜底；
+ *   - restart 失败保留 App 现有中文错误信息（supervisor 映射为 error，App 显示为不可用提示）。
+ */
+export function createAppServiceAdapter({
+  service = {},
+  home,
+  cliBin,
+  execPath = process.execPath,
+  http,
+  cloudRoot = null,
+  serviceHome = homedir(),
+} = {}) {
+  const descriptor = serviceDescriptorFor({ home, cliBin, execPath, http, cloudRoot });
+  return {
+    descriptor,
+    async status() {
+      if (typeof service?.serviceStatus === 'function') {
+        try {
+          const status = service.serviceStatus(descriptor, { home: serviceHome });
+          return {
+            ok: true,
+            registered: status?.registered === true,
+            running: status?.running === true,
+            label: status?.label ?? null,
+            autostart: status?.autostart ?? null,
+            foreign: status?.foreign === true,
+            unitPath: status?.unitPath ?? null,
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            registered: false,
+            running: false,
+            label: null,
+            autostart: null,
+            foreign: false,
+            unitPath: null,
+            error: String(error?.message ?? error),
+          };
+        }
+      }
+      if (typeof service?.registeredServicesForDir === 'function') {
+        // 旧注入形状（测试/旧调用方）：只给「是否登记」，状态未知时仍视为可探测。
+        try {
+          const registered = service.registeredServicesForDir(home, { home: serviceHome }).includes(SERVICE_KIND);
+          return {
+            ok: true,
+            registered,
+            running: null,
+            label: null,
+            autostart: null,
+            foreign: false,
+            unitPath: null,
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            registered: false,
+            running: false,
+            label: null,
+            autostart: null,
+            foreign: false,
+            unitPath: null,
+            error: String(error?.message ?? error),
+          };
+        }
+      }
+      // 模块不可用：App 旧行为就是「未登记 → child」。这里不伪造已登记，也不假装探测成功。
+      return {
+        ok: true,
+        registered: false,
+        running: false,
+        label: null,
+        autostart: null,
+        foreign: false,
+        unitPath: null,
+        available: false,
+      };
+    },
+    async restart() {
+      if (typeof service?.restartService !== 'function') {
+        throw runtimeError('RUNTIME_SERVICE_RESTART_FAILED', '常驻服务重启失败：@mebular/service 不可用');
+      }
+      const result = service.restartService(descriptor, { home: serviceHome });
+      if (result && result.ok === false) {
+        throw runtimeError(
+          'RUNTIME_SERVICE_RESTART_FAILED',
+          `常驻服务重启失败：${result.manual ?? result.error ?? result.message ?? '未知原因'}`,
+          { result },
+        );
+      }
+      return result ?? { ok: true };
+    },
+  };
+}
+
+/** App 在共享 provider 注册表中的记录（只含 kind/path/version/capabilities）。 */
+export function appRuntimeProvider({ cliBin, version = APP_VERSION } = {}) {
+  return {
+    kind: 'app',
+    path: cliBin,
+    version,
+    capabilities: [...APP_RUNTIME_PROVIDER_CAPABILITIES],
+  };
+}
+
+function sameProvider(entry, record) {
+  if (!entry || entry.kind !== record.kind || resolve(entry.path) !== resolve(record.path)) return false;
+  const capabilities = Array.isArray(entry.capabilities) ? entry.capabilities : [];
+  return entry.version === record.version
+    && capabilities.length === record.capabilities.length
+    && capabilities.every((item, index) => item === record.capabilities[index]);
+}
+
+/**
+ * 启动时注册/更新 `kind:app` provider（供 Plugin/CLI 发现 App runtime）。
+ * 失败只返回结果、不抛出：注册失败不得阻塞 App；cloudRoot/自定义 home 不可用时跳过。
+ */
+export async function registerAppRuntimeProvider({
+  cloudRoot,
+  cliBin,
+  version = APP_VERSION,
+  providers = null,
+} = {}) {
+  if (typeof cloudRoot !== 'string' || cloudRoot.length === 0) {
+    return { ok: false, skipped: true, reason: 'cloud_unavailable' };
+  }
+  if (typeof cliBin !== 'string' || cliBin.length === 0) {
+    return { ok: false, skipped: true, reason: 'cli_unavailable' };
+  }
+  const loaded = providers !== null
+    ? { module: providers, error: null }
+    : await loadRuntimeProviders(cliBin);
+  if (!loaded.module?.registerRuntimeProvider) {
+    return { ok: false, skipped: true, reason: 'providers_unavailable', error: loaded.error ?? null };
+  }
+  const record = appRuntimeProvider({ cliBin, version });
+  try {
+    if (typeof loaded.module.listRuntimeProviders === 'function') {
+      const current = await loaded.module.listRuntimeProviders(cloudRoot);
+      const existing = (current?.providers ?? []).find((entry) => sameProvider(entry, record)) ?? null;
+      if (existing) return { ok: true, unchanged: true, provider: existing };
+    }
+    const result = await loaded.module.registerRuntimeProvider(cloudRoot, record);
+    return { ok: true, created: result.created === true, provider: result.provider };
+  } catch (error) {
+    return { ok: false, error: String(error?.message ?? error) };
+  }
+}
+
+/**
  * 确保守护在跑（**默认优先服务**）：
- *   1. 已有实例健康（lock + /healthz 200）→ 复用，不重复启动；
- *   2. 服务托管已登记 → `@mebular/service` 重启它；
- *   3. 兜底 → 子进程 `spawn(execPath, [cliBin, 'serve'], { MEBULAR_HOME })`。
- * 返回 { mode: 'reused' | 'service' | 'child', home, child? }。
+ *   - 正常路径：委托共享 Runtime Supervisor（健康 attach / service / App provider child）；
+ *   - 自定义 home（cloudRoot 不可用）：保留 App 原有路径（不改变受限环境行为）。
+ *
+ * 返回 { mode: 'reused' | 'service' | 'child' | 'conflict', home, child?, reason?, message? }。
  */
 export async function ensureDaemon({
+  home,
+  service,
+  spawnFn,
+  fetchImpl,
+  cliBin,
+  execPath = process.execPath,
+  http = { host: '127.0.0.1', port: 7331 },
+  env = process.env,
+  cloudRoot = null,
+  serviceHome = homedir(),
+  supervisor = null,
+  probeHealthFn,
+  waitForHealthFn,
+  probePortFn,
+  waitAttempts,
+  waitIntervalMs,
+  now,
+} = {}) {
+  const root = typeof cloudRoot === 'string' && cloudRoot.length > 0 ? cloudRoot : null;
+  // 显式注入 supervisor 时（测试/诊断）也走共享路径；生产态只有 cloudRoot 可用才委托，
+  // 自定义 home / 受限 env 保持 App 既有行为。
+  const delegate = supervisor !== null || root !== null;
+  if (!delegate) {
+    return { ...(await legacyEnsureDaemon({ home, service, spawnFn, fetchImpl, cliBin, execPath, http, env, cloudRoot, serviceHome })), adapter: 'legacy' };
+  }
+
+  const loaded = supervisor !== null ? { module: supervisor, error: null } : await loadRuntimeSupervisor(cliBin);
+  if (!loaded.module?.ensureRuntime) {
+    const result = await legacyEnsureDaemon({ home, service, spawnFn, fetchImpl, cliBin, execPath, http, env, cloudRoot, serviceHome });
+    return {
+      ...result,
+      adapter: 'legacy',
+      warning: `共享 Runtime Supervisor 不可用，已使用 App 原有启动路径${loaded.error ? `（${loaded.error}）` : ''}`,
+    };
+  }
+
+  const adapter = createAppServiceAdapter({ service, home, cliBin, execPath, http, cloudRoot: root, serviceHome });
+  const runtimeEnv = root === null ? env : { ...env, MEBULAR_CLOUD_ROOT: root };
+  const port = Number(http?.port);
+  const result = await loaded.module.ensureRuntime({
+    home,
+    ...(Number.isInteger(port) && port > 0 ? { port } : {}),
+    env: runtimeEnv,
+    execPath,
+    // App 进程内持有 child 句柄：不 detach；supervisor 只返回本次拉起的 child，App 退出只停它。
+    detached: false,
+    service: adapter,
+    serviceHome,
+    cliBin,
+    fetchImpl,
+    spawnFn,
+    registryProviders: typeof cliBin === 'string' && cliBin.length > 0 ? [appRuntimeProvider({ cliBin })] : [],
+    includeSelf: false,
+    includeStandardApp: false,
+    ...(typeof probeHealthFn === 'function' ? { probeHealthFn } : {}),
+    ...(typeof waitForHealthFn === 'function' ? { waitForHealthFn } : {}),
+    ...(typeof probePortFn === 'function' ? { probePortFn } : {}),
+    ...(typeof waitAttempts === 'number' ? { waitAttempts } : {}),
+    ...(typeof waitIntervalMs === 'number' ? { waitIntervalMs } : {}),
+    ...(typeof now === 'function' ? { now } : {}),
+  });
+  return mapSupervisorResult(result, { home, http });
+}
+
+/** supervisor 结果 → App 既有模式；download_required/error 只映射为不可用/冲突提示，绝不下载。 */
+function mapSupervisorResult(result, { home, http }) {
+  const mode = result?.mode ?? 'error';
+  if (mode === 'reused' || mode === 'service') {
+    return { mode, home, child: null, adapter: 'supervisor' };
+  }
+  if (mode === 'child') {
+    return { mode: 'child', home, child: result?.child ?? null, adapter: 'supervisor' };
+  }
+  const reason = result?.reason ?? (mode === 'download_required' ? 'download_required' : 'runtime_error');
+  const message = appRuntimeMessage(result, { home, http, reason });
+  return {
+    mode: 'conflict',
+    reason,
+    message,
+    home,
+    child: null,
+    adapter: 'supervisor',
+    ...(typeof result?.instance === 'string' ? { instance: result.instance } : {}),
+  };
+}
+
+/** App 可理解的人话：保留原有 instance/端口/常驻提示语义。 */
+function appRuntimeMessage(result, { http, reason }) {
+  const port = Number.isInteger(http?.port) ? http.port : (result?.http?.port ?? 7331);
+  if (reason === 'instance_mismatch') return `端口 ${port} 上是另一张忆云，请先停止它`;
+  if (reason === 'instance_missing') return `端口 ${port} 上的守护没有 /healthz instance 身份，无法确认是当前忆云`;
+  if (reason === 'port_in_use') {
+    return `端口 ${port} 已被占用但不是 Mebular 守护：请关闭占用该端口的程序，或在启动参数里换一个端口（--port <n>）。`;
+  }
+  if (typeof result?.message === 'string' && result.message.trim().length > 0) return result.message;
+  if (result?.mode === 'download_required') {
+    return '没有可用的 Mebular runtime provider：请打开 Mebular App 或安装 CLI；本版本不会自动下载。';
+  }
+  return `Mebular 守护不可用（${reason}）`;
+}
+
+/** App 原有 ensureDaemon 实现（自定义 home / supervisor 不可用时的保留路径）。 */
+async function legacyEnsureDaemon({
   home,
   service,
   spawnFn,

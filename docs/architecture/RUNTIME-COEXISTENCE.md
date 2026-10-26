@@ -1,7 +1,8 @@
 # 共享 Runtime：App 与 DSH Plugin 入口对等
 
 > **状态**：Phase 0（契约）+ Phase 1（共享 Runtime Supervisor / Provider 注册表 / `mebular runtime` CLI，
-> 含入口持有的 `runtime supervise` child 生命周期）已落地。
+> 含入口持有的 `runtime supervise` child 生命周期）+ Phase 2（App 内部接入 Supervisor 并注册
+> `kind:app` provider）已落地。
 > B 下载、自动安装、失败重装、启动更新检查、升级、签名属于后续阶段；本文先把产品决策写成契约，
 > 代码不得提前越过阶段实现。
 >
@@ -121,7 +122,8 @@ App 已安装但未启动时，应启动 App provider，不得下载第二个 ru
 - 读取：不阻塞 attach/service；文件损坏时返回空 provider + warning；写入/移除 fail-closed，不覆盖损坏文件。
 - 注册/更新按 `kind + path` 去重，保留 `registeredAt`；移除需显式 `id` 或 `kind + path`。
 - 标准 App 路径发现集中在 `standardAppProviderPaths()`，打包布局变化只改这一处。
-- App 注册 `kind: app` 在 Phase 2 接入；Phase 1 已支持 CLI PATH、self 与注册表读取。
+- App 在 Phase 2 启动时注册 `kind: app`（路径 = 内置 CLI、版本 = `APP_VERSION`、能力 = `serve`），
+  路径/版本变化时更新同一条；注册失败只告警，不阻塞 App。Phase 1 已支持 CLI PATH、self 与注册表读取。
 
 ## 5. CLI 契约（稳定 JSON）
 
@@ -200,6 +202,8 @@ Phase 1 自动化覆盖：默认/非默认 profile、custom `MEBULAR_CLOUD_ROOT`
 active lock、instance mismatch、service 注册与不可覆盖优先级、provider 发现/注册表、端口冲突、
 启动锁、ensure attach/service/child、`supervise` child 所有权与 SIGTERM/SIGKILL 升级、
 无 provider → `download_required`、CLI 稳定 JSON。
+Phase 2 自动化覆盖：App `ensureDaemon` 委托 supervisor 的 reused/service/child/conflict 映射、App 专属
+service descriptor、child 句柄归 App 所有、`kind:app` provider 注册/版本更新/失败不阻塞、第二入口 attach。
 B 下载/更新/升级/卸载矩阵行在对应阶段补齐。
 
 ## 7. child 与 service

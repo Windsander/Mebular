@@ -13,7 +13,7 @@ import {
   APP_VERSION, consoleUrl, ensureDaemon, resolveCliBin, resolveHome, resolveHttp,
   serviceEnabledFor, stopManaged, waitForDaemonDetail, parseArgs, probeHealthDetail, probeProvision,
   probeRuntimeIdentity, probeSecurityLevel, serviceDescriptorFor, homeKey, isPortOpen,
-  reconcileManagedState, isManagedChildAlive,
+  reconcileManagedState, isManagedChildAlive, registerAppRuntimeProvider,
 } from './daemon.mjs';
 import {
   loadCloudModules, migrateLegacyService, performCloudSwitch, recoverSwitchIntent,
@@ -230,6 +230,7 @@ async function ensure() {
     fetchImpl: fetch,
     spawnFn: (exec, args, opts) => spawnChild(exec, args, opts),
   });
+  if (result.warning) console.log(`[desktop] ${result.warning}`);
   if (result.mode === 'conflict') {
     markTrayStateChanged();
     healthy = false;
@@ -898,6 +899,12 @@ async function initCloudState() {
     return;
   }
   cloudRoot = resolved.root;
+  // 共享 Runtime 发现：注册 kind:app provider（路径/版本/能力），供 CLI/Plugin 启动/attach；
+  // 只告警不阻塞启动；自定义 home（cloudRoot 不可用）时不注册。
+  const runtimeProvider = await registerAppRuntimeProvider({ cloudRoot, cliBin });
+  if (!runtimeProvider.ok) {
+    console.log(`[desktop] runtime provider 注册失败（不阻塞启动）：${runtimeProvider.error ?? runtimeProvider.reason ?? '未知原因'}`);
+  }
   try {
     const state = await cloudModules.profiles.readRegistry(cloudRoot);
     const current = state.registry.profiles.find((profile) => profile.id === state.registry.current) ?? null;

@@ -996,6 +996,143 @@ async function runCloud(action, args, flags) {
   process.exit(2);
 }
 
+// ---------- 共享 runtime：resolve / ensure / status + provider 注册表 ----------
+
+function runtimeCliError(error) {
+  return {
+    ok: false,
+    mode: 'error',
+    reason: error?.code ?? 'error',
+    message: error?.message ?? String(error),
+  };
+}
+
+function printRuntimeJson(value, exitCode = 0) {
+  console.log(JSON.stringify(value, null, 2));
+  process.exit(exitCode);
+}
+
+async function runtimeRootForCli() {
+  const { resolveCloudRoot } = await import('../src/profiles.mjs');
+  const cloud = resolveCloudRoot({ env: process.env });
+  if (!cloud.available) {
+    const error = new Error(`runtime 上下文不可用（${cloud.reason ?? 'cloud_unavailable'}）`);
+    error.code = 'CLOUD_UNAVAILABLE';
+    throw error;
+  }
+  return cloud.root;
+}
+
+async function runRuntimeProvider(args, flags) {
+  const { listRuntimeProviders, registerRuntimeProvider, removeRuntimeProvider } = await import('../src/runtime-providers.mjs');
+  const root = await runtimeRootForCli();
+  const sub = args[0];
+  if (sub === 'list') {
+    const state = await listRuntimeProviders(root);
+    printRuntimeJson({
+      ok: true,
+      root,
+      source: state.source,
+      providers: state.providers,
+      warnings: state.warnings,
+    });
+    return;
+  }
+  if (sub === 'add') {
+    if (typeof flags.kind !== 'string' || typeof flags.path !== 'string') {
+      const error = new Error('用法：mebular runtime provider add --kind app|cli|shared --path <abs> [--version V] [--capabilities a,b]');
+      error.code = 'USAGE';
+      throw error;
+    }
+    if (!existsSync(flags.path)) {
+      const error = new Error(`provider 路径不存在：${flags.path}`);
+      error.code = 'PROVIDER_PATH_MISSING';
+      throw error;
+    }
+    const capabilities = typeof flags.capabilities === 'string'
+      ? flags.capabilities.split(',').map((item) => item.trim()).filter(Boolean)
+      : [];
+    const result = await registerRuntimeProvider(root, {
+      kind: flags.kind,
+      path: flags.path,
+      version: typeof flags.version === 'string' ? flags.version : null,
+      capabilities,
+    });
+    printRuntimeJson({
+      ok: true,
+      root,
+      created: result.created,
+      provider: { ...result.provider, available: true },
+      warnings: result.warnings,
+    });
+    return;
+  }
+  if (sub === 'remove') {
+    const result = await removeRuntimeProvider(root, {
+      id: typeof flags.id === 'string' ? flags.id : undefined,
+      kind: typeof flags.kind === 'string' ? flags.kind : undefined,
+      path: typeof flags.path === 'string' ? flags.path : undefined,
+    });
+    printRuntimeJson({
+      ok: true,
+      root,
+      removed: result.removed,
+      warnings: result.warnings,
+    });
+    return;
+  }
+  const error = new Error('用法：mebular runtime provider <list|add|remove> [--kind ...] [--path ...] [--id ...]');
+  error.code = 'USAGE';
+  throw error;
+}
+
+async function runRuntime(action, args, flags) {
+  try {
+    if (action === 'provider') {
+      await runRuntimeProvider(args, flags);
+      return;
+    }
+    if (action === 'resolve' || action === 'ensure' || action === 'status') {
+      const {
+        ensureRuntime,
+        resolveRuntime,
+        runtimeStatus,
+        toPublicRuntimeResult,
+      } = await import('../src/runtime-supervisor.mjs');
+      const mode = typeof flags.start === 'string' ? flags.start : 'auto';
+      const options = { env: process.env, mode, allowDownload: false };
+      if (flags.port !== undefined) {
+        const port = Number(flags.port);
+        if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+          const error = new Error(`端口非法：${flags.port}`);
+          error.code = 'INVALID_PORT';
+          throw error;
+        }
+        options.port = port;
+      }
+      if (action === 'resolve') {
+        const result = await resolveRuntime(options);
+        printRuntimeJson(toPublicRuntimeResult(result), result.ok ? 0 : 2);
+      }
+      if (action === 'status') {
+        const result = await runtimeStatus(options);
+        printRuntimeJson(toPublicRuntimeResult(result), result.ok ? 0 : 2);
+      }
+      // ensure 默认成为 detached child 的 owner；CLI 退出后 daemon 继续运行。
+      options.detached = true;
+      const result = await ensureRuntime(options);
+      printRuntimeJson(toPublicRuntimeResult(result), result.ok ? 0 : 2);
+    }
+    const error = new Error(
+      '用法：mebular runtime <resolve|ensure|status|provider> [--start auto|child|service] [--port N] [--json]',
+    );
+    error.code = 'USAGE';
+    throw error;
+  } catch (error) {
+    printRuntimeJson(runtimeCliError(error), 2);
+  }
+}
+
 async function main() {
   const flags = parseFlags(argv.slice(1));
   switch (command) {
@@ -1065,6 +1202,10 @@ async function main() {
       await runCloud(argv[1], argv.slice(2), flags);
       return;
     }
+    case 'runtime': {
+      await runRuntime(argv[1], argv.slice(2), flags);
+      return;
+    }
     case 'token': {
       await runToken(argv[1], flags, argv[2]);
       return;
@@ -1082,6 +1223,8 @@ async function main() {
           '  service install|uninstall|restart|status|logs [--no-autostart --label L]  常驻服务管理（mebular-serve）',
           '  console [--host --port]      打印控制台 URL（需 serve 正在运行）',
           '  cloud list|use|rename [id] [name] [--force]   忆云管理（use 停旧/起新/失败回滚）',
+          '  runtime resolve|ensure|status [--start auto|child|service] [--port N] [--json]  共享 runtime（Phase 1 不下载）',
+          '  runtime provider list|add|remove [--kind app|cli|shared --path P --version V --capabilities a,b --id ID]  runtime provider 注册表',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
           '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',

@@ -216,6 +216,20 @@ check('index.js exports mountMcp()', typeof pluginModule.mountMcp === 'function'
 check('index.js exports resolveConfig()', typeof pluginModule.resolveConfig === 'function');
 check('index.js exports createDaemonLifecycle()', typeof pluginModule.createDaemonLifecycle === 'function');
 check('index.js exports createEmbedInfoHandler()', typeof pluginModule.createEmbedInfoHandler === 'function');
+check('index.js exports createRuntimeInstallManager()', typeof pluginModule.createRuntimeInstallManager === 'function');
+check('index.js exports createRuntimeInstallHandler()', typeof pluginModule.createRuntimeInstallHandler === 'function');
+check('index.js exports detectRegisteredRuntimeService()', typeof pluginModule.detectRegisteredRuntimeService === 'function');
+check('index.js exports sanitizeRuntimeInstallState()', typeof pluginModule.sanitizeRuntimeInstallState === 'function');
+check(
+  'index.js pinned runtime version tracks the plugin version',
+  pluginModule.RUNTIME_INSTALL_VERSION === pkg.version,
+  `${String(pluginModule.RUNTIME_INSTALL_VERSION)} != ${String(pkg.version)}`,
+);
+check(
+  'index.js exposes the loopback install route',
+  pluginModule.RUNTIME_INSTALL_PATH === '/mebular/runtime/install',
+  String(pluginModule.RUNTIME_INSTALL_PATH),
+);
 check('index.js exports agentStatusText()', typeof pluginModule.agentStatusText === 'function');
 check('index.js exports createAgentStatus()', typeof pluginModule.createAgentStatus === 'function');
 
@@ -291,7 +305,20 @@ check('client embeds the shared Console (?embed=dsh)', clientSource.includes('?e
 check('client uses a sandboxed iframe', clientSource.includes("sandbox: 'allow-scripts allow-same-origin allow-forms'"));
 check('client honours panel:false', clientSource.includes('__MEBULAR_DSH__') && /panel\s*===\s*false/.test(clientSource));
 check('client handles managed start states', clientSource.includes('managed_cli_missing') && clientSource.includes('managed_start_failed'));
-check('client does not post write requests to the host', !clientSource.includes('mebular:request') && !clientSource.includes('postMessage'));
+check('client offers the plugin-only install action', clientSource.includes("'/mebular/runtime/install'"));
+check('client posts only the install action', /body:\s*JSON\.stringify\(\{\s*action\s*\}\)/.test(clientSource));
+check('client has exactly one POST method', (clientSource.match(/method:\s*'POST'/g) ?? []).length === 1);
+check('client has no other write methods', !/method:\s*'(?:PUT|PATCH|DELETE)'/.test(clientSource));
+check('client shows install/retry/reinstall/copy/redetect actions', [
+  'installTitle', 'installingTitle', 'installFailedTitle', 'installAction', 'installRetry',
+  'installReinstall', 'installCopy', 'installRedetect', 'installManualHint', 'installReadme',
+].every((key) => clientSource.includes(key)));
+check('client copies the manual command locally', clientSource.includes('navigator?.clipboard?.writeText'));
+check(
+  'client never triggers install from the poll timer',
+  !/setInterval\([\s\S]{0,120}install\(/.test(clientSource),
+);
+check('client does not post write requests through DSH', !clientSource.includes('mebular:request') && !clientSource.includes('postMessage'));
 
 const clientRequires = [...clientSource.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)]
   .map((match) => match[1]);

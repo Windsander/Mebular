@@ -674,6 +674,7 @@ describe('P2 @mebular/dsh-plugin host：纯函数', () => {
       provider: null,
       service: null,
       downloadRequired: false,
+      install: null,
       embedProtocol: EMBED_PROTOCOL,
       consoleUrl: `${BASE}/console`,
       embedUrl: `${BASE}/console/?embed=dsh`,
@@ -682,7 +683,7 @@ describe('P2 @mebular/dsh-plugin host：纯函数', () => {
       reason: null,
     });
     expect(Object.keys(info).sort()).toEqual([
-      'consoleUrl', 'daemonUrl', 'downloadRequired', 'embedProtocol', 'embedUrl', 'loopback',
+      'consoleUrl', 'daemonUrl', 'downloadRequired', 'embedProtocol', 'embedUrl', 'install', 'loopback',
       'managed', 'mcpUrl', 'mode', 'ok', 'panel', 'profile', 'provider', 'reason',
       'runtimeMode', 'service', 'state', 'status', 'version',
     ]);
@@ -1836,8 +1837,10 @@ describe('P2 @mebular/dsh-plugin host：探测与 /mebular/embed-info 路由', (
     }, { applyOptions: { bridgeIntervalMs: 60000 } });
     activeMock = harness.mock;
 
-    expect(harness.routes).toHaveLength(1);
+    expect(harness.routes).toHaveLength(2);
     expect(harness.routes[0]).toMatchObject({ kind: 'exact', path: EMBED_INFO_PATH });
+    expect(harness.routes[1]).toMatchObject({ kind: 'exact', path: '/mebular/runtime/install' });
+    expect(typeof harness.routes[1].handler).toBe('function');
 
     const res = makeResponse();
     await harness.route.handler(makeRequest(), res);

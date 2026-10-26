@@ -23,14 +23,28 @@
 // shared supervisor's `runtime resolve --json`, so a non-default profile/port
 // is followed by the status route, the bridge, and the panel.
 
+import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 
 export const name = '@mebular/dsh-plugin';
 
 export const EMBED_INFO_PATH = '/mebular/embed-info';
+
+/** Loopback-only explicit user action: install/start the shared runtime. */
+export const RUNTIME_INSTALL_PATH = '/mebular/runtime/install';
+
+/**
+ * Pinned `@mebular/core` version for the plugin-only bootstrap. It must track
+ * this package's version (enforced by scripts/verify-dsh-plugin.mjs); clients
+ * can never supply a version, tag, URL or registry.
+ */
+export const RUNTIME_INSTALL_VERSION = '0.1.2';
+
+export const RUNTIME_INSTALL_ACTIONS = Object.freeze(['install', 'retry', 'reinstall', 'redetect']);
 
 /** Console discovery contract version, shared with packages/mcp. */
 export const EMBED_PROTOCOL = 1;
@@ -68,6 +82,45 @@ const RUNTIME_PROVIDERS_FILE = 'runtime-providers.json';
 const MAX_JSON_BYTES = 512 * 1024;
 const MAX_LOG_LINE = 500;
 const RUNTIME_PROVIDER_KINDS = new Set(['app', 'cli', 'shared']);
+
+const RUNTIME_DIR = 'runtime';
+const RUNTIME_INSTALL_LOCK_FILE = 'install.lock';
+const RUNTIME_PACKAGE_NAME = '@mebular/core';
+const RUNTIME_CLI_RELATIVE = join('node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs');
+const RUNTIME_PACKAGE_RELATIVE = join('node_modules', '@mebular', 'core', 'package.json');
+const RUNTIME_STAGING_PREFIX = '.tmp-install-';
+const RUNTIME_BACKUP_PREFIX = '.backup-';
+const DEFAULT_INSTALL_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_CLI_TIMEOUT_MS = 20_000;
+const DEFAULT_INSTALL_KILL_GRACE_MS = 500;
+const MAX_INSTALL_LOG_BYTES = 64 * 1024;
+const MAX_INSTALL_BODY_BYTES = 8 * 1024;
+const SEMVER_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+/** Stable install failure reasons surfaced by the panel and Agent logs. */
+export const RUNTIME_INSTALL_REASONS = Object.freeze([
+  'offline',
+  'registry_unreachable',
+  'http_error',
+  'integrity_mismatch',
+  'disk_full',
+  'permission_denied',
+  'npm_missing',
+  'unsupported_version',
+  'cancelled',
+  'install_locked',
+  'provider_registration_failed',
+  'init_failed',
+  'start_failed',
+  'runtime_resolve_failed',
+  'install_failed',
+]);
+
+const INSTALL_REASON_SET = new Set([
+  ...RUNTIME_INSTALL_REASONS,
+  'download_required',
+]);
+
 
 /** Standard App bundle runtime entry, mirroring the shared supervisor layout. */
 const APP_PROVIDER_TAIL = ['node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs'];
@@ -1102,6 +1155,7 @@ function sanitizeService(value) {
  *   provider?: unknown,
  *   service?: unknown,
  *   downloadRequired?: boolean,
+ *   install?: unknown,
  * }} [input]
  * @returns {{
  *   ok: boolean,
@@ -1117,6 +1171,7 @@ function sanitizeService(value) {
  *   provider: { kind: string, source: string | null, version: string | null } | null,
  *   service: { registered: boolean, running: boolean, foreign: boolean } | null,
  *   downloadRequired: boolean,
+ *   install: ReturnType<typeof sanitizeRuntimeInstallState> | null,
  *   embedProtocol: number | null,
  *   consoleUrl: string,
  *   embedUrl: string | null,
@@ -1211,6 +1266,7 @@ export function buildEmbedInfo(input = {}) {
     provider: sanitizeProvider(config.provider),
     service: sanitizeService(config.service),
     downloadRequired,
+    install: isObject(config.install) ? sanitizeRuntimeInstallState(config.install) : null,
     embedProtocol,
     consoleUrl,
     embedUrl: status === 'up' && reason === null ? remoteEmbedUrl : null,
@@ -1362,6 +1418,1190 @@ function failureState(data) {
   };
 }
 
+/* ------------------------------------------------------------------------- *
+ * Plugin-only shared runtime install (explicit user action)
+ * ------------------------------------------------------------------------- */
+
+function installError(reason, message, extra = {}) {
+  const code = INSTALL_REASON_SET.has(reason) ? reason : 'install_failed';
+  const error = new Error(message);
+  error.code = code;
+  for (const [key, value] of Object.entries(extra)) error[key] = value;
+  return error;
+}
+
+/** Strict semver + path safety; the version is always the plugin's constant. */
+export function assertRuntimeInstallVersion(value) {
+  if (typeof value !== 'string') {
+    throw installError('unsupported_version', 'runtime version must be a string');
+  }
+  const version = value.trim();
+  if (version.length === 0 || version.length > 128 || !SEMVER_RE.test(version)) {
+    throw installError('unsupported_version', `unsupported runtime version: ${version.slice(0, 128) || '(empty)'}`);
+  }
+  return version;
+}
+
+export function runtimeInstallDir(cloudRoot) {
+  return join(cloudRoot, RUNTIME_DIR);
+}
+
+export function runtimeInstallTarget(cloudRoot, version) {
+  return join(runtimeInstallDir(cloudRoot), assertRuntimeInstallVersion(version));
+}
+
+export function runtimeInstallCliPath(cloudRoot, version) {
+  return join(runtimeInstallTarget(cloudRoot, version), RUNTIME_CLI_RELATIVE);
+}
+
+export function runtimeManualInstallCommand(version = RUNTIME_INSTALL_VERSION) {
+  return `npm install -g ${RUNTIME_PACKAGE_NAME}@${assertRuntimeInstallVersion(version)}`;
+}
+
+/**
+ * Fixed npm command: `npm install --prefix <tmp> --ignore-scripts --no-audit
+ * --no-fund @mebular/core@<version>`. Only Windows `npm.cmd` uses a shell, and
+ * every argument is constructed here (never from the client).
+ */
+export function buildRuntimeInstallCommand({
+  version = RUNTIME_INSTALL_VERSION,
+  prefix,
+  platform = process.platform,
+  npmPath = null,
+  execPath = process.execPath,
+} = {}) {
+  const safeVersion = assertRuntimeInstallVersion(version);
+  if (typeof prefix !== 'string' || prefix.length === 0) {
+    throw installError('install_failed', 'missing npm --prefix');
+  }
+  let command;
+  let leading = [];
+  let shell = false;
+  const rawPath = typeof npmPath === 'string' && npmPath.trim().length > 0 ? npmPath.trim() : null;
+  if (rawPath !== null) {
+    const name = platform === 'win32' ? (rawPath.split(/[\\/]/).pop() ?? rawPath) : basename(rawPath);
+    if (/\.(mjs|cjs|js)$/i.test(name)) {
+      command = execPath;
+      leading = [rawPath];
+    } else if (platform === 'win32' && (/\.(cmd|bat)$/i.test(name) || name === 'npm')) {
+      command = /\.(cmd|bat)$/i.test(name) ? rawPath : `${rawPath}.cmd`;
+      shell = true;
+    } else {
+      command = rawPath;
+    }
+  } else if (platform === 'win32') {
+    command = 'npm.cmd';
+    shell = true;
+  } else {
+    command = 'npm';
+  }
+  const args = [
+    ...leading,
+    'install',
+    '--prefix',
+    prefix,
+    '--ignore-scripts',
+    '--no-audit',
+    '--no-fund',
+    `${RUNTIME_PACKAGE_NAME}@${safeVersion}`,
+  ];
+  const quote = (value) => (/[\s&|<>^]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value);
+  return {
+    command: shell && /\s/.test(command) ? `"${command}"` : command,
+    args: shell ? args.map((entry) => quote(String(entry))) : args,
+    shell,
+    version: safeVersion,
+  };
+}
+
+function sanitizeDetail(value, { home = null, cliPath = null } = {}) {
+  const text = redactLogLine(String(value ?? ''), {
+    ...(typeof home === 'string' ? { home } : {}),
+    ...(typeof cliPath === 'string' ? { cliPath } : {}),
+  });
+  return text.slice(0, 300);
+}
+
+function firstUsefulLine(text, options = {}) {
+  const line = String(text ?? '')
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .find((entry) => entry.length > 0);
+  return line === undefined ? null : sanitizeDetail(line, options);
+}
+
+function statusFromInstallText(text) {
+  const explicit = /\b(?:E|HTTP\s*)([45]\d{2})\b/i.exec(text);
+  if (explicit) return Number(explicit[1]);
+  const plain = /(?:^|\s)([45]\d{2})(?:\s|$)/m.exec(text);
+  return plain ? Number(plain[1]) : null;
+}
+
+/** Map npm spawn/exit/stderr to the stable install reasons. */
+export function classifyRuntimeInstallFailure({
+  spawnError = null,
+  exitCode = null,
+  stdout = '',
+  stderr = '',
+  options = {},
+} = {}) {
+  const text = `${stderr}\n${stdout}`;
+  const lower = text.toLowerCase();
+  const spawnCode = typeof spawnError?.code === 'string' ? spawnError.code.toUpperCase() : '';
+  const result = (reason, extra = {}) => ({
+    reason,
+    detail: firstUsefulLine(text, options)
+      ?? (spawnError?.message ? sanitizeDetail(spawnError.message, options) : null),
+    ...extra,
+  });
+
+  if (spawnError) {
+    if (spawnCode === 'ENOENT') return result('npm_missing');
+    if (spawnCode === 'EACCES' || spawnCode === 'EPERM') return result('permission_denied');
+    if (spawnCode === 'ENOSPC') return result('disk_full');
+    if (spawnCode === 'ETIMEDOUT' || spawnCode === 'ECONNREFUSED' || spawnCode === 'ECONNRESET') {
+      return result('registry_unreachable');
+    }
+    if (spawnCode === 'ENOTFOUND' || spawnCode === 'EAI_AGAIN'
+      || spawnCode === 'ENETUNREACH' || spawnCode === 'EHOSTUNREACH') {
+      return result('offline');
+    }
+  }
+  if (/eintegrity|integrity checksum|integrity.*(?:fail|mismatch)|shasum|checksum.*(?:fail|mismatch)/i.test(text)) {
+    return result('integrity_mismatch');
+  }
+  if (/enospc|no space left on device|disk (?:is )?full|not enough space/i.test(text)) {
+    return result('disk_full');
+  }
+  if (/eacces|eperm|permission denied|operation not permitted|access is denied/i.test(text)) {
+    return result('permission_denied');
+  }
+  if (exitCode === 127 || /npm: command not found|npm: not found|'npm' is not recognized|not recognized as an internal/i.test(text)) {
+    return result('npm_missing');
+  }
+  const status = statusFromInstallText(text);
+  if (/etarget|no matching version|version not found/i.test(text)) {
+    return result('unsupported_version', { status: 404 });
+  }
+  if (/e404|404 not found|not in this registry/i.test(text)) {
+    return result('http_error', { status: 404 });
+  }
+  if (/e401|401 unauthorized|e403|403 forbidden|unauthorized|forbidden/i.test(text)) {
+    return result('http_error', { status: status ?? (/401/.test(text) ? 401 : 403) });
+  }
+  if (status !== null || /http error|response code|bad gateway|service unavailable|internal server error/i.test(text)) {
+    return result('http_error', { status });
+  }
+  if (/enotfound|eai_again|eai_fail|getaddrinfo|enotreach|network is unreachable|offline|dns lookup/i.test(lower)) {
+    return result('offline');
+  }
+  if (/econnrefused|econnreset|etimedout|esockettimedout|socket hang up|network request.*failed|request to .* failed|registry.*unreachable/i.test(lower)) {
+    return result('registry_unreachable');
+  }
+  return result(exitCode === 0 ? 'install_failed' : 'http_error', { status });
+}
+
+function classifyInstallFsError(error) {
+  const code = typeof error?.code === 'string' ? error.code.toUpperCase() : '';
+  if (code === 'ENOSPC') return 'disk_full';
+  if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return 'permission_denied';
+  return 'install_failed';
+}
+
+/** Verify a prefix is exactly the pinned shared runtime (manifest + CLI). */
+export async function inspectInstalledRuntimePrefix(directory, version) {
+  const packagePath = join(directory, RUNTIME_PACKAGE_RELATIVE);
+  const cliPath = join(directory, RUNTIME_CLI_RELATIVE);
+  let raw;
+  try {
+    raw = await readFile(packagePath, 'utf-8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { ok: false, reason: 'integrity_mismatch', detail: 'package_json_missing', cliPath };
+    return { ok: false, reason: classifyInstallFsError(error), detail: `package_json_unreadable:${error?.code ?? 'error'}`, cliPath };
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: 'integrity_mismatch', detail: 'package_json_invalid', cliPath };
+  }
+  if (manifest?.name !== undefined && manifest.name !== RUNTIME_PACKAGE_NAME) {
+    return { ok: false, reason: 'integrity_mismatch', detail: 'package_name_mismatch', cliPath };
+  }
+  if (manifest?.version !== version) {
+    return { ok: false, reason: 'integrity_mismatch', detail: 'version_mismatch', cliPath };
+  }
+  try {
+    const info = await stat(cliPath);
+    if (!info.isFile()) return { ok: false, reason: 'integrity_mismatch', detail: 'cli_not_file', cliPath };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { ok: false, reason: 'integrity_mismatch', detail: 'cli_missing', cliPath };
+    return { ok: false, reason: classifyInstallFsError(error), detail: `cli_unreadable:${error?.code ?? 'error'}`, cliPath };
+  }
+  return { ok: true, packageVersion: manifest.version, cliPath };
+}
+
+function installTimestamp(now) {
+  const raw = typeof now === 'string' ? now : new Date().toISOString();
+  return raw.replace(/[^0-9A-Za-z_-]/g, '-');
+}
+
+function installRandomSuffix() {
+  return randomBytes(6).toString('hex');
+}
+
+async function acquireInstallLock({ runtimeDir, version, reinstall, pidAliveFn, now }) {
+  await mkdir(runtimeDir, { recursive: true });
+  const path = join(runtimeDir, RUNTIME_INSTALL_LOCK_FILE);
+  const startedAt = now();
+  const payload = JSON.stringify({ pid: process.pid, startedAt, version, mode: reinstall ? 'reinstall' : 'install' });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await writeFile(path, payload, { mode: 0o600, flag: 'wx' });
+      return {
+        path,
+        async release() {
+          try {
+            const held = JSON.parse(await readFile(path, 'utf-8'));
+            if (held?.pid === process.pid && held?.startedAt === startedAt) await rm(path, { force: true });
+          } catch {
+            // Already released/reclaimed.
+          }
+        },
+      };
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      let held = null;
+      try {
+        held = JSON.parse(await readFile(path, 'utf-8'));
+      } catch {
+        held = null;
+      }
+      const holderPid = Number(held?.pid);
+      if (Number.isInteger(holderPid) && holderPid > 0 && pidAliveFn(holderPid)) {
+        throw installError('install_locked', `another process is installing the runtime (pid ${holderPid})`, {
+          holderPid,
+        });
+      }
+      await rm(path, { force: true }).catch(() => undefined);
+    }
+  }
+  throw installError('install_locked', 'runtime install lock is held');
+}
+
+async function removeStaleInstallStaging(runtimeDir) {
+  let entries;
+  try {
+    entries = await readdir(runtimeDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  await Promise.all(entries
+    .filter((entry) => entry.name.startsWith(RUNTIME_STAGING_PREFIX))
+    .map((entry) => rm(join(runtimeDir, entry.name), { recursive: true, force: true }).catch(() => undefined)));
+}
+
+/**
+ * Run one short child (npm/CLI) with a hard timeout and abort support. Never
+ * throws; stdout/stderr are bounded and the child is terminated on timeout.
+ */
+function runInstallProcess({
+  command,
+  args,
+  shell = false,
+  cwd,
+  env,
+  timeoutMs,
+  signal,
+  spawnFn,
+  killGraceMs,
+}) {
+  return new Promise((resolvePromise) => {
+    let child = null;
+    let settled = false;
+    let stdout = '';
+    let stderr = '';
+    let timer = null;
+    let killTimer = null;
+    let forceTimer = null;
+    let exitTimer = null;
+    let aborted = false;
+    let timedOut = false;
+    const append = (current, chunk) => `${current}${String(chunk)}`.slice(-MAX_INSTALL_LOG_BYTES);
+    const cleanup = () => {
+      if (timer !== null) clearTimeout(timer);
+      if (killTimer !== null) clearTimeout(killTimer);
+      if (forceTimer !== null) clearTimeout(forceTimer);
+      if (exitTimer !== null) clearTimeout(exitTimer);
+      signal?.removeEventListener?.('abort', onAbort);
+    };
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolvePromise({ stdout, stderr, aborted, timedOut, ...value });
+    };
+    const kill = (name) => {
+      try {
+        child?.kill?.(name);
+      } catch {
+        // Already exited.
+      }
+    };
+    const terminate = () => {
+      kill('SIGTERM');
+      if (killTimer === null) killTimer = setTimeout(() => kill('SIGKILL'), Math.max(0, killGraceMs));
+      if (forceTimer === null) {
+        forceTimer = setTimeout(() => finish({ code: null, signal: null, forced: true }), Math.max(0, killGraceMs) + 500);
+      }
+    };
+    const onAbort = () => {
+      if (settled) return;
+      aborted = true;
+      terminate();
+    };
+
+    if (signal?.aborted) {
+      aborted = true;
+      finish({ code: null, signal: null });
+      return;
+    }
+    if (signal && typeof signal.addEventListener === 'function') {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    try {
+      child = spawnFn(command, args, {
+        ...(cwd === undefined ? {} : { cwd }),
+        env: { ...env },
+        shell: shell === true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      finish({ spawnError: error, code: null, signal: null });
+      return;
+    }
+    child?.stdout?.on?.('data', (chunk) => { stdout = append(stdout, chunk); });
+    child?.stderr?.on?.('data', (chunk) => { stderr = append(stderr, chunk); });
+    const listen = (event, handler) => {
+      if (typeof child?.once === 'function') child.once(event, handler);
+      else if (typeof child?.on === 'function') child.on(event, handler);
+    };
+    listen('error', (error) => finish({ spawnError: error, code: null, signal: null }));
+    listen('close', (code, signalName) => finish({ code, signal: signalName }));
+    listen('exit', (code, signalName) => {
+      if (!child?.stdout && !child?.stderr) {
+        finish({ code, signal: signalName });
+        return;
+      }
+      if (exitTimer === null) exitTimer = setTimeout(() => finish({ code, signal: signalName }), 100);
+    });
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        terminate();
+      }, timeoutMs);
+    }
+  });
+}
+
+function runInstalledCli({
+  cliPath,
+  args,
+  env,
+  platform,
+  execPath,
+  timeoutMs = DEFAULT_CLI_TIMEOUT_MS,
+  signal,
+  spawnFn,
+  killGraceMs,
+}) {
+  const invocation = runtimeInvocation(cliPath, { execPath, platform });
+  return runInstallProcess({
+    command: invocation.command,
+    args: [...invocation.prefix, ...args],
+    shell: invocation.shell,
+    env,
+    timeoutMs,
+    signal,
+    spawnFn,
+    killGraceMs,
+  });
+}
+
+/**
+ * Best-effort service registration detection without reading Mebular config or
+ * secrets: the service installer writes a manifest under
+ * `<serviceHome>/.mebular/services/mebular-serve.json` (or MEBULAR_SERVICE_HOME).
+ * A registered service means the install action must start/attach it instead of
+ * downloading a second runtime.
+ */
+export function detectRegisteredRuntimeService({
+  env = process.env,
+  userHome = homedir(),
+  exists = existsSync,
+} = {}) {
+  const serviceHome = typeof env.MEBULAR_SERVICE_HOME === 'string' && env.MEBULAR_SERVICE_HOME.length > 0
+    ? env.MEBULAR_SERVICE_HOME
+    : join(userHome, '.mebular', 'services');
+  const manifestPath = join(serviceHome, 'mebular-serve.json');
+  if (!exists(manifestPath)) return false;
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    if (manifest?.kind !== undefined && manifest.kind !== 'mebular-serve') return false;
+    if (typeof manifest?.unitPath === 'string' && manifest.unitPath.length > 0) {
+      return exists(manifest.unitPath);
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Non-sensitive install status shared by `/mebular/embed-info` and HTTP. */
+export function sanitizeRuntimeInstallState(value, fallback = null) {
+  const source = isObject(value) ? value : {};
+  const fallbackState = isObject(fallback) ? fallback : {};
+  const read = (key) => (source[key] !== undefined ? source[key] : fallbackState[key]);
+  const state = ['idle', 'installing', 'failed', 'done'].includes(read('state'))
+    ? read('state')
+    : 'idle';
+  const rawReason = read('reason');
+  const reason = typeof rawReason === 'string' && (INSTALL_REASON_SET.has(rawReason) || rawReason === 'not_allowed')
+    ? rawReason
+    : null;
+  const text = (key) => (typeof read(key) === 'string' && read(key).length > 0 ? read(key).slice(0, 600) : null);
+  return {
+    state,
+    reason,
+    detail: text('detail'),
+    manualCommand: text('manualCommand'),
+    targetVersion: text('targetVersion'),
+    action: typeof read('action') === 'string' && RUNTIME_INSTALL_ACTIONS.includes(read('action'))
+      ? read('action')
+      : null,
+    startedAt: text('startedAt'),
+    finishedAt: text('finishedAt'),
+    reused: read('reused') === true,
+    installed: read('installed') === true,
+    started: read('started') === true,
+    allowed: read('allowed') === true,
+  };
+}
+
+/**
+ * Create the install controller. It only runs on an explicit user action; it
+ * never downloads from `start()`/`inspect()`/timers. A missing runtime is
+ * resolved by (in order) a healthy daemon, a registered service, any App/CLI/
+ * shared provider, and only then the fixed npm package. Failures leave no
+ * staging directory, lock, provider overwrite, partial runtime or child process.
+ *
+ * @param {{
+ *   config?: unknown,
+ *   lifecycle: { inspect: () => Promise<Record<string, unknown>>, startAfterInstall?: () => Promise<Record<string, unknown>> },
+ *   version?: string,
+ *   env?: Record<string, string | undefined>,
+ *   userHome?: string,
+ *   cloudRoot?: string,
+ *   platform?: string,
+ *   execPath?: string,
+ *   npmPath?: string | null,
+ *   spawnFn?: typeof spawn,
+ *   discoverProviders?: typeof discoverRuntimeProviders,
+ *   detectService?: (context: Record<string, unknown>) => boolean | Promise<boolean>,
+ *   exists?: (file: string) => boolean,
+ *   pidAlive?: (pid: number) => boolean,
+ *   now?: () => string,
+ *   installTimeoutMs?: number,
+ *   cliTimeoutMs?: number,
+ *   installKillGraceMs?: number,
+ *   signal?: AbortSignal | null,
+ *   logger?: { info?: (message: string) => void, warn?: (message: string) => void },
+ * }} options
+ * @returns {{
+ *   start: (action?: string) => { accepted: boolean, state: ReturnType<typeof sanitizeRuntimeInstallState> },
+ *   cancel: () => Promise<unknown>,
+ *   dispose: () => Promise<unknown>,
+ *   getState: () => ReturnType<typeof sanitizeRuntimeInstallState>,
+ *   allowed: () => boolean,
+ *   denialReason: () => string | null,
+ * }}
+ */
+export function createRuntimeInstallManager(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const env = isObject(opts.env) ? opts.env : process.env;
+  const platform = typeof opts.platform === 'string' ? opts.platform : process.platform;
+  const execPath = typeof opts.execPath === 'string' && opts.execPath.length > 0 ? opts.execPath : process.execPath;
+  const userHome = typeof opts.userHome === 'string' && opts.userHome.length > 0 ? opts.userHome : homedir();
+  const config = resolveConfig(opts.config, { env });
+  const lifecycle = isObject(opts.lifecycle) && typeof opts.lifecycle.inspect === 'function'
+    ? opts.lifecycle
+    : null;
+  const spawnFn = typeof opts.spawnFn === 'function' ? opts.spawnFn : spawn;
+  const discoverProviders = typeof opts.discoverProviders === 'function'
+    ? opts.discoverProviders
+    : discoverRuntimeProviders;
+  const detectService = typeof opts.detectService === 'function'
+    ? opts.detectService
+    : () => detectRegisteredRuntimeService({
+      env,
+      userHome,
+      platform,
+      ...(typeof opts.exists === 'function' ? { exists: opts.exists } : {}),
+    });
+  const exists = typeof opts.exists === 'function' ? opts.exists : existsSync;
+  const pidAliveFn = typeof opts.pidAlive === 'function' ? opts.pidAlive : isProcessAlive;
+  const now = typeof opts.now === 'function' ? opts.now : () => new Date().toISOString();
+  const installTimeoutMs = Number.isFinite(opts.installTimeoutMs)
+    ? Math.max(250, opts.installTimeoutMs)
+    : DEFAULT_INSTALL_TIMEOUT_MS;
+  const cliTimeoutMs = Number.isFinite(opts.cliTimeoutMs)
+    ? Math.max(250, opts.cliTimeoutMs)
+    : DEFAULT_CLI_TIMEOUT_MS;
+  const killGraceMs = Number.isFinite(opts.installKillGraceMs)
+    ? Math.max(0, opts.installKillGraceMs)
+    : DEFAULT_INSTALL_KILL_GRACE_MS;
+  const logger = isObject(opts.logger) ? opts.logger : null;
+  const cloudRoot = typeof opts.cloudRoot === 'string' && opts.cloudRoot.length > 0
+    ? opts.cloudRoot
+    : runtimeCloudRoot({ env, userHome });
+  const version = assertRuntimeInstallVersion(
+    typeof opts.version === 'string' && opts.version.length > 0 ? opts.version : RUNTIME_INSTALL_VERSION,
+  );
+  const manualCommand = runtimeManualInstallCommand(version);
+
+  const denialReason = config.bootstrap === 'never'
+    ? 'bootstrap_never'
+    : config.runtime === 'external'
+      ? 'runtime_external'
+      : config.pinnedDaemonUrl === true
+        ? 'daemon_url_pinned'
+        : null;
+  const allowed = denialReason === null && lifecycle !== null;
+
+  let current = sanitizeRuntimeInstallState({
+    state: 'idle',
+    reason: null,
+    manualCommand,
+    targetVersion: version,
+    allowed,
+  });
+  let task = null;
+  let disposed = false;
+  let controller = new AbortController();
+
+  function log(level, message) {
+    try {
+      const fn = logger?.[level];
+      if (typeof fn === 'function') fn.call(logger, message);
+    } catch {
+      // Logging must never break install.
+    }
+  }
+
+  function publish(patch) {
+    current = sanitizeRuntimeInstallState({ ...current, ...patch }, {
+      manualCommand,
+      targetVersion: version,
+      allowed,
+    });
+    return current;
+  }
+
+  async function discoverProvider() {
+    try {
+      const discovery = await discoverProviders({
+        env,
+        platform,
+        userHome,
+        cloudRoot,
+        ...(config.cliPath === undefined ? {} : { cliPath: config.cliPath }),
+        ...(typeof opts.registry === 'undefined' ? {} : { registry: opts.registry }),
+        ...(typeof opts.includeStandardApp === 'undefined' ? {} : { includeStandardApp: opts.includeStandardApp }),
+        ...(typeof opts.exists === 'function' ? { exists: opts.exists } : {}),
+      });
+      return isObject(discovery?.selected) ? discovery.selected : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function inspectExisting({ includeProviderForUp = false } = {}) {
+    let snapshot = null;
+    try {
+      snapshot = await lifecycle.inspect();
+    } catch {
+      snapshot = null;
+    }
+    const up = snapshot?.status === 'up';
+    if (up && !includeProviderForUp) return { up: true, snapshot, provider: null, service: false };
+    const provider = await discoverProvider();
+    let service = snapshot?.service?.registered === true;
+    if (!service) {
+      try {
+        service = (await detectService({ env, userHome, platform, cloudRoot })) === true;
+      } catch {
+        service = false;
+      }
+    }
+    return {
+      up,
+      snapshot,
+      provider: provider ?? (isObject(snapshot?.provider) ? snapshot.provider : null),
+      service,
+    };
+  }
+
+  async function runCli(cliPath, args, { home = cloudRoot, timeoutMs = cliTimeoutMs } = {}) {
+    const result = await runInstalledCli({
+      cliPath,
+      args,
+      env: {
+        ...env,
+        MEBULAR_CLOUD_ROOT: cloudRoot,
+        MEBULAR_HOME: home,
+      },
+      platform,
+      execPath,
+      timeoutMs,
+      signal: controller.signal,
+      spawnFn,
+      killGraceMs,
+    });
+    return {
+      ...result,
+      ok: result.code === 0 && result.spawnError === undefined && result.aborted !== true && result.timedOut !== true,
+    };
+  }
+
+  async function registerProvider(cliPath) {
+    const result = await runCli(cliPath, [
+      'runtime',
+      'provider',
+      'add',
+      '--kind',
+      'shared',
+      '--path',
+      cliPath,
+      '--version',
+      version,
+      '--capabilities',
+      'serve',
+      '--json',
+    ]);
+    const data = parseJsonDocument(result.stdout);
+    if (!result.ok || data?.ok !== true) {
+      throw installError('provider_registration_failed', 'runtime provider registration failed', {
+        detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? result.spawnError?.message ?? 'provider_registration_failed', {
+          home: cloudRoot,
+          cliPath,
+        }),
+      });
+    }
+  }
+
+  async function resolveInstalledHome(cliPath) {
+    const result = await runCli(cliPath, ['runtime', 'resolve', '--json']);
+    const data = parseJsonDocument(result.stdout);
+    if (isObject(data) && typeof data.home === 'string' && isAbsolute(data.home)) return resolve(data.home);
+    return cloudRoot;
+  }
+
+  async function ensureInit(cliPath, home) {
+    const configPath = join(home, 'config.json');
+    if (exists(configPath)) return { skipped: true };
+    const result = await runCli(cliPath, ['init'], { home });
+    if (!result.ok) {
+      throw installError('init_failed', 'runtime init failed', {
+        detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? result.spawnError?.message ?? 'init_failed', {
+          home,
+          cliPath,
+        }),
+      });
+    }
+    if (!exists(configPath)) {
+      throw installError('init_failed', 'runtime init did not write config.json', { detail: 'config_missing' });
+    }
+    return { skipped: false };
+  }
+
+  async function startExisting({ installed = false, reused = false, restartOwned = false } = {}) {
+    if (typeof lifecycle.startAfterInstall !== 'function') {
+      throw installError('start_failed', 'lifecycle does not support explicit start');
+    }
+    const result = await lifecycle.startAfterInstall({ restartOwned: restartOwned === true });
+    let snapshot = isObject(result) ? result : null;
+    if (snapshot === null || snapshot.status === undefined) {
+      try {
+        snapshot = await lifecycle.inspect();
+      } catch {
+        snapshot = null;
+      }
+    }
+    if (snapshot?.status === 'up') {
+      return publish({
+        state: 'done',
+        reason: null,
+        detail: null,
+        installed: installed || reused || current.installed,
+        reused,
+        started: snapshot.managed === true || current.started,
+        finishedAt: now(),
+      });
+    }
+    const rawReason = typeof snapshot?.reason === 'string' ? snapshot.reason : null;
+    const reason = rawReason !== null && rawReason !== 'download_required' && INSTALL_REASON_SET.has(rawReason)
+      ? rawReason
+      : 'start_failed';
+    throw installError(reason, 'runtime did not become ready after start', {
+      detail: sanitizeDetail(rawReason ?? 'start_failed'),
+    });
+  }
+
+  async function installFiles(reinstall) {
+    const runtimeDir = runtimeInstallDir(cloudRoot);
+    const targetPath = runtimeInstallTarget(cloudRoot, version);
+    const cliPath = runtimeInstallCliPath(cloudRoot, version);
+    let lock = null;
+    let tempPath = null;
+    let backupPath = null;
+    try {
+      await mkdir(runtimeDir, { recursive: true });
+      lock = await acquireInstallLock({ runtimeDir, version, reinstall, pidAliveFn, now });
+      await removeStaleInstallStaging(runtimeDir);
+
+      const existing = await inspectInstalledRuntimePrefix(targetPath, version);
+      if (!reinstall && existing.ok) {
+        publish({ reused: true, installed: true, detail: null });
+        log('info', 'shared runtime already installed; reusing the pinned version');
+        return { cliPath, reused: true, installed: true, backupPath: null };
+      }
+
+      tempPath = join(runtimeDir, `${RUNTIME_STAGING_PREFIX}${version}-${process.pid}-${installRandomSuffix()}`);
+      await mkdir(tempPath, { recursive: true });
+      const invocation = buildRuntimeInstallCommand({
+        version,
+        prefix: tempPath,
+        platform,
+        npmPath: typeof opts.npmPath === 'string' ? opts.npmPath : null,
+        execPath,
+      });
+      const childEnv = { ...env };
+      delete childEnv.npm_config_global;
+      delete childEnv.npm_config_argv;
+      delete childEnv.npm_config_prefix;
+      const run = await runInstallProcess({
+        command: invocation.command,
+        args: invocation.args,
+        shell: invocation.shell,
+        cwd: tempPath,
+        env: childEnv,
+        timeoutMs: installTimeoutMs,
+        signal: controller.signal,
+        spawnFn,
+        killGraceMs,
+      });
+      if (run.aborted) throw installError('cancelled', 'runtime install cancelled', { detail: 'aborted' });
+      if (run.timedOut) throw installError('cancelled', 'runtime install timed out', { detail: 'timeout', timedOut: true });
+      if (run.spawnError || run.code !== 0) {
+        const classified = classifyRuntimeInstallFailure({
+          spawnError: run.spawnError,
+          exitCode: run.code,
+          stdout: run.stdout,
+          stderr: run.stderr,
+          options: { home: cloudRoot, cliPath },
+        });
+        throw installError(classified.reason, `runtime install failed (${classified.reason})`, {
+          detail: classified.detail,
+          status: classified.status,
+        });
+      }
+
+      const installed = await inspectInstalledRuntimePrefix(tempPath, version);
+      if (!installed.ok) {
+        throw installError(installed.reason, 'runtime install validation failed', { detail: installed.detail });
+      }
+      if (exists(targetPath)) {
+        backupPath = join(runtimeDir, `${RUNTIME_BACKUP_PREFIX}${version}-${installTimestamp(now())}-${installRandomSuffix()}`);
+        await rename(targetPath, backupPath);
+      }
+      try {
+        await rename(tempPath, targetPath);
+        tempPath = null;
+      } catch (error) {
+        if (backupPath !== null) {
+          try {
+            await rename(backupPath, targetPath);
+            backupPath = null;
+          } catch (restoreError) {
+            throw installError('permission_denied', `failed to restore the previous runtime: ${restoreError?.message ?? restoreError}`, {
+              detail: 'swap_restore_failed',
+            });
+          }
+        }
+        throw installError(classifyInstallFsError(error), `failed to swap the runtime directory (${error?.code ?? 'error'})`, {
+          detail: 'swap_failed',
+        });
+      }
+      const finalCheck = await inspectInstalledRuntimePrefix(targetPath, version);
+      if (!finalCheck.ok) {
+        let restored = false;
+        if (backupPath !== null) {
+          await rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
+          try {
+            await rename(backupPath, targetPath);
+            backupPath = null;
+            restored = true;
+          } catch {
+            restored = false;
+          }
+        }
+        throw installError('integrity_mismatch', 'runtime validation failed after atomic swap', {
+          detail: finalCheck.detail,
+          previousPreserved: restored,
+        });
+      }
+      publish({ installed: true, reused: false, detail: null });
+      log('info', `shared runtime ${version} installed`);
+      return { cliPath, reused: false, installed: true, backupPath };
+    } finally {
+      if (tempPath !== null) await rm(tempPath, { recursive: true, force: true }).catch(() => undefined);
+      await lock?.release?.();
+    }
+  }
+
+  async function execute(action) {
+    const existing = await inspectExisting({ includeProviderForUp: action === 'reinstall' });
+    if (disposed) return;
+    if (existing.up && action !== 'reinstall') {
+      publish({
+        state: 'done',
+        reason: null,
+        detail: null,
+        installed: current.installed,
+        reused: true,
+        started: false,
+        finishedAt: now(),
+      });
+      return;
+    }
+    // App/CLI/service are always reused. Only a shared runtime provider may be
+    // explicitly reinstalled; that is the one owner the plugin can switch.
+    const sharedReinstall = action === 'reinstall'
+      && existing.service !== true
+      && existing.provider?.kind === 'shared';
+    if (!sharedReinstall && (existing.provider !== null || existing.service)) {
+      publish({ state: 'installing', reason: 'provisioning', detail: existing.service ? 'service' : 'provider' });
+      await startExisting({ installed: false, reused: true });
+      return;
+    }
+    if (existing.up && !sharedReinstall) {
+      publish({
+        state: 'done',
+        reason: null,
+        detail: null,
+        installed: current.installed,
+        reused: true,
+        started: false,
+        finishedAt: now(),
+      });
+      return;
+    }
+    if (action === 'redetect') {
+      publish({
+        state: 'idle',
+        reason: 'download_required',
+        detail: null,
+        manualCommand,
+        finishedAt: now(),
+      });
+      return;
+    }
+
+    publish({ state: 'installing', reason: 'provisioning', detail: null });
+    let backupPath = null;
+    const restoreBackup = async () => {
+      if (backupPath === null) return;
+      const targetPath = runtimeInstallTarget(cloudRoot, version);
+      await rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
+      try {
+        await rename(backupPath, targetPath);
+        backupPath = null;
+        log('warn', 'reinstall did not complete; previous shared runtime restored');
+      } catch {
+        log('warn', 'reinstall did not complete and the previous shared runtime could not be restored automatically');
+      }
+    };
+    try {
+      const files = await installFiles(action === 'reinstall');
+      backupPath = files.backupPath ?? null;
+      if (disposed) {
+        await restoreBackup();
+        return;
+      }
+      await registerProvider(files.cliPath);
+      if (disposed) {
+        await restoreBackup();
+        return;
+      }
+      const home = await resolveInstalledHome(files.cliPath);
+      if (disposed) {
+        await restoreBackup();
+        return;
+      }
+      await ensureInit(files.cliPath, home);
+      if (disposed) {
+        await restoreBackup();
+        return;
+      }
+      publish({ state: 'installing', reason: 'provisioning', detail: 'starting' });
+      await startExisting({
+        installed: true,
+        reused: files.reused === true,
+        restartOwned: action === 'reinstall' && files.reused !== true,
+      });
+      backupPath = null;
+    } catch (error) {
+      await restoreBackup();
+      throw error;
+    }
+  }
+
+  function fail(error) {
+    const reason = typeof error?.code === 'string' && INSTALL_REASON_SET.has(error.code)
+      ? error.code
+      : 'install_failed';
+    const detail = sanitizeDetail(error?.detail ?? error?.message ?? 'install_failed', { home: cloudRoot });
+    publish({
+      state: 'failed',
+      reason,
+      detail,
+      manualCommand,
+      targetVersion: version,
+      finishedAt: now(),
+    });
+    log('warn', `runtime install failed (${reason})`);
+  }
+
+  function start(action = 'install') {
+    if (!RUNTIME_INSTALL_ACTIONS.includes(action)) {
+      return { accepted: false, state: current };
+    }
+    if (!allowed) return { accepted: false, state: current };
+    if (disposed) return { accepted: false, state: current };
+    if (task !== null) return { accepted: false, state: current };
+
+    controller = new AbortController();
+    publish({
+      state: 'installing',
+      reason: null,
+      detail: null,
+      action,
+      startedAt: now(),
+      finishedAt: null,
+      reused: false,
+      started: false,
+    });
+    task = Promise.resolve()
+      .then(() => execute(action))
+      .catch((error) => {
+        if (!disposed) fail(error);
+      })
+      .finally(() => {
+        task = null;
+      });
+    return { accepted: true, state: current };
+  }
+
+  async function dispose() {
+    if (disposed) return task ?? undefined;
+    disposed = true;
+    try {
+      controller.abort('plugin_disposed');
+    } catch {
+      // Abort is best-effort.
+    }
+    if (task !== null) {
+      try {
+        await task;
+      } catch {
+        // The flow cleaned up its staging/lock in `finally`.
+      }
+    }
+    if (current.state === 'installing') {
+      publish({
+        state: 'failed',
+        reason: 'cancelled',
+        detail: 'plugin_disposed',
+        manualCommand,
+        targetVersion: version,
+        finishedAt: now(),
+      });
+    }
+    return undefined;
+  }
+
+  return {
+    start,
+    cancel: dispose,
+    dispose,
+    getState: () => current,
+    allowed: () => allowed,
+    denialReason: () => denialReason,
+  };
+}
+
+function readInstallBody(req) {
+  return new Promise((resolvePromise) => {
+    if (!isObject(req) || typeof req.on !== 'function') {
+      const text = typeof req?.body === 'string' ? req.body : '';
+      resolvePromise({ ok: true, text });
+      return;
+    }
+    let size = 0;
+    let settled = false;
+    const chunks = [];
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(value);
+    };
+    req.on('data', (chunk) => {
+      if (settled) return;
+      const text = String(chunk ?? '');
+      size += Buffer.byteLength(text);
+      if (size > MAX_INSTALL_BODY_BYTES) {
+        finish({ ok: false, error: 'body_too_large' });
+        return;
+      }
+      chunks.push(text);
+    });
+    req.on('end', () => finish({ ok: true, text: chunks.join('') }));
+    req.on('error', () => finish({ ok: false, error: 'read_error' }));
+  });
+}
+
+/**
+ * Loopback-only `POST /mebular/runtime/install`.
+ *
+ * Remote peers get 404 for every method. The body accepts exactly one optional
+ * `action` (`install|retry|reinstall|redetect`); version/URL/registry are never
+ * accepted. Installation is asynchronous (202) and the client polls
+ * `/mebular/embed-info` for the same host-owned state.
+ *
+ * @param {{
+ *   config?: unknown,
+ *   manager: ReturnType<typeof createRuntimeInstallManager>,
+ * }} [options]
+ * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>}
+ */
+export function createRuntimeInstallHandler(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const config = resolveConfig(opts.config, { env: opts.env });
+  const manager = isObject(opts.manager) ? opts.manager : null;
+
+  function sendJson(res, status, value, extraHeaders = {}) {
+    if (res === null || typeof res !== 'object' || typeof res.end !== 'function') return;
+    res.statusCode = status;
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.setHeader('cache-control', 'no-store');
+    for (const [key, headerValue] of Object.entries(extraHeaders)) res.setHeader(key, headerValue);
+    res.end(JSON.stringify(value));
+  }
+
+  return async function handleRuntimeInstall(req, res) {
+    if (!isLoopbackAddress(req?.socket?.remoteAddress)) {
+      if (res !== null && typeof res === 'object' && typeof res.end === 'function') {
+        res.statusCode = 404;
+        res.end();
+      }
+      return;
+    }
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { ok: false, error: 'method_not_allowed' }, { allow: 'POST' });
+      return;
+    }
+    const body = await readInstallBody(req);
+    if (!body.ok) {
+      sendJson(res, 400, { ok: false, error: 'invalid_body' });
+      return;
+    }
+    let input = {};
+    if (body.text.trim().length > 0) {
+      const contentType = String(req.headers?.['content-type'] ?? req.headers?.['Content-Type'] ?? '');
+      if (!/^application\/json\b/i.test(contentType)) {
+        sendJson(res, 400, { ok: false, error: 'invalid_content_type' });
+        return;
+      }
+      try {
+        input = JSON.parse(body.text);
+      } catch {
+        sendJson(res, 400, { ok: false, error: 'invalid_json' });
+        return;
+      }
+      if (!isObject(input)) {
+        sendJson(res, 400, { ok: false, error: 'invalid_json' });
+        return;
+      }
+      const keys = Object.keys(input);
+      if (keys.some((key) => key !== 'action')) {
+        sendJson(res, 400, { ok: false, error: 'unsupported_parameters' });
+        return;
+      }
+    }
+    const action = input.action === undefined ? 'install' : input.action;
+    if (typeof action !== 'string' || !RUNTIME_INSTALL_ACTIONS.includes(action)) {
+      sendJson(res, 400, { ok: false, error: 'invalid_action' });
+      return;
+    }
+    if (manager === null) {
+      sendJson(res, 503, { ok: false, error: 'install_unavailable' });
+      return;
+    }
+    const configDenial = config.bootstrap === 'never'
+      ? 'bootstrap_never'
+      : config.runtime === 'external'
+        ? 'runtime_external'
+        : config.pinnedDaemonUrl === true
+          ? 'daemon_url_pinned'
+          : null;
+    if (configDenial !== null) {
+      sendJson(res, 403, {
+        ok: false,
+        error: 'install_not_allowed',
+        reason: configDenial,
+        ...(config.bootstrap === 'never' ? { bootstrap: 'never' } : {}),
+        ...(config.runtime === 'external' ? { runtime: 'external' } : {}),
+      });
+      return;
+    }
+    if (typeof manager.allowed === 'function' && manager.allowed() !== true) {
+      const reason = typeof manager.denialReason === 'function' ? manager.denialReason() : 'not_allowed';
+      sendJson(res, 403, {
+        ok: false,
+        error: 'install_not_allowed',
+        reason: reason ?? 'not_allowed',
+        ...(config.bootstrap === 'never' ? { bootstrap: 'never' } : {}),
+        ...(config.runtime === 'external' ? { runtime: 'external' } : {}),
+      });
+      return;
+    }
+    let result;
+    try {
+      result = manager.start(action);
+    } catch {
+      sendJson(res, 500, { ok: false, error: 'install_failed' });
+      return;
+    }
+    sendJson(res, 202, {
+      ok: true,
+      accepted: result?.accepted === true,
+      action,
+      install: manager.getState(),
+    });
+  };
+}
+
 /**
  * Create the daemon lifecycle state machine used by the host plugin.
  *
@@ -1370,6 +2610,12 @@ function failureState(data) {
  * process (never the daemon itself). A service/reused supervise exits after its
  * ready JSON; a child-mode one stays alive and dispose() sends SIGTERM only to
  * it, letting supervise stop the child it owns.
+ *
+ * `startAfterInstall()` is the explicit user-consent path used by the install
+ * panel: it allows exactly one managed start even when lifecycle is `attach`,
+ * is single-flight with the normal start, and never touches an external
+ * daemon/service. `retry()` repeats that explicit start (or a read-only inspect
+ * when starting is not allowed).
  *
  * @param {{
  *   config?: unknown,
@@ -1404,6 +2650,8 @@ function failureState(data) {
  * }} [options]
  * @returns {{
  *   start: () => Promise<Record<string, unknown>>,
+ *   startAfterInstall: () => Promise<Record<string, unknown>>,
+ *   retry: () => Promise<Record<string, unknown>>,
  *   inspect: () => Promise<Record<string, unknown>>,
  *   refresh: () => Promise<unknown>,
  *   dispose: () => void,
@@ -1520,6 +2768,8 @@ export function createDaemonLifecycle(options = {}) {
   let probing = null;
   /** @type {Promise<unknown> | null} */
   let startPromise = null;
+  /** Explicit user consent (install/redetect) allows one managed start on attach. */
+  let startOnce = false;
   /** @type {Promise<unknown> | null} */
   let disposal = null;
   let disposed = false;
@@ -1989,11 +3239,59 @@ export function createDaemonLifecycle(options = {}) {
   }
 
   function start() {
+    return beginStart(allowStart);
+  }
+
+  /**
+   * Explicit user-consented managed start. `lifecycle: attach` still never
+   * starts on activation; only this call (install/redetect/retry) opts in for
+   * one start. It re-resolves providers first, so a daemon that appeared in the
+   * meantime is reused instead of duplicated. `restartOwned` stops only the
+   * supervise process this plugin owns before starting the replaced runtime.
+   * @param {{ restartOwned?: boolean }} [options]
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async function startAfterInstall(options = {}) {
+    if (disposed) return snapshot();
+    if (config.pinnedDaemonUrl || config.runtime === 'external' || config.bootstrap === 'never') {
+      await refresh();
+      return snapshot();
+    }
+    startOnce = true;
+    sticky = null;
+    if (startPromise !== null) {
+      try {
+        await startPromise;
+      } catch {
+        // A failed attach/start is retried explicitly below.
+      }
+    }
+    if (disposed) return snapshot();
+    if (options?.restartOwned === true && superviseOwned && managed) {
+      await stopSupervise();
+      if (disposed) return snapshot();
+    }
+    return beginStart(true);
+  }
+
+  /**
+   * Retry an explicitly allowed start after a failure. Attach-only lifecycles
+   * without prior consent stay read-only and just re-inspect.
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  function retry() {
+    if (disposed) return Promise.resolve(snapshot());
+    if (!allowStart && !startOnce) return inspect();
+    sticky = null;
+    return startAfterInstall();
+  }
+
+  function beginStart(forceManaged) {
     if (startPromise !== null) return startPromise;
     if (disposed) return Promise.resolve(snapshot());
-    startPromise = (async () => {
+    const run = (async () => {
       try {
-        if (allowStart) await ensureManaged();
+        if (forceManaged) await ensureManaged();
         else await ensureAttach();
       } catch (error) {
         log('warn', `lifecycle start failed (${safeErrorCode(error)})`);
@@ -2002,12 +3300,16 @@ export function createDaemonLifecycle(options = {}) {
         if (disposed) return snapshot();
         phase = 'down';
         state = 'down';
-        reason = allowStart ? 'managed_start_failed' : null;
+        reason = forceManaged ? 'managed_start_failed' : null;
         if (reason !== null) sticky = { state, reason };
       }
       return snapshot();
     })();
-    return startPromise;
+    const tracked = run.finally(() => {
+      if (startPromise === tracked) startPromise = null;
+    });
+    startPromise = tracked;
+    return tracked;
   }
 
   /**
@@ -2042,6 +3344,8 @@ export function createDaemonLifecycle(options = {}) {
 
   return {
     start,
+    startAfterInstall,
+    retry,
     inspect,
     refresh,
     dispose,
@@ -2058,6 +3362,7 @@ export function createDaemonLifecycle(options = {}) {
  *   fetchImpl?: typeof fetch,
  *   probe?: typeof probeDaemon,
  *   lifecycle?: ReturnType<typeof createDaemonLifecycle> | null,
+ *   installManager?: ReturnType<typeof createRuntimeInstallManager> | null,
  *   now?: () => number,
  *   cacheTtlMs?: number,
  *   timeoutMs?: number,
@@ -2075,6 +3380,10 @@ export function createEmbedInfoHandler(options = {}) {
   const probe = typeof options.probe === 'function' ? options.probe : probeDaemon;
   const lifecycle = options.lifecycle !== null && typeof options.lifecycle?.inspect === 'function'
     ? options.lifecycle
+    : null;
+  const installManager = options.installManager !== null
+    && typeof options.installManager?.getState === 'function'
+    ? options.installManager
     : null;
   const now = typeof options.now === 'function' ? options.now : Date.now;
   const cacheTtlMs = Number.isFinite(options.cacheTtlMs) ? options.cacheTtlMs : DEFAULT_CACHE_TTL_MS;
@@ -2109,6 +3418,7 @@ export function createEmbedInfoHandler(options = {}) {
         provider: snapshot?.provider,
         service: snapshot?.service,
         downloadRequired: snapshot?.downloadRequired === true,
+        install: installManager?.getState() ?? null,
       });
     }
 
@@ -2122,8 +3432,14 @@ export function createEmbedInfoHandler(options = {}) {
           health: isObject(result?.health) ? result.health : null,
           embed: isObject(result?.embed) ? result.embed : null,
           panel: config.panel,
+          install: installManager?.getState() ?? null,
         }))
-        .catch(() => buildEmbedInfo({ daemonUrl: config.daemonUrl, reachable: false, panel: config.panel }))
+        .catch(() => buildEmbedInfo({
+          daemonUrl: config.daemonUrl,
+          reachable: false,
+          panel: config.panel,
+          install: installManager?.getState() ?? null,
+        }))
         .then((value) => {
           cached = value;
           cachedAt = now();
@@ -2163,7 +3479,12 @@ export function createEmbedInfoHandler(options = {}) {
     try {
       info = await readInfo();
     } catch {
-      info = buildEmbedInfo({ daemonUrl: config.daemonUrl, reachable: false, panel: config.panel });
+      info = buildEmbedInfo({
+        daemonUrl: config.daemonUrl,
+        reachable: false,
+        panel: config.panel,
+        install: installManager?.getState() ?? null,
+      });
     }
     sendJson(res, 200, info);
   };
@@ -2841,6 +4162,27 @@ export function apply(ctx, config = {}, options = {}) {
     ? opts.lifecycle
     : createDaemonLifecycle(lifecycleOptions);
 
+  const installOptions = {
+    config: resolved,
+    lifecycle,
+  };
+  for (const key of [
+    'env', 'platform', 'execPath', 'userHome', 'cloudRoot', 'registry', 'includeStandardApp',
+    'discoverProviders', 'detectService', 'exists', 'pidAlive', 'spawnFn', 'now', 'npmPath',
+    'installTimeoutMs', 'cliTimeoutMs', 'installKillGraceMs', 'version',
+  ]) {
+    if (opts[key] !== undefined) installOptions[key] = opts[key];
+  }
+  installOptions.logger = {
+    info: (message) => log('info', message),
+    warn: (message) => log('warn', message),
+  };
+  const installManager = isObject(opts.installManager)
+    && typeof opts.installManager.start === 'function'
+    && typeof opts.installManager.getState === 'function'
+    ? opts.installManager
+    : createRuntimeInstallManager(installOptions);
+
   // Agent-visible status is derived from the same lifecycle snapshot as the
   // MCP bridge; it is not a second status source and never adds its own poll.
   // `panel:false` does not disable it because it is prompt text, not UI.
@@ -2906,7 +4248,12 @@ export function apply(ctx, config = {}, options = {}) {
           .catch((error) => {
             log('warn', `lifecycle dispose failed (${safeErrorCode(error)})`);
           });
-        return Promise.all([bridgeDisposal, lifecycleDisposal]);
+        const installDisposal = Promise.resolve()
+          .then(() => installManager.dispose?.())
+          .catch((error) => {
+            log('warn', `install dispose failed (${safeErrorCode(error)})`);
+          });
+        return Promise.all([bridgeDisposal, lifecycleDisposal, installDisposal]);
       },
       '@mebular/dsh-plugin: daemon lifecycle, agent status, and MCP bridge',
     );
@@ -2916,7 +4263,8 @@ export function apply(ctx, config = {}, options = {}) {
   void lifecycleStart;
   void bridge.start();
 
-  const handler = createEmbedInfoHandler({ config: resolved, lifecycle });
+  const handler = createEmbedInfoHandler({ config: resolved, lifecycle, installManager });
+  const installHandler = createRuntimeInstallHandler({ config: resolved, manager: installManager, env: opts.env });
   if (typeof ctx.inject !== 'function') return;
   ctx.inject(['webServer'], (webCtx) => {
     const webServer = webCtx?.webServer;
@@ -2929,6 +4277,14 @@ export function apply(ctx, config = {}, options = {}) {
           handler,
         }),
         '@mebular/dsh-plugin: GET /mebular/embed-info',
+      );
+      webCtx.effect(
+        () => webServer.register({
+          kind: 'exact',
+          path: RUNTIME_INSTALL_PATH,
+          handler: installHandler,
+        }),
+        '@mebular/dsh-plugin: POST /mebular/runtime/install',
       );
     }
     // DSH 0.2.1-rc.2 exposes WebServer.tapIndex(transform) (see

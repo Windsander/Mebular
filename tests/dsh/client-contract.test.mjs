@@ -73,15 +73,19 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).toContain('frameFailed');
   });
 
-  it('处理 starting / managed_cli_missing / managed_start_failed，且不发 host 写请求', () => {
+  it('handles starting / managed_cli_missing / managed_start_failed; only the install route may POST', () => {
     expect(source).toContain("info?.status === 'starting'");
     expect(source).toContain('startingTitle');
     expect(source).toContain('startingBody');
     expect(source).toContain('managed_cli_missing');
     expect(source).toContain('managed_start_failed');
     expect(source).toContain('cliMissingTitle');
+    expect(source).toContain("'/mebular/runtime/install'");
+    expect(source).toMatch(/method:\s*'POST'/);
     expect(source).not.toContain('mebular:request');
     expect(source).not.toContain('postMessage');
+    expect((source.match(/method:\s*'POST'/g) ?? [])).toHaveLength(1);
+    expect((source.match(/method:\s*'(?:PUT|PATCH|DELETE)'/g) ?? [])).toHaveLength(0);
   });
 
   it('读取 host tapIndex 注入的 panel 全局，且只在 panel === false 时跳过注册', () => {

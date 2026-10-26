@@ -292,3 +292,137 @@ describe('DSH client 共享状态 store', () => {
     unsubscribe();
   });
 });
+
+describe('DSH client plugin-only runtime install UI', () => {
+  const INSTALL_IDLE = {
+    state: 'idle',
+    reason: 'download_required',
+    detail: null,
+    manualCommand: 'npm install -g @mebular/core@0.1.2',
+    targetVersion: '0.1.2',
+    action: null,
+    startedAt: null,
+    finishedAt: null,
+    reused: false,
+    installed: false,
+    started: false,
+    allowed: true,
+  };
+  const DOWNLOAD = {
+    ok: false,
+    status: 'down',
+    state: 'download_required',
+    reason: 'download_required',
+    downloadRequired: true,
+    loopback: false,
+    embedUrl: null,
+    install: INSTALL_IDLE,
+  };
+
+  it('offers install/copy/redetect/readme only when the host allows bootstrap', () => {
+    const { canInstall, installView, text } = loadClientInternals();
+    const t = text();
+    expect(canInstall(DOWNLOAD)).toBe(true);
+    const view = installView(t, DOWNLOAD);
+    expect(view).toMatchObject({ kind: 'install', heading: t.installTitle });
+    expect(view.actions).toEqual(['install', 'copy', 'redetect', 'readme']);
+    expect(view.manualCommand).toBe(INSTALL_IDLE.manualCommand);
+
+    expect(canInstall({ ...DOWNLOAD, install: { ...INSTALL_IDLE, allowed: false } })).toBe(false);
+    expect(canInstall({ ...DOWNLOAD, downloadRequired: false, reason: 'daemon_unreachable' })).toBe(false);
+    expect(canInstall({ ...DOWNLOAD, install: { ...INSTALL_IDLE, state: 'installing' } })).toBe(false);
+  });
+
+  it('shows provisioning while installing and recovery actions after failure', () => {
+    const { installView, text } = loadClientInternals();
+    const t = text();
+
+    const installing = installView(t, {
+      ...DOWNLOAD,
+      install: { ...INSTALL_IDLE, state: 'installing' },
+    });
+    expect(installing).toMatchObject({ kind: 'installing', heading: t.installingTitle });
+    expect(installing.actions).toEqual([]);
+
+    const failed = installView(t, {
+      ...DOWNLOAD,
+      install: { ...INSTALL_IDLE, state: 'failed', reason: 'offline', detail: 'registry unreachable' },
+    });
+    expect(failed).toMatchObject({ kind: 'failed', heading: t.installFailedTitle });
+    expect(failed.body).toContain(t.reasons.offline);
+    expect(failed.detail).toBe('registry unreachable');
+    expect(failed.actions).toEqual(['retry', 'reinstall', 'copy', 'redetect', 'readme']);
+  });
+
+  it('install state is not ready and maps to the amber starting dot', () => {
+    const { statusOf, isReadyInfo } = loadClientInternals();
+    const info = { ...DOWNLOAD, install: { ...INSTALL_IDLE, state: 'installing' } };
+    expect(isReadyInfo(info)).toBe(false);
+    expect(statusOf(info, false, false, null)).toBe('starting');
+  });
+
+  it('one explicit action is one POST; polling stays read-only and single-flight', async () => {
+    const clock = fakeClock();
+    const pending = deferred();
+    const calls = [];
+    const fetchImpl = jest.fn(async (url, init) => {
+      calls.push({ url, init });
+      if (init?.method === 'POST') {
+        await pending.promise;
+        return jsonResponse({ ok: true, accepted: true, install: { ...INSTALL_IDLE, state: 'installing' } });
+      }
+      return jsonResponse({
+        ...DOWNLOAD,
+        install: { ...INSTALL_IDLE, state: 'installing' },
+      });
+    });
+    const { createEmbedInfoStore } = loadClientInternals();
+    const store = createEmbedInfoStore({
+      fetchImpl,
+      setIntervalFn: clock.setIntervalFn,
+      clearIntervalFn: clock.clearIntervalFn,
+    });
+    const unsubscribe = store.subscribe(() => {});
+    await flush();
+
+    const first = store.install('install');
+    const second = store.install('install');
+    expect(first).toBe(second);
+    expect(calls.filter((call) => call.init?.method === 'POST')).toHaveLength(1);
+    expect(calls.find((call) => call.init?.method === 'POST')).toMatchObject({
+      url: '/mebular/runtime/install',
+    });
+    expect(JSON.parse(calls.find((call) => call.init?.method === 'POST').init.body)).toEqual({ action: 'install' });
+
+    pending.resolve();
+    await first;
+    await flush();
+    expect(store.getSnapshot().installPending).toBe(false);
+    expect(store.getSnapshot().status).toBe('starting');
+    unsubscribe();
+  });
+
+  it('POST failure is local state only and does not write any other route', async () => {
+    const clock = fakeClock();
+    const calls = [];
+    const fetchImpl = jest.fn(async (url, init) => {
+      calls.push({ url, init });
+      if (init?.method === 'POST') return jsonResponse({ error: 'no' }, { ok: false, status: 403 });
+      return jsonResponse(DOWNLOAD);
+    });
+    const { createEmbedInfoStore } = loadClientInternals();
+    const store = createEmbedInfoStore({
+      fetchImpl,
+      setIntervalFn: clock.setIntervalFn,
+      clearIntervalFn: clock.clearIntervalFn,
+    });
+    const unsubscribe = store.subscribe(() => {});
+    await flush();
+
+    await store.install('retry');
+    expect(store.getSnapshot().installError).toBe('HTTP 403');
+    expect(calls.filter((call) => call.init?.method === 'POST')).toHaveLength(1);
+    expect(new Set(calls.map((call) => call.url))).toEqual(new Set(['/mebular/embed-info', '/mebular/runtime/install']));
+    unsubscribe();
+  });
+});

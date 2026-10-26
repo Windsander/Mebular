@@ -16,6 +16,8 @@ window.__ModuleLoader__.load({
     const h = React.createElement;
 
     const EMBED_INFO_PATH = '/mebular/embed-info';
+    const RUNTIME_INSTALL_PATH = '/mebular/runtime/install';
+    const README_URL = 'https://github.com/Windsander/Mebular#readme';
     const DEFAULT_CONSOLE_URL = 'http://127.0.0.1:7331/console';
     const POLL_MS = 2500;
     const FETCH_TIMEOUT_MS = 4000;
@@ -35,6 +37,23 @@ window.__ModuleLoader__.load({
         startingBody: 'The DSH plugin is starting the local Mebular daemon. This usually takes a few seconds.',
         offlineTitle: 'Mebular is not running',
         downloadTitle: 'Open or install Mebular',
+        installTitle: 'Install Mebular Runtime',
+        installBody: 'No Mebular app, CLI, service or shared runtime was found. Install the pinned Mebular runtime, initialize it, and start it once. Nothing is downloaded unless you click Install.',
+        installingTitle: 'Installing Mebular Runtime',
+        installingBody: 'Downloading and verifying the pinned Mebular runtime, then initializing and starting it. This can take a few minutes; keep DSH open.',
+        installFailedTitle: 'Mebular Runtime installation failed',
+        installFailedBody: 'Nothing was started and the previous runtime (if any) is unchanged. Retry, reinstall, or run the manual command and check again.',
+        installAction: 'Install',
+        installRetry: 'Retry',
+        installReinstall: 'Reinstall Runtime',
+        installCopy: 'Copy manual command',
+        installCopied: 'Copied',
+        installRedetect: 'Check again',
+        installManualHint: 'Manual install: run this command, then click “Check again”.',
+        installReadme: 'Installation guide',
+        installVersion: 'Target version: {version}',
+        installDone: 'Mebular Runtime is ready',
+        installReasonLabel: 'Reason: {reason}',
         serviceTitle: 'Mebular runtime conflict',
         profileTitle: 'Mebular profile mismatch',
         cliMissingTitle: 'Mebular CLI not found',
@@ -52,6 +71,20 @@ window.__ModuleLoader__.load({
           daemon_unreachable: 'No Mebular daemon answered on the configured loopback address. MCP tools are unavailable until it starts; start Mebular or run "mebular serve", then the panel and tools recover automatically.',
           daemon_unhealthy: 'Mebular answered, but its health check did not report ready. Check the Mebular logs, then refresh.',
           download_required: 'No Mebular runtime was found on this machine. Open the Mebular app or install the Mebular CLI, then restart DSH; the panel and MCP tools connect automatically once it runs. This plugin does not download Mebular.',
+          offline: 'The npm registry is unreachable because this machine appears to be offline. Reconnect, then retry or use the manual command.',
+          registry_unreachable: 'The npm registry could not be reached. Check the network/proxy settings, then retry or use the manual command.',
+          http_error: 'The npm registry refused the download (HTTP error). Retry later, or install the pinned version manually.',
+          integrity_mismatch: 'The downloaded runtime did not match the pinned version or was incomplete. Reinstall Runtime and the plugin will verify it again.',
+          disk_full: 'The disk is full, so the runtime could not be installed. Free some space, then retry.',
+          permission_denied: 'The runtime directory is not writable. Fix its permissions, then retry; the previous runtime was kept.',
+          npm_missing: 'npm was not found. Install Node.js/npm, then retry or use the manual command.',
+          unsupported_version: 'The pinned runtime version is not available from npm. Update the plugin or install a supported version manually.',
+          cancelled: 'The runtime installation was cancelled or timed out. Retry when ready; no partial runtime was started.',
+          install_locked: 'Another Mebular entry point is installing the runtime. Wait for it to finish, then check again.',
+          provider_registration_failed: 'The runtime was installed but could not be registered for App/CLI discovery. Fix runtime-providers.json, then retry; nothing was started.',
+          init_failed: 'The runtime was installed but initialization failed, so it was not started. Retry; existing Mebular data and identity were not overwritten.',
+          start_failed: 'The runtime was installed but did not become ready. Retry, check the Mebular logs, or start Mebular manually.',
+          install_failed: 'The Mebular runtime could not be installed. Retry, reinstall, or use the manual command.',
           provisioning: 'The shared Mebular runtime supervisor is starting Mebular. This usually takes a few seconds.',
           service_conflict: 'The Mebular background service cannot be reused safely (another owner or unverifiable state). Open Mebular, check its service status, then refresh.',
           service_unknown: 'The plugin cannot verify the Mebular background service state. Check the Mebular service (or reinstall it from the Mebular Console), then refresh; no second daemon will be started.',
@@ -93,6 +126,23 @@ window.__ModuleLoader__.load({
         startingBody: 'DSH 插件正在启动本地 Mebular daemon，通常需要几秒钟。',
         offlineTitle: 'Mebular 未运行',
         downloadTitle: '打开或安装 Mebular',
+        installTitle: '安装 Mebular Runtime',
+        installBody: '本机没有找到 Mebular App、CLI、常驻服务或共享 runtime。安装固定版本的 Mebular runtime，并自动初始化、启动一次。只有点击「安装」才会下载。',
+        installingTitle: '正在安装 Mebular Runtime',
+        installingBody: '正在下载并校验固定版本的 Mebular runtime，随后初始化并启动。可能需要几分钟，请保持 DSH 打开。',
+        installFailedTitle: 'Mebular Runtime 安装失败',
+        installFailedBody: '没有启动任何半成品，旧 runtime（如有）保持不变。可以重试、重新安装，或执行手动命令后重新检测。',
+        installAction: '安装',
+        installRetry: '重试',
+        installReinstall: '重新安装 Runtime',
+        installCopy: '复制手动命令',
+        installCopied: '已复制',
+        installRedetect: '重新检测',
+        installManualHint: '手动安装：执行下面的命令，然后点击「重新检测」。',
+        installReadme: '安装说明',
+        installVersion: '目标版本：{version}',
+        installDone: 'Mebular Runtime 已就绪',
+        installReasonLabel: '原因：{reason}',
         serviceTitle: 'Mebular runtime 冲突',
         profileTitle: 'Mebular profile 不一致',
         cliMissingTitle: '未找到 Mebular CLI',
@@ -110,6 +160,20 @@ window.__ModuleLoader__.load({
           daemon_unreachable: '配置的 loopback 地址上没有 Mebular daemon。MCP 工具暂时不可用；请启动 Mebular 或运行 "mebular serve"，就绪后面板与工具会自动恢复。',
           daemon_unhealthy: 'Mebular 已响应，但健康检查未就绪。请检查 Mebular 日志后刷新。',
           download_required: '本机没有找到可用的 Mebular runtime。请打开 Mebular App 或安装 Mebular CLI，然后重启 DSH；启动后面板与 MCP 工具会自动连接。本插件不会自动下载 Mebular。',
+          offline: '本机似乎离线，无法访问 npm registry。请恢复网络后重试，或使用手动命令。',
+          registry_unreachable: '无法连接 npm registry。请检查网络/代理后重试，或使用手动命令。',
+          http_error: 'npm registry 拒绝了下载（HTTP 错误）。请稍后重试，或手动安装固定版本。',
+          integrity_mismatch: '下载的 runtime 与固定版本不一致或文件不完整。请点「重新安装 Runtime」，插件会再次校验。',
+          disk_full: '磁盘空间不足，无法安装 runtime。请释放空间后重试。',
+          permission_denied: 'runtime 目录不可写。请修复权限后重试；旧 runtime 已保留。',
+          npm_missing: '没有找到 npm。请先安装 Node.js/npm，然后重试或使用手动命令。',
+          unsupported_version: 'npm 上没有这个固定版本的 runtime。请更新插件，或手动安装受支持的版本。',
+          cancelled: 'runtime 安装已取消或超时。准备好后重试；不会启动半成品。',
+          install_locked: '另一个 Mebular 入口正在安装 runtime。请等它完成，然后重新检测。',
+          provider_registration_failed: 'runtime 已安装，但无法注册给 App/CLI 发现。请修复 runtime-providers.json 后重试；没有启动任何东西。',
+          init_failed: 'runtime 已安装，但初始化失败，因此没有启动。请重试；现有 Mebular 数据与身份未被覆盖。',
+          start_failed: 'runtime 已安装，但没有就绪。请重试、检查 Mebular 日志，或手动启动 Mebular。',
+          install_failed: 'Mebular runtime 安装失败。请重试、重新安装，或使用手动命令。',
           provisioning: '共享 runtime supervisor 正在启动 Mebular，通常需要几秒钟。',
           service_conflict: 'Mebular 常驻服务无法安全复用（归属不明或状态无法确认）。请打开 Mebular 检查常驻服务状态后刷新。',
           service_unknown: '插件无法确认 Mebular 常驻服务状态。请在 Mebular Console 检查或重新安装常驻服务后刷新；不会启动第二个 daemon。',
@@ -285,6 +349,57 @@ window.__ModuleLoader__.load({
         lineHeight: 1.6,
         color: 'var(--dsw-alias-label-secondary, #aaa)',
       },
+      buttonRow: {
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 8,
+        maxWidth: 520,
+      },
+      primaryAction: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        height: 32,
+        padding: '0 14px',
+        borderRadius: 6,
+        border: '1px solid var(--dsw-alias-state-success-primary, #22c55e)',
+        background: 'var(--dsw-alias-state-success-primary, #22c55e)',
+        color: '#04120a',
+        fontSize: 12,
+        fontWeight: 600,
+        lineHeight: '30px',
+        cursor: 'pointer',
+        textDecoration: 'none',
+        whiteSpace: 'nowrap',
+        font: 'inherit',
+      },
+      codeBlock: {
+        display: 'block',
+        maxWidth: 520,
+        margin: 0,
+        padding: '8px 10px',
+        borderRadius: 6,
+        border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3))',
+        background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,.08))',
+        color: 'var(--dsw-alias-label-primary, inherit)',
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+        fontSize: 12,
+        lineHeight: 1.5,
+        textAlign: 'left',
+        overflowX: 'auto',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-all',
+      },
+      detail: {
+        margin: 0,
+        maxWidth: 520,
+        fontSize: 11,
+        lineHeight: 1.5,
+        color: 'var(--dsw-alias-label-tertiary, #888)',
+        wordBreak: 'break-word',
+      },
     };
 
     function currentText() {
@@ -345,7 +460,7 @@ window.__ModuleLoader__.load({
     function statusOf(info, loading, ready, error) {
       if (error !== null) return 'offline';
       if (ready) return 'connected';
-      if (info?.status === 'starting') return 'starting';
+      if (info?.status === 'starting' || info?.install?.state === 'installing') return 'starting';
       if (info?.status === 'up') return 'unavailable';
       if (loading && info === null) return 'checking';
       return info === null ? 'checking' : 'offline';
@@ -380,6 +495,67 @@ window.__ModuleLoader__.load({
       if (typeof error === 'string' && error.length > 0) return t.error.replace('{error}', error);
       const reason = typeof info?.reason === 'string' ? info.reason : 'unknown';
       return t.reasons[reason] ?? t.reasons.unknown;
+    }
+
+    function installInfoOf(info) {
+      const install = info?.install;
+      return install !== null && typeof install === 'object' ? install : null;
+    }
+
+    function canInstall(info) {
+      const install = installInfoOf(info);
+      if (install === null || install.allowed !== true || install.state === 'installing') return false;
+      return info?.downloadRequired === true;
+    }
+
+    function installReasonMessage(t, info) {
+      const install = installInfoOf(info);
+      if (install === null || typeof install.reason !== 'string') return null;
+      return t.reasons[install.reason] ?? t.installFailedBody;
+    }
+
+    /**
+     * Pure panel view for the plugin-only install flow. The host already owns
+     * `install.state`; the client only chooses copy and which buttons apply.
+     */
+    function installView(t, info) {
+      const install = installInfoOf(info);
+      if (install === null) return null;
+      if (install.state === 'installing') {
+        return {
+          kind: 'installing',
+          heading: t.installingTitle,
+          body: t.installingBody,
+          detail: null,
+          manualCommand: null,
+          targetVersion: install.targetVersion ?? null,
+          actions: [],
+        };
+      }
+      if (install.state === 'failed') {
+        const canRetry = install.allowed === true;
+        return {
+          kind: 'failed',
+          heading: t.installFailedTitle,
+          body: `${t.installFailedBody} ${installReasonMessage(t, info) ?? ''}`.trim(),
+          detail: typeof install.detail === 'string' ? install.detail : null,
+          manualCommand: typeof install.manualCommand === 'string' ? install.manualCommand : null,
+          targetVersion: install.targetVersion ?? null,
+          actions: canRetry
+            ? ['retry', 'reinstall', 'copy', 'redetect', 'readme']
+            : ['copy', 'readme'],
+        };
+      }
+      if (!canInstall(info)) return null;
+      return {
+        kind: 'install',
+        heading: t.installTitle,
+        body: t.installBody,
+        detail: null,
+        manualCommand: typeof install.manualCommand === 'string' ? install.manualCommand : null,
+        targetVersion: install.targetVersion ?? null,
+        actions: ['install', 'copy', 'redetect', 'readme'],
+      };
     }
 
     // Non-sensitive shared-runtime summary for the panel header. Only values the
@@ -425,9 +601,12 @@ window.__ModuleLoader__.load({
         loading: true,
         ready: false,
         status: 'checking',
+        installPending: false,
+        installError: null,
       };
       let timer = null;
       let inFlight = null;
+      let installInFlight = null;
 
       function publish(patch) {
         const next = { ...snapshot, ...patch };
@@ -503,10 +682,50 @@ window.__ModuleLoader__.load({
         };
       }
 
+      /**
+       * One explicit user action -> one POST. Never called by polling. The
+       * host owns install state; the next embed-info read reflects it.
+       */
+      function install(action = 'install') {
+        if (installInFlight !== null) return installInFlight;
+        const request = (async () => {
+          publish({ installPending: true, installError: null });
+          const signal =
+            typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+              ? AbortSignal.timeout(timeoutMs * 4)
+              : undefined;
+          const init = {
+            method: 'POST',
+            cache: 'no-store',
+            headers: { accept: 'application/json', 'content-type': 'application/json' },
+            body: JSON.stringify({ action }),
+            ...(signal === undefined ? {} : { signal }),
+          };
+          try {
+            const response = await fetchImpl(RUNTIME_INSTALL_PATH, init);
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            await response.json().catch(() => null);
+            publish({ installPending: false, installError: null });
+          } catch (cause) {
+            publish({
+              installPending: false,
+              installError: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+          await load();
+        })();
+        installInFlight = request;
+        request.finally(() => {
+          if (installInFlight === request) installInFlight = null;
+        });
+        return request;
+      }
+
       return {
         subscribe,
         getSnapshot: () => snapshot,
         refresh: load,
+        install,
       };
     }
 
@@ -565,21 +784,48 @@ window.__ModuleLoader__.load({
 
     function MebularPanel() {
       const t = currentText();
-      const { info, error, loading, ready, status } = useEmbedInfo();
+      const { info, error, loading, ready, status, installPending, installError } = useEmbedInfo();
       const [refreshToken, setRefreshToken] = React.useState(0);
       const [frameState, setFrameState] = React.useState('idle');
+      const [copied, setCopied] = React.useState(false);
 
       const embedUrl = safeHttpUrl(info?.embedUrl);
       const frameFailed = frameState === 'failed';
       const showFrame = ready && !frameFailed;
       const consoleUrl = safeHttpUrl(info?.consoleUrl) ?? DEFAULT_CONSOLE_URL;
       const version = typeof info?.version === 'string' && info.version.length > 0 ? info.version : null;
-      const downloadRequired =
-        info?.downloadRequired === true || info?.reason === 'download_required';
       const meta = runtimeMeta(t, info);
+      const pendingView = installView(t, info) ?? (installPending
+        ? {
+          kind: 'installing',
+          heading: t.installingTitle,
+          body: t.installingBody,
+          detail: null,
+          manualCommand: null,
+          targetVersion: installInfoOf(info)?.targetVersion ?? null,
+          actions: [],
+        }
+        : null);
+      const installViewValue = installPending && pendingView?.kind !== 'installing'
+        ? { ...pendingView, kind: 'installing', heading: t.installingTitle, body: t.installingBody, actions: [] }
+        : pendingView;
       const refresh = () => {
         setRefreshToken((value) => value + 1);
         void embedInfoStore.refresh();
+      };
+      const runInstall = (action) => {
+        setCopied(false);
+        void embedInfoStore.install(action);
+      };
+      const copyManual = async () => {
+        const command = installViewValue?.manualCommand;
+        if (typeof command !== 'string' || command.length === 0) return;
+        try {
+          await navigator?.clipboard?.writeText(command);
+          setCopied(true);
+        } catch {
+          setCopied(false);
+        }
       };
 
       React.useEffect(() => {
@@ -623,24 +869,97 @@ window.__ModuleLoader__.load({
 
       const starting = info?.status === 'starting';
       const cliMissing = info?.reason === 'managed_cli_missing';
-      const heading = loading && info === null
-        ? t.connectingTitle
-        : starting
-          ? t.startingTitle
-          : downloadRequired
-            ? t.downloadTitle
-            : cliMissing
-              ? t.cliMissingTitle
-              : frameFailed
-                ? t.frameFailedTitle
+      const heading = installViewValue !== null
+        ? installViewValue.heading
+        : loading && info === null
+          ? t.connectingTitle
+          : starting
+            ? t.startingTitle
+            : frameFailed
+              ? t.frameFailedTitle
+              : cliMissing
+                ? t.cliMissingTitle
                 : info?.status === 'up' ? t.incompatibleTitle : t.offlineTitle;
-      const bodyText = loading && info === null
-        ? t.connectingBody
-        : starting
-          ? t.startingBody
-          : downloadRequired
-            ? t.reasons.download_required
+      const bodyText = installViewValue !== null
+        ? installViewValue.body
+        : loading && info === null
+          ? t.connectingBody
+          : starting
+            ? t.startingBody
             : frameFailed ? t.reasons.frame_blocked : reasonMessage(t, info, error);
+
+      const installButtons = installViewValue === null
+        ? null
+        : h(
+            'div',
+            { style: styles.buttonRow },
+            ...installViewValue.actions.map((action) => {
+              if (action === 'copy') {
+                return h(
+                  'button',
+                  {
+                    key: action,
+                    type: 'button',
+                    onClick: () => { void copyManual(); },
+                    style: styles.action,
+                  },
+                  copied ? t.installCopied : t.installCopy,
+                );
+              }
+              if (action === 'readme') {
+                return h(
+                  'a',
+                  {
+                    key: action,
+                    href: README_URL,
+                    target: '_blank',
+                    rel: 'noopener noreferrer',
+                    style: styles.action,
+                  },
+                  t.installReadme,
+                );
+              }
+              const label = action === 'install'
+                ? t.installAction
+                : action === 'retry'
+                  ? t.installRetry
+                  : action === 'reinstall' ? t.installReinstall : t.installRedetect;
+              return h(
+                'button',
+                {
+                  key: action,
+                  type: 'button',
+                  disabled: installPending,
+                  onClick: () => runInstall(action),
+                  style: action === 'install' ? styles.primaryAction : styles.action,
+                },
+                label,
+              );
+            }),
+          );
+      const installDetails = installViewValue === null
+        ? null
+        : [
+            installViewValue.targetVersion === null
+              ? null
+              : h(
+                  'p',
+                  { key: 'version', style: styles.detail },
+                  t.installVersion.replace('{version}', installViewValue.targetVersion),
+                ),
+            installViewValue.kind === 'failed' && installViewValue.detail !== null
+              ? h('p', { key: 'detail', style: styles.detail }, installViewValue.detail)
+              : null,
+            installViewValue.manualCommand === null
+              ? null
+              : h('p', { key: 'manual-hint', style: styles.detail }, t.installManualHint),
+            installViewValue.manualCommand === null
+              ? null
+              : h('code', { key: 'manual', style: styles.codeBlock }, installViewValue.manualCommand),
+            installError === null
+              ? null
+              : h('p', { key: 'post-error', style: styles.warn }, installError),
+          ].filter(Boolean);
 
       const body = showFrame
         ? h(
@@ -676,6 +995,8 @@ window.__ModuleLoader__.load({
             h('div', { style: styles.placeholderIcon }, h(MebularIcon, { size: 48 })),
             h('h2', { style: styles.heading }, heading),
             h('p', { style: styles.copy }, bodyText),
+            installDetails,
+            installButtons,
             h(
               'a',
               {
@@ -739,7 +1060,11 @@ window.__ModuleLoader__.load({
         plugin.__test = {
           createEmbedInfoStore,
           dotColor,
+          installInfoOf,
+          installReasonMessage,
+          installView,
           isReadyInfo,
+          canInstall,
           reasonMessage,
           runtimeMeta,
           statusOf,

@@ -14,7 +14,9 @@
 #   lifecycle: attach | managed | auto   -- attach only by default
 #   runtime:   auto | external           -- external = never start a runtime
 #   persistence: child | service         -- service requires an existing service
-#   bootstrap: prompt | never            -- prompt is panel-only guidance
+#   bootstrap: prompt | never            -- prompt shows the explicit Install action;
+#                                            never hides/rejects it. Nothing is
+#                                            downloaded until the user clicks Install.
 # An explicit daemonUrl is always attach-only.
 # Set daemonUrl here only to pin one instance explicitly.
 - insert:

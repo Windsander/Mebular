@@ -559,6 +559,206 @@ export function stopRuntimeChild(child, { signal = 'SIGTERM' } = {}) {
   }
 }
 
+function childExited(child) {
+  if (!child) return true;
+  if (typeof child.exitCode === 'number') return true;
+  return typeof child.signalCode === 'string' && child.signalCode.length > 0;
+}
+
+function signalChild(child, signal) {
+  if (!child || typeof child.kill !== 'function' || childExited(child)) return false;
+  try {
+    return child.kill(signal) !== false;
+  } catch {
+    return false;
+  }
+}
+
+/** 等待 child 退出事件；无事件接口/超时返回 false。timeoutMs=null 表示无限等待。 */
+function waitForChildExit(child, timeoutMs) {
+  if (childExited(child)) return Promise.resolve(true);
+  if (!child || typeof child.once !== 'function') return Promise.resolve(false);
+  return new Promise((resolvePromise) => {
+    let timer = null;
+    const remove = typeof child.removeListener === 'function'
+      ? (event, listener) => child.removeListener(event, listener)
+      : (event, listener) => child.off?.(event, listener);
+    const done = (exited) => {
+      if (timer !== null) clearTimeout(timer);
+      remove('exit', onExit);
+      resolvePromise(exited);
+    };
+    const onExit = () => done(true);
+    child.once('exit', onExit);
+    // 事件注册与退出可能竞态：注册后再检查一次。
+    if (childExited(child)) {
+      done(true);
+      return;
+    }
+    if (Number.isFinite(timeoutMs)) {
+      timer = setTimeout(() => done(false), Math.max(0, timeoutMs));
+    }
+  });
+}
+
+/**
+ * 优雅停止本 supervisor 拉起的 child：SIGTERM → graceMs → SIGKILL → 等待退出。
+ * 返回 `{stopped, escalated, signal, termSent, killSent}`；只作用于传入的 child 句柄。
+ */
+export async function stopRuntimeChildGracefully(child, {
+  graceMs = 2000,
+  killWaitMs = 5000,
+  graceSignal = 'SIGTERM',
+  killSignal = 'SIGKILL',
+} = {}) {
+  if (!child || childExited(child)) {
+    return { stopped: false, escalated: false, signal: null, termSent: false, killSent: false, reason: 'not_running' };
+  }
+  const termWait = waitForChildExit(child, graceMs);
+  const termSent = signalChild(child, graceSignal);
+  const exitedAfterTerm = termSent ? await termWait : childExited(child);
+  if (exitedAfterTerm) {
+    return { stopped: true, escalated: false, signal: graceSignal, termSent, killSent: false };
+  }
+  const killWait = waitForChildExit(child, killWaitMs);
+  const killSent = signalChild(child, killSignal);
+  const exitedAfterKill = killSent ? await killWait : childExited(child);
+  return {
+    stopped: exitedAfterKill,
+    escalated: true,
+    signal: killSignal,
+    termSent,
+    killSent,
+  };
+}
+
+function writeRuntimeLine(stream, value) {
+  if (stream && typeof stream.write === 'function') {
+    stream.write(`${JSON.stringify(value, null, 2)}\n`);
+  }
+}
+
+function waitForSupervisedChild({ child, signalSource, childStopGraceMs, childKillWaitMs }) {
+  return new Promise((resolvePromise) => {
+    let settled = false;
+    let stopping = false;
+    const off = (event, listener) => {
+      signalSource?.removeListener?.(event, listener);
+      signalSource?.off?.(event, listener);
+    };
+    const cleanup = () => {
+      off('SIGTERM', onSignal);
+      off('SIGINT', onSignal);
+      child?.removeListener?.('exit', onExit);
+    };
+    const finish = (outcome) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolvePromise(outcome);
+    };
+    const onExit = (code, signal) => {
+      if (stopping) return;
+      finish({
+        kind: 'child_exit',
+        exitCode: typeof code === 'number' ? code : 1,
+        signal: typeof signal === 'string' ? signal : null,
+      });
+    };
+    const onSignal = async (signal) => {
+      if (stopping) return;
+      stopping = true;
+      const stop = await stopRuntimeChildGracefully(child, {
+        graceMs: childStopGraceMs,
+        killWaitMs: childKillWaitMs,
+      });
+      finish({ kind: 'signal', signal, stop });
+    };
+    child?.once?.('exit', onExit);
+    signalSource?.on?.('SIGTERM', onSignal);
+    signalSource?.on?.('SIGINT', onSignal);
+    if (childExited(child)) {
+      onExit(
+        typeof child.exitCode === 'number' ? child.exitCode : null,
+        typeof child.signalCode === 'string' ? child.signalCode : null,
+      );
+    }
+  });
+}
+
+/**
+ * 长驻前台 supervisor（`mebular runtime supervise`）：
+ *   - reused/service/download_required/conflict：输出一次稳定 JSON 后退出（0 / 2）；
+ *   - child：以非 detached 方式启动 provider，输出 ready JSON 后保持存活；
+ *   - SIGTERM/SIGINT：只优雅停止自己拉起的 child，然后退出；
+ *   - child 提前退出：返回明确的 child_exited 事件与退出码，不接管外部 daemon/service。
+ *
+ * App 在 Phase 2 直接进程内调用 `ensureRuntime({ detached: false })` 并持有句柄；
+ * Plugin 在 Phase 3 spawn 本命令，把 supervise 进程当作自己的 child。
+ */
+export async function superviseRuntime(options = {}) {
+  const {
+    stdout = process.stdout,
+    stderr = process.stderr,
+    signalSource = process,
+    childStopGraceMs = 2000,
+    childKillWaitMs = 5000,
+    ...ensureOptions
+  } = options;
+
+  const result = await ensureRuntime({
+    ...ensureOptions,
+    detached: false,
+    childStdio: ['ignore', 2, 2],
+  });
+
+  if (result.mode !== 'child' || !result.child) {
+    writeRuntimeLine(stdout, toPublicRuntimeResult(result));
+    return result.ok ? 0 : 2;
+  }
+
+  writeRuntimeLine(stdout, toPublicRuntimeResult(result));
+  const child = result.child;
+
+  if (!isRuntimeChildAlive(child)) {
+    writeRuntimeLine(stderr, {
+      ok: false,
+      mode: 'child',
+      reason: 'child_exited',
+      exitCode: typeof child.exitCode === 'number' ? child.exitCode : null,
+      signal: typeof child.signalCode === 'string' ? child.signalCode : null,
+    });
+    return typeof child.exitCode === 'number' ? child.exitCode : 1;
+  }
+
+  const outcome = await waitForSupervisedChild({
+    child,
+    signalSource,
+    childStopGraceMs,
+    childKillWaitMs,
+  });
+
+  if (outcome.kind === 'signal') {
+    writeRuntimeLine(stderr, {
+      ok: outcome.stop?.stopped === true,
+      mode: 'child',
+      reason: outcome.stop?.stopped === true ? 'stopped' : 'stop_failed',
+      signal: outcome.signal,
+      stop: outcome.stop,
+    });
+    return outcome.stop?.stopped === true ? 0 : 1;
+  }
+
+  writeRuntimeLine(stderr, {
+    ok: false,
+    mode: 'child',
+    reason: 'child_exited',
+    exitCode: outcome.exitCode,
+    signal: outcome.signal,
+  });
+  return outcome.exitCode;
+}
+
 function daemonFromHealth(health, http) {
   return {
     status: health?.ok === true ? 'up' : 'down',
@@ -823,18 +1023,20 @@ async function inspectRuntime(options = {}) {
     return result;
   }
 
-  if (requestedMode === 'service' && serviceStatus.registered !== true) {
-    result.mode = 'error';
-    result.reason = 'service_not_registered';
-    result.message = '要求使用常驻服务，但当前 home 未注册 mebular-serve；Phase 1 不自动安装服务';
-    result.bootstrap = { state: 'error', allowDownload: false };
+  if (serviceStatus.registered === true) {
+    // 不变量：service 已注册即代表当前 home 的常驻所有权。任何入口/--start 都不能用 child 覆盖它，
+    // 否则会再起一个 daemon，抢端口/存储锁。
+    result.mode = 'service';
+    result.bootstrap = bootstrapForMode('service');
     result.warnings.push(...discovery.warnings);
     return result;
   }
 
-  if (requestedMode !== 'child' && serviceStatus.registered === true) {
-    result.mode = 'service';
-    result.bootstrap = bootstrapForMode('service');
+  if (requestedMode === 'service') {
+    result.mode = 'error';
+    result.reason = 'service_not_registered';
+    result.message = '要求使用常驻服务，但当前 home 未注册 mebular-serve；Phase 1 不自动安装服务';
+    result.bootstrap = { state: 'error', allowDownload: false };
     result.warnings.push(...discovery.warnings);
     return result;
   }
@@ -924,6 +1126,9 @@ export async function ensureRuntime(options = {}) {
     execPath = process.execPath,
     spawnFn = spawn,
     detached = false,
+    childStdio = 'ignore',
+    childStopGraceMs = 2000,
+    childKillWaitMs = 5000,
     startLockWaitMs = 20_000,
     startLockIntervalMs = 250,
     service: injectedService = null,
@@ -1055,7 +1260,7 @@ export async function ensureRuntime(options = {}) {
           MEBULAR_CLOUD_ROOT: inspected.cloudRoot,
           ELECTRON_RUN_AS_NODE: '1',
         },
-        stdio: 'ignore',
+        stdio: childStdio,
         detached: detached === true,
       });
       if (detached === true && typeof child.unref === 'function') child.unref();
@@ -1072,7 +1277,10 @@ export async function ensureRuntime(options = {}) {
 
     const waited = await waitForHealth(options, inspected.http, waitOptionsFrom(inspected, options));
     if (!waited.ok) {
-      stopRuntimeChild(child);
+      await stopRuntimeChildGracefully(child, {
+        graceMs: childStopGraceMs,
+        killWaitMs: childKillWaitMs,
+      });
       const conflict = HEALTH_TERMINAL_REASONS.has(waited.reason);
       return {
         ...inspected,

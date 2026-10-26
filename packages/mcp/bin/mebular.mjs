@@ -1092,11 +1092,12 @@ async function runRuntime(action, args, flags) {
       await runRuntimeProvider(args, flags);
       return;
     }
-    if (action === 'resolve' || action === 'ensure' || action === 'status') {
+    if (action === 'resolve' || action === 'ensure' || action === 'status' || action === 'supervise') {
       const {
         ensureRuntime,
         resolveRuntime,
         runtimeStatus,
+        superviseRuntime,
         toPublicRuntimeResult,
       } = await import('../src/runtime-supervisor.mjs');
       const mode = typeof flags.start === 'string' ? flags.start : 'auto';
@@ -1118,13 +1119,22 @@ async function runRuntime(action, args, flags) {
         const result = await runtimeStatus(options);
         printRuntimeJson(toPublicRuntimeResult(result), result.ok ? 0 : 2);
       }
+      if (action === 'supervise') {
+        // 入口所有权路径：前台持有 child；SIGTERM/SIGINT 时只停止自己拉起的 child。
+        const exitCode = await superviseRuntime({ ...options, detached: false });
+        process.exit(exitCode);
+      }
       // ensure 默认成为 detached child 的 owner；CLI 退出后 daemon 继续运行。
+      // 这是人工/诊断路径；入口（App/Plugin）不得依赖它拥有 child。
       options.detached = true;
       const result = await ensureRuntime(options);
+      if (result.ok && result.mode === 'child') {
+        console.error('note: runtime ensure 以 detached 方式启动 child（诊断用途）；入口请使用 mebular runtime supervise 持有 child');
+      }
       printRuntimeJson(toPublicRuntimeResult(result), result.ok ? 0 : 2);
     }
     const error = new Error(
-      '用法：mebular runtime <resolve|ensure|status|provider> [--start auto|child|service] [--port N] [--json]',
+      '用法：mebular runtime <resolve|ensure|status|supervise|provider> [--start auto|child|service] [--port N] [--json]',
     );
     error.code = 'USAGE';
     throw error;
@@ -1223,7 +1233,7 @@ async function main() {
           '  service install|uninstall|restart|status|logs [--no-autostart --label L]  常驻服务管理（mebular-serve）',
           '  console [--host --port]      打印控制台 URL（需 serve 正在运行）',
           '  cloud list|use|rename [id] [name] [--force]   忆云管理（use 停旧/起新/失败回滚）',
-          '  runtime resolve|ensure|status [--start auto|child|service] [--port N] [--json]  共享 runtime（Phase 1 不下载）',
+          '  runtime resolve|ensure|status|supervise [--start auto|child|service] [--port N] [--json]  共享 runtime（Phase 1 不下载；supervise 持有 child）',
           '  runtime provider list|add|remove [--kind app|cli|shared --path P --version V --capabilities a,b --id ID]  runtime provider 注册表',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',

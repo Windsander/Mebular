@@ -5,6 +5,7 @@
 // service、provider、端口冲突、启动锁、无 provider → download_required。
 
 import { describe, it, expect, afterEach } from '@jest/globals';
+import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -24,6 +25,8 @@ import {
   runtimeStartLockPath,
   runtimeStatus,
   stopRuntimeChild,
+  stopRuntimeChildGracefully,
+  superviseRuntime,
   toPublicRuntimeResult,
   tryAcquireRuntimeStartLock,
   waitForRuntime,
@@ -101,8 +104,14 @@ function fakeSpawn() {
     signalCode: null,
     killed: false,
     unrefed: false,
+    signals: [],
     unref() { this.unrefed = true; },
-    kill(signal) { this.killed = true; this.signal = signal; return true; },
+    kill(signal) {
+      this.killed = true;
+      this.signal = signal;
+      this.signals.push(signal);
+      return true;
+    },
   };
   return {
     calls,
@@ -112,6 +121,45 @@ function fakeSpawn() {
       return child;
     },
   };
+}
+
+/** 可控 child：只在指定信号上退出，用于验证 SIGTERM→SIGKILL 升级与 supervise 生命周期。 */
+function controllableChild({ exitOn = 'SIGTERM' } = {}) {
+  const listeners = new Map();
+  const emit = (event, ...args) => {
+    for (const listener of listeners.get(event) ?? []) listener(...args);
+  };
+  const child = {
+    pid: 5151,
+    exitCode: null,
+    signalCode: null,
+    killed: false,
+    signals: [],
+    unrefed: false,
+    unref() { this.unrefed = true; },
+    once(event, listener) {
+      const list = listeners.get(event) ?? [];
+      list.push(listener);
+      listeners.set(event, list);
+      return this;
+    },
+    removeListener(event, listener) {
+      const list = (listeners.get(event) ?? []).filter((entry) => entry !== listener);
+      listeners.set(event, list);
+      return this;
+    },
+    emit,
+    kill(signal) {
+      this.killed = true;
+      this.signals.push(signal);
+      if (signal === exitOn) {
+        this.signalCode = signal;
+        setImmediate(() => emit('exit', null, signal));
+      }
+      return true;
+    },
+  };
+  return child;
 }
 
 function fakeService({ registered = false, running = false } = {}) {
@@ -431,7 +479,7 @@ describe('ensureRuntime：attach / service / child / download_required', () => {
     expect(spawn.calls).toHaveLength(0);
   });
 
-  it('显式 --start child 时跳过已注册 service，启动 provider', async () => {
+  it('已注册 service 时显式 --start child 仍走 service，不得 spawn/返回 child', async () => {
     const { root, userHome } = await makeRoot();
     const path = await fakeProviderFile(root);
     const fake = fakeService({ registered: true });
@@ -450,18 +498,10 @@ describe('ensureRuntime：attach / service / child / download_required', () => {
       spawnFn: spawn.spawnFn,
     });
     expect(result.ok).toBe(true);
-    expect(result.mode).toBe('child');
-    expect(result.provider).toMatchObject({ kind: 'cli', path, source: 'registry' });
-    expect(result.child).toBe(spawn.child);
-    expect(fake.calls.restart).toBe(0);
-    expect(spawn.calls).toHaveLength(1);
-    expect(spawn.calls[0].args).toEqual([path, 'serve', '--port', '17331']);
-    expect(spawn.calls[0].options.env).toMatchObject({
-      MEBULAR_HOME: root,
-      MEBULAR_CLOUD_ROOT: root,
-      ELECTRON_RUN_AS_NODE: '1',
-    });
-    expect(spawn.calls[0].options.detached).toBe(false);
+    expect(result.mode).toBe('service');
+    expect(result.child).toBeUndefined();
+    expect(fake.calls.restart).toBe(1);
+    expect(spawn.calls).toHaveLength(0);
   });
 
   it('显式 --start service 但未注册 → service_not_registered，不 spawn', async () => {
@@ -507,6 +547,12 @@ describe('ensureRuntime：attach / service / child / download_required', () => {
     expect(result.mode).toBe('child');
     expect(result.version).toBe('1.2.3');
     expect(result.provider).toMatchObject({ kind: 'cli', path, version: '1.2.3', source: 'registry' });
+    expect(spawn.calls[0].args).toEqual([path, 'serve', '--port', '17331']);
+    expect(spawn.calls[0].options.env).toMatchObject({
+      MEBULAR_HOME: root,
+      MEBULAR_CLOUD_ROOT: root,
+      ELECTRON_RUN_AS_NODE: '1',
+    });
     expect(spawn.child.unrefed).toBe(true);
     expect(spawn.calls[0].options.detached).toBe(true);
     expect(toPublicRuntimeResult(result).child).toBeUndefined();
@@ -555,7 +601,7 @@ describe('ensureRuntime：attach / service / child / download_required', () => {
     expect(result.mode).toBe('error');
     expect(result.reason).toBe('start_failed');
     expect(spawn.child.killed).toBe(true);
-    expect(spawn.child.signal).toBe('SIGTERM');
+    expect(spawn.child.signals).toEqual(['SIGTERM', 'SIGKILL']);
   });
 
   it('端口被非 Mebular 程序占用 → port_in_use，不 spawn', async () => {
@@ -656,6 +702,188 @@ describe('ensureRuntime：attach / service / child / download_required', () => {
     expect(spawn.child.killed).toBe(true);
     expect(stopRuntimeChild(spawn.child)).toBe(false);
     expect(stopRuntimeChild(null)).toBe(false);
+  });
+});
+
+describe('stopRuntimeChildGracefully / superviseRuntime：入口持有 child', () => {
+  function captureStream() {
+    const chunks = [];
+    const waiters = [];
+    return {
+      chunks,
+      write(chunk) {
+        chunks.push(String(chunk));
+        while (waiters.length > 0) waiters.shift()();
+      },
+      next() {
+        if (chunks.length > 0) return Promise.resolve();
+        return new Promise((resolvePromise) => waiters.push(resolvePromise));
+      },
+    };
+  }
+
+  function superviseOptions({ root, userHome, providerPath, spawnFn, stdout, stderr, signalSource, service, waitForHealthFn = healthy(root) }) {
+    return {
+      env: envFor(root),
+      userHome,
+      probeHealthFn: down,
+      probePortFn: async () => false,
+      service,
+      waitForHealthFn,
+      registryProviders: providerPath === null ? [] : [providerRecord(providerPath)],
+      includeSelf: false,
+      includeStandardApp: false,
+      spawnFn,
+      stdout,
+      stderr,
+      signalSource,
+      childStopGraceMs: 50,
+      childKillWaitMs: 50,
+    };
+  }
+
+  it('SIGTERM 后优雅停止 child（不升级），等待退出后返回 0', async () => {
+    const child = controllableChild({ exitOn: 'SIGTERM' });
+    const result = await stopRuntimeChildGracefully(child, { graceMs: 50, killWaitMs: 50 });
+    expect(result).toMatchObject({ stopped: true, escalated: false, signal: 'SIGTERM' });
+    expect(child.signals).toEqual(['SIGTERM']);
+  });
+
+  it('SIGTERM 超时后升级 SIGKILL，并等待退出', async () => {
+    const child = controllableChild({ exitOn: 'SIGKILL' });
+    const result = await stopRuntimeChildGracefully(child, { graceMs: 5, killWaitMs: 50 });
+    expect(result).toMatchObject({ stopped: true, escalated: true, signal: 'SIGKILL' });
+    expect(child.signals).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(child.signalCode).toBe('SIGKILL');
+  });
+
+  it('已退出的 child 不再发信号', async () => {
+    const child = controllableChild();
+    child.signalCode = 'SIGTERM';
+    const result = await stopRuntimeChildGracefully(child);
+    expect(result).toMatchObject({ stopped: false, escalated: false, reason: 'not_running' });
+    expect(child.signals).toEqual([]);
+  });
+
+  it('supervise：ready 后 SIGTERM 只停止自己拉起的 child', async () => {
+    const { root, userHome } = await makeRoot();
+    const path = await fakeProviderFile(root);
+    const child = controllableChild({ exitOn: 'SIGTERM' });
+    const spawned = [];
+    const spawnFn = (execPath, args, options) => {
+      spawned.push({ execPath, args, options });
+      return child;
+    };
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const signalSource = new EventEmitter();
+    const promise = superviseRuntime(superviseOptions({
+      root,
+      userHome,
+      providerPath: path,
+      spawnFn,
+      stdout,
+      stderr,
+      signalSource,
+      service: fakeService().service,
+    }));
+
+    await stdout.next();
+    const ready = JSON.parse(stdout.chunks[0]);
+    expect(ready).toMatchObject({ ok: true, mode: 'child', provider: { kind: 'cli', path, source: 'registry' } });
+    expect(ready).not.toHaveProperty('child');
+    expect(spawned).toHaveLength(1);
+    expect(spawned[0].options.detached).toBe(false);
+    expect(spawned[0].options.stdio).toEqual(['ignore', 2, 2]);
+
+    signalSource.emit('SIGTERM', 'SIGTERM');
+    const exitCode = await promise;
+    expect(exitCode).toBe(0);
+    expect(child.signals).toEqual(['SIGTERM']);
+    expect(JSON.parse(stderr.chunks.at(-1))).toMatchObject({ ok: true, mode: 'child', reason: 'stopped' });
+    // 句柄仍属于本次 supervise；没有第二次 spawn/第二个 daemon。
+    expect(spawned).toHaveLength(1);
+  });
+
+  it('supervise：child 提前退出 → 传播退出码与 child_exited reason', async () => {
+    const { root, userHome } = await makeRoot();
+    const path = await fakeProviderFile(root);
+    const child = controllableChild({ exitOn: 'SIGTERM' });
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const signalSource = new EventEmitter();
+    const promise = superviseRuntime(superviseOptions({
+      root,
+      userHome,
+      providerPath: path,
+      spawnFn: () => child,
+      stdout,
+      stderr,
+      signalSource,
+      service: fakeService().service,
+    }));
+
+    await stdout.next();
+    child.exitCode = 7;
+    child.emit('exit', 7, null);
+    const exitCode = await promise;
+    expect(exitCode).toBe(7);
+    expect(JSON.parse(stderr.chunks.at(-1))).toMatchObject({
+      ok: false,
+      mode: 'child',
+      reason: 'child_exited',
+      exitCode: 7,
+    });
+  });
+
+  it('supervise：service 已注册时不 spawn，输出 service 结果后退出', async () => {
+    const { root, userHome } = await makeRoot();
+    const fake = fakeService({ registered: true });
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const spawn = fakeSpawn();
+    const signalSource = new EventEmitter();
+    const exitCode = await superviseRuntime(superviseOptions({
+      root,
+      userHome,
+      providerPath: await fakeProviderFile(root),
+      spawnFn: spawn.spawnFn,
+      stdout,
+      stderr,
+      signalSource,
+      service: fake.service,
+    }));
+    expect(exitCode).toBe(0);
+    expect(fake.calls.restart).toBe(1);
+    expect(spawn.calls).toHaveLength(0);
+    expect(JSON.parse(stdout.chunks[0])).toMatchObject({ ok: true, mode: 'service' });
+    expect(stdout.chunks).toHaveLength(1);
+  });
+
+  it('supervise：无 provider → download_required，输出一次 JSON 后 exit 2', async () => {
+    const { root, userHome } = await makeRoot();
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const spawn = fakeSpawn();
+    const signalSource = new EventEmitter();
+    const exitCode = await superviseRuntime(superviseOptions({
+      root,
+      userHome,
+      providerPath: null,
+      spawnFn: spawn.spawnFn,
+      stdout,
+      stderr,
+      signalSource,
+      service: fakeService().service,
+    }));
+    expect(exitCode).toBe(2);
+    expect(spawn.calls).toHaveLength(0);
+    expect(JSON.parse(stdout.chunks[0])).toMatchObject({
+      ok: false,
+      mode: 'download_required',
+      download: { allowed: false },
+    });
+    expect(stdout.chunks).toHaveLength(1);
   });
 });
 

@@ -75,11 +75,12 @@ async function makeRoot({ current = 'default' } = {}) {
   return { root, serviceHome, port };
 }
 
-function envFor(root, serviceHome, { includeHome = true } = {}) {
+function envFor(root, serviceHome, { includeHome = true, extra = {} } = {}) {
   const env = {
     ...process.env,
     MEBULAR_CLOUD_ROOT: root,
     MEBULAR_SERVICE_UNIT_HOME: serviceHome,
+    ...extra,
   };
   delete env.MEBULAR_HTTP_PORT;
   delete env.MEBULAR_HTTP_HOST;
@@ -130,6 +131,46 @@ describe('mebular runtime CLI：resolve / status / ensure', () => {
       daemon: { status: 'down' },
     });
     expect(json).not.toHaveProperty('child');
+  });
+
+  it('已注册 service 时 --start child 仍解析为 service（不 spawn 第二个 daemon）', async () => {
+    const { root, serviceHome } = await makeRoot();
+    const serviceState = await tempDir('runtime-cli-service-state-');
+    await mkdir(serviceState, { recursive: true });
+    await writeFile(join(serviceState, 'mebular-serve.json'), JSON.stringify({
+      kind: 'mebular-serve',
+      label: 'com.mebular.mebular-serve.test',
+      sha: 'test',
+      autostart: true,
+      args: [],
+      execPath: process.execPath,
+      unitPath: '',
+      installedAt: new Date().toISOString(),
+    }), 'utf-8');
+
+    const result = runCli(envFor(root, serviceHome, {
+      extra: { MEBULAR_SERVICE_HOME: serviceState },
+    }), 'resolve', '--start', 'child');
+    expect(result.status).toBe(0);
+    const json = JSON.parse(result.stdout);
+    expect(json).toMatchObject({
+      ok: true,
+      mode: 'service',
+      service: { registered: true },
+    });
+    expect(json.provider).toBe(null);
+  });
+
+  it('supervise 命令已接线：未注册 service 时输出 JSON 并 exit 2（不 spawn）', async () => {
+    const { root, serviceHome } = await makeRoot();
+    const result = runCli(envFor(root, serviceHome), 'supervise', '--start', 'service');
+    expect(result.status).toBe(2);
+    const json = JSON.parse(result.stdout);
+    expect(json).toMatchObject({
+      ok: false,
+      mode: 'error',
+      reason: 'service_not_registered',
+    });
   });
 
   it('ensure --start service 且未注册 → exit 2 + service_not_registered（不下载/不启动）', async () => {

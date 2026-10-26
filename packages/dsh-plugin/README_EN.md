@@ -47,6 +47,7 @@ mebular serve
 dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
 # development install: dsh plugin --profile web add ./packages/dsh-plugin
 # verify: call any mcp__mebular__* tool
+# uninstall: dsh plugin --profile web remove @mebular/dsh-plugin
 ```
 
 <div align="center">
@@ -61,11 +62,13 @@ dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
 
 | Start | Learn | Run | Trust |
 | --- | --- | --- | --- |
-| [Quickstart](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md) | [Architecture](https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md) | [Console](https://github.com/Windsander/Mebular/blob/main/docs/console/README.md) | [Limitations](https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS.md) |
-| [Agent skills](https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md) | [Fleet ops](https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md) | [Release SOP](https://github.com/Windsander/Mebular/blob/main/docs/operations/RELEASE.md) | [Sealing docs](https://github.com/Windsander/Mebular/blob/main/SEALING.md) |
-| [Changelog](https://github.com/Windsander/Mebular/blob/main/CHANGELOG.md) | [Contributing](https://github.com/Windsander/Mebular/blob/main/CONTRIBUTING.md) | [Security](https://github.com/Windsander/Mebular/blob/main/SECURITY.md) | [Website](https://mebular.cyberfederal.io) |
-| [DSH integration](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md) | [DSH E2E](https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md) | [npm](https://www.npmjs.com/package/@mebular/dsh-plugin) | [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/) |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md">Quickstart</a></strong> <br><sub>Install &amp; pair</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md">Architecture</a></strong> <br><sub>Nodes &amp; sync</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/console/README.md">Console</a></strong> <br><sub>Local GUI</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS.md">Limitations</a></strong> <br><sub>Sensitive data</sub> |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md">Agent skills</a></strong> <br><sub>Setup playbooks</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md">Fleet ops</a></strong> <br><sub>Multi-machine</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/RELEASE.md">Release SOP</a></strong> <br><sub>Release steps</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SEALING.md">Sealing docs</a></strong> <br><sub>Protocol rules</sub> |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/CHANGELOG.md">Changelog</a></strong> <br><sub>Release notes</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/CONTRIBUTING.md">Contributing</a></strong> <br><sub>Quality gates</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SECURITY.md">Security</a></strong> <br><sub>Report a vuln</sub> | <strong><a href="https://mebular.cyberfederal.io">Website</a></strong> <br><sub>Product site</sub> |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md">DSH integration</a></strong> <br><sub>Full reference</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md">DSH E2E</a></strong> <br><sub>CI gates</sub> | <strong><a href="https://www.npmjs.com/package/@mebular/dsh-plugin">npm</a></strong> <br><sub>Package page</sub> | <strong><a href="https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/">awesome-dsh-plugin</a></strong> <br><sub>Plugin list</sub> |
 
----
+<div align="center">
 
-v0.1.2 · MIT · Uninstall: `dsh plugin --profile web remove @mebular/dsh-plugin`
+v0.1.2 · early · MIT · © 2026 Sobert Li
+
+</div>

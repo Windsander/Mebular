@@ -47,6 +47,7 @@ mebular serve
 dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
 # 开发安装：dsh plugin --profile web add ./packages/dsh-plugin
 # 验证：调用任意 mcp__mebular__* 工具
+# 卸载：dsh plugin --profile web remove @mebular/dsh-plugin
 ```
 
 <div align="center">
@@ -61,11 +62,13 @@ dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
 
 | 开始 | 理解 | 运维 | 信任 |
 | --- | --- | --- | --- |
-| [快速上手](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART_CN.md) | [架构](https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md) | [控制台](https://github.com/Windsander/Mebular/blob/main/docs/console/README.md) | [限制](https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS_CN.md) |
-| [Agent](https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md) | [Fleet](https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md) | [发布流程](https://github.com/Windsander/Mebular/blob/main/docs/operations/RELEASE.md) | [封板契约](https://github.com/Windsander/Mebular/blob/main/SEALING_CN.md) |
-| [变更日志](https://github.com/Windsander/Mebular/blob/main/CHANGELOG.md) | [参与贡献](https://github.com/Windsander/Mebular/blob/main/CONTRIBUTING.md) | [安全](https://github.com/Windsander/Mebular/blob/main/SECURITY.md) | [官网](https://mebular.cyberfederal.io) |
-| [DSH 集成说明](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md) | [DSH E2E](https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md) | [npm](https://www.npmjs.com/package/@mebular/dsh-plugin) | [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/) |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART_CN.md">快速上手</a></strong> <br><sub>安装与配对</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md">架构</a></strong> <br><sub>节点与同步</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/console/README.md">控制台</a></strong> <br><sub>本地界面</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS_CN.md">限制</a></strong> <br><sub>敏感数据</sub> |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md">Agent</a></strong> <br><sub>部署规约</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md">Fleet</a></strong> <br><sub>多机操作</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/RELEASE.md">发布流程</a></strong> <br><sub>发布步骤</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SEALING_CN.md">封板契约</a></strong> <br><sub>协议红线</sub> |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/CHANGELOG.md">变更日志</a></strong> <br><sub>发布说明</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/CONTRIBUTING.md">参与贡献</a></strong> <br><sub>质量门禁</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SECURITY.md">安全</a></strong> <br><sub>报告漏洞</sub> | <strong><a href="https://mebular.cyberfederal.io">官网</a></strong> <br><sub>产品站点</sub> |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md">DSH 集成说明</a></strong> <br><sub>完整配置</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md">DSH E2E</a></strong> <br><sub>CI 门禁</sub> | <strong><a href="https://www.npmjs.com/package/@mebular/dsh-plugin">npm</a></strong> <br><sub>包页面</sub> | <strong><a href="https://awesome-dsh-plugin.com/zh/p/Windsander/Mebular--packages-dsh-plugin/">awesome-dsh-plugin</a></strong> <br><sub>插件列表</sub> |
 
----
+<div align="center">
 
-v0.1.2 · MIT · 卸载：`dsh plugin --profile web remove @mebular/dsh-plugin`
+v0.1.2 · early · MIT · © 2026 Sobert Li
+
+</div>

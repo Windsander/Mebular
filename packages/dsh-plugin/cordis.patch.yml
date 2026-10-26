@@ -6,7 +6,16 @@
 # panel and the MCP bridge cannot disagree about the port.
 #
 # daemonUrl is intentionally omitted: the host resolves it as
-# explicit daemonUrl > MEBULAR_HTTP_PORT > <home>/runtime.json > 7331.
+# explicit daemonUrl > MEBULAR_HTTP_PORT > <home>/runtime.json > 7331, then
+# refreshes it from the shared supervisor's `mebular runtime resolve --json`
+# (unless an explicit daemonUrl pins one instance).
+#
+# Shared-runtime options (all optional, safe defaults shown):
+#   lifecycle: attach | managed | auto   -- attach only by default
+#   runtime:   auto | external           -- external = never start a runtime
+#   persistence: child | service         -- service requires an existing service
+#   bootstrap: prompt | never            -- prompt is panel-only guidance
+# An explicit daemonUrl is always attach-only.
 # Set daemonUrl here only to pin one instance explicitly.
 - insert:
     - id: mebular

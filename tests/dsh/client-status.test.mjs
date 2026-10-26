@@ -20,7 +20,7 @@ const READY_INFO = {
   embedUrl: 'http://127.0.0.1:7331/console/?embed=dsh',
 };
 
-function loadClientInternals() {
+function loadClientInternals({ lang = 'en' } = {}) {
   let registration = null;
   const fakeWindow = {
     __MEBULAR_DSH_TEST__: true,
@@ -30,7 +30,8 @@ function loadClientInternals() {
       },
     },
   };
-  runInNewContext(source, { window: fakeWindow, URL }, { filename: clientPath });
+  const fakeDocument = { documentElement: { lang } };
+  runInNewContext(source, { window: fakeWindow, document: fakeDocument, URL }, { filename: clientPath });
   expect(registration).not.toBeNull();
   const exported = registration.factory((name) => {
     expect(name).toBe('react');
@@ -122,6 +123,66 @@ describe('DSH client 状态映射', () => {
     expect(statusTitle(text, 'connected')).toBe('Mebular: Connected');
     expect(statusTitle(text, 'offline')).toBe('Mebular: Offline');
     expect(statusTitle(text, 'unknown')).toBe('Mebular: Connecting');
+  });
+});
+
+describe('DSH client 共享 runtime 状态文案', () => {
+  const REASONS = [
+    'download_required', 'provisioning', 'service_conflict', 'profile_mismatch',
+    'version_mismatch', 'managed_cli_missing', 'instance_mismatch', 'instance_missing',
+    'cloud_mismatch', 'CLOUD_ALREADY_ACTIVE', 'port_in_use', 'service_unknown',
+    'service_foreign', 'service_not_registered', 'supervise_failed', 'child_exited',
+    'runtime_resolve_failed', 'start_locked',
+  ];
+
+  it('en 为每个共享 runtime reason 提供专门文案，不落到 unknown', () => {
+    const { reasonMessage, text } = loadClientInternals();
+    const t = text();
+    for (const reason of REASONS) {
+      expect(typeof t.reasons[reason]).toBe('string');
+      expect(t.reasons[reason].length).toBeGreaterThan(20);
+      expect(reasonMessage(t, { reason }, null)).toBe(t.reasons[reason]);
+      expect(reasonMessage(t, { reason }, null)).not.toBe(t.reasons.unknown);
+    }
+  });
+
+  it('zh 文案提示打开 App / 安装 CLI / 常驻，不承诺自动下载', () => {
+    const { reasonMessage, text } = loadClientInternals({ lang: 'zh' });
+    const t = text();
+    expect(t.reasons.download_required).toContain('Mebular App');
+    expect(t.reasons.download_required).toContain('安装 Mebular CLI');
+    expect(t.reasons.download_required).toContain('不会自动下载');
+    expect(t.reasons.service_not_registered).toContain('常驻');
+    expect(t.reasons.provisioning).toContain('supervisor');
+    expect(reasonMessage(t, { reason: 'download_required' }, null)).toBe(t.reasons.download_required);
+  });
+
+  it('runtimeMeta 只汇总非敏感字段', () => {
+    const { runtimeMeta, text } = loadClientInternals();
+    const t = text();
+    expect(runtimeMeta(t, {
+      profile: { id: 'work', name: 'Work' },
+      provider: { kind: 'app' },
+      runtimeMode: 'child',
+      service: { registered: true, running: true },
+    })).toBe('Work · app · child · service running');
+    expect(runtimeMeta(t, { profile: { id: 'work', name: null } })).toBe('work');
+    expect(runtimeMeta(t, null)).toBe('');
+  });
+
+  it('download_required 不是 ready，状态点为 offline', () => {
+    const { isReadyInfo, statusOf } = loadClientInternals();
+    const info = {
+      ok: false,
+      status: 'down',
+      state: 'download_required',
+      reason: 'download_required',
+      downloadRequired: true,
+      loopback: false,
+      embedUrl: null,
+    };
+    expect(isReadyInfo(info)).toBe(false);
+    expect(statusOf(info, false, false, null)).toBe('offline');
   });
 });
 

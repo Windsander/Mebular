@@ -34,6 +34,9 @@ window.__ModuleLoader__.load({
         startingTitle: 'Starting Mebular',
         startingBody: 'The DSH plugin is starting the local Mebular daemon. This usually takes a few seconds.',
         offlineTitle: 'Mebular is not running',
+        downloadTitle: 'Open or install Mebular',
+        serviceTitle: 'Mebular runtime conflict',
+        profileTitle: 'Mebular profile mismatch',
         cliMissingTitle: 'Mebular CLI not found',
         incompatibleTitle: 'Mebular Console cannot be embedded',
         frameFailedTitle: 'Mebular Console did not load',
@@ -42,18 +45,37 @@ window.__ModuleLoader__.load({
         refresh: 'Refresh',
         hostUnavailable: 'Panel route unavailable',
         loadingFrame: 'Loading Console…',
+        serviceRegistered: 'service',
+        serviceRunning: 'service running',
         error: 'The DSH host could not read Mebular status: {error}',
         reasons: {
           daemon_unreachable: 'No Mebular daemon answered on the configured loopback address. MCP tools are unavailable until it starts; start Mebular or run "mebular serve", then the panel and tools recover automatically.',
           daemon_unhealthy: 'Mebular answered, but its health check did not report ready. Check the Mebular logs, then refresh.',
+          download_required: 'No Mebular runtime was found on this machine. Open the Mebular app or install the Mebular CLI, then restart DSH; the panel and MCP tools connect automatically once it runs. This plugin does not download Mebular.',
+          provisioning: 'The shared Mebular runtime supervisor is starting Mebular. This usually takes a few seconds.',
+          service_conflict: 'The Mebular background service cannot be reused safely (another owner or unverifiable state). Open Mebular, check its service status, then refresh.',
+          service_unknown: 'The plugin cannot verify the Mebular background service state. Check the Mebular service (or reinstall it from the Mebular Console), then refresh; no second daemon will be started.',
+          service_foreign: 'The Mebular background service belongs to another Mebular home. Stop that instance or switch this profile; the plugin will not overwrite it.',
+          service_not_registered: 'This profile is configured with persistence:service, but the Mebular background service is not installed. Open Mebular and enable “Keep Mebular running” in its Console, or switch persistence back to child.',
+          profile_mismatch: 'The daemon on this address belongs to a different Mebular profile. Switch Mebular to this profile or close the other instance; the plugin will not start a second daemon.',
+          instance_mismatch: 'The daemon on this address serves a different Mebular workspace. Close the other instance or switch profiles; the plugin will not start a second daemon.',
+          instance_missing: 'The daemon on this address has no workspace identity, so the plugin cannot verify it. Restart Mebular from the same profile.',
+          cloud_mismatch: 'The daemon on this address serves a different Mebular cloud. Switch Mebular to this cloud or close the other instance.',
+          CLOUD_ALREADY_ACTIVE: 'Another Mebular instance already runs a different profile. Stop it or switch this profile; no second daemon will be started.',
+          port_in_use: 'The configured Mebular port is used by another program. Free the port or change the Mebular port; the plugin will not start a second daemon.',
+          version_mismatch: 'The running Mebular runtime is a different version than this plugin expects. Update Mebular or the plugin, then restart DSH.',
+          managed_cli_missing: 'No Mebular CLI or app runtime was found. Open the Mebular app or install the Mebular CLI, then restart DSH.',
+          managed_start_failed: 'The shared runtime supervisor started Mebular but it did not become healthy. Check the Mebular logs or start Mebular manually; the panel and tools recover automatically once it is up.',
+          supervise_failed: 'The shared runtime supervisor exited before reporting a ready daemon. Check the Mebular logs; the plugin will not start a second daemon.',
+          child_exited: 'The Mebular runtime this plugin started has exited. Start Mebular again, or use lifecycle: attach to only follow an existing daemon.',
+          runtime_resolve_failed: 'The plugin found a Mebular runtime but could not read its shared runtime status. Reinstall or update the Mebular app/CLI, then restart DSH.',
+          start_locked: 'Another Mebular entry point is starting the runtime. Wait a moment; the panel and tools attach when it is ready.',
           embed_info_unavailable: 'Mebular is running but does not expose /app/embed/info. Update Mebular to a version that supports DSH embedding.',
           embed_not_ok: 'Mebular refused the embed discovery request. Check the Mebular version and status.',
           embed_protocol_unsupported: 'This Mebular Console uses an embed protocol this plugin does not support. Update the plugin or Mebular.',
           embed_unsupported: 'This Mebular daemon does not offer Console embedding (loopback only).',
           not_loopback: 'Embedding is disabled because Mebular or DSH is not on a loopback address. Open Console in a browser instead.',
           embed_url_invalid: 'Mebular returned an embed URL that is not a loopback HTTP(S) URL. The panel will not load it.',
-          managed_cli_missing: 'Managed mode could not find the Mebular CLI. Install Mebular, or set MEBULAR_CLI or the plugin cliPath, then restart DSH.',
-          managed_start_failed: 'The plugin started Mebular but it did not become healthy. Check the Mebular logs or start Mebular manually; the panel and tools recover automatically once it is up.',
           frame_blocked: 'The Console iframe did not load, possibly blocked by CSP or cross-origin policy. Open it in a browser instead.',
           unknown: 'The Mebular Console is unavailable. Open it in a browser to see the daemon status.',
         },
@@ -70,6 +92,9 @@ window.__ModuleLoader__.load({
         startingTitle: '正在启动 Mebular',
         startingBody: 'DSH 插件正在启动本地 Mebular daemon，通常需要几秒钟。',
         offlineTitle: 'Mebular 未运行',
+        downloadTitle: '打开或安装 Mebular',
+        serviceTitle: 'Mebular runtime 冲突',
+        profileTitle: 'Mebular profile 不一致',
         cliMissingTitle: '未找到 Mebular CLI',
         incompatibleTitle: 'Mebular Console 无法嵌入',
         frameFailedTitle: 'Mebular Console 加载失败',
@@ -78,18 +103,37 @@ window.__ModuleLoader__.load({
         refresh: '刷新',
         hostUnavailable: '面板接口不可用',
         loadingFrame: '正在加载 Console…',
+        serviceRegistered: '常驻服务',
+        serviceRunning: '常驻运行中',
         error: 'DSH 主机无法读取 Mebular 状态：{error}',
         reasons: {
           daemon_unreachable: '配置的 loopback 地址上没有 Mebular daemon。MCP 工具暂时不可用；请启动 Mebular 或运行 "mebular serve"，就绪后面板与工具会自动恢复。',
           daemon_unhealthy: 'Mebular 已响应，但健康检查未就绪。请检查 Mebular 日志后刷新。',
+          download_required: '本机没有找到可用的 Mebular runtime。请打开 Mebular App 或安装 Mebular CLI，然后重启 DSH；启动后面板与 MCP 工具会自动连接。本插件不会自动下载 Mebular。',
+          provisioning: '共享 runtime supervisor 正在启动 Mebular，通常需要几秒钟。',
+          service_conflict: 'Mebular 常驻服务无法安全复用（归属不明或状态无法确认）。请打开 Mebular 检查常驻服务状态后刷新。',
+          service_unknown: '插件无法确认 Mebular 常驻服务状态。请在 Mebular Console 检查或重新安装常驻服务后刷新；不会启动第二个 daemon。',
+          service_foreign: '该 Mebular 常驻服务属于另一个 Mebular home。请停止那个实例或切换 profile；插件不会覆盖它。',
+          service_not_registered: '当前 profile 配置了 persistence:service，但尚未安装 Mebular 常驻服务。请在 Mebular Console 打开「让 Mebular 常驻」，或把 persistence 改回 child。',
+          profile_mismatch: '该地址上的 daemon 属于另一个 Mebular profile。请把 Mebular 切到当前 profile 或关闭另一个实例；插件不会启动第二个 daemon。',
+          instance_mismatch: '该地址上的 daemon 服务于另一张忆云。请关闭另一个实例或切换 profile；插件不会启动第二个 daemon。',
+          instance_missing: '该地址上的 daemon 没有忆云身份，插件无法确认它。请从同一 profile 重启 Mebular。',
+          cloud_mismatch: '该地址上的 daemon 服务于另一个忆云。请切换 Mebular 或关闭另一个实例。',
+          CLOUD_ALREADY_ACTIVE: '已有另一个 profile 的 Mebular 实例在运行。请停止它或切换当前 profile；不会启动第二个 daemon。',
+          port_in_use: '配置的 Mebular 端口已被其他程序占用。请释放端口或更换 Mebular 端口；插件不会启动第二个 daemon。',
+          version_mismatch: '运行中的 Mebular runtime 版本与插件预期不一致。请更新 Mebular 或插件后重启 DSH。',
+          managed_cli_missing: '没有找到 Mebular CLI 或 App runtime。请打开 Mebular App 或安装 Mebular CLI，然后重启 DSH。',
+          managed_start_failed: '共享 runtime supervisor 已启动 Mebular，但健康检查未通过。请检查 Mebular 日志或手动启动 Mebular；就绪后面板与工具会自动恢复。',
+          supervise_failed: '共享 runtime supervisor 在报告就绪前退出。请检查 Mebular 日志；插件不会启动第二个 daemon。',
+          child_exited: '插件启动的 Mebular runtime 已退出。请重新启动 Mebular，或使用 lifecycle: attach 只跟随已有 daemon。',
+          runtime_resolve_failed: '插件找到了 Mebular runtime，但无法读取共享 runtime 状态。请重新安装或更新 Mebular App/CLI 后重启 DSH。',
+          start_locked: '另一个 Mebular 入口正在启动 runtime。请稍候；就绪后会自动 attach。',
           embed_info_unavailable: 'Mebular 正在运行，但没有提供 /app/embed/info。请升级到支持 DSH 嵌入的版本。',
           embed_not_ok: 'Mebular 拒绝了嵌入发现请求。请检查 Mebular 版本与状态。',
           embed_protocol_unsupported: '此 Mebular Console 的嵌入协议版本不受插件支持。请升级插件或 Mebular。',
           embed_unsupported: '此 Mebular daemon 不允许嵌入 Console（仅限 loopback）。',
           not_loopback: 'Mebular 或 DSH 不在 loopback 地址上，因此禁用嵌入。请在浏览器中打开 Console。',
           embed_url_invalid: 'Mebular 返回了非 loopback HTTP(S) 的嵌入 URL，面板不会加载它。',
-          managed_cli_missing: 'managed 模式没有找到 Mebular CLI。请安装 Mebular，或设置 MEBULAR_CLI / 插件 cliPath，然后重启 DSH。',
-          managed_start_failed: '插件已启动 Mebular，但健康检查未通过。请检查 Mebular 日志或手动启动 Mebular；daemon 就绪后面板与工具会自动恢复。',
           frame_blocked: 'Console iframe 没有加载成功，可能被 CSP 或跨源策略阻止。请在浏览器中打开 Console。',
           unknown: 'Mebular Console 当前不可用。请在浏览器中打开以查看 daemon 状态。',
         },
@@ -150,6 +194,14 @@ window.__ModuleLoader__.load({
         fontSize: 11,
         color: 'var(--dsw-alias-label-tertiary, #888)',
         whiteSpace: 'nowrap',
+      },
+      meta: {
+        fontSize: 11,
+        color: 'var(--dsw-alias-label-tertiary, #888)',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis',
+        maxWidth: 220,
       },
       spacer: {
         flex: 1,
@@ -330,6 +382,25 @@ window.__ModuleLoader__.load({
       return t.reasons[reason] ?? t.reasons.unknown;
     }
 
+    // Non-sensitive shared-runtime summary for the panel header. Only values the
+    // host already publishes in /mebular/embed-info are shown.
+    function runtimeMeta(t, info) {
+      const parts = [];
+      const profile = info?.profile;
+      if (profile !== null && typeof profile === 'object') {
+        const label = typeof profile.name === 'string' && profile.name.length > 0
+          ? profile.name
+          : typeof profile.id === 'string' && profile.id.length > 0 ? profile.id : null;
+        if (label !== null) parts.push(label);
+      }
+      if (typeof info?.provider?.kind === 'string') parts.push(info.provider.kind);
+      if (typeof info?.runtimeMode === 'string' && info.runtimeMode.length > 0) parts.push(info.runtimeMode);
+      if (info?.service?.registered === true) {
+        parts.push(info.service.running === true ? t.serviceRunning : t.serviceRegistered);
+      }
+      return parts.join(' · ');
+    }
+
     // One module-level store feeds both the sidebar status dot and the panel.
     // It polls /mebular/embed-info only while at least one React subscriber is
     // mounted, shares an in-flight request, and never requires anything beyond
@@ -503,6 +574,9 @@ window.__ModuleLoader__.load({
       const showFrame = ready && !frameFailed;
       const consoleUrl = safeHttpUrl(info?.consoleUrl) ?? DEFAULT_CONSOLE_URL;
       const version = typeof info?.version === 'string' && info.version.length > 0 ? info.version : null;
+      const downloadRequired =
+        info?.downloadRequired === true || info?.reason === 'download_required';
+      const meta = runtimeMeta(t, info);
       const refresh = () => {
         setRefreshToken((value) => value + 1);
         void embedInfoStore.refresh();
@@ -529,6 +603,7 @@ window.__ModuleLoader__.load({
         }),
         h('span', { style: styles.title }, t.title),
         version === null ? null : h('span', { style: styles.version }, `v${version.replace(/^v/, '')}`),
+        meta.length === 0 ? null : h('span', { style: styles.meta }, meta),
         h('span', { style: styles.spacer }),
         error !== null && !ready
           ? h('span', { style: styles.warn, title: error }, t.hostUnavailable)
@@ -552,16 +627,20 @@ window.__ModuleLoader__.load({
         ? t.connectingTitle
         : starting
           ? t.startingTitle
-          : cliMissing
-            ? t.cliMissingTitle
-            : frameFailed
-              ? t.frameFailedTitle
-              : info?.status === 'up' ? t.incompatibleTitle : t.offlineTitle;
+          : downloadRequired
+            ? t.downloadTitle
+            : cliMissing
+              ? t.cliMissingTitle
+              : frameFailed
+                ? t.frameFailedTitle
+                : info?.status === 'up' ? t.incompatibleTitle : t.offlineTitle;
       const bodyText = loading && info === null
         ? t.connectingBody
         : starting
           ? t.startingBody
-          : frameFailed ? t.reasons.frame_blocked : reasonMessage(t, info, error);
+          : downloadRequired
+            ? t.reasons.download_required
+            : frameFailed ? t.reasons.frame_blocked : reasonMessage(t, info, error);
 
       const body = showFrame
         ? h(
@@ -661,8 +740,11 @@ window.__ModuleLoader__.load({
           createEmbedInfoStore,
           dotColor,
           isReadyInfo,
+          reasonMessage,
+          runtimeMeta,
           statusOf,
           statusTitle,
+          text: currentText,
         };
       }
     } catch {

@@ -1086,10 +1086,62 @@ async function runRuntimeProvider(args, flags) {
   throw error;
 }
 
+async function runRuntimeInstall(action, flags) {
+  const controller = new AbortController();
+  const onSignal = () => controller.abort();
+  process.once('SIGINT', onSignal);
+  process.once('SIGTERM', onSignal);
+
+  let result;
+  try {
+    const { installRuntime } = await import('../src/runtime-installer.mjs');
+    let home;
+    try {
+      // 只用于检测是否有正在运行的 daemon/service；失败不影响安装。
+      const { resolveRuntimeContext } = await import('../src/runtime-supervisor.mjs');
+      const context = await resolveRuntimeContext({ env: process.env });
+      if (context.ok) home = context.home;
+    } catch {
+      home = undefined;
+    }
+    const inlineVersion = process.argv.slice(2).find((token) => token.startsWith('--version='));
+    const requestedVersion = inlineVersion === undefined
+      ? flags.version
+      : inlineVersion.slice('--version='.length);
+    result = await installRuntime({
+      version: requestedVersion,
+      reinstall: action === 'reinstall',
+      home,
+      env: process.env,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    result = {
+      ok: false,
+      code: error?.code ?? 'install_failed',
+      reason: error?.code ?? 'install_failed',
+      message: `runtime 安装失败（${error?.code ?? 'install_failed'}）`,
+      command: action,
+      version: null,
+      manualCommand: null,
+      runtimeInstalled: false,
+      providerRegistered: false,
+    };
+  } finally {
+    process.removeListener('SIGINT', onSignal);
+    process.removeListener('SIGTERM', onSignal);
+  }
+  printRuntimeJson(result, result.ok ? 0 : 2);
+}
+
 async function runRuntime(action, args, flags) {
   try {
     if (action === 'provider') {
       await runRuntimeProvider(args, flags);
+      return;
+    }
+    if (action === 'install' || action === 'reinstall') {
+      await runRuntimeInstall(action, flags);
       return;
     }
     if (action === 'resolve' || action === 'ensure' || action === 'status' || action === 'supervise') {
@@ -1134,7 +1186,7 @@ async function runRuntime(action, args, flags) {
       printRuntimeJson(toPublicRuntimeResult(result), result.ok ? 0 : 2);
     }
     const error = new Error(
-      '用法：mebular runtime <resolve|ensure|status|supervise|provider> [--start auto|child|service] [--port N] [--json]',
+      '用法：mebular runtime <resolve|ensure|status|supervise|provider|install|reinstall> [--start auto|child|service] [--port N] [--version V] [--json]',
     );
     error.code = 'USAGE';
     throw error;
@@ -1233,7 +1285,8 @@ async function main() {
           '  service install|uninstall|restart|status|logs [--no-autostart --label L]  常驻服务管理（mebular-serve）',
           '  console [--host --port]      打印控制台 URL（需 serve 正在运行）',
           '  cloud list|use|rename [id] [name] [--force]   忆云管理（use 停旧/起新/失败回滚）',
-          '  runtime resolve|ensure|status|supervise [--start auto|child|service] [--port N] [--json]  共享 runtime（Phase 1 不下载；supervise 持有 child）',
+          '  runtime resolve|ensure|status|supervise [--start auto|child|service] [--port N] [--json]  共享 runtime（supervise 持有 child）',
+          '  runtime install|reinstall [--version V] [--json]  安装/重装共享 runtime（固定 @mebular/core 版本）',
           '  runtime provider list|add|remove [--kind app|cli|shared --path P --version V --capabilities a,b --id ID]  runtime provider 注册表',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',

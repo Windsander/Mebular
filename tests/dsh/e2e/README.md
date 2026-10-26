@@ -9,17 +9,41 @@ npm run verify:dsh:e2e:latest          # npm latest
 npm run verify:dsh:e2e -- --scenario daemon-down-recovery
 npm run verify:dsh:e2e -- --scenario managed-lifecycle --keep
 npm run verify:dsh:e2e -- --scenario panel-false --keep
-npm run verify:dsh:e2e -- --list       # 列出场景名
+npm run verify:dsh:e2e:negative        # 故障注入：坏插件必须判红
+npm run verify:dsh:e2e -- --list        # 列出场景名
 node scripts/verify-dsh-e2e.mjs --dsh-version minimum
 node scripts/verify-dsh-e2e.mjs --dsh-version latest --root "$TMPDIR/dsh-e2e/latest"
+node scripts/verify-dsh-e2e.mjs --scenario happy-path --plugin-tarball ./bad.tgz
 ```
 
 `--keep` 在成功时也保留临时目录和 artifacts。失败时无论是否加 `--keep` 都会保留现场。
 `--root`（或 `MEBULAR_DSH_E2E_ROOT`）把现场固定到指定目录，CI 用它上传稳定路径；
-目录必须不存在、为空，或带 harness 标记，且不能与仓库/主目录重叠。
+目录必须不存在、为空，或带 harness 标记，且不能与仓库/主目录重叠。`--plugin-tarball`
+只用于显式测试覆盖（negative control）；不传时仍从 `packages/dsh-plugin` 打包。
 
 CI 触发、矩阵、artifacts 与 release gate 见
 [`docs/operations/DSH_E2E.md`](../../../docs/operations/DSH_E2E.md)。
+
+## Negative control（test-of-test）
+
+```bash
+npm run verify:dsh:e2e:negative
+npm run verify:dsh:e2e:negative -- --dsh-version latest
+npm run verify:dsh:e2e:negative -- --keep
+```
+
+`tests/dsh/e2e/negative-control.mjs` 复制生产插件到临时目录，把副本
+`cordis.patch.yml` 的 `panel: true` 改成 `panel: false`，`npm pack` 后用
+`--plugin-tarball` 跑 `happy-path`。期望：
+
+- harness 退出码非 0；
+- 输出包含 `✗ 侧边栏存在唯一的 Mebular 入口` 与 `✗ Mebular 面板 iframe 已挂载`；
+- `probe`、关键工具与 `DSH Web 页面已加载` 仍为 `✓`，证明失败是 UI 注册回归，而不是
+  preflight 短路或 DSH 没有启动；
+- 失败现场写出 artifacts，脚本退出 0 表示“坏插件被正确判红”。
+
+它不改生产插件、不新增依赖，也不放进 nightly / release（会让 E2E 成本翻倍）。发布前或
+修改 E2E 断言时手动跑一次；正式发布门禁仍是完整 9 场景。
 
 ## 前置
 
@@ -127,10 +151,13 @@ artifacts 包括：`scenario.json`、`seed.json`、`dsh-log.txt`、`daemon-log.t
 - `.github/workflows/dsh-e2e.yml`：nightly、`workflow_dispatch`、`workflow_call`、相关路径
   PR / `main` push；矩阵为最低版 + `latest`（Node 24，全部场景），nightly / manual 额外跑
   Node 22.19 + 最低版的 `happy-path` smoke；`fail-fast: false`，job 超时 45 分钟。
+- Node 22.19 是 **nightly-only** 行为：PR 与 release gate 不跑这一档，避免每次 PR 增加成本。
 - 缺 pnpm / Chrome / 构建产物时显式失败，不静默 SKIP。
 - 失败上传 `scenario-*/artifacts` 与 harness 日志；成功清理固定根目录。
 - `.github/workflows/publish.yml` 的 `publish` / `release` 依赖 DSH E2E；E2E 失败不发六个
   npm 包，也不创建 GitHub Release。dry-run 同样执行 E2E，但保持不发布。
+- PR 的首次真实 runner 运行属于验收的一部分；本地全绿不替代它，本文不预先声称 CI 已绿。
+- negative control 是手动 test-of-test，不在 CI 矩阵中，也不参与 release gate。
 - 操作细节与升级步骤见 [`docs/operations/DSH_E2E.md`](../../../docs/operations/DSH_E2E.md)。
 
 ## 边界与已知缺口
@@ -141,10 +168,11 @@ artifacts 包括：`scenario.json`、`seed.json`、`dsh-log.txt`、`daemon-log.t
   本 E2E 只覆盖 loopback；非 loopback 分支由 `tests/mcp/console-embed.test.mjs` 单测覆盖。
 - DSH Desktop 的 origin/HTTPS/自定义 scheme 仍不在本轮范围。
 - managed 生命周期与 Agent 状态文本已覆盖；Node 22.19 的 `happy-path` smoke 已本地通过，
-  CI 在 nightly / manual 运行该档，首次 GitHub runner 结果仍待 PR 验收。
+  CI 只在 nightly / manual 运行该档；PR 的首次 GitHub runner 结果属于验收的一部分。
 - `managed-cli-missing` 依赖“PATH 上没有可解析的 mebular”：harness 会过滤包含 `mebular`
   的 PATH 目录，但仍保留 `node`；若宿主把 `node` 和 `mebular` 装在同一个目录，场景会显式失败并
   指出无法构造缺失条件，而不是跳过。
 - 不验证真实 DeepSeek 模型对话；probe 走 DSH tool registry，不发模型请求。
-- workflow 已接入；首次 GitHub Actions 真实运行需在默认分支注册后手动 dispatch 或等
-  nightly，本 README 不声称 CI 已绿。
+- negative control 只证明“移除 sidebar/panel 注册”会判红，不是全量故障注入矩阵。
+- workflow 已接入；首次 GitHub Actions 真实运行发生在 PR（或默认分支后手动 dispatch /
+  nightly），本 README 不声称 CI 已绿。

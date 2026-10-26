@@ -29,6 +29,11 @@
  * Usage:
  *   node scripts/verify-dsh-e2e.mjs [--scenario <name>]... [--keep]
  *     [--dsh-version <version|minimum|current|latest>] [--root <dir>] [--list]
+ *     [--plugin-tarball <path>]
+ *
+ * `--plugin-tarball` installs an explicit plugin tarball instead of packing
+ * `packages/dsh-plugin`; it exists for the negative control (test-of-test) and
+ * never changes the default path when omitted.
  *
  * `--root` (or MEBULAR_DSH_E2E_ROOT) pins the harness root so CI can upload a
  * stable failure path ($RUNNER_TEMP/dsh-e2e/<version>). The directory must not
@@ -41,9 +46,9 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { delimiter, dirname, join, parse as parsePath, relative, resolve, sep } from 'node:path';
+import { basename, delimiter, dirname, join, parse as parsePath, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { findChrome } from './lib/cdp.mjs';
@@ -98,7 +103,9 @@ function requireCheck(name, ok, detail = '') {
 }
 
 function parseArgs(argv) {
-  const options = { scenarios: [], keep: false, dshVersion: null, root: null, list: false };
+  const options = {
+    scenarios: [], keep: false, dshVersion: null, root: null, list: false, pluginTarball: null,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--keep') {
@@ -126,11 +133,40 @@ function parseArgs(argv) {
       const value = arg.slice('--root='.length);
       if (value.length === 0) throw new Error('--root 需要目录');
       options.root = value;
+    } else if (arg === '--plugin-tarball') {
+      const value = argv[index + 1] ?? '';
+      if (value.length === 0) throw new Error('--plugin-tarball 需要 tarball 路径');
+      options.pluginTarball = value;
+      index += 1;
+    } else if (arg.startsWith('--plugin-tarball=')) {
+      const value = arg.slice('--plugin-tarball='.length);
+      if (value.length === 0) throw new Error('--plugin-tarball 需要 tarball 路径');
+      options.pluginTarball = value;
     } else {
       throw new Error(`未知参数：${arg}`);
     }
   }
   return options;
+}
+
+/**
+ * Resolve an explicit plugin tarball (negative control only). The default path
+ * still packs `packages/dsh-plugin`, so an invalid override fails loudly here
+ * instead of being silently ignored.
+ *
+ * @returns {Promise<{ path: string, size: number, filename: string }>}
+ */
+async function resolvePluginTarballOverride(value) {
+  const path = resolve(value);
+  let info;
+  try {
+    info = await stat(path);
+  } catch {
+    throw new Error(`--plugin-tarball 不存在：${path}`);
+  }
+  if (!info.isFile()) throw new Error(`--plugin-tarball 不是文件：${path}`);
+  if (info.size === 0) throw new Error(`--plugin-tarball 是空文件：${path}`);
+  return { path, size: info.size, filename: basename(path) };
 }
 
 function resolveDshVersion(value, versions) {
@@ -546,7 +582,10 @@ const scenarios = [
       await assertNoPageExceptions(world);
 
       console.log('\n  证据');
-      console.log(`    侧边栏：${SIDEBAR_SELECTOR} × 1；状态=connected`);
+      const sidebarCount = await world.state.page.evalJs(
+        `document.querySelectorAll(${JSON.stringify(SIDEBAR_SELECTOR)}).length`,
+      );
+      console.log(`    侧边栏：${SIDEBAR_SELECTOR} × ${sidebarCount}；状态=${await statusDetail(world)}`);
       console.log(`    iframe：${iframeSrc}`);
       console.log(`    Console：dataset.embed=${embedFlag.value}`);
       console.log(`    工具：schemas=${probe.schemaCount}，mebular=${probe.mebularToolCount}`);
@@ -1109,6 +1148,9 @@ async function main() {
     for (const scenario of scenarios) console.log(`${scenario.name}\t${scenario.title}`);
     return 0;
   }
+  const pluginTarballOverride = options.pluginTarball === null
+    ? null
+    : await resolvePluginTarballOverride(options.pluginTarball);
   const selected = selectScenarios(options.scenarios);
   const versions = JSON.parse(await readFile(versionsPath, 'utf-8'));
   const dshVersion = resolveDshVersion(options.dshVersion ?? versions.minimum ?? versions.current, versions);
@@ -1155,8 +1197,15 @@ async function main() {
   let exitCode = 0;
   try {
     console.log('\n→ 打包 @mebular/dsh-plugin 与 probe（一次，供所有场景使用）');
-    const pluginTarball = await packPackage(pluginDir, packDir, '@mebular/dsh-plugin');
-    requireCheck('npm pack @mebular/dsh-plugin', pluginTarball.size > 0, `${pluginTarball.filename} (${pluginTarball.size}B)`);
+    let pluginTarball;
+    if (pluginTarballOverride !== null) {
+      pluginTarball = pluginTarballOverride;
+      console.log(`  ↳ 使用 --plugin-tarball 覆盖：${pluginTarball.path}`);
+      requireCheck('使用 --plugin-tarball 覆盖插件包', pluginTarball.size > 0, `${pluginTarball.filename} (${pluginTarball.size}B)`);
+    } else {
+      pluginTarball = await packPackage(pluginDir, packDir, '@mebular/dsh-plugin');
+      requireCheck('npm pack @mebular/dsh-plugin', pluginTarball.size > 0, `${pluginTarball.filename} (${pluginTarball.size}B)`);
+    }
     const probeTarball = await packPackage(probeDir, packDir, '@mebular/dsh-e2e-probe');
     requireCheck('npm pack probe（测试专用）', probeTarball.size > 0, `${probeTarball.filename} (${probeTarball.size}B)`);
 

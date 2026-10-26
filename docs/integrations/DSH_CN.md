@@ -93,6 +93,18 @@ Mebular 的数据，就说明图已接通。侧边栏 Mebular 面板应显示同
 启动守护进程（或运行 `mebular serve`）后，插件会在下一次健康检查时自动挂载工具，面板也随
 之恢复，不需要重启 DSH。`attach` 永远不会替你启动守护进程。
 
+### 自动化验证
+
+上面的手工检查已固化为 CI 门禁：`npm run verify:dsh:e2e` 在真 daemon、真 DSH Web 与真
+无头 Chrome 上跑 9 个场景，断言侧边栏、状态点、iframe `/console/?embed=dsh`、Console 内
+`dataset.embed='dsh'`、真实 `mcp__mebular__*` 工具调用，以及 daemon down/recovery、
+`panel: false`、自定义端口、卸载隔离、安全头和 managed 生命周期。nightly 覆盖最低支持版
+与 npm `latest`；Node 22.19 smoke 只在 nightly 运行。`publish` 与 GitHub Release 依赖同一
+workflow：E2E 不绿则六个 npm 包与 Release 都不发。发布前或修改 E2E 断言时还应运行
+`npm run verify:dsh:e2e:negative`：它移除副本插件的 sidebar 注册，要求 harness 判红。
+PR 的首次真实 GitHub runner 结果属于验收的一部分，不是合并后才补看的步骤。详见
+[DSH 真实 E2E 与 CI 门禁](../operations/DSH_E2E.md)。
+
 ## daemon 发现与端口
 
 默认端口是 `7331`。host 按以下顺序解析 daemon：

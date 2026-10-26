@@ -100,6 +100,21 @@ Agent receives a short status note (see below), and the log reports `mcp bridge 
 automatically, and the panel recovers without restarting DSH. `attach` never starts the
 daemon for you.
 
+### Automated verification
+
+The manual checks above are also a CI gate: `npm run verify:dsh:e2e` runs nine scenarios
+against a real daemon, real DSH Web and real headless Chrome. It asserts the sidebar entry,
+status dot, iframe `/console/?embed=dsh`, Console `dataset.embed='dsh'`, real
+`mcp__mebular__*` tool calls, daemon down/recovery, `panel: false`, custom ports, uninstall
+isolation, security headers and the managed lifecycle. Nightly covers the minimum supported
+DSH version and npm `latest`; the Node 22.19 smoke runs nightly only. `publish` and the
+GitHub Release depend on the same workflow, so a red E2E blocks all six npm packages and
+the release. Before a release or when changing E2E assertions, also run
+`npm run verify:dsh:e2e:negative`, which removes the sidebar registration from a copied
+plugin and requires the harness to fail. The first real GitHub runner result on the PR is
+part of acceptance, not a post-merge check. See
+[DSH E2E and CI gates](../operations/DSH_E2E.md).
+
 ## Daemon discovery and ports
 
 The default port is `7331`. The host resolves the daemon in this order:

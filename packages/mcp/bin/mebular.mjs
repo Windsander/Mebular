@@ -1232,6 +1232,57 @@ async function runRuntimeService(action) {
   printRuntimeJson({ ...result, action }, result.ok ? 0 : 2);
 }
 
+async function detectRunningRuntimeVersion() {
+  try {
+    const { resolveRuntimeContext, probeRuntimeHealth } = await import('../src/runtime-supervisor.mjs');
+    const context = await resolveRuntimeContext({ env: process.env });
+    if (!context.ok || !context.http) return null;
+    const health = await probeRuntimeHealth(fetch, context.http, {
+      expectedInstance: context.homeKey,
+      cloudId: context.profileId,
+      timeoutMs: 800,
+    });
+    return health?.ok === true ? (health.body?.version ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function runRuntimeCheckUpdate(flags) {
+  const { checkRuntimeUpdate, runtimeUpdateExitCode } = await import('../src/runtime-update.mjs');
+  const result = await checkRuntimeUpdate({
+    env: process.env,
+    force: flags.force === true,
+    entry: 'cli',
+    detectRunningVersion: detectRunningRuntimeVersion,
+  });
+  printRuntimeJson(result, runtimeUpdateExitCode(result));
+}
+
+async function runRuntimeUpdateState(args) {
+  const sub = args[0] ?? 'show';
+  if (sub !== 'show') {
+    const error = new Error('用法：mebular runtime update-state show [--json]');
+    error.code = 'USAGE';
+    throw error;
+  }
+  const {
+    publicRuntimeUpdateState,
+    readRuntimeUpdateState,
+    runtimeUpdateStatePath,
+  } = await import('../src/runtime-update.mjs');
+  const root = await runtimeRootForCli();
+  const state = await readRuntimeUpdateState(root);
+  printRuntimeJson({
+    ok: true,
+    root,
+    path: runtimeUpdateStatePath(root),
+    source: state.source,
+    state: publicRuntimeUpdateState(state.state),
+    warnings: state.warnings,
+  });
+}
+
 async function runRuntimeUpgrade(flags) {
   const { upgradeRuntime } = await import('../src/runtime-upgrade.mjs');
   const context = await runtimeContextForService().catch(() => null);
@@ -1259,6 +1310,14 @@ async function runRuntime(action, args, flags) {
     }
     if (action === 'upgrade') {
       await runRuntimeUpgrade(flags);
+      return;
+    }
+    if (action === 'check-update') {
+      await runRuntimeCheckUpdate(flags);
+      return;
+    }
+    if (action === 'update-state') {
+      await runRuntimeUpdateState(args);
       return;
     }
     if (action === 'install' || action === 'reinstall') {
@@ -1307,7 +1366,7 @@ async function runRuntime(action, args, flags) {
       printRuntimeJson(toPublicRuntimeResult(result), result.ok ? 0 : 2);
     }
     const error = new Error(
-      '用法：mebular runtime <resolve|ensure|status|supervise|provider|install|reinstall|current|service|upgrade> [--start auto|child|service] [--port N] [--version V] [--to V] [--json]',
+      '用法：mebular runtime <resolve|ensure|status|supervise|provider|install|reinstall|current|service|upgrade|check-update|update-state> [--start auto|child|service] [--port N] [--version V] [--to V] [--force] [--json]',
     );
     error.code = 'USAGE';
     throw error;
@@ -1418,6 +1477,8 @@ async function main() {
           '  runtime resolve|ensure|status|supervise [--start auto|child|service] [--port N] [--json]  共享 runtime（supervise 持有 child）',
           '  runtime install|reinstall [--version V] [--json]  安装/重装共享 runtime（固定 @mebular/core 版本）',
           '  runtime upgrade --to V [--json]  显式升级共享 runtime（复用 installer；service 存在时更新并重启）',
+          '  runtime check-update [--force] [--json]  只读检查官方 npm @mebular/core stable 更新（24h 节流；不安装）',
+          '  runtime update-state show [--json]  查看共享更新状态（只读诊断，不联网）',
           '  runtime current show|set|clear [--version V --runtime-path P --cli C --provider shared --owner O --installed-at ISO]  current 指针（非敏感）',
           '  runtime service install|uninstall|restart|status [--json]  共享 mebular-serve 所有权/生命周期',
           '  runtime provider list|add|remove [--kind app|cli|shared --path P --version V --capabilities a,b --id ID]  runtime provider 注册表',

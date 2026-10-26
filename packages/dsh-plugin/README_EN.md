@@ -6,7 +6,7 @@
 
 A distributed memory network for your AI assistants. Memory and tasks stay on your devices; devices sync directly.
 
-[![npm](https://img.shields.io/npm/v/@mebular/dsh-plugin?style=flat-square)](https://www.npmjs.com/package/@mebular/dsh-plugin) [![DSH](https://img.shields.io/badge/DSH-%E2%89%A50.2.1--rc.2-4D6BFE?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness) [![Node](https://img.shields.io/badge/Node-%E2%89%A522.19-339933?logo=node.js&logoColor=white&style=flat-square)](https://nodejs.org) [![MCP server](https://img.shields.io/badge/MCP-server-5A67D8?logo=modelcontextprotocol&logoColor=white&style=flat-square)](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md) [![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://github.com/Windsander/Mebular/blob/main/LICENSE) [![awesome-dsh-plugin](https://img.shields.io/badge/awesome--dsh--plugin-memory-4D6BFE?style=flat-square)](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/)
+[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://github.com/Windsander/Mebular/blob/main/LICENSE) [![Node.js >=22.19](https://img.shields.io/badge/Node-%E2%89%A522.19-339933?logo=node.js&logoColor=white&style=flat-square)](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md) [![MCP server](https://img.shields.io/badge/MCP-server-5A67D8?logo=modelcontextprotocol&logoColor=white&style=flat-square)](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md) [![DSH plugin](https://img.shields.io/badge/DSH-plugin-4D6BFE?logo=deepseek&logoColor=white&style=flat-square)](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/)
 
 [Start in 5 minutes](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md) · [How it works](https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md) · [Website](https://mebular.cyberfederal.io) · [中文](https://github.com/Windsander/Mebular/blob/main/packages/dsh-plugin/README.md)
 
@@ -24,80 +24,51 @@ A distributed memory network for your AI assistants. Memory and tasks stay on yo
 
 </div>
 
-## Mebular for DSH
+## DSH integration
 
-Mebular is the memory and task interop layer between agents and devices; `@mebular/dsh-plugin` connects DSH to that same graph.
-
-[npm](https://www.npmjs.com/package/@mebular/dsh-plugin) · [main README](https://github.com/Windsander/Mebular/blob/main/README.md) · [integration notes](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md)
+<div align="center">
 
 ![One memory graph: two machines, each running a Mebular node. Machine A connects DSH, Hermes and Codex; machine B connects Pi, OpenCode and Cursor. Both nodes sync the same graph directly.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-en.svg)
 
-*Different agents, different machines, one graph. DSH is one shell; other agents are shown for context. This README covers DSH only.*
+![What you get in DSH: a shared Console in the sidebar, official MCP tools, a status dot and the attach / managed lifecycle; panel: false keeps MCP only.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-en.svg)
 
-> **Additive, not a replacement.** Local memory providers keep working; Mebular adds a cross-device, cross-agent graph above them.
+</div>
 
-## What you get in DSH
+## Usage
 
-![What you get in DSH: a shared Console in the sidebar, official MCP tools, a status dot and the attach / managed lifecycle.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-en.svg)
+<div align="center">
 
-Shared Console, official MCP tools, status and lifecycle — all in one.
+![Three steps: start the daemon, install the plugin, restart DSH; the Mebular app keeps running independently.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en.svg)
 
-## 3 steps
-
-![Three steps: start the daemon, install the plugin, restart DSH.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en.svg)
-
-**Prerequisites**: Node `>=22.19` · DSH `>=0.2.1-rc.2 <0.3.0` · the Mebular app or Mebular CLI (`@mebular/core`) is available on this machine
+</div>
 
 ```bash
-mebular serve                                            # 1. start the daemon if the app is not running; default :7331
-dsh plugin --profile web add @mebular/dsh-plugin@0.1.2   # 2. install
-# 3. restart DSH Web, open the Mebular panel; call any mcp__mebular__* tool to verify
+mebular serve
+dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
+# development install: dsh plugin --profile web add ./packages/dsh-plugin
+# verify: call any mcp__mebular__* tool
+# uninstall: dsh plugin --profile web remove @mebular/dsh-plugin
 ```
 
-The plugin does not install the daemon or Console: the default `attach` only probes; installing it does not start the daemon, and `managed` is the opt-in that starts it. When the daemon is running but not initialized, the panel shows the same create/join Cloud onboarding as the app. The Mebular app keeps running independently; development install: `dsh plugin --profile web add ./packages/dsh-plugin`.
+<div align="center">
 
-## How it connects
-
-![DSH integration: DSH Web loads /console/?embed=dsh in an iframe, and the official MCP client reaches the same daemon at /mcp.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en.svg)
-
-*One daemon. One Console. Two shells.*
-
-`daemonUrl` → `MEBULAR_HTTP_PORT` → `runtime.json` → `7331`; the panel, `/mebular/embed-info`, and the MCP tools always use the same origin.
-
-## Configuration
-
-```yaml
-- id: mebular
-  name: '@mebular/dsh-plugin'
-  config:
-    lifecycle: attach
-    panel: true
-# panel: false keeps MCP only
-# lifecycle: managed starts and owns a daemon
-```
-
-Fields, environment, managed details, and the endpoint list are in the [integration notes](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md).
-
-## Troubleshooting
+![DSH integration: DSH Web loads /console/?embed=dsh in an iframe, and the official MCP client reaches the same daemon at /mcp; discovery daemonUrl → MEBULAR_HTTP_PORT → runtime.json → 7331.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en.svg)
 
 ![Status dot: green up, amber starting or degraded, red down, gray waiting for the first check.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-en.svg)
 
-- `daemon_unreachable` → start the Mebular app or `mebular serve`
-- `managed_cli_missing` → set `cliPath` / `MEBULAR_CLI`
-- `peer_missing` → make sure DSH provides the official MCP peer
-- Full reason list in the [integration notes](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md)
-
-## Security and limits
-
-- Loopback embed only; `/mebular/embed-info` accepts loopback peers only.
-- The plugin never reads the store or tokens, and never writes `~/.mebular`; managed child logs are redacted.
-- `attach` is the default and never starts or stops Mebular; only `lifecycle: managed` starts a child.
-- `@deepseek-ai/dsh-mcp-client` is a DSH-provided peer; cross-home setups need explicit `daemonUrl` or `MEBULAR_HTTP_PORT`.
+</div>
 
 ## Docs
 
-[Main README](https://github.com/Windsander/Mebular/blob/main/README.md) · [integration notes](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md) · [DSH E2E](https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md) · [npm](https://www.npmjs.com/package/@mebular/dsh-plugin) · [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/) · [SECURITY](https://github.com/Windsander/Mebular/blob/main/SECURITY.md)
+| Start | Learn | Run | Trust |
+| --- | --- | --- | --- |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART.md">Quickstart</a></strong> <br><sub>Install &amp; pair</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md">Architecture</a></strong> <br><sub>Nodes &amp; sync</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/console/README.md">Console</a></strong> <br><sub>Local GUI</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS.md">Limitations</a></strong> <br><sub>Sensitive data</sub> |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md">Agent skills</a></strong> <br><sub>Setup playbooks</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md">Fleet ops</a></strong> <br><sub>Multi-machine</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/RELEASE.md">Release SOP</a></strong> <br><sub>Release steps</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SEALING.md">Sealing docs</a></strong> <br><sub>Protocol rules</sub> |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/CHANGELOG.md">Changelog</a></strong> <br><sub>Release notes</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/CONTRIBUTING.md">Contributing</a></strong> <br><sub>Quality gates</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SECURITY.md">Security</a></strong> <br><sub>Report a vuln</sub> | <strong><a href="https://mebular.cyberfederal.io">Website</a></strong> <br><sub>Product site</sub> |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md">DSH integration</a></strong> <br><sub>Full reference</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md">DSH E2E</a></strong> <br><sub>CI gates</sub> | <strong><a href="https://www.npmjs.com/package/@mebular/dsh-plugin">npm</a></strong> <br><sub>Package page</sub> | <strong><a href="https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/">awesome-dsh-plugin</a></strong> <br><sub>Plugin list</sub> |
 
----
+<div align="center">
 
-v0.1.2 · MIT · Uninstall: `dsh plugin --profile web remove @mebular/dsh-plugin`
+v0.1.2 · early · MIT · © 2026 Sobert Li
+
+</div>

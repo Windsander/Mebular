@@ -231,6 +231,17 @@ function publicManifestRuntime(manifest) {
   };
 }
 
+function expectedServiceLabel(lib, home) {
+  try {
+    if (typeof lib?.defaultLabel === 'function') {
+      return lib.defaultLabel(RUNTIME_SERVICE_KIND, undefined, home);
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
 function conflictResult(action, message, details = {}) {
   return {
     ok: false,
@@ -323,6 +334,12 @@ export async function installRuntimeService({
   const manifestPath = manifestPathFrom(lib, options.home);
   const previousManifest = readManifestSync(manifestPath);
   const previousRuntime = publicManifestRuntime(previousManifest);
+  const expectedLabel = expectedServiceLabel(lib, home);
+  const legacyManifestOtherHome = previousRuntime === null
+    && typeof previousManifest?.label === 'string'
+    && previousManifest.label.length > 0
+    && typeof expectedLabel === 'string'
+    && previousManifest.label !== expectedLabel;
   const samePath = (left, right) => typeof left === 'string' && left.length > 0
     && typeof right === 'string' && right.length > 0
     && resolve(left) === resolve(right);
@@ -334,6 +351,18 @@ export async function installRuntimeService({
     || previousRuntime === null
     || previousRuntime.cloudRoot === null
     || samePath(previousRuntime.cloudRoot, root);
+  if (legacyManifestOtherHome && !replaceExisting) {
+    return conflictResult(action, '已存在另一个 home 的 legacy mebular-serve（manifest 无 runtime 元数据）：拒绝覆盖', {
+      reason: 'service_conflict',
+      existing: {
+        label: previousManifest.label ?? null,
+        unitPath: previousManifest.unitPath ?? null,
+        runtime: previousRuntime,
+      },
+      service: statusBefore,
+      current: source.current,
+    });
+  }
   const usingFallbackWithoutCurrent = source.currentSource === 'fallback';
   if (previousManifest !== null
     && !replaceExisting
@@ -552,6 +581,8 @@ export async function runtimeServiceStatus({
     home,
     serviceHome: options.home,
     label: status?.label ?? null,
+    manifestLabel: manifest?.label ?? null,
+    expectedLabel: expectedServiceLabel(lib, home),
     registered: status?.registered === true,
     running: status?.running === true,
     autostart: status?.autostart ?? null,
@@ -715,6 +746,20 @@ export async function uninstallRuntimeService({
   const manifestPath = manifestPathFrom(lib, options.home);
   const manifest = readManifestSync(manifestPath);
   const manifestRuntime = publicManifestRuntime(manifest);
+  const expectedLabel = expectedServiceLabel(lib, home);
+  if (!manifestRuntime?.home
+    && typeof manifest?.label === 'string'
+    && manifest.label.length > 0
+    && typeof expectedLabel === 'string'
+    && manifest.label !== expectedLabel) {
+    return {
+      ok: false,
+      action,
+      reason: 'service_conflict',
+      message: 'manifest 属于另一个 home 的 legacy mebular-serve：拒绝卸载他人服务',
+      existing: { label: manifest.label, unitPath: manifest?.unitPath ?? null, runtime: null },
+    };
+  }
   if (manifestRuntime?.home && resolve(manifestRuntime.home) !== resolve(home)) {
     return {
       ok: false,

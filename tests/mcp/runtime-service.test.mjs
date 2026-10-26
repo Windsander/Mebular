@@ -267,6 +267,41 @@ describe('共享 service：缺少 current / 冲突不覆盖', () => {
     expect(existsSync(manifestPath(serviceHome))).toBe(true);
   });
 
+  it('legacy manifest（无 runtime 元数据）属于另一 home → 冲突，不覆盖', async () => {
+    const root = await tempDir('runtime-service-root-');
+    const serviceHome = await tempDir('runtime-service-home-');
+    await writeCurrent(root);
+    const unitPath = join(serviceHome, 'foreign.plist');
+    await writeFile(unitPath, 'foreign', 'utf-8');
+    const existing = {
+      kind: RUNTIME_SERVICE_KIND,
+      label: 'com.mebular.mebular-serve.otherhome',
+      sha: 'x',
+      autostart: true,
+      args: ['/other/runtime/mebular.mjs', 'serve'],
+      execPath: process.execPath,
+      unitPath,
+      installedAt: '2026-01-01T00:00:00.000Z',
+    };
+    await mkdir(join(serviceHome, '.mebular', 'services'), { recursive: true });
+    await writeFile(manifestPath(serviceHome), JSON.stringify(existing), 'utf-8');
+
+    const installed = await installRuntimeService({
+      root,
+      home: root,
+      serviceHome,
+      platform: 'linux',
+      run: fakeRun().run,
+    });
+    expect(installed).toMatchObject({ ok: false, reason: 'service_conflict' });
+    const after = JSON.parse(await readFile(manifestPath(serviceHome), 'utf-8'));
+    expect(after).toMatchObject({ label: existing.label });
+
+    const removed = await uninstallRuntimeService({ root, home: root, serviceHome, platform: 'linux', run: fakeRun().run });
+    expect(removed).toMatchObject({ ok: false, reason: 'service_conflict' });
+    expect(existsSync(manifestPath(serviceHome))).toBe(true);
+  });
+
   it('current 无效时不覆盖已有 service（同一 home 也不写半 unit）', async () => {
     const root = await tempDir('runtime-service-root-');
     const serviceHome = await tempDir('runtime-service-home-');

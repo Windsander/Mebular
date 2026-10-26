@@ -6,7 +6,7 @@
 
 import { openSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, shell, dialog, session, screen } from 'electron';
 import {
@@ -16,7 +16,7 @@ import {
   reconcileManagedState, isManagedChildAlive, registerAppRuntimeProvider, resolveAppServiceRuntime,
 } from './daemon.mjs';
 import {
-  loadCloudModules, migrateLegacyService, performCloudSwitch, recoverSwitchIntent,
+  loadCloudModules, migrateLegacyService, performCloudSwitch, recoverSwitchIntent, appFallbackProvider,
 } from './clouds.mjs';
 import { buildHandlerTable, diagnostics } from './ipc.mjs';
 import { iconDataUrl, iconDataUrl2x } from './tray-icons.mjs';
@@ -162,7 +162,7 @@ async function loadServiceModule() {
 
 async function loadRuntimeServiceModule() {
   try {
-    return await import(join(cliBin, '..', 'src', 'runtime-service.mjs'));
+    return await import(join(dirname(cliBin), '..', 'src', 'runtime-service.mjs'));
   } catch {
     return null;
   }
@@ -943,7 +943,7 @@ async function refreshCloudIdentity() {
   return { state, current };
 }
 
-/** 启动时把旧单 home 服务单元迁到 OS home 归属（保留 autostart）。 */
+/** 启动时把旧单 home 服务单元迁到 OS home 归属（保留 autostart；current 可用时指向共享 runtime）。 */
 async function migrateCurrentCloudService() {
   if (!cloudModules || !cloudRoot) return null;
   // 崩溃恢复刚拉起的 child 占着端口：先不迁移服务，避免两套守护抢同一端口。
@@ -953,7 +953,11 @@ async function migrateCurrentCloudService() {
   try {
     const result = await migrateLegacyService({
       service,
+      runtimeService: cloudModules.runtime ?? null,
+      fallbackProvider: appFallbackProvider({ cliBin }),
       descriptor: serviceDescriptorFor({ home, cliBin, http: httpConf(), cloudRoot }),
+      root: cloudRoot,
+      cliBin,
       home,
       serviceHome,
       http: httpConf(),
@@ -1017,6 +1021,8 @@ async function initCloudState() {
       root: cloudRoot,
       cliBin,
       service,
+      runtimeService: cloudModules.runtime ?? null,
+      fallbackProvider: appFallbackProvider({ cliBin }),
       serviceHome,
       modules: cloudModules,
       fetchImpl: fetch,
@@ -1105,6 +1111,8 @@ async function cloudSwitchNow(rawId) {
       home,
       cliBin,
       service,
+      runtimeService: cloudModules.runtime ?? null,
+      fallbackProvider: appFallbackProvider({ cliBin }),
       serviceHome,
       modules: cloudModules,
       fetchImpl: fetch,

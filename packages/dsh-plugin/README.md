@@ -1,3 +1,5 @@
+<div align="center">
+
 ![Mebular — 分布式记忆网络](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero.svg)
 
 **一份记忆，每个助手，每台设备。**
@@ -10,11 +12,19 @@
 
 *不需要托管账号 · 没有中心协调者*
 
+</div>
+
 ---
 
-# 在 DSH 中使用 Mebular
+<div align="center">
 
-**把 DSH 接入同一张记忆图。**
+![星图示例：静止时的设备网络与悬停时的任务航道](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-starmap-cn.jpg)
+
+*静止时的星图：设备与共同订阅关系。 · 悬停时：任务域航道与实时 fleet 流量。蓝线与金线表示本机 ↔ 各设备的任务域双向可达关系，不是设备之间的互连。*
+
+</div>
+
+## 在 DSH 中使用 Mebular
 
 Mebular 是 Agent 与设备之间的记忆与任务互通层；`@mebular/dsh-plugin` 把 DSH 接入同一张图。
 

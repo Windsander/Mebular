@@ -1,3 +1,5 @@
+<div align="center">
+
 ![Mebular — distributed memory network](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero.svg)
 
 **One memory. Every assistant. Every device.**
@@ -10,11 +12,19 @@ A distributed memory network for your AI assistants. Memory and tasks stay on yo
 
 *No hosted account · No central coordinator*
 
+</div>
+
 ---
 
-# Mebular for DSH
+<div align="center">
 
-**Connect DSH to the same memory graph.**
+![Star map example: the device network at rest and task lanes on hover](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-starmap-en.jpg)
+
+*The map at rest: devices and their shared-subscription edges. · On hover: task-domain lanes plus live fleet traffic. Blue and gold show this device's two-way task-domain reachability, not peer-to-peer links.*
+
+</div>
+
+## Mebular for DSH
 
 Mebular is the memory and task interop layer between agents and devices; `@mebular/dsh-plugin` connects DSH to that same graph.
 

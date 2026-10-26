@@ -2,8 +2,8 @@
 
 > **状态**：Phase 0（契约）+ Phase 1（共享 Runtime Supervisor / Provider 注册表 / `mebular runtime` CLI，
 > 含入口持有的 `runtime supervise` child 生命周期）+ Phase 2（App 内部接入 Supervisor 并注册
-> `kind:app` provider）已落地。
-> B 下载、自动安装、失败重装、启动更新检查、升级、签名属于后续阶段；本文先把产品决策写成契约，
+> `kind:app` provider）+ Phase 4a（共享 runtime 安装器 / `runtime install|reinstall`）已落地。
+> B 面板/下载入口、init/start、启动更新检查、升级、签名属于后续阶段；本文先把产品决策写成契约，
 > 代码不得提前越过阶段实现。
 >
 > 相关：运行时分层见 [ARCHITECT.md](ARCHITECT.md)，跨表面状态语义见 [SURFACES.md](SURFACES.md)。
@@ -51,7 +51,7 @@ App 壳 / DSH Plugin 壳                只负责 UI、发现、ensure/attach
 | Runtime Supervisor | `packages/mcp/src/runtime-supervisor.mjs` | `resolveRuntimeContext`、provider 发现、`resolveRuntime`、`ensureRuntime`、`runtimeStatus`、启动锁、健康等待 |
 | Provider 注册表 | `packages/mcp/src/runtime-providers.mjs` | `~/.mebular/runtime-providers.json` 的原子读写/加锁/校验 |
 | CLI | `packages/mcp/bin/mebular.mjs` | `mebular runtime resolve\|ensure\|status`、`runtime provider list\|add\|remove` |
-| 复用模块 | `profiles.mjs`、`cloud-switch.mjs`、`home.mjs`、`runtime-file.mjs`、`@mebular/service` | profile/home、service descriptor、runtime.json、平台服务 |
+| 复用模块 | `profiles.mjs`、`cloud-switch.mjs`、`home.mjs`、`runtime-file.mjs`、`service-loader.mjs`、`@mebular/service` | profile/home、service descriptor、runtime.json、平台服务（bare → 内置 dist） |
 
 约束：
 
@@ -60,6 +60,38 @@ App 壳 / DSH Plugin 壳                只负责 UI、发现、ensure/attach
   Phase 1 不改 App 行为与 UI。
 - DSH Plugin 继续不 import `@mebular/*`；Phase 3 通过 `mebular runtime` 子进程接入。
 - App 现有 `child/service/reused` 三种语义是验收基线：shared supervisor 的 `mode` 必须能一一映射。
+
+### 3.1 ADR：安装布局中的 service 解析（Phase 4a）
+
+**决策：采用共享 service loader，不新增 npm 依赖。**
+
+`@mebular/core` 的 package.json 不依赖 `@mebular/service`，但 core tarball 的 `files` 已包含
+`packages/service/dist`。`npm install --prefix runtime/<version> @mebular/core@<version>` 后，
+bare `import('@mebular/service')` 无法解析到独立包；若直接失败，`runtime resolve` 的 service
+状态会变成 `service_unknown`，plugin-only 首次启动会被误阻断。
+
+`packages/mcp/src/service-loader.mjs` 统一：
+
+1. 先尝试 bare `import('@mebular/service')`（标准安装/本地 workspace）；
+2. 失败后回退 `new URL('../../service/dist/index.js', import.meta.url)`（core tarball 内置 dist）；
+3. 两者都失败才抛 `SERVICE_MODULE_UNAVAILABLE`，不把失败缓存成“永久不可用”。
+
+使用方：`cloud-switch.mjs`（`profileServiceStatus` 等默认 service）、`runtime-supervisor.mjs`
+（service restart adapter）、`bin/mebular.mjs`（`serve` heartbeat、`mebular service`）。
+App 仍可注入自己的 service adapter（`deps` / 现有注入点），行为不变；loader 只服务共享 core/CLI
+的默认路径。
+
+约束：
+
+- 不新增 npm 依赖，不改发布依赖或 `files` 清单；
+- 只允许 bare 包名与本文件相对定位的 bundled dist，不接受任意 URL/路径；
+- 相对 URL 以 loader 自身 `import.meta.url` 为锚点，仓库布局与安装布局（`node_modules/@mebular/core/...`）
+  都指向 `packages/service/dist/index.js`；
+- 只缓存成功结果，修复安装后可重试；错误只保留 cause，不含凭据；
+- service 状态失败仍按既有 fail-closed：`service_unknown` 时不 fallback child。
+
+测试：`tests/mcp/service-loader.test.mjs`（bare 成功、bare 失败回退、双失败、缓存、安装布局模拟）+
+`tests/mcp/runtime-cli.test.mjs`（无 service 注册返回 `registered:false`）。
 
 ## 4. Provider 与解析优先级
 

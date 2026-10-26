@@ -1216,7 +1216,8 @@ async function main() {
       const httpConf = fileConfig.mcp?.http ?? {};
       // D4：常驻进程写 service.heartbeat（role=mebular-serve），供 `service status`/doctor 判定。
       try {
-        const { startHeartbeat, resolveBuildSha } = await import('@mebular/service');
+        const { loadServiceModule } = await import('../src/service-loader.mjs');
+        const { startHeartbeat, resolveBuildSha } = await loadServiceModule();
         startHeartbeat(homeDir(), { role: 'mebular-serve', sha: resolveBuildSha() });
       } catch {
         // service 包缺失不应阻止 serve。
@@ -1243,7 +1244,15 @@ async function main() {
       return;
     }
     case 'service': {
-      const { runServiceCli } = await import('@mebular/service');
+      const { loadServiceModule } = await import('../src/service-loader.mjs');
+      let serviceLib;
+      try {
+        serviceLib = await loadServiceModule();
+      } catch (error) {
+        console.error(`✗ service 不可用（${error?.code ?? 'ERROR'}）：${error?.message ?? error}`);
+        process.exit(2);
+      }
+      const { runServiceCli } = serviceLib;
       const home = homeDir();
       const bin = process.argv[1];
       const descriptor = {

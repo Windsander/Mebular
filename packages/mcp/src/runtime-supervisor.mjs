@@ -38,6 +38,7 @@ import {
   profileServiceDescriptor,
   profileServiceStatus,
 } from './cloud-switch.mjs';
+import { loadServiceModule } from './service-loader.mjs';
 
 export const RUNTIME_DEFAULT_HOST = '127.0.0.1';
 export const RUNTIME_DEFAULT_PORT = 7331;
@@ -475,7 +476,7 @@ export function createRuntimeServiceAdapter({
       }
     },
     async restart() {
-      const lib = await import('@mebular/service');
+      const lib = await loadServiceModule();
       const result = lib.restartService(descriptor, { home: resolvedServiceHome });
       if (!result?.ok) {
         throw cloudError(

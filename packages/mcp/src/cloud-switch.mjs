@@ -18,6 +18,7 @@ import {
   readRegistry,
   setCurrentProfile,
 } from './profiles.mjs';
+import { loadServiceModule } from './service-loader.mjs';
 
 export const SWITCH_INTENT_FILE = 'switch.intent.json';
 
@@ -223,8 +224,9 @@ export function profileServiceDescriptor({
 }
 
 async function serviceLib(deps) {
+  // App 仍可注入自己的 service adapter；默认共享 core/CLI 走 loader（bare → bundled dist）。
   if (deps) return deps;
-  return import('@mebular/service');
+  return loadServiceModule();
 }
 
 export async function profileServiceStatus({ descriptor, serviceHome = homedir(), deps } = {}) {

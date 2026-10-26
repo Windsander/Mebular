@@ -129,6 +129,8 @@ describe('mebular runtime CLI：resolve / status / ensure', () => {
       home: join(root, 'profiles', 'p_a'),
       provider: { kind: 'cli', source: 'self' },
       daemon: { status: 'down' },
+      // service loader 可用：无 service 注册是正常 registered:false，不是 service_unknown。
+      service: { ok: true, registered: false, running: false },
     });
     expect(json).not.toHaveProperty('child');
   });

@@ -110,6 +110,7 @@ describe('mebular runtime upgrade-state / upgrade --to latest', () => {
         available: true,
         entry: 'app',
       },
+      lock: { busy: false, stale: true },
     });
     expect(result.stdout).not.toMatch(/token|authorization/i);
 

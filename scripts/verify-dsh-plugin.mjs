@@ -218,6 +218,10 @@ check('index.js exports createDaemonLifecycle()', typeof pluginModule.createDaem
 check('index.js exports createEmbedInfoHandler()', typeof pluginModule.createEmbedInfoHandler === 'function');
 check('index.js exports createRuntimeInstallManager()', typeof pluginModule.createRuntimeInstallManager === 'function');
 check('index.js exports createRuntimeInstallHandler()', typeof pluginModule.createRuntimeInstallHandler === 'function');
+check('index.js exports createRuntimeUpgradeManager()', typeof pluginModule.createRuntimeUpgradeManager === 'function');
+check('index.js exports createRuntimeUpgradeHandler()', typeof pluginModule.createRuntimeUpgradeHandler === 'function');
+check('index.js exports sanitizeRuntimeUpdateState()', typeof pluginModule.sanitizeRuntimeUpdateState === 'function');
+check('index.js exports sanitizeRuntimeUpgradeState()', typeof pluginModule.sanitizeRuntimeUpgradeState === 'function');
 check('index.js exports detectRegisteredRuntimeService()', typeof pluginModule.detectRegisteredRuntimeService === 'function');
 check('index.js exports sanitizeRuntimeInstallState()', typeof pluginModule.sanitizeRuntimeInstallState === 'function');
 check(
@@ -229,6 +233,16 @@ check(
   'index.js exposes the loopback install route',
   pluginModule.RUNTIME_INSTALL_PATH === '/mebular/runtime/install',
   String(pluginModule.RUNTIME_INSTALL_PATH),
+);
+check(
+  'index.js exposes the loopback upgrade route',
+  pluginModule.RUNTIME_UPGRADE_PATH === '/mebular/runtime/upgrade',
+  String(pluginModule.RUNTIME_UPGRADE_PATH),
+);
+check(
+  'index.js exposes fixed upgrade actions only',
+  JSON.stringify(pluginModule.RUNTIME_UPGRADE_ACTIONS) === JSON.stringify(['update', 'later', 'skip']),
+  JSON.stringify(pluginModule.RUNTIME_UPGRADE_ACTIONS),
 );
 check('index.js exports agentStatusText()', typeof pluginModule.agentStatusText === 'function');
 check('index.js exports createAgentStatus()', typeof pluginModule.createAgentStatus === 'function');
@@ -261,6 +275,24 @@ const hostSource = readFileSync(join(pkgDir, 'index.js'), 'utf8');
 check(
   'host registers the mebular:status prompt section',
   hostSource.includes("AGENT_STATUS_SECTION = 'mebular:status'"),
+);
+check(
+  'host checks updates through the selected CLI',
+  hostSource.includes("command: ['check-update']") && hostSource.includes("'update-state', 'prompted'"),
+);
+check(
+  'host upgrades only to the shared latest',
+  hostSource.includes("'upgrade', '--to', 'latest', '--json'"),
+);
+check(
+  'host never accepts a client upgrade version',
+  !/RUNTIME_UPGRADE_PATH[\s\S]{0,400}?input\.version/.test(hostSource)
+    && !/input\.(?:url|registry|tag)\b/.test(hostSource),
+);
+check(
+  'host unload never uninstalls the shared service/runtime',
+  !hostSource.includes('uninstallRuntimeService')
+    && !/runtime',\s*'service',\s*'uninstall'/.test(hostSource),
 );
 check('host feature-detects the optional systemPrompt service', /ctx\.systemPrompt/.test(hostSource));
 check(
@@ -306,7 +338,13 @@ check('client uses a sandboxed iframe', clientSource.includes("sandbox: 'allow-s
 check('client honours panel:false', clientSource.includes('__MEBULAR_DSH__') && /panel\s*===\s*false/.test(clientSource));
 check('client handles managed start states', clientSource.includes('managed_cli_missing') && clientSource.includes('managed_start_failed'));
 check('client offers the plugin-only install action', clientSource.includes("'/mebular/runtime/install'"));
-check('client posts only the install action', /body:\s*JSON\.stringify\(\{\s*action\s*\}\)/.test(clientSource));
+check('client offers the explicit upgrade action', clientSource.includes("'/mebular/runtime/upgrade'"));
+check('client renders the update banner/updateView', clientSource.includes('function updateView') && clientSource.includes('data-mebular-update'));
+check('client shows update/later/skip actions', [
+  'updateAction', 'updateLater', 'updateSkip', 'updateUpdatingTitle', 'updateFailedTitle', 'serviceHint',
+].every((key) => clientSource.includes(key)));
+check('client has no client-supplied upgrade version/url', !/RUNTIME_UPGRADE_PATH[\s\S]{0,300}?version/.test(clientSource));
+check('client posts only the fixed action body', /body:\s*JSON\.stringify\(\{\s*action\s*\}\)/.test(clientSource));
 check('client has exactly one POST method', (clientSource.match(/method:\s*'POST'/g) ?? []).length === 1);
 check('client has no other write methods', !/method:\s*'(?:PUT|PATCH|DELETE)'/.test(clientSource));
 check('client shows install/retry/reinstall/copy/redetect actions', [

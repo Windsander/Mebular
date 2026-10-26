@@ -1417,6 +1417,7 @@ async function maybeCheckRuntimeUpdates({ wizardComplete = false } = {}) {
       return runtimeUpdateActionForResponse(answer?.response);
     },
     skipVersionFn: (root, version) => modules.setRuntimeUpdateSkippedVersion(root, version),
+    promptedVersionFn: (root, version) => modules.setRuntimeUpdatePromptedVersion(root, version),
     performUpgradeFn: (options) => upgradeRuntimeFromApp(options),
   });
   if (result?.shown === true) {

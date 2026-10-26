@@ -211,6 +211,8 @@ export function emptyRuntimeUpdateState() {
     runningVersion: null,
     available: false,
     skippedVersion: null,
+    promptedVersion: null,
+    promptedAt: null,
     reason: null,
     failureReason: null,
     source: RUNTIME_UPDATE_SOURCE_URL,
@@ -262,6 +264,8 @@ export function normalizeRuntimeUpdateState(input, { now = new Date().toISOStrin
     runningVersion: versionField('runningVersion'),
     available: input.available === true,
     skippedVersion: versionField('skippedVersion', { stable: true }),
+    promptedVersion: versionField('promptedVersion', { stable: true }),
+    promptedAt: timeField('promptedAt'),
     reason: safeReason(input.reason),
     failureReason: safeReason(input.failureReason),
     // 来源始终归一为固定官方 URL；文件里出现别的来源也不采用。
@@ -357,6 +361,8 @@ export function publicRuntimeUpdateState(state) {
     runningVersion: state.runningVersion ?? null,
     available: state.available === true,
     skippedVersion: state.skippedVersion ?? null,
+    promptedVersion: state.promptedVersion ?? null,
+    promptedAt: state.promptedAt ?? null,
     reason: state.reason ?? null,
     failureReason: state.failureReason ?? null,
     source: RUNTIME_UPDATE_SOURCE_URL,
@@ -497,7 +503,31 @@ export async function setRuntimeUpdateSkippedVersion(root, version, { now = new 
   const state = await writeRuntimeUpdateState(root, {
     ...current.state,
     skippedVersion,
+    // 「跳过」本身也是用户已看过该版本提示的显式动作；另一入口不应再自动弹同一版本。
+    ...(skippedVersion === null
+      ? {}
+      : { promptedVersion: skippedVersion, promptedAt: now }),
     ...(skippingLatest ? { available: false, reason: 'skipped' } : {}),
+    updatedAt: now,
+  }, { now });
+  return { state, source: current.source, warnings: current.warnings, path: runtimeUpdateStatePath(root) };
+}
+
+/**
+ * 跨入口已提示去重：记录最近一次真正展示过更新提示的 latestVersion。
+ * 只写非敏感版本/时间；不改变 available/skippedVersion，也不触发检查/安装。
+ * 传 null 清除；损坏 state 在读取时已回退为空，写入原子覆盖。
+ */
+export async function setRuntimeUpdatePromptedVersion(root, version, { now = new Date().toISOString() } = {}) {
+  if (typeof root !== 'string' || root.length === 0) {
+    throw cloudError('CLOUD_UNAVAILABLE', '缺少 cloudRoot，无法写 update-state');
+  }
+  const promptedVersion = version === null || version === undefined ? null : assertStableVersion(version);
+  const current = await readRuntimeUpdateState(root);
+  const state = await writeRuntimeUpdateState(root, {
+    ...current.state,
+    promptedVersion,
+    promptedAt: promptedVersion === null ? null : now,
     updatedAt: now,
   }, { now });
   return { state, source: current.source, warnings: current.warnings, path: runtimeUpdateStatePath(root) };
@@ -702,6 +732,13 @@ export async function checkRuntimeUpdate(options = {}) {
     const currentSourceValue = fields.currentSource !== undefined ? fields.currentSource : currentState.source;
     const currentUsableValue = fields.currentUsable !== undefined ? fields.currentUsable : currentState.usable === true;
     const extraWarnings = Array.isArray(fields.warnings) ? fields.warnings : [];
+    const latestVersionValue = fields.latestVersion !== undefined ? fields.latestVersion : null;
+    const promptedVersionValue = fields.promptedVersion !== undefined
+      ? fields.promptedVersion
+      : stored.promptedVersion;
+    const promptedValue = fields.prompted !== undefined
+      ? fields.prompted === true
+      : (latestVersionValue !== null && promptedVersionValue === latestVersionValue);
     return {
       ok: fields.ok !== undefined ? fields.ok === true : true,
       action: 'check-update',
@@ -711,6 +748,7 @@ export async function checkRuntimeUpdate(options = {}) {
       message: fields.message ?? null,
       available: fields.available === true,
       skipped: fields.skipped === true,
+      prompted: promptedValue,
       decision,
       cached: fields.cached === true,
       stale: fields.stale === true,
@@ -725,8 +763,10 @@ export async function checkRuntimeUpdate(options = {}) {
       runningVersion: fields.runningVersion !== undefined
         ? fields.runningVersion
         : (explicitRunning ?? stored.runningVersion),
-      latestVersion: fields.latestVersion !== undefined ? fields.latestVersion : null,
+      latestVersion: latestVersionValue,
       skippedVersion: fields.skippedVersion !== undefined ? fields.skippedVersion : skippedVersion,
+      promptedVersion: promptedVersionValue,
+      promptedAt: fields.promptedAt !== undefined ? fields.promptedAt : stored.promptedAt,
       currentSource: currentSourceValue,
       currentUsable: currentUsableValue,
       lastCheckedAt: fields.lastCheckedAt !== undefined ? fields.lastCheckedAt : stored.lastCheckedAt,

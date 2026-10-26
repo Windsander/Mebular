@@ -135,6 +135,82 @@ describe('maybePromptForRuntimeUpdate', () => {
     expect(skipped).toEqual([{ root: '/root', version: '0.1.2' }]);
   });
 
+  it('真正展示提示前写共享 prompted；App 已提示的 latest 不再自动弹', async () => {
+    const prompted = [];
+    const session = createRuntimeUpdateSession();
+    const options = {
+      root: '/root',
+      session,
+      checkFn: async () => availableCheck,
+      showPromptFn: async () => RUNTIME_UPDATE_ACTION.LATER,
+      promptedVersionFn: async (root, version) => { prompted.push({ root, version }); },
+    };
+    const first = await maybePromptForRuntimeUpdate(options);
+    expect(first).toMatchObject({ shown: true, action: 'later', promptedSaved: true });
+    expect(prompted).toEqual([{ root: '/root', version: '0.1.2' }]);
+
+    // 另一个 App 进程/入口读取共享状态：prompted=true，不自动弹。
+    const other = await maybePromptForRuntimeUpdate({
+      root: '/root',
+      checkFn: async () => ({ ...availableCheck, prompted: true, promptedVersion: '0.1.2' }),
+      showPromptFn: async () => { throw new Error('must not prompt'); },
+    });
+    expect(other).toMatchObject({ shown: false, reason: 'already_prompted' });
+
+    // 只有提示写入失败也不阻塞本次展示，但返回 warning。
+    const warned = await maybePromptForRuntimeUpdate({
+      root: '/root',
+      checkFn: async () => availableCheck,
+      showPromptFn: async () => RUNTIME_UPDATE_ACTION.LATER,
+      promptedVersionFn: async () => { throw new Error('state unavailable'); },
+    });
+    expect(warned).toMatchObject({ shown: true, promptedSaved: false, warning: 'state unavailable' });
+    expect(prompted).toHaveLength(1);
+  });
+
+  it('skip/update/later 都先写 prompted（只写一次），另一个入口不再自动弹', async () => {
+    for (const action of [RUNTIME_UPDATE_ACTION.LATER, RUNTIME_UPDATE_ACTION.SKIP, RUNTIME_UPDATE_ACTION.UPDATE]) {
+      const prompted = [];
+      const session = createRuntimeUpdateSession();
+      const result = await maybePromptForRuntimeUpdate({
+        root: '/root',
+        session,
+        checkFn: async () => availableCheck,
+        showPromptFn: async () => action,
+        promptedVersionFn: async (root, version) => { prompted.push({ root, version }); },
+        skipVersionFn: async () => {},
+        performUpgradeFn: async () => ({ ok: true }),
+      });
+      expect(result).toMatchObject({ shown: true, promptedSaved: true });
+      expect(prompted).toEqual([{ root: '/root', version: '0.1.2' }]);
+      expect(session.promptedVersions.has('0.1.2')).toBe(true);
+
+      const again = await maybePromptForRuntimeUpdate({
+        root: '/root',
+        session,
+        checkFn: async () => availableCheck,
+        showPromptFn: async () => { throw new Error('must not prompt twice'); },
+      });
+      expect(again).toMatchObject({ shown: false, reason: 'already_prompted' });
+    }
+  });
+
+  it('check 读取到共享 promptedVersion 时视为已提示，不调用 showPrompt', async () => {
+    let showCalls = 0;
+    const result = await maybePromptForRuntimeUpdate({
+      root: '/root',
+      checkFn: async () => ({
+        ...availableCheck,
+        prompted: false,
+        promptedVersion: '0.1.2',
+        promptedAt: '2026-01-01T00:00:00.000Z',
+      }),
+      showPromptFn: async () => { showCalls += 1; return RUNTIME_UPDATE_ACTION.UPDATE; },
+    });
+    expect(result).toMatchObject({ shown: false, reason: 'already_prompted' });
+    expect(showCalls).toBe(0);
+  });
+
   it('只有用户点更新才调用升级；失败结果原样返回', async () => {
     const upgrades = [];
     const result = await maybePromptForRuntimeUpdate({

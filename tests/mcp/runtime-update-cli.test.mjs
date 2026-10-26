@@ -141,6 +141,26 @@ describe('mebular runtime check-update / update-state CLI', () => {
     expect(JSON.parse(missing.stdout)).toMatchObject({ ok: false, reason: 'USAGE' });
   });
 
+  it('update-state prompted --version 写共享 promptedVersion（不联网）', async () => {
+    const root = await makeRoot();
+    const env = cleanEnv({ MEBULAR_CLOUD_ROOT: root, MEBULAR_HOME: root });
+    const prompted = run(env, ['runtime', 'update-state', 'prompted', '--version', '0.2.0', '--json']);
+    expect(prompted.status).toBe(0);
+    expect(JSON.parse(prompted.stdout)).toMatchObject({
+      ok: true,
+      state: { promptedVersion: '0.2.0', promptedAt: expect.any(String) },
+    });
+
+    const show = run(env, ['runtime', 'update-state', 'show', '--json']);
+    expect(JSON.parse(show.stdout)).toMatchObject({
+      state: { promptedVersion: '0.2.0' },
+    });
+
+    const missing = run(env, ['runtime', 'update-state', 'prompted', '--json']);
+    expect(missing.status).toBe(2);
+    expect(JSON.parse(missing.stdout)).toMatchObject({ ok: false, reason: 'USAGE' });
+  });
+
   it('update-state show 只读诊断；非法子命令 exit 2 + USAGE', async () => {    const root = await makeRoot();
     await writeRuntimeUpdateState(root, {
       lastCheckedAt: '2026-10-26T00:00:00.000Z',
@@ -191,5 +211,6 @@ describe('mebular runtime check-update / update-state CLI', () => {
     expect(result.stdout).toContain('runtime check-update');
     expect(result.stdout).toContain('runtime update-state show');
     expect(result.stdout).toContain('runtime update-state skip');
+    expect(result.stdout).toContain('runtime update-state prompted');
   });
 });

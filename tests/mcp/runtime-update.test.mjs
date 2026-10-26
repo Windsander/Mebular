@@ -20,6 +20,7 @@ import {
   runtimeUpdateExitCode,
   runtimeUpdateLockPath,
   runtimeUpdateStatePath,
+  setRuntimeUpdatePromptedVersion,
   setRuntimeUpdateSkippedVersion,
 } from '../../packages/mcp/src/runtime-update.mjs';import { readRuntimeCurrent, writeRuntimeCurrent } from '../../packages/mcp/src/runtime-current.mjs';
 import { pidAlive } from '../../packages/mcp/src/profiles.mjs';
@@ -279,6 +280,71 @@ describe('runtime update check', () => {
 
     const cleared = await setRuntimeUpdateSkippedVersion(root, null, { now: clock.now().toISOString() });
     expect(cleared.state).toMatchObject({ skippedVersion: null, available: false, reason: 'skipped' });
+  });
+
+  it('跨入口 prompted：写 promptedVersion/promptedAt，check 返回 prompted 且不改变 available', async () => {
+    const root = await makeRoot();
+    const clock = makeClock();
+    await checkRuntimeUpdate(baseOptions(root, clock, registryFetch('0.2.0')));
+
+    const prompted = await setRuntimeUpdatePromptedVersion(root, '0.2.0', {
+      now: '2026-01-02T00:00:00.000Z',
+    });
+    expect(prompted.state).toMatchObject({
+      promptedVersion: '0.2.0',
+      promptedAt: '2026-01-02T00:00:00.000Z',
+      available: true,
+    });
+    expect(await readStateFile(root)).toMatchObject({
+      promptedVersion: '0.2.0',
+      promptedAt: '2026-01-02T00:00:00.000Z',
+    });
+
+    const cached = await checkRuntimeUpdate(baseOptions(root, clock, registryFetch('0.2.0')));
+    expect(cached).toMatchObject({
+      status: 'throttled',
+      available: true,
+      prompted: true,
+      promptedVersion: '0.2.0',
+      promptedAt: '2026-01-02T00:00:00.000Z',
+    });
+
+    // 新 latest 不再被旧 promptedVersion 抑制。
+    clock.advance(25 * 60 * 60 * 1000);
+    const newer = await checkRuntimeUpdate(baseOptions(root, clock, registryFetch('0.3.0')));
+    expect(newer).toMatchObject({ available: true, prompted: false, promptedVersion: '0.2.0' });
+
+    const cleared = await setRuntimeUpdatePromptedVersion(root, null, { now: clock.now().toISOString() });
+    expect(cleared.state).toMatchObject({ promptedVersion: null, promptedAt: null });
+    await expect(setRuntimeUpdatePromptedVersion(root, '0.2.0-beta.1')).rejects.toMatchObject({
+      code: 'unsupported_version',
+    });
+  });
+
+  it('跳过此版本也记录 prompted；损坏 state 回退为空且 prompted 写可自愈', async () => {
+    const root = await makeRoot();
+    const clock = makeClock();
+    await checkRuntimeUpdate(baseOptions(root, clock, registryFetch('0.2.0')));
+    const skipped = await setRuntimeUpdateSkippedVersion(root, '0.2.0', {
+      now: '2026-01-02T00:00:00.000Z',
+    });
+    expect(skipped.state).toMatchObject({
+      skippedVersion: '0.2.0',
+      promptedVersion: '0.2.0',
+      promptedAt: '2026-01-02T00:00:00.000Z',
+      available: false,
+    });
+
+    await writeFile(runtimeUpdateStatePath(root), '{invalid json', 'utf-8');
+    const broken = await readRuntimeUpdateState(root);
+    expect(broken.source).toBe('invalid');
+    expect(broken.state.promptedVersion).toBeNull();
+
+    const healed = await setRuntimeUpdatePromptedVersion(root, '0.3.0', {
+      now: '2026-01-03T00:00:00.000Z',
+    });
+    expect(healed.state).toMatchObject({ promptedVersion: '0.3.0' });
+    expect((await readRuntimeUpdateState(root)).source).toBe('main');
   });
 
   it('24h 节流返回缓存，不重复请求；--force 绕过；过期后重新请求', async () => {

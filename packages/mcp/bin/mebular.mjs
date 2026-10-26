@@ -1265,16 +1265,19 @@ async function runRuntimeUpdateState(args, flags = {}) {
     publicRuntimeUpdateState,
     readRuntimeUpdateState,
     runtimeUpdateStatePath,
+    setRuntimeUpdatePromptedVersion,
     setRuntimeUpdateSkippedVersion,
   } = await import('../src/runtime-update.mjs');
   const root = await runtimeRootForCli();
-  if (sub === 'skip') {
+  if (sub === 'skip' || sub === 'prompted') {
     if (typeof flags.version !== 'string' || flags.version.length === 0) {
-      const error = new Error('用法：mebular runtime update-state skip --version V [--json]');
+      const error = new Error(`用法：mebular runtime update-state ${sub} --version V [--json]`);
       error.code = 'USAGE';
       throw error;
     }
-    const result = await setRuntimeUpdateSkippedVersion(root, flags.version);
+    const result = sub === 'skip'
+      ? await setRuntimeUpdateSkippedVersion(root, flags.version)
+      : await setRuntimeUpdatePromptedVersion(root, flags.version);
     printRuntimeJson({
       ok: true,
       root,
@@ -1286,7 +1289,7 @@ async function runRuntimeUpdateState(args, flags = {}) {
     return;
   }
   if (sub !== 'show') {
-    const error = new Error('用法：mebular runtime update-state <show|skip --version V> [--json]');
+    const error = new Error('用法：mebular runtime update-state <show|skip|prompted> [--version V] [--json]');
     error.code = 'USAGE';
     throw error;
   }
@@ -1309,18 +1312,27 @@ async function runRuntimeUpgradeState(args) {
     throw error;
   }
   const {
+    inspectRuntimeUpgradeLock,
     publicRuntimeUpgradeState,
     readRuntimeUpgradeState,
     runtimeUpgradeStatePath,
   } = await import('../src/runtime-upgrade.mjs');
   const root = await runtimeRootForCli();
-  const state = await readRuntimeUpgradeState(root);
+  const [state, lock] = await Promise.all([
+    readRuntimeUpgradeState(root),
+    inspectRuntimeUpgradeLock(root),
+  ]);
   printRuntimeJson({
     ok: true,
     root,
     path: runtimeUpgradeStatePath(root),
     source: state.source,
     state: publicRuntimeUpgradeState(state.state),
+    lock: {
+      busy: lock.busy === true,
+      stale: lock.stale !== false,
+      holder: lock.holder ?? null,
+    },
     warnings: state.warnings,
   });
 }
@@ -1567,6 +1579,7 @@ async function main() {
           '  runtime check-update [--force] [--json]  只读检查官方 npm @mebular/core stable 更新（24h 节流；不安装）',
           '  runtime update-state show [--json]  查看共享更新状态（只读诊断，不联网）',
           '  runtime update-state skip --version V [--json]  跳过此版本（写共享 skippedVersion，两个入口都遵守）',
+          '  runtime update-state prompted --version V [--json]  记录已提示版本（两入口共享去重）',
           '  runtime current show|set|clear [--version V --runtime-path P --cli C --provider shared --owner O --installed-at ISO]  current 指针（非敏感）',
           '  runtime service install|uninstall|restart|status [--json]  共享 mebular-serve 所有权/生命周期',
           '  runtime provider list|add|remove [--kind app|cli|shared --path P --version V --capabilities a,b --id ID]  runtime provider 注册表',

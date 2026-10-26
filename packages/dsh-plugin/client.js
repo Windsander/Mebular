@@ -17,6 +17,7 @@ window.__ModuleLoader__.load({
 
     const EMBED_INFO_PATH = '/mebular/embed-info';
     const RUNTIME_INSTALL_PATH = '/mebular/runtime/install';
+    const RUNTIME_UPGRADE_PATH = '/mebular/runtime/upgrade';
     const README_URL = 'https://github.com/Windsander/Mebular#readme';
     const DEFAULT_CONSOLE_URL = 'http://127.0.0.1:7331/console';
     const POLL_MS = 2500;
@@ -54,6 +55,18 @@ window.__ModuleLoader__.load({
         installVersion: 'Target version: {version}',
         installDone: 'Mebular Runtime is ready',
         installReasonLabel: 'Reason: {reason}',
+        updateAvailable: 'Update available',
+        updateMessage: 'Mebular {current} → {latest}',
+        updateAction: 'Update',
+        updateLater: 'Later',
+        updateSkip: 'Skip this version',
+        updateUpdatingTitle: 'Updating Mebular',
+        updateUpdatingBody: 'Installing the new runtime, then reconnecting. Keep DSH open.',
+        updateFailedTitle: 'Mebular update failed',
+        updateFailedBody: 'The previous runtime (if any) is still in use.',
+        updateReasonLabel: 'Reason: {reason}',
+        updateBusy: 'Another Mebular entry point is updating the runtime. Wait for it to finish, then reconnect.',
+        updateReconnectFailed: 'The update finished but the panel could not reconnect. Refresh or open Console.',
         serviceTitle: 'Mebular runtime conflict',
         profileTitle: 'Mebular profile mismatch',
         cliMissingTitle: 'Mebular CLI not found',
@@ -66,6 +79,8 @@ window.__ModuleLoader__.load({
         loadingFrame: 'Loading Console…',
         serviceRegistered: 'service',
         serviceRunning: 'service running',
+        serviceHint: 'Keep Mebular running so DSH and other entry points share it.',
+        serviceHintAction: 'Open Console to enable “Keep Mebular running”',
         error: 'The DSH host could not read Mebular status: {error}',
         reasons: {
           daemon_unreachable: 'No Mebular daemon answered on the configured loopback address. MCP tools are unavailable until it starts; start Mebular or run "mebular serve", then the panel and tools recover automatically.',
@@ -143,6 +158,18 @@ window.__ModuleLoader__.load({
         installVersion: '目标版本：{version}',
         installDone: 'Mebular Runtime 已就绪',
         installReasonLabel: '原因：{reason}',
+        updateAvailable: '发现更新',
+        updateMessage: 'Mebular {current} → {latest}',
+        updateAction: '更新',
+        updateLater: '稍后',
+        updateSkip: '跳过此版本',
+        updateUpdatingTitle: '正在更新 Mebular',
+        updateUpdatingBody: '正在安装新 runtime，随后重新连接。请保持 DSH 打开。',
+        updateFailedTitle: 'Mebular 更新失败',
+        updateFailedBody: '旧 runtime（如有）仍在使用。',
+        updateReasonLabel: '原因：{reason}',
+        updateBusy: '另一个 Mebular 入口正在更新 runtime。请等它完成后再重新连接。',
+        updateReconnectFailed: '更新已完成，但面板未能重新连接。请刷新或打开 Console。',
         serviceTitle: 'Mebular runtime 冲突',
         profileTitle: 'Mebular profile 不一致',
         cliMissingTitle: '未找到 Mebular CLI',
@@ -155,6 +182,8 @@ window.__ModuleLoader__.load({
         loadingFrame: '正在加载 Console…',
         serviceRegistered: '常驻服务',
         serviceRunning: '常驻运行中',
+        serviceHint: '让 Mebular 常驻，DSH 与其他入口共享同一个 runtime。',
+        serviceHintAction: '在 Console 中开启「让 Mebular 常驻」',
         error: 'DSH 主机无法读取 Mebular 状态：{error}',
         reasons: {
           daemon_unreachable: '配置的 loopback 地址上没有 Mebular daemon。MCP 工具暂时不可用；请启动 Mebular 或运行 "mebular serve"，就绪后面板与工具会自动恢复。',
@@ -277,6 +306,41 @@ window.__ModuleLoader__.load({
         overflow: 'hidden',
         textOverflow: 'ellipsis',
         maxWidth: 180,
+      },
+      banner: {
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        gap: 8,
+        flex: 'none',
+        padding: '6px 12px',
+        borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
+        background: 'var(--dsw-alias-bg-layer-2, rgba(128,128,128,.08))',
+        fontSize: 11,
+        color: 'var(--dsw-alias-label-secondary, #aaa)',
+      },
+      bannerText: {
+        flex: 1,
+        minWidth: 160,
+        lineHeight: 1.4,
+      },
+      bannerActions: {
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        gap: 6,
+      },
+      serviceHint: {
+        display: 'flex',
+        flexWrap: 'wrap',
+        alignItems: 'center',
+        gap: 8,
+        flex: 'none',
+        padding: '4px 12px',
+        borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
+        background: 'var(--dsw-alias-bg-layer-1, transparent)',
+        fontSize: 11,
+        color: 'var(--dsw-alias-label-tertiary, #888)',
       },
       action: {
         display: 'inline-flex',
@@ -571,10 +635,79 @@ window.__ModuleLoader__.load({
       }
       if (typeof info?.provider?.kind === 'string') parts.push(info.provider.kind);
       if (typeof info?.runtimeMode === 'string' && info.runtimeMode.length > 0) parts.push(info.runtimeMode);
-      if (info?.service?.registered === true) {
-        parts.push(info.service.running === true ? t.serviceRunning : t.serviceRegistered);
+      const service = info?.service;
+      if (service?.registered === true) {
+        parts.push(service.running === true ? t.serviceRunning : t.serviceRegistered);
+        const serviceVersion = typeof service.version === 'string' && service.version.length > 0
+          ? service.version
+          : null;
+        if (serviceVersion !== null) parts.push(`v${serviceVersion.replace(/^v/, '')}`);
+        if (typeof service.provider === 'string' && service.provider.length > 0) {
+          parts.push(`service:${service.provider}`);
+        }
       }
       return parts.join(' · ');
+    }
+
+    function updateReasonText(t, reason) {
+      if (reason === 'busy') return t.updateBusy;
+      if (reason === 'reconnect_failed') return t.updateReconnectFailed;
+      if (typeof reason === 'string' && reason.length > 0) {
+        return (t.reasons[reason] ?? reason);
+      }
+      return null;
+    }
+
+    /**
+     * Pure banner view. `update.show` is a session prompt; `update.manual` is an
+     * already-prompted version the user can still update explicitly from the
+     * header. `dismissedVersion` is the local "later" choice and never writes
+     * skip; `pending` reflects the in-flight POST before the next poll.
+     */
+    function updateView(t, info, { dismissedVersion = null, pending = null } = {}) {
+      const update = info?.update !== null && typeof info?.update === 'object' ? info.update : null;
+      const upgrade = info?.upgrade !== null && typeof info?.upgrade === 'object' ? info.upgrade : null;
+      if (update === null && upgrade === null) return null;
+      const latest = typeof update?.latestVersion === 'string' ? update.latestVersion : null;
+      const current = typeof update?.currentVersion === 'string' ? update.currentVersion : null;
+      const to = typeof upgrade?.toVersion === 'string' ? upgrade.toVersion : latest;
+      const from = typeof upgrade?.fromVersion === 'string' ? upgrade.fromVersion : current;
+      const message = t.updateMessage.replace('{current}', from ?? '—').replace('{latest}', to ?? '—');
+
+      if (pending === 'update' || upgrade?.state === 'updating' || upgrade?.state === 'skipping') {
+        return {
+          kind: 'updating',
+          heading: t.updateUpdatingTitle,
+          body: t.updateUpdatingBody,
+          message,
+          reason: null,
+          actions: [],
+        };
+      }
+      const dismissed = dismissedVersion !== null
+        && ((latest !== null && dismissedVersion === latest)
+          || (typeof to === 'string' && dismissedVersion === to));
+      if (dismissed) return null;
+      if (upgrade?.state === 'failed') {
+        return {
+          kind: 'failed',
+          heading: t.updateFailedTitle,
+          body: `${t.updateFailedBody} ${t.updateReasonLabel.replace('{reason}', updateReasonText(t, upgrade.reason) ?? 'upgrade_failed')}`.trim(),
+          message,
+          reason: typeof upgrade.reason === 'string' ? upgrade.reason : 'upgrade_failed',
+          actions: ['update', 'later'],
+        };
+      }
+      if (update === null || update.available !== true || update.skipped === true) return null;
+      if (update.show !== true) return null;
+      return {
+        kind: 'available',
+        heading: t.updateAvailable,
+        body: null,
+        message,
+        reason: null,
+        actions: ['update', 'later', 'skip'],
+      };
     }
 
     // One module-level store feeds both the sidebar status dot and the panel.
@@ -603,10 +736,14 @@ window.__ModuleLoader__.load({
         status: 'checking',
         installPending: false,
         installError: null,
+        upgradePending: false,
+        upgradeError: null,
+        dismissedVersion: null,
       };
       let timer = null;
       let inFlight = null;
       let installInFlight = null;
+      let upgradeInFlight = null;
 
       function publish(patch) {
         const next = { ...snapshot, ...patch };
@@ -683,6 +820,27 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * One loopback write. The only literal POST in this client; callers pass
+       * a fixed host route and one action, never a version/tag/URL.
+       */
+      async function postAction(path, action, { timeoutScale = 4 } = {}) {
+        const signal =
+          typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+            ? AbortSignal.timeout(timeoutMs * timeoutScale)
+            : undefined;
+        const init = {
+          method: 'POST',
+          cache: 'no-store',
+          headers: { accept: 'application/json', 'content-type': 'application/json' },
+          body: JSON.stringify({ action }),
+          ...(signal === undefined ? {} : { signal }),
+        };
+        const response = await fetchImpl(path, init);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json().catch(() => null);
+      }
+
+      /**
        * One explicit user action -> one POST. Never called by polling. The
        * host owns install state; the next embed-info read reflects it.
        */
@@ -690,21 +848,8 @@ window.__ModuleLoader__.load({
         if (installInFlight !== null) return installInFlight;
         const request = (async () => {
           publish({ installPending: true, installError: null });
-          const signal =
-            typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
-              ? AbortSignal.timeout(timeoutMs * 4)
-              : undefined;
-          const init = {
-            method: 'POST',
-            cache: 'no-store',
-            headers: { accept: 'application/json', 'content-type': 'application/json' },
-            body: JSON.stringify({ action }),
-            ...(signal === undefined ? {} : { signal }),
-          };
           try {
-            const response = await fetchImpl(RUNTIME_INSTALL_PATH, init);
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            await response.json().catch(() => null);
+            await postAction(RUNTIME_INSTALL_PATH, action);
             publish({ installPending: false, installError: null });
           } catch (cause) {
             publish({
@@ -721,11 +866,68 @@ window.__ModuleLoader__.load({
         return request;
       }
 
+      /** Local "later": never writes skip, never auto-retries. */
+      function later(version = null) {
+        publish({
+          dismissedVersion: typeof version === 'string' && version.length > 0 ? version : null,
+          upgradeError: null,
+        });
+      }
+
+      /**
+       * Explicit update/skip. `later` stays local; both other actions are one
+       * POST to the fixed upgrade route. The host re-reads the latest version,
+       * so a client-supplied version is impossible by construction.
+       */
+      function upgrade(action = 'update') {
+        if (action === 'later') {
+          const latest = typeof snapshot.info?.update?.latestVersion === 'string'
+            ? snapshot.info.update.latestVersion
+            : null;
+          later(latest);
+          return Promise.resolve();
+        }
+        if (upgradeInFlight !== null) return upgradeInFlight;
+        const request = (async () => {
+          publish({ upgradePending: true, upgradeError: null });
+          try {
+            const response = await postAction(RUNTIME_UPGRADE_PATH, action, { timeoutScale: 8 });
+            const latest = typeof response?.upgrade?.toVersion === 'string'
+              ? response.upgrade.toVersion
+              : (typeof snapshot.info?.update?.latestVersion === 'string'
+                ? snapshot.info.update.latestVersion
+                : null);
+            publish({
+              upgradePending: false,
+              upgradeError: null,
+              // A successful update/skip suppresses this version locally too;
+              // the next shared check reflects the same state for other entries.
+              ...(action === 'update' || action === 'skip'
+                ? { dismissedVersion: latest }
+                : {}),
+            });
+          } catch (cause) {
+            publish({
+              upgradePending: false,
+              upgradeError: cause instanceof Error ? cause.message : String(cause),
+            });
+          }
+          await load();
+        })();
+        upgradeInFlight = request;
+        request.finally(() => {
+          if (upgradeInFlight === request) upgradeInFlight = null;
+        });
+        return request;
+      }
+
       return {
         subscribe,
         getSnapshot: () => snapshot,
         refresh: load,
         install,
+        later,
+        upgrade,
       };
     }
 
@@ -784,10 +986,14 @@ window.__ModuleLoader__.load({
 
     function MebularPanel() {
       const t = currentText();
-      const { info, error, loading, ready, status, installPending, installError } = useEmbedInfo();
+      const {
+        info, error, loading, ready, status, installPending, installError,
+        upgradePending, upgradeError, dismissedVersion,
+      } = useEmbedInfo();
       const [refreshToken, setRefreshToken] = React.useState(0);
       const [frameState, setFrameState] = React.useState('idle');
       const [copied, setCopied] = React.useState(false);
+      const [pendingUpgradeAction, setPendingUpgradeAction] = React.useState(null);
 
       const embedUrl = safeHttpUrl(info?.embedUrl);
       const frameFailed = frameState === 'failed';
@@ -795,6 +1001,20 @@ window.__ModuleLoader__.load({
       const consoleUrl = safeHttpUrl(info?.consoleUrl) ?? DEFAULT_CONSOLE_URL;
       const version = typeof info?.version === 'string' && info.version.length > 0 ? info.version : null;
       const meta = runtimeMeta(t, info);
+      const updateBanner = updateView(t, info, {
+        dismissedVersion,
+        pending: upgradePending ? (pendingUpgradeAction ?? 'update') : null,
+      });
+      const updateAvailable = info?.update !== null && typeof info?.update === 'object'
+        ? info.update
+        : null;
+      const manualUpdateVersion = updateAvailable?.manual === true && updateBanner === null
+        && (dismissedVersion === null || dismissedVersion !== updateAvailable.latestVersion)
+        ? updateAvailable.latestVersion
+        : null;
+      const serviceRegistered = info?.service?.registered === true;
+      const showServiceHint = ready && serviceRegistered !== true;
+      const upgradeState = typeof info?.upgrade?.state === 'string' ? info.upgrade.state : null;
       const pendingView = installView(t, info) ?? (installPending
         ? {
           kind: 'installing',
@@ -816,6 +1036,16 @@ window.__ModuleLoader__.load({
       const runInstall = (action) => {
         setCopied(false);
         void embedInfoStore.install(action);
+      };
+      const runUpgrade = (action) => {
+        if (action === 'later') {
+          embedInfoStore.later(updateAvailable?.latestVersion ?? null);
+          return;
+        }
+        setPendingUpgradeAction(action);
+        void embedInfoStore.upgrade(action).finally(() => {
+          setPendingUpgradeAction(null);
+        });
       };
       const copyManual = async () => {
         const command = installViewValue?.manualCommand;
@@ -839,6 +1069,13 @@ window.__ModuleLoader__.load({
         return () => window.clearTimeout(timer);
       }, [frameState, showFrame]);
 
+      React.useEffect(() => {
+        if (upgradeState !== 'done') return;
+        // Upgrade success: reload the shared Console/embed info once; no retry loop.
+        setRefreshToken((value) => value + 1);
+        void embedInfoStore.refresh();
+      }, [upgradeState]);
+
       const header = h(
         'div',
         { style: styles.header },
@@ -854,6 +1091,19 @@ window.__ModuleLoader__.load({
         error !== null && !ready
           ? h('span', { style: styles.warn, title: error }, t.hostUnavailable)
           : h('span', { style: styles.version }, t[status]),
+        manualUpdateVersion === null
+          ? null
+          : h(
+              'button',
+              {
+                type: 'button',
+                disabled: upgradePending,
+                onClick: () => runUpgrade('update'),
+                style: styles.action,
+                title: `${t.updateAction} ${manualUpdateVersion}`,
+              },
+              `${t.updateAction} v${manualUpdateVersion.replace(/^v/, '')}`,
+            ),
         h(
           'a',
           {
@@ -961,6 +1211,57 @@ window.__ModuleLoader__.load({
               : h('p', { key: 'post-error', style: styles.warn }, installError),
           ].filter(Boolean);
 
+      const updateBannerNode = updateBanner === null
+        ? null
+        : h(
+            'div',
+            { style: styles.banner, 'data-mebular-update': updateBanner.kind },
+            h(
+              'div',
+              { style: styles.bannerText },
+              h('strong', null, updateBanner.heading),
+              ' ',
+              h('span', null, updateBanner.message),
+              updateBanner.body === null ? null : h('div', null, updateBanner.body),
+              upgradeError === null ? null : h('div', { style: styles.warn }, upgradeError),
+            ),
+            h(
+              'div',
+              { style: styles.bannerActions },
+              ...updateBanner.actions.map((action) => h(
+                'button',
+                {
+                  key: action,
+                  type: 'button',
+                  disabled: upgradePending,
+                  onClick: () => runUpgrade(action),
+                  style: action === 'update' ? styles.primaryAction : styles.action,
+                },
+                action === 'update'
+                  ? t.updateAction
+                  : action === 'later' ? t.updateLater : t.updateSkip,
+              )),
+            ),
+          );
+      const serviceHintNode = showServiceHint
+        ? h(
+            'div',
+            { style: styles.serviceHint },
+            h('span', null, t.serviceHint),
+            h(
+              'a',
+              {
+                href: consoleUrl,
+                target: '_blank',
+                rel: 'noopener noreferrer',
+                style: styles.action,
+              },
+              t.serviceHintAction,
+            ),
+          )
+        : null;
+
+
       const body = showFrame
         ? h(
             'div',
@@ -1009,7 +1310,7 @@ window.__ModuleLoader__.load({
             ),
           );
 
-      return h('div', { style: styles.root }, header, body);
+      return h('div', { style: styles.root }, header, updateBannerNode, serviceHintNode, body);
     }
 
     const inject = ['slots'];
@@ -1063,6 +1364,7 @@ window.__ModuleLoader__.load({
           installInfoOf,
           installReasonMessage,
           installView,
+          updateView,
           isReadyInfo,
           canInstall,
           reasonMessage,

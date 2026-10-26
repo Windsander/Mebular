@@ -38,6 +38,15 @@ export const EMBED_INFO_PATH = '/mebular/embed-info';
 export const RUNTIME_INSTALL_PATH = '/mebular/runtime/install';
 
 /**
+ * Loopback-only explicit user action: upgrade the shared runtime to the latest
+ * version already known by the shared `runtime check-update`. The client can
+ * never supply a version, tag, URL or registry.
+ */
+export const RUNTIME_UPGRADE_PATH = '/mebular/runtime/upgrade';
+
+export const RUNTIME_UPGRADE_ACTIONS = Object.freeze(['update', 'later', 'skip']);
+
+/**
  * Pinned `@mebular/core` version for the plugin-only bootstrap. It must track
  * this package's version (enforced by scripts/verify-dsh-plugin.mjs); clients
  * can never supply a version, tag, URL or registry.
@@ -93,6 +102,10 @@ const RUNTIME_STAGING_PREFIX = '.tmp-install-';
 const RUNTIME_BACKUP_PREFIX = '.backup-';
 const DEFAULT_INSTALL_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_CLI_TIMEOUT_MS = 20_000;
+const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 8000;
+const DEFAULT_UPGRADE_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_UPGRADE_POLL_MS = 500;
+const DEFAULT_UPGRADE_RECONNECT_TIMEOUT_MS = 30_000;
 const DEFAULT_INSTALL_KILL_GRACE_MS = 500;
 const MAX_INSTALL_LOG_BYTES = 64 * 1024;
 const MAX_INSTALL_BODY_BYTES = 8 * 1024;
@@ -122,6 +135,38 @@ const INSTALL_REASON_SET = new Set([
   ...RUNTIME_INSTALL_REASONS,
   'download_required',
 ]);
+
+/** Stable update/upgrade reasons surfaced by the panel and the loopback route. */
+export const RUNTIME_UPGRADE_REASONS = Object.freeze([
+  'busy',
+  'no_update_available',
+  'no_provider',
+  'upgrade_unavailable',
+  'upgrade_failed',
+  'child_stop_failed',
+  'service_unknown',
+  'service_foreign',
+  'service_upgrade_failed',
+  'current_registration_failed',
+  'install_failed',
+  'unsupported_version',
+  'offline',
+  'registry_unreachable',
+  'http_error',
+  'integrity_mismatch',
+  'disk_full',
+  'permission_denied',
+  'npm_missing',
+  'cancelled',
+  'timeout',
+  'runtime_external',
+  'daemon_url_pinned',
+  'plugin_disposed',
+  'reconnect_failed',
+  'provisioning',
+]);
+
+const UPGRADE_REASON_SET = new Set(RUNTIME_UPGRADE_REASONS);
 
 /**
  * Lifecycle conflicts that make an install unsafe. These are never followed by
@@ -1267,6 +1312,8 @@ function sanitizeService(value) {
  *   service?: unknown,
  *   downloadRequired?: boolean,
  *   install?: unknown,
+ *   update?: unknown,
+ *   upgrade?: unknown,
  * }} [input]
  * @returns {{
  *   ok: boolean,
@@ -1378,6 +1425,8 @@ export function buildEmbedInfo(input = {}) {
     service: sanitizeService(config.service),
     downloadRequired,
     install: isObject(config.install) ? sanitizeRuntimeInstallState(config.install) : null,
+    update: isObject(config.update) ? sanitizeRuntimeUpdateState(config.update) : null,
+    upgrade: isObject(config.upgrade) ? sanitizeRuntimeUpgradeState(config.upgrade) : null,
     embedProtocol,
     consoleUrl,
     embedUrl: status === 'up' && reason === null ? remoteEmbedUrl : null,
@@ -2022,6 +2071,82 @@ export function sanitizeRuntimeInstallState(value, fallback = null) {
     reused: read('reused') === true,
     installed: read('installed') === true,
     started: read('started') === true,
+    allowed: read('allowed') === true,
+  };
+}
+
+const UPDATE_STATES = new Set([
+  'idle', 'checking', 'available', 'up_to_date', 'skipped', 'unknown', 'disabled',
+]);
+const UPDATE_REASON_RE = /^[a-z0-9][a-z0-9_.:-]{0,79}$/;
+
+function sanitizeVersion(value) {
+  return typeof value === 'string' && SEMVER_RE.test(value) ? value : null;
+}
+
+function sanitizeReason(value) {
+  return typeof value === 'string' && UPDATE_REASON_RE.test(value) ? value : null;
+}
+
+function sanitizeTime(value) {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+/**
+ * Non-sensitive shared update summary. `show/auto/manual` are presentation hints
+ * computed from the shared `promptedVersion`; the client still owns the local
+ * "later" dismissal for the current DSH session.
+ */
+export function sanitizeRuntimeUpdateState(value, fallback = null) {
+  const source = isObject(value) ? value : {};
+  const fallbackState = isObject(fallback) ? fallback : {};
+  const read = (key) => (source[key] !== undefined ? source[key] : fallbackState[key]);
+  const available = read('available') === true;
+  const skipped = read('skipped') === true;
+  const prompted = read('prompted') === true;
+  const rawState = read('state');
+  const state = UPDATE_STATES.has(rawState)
+    ? rawState
+    : skipped ? 'skipped' : available ? 'available' : 'idle';
+  return {
+    state,
+    reason: sanitizeReason(read('reason')),
+    failureReason: sanitizeReason(read('failureReason')),
+    currentVersion: sanitizeVersion(read('currentVersion')),
+    latestVersion: sanitizeVersion(read('latestVersion')),
+    promptedVersion: sanitizeVersion(read('promptedVersion')),
+    available,
+    skipped,
+    prompted,
+    checkedAt: sanitizeTime(read('checkedAt')),
+    promptedAt: sanitizeTime(read('promptedAt')),
+    show: read('show') === true,
+    auto: read('auto') === true,
+    manual: read('manual') === true && available && !skipped,
+  };
+}
+
+/** Non-sensitive execution state, kept separate from `install` and `update`. */
+export function sanitizeRuntimeUpgradeState(value, fallback = null) {
+  const source = isObject(value) ? value : {};
+  const fallbackState = isObject(fallback) ? fallback : {};
+  const read = (key) => (source[key] !== undefined ? source[key] : fallbackState[key]);
+  const state = ['idle', 'updating', 'skipping', 'failed', 'done'].includes(read('state'))
+    ? read('state')
+    : 'idle';
+  const reason = sanitizeReason(read('reason'));
+  return {
+    state,
+    reason: reason !== null && UPGRADE_REASON_SET.has(reason) ? reason : (state === 'failed' ? 'upgrade_failed' : null),
+    detail: typeof read('detail') === 'string' && read('detail').length > 0 ? read('detail').slice(0, 600) : null,
+    action: typeof read('action') === 'string' && RUNTIME_UPGRADE_ACTIONS.includes(read('action'))
+      ? read('action')
+      : null,
+    fromVersion: sanitizeVersion(read('fromVersion')),
+    toVersion: sanitizeVersion(read('toVersion')),
+    startedAt: sanitizeTime(read('startedAt')),
+    finishedAt: sanitizeTime(read('finishedAt')),
+    busy: read('busy') === true,
     allowed: read('allowed') === true,
   };
 }
@@ -2856,6 +2981,429 @@ export function createRuntimeInstallManager(options = {}) {
   };
 }
 
+/**
+ * Create the explicit shared-runtime upgrade controller used by
+ * `POST /mebular/runtime/upgrade`.
+ *
+ * Only `update`, `later` and `skip` are accepted; the client never supplies a
+ * version/tag/URL. `update` re-reads the shared check result and runs
+ * `mebular runtime upgrade --to latest`, so the target is always the latest
+ * stable version known by core. The shared upgrade lock (inside the CLI) is the
+ * only cross-entry mutex; `busy` is waited on with a bound and never retried as
+ * a second install.
+ *
+ * Ownership: only a supervise/child this plugin owns is stopped. A reused or
+ * service daemon is left alone; when `mebular-serve` is registered the core
+ * upgrade updates/restarts it. A failed upgrade restores the previous runtime
+ * pointers and re-attaches/restarts the previous daemon.
+ *
+ * @param {{
+ *   config?: unknown,
+ *   lifecycle: { inspect: () => Promise<Record<string, unknown>>, refresh?: () => Promise<unknown>, refreshUpdate?: () => Promise<unknown>, startAfterInstall?: (options?: Record<string, unknown>) => Promise<unknown>, stopOwnedChild?: () => Promise<Record<string, unknown>> },
+ *   env?: Record<string, string | undefined>,
+ *   userHome?: string,
+ *   platform?: string,
+ *   execPath?: string,
+ *   cloudRoot?: string,
+ *   spawnFn?: typeof spawn,
+ *   discoverProviders?: typeof discoverRuntimeProviders,
+ *   exists?: (file: string) => boolean,
+ *   now?: () => string,
+ *   sleep?: (ms: number) => Promise<unknown>,
+ *   cliTimeoutMs?: number,
+ *   upgradeTimeoutMs?: number,
+ *   upgradePollMs?: number,
+ *   reconnectTimeoutMs?: number,
+ *   logger?: { info?: (message: string) => void, warn?: (message: string) => void },
+ * }} options
+ * @returns {{
+ *   start: (action?: string) => { accepted: boolean, state: ReturnType<typeof sanitizeRuntimeUpgradeState> },
+ *   getState: () => ReturnType<typeof sanitizeRuntimeUpgradeState>,
+ *   allowed: () => boolean,
+ *   denialReason: () => string | null,
+ *   dispose: () => Promise<unknown>,
+ * }}
+ */
+export function createRuntimeUpgradeManager(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const env = isObject(opts.env) ? opts.env : process.env;
+  const platform = typeof opts.platform === 'string' ? opts.platform : process.platform;
+  const execPath = typeof opts.execPath === 'string' && opts.execPath.length > 0 ? opts.execPath : process.execPath;
+  const userHome = typeof opts.userHome === 'string' && opts.userHome.length > 0 ? opts.userHome : homedir();
+  const config = resolveConfig(opts.config, { env });
+  const lifecycle = isObject(opts.lifecycle) && typeof opts.lifecycle.inspect === 'function'
+    ? opts.lifecycle
+    : null;
+  const spawnFn = typeof opts.spawnFn === 'function' ? opts.spawnFn : spawn;
+  const discoverProviders = typeof opts.discoverProviders === 'function'
+    ? opts.discoverProviders
+    : discoverRuntimeProviders;
+  const exists = typeof opts.exists === 'function' ? opts.exists : existsSync;
+  const now = typeof opts.now === 'function' ? opts.now : () => new Date().toISOString();
+  const sleep = typeof opts.sleep === 'function'
+    ? opts.sleep
+    : (ms) => new Promise((resolvePromise) => {
+      const timer = setTimeout(resolvePromise, Math.max(0, ms));
+      timer.unref?.();
+    });
+  const cliTimeoutMs = Number.isFinite(opts.cliTimeoutMs)
+    ? Math.max(250, opts.cliTimeoutMs)
+    : DEFAULT_CLI_TIMEOUT_MS;
+  const upgradeTimeoutMs = Number.isFinite(opts.upgradeTimeoutMs)
+    ? Math.max(250, opts.upgradeTimeoutMs)
+    : DEFAULT_UPGRADE_TIMEOUT_MS;
+  const upgradePollMs = Number.isFinite(opts.upgradePollMs)
+    ? Math.max(0, opts.upgradePollMs)
+    : DEFAULT_UPGRADE_POLL_MS;
+  const reconnectTimeoutMs = Number.isFinite(opts.reconnectTimeoutMs)
+    ? Math.max(0, opts.reconnectTimeoutMs)
+    : DEFAULT_UPGRADE_RECONNECT_TIMEOUT_MS;
+  const logger = isObject(opts.logger) ? opts.logger : null;
+  const cloudRoot = typeof opts.cloudRoot === 'string' && opts.cloudRoot.length > 0
+    ? opts.cloudRoot
+    : runtimeCloudRoot({ env, userHome });
+
+  const denialReason = config.runtime === 'external'
+    ? 'runtime_external'
+    : config.pinnedDaemonUrl === true
+      ? 'daemon_url_pinned'
+      : lifecycle === null ? 'upgrade_unavailable' : null;
+  const allowed = denialReason === null;
+
+  let current = sanitizeRuntimeUpgradeState({ state: 'idle', allowed });
+  let task = null;
+  let disposed = false;
+  let controller = new AbortController();
+
+  function log(level, message) {
+    try {
+      const fn = logger?.[level];
+      if (typeof fn === 'function') fn.call(logger, message);
+    } catch {
+      // Logging must never break an explicit upgrade.
+    }
+  }
+
+  function publish(patch) {
+    current = sanitizeRuntimeUpgradeState({ ...current, ...patch, allowed });
+    return current;
+  }
+
+  function failureError(reason, message, extra = {}) {
+    const error = new Error(message);
+    error.code = reason;
+    error.detail = extra.detail;
+    error.busy = extra.busy === true;
+    error.reason = reason;
+    return error;
+  }
+
+  async function discoverProvider() {
+    try {
+      const discovery = await discoverProviders({
+        env,
+        platform,
+        userHome,
+        cloudRoot,
+        ...(config.cliPath === undefined ? {} : { cliPath: config.cliPath }),
+        ...(typeof opts.registry === 'undefined' ? {} : { registry: opts.registry }),
+        ...(typeof opts.includeStandardApp === 'undefined' ? {} : { includeStandardApp: opts.includeStandardApp }),
+        ...(typeof opts.exists === 'function' ? { exists: opts.exists } : {}),
+      });
+      return isObject(discovery?.selected) ? discovery.selected : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function runCli(cliPath, args, { timeoutMs = cliTimeoutMs } = {}) {
+    const result = await runInstalledCli({
+      cliPath,
+      args,
+      env: {
+        ...env,
+        MEBULAR_CLOUD_ROOT: cloudRoot,
+        MEBULAR_HOME: cloudRoot,
+      },
+      platform,
+      execPath,
+      timeoutMs,
+      signal: controller.signal,
+      spawnFn,
+      killGraceMs: DEFAULT_INSTALL_KILL_GRACE_MS,
+    });
+    return {
+      ...result,
+      ok: result.code === 0 && result.spawnError === undefined && result.aborted !== true && result.timedOut !== true,
+    };
+  }
+
+  async function selectedCli() {
+    const selected = await discoverProvider();
+    if (!isObject(selected) || typeof selected.path !== 'string' || !exists(selected.path)) return null;
+    return selected;
+  }
+
+  /** Read the server-owned latest version from the shared check result. */
+  async function resolveLatest(cliPath) {
+    const result = await runCli(cliPath, ['runtime', 'check-update', '--json'], { timeoutMs: cliTimeoutMs });
+    const data = parseJsonDocument(result.stdout);
+    if (!isObject(data) || data.ok !== true) {
+      throw failureError(
+        sanitizeReason(data?.reason ?? data?.status ?? result.spawnError?.code) ?? (result.timedOut ? 'timeout' : 'upgrade_failed'),
+        '无法读取共享 runtime 更新状态',
+        { detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? result.spawnError?.message ?? 'check_failed', { home: cloudRoot, cliPath }) },
+      );
+    }
+    const latest = sanitizeVersion(data.latestVersion);
+    const skipped = data.skipped === true;
+    return {
+      latest,
+      available: data.available === true && !skipped,
+      skipped,
+      currentVersion: sanitizeVersion(data.currentVersion),
+      promptedVersion: sanitizeVersion(data.promptedVersion),
+      checkedAt: sanitizeTime(data.checkedAt),
+    };
+  }
+
+  /** Non-destructive shared lock probe; `state.upgrading` is display-only. */
+  async function upgradeLockBusy(cliPath) {
+    const result = await runCli(cliPath, ['runtime', 'upgrade-state', 'show', '--json'], { timeoutMs: cliTimeoutMs });
+    const data = parseJsonDocument(result.stdout);
+    if (!isObject(data) || data.ok !== true) return false;
+    return data.lock?.busy === true;
+  }
+
+  async function waitForUpgradeIdle(cliPath) {
+    const deadline = Date.now() + reconnectTimeoutMs;
+    for (;;) {
+      if (disposed) return false;
+      const busy = await upgradeLockBusy(cliPath).catch(() => false);
+      if (!busy) return true;
+      if (Date.now() >= deadline) return false;
+      await sleep(upgradePollMs);
+    }
+  }
+
+  async function reconnect({ stoppedOwnChild, serviceRegistered }) {
+    if (!isObject(lifecycle)) return { ok: false, reason: 'reconnect_failed' };
+    try {
+      let snapshot;
+      if (stoppedOwnChild && typeof lifecycle.startAfterInstall === 'function') {
+        snapshot = await lifecycle.startAfterInstall({ restartOwned: true });
+      } else if (serviceRegistered && typeof lifecycle.startAfterInstall === 'function') {
+        snapshot = await lifecycle.startAfterInstall({ restartOwned: false });
+      } else if (typeof lifecycle.refresh === 'function') {
+        snapshot = await lifecycle.refresh();
+      } else {
+        snapshot = await lifecycle.inspect();
+      }
+      const state = isObject(snapshot) ? snapshot : await lifecycle.inspect().catch(() => null);
+      return {
+        ok: state?.status === 'up',
+        snapshot: state,
+        ...(state?.status === 'up' ? {} : { reason: state?.reason ?? 'reconnect_failed' }),
+      };
+    } catch (error) {
+      return { ok: false, reason: error?.code ?? 'reconnect_failed', error: String(error?.message ?? error) };
+    }
+  }
+
+  async function executeUpdate() {
+    const cli = await selectedCli();
+    if (cli === null) throw failureError('no_provider', '没有可用的 Mebular CLI/runtime provider');
+    const latest = await resolveLatest(cli.path);
+    if (latest.latest === null || latest.available !== true) {
+      throw failureError('no_update_available', '共享 check 没有可用的 stable 更新');
+    }
+    const fromVersion = latest.currentVersion;
+    publish({
+      state: 'updating',
+      action: 'update',
+      reason: 'provisioning',
+      detail: null,
+      fromVersion,
+      toVersion: latest.latest,
+      startedAt: now(),
+      finishedAt: null,
+      busy: false,
+    });
+
+    if (!(await waitForUpgradeIdle(cli.path))) {
+      publish({ state: 'failed', reason: 'busy', busy: true, finishedAt: now() });
+      await reconnect({ stoppedOwnChild: false, serviceRegistered: false });
+      throw failureError('busy', '另一个入口正在升级共享 runtime');
+    }
+
+    const snapshot = await lifecycle.inspect().catch(() => null);
+    const serviceRegistered = snapshot?.service?.registered === true;
+    const wantsOwnChild = snapshot?.managed === true && snapshot?.runtimeMode === 'child';
+    let stoppedOwnChild = false;
+    if (wantsOwnChild && typeof lifecycle.stopOwnedChild === 'function') {
+      const stopped = await lifecycle.stopOwnedChild();
+      if (stopped?.stopped !== true) {
+        publish({ state: 'failed', reason: 'child_stop_failed', finishedAt: now() });
+        throw failureError('child_stop_failed', '插件托管的 runtime 未能停止，已取消升级');
+      }
+      stoppedOwnChild = stopped?.stoppedOwned === true;
+    }
+
+    const result = await runCli(cli.path, ['runtime', 'upgrade', '--to', 'latest', '--json'], {
+      timeoutMs: upgradeTimeoutMs,
+    });
+    const data = parseJsonDocument(result.stdout);
+    if (isObject(data) && data.busy === true) {
+      await waitForUpgradeIdle(cli.path);
+      publish({ state: 'failed', reason: 'busy', busy: true, finishedAt: now() });
+      await reconnect({ stoppedOwnChild, serviceRegistered });
+      throw failureError('busy', '另一个入口正在升级共享 runtime');
+    }
+    if (result.timedOut === true) {
+      publish({ state: 'failed', reason: 'timeout', finishedAt: now() });
+      await reconnect({ stoppedOwnChild, serviceRegistered });
+      throw failureError('timeout', '共享 runtime 升级超时');
+    }
+    if (result.ok !== true || !isObject(data) || data.ok !== true) {
+      const rawReason = sanitizeReason(data?.reason) ?? (result.spawnError ? sanitizeReason(String(result.spawnError.code ?? '').toLowerCase()) : null);
+      const reason = rawReason !== null && UPGRADE_REASON_SET.has(rawReason) ? rawReason : 'upgrade_failed';
+      publish({
+        state: 'failed',
+        reason,
+        detail: sanitizeDetail(
+          (typeof data?.message === 'string' && data.message)
+          ?? firstUsefulLine(result.stderr)
+          ?? result.spawnError?.message
+          ?? 'upgrade_failed',
+          { home: cloudRoot, cliPath: cli.path },
+        ),
+        finishedAt: now(),
+      });
+      await reconnect({ stoppedOwnChild, serviceRegistered });
+      if (typeof lifecycle.refreshUpdate === 'function') {
+        Promise.resolve().then(() => lifecycle.refreshUpdate()).catch(() => {});
+      }
+      throw failureError(reason, data?.message ?? '共享 runtime 升级失败');
+    }
+
+    const toVersion = sanitizeVersion(data.to ?? data.version) ?? latest.latest;
+    publish({
+      state: 'done',
+      reason: null,
+      detail: null,
+      fromVersion: sanitizeVersion(data.previousCurrent?.version) ?? fromVersion,
+      toVersion,
+      finishedAt: now(),
+    });
+    const reconnected = await reconnect({ stoppedOwnChild, serviceRegistered });
+    if (!reconnected.ok) {
+      publish({ state: 'failed', reason: 'reconnect_failed', finishedAt: now() });
+      throw failureError('reconnect_failed', '升级成功但未能重新连接 Mebular');
+    }
+    if (typeof lifecycle.refreshUpdate === 'function') {
+      Promise.resolve().then(() => lifecycle.refreshUpdate()).catch(() => {});
+    }
+    log('info', `shared runtime upgraded to ${toVersion}`);
+  }
+
+  async function executeSkip() {
+    const cli = await selectedCli();
+    if (cli === null) throw failureError('no_provider', '没有可用的 Mebular CLI/runtime provider');
+    const latest = await resolveLatest(cli.path);
+    if (latest.latest === null) throw failureError('no_update_available', '没有可跳过的版本');
+    publish({ state: 'skipping', action: 'skip', reason: null, toVersion: latest.latest, startedAt: now(), finishedAt: null });
+    const result = await runCli(cli.path, [
+      'runtime',
+      'update-state',
+      'skip',
+      '--version',
+      latest.latest,
+      '--json',
+    ], { timeoutMs: cliTimeoutMs });
+    const data = parseJsonDocument(result.stdout);
+    if (result.ok !== true || !isObject(data) || data.ok !== true) {
+      throw failureError(
+        sanitizeReason(data?.reason) ?? 'upgrade_failed',
+        '写入共享跳过版本失败',
+        { detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? 'skip_failed', { home: cloudRoot, cliPath: cli.path }) },
+      );
+    }
+    publish({ state: 'done', reason: 'skipped', toVersion: latest.latest, finishedAt: now() });
+    if (typeof lifecycle.refreshUpdate === 'function') {
+      Promise.resolve().then(() => lifecycle.refreshUpdate()).catch(() => {});
+    }
+  }
+
+  function start(action = 'update') {
+    if (!RUNTIME_UPGRADE_ACTIONS.includes(action)) {
+      return { accepted: false, state: current };
+    }
+    if (!allowed || disposed) return { accepted: false, state: current };
+    if (action === 'later') {
+      // Later is session-local: it never writes skip and never retries on its own.
+      return { accepted: true, state: current };
+    }
+    if (task !== null) return { accepted: false, state: current };
+
+    controller = new AbortController();
+    publish({
+      state: action === 'skip' ? 'skipping' : 'updating',
+      action,
+      reason: action === 'skip' ? null : 'provisioning',
+      detail: null,
+      busy: false,
+      startedAt: now(),
+      finishedAt: null,
+    });
+    task = Promise.resolve()
+      .then(() => (action === 'skip' ? executeSkip() : executeUpdate()))
+      .catch((error) => {
+        if (disposed && error?.code === 'plugin_disposed') return;
+        const reason = typeof error?.code === 'string' && UPGRADE_REASON_SET.has(error.code)
+          ? error.code
+          : 'upgrade_failed';
+        const stateReason = current.reason ?? reason;
+        publish({
+          state: 'failed',
+          reason: stateReason,
+          detail: current.detail ?? sanitizeDetail(error?.detail ?? error?.message ?? 'upgrade_failed', { home: cloudRoot }),
+          finishedAt: now(),
+        });
+        log('warn', `runtime upgrade failed (${stateReason})`);
+      })
+      .finally(() => {
+        task = null;
+      });
+    return { accepted: true, state: current };
+  }
+
+  async function dispose() {
+    if (disposed) return task ?? undefined;
+    disposed = true;
+    try {
+      controller.abort('plugin_disposed');
+    } catch {
+      // Abort is best-effort.
+    }
+    if (task !== null) {
+      try {
+        await task;
+      } catch {
+        // The flow already rolled back/restored its own state.
+      }
+    }
+    return undefined;
+  }
+
+  return {
+    start,
+    getState: () => current,
+    allowed: () => allowed,
+    denialReason: () => denialReason,
+    dispose,
+  };
+}
+
 function readInstallBody(req) {
   return new Promise((resolvePromise) => {
     if (!isObject(req) || typeof req.on !== 'function') {
@@ -3010,6 +3558,109 @@ export function createRuntimeInstallHandler(options = {}) {
 }
 
 /**
+ * Loopback-only `POST /mebular/runtime/upgrade`.
+ *
+ * Remote peers get 404 for every method. The body accepts exactly one optional
+ * `action` (`update|later|skip`); version/tag/URL/registry are never accepted.
+ * `update` is asynchronous (202) and the client polls `/mebular/embed-info` for
+ * the same host-owned `upgrade` state. `later` is session-local, `skip` writes
+ * the shared skippedVersion. Single-flight lives in the manager.
+ *
+ * @param {{
+ *   config?: unknown,
+ *   manager: ReturnType<typeof createRuntimeUpgradeManager>,
+ * }} [options]
+ * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>}
+ */
+export function createRuntimeUpgradeHandler(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const config = resolveConfig(opts.config, { env: opts.env });
+  const manager = isObject(opts.manager) ? opts.manager : null;
+
+  function sendJson(res, status, value, extraHeaders = {}) {
+    if (res === null || typeof res !== 'object' || typeof res.end !== 'function') return;
+    res.statusCode = status;
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.setHeader('cache-control', 'no-store');
+    for (const [key, headerValue] of Object.entries(extraHeaders)) res.setHeader(key, headerValue);
+    res.end(JSON.stringify(value));
+  }
+
+  return async function handleRuntimeUpgrade(req, res) {
+    if (!isLoopbackAddress(req?.socket?.remoteAddress)) {
+      if (res !== null && typeof res === 'object' && typeof res.end === 'function') {
+        res.statusCode = 404;
+        res.end();
+      }
+      return;
+    }
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { ok: false, error: 'method_not_allowed' }, { allow: 'POST' });
+      return;
+    }
+    const contentType = String(req.headers?.['content-type'] ?? req.headers?.['Content-Type'] ?? '');
+    if (!/^application\/json\b/i.test(contentType)) {
+      sendJson(res, 400, { ok: false, error: 'invalid_content_type' });
+      return;
+    }
+    const body = await readInstallBody(req);
+    if (!body.ok || body.text.trim().length === 0) {
+      sendJson(res, 400, { ok: false, error: body.ok ? 'invalid_json' : 'invalid_body' });
+      return;
+    }
+    let input;
+    try {
+      input = JSON.parse(body.text);
+    } catch {
+      sendJson(res, 400, { ok: false, error: 'invalid_json' });
+      return;
+    }
+    if (!isObject(input)) {
+      sendJson(res, 400, { ok: false, error: 'invalid_json' });
+      return;
+    }
+    const keys = Object.keys(input);
+    if (keys.some((key) => key !== 'action')) {
+      sendJson(res, 400, { ok: false, error: 'unsupported_parameters' });
+      return;
+    }
+    const action = input.action === undefined ? 'update' : input.action;
+    if (typeof action !== 'string' || !RUNTIME_UPGRADE_ACTIONS.includes(action)) {
+      sendJson(res, 400, { ok: false, error: 'invalid_action' });
+      return;
+    }
+    if (manager === null) {
+      sendJson(res, 503, { ok: false, error: 'upgrade_unavailable' });
+      return;
+    }
+    if (typeof manager.allowed === 'function' && manager.allowed() !== true) {
+      const reason = typeof manager.denialReason === 'function' ? manager.denialReason() : 'not_allowed';
+      sendJson(res, 403, {
+        ok: false,
+        error: 'upgrade_not_allowed',
+        reason: reason ?? 'not_allowed',
+        ...(config.runtime === 'external' ? { runtime: 'external' } : {}),
+        ...(config.pinnedDaemonUrl === true ? { daemonUrl: 'pinned' } : {}),
+      });
+      return;
+    }
+    let result;
+    try {
+      result = manager.start(action);
+    } catch {
+      sendJson(res, 500, { ok: false, error: 'upgrade_failed' });
+      return;
+    }
+    sendJson(res, 202, {
+      ok: true,
+      accepted: result?.accepted === true,
+      action,
+      upgrade: manager.getState(),
+    });
+  };
+}
+
+/**
  * Create the daemon lifecycle state machine used by the host plugin.
  *
  * attach: resolve + probe only. managed/auto: reuse a healthy daemon, or spawn
@@ -3106,6 +3757,7 @@ export function createDaemonLifecycle(options = {}) {
     : DEFAULT_SUPERVISE_STOP_GRACE_MS;
   const logHome = typeof opts.home === 'string' && opts.home.length > 0 ? opts.home : mebularHome(env);
   const logger = isObject(opts.logger) ? opts.logger : null;
+  const exists = typeof opts.exists === 'function' ? opts.exists : existsSync;
   const discoverProviders = typeof opts.discoverProviders === 'function'
     ? opts.discoverProviders
     : discoverRuntimeProviders;
@@ -3148,6 +3800,48 @@ export function createDaemonLifecycle(options = {}) {
       if (handle.error) log('warn', `runtime supervise failed to spawn (${handle.error})`);
       return handle;
     };
+  const updateCheckTimeoutMs = Number.isFinite(opts.updateCheckTimeoutMs)
+    ? Math.max(250, opts.updateCheckTimeoutMs)
+    : DEFAULT_UPDATE_CHECK_TIMEOUT_MS;
+  const updateCloudRoot = typeof opts.cloudRoot === 'string' && opts.cloudRoot.length > 0
+    ? opts.cloudRoot
+    : runtimeCloudRoot({ env, userHome });
+  const updateCliEnv = { ...env, MEBULAR_CLOUD_ROOT: updateCloudRoot };
+  const runUpdateCheckFn = typeof opts.runUpdateCheck === 'function'
+    ? opts.runUpdateCheck
+    : async (context) => {
+      try {
+        return await runRuntimeJson({
+          cliPath: context?.provider?.path,
+          command: ['check-update'],
+          spawnFn,
+          env: updateCliEnv,
+          platform: context?.platform ?? platform,
+          execPath: context?.execPath ?? execPath,
+          timeoutMs: updateCheckTimeoutMs,
+        });
+      } catch {
+        return { ok: false, error: 'check_failed' };
+      }
+    };
+  const savePromptedVersion = typeof opts.savePromptedVersion === 'function'
+    ? opts.savePromptedVersion
+    : async (context, version) => {
+      try {
+        const result = await runRuntimeJson({
+          cliPath: context?.provider?.path,
+          command: ['update-state', 'prompted', '--version', version],
+          spawnFn,
+          env: updateCliEnv,
+          platform: context?.platform ?? platform,
+          execPath: context?.execPath ?? execPath,
+          timeoutMs: updateCheckTimeoutMs,
+        });
+        return result?.ok === true && result.data?.ok === true;
+      } catch {
+        return false;
+      }
+    };
 
   const allowStart = (config.lifecycle === 'managed' || config.lifecycle === 'auto')
     && config.runtime !== 'external'
@@ -3182,6 +3876,16 @@ export function createDaemonLifecycle(options = {}) {
   let disposed = false;
   /** @type {{ state: string, reason: string | null } | null} */
   let sticky = null;
+  /** Shared update summary (non-sensitive). */
+  let updateState = sanitizeRuntimeUpdateState({ state: 'idle' });
+  /** @type {Promise<unknown> | null} */
+  let updateTask = null;
+  /** Version whose banner was shown in this plugin session (prompted may be shared). */
+  let updatePromptVersion = null;
+  /** CLI provider used by the last successful update check (for prompted writes). */
+  let updateProvider = null;
+  /** @type {Set<string>} versions whose prompted write was already attempted */
+  const promptedWriteAttempts = new Set();
 
   function log(level, message) {
     safeLog(logger, level, message);
@@ -3210,7 +3914,138 @@ export function createDaemonLifecycle(options = {}) {
       service,
       version,
       downloadRequired,
+      update: updateState,
     };
+  }
+
+  function publishUpdate(patch) {
+    updateState = sanitizeRuntimeUpdateState({ ...updateState, ...patch });
+    return updateState;
+  }
+
+  /**
+   * Presentation view for `/mebular/embed-info`. The first time a shared
+   * latest version becomes visible in this session it records `promptedVersion`
+   * through the selected CLI, so the other entry (App/CLI/another DSH) never
+   * auto-prompts the same version. A prompted version still exposes `manual`,
+   * which the panel renders as an explicit update action.
+   */
+  function presentUpdate() {
+    const view = { ...updateState, show: false, auto: false, manual: false };
+    const latest = updateState.latestVersion;
+    if (!updateState.available || updateState.skipped || latest === null) return view;
+    view.manual = true;
+    if (updatePromptVersion === latest) {
+      view.show = true;
+      return view;
+    }
+    if (updateState.prompted === true) return view;
+    updatePromptVersion = latest;
+    pubUpdatePromptedLocally(latest);
+    view.prompted = true;
+    view.promptedVersion = latest;
+    view.show = true;
+    view.auto = true;
+    return view;
+  }
+
+  function pubUpdatePromptedLocally(version) {
+    updateState = sanitizeRuntimeUpdateState({ ...updateState, prompted: true, promptedVersion: version });
+    if (promptedWriteAttempts.has(version)) return;
+    promptedWriteAttempts.add(version);
+    const providerNow = provider;
+    Promise.resolve()
+      .then(() => savePromptedVersion({
+        provider: providerNow ?? updateProvider ?? provider,
+        config,
+        env,
+        platform,
+        execPath,
+        spawnFn,
+        timeoutMs: updateCheckTimeoutMs,
+      }, version))
+      .catch(() => false);
+  }
+
+  /**
+   * Non-blocking shared update check through the selected CLI. No provider/CLI
+   * means a silent skip; the 24h TTL/offline/busy handling lives in core.
+   */
+  function refreshUpdate() {
+    if (disposed) return Promise.resolve(updateState);
+    if (updateTask !== null) return updateTask;
+    updateTask = (async () => {
+      if (config.pinnedDaemonUrl === true) {
+        return publishUpdate({ state: 'disabled', reason: 'daemon_url_pinned', available: false, show: false, manual: false });
+      }
+      const existingProvider = isObject(provider) && typeof provider.path === 'string' && exists(provider.path)
+        ? provider
+        : null;
+      const cliProvider = existingProvider ?? await resolveProvider();
+      if (disposed) return updateState;
+      if (cliProvider === null
+        || typeof cliProvider.path !== 'string'
+        || !exists(cliProvider.path)) {
+        return publishUpdate({ state: 'disabled', reason: 'no_provider', available: false, show: false, manual: false });
+      }
+      updateProvider = cliProvider;
+      publishUpdate({ state: 'checking', reason: null });
+      const result = await runUpdateCheckFn({
+        provider: cliProvider,
+        config,
+        env,
+        platform,
+        execPath,
+        spawnFn,
+        timeoutMs: updateCheckTimeoutMs,
+      });
+      if (disposed) return updateState;
+      const data = isObject(result?.data) ? result.data : null;
+      if (result?.ok !== true || data === null || data.ok !== true) {
+        return publishUpdate({
+          state: 'unknown',
+          reason: sanitizeReason(data?.reason ?? data?.status ?? result?.error) ?? 'check_failed',
+          failureReason: sanitizeReason(data?.failureReason ?? data?.reason ?? result?.error) ?? 'check_failed',
+          currentVersion: sanitizeVersion(data?.currentVersion),
+          latestVersion: sanitizeVersion(data?.latestVersion),
+          available: false,
+          skipped: data?.skipped === true,
+          prompted: data?.prompted === true,
+          promptedVersion: sanitizeVersion(data?.promptedVersion),
+          checkedAt: sanitizeTime(data?.checkedAt),
+          show: false,
+          manual: false,
+        });
+      }
+      const latestVersion = sanitizeVersion(data.latestVersion);
+      const skipped = data.skipped === true;
+      const available = data.available === true && !skipped;
+      const prompted = data.prompted === true
+        || (latestVersion !== null && sanitizeVersion(data.promptedVersion) === latestVersion);
+      return publishUpdate({
+        state: available ? 'available' : skipped ? 'skipped' : data.decision === 'up_to_date' ? 'up_to_date' : 'idle',
+        reason: sanitizeReason(data.reason),
+        failureReason: null,
+        currentVersion: sanitizeVersion(data.currentVersion),
+        latestVersion,
+        promptedVersion: sanitizeVersion(data.promptedVersion),
+        available,
+        skipped,
+        prompted,
+        checkedAt: sanitizeTime(data.checkedAt),
+        promptedAt: sanitizeTime(data.promptedAt),
+        show: false,
+        manual: false,
+      });
+    })().catch(() => updateState).finally(() => {
+      updateTask = null;
+    });
+    return updateTask;
+  }
+
+  function scheduleUpdateCheck() {
+    if (disposed) return;
+    Promise.resolve().then(() => refreshUpdate()).catch(() => {});
   }
 
   function markDownloadRequired() {
@@ -3400,6 +4235,24 @@ export function createDaemonLifecycle(options = {}) {
     managed = false;
     if (!owned) return { stopped: true, reason: 'not_owned' };
     return stopHandle(handle);
+  }
+
+  /**
+   * Stop only the supervise process this plugin owns, and only when it owns a
+   * child daemon. A reused/service daemon is external and is never signalled by
+   * the plugin; the shared `runtime upgrade` path updates/restarts its service.
+   */
+  async function stopOwnedChild() {
+    if (!superviseOwned || superviseHandle === null || runtimeMode !== 'child') {
+      return { stopped: true, stoppedOwned: false, runtimeMode };
+    }
+    const result = await stopSupervise();
+    return {
+      stopped: result?.stopped === true,
+      stoppedOwned: true,
+      runtimeMode,
+      reason: result?.reason ?? null,
+    };
   }
 
   function watchSupervise(handle) {
@@ -3646,7 +4499,9 @@ export function createDaemonLifecycle(options = {}) {
   }
 
   function start() {
-    return beginStart(allowStart);
+    const started = beginStart(allowStart);
+    started.then(() => scheduleUpdateCheck()).catch(() => {});
+    return started;
   }
 
   /**
@@ -3678,9 +4533,10 @@ export function createDaemonLifecycle(options = {}) {
       await stopSupervise();
       if (disposed) return snapshot();
     }
-    return beginStart(true);
+    const result = await beginStart(true);
+    scheduleUpdateCheck();
+    return result;
   }
-
   /**
    * Retry an explicitly allowed start after a failure. Attach-only lifecycles
    * without prior consent stay read-only and just re-inspect.
@@ -3688,7 +4544,10 @@ export function createDaemonLifecycle(options = {}) {
    */
   function retry() {
     if (disposed) return Promise.resolve(snapshot());
-    if (!allowStart && !startOnce) return inspect();
+    if (!allowStart && !startOnce) {
+      scheduleUpdateCheck();
+      return inspect();
+    }
     sticky = null;
     return startAfterInstall();
   }
@@ -3755,6 +4614,9 @@ export function createDaemonLifecycle(options = {}) {
     retry,
     inspect,
     refresh,
+    refreshUpdate,
+    presentUpdate,
+    stopOwnedChild,
     dispose,
     getState: snapshot,
   };
@@ -3770,6 +4632,7 @@ export function createDaemonLifecycle(options = {}) {
  *   probe?: typeof probeDaemon,
  *   lifecycle?: ReturnType<typeof createDaemonLifecycle> | null,
  *   installManager?: ReturnType<typeof createRuntimeInstallManager> | null,
+ *   upgradeManager?: ReturnType<typeof createRuntimeUpgradeManager> | null,
  *   now?: () => number,
  *   cacheTtlMs?: number,
  *   timeoutMs?: number,
@@ -3792,6 +4655,10 @@ export function createEmbedInfoHandler(options = {}) {
     && typeof options.installManager?.getState === 'function'
     ? options.installManager
     : null;
+  const upgradeManager = options.upgradeManager !== null
+    && typeof options.upgradeManager?.getState === 'function'
+    ? options.upgradeManager
+    : null;
   const now = typeof options.now === 'function' ? options.now : Date.now;
   const cacheTtlMs = Number.isFinite(options.cacheTtlMs) ? options.cacheTtlMs : DEFAULT_CACHE_TTL_MS;
   const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : DEFAULT_PROBE_TIMEOUT_MS;
@@ -3805,6 +4672,9 @@ export function createEmbedInfoHandler(options = {}) {
   async function readInfo() {
     if (lifecycle !== null) {
       const snapshot = await lifecycle.inspect();
+      const update = typeof lifecycle.presentUpdate === 'function'
+        ? lifecycle.presentUpdate()
+        : (isObject(snapshot?.update) ? snapshot.update : null);
       return buildEmbedInfo({
         // The lifecycle refreshes this from the shared supervisor's resolve.
         daemonUrl: typeof snapshot?.daemonUrl === 'string' && snapshot.daemonUrl.length > 0
@@ -3826,6 +4696,8 @@ export function createEmbedInfoHandler(options = {}) {
         service: snapshot?.service,
         downloadRequired: snapshot?.downloadRequired === true,
         install: installManager?.getState() ?? null,
+        update,
+        upgrade: upgradeManager?.getState() ?? null,
       });
     }
 
@@ -3840,12 +4712,14 @@ export function createEmbedInfoHandler(options = {}) {
           embed: isObject(result?.embed) ? result.embed : null,
           panel: config.panel,
           install: installManager?.getState() ?? null,
+          upgrade: upgradeManager?.getState() ?? null,
         }))
         .catch(() => buildEmbedInfo({
           daemonUrl: config.daemonUrl,
           reachable: false,
           panel: config.panel,
           install: installManager?.getState() ?? null,
+          upgrade: upgradeManager?.getState() ?? null,
         }))
         .then((value) => {
           cached = value;
@@ -3891,6 +4765,7 @@ export function createEmbedInfoHandler(options = {}) {
         reachable: false,
         panel: config.panel,
         install: installManager?.getState() ?? null,
+        upgrade: upgradeManager?.getState() ?? null,
       });
     }
     sendJson(res, 200, info);
@@ -4559,6 +5434,7 @@ export function apply(ctx, config = {}, options = {}) {
   };
   for (const key of [
     'probe', 'fetchImpl', 'spawnFn', 'resolveCli', 'discoverProviders', 'runResolve', 'startSupervise',
+    'runUpdateCheck', 'savePromptedVersion', 'updateCheckTimeoutMs',
     'exists', 'env', 'home', 'runtime', 'pidAlive', 'platform', 'userHome', 'cloudRoot', 'registry',
     'includeStandardApp', 'execPath', 'now', 'sleep', 'timeoutMs', 'resolveTimeoutMs', 'cacheTtlMs',
     'startTimeoutMs', 'pollIntervalMs', 'superviseStopGraceMs',
@@ -4589,6 +5465,27 @@ export function apply(ctx, config = {}, options = {}) {
     && typeof opts.installManager.getState === 'function'
     ? opts.installManager
     : createRuntimeInstallManager(installOptions);
+
+  const upgradeOptions = {
+    config: resolved,
+    lifecycle,
+    logger: {
+      info: (message) => log('info', message),
+      warn: (message) => log('warn', message),
+    },
+  };
+  for (const key of [
+    'env', 'platform', 'execPath', 'userHome', 'cloudRoot', 'registry', 'includeStandardApp',
+    'discoverProviders', 'exists', 'spawnFn', 'now', 'sleep', 'cliTimeoutMs',
+    'upgradeTimeoutMs', 'upgradePollMs', 'reconnectTimeoutMs',
+  ]) {
+    if (opts[key] !== undefined) upgradeOptions[key] = opts[key];
+  }
+  const upgradeManager = isObject(opts.upgradeManager)
+    && typeof opts.upgradeManager.start === 'function'
+    && typeof opts.upgradeManager.getState === 'function'
+    ? opts.upgradeManager
+    : createRuntimeUpgradeManager(upgradeOptions);
 
   // Agent-visible status is derived from the same lifecycle snapshot as the
   // MCP bridge; it is not a second status source and never adds its own poll.
@@ -4644,6 +5541,10 @@ export function apply(ctx, config = {}, options = {}) {
   if (typeof ctx.effect === 'function') {
     ctx.effect(
       () => () => {
+        // Unloading the DSH entry only releases this plugin's own supervise and
+        // timers. The shared runtime, provider/service records and Mebular data
+        // stay untouched; `mebular runtime service uninstall` is the explicit
+        // removal action.
         agentStatus.dispose();
         const bridgeDisposal = Promise.resolve()
           .then(() => bridge.dispose())
@@ -4660,7 +5561,12 @@ export function apply(ctx, config = {}, options = {}) {
           .catch((error) => {
             log('warn', `install dispose failed (${safeErrorCode(error)})`);
           });
-        return Promise.all([bridgeDisposal, lifecycleDisposal, installDisposal]);
+        const upgradeDisposal = Promise.resolve()
+          .then(() => upgradeManager.dispose?.())
+          .catch((error) => {
+            log('warn', `upgrade dispose failed (${safeErrorCode(error)})`);
+          });
+        return Promise.all([bridgeDisposal, lifecycleDisposal, installDisposal, upgradeDisposal]);
       },
       '@mebular/dsh-plugin: daemon lifecycle, agent status, and MCP bridge',
     );
@@ -4670,8 +5576,9 @@ export function apply(ctx, config = {}, options = {}) {
   void lifecycleStart;
   void bridge.start();
 
-  const handler = createEmbedInfoHandler({ config: resolved, lifecycle, installManager });
+  const handler = createEmbedInfoHandler({ config: resolved, lifecycle, installManager, upgradeManager });
   const installHandler = createRuntimeInstallHandler({ config: resolved, manager: installManager, env: opts.env });
+  const upgradeHandler = createRuntimeUpgradeHandler({ config: resolved, manager: upgradeManager, env: opts.env });
   if (typeof ctx.inject !== 'function') return;
   ctx.inject(['webServer'], (webCtx) => {
     const webServer = webCtx?.webServer;
@@ -4692,6 +5599,14 @@ export function apply(ctx, config = {}, options = {}) {
           handler: installHandler,
         }),
         '@mebular/dsh-plugin: POST /mebular/runtime/install',
+      );
+      webCtx.effect(
+        () => webServer.register({
+          kind: 'exact',
+          path: RUNTIME_UPGRADE_PATH,
+          handler: upgradeHandler,
+        }),
+        '@mebular/dsh-plugin: POST /mebular/runtime/upgrade',
       );
     }
     // DSH 0.2.1-rc.2 exposes WebServer.tapIndex(transform) (see

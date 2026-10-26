@@ -391,6 +391,7 @@ export async function maybePromptForRuntimeUpdate({
   showPromptFn,
   upgradeStatusFn = null,
   skipVersionFn = null,
+  promptedVersionFn = null,
   performUpgradeFn = null,
   isBusy = () => false,
   hasRunningTasks = () => false,
@@ -433,8 +434,12 @@ export async function maybePromptForRuntimeUpdate({
     restarts = false;
   }
 
-  const prompted = typeof check?.latestVersion === 'string'
-    && session.promptedVersions?.has(check.latestVersion) === true;
+  const prompted = (typeof check?.latestVersion === 'string'
+    && session.promptedVersions?.has(check.latestVersion) === true)
+    || check?.prompted === true
+    || (typeof check?.promptedVersion === 'string'
+      && typeof check?.latestVersion === 'string'
+      && check.promptedVersion === check.latestVersion);
   const decision = runtimeUpdatePromptDecision({
     check,
     busy: isBusy() === true || preflight?.busy === true,
@@ -445,8 +450,21 @@ export async function maybePromptForRuntimeUpdate({
   });
   if (decision.show !== true) return { shown: false, ...decision, check };
 
+  // 只在真正要展示提示时写共享 prompted；skip/update/later 都算已提示，
+  // 另一个入口（App/Plugin/CLI）之后不会自动弹同一 latestVersion。
   session.promptedVersions?.add(check.latestVersion);
   session.prompting = true;
+  let promptedSaved = false;
+  let promptWarning = null;
+  if (typeof showPromptFn === 'function' && typeof promptedVersionFn === 'function') {
+    try {
+      await promptedVersionFn(root, check.latestVersion);
+      promptedSaved = true;
+    } catch (error) {
+      promptWarning = String(error?.message ?? error);
+    }
+  }
+
   try {
     let action = RUNTIME_UPDATE_ACTION.LATER;
     if (typeof showPromptFn === 'function') {
@@ -473,19 +491,42 @@ export async function maybePromptForRuntimeUpdate({
           warning = String(error?.message ?? error);
         }
       }
-      return { shown: true, action: RUNTIME_UPDATE_ACTION.SKIP, skipped, warning, check };
+      return {
+        shown: true,
+        action: RUNTIME_UPDATE_ACTION.SKIP,
+        skipped,
+        promptedSaved,
+        warning: warning ?? promptWarning,
+        check,
+      };
     }
     if (action === RUNTIME_UPDATE_ACTION.UPDATE) {
       if (typeof performUpgradeFn !== 'function') {
-        return { shown: true, action: RUNTIME_UPDATE_ACTION.UPDATE, ok: false, reason: 'upgrade_unavailable', check };
+        return {
+          shown: true,
+          action: RUNTIME_UPDATE_ACTION.UPDATE,
+          ok: false,
+          reason: 'upgrade_unavailable',
+          promptedSaved,
+          check,
+        };
       }
       const result = await performUpgradeFn({ to: check.latestVersion, check, root });
-      return { shown: true, action: RUNTIME_UPDATE_ACTION.UPDATE, ok: result?.ok === true, result, check };
+      return {
+        shown: true,
+        action: RUNTIME_UPDATE_ACTION.UPDATE,
+        ok: result?.ok === true,
+        result,
+        promptedSaved,
+        check,
+      };
     }
     // 稍后/关闭：不写 skip、不自动重试。
     return {
       shown: true,
       action: action === RUNTIME_UPDATE_ACTION.LATER ? RUNTIME_UPDATE_ACTION.LATER : RUNTIME_UPDATE_ACTION.DISMISS,
+      promptedSaved,
+      warning: promptWarning,
       check,
     };
   } finally {

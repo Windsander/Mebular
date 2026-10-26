@@ -103,6 +103,15 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).toContain('updateBusy');
   });
 
+  it('只有主面板实际渲染 banner 后才确认 prompted，每版本一次', () => {
+    expect(source).toContain('function confirmPrompted');
+    expect(source).toContain("postAction(RUNTIME_UPGRADE_PATH, 'prompted'");
+    expect(source).toContain('const promptedSent = new Set()');
+    expect(source).toMatch(/promptLatest[\s\S]{0,240}?confirmPrompted/);
+    expect(source).toContain('promptWarning');
+    expect(source).not.toMatch(/function presentUpdate/);
+  });
+
   it('读取 host tapIndex 注入的 panel 全局，且只在 panel === false 时跳过注册', () => {
     expect(source).toContain('__MEBULAR_DSH__');
     expect(source).toMatch(/panel\s*===\s*false/);

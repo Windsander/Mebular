@@ -157,10 +157,6 @@ function lifecycleHarness(overrides = {}) {
       calls.checks.push(context);
       return { ok: true, data: overrides.check ?? CHECK_AVAILABLE };
     },
-    savePromptedVersion: async (context, version) => {
-      calls.prompted.push({ context, version });
-      return true;
-    },
     ...overrides.options,
   });
   return { lifecycle, calls, warnings };
@@ -184,7 +180,7 @@ describe('DSH lifecycle shared update check', () => {
     expect(view).toMatchObject({ available: false, show: false, manual: false });
   });
 
-  it('check 有更新：snapshot/embed-info 暴露 update，首次展示写共享 prompted 且另一入口不再自动弹', async () => {
+  it('GET/presentUpdate 只读：check 有更新时返回 auto/show/manual，但从不写 prompted', async () => {
     const harness = lifecycleHarness();
     await harness.lifecycle.start();
     await waitFor(() => harness.lifecycle.getState().update.state === 'available');
@@ -196,14 +192,52 @@ describe('DSH lifecycle shared update check', () => {
       latestVersion: '0.2.0',
       available: true,
       skipped: false,
-      prompted: true,
+      prompted: false,
       show: true,
       auto: true,
       manual: true,
     });
-    await waitFor(() => harness.calls.prompted.length === 1);
-    expect(harness.calls.prompted[0].version).toBe('0.2.0');
+
+    const handler = createEmbedInfoHandler({
+      config: { lifecycle: 'attach' },
+      lifecycle: harness.lifecycle,
+    });
+    const first = fakeHttpRes();
+    await handler(fakeHttpReq({ method: 'GET' }), first);
+    const second = fakeHttpRes();
+    await handler(fakeHttpReq({ method: 'GET' }), second);
+    expect(first.body.update).toMatchObject({
+      available: true,
+      prompted: false,
+      show: true,
+      auto: true,
+      manual: true,
+    });
+    expect(second.body.update).toMatchObject({ auto: true });
+    expect(first.body.update).not.toHaveProperty('token');
+
+    // Sidebar/embed-info polling never persists prompted; no CLI write happened.
+    expect(harness.calls.prompted).toHaveLength(0);
     expect(harness.calls.checks).toHaveLength(1);
+    expect(harness.lifecycle.getState().update.prompted).toBe(false);
+  });
+
+  it('显式 prompted 确认后：本会话保持 banner，其他入口不再自动弹，手动更新保留', async () => {
+    const harness = lifecycleHarness();
+    await harness.lifecycle.start();
+    await waitFor(() => harness.lifecycle.getState().update.state === 'available');
+    expect(harness.lifecycle.presentUpdate()).toMatchObject({ show: true, auto: true, prompted: false });
+
+    harness.lifecycle.markUpdatePrompted('0.2.0');
+    const confirmed = harness.lifecycle.presentUpdate();
+    expect(confirmed).toMatchObject({
+      available: true,
+      prompted: true,
+      promptedVersion: '0.2.0',
+      show: true,
+      auto: false,
+      manual: true,
+    });
 
     const handler = createEmbedInfoHandler({
       config: { lifecycle: 'attach' },
@@ -212,16 +246,13 @@ describe('DSH lifecycle shared update check', () => {
     const res = fakeHttpRes();
     await handler(fakeHttpReq({ method: 'GET' }), res);
     expect(res.body.update).toMatchObject({
-      state: 'available',
-      currentVersion: '0.1.2',
-      latestVersion: '0.2.0',
-      available: true,
-      skipped: false,
       prompted: true,
+      promptedVersion: '0.2.0',
       show: true,
+      auto: false,
       manual: true,
     });
-    expect(res.body.update).not.toHaveProperty('token');
+    expect(harness.calls.prompted).toHaveLength(0);
   });
 
   it('共享 promptedVersion 已存在：不自动弹，但保留手动更新入口', async () => {
@@ -298,7 +329,7 @@ describe('DSH explicit runtime upgrade manager', () => {
     check = CHECK_AVAILABLE,
     options = {},
   } = {}) {
-    const calls = { inspect: 0, stop: 0, startAfterInstall: [], refresh: 0, refreshUpdate: 0 };
+    const calls = { inspect: 0, stop: 0, startAfterInstall: [], refresh: 0, refreshUpdate: 0, markPrompted: [] };
     const lifecycle = {
       inspect: async () => {
         calls.inspect += 1;
@@ -317,6 +348,7 @@ describe('DSH explicit runtime upgrade manager', () => {
         return { status: 'up', reason: null };
       },
       refreshUpdate: async () => { calls.refreshUpdate += 1; },
+      markUpdatePrompted: (version) => { calls.markPrompted.push(version); },
     };
     const tools = cli ?? fakeCli({
       'check-update': () => ({ code: 0, stdout: JSON.stringify(check) }),
@@ -462,6 +494,49 @@ describe('DSH explicit runtime upgrade manager', () => {
     expect(manager.getState().state).toBe('idle');
   });
 
+  it('prompted：服务端自读 latest 并只写一次共享 prompted；不升级、不改变 upgrade 状态', async () => {
+    const tools = fakeCli({
+      'check-update': () => ({ code: 0, stdout: JSON.stringify(CHECK_AVAILABLE) }),
+      'update-state prompted': () => ({
+        code: 0,
+        stdout: JSON.stringify({ ok: true, state: { promptedVersion: '0.2.0' } }),
+      }),
+      upgrade: () => { throw new Error('must not upgrade'); },
+    });
+    const { manager, calls } = managerHarness({ cli: tools });
+    const first = manager.start('prompted');
+    expect(first.accepted).toBe(true);
+    expect(manager.getState().state).toBe('idle');
+    await waitFor(() => tools.runtimeCalls().some((args) => args.includes('prompted')));
+    expect(tools.runtimeCalls()).toContainEqual([
+      'runtime', 'update-state', 'prompted', '--version', '0.2.0', '--json',
+    ]);
+    expect(calls.markPrompted).toEqual(['0.2.0']);
+    expect(tools.runtimeCalls().some((args) => args.includes('upgrade'))).toBe(false);
+
+    // 幂等：同一 latest 再次确认不再写 prompted（check 可以重读）。
+    manager.start('prompted');
+    await waitFor(() => tools.calls.length >= 2);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const promptedWrites = tools.runtimeCalls()
+      .filter((args) => args.slice(1, 3).join(' ') === 'update-state prompted');
+    expect(promptedWrites).toHaveLength(1);
+    expect(manager.getState().state).toBe('idle');
+  });
+
+  it('prompted 写失败只 warning：不升级、不标记已提示、面板更新入口不受影响', async () => {
+    const tools = fakeCli({
+      'check-update': () => ({ code: 0, stdout: JSON.stringify(CHECK_AVAILABLE) }),
+      'update-state prompted': () => ({ code: 2, stdout: JSON.stringify({ ok: false, reason: 'LOCKED' }) }),
+    });
+    const { manager, calls } = managerHarness({ cli: tools });
+    expect(manager.start('prompted').accepted).toBe(true);
+    await waitFor(() => tools.runtimeCalls().some((args) => args.includes('prompted')));
+    expect(calls.markPrompted).toEqual([]);
+    expect(manager.getState().state).toBe('idle');
+    expect(manager.allowed()).toBe(true);
+  });
+
   it('single-flight：升级中再次 start 不重复执行', async () => {
     let release;
     const gate = new Promise((resolve) => { release = resolve; });
@@ -584,6 +659,12 @@ describe('POST /mebular/runtime/upgrade route', () => {
     expect(res.body).toMatchObject({ ok: true, accepted: true, action: 'update' });
     expect(res.body).not.toHaveProperty('version');
     expect(calls).toEqual(['update']);
+
+    const prompted = fakeRes();
+    await handler(fakeReq({ body: JSON.stringify({ action: 'prompted' }) }), prompted);
+    expect(prompted.statusCode).toBe(202);
+    expect(prompted.body).toMatchObject({ ok: true, accepted: true, action: 'prompted' });
+    expect(calls).toEqual(['update', 'prompted']);
   });
 
   it('远端一律 404；非 POST 405；非 JSON/非法 JSON/任意 version/url 均 400', async () => {
@@ -727,7 +808,7 @@ describe('DSH client update banner', () => {
     expect(clientSource).toContain('在 Console 中开启');
   });
 
-  it('store：later 不发请求；skip/update POST 固定 upgrade 路由且 body 仅 action', async () => {
+  it('store：later 不发请求；prompted 每版本只发一次；skip/update body 仅 action', async () => {
     const { createEmbedInfoStore } = loadClientInternals();
     const calls = [];
     const store = createEmbedInfoStore({
@@ -742,7 +823,7 @@ describe('DSH client update banner', () => {
               ok: true,
               accepted: true,
               action: body.action,
-              upgrade: { state: 'done', toVersion: '0.2.0' },
+              upgrade: { state: body.action === 'prompted' ? 'idle' : 'done', toVersion: '0.2.0' },
             }),
           };
         }
@@ -756,6 +837,14 @@ describe('DSH client update banner', () => {
     store.later('0.2.0');
     expect(store.getSnapshot().dismissedVersion).toBe('0.2.0');
     expect(calls.filter((call) => call.init.method === 'POST')).toHaveLength(0);
+
+    // Banner rendered -> confirm; repeated renders must not POST twice.
+    await store.confirmPrompted('0.2.0');
+    await store.confirmPrompted('0.2.0');
+    const promptedPosts = calls.filter((call) => call.init.method === 'POST');
+    expect(promptedPosts).toHaveLength(1);
+    expect(promptedPosts[0].url).toBe('/mebular/runtime/upgrade');
+    expect(JSON.parse(promptedPosts[0].init.body)).toEqual({ action: 'prompted' });
 
     await store.upgrade('skip');
     const skip = calls.filter((call) => call.init.method === 'POST').at(-1);

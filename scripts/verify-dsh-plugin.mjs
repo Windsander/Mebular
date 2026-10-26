@@ -241,7 +241,7 @@ check(
 );
 check(
   'index.js exposes fixed upgrade actions only',
-  JSON.stringify(pluginModule.RUNTIME_UPGRADE_ACTIONS) === JSON.stringify(['update', 'later', 'skip']),
+  JSON.stringify(pluginModule.RUNTIME_UPGRADE_ACTIONS) === JSON.stringify(['update', 'later', 'skip', 'prompted']),
   JSON.stringify(pluginModule.RUNTIME_UPGRADE_ACTIONS),
 );
 check('index.js exports agentStatusText()', typeof pluginModule.agentStatusText === 'function');
@@ -278,7 +278,7 @@ check(
 );
 check(
   'host checks updates through the selected CLI',
-  hostSource.includes("command: ['check-update']") && hostSource.includes("'update-state', 'prompted'"),
+  hostSource.includes("command: ['check-update']") && /'update-state',\s*'prompted'/.test(hostSource),
 );
 check(
   'host upgrades only to the shared latest',
@@ -293,6 +293,19 @@ check(
   'host unload never uninstalls the shared service/runtime',
   !hostSource.includes('uninstallRuntimeService')
     && !/runtime',\s*'service',\s*'uninstall'/.test(hostSource),
+);
+const presentUpdateBody = /function presentUpdate\(\) \{([\s\S]*?)\n {2}\}/.exec(hostSource)?.[1] ?? '';
+check(
+  'GET presentUpdate is read-only (never writes prompted)',
+  presentUpdateBody.length > 0
+    && !presentUpdateBody.includes('savePrompted')
+    && !presentUpdateBody.includes('update-state')
+    && !presentUpdateBody.includes('markUpdatePrompted'),
+  presentUpdateBody.slice(0, 160),
+);
+check(
+  'host persists prompted only through an explicit action',
+  /action === 'prompted'/.test(hostSource) && /markUpdatePrompted/.test(hostSource),
 );
 check('host feature-detects the optional systemPrompt service', /ctx\.systemPrompt/.test(hostSource));
 check(
@@ -340,6 +353,9 @@ check('client handles managed start states', clientSource.includes('managed_cli_
 check('client offers the plugin-only install action', clientSource.includes("'/mebular/runtime/install'"));
 check('client offers the explicit upgrade action', clientSource.includes("'/mebular/runtime/upgrade'"));
 check('client renders the update banner/updateView', clientSource.includes('function updateView') && clientSource.includes('data-mebular-update'));
+check('client confirms prompted only after rendering the banner', clientSource.includes('function confirmPrompted')
+  && clientSource.includes("postAction(RUNTIME_UPGRADE_PATH, 'prompted'")
+  && /promptLatest[\s\S]{0,200}?confirmPrompted/.test(clientSource));
 check('client shows update/later/skip actions', [
   'updateAction', 'updateLater', 'updateSkip', 'updateUpdatingTitle', 'updateFailedTitle', 'serviceHint',
 ].every((key) => clientSource.includes(key)));

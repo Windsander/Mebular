@@ -44,7 +44,7 @@ export const RUNTIME_INSTALL_PATH = '/mebular/runtime/install';
  */
 export const RUNTIME_UPGRADE_PATH = '/mebular/runtime/upgrade';
 
-export const RUNTIME_UPGRADE_ACTIONS = Object.freeze(['update', 'later', 'skip']);
+export const RUNTIME_UPGRADE_ACTIONS = Object.freeze(['update', 'later', 'skip', 'prompted']);
 
 /**
  * Pinned `@mebular/core` version for the plugin-only bootstrap. It must track
@@ -3072,6 +3072,9 @@ export function createRuntimeUpgradeManager(options = {}) {
 
   let current = sanitizeRuntimeUpgradeState({ state: 'idle', allowed });
   let task = null;
+  let promptedTask = null;
+  /** Last prompted version this manager instance persisted (idempotent POSTs). */
+  let promptedAckVersion = null;
   let disposed = false;
   let controller = new AbortController();
 
@@ -3167,6 +3170,35 @@ export function createRuntimeUpgradeManager(options = {}) {
     };
   }
 
+  /**
+   * Persist the prompted version for an explicit upgrade/skip action. The GET
+   * route never calls this; a failure is a warning only and never blocks the
+   * user's action.
+   */
+  async function writePromptedBestEffort(cliPath, version) {
+    try {
+      const result = await runCli(cliPath, [
+        'runtime',
+        'update-state',
+        'prompted',
+        '--version',
+        version,
+        '--json',
+      ], { timeoutMs: cliTimeoutMs });
+      const data = parseJsonDocument(result.stdout);
+      if (result.ok !== true || !isObject(data) || data.ok !== true) {
+        log('warn', 'shared runtime prompted state could not be persisted');
+        return false;
+      }
+      promptedAckVersion = version;
+      lifecycle?.markUpdatePrompted?.(version);
+      return true;
+    } catch (error) {
+      log('warn', `shared runtime prompted state failed (${safeErrorCode(error)})`);
+      return false;
+    }
+  }
+
   /** Non-destructive shared lock probe; `state.upgrading` is display-only. */
   async function upgradeLockBusy(cliPath) {
     const result = await runCli(cliPath, ['runtime', 'upgrade-state', 'show', '--json'], { timeoutMs: cliTimeoutMs });
@@ -3210,6 +3242,15 @@ export function createRuntimeUpgradeManager(options = {}) {
     }
   }
 
+  async function executePrompted() {
+    const cli = await selectedCli();
+    if (cli === null) return;
+    const latest = await resolveLatest(cli.path);
+    if (latest.latest === null) return;
+    if (promptedAckVersion === latest.latest) return;
+    await writePromptedBestEffort(cli.path, latest.latest);
+  }
+
   async function executeUpdate() {
     const cli = await selectedCli();
     if (cli === null) throw failureError('no_provider', '没有可用的 Mebular CLI/runtime provider');
@@ -3218,6 +3259,8 @@ export function createRuntimeUpgradeManager(options = {}) {
       throw failureError('no_update_available', '共享 check 没有可用的 stable 更新');
     }
     const fromVersion = latest.currentVersion;
+    // Explicit update is also a prompt acknowledgement; best-effort only.
+    await writePromptedBestEffort(cli.path, latest.latest);
     publish({
       state: 'updating',
       action: 'update',
@@ -3311,6 +3354,7 @@ export function createRuntimeUpgradeManager(options = {}) {
     if (cli === null) throw failureError('no_provider', '没有可用的 Mebular CLI/runtime provider');
     const latest = await resolveLatest(cli.path);
     if (latest.latest === null) throw failureError('no_update_available', '没有可跳过的版本');
+    await writePromptedBestEffort(cli.path, latest.latest);
     publish({ state: 'skipping', action: 'skip', reason: null, toVersion: latest.latest, startedAt: now(), finishedAt: null });
     const result = await runCli(cli.path, [
       'runtime',
@@ -3341,6 +3385,20 @@ export function createRuntimeUpgradeManager(options = {}) {
     if (!allowed || disposed) return { accepted: false, state: current };
     if (action === 'later') {
       // Later is session-local: it never writes skip and never retries on its own.
+      return { accepted: true, state: current };
+    }
+    if (action === 'prompted') {
+      // Idempotent acknowledgement from the panel after the banner rendered.
+      // It never changes upgrade state or triggers an install.
+      if (promptedTask !== null || task !== null) return { accepted: true, state: current };
+      promptedTask = Promise.resolve()
+        .then(() => executePrompted())
+        .catch((error) => {
+          log('warn', `runtime prompted acknowledgement failed (${safeErrorCode(error)})`);
+        })
+        .finally(() => {
+          promptedTask = null;
+        });
       return { accepted: true, state: current };
     }
     if (task !== null) return { accepted: false, state: current };
@@ -3378,7 +3436,7 @@ export function createRuntimeUpgradeManager(options = {}) {
   }
 
   async function dispose() {
-    if (disposed) return task ?? undefined;
+    if (disposed) return task ?? promptedTask ?? undefined;
     disposed = true;
     try {
       controller.abort('plugin_disposed');
@@ -3390,6 +3448,13 @@ export function createRuntimeUpgradeManager(options = {}) {
         await task;
       } catch {
         // The flow already rolled back/restored its own state.
+      }
+    }
+    if (promptedTask !== null) {
+      try {
+        await promptedTask;
+      } catch {
+        // Prompted acknowledgement is best-effort and never blocks unload.
       }
     }
     return undefined;
@@ -3824,24 +3889,6 @@ export function createDaemonLifecycle(options = {}) {
         return { ok: false, error: 'check_failed' };
       }
     };
-  const savePromptedVersion = typeof opts.savePromptedVersion === 'function'
-    ? opts.savePromptedVersion
-    : async (context, version) => {
-      try {
-        const result = await runRuntimeJson({
-          cliPath: context?.provider?.path,
-          command: ['update-state', 'prompted', '--version', version],
-          spawnFn,
-          env: updateCliEnv,
-          platform: context?.platform ?? platform,
-          execPath: context?.execPath ?? execPath,
-          timeoutMs: updateCheckTimeoutMs,
-        });
-        return result?.ok === true && result.data?.ok === true;
-      } catch {
-        return false;
-      }
-    };
 
   const allowStart = (config.lifecycle === 'managed' || config.lifecycle === 'auto')
     && config.runtime !== 'external'
@@ -3880,12 +3927,8 @@ export function createDaemonLifecycle(options = {}) {
   let updateState = sanitizeRuntimeUpdateState({ state: 'idle' });
   /** @type {Promise<unknown> | null} */
   let updateTask = null;
-  /** Version whose banner was shown in this plugin session (prompted may be shared). */
+  /** Version whose banner was confirmed via the explicit `prompted` POST. */
   let updatePromptVersion = null;
-  /** CLI provider used by the last successful update check (for prompted writes). */
-  let updateProvider = null;
-  /** @type {Set<string>} versions whose prompted write was already attempted */
-  const promptedWriteAttempts = new Set();
 
   function log(level, message) {
     safeLog(logger, level, message);
@@ -3924,11 +3967,11 @@ export function createDaemonLifecycle(options = {}) {
   }
 
   /**
-   * Presentation view for `/mebular/embed-info`. The first time a shared
-   * latest version becomes visible in this session it records `promptedVersion`
-   * through the selected CLI, so the other entry (App/CLI/another DSH) never
-   * auto-prompts the same version. A prompted version still exposes `manual`,
-   * which the panel renders as an explicit update action.
+   * Presentation view for `/mebular/embed-info`, which is strictly read-only.
+   * `auto:true` means "this entry has not been prompted yet"; only the client,
+   * after actually rendering the banner, confirms through POST action
+   * `prompted`. A shared prompted version still exposes `manual`, which the
+   * panel renders as an explicit update action.
    */
   function presentUpdate() {
     const view = { ...updateState, show: false, auto: false, manual: false };
@@ -3940,31 +3983,22 @@ export function createDaemonLifecycle(options = {}) {
       return view;
     }
     if (updateState.prompted === true) return view;
-    updatePromptVersion = latest;
-    pubUpdatePromptedLocally(latest);
-    view.prompted = true;
-    view.promptedVersion = latest;
     view.show = true;
     view.auto = true;
     return view;
   }
 
-  function pubUpdatePromptedLocally(version) {
-    updateState = sanitizeRuntimeUpdateState({ ...updateState, prompted: true, promptedVersion: version });
-    if (promptedWriteAttempts.has(version)) return;
-    promptedWriteAttempts.add(version);
-    const providerNow = provider;
-    Promise.resolve()
-      .then(() => savePromptedVersion({
-        provider: providerNow ?? updateProvider ?? provider,
-        config,
-        env,
-        platform,
-        execPath,
-        spawnFn,
-        timeoutMs: updateCheckTimeoutMs,
-      }, version))
-      .catch(() => false);
+  /** Called only after the explicit `prompted` action persisted successfully. */
+  function markUpdatePrompted(version) {
+    if (typeof version !== 'string' || updateState.latestVersion !== version) return updateState;
+    updatePromptVersion = version;
+    updateState = sanitizeRuntimeUpdateState({
+      ...updateState,
+      prompted: true,
+      promptedVersion: version,
+      promptedAt: new Date().toISOString(),
+    });
+    return updateState;
   }
 
   /**
@@ -3988,7 +4022,6 @@ export function createDaemonLifecycle(options = {}) {
         || !exists(cliProvider.path)) {
         return publishUpdate({ state: 'disabled', reason: 'no_provider', available: false, show: false, manual: false });
       }
-      updateProvider = cliProvider;
       publishUpdate({ state: 'checking', reason: null });
       const result = await runUpdateCheckFn({
         provider: cliProvider,
@@ -4616,6 +4649,7 @@ export function createDaemonLifecycle(options = {}) {
     refresh,
     refreshUpdate,
     presentUpdate,
+    markUpdatePrompted,
     stopOwnedChild,
     dispose,
     getState: snapshot,
@@ -5434,7 +5468,7 @@ export function apply(ctx, config = {}, options = {}) {
   };
   for (const key of [
     'probe', 'fetchImpl', 'spawnFn', 'resolveCli', 'discoverProviders', 'runResolve', 'startSupervise',
-    'runUpdateCheck', 'savePromptedVersion', 'updateCheckTimeoutMs',
+    'runUpdateCheck', 'updateCheckTimeoutMs',
     'exists', 'env', 'home', 'runtime', 'pidAlive', 'platform', 'userHome', 'cloudRoot', 'registry',
     'includeStandardApp', 'execPath', 'now', 'sleep', 'timeoutMs', 'resolveTimeoutMs', 'cacheTtlMs',
     'startTimeoutMs', 'pollIntervalMs', 'superviseStopGraceMs',

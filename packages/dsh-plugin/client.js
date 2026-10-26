@@ -738,12 +738,14 @@ window.__ModuleLoader__.load({
         installError: null,
         upgradePending: false,
         upgradeError: null,
+        promptWarning: null,
         dismissedVersion: null,
       };
       let timer = null;
       let inFlight = null;
       let installInFlight = null;
       let upgradeInFlight = null;
+      const promptedSent = new Set();
 
       function publish(patch) {
         const next = { ...snapshot, ...patch };
@@ -875,6 +877,32 @@ window.__ModuleLoader__.load({
       }
 
       /**
+       * Explicit prompt acknowledgement, sent only after the main panel actually
+       * rendered the banner. One POST per latestVersion per browser session; the
+       * host re-reads the latest version, so no client version is transmitted.
+       * A failure is a local warning only and never disables the update actions.
+       */
+      function confirmPrompted(version = null) {
+        const latest = typeof version === 'string' && version.length > 0
+          ? version
+          : (typeof snapshot.info?.update?.latestVersion === 'string'
+            ? snapshot.info.update.latestVersion
+            : null);
+        if (latest === null || promptedSent.has(latest)) return Promise.resolve();
+        promptedSent.add(latest);
+        const request = (async () => {
+          try {
+            await postAction(RUNTIME_UPGRADE_PATH, 'prompted', { timeoutScale: 2 });
+            publish({ promptWarning: null });
+          } catch (cause) {
+            publish({ promptWarning: cause instanceof Error ? cause.message : String(cause) });
+          }
+          await load();
+        })();
+        return request;
+      }
+
+      /**
        * Explicit update/skip. `later` stays local; both other actions are one
        * POST to the fixed upgrade route. The host re-reads the latest version,
        * so a client-supplied version is impossible by construction.
@@ -928,6 +956,7 @@ window.__ModuleLoader__.load({
         install,
         later,
         upgrade,
+        confirmPrompted,
       };
     }
 
@@ -1005,6 +1034,11 @@ window.__ModuleLoader__.load({
         dismissedVersion,
         pending: upgradePending ? (pendingUpgradeAction ?? 'update') : null,
       });
+      const promptLatest = updateBanner?.kind === 'available'
+        && info?.update?.auto === true
+        && typeof info?.update?.latestVersion === 'string'
+        ? info.update.latestVersion
+        : null;
       const updateAvailable = info?.update !== null && typeof info?.update === 'object'
         ? info.update
         : null;
@@ -1075,6 +1109,13 @@ window.__ModuleLoader__.load({
         setRefreshToken((value) => value + 1);
         void embedInfoStore.refresh();
       }, [upgradeState]);
+
+      React.useEffect(() => {
+        // Only a rendered banner acknowledges the prompt; sidebar polling alone
+        // never writes the shared prompted state.
+        if (promptLatest === null) return;
+        void embedInfoStore.confirmPrompted(promptLatest);
+      }, [promptLatest]);
 
       const header = h(
         'div',

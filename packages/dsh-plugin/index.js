@@ -53,7 +53,13 @@ const DEFAULT_PROBE_TIMEOUT_MS = 1200;
 const DEFAULT_CACHE_TTL_MS = 1000;
 const DEFAULT_MANAGED_START_TIMEOUT_MS = 20000;
 const DEFAULT_MANAGED_POLL_INTERVAL_MS = 500;
-const DEFAULT_MANAGED_KILL_GRACE_MS = 2000;
+/**
+ * Stop window for the plugin-owned `runtime supervise` process. It must cover
+ * the supervisor's own child cleanup budget (SIGTERM → 2s → SIGKILL → 5s) plus
+ * margin; killing supervise earlier would orphan the daemon child.
+ */
+export const DEFAULT_SUPERVISE_STOP_GRACE_MS = 10000;
+export const DEFAULT_SUPERVISE_KILL_WAIT_MS = 5000;
 const DEFAULT_BRIDGE_POLL_INTERVAL_MS = 2000;
 const DEFAULT_RESOLVE_TIMEOUT_MS = 5000;
 const DEFAULT_CLI_NAME = 'mebular';
@@ -865,7 +871,9 @@ function startSuperviseProcess({
   env,
   platform,
   execPath,
-  killGraceMs = DEFAULT_MANAGED_KILL_GRACE_MS,
+  stopGraceMs = DEFAULT_SUPERVISE_STOP_GRACE_MS,
+  killWaitMs = DEFAULT_SUPERVISE_KILL_WAIT_MS,
+  wait = delay,
   logLine = null,
 }) {
   const invocation = runtimeInvocation(cliPath, { execPath, platform });
@@ -981,15 +989,32 @@ function startSuperviseProcess({
 
   const stop = (options = {}) => {
     if (stopping !== null) return stopping;
-    const graceMs = Number.isFinite(options.graceMs) ? Math.max(0, options.graceMs) : killGraceMs;
+    const graceMs = Number.isFinite(options.graceMs)
+      ? Math.max(0, options.graceMs)
+      : stopGraceMs;
     stopping = (async () => {
       if (exited) return { stopped: false, reason: 'already_exited' };
       const termSent = signalChild('SIGTERM');
-      const exitedAfterTerm = await Promise.race([exit.then(() => true), delay(graceMs).then(() => false)]);
-      if (exitedAfterTerm) return { stopped: true, escalated: false, termSent, killSent: false };
+      const exitedAfterTerm = await Promise.race([
+        exit.then(() => true),
+        Promise.resolve(wait(graceMs)).then(() => false),
+      ]);
+      if (exitedAfterTerm) {
+        return { stopped: true, escalated: false, termSent, killSent: false, graceMs };
+      }
       const killSent = signalChild('SIGKILL');
-      const exitedAfterKill = await Promise.race([exit.then(() => true), delay(1000).then(() => false)]);
-      return { stopped: exitedAfterKill, escalated: true, termSent, killSent };
+      const exitedAfterKill = await Promise.race([
+        exit.then(() => true),
+        Promise.resolve(wait(killWaitMs)).then(() => false),
+      ]);
+      return {
+        stopped: exitedAfterKill,
+        escalated: true,
+        termSent,
+        killSent,
+        graceMs,
+        reason: exitedAfterKill ? null : 'still_running',
+      };
     })();
     return stopping;
   };
@@ -1375,7 +1400,7 @@ function failureState(data) {
  *   cacheTtlMs?: number,
  *   startTimeoutMs?: number,
  *   pollIntervalMs?: number,
- *   killGraceMs?: number,
+ *   superviseStopGraceMs?: number,
  * }} [options]
  * @returns {{
  *   start: () => Promise<Record<string, unknown>>,
@@ -1421,9 +1446,9 @@ export function createDaemonLifecycle(options = {}) {
   const pollIntervalMs = Number.isFinite(opts.pollIntervalMs)
     ? opts.pollIntervalMs
     : DEFAULT_MANAGED_POLL_INTERVAL_MS;
-  const killGraceMs = Number.isFinite(opts.killGraceMs)
-    ? Math.max(0, opts.killGraceMs)
-    : DEFAULT_MANAGED_KILL_GRACE_MS;
+  const superviseStopGraceMs = Number.isFinite(opts.superviseStopGraceMs)
+    ? Math.max(0, opts.superviseStopGraceMs)
+    : DEFAULT_SUPERVISE_STOP_GRACE_MS;
   const logHome = typeof opts.home === 'string' && opts.home.length > 0 ? opts.home : mebularHome(env);
   const logger = isObject(opts.logger) ? opts.logger : null;
   const discoverProviders = typeof opts.discoverProviders === 'function'
@@ -1458,7 +1483,8 @@ export function createDaemonLifecycle(options = {}) {
         env: context?.env ?? env,
         platform: context?.platform ?? platform,
         execPath: context?.execPath ?? execPath,
-        killGraceMs: Number.isFinite(context?.killGraceMs) ? context.killGraceMs : killGraceMs,
+        stopGraceMs: Number.isFinite(context?.stopGraceMs) ? context.stopGraceMs : superviseStopGraceMs,
+        wait: sleep,
         logLine: (level, line) => log(level, redactLogLine(line, {
           home: logHome,
           cliPath: typeof context?.provider?.path === 'string' ? context.provider.path : undefined,
@@ -1494,6 +1520,8 @@ export function createDaemonLifecycle(options = {}) {
   let probing = null;
   /** @type {Promise<unknown> | null} */
   let startPromise = null;
+  /** @type {Promise<unknown> | null} */
+  let disposal = null;
   let disposed = false;
   /** @type {{ state: string, reason: string | null } | null} */
   let sticky = null;
@@ -1675,19 +1703,46 @@ export function createDaemonLifecycle(options = {}) {
     return isObject(discovery?.selected) ? discovery.selected : null;
   }
 
+  /**
+   * Stop one plugin-owned supervise process and verify it really exited.
+   * A `stopped:false` result is never silent: it is logged and reflected in the
+   * lifecycle reason so the panel does not claim a clean shutdown.
+   */
+  async function stopHandle(handle) {
+    if (!isObject(handle) || typeof handle.stop !== 'function') {
+      return { stopped: true, reason: 'not_running' };
+    }
+    let result;
+    try {
+      result = await handle.stop({ graceMs: superviseStopGraceMs });
+    } catch {
+      log('warn', 'failed to stop runtime supervise');
+      result = { stopped: false, reason: 'stop_failed' };
+    }
+    const alreadyExited = result?.reason === 'already_exited'
+      || handle.getState?.().exited === true;
+    if (result?.stopped !== true && !alreadyExited) {
+      phase = 'down';
+      state = 'down';
+      reason = 'supervise_stop_failed';
+      sticky = { state, reason };
+      log(
+        'warn',
+        `runtime supervise did not confirm exit (${result?.reason ?? 'still_running'}) after ${superviseStopGraceMs}ms; a supervise/child process may remain`,
+      );
+    }
+    return result;
+  }
+
   async function stopSupervise() {
     const handle = superviseHandle;
-    if (handle === null) return;
+    if (handle === null) return { stopped: true, reason: 'not_running' };
     superviseHandle = null;
     const owned = superviseOwned;
     superviseOwned = false;
     managed = false;
-    if (!owned || typeof handle.stop !== 'function') return;
-    try {
-      await handle.stop({ graceMs: killGraceMs });
-    } catch {
-      log('warn', 'failed to stop runtime supervise');
-    }
+    if (!owned) return { stopped: true, reason: 'not_owned' };
+    return stopHandle(handle);
   }
 
   function watchSupervise(handle) {
@@ -1809,17 +1864,11 @@ export function createDaemonLifecycle(options = {}) {
       platform,
       execPath,
       spawnFn,
-      killGraceMs,
+      stopGraceMs: superviseStopGraceMs,
       scriptArgs: config.persistence === 'service' ? ['--start', 'service'] : [],
     });
     if (disposed) {
-      if (isObject(handle) && typeof handle.stop === 'function') {
-        try {
-          await handle.stop({ graceMs: killGraceMs });
-        } catch {
-          // Disposal is best-effort.
-        }
-      }
+      await stopHandle(handle);
       return;
     }
     if (!isObject(handle)) {
@@ -1961,18 +2010,34 @@ export function createDaemonLifecycle(options = {}) {
     return startPromise;
   }
 
+  /**
+   * Idempotent async disposal. Callers may ignore the promise, but DSH unload
+   * awaits it so the supervise process (and the child it owns) is cleaned up.
+   * Repeated calls return the same promise and never signal twice.
+   * @returns {Promise<unknown>}
+   */
   function dispose() {
-    const running = superviseOwned && superviseHandle !== null;
+    if (disposal !== null) return disposal;
     disposed = true;
     managed = false;
     phase = 'down';
-    if (running) {
-      // Dispose is synchronous; stopSupervise escalates SIGTERM → SIGKILL.
-      void stopSupervise();
-    } else {
-      superviseHandle = null;
-      superviseOwned = false;
-    }
+    disposal = (async () => {
+      // Signal an already-assigned supervise immediately; waiting for the
+      // start promise first could delay cleanup by the full start timeout.
+      const immediateStop = stopSupervise();
+      // Wait for an in-flight start so a supervise spawned during disposal is
+      // still observed and stopped.
+      if (startPromise !== null) {
+        try {
+          await startPromise;
+        } catch {
+          // A failed start has no owned supervise left; stop below is a no-op.
+        }
+      }
+      await immediateStop;
+      await stopSupervise();
+    })();
+    return disposal;
   }
 
   return {
@@ -2768,7 +2833,7 @@ export function apply(ctx, config = {}, options = {}) {
     'probe', 'fetchImpl', 'spawnFn', 'resolveCli', 'discoverProviders', 'runResolve', 'startSupervise',
     'exists', 'env', 'home', 'runtime', 'pidAlive', 'platform', 'userHome', 'cloudRoot', 'registry',
     'includeStandardApp', 'execPath', 'now', 'sleep', 'timeoutMs', 'resolveTimeoutMs', 'cacheTtlMs',
-    'startTimeoutMs', 'pollIntervalMs', 'killGraceMs',
+    'startTimeoutMs', 'pollIntervalMs', 'superviseStopGraceMs',
   ]) {
     if (opts[key] !== undefined) lifecycleOptions[key] = opts[key];
   }
@@ -2830,10 +2895,18 @@ export function apply(ctx, config = {}, options = {}) {
   if (typeof ctx.effect === 'function') {
     ctx.effect(
       () => () => {
-        const pending = bridge.dispose();
         agentStatus.dispose();
-        lifecycle.dispose?.();
-        return pending;
+        const bridgeDisposal = Promise.resolve()
+          .then(() => bridge.dispose())
+          .catch(() => {});
+        // Cordis/DSH unload awaits this effect disposal: the supervise process
+        // needs its full stop window to release the child daemon it owns.
+        const lifecycleDisposal = Promise.resolve()
+          .then(() => lifecycle.dispose?.())
+          .catch((error) => {
+            log('warn', `lifecycle dispose failed (${safeErrorCode(error)})`);
+          });
+        return Promise.all([bridgeDisposal, lifecycleDisposal]);
       },
       '@mebular/dsh-plugin: daemon lifecycle, agent status, and MCP bridge',
     );

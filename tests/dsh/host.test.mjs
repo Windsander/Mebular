@@ -19,6 +19,7 @@ import {
   createEmbedInfoHandler,
   createMcpBridgeSupervisor,
   daemonPortFromUrl,
+  DEFAULT_SUPERVISE_STOP_GRACE_MS,
   discoverRuntimeProviders,
   injectPanelGlobal,
   isLoopbackAddress,
@@ -245,6 +246,9 @@ function runtimeHarness({
   warnings = [],
   logs = [],
   startTimeoutMs = 200,
+  superviseStopGraceMs = 10,
+  useDefaultSuperviseStopGrace = false,
+  sleep = undefined,
 } = {}) {
   const calls = { discovery: 0, resolve: [], supervise: [], probes: [] };
   const handle = supervise ?? superviseHandle(resolveData);
@@ -276,13 +280,16 @@ function runtimeHarness({
         embed: reachable ? embedFor(daemonUrl) : null,
       };
     }),
-    killGraceMs: 10,
     pollIntervalMs: 1,
     startTimeoutMs,
     cacheTtlMs: 0,
     env,
     runtime: runtimeDoc,
   };
+  if (!useDefaultSuperviseStopGrace && superviseStopGraceMs !== undefined) {
+    options.superviseStopGraceMs = superviseStopGraceMs;
+  }
+  if (typeof sleep === 'function') options.sleep = sleep;
   if (home !== undefined) options.home = home;
   if (!useRealResolve) {
     options.runResolve = async (context) => {
@@ -1387,6 +1394,39 @@ describe('P6 @mebular/dsh-plugin host：MCP bridge supervisor', () => {
     expect(lifecycleDisposed).toBe(1);
   });
 
+  it('apply effect 等待 lifecycle.dispose 完成，DSH unload 不会提前结束', async () => {
+    const order = [];
+    const snapshot = {
+      status: 'up',
+      mode: 'attach',
+      managed: false,
+      reason: null,
+      reachable: true,
+      health: HEALTH,
+      embed: EMBED,
+    };
+    const lifecycle = {
+      start: async () => snapshot,
+      inspect: async () => snapshot,
+      dispose: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        order.push('lifecycle');
+      },
+    };
+    const harness = applyHarness(() => {
+      throw new Error('fetch must not run with a fake lifecycle');
+    }, {
+      config: {},
+      applyOptions: { lifecycle },
+    });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.plugins.length === 1);
+    await harness.cleanup();
+    expect(order).toEqual(['lifecycle']);
+    expect(harness.intervals[0].cleared).toBe(true);
+  });
+
   it('apply 跟随 resolve 的非默认端口：embed-info、MCP bridge 与 panel 使用同一动态 URL', async () => {
     const provider = appProvider();
     const harness = applyHarness(
@@ -2418,7 +2458,7 @@ describe('P8 @mebular/dsh-plugin：共享 runtime 生命周期', () => {
           health: world.up ? HEALTH : null,
           embed: world.up ? embedFor(daemonUrl) : null,
         }),
-        killGraceMs: 10,
+        superviseStopGraceMs: 10,
         pollIntervalMs: 1,
         startTimeoutMs: 200,
         cacheTtlMs: 0,
@@ -2478,6 +2518,12 @@ describe('P8 @mebular/dsh-plugin：共享 runtime 生命周期', () => {
       provider: cliProvider(),
       useRealSupervise: true,
       startTimeoutMs: 30,
+      // Stop grace is 10ms in this harness; exit there so SIGKILL's 5s wait is
+      // never reached.
+      sleep: (ms) => {
+        if (ms >= 10 && children.length > 0) children[0].emit('exit', 0, 'SIGTERM');
+        return Promise.resolve();
+      },
       spawnFn: (command, args, options) => {
         spawnCalls.push({ command, args, options });
         const child = fakeChild();
@@ -2585,6 +2631,148 @@ describe('P8 @mebular/dsh-plugin：共享 runtime 生命周期', () => {
     }
     harness.lifecycle.dispose();
     children[0].emit('exit', 0, 'SIGTERM');
+  });
+});
+
+describe('P9 @mebular/dsh-plugin：supervise stop 窗口与 dispose', () => {
+  it('默认 stop grace 覆盖 supervisor 的 child 清理预算', () => {
+    expect(DEFAULT_SUPERVISE_STOP_GRACE_MS).toBeGreaterThanOrEqual(9000);
+  });
+
+  it('supervise 收到 SIGTERM 后约 3s 才退出：不在 2s 提前 SIGKILL，最终无孤儿', async () => {
+    const spawnCalls = [];
+    const children = [];
+    const waits = [];
+    const clock = { now: 0 };
+    const childExitAfterMs = 3000;
+    let exitAt = null;
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider: appProvider(),
+      useRealSupervise: true,
+      // Default 10s window: the supervisor may need 2s + 5s to clean its child.
+      useDefaultSuperviseStopGrace: true,
+      sleep: (ms) => {
+        waits.push(ms);
+        const target = clock.now + ms;
+        // The supervisor cleans its child in ~3s, inside the 10s stop window.
+        if (exitAt !== null && exitAt <= target && children.length > 0) {
+          clock.now = exitAt;
+          children[0].emit('exit', 0, 'SIGTERM');
+        }
+        clock.now = target;
+        return Promise.resolve();
+      },
+      spawnFn: (command, args, options) => {
+        spawnCalls.push({ command, args, options });
+        const child = fakeChild();
+        const kill = child.kill;
+        child.kill = function onKill(signal) {
+          if (signal === 'SIGTERM') exitAt = clock.now + childExitAfterMs;
+          return kill.call(this, signal);
+        };
+        children.push(child);
+        return child;
+      },
+    });
+
+    const started = harness.lifecycle.start();
+    await waitFor(() => spawnCalls.length === 1);
+    children[0].stdout.emit(`${JSON.stringify(resolveDocument())}\n`);
+    await started;
+
+    const disposal = harness.lifecycle.dispose();
+    await disposal;
+
+    expect(waits).toContain(DEFAULT_SUPERVISE_STOP_GRACE_MS);
+    expect(waits).not.toContain(2000);
+    // Virtual time reached the 3s child-exit point, long before SIGKILL would
+    // even be considered, and only one SIGTERM was sent to supervise.
+    expect(clock.now).toBeGreaterThanOrEqual(childExitAfterMs);
+    expect(children[0].killCalls).toEqual(['SIGTERM']);
+    expect(spawnCalls).toHaveLength(1);
+    expect(children).toHaveLength(1);
+    expect(harness.logs.join('\n')).not.toContain('did not confirm exit');
+  });
+
+  it('dispose 返回同一个 Promise，等待 stop 完成且重复调用只 stop 一次', async () => {
+    const handle = superviseHandle(resolveDocument({ mode: 'child' }));
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider: cliProvider(),
+      supervise: handle,
+    });
+    await harness.lifecycle.start();
+
+    const first = harness.lifecycle.dispose();
+    const second = harness.lifecycle.dispose();
+    expect(second).toBe(first);
+    expect(typeof first?.then).toBe('function');
+    await first;
+    expect(handle.stopCalls).toHaveLength(1);
+    expect(handle.stopCalls[0]).toEqual({ graceMs: 10 });
+
+    const third = harness.lifecycle.dispose();
+    expect(third).toBe(first);
+    await third;
+    expect(handle.stopCalls).toHaveLength(1);
+  });
+
+  it('默认 lifecycle 把 10s stop grace 传给 supervise，而不是旧的 2s', async () => {
+    const handle = superviseHandle(resolveDocument({ mode: 'child' }));
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider: cliProvider(),
+      supervise: handle,
+      useDefaultSuperviseStopGrace: true,
+    });
+    await harness.lifecycle.start();
+    await harness.lifecycle.dispose();
+
+    expect(handle.stopCalls).toEqual([{ graceMs: DEFAULT_SUPERVISE_STOP_GRACE_MS }]);
+    expect(handle.stopCalls[0].graceMs).not.toBe(2000);
+  });
+
+  it('超过新 stop grace 仍不退出才 SIGKILL，并记录 supervise_stop_failed', async () => {
+    const spawnCalls = [];
+    const children = [];
+    const waits = [];
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider: appProvider(),
+      useRealSupervise: true,
+      useDefaultSuperviseStopGrace: true,
+      sleep: (ms) => {
+        waits.push(ms);
+        return Promise.resolve();
+      },
+      spawnFn: (command, args, options) => {
+        spawnCalls.push({ command, args, options });
+        const child = fakeChild();
+        children.push(child);
+        return child;
+      },
+    });
+
+    const started = harness.lifecycle.start();
+    await waitFor(() => spawnCalls.length === 1);
+    children[0].stdout.emit(`${JSON.stringify(resolveDocument())}\n`);
+    await started;
+
+    await harness.lifecycle.dispose();
+
+    expect(children[0].killCalls).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(waits[0]).toBe(DEFAULT_SUPERVISE_STOP_GRACE_MS);
+    expect(waits[1]).toBe(5000);
+    expect(waits[0]).toBeGreaterThan(2000);
+    expect(harness.logs.join('\n')).toContain('did not confirm exit');
+    expect(harness.lifecycle.getState()).toMatchObject({
+      status: 'down',
+      state: 'down',
+      reason: 'supervise_stop_failed',
+    });
+    expect(spawnCalls).toHaveLength(1);
+    expect(children).toHaveLength(1);
   });
 });
 

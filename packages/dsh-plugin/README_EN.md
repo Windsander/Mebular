@@ -1,3 +1,5 @@
+![Mebular — distributed memory network](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero.svg)
+
 # Mebular for DSH
 
 **One memory graph for every agent, on every machine.**
@@ -74,7 +76,7 @@ Fields, environment, managed details, and the endpoint list are in the [integrat
 
 ## Docs
 
-[Main README](https://github.com/Windsander/Mebular/blob/main/README.md) · [integration notes](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md) · [npm](https://www.npmjs.com/package/@mebular/dsh-plugin) · [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/) · [SECURITY](https://github.com/Windsander/Mebular/blob/main/SECURITY.md)
+[Main README](https://github.com/Windsander/Mebular/blob/main/README.md) · [integration notes](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md) · [DSH E2E](https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md) · [npm](https://www.npmjs.com/package/@mebular/dsh-plugin) · [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/) · [SECURITY](https://github.com/Windsander/Mebular/blob/main/SECURITY.md)
 
 ---
 

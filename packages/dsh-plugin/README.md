@@ -1,3 +1,5 @@
+![Mebular — 分布式记忆网络](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero.svg)
+
 # 在 DSH 中使用 Mebular
 
 **一张记忆图，连接每个 Agent、每台机器。**
@@ -74,7 +76,7 @@ dsh plugin --profile web add @mebular/dsh-plugin@0.1.2   # 2. 安装
 
 ## 文档
 
-[主 README](https://github.com/Windsander/Mebular/blob/main/README_CN.md) · [集成说明](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md) · [npm](https://www.npmjs.com/package/@mebular/dsh-plugin) · [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/) · [SECURITY](https://github.com/Windsander/Mebular/blob/main/SECURITY.md)
+[主 README](https://github.com/Windsander/Mebular/blob/main/README_CN.md) · [集成说明](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md) · [DSH E2E](https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md) · [npm](https://www.npmjs.com/package/@mebular/dsh-plugin) · [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/) · [SECURITY](https://github.com/Windsander/Mebular/blob/main/SECURITY.md)
 
 ---
 

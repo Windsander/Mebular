@@ -81,8 +81,12 @@ Supervisor 的解析顺序固定：
 - **service 优先不可覆盖**：当前 home 已注册 `mebular-serve` 时，`ensure` / `supervise` 必须走 service，
   即使调用方传 `--start child`；不得为了“我想要 child”再启动一个 daemon。`--start child` 只表示
   “没有 service 时才用 child”。
+- **service 状态 fail-closed**：`serviceStatus.ok === false` → `service_unknown`；
+  `serviceStatus.foreign === true` → `service_foreign`。两种情况都不得 restart、不得 fallback child；
+  只有 `ok:true, registered:false, foreign:false` 才允许继续 provider/child。
+  健康 daemon 的 attach 仍然优先级最高（即使 service 状态未知）。
 - `ensure --start service` 在未注册时返回 `service_not_registered`，Phase 1 不自动安装 service
-  （安装属于 Phase 5）。
+  （安装属于 Phase 5）；状态未知时返回 `service_unknown`，不是 `service_not_registered`。
 - **只停止自己启动的 child**：`stopRuntimeChild` / `stopRuntimeChildGracefully` 只处理本次 supervisor
   拉起的句柄；外部 daemon/service 不动。入口必须持有 child 所有权（见 §7）。
 
@@ -134,6 +138,7 @@ mebular runtime provider list|add|remove [--kind app|cli|shared --path P --versi
   `resolve`/`status` 只要上下文解析成功即 0（daemon down 也是有效状态）。
 - **`supervise` 是入口持有 child 的唯一 CLI 路径**：前台启动 provider child，stdout 输出一次 ready JSON，
   child 日志走 stderr，随后保持存活；SIGTERM/SIGINT 时只优雅停止自己拉起的 child，等待退出后再退出。
+  startup 期间收到信号会 abort ensure、停止已 spawn 的 child，并输出 `signal_during_start` 后退出；
   child 提前退出时向 stderr 输出 `child_exited` 事件并以 child 退出码退出，不留孤儿。
   `reused` / `service` / `download_required` / `conflict` 时输出结果后立即退出，不接管外部 daemon/service。
 - `ensure` 的 child 行为固定为 detached，仅用于人工/诊断；CLI 退出后 daemon 继续运行，调用方拿不到句柄，
@@ -172,6 +177,8 @@ mebular runtime provider list|add|remove [--kind app|cli|shared --path P --versi
 | Plugin 先装、先启动 | 使用共享 runtime/profile；后装 App 时 App 读同一 cloudRoot/profile/service/provider → attach |
 | App 先装、先启动 | App 建/用 profile，启动 service/child；Plugin 解析同一 profile，attach；**不下载** |
 | service 已注册 + `--start child` | 仍走 service；不得 spawn 第二个 daemon，不得返回 child 句柄 |
+| service 状态 unknown / foreign | fail-closed：`service_unknown` / `service_foreign`；不 restart、不 spawn、不碰他人作业 |
+| supervise startup 期间收到信号 | abort ensure、停止已 spawn 的 child（graceful），输出 `signal_during_start`，无孤儿 |
 | 入口需要 child 所有权 | App 进程内 `ensureRuntime({detached:false})`；Plugin spawn `runtime supervise` 并终止 supervise，由它停止 daemon child |
 | App 已安装但没启动 | Plugin 通过 provider/service/标准路径启动 App 的 runtime；**不下载** |
 | CLI 已安装 | Plugin 复用 CLI runtime；**不下载** |
@@ -221,6 +228,12 @@ B 下载/更新/升级/卸载矩阵行在对应阶段补齐。
 `supervise` 的停止顺序：SIGTERM → 2s grace → SIGKILL → 等待 child 退出 → supervise 自己退出。
 child 提前退出时返回 `child_exited`，不留下孤儿，也不接管外部 daemon/service。
 
+**startup 期间信号**：`supervise` 在调用 `ensure` 前安装临时 SIGTERM/SIGINT 处理；`ensure` 通过
+`onChildStarted` 暴露已 spawn 的 child，并在等待健康时可被 abort。收到信号时由 `ensure` 作为唯一
+owner 停止已 spawn 的 child（graceful，SIGTERM→SIGKILL），等待退出后 `supervise` 输出
+`reason: "signal_during_start"` / `stopped` 并退出。ready 之后的信号走原有 `stopped`/`stop_failed` 路径；
+两者不重复杀/等待。
+
 ## 8. 后续阶段的产品决策（写成契约，未实现）
 
 ### B：按需下载 / 自动安装 / 失败重装（Phase 4）
@@ -269,7 +282,12 @@ child 提前退出时返回 `child_exited`，不留下孤儿，也不接管外�
 | `port_in_use` | 端口被非 Mebular 程序占用 |
 | `start_locked` | 另一个入口正在启动且等待健康超时 |
 | `service_not_registered` | 显式要求 service，但当前 home 未注册；Phase 1 不自动安装 |
+| `service_unknown` | service 状态探测失败：fail-closed，不 restart/不 fallback child |
+| `service_foreign` | service label 被其他 home 作业占用：不碰他人作业 |
 | `service_start_failed` | service 已重启但健康校验失败 |
+| `signal_during_start` | supervise startup 期间收到 SIGTERM/SIGINT，已停止 child 后退出 |
+| `aborted` | ensure 被 startup 信号 abort（内部原因码） |
+| `supervise_failed` | supervise 调用 ensure 时出现未预期异常（已尽力清理 child） |
 | `child_exited` | supervise 的 daemon child 提前退出（传播退出码，不留孤儿） |
 | `stopped` / `stop_failed` | supervise 收到终止信号后 child 已停止 / 未能停止 |
 | `spawn_failed` | provider 进程无法启动 |
@@ -298,8 +316,9 @@ npm test -- --runInBand tests/mcp/runtime-providers.test.mjs tests/mcp/runtime-s
 
 - `runtime-providers.test.mjs`：原子写/0600/未知字段丢弃、去重、移除、损坏 fail-closed、锁/陈旧锁、CLI provider 命令。
 - `runtime-supervisor.test.mjs`：root/profile/current/显式 home、custom `MEBULAR_CLOUD_ROOT`、HTTP 目标、
-  health 探测/等待/端口、provider 发现、attach/service/child、service 优先级不可覆盖、active lock、
-  instance mismatch、端口冲突、启动锁、无 provider → `download_required`、只读 resolve/status、
-  `supervise` ready/SIGTERM/child 提前退出、`stopRuntimeChildGracefully` 的 SIGTERM→SIGKILL 升级。
+  health 探测/等待/端口、provider 发现、attach/service/child、service 优先级不可覆盖、
+  service unknown/foreign fail-closed、active lock、instance mismatch、端口冲突、启动锁、
+  无 provider → `download_required`、只读 resolve/status、`supervise` ready/SIGTERM/startup 信号/
+  child 提前退出、`stopRuntimeChildGracefully` 的 SIGTERM→SIGKILL 升级。
 - `runtime-cli.test.mjs`：稳定 JSON、退出码、current profile 跟随、`--start child` 不绕过已注册 service、
   `supervise` 接线、`ensure --start service` 未注册、非法参数、无 `child`/秘密字段。

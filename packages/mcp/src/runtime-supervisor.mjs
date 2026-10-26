@@ -638,60 +638,16 @@ function writeRuntimeLine(stream, value) {
   }
 }
 
-function waitForSupervisedChild({ child, signalSource, childStopGraceMs, childKillWaitMs }) {
-  return new Promise((resolvePromise) => {
-    let settled = false;
-    let stopping = false;
-    const off = (event, listener) => {
-      signalSource?.removeListener?.(event, listener);
-      signalSource?.off?.(event, listener);
-    };
-    const cleanup = () => {
-      off('SIGTERM', onSignal);
-      off('SIGINT', onSignal);
-      child?.removeListener?.('exit', onExit);
-    };
-    const finish = (outcome) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolvePromise(outcome);
-    };
-    const onExit = (code, signal) => {
-      if (stopping) return;
-      finish({
-        kind: 'child_exit',
-        exitCode: typeof code === 'number' ? code : 1,
-        signal: typeof signal === 'string' ? signal : null,
-      });
-    };
-    const onSignal = async (signal) => {
-      if (stopping) return;
-      stopping = true;
-      const stop = await stopRuntimeChildGracefully(child, {
-        graceMs: childStopGraceMs,
-        killWaitMs: childKillWaitMs,
-      });
-      finish({ kind: 'signal', signal, stop });
-    };
-    child?.once?.('exit', onExit);
-    signalSource?.on?.('SIGTERM', onSignal);
-    signalSource?.on?.('SIGINT', onSignal);
-    if (childExited(child)) {
-      onExit(
-        typeof child.exitCode === 'number' ? child.exitCode : null,
-        typeof child.signalCode === 'string' ? child.signalCode : null,
-      );
-    }
-  });
-}
-
 /**
  * 长驻前台 supervisor（`mebular runtime supervise`）：
  *   - reused/service/download_required/conflict：输出一次稳定 JSON 后退出（0 / 2）；
  *   - child：以非 detached 方式启动 provider，输出 ready JSON 后保持存活；
  *   - SIGTERM/SIGINT：只优雅停止自己拉起的 child，然后退出；
+ *   - startup 期间收到信号：abort ensure，停止已 spawn 的 child，输出 signal_during_start；
  *   - child 提前退出：返回明确的 child_exited 事件与退出码，不接管外部 daemon/service。
+ *
+ * 启动期间由 ensure 负责 child 清理（唯一 owner）；supervise 只在 ensure 已返回成功但仍有
+ * 存活 child 的竞态窗口做安全兜底，不重复杀/等待。
  *
  * App 在 Phase 2 直接进程内调用 `ensureRuntime({ detached: false })` 并持有句柄；
  * Plugin 在 Phase 3 spawn 本命令，把 supervise 进程当作自己的 child。
@@ -706,57 +662,179 @@ export async function superviseRuntime(options = {}) {
     ...ensureOptions
   } = options;
 
-  const result = await ensureRuntime({
-    ...ensureOptions,
-    detached: false,
-    childStdio: ['ignore', 2, 2],
+  const controller = new AbortController();
+  let phase = 'starting';
+  let startupSignal = null;
+  let startedChild = null;
+  let settled = false;
+  let resolveOutcome = null;
+  const outcomePromise = new Promise((resolvePromise) => {
+    resolveOutcome = resolvePromise;
   });
+  const finish = (outcome) => {
+    if (settled) return;
+    settled = true;
+    resolveOutcome(outcome);
+  };
 
-  if (result.mode !== 'child' || !result.child) {
+  const onSignal = (signal) => {
+    if (phase === 'starting') {
+      if (startupSignal === null) startupSignal = signal;
+      controller.abort(signal);
+      return;
+    }
+    if (phase === 'ready') {
+      phase = 'stopping';
+      stopRuntimeChildGracefully(startedChild, {
+        graceMs: childStopGraceMs,
+        killWaitMs: childKillWaitMs,
+      })
+        .then((stop) => finish({ kind: 'signal', signal, stop }))
+        .catch((error) => finish({
+          kind: 'signal',
+          signal,
+          stop: {
+            stopped: false,
+            escalated: false,
+            signal: null,
+            reason: 'stop_failed',
+            error: String(error?.message ?? error),
+          },
+        }));
+    }
+  };
+  const onSigterm = () => onSignal('SIGTERM');
+  const onSigint = () => onSignal('SIGINT');
+  const removeSignalHandlers = () => {
+    signalSource?.removeListener?.('SIGTERM', onSigterm);
+    signalSource?.removeListener?.('SIGINT', onSigint);
+    signalSource?.off?.('SIGTERM', onSigterm);
+    signalSource?.off?.('SIGINT', onSigint);
+  };
+  signalSource?.on?.('SIGTERM', onSigterm);
+  signalSource?.on?.('SIGINT', onSigint);
+
+  const handleStartupSignal = async (result) => {
+    let stop = result?.cleanup ?? null;
+    if (startedChild !== null && isRuntimeChildAlive(startedChild)) {
+      // ensure 已尽力清理但 child 仍存活（极窄竞态）：supervise 兜底，仍只作用于自己的 child。
+      stop = await stopRuntimeChildGracefully(startedChild, {
+        graceMs: childStopGraceMs,
+        killWaitMs: childKillWaitMs,
+      });
+    }
+    const stopped = stop === null ? true : stop.stopped === true;
+    writeRuntimeLine(stdout, {
+      ok: stopped,
+      mode: 'error',
+      reason: 'signal_during_start',
+      signal: startupSignal,
+      stopped,
+      ...(stop !== null ? { stop } : {}),
+    });
+    return stopped ? 0 : 1;
+  };
+
+  try {
+    let result;
+    try {
+      result = await ensureRuntime({
+        ...ensureOptions,
+        childStopGraceMs,
+        childKillWaitMs,
+        detached: false,
+        childStdio: ['ignore', 2, 2],
+        abortSignal: controller.signal,
+        onChildStarted: (child) => {
+          startedChild = child;
+        },
+      });
+    } catch (error) {
+      let stop = null;
+      if (startedChild !== null && isRuntimeChildAlive(startedChild)) {
+        stop = await stopRuntimeChildGracefully(startedChild, {
+          graceMs: childStopGraceMs,
+          killWaitMs: childKillWaitMs,
+        });
+      }
+      writeRuntimeLine(stderr, {
+        ok: false,
+        mode: 'error',
+        reason: 'supervise_failed',
+        message: String(error?.message ?? error),
+        ...(stop !== null ? { stop } : {}),
+      });
+      return 2;
+    }
+
+    if (startupSignal !== null) return await handleStartupSignal(result);
+
+    if (result.mode !== 'child' || !result.child) {
+      writeRuntimeLine(stdout, toPublicRuntimeResult(result));
+      return result.ok ? 0 : 2;
+    }
+
+    const child = result.child;
+    startedChild = child;
+    if (!isRuntimeChildAlive(child)) {
+      writeRuntimeLine(stderr, {
+        ok: false,
+        mode: 'child',
+        reason: 'child_exited',
+        exitCode: typeof child.exitCode === 'number' ? child.exitCode : null,
+        signal: typeof child.signalCode === 'string' ? child.signalCode : null,
+      });
+      return typeof child.exitCode === 'number' ? child.exitCode : 1;
+    }
+
+    phase = 'ready';
+    if (startupSignal !== null) {
+      // ensure 返回与 phase 切换之间的极窄竞态：仍按 startup 信号处理。
+      phase = 'stopping';
+      return await handleStartupSignal(result);
+    }
+    child.once?.('exit', (code, signal) => {
+      if (phase !== 'ready') return;
+      phase = 'exited';
+      finish({
+        kind: 'child_exit',
+        exitCode: typeof code === 'number' ? code : 1,
+        signal: typeof signal === 'string' ? signal : null,
+      });
+    });
     writeRuntimeLine(stdout, toPublicRuntimeResult(result));
-    return result.ok ? 0 : 2;
-  }
+    if (childExited(child) && phase === 'ready') {
+      phase = 'exited';
+      finish({
+        kind: 'child_exit',
+        exitCode: typeof child.exitCode === 'number' ? child.exitCode : 1,
+        signal: typeof child.signalCode === 'string' ? child.signalCode : null,
+      });
+    }
 
-  writeRuntimeLine(stdout, toPublicRuntimeResult(result));
-  const child = result.child;
+    const outcome = await outcomePromise;
+    if (outcome.kind === 'signal') {
+      writeRuntimeLine(stderr, {
+        ok: outcome.stop?.stopped === true,
+        mode: 'child',
+        reason: outcome.stop?.stopped === true ? 'stopped' : 'stop_failed',
+        signal: outcome.signal,
+        stop: outcome.stop,
+      });
+      return outcome.stop?.stopped === true ? 0 : 1;
+    }
 
-  if (!isRuntimeChildAlive(child)) {
     writeRuntimeLine(stderr, {
       ok: false,
       mode: 'child',
       reason: 'child_exited',
-      exitCode: typeof child.exitCode === 'number' ? child.exitCode : null,
-      signal: typeof child.signalCode === 'string' ? child.signalCode : null,
-    });
-    return typeof child.exitCode === 'number' ? child.exitCode : 1;
-  }
-
-  const outcome = await waitForSupervisedChild({
-    child,
-    signalSource,
-    childStopGraceMs,
-    childKillWaitMs,
-  });
-
-  if (outcome.kind === 'signal') {
-    writeRuntimeLine(stderr, {
-      ok: outcome.stop?.stopped === true,
-      mode: 'child',
-      reason: outcome.stop?.stopped === true ? 'stopped' : 'stop_failed',
+      exitCode: outcome.exitCode,
       signal: outcome.signal,
-      stop: outcome.stop,
     });
-    return outcome.stop?.stopped === true ? 0 : 1;
+    return outcome.exitCode;
+  } finally {
+    removeSignalHandlers();
   }
-
-  writeRuntimeLine(stderr, {
-    ok: false,
-    mode: 'child',
-    reason: 'child_exited',
-    exitCode: outcome.exitCode,
-    signal: outcome.signal,
-  });
-  return outcome.exitCode;
 }
 
 function daemonFromHealth(health, http) {
@@ -775,7 +853,7 @@ function daemonFromHealth(health, http) {
 function publicService(service) {
   if (!service) return null;
   return {
-    ok: service.ok !== false,
+    ok: service.ok === true,
     registered: service.registered === true,
     running: service.running === true,
     label: service.label ?? null,
@@ -837,6 +915,49 @@ function errorResult(context, error, checkedAt, http = null) {
   result.message = error?.message ?? String(error);
   result.bootstrap = { state: 'error', allowDownload: false };
   return result;
+}
+
+function abortError(signal) {
+  const error = cloudError('RUNTIME_ABORTED', 'runtime ensure 在启动期间被终止');
+  error.abortSignal = signal ?? null;
+  return error;
+}
+
+/** 用 AbortSignal 中断 ensure 的等待；用于 supervise 在 startup 期间收到 SIGTERM/SIGINT。 */
+function awaitWithAbort(promise, signal) {
+  if (!signal || typeof signal.addEventListener !== 'function') return promise;
+  if (signal.aborted) return Promise.reject(abortError(signal.reason));
+  return new Promise((resolvePromise, reject) => {
+    const onAbort = () => {
+      cleanup();
+      reject(abortError(signal.reason));
+    };
+    const cleanup = () => signal.removeEventListener?.('abort', onAbort);
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => { cleanup(); resolvePromise(value); },
+      (error) => { cleanup(); reject(error); },
+    );
+  });
+}
+
+function abortedRuntimeResult(inspected, signal, cleanup = null) {
+  const base = inspected ?? errorResult(
+    null,
+    cloudError('RUNTIME_ABORTED', 'runtime ensure 在启动期间被终止'),
+    new Date().toISOString(),
+  );
+  return {
+    ...base,
+    ok: false,
+    mode: 'error',
+    reason: 'aborted',
+    message: 'runtime ensure 在启动期间被终止',
+    bootstrap: { state: 'error', allowDownload: false },
+    aborted: true,
+    abortSignal: signal ?? null,
+    ...(cleanup !== null ? { cleanup } : {}),
+  };
 }
 
 function providerPublic(provider) {
@@ -965,6 +1086,18 @@ async function inspectRuntime(options = {}) {
       error: error?.message ?? String(error),
     };
   }
+  if (!serviceStatus || typeof serviceStatus !== 'object') {
+    serviceStatus = {
+      ok: false,
+      registered: false,
+      running: false,
+      label: null,
+      autostart: null,
+      foreign: false,
+      unitPath: null,
+      error: 'service status returned no object',
+    };
+  }
 
   const discovery = await discoverRuntimeProviders({
     root: context.cloudRoot,
@@ -1018,6 +1151,26 @@ async function inspectRuntime(options = {}) {
     result.mode = 'conflict';
     result.reason = 'CLOUD_ALREADY_ACTIVE';
     result.message = `已有忆云守护在运行（pid ${activeConflict.pid}，home=${activeConflict.home ?? '未知'}）：请先停止它`;
+    result.bootstrap = bootstrapForMode('conflict');
+    result.warnings.push(...discovery.warnings);
+    return result;
+  }
+
+  // service 状态未知时 fail-closed：不能因为探测失败就 fallback child，否则可能再起一个 daemon。
+  if (serviceStatus.ok !== true) {
+    result.mode = 'conflict';
+    result.reason = 'service_unknown';
+    result.message = `无法确认 mebular-serve 状态${serviceStatus.error ? `（${serviceStatus.error}）` : ''}：请检查/重试 service，不会启动第二个 daemon`;
+    result.bootstrap = bootstrapForMode('conflict');
+    result.warnings.push(...discovery.warnings);
+    return result;
+  }
+
+  // 同 label 作业属于其他 home：绝不 restart/覆盖他人作业。
+  if (serviceStatus.foreign === true) {
+    result.mode = 'conflict';
+    result.reason = 'service_foreign';
+    result.message = 'mebular-serve label 被其他 home 的作业占用：不会重启/覆盖他人作业';
     result.bootstrap = bootstrapForMode('conflict');
     result.warnings.push(...discovery.warnings);
     return result;
@@ -1113,7 +1266,17 @@ export async function resolveRuntime(options = {}) {
  * 只停止本次自己拉起的 child；service/外部 daemon 不主动杀。
  */
 export async function ensureRuntime(options = {}) {
-  const inspected = await inspectRuntime(options);
+  const { abortSignal = null, onChildStarted = null } = options;
+  let inspected;
+  try {
+    inspected = await awaitWithAbort(inspectRuntime(options), abortSignal);
+  } catch (error) {
+    if (error?.code === 'RUNTIME_ABORTED') {
+      return abortedRuntimeResult(null, error.abortSignal ?? abortSignal?.reason);
+    }
+    throw error;
+  }
+  if (abortSignal?.aborted) return abortedRuntimeResult(inspected, abortSignal.reason);
   if (!inspected.ok || inspected.mode === 'reused') {
     return { ...inspected, ok: inspected.ok === true && inspected.mode === 'reused' };
   }
@@ -1155,11 +1318,19 @@ export async function ensureRuntime(options = {}) {
   if (!lock.acquired) {
     // 另一个入口正在启动：等它健康后 attach，而不是再起一个 daemon。
     const attempts = Math.max(1, Math.ceil(startLockWaitMs / Math.max(1, startLockIntervalMs)));
-    const waited = await waitForHealth(options, inspected.http, waitOptionsFrom(inspected, options, {
-      attempts,
-      intervalMs: startLockIntervalMs,
-      onTick: undefined,
-    }));
+    let waited;
+    try {
+      waited = await awaitWithAbort(waitForHealth(options, inspected.http, waitOptionsFrom(inspected, options, {
+        attempts,
+        intervalMs: startLockIntervalMs,
+        onTick: undefined,
+      })), abortSignal);
+    } catch (error) {
+      if (error?.code === 'RUNTIME_ABORTED') {
+        return abortedRuntimeResult(inspected, error.abortSignal ?? abortSignal?.reason);
+      }
+      throw error;
+    }
     if (waited.ok) {
       return {
         ...inspected,
@@ -1184,10 +1355,18 @@ export async function ensureRuntime(options = {}) {
 
   try {
     // 双重检查：拿到启动锁后可能已被另一个入口启动。
-    const current = await probeHealth(options, inspected.http, {
-      expectedInstance: inspected.homeKey,
-      cloudId: inspected.profileId,
-    });
+    let current;
+    try {
+      current = await awaitWithAbort(probeHealth(options, inspected.http, {
+        expectedInstance: inspected.homeKey,
+        cloudId: inspected.profileId,
+      }), abortSignal);
+    } catch (error) {
+      if (error?.code === 'RUNTIME_ABORTED') {
+        return abortedRuntimeResult(inspected, error.abortSignal ?? abortSignal?.reason);
+      }
+      throw error;
+    }
     if (current.ok) {
       return {
         ...inspected,
@@ -1201,6 +1380,7 @@ export async function ensureRuntime(options = {}) {
     }
 
     if (inspected.mode === 'service') {
+      if (abortSignal?.aborted) return abortedRuntimeResult(inspected, abortSignal.reason);
       try {
         await service.restart();
       } catch (error) {
@@ -1213,7 +1393,18 @@ export async function ensureRuntime(options = {}) {
           bootstrap: { state: 'error', allowDownload: false },
         };
       }
-      const waited = await waitForHealth(options, inspected.http, waitOptionsFrom(inspected, options));
+      let waited;
+      try {
+        waited = await awaitWithAbort(
+          waitForHealth(options, inspected.http, waitOptionsFrom(inspected, options)),
+          abortSignal,
+        );
+      } catch (error) {
+        if (error?.code === 'RUNTIME_ABORTED') {
+          return abortedRuntimeResult(inspected, error.abortSignal ?? abortSignal?.reason);
+        }
+        throw error;
+      }
       if (!waited.ok) {
         return {
           ...inspected,
@@ -1249,6 +1440,8 @@ export async function ensureRuntime(options = {}) {
       };
     }
 
+    if (abortSignal?.aborted) return abortedRuntimeResult(inspected, abortSignal.reason);
+
     const command = runtimeCommandForProvider(provider, { execPath });
     const args = [...command.args, '--port', String(inspected.http.port)];
     let child;
@@ -1264,7 +1457,14 @@ export async function ensureRuntime(options = {}) {
         detached: detached === true,
       });
       if (detached === true && typeof child.unref === 'function') child.unref();
+      if (typeof onChildStarted === 'function') onChildStarted(child);
     } catch (error) {
+      if (child) {
+        await stopRuntimeChildGracefully(child, {
+          graceMs: childStopGraceMs,
+          killWaitMs: childKillWaitMs,
+        });
+      }
       return {
         ...inspected,
         ok: false,
@@ -1275,9 +1475,32 @@ export async function ensureRuntime(options = {}) {
       };
     }
 
-    const waited = await waitForHealth(options, inspected.http, waitOptionsFrom(inspected, options));
+    let waited;
+    try {
+      waited = await awaitWithAbort(
+        waitForHealth(options, inspected.http, waitOptionsFrom(inspected, options)),
+        abortSignal,
+      );
+    } catch (error) {
+      const cleanup = await stopRuntimeChildGracefully(child, {
+        graceMs: childStopGraceMs,
+        killWaitMs: childKillWaitMs,
+      });
+      if (error?.code === 'RUNTIME_ABORTED') {
+        return abortedRuntimeResult(inspected, error.abortSignal ?? abortSignal?.reason, cleanup);
+      }
+      return {
+        ...inspected,
+        ok: false,
+        mode: 'error',
+        reason: 'start_failed',
+        message: `runtime child 启动等待失败：${error?.message ?? error}`,
+        cleanup,
+        bootstrap: { state: 'error', allowDownload: false },
+      };
+    }
     if (!waited.ok) {
-      await stopRuntimeChildGracefully(child, {
+      const cleanup = await stopRuntimeChildGracefully(child, {
         graceMs: childStopGraceMs,
         killWaitMs: childKillWaitMs,
       });
@@ -1291,6 +1514,7 @@ export async function ensureRuntime(options = {}) {
           ? `启动后端口上的 instance 不匹配（${waited.reason}）`
           : `runtime child 启动后健康校验失败（${waited.reason ?? 'timeout'}）`,
         daemon: daemonFromHealth(waited, inspected.http),
+        cleanup,
         bootstrap: conflict
           ? bootstrapForMode('conflict')
           : { state: 'error', allowDownload: false },

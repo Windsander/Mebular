@@ -162,7 +162,7 @@ function controllableChild({ exitOn = 'SIGTERM' } = {}) {
   return child;
 }
 
-function fakeService({ registered = false, running = false } = {}) {
+function fakeService({ registered = false, running = false, ok = true, foreign = false, error = null } = {}) {
   const calls = { status: 0, restart: 0 };
   return {
     calls,
@@ -170,13 +170,14 @@ function fakeService({ registered = false, running = false } = {}) {
       async status() {
         calls.status += 1;
         return {
-          ok: true,
+          ok,
           registered,
           running,
           label: 'com.mebular.serve.test',
           autostart: true,
-          foreign: false,
+          foreign,
           unitPath: '/tmp/unit',
+          ...(error ? { error } : {}),
         };
       },
       async restart() {
@@ -504,6 +505,77 @@ describe('ensureRuntime：attach / service / child / download_required', () => {
     expect(spawn.calls).toHaveLength(0);
   });
 
+  it('service 状态 unknown → service_unknown 冲突，不 spawn/不 restart', async () => {
+    const { root, userHome } = await makeRoot();
+    const path = await fakeProviderFile(root);
+    const fake = fakeService({ ok: false, error: 'launchctl unavailable' });
+    const spawn = fakeSpawn();
+    const result = await ensureRuntime({
+      env: envFor(root),
+      userHome,
+      mode: 'service',
+      probeHealthFn: down,
+      probePortFn: async () => false,
+      service: fake.service,
+      registryProviders: [providerRecord(path)],
+      includeSelf: false,
+      includeStandardApp: false,
+      spawnFn: spawn.spawnFn,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.mode).toBe('conflict');
+    expect(result.reason).toBe('service_unknown');
+    expect(result.service).toMatchObject({ ok: false, registered: false });
+    expect(fake.calls.restart).toBe(0);
+    expect(spawn.calls).toHaveLength(0);
+  });
+
+  it('service foreign → service_foreign 冲突，不碰他人作业/不 spawn', async () => {
+    const { root, userHome } = await makeRoot();
+    const path = await fakeProviderFile(root);
+    const fake = fakeService({ registered: true, foreign: true });
+    const spawn = fakeSpawn();
+    const result = await ensureRuntime({
+      env: envFor(root),
+      userHome,
+      mode: 'child',
+      probeHealthFn: down,
+      probePortFn: async () => false,
+      service: fake.service,
+      registryProviders: [providerRecord(path)],
+      includeSelf: false,
+      includeStandardApp: false,
+      spawnFn: spawn.spawnFn,
+    });
+    expect(result.ok).toBe(false);
+    expect(result.mode).toBe('conflict');
+    expect(result.reason).toBe('service_foreign');
+    expect(result.service).toMatchObject({ ok: true, registered: true, foreign: true });
+    expect(fake.calls.restart).toBe(0);
+    expect(spawn.calls).toHaveLength(0);
+  });
+
+  it('健康 daemon 优先级最高：service unknown 仍 attach', async () => {
+    const { root, userHome } = await makeRoot();
+    const fake = fakeService({ ok: false, error: 'status failed' });
+    const spawn = fakeSpawn();
+    const result = await ensureRuntime({
+      env: envFor(root),
+      userHome,
+      probeHealthFn: healthy(root),
+      probePortFn: async () => false,
+      service: fake.service,
+      registryProviders: [],
+      includeSelf: false,
+      includeStandardApp: false,
+      spawnFn: spawn.spawnFn,
+    });
+    expect(result.ok).toBe(true);
+    expect(result.mode).toBe('reused');
+    expect(spawn.calls).toHaveLength(0);
+    expect(fake.calls.restart).toBe(0);
+  });
+
   it('显式 --start service 但未注册 → service_not_registered，不 spawn', async () => {
     const { root, userHome } = await makeRoot();
     const path = await fakeProviderFile(root);
@@ -803,6 +875,76 @@ describe('stopRuntimeChildGracefully / superviseRuntime：入口持有 child', (
     expect(JSON.parse(stderr.chunks.at(-1))).toMatchObject({ ok: true, mode: 'child', reason: 'stopped' });
     // 句柄仍属于本次 supervise；没有第二次 spawn/第二个 daemon。
     expect(spawned).toHaveLength(1);
+  });
+
+  it('supervise：startup 期间 SIGTERM 停止已 spawn child，不升级 SIGKILL、不留孤儿', async () => {
+    const { root, userHome } = await makeRoot();
+    const path = await fakeProviderFile(root);
+    const child = controllableChild({ exitOn: 'SIGTERM' });
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const signalSource = new EventEmitter();
+    let spawnedResolve;
+    const spawned = new Promise((resolvePromise) => { spawnedResolve = resolvePromise; });
+    const spawnFn = () => {
+      spawnedResolve();
+      return child;
+    };
+    const pendingHealth = () => new Promise(() => {});
+    const promise = superviseRuntime(superviseOptions({
+      root,
+      userHome,
+      providerPath: path,
+      spawnFn,
+      stdout,
+      stderr,
+      signalSource,
+      service: fakeService().service,
+      waitForHealthFn: pendingHealth,
+    }));
+
+    await spawned;
+    signalSource.emit('SIGTERM', 'SIGTERM');
+    const exitCode = await promise;
+    expect(exitCode).toBe(0);
+    expect(child.signals).toEqual(['SIGTERM']);
+    expect(child.signalCode).toBe('SIGTERM');
+    const final = JSON.parse(stdout.chunks.at(-1));
+    expect(final).toMatchObject({
+      ok: true,
+      mode: 'error',
+      reason: 'signal_during_start',
+      stopped: true,
+      signal: 'SIGTERM',
+    });
+    // startup 信号时没有 ready JSON；只输出一次明确的终止结果。
+    expect(stdout.chunks).toHaveLength(1);
+    expect(stderr.chunks).toHaveLength(0);
+  });
+
+  it('supervise：service 状态 unknown → conflict，不 spawn', async () => {
+    const { root, userHome } = await makeRoot();
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const spawn = fakeSpawn();
+    const signalSource = new EventEmitter();
+    const exitCode = await superviseRuntime(superviseOptions({
+      root,
+      userHome,
+      providerPath: await fakeProviderFile(root),
+      spawnFn: spawn.spawnFn,
+      stdout,
+      stderr,
+      signalSource,
+      service: fakeService({ ok: false, error: 'status failed' }).service,
+    }));
+    expect(exitCode).toBe(2);
+    expect(spawn.calls).toHaveLength(0);
+    expect(JSON.parse(stdout.chunks[0])).toMatchObject({
+      ok: false,
+      mode: 'conflict',
+      reason: 'service_unknown',
+    });
   });
 
   it('supervise：child 提前退出 → 传播退出码与 child_exited reason', async () => {

@@ -1,10 +1,11 @@
 # DSH 真实 E2E 与 CI 门禁
 
 面向 `@mebular/dsh-plugin` 的回归说明：在**真 daemon + 真 `@deepseek-ai/dsh` + 真
-Chrome/CDP + 真 MCP 工具调用**上跑 P0 场景，并把它作为 nightly 信号、相关路径 PR
-检查和发布门禁。
+Chrome/CDP + 真 MCP 工具调用**上跑 P0 失败/恢复与 P1 managed/Agent 场景，并把它作为
+nightly 信号、相关路径 PR 检查和发布门禁。
 
-> 原则：前置条件缺失直接失败，不允许静默 SKIP；不 mock DSH，不硬编码工具总数。
+> 原则：前置条件缺失直接失败，不允许静默 SKIP；不 mock DSH，不硬编码工具总数；
+> managed 只回收自己启动的 child，外部 daemon 永不停止。
 
 相关文件：
 
@@ -56,7 +57,25 @@ node scripts/verify-dsh-e2e.mjs --dsh-version minimum
 node scripts/verify-dsh-e2e.mjs --dsh-version latest
 ```
 
-### 1.3 固定 artifacts 根目录（CI 使用）
+### 1.3 场景矩阵
+
+| 场景 | 覆盖 | 关键断言 |
+| --- | --- | --- |
+| `happy-path` | P0 全链路 | sidebar、`connected`、iframe、Console `dataset.embed=dsh`、关键工具注册、真实只读调用 |
+| `daemon-down-recovery` | P0 失败/恢复 | 启动 down；运行中启动 daemon 自动恢复；掉线自动注销；同端口重启再恢复；DSH pid 不变 |
+| `panel-false` | P0 面板隔离 | `panel:false` 全局、无 sidebar/iframe、工具仍可调用 |
+| `custom-port` | P0 发现顺序 | `MEBULAR_HTTP_PORT` 覆盖冲突 runtime；面板/发现文档/MCP 同源 |
+| `uninstall` | P0 卸载隔离 | `plugin remove` 后 daemon 与 Console 不受影响 |
+| `security-headers` | P0 安全头 | 普通 Console DENY；embed 只放开 loopback；发现文档无敏感字段 |
+| `managed-lifecycle` | P1 managed 启动 | 无 daemon 时插件自启 child；`managed=true`；runtime.json pid 存活且非 DSH；停 DSH 后 child 退出、端口关闭 |
+| `managed-reuse` | P1 managed 复用 | 外部 daemon 已存在时 `managed=false`；停 DSH 后外部 daemon、`/healthz`、`/console/`、runtime.json 均存活 |
+| `managed-cli-missing` | P1 managed 失败 | `down`、`reason=managed_cli_missing`、无工具、Agent 文本给出安装/CLI/配置恢复动作 |
+
+Agent 可见状态在 `happy-path`、`panel-false`、`custom-port`、managed 场景中断言 up 时
+`mebular:status` 为空；在 `daemon-down-recovery` 断言 down 时非空、恢复后重新为空。文本全部通过
+DSH 的 `ctx.inject(['systemPrompt'])` + `assemble()` 读取，不读 DOM。
+
+### 1.4 固定 artifacts 根目录（CI 使用）
 
 默认使用系统临时目录下的随机 `mebular-dsh-e2e-*`，成功清理、失败保留。CI 需要稳定
 上传路径，因此支持显式根目录：
@@ -98,12 +117,15 @@ CI 固定到 `$RUNNER_TEMP/dsh-e2e/<matrix.dsh>`（`0.2.1-rc.2` / `latest`）。
 
 矩阵：
 
-| label | DSH 版本 | Node | 说明 |
-| --- | --- | --- | --- |
-| `minimum` | `0.2.1-rc.2` | 24 | 与 `tests/dsh/e2e/versions.json` 的 `minimum` 对齐（workflow 内有 SSOT 校验） |
-| `latest` | `latest` | 24 | 夜间 / 发布前发现新版破坏 |
+| label | DSH 版本 | Node | 场景 | 说明 |
+| --- | --- | --- | --- | --- |
+| `minimum` | `0.2.1-rc.2` | 24 | 全部 9 个 | 与 `tests/dsh/e2e/versions.json` 的 `minimum` 对齐（workflow 内有 SSOT 校验） |
+| `latest` | `latest` | 24 | 全部 9 个 | 夜间 / 发布前发现新版破坏 |
+| `node22-minimum` | `0.2.1-rc.2` | 22.19 | `happy-path` | 仅 `schedule` / `workflow_dispatch`；验证 Node 22.19 兼容性，不增加 PR 成本 |
 
-- `fail-fast: false`：两档都跑完再汇总。
+- `fail-fast: false`：所有已启用档位都跑完再汇总。
+- Node 22.19 smoke 在 `pull_request` / `push main` / `workflow_call` 上跳过，只在 nightly
+  和手动 dispatch 运行。
 - 单 job `timeout-minutes: 45`。
 - 每个 job 准备 pnpm（`dsh plugin add` 需要；CI 固定精确版本 `12.15.0`）和 Chrome/Chromium。
   Chrome 直接探测 `ubuntu-latest` 预装的 `google-chrome` / `google-chrome-stable` /
@@ -126,7 +148,28 @@ CI 固定到 `$RUNNER_TEMP/dsh-e2e/<matrix.dsh>`（`0.2.1-rc.2` / `latest`）。
 所有文本在落盘前经过 `scripts/lib/redact.mjs`；`redaction-audit.json` 有泄漏时场景
 直接判失败。artifact 保留 14 天，名称为 `dsh-e2e-<label>-<run_attempt>`。
 
+`probe.json` 额外记录 Agent 可见状态：`agent.supported`（`true` 成功 / `null` 未注入 /
+`false` 不可用）、`agent.sectionPresent`、`agent.text`、`agent.textLength`、
+`agent.error` 和按工具数量去重的 `agentHistory`。managed 场景成功退出后 `runtime.json`
+可能已被 child 清理，artifact 会写成合法的 `null`，而不是空文件。
+
 成功时 harness 清理根目录，CI 再兜底删除固定路径，避免残留。
+
+### 3.1 Managed 生命周期与 Agent 状态证据
+
+- **child 归属**：`managed-lifecycle` 在启动前没有任何 daemon，插件按 profile 的
+  `lifecycle: managed` + `cliPath` 自启 child；harness 从临时 home 的 `runtime.json`
+  读取 pid，断言 pid 存活、不是 DSH pid、与 `/mebular/embed-info` 同端口。停止 DSH 后
+  单独等待该 pid 消失并确认端口关闭。
+- **外部 daemon 不受影响**：`managed-reuse` 先启动真实外部 daemon，插件探测健康后直接复用
+  （`mode=managed`、`managed=false`）。停止 DSH 后外部 pid、`/healthz`、`/console/` 与
+  `runtime.json` 仍存在。插件只在 dispose 时停止自己 spawn 的 child，永不停止外部 daemon。
+- **CLI 缺失**：`managed-cli-missing` 让 `cliPath` 指向不存在路径，并从 PATH 移除所有能
+  解析到 `mebular` 的目录；期望 `status=down`、`reason=managed_cli_missing`、无
+  `mcp__mebular__*` 工具，且 Agent 文本包含安装/`MEBULAR_CLI`/`cliPath` 与重启 DSH 的恢复动作。
+- **Agent 文本**：全部通过 DSH 的 `systemPrompt.assemble()` 读取 `mebular:status` section；
+  daemon up 时文本为空（不增加 prompt token），down 时非空且给出恢复动作。`systemPrompt`
+  不可用或 `assemble()` 失败会记录为 `supported=null/false` 或 error，场景失败，不会伪造通过。
 
 本地下载：
 
@@ -196,6 +239,10 @@ verify
 | `mcp__mebular__*` 为 0 | daemon 未启动或 origin 不一致；看 `probe.json`、`dsh-embed-info.json`、`daemon-log.txt`。 |
 | iframe 未出现 / 地址错误 | 看 `embed-info.json` 与 `daemon-log.txt`；确认 `MEBULAR_HTTP_PORT` / runtime.json 解析。 |
 | `artifacts 已脱敏` 失败 | 新增日志带出了未覆盖的敏感形状；扩展 `scripts/lib/redact.mjs` 并复跑。 |
+| `managed-lifecycle` 的 child pid 立即消失 / 端口未监听 | 看 `dsh-log.txt` 里 `managed daemon ...` 行与 `dsh-dump-config.yml` 的 `cliPath`；确认 CLI 可执行、端口未被占用。 |
+| `managed-reuse` 报 `managed=true` | 插件启动前探测到了可复用 daemon 但随后自己 spawn；检查外部 daemon 的 `runtime.json` pid 是否仍存活、`MEBULAR_HTTP_PORT` 是否误指别处。 |
+| `managed-cli-missing` 变成 up | PATH 上仍有 `mebular`，或 `cliPath` 指向了存在的文件；看失败输出里的过滤后 PATH，确认 `node` 仍可用但 `mebular` 不可解析。 |
+| Agent 文本断言失败 | 看 `probe.json` 的 `agent` / `agentHistory`：`supported=null/false` 表示 `systemPrompt` 服务未注入；有 error 表示 `assemble()` 抛错。不要用 DOM 文案替代。 |
 | 偶发浏览器 flake | 先单场景复跑：`--scenario happy-path --keep`；仍失败按 artifacts 定位，不要直接重跑到绿。 |
 | `--root` 被拒绝 | 目录非空且无 harness 标记，或与仓库/主目录重叠；换空目录或清理旧现场。 |
 
@@ -204,6 +251,9 @@ verify
 ```bash
 npm run verify:dsh:e2e -- --scenario happy-path --keep
 npm run verify:dsh:e2e -- --scenario daemon-down-recovery
+npm run verify:dsh:e2e -- --scenario managed-lifecycle --keep
+npm run verify:dsh:e2e -- --scenario managed-reuse --keep
+npm run verify:dsh:e2e -- --scenario managed-cli-missing --keep
 npm run verify:dsh:e2e -- --scenario security-headers --keep
 ```
 
@@ -213,6 +263,10 @@ npm run verify:dsh:e2e -- --scenario security-headers --keep
 - 非 loopback 的 `X-Frame-Options` / `frame-ancestors` 由单测覆盖，不在本 E2E 里启动
   TLS daemon。
 - 不验证真实 DeepSeek 模型对话；probe 走 DSH tool registry，不发模型请求。
-- Node 22.19 smoke、managed 生命周期、Agent 状态文本属于后续阶段，当前矩阵只有 Node 24。
+- managed 生命周期与 Agent 状态文本已覆盖；Node 22.19 的 `happy-path` smoke 已本地通过，
+  CI 仅在 nightly / manual 运行该档，首次真实 runner 结果仍待 PR 验收。
+- `managed-cli-missing` 依赖 PATH 上没有可解析的 `mebular`。harness 会过滤包含 `mebular`
+  的 PATH 目录并保留 `node`；若宿主把 `node` 与 `mebular` 放在同一目录，场景会明确失败，
+  不会静默 SKIP。
 - GitHub Actions 的首次真实运行需要在 workflow 进入默认分支后手动 `workflow_dispatch`
   或等 nightly；本文档与本地校验不声称“CI 已绿”。

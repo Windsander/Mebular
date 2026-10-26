@@ -137,6 +137,10 @@ export async function createWorld(options) {
     dumpConfigText: '',
     profileBundles: [],
     headers: null,
+    // Daemon children this scenario proved the plugin spawned. Cleanup may stop
+    // only these PIDs (and only while their command line still names Mebular),
+    // never an external daemon.
+    ownedChildPids: [],
     startedAt: new Date().toISOString(),
   };
 
@@ -210,6 +214,66 @@ export async function createWorld(options) {
     await stopProcess(handle);
     state.daemon = null;
     return { pid, exitCode: handle.exitCode, signal: handle.signal };
+  }
+
+  /**
+   * Stop the DSH Web process started by this scenario. DSH handles SIGTERM,
+   * disposes the plugin tree (which stops a managed child it owns), then exits.
+   * Kept as a helper so managed scenarios can prove child shutdown while the
+   * external daemon (if any) survives.
+   */
+  async function stopDsh({ timeoutMs = 15000 } = {}) {
+    const handle = state.dsh;
+    if (handle === null) return null;
+    const pid = handle.proc.pid;
+    await stopProcess(handle, { timeoutMs });
+    if (state.dsh === handle) state.dsh = null;
+    return { pid, exitCode: handle.exitCode, signal: handle.signal };
+  }
+
+  /** Wait until a PID is gone (or the timeout expires). @returns {Promise<boolean>} */
+  async function waitForExit(pid, timeoutMs = 15000) {
+    const result = await waitForValue(
+      async () => isProcessAlive(pid),
+      (alive) => alive === false,
+      { timeoutMs, intervalMs: 250, describe: `pid ${pid} 退出` },
+    );
+    return result.ok;
+  }
+
+  /**
+   * Record a daemon PID the plugin is expected to own. Only this scenario's
+   * managed child is tracked; external daemons are never passed here.
+   */
+  function trackOwnedChild(pid) {
+    if (!Number.isInteger(pid) || pid <= 0 || pid === state.dshPid) return false;
+    if (!state.ownedChildPids.includes(pid)) state.ownedChildPids.push(pid);
+    return true;
+  }
+
+  /** Best-effort command line of a PID, used to avoid killing a reused PID. */
+  async function processCommand(pid) {
+    if (process.platform === 'win32') return null;
+    const result = await runCommand('ps', 'ps', ['-o', 'command=', '-p', String(pid)], { timeoutMs: 5000 });
+    return result.code === 0 ? result.stdout.trim() : null;
+  }
+
+  /**
+   * Failure-path cleanup for tracked managed children. Runs only after DSH was
+   * stopped, so a normal managed lifecycle leaves nothing to do. A PID whose
+   * command line no longer names Mebular is left alone (possible PID reuse).
+   */
+  async function stopTrackedChildren() {
+    for (const pid of [...state.ownedChildPids]) {
+      if (!isProcessAlive(pid)) continue;
+      const command = await processCommand(pid);
+      if (command !== null && !/mebular/i.test(command)) continue;
+      try { process.kill(pid, 'SIGTERM'); } catch { /* Best effort. */ }
+      if (!(await waitForExit(pid, 5000))) {
+        try { process.kill(pid, 'SIGKILL'); } catch { /* Best effort. */ }
+        await waitForExit(pid, 2000);
+      }
+    }
   }
 
   async function installProfile(profileOptions = {}) {
@@ -435,7 +499,10 @@ export async function createWorld(options) {
     await record('daemon-log.txt', () => recordText('daemon-log.txt', daemonLog()));
     await record('dsh-dump-config.yml', () => recordText('dsh-dump-config.yml', state.dumpConfigText));
     await record('runtime.json', async () => {
-      await recordText('runtime.json', await readTextIfExists(join(mebularHome, 'runtime.json')));
+      const text = await readTextIfExists(join(mebularHome, 'runtime.json'));
+      // A managed daemon removes runtime.json when it exits; keep the artifact
+      // a valid JSON document instead of writing an empty file.
+      await recordText('runtime.json', text === null ? 'null\n' : text);
     });
     await record('profiles.json', async () => {
       await recordText('profiles.json', await readTextIfExists(join(mebularHome, 'profiles.json')));
@@ -519,6 +586,7 @@ export async function createWorld(options) {
     await state.cdp?.close().catch(() => undefined);
     await state.chrome?.close().catch(() => undefined);
     for (const handle of [...dshHandles].reverse()) await stopProcess(handle);
+    await stopTrackedChildren();
     for (const handle of [...daemonHandles].reverse()) await stopProcess(handle);
     state.page = null;
     state.cdp = null;
@@ -539,6 +607,9 @@ export async function createWorld(options) {
     env: baseEnv,
     startDaemon,
     stopDaemon,
+    stopDsh,
+    waitForExit,
+    trackOwnedChild,
     installProfile,
     dumpConfig,
     startDsh,

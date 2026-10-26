@@ -10,8 +10,9 @@ name: DSH E2E
 #   pull_request      path-filtered changes that can break the integration
 #   push main         main baseline with the same path filter
 #
-# The two matrix legs are the minimum supported DSH version and npm `latest`.
-# Keep the minimum leg in sync with tests/dsh/e2e/versions.json (checked below).
+# The matrix legs are the minimum supported DSH version, npm `latest`, and a
+# Node 22.19 + minimum smoke that runs only on nightly / manual dispatch. Keep
+# the minimum leg in sync with tests/dsh/e2e/versions.json (checked below).
 
 on:
   schedule:
@@ -60,6 +61,8 @@ concurrency:
 jobs:
   e2e:
     name: dsh-e2e (${{ matrix.label }})
+    # The Node 22.19 smoke is a nightly/manual signal, not a per-PR cost.
+    if: matrix.label != 'node22-minimum' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
@@ -68,8 +71,16 @@ jobs:
         include:
           - label: minimum
             dsh: 0.2.1-rc.2
+            node: '24'
+            scenarios: ''
           - label: latest
             dsh: latest
+            node: '24'
+            scenarios: ''
+          - label: node22-minimum
+            dsh: 0.2.1-rc.2
+            node: '22.19'
+            scenarios: '--scenario happy-path'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -77,7 +88,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 24
+          node-version: ${{ matrix.node }}
           cache: npm
 
       - name: Cache pnpm store
@@ -123,11 +134,20 @@ jobs:
 
       - name: Verify prerequisites (fail, never skip)
         shell: bash
+        env:
+          NODE_VERSION: ${{ matrix.node }}
         run: |
           set -euo pipefail
+          EXPECTED_MAJOR="${NODE_VERSION%%.*}"
           NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-          if [ "$NODE_MAJOR" != "24" ]; then
-            echo "::error::DSH E2E requires Node 24, got $(node --version)"
+          if [ "$NODE_MAJOR" != "$EXPECTED_MAJOR" ]; then
+            echo "::error::DSH E2E requires Node $NODE_VERSION, got $(node --version)"
+            exit 1
+          fi
+          # The 22.19 leg must actually run that minor, not just any 22.x.
+          if [ "$NODE_VERSION" != "${NODE_VERSION%%.*}" ] \
+             && [ "$(node -p 'process.versions.node.split(".").slice(0,2).join(".")')" != "$NODE_VERSION" ]; then
+            echo "::error::DSH E2E requires Node $NODE_VERSION, got $(node --version)"
             exit 1
           fi
           if [ -z "${CHROME_PATH:-}" ] || [ ! -x "$CHROME_PATH" ]; then
@@ -164,9 +184,13 @@ jobs:
         env:
           E2E_ROOT: ${{ runner.temp }}/dsh-e2e/${{ matrix.dsh }}
           E2E_LOG: ${{ runner.temp }}/dsh-e2e-${{ matrix.dsh }}-harness.log
+          E2E_SCENARIOS: ${{ matrix.scenarios }}
         run: |
           set -euo pipefail
-          node scripts/verify-dsh-e2e.mjs --dsh-version "${{ matrix.dsh }}" --root "$E2E_ROOT" 2>&1 | tee "$E2E_LOG"
+          node scripts/verify-dsh-e2e.mjs \
+            --dsh-version "${{ matrix.dsh }}" \
+            --root "$E2E_ROOT" \
+            ${E2E_SCENARIOS:-} 2>&1 | tee "$E2E_LOG"
 
       - name: Upload failure artifacts
         if: failure()

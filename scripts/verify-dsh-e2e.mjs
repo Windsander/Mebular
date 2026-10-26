@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 /**
- * Real DSH E2E: P0 failure/recovery matrix (Phase 2).
+ * Real DSH E2E: P0 failure/recovery + P1 managed/Agent matrix (Phase 4).
  *
- * Preserves the Phase 1 happy path and adds five isolated scenarios on top of
- * reusable world primitives (scripts/lib/dsh-e2e-world.mjs):
+ * Preserves the Phase 1 happy path and Phase 2 failure/recovery scenarios on
+ * top of reusable world primitives (scripts/lib/dsh-e2e-world.mjs):
  *
  *   happy-path             sidebar / connected / iframe / Console / real tool call
+ *   managed-lifecycle      no daemon -> plugin starts its own child; stopping
+ *                          DSH stops only that child
+ *   managed-reuse          managed profile reuses an external daemon; stopping
+ *                          DSH leaves that daemon alive
+ *   managed-cli-missing    no CLI -> down + managed_cli_missing + Agent hint
  *   daemon-down-recovery   down at boot -> up -> down -> up, without restarting DSH
  *   panel-false            separate profile, no sidebar/iframe, MCP tools still work
  *   custom-port            MEBULAR_HTTP_PORT wins over a conflicting runtime.json;
@@ -17,6 +22,9 @@
  * Every scenario gets its own MEBULAR_HOME, DSH_HOME, profile, random ports,
  * temp directory, probe output, and artifacts. Artifacts are redacted before
  * they are kept (scripts/lib/redact.mjs) and audited after writing.
+ *
+ * Agent-visible status is read through DSH's own systemPrompt registry
+ * (`ctx.inject(['systemPrompt'])` + `assemble()`), never from the DOM.
  *
  * Usage:
  *   node scripts/verify-dsh-e2e.mjs [--scenario <name>]... [--keep]
@@ -35,7 +43,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, parse as parsePath, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, join, parse as parsePath, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { findChrome } from './lib/cdp.mjs';
@@ -50,6 +58,7 @@ import {
   runCommand,
   sleep,
   tail,
+  waitForValue,
 } from './lib/e2e-process.mjs';
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -285,7 +294,7 @@ async function cleanupRoot(rootInfo, { keep }) {
 
 function probeSummary(probe) {
   if (probe === null || probe === undefined) return 'probe=missing';
-  return `phase=${probe.phase ?? '?'} mcpTools=${probe.mebularToolCount ?? '?'} schemas=${probe.schemaCount ?? '?'} done=${probe.done === true}`;
+  return `phase=${probe.phase ?? '?'} mcpTools=${probe.mebularToolCount ?? '?'} schemas=${probe.schemaCount ?? '?'} agent=${probe.agent?.supported ?? 'pending'} done=${probe.done === true}`;
 }
 
 async function waitProbeOrFail(world, predicate, description, timeoutMs = 60000, detailFn = probeSummary) {
@@ -336,6 +345,126 @@ function panelFalsePatch() {
     '    panel: false',
     '',
   ].join('\n');
+}
+
+function managedPatch(cliPath) {
+  return [
+    '# E2E profile patch: let the plugin own its daemon child.',
+    '# A profile patch replaces the whole config for the matched row.',
+    '- id: mebular',
+    '  config:',
+    '    lifecycle: managed',
+    `    cliPath: ${JSON.stringify(cliPath)}`,
+    '    panel: true',
+    '',
+  ].join('\n');
+}
+
+/** PATH dirs that cannot resolve a `mebular` executable (managed_cli_missing). */
+function pathWithoutMebular(env) {
+  const dirs = String(env.PATH ?? '').split(delimiter).filter((dir) => dir.length > 0);
+  return dirs.filter((dir) => !existsSync(join(dir, 'mebular')) && !existsSync(join(dir, 'mebular.cmd')));
+}
+
+function pathHasNode(dirs) {
+  return dirs.some((dir) => existsSync(join(dir, 'node')) || existsSync(join(dir, 'node.exe')));
+}
+
+async function waitForDshInfo(world, predicate, timeoutMs = 45000) {
+  const started = Date.now();
+  let last = null;
+  while (Date.now() - started < timeoutMs) {
+    last = await world.fetchDshJson('/mebular/embed-info').catch(() => null);
+    if (predicate(last?.json ?? null)) return last.json;
+    await sleep(250);
+  }
+  return last?.json ?? null;
+}
+
+async function waitForRuntime(world, predicate, timeoutMs = 20000) {
+  const result = await waitForValue(
+    async () => readJsonIfExists(join(world.state.mebularHome, 'runtime.json')),
+    (value) => value !== null && predicate(value),
+    { timeoutMs, intervalMs: 250, describe: 'runtime.json' },
+  );
+  return result.value;
+}
+
+async function portClosed(port) {
+  try {
+    await fetchJson(`http://127.0.0.1:${port}/healthz`, 1000);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+function agentSummary(probe) {
+  const agent = probe?.agent;
+  if (agent === null || agent === undefined) return 'agent=missing';
+  const text = typeof agent.text === 'string' ? agent.text : '';
+  return `supported=${agent.supported ?? 'pending'} section=${agent.sectionPresent === true} textLength=${text.trim().length} error=${agent.error ?? 'none'}`;
+}
+
+function agentUnavailableReason(probe) {
+  const agent = probe?.agent;
+  if (agent === null || agent === undefined) return 'probe 未记录 systemPrompt 状态';
+  if (agent.supported !== true) {
+    return `systemPrompt 不可读（supported=${agent.supported ?? 'pending'}，${agent.error ?? 'no service'}）`;
+  }
+  if (typeof agent.error === 'string' && agent.error.length > 0) return agent.error;
+  return null;
+}
+
+function agentText(probe) {
+  return typeof probe?.agent?.text === 'string' ? probe.agent.text.trim() : '';
+}
+
+function checkAgentReadable(probe, label) {
+  const reason = agentUnavailableReason(probe);
+  check(`${label}：Agent 状态来自 ctx.systemPrompt.assemble()`, reason === null, reason ?? agentSummary(probe));
+  return reason === null;
+}
+
+function checkAgentUp(probe, label) {
+  if (!checkAgentReadable(probe, label)) return false;
+  const text = agentText(probe);
+  return check(
+    `${label}：daemon up 时 mebular:status 不贡献 prompt 文本`,
+    text.length === 0,
+    `textLength=${text.length} text=${tail(text, 180) || '(empty)'}`,
+  );
+}
+
+function findDownAgent(probe) {
+  const history = Array.isArray(probe?.agentHistory) ? probe.agentHistory : [];
+  return history.find((entry) => entry?.mebularToolCount === 0
+    && entry?.supported === true
+    && typeof entry?.text === 'string'
+    && entry.text.trim().length > 0) ?? null;
+}
+
+function checkAgentDownText(probe, label) {
+  const entry = findDownAgent(probe);
+  const detail = entry === null
+    ? agentSummary(probe)
+    : `textLength=${entry.text.trim().length} toolCount=${entry.mebularToolCount} phase=${entry.phase ?? '?'}`;
+  if (!check(`${label}：daemon down 时记录了非空的 mebular:status`, entry !== null, detail)) {
+    return;
+  }
+  const text = entry.text.trim();
+  check(`${label}：明确说 Mebular 记忆不可用`, /Mebular/i.test(text) && /unavailable|not running|not healthy|starting/i.test(text), tail(text, 220));
+  check(`${label}：给出启动 App / mebular serve 的恢复动作`, /(Mebular app|mebular serve)/i.test(text), tail(text, 220));
+  check(`${label}：不诱导模型声称记忆可用`, /do not claim/i.test(text), tail(text, 220));
+  check(`${label}：恢复后 section 文本重新为空`, agentText(probe).length === 0 || probe?.done !== true, `text=${tail(agentText(probe), 160) || '(empty)'}`);
+}
+
+function checkAgentCliMissingText(probe, label) {
+  if (!checkAgentReadable(probe, label)) return;
+  const text = agentText(probe);
+  check(`${label}：daemon down 时 mebular:status 非空`, text.length > 0, tail(text, 220) || '(empty)');
+  check(`${label}：说明 CLI 缺失`, /(CLI|cliPath|MEBULAR_CLI)/i.test(text), tail(text, 240));
+  check(`${label}：给出安装 / 配置恢复动作`, /(install Mebular|MEBULAR_CLI|cliPath)/i.test(text) && /restart DSH/i.test(text), tail(text, 240));
 }
 
 const scenarios = [
@@ -412,6 +541,7 @@ const scenarios = [
       const invocationText = typeof invocation?.text === 'string' ? invocation.text : '';
       check('调用返回临时 home 的真实记忆（含本次 token）', invocationText.includes(world.seed.memoryToken));
       check('调用返回本次 seed 的记忆 id', invocationText.includes(world.seed.memoryId), world.seed.memoryId);
+      checkAgentUp(probe, 'daemon up');
 
       await assertNoPageExceptions(world);
 
@@ -420,10 +550,171 @@ const scenarios = [
       console.log(`    iframe：${iframeSrc}`);
       console.log(`    Console：dataset.embed=${embedFlag.value}`);
       console.log(`    工具：schemas=${probe.schemaCount}，mebular=${probe.mebularToolCount}`);
+      console.log(`    Agent：${agentSummary(probe)}（up 时文本为空）`);
       console.log(`    真实调用：${invocation.tool} -> ${world.redact(tail(invocationText, 180))}`);
       console.log(`    seed：memoryId=${world.seed.memoryId} token=<redacted>（已命中）`);
     },
   },
+  {
+    name: 'managed-lifecycle',
+    title: 'Managed 生命周期（插件自启 child，DSH 退出只回收自己的 child）',
+    run: async (world, context) => {
+      const port = await freePort();
+      const bundles = await world.installProfile({ patch: managedPatch(mebularBin) });
+      check(
+        'managed profile 包含插件与 probe',
+        bundles.includes('@mebular/dsh-plugin') && bundles.includes('@mebular/dsh-e2e-probe'),
+        JSON.stringify(bundles),
+      );
+      const dump = await world.dumpConfig();
+      check('dump-config 只有一条 mebular row', countMatches(dump, /^\s*-\s*id:\s*mebular\s*$/gm) === 1);
+      check('dump-config mebular lifecycle: managed', /id:\s*mebular\b[\s\S]*?lifecycle:\s*managed/.test(dump));
+      check('dump-config cliPath 指向仓库 Mebular CLI', /cliPath:[\s\S]{0,300}mebular\.mjs/.test(dump), tail(dump, 300));
+
+      // No daemon exists yet: the managed profile points at a reserved port, so
+      // a real daemon on 7331 can never be mistaken for this scenario's child.
+      await world.startDsh({ probeExpect: 'up', env: { MEBULAR_HTTP_PORT: String(port) } });
+      await world.openBrowser({ chromePath: context.chromePath });
+      check('DSH Web 页面已加载', (await world.state.page.evalJs('document.title')) === 'DeepSeek Harness');
+      check('managed daemon 启动后状态 connected', await world.waitForStatus('connected', 60000), await statusDetail(world));
+      check('点击侧边栏打开面板', await world.openPanel());
+      check('managed daemon 的 iframe 已挂载', await world.waitForIframe(45000));
+      const iframeSrc = await world.iframeSrc();
+      check('iframe 指向 managed 端口', iframeSrc === `http://127.0.0.1:${port}/console/?embed=dsh`, iframeSrc);
+
+      const info = await waitForDshInfo(world, (json) => json?.managed === true && json?.status === 'up');
+      check('embed-info status=up + ok', info?.status === 'up' && info?.ok === true, JSON.stringify(info));
+      check('embed-info mode=managed', info?.mode === 'managed', String(info?.mode));
+      check('embed-info managed=true', info?.managed === true, String(info?.managed));
+      check('embed-info reason=null', info?.reason === null, String(info?.reason));
+      check('embed-info consoleUrl 指向 managed 端口', info?.consoleUrl === `http://127.0.0.1:${port}/console`, info?.consoleUrl ?? '(missing)');
+
+      const runtime = await waitForRuntime(world, (value) => Number.isInteger(value?.pid) && value?.http?.port === port);
+      const childPid = runtime?.pid;
+      const dshPid = world.state.dsh?.proc?.pid;
+      check('runtime.json 记录 managed child pid', Number.isInteger(childPid) && childPid > 0, `pid=${childPid}`);
+      check('managed child 不是 DSH 进程', childPid !== dshPid, `child=${childPid} dsh=${dshPid}`);
+      check('managed child 存活', world.isProcessAlive(childPid), `pid=${childPid}`);
+      check('managed child 与 embed-info 使用同一端口', runtime?.http?.port === port, `port=${runtime?.http?.port}`);
+      world.trackOwnedChild(childPid);
+
+      const probe = await waitProbeOrFail(world, (value) => value.done === true, 'managed daemon 下工具注册并可调用', 90000);
+      check('managed 时工具数 > 0', probe.mebularToolCount > 0, `mebular=${probe.mebularToolCount}`);
+      check('managed 时关键工具存在', probe.required?.['mcp__mebular__memory_write'] === true && probe.required?.['mcp__mebular__memory_query'] === true);
+      check('managed 时真实调用成功', probe.invocation?.ok === true, String(probe.invocation?.error ?? ''));
+      check('managed 时调用返回本次 seed token', typeof probe.invocation?.text === 'string' && probe.invocation.text.includes(world.seed.memoryToken));
+      checkAgentUp(probe, 'managed up');
+      await assertNoPageExceptions(world);
+
+      const stopped = await world.stopDsh();
+      check('stopDsh 结束 DSH 进程', stopped !== null && !world.isProcessAlive(dshPid), `pid=${dshPid}`);
+      check('停止 DSH 后 managed child 退出', await world.waitForExit(childPid, 20000), `pid=${childPid}`);
+      check('停止 DSH 后 managed 端口不再监听', await portClosed(port), `port=${port}`);
+
+      console.log('\n  证据');
+      console.log(`    profile：lifecycle=managed cliPath=<repo>/packages/mcp/bin/mebular.mjs`);
+      console.log(`    embed-info：${JSON.stringify(info)}`);
+      console.log(`    managed child：pid=${childPid}（DSH pid=${dshPid}）exit=${!world.isProcessAlive(childPid)}`);
+      console.log(`    工具：mebular=${probe.mebularToolCount}；真实调用=${probe.invocation?.tool} ok`);
+      console.log(`    Agent：${agentSummary(probe)}（up 时文本为空）`);
+      console.log(`    停止 DSH 后端口 ${port} 已关闭`);
+    },
+  },
+  {
+    name: 'managed-reuse',
+    title: 'Managed 复用外部 daemon（DSH 退出不停止外部 daemon）',
+    run: async (world, context) => {
+      const daemon = await world.startDaemon();
+      const externalPid = daemon.pid;
+      const runtimeBefore = await readJsonIfExists(join(world.state.mebularHome, 'runtime.json'));
+      check('外部 daemon 已写入 runtime.json', runtimeBefore?.pid === externalPid, `pid=${runtimeBefore?.pid}`);
+
+      const bundles = await world.installProfile({ patch: managedPatch(mebularBin) });
+      check('managed reuse profile 已安装插件', bundles.includes('@mebular/dsh-plugin'), JSON.stringify(bundles));
+      await world.startDsh({ probeExpect: 'up' });
+      await world.openBrowser({ chromePath: context.chromePath });
+      check('DSH Web 页面已加载', (await world.state.page.evalJs('document.title')) === 'DeepSeek Harness');
+      check('复用外部 daemon 后状态 connected', await world.waitForStatus('connected', 45000), await statusDetail(world));
+
+      const info = await waitForDshInfo(world, (json) => json?.managed === false && json?.status === 'up');
+      check('embed-info status=up + ok', info?.status === 'up' && info?.ok === true, JSON.stringify(info));
+      check('embed-info mode=managed', info?.mode === 'managed', String(info?.mode));
+      check('复用外部 daemon 时 managed=false', info?.managed === false, String(info?.managed));
+      check('embed-info reason=null', info?.reason === null, String(info?.reason));
+      check('embed-info consoleUrl 指向外部 daemon', info?.consoleUrl === `http://127.0.0.1:${daemon.port}/console`, info?.consoleUrl ?? '(missing)');
+
+      const probe = await waitProbeOrFail(world, (value) => value.done === true, '复用外部 daemon 时工具可调用', 90000);
+      check('复用外部 daemon 时工具数 > 0', probe.mebularToolCount > 0, `mebular=${probe.mebularToolCount}`);
+      check('复用外部 daemon 时真实调用成功', probe.invocation?.ok === true, String(probe.invocation?.error ?? ''));
+      check('复用外部 daemon 时调用返回 seed token', typeof probe.invocation?.text === 'string' && probe.invocation.text.includes(world.seed.memoryToken));
+      checkAgentUp(probe, 'managed reuse up');
+      await assertNoPageExceptions(world);
+
+      const dshPid = world.state.dsh?.proc?.pid;
+      const stopped = await world.stopDsh();
+      check('stopDsh 结束 DSH 进程', stopped !== null && !world.isProcessAlive(dshPid), `pid=${dshPid}`);
+      check('停止 DSH 后外部 daemon 仍存活', world.isProcessAlive(externalPid), `pid=${externalPid}`);
+      const health = await fetchRaw(`http://127.0.0.1:${daemon.port}/healthz`);
+      const consolePage = await fetchRaw(`http://127.0.0.1:${daemon.port}/console/`);
+      check('停止 DSH 后外部 daemon /healthz 仍 200', health.status === 200, `status=${health.status}`);
+      check('停止 DSH 后外部 daemon /console/ 仍 200', consolePage.status === 200, `status=${consolePage.status}`);
+      const runtimeAfter = await readJsonIfExists(join(world.state.mebularHome, 'runtime.json'));
+      check('外部 daemon runtime.json 未被改动', runtimeAfter?.pid === externalPid && runtimeAfter?.http?.port === daemon.port, JSON.stringify(runtimeAfter?.http ?? null));
+
+      console.log('\n  证据');
+      console.log(`    embed-info：${JSON.stringify(info)}`);
+      console.log(`    外部 daemon：pid=${externalPid} port=${daemon.port} alive=${world.isProcessAlive(externalPid)}`);
+      console.log(`    DSH pid=${dshPid} stopped=${!world.isProcessAlive(dshPid)}`);
+      console.log(`    工具：mebular=${probe.mebularToolCount}；真实调用=${probe.invocation?.tool} ok`);
+      console.log(`    Agent：${agentSummary(probe)}（up 时文本为空）`);
+    },
+  },
+  {
+    name: 'managed-cli-missing',
+    title: 'Managed CLI 缺失（down + managed_cli_missing + Agent 安装提示）',
+    run: async (world, context) => {
+      const port = await freePort();
+      const missingCli = join(world.state.scenarioDir, 'missing-cli', 'mebular.mjs');
+      const bundles = await world.installProfile({ patch: managedPatch(missingCli) });
+      check('managed cli-missing profile 已安装插件', bundles.includes('@mebular/dsh-plugin'), JSON.stringify(bundles));
+
+      // Keep node (and the rest of the toolchain) on PATH but remove every
+      // directory that could resolve a `mebular` executable, so the plugin
+      // genuinely takes the managed_cli_missing branch.
+      const pathDirs = pathWithoutMebular(world.env);
+      if (!pathHasNode(pathDirs) && !existsSync(join(dirname(process.execPath), 'mebular'))) {
+        pathDirs.unshift(dirname(process.execPath));
+      }
+      requireCheck('过滤后的 PATH 仍可解析 node（且没有 mebular）', pathHasNode(pathDirs), pathDirs.join(delimiter));
+
+      await world.startDsh({
+        probeExpect: 'down',
+        env: { MEBULAR_HTTP_PORT: String(port), PATH: pathDirs.join(delimiter) },
+      });
+      await world.openBrowser({ chromePath: context.chromePath });
+      check('DSH Web 页面已加载', (await world.state.page.evalJs('document.title')) === 'DeepSeek Harness');
+      check('CLI 缺失时状态为 offline', await world.waitForStatus('offline', 60000), await statusDetail(world));
+
+      const info = await waitForDshInfo(world, (json) => json?.status === 'down' && json?.reason === 'managed_cli_missing');
+      check('embed-info status=down', info?.status === 'down', JSON.stringify(info));
+      check('embed-info reason=managed_cli_missing', info?.reason === 'managed_cli_missing', String(info?.reason));
+      check('embed-info managed=false', info?.managed === false, String(info?.managed));
+      check('embed-info ok=false', info?.ok === false, String(info?.ok));
+
+      const probe = await waitProbeOrFail(world, (value) => value.done === true, 'CLI 缺失时 probe 完成观察', 60000);
+      check('CLI 缺失时没有 mcp__mebular__* 工具', probe.mebularToolCount === 0, `mebular=${probe.mebularToolCount}`);
+      check('CLI 缺失时关键工具均未注册', probe.required?.['mcp__mebular__memory_write'] === false && probe.required?.['mcp__mebular__memory_query'] === false);
+      checkAgentCliMissingText(probe, 'managed_cli_missing');
+      await assertNoPageExceptions(world);
+
+      console.log('\n  证据');
+      console.log(`    embed-info：${JSON.stringify(info)}`);
+      console.log(`    工具：mebular=${probe.mebularToolCount}；required=${JSON.stringify(probe.required)}`);
+      console.log(`    Agent：${agentSummary(probe)}`);
+      console.log(`    Agent 文本：${tail(agentText(probe), 300)}`);
+    },
+  },
+
   {
     name: 'daemon-down-recovery',
     title: 'Daemon down 启动 → 恢复 → 掉线 → 再恢复',
@@ -491,6 +782,7 @@ const scenarios = [
         45000,
       );
       check('掉线后工具数为 0', runtimeDown.mebularToolCount === 0, `mebular=${runtimeDown.mebularToolCount}`);
+      check('掉线后 Agent 状态文本非空', agentText(runtimeDown).length > 0, agentSummary(runtimeDown));
       check('掉线后状态 offline', await world.waitForStatus('offline', 45000), await statusDetail(world));
       check('掉线后 iframe 消失', await world.waitForNoIframe(45000));
 
@@ -509,13 +801,17 @@ const scenarios = [
       check('恢复后的调用仍返回本次 seed token', typeof invocation?.text === 'string' && invocation.text.includes(world.seed.memoryToken));
       check('恢复后的调用仍返回 memory id', typeof invocation?.text === 'string' && invocation.text.includes(world.seed.memoryId));
       check('全程未重启 DSH', world.state.dsh.proc.pid === dshPid && world.state.dsh.proc.exitCode === null, `pid=${dshPid}`);
+      checkAgentDownText(recovered, 'daemon down');
+      checkAgentUp(recovered, 'daemon recovered');
       await assertNoPageExceptions(world);
 
       console.log('\n  证据');
       console.log(`    启动：无 daemon，状态=offline，工具=${downAtBoot.mebularToolCount}`);
       console.log(`    第一次恢复：状态=connected，工具=${firstUp.mebularToolCount}，iframe 已加载`);
       console.log(`    掉线：状态=offline，工具=${runtimeDown.mebularToolCount}，iframe 已移除`);
+      console.log(`    掉线 Agent 文本：${tail(agentText(runtimeDown), 300) || '(empty)'}`);
       console.log(`    第二次恢复：状态=connected，工具=${recovered.mebularToolCount}，真实调用=${invocation.tool} ok`);
+      console.log(`    恢复后 Agent：${agentSummary(recovered)}（up 时文本为空）`);
       console.log(`    DSH pid 全程=${dshPid}`);
     },
   },
@@ -560,6 +856,7 @@ const scenarios = [
       check('panel:false 时关键工具存在', probe.required?.['mcp__mebular__memory_write'] === true && probe.required?.['mcp__mebular__memory_query'] === true);
       check('panel:false 时真实调用成功', probe.invocation?.ok === true, String(probe.invocation?.error ?? ''));
       check('panel:false 时调用返回 seed token', typeof probe.invocation?.text === 'string' && probe.invocation.text.includes(world.seed.memoryToken));
+      checkAgentUp(probe, 'panel:false up');
       await assertNoPageExceptions(world);
 
       console.log('\n  证据');
@@ -617,6 +914,7 @@ const scenarios = [
       const probe = await waitProbeOrFail(world, (value) => value.done === true, '显式端口下工具可用', 90000);
       check('MCP 工具来自同一 daemon', probe.invocation?.ok === true && typeof probe.invocation?.text === 'string' && probe.invocation.text.includes(world.seed.memoryToken));
       check('未误用冲突 runtime.json 的端口', !JSON.stringify({ iframeSrc, dshInfo: dshInfo.json, daemonInfo: daemonInfo.json }).includes(`:${conflictPort}`), `conflictPort=${conflictPort}`);
+      checkAgentUp(probe, 'custom-port up');
       await assertNoPageExceptions(world);
 
       console.log('\n  证据');
@@ -822,7 +1120,7 @@ async function main() {
     : '';
   const rootRequest = options.root ?? (envRoot.length > 0 ? envRoot : null);
 
-  console.log('DSH 真实 E2E（P0 失败/恢复矩阵 + CI 门禁）');
+  console.log('DSH 真实 E2E（P0 失败/恢复 + P1 managed/Agent）');
   console.log('========================================');
   console.log(`场景：${selected.map((scenario) => scenario.name).join(', ')}`);
   console.log(`DSH 版本：${dshVersion}`);

@@ -17,6 +17,9 @@ import {
   createDaemonLifecycle,
   createRuntimeInstallHandler,
   createRuntimeInstallManager,
+  discoverRuntimeProviders,
+  readRegisteredRuntimeService,
+  readRuntimeCurrentProvider,
   sanitizeRuntimeInstallState,
 } from '../../packages/dsh-plugin/index.js';
 
@@ -149,6 +152,7 @@ function createFakeTools(root, {
   npmError = null,
   npmContent = '// fake shared runtime\n',
   providerOk = true,
+  currentOk = true,
   initFails = false,
   hang = false,
 } = {}) {
@@ -200,6 +204,44 @@ function createFakeTools(root, {
         await mkdir(home, { recursive: true });
         await writeFile(join(home, 'config.json'), '{}\n', 'utf-8');
         return { code: 0, stdout: 'initialized\n' };
+      }
+      if (commandName === 'runtime' && args[2] === 'current') {
+        const sub = args[3];
+        const cloudRoot = options.env?.MEBULAR_CLOUD_ROOT ?? root;
+        const currentPath = join(cloudRoot, 'runtime', 'current.json');
+        if (sub === 'show') {
+          let current = null;
+          try {
+            current = JSON.parse(await readFile(currentPath, 'utf-8'));
+          } catch {
+            current = null;
+          }
+          return { code: 0, stdout: JSON.stringify({ ok: true, current }) };
+        }
+        if (sub === 'set') {
+          if (!currentOk) return { code: 2, stdout: JSON.stringify({ ok: false, reason: 'current_registration_failed' }) };
+          const flag = (name) => {
+            const index = args.indexOf(name);
+            return index >= 0 ? args[index + 1] : null;
+          };
+          const record = {
+            v: 1,
+            version: flag('--version'),
+            runtimePath: flag('--runtime-path'),
+            cliPath: flag('--cli'),
+            provider: flag('--provider') ?? 'shared',
+            owner: flag('--owner') ?? 'shared',
+            installedAt: flag('--installed-at') ?? new Date().toISOString(),
+          };
+          await mkdir(join(cloudRoot, 'runtime'), { recursive: true });
+          await writeFile(currentPath, `${JSON.stringify(record, null, 2)}\n`, 'utf-8');
+          return { code: 0, stdout: JSON.stringify({ ok: true, current: record }) };
+        }
+        if (sub === 'clear') {
+          await rm(currentPath, { force: true });
+          return { code: 0, stdout: JSON.stringify({ ok: true, cleared: true }) };
+        }
+        return { code: 2, stdout: JSON.stringify({ ok: false, reason: 'unexpected_current_command' }) };
       }
       if (commandName === 'runtime' && args[2] === 'provider') {
         if (!providerOk) return { code: 2, stdout: JSON.stringify({ ok: false, reason: 'invalid_registry' }) };
@@ -399,6 +441,15 @@ describe('Phase 4b install controller: explicit install only', () => {
     expect(lifecycle.calls).toEqual([{ restartOwned: false }]);
     expect(existsSync(join(root, 'runtime', RUNTIME_INSTALL_VERSION, 'node_modules', '@mebular', 'core', 'package.json'))).toBe(true);
     expect(existsSync(join(root, 'config.json'))).toBe(true);
+    const current = JSON.parse(await readFile(join(root, 'runtime', 'current.json'), 'utf-8'));
+    expect(current).toMatchObject({
+      v: 1,
+      version: RUNTIME_INSTALL_VERSION,
+      runtimePath: join(root, 'runtime', RUNTIME_INSTALL_VERSION),
+      provider: 'shared',
+      owner: 'shared',
+    });
+    expect(current.cliPath).toContain(join('@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs'));
     await expectCleanRuntimeDir(root);
 
     const again = manager.start('install');
@@ -569,6 +620,8 @@ describe('Phase 4b install controller: failure mapping and recovery', () => {
     expect(tools.npmCalls()).toHaveLength(1);
     expect(tools.providerCalls()).toHaveLength(1);
     expect(lifecycle.calls).toHaveLength(0);
+    // 初始化失败回滚 current，避免“安装写了一半”的 current 指向未启动 runtime。
+    expect(existsSync(join(root, 'runtime', 'current.json'))).toBe(false);
 
     tools.failInit(false);
     manager.start('retry');
@@ -607,6 +660,21 @@ describe('Phase 4b install controller: failure mapping and recovery', () => {
     const state = await waitSettled(manager);
     expect(state).toMatchObject({ state: 'failed', reason: 'provider_registration_failed', installed: true });
     expect(existsSync(join(root, 'runtime', RUNTIME_INSTALL_VERSION))).toBe(true);
+    expect(tools.initCalls()).toHaveLength(0);
+    expect(lifecycle.calls).toHaveLength(0);
+  });
+
+  it('current registration failure keeps the installed runtime but reports a stable reason', async () => {
+    const root = await tempRoot();
+    const lifecycle = createFakeLifecycle();
+    const tools = createFakeTools(root, { currentOk: false });
+    const manager = managerFor(root, lifecycle, () => discovery(null), tools);
+
+    manager.start('install');
+    const state = await waitSettled(manager);
+    expect(state).toMatchObject({ state: 'failed', reason: 'current_registration_failed', installed: true });
+    expect(existsSync(join(root, 'runtime', RUNTIME_INSTALL_VERSION))).toBe(true);
+    expect(existsSync(join(root, 'runtime', 'current.json'))).toBe(false);
     expect(tools.initCalls()).toHaveLength(0);
     expect(lifecycle.calls).toHaveLength(0);
   });
@@ -1291,5 +1359,97 @@ describe('Phase 4b lifecycle: explicit startAfterInstall/retry', () => {
     expect(state.status).toBe('down');
     expect(probes).toBeGreaterThan(before);
     await lifecycle.dispose();
+  });
+});
+
+describe('Phase 5a service manifest detection', () => {
+  it('plugin provider discovery prefers a valid shared current over registry order', async () => {
+    const root = await tempRoot();
+    const makeRuntime = async (version) => {
+      const runtimePath = join(root, 'runtime', version);
+      const core = join(runtimePath, 'node_modules', '@mebular', 'core');
+      await mkdir(join(core, 'packages', 'mcp', 'bin'), { recursive: true });
+      await writeFile(join(core, 'package.json'), JSON.stringify({ name: '@mebular/core', version }), 'utf-8');
+      const cliPath = join(core, 'packages', 'mcp', 'bin', 'mebular.mjs');
+      await writeFile(cliPath, '// runtime\n', 'utf-8');
+      return { runtimePath, cliPath };
+    };
+    const oldRuntime = await makeRuntime('0.1.1');
+    const newRuntime = await makeRuntime('0.1.2');
+    await writeFile(join(root, 'runtime-providers.json'), JSON.stringify({
+      v: 1,
+      providers: [
+        { id: 'old', kind: 'shared', path: oldRuntime.cliPath, version: '0.1.1', capabilities: ['serve'] },
+        { id: 'new', kind: 'shared', path: newRuntime.cliPath, version: '0.1.2', capabilities: ['serve'] },
+      ],
+    }), 'utf-8');
+    await writeFile(join(root, 'runtime', 'current.json'), JSON.stringify({
+      v: 1,
+      version: '0.1.2',
+      runtimePath: newRuntime.runtimePath,
+      cliPath: newRuntime.cliPath,
+      provider: 'shared',
+      owner: 'shared',
+      installedAt: '2026-01-01T00:00:00.000Z',
+    }), 'utf-8');
+
+    const current = readRuntimeCurrentProvider({ cloudRoot: root });
+    expect(current).toMatchObject({ usable: true, provider: { source: 'current', path: newRuntime.cliPath } });
+    const discovery = await discoverRuntimeProviders({
+      env: {},
+      userHome: root,
+      cloudRoot: root,
+      includeStandardApp: false,
+    });
+    expect(discovery.selected).toMatchObject({ kind: 'shared', path: newRuntime.cliPath, source: 'current' });
+  });
+
+  it('reads runtimePath/version/provider/owner from the shared mebular-serve manifest', async () => {
+    const userHome = await tempRoot();
+    const serviceHome = join(userHome, '.mebular', 'services');
+    const unitPath = join(serviceHome, 'mebular-serve.plist');
+    await mkdir(serviceHome, { recursive: true });
+    await writeFile(unitPath, 'plist', 'utf-8');
+    await writeFile(join(serviceHome, 'mebular-serve.json'), JSON.stringify({
+      kind: 'mebular-serve',
+      label: 'com.mebular.mebular-serve.test',
+      sha: 'x',
+      autostart: true,
+      args: ['/rt/mebular.mjs', 'serve'],
+      execPath: process.execPath,
+      unitPath,
+      installedAt: '2026-01-01T00:00:00.000Z',
+      runtime: {
+        version: '0.1.2',
+        runtimePath: '/rt/0.1.2',
+        cliPath: '/rt/mebular.mjs',
+        provider: 'app',
+        owner: 'app',
+        home: '/rt/home',
+        cloudRoot: '/rt',
+      },
+    }), 'utf-8');
+
+    const info = readRegisteredRuntimeService({ env: { MEBULAR_SERVICE_HOME: serviceHome }, userHome });
+    expect(info).toMatchObject({
+      registered: true,
+      version: '0.1.2',
+      runtimePath: '/rt/0.1.2',
+      provider: 'app',
+      owner: 'app',
+      cloudRoot: '/rt',
+    });
+  });
+
+  it('missing unit file means not registered', async () => {
+    const userHome = await tempRoot();
+    const serviceHome = join(userHome, '.mebular', 'services');
+    await mkdir(serviceHome, { recursive: true });
+    await writeFile(join(serviceHome, 'mebular-serve.json'), JSON.stringify({
+      kind: 'mebular-serve',
+      unitPath: join(serviceHome, 'missing.plist'),
+      runtime: { version: '0.1.2' },
+    }), 'utf-8');
+    expect(readRegisteredRuntimeService({ env: { MEBULAR_SERVICE_HOME: serviceHome }, userHome })).toBe(null);
   });
 });

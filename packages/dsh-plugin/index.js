@@ -78,6 +78,7 @@ const DEFAULT_BRIDGE_POLL_INTERVAL_MS = 2000;
 const DEFAULT_RESOLVE_TIMEOUT_MS = 5000;
 const DEFAULT_CLI_NAME = 'mebular';
 const RUNTIME_FILE = 'runtime.json';
+const RUNTIME_CURRENT_FILE = 'current.json';
 const RUNTIME_PROVIDERS_FILE = 'runtime-providers.json';
 const MAX_JSON_BYTES = 512 * 1024;
 const MAX_LOG_LINE = 500;
@@ -110,6 +111,7 @@ export const RUNTIME_INSTALL_REASONS = Object.freeze([
   'cancelled',
   'install_locked',
   'provider_registration_failed',
+  'current_registration_failed',
   'init_failed',
   'start_failed',
   'runtime_resolve_failed',
@@ -675,18 +677,79 @@ function providerKindOrder(kind) {
 
 function providerSourceOrder(source) {
   return source === 'config' ? -1
-    : source === 'registry' ? 0
-      : source === 'standard' ? 1
-        : source === 'env' ? 2
-          : source === 'path' ? 3
-            : 9;
+    : source === 'current' ? -1
+      : source === 'registry' ? 0
+        : source === 'standard' ? 1
+          : source === 'env' ? 2
+            : source === 'path' ? 3
+              : 9;
+}
+
+/**
+ * Read `<cloudRoot>/runtime/current.json` and validate the pointed install
+ * without reading config/secrets. Corrupt or half-installed pointers are
+ * ignored with a warning; a missing pointer is legal.
+ */
+export function readRuntimeCurrentProvider({
+  cloudRoot,
+  exists = existsSync,
+  readFileImpl = readFileSync,
+} = {}) {
+  if (typeof cloudRoot !== 'string' || cloudRoot.length === 0) {
+    return { provider: null, usable: false, current: null, warning: null, invalidPath: null };
+  }
+  const file = join(cloudRoot, 'runtime', RUNTIME_CURRENT_FILE);
+  let raw;
+  try {
+    raw = JSON.parse(readFileImpl(file, 'utf-8'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return { provider: null, usable: false, current: null, warning: null, invalidPath: null };
+    }
+    return { provider: null, usable: false, current: null, warning: 'runtime current.json is corrupt; ignoring it', invalidPath: null };
+  }
+  const version = typeof raw?.version === 'string' && SEMVER_RE.test(raw.version) ? raw.version : null;
+  const runtimePath = isAbsolute(raw?.runtimePath ?? '') ? raw.runtimePath : null;
+  const cliPath = isAbsolute(raw?.cliPath ?? '') ? raw.cliPath : null;
+  if (version === null || runtimePath === null || cliPath === null || raw?.v !== 1) {
+    return { provider: null, usable: false, current: null, warning: 'runtime current.json is invalid; ignoring it', invalidPath: cliPath };
+  }
+  const current = {
+    version,
+    runtimePath,
+    cliPath,
+    provider: typeof raw.provider === 'string' ? raw.provider : 'shared',
+    owner: typeof raw.owner === 'string' ? raw.owner : 'shared',
+    installedAt: typeof raw.installedAt === 'string' ? raw.installedAt : null,
+  };
+  if (!exists(cliPath)) {
+    return { provider: null, usable: false, current, warning: 'runtime current points to a missing CLI; ignoring it', invalidPath: cliPath };
+  }
+  try {
+    const manifest = JSON.parse(readFileImpl(join(runtimePath, 'node_modules', '@mebular', 'core', 'package.json'), 'utf-8'));
+    if (manifest?.name !== undefined && manifest.name !== '@mebular/core') {
+      return { provider: null, usable: false, current, warning: 'runtime current package name mismatch; ignoring it', invalidPath: cliPath };
+    }
+    if (manifest?.version !== version) {
+      return { provider: null, usable: false, current, warning: 'runtime current package version mismatch; ignoring it', invalidPath: cliPath };
+    }
+  } catch {
+    return { provider: null, usable: false, current, warning: 'runtime current points to an incomplete install; ignoring it', invalidPath: cliPath };
+  }
+  return {
+    provider: { kind: 'shared', path: cliPath, source: 'current', version },
+    usable: true,
+    current,
+    warning: null,
+    invalidPath: null,
+  };
 }
 
 /**
  * Discover launchable runtime providers without reading Mebular config or
  * secrets. Order mirrors the shared supervisor: app > cli > shared, with the
  * registry ahead of standard App paths and PATH. An explicit config `cliPath`
- * is a user pin and wins.
+ * is a user pin and wins; a valid shared `current` wins among shared versions.
  *
  * @param {{
  *   env?: Record<string, string | undefined>,
@@ -729,6 +792,16 @@ export async function discoverRuntimeProviders(options = {}) {
   const pin = resolveCommandCandidate(opts.cliPath, { env, platform, exists });
   if (pin !== null) add('cli', pin, 'config');
 
+  const currentState = readRuntimeCurrentProvider({
+    cloudRoot,
+    exists,
+    ...(typeof opts.readFileImpl === 'function' ? { readFileImpl: opts.readFileImpl } : {}),
+  });
+  if (currentState.warning !== null) warnings.push(currentState.warning);
+  if (currentState.provider !== null) {
+    add(currentState.provider.kind, currentState.provider.path, currentState.provider.source, currentState.provider.version);
+  }
+
   let registry = opts.registry;
   if (registry === undefined) {
     try {
@@ -743,6 +816,11 @@ export async function discoverRuntimeProviders(options = {}) {
       // The supervisor writes absolute paths; never resolve a registry path
       // relative to the plugin's cwd.
       if (typeof entry.path !== 'string' || !isAbsolute(entry.path)) continue;
+      if (entry.kind === 'shared'
+        && currentState.invalidPath !== null
+        && entry.path === currentState.invalidPath) {
+        continue;
+      }
       add(entry.kind, entry.path, 'registry', entry.version);
     }
   } else if (registry !== null && registry !== undefined) {
@@ -778,6 +856,10 @@ export async function discoverRuntimeProviders(options = {}) {
     if (source !== 0) return source;
     return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
   });
+
+  if (currentState.usable !== true && sorted.filter((entry) => entry.kind === 'shared').length > 1) {
+    warnings.push('multiple shared runtimes found but current is unavailable; using provider path/version order');
+  }
 
   return {
     cloudRoot,
@@ -1135,10 +1217,17 @@ function sanitizeProvider(value) {
 
 function sanitizeService(value) {
   if (!isObject(value)) return null;
+  const text = (key) => (typeof value[key] === 'string' && value[key].length > 0 ? value[key] : null);
+  const runtime = isObject(value.runtime) ? value.runtime : null;
   return {
     registered: value.registered === true,
     running: value.running === true,
     foreign: value.foreign === true,
+    version: text('version') ?? (typeof runtime?.version === 'string' ? runtime.version : null),
+    provider: text('provider') ?? (typeof runtime?.provider === 'string' ? runtime.provider : null),
+    owner: text('owner') ?? (typeof runtime?.owner === 'string' ? runtime.owner : null),
+    label: text('label'),
+    unitPath: text('unitPath'),
   };
 }
 
@@ -1852,13 +1941,11 @@ function runInstalledCli({
 }
 
 /**
- * Best-effort service registration detection without reading Mebular config or
- * secrets: the service installer writes a manifest under
- * `<serviceHome>/.mebular/services/mebular-serve.json` (or MEBULAR_SERVICE_HOME).
- * A registered service means the install action must start/attach it instead of
- * downloading a second runtime.
+ * Read the non-sensitive `mebular-serve` manifest written by the shared service
+ * layer. Returns `null` when missing/corrupt; `registered` requires the unit file
+ * (when recorded) to exist.
  */
-export function detectRegisteredRuntimeService({
+export function readRegisteredRuntimeService({
   env = process.env,
   userHome = homedir(),
   exists = existsSync,
@@ -1867,17 +1954,45 @@ export function detectRegisteredRuntimeService({
     ? env.MEBULAR_SERVICE_HOME
     : join(userHome, '.mebular', 'services');
   const manifestPath = join(serviceHome, 'mebular-serve.json');
-  if (!exists(manifestPath)) return false;
+  if (!exists(manifestPath)) return null;
   try {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
-    if (manifest?.kind !== undefined && manifest.kind !== 'mebular-serve') return false;
-    if (typeof manifest?.unitPath === 'string' && manifest.unitPath.length > 0) {
-      return exists(manifest.unitPath);
-    }
-    return true;
+    if (manifest?.kind !== undefined && manifest.kind !== 'mebular-serve') return null;
+    const unitExists = typeof manifest?.unitPath === 'string' && manifest.unitPath.length > 0
+      ? exists(manifest.unitPath)
+      : true;
+    if (!unitExists) return null;
+    const runtime = isObject(manifest?.runtime) ? manifest.runtime : null;
+    return {
+      registered: true,
+      manifestPath,
+      label: typeof manifest?.label === 'string' ? manifest.label : null,
+      unitPath: typeof manifest?.unitPath === 'string' ? manifest.unitPath : null,
+      autostart: manifest?.autostart === true,
+      version: typeof runtime?.version === 'string' ? runtime.version : null,
+      runtimePath: typeof runtime?.runtimePath === 'string' ? runtime.runtimePath : null,
+      cliPath: typeof runtime?.cliPath === 'string'
+        ? runtime.cliPath
+        : (Array.isArray(manifest?.args) && typeof manifest.args[0] === 'string' ? manifest.args[0] : null),
+      provider: typeof runtime?.provider === 'string' ? runtime.provider : null,
+      owner: typeof runtime?.owner === 'string' ? runtime.owner : null,
+      home: typeof runtime?.home === 'string' ? runtime.home : null,
+      cloudRoot: typeof runtime?.cloudRoot === 'string' ? runtime.cloudRoot : null,
+    };
   } catch {
-    return false;
+    return null;
   }
+}
+
+/**
+ * Best-effort service registration detection without reading Mebular config or
+ * secrets: the shared installer writes a manifest under
+ * `<serviceHome>/.mebular/services/mebular-serve.json` (or MEBULAR_SERVICE_HOME).
+ * A registered service means the install action must start/attach it instead of
+ * downloading a second runtime.
+ */
+export function detectRegisteredRuntimeService(options = {}) {
+  return readRegisteredRuntimeService(options)?.registered === true;
 }
 
 /** Non-sensitive install status shared by `/mebular/embed-info` and HTTP. */
@@ -2200,6 +2315,59 @@ export function createRuntimeInstallManager(options = {}) {
     });
   }
 
+  async function readCurrentRecord(cliPath) {
+    const result = await runCli(cliPath, ['runtime', 'current', 'show', '--json']);
+    const data = parseJsonDocument(result.stdout);
+    if (!result.ok || data?.ok !== true) return { ok: false, current: null };
+    return { ok: true, current: isObject(data.current) ? data.current : null };
+  }
+
+  async function setCurrentRecord(cliPath, record) {
+    const args = [
+      'runtime',
+      'current',
+      'set',
+      '--version',
+      record.version,
+      '--runtime-path',
+      record.runtimePath,
+      '--cli',
+      record.cliPath,
+      '--provider',
+      record.provider ?? 'shared',
+      '--owner',
+      record.owner ?? 'shared',
+      ...(typeof record.installedAt === 'string' && record.installedAt.length > 0
+        ? ['--installed-at', record.installedAt]
+        : []),
+      '--json',
+    ];
+    const result = await runCli(cliPath, args);
+    const data = parseJsonDocument(result.stdout);
+    if (!result.ok || data?.ok !== true) {
+      throw installError('current_registration_failed', 'runtime current registration failed', {
+        detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? result.spawnError?.message ?? 'current_registration_failed', {
+          home: cloudRoot,
+          cliPath,
+        }),
+      });
+    }
+    return data.current ?? null;
+  }
+
+  async function clearCurrentRecord(cliPath) {
+    const result = await runCli(cliPath, ['runtime', 'current', 'clear', '--json']);
+    const data = parseJsonDocument(result.stdout);
+    if (!result.ok || data?.ok !== true) {
+      throw installError('current_registration_failed', 'runtime current clear failed', {
+        detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? result.spawnError?.message ?? 'current_clear_failed', {
+          home: cloudRoot,
+          cliPath,
+        }),
+      });
+    }
+  }
+
   async function resolveInstalledHome(cliPath) {
     const result = await runCli(cliPath, ['runtime', 'resolve', '--json']);
     const data = parseJsonDocument(result.stdout);
@@ -2434,6 +2602,8 @@ export function createRuntimeInstallManager(options = {}) {
     let backupPath = null;
     let newProviderPath = null;
     let providerRegistered = false;
+    let currentWritten = false;
+    let previousCurrent = null;
     let startAttempted = false;
 
     const restoreBackup = async () => {
@@ -2488,6 +2658,28 @@ export function createRuntimeInstallManager(options = {}) {
       return ok;
     };
 
+    const restorePreviousCurrent = async () => {
+      if (!currentWritten) return true;
+      const cliPath = newProviderPath !== null && exists(newProviderPath)
+        ? newProviderPath
+        : previousProvider?.path;
+      if (typeof cliPath !== 'string' || !exists(cliPath)) {
+        log('warn', 'previous runtime current could not be restored (no usable CLI)');
+        return false;
+      }
+      try {
+        if (previousCurrent === null) {
+          await clearCurrentRecord(cliPath);
+        } else {
+          await setCurrentRecord(cliPath, previousCurrent);
+        }
+        return true;
+      } catch (error) {
+        log('warn', `previous runtime current could not be restored (${safeErrorCode(error)})`);
+        return false;
+      }
+    };
+
     const restartPreviousDaemon = async () => {
       try {
         const result = await lifecycle.startAfterInstall({ restartOwned: false });
@@ -2503,9 +2695,11 @@ export function createRuntimeInstallManager(options = {}) {
     const rollback = async ({ allowRestart }) => {
       const filesRestored = await restoreBackup();
       const providerRestored = await restorePreviousProvider();
+      const currentRestored = await restorePreviousCurrent();
       const notes = [];
       if (!filesRestored) notes.push('previous_runtime_restore_failed');
       if (!providerRestored) notes.push('previous_provider_restore_failed');
+      if (!currentRestored) notes.push('previous_current_restore_failed');
       if (allowRestart && startAttempted && previousOwned) {
         if (!providerRestored) {
           notes.push('previous_daemon_restart_skipped');
@@ -2525,11 +2719,27 @@ export function createRuntimeInstallManager(options = {}) {
         await rollback({ allowRestart: false });
         return;
       }
+      const currentBefore = await readCurrentRecord(files.cliPath);
+      previousCurrent = currentBefore.current;
       await registerProvider(files.cliPath);
       providerRegistered = true;
       if (sharedReinstall && previousProvider !== null && previousProvider.path !== files.cliPath) {
         await removeProviderRecord(files.cliPath, previousProvider.path);
       }
+      if (disposed) {
+        await rollback({ allowRestart: false });
+        return;
+      }
+      // 4b 与 4a 共用 current 语义：安装成功后由安装后的 CLI 原子写 current。
+      await setCurrentRecord(files.cliPath, {
+        version,
+        runtimePath: runtimeInstallTarget(cloudRoot, version),
+        cliPath: files.cliPath,
+        provider: 'shared',
+        owner: 'shared',
+        installedAt: now(),
+      });
+      currentWritten = true;
       if (disposed) {
         await rollback({ allowRestart: false });
         return;

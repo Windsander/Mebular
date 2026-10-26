@@ -236,8 +236,8 @@ describe('mebular runtime install|reinstall CLI', () => {
     expect(missingJson).toMatchObject({ ok: false, reason: 'USAGE' });
     expect(missingJson.message).toContain('install');
     expect(missingJson.message).toContain('reinstall');
+    expect(missingJson.message).toContain('upgrade');
     expect(missingJson.message).not.toContain('check-update');
-    expect(missingJson.message).not.toContain('upgrade');
 
     const unknown = runCli(env, 'nope', '--json');
     expect(unknown.status).toBe(2);

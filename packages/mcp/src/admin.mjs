@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { POLICY_NAMESPACE, normalizeNamespace } from '@mebular/core';
 import { configPath } from './config.mjs';
-import { cloudError, displayPath, readRegistry } from './profiles.mjs';
+import { cloudError, displayPath, readRegistry, resolveCloudRoot } from './profiles.mjs';
 import { TOOL_NAMES } from './tools.mjs';
 import { hotPaths, readApplyPending, readApplyResult } from './config-apply.mjs';
 import {
@@ -1239,15 +1239,30 @@ export async function buildNetStatusView({ app }) {
 
 /** H-1 · GET /admin/api/service：常驻运行状态（registered/running/autostart/heartbeat）。 */
 export async function buildServiceView({ home: instanceHome }) {
-  const { serviceStatusForHome, registeredForHome, resolveServiceHome, SERVICE_KIND } = await import('./service-control.mjs');
+  const { runtimeServiceStatus, runtimeProviderFromEnv, RUNTIME_SERVICE_KIND } = await import('./runtime-service.mjs');
+  const { registeredForHome, resolveServiceHome, SERVICE_KIND } = await import('./service-control.mjs');
   const platform = process.platform;
   // 两套 home：home 是实例身份（descriptor 的 MEBULAR_HOME/心跳），serviceHome 是 unit/manifest 落盘位置。
   // 旧实现把两者混用 → 控制台去实例 home 下找 unit，对 CLI 装在 OS home 的服务误报「未常驻」。
   const serviceHome = resolveServiceHome();
+  const cloud = resolveCloudRoot({ home: instanceHome, env: process.env });
+  const fallbackProvider = runtimeProviderFromEnv({ cliPath: process.argv[1] });
   let status = null;
   let error = null;
   try {
-    status = serviceStatusForHome({ home: instanceHome, serviceHome, platform });
+    if (cloud.available) {
+      status = await runtimeServiceStatus({
+        root: cloud.root,
+        home: instanceHome,
+        serviceHome,
+        platform,
+        fallbackProvider,
+      });
+      if (status.ok !== true) error = status.message ?? status.reason ?? 'service_unknown';
+    } else {
+      const { serviceStatusForHome } = await import('./service-control.mjs');
+      status = serviceStatusForHome({ home: instanceHome, serviceHome, platform });
+    }
   } catch (cause) {
     error = String(cause?.message ?? cause);
   }
@@ -1259,7 +1274,7 @@ export async function buildServiceView({ home: instanceHome }) {
   }
   return {
     platform,
-    kind: SERVICE_KIND,
+    kind: RUNTIME_SERVICE_KIND ?? SERVICE_KIND,
     home: instanceHome,
     serviceHome,
     serviceManaged: Boolean(process.env.MEBULAR_SERVICE_KIND || process.env.MEBULAR_SERVICE_SHA),
@@ -1267,6 +1282,13 @@ export async function buildServiceView({ home: instanceHome }) {
     running: status?.running ?? false,
     autostart: status?.autostart ?? null,
     unitPath: status?.unitPath ?? null,
+    version: status?.version ?? null,
+    runtimePath: status?.runtimePath ?? null,
+    provider: status?.provider ?? null,
+    owner: status?.owner ?? null,
+    current: status?.current ?? null,
+    currentUsable: status?.currentUsable === true,
+    ...(error ? { error } : {}),
     sha: status?.sha ?? null,
     heartbeat: status?.heartbeat ?? null,
     ...(error ? { error } : {}),

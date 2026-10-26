@@ -97,6 +97,16 @@ function runCli(env, ...args) {
   });
 }
 
+async function writeRuntime(root, version) {
+  const runtimePath = join(root, 'runtime', version);
+  const core = join(runtimePath, 'node_modules', '@mebular', 'core');
+  await mkdir(join(core, 'packages', 'mcp', 'bin'), { recursive: true });
+  await writeFile(join(core, 'package.json'), JSON.stringify({ name: '@mebular/core', version }), 'utf-8');
+  const cliPath = join(core, 'packages', 'mcp', 'bin', 'mebular.mjs');
+  await writeFile(cliPath, '// fake runtime\n', 'utf-8');
+  return { runtimePath, cliPath };
+}
+
 describe('mebular runtime CLI：resolve / status / ensure', () => {
   it('status 输出稳定 JSON（daemon down 仍 ok:true），不含 child/token', async () => {
     const { root, serviceHome, port } = await makeRoot();
@@ -197,5 +207,68 @@ describe('mebular runtime CLI：resolve / status / ensure', () => {
     const badPort = runCli(envFor(root, serviceHome), 'resolve', '--port', '99999');
     expect(badPort.status).toBe(2);
     expect(JSON.parse(badPort.stdout)).toMatchObject({ ok: false, reason: 'INVALID_PORT' });
+  });
+});
+
+describe('mebular runtime CLI：current / service / upgrade', () => {
+  it('current show/set/clear + runtime status 暴露 current（非敏感）', async () => {
+    const { root, serviceHome } = await makeRoot();
+    const missing = runCli(envFor(root, serviceHome), 'current', 'show');
+    expect(missing.status).toBe(0);
+    expect(JSON.parse(missing.stdout)).toMatchObject({ ok: true, current: null, usable: false });
+
+    const layout = await writeRuntime(root, '0.1.2');
+    const set = spawnSync(process.execPath, [
+      CLI, 'runtime', 'current', 'set',
+      '--version', '0.1.2',
+      '--runtime-path', layout.runtimePath,
+      '--cli', layout.cliPath,
+      '--provider', 'shared',
+      '--owner', 'shared',
+      '--json',
+    ], { env: envFor(root, serviceHome), encoding: 'utf-8', timeout: 20_000 });
+    expect(set.status).toBe(0);
+    expect(JSON.parse(set.stdout)).toMatchObject({ ok: true, current: { version: '0.1.2' } });
+
+    const status = runCli(envFor(root, serviceHome), 'status');
+    expect(status.status).toBe(0);
+    const json = JSON.parse(status.stdout);
+    expect(json).toMatchObject({ current: { version: '0.1.2' }, currentUsable: true });
+    expect(status.stdout).not.toMatch(/token|privateKey|secret/i);
+
+    const clear = runCli(envFor(root, serviceHome), 'current', 'clear');
+    expect(clear.status).toBe(0);
+    expect(JSON.parse(clear.stdout)).toMatchObject({ ok: true, cleared: true });
+  });
+
+  it('service status/uninstall 无 service 也稳定；install 无 current → runtime_required', async () => {
+    const { root, serviceHome } = await makeRoot();
+    const status = runCli(envFor(root, serviceHome), 'service', 'status');
+    expect(status.status).toBe(0);
+    expect(JSON.parse(status.stdout)).toMatchObject({
+      ok: true,
+      registered: false,
+      running: false,
+      current: null,
+    });
+
+    const uninstall = runCli(envFor(root, serviceHome), 'service', 'uninstall');
+    expect(uninstall.status).toBe(0);
+    expect(JSON.parse(uninstall.stdout)).toMatchObject({ ok: true, removed: false, runtimePreserved: true });
+
+    const install = runCli(envFor(root, serviceHome), 'service', 'install');
+    expect(install.status).toBe(2);
+    expect(JSON.parse(install.stdout)).toMatchObject({ ok: false, reason: 'runtime_required' });
+  });
+
+  it('upgrade 非法版本 / service 未知子命令 → exit 2 + 稳定 reason/usage', async () => {
+    const { root, serviceHome } = await makeRoot();
+    const invalid = runCli(envFor(root, serviceHome), 'upgrade', '--to', 'latest');
+    expect(invalid.status).toBe(2);
+    expect(JSON.parse(invalid.stdout)).toMatchObject({ ok: false, reason: 'unsupported_version' });
+
+    const usage = runCli(envFor(root, serviceHome), 'service', 'nope');
+    expect(usage.status).toBe(2);
+    expect(JSON.parse(usage.stdout)).toMatchObject({ ok: false, reason: 'USAGE' });
   });
 });

@@ -223,8 +223,19 @@ export function serviceEnabledFor(service, home, serviceHome = homedir()) {
  * `ServiceOptions.home` 是「plist/manifest 落在哪个 OS 用户目录」，由调用方另传
  * （App 必须传 OS home，而不是忆云 home——否则单元会写进 profiles/<id> 内）。
  */
-export function serviceDescriptorFor({ home, cliBin, execPath, http, cloudRoot = null }) {
+export function serviceDescriptorFor({ home, cliBin, execPath, http, cloudRoot = null, runtime = null }) {
   const listenArgs = Number.isInteger(http?.port) && http.port > 0 ? ['--port', String(http.port)] : [];
+  const runtimeInfo = runtime ?? {
+    version: APP_VERSION,
+    runtimePath: null,
+    cliPath: cliBin,
+    provider: 'app',
+    owner: 'app',
+    execPath,
+    electron: true,
+    cloudRoot: typeof cloudRoot === 'string' && cloudRoot.length > 0 ? cloudRoot : null,
+    home,
+  };
   return {
     kind: SERVICE_KIND,
     args: [cliBin, 'serve', ...listenArgs],
@@ -236,7 +247,12 @@ export function serviceDescriptorFor({ home, cliBin, execPath, http, cloudRoot =
       ...(typeof cloudRoot === 'string' && cloudRoot.length > 0 ? { MEBULAR_CLOUD_ROOT: cloudRoot } : {}),
       // 打包态 execPath = Electron 本体；显式以 Node 运行时启动 CLI（否则会再开一个 App）。
       ELECTRON_RUN_AS_NODE: '1',
+      MEBULAR_RUNTIME_PROVIDER: runtimeInfo.provider ?? 'app',
+      MEBULAR_RUNTIME_OWNER: runtimeInfo.owner ?? 'app',
+      ...(runtimeInfo.version ? { MEBULAR_RUNTIME_VERSION: runtimeInfo.version } : {}),
+      ...(runtimeInfo.cliPath ? { MEBULAR_RUNTIME_PATH: runtimeInfo.cliPath } : {}),
     },
+    runtime: runtimeInfo,
   };
 }
 
@@ -271,6 +287,89 @@ async function loadRuntimeProviders(cliBin) {
   }
 }
 
+async function loadRuntimeCurrent(cliBin) {
+  if (typeof cliBin !== 'string' || cliBin.length === 0) {
+    return { module: null, error: '缺少 cliBin' };
+  }
+  try {
+    return { module: await importRuntimeSource(cliBin, 'runtime-current.mjs'), error: null };
+  } catch (error) {
+    return { module: null, error: String(error?.message ?? error) };
+  }
+}
+
+/**
+ * App service 来源：共享 current 可用 → 指向 current CLI（owner/shared），
+ * 否则保留 App 现有 provider（owner/app，指向 App bundle CLI）。**绝不下载**。
+ *
+ * execPath/ELECTRON_RUN_AS_NODE/port/cloudRoot 仍由 App 描述符决定；只是把 args 的 CLI
+ * 从 App bundle 切到共享 runtime，从而满足“service 指向共享 runtime”的所有权边界。
+ */
+export async function resolveAppServiceRuntime({
+  cliBin,
+  cloudRoot = null,
+  version = APP_VERSION,
+  currentModule = null,
+} = {}) {
+  const fallback = {
+    version,
+    runtimePath: null,
+    cliPath: cliBin,
+    provider: 'app',
+    owner: 'app',
+    execPath: process.execPath,
+    electron: true,
+    cloudRoot: typeof cloudRoot === 'string' && cloudRoot.length > 0 ? cloudRoot : null,
+  };
+  if (typeof cloudRoot !== 'string' || cloudRoot.length === 0) {
+    return { source: fallback, current: null, currentUsable: false, warning: null };
+  }
+  const loaded = currentModule !== null
+    ? { module: currentModule, error: null }
+    : await loadRuntimeCurrent(cliBin);
+  if (typeof loaded.module?.readRuntimeCurrent !== 'function') {
+    return {
+      source: fallback,
+      current: null,
+      currentUsable: false,
+      warning: `共享 runtime current 模块不可用，保留 App provider${loaded.error ? `（${loaded.error}）` : ''}`,
+    };
+  }
+  try {
+    const state = await loaded.module.readRuntimeCurrent(cloudRoot);
+    if (state.usable === true && state.current) {
+      return {
+        source: {
+          version: state.current.version,
+          runtimePath: state.current.runtimePath,
+          cliPath: state.current.cliPath,
+          provider: 'shared',
+          owner: 'shared',
+          execPath: process.execPath,
+          electron: true,
+          cloudRoot,
+        },
+        current: loaded.module.publicRuntimeCurrent(state.current),
+        currentUsable: true,
+        warning: null,
+      };
+    }
+    return {
+      source: fallback,
+      current: loaded.module.publicRuntimeCurrent(state.current),
+      currentUsable: false,
+      warning: state.warnings?.[0] ?? null,
+    };
+  } catch (error) {
+    return {
+      source: fallback,
+      current: null,
+      currentUsable: false,
+      warning: `共享 runtime current 读取失败，保留 App provider（${error?.message ?? error}）`,
+    };
+  }
+}
+
 function runtimeError(code, message, extra = {}) {
   const error = new Error(message);
   error.code = code;
@@ -296,10 +395,26 @@ export function createAppServiceAdapter({
   http,
   cloudRoot = null,
   serviceHome = homedir(),
+  runtimeSource = null,
+  current = null,
+  currentUsable = false,
 } = {}) {
-  const descriptor = serviceDescriptorFor({ home, cliBin, execPath, http, cloudRoot });
+  const effectiveRuntime = runtimeSource === null
+    ? null
+    : { ...runtimeSource, execPath };
+  const descriptor = serviceDescriptorFor({
+    home,
+    cliBin: effectiveRuntime?.cliPath ?? cliBin,
+    execPath,
+    http,
+    cloudRoot,
+    runtime: effectiveRuntime,
+  });
   return {
     descriptor,
+    runtimeSource: effectiveRuntime,
+    current,
+    currentUsable,
     async status() {
       if (typeof service?.serviceStatus === 'function') {
         try {
@@ -312,6 +427,13 @@ export function createAppServiceAdapter({
             autostart: status?.autostart ?? null,
             foreign: status?.foreign === true,
             unitPath: status?.unitPath ?? null,
+            version: status?.runtime?.version ?? effectiveRuntime?.version ?? null,
+            runtimePath: status?.runtime?.runtimePath ?? effectiveRuntime?.runtimePath ?? null,
+            provider: status?.runtime?.provider ?? effectiveRuntime?.provider ?? null,
+            owner: status?.runtime?.owner ?? effectiveRuntime?.owner ?? null,
+            runtime: status?.runtime ?? effectiveRuntime ?? null,
+            current,
+            currentUsable,
           };
         } catch (error) {
           return {
@@ -475,7 +597,19 @@ export async function ensureDaemon({
     };
   }
 
-  const adapter = createAppServiceAdapter({ service, home, cliBin, execPath, http, cloudRoot: root, serviceHome });
+  const appServiceRuntime = await resolveAppServiceRuntime({ cliBin, cloudRoot: root });
+  const adapter = createAppServiceAdapter({
+    service,
+    home,
+    cliBin,
+    execPath,
+    http,
+    cloudRoot: root,
+    serviceHome,
+    runtimeSource: appServiceRuntime.source,
+    current: appServiceRuntime.current,
+    currentUsable: appServiceRuntime.currentUsable,
+  });
   const runtimeEnv = root === null ? env : { ...env, MEBULAR_CLOUD_ROOT: root };
   const port = Number(http?.port);
   const result = await loaded.module.ensureRuntime({
@@ -500,7 +634,10 @@ export async function ensureDaemon({
     ...(typeof waitIntervalMs === 'number' ? { waitIntervalMs } : {}),
     ...(typeof now === 'function' ? { now } : {}),
   });
-  return mapSupervisorResult(result, { home, http });
+  const mapped = mapSupervisorResult(result, { home, http });
+  return appServiceRuntime.warning
+    ? { ...mapped, warning: appServiceRuntime.warning }
+    : mapped;
 }
 
 /** supervisor 结果 → App 既有模式；download_required/error 只映射为不可用/冲突提示，绝不下载。 */

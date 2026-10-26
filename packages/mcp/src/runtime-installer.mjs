@@ -1,9 +1,9 @@
-// 共享 Runtime 安装器（Phase 4a）：把固定版本的 `@mebular/core` 安装到
-// `<cloudRoot>/runtime/<version>/`，并注册 `kind:shared` provider。
+// 共享 Runtime 安装器（Phase 4a/5a）：把固定版本的 `@mebular/core` 安装到
+// `<cloudRoot>/runtime/<version>/`，注册 `kind:shared` provider，并写 current 指针。
 //
 // 边界（本阶段）：
-//   - 只安装文件 + 注册 provider；不停止/重启正在运行的 daemon/service；
-//   - 不实现 update/service/升级；不碰 DSH Plugin 或 App UI；
+//   - 只安装文件 + provider + current；不停止/重启正在运行的 daemon/service；
+//   - service 生命周期在 runtime-service.mjs，受控升级在 runtime-upgrade.mjs；
 //   - 来源固定 npm registry 的 `@mebular/core@<version>`，不接受 URL/tarball；
 //   - 全流程离线可测：npm spawn / 时钟 / PID 存活 / provider 注册均可注入。
 //
@@ -21,15 +21,34 @@ import { basename, join, resolve } from 'node:path';
 import { APP_VERSION } from './version.mjs';
 import { cloudError, pidAlive, resolveCloudRoot } from './profiles.mjs';
 import { registerExclusiveRuntimeProvider } from './runtime-providers.mjs';
+import {
+  RUNTIME_CLI_RELATIVE,
+  RUNTIME_PACKAGE_NAME,
+  RUNTIME_PACKAGE_RELATIVE,
+  assertRuntimeVersion,
+  manualRuntimeInstallCommand,
+  runtimeRootPath,
+  runtimeVersionPath,
+  sharedRuntimeCliPath,
+} from './runtime-layout.mjs';
+import { readRuntimeCurrent, writeRuntimeCurrent } from './runtime-current.mjs';
 
-export const RUNTIME_DIR = 'runtime';
+export {
+  RUNTIME_CLI_RELATIVE,
+  RUNTIME_DIR,
+  RUNTIME_PACKAGE_NAME,
+  RUNTIME_PACKAGE_RELATIVE,
+  assertRuntimeVersion,
+  manualRuntimeInstallCommand,
+  runtimeRootPath,
+  runtimeVersionPath,
+  sharedRuntimeCliPath,
+} from './runtime-layout.mjs';
+
 export const RUNTIME_INSTALL_LOCK_FILE = 'install.lock';
-export const RUNTIME_PACKAGE_NAME = '@mebular/core';
 export const RUNTIME_INSTALL_TIMEOUT_MS = 10 * 60_000;
 export const RUNTIME_KILL_GRACE_MS = 500;
 export const RUNTIME_SHARED_CAPABILITIES = Object.freeze(['serve']);
-export const RUNTIME_CLI_RELATIVE = join('node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs');
-export const RUNTIME_PACKAGE_RELATIVE = join('node_modules', '@mebular', 'core', 'package.json');
 export const RUNTIME_STAGING_PREFIX = '.tmp-install-';
 export const RUNTIME_BACKUP_PREFIX = '.backup-';
 
@@ -46,40 +65,11 @@ export const RUNTIME_INSTALL_REASONS = Object.freeze([
 ]);
 
 const INSTALL_REASON_SET = new Set(RUNTIME_INSTALL_REASONS);
-const SEMVER_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
 const MAX_VERSION_LENGTH = 128;
 const MAX_LOG_BYTES = 64 * 1024;
 
-export function runtimeRootPath(root) {
-  return join(root, RUNTIME_DIR);
-}
-
 export function runtimeInstallLockPath(root) {
   return join(runtimeRootPath(root), RUNTIME_INSTALL_LOCK_FILE);
-}
-
-export function runtimeVersionPath(root, version) {
-  return join(runtimeRootPath(root), version);
-}
-
-export function sharedRuntimeCliPath(root, version) {
-  return join(runtimeVersionPath(root, version), RUNTIME_CLI_RELATIVE);
-}
-
-export function manualRuntimeInstallCommand(version) {
-  return `npm install -g ${RUNTIME_PACKAGE_NAME}@${version}`;
-}
-
-/** 严格 semver + 路径安全：只允许可安全拼进目录/npm spec 的字符。 */
-export function assertRuntimeVersion(value) {
-  if (typeof value !== 'string') {
-    throw cloudError('unsupported_version', 'runtime 版本必须是字符串');
-  }
-  const version = value.trim();
-  if (version.length === 0 || version.length > MAX_VERSION_LENGTH || !SEMVER_RE.test(version)) {
-    throw cloudError('unsupported_version', `不支持的 runtime 版本：${version.slice(0, MAX_VERSION_LENGTH) || '(空)'}`);
-  }
-  return version;
 }
 
 function safeRequestedVersion(value) {
@@ -588,6 +578,7 @@ function successResult(context, fields = {}) {
     runtimeInstalled: true,
     providerRegistered: false,
     provider: null,
+    current: null,
     restartRequired: false,
     running: null,
     note: null,
@@ -620,6 +611,8 @@ function failureResult(context, error, fields = {}) {
     backupPath: fields.backupPath ?? null,
     runtimeInstalled: fields.runtimeInstalled === true,
     providerRegistered: fields.providerRegistered === true,
+    provider: fields.provider ?? null,
+    current: fields.current ?? null,
     targetPreserved: fields.targetPreserved === true,
     restartRequired: false,
     running: fields.running ?? null,
@@ -629,6 +622,7 @@ function failureResult(context, error, fields = {}) {
     logTail: fields.logTail ?? error?.logTail ?? null,
     timedOut: fields.timedOut === true,
     providerErrorCode: fields.providerErrorCode ?? null,
+    currentWriteFailed: fields.currentWriteFailed === true,
     holderPid: fields.holderPid ?? error?.holderPid ?? null,
     previousPreserved: fields.previousPreserved ?? error?.previousPreserved ?? null,
     warnings: fields.warnings ?? [],
@@ -757,6 +751,30 @@ export async function installRuntime(options = {}) {
     }
   };
 
+  // 4a/4b 共用语义：安装成功后写 current。已存在的同路径/同版本 current 保留 installedAt，
+  // 避免幂等 install 每次刷新“安装时间”；新安装使用本次 checkedAt。
+  const persistCurrent = async () => {
+    try {
+      const previous = await readRuntimeCurrent(root);
+      const installedAt = previous.usable
+        && previous.current?.runtimePath === targetPath
+        && previous.current?.version === context.version
+        ? previous.current.installedAt
+        : checkedAt;
+      const current = await writeRuntimeCurrent(root, {
+        version: context.version,
+        runtimePath: targetPath,
+        cliPath,
+        provider: 'shared',
+        owner: 'shared',
+        installedAt,
+      }, { now: checkedAt });
+      return { ok: true, current };
+    } catch (error) {
+      return { ok: false, error };
+    }
+  };
+
   try {
     removeExitCleanup = installExitCleanup(state);
     lock = await acquireInstallLock({
@@ -798,6 +816,20 @@ export async function installRuntime(options = {}) {
         });
       }
       const running = await detectSafe();
+      const current = await persistCurrent();
+      if (!current.ok) {
+        return failureResult(context, cloudError(
+          'install_failed',
+          '共享 runtime 已存在，但 current 指针写入失败；现有 runtime/provider 未被删除',
+          { detail: sanitizeRuntimeInstallLog(current.error?.message ?? current.error).slice(0, 300), currentWriteFailed: true },
+        ), {
+          runtimeInstalled: true,
+          providerRegistered: true,
+          targetPreserved: true,
+          previous: null,
+          backupPath: null,
+        });
+      }
       return successResult(context, {
         reused: true,
         changed: false,
@@ -805,6 +837,7 @@ export async function installRuntime(options = {}) {
         backupPath: null,
         providerRegistered: true,
         provider: registration.provider,
+        current: current.current,
         restartRequired: running.runningDetected === true,
         running,
         note: running.runningDetected
@@ -937,6 +970,21 @@ export async function installRuntime(options = {}) {
     }
 
     const running = await detectSafe();
+    const current = await persistCurrent();
+    if (!current.ok) {
+      return failureResult(context, cloudError(
+        'install_failed',
+        'runtime 已安装，但 current 指针写入失败；现有 runtime/provider 未被删除',
+        { detail: sanitizeRuntimeInstallLog(current.error?.message ?? current.error).slice(0, 300), currentWriteFailed: true },
+      ), {
+        runtimeInstalled: true,
+        providerRegistered: true,
+        targetPreserved: true,
+        previous,
+        backupPath,
+        provider: registration.provider,
+      });
+    }
     return successResult(context, {
       reused: false,
       changed: true,
@@ -944,6 +992,7 @@ export async function installRuntime(options = {}) {
       backupPath,
       providerRegistered: true,
       provider: registration.provider,
+      current: current.current,
       restartRequired: running.runningDetected === true,
       running,
       note: running.runningDetected

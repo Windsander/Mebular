@@ -58,6 +58,19 @@ export interface RunTraceEntry {
   durationMs: number;
 }
 
+/** 共享 runtime 的非敏感元数据（随 service manifest 落盘）。 */
+export interface ServiceRuntimeInfo {
+  version: string | null;
+  runtimePath: string | null;
+  cliPath: string;
+  provider: string | null;
+  owner: string | null;
+  execPath?: string | null;
+  electron?: boolean;
+  cloudRoot?: string | null;
+  home?: string | null;
+}
+
 /** 单个常驻组件的宿主描述（由 fleet / mebular CLI 提供）。 */
 export interface ServiceDescriptor {
   kind: ServiceKind;
@@ -68,6 +81,8 @@ export interface ServiceDescriptor {
   execPath?: string;
   workingDir?: string;
   env?: Readonly<Record<string, string>>;
+  /** 共享 runtime 来源（可选；不写则不改变旧调用方 manifest 形状）。 */
+  runtime?: ServiceRuntimeInfo;
 }
 
 export interface ServiceOptions {
@@ -89,6 +104,8 @@ export interface ServiceManifest {
   execPath: string;
   unitPath: string;
   installedAt: string;
+  /** 共享 runtime 来源与 owner（不含秘密）。 */
+  runtime?: ServiceRuntimeInfo;
 }
 
 const currentPlatform = (p?: ServicePlatform): ServicePlatform => p ?? (process.platform as ServicePlatform);
@@ -369,6 +386,7 @@ export function installService(
     execPath: spec.execPath,
     unitPath,
     installedAt: new Date(options.now ?? Date.now()).toISOString(),
+    ...(descriptor.runtime !== undefined ? { runtime: descriptor.runtime } : {}),
   };
   fs.writeFileSync(manifestPath(spec.kind, home), JSON.stringify(manifest, null, 2), { mode: 0o600 });
 
@@ -515,6 +533,10 @@ export interface ServiceStatusEntry {
   unitPath: string;
   sha: string | null;
   autostart: boolean | null;
+  /** 共享 runtime 来源（manifest 扩展；旧 manifest 为 null）。 */
+  runtime: ServiceRuntimeInfo | null;
+  execPath: string | null;
+  args: string[];
   heartbeat: { present: boolean; fresh: boolean; ageMs: number | null; pid: number | null; sha: string | null; role: string | null };
 }
 
@@ -562,6 +584,9 @@ export function serviceStatus(descriptor: ServiceDescriptor, options: ServiceOpt
     unitPath,
     sha: manifest?.sha ?? null,
     autostart: manifest?.autostart ?? null,
+    runtime: manifest?.runtime ?? null,
+    execPath: manifest?.execPath ?? null,
+    args: Array.isArray(manifest?.args) ? [...manifest.args] : [],
     heartbeat: {
       present: hb !== null,
       fresh,

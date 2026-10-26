@@ -13,7 +13,7 @@ import {
   APP_VERSION, consoleUrl, ensureDaemon, resolveCliBin, resolveHome, resolveHttp,
   serviceEnabledFor, stopManaged, waitForDaemonDetail, parseArgs, probeHealthDetail, probeProvision,
   probeRuntimeIdentity, probeSecurityLevel, serviceDescriptorFor, homeKey, isPortOpen,
-  reconcileManagedState, isManagedChildAlive, registerAppRuntimeProvider,
+  reconcileManagedState, isManagedChildAlive, registerAppRuntimeProvider, resolveAppServiceRuntime,
 } from './daemon.mjs';
 import {
   loadCloudModules, migrateLegacyService, performCloudSwitch, recoverSwitchIntent,
@@ -160,12 +160,58 @@ async function loadServiceModule() {
   }
 }
 
+async function loadRuntimeServiceModule() {
+  try {
+    return await import(join(cliBin, '..', 'src', 'runtime-service.mjs'));
+  } catch {
+    return null;
+  }
+}
+
 async function probeService() {
   const service = await loadServiceModule();
   if (!service?.serviceStatus) return { available: false };
+  const runtimeService = await loadRuntimeServiceModule();
+  const appRuntime = await resolveAppServiceRuntime({ cliBin, cloudRoot });
+  if (runtimeService?.runtimeServiceStatus && typeof cloudRoot === 'string' && cloudRoot.length > 0) {
+    try {
+      const status = await runtimeService.runtimeServiceStatus({
+        root: cloudRoot,
+        home,
+        serviceHome,
+        fallbackProvider: appRuntime.source,
+        ...(service ? { serviceLib: service } : {}),
+      });
+      if (status.ok === true) {
+        return {
+          available: true,
+          registered: status.registered,
+          running: status.running,
+          autostart: status.autostart,
+          unitPath: status.unitPath ?? null,
+          version: status.version ?? null,
+          runtimePath: status.runtimePath ?? null,
+          provider: status.provider ?? null,
+          owner: status.owner ?? null,
+          current: status.current ?? null,
+          currentUsable: status.currentUsable === true,
+        };
+      }
+      return { available: true, error: status.message ?? status.reason ?? 'service_unknown' };
+    } catch (error) {
+      return { available: true, error: String(error?.message ?? error) };
+    }
+  }
   try {
     const st = service.serviceStatus(
-      serviceDescriptorFor({ home, cliBin, http: httpConf(), cloudRoot }),
+      serviceDescriptorFor({
+        home,
+        cliBin: appRuntime.source.cliPath,
+        execPath: process.execPath,
+        http: httpConf(),
+        cloudRoot,
+        runtime: appRuntime.source,
+      }),
       { home: serviceHome },
     );
     return { available: true, registered: st.registered, running: st.running, autostart: st.autostart, unitPath: st.unitPath ?? null };
@@ -799,16 +845,63 @@ async function installServiceDirect() {
   if (process.env.MEBULAR_DESKTOP_DRY_RUN === '1') {
     return { ok: true, dryRun: true, note: '（DRY_RUN）将调用 @mebular/service installService', home };
   }
+  const appRuntime = await resolveAppServiceRuntime({ cliBin, cloudRoot });
+  const runtimeService = await loadRuntimeServiceModule();
   const service = await loadServiceModule();
-  if (!service?.installService) return { ok: false, reason: '@mebular/service 不可用' };
-  const descriptor = serviceDescriptorFor({ home, cliBin, http: httpConf(), cloudRoot });
+  if (runtimeService?.installRuntimeService && typeof cloudRoot === 'string' && cloudRoot.length > 0) {
+    try {
+      const status = await runtimeService.runtimeServiceStatus({
+        root: cloudRoot,
+        home,
+        serviceHome,
+        fallbackProvider: appRuntime.source,
+        ...(service ? { serviceLib: service } : {}),
+      });
+      // F2b 幂等：已注册 → no-op（不重写 plist、不重启守护）。
+      if (status.ok === true && installDecision(status).already) {
+        return { ok: true, already: true, registered: true, running: Boolean(status.running), unitPath: status.unitPath ?? null };
+      }
+      const res = await runtimeService.installRuntimeService({
+        root: cloudRoot,
+        home,
+        serviceHome,
+        http: httpConf(),
+        fallbackProvider: appRuntime.source,
+        autostart: true,
+        ...(service ? { serviceLib: service } : {}),
+      });
+      if (res?.ok !== true) {
+        return { ok: false, reason: res?.message ?? res?.reason ?? 'service_install_failed', current: res?.current ?? null };
+      }
+      return {
+        ok: true,
+        already: res.already === true,
+        registered: true,
+        unitPath: res.unitPath ?? null,
+        runtime: res.runtime ?? null,
+        current: res.current ?? null,
+      };
+    } catch (error) {
+      return { ok: false, reason: String(error?.message ?? error) };
+    }
+  }
+  const fallbackService = await loadServiceModule();
+  if (!fallbackService?.installService) return { ok: false, reason: '@mebular/service 不可用' };
+  const descriptor = serviceDescriptorFor({
+    home,
+    cliBin: appRuntime.source.cliPath,
+    execPath: process.execPath,
+    http: httpConf(),
+    cloudRoot,
+    runtime: appRuntime.source,
+  });
   try {
     // F2b 幂等：已注册 → no-op（不重写 plist、不重启守护——重装会把健康瞬断、① 翻回未完成）
-    const status = service.serviceStatus?.(descriptor, { home: serviceHome });
+    const status = fallbackService.serviceStatus?.(descriptor, { home: serviceHome });
     if (installDecision(status).already) {
       return { ok: true, already: true, registered: true, running: Boolean(status.running), unitPath: status.unitPath ?? null };
     }
-    const res = service.installService(descriptor, { home: serviceHome, autostart: true });
+    const res = fallbackService.installService(descriptor, { home: serviceHome, autostart: true });
     return { ok: true, already: false, registered: true, unitPath: res?.unitPath ?? null };
   } catch (error) {
     return { ok: false, reason: String(error?.message ?? error) };

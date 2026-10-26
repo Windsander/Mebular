@@ -35,16 +35,23 @@ import {
   runtimeProviderId,
 } from './runtime-providers.mjs';
 import {
-  profileServiceDescriptor,
-  profileServiceStatus,
-} from './cloud-switch.mjs';
-import { loadServiceModule } from './service-loader.mjs';
+  publicRuntimeCurrent,
+  readRuntimeCurrent,
+} from './runtime-current.mjs';
+import {
+  RUNTIME_SERVICE_KIND,
+  resolveRuntimeServiceSource,
+  restartRuntimeService,
+  runtimeServiceDescriptor,
+  runtimeServiceStatus,
+} from './runtime-service.mjs';
 
 export const RUNTIME_DEFAULT_HOST = '127.0.0.1';
 export const RUNTIME_DEFAULT_PORT = 7331;
 export const RUNTIME_START_LOCK_FILE = 'runtime-start.lock';
-export const RUNTIME_SERVICE_KIND = 'mebular-serve';
-export const RUNTIME_PROVIDER_SOURCE_ORDER = Object.freeze({ registry: 0, standard: 1, path: 2, self: 2 });
+export { RUNTIME_SERVICE_KIND };
+export const RUNTIME_SERVICE_KIND_NAME = RUNTIME_SERVICE_KIND;
+export const RUNTIME_PROVIDER_SOURCE_ORDER = Object.freeze({ current: -1, registry: 0, standard: 1, path: 2, self: 2 });
 export const RUNTIME_PROVIDER_KIND_ORDER = Object.freeze({ app: 0, cli: 1, shared: 2 });
 
 const HEALTH_TERMINAL_REASONS = new Set(['instance_mismatch', 'instance_missing', 'cloud_mismatch']);
@@ -343,6 +350,7 @@ export async function discoverRuntimeProviders({
   includeSelf = true,
   includeStandardApp = true,
   registryProviders = null,
+  currentState: providedCurrentState = null,
   selfPath = defaultSelfCliPath(),
 } = {}) {
   const warnings = [];
@@ -355,12 +363,39 @@ export async function discoverRuntimeProviders({
     warnings.push(...state.warnings);
   }
 
+  const currentState = providedCurrentState ?? (typeof root === 'string' && root.length > 0
+    ? await readRuntimeCurrent(root, { userHome })
+    : { current: null, usable: false, source: 'missing', warnings: [] });
+  if (currentState?.source === 'invalid') {
+    warnings.push(...(currentState.warnings ?? []));
+  }
+
   const entries = [];
+  if (currentState?.usable === true && currentState.current) {
+    entries.push({
+      id: runtimeProviderId('shared', currentState.current.cliPath),
+      kind: 'shared',
+      path: currentState.current.cliPath,
+      version: currentState.current.version,
+      runtimePath: currentState.current.runtimePath,
+      capabilities: ['serve'],
+      registeredAt: currentState.current.installedAt ?? null,
+      updatedAt: currentState.current.installedAt ?? null,
+      source: 'current',
+      available: true,
+    });
+  }
+  const invalidCurrentPath = currentState?.usable !== true && currentState?.current?.cliPath
+    ? resolve(currentState.current.cliPath)
+    : null;
   for (const provider of registry) {
+    const unavailableCurrentTarget = provider.kind === 'shared'
+      && invalidCurrentPath !== null
+      && resolve(provider.path) === invalidCurrentPath;
     entries.push({
       ...provider,
       source: 'registry',
-      available: existsSync(provider.path),
+      available: !unavailableCurrentTarget && existsSync(provider.path),
     });
   }
 
@@ -417,11 +452,20 @@ export async function discoverRuntimeProviders({
   }
   const sorted = [...deduped.values()].sort(compareProviders);
   const available = sorted.filter((entry) => entry.available);
+  if (currentState?.usable !== true) {
+    const shared = available.filter((entry) => entry.kind === 'shared');
+    if (shared.length > 1) {
+      warnings.push('存在多个 shared runtime，但 current 不可用：按现有 provider 路径/版本规则选择（建议运行 runtime status 修复 current）');
+    }
+  }
   return {
     root: typeof root === 'string' ? root : null,
     entries: sorted,
     available,
     selected: available[0] ?? null,
+    current: publicRuntimeCurrent(currentState?.current ?? null),
+    currentUsable: currentState?.usable === true,
+    currentSource: currentState?.source ?? 'missing',
     warnings,
   };
 }
@@ -437,32 +481,40 @@ export function runtimeCommandForProvider(provider, { execPath = process.execPat
   return { execPath: provider.path, args: ['serve'] };
 }
 
-/** 默认 service 适配器：复用 @mebular/service；状态失败不阻塞 attach/provider 兜底。 */
+/** 默认 service 适配器：复用共享 service 层（current 优先）；状态失败不阻塞 attach/provider 兜底。 */
 export function createRuntimeServiceAdapter({
   root,
   home,
   cliBin = defaultSelfCliPath(),
   serviceHome,
   env = process.env,
+  currentState = null,
+  fallbackProvider = null,
 } = {}) {
-  const descriptor = profileServiceDescriptor({ root, home, cliBin });
   const resolvedServiceHome = resolveRuntimeServiceHome({ serviceHome, env });
+  const fallback = fallbackProvider ?? {
+    path: cliBin,
+    kind: 'cli',
+    owner: 'cli',
+    version: APP_VERSION,
+    execPath: process.execPath,
+  };
+  const source = resolveRuntimeServiceSource({ currentState, fallbackProvider: fallback });
+  const descriptor = source.ok === true
+    ? runtimeServiceDescriptor({ root, home, source })
+    : null;
   return {
     descriptor,
     serviceHome: resolvedServiceHome,
     async status() {
-      try {
-        const status = await profileServiceStatus({ descriptor, serviceHome: resolvedServiceHome });
-        return {
-          ok: true,
-          registered: status.registered === true,
-          running: status.running === true,
-          label: status.label ?? null,
-          autostart: status.autostart ?? null,
-          foreign: status.foreign === true,
-          unitPath: status.unitPath ?? null,
-        };
-      } catch (error) {
+      const status = await runtimeServiceStatus({
+        root,
+        home,
+        serviceHome: resolvedServiceHome,
+        currentState,
+        fallbackProvider: fallback,
+      });
+      if (status.ok !== true) {
         return {
           ok: false,
           registered: false,
@@ -471,17 +523,38 @@ export function createRuntimeServiceAdapter({
           autostart: null,
           foreign: false,
           unitPath: null,
-          error: error?.message ?? String(error),
+          error: status.message ?? status.reason ?? 'service_unknown',
         };
       }
+      return {
+        ok: true,
+        registered: status.registered === true,
+        running: status.running === true,
+        label: status.label ?? null,
+        autostart: status.autostart ?? null,
+        foreign: status.foreign === true,
+        unitPath: status.unitPath ?? null,
+        version: status.version ?? null,
+        runtimePath: status.runtimePath ?? null,
+        provider: status.provider ?? null,
+        owner: status.owner ?? null,
+        runtime: status.runtime ?? null,
+        current: status.current ?? null,
+        currentUsable: status.currentUsable === true,
+      };
     },
     async restart() {
-      const lib = await loadServiceModule();
-      const result = lib.restartService(descriptor, { home: resolvedServiceHome });
-      if (!result?.ok) {
+      const result = await restartRuntimeService({
+        root,
+        home,
+        serviceHome: resolvedServiceHome,
+        currentState,
+        fallbackProvider: fallback,
+      });
+      if (result?.ok !== true) {
         throw cloudError(
           'RUNTIME_SERVICE_RESTART_FAILED',
-          `常驻服务重启失败：${result?.manual ?? '未知原因'}`,
+          `常驻服务重启失败：${result?.manual ?? result?.message ?? '未知原因'}`,
           { result },
         );
       }
@@ -861,6 +934,11 @@ function publicService(service) {
     autostart: service.autostart ?? null,
     foreign: service.foreign === true,
     unitPath: service.unitPath ?? null,
+    version: service.version ?? null,
+    runtimePath: service.runtimePath ?? null,
+    provider: service.provider ?? null,
+    owner: service.owner ?? null,
+    runtime: service.runtime ?? null,
     ...(service.error ? { error: service.error } : {}),
   };
 }
@@ -881,6 +959,10 @@ function baseResult(context, { http = null, checkedAt }) {
     instance: null,
     version: null,
     runtimePath: context?.runtimePath ?? null,
+    current: null,
+    currentUsable: false,
+    currentSource: 'missing',
+    versionMismatch: false,
     runtimeFile: context?.runtime === null || context?.runtime === undefined
       ? null
       : {
@@ -968,6 +1050,7 @@ function providerPublic(provider) {
     kind: provider.kind,
     path: provider.path,
     version: provider.version ?? null,
+    runtimePath: provider.runtimePath ?? null,
     capabilities: Array.isArray(provider.capabilities) ? [...provider.capabilities] : [],
     source: provider.source ?? null,
   };
@@ -983,6 +1066,9 @@ function providersPublic(discovery) {
     })),
     available: discovery.available.map((entry) => providerPublic(entry)),
     selected: providerPublic(discovery.selected),
+    current: discovery.current ?? null,
+    currentUsable: discovery.currentUsable === true,
+    currentSource: discovery.currentSource ?? 'missing',
     warnings: [...discovery.warnings],
   };
 }
@@ -1070,8 +1156,16 @@ async function inspectRuntime(options = {}) {
   }
 
   const activeLock = readActiveRuntimeLock(context.cloudRoot);
+  const currentState = await readRuntimeCurrent(context.cloudRoot, { userHome });
   const service = injectedService
-    ?? createRuntimeServiceAdapter({ root: context.cloudRoot, home: context.home, cliBin, serviceHome, env });
+    ?? createRuntimeServiceAdapter({
+      root: context.cloudRoot,
+      home: context.home,
+      cliBin,
+      serviceHome,
+      env,
+      currentState,
+    });
   let serviceStatus;
   try {
     serviceStatus = await service.status();
@@ -1107,6 +1201,7 @@ async function inspectRuntime(options = {}) {
     includeSelf,
     includeStandardApp,
     registryProviders,
+    currentState,
     selfPath,
   });
 
@@ -1114,6 +1209,9 @@ async function inspectRuntime(options = {}) {
   result.daemon = daemonFromHealth(health, http);
   result.instance = health?.instance ?? health?.body?.instance ?? null;
   result.version = health?.body?.version ?? context.runtime?.version ?? null;
+  result.current = publicRuntimeCurrent(currentState.current);
+  result.currentUsable = currentState.usable === true;
+  result.currentSource = currentState.source;
   result.service = publicService(serviceStatus);
   result.providers = providersPublic(discovery);
   const activeConflict = activeLockConflict(activeLock, context.home);
@@ -1126,6 +1224,15 @@ async function inspectRuntime(options = {}) {
       startedAt: activeLock.startedAt ?? null,
       conflict: activeConflict !== null,
     };
+  result.versionMismatch = health?.ok === true
+    && currentState.usable === true
+    && typeof result.version === 'string'
+    && result.version !== currentState.current.version;
+  if (result.versionMismatch) {
+    result.warnings.push(
+      `运行中的 daemon 版本 ${result.version} 与 current ${currentState.current.version} 不一致：已 attach；升级需显式执行 runtime upgrade`,
+    );
+  }
 
   if (health?.ok === true) {
     result.mode = 'reused';
@@ -1453,6 +1560,11 @@ export async function ensureRuntime(options = {}) {
           MEBULAR_HOME: inspected.home,
           MEBULAR_CLOUD_ROOT: inspected.cloudRoot,
           ELECTRON_RUN_AS_NODE: '1',
+          MEBULAR_RUNTIME_PROVIDER: provider.kind,
+          MEBULAR_RUNTIME_OWNER: provider.kind,
+          ...(provider.version ? { MEBULAR_RUNTIME_VERSION: provider.version } : {}),
+          ...(provider.path ? { MEBULAR_RUNTIME_PATH: provider.path } : {}),
+          ...(provider.runtimePath ? { MEBULAR_RUNTIME_ROOT: provider.runtimePath } : {}),
         },
         stdio: childStdio,
         detached: detached === true,

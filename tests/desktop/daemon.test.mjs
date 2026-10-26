@@ -25,9 +25,11 @@ import {
   homeKey,
   serviceDescriptorFor,
   reconcileManagedState,
+  resolveAppServiceRuntime,
 } from '../../apps/desktop/src/main/daemon.mjs';
 import * as runtimeProviders from '../../packages/mcp/src/runtime-providers.mjs';
 import * as runtimeSupervisor from '../../packages/mcp/src/runtime-supervisor.mjs';
+import * as runtimeCurrent from '../../packages/mcp/src/runtime-current.mjs';
 import { IPC_CHANNELS, isAllowedChannel, buildHandlerTable, diagnostics } from '../../apps/desktop/src/main/ipc.mjs';
 import { iconDataUrl, iconDataUrl2x, TRAY_STATES } from '../../apps/desktop/src/main/tray-icons.mjs';
 
@@ -476,6 +478,80 @@ describe('Phase 2 · App 专属 service adapter / provider 注册', () => {
 
     const missing = createAppServiceAdapter({ service: {}, home: '/cloud', cliBin: '/x/mebular.mjs', http });
     expect(await missing.status()).toMatchObject({ ok: true, registered: false, available: false });
+  });
+
+  it('App service 来源：current 可用指向共享 runtime；缺失时保留 App provider 且不下载', async () => {
+    const root = await tempDir();
+    const appCli = join(root, 'app', 'mebular.mjs');
+    await mkdir(join(root, 'app'), { recursive: true });
+    await writeFile(appCli, '// app\n', 'utf-8');
+
+    const fallback = await resolveAppServiceRuntime({ cliBin: appCli, cloudRoot: root, currentModule: runtimeCurrent });
+    expect(fallback).toMatchObject({
+      currentUsable: false,
+      source: { provider: 'app', owner: 'app', cliPath: appCli },
+    });
+
+    const runtimePath = join(root, 'runtime', '0.1.2');
+    const core = join(runtimePath, 'node_modules', '@mebular', 'core');
+    await mkdir(join(core, 'packages', 'mcp', 'bin'), { recursive: true });
+    await writeFile(join(core, 'package.json'), JSON.stringify({ name: '@mebular/core', version: '0.1.2' }), 'utf-8');
+    const sharedCli = join(core, 'packages', 'mcp', 'bin', 'mebular.mjs');
+    await writeFile(sharedCli, '// shared\n', 'utf-8');
+    await writeFile(join(root, 'runtime', 'current.json'), JSON.stringify({
+      v: 1,
+      version: '0.1.2',
+      runtimePath,
+      cliPath: sharedCli,
+      provider: 'shared',
+      owner: 'shared',
+      installedAt: '2026-01-01T00:00:00.000Z',
+    }), 'utf-8');
+
+    const current = await resolveAppServiceRuntime({ cliBin: appCli, cloudRoot: root, currentModule: runtimeCurrent });
+    expect(current).toMatchObject({
+      currentUsable: true,
+      source: {
+        provider: 'shared',
+        owner: 'shared',
+        version: '0.1.2',
+        runtimePath,
+        cliPath: sharedCli,
+        execPath: process.execPath,
+        electron: true,
+      },
+      current: { version: '0.1.2' },
+    });
+
+    const adapter = createAppServiceAdapter({
+      service: {},
+      home: '/cloud',
+      cliBin: appCli,
+      execPath: '/electron',
+      http: { host: '127.0.0.1', port: 7444 },
+      cloudRoot: root,
+      runtimeSource: current.source,
+      current: current.current,
+      currentUsable: true,
+    });
+    expect(adapter.descriptor).toMatchObject({
+      args: [sharedCli, 'serve', '--port', '7444'],
+      execPath: '/electron',
+      env: {
+        MEBULAR_HOME: '/cloud',
+        MEBULAR_CLOUD_ROOT: root,
+        ELECTRON_RUN_AS_NODE: '1',
+        MEBULAR_RUNTIME_PROVIDER: 'shared',
+        MEBULAR_RUNTIME_OWNER: 'shared',
+      },
+      runtime: {
+        version: '0.1.2',
+        runtimePath,
+        cliPath: sharedCli,
+        provider: 'shared',
+        owner: 'shared',
+      },
+    });
   });
 
   it('注册 kind:app provider：版本更新同一条、可被 provider 发现、失败不阻塞且不覆盖损坏文件', async () => {

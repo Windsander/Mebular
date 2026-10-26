@@ -219,7 +219,24 @@ export function profileServiceDescriptor({
     heartbeatDir: home,
     workingDir: home,
     execPath,
-    env: { MEBULAR_HOME: home, MEBULAR_CLOUD_ROOT: root },
+    env: {
+      MEBULAR_HOME: home,
+      MEBULAR_CLOUD_ROOT: root,
+      MEBULAR_RUNTIME_PROVIDER: 'cli',
+      MEBULAR_RUNTIME_OWNER: 'cli',
+      MEBULAR_RUNTIME_PATH: cliBin,
+    },
+    runtime: {
+      version: null,
+      runtimePath: null,
+      cliPath: cliBin,
+      provider: 'cli',
+      owner: 'cli',
+      execPath,
+      electron: false,
+      cloudRoot: root,
+      home,
+    },
   };
 }
 

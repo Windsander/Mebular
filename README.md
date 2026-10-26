@@ -10,7 +10,7 @@
 A distributed memory network for your AI assistants.<br>
 Memory and tasks stay on your devices; devices sync directly.
 
-[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE) [![Node.js >=20](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white&style=flat-square)](docs/getting-started/QUICKSTART.md) [![MCP server](https://img.shields.io/badge/MCP-server-5A67D8?logo=modelcontextprotocol&logoColor=white&style=flat-square)](docs/getting-started/QUICKSTART.md) [![DSH plugin](https://img.shields.io/badge/DSH-plugin-4D6BFE?logo=deepseek&logoColor=white&style=flat-square)](packages/dsh-plugin/README.md)
+[![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE) [![Node.js >=20](https://img.shields.io/badge/Node-%E2%89%A520-339933?logo=node.js&logoColor=white&style=flat-square)](docs/getting-started/QUICKSTART.md) [![MCP server](https://img.shields.io/badge/MCP-server-5A67D8?logo=modelcontextprotocol&logoColor=white&style=flat-square)](docs/getting-started/QUICKSTART.md) [![DSH plugin](https://img.shields.io/badge/DSH-plugin-4D6BFE?logo=deepseek&logoColor=white&style=flat-square)](packages/dsh-plugin/README_EN.md)
 
 [Start in 5 minutes](docs/getting-started/QUICKSTART.md) · [How it works](docs/architecture/ARCHITECT.md) · [Website](https://mebular.cyberfederal.io) · [中文](README_CN.md)
 
@@ -138,7 +138,7 @@ Keep the Mebular app running, then install the plugin from npm into DSH's web pr
 <code>dsh plugin --profile web add @mebular/dsh-plugin@0.1.2</code><br>
 A Mebular sidebar panel embeds the same Console through <code>?embed=dsh</code> (loopback only), and the official MCP client reaches the same graph. The plugin discovers the daemon by <code>daemonUrl &gt; MEBULAR_HTTP_PORT &gt; runtime.json &gt; 7331</code>, so custom ports follow automatically. The plugin is an independent adapter with its code isolated in <code>packages/dsh-plugin</code>; it is published by its own npm job, while its version follows the unified release train, so all six npm packages share one version. For plugin development, install from <code>packages/dsh-plugin</code> instead.<br>
 Listed on <a href="https://github.com/awesome-dsh-plugin/awesome-dsh-plugin">awesome-dsh-plugin</a> under <code>memory</code>.<br>
-<a href="packages/dsh-plugin/README.md">DSH plugin guide →</a> · <a href="docs/integrations/DSH.md">Integration notes →</a></p>
+<a href="packages/dsh-plugin/README_EN.md">DSH plugin guide →</a> · <a href="docs/integrations/DSH.md">Integration notes →</a></p>
 
 <details>
 <summary>Who does what</summary>

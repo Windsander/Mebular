@@ -18,6 +18,7 @@ import {
   readRegistry,
   setCurrentProfile,
 } from './profiles.mjs';
+import { loadServiceModule } from './service-loader.mjs';
 
 export const SWITCH_INTENT_FILE = 'switch.intent.json';
 
@@ -218,13 +219,31 @@ export function profileServiceDescriptor({
     heartbeatDir: home,
     workingDir: home,
     execPath,
-    env: { MEBULAR_HOME: home, MEBULAR_CLOUD_ROOT: root },
+    env: {
+      MEBULAR_HOME: home,
+      MEBULAR_CLOUD_ROOT: root,
+      MEBULAR_RUNTIME_PROVIDER: 'cli',
+      MEBULAR_RUNTIME_OWNER: 'cli',
+      MEBULAR_RUNTIME_PATH: cliBin,
+    },
+    runtime: {
+      version: null,
+      runtimePath: null,
+      cliPath: cliBin,
+      provider: 'cli',
+      owner: 'cli',
+      execPath,
+      electron: false,
+      cloudRoot: root,
+      home,
+    },
   };
 }
 
 async function serviceLib(deps) {
+  // App 仍可注入自己的 service adapter；默认共享 core/CLI 走 loader（bare → bundled dist）。
   if (deps) return deps;
-  return import('@mebular/service');
+  return loadServiceModule();
 }
 
 export async function profileServiceStatus({ descriptor, serviceHome = homedir(), deps } = {}) {

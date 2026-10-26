@@ -65,7 +65,7 @@ npm run verify:dsh:e2e:negative -- --keep
 | `security-headers` | 直接请求 daemon Console 与发现文档 | 普通 `/console/`：`X-Frame-Options: DENY` + `frame-ancestors 'none'`；`?embed=dsh`：无 XFO，`frame-ancestors` 只放开 loopback；`/mebular/embed-info` 字段白名单且不含 token/密钥/home/CLI 路径 |
 | `managed-lifecycle` | profile 写 `lifecycle: managed` + `cliPath` 指向本仓库 `packages/mcp/bin/mebular.mjs`，启动前没有任何 daemon | 插件自启 child：`connected`、iframe、工具与真实调用可用；`/mebular/embed-info` 报 `mode=managed` / `managed=true`；临时 home `runtime.json` 的 pid 存活且不是 DSH pid；停止 DSH 后该 pid 退出、端口关闭 |
 | `managed-reuse` | 先启动真实外部 daemon，再用 managed profile 启动 DSH | `/mebular/embed-info` 报 `mode=managed` / `managed=false`，`consoleUrl` 指向外部 daemon；工具与真实调用可用；停止 DSH 后外部 daemon 仍存活、`/healthz` 与 `/console/` 仍 200、`runtime.json` 未被改动 |
-| `managed-cli-missing` | profile 写一个不存在的 `cliPath`，并从 PATH 移除所有能解析到 `mebular` 的目录 | 状态 `down`；`/mebular/embed-info` 的 `reason=managed_cli_missing`、`managed=false`；没有 `mcp__mebular__*` 工具；`mebular:status` 文本说明 CLI 缺失并给出安装/`MEBULAR_CLI`/`cliPath` + 重启 DSH 的恢复动作 |
+| `managed-cli-missing` | profile 写一个不存在的 `cliPath`，并从 PATH 移除所有能解析到 `mebular` 的目录 | 状态 `down`；`/mebular/embed-info` 的 `reason=download_required`、`state=download_required`、`downloadRequired=true`、`managed=false`；`install` 引导可用；没有 `mcp__mebular__*` 工具；`mebular:status` 文本说明 CLI/runtime 缺失并给出安装/`MEBULAR_CLI`/`cliPath` + 重启 DSH 的恢复动作 |
 
 `daemon-down-recovery` 用一个保留但未监听的随机端口作为 `MEBULAR_HTTP_PORT`，因此不会碰到真实用户
 在 7331 上的 daemon。`custom-port` 故意把 `runtime.json` 写成冲突值，用来证明 env 优先于 runtime
@@ -113,7 +113,7 @@ harness 根目录下（默认随机 tmp，CI 为 `$RUNNER_TEMP/dsh-e2e/<version>
 - `PROBE_EXPECT=recover`：记录 `down → up → down → up` 的状态转换，在掉线时确认
   `mebular:status` 非空、恢复后重新为空，最后完成真实调用。
 - `PROBE_EXPECT=down`：观察三轮，记录 Mebular 工具是否确实为空，并等待
-  `mebular:status` 文本出现（用于 `managed_cli_missing` 的恢复提示断言）。
+  `mebular:status` 文本出现（用于 `download_required` 的恢复提示断言）。
 
 `probe.json` 中除工具名/调用结果外，还记录：
 

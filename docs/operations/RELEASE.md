@@ -25,6 +25,9 @@
 
 - **版本策略**：6 个可发布包（`core` / `service` / `skill` / `mcp` / `fleet` / `dsh-plugin`）
   共用同一发布版本；`scripts/bump_version.sh` 一次同步全部 manifest 与版本源。
+- **DSH plugin-only runtime 版本**：`packages/dsh-plugin` 在运行时从自身 `package.json` 读取
+  plugin-only 安装的固定 `@mebular/core` 版本；bump 只需更新 manifest，无需改插件源码。
+  同一 release train 中该版本与 core 相同。
 - **MCP 版本源**：`packages/mcp/src/version.mjs` 是唯一真源；`serve.mjs` / `server.mjs` /
   `client.mjs` 从它导入，`packages/mcp/scripts/publish-manifest.mjs` 从自己的
   `package.json` 取版本。禁止再手写 `0.x.y`。

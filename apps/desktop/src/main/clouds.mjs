@@ -5,14 +5,16 @@
 //   - 切换不复制、不合并、不删除任何忆云目录；只停旧守护/起新守护/改 current。
 //   - 端口 200 必须核对 /healthz instance（homeKey）；不匹配 = 另一张忆云，不得 reused/继续。
 //   - 失败回滚旧守护；崩溃由 switch.intent.json 恢复；两者都不健康只诊断，不删档案/intent。
+//   - service 所有权统一走 runtime-service：current 可用时禁止回退 App descriptor 覆盖共享 service。
 
 import { readFileSync, existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { execFileSync } from 'node:child_process';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  APP_VERSION,
   homeKey,
   probeHealthDetail,
   resolveHttp,
@@ -63,10 +65,223 @@ export async function defaultLooksLikeMebularServe(pid) {
 
 /** 从 CLI 入口解析同仓库的 E2-A1 模块（开发态/打包 extraResources 同构）。 */
 export async function loadCloudModules(cliBin) {
-  const src = join(cliBin, '..', '..', 'src');
+  const src = join(dirname(cliBin), '..', 'src');
+  const profiles = await import(pathToFileURL(join(src, 'profiles.mjs')).href);
+  const switchModule = await import(pathToFileURL(join(src, 'cloud-switch.mjs')).href);
+  let runtime = null;
+  try {
+    runtime = await import(pathToFileURL(join(src, 'runtime-service.mjs')).href);
+  } catch {
+    // 自定义安装/旧布局：保留 legacy service 兜底；调用方会用 current 文件做 fail-safe。
+    runtime = null;
+  }
   return {
-    profiles: await import(pathToFileURL(join(src, 'profiles.mjs')).href),
-    switch: await import(pathToFileURL(join(src, 'cloud-switch.mjs')).href),
+    profiles,
+    switch: switchModule,
+    runtime,
+  };
+}
+
+function hasRuntimeCurrent(root) {
+  return typeof root === 'string' && root.length > 0
+    && existsSync(join(root, 'runtime', 'current.json'));
+}
+
+/** App/CLI fallback 来源：只记录 owner/provider，不下载、不安装 runtime。 */
+export function appFallbackProvider({ cliBin, execPath = process.execPath, version = APP_VERSION } = {}) {
+  return {
+    path: cliBin,
+    kind: 'app',
+    owner: 'app',
+    version,
+    runtimePath: null,
+    execPath,
+    electron: true,
+  };
+}
+
+/** legacy（无 runtime-service）时仍保持 App 既有 descriptor 行为，并记录 owner=app。 */
+export function legacyServiceDescriptor({
+  root,
+  home,
+  http = null,
+  cliBin,
+  execPath = process.execPath,
+} = {}) {
+  const port = Number(http?.port);
+  const listenArgs = Number.isInteger(port) && port > 0 ? ['--port', String(port)] : [];
+  return {
+    kind: CLOUD_SERVICE_KIND,
+    args: [cliBin, 'serve', ...listenArgs],
+    heartbeatDir: home,
+    workingDir: home,
+    execPath,
+    env: {
+      MEBULAR_HOME: home,
+      ...(typeof root === 'string' && root.length > 0 ? { MEBULAR_CLOUD_ROOT: root } : {}),
+      ELECTRON_RUN_AS_NODE: '1',
+      MEBULAR_RUNTIME_PROVIDER: 'app',
+      MEBULAR_RUNTIME_OWNER: 'app',
+      MEBULAR_RUNTIME_VERSION: APP_VERSION,
+      ...(cliBin ? { MEBULAR_RUNTIME_PATH: cliBin } : {}),
+    },
+    runtime: {
+      version: APP_VERSION,
+      runtimePath: null,
+      cliPath: cliBin,
+      provider: 'app',
+      owner: 'app',
+      execPath,
+      electron: true,
+      cloudRoot: typeof root === 'string' && root.length > 0 ? root : null,
+      home,
+    },
+  };
+}
+
+/**
+ * 云切换统一 service 操作层：
+ *   - runtime-service 可用：current 优先；无 current 才用 App fallback（记录 owner）；
+ *   - runtime-service 不可用且 current 存在：blocked（绝不回退 App descriptor 覆盖共享 service）；
+ *   - 两者都没有：legacy descriptor 兜底（自定义安装/旧测试），仍记录 owner=app。
+ */
+export async function createCloudServiceOps({
+  root = null,
+  cliBin = null,
+  service = {},
+  runtimeService = null,
+  fallbackProvider = null,
+} = {}) {
+  let runtime = runtimeService;
+  let runtimeError = null;
+  if (runtime === null && typeof cliBin === 'string' && cliBin.length > 0) {
+    try {
+      const src = join(dirname(cliBin), '..', 'src');
+      runtime = await import(pathToFileURL(join(src, 'runtime-service.mjs')).href);
+    } catch (error) {
+      runtimeError = error;
+    }
+  }
+  const shared = runtime !== null
+    && typeof runtime?.installRuntimeService === 'function'
+    && typeof runtime?.runtimeServiceStatus === 'function'
+    && typeof runtime?.uninstallRuntimeService === 'function';
+  if (!shared && hasRuntimeCurrent(root)) {
+    const error = cloudError(
+      'RUNTIME_SERVICE_UNAVAILABLE',
+      '共享 runtime current 存在，但 runtime-service 不可用：拒绝用 App descriptor 覆盖共享 service',
+      { cause: runtimeError },
+    );
+    return {
+      mode: 'blocked',
+      error,
+      canInstall: false,
+      async status() { throw error; },
+      async install() { throw error; },
+      async uninstall() { throw error; },
+      async planRestart() { throw error; },
+    };
+  }
+
+  const fallback = fallbackProvider ?? appFallbackProvider({ cliBin });
+  const descriptorFor = (home, http = null) => legacyServiceDescriptor({
+    root,
+    home,
+    http,
+    cliBin,
+    execPath: fallback?.execPath ?? process.execPath,
+  });
+
+  return {
+    mode: shared ? 'shared' : 'legacy',
+    runtime,
+    error: runtimeError,
+    fallbackProvider: fallback,
+    canInstall: shared || typeof service?.installService === 'function',
+    descriptorFor,
+    async status({ home, serviceHome = homedir(), http = null } = {}) {
+      if (shared) {
+        try {
+          return await runtime.runtimeServiceStatus({
+            root,
+            home,
+            serviceHome,
+            serviceLib: service,
+            fallbackProvider: fallback,
+          });
+        } catch (error) {
+          return { ok: false, registered: false, running: false, autostart: null, unitPath: null, error: String(error?.message ?? error) };
+        }
+      }
+      const status = safeStatus(service, descriptorFor(home, http), serviceHome);
+      if (status === null) return null;
+      const expectedLabel = typeof service?.defaultLabel === 'function'
+        ? service.defaultLabel(CLOUD_SERVICE_KIND, undefined, home)
+        : null;
+      return { ...status, expectedLabel };
+    },
+    /**
+     * 该 service 是否确实属于 home（不是同一 serviceHome 下另一个 home/cloudRoot）。
+     * runtime-service 模式用 manifest runtime.home / label 判定；legacy 模式保持旧行为。
+     */
+    async ownsService({ home, serviceHome = homedir(), http = null } = {}) {
+      const status = await this.status({ home, serviceHome, http });
+      if (status?.registered !== true) return false;
+      if (!shared) return true;
+      if (typeof status.runtime?.home === 'string' && status.runtime.home.length > 0) {
+        return resolve(status.runtime.home) === resolve(home);
+      }
+      const manifestLabel = status.manifestLabel ?? status.label;
+      if (typeof manifestLabel === 'string' && typeof status.expectedLabel === 'string') {
+        return manifestLabel === status.expectedLabel;
+      }
+      // 不完整注入（自定义 runtime-service/测试替身）没有 ownership 元数据：保持旧语义信任 registered。
+      return true;
+    },
+    async install({ home, http = null, serviceHome = homedir(), autostart = true } = {}) {
+      if (shared) {
+        return runtime.installRuntimeService({
+          root,
+          home,
+          serviceHome,
+          http,
+          fallbackProvider: fallback,
+          serviceLib: service,
+          autostart,
+        });
+      }
+      if (typeof service?.installService !== 'function') {
+        throw cloudError('SERVICE_UNAVAILABLE', '服务托管不可用：无法安装忆云守护服务');
+      }
+      return service.installService(descriptorFor(home, http), { home: serviceHome, autostart });
+    },
+    async uninstall({ home, serviceHome = homedir() } = {}) {
+      if (shared) {
+        return runtime.uninstallRuntimeService({
+          root,
+          home,
+          serviceHome,
+          serviceLib: service,
+        });
+      }
+      if (typeof service?.uninstallService !== 'function') return { ok: false, removed: false };
+      return service.uninstallService(descriptorFor(home), { home: serviceHome });
+    },
+    async planRestart({ home, serviceHome = homedir() } = {}) {
+      if (shared && typeof runtime.planRuntimeServiceRestart === 'function') {
+        return runtime.planRuntimeServiceRestart({
+          root,
+          home,
+          serviceHome,
+          serviceLib: service,
+          fallbackProvider: fallback,
+        });
+      }
+      if (typeof service?.restartPlanFor !== 'function') {
+        return { registered: false, manual: '服务管理不可用：请手动重启' };
+      }
+      return service.restartPlanFor(descriptorFor(home), { home: serviceHome });
+    },
   };
 }
 
@@ -160,7 +375,12 @@ function safeStatus(service, descriptor, serviceHome) {
  */
 export async function migrateLegacyService({
   service,
-  descriptor,
+  descriptor = null,
+  root = null,
+  cliBin = null,
+  runtimeService = null,
+  fallbackProvider = null,
+  serviceOps = null,
   home,
   serviceHome = homedir(),
   http = null,
@@ -168,39 +388,64 @@ export async function migrateLegacyService({
   pidAlive = defaultPidAlive,
   stopTimeoutMs = 10_000,
 } = {}) {
-  if (typeof service?.serviceStatus !== 'function' || typeof service?.installService !== 'function') {
+  let ops = serviceOps;
+  if (ops === null) {
+    ops = await createCloudServiceOps({
+      root,
+      cliBin: cliBin ?? descriptor?.args?.[0] ?? null,
+      service,
+      runtimeService,
+      fallbackProvider,
+    });
+  }
+  if (ops.mode === 'blocked') {
+    return { migrated: false, available: false, reason: 'runtime_service_unavailable', error: ops.error?.message ?? null };
+  }
+  if (ops.mode === 'legacy' && typeof service?.serviceStatus !== 'function') {
     return { migrated: false, available: false, reason: 'service_unavailable' };
   }
   if (resolve(home) === resolve(serviceHome)) {
     return { migrated: false, available: true, reason: 'same_service_home' };
   }
-  const statusNew = safeStatus(service, descriptor, serviceHome);
-  const statusLegacy = safeStatus(service, descriptor, home);
+  const statusNew = await ops.status({ home, serviceHome });
+  const newOwned = await ops.ownsService({ home, serviceHome });
+  if (statusNew?.registered === true && !newOwned) {
+    return {
+      migrated: false,
+      available: true,
+      registered: false,
+      running: false,
+      autostart: null,
+      reason: 'service_conflict',
+      runtime: statusNew?.runtime ?? null,
+    };
+  }
+  const statusLegacy = await ops.status({ home, serviceHome: home });
   if (!statusLegacy?.registered) {
     return {
       migrated: false,
       available: true,
-      registered: Boolean(statusNew?.registered),
-      running: Boolean(statusNew?.running),
+      registered: Boolean(newOwned),
+      running: Boolean(newOwned && statusNew?.running),
       autostart: statusNew?.autostart ?? null,
+      runtime: statusNew?.runtime ?? null,
     };
   }
   const autostart = statusLegacy.autostart ?? statusNew?.autostart ?? true;
   let installed = false;
-  if (!statusNew?.registered) {
+  let installResult = null;
+  if (!newOwned) {
     // 先停旧单元并等 lock 释放，再装新单元：避免新进程撞上旧 active.lock（双活窗口）。
-    if (typeof service.uninstallService === 'function') {
-      service.uninstallService(descriptor, { home });
-    }
+    await ops.uninstall({ home, serviceHome: home });
     if (http && await waitForCloudStopped({ home, http, fetchImpl, pidAlive, timeoutMs: stopTimeoutMs }) === false) {
       throw cloudError('SERVICE_MIGRATION_FAILED', '旧守护服务未能停止（lock/端口仍被占用）：请检查诊断');
     }
-    const result = service.installService(descriptor, { home: serviceHome, autostart });
-    if (!result?.ok) {
+    installResult = await ops.install({ home, http, serviceHome, autostart });
+    if (installResult?.ok !== true || installResult?.running === false) {
       throw cloudError(
         'SERVICE_MIGRATION_FAILED',
-        `旧守护服务迁移失败：${result?.error ?? result?.message ?? 'installService 未成功'}`,
-        { result },
+        `旧守护服务迁移失败：${installResult?.error ?? installResult?.message ?? installResult?.reason ?? 'installService 未成功'}`,
+        { result: installResult },
       );
     }
     installed = true;
@@ -210,8 +455,8 @@ export async function migrateLegacyService({
   let legacyManifest = null;
   try {
     legacyManifest = typeof service.manifestPath === 'function'
-      ? service.manifestPath(descriptor.kind, home)
-      : join(home, '.mebular', 'services', `${descriptor.kind}.json`);
+      ? service.manifestPath(descriptor?.kind ?? CLOUD_SERVICE_KIND, home)
+      : join(home, '.mebular', 'services', `${descriptor?.kind ?? CLOUD_SERVICE_KIND}.json`);
   } catch {
     legacyManifest = null;
   }
@@ -225,8 +470,11 @@ export async function migrateLegacyService({
     available: true,
     installed,
     registered: true,
-    running: Boolean(statusNew?.running || installed),
+    running: Boolean((newOwned && statusNew?.running) || installed),
     autostart,
+    runtime: installResult?.runtime ?? statusNew?.runtime ?? statusLegacy?.runtime ?? null,
+    provider: installResult?.provider ?? statusNew?.provider ?? null,
+    owner: installResult?.owner ?? statusNew?.owner ?? null,
   };
 }
 
@@ -263,10 +511,15 @@ export async function writeCloudPreference(root, id, patch) {
 
 /** 停旧：managed child / 服务单元 / 外部 lock PID；随后等到端口与 lock 都释放。 */
 export async function stopCloudDaemon({
+  root = null,
+  cliBin = null,
   home,
   http,
   service,
-  descriptor,
+  descriptor = null,
+  runtimeService = null,
+  fallbackProvider = null,
+  serviceOps = null,
   serviceHome = homedir(),
   managedChild = null,
   oldPid = null,
@@ -287,16 +540,25 @@ export async function stopCloudDaemon({
     }
   }
 
+  const ops = serviceOps ?? await createCloudServiceOps({
+    root,
+    cliBin: cliBin ?? descriptor?.args?.[0] ?? null,
+    service,
+    runtimeService,
+    fallbackProvider,
+  });
+  if (ops.mode === 'blocked') throw ops.error;
+
   let serviceStopped = false;
-  const statusNew = safeStatus(service, descriptor, serviceHome);
-  if (statusNew?.registered && typeof service?.uninstallService === 'function') {
-    const result = service.uninstallService(descriptor, { home: serviceHome });
-    serviceStopped = Boolean(result?.ok);
+  const ownedNew = await ops.ownsService({ home, serviceHome, http });
+  if (ownedNew) {
+    const result = await ops.uninstall({ home, serviceHome });
+    serviceStopped = result?.ok !== false;
   }
   if (resolve(home) !== resolve(serviceHome)) {
-    const statusLegacy = safeStatus(service, descriptor, home);
-    if (statusLegacy?.registered && typeof service?.uninstallService === 'function') {
-      service.uninstallService(descriptor, { home });
+    const ownedLegacy = await ops.ownsService({ home, serviceHome: home, http });
+    if (ownedLegacy) {
+      await ops.uninstall({ home, serviceHome: home });
       serviceStopped = true;
     }
   }
@@ -346,7 +608,10 @@ export async function startCloudDaemon({
   http,
   cliBin,
   service,
-  descriptor,
+  descriptor = null,
+  runtimeService = null,
+  fallbackProvider = null,
+  serviceOps = null,
   serviceHome = homedir(),
   mode = 'child',
   autostart = true,
@@ -354,18 +619,27 @@ export async function startCloudDaemon({
   env = process.env,
 } = {}) {
   if (mode === 'service') {
-    if (typeof service?.installService !== 'function') {
+    const ops = serviceOps ?? await createCloudServiceOps({
+      root,
+      cliBin: cliBin ?? descriptor?.args?.[0] ?? null,
+      service,
+      runtimeService,
+      fallbackProvider,
+      env,
+    });
+    if (ops.mode === 'blocked') throw ops.error;
+    if (ops.canInstall !== true) {
       throw cloudError('SERVICE_UNAVAILABLE', '服务托管不可用：无法安装忆云守护服务');
     }
-    const result = service.installService(descriptor, { home: serviceHome, autostart });
-    if (!result?.ok) {
+    const result = await ops.install({ home, http, serviceHome, autostart });
+    if (result?.ok !== true || result?.running === false) {
       throw cloudError(
         'SERVICE_START_FAILED',
-        `服务安装失败：${result?.error ?? result?.message ?? result?.warning ?? '未知原因'}`,
+        `服务安装失败：${result?.error ?? result?.message ?? result?.reason ?? result?.warning ?? '未知原因'}`,
         { result },
       );
     }
-    return { mode: 'service', child: null, result };
+    return { mode: 'service', child: null, result, runtime: result.runtime ?? null, provider: result.provider ?? null, owner: result.owner ?? null };
   }
   if (typeof spawnFn !== 'function') throw cloudError('SPAWN_UNAVAILABLE', '缺少子进程启动器');
   const listenArgs = Number.isInteger(http?.port) && http.port > 0 ? ['--port', String(http.port)] : [];
@@ -375,23 +649,45 @@ export async function startCloudDaemon({
       MEBULAR_HOME: home,
       MEBULAR_CLOUD_ROOT: root,
       ELECTRON_RUN_AS_NODE: '1',
+      MEBULAR_RUNTIME_PROVIDER: 'app',
+      MEBULAR_RUNTIME_OWNER: 'app',
+      ...(cliBin ? { MEBULAR_RUNTIME_PATH: cliBin } : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   return { mode: 'child', child, result: null };
 }
 
-function statusForHome(service, descriptor, serviceHome) {
-  return safeStatus(service, descriptor, serviceHome);
-}
-
 /** 清掉目标忆云可能残留的服务单元（上次失败切换），避免与 child 抢端口/单活。 */
-async function stopTargetLeftovers({ service, descriptor, serviceHome, targetHome }) {
+export async function stopTargetLeftovers({
+  serviceOps = null,
+  service = {},
+  root = null,
+  cliBin = null,
+  descriptor = null,
+  runtimeService = null,
+  fallbackProvider = null,
+  serviceHome,
+  targetHome,
+}) {
+  const ops = serviceOps ?? await createCloudServiceOps({
+    root,
+    cliBin: cliBin ?? descriptor?.args?.[0] ?? null,
+    service,
+    runtimeService,
+    fallbackProvider,
+  });
+  if (ops.mode === 'blocked') throw ops.error;
   for (const at of [serviceHome, targetHome]) {
     if (typeof at !== 'string' || at.length === 0) continue;
-    const status = statusForHome(service, descriptor, at);
-    if (status?.registered && typeof service?.uninstallService === 'function') {
-      service.uninstallService(descriptor, { home: at });
+    const status = await ops.status({ home: targetHome, serviceHome: at });
+    // targetHome 下的 manifest 是目标忆云自己的 legacy 位置；serviceHome 是共享位置，
+    // 必须核对 ownership，绝不删除其他 home/cloudRoot 的 service。
+    const owned = at === targetHome && at !== serviceHome
+      ? status?.registered === true
+      : await ops.ownsService({ home: targetHome, serviceHome: at });
+    if (owned) {
+      await ops.uninstall({ home: targetHome, serviceHome: at });
     }
   }
 }
@@ -430,6 +726,8 @@ export async function performCloudSwitch({
   home,
   cliBin,
   service = {},
+  runtimeService = null,
+  fallbackProvider = null,
   serviceHome = homedir(),
   modules,
   fetchImpl = fetch,
@@ -524,38 +822,18 @@ export async function performCloudSwitch({
 
   const oldLock = readHomeLock(home);
   const oldLockPid = Number.isInteger(oldLock?.pid) && pidAlive(oldLock.pid) ? oldLock.pid : null;
-  const descriptor = {
-    kind: CLOUD_SERVICE_KIND,
-    args: [cliBin, 'serve', ...(Number.isInteger(oldHttp.port) && oldHttp.port > 0 ? ['--port', String(oldHttp.port)] : [])],
-    heartbeatDir: home,
-    workingDir: home,
-    execPath: process.execPath,
-    env: {
-      MEBULAR_HOME: home,
-      MEBULAR_CLOUD_ROOT: root,
-      ELECTRON_RUN_AS_NODE: '1',
-    },
-  };
-  const previousDescriptor = previousHome ? {
-    ...descriptor,
-    args: [cliBin, 'serve', ...(Number.isInteger(httpForHome(previousHome, env).port) && httpForHome(previousHome, env).port > 0
-      ? ['--port', String(httpForHome(previousHome, env).port)]
-      : [])],
-    heartbeatDir: previousHome,
-    workingDir: previousHome,
-    env: { MEBULAR_HOME: previousHome, MEBULAR_CLOUD_ROOT: root, ELECTRON_RUN_AS_NODE: '1' },
-  } : null;
-  const targetDescriptor = {
-    kind: CLOUD_SERVICE_KIND,
-    args: [cliBin, 'serve', ...(Number.isInteger(targetHttp.port) && targetHttp.port > 0 ? ['--port', String(targetHttp.port)] : [])],
-    heartbeatDir: targetHome,
-    workingDir: targetHome,
-    execPath: process.execPath,
-    env: { MEBULAR_HOME: targetHome, MEBULAR_CLOUD_ROOT: root, ELECTRON_RUN_AS_NODE: '1' },
-  };
+  const serviceOps = await createCloudServiceOps({
+    root,
+    cliBin,
+    service,
+    runtimeService: runtimeService ?? modules.runtime ?? null,
+    fallbackProvider,
+    env,
+  });
+  if (serviceOps.mode === 'blocked') throw serviceOps.error;
 
-  // 目标残留单元先清掉（不涉及当前忆云）。
-  await stopTargetLeftovers({ service, descriptor: targetDescriptor, serviceHome, targetHome });
+  // 目标残留单元先清掉（只针对目标 home；不触碰旧/其他 home 的 service）。
+  await stopTargetLeftovers({ serviceOps, serviceHome, targetHome });
   const targetLock = readHomeLock(targetHome);
   if (Number.isInteger(targetLock?.pid) && pidAlive(targetLock.pid)) {
     const targetLockHome = typeof targetLock.home === 'string' ? resolve(targetLock.home) : null;
@@ -580,8 +858,11 @@ export async function performCloudSwitch({
   if (previousHome) {
     try {
       await migrateLegacyService({
+        serviceOps,
         service,
-        descriptor: previousDescriptor ?? descriptor,
+        descriptor: null,
+        root,
+        cliBin,
         home: previousHome,
         serviceHome,
         http: httpForHome(previousHome, env),
@@ -593,8 +874,17 @@ export async function performCloudSwitch({
       throw cloudError('SERVICE_MIGRATION_FAILED', `旧忆云服务迁移失败：${error?.message ?? error}`, { cause: error });
     }
   }
-  const oldStatus = statusForHome(service, previousDescriptor ?? descriptor, serviceHome);
-  const serviceManaged = Boolean(oldStatus?.registered);
+  const oldStatus = await serviceOps.status({
+    home: previousHome ?? home,
+    serviceHome,
+    http: previousHome ? httpForHome(previousHome, env) : oldHttp,
+  });
+  const oldOwned = await serviceOps.ownsService({
+    home: previousHome ?? home,
+    serviceHome,
+    http: previousHome ? httpForHome(previousHome, env) : oldHttp,
+  });
+  const serviceManaged = Boolean(oldOwned);
   const mode = serviceManaged ? 'service' : 'child';
   const prefs = await readCloudPrefs(root);
   const autostart = oldStatus?.autostart
@@ -609,10 +899,14 @@ export async function performCloudSwitch({
   let activeStart = null;
   const stop = async () => {
     await stopCloudDaemon({
+      root,
+      cliBin,
       home,
       http: oldHttp,
       service,
-      descriptor: previousDescriptor ?? descriptor,
+      runtimeService: runtimeService ?? modules.runtime ?? null,
+      fallbackProvider,
+      serviceOps,
       serviceHome,
       managedChild,
       oldPid: oldLockPid,
@@ -635,7 +929,9 @@ export async function performCloudSwitch({
       http: httpForHome(toHome, env),
       cliBin,
       service,
-      descriptor: to?.id === previous?.id ? (previousDescriptor ?? descriptor) : targetDescriptor,
+      runtimeService: runtimeService ?? modules.runtime ?? null,
+      fallbackProvider,
+      serviceOps,
       serviceHome,
       mode: targetMode,
       autostart: targetAutostart,
@@ -679,7 +975,7 @@ export async function performCloudSwitch({
       });
       activeStart = null;
     }
-    await stopTargetLeftovers({ service, descriptor: targetDescriptor, serviceHome, targetHome });
+    await stopTargetLeftovers({ serviceOps, serviceHome, targetHome });
     await stopLockedPid({
       home: targetHome,
       http: targetHttp,
@@ -737,6 +1033,8 @@ export async function recoverSwitchIntent({
   root,
   cliBin,
   service = {},
+  runtimeService = null,
+  fallbackProvider = null,
   serviceHome = homedir(),
   modules,
   fetchImpl = fetch,
@@ -774,6 +1072,25 @@ export async function recoverSwitchIntent({
     };
   }
 
+  const serviceOps = await createCloudServiceOps({
+    root,
+    cliBin,
+    service,
+    runtimeService: runtimeService ?? modules.runtime ?? null,
+    fallbackProvider,
+    env,
+  });
+  if (serviceOps.mode === 'blocked') {
+    return {
+      recovered: true,
+      status: 'diagnostics',
+      current: state.registry.current,
+      home: previousHome,
+      message: `共享 runtime current 存在但 runtime-service 不可用：拒绝用 App descriptor 覆盖 service（${serviceOps.error?.message ?? 'runtime_service_unavailable'}）`,
+      intent,
+    };
+  }
+
   if (targetHome) {
     const targetHttp = httpForHome(targetHome, env);
     const targetHealth = await waitForCloudDaemon({
@@ -787,32 +1104,21 @@ export async function recoverSwitchIntent({
     if (targetHealth.ok) {
       await modules.profiles.setCurrentProfile(root, intent.to);
       await modules.switch.clearSwitchIntent(root);
-      const targetStatus = statusForHome(service, {
-        kind: CLOUD_SERVICE_KIND,
-        args: [cliBin, 'serve'],
-        heartbeatDir: targetHome,
-        env: { MEBULAR_HOME: targetHome, MEBULAR_CLOUD_ROOT: root },
-      }, serviceHome);
+      const targetStatus = await serviceOps.status({ home: targetHome, serviceHome, http: targetHttp });
+      const targetOwned = await serviceOps.ownsService({ home: targetHome, serviceHome, http: targetHttp });
       return {
         recovered: true,
         status: 'committed',
         current: intent.to,
         home: targetHome,
-        mode: targetStatus?.registered ? 'service' : 'reused',
+        mode: targetOwned ? 'service' : 'reused',
         child: null,
         profile: target,
+        service: targetStatus?.registered ? targetStatus : null,
       };
     }
     // 目标不健康：先停掉可能半启动的目标，防回滚双活。
-    const targetDescriptor = {
-      kind: CLOUD_SERVICE_KIND,
-      args: [cliBin, 'serve'],
-      heartbeatDir: targetHome,
-      workingDir: targetHome,
-      execPath: process.execPath,
-      env: { MEBULAR_HOME: targetHome, MEBULAR_CLOUD_ROOT: root, ELECTRON_RUN_AS_NODE: '1' },
-    };
-    await stopTargetLeftovers({ service, descriptor: targetDescriptor, serviceHome, targetHome }).catch(() => undefined);
+    await stopTargetLeftovers({ serviceOps, serviceHome, targetHome }).catch(() => undefined);
     await stopLockedPid({
       home: targetHome,
       http: targetHttp,
@@ -839,39 +1145,31 @@ export async function recoverSwitchIntent({
       cloudId: previous?.id ?? null,
     });
     if (previousHealth.ok) {
-      const previousStatus = statusForHome(service, {
-        kind: CLOUD_SERVICE_KIND,
-        args: [cliBin, 'serve'],
-        heartbeatDir: previousHome,
-        env: { MEBULAR_HOME: previousHome, MEBULAR_CLOUD_ROOT: root },
-      }, serviceHome);
+      const previousStatus = await serviceOps.status({ home: previousHome, serviceHome, http: previousHttp });
+      const previousOwned = await serviceOps.ownsService({ home: previousHome, serviceHome, http: previousHttp });
       await modules.switch.clearSwitchIntent(root);
       return {
         recovered: true,
         status: 'rolled_back',
         current: previous.id,
         home: previousHome,
-        mode: previousStatus?.registered ? 'service' : 'reused',
+        mode: previousOwned ? 'service' : 'reused',
         child: managedChild,
         profile: previous,
+        service: previousStatus?.registered ? previousStatus : null,
       };
     }
 
-    const previousDescriptor = {
-      kind: CLOUD_SERVICE_KIND,
-      args: [cliBin, 'serve'],
-      heartbeatDir: previousHome,
-      workingDir: previousHome,
-      execPath: process.execPath,
-      env: { MEBULAR_HOME: previousHome, MEBULAR_CLOUD_ROOT: root, ELECTRON_RUN_AS_NODE: '1' },
-    };
     const prefs = await readCloudPrefs(root);
     const pref = prefs.profiles?.[previous.id] ?? {};
-    let oldStatus = statusForHome(service, previousDescriptor, serviceHome);
+    let oldStatus = await serviceOps.status({ home: previousHome, serviceHome, http: previousHttp });
+    let oldOwned = await serviceOps.ownsService({ home: previousHome, serviceHome, http: previousHttp });
     try {
       const migration = await migrateLegacyService({
+        serviceOps,
         service,
-        descriptor: previousDescriptor,
+        root,
+        cliBin,
         home: previousHome,
         serviceHome,
         http: previousHttp,
@@ -879,11 +1177,14 @@ export async function recoverSwitchIntent({
         pidAlive,
         stopTimeoutMs,
       });
-      if (migration.registered) oldStatus = { ...(oldStatus ?? {}), registered: true };
+      if (migration.registered) {
+        oldStatus = { ...(oldStatus ?? {}), registered: true };
+        oldOwned = true;
+      }
     } catch {
       // 迁移失败不阻断 child 兜底
     }
-    const mode = oldStatus?.registered ? 'service' : (pref.mode === 'service' && service?.installService ? 'service' : 'child');
+    const mode = oldOwned ? 'service' : (pref.mode === 'service' && serviceOps.canInstall ? 'service' : 'child');
     const autostart = oldStatus?.autostart ?? pref.autostart ?? true;
     try {
       const started = await startCloudDaemon({
@@ -892,7 +1193,9 @@ export async function recoverSwitchIntent({
         http: previousHttp,
         cliBin,
         service,
-        descriptor: previousDescriptor,
+        runtimeService: runtimeService ?? modules.runtime ?? null,
+        fallbackProvider,
+        serviceOps,
         serviceHome,
         mode,
         autostart,

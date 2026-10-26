@@ -1789,12 +1789,18 @@ export async function startHttpServer({
     }
     let plan;
     try {
-      const { restartPlanFor } = await import('../../service/dist/index.js');
-      plan = restartPlanFor({ kind, args: [], heartbeatDir: home, env: { MEBULAR_HOME: home } }, { home });
+      const { planRuntimeServiceRestart, runtimeProviderFromEnv } = await import('./runtime-service.mjs');
+      const { resolveServiceHome } = await import('./service-control.mjs');
+      plan = await planRuntimeServiceRestart({
+        root: cloud.available ? cloud.root : null,
+        home,
+        serviceHome: resolveServiceHome(),
+        fallbackProvider: runtimeProviderFromEnv({ cliPath: process.argv[1] }),
+      });
     } catch (error) {
       return { registered: false, manual: `服务管理不可用（${String(error?.message ?? error)}）：请手动重启` };
     }
-    const command = plan.commands.map((entry) => entry.join(' ')).join(' && ') || null;
+    const command = plan.commands?.map((entry) => entry.join(' ')).join(' && ') || null;
     if (!plan.registered) return { registered: false, command, manual: plan.manual };
     const dryRun = process.env.MEBULAR_RESTART_DRY_RUN === '1';
     return {
@@ -2753,21 +2759,63 @@ export async function startHttpServer({
       return sendJson(res, result.ok ? 200 : 409, result);
     }
 
-    // H-1：常驻运行（服务托管，动作式；服务命令带**守护自身 home**）。CI 用 MEBULAR_SERVICE_DRY_RUN=1 替身断言命令序列。
+    // H-1：常驻运行（服务托管，动作式；统一走共享 runtime/service 层）。CI 用 MEBULAR_SERVICE_DRY_RUN=1 替身断言命令序列。
     const svcAction = path.match(/^\/admin\/api\/service\/(install|uninstall)$/);
     if (svcAction) {
-      const { installServiceForHome, uninstallServiceForHome, serviceStatusForHome, resolveServiceHome } = await import('./service-control.mjs');
+      const {
+        installRuntimeService,
+        runtimeProviderFromEnv,
+        runtimeServiceStatus,
+        uninstallRuntimeService,
+      } = await import('./runtime-service.mjs');
+      const { resolveServiceHome } = await import('./service-control.mjs');
       const dryRun = process.env.MEBULAR_SERVICE_DRY_RUN === '1';
       const commands = [];
       const run = dryRun ? (cmd, args) => { commands.push([cmd, ...(args ?? [])]); return { status: 0, stdout: '', stderr: '' }; } : undefined;
       // 两套 home：home = 实例身份（descriptor），serviceHome = unit/manifest 落盘（用户 OS home）。
       const serviceHome = resolveServiceHome();
+      const root = cloud.available ? cloud.root : null;
+      const fallbackProvider = runtimeProviderFromEnv({ cliPath: process.argv[1] });
+      if (root === null) {
+        // 自定义 home / 受限 env：保留 App 既有 service-control 行为。
+        const { installServiceForHome, uninstallServiceForHome, serviceStatusForHome } = await import('./service-control.mjs');
+        try {
+          const action = svcAction[1];
+          const result = action === 'install'
+            ? installServiceForHome({ home, serviceHome, ...(run ? { run } : {}) })
+            : uninstallServiceForHome({ home, serviceHome, ...(run ? { run } : {}) });
+          const status = serviceStatusForHome({ home, serviceHome, ...(run ? { run } : {}) });
+          return sendJson(res, 200, { ok: true, action, dryRun, commands, result, status });
+        } catch (error) {
+          return sendJson(res, 500, { ok: false, action: svcAction[1], error: 'service_action_failed', message: String(error?.message ?? error) });
+        }
+      }
       try {
         const action = svcAction[1];
         const result = action === 'install'
-          ? installServiceForHome({ home, serviceHome, ...(run ? { run } : {}) })
-          : uninstallServiceForHome({ home, serviceHome, ...(run ? { run } : {}) });
-        const status = serviceStatusForHome({ home, serviceHome, ...(run ? { run } : {}) });
+          ? await installRuntimeService({ root, home, serviceHome, http: { port }, fallbackProvider, ...(run ? { run } : {}) })
+          : await uninstallRuntimeService({ root, home, serviceHome, ...(run ? { run } : {}) });
+        const status = await runtimeServiceStatus({
+          root,
+          home,
+          serviceHome,
+          fallbackProvider,
+          ...(run ? { run } : {}),
+        });
+        if (result?.ok !== true) {
+          const httpStatus = ['runtime_required', 'service_conflict', 'service_foreign'].includes(result?.reason) ? 409 : 500;
+          return sendJson(res, httpStatus, {
+            ok: false,
+            action,
+            dryRun,
+            commands,
+            reason: result?.reason ?? 'service_action_failed',
+            message: result?.message ?? 'service action failed',
+            current: result?.current ?? null,
+            result,
+            status,
+          });
+        }
         return sendJson(res, 200, { ok: true, action, dryRun, commands, result, status });
       } catch (error) {
         return sendJson(res, 500, { ok: false, action: svcAction[1], error: 'service_action_failed', message: String(error?.message ?? error) });

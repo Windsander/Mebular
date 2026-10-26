@@ -20,7 +20,7 @@ const READY_INFO = {
   embedUrl: 'http://127.0.0.1:7331/console/?embed=dsh',
 };
 
-function loadClientInternals() {
+function loadClientInternals({ lang = 'en' } = {}) {
   let registration = null;
   const fakeWindow = {
     __MEBULAR_DSH_TEST__: true,
@@ -30,7 +30,8 @@ function loadClientInternals() {
       },
     },
   };
-  runInNewContext(source, { window: fakeWindow, URL }, { filename: clientPath });
+  const fakeDocument = { documentElement: { lang } };
+  runInNewContext(source, { window: fakeWindow, document: fakeDocument, URL }, { filename: clientPath });
   expect(registration).not.toBeNull();
   const exported = registration.factory((name) => {
     expect(name).toBe('react');
@@ -122,6 +123,66 @@ describe('DSH client 状态映射', () => {
     expect(statusTitle(text, 'connected')).toBe('Mebular: Connected');
     expect(statusTitle(text, 'offline')).toBe('Mebular: Offline');
     expect(statusTitle(text, 'unknown')).toBe('Mebular: Connecting');
+  });
+});
+
+describe('DSH client 共享 runtime 状态文案', () => {
+  const REASONS = [
+    'download_required', 'provisioning', 'service_conflict', 'profile_mismatch',
+    'version_mismatch', 'managed_cli_missing', 'instance_mismatch', 'instance_missing',
+    'cloud_mismatch', 'CLOUD_ALREADY_ACTIVE', 'port_in_use', 'service_unknown',
+    'service_foreign', 'service_not_registered', 'supervise_failed', 'child_exited',
+    'runtime_resolve_failed', 'start_locked',
+  ];
+
+  it('en 为每个共享 runtime reason 提供专门文案，不落到 unknown', () => {
+    const { reasonMessage, text } = loadClientInternals();
+    const t = text();
+    for (const reason of REASONS) {
+      expect(typeof t.reasons[reason]).toBe('string');
+      expect(t.reasons[reason].length).toBeGreaterThan(20);
+      expect(reasonMessage(t, { reason }, null)).toBe(t.reasons[reason]);
+      expect(reasonMessage(t, { reason }, null)).not.toBe(t.reasons.unknown);
+    }
+  });
+
+  it('zh 文案提示打开 App / 安装 CLI / 常驻，不承诺自动下载', () => {
+    const { reasonMessage, text } = loadClientInternals({ lang: 'zh' });
+    const t = text();
+    expect(t.reasons.download_required).toContain('Mebular App');
+    expect(t.reasons.download_required).toContain('安装 Mebular CLI');
+    expect(t.reasons.download_required).toContain('不会自动下载');
+    expect(t.reasons.service_not_registered).toContain('常驻');
+    expect(t.reasons.provisioning).toContain('supervisor');
+    expect(reasonMessage(t, { reason: 'download_required' }, null)).toBe(t.reasons.download_required);
+  });
+
+  it('runtimeMeta 只汇总非敏感字段', () => {
+    const { runtimeMeta, text } = loadClientInternals();
+    const t = text();
+    expect(runtimeMeta(t, {
+      profile: { id: 'work', name: 'Work' },
+      provider: { kind: 'app' },
+      runtimeMode: 'child',
+      service: { registered: true, running: true },
+    })).toBe('Work · app · child · service running');
+    expect(runtimeMeta(t, { profile: { id: 'work', name: null } })).toBe('work');
+    expect(runtimeMeta(t, null)).toBe('');
+  });
+
+  it('download_required 不是 ready，状态点为 offline', () => {
+    const { isReadyInfo, statusOf } = loadClientInternals();
+    const info = {
+      ok: false,
+      status: 'down',
+      state: 'download_required',
+      reason: 'download_required',
+      downloadRequired: true,
+      loopback: false,
+      embedUrl: null,
+    };
+    expect(isReadyInfo(info)).toBe(false);
+    expect(statusOf(info, false, false, null)).toBe('offline');
   });
 });
 
@@ -228,6 +289,140 @@ describe('DSH client 共享状态 store', () => {
     const unsubscribe = store.subscribe(() => {});
     await flush();
     expect(store.getSnapshot()).toMatchObject({ ready: false, status: 'starting' });
+    unsubscribe();
+  });
+});
+
+describe('DSH client plugin-only runtime install UI', () => {
+  const INSTALL_IDLE = {
+    state: 'idle',
+    reason: 'download_required',
+    detail: null,
+    manualCommand: 'npm install -g @mebular/core@0.1.2',
+    targetVersion: '0.1.2',
+    action: null,
+    startedAt: null,
+    finishedAt: null,
+    reused: false,
+    installed: false,
+    started: false,
+    allowed: true,
+  };
+  const DOWNLOAD = {
+    ok: false,
+    status: 'down',
+    state: 'download_required',
+    reason: 'download_required',
+    downloadRequired: true,
+    loopback: false,
+    embedUrl: null,
+    install: INSTALL_IDLE,
+  };
+
+  it('offers install/copy/redetect/readme only when the host allows bootstrap', () => {
+    const { canInstall, installView, text } = loadClientInternals();
+    const t = text();
+    expect(canInstall(DOWNLOAD)).toBe(true);
+    const view = installView(t, DOWNLOAD);
+    expect(view).toMatchObject({ kind: 'install', heading: t.installTitle });
+    expect(view.actions).toEqual(['install', 'copy', 'redetect', 'readme']);
+    expect(view.manualCommand).toBe(INSTALL_IDLE.manualCommand);
+
+    expect(canInstall({ ...DOWNLOAD, install: { ...INSTALL_IDLE, allowed: false } })).toBe(false);
+    expect(canInstall({ ...DOWNLOAD, downloadRequired: false, reason: 'daemon_unreachable' })).toBe(false);
+    expect(canInstall({ ...DOWNLOAD, install: { ...INSTALL_IDLE, state: 'installing' } })).toBe(false);
+  });
+
+  it('shows provisioning while installing and recovery actions after failure', () => {
+    const { installView, text } = loadClientInternals();
+    const t = text();
+
+    const installing = installView(t, {
+      ...DOWNLOAD,
+      install: { ...INSTALL_IDLE, state: 'installing' },
+    });
+    expect(installing).toMatchObject({ kind: 'installing', heading: t.installingTitle });
+    expect(installing.actions).toEqual([]);
+
+    const failed = installView(t, {
+      ...DOWNLOAD,
+      install: { ...INSTALL_IDLE, state: 'failed', reason: 'offline', detail: 'registry unreachable' },
+    });
+    expect(failed).toMatchObject({ kind: 'failed', heading: t.installFailedTitle });
+    expect(failed.body).toContain(t.reasons.offline);
+    expect(failed.detail).toBe('registry unreachable');
+    expect(failed.actions).toEqual(['retry', 'reinstall', 'copy', 'redetect', 'readme']);
+  });
+
+  it('install state is not ready and maps to the amber starting dot', () => {
+    const { statusOf, isReadyInfo } = loadClientInternals();
+    const info = { ...DOWNLOAD, install: { ...INSTALL_IDLE, state: 'installing' } };
+    expect(isReadyInfo(info)).toBe(false);
+    expect(statusOf(info, false, false, null)).toBe('starting');
+  });
+
+  it('one explicit action is one POST; polling stays read-only and single-flight', async () => {
+    const clock = fakeClock();
+    const pending = deferred();
+    const calls = [];
+    const fetchImpl = jest.fn(async (url, init) => {
+      calls.push({ url, init });
+      if (init?.method === 'POST') {
+        await pending.promise;
+        return jsonResponse({ ok: true, accepted: true, install: { ...INSTALL_IDLE, state: 'installing' } });
+      }
+      return jsonResponse({
+        ...DOWNLOAD,
+        install: { ...INSTALL_IDLE, state: 'installing' },
+      });
+    });
+    const { createEmbedInfoStore } = loadClientInternals();
+    const store = createEmbedInfoStore({
+      fetchImpl,
+      setIntervalFn: clock.setIntervalFn,
+      clearIntervalFn: clock.clearIntervalFn,
+    });
+    const unsubscribe = store.subscribe(() => {});
+    await flush();
+
+    const first = store.install('install');
+    const second = store.install('install');
+    expect(first).toBe(second);
+    expect(calls.filter((call) => call.init?.method === 'POST')).toHaveLength(1);
+    expect(calls.find((call) => call.init?.method === 'POST')).toMatchObject({
+      url: '/mebular/runtime/install',
+    });
+    expect(JSON.parse(calls.find((call) => call.init?.method === 'POST').init.body)).toEqual({ action: 'install' });
+
+    pending.resolve();
+    await first;
+    await flush();
+    expect(store.getSnapshot().installPending).toBe(false);
+    expect(store.getSnapshot().status).toBe('starting');
+    unsubscribe();
+  });
+
+  it('POST failure is local state only and does not write any other route', async () => {
+    const clock = fakeClock();
+    const calls = [];
+    const fetchImpl = jest.fn(async (url, init) => {
+      calls.push({ url, init });
+      if (init?.method === 'POST') return jsonResponse({ error: 'no' }, { ok: false, status: 403 });
+      return jsonResponse(DOWNLOAD);
+    });
+    const { createEmbedInfoStore } = loadClientInternals();
+    const store = createEmbedInfoStore({
+      fetchImpl,
+      setIntervalFn: clock.setIntervalFn,
+      clearIntervalFn: clock.clearIntervalFn,
+    });
+    const unsubscribe = store.subscribe(() => {});
+    await flush();
+
+    await store.install('retry');
+    expect(store.getSnapshot().installError).toBe('HTTP 403');
+    expect(calls.filter((call) => call.init?.method === 'POST')).toHaveLength(1);
+    expect(new Set(calls.map((call) => call.url))).toEqual(new Set(['/mebular/embed-info', '/mebular/runtime/install']));
     unsubscribe();
   });
 });

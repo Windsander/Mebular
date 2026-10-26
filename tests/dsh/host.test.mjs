@@ -19,6 +19,8 @@ import {
   createEmbedInfoHandler,
   createMcpBridgeSupervisor,
   daemonPortFromUrl,
+  DEFAULT_SUPERVISE_STOP_GRACE_MS,
+  discoverRuntimeProviders,
   injectPanelGlobal,
   isLoopbackAddress,
   isLoopbackUrl,
@@ -29,6 +31,7 @@ import {
   redactLogLine,
   resolveCliPath,
   resolveConfig,
+  runtimeCloudRoot,
   scriptJson,
 } from '../../packages/dsh-plugin/index.js';
 
@@ -147,35 +150,163 @@ async function waitFor(predicate, timeoutMs = 2000) {
   }
 }
 
-function lifecycleHarness({
-  lifecycle = 'attach',
-  reachable = false,
-  spawnCalls = [],
-  children = [],
-  cli = null,
-  warnings = [],
-} = {}) {
-  return createDaemonLifecycle({
-    config: { daemonUrl: BASE, lifecycle },
-    probe: async () => ({
-      reachable,
-      health: reachable ? HEALTH : null,
-      embed: reachable ? EMBED : null,
-    }),
-    spawnFn: (command, args, options) => {
-      spawnCalls.push({ command, args, options });
-      const child = fakeChild();
-      children.push(child);
-      return child;
+function cliProvider(path = '/opt/mebular/bin/mebular') {
+  return { kind: 'cli', path, source: 'config', version: null };
+}
+
+function appProvider(
+  path = '/Applications/Mebular.app/Contents/Resources/node_modules/@mebular/core/packages/mcp/bin/mebular.mjs',
+) {
+  return { kind: 'app', path, source: 'registry', version: '0.2.0' };
+}
+
+function discoveryFor(provider = null) {
+  return {
+    cloudRoot: '/tmp/mebular-dsh-test',
+    providers: provider === null ? [] : [provider],
+    selected: provider,
+    warnings: [],
+  };
+}
+
+function resolveDocument({ mode = 'child', port = 9123, ...extra } = {}) {
+  return {
+    ok: true,
+    mode,
+    http: { scheme: 'http', host: '127.0.0.1', port },
+    instance: 'instance-test',
+    version: '0.2.0',
+    profileId: 'work',
+    profile: { id: 'work', name: 'Work' },
+    service: {
+      registered: mode === 'service',
+      running: mode === 'service',
+      foreign: false,
     },
-    resolveCli: () => cli,
-    logger: { warn: (message) => warnings.push(message) },
-    startTimeoutMs: 5000,
-    pollIntervalMs: 5,
-    killGraceMs: 50,
+    providers: {
+      selected: mode === 'service'
+        ? { kind: 'cli', source: 'path', version: '0.2.0' }
+        : { kind: 'app', source: 'registry', version: '0.2.0' },
+    },
+    ...extra,
+  };
+}
+
+function embedFor(daemonUrl) {
+  return {
+    ...EMBED,
+    consoleUrl: `${daemonUrl}/console`,
+    embedUrl: `${daemonUrl}/console/?embed=dsh`,
+    mcpUrl: `${daemonUrl}/mcp`,
+  };
+}
+
+/** Controllable supervise handle for deterministic lifecycle tests. */
+function superviseHandle(readyData, { exitAfterReady = false } = {}) {
+  let resolveExit;
+  const exited = new Promise((resolve) => { resolveExit = resolve; });
+  if (exitAfterReady) {
+    queueMicrotask(() => resolveExit({ code: 0, signal: null }));
+  }
+  return {
+    ready: Promise.resolve({ ok: readyData?.ok === true, data: readyData }),
+    exited,
+    stopCalls: [],
+    exit(code = 0, signal = null) {
+      resolveExit({ code, signal });
+    },
+    async stop(options) {
+      this.stopCalls.push(options);
+      resolveExit({ code: 0, signal: 'SIGTERM' });
+      return { stopped: true };
+    },
+    getState: () => ({ exited: false }),
+  };
+}
+
+function runtimeHarness({
+  lifecycle = 'attach',
+  runtime = 'auto',
+  persistence = 'child',
+  bootstrap = 'prompt',
+  provider = cliProvider(),
+  resolveData = resolveDocument(),
+  resolveResult = null,
+  supervise = null,
+  useRealSupervise = false,
+  useRealResolve = false,
+  spawnFn = null,
+  reachable = true,
+  probe = null,
+  config = {},
+  env = { PATH: '/usr/bin', MEBULAR_HOME: '/inherited/home' },
+  platform = undefined,
+  home = undefined,
+  runtimeDoc = null,
+  warnings = [],
+  logs = [],
+  startTimeoutMs = 200,
+  superviseStopGraceMs = 10,
+  useDefaultSuperviseStopGrace = false,
+  sleep = undefined,
+} = {}) {
+  const calls = { discovery: 0, resolve: [], supervise: [], probes: [] };
+  const handle = supervise ?? superviseHandle(resolveData);
+  const options = {
+    config: {
+      lifecycle,
+      runtime,
+      persistence,
+      bootstrap,
+      pinnedDaemonUrl: false,
+      ...config,
+    },
+    logger: {
+      info: (message) => logs.push(`info:${message}`),
+      warn: (message) => {
+        warnings.push(message);
+        logs.push(`warn:${message}`);
+      },
+    },
+    discoverProviders: async () => {
+      calls.discovery += 1;
+      return discoveryFor(provider);
+    },
+    probe: probe ?? (async ({ daemonUrl }) => {
+      calls.probes.push(daemonUrl);
+      return {
+        reachable,
+        health: reachable ? HEALTH : null,
+        embed: reachable ? embedFor(daemonUrl) : null,
+      };
+    }),
+    pollIntervalMs: 1,
+    startTimeoutMs,
     cacheTtlMs: 0,
-    env: { PATH: '/usr/bin', MEBULAR_HOME: '/inherited/home' },
-  });
+    env,
+    runtime: runtimeDoc,
+  };
+  if (!useDefaultSuperviseStopGrace && superviseStopGraceMs !== undefined) {
+    options.superviseStopGraceMs = superviseStopGraceMs;
+  }
+  if (typeof sleep === 'function') options.sleep = sleep;
+  if (home !== undefined) options.home = home;
+  if (!useRealResolve) {
+    options.runResolve = async (context) => {
+      calls.resolve.push(context);
+      return resolveResult ?? { ok: true, data: resolveData };
+    };
+  }
+  if (platform !== undefined) options.platform = platform;
+  if (!useRealSupervise) {
+    options.startSupervise = async (context) => {
+      calls.supervise.push(context);
+      return handle;
+    };
+  } else if (typeof spawnFn === 'function') {
+    options.spawnFn = spawnFn;
+  }
+  return { lifecycle: createDaemonLifecycle(options), calls, handle, warnings, logs };
 }
 
 function applyHarness(fetchHandler, {
@@ -300,6 +431,8 @@ function applyHarness(fetchHandler, {
     importModule,
     bridgeIntervalMs: 5,
     cacheTtlMs: 0,
+    // Hermetic default: no host runtime providers on the test machine.
+    discoverProviders: async () => discoveryFor(null),
     setIntervalFn(callback, ms) {
       const handle = {
         callback,
@@ -378,6 +511,10 @@ describe('P2 @mebular/dsh-plugin host：纯函数', () => {
         daemonUrl: 'http://127.0.0.1:7331',
         lifecycle: 'attach',
         panel: true,
+        runtime: 'auto',
+        persistence: 'child',
+        bootstrap: 'prompt',
+        pinnedDaemonUrl: false,
       });
     } finally {
       if (prior === undefined) delete process.env.MEBULAR_HTTP_PORT;
@@ -394,11 +531,19 @@ describe('P2 @mebular/dsh-plugin host：纯函数', () => {
         daemonUrl: 'http://127.0.0.1:8123',
         lifecycle: 'managed',
         panel: false,
+        runtime: 'auto',
+        persistence: 'child',
+        bootstrap: 'prompt',
+        pinnedDaemonUrl: false,
       });
       expect(resolveConfig({ lifecycle: 'managed', cliPath: ' /opt/mebular ' }, CONFIG_OPTS)).toEqual({
         daemonUrl: 'http://127.0.0.1:8123',
         lifecycle: 'managed',
         panel: true,
+        runtime: 'auto',
+        persistence: 'child',
+        bootstrap: 'prompt',
+        pinnedDaemonUrl: false,
         cliPath: '/opt/mebular',
       });
       process.env.MEBULAR_HTTP_PORT = 'not-a-port';
@@ -418,9 +563,12 @@ describe('P2 @mebular/dsh-plugin host：纯函数', () => {
       const warnings = [];
       expect(resolveConfig({
         daemonUrl: 'file:///tmp/mebular',
-        lifecycle: 'auto',
+        lifecycle: 'sometimes',
         panel: 'maybe',
         cliPath: 42,
+        runtime: 'sometimes',
+        persistence: 'sometimes',
+        bootstrap: 'sometimes',
       }, {
         warn: (message) => warnings.push(message),
         runtime: null,
@@ -428,13 +576,26 @@ describe('P2 @mebular/dsh-plugin host：纯函数', () => {
         daemonUrl: 'http://127.0.0.1:7331',
         lifecycle: 'attach',
         panel: true,
+        runtime: 'auto',
+        persistence: 'child',
+        bootstrap: 'prompt',
+        pinnedDaemonUrl: false,
       });
-      expect(warnings).toHaveLength(4);
+      expect(warnings).toHaveLength(7);
       expect(warnings.join('\n')).toContain('invalid daemonUrl');
       expect(warnings.join('\n')).toContain('invalid lifecycle');
       expect(warnings.join('\n')).toContain('invalid panel');
       expect(warnings.join('\n')).toContain('invalid cliPath');
+      expect(warnings.join('\n')).toContain('invalid runtime');
+      expect(warnings.join('\n')).toContain('invalid persistence');
+      expect(warnings.join('\n')).toContain('invalid bootstrap');
       expect(resolveConfig({ lifecycle: ' MANAGED ' }).lifecycle).toBe('managed');
+      expect(resolveConfig({ lifecycle: ' AUTO ' }).lifecycle).toBe('auto');
+      expect(resolveConfig({ runtime: 'EXTERNAL' }).runtime).toBe('external');
+      expect(resolveConfig({ persistence: 'SERVICE' }).persistence).toBe('service');
+      expect(resolveConfig({ bootstrap: 'NEVER' }).bootstrap).toBe('never');
+      expect(resolveConfig({ daemonUrl: 'http://127.0.0.1:7000' }).pinnedDaemonUrl).toBe(true);
+      expect(resolveConfig({ daemonUrl: 'http://127.0.0.1:7000', pinnedDaemonUrl: false }).pinnedDaemonUrl).toBe(false);
     } finally {
       if (prior === undefined) delete process.env.MEBULAR_HTTP_PORT;
       else process.env.MEBULAR_HTTP_PORT = prior;
@@ -502,10 +663,20 @@ describe('P2 @mebular/dsh-plugin host：纯函数', () => {
     expect(info).toEqual({
       ok: true,
       status: 'up',
+      state: 'up',
       mode: 'attach',
+      runtimeMode: null,
       managed: false,
       panel: true,
+      daemonUrl: BASE,
       version: '0.1.0',
+      profile: null,
+      provider: null,
+      service: null,
+      downloadRequired: false,
+      install: null,
+      update: null,
+      upgrade: null,
       embedProtocol: EMBED_PROTOCOL,
       consoleUrl: `${BASE}/console`,
       embedUrl: `${BASE}/console/?embed=dsh`,
@@ -514,8 +685,9 @@ describe('P2 @mebular/dsh-plugin host：纯函数', () => {
       reason: null,
     });
     expect(Object.keys(info).sort()).toEqual([
-      'consoleUrl', 'embedProtocol', 'embedUrl', 'loopback',
-      'managed', 'mcpUrl', 'mode', 'ok', 'panel', 'reason', 'status', 'version',
+      'consoleUrl', 'daemonUrl', 'downloadRequired', 'embedProtocol', 'embedUrl', 'install', 'loopback',
+      'managed', 'mcpUrl', 'mode', 'ok', 'panel', 'profile', 'provider', 'reason',
+      'runtimeMode', 'service', 'state', 'status', 'update', 'upgrade', 'version',
     ]);
     const serialized = JSON.stringify(info).toLowerCase();
     for (const word of ['token', 'secret', 'password', 'authorization']) {
@@ -1224,6 +1396,157 @@ describe('P6 @mebular/dsh-plugin host：MCP bridge supervisor', () => {
     await harness.cleanup();
     expect(lifecycleDisposed).toBe(1);
   });
+
+  it('apply effect 等待 lifecycle.dispose 完成，DSH unload 不会提前结束', async () => {
+    const order = [];
+    const snapshot = {
+      status: 'up',
+      mode: 'attach',
+      managed: false,
+      reason: null,
+      reachable: true,
+      health: HEALTH,
+      embed: EMBED,
+    };
+    const lifecycle = {
+      start: async () => snapshot,
+      inspect: async () => snapshot,
+      dispose: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        order.push('lifecycle');
+      },
+    };
+    const harness = applyHarness(() => {
+      throw new Error('fetch must not run with a fake lifecycle');
+    }, {
+      config: {},
+      applyOptions: { lifecycle },
+    });
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.plugins.length === 1);
+    await harness.cleanup();
+    expect(order).toEqual(['lifecycle']);
+    expect(harness.intervals[0].cleared).toBe(true);
+  });
+
+  it('apply 跟随 resolve 的非默认端口：embed-info、MCP bridge 与 panel 使用同一动态 URL', async () => {
+    const provider = appProvider();
+    const harness = applyHarness(
+      (url) => {
+        if (url === 'http://127.0.0.1:9123/healthz') {
+          return jsonResponse({ ...HEALTH, version: '0.2.0' });
+        }
+        if (url === 'http://127.0.0.1:9123/app/embed/info') {
+          return jsonResponse(embedFor('http://127.0.0.1:9123'));
+        }
+        throw new Error(`unexpected ${url}`);
+      },
+      {
+        config: {},
+        applyOptions: {
+          discoverProviders: async () => discoveryFor(provider),
+          runResolve: async () => ({ ok: true, data: resolveDocument({ mode: 'reused' }) }),
+        },
+      },
+    );
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.plugins.length === 1);
+    expect(harness.plugins[0].config).toMatchObject({
+      serverName: 'mebular',
+      url: 'http://127.0.0.1:9123/mcp',
+    });
+
+    const res = makeResponse();
+    harness.mock.calls.length = 0;
+    await harness.route.handler(makeRequest(), res);
+    const info = JSON.parse(res.body);
+    expect(info).toMatchObject({
+      ok: true,
+      status: 'up',
+      daemonUrl: 'http://127.0.0.1:9123',
+      consoleUrl: 'http://127.0.0.1:9123/console',
+      embedUrl: 'http://127.0.0.1:9123/console/?embed=dsh',
+      mcpUrl: 'http://127.0.0.1:9123/mcp',
+      profile: { id: 'work', name: 'Work' },
+      provider: { kind: 'app' },
+      downloadRequired: false,
+    });
+    expect(harness.mock.calls.length).toBeGreaterThan(0);
+    expect(harness.mock.calls.every((call) => call.url.startsWith('http://127.0.0.1:9123'))).toBe(true);
+  });
+
+  it('apply + 无 provider + down：route 返回 download_required，不 spawn', async () => {
+    let spawnCalls = 0;
+    const harness = applyHarness(
+      () => {
+        throw new Error('ECONNREFUSED');
+      },
+      {
+        config: {},
+        applyOptions: {
+          spawnFn: () => {
+            spawnCalls += 1;
+            throw new Error('must not spawn');
+          },
+        },
+      },
+    );
+    activeMock = harness.mock;
+
+    await waitFor(() => harness.warnings.some((line) => line.includes('download_required')));
+    const res = makeResponse();
+    await harness.route.handler(makeRequest(), res);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: false,
+      status: 'down',
+      state: 'download_required',
+      reason: 'download_required',
+      downloadRequired: true,
+      embedUrl: null,
+    });
+    expect(spawnCalls).toBe(0);
+  });
+
+  it('daemon URL 变化：MCP bridge 先 unmount 再 remount，不并存两个实例', async () => {
+    let snapshot = {
+      status: 'up',
+      mode: 'attach',
+      managed: false,
+      reason: null,
+      reachable: true,
+      health: HEALTH,
+      embed: EMBED,
+      daemonUrl: 'http://127.0.0.1:7331',
+    };
+    const mounts = [];
+    const disposed = [];
+    const supervisor = createMcpBridgeSupervisor({
+      lifecycle: { inspect: async () => snapshot },
+      daemonUrl: 'http://127.0.0.1:7331',
+      mount: async (url) => {
+        mounts.push(url);
+        return { ok: true, dispose: async () => { disposed.push(url); } };
+      },
+      intervalMs: 1000,
+      setIntervalFn: () => ({ unref() {} }),
+      clearIntervalFn: () => {},
+    });
+
+    await supervisor.check();
+    expect(mounts).toEqual(['http://127.0.0.1:7331']);
+    expect(supervisor.getState()).toMatchObject({ mounted: true, mountedUrl: 'http://127.0.0.1:7331' });
+
+    snapshot = { ...snapshot, daemonUrl: 'http://127.0.0.1:9123' };
+    await supervisor.check();
+    expect(disposed).toEqual(['http://127.0.0.1:7331']);
+    expect(mounts).toEqual(['http://127.0.0.1:7331', 'http://127.0.0.1:9123']);
+    expect(supervisor.getState()).toMatchObject({ mounted: true, mountedUrl: 'http://127.0.0.1:9123' });
+
+    await supervisor.dispose();
+    expect(disposed).toEqual(['http://127.0.0.1:7331', 'http://127.0.0.1:9123']);
+  });
 });
 
 describe('P7 @mebular/dsh-plugin host：Agent 可见状态', () => {
@@ -1516,8 +1839,12 @@ describe('P2 @mebular/dsh-plugin host：探测与 /mebular/embed-info 路由', (
     }, { applyOptions: { bridgeIntervalMs: 60000 } });
     activeMock = harness.mock;
 
-    expect(harness.routes).toHaveLength(1);
+    expect(harness.routes).toHaveLength(3);
     expect(harness.routes[0]).toMatchObject({ kind: 'exact', path: EMBED_INFO_PATH });
+    expect(harness.routes[1]).toMatchObject({ kind: 'exact', path: '/mebular/runtime/install' });
+    expect(harness.routes[2]).toMatchObject({ kind: 'exact', path: '/mebular/runtime/upgrade' });
+    expect(typeof harness.routes[1].handler).toBe('function');
+    expect(typeof harness.routes[2].handler).toBe('function');
 
     const res = makeResponse();
     await harness.route.handler(makeRequest(), res);
@@ -1679,370 +2006,784 @@ describe('P2 @mebular/dsh-plugin host：探测与 /mebular/embed-info 路由', (
   });
 });
 
-describe('P3 @mebular/dsh-plugin：attach / managed 生命周期', () => {
-  it('attach + up：只探测，不 spawn，mode=attach/managed=false', async () => {
-    const spawnCalls = [];
-    const lifecycle = lifecycleHarness({
-      lifecycle: 'attach',
-      reachable: true,
-      spawnCalls,
-      cli: '/opt/mebular',
-    });
+describe('P8 @mebular/dsh-plugin：共享 runtime 发现', () => {
+  it('注册表 app > cli > shared；显式 cliPath 是用户 pin', async () => {
+    const exists = (file) => new Set([
+      '/opt/App/mebular.mjs',
+      '/opt/shared/mebular.mjs',
+      '/usr/bin/mebular',
+      '/pin/mebular',
+    ]).has(file);
+    const registry = {
+      v: 1,
+      providers: [
+        { kind: 'shared', path: '/opt/shared/mebular.mjs', version: '0.1.0' },
+        { kind: 'cli', path: '/usr/bin/mebular', version: '0.2.0' },
+        { kind: 'app', path: '/opt/App/mebular.mjs', version: '0.3.0' },
+      ],
+    };
+    const env = { PATH: '/usr/bin' };
+    const base = { env, platform: 'linux', userHome: '/home/u', exists, registry, includeStandardApp: false };
 
-    await lifecycle.start();
-    const state = await lifecycle.inspect();
-    expect(state).toMatchObject({
-      status: 'up',
-      mode: 'attach',
-      managed: false,
-      reason: null,
-    });
-    expect(spawnCalls).toHaveLength(0);
+    const discovery = await discoverRuntimeProviders(base);
+    expect(discovery.providers.map((entry) => `${entry.kind}:${entry.path}`)).toEqual([
+      'app:/opt/App/mebular.mjs',
+      'cli:/usr/bin/mebular',
+      'shared:/opt/shared/mebular.mjs',
+    ]);
+    expect(discovery.selected).toMatchObject({ kind: 'app', path: '/opt/App/mebular.mjs', source: 'registry' });
+    // The plugin uses the host path.join for the default root; keep the test portable.
+    expect(discovery.cloudRoot).toBe(join('/home/u', '.mebular'));
 
-    lifecycle.dispose();
-    expect(spawnCalls).toHaveLength(0);
+    const pinned = await discoverRuntimeProviders({ ...base, cliPath: '/pin/mebular' });
+    expect(pinned.selected).toMatchObject({ kind: 'cli', path: '/pin/mebular', source: 'config' });
+    expect(pinned.providers.map((entry) => entry.path)).toContain('/opt/App/mebular.mjs');
   });
 
-  it('attach + down：不 spawn，状态 down + daemon_unreachable', async () => {
-    const spawnCalls = [];
-    const lifecycle = lifecycleHarness({
+  it('MEBULAR_CLI 优先于 PATH，路径不存在则跳过', async () => {
+    // findFileOnPath calls the host path.join, including when platform:'linux'
+    // is injected, so build the expected PATH candidate the same way.
+    const pathCli = join('/usr/local/bin', 'mebular');
+    const exists = (file) => new Set(['/env/mebular', pathCli]).has(file);
+    const discovery = await discoverRuntimeProviders({
+      env: { PATH: '/usr/local/bin', MEBULAR_CLI: '/env/mebular' },
+      platform: 'linux',
+      userHome: '/home/u',
+      exists,
+      registry: { v: 1, providers: [] },
+      includeStandardApp: false,
+    });
+    expect(discovery.selected).toMatchObject({ kind: 'cli', path: '/env/mebular', source: 'env' });
+
+    const missing = await discoverRuntimeProviders({
+      env: { PATH: '/usr/local/bin', MEBULAR_CLI: '/missing/mebular' },
+      platform: 'linux',
+      userHome: '/home/u',
+      exists,
+      registry: { v: 1, providers: [] },
+      includeStandardApp: false,
+    });
+    expect(missing.selected).toMatchObject({ path: pathCli, source: 'path' });
+  });
+
+  it('MEBULAR_CLOUD_ROOT 指定注册表位置；App 标准路径可被发现', async () => {
+    const standard = join('/Applications', 'Mebular.app', 'Contents', 'Resources', ...[
+      'node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs',
+    ]);
+    const exists = (file) => new Set([
+      '/custom/root/runtime-providers.json',
+      standard,
+      '/usr/bin/mebular',
+    ]).has(file);
+    const discovery = await discoverRuntimeProviders({
+      env: { PATH: '/usr/bin', MEBULAR_CLOUD_ROOT: '/custom/root' },
+      platform: 'darwin',
+      userHome: '/home/u',
+      exists,
+      registry: { v: 1, providers: [{ kind: 'cli', path: '/usr/bin/mebular' }] },
+    });
+    expect(discovery.cloudRoot).toBe('/custom/root');
+    expect(discovery.selected).toMatchObject({ kind: 'app', path: standard, source: 'standard' });
+    expect(runtimeCloudRoot({ env: { MEBULAR_CLOUD_ROOT: '/custom/root' }, userHome: '/home/u' })).toBe('/custom/root');
+    expect(runtimeCloudRoot({ env: {}, userHome: '/home/u' })).toBe(join('/home/u', '.mebular'));
+  });
+
+  it('Windows PATH 按 PATHEXT 发现 mebular.cmd', async () => {
+    const discovery = await discoverRuntimeProviders({
+      env: { PATH: 'C:\\bin', PATHEXT: '.EXE;.CMD' },
+      platform: 'win32',
+      userHome: 'C:\\Users\\me',
+      exists: (file) => file === join('C:\\bin', 'mebular.CMD'),
+      registry: { v: 1, providers: [] },
+      includeStandardApp: false,
+    });
+    expect(discovery.selected).toMatchObject({ kind: 'cli', source: 'path' });
+    expect(discovery.selected.path.toLowerCase()).toContain('mebular.cmd');
+  });
+});
+
+describe('P8 @mebular/dsh-plugin：共享 runtime 生命周期', () => {
+  it('attach + 健康 daemon：复用 resolve 返回的动态 URL，不启动', async () => {
+    const harness = runtimeHarness({
       lifecycle: 'attach',
-      reachable: false,
-      spawnCalls,
-      cli: '/opt/mebular',
+      provider: appProvider(),
+      resolveData: resolveDocument({ mode: 'reused' }),
     });
 
-    await lifecycle.start();
-    const state = await lifecycle.inspect();
+    const state = await harness.lifecycle.start();
     expect(state).toMatchObject({
-      status: 'down',
+      status: 'up',
+      state: 'up',
       mode: 'attach',
+      runtimeMode: null,
       managed: false,
       reason: null,
+      daemonUrl: 'http://127.0.0.1:9123',
+      profile: { id: 'work', name: 'Work' },
+      provider: { kind: 'app', source: 'registry' },
+      // The running daemon is authoritative for the version (0.1.0 here),
+      // not the provider registration.
+      version: '0.1.0',
+      downloadRequired: false,
     });
-    expect(spawnCalls).toHaveLength(0);
+    expect(harness.calls.resolve).toHaveLength(1);
+    expect(harness.calls.supervise).toHaveLength(0);
+    expect(harness.calls.probes).toContain('http://127.0.0.1:9123');
+    expect(harness.calls.discovery).toBe(1);
+  });
 
+  it('attach + runtime 已安装未运行：只提示，不启动 supervise', async () => {
+    const harness = runtimeHarness({
+      lifecycle: 'attach',
+      provider: cliProvider(),
+      resolveData: resolveDocument({ mode: 'child' }),
+      reachable: false,
+    });
+
+    const state = await harness.lifecycle.start();
+    expect(state).toMatchObject({
+      status: 'down',
+      state: 'down',
+      mode: 'attach',
+      reason: null,
+      daemonUrl: 'http://127.0.0.1:9123',
+      downloadRequired: false,
+    });
+    expect(harness.calls.supervise).toHaveLength(0);
     const info = buildEmbedInfo({
-      daemonUrl: BASE,
+      daemonUrl: state.daemonUrl,
       reachable: state.reachable,
-      health: state.health,
-      embed: state.embed,
       status: state.status,
+      state: state.state,
       mode: state.mode,
-      managed: state.managed,
       reason: state.reason,
+      downloadRequired: state.downloadRequired,
     });
     expect(info.reason).toBe('daemon_unreachable');
     expect(info.embedUrl).toBeNull();
   });
 
-  it('managed + up：复用已有 daemon，不 spawn、不托管', async () => {
-    const spawnCalls = [];
-    const lifecycle = lifecycleHarness({ lifecycle: 'managed', reachable: true, spawnCalls });
+  it('attach + 无 provider：download_required，不 spawn、不下载', async () => {
+    const harness = runtimeHarness({
+      lifecycle: 'attach',
+      provider: null,
+      reachable: false,
+    });
 
-    await lifecycle.start();
-    const state = await lifecycle.inspect();
+    const state = await harness.lifecycle.start();
     expect(state).toMatchObject({
+      status: 'down',
+      state: 'download_required',
+      mode: 'attach',
+      reason: 'download_required',
+      downloadRequired: true,
+    });
+    expect(harness.calls.resolve).toHaveLength(0);
+    expect(harness.calls.supervise).toHaveLength(0);
+  });
+
+  it('managed + 健康 daemon：复用，不 supervise；runtime: external 强制 attach', async () => {
+    const reused = runtimeHarness({
+      lifecycle: 'managed',
+      provider: cliProvider(),
+      resolveData: resolveDocument({ mode: 'reused' }),
+    });
+    expect(await reused.lifecycle.start()).toMatchObject({
       status: 'up',
       mode: 'managed',
+      runtimeMode: null,
       managed: false,
-      reason: null,
     });
-    expect(spawnCalls).toHaveLength(0);
+    expect(reused.calls.supervise).toHaveLength(0);
 
-    lifecycle.dispose();
-    expect(spawnCalls).toHaveLength(0);
-  });
-
-  it('managed + down + CLI：只 spawn 一次，starting 后 dispose 只杀自己的 child', async () => {
-    const spawnCalls = [];
-    const children = [];
-    const lifecycle = lifecycleHarness({
+    const external = runtimeHarness({
       lifecycle: 'managed',
+      runtime: 'external',
+      provider: cliProvider(),
+      resolveData: resolveDocument({ mode: 'child' }),
       reachable: false,
-      spawnCalls,
-      children,
-      cli: '/opt/mebular',
     });
-
-    const startup = lifecycle.start();
-    await waitFor(() => spawnCalls.length === 1);
-    const during = await lifecycle.inspect();
-    expect(during).toMatchObject({
-      status: 'starting',
-      mode: 'managed',
-      managed: true,
-      reason: null,
-    });
-    expect(during.health).toBeNull();
-
-    expect(spawnCalls[0]).toMatchObject({
-      command: '/opt/mebular',
-      args: ['serve', '--port', '7331'],
-    });
-    expect(spawnCalls[0].options.stdio).toEqual(['ignore', 'pipe', 'pipe']);
-    // Managed mode inherits MEBULAR_HOME; it never rewrites the Mebular home.
-    expect(spawnCalls[0].options.env.MEBULAR_HOME).toBe('/inherited/home');
-
-    lifecycle.dispose();
-    await startup;
-    expect(children[0].killCalls).toEqual(['SIGTERM']);
-    expect(lifecycle.getState()).toMatchObject({ status: 'down', managed: false });
-    expect(spawnCalls).toHaveLength(1);
-  });
-
-  it('managed + down + CLI 缺失：降级 attach，不 spawn，reason=managed_cli_missing', async () => {
-    const spawnCalls = [];
-    const warnings = [];
-    const lifecycle = lifecycleHarness({
-      lifecycle: 'managed',
-      reachable: false,
-      spawnCalls,
-      warnings,
-    });
-
-    await lifecycle.start();
-    const state = await lifecycle.inspect();
-    expect(state).toMatchObject({
+    expect(await external.lifecycle.start()).toMatchObject({
       status: 'down',
       mode: 'attach',
-      managed: false,
-      reason: 'managed_cli_missing',
+      reason: null,
     });
-    expect(spawnCalls).toHaveLength(0);
-    expect(warnings.join('\n')).toContain('no Mebular CLI');
-
-    lifecycle.dispose();
-    expect(spawnCalls).toHaveLength(0);
+    expect(external.calls.supervise).toHaveLength(0);
   });
 
-  it('managed 启动超时：状态 down + managed_start_failed，只 kill 自己的 child', async () => {
+  it('managed + App .mjs provider：用当前 Node 执行 supervise，dispose 只停 supervise', async () => {
+    const provider = appProvider();
     const spawnCalls = [];
     const children = [];
-    const lifecycle = createDaemonLifecycle({
-      config: { daemonUrl: BASE, lifecycle: 'managed' },
-      probe: async () => ({ reachable: false, health: null, embed: null }),
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider,
+      useRealSupervise: true,
       spawnFn: (command, args, options) => {
         spawnCalls.push({ command, args, options });
         const child = fakeChild();
         children.push(child);
         return child;
       },
-      resolveCli: () => '/opt/mebular',
-      logger: { warn() {} },
-      startTimeoutMs: 30,
-      pollIntervalMs: 5,
-      killGraceMs: 10,
-      cacheTtlMs: 0,
     });
 
-    await lifecycle.start();
-    expect(spawnCalls).toHaveLength(1);
-    expect(lifecycle.getState()).toMatchObject({
-      status: 'down',
+    const started = harness.lifecycle.start();
+    await waitFor(() => spawnCalls.length === 1);
+    expect(spawnCalls[0].command).toBe(process.execPath);
+    expect(spawnCalls[0].args).toEqual([provider.path, 'runtime', 'supervise', '--json']);
+    expect(spawnCalls[0].options.shell).toBeUndefined();
+
+    children[0].stdout.emit(`${JSON.stringify(resolveDocument())}\n`);
+    const state = await started;
+    expect(state).toMatchObject({
+      status: 'up',
+      state: 'up',
       mode: 'managed',
-      managed: false,
-      reason: 'managed_start_failed',
+      runtimeMode: 'child',
+      managed: true,
+      daemonUrl: 'http://127.0.0.1:9123',
+      provider: { kind: 'app' },
     });
-    // Timeout cleanup escalates SIGTERM -> SIGKILL for its own child.
-    expect(children[0].killCalls).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(harness.calls.supervise).toHaveLength(0);
 
-    lifecycle.dispose();
-    expect(children[0].killCalls).toEqual(['SIGTERM', 'SIGKILL']);
-    expect(lifecycle.getState()).toMatchObject({ managed: false, reason: 'managed_start_failed' });
+    harness.lifecycle.dispose();
+    await waitFor(() => children[0].killCalls.length >= 1);
+    expect(children[0].killCalls[0]).toBe('SIGTERM');
+    children[0].emit('exit', 0, 'SIGTERM');
+    expect(harness.lifecycle.getState()).toMatchObject({ managed: false, status: 'down' });
   });
 
-  it('spawn error：不留下 child，状态 managed_start_failed，日志不含 CLI 路径', async () => {
+  it('fake .mjs CLI：真实执行 runtime resolve --json 并采用权威 profile/端口', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'mebular-dsh-cli-'));
+    const cli = join(home, 'mebular.mjs');
+    try {
+      await writeFile(cli, [
+        "const args = process.argv.slice(2);",
+        "if (args[0] !== 'runtime' || args[1] !== 'resolve' || args[2] !== '--json') {",
+        "  console.error('unexpected args', args);",
+        '  process.exit(3);',
+        '}',
+        "process.stdout.write(`${JSON.stringify({",
+        "  ok: true, mode: 'reused',",
+        "  http: { scheme: 'http', host: '127.0.0.1', port: 9123 },",
+        "  version: '0.2.0', profileId: 'work', profile: { id: 'work', name: 'Work' },",
+        "  service: { registered: true, running: true, foreign: false },",
+        "  providers: { selected: { kind: 'app', source: 'registry' } },",
+        '})}\\n`);',
+      ].join('\n'), 'utf-8');
+
+      const harness = runtimeHarness({
+        lifecycle: 'attach',
+        provider: appProvider(cli),
+        useRealResolve: true,
+        home,
+      });
+      const state = await harness.lifecycle.start();
+      expect(state).toMatchObject({
+        status: 'up',
+        daemonUrl: 'http://127.0.0.1:9123',
+        profile: { id: 'work', name: 'Work' },
+        service: { registered: true, running: true },
+        provider: { kind: 'app' },
+      });
+      expect(harness.calls.resolve).toHaveLength(0);
+      expect(harness.calls.probes).toEqual(['http://127.0.0.1:9123']);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('managed + CLI provider：命令行路径直接执行，Windows .cmd 才用 shell', async () => {
+    for (const [providerPath, platform, expectedShell, expectedCommand] of [
+      ['/opt/mebular/bin/mebular', 'linux', false, '/opt/mebular/bin/mebular'],
+      ['C:\\Tools\\mebular.cmd', 'win32', true, 'C:\\Tools\\mebular.cmd'],
+      ['C:\\Tools\\mebular.exe', 'win32', false, 'C:\\Tools\\mebular.exe'],
+    ]) {
+      const spawnCalls = [];
+      const children = [];
+      const harness = runtimeHarness({
+        lifecycle: 'managed',
+        provider: cliProvider(providerPath),
+        useRealSupervise: true,
+        platform,
+        spawnFn: (command, args, options) => {
+          spawnCalls.push({ command, args, options });
+          const child = fakeChild();
+          children.push(child);
+          return child;
+        },
+      });
+
+      const started = harness.lifecycle.start();
+      await waitFor(() => spawnCalls.length === 1);
+      expect(spawnCalls[0].command).toBe(expectedCommand);
+      expect(spawnCalls[0].args).toEqual(['runtime', 'supervise', '--json']);
+      expect(Boolean(spawnCalls[0].options.shell)).toBe(expectedShell);
+
+      children[0].stdout.emit(`${JSON.stringify(resolveDocument())}\n`);
+      await started;
+      harness.lifecycle.dispose();
+      children[0].emit('exit', 0, 'SIGTERM');
+    }
+  });
+
+  it('service 已注册：supervise 输出 service 后正常退出，不当作失败，不停外部 daemon', async () => {
+    const handle = superviseHandle(resolveDocument({ mode: 'service' }), { exitAfterReady: true });
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider: cliProvider(),
+      resolveData: resolveDocument({ mode: 'service' }),
+      supervise: handle,
+    });
+
+    const state = await harness.lifecycle.start();
+    expect(harness.calls.supervise).toHaveLength(1);
+    expect(state).toMatchObject({
+      status: 'up',
+      state: 'up',
+      runtimeMode: 'service',
+      managed: false,
+      daemonUrl: 'http://127.0.0.1:9123',
+      service: { registered: true, running: true },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(harness.lifecycle.getState()).toMatchObject({ status: 'up', reason: null });
+    expect(handle.stopCalls).toHaveLength(0);
+    harness.lifecycle.dispose();
+    expect(handle.stopCalls).toHaveLength(0);
+  });
+
+  it('persistence: service 但未注册：明确 service_not_registered，不启动 child、不安装', async () => {
+    const ready = {
+      ok: false,
+      mode: 'error',
+      reason: 'service_not_registered',
+      http: { scheme: 'http', host: '127.0.0.1', port: 9123 },
+      service: { registered: false, running: false, foreign: false },
+      providers: { selected: { kind: 'cli', source: 'path' } },
+    };
+    const handle = superviseHandle(ready);
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      persistence: 'service',
+      provider: cliProvider(),
+      resolveData: resolveDocument({ mode: 'service' }),
+      supervise: handle,
+      reachable: false,
+    });
+
+    const state = await harness.lifecycle.start();
+    expect(state).toMatchObject({
+      status: 'down',
+      state: 'service_conflict',
+      reason: 'service_not_registered',
+      downloadRequired: false,
+    });
+    expect(harness.calls.supervise).toHaveLength(1);
+    expect(harness.calls.supervise[0].scriptArgs).toEqual(['--start', 'service']);
+    expect(handle.stopCalls).toHaveLength(1);
+  });
+
+  it('conflict 原因映射为稳定 state/reason，不启动 supervise', async () => {
+    for (const [reason, expectedState] of [
+      ['instance_mismatch', 'profile_mismatch'],
+      ['instance_missing', 'profile_mismatch'],
+      ['cloud_mismatch', 'profile_mismatch'],
+      ['CLOUD_ALREADY_ACTIVE', 'profile_mismatch'],
+      ['service_unknown', 'service_conflict'],
+      ['service_foreign', 'service_conflict'],
+      ['port_in_use', 'down'],
+      ['version_mismatch', 'version_mismatch'],
+    ]) {
+      const harness = runtimeHarness({
+        lifecycle: 'managed',
+        provider: cliProvider(),
+        resolveResult: {
+          ok: true,
+          data: {
+            ok: false,
+            mode: 'conflict',
+            reason,
+            http: { scheme: 'http', host: '127.0.0.1', port: 9123 },
+            service: { registered: false, running: false, foreign: reason === 'service_foreign' },
+            providers: { selected: { kind: 'cli', source: 'path' } },
+          },
+        },
+        reachable: false,
+      });
+      const state = await harness.lifecycle.start();
+      expect(state).toMatchObject({ state: expectedState, reason });
+      expect(harness.calls.supervise).toHaveLength(0);
+    }
+  });
+
+  it('显式 daemonUrl pin：只 attach，不 resolve/supervise，不被动态 URL 覆盖', async () => {
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider: appProvider(),
+      config: { daemonUrl: 'http://127.0.0.1:7000', pinnedDaemonUrl: true },
+    });
+
+    const state = await harness.lifecycle.start();
+    expect(state).toMatchObject({
+      status: 'up',
+      mode: 'attach',
+      daemonUrl: 'http://127.0.0.1:7000',
+      runtimeMode: null,
+    });
+    expect(harness.calls.discovery).toBe(0);
+    expect(harness.calls.resolve).toHaveLength(0);
+    expect(harness.calls.supervise).toHaveLength(0);
+    expect(harness.calls.probes).toEqual(['http://127.0.0.1:7000']);
+  });
+
+  it('两个入口同时冷启动：只有一个 supervise/daemon；一个退出后另一个可 attach 或重启', async () => {
+    const world = { up: false, starts: 0 };
+    const provider = appProvider();
+    const makeEntry = () => {
+      const entry = { stops: 0 };
+      entry.lifecycle = createDaemonLifecycle({
+        config: { lifecycle: 'managed', pinnedDaemonUrl: false },
+        discoverProviders: async () => discoveryFor(provider),
+        runResolve: async () => ({
+          ok: true,
+          data: world.up ? resolveDocument({ mode: 'reused' }) : resolveDocument({ mode: 'child' }),
+        }),
+        startSupervise: async () => {
+          if (world.up) {
+            return superviseHandle(resolveDocument({ mode: 'reused' }), { exitAfterReady: true });
+          }
+          world.starts += 1;
+          world.up = true;
+          const handle = superviseHandle(resolveDocument({ mode: 'child' }));
+          handle.stop = async () => {
+            entry.stops += 1;
+            world.up = false;
+            handle.exit(0, 'SIGTERM');
+            return { stopped: true };
+          };
+          return handle;
+        },
+        probe: async ({ daemonUrl }) => ({
+          reachable: world.up,
+          health: world.up ? HEALTH : null,
+          embed: world.up ? embedFor(daemonUrl) : null,
+        }),
+        superviseStopGraceMs: 10,
+        pollIntervalMs: 1,
+        startTimeoutMs: 200,
+        cacheTtlMs: 0,
+        env: {},
+      });
+      return entry;
+    };
+
+    const first = makeEntry();
+    const second = makeEntry();
+    const [firstState, secondState] = await Promise.all([
+      first.lifecycle.start(),
+      second.lifecycle.start(),
+    ]);
+    expect(world.starts).toBe(1);
+    expect(firstState.status).toBe('up');
+    expect(secondState.status).toBe('up');
+    expect([firstState.managed, secondState.managed].filter(Boolean)).toHaveLength(1);
+
+    first.lifecycle.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(world.up).toBe(false);
+    expect(first.stops).toBe(1);
+    expect((await second.lifecycle.inspect()).status).toBe('down');
+
+    const third = makeEntry();
+    expect((await third.lifecycle.start()).status).toBe('up');
+    expect(world.starts).toBe(2);
+    third.lifecycle.dispose();
+  });
+
+  it('supervise child 在 up 后退出：状态 down + child_exited，不重启第二个 daemon', async () => {
+    const handle = superviseHandle(resolveDocument({ mode: 'child' }));
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider: cliProvider(),
+      supervise: handle,
+    });
+
+    expect((await harness.lifecycle.start()).status).toBe('up');
+    handle.exit(7, null);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(harness.lifecycle.getState()).toMatchObject({
+      status: 'down',
+      state: 'down',
+      reason: 'child_exited',
+      managed: false,
+    });
+    expect(harness.calls.supervise).toHaveLength(1);
+  });
+
+  it('supervise 就绪超时：managed_start_failed 且只停自己的 supervise', async () => {
+    const spawnCalls = [];
+    const children = [];
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider: cliProvider(),
+      useRealSupervise: true,
+      startTimeoutMs: 30,
+      // Stop grace is 10ms in this harness; exit there so SIGKILL's 5s wait is
+      // never reached.
+      sleep: (ms) => {
+        if (ms >= 10 && children.length > 0) children[0].emit('exit', 0, 'SIGTERM');
+        return Promise.resolve();
+      },
+      spawnFn: (command, args, options) => {
+        spawnCalls.push({ command, args, options });
+        const child = fakeChild();
+        children.push(child);
+        return child;
+      },
+    });
+
+    const state = await harness.lifecycle.start();
+    expect(state).toMatchObject({
+      status: 'down',
+      state: 'down',
+      reason: 'managed_start_failed',
+      managed: false,
+    });
+    expect(spawnCalls).toHaveLength(1);
+    expect(children[0].killCalls[0]).toBe('SIGTERM');
+    children[0].emit('exit', 0, 'SIGTERM');
+  });
+
+  it('resolve 失败 + daemon 不可达：runtime_resolve_failed，不猜测端口', async () => {
+    const harness = runtimeHarness({
+      lifecycle: 'attach',
+      provider: cliProvider(),
+      resolveResult: { ok: false, error: 'timeout' },
+      reachable: false,
+    });
+    const state = await harness.lifecycle.start();
+    expect(state).toMatchObject({
+      status: 'down',
+      state: 'down',
+      reason: 'runtime_resolve_failed',
+    });
+    expect(harness.calls.supervise).toHaveLength(0);
+  });
+
+  it('bootstrap: never 抑制下载/安装提示但保持 down', async () => {
+    const harness = runtimeHarness({
+      lifecycle: 'attach',
+      provider: null,
+      bootstrap: 'never',
+      reachable: false,
+    });
+    const state = await harness.lifecycle.start();
+    expect(state).toMatchObject({
+      status: 'down',
+      state: 'down',
+      reason: null,
+      downloadRequired: false,
+    });
+  });
+
+  it('非法 lifecycle/runtime/persistence/bootstrap 回退并告警，不阻止启动', async () => {
     const warnings = [];
     const lifecycle = createDaemonLifecycle({
-      config: { daemonUrl: BASE, lifecycle: 'managed' },
-      probe: async () => ({ reachable: false, health: null, embed: null }),
-      spawnFn: () => {
-        const error = new Error('spawn /opt/mebular ENOENT');
-        error.code = 'ENOENT';
-        throw error;
+      config: {
+        lifecycle: 'sometimes',
+        runtime: 'sometimes',
+        persistence: 'sometimes',
+        bootstrap: 'sometimes',
+        pinnedDaemonUrl: false,
       },
-      resolveCli: () => '/opt/mebular',
-      logger: { warn: (message) => warnings.push(message) },
-      startTimeoutMs: 30,
-      pollIntervalMs: 5,
-      killGraceMs: 10,
+      warn: (message) => warnings.push(message),
+      discoverProviders: async () => discoveryFor(null),
+      probe: async () => ({ reachable: false, health: null, embed: null }),
+      env: {},
       cacheTtlMs: 0,
     });
-
-    await lifecycle.start();
-    expect(lifecycle.getState()).toMatchObject({
-      status: 'down',
-      mode: 'managed',
-      managed: false,
-      reason: 'managed_start_failed',
-    });
-    expect(warnings.join('\n')).toContain('failed to spawn (ENOENT)');
-    expect(warnings.join('\n')).not.toContain('/opt/mebular');
+    const state = await lifecycle.start();
+    expect(state).toMatchObject({ status: 'down', mode: 'attach' });
+    expect(warnings.join('\n')).toContain('invalid lifecycle');
+    expect(warnings.join('\n')).toContain('invalid runtime');
+    expect(warnings.join('\n')).toContain('invalid persistence');
+    expect(warnings.join('\n')).toContain('invalid bootstrap');
     lifecycle.dispose();
   });
 
-  it('Windows .cmd：使用 shell 启动且 args 固定；普通可执行不启用 shell', async () => {
-    for (const [cliPath, expectedShell] of [
-      ['C:\\Tools\\mebular.cmd', true],
-      ['C:\\Tools\\mebular.exe', false],
-    ]) {
-      const calls = [];
-      const lifecycle = createDaemonLifecycle({
-        config: { daemonUrl: BASE, lifecycle: 'managed' },
-        probe: async () => ({ reachable: false, health: null, embed: null }),
-        spawnFn: (command, args, options) => {
-          calls.push({ command, args, options });
-          return fakeChild();
-        },
-        resolveCli: () => cliPath,
-        platform: 'win32',
-        logger: { warn() {} },
-        startTimeoutMs: 20,
-        pollIntervalMs: 5,
-        killGraceMs: 5,
-        cacheTtlMs: 0,
-      });
-      await lifecycle.start();
-      expect(calls).toHaveLength(1);
-      expect(calls[0].args).toEqual(['serve', '--port', '7331']);
-      expect(Boolean(calls[0].options.shell)).toBe(expectedShell);
-      lifecycle.dispose();
-    }
-  });
-
-  it('dispose：SIGTERM 后仍存活，grace 到期发 SIGKILL', async () => {
+  it('supervise 日志中的 secret 与路径被脱敏', async () => {
     const spawnCalls = [];
     const children = [];
-    const lifecycle = lifecycleHarness({
+    const harness = runtimeHarness({
       lifecycle: 'managed',
-      reachable: false,
-      spawnCalls,
-      children,
-      cli: '/opt/mebular',
-    });
-
-    const startup = lifecycle.start();
-    await waitFor(() => spawnCalls.length === 1);
-    lifecycle.dispose();
-    await startup;
-    expect(children[0].killCalls[0]).toBe('SIGTERM');
-    await new Promise((resolve) => setTimeout(resolve, 80));
-    expect(children[0].killCalls).toEqual(['SIGTERM', 'SIGKILL']);
-  });
-
-  it('managed 子进程日志：secret/token/Authorization 与路径脱敏', async () => {
-    const spawnCalls = [];
-    const children = [];
-    const logs = [];
-    const lifecycle = createDaemonLifecycle({
-      config: { daemonUrl: BASE, lifecycle: 'managed' },
-      probe: async () => ({ reachable: false, health: null, embed: null }),
+      provider: cliProvider(),
+      useRealSupervise: true,
       spawnFn: (command, args, options) => {
         spawnCalls.push({ command, args, options });
         const child = fakeChild();
         children.push(child);
         return child;
       },
-      resolveCli: () => '/opt/mebular',
-      logger: {
-        info: (message) => logs.push(message),
-        warn: (message) => logs.push(message),
-      },
-      env: { PATH: '/usr/bin', MEBULAR_HOME: '/Users/me/.mebular' },
-      startTimeoutMs: 5000,
-      pollIntervalMs: 5,
-      killGraceMs: 10,
-      cacheTtlMs: 0,
     });
 
-    const startup = lifecycle.start();
+    const started = harness.lifecycle.start();
     await waitFor(() => spawnCalls.length === 1);
-    children[0].stderr.emit(
-      'token=abc123 Authorization: Bearer eyJhbGci password="pw" /opt/mebular /Users/me/.mebular',
-    );
-    expect(logs.join('\n')).toContain('token=<redacted>');
-    expect(logs.join('\n')).toContain('Authorization: Bearer <redacted>');
-    expect(logs.join('\n')).toContain('password="<redacted>"');
-    for (const secret of ['abc123', 'eyJhbGci', 'pw', '/opt/mebular', '/Users/me/.mebular']) {
-      expect(logs.join('\n')).not.toContain(secret);
+    children[0].stdout.emit(`${JSON.stringify(resolveDocument())}\n`);
+    await started;
+    children[0].stderr.emit('token=abc123 Authorization: Bearer eyJhbGci /opt/mebular/bin/mebular /inherited/home');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const output = harness.logs.join('\n');
+    expect(output).toContain('token=<redacted>');
+    expect(output).toContain('Authorization: Bearer <redacted>');
+    for (const secret of ['abc123', 'eyJhbGci', '/opt/mebular/bin/mebular', '/inherited/home']) {
+      expect(output).not.toContain(secret);
     }
-    lifecycle.dispose();
-    await startup;
+    harness.lifecycle.dispose();
+    children[0].emit('exit', 0, 'SIGTERM');
+  });
+});
+
+describe('P9 @mebular/dsh-plugin：supervise stop 窗口与 dispose', () => {
+  it('默认 stop grace 覆盖 supervisor 的 child 清理预算', () => {
+    expect(DEFAULT_SUPERVISE_STOP_GRACE_MS).toBeGreaterThanOrEqual(9000);
   });
 
-  it('外部 daemon 不被 dispose 停止', async () => {
+  it('supervise 收到 SIGTERM 后约 3s 才退出：不在 2s 提前 SIGKILL，最终无孤儿', async () => {
     const spawnCalls = [];
-    const lifecycle = lifecycleHarness({ lifecycle: 'managed', reachable: true, spawnCalls });
-    await lifecycle.start();
-    lifecycle.dispose();
-    expect(spawnCalls).toHaveLength(0);
+    const children = [];
+    const waits = [];
+    const clock = { now: 0 };
+    const childExitAfterMs = 3000;
+    let exitAt = null;
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider: appProvider(),
+      useRealSupervise: true,
+      // Default 10s window: the supervisor may need 2s + 5s to clean its child.
+      useDefaultSuperviseStopGrace: true,
+      sleep: (ms) => {
+        waits.push(ms);
+        const target = clock.now + ms;
+        // The supervisor cleans its child in ~3s, inside the 10s stop window.
+        if (exitAt !== null && exitAt <= target && children.length > 0) {
+          clock.now = exitAt;
+          children[0].emit('exit', 0, 'SIGTERM');
+        }
+        clock.now = target;
+        return Promise.resolve();
+      },
+      spawnFn: (command, args, options) => {
+        spawnCalls.push({ command, args, options });
+        const child = fakeChild();
+        const kill = child.kill;
+        child.kill = function onKill(signal) {
+          if (signal === 'SIGTERM') exitAt = clock.now + childExitAfterMs;
+          return kill.call(this, signal);
+        };
+        children.push(child);
+        return child;
+      },
+    });
+
+    const started = harness.lifecycle.start();
+    await waitFor(() => spawnCalls.length === 1);
+    children[0].stdout.emit(`${JSON.stringify(resolveDocument())}\n`);
+    await started;
+
+    const disposal = harness.lifecycle.dispose();
+    await disposal;
+
+    expect(waits).toContain(DEFAULT_SUPERVISE_STOP_GRACE_MS);
+    expect(waits).not.toContain(2000);
+    // Virtual time reached the 3s child-exit point, long before SIGKILL would
+    // even be considered, and only one SIGTERM was sent to supervise.
+    expect(clock.now).toBeGreaterThanOrEqual(childExitAfterMs);
+    expect(children[0].killCalls).toEqual(['SIGTERM']);
+    expect(spawnCalls).toHaveLength(1);
+    expect(children).toHaveLength(1);
+    expect(harness.logs.join('\n')).not.toContain('did not confirm exit');
   });
 
-  it('状态契约：up/managed 形状完整且不含敏感字段', async () => {
-    const lifecycle = {
-      inspect: async () => ({
-        status: 'up',
-        mode: 'managed',
-        managed: true,
-        reason: null,
-        reachable: true,
-        health: HEALTH,
-        embed: EMBED,
-      }),
-    };
-    const handler = createEmbedInfoHandler({ config: { daemonUrl: BASE }, lifecycle });
-    const res = makeResponse();
-    await handler(makeRequest(), res);
-    const info = JSON.parse(res.body);
-
-    expect(info).toMatchObject({
-      ok: true,
-      status: 'up',
-      mode: 'managed',
-      managed: true,
-      panel: true,
-      version: '0.1.0',
-      embedProtocol: 1,
-      consoleUrl: `${BASE}/console`,
-      embedUrl: `${BASE}/console/?embed=dsh`,
-      mcpUrl: `${BASE}/mcp`,
-      loopback: true,
-      reason: null,
+  it('dispose 返回同一个 Promise，等待 stop 完成且重复调用只 stop 一次', async () => {
+    const handle = superviseHandle(resolveDocument({ mode: 'child' }));
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider: cliProvider(),
+      supervise: handle,
     });
-    expect(Object.keys(info).sort()).toEqual([
-      'consoleUrl', 'embedProtocol', 'embedUrl', 'loopback',
-      'managed', 'mcpUrl', 'mode', 'ok', 'panel', 'reason', 'status', 'version',
-    ]);
-    const serialized = JSON.stringify(info).toLowerCase();
-    for (const word of ['token', 'secret', 'password', 'authorization', 'cliPath', '/inherited']) {
-      expect(serialized).not.toContain(word.toLowerCase());
-    }
+    await harness.lifecycle.start();
+
+    const first = harness.lifecycle.dispose();
+    const second = harness.lifecycle.dispose();
+    expect(second).toBe(first);
+    expect(typeof first?.then).toBe('function');
+    await first;
+    expect(handle.stopCalls).toHaveLength(1);
+    expect(handle.stopCalls[0]).toEqual({ graceMs: 10 });
+
+    const third = harness.lifecycle.dispose();
+    expect(third).toBe(first);
+    await third;
+    expect(handle.stopCalls).toHaveLength(1);
   });
 
-  it('状态契约：starting 不返回 embedUrl，并由 client 显示启动占位页', async () => {
-    const lifecycle = {
-      inspect: async () => ({
-        status: 'starting',
-        mode: 'managed',
-        managed: true,
-        reason: null,
-        reachable: false,
-        health: null,
-        embed: null,
-      }),
-    };
-    const handler = createEmbedInfoHandler({ config: { daemonUrl: BASE }, lifecycle });
-    const res = makeResponse();
-    await handler(makeRequest(), res);
-    expect(JSON.parse(res.body)).toMatchObject({
-      ok: false,
-      status: 'starting',
-      mode: 'managed',
-      managed: true,
-      embedUrl: null,
-      reason: null,
+  it('默认 lifecycle 把 10s stop grace 传给 supervise，而不是旧的 2s', async () => {
+    const handle = superviseHandle(resolveDocument({ mode: 'child' }));
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider: cliProvider(),
+      supervise: handle,
+      useDefaultSuperviseStopGrace: true,
     });
+    await harness.lifecycle.start();
+    await harness.lifecycle.dispose();
+
+    expect(handle.stopCalls).toEqual([{ graceMs: DEFAULT_SUPERVISE_STOP_GRACE_MS }]);
+    expect(handle.stopCalls[0].graceMs).not.toBe(2000);
+  });
+
+  it('超过新 stop grace 仍不退出才 SIGKILL，并记录 supervise_stop_failed', async () => {
+    const spawnCalls = [];
+    const children = [];
+    const waits = [];
+    const harness = runtimeHarness({
+      lifecycle: 'managed',
+      provider: appProvider(),
+      useRealSupervise: true,
+      useDefaultSuperviseStopGrace: true,
+      sleep: (ms) => {
+        waits.push(ms);
+        return Promise.resolve();
+      },
+      spawnFn: (command, args, options) => {
+        spawnCalls.push({ command, args, options });
+        const child = fakeChild();
+        children.push(child);
+        return child;
+      },
+    });
+
+    const started = harness.lifecycle.start();
+    await waitFor(() => spawnCalls.length === 1);
+    children[0].stdout.emit(`${JSON.stringify(resolveDocument())}\n`);
+    await started;
+
+    await harness.lifecycle.dispose();
+
+    expect(children[0].killCalls).toEqual(['SIGTERM', 'SIGKILL']);
+    expect(waits[0]).toBe(DEFAULT_SUPERVISE_STOP_GRACE_MS);
+    expect(waits[1]).toBe(5000);
+    expect(waits[0]).toBeGreaterThan(2000);
+    expect(harness.logs.join('\n')).toContain('did not confirm exit');
+    expect(harness.lifecycle.getState()).toMatchObject({
+      status: 'down',
+      state: 'down',
+      reason: 'supervise_stop_failed',
+    });
+    expect(spawnCalls).toHaveLength(1);
+    expect(children).toHaveLength(1);
   });
 });
 

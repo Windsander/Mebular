@@ -20,13 +20,18 @@ import {
   waitForDaemonDetail,
 } from '../../apps/desktop/src/main/daemon.mjs';
 import {
+  createCloudServiceOps,
   migrateLegacyService,
   performCloudSwitch,
   readCloudPrefs,
   recoverSwitchIntent,
+  stopTargetLeftovers,
+  writeCloudPreference,
 } from '../../apps/desktop/src/main/clouds.mjs';
 import * as profiles from '../../packages/mcp/src/profiles.mjs';
 import * as cloudSwitch from '../../packages/mcp/src/cloud-switch.mjs';
+import * as runtimeServiceModule from '../../packages/mcp/src/runtime-service.mjs';
+import { writeRuntimeCurrent } from '../../packages/mcp/src/runtime-current.mjs';
 import { IPC_CHANNELS, buildHandlerTable, sanitizeArgs } from '../../apps/desktop/src/main/ipc.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -118,6 +123,61 @@ function fakeChild(running, home) {
       return true;
     },
   };
+}
+
+/** 真实 runtime-service + fake @mebular/service：用于断言 current descriptor。 */
+function serviceRecording({ registeredHomes = new Set(), legacyHomes = new Set(), running = { home: null }, allRegistered = false } = {}) {
+  const installs = [];
+  const uninstalls = [];
+  const service = noService({
+    serviceStatus: (descriptor, options) => {
+      const at = options?.home;
+      const home = descriptor?.env?.MEBULAR_HOME;
+      const registered = allRegistered
+        || (registeredHomes.has(home) && at === '/os-home')
+        || (legacyHomes.has(home) && at === home);
+      return {
+        registered,
+        running: registered && running.home === home,
+        autostart: registered ? false : null,
+        label: `com.mebular.mebular-serve.${home}`,
+        unitPath: registered
+          ? (at === home ? join(home, 'Library', 'LaunchAgents', 'com.mebular.mebular-serve.abc.plist') : `/os-home/unit-${home}.plist`)
+          : null,
+      };
+    },
+    defaultLabel: (_kind, _prefix, home) => `com.mebular.mebular-serve.${home}`,
+    installService: (descriptor, options) => {
+      installs.push({ descriptor, options });
+      running.home = descriptor.env.MEBULAR_HOME;
+      return { ok: true, started: true, label: 'com.mebular.mebular-serve.test', unitPath: `/os-home/unit-${descriptor.env.MEBULAR_HOME}.plist` };
+    },
+    uninstallService: (descriptor, options) => {
+      uninstalls.push({ descriptor, options });
+      if (running.home === descriptor.env.MEBULAR_HOME) running.home = null;
+      return { ok: true, removed: true };
+    },
+    manifestPath: (kind, at) => join(at, '.mebular', 'services', `${kind}.json`),
+  });
+  return { service, installs, uninstalls, running };
+}
+
+async function writeCurrentRuntime(root, version = '0.1.2') {
+  const runtimePath = join(root, 'runtime', version);
+  const core = join(runtimePath, 'node_modules', '@mebular', 'core');
+  await mkdir(join(core, 'packages', 'mcp', 'bin'), { recursive: true });
+  await writeFile(join(core, 'package.json'), JSON.stringify({ name: '@mebular/core', version }), 'utf-8');
+  const cliPath = join(core, 'packages', 'mcp', 'bin', 'mebular.mjs');
+  await writeFile(cliPath, '// shared runtime\n', 'utf-8');
+  await writeRuntimeCurrent(root, {
+    version,
+    runtimePath,
+    cliPath,
+    provider: 'shared',
+    owner: 'shared',
+    installedAt: '2026-01-01T00:00:00.000Z',
+  });
+  return { runtimePath, cliPath, version };
 }
 
 describe('CL-05 · healthz 实例身份', () => {
@@ -414,6 +474,274 @@ describe('CL-09 · switch.intent.json 崩溃恢复', () => {
     expect((await profiles.readRegistry(root)).registry.profiles.map((entry) => entry.id)).toEqual(['default', 'p2']);
     expect(existsSync(defaultHome)).toBe(true);
     expect(existsSync(p2Home)).toBe(true);
+  });
+});
+
+describe('Phase 5a · 云切换/迁移使用共享 current service', () => {
+  it('按 App CLI 入口可动态加载 runtime-service（无需 index 额外注入）', async () => {
+    const { root } = await makeRoot();
+    await writeCurrentRuntime(root, '0.1.2');
+    const cliBin = join(here, '..', '..', 'packages', 'mcp', 'bin', 'mebular.mjs');
+    const ops = await createCloudServiceOps({ root, cliBin, service: noService() });
+    expect(ops.mode).toBe('shared');
+    expect(typeof ops.install).toBe('function');
+  });
+
+  it('current 可用：切换后的 service 安装使用 current CLI/version/owner，不写 App descriptor', async () => {
+    const { root, defaultHome, p2Home } = await makeRoot();
+    const shared = await writeCurrentRuntime(root, '0.1.2');
+    const running = { home: defaultHome };
+    const rec = serviceRecording({ registeredHomes: new Set([defaultHome]), running });
+    const result = await performCloudSwitch({
+      root,
+      id: 'p2',
+      home: defaultHome,
+      cliBin: '/x/mebular.mjs',
+      modules,
+      runtimeService: runtimeServiceModule,
+      fetchImpl: makeFetcher({ root, defaultHome, p2Home, running }),
+      spawnFn: () => { throw new Error('service mode must not spawn'); },
+      service: rec.service,
+      serviceHome: '/os-home',
+      pidAlive: () => false,
+    });
+    expect(result).toMatchObject({ ok: true, current: 'p2', mode: 'service', child: null });
+    expect(rec.installs).toHaveLength(1);
+    const installed = rec.installs[0];
+    expect(installed.descriptor.args[0]).toBe(shared.cliPath);
+    expect(installed.descriptor.args).not.toContain('/x/mebular.mjs');
+    expect(installed.descriptor.runtime).toMatchObject({
+      version: '0.1.2',
+      runtimePath: shared.runtimePath,
+      cliPath: shared.cliPath,
+      provider: 'shared',
+      owner: 'shared',
+      home: p2Home,
+      cloudRoot: root,
+    });
+    expect(installed.descriptor.env).toMatchObject({
+      MEBULAR_HOME: p2Home,
+      MEBULAR_CLOUD_ROOT: root,
+      MEBULAR_RUNTIME_PROVIDER: 'shared',
+      MEBULAR_RUNTIME_OWNER: 'shared',
+    });
+    expect(rec.uninstalls.some((call) => call.options.home === '/os-home')).toBe(true);
+  });
+
+  it('current 不可用：使用 App fallback，manifest runtime owner=app，不下载 runtime', async () => {
+    const { root, defaultHome, p2Home } = await makeRoot();
+    const appCli = join(root, 'app', 'mebular.mjs');
+    await mkdir(dirname(appCli), { recursive: true });
+    await writeFile(appCli, '// app runtime\n', 'utf-8');
+    const running = { home: defaultHome };
+    const rec = serviceRecording({ registeredHomes: new Set([defaultHome]), running });
+    const result = await performCloudSwitch({
+      root,
+      id: 'p2',
+      home: defaultHome,
+      cliBin: appCli,
+      modules,
+      runtimeService: runtimeServiceModule,
+      fetchImpl: makeFetcher({ root, defaultHome, p2Home, running }),
+      spawnFn: () => { throw new Error('service mode must not spawn'); },
+      service: rec.service,
+      serviceHome: '/os-home',
+      pidAlive: () => false,
+    });
+    expect(result).toMatchObject({ ok: true, current: 'p2', mode: 'service' });
+    const installed = rec.installs[0];
+    expect(installed.descriptor.args[0]).toBe(appCli);
+    expect(installed.descriptor.runtime).toMatchObject({
+      provider: 'app',
+      owner: 'app',
+      cliPath: appCli,
+      runtimePath: null,
+      version: '0.1.2',
+    });
+    expect(existsSync(join(root, 'runtime'))).toBe(false);
+  });
+
+  it('runtime-service 不可用但 current 存在：拒绝回退 App descriptor（不改 service）', async () => {
+    const { root, defaultHome, p2Home } = await makeRoot();
+    await writeCurrentRuntime(root, '0.1.2');
+    const running = { home: defaultHome };
+    const rec = serviceRecording({ registeredHomes: new Set([defaultHome]), running });
+    let error = null;
+    try {
+      await performCloudSwitch({
+        root,
+        id: 'p2',
+        home: defaultHome,
+        cliBin: '/x/mebular.mjs',
+        modules,
+        fetchImpl: makeFetcher({ root, defaultHome, p2Home, running }),
+        spawnFn: () => { throw new Error('must not start'); },
+        service: rec.service,
+        serviceHome: '/os-home',
+        pidAlive: () => false,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error?.code).toBe('RUNTIME_SERVICE_UNAVAILABLE');
+    expect(rec.installs).toHaveLength(0);
+    expect(rec.uninstalls).toHaveLength(0);
+    expect(running.home).toBe(defaultHome);
+  });
+
+  it('legacy migration：current 可用迁移到 shared；无 current 保留 App owner', async () => {
+    for (const scenario of [
+      { name: 'shared current', current: true, expectedProvider: 'shared', expectedOwner: 'shared' },
+      { name: 'app fallback', current: false, expectedProvider: 'app', expectedOwner: 'app' },
+    ]) {
+      const { root, defaultHome } = await makeRoot();
+      const serviceHome = join(root, '..', `os-home-${scenario.current ? 'shared' : 'app'}`);
+      const shared = scenario.current ? await writeCurrentRuntime(root, '0.1.2') : null;
+      const appCli = join(root, 'app', 'mebular.mjs');
+      await mkdir(dirname(appCli), { recursive: true });
+      await writeFile(appCli, '// app runtime\n', 'utf-8');
+      const legacyUnit = join(defaultHome, 'Library', 'LaunchAgents', 'com.mebular.mebular-serve.abc.plist');
+      const legacyManifest = join(defaultHome, '.mebular', 'services', 'mebular-serve.json');
+      await mkdir(dirname(legacyUnit), { recursive: true });
+      await mkdir(dirname(legacyManifest), { recursive: true });
+      await writeFile(legacyUnit, 'plist');
+      await writeFile(legacyManifest, JSON.stringify({ autostart: false }));
+      const rec = serviceRecording({ legacyHomes: new Set([defaultHome]) });
+
+      const result = await migrateLegacyService({
+        service: rec.service,
+        runtimeService: runtimeServiceModule,
+        root,
+        cliBin: appCli,
+        home: defaultHome,
+        serviceHome,
+      });
+      expect(result).toMatchObject({
+        migrated: true,
+        autostart: false,
+        provider: scenario.expectedProvider,
+        owner: scenario.expectedOwner,
+      });
+      expect(rec.installs).toHaveLength(1);
+      const installed = rec.installs[0];
+      if (shared) {
+        expect(installed.descriptor.args[0]).toBe(shared.cliPath);
+        expect(installed.descriptor.runtime).toMatchObject({ provider: 'shared', owner: 'shared' });
+      } else {
+        expect(installed.descriptor.args[0]).toBe(appCli);
+        expect(installed.descriptor.runtime).toMatchObject({ provider: 'app', owner: 'app' });
+      }
+      expect(existsSync(legacyUnit)).toBe(false);
+      expect(existsSync(legacyManifest)).toBe(false);
+    }
+  });
+
+  it('切换失败回滚：重新安装旧 home service 仍使用 shared current', async () => {
+    const { root, defaultHome, p2Home } = await makeRoot();
+    const shared = await writeCurrentRuntime(root, '0.1.2');
+    const running = { home: defaultHome };
+    const rec = serviceRecording({ registeredHomes: new Set([defaultHome]), running });
+    let error = null;
+    try {
+      await performCloudSwitch({
+        root,
+        id: 'p2',
+        home: defaultHome,
+        cliBin: '/x/mebular.mjs',
+        modules,
+        runtimeService: runtimeServiceModule,
+        fetchImpl: makeFetcher({ root, defaultHome, p2Home, running, failPorts: new Set([P2]) }),
+        spawnFn: () => { throw new Error('service mode must not spawn'); },
+        service: rec.service,
+        serviceHome: '/os-home',
+        pidAlive: () => false,
+        verifyTimeoutMs: 100,
+        verifyIntervalMs: 10,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error?.code).toBe('CLOUD_SWITCH_FAILED');
+    expect(error?.rollback?.ok).toBe(true);
+    expect(rec.installs.length).toBeGreaterThanOrEqual(2);
+    expect(rec.installs.at(-1).descriptor.env.MEBULAR_HOME).toBe(defaultHome);
+    expect(rec.installs.at(-1).descriptor.args[0]).toBe(shared.cliPath);
+    expect(rec.installs.at(-1).descriptor.runtime).toMatchObject({ provider: 'shared', owner: 'shared' });
+    expect((await profiles.readRegistry(root)).registry.current).toBe('default');
+  });
+
+  it('stopTargetLeftovers 不删除其他 home/cloudRoot 的 manifest', async () => {
+    const { root, p2Home } = await makeRoot();
+    const serviceHome = join(root, '..', 'os-home-stop');
+    await mkdir(join(serviceHome, '.mebular', 'services'), { recursive: true });
+    await writeFile(join(serviceHome, '.mebular', 'services', 'mebular-serve.json'), JSON.stringify({
+      kind: 'mebular-serve',
+      label: 'com.mebular.mebular-serve.other',
+      unitPath: join(serviceHome, 'foreign.plist'),
+      args: [],
+      execPath: process.execPath,
+      runtime: {
+        version: '0.1.2',
+        runtimePath: null,
+        cliPath: '/other/mebular.mjs',
+        provider: 'shared',
+        owner: 'shared',
+        cloudRoot: root,
+        home: '/other/home',
+      },
+    }), 'utf-8');
+    await writeFile(join(serviceHome, 'foreign.plist'), 'plist', 'utf-8');
+    const uninstalls = [];
+    const service = noService({
+      serviceStatus: (_descriptor, options) => ({
+        registered: options?.home === serviceHome,
+        running: false,
+        autostart: null,
+        label: 'com.mebular.mebular-serve.other',
+        unitPath: join(serviceHome, 'foreign.plist'),
+      }),
+      defaultLabel: (_kind, _prefix, home) => `com.mebular.mebular-serve.${home}`,
+      uninstallService: (_descriptor, options) => {
+        uninstalls.push(options);
+        return { ok: true, removed: true };
+      },
+    });
+    await stopTargetLeftovers({
+      service,
+      runtimeService: runtimeServiceModule,
+      root,
+      cliBin: '/x/mebular.mjs',
+      serviceHome,
+      targetHome: p2Home,
+    });
+    expect(uninstalls).toHaveLength(0);
+    expect(existsSync(join(serviceHome, '.mebular', 'services', 'mebular-serve.json'))).toBe(true);
+  });
+
+  it('recoverSwitchIntent 回滚 service 使用 current descriptor', async () => {
+    const { root, defaultHome, p2Home } = await makeRoot({ current: 'p2' });
+    const shared = await writeCurrentRuntime(root, '0.1.2');
+    await cloudSwitch.writeSwitchIntent(root, { from: 'default', to: 'p2', phase: 'starting' });
+    await writeCloudPreference(root, 'default', { mode: 'service', autostart: true });
+    const running = { home: null };
+    const rec = serviceRecording({ running });
+    const result = await recoverSwitchIntent({
+      root,
+      cliBin: '/x/mebular.mjs',
+      modules,
+      runtimeService: runtimeServiceModule,
+      fetchImpl: makeFetcher({ root, defaultHome, p2Home, running }),
+      spawnFn: () => { throw new Error('service mode must not spawn'); },
+      service: rec.service,
+      serviceHome: '/os-home',
+      pidAlive: () => false,
+      verifyTimeoutMs: 200,
+      verifyIntervalMs: 10,
+    });
+    expect(result).toMatchObject({ recovered: true, status: 'rolled_back', current: 'default', mode: 'service' });
+    expect(rec.installs).toHaveLength(1);
+    expect(rec.installs[0].descriptor.args[0]).toBe(shared.cliPath);
+    expect(rec.installs[0].descriptor.runtime).toMatchObject({ provider: 'shared', owner: 'shared' });
   });
 });
 

@@ -6,23 +6,76 @@
 // MCP bridge peer, loaded lazily at apply time (never at module top level).
 //
 // Lifecycle:
-//   - `attach` (default): only probe an existing daemon. Never spawn or stop.
-//   - `managed`: reuse a healthy daemon; otherwise spawn `mebular serve` once
-//     and stop only that child on plugin dispose. This is a process fallback,
-//     not a service install, and never touches an external/service daemon.
+//   - `attach` (default): resolve + probe an existing daemon. Never spawn or stop.
+//   - `managed`: reuse a healthy daemon; otherwise spawn `mebular runtime
+//     supervise` once through the shared Runtime Supervisor. The plugin owns the
+//     supervise process, not the daemon; dispose sends SIGTERM to supervise,
+//     which stops only the child it started. Service installs are never done.
+//   - `auto`: same as `managed` (explicit opt-in to starting a runtime).
+//
+// `runtime: external` forces attach-only; an explicit `daemonUrl` pins one URL
+// and is also attach-only. Without a CLI/provider the legacy
+// MEBULAR_HTTP_PORT / <home>/runtime.json attach fallback is kept; otherwise the
+// panel reports `download_required` and nothing is spawned or downloaded.
 //
 // The MCP bridge mounts the official @deepseek-ai/dsh-mcp-client plugin on the
-// same daemon URL the panel uses, so both follow one discovery order:
-// explicit daemonUrl > MEBULAR_HTTP_PORT > <home>/runtime.json > 7331.
+// same effective daemon URL the panel uses. That URL is refreshed from the
+// shared supervisor's `runtime resolve --json`, so a non-default profile/port
+// is followed by the status route, the bridge, and the panel.
 
+import { randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 
 export const name = '@mebular/dsh-plugin';
 
 export const EMBED_INFO_PATH = '/mebular/embed-info';
+
+/** Loopback-only explicit user action: install/start the shared runtime. */
+export const RUNTIME_INSTALL_PATH = '/mebular/runtime/install';
+
+/**
+ * Loopback-only explicit user action: upgrade the shared runtime to the latest
+ * version already known by the shared `runtime check-update`. The client can
+ * never supply a version, tag, URL or registry.
+ */
+export const RUNTIME_UPGRADE_PATH = '/mebular/runtime/upgrade';
+
+export const RUNTIME_UPGRADE_ACTIONS = Object.freeze(['update', 'later', 'skip', 'prompted']);
+
+const SEMVER_RE = /^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+/**
+ * Pinned `@mebular/core` version for the plugin-only bootstrap.
+ *
+ * It is read from this package's own `package.json` at module load, so a
+ * release bump does not require editing source (the tarball always contains
+ * `package.json`). Clients can never supply a version, tag, URL or registry.
+ * `scripts/verify-dsh-plugin.mjs` still checks the derived value.
+ */
+function readPluginPackageVersion() {
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf-8'));
+  } catch (error) {
+    throw new Error(`@mebular/dsh-plugin: cannot read package.json (${error?.code ?? 'error'})`);
+  }
+  if (manifest?.name !== name) {
+    throw new Error(`@mebular/dsh-plugin: unexpected package.json name ${String(manifest?.name)}`);
+  }
+  const version = typeof manifest.version === 'string' ? manifest.version.trim() : '';
+  if (version.length === 0 || version.length > 128 || !SEMVER_RE.test(version)) {
+    throw new Error(`@mebular/dsh-plugin: invalid package.json version ${String(manifest?.version)}`);
+  }
+  return version;
+}
+
+export const RUNTIME_INSTALL_VERSION = readPluginPackageVersion();
+
+export const RUNTIME_INSTALL_ACTIONS = Object.freeze(['install', 'retry', 'reinstall', 'redetect']);
 
 /** Console discovery contract version, shared with packages/mcp. */
 export const EMBED_PROTOCOL = 1;
@@ -45,11 +98,122 @@ const DEFAULT_PROBE_TIMEOUT_MS = 1200;
 const DEFAULT_CACHE_TTL_MS = 1000;
 const DEFAULT_MANAGED_START_TIMEOUT_MS = 20000;
 const DEFAULT_MANAGED_POLL_INTERVAL_MS = 500;
-const DEFAULT_MANAGED_KILL_GRACE_MS = 2000;
+/**
+ * Stop window for the plugin-owned `runtime supervise` process. It must cover
+ * the supervisor's own child cleanup budget (SIGTERM → 2s → SIGKILL → 5s) plus
+ * margin; killing supervise earlier would orphan the daemon child.
+ */
+export const DEFAULT_SUPERVISE_STOP_GRACE_MS = 10000;
+export const DEFAULT_SUPERVISE_KILL_WAIT_MS = 5000;
 const DEFAULT_BRIDGE_POLL_INTERVAL_MS = 2000;
+const DEFAULT_RESOLVE_TIMEOUT_MS = 5000;
 const DEFAULT_CLI_NAME = 'mebular';
 const RUNTIME_FILE = 'runtime.json';
+const RUNTIME_CURRENT_FILE = 'current.json';
+const RUNTIME_PROVIDERS_FILE = 'runtime-providers.json';
+const MAX_JSON_BYTES = 512 * 1024;
 const MAX_LOG_LINE = 500;
+const RUNTIME_PROVIDER_KINDS = new Set(['app', 'cli', 'shared']);
+
+const RUNTIME_DIR = 'runtime';
+const RUNTIME_INSTALL_LOCK_FILE = 'install.lock';
+const RUNTIME_PACKAGE_NAME = '@mebular/core';
+const RUNTIME_CLI_RELATIVE = join('node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs');
+const RUNTIME_PACKAGE_RELATIVE = join('node_modules', '@mebular', 'core', 'package.json');
+const RUNTIME_STAGING_PREFIX = '.tmp-install-';
+const RUNTIME_BACKUP_PREFIX = '.backup-';
+const DEFAULT_INSTALL_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_CLI_TIMEOUT_MS = 20_000;
+const DEFAULT_UPDATE_CHECK_TIMEOUT_MS = 8000;
+const DEFAULT_UPGRADE_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_UPGRADE_POLL_MS = 500;
+const DEFAULT_UPGRADE_RECONNECT_TIMEOUT_MS = 30_000;
+const DEFAULT_INSTALL_KILL_GRACE_MS = 500;
+const MAX_INSTALL_LOG_BYTES = 64 * 1024;
+const MAX_INSTALL_BODY_BYTES = 8 * 1024;
+
+/** Stable install failure reasons surfaced by the panel and Agent logs. */
+export const RUNTIME_INSTALL_REASONS = Object.freeze([
+  'offline',
+  'registry_unreachable',
+  'http_error',
+  'integrity_mismatch',
+  'disk_full',
+  'permission_denied',
+  'npm_missing',
+  'unsupported_version',
+  'cancelled',
+  'install_locked',
+  'provider_registration_failed',
+  'current_registration_failed',
+  'init_failed',
+  'start_failed',
+  'runtime_resolve_failed',
+  'install_failed',
+]);
+
+const INSTALL_REASON_SET = new Set([
+  ...RUNTIME_INSTALL_REASONS,
+  'download_required',
+]);
+
+/** Stable update/upgrade reasons surfaced by the panel and the loopback route. */
+export const RUNTIME_UPGRADE_REASONS = Object.freeze([
+  'busy',
+  'no_update_available',
+  'no_provider',
+  'upgrade_unavailable',
+  'upgrade_failed',
+  'child_stop_failed',
+  'service_unknown',
+  'service_foreign',
+  'service_upgrade_failed',
+  'current_registration_failed',
+  'install_failed',
+  'unsupported_version',
+  'offline',
+  'registry_unreachable',
+  'http_error',
+  'integrity_mismatch',
+  'disk_full',
+  'permission_denied',
+  'npm_missing',
+  'cancelled',
+  'timeout',
+  'runtime_external',
+  'daemon_url_pinned',
+  'plugin_disposed',
+  'reconnect_failed',
+  'provisioning',
+]);
+
+const UPGRADE_REASON_SET = new Set(RUNTIME_UPGRADE_REASONS);
+
+/**
+ * Lifecycle conflicts that make an install unsafe. These are never followed by
+ * an npm download: the panel remains in its conflict state and the POST returns
+ * a stable failure instead.
+ */
+const INSTALL_CONFLICT_REASONS = new Set([
+  'profile_mismatch',
+  'service_conflict',
+  'version_mismatch',
+  'port_in_use',
+  'instance_mismatch',
+  'instance_missing',
+  'cloud_mismatch',
+  'CLOUD_ALREADY_ACTIVE',
+  'service_unknown',
+  'service_foreign',
+  'service_not_registered',
+  'start_locked',
+]);
+
+for (const reason of INSTALL_CONFLICT_REASONS) INSTALL_REASON_SET.add(reason);
+
+
+/** Standard App bundle runtime entry, mirroring the shared supervisor layout. */
+const APP_PROVIDER_TAIL = ['node_modules', '@mebular', 'core', 'packages', 'mcp', 'bin', 'mebular.mjs'];
 
 /** Official DSH MCP bridge. Supplied by the DSH host as a peer dependency. */
 export const MCP_CLIENT_PACKAGE = '@deepseek-ai/dsh-mcp-client';
@@ -234,7 +398,8 @@ function describeValue(value) {
  *
  * daemonUrl discovery order: explicit config > MEBULAR_HTTP_PORT > runtime.json
  * (Mebular home, pid must still be alive) > loopback:7331. Discovery never
- * touches config.json, identity, or secrets.
+ * touches config.json, identity, or secrets. The effective URL is later
+ * refreshed from `mebular runtime resolve --json` unless it is pinned.
  *
  * @param {unknown} input
  * @param {{
@@ -244,7 +409,16 @@ function describeValue(value) {
  *   runtime?: unknown,
  *   pidAlive?: (pid: number) => boolean,
  * } | ((message: string) => void)} [options]
- * @returns {{ daemonUrl: string, lifecycle: 'attach' | 'managed', panel: boolean, cliPath?: string }}
+ * @returns {{
+ *   daemonUrl: string,
+ *   lifecycle: 'attach' | 'managed' | 'auto',
+ *   panel: boolean,
+ *   runtime: 'auto' | 'external',
+ *   persistence: 'child' | 'service',
+ *   bootstrap: 'prompt' | 'never',
+ *   pinnedDaemonUrl: boolean,
+ *   cliPath?: string,
+ * }}
  */
 export function resolveConfig(input = {}, options = {}) {
   const config = isObject(input) ? input : {};
@@ -269,7 +443,7 @@ export function resolveConfig(input = {}, options = {}) {
     const value = typeof config.lifecycle === 'string'
       ? config.lifecycle.trim().toLowerCase()
       : config.lifecycle;
-    if (value === 'attach' || value === 'managed') lifecycle = value;
+    if (value === 'attach' || value === 'managed' || value === 'auto') lifecycle = value;
     else notify(`invalid lifecycle ${describeValue(config.lifecycle)}; using "attach"`);
   }
 
@@ -279,6 +453,31 @@ export function resolveConfig(input = {}, options = {}) {
     else if (config.panel === 'on') panel = true;
     else if (config.panel === 'off') panel = false;
     else notify(`invalid panel ${describeValue(config.panel)}; using true`);
+  }
+
+  let runtime = 'auto';
+  if (config.runtime !== undefined) {
+    const value = typeof config.runtime === 'string' ? config.runtime.trim().toLowerCase() : config.runtime;
+    if (value === 'auto' || value === 'external') runtime = value;
+    else notify(`invalid runtime ${describeValue(config.runtime)}; using "auto"`);
+  }
+
+  let persistence = 'child';
+  if (config.persistence !== undefined) {
+    const value = typeof config.persistence === 'string'
+      ? config.persistence.trim().toLowerCase()
+      : config.persistence;
+    if (value === 'child' || value === 'service') persistence = value;
+    else notify(`invalid persistence ${describeValue(config.persistence)}; using "child"`);
+  }
+
+  let bootstrap = 'prompt';
+  if (config.bootstrap !== undefined) {
+    const value = typeof config.bootstrap === 'string'
+      ? config.bootstrap.trim().toLowerCase()
+      : config.bootstrap;
+    if (value === 'prompt' || value === 'never') bootstrap = value;
+    else notify(`invalid bootstrap ${describeValue(config.bootstrap)}; using "prompt"`);
   }
 
   let cliPath;
@@ -318,16 +517,24 @@ export function resolveConfig(input = {}, options = {}) {
       // An explicit `runtime` (even null) is a test seam that disables or
       // supplies the document instead of reading <home>/runtime.json.
       if (opts.runtime !== undefined) runtimeOptions.runtime = opts.runtime;
-      const runtime = readRuntimeState(runtimeOptions);
-      daemonUrl = runtimeDaemonUrl(runtime, { pidAlive: opts.pidAlive }) ?? `http://127.0.0.1:${DEFAULT_PORT}`;
+      const runtimeState = readRuntimeState(runtimeOptions);
+      daemonUrl = runtimeDaemonUrl(runtimeState, { pidAlive: opts.pidAlive })
+        ?? `http://127.0.0.1:${DEFAULT_PORT}`;
     }
   }
 
-  /** @type {{ daemonUrl: string, lifecycle: 'attach' | 'managed', panel: boolean, cliPath?: string }} */
+  /** @type {ReturnType<typeof resolveConfig>} */
   const resolved = {
     daemonUrl,
     lifecycle,
     panel,
+    runtime,
+    persistence,
+    bootstrap,
+    // A pre-resolved config (from apply()) carries the marker; only a raw
+    // explicit daemonUrl becomes a pin.
+    pinnedDaemonUrl: config.pinnedDaemonUrl === true
+      || (config.pinnedDaemonUrl === undefined && explicitDaemonUrl !== null),
   };
   if (cliPath !== undefined) resolved.cliPath = cliPath;
   return resolved;
@@ -452,13 +659,657 @@ export function resolveCliPath(options = {}) {
   return null;
 }
 
+/* ------------------------------------------------------------------------- *
+ * Shared runtime discovery (non-sensitive)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Non-sensitive shared root: MEBULAR_CLOUD_ROOT, else ~/.mebular. Only provider
+ * records, profiles/runtime discovery files and runtime.json are read here;
+ * never config.json, identity, or secrets.
+ * @param {{ env?: Record<string, string | undefined>, userHome?: string }} [options]
+ * @returns {string}
+ */
+export function runtimeCloudRoot(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const env = isObject(opts.env) ? opts.env : process.env;
+  const userHome = typeof opts.userHome === 'string' && opts.userHome.length > 0 ? opts.userHome : homedir();
+  const raw = env.MEBULAR_CLOUD_ROOT;
+  if (typeof raw === 'string' && raw.trim().length > 0) return raw.trim();
+  return join(userHome, '.mebular');
+}
+
+/**
+ * Standard App bundle runtime entry candidates, mirroring the shared Runtime
+ * Supervisor. App providers are the bundler entry (`.../mebular.mjs`), which is
+ * executed with the current Node runtime.
+ * @param {{ platform?: string, env?: Record<string, string | undefined>, userHome?: string }} [options]
+ * @returns {string[]}
+ */
+export function standardAppProviderPaths(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const platform = typeof opts.platform === 'string' ? opts.platform : process.platform;
+  const env = isObject(opts.env) ? opts.env : process.env;
+  const userHome = typeof opts.userHome === 'string' && opts.userHome.length > 0 ? opts.userHome : homedir();
+  if (platform === 'darwin') {
+    return [
+      join('/Applications', 'Mebular.app', 'Contents', 'Resources', ...APP_PROVIDER_TAIL),
+      join(userHome, 'Applications', 'Mebular.app', 'Contents', 'Resources', ...APP_PROVIDER_TAIL),
+    ];
+  }
+  if (platform === 'win32') {
+    const local = env.LOCALAPPDATA ?? join(userHome, 'AppData', 'Local');
+    return [
+      join(local, 'Programs', 'Mebular', 'resources', ...APP_PROVIDER_TAIL),
+      join(local, 'Mebular', 'resources', ...APP_PROVIDER_TAIL),
+    ];
+  }
+  return [
+    join('/opt', 'Mebular', 'resources', ...APP_PROVIDER_TAIL),
+    join(userHome, '.local', 'share', 'Mebular', 'resources', ...APP_PROVIDER_TAIL),
+  ];
+}
+
+function findFileOnPath(name, { env, platform, exists }) {
+  const isWindows = platform === 'win32';
+  const exts = isWindows
+    ? (typeof env.PATHEXT === 'string' ? env.PATHEXT.split(';') : ['.EXE', '.CMD', '.BAT', '.COM']).filter(Boolean)
+    : [''];
+  const dirs = String(env.PATH ?? '')
+    .split(isWindows ? ';' : ':')
+    .filter((dir) => dir.length > 0);
+  for (const dir of dirs) {
+    for (const ext of exts) {
+      const file = join(dir, `${name}${ext}`);
+      if (exists(file)) return file;
+    }
+  }
+  return null;
+}
+
+function resolveCommandCandidate(value, { env, platform, exists }) {
+  if (typeof value !== 'string' || value.trim().length === 0) return null;
+  const trimmed = value.trim();
+  const direct = isAbsolute(trimmed)
+    || trimmed.includes('/')
+    || (platform === 'win32' && trimmed.includes('\\'));
+  if (direct) return exists(trimmed) ? trimmed : null;
+  return findFileOnPath(trimmed, { env, platform, exists });
+}
+
+function providerKindOrder(kind) {
+  return kind === 'app' ? 0 : kind === 'cli' ? 1 : kind === 'shared' ? 2 : 9;
+}
+
+function providerSourceOrder(source) {
+  return source === 'config' ? -1
+    : source === 'current' ? -1
+      : source === 'registry' ? 0
+        : source === 'standard' ? 1
+          : source === 'env' ? 2
+            : source === 'path' ? 3
+              : 9;
+}
+
+/**
+ * Read `<cloudRoot>/runtime/current.json` and validate the pointed install
+ * without reading config/secrets. Corrupt or half-installed pointers are
+ * ignored with a warning; a missing pointer is legal.
+ */
+export function readRuntimeCurrentProvider({
+  cloudRoot,
+  exists = existsSync,
+  readFileImpl = readFileSync,
+} = {}) {
+  if (typeof cloudRoot !== 'string' || cloudRoot.length === 0) {
+    return { provider: null, usable: false, current: null, warning: null, invalidPath: null };
+  }
+  const file = join(cloudRoot, 'runtime', RUNTIME_CURRENT_FILE);
+  let raw;
+  try {
+    raw = JSON.parse(readFileImpl(file, 'utf-8'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return { provider: null, usable: false, current: null, warning: null, invalidPath: null };
+    }
+    return { provider: null, usable: false, current: null, warning: 'runtime current.json is corrupt; ignoring it', invalidPath: null };
+  }
+  const version = typeof raw?.version === 'string' && SEMVER_RE.test(raw.version) ? raw.version : null;
+  const runtimePath = isAbsolute(raw?.runtimePath ?? '') ? raw.runtimePath : null;
+  const cliPath = isAbsolute(raw?.cliPath ?? '') ? raw.cliPath : null;
+  if (version === null || runtimePath === null || cliPath === null || raw?.v !== 1) {
+    return { provider: null, usable: false, current: null, warning: 'runtime current.json is invalid; ignoring it', invalidPath: cliPath };
+  }
+  const current = {
+    version,
+    runtimePath,
+    cliPath,
+    provider: typeof raw.provider === 'string' ? raw.provider : 'shared',
+    owner: typeof raw.owner === 'string' ? raw.owner : 'shared',
+    installedAt: typeof raw.installedAt === 'string' ? raw.installedAt : null,
+  };
+  if (!exists(cliPath)) {
+    return { provider: null, usable: false, current, warning: 'runtime current points to a missing CLI; ignoring it', invalidPath: cliPath };
+  }
+  try {
+    const manifest = JSON.parse(readFileImpl(join(runtimePath, 'node_modules', '@mebular', 'core', 'package.json'), 'utf-8'));
+    if (manifest?.name !== undefined && manifest.name !== '@mebular/core') {
+      return { provider: null, usable: false, current, warning: 'runtime current package name mismatch; ignoring it', invalidPath: cliPath };
+    }
+    if (manifest?.version !== version) {
+      return { provider: null, usable: false, current, warning: 'runtime current package version mismatch; ignoring it', invalidPath: cliPath };
+    }
+  } catch {
+    return { provider: null, usable: false, current, warning: 'runtime current points to an incomplete install; ignoring it', invalidPath: cliPath };
+  }
+  return {
+    provider: { kind: 'shared', path: cliPath, source: 'current', version },
+    usable: true,
+    current,
+    warning: null,
+    invalidPath: null,
+  };
+}
+
+/**
+ * Discover launchable runtime providers without reading Mebular config or
+ * secrets. Order mirrors the shared supervisor: app > cli > shared, with the
+ * registry ahead of standard App paths and PATH. An explicit config `cliPath`
+ * is a user pin and wins; a valid shared `current` wins among shared versions.
+ *
+ * @param {{
+ *   env?: Record<string, string | undefined>,
+ *   platform?: string,
+ *   userHome?: string,
+ *   cloudRoot?: string,
+ *   cliPath?: string,
+ *   exists?: (file: string) => boolean,
+ *   registry?: unknown,
+ *   includeStandardApp?: boolean,
+ * }} [options]
+ * @returns {Promise<{
+ *   cloudRoot: string | null,
+ *   providers: Array<{ kind: 'app' | 'cli' | 'shared', path: string, source: string, version: string | null }>,
+ *   selected: { kind: 'app' | 'cli' | 'shared', path: string, source: string, version: string | null } | null,
+ *   warnings: string[],
+ * }>}
+ */
+export async function discoverRuntimeProviders(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const env = isObject(opts.env) ? opts.env : process.env;
+  const platform = typeof opts.platform === 'string' ? opts.platform : process.platform;
+  const userHome = typeof opts.userHome === 'string' && opts.userHome.length > 0 ? opts.userHome : homedir();
+  const exists = typeof opts.exists === 'function' ? opts.exists : existsSync;
+  const cloudRoot = typeof opts.cloudRoot === 'string' && opts.cloudRoot.length > 0
+    ? opts.cloudRoot
+    : runtimeCloudRoot({ env, userHome });
+  const warnings = [];
+  /** @type {Array<{ kind: string, path: string, source: string, version: string | null }>} */
+  const providers = [];
+
+  const add = (kind, path, source, version = null) => {
+    if (!RUNTIME_PROVIDER_KINDS.has(kind)) return;
+    if (typeof path !== 'string' || path.trim().length === 0) return;
+    const file = path.trim();
+    if (!exists(file)) return;
+    providers.push({ kind, path: file, source, version: typeof version === 'string' && version.length > 0 ? version : null });
+  };
+
+  const pin = resolveCommandCandidate(opts.cliPath, { env, platform, exists });
+  if (pin !== null) add('cli', pin, 'config');
+
+  const currentState = readRuntimeCurrentProvider({
+    cloudRoot,
+    exists,
+    ...(typeof opts.readFileImpl === 'function' ? { readFileImpl: opts.readFileImpl } : {}),
+  });
+  if (currentState.warning !== null) warnings.push(currentState.warning);
+  if (currentState.provider !== null) {
+    add(currentState.provider.kind, currentState.provider.path, currentState.provider.source, currentState.provider.version);
+  }
+
+  let registry = opts.registry;
+  if (registry === undefined) {
+    try {
+      registry = JSON.parse(readFileSync(join(cloudRoot, RUNTIME_PROVIDERS_FILE), 'utf-8'));
+    } catch {
+      registry = null;
+    }
+  }
+  if (isObject(registry) && registry.v === 1 && Array.isArray(registry.providers)) {
+    for (const entry of registry.providers) {
+      if (!isObject(entry)) continue;
+      // The supervisor writes absolute paths; never resolve a registry path
+      // relative to the plugin's cwd.
+      if (typeof entry.path !== 'string' || !isAbsolute(entry.path)) continue;
+      if (entry.kind === 'shared'
+        && currentState.invalidPath !== null
+        && entry.path === currentState.invalidPath) {
+        continue;
+      }
+      add(entry.kind, entry.path, 'registry', entry.version);
+    }
+  } else if (registry !== null && registry !== undefined) {
+    warnings.push('runtime-providers.json ignored (invalid shape or version)');
+  }
+
+  if (opts.includeStandardApp !== false) {
+    for (const path of standardAppProviderPaths({ platform, env, userHome })) {
+      add('app', path, 'standard');
+    }
+  }
+
+  const envCli = resolveCommandCandidate(env.MEBULAR_CLI, { env, platform, exists });
+  if (envCli !== null) add('cli', envCli, 'env');
+
+  const pathCli = findFileOnPath(DEFAULT_CLI_NAME, { env, platform, exists });
+  if (pathCli !== null) add('cli', pathCli, 'path');
+
+  const deduped = new Map();
+  for (const provider of providers) {
+    const key = `${provider.kind}\n${provider.path}`;
+    if (!deduped.has(key)) deduped.set(key, provider);
+  }
+  const sorted = [...deduped.values()].sort((left, right) => {
+    // Explicit config cliPath is a user pin, then app > cli > shared, so a
+    // registry CLI never outranks a standard App bundle.
+    const leftPinned = left.source === 'config';
+    const rightPinned = right.source === 'config';
+    if (leftPinned !== rightPinned) return leftPinned ? -1 : 1;
+    const kind = providerKindOrder(left.kind) - providerKindOrder(right.kind);
+    if (kind !== 0) return kind;
+    const source = providerSourceOrder(left.source) - providerSourceOrder(right.source);
+    if (source !== 0) return source;
+    return left.path < right.path ? -1 : left.path > right.path ? 1 : 0;
+  });
+
+  if (currentState.usable !== true && sorted.filter((entry) => entry.kind === 'shared').length > 1) {
+    warnings.push('multiple shared runtimes found but current is unavailable; using provider path/version order');
+  }
+
+  return {
+    cloudRoot,
+    providers: sorted,
+    selected: sorted[0] ?? null,
+    warnings,
+  };
+}
+
+/* ------------------------------------------------------------------------- *
+ * `mebular runtime resolve|supervise` subprocess bridge
+ * ------------------------------------------------------------------------- */
+
+function runtimeInvocation(cliPath, { execPath = process.execPath, platform = process.platform } = {}) {
+  const path = String(cliPath ?? '');
+  // A `.mjs/.cjs/.js` provider (including App bundles) runs on the current Node.
+  if (/\.(?:mjs|cjs|js)$/i.test(path)) {
+    return { command: execPath, prefix: [path], shell: false };
+  }
+  // Node cannot exec .cmd/.bat directly on Windows; args stay fixed.
+  return {
+    command: path,
+    prefix: [],
+    shell: platform === 'win32' && /\.(?:cmd|bat)$/i.test(path),
+  };
+}
+
+function runtimeCliArgs(invocation, args) {
+  return [...invocation.prefix, 'runtime', ...args];
+}
+
+function parseJsonDocument(text) {
+  const trimmed = String(text ?? '').trim();
+  if (trimmed.length === 0) return null;
+  try {
+    const value = JSON.parse(trimmed);
+    return isObject(value) ? value : null;
+  } catch {
+    const start = trimmed.indexOf('{');
+    if (start === -1) return null;
+    try {
+      const value = JSON.parse(trimmed.slice(start));
+      return isObject(value) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, Math.max(0, ms));
+    timer.unref?.();
+  });
+}
+
+/**
+ * Run one short `mebular runtime <command> --json` and parse its document.
+ * Domain failures stay in `data` (exit code 2 still prints JSON); transport
+ * failures return `{ ok: false, error }`. Never throws.
+ */
+function runRuntimeJson({
+  cliPath,
+  command,
+  spawnFn,
+  env,
+  platform,
+  execPath,
+  timeoutMs = DEFAULT_RESOLVE_TIMEOUT_MS,
+}) {
+  const invocation = runtimeInvocation(cliPath, { execPath, platform });
+  const argv = runtimeCliArgs(invocation, [...command, '--json']);
+  return new Promise((resolve) => {
+    let settled = false;
+    let stdout = '';
+    let child = null;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = setTimeout(() => {
+      try {
+        child?.kill?.('SIGKILL');
+      } catch {
+        // Timeout cleanup is best-effort.
+      }
+      finish({ ok: false, error: 'timeout' });
+    }, Math.max(250, timeoutMs));
+    timer.unref?.();
+
+    try {
+      child = spawnFn(invocation.command, argv, {
+        env: { ...env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        ...(invocation.shell ? { shell: true } : {}),
+      });
+    } catch {
+      finish({ ok: false, error: 'spawn_failed' });
+      return;
+    }
+    if (!child || typeof child !== 'object') {
+      finish({ ok: false, error: 'spawn_failed' });
+      return;
+    }
+
+    const collect = (stream, append) => {
+      if (stream === null || typeof stream !== 'object' || typeof stream.on !== 'function') return;
+      try {
+        stream.on('data', (chunk) => {
+          append(String(chunk ?? ''));
+          if (stdout.length > MAX_JSON_BYTES) {
+            try {
+              child.kill?.('SIGKILL');
+            } catch {
+              // Cleanup is best-effort.
+            }
+            finish({ ok: false, error: 'output_too_large' });
+          }
+        });
+      } catch {
+        // A broken stream surfaces as an empty document below.
+      }
+    };
+    collect(child.stdout, (text) => { stdout += text; });
+    collect(child.stderr, () => {});
+
+    const done = () => {
+      const data = parseJsonDocument(stdout);
+      finish(data === null ? { ok: false, error: 'invalid_json' } : { ok: true, data });
+    };
+    try {
+      if (typeof child.once === 'function') {
+        child.once('error', () => finish({ ok: false, error: 'spawn_failed' }));
+        child.once('close', done);
+        child.once('exit', () => {
+          // `exit` can fire before the last stdout chunk; parse on the next
+          // tick unless `close` already settled.
+          const timer = setTimeout(done, 0);
+          timer.unref?.();
+        });
+      } else if (typeof child.on === 'function') {
+        child.on('error', () => finish({ ok: false, error: 'spawn_failed' }));
+        child.on('close', done);
+      }
+    } catch {
+      finish({ ok: false, error: 'spawn_failed' });
+    }
+  });
+}
+
+/**
+ * Start `mebular runtime supervise --json` and expose its lifecycle:
+ *   - `ready` resolves on the authoritative ready JSON (or process exit);
+ *   - `exited` resolves with the exit code/signal;
+ *   - `stop()` sends SIGTERM, escalating to SIGKILL after the grace period.
+ * A service/reused supervise exits normally after ready JSON; a child-mode one
+ * stays alive and is the only process this plugin owns.
+ */
+function startSuperviseProcess({
+  cliPath,
+  scriptArgs = [],
+  spawnFn,
+  env,
+  platform,
+  execPath,
+  stopGraceMs = DEFAULT_SUPERVISE_STOP_GRACE_MS,
+  killWaitMs = DEFAULT_SUPERVISE_KILL_WAIT_MS,
+  wait = delay,
+  logLine = null,
+}) {
+  const invocation = runtimeInvocation(cliPath, { execPath, platform });
+  const argv = runtimeCliArgs(invocation, ['supervise', '--json', ...scriptArgs]);
+  let child = null;
+  let settledReady = false;
+  let exited = false;
+  let exitCode = null;
+  let exitSignal = null;
+  let stdoutBuffer = '';
+  let stderrTail = '';
+  /** @type {Promise<unknown> | null} */
+  let stopping = null;
+  let resolveReady;
+  let resolveExit;
+  const ready = new Promise((resolve) => { resolveReady = resolve; });
+  const exit = new Promise((resolve) => { resolveExit = resolve; });
+
+  const log = (level, line) => {
+    if (typeof logLine !== 'function' || typeof line !== 'string' || line.length === 0) return;
+    try {
+      logLine(level, line);
+    } catch {
+      // Logging must never break supervision.
+    }
+  };
+
+  const settleReady = (value) => {
+    if (settledReady) return;
+    settledReady = true;
+    resolveReady(value);
+  };
+
+  const finishExit = (code, signal) => {
+    if (exited) return;
+    exited = true;
+    exitCode = Number.isInteger(code) ? code : null;
+    exitSignal = typeof signal === 'string' ? signal : null;
+    if (!settledReady) settleReady({ ok: false, exited: true, code: exitCode, signal: exitSignal });
+    resolveExit({ code: exitCode, signal: exitSignal, stderr: stderrTail });
+  };
+
+  try {
+    child = spawnFn(invocation.command, argv, {
+      env: { ...env },
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+      ...(invocation.shell ? { shell: true } : {}),
+    });
+  } catch {
+    child = null;
+  }
+
+  const failedHandle = (error) => ({
+    command: invocation.command,
+    args: argv,
+    error,
+    ready: Promise.resolve({ ok: false, error }),
+    exited: Promise.resolve({ code: null, signal: null, stderr: '' }),
+    stop: async () => ({ stopped: false, reason: 'not_running' }),
+    getState: () => ({ exited: true, code: null, signal: null }),
+  });
+
+  if (!isObject(child)) return failedHandle('spawn_failed');
+
+  const wire = (stream, level, onChunk) => {
+    if (stream === null || typeof stream !== 'object' || typeof stream.on !== 'function') return;
+    try {
+      stream.on('data', (chunk) => {
+        const text = String(chunk ?? '');
+        for (const line of text.split(/\r?\n/)) {
+          if (line.trim().length > 0) log(level, line.trim());
+        }
+        onChunk(text);
+      });
+    } catch {
+      // A broken stream is covered by the readiness timeout/exit event.
+    }
+  };
+
+  wire(child.stdout, 'info', (text) => {
+    if (settledReady) return;
+    stdoutBuffer += text;
+    if (stdoutBuffer.length > MAX_JSON_BYTES) stdoutBuffer = stdoutBuffer.slice(-MAX_JSON_BYTES);
+    const trimmed = stdoutBuffer.trim();
+    if (!trimmed.endsWith('}')) return;
+    const data = parseJsonDocument(trimmed);
+    if (data !== null) settleReady({ ok: data.ok === true, data });
+  });
+  wire(child.stderr, 'warn', (text) => {
+    stderrTail = `${stderrTail}${text}`.slice(-4096);
+  });
+
+  try {
+    if (typeof child.once === 'function') {
+      child.once('error', () => finishExit(null, null));
+      child.once('exit', (code, signal) => finishExit(code, signal));
+    } else if (typeof child.on === 'function') {
+      child.on('error', () => finishExit(null, null));
+      child.on('exit', (code, signal) => finishExit(code, signal));
+    }
+  } catch {
+    finishExit(null, null);
+  }
+
+  const signalChild = (signal) => {
+    try {
+      return child.kill?.(signal) !== false;
+    } catch {
+      return false;
+    }
+  };
+
+  const stop = (options = {}) => {
+    if (stopping !== null) return stopping;
+    const graceMs = Number.isFinite(options.graceMs)
+      ? Math.max(0, options.graceMs)
+      : stopGraceMs;
+    stopping = (async () => {
+      if (exited) return { stopped: false, reason: 'already_exited' };
+      const termSent = signalChild('SIGTERM');
+      const exitedAfterTerm = await Promise.race([
+        exit.then(() => true),
+        Promise.resolve(wait(graceMs)).then(() => false),
+      ]);
+      if (exitedAfterTerm) {
+        return { stopped: true, escalated: false, termSent, killSent: false, graceMs };
+      }
+      const killSent = signalChild('SIGKILL');
+      const exitedAfterKill = await Promise.race([
+        exit.then(() => true),
+        Promise.resolve(wait(killWaitMs)).then(() => false),
+      ]);
+      return {
+        stopped: exitedAfterKill,
+        escalated: true,
+        termSent,
+        killSent,
+        graceMs,
+        reason: exitedAfterKill ? null : 'still_running',
+      };
+    })();
+    return stopping;
+  };
+
+  return {
+    command: invocation.command,
+    args: argv,
+    ready,
+    exited: exit,
+    stop,
+    getState: () => ({ exited, code: exitCode, signal: exitSignal }),
+  };
+}
+
+function daemonUrlFromHttp(http) {
+  if (!isObject(http)) return null;
+  const scheme = http.scheme === 'https' ? 'https' : 'http';
+  const host = typeof http.host === 'string' && http.host.trim().length > 0 ? http.host.trim() : null;
+  const port = Number.isInteger(http.port) ? http.port : null;
+  if (host === null || port === null) return null;
+  const bracketed = host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  const href = httpUrl(`${scheme}://${bracketed}:${port}`);
+  return href === null ? null : normalizeDaemonUrl(href, href);
+}
+
+function sanitizeProfile(value) {
+  if (!isObject(value)) return null;
+  const id = typeof value.id === 'string' && value.id.length > 0 ? value.id : null;
+  const name = typeof value.name === 'string' && value.name.length > 0 ? value.name : null;
+  if (id === null && name === null) return null;
+  return { id, name };
+}
+
+function sanitizeProvider(value) {
+  if (!isObject(value)) return null;
+  if (!RUNTIME_PROVIDER_KINDS.has(value.kind)) return null;
+  return {
+    kind: value.kind,
+    source: typeof value.source === 'string' ? value.source : null,
+    version: typeof value.version === 'string' && value.version.length > 0 ? value.version : null,
+  };
+}
+
+function sanitizeService(value) {
+  if (!isObject(value)) return null;
+  const text = (key) => (typeof value[key] === 'string' && value[key].length > 0 ? value[key] : null);
+  const runtime = isObject(value.runtime) ? value.runtime : null;
+  return {
+    registered: value.registered === true,
+    running: value.running === true,
+    foreign: value.foreign === true,
+    version: text('version') ?? (typeof runtime?.version === 'string' ? runtime.version : null),
+    provider: text('provider') ?? (typeof runtime?.provider === 'string' ? runtime.provider : null),
+    owner: text('owner') ?? (typeof runtime?.owner === 'string' ? runtime.owner : null),
+    label: text('label'),
+    unitPath: text('unitPath'),
+  };
+}
+
+
 /**
  * Build the non-sensitive status document returned to the DSH panel.
  *
- * - `status` is `up`, `down`, or `starting` (managed daemon boot).
- * - `mode` is the effective lifecycle; it degrades to `attach` when the
- *   managed CLI cannot be resolved.
- * - `managed` is true only while this plugin owns the running child process.
+ * - `status` is `up`, `down`, or `starting` (legacy, stable fields).
+ * - `state` adds the shared-runtime detail: `up`, `down`, `starting`,
+ *   `download_required`, `profile_mismatch`, `service_conflict`, or
+ *   `version_mismatch`.
+ * - `mode` is the effective lifecycle; it degrades to `attach` when starting is
+ *   not allowed (`lifecycle: attach`, `runtime: external`, or a pinned URL).
+ * - `runtimeMode` is how the running daemon was reached: `reused`, `service`,
+ *   `child`, or `attach` while nothing is up yet.
+ * - `managed` is true only while this plugin owns the running supervise child.
  * - `ok` means "ready to embed": status up, protocol 1, embedConsole, both
  *   sides loopback, and a valid loopback embed URL.
  * - `embedUrl` is null unless `ok`; the panel must never frame a fallback URL.
@@ -470,18 +1321,36 @@ export function resolveCliPath(options = {}) {
  *   health?: Record<string, unknown> | null,
  *   embed?: Record<string, unknown> | null,
  *   status?: 'up' | 'down' | 'starting',
+ *   state?: string,
  *   mode?: 'attach' | 'managed',
+ *   runtimeMode?: string | null,
  *   managed?: boolean,
  *   panel?: boolean,
  *   reason?: string | null,
+ *   version?: string | null,
+ *   profile?: unknown,
+ *   provider?: unknown,
+ *   service?: unknown,
+ *   downloadRequired?: boolean,
+ *   install?: unknown,
+ *   update?: unknown,
+ *   upgrade?: unknown,
  * }} [input]
  * @returns {{
  *   ok: boolean,
  *   status: 'up' | 'down' | 'starting',
+ *   state: string,
  *   mode: 'attach' | 'managed',
+ *   runtimeMode: string | null,
  *   managed: boolean,
  *   panel: boolean,
+ *   daemonUrl: string,
  *   version: string | null,
+ *   profile: { id: string | null, name: string | null } | null,
+ *   provider: { kind: string, source: string | null, version: string | null } | null,
+ *   service: { registered: boolean, running: boolean, foreign: boolean } | null,
+ *   downloadRequired: boolean,
+ *   install: ReturnType<typeof sanitizeRuntimeInstallState> | null,
  *   embedProtocol: number | null,
  *   consoleUrl: string,
  *   embedUrl: string | null,
@@ -505,6 +1374,9 @@ export function buildEmbedInfo(input = {}) {
   const reasonOverride = typeof config.reason === 'string' && config.reason.length > 0
     ? config.reason
     : null;
+  const runtimeMode = typeof config.runtimeMode === 'string' && config.runtimeMode.length > 0
+    ? config.runtimeMode
+    : null;
 
   const daemonLoopback = isLoopbackUrl(daemonUrl);
   const remoteLoopback = embed?.loopback === true;
@@ -519,11 +1391,14 @@ export function buildEmbedInfo(input = {}) {
 
   const consoleUrl = isLoopbackUrl(remoteConsoleUrl) ? remoteConsoleUrl : joinUrl(daemonUrl, '/console');
   const mcpUrl = remoteMcpUrl ?? joinUrl(daemonUrl, '/mcp');
+  const resolvedVersion = typeof config.version === 'string' && config.version.length > 0
+    ? config.version
+    : null;
   const version = typeof health?.version === 'string' && health.version.length > 0
     ? health.version
     : typeof embed?.version === 'string' && embed.version.length > 0
       ? embed.version
-      : null;
+      : resolvedVersion;
 
   /** @type {string | null} */
   let reason = null;
@@ -547,13 +1422,32 @@ export function buildEmbedInfo(input = {}) {
     reason = reasonOverride ?? 'embed_url_invalid';
   }
 
+  const knownStates = new Set([
+    'up', 'down', 'starting', 'download_required',
+    'profile_mismatch', 'service_conflict', 'version_mismatch',
+  ]);
+  const state = typeof config.state === 'string' && knownStates.has(config.state)
+    ? config.state
+    : status === 'up' ? 'up' : status === 'starting' ? 'starting' : 'down';
+  const downloadRequired = config.downloadRequired === true || reason === 'download_required';
+
   return {
     ok: status === 'up' && reason === null,
     status,
+    state,
     mode,
+    runtimeMode,
     managed,
     panel,
+    daemonUrl,
     version,
+    profile: sanitizeProfile(config.profile),
+    provider: sanitizeProvider(config.provider),
+    service: sanitizeService(config.service),
+    downloadRequired,
+    install: isObject(config.install) ? sanitizeRuntimeInstallState(config.install) : null,
+    update: isObject(config.update) ? sanitizeRuntimeUpdateState(config.update) : null,
+    upgrade: isObject(config.upgrade) ? sanitizeRuntimeUpgradeState(config.upgrade) : null,
     embedProtocol,
     consoleUrl,
     embedUrl: status === 'up' && reason === null ? remoteEmbedUrl : null,
@@ -679,12 +1573,2193 @@ function safeLog(logger, level, message) {
   }
 }
 
+function providerFromCliPath(path) {
+  if (typeof path !== 'string' || path.trim().length === 0) return null;
+  return { kind: 'cli', path: path.trim(), source: 'config', version: null };
+}
+
+function failureState(data) {
+  const raw = typeof data?.reason === 'string' ? data.reason : '';
+  if (data?.mode === 'download_required' || raw === 'download_required') {
+    return { state: 'download_required', reason: 'download_required', download: true };
+  }
+  if (raw === 'instance_mismatch'
+    || raw === 'instance_missing'
+    || raw === 'cloud_mismatch'
+    || raw === 'CLOUD_ALREADY_ACTIVE') {
+    return { state: 'profile_mismatch', reason: raw };
+  }
+  if (raw === 'service_unknown' || raw === 'service_foreign' || raw === 'service_not_registered') {
+    return { state: 'service_conflict', reason: raw };
+  }
+  if (raw === 'version_mismatch') return { state: 'version_mismatch', reason: raw };
+  return {
+    state: 'down',
+    reason: raw.length > 0 ? raw : (data?.mode === 'error' ? 'runtime_error' : null),
+  };
+}
+
+/* ------------------------------------------------------------------------- *
+ * Plugin-only shared runtime install (explicit user action)
+ * ------------------------------------------------------------------------- */
+
+function installError(reason, message, extra = {}) {
+  const code = INSTALL_REASON_SET.has(reason) ? reason : 'install_failed';
+  const error = new Error(message);
+  error.code = code;
+  for (const [key, value] of Object.entries(extra)) error[key] = value;
+  return error;
+}
+
+/** Strict semver + path safety; the version is always the plugin's constant. */
+export function assertRuntimeInstallVersion(value) {
+  if (typeof value !== 'string') {
+    throw installError('unsupported_version', 'runtime version must be a string');
+  }
+  const version = value.trim();
+  if (version.length === 0 || version.length > 128 || !SEMVER_RE.test(version)) {
+    throw installError('unsupported_version', `unsupported runtime version: ${version.slice(0, 128) || '(empty)'}`);
+  }
+  return version;
+}
+
+export function runtimeInstallDir(cloudRoot) {
+  return join(cloudRoot, RUNTIME_DIR);
+}
+
+export function runtimeInstallTarget(cloudRoot, version) {
+  return join(runtimeInstallDir(cloudRoot), assertRuntimeInstallVersion(version));
+}
+
+export function runtimeInstallCliPath(cloudRoot, version) {
+  return join(runtimeInstallTarget(cloudRoot, version), RUNTIME_CLI_RELATIVE);
+}
+
+export function runtimeManualInstallCommand(version = RUNTIME_INSTALL_VERSION) {
+  return `npm install -g ${RUNTIME_PACKAGE_NAME}@${assertRuntimeInstallVersion(version)}`;
+}
+
+/**
+ * Fixed npm command: `npm install --prefix <tmp> --ignore-scripts --no-audit
+ * --no-fund @mebular/core@<version>`. Only Windows `npm.cmd` uses a shell, and
+ * every argument is constructed here (never from the client).
+ */
+export function buildRuntimeInstallCommand({
+  version = RUNTIME_INSTALL_VERSION,
+  prefix,
+  platform = process.platform,
+  npmPath = null,
+  execPath = process.execPath,
+} = {}) {
+  const safeVersion = assertRuntimeInstallVersion(version);
+  if (typeof prefix !== 'string' || prefix.length === 0) {
+    throw installError('install_failed', 'missing npm --prefix');
+  }
+  let command;
+  let leading = [];
+  let shell = false;
+  const rawPath = typeof npmPath === 'string' && npmPath.trim().length > 0 ? npmPath.trim() : null;
+  if (rawPath !== null) {
+    const name = platform === 'win32' ? (rawPath.split(/[\\/]/).pop() ?? rawPath) : basename(rawPath);
+    if (/\.(mjs|cjs|js)$/i.test(name)) {
+      command = execPath;
+      leading = [rawPath];
+    } else if (platform === 'win32' && (/\.(cmd|bat)$/i.test(name) || name === 'npm')) {
+      command = /\.(cmd|bat)$/i.test(name) ? rawPath : `${rawPath}.cmd`;
+      shell = true;
+    } else {
+      command = rawPath;
+    }
+  } else if (platform === 'win32') {
+    command = 'npm.cmd';
+    shell = true;
+  } else {
+    command = 'npm';
+  }
+  const args = [
+    ...leading,
+    'install',
+    '--prefix',
+    prefix,
+    '--ignore-scripts',
+    '--no-audit',
+    '--no-fund',
+    `${RUNTIME_PACKAGE_NAME}@${safeVersion}`,
+  ];
+  const quote = (value) => (/[\s&|<>^]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value);
+  return {
+    command: shell && /\s/.test(command) ? `"${command}"` : command,
+    args: shell ? args.map((entry) => quote(String(entry))) : args,
+    shell,
+    version: safeVersion,
+  };
+}
+
+function sanitizeDetail(value, { home = null, cliPath = null } = {}) {
+  const text = redactLogLine(String(value ?? ''), {
+    ...(typeof home === 'string' ? { home } : {}),
+    ...(typeof cliPath === 'string' ? { cliPath } : {}),
+  });
+  return text.slice(0, 300);
+}
+
+function firstUsefulLine(text, options = {}) {
+  const line = String(text ?? '')
+    .split(/\r?\n/)
+    .map((entry) => entry.trim())
+    .find((entry) => entry.length > 0);
+  return line === undefined ? null : sanitizeDetail(line, options);
+}
+
+function statusFromInstallText(text) {
+  const explicit = /\b(?:E|HTTP\s*)([45]\d{2})\b/i.exec(text);
+  if (explicit) return Number(explicit[1]);
+  const plain = /(?:^|\s)([45]\d{2})(?:\s|$)/m.exec(text);
+  return plain ? Number(plain[1]) : null;
+}
+
+/** Map npm spawn/exit/stderr to the stable install reasons. */
+export function classifyRuntimeInstallFailure({
+  spawnError = null,
+  exitCode = null,
+  stdout = '',
+  stderr = '',
+  options = {},
+} = {}) {
+  const text = `${stderr}\n${stdout}`;
+  const lower = text.toLowerCase();
+  const spawnCode = typeof spawnError?.code === 'string' ? spawnError.code.toUpperCase() : '';
+  const result = (reason, extra = {}) => ({
+    reason,
+    detail: firstUsefulLine(text, options)
+      ?? (spawnError?.message ? sanitizeDetail(spawnError.message, options) : null),
+    ...extra,
+  });
+
+  if (spawnError) {
+    if (spawnCode === 'ENOENT') return result('npm_missing');
+    if (spawnCode === 'EACCES' || spawnCode === 'EPERM') return result('permission_denied');
+    if (spawnCode === 'ENOSPC') return result('disk_full');
+    if (spawnCode === 'ETIMEDOUT' || spawnCode === 'ECONNREFUSED' || spawnCode === 'ECONNRESET') {
+      return result('registry_unreachable');
+    }
+    if (spawnCode === 'ENOTFOUND' || spawnCode === 'EAI_AGAIN'
+      || spawnCode === 'ENETUNREACH' || spawnCode === 'EHOSTUNREACH') {
+      return result('offline');
+    }
+  }
+  if (/eintegrity|integrity checksum|integrity.*(?:fail|mismatch)|shasum|checksum.*(?:fail|mismatch)/i.test(text)) {
+    return result('integrity_mismatch');
+  }
+  if (/enospc|no space left on device|disk (?:is )?full|not enough space/i.test(text)) {
+    return result('disk_full');
+  }
+  if (/eacces|eperm|permission denied|operation not permitted|access is denied/i.test(text)) {
+    return result('permission_denied');
+  }
+  if (exitCode === 127 || /npm: command not found|npm: not found|'npm' is not recognized|not recognized as an internal/i.test(text)) {
+    return result('npm_missing');
+  }
+  const status = statusFromInstallText(text);
+  if (/etarget|no matching version|version not found/i.test(text)) {
+    return result('unsupported_version', { status: 404 });
+  }
+  if (/e404|404 not found|not in this registry/i.test(text)) {
+    return result('http_error', { status: 404 });
+  }
+  if (/e401|401 unauthorized|e403|403 forbidden|unauthorized|forbidden/i.test(text)) {
+    return result('http_error', { status: status ?? (/401/.test(text) ? 401 : 403) });
+  }
+  if (status !== null || /http error|response code|bad gateway|service unavailable|internal server error/i.test(text)) {
+    return result('http_error', { status });
+  }
+  if (/enotfound|eai_again|eai_fail|getaddrinfo|enotreach|network is unreachable|offline|dns lookup/i.test(lower)) {
+    return result('offline');
+  }
+  if (/econnrefused|econnreset|etimedout|esockettimedout|socket hang up|network request.*failed|request to .* failed|registry.*unreachable/i.test(lower)) {
+    return result('registry_unreachable');
+  }
+  return result(exitCode === 0 ? 'install_failed' : 'http_error', { status });
+}
+
+function classifyInstallFsError(error) {
+  const code = typeof error?.code === 'string' ? error.code.toUpperCase() : '';
+  if (code === 'ENOSPC') return 'disk_full';
+  if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return 'permission_denied';
+  return 'install_failed';
+}
+
+/** Verify a prefix is exactly the pinned shared runtime (manifest + CLI). */
+export async function inspectInstalledRuntimePrefix(directory, version) {
+  const packagePath = join(directory, RUNTIME_PACKAGE_RELATIVE);
+  const cliPath = join(directory, RUNTIME_CLI_RELATIVE);
+  let raw;
+  try {
+    raw = await readFile(packagePath, 'utf-8');
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { ok: false, reason: 'integrity_mismatch', detail: 'package_json_missing', cliPath };
+    return { ok: false, reason: classifyInstallFsError(error), detail: `package_json_unreadable:${error?.code ?? 'error'}`, cliPath };
+  }
+  let manifest;
+  try {
+    manifest = JSON.parse(raw);
+  } catch {
+    return { ok: false, reason: 'integrity_mismatch', detail: 'package_json_invalid', cliPath };
+  }
+  if (manifest?.name !== undefined && manifest.name !== RUNTIME_PACKAGE_NAME) {
+    return { ok: false, reason: 'integrity_mismatch', detail: 'package_name_mismatch', cliPath };
+  }
+  if (manifest?.version !== version) {
+    return { ok: false, reason: 'integrity_mismatch', detail: 'version_mismatch', cliPath };
+  }
+  try {
+    const info = await stat(cliPath);
+    if (!info.isFile()) return { ok: false, reason: 'integrity_mismatch', detail: 'cli_not_file', cliPath };
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { ok: false, reason: 'integrity_mismatch', detail: 'cli_missing', cliPath };
+    return { ok: false, reason: classifyInstallFsError(error), detail: `cli_unreadable:${error?.code ?? 'error'}`, cliPath };
+  }
+  return { ok: true, packageVersion: manifest.version, cliPath };
+}
+
+function installTimestamp(now) {
+  const raw = typeof now === 'string' ? now : new Date().toISOString();
+  return raw.replace(/[^0-9A-Za-z_-]/g, '-');
+}
+
+function installRandomSuffix() {
+  return randomBytes(6).toString('hex');
+}
+
+async function acquireInstallLock({ runtimeDir, version, reinstall, pidAliveFn, now }) {
+  await mkdir(runtimeDir, { recursive: true });
+  const path = join(runtimeDir, RUNTIME_INSTALL_LOCK_FILE);
+  const startedAt = now();
+  const payload = JSON.stringify({ pid: process.pid, startedAt, version, mode: reinstall ? 'reinstall' : 'install' });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      await writeFile(path, payload, { mode: 0o600, flag: 'wx' });
+      return {
+        path,
+        async release() {
+          try {
+            const held = JSON.parse(await readFile(path, 'utf-8'));
+            if (held?.pid === process.pid && held?.startedAt === startedAt) await rm(path, { force: true });
+          } catch {
+            // Already released/reclaimed.
+          }
+        },
+      };
+    } catch (error) {
+      if (error?.code !== 'EEXIST') throw error;
+      let held = null;
+      try {
+        held = JSON.parse(await readFile(path, 'utf-8'));
+      } catch {
+        held = null;
+      }
+      const holderPid = Number(held?.pid);
+      if (Number.isInteger(holderPid) && holderPid > 0 && pidAliveFn(holderPid)) {
+        throw installError('install_locked', `another process is installing the runtime (pid ${holderPid})`, {
+          holderPid,
+        });
+      }
+      await rm(path, { force: true }).catch(() => undefined);
+    }
+  }
+  throw installError('install_locked', 'runtime install lock is held');
+}
+
+async function removeStaleInstallStaging(runtimeDir) {
+  let entries;
+  try {
+    entries = await readdir(runtimeDir, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  await Promise.all(entries
+    .filter((entry) => entry.name.startsWith(RUNTIME_STAGING_PREFIX))
+    .map((entry) => rm(join(runtimeDir, entry.name), { recursive: true, force: true }).catch(() => undefined)));
+}
+
+/**
+ * Run one short child (npm/CLI) with a hard timeout and abort support. Never
+ * throws; stdout/stderr are bounded and the child is terminated on timeout.
+ */
+function runInstallProcess({
+  command,
+  args,
+  shell = false,
+  cwd,
+  env,
+  timeoutMs,
+  signal,
+  spawnFn,
+  killGraceMs,
+}) {
+  return new Promise((resolvePromise) => {
+    let child = null;
+    let settled = false;
+    let stdout = '';
+    let stderr = '';
+    let timer = null;
+    let killTimer = null;
+    let forceTimer = null;
+    let exitTimer = null;
+    let aborted = false;
+    let timedOut = false;
+    const append = (current, chunk) => `${current}${String(chunk)}`.slice(-MAX_INSTALL_LOG_BYTES);
+    const cleanup = () => {
+      if (timer !== null) clearTimeout(timer);
+      if (killTimer !== null) clearTimeout(killTimer);
+      if (forceTimer !== null) clearTimeout(forceTimer);
+      if (exitTimer !== null) clearTimeout(exitTimer);
+      signal?.removeEventListener?.('abort', onAbort);
+    };
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolvePromise({ stdout, stderr, aborted, timedOut, ...value });
+    };
+    const kill = (name) => {
+      try {
+        child?.kill?.(name);
+      } catch {
+        // Already exited.
+      }
+    };
+    const terminate = () => {
+      kill('SIGTERM');
+      if (killTimer === null) killTimer = setTimeout(() => kill('SIGKILL'), Math.max(0, killGraceMs));
+      if (forceTimer === null) {
+        forceTimer = setTimeout(() => finish({ code: null, signal: null, forced: true }), Math.max(0, killGraceMs) + 500);
+      }
+    };
+    const onAbort = () => {
+      if (settled) return;
+      aborted = true;
+      terminate();
+    };
+
+    if (signal?.aborted) {
+      aborted = true;
+      finish({ code: null, signal: null });
+      return;
+    }
+    if (signal && typeof signal.addEventListener === 'function') {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    try {
+      child = spawnFn(command, args, {
+        ...(cwd === undefined ? {} : { cwd }),
+        env: { ...env },
+        shell: shell === true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+      });
+    } catch (error) {
+      finish({ spawnError: error, code: null, signal: null });
+      return;
+    }
+    child?.stdout?.on?.('data', (chunk) => { stdout = append(stdout, chunk); });
+    child?.stderr?.on?.('data', (chunk) => { stderr = append(stderr, chunk); });
+    const listen = (event, handler) => {
+      if (typeof child?.once === 'function') child.once(event, handler);
+      else if (typeof child?.on === 'function') child.on(event, handler);
+    };
+    listen('error', (error) => finish({ spawnError: error, code: null, signal: null }));
+    listen('close', (code, signalName) => finish({ code, signal: signalName }));
+    listen('exit', (code, signalName) => {
+      if (!child?.stdout && !child?.stderr) {
+        finish({ code, signal: signalName });
+        return;
+      }
+      if (exitTimer === null) exitTimer = setTimeout(() => finish({ code, signal: signalName }), 100);
+    });
+    if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        terminate();
+      }, timeoutMs);
+    }
+  });
+}
+
+function runInstalledCli({
+  cliPath,
+  args,
+  env,
+  platform,
+  execPath,
+  timeoutMs = DEFAULT_CLI_TIMEOUT_MS,
+  signal,
+  spawnFn,
+  killGraceMs,
+}) {
+  const invocation = runtimeInvocation(cliPath, { execPath, platform });
+  return runInstallProcess({
+    command: invocation.command,
+    args: [...invocation.prefix, ...args],
+    shell: invocation.shell,
+    env,
+    timeoutMs,
+    signal,
+    spawnFn,
+    killGraceMs,
+  });
+}
+
+/**
+ * Read the non-sensitive `mebular-serve` manifest written by the shared service
+ * layer. Returns `null` when missing/corrupt; `registered` requires the unit file
+ * (when recorded) to exist.
+ */
+export function readRegisteredRuntimeService({
+  env = process.env,
+  userHome = homedir(),
+  exists = existsSync,
+} = {}) {
+  const serviceHome = typeof env.MEBULAR_SERVICE_HOME === 'string' && env.MEBULAR_SERVICE_HOME.length > 0
+    ? env.MEBULAR_SERVICE_HOME
+    : join(userHome, '.mebular', 'services');
+  const manifestPath = join(serviceHome, 'mebular-serve.json');
+  if (!exists(manifestPath)) return null;
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    if (manifest?.kind !== undefined && manifest.kind !== 'mebular-serve') return null;
+    const unitExists = typeof manifest?.unitPath === 'string' && manifest.unitPath.length > 0
+      ? exists(manifest.unitPath)
+      : true;
+    if (!unitExists) return null;
+    const runtime = isObject(manifest?.runtime) ? manifest.runtime : null;
+    return {
+      registered: true,
+      manifestPath,
+      label: typeof manifest?.label === 'string' ? manifest.label : null,
+      unitPath: typeof manifest?.unitPath === 'string' ? manifest.unitPath : null,
+      autostart: manifest?.autostart === true,
+      version: typeof runtime?.version === 'string' ? runtime.version : null,
+      runtimePath: typeof runtime?.runtimePath === 'string' ? runtime.runtimePath : null,
+      cliPath: typeof runtime?.cliPath === 'string'
+        ? runtime.cliPath
+        : (Array.isArray(manifest?.args) && typeof manifest.args[0] === 'string' ? manifest.args[0] : null),
+      provider: typeof runtime?.provider === 'string' ? runtime.provider : null,
+      owner: typeof runtime?.owner === 'string' ? runtime.owner : null,
+      home: typeof runtime?.home === 'string' ? runtime.home : null,
+      cloudRoot: typeof runtime?.cloudRoot === 'string' ? runtime.cloudRoot : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Best-effort service registration detection without reading Mebular config or
+ * secrets: the shared installer writes a manifest under
+ * `<serviceHome>/.mebular/services/mebular-serve.json` (or MEBULAR_SERVICE_HOME).
+ * A registered service means the install action must start/attach it instead of
+ * downloading a second runtime.
+ */
+export function detectRegisteredRuntimeService(options = {}) {
+  return readRegisteredRuntimeService(options)?.registered === true;
+}
+
+/** Non-sensitive install status shared by `/mebular/embed-info` and HTTP. */
+export function sanitizeRuntimeInstallState(value, fallback = null) {
+  const source = isObject(value) ? value : {};
+  const fallbackState = isObject(fallback) ? fallback : {};
+  const read = (key) => (source[key] !== undefined ? source[key] : fallbackState[key]);
+  const state = ['idle', 'installing', 'failed', 'done'].includes(read('state'))
+    ? read('state')
+    : 'idle';
+  const rawReason = read('reason');
+  const reason = typeof rawReason === 'string' && (INSTALL_REASON_SET.has(rawReason) || rawReason === 'not_allowed')
+    ? rawReason
+    : null;
+  const text = (key) => (typeof read(key) === 'string' && read(key).length > 0 ? read(key).slice(0, 600) : null);
+  return {
+    state,
+    reason,
+    detail: text('detail'),
+    manualCommand: text('manualCommand'),
+    targetVersion: text('targetVersion'),
+    action: typeof read('action') === 'string' && RUNTIME_INSTALL_ACTIONS.includes(read('action'))
+      ? read('action')
+      : null,
+    startedAt: text('startedAt'),
+    finishedAt: text('finishedAt'),
+    reused: read('reused') === true,
+    installed: read('installed') === true,
+    started: read('started') === true,
+    allowed: read('allowed') === true,
+  };
+}
+
+const UPDATE_STATES = new Set([
+  'idle', 'checking', 'available', 'up_to_date', 'skipped', 'unknown', 'disabled',
+]);
+const UPDATE_REASON_RE = /^[a-z0-9][a-z0-9_.:-]{0,79}$/;
+
+function sanitizeVersion(value) {
+  return typeof value === 'string' && SEMVER_RE.test(value) ? value : null;
+}
+
+function sanitizeReason(value) {
+  return typeof value === 'string' && UPDATE_REASON_RE.test(value) ? value : null;
+}
+
+function sanitizeTime(value) {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+/**
+ * Non-sensitive shared update summary. `show/auto/manual` are presentation hints
+ * computed from the shared `promptedVersion`; the client still owns the local
+ * "later" dismissal for the current DSH session.
+ */
+export function sanitizeRuntimeUpdateState(value, fallback = null) {
+  const source = isObject(value) ? value : {};
+  const fallbackState = isObject(fallback) ? fallback : {};
+  const read = (key) => (source[key] !== undefined ? source[key] : fallbackState[key]);
+  const available = read('available') === true;
+  const skipped = read('skipped') === true;
+  const prompted = read('prompted') === true;
+  const rawState = read('state');
+  const state = UPDATE_STATES.has(rawState)
+    ? rawState
+    : skipped ? 'skipped' : available ? 'available' : 'idle';
+  return {
+    state,
+    reason: sanitizeReason(read('reason')),
+    failureReason: sanitizeReason(read('failureReason')),
+    currentVersion: sanitizeVersion(read('currentVersion')),
+    latestVersion: sanitizeVersion(read('latestVersion')),
+    promptedVersion: sanitizeVersion(read('promptedVersion')),
+    available,
+    skipped,
+    prompted,
+    checkedAt: sanitizeTime(read('checkedAt')),
+    promptedAt: sanitizeTime(read('promptedAt')),
+    show: read('show') === true,
+    auto: read('auto') === true,
+    manual: read('manual') === true && available && !skipped,
+  };
+}
+
+/** Non-sensitive execution state, kept separate from `install` and `update`. */
+export function sanitizeRuntimeUpgradeState(value, fallback = null) {
+  const source = isObject(value) ? value : {};
+  const fallbackState = isObject(fallback) ? fallback : {};
+  const read = (key) => (source[key] !== undefined ? source[key] : fallbackState[key]);
+  const state = ['idle', 'updating', 'skipping', 'failed', 'done'].includes(read('state'))
+    ? read('state')
+    : 'idle';
+  const reason = sanitizeReason(read('reason'));
+  return {
+    state,
+    reason: reason !== null && UPGRADE_REASON_SET.has(reason) ? reason : (state === 'failed' ? 'upgrade_failed' : null),
+    detail: typeof read('detail') === 'string' && read('detail').length > 0 ? read('detail').slice(0, 600) : null,
+    action: typeof read('action') === 'string' && RUNTIME_UPGRADE_ACTIONS.includes(read('action'))
+      ? read('action')
+      : null,
+    fromVersion: sanitizeVersion(read('fromVersion')),
+    toVersion: sanitizeVersion(read('toVersion')),
+    startedAt: sanitizeTime(read('startedAt')),
+    finishedAt: sanitizeTime(read('finishedAt')),
+    busy: read('busy') === true,
+    allowed: read('allowed') === true,
+  };
+}
+
+/** Stable conflict reason from a lifecycle snapshot, or null. */
+function installConflictReason(snapshot) {
+  if (!isObject(snapshot) || snapshot.status === 'up') return null;
+  const reason = typeof snapshot.reason === 'string' ? snapshot.reason : null;
+  if (reason !== null && INSTALL_CONFLICT_REASONS.has(reason)) return reason;
+  const state = typeof snapshot.state === 'string' ? snapshot.state : null;
+  if (state !== null && INSTALL_CONFLICT_REASONS.has(state)) return state;
+  return null;
+}
+
+/**
+ * Create the install controller. It only runs on an explicit user action; it
+ * never downloads from `start()`/`inspect()`/timers. A missing runtime is
+ * resolved by (in order) a healthy daemon, a registered service, any App/CLI/
+ * shared provider, and only then the fixed npm package. Failures leave no
+ * staging directory, lock, provider overwrite, partial runtime or child process.
+ *
+ * @param {{
+ *   config?: unknown,
+ *   lifecycle: { inspect: () => Promise<Record<string, unknown>>, startAfterInstall?: () => Promise<Record<string, unknown>> },
+ *   version?: string,
+ *   env?: Record<string, string | undefined>,
+ *   userHome?: string,
+ *   cloudRoot?: string,
+ *   platform?: string,
+ *   execPath?: string,
+ *   npmPath?: string | null,
+ *   spawnFn?: typeof spawn,
+ *   discoverProviders?: typeof discoverRuntimeProviders,
+ *   detectService?: (context: Record<string, unknown>) => boolean | Promise<boolean>,
+ *   exists?: (file: string) => boolean,
+ *   pidAlive?: (pid: number) => boolean,
+ *   now?: () => string,
+ *   installTimeoutMs?: number,
+ *   cliTimeoutMs?: number,
+ *   installKillGraceMs?: number,
+ *   signal?: AbortSignal | null,
+ *   logger?: { info?: (message: string) => void, warn?: (message: string) => void },
+ * }} options
+ * @returns {{
+ *   start: (action?: string) => { accepted: boolean, state: ReturnType<typeof sanitizeRuntimeInstallState> },
+ *   cancel: () => Promise<unknown>,
+ *   dispose: () => Promise<unknown>,
+ *   getState: () => ReturnType<typeof sanitizeRuntimeInstallState>,
+ *   allowed: () => boolean,
+ *   denialReason: () => string | null,
+ * }}
+ */
+export function createRuntimeInstallManager(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const env = isObject(opts.env) ? opts.env : process.env;
+  const platform = typeof opts.platform === 'string' ? opts.platform : process.platform;
+  const execPath = typeof opts.execPath === 'string' && opts.execPath.length > 0 ? opts.execPath : process.execPath;
+  const userHome = typeof opts.userHome === 'string' && opts.userHome.length > 0 ? opts.userHome : homedir();
+  const config = resolveConfig(opts.config, { env });
+  const lifecycle = isObject(opts.lifecycle) && typeof opts.lifecycle.inspect === 'function'
+    ? opts.lifecycle
+    : null;
+  const spawnFn = typeof opts.spawnFn === 'function' ? opts.spawnFn : spawn;
+  const discoverProviders = typeof opts.discoverProviders === 'function'
+    ? opts.discoverProviders
+    : discoverRuntimeProviders;
+  const detectService = typeof opts.detectService === 'function'
+    ? opts.detectService
+    : () => detectRegisteredRuntimeService({
+      env,
+      userHome,
+      platform,
+      ...(typeof opts.exists === 'function' ? { exists: opts.exists } : {}),
+    });
+  const exists = typeof opts.exists === 'function' ? opts.exists : existsSync;
+  const pidAliveFn = typeof opts.pidAlive === 'function' ? opts.pidAlive : isProcessAlive;
+  const now = typeof opts.now === 'function' ? opts.now : () => new Date().toISOString();
+  const installTimeoutMs = Number.isFinite(opts.installTimeoutMs)
+    ? Math.max(250, opts.installTimeoutMs)
+    : DEFAULT_INSTALL_TIMEOUT_MS;
+  const cliTimeoutMs = Number.isFinite(opts.cliTimeoutMs)
+    ? Math.max(250, opts.cliTimeoutMs)
+    : DEFAULT_CLI_TIMEOUT_MS;
+  const killGraceMs = Number.isFinite(opts.installKillGraceMs)
+    ? Math.max(0, opts.installKillGraceMs)
+    : DEFAULT_INSTALL_KILL_GRACE_MS;
+  const logger = isObject(opts.logger) ? opts.logger : null;
+  const cloudRoot = typeof opts.cloudRoot === 'string' && opts.cloudRoot.length > 0
+    ? opts.cloudRoot
+    : runtimeCloudRoot({ env, userHome });
+  const version = assertRuntimeInstallVersion(
+    typeof opts.version === 'string' && opts.version.length > 0 ? opts.version : RUNTIME_INSTALL_VERSION,
+  );
+  const manualCommand = runtimeManualInstallCommand(version);
+
+  const denialReason = config.bootstrap === 'never'
+    ? 'bootstrap_never'
+    : config.runtime === 'external'
+      ? 'runtime_external'
+      : config.pinnedDaemonUrl === true
+        ? 'daemon_url_pinned'
+        : null;
+  const allowed = denialReason === null && lifecycle !== null;
+
+  let current = sanitizeRuntimeInstallState({
+    state: 'idle',
+    reason: null,
+    manualCommand,
+    targetVersion: version,
+    allowed,
+  });
+  let task = null;
+  let disposed = false;
+  let controller = new AbortController();
+
+  function log(level, message) {
+    try {
+      const fn = logger?.[level];
+      if (typeof fn === 'function') fn.call(logger, message);
+    } catch {
+      // Logging must never break install.
+    }
+  }
+
+  function publish(patch) {
+    current = sanitizeRuntimeInstallState({ ...current, ...patch }, {
+      manualCommand,
+      targetVersion: version,
+      allowed,
+    });
+    return current;
+  }
+
+  async function discoverProvider() {
+    try {
+      const discovery = await discoverProviders({
+        env,
+        platform,
+        userHome,
+        cloudRoot,
+        ...(config.cliPath === undefined ? {} : { cliPath: config.cliPath }),
+        ...(typeof opts.registry === 'undefined' ? {} : { registry: opts.registry }),
+        ...(typeof opts.includeStandardApp === 'undefined' ? {} : { includeStandardApp: opts.includeStandardApp }),
+        ...(typeof opts.exists === 'function' ? { exists: opts.exists } : {}),
+      });
+      return isObject(discovery?.selected) ? discovery.selected : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function inspectExisting({ includeProviderForUp = false } = {}) {
+    let snapshot = null;
+    try {
+      snapshot = await lifecycle.inspect();
+    } catch {
+      snapshot = null;
+    }
+    const up = snapshot?.status === 'up';
+    const conflict = up ? null : installConflictReason(snapshot);
+    if (conflict !== null) {
+      return { up: false, snapshot, conflict, provider: null, service: false };
+    }
+    if (up && !includeProviderForUp) return { up: true, snapshot, conflict: null, provider: null, service: false };
+    const provider = await discoverProvider();
+    let service = snapshot?.service?.registered === true;
+    if (!service) {
+      try {
+        service = (await detectService({ env, userHome, platform, cloudRoot })) === true;
+      } catch {
+        service = false;
+      }
+    }
+    return {
+      up,
+      snapshot,
+      conflict: null,
+      provider: provider ?? (isObject(snapshot?.provider) ? snapshot.provider : null),
+      service,
+    };
+  }
+
+  async function runCli(cliPath, args, { home = cloudRoot, timeoutMs = cliTimeoutMs } = {}) {
+    const result = await runInstalledCli({
+      cliPath,
+      args,
+      env: {
+        ...env,
+        MEBULAR_CLOUD_ROOT: cloudRoot,
+        MEBULAR_HOME: home,
+      },
+      platform,
+      execPath,
+      timeoutMs,
+      signal: controller.signal,
+      spawnFn,
+      killGraceMs,
+    });
+    return {
+      ...result,
+      ok: result.code === 0 && result.spawnError === undefined && result.aborted !== true && result.timedOut !== true,
+    };
+  }
+
+  function normalizeProviderRecord(value) {
+    if (!isObject(value) || value.kind !== 'shared') return null;
+    if (typeof value.path !== 'string' || !isAbsolute(value.path)) return null;
+    return {
+      kind: 'shared',
+      path: value.path,
+      version: typeof value.version === 'string' && value.version.length > 0 ? value.version : null,
+      capabilities: Array.isArray(value.capabilities) && value.capabilities.length > 0
+        ? value.capabilities.filter((entry) => typeof entry === 'string')
+        : ['serve'],
+    };
+  }
+
+  async function findSharedProviderFallback() {
+    try {
+      const raw = JSON.parse(await readFile(join(cloudRoot, 'runtime-providers.json'), 'utf-8'));
+      if (raw?.v !== 1 || !Array.isArray(raw.providers)) return null;
+      for (const entry of raw.providers) {
+        const record = normalizeProviderRecord(entry);
+        if (record !== null && exists(record.path)) return record;
+      }
+    } catch {
+      // Missing/corrupt registry: discovery already told us there is no usable
+      // provider, so there is no old record to preserve.
+    }
+    return null;
+  }
+
+  async function addProviderRecord(cliPath, record) {
+    const providerRecord = normalizeProviderRecord(record);
+    if (providerRecord === null) {
+      throw installError('provider_registration_failed', 'invalid shared runtime provider record');
+    }
+    const args = [
+      'runtime',
+      'provider',
+      'add',
+      '--kind',
+      providerRecord.kind,
+      '--path',
+      providerRecord.path,
+      ...(providerRecord.version === null ? [] : ['--version', providerRecord.version]),
+      '--capabilities',
+      providerRecord.capabilities.join(','),
+      '--json',
+    ];
+    const result = await runCli(cliPath, args);
+    const data = parseJsonDocument(result.stdout);
+    if (!result.ok || data?.ok !== true) {
+      throw installError('provider_registration_failed', 'runtime provider registration failed', {
+        detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? result.spawnError?.message ?? 'provider_registration_failed', {
+          home: cloudRoot,
+          cliPath,
+        }),
+      });
+    }
+  }
+
+  async function removeProviderRecord(cliPath, providerPath) {
+    const result = await runCli(cliPath, [
+      'runtime',
+      'provider',
+      'remove',
+      '--kind',
+      'shared',
+      '--path',
+      providerPath,
+      '--json',
+    ]);
+    const data = parseJsonDocument(result.stdout);
+    if (!result.ok || data?.ok !== true) {
+      throw installError('provider_registration_failed', 'runtime provider removal failed', {
+        detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? result.spawnError?.message ?? 'provider_removal_failed', {
+          home: cloudRoot,
+          cliPath,
+        }),
+      });
+    }
+  }
+
+  async function registerProvider(cliPath) {
+    await addProviderRecord(cliPath, {
+      kind: 'shared',
+      path: cliPath,
+      version,
+      capabilities: ['serve'],
+    });
+  }
+
+  async function readCurrentRecord(cliPath) {
+    const result = await runCli(cliPath, ['runtime', 'current', 'show', '--json']);
+    const data = parseJsonDocument(result.stdout);
+    if (!result.ok || data?.ok !== true) return { ok: false, current: null };
+    return { ok: true, current: isObject(data.current) ? data.current : null };
+  }
+
+  async function setCurrentRecord(cliPath, record) {
+    const args = [
+      'runtime',
+      'current',
+      'set',
+      '--version',
+      record.version,
+      '--runtime-path',
+      record.runtimePath,
+      '--cli',
+      record.cliPath,
+      '--provider',
+      record.provider ?? 'shared',
+      '--owner',
+      record.owner ?? 'shared',
+      ...(typeof record.installedAt === 'string' && record.installedAt.length > 0
+        ? ['--installed-at', record.installedAt]
+        : []),
+      '--json',
+    ];
+    const result = await runCli(cliPath, args);
+    const data = parseJsonDocument(result.stdout);
+    if (!result.ok || data?.ok !== true) {
+      throw installError('current_registration_failed', 'runtime current registration failed', {
+        detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? result.spawnError?.message ?? 'current_registration_failed', {
+          home: cloudRoot,
+          cliPath,
+        }),
+      });
+    }
+    return data.current ?? null;
+  }
+
+  async function clearCurrentRecord(cliPath) {
+    const result = await runCli(cliPath, ['runtime', 'current', 'clear', '--json']);
+    const data = parseJsonDocument(result.stdout);
+    if (!result.ok || data?.ok !== true) {
+      throw installError('current_registration_failed', 'runtime current clear failed', {
+        detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? result.spawnError?.message ?? 'current_clear_failed', {
+          home: cloudRoot,
+          cliPath,
+        }),
+      });
+    }
+  }
+
+  async function resolveInstalledHome(cliPath) {
+    const result = await runCli(cliPath, ['runtime', 'resolve', '--json']);
+    const data = parseJsonDocument(result.stdout);
+    if (isObject(data) && typeof data.home === 'string' && isAbsolute(data.home)) return resolve(data.home);
+    return cloudRoot;
+  }
+
+  async function ensureInit(cliPath, home) {
+    const configPath = join(home, 'config.json');
+    if (exists(configPath)) return { skipped: true };
+    const result = await runCli(cliPath, ['init'], { home });
+    if (!result.ok) {
+      throw installError('init_failed', 'runtime init failed', {
+        detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? result.spawnError?.message ?? 'init_failed', {
+          home,
+          cliPath,
+        }),
+      });
+    }
+    if (!exists(configPath)) {
+      throw installError('init_failed', 'runtime init did not write config.json', { detail: 'config_missing' });
+    }
+    return { skipped: false };
+  }
+
+  async function startExisting({ installed = false, reused = false, restartOwned = false } = {}) {
+    if (typeof lifecycle.startAfterInstall !== 'function') {
+      throw installError('start_failed', 'lifecycle does not support explicit start');
+    }
+    const result = await lifecycle.startAfterInstall({ restartOwned: restartOwned === true });
+    let snapshot = isObject(result) ? result : null;
+    if (snapshot === null || snapshot.status === undefined) {
+      try {
+        snapshot = await lifecycle.inspect();
+      } catch {
+        snapshot = null;
+      }
+    }
+    if (snapshot?.status === 'up') {
+      return publish({
+        state: 'done',
+        reason: null,
+        detail: null,
+        installed: installed || reused || current.installed,
+        reused,
+        started: snapshot.managed === true || current.started,
+        finishedAt: now(),
+      });
+    }
+    const rawReason = typeof snapshot?.reason === 'string' ? snapshot.reason : null;
+    const reason = rawReason !== null && rawReason !== 'download_required' && INSTALL_REASON_SET.has(rawReason)
+      ? rawReason
+      : 'start_failed';
+    throw installError(reason, 'runtime did not become ready after start', {
+      detail: sanitizeDetail(rawReason ?? 'start_failed'),
+    });
+  }
+
+  async function installFiles(reinstall) {
+    const runtimeDir = runtimeInstallDir(cloudRoot);
+    const targetPath = runtimeInstallTarget(cloudRoot, version);
+    const cliPath = runtimeInstallCliPath(cloudRoot, version);
+    let lock = null;
+    let tempPath = null;
+    let backupPath = null;
+    try {
+      await mkdir(runtimeDir, { recursive: true });
+      lock = await acquireInstallLock({ runtimeDir, version, reinstall, pidAliveFn, now });
+      await removeStaleInstallStaging(runtimeDir);
+
+      const existing = await inspectInstalledRuntimePrefix(targetPath, version);
+      if (!reinstall && existing.ok) {
+        publish({ reused: true, installed: true, detail: null });
+        log('info', 'shared runtime already installed; reusing the pinned version');
+        return { cliPath, reused: true, installed: true, backupPath: null };
+      }
+
+      tempPath = join(runtimeDir, `${RUNTIME_STAGING_PREFIX}${version}-${process.pid}-${installRandomSuffix()}`);
+      await mkdir(tempPath, { recursive: true });
+      const invocation = buildRuntimeInstallCommand({
+        version,
+        prefix: tempPath,
+        platform,
+        npmPath: typeof opts.npmPath === 'string' ? opts.npmPath : null,
+        execPath,
+      });
+      const childEnv = { ...env };
+      delete childEnv.npm_config_global;
+      delete childEnv.npm_config_argv;
+      delete childEnv.npm_config_prefix;
+      const run = await runInstallProcess({
+        command: invocation.command,
+        args: invocation.args,
+        shell: invocation.shell,
+        cwd: tempPath,
+        env: childEnv,
+        timeoutMs: installTimeoutMs,
+        signal: controller.signal,
+        spawnFn,
+        killGraceMs,
+      });
+      if (run.aborted) throw installError('cancelled', 'runtime install cancelled', { detail: 'aborted' });
+      if (run.timedOut) throw installError('cancelled', 'runtime install timed out', { detail: 'timeout', timedOut: true });
+      if (run.spawnError || run.code !== 0) {
+        const classified = classifyRuntimeInstallFailure({
+          spawnError: run.spawnError,
+          exitCode: run.code,
+          stdout: run.stdout,
+          stderr: run.stderr,
+          options: { home: cloudRoot, cliPath },
+        });
+        throw installError(classified.reason, `runtime install failed (${classified.reason})`, {
+          detail: classified.detail,
+          status: classified.status,
+        });
+      }
+
+      const installed = await inspectInstalledRuntimePrefix(tempPath, version);
+      if (!installed.ok) {
+        throw installError(installed.reason, 'runtime install validation failed', { detail: installed.detail });
+      }
+      if (exists(targetPath)) {
+        backupPath = join(runtimeDir, `${RUNTIME_BACKUP_PREFIX}${version}-${installTimestamp(now())}-${installRandomSuffix()}`);
+        await rename(targetPath, backupPath);
+      }
+      try {
+        await rename(tempPath, targetPath);
+        tempPath = null;
+      } catch (error) {
+        if (backupPath !== null) {
+          try {
+            await rename(backupPath, targetPath);
+            backupPath = null;
+          } catch (restoreError) {
+            throw installError('permission_denied', `failed to restore the previous runtime: ${restoreError?.message ?? restoreError}`, {
+              detail: 'swap_restore_failed',
+            });
+          }
+        }
+        throw installError(classifyInstallFsError(error), `failed to swap the runtime directory (${error?.code ?? 'error'})`, {
+          detail: 'swap_failed',
+        });
+      }
+      const finalCheck = await inspectInstalledRuntimePrefix(targetPath, version);
+      if (!finalCheck.ok) {
+        let restored = false;
+        if (backupPath !== null) {
+          await rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
+          try {
+            await rename(backupPath, targetPath);
+            backupPath = null;
+            restored = true;
+          } catch {
+            restored = false;
+          }
+        }
+        throw installError('integrity_mismatch', 'runtime validation failed after atomic swap', {
+          detail: finalCheck.detail,
+          previousPreserved: restored,
+        });
+      }
+      publish({ installed: true, reused: false, detail: null });
+      log('info', `shared runtime ${version} installed`);
+      return { cliPath, reused: false, installed: true, backupPath };
+    } finally {
+      if (tempPath !== null) await rm(tempPath, { recursive: true, force: true }).catch(() => undefined);
+      await lock?.release?.();
+    }
+  }
+
+  async function execute(action) {
+    const existing = await inspectExisting({ includeProviderForUp: action === 'reinstall' });
+    if (disposed) return;
+    if (existing.conflict !== null && existing.conflict !== undefined) {
+      throw installError(existing.conflict, 'runtime conflict blocks installation', {
+        detail: sanitizeDetail(existing.conflict),
+      });
+    }
+    if (existing.up && action !== 'reinstall') {
+      publish({
+        state: 'done',
+        reason: null,
+        detail: null,
+        installed: current.installed,
+        reused: true,
+        started: false,
+        finishedAt: now(),
+      });
+      return;
+    }
+    // App/CLI/service are always reused. Only a shared runtime provider may be
+    // explicitly reinstalled; that is the one owner the plugin can switch.
+    const sharedReinstall = action === 'reinstall'
+      && existing.service !== true
+      && existing.provider?.kind === 'shared';
+    if (!sharedReinstall && (existing.provider !== null || existing.service)) {
+      publish({ state: 'installing', reason: 'provisioning', detail: existing.service ? 'service' : 'provider' });
+      await startExisting({ installed: false, reused: true });
+      return;
+    }
+    if (existing.up && !sharedReinstall) {
+      publish({
+        state: 'done',
+        reason: null,
+        detail: null,
+        installed: current.installed,
+        reused: true,
+        started: false,
+        finishedAt: now(),
+      });
+      return;
+    }
+    if (action === 'redetect') {
+      publish({
+        state: 'idle',
+        reason: 'download_required',
+        detail: null,
+        manualCommand,
+        finishedAt: now(),
+      });
+      return;
+    }
+
+    let previousProvider = null;
+    let previousOwned = false;
+    if (sharedReinstall) {
+      previousProvider = normalizeProviderRecord(existing.provider) ?? await findSharedProviderFallback();
+      previousOwned = existing.up === true && existing.snapshot?.managed === true;
+    }
+
+    publish({ state: 'installing', reason: 'provisioning', detail: null });
+    let backupPath = null;
+    let newProviderPath = null;
+    let providerRegistered = false;
+    let currentWritten = false;
+    let previousCurrent = null;
+    let startAttempted = false;
+
+    const restoreBackup = async () => {
+      if (backupPath === null) return true;
+      const targetPath = runtimeInstallTarget(cloudRoot, version);
+      await rm(targetPath, { recursive: true, force: true }).catch(() => undefined);
+      try {
+        await rename(backupPath, targetPath);
+        backupPath = null;
+        log('warn', 'reinstall did not complete; previous shared runtime restored');
+        return true;
+      } catch {
+        log('warn', 'reinstall did not complete and the previous shared runtime could not be restored automatically');
+        return false;
+      }
+    };
+
+    const restorePreviousProvider = async () => {
+      if (action !== 'reinstall' || !providerRegistered) return true;
+      const cliPath = newProviderPath;
+      let ok = true;
+      if (previousProvider !== null) {
+        if (cliPath !== null && cliPath !== previousProvider.path) {
+          try {
+            await removeProviderRecord(cliPath, cliPath);
+          } catch (error) {
+            ok = false;
+            log('warn', `new runtime provider could not be removed (${error?.code ?? 'error'})`);
+          }
+        }
+        try {
+          await addProviderRecord(previousProvider.path, previousProvider);
+        } catch (firstError) {
+          try {
+            // The old CLI path may be gone after a failed swap; the restored
+            // target CLI can still write the same registry atomically.
+            if (cliPath === null || !exists(cliPath)) throw firstError;
+            await addProviderRecord(cliPath, previousProvider);
+          } catch {
+            ok = false;
+            log('warn', 'previous runtime provider could not be re-registered');
+          }
+        }
+      } else if (cliPath !== null) {
+        try {
+          await removeProviderRecord(cliPath, cliPath);
+        } catch (error) {
+          ok = false;
+          log('warn', `new runtime provider could not be removed (${error?.code ?? 'error'})`);
+        }
+      }
+      return ok;
+    };
+
+    const restorePreviousCurrent = async () => {
+      if (!currentWritten) return true;
+      const cliPath = newProviderPath !== null && exists(newProviderPath)
+        ? newProviderPath
+        : previousProvider?.path;
+      if (typeof cliPath !== 'string' || !exists(cliPath)) {
+        log('warn', 'previous runtime current could not be restored (no usable CLI)');
+        return false;
+      }
+      try {
+        if (previousCurrent === null) {
+          await clearCurrentRecord(cliPath);
+        } else {
+          await setCurrentRecord(cliPath, previousCurrent);
+        }
+        return true;
+      } catch (error) {
+        log('warn', `previous runtime current could not be restored (${safeErrorCode(error)})`);
+        return false;
+      }
+    };
+
+    const restartPreviousDaemon = async () => {
+      try {
+        const result = await lifecycle.startAfterInstall({ restartOwned: false });
+        if (isObject(result) && result.status === 'up') return true;
+        const snapshot = await lifecycle.inspect().catch(() => null);
+        return snapshot?.status === 'up';
+      } catch (error) {
+        log('warn', `previous Mebular runtime could not be restarted (${safeErrorCode(error)})`);
+        return false;
+      }
+    };
+
+    const rollback = async ({ allowRestart }) => {
+      const filesRestored = await restoreBackup();
+      const providerRestored = await restorePreviousProvider();
+      const currentRestored = await restorePreviousCurrent();
+      const notes = [];
+      if (!filesRestored) notes.push('previous_runtime_restore_failed');
+      if (!providerRestored) notes.push('previous_provider_restore_failed');
+      if (!currentRestored) notes.push('previous_current_restore_failed');
+      if (allowRestart && startAttempted && previousOwned) {
+        if (!providerRestored) {
+          notes.push('previous_daemon_restart_skipped');
+        } else {
+          const restarted = await restartPreviousDaemon();
+          notes.push(restarted ? 'previous_daemon_restarted' : 'previous_daemon_restart_failed');
+        }
+      }
+      return notes;
+    };
+
+    try {
+      const files = await installFiles(action === 'reinstall');
+      backupPath = files.backupPath ?? null;
+      newProviderPath = files.cliPath;
+      if (disposed) {
+        await rollback({ allowRestart: false });
+        return;
+      }
+      const currentBefore = await readCurrentRecord(files.cliPath);
+      previousCurrent = currentBefore.current;
+      await registerProvider(files.cliPath);
+      providerRegistered = true;
+      if (sharedReinstall && previousProvider !== null && previousProvider.path !== files.cliPath) {
+        await removeProviderRecord(files.cliPath, previousProvider.path);
+      }
+      if (disposed) {
+        await rollback({ allowRestart: false });
+        return;
+      }
+      // 4b 与 4a 共用 current 语义：安装成功后由安装后的 CLI 原子写 current。
+      await setCurrentRecord(files.cliPath, {
+        version,
+        runtimePath: runtimeInstallTarget(cloudRoot, version),
+        cliPath: files.cliPath,
+        provider: 'shared',
+        owner: 'shared',
+        installedAt: now(),
+      });
+      currentWritten = true;
+      if (disposed) {
+        await rollback({ allowRestart: false });
+        return;
+      }
+      const home = await resolveInstalledHome(files.cliPath);
+      if (disposed) {
+        await rollback({ allowRestart: false });
+        return;
+      }
+      await ensureInit(files.cliPath, home);
+      if (disposed) {
+        await rollback({ allowRestart: false });
+        return;
+      }
+      publish({ state: 'installing', reason: 'provisioning', detail: 'starting' });
+      startAttempted = true;
+      await startExisting({
+        installed: true,
+        reused: files.reused === true,
+        restartOwned: action === 'reinstall' && files.reused !== true,
+      });
+      backupPath = null;
+    } catch (error) {
+      const notes = await rollback({ allowRestart: !disposed });
+      if (notes.length > 0) {
+        const base = typeof error?.detail === 'string' && error.detail.length > 0 ? `${error.detail}; ` : '';
+        error.detail = `${base}${notes.join('; ')}`;
+      }
+      throw error;
+    }
+  }
+
+  function fail(error) {
+    const reason = typeof error?.code === 'string' && INSTALL_REASON_SET.has(error.code)
+      ? error.code
+      : 'install_failed';
+    const detail = sanitizeDetail(error?.detail ?? error?.message ?? 'install_failed', { home: cloudRoot });
+    publish({
+      state: 'failed',
+      reason,
+      detail,
+      manualCommand,
+      targetVersion: version,
+      finishedAt: now(),
+    });
+    log('warn', `runtime install failed (${reason})`);
+  }
+
+  function start(action = 'install') {
+    if (!RUNTIME_INSTALL_ACTIONS.includes(action)) {
+      return { accepted: false, state: current };
+    }
+    if (!allowed) return { accepted: false, state: current };
+    if (disposed) return { accepted: false, state: current };
+    if (task !== null) return { accepted: false, state: current };
+
+    controller = new AbortController();
+    publish({
+      state: 'installing',
+      reason: null,
+      detail: null,
+      action,
+      startedAt: now(),
+      finishedAt: null,
+      reused: false,
+      started: false,
+    });
+    task = Promise.resolve()
+      .then(() => execute(action))
+      .catch((error) => {
+        if (!disposed) fail(error);
+      })
+      .finally(() => {
+        task = null;
+      });
+    return { accepted: true, state: current };
+  }
+
+  async function dispose() {
+    if (disposed) return task ?? undefined;
+    disposed = true;
+    try {
+      controller.abort('plugin_disposed');
+    } catch {
+      // Abort is best-effort.
+    }
+    if (task !== null) {
+      try {
+        await task;
+      } catch {
+        // The flow cleaned up its staging/lock in `finally`.
+      }
+    }
+    if (current.state === 'installing') {
+      publish({
+        state: 'failed',
+        reason: 'cancelled',
+        detail: 'plugin_disposed',
+        manualCommand,
+        targetVersion: version,
+        finishedAt: now(),
+      });
+    }
+    return undefined;
+  }
+
+  return {
+    start,
+    cancel: dispose,
+    dispose,
+    getState: () => current,
+    allowed: () => allowed,
+    denialReason: () => denialReason,
+  };
+}
+
+/**
+ * Create the explicit shared-runtime upgrade controller used by
+ * `POST /mebular/runtime/upgrade`.
+ *
+ * Only `update`, `later` and `skip` are accepted; the client never supplies a
+ * version/tag/URL. `update` re-reads the shared check result and runs
+ * `mebular runtime upgrade --to latest`, so the target is always the latest
+ * stable version known by core. The shared upgrade lock (inside the CLI) is the
+ * only cross-entry mutex; `busy` is waited on with a bound and never retried as
+ * a second install.
+ *
+ * Ownership: only a supervise/child this plugin owns is stopped. A reused or
+ * service daemon is left alone; when `mebular-serve` is registered the core
+ * upgrade updates/restarts it. A failed upgrade restores the previous runtime
+ * pointers and re-attaches/restarts the previous daemon.
+ *
+ * @param {{
+ *   config?: unknown,
+ *   lifecycle: { inspect: () => Promise<Record<string, unknown>>, refresh?: () => Promise<unknown>, refreshUpdate?: () => Promise<unknown>, startAfterInstall?: (options?: Record<string, unknown>) => Promise<unknown>, stopOwnedChild?: () => Promise<Record<string, unknown>> },
+ *   env?: Record<string, string | undefined>,
+ *   userHome?: string,
+ *   platform?: string,
+ *   execPath?: string,
+ *   cloudRoot?: string,
+ *   spawnFn?: typeof spawn,
+ *   discoverProviders?: typeof discoverRuntimeProviders,
+ *   exists?: (file: string) => boolean,
+ *   now?: () => string,
+ *   sleep?: (ms: number) => Promise<unknown>,
+ *   cliTimeoutMs?: number,
+ *   upgradeTimeoutMs?: number,
+ *   upgradePollMs?: number,
+ *   reconnectTimeoutMs?: number,
+ *   logger?: { info?: (message: string) => void, warn?: (message: string) => void },
+ * }} options
+ * @returns {{
+ *   start: (action?: string) => { accepted: boolean, state: ReturnType<typeof sanitizeRuntimeUpgradeState> },
+ *   getState: () => ReturnType<typeof sanitizeRuntimeUpgradeState>,
+ *   allowed: () => boolean,
+ *   denialReason: () => string | null,
+ *   dispose: () => Promise<unknown>,
+ * }}
+ */
+export function createRuntimeUpgradeManager(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const env = isObject(opts.env) ? opts.env : process.env;
+  const platform = typeof opts.platform === 'string' ? opts.platform : process.platform;
+  const execPath = typeof opts.execPath === 'string' && opts.execPath.length > 0 ? opts.execPath : process.execPath;
+  const userHome = typeof opts.userHome === 'string' && opts.userHome.length > 0 ? opts.userHome : homedir();
+  const config = resolveConfig(opts.config, { env });
+  const lifecycle = isObject(opts.lifecycle) && typeof opts.lifecycle.inspect === 'function'
+    ? opts.lifecycle
+    : null;
+  const spawnFn = typeof opts.spawnFn === 'function' ? opts.spawnFn : spawn;
+  const discoverProviders = typeof opts.discoverProviders === 'function'
+    ? opts.discoverProviders
+    : discoverRuntimeProviders;
+  const exists = typeof opts.exists === 'function' ? opts.exists : existsSync;
+  const now = typeof opts.now === 'function' ? opts.now : () => new Date().toISOString();
+  const sleep = typeof opts.sleep === 'function'
+    ? opts.sleep
+    : (ms) => new Promise((resolvePromise) => {
+      const timer = setTimeout(resolvePromise, Math.max(0, ms));
+      timer.unref?.();
+    });
+  const cliTimeoutMs = Number.isFinite(opts.cliTimeoutMs)
+    ? Math.max(250, opts.cliTimeoutMs)
+    : DEFAULT_CLI_TIMEOUT_MS;
+  const upgradeTimeoutMs = Number.isFinite(opts.upgradeTimeoutMs)
+    ? Math.max(250, opts.upgradeTimeoutMs)
+    : DEFAULT_UPGRADE_TIMEOUT_MS;
+  const upgradePollMs = Number.isFinite(opts.upgradePollMs)
+    ? Math.max(0, opts.upgradePollMs)
+    : DEFAULT_UPGRADE_POLL_MS;
+  const reconnectTimeoutMs = Number.isFinite(opts.reconnectTimeoutMs)
+    ? Math.max(0, opts.reconnectTimeoutMs)
+    : DEFAULT_UPGRADE_RECONNECT_TIMEOUT_MS;
+  const logger = isObject(opts.logger) ? opts.logger : null;
+  const cloudRoot = typeof opts.cloudRoot === 'string' && opts.cloudRoot.length > 0
+    ? opts.cloudRoot
+    : runtimeCloudRoot({ env, userHome });
+
+  const denialReason = config.runtime === 'external'
+    ? 'runtime_external'
+    : config.pinnedDaemonUrl === true
+      ? 'daemon_url_pinned'
+      : lifecycle === null ? 'upgrade_unavailable' : null;
+  const allowed = denialReason === null;
+
+  let current = sanitizeRuntimeUpgradeState({ state: 'idle', allowed });
+  let task = null;
+  let promptedTask = null;
+  /** Last prompted version this manager instance persisted (idempotent POSTs). */
+  let promptedAckVersion = null;
+  let disposed = false;
+  let controller = new AbortController();
+
+  function log(level, message) {
+    try {
+      const fn = logger?.[level];
+      if (typeof fn === 'function') fn.call(logger, message);
+    } catch {
+      // Logging must never break an explicit upgrade.
+    }
+  }
+
+  function publish(patch) {
+    current = sanitizeRuntimeUpgradeState({ ...current, ...patch, allowed });
+    return current;
+  }
+
+  function failureError(reason, message, extra = {}) {
+    const error = new Error(message);
+    error.code = reason;
+    error.detail = extra.detail;
+    error.busy = extra.busy === true;
+    error.reason = reason;
+    return error;
+  }
+
+  async function discoverProvider() {
+    try {
+      const discovery = await discoverProviders({
+        env,
+        platform,
+        userHome,
+        cloudRoot,
+        ...(config.cliPath === undefined ? {} : { cliPath: config.cliPath }),
+        ...(typeof opts.registry === 'undefined' ? {} : { registry: opts.registry }),
+        ...(typeof opts.includeStandardApp === 'undefined' ? {} : { includeStandardApp: opts.includeStandardApp }),
+        ...(typeof opts.exists === 'function' ? { exists: opts.exists } : {}),
+      });
+      return isObject(discovery?.selected) ? discovery.selected : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async function runCli(cliPath, args, { timeoutMs = cliTimeoutMs } = {}) {
+    const result = await runInstalledCli({
+      cliPath,
+      args,
+      env: {
+        ...env,
+        MEBULAR_CLOUD_ROOT: cloudRoot,
+        MEBULAR_HOME: cloudRoot,
+      },
+      platform,
+      execPath,
+      timeoutMs,
+      signal: controller.signal,
+      spawnFn,
+      killGraceMs: DEFAULT_INSTALL_KILL_GRACE_MS,
+    });
+    return {
+      ...result,
+      ok: result.code === 0 && result.spawnError === undefined && result.aborted !== true && result.timedOut !== true,
+    };
+  }
+
+  async function selectedCli() {
+    const selected = await discoverProvider();
+    if (!isObject(selected) || typeof selected.path !== 'string' || !exists(selected.path)) return null;
+    return selected;
+  }
+
+  /** Read the server-owned latest version from the shared check result. */
+  async function resolveLatest(cliPath) {
+    const result = await runCli(cliPath, ['runtime', 'check-update', '--json'], { timeoutMs: cliTimeoutMs });
+    const data = parseJsonDocument(result.stdout);
+    if (!isObject(data) || data.ok !== true) {
+      throw failureError(
+        sanitizeReason(data?.reason ?? data?.status ?? result.spawnError?.code) ?? (result.timedOut ? 'timeout' : 'upgrade_failed'),
+        '无法读取共享 runtime 更新状态',
+        { detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? result.spawnError?.message ?? 'check_failed', { home: cloudRoot, cliPath }) },
+      );
+    }
+    const latest = sanitizeVersion(data.latestVersion);
+    const skipped = data.skipped === true;
+    return {
+      latest,
+      available: data.available === true && !skipped,
+      skipped,
+      currentVersion: sanitizeVersion(data.currentVersion),
+      promptedVersion: sanitizeVersion(data.promptedVersion),
+      checkedAt: sanitizeTime(data.checkedAt),
+    };
+  }
+
+  /**
+   * Persist the prompted version for an explicit upgrade/skip action. The GET
+   * route never calls this; a failure is a warning only and never blocks the
+   * user's action.
+   */
+  async function writePromptedBestEffort(cliPath, version) {
+    try {
+      const result = await runCli(cliPath, [
+        'runtime',
+        'update-state',
+        'prompted',
+        '--version',
+        version,
+        '--json',
+      ], { timeoutMs: cliTimeoutMs });
+      const data = parseJsonDocument(result.stdout);
+      if (result.ok !== true || !isObject(data) || data.ok !== true) {
+        log('warn', 'shared runtime prompted state could not be persisted');
+        return false;
+      }
+      promptedAckVersion = version;
+      lifecycle?.markUpdatePrompted?.(version);
+      return true;
+    } catch (error) {
+      log('warn', `shared runtime prompted state failed (${safeErrorCode(error)})`);
+      return false;
+    }
+  }
+
+  /** Non-destructive shared lock probe; `state.upgrading` is display-only. */
+  async function upgradeLockBusy(cliPath) {
+    const result = await runCli(cliPath, ['runtime', 'upgrade-state', 'show', '--json'], { timeoutMs: cliTimeoutMs });
+    const data = parseJsonDocument(result.stdout);
+    if (!isObject(data) || data.ok !== true) return false;
+    return data.lock?.busy === true;
+  }
+
+  async function waitForUpgradeIdle(cliPath) {
+    const deadline = Date.now() + reconnectTimeoutMs;
+    for (;;) {
+      if (disposed) return false;
+      const busy = await upgradeLockBusy(cliPath).catch(() => false);
+      if (!busy) return true;
+      if (Date.now() >= deadline) return false;
+      await sleep(upgradePollMs);
+    }
+  }
+
+  async function reconnect({ stoppedOwnChild, serviceRegistered }) {
+    if (!isObject(lifecycle)) return { ok: false, reason: 'reconnect_failed' };
+    try {
+      let snapshot;
+      if (stoppedOwnChild && typeof lifecycle.startAfterInstall === 'function') {
+        snapshot = await lifecycle.startAfterInstall({ restartOwned: true });
+      } else if (serviceRegistered && typeof lifecycle.startAfterInstall === 'function') {
+        snapshot = await lifecycle.startAfterInstall({ restartOwned: false });
+      } else if (typeof lifecycle.refresh === 'function') {
+        snapshot = await lifecycle.refresh();
+      } else {
+        snapshot = await lifecycle.inspect();
+      }
+      const state = isObject(snapshot) ? snapshot : await lifecycle.inspect().catch(() => null);
+      return {
+        ok: state?.status === 'up',
+        snapshot: state,
+        ...(state?.status === 'up' ? {} : { reason: state?.reason ?? 'reconnect_failed' }),
+      };
+    } catch (error) {
+      return { ok: false, reason: error?.code ?? 'reconnect_failed', error: String(error?.message ?? error) };
+    }
+  }
+
+  async function executePrompted() {
+    const cli = await selectedCli();
+    if (cli === null) return;
+    const latest = await resolveLatest(cli.path);
+    if (latest.latest === null) return;
+    if (promptedAckVersion === latest.latest) return;
+    await writePromptedBestEffort(cli.path, latest.latest);
+  }
+
+  async function executeUpdate() {
+    const cli = await selectedCli();
+    if (cli === null) throw failureError('no_provider', '没有可用的 Mebular CLI/runtime provider');
+    const latest = await resolveLatest(cli.path);
+    if (latest.latest === null || latest.available !== true) {
+      throw failureError('no_update_available', '共享 check 没有可用的 stable 更新');
+    }
+    const fromVersion = latest.currentVersion;
+    // Explicit update is also a prompt acknowledgement; best-effort only.
+    await writePromptedBestEffort(cli.path, latest.latest);
+    publish({
+      state: 'updating',
+      action: 'update',
+      reason: 'provisioning',
+      detail: null,
+      fromVersion,
+      toVersion: latest.latest,
+      startedAt: now(),
+      finishedAt: null,
+      busy: false,
+    });
+
+    if (!(await waitForUpgradeIdle(cli.path))) {
+      publish({ state: 'failed', reason: 'busy', busy: true, finishedAt: now() });
+      await reconnect({ stoppedOwnChild: false, serviceRegistered: false });
+      throw failureError('busy', '另一个入口正在升级共享 runtime');
+    }
+
+    const snapshot = await lifecycle.inspect().catch(() => null);
+    const serviceRegistered = snapshot?.service?.registered === true;
+    const wantsOwnChild = snapshot?.managed === true && snapshot?.runtimeMode === 'child';
+    let stoppedOwnChild = false;
+    if (wantsOwnChild && typeof lifecycle.stopOwnedChild === 'function') {
+      const stopped = await lifecycle.stopOwnedChild();
+      if (stopped?.stopped !== true) {
+        publish({ state: 'failed', reason: 'child_stop_failed', finishedAt: now() });
+        throw failureError('child_stop_failed', '插件托管的 runtime 未能停止，已取消升级');
+      }
+      stoppedOwnChild = stopped?.stoppedOwned === true;
+    }
+
+    const result = await runCli(cli.path, ['runtime', 'upgrade', '--to', 'latest', '--json'], {
+      timeoutMs: upgradeTimeoutMs,
+    });
+    const data = parseJsonDocument(result.stdout);
+    if (isObject(data) && data.busy === true) {
+      await waitForUpgradeIdle(cli.path);
+      publish({ state: 'failed', reason: 'busy', busy: true, finishedAt: now() });
+      await reconnect({ stoppedOwnChild, serviceRegistered });
+      throw failureError('busy', '另一个入口正在升级共享 runtime');
+    }
+    if (result.timedOut === true) {
+      publish({ state: 'failed', reason: 'timeout', finishedAt: now() });
+      await reconnect({ stoppedOwnChild, serviceRegistered });
+      throw failureError('timeout', '共享 runtime 升级超时');
+    }
+    if (result.ok !== true || !isObject(data) || data.ok !== true) {
+      const rawReason = sanitizeReason(data?.reason) ?? (result.spawnError ? sanitizeReason(String(result.spawnError.code ?? '').toLowerCase()) : null);
+      const reason = rawReason !== null && UPGRADE_REASON_SET.has(rawReason) ? rawReason : 'upgrade_failed';
+      publish({
+        state: 'failed',
+        reason,
+        detail: sanitizeDetail(
+          (typeof data?.message === 'string' && data.message)
+          ?? firstUsefulLine(result.stderr)
+          ?? result.spawnError?.message
+          ?? 'upgrade_failed',
+          { home: cloudRoot, cliPath: cli.path },
+        ),
+        finishedAt: now(),
+      });
+      await reconnect({ stoppedOwnChild, serviceRegistered });
+      if (typeof lifecycle.refreshUpdate === 'function') {
+        Promise.resolve().then(() => lifecycle.refreshUpdate()).catch(() => {});
+      }
+      throw failureError(reason, data?.message ?? '共享 runtime 升级失败');
+    }
+
+    const toVersion = sanitizeVersion(data.to ?? data.version) ?? latest.latest;
+    publish({
+      state: 'done',
+      reason: null,
+      detail: null,
+      fromVersion: sanitizeVersion(data.previousCurrent?.version) ?? fromVersion,
+      toVersion,
+      finishedAt: now(),
+    });
+    const reconnected = await reconnect({ stoppedOwnChild, serviceRegistered });
+    if (!reconnected.ok) {
+      publish({ state: 'failed', reason: 'reconnect_failed', finishedAt: now() });
+      throw failureError('reconnect_failed', '升级成功但未能重新连接 Mebular');
+    }
+    if (typeof lifecycle.refreshUpdate === 'function') {
+      Promise.resolve().then(() => lifecycle.refreshUpdate()).catch(() => {});
+    }
+    log('info', `shared runtime upgraded to ${toVersion}`);
+  }
+
+  async function executeSkip() {
+    const cli = await selectedCli();
+    if (cli === null) throw failureError('no_provider', '没有可用的 Mebular CLI/runtime provider');
+    const latest = await resolveLatest(cli.path);
+    if (latest.latest === null) throw failureError('no_update_available', '没有可跳过的版本');
+    await writePromptedBestEffort(cli.path, latest.latest);
+    publish({ state: 'skipping', action: 'skip', reason: null, toVersion: latest.latest, startedAt: now(), finishedAt: null });
+    const result = await runCli(cli.path, [
+      'runtime',
+      'update-state',
+      'skip',
+      '--version',
+      latest.latest,
+      '--json',
+    ], { timeoutMs: cliTimeoutMs });
+    const data = parseJsonDocument(result.stdout);
+    if (result.ok !== true || !isObject(data) || data.ok !== true) {
+      throw failureError(
+        sanitizeReason(data?.reason) ?? 'upgrade_failed',
+        '写入共享跳过版本失败',
+        { detail: sanitizeDetail(firstUsefulLine(result.stderr) ?? 'skip_failed', { home: cloudRoot, cliPath: cli.path }) },
+      );
+    }
+    publish({ state: 'done', reason: 'skipped', toVersion: latest.latest, finishedAt: now() });
+    if (typeof lifecycle.refreshUpdate === 'function') {
+      Promise.resolve().then(() => lifecycle.refreshUpdate()).catch(() => {});
+    }
+  }
+
+  function start(action = 'update') {
+    if (!RUNTIME_UPGRADE_ACTIONS.includes(action)) {
+      return { accepted: false, state: current };
+    }
+    if (!allowed || disposed) return { accepted: false, state: current };
+    if (action === 'later') {
+      // Later is session-local: it never writes skip and never retries on its own.
+      return { accepted: true, state: current };
+    }
+    if (action === 'prompted') {
+      // Idempotent acknowledgement from the panel after the banner rendered.
+      // It never changes upgrade state or triggers an install.
+      if (promptedTask !== null || task !== null) return { accepted: true, state: current };
+      promptedTask = Promise.resolve()
+        .then(() => executePrompted())
+        .catch((error) => {
+          log('warn', `runtime prompted acknowledgement failed (${safeErrorCode(error)})`);
+        })
+        .finally(() => {
+          promptedTask = null;
+        });
+      return { accepted: true, state: current };
+    }
+    if (task !== null) return { accepted: false, state: current };
+
+    controller = new AbortController();
+    publish({
+      state: action === 'skip' ? 'skipping' : 'updating',
+      action,
+      reason: action === 'skip' ? null : 'provisioning',
+      detail: null,
+      busy: false,
+      startedAt: now(),
+      finishedAt: null,
+    });
+    task = Promise.resolve()
+      .then(() => (action === 'skip' ? executeSkip() : executeUpdate()))
+      .catch((error) => {
+        if (disposed && error?.code === 'plugin_disposed') return;
+        const reason = typeof error?.code === 'string' && UPGRADE_REASON_SET.has(error.code)
+          ? error.code
+          : 'upgrade_failed';
+        const stateReason = current.reason ?? reason;
+        publish({
+          state: 'failed',
+          reason: stateReason,
+          detail: current.detail ?? sanitizeDetail(error?.detail ?? error?.message ?? 'upgrade_failed', { home: cloudRoot }),
+          finishedAt: now(),
+        });
+        log('warn', `runtime upgrade failed (${stateReason})`);
+      })
+      .finally(() => {
+        task = null;
+      });
+    return { accepted: true, state: current };
+  }
+
+  async function dispose() {
+    if (disposed) return task ?? promptedTask ?? undefined;
+    disposed = true;
+    try {
+      controller.abort('plugin_disposed');
+    } catch {
+      // Abort is best-effort.
+    }
+    if (task !== null) {
+      try {
+        await task;
+      } catch {
+        // The flow already rolled back/restored its own state.
+      }
+    }
+    if (promptedTask !== null) {
+      try {
+        await promptedTask;
+      } catch {
+        // Prompted acknowledgement is best-effort and never blocks unload.
+      }
+    }
+    return undefined;
+  }
+
+  return {
+    start,
+    getState: () => current,
+    allowed: () => allowed,
+    denialReason: () => denialReason,
+    dispose,
+  };
+}
+
+function readInstallBody(req) {
+  return new Promise((resolvePromise) => {
+    if (!isObject(req) || typeof req.on !== 'function') {
+      const text = typeof req?.body === 'string' ? req.body : '';
+      resolvePromise({ ok: true, text });
+      return;
+    }
+    let size = 0;
+    let settled = false;
+    const chunks = [];
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      resolvePromise(value);
+    };
+    req.on('data', (chunk) => {
+      if (settled) return;
+      const text = String(chunk ?? '');
+      size += Buffer.byteLength(text);
+      if (size > MAX_INSTALL_BODY_BYTES) {
+        finish({ ok: false, error: 'body_too_large' });
+        return;
+      }
+      chunks.push(text);
+    });
+    req.on('end', () => finish({ ok: true, text: chunks.join('') }));
+    req.on('error', () => finish({ ok: false, error: 'read_error' }));
+  });
+}
+
+/**
+ * Loopback-only `POST /mebular/runtime/install`.
+ *
+ * Remote peers get 404 for every method. The body accepts exactly one optional
+ * `action` (`install|retry|reinstall|redetect`); version/URL/registry are never
+ * accepted. Installation is asynchronous (202) and the client polls
+ * `/mebular/embed-info` for the same host-owned state.
+ *
+ * @param {{
+ *   config?: unknown,
+ *   manager: ReturnType<typeof createRuntimeInstallManager>,
+ * }} [options]
+ * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>}
+ */
+export function createRuntimeInstallHandler(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const config = resolveConfig(opts.config, { env: opts.env });
+  const manager = isObject(opts.manager) ? opts.manager : null;
+
+  function sendJson(res, status, value, extraHeaders = {}) {
+    if (res === null || typeof res !== 'object' || typeof res.end !== 'function') return;
+    res.statusCode = status;
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.setHeader('cache-control', 'no-store');
+    for (const [key, headerValue] of Object.entries(extraHeaders)) res.setHeader(key, headerValue);
+    res.end(JSON.stringify(value));
+  }
+
+  return async function handleRuntimeInstall(req, res) {
+    if (!isLoopbackAddress(req?.socket?.remoteAddress)) {
+      if (res !== null && typeof res === 'object' && typeof res.end === 'function') {
+        res.statusCode = 404;
+        res.end();
+      }
+      return;
+    }
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { ok: false, error: 'method_not_allowed' }, { allow: 'POST' });
+      return;
+    }
+    const body = await readInstallBody(req);
+    if (!body.ok) {
+      sendJson(res, 400, { ok: false, error: 'invalid_body' });
+      return;
+    }
+    let input = {};
+    const contentType = String(req.headers?.['content-type'] ?? req.headers?.['Content-Type'] ?? '');
+    if (!/^application\/json\b/i.test(contentType)) {
+      sendJson(res, 400, { ok: false, error: 'invalid_content_type' });
+      return;
+    }
+    if (body.text.trim().length === 0) {
+      sendJson(res, 400, { ok: false, error: 'invalid_json' });
+      return;
+    }
+    try {
+      input = JSON.parse(body.text);
+    } catch {
+      sendJson(res, 400, { ok: false, error: 'invalid_json' });
+      return;
+    }
+    if (!isObject(input)) {
+      sendJson(res, 400, { ok: false, error: 'invalid_json' });
+      return;
+    }
+    const keys = Object.keys(input);
+    if (keys.some((key) => key !== 'action')) {
+      sendJson(res, 400, { ok: false, error: 'unsupported_parameters' });
+      return;
+    }
+    const action = input.action === undefined ? 'install' : input.action;
+    if (typeof action !== 'string' || !RUNTIME_INSTALL_ACTIONS.includes(action)) {
+      sendJson(res, 400, { ok: false, error: 'invalid_action' });
+      return;
+    }
+    if (manager === null) {
+      sendJson(res, 503, { ok: false, error: 'install_unavailable' });
+      return;
+    }
+    const configDenial = config.bootstrap === 'never'
+      ? 'bootstrap_never'
+      : config.runtime === 'external'
+        ? 'runtime_external'
+        : config.pinnedDaemonUrl === true
+          ? 'daemon_url_pinned'
+          : null;
+    if (configDenial !== null) {
+      sendJson(res, 403, {
+        ok: false,
+        error: 'install_not_allowed',
+        reason: configDenial,
+        ...(config.bootstrap === 'never' ? { bootstrap: 'never' } : {}),
+        ...(config.runtime === 'external' ? { runtime: 'external' } : {}),
+      });
+      return;
+    }
+    if (typeof manager.allowed === 'function' && manager.allowed() !== true) {
+      const reason = typeof manager.denialReason === 'function' ? manager.denialReason() : 'not_allowed';
+      sendJson(res, 403, {
+        ok: false,
+        error: 'install_not_allowed',
+        reason: reason ?? 'not_allowed',
+        ...(config.bootstrap === 'never' ? { bootstrap: 'never' } : {}),
+        ...(config.runtime === 'external' ? { runtime: 'external' } : {}),
+      });
+      return;
+    }
+    let result;
+    try {
+      result = manager.start(action);
+    } catch {
+      sendJson(res, 500, { ok: false, error: 'install_failed' });
+      return;
+    }
+    sendJson(res, 202, {
+      ok: true,
+      accepted: result?.accepted === true,
+      action,
+      install: manager.getState(),
+    });
+  };
+}
+
+/**
+ * Loopback-only `POST /mebular/runtime/upgrade`.
+ *
+ * Remote peers get 404 for every method. The body accepts exactly one optional
+ * `action` (`update|later|skip`); version/tag/URL/registry are never accepted.
+ * `update` is asynchronous (202) and the client polls `/mebular/embed-info` for
+ * the same host-owned `upgrade` state. `later` is session-local, `skip` writes
+ * the shared skippedVersion. Single-flight lives in the manager.
+ *
+ * @param {{
+ *   config?: unknown,
+ *   manager: ReturnType<typeof createRuntimeUpgradeManager>,
+ * }} [options]
+ * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>}
+ */
+export function createRuntimeUpgradeHandler(options = {}) {
+  const opts = isObject(options) ? options : {};
+  const config = resolveConfig(opts.config, { env: opts.env });
+  const manager = isObject(opts.manager) ? opts.manager : null;
+
+  function sendJson(res, status, value, extraHeaders = {}) {
+    if (res === null || typeof res !== 'object' || typeof res.end !== 'function') return;
+    res.statusCode = status;
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    res.setHeader('cache-control', 'no-store');
+    for (const [key, headerValue] of Object.entries(extraHeaders)) res.setHeader(key, headerValue);
+    res.end(JSON.stringify(value));
+  }
+
+  return async function handleRuntimeUpgrade(req, res) {
+    if (!isLoopbackAddress(req?.socket?.remoteAddress)) {
+      if (res !== null && typeof res === 'object' && typeof res.end === 'function') {
+        res.statusCode = 404;
+        res.end();
+      }
+      return;
+    }
+    if (req.method !== 'POST') {
+      sendJson(res, 405, { ok: false, error: 'method_not_allowed' }, { allow: 'POST' });
+      return;
+    }
+    const contentType = String(req.headers?.['content-type'] ?? req.headers?.['Content-Type'] ?? '');
+    if (!/^application\/json\b/i.test(contentType)) {
+      sendJson(res, 400, { ok: false, error: 'invalid_content_type' });
+      return;
+    }
+    const body = await readInstallBody(req);
+    if (!body.ok || body.text.trim().length === 0) {
+      sendJson(res, 400, { ok: false, error: body.ok ? 'invalid_json' : 'invalid_body' });
+      return;
+    }
+    let input;
+    try {
+      input = JSON.parse(body.text);
+    } catch {
+      sendJson(res, 400, { ok: false, error: 'invalid_json' });
+      return;
+    }
+    if (!isObject(input)) {
+      sendJson(res, 400, { ok: false, error: 'invalid_json' });
+      return;
+    }
+    const keys = Object.keys(input);
+    if (keys.some((key) => key !== 'action')) {
+      sendJson(res, 400, { ok: false, error: 'unsupported_parameters' });
+      return;
+    }
+    const action = input.action === undefined ? 'update' : input.action;
+    if (typeof action !== 'string' || !RUNTIME_UPGRADE_ACTIONS.includes(action)) {
+      sendJson(res, 400, { ok: false, error: 'invalid_action' });
+      return;
+    }
+    if (manager === null) {
+      sendJson(res, 503, { ok: false, error: 'upgrade_unavailable' });
+      return;
+    }
+    if (typeof manager.allowed === 'function' && manager.allowed() !== true) {
+      const reason = typeof manager.denialReason === 'function' ? manager.denialReason() : 'not_allowed';
+      sendJson(res, 403, {
+        ok: false,
+        error: 'upgrade_not_allowed',
+        reason: reason ?? 'not_allowed',
+        ...(config.runtime === 'external' ? { runtime: 'external' } : {}),
+        ...(config.pinnedDaemonUrl === true ? { daemonUrl: 'pinned' } : {}),
+      });
+      return;
+    }
+    let result;
+    try {
+      result = manager.start(action);
+    } catch {
+      sendJson(res, 500, { ok: false, error: 'upgrade_failed' });
+      return;
+    }
+    sendJson(res, 202, {
+      ok: true,
+      accepted: result?.accepted === true,
+      action,
+      upgrade: manager.getState(),
+    });
+  };
+}
+
 /**
  * Create the daemon lifecycle state machine used by the host plugin.
  *
- * attach: probes only. managed: probes once, reuses a healthy daemon, or
- * spawns the resolved CLI exactly once and waits for /healthz with a bound.
- * dispose() sends SIGTERM only to a child this lifecycle started.
+ * attach: resolve + probe only. managed/auto: reuse a healthy daemon, or spawn
+ * `mebular runtime supervise --json` exactly once and hold that supervise
+ * process (never the daemon itself). A service/reused supervise exits after its
+ * ready JSON; a child-mode one stays alive and dispose() sends SIGTERM only to
+ * it, letting supervise stop the child it owns.
+ *
+ * `startAfterInstall()` is the explicit user-consent path used by the install
+ * panel: it allows exactly one managed start even when lifecycle is `attach`,
+ * is single-flight with the normal start, and never touches an external
+ * daemon/service. `retry()` repeats that explicit start (or a read-only inspect
+ * when starting is not allowed).
  *
  * @param {{
  *   config?: unknown,
@@ -694,56 +3769,49 @@ function safeLog(logger, level, message) {
  *   fetchImpl?: typeof fetch,
  *   spawnFn?: typeof spawn,
  *   resolveCli?: (context: { config: ReturnType<typeof resolveConfig> }) => string | null,
+ *   discoverProviders?: typeof discoverRuntimeProviders,
+ *   runResolve?: (context: Record<string, unknown>) => Promise<{ ok: boolean, data?: Record<string, unknown> | null, error?: string }>,
+ *   startSupervise?: (context: Record<string, unknown>) => unknown,
  *   exists?: (file: string) => boolean,
+ *   cloudRoot?: string,
+ *   registry?: unknown,
+ *   includeStandardApp?: boolean,
  *   env?: Record<string, string | undefined>,
+ *   userHome?: string,
  *   home?: string,
  *   runtime?: unknown,
  *   pidAlive?: (pid: number) => boolean,
  *   platform?: string,
+ *   execPath?: string,
  *   now?: () => number,
  *   sleep?: (ms: number) => Promise<unknown>,
  *   timeoutMs?: number,
+ *   resolveTimeoutMs?: number,
  *   cacheTtlMs?: number,
  *   startTimeoutMs?: number,
  *   pollIntervalMs?: number,
- *   killGraceMs?: number,
+ *   superviseStopGraceMs?: number,
  * }} [options]
  * @returns {{
- *   start: () => Promise<{
- *     status: 'up' | 'down' | 'starting',
- *     mode: 'attach' | 'managed',
- *     managed: boolean,
- *     reason: string | null,
- *     reachable: boolean,
- *     health: Record<string, unknown> | null,
- *     embed: Record<string, unknown> | null,
- *   }>,
- *   inspect: () => Promise<{
- *     status: 'up' | 'down' | 'starting',
- *     mode: 'attach' | 'managed',
- *     managed: boolean,
- *     reason: string | null,
- *     reachable: boolean,
- *     health: Record<string, unknown> | null,
- *     embed: Record<string, unknown> | null,
- *   }>,
+ *   start: () => Promise<Record<string, unknown>>,
+ *   startAfterInstall: () => Promise<Record<string, unknown>>,
+ *   retry: () => Promise<Record<string, unknown>>,
+ *   inspect: () => Promise<Record<string, unknown>>,
  *   refresh: () => Promise<unknown>,
  *   dispose: () => void,
- *   getState: () => {
- *     status: 'up' | 'down' | 'starting',
- *     mode: 'attach' | 'managed',
- *     managed: boolean,
- *     reason: string | null,
- *     reachable: boolean,
- *     health: Record<string, unknown> | null,
- *     embed: Record<string, unknown> | null,
- *   },
+ *   getState: () => Record<string, unknown>,
  * }}
  */
 export function createDaemonLifecycle(options = {}) {
   const opts = isObject(options) ? options : {};
   const env = isObject(opts.env) ? opts.env : process.env;
   const platform = typeof opts.platform === 'string' ? opts.platform : process.platform;
+  const execPath = typeof opts.execPath === 'string' && opts.execPath.length > 0
+    ? opts.execPath
+    : process.execPath;
+  const userHome = typeof opts.userHome === 'string' && opts.userHome.length > 0
+    ? opts.userHome
+    : homedir();
   const configOptions = { warn: opts.warn, env };
   if (opts.home !== undefined) configOptions.home = opts.home;
   if (opts.runtime !== undefined) configOptions.runtime = opts.runtime;
@@ -760,6 +3828,9 @@ export function createDaemonLifecycle(options = {}) {
     });
   const fetchImpl = opts.fetchImpl ?? globalThis.fetch;
   const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : DEFAULT_PROBE_TIMEOUT_MS;
+  const resolveTimeoutMs = Number.isFinite(opts.resolveTimeoutMs)
+    ? opts.resolveTimeoutMs
+    : DEFAULT_RESOLVE_TIMEOUT_MS;
   const cacheTtlMs = Number.isFinite(opts.cacheTtlMs) ? opts.cacheTtlMs : DEFAULT_CACHE_TTL_MS;
   const startTimeoutMs = Number.isFinite(opts.startTimeoutMs)
     ? opts.startTimeoutMs
@@ -767,53 +3838,326 @@ export function createDaemonLifecycle(options = {}) {
   const pollIntervalMs = Number.isFinite(opts.pollIntervalMs)
     ? opts.pollIntervalMs
     : DEFAULT_MANAGED_POLL_INTERVAL_MS;
-  const killGraceMs = Number.isFinite(opts.killGraceMs)
-    ? Math.max(0, opts.killGraceMs)
-    : DEFAULT_MANAGED_KILL_GRACE_MS;
+  const superviseStopGraceMs = Number.isFinite(opts.superviseStopGraceMs)
+    ? Math.max(0, opts.superviseStopGraceMs)
+    : DEFAULT_SUPERVISE_STOP_GRACE_MS;
   const logHome = typeof opts.home === 'string' && opts.home.length > 0 ? opts.home : mebularHome(env);
   const logger = isObject(opts.logger) ? opts.logger : null;
-  const resolveCli = typeof opts.resolveCli === 'function'
-    ? opts.resolveCli
-    : () => resolveCliPath({
-      cliPath: config.cliPath,
-      env,
-      platform,
-      exists: opts.exists,
-    });
+  const exists = typeof opts.exists === 'function' ? opts.exists : existsSync;
+  const discoverProviders = typeof opts.discoverProviders === 'function'
+    ? opts.discoverProviders
+    : discoverRuntimeProviders;
+  const legacyResolveCli = typeof opts.resolveCli === 'function' ? opts.resolveCli : null;
+  const runResolveFn = typeof opts.runResolve === 'function'
+    ? opts.runResolve
+    : async (context) => {
+      try {
+        const result = await runRuntimeJson({
+          cliPath: context?.provider?.path,
+          command: ['resolve'],
+          spawnFn,
+          env: context?.env ?? env,
+          platform: context?.platform ?? platform,
+          execPath: context?.execPath ?? execPath,
+          timeoutMs: Number.isFinite(context?.timeoutMs) ? context.timeoutMs : resolveTimeoutMs,
+        });
+        return isObject(result) ? result : { ok: false, error: 'resolve_failed' };
+      } catch {
+        return { ok: false, error: 'resolve_failed' };
+      }
+    };
+  const startSupervise = typeof opts.startSupervise === 'function'
+    ? opts.startSupervise
+    : (context) => {
+      const handle = startSuperviseProcess({
+        cliPath: context?.provider?.path,
+        scriptArgs: Array.isArray(context?.scriptArgs) ? context.scriptArgs : [],
+        spawnFn,
+        env: context?.env ?? env,
+        platform: context?.platform ?? platform,
+        execPath: context?.execPath ?? execPath,
+        stopGraceMs: Number.isFinite(context?.stopGraceMs) ? context.stopGraceMs : superviseStopGraceMs,
+        wait: sleep,
+        logLine: (level, line) => log(level, redactLogLine(line, {
+          home: logHome,
+          cliPath: typeof context?.provider?.path === 'string' ? context.provider.path : undefined,
+        })),
+      });
+      if (handle.error) log('warn', `runtime supervise failed to spawn (${handle.error})`);
+      return handle;
+    };
+  const updateCheckTimeoutMs = Number.isFinite(opts.updateCheckTimeoutMs)
+    ? Math.max(250, opts.updateCheckTimeoutMs)
+    : DEFAULT_UPDATE_CHECK_TIMEOUT_MS;
+  const updateCloudRoot = typeof opts.cloudRoot === 'string' && opts.cloudRoot.length > 0
+    ? opts.cloudRoot
+    : runtimeCloudRoot({ env, userHome });
+  const updateCliEnv = { ...env, MEBULAR_CLOUD_ROOT: updateCloudRoot };
+  const runUpdateCheckFn = typeof opts.runUpdateCheck === 'function'
+    ? opts.runUpdateCheck
+    : async (context) => {
+      try {
+        return await runRuntimeJson({
+          cliPath: context?.provider?.path,
+          command: ['check-update'],
+          spawnFn,
+          env: updateCliEnv,
+          platform: context?.platform ?? platform,
+          execPath: context?.execPath ?? execPath,
+          timeoutMs: updateCheckTimeoutMs,
+        });
+      } catch {
+        return { ok: false, error: 'check_failed' };
+      }
+    };
 
-  let mode = config.lifecycle;
-  let phase = config.lifecycle === 'managed' ? 'starting' : 'down';
-  let managed = false;
-  let child = null;
-  let childState = 'none';
-  /** @type {Promise<unknown> | null} */
-  let terminating = null;
-  let terminatingChild = null;
-  let failureReason = null;
+  const allowStart = (config.lifecycle === 'managed' || config.lifecycle === 'auto')
+    && config.runtime !== 'external'
+    && config.pinnedDaemonUrl !== true;
+  const mode = allowStart ? 'managed' : 'attach';
+
+  let phase = 'down';
+  let state = 'down';
+  let reason = null;
+  let downloadRequired = false;
+  let profile = null;
+  let provider = null;
+  let service = null;
+  let version = null;
+  let runtimeMode = null;
+  let daemonUrl = config.daemonUrl;
   let health = null;
   let embed = null;
   let reachable = false;
+  let managed = false;
+  let superviseOwned = false;
+  let superviseHandle = null;
   let lastProbeAt = -Infinity;
   /** @type {Promise<unknown> | null} */
   let probing = null;
   /** @type {Promise<unknown> | null} */
   let startPromise = null;
+  /** Explicit user consent (install/redetect) allows one managed start on attach. */
+  let startOnce = false;
+  /** @type {Promise<unknown> | null} */
+  let disposal = null;
   let disposed = false;
+  /** @type {{ state: string, reason: string | null } | null} */
+  let sticky = null;
+  /** Shared update summary (non-sensitive). */
+  let updateState = sanitizeRuntimeUpdateState({ state: 'idle' });
+  /** @type {Promise<unknown> | null} */
+  let updateTask = null;
+  /** Version whose banner was confirmed via the explicit `prompted` POST. */
+  let updatePromptVersion = null;
 
   function log(level, message) {
     safeLog(logger, level, message);
   }
 
-  function currentSnapshot() {
+  if (config.pinnedDaemonUrl) {
+    log('info', 'daemonUrl is pinned; lifecycle is attach-only');
+  } else if (config.lifecycle !== 'attach' && config.runtime === 'external') {
+    log('info', 'runtime is external; lifecycle is attach-only');
+  }
+
+  function snapshot() {
     return {
       status: phase,
+      state: phase === 'up' ? 'up' : state,
       mode,
-      managed: managed && childState === 'running' && !disposed,
-      reason: phase === 'down' ? failureReason : null,
+      runtimeMode,
+      managed: managed && superviseOwned && !disposed,
+      reason: phase === 'up' ? null : reason,
       reachable: phase === 'up' ? true : reachable,
       health,
       embed,
+      daemonUrl,
+      profile,
+      provider,
+      service,
+      version,
+      downloadRequired,
+      update: updateState,
     };
+  }
+
+  function publishUpdate(patch) {
+    updateState = sanitizeRuntimeUpdateState({ ...updateState, ...patch });
+    return updateState;
+  }
+
+  /**
+   * Presentation view for `/mebular/embed-info`, which is strictly read-only.
+   * `auto:true` means "this entry has not been prompted yet"; only the client,
+   * after actually rendering the banner, confirms through POST action
+   * `prompted`. A shared prompted version still exposes `manual`, which the
+   * panel renders as an explicit update action.
+   */
+  function presentUpdate() {
+    const view = { ...updateState, show: false, auto: false, manual: false };
+    const latest = updateState.latestVersion;
+    if (!updateState.available || updateState.skipped || latest === null) return view;
+    view.manual = true;
+    if (updatePromptVersion === latest) {
+      view.show = true;
+      return view;
+    }
+    if (updateState.prompted === true) return view;
+    view.show = true;
+    view.auto = true;
+    return view;
+  }
+
+  /** Called only after the explicit `prompted` action persisted successfully. */
+  function markUpdatePrompted(version) {
+    if (typeof version !== 'string' || updateState.latestVersion !== version) return updateState;
+    updatePromptVersion = version;
+    updateState = sanitizeRuntimeUpdateState({
+      ...updateState,
+      prompted: true,
+      promptedVersion: version,
+      promptedAt: new Date().toISOString(),
+    });
+    return updateState;
+  }
+
+  /**
+   * Non-blocking shared update check through the selected CLI. No provider/CLI
+   * means a silent skip; the 24h TTL/offline/busy handling lives in core.
+   */
+  function refreshUpdate() {
+    if (disposed) return Promise.resolve(updateState);
+    if (updateTask !== null) return updateTask;
+    updateTask = (async () => {
+      if (config.pinnedDaemonUrl === true) {
+        return publishUpdate({ state: 'disabled', reason: 'daemon_url_pinned', available: false, show: false, manual: false });
+      }
+      const existingProvider = isObject(provider) && typeof provider.path === 'string' && exists(provider.path)
+        ? provider
+        : null;
+      const cliProvider = existingProvider ?? await resolveProvider();
+      if (disposed) return updateState;
+      if (cliProvider === null
+        || typeof cliProvider.path !== 'string'
+        || !exists(cliProvider.path)) {
+        return publishUpdate({ state: 'disabled', reason: 'no_provider', available: false, show: false, manual: false });
+      }
+      publishUpdate({ state: 'checking', reason: null });
+      const result = await runUpdateCheckFn({
+        provider: cliProvider,
+        config,
+        env,
+        platform,
+        execPath,
+        spawnFn,
+        timeoutMs: updateCheckTimeoutMs,
+      });
+      if (disposed) return updateState;
+      const data = isObject(result?.data) ? result.data : null;
+      if (result?.ok !== true || data === null || data.ok !== true) {
+        return publishUpdate({
+          state: 'unknown',
+          reason: sanitizeReason(data?.reason ?? data?.status ?? result?.error) ?? 'check_failed',
+          failureReason: sanitizeReason(data?.failureReason ?? data?.reason ?? result?.error) ?? 'check_failed',
+          currentVersion: sanitizeVersion(data?.currentVersion),
+          latestVersion: sanitizeVersion(data?.latestVersion),
+          available: false,
+          skipped: data?.skipped === true,
+          prompted: data?.prompted === true,
+          promptedVersion: sanitizeVersion(data?.promptedVersion),
+          checkedAt: sanitizeTime(data?.checkedAt),
+          show: false,
+          manual: false,
+        });
+      }
+      const latestVersion = sanitizeVersion(data.latestVersion);
+      const skipped = data.skipped === true;
+      const available = data.available === true && !skipped;
+      const prompted = data.prompted === true
+        || (latestVersion !== null && sanitizeVersion(data.promptedVersion) === latestVersion);
+      return publishUpdate({
+        state: available ? 'available' : skipped ? 'skipped' : data.decision === 'up_to_date' ? 'up_to_date' : 'idle',
+        reason: sanitizeReason(data.reason),
+        failureReason: null,
+        currentVersion: sanitizeVersion(data.currentVersion),
+        latestVersion,
+        promptedVersion: sanitizeVersion(data.promptedVersion),
+        available,
+        skipped,
+        prompted,
+        checkedAt: sanitizeTime(data.checkedAt),
+        promptedAt: sanitizeTime(data.promptedAt),
+        show: false,
+        manual: false,
+      });
+    })().catch(() => updateState).finally(() => {
+      updateTask = null;
+    });
+    return updateTask;
+  }
+
+  function scheduleUpdateCheck() {
+    if (disposed) return;
+    Promise.resolve().then(() => refreshUpdate()).catch(() => {});
+  }
+
+  function markDownloadRequired() {
+    if (config.bootstrap === 'never') {
+      downloadRequired = false;
+      phase = 'down';
+      state = 'down';
+      reason = null;
+      sticky = { state: 'down', reason: null };
+      return;
+    }
+    downloadRequired = true;
+    phase = 'down';
+    state = 'download_required';
+    reason = 'download_required';
+    sticky = { state: 'download_required', reason: 'download_required' };
+  }
+
+  function applyResolve(data) {
+    if (!isObject(data)) return;
+    if (config.pinnedDaemonUrl !== true) {
+      const url = daemonUrlFromHttp(data.http);
+      if (url !== null) daemonUrl = url;
+    }
+    const nextProfile = sanitizeProfile(data.profile);
+    if (nextProfile !== null) profile = nextProfile;
+    else if (typeof data.profileId === 'string' && data.profileId.length > 0) {
+      profile = { id: data.profileId, name: null };
+    } else {
+      profile = null;
+    }
+    service = sanitizeService(data.service);
+    const nextProvider = sanitizeProvider(data.providers?.selected ?? data.provider);
+    if (nextProvider !== null) provider = nextProvider;
+    if (typeof data.version === 'string' && data.version.length > 0) version = data.version;
+  }
+
+  function applyFailure(data) {
+    if (!isObject(data)) {
+      phase = 'down';
+      state = 'down';
+      reason = 'runtime_error';
+      sticky = { state, reason };
+      return;
+    }
+    applyResolve(data);
+    const next = failureState(data);
+    if (next.download === true) {
+      markDownloadRequired();
+      log('warn', 'no Mebular runtime provider; download_required (no download, no spawn)');
+      return;
+    }
+    downloadRequired = false;
+    phase = 'down';
+    state = next.state;
+    reason = next.reason;
+    sticky = { state, reason };
+    log('warn', `shared runtime unavailable (${reason ?? 'unknown'})`);
   }
 
   function applyProbe(result) {
@@ -825,22 +4169,33 @@ export function createDaemonLifecycle(options = {}) {
 
     if (reachable) {
       phase = 'up';
-      failureReason = null;
-      if (childState !== 'running') managed = false;
+      state = 'up';
+      reason = null;
+      sticky = null;
+      downloadRequired = false;
+      if (typeof health?.version === 'string' && health.version.length > 0) version = health.version;
+      if (!superviseOwned) managed = false;
       return;
     }
     if (phase === 'starting') return;
     phase = 'down';
-    if (childState === 'exited' && mode === 'managed') {
-      failureReason = 'managed_start_failed';
-    } else if (failureReason !== 'managed_cli_missing' && failureReason !== 'managed_start_failed') {
-      failureReason = null;
+    if (sticky !== null) {
+      state = sticky.state;
+      reason = sticky.reason;
+      return;
     }
+    if (downloadRequired) {
+      state = 'download_required';
+      reason = 'download_required';
+      return;
+    }
+    state = 'down';
+    reason = null;
   }
 
   async function runProbe() {
     try {
-      const result = await probe({ daemonUrl: config.daemonUrl, fetchImpl, timeoutMs });
+      const result = await probe({ daemonUrl, fetchImpl, timeoutMs });
       return isObject(result) ? result : { reachable: false, health: null, embed: null };
     } catch {
       return { reachable: false, health: null, embed: null };
@@ -852,144 +4207,132 @@ export function createDaemonLifecycle(options = {}) {
     probing = (async () => {
       const result = await runProbe();
       if (!disposed) applyProbe(result);
-      return currentSnapshot();
+      return snapshot();
     })().finally(() => {
       probing = null;
     });
     return probing;
   }
 
-  function wireOutput(stream, level, cliPath) {
-    if (stream === null || typeof stream !== 'object' || typeof stream.on !== 'function') return;
-    try {
-      stream.on('data', (chunk) => {
-        const text = String(chunk ?? '');
-        const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 20);
-        for (const line of lines) {
-          log(level, `managed daemon: ${redactLogLine(line, { home: logHome, cliPath })}`);
-        }
-      });
-    } catch {
-      // A broken stream must not break the lifecycle.
+  async function inspect() {
+    if (disposed) return snapshot();
+    if (phase === 'starting') return snapshot();
+    if (probing !== null) {
+      await probing;
+      return snapshot();
     }
+    if (now() - lastProbeAt < cacheTtlMs) return snapshot();
+    await refresh();
+    return snapshot();
   }
 
-  function startChild(cliPath) {
-    const port = daemonPortFromUrl(config.daemonUrl);
-    const args = ['serve', '--port', String(port)];
-    // Node cannot execute .cmd/.bat directly on Windows. The args are fixed and
-    // the CLI path comes from local config/PATH, so shell quoting is not an
-    // injection surface. Other platforms keep direct exec.
-    const shell = platform === 'win32' && /\.(?:cmd|bat)$/i.test(cliPath);
-    let proc;
-    try {
-      // Inherit the process environment: the Mebular CLI resolves its own home.
-      proc = spawnFn(cliPath, args, {
-        env: { ...env },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        windowsHide: true,
-        ...(shell ? { shell: true } : {}),
-      });
-    } catch (error) {
-      log('warn', `managed daemon failed to spawn (${safeErrorCode(error)})`);
-      return false;
+  async function resolveProvider() {
+    if (legacyResolveCli !== null) {
+      try {
+        return providerFromCliPath(legacyResolveCli({ config }));
+      } catch {
+        log('warn', 'runtime provider resolution failed; falling back to attach');
+        return null;
+      }
     }
-    if (proc === null || typeof proc !== 'object') {
-      log('warn', 'managed daemon failed to spawn (no_child_process)');
-      return false;
-    }
-
-    child = proc;
-    childState = 'running';
-    managed = true;
-    // Never log the CLI path or the Mebular home.
-    log('info', `managed daemon started on port ${port}`);
-
-    const markExited = (event, detail) => {
-      if (childState === 'exited') return;
-      childState = 'exited';
-      managed = false;
-      if (disposed) return;
-      if (phase !== 'starting') phase = 'down';
-      log('warn', `managed daemon ${event}${detail ? `: ${detail}` : ''}`);
-    };
-
+    const discoveryOptions = { env, platform, userHome, cliPath: config.cliPath };
+    if (opts.exists !== undefined) discoveryOptions.exists = opts.exists;
+    if (opts.cloudRoot !== undefined) discoveryOptions.cloudRoot = opts.cloudRoot;
+    if (opts.registry !== undefined) discoveryOptions.registry = opts.registry;
+    if (opts.includeStandardApp !== undefined) discoveryOptions.includeStandardApp = opts.includeStandardApp;
+    let discovery;
     try {
-      proc.once?.('error', (error) => markExited('failed', safeErrorCode(error)));
-      proc.once?.('exit', (code, signal) => {
-        markExited('exited', signal ? `signal ${signal}` : `code ${code}`);
-      });
+      discovery = await discoverProviders(discoveryOptions);
     } catch {
-      // Event wiring failure is handled by the health wait and timeout.
+      return null;
     }
-    wireOutput(proc.stdout, 'info', cliPath);
-    wireOutput(proc.stderr, 'warn', cliPath);
-    return true;
-  }
-
-  function signalChild(proc, signal) {
-    try {
-      proc.kill(signal);
-    } catch (error) {
-      log('warn', `failed to signal managed daemon (${safeErrorCode(error)})`);
-    }
+    return isObject(discovery?.selected) ? discovery.selected : null;
   }
 
   /**
-   * Terminate a child this lifecycle started: SIGTERM, then SIGKILL after the
-   * grace period. Resolves when the process exits or the escalation completes.
-   * @param {unknown} proc
+   * Stop one plugin-owned supervise process and verify it really exited.
+   * A `stopped:false` result is never silent: it is logged and reflected in the
+   * lifecycle reason so the panel does not claim a clean shutdown.
    */
-  function terminateChild(proc) {
-    if (proc === null || typeof proc !== 'object') return Promise.resolve();
-    if (terminatingChild === proc && terminating !== null) return terminating;
-    terminatingChild = proc;
-    terminating = new Promise((resolve) => {
-      let settled = false;
-      /** @type {ReturnType<typeof setTimeout> | null} */
-      let timer = null;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        if (timer !== null) clearTimeout(timer);
-        try {
-          proc.removeListener?.('exit', onExit);
-        } catch {
-          // Listener cleanup must never block disposal.
-        }
-        resolve();
-      };
-      const onExit = () => finish();
-      try {
-        proc.once?.('exit', onExit);
-      } catch {
-        // The timeout below still escalates.
-      }
-      signalChild(proc, 'SIGTERM');
-      timer = setTimeout(() => {
-        if (settled) return;
-        log('warn', `managed daemon did not exit after SIGTERM within ${killGraceMs}ms; sending SIGKILL`);
-        signalChild(proc, 'SIGKILL');
-        finish();
-      }, killGraceMs);
-      timer.unref?.();
-    });
-    return terminating;
+  async function stopHandle(handle) {
+    if (!isObject(handle) || typeof handle.stop !== 'function') {
+      return { stopped: true, reason: 'not_running' };
+    }
+    let result;
+    try {
+      result = await handle.stop({ graceMs: superviseStopGraceMs });
+    } catch {
+      log('warn', 'failed to stop runtime supervise');
+      result = { stopped: false, reason: 'stop_failed' };
+    }
+    const alreadyExited = result?.reason === 'already_exited'
+      || handle.getState?.().exited === true;
+    if (result?.stopped !== true && !alreadyExited) {
+      phase = 'down';
+      state = 'down';
+      reason = 'supervise_stop_failed';
+      sticky = { state, reason };
+      log(
+        'warn',
+        `runtime supervise did not confirm exit (${result?.reason ?? 'still_running'}) after ${superviseStopGraceMs}ms; a supervise/child process may remain`,
+      );
+    }
+    return result;
   }
 
-  async function stopOwnedChild() {
-    const proc = child;
-    if (proc === null) return;
-    if (childState !== 'running') {
-      child = null;
-      return;
-    }
-    await terminateChild(proc);
-    if (child === proc) {
-      child = null;
-      childState = 'exited';
-    }
+  async function stopSupervise() {
+    const handle = superviseHandle;
+    if (handle === null) return { stopped: true, reason: 'not_running' };
+    superviseHandle = null;
+    const owned = superviseOwned;
+    superviseOwned = false;
     managed = false;
+    if (!owned) return { stopped: true, reason: 'not_owned' };
+    return stopHandle(handle);
+  }
+
+  /**
+   * Stop only the supervise process this plugin owns, and only when it owns a
+   * child daemon. A reused/service daemon is external and is never signalled by
+   * the plugin; the shared `runtime upgrade` path updates/restarts its service.
+   */
+  async function stopOwnedChild() {
+    if (!superviseOwned || superviseHandle === null || runtimeMode !== 'child') {
+      return { stopped: true, stoppedOwned: false, runtimeMode };
+    }
+    const result = await stopSupervise();
+    return {
+      stopped: result?.stopped === true,
+      stoppedOwned: true,
+      runtimeMode,
+      reason: result?.reason ?? null,
+    };
+  }
+
+  function watchSupervise(handle) {
+    if (!isObject(handle) || typeof handle.exited?.then !== 'function') return;
+    handle.exited.then((exit) => {
+      if (disposed) return;
+      superviseOwned = false;
+      managed = false;
+      // A service/reused supervise exits after its ready JSON: normal.
+      if (runtimeMode !== 'child') return;
+      phase = 'down';
+      state = 'down';
+      reason = 'child_exited';
+      sticky = { state: 'down', reason: 'child_exited' };
+      log('warn', `runtime supervise exited (${exit?.code ?? exit?.signal ?? 'unknown'}) before the child stayed healthy`);
+    }).catch(() => {});
+  }
+
+  async function awaitReady(handle) {
+    const timeout = new Promise((resolve) => {
+      const timer = setTimeout(() => resolve({ timedOut: true }), startTimeoutMs);
+      timer.unref?.();
+    });
+    const settled = Promise.resolve(handle.ready)
+      .then((value) => ({ value }), () => ({ value: null }));
+    return Promise.race([settled, timeout]);
   }
 
   async function waitForManagedHealth() {
@@ -999,113 +4342,338 @@ export function createDaemonLifecycle(options = {}) {
       if (disposed) return;
       applyProbe(result);
       if (reachable) return;
-      if (childState === 'exited') {
-        await stopOwnedChild();
-        if (disposed) return;
+      const exited = typeof superviseHandle?.getState === 'function'
+        ? superviseHandle.getState()?.exited === true
+        : !superviseOwned;
+      if (exited) {
         phase = 'down';
-        failureReason = 'managed_start_failed';
-        log('warn', 'managed daemon exited before becoming healthy');
+        state = 'down';
+        reason = 'managed_start_failed';
+        sticky = { state, reason };
         return;
       }
       if (now() >= deadline) {
-        log('warn', `managed daemon did not become healthy within ${startTimeoutMs}ms`);
-        // Only the child spawned above is stopped; an external daemon is never
-        // touched here because child is null in attach-after-reuse paths.
-        await stopOwnedChild();
+        log('warn', `runtime supervise did not become healthy within ${startTimeoutMs}ms`);
+        await stopSupervise();
         if (disposed) return;
         phase = 'down';
-        failureReason = 'managed_start_failed';
+        state = 'down';
+        reason = 'managed_start_failed';
+        sticky = { state, reason };
         return;
       }
       await sleep(pollIntervalMs);
     }
   }
 
+  async function waitForDaemonUp() {
+    const deadline = now() + startTimeoutMs;
+    while (!disposed) {
+      const result = await runProbe();
+      if (disposed) return;
+      applyProbe(result);
+      if (reachable) return;
+      if (now() >= deadline) return;
+      await sleep(pollIntervalMs);
+    }
+  }
+
   async function ensureManaged() {
-    const initial = await runProbe();
+    if (config.pinnedDaemonUrl) {
+      await refresh();
+      return;
+    }
+    const cliProvider = await resolveProvider();
     if (disposed) return;
-    applyProbe(initial);
-    if (reachable) {
-      log('info', 'reusing an existing Mebular daemon');
+    if (cliProvider === null) {
+      await refresh();
+      if (!disposed && !reachable) markDownloadRequired();
       return;
     }
 
-    let cli = null;
-    try {
-      cli = resolveCli({ config });
-    } catch {
-      log('warn', 'managed CLI resolution failed; falling back to attach');
+    const resolved = await runResolveFn({ provider: cliProvider, config, env, platform, execPath, spawnFn, timeoutMs: resolveTimeoutMs });
+    if (disposed) return;
+    if (resolved.ok !== true || !isObject(resolved.data)) {
+      await refresh();
+      if (!reachable && !disposed) {
+        phase = 'down';
+        state = 'down';
+        reason = 'runtime_resolve_failed';
+        sticky = { state, reason };
+        log('warn', `runtime resolve failed (${resolved.error ?? 'unknown'})`);
+      }
+      return;
     }
-    const cliPath = typeof cli === 'string' && cli.trim().length > 0 ? cli.trim() : null;
-    if (cliPath === null) {
-      mode = 'attach';
-      phase = 'down';
-      failureReason = 'managed_cli_missing';
-      log('warn', 'managed lifecycle requested but no Mebular CLI was found; falling back to attach');
+
+    const data = resolved.data;
+    applyResolve(data);
+    if (provider === null) provider = sanitizeProvider(cliProvider);
+    if (data.mode === 'reused') {
+      await refresh();
+      return;
+    }
+    if (data.mode !== 'child' && data.mode !== 'service') {
+      applyFailure(data);
       return;
     }
 
     phase = 'starting';
-    failureReason = null;
-    if (!startChild(cliPath)) {
-      phase = 'down';
-      failureReason = 'managed_start_failed';
+    state = 'starting';
+    reason = 'provisioning';
+    managed = false;
+    const handle = await startSupervise({
+      provider: cliProvider,
+      config,
+      env,
+      platform,
+      execPath,
+      spawnFn,
+      stopGraceMs: superviseStopGraceMs,
+      scriptArgs: config.persistence === 'service' ? ['--start', 'service'] : [],
+    });
+    if (disposed) {
+      await stopHandle(handle);
       return;
     }
-    await waitForManagedHealth();
+    if (!isObject(handle)) {
+      phase = 'down';
+      state = 'down';
+      reason = 'supervise_failed';
+      sticky = { state, reason };
+      return;
+    }
+    superviseHandle = handle;
+    superviseOwned = true;
+
+    const readyResult = await awaitReady(handle);
+    if (disposed) {
+      await stopSupervise();
+      return;
+    }
+    if (isObject(readyResult) && readyResult.timedOut === true) {
+      log('warn', `runtime supervise did not report ready within ${startTimeoutMs}ms`);
+      await stopSupervise();
+      if (disposed) return;
+      phase = 'down';
+      state = 'down';
+      reason = 'managed_start_failed';
+      sticky = { state, reason };
+      return;
+    }
+
+    const ready = isObject(readyResult) ? readyResult.value : null;
+    const readyData = isObject(ready?.data) ? ready.data : null;
+    if (readyData === null) {
+      await refresh();
+      if (!reachable && !disposed) {
+        phase = 'down';
+        state = 'down';
+        reason = ready?.exited === true ? 'supervise_failed' : 'managed_start_failed';
+        sticky = { state, reason };
+      }
+      return;
+    }
+
+    applyResolve(readyData);
+    runtimeMode = readyData.mode === 'child'
+      ? 'child'
+      : readyData.mode === 'service' ? 'service' : 'reused';
+
+    if (readyData.ok !== true) {
+      if (readyData.mode === 'reused') {
+        await refresh();
+        return;
+      }
+      applyFailure(readyData);
+      await stopSupervise();
+      return;
+    }
+
+    watchSupervise(handle);
+    managed = runtimeMode === 'child';
+    if (runtimeMode === 'child') {
+      await waitForManagedHealth();
+      if (!reachable && !disposed) await stopSupervise();
+      return;
+    }
+
+    // service/reused: the ready JSON is authoritative; the supervise process
+    // exits normally. Wait briefly for /healthz to confirm, never spawn again.
+    await waitForDaemonUp();
+    if (!reachable && !disposed) {
+      phase = 'down';
+      state = 'down';
+      reason = runtimeMode === 'service' ? 'service_start_failed' : 'managed_start_failed';
+      sticky = { state, reason };
+    }
+  }
+
+  async function ensureAttach() {
+    if (config.pinnedDaemonUrl) {
+      await refresh();
+      return;
+    }
+    const cliProvider = await resolveProvider();
+    if (disposed) return;
+    if (cliProvider === null) {
+      await refresh();
+      if (!disposed && !reachable) markDownloadRequired();
+      return;
+    }
+
+    const resolved = await runResolveFn({ provider: cliProvider, config, env, platform, execPath, spawnFn, timeoutMs: resolveTimeoutMs });
+    if (disposed) return;
+    if (resolved.ok === true && isObject(resolved.data)) {
+      const data = resolved.data;
+      applyResolve(data);
+      if (provider === null) provider = sanitizeProvider(cliProvider);
+      await refresh();
+      if (reachable || disposed) return;
+      if (data.mode === 'download_required' || data.mode === 'conflict' || data.mode === 'error') {
+        applyFailure(data);
+        return;
+      }
+      // child/service: a runtime is installed but not running. Attach never
+      // starts it; the panel asks the user to open Mebular.
+      downloadRequired = false;
+      phase = 'down';
+      state = 'down';
+      reason = null;
+      sticky = { state: 'down', reason: null };
+      return;
+    }
+
+    await refresh();
+    if (!reachable && !disposed) {
+      phase = 'down';
+      state = 'down';
+      reason = 'runtime_resolve_failed';
+      sticky = { state, reason };
+    }
   }
 
   function start() {
-    if (startPromise !== null) return startPromise;
-    if (disposed) return Promise.resolve(currentSnapshot());
-    startPromise = (async () => {
+    const started = beginStart(allowStart);
+    started.then(() => scheduleUpdateCheck()).catch(() => {});
+    return started;
+  }
+
+  /**
+   * Explicit user-consented managed start. `lifecycle: attach` still never
+   * starts on activation; only this call (install/redetect/retry) opts in for
+   * one start. It re-resolves providers first, so a daemon that appeared in the
+   * meantime is reused instead of duplicated. `restartOwned` stops only the
+   * supervise process this plugin owns before starting the replaced runtime.
+   * @param {{ restartOwned?: boolean }} [options]
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  async function startAfterInstall(options = {}) {
+    if (disposed) return snapshot();
+    if (config.pinnedDaemonUrl || config.runtime === 'external' || config.bootstrap === 'never') {
+      await refresh();
+      return snapshot();
+    }
+    startOnce = true;
+    sticky = null;
+    if (startPromise !== null) {
       try {
-        if (config.lifecycle === 'managed') await ensureManaged();
-        else await refresh();
+        await startPromise;
+      } catch {
+        // A failed attach/start is retried explicitly below.
+      }
+    }
+    if (disposed) return snapshot();
+    if (options?.restartOwned === true && superviseOwned && managed) {
+      await stopSupervise();
+      if (disposed) return snapshot();
+    }
+    const result = await beginStart(true);
+    scheduleUpdateCheck();
+    return result;
+  }
+  /**
+   * Retry an explicitly allowed start after a failure. Attach-only lifecycles
+   * without prior consent stay read-only and just re-inspect.
+   * @returns {Promise<Record<string, unknown>>}
+   */
+  function retry() {
+    if (disposed) return Promise.resolve(snapshot());
+    if (!allowStart && !startOnce) {
+      scheduleUpdateCheck();
+      return inspect();
+    }
+    sticky = null;
+    return startAfterInstall();
+  }
+
+  function beginStart(forceManaged) {
+    if (startPromise !== null) return startPromise;
+    if (disposed) return Promise.resolve(snapshot());
+    const run = (async () => {
+      try {
+        if (forceManaged) await ensureManaged();
+        else await ensureAttach();
       } catch (error) {
         log('warn', `lifecycle start failed (${safeErrorCode(error)})`);
-        // A thrown start path must not leave an owned child behind. This never
-        // touches a daemon the plugin did not spawn.
-        await stopOwnedChild();
+        // A thrown start path must not leave an owned supervise process behind.
+        await stopSupervise();
+        if (disposed) return snapshot();
         phase = 'down';
-        failureReason = mode === 'managed' ? 'managed_start_failed' : null;
+        state = 'down';
+        reason = forceManaged ? 'managed_start_failed' : null;
+        if (reason !== null) sticky = { state, reason };
       }
-      return currentSnapshot();
+      return snapshot();
     })();
-    return startPromise;
+    const tracked = run.finally(() => {
+      if (startPromise === tracked) startPromise = null;
+    });
+    startPromise = tracked;
+    return tracked;
   }
 
-  async function inspect() {
-    if (disposed) return currentSnapshot();
-    if (phase === 'starting') return currentSnapshot();
-    if (probing !== null) {
-      await probing;
-      return currentSnapshot();
-    }
-    if (now() - lastProbeAt < cacheTtlMs) return currentSnapshot();
-    await refresh();
-    return currentSnapshot();
-  }
-
+  /**
+   * Idempotent async disposal. Callers may ignore the promise, but DSH unload
+   * awaits it so the supervise process (and the child it owns) is cleaned up.
+   * Repeated calls return the same promise and never signal twice.
+   * @returns {Promise<unknown>}
+   */
   function dispose() {
-    const proc = child;
-    const running = proc !== null && childState === 'running';
+    if (disposal !== null) return disposal;
     disposed = true;
-    child = null;
-    childState = 'exited';
     managed = false;
     phase = 'down';
-    // SIGTERM now, SIGKILL after killGraceMs. termination is intentionally not
-    // awaited: DSH disposal is synchronous, and the timer still escalates.
-    if (running) void terminateChild(proc);
+    disposal = (async () => {
+      // Signal an already-assigned supervise immediately; waiting for the
+      // start promise first could delay cleanup by the full start timeout.
+      const immediateStop = stopSupervise();
+      // Wait for an in-flight start so a supervise spawned during disposal is
+      // still observed and stopped.
+      if (startPromise !== null) {
+        try {
+          await startPromise;
+        } catch {
+          // A failed start has no owned supervise left; stop below is a no-op.
+        }
+      }
+      await immediateStop;
+      await stopSupervise();
+    })();
+    return disposal;
   }
 
   return {
     start,
+    startAfterInstall,
+    retry,
     inspect,
     refresh,
+    refreshUpdate,
+    presentUpdate,
+    markUpdatePrompted,
+    stopOwnedChild,
     dispose,
-    getState: currentSnapshot,
+    getState: snapshot,
   };
 }
 
@@ -1118,6 +4686,8 @@ export function createDaemonLifecycle(options = {}) {
  *   fetchImpl?: typeof fetch,
  *   probe?: typeof probeDaemon,
  *   lifecycle?: ReturnType<typeof createDaemonLifecycle> | null,
+ *   installManager?: ReturnType<typeof createRuntimeInstallManager> | null,
+ *   upgradeManager?: ReturnType<typeof createRuntimeUpgradeManager> | null,
  *   now?: () => number,
  *   cacheTtlMs?: number,
  *   timeoutMs?: number,
@@ -1136,6 +4706,14 @@ export function createEmbedInfoHandler(options = {}) {
   const lifecycle = options.lifecycle !== null && typeof options.lifecycle?.inspect === 'function'
     ? options.lifecycle
     : null;
+  const installManager = options.installManager !== null
+    && typeof options.installManager?.getState === 'function'
+    ? options.installManager
+    : null;
+  const upgradeManager = options.upgradeManager !== null
+    && typeof options.upgradeManager?.getState === 'function'
+    ? options.upgradeManager
+    : null;
   const now = typeof options.now === 'function' ? options.now : Date.now;
   const cacheTtlMs = Number.isFinite(options.cacheTtlMs) ? options.cacheTtlMs : DEFAULT_CACHE_TTL_MS;
   const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : DEFAULT_PROBE_TIMEOUT_MS;
@@ -1149,16 +4727,32 @@ export function createEmbedInfoHandler(options = {}) {
   async function readInfo() {
     if (lifecycle !== null) {
       const snapshot = await lifecycle.inspect();
+      const update = typeof lifecycle.presentUpdate === 'function'
+        ? lifecycle.presentUpdate()
+        : (isObject(snapshot?.update) ? snapshot.update : null);
       return buildEmbedInfo({
-        daemonUrl: config.daemonUrl,
+        // The lifecycle refreshes this from the shared supervisor's resolve.
+        daemonUrl: typeof snapshot?.daemonUrl === 'string' && snapshot.daemonUrl.length > 0
+          ? snapshot.daemonUrl
+          : config.daemonUrl,
         reachable: snapshot?.reachable === true,
         health: isObject(snapshot?.health) ? snapshot.health : null,
         embed: isObject(snapshot?.embed) ? snapshot.embed : null,
         status: snapshot?.status,
+        state: snapshot?.state,
         mode: snapshot?.mode,
+        runtimeMode: snapshot?.runtimeMode,
         managed: snapshot?.managed === true,
         panel: config.panel,
         reason: typeof snapshot?.reason === 'string' ? snapshot.reason : null,
+        version: typeof snapshot?.version === 'string' ? snapshot.version : null,
+        profile: snapshot?.profile,
+        provider: snapshot?.provider,
+        service: snapshot?.service,
+        downloadRequired: snapshot?.downloadRequired === true,
+        install: installManager?.getState() ?? null,
+        update,
+        upgrade: upgradeManager?.getState() ?? null,
       });
     }
 
@@ -1172,8 +4766,16 @@ export function createEmbedInfoHandler(options = {}) {
           health: isObject(result?.health) ? result.health : null,
           embed: isObject(result?.embed) ? result.embed : null,
           panel: config.panel,
+          install: installManager?.getState() ?? null,
+          upgrade: upgradeManager?.getState() ?? null,
         }))
-        .catch(() => buildEmbedInfo({ daemonUrl: config.daemonUrl, reachable: false, panel: config.panel }))
+        .catch(() => buildEmbedInfo({
+          daemonUrl: config.daemonUrl,
+          reachable: false,
+          panel: config.panel,
+          install: installManager?.getState() ?? null,
+          upgrade: upgradeManager?.getState() ?? null,
+        }))
         .then((value) => {
           cached = value;
           cachedAt = now();
@@ -1213,7 +4815,13 @@ export function createEmbedInfoHandler(options = {}) {
     try {
       info = await readInfo();
     } catch {
-      info = buildEmbedInfo({ daemonUrl: config.daemonUrl, reachable: false, panel: config.panel });
+      info = buildEmbedInfo({
+        daemonUrl: config.daemonUrl,
+        reachable: false,
+        panel: config.panel,
+        install: installManager?.getState() ?? null,
+        upgrade: upgradeManager?.getState() ?? null,
+      });
     }
     sendJson(res, 200, info);
   };
@@ -1393,11 +5001,31 @@ export function agentStatusText(snapshot) {
     return 'Mebular is starting; memory tools are temporarily unavailable. Retry shortly.';
   }
   const reason = snapshot?.reason;
+  if (reason === 'download_required') {
+    return 'Mebular memory is unavailable because no Mebular runtime was found. Tell the user to open the Mebular app or install the Mebular CLI, then restart DSH; the plugin never downloads it. Do not claim Mebular memory is available.';
+  }
   if (reason === 'managed_cli_missing') {
     return 'Mebular memory is unavailable because the Mebular CLI was not found. Tell the user to install Mebular or set MEBULAR_CLI/cliPath, then restart DSH; do not claim Mebular memory is available.';
   }
+  if (reason === 'service_unknown' || reason === 'service_foreign' || reason === 'service_not_registered') {
+    return 'Mebular memory is unavailable because the shared Mebular service cannot be reused safely. Tell the user to open Mebular and check its service, then retry; do not claim Mebular memory is available.';
+  }
+  if (reason === 'instance_mismatch'
+    || reason === 'instance_missing'
+    || reason === 'cloud_mismatch'
+    || reason === 'CLOUD_ALREADY_ACTIVE') {
+    return 'Mebular memory is unavailable because another Mebular profile owns this address. Tell the user to switch Mebular to this profile or stop the other instance; do not claim Mebular memory is available.';
+  }
+  if (reason === 'port_in_use') {
+    return 'Mebular memory is unavailable because another program uses the Mebular port. Tell the user to free the port or change the Mebular port; do not claim Mebular memory is available.';
+  }
   if (reason === 'managed_start_failed') {
     return 'Mebular memory is unavailable because the managed Mebular daemon failed to start. Tell the user to check the Mebular logs, or start the Mebular app or run `mebular serve`; do not claim Mebular memory is available.';
+  }
+  if (reason === 'supervise_failed'
+    || reason === 'child_exited'
+    || reason === 'runtime_resolve_failed') {
+    return 'Mebular memory is unavailable because the shared Mebular runtime did not start. Tell the user to check the Mebular logs, or start the Mebular app or run `mebular serve`; do not claim Mebular memory is available.';
   }
   if (isObject(snapshot?.health)) {
     return 'Mebular memory is unavailable because the local Mebular daemon is not healthy. Tell the user to check the Mebular app or its logs, then retry; do not claim Mebular memory is available.';
@@ -1548,7 +5176,7 @@ export function createAgentStatus(options = {}) {
  */
 function bridgeReason(snapshot) {
   const reason = snapshot?.reason;
-  if (reason === 'managed_cli_missing' || reason === 'managed_start_failed') return reason;
+  if (typeof reason === 'string' && reason.length > 0) return reason;
   return 'daemon_unreachable';
 }
 
@@ -1564,10 +5192,33 @@ function bridgeUnavailableMessage(code) {
       return 'mcp bridge unavailable (daemon_unreachable): start the Mebular app or run "mebular serve"';
     case 'daemon_starting':
       return 'mcp bridge unavailable (daemon_starting): waiting for the managed daemon to become healthy';
+    case 'provisioning':
+      return 'mcp bridge unavailable (provisioning): the shared runtime supervisor is starting Mebular';
+    case 'download_required':
+      return 'mcp bridge unavailable (download_required): open the Mebular app or install the Mebular CLI; this plugin does not download it';
     case 'managed_cli_missing':
       return 'mcp bridge unavailable (managed_cli_missing): install Mebular or set MEBULAR_CLI/cliPath, then restart DSH';
     case 'managed_start_failed':
       return 'mcp bridge unavailable (managed_start_failed): the managed daemon did not become healthy; start Mebular manually';
+    case 'supervise_failed':
+      return 'mcp bridge unavailable (supervise_failed): the shared runtime supervisor exited before ready; check the Mebular logs';
+    case 'child_exited':
+      return 'mcp bridge unavailable (child_exited): the runtime this plugin started exited; start Mebular again';
+    case 'runtime_resolve_failed':
+      return 'mcp bridge unavailable (runtime_resolve_failed): reinstall or update the Mebular app/CLI';
+    case 'service_unknown':
+    case 'service_foreign':
+    case 'service_not_registered':
+      return `mcp bridge unavailable (${code}): the Mebular service state cannot be reused safely; check the Mebular service`;
+    case 'instance_mismatch':
+    case 'instance_missing':
+    case 'cloud_mismatch':
+    case 'CLOUD_ALREADY_ACTIVE':
+      return `mcp bridge unavailable (${code}): another Mebular profile owns this address; switch profiles or stop it`;
+    case 'port_in_use':
+      return 'mcp bridge unavailable (port_in_use): another program uses the Mebular port; free it or change the port';
+    case 'start_locked':
+      return 'mcp bridge unavailable (start_locked): another Mebular entry point is starting the runtime; retrying';
     case 'peer_missing':
       return 'mcp bridge unavailable (peer_missing): install @deepseek-ai/dsh-mcp-client in the DSH host';
     case 'ctx_unavailable':
@@ -1623,6 +5274,8 @@ export function createMcpBridgeSupervisor(options = {}) {
 
   /** @type {{ ok: true, dispose: () => Promise<void> } | null} */
   let mounted = null;
+  /** URL of the currently mounted fiber, so a daemon URL change remounts. */
+  let mountedUrl = null;
   /** @type {ReturnType<typeof setInterval> | null} */
   let timer = null;
   /** @type {Promise<void> | null} */
@@ -1654,12 +5307,29 @@ export function createMcpBridgeSupervisor(options = {}) {
     }
 
     const status = snapshot?.status;
+    const effectiveUrl = typeof snapshot?.daemonUrl === 'string' && snapshot.daemonUrl.length > 0
+      ? snapshot.daemonUrl
+      : daemonUrl;
     if (status === 'up') {
       lastNotice = null;
-      if (mounted !== null) return;
+      if (mounted !== null && mountedUrl === effectiveUrl) return;
+      if (mounted !== null) {
+        // The shared supervisor resolved a different profile/port: release the
+        // old fiber first so two bridges never coexist.
+        const previous = mounted;
+        mounted = null;
+        mountedUrl = null;
+        try {
+          await previous.dispose();
+          log('info', 'mcp bridge reattached (daemon_url_changed)');
+        } catch {
+          log('warn', 'mcp bridge detach failed (mcp_client_dispose_failed): MCP tools may remain registered');
+        }
+        if (disposed) return;
+      }
       let result;
       try {
-        result = await mount(daemonUrl);
+        result = await mount(effectiveUrl);
       } catch (error) {
         const code = safeErrorCode(error);
         result = { ok: false, code: code === 'error' ? 'mcp_client_start_failed' : code };
@@ -1670,6 +5340,7 @@ export function createMcpBridgeSupervisor(options = {}) {
       }
       if (result?.ok === true && typeof result.dispose === 'function') {
         mounted = result;
+        mountedUrl = effectiveUrl;
         lastMountFailure = null;
         return;
       }
@@ -1687,6 +5358,7 @@ export function createMcpBridgeSupervisor(options = {}) {
     if (mounted !== null) {
       const handle = mounted;
       mounted = null;
+      mountedUrl = null;
       try {
         await handle.dispose();
       } catch {
@@ -1742,6 +5414,7 @@ export function createMcpBridgeSupervisor(options = {}) {
         if (mounted !== null) {
           const handle = mounted;
           mounted = null;
+          mountedUrl = null;
           await handle.dispose().catch(() => {});
         }
       });
@@ -1752,7 +5425,12 @@ export function createMcpBridgeSupervisor(options = {}) {
     start,
     check: tick,
     dispose,
-    getState: () => ({ mounted: mounted !== null, timer: timer !== null, disposed }),
+    getState: () => ({
+      mounted: mounted !== null,
+      mountedUrl,
+      timer: timer !== null,
+      disposed,
+    }),
   };
 }
 
@@ -1810,14 +5488,59 @@ export function apply(ctx, config = {}, options = {}) {
     },
   };
   for (const key of [
-    'probe', 'fetchImpl', 'spawnFn', 'resolveCli', 'exists', 'env', 'home', 'platform',
-    'now', 'sleep', 'timeoutMs', 'cacheTtlMs', 'startTimeoutMs', 'pollIntervalMs', 'killGraceMs',
+    'probe', 'fetchImpl', 'spawnFn', 'resolveCli', 'discoverProviders', 'runResolve', 'startSupervise',
+    'runUpdateCheck', 'updateCheckTimeoutMs',
+    'exists', 'env', 'home', 'runtime', 'pidAlive', 'platform', 'userHome', 'cloudRoot', 'registry',
+    'includeStandardApp', 'execPath', 'now', 'sleep', 'timeoutMs', 'resolveTimeoutMs', 'cacheTtlMs',
+    'startTimeoutMs', 'pollIntervalMs', 'superviseStopGraceMs',
   ]) {
     if (opts[key] !== undefined) lifecycleOptions[key] = opts[key];
   }
   const lifecycle = isObject(opts.lifecycle) && typeof opts.lifecycle.inspect === 'function'
     ? opts.lifecycle
     : createDaemonLifecycle(lifecycleOptions);
+
+  const installOptions = {
+    config: resolved,
+    lifecycle,
+  };
+  for (const key of [
+    'env', 'platform', 'execPath', 'userHome', 'cloudRoot', 'registry', 'includeStandardApp',
+    'discoverProviders', 'detectService', 'exists', 'pidAlive', 'spawnFn', 'now', 'npmPath',
+    'installTimeoutMs', 'cliTimeoutMs', 'installKillGraceMs', 'version',
+  ]) {
+    if (opts[key] !== undefined) installOptions[key] = opts[key];
+  }
+  installOptions.logger = {
+    info: (message) => log('info', message),
+    warn: (message) => log('warn', message),
+  };
+  const installManager = isObject(opts.installManager)
+    && typeof opts.installManager.start === 'function'
+    && typeof opts.installManager.getState === 'function'
+    ? opts.installManager
+    : createRuntimeInstallManager(installOptions);
+
+  const upgradeOptions = {
+    config: resolved,
+    lifecycle,
+    logger: {
+      info: (message) => log('info', message),
+      warn: (message) => log('warn', message),
+    },
+  };
+  for (const key of [
+    'env', 'platform', 'execPath', 'userHome', 'cloudRoot', 'registry', 'includeStandardApp',
+    'discoverProviders', 'exists', 'spawnFn', 'now', 'sleep', 'cliTimeoutMs',
+    'upgradeTimeoutMs', 'upgradePollMs', 'reconnectTimeoutMs',
+  ]) {
+    if (opts[key] !== undefined) upgradeOptions[key] = opts[key];
+  }
+  const upgradeManager = isObject(opts.upgradeManager)
+    && typeof opts.upgradeManager.start === 'function'
+    && typeof opts.upgradeManager.getState === 'function'
+    ? opts.upgradeManager
+    : createRuntimeUpgradeManager(upgradeOptions);
 
   // Agent-visible status is derived from the same lifecycle snapshot as the
   // MCP bridge; it is not a second status source and never adds its own poll.
@@ -1873,10 +5596,32 @@ export function apply(ctx, config = {}, options = {}) {
   if (typeof ctx.effect === 'function') {
     ctx.effect(
       () => () => {
-        const pending = bridge.dispose();
+        // Unloading the DSH entry only releases this plugin's own supervise and
+        // timers. The shared runtime, provider/service records and Mebular data
+        // stay untouched; `mebular runtime service uninstall` is the explicit
+        // removal action.
         agentStatus.dispose();
-        lifecycle.dispose?.();
-        return pending;
+        const bridgeDisposal = Promise.resolve()
+          .then(() => bridge.dispose())
+          .catch(() => {});
+        // Cordis/DSH unload awaits this effect disposal: the supervise process
+        // needs its full stop window to release the child daemon it owns.
+        const lifecycleDisposal = Promise.resolve()
+          .then(() => lifecycle.dispose?.())
+          .catch((error) => {
+            log('warn', `lifecycle dispose failed (${safeErrorCode(error)})`);
+          });
+        const installDisposal = Promise.resolve()
+          .then(() => installManager.dispose?.())
+          .catch((error) => {
+            log('warn', `install dispose failed (${safeErrorCode(error)})`);
+          });
+        const upgradeDisposal = Promise.resolve()
+          .then(() => upgradeManager.dispose?.())
+          .catch((error) => {
+            log('warn', `upgrade dispose failed (${safeErrorCode(error)})`);
+          });
+        return Promise.all([bridgeDisposal, lifecycleDisposal, installDisposal, upgradeDisposal]);
       },
       '@mebular/dsh-plugin: daemon lifecycle, agent status, and MCP bridge',
     );
@@ -1886,7 +5631,9 @@ export function apply(ctx, config = {}, options = {}) {
   void lifecycleStart;
   void bridge.start();
 
-  const handler = createEmbedInfoHandler({ config: resolved, lifecycle });
+  const handler = createEmbedInfoHandler({ config: resolved, lifecycle, installManager, upgradeManager });
+  const installHandler = createRuntimeInstallHandler({ config: resolved, manager: installManager, env: opts.env });
+  const upgradeHandler = createRuntimeUpgradeHandler({ config: resolved, manager: upgradeManager, env: opts.env });
   if (typeof ctx.inject !== 'function') return;
   ctx.inject(['webServer'], (webCtx) => {
     const webServer = webCtx?.webServer;
@@ -1899,6 +5646,22 @@ export function apply(ctx, config = {}, options = {}) {
           handler,
         }),
         '@mebular/dsh-plugin: GET /mebular/embed-info',
+      );
+      webCtx.effect(
+        () => webServer.register({
+          kind: 'exact',
+          path: RUNTIME_INSTALL_PATH,
+          handler: installHandler,
+        }),
+        '@mebular/dsh-plugin: POST /mebular/runtime/install',
+      );
+      webCtx.effect(
+        () => webServer.register({
+          kind: 'exact',
+          path: RUNTIME_UPGRADE_PATH,
+          handler: upgradeHandler,
+        }),
+        '@mebular/dsh-plugin: POST /mebular/runtime/upgrade',
       );
     }
     // DSH 0.2.1-rc.2 exposes WebServer.tapIndex(transform) (see

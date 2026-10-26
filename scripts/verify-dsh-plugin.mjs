@@ -216,6 +216,45 @@ check('index.js exports mountMcp()', typeof pluginModule.mountMcp === 'function'
 check('index.js exports resolveConfig()', typeof pluginModule.resolveConfig === 'function');
 check('index.js exports createDaemonLifecycle()', typeof pluginModule.createDaemonLifecycle === 'function');
 check('index.js exports createEmbedInfoHandler()', typeof pluginModule.createEmbedInfoHandler === 'function');
+check('index.js exports createRuntimeInstallManager()', typeof pluginModule.createRuntimeInstallManager === 'function');
+check('index.js exports createRuntimeInstallHandler()', typeof pluginModule.createRuntimeInstallHandler === 'function');
+check('index.js exports createRuntimeUpgradeManager()', typeof pluginModule.createRuntimeUpgradeManager === 'function');
+check('index.js exports createRuntimeUpgradeHandler()', typeof pluginModule.createRuntimeUpgradeHandler === 'function');
+check('index.js exports sanitizeRuntimeUpdateState()', typeof pluginModule.sanitizeRuntimeUpdateState === 'function');
+check('index.js exports sanitizeRuntimeUpgradeState()', typeof pluginModule.sanitizeRuntimeUpgradeState === 'function');
+check('index.js exports detectRegisteredRuntimeService()', typeof pluginModule.detectRegisteredRuntimeService === 'function');
+check('index.js exports sanitizeRuntimeInstallState()', typeof pluginModule.sanitizeRuntimeInstallState === 'function');
+check(
+  'index.js pinned runtime version tracks the plugin version',
+  pluginModule.RUNTIME_INSTALL_VERSION === pkg.version,
+  `${String(pluginModule.RUNTIME_INSTALL_VERSION)} != ${String(pkg.version)}`,
+);
+check(
+  'index.js manual install command uses the derived version',
+  pluginModule.runtimeManualInstallCommand?.() === `npm install -g @mebular/core@${pkg.version}`,
+  String(pluginModule.runtimeManualInstallCommand?.()),
+);
+check(
+  'index.js npm install command uses the derived version',
+  pluginModule.buildRuntimeInstallCommand?.({ prefix: '/tmp/runtime-prefix', platform: 'linux' })
+    ?.args?.includes(`@mebular/core@${pkg.version}`) === true,
+  JSON.stringify(pluginModule.buildRuntimeInstallCommand?.({ prefix: '/tmp/runtime-prefix', platform: 'linux' })?.args),
+);
+check(
+  'index.js exposes the loopback install route',
+  pluginModule.RUNTIME_INSTALL_PATH === '/mebular/runtime/install',
+  String(pluginModule.RUNTIME_INSTALL_PATH),
+);
+check(
+  'index.js exposes the loopback upgrade route',
+  pluginModule.RUNTIME_UPGRADE_PATH === '/mebular/runtime/upgrade',
+  String(pluginModule.RUNTIME_UPGRADE_PATH),
+);
+check(
+  'index.js exposes fixed upgrade actions only',
+  JSON.stringify(pluginModule.RUNTIME_UPGRADE_ACTIONS) === JSON.stringify(['update', 'later', 'skip', 'prompted']),
+  JSON.stringify(pluginModule.RUNTIME_UPGRADE_ACTIONS),
+);
 check('index.js exports agentStatusText()', typeof pluginModule.agentStatusText === 'function');
 check('index.js exports createAgentStatus()', typeof pluginModule.createAgentStatus === 'function');
 
@@ -245,8 +284,44 @@ for (const file of codeFiles) {
 
 const hostSource = readFileSync(join(pkgDir, 'index.js'), 'utf8');
 check(
+  'index.js derives pinned runtime version from package.json',
+  hostSource.includes("new URL('./package.json', import.meta.url)")
+    && !/RUNTIME_INSTALL_VERSION\s*=\s*['"]\s*\d/.test(hostSource),
+);
+check(
   'host registers the mebular:status prompt section',
   hostSource.includes("AGENT_STATUS_SECTION = 'mebular:status'"),
+);
+check(
+  'host checks updates through the selected CLI',
+  hostSource.includes("command: ['check-update']") && /'update-state',\s*'prompted'/.test(hostSource),
+);
+check(
+  'host upgrades only to the shared latest',
+  hostSource.includes("'upgrade', '--to', 'latest', '--json'"),
+);
+check(
+  'host never accepts a client upgrade version',
+  !/RUNTIME_UPGRADE_PATH[\s\S]{0,400}?input\.version/.test(hostSource)
+    && !/input\.(?:url|registry|tag)\b/.test(hostSource),
+);
+check(
+  'host unload never uninstalls the shared service/runtime',
+  !hostSource.includes('uninstallRuntimeService')
+    && !/runtime',\s*'service',\s*'uninstall'/.test(hostSource),
+);
+const presentUpdateBody = /function presentUpdate\(\) \{([\s\S]*?)\n {2}\}/.exec(hostSource)?.[1] ?? '';
+check(
+  'GET presentUpdate is read-only (never writes prompted)',
+  presentUpdateBody.length > 0
+    && !presentUpdateBody.includes('savePrompted')
+    && !presentUpdateBody.includes('update-state')
+    && !presentUpdateBody.includes('markUpdatePrompted'),
+  presentUpdateBody.slice(0, 160),
+);
+check(
+  'host persists prompted only through an explicit action',
+  /action === 'prompted'/.test(hostSource) && /markUpdatePrompted/.test(hostSource),
 );
 check('host feature-detects the optional systemPrompt service', /ctx\.systemPrompt/.test(hostSource));
 check(
@@ -291,7 +366,29 @@ check('client embeds the shared Console (?embed=dsh)', clientSource.includes('?e
 check('client uses a sandboxed iframe', clientSource.includes("sandbox: 'allow-scripts allow-same-origin allow-forms'"));
 check('client honours panel:false', clientSource.includes('__MEBULAR_DSH__') && /panel\s*===\s*false/.test(clientSource));
 check('client handles managed start states', clientSource.includes('managed_cli_missing') && clientSource.includes('managed_start_failed'));
-check('client does not post write requests to the host', !clientSource.includes('mebular:request') && !clientSource.includes('postMessage'));
+check('client offers the plugin-only install action', clientSource.includes("'/mebular/runtime/install'"));
+check('client offers the explicit upgrade action', clientSource.includes("'/mebular/runtime/upgrade'"));
+check('client renders the update banner/updateView', clientSource.includes('function updateView') && clientSource.includes('data-mebular-update'));
+check('client confirms prompted only after rendering the banner', clientSource.includes('function confirmPrompted')
+  && clientSource.includes("postAction(RUNTIME_UPGRADE_PATH, 'prompted'")
+  && /promptLatest[\s\S]{0,200}?confirmPrompted/.test(clientSource));
+check('client shows update/later/skip actions', [
+  'updateAction', 'updateLater', 'updateSkip', 'updateUpdatingTitle', 'updateFailedTitle', 'serviceHint',
+].every((key) => clientSource.includes(key)));
+check('client has no client-supplied upgrade version/url', !/RUNTIME_UPGRADE_PATH[\s\S]{0,300}?version/.test(clientSource));
+check('client posts only the fixed action body', /body:\s*JSON\.stringify\(\{\s*action\s*\}\)/.test(clientSource));
+check('client has exactly one POST method', (clientSource.match(/method:\s*'POST'/g) ?? []).length === 1);
+check('client has no other write methods', !/method:\s*'(?:PUT|PATCH|DELETE)'/.test(clientSource));
+check('client shows install/retry/reinstall/copy/redetect actions', [
+  'installTitle', 'installingTitle', 'installFailedTitle', 'installAction', 'installRetry',
+  'installReinstall', 'installCopy', 'installRedetect', 'installManualHint', 'installReadme',
+].every((key) => clientSource.includes(key)));
+check('client copies the manual command locally', clientSource.includes('navigator?.clipboard?.writeText'));
+check(
+  'client never triggers install from the poll timer',
+  !/setInterval\([\s\S]{0,120}install\(/.test(clientSource),
+);
+check('client does not post write requests through DSH', !clientSource.includes('mebular:request') && !clientSource.includes('postMessage'));
 
 const clientRequires = [...clientSource.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)]
   .map((match) => match[1]);

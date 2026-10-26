@@ -73,15 +73,43 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).toContain('frameFailed');
   });
 
-  it('处理 starting / managed_cli_missing / managed_start_failed，且不发 host 写请求', () => {
+  it('handles starting / managed_cli_missing / managed_start_failed; only fixed routes may POST', () => {
     expect(source).toContain("info?.status === 'starting'");
     expect(source).toContain('startingTitle');
     expect(source).toContain('startingBody');
     expect(source).toContain('managed_cli_missing');
     expect(source).toContain('managed_start_failed');
     expect(source).toContain('cliMissingTitle');
+    expect(source).toContain("'/mebular/runtime/install'");
+    expect(source).toContain("'/mebular/runtime/upgrade'");
+    expect(source).toMatch(/method:\s*'POST'/);
     expect(source).not.toContain('mebular:request');
     expect(source).not.toContain('postMessage');
+    expect((source.match(/method:\s*'POST'/g) ?? [])).toHaveLength(1);
+    expect((source.match(/method:\s*'(?:PUT|PATCH|DELETE)'/g) ?? [])).toHaveLength(0);
+    expect(source).toMatch(/body:\s*JSON\.stringify\(\{\s*action\s*\}\)/);
+    expect(source).not.toMatch(/JSON\.stringify\(\{[^}]*version/);
+  });
+
+  it('渲染共享更新 banner、稍后/跳过/更新与服务常驻入口', () => {
+    expect(source).toContain('function updateView');
+    expect(source).toContain("kind: 'available'");
+    expect(source).toContain("actions: ['update', 'later', 'skip']");
+    expect(source).toContain("actions: ['update', 'later']");
+    expect(source).toContain('dismissedVersion');
+    expect(source).toContain('data-mebular-update');
+    expect(source).toContain('serviceHint');
+    expect(source).toContain('updateFailedTitle');
+    expect(source).toContain('updateBusy');
+  });
+
+  it('只有主面板实际渲染 banner 后才确认 prompted，每版本一次', () => {
+    expect(source).toContain('function confirmPrompted');
+    expect(source).toContain("postAction(RUNTIME_UPGRADE_PATH, 'prompted'");
+    expect(source).toContain('const promptedSent = new Set()');
+    expect(source).toMatch(/promptLatest[\s\S]{0,240}?confirmPrompted/);
+    expect(source).toContain('promptWarning');
+    expect(source).not.toMatch(/function presentUpdate/);
   });
 
   it('读取 host tapIndex 注入的 panel 全局，且只在 panel === false 时跳过注册', () => {

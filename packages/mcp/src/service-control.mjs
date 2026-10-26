@@ -39,14 +39,32 @@ export function cliBinPath() {
 }
 
 /** 守护服务描述符：**必须**携带守护自身 home（env + workingDir + heartbeatDir）。 */
-export function serviceDescriptor({ home, execPath = process.execPath, extraArgs = [] } = {}) {
+export function serviceDescriptor({ home, execPath = process.execPath, extraArgs = [], cloudRoot = null } = {}) {
+  const cliPath = cliBinPath();
   return {
     kind: SERVICE_KIND,
-    args: [cliBinPath(), 'serve', ...extraArgs],
+    args: [cliPath, 'serve', ...extraArgs],
     heartbeatDir: home,
     workingDir: home,
     execPath,
-    env: { MEBULAR_HOME: home },
+    env: {
+      MEBULAR_HOME: home,
+      ...(typeof cloudRoot === 'string' && cloudRoot.length > 0 ? { MEBULAR_CLOUD_ROOT: cloudRoot } : {}),
+      MEBULAR_RUNTIME_PROVIDER: 'cli',
+      MEBULAR_RUNTIME_OWNER: 'cli',
+      MEBULAR_RUNTIME_PATH: cliPath,
+    },
+    runtime: {
+      version: null,
+      runtimePath: null,
+      cliPath,
+      provider: 'cli',
+      owner: 'cli',
+      execPath,
+      electron: false,
+      cloudRoot: typeof cloudRoot === 'string' && cloudRoot.length > 0 ? cloudRoot : null,
+      home,
+    },
   };
 }
 

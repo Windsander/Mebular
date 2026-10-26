@@ -33,9 +33,9 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, parse as parsePath, resolve, sep } from 'node:path';
+import { dirname, join, parse as parsePath, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { findChrome } from './lib/cdp.mjs';
@@ -134,13 +134,96 @@ function isSameOrInside(parent, child) {
   return child === parent || child.startsWith(`${parent}${sep}`);
 }
 
+async function realpathOrSelf(path) {
+  try {
+    return await realpath(path);
+  } catch {
+    return path;
+  }
+}
+
+/** Nearest existing ancestor of a path that may not exist yet. */
+async function nearestExistingAncestor(target) {
+  let current = target;
+  for (;;) {
+    try {
+      await lstat(current);
+      return current;
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+      const parent = dirname(current);
+      if (parent === current) return current;
+      current = parent;
+    }
+  }
+}
+
+/**
+ * Reject roots that overlap the filesystem root, the home directory, or the
+ * repository — including when the overlap is only visible through a symlinked
+ * ancestor. A root that is itself a symlink is rejected outright.
+ *
+ * @returns {Promise<{ exists: boolean, realDir: string }>}
+ */
+async function assertSafeRoot(dir) {
+  const lexicalHome = resolve(homedir());
+  if (dir === parsePath(dir).root) {
+    throw new Error(`--root 不能是文件系统根目录：${dir}`);
+  }
+  if (dir === lexicalHome) {
+    throw new Error(`--root 不能是用户主目录：${dir}`);
+  }
+  if (isSameOrInside(dir, repoRoot) || isSameOrInside(repoRoot, dir)) {
+    throw new Error(`--root 不能与仓库目录重叠：${dir}`);
+  }
+
+  let exists = true;
+  try {
+    const info = await lstat(dir);
+    if (info.isSymbolicLink()) {
+      throw new Error(`--root 不能是符号链接：${dir}`);
+    }
+    if (!info.isDirectory()) {
+      throw new Error(`--root 不是目录：${dir}`);
+    }
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    exists = false;
+  }
+
+  let realDir;
+  if (exists) {
+    realDir = await realpath(dir);
+  } else {
+    // The root does not exist yet: resolve the nearest existing ancestor and
+    // re-attach the missing suffix, so a symlinked parent cannot hide an
+    // overlap with the repository or home directory.
+    const ancestor = await nearestExistingAncestor(dirname(dir));
+    const realAncestor = await realpath(ancestor);
+    realDir = resolve(realAncestor, relative(ancestor, dir));
+  }
+
+  const realHome = await realpathOrSelf(lexicalHome);
+  const realRepo = await realpathOrSelf(repoRoot);
+  if (realDir === parsePath(realDir).root) {
+    throw new Error(`--root 不能是文件系统根目录（realpath）：${realDir}`);
+  }
+  if (realDir === realHome) {
+    throw new Error(`--root 不能是用户主目录（realpath）：${realDir}`);
+  }
+  if (isSameOrInside(realDir, realRepo) || isSameOrInside(realRepo, realDir)) {
+    throw new Error(`--root 不能与仓库目录重叠（realpath：${realDir}）：${dir}`);
+  }
+  return { exists, realDir };
+}
+
 /**
  * Create or validate the harness root.
  *
  * Default: a fresh mkdtemp directory (Phase 1/2 behavior, removed on success).
  * Explicit root: must be absent, empty, or a previous harness root carrying the
  * marker (only harness-owned entries). Never a repository ancestor/descendant,
- * the home directory, or the filesystem root.
+ * the home directory, or the filesystem root; symlinked roots are rejected.
  */
 async function prepareRoot(requested) {
   if (requested === null || requested === undefined) {
@@ -150,24 +233,7 @@ async function prepareRoot(requested) {
   }
 
   const dir = resolve(requested);
-  if (dir === parsePath(dir).root) {
-    throw new Error(`--root 不能是文件系统根目录：${dir}`);
-  }
-  if (dir === resolve(homedir())) {
-    throw new Error(`--root 不能是用户主目录：${dir}`);
-  }
-  if (isSameOrInside(dir, repoRoot) || isSameOrInside(repoRoot, dir)) {
-    throw new Error(`--root 不能与仓库目录重叠：${dir}`);
-  }
-
-  let exists = true;
-  try {
-    const info = await stat(dir);
-    if (!info.isDirectory()) throw new Error(`--root 不是目录：${dir}`);
-  } catch (error) {
-    if (error?.code !== 'ENOENT') throw error;
-    exists = false;
-  }
+  const { exists } = await assertSafeRoot(dir);
 
   if (!exists) {
     await mkdir(dir, { recursive: true });

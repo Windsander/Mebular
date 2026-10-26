@@ -88,26 +88,41 @@ jobs:
           restore-keys: |
             pnpm-store-${{ runner.os }}-v1-
 
+      # GitHub-hosted ubuntu-latest images already ship Chrome/Chromium. Probe
+      # the preinstalled binaries instead of pulling a third-party action whose
+      # moving tag would add supply-chain risk.
       - name: Prepare Chrome/Chromium
-        id: chrome
-        uses: browser-actions/setup-chrome@v1
-        with:
-          chrome-version: stable
-          install-chromedriver: false
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHROME_BIN="$(command -v google-chrome \
+            || command -v google-chrome-stable \
+            || command -v chromium \
+            || command -v chromium-browser \
+            || true)"
+          if [ -z "$CHROME_BIN" ]; then
+            echo "::error::No Chrome/Chromium binary found on this runner; DSH E2E must not skip"
+            exit 1
+          fi
+          "$CHROME_BIN" --version
+          echo "CHROME_PATH=$CHROME_BIN" >> "$GITHUB_ENV"
 
       - name: Prepare pnpm
         shell: bash
         run: |
           set -euo pipefail
-          # `dsh plugin add` forwards to pnpm. Pin the major validated locally
-          # (12.x) so a future pnpm major cannot silently change plugin installs.
-          npm install --global pnpm@12 --no-audit --no-fund
+          # `dsh plugin add` forwards to pnpm. Pin the exact version validated
+          # locally (12.15.0) so a range bump cannot silently change installs.
+          npm install --global pnpm@12.15.0 --no-audit --no-fund
+          INSTALLED="$(pnpm --version)"
+          if [ "$INSTALLED" != "12.15.0" ]; then
+            echo "::error::pnpm version mismatch: expected 12.15.0, got $INSTALLED"
+            exit 1
+          fi
           pnpm --version
 
       - name: Verify prerequisites (fail, never skip)
         shell: bash
-        env:
-          CHROME_PATH: ${{ steps.chrome.outputs.chrome-path }}
         run: |
           set -euo pipefail
           NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
@@ -125,7 +140,6 @@ jobs:
             exit 1
           fi
           pnpm --version
-          echo "CHROME_PATH=$CHROME_PATH" >> "$GITHUB_ENV"
 
       - name: Install dependencies
         run: npm ci

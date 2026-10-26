@@ -1,14 +1,24 @@
 ![Mebular — 分布式记忆网络](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-hero.svg)
 
+**一份记忆，每个助手，每台设备。**
+
+面向 AI 助手的分布式记忆网络。记忆和任务留在你的设备上，设备之间直接同步。
+
+[![npm](https://img.shields.io/npm/v/@mebular/dsh-plugin?style=flat-square)](https://www.npmjs.com/package/@mebular/dsh-plugin) [![DSH](https://img.shields.io/badge/DSH-%E2%89%A50.2.1--rc.2-4D6BFE?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness) [![Node](https://img.shields.io/badge/Node-%E2%89%A522.19-339933?logo=node.js&logoColor=white&style=flat-square)](https://nodejs.org) [![MCP server](https://img.shields.io/badge/MCP-server-5A67D8?logo=modelcontextprotocol&logoColor=white&style=flat-square)](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md) [![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://github.com/Windsander/Mebular/blob/main/LICENSE) [![awesome-dsh-plugin](https://img.shields.io/badge/awesome--dsh--plugin-memory-4D6BFE?style=flat-square)](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/)
+
+[5 分钟开始](https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART_CN.md) · [了解架构](https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md) · [官网](https://mebular.cyberfederal.io) · [English](https://github.com/Windsander/Mebular/blob/main/packages/dsh-plugin/README_EN.md)
+
+*不需要托管账号 · 没有中心协调者*
+
+---
+
 # 在 DSH 中使用 Mebular
 
-**一张记忆图，连接每个 Agent、每台机器。**
+**把 DSH 接入同一张记忆图。**
 
 Mebular 是 Agent 与设备之间的记忆与任务互通层；`@mebular/dsh-plugin` 把 DSH 接入同一张图。
 
-[![npm](https://img.shields.io/npm/v/@mebular/dsh-plugin?style=flat-square)](https://www.npmjs.com/package/@mebular/dsh-plugin) [![DSH](https://img.shields.io/badge/DSH-%E2%89%A50.2.1--rc.2-4D6BFE?style=flat-square)](https://github.com/deepseek-ai/deepseek-harness) [![Node](https://img.shields.io/badge/Node-%E2%89%A522.19-339933?logo=node.js&logoColor=white&style=flat-square)](https://nodejs.org) [![CI](https://github.com/Windsander/Mebular/actions/workflows/ci.yml/badge.svg?style=flat-square)](https://github.com/Windsander/Mebular/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://github.com/Windsander/Mebular/blob/main/LICENSE) [![awesome-dsh-plugin](https://img.shields.io/badge/awesome--dsh--plugin-memory-4D6BFE?style=flat-square)](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/)
-
-[English](https://github.com/Windsander/Mebular/blob/main/packages/dsh-plugin/README_EN.md) · [npm](https://www.npmjs.com/package/@mebular/dsh-plugin) · [主 README](https://github.com/Windsander/Mebular/blob/main/README_CN.md) · [集成说明](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md)
+[npm](https://www.npmjs.com/package/@mebular/dsh-plugin) · [主 README](https://github.com/Windsander/Mebular/blob/main/README_CN.md) · [集成说明](https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md)
 
 ![一张记忆图：两台机器，每台一个 Mebular 节点；机器 A 连接 DSH、Hermes、Codex，机器 B 连接 Pi、OpenCode、Cursor；两个节点直接同步同一张图。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-cn.svg)
 

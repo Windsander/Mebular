@@ -16,8 +16,17 @@
 | **DSH** | Agent 面：理解并调用 Mebular 工具，同时在侧边栏显示同一套 Console。 |
 
 插件不会替换 App：它不另起第二套 Mebular Console、不直接读本地存储、不 import
-`@mebular/*`。唯一契约是守护进程公开的 HTTP 接口：`/healthz`、`/app/embed/info`、
-`/mcp` 和 `/console/?embed=dsh`。
+`@mebular/*`。唯一契约是守护进程公开的 HTTP 接口。
+
+## 端点
+
+| 端点 | 用途 |
+| --- | --- |
+| `/healthz` | daemon 健康检查 |
+| `/app/embed/info` | Console 可嵌入性 |
+| `/console/?embed=dsh` | DSH 侧边栏 iframe |
+| `/mcp` | 官方 MCP client 的 Streamable HTTP 端点 |
+| `/mebular/embed-info` | 面板只读状态（仅 loopback） |
 
 ## 前提
 
@@ -46,6 +55,9 @@ dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
 ```bash
 dsh plugin --profile web add ./packages/dsh-plugin
 ```
+
+安装插件不会启动 daemon：默认 `attach` 只探测。Mebular App 已在运行则直接跳过；否则启动
+App 或 `mebular serve`，或显式设置 `lifecycle: managed` 让插件代启动。
 
 `@mebular/dsh-plugin` 是独立适配器：代码隔离在 `packages/dsh-plugin`，由独立 npm job
 发布；版本随统一 Mebular release train，六个 npm 包同版本。插件已收录于
@@ -92,6 +104,18 @@ Mebular 的数据，就说明图已接通。侧边栏 Mebular 面板应显示同
 `mcp bridge unavailable (daemon_unreachable): start the Mebular app or run "mebular serve"`。
 启动守护进程（或运行 `mebular serve`）后，插件会在下一次健康检查时自动挂载工具，面板也随
 之恢复，不需要重启 DSH。`attach` 永远不会替你启动守护进程。
+
+## 常见 reason
+
+| reason | 处理 |
+| --- | --- |
+| `daemon_unreachable` | 启动 Mebular App 或 `mebular serve`；检查 `7331` |
+| `daemon_unhealthy` | 检查 `/healthz`、端口和 daemon 日志 |
+| `embed_info_unavailable` | 检查 daemon 版本与 `/app/embed/info` |
+| `not_loopback` / `embed_unsupported` | 面板只支持 loopback；在本地 DSH 使用 |
+| `managed_cli_missing` | 安装 Mebular CLI，或设置 `cliPath` / `MEBULAR_CLI` |
+| `managed_start_failed` | 查看 DSH 日志中脱敏后的 managed child stderr |
+| `peer_missing` | 确认 DSH 提供 `@deepseek-ai/dsh-mcp-client` peer |
 
 ## daemon 发现与端口
 
@@ -148,6 +172,24 @@ child 处于 `starting` 时不挂载 MCP bridge；`managed_start_failed` / `mana
 不安装系统服务，也不覆盖 `MEBULAR_HOME`。
 
 只想保留 MCP、不显示侧边栏面板时，设置 `panel: false`（适用于 headless / TUI profile）。
+
+## 配置字段与环境变量
+
+| 字段 | 默认 | 说明 |
+| --- | --- | --- |
+| `daemonUrl` | `http://127.0.0.1:7331` | 只接受 `http:` / `https:`，尾部斜杠会被去掉 |
+| `lifecycle` | `attach` | `attach` 只探测；`managed` 在无 daemon 时启动子进程 |
+| `panel` | `true` | `false` 时不注册 sidebar / main 面板，MCP 工具照常可用 |
+| `cliPath` | 未设置 | 仅 `managed` 使用；也接受 `MEBULAR_CLI`，最后回退到 `PATH` |
+
+| 变量 | 作用 |
+| --- | --- |
+| `MEBULAR_HTTP_PORT` | 覆盖 daemon 端口；host、面板、MCP 桥一起跟随 |
+| `MEBULAR_HOME` | 定位 `runtime.json`；缺省 `~/.mebular` |
+| `MEBULAR_CLI` | `managed` 的 CLI 候选（`cliPath` 优先） |
+| `DSH_HOME` | DSH profile 根；与 Mebular home 无关 |
+
+非法值会回退安全默认并写一条 `warn`，不会让 DSH 启动失败。
 
 ## Agent 可见状态（仅 DSH）
 

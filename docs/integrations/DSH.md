@@ -18,7 +18,17 @@ same Console the desktop app uses.
 
 The plugin never replaces the app. It does not start a second Mebular console, read the
 local store, or import `@mebular/*`. The only contract is the daemon's public HTTP
-surface: `/healthz`, `/app/embed/info`, `/mcp` and `/console/?embed=dsh`.
+surface.
+
+## Endpoints
+
+| Endpoint | Purpose |
+| --- | --- |
+| `/healthz` | daemon health check |
+| `/app/embed/info` | Console embeddability |
+| `/console/?embed=dsh` | DSH sidebar iframe |
+| `/mcp` | Streamable HTTP endpoint for the official MCP client |
+| `/mebular/embed-info` | read-only panel status (loopback only) |
 
 ## Before you start
 
@@ -48,6 +58,10 @@ For plugin development, install from the repository checkout instead:
 ```bash
 dsh plugin --profile web add ./packages/dsh-plugin
 ```
+
+Installing the plugin does not start the daemon: the default `attach` only probes. If the
+Mebular app is already running, skip this; otherwise start the app or `mebular serve`, or set
+`lifecycle: managed` to let the plugin start it.
 
 `@mebular/dsh-plugin` is an independent adapter: its code stays isolated in
 `packages/dsh-plugin`, and it is published by its own npm job. Its version follows the
@@ -99,6 +113,18 @@ Agent receives a short status note (see below), and the log reports `mcp bridge 
 `mebular serve`); the plugin discovers it on the next health check, mounts the tools
 automatically, and the panel recovers without restarting DSH. `attach` never starts the
 daemon for you.
+
+## Common reasons
+
+| Reason | What to do |
+| --- | --- |
+| `daemon_unreachable` | start the Mebular app or run `mebular serve`; check `7331` |
+| `daemon_unhealthy` | check `/healthz`, the port and the daemon log |
+| `embed_info_unavailable` | check the daemon version and `/app/embed/info` |
+| `not_loopback` / `embed_unsupported` | the panel is loopback only; use local DSH |
+| `managed_cli_missing` | install the Mebular CLI, or set `cliPath` / `MEBULAR_CLI` |
+| `managed_start_failed` | read the redacted managed child stderr in the DSH log |
+| `peer_missing` | make sure DSH provides the `@deepseek-ai/dsh-mcp-client` peer |
 
 ## Daemon discovery and ports
 
@@ -163,6 +189,25 @@ No service is installed, and `MEBULAR_HOME` is never rewritten.
 
 Set `panel: false` to keep MCP tools but hide the sidebar/main panel, for example on a
 headless or TUI-only profile.
+
+## Configuration fields and environment
+
+| Field | Default | Description |
+| --- | --- | --- |
+| `daemonUrl` | `http://127.0.0.1:7331` | only `http:` / `https:`; trailing slash removed |
+| `lifecycle` | `attach` | `attach` only probes; `managed` starts a child when no daemon exists |
+| `panel` | `true` | `false` hides the sidebar / main panel; MCP tools stay available |
+| `cliPath` | unset | only for `managed`; `MEBULAR_CLI` is accepted, then `mebular` on `PATH` |
+
+| Variable | Effect |
+| --- | --- |
+| `MEBULAR_HTTP_PORT` | overrides the daemon port; the host, panel, and MCP bridge follow it |
+| `MEBULAR_HOME` | locates `runtime.json`; default `~/.mebular` |
+| `MEBULAR_CLI` | CLI candidate for `managed` (`cliPath` wins) |
+| `DSH_HOME` | DSH profile root; unrelated to the Mebular home |
+
+Invalid values fall back to safe defaults and log one `warn`; they never prevent DSH from
+starting.
 
 ## Agent-visible status (DSH only)
 

@@ -74,7 +74,7 @@ node scripts/verify-dsh-e2e.mjs --dsh-version latest
 | `security-headers` | P0 安全头 | 普通 Console DENY；embed 只放开 loopback；发现文档无敏感字段 |
 | `managed-lifecycle` | P1 managed 启动 | 无 daemon 时插件自启 child；`managed=true`；runtime.json pid 存活且非 DSH；停 DSH 后 child 退出、端口关闭 |
 | `managed-reuse` | P1 managed 复用 | 外部 daemon 已存在时 `managed=false`；停 DSH 后外部 daemon、`/healthz`、`/console/`、runtime.json 均存活 |
-| `managed-cli-missing` | P1 managed 失败 | `down`、`reason=managed_cli_missing`、无工具、Agent 文本给出安装/CLI/配置恢复动作 |
+| `managed-cli-missing` | P1 managed 失败 | `down`、`reason=download_required`、`state=download_required`、`downloadRequired=true`、无工具、Agent 文本给出安装/CLI/配置恢复动作 |
 
 Agent 可见状态在 `happy-path`、`panel-false`、`custom-port`、managed 场景中断言 up 时
 `mebular:status` 为空；在 `daemon-down-recovery` 断言 down 时非空、恢复后重新为空。文本全部通过
@@ -194,8 +194,9 @@ negative control 是 test-of-test，**不放进 nightly / release**（会让 E2E
   （`mode=managed`、`managed=false`）。停止 DSH 后外部 pid、`/healthz`、`/console/` 与
   `runtime.json` 仍存在。插件只在 dispose 时停止自己 spawn 的 child，永不停止外部 daemon。
 - **CLI 缺失**：`managed-cli-missing` 让 `cliPath` 指向不存在路径，并从 PATH 移除所有能
-  解析到 `mebular` 的目录；期望 `status=down`、`reason=managed_cli_missing`、无
-  `mcp__mebular__*` 工具，且 Agent 文本包含安装/`MEBULAR_CLI`/`cliPath` 与重启 DSH 的恢复动作。
+  解析到 `mebular` 的目录；期望 `status=down`、`reason=download_required`、
+  `state=download_required`、`downloadRequired=true`、无 `mcp__mebular__*` 工具，且 Agent 文本
+  包含安装/`MEBULAR_CLI`/`cliPath` 与重启 DSH 的恢复动作。面板显示显式安装引导。
 - **Agent 文本**：全部通过 DSH 的 `systemPrompt.assemble()` 读取 `mebular:status` section；
   daemon up 时文本为空（不增加 prompt token），down 时非空且给出恢复动作。`systemPrompt`
   不可用或 `assemble()` 失败会记录为 `supported=null/false` 或 error，场景失败，不会伪造通过。

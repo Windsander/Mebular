@@ -10,7 +10,7 @@
  *                          DSH stops only that child
  *   managed-reuse          managed profile reuses an external daemon; stopping
  *                          DSH leaves that daemon alive
- *   managed-cli-missing    no CLI -> down + managed_cli_missing + Agent hint
+ *   managed-cli-missing    no CLI/runtime -> down + download_required + install guide + Agent hint
  *   daemon-down-recovery   down at boot -> up -> down -> up, without restarting DSH
  *   panel-false            separate profile, no sidebar/iframe, MCP tools still work
  *   custom-port            MEBULAR_HTTP_PORT wins over a conflicting runtime.json;
@@ -396,7 +396,7 @@ function managedPatch(cliPath) {
   ].join('\n');
 }
 
-/** PATH dirs that cannot resolve a `mebular` executable (managed_cli_missing). */
+/** PATH dirs that cannot resolve a `mebular` executable (download_required). */
 function pathWithoutMebular(env) {
   const dirs = String(env.PATH ?? '').split(delimiter).filter((dir) => dir.length > 0);
   return dirs.filter((dir) => !existsSync(join(dir, 'mebular')) && !existsSync(join(dir, 'mebular.cmd')));
@@ -499,8 +499,8 @@ function checkAgentCliMissingText(probe, label) {
   if (!checkAgentReadable(probe, label)) return;
   const text = agentText(probe);
   check(`${label}：daemon down 时 mebular:status 非空`, text.length > 0, tail(text, 220) || '(empty)');
-  check(`${label}：说明 CLI 缺失`, /(CLI|cliPath|MEBULAR_CLI)/i.test(text), tail(text, 240));
-  check(`${label}：给出安装 / 配置恢复动作`, /(install Mebular|MEBULAR_CLI|cliPath)/i.test(text) && /restart DSH/i.test(text), tail(text, 240));
+  check(`${label}：说明 CLI/runtime 缺失`, /(CLI|cliPath|MEBULAR_CLI|runtime)/i.test(text), tail(text, 240));
+  check(`${label}：给出安装 / 配置恢复动作`, /install (the )?Mebular|MEBULAR_CLI|cliPath/i.test(text) && /restart DSH/i.test(text), tail(text, 240));
 }
 
 const scenarios = [
@@ -710,7 +710,7 @@ const scenarios = [
   },
   {
     name: 'managed-cli-missing',
-    title: 'Managed CLI 缺失（down + managed_cli_missing + Agent 安装提示）',
+    title: 'Managed runtime 缺失（down + download_required + Agent 安装提示）',
     run: async (world, context) => {
       const port = await freePort();
       const missingCli = join(world.state.scenarioDir, 'missing-cli', 'mebular.mjs');
@@ -719,7 +719,7 @@ const scenarios = [
 
       // Keep node (and the rest of the toolchain) on PATH but remove every
       // directory that could resolve a `mebular` executable, so the plugin
-      // genuinely takes the managed_cli_missing branch.
+      // genuinely takes the shared-runtime download_required branch.
       const pathDirs = pathWithoutMebular(world.env);
       if (!pathHasNode(pathDirs) && !existsSync(join(dirname(process.execPath), 'mebular'))) {
         pathDirs.unshift(dirname(process.execPath));
@@ -734,16 +734,19 @@ const scenarios = [
       check('DSH Web 页面已加载', (await world.state.page.evalJs('document.title')) === 'DeepSeek Harness');
       check('CLI 缺失时状态为 offline', await world.waitForStatus('offline', 60000), await statusDetail(world));
 
-      const info = await waitForDshInfo(world, (json) => json?.status === 'down' && json?.reason === 'managed_cli_missing');
+      const info = await waitForDshInfo(world, (json) => json?.status === 'down' && json?.reason === 'download_required');
       check('embed-info status=down', info?.status === 'down', JSON.stringify(info));
-      check('embed-info reason=managed_cli_missing', info?.reason === 'managed_cli_missing', String(info?.reason));
+      check('embed-info reason=download_required', info?.reason === 'download_required', String(info?.reason));
+      check('embed-info state=download_required', info?.state === 'download_required', String(info?.state));
+      check('embed-info downloadRequired=true', info?.downloadRequired === true, String(info?.downloadRequired));
+      check('embed-info install 引导可用', info?.install?.allowed === true, JSON.stringify(info?.install));
       check('embed-info managed=false', info?.managed === false, String(info?.managed));
       check('embed-info ok=false', info?.ok === false, String(info?.ok));
 
       const probe = await waitProbeOrFail(world, (value) => value.done === true, 'CLI 缺失时 probe 完成观察', 60000);
       check('CLI 缺失时没有 mcp__mebular__* 工具', probe.mebularToolCount === 0, `mebular=${probe.mebularToolCount}`);
       check('CLI 缺失时关键工具均未注册', probe.required?.['mcp__mebular__memory_write'] === false && probe.required?.['mcp__mebular__memory_query'] === false);
-      checkAgentCliMissingText(probe, 'managed_cli_missing');
+      checkAgentCliMissingText(probe, 'download_required');
       await assertNoPageExceptions(world);
 
       console.log('\n  证据');
@@ -773,16 +776,16 @@ const scenarios = [
       check('down 时点击侧边栏打开面板', await world.openPanel());
       check('down 时没有 iframe', await world.waitForNoIframe(15000));
       const placeholderVisible = await world.state.page.waitFor(
-        `/Mebular is not running|Mebular 未运行|No Mebular daemon answered|没有 Mebular daemon/.test(document.body?.innerText ?? "")`,
+        `/Install Mebular Runtime|安装 Mebular Runtime|Open or install Mebular|打开或安装 Mebular|No Mebular app, CLI, service|本机没有找到 Mebular App/.test(document.body?.innerText ?? "")`,
         { timeout: 30000 },
       );
-      check('down 时面板显示启动引导占位', placeholderVisible);
+      check('down 时面板显示安装引导占位', placeholderVisible);
       const placeholderHeading = await world.state.page.evalJs(
         '[...document.querySelectorAll("h2")].map((node) => node.textContent?.trim() ?? "").find((text) => /Mebular/.test(text)) ?? ""',
       );
       check(
-        'down 时占位标题为未运行',
-        /not running|未运行/i.test(placeholderHeading),
+        'down 时占位标题为安装引导',
+        /Install Mebular Runtime|安装 Mebular Runtime|Open or install Mebular|打开或安装 Mebular/i.test(placeholderHeading),
         placeholderHeading || '(no Mebular heading)',
       );
       const downAtBoot = await waitProbeOrFail(
@@ -1045,8 +1048,10 @@ const scenarios = [
       const dshInfo = await world.fetchDshJson('/mebular/embed-info');
       check('/mebular/embed-info 200', dshInfo.status === 200, `status=${dshInfo.status}`);
       const allowedKeys = [
-        'ok', 'status', 'mode', 'managed', 'panel', 'version', 'embedProtocol',
-        'consoleUrl', 'embedUrl', 'mcpUrl', 'loopback', 'reason',
+        'ok', 'status', 'state', 'mode', 'runtimeMode', 'managed', 'panel', 'version',
+        'daemonUrl', 'profile', 'provider', 'service', 'downloadRequired', 'install',
+        'update', 'upgrade', 'embedProtocol', 'consoleUrl', 'embedUrl', 'mcpUrl',
+        'loopback', 'reason',
       ];
       const keys = Object.keys(dshInfo.json ?? {}).sort();
       check('/mebular/embed-info 字段白名单', keys.every((key) => allowedKeys.includes(key)), JSON.stringify(keys));

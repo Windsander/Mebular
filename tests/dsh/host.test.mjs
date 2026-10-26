@@ -2032,7 +2032,8 @@ describe('P8 @mebular/dsh-plugin：共享 runtime 发现', () => {
       'shared:/opt/shared/mebular.mjs',
     ]);
     expect(discovery.selected).toMatchObject({ kind: 'app', path: '/opt/App/mebular.mjs', source: 'registry' });
-    expect(discovery.cloudRoot).toBe('/home/u/.mebular');
+    // The plugin uses the host path.join for the default root; keep the test portable.
+    expect(discovery.cloudRoot).toBe(join('/home/u', '.mebular'));
 
     const pinned = await discoverRuntimeProviders({ ...base, cliPath: '/pin/mebular' });
     expect(pinned.selected).toMatchObject({ kind: 'cli', path: '/pin/mebular', source: 'config' });
@@ -2040,7 +2041,10 @@ describe('P8 @mebular/dsh-plugin：共享 runtime 发现', () => {
   });
 
   it('MEBULAR_CLI 优先于 PATH，路径不存在则跳过', async () => {
-    const exists = (file) => new Set(['/env/mebular', '/usr/local/bin/mebular']).has(file);
+    // findFileOnPath calls the host path.join, including when platform:'linux'
+    // is injected, so build the expected PATH candidate the same way.
+    const pathCli = join('/usr/local/bin', 'mebular');
+    const exists = (file) => new Set(['/env/mebular', pathCli]).has(file);
     const discovery = await discoverRuntimeProviders({
       env: { PATH: '/usr/local/bin', MEBULAR_CLI: '/env/mebular' },
       platform: 'linux',
@@ -2059,7 +2063,7 @@ describe('P8 @mebular/dsh-plugin：共享 runtime 发现', () => {
       registry: { v: 1, providers: [] },
       includeStandardApp: false,
     });
-    expect(missing.selected).toMatchObject({ path: '/usr/local/bin/mebular', source: 'path' });
+    expect(missing.selected).toMatchObject({ path: pathCli, source: 'path' });
   });
 
   it('MEBULAR_CLOUD_ROOT 指定注册表位置；App 标准路径可被发现', async () => {

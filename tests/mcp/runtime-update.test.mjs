@@ -175,8 +175,15 @@ describe('runtime update check', () => {
       failureReason: null,
       source: RUNTIME_UPDATE_SOURCE_URL,
     });
-    const mode = (await stat(runtimeUpdateStatePath(root))).mode & 0o777;
-    expect(mode).toBe(0o600);
+    const statePath = runtimeUpdateStatePath(root);
+    if (process.platform !== 'win32') {
+      // POSIX 0600 is the contract; Windows has no POSIX mode bits.
+      const mode = (await stat(statePath)).mode & 0o777;
+      expect(mode).toBe(0o600);
+    } else {
+      expect((await stat(statePath)).isFile()).toBe(true);
+      expect((await readFile(statePath, 'utf-8')).length).toBeGreaterThan(0);
+    }
     const leftovers = (await readdir(join(root, 'runtime')))
       .filter((name) => name.startsWith('update-state.json.tmp-'));
     expect(leftovers).toEqual([]);

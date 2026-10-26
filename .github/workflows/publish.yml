@@ -2,6 +2,7 @@ name: Publish
 
 # 发布顺序（push 到 release/v*）：
 #   verify（版本 SSOT + lint/test + 6 个发布 tarball）
+#     → dsh-e2e（复用 dsh-e2e.yml：真实 DSH 最低版 + latest；失败即阻断发布）
 #     → preflight（npm token 可用性；失败则后续全部不启动）
 #     → desktop-macos / desktop-windows / desktop-linux
 #         （同一批 tarball → runtime → 安装包 → packaged runtime smoke）
@@ -10,7 +11,7 @@ name: Publish
 #     → visibility（六包均可 npm view + latest 指向本次版本才继续）
 #     → release（三平台安装包 + SHA256SUMS.txt，幂等上传）
 #
-# workflow_dispatch 是 packaging dry-run：只跑 verify + desktop matrix 并上传 artifacts，
+# workflow_dispatch 是 packaging dry-run：跑 verify + dsh-e2e + desktop matrix 并上传 artifacts，
 # publish / publish-dsh / visibility / release 全部跳过；TAG 从根 package.json 版本生成。
 run-name: Publish ${{ github.ref_name }} · ${{ github.event_name == 'push' && 'release' || 'dry-run (no publish)' }}
 
@@ -170,6 +171,14 @@ jobs:
           path: release-pack/*.tgz
           if-no-files-found: error
           retention-days: 7
+
+  # Release gate：复用 dsh-e2e.yml 的真实 DSH E2E（最低版 + latest 两档矩阵）。
+  # 失败时 publish / publish-dsh / visibility / release 全部不会启动。
+  # dry-run 也跑 E2E，确保 release-prep 的 dry-run 与正式发布覆盖同一道门。
+  dsh-e2e:
+    name: DSH E2E (real DSH release gate)
+    needs: verify
+    uses: ./.github/workflows/dsh-e2e.yml
 
   preflight:
     name: preflight (npm token, push only)
@@ -410,8 +419,11 @@ jobs:
 
   publish:
     name: npm publish lockstep tarballs (push only)
-    needs: [preflight, verify, desktop-macos, desktop-windows, desktop-linux]
-    if: github.event_name == 'push' && needs.preflight.result == 'success'
+    needs: [preflight, verify, desktop-macos, desktop-windows, desktop-linux, dsh-e2e]
+    if: >-
+      github.event_name == 'push'
+      && needs.preflight.result == 'success'
+      && needs.dsh-e2e.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -549,12 +561,13 @@ jobs:
 
   release:
     name: GitHub Release installers + checksums (push only)
-    needs: [verify, publish, publish-dsh, visibility, desktop-macos, desktop-windows, desktop-linux]
+    needs: [verify, publish, publish-dsh, visibility, desktop-macos, desktop-windows, desktop-linux, dsh-e2e]
     if: >-
       github.event_name == 'push'
       && needs.publish.result == 'success'
       && needs.publish-dsh.result == 'success'
       && needs.visibility.result == 'success'
+      && needs.dsh-e2e.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:

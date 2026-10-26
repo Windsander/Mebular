@@ -1,0 +1,243 @@
+name: DSH E2E
+
+# Real DSH E2E: real daemon + real @deepseek-ai/dsh + real Chrome/CDP + real MCP
+# tool calls. Missing prerequisites fail the job; they never silently skip.
+#
+# Triggers:
+#   schedule          nightly (UTC 03:00 / 北京时间 11:00)
+#   workflow_dispatch manual reproduction
+#   workflow_call     release gate from publish.yml
+#   pull_request      path-filtered changes that can break the integration
+#   push main         main baseline with the same path filter
+#
+# The matrix legs are the minimum supported DSH version, npm `latest`, and a
+# Node 22.19 + minimum smoke that runs only on nightly / manual dispatch. Keep
+# the minimum leg in sync with tests/dsh/e2e/versions.json (checked below).
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+  workflow_call:
+  pull_request:
+    paths:
+      - 'packages/dsh-plugin/**'
+      - 'packages/mcp/**'
+      - 'packages/console/**'
+      - 'tests/dsh/**'
+      - 'scripts/verify-dsh-e2e.mjs'
+      - 'scripts/lib/**'
+      - '.github/workflows/dsh-e2e.yml'
+      # Runtime inputs used by the daemon and the embedded Console.
+      - 'src/**'
+      - 'packages/service/**'
+      - 'packages/fleet/**'
+      - 'package.json'
+      - 'package-lock.json'
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/dsh-plugin/**'
+      - 'packages/mcp/**'
+      - 'packages/console/**'
+      - 'tests/dsh/**'
+      - 'scripts/verify-dsh-e2e.mjs'
+      - 'scripts/lib/**'
+      - '.github/workflows/dsh-e2e.yml'
+      - 'src/**'
+      - 'packages/service/**'
+      - 'packages/fleet/**'
+      - 'package.json'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dsh-e2e-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  e2e:
+    name: dsh-e2e (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: minimum
+            dsh: 0.2.1-rc.2
+            node: '24'
+            scenarios: ''
+          - label: latest
+            dsh: latest
+            node: '24'
+            scenarios: ''
+          - label: node22-minimum
+            dsh: 0.2.1-rc.2
+            node: '22.19'
+            scenarios: '--scenario happy-path'
+    steps:
+      # job-level `if` cannot read the matrix context (matrix expands after the
+      # job-level condition is evaluated). Guard each matrix row with a step
+      # instead: the Node 22.19 smoke is a nightly/manual signal, not a per-PR
+      # cost. The runner is still allocated for this row, but every real step
+      # below skips on pull_request / push / workflow_call.
+      - name: Determine whether this matrix row runs
+        id: guard
+        shell: bash
+        env:
+          ROW_LABEL: ${{ matrix.label }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if [ "$ROW_LABEL" = "node22-minimum" ] \
+             && [ "$EVENT_NAME" != "schedule" ] \
+             && [ "$EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping node22-minimum on $EVENT_NAME"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.guard.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        if: steps.guard.outputs.enabled == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Cache pnpm store
+        if: steps.guard.outputs.enabled == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/pnpm/store
+          key: pnpm-store-${{ runner.os }}-v1-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            pnpm-store-${{ runner.os }}-v1-
+
+      # GitHub-hosted ubuntu-latest images already ship Chrome/Chromium. Probe
+      # the preinstalled binaries instead of pulling a third-party action whose
+      # moving tag would add supply-chain risk.
+      - name: Prepare Chrome/Chromium
+        if: steps.guard.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          CHROME_BIN="$(command -v google-chrome \
+            || command -v google-chrome-stable \
+            || command -v chromium \
+            || command -v chromium-browser \
+            || true)"
+          if [ -z "$CHROME_BIN" ]; then
+            echo "::error::No Chrome/Chromium binary found on this runner; DSH E2E must not skip"
+            exit 1
+          fi
+          "$CHROME_BIN" --version
+          echo "CHROME_PATH=$CHROME_BIN" >> "$GITHUB_ENV"
+
+      - name: Prepare pnpm
+        if: steps.guard.outputs.enabled == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # `dsh plugin add` forwards to pnpm. Pin the exact version validated
+          # locally (12.15.0) so a range bump cannot silently change installs.
+          npm install --global pnpm@12.15.0 --no-audit --no-fund
+          INSTALLED="$(pnpm --version)"
+          if [ "$INSTALLED" != "12.15.0" ]; then
+            echo "::error::pnpm version mismatch: expected 12.15.0, got $INSTALLED"
+            exit 1
+          fi
+          pnpm --version
+
+      - name: Verify prerequisites (fail, never skip)
+        if: steps.guard.outputs.enabled == 'true'
+        shell: bash
+        env:
+          NODE_VERSION: ${{ matrix.node }}
+        run: |
+          set -euo pipefail
+          EXPECTED_MAJOR="${NODE_VERSION%%.*}"
+          NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
+          if [ "$NODE_MAJOR" != "$EXPECTED_MAJOR" ]; then
+            echo "::error::DSH E2E requires Node $NODE_VERSION, got $(node --version)"
+            exit 1
+          fi
+          # The 22.19 leg must actually run that minor, not just any 22.x.
+          if [ "$NODE_VERSION" != "${NODE_VERSION%%.*}" ] \
+             && [ "$(node -p 'process.versions.node.split(".").slice(0,2).join(".")')" != "$NODE_VERSION" ]; then
+            echo "::error::DSH E2E requires Node $NODE_VERSION, got $(node --version)"
+            exit 1
+          fi
+          if [ -z "${CHROME_PATH:-}" ] || [ ! -x "$CHROME_PATH" ]; then
+            echo "::error::Chrome/Chromium binary missing; DSH E2E must not skip"
+            exit 1
+          fi
+          "$CHROME_PATH" --version
+          if ! command -v pnpm >/dev/null 2>&1; then
+            echo "::error::pnpm missing; dsh plugin add requires it"
+            exit 1
+          fi
+          pnpm --version
+
+      - name: Install dependencies
+        if: steps.guard.outputs.enabled == 'true'
+        run: npm ci
+
+      - name: Build
+        if: steps.guard.outputs.enabled == 'true'
+        run: npm run build
+
+      - name: Verify DSH version matrix SSOT
+        if: steps.guard.outputs.enabled == 'true' && matrix.label == 'minimum'
+        shell: bash
+        run: |
+          set -euo pipefail
+          MIN="$(node -p "require('./tests/dsh/e2e/versions.json').minimum")"
+          if [ "$MIN" != "${{ matrix.dsh }}" ]; then
+            echo "::error::tests/dsh/e2e/versions.json minimum=$MIN 与 workflow matrix=${{ matrix.dsh }} 不一致"
+            exit 1
+          fi
+
+      - name: Run real DSH E2E (${{ matrix.label }})
+        id: e2e
+        if: steps.guard.outputs.enabled == 'true'
+        shell: bash
+        env:
+          E2E_ROOT: ${{ runner.temp }}/dsh-e2e/${{ matrix.dsh }}
+          E2E_LOG: ${{ runner.temp }}/dsh-e2e-${{ matrix.dsh }}-harness.log
+          E2E_SCENARIOS: ${{ matrix.scenarios }}
+        run: |
+          set -euo pipefail
+          node scripts/verify-dsh-e2e.mjs \
+            --dsh-version "${{ matrix.dsh }}" \
+            --root "$E2E_ROOT" \
+            ${E2E_SCENARIOS:-} 2>&1 | tee "$E2E_LOG"
+
+      - name: Upload failure artifacts
+        if: steps.guard.outputs.enabled == 'true' && failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-e2e-${{ matrix.label }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/dsh-e2e/${{ matrix.dsh }}/scenario-*/artifacts
+            ${{ runner.temp }}/dsh-e2e-${{ matrix.dsh }}-harness.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Clean up success artifacts
+        if: steps.guard.outputs.enabled == 'true' && success()
+        shell: bash
+        env:
+          E2E_ROOT: ${{ runner.temp }}/dsh-e2e/${{ matrix.dsh }}
+          E2E_LOG: ${{ runner.temp }}/dsh-e2e-${{ matrix.dsh }}-harness.log
+        run: |
+          rm -rf "$E2E_ROOT" "$E2E_LOG"
+          rmdir "$(dirname "$E2E_ROOT")" 2>/dev/null || true

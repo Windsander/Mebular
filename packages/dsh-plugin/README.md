@@ -201,10 +201,17 @@ mcp__mebular__*
 DSH 与 Mebular App 同时保持运行，Mebular App 继续独立运行、继续负责存储与控制台，不会因为
 安装插件而退出或消失。
 
-P7.3 在 `@deepseek-ai/dsh@0.2.1-rc.2`、临时 home 与非默认端口上实测：侧边栏出现 Mebular，
-iframe 为 `/console/?embed=dsh`，Console 内 `dataset.embed='dsh'`、星图与设置正常；
-临时 probe 插件从 `ctx.tools.schemas()` 读到 29 个 `mcp__mebular__*` 工具（总计 33 个，
-其余为 DSH 自带工具）。工具数量会随 daemon 版本变化，不承诺固定值。
+P7.3 的手工验证已固化为自动化门禁：`npm run verify:dsh:e2e` 在真 daemon、真
+`@deepseek-ai/dsh`、真 Chrome/CDP 上跑 9 个场景，断言侧边栏、状态点、iframe
+`/console/?embed=dsh`、Console 内 `dataset.embed='dsh'`，并通过 DSH 自己的 tool registry
+真实调用 `mcp__mebular__*` 的只读工具（不硬编码工具总数）。nightly 覆盖最低支持版与 npm
+`latest`；Node 22.19 的 smoke 只在 nightly / manual 运行。`publish` 与 GitHub Release 依赖
+同一 workflow：E2E 不绿则六个 npm 包和 Release 都不发。发布前或修改 E2E 断言时还应手动跑
+`npm run verify:dsh:e2e:negative`，它会故意移除副本插件的 sidebar 注册，要求 E2E 判红。
+
+完整矩阵、artifacts 与发布门禁见
+[`docs/operations/DSH_E2E.md`](../../docs/operations/DSH_E2E.md)。PR 的首次真实 runner 结果
+属于验收的一部分；本文档不声称 CI 已绿。
 
 面板状态可单独检查（只接受 loopback 请求）：
 
@@ -350,6 +357,12 @@ npm test -- --runInBand tests/dsh tests/console tests/mcp
 
 # 插件打包契约（无网络、不写文件）
 npm run verify:dsh-plugin
+
+# 真实 DSH E2E（真 daemon / DSH / Chrome；完整 9 场景）
+npm run verify:dsh:e2e
+
+# 故障注入：坏插件必须让 E2E 判红（手动，不进 nightly/release）
+npm run verify:dsh:e2e:negative
 ```
 
 `index.js` 是纯 ESM host plugin；`client.js` 是手写

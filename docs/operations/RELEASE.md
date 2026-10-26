@@ -100,16 +100,18 @@
 
 ## 2. 发布流水线
 
-`.github/workflows/publish.yml` 的 9 个 job：
+`.github/workflows/publish.yml` 的 10 个 job（`dsh-e2e` 调用 reusable workflow 的
+`minimum` + `latest` 两个矩阵 job）：
 
 ```text
 verify（SSOT / build / lint / test / 6 tarballs）
+  ├─ dsh-e2e（reusable dsh-e2e.yml：真实 DSH 最低版 + latest）
   ├─ preflight（push only：npm whoami）
   ├─ desktop-macos  ─┐
   ├─ desktop-windows ├─ 同一批 tarball → runtime → 安装包 → packaged smoke
   └─ desktop-linux  ─┘
         │
-        ▼（三平台全部成功 + preflight 成功）
+        ▼（三平台 + preflight + DSH E2E 全部成功）
      publish（core/service/skill/mcp/fleet tarball）
         │
         ▼
@@ -132,18 +134,24 @@ verify（SSOT / build / lint / test / 6 tarballs）
 4. **desktop matrix** 在 macOS / Windows / Linux runner 上各自下载 `release-tarballs`，
    执行 `prepare-runtime` → `smoke:runtime` → `dist:*` → packaged runtime smoke，并上传
    `desktop-macos` / `desktop-windows` / `desktop-linux`。
-5. **publish** 依赖 `preflight` + `verify` + 三个 desktop job，因此**安装包全部通过后才发 npm**。
-6. **publish-dsh** 依赖 `publish`，发布 `packages/dsh-plugin` tarball；版本与六包 SSOT 一致。
-7. **visibility** 依赖 `publish` + `publish-dsh`，用
+5. **publish** 依赖 `preflight` + `verify` + 三个 desktop job + `dsh-e2e`，因此**安装包全部
+   通过、且真实 DSH E2E 全绿后才发 npm**。E2E 失败时 `publish` / `publish-dsh` /
+   `visibility` / `release` 都不会启动。
+6. **dsh-e2e** 复用 `.github/workflows/dsh-e2e.yml`，矩阵为最低 `0.2.1-rc.2` 与 npm
+   `latest`；`fail-fast: false`，单 job 超时 45 分钟。操作细节见
+   [`DSH_E2E.md`](DSH_E2E.md)。
+8. **publish-dsh** 依赖 `publish`，发布 `packages/dsh-plugin` tarball；版本与六包 SSOT 一致。
+9. **visibility** 依赖 `publish` + `publish-dsh`，用
    `scripts/verify-release-visibility.mjs` 有界轮询六个包的 `npm view <pkg>@<version> version`
    与 `dist-tags.latest`。只有六包可见且 latest 指向本次版本，`release` 才会启动。
-8. **release** 依赖全部 job，下载三个 `desktop-*` artifact，校验恰好 1 个 `.dmg` / `.exe` /
-   `.AppImage` / `.deb`，生成 `SHA256SUMS.txt`，从 CHANGELOG 抽取 notes，创建 Release 并
-   `gh release upload --clobber`。
+10. **release** 依赖全部 job（含 `dsh-e2e`），下载三个 `desktop-*` artifact，校验恰好 1 个
+    `.dmg` / `.exe` / `.AppImage` / `.deb`，生成 `SHA256SUMS.txt`，从 CHANGELOG 抽取 notes，
+    创建 Release 并 `gh release upload --clobber`。
 
 > 串行保证：`concurrency.group = publish-${{ github.ref }}`，`cancel-in-progress: false`；
-> 同一 release 分支重复 push 不会并行发布。dry-run（`workflow_dispatch`）不运行
-> preflight / publish / publish-dsh / visibility / release。
+> 同一 release 分支重复 push 不会并行发布。dry-run（`workflow_dispatch`）运行
+> verify + dsh-e2e + desktop matrix，但不运行 preflight / publish / publish-dsh /
+> visibility / release。
 
 ### 2.1 分支生命周期（固定流程）
 
@@ -201,11 +209,16 @@ npm run lint
 npm run test:coverage          # 覆盖率门槛在 package.json#jest.coverageThreshold
 npm run verify:mcp:publish     # 5 包 npm pack + tarball 干净安装冒烟
 npm run verify:dsh-plugin      # 插件契约 + tarball
+npm run verify:dsh:e2e:min     # 真实 DSH 最低支持版本 E2E
+npm run verify:dsh:e2e:latest  # 真实 DSH npm latest（网络允许时）
 npm run verify:release-version # 六包 / lock / 桌面 / MCP / CHANGELOG SSOT
 npm run check:docs             # 文档一致性 7/7
 npm run check:i18n
 npm run check:deps
 ```
+
+> `verify:dsh:e2e:*` 需要 pnpm、Chrome/Chromium 与 npm 网络；缺前置会显式失败，不会 SKIP。
+> 详见 [`DSH_E2E.md`](DSH_E2E.md)。
 
 发布后可见性 gate 也可以独立预演（对已发布版本只读）：
 
@@ -238,10 +251,11 @@ node apps/desktop/scripts/smoke-runtime.mjs --runtime "apps/desktop/dist/<unpack
 
 ## 4. Packaging dry-run
 
-`workflow_dispatch` 只跑 `verify` + 三平台 desktop matrix，上传 artifacts；**不**运行
+`workflow_dispatch` 跑 `verify` + `dsh-e2e` + 三平台 desktop matrix，上传 artifacts；**不**运行
 `preflight`、`publish`、`publish-dsh`、`visibility`、`release`，不发布 npm，也不创建
 GitHub Release。TAG 从根 `package.json` 版本生成，因此必须先在 `release-prep` 分支完成
-版本 bump。
+版本 bump。dry-run 与正式发布跑同一套 DSH E2E 门禁，避免“dry-run 绿、正式发布才发现
+DSH 破坏”。
 
 > `workflow_dispatch` 需要该 workflow 已在默认分支注册。若 `publish.yml` 尚未合入 `main`，
 > GitHub 不会提供手动触发入口；此时不要用 `release/v*` 分支 push 代替 dry-run，那会进入
@@ -403,6 +417,7 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 | 失败位置 | 处理 |
 | --- | --- |
 | verify | 修版本 / CHANGELOG / 测试，重推同一分支。不要跳过 verify。 |
+| dsh-e2e | 下载 `dsh-e2e-*` artifacts，按 [`DSH_E2E.md`](DSH_E2E.md) 第 6 节定位；修复后重跑 E2E 或整个 run。不要用 skip / 删断言换绿。 |
 | preflight | 更新 `NPM_TOKEN`（granular + Bypass 2FA），再 Rerun failed jobs。 |
 | 单个 desktop job | 先看 packaged runtime smoke 日志；修 runtime / builder 配置后重跑。其余平台成功产物保留。 |
 | publish 部分包已发 | 直接重跑；已发布包 skip，未发布包继续。 |
@@ -562,16 +577,19 @@ git push -u origin release/v0.1.0
 | `npm audit --omit=dev` | ✅ | 0 vulnerabilities |
 | `npm run check:docs` | ✅ | 7/7 |
 | `npm run verify:mcp:publish` | ⏳ | 发布分支上由 Publish verify 重跑 |
-| `npm run verify:dsh-plugin` | ✅ | bundle / patch / runtime bridge / client contract / tarball |
-| DSH 真实 E2E | ✅ | `@deepseek-ai/dsh@0.2.1-rc.2`：sidebar iframe `?embed=dsh`、29 个 `mcp__mebular__*` |
+| `npm run verify:dsh-plugin` | ✅ | 136 checks：bundle / patch / runtime bridge / client contract / tarball |
+| DSH 真实 E2E（min） | ✅ | `@deepseek-ai/dsh@0.2.1-rc.2`：6 场景 121/121（2026-10-26 本地复跑） |
+| DSH 真实 E2E（latest） | ✅ | npm `latest`（当时同为 `0.2.1-rc.2`）：6 场景 121/121 |
 | 桌面单元 / 契约 | ✅ | desktop 229 tests（R1/R2） |
 | `prepare-runtime` + `smoke:runtime` | ✅ | 7 checks：`/healthz`、embed info、Console 安全头 |
 | `dist:dir` + packaged runtime smoke | ✅ | 7 checks；从 `<resources>/node_modules` 启动 |
-| `publish.yml` 结构 | ✅ | 8 jobs；`workflow_dispatch` dry-run；actionlint 通过 |
+| `publish.yml` 结构 | ✅ | 10 jobs（含 `dsh-e2e` reusable gate）；`js-yaml` 解析 + needs 图校验；本机无 actionlint |
+| DSH E2E workflow 首次 runner 运行 | ⏳ | workflow 已接入；需在默认分支 `workflow_dispatch` 或等 nightly，尚未声称 CI 已绿 |
 | 三平台 packaging dry-run | ⏳ | R4 在 GitHub runner 上执行 |
 
 > 本表不替代发布分支上的 `build` / `lint` / `test:coverage` / `verify:mcp:publish` /
-> `verify:dsh-plugin` 门禁；三平台安装包必须在 dry-run 中实际构建并冒烟后才能进入 R5。
+> `verify:dsh-plugin` / `verify:dsh:e2e:min` / `verify:dsh:e2e:latest` 门禁；三平台安装包
+> 必须在 dry-run 中实际构建并冒烟后才能进入 R5。
 
 ### 10.1 已知问题（不阻塞 0.1.0）
 

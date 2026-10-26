@@ -1,0 +1,7 @@
+# Test-only probe. Installed next to @mebular/dsh-plugin by the E2E harness.
+# It never ships in the npm package.
+- insert:
+    - id: mebular-e2e-probe
+      name: '@mebular/dsh-e2e-probe'
+      config:
+        timeoutMs: 120000

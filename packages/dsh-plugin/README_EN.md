@@ -18,7 +18,7 @@ A distributed memory network for your AI assistants. Memory and tasks stay on yo
 
 <div align="center">
 
-![Star map example: the device network at rest and task lanes on hover](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-starmap-en.jpg)
+![Star map baseline: the device network before hovering](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/star-map-baseline-en-420.jpg) ![Task lanes and a fleet event: blue can send, gold can receive, gray unreachable](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/star-map-lanes-en-420.jpg)
 
 *The map at rest: devices and their shared-subscription edges. · On hover: task-domain lanes plus live fleet traffic. Blue and gold show this device's two-way task-domain reachability, not peer-to-peer links.*
 

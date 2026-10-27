@@ -1,78 +1,44 @@
-# Use Mebular with DeepSeek Harness (DSH)
+# Mebular in DeepSeek Harness (DSH)
 
-[中文](DSH_CN.md) · [Back to docs](../README.md)
+[中文](DSH_CN.md) · [Documentation index](../README.md)
 
-`@mebular/dsh-plugin` adds Mebular's memory and task graph to
-[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH), and embeds
-the shared Mebular Console in a DSH sidebar panel. It is a zero-build DSH bundle: one
-`mebular` host row discovers the running daemon at runtime, mounts the official
-`@deepseek-ai/dsh-mcp-client` peer over **Streamable HTTP**, and points its iframe at the
-same Console the desktop app uses.
+`@mebular/dsh-plugin` brings Mebular's memory and task graph into
+[DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH), and
+embeds the shared Mebular Console in the DSH sidebar. It is a zero-build DSH
+bundle: it does not import `@mebular/*`; it discovers the shared local runtime
+through the CLI and daemon HTTP endpoints.
 
-## One Console, two shells
+Since v0.2.0, the App and the DSH Plugin are **two equal entry points to one
+local Mebular runtime**: one daemon, one `mebular-serve`, one active
+profile/home and one data root. The Plugin defaults to `attach`; only an
+explicit `managed`/`auto` choice or a panel install starts/installs the runtime.
 
-| Plane | Responsibility |
+## Two entries, one runtime
+
+| Surface | Responsibility |
 | --- | --- |
-| **Mebular app / daemon** | Control plane: identity, storage lock, trust, sync, star-map Console. |
-| **DSH** | Agent plane: reasons over the graph, calls Mebular tools, and shows the same Console in a sidebar panel. |
+| **Mebular App / shared runtime** | Control plane: runtime, daemon, service, identity, storage lock, sync and the star-map Console. |
+| **DSH Plugin** | Agent surface: the same Console in the sidebar, the official MCP client, and on-demand ensure/start of the same runtime. |
 
-The plugin never replaces the app. It does not start a second Mebular console, read the
-local store, or import `@mebular/*`. The only contract is the daemon's public HTTP
-surface.
-
-## Endpoints
-
-| Endpoint | Purpose |
-| --- | --- |
-| `/healthz` | daemon health check |
-| `/app/embed/info` | Console embeddability |
-| `/console/?embed=dsh` | DSH sidebar iframe |
-| `/mcp` | Streamable HTTP endpoint for the official MCP client |
-| `/mebular/embed-info` | read-only panel status (loopback only) |
-
-## Before you start
-
-1. Start the Mebular app, or run the daemon on its own:
-
-   ```bash
-   mebular serve            # default HTTP/MCP/console port 7331
-   curl -sS http://127.0.0.1:7331/healthz
-   ```
-
-2. Confirm the default MCP endpoint is `http://127.0.0.1:7331/mcp`.
-
-> **Use HTTP, not stdio.** A stdio MCP entry starts a second Mebular process, which then
-> fights the app's daemon for the storage lock (`MCP_STORAGE_LOCKED`). This plugin never
-> declares a stdio transport or a `command:`.
+The Plugin never starts a second Console and never reads the store, identity or
+tokens directly. It uses the shared runtime supervisor (`runtime
+resolve`/`supervise`) and daemon HTTP endpoints.
 
 ## Install
 
-Install the plugin from npm into DSH's web profile:
+Install from npm into the DSH web profile:
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
+dsh plugin --profile web add @mebular/dsh-plugin@0.2.0
 ```
 
-For plugin development, install from the repository checkout instead:
+For development:
 
 ```bash
 dsh plugin --profile web add ./packages/dsh-plugin
 ```
 
-The plugin does not install the daemon or Console, and installing it does not start the
-daemon: the default `attach` only probes. If the Mebular app is already running, skip this;
-otherwise install and open the app, or install the CLI and run `mebular serve`; alternatively
-set `lifecycle: managed` to let the plugin start it (the CLI is required). When the daemon is
-running but not initialized, the Console in the panel shows the same create/join Cloud
-onboarding as the app.
-
-`@mebular/dsh-plugin` is an independent adapter: its code stays isolated in
-`packages/dsh-plugin`, and it is published by its own npm job. Its version follows the
-unified Mebular release train, so all six npm packages share one version. The plugin is listed in
-[awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) under **memory**
-(PR [#9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)).
-
-The package ships `cordis.patch.yml` with exactly one host row:
+The default config is minimal and attach-only:
 
 ```yaml
 - id: mebular
@@ -82,184 +48,115 @@ The package ships `cordis.patch.yml` with exactly one host row:
     panel: true
 ```
 
-There is no static MCP row and no hard-coded `daemonUrl`. On activation the host resolves
-the daemon URL, mounts the official MCP client against it, and registers the sidebar and
-main panel. Restart the DSH session so the profile is reloaded.
+Restart the DSH session for the profile to take effect. Installing the Plugin
+never downloads or starts Mebular silently.
 
-## Verify
+### When no runtime exists
+
+If an App/CLI/service/shared runtime exists, the Plugin attaches and installs
+nothing.
+
+If none exists, the panel reports `download_required` with an explicit
+**Install Mebular Runtime** action. On click the Plugin installs the pinned
+`@mebular/core` matching its own package version: download → verify → atomic
+install → provider registration → init → start → Console onboarding. Failures
+offer the reason, manual command, retry/reinstall and re-detect; the old runtime
+is preserved and no half runtime is started.
+
+Only the user's click triggers a download. `bootstrap: never` disables this
+entry point.
+
+## Shared runtime resolution
+
+The Plugin does not guess the current profile or port. It selects a shared CLI
+(App/CLI/shared provider) and runs:
 
 ```bash
-dsh --profile web --dump-config | grep -A6 mebular
+mebular runtime resolve --json
 ```
 
-The block should contain only the `mebular` host row (`name: '@mebular/dsh-plugin'`).
-There should be no `@deepseek-ai/dsh-mcp-client` row and no `url:` in the patch.
+The result provides the current `cloudRoot`/profile/home, daemon HTTP endpoint,
+version, service/provider and bootstrap state. The panel, MCP bridge and iframe
+use the same dynamic daemon URL.
 
-In a DSH session the Mebular tools are namespaced as `mcp__mebular__*` (for example a
-memory read/write or task tool). Calling one and getting Mebular data back means the graph
-is connected. The sidebar Mebular panel should show the same Console; its status comes
-from the loopback-only `GET /mebular/embed-info` route.
+Provider order is `app > cli > shared`; for multiple shared versions,
+`runtime/current.json` wins. If the App is installed but stopped, the Plugin
+starts the App provider instead of downloading another runtime. A registered
+service takes precedence. An explicit `daemonUrl` is a pin and is attach-only;
+it is never overridden by the dynamic URL.
 
-The Mebular sidebar icon carries a small status dot even while the panel is closed: green
-means connected, amber means starting or degraded, red means offline, and gray means the
-first check is still pending. The dot and the panel share one poll and one status source;
-hovering the dot shows the current status. See the
-[surface contract](../architecture/SURFACES.md) for the shared state and recovery rules.
+The legacy discovery order remains available when no shared CLI is present:
+`daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 127.0.0.1:7331`. Only
+non-sensitive `runtime.json` fields are read; config, identity, tokens and the
+store are never read.
 
-If a call returns `NOT_INITIALIZED`, finish creating or joining a Cloud in the Console;
-the same MCP session recovers without restarting the daemon.
+Environment variables:
 
-When no daemon is running, the plugin does not mount the MCP client at all, so there are no
-`mcp__mebular__*` tools to wait on or call. The panel still loads and shows guidance, the
-Agent receives a short status note (see below), and the log reports `mcp bridge unavailable
-(daemon_unreachable): start the Mebular app or run "mebular serve"`. Start the daemon (or run
-`mebular serve`); the plugin discovers it on the next health check, mounts the tools
-automatically, and the panel recovers without restarting DSH. `attach` never starts the
-daemon for you.
-
-### Automated verification
-
-The manual checks above are also a CI gate: `npm run verify:dsh:e2e` runs nine scenarios
-against a real daemon, real DSH Web and real headless Chrome. It asserts the sidebar entry,
-status dot, iframe `/console/?embed=dsh`, Console `dataset.embed='dsh'`, real
-`mcp__mebular__*` tool calls, daemon down/recovery, `panel: false`, custom ports, uninstall
-isolation, security headers and the managed lifecycle. Nightly covers the minimum supported
-DSH version and npm `latest`; the Node 22.19 smoke runs nightly only. `publish` and the
-GitHub Release depend on the same workflow, so a red E2E blocks all six npm packages and
-the release. Before a release or when changing E2E assertions, also run
-`npm run verify:dsh:e2e:negative`, which removes the sidebar registration from a copied
-plugin and requires the harness to fail. The first real GitHub runner result on the PR is
-part of acceptance, not a post-merge check. See
-[DSH E2E and CI gates](../operations/DSH_E2E.md).
-
-## Common reasons
-
-| Reason | What to do |
+| Variable | Purpose |
 | --- | --- |
-| `daemon_unreachable` | start the Mebular app or run `mebular serve`; check `7331` |
-| `daemon_unhealthy` | check `/healthz`, the port and the daemon log |
-| `embed_info_unavailable` | check the daemon version and `/app/embed/info` |
-| `not_loopback` / `embed_unsupported` | the panel is loopback only; use local DSH |
-| `managed_cli_missing` | install the Mebular CLI, or set `cliPath` / `MEBULAR_CLI` |
-| `managed_start_failed` | read the redacted managed child stderr in the DSH log |
-| `peer_missing` | make sure DSH provides the `@deepseek-ai/dsh-mcp-client` peer |
+| `MEBULAR_CLOUD_ROOT` | Shared root; defaults to `~/.mebular` |
+| `MEBULAR_HOME` | Compatibility home/profile discovery |
+| `MEBULAR_HTTP_PORT` | Legacy port override; a successful shared resolve wins |
+| `MEBULAR_CLI` | Explicit CLI candidate (`cliPath` wins) |
 
-## Daemon discovery and ports
+## Lifecycle
 
-The default port is `7331`. The host resolves the daemon in this order:
+| Config | Behaviour |
+| --- | --- |
+| `lifecycle: attach` (default) | Resolve/probe only; never start or stop. The panel asks the user to start the App or install the runtime. |
+| `lifecycle: managed` | Explicit opt-in. Reuse a healthy daemon; use a registered service; otherwise start via a provider. |
+| `lifecycle: auto` | Explicit opt-in with managed start semantics; without a provider it returns to `download_required` and does not download. |
+| `runtime: external` | Attach-only; never start or stop. |
+| `persistence: child` | Default; the Plugin owns its own `runtime supervise` process. |
+| `persistence: service` | Require an existing service; do not install one. |
+| `bootstrap: prompt` | Show the install action when no runtime exists (default). |
+| `bootstrap: never` | Hide and reject the install action. |
 
-1. explicit `daemonUrl` in the plugin config (credentials are rejected);
-2. `MEBULAR_HTTP_PORT`;
-3. `<home>/runtime.json` (written after the daemon's HTTP listener is bound; a dead `pid`
-   makes the record stale and it is skipped);
-4. `http://127.0.0.1:7331`.
+`managed`/`auto` hold the child through `mebular runtime supervise`, not by
+spawning `mebular serve` directly. On dispose the Plugin stops only its own
+supervisor; the supervisor then cleans up the daemon child it owns. Service and
+external daemons are never stopped by the Plugin.
 
-`<home>` follows the Mebular CLI: `MEBULAR_HOME`, defaulting to `~/.mebular`. The host
-reads only the non-sensitive discovery fields (`version`, `pid`, `http.host`, `http.port`,
-`consolePath`, `mcpPath`, `embedProtocol`); it never reads `config.json`, identity,
-tokens, or the store.
-
-To use a different port, keep the daemon and DSH in sync:
-
-```bash
-MEBULAR_HTTP_PORT=7332 dsh --profile web
-```
-
-The panel, `/mebular/embed-info`, and the MCP bridge all follow the same resolved origin.
-There is no separate MCP URL to edit.
-
-## Lifecycle: attach or managed
-
-`attach` is the default: probe `/healthz` only, never start or stop a process. If no
-daemon is running, the panel shows guidance, the MCP bridge stays unmounted, and the log
-reports a stable `daemon_unreachable` notice. When the daemon starts, the bridge mounts
-automatically; when it stops, the bridge fiber is disposed and its tools are unregistered.
-
-`managed` reuses a healthy daemon, or starts one `mebular serve --port <port>` child when
-none is running, waits for `/healthz`, and stops only that child on dispose. The MCP bridge
-is not mounted while the child is `starting`, and is not mounted after
-`managed_start_failed` / `managed_cli_missing`; those states are logged with their stable
-reason. Once the daemon becomes healthy, the bridge mounts without a DSH restart.
+Full config:
 
 ```yaml
 - id: mebular
   name: '@mebular/dsh-plugin'
   config:
-    lifecycle: managed
-    cliPath: /absolute/path/to/mebular
+    lifecycle: managed      # attach | managed | auto
+    runtime: auto           # auto | external
+    persistence: child      # child | service
+    bootstrap: prompt       # prompt | never
     panel: true
+    # daemonUrl: ...         # explicit pin; also makes the lifecycle attach-only
 ```
 
-`managed` is a child-process fallback, not a service install:
+Invalid values fall back safely with a warning; activation does not fail.
 
-- a healthy daemon (service-managed, desktop app, or manual `mebular serve`) is reused, never
-  preempted or stopped;
-- when no daemon exists, it resolves the CLI and starts `mebular serve --port <port>`, then
-  waits for `/healthz` for a bounded time (20s by default);
-- on timeout, spawn error, or an early child exit, it stops only its own child and reports
-  `down` with `reason: managed_start_failed`; it does not retry forever;
-- shutdown is `SIGTERM` → 2s grace → `SIGKILL`; an external daemon is never stopped;
-- if the CLI cannot be resolved, it degrades to `attach` with `down` and
-  `reason: managed_cli_missing`;
-- child stdout/stderr is redacted before it reaches the DSH logger.
+## Status and panel
 
-No service is installed, and `MEBULAR_HOME` is never rewritten.
-
-Set `panel: false` to keep MCP tools but hide the sidebar/main panel, for example on a
-headless or TUI-only profile.
-
-## Configuration fields and environment
-
-| Field | Default | Description |
-| --- | --- | --- |
-| `daemonUrl` | `http://127.0.0.1:7331` | only `http:` / `https:`; trailing slash removed |
-| `lifecycle` | `attach` | `attach` only probes; `managed` starts a child when no daemon exists |
-| `panel` | `true` | `false` hides the sidebar / main panel; MCP tools stay available |
-| `cliPath` | unset | only for `managed`; `MEBULAR_CLI` is accepted, then `mebular` on `PATH` |
-
-| Variable | Effect |
-| --- | --- |
-| `MEBULAR_HTTP_PORT` | overrides the daemon port; the host, panel, and MCP bridge follow it |
-| `MEBULAR_HOME` | locates `runtime.json`; default `~/.mebular` |
-| `MEBULAR_CLI` | CLI candidate for `managed` (`cliPath` wins) |
-| `DSH_HOME` | DSH profile root; unrelated to the Mebular home |
-
-Invalid values fall back to safe defaults and log one `warn`; they never prevent DSH from
-starting.
-
-## Agent-visible status (DSH only)
-
-Mebular's availability is visible to the Agent too, not only to the sidebar. The host
-registers one DSH system-prompt section named `mebular:status`:
-
-- while the daemon is `up`, the section text is empty, so it adds no prompt tokens;
-- when it is `down`, the Agent is told that Mebular memory is unavailable, to ask you to
-  start the Mebular app or run `mebular serve`, and not to claim memory is available;
-- `starting` says memory tools are temporarily unavailable; `managed_cli_missing` and
-  `managed_start_failed` give their own recovery action.
-
-The section is derived from the same lifecycle snapshot as the MCP bridge; it does not add a
-poller or a second status source. DSH is notified through `system-prompt/change` only when
-the text changes, not on every health tick. It is profile-level prompt text, so every agent
-in that DSH profile may see it.
-
-This is an adapter feature, not a wire field and not a general MCP capability. The host
-injects the optional `systemPrompt` service with `ctx.inject(['systemPrompt'])` and silently
-skips the section on older DSH versions or profiles without that service; activation, the
-panel, and the MCP bridge keep working. `panel: false` does not disable it. Other MCP clients
-are not promised this hint, and Mebular does not add a `mebular_status` tool.
-
-## `/mebular/embed-info` contract
+`GET /mebular/embed-info` is loopback-only and returns non-sensitive state.
+v0.2.0 adds `state`, `runtimeMode`, `profile`, `provider`, `service`,
+`downloadRequired`, `install`, `update` and `upgrade`; the panel, MCP bridge and
+iframe share this state.
 
 ```json
 {
   "ok": true,
   "status": "up",
+  "state": "up",
   "mode": "attach",
+  "runtimeMode": "reused",
   "managed": false,
   "panel": true,
-  "version": "0.1.2",
-  "embedProtocol": 1,
+  "version": "0.2.0",
+  "profile": { "id": "default", "name": "My Cloud" },
+  "provider": { "kind": "app", "source": "registry", "version": "0.2.0" },
+  "service": { "registered": false, "running": false, "foreign": false },
+  "downloadRequired": false,
+  "install": { "state": "idle", "allowed": true },
+  "update": { "state": "idle", "available": false, "show": false, "manual": false },
+  "upgrade": { "state": "idle", "busy": false },
   "consoleUrl": "http://127.0.0.1:7331/console",
   "embedUrl": "http://127.0.0.1:7331/console/?embed=dsh",
   "mcpUrl": "http://127.0.0.1:7331/mcp",
@@ -268,95 +165,103 @@ are not promised this hint, and Mebular does not add a `mebular_status` tool.
 }
 ```
 
-| Field | Meaning |
-| --- | --- |
-| `status` | `up` (healthy), `down` (unreachable / unhealthy), `starting` (managed is starting and waiting for healthz). While `starting`, `embedUrl` is `null` and the panel does not load the iframe. |
-| `mode` | the effective lifecycle. A missing CLI degrades `managed` to `attach`. |
-| `managed` | `true` only when this plugin started the current daemon and its child is still running; reusing an external daemon always reports `false`. |
-| `reason` | a stable diagnostic code; `null` on success. |
+Common panel states:
 
-The other fields are `ok`, `panel`, `version`, `embedProtocol`, `consoleUrl`, `embedUrl`,
-`mcpUrl`, and `loopback`. `embedUrl` is returned only when the daemon, `/app/embed/info`'s
-`loopback`, `embedProtocol`, and `capabilities.embedConsole` all agree; otherwise the panel
-shows a placeholder and does not load the iframe.
+- `download_required` / `download_failed`: no usable runtime; show explicit
+  install, manual command and re-detect; never auto-download.
+- `provisioning` / `starting`: installing, init or supervisor startup; MCP tools
+  are not mounted yet.
+- `service_conflict` / `profile_mismatch` / `port_in_use`: do not start a second
+  daemon; follow the service/profile/port recovery message.
+- `update_available`: a new stable version was found; prompt only.
+- `up`: healthy daemon with a matching embed protocol; MCP bridge mounted and
+  Console embeddable.
 
-## Architecture boundary
+The sidebar dot shares the same source: green = up, amber = starting/installing/
+updating, red = down, gray = first check pending.
+
+## Updates and upgrade
+
+The Plugin calls the shared `mebular runtime check-update --json` on startup or
+refresh:
+
+- fixed official npm stable channel; 24h throttle; offline/HTTP/busy is silent;
+- shared `update-state`/`update.lock`; only one entry prompts;
+- `promptedVersion` is written only after the panel actually renders the
+  banner; the App writes the same shared state;
+- **Skip this version** writes the shared skipped version; **Later** does not
+  write a skip and does not auto-retry.
+
+Only an explicit user action runs:
 
 ```text
-DSH host                         Mebular daemon
-  ├─ cordis.patch.yml            ├─ /healthz
-  │   └─ mebular (index.js)      ├─ /app/embed/info
-  │       ├─ GET /mebular/embed-info
-  │       └─ mounts official mcp-client ──┼─ /mcp
-  └─ client.js
-      └─ iframe ─────────────────┼─ /console/?embed=dsh
+mebular runtime upgrade --to latest --json
 ```
 
-- This package imports **no** `@mebular/core`, `@mebular/console` or `@mebular/desktop`, and
-  copies none of the Console UI or static assets.
-- There is one Console implementation, served by the Mebular daemon; DSH only provides the
-  iframe container.
-- The plugin never opens `store.jsonl`, reads tokens, or writes `~/.mebular`.
-- The plugin dynamically imports only the official `@deepseek-ai/dsh-mcp-client` peer. MCP
-  connection, reconnection, discovery and registration stay with that official package. The
-  host mounts it with the discovered origin while the lifecycle is `up`, and disposes the child
-  fiber when the daemon goes away; the host does not implement an MCP client.
-- The panel and the MCP bridge share one daemon resolution; the panel and the tools never
-  disagree about the port.
+The upgrade reuses the installer and updates current/provider. If a service is
+registered, core updates and restarts `mebular-serve`; the Plugin restarts only
+its own supervisor. External daemons are untouched. A shared upgrade lock
+allows one executor; the other waits/reconnects. On failure the old
+runtime/current/provider are preserved and no second daemon is created.
+
+## Persistence and uninstall
+
+- Console **Keep Mebular running** installs/checks the shared `mebular-serve`;
+- the Plugin panel displays service status and links to Console; the Plugin does
+  not install services itself;
+- removing the DSH Plugin removes only the Plugin and its own supervisor/timers;
+  it does not delete runtime, provider, service or data;
+- explicit service removal is `mebular runtime service uninstall`; it preserves
+  runtime/provider/data.
 
 ## Security
 
-- `GET /mebular/embed-info` accepts loopback peers only; other sources get `404`.
-- The response contains no tokens, secrets, home paths, CLI paths, or process env.
-- The iframe is only created when the daemon, its loopback flag, embed protocol `1`, and
-  `capabilities.embedConsole` all agree; otherwise the panel shows a placeholder.
-- Iframe sandbox is `allow-scripts allow-same-origin allow-forms`; no top navigation.
-- The Console removes `X-Frame-Options` only for `?embed=dsh` on a loopback daemon and
-  limits `frame-ancestors` to loopback HTTP origins.
-- Managed child logs are redacted before they reach the DSH logger.
+- `/mebular/embed-info` is loopback-only and contains no token, key, home or CLI
+  path.
+- Install/upgrade are loopback-only `POST` JSON actions; arbitrary version/URL/
+  registry values are rejected. The host reads the fixed source and target.
+- The iframe is created only when the daemon, embed protocol, loopback and
+  `capabilities.embedConsole` all match; the sandbox grants no top navigation.
+- Shared update/upgrade/install locks prevent duplicate installs or upgrades;
+  logs are redacted.
 
-## Development and tests
+## Common reasons
 
-```sh
-# host pure functions + HTTP handler + lifecycle + client contract
+| Reason | Action |
+| --- | --- |
+| `download_required` | Install from the panel, or open the App/install the CLI |
+| `service_conflict` / `service_unknown` / `service_foreign` | Check Console/service; do not start a second daemon |
+| `profile_mismatch` / `instance_mismatch` / `CLOUD_ALREADY_ACTIVE` | Switch to the same profile or stop the other instance |
+| `port_in_use` | Free the port or change the Mebular port |
+| `runtime_resolve_failed` | Update/reinstall the App/CLI or shared runtime |
+| `supervise_failed` / `child_exited` | Check the shared runtime log and retry |
+| `update_*` / `upgrade_busy` | Wait for the other entry; upgrades are explicit |
+| `peer_missing` | Ensure DSH provides the `@deepseek-ai/dsh-mcp-client` peer |
+
+## Verification
+
+```bash
 npm test -- --runInBand tests/dsh
-
-# related regressions (Console embed / MCP / runtime / shutdown)
-npm test -- --runInBand tests/dsh tests/console tests/mcp
-
-# plugin packaging contract (no network, writes no files)
 npm run verify:dsh-plugin
+npm run verify:runtime:coexistence
 ```
 
-`index.js` is a plain ESM host plugin; `client.js` is a hand-written
-`window.__ModuleLoader__.load({ id: '@mebular/dsh-plugin', factory })` wrapper that only
-`require('react')`. Neither has a build step.
+The real DSH Web E2E (minimum supported version and npm latest), cold start,
+single daemon, service, update locks and upgrade rollback are covered by CI and
+[DSH E2E](../operations/DSH_E2E.md).
 
-## Where the plugin lives
+## Release and version
 
-The package is developed in `packages/dsh-plugin` inside this repository and published as
-`@mebular/dsh-plugin` on npm. GitHub topics are **repository-level**: keywords such as
-`dsh-plugin`, `deepseek-harness` and `agent-memory` describe the Mebular repository as a
-whole, not a separate package repo, so discovery points back here. See the
-[plugin README](../../packages/dsh-plugin/README_EN.md) for the quick start and capability
-overview; this document is the full configuration and lifecycle reference.
-
-## Release and versioning
-
-- Version: `0.1.2`, on the unified Mebular v0.1.2 release train (all six npm packages share
-  one version)
-- npm: [`@mebular/dsh-plugin@0.1.2`](https://www.npmjs.com/package/@mebular/dsh-plugin)
-- The plugin is an independent adapter: its code is isolated in `packages/dsh-plugin`, and its
-  npm publish runs in its own `publish-dsh` job.
-- Listed on
-  [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/)
-  under `memory` (PR [#9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)).
-- All six npm packages (`core`, `service`, `skill`, `mcp`, `fleet`, `dsh-plugin`) share one
-  version from the unified Mebular release train. The plugin is included in every release;
-  no release ships the DSH plugin alone.
-- Publish is idempotent: the `publish-dsh` workflow job reads the version from
-  `packages/dsh-plugin/package.json`, skips it if `npm view` already sees that version, and
-  otherwise publishes the package. See [the release SOP](../operations/RELEASE.md).
+- Version: `0.2.0`, on the unified Mebular v0.2.0 release train (all six npm
+  packages share the same version).
+- npm: `@mebular/dsh-plugin@0.2.0`.
+- The Plugin is an isolated adapter in `packages/dsh-plugin`, published by its
+  own npm job. It reads the pinned runtime version from its own `package.json`,
+  so a release bump needs no Plugin source edit.
+- Publish `@mebular/core@0.2.0` before `@mebular/dsh-plugin@0.2.0`; see
+  [Release SOP](../operations/RELEASE.md).
+- Listed in the `memory` category of
+  [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/).
 
 ## Uninstall
 
@@ -364,13 +269,11 @@ overview; this document is the full configuration and lifecycle reference.
 dsh plugin --profile web remove @mebular/dsh-plugin
 ```
 
-Confirm the profile no longer lists the plugin:
+Confirm the profile no longer contains the plugin:
 
 ```bash
-dsh --profile web --dump-config | grep -i mebular   # should print nothing
+dsh --profile web --dump-config | grep -i mebular   # expected: no output
 ```
 
-This removes only the DSH plugin. The Mebular app, its data, and the running Console are
-untouched; `/healthz` and `/console/` remain available. Do not delete the Mebular home or
-store. After `dsh plugin remove`, pnpm may keep a `node_modules/@mebular/dsh-plugin` symlink;
-it is not in the profile bundles and is not loaded.
+Removing the Plugin leaves the Mebular App, runtime, service, data and a running
+Console untouched. Do not delete the Mebular home or store.

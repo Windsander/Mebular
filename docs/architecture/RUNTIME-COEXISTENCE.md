@@ -1,10 +1,9 @@
 # 共享 Runtime：App 与 DSH Plugin 入口对等
 
-> **状态**：Phase 0–6 的代码与契约已落地：共享 Runtime Supervisor、Provider 注册表、
-> `mebular runtime` CLI、App 内部接入、DSH Plugin 共存接入、按需安装/重装、
-> service 所有权、启动更新检查、受控升级/回滚、离线共存 E2E。
-> 签名仍不在本计划内。真实 Windows 上的 Task Scheduler 路径尚未在本阶段验证；
-> 本机 service 的手工迁移需按 §10 的 legacy label 说明处理。
+> **状态**：v0.2.0 已落地共享 Runtime Supervisor、Provider 注册表、`mebular runtime`
+> CLI、App 内部接入、DSH Plugin 共存接入、按需安装/重装、service 所有权、启动更新检查、
+> 受控升级/回滚和离线共存 E2E。签名仍不在本版本范围内；真实 Windows Task Scheduler
+> 尚未做本机实机验证；legacy service label 遵循 fail-safe 迁移说明。
 >
 > 相关：[ARCHITECT.md](ARCHITECT.md)（运行时分层）、[SURFACES.md](SURFACES.md)
 > （跨表面状态语义）、[SHARED_RUNTIME.md](../operations/SHARED_RUNTIME.md)（操作与回滚）。
@@ -124,7 +123,7 @@ PATH、当前 CLI 自身。`runtime/current.json` 可用时作为 `kind: shared,
       "id": "sha256(kind+path) 前 12 hex",
       "kind": "app | cli | shared",
       "path": "/absolute/path/to/runtime-entry",
-      "version": "0.1.2",
+      "version": "0.2.0",
       "capabilities": ["serve"],
       "registeredAt": "2026-01-01T00:00:00.000Z",
       "updatedAt": "2026-01-01T00:00:00.000Z"

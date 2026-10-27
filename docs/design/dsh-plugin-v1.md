@@ -1,6 +1,11 @@
 # DSH 插件：共享 Console + 隔离壳
 
-Status: final（P7.1 / P7.2 已实现，P7.3 完成真实 E2E、截图与上架材料）
+> **历史设计（v0.1）**：本文记录 v0.1 的插件设计。v0.2.0 起由共享 Runtime
+> Supervisor/current/service/update 统一管理，当前配置与状态以
+> [`docs/integrations/DSH_CN.md`](../integrations/DSH_CN.md) 和
+> [`RUNTIME-COEXISTENCE.md`](../architecture/RUNTIME-COEXISTENCE.md) 为准。
+>
+> Status: final（P7.1 / P7.2 已实现，P7.3 完成真实 E2E、截图与上架材料）
 Branch: `feat/dsh-shared-console`
 Base: `origin/main@7c03798`
 DSH baseline: `0.2.1-rc.2`

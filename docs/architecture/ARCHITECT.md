@@ -96,9 +96,27 @@ UNINITIALIZED ── create/join ──▶ INITIALIZING ──▶ READY
 - `@mebular/dsh-plugin` 代码隔离在 `packages/dsh-plugin`，由独立 npm job 发布，但版本随统一
   release train；不存在 DSH-only release。
 - `packages/console` 与 `apps/desktop` 为 private 工作包，不单独发布；控制台随根包/守护分发。
-- Electron 桌面壳包含窗口、托盘、守护托管和云切换；v0.1.2 已纳入三平台 **unsigned** 安装包
+- Electron 桌面壳包含窗口、托盘、守护托管和云切换；v0.2.0 已纳入三平台 **unsigned** 安装包
   （macOS Universal DMG、Windows NSIS x64、Linux AppImage/deb x64）。安装包 runtime 来自与
   npm 发布同一批 verify tarball，并自带 Electron。签名、公证、自动更新在后续版本处理。
+
+### 2.6 共享 Runtime 与入口所有权
+
+从 v0.2.0 开始，App 与 DSH Plugin 都只是入口壳；本机 Mebular runtime、daemon、service、
+provider、current 和 profile 属于共享层，放在 `@mebular/mcp` 的 Runtime Supervisor 中。
+
+- 健康 daemon → attach；已注册 `mebular-serve` → 启动/复用；App/CLI/shared provider → 启动；
+  都没有才按用户同意安装固定版本共享 runtime；
+- `runtime-providers.json` 只记录非敏感 provider；`runtime/current.json` 指向当前共享版本；
+- `runtime-start.lock`、`update.lock`、`upgrade.lock`、`install.lock` 防止两个入口同时
+  启动、检查、升级或安装；
+- App 和 Plugin 只拥有自己拉起的 supervise/child；外部 daemon、service 和另一个入口的
+  runtime 不会被停止；
+- 入口卸载不删除共享 runtime、service、provider 或数据。
+
+完整的 provider/current/service/update 契约见
+[`RUNTIME-COEXISTENCE.md`](RUNTIME-COEXISTENCE.md)；日常操作见
+[`SHARED_RUNTIME.md`](../operations/SHARED_RUNTIME.md)。
 
 ## 3. 表面契约
 

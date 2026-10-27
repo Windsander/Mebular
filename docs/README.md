@@ -11,6 +11,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 - [README](../README.md) · [中文 README](../README_CN.md)
 - [Quickstart](getting-started/QUICKSTART.md) · [快速上手](getting-started/QUICKSTART_CN.md)
+- [Roadmap](../ROADMAP.md) · [路线图](../ROADMAP_CN.md) — public themes, current focus and exploration
 - [DSH integration](integrations/DSH.md) · [DSH 集成](integrations/DSH_CN.md)
 - [Contributing & quality gates](../CONTRIBUTING.md)
 - [Security policy](../SECURITY.md)

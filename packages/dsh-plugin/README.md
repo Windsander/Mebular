@@ -28,6 +28,15 @@ App 与 DSH Plugin 是同一套本机 Mebular runtime 的两个入口。插件�
 
 </div>
 
+<table width="100%">
+  <tr>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-cn-normal.jpg" alt="完整深色 DeepSeek Harness 界面：侧栏 Mebular 入口、面板 header 与内嵌星图" width="100%"><br><sub>完整 DSH 面板 · 入口与星图</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-cn-collapsed.jpg" alt="深色 DeepSeek Harness 侧栏折叠后，Mebular Console 全宽显示" width="100%"><br><sub>折叠侧栏 · Console 全宽</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-cn-memories.jpg" alt="深色 DeepSeek Harness 中的 Mebular 共享记忆视图" width="100%"><br><sub>共享记忆视图</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-cn-settings.jpg" alt="深色 DeepSeek Harness 中的 Mebular 设置视图（演示数据）" width="100%"><br><sub>设置与常驻配置</sub></td>
+  </tr>
+</table>
+
 ## DSH 接入
 
 <div align="center">

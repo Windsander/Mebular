@@ -29,6 +29,15 @@ asks before installing a pinned shared runtime.
 
 </div>
 
+<table width="100%">
+  <tr>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-normal.jpg" alt="The complete dark DeepSeek Harness view: Mebular sidebar entry, panel header and embedded star map" width="100%"><br><sub>Full DSH panel · entry and star map</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-collapsed.jpg" alt="Mebular Console full width after collapsing the dark DeepSeek Harness sidebar" width="100%"><br><sub>Collapsed sidebar · full Console</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-memories.jpg" alt="The Mebular shared-memory view inside dark DeepSeek Harness" width="100%"><br><sub>Shared memory view</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-en-settings.jpg" alt="The Mebular settings view inside dark DeepSeek Harness (demo data)" width="100%"><br><sub>Settings and keep-running</sub></td>
+  </tr>
+</table>
+
 ## DSH integration
 
 <div align="center">

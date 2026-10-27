@@ -284,6 +284,8 @@ html.console-booting #boot-screen::after {
 .sidebar-settings-ico { font-size: 11px; line-height: 1; }
 [data-embed='dsh'] .embed-only { display: list-item; }
 [data-embed='dsh'] .topbar { display: none; }
+/* 锁定态横幅在窄 DSH 面板会压住右侧导航；onboarding 卡已承载同一信息。 */
+[data-embed='dsh'] .banner.is-locked { display: none; }
 [data-embed='dsh'] .app { height: 100vh; }
 [data-embed='dsh'] .layout { flex: 1 1 auto; min-height: 0; }
 .legend-panel {

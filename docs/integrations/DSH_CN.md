@@ -200,6 +200,8 @@ mebular runtime upgrade --to latest --json
   创建；sandbox 不含 top navigation。
 - `?embed=dsh` 下 Console CSP 允许 loopback HTTP 祖先和 DSH Desktop 的
   `dsh-app://app` origin；普通 Console 请求仍保持 `frame-ancestors 'none'`。
+- DSH 内嵌态隐藏锁定横幅：onboarding 卡已承载同一提示，横幅在窄面板会压住
+  Console 右侧导航（`审计` / `设置`）。
 - 共享 update/upgrade/install 锁防止两个入口重复安装或升级；日志先脱敏。
 
 ## 常见 reason

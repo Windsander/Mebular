@@ -266,6 +266,7 @@ describe('P1 console 接线（静态契约）', () => {
     expect(consoleCss).toContain('.embed-only { display: none; }');
     expect(consoleCss).toContain("[data-embed='dsh'] .embed-only { display: list-item; }");
     expect(consoleCss).toContain("[data-embed='dsh'] .topbar { display: none; }");
+    expect(consoleCss).toContain("[data-embed='dsh'] .banner.is-locked { display: none; }");
     expect(consoleCss).toMatch(/\[data-embed='dsh'\] \.layout \{ flex: 1 1 auto; min-height: 0; \}/);
   });
 });

@@ -22,6 +22,9 @@ The GitHub Release body is extracted from this file: everything between the rele
 - **DSH Desktop Console white panel** — the Console embed CSP now allows the
   DSH Desktop ancestor origin `dsh-app://app` in addition to DSH Web's loopback
   HTTP origins. Ordinary Console requests still send `frame-ancestors 'none'`.
+- **DSH embed locked banner overlap** — the locked-state banner is suppressed
+  inside the DSH embed, where it covered the right-side navigation (`审计` /
+  `设置`); the onboarding card remains as the single action prompt.
 
 ## [v0.2.1] - 2026-10-27
 

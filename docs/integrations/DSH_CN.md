@@ -186,7 +186,8 @@ mebular runtime upgrade --to latest --json
 ## 常驻与卸载
 
 - Console 的「让 Mebular 常驻」安装/检查共享 `mebular-serve`；
-- 插件面板显示 service 状态，并链接到 Console；插件本身不安装 service；
+- service 状态与常驻操作在 Console 设置中；插件面板只保留紧凑 runtime header，
+  插件本身不安装 service；
 - 卸载 DSH 插件只移除插件和它自己的 supervise/timer，不删除 runtime、provider、
   service 或数据；
 - 显式移除常驻服务用 `mebular runtime service uninstall`；它会保留 runtime/provider/data。

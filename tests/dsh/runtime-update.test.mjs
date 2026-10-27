@@ -799,13 +799,12 @@ describe('DSH client update banner', () => {
     expect(busy.body).toContain('Another Mebular entry point');
   });
 
-  it('中文文案存在，banner 不依赖颜色且保留 service 提示', () => {
+  it('中文文案存在，banner 不依赖颜色且 header 不再插入常驻提示行', () => {
     const { updateView, text } = loadClientInternals({ lang: 'zh-CN' });
     const view = updateView(text(), updateInfo());
     expect(view.heading).toBe('发现更新');
     expect(view.actions).toEqual(['update', 'later', 'skip']);
-    expect(clientSource).toContain('serviceHint');
-    expect(clientSource).toContain('在 Console 中开启');
+    expect(clientSource).not.toContain('serviceHint');
   });
 
   it('store：later 不发请求；prompted 每版本只发一次；skip/update body 仅 action', async () => {

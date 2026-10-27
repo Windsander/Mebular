@@ -157,19 +157,6 @@ describe('DSH client 共享 runtime 状态文案', () => {
     expect(reasonMessage(t, { reason: 'download_required' }, null)).toBe(t.reasons.download_required);
   });
 
-  it('runtimeMeta 只汇总非敏感字段', () => {
-    const { runtimeMeta, text } = loadClientInternals();
-    const t = text();
-    expect(runtimeMeta(t, {
-      profile: { id: 'work', name: 'Work' },
-      provider: { kind: 'app' },
-      runtimeMode: 'child',
-      service: { registered: true, running: true },
-    })).toBe('Work · app · child · service running');
-    expect(runtimeMeta(t, { profile: { id: 'work', name: null } })).toBe('work');
-    expect(runtimeMeta(t, null)).toBe('');
-  });
-
   it('download_required 不是 ready，状态点为 offline', () => {
     const { isReadyInfo, statusOf } = loadClientInternals();
     const info = {

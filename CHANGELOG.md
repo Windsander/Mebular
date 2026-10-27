@@ -34,6 +34,9 @@ The GitHub Release body is extracted from this file: everything between the rele
   line, and the redundant onboarding card is suppressed in the embed.
 - **DSH expanded-sidebar spacing** — the panel header keeps a wider left inset
   so the status dot does not crowd the sidebar edge.
+- **DSH compact header** — `打开 Console` and `刷新` are now compact icon
+  actions, the redundant connected label is dropped, and the service-hint row
+  is removed; keep-running settings remain in Console settings.
 
 ## [v0.2.1] - 2026-10-27
 

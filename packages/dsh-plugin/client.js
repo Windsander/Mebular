@@ -77,10 +77,6 @@ window.__ModuleLoader__.load({
         refresh: 'Refresh',
         hostUnavailable: 'Panel route unavailable',
         loadingFrame: 'Loading Console…',
-        serviceRegistered: 'service',
-        serviceRunning: 'service running',
-        serviceHint: 'Keep Mebular running so DSH and other entry points share it.',
-        serviceHintAction: 'Open Console to enable “Keep Mebular running”',
         error: 'The DSH host could not read Mebular status: {error}',
         reasons: {
           daemon_unreachable: 'No Mebular daemon answered on the configured loopback address. MCP tools are unavailable until it starts; start Mebular or run "mebular serve", then the panel and tools recover automatically.',
@@ -180,10 +176,6 @@ window.__ModuleLoader__.load({
         refresh: '刷新',
         hostUnavailable: '面板接口不可用',
         loadingFrame: '正在加载 Console…',
-        serviceRegistered: '常驻服务',
-        serviceRunning: '常驻运行中',
-        serviceHint: '让 Mebular 常驻，DSH 与其他入口共享同一个 runtime。',
-        serviceHintAction: '在 Console 中开启「让 Mebular 常驻」',
         error: 'DSH 主机无法读取 Mebular 状态：{error}',
         reasons: {
           daemon_unreachable: '配置的 loopback 地址上没有 Mebular daemon。MCP 工具暂时不可用；请启动 Mebular 或运行 "mebular serve"，就绪后面板与工具会自动恢复。',
@@ -258,6 +250,21 @@ window.__ModuleLoader__.load({
         // of the main panel. Reserve that strip so the Mebular header does not
         // render underneath them.
         paddingLeft: 172,
+      },
+      iconAction: {
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        width: 28,
+        height: 28,
+        flex: 'none',
+        padding: 0,
+        borderRadius: 6,
+        border: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.3))',
+        background: 'transparent',
+        color: 'inherit',
+        cursor: 'pointer',
+        textDecoration: 'none',
       },
       dot: {
         width: 8,
@@ -335,18 +342,6 @@ window.__ModuleLoader__.load({
         flexWrap: 'wrap',
         alignItems: 'center',
         gap: 6,
-      },
-      serviceHint: {
-        display: 'flex',
-        flexWrap: 'wrap',
-        alignItems: 'center',
-        gap: 8,
-        flex: 'none',
-        padding: '4px 12px',
-        borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
-        background: 'var(--dsw-alias-bg-layer-1, transparent)',
-        fontSize: 11,
-        color: 'var(--dsw-alias-label-tertiary, #888)',
       },
       action: {
         display: 'inline-flex',
@@ -626,33 +621,6 @@ window.__ModuleLoader__.load({
         targetVersion: install.targetVersion ?? null,
         actions: ['install', 'copy', 'redetect', 'readme'],
       };
-    }
-
-    // Non-sensitive shared-runtime summary for the panel header. Only values the
-    // host already publishes in /mebular/embed-info are shown.
-    function runtimeMeta(t, info) {
-      const parts = [];
-      const profile = info?.profile;
-      if (profile !== null && typeof profile === 'object') {
-        const label = typeof profile.name === 'string' && profile.name.length > 0
-          ? profile.name
-          : typeof profile.id === 'string' && profile.id.length > 0 ? profile.id : null;
-        if (label !== null) parts.push(label);
-      }
-      if (typeof info?.provider?.kind === 'string') parts.push(info.provider.kind);
-      if (typeof info?.runtimeMode === 'string' && info.runtimeMode.length > 0) parts.push(info.runtimeMode);
-      const service = info?.service;
-      if (service?.registered === true) {
-        parts.push(service.running === true ? t.serviceRunning : t.serviceRegistered);
-        const serviceVersion = typeof service.version === 'string' && service.version.length > 0
-          ? service.version
-          : null;
-        if (serviceVersion !== null) parts.push(`v${serviceVersion.replace(/^v/, '')}`);
-        if (typeof service.provider === 'string' && service.provider.length > 0) {
-          parts.push(`service:${service.provider}`);
-        }
-      }
-      return parts.join(' · ');
     }
 
     function updateReasonText(t, reason) {
@@ -1000,6 +968,49 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function OpenConsoleIcon() {
+      return h(
+        'svg',
+        {
+          width: 14,
+          height: 14,
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.8,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': 'true',
+          focusable: 'false',
+        },
+        h('path', { d: 'M14 4h6v6' }),
+        h('path', { d: 'M20 4 11 13' }),
+        h('path', { d: 'M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6' }),
+      );
+    }
+
+    function RefreshIcon() {
+      return h(
+        'svg',
+        {
+          width: 14,
+          height: 14,
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.8,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': 'true',
+          focusable: 'false',
+        },
+        h('path', { d: 'M20 11a8.1 8.1 0 0 0-14.9-4.7L3 8' }),
+        h('path', { d: 'M3 3v5h5' }),
+        h('path', { d: 'M4 13a8.1 8.1 0 0 0 14.9 4.7L21 16' }),
+        h('path', { d: 'M21 21v-5h-5' }),
+      );
+    }
+
     function MebularStatusIcon(props) {
       const t = currentText();
       const { status } = useEmbedInfo();
@@ -1061,7 +1072,6 @@ window.__ModuleLoader__.load({
       const showFrame = ready && !frameFailed;
       const consoleUrl = safeHttpUrl(info?.consoleUrl) ?? DEFAULT_CONSOLE_URL;
       const version = typeof info?.version === 'string' && info.version.length > 0 ? info.version : null;
-      const meta = runtimeMeta(t, info);
       const updateBanner = updateView(t, info, {
         dismissedVersion,
         pending: upgradePending ? (pendingUpgradeAction ?? 'update') : null,
@@ -1078,8 +1088,6 @@ window.__ModuleLoader__.load({
         && (dismissedVersion === null || dismissedVersion !== updateAvailable.latestVersion)
         ? updateAvailable.latestVersion
         : null;
-      const serviceRegistered = info?.service?.registered === true;
-      const showServiceHint = ready && serviceRegistered !== true;
       const upgradeState = typeof info?.upgrade?.state === 'string' ? info.upgrade.state : null;
       const pendingView = installView(t, info) ?? (installPending
         ? {
@@ -1162,11 +1170,12 @@ window.__ModuleLoader__.load({
         }),
         h('span', { style: styles.title }, t.title),
         version === null ? null : h('span', { style: styles.version }, `v${version.replace(/^v/, '')}`),
-        meta.length === 0 ? null : h('span', { style: styles.meta }, meta),
         h('span', { style: styles.spacer }),
         error !== null && !ready
           ? h('span', { style: styles.warn, title: error }, t.hostUnavailable)
-          : h('span', { style: styles.version }, t[status]),
+          : status === 'connected'
+            ? null
+            : h('span', { style: styles.version }, t[status]),
         manualUpdateVersion === null
           ? null
           : h(
@@ -1186,11 +1195,25 @@ window.__ModuleLoader__.load({
             href: consoleUrl,
             target: '_blank',
             rel: 'noopener noreferrer',
-            style: styles.action,
+            style: styles.iconAction,
+            title: t.openConsole,
+            'aria-label': t.openConsole,
+            'data-mebular-action': 'open-console',
           },
-          t.openConsole,
+          h(OpenConsoleIcon),
         ),
-        h('button', { type: 'button', onClick: refresh, style: styles.action }, t.refresh),
+        h(
+          'button',
+          {
+            type: 'button',
+            onClick: refresh,
+            style: styles.iconAction,
+            title: t.refresh,
+            'aria-label': t.refresh,
+            'data-mebular-action': 'refresh',
+          },
+          h(RefreshIcon),
+        ),
       );
 
       const starting = info?.status === 'starting';
@@ -1319,24 +1342,6 @@ window.__ModuleLoader__.load({
               )),
             ),
           );
-      const serviceHintNode = showServiceHint
-        ? h(
-            'div',
-            { style: styles.serviceHint },
-            h('span', null, t.serviceHint),
-            h(
-              'a',
-              {
-                href: consoleUrl,
-                target: '_blank',
-                rel: 'noopener noreferrer',
-                style: styles.action,
-              },
-              t.serviceHintAction,
-            ),
-          )
-        : null;
-
 
       const body = showFrame
         ? h(
@@ -1386,7 +1391,7 @@ window.__ModuleLoader__.load({
             ),
           );
 
-      return h('div', { style: styles.root }, header, updateBannerNode, serviceHintNode, body);
+      return h('div', { style: styles.root }, header, updateBannerNode, body);
     }
 
     const inject = ['slots'];
@@ -1444,7 +1449,6 @@ window.__ModuleLoader__.load({
           isReadyInfo,
           canInstall,
           reasonMessage,
-          runtimeMeta,
           statusOf,
           statusTitle,
           text: currentText,

@@ -98,14 +98,16 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).toContain("'data-mebular-panel-header': 'true'");
   });
 
-  it('渲染共享更新 banner、稍后/跳过/更新与服务常驻入口', () => {
+  it('渲染共享更新 banner、稍后/跳过/更新与紧凑 header 操作', () => {
     expect(source).toContain('function updateView');
     expect(source).toContain("kind: 'available'");
     expect(source).toContain("actions: ['update', 'later', 'skip']");
     expect(source).toContain("actions: ['update', 'later']");
     expect(source).toContain('dismissedVersion');
     expect(source).toContain('data-mebular-update');
-    expect(source).toContain('serviceHint');
+    expect(source).toContain("'data-mebular-action': 'open-console'");
+    expect(source).toContain("'data-mebular-action': 'refresh'");
+    expect(source).not.toContain('serviceHint');
     expect(source).toContain('updateFailedTitle');
     expect(source).toContain('updateBusy');
   });
@@ -148,7 +150,8 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).toContain("'data-mebular-status': status");
     expect(source).toContain("label: 'Mebular'");
     expect(source).toContain("'aria-hidden': 'true'");
-    expect(source).not.toContain('aria-label');
+    expect(source).toContain("'aria-label': t.openConsole");
+    expect(source).toContain("'aria-label': t.refresh");
   });
 
   it('daemon down 文案说明 MCP 工具暂不可用且会自动恢复', () => {

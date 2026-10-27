@@ -123,7 +123,7 @@ PATH、当前 CLI 自身。`runtime/current.json` 可用时作为 `kind: shared,
       "id": "sha256(kind+path) 前 12 hex",
       "kind": "app | cli | shared",
       "path": "/absolute/path/to/runtime-entry",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "capabilities": ["serve"],
       "registeredAt": "2026-01-01T00:00:00.000Z",
       "updatedAt": "2026-01-01T00:00:00.000Z"

@@ -41,7 +41,7 @@ changes are included.
 - Relevant local Jest suites: 82/82 passed.
 - `npm run check:docs`: 7/7 passed.
 - `verify-dsh-plugin`: 176/176 passed.
-- Release packaging dry-run: to be recorded before publishing.
+- **Packaging dry-run** — [run 40526024891](https://github.com/Windsander/Mebular/actions/runs/40526024891) passed: verify + 6 tarballs, macOS Universal DMG, Windows NSIS, Linux AppImage/deb, and real DSH E2E minimum/latest/node22 all green.
 
 ## [v0.2.1] - 2026-10-27
 

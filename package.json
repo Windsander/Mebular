@@ -1,6 +1,6 @@
 {
   "name": "@mebular/core",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "本地优先的图式记忆系统：为 Hermes 等 Agent 提供跨设备、可离线、可验证的记忆共享层",
   "license": "MIT",
   "author": {

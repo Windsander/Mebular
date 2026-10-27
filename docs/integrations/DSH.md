@@ -29,7 +29,7 @@ resolve`/`supervise`) and daemon HTTP endpoints.
 Install from npm into the DSH web profile:
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.2.1
+dsh plugin --profile web add @mebular/dsh-plugin@0.2.2
 ```
 
 For development:
@@ -149,9 +149,9 @@ iframe share this state.
   "runtimeMode": "reused",
   "managed": false,
   "panel": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "profile": { "id": "default", "name": "My Cloud" },
-  "provider": { "kind": "app", "source": "registry", "version": "0.2.1" },
+  "provider": { "kind": "app", "source": "registry", "version": "0.2.2" },
   "service": { "registered": false, "running": false, "foreign": false },
   "downloadRequired": false,
   "install": { "state": "idle", "allowed": true },
@@ -260,13 +260,13 @@ single daemon, service, update locks and upgrade rollback are covered by CI and
 
 ## Release and version
 
-- Version: `0.2.1`, on the unified Mebular v0.2.1 release train (all six npm
+- Version: `0.2.2`, on the unified Mebular v0.2.2 release train (all six npm
   packages share the same version).
-- npm: `@mebular/dsh-plugin@0.2.1`.
+- npm: `@mebular/dsh-plugin@0.2.2`.
 - The Plugin is an isolated adapter in `packages/dsh-plugin`, published by its
   own npm job. It reads the pinned runtime version from its own `package.json`,
   so a release bump needs no Plugin source edit.
-- Publish `@mebular/core@0.2.1` before `@mebular/dsh-plugin@0.2.1`; see
+- Publish `@mebular/core@0.2.2` before `@mebular/dsh-plugin@0.2.2`; see
   [Release SOP](../operations/RELEASE.md).
 - Listed in the `memory` category of
   [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/).

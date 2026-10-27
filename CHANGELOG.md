@@ -15,32 +15,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
-## [Unreleased]
+## [v0.2.2] - 2026-10-27
+
+Patch release focused on DeepSeek Harness Desktop integration. All six npm
+packages and the desktop app ship as `0.2.2`; no runtime protocol or data format
+changes are included.
+
+### Changed
+
+- **DSH panel header** — the header now matches the DSH 52px top strip, keeps a safe left inset, uses compact icon actions for Open Console/Refresh, and is a draggable window region with no-drag action buttons.
+- **DSH cloud actions** — the embedded Console now exposes its cloud actions in a compact upper-right bar: New Cloud/Join Cloud while locked, then Join Cloud/Invite Device after initialization. The duplicated onboarding card is hidden in the embed.
+- **DSH runtime hint** — the repeated keep-running row is removed from the plugin panel; shared-runtime service configuration remains in Console settings.
 
 ### Fixed
 
-- **DSH Desktop Console white panel** — the Console embed CSP now allows the
-  DSH Desktop ancestor origin `dsh-app://app` in addition to DSH Web's loopback
-  HTTP origins. Ordinary Console requests still send `frame-ancestors 'none'`.
-- **DSH embed locked banner overlap** — the locked-state banner is suppressed
-  inside the DSH embed, where it covered the right-side navigation (`审计` /
-  `设置`); the onboarding card remains as the single action prompt.
-- **DSH collapsed-sidebar header overlap** — the panel header reserves the
-  collapsed-sidebar control strip, keeping DSH's “open sidebar” and “new
-  session” controls clear of the Mebular title and status.
-- **DSH embed cloud actions** — the hidden topbar actions are mirrored in a
-  compact upper-right action bar (`新建忆云` / `加入忆云`, then `邀请设备` after
-  initialization). The buttons use the normal topbar geometry, stay on one
-  line, and the redundant onboarding card is suppressed in the embed.
-- **DSH expanded-sidebar spacing** — the panel header keeps a wider left inset
-  so the status dot does not crowd the sidebar edge.
-- **DSH compact header** — `打开 Console` and `刷新` are now compact icon
-  actions, the redundant connected label is dropped, and the service-hint row
-  is removed; keep-running settings remain in Console settings.
-- **DSH panel drag region** — the panel header now uses the Electron titlebar
-  drag region with text selection disabled; header actions remain no-drag and
-  clickable. The header is 52px tall and explicitly keeps left padding so the
-  status dot aligns with DSH's top controls and clears the panel edge.
+- **DSH Desktop Console white panel** — `?embed=dsh` now allows the exact `dsh-app://app` Desktop ancestor in addition to loopback HTTP ancestors; ordinary Console requests keep `frame-ancestors 'none'`.
+- **DSH locked-state navigation overlap** — the redundant locked banner no longer covers the right-side Console navigation.
+- **DSH collapsed-sidebar overlap** — the panel header reserves DSH's floating sidebar controls.
+- **DSH action wrapping** — compact cloud-action buttons keep their normal height and never wrap at narrow panel widths.
+- **DSH status alignment** — the status dot and header actions share the DSH top-strip vertical center.
+
+### Verified
+
+- PR #275 required checks: 8/8 passed, including build/test/lint, real DSH E2E minimum + latest, desktop smoke, Windows CI, and WAN NAT isolation.
+- Relevant local Jest suites: 82/82 passed.
+- `npm run check:docs`: 7/7 passed.
+- `verify-dsh-plugin`: 176/176 passed.
+- Release packaging dry-run: to be recorded before publishing.
 
 ## [v0.2.1] - 2026-10-27
 

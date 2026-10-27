@@ -1,6 +1,6 @@
 {
   "name": "@mebular/mcp",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Mebular MCP server（stdio + Streamable HTTP）：把 Mebular 记忆能力暴露给任意 MCP client",
   "license": "MIT",
   "author": {

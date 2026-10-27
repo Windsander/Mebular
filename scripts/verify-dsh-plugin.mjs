@@ -373,8 +373,12 @@ check('client confirms prompted only after rendering the banner', clientSource.i
   && clientSource.includes("postAction(RUNTIME_UPGRADE_PATH, 'prompted'")
   && /promptLatest[\s\S]{0,200}?confirmPrompted/.test(clientSource));
 check('client shows update/later/skip actions', [
-  'updateAction', 'updateLater', 'updateSkip', 'updateUpdatingTitle', 'updateFailedTitle', 'serviceHint',
+  'updateAction', 'updateLater', 'updateSkip', 'updateUpdatingTitle', 'updateFailedTitle',
 ].every((key) => clientSource.includes(key)));
+check('client exposes compact header actions', [
+  "data-mebular-action': 'open-console'",
+  "data-mebular-action': 'refresh'",
+].every((snippet) => clientSource.includes(snippet)));
 check('client has no client-supplied upgrade version/url', !/RUNTIME_UPGRADE_PATH[\s\S]{0,300}?version/.test(clientSource));
 check('client posts only the fixed action body', /body:\s*JSON\.stringify\(\{\s*action\s*\}\)/.test(clientSource));
 check('client has exactly one POST method', (clientSource.match(/method:\s*'POST'/g) ?? []).length === 1);

@@ -31,10 +31,10 @@ asks before installing a pinned shared runtime.
 
 <table width="100%">
   <tr>
-    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-sidebar.svg" alt="The Mebular entry and status dot in the DeepSeek Harness sidebar" width="100%"><br><sub>Sidebar entry and status</sub></td>
-    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-controls.svg" alt="The Mebular panel header and Console navigation" width="100%"><br><sub>Panel header and navigation</sub></td>
-    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-starmap.svg" alt="The shared Mebular Console star map inside the DSH panel" width="100%"><br><sub>Shared Console star map</sub></td>
-    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-actions.svg" alt="Join Cloud and Invite device actions in the Mebular Console" width="100%"><br><sub>Join / invite actions</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-full-normal.svg" alt="The complete DeepSeek Harness view: Mebular sidebar entry, panel header and embedded star map" width="100%"><br><sub>Full DSH panel · entry and star map</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-full-collapsed.svg" alt="Mebular Console full width after collapsing the DeepSeek Harness sidebar" width="100%"><br><sub>Collapsed sidebar · full Console</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-full-memories.svg" alt="The Mebular shared-memory view inside DeepSeek Harness" width="100%"><br><sub>Shared memory view</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-full-settings.svg" alt="The Mebular settings view inside DeepSeek Harness (demo data)" width="100%"><br><sub>Settings and keep-running</sub></td>
   </tr>
 </table>
 

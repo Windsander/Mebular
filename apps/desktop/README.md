@@ -13,7 +13,7 @@ Electron 薄壳：把**既有控制台**（`127.0.0.1:<port>/console`）装进�
 
 ```
 apps/desktop/
-├── package.json            # private + 0.1.2（与六个 npm 包同版本）
+├── package.json            # private + 0.2.1（与六个 npm 包同版本）
 ├── electron-builder.yml    # 安装包配置（runtime/node_modules → resources/node_modules）
 ├── runtime/                # 发布 tarball 安装出的运行时（不入库）
 ├── src/main/               # Electron 主进程：daemon.mjs（托管逻辑，纯可测）/ index.mjs（壳）/ ipc.mjs / tray-icons.mjs

@@ -3,9 +3,9 @@
 面向 `@mebular/*` npm 包与三平台桌面安装包的发布操作手册。核心约束：**分支名即版本号
 （SSOT）**、**先构建安装包再发 npm**、**幂等发布**、**按 ref 串行**。
 
-当前发布线 v0.2.0：
+当前发布线 v0.2.1：
 
-- 6 个 npm 包统一为 `0.2.0`（单版本 umbrella：`core` / `service` / `skill` / `mcp` / `fleet` / `dsh-plugin`）；
+- 6 个 npm 包统一为 `0.2.1`（单版本 umbrella：`core` / `service` / `skill` / `mcp` / `fleet` / `dsh-plugin`）；
 - macOS Universal DMG、Windows NSIS x64、Linux AppImage + deb x64（unsigned）；
 - `SHA256SUMS.txt`（仅 GitHub Release 资产生成）。
 
@@ -35,7 +35,7 @@
   `@mebular/mcp` 单独安装只有 `mebular`，**不能**当作双 bin 安装入口。
 - **桌面版本**：`apps/desktop/package.json`、`apps/desktop/package-lock.json` 与
   `apps/desktop/src/main/daemon.mjs` 的 `APP_VERSION` 必须等于发布版本。
-- **触发方式**：push 到 `release/v*` 分支（例如 `release/v0.2.0`），**不使用 tag 触发**。
+- **触发方式**：push 到 `release/v*` 分支（例如 `release/v0.2.1`），**不使用 tag 触发**。
   手动 `workflow_dispatch` 是 packaging dry-run。
 - **发布分支即真相**：`release/vX.Y.Z` 的 `X.Y.Z` 必须等于 6 个 `package.json` 的版本、
   根 `package-lock.json` 的 workspace 条目、桌面三处版本、MCP 版本源，以及
@@ -80,24 +80,24 @@
 - **npm unpublish（72 小时窗口）**：仅能删除**发布后 72 小时内**、且**无人依赖**的版本；
   超时或被依赖一律 400。六个包各执行一次（同一版本）：
   ```bash
-  npm unpublish @mebular/core@0.2.0     # 重复 core → service → skill → mcp → fleet → dsh-plugin
+  npm unpublish @mebular/core@0.2.1     # 重复 core → service → skill → mcp → fleet → dsh-plugin
   ```
   同一版本被删除后**不可再以相同版本号重新发布**，后续必须升号。
 - **npm deprecate（常规手段）**：标记问题版本，安装时会打印警告但不阻断：
   ```bash
-  npm deprecate @mebular/mcp@0.2.0 "broken: use 0.2.1"
+  npm deprecate @mebular/mcp@0.2.1 "broken: upgrade to a newer version"
   ```
   建议六个包用同一条消息一并废弃，再发布更高修复版本。
 - **回退 GitHub Release**：
   ```bash
-  gh release delete v0.2.0 --yes            # 仅删 Release
-  git push origin :refs/tags/v0.2.0         # 删除 tag（仅在确认无人依赖时）
+  gh release delete v0.2.1 --yes            # 仅删 Release
+  git push origin :refs/tags/v0.2.1         # 删除 tag（仅在确认无人依赖时）
   ```
   或网页端 Releases → 该版本 → Delete release；若只想隐藏，标为 **pre-release**。
   注意：删除 Release 不会撤销 npm 发布，npm 仍需按上面的步骤处理。
 - **只换安装包**：npm 不受影响。重新构建后对同一 tag 重传资产即可：
   ```bash
-  gh release upload v0.2.0 release-assets/* --clobber
+  gh release upload v0.2.1 release-assets/* --clobber
   ```
   下载页会立即使用新文件；`SHA256SUMS.txt` 必须与安装包一起重传。
 
@@ -186,21 +186,21 @@ origin/main
 
 ```bash
 git fetch origin
-git switch -c release-prep/v0.2.0 origin/main  # 先 prep，dry-run 后再建 release 分支
-bash scripts/bump_version.sh v0.2.0             # 同步 6 包 + 版本源 + CHANGELOG 章节
+git switch -c release-prep/v0.2.1 origin/main  # 先 prep，dry-run 后再建 release 分支
+bash scripts/bump_version.sh v0.2.1             # 同步 6 包 + 版本源 + CHANGELOG 章节
 npm run verify:release-version                  # 只读校验；也可带 --version/--tag
 ```
 
 `bump_version.sh` 会：
 
-1. 将 6 个 `package.json`（core / fleet / mcp / service / skill / dsh-plugin）改为 `0.2.0`；
+1. 将 6 个 `package.json`（core / fleet / mcp / service / skill / dsh-plugin）改为 `0.2.1`；
 2. 同步根 `package-lock.json` 的根版本与 6 个 workspace 条目；
 3. 同步桌面 `package.json` / `package-lock.json` / `APP_VERSION`；
-4. 同步任何「已是版本号区间」的内部 `@mebular/*` 依赖为 `^0.2.0`；
+4. 同步任何「已是版本号区间」的内部 `@mebular/*` 依赖为 `^0.2.1`；
 5. 改写 `packages/mcp/src/version.mjs` 的 `APP_VERSION`（MCP 唯一版本源）；
-6. 在 `CHANGELOG.md` 顶部插入 `## [v0.2.0] - <date>` 章节（已存在则跳过，幂等）。
+6. 在 `CHANGELOG.md` 顶部插入 `## [v0.2.1] - <date>` 章节（已存在则跳过，幂等）。
 
-> 若版本号与 CHANGELOG 章节已存在（例如当前 `release-prep/v0.2.0`），**不需要**再跑
+> 若版本号与 CHANGELOG 章节已存在（例如当前 `release-prep/v0.2.1`），**不需要**再跑
 > `bump_version.sh`；只有从新版本开始时才执行上面的 bump。
 
 ### 3.2 本地预检（推荐）
@@ -226,7 +226,7 @@ npm run check:deps
 发布后可见性 gate 也可以独立预演（对已发布版本只读）：
 
 ```bash
-npm run verify:release-visibility -- --version 0.2.0 --timeout-seconds 60 --interval-seconds 5
+npm run verify:release-visibility -- --version 0.2.1 --timeout-seconds 60 --interval-seconds 5
 ```
 
 桌面链路（与 CI 同路径）：
@@ -266,7 +266,7 @@ DSH 破坏”。
 
 ```bash
 # 在 release-prep 分支上触发（workflow 已在 main 注册）
-gh workflow run publish.yml --ref release-prep/v0.2.0
+gh workflow run publish.yml --ref release-prep/v0.2.1
 
 # 观察
 gh run list --workflow=publish.yml --limit 5
@@ -297,9 +297,9 @@ sha256sum release-assets/*              # Linux
 dry-run 通过后，从 prep 分支创建正式发布分支并 push：
 
 ```bash
-git switch release-prep/v0.2.0
-git switch -c release/v0.2.0
-git push -u origin release/v0.2.0
+git switch release-prep/v0.2.1
+git switch -c release/v0.2.1
+git push -u origin release/v0.2.1
 ```
 
 push 后自动执行第 2 节的完整流水线。任一 job 失败即停；安装包未全绿时不会发 npm；
@@ -308,7 +308,7 @@ push 后自动执行第 2 节的完整流水线。任一 job 失败即停；安�
 ### 5.2 观察
 
 ```bash
-gh run list --workflow=publish.yml --branch release/v0.2.0 --limit 5
+gh run list --workflow=publish.yml --branch release/v0.2.1 --limit 5
 gh run watch <run-id>
 gh run view <run-id> --log-failed       # 失败时
 
@@ -321,19 +321,19 @@ gh run view <run-id> --json jobs --jq '.jobs[] | select(.name | contains("visibi
 ```bash
 # npm 六包：version 与 latest 都必须指向本次版本
 for p in core service skill mcp fleet dsh-plugin; do
-  npm view "@mebular/$p@0.2.0" version
+  npm view "@mebular/$p@0.2.1" version
   npm view "@mebular/$p" dist-tags.latest
 done
 
 # 或复用流水线同一个 gate（只读轮询；已可见时立即通过）
-npm run verify:release-visibility -- --version 0.2.0 --dsh-version 0.2.0
+npm run verify:release-visibility -- --version 0.2.1 --dsh-version 0.2.1
 
 # GitHub Release
-gh release view v0.2.0
-gh release view v0.2.0 --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
+gh release view v0.2.1
+gh release view v0.2.1 --json assets --jq '.assets[] | "\(.name)  \(.size) bytes"'
 
 # 根包双 bin
-npm install -g @mebular/core@0.2.0
+npm install -g @mebular/core@0.2.1
 command -v mebular && command -v fleet
 mebular tools >/dev/null && fleet --version
 ```
@@ -346,13 +346,13 @@ mebular tools >/dev/null && fleet --version
 - [ ] 下载资产后按第 6 节校验 checksum；`SHA256SUMS.txt` 恰好 4 行；
 - [ ] `release/vX.Y.Z` 已通过 PR 回合并 `main`，随后删除 release / prep 分支。
 
-> 不要用 `npm install -g @mebular/mcp@0.2.0` 冒充双 bin 安装：`@mebular/mcp` 只提供
+> 不要用 `npm install -g @mebular/mcp@0.2.1` 冒充双 bin 安装：`@mebular/mcp` 只提供
 > `mebular`，`fleet` 必须来自根包（或单独安装 `@mebular/fleet`）。
 
 插件独立验证（先让 App / 守护运行）：
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.2.0
+dsh plugin --profile web add @mebular/dsh-plugin@0.2.1
 dsh --profile web --dump-config | grep -A3 mebular   # host row；transport 由官方 MCP client 挂载
 # DSH 会话中确认 mcp__mebular__* 可调用；侧边栏面板加载 /console/?embed=dsh
 ```
@@ -374,7 +374,7 @@ MEBULAR_HOME="$(mktemp -d)" mebular serve --port 7399
 从 Release 下载并校验：
 
 ```bash
-gh release download v0.2.0 -D release-assets
+gh release download v0.2.1 -D release-assets
 cd release-assets
 
 # Linux
@@ -398,7 +398,7 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 - macOS 打开 DMG 后能启动；Windows NSIS 能安装并启动；Linux AppImage 可执行，deb 可安装；
 - 首次启动能进入锁定控制台，`/healthz` 正常；
 - 全部为 **unsigned** 发布：macOS Gatekeeper 与 Windows SmartScreen 会拦截，按 Release
-  notes 的绕过步骤操作。签名、公证与自动更新不在 v0.2.0 范围。
+  notes 的绕过步骤操作。签名、公证与自动更新不在 v0.2.1 范围。
 
 安装包内的 runtime 结构、本地打包与签名后续见
 [`DESKTOP_RELEASE.md`](DESKTOP_RELEASE.md)。
@@ -485,7 +485,7 @@ node scripts/prune-merged-branches.mjs --apply --yes   # 确认后删除
 发布分支本身在回合并 main 后，再用同一脚本或显式命令删除：
 
 ```bash
-git push origin --delete release/v0.2.0 release-prep/v0.2.0
+git push origin --delete release/v0.2.1 release-prep/v0.2.1
 ```
 
 > 不要未经确认批量删除；不要删除 `site-*`（Pages 部署源）或仍有 open PR 的分支。

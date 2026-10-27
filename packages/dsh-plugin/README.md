@@ -44,34 +44,43 @@ App 与 DSH Plugin 是同一套本机 Mebular runtime 的两个入口。插件�
 
 ![三步接入：安装插件、重启 DSH；已有 App/CLI 自动连接，没有 runtime 时面板显式安装共享 runtime。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn.svg)
 
-</div>
-
-```bash
-# 安装插件（只安装插件，不启动/下载 Mebular）
-dsh plugin --profile web add @mebular/dsh-plugin@0.2.0
-
-# App/CLI 已在运行：插件自动 attach，不需要手动 mebular serve。
-# 没有 runtime：打开 Mebular 面板，按提示显式安装共享 runtime。
-# 只有 CLI 方式才需要：mebular serve
-
-# 开发安装：dsh plugin --profile web add ./packages/dsh-plugin
-# 验证：调用任意 mcp__mebular__* 工具
-# 卸载：dsh plugin --profile web remove @mebular/dsh-plugin
-```
-
-<div align="center">
-
 ![DSH 接入：DSH Web 通过 iframe 加载 /console/?embed=dsh，官方 MCP client 连接同一个 daemon 的 /mcp；通过共享 runtime resolve 解析 App/CLI/shared provider 与动态 URL。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn.svg)
 
 ![状态点：绿色已连接，琥珀色启动/安装/更新中，红色未运行，灰色等待首次检查。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn.svg)
 
 </div>
 
-## 兼容发现
+已有 Mebular App 或 CLI 时，插件会自动连接；没有 runtime 时，打开 Mebular 面板按提示安装共享 runtime。只有 CLI 方式需要手动 `mebular serve`。
 
-共享 runtime resolve 可用时优先使用它。没有共享 CLI 的旧环境仍按
-`daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331` 发现 daemon；`MEBULAR_HOME`
-只用于定位 `runtime.json`。Mebular App 继续独立运行，插件只连接同一个 daemon。
+<details>
+<summary>命令行：安装 / 开发安装 / 卸载</summary>
+
+```bash
+# 安装插件（不会静默启动或下载 Mebular）
+dsh plugin --profile web add @mebular/dsh-plugin@0.2.0
+
+# 开发安装
+dsh plugin --profile web add ./packages/dsh-plugin
+
+# 验证：在 DSH 中调用任意 mcp__mebular__* 工具
+# 卸载
+dsh plugin --profile web remove @mebular/dsh-plugin
+```
+
+</details>
+
+## MCP 工具
+
+DSH 通过官方 MCP client 连接同一个 daemon 的 `/mcp`；工具在 DSH 里显示为 `mcp__mebular__*`。
+
+| 能力 | 工具 | MCP 说明 |
+| --- | --- | --- |
+| 记忆写入 | `memory_write` `memory_write_batch` | 写入单条/批量事实、偏好、情节与技能；写入即签名并参与同步 |
+| 记忆召回 | `memory_query` `memory_search` `memory_graph` | 语义/关键词召回、图遍历；可按时间与关系过滤 |
+| 画像与历史 | `memory_profile` `memory_skills` `memory_history` | 读取用户偏好、技能清单与会话情节 |
+| 记忆维护 | `memory_import` `memory_status` `memory_sync` `memory_delete` `memory_archive` | 导入、状态、同步、墓碑删除、归档/解除归档 |
+| 任务派发 | `task_submit` `task_submit_batch` `task_cancel` `task_retry` `task_status` `task_list` `task_history` `task_children` `task_summarize` | 派发、取消、重试与查询任务 DAG |
+| 协作协商 | `task_subscribe` `task_negotiate` `chatter_send` `chatter_inbox` `task_quota` `task_targets` `board_create` | 变更订阅、协商、配额闲聊、目标与任务板 |
 
 ## 文档
 
@@ -81,6 +90,18 @@ dsh plugin --profile web add @mebular/dsh-plugin@0.2.0
 | <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md">Agent</a></strong> <br><sub>部署规约</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md">Fleet</a></strong> <br><sub>多机操作</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/SHARED_RUNTIME.md">共享 runtime</a></strong> <br><sub>安装、升级与回滚</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SEALING_CN.md">封板契约</a></strong> <br><sub>协议红线</sub> |
 | <strong><a href="https://github.com/Windsander/Mebular/blob/main/CHANGELOG.md">变更日志</a></strong> <br><sub>发布说明</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/CONTRIBUTING.md">参与贡献</a></strong> <br><sub>质量门禁</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SECURITY.md">安全</a></strong> <br><sub>报告漏洞</sub> | <strong><a href="https://mebular.cyberfederal.io">官网</a></strong> <br><sub>产品站点</sub> |
 | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md">DSH 集成说明</a></strong> <br><sub>完整配置</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md">DSH E2E</a></strong> <br><sub>CI 门禁</sub> | <strong><a href="https://www.npmjs.com/package/@mebular/dsh-plugin">npm</a></strong> <br><sub>包页面</sub> | <strong><a href="https://awesome-dsh-plugin.com/zh/p/Windsander/Mebular--packages-dsh-plugin/">awesome-dsh-plugin</a></strong> <br><sub>插件列表</sub> |
+
+<details>
+<summary>兼容发现</summary>
+
+| 场景 | 解析方式 |
+| --- | --- |
+| 共享 runtime 可用 | 优先使用共享 runtime resolve（App / CLI / shared provider + 动态 URL） |
+| 没有共享 CLI 的旧环境 | `daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331` |
+| `MEBULAR_HOME` | 只用于定位 `runtime.json` |
+| Mebular App | 继续独立运行；插件只连接同一个 daemon |
+
+</details>
 
 <div align="center">
 

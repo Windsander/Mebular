@@ -28,7 +28,7 @@ The GitHub Release body is extracted from this file: everything between the rele
 
 - **Full Jest** — 207 suites / 2113 tests passed.
 - **Runtime coexistence** — 13 scenarios / 153 checks passed.
-- **Real DSH E2E** — 5 key scenarios / 116 checks passed; real Chrome, Console, and MCP calls included.
+- **Real DSH E2E** — 9/9 scenarios, 210 checks passed on both DSH `0.2.1-rc.2` and npm `latest`; real Chrome, Console, and MCP calls included, including the daemon-down offline panel and the separate missing-runtime install guide.
 - **Packaged and standalone smoke** — published runtime smoke (7 checks) and standalone MCP health/Console/locale/embed-info all passed.
 
 ## [v0.2.0] - 2026-10-27

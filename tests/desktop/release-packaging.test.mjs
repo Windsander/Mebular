@@ -133,6 +133,15 @@ describe('R1 renderer assistant-status：开发态与打包态双布局', () => 
   });
 });
 
+describe('R1 Windows 动态 import URL', () => {
+  it('服务与 runtime-service 两个 loader 都使用 file: URL，不直接 import 文件系统路径', () => {
+    const source = readFileSync(join(repoRoot, 'apps', 'desktop', 'src', 'main', 'index.mjs'), 'utf8');
+    expect(source).toMatch(/import\(pathToFileURL\(join\(cliBin/);
+    expect(source).toMatch(/import\(pathToFileURL\(join\(dirname\(cliBin\)/);
+    expect(source).not.toMatch(/await import\(join\(/);
+  });
+});
+
 // R4.1：package name 是 @mebular/desktop，Linux 默认 executableName 会派生为 @mebulardesktop，
 // AppImage 因 @/. 拒绝构建，故必须显式声明合法可执行名；静态契约防止回归。
 describe('R4.1 Linux executableName / desktopName 契约', () => {

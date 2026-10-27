@@ -22,6 +22,7 @@ import {
   resolveRuntime,
   resolveRuntimeContext,
   resolveRuntimeHttp,
+  runtimeCommandForProvider,
   runtimeStartLockPath,
   runtimeStatus,
   stopRuntimeChild,
@@ -383,6 +384,28 @@ describe('discoverRuntimeProviders', () => {
     expect(discovery.selected).toMatchObject({ kind: 'cli', path, version: '1.2.3', source: 'registry' });
     expect(discovery.entries.find((entry) => entry.kind === 'shared')).toMatchObject({ available: false });
     expect(discovery.available.some((entry) => entry.source === 'self')).toBe(true);
+  });
+});
+
+describe('runtimeCommandForProvider：Windows 批处理与 JS 入口', () => {
+  it('win32 的 .cmd/.bat 通过 shell 启动，.mjs 继续走 Node', () => {
+    for (const extension of ['cmd', 'bat']) {
+      expect(runtimeCommandForProvider(
+        { path: `C:/tools/mebular.${extension}` },
+        { execPath: 'C:/node.exe', platform: 'win32' },
+      )).toMatchObject({ execPath: `C:/tools/mebular.${extension}`, args: ['serve'], shell: true });
+    }
+    expect(runtimeCommandForProvider(
+      { path: 'C:/tools/mebular.mjs' },
+      { execPath: 'C:/node.exe', platform: 'win32' },
+    )).toMatchObject({ execPath: 'C:/node.exe', args: ['C:/tools/mebular.mjs', 'serve'], shell: false });
+  });
+
+  it('非 Windows 不为批处理启用 shell', () => {
+    expect(runtimeCommandForProvider(
+      { path: '/usr/local/bin/mebular.cmd' },
+      { platform: 'linux' },
+    ).shell).toBe(false);
   });
 });
 

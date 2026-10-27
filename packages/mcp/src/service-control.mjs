@@ -53,6 +53,7 @@ export function serviceDescriptor({ home, execPath = process.execPath, extraArgs
       MEBULAR_RUNTIME_PROVIDER: 'cli',
       MEBULAR_RUNTIME_OWNER: 'cli',
       MEBULAR_RUNTIME_PATH: cliPath,
+      ELECTRON_RUN_AS_NODE: '1',
     },
     runtime: {
       version: null,
@@ -61,7 +62,7 @@ export function serviceDescriptor({ home, execPath = process.execPath, extraArgs
       provider: 'cli',
       owner: 'cli',
       execPath,
-      electron: false,
+      electron: Boolean(process.versions.electron),
       cloudRoot: typeof cloudRoot === 'string' && cloudRoot.length > 0 ? cloudRoot : null,
       home,
     },

@@ -91,6 +91,13 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).not.toMatch(/JSON\.stringify\(\{[^}]*version/);
   });
 
+  it('折叠 DSH 侧栏时为顶栏控制按钮保留安全区', () => {
+    expect(source).toContain('data-sidebar-collapsed="true"');
+    expect(source).toContain('headerSidebarCollapsed');
+    expect(source).toContain('paddingLeft: 172');
+    expect(source).toContain("'data-mebular-panel-header': 'true'");
+  });
+
   it('渲染共享更新 banner、稍后/跳过/更新与服务常驻入口', () => {
     expect(source).toContain('function updateView');
     expect(source).toContain("kind: 'available'");

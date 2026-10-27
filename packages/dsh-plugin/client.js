@@ -253,6 +253,12 @@ window.__ModuleLoader__.load({
         borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
         background: 'var(--dsw-alias-bg-layer-2, transparent)',
       },
+      headerSidebarCollapsed: {
+        // DSH keeps its collapsed-sidebar controls floating over the left edge
+        // of the main panel. Reserve that strip so the Mebular header does not
+        // render underneath them.
+        paddingLeft: 172,
+      },
       dot: {
         width: 8,
         height: 8,
@@ -1013,8 +1019,34 @@ window.__ModuleLoader__.load({
       );
     }
 
+    function useDshSidebarCollapsed() {
+      const read = () => {
+        try {
+          return typeof document !== 'undefined'
+            && document.querySelector('[data-sidebar-collapsed="true"]') !== null;
+        } catch {
+          return false;
+        }
+      };
+      const [collapsed, setCollapsed] = React.useState(read);
+      React.useEffect(() => {
+        if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return undefined;
+        const sync = () => setCollapsed(read());
+        sync();
+        const observer = new MutationObserver(sync);
+        observer.observe(document.documentElement, {
+          subtree: true,
+          attributes: true,
+          attributeFilter: ['data-sidebar-collapsed'],
+        });
+        return () => observer.disconnect();
+      }, []);
+      return collapsed;
+    }
+
     function MebularPanel() {
       const t = currentText();
+      const sidebarCollapsed = useDshSidebarCollapsed();
       const {
         info, error, loading, ready, status, installPending, installError,
         upgradePending, upgradeError, dismissedVersion,
@@ -1119,7 +1151,10 @@ window.__ModuleLoader__.load({
 
       const header = h(
         'div',
-        { style: styles.header },
+        {
+          style: { ...styles.header, ...(sidebarCollapsed ? styles.headerSidebarCollapsed : null) },
+          'data-mebular-panel-header': 'true',
+        },
         h('span', {
           style: { ...styles.dot, background: dotColor(status) },
           title: statusTitle(t, status),

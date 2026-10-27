@@ -25,6 +25,9 @@ The GitHub Release body is extracted from this file: everything between the rele
 - **DSH embed locked banner overlap** — the locked-state banner is suppressed
   inside the DSH embed, where it covered the right-side navigation (`审计` /
   `设置`); the onboarding card remains as the single action prompt.
+- **DSH collapsed-sidebar header overlap** — the panel header reserves the
+  collapsed-sidebar control strip, keeping DSH's “open sidebar” and “new
+  session” controls clear of the Mebular title and status.
 
 ## [v0.2.1] - 2026-10-27
 

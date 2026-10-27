@@ -125,7 +125,7 @@ mebular print-config --client opencode         # MCP 配置
       <td><strong><a href="SEALING_CN.md">封板契约</a></strong><br><sub>协议红线</sub></td>
     </tr>
     <tr>
-      <td><strong><a href="CHANGELOG.md">变更日志</a></strong><br><sub>发布说明</sub></td>
+      <td><strong><a href="CHANGELOG.md">变更日志</a> · <a href="ROADMAP_CN.md">路线图</a></strong><br><sub>发布与规划</sub></td>
       <td><strong><a href="CONTRIBUTING.md">参与贡献</a></strong><br><sub>质量门禁</sub></td>
       <td><strong><a href="SECURITY.md">安全</a></strong><br><sub>报告漏洞</sub></td>
       <td><strong><a href="https://mebular.cyberfederal.io">官网</a></strong><br><sub>产品站点</sub></td>

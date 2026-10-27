@@ -125,7 +125,7 @@ mebular print-config --client opencode         # MCP config
       <td><strong><a href="SEALING.md">Sealing docs</a></strong><br><sub>Protocol rules</sub></td>
     </tr>
     <tr>
-      <td><strong><a href="CHANGELOG.md">Changelog</a></strong><br><sub>Release notes</sub></td>
+      <td><strong><a href="CHANGELOG.md">Changelog</a> · <a href="ROADMAP.md">Roadmap</a></strong><br><sub>Released &amp; planned</sub></td>
       <td><strong><a href="CONTRIBUTING.md">Contributing</a></strong><br><sub>Quality gates</sub></td>
       <td><strong><a href="SECURITY.md">Security</a></strong><br><sub>Report a vuln</sub></td>
       <td><strong><a href="https://mebular.cyberfederal.io">Website</a></strong><br><sub>Product site</sub></td>

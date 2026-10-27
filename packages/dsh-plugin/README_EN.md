@@ -45,35 +45,43 @@ asks before installing a pinned shared runtime.
 
 ![Three steps: install the plugin, restart DSH; an existing App/CLI attaches, and the panel explicitly installs the shared runtime when none exists.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-en.svg)
 
-</div>
-
-```bash
-# Install the plugin only; it does not start or download Mebular.
-dsh plugin --profile web add @mebular/dsh-plugin@0.2.0
-
-# App/CLI running: the plugin attaches automatically; no manual mebular serve.
-# No runtime: open the Mebular panel and explicitly install the shared runtime.
-# CLI-only fallback: mebular serve
-
-# development install: dsh plugin --profile web add ./packages/dsh-plugin
-# verify: call any mcp__mebular__* tool
-# uninstall: dsh plugin --profile web remove @mebular/dsh-plugin
-```
-
-<div align="center">
-
 ![DSH integration: DSH Web loads /console/?embed=dsh in an iframe, and the official MCP client reaches the same daemon at /mcp; shared runtime resolve selects the App/CLI/shared provider and dynamic URL.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-en.svg)
 
 ![Status dot: green up, amber starting/installing/updating, red down, gray waiting for the first check.](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-en.svg)
 
 </div>
 
-## Legacy discovery
+An existing Mebular app or CLI attaches automatically; when no runtime exists, open the Mebular panel and install the shared runtime when prompted. Only the CLI-only path needs `mebular serve`.
 
-Shared runtime resolve is preferred when a shared CLI is available. Without it,
-legacy discovery remains `daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331`;
-`MEBULAR_HOME` only locates `runtime.json`. The Mebular app keeps running
-independently; the plugin connects to the same daemon.
+<details>
+<summary>Commands: install / development install / uninstall</summary>
+
+```bash
+# Install the plugin (it never starts or downloads Mebular silently)
+dsh plugin --profile web add @mebular/dsh-plugin@0.2.0
+
+# Development install
+dsh plugin --profile web add ./packages/dsh-plugin
+
+# Verify: call any mcp__mebular__* tool in DSH
+# Uninstall
+dsh plugin --profile web remove @mebular/dsh-plugin
+```
+
+</details>
+
+## MCP tools
+
+DSH reaches the same daemon at `/mcp` through the official MCP client; tools appear as `mcp__mebular__*`.
+
+| Area | Tools | MCP behavior |
+| --- | --- | --- |
+| Memory write | `memory_write` `memory_write_batch` | Write one or many facts, preferences, episodes and skills; every write is signed and synced |
+| Memory recall | `memory_query` `memory_search` `memory_graph` | Semantic/keyword recall and graph traversal; filter by time and relation |
+| Profile and history | `memory_profile` `memory_skills` `memory_history` | Read user preferences, skill inventory and session episodes |
+| Memory maintenance | `memory_import` `memory_status` `memory_sync` `memory_delete` `memory_archive` | Import, status, sync, tombstone delete, archive/unarchive |
+| Task dispatch | `task_submit` `task_submit_batch` `task_cancel` `task_retry` `task_status` `task_list` `task_history` `task_children` `task_summarize` | Dispatch, cancel, retry and query the task DAG |
+| Collaboration | `task_subscribe` `task_negotiate` `chatter_send` `chatter_inbox` `task_quota` `task_targets` `board_create` | Change subscription, negotiate, quota chatter, targets and task boards |
 
 ## Docs
 
@@ -83,6 +91,18 @@ independently; the plugin connects to the same daemon.
 | <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md">Agent skills</a></strong> <br><sub>Setup playbooks</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md">Fleet ops</a></strong> <br><sub>Multi-machine</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/SHARED_RUNTIME.md">Shared runtime</a></strong> <br><sub>Install/upgrade/rollback</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SEALING.md">Sealing docs</a></strong> <br><sub>Protocol rules</sub> |
 | <strong><a href="https://github.com/Windsander/Mebular/blob/main/CHANGELOG.md">Changelog</a></strong> <br><sub>Release notes</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/CONTRIBUTING.md">Contributing</a></strong> <br><sub>Quality gates</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SECURITY.md">Security</a></strong> <br><sub>Report a vuln</sub> | <strong><a href="https://mebular.cyberfederal.io">Website</a></strong> <br><sub>Product site</sub> |
 | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH.md">DSH integration</a></strong> <br><sub>Full reference</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md">DSH E2E</a></strong> <br><sub>CI gates</sub> | <strong><a href="https://www.npmjs.com/package/@mebular/dsh-plugin">npm</a></strong> <br><sub>Package page</sub> | <strong><a href="https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/">awesome-dsh-plugin</a></strong> <br><sub>Plugin list</sub> |
+
+<details>
+<summary>Discovery &amp; compatibility</summary>
+
+| Case | Resolution |
+| --- | --- |
+| Shared runtime available | Prefer shared runtime resolve (App / CLI / shared provider + dynamic URL) |
+| Legacy environment without a shared CLI | `daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331` |
+| `MEBULAR_HOME` | Locates `runtime.json` only |
+| Mebular app | Keeps running independently; the plugin connects to the same daemon |
+
+</details>
 
 <div align="center">
 

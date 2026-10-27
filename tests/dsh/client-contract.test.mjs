@@ -144,6 +144,14 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).not.toContain('window.setInterval(tick');
   });
 
+  it('header 是窗口拖动区，操作按钮为非拖动区', () => {
+    expect(source).toContain("WebkitAppRegion: 'drag'");
+    expect(source).toContain("userSelect: 'none'");
+    expect(source).toContain("WebkitAppRegion: 'no-drag'");
+    expect(source).toContain("'data-mebular-action': 'open-console'");
+    expect(source).toContain("'data-mebular-action': 'refresh'");
+  });
+
   it('状态点保留可读 title，并继续使用 label 作为 DSH 按钮名称', () => {
     expect(source).toContain('function statusTitle');
     expect(source).toContain('title: statusTitle(t, status)');

@@ -37,6 +37,9 @@ The GitHub Release body is extracted from this file: everything between the rele
 - **DSH compact header** — `打开 Console` and `刷新` are now compact icon
   actions, the redundant connected label is dropped, and the service-hint row
   is removed; keep-running settings remain in Console settings.
+- **DSH panel drag region** — the panel header now uses the Electron titlebar
+  drag region with text selection disabled; header actions remain no-drag and
+  clickable.
 
 ## [v0.2.1] - 2026-10-27
 

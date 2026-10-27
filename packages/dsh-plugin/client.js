@@ -244,6 +244,10 @@ window.__ModuleLoader__.load({
         padding: '0 20px',
         borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
         background: 'var(--dsw-alias-bg-layer-2, transparent)',
+        // Match the DSH titlebar: dragging the panel heading moves the window,
+        // and a drag must not start a text selection.
+        WebkitAppRegion: 'drag',
+        userSelect: 'none',
       },
       headerSidebarCollapsed: {
         // DSH keeps its collapsed-sidebar controls floating over the left edge
@@ -265,6 +269,7 @@ window.__ModuleLoader__.load({
         color: 'inherit',
         cursor: 'pointer',
         textDecoration: 'none',
+        WebkitAppRegion: 'no-drag',
       },
       dot: {
         width: 8,
@@ -359,6 +364,7 @@ window.__ModuleLoader__.load({
         textDecoration: 'none',
         whiteSpace: 'nowrap',
         font: 'inherit',
+        WebkitAppRegion: 'no-drag',
       },
       frameWrap: {
         flex: 1,

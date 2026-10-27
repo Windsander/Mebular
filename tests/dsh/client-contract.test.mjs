@@ -150,6 +150,8 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).toContain("WebkitAppRegion: 'no-drag'");
     expect(source).toContain("'data-mebular-action': 'open-console'");
     expect(source).toContain("'data-mebular-action': 'refresh'");
+    expect(source).toContain('minHeight: 52');
+    expect(source).toContain('paddingLeft: 20');
   });
 
   it('状态点保留可读 title，并继续使用 label 作为 DSH 按钮名称', () => {

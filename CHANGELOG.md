@@ -39,7 +39,8 @@ The GitHub Release body is extracted from this file: everything between the rele
   is removed; keep-running settings remain in Console settings.
 - **DSH panel drag region** — the panel header now uses the Electron titlebar
   drag region with text selection disabled; header actions remain no-drag and
-  clickable.
+  clickable. The header is 52px tall and explicitly keeps left padding so the
+  status dot aligns with DSH's top controls and clears the panel edge.
 
 ## [v0.2.1] - 2026-10-27
 

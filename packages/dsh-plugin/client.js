@@ -240,8 +240,13 @@ window.__ModuleLoader__.load({
         alignItems: 'center',
         gap: 8,
         flex: 'none',
-        minHeight: 40,
-        padding: '0 20px',
+        minHeight: 52,
+        // Use explicit sides instead of the padding shorthand: the DSH shell
+        // normalizes shorthand left padding on drag regions.
+        paddingTop: 0,
+        paddingRight: 20,
+        paddingBottom: 0,
+        paddingLeft: 20,
         borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
         background: 'var(--dsw-alias-bg-layer-2, transparent)',
         // Match the DSH titlebar: dragging the panel heading moves the window,

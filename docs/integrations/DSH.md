@@ -222,6 +222,9 @@ runtime/current/provider are preserved and no second daemon is created.
   registry values are rejected. The host reads the fixed source and target.
 - The iframe is created only when the daemon, embed protocol, loopback and
   `capabilities.embedConsole` all match; the sandbox grants no top navigation.
+- Under `?embed=dsh` the Console CSP allows loopback HTTP ancestors and the DSH
+  Desktop origin `dsh-app://app`; ordinary Console requests keep
+  `frame-ancestors 'none'`.
 - Shared update/upgrade/install locks prevent duplicate installs or upgrades;
   logs are redacted.
 

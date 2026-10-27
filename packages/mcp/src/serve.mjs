@@ -298,8 +298,11 @@ export function consoleSecurityHeaders(res, { tls = false, embed = false, loopba
   res.setHeader('referrer-policy', 'no-referrer');
   const frameable = embed === true && loopback === true;
   if (!frameable) res.setHeader('x-frame-options', 'DENY');
+  // DSH Web uses a loopback HTTP origin; DSH Desktop's top-level page is
+  // `dsh-app://app`. Both are explicit DSH embed hosts; ordinary browser
+  // navigation and non-embed requests remain denied.
   const frameAncestors = frameable
-    ? 'http://127.0.0.1:* http://localhost:*'
+    ? 'http://127.0.0.1:* http://localhost:* dsh-app://app'
     : "'none'";
   res.setHeader(
     'content-security-policy',

@@ -15,6 +15,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
+## [Unreleased]
+
+### Fixed
+
+- **DSH Desktop Console white panel** — the Console embed CSP now allows the
+  DSH Desktop ancestor origin `dsh-app://app` in addition to DSH Web's loopback
+  HTTP origins. Ordinary Console requests still send `frame-ancestors 'none'`.
+
 ## [v0.2.1] - 2026-10-27
 
 ### Fixed

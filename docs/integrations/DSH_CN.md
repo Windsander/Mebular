@@ -198,6 +198,8 @@ mebular runtime upgrade --to latest --json
   固定目标由 host 读取，不由客户端传入。
 - iframe 只在 daemon、embed protocol、loopback 与 `capabilities.embedConsole` 都满足时
   创建；sandbox 不含 top navigation。
+- `?embed=dsh` 下 Console CSP 允许 loopback HTTP 祖先和 DSH Desktop 的
+  `dsh-app://app` origin；普通 Console 请求仍保持 `frame-ancestors 'none'`。
 - 共享 update/upgrade/install 锁防止两个入口重复安装或升级；日志先脱敏。
 
 ## 常见 reason

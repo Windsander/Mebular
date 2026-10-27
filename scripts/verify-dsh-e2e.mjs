@@ -1075,8 +1075,8 @@ const scenarios = [
       check('?embed=dsh 不发送 X-Frame-Options', embed.headers['x-frame-options'] === undefined, embed.headers['x-frame-options'] ?? '(absent)');
       const embedCsp = embed.headers['content-security-policy'] ?? '';
       check(
-        '?embed=dsh 的 frame-ancestors 只放开 loopback',
-        embedCsp.includes('frame-ancestors http://127.0.0.1:* http://localhost:*'),
+        '?embed=dsh 的 frame-ancestors 只放开 loopback 与 DSH Desktop',
+        embedCsp.includes('frame-ancestors http://127.0.0.1:* http://localhost:* dsh-app://app'),
         embedCsp,
       );
 

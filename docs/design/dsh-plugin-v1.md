@@ -101,8 +101,11 @@ Content-Security-Policy: ... frame-ancestors 'none'
 
 ```http
 # 不发送 X-Frame-Options
-Content-Security-Policy: ... frame-ancestors http://127.0.0.1:* http://localhost:*
+Content-Security-Policy: ... frame-ancestors http://127.0.0.1:* http://localhost:* dsh-app://app
 ```
+
+DSH Web 的顶层 origin 是 `http://127.0.0.1:<port>`；DSH Desktop 的顶层页面是
+`dsh-app://app`。两者都是显式允许的 DSH 嵌入宿主；普通浏览器导航和非 embed 请求仍被拒绝。
 
 页面行为：
 
@@ -437,13 +440,11 @@ host 在 `apply` 时通过 `ctx.inject(['systemPrompt'])` 注入 DSH 可选的 s
    版本线；正式安装为 `dsh plugin --profile web add @mebular/dsh-plugin@0.1.0`。插件开发
    仍可从 `./packages/dsh-plugin` 或 GitHub 子目录安装。
 2. **官方列表**：已收录于 awesome-dsh-plugin 的 `memory` 分类（[PR #9167](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/pull/9167)，2026-10-24 合并）；`docs/dsh/awesome-dsh-plugin-entry.yml` 保留为条目源与审计记录。
-3. **仅 loopback**：公网 DSH、HTTPS loopback、非 HTTP 自定义协议不在当前
-   `frame-ancestors` 白名单。
-4. **Desktop origin 未在本轮验证**：`@deepseek-ai/dsh-desktop-host` 不在 npm 上，也未
-   出现在公开 DSH 仓库的可检索 tree 中，无法静态确认其窗口 origin。若 Desktop 使用
-   `http://127.0.0.1:<port>`，与当前 CSP 白名单一致；若改用 HTTPS 或自定义 scheme，
-   需要扩展 `frame-ancestors` 并重跑 E2E。本轮只验证了 DSH Web 的
-   `http://127.0.0.1:7392` origin。
+3. **仅 loopback 与 DSH Desktop**：公网 DSH、HTTPS loopback 不在当前
+   `frame-ancestors` 白名单；DSH Desktop 使用固定的 `dsh-app://app` origin。
+4. **Desktop origin 已确认**：DSH Desktop 的顶层页面为 `dsh-app://app`；CSP 在
+   `embed=dsh` + loopback 条件下显式允许该 origin。DSH Web 仍使用
+   `http://127.0.0.1:<port>`。
 5. **MCP peer 由 DSH 提供**：Jest、普通 Node 或缺少 `@deepseek-ai/dsh-mcp-client` 的宿主
    没有 MCP 工具，但面板与状态路由仍工作。
 6. **runtime home 必须一致**：DSH 与 daemon 的 `MEBULAR_HOME` 不同且未设

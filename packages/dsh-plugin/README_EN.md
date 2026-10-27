@@ -29,6 +29,15 @@ asks before installing a pinned shared runtime.
 
 </div>
 
+<table width="100%">
+  <tr>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-sidebar.svg" alt="The Mebular entry and status dot in the DeepSeek Harness sidebar" width="100%"><br><sub>Sidebar entry and status</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-controls.svg" alt="The Mebular panel header and Console navigation" width="100%"><br><sub>Panel header and navigation</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-starmap.svg" alt="The shared Mebular Console star map inside the DSH panel" width="100%"><br><sub>Shared Console star map</sub></td>
+    <td width="25%"><img src="https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-plugin-demo-actions.svg" alt="Join Cloud and Invite device actions in the Mebular Console" width="100%"><br><sub>Join / invite actions</sub></td>
+  </tr>
+</table>
+
 ## DSH integration
 
 <div align="center">

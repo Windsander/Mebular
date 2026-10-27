@@ -29,7 +29,7 @@ resolve`/`supervise`) and daemon HTTP endpoints.
 Install from npm into the DSH web profile:
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.2.0
+dsh plugin --profile web add @mebular/dsh-plugin@0.2.1
 ```
 
 For development:
@@ -252,13 +252,13 @@ single daemon, service, update locks and upgrade rollback are covered by CI and
 
 ## Release and version
 
-- Version: `0.2.0`, on the unified Mebular v0.2.0 release train (all six npm
+- Version: `0.2.1`, on the unified Mebular v0.2.1 release train (all six npm
   packages share the same version).
-- npm: `@mebular/dsh-plugin@0.2.0`.
+- npm: `@mebular/dsh-plugin@0.2.1`.
 - The Plugin is an isolated adapter in `packages/dsh-plugin`, published by its
   own npm job. It reads the pinned runtime version from its own `package.json`,
   so a release bump needs no Plugin source edit.
-- Publish `@mebular/core@0.2.0` before `@mebular/dsh-plugin@0.2.0`; see
+- Publish `@mebular/core@0.2.1` before `@mebular/dsh-plugin@0.2.1`; see
   [Release SOP](../operations/RELEASE.md).
 - Listed in the `memory` category of
   [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/).

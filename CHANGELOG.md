@@ -15,6 +15,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
+## [v0.2.1] - 2026-10-27
+
+### Fixed
+
+- **First-run wizard module resolution** — the packaged desktop renderer now resolves the shared assistant-status module from `Resources/node_modules/@mebular/core` with a development fallback. This restores **Start deployment** and **Skip wizard** on macOS, Windows, and Linux (#270).
+- **Windows service loading and provider startup** — desktop service loaders now use `file:` URLs, and `.cmd`/`.bat` runtime providers launch through the Windows shell (#272).
+- **Custom-home service execution** — service descriptors now carry `ELECTRON_RUN_AS_NODE=1`, so custom-home service installation starts a Node daemon instead of another App instance (#272).
+- **Standalone MCP asset resolution** — Console and locale assets now resolve correctly for both core-internal and standalone `@mebular/mcp` layouts, including the `fleet quickstart --daemon` path (#272).
+
+### Verified
+
+- **Full Jest** — 207 suites / 2113 tests passed.
+- **Runtime coexistence** — 13 scenarios / 153 checks passed.
+- **Real DSH E2E** — 5 key scenarios / 116 checks passed; real Chrome, Console, and MCP calls included.
+- **Packaged and standalone smoke** — published runtime smoke (7 checks) and standalone MCP health/Console/locale/embed-info all passed.
+
 ## [v0.2.0] - 2026-10-27
 
 v0.2.0 is the shared-runtime release. The Mebular App and the DSH Plugin are now

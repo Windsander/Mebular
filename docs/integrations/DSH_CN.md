@@ -26,7 +26,7 @@ supervisor 的 `runtime resolve`/`supervise` 和 daemon HTTP 端点工作。
 从 npm 安装到 DSH 的 Web profile：
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.2.0
+dsh plugin --profile web add @mebular/dsh-plugin@0.2.1
 ```
 
 开发时从工作树安装：
@@ -226,11 +226,11 @@ npm run verify:runtime:coexistence
 
 ## 发布与版本
 
-- 版本：`0.2.0`，随统一 Mebular v0.2.0 release train（六个 npm 包同版本）
-- npm：`@mebular/dsh-plugin@0.2.0`
+- 版本：`0.2.1`，随统一 Mebular v0.2.1 release train（六个 npm 包同版本）
+- npm：`@mebular/dsh-plugin@0.2.1`
 - 插件是独立适配器：代码隔离在 `packages/dsh-plugin`，由独立 npm job 发布；插件运行时从
   自己的 `package.json` 读取 pinned runtime 版本，发布 bump 不需要改插件源码。
-- 发布先 `@mebular/core@0.2.0`，再 `@mebular/dsh-plugin@0.2.0`；详见
+- 发布先 `@mebular/core@0.2.1`，再 `@mebular/dsh-plugin@0.2.1`；详见
   [发布 SOP](../operations/RELEASE.md)。
 - 插件已收录于
   [awesome-dsh-plugin](https://awesome-dsh-plugin.com/zh/p/Windsander/Mebular--packages-dsh-plugin/)

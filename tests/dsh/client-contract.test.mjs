@@ -91,14 +91,23 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).not.toMatch(/JSON\.stringify\(\{[^}]*version/);
   });
 
-  it('渲染共享更新 banner、稍后/跳过/更新与服务常驻入口', () => {
+  it('折叠 DSH 侧栏时为顶栏控制按钮保留安全区', () => {
+    expect(source).toContain('data-sidebar-collapsed="true"');
+    expect(source).toContain('headerSidebarCollapsed');
+    expect(source).toContain('paddingLeft: 172');
+    expect(source).toContain("'data-mebular-panel-header': 'true'");
+  });
+
+  it('渲染共享更新 banner、稍后/跳过/更新与紧凑 header 操作', () => {
     expect(source).toContain('function updateView');
     expect(source).toContain("kind: 'available'");
     expect(source).toContain("actions: ['update', 'later', 'skip']");
     expect(source).toContain("actions: ['update', 'later']");
     expect(source).toContain('dismissedVersion');
     expect(source).toContain('data-mebular-update');
-    expect(source).toContain('serviceHint');
+    expect(source).toContain("'data-mebular-action': 'open-console'");
+    expect(source).toContain("'data-mebular-action': 'refresh'");
+    expect(source).not.toContain('serviceHint');
     expect(source).toContain('updateFailedTitle');
     expect(source).toContain('updateBusy');
   });
@@ -135,13 +144,24 @@ describe('P2 @mebular/dsh-plugin client：静态契约', () => {
     expect(source).not.toContain('window.setInterval(tick');
   });
 
+  it('header 是窗口拖动区，操作按钮为非拖动区', () => {
+    expect(source).toContain("WebkitAppRegion: 'drag'");
+    expect(source).toContain("userSelect: 'none'");
+    expect(source).toContain("WebkitAppRegion: 'no-drag'");
+    expect(source).toContain("'data-mebular-action': 'open-console'");
+    expect(source).toContain("'data-mebular-action': 'refresh'");
+    expect(source).toContain('minHeight: 52');
+    expect(source).toContain('paddingLeft: 20');
+  });
+
   it('状态点保留可读 title，并继续使用 label 作为 DSH 按钮名称', () => {
     expect(source).toContain('function statusTitle');
     expect(source).toContain('title: statusTitle(t, status)');
     expect(source).toContain("'data-mebular-status': status");
     expect(source).toContain("label: 'Mebular'");
     expect(source).toContain("'aria-hidden': 'true'");
-    expect(source).not.toContain('aria-label');
+    expect(source).toContain("'aria-label': t.openConsole");
+    expect(source).toContain("'aria-label': t.refresh");
   });
 
   it('daemon down 文案说明 MCP 工具暂不可用且会自动恢复', () => {

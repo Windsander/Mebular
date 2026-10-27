@@ -186,7 +186,8 @@ mebular runtime upgrade --to latest --json
 ## 常驻与卸载
 
 - Console 的「让 Mebular 常驻」安装/检查共享 `mebular-serve`；
-- 插件面板显示 service 状态，并链接到 Console；插件本身不安装 service；
+- service 状态与常驻操作在 Console 设置中；插件面板只保留紧凑 runtime header，
+  插件本身不安装 service；
 - 卸载 DSH 插件只移除插件和它自己的 supervise/timer，不删除 runtime、provider、
   service 或数据；
 - 显式移除常驻服务用 `mebular runtime service uninstall`；它会保留 runtime/provider/data。
@@ -198,6 +199,11 @@ mebular runtime upgrade --to latest --json
   固定目标由 host 读取，不由客户端传入。
 - iframe 只在 daemon、embed protocol、loopback 与 `capabilities.embedConsole` 都满足时
   创建；sandbox 不含 top navigation。
+- `?embed=dsh` 下 Console CSP 允许 loopback HTTP 祖先和 DSH Desktop 的
+  `dsh-app://app` origin；普通 Console 请求仍保持 `frame-ancestors 'none'`。
+- DSH 内嵌态隐藏锁定横幅和 onboarding 卡：它们在窄面板会压住 Console 右侧导航
+  （`审计` / `设置`）。内嵌态右上角提供紧凑操作条：锁定态为 `新建忆云` /
+  `加入忆云`，初始化后为 `加入忆云` / `邀请设备`。
 - 共享 update/upgrade/install 锁防止两个入口重复安装或升级；日志先脱敏。
 
 ## 常见 reason

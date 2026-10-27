@@ -38,11 +38,13 @@ describe('P1 console embed：安全头', () => {
     }
   });
 
-  it('embed=true + loopback=true：移除 XFO，只允许 loopback 祖先', () => {
+  it('embed=true + loopback=true：移除 XFO，只允许 loopback 与 DSH Desktop 祖先', () => {
     const res = headerRecorder();
     consoleSecurityHeaders(res, { embed: true, loopback: true });
     expect(res.headers['x-frame-options']).toBeUndefined();
-    expect(res.headers['content-security-policy']).toContain('frame-ancestors http://127.0.0.1:* http://localhost:*');
+    expect(res.headers['content-security-policy']).toContain(
+      'frame-ancestors http://127.0.0.1:* http://localhost:* dsh-app://app',
+    );
     expect(res.headers['content-security-policy']).not.toContain("frame-ancestors 'none'");
     // 其余安全头不回退
     expect(res.headers['x-content-type-options']).toBe('nosniff');
@@ -81,7 +83,7 @@ describe('P1 console embed：真实 HTTP server', () => {
     expect(res.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
   });
 
-  it('/console?embed=dsh 的 308 保留 query；/console/?embed=dsh 允许 loopback frame', async () => {
+  it('/console?embed=dsh 的 308 保留 query；/console/?embed=dsh 允许 loopback 与 DSH Desktop frame', async () => {
     const redirect = await fetch(`${base}/console?embed=dsh`, { redirect: 'manual' });
     expect(redirect.status).toBe(308);
     expect(redirect.headers.get('location')).toBe('/console/?embed=dsh');
@@ -90,7 +92,7 @@ describe('P1 console embed：真实 HTTP server', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('x-frame-options')).toBeNull();
     const csp = res.headers.get('content-security-policy');
-    expect(csp).toContain('frame-ancestors http://127.0.0.1:* http://localhost:*');
+    expect(csp).toContain('frame-ancestors http://127.0.0.1:* http://localhost:* dsh-app://app');
     expect(csp).not.toContain("frame-ancestors 'none'");
   });
 

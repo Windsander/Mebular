@@ -207,8 +207,9 @@ runtime/current/provider are preserved and no second daemon is created.
 ## Persistence and uninstall
 
 - Console **Keep Mebular running** installs/checks the shared `mebular-serve`;
-- the Plugin panel displays service status and links to Console; the Plugin does
-  not install services itself;
+- service status and the keep-running action live in Console settings; the
+  Plugin panel only shows the compact runtime header and does not install
+  services itself;
 - removing the DSH Plugin removes only the Plugin and its own supervisor/timers;
   it does not delete runtime, provider, service or data;
 - explicit service removal is `mebular runtime service uninstall`; it preserves
@@ -222,6 +223,13 @@ runtime/current/provider are preserved and no second daemon is created.
   registry values are rejected. The host reads the fixed source and target.
 - The iframe is created only when the daemon, embed protocol, loopback and
   `capabilities.embedConsole` all match; the sandbox grants no top navigation.
+- Under `?embed=dsh` the Console CSP allows loopback HTTP ancestors and the DSH
+  Desktop origin `dsh-app://app`; ordinary Console requests keep
+  `frame-ancestors 'none'`.
+- The locked-state Console banner and onboarding card are hidden inside the DSH
+  embed because they would overlap the right-side Console navigation at narrow
+  panel widths. A compact upper-right action bar provides `新建忆云` /
+  `加入忆云` while locked, then `加入忆云` / `邀请设备` after initialization.
 - Shared update/upgrade/install locks prevent duplicate installs or upgrades;
   logs are redacted.
 

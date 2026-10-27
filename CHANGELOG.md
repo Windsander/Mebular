@@ -15,6 +15,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
+## [Unreleased]
+
+### Fixed
+
+- **DSH Desktop Console white panel** — the Console embed CSP now allows the
+  DSH Desktop ancestor origin `dsh-app://app` in addition to DSH Web's loopback
+  HTTP origins. Ordinary Console requests still send `frame-ancestors 'none'`.
+- **DSH embed locked banner overlap** — the locked-state banner is suppressed
+  inside the DSH embed, where it covered the right-side navigation (`审计` /
+  `设置`); the onboarding card remains as the single action prompt.
+- **DSH collapsed-sidebar header overlap** — the panel header reserves the
+  collapsed-sidebar control strip, keeping DSH's “open sidebar” and “new
+  session” controls clear of the Mebular title and status.
+- **DSH embed cloud actions** — the hidden topbar actions are mirrored in a
+  compact upper-right action bar (`新建忆云` / `加入忆云`, then `邀请设备` after
+  initialization). The buttons use the normal topbar geometry, stay on one
+  line, and the redundant onboarding card is suppressed in the embed.
+- **DSH expanded-sidebar spacing** — the panel header keeps a wider left inset
+  so the status dot does not crowd the sidebar edge.
+- **DSH compact header** — `打开 Console` and `刷新` are now compact icon
+  actions, the redundant connected label is dropped, and the service-hint row
+  is removed; keep-running settings remain in Console settings.
+- **DSH panel drag region** — the panel header now uses the Electron titlebar
+  drag region with text selection disabled; header actions remain no-drag and
+  clickable. The header is 52px tall and explicitly keeps left padding so the
+  status dot aligns with DSH's top controls and clears the panel edge.
+
 ## [v0.2.1] - 2026-10-27
 
 ### Fixed

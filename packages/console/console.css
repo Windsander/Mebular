@@ -284,6 +284,46 @@ html.console-booting #boot-screen::after {
 .sidebar-settings-ico { font-size: 11px; line-height: 1; }
 [data-embed='dsh'] .embed-only { display: list-item; }
 [data-embed='dsh'] .topbar { display: none; }
+/* DSH embed：用右上角紧凑操作条替代被隐藏的 topbar actions。 */
+.embed-actions {
+  display: none;
+  position: fixed;
+  top: 10px;
+  right: 14px;
+  z-index: 20;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+[data-embed='dsh'] .embed-actions:not([hidden]) { display: flex; }
+.embed-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  height: 34px;
+  padding: 0 12px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.embed-actions .btn .btn-ico {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 15px;
+  font-size: 15px;
+  line-height: 1;
+}
+.embed-actions .btn .btn-label { white-space: nowrap; }
+/* 锁定态横幅会压住右侧导航；onboarding 卡与新操作条重复，内嵌态一并收起。 */
+[data-embed='dsh'] .banner.is-locked,
+[data-embed='dsh'] .onboarding-coach { display: none !important; }
+@media (max-width: 760px) {
+  .embed-actions { right: 12px; }
+  .embed-actions .btn { padding: 0 8px; }
+}
 [data-embed='dsh'] .app { height: 100vh; }
 [data-embed='dsh'] .layout { flex: 1 1 auto; min-height: 0; }
 .legend-panel {

@@ -1,11 +1,11 @@
-// R1 桌面发布打包：打包态 CLI / locales 解析优先级 + 版本 SSOT。
+// R1 桌面发布打包：打包态 CLI / locales / renderer 共享模块解析优先级 + 版本 SSOT。
 // 不启动 Electron、不依赖 release-pack（用临时目录模拟 resources 布局）。
 
 import { describe, it, expect, afterEach } from '@jest/globals';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { APP_VERSION, repoRootFromModule, resolveCliBin } from '../../apps/desktop/src/main/daemon.mjs';
 import { resolveLocalesDir } from '../../apps/desktop/src/main/i18n.mjs';
 
@@ -110,6 +110,26 @@ describe('R1 resolveLocalesDir：runtime 内 locale pack', () => {
   it('MEBULAR_LOCALES_DIR 仍最高优先', () => {
     expect(resolveLocalesDir({ env: { MEBULAR_LOCALES_DIR: '/tmp/custom' }, moduleDir: '/x', resourcesPath: '/res' }))
       .toBe('/tmp/custom');
+  });
+});
+
+describe('R1 renderer assistant-status：开发态与打包态双布局', () => {
+  it('仓库布局保留 packages/console 回退路径', async () => {
+    const { wizardRowStatus } = await import('../../apps/desktop/src/renderer/wizard-view.mjs');
+    expect(wizardRowStatus({ id: 'opencode', state: 'connected' }).key).toBe('connected');
+  });
+
+  it('app.asar/src/renderer 能从 Resources/node_modules 加载共享投影', async () => {
+    const resources = tempDir('mebular-renderer-resources-');
+    const view = join(resources, 'app.asar', 'src', 'renderer', 'wizard-view.mjs');
+    const helper = join(resources, 'node_modules', '@mebular', 'core', 'packages', 'console', 'assistant-status.js');
+    mkdirSync(dirname(view), { recursive: true });
+    mkdirSync(dirname(helper), { recursive: true });
+    copyFileSync(join(repoRoot, 'apps', 'desktop', 'src', 'renderer', 'wizard-view.mjs'), view);
+    copyFileSync(join(repoRoot, 'packages', 'console', 'assistant-status.js'), helper);
+
+    const { wizardRowStatus } = await import(pathToFileURL(view).href);
+    expect(wizardRowStatus({ id: 'opencode', state: 'connected' }).key).toBe('connected');
   });
 });
 

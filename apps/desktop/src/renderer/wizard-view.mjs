@@ -142,7 +142,23 @@ function assistantsStepView(step, start, t) {
 // UX-2 补丁 3：瞬态容忍 + 行状态机（纯函数，渲染层与单测共用）
 // ---------------------------------------------------------------------------
 
-import { projectAssistantStatus } from '../../../../packages/console/assistant-status.js';
+// The packaged renderer resolves @mebular/core from Resources/node_modules;
+// the repository layout keeps the sibling packages/console path for development.
+const packagedAssistantStatus = new URL('../../../node_modules/@mebular/core/packages/console/assistant-status.js', import.meta.url);
+const developmentAssistantStatus = new URL('../../../../packages/console/assistant-status.js', import.meta.url);
+function isMissingModuleError(error) {
+  return error?.code === 'ERR_MODULE_NOT_FOUND'
+    || error?.code === 'MODULE_NOT_FOUND'
+    || /^(?:Cannot find module|Failed to fetch dynamically imported module)\b/.test(String(error?.message ?? ''));
+}
+
+let projectAssistantStatus;
+try {
+  ({ projectAssistantStatus } = await import(packagedAssistantStatus.href));
+} catch (error) {
+  if (!isMissingModuleError(error)) throw error;
+  ({ projectAssistantStatus } = await import(developmentAssistantStatus.href));
+}
 
 /**
  * ①「守护已就绪」瞬态容忍（防误翻）：曾就绪时**连续 ≥2 次**探测失败才翻回未完成；

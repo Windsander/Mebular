@@ -266,7 +266,13 @@ describe('P1 console 接线（静态契约）', () => {
     expect(consoleCss).toContain('.embed-only { display: none; }');
     expect(consoleCss).toContain("[data-embed='dsh'] .embed-only { display: list-item; }");
     expect(consoleCss).toContain("[data-embed='dsh'] .topbar { display: none; }");
-    expect(consoleCss).toContain("[data-embed='dsh'] .banner.is-locked { display: none; }");
+    expect(consoleCss).toContain("[data-embed='dsh'] .banner.is-locked");
+    expect(consoleCss).toContain("[data-embed='dsh'] .onboarding-coach { display: none !important; }");
+    expect(consoleCss).toContain("[data-embed='dsh'] .embed-actions:not([hidden]) { display: flex; }");
     expect(consoleCss).toMatch(/\[data-embed='dsh'\] \.layout \{ flex: 1 1 auto; min-height: 0; \}/);
+    expect(indexHtml).toContain('id="embed-actions"');
+    expect(indexHtml).toContain('id="embed-create-cloud"');
+    expect(indexHtml).toContain('id="embed-join-cloud"');
+    expect(indexHtml).toContain('id="embed-invite-device"');
   });
 });

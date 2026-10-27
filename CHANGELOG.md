@@ -28,6 +28,11 @@ The GitHub Release body is extracted from this file: everything between the rele
 - **DSH collapsed-sidebar header overlap** — the panel header reserves the
   collapsed-sidebar control strip, keeping DSH's “open sidebar” and “new
   session” controls clear of the Mebular title and status.
+- **DSH embed cloud actions** — the hidden topbar actions are mirrored in a
+  compact upper-right action bar (`新建忆云` / `加入忆云`, then `邀请设备` after
+  initialization). The redundant onboarding card is suppressed in the embed.
+- **DSH expanded-sidebar spacing** — the panel header keeps a wider left inset
+  so the status dot does not crowd the sidebar edge.
 
 ## [v0.2.1] - 2026-10-27
 

@@ -284,8 +284,24 @@ html.console-booting #boot-screen::after {
 .sidebar-settings-ico { font-size: 11px; line-height: 1; }
 [data-embed='dsh'] .embed-only { display: list-item; }
 [data-embed='dsh'] .topbar { display: none; }
-/* 锁定态横幅在窄 DSH 面板会压住右侧导航；onboarding 卡已承载同一信息。 */
-[data-embed='dsh'] .banner.is-locked { display: none; }
+/* DSH embed：用右上角紧凑操作条替代被隐藏的 topbar actions。 */
+.embed-actions {
+  display: none;
+  position: fixed;
+  top: 10px;
+  right: 14px;
+  z-index: 20;
+  align-items: center;
+  gap: 8px;
+}
+[data-embed='dsh'] .embed-actions:not([hidden]) { display: flex; }
+/* 锁定态横幅会压住右侧导航；onboarding 卡与新操作条重复，内嵌态一并收起。 */
+[data-embed='dsh'] .banner.is-locked,
+[data-embed='dsh'] .onboarding-coach { display: none !important; }
+@media (max-width: 760px) {
+  .embed-actions { right: 12px; }
+  .embed-actions .btn { padding: 0 8px; }
+}
 [data-embed='dsh'] .app { height: 100vh; }
 [data-embed='dsh'] .layout { flex: 1 1 auto; min-height: 0; }
 .legend-panel {

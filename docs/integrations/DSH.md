@@ -225,9 +225,10 @@ runtime/current/provider are preserved and no second daemon is created.
 - Under `?embed=dsh` the Console CSP allows loopback HTTP ancestors and the DSH
   Desktop origin `dsh-app://app`; ordinary Console requests keep
   `frame-ancestors 'none'`.
-- The locked-state Console banner is hidden inside the DSH embed because the
-  onboarding card carries the same prompt and the banner otherwise overlaps the
-  right-side Console navigation at narrow panel widths.
+- The locked-state Console banner and onboarding card are hidden inside the DSH
+  embed because they would overlap the right-side Console navigation at narrow
+  panel widths. A compact upper-right action bar provides `新建忆云` /
+  `加入忆云` while locked, then `加入忆云` / `邀请设备` after initialization.
 - Shared update/upgrade/install locks prevent duplicate installs or upgrades;
   logs are redacted.
 

@@ -453,6 +453,7 @@ function renderLockedChrome() {
   join?.classList.add('is-onboarding');
   create?.removeAttribute('aria-disabled');
   join?.removeAttribute('aria-disabled');
+  syncEmbedActions();
 }
 
 function clearLockedChrome() {
@@ -473,6 +474,23 @@ function clearLockedChrome() {
   if (join) join.hidden = false;
   create?.classList.remove('is-onboarding');
   join?.classList.remove('is-onboarding');
+  syncEmbedActions();
+}
+
+/**
+ * DSH 内嵌态把 topbar 隐藏了，但仍保留同状态的云操作：
+ * 锁定态 = 新建 / 加入；READY = 加入 / 邀请设备。普通 App/web 不显示此操作条。
+ */
+function syncEmbedActions() {
+  const box = $('#embed-actions');
+  if (!box) return;
+  const create = $('#embed-create-cloud');
+  const join = $('#embed-join-cloud');
+  const invite = $('#embed-invite-device');
+  if (create) create.hidden = !state.locked;
+  if (join) join.hidden = false;
+  if (invite) invite.hidden = state.locked;
+  box.hidden = false;
 }
 
 function topbarSecurityLevel(level) {
@@ -4563,6 +4581,14 @@ $('#join-cloud')?.addEventListener('click', () => {
 $('#create-cloud')?.addEventListener('click', () => {
   if (state.locked) openOnboardCreate();
 });
+// DSH embed：右上角紧凑操作条复用同一套动作与状态。
+for (const [embedId, sourceId] of [
+  ['#embed-create-cloud', '#create-cloud'],
+  ['#embed-join-cloud', '#join-cloud'],
+  ['#embed-invite-device', '#invite-device'],
+]) {
+  $(embedId)?.addEventListener('click', () => $(sourceId)?.click());
+}
 $('#coach-create')?.addEventListener('click', () => {
   dismissOnboardingCoach();
   openOnboardCreate();

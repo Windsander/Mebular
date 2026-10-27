@@ -37,6 +37,14 @@
       </div>
     </header>
 
+    <!-- DSH embed: compact cloud actions in the upper-right, matching the
+         normal App topbar without bringing back the whole topbar. -->
+    <div id="embed-actions" class="embed-actions" hidden>
+      <button id="embed-create-cloud" class="btn btn-primary" type="button" title="新建忆云" aria-label="新建忆云" data-i18n-title="topbar.createCloud" data-i18n-aria-label="topbar.createCloud"><span class="btn-ico">＋</span><span class="btn-label" data-i18n="topbar.createCloudShort">新建忆云</span></button>
+      <button id="embed-join-cloud" class="btn" type="button" title="加入忆云" aria-label="加入忆云" data-i18n-title="topbar.joinCloud" data-i18n-aria-label="topbar.joinCloud"><span class="btn-ico" aria-hidden="true"><svg class="cloud-mark" viewBox="0 0 16 16" fill="none"><path d="M4.6 12.2h6.9a2.7 2.7 0 0 0 .4-5.37A4.2 4.2 0 0 0 3.4 7.1a2.6 2.6 0 0 0 1.2 5.1Z" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span class="btn-label" data-i18n="topbar.joinCloudShort">加入忆云</span></button>
+      <button id="embed-invite-device" class="btn btn-primary" type="button" title="邀请设备" aria-label="邀请设备" data-i18n-title="topbar.invite" data-i18n-aria-label="topbar.invite" hidden><span class="btn-ico">＋</span><span class="btn-label" data-i18n="topbar.inviteShort">邀请设备</span></button>
+    </div>
+
     <div class="layout">
       <nav class="sidebar">
         <ul id="view-nav" class="view-tabs">

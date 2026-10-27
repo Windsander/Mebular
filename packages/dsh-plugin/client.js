@@ -249,7 +249,7 @@ window.__ModuleLoader__.load({
         gap: 8,
         flex: 'none',
         minHeight: 40,
-        padding: '0 12px',
+        padding: '0 20px',
         borderBottom: '1px solid var(--dsw-alias-border-l2, rgba(128,128,128,.25))',
         background: 'var(--dsw-alias-bg-layer-2, transparent)',
       },

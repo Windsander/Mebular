@@ -12,6 +12,10 @@
 
 *不需要托管账号 · 没有中心协调者*
 
+App 与 DSH Plugin 是同一套本机 Mebular runtime 的两个入口。插件默认 `attach`，
+不会因安装而静默启动或下载；已有 App/CLI 时直接连接。没有 runtime 时，面板会先询问，
+再按需安装固定版本共享 runtime。
+
 </div>
 
 ---
@@ -30,7 +34,7 @@
 
 ![一张记忆图：两台机器，每台一个 Mebular 节点；机器 A 连接 DSH、Hermes、Codex，机器 B 连接 Pi、OpenCode、Cursor；两个节点直接同步同一张图。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-memory-mesh-cn.svg)
 
-![DSH 里得到什么：侧边栏共享 Console、官方 MCP 工具、状态点与 attach / managed 生命周期；panel: false 只保留 MCP。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-cn.svg)
+![DSH 里得到什么：侧边栏共享 Console、官方 MCP 工具、状态点、attach / managed / auto 生命周期与按需安装更新；panel: false 只保留 MCP。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-capabilities-cn.svg)
 
 </div>
 
@@ -38,13 +42,18 @@
 
 <div align="center">
 
-![三步接入：启动 daemon、安装插件、重启 DSH；Mebular App 继续独立运行。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn.svg)
+![三步接入：安装插件、重启 DSH；已有 App/CLI 自动连接，没有 runtime 时面板显式安装共享 runtime。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-quickstart-cn.svg)
 
 </div>
 
 ```bash
-mebular serve
-dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
+# 安装插件（只安装插件，不启动/下载 Mebular）
+dsh plugin --profile web add @mebular/dsh-plugin@0.2.0
+
+# App/CLI 已在运行：插件自动 attach，不需要手动 mebular serve。
+# 没有 runtime：打开 Mebular 面板，按提示显式安装共享 runtime。
+# 只有 CLI 方式才需要：mebular serve
+
 # 开发安装：dsh plugin --profile web add ./packages/dsh-plugin
 # 验证：调用任意 mcp__mebular__* 工具
 # 卸载：dsh plugin --profile web remove @mebular/dsh-plugin
@@ -52,23 +61,29 @@ dsh plugin --profile web add @mebular/dsh-plugin@0.1.2
 
 <div align="center">
 
-![DSH 接入：DSH Web 通过 iframe 加载 /console/?embed=dsh，官方 MCP client 连接同一个 daemon 的 /mcp；发现顺序 daemonUrl → MEBULAR_HTTP_PORT → runtime.json → 7331。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn.svg)
+![DSH 接入：DSH Web 通过 iframe 加载 /console/?embed=dsh，官方 MCP client 连接同一个 daemon 的 /mcp；通过共享 runtime resolve 解析 App/CLI/shared provider 与动态 URL。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-connection-cn.svg)
 
-![状态点：绿色已连接，琥珀色启动中或降级，红色未运行，灰色等待首次检查。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn.svg)
+![状态点：绿色已连接，琥珀色启动/安装/更新中，红色未运行，灰色等待首次检查。](https://raw.githubusercontent.com/Windsander/Mebular/HEAD/assets/dsh-status-cn.svg)
 
 </div>
+
+## 兼容发现
+
+共享 runtime resolve 可用时优先使用它。没有共享 CLI 的旧环境仍按
+`daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331` 发现 daemon；`MEBULAR_HOME`
+只用于定位 `runtime.json`。Mebular App 继续独立运行，插件只连接同一个 daemon。
 
 ## 文档
 
 | 开始 | 理解 | 运维 | 信任 |
 | --- | --- | --- | --- |
 | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/getting-started/QUICKSTART_CN.md">快速上手</a></strong> <br><sub>安装与配对</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/architecture/ARCHITECT.md">架构</a></strong> <br><sub>节点与同步</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/console/README.md">控制台</a></strong> <br><sub>本地界面</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/limitations/LIMITATIONS_CN.md">限制</a></strong> <br><sub>敏感数据</sub> |
-| <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md">Agent</a></strong> <br><sub>部署规约</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md">Fleet</a></strong> <br><sub>多机操作</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/RELEASE.md">发布流程</a></strong> <br><sub>发布步骤</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SEALING_CN.md">封板契约</a></strong> <br><sub>协议红线</sub> |
+| <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/skill/SETUP.md">Agent</a></strong> <br><sub>部署规约</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/packages/fleet/RUNBOOK.md">Fleet</a></strong> <br><sub>多机操作</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/SHARED_RUNTIME.md">共享 runtime</a></strong> <br><sub>安装、升级与回滚</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SEALING_CN.md">封板契约</a></strong> <br><sub>协议红线</sub> |
 | <strong><a href="https://github.com/Windsander/Mebular/blob/main/CHANGELOG.md">变更日志</a></strong> <br><sub>发布说明</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/CONTRIBUTING.md">参与贡献</a></strong> <br><sub>质量门禁</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/SECURITY.md">安全</a></strong> <br><sub>报告漏洞</sub> | <strong><a href="https://mebular.cyberfederal.io">官网</a></strong> <br><sub>产品站点</sub> |
 | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/integrations/DSH_CN.md">DSH 集成说明</a></strong> <br><sub>完整配置</sub> | <strong><a href="https://github.com/Windsander/Mebular/blob/main/docs/operations/DSH_E2E.md">DSH E2E</a></strong> <br><sub>CI 门禁</sub> | <strong><a href="https://www.npmjs.com/package/@mebular/dsh-plugin">npm</a></strong> <br><sub>包页面</sub> | <strong><a href="https://awesome-dsh-plugin.com/zh/p/Windsander/Mebular--packages-dsh-plugin/">awesome-dsh-plugin</a></strong> <br><sub>插件列表</sub> |
 
 <div align="center">
 
-v0.1.2 · early · MIT · © 2026 Sobert Li
+v0.2.0 · early · MIT · © 2026 Sobert Li
 
 </div>

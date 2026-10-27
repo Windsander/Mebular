@@ -54,10 +54,10 @@ Plugin 的可选配置（`cordis.patch.yml`）：
 
 ```bash
 # 固定版本（CLI/App 默认取 core APP_VERSION；Plugin 面板取插件 package version）
-mebular runtime install --version 0.1.2 --json
+mebular runtime install --version 0.2.0 --json
 
 # 同版本损坏/需要覆盖时
-mebular runtime reinstall --version 0.1.2 --json
+mebular runtime reinstall --version 0.2.0 --json
 ```
 
 Plugin 面板触发的安装使用**插件自身 `package.json` 的 `version`**（运行时读取，发布 bump 无需改
@@ -126,9 +126,9 @@ manifest 位于用户 home 的 `.mebular/services/mebular-serve.json`，记录
 
    ```bash
    mebular runtime current set \
-     --version 0.1.2 \
-     --runtime-path ~/.mebular/runtime/0.1.2 \
-     --cli ~/.mebular/runtime/0.1.2/node_modules/@mebular/core/packages/mcp/bin/mebular.mjs \
+     --version 0.2.0 \
+     --runtime-path ~/.mebular/runtime/0.2.0 \
+     --cli ~/.mebular/runtime/0.2.0/node_modules/@mebular/core/packages/mcp/bin/mebular.mjs \
      --provider shared --owner shared --json
    ```
 

@@ -1,5 +1,9 @@
 # feat(dsh): integrate Mebular as a shared-console DSH plugin
 
+> **Historical v0.1 PR material**: the current v0.2.0 guide is
+> [`docs/integrations/DSH.md`](../integrations/DSH.md) /
+> [`DSH_CN.md`](../integrations/DSH_CN.md). This file is kept for traceability.
+
 > PR 描述草稿。目标分支 `main`，来源分支 `feat/dsh-shared-console`，基线
 > `origin/main@7c03798`。
 >

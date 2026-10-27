@@ -6,16 +6,17 @@
 >
 > 本文描述**已经存在**的 wire 契约（`/healthz`、`/app/embed/info`、DSH
 > `/mebular/embed-info`），以及 DSH adapter 私有的 Agent 可见提示（非 wire）。
-> 本轮不新增 endpoint、字段或核心状态，只记录缺口。
+> v0.2.0 增加了共享 runtime resolve、install/update 状态与若干 reason；完整 provider/current/
+> service 语义见 [`RUNTIME-COEXISTENCE.md`](RUNTIME-COEXISTENCE.md)。
 
 ## 1. 状态词汇
 
 | 状态 | 含义 | 现有来源 |
 |---|---|---|
 | `uninitialized` | daemon 已监听，但 home 尚未建新/加入忆云。 | Console 的 provisioning 流程；`/healthz` 仍返回 `200`、`status: "ok"`。当前 `/app/embed/info` 在引导态返回 `409 provision_required`。 |
-| `starting` | daemon 正在启动，尚未通过健康检查。 | 仅 DSH managed lifecycle：`/mebular/embed-info` 的 `status: "starting"`。核心 HTTP server 不产生这个 wire 状态。 |
+| `starting` | daemon 正在启动、安装或更新，尚未通过健康检查。 | DSH managed/install/update lifecycle：`/mebular/embed-info` 的 `status: "starting"`；核心 HTTP server 不产生这个 wire 状态。 |
 | `up` | daemon 可达且 `/healthz` 报告健康；Console/embed 能力可能仍然不可用。 | `/healthz` 的 `status: "ok"`；DSH embed-info 的 `status: "up"`。 |
-| `down` | daemon 不可达，或 `/healthz` 不健康，或 managed 启动失败。 | DSH embed-info 的 `status: "down"`，通常带 `reason`。 |
+| `down` | daemon 不可达、`/healthz` 不健康，或 managed/install/update 失败。 | DSH embed-info 的 `status: "down"`，通常带 `reason`；`download_required` 是安装前的预期状态。 |
 | `degraded` | daemon 可达且健康，但某个表面能力不可用（当前主要是 Console/embed）。 | 由 `status: "up"` + 非空 `reason`（`embed_*`、`not_loopback`）推导。 |
 
 判定规则：
@@ -26,7 +27,7 @@
   已就绪。
 - `uninitialized` 是 daemon 生命周期状态，不是 `/app/embed/info` 的 `status` 值。当前
   DSH 会看到 `up` + `embed_info_unavailable`（见 §5 缺口）。
-- `starting` 只属于 DSH 的 managed 启动过程；attach 模式没有这个阶段。
+- `starting` 属于 DSH 的 managed 启动以及显式 install/update 过程；纯 attach 没有这个阶段。
 
 ## 2. Capabilities
 
@@ -45,7 +46,7 @@
 DSH host 通过 `ctx.inject(['systemPrompt'])` 注册唯一 section `mebular:status`，把
 lifecycle 快照中的非 `up` 状态解释成一句短提示：`down` 时告诉 Agent 不要声称记忆可用，
 并提示用户启动 Mebular App 或运行 `mebular serve`；`starting` 时说明工具暂不可用；
-managed 失败时按 `managed_cli_missing` / `managed_start_failed` 给出对应恢复动作。
+managed/安装/更新失败时按 `download_required`、`service_*`、`managed_start_failed` 等稳定 reason 给出对应恢复动作；`managed_cli_missing` 仅作为旧快照兼容。
 `up` 时 section 文本为空，不增加 token。
 
 这条提示不是新的状态源：它只从 MCP bridge 已有的 2s 快照派生，文本变化时才发
@@ -65,8 +66,12 @@ Reason 是稳定、可编程的诊断码；展示文案由各表面本地化，�
 |---|---|---|---|
 | `daemon_unreachable` | DSH host、MCP bridge | 配置的 loopback 地址上没有健康 daemon。 | 启动 Mebular App，或运行 `mebular serve`；DSH 面板与 MCP 工具会自动恢复。 |
 | `daemon_unhealthy` | DSH host | daemon 有响应，但 `/healthz` 未报告健康。 | 查看 Mebular 日志，修复后刷新；必要时重启 daemon。 |
-| `managed_cli_missing` | DSH managed | managed 模式找不到 Mebular CLI，已降级为 attach。 | 安装 Mebular，或设置 `MEBULAR_CLI` / 插件 `cliPath`，然后重启 DSH。 |
-| `managed_start_failed` | DSH managed | managed 子进程未在时限内健康，或提前退出。 | 查看日志，或手动启动 Mebular；daemon 恢复后工具自动挂载。 |
+| `managed_cli_missing` | DSH legacy snapshot | v0.2.0 前的 managed CLI 缺失状态；当前显示为 `download_required`。 | 打开 App/安装 CLI，或从面板安装共享 runtime。 |
+| `download_required` | DSH v0.2.0 | 没有健康 daemon/service/App/CLI/shared provider。 | 在面板显式安装固定版本共享 runtime，或打开 App/安装 CLI。 |
+| `managed_start_failed` | DSH managed/install | managed/安装后的子进程未在时限内健康，或提前退出。 | 查看日志，或手动启动 Mebular；daemon 恢复后工具自动挂载。 |
+| `service_conflict` / `service_unknown` / `service_foreign` | DSH v0.2.0 | service 不可复用、状态未知或属于其他 home。 | 检查 Console/service；不要启动第二个 daemon。 |
+| `profile_mismatch` / `instance_mismatch` / `CLOUD_ALREADY_ACTIVE` | DSH v0.2.0 | 端口/active lock 属于另一个 profile。 | 切换到同一 profile，或停止另一个实例。 |
+| `runtime_resolve_failed` | DSH v0.2.0 | 共享 CLI/provider 无法给出 runtime 上下文。 | 更新/重装 App/CLI 或共享 runtime。 |
 | `embed_info_unavailable` | DSH host | daemon 在跑，但没有可用的 `/app/embed/info`（旧版本，或当前引导态返回 `409`）。 | 升级 Mebular；若刚建/加入忆云，先完成 Console provisioning。 |
 | `embed_not_ok` | DSH host | `/app/embed/info` 明确返回 `ok: false`。 | 检查 Mebular 版本与 daemon 状态。 |
 | `not_loopback` | DSH host | daemon 或 DSH 不在 loopback，嵌入被禁用。 | 改用 loopback 地址，或在浏览器打开 Console。 |
@@ -102,7 +107,7 @@ DSH 客户端把 `connected` / `starting` / `unavailable` / `offline` / `checkin
 {
   "status": "ok",
   "name": "mebular",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "auth": "none",
   "tls": false,
   "instance": "<home-key>"
@@ -115,7 +120,7 @@ DSH 客户端把 `connected` / `starting` / `unavailable` / `offline` / `checkin
 {
   "ok": true,
   "name": "mebular",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "embedProtocol": 1,
   "consoleUrl": "http://127.0.0.1:7331/console",
   "embedUrl": "http://127.0.0.1:7331/console/?embed=dsh",
@@ -134,7 +139,16 @@ DSH 客户端把 `connected` / `starting` / `unavailable` / `offline` / `checkin
   "mode": "attach",
   "managed": false,
   "panel": true,
-  "version": "0.1.2",
+  "version": "0.2.0",
+  "state": "up",
+  "runtimeMode": "reused",
+  "profile": { "id": "default", "name": "我的忆云" },
+  "provider": { "kind": "app", "source": "registry", "version": "0.2.0" },
+  "service": { "registered": false, "running": false, "foreign": false },
+  "downloadRequired": false,
+  "install": { "state": "idle", "allowed": true },
+  "update": { "state": "idle", "available": false, "show": false, "manual": false },
+  "upgrade": { "state": "idle", "busy": false },
   "embedProtocol": 1,
   "consoleUrl": "http://127.0.0.1:7331/console",
   "embedUrl": "http://127.0.0.1:7331/console/?embed=dsh",
@@ -144,8 +158,10 @@ DSH 客户端把 `connected` / `starting` / `unavailable` / `offline` / `checkin
 }
 ```
 
-DSH 的 `status` 只有 `up` / `down` / `starting`；`ok` 为 `true` 仅当 `status: "up"` 且
-`reason` 为 `null`。`starting` 与任何带 reason 的 `up` 都不会给出 `embedUrl`。
+DSH 的 `status` 仍只有 `up` / `down` / `starting`；v0.2.0 的 `state` 额外区分
+`download_required`、`provisioning`、`service_conflict`、`profile_mismatch`、`version_mismatch`
+等展示状态。`ok` 为 `true` 仅当 `status: "up"` 且 `reason` 为 `null`；`starting`、
+`download_required` 与任何带 reason 的 `up` 都不会给出 `embedUrl`。
 
 ## 6. 已知缺口（只记录，不在本轮实现）
 

@@ -15,6 +15,157 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
+## [v0.2.0] - 2026-10-27
+
+v0.2.0 is the shared-runtime release. The Mebular App and the DSH Plugin are now
+two equal entry points to **one local Mebular runtime**: one daemon, one
+`mebular-serve`, one active profile/home and one data root. Runtime ownership,
+provider discovery, current-version selection, service lifecycle, update checks
+and upgrades live outside both entry points instead of being duplicated by the
+desktop app and the DSH plugin.
+
+All six npm packages and the desktop app ship as `0.2.0`. `@mebular/dsh-plugin`
+still has its own npm publish job, but follows the same release train and reads
+the pinned shared-runtime version from its own package version at runtime.
+
+### Added
+
+- **Shared Runtime Supervisor** — `@mebular/mcp` now owns one supervisor for
+  profile/cloudRoot/home resolution, health and instance checks, `active.lock`,
+  cross-entry start locks, provider discovery, service precedence, child
+  ownership, `runtime resolve|ensure|status|supervise` and a stable JSON result
+  contract. App and Plugin no longer start private daemons.
+- **Provider registry** — non-sensitive App/CLI/shared runtime providers are
+  recorded in `runtime-providers.json` with atomic writes and locking. App
+  registration is exclusive for `kind:app`, so moving the App cannot leave a
+  stale provider path.
+- **Shared current pointer** — `runtime/current.json` records the installed
+  shared runtime version/path/provider/owner. Provider discovery and service
+  ownership prefer current; a missing/corrupt current falls back safely.
+- **Shared service lifecycle** — one `mebular-serve` per home/cloudRoot, with
+  runtime path/version/provider/owner metadata in the manifest. New CLI commands
+  cover service install/status/restart/uninstall and shared current operations.
+  Entry uninstall never removes the shared runtime, service, provider records or
+  data.
+- **Plugin-only bootstrap** — users can install a pinned shared runtime from the
+  DSH panel with one explicit action: download → verify → atomic install →
+  provider registration → init → start → Console onboarding. Retry, reinstall,
+  copyable manual command and “check again” are available after failures; old
+  runtimes are retained for rollback.
+- **Update check and controlled upgrade** — fixed official npm stable source,
+  24h check throttle, shared update/upgrade state and locks, prompted/skipped
+  version sharing and user-visible `Update / Later / Skip` prompts in the App
+  and DSH Plugin. No silent install or upgrade.
+- **Coexistence E2E and docs** — `scripts/verify-runtime-coexistence.mjs`, the
+  shared runtime ADR and the operator guide cover cold starts, single-daemon
+  behaviour, install/current/provider atomicity, service ownership, update and
+  upgrade locks, rollback and entry-uninstall preservation.
+
+### Changed
+
+- **DSH Plugin default remains attach** — installing the plugin still does not
+  start or download Mebular. `managed`/`auto` are explicit opt-ins; managed
+  startup now goes through `runtime supervise` instead of spawning
+  `mebular serve` directly. The effective daemon URL is resolved from the
+  shared runtime and used consistently by the Console iframe, MCP bridge and
+  panel.
+- **App runtime integration** — App daemon/service/quit/profile-switch paths
+  route through the shared supervisor/service layer. The App main flow, wizard
+  and tray are unchanged; the only new App interaction is the incremental
+  runtime update prompt. App child and service upgrades stop/restart only what
+  the App owns.
+- **Service ownership** — cloud-switch, legacy service migration, Console
+  service actions and update/upgrade use shared current/service descriptors
+  instead of writing App descriptors over a shared service.
+- **Plugin configuration** — `lifecycle: attach|managed|auto`,
+  `runtime: auto|external`, `persistence: child|service` and
+  `bootstrap: prompt|never` are supported. Explicit `daemonUrl` remains
+  attach-only, and plugin-only installs are explicit.
+- **Release engineering** — the Plugin derives its pinned runtime version from
+  its own `package.json` at runtime; release bumps no longer require editing
+  plugin source. Publish `@mebular/core` before `@mebular/dsh-plugin`.
+
+### Fixed
+
+- **Installed-core service resolution** — the installed `@mebular/core` now
+  resolves its bundled `@mebular/service` when the separate npm package is not
+  present, so plugin-only runtime service status is not misreported as
+  `service_unknown`.
+- **Provider path replacement** — App path changes atomically replace the old
+  `kind:app` record instead of leaving a stale provider that could start an old
+  runtime.
+- **Supervise cleanup** — plugin disposal uses a full cleanup window covering
+  the supervisor's child SIGTERM/SIGKILL budget and waits for cleanup; a failed
+  reinstall restores the old runtime/provider and restarts the old owned daemon.
+- **Update prompt semantics** — `/mebular/embed-info` is read-only; prompted is
+  persisted only after the plugin panel actually renders the banner, so sidebar
+  polling cannot suppress another entry's prompt.
+- **Cross-platform CI contracts** — Windows test paths and file-mode
+  expectations, plus DSH E2E contracts for the new `download_required` and
+  update fields, are aligned.
+
+### Breaking / migration notes
+
+- DSH Plugin `managed` with an explicit `daemonUrl` is now attach-only; use the
+  shared runtime configuration instead of mixing a pinned URL with managed
+  startup.
+- The old `managed_cli_missing` reason is replaced by `download_required`; the
+  panel now offers the pinned shared-runtime install flow.
+- Existing legacy `mebular-serve` manifests without runtime metadata are
+  migrated only when safe; ambiguous legacy labels fail safe instead of being
+  overwritten.
+- App/CLI/service daemons that are already running are attached; the Plugin
+  does not stop or upgrade an external daemon.
+
+### Verified
+
+- **All tests** — 206 Jest suites / 2105 tests.
+- **Runtime coexistence E2E** — 13 scenarios / 153 checks, using real
+  `mebular runtime` CLI processes, a real supervisor/service installer and fake
+  HTTP daemons/npm.
+- **DSH gates** — `verify:dsh-plugin` 175 checks; real DSH Web E2E minimum and
+  latest rows in CI; docs and i18n checks.
+- **CI** — macOS build/test/lint, Windows build/test/lint, desktop smoke, DSH
+  E2E minimum/latest, WAN NAT isolation and semantic recall all pass on the
+  feature PR CI; release packaging is checked again on the release branch.
+
+### Desktop installers (unsigned)
+
+- Rebuilt installers for macOS (Universal DMG), Windows (NSIS x64) and Linux
+  (AppImage + deb x64). `SHA256SUMS.txt` is published with them; verify it before
+  installing.
+- v0.2.0 is **unsigned and not notarized**. On macOS, right-click the app and
+  choose **Open** (or **System Settings → Privacy & Security → Open Anyway**).
+  On Windows, choose **More info → Run anyway**.
+- **No auto-update** in this release. Signing, notarization and auto-update
+  remain follow-up work.
+
+### Install
+
+- Desktop: download from [GitHub Releases v0.2.0](https://github.com/Windsander/Mebular/releases/tag/v0.2.0).
+- CLI and server: `npm install -g @mebular/core@0.2.0`.
+- DSH plugin: `dsh plugin --profile web add @mebular/dsh-plugin@0.2.0`
+  (attach if the App/CLI is running; otherwise use the panel's explicit
+  shared-runtime install).
+
+### 中文摘要
+
+- **共享 runtime** —— App 与 DSH Plugin 现在是同一套本机 Mebular runtime 的两个入口：
+  一个 daemon、一个 `mebular-serve`、一个当前 profile/home、一份数据。Supervisor、provider、
+  current、启动锁、service、更新与升级都不再由两个入口各自维护。
+- **Plugin-only 安装** —— DSH 面板可按需安装固定版本共享 runtime：下载 → 校验 → 原子安装 →
+  provider → init → 启动 → Console onboarding，一次点击完成；失败可重试、重装、复制手动命令、
+  重新检测，旧 runtime 保留。
+- **更新** —— App 与 Plugin 启动时共享 24h 节流检查；只提示，不静默安装；`更新 / 稍后 /
+  跳过此版本` 通过共享 update/upgrade 锁与状态去重。
+- **服务所有权** —— `mebular-serve` 指向共享 current，manifest 记录 runtime/version/owner；
+  卸载入口不删除 runtime、service、provider 或数据。
+- **兼容性** —— Plugin 默认仍是 `attach`；`managed`/`auto` 才启动；显式 `daemonUrl` 只
+  attach；旧 `managed_cli_missing` 改为 `download_required`；legacy service 迁移采取
+  fail-safe。
+- **验证** —— 206 suites / 2105 tests；runtime coexistence 153 checks；DSH E2E、Windows CI、
+  WAN NAT、semantic recall 全部通过。桌面安装包仍为 unsigned，不含自动更新。
+
 ## [v0.1.2] - 2026-10-25
 
 v0.1.2 is a DSH usability release on the v0.1.x line. It makes Mebular's availability
@@ -249,6 +400,8 @@ installers.
   仓库源码；五个 `@mebular/*` 包来自与 npm 发布相同的已验证 tarball。
 - **范围** —— v0.1.0 不做签名、公证与自动更新，留到后续版本。
 
-[Unreleased]: https://github.com/Windsander/Mebular/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Windsander/Mebular/compare/v0.2.0...HEAD
+[v0.2.0]: https://github.com/Windsander/Mebular/releases/tag/v0.2.0
+[v0.1.2]: https://github.com/Windsander/Mebular/releases/tag/v0.1.2
 [v0.1.1]: https://github.com/Windsander/Mebular/releases/tag/v0.1.1
 [v0.1.0]: https://github.com/Windsander/Mebular/releases/tag/v0.1.0

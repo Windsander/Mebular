@@ -1,6 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="140" viewBox="0 0 1080 140" role="img" aria-label="Status dot: green up, amber starting or degraded, red down, gray waiting for the first check.">
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="140" viewBox="0 0 1080 140" role="img" aria-label="Status dot: green up, amber starting/installing/updating, red down, gray waiting for the first check.">
   <title>STATUS DOT</title>
-  <desc>Status dot: green up, amber starting or degraded, red down, gray waiting for the first check.</desc>
+  <desc>Status dot: green up, amber starting/installing/updating, red down, gray waiting for the first check.</desc>
   <defs>
     <style>
       .theme-light { display: none; }
@@ -24,7 +24,7 @@
     <text x="82" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#e2ecff" font-weight="400" text-anchor="start">up</text>
     <circle cx="300" cy="98" r="15" fill="#d29922" opacity="0.16"/>
     <circle cx="300" cy="98" r="7" fill="#d29922"/>
-    <text x="322" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#e2ecff" font-weight="400" text-anchor="start">starting / degraded</text>
+    <text x="322" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#e2ecff" font-weight="400" text-anchor="start">starting / install / update</text>
     <circle cx="540" cy="98" r="15" fill="#f85149" opacity="0.16"/>
     <circle cx="540" cy="98" r="7" fill="#f85149"/>
     <text x="562" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#e2ecff" font-weight="400" text-anchor="start">down</text>
@@ -46,7 +46,7 @@
     <text x="82" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#0b1a33" font-weight="400" text-anchor="start">up</text>
     <circle cx="300" cy="98" r="15" fill="#9a6700" opacity="0.16"/>
     <circle cx="300" cy="98" r="7" fill="#9a6700"/>
-    <text x="322" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#0b1a33" font-weight="400" text-anchor="start">starting / degraded</text>
+    <text x="322" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#0b1a33" font-weight="400" text-anchor="start">starting / install / update</text>
     <circle cx="540" cy="98" r="15" fill="#cf222e" opacity="0.16"/>
     <circle cx="540" cy="98" r="7" fill="#cf222e"/>
     <text x="562" y="103" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="13" fill="#0b1a33" font-weight="400" text-anchor="start">down</text>

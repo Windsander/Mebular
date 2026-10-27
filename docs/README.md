@@ -50,7 +50,7 @@ main [`README.md`](../README.md); this index only describes document structure.
 
 ## Design
 
-- [DSH plugin v1](design/dsh-plugin-v1.md) — shared Console, runtime discovery, attach/managed
+- [DSH plugin v1](design/dsh-plugin-v1.md) — historical v0.1 design; current guide is [DSH integration](integrations/DSH.md)
 - [Configuration journey v1](design/config-journey-v1.md) — Historical record of the v1 setup flow
 - [HTML prototype](design/prototype/README.md) — Historical record of the early prototype
 

@@ -11,7 +11,8 @@
  *   managed-reuse          managed profile reuses an external daemon; stopping
  *                          DSH leaves that daemon alive
  *   managed-cli-missing    no CLI/runtime -> down + download_required + install guide + Agent hint
- *   daemon-down-recovery   down at boot -> up -> down -> up, without restarting DSH
+ *   daemon-down-recovery   down at boot -> up -> down -> up, without restarting DSH;
+ *                          down shows the offline panel (not the install guide)
  *   panel-false            separate profile, no sidebar/iframe, MCP tools still work
  *   custom-port            MEBULAR_HTTP_PORT wins over a conflicting runtime.json;
  *                          panel, /mebular/embed-info, and MCP use one origin
@@ -349,6 +350,24 @@ async function statusDetail(world) {
 async function assertNoPageExceptions(world) {
   const exceptions = world.state.page.errors.filter((entry) => entry.kind === 'exception');
   check('页面没有未捕获异常', exceptions.length === 0, JSON.stringify(exceptions).slice(0, 500));
+}
+
+const OFFLINE_PANEL_TITLE = '^(?:Mebular 未运行|Mebular is not running)$';
+const INSTALL_PANEL_TITLE = '^(?:安装 Mebular Runtime|Install Mebular Runtime)$';
+
+async function waitForPanelHeading(world, pattern, timeoutMs = 30000) {
+  return world.state.page.waitFor(
+    `[...document.querySelectorAll("h2")].some((node) =>
+      new RegExp(${JSON.stringify(pattern)}, "i").test(node.textContent?.trim() ?? "")
+    )`,
+    { timeout: timeoutMs },
+  );
+}
+
+async function panelHeadingText(world) {
+  return world.state.page.evalJs(
+    '[...document.querySelectorAll("h2")].map((node) => node.textContent?.trim() ?? "").find((text) => /Mebular/.test(text)) ?? ""',
+  );
 }
 
 async function assertNoSensitive(world, value, label) {
@@ -733,6 +752,16 @@ const scenarios = [
       await world.openBrowser({ chromePath: context.chromePath });
       check('DSH Web 页面已加载', (await world.state.page.evalJs('document.title')) === 'DeepSeek Harness');
       check('CLI 缺失时状态为 offline', await world.waitForStatus('offline', 60000), await statusDetail(world));
+      check('CLI 缺失时点击侧边栏打开面板', await world.openPanel());
+      const installGuideVisible = await waitForPanelHeading(world, INSTALL_PANEL_TITLE);
+      const installHeading = await panelHeadingText(world);
+      check('CLI 缺失时面板显示安装引导', installGuideVisible);
+      check(
+        'CLI 缺失时占位标题为安装引导',
+        new RegExp(INSTALL_PANEL_TITLE, 'i').test(installHeading),
+        installHeading || '(no Mebular heading)',
+      );
+      check('CLI 缺失时没有 iframe', await world.waitForNoIframe(15000));
 
       const info = await waitForDshInfo(world, (json) => json?.status === 'down' && json?.reason === 'download_required');
       check('embed-info status=down', info?.status === 'down', JSON.stringify(info));
@@ -764,8 +793,13 @@ const scenarios = [
       const port = await freePort();
       // No daemon yet: the port is reserved but closed. MEBULAR_HTTP_PORT
       // points the plugin at it, so the fallback 7331 is never involved.
+      // Pin the repo CLI explicitly: this is the installed -> daemon-down state,
+      // independent of whether npm/direct-node added node_modules/.bin to PATH.
       await world.installProfile();
-      await world.startDsh({ probeExpect: 'recover', env: { MEBULAR_HTTP_PORT: String(port) } });
+      await world.startDsh({
+        probeExpect: 'recover',
+        env: { MEBULAR_HTTP_PORT: String(port), MEBULAR_CLI: mebularBin },
+      });
       await world.openBrowser({ chromePath: context.chromePath });
       check('DSH Web 页面已加载', (await world.state.page.evalJs('document.title')) === 'DeepSeek Harness');
       check('down 时侧边栏仍存在', await world.state.page.waitFor(
@@ -774,19 +808,24 @@ const scenarios = [
       ));
       check('down 时状态为 offline', await world.waitForStatus('offline', 45000), await statusDetail(world));
       check('down 时点击侧边栏打开面板', await world.openPanel());
-      check('down 时没有 iframe', await world.waitForNoIframe(15000));
-      const placeholderVisible = await world.state.page.waitFor(
-        `/Install Mebular Runtime|安装 Mebular Runtime|Open or install Mebular|打开或安装 Mebular|No Mebular app, CLI, service|本机没有找到 Mebular App/.test(document.body?.innerText ?? "")`,
-        { timeout: 30000 },
-      );
-      check('down 时面板显示安装引导占位', placeholderVisible);
-      const placeholderHeading = await world.state.page.evalJs(
-        '[...document.querySelectorAll("h2")].map((node) => node.textContent?.trim() ?? "").find((text) => /Mebular/.test(text)) ?? ""',
-      );
       check(
-        'down 时占位标题为安装引导',
-        /Install Mebular Runtime|安装 Mebular Runtime|Open or install Mebular|打开或安装 Mebular/i.test(placeholderHeading),
+        'down 时侧边栏面板已渲染',
+        await world.state.page.waitFor('document.querySelectorAll("h2").length > 0', { timeout: 30000 }),
+      );
+      check('down 时没有 iframe', await world.waitForNoIframe(15000));
+      const offlinePlaceholderVisible = await waitForPanelHeading(world, OFFLINE_PANEL_TITLE);
+      const placeholderHeading = await panelHeadingText(world);
+      check('down 时面板显示 offline 占位', offlinePlaceholderVisible);
+      check(
+        'down 时占位标题为 Mebular 未运行',
+        new RegExp(OFFLINE_PANEL_TITLE, 'i').test(placeholderHeading),
         placeholderHeading || '(no Mebular heading)',
+      );
+      const downPanelText = await world.pageText();
+      check(
+        'down 时说明 daemon 未响应及恢复动作',
+        /Mebular daemon/i.test(downPanelText) && /mebular serve/i.test(downPanelText),
+        tail(downPanelText, 300),
       );
       const downAtBoot = await waitProbeOrFail(
         world,

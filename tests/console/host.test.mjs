@@ -269,6 +269,9 @@ describe('P1 console 接线（静态契约）', () => {
     expect(consoleCss).toContain("[data-embed='dsh'] .banner.is-locked");
     expect(consoleCss).toContain("[data-embed='dsh'] .onboarding-coach { display: none !important; }");
     expect(consoleCss).toContain("[data-embed='dsh'] .embed-actions:not([hidden]) { display: flex; }");
+    expect(consoleCss).toContain('.embed-actions .btn {');
+    expect(consoleCss).toContain('flex: 0 0 auto;');
+    expect(consoleCss).toContain('.embed-actions .btn .btn-label { white-space: nowrap; }');
     expect(consoleCss).toMatch(/\[data-embed='dsh'\] \.layout \{ flex: 1 1 auto; min-height: 0; \}/);
     expect(indexHtml).toContain('id="embed-actions"');
     expect(indexHtml).toContain('id="embed-create-cloud"');

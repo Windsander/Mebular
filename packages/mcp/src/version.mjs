@@ -5,4 +5,4 @@
 // scripts/bump-version.mjs 只改这一处，scripts/verify-release-version.mjs
 // 校验它等于发布版本；不要在其它文件再写版本字面量。
 
-export const APP_VERSION = '0.1.2';
+export const APP_VERSION = '0.2.0';

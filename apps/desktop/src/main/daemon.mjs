@@ -12,7 +12,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-export const APP_VERSION = '0.1.2';
+export const APP_VERSION = '0.2.0';
 export const SERVICE_KIND = 'mebular-serve';
 /** App 注册到 <cloudRoot>/runtime-providers.json 的能力（只写发现信息，不写 token/身份）。 */
 export const APP_RUNTIME_PROVIDER_CAPABILITIES = Object.freeze(['serve']);

@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  APP_VERSION,
   ensureDaemon,
   probeHealth,
   probeHealthDetail,
@@ -556,7 +557,7 @@ describe('Phase 5a · 云切换/迁移使用共享 current service', () => {
       owner: 'app',
       cliPath: appCli,
       runtimePath: null,
-      version: '0.1.2',
+      version: APP_VERSION,
     });
     expect(existsSync(join(root, 'runtime'))).toBe(false);
   });

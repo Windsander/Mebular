@@ -170,7 +170,7 @@ function httpConf() {
 
 async function loadServiceModule() {
   try {
-    return await import(join(cliBin, '..', '..', '..', 'service', 'dist', 'index.js'));
+    return await import(pathToFileURL(join(cliBin, '..', '..', '..', 'service', 'dist', 'index.js')).href);
   } catch {
     return null;
   }
@@ -178,7 +178,7 @@ async function loadServiceModule() {
 
 async function loadRuntimeServiceModule() {
   try {
-    return await import(join(dirname(cliBin), '..', 'src', 'runtime-service.mjs'));
+    return await import(pathToFileURL(join(dirname(cliBin), '..', 'src', 'runtime-service.mjs')).href);
   } catch {
     return null;
   }

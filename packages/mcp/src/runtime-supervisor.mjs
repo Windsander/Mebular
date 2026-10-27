@@ -470,15 +470,15 @@ export async function discoverRuntimeProviders({
   };
 }
 
-/** provider 启动命令：JS 入口用当前 Node 运行时；可执行文件直接执行。 */
-export function runtimeCommandForProvider(provider, { execPath = process.execPath } = {}) {
+/** provider 启动命令：JS 入口用当前 Node 运行时；Windows 批处理经 shell；其他可执行文件直接执行。 */
+export function runtimeCommandForProvider(provider, { execPath = process.execPath, platform = process.platform } = {}) {
   if (!provider || typeof provider.path !== 'string' || provider.path.length === 0) {
     throw cloudError('RUNTIME_PROVIDER_INVALID', '缺少可启动的 runtime provider');
   }
   if (/\.(mjs|cjs|js)$/i.test(provider.path)) {
-    return { execPath, args: [provider.path, 'serve'] };
+    return { execPath, args: [provider.path, 'serve'], shell: false };
   }
-  return { execPath: provider.path, args: ['serve'] };
+  return { execPath: provider.path, args: ['serve'], shell: platform === 'win32' && /\.(cmd|bat)$/i.test(provider.path) };
 }
 
 /** 默认 service 适配器：复用共享 service 层（current 优先）；状态失败不阻塞 attach/provider 兜底。 */

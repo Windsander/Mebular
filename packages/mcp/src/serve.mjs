@@ -20,6 +20,7 @@ import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 import { configPath } from './config.mjs';
 import { createServiceFacade } from './service-facade.mjs';
 import { APP_VERSION } from './version.mjs';
+import { resolveStaticAssetRoots } from './asset-roots.mjs';
 
 // 兼容既有导入方：APP_VERSION 的真源是 ./version.mjs。
 export { APP_VERSION } from './version.mjs';
@@ -229,12 +230,11 @@ export const EMBED_PROTOCOL = 1;
 
 // ---------- 控制台静态托管（D1） ----------
 // 路径白名单：只认识这几个确切文件名，天然防目录穿越。允许 MEBULAR_CONSOLE_DIR 覆盖。
-const CONSOLE_DIR =
-  process.env.MEBULAR_CONSOLE_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'console');
+const DEFAULT_ASSET_ROOTS = resolveStaticAssetRoots(import.meta.url);
+const CONSOLE_DIR = process.env.MEBULAR_CONSOLE_DIR ?? DEFAULT_ASSET_ROOTS.consoleDir;
 // locale pack 数据层：唯一注册表 + 每语言目录（只读 JSON）。
 // 允许 MEBULAR_LOCALES_DIR 覆盖（桌面打包时 extraResources 落在 <resources>/locales）。
-const LOCALES_DIR =
-  process.env.MEBULAR_LOCALES_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'locales');
+const LOCALES_DIR = process.env.MEBULAR_LOCALES_DIR ?? DEFAULT_ASSET_ROOTS.localesDir;
 const LOCALE_CODE_RE = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/;
 const LOCALE_PACK_FILES = new Set(['console.json', 'desktop.json', 'errors.json']);
 const CONSOLE_FILES = {

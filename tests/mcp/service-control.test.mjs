@@ -63,6 +63,12 @@ describe('H-1 service-control：常驻运行', () => {
     expect(desc.heartbeatDir).toBe(instanceHome);
   });
 
+  it('描述符：Electron 作为 Node 运行时，显式带 ELECTRON_RUN_AS_NODE', () => {
+    const desc = serviceDescriptor({ home: instanceHome });
+    expect(desc.env.ELECTRON_RUN_AS_NODE).toBe('1');
+    expect(desc.runtime.electron).toBe(Boolean(process.versions.electron));
+  });
+
   it('linux：unit/manifest 落 serviceHome；单元仍带实例 home 的 MEBULAR_HOME/WorkingDirectory', () => {
     const res = installServiceForHome({ home: instanceHome, serviceHome, platform: 'linux', run: rec.run, now: 1700000000000 });
     expect(res.ok).toBe(true);

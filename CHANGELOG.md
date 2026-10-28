@@ -40,7 +40,7 @@ ship as `0.2.3`; no runtime protocol or data-format changes are included.
 - Runtime coexistence — **13 scenarios / 153 checks passed**.
 - Real DSH E2E — minimum, latest and Node 22 minimum passed.
 - `verify:console` / `verify:onboarding` / `verify:daemon` / `verify:config` passed.
-- Packaging dry-run — pending release validation.
+- Packaging dry-run — [run 40649283781](https://github.com/Windsander/Mebular/actions/runs/40649283781) passed: verify + 6 tarballs, macOS/Windows/Linux installers, and real DSH E2E minimum/latest/Node 22 minimum.
 
 ## [v0.2.2] - 2026-10-27
 

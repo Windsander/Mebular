@@ -916,6 +916,24 @@ function writeData(root, userHome) {
   mkdirSync(root, { recursive: true });
   mkdirSync(userHome, { recursive: true });
   writeFileSync(join(root, 'store.jsonl'), '{"kind":"e2e-data"}\n');
+  // F-IDENT-1：已经有 store 数据的 home 必须携带身份；runtime 会拒绝在
+  // 无身份的非空 store 上启动/解析。这里使用结构合法的测试身份（fake runtime
+  // 不需要真实私钥/证书链）。
+  const publicKeyHex = 'a'.repeat(64);
+  writeFileSync(join(root, 'store.jsonl.identity.json'), JSON.stringify({
+    deviceId: 'device-e2e',
+    deviceName: 'e2e',
+    publicKeyHex,
+    certificate: {
+      deviceId: 'device-e2e',
+      devicePublicKey: publicKeyHex,
+      createdAt: 0,
+      metadata: {},
+      signature: 'c2lnbmF0dXJl',
+    },
+    createdAt: 0,
+    privateKeyPkcs8: 'cGtjczg=',
+  }, null, 2));
   writeFileSync(join(userHome, '.e2e-home-marker'), 'keep\n');
 }
 

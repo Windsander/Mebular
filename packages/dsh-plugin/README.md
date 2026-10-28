@@ -66,7 +66,7 @@ App 与 DSH Plugin 是同一套本机 Mebular runtime 的两个入口。插件�
 
 ```bash
 # 安装插件（不会静默启动或下载 Mebular）
-dsh plugin --profile web add @mebular/dsh-plugin@0.2.2
+dsh plugin --profile web add @mebular/dsh-plugin@0.2.3
 
 # 开发安装
 dsh plugin --profile web add ./packages/dsh-plugin
@@ -114,6 +114,6 @@ DSH 通过官方 MCP client 连接同一个 daemon 的 `/mcp`；工具在 DSH �
 
 <div align="center">
 
-v0.2.2 · early · MIT · © 2026 Sobert Li
+v0.2.3 · early · MIT · © 2026 Sobert Li
 
 </div>

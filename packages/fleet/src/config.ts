@@ -3,10 +3,10 @@
 // 目录（device home）权限 0700；配置文件 `fleet.config.json`；主密钥 `master-key.json`；
 // 事件存储 `store.jsonl`（设备身份 `store.jsonl.identity.json` 由 core 落盘）。
 
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 const SUBTLE = globalThis.crypto.subtle;
 
@@ -201,12 +201,39 @@ export async function saveFleetConfig(path: string, config: FleetConfig): Promis
   if (permissionsApplicable()) await chmod(path, 0o600);
 }
 
-/** 加载配置（形状非法即抛错）。 */
+/** 读 `<storagePath>.identity.json` 的 deviceId（只读；缺失或损坏返回 null）。 */
+export function identityDeviceIdForStorage(storagePath: string): string | null {
+  if (typeof storagePath !== 'string' || storagePath.length === 0) return null;
+  try {
+    const record = JSON.parse(readFileSync(`${storagePath}.identity.json`, 'utf-8')) as Record<string, unknown>;
+    return typeof record?.deviceId === 'string' && record.deviceId.length > 0 ? record.deviceId : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 配置里的 storagePath（相对路径按设备目录解析）。 */
+export function resolveConfigStoragePath(dir: string, value: unknown): string {
+  if (typeof value === 'string' && value.length > 0) {
+    return isAbsolute(value) ? value : resolve(dir, value);
+  }
+  return join(dir, 'store.jsonl');
+}
+
+/**
+ * 加载配置（形状非法即抛错）。
+ * 身份文件是 deviceId 的唯一权威：fleet.config 的 `device` 仅作旧布局回退。
+ */
 export async function loadFleetConfig(path: string): Promise<FleetConfig> {
   const parsed = JSON.parse(await readFile(path, 'utf-8')) as unknown;
   const errors = validateFleetConfig(parsed);
   if (errors.length > 0) throw new Error(`config 非法：${errors.join('; ')}`);
-  return parsed as FleetConfig;
+  const config = parsed as FleetConfig;
+  const storage = resolveConfigStoragePath(config.dir ?? dirname(path), config.storagePath);
+  const identityDevice = identityDeviceIdForStorage(storage);
+  return identityDevice !== null && identityDevice !== config.device
+    ? { ...config, device: identityDevice }
+    : config;
 }
 
 /**
@@ -226,13 +253,15 @@ export function daemonConfigToFleet(dir: string, cfg: Record<string, unknown>): 
   const peers = (Array.isArray(network.peers) ? network.peers : [])
     .filter((p): p is Record<string, unknown> => typeof p === 'object' && p !== null && typeof (p as Record<string, unknown>).device === 'string')
     .map((p) => ({ device: String(p.device), ...(typeof p.addr === 'string' && p.addr.length > 0 ? { addr: p.addr } : {}) }));
-  const storagePath = typeof cfg.storagePath === 'string' && cfg.storagePath.length > 0 ? cfg.storagePath : join(dir, 'store.jsonl');
+  const storagePath = resolveConfigStoragePath(dir, cfg.storagePath);
   const masterKeyFile = typeof encryption.userMasterPublicKeyFile === 'string' && encryption.userMasterPublicKeyFile.length > 0
     ? encryption.userMasterPublicKeyFile
     : typeof encryption.keyFile === 'string' && encryption.keyFile.length > 0
       ? encryption.keyFile
       : join(dir, 'user-master-key.json');
-  const device = typeof cfg.deviceId === 'string' && cfg.deviceId.length > 0 ? cfg.deviceId : `device-${basename(dir) || 'local'}`;
+  const identityDevice = identityDeviceIdForStorage(storagePath);
+  const device = identityDevice
+    ?? (typeof cfg.deviceId === 'string' && cfg.deviceId.length > 0 ? cfg.deviceId : `device-${basename(dir) || 'local'}`);
   return {
     v: 1,
     device,

@@ -140,9 +140,8 @@ export async function startServeServer(options = {}) {
   // F-NET-1（C）：**先取单实例锁，再初始化网络**——第二写者应在绑定监听端口前就得到
   // 可读的 MCP_STORAGE_LOCKED（此前 createMebular 先启网络 → 抢 4001 → 裸 EADDRINUSE）。
   const preConfig = provisionStart ? {} : await loadConfigFile(home).catch(() => ({}));
-  const preStoragePath = process.env.MEBULAR_STORAGE_PATH
-    ?? preConfig.storagePath
-    ?? join(home, (preConfig.storageAdapter ?? 'json') === 'sqlite' ? 'store.sqlite' : 'store.jsonl');
+  const { storagePathForHome } = await import('./home-identity.mjs');
+  const preStoragePath = storagePathForHome(home, preConfig, process.env);
   const lock = await acquireLock(home, preStoragePath);
 
   // 热初始化 / 正常启动共用：app、join 服务、运行时快照与生命周期资源。

@@ -1,16 +1,19 @@
-// `mebular init` must not create a config with a different deviceId than an
-// existing identity file. This is the partial-initialization path that can leave
-// a home unable to start with IDENTITY_NOT_INITIALIZED.
-//
-// The tests use a dummy user-master-key.json because init only needs the key file
-// to exist; no core runtime is initialized here.
+// `mebular init` identity contract (F-IDENT-1):
+//   - identity file is the sole authority for deviceId/deviceName;
+//   - config.json never stores deviceId/deviceName;
+//   - legacy config fields are backed up and removed (valid identity wins);
+//   - explicit --device-id conflict is a hard error;
+//   - invalid identity fails closed, and a missing identity over an existing
+//     store is refused (no silent rekey).
 
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { IdentityManager } from '@mebular/core';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const CLI = join(ROOT, 'packages/mcp/bin/mebular.mjs');
@@ -24,31 +27,69 @@ async function makeHome() {
 }
 
 async function seedKey(home) {
-  await writeFile(join(home, 'user-master-key.json'), '{}\n', 'utf-8');
+  const manager = new IdentityManager();
+  const master = await manager.generateUserMasterKey();
+  const record = {
+    publicKey: Buffer.from(master.publicKey).toString('base64'),
+    privateKeyPkcs8: await IdentityManager.exportPrivateKey(master.privateKey),
+    createdAt: new Date().toISOString(),
+  };
+  await writeFile(join(home, 'user-master-key.json'), JSON.stringify(record, null, 2), 'utf-8');
+  return master;
 }
 
-async function seedIdentity(home, { deviceId = 'localhost', deviceName = 'localhost' } = {}) {
-  await writeFile(
-    join(home, 'store.jsonl.identity.json'),
-    JSON.stringify({ deviceId, deviceName }, null, 2),
-    'utf-8',
-  );
+async function seedIdentity(home, master, { deviceId = 'device-test-id', deviceName = 'test-name' } = {}) {
+  const manager = new IdentityManager();
+  if (master) manager.setUserMasterPrivateKey(master.privateKey);
+  const identity = await manager.generateDeviceKey(deviceId, deviceName);
+  identity.certificate = await manager.issueDeviceCertificate(deviceId);
+  const record = {
+    deviceId: identity.deviceId,
+    deviceName: identity.name,
+    publicKeyHex: Buffer.from(identity.publicKey).toString('hex'),
+    certificate: identity.certificate,
+    ...(identity.certificateChain !== undefined ? { certificateChain: identity.certificateChain } : {}),
+    createdAt: identity.createdAt,
+    privateKeyPkcs8: await IdentityManager.exportPrivateKey(identity.privateKey),
+  };
+  await writeFile(join(home, 'store.jsonl.identity.json'), JSON.stringify(record, null, 2), 'utf-8');
+  return record;
 }
 
-async function seedConfig(home, { deviceId = 'device-local' } = {}) {
+async function seedConfig(home, { deviceId = 'device-legacy', deviceName = 'legacy' } = {}) {
   await writeFile(
     join(home, 'config.json'),
-    JSON.stringify({ storagePath: join(home, 'store.jsonl'), deviceId }, null, 2),
+    JSON.stringify({ storagePath: join(home, 'store.jsonl'), deviceId, deviceName }, null, 2),
     'utf-8',
   );
 }
 
-function invokeInit(home, args = []) {
-  const env = { ...process.env, MEBULAR_HOME: home };
+async function seedStoreEvent(home) {
+  await writeFile(join(home, 'store.jsonl'), '{"id":"e1"}\n', 'utf-8');
+}
+
+function invokeInit(home, args = [], extraEnv = {}) {
+  const env = { ...process.env, MEBULAR_HOME: home, ...extraEnv };
   delete env.MEBULAR_DEVICE_ID;
   delete env.MEBULAR_DEVICE_NAME;
   delete env.MEBULAR_STORAGE_PATH;
   return spawnSync(process.execPath, [CLI, 'init', ...args], {
+    cwd: ROOT,
+    env,
+    encoding: 'utf8',
+    timeout: 30000,
+  });
+}
+
+function invokeStatus(home, extraEnv = {}) {
+  const env = {
+    ...process.env,
+    MEBULAR_HOME: home,
+    MEBULAR_NETWORK_ENABLED: '0',
+    ...extraEnv,
+  };
+  delete env.MEBULAR_STORAGE_PATH;
+  return spawnSync(process.execPath, [CLI, 'status'], {
     cwd: ROOT,
     env,
     encoding: 'utf8',
@@ -64,74 +105,149 @@ afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
-describe('mebular init identity invariants', () => {
-  it('restores a missing config from an existing identity instead of writing the default deviceId', async () => {
+describe('mebular init identity contract', () => {
+  it('fresh home: creates identity; config has no deviceId/deviceName', async () => {
     const home = await makeHome();
-    await seedKey(home);
-    await seedIdentity(home, { deviceId: 'localhost', deviceName: 'localhost' });
+
+    const result = invokeInit(home, ['--device-name', 'fresh-device']);
+
+    expect(result.status).toBe(0);
+    const config = await readJson(join(home, 'config.json'));
+    expect(config).not.toHaveProperty('deviceId');
+    expect(config).not.toHaveProperty('deviceName');
+    expect(config.storagePath).toBe(join(home, 'store.jsonl'));
+    const identity = await readJson(join(home, 'store.jsonl.identity.json'));
+    expect(identity.deviceId).toMatch(/^device-/);
+    expect(identity.deviceName).toBe('fresh-device');
+  });
+
+  it('explicit --device-id bootstraps that id on a fresh home', async () => {
+    const home = await makeHome();
+
+    const result = invokeInit(home, ['--device-id', 'device-chosen']);
+
+    expect(result.status).toBe(0);
+    expect((await readJson(join(home, 'store.jsonl.identity.json'))).deviceId).toBe('device-chosen');
+    expect((await readJson(join(home, 'config.json')))).not.toHaveProperty('deviceId');
+  });
+
+  it('existing identity + missing config: restores config without device fields', async () => {
+    const home = await makeHome();
+    const master = await seedKey(home);
+    await seedIdentity(home, master, { deviceId: 'device-keep', deviceName: 'keep-name' });
 
     const result = invokeInit(home);
 
     expect(result.status).toBe(0);
     expect(result.stderr).toBe('');
-    expect(result.stdout).toContain('已按既有身份恢复配置');
+    expect(result.stdout).toContain('已写入配置');
     const config = await readJson(join(home, 'config.json'));
-    expect(config.deviceId).toBe('localhost');
-    expect(config.deviceName).toBe('localhost');
-    expect(config.storagePath).toBe(join(home, 'store.jsonl'));
+    expect(config).not.toHaveProperty('deviceId');
+    expect(config).not.toHaveProperty('deviceName');
+    expect((await readJson(join(home, 'store.jsonl.identity.json'))).deviceId).toBe('device-keep');
   });
 
-  it('refuses to overwrite a mismatched config and reports IDENTITY_MISMATCH', async () => {
+  it('valid identity + legacy config mismatch: self-heals, backs up, continues', async () => {
     const home = await makeHome();
-    await seedKey(home);
-    await seedConfig(home, { deviceId: 'device-local' });
-    await seedIdentity(home, { deviceId: 'localhost', deviceName: 'localhost' });
+    const master = await seedKey(home);
+    await seedIdentity(home, master, { deviceId: 'device-real', deviceName: 'real-name' });
+    await seedConfig(home, { deviceId: 'device-legacy', deviceName: 'legacy-name' });
 
     const result = invokeInit(home);
 
-    expect(result.status).toBe(2);
-    expect(result.stderr).toContain('IDENTITY_MISMATCH');
-    expect(result.stderr).toContain('localhost');
-    expect(result.stderr).toContain('device-local');
-    expect((await readJson(join(home, 'config.json'))).deviceId).toBe('device-local');
-    expect((await readJson(join(home, 'store.jsonl.identity.json'))).deviceId).toBe('localhost');
+    expect(result.status).toBe(0);
+    const config = await readJson(join(home, 'config.json'));
+    expect(config).not.toHaveProperty('deviceId');
+    expect(config).not.toHaveProperty('deviceName');
+    const backup = await readJson(join(home, 'config.json.identity-legacy.bak'));
+    expect(backup).toMatchObject({ deviceId: 'device-legacy', deviceName: 'legacy-name' });
+    expect((await readJson(join(home, 'store.jsonl.identity.json'))).deviceId).toBe('device-real');
   });
 
-  it('refuses an explicit --device-id that conflicts with the existing identity', async () => {
+  it('explicit --device-id conflict is a hard error and writes nothing', async () => {
     const home = await makeHome();
-    await seedKey(home);
-    await seedIdentity(home, { deviceId: 'localhost' });
+    const master = await seedKey(home);
+    await seedIdentity(home, master, { deviceId: 'device-real' });
 
     const result = invokeInit(home, ['--device-id', 'device-other']);
 
     expect(result.status).toBe(2);
     expect(result.stderr).toContain('IDENTITY_MISMATCH');
     await expect(readJson(join(home, 'config.json'))).rejects.toThrow();
+    expect((await readJson(join(home, 'store.jsonl.identity.json'))).deviceId).toBe('device-real');
   });
 
-  it('is idempotent when config and identity already match', async () => {
+  it('invalid identity is a hard error and writes nothing', async () => {
     const home = await makeHome();
     await seedKey(home);
-    await seedConfig(home, { deviceId: 'localhost' });
-    await seedIdentity(home, { deviceId: 'localhost' });
+    await writeFile(join(home, 'store.jsonl.identity.json'), '{"deviceId":"broken"}\n', 'utf-8');
+
+    const result = invokeInit(home);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('IDENTITY_INVALID');
+    await expect(readJson(join(home, 'config.json'))).rejects.toThrow();
+  });
+
+  it('missing identity over an existing store is refused', async () => {
+    const home = await makeHome();
+    await seedKey(home);
+    await seedStoreEvent(home);
+
+    const result = invokeInit(home);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('IDENTITY_STORE_OCCUPIED');
+    await expect(readJson(join(home, 'config.json'))).rejects.toThrow();
+    expect(existsSync(join(home, 'store.jsonl.identity.json'))).toBe(false);
+  });
+
+  it('legacy config-only home (empty store) bootstraps identity from the old deviceId', async () => {
+    const home = await makeHome();
+    await seedKey(home);
+    await seedConfig(home, { deviceId: 'device-old', deviceName: 'old-name' });
+
+    const result = invokeInit(home);
+
+    expect(result.status).toBe(0);
+    const identity = await readJson(join(home, 'store.jsonl.identity.json'));
+    expect(identity).toMatchObject({ deviceId: 'device-old', deviceName: 'old-name' });
+    const config = await readJson(join(home, 'config.json'));
+    expect(config).not.toHaveProperty('deviceId');
+    expect(config).not.toHaveProperty('deviceName');
+    expect((await readJson(join(home, 'config.json.identity-legacy.bak'))).deviceId).toBe('device-old');
+  });
+
+  it('is idempotent when config already has no identity fields', async () => {
+    const home = await makeHome();
+    await invokeInit(home);
     const before = await readFile(join(home, 'config.json'), 'utf-8');
 
     const result = invokeInit(home);
 
     expect(result.status).toBe(0);
-    expect(result.stdout).toContain('配置已存在，未覆盖');
+    expect(result.stdout).toContain('配置已存在');
     expect(await readFile(join(home, 'config.json'), 'utf-8')).toBe(before);
+    expect(existsSync(join(home, 'config.json.identity-legacy.bak'))).toBe(false);
   });
 
-  it('keeps the normal fresh-init path when no identity exists', async () => {
+  it('status agrees with identity and ignores env device overrides', async () => {
     const home = await makeHome();
-    await seedKey(home);
+    await invokeInit(home, ['--device-name', 'status-device']);
+    const identity = await readJson(join(home, 'store.jsonl.identity.json'));
 
-    const result = invokeInit(home);
+    const result = invokeStatus(home, {
+      MEBULAR_DEVICE_ID: 'device-env-other',
+      MEBULAR_DEVICE_NAME: 'env-other',
+    });
 
     expect(result.status).toBe(0);
+    const status = JSON.parse(result.stdout);
+    expect(status.deviceId).toBe(identity.deviceId);
+    expect(status.identityError).toBeUndefined();
+    expect(result.stderr).toContain('忽略 MEBULAR_DEVICE_ID');
     const config = await readJson(join(home, 'config.json'));
-    expect(config.deviceId).toMatch(/^device-/);
-    expect(config.deviceName).toBeUndefined();
+    expect(config).not.toHaveProperty('deviceId');
+    expect(config).not.toHaveProperty('deviceName');
   });
 });

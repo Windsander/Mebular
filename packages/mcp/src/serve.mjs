@@ -3204,7 +3204,9 @@ export async function startHttpServer({
           phase = 'INITIALIZING';
           let transaction = null;
           try {
-            transaction = await snapshotProvisionState(home);
+            transaction = await snapshotProvisionState(home, {
+              storagePath: process.env.MEBULAR_STORAGE_PATH ?? join(home, 'store.jsonl'),
+            });
             const result = action === 'create'
               ? await provisionCreate({
                 home,

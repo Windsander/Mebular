@@ -9,6 +9,12 @@ import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { Mebular, IdentityManager, FileEndpointStore, EndpointBook } from '@mebular/core';
 import { homeDir } from './home.mjs';
+import {
+  cleanLegacyConfig,
+  createIdentityForStorage,
+  prepareHomeIdentity,
+  storagePathForHome,
+} from './home-identity.mjs';
 
 /** 统一家目录（唯一真源，F-INST-1）：见 `./home.mjs`。 */
 export { homeDir };
@@ -81,8 +87,16 @@ async function readKeyRecord(source) {
   };
 }
 
-/** 解析用户主密钥；按 env > config.keyFile > <home>/user-master-key.json > 生成并持久化 */
-export async function resolveMasterKeys(home, config) {
+/** 只读主密钥记录（CLI init / provision 在签发身份前校验 keyFile）。 */
+export async function readMasterKeyRecord(source) {
+  return readKeyRecord(source);
+}
+
+/**
+ * 解析用户主密钥；按 env > config.keyFile > <home>/user-master-key.json > 生成并持久化。
+ * `allowGenerate:false` 用于「已有身份」：绝不自动生成新的信任根。
+ */
+export async function resolveMasterKeys(home, config, { allowGenerate = true } = {}) {
   const envFile = process.env.MEBULAR_USER_MASTER_KEY_FILE;
   const envInline = process.env.MEBULAR_USER_MASTER_KEY;
   if (envFile) return readKeyRecord(envFile);
@@ -93,6 +107,14 @@ export async function resolveMasterKeys(home, config) {
 
   const defaultFile = join(home, 'user-master-key.json');
   if (existsSync(defaultFile)) return readKeyRecord(defaultFile);
+
+  if (!allowGenerate) {
+    const error = new Error(
+      `已有设备身份，但缺少用户主密钥：${defaultFile}（不会自动生成新的信任根；请恢复原主密钥或从备份恢复）`,
+    );
+    error.code = 'IDENTITY_TRUST_ROOT_MISSING';
+    throw error;
+  }
 
   const master = await new IdentityManager().generateUserMasterKey();
   const record = {
@@ -114,27 +136,50 @@ export function identityMode(home, config, storagePath) {
   const explicit = config.identity?.mode;
   if (explicit === 'root' || explicit === 'delegated') return explicit;
   const identityFile = `${storagePath}.identity.json`;
+  if (!existsSync(identityFile)) return 'root';
+  try {
+    const identity = JSON.parse(readFileSync(identityFile, 'utf-8'));
+    // 主密钥直签的 root 身份没有 issuer/委派链；即使本地主密钥缺失也仍是 root
+    // （交给「信任根缺失」错误处理，而不是误判成 delegated）。
+    const chain = Array.isArray(identity?.certificateChain) ? identity.certificateChain : [];
+    if (identity?.certificate?.issuer !== undefined || chain.length > 1) return 'delegated';
+    if (identity?.certificate !== undefined) return 'root';
+  } catch {
+    // 身份文件损坏：交给 preflight 以 IDENTITY_INVALID fail closed。
+    return 'root';
+  }
+  // 旧/异构身份文件：沿用历史判定（主私钥在场 = root）。
   const masterFile = config.encryption?.keyFile ?? join(home, 'user-master-key.json');
-  if (existsSync(identityFile)) {
-    try {
-      const rec = JSON.parse(readFileSync(masterFile, 'utf-8'));
-      if (typeof rec.privateKeyPkcs8 !== 'string') return 'delegated';
-    } catch {
-      return 'delegated';
-    }
+  try {
+    const rec = JSON.parse(readFileSync(masterFile, 'utf-8'));
+    if (typeof rec.privateKeyPkcs8 !== 'string') return 'delegated';
+  } catch {
+    return 'delegated';
   }
   return 'root';
 }
 
-/** 读取**用户主公钥**（委派模式只需公钥；`config.encryption.userMasterPublicKeyFile` 或 <home>/user-master-key.json）。 */
+/**
+ * 读取**用户主公钥**（委派模式只需公钥）。
+ * 候选：`config.encryption.userMasterPublicKeyFile` → <home>/user-master-key.json → <home>/master-key.json
+ * （后两者覆盖 config 缺失时的既有布局；只读公开材料）。
+ */
 export async function resolveMasterPublicKey(home, config) {
-  const file = config.encryption?.userMasterPublicKeyFile ?? join(home, 'user-master-key.json');
-  if (!existsSync(file)) {
-    throw new Error(`委派身份模式需要用户主公钥：${file}（配置 encryption.userMasterPublicKeyFile 或放入该文件）`);
+  const candidates = [
+    config.encryption?.userMasterPublicKeyFile,
+    join(home, 'user-master-key.json'),
+    join(home, 'master-key.json'),
+  ].filter((file) => typeof file === 'string' && file.length > 0);
+  for (const file of candidates) {
+    if (!existsSync(file)) continue;
+    const data = JSON.parse(await readFile(file, 'utf-8'));
+    if (typeof data.publicKey !== 'string') throw new Error(`主公钥文件形状非法：${file}`);
+    return new Uint8Array(Buffer.from(data.publicKey, 'base64'));
   }
-  const data = JSON.parse(await readFile(file, 'utf-8'));
-  if (typeof data.publicKey !== 'string') throw new Error(`主公钥文件形状非法：${file}`);
-  return new Uint8Array(Buffer.from(data.publicKey, 'base64'));
+  throw new Error(
+    `委派身份模式需要用户主公钥（已尝试：${candidates.join(' / ')}）；`
+      + '请配置 encryption.userMasterPublicKeyFile 或恢复主公钥文件',
+  );
 }
 
 /** 依配置构建并初始化 Mebular 门面 */
@@ -142,15 +187,29 @@ export async function createMebular() {
   const home = homeDir();
   const config = await loadConfigFile(home);
   const storageAdapter = config.storageAdapter ?? 'json';
-  const storagePath = process.env.MEBULAR_STORAGE_PATH
-    ?? config.storagePath
-    ?? join(home, storageAdapter === 'sqlite' ? 'store.sqlite' : 'store.jsonl');
-  const deviceId = process.env.MEBULAR_DEVICE_ID ?? config.deviceId ?? `device-${process.env.HOSTNAME ?? 'local'}`;
-  const deviceName = process.env.MEBULAR_DEVICE_NAME ?? config.deviceName;
+  const storagePath = storagePathForHome(home, config, process.env);
+  // F-IDENT-1：身份文件是 deviceId/deviceName 的唯一权威；env/config 只在身份缺失时作为 bootstrap。
+  const prepared = prepareHomeIdentity({ home, config, env: process.env });
+  if (!prepared.ok) {
+    const error = new Error(prepared.message);
+    error.code = prepared.code;
+    error.identityPath = prepared.identityPath;
+    if (prepared.problems) error.problems = prepared.problems;
+    throw error;
+  }
+  for (const warning of prepared.warnings) console.error(`warning: ${warning}`);
   const mode = identityMode(home, config, storagePath);
+  if (prepared.status === 'missing' && mode === 'delegated') {
+    const error = new Error(
+      `委派身份缺少身份文件：${prepared.identityPath}。委派设备需要既有证书链，不能在本机新签发。`,
+    );
+    error.code = 'IDENTITY_NOT_INITIALIZED';
+    error.identityPath = prepared.identityPath;
+    throw error;
+  }
   // 生效值快照（console 设置卡应展示这些，而不是静态 config，否则 CLI/env 覆盖后卡片会失真）
   const effective = {
-    deviceName: deviceName ?? null,
+    deviceName: prepared.identity.deviceName,
     identityMode: mode,
     storageAdapter,
     encryptionLevel: config.encryption?.level ?? 'none',
@@ -174,7 +233,23 @@ export async function createMebular() {
   const masterKeys =
     mode === 'delegated'
       ? { userMasterKey: await resolveMasterPublicKey(home, config) }
-      : await resolveMasterKeys(home, config);
+      // 已有身份时禁止自动生成新主密钥（避免静默更换信任根）。
+      : await resolveMasterKeys(home, config, { allowGenerate: prepared.status === 'missing' });
+
+  let deviceId = prepared.identity.deviceId;
+  let deviceName = prepared.identity.deviceName;
+  if (prepared.status === 'missing') {
+    const created = await createIdentityForStorage({
+      storagePath,
+      deviceId,
+      deviceName,
+      userMasterPrivateKey: masterKeys.userMasterPrivateKey,
+      userMasterPublicKey: masterKeys.userMasterKey,
+    });
+    deviceId = created.deviceId;
+    deviceName = created.deviceName;
+    effective.deviceName = created.deviceName;
+  }
 
   // C2：地址簿里的 seeds（配对时随令牌写入）+ 配置 seeds → 客户端 relay 列表
   const bookSeeds = effective.networkEnabled ? await relaySeedsFromBook(home) : [];
@@ -249,6 +324,18 @@ export async function createMebular() {
     },
   });
   await app.initialize();
+  // 身份已就绪：备份并移除 legacy config 身份字段（即使旧值与身份不同也以身份为准）。
+  // 失败不阻断启动：身份仍是唯一权威，下次启动重试迁移。
+  try {
+    const migrated = await cleanLegacyConfig({ configPath: configPath(home), identity: { deviceId, deviceName } });
+    for (const warning of migrated.warnings) console.error(`warning: ${warning}`);
+    if (migrated.migrated) {
+      delete config.deviceId;
+      delete config.deviceName;
+    }
+  } catch (error) {
+    console.error(`warning: 无法清理 config.json 旧身份字段（${error?.message ?? error}）`);
+  }
   // W2：按 config.network.peers 主动拨号（daemon 形态的点对点建立；只有一方需地址）
   for (const peer of config.network?.peers ?? []) {
     if (typeof peer?.addr !== 'string' || peer.addr.length === 0) continue;

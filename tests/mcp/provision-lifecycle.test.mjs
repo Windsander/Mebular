@@ -92,6 +92,7 @@ const getJson = async (base, path) => {
     out.cases.create.portAfter = srv.port;
     out.cases.create.state = srv.getState();
     out.cases.create.config = await readJson(join(home, 'config.json'));
+    out.cases.create.identity = await readJson(join(home, 'store.jsonl.identity.json'));
     out.cases.create.registry = await readJson(join(home, 'profiles.json'));
     out.cases.create.files = await readdir(home);
     out.cases.create.duplicate = await post(base, '/app/provision/create', { confirm: true }, auth);
@@ -214,7 +215,7 @@ const getJson = async (base, path) => {
     out.cases.join.state = srv.getState();
     out.cases.join.registry = await readJson(join(home, 'profiles.json'));
     out.cases.join.master = await readJson(join(home, 'master-key.json'));
-    out.cases.join.identityExists = await readFile(join(home, 'store.jsonl.identity.json'), 'utf-8').then(() => true).catch(() => false);
+    out.cases.join.identity = await readJson(join(home, 'store.jsonl.identity.json'));
     out.cases.join.config = await readJson(join(home, 'config.json'));
   } finally {
     await srv.close();
@@ -268,9 +269,12 @@ describe('P1 单进程热初始化生命周期', () => {
     expect(c.statusAfter.status).toBe(404);
   });
 
-  it('create：写入 config + profile registry（current/default + 忆云名），设备名生效', () => {
+  it('create：写入 config（无身份字段）+ profile registry（current/default + 忆云名），设备名由身份提供', () => {
     const c = result.cases.create;
-    expect(c.config).toMatchObject({ deviceName: '测试机', mcp: { http: { port: c.port } } });
+    expect(c.config).toMatchObject({ mcp: { http: { port: c.port } } });
+    expect(c.config).not.toHaveProperty('deviceId');
+    expect(c.config).not.toHaveProperty('deviceName');
+    expect(c.identity).toMatchObject({ deviceId: c.response.body.deviceId, deviceName: '测试机' });
     expect(c.registry).toMatchObject({ v: 1, current: 'default' });
     expect(c.registry.profiles).toHaveLength(1);
     expect(c.registry.profiles[0]).toMatchObject({ id: 'default', name: '测试忆云' });
@@ -338,9 +342,10 @@ describe('P1 单进程热初始化生命周期', () => {
     expect(c.state).toMatchObject({ phase: 'READY', hotInitialized: true });
     expect(c.registry).toMatchObject({ current: 'default' });
     expect(c.registry.profiles[0]).toMatchObject({ id: 'default', name: '忆云 1' });
-    expect(c.config.deviceName).toBe('加入机');
+    expect(c.config).not.toHaveProperty('deviceId');
+    expect(c.config).not.toHaveProperty('deviceName');
     expect(c.config.identity?.mode).toBe('delegated');
-    expect(c.identityExists).toBe(true);
+    expect(c.identity).toMatchObject({ deviceId: c.response.body.deviceId, deviceName: '加入机' });
     expect(c.master?.privateKeyPkcs8).toBeUndefined();
   });
 });

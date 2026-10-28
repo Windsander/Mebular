@@ -31,9 +31,11 @@ import { dirname, join } from 'node:path';
 import { POLICY_NAMESPACE, type DeviceCertificate } from '@mebular/core';
 import {
   fleetConfigPath,
+  identityDeviceIdForStorage,
   loadFleetConfig,
   masterKeyFingerprint,
   permissionsApplicable,
+  resolveConfigStoragePath,
   readMasterKeyFile,
   type FleetAgentConfig,
 } from './config.js';
@@ -1427,9 +1429,12 @@ export async function resolveHomeMasterKey(dir: string): Promise<ResolvedHomeKey
       : typeof encryption.keyFile === 'string' && encryption.keyFile.length > 0
         ? encryption.keyFile
         : join(dir, 'user-master-key.json');
+    const storagePath = resolveConfigStoragePath(dir, config.storagePath);
     return {
       keyPath,
-      deviceId: typeof config.deviceId === 'string' ? config.deviceId : `device-${process.pid}`,
+      // 身份文件是 deviceId 的唯一权威；config.deviceId 仅旧布局回退。
+      deviceId: identityDeviceIdForStorage(storagePath)
+        ?? (typeof config.deviceId === 'string' ? config.deviceId : `device-${process.pid}`),
       encryption: await readMasterKeyFile(keyPath),
     };
   }

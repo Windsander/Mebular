@@ -15,6 +15,33 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
+## [v0.2.3] - 2026-10-28
+
+Identity-focused maintenance release. All six npm packages and the desktop app
+ship as `0.2.3`; no runtime protocol or data-format changes are included.
+
+### Changed
+
+- **Identity contract** — `<storagePath>.identity.json` is now the sole authority for `deviceId` / `deviceName`. New configs write neither field, and all CLI, App, DSH and fleet read paths resolve the device identity from the identity file.
+- **Transparent legacy recovery** — a valid identity with legacy `config.deviceId` / `deviceName` values is backed up to `config.json.identity-legacy.bak`, the stale fields are removed atomically, and startup continues without user interaction.
+- **Shared preflight** — `init`, provision create/restore/join, and runtime startup use the same `home-identity` contract. Invalid or inconsistent identity is reported as `identity_invalid` / `identity_store_occupied` instead of an opaque `unreachable`.
+- **No new App/DSH UI** — the common repair path is automatic; only an invalid identity fails closed.
+
+### Fixed
+
+- **`mebular init` identity handling** — an existing identity wins; conflicting `--device-id` is rejected; a root identity with a missing or invalid user master key now fails with `IDENTITY_TRUST_ROOT_MISSING` / `MASTER_KEY_INVALID` before touching config. Delegated identities do not require a root key.
+- **No silent rekey** — a missing identity over a non-empty store fails with `IDENTITY_STORE_OCCUPIED`; an existing identity with a missing trust root fails closed and never generates a new master key.
+- **Join safety** — `provisionJoinInto` and `fleet.joinWithToken` refuse to issue a new identity over existing store data.
+- **Fleet and status consistency** — profile, fleet, admin and CLI status paths derive device identity from the identity file instead of legacy config fields.
+
+### Verified
+
+- Full Jest — **210 suites / 2153 tests passed**.
+- Runtime coexistence — **13 scenarios / 153 checks passed**.
+- Real DSH E2E — minimum, latest and Node 22 minimum passed.
+- `verify:console` / `verify:onboarding` / `verify:daemon` / `verify:config` passed.
+- Packaging dry-run — pending release validation.
+
 ## [v0.2.2] - 2026-10-27
 
 Patch release focused on DeepSeek Harness Desktop integration. All six npm

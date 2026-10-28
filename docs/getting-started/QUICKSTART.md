@@ -10,12 +10,12 @@ source paths need Node.js >= 20; check with `node -v`.
 
 ## 1. Desktop app (recommended)
 
-1. Download the app from [GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.2.2) and open it.
+1. Download the app from [GitHub Releases](https://github.com/Windsander/Mebular/releases/tag/v0.2.3) and open it.
 2. Click **Start deployment**. It starts the local service on this machine, connects the AI assistants already
    installed here, and opens the **locked main console**.
 3. Choose **Create new Cloud** on your first device, or **Join existing Cloud** on a later one.
 
-> The v0.2.2 installers are unsigned. Verify `SHA256SUMS.txt` first, then use right-click → **Open**
+> The v0.2.3 installers are unsigned. Verify `SHA256SUMS.txt` first, then use right-click → **Open**
 > on macOS or **More info → Run anyway** on Windows. The package bundles Electron and its runtime;
 > no local Node.js is needed. Details: [desktop release](../operations/DESKTOP_RELEASE.md).
 

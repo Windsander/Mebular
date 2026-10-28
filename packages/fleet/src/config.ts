@@ -3,7 +3,7 @@
 // 目录（device home）权限 0700；配置文件 `fleet.config.json`；主密钥 `master-key.json`；
 // 事件存储 `store.jsonl`（设备身份 `store.jsonl.identity.json` 由 core 落盘）。
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -210,6 +210,31 @@ export function identityDeviceIdForStorage(storagePath: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * 身份缺失时禁止在已有数据的 store 上自动签发新身份（避免自动换钥）。
+ * JSONL 只有空白行视为空；其他格式（SQLite）无法证明为空即拒绝。
+ */
+export function assertFreshStoreForIdentity(storagePath: string): void {
+  let stat;
+  try {
+    stat = statSync(storagePath);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return;
+    throw error;
+  }
+  if (stat.size === 0) return;
+  if (/\.jsonl?$/i.test(storagePath)) {
+    const text = readFileSync(storagePath, 'utf-8');
+    if (text.split('\n').every((line) => line.trim().length === 0)) return;
+  }
+  const error = new Error(
+    `存储已有数据但身份文件缺失：拒绝自动生成新身份（${storagePath}）。请恢复原身份文件或从备份恢复。`,
+  ) as Error & { code?: string };
+  error.code = 'IDENTITY_STORE_OCCUPIED';
+  throw error;
 }
 
 /** 配置里的 storagePath（相对路径按设备目录解析）。 */

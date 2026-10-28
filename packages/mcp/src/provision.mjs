@@ -554,6 +554,8 @@ export async function provisionJoinInto({
     error.code = 'ALREADY_PROVISIONED';
     throw error;
   }
+  // 身份缺失但 store 已有数据 = 自动换钥风险：在写 config / 请求加入前拒绝。
+  assertFreshStore(join(home, 'store.jsonl'));
   if (typeof token !== 'string' || token.trim().length === 0) {
     const error = new Error('需要令牌文本（邀请面板生成的 base64 令牌）');
     error.code = 'TOKEN_REQUIRED';

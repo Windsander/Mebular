@@ -56,6 +56,24 @@ async function seedIdentity(home, master, { deviceId = 'device-test-id', deviceN
   return record;
 }
 
+async function seedDelegatedIdentity(home, master, { deviceId = 'device-leaf' } = {}) {
+  const manager = new IdentityManager();
+  manager.setUserMasterPrivateKey(master.privateKey);
+  const issuer = await manager.generateDeviceKey('device-root', 'root');
+  issuer.certificate = await manager.issueDeviceCertificate('device-root');
+  const leaf = await manager.generateDeviceKey(deviceId, 'leaf-name');
+  const leafCertificate = await manager.issueDelegatedDeviceCertificate(deviceId, 'device-root');
+  await writeFile(join(home, 'store.jsonl.identity.json'), JSON.stringify({
+    deviceId: leaf.deviceId,
+    deviceName: leaf.name,
+    publicKeyHex: Buffer.from(leaf.publicKey).toString('hex'),
+    certificate: leafCertificate,
+    certificateChain: leaf.certificateChain,
+    createdAt: leaf.createdAt,
+    privateKeyPkcs8: await IdentityManager.exportPrivateKey(leaf.privateKey),
+  }, null, 2), 'utf-8');
+}
+
 async function seedConfig(home, { deviceId = 'device-legacy', deviceName = 'legacy' } = {}) {
   await writeFile(
     join(home, 'config.json'),
@@ -162,6 +180,53 @@ describe('mebular init identity contract', () => {
     const backup = await readJson(join(home, 'config.json.identity-legacy.bak'));
     expect(backup).toMatchObject({ deviceId: 'device-legacy', deviceName: 'legacy-name' });
     expect((await readJson(join(home, 'store.jsonl.identity.json'))).deviceId).toBe('device-real');
+  });
+
+  it('root identity + missing user master key: init exits 2 and does not migrate config', async () => {
+    const home = await makeHome();
+    const master = await seedKey(home);
+    await seedIdentity(home, master, { deviceId: 'device-real' });
+    await rm(join(home, 'user-master-key.json'), { force: true });
+    await seedConfig(home, { deviceId: 'device-legacy', deviceName: 'legacy' });
+    const before = await readFile(join(home, 'config.json'), 'utf-8');
+
+    const result = invokeInit(home);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('IDENTITY_TRUST_ROOT_MISSING');
+    expect(await readFile(join(home, 'config.json'), 'utf-8')).toBe(before);
+    expect(existsSync(join(home, 'config.json.identity-legacy.bak'))).toBe(false);
+    expect(existsSync(join(home, 'user-master-key.json'))).toBe(false);
+  });
+
+  it('root identity + malformed user master key: init exits 2 with MASTER_KEY_INVALID', async () => {
+    const home = await makeHome();
+    const master = await seedKey(home);
+    await seedIdentity(home, master, { deviceId: 'device-real' });
+    await writeFile(join(home, 'user-master-key.json'), '{ broken', 'utf-8');
+    await seedConfig(home, { deviceId: 'device-legacy' });
+    const before = await readFile(join(home, 'config.json'), 'utf-8');
+
+    const result = invokeInit(home);
+
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain('MASTER_KEY_INVALID');
+    expect(await readFile(join(home, 'config.json'), 'utf-8')).toBe(before);
+    expect(existsSync(join(home, 'config.json.identity-legacy.bak'))).toBe(false);
+  });
+
+  it('delegated identity does not require a root user master key', async () => {
+    const home = await makeHome();
+    const master = await seedKey(home);
+    await seedDelegatedIdentity(home, master, { deviceId: 'device-leaf' });
+    await rm(join(home, 'user-master-key.json'), { force: true });
+    await writeFile(join(home, 'config.json'), JSON.stringify({ storagePath: join(home, 'store.jsonl') }), 'utf-8');
+
+    const result = invokeInit(home);
+
+    expect(result.status).toBe(0);
+    expect(existsSync(join(home, 'user-master-key.json'))).toBe(false);
+    expect((await readJson(join(home, 'store.jsonl.identity.json'))).deviceId).toBe('device-leaf');
   });
 
   it('explicit --device-id conflict is a hard error and writes nothing', async () => {

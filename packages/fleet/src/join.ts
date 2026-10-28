@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { constants, existsSync } from 'node:fs';
 import { Mebular, IdentityManager, bytesToHex, hexToBytes, EndpointBook, FileEndpointStore, derivePeerIdHex, RELAY_SEEDS_KEY } from '@mebular/core';
 import {
+  assertFreshStoreForIdentity,
   fleetConfigPath,
   fleetMasterKeyPath,
   fleetStoragePath,
@@ -133,6 +134,8 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
   let securityApproval: { approvalId: string; nonce: string; initiator?: string; cosign?: unknown } | undefined;
 
   if (!alreadyJoined && !reuseIdentity) {
+    // 身份缺失且 store 已有数据 = 自动换钥风险：签发前拒绝，绝不写身份/主密钥/配置。
+    assertFreshStoreForIdentity(storagePath);
     const deviceName = typeof input.deviceName === 'string' && input.deviceName.trim().length > 0
       ? input.deviceName.trim()
       : input.device;

@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
 const HARNESS = String.raw`
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -217,6 +217,38 @@ const getJson = async (base, path) => {
     out.cases.join.master = await readJson(join(home, 'master-key.json'));
     out.cases.join.identity = await readJson(join(home, 'store.jsonl.identity.json'));
     out.cases.join.config = await readJson(join(home, 'config.json'));
+
+    // 4b) 身份缺失 + store 已有数据：join 必须在写 config / 请求加入前拒绝。
+    const occupiedHome = useHome('join-occupied');
+    await mkdir(occupiedHome, { recursive: true });
+    await writeFile(join(occupiedHome, 'store.jsonl'), '{"id":"keep-me"}\n');
+    const occupiedToken = fleet.encodeJoinToken(await fleet.buildJoinToken({
+      mebular: inviter,
+      deviceId: 'device-inviter',
+      namespace: 'tasks',
+      endpoint,
+      ttlMs: 600000,
+    }));
+    const occupiedSrv = await startServeServer({ host: '127.0.0.1', port: 0, auth: 'none' });
+    const occupiedBase = 'http://127.0.0.1:' + occupiedSrv.port;
+    try {
+      const occupiedAuth = await csrf(occupiedBase);
+      out.cases.joinOccupied = {
+        response: await post(occupiedBase, '/app/provision/join', {
+          confirm: true,
+          deviceName: '占用机',
+          token: occupiedToken,
+        }, occupiedAuth),
+      };
+      out.cases.joinOccupied.files = await readdir(occupiedHome);
+      out.cases.joinOccupied.config = await readJson(join(occupiedHome, 'config.json'));
+      out.cases.joinOccupied.identity = await readJson(join(occupiedHome, 'store.jsonl.identity.json'));
+      out.cases.joinOccupied.master = await readJson(join(occupiedHome, 'master-key.json'));
+      out.cases.joinOccupied.userMaster = await readJson(join(occupiedHome, 'user-master-key.json'));
+      out.cases.joinOccupied.status = await getJson(occupiedBase, '/app/provision/status');
+    } finally {
+      await occupiedSrv.close();
+    }
   } finally {
     await srv.close();
     await joinSvc.close().catch(() => undefined);
@@ -347,5 +379,26 @@ describe('P1 单进程热初始化生命周期', () => {
     expect(c.config.identity?.mode).toBe('delegated');
     expect(c.identity).toMatchObject({ deviceId: c.response.body.deviceId, deviceName: '加入机' });
     expect(c.master?.privateKeyPkcs8).toBeUndefined();
+  });
+
+  it('join：身份缺失 + store 已有数据 → IDENTITY_STORE_OCCUPIED，且不落盘', () => {
+    const c = result.cases.joinOccupied;
+    expect(c.response.status).toBe(400);
+    expect(c.response.body).toMatchObject({
+      ok: false,
+      error: 'IDENTITY_STORE_OCCUPIED',
+      phase: 'UNINITIALIZED',
+    });
+    expect(c.response.body.message).toContain('拒绝自动生成新身份');
+    expect(c.files).toContain('store.jsonl');
+    expect(c.files).not.toContain('config.json');
+    expect(c.files).not.toContain('store.jsonl.identity.json');
+    expect(c.files).not.toContain('master-key.json');
+    expect(c.files).not.toContain('user-master-key.json');
+    expect(c.config).toBeNull();
+    expect(c.identity).toBeNull();
+    expect(c.master).toBeNull();
+    expect(c.userMaster).toBeNull();
+    expect(c.status.body?.provisioned).toBe(false);
   });
 });

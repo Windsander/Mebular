@@ -237,11 +237,11 @@ async function runInit(flags) {
   for (const warning of prepared.warnings) console.error(`warning: ${warning}`);
 
   let identity = prepared.identity;
+  const { identityMode, readMasterKeyRecord } = await import('../src/config.mjs');
   if (prepared.status === 'missing') {
     // 缺身份但 store 已有数据 = 自动换钥风险：先拒绝，绝不写任何文件。
     assertFreshStore(storagePath);
     if (!existsSync(keyFile)) await runKeygen({ out: keyFile });
-    const { readMasterKeyRecord } = await import('../src/config.mjs');
     let master;
     try {
       master = await readMasterKeyRecord(keyFile);
@@ -259,6 +259,32 @@ async function runInit(flags) {
       userMasterPublicKey: master.userMasterKey,
     });
     identity = { deviceId: created.deviceId, deviceName: created.deviceName };
+  } else if (identityMode(home, config ?? {}, storagePath) === 'root') {
+    // 已有 root 身份但信任根缺失/损坏：init 不能假装成功，更不能生成新主密钥。
+    // 委派身份没有 root 主私钥是正常的，因此只对 root 校验。
+    const envInline = process.env.MEBULAR_USER_MASTER_KEY;
+    const keySource = envInline
+      ? envInline
+      : (process.env.MEBULAR_USER_MASTER_KEY_FILE
+        || (typeof config?.encryption?.keyFile === 'string' && config.encryption.keyFile.length > 0
+          ? config.encryption.keyFile
+          : keyFile));
+    if (!envInline && !existsSync(keySource)) {
+      throw initError(
+        `已有 root 身份，但缺少用户主密钥：${keySource}`
+          + '（不会自动生成新的信任根；请恢复原主密钥或从备份恢复）',
+        'IDENTITY_TRUST_ROOT_MISSING',
+      );
+    }
+    let master;
+    try {
+      master = await readMasterKeyRecord(keySource);
+    } catch (error) {
+      throw initError(`主密钥文件损坏：${keySource}（${error?.message ?? error}）`, 'MASTER_KEY_INVALID');
+    }
+    if (!master.userMasterPrivateKey) {
+      throw initError(`主密钥文件缺少私钥：${keySource}`, 'MASTER_KEY_INVALID');
+    }
   }
 
   if (config !== null) {

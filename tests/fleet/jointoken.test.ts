@@ -117,6 +117,44 @@ describe('T2 加入令牌与 join 服务', () => {
     }
   });
 
+  it('joinWithToken：身份缺失 + store 已有数据 → IDENTITY_STORE_OCCUPIED，不写身份/配置', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fleet-join-occupied-'));
+    try {
+      const A = join(root, 'A');
+      const B = join(root, 'B');
+      const inviter = await makeInviter(A);
+      const svc = await startJoinService({ mebular: inviter, deviceId: 'device-A', storagePath: join(A, 'store.jsonl'), port: 0 });
+      const endpoint = `http://127.0.0.1:${svc.port}`;
+      try {
+        await mkdir(B, { recursive: true });
+        await writeFile(join(B, 'store.jsonl'), '{"id":"keep-me"}\n', 'utf-8');
+        const token = encodeJoinToken(await buildJoinToken({
+          mebular: inviter, deviceId: 'device-A', namespace: 'tasks', endpoint, ttlMs: 60_000,
+        }));
+        const nonce = decodeJoinToken(token).nonce;
+
+        await expect(joinWithToken({
+          dir: B,
+          token,
+          device: 'device-B',
+          listen: '/ip4/127.0.0.1/tcp/0',
+          agents: AGENTS,
+        })).rejects.toMatchObject({ code: 'IDENTITY_STORE_OCCUPIED' });
+
+        await expect(access(join(B, 'store.jsonl.identity.json'))).rejects.toThrow();
+        await expect(access(fleetConfigPath(B))).rejects.toThrow();
+        await expect(access(join(B, 'master-key.json'))).rejects.toThrow();
+        const state = await readJoinNonceState(join(A, 'store.jsonl'));
+        expect(state.used).not.toContain(nonce);
+      } finally {
+        await svc.close();
+        await inviter.shutdown();
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it('F-2：同一令牌**并发**请求只成功一次（先占用后签发）', async () => {
     const root = await mkdtemp(join(tmpdir(), 'fleet-join-race-'));
     try {

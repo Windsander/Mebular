@@ -86,6 +86,8 @@
     '进入网络': 'Enter the network',
     '本地优先': 'Local-first',
     '无中心协调者': 'No central coordinator',
+    '最新版本': 'Latest release',
+    '下载最新版': 'Download latest',
     '向下翻页，跟着一条记忆走': 'Scroll to follow one memory',
     '01 / 网络': '01 / Network',
     '没有中心。': 'No center.',

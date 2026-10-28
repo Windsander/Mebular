@@ -39,7 +39,6 @@ if (!existsSync(keyFile)) {
 if (!existsSync(cfgFile)) {
   await writeFile(cfgFile, JSON.stringify({
     storagePath,
-    deviceId: device,
     encryption: { level: 'none', keyFile },
     identity: { mode: 'root' },
     network: { enabled: false, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
@@ -64,7 +63,7 @@ const encryption = {
 const config = JSON.parse(await readFile(cfgFile, 'utf-8'));
 const app = new Mebular({
   storagePath: config.storagePath,
-  deviceId: config.deviceId,
+  deviceId: device,
   encryption,
   network: { enabled: false },
   sync: { namespaces: config.sync?.namespaces ?? [] },

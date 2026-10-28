@@ -124,7 +124,7 @@ describe('Mebular 门面', () => {
   it('首次初始化缺主私钥报 IdentityError；身份文件与 deviceId 不匹配也报错', async () => {
     const noKey = new Mebular({ storagePath, deviceId: 'device-A' });
     await expect(noKey.initialize()).rejects.toThrow(IdentityError);
-    await expect(noKey.initialize()).rejects.toMatchObject({ code: ErrorCodes.IDENTITY_NOT_INITIALIZED });
+    await expect(noKey.initialize()).rejects.toMatchObject({ code: ErrorCodes.IDENTITY_TRUST_ROOT_MISSING });
 
     const seeded = new Mebular({
       storagePath,
@@ -136,6 +136,26 @@ describe('Mebular 门面', () => {
 
     const mismatched = new Mebular({ storagePath, deviceId: 'device-B' });
     await expect(mismatched.initialize()).rejects.toThrow(/不匹配/);
+  });
+
+  it('身份文件缺失但 store 已有事件：拒绝自动换钥', async () => {
+    const first = new Mebular({
+      storagePath,
+      deviceId: 'device-A',
+      encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
+    });
+    await first.initialize();
+    await first.graph.createNode('fact', { text: 'keep-me' });
+    await first.shutdown();
+    await rm(`${storagePath}.identity.json`, { force: true });
+
+    const replay = new Mebular({
+      storagePath,
+      deviceId: 'device-A',
+      encryption: { userMasterKey: master.publicKey, userMasterPrivateKey: master.privateKey },
+    });
+    await expect(replay.initialize()).rejects.toMatchObject({ code: ErrorCodes.IDENTITY_STORE_OCCUPIED });
+    expect(existsSync(`${storagePath}.identity.json`)).toBe(false);
   });
 
   it('未初始化访问子系统抛 MebularError；shutdown 幂等', async () => {

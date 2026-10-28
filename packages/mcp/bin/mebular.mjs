@@ -217,44 +217,60 @@ async function runInit(flags) {
   const storagePath = typeof config?.storagePath === 'string'
     ? config.storagePath
     : (typeof flags['storage'] === 'string' ? flags['storage'] : join(home, 'store.jsonl'));
-  const identityFile = `${storagePath}.identity.json`;
-  const identity = existsSync(identityFile)
-    ? await readInitJson(identityFile, { label: '身份文件', code: 'IDENTITY_INVALID' })
-    : null;
-  const requestedDeviceId = typeof flags['device-id'] === 'string'
-    ? flags['device-id'].trim() || null
-    : null;
+  const explicit = {
+    ...(typeof flags['device-id'] === 'string' && flags['device-id'].trim().length > 0
+      ? { deviceId: flags['device-id'].trim() }
+      : {}),
+    ...(typeof flags['device-name'] === 'string' && flags['device-name'].trim().length > 0
+      ? { deviceName: flags['device-name'].trim() }
+      : {}),
+  };
 
-  if (identity !== null && (typeof identity.deviceId !== 'string' || identity.deviceId.length === 0)) {
-    throw initError(`身份文件缺少有效 deviceId：${identityFile}`, 'IDENTITY_INVALID');
-  }
-  if (identity !== null && config !== null && config.deviceId !== identity.deviceId) {
-    throw initError(
-      `身份文件与配置不一致：identity=${identity.deviceId}，config=${String(config.deviceId ?? '(missing)')}。`
-        + '请保留备份后运行恢复流程，不要直接删除 identity 或改写 deviceId。',
-      'IDENTITY_MISMATCH',
-    );
-  }
-  if (identity !== null && requestedDeviceId !== null && requestedDeviceId !== identity.deviceId) {
-    throw initError(
-      `--device-id ${requestedDeviceId} 与已有身份 ${identity.deviceId} 不一致；已有身份不能通过 init 改写。`,
-      'IDENTITY_MISMATCH',
-    );
+  const {
+    assertFreshStore,
+    cleanLegacyConfig,
+    createIdentity,
+    prepareIdentity,
+  } = await import('../src/identity.mjs');
+  const prepared = prepareIdentity({ home, config: config ?? {}, storagePath, explicit });
+  if (!prepared.ok) {
+    throw initError(prepared.message, prepared.code);
   }
 
-  if (!existsSync(keyFile)) await runKeygen({ out: keyFile });
+  let identity = prepared.identity;
+  if (prepared.status === 'missing') {
+    assertFreshStore(storagePath);
+    if (!existsSync(keyFile)) await runKeygen({ out: keyFile });
+    const { readMasterKeyRecord } = await import('../src/config.mjs');
+    let master;
+    try {
+      master = await readMasterKeyRecord(keyFile);
+    } catch (error) {
+      throw initError(`主密钥文件损坏：${keyFile}（${error?.message ?? error}）`, 'MASTER_KEY_INVALID');
+    }
+    if (!master.userMasterPrivateKey) {
+      throw initError(`主密钥文件缺少私钥：${keyFile}`, 'MASTER_KEY_INVALID');
+    }
+    const created = await createIdentity({
+      storagePath,
+      deviceId: identity.deviceId,
+      deviceName: identity.deviceName,
+      userMasterPrivateKey: master.userMasterPrivateKey,
+      userMasterPublicKey: master.userMasterKey,
+    });
+    identity = { deviceId: created.deviceId, deviceName: created.deviceName };
+  }
 
   if (config !== null) {
+    const migrated = await cleanLegacyConfig({ configPath: configFile, identity });
     console.log(`配置已存在，未覆盖：${configFile}`);
+    if (migrated.migrated) {
+      console.log(`已备份旧 config 身份字段：${migrated.backupPath}，并以身份 ${identity.deviceId} 为准`);
+    }
   } else {
-    const deviceId = identity?.deviceId ?? requestedDeviceId ?? `device-${process.env.HOSTNAME ?? 'local'}`;
     const nextConfig = {
       storagePath,
       storageAdapter: 'json',
-      deviceId,
-      ...(typeof identity?.deviceName === 'string' && identity.deviceName.length > 0
-        ? { deviceName: identity.deviceName }
-        : {}),
       encryption: { level: 'none', keyFile },
       network: { enabled: false, libp2p: { listen: [], relayServers: [], relayUnlimited: false } },
       // 常驻入口默认实时（写入即推 + 周期 anti-entropy）；可显式关闭
@@ -263,9 +279,7 @@ async function runInit(flags) {
       mcp: { http: { host: '127.0.0.1', port: 7331, auth: 'none', tls: false, tokensFile: join(home, 'auth', 'tokens.json') } },
     };
     await writeFile(configFile, JSON.stringify(nextConfig, null, 2), 'utf-8');
-    console.log(identity === null
-      ? `已写入配置：${configFile}`
-      : `已按既有身份恢复配置：${configFile}（deviceId=${deviceId}）`);
+    console.log(`已写入配置：${configFile}（deviceId=${identity.deviceId}，由身份文件提供）`);
   }
   console.log(
     [
@@ -554,6 +568,9 @@ async function runStatus() {
   const storagePath = process.env.MEBULAR_STORAGE_PATH
     ?? configFile.storagePath
     ?? join(home, (configFile.storageAdapter ?? 'json') === 'sqlite' ? 'store.sqlite' : 'store.jsonl');
+  const { readIdentityFile } = await import('../src/identity.mjs');
+  const identityRead = readIdentityFile(storagePath);
+  const identityDeviceId = identityRead.status === 'valid' ? identityRead.deviceId : null;
   // store 锁持有者（单写者证据）
   let storeLock = null;
   const lockPath = join(home, 'lock');
@@ -575,12 +592,13 @@ async function runStatus() {
         ok: true,
         running: true,
         reused: true,
-        deviceId: process.env.MEBULAR_DEVICE_ID ?? configFile.deviceId ?? `device-${process.env.HOSTNAME ?? 'local'}`,
+        deviceId: identityDeviceId,
         peerId: null,
         nodeCount: null,
         stateHash: null,
         home,
         storagePath,
+        ...(identityDeviceId === null ? { identityError: identityRead.status === 'invalid' ? identityRead.problems : identityRead.status } : {}),
         identityMode: resolveIdentityMode(home, configFile, storagePath),
         network: { enabled: configFile.network?.enabled ?? false, listen: configFile.network?.libp2p?.listen ?? [], reused: true },
         storeLock,

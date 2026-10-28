@@ -13,6 +13,7 @@ import { createServer } from 'node:net';
 import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { configPath, resolveMasterKeys } from './config.mjs';
+import { assertFreshStore, createIdentityForStorage, identityPathFor, readIdentityFile } from './identity.mjs';
 import {
   DEFAULT_PROFILE_NAME,
   masterFingerprintForHome,
@@ -123,8 +124,11 @@ const PROVISION_STATE_PATHS = [
  * P1：create/join 的落盘事务快照。热初始化失败时只删除**本次新建**的文件，
  * 不触碰调用前已存在的任何内容（home 锁始终由当前进程持有）。
  */
-export async function snapshotProvisionState(home) {
+export async function snapshotProvisionState(home, { storagePath } = {}) {
   const paths = new Set(PROVISION_STATE_PATHS.map((rel) => join(home, rel)));
+  const effectiveStorage = storagePath ?? join(home, 'store.jsonl');
+  paths.add(`${effectiveStorage}.identity.json`);
+  paths.add(join(home, 'config.json.identity-legacy.bak'));
   paths.add(configPath(home));
   const cloud = resolveCloudRoot({ home, env: process.env });
   if (cloud.available) {
@@ -243,8 +247,7 @@ async function writeInitialProvisionConfig({ home, deviceName, deviceId, mcpPort
   const listenChoice = await findFreePort(Number(listenPort) > 0 ? Number(listenPort) : 4001);
 
   const config = {
-    deviceId: id,
-    deviceName: name,
+    storagePath: join(home, 'store.jsonl'),
     encryption: { level: 'none' },
     network: {
       enabled: true,
@@ -298,13 +301,25 @@ export async function provisionCreate({ home, cloudName, deviceName, deviceId, m
   const registryBackupPath = cloud.available ? join(cloud.root, 'profiles.json.bak') : null;
   const registryExisted = registryPath !== null && existsSync(registryPath);
   const registryBackupExisted = registryBackupPath !== null && existsSync(registryBackupPath);
+  const storagePath = join(home, 'store.jsonl');
+  const identityPath = identityPathFor(storagePath);
+  const identityExisted = existsSync(identityPath);
   try {
+    assertFreshStore(storagePath);
     const master = await resolveMasterKeys(home, {});
     if (master.userMasterPrivateKey === undefined) {
       const error = new Error('建新需要 root 主密钥（生成失败：未获得私钥）');
       error.code = 'MASTER_KEY_FAILED';
       throw error;
     }
+    const identityDeviceId = normalizeExplicitDeviceId(deviceId) ?? deriveDeviceId(name);
+    await createIdentityForStorage({
+      storagePath,
+      deviceId: identityDeviceId,
+      deviceName: name,
+      userMasterPrivateKey: master.userMasterPrivateKey,
+      userMasterPublicKey: master.userMasterKey,
+    });
     const result = await writeInitialProvisionConfig({
       home,
       deviceName: name,
@@ -340,6 +355,7 @@ export async function provisionCreate({ home, cloudName, deviceName, deviceId, m
   } catch (error) {
     if (!keyExisted) await rm(keyPath, { force: true }).catch(() => undefined);
     if (!configExisted) await rm(cfgPath, { force: true }).catch(() => undefined);
+    if (!identityExisted) await rm(identityPath, { force: true }).catch(() => undefined);
     if (registryPath !== null && !registryExisted) await rm(registryPath, { force: true }).catch(() => undefined);
     if (registryBackupPath !== null && !registryBackupExisted) await rm(registryBackupPath, { force: true }).catch(() => undefined);
     throw error;
@@ -370,6 +386,9 @@ export async function provisionRestore({ home, file, code, cloudName, deviceName
   }
   const fleet = await import('../../fleet/dist/index.js');
   const keyPath = join(home, 'user-master-key.json');
+  const storagePath = join(home, 'store.jsonl');
+  const keyExisted = existsSync(keyPath);
+  assertFreshStore(storagePath);
   let restored;
   try {
     restored = await fleet.restoreMasterKeyBackup({
@@ -386,6 +405,19 @@ export async function provisionRestore({ home, file, code, cloudName, deviceName
   }
   const transaction = await snapshotProvisionState(home);
   try {
+    const master = await resolveMasterKeys(home, {});
+    if (master.userMasterPrivateKey === undefined) {
+      const error = new Error('恢复失败：主密钥文件缺少私钥（无法签发设备身份）');
+      error.code = 'RESTORE_FAILED';
+      throw error;
+    }
+    await createIdentityForStorage({
+      storagePath,
+      deviceId: normalizeExplicitDeviceId(deviceId) ?? deriveDeviceId(name),
+      deviceName: name,
+      userMasterPrivateKey: master.userMasterPrivateKey,
+      userMasterPublicKey: master.userMasterKey,
+    });
     const result = await writeInitialProvisionConfig({
       home,
       deviceName: name,
@@ -421,6 +453,7 @@ export async function provisionRestore({ home, file, code, cloudName, deviceName
     };
   } catch (error) {
     await transaction.rollback();
+    if (!keyExisted) await rm(keyPath, { force: true }).catch(() => undefined);
     throw error;
   }
 }
@@ -456,11 +489,9 @@ async function resolveJoinPorts({ ports = {}, mcpPort, joinPort, listenPort }) {
   return { mcp, join, listen };
 }
 
-function delegatedConfig({ home, id, name, namespace, ports, peers = [] }) {
+function delegatedConfig({ home, namespace, ports, peers = [] }) {
   return {
     storagePath: join(home, 'store.jsonl'),
-    deviceId: id,
-    deviceName: name,
     identity: { mode: 'delegated' },
     encryption: { level: 'none', userMasterPublicKeyFile: join(home, 'master-key.json') },
     network: {
@@ -548,6 +579,7 @@ export async function provisionJoinInto({
       dir: home,
       token: token.trim(),
       device: id,
+      deviceName: name,
       namespace,
       listen: `/ip4/0.0.0.0/tcp/${resolvedPorts.listen}`,
       agents: [{ name: 'echo', kind: 'echo' }],
@@ -579,6 +611,17 @@ export async function provisionJoinInto({
   const masterKeyPublic = join(home, 'master-key.json');
   const fingerprint = typeof joined.fingerprint === 'string' ? joined.fingerprint : null;
   try {
+    const identity = readIdentityFile(join(home, 'store.jsonl'));
+    if (identity.status !== 'valid') {
+      const error = new Error(`加入后身份文件不可用：${identity.path ?? join(home, 'store.jsonl.identity.json')}`);
+      error.code = 'IDENTITY_INVALID';
+      throw error;
+    }
+    if (identity.deviceId !== id) {
+      const error = new Error(`加入后身份 ${identity.deviceId} 与请求 ${id} 不一致`);
+      error.code = 'IDENTITY_MISMATCH';
+      throw error;
+    }
     const path = await writeConfigFile(home, delegatedConfig({ home, id, name, namespace, ports: resolvedPorts, peers }));
     const profile = registerCurrentProfile
       ? await writeInitialProfile({

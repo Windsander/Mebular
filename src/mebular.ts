@@ -1530,6 +1530,7 @@ export class Mebular {
       if (record.deviceId !== this.config.deviceId) {
         throw new IdentityError(
           `身份文件与 deviceId 不匹配：${record.deviceId} != ${this.config.deviceId}`,
+          ErrorCodes.IDENTITY_MISMATCH,
         );
       }
 
@@ -1584,6 +1585,16 @@ export class Mebular {
     if (!this.identity.hasMasterPrivateKey()) {
       throw new IdentityError(
         '首次初始化需要用户主私钥为本机设备签发证书（config.encryption.userMasterPrivateKey）',
+        ErrorCodes.IDENTITY_TRUST_ROOT_MISSING,
+      );
+    }
+    // 安全护栏：store 已有事件而身份文件缺失 = 自动换钥风险。绝不静默生成新身份。
+    const existingEvents = await this.storageImpl!.listEvents({});
+    if (existingEvents.length > 0) {
+      throw new IdentityError(
+        `存储已有 ${existingEvents.length} 条事件，但身份文件缺失：拒绝自动生成新身份（避免自动换钥）。`
+          + `请恢复 ${path} 或从备份恢复。`,
+        ErrorCodes.IDENTITY_STORE_OCCUPIED,
       );
     }
     const identity = await this.identity.generateDeviceKey(

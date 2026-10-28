@@ -158,6 +158,8 @@ describe('M1 桌面 App：守护托管', () => {
       MEBULAR_CLOUD_ROOT: '/root',
       ELECTRON_RUN_AS_NODE: '1',
     });
+    expect(spawned.opts.env.MEBULAR_DEVICE_ID).toBeUndefined();
+    expect(spawned.opts.env.MEBULAR_DEVICE_NAME).toBeUndefined();
   });
 
   it('服务描述符：OS home 与实例 home 分离；env 带 root + ELECTRON_RUN_AS_NODE', () => {
@@ -171,6 +173,8 @@ describe('M1 桌面 App：守护托管', () => {
         ELECTRON_RUN_AS_NODE: '1',
       },
     });
+    expect(descriptor.env.MEBULAR_DEVICE_ID).toBeUndefined();
+    expect(descriptor.env.MEBULAR_DEVICE_NAME).toBeUndefined();
     expect(descriptor.args).toEqual(['/x/mebular.mjs', 'serve', '--port', '7331']);
   });
 

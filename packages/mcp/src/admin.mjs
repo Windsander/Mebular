@@ -408,7 +408,7 @@ export function collectOnlinePeers(app) {
 }
 
 /** GET /admin/api/overview */
-export async function buildOverview({ app, service, cloud, config, runtime }) {
+export async function buildOverview({ app, service, cloud, runtime }) {
   const status = await service.status();
   const { peers } = collectOnlinePeers(app);
   let blockedCount = 0;
@@ -434,7 +434,6 @@ export async function buildOverview({ app, service, cloud, config, runtime }) {
   }
   const selfDeviceName = deviceNames[app.deviceId]?.name
     ?? runtime?.deviceName
-    ?? config?.deviceName
     ?? null;
   // 忆云身份：旧守护无此字段 → 前端自行隐藏；注册表不可读时同样省略（不阻塞总览）。
   let cloudView = null;
@@ -608,7 +607,7 @@ export async function collectKnownDevices(app, policy, online) {
 }
 
 /** GET /admin/api/devices */
-export async function buildDevices({ app, config, runtime }) {
+export async function buildDevices({ app, runtime }) {
   const self = app.deviceId;
   const online = collectOnlinePeers(app);
   const policy = await collectPolicy(app);
@@ -620,7 +619,7 @@ export async function buildDevices({ app, config, runtime }) {
   } catch {
     deviceNames = {};
   }
-  const selfNameFallback = runtime?.deviceName ?? config?.deviceName ?? null;
+  const selfNameFallback = runtime?.deviceName ?? null;
 
   let syncStatus = null;
   try {
@@ -904,8 +903,8 @@ export async function buildSettings({ app, service, config, runtime, home }) {
   const payload = {
     identity: {
       deviceId: app.deviceId,
-      name: selfDeviceName ?? runtime?.deviceName ?? config?.deviceName ?? null,
-      nameSource: selfDeviceName ? 'network' : (runtime?.deviceName ?? config?.deviceName ? 'local' : null),
+      name: selfDeviceName ?? runtime?.deviceName ?? null,
+      nameSource: selfDeviceName ? 'network' : (runtime?.deviceName ? 'local' : null),
       // W2：root（持主私钥）/ delegated（仅委派链）
       mode: runtime?.identityMode ?? config?.identity?.mode ?? null,
       peerId: status.peerId,

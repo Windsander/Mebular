@@ -28,6 +28,7 @@ export interface JoinWithTokenInput {
   dir: string;
   token: string;
   device: string;
+  deviceName?: string;
   namespace?: string;
   listen?: string;
   agents: FleetAgentConfig[];
@@ -112,8 +113,11 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
   let securityApproval: { approvalId: string; nonce: string; initiator?: string; cosign?: unknown } | undefined;
 
   if (!alreadyJoined) {
+    const deviceName = typeof input.deviceName === 'string' && input.deviceName.trim().length > 0
+      ? input.deviceName.trim()
+      : input.device;
     const im = new IdentityManager();
-    const deviceKey = await im.generateDeviceKey(input.device, input.device);
+    const deviceKey = await im.generateDeviceKey(input.device, deviceName);
     const issued = await requestJoin({
       endpoint: token.endpoint,
       token: input.token,
@@ -126,7 +130,7 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
     const privateKeyPkcs8 = await IdentityManager.exportPrivateKey(deviceKey.privateKey);
     const record = {
       deviceId: input.device,
-      deviceName: input.device,
+      deviceName,
       publicKeyHex: bytesToHex(deviceKey.publicKey),
       certificate: issued.certificate,
       certificateChain: issued.chain,

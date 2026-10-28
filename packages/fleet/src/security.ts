@@ -31,6 +31,7 @@ import { dirname, join } from 'node:path';
 import { POLICY_NAMESPACE, type DeviceCertificate } from '@mebular/core';
 import {
   fleetConfigPath,
+  identityDeviceIdForStorage,
   loadFleetConfig,
   masterKeyFingerprint,
   permissionsApplicable,
@@ -1427,9 +1428,13 @@ export async function resolveHomeMasterKey(dir: string): Promise<ResolvedHomeKey
       : typeof encryption.keyFile === 'string' && encryption.keyFile.length > 0
         ? encryption.keyFile
         : join(dir, 'user-master-key.json');
+    const storagePath = typeof config.storagePath === 'string' && config.storagePath.length > 0
+      ? config.storagePath
+      : join(dir, 'store.jsonl');
     return {
       keyPath,
-      deviceId: typeof config.deviceId === 'string' ? config.deviceId : `device-${process.pid}`,
+      deviceId: identityDeviceIdForStorage(storagePath)
+        ?? (typeof config.deviceId === 'string' ? config.deviceId : `device-${process.pid}`),
       encryption: await readMasterKeyFile(keyPath),
     };
   }

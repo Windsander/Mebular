@@ -164,6 +164,20 @@ function inferKind(home, config) {
   }
 }
 
+/** 档案展示用 deviceId：身份文件优先；config.deviceId 仅旧布局回退。 */
+function deviceIdForHome(home, config = {}) {
+  const storage = typeof config?.storagePath === 'string' && config.storagePath.length > 0
+    ? resolve(home, config.storagePath)
+    : join(home, 'store.jsonl');
+  try {
+    const record = JSON.parse(readFileSync(`${storage}.identity.json`, 'utf-8'));
+    if (typeof record?.deviceId === 'string' && record.deviceId.length > 0) return record.deviceId;
+  } catch {
+    // 身份文件缺失/损坏 → 旧布局回退；运行期由 createMebular fail closed。
+  }
+  return typeof config?.deviceId === 'string' ? config.deviceId : null;
+}
+
 /** 公开指纹：sha256(bytes) 前 12 hex。输入无效返回 null（不阻塞加入/展示）。 */
 export function masterFingerprintFromBytes(bytes) {
   try {
@@ -244,7 +258,7 @@ function synthesizeDefaultRegistry(home) {
       createdAt,
       lastUsedAt: null,
       masterFingerprint: masterFingerprintForHome(home, config),
-      deviceId: typeof config.deviceId === 'string' ? config.deviceId : null,
+      deviceId: deviceIdForHome(home, config),
     }],
   };
 }

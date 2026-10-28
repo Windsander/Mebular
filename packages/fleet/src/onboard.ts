@@ -21,6 +21,7 @@ import {
   fleetMasterKeyPath,
   fleetStoragePath,
   generateMasterKey,
+  identityDeviceIdForStorage,
   loadFleetConfig,
   loadToolConfig,
   masterKeyFingerprint,
@@ -108,6 +109,17 @@ export async function onboardDevice(input: OnboardInput): Promise<OnboardResult>
   await mkdir(input.dir, { recursive: true });
   if (permissionsApplicable()) await chmod(input.dir, 0o700);
 
+  const storagePath = fleetStoragePath(input.dir);
+  const identityDevice = identityDeviceIdForStorage(storagePath);
+  if (identityDevice !== null && identityDevice !== input.device) {
+    const error = new Error(
+      `目录已有设备身份 ${identityDevice}，与 --device ${input.device} 不一致；已有身份不能被 onboard 改写。`,
+    ) as Error & { code?: string };
+    error.code = 'IDENTITY_MISMATCH';
+    throw error;
+  }
+  const device = identityDevice ?? input.device;
+
   const keyPath = fleetMasterKeyPath(input.dir);
   let masterKeyCreated = false;
   let encryption: FleetEncryption;
@@ -124,9 +136,9 @@ export async function onboardDevice(input: OnboardInput): Promise<OnboardResult>
 
   const config: FleetConfig = {
     v: 1,
-    device: input.device,
+    device,
     dir: input.dir,
-    storagePath: fleetStoragePath(input.dir),
+    storagePath,
     masterKeyFile: keyPath,
     namespace: input.namespace ?? 'tasks',
     listen: input.listen ?? '/ip4/0.0.0.0/tcp/0',

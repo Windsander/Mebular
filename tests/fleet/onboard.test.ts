@@ -23,7 +23,7 @@ import {
   parseAgentSpecs,
   permissionsApplicable,
 } from '../../packages/fleet/src/index.js';
-import { loadToolConfig } from '../../packages/fleet/src/config.js';
+import { loadToolConfig, daemonConfigToFleet } from '../../packages/fleet/src/config.js';
 import { IdentityManager } from '@mebular/core';
 
 let dir: string;
@@ -321,6 +321,25 @@ describe('loadToolConfig / daemonConfigToFleet（统一 MCP 入口的 home 适�
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('daemon home：身份文件优先于 config.deviceId（身份契约）', async () => {
+    await writeFile(join(dir, 'store.jsonl.identity.json'), JSON.stringify({ deviceId: 'device-identity' }), 'utf-8');
+    await writeFile(join(dir, 'config.json'), JSON.stringify({
+      storagePath: join(dir, 'store.jsonl'),
+      deviceId: 'device-stale',
+      network: { enabled: false },
+      sync: {},
+    }), 'utf-8');
+    const cfg = await daemonConfigToFleet(dir, JSON.parse(await readFile(join(dir, 'config.json'), 'utf-8')));
+    expect(cfg.device).toBe('device-identity');
+  });
+
+  it('onboard 遇到已有身份的不同 --device：拒绝并保留原配置', async () => {
+    await writeFile(join(dir, 'store.jsonl.identity.json'), JSON.stringify({ deviceId: 'device-existing' }), 'utf-8');
+    await expect(onboardDevice({ dir, device: 'device-other', agents: [{ name: 'echo', kind: 'echo' }] }))
+      .rejects.toMatchObject({ code: 'IDENTITY_MISMATCH' });
+    await expect(readFile(fleetConfigPath(dir), 'utf-8')).rejects.toThrow();
   });
 
   it('readMasterKeyFile 容忍缺省 v（守护侧 <home>/user-master-key.json 无版本字段）', async () => {

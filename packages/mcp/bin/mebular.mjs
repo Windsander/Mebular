@@ -187,21 +187,74 @@ async function runKeygen(flags) {
   console.error('（主私钥是信任根，请妥善保管；权限 0600）');
 }
 
+function initError(message, code) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+async function readInitJson(file, { label, code }) {
+  try {
+    const parsed = JSON.parse(await readFile(file, 'utf-8'));
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('顶层必须是对象');
+    }
+    return parsed;
+  } catch (error) {
+    throw initError(`${label}损坏：${file}（${error?.message ?? error}）`, code);
+  }
+}
+
 async function runInit(flags) {
   const home = homeDir();
   const configFile = join(home, 'config.json');
   const keyFile = join(home, 'user-master-key.json');
   await mkdir(home, { recursive: true });
 
+  const config = existsSync(configFile)
+    ? await readInitJson(configFile, { label: 'config.json', code: 'CONFIG_INVALID' })
+    : null;
+  const storagePath = typeof config?.storagePath === 'string'
+    ? config.storagePath
+    : (typeof flags['storage'] === 'string' ? flags['storage'] : join(home, 'store.jsonl'));
+  const identityFile = `${storagePath}.identity.json`;
+  const identity = existsSync(identityFile)
+    ? await readInitJson(identityFile, { label: '身份文件', code: 'IDENTITY_INVALID' })
+    : null;
+  const requestedDeviceId = typeof flags['device-id'] === 'string'
+    ? flags['device-id'].trim() || null
+    : null;
+
+  if (identity !== null && (typeof identity.deviceId !== 'string' || identity.deviceId.length === 0)) {
+    throw initError(`身份文件缺少有效 deviceId：${identityFile}`, 'IDENTITY_INVALID');
+  }
+  if (identity !== null && config !== null && config.deviceId !== identity.deviceId) {
+    throw initError(
+      `身份文件与配置不一致：identity=${identity.deviceId}，config=${String(config.deviceId ?? '(missing)')}。`
+        + '请保留备份后运行恢复流程，不要直接删除 identity 或改写 deviceId。',
+      'IDENTITY_MISMATCH',
+    );
+  }
+  if (identity !== null && requestedDeviceId !== null && requestedDeviceId !== identity.deviceId) {
+    throw initError(
+      `--device-id ${requestedDeviceId} 与已有身份 ${identity.deviceId} 不一致；已有身份不能通过 init 改写。`,
+      'IDENTITY_MISMATCH',
+    );
+  }
+
   if (!existsSync(keyFile)) await runKeygen({ out: keyFile });
 
-  if (existsSync(configFile)) {
+  if (config !== null) {
     console.log(`配置已存在，未覆盖：${configFile}`);
   } else {
-    const config = {
-      storagePath: typeof flags['storage'] === 'string' ? flags['storage'] : join(home, 'store.jsonl'),
+    const deviceId = identity?.deviceId ?? requestedDeviceId ?? `device-${process.env.HOSTNAME ?? 'local'}`;
+    const nextConfig = {
+      storagePath,
       storageAdapter: 'json',
-      deviceId: typeof flags['device-id'] === 'string' ? flags['device-id'] : `device-${process.env.HOSTNAME ?? 'local'}`,
+      deviceId,
+      ...(typeof identity?.deviceName === 'string' && identity.deviceName.length > 0
+        ? { deviceName: identity.deviceName }
+        : {}),
       encryption: { level: 'none', keyFile },
       network: { enabled: false, libp2p: { listen: [], relayServers: [], relayUnlimited: false } },
       // 常驻入口默认实时（写入即推 + 周期 anti-entropy）；可显式关闭
@@ -209,8 +262,10 @@ async function runInit(flags) {
       semantic: { enabled: false, minScore: 0.2 },
       mcp: { http: { host: '127.0.0.1', port: 7331, auth: 'none', tls: false, tokensFile: join(home, 'auth', 'tokens.json') } },
     };
-    await writeFile(configFile, JSON.stringify(config, null, 2), 'utf-8');
-    console.log(`已写入配置：${configFile}`);
+    await writeFile(configFile, JSON.stringify(nextConfig, null, 2), 'utf-8');
+    console.log(identity === null
+      ? `已写入配置：${configFile}`
+      : `已按既有身份恢复配置：${configFile}（deviceId=${deviceId}）`);
   }
   console.log(
     [
@@ -1586,7 +1641,7 @@ async function main() {
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',
           '  token consent [--scope a,b] [--ttl sec]   生成一次性本地同意码（/authorize 用）',
-          '  init / keygen / print-config / status|doctor   初始化、状态与自检（身份模式/网络/锁/域/join）',
+          '  init / keygen / print-config / status|doctor   初始化（已有身份时沿用其 deviceId）、状态与自检',
           '  doctor --net                 网络排障：地址簿/路径状态 + relay 可达性 + 下一步建议',
           '  tools                        打印 MCP 工具 ↔ CLI 对照表',
           '  memory_write|memory_write_batch|memory_query|memory_search|memory_profile|memory_skills|',
@@ -1596,7 +1651,12 @@ async function main() {
       process.exit(0);
       return;
     case 'init':
-      await runInit(flags);
+      try {
+        await runInit(flags);
+      } catch (error) {
+        console.error(`✗ init 失败（${error?.code ?? 'ERROR'}）：${error?.message ?? error}`);
+        process.exit(2);
+      }
       return;
     case 'keygen':
       await runKeygen(flags);

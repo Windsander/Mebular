@@ -21,6 +21,7 @@ import {
   fleetMasterKeyPath,
   fleetStoragePath,
   generateMasterKey,
+  identityDeviceIdForStorage,
   loadFleetConfig,
   loadToolConfig,
   masterKeyFingerprint,
@@ -108,7 +109,33 @@ export async function onboardDevice(input: OnboardInput): Promise<OnboardResult>
   await mkdir(input.dir, { recursive: true });
   if (permissionsApplicable()) await chmod(input.dir, 0o700);
 
+  // 身份文件是 deviceId 的唯一权威：已有身份时 onboard 不得改写它。
+  const storagePath = fleetStoragePath(input.dir);
+  const identityFile = `${storagePath}.identity.json`;
+  const identityDevice = identityDeviceIdForStorage(storagePath);
+  if (identityDevice === null && await exists(identityFile)) {
+    const error = new Error(`身份文件已存在但无效：${identityFile}`) as Error & { code?: string };
+    error.code = 'IDENTITY_INVALID';
+    throw error;
+  }
+  if (identityDevice !== null && identityDevice !== input.device) {
+    const error = new Error(
+      `目录已有设备身份 ${identityDevice}，与 --device ${input.device} 不一致；已有身份不能被 onboard 改写。`,
+    ) as Error & { code?: string };
+    error.code = 'IDENTITY_MISMATCH';
+    throw error;
+  }
+  const device = identityDevice ?? input.device;
+
   const keyPath = fleetMasterKeyPath(input.dir);
+  // 已有身份但主密钥缺失：生成新钥 = 静默更换信任根，必须 fail closed。
+  if (identityDevice !== null && input.masterKeyFile === undefined && !(await exists(keyPath))) {
+    const error = new Error(
+      `目录已有设备身份 ${identityDevice}，但缺少主密钥 ${keyPath}（不会自动生成新的信任根；请恢复原主密钥）`,
+    ) as Error & { code?: string };
+    error.code = 'IDENTITY_TRUST_ROOT_MISSING';
+    throw error;
+  }
   let masterKeyCreated = false;
   let encryption: FleetEncryption;
   if (input.masterKeyFile !== undefined) {
@@ -124,9 +151,9 @@ export async function onboardDevice(input: OnboardInput): Promise<OnboardResult>
 
   const config: FleetConfig = {
     v: 1,
-    device: input.device,
+    device,
     dir: input.dir,
-    storagePath: fleetStoragePath(input.dir),
+    storagePath,
     masterKeyFile: keyPath,
     namespace: input.namespace ?? 'tasks',
     listen: input.listen ?? '/ip4/0.0.0.0/tcp/0',

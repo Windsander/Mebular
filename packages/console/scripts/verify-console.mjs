@@ -648,11 +648,16 @@ try {
     `status=${cfgOk.status}`,
   );
   const cfgOnDisk = JSON.parse(await readFile(join(home, 'config.json'), 'utf-8'));
+  // F-IDENT-1：config 只保留非身份键；deviceId/deviceName 由身份文件提供（legacy 字段启动时已清理）。
+  const identityOnDisk = JSON.parse(await readFile(`${storage}.identity.json`, 'utf-8'));
   check(
-    'config 写入磁盘且保留其他键',
+    'config 写入磁盘且保留其他键；身份字段只由身份文件提供',
     cfgOnDisk.sync?.snapshotThreshold === 4096 && cfgOnDisk.sync?.antiEntropy?.intervalMs === 120000
-      && cfgOnDisk.sync?.peerWhitelist?.[0] === 'device-peer' && cfgOnDisk.deviceId === 'device-console'
-      && cfgOnDisk.joinService?.bind === '127.0.0.1' && cfgOnDisk.joinService?.port === 4002,
+      && cfgOnDisk.sync?.peerWhitelist?.[0] === 'device-peer'
+      && cfgOnDisk.deviceId === undefined && cfgOnDisk.deviceName === undefined
+      && cfgOnDisk.joinService?.bind === '127.0.0.1' && cfgOnDisk.joinService?.port === 4002
+      && identityOnDisk?.deviceId === 'device-console',
+    `deviceId=${identityOnDisk?.deviceId} configDeviceId=${String(cfgOnDisk.deviceId)}`,
   );
   const cfgAfterWrite = await getJson(port, '/admin/api/config');
   check('GET config 反映写入', cfgAfterWrite.json?.config?.sync?.snapshotThreshold === 4096);

@@ -1132,3 +1132,51 @@ describe('resolveRuntime / runtimeStatus：只读，不启动', () => {
     expect(result.providers.selected).toMatchObject({ source: 'self' });
   });
 });
+
+describe('F-IDENT-1 身份 preflight（spawn 前 fail closed）', () => {
+  it('无效身份 → reason=identity_invalid，且不探活', async () => {
+    const { root, userHome } = await makeRoot();
+    const home = join(root, 'store.jsonl');
+    await writeFile(`${home}.identity.json`, '{"deviceId":"broken"}\n', 'utf-8');
+    let probed = false;
+    const result = await runtimeStatus({
+      env: envFor(root),
+      userHome,
+      probeHealthFn: async () => {
+        probed = true;
+        return { ok: false, reason: 'unreachable' };
+      },
+      service: fakeService().service,
+      includeSelf: false,
+      includeStandardApp: false,
+    });
+    expect(result).toMatchObject({ ok: false, mode: 'error', reason: 'identity_invalid', code: 'IDENTITY_INVALID' });
+    expect(result.identity).toMatchObject({ status: 'invalid', path: `${home}.identity.json` });
+    expect(probed).toBe(false);
+  });
+
+  it('身份缺失 + 非空 store → reason=identity_store_occupied，不探活', async () => {
+    const { root, userHome } = await makeRoot();
+    const home = join(root, 'store.jsonl');
+    await writeFile(home, '{"id":"e1"}\n', 'utf-8');
+    let probed = false;
+    const result = await runtimeStatus({
+      env: envFor(root),
+      userHome,
+      probeHealthFn: async () => {
+        probed = true;
+        return { ok: false, reason: 'unreachable' };
+      },
+      service: fakeService().service,
+      includeSelf: false,
+      includeStandardApp: false,
+    });
+    expect(result).toMatchObject({
+      ok: false,
+      mode: 'error',
+      reason: 'identity_store_occupied',
+      code: 'IDENTITY_STORE_OCCUPIED',
+    });
+    expect(probed).toBe(false);
+  });
+});

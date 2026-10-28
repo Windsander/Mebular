@@ -12,7 +12,13 @@ import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { hostname } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { configPath, resolveMasterKeys } from './config.mjs';
+import { configPath, readMasterKeyRecord, resolveMasterKeys } from './config.mjs';
+import {
+  assertFreshStore,
+  createIdentityForStorage,
+  identityPathFor,
+  readIdentityFile,
+} from './home-identity.mjs';
 import {
   DEFAULT_PROFILE_NAME,
   masterFingerprintForHome,
@@ -123,8 +129,13 @@ const PROVISION_STATE_PATHS = [
  * P1：create/join 的落盘事务快照。热初始化失败时只删除**本次新建**的文件，
  * 不触碰调用前已存在的任何内容（home 锁始终由当前进程持有）。
  */
-export async function snapshotProvisionState(home) {
+export async function snapshotProvisionState(home, { storagePath } = {}) {
   const paths = new Set(PROVISION_STATE_PATHS.map((rel) => join(home, rel)));
+  const effectiveStorage = typeof storagePath === 'string' && storagePath.length > 0
+    ? storagePath
+    : join(home, 'store.jsonl');
+  paths.add(identityPathFor(effectiveStorage));
+  paths.add(`${configPath(home)}.identity-legacy.bak`);
   paths.add(configPath(home));
   const cloud = resolveCloudRoot({ home, env: process.env });
   if (cloud.available) {
@@ -235,16 +246,21 @@ async function writeConfigFile(home, config) {
  * 写引导态 config.json（create/restore 共用）。调用方必须已确保 `<home>/user-master-key.json` 存在
  * （create 由 resolveMasterKeys 生成；restore 由备份解密落盘）。
  */
-async function writeInitialProvisionConfig({ home, deviceName, deviceId, mcpPort, joinPort, listenPort, action = 'create', notes = [] }) {
+async function writeInitialProvisionConfig({ home, storagePath, deviceName, deviceId, mcpPort, joinPort, listenPort, action = 'create', notes = [] }) {
   const name = String(deviceName ?? '').trim() || defaultDeviceName();
-  const id = normalizeExplicitDeviceId(deviceId) ?? deriveDeviceId(name);
+  // 调用方传入的身份值即权威；仅在缺省时按名字派生（保持旧内部契约）。
+  const id = String(deviceId ?? '').trim() || deriveDeviceId(name);
+  // 与 isProvisionHome/createMebular 同序：env 覆盖 > <home>/store.jsonl。
+  const effectiveStorage = typeof storagePath === 'string' && storagePath.length > 0
+    ? storagePath
+    : (process.env.MEBULAR_STORAGE_PATH ?? join(home, 'store.jsonl'));
   // 端口预检（避免重启即失败）：mcp 端口 = 当前引导服务端口（我们自己持有，无需探测）
   const joinChoice = await findFreePort(Number(joinPort) > 0 ? Number(joinPort) : 4002);
   const listenChoice = await findFreePort(Number(listenPort) > 0 ? Number(listenPort) : 4001);
 
+  // F-IDENT-1：config 不写身份字段；deviceId/deviceName 由 <storagePath>.identity.json 提供。
   const config = {
-    deviceId: id,
-    deviceName: name,
+    storagePath: effectiveStorage,
     encryption: { level: 'none' },
     network: {
       enabled: true,
@@ -298,17 +314,30 @@ export async function provisionCreate({ home, cloudName, deviceName, deviceId, m
   const registryBackupPath = cloud.available ? join(cloud.root, 'profiles.json.bak') : null;
   const registryExisted = registryPath !== null && existsSync(registryPath);
   const registryBackupExisted = registryBackupPath !== null && existsSync(registryBackupPath);
+  const storagePath = process.env.MEBULAR_STORAGE_PATH ?? join(home, 'store.jsonl');
+  const identityFile = identityPathFor(storagePath);
+  const identityExisted = existsSync(identityFile);
   try {
+    // 缺身份但 store 已有数据 = 自动换钥风险：先拒绝，绝不写主密钥/配置。
+    assertFreshStore(storagePath);
     const master = await resolveMasterKeys(home, {});
     if (master.userMasterPrivateKey === undefined) {
       const error = new Error('建新需要 root 主密钥（生成失败：未获得私钥）');
       error.code = 'MASTER_KEY_FAILED';
       throw error;
     }
+    const identity = await createIdentityForStorage({
+      storagePath,
+      deviceId: normalizeExplicitDeviceId(deviceId) ?? deriveDeviceId(name),
+      deviceName: name,
+      userMasterPrivateKey: master.userMasterPrivateKey,
+      userMasterPublicKey: master.userMasterKey,
+    });
     const result = await writeInitialProvisionConfig({
       home,
-      deviceName: name,
-      deviceId,
+      storagePath,
+      deviceName: identity.deviceName,
+      deviceId: identity.deviceId,
       mcpPort,
       joinPort,
       listenPort,
@@ -340,6 +369,7 @@ export async function provisionCreate({ home, cloudName, deviceName, deviceId, m
   } catch (error) {
     if (!keyExisted) await rm(keyPath, { force: true }).catch(() => undefined);
     if (!configExisted) await rm(cfgPath, { force: true }).catch(() => undefined);
+    if (!identityExisted) await rm(identityFile, { force: true }).catch(() => undefined);
     if (registryPath !== null && !registryExisted) await rm(registryPath, { force: true }).catch(() => undefined);
     if (registryBackupPath !== null && !registryBackupExisted) await rm(registryBackupPath, { force: true }).catch(() => undefined);
     throw error;
@@ -370,6 +400,10 @@ export async function provisionRestore({ home, file, code, cloudName, deviceName
   }
   const fleet = await import('../../fleet/dist/index.js');
   const keyPath = join(home, 'user-master-key.json');
+  const storagePath = process.env.MEBULAR_STORAGE_PATH ?? join(home, 'store.jsonl');
+  // 缺身份但 store 已有数据 = 自动换钥风险：写主密钥前先拒绝。
+  assertFreshStore(storagePath);
+  const transaction = await snapshotProvisionState(home, { storagePath });
   let restored;
   try {
     restored = await fleet.restoreMasterKeyBackup({
@@ -384,12 +418,25 @@ export async function provisionRestore({ home, file, code, cloudName, deviceName
     wrapped.code = 'RESTORE_FAILED';
     throw wrapped;
   }
-  const transaction = await snapshotProvisionState(home);
   try {
+    const master = await readMasterKeyRecord(keyPath);
+    if (master.userMasterPrivateKey === undefined) {
+      const error = new Error('恢复失败：主密钥文件缺少私钥（无法签发设备身份）');
+      error.code = 'RESTORE_FAILED';
+      throw error;
+    }
+    const identity = await createIdentityForStorage({
+      storagePath,
+      deviceId: normalizeExplicitDeviceId(deviceId) ?? deriveDeviceId(name),
+      deviceName: name,
+      userMasterPrivateKey: master.userMasterPrivateKey,
+      userMasterPublicKey: master.userMasterKey,
+    });
     const result = await writeInitialProvisionConfig({
       home,
-      deviceName: name,
-      deviceId,
+      storagePath,
+      deviceName: identity.deviceName,
+      deviceId: identity.deviceId,
       mcpPort,
       joinPort,
       listenPort,
@@ -456,11 +503,10 @@ async function resolveJoinPorts({ ports = {}, mcpPort, joinPort, listenPort }) {
   return { mcp, join, listen };
 }
 
-function delegatedConfig({ home, id, name, namespace, ports, peers = [] }) {
+function delegatedConfig({ home, namespace, ports, peers = [] }) {
   return {
     storagePath: join(home, 'store.jsonl'),
-    deviceId: id,
-    deviceName: name,
+    // F-IDENT-1：不写身份字段；deviceId/deviceName 由身份文件提供。
     identity: { mode: 'delegated' },
     encryption: { level: 'none', userMasterPublicKeyFile: join(home, 'master-key.json') },
     network: {
@@ -508,6 +554,8 @@ export async function provisionJoinInto({
     error.code = 'ALREADY_PROVISIONED';
     throw error;
   }
+  // 身份缺失但 store 已有数据 = 自动换钥风险：在写 config / 请求加入前拒绝。
+  assertFreshStore(join(home, 'store.jsonl'));
   if (typeof token !== 'string' || token.trim().length === 0) {
     const error = new Error('需要令牌文本（邀请面板生成的 base64 令牌）');
     error.code = 'TOKEN_REQUIRED';
@@ -540,7 +588,7 @@ export async function provisionJoinInto({
   };
 
   // 预写 config：兑换前完成本机落盘（端口复用当前忆云；准备阶段不 bind）。
-  await writeConfigFile(home, delegatedConfig({ home, id, name, namespace, ports: resolvedPorts }));
+  await writeConfigFile(home, delegatedConfig({ home, namespace, ports: resolvedPorts }));
 
   let joined;
   try {
@@ -548,6 +596,7 @@ export async function provisionJoinInto({
       dir: home,
       token: token.trim(),
       device: id,
+      deviceName: name,
       namespace,
       listen: `/ip4/0.0.0.0/tcp/${resolvedPorts.listen}`,
       agents: [{ name: 'echo', kind: 'echo' }],
@@ -579,21 +628,33 @@ export async function provisionJoinInto({
   const masterKeyPublic = join(home, 'master-key.json');
   const fingerprint = typeof joined.fingerprint === 'string' ? joined.fingerprint : null;
   try {
-    const path = await writeConfigFile(home, delegatedConfig({ home, id, name, namespace, ports: resolvedPorts, peers }));
+    // 加入后身份文件必须可用且与请求一致——config 与档案都只引用身份提供的 deviceId。
+    const identity = readIdentityFile(join(home, 'store.jsonl'));
+    if (identity.status !== 'valid') {
+      const error = new Error(`加入后身份文件不可用：${identity.path}`);
+      error.code = 'IDENTITY_INVALID';
+      throw error;
+    }
+    if (identity.deviceId !== id) {
+      const error = new Error(`加入后身份 ${identity.deviceId} 与请求 ${id} 不一致`);
+      error.code = 'IDENTITY_MISMATCH';
+      throw error;
+    }
+    const path = await writeConfigFile(home, delegatedConfig({ home, namespace, ports: resolvedPorts, peers }));
     const profile = registerCurrentProfile
       ? await writeInitialProfile({
         home,
         name: profileName,
         kind: 'delegated',
-        deviceId: id,
+        deviceId: identity.deviceId,
         masterFingerprint: fingerprint,
       })
       : { written: false, reason: 'not_current_profile' };
     return {
       ok: true,
       action: 'join',
-      deviceId: id,
-      deviceName: name,
+      deviceId: identity.deviceId,
+      deviceName: identity.deviceName,
       inviterDeviceId: parsed.inviterDeviceId,
       namespace,
       hinted: joined.hinted,

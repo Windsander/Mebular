@@ -609,8 +609,6 @@ export const CONFIG_SCHEMA = [
   { path: 'semantic.cacheDir', kind: 'string', exposure: 'internal', writable: false, requiresRestart: true, default: null, ui: { type: 'text', label: '模型缓存目录' } },
   { path: 'storagePath', kind: 'string', exposure: 'internal', writable: false, requiresRestart: true, default: null, ui: { type: 'text', label: '存储路径' } },
   { path: 'storageAdapter', kind: 'enum', spec: { values: ['json', 'sqlite'] }, exposure: 'internal', writable: false, requiresRestart: true, default: 'json', ui: { type: 'select', label: '存储适配器' } },
-  { path: 'deviceId', kind: 'string', exposure: 'internal', writable: false, requiresRestart: true, default: null, ui: { type: 'text', label: '设备标识' } },
-  { path: 'deviceName', kind: 'string', exposure: 'internal', writable: false, requiresRestart: true, default: null, ui: { type: 'text', label: '设备名' } },
   { path: 'identity.mode', kind: 'enum', spec: { values: ['root', 'delegated'] }, exposure: 'internal', writable: false, requiresRestart: true, default: 'root', ui: { type: 'select', label: '身份模式' } },
   { path: 'encryption.level', kind: 'enum', spec: { values: ['none', 'at-rest'] }, exposure: 'internal', writable: false, requiresRestart: true, default: 'none', ui: { type: 'select', label: '加密级别' } },
   { path: 'encryption.passphraseEnv', kind: 'string', exposure: 'internal', writable: false, requiresRestart: true, default: null, ui: { type: 'text', label: '口令环境变量名' } },

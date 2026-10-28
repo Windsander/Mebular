@@ -6,12 +6,14 @@
 
 import { access, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { constants } from 'node:fs';
+import { constants, existsSync } from 'node:fs';
 import { Mebular, IdentityManager, bytesToHex, hexToBytes, EndpointBook, FileEndpointStore, derivePeerIdHex, RELAY_SEEDS_KEY } from '@mebular/core';
 import {
+  assertFreshStoreForIdentity,
   fleetConfigPath,
   fleetMasterKeyPath,
   fleetStoragePath,
+  identityDeviceIdForStorage,
   loadFleetConfig,
   masterKeyFingerprint,
   readMasterKeyFile,
@@ -28,6 +30,8 @@ export interface JoinWithTokenInput {
   dir: string;
   token: string;
   device: string;
+  /** 设备展示名（写入身份文件；缺省 = device） */
+  deviceName?: string;
   namespace?: string;
   listen?: string;
   agents: FleetAgentConfig[];
@@ -108,12 +112,35 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
   await mkdir(input.dir, { recursive: true });
   const storagePath = fleetStoragePath(input.dir);
   const keyPath = fleetMasterKeyPath(input.dir);
+  // 已有身份时绝不重新签发/覆盖（避免自动换钥）；缺失 fleet.config 时复用既有身份补配置。
+  const identityFile = `${storagePath}.identity.json`;
+  const existingIdentity = identityDeviceIdForStorage(storagePath);
+  const reuseIdentity = !alreadyJoined && existsSync(identityFile);
+  if (reuseIdentity) {
+    if (existingIdentity === null) {
+      const error = new Error(`身份文件已存在但无效：${identityFile}`) as Error & { code?: string };
+      error.code = 'IDENTITY_INVALID';
+      throw error;
+    }
+    if (existingIdentity !== input.device) {
+      const error = new Error(
+        `目录已有设备身份 ${existingIdentity}，与 --device ${input.device} 不一致；已有身份不能被 join 改写。`,
+      ) as Error & { code?: string };
+      error.code = 'IDENTITY_MISMATCH';
+      throw error;
+    }
+  }
   let peerAddr: string | undefined;
   let securityApproval: { approvalId: string; nonce: string; initiator?: string; cosign?: unknown } | undefined;
 
-  if (!alreadyJoined) {
+  if (!alreadyJoined && !reuseIdentity) {
+    // 身份缺失且 store 已有数据 = 自动换钥风险：签发前拒绝，绝不写身份/主密钥/配置。
+    assertFreshStoreForIdentity(storagePath);
+    const deviceName = typeof input.deviceName === 'string' && input.deviceName.trim().length > 0
+      ? input.deviceName.trim()
+      : input.device;
     const im = new IdentityManager();
-    const deviceKey = await im.generateDeviceKey(input.device, input.device);
+    const deviceKey = await im.generateDeviceKey(input.device, deviceName);
     const issued = await requestJoin({
       endpoint: token.endpoint,
       token: input.token,
@@ -126,7 +153,7 @@ export async function joinWithToken(input: JoinWithTokenInput): Promise<JoinWith
     const privateKeyPkcs8 = await IdentityManager.exportPrivateKey(deviceKey.privateKey);
     const record = {
       deviceId: input.device,
-      deviceName: input.device,
+      deviceName,
       publicKeyHex: bytesToHex(deviceKey.publicKey),
       certificate: issued.certificate,
       certificateChain: issued.chain,

@@ -217,44 +217,87 @@ async function runInit(flags) {
   const storagePath = typeof config?.storagePath === 'string'
     ? config.storagePath
     : (typeof flags['storage'] === 'string' ? flags['storage'] : join(home, 'store.jsonl'));
-  const identityFile = `${storagePath}.identity.json`;
-  const identity = existsSync(identityFile)
-    ? await readInitJson(identityFile, { label: '身份文件', code: 'IDENTITY_INVALID' })
-    : null;
-  const requestedDeviceId = typeof flags['device-id'] === 'string'
-    ? flags['device-id'].trim() || null
-    : null;
+  const explicit = {
+    ...(typeof flags['device-id'] === 'string' && flags['device-id'].trim().length > 0
+      ? { deviceId: flags['device-id'].trim() }
+      : {}),
+    ...(typeof flags['device-name'] === 'string' && flags['device-name'].trim().length > 0
+      ? { deviceName: flags['device-name'].trim() }
+      : {}),
+  };
 
-  if (identity !== null && (typeof identity.deviceId !== 'string' || identity.deviceId.length === 0)) {
-    throw initError(`身份文件缺少有效 deviceId：${identityFile}`, 'IDENTITY_INVALID');
-  }
-  if (identity !== null && config !== null && config.deviceId !== identity.deviceId) {
-    throw initError(
-      `身份文件与配置不一致：identity=${identity.deviceId}，config=${String(config.deviceId ?? '(missing)')}。`
-        + '请保留备份后运行恢复流程，不要直接删除 identity 或改写 deviceId。',
-      'IDENTITY_MISMATCH',
-    );
-  }
-  if (identity !== null && requestedDeviceId !== null && requestedDeviceId !== identity.deviceId) {
-    throw initError(
-      `--device-id ${requestedDeviceId} 与已有身份 ${identity.deviceId} 不一致；已有身份不能通过 init 改写。`,
-      'IDENTITY_MISMATCH',
-    );
-  }
+  const {
+    assertFreshStore,
+    cleanLegacyConfig,
+    createIdentity,
+    prepareIdentity,
+  } = await import('../src/home-identity.mjs');
+  const prepared = prepareIdentity({ config: config ?? {}, storagePath, explicit });
+  if (!prepared.ok) throw initError(prepared.message, prepared.code);
+  for (const warning of prepared.warnings) console.error(`warning: ${warning}`);
 
-  if (!existsSync(keyFile)) await runKeygen({ out: keyFile });
+  let identity = prepared.identity;
+  const { identityMode, readMasterKeyRecord } = await import('../src/config.mjs');
+  if (prepared.status === 'missing') {
+    // 缺身份但 store 已有数据 = 自动换钥风险：先拒绝，绝不写任何文件。
+    assertFreshStore(storagePath);
+    if (!existsSync(keyFile)) await runKeygen({ out: keyFile });
+    let master;
+    try {
+      master = await readMasterKeyRecord(keyFile);
+    } catch (error) {
+      throw initError(`主密钥文件损坏：${keyFile}（${error?.message ?? error}）`, 'MASTER_KEY_INVALID');
+    }
+    if (!master.userMasterPrivateKey) {
+      throw initError(`主密钥文件缺少私钥：${keyFile}`, 'MASTER_KEY_INVALID');
+    }
+    const created = await createIdentity({
+      storagePath,
+      deviceId: identity.deviceId,
+      deviceName: identity.deviceName,
+      userMasterPrivateKey: master.userMasterPrivateKey,
+      userMasterPublicKey: master.userMasterKey,
+    });
+    identity = { deviceId: created.deviceId, deviceName: created.deviceName };
+  } else if (identityMode(home, config ?? {}, storagePath) === 'root') {
+    // 已有 root 身份但信任根缺失/损坏：init 不能假装成功，更不能生成新主密钥。
+    // 委派身份没有 root 主私钥是正常的，因此只对 root 校验。
+    const envInline = process.env.MEBULAR_USER_MASTER_KEY;
+    const keySource = envInline
+      ? envInline
+      : (process.env.MEBULAR_USER_MASTER_KEY_FILE
+        || (typeof config?.encryption?.keyFile === 'string' && config.encryption.keyFile.length > 0
+          ? config.encryption.keyFile
+          : keyFile));
+    if (!envInline && !existsSync(keySource)) {
+      throw initError(
+        `已有 root 身份，但缺少用户主密钥：${keySource}`
+          + '（不会自动生成新的信任根；请恢复原主密钥或从备份恢复）',
+        'IDENTITY_TRUST_ROOT_MISSING',
+      );
+    }
+    let master;
+    try {
+      master = await readMasterKeyRecord(keySource);
+    } catch (error) {
+      throw initError(`主密钥文件损坏：${keySource}（${error?.message ?? error}）`, 'MASTER_KEY_INVALID');
+    }
+    if (!master.userMasterPrivateKey) {
+      throw initError(`主密钥文件缺少私钥：${keySource}`, 'MASTER_KEY_INVALID');
+    }
+  }
 
   if (config !== null) {
+    const migrated = await cleanLegacyConfig({ configPath: configFile, identity });
     console.log(`配置已存在，未覆盖：${configFile}`);
+    if (migrated.migrated) {
+      console.log(`已备份旧 config 身份字段：${migrated.backupPath}，并以身份 ${identity.deviceId} 为准`);
+    }
   } else {
-    const deviceId = identity?.deviceId ?? requestedDeviceId ?? `device-${process.env.HOSTNAME ?? 'local'}`;
+    // F-IDENT-1：新 config 不写 deviceId/deviceName；身份文件是唯一权威。
     const nextConfig = {
       storagePath,
       storageAdapter: 'json',
-      deviceId,
-      ...(typeof identity?.deviceName === 'string' && identity.deviceName.length > 0
-        ? { deviceName: identity.deviceName }
-        : {}),
       encryption: { level: 'none', keyFile },
       network: { enabled: false, libp2p: { listen: [], relayServers: [], relayUnlimited: false } },
       // 常驻入口默认实时（写入即推 + 周期 anti-entropy）；可显式关闭
@@ -263,9 +306,7 @@ async function runInit(flags) {
       mcp: { http: { host: '127.0.0.1', port: 7331, auth: 'none', tls: false, tokensFile: join(home, 'auth', 'tokens.json') } },
     };
     await writeFile(configFile, JSON.stringify(nextConfig, null, 2), 'utf-8');
-    console.log(identity === null
-      ? `已写入配置：${configFile}`
-      : `已按既有身份恢复配置：${configFile}（deviceId=${deviceId}）`);
+    console.log(`已写入配置：${configFile}（deviceId=${identity.deviceId}，由身份文件提供）`);
   }
   console.log(
     [
@@ -549,11 +590,13 @@ async function runNetDoctor() {
 
 async function runStatus() {
   const { loadConfigFile, homeDir: resolveHome, identityMode: resolveIdentityMode } = await import('../src/config.mjs');
+  const { readIdentityFile, storagePathForHome } = await import('../src/home-identity.mjs');
   const home = resolveHome();
   const configFile = await loadConfigFile(home).catch(() => ({}));
-  const storagePath = process.env.MEBULAR_STORAGE_PATH
-    ?? configFile.storagePath
-    ?? join(home, (configFile.storageAdapter ?? 'json') === 'sqlite' ? 'store.sqlite' : 'store.jsonl');
+  const storagePath = storagePathForHome(home, configFile, process.env);
+  // F-IDENT-1：status 的 deviceId 只认身份文件；env/config 仅旧布局兜底（且仅用于展示）。
+  const identityRead = readIdentityFile(storagePath);
+  const identityDeviceId = identityRead.status === 'valid' ? identityRead.deviceId : null;
   // store 锁持有者（单写者证据）
   let storeLock = null;
   const lockPath = join(home, 'lock');
@@ -575,12 +618,19 @@ async function runStatus() {
         ok: true,
         running: true,
         reused: true,
-        deviceId: process.env.MEBULAR_DEVICE_ID ?? configFile.deviceId ?? `device-${process.env.HOSTNAME ?? 'local'}`,
+        deviceId: identityDeviceId,
         peerId: null,
         nodeCount: null,
         stateHash: null,
         home,
         storagePath,
+        ...(identityDeviceId === null
+          ? {
+              identityError: identityRead.status === 'invalid'
+                ? { status: 'invalid', code: 'IDENTITY_INVALID', problems: identityRead.problems ?? [] }
+                : { status: identityRead.status, code: identityRead.status === 'missing' ? 'IDENTITY_MISSING' : null },
+            }
+          : {}),
         identityMode: resolveIdentityMode(home, configFile, storagePath),
         network: { enabled: configFile.network?.enabled ?? false, listen: configFile.network?.libp2p?.listen ?? [], reused: true },
         storeLock,
@@ -1670,14 +1720,24 @@ async function main() {
       return;
     }
     case 'status':
-      await runStatus();
+      try {
+        await runStatus();
+      } catch (error) {
+        console.error(`✗ status 失败（${error?.code ?? 'ERROR'}）：${error?.message ?? error}`);
+        process.exit(2);
+      }
       return;
     case 'doctor':
       if (flags.net === true || flags.net === 'true') {
         await runNetDoctor();
         return;
       }
-      await runStatus();
+      try {
+        await runStatus();
+      } catch (error) {
+        console.error(`✗ doctor 失败（${error?.code ?? 'ERROR'}）：${error?.message ?? error}`);
+        process.exit(2);
+      }
       return;
     default: {
       const { toolByName } = await import('../src/tools.mjs');

@@ -36,10 +36,10 @@ if (!existsSync(keyFile)) {
 }
 
 // 2) config（root 身份；joinService 开启便于演示「邀请设备」；仅回环）
+//    F-IDENT-1：deviceId/deviceName 只由 <storagePath>.identity.json 提供，config 不写。
 if (!existsSync(cfgFile)) {
   await writeFile(cfgFile, JSON.stringify({
     storagePath,
-    deviceId: device,
     encryption: { level: 'none', keyFile },
     identity: { mode: 'root' },
     network: { enabled: false, libp2p: { listen: ['/ip4/127.0.0.1/tcp/0'] } },
@@ -62,9 +62,17 @@ const encryption = {
   userMasterPrivateKey: await IdentityManager.importPrivateKey(master.privateKeyPkcs8),
 };
 const config = JSON.parse(await readFile(cfgFile, 'utf-8'));
+// 既有身份优先（重复运行 --device 不同时不改写身份）。
+let deviceId = device;
+try {
+  const identity = JSON.parse(await readFile(`${storagePath}.identity.json`, 'utf-8'));
+  if (typeof identity?.deviceId === 'string' && identity.deviceId.length > 0) deviceId = identity.deviceId;
+} catch {
+  // 首次运行：由 core 用 --device 建立身份。
+}
 const app = new Mebular({
   storagePath: config.storagePath,
-  deviceId: config.deviceId,
+  deviceId,
   encryption,
   network: { enabled: false },
   sync: { namespaces: config.sync?.namespaces ?? [] },

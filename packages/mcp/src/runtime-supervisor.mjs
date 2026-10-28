@@ -29,6 +29,7 @@ import {
   readRegistry,
   resolveCloudRoot,
 } from './profiles.mjs';
+import { prepareHomeIdentity } from './home-identity.mjs';
 import { readRuntimeFile, runtimePath } from './runtime-file.mjs';
 import {
   readRuntimeProviders,
@@ -1144,6 +1145,29 @@ async function inspectRuntime(options = {}) {
     } catch (error) {
       return errorResult(context, error, checkedAt, context.http);
     }
+  }
+
+  // F-IDENT-1：spawn/service 之前完成身份 preflight——无效身份或「身份缺失 + 非空 store」
+  // 以明确 reason fail closed，而不是 child 退出后只剩 unreachable。
+  const homeConfig = await readHomeConfig(context.home);
+  const identity = prepareHomeIdentity({ home: context.home, config: homeConfig, env });
+  if (!identity.ok) {
+    const result = baseResult(context, { http, checkedAt });
+    result.ok = false;
+    result.mode = 'error';
+    result.reason = identity.status === 'invalid'
+      ? 'identity_invalid'
+      : identity.status === 'occupied'
+        ? 'identity_store_occupied'
+        : 'identity_mismatch';
+    result.code = identity.code ?? null;
+    result.message = identity.message;
+    result.identity = {
+      status: identity.status,
+      path: identity.identityPath ?? null,
+      ...(identity.problems ? { problems: identity.problems } : {}),
+    };
+    return result;
   }
 
   const probeHealth = probeHealthFn

@@ -254,16 +254,18 @@ async function main() {
         && created.json?.ports?.mcp === portA,
       `status=${created.status} pid=${a.proc.pid} port=${created.json?.ports?.mcp}`);
     const cfgA = await readJson(join(homeA, 'config.json'));
+    const identityA = await readJson(join(homeA, 'store.jsonl.identity.json'));
     const masterA = await readJson(join(homeA, 'user-master-key.json'));
-    check('O2 落盘：root 主密钥（含 privateKeyPkcs8）+ config 开 joinService / mcp 回环',
+    check('O2 落盘：root 主密钥（含 privateKeyPkcs8）+ config 开 joinService / mcp 回环 + 身份文件',
       typeof masterA?.privateKeyPkcs8 === 'string'
         && cfgA?.joinService?.enabled === true
         && cfgA?.mcp?.http?.host === '127.0.0.1' && cfgA?.mcp?.http?.auth === 'none'
         && cfgA?.mcp?.http?.port === portA
-        && cfgA?.deviceId === created.json?.deviceId,
-      `deviceId=${cfgA?.deviceId} joinPort=${cfgA?.joinService?.port}`);
+        && cfgA?.deviceId === undefined && cfgA?.deviceName === undefined
+        && identityA?.deviceId === created.json?.deviceId,
+      `deviceId=${identityA?.deviceId} joinPort=${cfgA?.joinService?.port}`);
     check('F-ONB-1 建新（普通名 Mac-A）→ deviceId=device-Mac-A（单前缀）',
-      cfgA?.deviceId === 'device-Mac-A', `deviceId=${cfgA?.deviceId}`);
+      identityA?.deviceId === 'device-Mac-A', `deviceId=${identityA?.deviceId}`);
     const repeated = await post(portA, '/app/provision/create', { confirm: true });
     check('O2 重复调 provision → 409 already_provisioned（initialized=true）',
       repeated.status === 409 && repeated.json?.error === 'already_provisioned' && repeated.json?.initialized === true,
@@ -317,8 +319,9 @@ async function main() {
     const identityB = await readJson(join(homeB, 'store.jsonl.identity.json'));
     const masterHome = existsSync(join(homeB, 'user-master-key.json')) ? await readJson(join(homeB, 'user-master-key.json')) : null;
     check('F-ONB-1 加入（输入 device-Mac-B）→ deviceId=device-Mac-B（不重复前缀）',
-      joined.json?.deviceId === 'device-Mac-B' && cfgB?.deviceId === 'device-Mac-B',
-      `deviceId=${joined.json?.deviceId}`);
+      joined.json?.deviceId === 'device-Mac-B' && identityB?.deviceId === 'device-Mac-B'
+        && cfgB?.deviceId === undefined && cfgB?.deviceName === undefined,
+      `deviceId=${identityB?.deviceId}`);
     check('O3 委派身份落盘：config.identity.mode=delegated + 主密钥文件**无 privateKeyPkcs8**',
       cfgB?.identity?.mode === 'delegated' && masterB?.publicKey && masterB?.privateKeyPkcs8 === undefined
         && (masterHome === null || masterHome?.privateKeyPkcs8 === undefined),
@@ -336,7 +339,7 @@ async function main() {
       s3.ok,
       s3.ok ? `mode=delegated 等待=${s3.waitedMs}ms` : `mode=${settingsB?.identity?.mode ?? 'undefined'} 等待=${s3.waitedMs}ms/${s3.attempts} 次`);
     // 本机订阅 = 令牌分区（B 自己声明；订阅零门槛）
-    const deviceB = cfgB?.deviceId;
+    const deviceB = identityB?.deviceId ?? joined.json?.deviceId;
     const effective = await getJson(portB, `/app/policy/subscriptions?device=${encodeURIComponent(deviceB)}`);
     check('O3 本机订阅 = 令牌分区（/app/policy/subscriptions 含 tasks）',
       effective.json?.ok === true && (effective.json?.namespaces ?? []).includes('tasks'),

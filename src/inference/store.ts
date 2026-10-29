@@ -1235,6 +1235,21 @@ export class ModelStore {
     };
   }
 
+  /**
+   * 删除一个包的 partial 下载目录（暂停/取消/重新下载前使用），不触碰已安装目录。
+   * 独立于 uninstall，避免“取消下载”误删已安装模型。
+   */
+  async clearPartial(packId: string): Promise<{ removed: boolean; path: string }> {
+    const path = this.partialDir(packId);
+    const existing = await this.statOrNull(path);
+    if (existing) await this.removeQuietly(path);
+    const active = this.statuses.get(packId);
+    if (active && (active.state === 'downloading' || active.state === 'verifying' || active.state === 'installing')) {
+      this.statuses.delete(packId);
+    }
+    return { removed: existing !== null, path };
+  }
+
   /** 卸载已安装包、partial 与 staging/backup 残留；幂等。 */
   async uninstall(packId: string): Promise<{ removed: boolean; path: string }> {
     const path = this.packPath(packId);

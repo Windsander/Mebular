@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { POLICY_NAMESPACE, normalizeNamespace } from '@mebular/core';
 import { configPath } from './config.mjs';
+import { buildModelsList, buildModelsStatus } from './inference-admin.mjs';
 import { cloudError, displayPath, readRegistry, resolveCloudRoot } from './profiles.mjs';
 import { TOOL_NAMES } from './tools.mjs';
 import { hotPaths, readApplyPending, readApplyResult } from './config-apply.mjs';
@@ -1357,4 +1358,9 @@ export const READ_ROUTES = {
   '/admin/api/net': buildNetStatusView,
   '/admin/api/service': buildServiceView,
   '/admin/api/clients': buildClientsView,
+  // 0.3 本地模型：设备级 store，不进忆云；写端点见 serve.mjs WRITE_PATTERNS。
+  '/admin/api/models': (ctx) => buildModelsList(ctx),
+  '/admin/api/models/status': (ctx) => buildModelsStatus(ctx),
+  '/admin/api/inference/models': (ctx) => buildModelsList(ctx),
+  '/admin/api/inference/status': (ctx) => buildModelsStatus(ctx),
 };

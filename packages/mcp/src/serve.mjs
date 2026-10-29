@@ -879,6 +879,55 @@ export async function startHttpServer({
   let service = initialService;
   let config = initialConfig ?? {};
   let runtime = initialRuntime;
+
+  // 0.3 设备级模型选择：config 显式 pack 优先；否则 <home>/inference.json.selectedPack。
+  // 这里只改内存中的 runtime.model.local，不写盘、不进忆云；显式选择失败也不会被换成别的包。
+  const applyInferenceSelection = async (value) => {
+    const base = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const local = base?.runtime?.model?.local;
+    const configPack = local && typeof local.pack === 'string' && local.pack.length > 0 ? local.pack : null;
+    const configPath = local && typeof local.path === 'string' && local.path.length > 0 ? local.path : null;
+    const clone = () => JSON.parse(JSON.stringify(base));
+    const withPath = () => {
+      const next = clone();
+      next.runtime = next.runtime && typeof next.runtime === 'object' ? next.runtime : {};
+      next.runtime.model = next.runtime.model && typeof next.runtime.model === 'object' ? next.runtime.model : {};
+      next.runtime.model.local = next.runtime.model.local && typeof next.runtime.model.local === 'object'
+        ? next.runtime.model.local
+        : {};
+      return next;
+    };
+    if (configPack && configPath) return base;
+    if (configPack) {
+      // 显式 config pack 但未写 path：设备 store 默认在 <home>/models/<pack>，
+      // 避免 RuntimeService 回落到旧的 <home>/runtime/models。
+      try {
+        const next = withPath();
+        next.runtime.model.local.path = join(home, 'models', configPack);
+        return next;
+      } catch {
+        return base;
+      }
+    }
+    try {
+      const { readInferenceState } = await import('./inference-store.mjs');
+      const read = await readInferenceState(home, { init: false });
+      const selected = read?.state?.selectedPack;
+      if (typeof selected !== 'string' || selected.length === 0) return base;
+      const next = withPath();
+      next.runtime.model.local.pack = selected;
+      next.runtime.model.local.path = join(home, 'models', selected);
+      // inference.json 的 selectedPack 本身就是显式选择；默认 heuristic 时切到 local，
+      // 避免“选了模型但 Runtime 仍走 heuristic”。host/api/auto 保持用户显式值。
+      if (next.runtime.model.source === undefined || next.runtime.model.source === 'heuristic') {
+        next.runtime.model.source = 'local';
+      }
+      return next;
+    } catch {
+      return base;
+    }
+  };
+  config = await applyInferenceSelection(config);
   let deviceId = initialDeviceId;
   let namespace = initialNamespace;
   let joinEndpoint = initialJoinEndpoint;
@@ -917,7 +966,7 @@ export async function startHttpServer({
     if (!next?.app || !next?.service) throw new Error('初始化结果缺少 app/service');
     app = next.app;
     service = next.service;
-    config = next.config ?? {};
+    config = await applyInferenceSelection(next.config ?? {});
     runtime = next.runtime ?? null;
     deviceId = next.deviceId ?? null;
     namespace = next.namespace ?? 'tasks';
@@ -993,6 +1042,28 @@ export async function startHttpServer({
     origin: () => origin,
     csrfValid,
   });
+
+  // 模型选择/卸载后让 RuntimeService 重新读取 runtime.model.local；旧引擎由 dispose 停止。
+  const refreshInferenceRuntime = async () => {
+    try {
+      const { readDeviceConfig } = await import('./inference-store.mjs');
+      const disk = await readDeviceConfig(home);
+      const diskModel = disk?.runtime?.model;
+      if (diskModel && typeof diskModel === 'object') {
+        config = await applyInferenceSelection({
+          ...config,
+          runtime: { ...(config?.runtime ?? {}), model: diskModel },
+        });
+      }
+    } catch {
+      // 读盘失败时保留当前内存配置；下一次启动会重新解析。
+    }
+    if (runtimeService) {
+      await runtimeService.dispose?.().catch?.(() => undefined);
+      runtimeService = null;
+      runtimeServiceApp = null;
+    }
+  };
 
   const mcpSessions = new Map(); // sessionId → { transport, server }
   async function transportFor(sessionId) {
@@ -1385,6 +1456,8 @@ export async function startHttpServer({
     /^\/admin\/api\/assistants$/,
     /^\/admin\/api\/assistants\/([^/]+)$/,
     /^\/admin\/api\/assistants\/([^/]+)\/remove$/,
+    // 0.3 本地模型：设备级 store；同走 Origin + CSRF + memory.admin。
+    /^\/admin\/api\/(?:models|inference)\/(select|download|pause|resume|cancel|import|uninstall|remove|start|stop|test)$/,
   ];
 
   // P2：UNINITIALIZED 仅开放本机助手配置所需的读写动作（列表 / 预览 / 接入 / 验证 / 重探）。
@@ -1934,6 +2007,23 @@ export async function startHttpServer({
 
     // 自动修复：客户端接入修复，**不**经 securityWriteGate（不写记忆/安全状态）。
     if (path === '/admin/api/repair') return handleRepair(req, res);
+
+    // 0.3 本地模型：设备级 store，不经 securityWriteGate（不写记忆/安全状态）。
+    const modelAction = path.match(/^\/admin\/api\/(?:models|inference)\/([^/]+)$/);
+    if (modelAction) {
+      const { handleModelsWrite } = await import('./inference-admin.mjs');
+      const result = await handleModelsWrite({
+        home,
+        config,
+        action: decodeURIComponent(modelAction[1]),
+        input: parseJsonBody(body) ?? {},
+      });
+      if (result.status < 400 && ['select', 'remove', 'uninstall', 'stop'].includes(modelAction[1])) {
+        // stop 同时释放 RuntimeService 自己的按需引擎，避免“admin stop 之后 runtime 仍占着模型”。
+        await refreshInferenceRuntime();
+      }
+      return sendJson(res, result.status, result.body);
+    }
 
     // S2：安全三档写端点门禁（medium 动态码 / high 会签或恢复码；low 放行）。
     const gateInput = parseJsonBody(body) ?? {};
@@ -3606,7 +3696,17 @@ export async function startHttpServer({
       } finally {
         // 4) 无论前面如何都要清理；pid 守卫保证不误删新实例的 runtime.json。
         await clearRuntimeFile(home, { pid: process.pid }).catch(() => undefined);
-        // 5) 保留最新 main 的生命周期收尾：root 单活锁 + 热初始化上下文（app/join/广播）。
+        // 5) 本地模型子进程先停，避免 daemon 退出后留下孤儿 llama-server。
+        //    RuntimeService 自己的按需引擎与 admin/CLI 引擎都必须在退出前关闭。
+        try {
+          await runtimeService?.dispose?.();
+        } catch {
+          // 关闭路径不抛出。
+        }
+        await import('./inference-admin.mjs')
+          .then(({ disposeInferenceManager }) => disposeInferenceManager(home))
+          .catch(() => undefined);
+        // 6) 保留最新 main 的生命周期收尾：root 单活锁 + 热初始化上下文（app/join/广播）。
         await activeLock?.release?.().catch(() => undefined);
         await onClose?.().catch(() => undefined);
       }

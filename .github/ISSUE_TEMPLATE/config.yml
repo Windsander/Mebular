@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Questions / 使用问答
+    url: https://github.com/Windsander/Mebular/discussions/categories/q-a
+    about: Ask for help or discuss usage / 使用求助与一般问答
+  - name: 💡 Ideas / 探索与构想
+    url: https://github.com/Windsander/Mebular/discussions/categories/ideas
+    about: Discuss early or exploratory ideas before defining an Issue / 在形成明确 Issue 前讨论早期构想
+  - name: 🔒 Security vulnerability / 安全漏洞
+    url: https://github.com/Windsander/Mebular/security/advisories/new
+    about: Report privately; do not open a public Issue / 请私密报告，不要创建公开 Issue
+  - name: 🤝 Code of Conduct report / 行为准则举报
+    url: https://github.com/Windsander/Mebular/security/advisories/new
+    about: Private report; prefix the title with [Code of Conduct] / 私密举报，标题请加 [Code of Conduct] 前缀

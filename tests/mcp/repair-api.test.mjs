@@ -106,6 +106,14 @@ const getJson = async (base, path) => {
   const res = await fetch(base + path);
   return { status: res.status, body: await res.json().catch(() => null) };
 };
+const waitFor = async (predicate, timeoutMs = 5000) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try { if (await predicate()) return true; } catch { /* retry */ }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+};
 
 const { startServeServer } = await load('packages/mcp/src/server.mjs');
 const { Client, StreamableHTTPClientTransport } = await load('node_modules/@modelcontextprotocol/client/dist/index.mjs');
@@ -119,6 +127,16 @@ try {
     deviceName: 'repair-device',
     cloudName: 'repair-cloud',
   }, auth);
+
+  // runtime ready（热初始化 + 实际端口确定）后，旧 loopback URL 应被自动 reconcile。
+  out.cases.currentMcpUrl = base + '/mcp';
+  out.cases.autoHealed = await waitFor(async () => {
+    const cfg = await readJson(opencodeConfig);
+    return cfg?.mcp?.servers?.mebular?.url === base + '/mcp';
+  });
+  out.cases.autoReconciledConfig = await readJson(opencodeConfig);
+  out.cases.clientsAfterStartup = await getJson(base, '/admin/api/clients');
+  out.cases.skillAfterStartup = await readFile(join(skillDir, 'mebular-memory', 'SKILL.md'), 'utf-8').catch(() => null);
 
   // 先写一条真实记忆：让 store（记忆/任务/审计共用事件日志）存在且非空，
   // 修复前后按字节比对才有意义。
@@ -141,8 +159,13 @@ try {
     clouds: await getJson(base, '/admin/api/clouds'),
     overview: await getJson(base, '/admin/api/overview'),
   };
-  out.cases.currentMcpUrl = base + '/mcp';
-  out.cases.clientsBefore = await getJson(base, '/admin/api/clients');
+
+  // 启动自愈已完成后，再制造一次运行期漂移：验证手动「自动修复」兜底仍能把旧 URL 写回当前端点。
+  await writeFile(opencodeConfig, JSON.stringify({
+    theme: 'dark',
+    mcp: { servers: { other: { keep: 1 }, mebular: { type: 'remote', url: 'http://127.0.0.1:56007/mcp' } } },
+  }, null, 2), 'utf-8');
+  out.cases.clientsBefore = await getJson(base, '/admin/api/clients?refresh=1');
 
   out.cases.repair = await post(base, '/admin/api/repair', {}, auth);
 
@@ -216,6 +239,18 @@ describe('POST /admin/api/repair：只修客户端接入', () => {
     expect(result.cases.mcpFragment).toContain('mebular');
     expect(result.cases.marker).toMatchObject({ schema: 1, managedBy: 'mebular', skill: 'mebular-memory' });
     expect(result.cases.marker.files['mcp/opencode.json']).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('runtime ready 自动 reconcile 旧 loopback URL：不 force Skill，其他 server 保留', () => {
+    expect(result.cases.autoHealed).toBe(true);
+    const healed = result.cases.autoReconciledConfig;
+    expect(healed?.theme).toBe('dark');
+    expect(healed?.mcp?.servers?.other).toEqual({ keep: 1 });
+    expect(healed?.mcp?.servers?.mebular).toEqual({ type: 'remote', url: result.cases.currentMcpUrl });
+    expect(result.cases.skillAfterStartup).toBe('CUSTOM USER SKILL');
+    const afterStartup = (result.cases.clientsAfterStartup?.body?.clients ?? []).find((entry) => entry.id === 'opencode');
+    expect(afterStartup?.connected).toBe(true);
+    expect(afterStartup?.state).toBe('connected');
   });
 
   it('旧 56007 URL：/admin/api/clients 不报 connected，repair 写回当前 mcpUrl', () => {

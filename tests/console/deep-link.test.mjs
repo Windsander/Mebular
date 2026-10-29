@@ -632,4 +632,28 @@ describe('简化轮 · stale 状态语义（#116 F-FIX-B：stdio 已写入需升
     expect(html).toContain('7331');
     expect(html).not.toContain('已接入 ✓');
   });
+
+  it('needs-confirmation（自定义远端 URL）→「需要修复/请确认」，不自动覆盖但仍可显式修复', async () => {
+    const { projectAssistantStatus } = await import('../../packages/console/assistant-status.js');
+    const st = projectAssistantStatus({ id: 'cursor', state: 'needs-confirmation', needsConfirmation: true, remoteUrl: true }, {});
+    expect(st).toMatchObject({ key: 'needs-confirmation', label: '需要修复/请确认', tone: 'todo' });
+    expect(st.label).not.toBe('已接入 ✓');
+
+    const html = assistantsPanelHtml({
+      clients: [{
+        id: 'cursor', name: 'Cursor', state: 'needs-confirmation', connected: false,
+        needsConfirmation: true, remoteUrl: true,
+        staleReason: '自定义远端 MCP 地址与当前端点不一致，请确认或手动修复',
+        configuredUrl: 'https://mcp.example.com/mcp',
+        expectedUrl: 'http://127.0.0.1:7331/mcp',
+        landing: { primaryPath: '/x/.cursor/mcp.json' },
+      }],
+      ui: {},
+    });
+    expect(html).toContain('需要修复/请确认');
+    expect(html).toContain('不会自动覆盖');
+    expect(html).toContain('自动修复');
+    expect(html).toContain('mcp.example.com');
+    expect(html).not.toContain('已接入 ✓');
+  });
 });

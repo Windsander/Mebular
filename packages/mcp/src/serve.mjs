@@ -3285,6 +3285,23 @@ export async function startHttpServer({
                 }
               })
               .catch((error) => console.error(`SKILL_ENSURE_FAILED ${error?.code ?? 'ERROR'}`));
+            // 自动自愈（主路径）：热初始化后实际端口已确定 → 只更新已存在的本机 loopback Mebular 条目。
+            void import('./clients.mjs')
+              .then(({ reconcileClientEndpoints, assistantUserHome, daemonMcpUrl }) => {
+                const reconcileHost = host === '0.0.0.0' || host === '::' ? '127.0.0.1' : host;
+                return reconcileClientEndpoints({
+                  home,
+                  userHome: assistantUserHome(),
+                  cwd: process.cwd(),
+                  mcpUrl: daemonMcpUrl({ host: `${reconcileHost}:${boundPort}`, encrypted: tls }),
+                });
+              })
+              .then((result) => {
+                if (result?.summary?.failed > 0) {
+                  console.error(`CLIENT_ENDPOINT_RECONCILE_PARTIAL ${result.summary.failed} client(s)`);
+                }
+              })
+              .catch((error) => console.error(`CLIENT_ENDPOINT_RECONCILE_FAILED ${error?.code ?? 'ERROR'}`));
             return sendJson(res, 200, {
               ok: true,
               ...result,

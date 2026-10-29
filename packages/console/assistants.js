@@ -103,6 +103,8 @@ export function normalizeClient(c = {}) {
     stale: c.stale === true || c.landing?.stale === true,
     staleKind: c.staleKind ?? c.landing?.staleKind ?? null,
     staleUrl: c.staleUrl === true || c.landing?.staleUrl === true,
+    needsConfirmation: c.needsConfirmation === true || c.landing?.needsConfirmation === true,
+    remoteUrl: c.remoteUrl === true || c.landing?.remoteUrl === true,
     staleReason: c.staleReason ?? c.landing?.staleReason ?? null,
     configuredUrl: c.configuredUrl ?? c.landing?.configuredUrl ?? null,
     expectedUrl: c.expectedUrl ?? c.landing?.expectedUrl ?? c.mcpUrl ?? null,
@@ -137,7 +139,7 @@ function statusLabel(status) {
 
 /** 排序：需处理优先（未接入/接入失败/验证未过/待生效/检测失败 → 需手动 → 已接入）；未安装单独进底部折叠。 */
 export function sortClients(clients) {
-  const rank = { 'not-connected': 0, 'connect-failed': 0, 'verify-failed': 0, busy: 0, 'pending-reload': 0, 'detect-failed': 0, 'stale-url': 0, manual: 1, connected: 2 };
+  const rank = { 'not-connected': 0, 'connect-failed': 0, 'verify-failed': 0, busy: 0, 'pending-reload': 0, 'detect-failed': 0, 'stale-url': 0, 'needs-confirmation': 0, manual: 1, connected: 2 };
   const actionable = [], missing = [];
   for (const c of clients) (c.installed ? actionable : missing).push(c);
   actionable.sort((a, b) => (rank[assistantStatus(a).key] ?? 9) - (rank[assistantStatus(b).key] ?? 9));
@@ -183,10 +185,11 @@ function rowHtml(client, ui, status) {
   const failed = ui.clientFailed?.[client.id] ?? null;
   const pending = status.key === 'pending-reload';
   const staleUrl = status.key === 'stale-url';
+  const needsConfirmation = status.key === 'needs-confirmation';
   let action;
   if (status.key === 'busy') action = `<button class="btn btn-small btn-crt" type="button" disabled>${esc(statusLabel(status))}</button>`;
   else if (status.key === 'connected') action = `<button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">${esc(tr('assistants.action.details', '详情 ›'))}</button>`;
-  else if (staleUrl) action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="connect" data-cli-id="${id}">${esc(tr('assistants.action.repair', '自动修复'))}</button>\n      <button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">${esc(tr('assistants.action.details', '详情 ›'))}</button>`;
+  else if (staleUrl || needsConfirmation) action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="connect" data-cli-id="${id}">${esc(tr('assistants.action.repair', '自动修复'))}</button>\n      <button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">${esc(tr('assistants.action.details', '详情 ›'))}</button>`;
   else if (status.key === 'manual') action = `<button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">${esc(tr('assistants.action.snippet', '查看片段 ›'))}</button>`;
   else if (status.key === 'not-installed') action = `<button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">${esc(tr('assistants.action.install', '怎么装 ›'))}</button>`;
   else if (pending) {
@@ -198,14 +201,21 @@ function rowHtml(client, ui, status) {
   else if (status.key === 'detect-failed') action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="recheck" data-cli-id="${id}">${esc(tr('assistants.action.recheck', '重新检测'))}</button>`;
   else action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="connect" data-cli-id="${id}">${esc(tr('assistants.action.connect', '接入'))}</button>\n      <button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">${esc(tr('assistants.action.details', '详情 ›'))}</button>`;
 
-  // 行内展开（默认收起；有消息/失败/重载提醒/待生效/旧 URL/验证结果/打开详情时展开）
+  // 行内展开（默认收起；有消息/失败/重载提醒/待生效/旧 URL/待确认/验证结果/打开详情时展开）
   const reloadHint = status.reloadHint === true;
-  const open = Boolean(msg) || Boolean(failed) || reloadHint || pending || staleUrl || Boolean(verify) || ui.clientOpen?.[client.id];
+  const open = Boolean(msg) || Boolean(failed) || reloadHint || pending || staleUrl || needsConfirmation || Boolean(verify) || ui.clientOpen?.[client.id];
   const detailBits = [];
   if (staleUrl) {
     detailBits.push(`<p class="asst-line todo">${esc(tr(
       'assistants.staleUrl.reason',
       'MCP 地址已过期：{configured}（当前为 {expected}）',
+      { configured: client.configuredUrl ?? '—', expected: client.expectedUrl ?? client.mcpUrl ?? '—' },
+    ))}</p>`);
+  }
+  if (needsConfirmation) {
+    detailBits.push(`<p class="asst-line todo">${esc(tr(
+      'assistants.remoteUrl.reason',
+      '自定义远端 MCP 地址与当前端点不一致：{configured}（当前为 {expected}）；不会自动覆盖，请确认或手动修复。',
       { configured: client.configuredUrl ?? '—', expected: client.expectedUrl ?? client.mcpUrl ?? '—' },
     ))}</p>`);
   }
@@ -427,6 +437,7 @@ export function attentionItems({ clients, ui = {}, devices, selfId = null, secur
     if (st.key === 'pending-reload') items.push({ id: `asst-${c.id}`, label: tr('attention.asstPendingReload', '{name} 待生效', { name: c.name }), action: 'assistants' });
     if (st.key === 'verify-failed') items.push({ id: `asst-${c.id}`, label: tr('attention.asstVerifyFailed', '{name} 验证未过', { name: c.name }), action: 'assistants' });
     if (st.key === 'stale-url') items.push({ id: `asst-${c.id}`, label: tr('attention.asstStaleUrl', '{name} 配置已过期', { name: c.name }), action: 'assistants' });
+    if (st.key === 'needs-confirmation') items.push({ id: `asst-${c.id}`, label: tr('attention.asstNeedsConfirmation', '{name} 需要修复/请确认', { name: c.name }), action: 'assistants' });
   }
   if (security !== null && security !== undefined) {
     if (security.level === 'medium' && security.totp?.imported !== true) {

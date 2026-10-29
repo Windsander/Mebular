@@ -799,6 +799,8 @@ describe('简化轮 · 向导首屏去运维化（① 全自动、② 只看已�
     const fn = wizardJs.match(/function connectTargets\(clients\)[\s\S]*?\n\}/)?.[0] ?? '';
     expect(fn).toMatch(/c\.state !== 'manual'/);
     expect(fn).toMatch(/c\.needsManual !== true/);
+    expect(fn).toMatch(/c\.state !== 'needs-confirmation'/);
+    expect(fn).toMatch(/c\.needsConfirmation !== true/);
     expect(wizardJs).not.toContain('renderClients');
   });
 

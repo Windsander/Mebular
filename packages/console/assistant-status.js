@@ -48,6 +48,10 @@ export function projectAssistantStatus(client = {}, ui = {}) {
   const installed = state ? state !== 'not-installed' && state !== 'detect-failed' : Boolean(client.installed);
   const connected = state ? state === 'connected' : Boolean(client.installed && client.connected);
   if (state === 'detect-failed') return { key: 'detect-failed', label: '检测失败', labelKey: 'assistants.status.detectFailed', tone: 'todo', ...noHint };
+  // 自定义远端 / 非 loopback URL 与当前端点不一致：不自动覆盖，显式提示用户确认或手动修复。
+  if (state === 'needs-confirmation') {
+    return { key: 'needs-confirmation', label: '需要修复/请确认', labelKey: 'assistants.status.needsConfirmation', tone: 'todo', ...noHint };
+  }
   // 配置里的 loopback MCP URL 与当前守护端点不一致（旧端口/旧路径）→ 配置已过期，需自动修复。
   // 不得显示「已接入 ✓」；与 stdio 形态的「需升级为直连」区分开。
   const staleUrl = client.staleUrl === true || client.staleKind === 'url' || client.landing?.staleUrl === true;

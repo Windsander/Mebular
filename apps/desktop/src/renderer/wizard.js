@@ -201,7 +201,9 @@ async function openConsoleOnce() {
 // 可自动接入的目标：已装、未接、非 manual 兜底、非检测失败
 function connectTargets(clients) {
   return (clients ?? []).filter((c) => c.installed && !c.connected
-    && c.state !== 'manual' && c.needsManual !== true && c.state !== 'detect-failed');
+    && c.state !== 'manual' && c.needsManual !== true && c.state !== 'detect-failed'
+    // 自定义远端 URL 不自动覆盖：必须由用户显式确认/手动修复。
+    && c.state !== 'needs-confirmation' && c.needsConfirmation !== true);
 }
 /** 逐个自动接入（旁白式进度：一次只报当前一个；失败非阻断，收尾汇总）。返回 { ok:[], failed:[], targets:number }。 */
 async function autoConnectAll(clientsInput) {

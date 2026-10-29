@@ -187,19 +187,34 @@ function staleLoopbackUrl(configuredUrl, expectedUrl) {
 }
 
 /**
- * 诊断字段 + stale 判定：仅当配置的是**回环 URL**且与当前 runtime `mcpUrl`
- * 的端口/路径（或 scheme）不一致时才判 stale（用户有意配置的远端 URL 不因状态探测被判 stale/静默改写）。
+ * 诊断字段 + 可自愈判定：
+ * - **回环 URL** 且端口/路径（或 scheme）与当前 runtime 不一致 → `staleUrl`（可自动 reconcile）；
+ * - **非回环/自定义远端 URL** 且与当前端点不一致 → `needsConfirmation`（不自动覆盖，人工确认/显式修复）；
+ * - 两端一致（仅末尾 `/`、回环别名差异）→ 正常。
  */
 function urlDiagnostics(configuredUrl, expectedUrl) {
   const out = {};
   if (typeof configuredUrl === 'string' && configuredUrl.length > 0) out.configuredUrl = displayMcpUrl(configuredUrl);
   if (typeof expectedUrl === 'string' && expectedUrl.length > 0) out.expectedUrl = displayMcpUrl(expectedUrl);
-  if (!out.configuredUrl || !out.expectedUrl) return { ...out, staleUrl: false };
+  if (!out.configuredUrl || !out.expectedUrl) return { ...out, staleUrl: false, needsConfirmation: false };
+  const configuredLoopback = isLoopbackMcpUrl(configuredUrl);
+  const matches = sameMcpUrl(configuredUrl, expectedUrl);
+  if (!matches && !configuredLoopback) {
+    return {
+      ...out,
+      staleUrl: false,
+      needsConfirmation: true,
+      remoteUrl: true,
+      staleReason: `自定义远端 MCP 地址与当前端点不一致：${out.configuredUrl}（当前为 ${out.expectedUrl}），不会自动覆盖，请确认或手动修复`,
+    };
+  }
   const staleUrl = staleLoopbackUrl(configuredUrl, expectedUrl);
-  if (!staleUrl) return { ...out, staleUrl: false };
+  if (!staleUrl) return { ...out, staleUrl: false, needsConfirmation: false, remoteUrl: !configuredLoopback };
   return {
     ...out,
     staleUrl: true,
+    needsConfirmation: false,
+    remoteUrl: false,
     staleReason: `MCP 地址已过期：${out.configuredUrl}（当前为 ${out.expectedUrl}），请自动修复`,
   };
 }
@@ -800,13 +815,15 @@ export function landingState(assistant, options = {}) {
     const hasHttp = has && /transport:\s*streamable-http/.test(scope);
     const urlInfo = urlDiagnostics(yamlEntryUrl(scope), options.mcpUrl);
     const staleUrl = hasHttp && urlInfo.staleUrl === true;
+    const needsConfirmation = hasHttp && urlInfo.needsConfirmation === true;
     return {
       exists: true,
-      present: hasHttp && !staleUrl,
+      present: hasHttp && !staleUrl && !needsConfirmation,
       legacyShape: false,
       staleStdio: has && /transport:\s*stdio/.test(scope) && !hasHttp,
       ...urlInfo,
       staleUrl,
+      needsConfirmation,
       text,
     };
   }
@@ -817,8 +834,9 @@ export function landingState(assistant, options = {}) {
     const hasCommand = block !== null && /^\s*command\s*:\s*\S+/m.test(block);
     const urlInfo = urlDiagnostics(yamlEntryUrl(block), options.mcpUrl);
     const staleUrl = hasUrl && urlInfo.staleUrl === true;
-    // 语义判据：remote（有 url 且端点未过期）→ present；stdio 形态或旧 loopback 地址 → stale
-    const present = hasUrl && !hasCommand && !staleUrl;
+    const needsConfirmation = hasUrl && urlInfo.needsConfirmation === true;
+    // 语义判据：remote（有 url 且端点未过期/未待确认）→ present；stdio 形态或旧 loopback 地址 → stale
+    const present = hasUrl && !hasCommand && !staleUrl && !needsConfirmation;
     return {
       exists: true,
       present,
@@ -826,6 +844,7 @@ export function landingState(assistant, options = {}) {
       staleStdio: !present && hasCommand,
       ...urlInfo,
       staleUrl,
+      needsConfirmation,
       text,
     };
   }
@@ -841,9 +860,10 @@ export function landingState(assistant, options = {}) {
     const storedUrl = typeof stored?.url === 'string' ? stored.url : null;
     const urlInfo = urlDiagnostics(isHttp ? storedUrl : null, options.mcpUrl);
     const staleUrl = isHttp && urlInfo.staleUrl === true;
-    const present = isHttp && !staleUrl;
+    const needsConfirmation = isHttp && urlInfo.needsConfirmation === true;
+    const present = isHttp && !staleUrl && !needsConfirmation;
     const staleStdio = !present && entryIsStdio(format, stored);
-    return { exists: true, present, legacyShape: legacy && !present, staleStdio, ...urlInfo, staleUrl, text };
+    return { exists: true, present, legacyShape: legacy && !present, staleStdio, ...urlInfo, staleUrl, needsConfirmation, text };
   } catch {
     return { exists: true, present: false, legacyShape: false, text, parseError: true };
   }
@@ -984,15 +1004,17 @@ function buildStateItem(assistant, signals, landing, options = {}) {
   const strategy = assistant.writer?.strategy ?? 'merge-key';
   const staleUrl = landing.staleUrl === true;
   const staleStdio = landing.staleStdio === true;
+  const needsConfirmation = landing.needsConfirmation === true;
   let state;
   if (strategy === 'manual' && !landing.present) state = anyHit ? 'manual' : 'not-installed';
   else if (landing.present) state = 'connected';
+  else if (needsConfirmation) state = 'needs-confirmation'; // 自定义远端 URL 与当前端点不一致：不自动覆盖
   else if (staleUrl) state = 'stale';      // 配置的 loopback MCP 地址已过期（旧端口/旧路径）
   else if (staleStdio) state = 'stale';    // 已写入但过时（stdio）→ 升级直连
   else if (!anyHit) state = anyError ? 'detect-failed' : 'not-installed';
   else state = 'not-connected';
-  const STATE_LABEL = { 'not-installed': '未安装', 'not-connected': '未接入', connected: '已接入 ✓', manual: '需手动', 'detect-failed': '检测失败', stale: '已写入·需升级为直连' };
-  const staleReason = staleUrl ? (landing.staleReason ?? 'MCP 地址已过期，请自动修复') : null;
+  const STATE_LABEL = { 'not-installed': '未安装', 'not-connected': '未接入', connected: '已接入 ✓', manual: '需手动', 'detect-failed': '检测失败', stale: '已写入·需升级为直连', 'needs-confirmation': '需要修复/请确认' };
+  const staleReason = needsConfirmation || staleUrl ? (landing.staleReason ?? 'MCP 地址与当前端点不一致，请确认或手动修复') : null;
   return {
     id: assistant.id,
     name: assistant.name,
@@ -1000,7 +1022,7 @@ function buildStateItem(assistant, signals, landing, options = {}) {
     type: assistant.kind === 'snippet' ? 'snippet' : 'file', // file | snippet（descriptor 形态）
     registryKind: assistant.registryKind ?? 'builtin',
     state,
-    stateLabel: staleUrl ? '配置已过期 · 请自动修复' : (STATE_LABEL[state] ?? state),
+    stateLabel: needsConfirmation ? '需要修复/请确认' : staleUrl ? '配置已过期 · 请自动修复' : (STATE_LABEL[state] ?? state),
     evidence: signals.map((s) => ({ ...s, detail: redactSecrets(s.detail) })),
     anySignalHit: anyHit,
     landing: {
@@ -1015,6 +1037,8 @@ function buildStateItem(assistant, signals, landing, options = {}) {
       staleKind: staleUrl ? 'url' : staleStdio ? 'stdio' : null,
       staleStdio,
       staleUrl,
+      needsConfirmation,
+      remoteUrl: landing.remoteUrl === true,
       staleReason,
       configuredUrl: landing.configuredUrl ?? null,
       expectedUrl: landing.expectedUrl ?? null,
@@ -1037,6 +1061,8 @@ function buildStateItem(assistant, signals, landing, options = {}) {
     stale: staleUrl || staleStdio,
     staleKind: staleUrl ? 'url' : staleStdio ? 'stdio' : null,
     staleUrl,
+    needsConfirmation,
+    remoteUrl: landing.remoteUrl === true,
     staleReason,
     configuredUrl: landing.configuredUrl ?? null,
     expectedUrl: landing.expectedUrl ?? null,
@@ -1286,12 +1312,75 @@ export async function connectClient(id, options = {}) {
   return attachSkills({ ok: true, changed: true, configPath: primary, backupPath, preview }, id, options);
 }
 
+/**
+ * 运行时就绪后的**自动自愈**（普通旧端口漂移的主路径）：
+ * 只把**已存在且配置为本机 loopback** 的 Mebular HTTP 条目幂等更新到当前 `mcpUrl`。
+ *
+ * 边界（刻意保守）：
+ * - 不创建新客户端配置（`exists !== true` 跳过）；不 force Skill、不调用 installSkills；
+ * - 非 loopback / 用户自定义远端 URL 不覆盖（留给状态检测显示“需要修复/请确认”与手动兜底）；
+ * - 只改 Mebular 自己的入口，保留其他 MCP servers / 其他配置；
+ * - 不触碰 memory / identity / storage / sync / cloud / subscription / task / audit。
+ *
+ * 单项失败只记录，返回结构化报告；调用方（runtime ready）绝不因此阻断启动。
+ */
+export async function reconcileClientEndpoints(options = {}) {
+  const mcpUrl = typeof options.mcpUrl === 'string' && options.mcpUrl.trim().length > 0 ? options.mcpUrl.trim() : null;
+  if (!mcpUrl) {
+    return { ok: true, skipped: true, reason: 'no_mcp_url', scope: 'client-endpoint-reconcile', clients: [], summary: { total: 0, changed: 0, failed: 0 } };
+  }
+  const reg = registry(options);
+  const clients = [];
+  for (const assistant of reg.assistants) {
+    const strategy = assistant.writer?.strategy ?? 'merge-key';
+    if (strategy === 'manual' || !assistant.landing?.primaryPath) continue;
+    let landing;
+    try {
+      landing = landingState(assistant, { ...options, mcpUrl });
+    } catch (error) {
+      clients.push({
+        id: assistant.id, name: assistant.name, ok: false, changed: false,
+        from: null, to: mcpUrl, reason: `状态探测失败：${redactSecrets(error?.message ?? error)}`,
+      });
+      continue;
+    }
+    // 主路径只自动处理 loopback 旧端点；stdio / 远端自定义 / 未接入都不在此处写。
+    if (landing.exists !== true || landing.staleUrl !== true) continue;
+    try {
+      const result = await connectClient(assistant.id, { ...options, mcpUrl, skipSkills: true });
+      clients.push({
+        id: assistant.id,
+        name: assistant.name,
+        ok: result.ok === true,
+        changed: result.changed === true,
+        from: landing.configuredUrl ?? null,
+        to: mcpUrl,
+        ...(result.ok === true ? {} : { reason: redactSecrets(result.reason ?? 'reconcile_failed') }),
+      });
+    } catch (error) {
+      clients.push({
+        id: assistant.id, name: assistant.name, ok: false, changed: false,
+        from: landing.configuredUrl ?? null, to: mcpUrl,
+        reason: redactSecrets(error?.message ?? error),
+      });
+    }
+  }
+  const failed = clients.filter((entry) => entry.ok !== true);
+  const changed = clients.filter((entry) => entry.changed === true);
+  return {
+    ok: failed.length === 0,
+    scope: 'client-endpoint-reconcile',
+    clients,
+    summary: { total: clients.length, changed: changed.length, failed: failed.length },
+  };
+}
+
 /** 回滚：显式备份优先；否则最近一次备份；无备份则删除 mebular 条目（DSH 除外）。 */
-/** 备份候选是否已含 mebular 条目——**与状态探针同一判据**（landingState：present ∪ staleStdio ∪ legacyShape），
+/** 备份候选是否已含 mebular 条目——**与状态探针同一判据**（landingState：present ∪ staleStdio ∪ staleUrl ∪ needsConfirmation ∪ legacyShape），
  *  避免自建弱判据（如 yamlHasKey）漏报导致回滚选错快照。 */
 function backupHasMebularEntry(assistant, backupPath) {
   const st = landingState({ ...assistant, landing: { ...assistant.landing, primaryPath: backupPath } }, {});
-  return Boolean(st.present || st.staleStdio || st.staleUrl || st.legacyShape);
+  return Boolean(st.present || st.staleStdio || st.staleUrl || st.needsConfirmation || st.legacyShape);
 }
 
 export async function rollbackClient(id, options = {}) {
@@ -1333,6 +1422,7 @@ export function readbackCheck(assistant, options = {}) {
   if (!landing.exists) return { ok: false, detail: '配置文件不存在' };
   if (!landing.present) {
     if (landing.legacyShape) return { ok: false, detail: '只找到旧形状（不生效），建议重新接入' };
+    if (landing.needsConfirmation) return { ok: false, detail: landing.staleReason ?? '自定义远端 MCP 地址与当前端点不一致，请确认或手动修复' };
     if (landing.staleUrl) return { ok: false, detail: landing.staleReason ?? 'MCP 地址已过期，请自动修复' };
     if (landing.staleStdio) return { ok: false, detail: '条目是 stdio 形态：守护运行中会被拒（MCP_STORAGE_LOCKED），建议重新接入为 HTTP /mcp' };
     return { ok: false, detail: '未找到 mebular 条目' };

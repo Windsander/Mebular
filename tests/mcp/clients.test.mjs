@@ -19,6 +19,7 @@ import {
   previewClient,
   mergeJsonEntry,
   installSkills,
+  reconcileClientEndpoints,
   repairClients,
   sameMcpUrl,
   verifyAssistant,
@@ -339,6 +340,85 @@ describe('MCP URL 陈旧检测与自动修复', () => {
     expect(verify.steps.find((step) => step.name === 'readback')?.ok).toBe(true);
   });
 
+  it('启动自愈：Hermes 旧 loopback URL 自动更新为当前，保留其他 server，不 force Skill', async () => {
+    const cfg = join(userHome, '.hermes', 'config.yaml');
+    await mkdir(dirname(cfg), { recursive: true });
+    await writeFile(cfg, hermesFixture(OLD));
+    const skill = join(userHome, '.hermes', 'skills', 'mebular-memory', 'SKILL.md');
+    await mkdir(dirname(skill), { recursive: true });
+    await writeFile(skill, 'CUSTOM USER SKILL', 'utf-8');
+    const prefix = 'hermes config set --force mcp_servers.mebular ';
+    const runAsync = async (cmd) => {
+      if (cmd.startsWith(prefix)) {
+        const entry = JSON.parse(JSON.parse(cmd.slice(prefix.length)));
+        await writeFile(cfg, hermesFixture(entry.url));
+        return { ok: true, code: 0, stdout: '', stderr: '' };
+      }
+      if (cmd === 'hermes config get mcp_servers') {
+        return { ok: true, code: 0, stdout: await readFile(cfg, 'utf-8'), stderr: '' };
+      }
+      return { ok: false, code: 1, stdout: '', stderr: '' };
+    };
+
+    const out = await reconcileClientEndpoints(opts({ mcpUrl: CURRENT, runAsync }));
+    expect(out.ok).toBe(true);
+    expect(out.summary).toMatchObject({ total: 1, changed: 1, failed: 0 });
+    const text = await readFile(cfg, 'utf-8');
+    expect(text).toContain(`url: ${CURRENT}`);
+    expect(text).not.toContain('56007');
+    expect(text).toContain('openchamber'); // 其他 MCP server 不丢
+    expect(await readFile(skill, 'utf-8')).toBe('CUSTOM USER SKILL'); // 不 force Skill
+    // 幂等：第二次无可改项，不产生新备份
+    const again = await reconcileClientEndpoints(opts({ mcpUrl: CURRENT, runAsync }));
+    expect(again.summary).toMatchObject({ total: 0, changed: 0, failed: 0 });
+    expect((await readdir(join(userHome, '.hermes'))).filter((f) => f.includes('.bak-'))).toHaveLength(1);
+  });
+
+  it('启动自愈：OpenCode 旧 URL 自动更新、其他 server 保留、幂等', async () => {
+    const cfg = join(userHome, '.config', 'opencode', 'opencode.json');
+    await mkdir(dirname(cfg), { recursive: true });
+    await writeFile(cfg, JSON.stringify({
+      theme: 'dark',
+      mcp: { servers: { other: { keep: 1 }, mebular: { type: 'remote', url: OLD } } },
+    }, null, 2));
+
+    const first = await reconcileClientEndpoints(opts({ mcpUrl: CURRENT }));
+    expect(first.ok).toBe(true);
+    expect(first.summary.failed).toBe(0);
+    expect(first.summary.changed).toBeGreaterThanOrEqual(1);
+    const written = JSON.parse(await readFile(cfg, 'utf-8'));
+    expect(written.theme).toBe('dark');
+    expect(written.mcp.servers.other).toEqual({ keep: 1 });
+    expect(written.mcp.servers.mebular).toEqual({ type: 'remote', url: CURRENT });
+
+    const second = await reconcileClientEndpoints(opts({ mcpUrl: CURRENT }));
+    expect(second.summary).toMatchObject({ total: 0, changed: 0, failed: 0 });
+  });
+
+  it('自定义远端 URL 不自动覆盖：状态为需要修复/请确认，显式修复才重置', async () => {
+    const cfg = join(userHome, '.cursor', 'mcp.json');
+    await mkdir(dirname(cfg), { recursive: true });
+    const remote = 'https://mcp.example.com/mcp';
+    await writeFile(cfg, JSON.stringify({ mcpServers: { mebular: { url: remote } } }, null, 2));
+
+    const out = await reconcileClientEndpoints(opts({ mcpUrl: CURRENT }));
+    expect(out.summary).toMatchObject({ total: 0, changed: 0, failed: 0 });
+    expect(JSON.parse(await readFile(cfg, 'utf-8')).mcpServers.mebular).toEqual({ url: remote });
+
+    const st = assistantState(descriptorFor('cursor', opts()), opts({ mcpUrl: CURRENT }));
+    expect(st.state).toBe('needs-confirmation');
+    expect(st.connected).toBe(false);
+    expect(st.needsConfirmation).toBe(true);
+    expect(st.staleUrl).toBe(false);
+    expect(st.landing.configuredUrl).toBe(remote);
+
+    // 显式兜底：用户确认后手动修复才按当前端点重置。
+    const repaired = await connectClient('cursor', opts({ mcpUrl: CURRENT, skipSkills: true }));
+    expect(repaired.ok).toBe(true);
+    expect(repaired.changed).toBe(true);
+    expect(JSON.parse(await readFile(cfg, 'utf-8')).mcpServers.mebular).toEqual({ url: CURRENT });
+  });
+
   it('OpenCode/OpenChamber JSON：旧 URL 经 repairClients 写回当前 URL，其他 server 保留', async () => {
     const cfg = join(userHome, '.config', 'opencode', 'opencode.json');
     await mkdir(dirname(cfg), { recursive: true });
@@ -431,14 +511,5 @@ describe('MCP URL 陈旧检测与自动修复', () => {
     expect(repaired.ok).toBe(true);
     expect(repaired.changed).toBe(true);
     expect(JSON.parse(await readFile(cursorCfg, 'utf-8')).mcpServers.mebular).toEqual({ url: CURRENT });
-  });
-
-  it('用户有意配置的远端 URL 不判 stale（仅显式修复才按当前端点改写）', async () => {
-    const cfg = join(userHome, '.cursor', 'mcp.json');
-    await mkdir(dirname(cfg), { recursive: true });
-    await writeFile(cfg, JSON.stringify({ mcpServers: { mebular: { url: 'https://mcp.example.com/mcp' } } }, null, 2));
-    const st = assistantState(descriptorFor('cursor', opts()), opts({ mcpUrl: CURRENT }));
-    expect(st.state).toBe('connected');
-    expect(st.staleUrl).toBe(false);
   });
 });

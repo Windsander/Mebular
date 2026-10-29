@@ -85,7 +85,7 @@ schema 六要素见接入契约 §2：**probe（探测）/ landing（落面+格�
 派生态（一等状态，有专属视觉与主动作）：
 - **已写入·待重启**（黄）：主按钮「我已重启，重新验证」。
 - **已写入·验证未过**（黄）：主按钮「重新验证」，次级「查看验证输出」「回滚」。
-- **配置已过期**（黄）：配置里的 Mebular URL 是旧 loopback 地址（端口/路径与当前 runtime `/mcp` 不一致；仅末尾 `/` 差异视为一致，stdio 条目不适用）→ 主按钮「自动修复」；用户有意配置的远端 URL 不因端点比较自动判 stale（显式自动修复仍按当前端点重写 Mebular 条目）。
+- **配置已过期**（黄）：配置里的 Mebular URL 是旧 loopback 地址（端口/路径与当前 runtime `/mcp` 不一致；仅末尾 `/` 差异视为一致，stdio 条目不适用）→ runtime ready 后**自动 reconcile** 到当前端点（幂等、只改 Mebular 入口）；自动自愈失败时才显示该状态，主按钮「自动修复」作显式兜底。用户自定义的非 loopback 远端 URL 不自动覆盖，显示「需要修复/请确认」。
 - **检测失败**（灰）：主按钮「重试检测」，次级「手动登记为已装」。
 
 ### 3.3 验证闭环（接入后必走）
@@ -283,6 +283,7 @@ schema 六要素见接入契约 §2：**probe（探测）/ landing（落面+格�
 - A-3 OpenChamber 落面 = global `~/.config/opencode/opencode.json` 的 `mcp.servers.mebular`；**禁写** `opencode.managed.json`（实现 grep 无该路径写入分支）；验证钩子 `opencode mcp list` 只读调用。
 - A-4 配置文件不存在但 CLI 存在 → 判「已装·未接入」（不假阴性）；配置存在 CLI 不在 → 仍「已装」但 evidence 标明（不假阳性静默）。
 - A-5 Hermes 内置条目：落面 `~/.hermes/config.yaml` 的 `mcp_servers.mebular`；写入仅经 `hermes config set --force`；写前字节级备份+失败回滚；验证 `hermes mcp test mebular` rc=0 ∧ 输出含 `✓ Connected` ∧ `Tools discovered: N≥1`；activation=hot（无重启清单步）。
+- A-20 旧 loopback MCP URL（如 56007）在 runtime ready 后自动 reconcile 到当前 `mcpUrl`（幂等、只改 Mebular 入口、保留其他 MCP servers/配置、不 force Skill）；用户自定义非 loopback 远端 URL 不自动覆盖，状态为「需要修复/请确认」；手动「自动修复」仅作显式兜底。
 
 **无死交互**
 - A-6 未安装卡无「接入」按钮；主按钮恒为「怎么装」（DOM 断言）。

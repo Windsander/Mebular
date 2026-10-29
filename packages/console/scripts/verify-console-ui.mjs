@@ -964,16 +964,28 @@ async function main() {
       return tabs.join(',') === '常用,安全,AI 助手,MCP 接入,高级' && document.querySelector('#settings')?.hidden === false;
     })()`));
     await evalJs('document.querySelector("[data-settings-tab=common]").click()');
-    check('E1 常用页：保留只读状态 + 重启向导；无重复邀请入口', await waitFor(`(() => {
+    check('E1 常用页：保留只读状态 + 自动修复 + 重启向导；无重复邀请入口', await waitFor(`(() => {
       const common = document.querySelector('#settings-panel-common');
       const topbarInvite = document.querySelector('#invite-device');
       return Boolean(common) && common.hidden === false
         && !common.querySelector('.cfg-editor') && Boolean(common.querySelector('#settings-resident'))
         && Boolean(common.querySelector('[data-settings-common-status]'))
+        && Boolean(common.querySelector('.settings-repair-row #settings-repair'))
         && !common.querySelector('#settings-invite-device')
         && Boolean(topbarInvite)
         && /高级/.test(common.textContent);
     })()`));
+    // 自动修复：browser 无 preload 桥也渲染；点击先二次确认（取消不写）。
+    await evalJs('document.querySelector("#settings-repair").click()');
+    check('自动修复（browser）：二次确认明确覆盖 MCP/Skill、不碰记忆/身份/订阅/任务/审计', await waitFor(`(() => {
+      const modal = document.querySelector('#modal');
+      const text = modal?.innerText ?? '';
+      return Boolean(modal) && modal.hidden === false
+        && /自动修复客户端接入/.test(text) && /MCP 条目/.test(text) && /Skill/.test(text)
+        && /记忆/.test(text) && /身份/.test(text) && /订阅/.test(text) && /任务/.test(text) && /审计/.test(text);
+    })()`));
+    await evalJs('document.querySelector("#modal-cancel").click()');
+    await waitFor('document.querySelector("#modal")?.hidden === true');
     const foldAudit = await evalJs(`(() => {
       const details = [...document.querySelectorAll('#settings-body details')];
       return { count: details.length, keys: details.map((d) => d.dataset.settingsFold ?? d.className) };
@@ -4520,11 +4532,15 @@ async function main() {
 
         // 设置 = 锁定态排错入口（不白屏）
         await evalJs('document.querySelector("#open-settings").click()');
-        check('P3 锁定设置：不白屏，给出锁定说明 + 两个入口 + 诊断信息', await waitFor(`(() => {
+        check('P3 锁定设置：不白屏，锁定说明 + 顶栏引导 + 诊断信息，且不再重复两个入口', await waitFor(`(() => {
           const body = document.querySelector('#settings-body');
+          const create = document.querySelector('#create-cloud');
+          const join = document.querySelector('#join-cloud');
           return /忆云尚未初始化/.test(body?.textContent ?? '')
-            && Boolean(body.querySelector('[data-locked-action="create"]'))
-            && Boolean(body.querySelector('[data-locked-action="join"]'))
+            && !body.querySelector('[data-locked-action]')
+            && /顶栏/.test(body.textContent) && /新建忆云/.test(body.textContent) && /加入忆云/.test(body.textContent)
+            && Boolean(create) && create.hidden === false
+            && Boolean(join) && join.hidden === false
             && /诊断信息/.test(body.textContent);
         })()`));
         await evalJs('document.querySelector("#settings-close").click()');

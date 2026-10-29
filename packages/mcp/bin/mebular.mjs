@@ -308,6 +308,16 @@ async function runInit(flags) {
     await writeFile(configFile, JSON.stringify(nextConfig, null, 2), 'utf-8');
     console.log(`已写入配置：${configFile}（deviceId=${identity.deviceId}，由身份文件提供）`);
   }
+  // Skill 是部署产物：初始化成功后对已检测到的助手自动 ensure；失败只告警，不阻断 init。
+  try {
+    const { autoEnsureSkills, assistantUserHome } = await import('../src/clients.mjs');
+    const skills = await autoEnsureSkills({ home, userHome: assistantUserHome(), cwd: process.cwd() });
+    if (!skills.skipped && skills.summary?.total > 0) {
+      console.log(`Skill：安装 ${skills.summary.installed} · 更新 ${skills.summary.updated} · 保留 ${skills.summary.kept} · 失败 ${skills.summary.failed}`);
+    }
+  } catch (error) {
+    console.error(`warning: Skill 自动安装失败（不阻断初始化）：${error?.message ?? error}`);
+  }
   console.log(
     [
       '',

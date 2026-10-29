@@ -1,7 +1,7 @@
 // UX-2 · 设置 · AI 助手专区 + 首屏叠加层（纯字符串构建器，无 DOM 依赖，可单测）。
 // 与 console.js 的约定：console.js 负责取数/动作/事件，本模块负责
 //   归一化（轮 A 注册表形状优先：state/evidence/hasVerify/activation/kind；旧形状 installed/connected 兜底）、
-//   单列表 HTML、行内 verify 步骤、自定义助手 CRUD 表单、常驻运行行、重启向导行、「需要注意」条目推导。
+//   单列表 HTML、行内 verify 步骤、自定义助手 CRUD 表单、常驻运行行、自动修复行、重启向导行、「需要注意」条目推导。
 // 状态词投影唯一真源 = ./assistant-status.js 的 projectAssistantStatus（向导/设置页共用，快照断言守护一致）。
 //
 // i18n：用户可见文案走 console pack（t）；catalog 未加载（单测 / 静态兜底）时回退本文件的中文字面量。
@@ -345,6 +345,23 @@ export function wizardRowHtml(hasBridge) {
     <span class="asst-st">${esc(tr('settings.wizard.note', '重新走一遍首次设置（不动已有配置）'))}</span>
     <button class="btn btn-small" type="button" id="settings-open-wizard">${esc(tr('settings.wizard.action', '重启向导 ›'))}</button>
   </div>`;
+}
+
+/**
+ * 自动修复行（设置 · 常用）：只修客户端接入（MCP 条目 + Skill），
+ * 不依赖 host.openWizard，因此 browser / desktop / DSH 都渲染。
+ */
+export function repairRowHtml(repair = {}) {
+  const busy = repair.busy === true;
+  const tone = repair.tone === 'error' ? ' todo' : '';
+  const message = String(repair.message ?? '');
+  return `<div class="asst-row settings-repair-row">
+    <span class="asst-name">${esc(tr('settings.repair.title', '自动修复'))}</span>
+    <span class="asst-st">${esc(tr('settings.repair.note', '强制重跑已检测助手的 MCP 接入与 Skill；不动记忆/身份/订阅/任务/审计'))}</span>
+    <span class="asst-sp"></span>
+    <button class="btn btn-small btn-crt" type="button" id="settings-repair"${busy ? ' disabled' : ''}>${esc(busy ? tr('settings.repair.busy', '修复中…') : tr('settings.repair.action', '开始修复'))}</button>
+  </div>
+  ${message ? `<p class="asst-line settings-repair-msg${tone}" id="settings-repair-msg">${esc(message)}</p>` : ''}`;
 }
 
 /** 首屏状态总览条（纯只读；对端计数不含本机）。 */

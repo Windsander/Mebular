@@ -7,7 +7,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,9 +23,9 @@ const check = (label, ok, detail = '') => {
   if (!ok) passed = false;
 };
 
-function run(args, env = {}) {
+function run(args, env = {}, cwd = rootDir) {
   return execFileSync(process.execPath, args, {
-    cwd: rootDir,
+    cwd,
     encoding: 'utf-8',
     env: { ...process.env, ...env },
   });
@@ -232,6 +232,23 @@ try {
     check('install.mjs 一并安装 mcp/ 片段（mebular-memory/mcp/opencode.json）',
       existsSync(join(installTarget, 'mebular-memory', 'mcp', 'opencode.json'))
         && existsSync(join(installTarget, 'mebular-memory', 'mcp', 'claude.json')));
+  }
+
+  // ---------- install.mjs --global：已存在 OpenCode/OpenChamber 客户端才写其 Skill 目录 ----------
+  {
+    const globalHome = join(dir, 'global-home');
+    await mkdir(join(globalHome, '.config', 'opencode'), { recursive: true });
+    await writeFile(join(globalHome, '.config', 'opencode', 'opencode.json'), '{}', 'utf-8');
+    run([join(skillDir, 'scripts', 'install.mjs'), '--global'], { HOME: globalHome }, globalHome);
+    check('install.mjs --global 安装到 OpenChamber 的 ~/.config/opencode/skills',
+      existsSync(join(globalHome, '.config', 'opencode', 'skills', 'mebular-memory', 'SKILL.md'))
+        && existsSync(join(globalHome, '.config', 'opencode', 'skills', 'mebular-memory', 'mcp', 'opencode.json')));
+
+    const bareHome = join(dir, 'bare-home');
+    await mkdir(bareHome, { recursive: true });
+    run([join(skillDir, 'scripts', 'install.mjs'), '--global'], { HOME: bareHome }, bareHome);
+    check('install.mjs --global 未检测到 OpenCode 客户端时不创建 ~/.config/opencode/skills',
+      !existsSync(join(bareHome, '.config', 'opencode', 'skills')));
   }
 } catch (error) {
   check('G6.4 验证', false, String(error?.message ?? error).substring(0, 400));

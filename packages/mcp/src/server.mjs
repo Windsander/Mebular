@@ -388,6 +388,15 @@ export async function startServeServer(options = {}) {
       current.runtime.mcp.auth = httpServer.auth;
       // G：装配完成后写「已监听」标记——supervisor 用它判定新实例健康（join 失败则不写）
       await finalizeRuntime(current);
+      // Skill 收敛（启动/升级）：受管旧版更新、用户修改保留；失败只记录，绝不阻断 serve。
+      void import('./clients.mjs')
+        .then(({ autoEnsureSkills, assistantUserHome }) => autoEnsureSkills({ home, userHome: assistantUserHome(), cwd: process.cwd() }))
+        .then((result) => {
+          if (result?.summary?.failed > 0 || (result?.ok === false && result?.skipped !== true)) {
+            console.error(`SKILL_ENSURE_PENDING_REPAIR ${result?.reason ?? `${result?.summary?.failed ?? 1} client(s)`}`);
+          }
+        })
+        .catch((error) => console.error(`SKILL_ENSURE_FAILED ${error?.code ?? 'ERROR'}`));
     }
 
     const shutdown = async () => {

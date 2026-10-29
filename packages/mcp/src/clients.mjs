@@ -19,13 +19,15 @@
 //
 // 纯函数式：home/cwd/platform/env/run 可注入，便于单元测试（不触碰真实用户目录）。
 
+import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { chmod, copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { chmod, copyFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { exec, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { delimiter, dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { APP_VERSION } from './version.mjs';
 
 // ---------------------------------------------------------------------------
 // 格式适配器（落面形状的唯一真源；A-17 以 `opencode mcp add` 产出为准）
@@ -1032,6 +1034,19 @@ async function connectViaCli(assistant, options = {}) {
   };
 }
 
+/** 接入成功后顺带 ensure 该客户端的 Skill；失败只记录，绝不阻断 MCP 接入。 */
+async function attachSkills(result, id, options = {}) {
+  if (!result?.ok || options.skipSkills === true) return result;
+  const assistant = descriptorFor(id, options);
+  if ((assistant?.skillsDirs ?? []).length === 0) return result;
+  try {
+    result.skills = await installSkills(id, options);
+  } catch (error) {
+    result.skills = { ok: false, id, reason: `Skill 安装失败：${redactSecrets(error?.message ?? error)}` };
+  }
+  return result;
+}
+
 /** 接入：merge-key（备份 → 原子写）/ cli-set（官方 CLI）/ manual（仅片段）。 */
 export async function connectClient(id, options = {}) {
   const assistant = descriptorFor(id, options);
@@ -1044,7 +1059,7 @@ export async function connectClient(id, options = {}) {
   if (isForbidden(assistant, primary)) {
     return { ok: false, reason: `禁写路径（landing.forbiddenPaths）：${primary}` };
   }
-  if (strategy === 'cli-set') return connectViaCli(assistant, options);
+  if (strategy === 'cli-set') return attachSkills(await connectViaCli(assistant, options), id, options);
   const existing = safeReadText(primary);
   const merged = computeMerged(assistant, existing, options);
   if (merged.error) {
@@ -1052,7 +1067,7 @@ export async function connectClient(id, options = {}) {
   }
   const preview = lineDiff(existing ?? '', merged.text);
   if (!merged.changed) {
-    return { ok: true, changed: false, configPath: primary, backupPath: null, preview, note: '已接入（幂等：无需改动）' };
+    return attachSkills({ ok: true, changed: false, configPath: primary, backupPath: null, preview, note: '已接入（幂等：无需改动）' }, id, options);
   }
   const backupPath = existing !== null ? `${primary}.bak-${tsStamp()}` : null;
   if (backupPath) await copyFile(primary, backupPath);
@@ -1063,7 +1078,7 @@ export async function connectClient(id, options = {}) {
     if (backupPath) await copyFile(backupPath, primary); // 失败回滚
     return { ok: false, changed: false, rolledBack: Boolean(backupPath), backupPath, reason: `写入失败已回滚：${redactSecrets(error?.message ?? error)}` };
   }
-  return { ok: true, changed: true, configPath: primary, backupPath, preview };
+  return attachSkills({ ok: true, changed: true, configPath: primary, backupPath, preview }, id, options);
 }
 
 /** 回滚：显式备份优先；否则最近一次备份；无备份则删除 mebular 条目（DSH 除外）。 */
@@ -1206,37 +1221,418 @@ export async function verifyAssistant(id, options = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// Skill 安装
+// Skill 安装（单一实现：缺失安装 / 受管旧版更新 / 用户修改保留 / force 覆盖）
 // ---------------------------------------------------------------------------
+
+/**
+ * 受管版本标记：每个 Skill 目录一份 `.mebular-skill.json`。
+ *
+ * - 有标记 ∧ `managedBy=mebular` ∧ 文件哈希与标记一致 → Mebular 管理且用户未改；
+ * - 无标记 / 哈希不一致 → 用户自定义或用户改过 → 默认保留；
+ * - `force`（自动修复）→ 完整覆盖已知 Skill 文件（不删除用户额外文件）。
+ *
+ * `files` 记录 **Mebular 写入的受管文件**哈希（含 `mcp/` 片段），因此「受管旧版」既能按版本号识别，
+ * 也能识别同版本但内容漂移的安装；用户额外添加的文件不参与判定，也不会被删除。
+ */
+export const SKILL_MANIFEST_FILE = '.mebular-skill.json';
+const SKILL_MANIFEST_SCHEMA = 1;
+const SKILL_SPECS = [
+  {
+    name: 'mebular-memory',
+    files: [
+      ['SKILL.md', 'SKILL.md'],
+      ['MEMORY_POLICY.md', 'MEMORY_POLICY.md'],
+      ['SETUP.md', 'SETUP.md'],
+    ],
+    copyDirs: [['mcp', 'mcp']],
+  },
+  {
+    name: 'mebular-tasks',
+    files: [
+      ['tasks/SKILL.md', 'SKILL.md'],
+      ['SETUP.md', 'SETUP.md'],
+    ],
+    copyDirs: [],
+  },
+];
 
 function moduleSkillRoot() {
   return join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'skill');
 }
 
-/** 安装 mebular-memory + mebular-tasks 到该客户端首个已知 Skill 目录。 */
-export async function installSkills(id, options = {}) {
-  const desc = descriptorFor(id, options);
-  if (!desc) return { ok: false, reason: `未知客户端：${id}` };
-  const dirs = (desc.skillsDirs ?? []).filter(Boolean);
-  if (dirs.length === 0) return { ok: false, reason: '该客户端没有已知的 Skill 目录' };
-  const candidates = [
+function skillRootCandidates(options = {}) {
+  return [
     options.skillRoot,
     moduleSkillRoot(),
     join(options.repoRoot ?? process.cwd(), 'packages', 'skill'),
   ].filter((p) => typeof p === 'string' && p.length > 0);
-  const rootDir = candidates.find((p) => existsSync(join(p, 'SKILL.md')));
-  if (!rootDir) {
-    return { ok: false, reason: `未找到 Skill 源（试过：${candidates.join('、')}）`, snippet: '请在仓库内运行，或手动复制 Skill 目录' };
+}
+
+function resolveSkillRoot(options = {}) {
+  return skillRootCandidates(options).find((p) => existsSync(join(p, 'SKILL.md'))) ?? null;
+}
+
+function skillSourceVersion(rootDir) {
+  try {
+    const pkg = JSON.parse(readFileSync(join(rootDir, 'package.json'), 'utf-8'));
+    if (typeof pkg.version === 'string' && pkg.version.length > 0) return pkg.version;
+  } catch {
+    // 独立/测试 Skill 源可以没有 package.json：回落到 MCP 对外版本。
   }
-  const target = dirs[0];
-  const mem = join(target, 'mebular-memory');
-  const tasks = join(target, 'mebular-tasks');
-  await mkdir(mem, { recursive: true });
-  await mkdir(tasks, { recursive: true });
-  await copyFile(join(rootDir, 'SKILL.md'), join(mem, 'SKILL.md'));
-  await copyFile(join(rootDir, 'MEMORY_POLICY.md'), join(mem, 'MEMORY_POLICY.md'));
-  await copyFile(join(rootDir, 'SETUP.md'), join(mem, 'SETUP.md'));
-  await copyFile(join(rootDir, 'tasks', 'SKILL.md'), join(tasks, 'SKILL.md'));
-  await copyFile(join(rootDir, 'SETUP.md'), join(tasks, 'SETUP.md'));
-  return { ok: true, installed: [mem, tasks] };
+  return APP_VERSION;
+}
+
+function sha256Buffer(buffer) {
+  return createHash('sha256').update(buffer).digest('hex');
+}
+
+function listRelativeFiles(root) {
+  if (!existsSync(root)) return [];
+  const out = [];
+  const walk = (dir, prefix) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name === SKILL_MANIFEST_FILE || entry.name === '.DS_Store') continue;
+      const rel = prefix.length > 0 ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(join(dir, entry.name), rel);
+      else if (entry.isFile()) out.push(rel);
+    }
+  };
+  walk(root, '');
+  return out;
+}
+
+function hashSkillDir(dir) {
+  const out = {};
+  for (const rel of listRelativeFiles(dir)) {
+    out[rel] = sha256Buffer(readFileSync(join(dir, ...rel.split('/'))));
+  }
+  return out;
+}
+
+function readSkillMarker(dir) {
+  try {
+    const data = JSON.parse(readFileSync(join(dir, SKILL_MANIFEST_FILE), 'utf-8'));
+    if (data?.schema !== SKILL_MANIFEST_SCHEMA || data?.managedBy !== 'mebular') return null;
+    if (data.files === null || typeof data.files !== 'object' || Array.isArray(data.files)) return null;
+    const files = {};
+    for (const [key, value] of Object.entries(data.files)) {
+      if (typeof value === 'string') files[key] = value;
+    }
+    return { ...data, files };
+  } catch {
+    return null;
+  }
+}
+
+function skillSourcePairs(rootDir, spec) {
+  const pairs = [];
+  for (const [src, rel] of spec.files) {
+    const abs = join(rootDir, ...src.split('/'));
+    if (!existsSync(abs)) throw new Error(`Skill 源缺少 ${src}`);
+    pairs.push([abs, rel]);
+  }
+  for (const [srcDir, relDir] of spec.copyDirs ?? []) {
+    const absDir = join(rootDir, srcDir);
+    if (!existsSync(absDir)) throw new Error(`Skill 源缺少 ${srcDir}/（Skill 承诺随包安装接入片段）`);
+    for (const rel of listRelativeFiles(absDir)) {
+      pairs.push([join(absDir, ...rel.split('/')), `${relDir}/${rel}`]);
+    }
+  }
+  return pairs;
+}
+
+function hashesForPairs(pairs) {
+  return Object.fromEntries(pairs.map(([abs, rel]) => [rel, sha256Buffer(readFileSync(abs))]));
+}
+
+async function writeSkillFiles(dir, pairs, marker, { version, source, skill, managedHashes }) {
+  for (const [abs, rel] of pairs) {
+    const dest = join(dir, ...rel.split('/'));
+    await mkdir(dirname(dest), { recursive: true });
+    await copyFile(abs, dest);
+  }
+  // 受管旧版的多余文件（例如上一版有、这一版已移除）只按旧标记清理；绝不扫描/删除用户文件。
+  if (marker) {
+    const keep = new Set(pairs.map(([, rel]) => rel));
+    for (const rel of Object.keys(marker.files ?? {})) {
+      if (keep.has(rel)) continue;
+      await rm(join(dir, ...rel.split('/')), { force: true });
+    }
+  }
+  const files = managedHashes ?? hashesForPairs(pairs);
+  await writeFile(join(dir, SKILL_MANIFEST_FILE), `${JSON.stringify({
+    schema: SKILL_MANIFEST_SCHEMA,
+    managedBy: 'mebular',
+    skill,
+    version,
+    installedAt: new Date().toISOString(),
+    source,
+    files,
+  }, null, 2)}\n`, 'utf-8');
+  return files;
+}
+
+async function installSkillSpec(rootDir, targetDir, spec, { force = false, version, source } = {}) {
+  const dir = join(targetDir, spec.name);
+  const existed = existsSync(join(dir, 'SKILL.md'));
+  const marker = existed ? readSkillMarker(dir) : null;
+  const currentHashes = existed ? hashSkillDir(dir) : {};
+  const pairs = skillSourcePairs(rootDir, spec);
+  const sourceHashes = hashesForPairs(pairs);
+
+  if (existed && force !== true) {
+    if (!marker) return { name: spec.name, status: 'kept', dir, reason: '无受管标记（用户自定义），未覆盖' };
+    // 只比较标记登记的受管文件；用户额外添加的文件不阻止更新，也不会被删除。
+    const managedUnchanged = Object.entries(marker.files).every(([rel, hash]) => currentHashes[rel] === hash);
+    if (!managedUnchanged) {
+      return { name: spec.name, status: 'kept', dir, reason: '文件与受管标记不一致（用户修改过），未覆盖' };
+    }
+    const sourceCurrent = Object.entries(sourceHashes).every(([rel, hash]) => marker.files[rel] === hash);
+    if (marker.version === version && sourceCurrent) {
+      return { name: spec.name, status: 'unchanged', dir, version };
+    }
+  }
+
+  await writeSkillFiles(dir, pairs, marker, { version, source, skill: spec.name, managedHashes: sourceHashes });
+  return { name: spec.name, status: existed ? 'updated' : 'installed', dir, version };
+}
+
+function summarizeSkillResults(targetDir, results, { version, source } = {}) {
+  const failed = results.filter((r) => r.status === 'failed');
+  const by = (status) => results.filter((r) => r.status === status).map((r) => r.dir);
+  let status = 'unchanged';
+  if (failed.length > 0) status = 'failed';
+  else if (results.some((r) => r.status === 'installed')) status = 'installed';
+  else if (results.some((r) => r.status === 'updated')) status = 'updated';
+  else if (results.some((r) => r.status === 'kept')) status = 'kept';
+  return {
+    ok: failed.length === 0,
+    status,
+    targetDir,
+    version: version ?? null,
+    source: source ?? null,
+    installed: by('installed'),
+    updated: by('updated'),
+    kept: by('kept'),
+    unchanged: by('unchanged'),
+    skills: results,
+    ...(failed.length > 0 ? { reason: failed.map((r) => `${r.name}: ${r.reason ?? '安装失败'}`).join('；') } : {}),
+  };
+}
+
+/** 安装到指定目录（install.mjs / 显式安装共用；默认保留用户修改，force 覆盖）。 */
+export async function installSkillsToDir(targetDir, options = {}) {
+  if (typeof targetDir !== 'string' || targetDir.length === 0) {
+    return { ok: false, reason: '缺少 Skill 目标目录', skills: [], installed: [], updated: [], kept: [], unchanged: [] };
+  }
+  const rootDir = resolveSkillRoot(options);
+  if (!rootDir) {
+    return {
+      ok: false,
+      reason: `未找到 Skill 源（试过：${skillRootCandidates(options).join('、')}）`,
+      targetDir,
+      skills: [],
+      installed: [],
+      updated: [],
+      kept: [],
+      unchanged: [],
+    };
+  }
+  const version = skillSourceVersion(rootDir);
+  const source = 'mebular';
+  const results = [];
+  for (const spec of SKILL_SPECS) {
+    try {
+      results.push(await installSkillSpec(rootDir, targetDir, spec, { force: options.force === true, version, source }));
+    } catch (error) {
+      results.push({ name: spec.name, status: 'failed', dir: join(targetDir, spec.name), reason: redactSecrets(error?.message ?? error) });
+    }
+  }
+  return summarizeSkillResults(targetDir, results, { version, source });
+}
+
+function preferredSkillTarget(dirs) {
+  // 与既有 installSkills 行为一致：descriptor 的首个目录 = 客户端全局 Skill 目录。
+  // 不优先挑“已存在的 cwd 目录”，否则 cwd=仓库时会误把 Skill 写进项目。
+  return dirs[0];
+}
+
+/**
+ * 安装 mebular-memory + mebular-tasks 到该客户端首个已知 Skill 目录。
+ * 默认语义 = ensure：缺失安装、受管旧版更新、用户修改/无标记保留；`force:true` 完整覆盖。
+ */
+export async function installSkills(id, options = {}) {
+  const desc = descriptorFor(id, options);
+  if (!desc) return { ok: false, id, reason: `未知客户端：${id}`, skills: [], installed: [], updated: [], kept: [], unchanged: [] };
+  const dirs = (desc.skillsDirs ?? []).filter(Boolean);
+  if (dirs.length === 0) return { ok: false, id, reason: '该客户端没有已知的 Skill 目录', skills: [], installed: [], updated: [], kept: [], unchanged: [] };
+  const target = options.skillDir ?? preferredSkillTarget(dirs);
+  const result = await installSkillsToDir(target, options);
+  return { ...result, id };
+}
+
+function skillStateDetected(state) {
+  return Boolean(state?.anySignalHit || state?.installed);
+}
+
+/**
+ * 对所有**已检测到的客户端**做 Skill ensure（单一实现）。
+ *
+ * - 目录只来自 descriptor 的 `skillsDirs`；未检测到的客户端不创建任何目录；
+ * - 同一 Skill 目录被多个客户端共享时只处理一次（OpenCode / OpenChamber）；
+ * - 单个 Skill/客户端失败只记录，不抛出。
+ */
+export async function ensureSkills(options = {}) {
+  const wanted = Array.isArray(options.clientIds) ? new Set(options.clientIds) : null;
+  const reg = registry(options);
+  const clients = [];
+  const seenTargets = new Map();
+  for (const assistant of reg.assistants) {
+    if (wanted && !wanted.has(assistant.id)) continue;
+    const dirs = (assistant.skillsDirs ?? []).filter(Boolean);
+    if (dirs.length === 0) {
+      clients.push({ id: assistant.id, name: assistant.name, detected: false, status: 'skipped', reason: '该客户端没有已知的 Skill 目录' });
+      continue;
+    }
+    let state;
+    try {
+      state = await assistantStateAsync(assistant, options);
+    } catch (error) {
+      clients.push({ id: assistant.id, name: assistant.name, detected: false, status: 'failed', reason: `检测失败：${redactSecrets(error?.message ?? error)}` });
+      continue;
+    }
+    if (!skillStateDetected(state)) {
+      clients.push({ id: assistant.id, name: assistant.name, detected: false, status: 'skipped', reason: '未检测到该客户端' });
+      continue;
+    }
+    const target = preferredSkillTarget(dirs);
+    if (seenTargets.has(target)) {
+      clients.push({
+        id: assistant.id, name: assistant.name, detected: true, status: 'skipped',
+        targetDir: target, reason: `与 ${seenTargets.get(target)} 共享 Skill 目录，已由前者处理`,
+      });
+      continue;
+    }
+    seenTargets.set(target, assistant.id);
+    try {
+      const result = await installSkills(assistant.id, options);
+      clients.push({ ...result, name: assistant.name, detected: true });
+    } catch (error) {
+      clients.push({
+        id: assistant.id, name: assistant.name, detected: true, status: 'failed',
+        targetDir: target, reason: redactSecrets(error?.message ?? error), skills: [],
+        installed: [], updated: [], kept: [], unchanged: [],
+      });
+    }
+  }
+  const failed = clients.filter((c) => c.status === 'failed');
+  return {
+    ok: failed.length === 0,
+    clients,
+    summary: {
+      total: clients.length,
+      installed: clients.filter((c) => c.status === 'installed').length,
+      updated: clients.filter((c) => c.status === 'updated').length,
+      kept: clients.filter((c) => c.status === 'kept').length,
+      unchanged: clients.filter((c) => c.status === 'unchanged').length,
+      skipped: clients.filter((c) => c.status === 'skipped').length,
+      failed: failed.length,
+    },
+  };
+}
+
+/**
+ * 启动/初始化收敛入口（**永不阻断**调用方）：
+ * 测试环境默认关闭，避免验证脚本写真实 `~/.config/opencode/skills`；
+ * 需要显式验证自动接线时设置 `MEBULAR_SKILL_AUTOWIRE=1`。
+ */
+export async function autoEnsureSkills(options = {}) {
+  const forcedOn = process.env.MEBULAR_SKILL_AUTOWIRE === '1';
+  // 安全网：临时 MEBULAR home + 真实用户主目录 = 验证脚本形态，绝不写真实 Skill 目录。
+  const tempHomeWithRealUser = typeof options.home === 'string'
+    && options.home.startsWith(tmpdir())
+    && typeof options.userHome === 'string'
+    && !options.userHome.startsWith(tmpdir());
+  const disabled = options.enabled === false
+    || (!forcedOn && (process.env.MEBULAR_SKILL_AUTOWIRE === '0'
+      || process.env.JEST_WORKER_ID !== undefined
+      || process.env.NODE_ENV === 'test'
+      || tempHomeWithRealUser));
+  if (disabled) {
+    return { ok: true, skipped: true, reason: 'skill auto-wire disabled', clients: [], summary: { total: 0, installed: 0, updated: 0, kept: 0, unchanged: 0, skipped: 0, failed: 0 } };
+  }
+  try {
+    return await ensureSkills(options);
+  } catch (error) {
+    return {
+      ok: false,
+      skipped: false,
+      reason: `Skill 自动安装失败：${redactSecrets(error?.message ?? error)}`,
+      clients: [],
+      summary: { total: 0, installed: 0, updated: 0, kept: 0, unchanged: 0, skipped: 0, failed: 1 },
+    };
+  }
+}
+
+/**
+ * 自动修复（只做客户端接入）：
+ * 对**已检测到的**助手逐个重新执行 MCP 接入（connectClient）+ Skill force 安装 + 验证。
+ * 不触碰 memory / identity / cloud / task / audit；单项失败不影响其他项。
+ */
+export async function repairClients(options = {}) {
+  const list = await listAssistantsAsync({ ...options, refresh: true });
+  const candidates = list.assistants.filter((assistant) => skillStateDetected(assistant));
+  const clients = [];
+  for (const assistant of candidates) {
+    const base = {
+      id: assistant.id,
+      name: assistant.name,
+      detected: true,
+      stateBefore: assistant.state ?? null,
+      connect: null,
+      skills: null,
+      verify: null,
+      stateAfter: null,
+    };
+    if (assistant.writer?.strategy === 'manual' || !assistant.landing?.primaryPath) {
+      clients.push({ ...base, connect: { ok: false, skipped: true, reason: '该客户端不支持自动写入：只提供片段' }, skills: { ok: true, skipped: true, reason: '无自动接入目录' } });
+      continue;
+    }
+    try {
+      base.connect = await connectClient(assistant.id, { ...options, skipSkills: true });
+    } catch (error) {
+      base.connect = { ok: false, reason: `接入失败：${redactSecrets(error?.message ?? error)}` };
+    }
+    if ((assistant.skillsDirs ?? []).length > 0) {
+      try {
+        base.skills = await installSkills(assistant.id, { ...options, force: true });
+      } catch (error) {
+        base.skills = { ok: false, reason: `Skill 安装失败：${redactSecrets(error?.message ?? error)}` };
+      }
+    } else {
+      base.skills = { ok: true, skipped: true, reason: '该客户端没有已知的 Skill 目录' };
+    }
+    try {
+      base.verify = await verifyAssistant(assistant.id, options);
+      base.stateAfter = base.verify?.state ?? null;
+    } catch (error) {
+      base.verify = { ok: false, reason: `验证失败：${redactSecrets(error?.message ?? error)}` };
+    }
+    clients.push(base);
+  }
+  const failed = clients.filter((entry) => (entry.connect?.ok === false && entry.connect?.skipped !== true)
+    || entry.skills?.ok === false);
+  const repaired = clients.filter((entry) => entry.connect?.ok === true && entry.connect?.skipped !== true);
+  return {
+    ok: failed.length === 0,
+    scope: 'client-integration',
+    repairedAt: new Date().toISOString(),
+    clients,
+    summary: {
+      total: clients.length,
+      repaired: repaired.length,
+      failed: failed.length,
+      skipped: clients.filter((entry) => entry.connect?.skipped === true).length,
+    },
+  };
 }

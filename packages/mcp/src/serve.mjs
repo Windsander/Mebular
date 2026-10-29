@@ -1341,6 +1341,7 @@ export async function startHttpServer({
     /^\/admin\/api\/security\/recovery\/(generate|rotate)$/,
     /^\/admin\/api\/namespaces\/([^/]+)\/(rejoin|leave)$/,
     /^\/admin\/api\/service\/(install|uninstall)$/,
+    /^\/admin\/api\/repair$/,
     /^\/admin\/api\/clients\/([^/]+)\/(connect|rollback|skills|preview|verify|recheck)$/,
     /^\/admin\/api\/assistants$/,
     /^\/admin\/api\/assistants\/([^/]+)$/,
@@ -1859,6 +1860,24 @@ export async function startHttpServer({
     }
   }
 
+  // 设置 · 常用「自动修复」：只重跑客户端接入（MCP 条目 + Skill），不碰 memory/identity/cloud/task/audit。
+  async function handleRepair(req, res) {
+    const { repairClients, assistantUserHome, daemonMcpUrl } = await import('./clients.mjs');
+    const mcpUrl = daemonMcpUrl({ host: req.headers?.host, encrypted: Boolean(req.socket?.encrypted) });
+    try {
+      const result = await repairClients({ home, cwd: process.cwd(), mcpUrl, userHome: assistantUserHome() });
+      // 逐项失败也是有效结果：200 + per-client report，由 UI 展示摘要。
+      return sendJson(res, 200, result);
+    } catch (error) {
+      return sendJson(res, 500, {
+        ok: false,
+        scope: 'client-integration',
+        error: 'repair_failed',
+        message: `自动修复失败：${String(error?.message ?? error)}`,
+      });
+    }
+  }
+
   // D2 写端点实现（memory.admin scope + CSRF 已在 handleAdminWrite 校验）
   async function applyAdminWrite(req, res, path, body) {
     if (!app || !service) {
@@ -1873,6 +1892,9 @@ export async function startHttpServer({
     if (path === '/admin/api/clouds/inspect') return handleCloudInspect(req, res, body);
     if (path === '/admin/api/clouds/join') return handleCloudJoin(req, res, body);
     if (path === '/admin/api/clouds/rename') return handleCloudRename(req, res, body);
+
+    // 自动修复：客户端接入修复，**不**经 securityWriteGate（不写记忆/安全状态）。
+    if (path === '/admin/api/repair') return handleRepair(req, res);
 
     // S2：安全三档写端点门禁（medium 动态码 / high 会签或恢复码；low 放行）。
     const gateInput = parseJsonBody(body) ?? {};
@@ -3254,6 +3276,15 @@ export async function startHttpServer({
               },
             });
             await activateRuntime(next, { viaHotInit: true });
+            // 首次初始化成功：对已检测到的客户端 ensure Skill（后台执行；失败不阻断初始化响应）。
+            void import('./clients.mjs')
+              .then(({ autoEnsureSkills, assistantUserHome }) => autoEnsureSkills({ home, userHome: assistantUserHome(), cwd: process.cwd() }))
+              .then((result) => {
+                if (result?.summary?.failed > 0 || (result?.ok === false && result?.skipped !== true)) {
+                  console.error(`SKILL_ENSURE_PENDING_REPAIR ${result?.reason ?? `${result?.summary?.failed ?? 1} client(s)`}`);
+                }
+              })
+              .catch((error) => console.error(`SKILL_ENSURE_FAILED ${error?.code ?? 'ERROR'}`));
             return sendJson(res, 200, {
               ok: true,
               ...result,

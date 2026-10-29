@@ -855,6 +855,12 @@ try {
       /async function refreshOnce\(\) \{\s*\/\/[^\n]*\n(?:\s*\/\/[^\n]*\n)*\s*if \(state\.locked\) return;/.test(consoleSrcOnboard)
         && /function startEvents\(\) \{\s*\n\s*if \(state\.locked/.test(consoleSrcOnboard),
       'refreshOnce/startEvents locked 闸门');
+    check('P3 锁定设置去重：不再渲染新建/加入按钮，保留顶栏引导与诊断',
+      !consoleSrcOnboard.includes('data-locked-action')
+        && consoleSrcOnboard.includes("t('lock.settings.guide')")
+        && consoleSrcOnboard.includes("t('lock.settings.diagnostics')")
+        && consoleSrcOnboard.includes("t('lock.settings.copy')"),
+      '无 data-locked-action；guide 指向顶栏');
     check('P3 无 reload 解锁：initialized → unlockConsole → enterNormalConsole（幂等）',
       /res\?\.initialized === true/.test(consoleSrcOnboard)
         && /unlockConsole/.test(consoleSrcOnboard)
@@ -1031,6 +1037,12 @@ try {
         && jsSrcH1.includes('data-cli-action') && jsSrcH1.includes('renderSettings(deepLink.openSettings)')
         && asstSrcH1.includes('connect-diff') && asstSrcH1.includes('assistantsPanelHtml'),
       '专区 + 别名 + 叠加层');
+    check('设置·常用自动修复接线：独立行 + 二次确认 + POST /admin/api/repair + 逐项摘要（不依赖 openWizard）',
+      asstSrcH1.includes('repairRowHtml') && asstSrcH1.includes("settings.repair.title")
+        && jsSrcH1.includes('repairRowHtml(state.repair)')
+        && jsSrcH1.includes("'/admin/api/repair'") && jsSrcH1.includes("t('settings.repair.confirmBody')")
+        && jsSrcH1.includes("t('settings.repair.partial'"),
+      '独立于重启向导');
   }
 
   // ---------- 邀请设备（T2 令牌加入） ----------

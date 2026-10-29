@@ -1313,13 +1313,52 @@ export async function connectClient(id, options = {}) {
 }
 
 /**
+ * 自动 reconcile 的 JSON 专用写入：只改 `<keyPath>.url`，保留 mebular 条目里的
+ * `type` / `headers` / 其他自定义字段；写前备份、失败回滚、原子写。
+ * 结构未知/解析失败 → 返回错误，交回状态检测与手动兜底。
+ */
+async function reconcileJsonMebularUrl(assistant, mcpUrl) {
+  const primary = assistant.landing?.primaryPath ?? null;
+  if (!primary) return { ok: false, reason: '缺少配置路径' };
+  if (isForbidden(assistant, primary)) return { ok: false, reason: `禁写路径（landing.forbiddenPaths）：${primary}` };
+  const text = safeReadText(primary);
+  if (text === null) return { ok: false, reason: '配置文件不存在' };
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (error) {
+    return { ok: false, reason: `配置不是合法 JSON（${error instanceof Error ? error.message : String(error)}）` };
+  }
+  const path = keyPathOf(assistant.landing?.format ?? assistant.format);
+  const stored = walkGet(parsed, path).value ?? null;
+  if (stored === null || typeof stored !== 'object' || Array.isArray(stored)) {
+    return { ok: false, reason: 'mebular 条目结构未知（不自动改写）' };
+  }
+  if (stored.url === mcpUrl) return { ok: true, changed: false, configPath: primary, backupPath: null };
+  let node = parsed;
+  for (const key of path.slice(0, -1)) node = node?.[key];
+  if (node === null || typeof node !== 'object') return { ok: false, reason: 'mebular 父级结构未知（不自动改写）' };
+  node[path[path.length - 1]] = { ...stored, url: mcpUrl };
+  const backupPath = `${primary}.bak-${tsStamp()}`;
+  await copyFile(primary, backupPath);
+  try {
+    await atomicWrite(primary, `${JSON.stringify(parsed, null, 2)}\n`);
+    clearAssistantsCache();
+  } catch (error) {
+    await copyFile(backupPath, primary);
+    return { ok: false, reason: `写入失败已回滚：${redactSecrets(error?.message ?? error)}` };
+  }
+  return { ok: true, changed: true, configPath: primary, backupPath };
+}
+
+/**
  * 运行时就绪后的**自动自愈**（普通旧端口漂移的主路径）：
  * 只把**已存在且配置为本机 loopback** 的 Mebular HTTP 条目幂等更新到当前 `mcpUrl`。
  *
  * 边界（刻意保守）：
  * - 不创建新客户端配置（`exists !== true` 跳过）；不 force Skill、不调用 installSkills；
  * - 非 loopback / 用户自定义远端 URL 不覆盖（留给状态检测显示“需要修复/请确认”与手动兜底）；
- * - 只改 Mebular 自己的入口，保留其他 MCP servers / 其他配置；
+ * - 只改 Mebular 自己的入口，保留其他 MCP servers / 其他配置；JSON 条目只改 url，保留其余字段；
  * - 不触碰 memory / identity / storage / sync / cloud / subscription / task / audit。
  *
  * 单项失败只记录，返回结构化报告；调用方（runtime ready）绝不因此阻断启动。
@@ -1347,7 +1386,10 @@ export async function reconcileClientEndpoints(options = {}) {
     // 主路径只自动处理 loopback 旧端点；stdio / 远端自定义 / 未接入都不在此处写。
     if (landing.exists !== true || landing.staleUrl !== true) continue;
     try {
-      const result = await connectClient(assistant.id, { ...options, mcpUrl, skipSkills: true });
+      const adapter = adapterFor(assistant.landing?.format ?? assistant.format);
+      const result = adapter?.serialization === 'json'
+        ? await reconcileJsonMebularUrl(assistant, mcpUrl)
+        : await connectClient(assistant.id, { ...options, mcpUrl, skipSkills: true });
       clients.push({
         id: assistant.id,
         name: assistant.name,

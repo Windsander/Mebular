@@ -380,7 +380,7 @@ describe('MCP URL 陈旧检测与自动修复', () => {
     await mkdir(dirname(cfg), { recursive: true });
     await writeFile(cfg, JSON.stringify({
       theme: 'dark',
-      mcp: { servers: { other: { keep: 1 }, mebular: { type: 'remote', url: OLD } } },
+      mcp: { servers: { other: { keep: 1 }, mebular: { type: 'remote', url: OLD, headers: { Authorization: 'Bearer keep-me' } } } },
     }, null, 2));
 
     const first = await reconcileClientEndpoints(opts({ mcpUrl: CURRENT }));
@@ -390,7 +390,7 @@ describe('MCP URL 陈旧检测与自动修复', () => {
     const written = JSON.parse(await readFile(cfg, 'utf-8'));
     expect(written.theme).toBe('dark');
     expect(written.mcp.servers.other).toEqual({ keep: 1 });
-    expect(written.mcp.servers.mebular).toEqual({ type: 'remote', url: CURRENT });
+    expect(written.mcp.servers.mebular).toEqual({ type: 'remote', url: CURRENT, headers: { Authorization: 'Bearer keep-me' } });
 
     const second = await reconcileClientEndpoints(opts({ mcpUrl: CURRENT }));
     expect(second.summary).toMatchObject({ total: 0, changed: 0, failed: 0 });

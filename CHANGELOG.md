@@ -42,6 +42,8 @@ ship as `0.2.4`; no runtime protocol or data-format changes are included.
 
 - PR #288 required checks: 8/8 passed, including Windows, build/test/lint, desktop smoke, WAN NAT, semantic recall, and real DSH E2E minimum/latest/Node 22.
 - Local gates: full Jest (excluding the known local 0.2.2 App port conflict), `verify:console`, `verify:mcp:skill`, `verify:onboarding`, `verify:daemon`, `check:i18n`, and `check:surface-parity`.
+- Packaging dry-run [run 40813530946](https://github.com/Windsander/Mebular/actions/runs/40813530946) passed: verify + 6 tarballs, macOS/Windows/Linux installers, and real DSH E2E minimum/latest/Node 22 minimum.
+- Packaged 0.2.4 runtime smoke in a temporary HOME installed `mebular-memory` and `mebular-tasks` successfully; the real user HOME was not modified.
 
 ## [v0.2.3] - 2026-10-28
 

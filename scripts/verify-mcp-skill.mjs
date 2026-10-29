@@ -262,21 +262,49 @@ try {
         && existsSync(join(installTarget, 'mebular-memory', 'mcp', 'claude.json')));
   }
 
-  // ---------- install.mjs --global：已存在 OpenCode/OpenChamber 客户端才写其 Skill 目录 ----------
+  // ---------- install.mjs --global：只写已检测客户端的全局 Skill 目录 ----------
   {
     const globalHome = join(dir, 'global-home');
     await mkdir(join(globalHome, '.config', 'opencode'), { recursive: true });
     await writeFile(join(globalHome, '.config', 'opencode', 'opencode.json'), '{}', 'utf-8');
-    run([join(skillDir, 'scripts', 'install.mjs'), '--global'], { HOME: globalHome }, globalHome);
-    check('install.mjs --global 安装到 OpenChamber 的 ~/.config/opencode/skills',
-      existsSync(join(globalHome, '.config', 'opencode', 'skills', 'mebular-memory', 'SKILL.md'))
-        && existsSync(join(globalHome, '.config', 'opencode', 'skills', 'mebular-memory', 'mcp', 'opencode.json')));
+    await mkdir(join(globalHome, '.hermes'), { recursive: true });
+    await writeFile(join(globalHome, '.hermes', 'config.yaml'), 'mcp_servers: {}\n', 'utf-8');
+    await writeFile(join(globalHome, '.claude.json'), '{}', 'utf-8');
+    await mkdir(join(globalHome, '.cursor'), { recursive: true });
+    await writeFile(join(globalHome, '.cursor', 'mcp.json'), '{}', 'utf-8');
+    await mkdir(join(globalHome, '.dsh'), { recursive: true });
+    const globalProject = join(dir, 'global-project');
+    await mkdir(globalProject, { recursive: true });
+    run([join(skillDir, 'scripts', 'install.mjs'), '--global'], { HOME: globalHome, USERPROFILE: globalHome }, globalProject);
+    const globalTargets = [
+      ['OpenCode/OpenChamber', join(globalHome, '.config', 'opencode', 'skills'), 'opencode.json'],
+      ['Hermes', join(globalHome, '.hermes', 'skills'), null],
+      ['Claude Code', join(globalHome, '.claude', 'skills'), null],
+      ['Cursor', join(globalHome, '.cursor', 'skills'), null],
+      ['DSH', join(globalHome, '.agents', 'skills'), null],
+    ];
+    for (const [label, target, fragment] of globalTargets) {
+      check(`install.mjs --global 安装到 ${label} 的全局 Skill 目录（${target.replace(globalHome, '~')}）`,
+        existsSync(join(target, 'mebular-memory', 'SKILL.md'))
+          && existsSync(join(target, 'mebular-tasks', 'SKILL.md'))
+          && (fragment === null || existsSync(join(target, 'mebular-memory', 'mcp', fragment))));
+    }
 
     const bareHome = join(dir, 'bare-home');
+    const bareProject = join(dir, 'bare-project');
     await mkdir(bareHome, { recursive: true });
-    run([join(skillDir, 'scripts', 'install.mjs'), '--global'], { HOME: bareHome }, bareHome);
-    check('install.mjs --global 未检测到 OpenCode 客户端时不创建 ~/.config/opencode/skills',
-      !existsSync(join(bareHome, '.config', 'opencode', 'skills')));
+    await mkdir(bareProject, { recursive: true });
+    run([join(skillDir, 'scripts', 'install.mjs'), '--global'], { HOME: bareHome, USERPROFILE: bareHome }, bareProject);
+    const absentTargets = [
+      ['.config', 'opencode', 'skills'],
+      ['.hermes', 'skills'],
+      ['.claude', 'skills'],
+      ['.cursor', 'skills'],
+      ['.agents', 'skills'],
+    ];
+    const created = absentTargets.filter((parts) => existsSync(join(bareHome, ...parts)));
+    check('install.mjs --global 未检测到客户端时不创建任何全局 Skill 目录',
+      created.length === 0, created.map((parts) => parts.join('/')).join(', '));
   }
 } catch (error) {
   check('G6.4 验证', false, String(error?.message ?? error).substring(0, 400));

@@ -49,6 +49,8 @@ Mebular 是一个本地优先的分布式图记忆层。通过 MCP 工具读写�
 
 本 Skill 目录附各客户端 MCP 接入片段（见 `mcp/`）；`scripts/install.mjs` 可将本 Skill（含 `mcp/` 片段）安装到常见 Skill 目录。
 
+支持的文件夹式 Skill 客户端（`--global` 只写**已检测到**的客户端）：OpenCode/OpenChamber `~/.config/opencode/skills`、Hermes `~/.hermes/skills`、Claude Code `~/.claude/skills`、Cursor `~/.cursor/skills`、DeepSeek Harness `~/.agents/skills`；Claude Desktop 无文件夹式自动目录（用 zip/UI 上传）。
+
 **会话里没有 Mebular 工具时的第一步**（每次会话）：
 
 1. **先看 App/守护是否已在跑**：读 `HOME_DIR="${MEBULAR_HOME:-$HOME/.mebular}"` 下的 `runtime.json`，用其中的 `host`/`port` 请求 `/healthz`；200 → 已在跑，直接接入，**不要因为 `command -v mebular` 失败就再装一套 CLI**。

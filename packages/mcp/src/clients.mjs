@@ -245,7 +245,7 @@ export function builtinAssistants(options = {}) {
         'opencode.managed.json 为 App 所有且会被重写，禁写',
         'opencode mcp list 经运行服务回答，只读但勿频繁调用',
       ],
-      skillsDirs: [join(userHome, '.config', 'opencode', 'skills')],
+      skillsDirs: [join(userHome, '.config', 'opencode', 'skills'), join(cwd, '.opencode', 'skills')],
       reuseOf: 'opencode',
       note: 'OpenChamber 复用 OpenCode 的 global 配置（接一次即可）',
     },
@@ -255,6 +255,7 @@ export function builtinAssistants(options = {}) {
       probe: {
         signals: [
           { kind: 'config-path', paths: [hermesPath] },
+          { kind: 'dir', paths: [join(userHome, '.hermes')] },
           { kind: 'cli', command: 'hermes --version', timeoutMs: 2500 },
           { kind: 'path', paths: [join(userHome, '.local', 'bin', 'hermes')] },
         ],
@@ -269,7 +270,7 @@ export function builtinAssistants(options = {}) {
         'Hermes 无法 env 沙箱（HERMES_CONFIG_PATH 被剥离）→ 写前字节级备份 + 失败回滚为硬要求',
         '写入仅经 `hermes config set --force`（ruamel 保注释）；未知子键必须 --force',
       ],
-      skillsDirs: [join(userHome, '.agents', 'skills')],
+      skillsDirs: [join(userHome, '.hermes', 'skills')],
       reuseOf: null,
       note: 'Hermes 的 MCP 配置在 ~/.hermes/config.yaml',
     },
@@ -287,19 +288,19 @@ export function builtinAssistants(options = {}) {
       verify: { cli: { command: 'opencode mcp list', expect: 'mebular', timeoutMs: 4000 }, configReadback: true },
       activation: { kind: 'user-reload', note: 'OpenCode 侧重载/重启后生效' },
       risks: ['opencode mcp list 经运行服务回答，只读但勿频繁调用'],
-      skillsDirs: [join(userHome, '.config', 'opencode', 'skills'), join(userHome, '.agents', 'skills'), join(cwd, '.agents', 'skills'), join(cwd, '.opencode', 'skills')],
+      skillsDirs: [join(userHome, '.config', 'opencode', 'skills'), join(cwd, '.opencode', 'skills')],
       reuseOf: null,
       note: null,
     },
     {
       id: 'claude-code', name: 'Claude Code', kind: 'file', format: 'json-mcpServers',
       landing: { primaryPath: join(userHome, '.claude.json'), keyPath: 'mcpServers.mebular', forbiddenPaths: [], format: 'json-mcpServers', httpShape: 'claude-http' },
-      probe: { signals: [{ kind: 'config-path', paths: [join(userHome, '.claude.json')] }, { kind: 'cli', command: 'claude --version', timeoutMs: 1500 }] },
+      probe: { signals: [{ kind: 'config-path', paths: [join(userHome, '.claude.json')] }, { kind: 'dir', paths: [join(userHome, '.claude')] }, { kind: 'cli', command: 'claude --version', timeoutMs: 1500 }] },
       writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
       verify: { configReadback: true },
       activation: { kind: 'user-reload', note: '重启 Claude Code 后生效' },
       risks: [],
-      skillsDirs: [join(userHome, '.agents', 'skills'), join(cwd, '.agents', 'skills')],
+      skillsDirs: [join(userHome, '.claude', 'skills'), join(cwd, '.claude', 'skills')],
       reuseOf: null, note: null,
     },
     {
@@ -319,17 +320,24 @@ export function builtinAssistants(options = {}) {
       writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
       verify: { configReadback: true },
       activation: { kind: 'user-reload', note: '重启 Cursor 后生效' },
-      risks: ['HTTP /mcp 默认只监听回环：客户端与守护须**同机**（跨机请在 config 里启用 TLS+鉴权并用可达主机名）'], skillsDirs: [], reuseOf: null, note: null,
+      risks: ['HTTP /mcp 默认只监听回环：客户端与守护须**同机**（跨机请在 config 里启用 TLS+鉴权并用可达主机名）'],
+      skillsDirs: [join(userHome, '.cursor', 'skills'), join(cwd, '.cursor', 'skills')], reuseOf: null, note: null,
     },
     {
       id: 'dsh', name: 'DeepSeek Harness (DSH)', kind: 'file', format: 'dsh',
       landing: { primaryPath: join(cwd, '.dsh', 'cordis.yml'), keyPath: 'plugins', forbiddenPaths: [], format: 'dsh' },
-      probe: { signals: [{ kind: 'config-path', paths: [join(cwd, '.dsh', 'cordis.yml')] }, { kind: 'dir', paths: [join(cwd, '.dsh')] }] },
+      probe: {
+        signals: [
+          { kind: 'config-path', paths: [join(cwd, '.dsh', 'cordis.yml')] },
+          // DSH_HOME 默认 ~/.dsh；全局安装也要能被自动检测（Skill 仍写 ~/.agents/skills）。
+          { kind: 'dir', paths: [join(cwd, '.dsh'), join(userHome, '.dsh')] },
+        ],
+      },
       writer: { strategy: 'merge-key', command: null, backup: 'byte-level', atomic: true },
       verify: { configReadback: true },
       activation: { kind: 'user-reload', note: '重启 DSH 后生效' },
       risks: ['DSH 配置为 YAML 插件列表：结构未知时不自动改写', 'HTTP /mcp 默认只监听回环：客户端与守护须同机（跨机请启用 TLS+鉴权并用可达主机名）'],
-      skillsDirs: [join(cwd, '.dsh', 'skills'), join(userHome, '.agents', 'skills')], reuseOf: null, note: null,
+      skillsDirs: [join(userHome, '.agents', 'skills'), join(cwd, '.dsh', 'skills')], reuseOf: null, note: null,
     },
     {
       id: 'generic', name: '其他 AI 助手（复制片段）', kind: 'snippet', format: 'generic-snippet',
@@ -1594,6 +1602,7 @@ export async function repairClients(options = {}) {
   const list = await listAssistantsAsync({ ...options, refresh: true });
   const candidates = list.assistants.filter((assistant) => skillStateDetected(assistant));
   const clients = [];
+  const seenSkillTargets = new Map();
   for (const assistant of candidates) {
     const base = {
       id: assistant.id,
@@ -1614,11 +1623,33 @@ export async function repairClients(options = {}) {
     } catch (error) {
       base.connect = { ok: false, reason: `接入失败：${redactSecrets(error?.message ?? error)}` };
     }
-    if ((assistant.skillsDirs ?? []).length > 0) {
-      try {
-        base.skills = await installSkills(assistant.id, { ...options, force: true });
-      } catch (error) {
-        base.skills = { ok: false, reason: `Skill 安装失败：${redactSecrets(error?.message ?? error)}` };
+    const skillDirs = (assistant.skillsDirs ?? []).filter(Boolean);
+    if (skillDirs.length > 0) {
+      // 与 ensureSkills 同判据：共享全局目录（OpenChamber / OpenCode）只 force 安装一次。
+      const target = preferredSkillTarget(skillDirs);
+      const shared = seenSkillTargets.get(target);
+      if (shared) {
+        // 共享目录（OpenChamber / OpenCode）复用首次安装结果，但明确标注 skipped；实际只写一次。
+        base.skills = {
+          ...(shared.result ?? {}),
+          id: assistant.id,
+          ok: shared.result?.ok ?? true,
+          skipped: true,
+          targetDir: target,
+          sharedWith: shared.id,
+          reason: `与 ${shared.id} 共享 Skill 目录，已由前者处理`,
+        };
+      } else {
+        seenSkillTargets.set(target, { id: assistant.id, result: null });
+        try {
+          const result = await installSkills(assistant.id, { ...options, force: true });
+          seenSkillTargets.set(target, { id: assistant.id, result });
+          base.skills = result;
+        } catch (error) {
+          const failure = { ok: false, targetDir: target, reason: `Skill 安装失败：${redactSecrets(error?.message ?? error)}` };
+          seenSkillTargets.set(target, { id: assistant.id, result: failure });
+          base.skills = failure;
+        }
       }
     } else {
       base.skills = { ok: true, skipped: true, reason: '该客户端没有已知的 Skill 目录' };

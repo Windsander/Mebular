@@ -101,7 +101,12 @@ const FALLBACK_SPECS = [
   },
 ];
 
-const safeRel = (rel) => typeof rel === 'string' && rel.length > 0 && !rel.startsWith('/') && !rel.split('/').includes('..');
+// 与 clients.mjs#isSafeManagedRelPath 一致：拒绝绝对路径/盘符/反斜杠/空段/./..。
+const safeRel = (rel) => {
+  if (typeof rel !== 'string' || rel.length === 0 || rel.includes('\0') || rel.includes('\\')) return false;
+  if (rel.startsWith('/') || /^[A-Za-z]:/.test(rel)) return false;
+  return rel.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
+};
 
 function listRelativeFiles(root) {
   if (!existsSync(root)) return [];

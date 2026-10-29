@@ -82,4 +82,20 @@ describe('@mebular/skill 独立包回落安装', () => {
     expect(updated.status).toBe(0);
     expect(JSON.parse(await readFile(markerPath, 'utf-8')).version).not.toBe('0.0.1');
   });
+
+  it('fallback force：标记里的 ../outside.txt 不会删除目标目录外文件', async () => {
+    expect(runInstall(target).status).toBe(0);
+    const outside = join(target, 'outside.txt');
+    await writeFile(outside, 'DO NOT DELETE', 'utf-8');
+    const markerPath = join(mem(), '.mebular-skill.json');
+    const marker = JSON.parse(await readFile(markerPath, 'utf-8'));
+    marker.files['../outside.txt'] = 'deadbeef';
+    marker.files['..\\outside.txt'] = 'deadbeef';
+    await writeFile(markerPath, JSON.stringify(marker, null, 2), 'utf-8');
+
+    const forced = runInstall(target, ['--force']);
+    expect(forced.status).toBe(0);
+    expect(existsSync(outside)).toBe(true);
+    expect(await readFile(outside, 'utf-8')).toBe('DO NOT DELETE');
+  });
 });

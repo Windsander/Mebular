@@ -1309,6 +1309,17 @@ function hashSkillDir(dir) {
   return out;
 }
 
+/**
+ * 受管文件相对路径校验（POSIX / Windows 共用）：
+ * 拒绝绝对路径、盘符、反斜杠分隔、空段、`.`/`..` 段与非字符串。
+ * 只用于 `marker.files` 的清理；不安全的 key 直接跳过，绝不触碰 Skill 目录外。
+ */
+export function isSafeManagedRelPath(rel) {
+  if (typeof rel !== 'string' || rel.length === 0 || rel.includes('\0') || rel.includes('\\')) return false;
+  if (rel.startsWith('/') || /^[A-Za-z]:/.test(rel)) return false;
+  return rel.split('/').every((part) => part.length > 0 && part !== '.' && part !== '..');
+}
+
 function readSkillMarker(dir) {
   try {
     const data = JSON.parse(readFileSync(join(dir, SKILL_MANIFEST_FILE), 'utf-8'));
@@ -1355,7 +1366,7 @@ async function writeSkillFiles(dir, pairs, marker, { version, source, skill, man
   if (marker) {
     const keep = new Set(pairs.map(([, rel]) => rel));
     for (const rel of Object.keys(marker.files ?? {})) {
-      if (keep.has(rel)) continue;
+      if (keep.has(rel) || !isSafeManagedRelPath(rel)) continue;
       await rm(join(dir, ...rel.split('/')), { force: true });
     }
   }

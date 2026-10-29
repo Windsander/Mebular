@@ -75,7 +75,13 @@ license: MIT（与仓库一致）
 - **落面 = global `~/.config/opencode/opencode.json` 的 `mcp.servers.mebular`**。
   `OPENCODE_CONFIG` 是**合并、非取代**：`opencode debug config` 来源列表同时含真实
   global（index 0）与 managed（index 2）→ global 会被读取。
-- **禁止**写 `~/.config/openchamber/opencode.managed.json`（App 所有、只放 plugins、会被重写）。
+- remote 条目固定 `{"type":"remote","url":…,"oauth":false,"codemode":false}`：
+  `oauth:false` 防止宿主对本地 Mebular 发起 OAuth；`codemode:false` 让工具保持直连，
+  不被 OpenCode 2 Code Mode 的目录折叠隐藏。
+- 已有 mebular 条目只覆盖 `type/url/oauth/codemode`；`headers`、`timeout`、`protocol`
+  等用户字段保留，其他配置键文本不变（原子写 + 字节级备份 + 失败回滚 + 幂等）。
+- **禁止**写 `~/.config/openchamber/opencode.managed.json` **及**
+  `~/.config/openchamber/run/instances/*/opencode.managed.json`（App 所有、会被重写）。
 - 生效：写完由**用户在 App 侧重载/重启**（产品不得发 `opencode reload` 干扰运行服务）。
 - 验证钩子（只读、经运行服务回答、**勿频繁**）：`opencode mcp list`（应出现 mebular）、
   `opencode debug config`（来源 0 的 keys 含 `mcp`）。
@@ -98,6 +104,17 @@ license: MIT（与仓库一致）
 现有写入产出 `mcp.<name>` 形状，而正确 schema 可能是 **`mcp.servers.<name>`**
 （以 `opencode mcp add` 产出为真源）——这是「接了不生效」的头号嫌疑。
 实现轮**必须**在沙箱对照 `opencode mcp list` 验证并修正后，才允许宣布接入完成。
+
+### 2.4 OpenChamber 原生 memory 共存（只读守卫）
+
+- 只读探测三件事：env `OPENCHAMBER_MEMORY_ENABLE`、`settings.json` 的
+  `agentMemoryToolEnabled`、`memory.json` 是否存在（global `~/.config/openchamber/memory.json`
+  与 `projects/*/memory.json`）。**不读取 entries、不写、不导入、不替换、不双写**，
+  也不注册 `openchamber_memory` 工具。
+- 原生 memory 开启时，Mebular 沉浸式默认 **tool-only**，必须由用户显式 opt-in；
+  轻量 MCP 不受影响。
+- 状态/描述必须如实给出三路证据与 `tool-only / 需显式 opt-in` 口径；不得声称已接管、
+  已迁移或已同步原生 memory。
 
 ## 三、三态诚实（判据与动作分离）
 

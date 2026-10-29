@@ -390,7 +390,8 @@ describe('MCP URL 陈旧检测与自动修复', () => {
     const written = JSON.parse(await readFile(cfg, 'utf-8'));
     expect(written.theme).toBe('dark');
     expect(written.mcp.servers.other).toEqual({ keep: 1 });
-    expect(written.mcp.servers.mebular).toEqual({ type: 'remote', url: CURRENT, headers: { Authorization: 'Bearer keep-me' } });
+    // OpenChamber 与 OpenCode 共用同一文件：先由 OpenChamber 描述符补齐 oauth:false / codemode:false。
+    expect(written.mcp.servers.mebular).toEqual({ type: 'remote', url: CURRENT, headers: { Authorization: 'Bearer keep-me' }, oauth: false, codemode: false });
 
     const second = await reconcileClientEndpoints(opts({ mcpUrl: CURRENT }));
     expect(second.summary).toMatchObject({ total: 0, changed: 0, failed: 0 });
@@ -458,7 +459,8 @@ describe('MCP URL 陈旧检测与自动修复', () => {
     const written = JSON.parse(await readFile(cfg, 'utf-8'));
     expect(written.theme).toBe('dark');
     expect(written.mcp.servers.other).toEqual({ keep: 1 });
-    expect(written.mcp.servers.mebular).toEqual({ type: 'remote', url: CURRENT });
+    // 同一落面由 OpenChamber 条目补齐固定字段（oauth:false / codemode:false）。
+    expect(written.mcp.servers.mebular).toEqual({ type: 'remote', url: CURRENT, oauth: false, codemode: false });
 
     const after = assistantState(descriptorFor('opencode', opts()), opts({ mcpUrl: CURRENT }));
     expect(after.state).toBe('connected');

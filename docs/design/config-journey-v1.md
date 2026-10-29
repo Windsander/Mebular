@@ -65,7 +65,9 @@ schema 六要素见接入契约 §2：**probe（探测）/ landing（落面+格�
 - probe 多信号并集：`config-path` / `cli` / `app-bundle` / `process`，每条信号独立证伪；命中详情随状态上报。
 - 落面以 F-EXP-1 实测为准（修硬伤③，真实值已入契约 §2.1/§2.2）：
   - **OpenChamber**：global `~/.config/opencode/opencode.json` 的 `mcp.servers.mebular`
-    （`OPENCODE_CONFIG` 合并而非取代，global 会被读取）；**禁写** `~/.config/openchamber/opencode.managed.json`（App 私有会被重写）；
+    （`OPENCODE_CONFIG` 合并而非取代，global 会被读取）；remote 条目固定 `oauth:false` /
+    `codemode:false`；**禁写** `~/.config/openchamber/opencode.managed.json` 及
+    `run/instances/*/opencode.managed.json`（App 私有会被重写）；
     生效 = 用户在 App 侧重载/重启（产品不得发 `opencode reload`）；验证 `opencode mcp list`（只读、勿频繁）。
   - **Hermes**：`~/.hermes/config.yaml` 的 `mcp_servers.mebular`；写入**必须**经
     `hermes config set --force`（保注释；无法 env 沙箱 → 字节级备份+失败回滚为硬要求）；
@@ -280,7 +282,7 @@ schema 六要素见接入契约 §2：**probe（探测）/ landing（落面+格�
 **模型与检测**
 - A-1 注册表驱动：`/admin/api/clients` 输出 = 内置 ∪ 自定义条目；前端无写死名单/数量（grep 无 `n/7` 式常量）。
 - A-2 三态判据随状态上报：每条客户端含 `evidence`（逐信号命中/未命中 + 来源）。
-- A-3 OpenChamber 落面 = global `~/.config/opencode/opencode.json` 的 `mcp.servers.mebular`；**禁写** `opencode.managed.json`（实现 grep 无该路径写入分支）；验证钩子 `opencode mcp list` 只读调用。
+- A-3 OpenChamber 落面 = global `~/.config/opencode/opencode.json` 的 `mcp.servers.mebular`（remote + `oauth:false` + `codemode:false`）；**禁写** `opencode.managed.json`（含 `run/instances/*`；实现 grep 无该路径写入分支）；验证钩子 `opencode mcp list` 只读调用。
 - A-4 配置文件不存在但 CLI 存在 → 判「已装·未接入」（不假阴性）；配置存在 CLI 不在 → 仍「已装」但 evidence 标明（不假阳性静默）。
 - A-5 Hermes 内置条目：落面 `~/.hermes/config.yaml` 的 `mcp_servers.mebular`；写入仅经 `hermes config set --force`；写前字节级备份+失败回滚；验证 `hermes mcp test mebular` rc=0 ∧ 输出含 `✓ Connected` ∧ `Tools discovered: N≥1`；activation=hot（无重启清单步）。
 - A-20 旧 loopback MCP URL（如 56007）在 runtime ready 后自动 reconcile 到当前 `mcpUrl`（幂等、只改 Mebular 入口、保留其他 MCP servers/配置、不 force Skill）；用户自定义非 loopback 远端 URL 不自动覆盖，状态为「需要修复/请确认」；手动「自动修复」仅作显式兜底。

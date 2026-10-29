@@ -66,7 +66,8 @@ describe('F-FIX-B 条目形状 = 守护 HTTP /mcp', () => {
     const url = 'http://127.0.0.1:7331/mcp';
     const items = listAssistants(opts({ mcpUrl: url })).assistants;
     const by = (id) => items.find((a) => a.id === id);
-    expect(JSON.parse(by('openchamber').snippet).mcp.servers.mebular).toEqual({ type: 'remote', url });
+    // OpenChamber descriptor 固定 oauth:false / codemode:false（不弹 OAuth、不让 Code Mode 藏工具）
+    expect(JSON.parse(by('openchamber').snippet).mcp.servers.mebular).toEqual({ type: 'remote', url, oauth: false, codemode: false });
     expect(JSON.parse(by('opencode').snippet).mcp.servers.mebular).toEqual({ type: 'remote', url });
     expect(JSON.parse(by('claude-code').snippet).mcpServers.mebular).toEqual({ type: 'http', url });
     expect(JSON.parse(by('claude-desktop').snippet).mcpServers.mebular).toEqual({ type: 'http', url });

@@ -15,6 +15,34 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 The GitHub Release body is extracted from this file: everything between the release's
 `## [vX.Y.Z]` heading and the next `## [` heading. Keep that section self-contained.
 
+## [v0.2.4] - 2026-10-29
+
+Agent adoption and Skill deployment release. All six npm packages and the desktop app
+ship as `0.2.4`; no runtime protocol or data-format changes are included.
+
+### Added
+
+- **Skill as a deployment artifact** — `connectClient`, App initialization, daemon startup, `mebular init`, and the `fleet --daemon` service path now ensure `mebular-memory` and `mebular-tasks` for detected clients. Installs include the `mcp/` fragments and a managed manifest.
+- **Settings · Common “Auto repair”** — one-click, confirmed repair of detected assistant MCP entries and Skills. Failures are reported per client with redacted, expandable details.
+- **Agent routing hints** — all 29 MCP tools now start their descriptions with “何时用”, and the MCP server publishes global `instructions` for routing and memory/task discipline.
+- **SETUP runtime detection** — the agent playbook recognizes `runtime.json` + `/healthz` first, so an App runtime without a PATH CLI is not treated as uninstalled.
+
+### Changed
+
+- User-modified or unmarked Skills are preserved by default; only an explicit “Auto repair” force-overwrites the managed client assets.
+- The locked settings page no longer duplicates “New cloud / Join cloud”; those actions stay in the top bar, while the settings page keeps diagnostics and guidance.
+- Dependency maintenance: electron-builder and `@modelcontextprotocol/server` bumps.
+
+### Fixed
+
+- Managed-Skill cleanup now rejects absolute paths, drive letters, backslashes, empty segments, and `.`/`..` segments, preventing force repair from deleting files outside the Skill directory.
+- `repair-api` Windows CI uses a real `.cmd` test double; `runtime.json` parsing no longer depends on Node being on PATH.
+
+### Verified
+
+- PR #288 required checks: 8/8 passed, including Windows, build/test/lint, desktop smoke, WAN NAT, semantic recall, and real DSH E2E minimum/latest/Node 22.
+- Local gates: full Jest (excluding the known local 0.2.2 App port conflict), `verify:console`, `verify:mcp:skill`, `verify:onboarding`, `verify:daemon`, `check:i18n`, and `check:surface-parity`.
+
 ## [v0.2.3] - 2026-10-28
 
 Identity-focused maintenance release. All six npm packages and the desktop app

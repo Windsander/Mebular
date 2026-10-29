@@ -1,16 +1,16 @@
 # 桌面安装包发布
 
-面向 Mebular v0.2.3 的桌面安装包构建、验收与后续签名计划。发布流程总览见
+面向 Mebular v0.2.4 的桌面安装包构建、验收与后续签名计划。发布流程总览见
 [`RELEASE.md`](RELEASE.md)。
 
-## 0. v0.2.3 范围
+## 0. v0.2.4 范围
 
 | 平台 | 目标 | 架构 | 产物 |
 | --- | --- | --- | --- |
-| macOS | DMG | Universal（arm64 + x64） | `Mebular-0.2.3-universal.dmg` |
-| Windows | NSIS | x64 | `Mebular-Setup-0.2.3.exe` |
-| Linux | AppImage | x64 | `Mebular-0.2.3-x86_64.AppImage` |
-| Linux | deb | x64 | `Mebular-0.2.3-amd64.deb` |
+| macOS | DMG | Universal（arm64 + x64） | `Mebular-0.2.4-universal.dmg` |
+| Windows | NSIS | x64 | `Mebular-Setup-0.2.4.exe` |
+| Linux | AppImage | x64 | `Mebular-0.2.4-x86_64.AppImage` |
+| Linux | deb | x64 | `Mebular-0.2.4-amd64.deb` |
 
 - 全部为 **unsigned** 发布；不做代码签名、公证或自动更新。
 - 每个安装包都自带 Electron 和一份完整的 Mebular runtime，**不需要本机 Node.js**，也不依赖
@@ -157,26 +157,26 @@ electron-builder 的 `artifactName` 固定为：
 
 | 平台 | 配置 | 最终文件名 |
 | --- | --- | --- |
-| macOS | `Mebular-${version}-${arch}.${ext}` + `--universal` | `Mebular-0.2.3-universal.dmg` |
-| Windows | `Mebular-Setup-${version}.${ext}` | `Mebular-Setup-0.2.3.exe` |
-| Linux AppImage | `Mebular-${version}-${arch}.${ext}` + x64 | `Mebular-0.2.3-x86_64.AppImage` |
-| Linux deb | 同上；deb 的 arch 宏为 `amd64` | `Mebular-0.2.3-amd64.deb` |
+| macOS | `Mebular-${version}-${arch}.${ext}` + `--universal` | `Mebular-0.2.4-universal.dmg` |
+| Windows | `Mebular-Setup-${version}.${ext}` | `Mebular-Setup-0.2.4.exe` |
+| Linux AppImage | `Mebular-${version}-${arch}.${ext}` + x64 | `Mebular-0.2.4-x86_64.AppImage` |
+| Linux deb | 同上；deb 的 arch 宏为 `amd64` | `Mebular-0.2.4-amd64.deb` |
 
 `SHA256SUMS.txt` 由 release job 在 Linux 上生成，只包含安装包，按文件名 `LC_ALL=C sort`
 排序，例如：
 
 ```text
-<hash>  Mebular-0.2.3-amd64.deb
-<hash>  Mebular-0.2.3-universal.dmg
-<hash>  Mebular-0.2.3-x86_64.AppImage
-<hash>  Mebular-Setup-0.2.3.exe
+<hash>  Mebular-0.2.4-amd64.deb
+<hash>  Mebular-0.2.4-universal.dmg
+<hash>  Mebular-0.2.4-x86_64.AppImage
+<hash>  Mebular-Setup-0.2.4.exe
 ```
 
 dry-run 不会生成这个文件；它只在正式 `release` job 创建 GitHub Release 时产生。
 
 ## 4. unsigned 安装体验
 
-v0.2.3 没有 Apple Developer ID、公证或 Windows 代码签名证书。用户会看到系统安全提示，
+v0.2.4 没有 Apple Developer ID、公证或 Windows 代码签名证书。用户会看到系统安全提示，
 这是预期行为，不是安装包损坏。
 
 ### 4.1 先校验
@@ -202,17 +202,17 @@ Windows 可用 PowerShell 的 `Get-FileHash -Algorithm SHA256` 对照 `SHA256SUM
 
 ### 4.3 Windows SmartScreen
 
-1. 运行 `Mebular-Setup-0.2.3.exe`。
+1. 运行 `Mebular-Setup-0.2.4.exe`。
 2. 出现「Windows 已保护你的电脑」时点「更多信息」，再点「仍要运行」。
 
 ### 4.4 Linux
 
 ```bash
-chmod +x Mebular-0.2.3-x86_64.AppImage
-./Mebular-0.2.3-x86_64.AppImage
+chmod +x Mebular-0.2.4-x86_64.AppImage
+./Mebular-0.2.4-x86_64.AppImage
 
 # Debian / Ubuntu
-sudo apt install ./Mebular-0.2.3-amd64.deb
+sudo apt install ./Mebular-0.2.4-amd64.deb
 ```
 
 AppImage 需要 FUSE；没有 FUSE 时可使用 `--appimage-extract-and-run`。deb 安装后从应用菜单
@@ -259,7 +259,7 @@ node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/linux-un
 
 ## 6. 签名、公证与自动更新（后续）
 
-v0.2.3 明确不签名。后续版本的建议顺序：
+v0.2.4 明确不签名。后续版本的建议顺序：
 
 1. **macOS**：申请 Developer ID Application 证书；在 CI 注入 `CSC_LINK` /
    `CSC_KEY_PASSWORD`，移除 `electron-builder.yml` 的 `identity: null`；用

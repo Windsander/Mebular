@@ -26,7 +26,7 @@
     <text x="312" y="133" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#8ac8ff" font-weight="700" text-anchor="middle">1</text>
     <text x="122" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#e2ecff" font-weight="700" text-anchor="start">安装插件</text>
     <text x="60" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#8ac8ff" font-weight="400" text-anchor="start">dsh plugin --profile web add</text>
-    <text x="60" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="start">@mebular/dsh-plugin@0.2.3</text>
+    <text x="60" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#8aa8c8" font-weight="400" text-anchor="start">@mebular/dsh-plugin@0.2.4</text>
     <rect x="390" y="100" width="300" height="160" rx="16" fill="#081322" stroke="#1a3a60" stroke-width="1.2"/>
     <path d="M433,123 L452,133 L452,150 L433,160 L414,150 L414,133 Z" fill="#0d1e35" stroke="#4a8acf" stroke-width="1.2"/><path d="M414,133 L433,143 L452,133" fill="none" stroke="#8ac8ff" stroke-width="1.2" opacity="0.8"/><line x1="433" y1="143" x2="433" y2="158" stroke="#8ac8ff" stroke-width="1.2" opacity="0.5"/>
     <circle cx="662" cy="128" r="12" fill="#8ac8ff" opacity="0.16"/>
@@ -61,7 +61,7 @@
     <text x="312" y="133" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11" fill="#2f6fce" font-weight="700" text-anchor="middle">1</text>
     <text x="122" y="142" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="16" fill="#0b1a33" font-weight="700" text-anchor="start">安装插件</text>
     <text x="60" y="188" font-family="'SF Mono','Cascadia Code','Source Code Pro',Consolas,monospace" font-size="11.5" fill="#2f6fce" font-weight="400" text-anchor="start">dsh plugin --profile web add</text>
-    <text x="60" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5a7290" font-weight="400" text-anchor="start">@mebular/dsh-plugin@0.2.3</text>
+    <text x="60" y="210" font-family="'SF Pro Text','PingFang SC','Segoe UI',ui-sans-serif,system-ui,sans-serif" font-size="11" fill="#5a7290" font-weight="400" text-anchor="start">@mebular/dsh-plugin@0.2.4</text>
     <rect x="390" y="100" width="300" height="160" rx="16" fill="#f7faff" stroke="#c9d8ee" stroke-width="1.2"/>
     <path d="M433,123 L452,133 L452,150 L433,160 L414,150 L414,133 Z" fill="#ffffff" stroke="#7fa6d9" stroke-width="1.2"/><path d="M414,133 L433,143 L452,133" fill="none" stroke="#2f6fce" stroke-width="1.2" opacity="0.8"/><line x1="433" y1="143" x2="433" y2="158" stroke="#2f6fce" stroke-width="1.2" opacity="0.5"/>
     <circle cx="662" cy="128" r="12" fill="#2f6fce" opacity="0.16"/>

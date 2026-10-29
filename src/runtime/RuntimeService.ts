@@ -2919,12 +2919,12 @@ function normalizeCandidate(value: unknown, defaultNamespace: string): Candidate
   const kind = candidate.kind;
   if (kind !== 'fact' && kind !== 'preference' && kind !== 'episode'
     && kind !== 'skill' && kind !== 'observation') {
-    throw new Error(`非法 kind：${String(kind)}`);
+    throw new RuntimeServiceError('invalid_request', `非法 kind：${String(kind)}`);
   }
   const namespace = candidate.namespace === undefined
     ? defaultNamespace
     : normalizeNamespace(requiredText(candidate.namespace, 'candidate.namespace'));
-  if (isRuntimeReservedNamespace(namespace)) throw new Error('namespace 是保留域');
+  if (isRuntimeReservedNamespace(namespace)) throw new RuntimeServiceError('invalid_request', 'namespace 是保留域');
   const tags = optionalStringArray(candidate.tags, 'candidate.tags', MAX_TAGS);
   const relatedTo = optionalStringArray(candidate.relatedTo, 'candidate.relatedTo', MAX_RELATED);
   const data = requireObject(candidate.data, 'candidate.data');
@@ -2933,7 +2933,7 @@ function normalizeCandidate(value: unknown, defaultNamespace: string): Candidate
     const validFrom = optionalPositiveNumber(data.validFrom, 'candidate.data.validFrom');
     const validTo = optionalPositiveNumber(data.validTo, 'candidate.data.validTo');
     if (validFrom !== undefined && validTo !== undefined && validTo < validFrom) {
-      throw new Error('validTo 早于 validFrom');
+      throw new RuntimeServiceError('invalid_request', 'validTo 早于 validFrom');
     }
     return {
       kind,
@@ -2977,7 +2977,7 @@ function normalizeCandidate(value: unknown, defaultNamespace: string): Candidate
     const startTime = optionalPositiveNumber(data.startTime, 'candidate.data.startTime');
     const endTime = optionalPositiveNumber(data.endTime, 'candidate.data.endTime');
     if (startTime !== undefined && endTime !== undefined && endTime < startTime) {
-      throw new Error('endTime 早于 startTime');
+      throw new RuntimeServiceError('invalid_request', 'endTime 早于 startTime');
     }
     return {
       kind,

@@ -77,4 +77,4 @@ python3 -m unittest discover -s integrations/hermes/tests -v
 - `prefetch` 首次同步召回最多等 `recall_timeout`（默认 1.5s）；后台预热可避免下一轮等待。
 - spool 是单进程 JSONL，不做跨进程锁；同一 `HERMES_HOME` 不应跑两个 Hermes 写者。
 - companion 同步调用宿主模型，增加延迟/成本，默认关闭；不做图片抽取。
-- 0.3 契约仍是草案，wire shape 可能调整；本目录以 `docs.design/0.3.0-memory-runtime-contract.md` 为准。
+- 0.3 契约仍是草案，wire shape 可能调整；本目录以 `docs/design/0.3.0-memory-runtime-contract.md` 为准。

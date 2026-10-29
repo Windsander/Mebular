@@ -5,6 +5,7 @@
 // 不创建从用户记录到内部对象的边；来源关系只写在 content.sourceIds / recordIds。
 
 import type { GraphStore } from '../core/GraphStore.js';
+import { ValidationError } from '../errors.js';
 import type { Node } from '../types/index.js';
 import { isRuntimeInternalNode, readRuntimeMetadata } from './internal.js';
 import {
@@ -61,10 +62,10 @@ export async function createRuntimeObjectNode(
   input: CreateRuntimeObjectInput,
 ): Promise<Node> {
   if (input.envelope.kind !== input.type) {
-    throw new Error(`runtime envelope kind ${input.envelope.kind} 与节点类型 ${input.type} 不一致`);
+    throw new ValidationError(`runtime envelope kind ${input.envelope.kind} 与节点类型 ${input.type} 不一致`);
   }
   if (input.envelope.internal !== true) {
-    throw new Error('Runtime 内部对象必须设置 envelope.internal=true');
+    throw new ValidationError('Runtime 内部对象必须设置 envelope.internal=true');
   }
 
   const created = await graph.createNode(input.type, input.content, undefined, {
@@ -78,7 +79,7 @@ export async function createRuntimeObjectNode(
     },
   });
   if (!withMetadata) {
-    throw new Error(`Runtime 节点写入后读取失败：${created.id}`);
+    throw new ValidationError(`Runtime 节点写入后读取失败：${created.id}`);
   }
 
   let node = withMetadata;

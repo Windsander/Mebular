@@ -95,7 +95,7 @@ const state = {
   clientMsg: {},
   clientDiff: {},
   // 设置 · 常用「自动修复」：只修客户端接入，独立于重启向导。
-  repair: { busy: false, message: '', tone: null },
+  repair: { busy: false, message: '', tone: null, details: [] },
 };
 
 const stage = new StarStage($('#stage'));
@@ -3248,6 +3248,14 @@ async function serviceAction(action) {
   }
 }
 
+/** 失败详情再脱敏一道（服务端已脱敏；这里防未来字段变化把 token/密钥带进 DOM）。 */
+function redactRepairText(value) {
+  return String(value ?? '')
+    .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 <redacted>')
+    .replace(/\b(token|secret|password|passwd|api[-_]?key|authorization)\b\s*[:=]\s*[^\s,;]+/gi, '$1=<redacted>')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, 'sk-<redacted>');
+}
+
 /** 设置 · 常用「自动修复」：只重跑客户端接入（MCP 条目 + Skill force），不重启、不碰记忆面。 */
 async function repairClientIntegration() {
   if (state.repair?.busy) return;
@@ -3258,7 +3266,7 @@ async function repairClientIntegration() {
   });
   if (!ok) return;
   const render = () => renderSettings(state.settingsTab ?? 'common');
-  state.repair = { busy: true, message: t('settings.repair.running'), tone: null };
+  state.repair = { busy: true, message: t('settings.repair.running'), tone: null, details: [] };
   render();
   let res;
   try {
@@ -3268,6 +3276,7 @@ async function repairClientIntegration() {
       busy: false,
       tone: 'error',
       message: t('settings.repair.failed', { message: localizeError(error, 'errors.unknown') }),
+      details: [],
     };
     render();
     return;
@@ -3277,16 +3286,26 @@ async function repairClientIntegration() {
     || entry.skills?.ok === false);
   const repaired = clients.filter((entry) => entry.connect?.ok === true && entry.connect?.skipped !== true);
   if (clients.length === 0 || (failed.length === 0 && repaired.length === 0)) {
-    state.repair = { busy: false, message: t('settings.repair.none'), tone: null };
+    state.repair = { busy: false, message: t('settings.repair.none'), tone: null, details: [] };
   } else if (failed.length > 0) {
     const names = failed.map((entry) => entry.name ?? entry.id).join(t('common.listSeparator'));
+    const details = failed.map((entry) => {
+      const reasons = [entry.connect?.reason, entry.skills?.reason]
+        .filter((reason) => typeof reason === 'string' && reason.trim().length > 0)
+        .map(redactRepairText);
+      return {
+        name: redactRepairText(entry.name ?? entry.id ?? '—'),
+        reasons: reasons.length > 0 ? reasons : [t('settings.repair.unknownReason')],
+      };
+    });
     state.repair = {
       busy: false,
       tone: 'error',
       message: t('settings.repair.partial', { ok: repaired.length, failed: failed.length, names }),
+      details,
     };
   } else {
-    state.repair = { busy: false, message: t('settings.repair.success', { count: repaired.length }), tone: null };
+    state.repair = { busy: false, message: t('settings.repair.success', { count: repaired.length }), tone: null, details: [] };
   }
   // 成功摘要已确定；刷新失败只影响列表即时性，不能把成功的修复误报为失败。
   try { await refresh(); } catch { /* 下一轮 3s 轮询会继续刷新 */ }

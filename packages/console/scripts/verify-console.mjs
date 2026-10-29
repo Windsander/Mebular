@@ -1037,12 +1037,14 @@ try {
         && jsSrcH1.includes('data-cli-action') && jsSrcH1.includes('renderSettings(deepLink.openSettings)')
         && asstSrcH1.includes('connect-diff') && asstSrcH1.includes('assistantsPanelHtml'),
       '专区 + 别名 + 叠加层');
-    check('设置·常用自动修复接线：独立行 + 二次确认 + POST /admin/api/repair + 逐项摘要（不依赖 openWizard）',
+    check('设置·常用自动修复接线：独立行 + 二次确认 + POST /admin/api/repair + 逐项摘要 + 可展开失败详情（不依赖 openWizard）',
       asstSrcH1.includes('repairRowHtml') && asstSrcH1.includes("settings.repair.title")
+        && asstSrcH1.includes('settings-repair-details') && asstSrcH1.includes("settings.repair.details")
         && jsSrcH1.includes('repairRowHtml(state.repair)')
         && jsSrcH1.includes("'/admin/api/repair'") && jsSrcH1.includes("t('settings.repair.confirmBody')")
-        && jsSrcH1.includes("t('settings.repair.partial'"),
-      '独立于重启向导');
+        && jsSrcH1.includes("t('settings.repair.partial'") && asstSrcH1.includes('repair.details')
+        && jsSrcH1.includes('redactRepairText'),
+      '独立于重启向导 + 失败详情脱敏');
   }
 
   // ---------- 邀请设备（T2 令牌加入） ----------

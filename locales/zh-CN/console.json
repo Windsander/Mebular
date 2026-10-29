@@ -464,6 +464,8 @@
     "settings.repair.success": "已修复 {count} 个助手；新会话或重载对应助手后生效。",
     "settings.repair.partial": "已修复 {ok} 个，{failed} 个未完成：{names}。新会话或重载对应助手后生效；可展开查看原因。",
     "settings.repair.failed": "自动修复失败：{message}",
+    "settings.repair.details": "失败详情（{count}）",
+    "settings.repair.unknownReason": "原因未返回",
     "settings.repair.confirmTitle": "自动修复客户端接入？",
     "settings.repair.confirmBody": "会覆盖 Mebular 写入的 MCP 条目和 Skill，但不会动记忆、身份、订阅、任务、审计。已检测到的助手会逐个重跑；某个失败不影响其他。",
     "settings.repair.confirm": "开始修复",

@@ -464,6 +464,8 @@
     "settings.repair.success": "Repaired {count} assistant(s). Take effect in a new session or after reloading each assistant.",
     "settings.repair.partial": "Repaired {ok}; {failed} did not finish: {names}. Take effect in a new session or after reloading each assistant; expand for details.",
     "settings.repair.failed": "Auto repair failed: {message}",
+    "settings.repair.details": "Failure details ({count})",
+    "settings.repair.unknownReason": "No reason returned",
     "settings.repair.confirmTitle": "Auto repair client setup?",
     "settings.repair.confirmBody": "This overwrites the MCP entries and Skills that Mebular wrote, but does not touch memory, identity, subscriptions, tasks or audit. Detected assistants are repaired one by one; one failure does not stop the others.",
     "settings.repair.confirm": "Start repair",

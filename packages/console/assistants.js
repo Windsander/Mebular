@@ -17,6 +17,12 @@ const esc = (s) => String(s ?? '')
 const tr = (key, fallback, vars) => (t.has(key) ? t(key, vars) : interpolate(fallback, vars));
 
 const CJK_TEXT = /[\u3400-\u9fff]/;
+
+/** 自动修复失败详情再脱敏（服务端已脱敏；防止未来字段变化把 token/密钥带进 DOM）。 */
+const redactRepairText = (value) => String(value ?? '')
+  .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 <redacted>')
+  .replace(/\b(token|secret|password|passwd|api[-_]?key|authorization)\b\s*[:=]\s*[^\s,;]+/gi, '$1=<redacted>')
+  .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, 'sk-<redacted>');
 const isEnglishUi = () => !String(getLocale?.() ?? 'zh-CN').trim().toLowerCase().startsWith('zh');
 
 /**
@@ -355,13 +361,27 @@ export function repairRowHtml(repair = {}) {
   const busy = repair.busy === true;
   const tone = repair.tone === 'error' ? ' todo' : '';
   const message = String(repair.message ?? '');
+  const details = Array.isArray(repair.details) ? repair.details : [];
+  const detailHtml = details.length > 0
+    ? `<details class="settings-repair-details" id="settings-repair-details">
+        <summary>${esc(tr('settings.repair.details', '失败详情（{count}）', { count: details.length }))}</summary>
+        <ul>${details.map((entry) => {
+          const name = redactRepairText(entry?.name ?? entry?.id ?? '—');
+          const reasons = Array.isArray(entry?.reasons)
+            ? entry.reasons.filter(Boolean).map(redactRepairText)
+            : [];
+          return `<li><b>${esc(name)}</b><span>${esc(reasons.join('；') || tr('settings.repair.unknownReason', '原因未返回'))}</span></li>`;
+        }).join('')}</ul>
+      </details>`
+    : '';
   return `<div class="asst-row settings-repair-row">
     <span class="asst-name">${esc(tr('settings.repair.title', '自动修复'))}</span>
     <span class="asst-st">${esc(tr('settings.repair.note', '强制重跑已检测助手的 MCP 接入与 Skill；不动记忆/身份/订阅/任务/审计'))}</span>
     <span class="asst-sp"></span>
     <button class="btn btn-small btn-crt" type="button" id="settings-repair"${busy ? ' disabled' : ''}>${esc(busy ? tr('settings.repair.busy', '修复中…') : tr('settings.repair.action', '开始修复'))}</button>
   </div>
-  ${message ? `<p class="asst-line settings-repair-msg${tone}" id="settings-repair-msg">${esc(message)}</p>` : ''}`;
+  ${message ? `<p class="asst-line settings-repair-msg${tone}" id="settings-repair-msg">${esc(message)}</p>` : ''}
+  ${detailHtml}`;
 }
 
 /** 首屏状态总览条（纯只读；对端计数不含本机）。 */

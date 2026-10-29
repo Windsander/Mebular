@@ -15,7 +15,7 @@
 
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
-import { cp, mkdir, writeFile } from 'node:fs/promises';
+import { cp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -67,60 +67,175 @@ if (targets.length === 0) {
 }
 
 const sharedClients = join(pkgRoot, '..', 'mcp', 'src', 'clients.mjs');
-const shared = existsSync(sharedClients)
+// 独立包没有 mcp 源码时自动回落；测试/诊断可强制走回落以验证“保留/force”契约。
+const forceFallback = process.env.MEBULAR_SKILL_INSTALL_FALLBACK === '1';
+const shared = !forceFallback && existsSync(sharedClients)
   ? await import(pathToFileURL(sharedClients).href).catch(() => null)
   : null;
 
-/** 独立 @mebular/skill 回落：只复制已知文件；标记/保留语义从简但同契约。 */
-async function fallbackInstall(target) {
-  const mem = join(target, SKILL_NAME);
-  const tasks = join(target, TASK_SKILL_NAME);
-  await mkdir(mem, { recursive: true });
-  await mkdir(tasks, { recursive: true });
-  for (const [from, to] of [
-    [join(pkgRoot, 'SKILL.md'), join(mem, 'SKILL.md')],
-    [join(pkgRoot, 'MEMORY_POLICY.md'), join(mem, 'MEMORY_POLICY.md')],
-    [join(pkgRoot, 'SETUP.md'), join(mem, 'SETUP.md')],
-    [join(pkgRoot, 'tasks', 'SKILL.md'), join(tasks, 'SKILL.md')],
-    [join(pkgRoot, 'SETUP.md'), join(tasks, 'SETUP.md')],
-  ]) {
-    if (!existsSync(from)) throw new Error(`Skill 源缺少 ${from}`);
-    await cp(from, to, { force: true });
+const MARKER = '.mebular-skill.json';
+const SOURCE_VERSION = (() => {
+  try {
+    return JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf-8')).version ?? null;
+  } catch {
+    return null;
   }
-  await cp(join(pkgRoot, 'mcp'), join(mem, 'mcp'), { recursive: true, force: true });
-  const version = (() => {
-    try {
-      return JSON.parse(readFileSync(join(pkgRoot, 'package.json'), 'utf-8')).version ?? null;
-    } catch {
-      return null;
+})();
+const FALLBACK_SPECS = [
+  {
+    name: SKILL_NAME,
+    files: [
+      ['SKILL.md', 'SKILL.md'],
+      ['MEMORY_POLICY.md', 'MEMORY_POLICY.md'],
+      ['SETUP.md', 'SETUP.md'],
+    ],
+    copyDirs: ['mcp'],
+  },
+  {
+    name: TASK_SKILL_NAME,
+    files: [
+      ['tasks/SKILL.md', 'SKILL.md'],
+      ['SETUP.md', 'SETUP.md'],
+    ],
+    copyDirs: [],
+  },
+];
+
+const safeRel = (rel) => typeof rel === 'string' && rel.length > 0 && !rel.startsWith('/') && !rel.split('/').includes('..');
+
+function listRelativeFiles(root) {
+  if (!existsSync(root)) return [];
+  const out = [];
+  const walk = (dir, prefix) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      if (entry.name === MARKER || entry.name === '.DS_Store') continue;
+      const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+      if (entry.isDirectory()) walk(join(dir, entry.name), rel);
+      else if (entry.isFile()) out.push(rel);
     }
-  })();
-  const installedAt = new Date().toISOString();
-  const hashDir = (root) => {
-    const out = {};
-    const walk = (dir, prefix) => {
-      for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
-        if (entry.name === '.mebular-skill.json') continue;
-        const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
-        if (entry.isDirectory()) walk(join(dir, entry.name), rel);
-        else if (entry.isFile()) out[rel] = createHash('sha256').update(readFileSync(join(dir, entry.name))).digest('hex');
-      }
-    };
-    walk(root, '');
-    return out;
   };
-  for (const [name, dir] of [[SKILL_NAME, mem], [TASK_SKILL_NAME, tasks]]) {
-    await writeFile(join(dir, '.mebular-skill.json'), `${JSON.stringify({
-      schema: 1,
-      managedBy: 'mebular',
-      skill: name,
-      version,
-      installedAt,
-      source: 'mebular',
-      files: hashDir(dir),
-    }, null, 2)}\n`, 'utf-8');
+  walk(root, '');
+  return out;
+}
+
+function hashDir(root) {
+  return Object.fromEntries(listRelativeFiles(root).map((rel) => [
+    rel,
+    createHash('sha256').update(readFileSync(join(root, ...rel.split('/')))).digest('hex'),
+  ]));
+}
+
+function readMarker(dir) {
+  try {
+    const data = JSON.parse(readFileSync(join(dir, MARKER), 'utf-8'));
+    if (data?.schema !== 1 || data?.managedBy !== 'mebular') return null;
+    if (data.files === null || typeof data.files !== 'object' || Array.isArray(data.files)) return null;
+    return data;
+  } catch {
+    return null;
   }
-  return { ok: true, installed: [mem, tasks], updated: [], kept: [], unchanged: [] };
+}
+
+function sourcePairs(spec) {
+  const pairs = [];
+  for (const [src, rel] of spec.files) {
+    const abs = join(pkgRoot, ...src.split('/'));
+    if (!existsSync(abs)) throw new Error(`Skill 源缺少 ${src}`);
+    pairs.push([abs, rel]);
+  }
+  for (const srcDir of spec.copyDirs) {
+    const absDir = join(pkgRoot, srcDir);
+    if (!existsSync(absDir)) throw new Error(`Skill 源缺少 ${srcDir}/`);
+    for (const rel of listRelativeFiles(absDir)) {
+      pairs.push([join(absDir, ...rel.split('/')), `${srcDir}/${rel}`]);
+    }
+  }
+  return pairs;
+}
+
+async function writeSkill(dir, pairs, marker, spec) {
+  for (const [abs, rel] of pairs) {
+    const dest = join(dir, ...rel.split('/'));
+    await mkdir(dirname(dest), { recursive: true });
+    await cp(abs, dest, { force: true });
+  }
+  if (marker) {
+    const keep = new Set(pairs.map(([, rel]) => rel));
+    for (const rel of Object.keys(marker.files ?? {})) {
+      if (!keep.has(rel) && safeRel(rel)) await rm(join(dir, ...rel.split('/')), { force: true });
+    }
+  }
+  const files = Object.fromEntries(pairs.map(([abs, rel]) => [
+    rel,
+    createHash('sha256').update(readFileSync(abs)).digest('hex'),
+  ]));
+  await writeFile(join(dir, MARKER), `${JSON.stringify({
+    schema: 1,
+    managedBy: 'mebular',
+    skill: spec.name,
+    version: SOURCE_VERSION,
+    installedAt: new Date().toISOString(),
+    source: 'mebular',
+    files,
+  }, null, 2)}\n`, 'utf-8');
+  return files;
+}
+
+async function installFallbackSpec(target, spec, force) {
+  const dir = join(target, spec.name);
+  const existed = existsSync(join(dir, 'SKILL.md'));
+  const marker = existed ? readMarker(dir) : null;
+  const current = existed ? hashDir(dir) : {};
+  const pairs = sourcePairs(spec);
+  const sourceHashes = Object.fromEntries(pairs.map(([abs, rel]) => [
+    rel,
+    createHash('sha256').update(readFileSync(abs)).digest('hex'),
+  ]));
+
+  if (existed && force !== true) {
+    if (!marker) return { name: spec.name, status: 'kept', dir, reason: '无受管标记（用户自定义），未覆盖' };
+    const managedUnchanged = Object.entries(marker.files).every(([rel, hash]) => current[rel] === hash);
+    if (!managedUnchanged) return { name: spec.name, status: 'kept', dir, reason: '文件与受管标记不一致（用户修改过），未覆盖' };
+    const sourceCurrent = Object.entries(sourceHashes).every(([rel, hash]) => marker.files[rel] === hash);
+    if (marker.version === SOURCE_VERSION && sourceCurrent) {
+      return { name: spec.name, status: 'unchanged', dir, version: SOURCE_VERSION };
+    }
+  }
+
+  await writeSkill(dir, pairs, marker, spec);
+  return { name: spec.name, status: existed ? 'updated' : 'installed', dir, version: SOURCE_VERSION };
+}
+
+/** 独立 @mebular/skill 回落：与主实现同契约——默认保留用户修改，force 才覆盖。 */
+async function fallbackInstall(target, force = false) {
+  const results = [];
+  for (const spec of FALLBACK_SPECS) {
+    try {
+      results.push(await installFallbackSpec(target, spec, force));
+    } catch (error) {
+      results.push({ name: spec.name, status: 'failed', dir: join(target, spec.name), reason: String(error?.message ?? error) });
+    }
+  }
+  const failed = results.filter((r) => r.status === 'failed');
+  const by = (status) => results.filter((r) => r.status === status).map((r) => r.dir);
+  let status = 'unchanged';
+  if (failed.length > 0) status = 'failed';
+  else if (results.some((r) => r.status === 'installed')) status = 'installed';
+  else if (results.some((r) => r.status === 'updated')) status = 'updated';
+  else if (results.some((r) => r.status === 'kept')) status = 'kept';
+  return {
+    ok: failed.length === 0,
+    status,
+    targetDir: target,
+    version: SOURCE_VERSION,
+    source: 'mebular',
+    installed: by('installed'),
+    updated: by('updated'),
+    kept: by('kept'),
+    unchanged: by('unchanged'),
+    skills: results,
+    ...(failed.length > 0 ? { reason: failed.map((r) => `${r.name}: ${r.reason}`).join('；') } : {}),
+  };
 }
 
 const installed = [];
@@ -129,7 +244,7 @@ for (const target of targets) {
   try {
     const result = shared?.installSkillsToDir
       ? await shared.installSkillsToDir(target, { skillRoot: pkgRoot, force })
-      : await fallbackInstall(target);
+      : await fallbackInstall(target, force);
     if (result.ok === false) {
       failed = true;
       console.error(`✗ ${target}：${result.reason ?? '安装失败'}`);

@@ -1650,6 +1650,11 @@ body.modal-open { overflow: hidden; }
 .settings-wizard-row #settings-open-wizard,
 .settings-repair-row #settings-repair { flex: 0 0 auto; }
 .settings-repair-msg { padding: 0 2px 8px; overflow-wrap: anywhere; }
+.settings-repair-details { margin: 0 2px 8px; font-size: 12px; color: var(--muted); }
+.settings-repair-details summary { cursor: pointer; color: var(--accent-2); }
+.settings-repair-details ul { margin: 6px 0 0; padding-left: 18px; }
+.settings-repair-details li { margin: 2px 0; overflow-wrap: anywhere; }
+.settings-repair-details li b { color: var(--text); margin-right: 6px; }
 @media (max-width: 760px) {
   /* 窄屏：名称 + 按钮一行（按钮靠右），说明整行换到第二行 */
   .settings-wizard-row,

@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   SKILL_MANIFEST_FILE,
+  autoEnsureSkills,
   connectClient,
   ensureSkills,
   installSkillsToDir,
@@ -179,6 +180,27 @@ describe('Skill ensure：受管版本 / 用户修改 / force', () => {
     expect((await readdir(target)).sort()).toEqual(['mebular-memory', 'mebular-tasks']);
     expect(existsSync(join(target, 'mebular-memory', 'mcp', 'opencode.json'))).toBe(true);
     expect(existsSync(join(target, 'mebular-memory', MANIFEST))).toBe(true);
+  });
+
+  it('autoEnsureSkills：测试环境默认跳过；MEBULAR_SKILL_AUTOWIRE=1 时安装', async () => {
+    await detectOpencode();
+    const previous = process.env.MEBULAR_SKILL_AUTOWIRE;
+    try {
+      delete process.env.MEBULAR_SKILL_AUTOWIRE;
+      const skipped = await autoEnsureSkills(opts({ skillRoot }));
+      expect(skipped.skipped).toBe(true);
+      expect(existsSync(skillsDir())).toBe(false);
+
+      process.env.MEBULAR_SKILL_AUTOWIRE = '1';
+      const installed = await autoEnsureSkills(opts({ skillRoot }));
+      expect(installed.skipped).not.toBe(true);
+      expect(installed.ok).toBe(true);
+      expect(openchamberResult(installed).status).toBe('installed');
+      expect(await readFile(join(memDir(), 'SKILL.md'), 'utf-8')).toBe('S1');
+    } finally {
+      if (previous === undefined) delete process.env.MEBULAR_SKILL_AUTOWIRE;
+      else process.env.MEBULAR_SKILL_AUTOWIRE = previous;
+    }
   });
 
   it('connectClient 成功后自动安装该客户端 Skill；再次接入保留用户修改', async () => {

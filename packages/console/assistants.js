@@ -96,9 +96,17 @@ export function normalizeClient(c = {}) {
     custom: (c.kind ?? c.registryKind) === 'custom',
     builtin: (c.kind ?? c.registryKind ?? 'builtin') === 'builtin',
     manual,
-    state: c.state ?? null,              // not-installed/not-connected/connected/manual/detect-failed
+    state: c.state ?? null,              // not-installed/not-connected/connected/manual/detect-failed/stale
     installed,
     connected,
+    // 陈旧配置（旧 loopback MCP URL）：状态词走「配置已过期 · 请自动修复」，绝不显示绿色已连接。
+    stale: c.stale === true || c.landing?.stale === true,
+    staleKind: c.staleKind ?? c.landing?.staleKind ?? null,
+    staleUrl: c.staleUrl === true || c.landing?.staleUrl === true,
+    staleReason: c.staleReason ?? c.landing?.staleReason ?? null,
+    configuredUrl: c.configuredUrl ?? c.landing?.configuredUrl ?? null,
+    expectedUrl: c.expectedUrl ?? c.landing?.expectedUrl ?? c.mcpUrl ?? null,
+    mcpUrl: c.mcpUrl ?? c.landing?.expectedUrl ?? null,
     evidence: c.evidence ?? null,
     hasVerify: Boolean(c.hasVerify),
     activation: c.activation ?? null,    // { kind: 'hot' | 'user-reload', note? }
@@ -129,7 +137,7 @@ function statusLabel(status) {
 
 /** 排序：需处理优先（未接入/接入失败/验证未过/待生效/检测失败 → 需手动 → 已接入）；未安装单独进底部折叠。 */
 export function sortClients(clients) {
-  const rank = { 'not-connected': 0, 'connect-failed': 0, 'verify-failed': 0, busy: 0, 'pending-reload': 0, 'detect-failed': 0, manual: 1, connected: 2 };
+  const rank = { 'not-connected': 0, 'connect-failed': 0, 'verify-failed': 0, busy: 0, 'pending-reload': 0, 'detect-failed': 0, 'stale-url': 0, manual: 1, connected: 2 };
   const actionable = [], missing = [];
   for (const c of clients) (c.installed ? actionable : missing).push(c);
   actionable.sort((a, b) => (rank[assistantStatus(a).key] ?? 9) - (rank[assistantStatus(b).key] ?? 9));
@@ -174,9 +182,11 @@ function rowHtml(client, ui, status) {
   const verify = ui.clientVerify?.[client.id] ?? null;
   const failed = ui.clientFailed?.[client.id] ?? null;
   const pending = status.key === 'pending-reload';
+  const staleUrl = status.key === 'stale-url';
   let action;
   if (status.key === 'busy') action = `<button class="btn btn-small btn-crt" type="button" disabled>${esc(statusLabel(status))}</button>`;
   else if (status.key === 'connected') action = `<button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">${esc(tr('assistants.action.details', '详情 ›'))}</button>`;
+  else if (staleUrl) action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="connect" data-cli-id="${id}">${esc(tr('assistants.action.repair', '自动修复'))}</button>\n      <button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">${esc(tr('assistants.action.details', '详情 ›'))}</button>`;
   else if (status.key === 'manual') action = `<button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">${esc(tr('assistants.action.snippet', '查看片段 ›'))}</button>`;
   else if (status.key === 'not-installed') action = `<button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">${esc(tr('assistants.action.install', '怎么装 ›'))}</button>`;
   else if (pending) {
@@ -188,10 +198,17 @@ function rowHtml(client, ui, status) {
   else if (status.key === 'detect-failed') action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="recheck" data-cli-id="${id}">${esc(tr('assistants.action.recheck', '重新检测'))}</button>`;
   else action = `<button class="btn btn-small btn-crt" type="button" data-cli-action="connect" data-cli-id="${id}">${esc(tr('assistants.action.connect', '接入'))}</button>\n      <button class="btn btn-small" type="button" data-cli-action="details" data-cli-id="${id}">${esc(tr('assistants.action.details', '详情 ›'))}</button>`;
 
-  // 行内展开（默认收起；有消息/失败/重载提醒/待生效/验证结果/打开详情时展开）
+  // 行内展开（默认收起；有消息/失败/重载提醒/待生效/旧 URL/验证结果/打开详情时展开）
   const reloadHint = status.reloadHint === true;
-  const open = Boolean(msg) || Boolean(failed) || reloadHint || pending || Boolean(verify) || ui.clientOpen?.[client.id];
+  const open = Boolean(msg) || Boolean(failed) || reloadHint || pending || staleUrl || Boolean(verify) || ui.clientOpen?.[client.id];
   const detailBits = [];
+  if (staleUrl) {
+    detailBits.push(`<p class="asst-line todo">${esc(tr(
+      'assistants.staleUrl.reason',
+      'MCP 地址已过期：{configured}（当前为 {expected}）',
+      { configured: client.configuredUrl ?? '—', expected: client.expectedUrl ?? client.mcpUrl ?? '—' },
+    ))}</p>`);
+  }
   // 补丁 3 增补：提示层与状态层分离——「已写入 · 请重载」小字提醒不覆盖「已接入 ✓」
   if (reloadHint && (status.key === 'connected' || pending)) {
     detailBits.push(`<p class="asst-line muted">${esc(tr('assistants.reloadHintPrefix', '已写入 · 重启 {name} 这个软件后生效 · ', { name: client.name }))}<button class="btn btn-small" type="button" data-cli-action="${client.hasVerify ? 'verify-confirm' : 'recheck'}" data-cli-id="${id}">${esc(tr('assistants.action.verifyAfterReload', '我已重载，验证'))}</button></p>`);
@@ -409,6 +426,7 @@ export function attentionItems({ clients, ui = {}, devices, selfId = null, secur
     const st = assistantStatus(c, ui);
     if (st.key === 'pending-reload') items.push({ id: `asst-${c.id}`, label: tr('attention.asstPendingReload', '{name} 待生效', { name: c.name }), action: 'assistants' });
     if (st.key === 'verify-failed') items.push({ id: `asst-${c.id}`, label: tr('attention.asstVerifyFailed', '{name} 验证未过', { name: c.name }), action: 'assistants' });
+    if (st.key === 'stale-url') items.push({ id: `asst-${c.id}`, label: tr('attention.asstStaleUrl', '{name} 配置已过期', { name: c.name }), action: 'assistants' });
   }
   if (security !== null && security !== undefined) {
     if (security.level === 'medium' && security.totp?.imported !== true) {

@@ -608,4 +608,28 @@ describe('简化轮 · stale 状态语义（#116 F-FIX-B：stdio 已写入需升
     const { wizardRowStatus } = await import('../../apps/desktop/src/renderer/wizard-view.mjs');
     expect(wizardRowStatus({ id: 'x', state: 'stale', installed: true }, {})).toMatchObject({ key: 'stale', label: '已写入·需升级为直连' });
   });
+
+  it('staleUrl（旧 loopback 端口）→「配置已过期 · 请自动修复」，不得显示绿色已连接', async () => {
+    const { projectAssistantStatus } = await import('../../packages/console/assistant-status.js');
+    const st = projectAssistantStatus({ id: 'hermes', state: 'stale', staleUrl: true, staleKind: 'url', installed: true }, {});
+    expect(st).toMatchObject({ key: 'stale-url', label: '配置已过期 · 请自动修复', tone: 'todo' });
+    expect(st.label).not.toBe('已接入 ✓');
+    expect(st.label).not.toBe('未接入');
+
+    const html = assistantsPanelHtml({
+      clients: [{
+        id: 'hermes', name: 'Hermes', state: 'stale', connected: false,
+        staleUrl: true, staleKind: 'url',
+        staleReason: 'MCP 地址已过期：http://127.0.0.1:56007/mcp（当前为 http://127.0.0.1:7331/mcp），请自动修复',
+        configuredUrl: 'http://127.0.0.1:56007/mcp', expectedUrl: 'http://127.0.0.1:7331/mcp',
+        landing: { primaryPath: '/x/.hermes/config.yaml' },
+      }],
+      ui: {},
+    });
+    expect(html).toContain('配置已过期 · 请自动修复');
+    expect(html).toContain('自动修复');
+    expect(html).toContain('56007');
+    expect(html).toContain('7331');
+    expect(html).not.toContain('已接入 ✓');
+  });
 });

@@ -102,6 +102,108 @@ export function daemonMcpUrl({ host, encrypted } = {}) {
   return `${encrypted ? 'https' : 'http'}://${target}:${port}/mcp`;
 }
 
+// ---------------------------------------------------------------------------
+// MCP URL 同端点判定（陈旧配置检测；只用于 HTTP/remote 条目，stdio 不适用）
+// ---------------------------------------------------------------------------
+
+/**
+ * HTTP(S) MCP URL 归一化：
+ * - 忽略**末尾 `/`**（`…/mcp/` ≡ `…/mcp`）；
+ * - host / scheme 大小写归一，`localhost` ≡ `127.0.0.1`（同机回环别名）；
+ * - **端口不同 = 不同端点**（旧 56007 vs 当前 7331 必须判为不匹配）；
+ * - 路径/查询不同 = 不同端点；非 http(s)/不可解析 → null（不参与比较）。
+ */
+export function normalizeMcpUrl(raw) {
+  if (typeof raw !== 'string') return null;
+  const text = raw.trim();
+  if (text.length === 0) return null;
+  let parsed;
+  try {
+    parsed = new URL(text);
+  } catch {
+    return null;
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+  let host = parsed.hostname.toLowerCase();
+  if (host === 'localhost') host = '127.0.0.1';
+  const port = parsed.port.length > 0 ? `:${parsed.port}` : '';
+  const path = parsed.pathname.replace(/\/+$/, '');
+  return `${parsed.protocol}//${host}${port}${path}${parsed.search}`;
+}
+
+/** 两个 MCP URL 是否指向同一端点（末尾 `/` 等价；端口不同不等价）。 */
+export function sameMcpUrl(a, b) {
+  const left = normalizeMcpUrl(a);
+  const right = normalizeMcpUrl(b);
+  if (left === null || right === null) {
+    return typeof a === 'string' && typeof b === 'string' && a.trim() === b.trim();
+  }
+  return left === right;
+}
+
+/** 是否为**回环** HTTP MCP 地址（只对这类条目做“旧端口/旧路径”判定）。 */
+export function isLoopbackMcpUrl(raw) {
+  const normalized = normalizeMcpUrl(raw);
+  if (normalized === null) return false;
+  let host;
+  try {
+    host = new URL(normalized).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  return host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1' || host === '0.0.0.0';
+}
+
+/** URL 诊断展示：去掉 userinfo（如 `user:pass@`）并脱敏已知凭据参数。 */
+function displayMcpUrl(raw) {
+  try {
+    const parsed = new URL(raw);
+    if (parsed.username.length > 0 || parsed.password.length > 0) {
+      parsed.username = '';
+      parsed.password = '';
+      return redactSecrets(parsed.toString());
+    }
+  } catch {
+    // 无法解析时按原文脱敏展示（不阻断诊断）。
+  }
+  return redactSecrets(raw);
+}
+
+/** 回环配置是否与当前 runtime 端点“过期”：同端口/路径仅主机不同（如经 LAN 访问控制台）不算。 */
+function staleLoopbackUrl(configuredUrl, expectedUrl) {
+  if (!isLoopbackMcpUrl(configuredUrl)) return false;
+  if (sameMcpUrl(configuredUrl, expectedUrl)) return false;
+  try {
+    const configured = new URL(normalizeMcpUrl(configuredUrl));
+    const expected = new URL(normalizeMcpUrl(expectedUrl));
+    // 控制台可能经 LAN/反向代理访问：同一 scheme+端口+路径时，loopback 对同机客户端仍有效。
+    if (configured.protocol === expected.protocol
+      && configured.port === expected.port
+      && configured.pathname === expected.pathname) return false;
+  } catch {
+    return true;
+  }
+  return true;
+}
+
+/**
+ * 诊断字段 + stale 判定：仅当配置的是**回环 URL**且与当前 runtime `mcpUrl`
+ * 的端口/路径（或 scheme）不一致时才判 stale（用户有意配置的远端 URL 不因状态探测被判 stale/静默改写）。
+ */
+function urlDiagnostics(configuredUrl, expectedUrl) {
+  const out = {};
+  if (typeof configuredUrl === 'string' && configuredUrl.length > 0) out.configuredUrl = displayMcpUrl(configuredUrl);
+  if (typeof expectedUrl === 'string' && expectedUrl.length > 0) out.expectedUrl = displayMcpUrl(expectedUrl);
+  if (!out.configuredUrl || !out.expectedUrl) return { ...out, staleUrl: false };
+  const staleUrl = staleLoopbackUrl(configuredUrl, expectedUrl);
+  if (!staleUrl) return { ...out, staleUrl: false };
+  return {
+    ...out,
+    staleUrl: true,
+    staleReason: `MCP 地址已过期：${out.configuredUrl}（当前为 ${out.expectedUrl}），请自动修复`,
+  };
+}
+
 /** 形状选择：给 url → HTTP 形态；否则 stdio（descriptor 可用 `landing.httpShape` 覆盖）。 */
 function shapeFor(format, options = {}) {
   const adapter = adapterFor(format);
@@ -549,15 +651,38 @@ export function mergeJsonEntry(existingText, { format, entry, keyPath } = {}) {
   return { changed, next, text: `${JSON.stringify(next, null, 2)}\n` };
 }
 
+/** 只替换 DSH mebular 条目里的 `url:` 行（保留其他插件与键）。 */
+function replaceDshMebularUrl(text, url) {
+  const block = dshMebularBlock(text);
+  if (block === null) return null;
+  const start = text.indexOf(block);
+  if (start < 0) return null;
+  const replaced = block.replace(/^(\s*url\s*:\s*)(?:"[^"]*"|'[^']*'|[^\s#]+)/m, `$1${url}`);
+  if (replaced === block) return null;
+  return `${text.slice(0, start)}${replaced}${text.slice(start + block.length)}`;
+}
+
 /** DSH(YAML) 合并：空文件 → 写片段；已含 serverName: mebular → 幂等；结构未知 → 不写。 */
 export function mergeDsh(existingText, options = {}) {
   const snippet = snippetFor('dsh', options);
   if (existingText === null || existingText.trim() === '') return { changed: true, text: `${snippet}\n` };
   if (/serverName:\s*['"]?mebular['"]?/.test(existingText)) {
-    // 已接入：仅当**形态等价**（HTTP vs stdio）才算幂等，否则需改写
+    // 已接入：仅当**形态/端点等价**才算幂等，否则只改 mebular 的 URL（保留其他插件）。
+    const block = dshMebularBlock(existingText);
+    const scope = block ?? existingText;
     const wantHttp = Boolean(options.url);
-    const hasHttp = /transport:\s*streamable-http/.test(existingText);
-    if (wantHttp === hasHttp) return { changed: false, text: existingText };
+    const hasHttp = /transport:\s*streamable-http/.test(scope);
+    if (wantHttp === hasHttp) {
+      if (wantHttp && hasHttp) {
+        const urlInfo = urlDiagnostics(yamlEntryUrl(scope), options.url);
+        if (urlInfo.staleUrl === true) {
+          const next = replaceDshMebularUrl(existingText, options.url);
+          if (next !== null) return { changed: true, text: next };
+          return { error: 'DSH 配置中的 mebular URL 无法定位：未自动改写（请按片段人工合并）' };
+        }
+      }
+      return { changed: false, text: existingText };
+    }
     return { changed: true, text: `${snippet}\n` };
   }
   return { error: 'DSH 配置已存在但未接入：YAML 结构未知，未自动改写（请按片段人工合并）' };
@@ -614,6 +739,38 @@ export function yamlEntryBlock(text, parent, child) {
   return block === null ? null : block.join('\n');
 }
 
+/** 提取 YAML 块里 `url:` 的标量值（支持单/双引号与行尾注释；无则 null）。 */
+export function yamlEntryUrl(block) {
+  if (typeof block !== 'string') return null;
+  const match = /^\s*url\s*:\s*(?:"([^"]*)"|'([^']*)'|([^\s#]+))/m.exec(block);
+  const value = (match?.[1] ?? match?.[2] ?? match?.[3] ?? '').trim();
+  return value.length > 0 ? value : null;
+}
+
+/**
+ * 提取 DSH YAML 插件列表中 `serverName: mebular` 的那一项（行式；无需 yaml 依赖）。
+ * 只用于把 URL 判据/改写限制在 mebular 条目内，避免误碰其他插件。
+ */
+export function dshMebularBlock(text) {
+  const lines = String(text ?? '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^\s*-\s+name\s*:/.test(lines[i])) continue;
+    const itemIndent = lines[i].match(/^\s*/)?.[0].length ?? 0;
+    const item = [lines[i]];
+    for (let j = i + 1; j < lines.length; j++) {
+      const line = lines[j];
+      const leading = line.match(/^\s*/)?.[0].length ?? 0;
+      const nextItem = /^\s*-\s+/.test(line) && leading === itemIndent;
+      const topLevel = line.trim().length > 0 && leading === 0;
+      if (nextItem || topLevel) break;
+      item.push(line);
+    }
+    const block = item.join('\n');
+    if (/serverName:\s*['"]?mebular['"]?/.test(block)) return block;
+  }
+  return null;
+}
+
 /** 该格式下「HTTP/remote」形态（valid）；`stdio` 形态守护运行中会被拒（MCP_STORAGE_LOCKED）。 */
 export function entryIsHttp(format, entry) {
   if (entry === null || typeof entry !== 'object') return false;
@@ -637,18 +794,40 @@ export function landingState(assistant, options = {}) {
   const text = safeReadText(primary);
   if (text === null) return { exists: false, present: false, legacyShape: false, text: null };
   if (format === 'dsh') {
-    const has = /serverName:\s*['"]?mebular['"]?/.test(text);
-    const present = has && /transport:\s*streamable-http/.test(text);
-    return { exists: true, present, legacyShape: false, staleStdio: has && /transport:\s*stdio/.test(text) && !present, text };
+    const block = dshMebularBlock(text);
+    const scope = block ?? text;
+    const has = /serverName:\s*['"]?mebular['"]?/.test(scope);
+    const hasHttp = has && /transport:\s*streamable-http/.test(scope);
+    const urlInfo = urlDiagnostics(yamlEntryUrl(scope), options.mcpUrl);
+    const staleUrl = hasHttp && urlInfo.staleUrl === true;
+    return {
+      exists: true,
+      present: hasHttp && !staleUrl,
+      legacyShape: false,
+      staleStdio: has && /transport:\s*stdio/.test(scope) && !hasHttp,
+      ...urlInfo,
+      staleUrl,
+      text,
+    };
   }
   if (adapter?.serialization === 'yaml') {
     const path = keyPathOf(format);
     const block = yamlEntryBlock(text, path[0], path[1]);
     const hasUrl = block !== null && /^\s*url\s*:\s*\S+/m.test(block);
     const hasCommand = block !== null && /^\s*command\s*:\s*\S+/m.test(block);
-    // 语义判据：remote（有 url）→ present；stdio（有 command 无 url）→ stale；旧「逐字段错位追加」也归 stale
-    const present = hasUrl && !hasCommand;
-    return { exists: true, present, legacyShape: false, staleStdio: !present && hasCommand, text };
+    const urlInfo = urlDiagnostics(yamlEntryUrl(block), options.mcpUrl);
+    const staleUrl = hasUrl && urlInfo.staleUrl === true;
+    // 语义判据：remote（有 url 且端点未过期）→ present；stdio 形态或旧 loopback 地址 → stale
+    const present = hasUrl && !hasCommand && !staleUrl;
+    return {
+      exists: true,
+      present,
+      legacyShape: false,
+      staleStdio: !present && hasCommand,
+      ...urlInfo,
+      staleUrl,
+      text,
+    };
   }
   try {
     const parsed = JSON.parse(text);
@@ -657,13 +836,14 @@ export function landingState(assistant, options = {}) {
     const legacy = adapter?.legacyKeyPath
       ? walkGet(parsed, adapter.legacyKeyPath).value !== undefined
       : false;
-    // 语义判据（兼容迁移）：remote/http 形态 → present；stdio 形态或**端口与当前守护端点不符** → stale
+    // 语义判据（兼容迁移）：remote/http 形态且端点未过期 → present；stdio 形态 → stale
     const isHttp = entryIsHttp(format, stored);
     const storedUrl = typeof stored?.url === 'string' ? stored.url : null;
-    const urlOk = options.mcpUrl === undefined || options.mcpUrl === null || storedUrl === options.mcpUrl;
-    const present = isHttp && urlOk;
-    const staleStdio = !present && (entryIsStdio(format, stored) || (isHttp && !urlOk));
-    return { exists: true, present, legacyShape: legacy && !present, staleStdio, text };
+    const urlInfo = urlDiagnostics(isHttp ? storedUrl : null, options.mcpUrl);
+    const staleUrl = isHttp && urlInfo.staleUrl === true;
+    const present = isHttp && !staleUrl;
+    const staleStdio = !present && entryIsStdio(format, stored);
+    return { exists: true, present, legacyShape: legacy && !present, staleStdio, ...urlInfo, staleUrl, text };
   } catch {
     return { exists: true, present: false, legacyShape: false, text, parseError: true };
   }
@@ -802,13 +982,17 @@ function buildStateItem(assistant, signals, landing, options = {}) {
   const anyHit = signals.some((s) => s.hit);
   const anyError = signals.some((s) => typeof s.detail === 'string' && s.detail.startsWith('探测异常'));
   const strategy = assistant.writer?.strategy ?? 'merge-key';
+  const staleUrl = landing.staleUrl === true;
+  const staleStdio = landing.staleStdio === true;
   let state;
   if (strategy === 'manual' && !landing.present) state = anyHit ? 'manual' : 'not-installed';
   else if (landing.present) state = 'connected';
-  else if (landing.staleStdio) state = 'stale';   // 已写入但过时（stdio）→ 升级直连
+  else if (staleUrl) state = 'stale';      // 配置的 loopback MCP 地址已过期（旧端口/旧路径）
+  else if (staleStdio) state = 'stale';    // 已写入但过时（stdio）→ 升级直连
   else if (!anyHit) state = anyError ? 'detect-failed' : 'not-installed';
   else state = 'not-connected';
   const STATE_LABEL = { 'not-installed': '未安装', 'not-connected': '未接入', connected: '已接入 ✓', manual: '需手动', 'detect-failed': '检测失败', stale: '已写入·需升级为直连' };
+  const staleReason = staleUrl ? (landing.staleReason ?? 'MCP 地址已过期，请自动修复') : null;
   return {
     id: assistant.id,
     name: assistant.name,
@@ -816,7 +1000,7 @@ function buildStateItem(assistant, signals, landing, options = {}) {
     type: assistant.kind === 'snippet' ? 'snippet' : 'file', // file | snippet（descriptor 形态）
     registryKind: assistant.registryKind ?? 'builtin',
     state,
-    stateLabel: STATE_LABEL[state] ?? state,
+    stateLabel: staleUrl ? '配置已过期 · 请自动修复' : (STATE_LABEL[state] ?? state),
     evidence: signals.map((s) => ({ ...s, detail: redactSecrets(s.detail) })),
     anySignalHit: anyHit,
     landing: {
@@ -827,7 +1011,13 @@ function buildStateItem(assistant, signals, landing, options = {}) {
       strategy,
       present: landing.present,
       legacyShape: landing.legacyShape === true,
-      staleStdio: landing.staleStdio === true,
+      stale: staleUrl || staleStdio,
+      staleKind: staleUrl ? 'url' : staleStdio ? 'stdio' : null,
+      staleStdio,
+      staleUrl,
+      staleReason,
+      configuredUrl: landing.configuredUrl ?? null,
+      expectedUrl: landing.expectedUrl ?? null,
       exists: landing.exists,
       parseError: landing.parseError === true,
     },
@@ -843,6 +1033,13 @@ function buildStateItem(assistant, signals, landing, options = {}) {
     note: assistant.note ?? null,
     snippet: snippetFor(assistant.format, entryOptionsFor(assistant, options)),
     mcpUrl: options.mcpUrl ?? null,
+    // 陈旧配置诊断（顶层投影，UI/脚本无需深入 landing）
+    stale: staleUrl || staleStdio,
+    staleKind: staleUrl ? 'url' : staleStdio ? 'stdio' : null,
+    staleUrl,
+    staleReason,
+    configuredUrl: landing.configuredUrl ?? null,
+    expectedUrl: landing.expectedUrl ?? null,
     // 兼容既有 `/admin/api/clients` 字段（只扩展不破坏；UI 亦可继续用）
     installed: signals.some((s) => s.kind !== 'always' && s.hit),
     connected: state === 'connected',
@@ -1094,7 +1291,7 @@ export async function connectClient(id, options = {}) {
  *  避免自建弱判据（如 yamlHasKey）漏报导致回滚选错快照。 */
 function backupHasMebularEntry(assistant, backupPath) {
   const st = landingState({ ...assistant, landing: { ...assistant.landing, primaryPath: backupPath } }, {});
-  return Boolean(st.present || st.staleStdio || st.legacyShape);
+  return Boolean(st.present || st.staleStdio || st.staleUrl || st.legacyShape);
 }
 
 export async function rollbackClient(id, options = {}) {
@@ -1136,6 +1333,7 @@ export function readbackCheck(assistant, options = {}) {
   if (!landing.exists) return { ok: false, detail: '配置文件不存在' };
   if (!landing.present) {
     if (landing.legacyShape) return { ok: false, detail: '只找到旧形状（不生效），建议重新接入' };
+    if (landing.staleUrl) return { ok: false, detail: landing.staleReason ?? 'MCP 地址已过期，请自动修复' };
     if (landing.staleStdio) return { ok: false, detail: '条目是 stdio 形态：守护运行中会被拒（MCP_STORAGE_LOCKED），建议重新接入为 HTTP /mcp' };
     return { ok: false, detail: '未找到 mebular 条目' };
   }

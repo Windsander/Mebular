@@ -62,7 +62,16 @@ delete process.env.MEBULAR_STORAGE_PATH;
 const opencodeDir = join(userHome, '.config', 'opencode');
 await mkdir(opencodeDir, { recursive: true });
 const opencodeConfig = join(opencodeDir, 'opencode.json');
-await writeFile(opencodeConfig, JSON.stringify({ theme: 'dark', mcp: { servers: { other: { keep: 1 } } } }, null, 2), 'utf-8');
+await writeFile(opencodeConfig, JSON.stringify({
+  theme: 'dark',
+  mcp: {
+    servers: {
+      other: { keep: 1 },
+      // 升级前遗留：runtime 现在监听随机端口，旧 loopback 端口必须判为 stale。
+      mebular: { type: 'remote', url: 'http://127.0.0.1:56007/mcp' },
+    },
+  },
+}, null, 2), 'utf-8');
 const skillDir = join(opencodeDir, 'skills');
 await mkdir(join(skillDir, 'mebular-memory'), { recursive: true });
 await writeFile(join(skillDir, 'mebular-memory', 'SKILL.md'), 'CUSTOM USER SKILL', 'utf-8');
@@ -132,6 +141,8 @@ try {
     clouds: await getJson(base, '/admin/api/clouds'),
     overview: await getJson(base, '/admin/api/overview'),
   };
+  out.cases.currentMcpUrl = base + '/mcp';
+  out.cases.clientsBefore = await getJson(base, '/admin/api/clients');
 
   out.cases.repair = await post(base, '/admin/api/repair', {}, auth);
 
@@ -199,12 +210,30 @@ describe('POST /admin/api/repair：只修客户端接入', () => {
   it('MCP 条目 + Skill（含 mcp/ 片段）被强制重跑，用户自定义 Skill 被覆盖', () => {
     expect(result.cases.opencodeConfig?.theme).toBe('dark');
     expect(result.cases.opencodeConfig?.mcp?.servers?.other).toEqual({ keep: 1 });
-    expect(result.cases.opencodeConfig?.mcp?.servers?.mebular?.url).toMatch(/\/mcp$/);
+    expect(result.cases.opencodeConfig?.mcp?.servers?.mebular?.url).toBe(result.cases.currentMcpUrl);
     expect(result.cases.skillMd).not.toBe('CUSTOM USER SKILL');
     expect(result.cases.skillMd).toMatch(/name:\s*mebular-memory/);
     expect(result.cases.mcpFragment).toContain('mebular');
     expect(result.cases.marker).toMatchObject({ schema: 1, managedBy: 'mebular', skill: 'mebular-memory' });
     expect(result.cases.marker.files['mcp/opencode.json']).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('旧 56007 URL：/admin/api/clients 不报 connected，repair 写回当前 mcpUrl', () => {
+    const beforeClients = result.cases.clientsBefore?.body?.clients ?? [];
+    const beforeOpencode = beforeClients.find((entry) => entry.id === 'opencode');
+    expect(beforeOpencode).toBeTruthy();
+    expect(beforeOpencode.state).toBe('stale');
+    expect(beforeOpencode.connected).toBe(false);
+    expect(beforeOpencode.staleUrl).toBe(true);
+    expect(beforeOpencode.landing?.staleUrl).toBe(true);
+    expect(beforeOpencode.landing?.configuredUrl).toMatch(/56007/);
+    expect(beforeOpencode.landing?.expectedUrl).toBe(result.cases.currentMcpUrl);
+    expect(beforeOpencode.landing?.staleReason).toMatch(/56007/);
+    expect(beforeOpencode.landing?.staleReason).toMatch(/过期/);
+
+    const repaired = (result.cases.repair.body.clients ?? []).find((entry) => entry.id === 'opencode');
+    expect(repaired?.stateBefore).toBe('stale');
+    expect(repaired?.verify?.ok).toBe(true);
   });
 
   it('不触碰 memory / identity / cloud / task / audit：store、身份、主密钥、config 字节不变', () => {

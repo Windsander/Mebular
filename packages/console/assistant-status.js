@@ -48,6 +48,12 @@ export function projectAssistantStatus(client = {}, ui = {}) {
   const installed = state ? state !== 'not-installed' && state !== 'detect-failed' : Boolean(client.installed);
   const connected = state ? state === 'connected' : Boolean(client.installed && client.connected);
   if (state === 'detect-failed') return { key: 'detect-failed', label: '检测失败', labelKey: 'assistants.status.detectFailed', tone: 'todo', ...noHint };
+  // 配置里的 loopback MCP URL 与当前守护端点不一致（旧端口/旧路径）→ 配置已过期，需自动修复。
+  // 不得显示「已接入 ✓」；与 stdio 形态的「需升级为直连」区分开。
+  const staleUrl = client.staleUrl === true || client.staleKind === 'url' || client.landing?.staleUrl === true;
+  if (state === 'stale' && staleUrl) {
+    return { key: 'stale-url', label: '配置已过期 · 请自动修复', labelKey: 'assistants.status.staleUrl', tone: 'todo', ...noHint };
+  }
   // F-FIX-B（#116）：已写入但过时（stdio 形态）→ 需升级为 HTTP 直连（待处理黄色，非「未接入」）
   if (state === 'stale') return { key: 'stale', label: '已写入·需升级为直连', labelKey: 'assistants.status.stale', tone: 'todo', ...noHint };
   if (manual) return { key: 'manual', label: '需手动', labelKey: 'assistants.status.manual', tone: 'muted', ...noHint };

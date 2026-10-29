@@ -1144,7 +1144,11 @@ export function createMemoryRuntimeAdapter(options = {}) {
   }
 
   async function recallInjection(payload) {
-    if (!config.recall || disposed || closing || !ready) return null;
+    // Do not gate recall on the lifecycle snapshot: the first health probe can
+    // transiently report down while DSH is still starting, and that must not
+    // silently remove memory from the first human turn. A request to a really
+    // down daemon fails fast and is bounded by recallTimeoutMs.
+    if (!config.recall || disposed || closing) return null;
     const agent = payload?.agent;
     if (!agent || isMemoryAgent(agent, config)) {
       stats.recall.skipped += 1;
@@ -1213,7 +1217,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
     max: config.maxQueue,
     batchSize: config.ingestBatchSize,
     flushMs: config.ingestFlushMs,
-    isReady: () => ready && !disposed,
+    isReady: () => !disposed,
     stats: stats.ingest,
     dedupeLimit: config.dedupeCacheSize,
     setTimeoutFn,
@@ -1258,14 +1262,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
             && attempt < config.ingestRetries
             && !disposed
             && !closing
-            && ready
             && retrySignal?.aborted !== true;
           if (!retryable) break;
           attempt += 1;
           stats.ingest.retries += 1;
           const backoff = config.ingestRetryBaseMs * (2 ** (attempt - 1));
           await abortableDelay(backoff, retrySignal, setTimeoutFn, clearTimeoutFn);
-          if (retrySignal?.aborted === true || disposed || closing || !ready) break;
+          if (retrySignal?.aborted === true || disposed || closing) break;
         }
         if (lastFailure !== null) {
           stats.ingest.failed += group.length;

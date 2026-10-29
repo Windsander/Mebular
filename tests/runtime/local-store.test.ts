@@ -99,6 +99,8 @@ describe('RuntimeLocalStore', () => {
   });
 
   it('文件与目录权限：runtime/ 0700、JSONL 0600', async () => {
+    // Windows has no POSIX mode bits; ACLs are enforced by the OS profile.
+    if (process.platform === 'win32') return;
     const local = store();
     await local.putRawChunk('cl_test', raw('权限测试'));
     await local.putTrace(trace());

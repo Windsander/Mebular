@@ -107,7 +107,9 @@ describe('RuntimeService 完整引擎', () => {
     const status = await runtime.status();
     expect(status.counts.localRawChunks).toBe(1);
     expect(status.counts.memoryRecords).toBe(2);
-    expect((await stat(join(dir, 'runtime', 'raw', 'chunks.jsonl'))).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(join(dir, 'runtime', 'raw', 'chunks.jsonl'))).mode & 0o777).toBe(0o600);
+    }
 
     const recalled = await runtime.recall({ query: '深色', agentId: 'opencode', namespaces: ['notes'] });
     expect(recalled.records).toHaveLength(1);
@@ -337,7 +339,9 @@ describe('RuntimeService 完整引擎', () => {
 
     const cloudId = (await runtime.status()).identity.cloudId!;
     const checkpointPath = join(dir, 'runtime', 'checkpoints', cloudId, 'opencode', 'th_1.json');
-    expect((await stat(checkpointPath)).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(checkpointPath)).mode & 0o777).toBe(0o600);
+    }
 
     // 另一个 host 租约未过期时不能写；force 可抢。
     const other = new RuntimeService(app, {
@@ -514,7 +518,9 @@ describe('RuntimeService 完整引擎', () => {
     expect(quiet.traceId).toBeUndefined();
 
     const tracesPath = join(dir, 'runtime', 'traces.jsonl');
-    expect((await stat(tracesPath)).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(tracesPath)).mode & 0o777).toBe(0o600);
+    }
     expect((await readFile(tracesPath, 'utf8')).trim().split('\n').length).toBeGreaterThanOrEqual(2);
   });
 

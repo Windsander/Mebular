@@ -43,8 +43,10 @@ describe('设备级 model store 初始化', () => {
     const paths = await ensureInferenceStore(home);
     expect(paths.modelsDir).toBe(join(home, 'models'));
     expect(paths.statePath).toBe(join(home, 'inference.json'));
-    expect(await fileMode(paths.modelsDir)).toBe(0o700);
-    expect(await fileMode(paths.statePath)).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect(await fileMode(paths.modelsDir)).toBe(0o700);
+      expect(await fileMode(paths.statePath)).toBe(0o600);
+    }
     const state = JSON.parse(await readFile(paths.statePath, 'utf-8'));
     expect(state).toMatchObject({ schema: 1, selectedPack: null, downloads: {}, installs: {} });
     expect(JSON.stringify(state)).not.toContain('model.gguf');

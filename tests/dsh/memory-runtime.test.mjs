@@ -239,6 +239,41 @@ describe('@mebular/dsh-plugin memory runtime：配置与默认关闭', () => {
 });
 
 describe('@mebular/dsh-plugin memory runtime：recall 注入', () => {
+  it('生命周期首次探测暂时 down 时仍尝试首轮召回', async () => {
+    const ctx = fakeContext();
+    const fetch = installFetch(() => jsonOk({
+      records: [{ id: 'm1', type: 'fact', content: 'user prefers dark theme' }],
+    }));
+    const session = makeSession({ surface: { nodes: [1, 2], contentGeneration: 0 } });
+    const agent = makeAgent({ session });
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        enabled: true,
+        ingest: false,
+        checkpoints: false,
+        hideMemoryTools: false,
+        recallTimeoutMs: 50,
+      },
+      daemonUrl: BASE,
+      fetchImpl: fetch.fetchImpl,
+    });
+    adapter.updateSnapshot({ status: 'down', daemonUrl: BASE });
+
+    const messages = [humanMessage('what theme should we use?')];
+    const decision = await waterfall(ctx, 'agent/pre-step', {
+      agent,
+      messages,
+      turn: 1,
+      step: 1,
+      signal: new AbortController().signal,
+    }, async () => ({ kind: 'enter', messages }));
+
+    expect(decision.messages).toHaveLength(2);
+    expect(fetch.calls).toHaveLength(1);
+    expect(adapter.getState().recall.hits).toBe(1);
+  });
+
   it('只在人类新 turn 首步注入一条 mebular-memory UserMessage', async () => {
     const ctx = fakeContext();
     const fetch = installFetch(() => jsonOk({

@@ -44,6 +44,9 @@ ship as `0.2.4`; no runtime protocol or data-format changes are included.
 - PR #288 required checks: 8/8 passed, including Windows, build/test/lint, desktop smoke, WAN NAT, semantic recall, and real DSH E2E minimum/latest/Node 22.
 - PR #290 required checks: 8/8 passed; target matrix covers OpenChamber/OpenCode, Hermes, Claude Code, Cursor and DSH.
 - Local gates for the target matrix: `verify:mcp:skill`, `check:docs`, `check:i18n`, and the target-matrix Jest suites.
+- Packaging dry-run [run 40829880252](https://github.com/Windsander/Mebular/actions/runs/40829880252) passed: verify + 6 tarballs, macOS/Windows/Linux installers, and real DSH E2E minimum/latest/Node 22.
+- Real Agent E2E: OpenCode 2.0.29 with DeepSeek Flash loaded `mebular-memory`, called `memory_write` and stored a preference; a new session then called `memory_query`/`memory_profile` and recalled it. Temporary HOME only; real user data untouched.
+- App 0.2.4 packaged runtime boots and reports `0.2.4`; auto-install requires an initialized cloud and was validated through the packaged runtime + OpenCode path.
 
 ## [v0.2.3] - 2026-10-28
 

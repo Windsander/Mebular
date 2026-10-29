@@ -101,10 +101,16 @@ Starting with 0.3.0 the host plugin can bridge `/runtime/v1` alongside the exist
       governanceTools: []
       # Memory-butler presets/session ids are exempt from tool masking.
       memoryAgentPresets: ['mebular-memory']
+      # Runtime HTTP auth: auto (default, bearer when a token exists) / bearer / none.
+      auth: auto
+      # Read the token from an env var (default MEBULAR_RUNTIME_TOKEN).
+      tokenEnv: MEBULAR_RUNTIME_TOKEN
+      # token: '...'
 ```
 
 - `recall`: calls `POST /runtime/v1/recall` only on the first step of a new human turn. No hits, timeout or failure passes through unchanged; a hit injects one UserMessage with `source.kind='mebular-memory'`, deduped by surface + session query.
-- `ingest`: batches user/assistant/tool events to `POST /runtime/v1/ingest`, skips the fork/resume inherited prefix, dedupes by `(sessionId, seq)`, uses a bounded queue and never blocks the loop.
+- `ingest`: batches user/assistant/tool events to `POST /runtime/v1/ingest`, skips the fork/resume inherited prefix, dedupes by `(sessionId, seq)`, uses a bounded queue and never blocks the loop. Network errors, timeouts, 429 and 5xx retry at most twice by default (exponential backoff; `ingestRetries` / `ingestRetryBaseMs`); dispose cancels the backoff. Retries reuse one `requestId` and `Idempotency-Key`, failures surface as warning/status, and events are not re-enqueued.
+- `auth`: `auto` (default) sends `Authorization: Bearer` when `memoryRuntime.token` or `tokenEnv` (default `MEBULAR_RUNTIME_TOKEN`) is set; without a token it sends no header, so Runtime `auth=none` works unchanged. `bearer` forces bearer, `none` never sends. The token never enters logs, errors or `getState()`; with bearer, 401/403 is recorded as a warning plus `auth` / `ingest.lastError` state instead of passing silently.
 - `checkpoints`: folds `compaction/start → summary → replacement → end` into a ContextCheckpoint and `PUT /runtime/v1/checkpoints/:threadId`; a failure or interruption is never reported as committed.
 - `hideMemoryTools`: dynamically hides currently visible `mcp__mebular__memory_*` from ordinary agents, keeps `task_*` and `governanceTools`, and replays through `agent.ctx.tools.restrict` + `tools/change` without hardcoding unknown names.
 - `maintenance`: on idle, asks the current session model for candidates and submits them to `POST /runtime/v1/ingest` (`extractor='host'`); no tools, capped maxTokens, timeout, silent failure and no direct graph write.

@@ -5565,6 +5565,7 @@ export function apply(ctx, config = {}, options = {}) {
     daemonUrl: resolved.daemonUrl,
     fetchImpl: opts.fetchImpl,
     now: opts.now,
+    env: opts.env,
     homeDir: memoryRuntimeConfig.enabled ? (opts.userHome ?? homedir()) : undefined,
     setTimeoutFn: opts.setTimeoutFn,
     clearTimeoutFn: opts.clearTimeoutFn,

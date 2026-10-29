@@ -1,0 +1,7 @@
+# Test-only memory runtime probe. Installed next to @mebular/dsh-plugin by the
+# memory runtime E2E harness. It never ships in the npm package.
+- insert:
+    - id: mebular-memory-e2e-probe
+      name: '@mebular/dsh-memory-runtime-probe'
+      config:
+        timeoutMs: 60000

@@ -100,10 +100,16 @@ dsh plugin --profile web remove @mebular/dsh-plugin
       governanceTools: []
       # 记忆管家 agent 的 preset / session id（例外，不隐藏 memory_*）
       memoryAgentPresets: ['mebular-memory']
+      # Runtime HTTP 认证：auto（默认，有 token 时 bearer）/ bearer / none
+      auth: auto
+      # 直接配置 token，或从环境变量读取（默认 MEBULAR_RUNTIME_TOKEN）
+      tokenEnv: MEBULAR_RUNTIME_TOKEN
+      # token: '...'
 ```
 
 - `recall`：仅在新人类 turn 首步调用 `POST /runtime/v1/recall`，无命中/超时/失败原样放行；命中时注入一条 `source.kind='mebular-memory'` 的 UserMessage，并按 surface + session query 去重。
-- `ingest`：批量把 user/assistant/tool 事件送到 `POST /runtime/v1/ingest`；跳过 fork/resume 的 inherited prefix，按 `(sessionId, seq)` 去重，队列有界，不阻塞 loop。
+- `ingest`：批量把 user/assistant/tool 事件送到 `POST /runtime/v1/ingest`；跳过 fork/resume 的 inherited prefix，按 `(sessionId, seq)` 去重，队列有界，不阻塞 loop。网络错误、超时、429/5xx 默认最多重试 2 次（指数退避，`ingestRetries` / `ingestRetryBaseMs` 可调；dispose 会取消退避）；重试复用同一个 `requestId` 与 `Idempotency-Key`，失败写入 warning/status，不重复入队。
+- `auth`：`auto`（默认）在存在 `memoryRuntime.token` 或 `tokenEnv`（默认 `MEBULAR_RUNTIME_TOKEN`）时发送 `Authorization: Bearer`；没有 token 时不发送，兼容 Runtime `auth=none`。`bearer` 强制 bearer，`none` 永不发送。token 不会进入日志、错误或 `getState()`；bearer 下 401/403 会记录 warning 与 `auth`/`ingest.lastError` 状态，不会静默通过。
 - `checkpoints`：把 `compaction/start → summary → replacement → end` 折叠为 ContextCheckpoint 并 `PUT /runtime/v1/checkpoints/:threadId`；失败或中断不会标记为 committed。
 - `hideMemoryTools`：普通 Agent 动态隐藏当前可见的 `mcp__mebular__memory_*`，保留 `task_*` 与 `governanceTools`；通过 `agent.ctx.tools.restrict` + `tools/change` 重放，不硬编码工具名。
 - `maintenance`：在 Agent idle 时用当前会话模型整理候选，经 `POST /runtime/v1/ingest`（`extractor='host'`）交给 Mebular；无 tools、有 maxTokens 上限与超时，失败静默，不直接写图。

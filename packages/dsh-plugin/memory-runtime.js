@@ -30,6 +30,8 @@ const DEFAULT_CONFIG = Object.freeze({
   checkpoints: true,
   hideMemoryTools: true,
   agentId: 'dsh',
+  auth: 'auto',
+  tokenEnv: 'MEBULAR_RUNTIME_TOKEN',
   namespace: null,
   namespaces: Object.freeze([]),
   recallLimit: 8,
@@ -41,6 +43,8 @@ const DEFAULT_CONFIG = Object.freeze({
   ingestBatchSize: 16,
   ingestFlushMs: 250,
   ingestTimeoutMs: 2000,
+  ingestRetries: 2,
+  ingestRetryBaseMs: 250,
   maxQueue: 256,
   maxChunkBytes: 16 * 1024,
   checkpointTimeoutMs: 2500,
@@ -96,6 +100,34 @@ function uniqueStrings(value, limit = 64) {
 function normalizeBaseUrl(value) {
   if (typeof value !== 'string' || value.trim().length === 0) return '';
   return value.trim().replace(/\/+$/, '');
+}
+
+function normalizeTokenEnv(value, warn) {
+  if (value === undefined) return DEFAULT_CONFIG.tokenEnv;
+  if (value === null || value === false) return '';
+  if (typeof value !== 'string') {
+    warn('invalid memoryRuntime.tokenEnv; using the default env name');
+    return DEFAULT_CONFIG.tokenEnv;
+  }
+  const name = value.trim();
+  if (name.length === 0) return '';
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    warn('invalid memoryRuntime.tokenEnv; using the default env name');
+    return DEFAULT_CONFIG.tokenEnv;
+  }
+  return name;
+}
+
+function normalizeAuthMode(value, warn) {
+  if (value === undefined) return DEFAULT_CONFIG.auth;
+  if (typeof value !== 'string') {
+    warn('invalid memoryRuntime.auth; using "auto"');
+    return DEFAULT_CONFIG.auth;
+  }
+  const mode = value.trim().toLowerCase();
+  if (mode === 'none' || mode === 'bearer' || mode === 'auto') return mode;
+  warn('invalid memoryRuntime.auth; using "auto"');
+  return DEFAULT_CONFIG.auth;
 }
 
 function hashText(value) {
@@ -184,6 +216,17 @@ export function resolveMemoryRuntimeConfig(input = {}, options = {}) {
   const memoryAgentPresets = uniqueStrings(presetInput, 16);
   const memoryAgentIds = uniqueStrings(raw.memoryAgentIds, 32);
   const checkpointSync = raw.checkpointSync === 'cloud' ? 'cloud' : 'local';
+  const auth = normalizeAuthMode(raw.auth, warn);
+  const tokenEnv = normalizeTokenEnv(raw.tokenEnv, warn);
+  let token = null;
+  if (raw.token !== undefined && raw.token !== null) {
+    if (typeof raw.token === 'string') {
+      const value = raw.token.trim();
+      if (value.length > 0) token = value;
+    } else {
+      warn('invalid memoryRuntime.token; ignoring it');
+    }
+  }
 
   return {
     enabled,
@@ -192,6 +235,11 @@ export function resolveMemoryRuntimeConfig(input = {}, options = {}) {
     checkpoints: enabled && raw.checkpoints !== false,
     hideMemoryTools,
     agentId,
+    auth,
+    tokenEnv,
+    // The token is kept only in the resolved adapter config. It is never
+    // written to getState()/logs and never included in an error.
+    token,
     namespace: namespace.length > 0 ? namespace : null,
     namespaces,
     recallLimit: asInt(raw.recallLimit, DEFAULT_CONFIG.recallLimit, 1, 50),
@@ -203,6 +251,8 @@ export function resolveMemoryRuntimeConfig(input = {}, options = {}) {
     ingestBatchSize: asInt(raw.ingestBatchSize, DEFAULT_CONFIG.ingestBatchSize, 1, 100),
     ingestFlushMs: asInt(raw.ingestFlushMs, DEFAULT_CONFIG.ingestFlushMs, 0, 10_000),
     ingestTimeoutMs: asInt(raw.ingestTimeoutMs, DEFAULT_CONFIG.ingestTimeoutMs, 10, 10_000),
+    ingestRetries: asInt(raw.ingestRetries, DEFAULT_CONFIG.ingestRetries, 0, 5),
+    ingestRetryBaseMs: asInt(raw.ingestRetryBaseMs, DEFAULT_CONFIG.ingestRetryBaseMs, 1, 10_000),
     maxQueue: asInt(raw.maxQueue, DEFAULT_CONFIG.maxQueue, 1, 2048),
     maxChunkBytes: asInt(raw.maxChunkBytes, DEFAULT_CONFIG.maxChunkBytes, 16, 256 * 1024),
     checkpointTimeoutMs: asInt(raw.checkpointTimeoutMs, DEFAULT_CONFIG.checkpointTimeoutMs, 10, 10_000),
@@ -600,6 +650,47 @@ function delay(ms, setTimeoutFn = setTimeout) {
   });
 }
 
+/**
+ * Delay that resolves early when its signal aborts. Used by bounded ingest
+ * retries so unload/daemon-down never waits out a backoff window.
+ *
+ * @param {number} ms
+ * @param {AbortSignal | undefined} signal
+ * @param {typeof setTimeout} setTimeoutFn
+ * @param {typeof clearTimeout} clearTimeoutFn
+ */
+function abortableDelay(ms, signal, setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout) {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = () => {
+      if (timer !== null) {
+        clearTimeoutFn(timer);
+        timer = null;
+      }
+      signal?.removeEventListener?.('abort', finish);
+      resolve();
+    };
+    timer = setTimeoutFn(finish, Math.max(0, ms));
+    timer?.unref?.();
+    signal?.addEventListener?.('abort', finish, { once: true });
+  });
+}
+
+function isRetryableRuntimeFailure(result) {
+  if (result?.ok !== false) return false;
+  if (result.retryable === true) return true;
+  if (result.status === 401 || result.status === 403) return false;
+  if (result.status === 409 || result.status === 422) return false;
+  if (Number.isInteger(result.status)) {
+    return result.status === 408 || result.status === 429 || result.status >= 500;
+  }
+  if (typeof result.code === 'string' && /^http_5\d\d$/u.test(result.code)) return true;
+  return result.code === 'fetch_failed'
+    || result.code === 'timeout'
+    || result.code === 'fetch_unavailable';
+}
+
 function createAbortScope(parent, timeoutMs, setTimeoutFn, clearTimeoutFn) {
   const controller = new AbortController();
   const onAbort = () => {
@@ -805,6 +896,7 @@ function createJobQueue({ max, handler, setTimeoutFn, clearTimeoutFn, stats, set
  *   now?: () => number,
  *   log?: (level: 'info' | 'warn', message: string) => void,
  *   ready?: boolean,
+ *   env?: Record<string, string | undefined>,
  *   homeDir?: string,
  *   setTimeoutFn?: typeof setTimeout,
  *   clearTimeoutFn?: typeof clearTimeout,
@@ -821,6 +913,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
   const setTimeoutFn = typeof opts.setTimeoutFn === 'function' ? opts.setTimeoutFn : setTimeout;
   const clearTimeoutFn = typeof opts.clearTimeoutFn === 'function' ? opts.clearTimeoutFn : clearTimeout;
   const homeDir = asText(opts.homeDir);
+  const env = isObject(opts.env) ? opts.env : process.env;
 
   if (!config.enabled || ctx === null) {
     return {
@@ -834,11 +927,16 @@ export function createMemoryRuntimeAdapter(options = {}) {
         disposed: false,
         ready: false,
         features: {},
+        auth: { mode: 'none', tokenPresent: false, failures: 0, lastStatus: null, lastCode: null, lastAt: null },
         recall: { attempts: 0, hits: 0, empty: 0, failures: 0, skipped: 0, deduped: 0, anchors: 0 },
-        ingest: { queued: 0, sent: 0, batches: 0, failed: 0, dropped: 0, duplicates: 0, skipped: 0 },
+        ingest: {
+          queued: 0, sent: 0, batches: 0, failed: 0, dropped: 0, duplicates: 0, skipped: 0,
+          retries: 0, exhausted: 0, lastError: null,
+        },
         checkpoints: { queued: 0, attempts: 0, sent: 0, failed: 0, committed: 0, incomplete: 0, interrupted: 0 },
         tools: { trackedAgents: 0, restricted: 0, currentDenied: 0 },
         maintenance: { attempts: 0, sent: 0, failures: 0, skipped: 0, running: 0 },
+        lastWarning: null,
         compactions: [],
       }),
     };
@@ -852,10 +950,17 @@ export function createMemoryRuntimeAdapter(options = {}) {
   let toolRefreshScheduled = false;
   let toolRefreshPromise = null;
   let suppressToolsChange = false;
+  let lastWarning = null;
+  const warned = new Set();
+  const retryAbort = typeof AbortController === 'function' ? new AbortController() : null;
 
   const stats = {
+    auth: { failures: 0, lastStatus: null, lastCode: null, lastAt: null },
     recall: { attempts: 0, hits: 0, empty: 0, failures: 0, skipped: 0, deduped: 0 },
-    ingest: { queued: 0, sent: 0, batches: 0, failed: 0, dropped: 0, duplicates: 0, skipped: 0, inherited: 0 },
+    ingest: {
+      queued: 0, sent: 0, batches: 0, failed: 0, dropped: 0, duplicates: 0, skipped: 0, inherited: 0,
+      retries: 0, exhausted: 0, lastError: null,
+    },
     checkpoints: { attempts: 0, sent: 0, failed: 0, committed: 0, incomplete: 0, interrupted: 0, dropped: 0 },
     tools: { restricted: 0, currentDenied: 0 },
     maintenance: { attempts: 0, sent: 0, failures: 0, skipped: 0 },
@@ -871,6 +976,63 @@ export function createMemoryRuntimeAdapter(options = {}) {
   function runtimeUrl(path) {
     const suffix = `${MEMORY_RUNTIME_PATH}${path}`;
     return daemonUrl.length > 0 ? `${daemonUrl}${suffix}` : suffix;
+  }
+
+  function warnOnce(key, message) {
+    const safe = redactMemoryText(message, { homeDir });
+    lastWarning = { code: key, message: safe, at: now() };
+    if (warned.has(key)) return;
+    if (warned.size >= 128) warned.delete(warned.values().next().value);
+    warned.add(key);
+    if (typeof opts.log === 'function') {
+      try {
+        opts.log('warn', safe);
+      } catch {
+        // Logging must never break the loop.
+      }
+    }
+  }
+
+  /**
+   * Resolve the bearer token at request time. `memoryRuntime.token` wins over
+   * the configured environment variable; `auth: 'none'` always wins over both.
+   * The value is never returned from getState() and never logged.
+   */
+  function resolveAuthToken() {
+    if (config.auth === 'none') return '';
+    if (typeof config.token === 'string' && config.token.length > 0) return config.token;
+    if (typeof config.tokenEnv === 'string' && config.tokenEnv.length > 0) {
+      const value = env?.[config.tokenEnv];
+      if (typeof value === 'string') return value.trim();
+    }
+    return '';
+  }
+
+  function effectiveAuthMode() {
+    if (config.auth === 'none') return 'none';
+    return resolveAuthToken().length > 0 ? 'bearer' : 'none';
+  }
+
+  function noteAuthFailure(result) {
+    if (result?.status !== 401 && result?.status !== 403) return;
+    stats.auth.failures += 1;
+    stats.auth.lastStatus = result.status;
+    stats.auth.lastCode = result.code ?? `http_${result.status}`;
+    stats.auth.lastAt = now();
+    const hint = config.tokenEnv.length > 0
+      ? `memoryRuntime.token or ${config.tokenEnv}`
+      : 'memoryRuntime.token';
+    warnOnce(
+      `auth:${result.status}:${stats.auth.lastCode}`,
+      `memory runtime request unauthorized (status ${result.status}); check ${hint}`,
+    );
+  }
+
+  if (config.auth === 'bearer' && resolveAuthToken().length === 0) {
+    warnOnce(
+      'auth:missing-token',
+      'memoryRuntime.auth is "bearer" but no Runtime token is configured; set memoryRuntime.token or its tokenEnv',
+    );
   }
 
   async function runtimeRequest(path, body, requestOptions = {}) {
@@ -895,6 +1057,8 @@ export function createMemoryRuntimeAdapter(options = {}) {
           accept: 'application/json',
           'content-type': 'application/json',
         };
+        const token = resolveAuthToken();
+        if (token.length > 0) headers.authorization = `Bearer ${token}`;
         if (typeof requestOptions.idempotencyKey === 'string' && requestOptions.idempotencyKey.length > 0) {
           headers['idempotency-key'] = requestOptions.idempotencyKey;
         }
@@ -914,22 +1078,28 @@ export function createMemoryRuntimeAdapter(options = {}) {
         const successful = response?.ok === true
           || (response?.ok === undefined && status !== null && status >= 200 && status < 300);
         if (!successful) {
-          return {
+          const failure = {
             ok: false,
             code: isObject(document?.error) && typeof document.error.code === 'string'
               ? document.error.code
               : `http_${status ?? 'error'}`,
             status,
+            retryable: isObject(document?.error) && document.error.retryable === true,
           };
+          noteAuthFailure(failure);
+          return failure;
         }
         if (isObject(document) && document.ok === false) {
-          return {
+          const failure = {
             ok: false,
             code: isObject(document.error) && typeof document.error.code === 'string'
               ? document.error.code
               : 'runtime_error',
             status,
+            retryable: isObject(document?.error) && document.error.retryable === true,
           };
+          noteAuthFailure(failure);
+          return failure;
         }
         return {
           ok: true,
@@ -1069,13 +1239,49 @@ export function createMemoryRuntimeAdapter(options = {}) {
           chunks: group.map((item) => item.chunk),
           ...(config.namespace === null ? {} : { namespace: config.namespace }),
         };
-        const result = await runtimeRequest('/ingest', payload, {
-          timeoutMs: config.ingestTimeoutMs,
-          idempotencyKey: requestId,
-        });
-        stats.ingest.batches += 1;
-        if (result.ok) stats.ingest.sent += group.length;
-        else stats.ingest.failed += group.length;
+        const retrySignal = retryAbort?.signal;
+        let attempt = 0;
+        let lastFailure = null;
+        for (;;) {
+          const result = await runtimeRequest('/ingest', payload, {
+            timeoutMs: config.ingestTimeoutMs,
+            idempotencyKey: requestId,
+          });
+          stats.ingest.batches += 1;
+          if (result.ok) {
+            stats.ingest.sent += group.length;
+            lastFailure = null;
+            break;
+          }
+          lastFailure = result;
+          const retryable = isRetryableRuntimeFailure(result)
+            && attempt < config.ingestRetries
+            && !disposed
+            && !closing
+            && ready
+            && retrySignal?.aborted !== true;
+          if (!retryable) break;
+          attempt += 1;
+          stats.ingest.retries += 1;
+          const backoff = config.ingestRetryBaseMs * (2 ** (attempt - 1));
+          await abortableDelay(backoff, retrySignal, setTimeoutFn, clearTimeoutFn);
+          if (retrySignal?.aborted === true || disposed || closing || !ready) break;
+        }
+        if (lastFailure !== null) {
+          stats.ingest.failed += group.length;
+          if (attempt >= config.ingestRetries && isRetryableRuntimeFailure(lastFailure)) {
+            stats.ingest.exhausted += 1;
+          }
+          stats.ingest.lastError = {
+            code: lastFailure.code ?? 'runtime_error',
+            status: Number.isInteger(lastFailure.status) ? lastFailure.status : null,
+            at: now(),
+          };
+          warnOnce(
+            `ingest:${stats.ingest.lastError.code}`,
+            `memory runtime ingest failed (${stats.ingest.lastError.code}); the event batch was dropped after ${attempt + 1} attempt(s)`,
+          );
+        }
       }
     },
   });
@@ -1643,15 +1849,32 @@ export function createMemoryRuntimeAdapter(options = {}) {
       if (runs.length === 0) break;
       await Promise.race([Promise.allSettled(runs), delay(config.maintenance.timeoutMs + 100, setTimeoutFn)]);
     }
-    await Promise.race([ingestQueue.flush(), delay(config.ingestTimeoutMs, setTimeoutFn)]);
+    // A flush waits for the whole bounded retry budget, not just one request
+    // timeout; otherwise callers observe a stale "failed" count while retries
+    // are still in flight.
+    const retryBudget = config.ingestRetries > 0
+      ? config.ingestRetryBaseMs * ((2 ** config.ingestRetries) - 1)
+      : 0;
+    const ingestBudget = Math.min(
+      60_000,
+      config.ingestTimeoutMs * (config.ingestRetries + 1) + retryBudget,
+    );
+    await Promise.race([ingestQueue.flush(), delay(ingestBudget, setTimeoutFn)]);
     await Promise.race([checkpointQueue.flush(), delay(config.checkpointTimeoutMs, setTimeoutFn)]);
   }
 
   function dispose() {
     if (disposal !== null) return disposal;
     // Stop accepting new work immediately, but leave HTTP available for one
-    // bounded drain of the ingest and checkpoint queues.
+    // bounded drain of the ingest and checkpoint queues. Cancelling retry waits
+    // now keeps unload bounded; an already in-flight request still gets to
+    // finish before activeRequests is aborted.
     closing = true;
+    try {
+      retryAbort?.abort();
+    } catch {
+      // Best effort.
+    }
     for (const off of listeners.splice(0)) {
       try {
         off();
@@ -1731,6 +1954,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
         hideMemoryTools: config.hideMemoryTools,
         maintenance: config.maintenance.enabled,
       },
+      auth: {
+        mode: effectiveAuthMode(),
+        configured: config.auth,
+        tokenPresent: resolveAuthToken().length > 0,
+        tokenEnv: config.tokenEnv.length > 0 ? config.tokenEnv : null,
+        ...stats.auth,
+      },
       recall: {
         ...stats.recall,
         anchors: anchors.size,
@@ -1751,6 +1981,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         ...stats.maintenance,
         running: maintenanceRuns.size,
       },
+      lastWarning,
       compactions: [...compactions.values()].map((state) => ({
         compactionId: state.compactionId,
         committed: state.committed,

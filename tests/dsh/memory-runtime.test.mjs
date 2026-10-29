@@ -990,6 +990,300 @@ describe('@mebular/dsh-plugin memory runtime：后台当前模型整理', () => 
   });
 });
 
+describe('@mebular/dsh-plugin memory runtime：Runtime HTTP 认证', () => {
+  const authConfig = (extra = {}) => ({
+    enabled: true,
+    recall: false,
+    ingest: true,
+    checkpoints: false,
+    hideMemoryTools: false,
+    ingestFlushMs: 0,
+    ingestTimeoutMs: 50,
+    ingestRetryBaseMs: 1,
+    ...extra,
+  });
+
+  function enqueueOne(ctx, adapter) {
+    const session = makeSession();
+    handlerFor(ctx, 'session/event')(session, event('user/message', 1, humanMessage('hello')));
+    return adapter;
+  }
+
+  it('配置 token 时发送 Bearer；state 与日志都不包含 token', async () => {
+    const ctx = fakeContext();
+    const fetch = installFetch(() => jsonOk({}));
+    const logs = [];
+    const { adapter } = adapterFor({
+      ctx,
+      config: authConfig({ auth: 'bearer', token: 'config-token-value' }),
+      daemonUrl: BASE,
+      fetchImpl: fetch.fetchImpl,
+      log: (level, message) => logs.push(`${level}:${message}`),
+    });
+    enqueueOne(ctx, adapter);
+    await adapter.flush();
+
+    expect(fetch.calls).toHaveLength(1);
+    expect(fetch.calls[0].init.headers.authorization).toBe('Bearer config-token-value');
+    const state = adapter.getState();
+    expect(state.auth).toMatchObject({
+      mode: 'bearer',
+      configured: 'bearer',
+      tokenPresent: true,
+    });
+    expect(JSON.stringify(state)).not.toContain('config-token-value');
+    expect(logs.join('\n')).not.toContain('config-token-value');
+  });
+
+  it('tokenEnv 默认读 MEBULAR_RUNTIME_TOKEN，也支持自定义 env 名', async () => {
+    for (const [tokenEnv, env] of [
+      [undefined, { MEBULAR_RUNTIME_TOKEN: 'default-env-token' }],
+      ['CUSTOM_RUNTIME_TOKEN', { CUSTOM_RUNTIME_TOKEN: 'custom-env-token' }],
+    ]) {
+      const ctx = fakeContext();
+      const fetch = installFetch(() => jsonOk({}));
+      const { adapter } = adapterFor({
+        ctx,
+        config: authConfig({ auth: 'auto', ...(tokenEnv === undefined ? {} : { tokenEnv }) }),
+        daemonUrl: BASE,
+        fetchImpl: fetch.fetchImpl,
+        env,
+      });
+      enqueueOne(ctx, adapter);
+      await adapter.flush();
+      expect(fetch.calls[0].init.headers.authorization).toBe(
+        `Bearer ${env[tokenEnv ?? 'MEBULAR_RUNTIME_TOKEN']}`,
+      );
+      expect(JSON.stringify(adapter.getState())).not.toContain(env[tokenEnv ?? 'MEBULAR_RUNTIME_TOKEN']);
+    }
+  });
+
+  it('auth: none 即使有 token/env 也不发送 Authorization', async () => {
+    const ctx = fakeContext();
+    const fetch = installFetch(() => jsonOk({}));
+    const { adapter } = adapterFor({
+      ctx,
+      config: authConfig({ auth: 'none', token: 'ignored-token' }),
+      daemonUrl: BASE,
+      fetchImpl: fetch.fetchImpl,
+      env: { MEBULAR_RUNTIME_TOKEN: 'ignored-env-token' },
+    });
+    enqueueOne(ctx, adapter);
+    await adapter.flush();
+
+    expect(fetch.calls).toHaveLength(1);
+    expect(fetch.calls[0].init.headers.authorization).toBeUndefined();
+    expect(adapter.getState().auth).toMatchObject({
+      mode: 'none',
+      configured: 'none',
+      tokenPresent: false,
+    });
+  });
+
+  it('无 token 的 auto 模式不发送 Authorization（兼容 runtime auth none）', async () => {
+    const ctx = fakeContext();
+    const fetch = installFetch(() => jsonOk({}));
+    const { adapter } = adapterFor({
+      ctx,
+      config: authConfig({ auth: 'auto' }),
+      daemonUrl: BASE,
+      fetchImpl: fetch.fetchImpl,
+      env: {},
+    });
+    enqueueOne(ctx, adapter);
+    await adapter.flush();
+    expect(fetch.calls[0].init.headers.authorization).toBeUndefined();
+    expect(adapter.getState().auth.mode).toBe('none');
+  });
+
+  it('bearer 401 不重试，记录 warning/status 且不泄漏 token', async () => {
+    const ctx = fakeContext();
+    const fetch = installFetch(() => jsonFail(401, 'unauthorized'));
+    const logs = [];
+    const { adapter } = adapterFor({
+      ctx,
+      config: authConfig({
+        auth: 'bearer',
+        token: 'secret-token-never-log',
+        ingestRetries: 2,
+      }),
+      daemonUrl: BASE,
+      fetchImpl: fetch.fetchImpl,
+      log: (level, message) => logs.push(`${level}:${message}`),
+    });
+    enqueueOne(ctx, adapter);
+    await adapter.flush();
+
+    expect(fetch.calls).toHaveLength(1);
+    const state = adapter.getState();
+    expect(state.ingest.failed).toBe(1);
+    expect(state.ingest.retries).toBe(0);
+    expect(state.ingest.lastError).toMatchObject({ code: 'unauthorized', status: 401 });
+    expect(state.auth.failures).toBe(1);
+    expect(state.auth.lastStatus).toBe(401);
+    expect(state.auth.lastCode).toBe('unauthorized');
+    expect(state.lastWarning?.code).toContain('unauthorized');
+    expect(logs.join('\n')).toContain('unauthorized');
+    expect(JSON.stringify(state)).not.toContain('secret-token-never-log');
+    expect(logs.join('\n')).not.toContain('secret-token-never-log');
+  });
+
+  it('非法 auth/tokenEnv 回退安全默认；空 tokenEnv 禁用 env 读取', async () => {
+    const warnings = [];
+    const config = resolveMemoryRuntimeConfig({
+      enabled: true,
+      auth: 'sometimes',
+      tokenEnv: 'not a name',
+      token: 123,
+    }, { warn: (message) => warnings.push(message) });
+    expect(config.auth).toBe('auto');
+    expect(config.tokenEnv).toBe('MEBULAR_RUNTIME_TOKEN');
+    expect(config.token).toBeNull();
+    expect(warnings).toHaveLength(3);
+
+    const ctx = fakeContext();
+    const fetch = installFetch(() => jsonOk({}));
+    const { adapter } = adapterFor({
+      ctx,
+      config: authConfig({ auth: 'auto', tokenEnv: '' }),
+      daemonUrl: BASE,
+      fetchImpl: fetch.fetchImpl,
+      env: { MEBULAR_RUNTIME_TOKEN: 'must-not-be-read' },
+    });
+    const session = makeSession();
+    handlerFor(ctx, 'session/event')(session, event('user/message', 1, humanMessage('hello')));
+    await adapter.flush();
+    expect(fetch.calls[0].init.headers.authorization).toBeUndefined();
+  });
+
+  it('bearer 缺少 token 时告警但不清空既有功能', async () => {
+    const logs = [];
+    const ctx = fakeContext();
+    const { adapter } = adapterFor({
+      ctx,
+      config: authConfig({ auth: 'bearer', ingest: false, recall: false, checkpoints: false }),
+      fetchImpl: installFetch(() => jsonOk({})).fetchImpl,
+      env: {},
+      log: (level, message) => logs.push(`${level}:${message}`),
+    });
+    expect(adapter.getState().auth).toMatchObject({ mode: 'none', configured: 'bearer', tokenPresent: false });
+    expect(logs.join('\n')).toContain('no Runtime token');
+  });
+});
+
+describe('@mebular/dsh-plugin memory runtime：ingest 有界重试', () => {
+  function retryConfig(extra = {}) {
+    return {
+      enabled: true,
+      recall: false,
+      ingest: true,
+      checkpoints: false,
+      hideMemoryTools: false,
+      ingestBatchSize: 8,
+      ingestFlushMs: 0,
+      ingestTimeoutMs: 50,
+      ingestRetryBaseMs: 1,
+      ingestRetries: 2,
+      ...extra,
+    };
+  }
+
+  function emitOne(ctx) {
+    const session = makeSession();
+    handlerFor(ctx, 'session/event')(session, event('user/message', 1, humanMessage('hello')));
+  }
+
+  it('503 后按同 requestId/idempotency-key 重试成功', async () => {
+    const ctx = fakeContext();
+    const responses = [jsonFail(503, 'runtime_not_ready'), jsonFail(503, 'runtime_not_ready'), jsonOk({})];
+    const fetch = installFetch(() => responses.shift() ?? jsonOk({}));
+    const { adapter } = adapterFor({
+      ctx,
+      config: retryConfig(),
+      daemonUrl: BASE,
+      fetchImpl: fetch.fetchImpl,
+    });
+    emitOne(ctx);
+    await adapter.flush();
+
+    expect(fetch.calls).toHaveLength(3);
+    const ids = fetch.calls.map((call) => call.body.requestId);
+    const keys = fetch.calls.map((call) => call.init.headers['idempotency-key']);
+    expect(new Set(ids).size).toBe(1);
+    expect(keys).toEqual(ids);
+    expect(ids[0]).toMatch(/^dsh_/);
+    const state = adapter.getState();
+    expect(state.ingest.retries).toBe(2);
+    expect(state.ingest.batches).toBe(3);
+    expect(state.ingest.sent).toBe(1);
+    expect(state.ingest.failed).toBe(0);
+    expect(state.ingest.lastError).toBeNull();
+  });
+
+  it('重试耗尽后只记一次 failed，并记录 lastError/exhausted/warning', async () => {
+    const ctx = fakeContext();
+    const fetch = installFetch(() => jsonFail(503, 'runtime_not_ready'));
+    const logs = [];
+    const { adapter } = adapterFor({
+      ctx,
+      config: retryConfig(),
+      daemonUrl: BASE,
+      fetchImpl: fetch.fetchImpl,
+      log: (level, message) => logs.push(`${level}:${message}`),
+    });
+    emitOne(ctx);
+    await adapter.flush();
+
+    expect(fetch.calls).toHaveLength(3);
+    const state = adapter.getState();
+    expect(state.ingest.failed).toBe(1);
+    expect(state.ingest.retries).toBe(2);
+    expect(state.ingest.exhausted).toBe(1);
+    expect(state.ingest.lastError).toMatchObject({ code: 'runtime_not_ready', status: 503 });
+    expect(state.lastWarning?.code).toBe('ingest:runtime_not_ready');
+    expect(logs.join('\n')).toContain('runtime_not_ready');
+  });
+
+  it('4xx 非重试错误只请求一次', async () => {
+    const ctx = fakeContext();
+    const fetch = installFetch(() => jsonFail(400, 'invalid_request'));
+    const { adapter } = adapterFor({
+      ctx,
+      config: retryConfig(),
+      daemonUrl: BASE,
+      fetchImpl: fetch.fetchImpl,
+    });
+    emitOne(ctx);
+    await adapter.flush();
+    expect(fetch.calls).toHaveLength(1);
+    expect(adapter.getState().ingest.retries).toBe(0);
+    expect(adapter.getState().ingest.failed).toBe(1);
+  });
+
+  it('dispose 取消退避等待，不等待完整重试预算', async () => {
+    const ctx = fakeContext();
+    let firstCallResolve;
+    const firstCall = new Promise((resolve) => { firstCallResolve = resolve; });
+    const fetch = installFetch(() => {
+      firstCallResolve();
+      return jsonFail(503, 'runtime_not_ready');
+    });
+    const { adapter } = adapterFor({
+      ctx,
+      config: retryConfig({ ingestRetryBaseMs: 10_000, disposeTimeoutMs: 100 }),
+      daemonUrl: BASE,
+      fetchImpl: fetch.fetchImpl,
+    });
+    emitOne(ctx);
+    await firstCall;
+    const before = Date.now();
+    await adapter.dispose();
+    expect(Date.now() - before).toBeLessThan(1000);
+    expect(fetch.calls).toHaveLength(1);
+    expect(adapter.getState().disposed).toBe(true);
+  });
+});
+
 describe('@mebular/dsh-plugin memory runtime：纯函数', () => {
   it('buildRecallMessage 无记录返回 null，并限制长度', () => {
     expect(buildRecallMessage([])).toBeNull();

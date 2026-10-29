@@ -1,6 +1,6 @@
 # Mebular 桌面 App（apps/desktop）
 
-> v0.2.3：**壳 + 守护托管 + 内嵌控制台 + 发布 tarball 运行时 + 三平台 unsigned 安装包**。
+> v0.2.4：**壳 + 守护托管 + 内嵌控制台 + 发布 tarball 运行时 + 三平台 unsigned 安装包**。
 > 安装包 runtime 来自与 npm 发布同一批 verify tarball；签名、公证与自动更新留到后续版本。
 > 发布操作见 [`docs/operations/DESKTOP_RELEASE.md`](../../docs/operations/DESKTOP_RELEASE.md)。
 
@@ -32,7 +32,7 @@ npm run dev -- --home ~/.mebular --port 7331   # 透传参数（可选）
 npm run smoke                     # 无 GUI 有界冒烟（CI 用）
 ```
 
-## 安装包（v0.2.3，unsigned）
+## 安装包（v0.2.4，unsigned）
 
 安装包里的 Mebular 运行时**不来自仓库源码目录**，而是先用 `npm pack` 产出五个发布
 tarball，再由 `prepare-runtime` 一次性 `npm install --omit=dev --ignore-scripts` 到
@@ -75,7 +75,7 @@ node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/win-unpa
 node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/linux-unpacked/resources
 ```
 
-> v0.2.3 产物**未签名、未公证**：macOS Gatekeeper 要求右键 → 打开（或系统设置 → 隐私与
+> v0.2.4 产物**未签名、未公证**：macOS Gatekeeper 要求右键 → 打开（或系统设置 → 隐私与
 > 安全性 → 仍要打开），Windows SmartScreen 要求「更多信息 → 仍要运行」。发布前先用
 > Release 的 `SHA256SUMS.txt` 校验。签名、公证与自动更新留到后续版本；完整说明见
 > [`docs/operations/DESKTOP_RELEASE.md`](../../docs/operations/DESKTOP_RELEASE.md)。

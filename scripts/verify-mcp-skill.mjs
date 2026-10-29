@@ -7,7 +7,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,9 +23,9 @@ const check = (label, ok, detail = '') => {
   if (!ok) passed = false;
 };
 
-function run(args, env = {}) {
+function run(args, env = {}, cwd = rootDir) {
   return execFileSync(process.execPath, args, {
-    cwd: rootDir,
+    cwd,
     encoding: 'utf-8',
     env: { ...process.env, ...env },
   });
@@ -150,17 +150,42 @@ try {
     check('SETUP §3 status 不再用不存在的 --home 参数（改注 MEBULAR_HOME）',
       !/mebular status --home/.test(setup) && setup.includes('MEBULAR_HOME=<dir> mebular status'));
 
+    // ---------- App 运行态兜底：runtime.json + /healthz 优先于 CLI 探测 ----------
+    const s01ForRuntime = setup.slice(setup.indexOf('**0.1 幂等'), setup.indexOf('**0.2 无 home'));
+    const s01Blocks = [...s01ForRuntime.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
+    const runtimeBlock = s01Blocks.find((block) => block.includes('runtime.json')) ?? '';
+    const statusBlock = s01Blocks.find((block) => block.includes('config.json')) ?? '';
+    check('SETUP §0.1 用 sed 从 runtime.json 读 http.host/http.port（默认 127.0.0.1/7331，不依赖 Node/CLI）',
+      runtimeBlock.includes('runtime.json')
+        && runtimeBlock.includes('"http"') && runtimeBlock.includes('"host"') && runtimeBlock.includes('"port"')
+        && runtimeBlock.includes('sed -n') && runtimeBlock.includes('HTTP_BLOCK')
+        && runtimeBlock.includes('HOST="${HOST:-127.0.0.1}"')
+        && runtimeBlock.includes('PORT="${PORT:-7331}"')
+        && runtimeBlock.includes('node -e') === false
+        && runtimeBlock.includes('/healthz') && runtimeBlock.includes('RUNNING=1')
+        && runtimeBlock.indexOf('command -v mebular') > runtimeBlock.indexOf('if [ "$RUNNING" -eq 0 ]')
+        && /已在跑/.test(runtimeBlock) && /跳过 §2 CLI 安装/.test(runtimeBlock)
+        && setup.includes('失败不是安装理由'),
+      'http.host/http.port + defaults；CLI 探测在 RUNNING 门控之后');
+    check('SETUP §0.1 单一代码块：RUNNING 不跨块重置，healthz 成功后绝不进入 CLI 安装分支',
+      s01Blocks.length === 1 && runtimeBlock === statusBlock
+        && runtimeBlock.includes('RUNNING=0') && runtimeBlock.includes('RUNNING=1')
+        && runtimeBlock.includes('if [ "$RUNNING" -eq 0 ]; then')
+        && !runtimeBlock.includes('RUNNING="${RUNNING:-0}"')
+        && /if \[ "\$RUNNING" -eq 0 \]; then[\s\S]*?command -v mebular[\s\S]*?else[\s\S]*?RUNNING=1：已在跑，跳过 CLI 安装\/拉起/.test(runtimeBlock)
+        && /没有 runtime\/healthz 且没有 CLI → 按 §2 安装 CLI/.test(runtimeBlock)
+        && runtimeBlock.indexOf('RUNNING=1') < runtimeBlock.indexOf('if [ "$RUNNING" -eq 0 ]'),
+      '同一 shell 块 + RUNNING=1 → 跳过 §2');
+
     // ---------- 修复轮 A/B/C（评审 3 处必改）----------
     // A（高）：§0.1 的 `mebular status` 必须在「home 存在」守卫内（无 home 照抄不得自举身份）
-    const s01 = setup.slice(setup.indexOf('**0.1 幂等'), setup.indexOf('**0.2 无 home'));
-    const s01Block = (s01.match(/```bash\n([\s\S]*?)```/) ?? [])[1] ?? '';
     check('A §0.1 的 `mebular status` 处于「home 存在」守卫内（if [ -f …config.json ] … then … else … fi）',
-      /if \[ -f "\$HOME_DIR\/config\.json" \]; then/.test(s01Block)
-        && /then[\s\S]*?mebular status[\s\S]*?else[\s\S]*?fi/.test(s01Block)
-        && (s01Block.match(/mebular status/g) ?? []).length === 1,
-      s01Block.includes('mebular status') ? '守卫内唯一一处 status' : '缺少 status');
+      /if \[ -f "\$HOME_DIR\/config\.json" \]; then/.test(statusBlock)
+        && /then[\s\S]*?mebular status[\s\S]*?else[\s\S]*?fi/.test(statusBlock)
+        && (statusBlock.match(/mebular status/g) ?? []).length === 1,
+      statusBlock.includes('mebular status') ? '守卫内唯一一处 status' : '缺少 status');
     check('A §0.1 守卫的 else 分支明确「无 home → §3/§5」且**不跑** status',
-      /else[\s\S]*?无 home → §3 建新 \/ §5 加入/.test(s01Block) && /不要在这里跑 status/.test(s01Block));
+      /else[\s\S]*?无 home → §3 建新 \/ §5 加入/.test(statusBlock) && /不要在这里跑 status/.test(statusBlock));
 
     // B（中）：§0.4 判据不得把 storeLock 列为 memory_status 的返回项，且须注明它来自 CLI status
     const s04 = setup.slice(setup.indexOf('**0.4 接入当前客户端'), setup.indexOf('**0.5 红线'));
@@ -194,6 +219,9 @@ try {
     // D（随行）：SKILL.md 接入第 1 步同样防滥用
     check('D SKILL.md 接入第 1 步注明「home 不存在时先按 SETUP §3/§5，不要跑 status」',
       /home 不存在时\*\*先按 SETUP §3\/§5/.test(skill) && /不要跑 `status`/.test(skill));
+    check('SKILL.md 接入第 1 步先查 runtime.json + /healthz（不把 App 运行态误判成未安装）',
+      /runtime\.json/.test(skill) && /\/healthz/.test(skill)
+        && /不要因为 `command -v mebular` 失败/.test(skill));
 
     // §0 与 SKILL 的互相引用
     check('SKILL.md 接入节含 print-config 与「会话里没有 Mebular 工具时的第一步」',
@@ -232,6 +260,23 @@ try {
     check('install.mjs 一并安装 mcp/ 片段（mebular-memory/mcp/opencode.json）',
       existsSync(join(installTarget, 'mebular-memory', 'mcp', 'opencode.json'))
         && existsSync(join(installTarget, 'mebular-memory', 'mcp', 'claude.json')));
+  }
+
+  // ---------- install.mjs --global：已存在 OpenCode/OpenChamber 客户端才写其 Skill 目录 ----------
+  {
+    const globalHome = join(dir, 'global-home');
+    await mkdir(join(globalHome, '.config', 'opencode'), { recursive: true });
+    await writeFile(join(globalHome, '.config', 'opencode', 'opencode.json'), '{}', 'utf-8');
+    run([join(skillDir, 'scripts', 'install.mjs'), '--global'], { HOME: globalHome }, globalHome);
+    check('install.mjs --global 安装到 OpenChamber 的 ~/.config/opencode/skills',
+      existsSync(join(globalHome, '.config', 'opencode', 'skills', 'mebular-memory', 'SKILL.md'))
+        && existsSync(join(globalHome, '.config', 'opencode', 'skills', 'mebular-memory', 'mcp', 'opencode.json')));
+
+    const bareHome = join(dir, 'bare-home');
+    await mkdir(bareHome, { recursive: true });
+    run([join(skillDir, 'scripts', 'install.mjs'), '--global'], { HOME: bareHome }, bareHome);
+    check('install.mjs --global 未检测到 OpenCode 客户端时不创建 ~/.config/opencode/skills',
+      !existsSync(join(bareHome, '.config', 'opencode', 'skills')));
   }
 } catch (error) {
   check('G6.4 验证', false, String(error?.message ?? error).substring(0, 400));

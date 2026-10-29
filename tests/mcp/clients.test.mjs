@@ -134,10 +134,12 @@ describe('H-1 clients：侦测与合并写入', () => {
   it('Skill 安装：显式 skillRoot 注入优先；默认装到首个 skill 目录', async () => {
     const fakeRoot = join(home, 'fake-skill');
     await mkdir(join(fakeRoot, 'tasks'), { recursive: true });
+    await mkdir(join(fakeRoot, 'mcp'), { recursive: true });
     await writeFile(join(fakeRoot, 'SKILL.md'), 'S', 'utf-8');
     await writeFile(join(fakeRoot, 'MEMORY_POLICY.md'), 'M', 'utf-8');
     await writeFile(join(fakeRoot, 'SETUP.md'), 'U', 'utf-8');
     await writeFile(join(fakeRoot, 'tasks', 'SKILL.md'), 'T', 'utf-8');
+    await writeFile(join(fakeRoot, 'mcp', 'opencode.json'), '{"mcp":{}}', 'utf-8');
     const injected = await installSkills('opencode', { ...opts(), skillRoot: fakeRoot });
     expect(injected.ok).toBe(true);
     expect(injected.installed.length).toBe(2);

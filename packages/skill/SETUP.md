@@ -8,24 +8,58 @@
 > 目标：**在当前会话里直接拿到 Mebular 的跨设备记忆能力**（MCP 工具面），且**不改动任何既有 memory provider**。
 > 顺序：① 幂等检查 → ② 无 home 指回 §3/§5（**不自建身份**）→ ③ 有 home 未在跑则拉起 → ④ 接入当前客户端并验证 → ⑤ 红线。
 
-**0.1 幂等：已装且已在跑就直接用，不要重复安装/重启**
+**0.1 幂等：先在跑就直接用（App / 常驻守护都算），不要重复安装/重启**
+
+先看守护发现文件 + 健康检查——**这一步不依赖 `command -v mebular`**：
 
 ```bash
-command -v mebular          # 期望：打印路径；未安装（无输出、exit 1）→ 见 §2
-# 幂等判定**只在 home 已存在时**执行 status（无 home 时它会在默认 home 自举身份材料，见 0.2）
 HOME_DIR="${MEBULAR_HOME:-$HOME/.mebular}"
-if [ -f "$HOME_DIR/config.json" ]; then
-  MEBULAR_HOME="$HOME_DIR" mebular status      # 判定见下（exit 0）
+RUNNING=0
+HOST=127.0.0.1
+PORT=7331
+RUNTIME_FILE="$HOME_DIR/runtime.json"
+# runtime.json 形状：{ "version": "...", "pid": ..., "http": { "host": "...", "port": ... } }
+if [ -f "$RUNTIME_FILE" ]; then
+  HTTP_BLOCK=$(sed -n '/"http"[[:space:]]*:/,/}/p' "$RUNTIME_FILE")
+  HOST=$(printf '%s\n' "$HTTP_BLOCK" | sed -n 's/.*"host"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  PORT=$(printf '%s\n' "$HTTP_BLOCK" | sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)
+  HOST="${HOST:-127.0.0.1}"
+  PORT="${PORT:-7331}"
+  CURL_HOST="$HOST"
+  case "$HOST" in *:*) CURL_HOST="[$HOST]" ;; esac
+  if curl -fsS "http://$CURL_HOST:$PORT/healthz" >/dev/null; then
+    RUNNING=1
+    echo "Mebular 已在跑（http://$HOST:$PORT），直接用；跳过 §2 CLI 安装，进入 §0.4 接入"
+  fi
+fi
+
+# CLI 可用性分支：与上面的 RUNNING 在**同一 shell 块**内；RUNNING=1 时绝不进入 §2。
+if [ "$RUNNING" -eq 0 ]; then
+  if command -v mebular >/dev/null 2>&1; then
+    # 幂等判定**只在 home 已存在时**执行 status（无 home 时它会在默认 home 自举身份材料，见 0.2）
+    if [ -f "$HOME_DIR/config.json" ]; then
+      MEBULAR_HOME="$HOME_DIR" mebular status      # 判定见下（exit 0）
+    else
+      echo "无 home → §3 建新 / §5 加入"           # 不要在这里跑 status
+    fi
+  else
+    echo "没有 runtime/healthz 且没有 CLI → 按 §2 安装 CLI"
+  fi
 else
-  echo "无 home → §3 建新 / §5 加入"           # 不要在这里跑 status
+  echo "RUNNING=1：已在跑，跳过 CLI 安装/拉起，直接进入 §0.4 接入"
 fi
 ```
 
-判定「守护已在跑」：`status` 输出里 **`storeLock` 非 null**（形如 `{"pid":…,"startedAt":…,"storagePath":…}`）→
+判定「守护已在跑」：`runtime.json` 存在且 `/healthz` 返回 200（App 内置 runtime、常驻服务、前台 `serve` 都写同一文件）→
+`RUNNING=1`，**直接使用**本机已有实例，不要重复 `install` 或再起 `serve`。**已在跑时，`command -v mebular` 失败不是安装理由；
+上面的 CLI 分支在 `RUNNING=1` 时不会执行，直接进入 §0.4 接入。**
+
+判定 `status` 输出里 **`storeLock` 非 null**（形如 `{"pid":…,"startedAt":…,"storagePath":…}`）→
 **直接使用**本机已有实例，不要重复 `install` 或再起 `serve`。
 
 > 注意口径：`status.running` 是 **P2P 节点**状态（`network.enabled=true` 才为 true），**不是**守护进程状态；
 > 默认 home 下它常为 `false`，属正常。判定守护进程请用 `storeLock`（或 0.3 的 `service status` / `/healthz`）。
+> **无 `config.json` 时不要自建身份**：引导用户从 App 主界面「新建忆云 / 加入忆云」完成（§3/§5）。
 
 **0.2 无 home：不要在这里自建身份**
 

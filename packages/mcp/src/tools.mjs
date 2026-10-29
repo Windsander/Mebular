@@ -1,4 +1,4 @@
-// MCP 工具面（G6.2 / D35 + R1 统一入口）：**27 个** agent 中立工具 = 记忆 11（薄壳委托 MemoryService）
+// MCP 工具面（G6.2 / D35 + R1 统一入口）：**29 个** agent 中立工具 = 记忆 13（薄壳委托 MemoryService）
 // + 任务 16（复用 @mebular/fleet 的 TASK_TOOLS handler；同 handler 不复制）。
 //
 // 钳制：limit ≤ 50（默认 10）、depth ≤ 5、batch ≤ 100。
@@ -90,12 +90,15 @@ const namespaceFilter = z.union([z.string(), z.array(z.string())]).optional();
 
 const internalTypes = z.array(z.enum(['fact', 'episode', 'skill', 'preference', 'observation']));
 
+/** 工具描述首行 = 首要路由信号「何时用」；原始语义/约束保留在第二行。 */
+const when = (whenToUse, description) => `何时用：${whenToUse}\n${description}`;
+
 /** 工具注册表：handler(service, args) → MCP 结果对象（CLI 直接取 `structuredContent`）。 */
 export const TOOL_SPECS = [
   {
     name: 'memory_write',
     title: '写入记忆',
-    description: '写入单条记忆（fact/episode/skill/preference/observation）',
+    description: when('需要把用户明确、可复用的稳定事实/偏好写入长期记忆时；先查后写，用 memory_query/memory_search 查重。', '写入单条记忆（fact/episode/skill/preference/observation）'),
     inputSchema: z.object({ items: z.array(memoryInputSchema).min(1) }),
     handler: async (service, { items }) => {
       try {
@@ -108,7 +111,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_write_batch',
     title: '批量写入记忆',
-    description: `批量写入记忆（最多 ${MAX_BATCH} 条）`,
+    description: when('一次会话结束有 2 条以上稳定事实/偏好要落库，且已查重时。', `批量写入记忆（最多 ${MAX_BATCH} 条）`),
     inputSchema: z.object({ items: z.array(memoryInputSchema).min(1) }),
     handler: async (service, { items }) => {
       if (items.length > MAX_BATCH) return fail(`批量写入超过上限：${items.length} > ${MAX_BATCH}`);
@@ -122,7 +125,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_query',
     title: '查询记忆',
-    description: '语义/关键词召回（配置向量索引时走语义）',
+    description: when('回答前需要按语义召回已有记忆，或不确定某事实是否已记录时。', '语义/关键词召回（配置向量索引时走语义）'),
     inputSchema: z.object({
       query: z.string().optional(),
       types: internalTypes.optional(),
@@ -161,7 +164,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_search',
     title: '关键词搜索',
-    description: '关键词检索基线，可选一跳关系',
+    description: when('已知关键词/专有名词，需要精确检索或查重时（比 memory_query 更可控）。', '关键词检索基线，可选一跳关系'),
     inputSchema: z.object({
       query: z.string(),
       types: z.array(z.string()).optional(),
@@ -196,7 +199,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_profile',
     title: '用户画像',
-    description: '返回用户偏好与属性（默认不含已归档）',
+    description: when('需要用户偏好/属性做个性化回答，或判断写入是否符合用户约束时。', '返回用户偏好与属性（默认不含已归档）'),
     inputSchema: z.object({ includeArchived: z.boolean().optional() }),
     handler: async (service, args) => {
       try {
@@ -209,7 +212,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_skills',
     title: '技能列表',
-    description: '按分类/关键词/标签筛选技能',
+    description: when('需要复用已有技能步骤，或查找某类可复用流程时。', '按分类/关键词/标签筛选技能'),
     inputSchema: z.object({
       category: z.string().optional(),
       search: z.string().optional(),
@@ -233,7 +236,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_history',
     title: '会话历史',
-    description: '按会话/时间/主题筛选会话情节',
+    description: when('需要回看某次会话/任务过程，而不是稳定事实时。', '按会话/时间/主题筛选会话情节'),
     inputSchema: z.object({
       sessionIds: z.array(z.string()).optional(),
       startTime: z.number().optional(),
@@ -262,7 +265,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_graph',
     title: '图遍历',
-    description: `从起点遍历（深度 ≤ ${MAX_DEPTH}）`,
+    description: when('需要沿关系边查上下文（相关实体/事实/技能）时。', `从起点遍历（深度 ≤ ${MAX_DEPTH}）`),
     inputSchema: z.object({
       startId: z.string(),
       direction: z.enum(['outgoing', 'incoming', 'both']).optional(),
@@ -288,7 +291,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_import',
     title: '导入记忆',
-    description: '经适配器导入异构来源（kv/markdown/…）',
+    description: when('从外部 kv/markdown 等来源一次性导入历史记忆时。', '经适配器导入异构来源（kv/markdown/…）'),
     inputSchema: z.object({ kind: z.string().optional(), data: z.unknown(), origin: z.string().optional() }),
     handler: async (service, args) => {
       try {
@@ -305,7 +308,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_status',
     title: '记忆状态',
-    description: '返回设备/网络/计数/状态哈希/开关',
+    description: when('接入、排障或需要确认设备/网络/计数/状态哈希/开关时。', '返回设备/网络/计数/状态哈希/开关'),
     inputSchema: z.object({}),
     handler: async (service) => {
       try {
@@ -318,7 +321,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_sync',
     title: '同步对端',
-    description: '连接对端并等待一次双向同步（network.enabled 需为 true）',
+    description: when('需要立即拉取/推送某个对端，而不是等待自动同步时（network.enabled 需为 true）。', '连接对端并等待一次双向同步（network.enabled 需为 true）'),
     inputSchema: z.object({ peerId: z.string(), address: z.string().optional() }),
     handler: async (service, args) => {
       try {
@@ -332,7 +335,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_delete',
     title: '删除记忆',
-    description: '删除记忆：写墓碑（deletedAt）并随图事件同步到各端；删除后默认不再出现在任何召回。不可逆动作（对端已拷贝的旧快照无法强制回收）。需 memory.admin。',
+    description: when('确认内容要永久墓碑删除、且接受不可逆时；不确定时先用 memory_archive。', '删除记忆：写墓碑（deletedAt）并随图事件同步到各端；删除后默认不再出现在任何召回。不可逆动作（对端已拷贝的旧快照无法强制回收）。需 memory.admin。'),
     inputSchema: z.object({ ids: z.array(z.string()).min(1) }),
     handler: async (service, args) => {
       try {
@@ -345,7 +348,7 @@ export const TOOL_SPECS = [
   {
     name: 'memory_archive',
     title: '归档 / 解除归档记忆',
-    description: '归档记忆：打 metadata.archivedAt 标记（随图同步、无损、可逆），归档后默认不进入召回；archived=false 解除归档。删除（墓碑）节点会被跳过。',
+    description: when('内容暂时不该参与召回但将来可能有用（可逆）；要永久删除请用 memory_delete。', '归档记忆：打 metadata.archivedAt 标记（随图同步、无损、可逆），归档后默认不进入召回；archived=false 解除归档。删除（墓碑）节点会被跳过。'),
     inputSchema: z.object({ ids: z.array(z.string()).min(1), archived: z.boolean().optional() }),
     handler: async (service, args) => {
       try {
@@ -357,13 +360,13 @@ export const TOOL_SPECS = [
   },
 ];
 
-/** 统一工具注册表（记忆 11 + 任务 16 = 27）：`mebular mcp`（stdio）与 HTTP `/mcp` 都注册这一份。 */
+/** 统一工具注册表（记忆 13 + 任务 16 = 29）：`mebular mcp`（stdio）与 HTTP `/mcp` 都注册这一份。 */
 export const ALL_TOOL_SPECS = [...TOOL_SPECS, ...TASK_TOOL_SPECS];
 
-/** 统一工具名（27）——控制台「能力清单」与 CLI `mebular tools` 同源。 */
+/** 统一工具名（29）——控制台「能力清单」与 CLI `mebular tools` 同源。 */
 export const TOOL_NAMES = ALL_TOOL_SPECS.map((spec) => spec.name);
 
-/** 统一 scope 表（记忆 + 任务，27）。 */
+/** 统一 scope 表（记忆 + 任务，29）。 */
 export const TOOL_ALL_SCOPES = { ...TOOL_SCOPES, ...TASK_TOOL_SCOPES };
 
 /** 工具名 → spec（记忆 + 任务；CLI 与 MCP 同 handler）。 */

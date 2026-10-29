@@ -10,7 +10,7 @@ import { StarStage, namespaceColor, shortId, buildHoverRoutes, buildNetworkScene
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
 import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
-import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
+import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
 import { t, getLocale, setLocale, onLocaleChange, applyStaticI18n, languageSettingsRowHtml, initI18n, reconcileDesktopLocale, LOCALE_STORAGE_KEY, formatDate as formatLocaleDate, formatDateTime as formatLocaleDateTime, formatExpiry } from './i18n.mjs';
@@ -94,6 +94,8 @@ const state = {
   serviceMsg: '',
   clientMsg: {},
   clientDiff: {},
+  // 设置 · 常用「自动修复」：只修客户端接入，独立于重启向导。
+  repair: { busy: false, message: '', tone: null, details: [] },
 };
 
 const stage = new StarStage($('#stage'));
@@ -1500,10 +1502,7 @@ function renderLockedSettings(body) {
       <section class="settings-section" data-locked-settings>
         <h3>${escapeHtml(t('lock.settings.title'))} <span class="crt-tag crt-tag-warn">${escapeHtml(t('lock.settings.tag'))}</span></h3>
         <p class="settings-section-desc muted">${escapeHtml(t('lock.settings.desc'))}</p>
-        <div class="locked-settings-actions">
-          <button class="btn btn-primary" type="button" data-locked-action="create">${escapeHtml(t('lock.settings.create'))}</button>
-          <button class="btn btn-crt" type="button" data-locked-action="join">${escapeHtml(t('lock.settings.join'))}</button>
-        </div>
+        <p class="settings-section-desc muted">${escapeHtml(t('lock.settings.guide'))}</p>
       </section>
       <section class="settings-section" data-locked-diagnostics>
         <h3>${escapeHtml(t('lock.settings.diagnostics'))} <span class="badge badge-muted">${escapeHtml(t('lock.settings.readonly'))}</span></h3>
@@ -1518,12 +1517,6 @@ function renderLockedSettings(body) {
       </section>
     </div>
   `;
-  body.querySelectorAll('[data-locked-action]').forEach((button) => {
-    button.addEventListener('click', () => {
-      if (button.dataset.lockedAction === 'create') openOnboardCreate();
-      else openOnboardJoin();
-    });
-  });
   body.querySelector('#settings-locked-copy')?.addEventListener('click', (event) => {
     const payload = {
       phase: status.phase ?? 'UNINITIALIZED',
@@ -1568,6 +1561,7 @@ function settingsSignature(activeTab) {
     state.clientVerify ?? null,
     state.clientBusy ?? null,
     state.clientFailed ?? null,
+    state.repair ?? null,
     state.addForm ?? null,
     // 诊断 · 状态指纹（来自记忆域的 stateHash；轮询内变化时重建）
     (state.namespaces ?? []).map((n) => [n.namespace, n.stateHash ?? null]),
@@ -1644,6 +1638,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     ${panel('common', `
       ${languageSettingsRowHtml()}
       <div class="settings-resident" id="settings-resident">${serviceRowHtml(state.service, state.serviceMsg)}</div>
+      ${repairRowHtml(state.repair)}
       ${wizardRowHtml(host.capabilities.openWizard)}
       <section class="settings-section" data-settings-common-status>
         <h3>${escapeHtml(t('settings.common.statusTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3>
@@ -3253,6 +3248,70 @@ async function serviceAction(action) {
   }
 }
 
+/** 失败详情再脱敏一道（服务端已脱敏；这里防未来字段变化把 token/密钥带进 DOM）。 */
+function redactRepairText(value) {
+  return String(value ?? '')
+    .replace(/\b(Bearer)\s+[A-Za-z0-9._~+/=-]+/gi, '$1 <redacted>')
+    .replace(/\b(token|secret|password|passwd|api[-_]?key|authorization)\b\s*[:=]\s*[^\s,;]+/gi, '$1=<redacted>')
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, 'sk-<redacted>');
+}
+
+/** 设置 · 常用「自动修复」：只重跑客户端接入（MCP 条目 + Skill force），不重启、不碰记忆面。 */
+async function repairClientIntegration() {
+  if (state.repair?.busy) return;
+  const ok = await confirmModal({
+    title: t('settings.repair.confirmTitle'),
+    body: t('settings.repair.confirmBody'),
+    confirmLabel: t('settings.repair.confirm'),
+  });
+  if (!ok) return;
+  const render = () => renderSettings(state.settingsTab ?? 'common');
+  state.repair = { busy: true, message: t('settings.repair.running'), tone: null, details: [] };
+  render();
+  let res;
+  try {
+    res = await api('/admin/api/repair', { method: 'POST', body: {}, timeoutMs: 120000 });
+  } catch (error) {
+    state.repair = {
+      busy: false,
+      tone: 'error',
+      message: t('settings.repair.failed', { message: localizeError(error, 'errors.unknown') }),
+      details: [],
+    };
+    render();
+    return;
+  }
+  const clients = Array.isArray(res?.clients) ? res.clients : [];
+  const failed = clients.filter((entry) => (entry.connect?.ok === false && entry.connect?.skipped !== true)
+    || entry.skills?.ok === false);
+  const repaired = clients.filter((entry) => entry.connect?.ok === true && entry.connect?.skipped !== true);
+  if (clients.length === 0 || (failed.length === 0 && repaired.length === 0)) {
+    state.repair = { busy: false, message: t('settings.repair.none'), tone: null, details: [] };
+  } else if (failed.length > 0) {
+    const names = failed.map((entry) => entry.name ?? entry.id).join(t('common.listSeparator'));
+    const details = failed.map((entry) => {
+      const reasons = [entry.connect?.reason, entry.skills?.reason]
+        .filter((reason) => typeof reason === 'string' && reason.trim().length > 0)
+        .map(redactRepairText);
+      return {
+        name: redactRepairText(entry.name ?? entry.id ?? '—'),
+        reasons: reasons.length > 0 ? reasons : [t('settings.repair.unknownReason')],
+      };
+    });
+    state.repair = {
+      busy: false,
+      tone: 'error',
+      message: t('settings.repair.partial', { ok: repaired.length, failed: failed.length, names }),
+      details,
+    };
+  } else {
+    state.repair = { busy: false, message: t('settings.repair.success', { count: repaired.length }), tone: null, details: [] };
+  }
+  // 成功摘要已确定；刷新失败只影响列表即时性，不能把成功的修复误报为失败。
+  try { await refresh(); } catch { /* 下一轮 3s 轮询会继续刷新 */ }
+  render();
+}
+
 async function clientAction(id, action) {
   const say = (message) => { state.clientMsg[id] = message; rerenderAssistants(); };
   const showDiff = (message) => { state.clientDiff[id] = message; rerenderAssistants(); };
@@ -3302,7 +3361,10 @@ async function clientAction(id, action) {
     delete state.clientFailed[id]; // 成功/重试成功 → 清失败态
     say(action === 'connect'
       ? (res.changed ? t('assistants.done.connectChanged') : t('assistants.done.connectUnchanged'))
-      : action === 'rollback' ? t('assistants.done.rolledBack') : t('assistants.done.installed'));
+      : action === 'rollback' ? t('assistants.done.rolledBack')
+        : action === 'skills' && Array.isArray(res.kept) && res.kept.length > 0
+          ? t('assistants.done.skillsKept')
+          : t('assistants.done.installed'));
     // R-1 中-6 → UX-2 行内闭环：接入成功后挂重载提醒，「我已重载，验证」可消
     if (action === 'connect' && res.changed) { state.clientRestart[id] = true; state.clientVerify[id] = null; }
     await refresh();
@@ -4617,6 +4679,7 @@ $('#settings-body').addEventListener('click', (event) => {
   if (extra) { $('#about').hidden = false; renderAbout(); return; }
   const svc = event.target.closest('[data-svc-action]');
   if (svc) { void serviceAction(svc.dataset.svcAction); return; }
+  if (event.target.closest('#settings-repair')) { void repairClientIntegration(); return; }
   const cli = event.target.closest('[data-cli-action]');
   if (cli) { void clientAction(cli.dataset.cliId, cli.dataset.cliAction); return; }
   if (event.target.closest('#asst-add')) {

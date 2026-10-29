@@ -157,12 +157,15 @@ function dispatchInput(input: Record<string, unknown>): TaskDispatch | undefined
   return d;
 }
 
+/** 工具描述首行 = 首要路由信号「何时用」；原始语义/约束保留在第二行。 */
+const when = (whenToUse: string, description: string): string => `何时用：${whenToUse}\n${description}`;
+
 export const TASK_TOOLS: TaskTool[] = [
   {
     name: 'task_submit',
     cli: 'task_submit',
     scope: 'task.write',
-    description: '提交任务（root 或 child）；root 可带预算与派发策略。**非幂等**：重试 = 新任务（需要关联请用 causedBy/chain）',
+    description: when('要把任务派给其他设备/Agent 时；先 task_targets 确认可派对象，再提交。', '提交任务（root 或 child）；root 可带预算与派发策略。**非幂等**：重试 = 新任务（需要关联请用 causedBy/chain）'),
     inputSchema: {
       type: 'object',
       required: ['intent', 'to'],
@@ -205,7 +208,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_submit_batch',
     cli: 'task_submit_batch',
     scope: 'task.write',
-    description: '批量提交任务（同 root 语义）',
+    description: when('一次要派发多个同 root 语义的任务时。', '批量提交任务（同 root 语义）'),
     inputSchema: { type: 'object', required: ['tasks'], properties: { tasks: { type: 'array' } } },
     handler: async (input, ctx) => {
       const tasks = input.tasks;
@@ -221,7 +224,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_cancel',
     cli: 'task_cancel',
     scope: 'task.write',
-    description: '取消未终态任务（写 failed，reason=CANCELLED）',
+    description: when('任务尚未终态且需要终止时；已终态返回 already-terminal。', '取消未终态任务（写 failed，reason=CANCELLED）'),
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' }, reason: { type: 'string' } } },
     handler: async (input, ctx) => {
       const session = await openSession(ctx);
@@ -253,7 +256,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_retry',
     cli: 'task_retry',
     scope: 'task.write',
-    description: '以新任务重试（链表达：新任务 causedBy 原任务）',
+    description: when('任务失败/需要重跑且要保留因果链时。', '以新任务重试（链表达：新任务 causedBy 原任务）'),
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
       const session = await openSession(ctx);
@@ -277,7 +280,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_status',
     cli: 'task_status',
     scope: 'task.read',
-    description: '查询单任务权威状态',
+    description: when('需要单任务的权威状态/进度时。', '查询单任务权威状态'),
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
       const session = await openSession(ctx);
@@ -294,7 +297,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_list',
     cli: 'task_list',
     scope: 'task.read',
-    description: '列出任务（可按 status/from 过滤）',
+    description: when('需要总览任务，或按状态/来源筛选时。', '列出任务（可按 status/from 过滤）'),
     inputSchema: { type: 'object', properties: { status: { type: 'string' }, fromDevice: { type: 'string' } } },
     handler: async (input, ctx) => {
       const session = await openSession(ctx);
@@ -314,7 +317,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_history',
     cli: 'task_history',
     scope: 'task.read',
-    description: '任务的全部事件（确定序）',
+    description: when('需要审计单任务全部事件或定位失败原因时。', '任务的全部事件（确定序）'),
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
       const session = await openSession(ctx);
@@ -331,7 +334,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_children',
     cli: 'task_children',
     scope: 'task.read',
-    description: '任务的直接子任务（trace.causedBy）',
+    description: when('需要展开某任务的直接子任务时。', '任务的直接子任务（trace.causedBy）'),
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
       const session = await openSession(ctx);
@@ -349,7 +352,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_summarize',
     cli: 'task_summarize',
     scope: 'task.read',
-    description: '从 root 可达子图的汇总（复用 summarizeDag）',
+    description: when('需要从 root 汇总整棵 DAG/整体进度时。', '从 root 可达子图的汇总（复用 summarizeDag）'),
     inputSchema: { type: 'object', required: ['taskId'], properties: { taskId: { type: 'string' } } },
     handler: async (input, ctx) => {
       const session = await openSession(ctx);
@@ -365,7 +368,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_subscribe',
     cli: 'task_subscribe',
     scope: 'task.write',
-    description: '变化订阅：返回自 cursor 起有变化的任务（单次）；CLI --watch 轮询',
+    description: when('需要增量轮询任务变化（cursor）时；单次返回，CLI --watch 轮询。', '变化订阅：返回自 cursor 起有变化的任务（单次）；CLI --watch 轮询'),
     inputSchema: { type: 'object', properties: { cursor: { type: 'object' } } },
     handler: async (input, ctx) => {
       const session = await openSession(ctx);
@@ -384,7 +387,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_negotiate',
     cli: 'task_negotiate',
     scope: 'task.write',
-    description: '发送协商消息（clarify/counter/accept/reject；messageId 幂等）',
+    description: when('接收方需要澄清/还价/接受/拒绝任务时；messageId 幂等。', '发送协商消息（clarify/counter/accept/reject；messageId 幂等）'),
     inputSchema: { type: 'object', required: ['taskId', 'kind', 'round'], properties: { taskId: { type: 'string' }, kind: { type: 'string' }, round: { type: 'number' }, text: { type: 'string' } } },
     handler: async (input, ctx) => {
       const session = await openSession(ctx);
@@ -415,7 +418,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'chatter_send',
     cli: 'chatter_send',
     scope: 'task.write',
-    description: '配额制闲聊发送（本地配额记账）',
+    description: when('需要非任务型协作闲聊/状态同步，且接受本地配额记账时。', '配额制闲聊发送（本地配额记账）'),
     inputSchema: { type: 'object', required: ['topic', 'text'], properties: { topic: { type: 'string' }, text: { type: 'string' }, messageId: { type: 'string' } } },
     handler: async (input, ctx) => {
       const session = await openSession(ctx);
@@ -440,7 +443,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'chatter_inbox',
     cli: 'chatter_inbox',
     scope: 'task.write',
-    description: '闲聊收件箱（幂等去重、确定序）',
+    description: when('需要读取本机闲聊收件箱时（幂等去重、确定序）。', '闲聊收件箱（幂等去重、确定序）'),
     inputSchema: { type: 'object', properties: {} },
     handler: async (_input, ctx) => {
       const session = await openSession(ctx);
@@ -457,7 +460,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_quota',
     cli: 'task_quota',
     scope: 'task.read',
-    description: '本机配额状态（每设备对自己发出本地记账；无全局账本）',
+    description: when('派发前确认本机配额、避免超限时。', '本机配额状态（每设备对自己发出本地记账；无全局账本）'),
     inputSchema: { type: 'object', properties: {} },
     handler: async (_input, ctx) => {
       const config = await loadToolConfig(ctx.dir);
@@ -468,7 +471,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'task_targets',
     cli: 'task_targets',
     scope: 'task.read',
-    description: '我能派给谁：订阅任务域的对端 ∩ 其 Agent 目录（device, agent）',
+    description: when('派发前先查“我能派给谁”（订阅任务域 ∩ Agent 目录）。', '我能派给谁：订阅任务域的对端 ∩ 其 Agent 目录（device, agent）'),
     inputSchema: { type: 'object', properties: {} },
     handler: async (_input, ctx) => {
       const session = await openSession(ctx);
@@ -491,7 +494,7 @@ export const TASK_TOOLS: TaskTool[] = [
     name: 'board_create',
     cli: 'board_create',
     scope: 'task.write',
-    description: '建板（= 建域 + 本机订阅 + 邀请成员）；域是板的薄封装',
+    description: when('需要开新任务板/域并邀请成员时。', '建板（= 建域 + 本机订阅 + 邀请成员）；域是板的薄封装'),
     inputSchema: { type: 'object', required: ['name'], properties: { name: { type: 'string' }, with: { type: 'array', items: { type: 'string' } } } },
     handler: async (input, ctx) => {
       const name = requiredString(input, 'name');

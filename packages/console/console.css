@@ -1643,15 +1643,28 @@ body.modal-open { overflow: hidden; }
 .asst-sp { flex: 1 1 auto; }
 /* 重启向导行（设置·常用）：说明列可收缩，动作按钮永不被长句挤出可视区。
    只作用于本行专用类；AI 助手其它 .asst-row 的「名称|状态|弹簧|动作」模板不变。 */
-.settings-wizard-row .asst-name { flex: 0 0 auto; min-width: 0; }
-.settings-wizard-row .asst-st { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
-.settings-wizard-row #settings-open-wizard { flex: 0 0 auto; }
+.settings-wizard-row .asst-name,
+.settings-repair-row .asst-name { flex: 0 0 auto; min-width: 0; }
+.settings-wizard-row .asst-st,
+.settings-repair-row .asst-st { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.settings-wizard-row #settings-open-wizard,
+.settings-repair-row #settings-repair { flex: 0 0 auto; }
+.settings-repair-msg { padding: 0 2px 8px; overflow-wrap: anywhere; }
+.settings-repair-details { margin: 0 2px 8px; font-size: 12px; color: var(--muted); }
+.settings-repair-details summary { cursor: pointer; color: var(--accent-2); }
+.settings-repair-details ul { margin: 6px 0 0; padding-left: 18px; }
+.settings-repair-details li { margin: 2px 0; overflow-wrap: anywhere; }
+.settings-repair-details li b { color: var(--text); margin-right: 6px; }
 @media (max-width: 760px) {
   /* 窄屏：名称 + 按钮一行（按钮靠右），说明整行换到第二行 */
-  .settings-wizard-row { flex-wrap: wrap; }
-  .settings-wizard-row .asst-name { order: 0; }
-  .settings-wizard-row #settings-open-wizard { order: 1; margin-left: auto; }
-  .settings-wizard-row .asst-st { order: 2; flex: 1 1 100%; }
+  .settings-wizard-row,
+  .settings-repair-row { flex-wrap: wrap; }
+  .settings-wizard-row .asst-name,
+  .settings-repair-row .asst-name { order: 0; }
+  .settings-wizard-row #settings-open-wizard,
+  .settings-repair-row #settings-repair { order: 1; margin-left: auto; }
+  .settings-wizard-row .asst-st,
+  .settings-repair-row .asst-st { order: 2; flex: 1 1 100%; }
 }
 .asst-head { display: flex; align-items: center; justify-content: space-between; gap: var(--row-gap); margin-bottom: 6px; }
 .asst-head p { margin: 0; font-size: 12px; }
@@ -2027,8 +2040,7 @@ details.share[open] summary::before { content: "▾ "; }
   .onboarding-coach::before { right: 32px; }
 }
 
-/* 锁定态设置：两个入口 + 诊断信息 */
-.locked-settings-actions { display: flex; gap: 8px; flex-wrap: wrap; margin: 4px 0 2px; }
+/* 锁定态设置：顶栏引导 + 诊断信息（入口只在顶栏，设置内不重复） */
 
 /* 锁定态弹框：令牌输入与加入忆云一致（等宽、可换行）；字段仍复用 .field */
 #onboard-join textarea.crt-input { font-family: var(--crt-mono, monospace); font-size: 11px; resize: vertical; }

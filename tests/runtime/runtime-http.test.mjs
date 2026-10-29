@@ -67,7 +67,7 @@ describe('/runtime/v1', () => {
       },
       capabilities: {
         mcpTools: true,
-        ingest: false,
+        ingest: true,
         rawCapture: 'off',
         trace: 'local',
       },
@@ -108,7 +108,7 @@ describe('/runtime/v1', () => {
         mode: 'immersive',
         changed: true,
         requiresRestart: false,
-        capabilities: { ingest: false, checkpoint: false, compact: false },
+        capabilities: { ingest: true, checkpoint: true, compact: true },
       },
     });
 

@@ -246,7 +246,12 @@ describe('POST /admin/api/repair：只修客户端接入', () => {
     const healed = result.cases.autoReconciledConfig;
     expect(healed?.theme).toBe('dark');
     expect(healed?.mcp?.servers?.other).toEqual({ keep: 1 });
-    expect(healed?.mcp?.servers?.mebular).toEqual({ type: 'remote', url: result.cases.currentMcpUrl });
+    expect(healed?.mcp?.servers?.mebular).toEqual({
+      type: 'remote',
+      url: result.cases.currentMcpUrl,
+      oauth: false,
+      codemode: false,
+    });
     expect(result.cases.skillAfterStartup).toBe('CUSTOM USER SKILL');
     const afterStartup = (result.cases.clientsAfterStartup?.body?.clients ?? []).find((entry) => entry.id === 'opencode');
     expect(afterStartup?.connected).toBe(true);

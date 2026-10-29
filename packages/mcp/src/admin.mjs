@@ -31,6 +31,21 @@ import {
 
 export const POLICY_NS = POLICY_NAMESPACE;
 
+// Runtime 内部对象判定（与 src/runtime/internal.ts 同义）。
+// 这里不 import 新导出的 helper：管理 API 也会被旧版 @mebular/core 的宿主进程加载。
+const RUNTIME_INTERNAL_TYPES = new Set([
+  'compact', 'context_checkpoint', 'self_record', 'raw_chunk', 'recall_trace',
+]);
+
+export function isRuntimeInternalObject(node) {
+  if (!node) return false;
+  if (RUNTIME_INTERNAL_TYPES.has(node.type)) return true;
+  if (node.metadata?.runtime?.internal === true) return true;
+  return typeof node.namespace === 'string'
+    && node.namespace.startsWith('__')
+    && node.namespace !== '__policy__';
+}
+
 /** hex → Uint8Array（证书 devicePublicKey 为 hex 编码） */
 export function hexToBytes(hex) {
   if (typeof hex !== 'string' || hex.length % 2 !== 0) return new Uint8Array();
@@ -1159,6 +1174,8 @@ export async function buildMemories({ app, url }) {
   const flag = (name) => params.get(name) === '1' || params.get(name) === 'true';
   const includeArchived = flag('includeArchived');
   const includeDeleted = flag('includeDeleted');
+  // 0.3：Runtime 内部对象默认隐藏；includeInternal=1 仅管理面调试使用。
+  const includeInternal = flag('includeInternal');
   const namespace = params.get('namespace') ?? undefined;
   const limitRaw = Number(params.get('limit') ?? '50');
   const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.trunc(limitRaw), 1), 200) : 50;
@@ -1173,6 +1190,7 @@ export async function buildMemories({ app, url }) {
   const filtered = nodes.filter((node) => {
     if (!includeDeleted && node.deletedAt) return false;
     if (!includeArchived && archivedOf(node)) return false;
+    if (!includeInternal && isRuntimeInternalObject(node)) return false;
     if (namespace !== undefined && (node.namespace ?? 'default') !== namespace) return false;
     return true;
   });
@@ -1210,6 +1228,7 @@ export async function buildMemories({ app, url }) {
     limit,
     includeArchived,
     includeDeleted,
+    includeInternal,
     ...(namespace !== undefined ? { namespace } : {}),
     memories,
   };

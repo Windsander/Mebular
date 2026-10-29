@@ -10,7 +10,6 @@ import { IdentityManager } from '../../src/crypto/IdentityManager.js';
 import { MemoryService } from '../../src/memory/MemoryService.js';
 import {
   RuntimeModeError,
-  RuntimeNotImplementedError,
   RuntimeService,
   createCompactNode,
   defaultRuntimeSettings,
@@ -107,14 +106,14 @@ describe('RuntimeService (G0/G1)', () => {
     expect(status.identity.hostId).toMatch(/^h_[0-9a-f]{16}$/);
     expect(status.capabilities).toMatchObject({
       mcpTools: true,
-      ingest: false,
-      recall: false,
-      context: false,
-      checkpoint: false,
-      compact: false,
+      ingest: true,
+      recall: true,
+      context: true,
+      checkpoint: true,
+      compact: true,
       rawCapture: 'local',
       trace: 'local',
-      modelSources: ['heuristic'],
+      modelSources: ['heuristic', 'host'],
     });
     expect(status.counts.memoryRecords).toBe(2);
     expect(status.counts.compacts).toBe(1);
@@ -147,11 +146,11 @@ describe('RuntimeService (G0/G1)', () => {
       changed: true,
       requiresRestart: false,
       capabilities: {
-        ingest: false,
-        recall: false,
-        context: false,
-        checkpoint: false,
-        compact: false,
+        ingest: true,
+        recall: true,
+        context: true,
+        checkpoint: true,
+        compact: true,
       },
     });
     expect(persisted).toEqual(['immersive']);
@@ -178,18 +177,27 @@ describe('RuntimeService (G0/G1)', () => {
     await expect(runtime.setMode('turbo' as RuntimeMode)).rejects.toBeInstanceOf(RuntimeModeError);
   });
 
-  it('未实现业务接口显式抛 runtime_not_implemented，不静默假成功', async () => {
-    const runtime = new RuntimeService(app, { hostKey: 'home-test' });
-    await expect(runtime.ingest({ agentId: 'opencode' })).rejects.toBeInstanceOf(RuntimeNotImplementedError);
-    await expect(runtime.recall({ query: 'x', agentId: 'opencode' })).rejects.toMatchObject({
-      code: 'runtime_not_implemented',
+  it('mcp 模式：写端点显式 409 mode_mismatch，读端点仍可用', async () => {
+    const runtime = new RuntimeService(app, {
+      hostKey: 'home-test',
+      runtimeDir: join(dir, 'runtime'),
+      memoryService: memory,
     });
-    await expect(runtime.context({ agentId: 'opencode' })).rejects.toMatchObject({
-      code: 'runtime_not_implemented',
+    await expect(runtime.ingest({ agentId: 'opencode' })).rejects.toMatchObject({
+      code: 'mode_mismatch',
+      status: 409,
     });
-    await expect(runtime.getCheckpoint('th_1', 'opencode')).rejects.toMatchObject({
-      code: 'runtime_not_implemented',
+    await expect(runtime.compact({ namespace: 'default' })).rejects.toMatchObject({
+      code: 'mode_mismatch',
     });
+    await expect(runtime.putCheckpoint('th_1', { agentId: 'opencode' })).rejects.toMatchObject({
+      code: 'mode_mismatch',
+    });
+    await expect(runtime.recall({ query: 'x', agentId: 'opencode' })).resolves.toMatchObject({
+      records: [],
+      total: 0,
+    });
+    await expect(runtime.getCheckpoint('th_1', 'opencode')).resolves.toEqual({ checkpoint: null });
   });
 });
 

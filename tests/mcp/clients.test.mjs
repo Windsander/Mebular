@@ -268,6 +268,7 @@ describe('MCP URL 陈旧检测与自动修复', () => {
     expect(sameMcpUrl(`${CURRENT}/`, CURRENT)).toBe(true);
     expect(sameMcpUrl('http://localhost:7331/mcp', CURRENT)).toBe(true);
     expect(sameMcpUrl(OLD, CURRENT)).toBe(false);
+    expect(sameMcpUrl('http://127.0.0.1:7331/other', CURRENT)).toBe(false);
   });
 
   it('控制台经 LAN 访问（同端口/路径）不把 loopback 配置误判 stale', async () => {

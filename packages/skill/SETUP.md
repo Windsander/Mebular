@@ -14,31 +14,47 @@
 
 ```bash
 HOME_DIR="${MEBULAR_HOME:-$HOME/.mebular}"
-if [ -f "$HOME_DIR/runtime.json" ]; then
-  HOST=$(node -e "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(r.host||'127.0.0.1')" "$HOME_DIR/runtime.json")
-  PORT=$(node -e "const r=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.stdout.write(String(r.port||7331))" "$HOME_DIR/runtime.json")
-  if curl -fsS "http://$HOST:$PORT/healthz" >/dev/null; then
-    echo "Mebular 已在跑，直接用（不要安装第二套 CLI）"
+RUNNING=0
+HOST=127.0.0.1
+PORT=7331
+RUNTIME_FILE="$HOME_DIR/runtime.json"
+# runtime.json 形状：{ "version": "...", "pid": ..., "http": { "host": "...", "port": ... } }
+if [ -f "$RUNTIME_FILE" ]; then
+  HTTP_BLOCK=$(sed -n '/"http"[[:space:]]*:/,/}/p' "$RUNTIME_FILE")
+  HOST=$(printf '%s\n' "$HTTP_BLOCK" | sed -n 's/.*"host"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1)
+  PORT=$(printf '%s\n' "$HTTP_BLOCK" | sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -n 1)
+  HOST="${HOST:-127.0.0.1}"
+  PORT="${PORT:-7331}"
+  CURL_HOST="$HOST"
+  case "$HOST" in *:*) CURL_HOST="[$HOST]" ;; esac
+  if curl -fsS "http://$CURL_HOST:$PORT/healthz" >/dev/null; then
+    RUNNING=1
+    echo "Mebular 已在跑（http://$HOST:$PORT），直接用；跳过 §2 CLI 安装，进入 §0.4 接入"
   fi
 fi
 ```
 
 判定「守护已在跑」：`runtime.json` 存在且 `/healthz` 返回 200（App 内置 runtime、常驻服务、前台 `serve` 都写同一文件）→
-**直接使用**本机已有实例，不要重复 `install` 或再起 `serve`。**已在跑时，`command -v mebular` 失败不是安装理由。**
+`RUNNING=1`，**直接使用**本机已有实例，不要重复 `install` 或再起 `serve`。**已在跑时，`command -v mebular` 失败不是安装理由。**
 
-**CLI 可用性分支**（没有 runtime/healthz 时才需要）：
+**CLI 可用性分支**（只在 `RUNNING=0` 时执行；已在跑时跳过 §2）：
 
 ```bash
+RUNNING="${RUNNING:-0}"
 HOME_DIR="${MEBULAR_HOME:-$HOME/.mebular}"
-if command -v mebular >/dev/null 2>&1; then
-  # 幂等判定**只在 home 已存在时**执行 status（无 home 时它会在默认 home 自举身份材料，见 0.2）
-  if [ -f "$HOME_DIR/config.json" ]; then
-    MEBULAR_HOME="$HOME_DIR" mebular status      # 判定见下（exit 0）
+if [ "$RUNNING" -eq 0 ]; then
+  if command -v mebular >/dev/null 2>&1; then
+    # 幂等判定**只在 home 已存在时**执行 status（无 home 时它会在默认 home 自举身份材料，见 0.2）
+    if [ -f "$HOME_DIR/config.json" ]; then
+      MEBULAR_HOME="$HOME_DIR" mebular status      # 判定见下（exit 0）
+    else
+      echo "无 home → §3 建新 / §5 加入"           # 不要在这里跑 status
+    fi
   else
-    echo "无 home → §3 建新 / §5 加入"           # 不要在这里跑 status
+    echo "没有 runtime/healthz 且没有 CLI → 按 §2 安装 CLI"
   fi
 else
-  echo "没有 runtime/healthz 且没有 CLI → 按 §2 安装 CLI"
+  echo "RUNNING=1：已在跑，跳过 CLI 安装/拉起，直接进入 §0.4 接入"
 fi
 ```
 

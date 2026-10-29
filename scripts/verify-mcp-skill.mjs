@@ -155,17 +155,27 @@ try {
     const s01Blocks = [...s01ForRuntime.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
     const runtimeBlock = s01Blocks.find((block) => block.includes('runtime.json')) ?? '';
     const statusBlock = s01Blocks.find((block) => block.includes('config.json')) ?? '';
-    check('SETUP §0.1 先用 runtime.json + /healthz 判定 App/守护运行态（不依赖 CLI）',
-      runtimeBlock.includes('runtime.json') && runtimeBlock.includes('/healthz')
+    check('SETUP §0.1 用 sed 从 runtime.json 读 http.host/http.port（默认 127.0.0.1/7331，不依赖 Node/CLI）',
+      runtimeBlock.includes('runtime.json')
+        && runtimeBlock.includes('"http"') && runtimeBlock.includes('"host"') && runtimeBlock.includes('"port"')
+        && runtimeBlock.includes('sed -n') && runtimeBlock.includes('HTTP_BLOCK')
+        && runtimeBlock.includes('HOST="${HOST:-127.0.0.1}"')
+        && runtimeBlock.includes('PORT="${PORT:-7331}"')
+        && runtimeBlock.includes('node -e') === false
         && runtimeBlock.includes('command -v mebular') === false
-        && /已在跑/.test(s01ForRuntime) && /不要安装第二套/.test(s01ForRuntime)
+        && runtimeBlock.includes('/healthz') && runtimeBlock.includes('RUNNING=1')
+        && /已在跑/.test(runtimeBlock) && /跳过 §2 CLI 安装/.test(runtimeBlock)
         && setup.includes('失败不是安装理由'),
-      'runtime.json + healthz = 已在跑，直接用');
-    check('SETUP §0.1 保留 CLI 可用性分支：没有 runtime/healthz 且没有 CLI 才按 §2 安装',
-      s01ForRuntime.includes('CLI 可用性分支')
-        && statusBlock.includes('command -v mebular')
-        && /没有 runtime\/healthz 且没有 CLI → 按 §2 安装 CLI/.test(statusBlock),
-      'CLI 分支 + §2 兜底');
+      'http.host/http.port + defaults；无 Node/CLI 依赖');
+    check('SETUP §0.1 RUNNING 门控：healthz 成功即跳过 CLI 安装分支（不出现矛盾提示）',
+      runtimeBlock.includes('RUNNING=0')
+        && statusBlock.includes('RUNNING="${RUNNING:-0}"')
+        && statusBlock.includes('if [ "$RUNNING" -eq 0 ]; then')
+        && /if \[ "\$RUNNING" -eq 0 \]; then[\s\S]*?command -v mebular[\s\S]*?else[\s\S]*?RUNNING=1：已在跑，跳过 CLI 安装\/拉起/.test(statusBlock)
+        && /没有 runtime\/healthz 且没有 CLI → 按 §2 安装 CLI/.test(statusBlock)
+        && s01ForRuntime.indexOf('RUNNING=1') >= 0
+        && s01ForRuntime.indexOf('RUNNING=1') < s01ForRuntime.indexOf('if [ "$RUNNING" -eq 0 ]'),
+      'RUNNING=1 → 跳过 §2，直接 §0.4');
 
     // ---------- 修复轮 A/B/C（评审 3 处必改）----------
     // A（高）：§0.1 的 `mebular status` 必须在「home 存在」守卫内（无 home 照抄不得自举身份）

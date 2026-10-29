@@ -158,6 +158,10 @@ async function seedHome(home) {
   const storagePath = join(home, 'store.jsonl');
   // S3：真实 root + 两条他机会签请求（批准/拒绝写入走真实端点，不靠桩）
   const { Mebular, IdentityManager, POLICY_NAMESPACE } = await import('@mebular/core');
+  // 运行时内部对象 helper 用本工作树构建产物（node_modules 可能指向旧包）。
+  const { createCompactNode, createContextCheckpointNode, createSelfRecordNode } = await import(
+    new URL('../../../dist/index.js', import.meta.url).href
+  );
   const { securityActionDigest, pairingCodeForDigest } = await import('@mebular/fleet');
   const master = await new IdentityManager().generateUserMasterKey();
   const defaultFingerprint = `sha256:${createHash('sha256').update(Buffer.from(master.publicKey)).digest('hex').slice(0, 12)}`;
@@ -227,6 +231,73 @@ async function seedHome(home) {
       } },
       namespace: POLICY_NAMESPACE,
     });
+    // 0.3 运行时治理视图用料：compact / checkpoint / self（内部对象默认隐藏）+ 本机召回轨迹。
+    const runtimeEnvelope = (kind) => ({
+      schema: 1,
+      kind,
+      id: 'ignored',
+      cloudId: 'cl_ui',
+      userId: 'u_ui',
+      agentId: 'opencode',
+      namespace: 'notes',
+      visibility: kind === 'self_record' ? 'agent-self' : kind === 'context_checkpoint' ? 'task' : 'user',
+      sync: 'cloud',
+      internal: true,
+      provenance: { source: 'runtime', extractor: 'heuristic', at: now },
+      createdAt: now,
+      updatedAt: now,
+    });
+    await createCompactNode(app.graph, {
+      schema: 1,
+      summary: 'UI 运行时摘要：普通记忆的合并视图',
+      sourceIds: [],
+      sourceHashes: [],
+      strategy: 'summary',
+      model: { extractor: 'heuristic' },
+      tokenCount: 12,
+      stale: false,
+    }, runtimeEnvelope('compact'), { namespace: 'notes' });
+    await createContextCheckpointNode(app.graph, {
+      schema: 1,
+      threadId: 'th_ui_runtime',
+      agentId: 'opencode',
+      revision: 3,
+      state: { cursor: 3 },
+      summary: 'UI checkpoint：任务恢复点',
+      recordIds: [],
+      originHostId: 'h_ui',
+      lease: { hostId: 'h_ui', until: now + 60_000 },
+      expiresAt: now + 86_400_000,
+    }, runtimeEnvelope('context_checkpoint'));
+    await createSelfRecordNode(app.graph, {
+      schema: 1,
+      agentId: 'opencode',
+      revision: 2,
+      displayName: 'OpenCode',
+      goals: ['UI 验证'],
+      traits: ['careful'],
+      preferences: {},
+      capabilities: [],
+      boundaries: [],
+      updatedAt: now,
+    }, runtimeEnvelope('self_record'));
+    await mkdir(join(home, 'runtime'), { recursive: true, mode: 0o700 });
+    await writeFile(join(home, 'runtime', 'traces.jsonl'), `${JSON.stringify({
+      schema: 1,
+      id: 'tr_ui_runtime_0001',
+      cloudId: 'cl_ui',
+      agentId: 'opencode',
+      hostId: 'h_ui',
+      threadId: 'th_ui_runtime',
+      at: now - 60_000,
+      queryHash: 'ui-trace-hash',
+      queryPreview: 'UI 召回：主题偏好',
+      namespaces: ['notes'],
+      hits: [{ id: 'ui-hit-1', type: 'fact', score: 0.91, rank: 1 }],
+      model: { query: 'heuristic' },
+      tookMs: 9,
+      degraded: false,
+    })}\n`, { encoding: 'utf-8', mode: 0o600 });
     await app.shutdown();
   }
   // UX-2 收口联调用料（全在沙箱 home 内）：
@@ -513,11 +584,11 @@ async function main() {
     check('UX-2 首屏状态总览条可见（纯只读：守护/对端/记忆）', await waitFor('(() => { const p = document.querySelector("#status-pill"); return Boolean(p) && p.hidden === false && /守护/.test(p.textContent) && /对端/.test(p.textContent) && /记忆/.test(p.textContent); })()'));
     check('UX-2「需要注意」浮卡条件渲染（无事不出现；有事则条目可点）', await evalJs('(() => { const c = document.querySelector("#attention-card"); return Boolean(c) && (c.hidden === true || c.querySelectorAll("[data-attention-action]").length > 0); })()'));
 
-    // §7：导航序与命名（星图 / 共享 / 记忆 / 审计；data-view 驱动切换，顺序不影响行为）
-    check('§7 导航：tab 顺序与命名 = 星图/共享/记忆/审计',
+    // §7：导航序与命名（星图 / 共享 / 记忆 / 审计 / 运行时；data-view 驱动切换）
+    check('§7 导航：tab 顺序与命名 = 星图/共享/记忆/审计/运行时',
       await evalJs(`(() => {
         const labels = Array.from(document.querySelectorAll('#view-nav .view-label')).map((el) => el.textContent);
-        return JSON.stringify(labels) === JSON.stringify(['星图', '共享', '记忆', '审计']);
+        return JSON.stringify(labels) === JSON.stringify(['星图', '共享', '记忆', '审计', '运行时']);
       })()`));
     check('E1 顶栏：无「连接已有地址」，仅保留「邀请设备」',
       await evalJs(`(() => {
@@ -625,9 +696,137 @@ async function main() {
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('从记忆视图切回星图', await waitFor('document.querySelector("#memories-view")?.hidden === true'));
 
+    // 0.3 · 记忆运行时：状态 / 内部对象过滤 / 轨迹 / 模式切换（不迁移数据）
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
+    check('切换到运行时视图（#runtime-view 可见）', await waitFor('document.querySelector("#runtime-view")?.hidden === false'));
+    check('运行时状态卡：模式/模型/计数/同步/数据范围 + 本机视角说明',
+      await waitFor(`(() => {
+        const v = document.querySelector('#runtime-view');
+        const s = document.querySelector('#runtime-status');
+        return Boolean(v) && Boolean(s) && /接入方式/.test(s.textContent) && /记忆模型/.test(s.textContent)
+          && /记忆计数/.test(s.textContent) && /同步/.test(s.textContent) && /数据范围/.test(s.textContent)
+          && /Raw/.test(s.textContent) && /本机视角/.test(v.textContent);
+      })()`, 20000));
+    check('运行时时间线默认只显示普通记录（compact/checkpoint/self 隐藏）',
+      await waitFor(`(() => {
+        const list = document.querySelector('#runtime-timeline');
+        return Boolean(list) && list.querySelectorAll('.mem-row').length >= 1
+          && list.querySelectorAll('[data-rt-kind=compact], [data-rt-kind=checkpoint], [data-rt-kind=self]').length === 0;
+      })()`, 20000));
+    await evalJs('document.querySelector("[data-rt-internal-toggle]").click()');
+    const internalVisible = await waitFor(`(() => {
+        const list = document.querySelector('#runtime-timeline');
+        return Boolean(list)
+          && list.querySelectorAll('[data-rt-kind=compact]').length >= 1
+          && list.querySelectorAll('[data-rt-kind=checkpoint]').length >= 1
+          && list.querySelectorAll('[data-rt-kind=self]').length >= 1;
+      })()`, 20000);
+    check('管理员打开「显示内部对象」后出现 compact / checkpoint / self', internalVisible,
+      internalVisible ? '' : await evalJs(`(async () => {
+        const api = await fetch('/admin/api/memories?limit=200&includeInternal=1').then((r) => r.json()).catch(() => null);
+        return JSON.stringify({
+          checked: document.querySelector('[data-rt-internal-toggle]')?.checked ?? null,
+          rows: [...document.querySelectorAll('#runtime-timeline .mem-row')].map((row) => row.dataset.rtKind),
+          api: (api?.memories ?? []).map((memory) => memory.type),
+        });
+      })()`));
+    await evalJs('document.querySelector("[data-rt-filter=compact]").click()');
+    check('时间线筛选 compact：只显示摘要行',
+      await waitFor(`(() => {
+        const rows = [...document.querySelectorAll('#runtime-timeline .mem-row')];
+        return rows.length >= 1 && rows.every((row) => row.dataset.rtKind === 'compact')
+          && /内部 · 管理员/.test(document.querySelector('#runtime-timeline')?.textContent ?? '');
+      })()`, 20000));
+    await evalJs('document.querySelector("#runtime-timeline [data-rt-object]").click()');
+    check('内部对象可查看（compact 摘要，仅管理员视图）',
+      await waitFor(`(() => {
+        const d = document.querySelector('#runtime-timeline .runtime-detail');
+        return Boolean(d) && /UI 运行时摘要/.test(d.textContent) && /内部 · 管理员/.test(d.textContent);
+      })()`, 20000));
+    await evalJs('document.querySelector("#runtime-timeline [data-rt-object]").click()');
+    check('召回轨迹可见，「为什么想起」展开命中与分数',
+      await waitFor(`(() => {
+        const list = document.querySelector('#runtime-traces');
+        return Boolean(list) && /UI 召回/.test(list.textContent) && Boolean(list.querySelector('[data-rt-trace]'));
+      })()`, 20000));
+    await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
+    check('轨迹命中明细：fact / 分数 / 模型',
+      await waitFor(`(() => {
+        const hits = document.querySelector('#runtime-traces .runtime-trace-hits');
+        return Boolean(hits) && /fact/.test(hits.textContent) && /0.91/.test(hits.textContent);
+      })()`, 20000));
+    check('轻量 MCP 模式下反馈按钮禁用（不伪造成可写）',
+      await evalJs('(() => { const b = document.querySelector("#runtime-traces [data-rt-trace-useful]"); return Boolean(b) && b.disabled === true; })()'));
+    await evalJs('document.querySelector("[data-rt-filter=memory]").click()');
+    const beforeModeSwitch = await evalJs('document.querySelectorAll("#runtime-timeline .mem-row[data-rt-kind=memory]").length');
+    await evalJs('document.querySelector("#runtime-status [data-rt-mode=immersive]").click()');
+    check('切换接入方式走品牌确认（不迁移、不删除）',
+      await waitFor('document.querySelector("#modal")?.hidden === false && /不迁移|不删除/.test(document.querySelector("#modal-body")?.textContent ?? "")'));
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    check('切换到沉浸式 Runtime：当前模式即时更新',
+      await waitFor('document.querySelector("#runtime-head-mode")?.textContent === "沉浸式 Runtime"', 20000));
+    check('模式切换不迁移数据：普通记录数量不变',
+      beforeModeSwitch >= 1 && await evalJs('document.querySelectorAll("#runtime-timeline .mem-row[data-rt-kind=memory]").length') === beforeModeSwitch);
+    check('沉浸式下反馈按钮可用（写入口已打开）',
+      await waitFor('(() => { const b = document.querySelector("#runtime-traces [data-rt-trace-useful]"); return Boolean(b) && b.disabled === false; })()', 20000));
+    await evalJs('document.querySelector("#runtime-status [data-rt-mode=mcp]").click()');
+    await waitFor('document.querySelector("#modal")?.hidden === false');
+    await evalJs('document.querySelector("#modal-confirm").click()');
+    check('切回轻量 MCP（随时可回退）',
+      await waitFor('document.querySelector("#runtime-head-mode")?.textContent === "轻量 MCP"', 20000));
+    await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
+    check('从运行时视图切回星图', await waitFor('document.querySelector("#runtime-view")?.hidden === true'));
+
     // H-1/UX-2：设置 · AI 助手专区（连接页已收编进设置；单列表 + 行内闭环）
     await evalJs('document.querySelector("#open-settings").click()');
     check('设置弹层打开', await waitFor('document.querySelector("#settings")?.hidden === false'));
+    // 0.3 · 设置 · 记忆运行时：两轴 + 复杂项收进高级
+    await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
+    check('设置·记忆运行时：接入方式 / 记忆模型 / 本地精选 / 第三方 API',
+      await waitFor(`(() => {
+        const p = document.querySelector('#settings-panel-runtime');
+        if (!p || p.hidden) return false;
+        return /接入方式/.test(p.textContent) && /记忆模型/.test(p.textContent)
+          && /本地精选模型/.test(p.textContent) && /第三方 API/.test(p.textContent)
+          && p.querySelectorAll('.runtime-pack').length >= 3
+          && Boolean(p.querySelector('[data-rt-model-source=heuristic]'))
+          && Boolean(p.querySelector('[data-rt-model-source=local]'))
+          && Boolean(p.querySelector('[data-rt-model-source=api]'));
+      })()`, 20000));
+    check('模型轴：当前对话模型显示为宿主管理（不伪造全局开关）',
+      await evalJs(`(() => {
+        const host = document.querySelector('#settings-panel-runtime [data-rt-host-model]');
+        return Boolean(host) && /宿主管理/.test(host.textContent)
+          && !host.querySelector('button, input, select');
+      })()`));
+    check('本地模型卡：9B/27B/4B + 体积/内存/状态；不显示量化/线程/端口',
+      await evalJs(`(() => {
+        const p = document.querySelector('#settings-panel-runtime');
+        const text = p?.textContent ?? '';
+        return /Qwen 9B/.test(text) && /Qwen 27B/.test(text) && /Qwen 4B/.test(text)
+          && /下载体积/.test(text) && /内存要求/.test(text) && /状态/.test(text)
+          && !/Q4_K_M|量化|线程|端口/.test(text);
+      })()`));
+    await evalJs('(() => { const d = document.querySelector("#runtime-advanced-fold"); if (d) d.open = true; })()');
+    check('高级折叠：capture / trace / retention / context budget / checkpoint/self sync',
+      await evalJs(`(() => {
+        const p = document.querySelector('#runtime-advanced-fold');
+        if (!p) return false;
+        const paths = [...p.querySelectorAll('[data-rt-path]')].map((el) => el.dataset.rtPath);
+        return ['runtime.capture', 'runtime.trace', 'runtime.retention.rawDays', 'runtime.retention.traceDays',
+          'runtime.retention.checkpointDays', 'runtime.limits.maxContextTokens',
+          'runtime.checkpoint.sync', 'runtime.self.sync'].every((path) => paths.includes(path));
+      })()`));
+    check('第三方 API 高级：endpoint/model/keyRef + allowRemote 警告 + 超时',
+      await evalJs(`(() => {
+        const p = document.querySelector('#settings-panel-runtime');
+        const text = p?.textContent ?? '';
+        return Boolean(p.querySelector('[data-rt-api-save]'))
+          && Boolean(p.querySelector('[data-rt-api-allow-remote]'))
+          && /Endpoint/.test(text) && /模型名/.test(text) && /密钥引用/.test(text)
+          && /记忆文本会发送到该 endpoint/.test(text) && /超时/.test(text);
+      })()`));
+    await evalJs('document.querySelector("[data-settings-tab=assistants]").click()');
     // U-3 症状①：背板/设置框不滚，只有页签下的 .settings-scroll 滚动；页面滚动锁定
     check('U-3 设置壳：提示在标题下 + 仅内容区滚动 + 右上角 X + 滚动条贴边',
       await evalJs(`(() => {
@@ -808,11 +1007,12 @@ async function main() {
       });
       return { viewId, bgColor: cs.backgroundColor, bgImage: cs.backgroundImage, beforePosition: before.position, cards };
     })`;
-    const viewTabs = { 'domains-view': 2, 'memories-view': 3, 'audit-view': 4 };
+    const viewTabs = { 'domains-view': 2, 'memories-view': 3, 'audit-view': 4, 'runtime-view': 5 };
     const viewCards = {
       'domains-view': ['#domains-list', '#domain-detail .sector-readout'],
       'audit-view': [],
       'memories-view': ['#memories-list .mem-row'],
+      'runtime-view': ['#runtime-status .runtime-card', '#runtime-timeline .mem-row'],
     };
     const bgReports = [];
     for (const [viewId, nth] of Object.entries(viewTabs)) {
@@ -820,12 +1020,12 @@ async function main() {
       await waitFor(`document.getElementById("${viewId}")?.hidden === false`);
       bgReports.push(await evalJs(`${probeViewBg}(${JSON.stringify(viewId)}, ${JSON.stringify(viewCards[viewId])})`));
     }
-    check('三个面板视图均激活并探针成功', bgReports.every((r) => r && r.beforePosition),
+    check('四个面板视图均激活并探针成功', bgReports.length === 4 && bgReports.every((r) => r && r.beforePosition),
       JSON.stringify(bgReports.map((r) => r?.viewId ?? null)));
-    check('面板扫描线钉住可视区（::before position: fixed，三视图一致）',
+    check('面板扫描线钉住可视区（::before position: fixed，四视图一致）',
       bgReports.every((r) => r.beforePosition === 'fixed'),
       JSON.stringify(bgReports.map((r) => r.beforePosition)));
-    check('面板背景样式三视图一致（background-color / background-image）',
+    check('面板背景样式四视图一致（background-color / background-image）',
       bgReports.every((r) => r.bgColor === bgReports[0].bgColor && r.bgImage === bgReports[0].bgImage));
     const escapedCards = bgReports.flatMap((r) => r.cards
       .filter((c) => !c.missing)
@@ -959,9 +1159,9 @@ async function main() {
 
     // 设置弹窗（E1 IA：常用/安全/AI 助手/MCP 接入/高级 + 关于本机）
     await evalJs('document.querySelector("#open-settings").click()');
-    check('E1 设置弹窗打开（5 页签：常用 / 安全 / AI 助手 / MCP 接入 / 高级）', await waitFor(`(() => {
+    check('E1 设置弹窗打开（6 页签：常用 / 安全 / AI 助手 / 记忆运行时 / MCP 接入 / 高级）', await waitFor(`(() => {
       const tabs = [...document.querySelectorAll('#settings-body .settings-tab:not(.settings-tab-extra)')].map((el) => el.textContent.trim());
-      return tabs.join(',') === '常用,安全,AI 助手,MCP 接入,高级' && document.querySelector('#settings')?.hidden === false;
+      return tabs.join(',') === '常用,安全,AI 助手,记忆运行时,MCP 接入,高级' && document.querySelector('#settings')?.hidden === false;
     })()`));
     await evalJs('document.querySelector("[data-settings-tab=common]").click()');
     check('E1 常用页：保留只读状态 + 自动修复 + 重启向导；无重复邀请入口', await waitFor(`(() => {
@@ -991,7 +1191,7 @@ async function main() {
       return { count: details.length, keys: details.map((d) => d.dataset.settingsFold ?? d.className) };
     })()`);
     check('U1 设置折叠预算：≤5 且均为允许类型（邀请无折叠）', Boolean(foldAudit) && foldAudit.count <= 5
-      && foldAudit.keys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(key)),
+      && foldAudit.keys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'runtime-advanced', 'assistants'].includes(key)),
       JSON.stringify(foldAudit));
     check('U-1 设置无退役配置项/引导签发者/授权·签发·参与',
       await evalJs(`(() => {
@@ -1255,8 +1455,8 @@ async function main() {
       JSON.stringify(mcpDropdown));
 
     // E1 · 设置分层：5 tab；诊断并入高级；订阅域移出；反熵细节不出屏；无「保存」按钮
-    check('E1 设置 5 页签（常用/安全/AI 助手/MCP 接入/高级）且无诊断页签/保存按钮',
-      await evalJs('document.querySelectorAll("#settings-body .settings-tab:not(.settings-tab-extra)").length === 5 && !document.querySelector("#settings-panel-diagnostics") && !document.querySelector("[data-cfg-action=save]")'));
+    check('E1 设置 6 页签（常用/安全/AI 助手/记忆运行时/MCP 接入/高级）且无诊断页签/保存按钮',
+      await evalJs('document.querySelectorAll("#settings-body .settings-tab:not(.settings-tab-extra)").length === 6 && !document.querySelector("#settings-panel-diagnostics") && !document.querySelector("[data-cfg-action=save]")'));
     check('简化轮：订阅域与反熵细节不出设置页（grep 断言面）',
       await evalJs(`(() => { const body = document.querySelector("#settings-body"); return !body.querySelector('[data-cfg-path="sync.namespaces"]') && !body.querySelector('[data-cfg-path="sync.antiEntropy.intervalMs"]') && !body.querySelector('[data-cfg-path="sync.antiEntropy.jitterRatio"]') && !body.querySelector('[data-cfg-path="sync.snapshotThreshold"]') && !body.querySelector('[data-cfg-path="semantic.minScore"]') && Boolean(body.querySelector('[data-cfg-path="sync.antiEntropy.enabled"]')); })()`));
     check('简化轮：诊断并入高级底部折叠（cfg-copy-all 就位）',
@@ -1958,7 +2158,7 @@ async function main() {
       .map((el) => el.dataset.settingsFold ?? el.className))()`);
     check('U-1 全域折叠预算：设置 + 关于 ≤5 且均为白名单类型（邀请无折叠）', Array.isArray(allFoldKeys)
       && allFoldKeys.length <= 5
-      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(key)),
+      && allFoldKeys.every((key) => ['mcp-danger', 'diagnostics', 'about-runtime', 'runtime-advanced', 'assistants'].includes(key)),
       JSON.stringify(allFoldKeys));
     check('E1 邀请面板无「去设置启用」旧指路（未启用时就地一键启用）',
       await evalJs(`(() => {
@@ -2373,7 +2573,7 @@ async function main() {
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await evalJs('document.querySelector("#open-settings").click()');
     await evalJs('document.querySelector("[data-settings-tab=security]").click()');
-    check('S3/E1 窄屏：安全卡与 5 页签不横向溢出（390px）',
+    check('S3/E1 窄屏：安全卡与 6 页签不横向溢出（390px）',
       await waitFor(`(() => {
         const box = document.querySelector('#settings .modal-box');
         const card = document.querySelector('#settings-security-slot');
@@ -2710,7 +2910,7 @@ async function main() {
       };
     })()`);
     check('i18n 导航 390：英文标签整词显示（Star map 不拆行）+ 无横向溢出',
-      nav390.labels.join(',') === 'Star map,Sharing,Memories,Audit'
+      nav390.labels.join(',') === 'Star map,Sharing,Memories,Audit,Runtime'
         && nav390.split === false && nav390.navOverflow === false && nav390.pageOverflow === false,
       JSON.stringify(nav390));
     await captureNow('i18n-en-topbar-390.jpg');
@@ -2796,7 +2996,7 @@ async function main() {
       const extra = document.querySelector('#settings-body .settings-tab-extra')?.textContent.trim() ?? '';
       const out = { lang: document.documentElement.lang, tabs, extra, panels: {}, cjk: {}, open: {} };
       const full = {};
-      for (const id of ['common', 'security', 'assistants', 'mcp', 'advanced']) {
+      for (const id of ['common', 'security', 'assistants', 'runtime', 'mcp', 'advanced']) {
         document.querySelector('[data-settings-tab=' + id + ']')?.click();
         const text = panel(id);
         full[id] = text;
@@ -2814,6 +3014,7 @@ async function main() {
         service: /Resident/.test(full.common),
         securitySections: /Security level/.test(full.security) && /Authenticator seed/.test(full.security) && /Recovery code/.test(full.security),
         assistants: /Add assistant/.test(full.assistants),
+        runtime: /Access mode/.test(full.runtime) && /Memory model/.test(full.runtime) && /Third-party API/.test(full.runtime),
         mcp: /Connection/.test(full.mcp) && /TLS/.test(full.mcp) && /Risks and recovery/.test(full.mcp),
         advanced: /Resident service/.test(full.advanced) && /Network/.test(full.advanced) && /Automation/.test(full.advanced) && /Diagnostics and recovery/.test(full.advanced),
         diagnostics: /Version and service status/.test(diag) && /Recovery guide/.test(diag) && /Full configuration/.test(diag),
@@ -2822,9 +3023,9 @@ async function main() {
       return out;
     })()`;
     const settingsPanels = await evalJs(settingsPanelsProbe);
-    check('i18n 设置深度页英文：五个页签 + 通用/安全/AI 助手/MCP/高级 段落文案全英文',
+    check('i18n 设置深度页英文：六个页签 + 通用/安全/AI 助手/运行时/MCP/高级 段落文案全英文',
       settingsPanels.lang === 'en-US'
-        && settingsPanels.tabs.join(',') === 'General,Security,Assistants,MCP,Advanced'
+        && settingsPanels.tabs.join(',') === 'General,Security,Assistants,Runtime,MCP,Advanced'
         && settingsPanels.extra === 'About device'
         && Object.values(settingsPanels.has).every(Boolean)
         && settingsPanels.cjk.security === false,
@@ -4332,7 +4533,7 @@ async function main() {
             && /Not initialized/.test(document.querySelector('#online-badge')?.textContent ?? '')
             && /Memories —/.test(document.querySelector('#memory-badge')?.textContent ?? '')
             && /Security: —/.test(document.querySelector('#security-badge')?.textContent ?? '')
-            && navTitles.length === 3 && navTitles.every((title) => title === 'Available after you create or join a cloud')
+            && navTitles.length === 4 && navTitles.every((title) => title === 'Available after you create or join a cloud')
             && /Cloud not initialized/.test(document.querySelector('#banner')?.textContent ?? '')
             && !/[\\u3400-\\u9fff]/.test(text);
         })()`));

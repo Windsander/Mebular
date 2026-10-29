@@ -586,7 +586,7 @@ describe('简化轮 · 术语净化（内部机制不上屏）', () => {
 
   it('设置页不出订阅域/反熵细节（settings-ia 单一真源）；诊断并入高级', async () => {
     const ia = await import('../../packages/console/settings-ia.js');
-    expect(ia.IA_TABS.map((t) => t.id)).toEqual(['common', 'security', 'assistants', 'mcp', 'advanced']);
+    expect(ia.IA_TABS.map((t) => t.id)).toEqual(['common', 'security', 'assistants', 'runtime', 'mcp', 'advanced']);
     expect(ia.IA_MIGRATION['sync.namespaces']).toBe('domains');
     expect(ia.IA_EDITOR_RENDER_PATHS).not.toContain('sync.namespaces');
     for (const hidden of ['sync.antiEntropy.intervalMs', 'sync.antiEntropy.jitterRatio', 'sync.snapshotThreshold', 'semantic.minScore', 'sync.peerWhitelist']) {

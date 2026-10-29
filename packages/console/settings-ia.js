@@ -28,6 +28,7 @@ export const IA_TABS = [
   { id: 'common', label: '常用', labelKey: 'settings.tab.common' },
   { id: 'security', label: '安全', labelKey: 'settings.tab.security' },
   { id: 'assistants', label: 'AI 助手', labelKey: 'settings.tab.assistants' },
+  { id: 'runtime', label: '记忆运行时', labelKey: 'settings.tab.runtime' },
   { id: 'mcp', label: 'MCP 接入', labelKey: 'settings.tab.mcp' },
   { id: 'advanced', label: '高级', labelKey: 'settings.tab.advanced' },
 ];
@@ -47,6 +48,7 @@ export const IA_SETTINGS_FOLDS = [
   { id: 'mcp-danger', label: 'MCP 接入 · 危险与自救', labelKey: 'settings.fold.mcpDanger', home: 'mcp' },
   { id: 'diagnostics', label: '诊断与恢复', labelKey: 'settings.fold.diagnostics', home: 'advanced' },
   { id: 'about-runtime', label: '运行状态（只读）', labelKey: 'settings.fold.aboutRuntime', home: 'about' },
+  { id: 'runtime-advanced', label: '高级 · 采集、保留与上下文', labelKey: 'settings.fold.runtimeAdvanced', home: 'runtime' },
 ];
 
 /**
@@ -225,6 +227,94 @@ export const IA_ADVANCED_FIELDS = IA_ADVANCED_SECTIONS.flatMap((section) => sect
 export const IA_MCP_FIELDS = IA_MCP_SECTIONS.flatMap((section) => section.fields);
 
 /**
+ * 0.3 记忆运行时：用户只面对两条轴（接入方式 / 记忆模型），其余收进高级。
+ * 这些 path 仍走 config.json 的 runtime 段（internal writable）；不是 schema 编辑器面，
+ * 因此不进入 IA_EDITOR_PATHS，也不改变既有设置 IA 的 schema↔IA 防漂移集合。
+ */
+export const IA_RUNTIME_MODES = ['mcp', 'immersive'];
+export const IA_RUNTIME_MODEL_SOURCES = ['heuristic', 'local', 'api'];
+export const IA_RUNTIME_API_FIELDS = [
+  'runtime.model.api.baseUrl',
+  'runtime.model.api.model',
+  'runtime.model.api.keyRef',
+  'runtime.model.api.allowRemote',
+  'runtime.model.api.timeoutMs',
+];
+export const IA_RUNTIME_ADVANCED_FIELDS = [
+  'runtime.capture',
+  'runtime.trace',
+  'runtime.retention.rawDays',
+  'runtime.retention.traceDays',
+  'runtime.retention.checkpointDays',
+  'runtime.limits.maxContextTokens',
+  'runtime.checkpoint.sync',
+  'runtime.self.sync',
+];
+export const IA_RUNTIME_FIELDS = [
+  ...IA_RUNTIME_API_FIELDS,
+  ...IA_RUNTIME_ADVANCED_FIELDS,
+];
+/** 由动作按钮写入、但不出现在字段编辑器里的 runtime path。 */
+export const IA_RUNTIME_CONTROL_PATHS = ['runtime.mode', 'runtime.model.source'];
+
+/** Runtime 字段文案（runtime 段仍是 internal writable；这里只提供 Console 展示文案）。 */
+export const IA_RUNTIME_FIELD_COPY = {
+  'runtime.model.api.baseUrl': {
+    labelKey: 'settings.runtime.api.baseUrl',
+    helpKey: 'settings.runtime.api.baseUrlHelp',
+  },
+  'runtime.model.api.model': {
+    labelKey: 'settings.runtime.api.model',
+    helpKey: 'settings.runtime.api.modelHelp',
+  },
+  'runtime.model.api.keyRef': {
+    labelKey: 'settings.runtime.api.keyRef',
+    helpKey: 'settings.runtime.api.keyRefHelp',
+  },
+  'runtime.model.api.allowRemote': {
+    labelKey: 'settings.runtime.api.allowRemote',
+    helpKey: 'settings.runtime.api.allowRemoteHelp',
+    warnKey: 'settings.runtime.api.allowRemoteWarn',
+  },
+  'runtime.model.api.timeoutMs': {
+    labelKey: 'settings.runtime.api.timeout',
+    helpKey: 'settings.runtime.api.timeoutHelp',
+  },
+  'runtime.capture': {
+    labelKey: 'settings.runtime.advanced.capture.label',
+    helpKey: 'settings.runtime.advanced.capture.help',
+  },
+  'runtime.trace': {
+    labelKey: 'settings.runtime.advanced.trace.label',
+    helpKey: 'settings.runtime.advanced.trace.help',
+  },
+  'runtime.retention.rawDays': {
+    labelKey: 'settings.runtime.advanced.rawDays.label',
+    helpKey: 'settings.runtime.advanced.rawDays.help',
+  },
+  'runtime.retention.traceDays': {
+    labelKey: 'settings.runtime.advanced.traceDays.label',
+    helpKey: 'settings.runtime.advanced.traceDays.help',
+  },
+  'runtime.retention.checkpointDays': {
+    labelKey: 'settings.runtime.advanced.checkpointDays.label',
+    helpKey: 'settings.runtime.advanced.checkpointDays.help',
+  },
+  'runtime.limits.maxContextTokens': {
+    labelKey: 'settings.runtime.advanced.maxContextTokens.label',
+    helpKey: 'settings.runtime.advanced.maxContextTokens.help',
+  },
+  'runtime.checkpoint.sync': {
+    labelKey: 'settings.runtime.advanced.checkpointSync.label',
+    helpKey: 'settings.runtime.advanced.checkpointSync.help',
+  },
+  'runtime.self.sync': {
+    labelKey: 'settings.runtime.advanced.selfSync.label',
+    helpKey: 'settings.runtime.advanced.selfSync.help',
+  },
+};
+
+/**
  * 只读面（status-only）：值由运行时 / 自动推导（relay 池、LAN 发现、桥、打洞、广播、join、TLS、）。
  * 与 config-schema.mjs 的 STATUS_ONLY_PATHS 逐项一致（E1 防漂移断言；多/少即红）。
  */
@@ -265,6 +355,9 @@ export const IA_INFO_BLOCKS = {
 export const IA_MIGRATION = {
   ...Object.fromEntries(IA_ADVANCED_FIELDS.map((p) => [p, 'advanced'])),
   ...Object.fromEntries(IA_MCP_FIELDS.map((p) => [p, 'mcp'])),
+  // 0.3 记忆运行时：两条主轴的字段与高级折叠同属「记忆运行时」tab
+  ...Object.fromEntries(IA_RUNTIME_FIELDS.map((p) => [p, 'runtime'])),
+  ...Object.fromEntries(IA_RUNTIME_CONTROL_PATHS.map((p) => [p, 'runtime'])),
   // 内容管理：订阅域 → 主页「记忆共享」
   'sync.namespaces': 'domains',
   // 只读面：自动同步 / 写入即推（默认常开）+ relay 池 / LAN / 桥 / 打洞 / 广播 / join / TLS
@@ -393,6 +486,122 @@ export function localizeSchemaReason(path, reason, translate) {
 
 /** config-schema `effective` 的「已配置」哨兵值（文本字段只读展示用）。 */
 export const SCHEMA_CONFIGURED_VALUE = '（已配置）';
+
+/** Runtime 模型包状态 → 文案 key（未知状态回退 failed，不把内部状态码直接给用户）。 */
+export function runtimePackStateKey(state) {
+  const key = `settings.runtime.state.${String(state ?? 'not_installed')}`;
+  return [
+    'settings.runtime.state.not_installed',
+    'settings.runtime.state.downloading',
+    'settings.runtime.state.verifying',
+    'settings.runtime.state.installing',
+    'settings.runtime.state.paused',
+    'settings.runtime.state.failed',
+    'settings.runtime.state.cancelled',
+    'settings.runtime.state.installed',
+    'settings.runtime.state.corrupt',
+  ].includes(key) ? key : 'settings.runtime.state.failed';
+}
+
+/** 下载进度（字节 + 百分比）；total 未知时 percent=null。 */
+export function runtimePackProgress(download) {
+  const downloadedBytes = Number.isFinite(download?.downloadedBytes) ? Math.max(0, download.downloadedBytes) : 0;
+  const totalBytes = Number.isFinite(download?.totalBytes) ? Math.max(0, download.totalBytes) : 0;
+  const percent = totalBytes > 0 ? Math.min(100, Math.max(0, (downloadedBytes / totalBytes) * 100)) : null;
+  return { downloadedBytes, totalBytes, percent };
+}
+
+/** 人类可读体积（十进制单位；不显示量化/上下文长度等技术细节）。 */
+export function formatByteSize(bytes) {
+  const value = Number(bytes);
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let amount = value;
+  let index = 0;
+  while (amount >= 1000 && index < units.length - 1) {
+    amount /= 1000;
+    index += 1;
+  }
+  const rounded = index === 0 ? Math.round(amount) : Math.round(amount * 10) / 10;
+  return `${rounded} ${units[index]}`;
+}
+
+/** 内部对象三重判定（与 admin.mjs / core internal.ts 同义；用于 Console 时间线过滤）。 */
+export const RUNTIME_INTERNAL_NODE_TYPES = Object.freeze([
+  'compact', 'context_checkpoint', 'self_record', 'raw_chunk', 'recall_trace',
+]);
+
+const RUNTIME_INTERNAL_TYPE_SET = new Set(RUNTIME_INTERNAL_NODE_TYPES);
+
+export function isInternalRuntimeMemory(memory) {
+  if (!memory) return false;
+  if (RUNTIME_INTERNAL_TYPE_SET.has(memory.type)) return true;
+  if (memory.internal === true) return true;
+  if (memory.metadata?.runtime?.internal === true) return true;
+  return typeof memory.namespace === 'string'
+    && memory.namespace.startsWith('__')
+    && memory.namespace !== '__policy__';
+}
+
+/** 时间线分类：memory / compact / checkpoint / self / other（other 仍属内部）。 */
+export function runtimeTimelineKind(memory) {
+  if (memory?.type === 'compact') return 'compact';
+  if (memory?.type === 'context_checkpoint') return 'checkpoint';
+  if (memory?.type === 'self_record') return 'self';
+  if (isInternalRuntimeMemory(memory)) return 'other';
+  return 'memory';
+}
+
+/** 默认只显示普通记录；includeInternal 打开后可按 kind 筛选。 */
+export function filterRuntimeTimeline(memories, { filter = 'memory', includeInternal = false } = {}) {
+  const list = Array.isArray(memories) ? memories : [];
+  return list.filter((memory) => {
+    const kind = runtimeTimelineKind(memory);
+    if (!includeInternal && kind !== 'memory') return false;
+    if (filter === 'all') return true;
+    return kind === filter;
+  });
+}
+
+/** 当前模式：运行时状态优先，其次本机配置，最后默认 mcp。 */
+export function runtimeModeOf(status, config) {
+  const raw = status?.mode ?? config?.runtime?.mode;
+  return raw === 'immersive' ? 'immersive' : 'mcp';
+}
+
+/** 当前记忆模型来源：运行时 configured 优先，其次本机配置；host/auto 保留为状态值。 */
+export function runtimeModelSourceOf(status, config) {
+  const raw = status?.model?.configured ?? config?.runtime?.model?.source;
+  return ['heuristic', 'local', 'host', 'api', 'auto'].includes(raw) ? raw : 'heuristic';
+}
+
+/** 运行时 warning 码 → 文案 key（已知码）；未知码由调用方原样展示。 */
+export const RUNTIME_WARNING_KEYS = Object.freeze({
+  rawCaptureUnencrypted: 'runtime.warning.rawCaptureUnencrypted',
+  cloud_identity_unavailable: 'runtime.warning.cloudIdentityUnavailable',
+  raw_storage_unavailable: 'runtime.warning.rawStorageUnavailable',
+  trace_storage_unavailable: 'runtime.warning.traceStorageUnavailable',
+  runtime_model_degraded: 'runtime.warning.modelDegraded',
+  host_candidates_missing: 'runtime.warning.hostCandidatesMissing',
+  model_unavailable: 'runtime.warning.modelUnavailable',
+  model_invalid_candidates: 'runtime.warning.modelInvalidCandidates',
+  no_extractable_memory: 'runtime.warning.noExtractableMemory',
+  selected_pack_not_installed: 'runtime.warning.selectedPackNotInstalled',
+  selected_pack_corrupt: 'runtime.warning.selectedPackCorrupt',
+  selected_pack_unknown: 'runtime.warning.selectedPackUnknown',
+  config_pack_overrides_selection: 'runtime.warning.configPackOverridesSelection',
+  runtime_source_not_local: 'runtime.warning.sourceNotLocal',
+  hardware_detection_failed: 'runtime.warning.hardwareDetectionFailed',
+  model_recommendation_failed: 'runtime.warning.modelRecommendationFailed',
+});
+
+/** 模型降级原因码 → 文案 key（未知原因原样返回）。 */
+export const RUNTIME_MODEL_REASON_KEYS = Object.freeze({
+  host_candidates_missing: 'runtime.model.reason.hostCandidatesMissing',
+  model_unavailable: 'runtime.model.reason.modelUnavailable',
+  model_invalid_candidates: 'runtime.model.reason.modelInvalidCandidates',
+  remote_not_allowed: 'runtime.model.reason.remoteNotAllowed',
+});
 
 // ---------- U-1 · CSRF 403 自愈（与 IA 同处共享纯逻辑模块：无 DOM、零依赖） ----------
 // 长开页面 / 守护重启后旧 token 失效时，重取一次 /console/ 的 token（响应头 + cookie），

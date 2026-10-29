@@ -9,7 +9,7 @@
 import { StarStage, namespaceColor, shortId, buildHoverRoutes, buildNetworkScene, normalizeFleetEvent, resolveTaskNamespace, summarizeHoverRoutes } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, IA_RUNTIME_API_FIELDS, IA_RUNTIME_FIELD_COPY, filterRuntimeTimeline, runtimeTimelineKind, runtimeModeOf, runtimeModelSourceOf, runtimePackStateKey, runtimePackProgress, formatByteSize, RUNTIME_WARNING_KEYS, RUNTIME_MODEL_REASON_KEYS } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
@@ -55,6 +55,23 @@ const state = {
   // G-ML-1：记忆生命周期视图（动作式；默认过滤已删除/已归档）
   memories: null,
   memoryFilters: { archived: false, deleted: false, namespace: '' },
+  // 0.3：记忆运行时（状态 / 治理 / 模型 / 轨迹）；数据只在相关视图/设置页按需加载。
+  runtime: {
+    status: null,
+    models: null,
+    traces: null,
+    memories: null,
+    errors: {},
+    loading: false,
+    loadedAt: 0,
+    timelineFilter: 'memory',
+    includeInternal: false,
+    traceOpen: {},
+    objectDetail: null,
+    formError: '',
+    modelFocus: null,
+  },
+  runtimeDraft: {},
   settings: null,
   // E2-A2：忆云列表/卡片与加入弹层（clouds 端点旧守护可能没有 → 卡片显示升级提示）
   clouds: null,
@@ -259,6 +276,7 @@ async function refreshOnce() {
     state.features = { writes: false };
     state.error = null;
     state.degraded = mock.degraded;
+    await ensureRuntimeData();
     render();
     return;
   }
@@ -320,6 +338,7 @@ async function refreshOnce() {
   state.degraded = computeDegraded();
   // 若加入弹层在首轮数据到达前已打开：补齐当前忆云名与默认名字（不覆盖用户已输入内容）。
   syncCloudJoinMeta();
+  await ensureRuntimeData();
   render();
 }
 
@@ -423,6 +442,7 @@ function render() {
   renderDomains();
   renderAudit();
   renderMemories();
+  renderRuntime();
   renderOverlays();
   if (!$('#settings').hidden) renderSettings();
   if (!$('#about').hidden) renderAbout();
@@ -1490,6 +1510,279 @@ function renderMcpSections() {
   }).join('');
 }
 
+// ---------- 0.3 · 设置 · 记忆运行时（两条主轴 + 高级折叠） ----------
+
+function runtimeFieldCopy(path) {
+  const copy = IA_RUNTIME_FIELD_COPY[path] ?? {};
+  return {
+    label: copy.labelKey ? t(copy.labelKey) : path,
+    help: copy.helpKey ? t(copy.helpKey) : '',
+    warn: copy.warnKey ? t(copy.warnKey) : '',
+  };
+}
+
+function runtimeDraftValue(path, fallback) {
+  return Object.prototype.hasOwnProperty.call(state.runtimeDraft, path)
+    ? state.runtimeDraft[path]
+    : runtimeConfigValue(path, fallback);
+}
+
+/** keyRef 是引用而非密钥；非 env/keychain/file 的旧值不在界面回显。 */
+function runtimeKeyRefDisplay(value) {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  return /^(env|keychain|file):/.test(text) ? text : t('settings.runtime.api.keyRefMasked');
+}
+
+function runtimeControlRow(path, control) {
+  const copy = runtimeFieldCopy(path);
+  const id = `rt-${path.replace(/\./g, '-')}`;
+  return `<div class="cfg-row">
+    <label class="cfg-label" for="${id}">${escapeHtml(copy.label)}</label>
+    <div class="cfg-control">
+      ${control.replace('__ID__', id)}
+      ${copy.help ? `<p class="cfg-help muted">${escapeHtml(copy.help)}</p>` : ''}
+      ${copy.warn ? `<p class="cfg-help cfg-warn">⚠ ${escapeHtml(copy.warn)}</p>` : ''}
+    </div>
+  </div>`;
+}
+
+function runtimeSelectControl(path, value, options, { autosave = true, disabled = false } = {}) {
+  return `<select class="crt-input" id="__ID__" data-rt-path="${escapeHtml(path)}"${autosave ? ' data-rt-autosave="1"' : ''}${disabled ? ' disabled' : ''}>`
+    + options.map(([optionValue, label]) => `<option value="${escapeHtml(optionValue)}" ${optionValue === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')
+    + '</select>';
+}
+
+function runtimeNumberControl(path, value, { min = 0, step = 1, autosave = true, disabled = false } = {}) {
+  return `<input class="crt-input cfg-input" id="__ID__" type="number" min="${min}" step="${step}" value="${escapeHtml(String(value ?? ''))}" data-rt-path="${escapeHtml(path)}"${autosave ? ' data-rt-autosave="1"' : ''}${disabled ? ' disabled' : ''}>`;
+}
+
+function runtimeTextControl(path, value, { placeholder = '', autosave = false, disabled = false } = {}) {
+  return `<input class="crt-input cfg-input" id="__ID__" type="text" value="${escapeHtml(String(value ?? ''))}" placeholder="${escapeHtml(placeholder)}" data-rt-path="${escapeHtml(path)}"${autosave ? ' data-rt-autosave="1"' : ''}${disabled ? ' disabled' : ''}>`;
+}
+
+function runtimeModeSettingsHtml() {
+  const mode = runtimeModeOf(state.runtime.status, currentConfigFile());
+  const disabled = !state.features.writes || MOCK;
+  const button = (value, label, desc) => `<button class="runtime-model-card crt-surface" type="button" data-rt-mode="${value}" aria-pressed="${mode === value}" ${disabled ? 'disabled' : ''}>
+    <span class="runtime-model-name">${escapeHtml(label)} ${mode === value ? `<span class="crt-tag">${escapeHtml(t('settings.runtime.access.current', { mode: label }))}</span>` : ''}</span>
+    <span class="runtime-model-desc">${escapeHtml(desc)}</span>
+  </button>`;
+  return settingsSectionHtml({
+    id: 'runtime-access',
+    title: t('settings.runtime.access.title'),
+    desc: t('settings.runtime.access.desc'),
+    chip: `<span class="crt-tag">${escapeHtml(t('settings.runtime.access.current', { mode: runtimeModeLabel(mode) }))}</span>`,
+    body: `<div class="runtime-model-grid">${button('mcp', t('settings.runtime.access.mcp'), t('settings.runtime.access.mcpDesc'))}${button('immersive', t('settings.runtime.access.immersive'), t('settings.runtime.access.immersiveDesc'))}</div>
+      <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.access.switchHint'))}</p>`,
+  });
+}
+
+function runtimeModelSettingsHtml() {
+  const status = state.runtime.status;
+  const models = state.runtime.models;
+  const configured = runtimeModelSourceOf(status, currentConfigFile());
+  const active = status?.model?.active ?? configured;
+  const selectedPack = (models?.packs ?? []).find((pack) => pack.selected) ?? null;
+  const credential = status?.model?.credential;
+  const disabled = !state.features.writes || MOCK;
+  const option = (source, label, desc, meta) => `<button class="runtime-model-card crt-surface" type="button" data-rt-model-source="${source}" aria-pressed="${configured === source}" ${disabled ? 'disabled' : ''}>
+    <span class="runtime-model-name">${escapeHtml(label)} ${configured === source ? `<span class="crt-tag">${escapeHtml(t('settings.runtime.model.current', { source: label }))}</span>` : ''}</span>
+    <span class="runtime-model-desc">${escapeHtml(desc)}</span>
+    ${meta ? `<span class="runtime-model-state">${escapeHtml(meta)}</span>` : ''}
+  </button>`;
+  const hostActive = configured === 'host';
+  return settingsSectionHtml({
+    id: 'runtime-model',
+    title: t('settings.runtime.model.title'),
+    desc: t('settings.runtime.model.desc'),
+    chip: status?.model?.degraded ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('runtime.model.degraded'))}</span>` : '',
+    body: `<div class="runtime-model-grid">
+      ${option('heuristic', t('settings.runtime.model.heuristic'), t('settings.runtime.model.heuristicDesc'), t('runtime.source.heuristic'))}
+      ${option('local', t('settings.runtime.model.local'), t('settings.runtime.model.localDesc'), selectedPack ? t('settings.runtime.model.selectedPack', { pack: runtimePackLabel(selectedPack) }) : t('settings.runtime.model.noPack'))}
+      ${option('api', t('settings.runtime.model.api'), t('settings.runtime.model.apiDesc'), credential?.configured ? t('settings.runtime.api.credentialConfigured', { source: credential.source ?? '—' }) : t('settings.runtime.api.credentialMissing'))}
+    </div>
+    <div class="runtime-host-model" data-rt-host-model>
+      <div class="runtime-host-title"><span>${escapeHtml(t('settings.runtime.model.host'))}</span><span class="crt-tag">${escapeHtml(t('settings.runtime.model.hostManaged'))}</span>${hostActive ? `<span class="crt-tag crt-tag-ok">${escapeHtml(t('settings.runtime.model.current', { source: t('settings.runtime.model.host') }))}</span>` : ''}</div>
+      <p class="muted">${escapeHtml(t('settings.runtime.model.hostDesc'))}</p>
+    </div>
+    ${status?.model?.degraded ? `<p class="crt-warn">${escapeHtml(t('settings.runtime.model.degraded', { reason: runtimeReasonText(status.model.reason) || t('runtime.model.reason.unknown') }))}</p>` : ''}
+    <p class="muted">${escapeHtml(t('settings.runtime.model.active', { source: runtimeSourceLabel(active) }))}</p>
+    ${runtimeConfigDiffersFromStatus(status) ? `<p class="cfg-help cfg-warn">⚠ ${escapeHtml(t('settings.runtime.pendingRestart'))}</p>` : ''}`,
+  });
+}
+
+function runtimePackCard(pack) {
+  const stateName = pack.state ?? (pack.installed ? 'installed' : 'not_installed');
+  const download = pack.download;
+  const progress = runtimePackProgress(download);
+  const busy = ['downloading', 'verifying', 'installing'].includes(stateName);
+  const paused = stateName === 'paused';
+  const failed = stateName === 'failed' || stateName === 'corrupt';
+  const installed = stateName === 'installed' || pack.installed === true;
+  const selected = pack.selected === true;
+  const disabled = !state.features.writes || MOCK;
+  const stateClass = installed ? 'crt-tag-ok' : failed ? 'crt-tag-error' : busy || paused ? 'crt-tag-warn' : '';
+  const requirements = pack.requirements ?? {};
+  const memoryText = requirements.minMemoryBytes
+    ? t('settings.runtime.local.memoryValue', {
+      min: formatByteSize(requirements.minMemoryBytes),
+      recommended: formatByteSize(requirements.recommendedMemoryBytes ?? requirements.minMemoryBytes),
+    })
+    : '—';
+  const actions = [];
+  const button = (action, label, extra = '') => `<button class="btn btn-small btn-crt" type="button" data-rt-pack-action="${action}" data-rt-pack="${escapeHtml(pack.packId)}" ${disabled ? 'disabled' : ''} ${extra}>${escapeHtml(label)}</button>`;
+  if (busy) {
+    actions.push(button('pause', t('settings.runtime.local.pause')));
+    actions.push(button('cancel', t('settings.runtime.local.cancel')));
+  } else if (paused) {
+    actions.push(button('resume', t('settings.runtime.local.resume')));
+    actions.push(button('cancel', t('settings.runtime.local.cancel')));
+  } else if (failed) {
+    actions.push(button('download', t('settings.runtime.local.download')));
+    actions.push(button('cancel', t('settings.runtime.local.cancel')));
+  } else if (installed) {
+    if (!selected) actions.push(button('select', t('settings.runtime.local.select')));
+    actions.push(button('uninstall', t('settings.runtime.local.uninstall')));
+  } else {
+    actions.push(button('download', t('settings.runtime.local.download')));
+  }
+  const progressHtml = (busy || paused)
+    ? `<div class="runtime-progress" aria-hidden="true"><span style="--rt-progress:${progress.percent === null ? 0 : progress.percent.toFixed(1)}"></span></div>
+       <p class="muted">${escapeHtml(progress.totalBytes > 0
+         ? t('settings.runtime.progress', { done: formatByteSize(progress.downloadedBytes), total: formatByteSize(progress.totalBytes) })
+         : t('settings.runtime.local.preparing'))}</p>`
+    : '';
+  return `<article class="runtime-pack crt-surface" data-runtime-pack="${escapeHtml(pack.packId)}">
+    <h4>${escapeHtml(runtimePackLabel(pack))} ${pack.default ? `<span class="crt-tag">${escapeHtml(t('settings.runtime.local.default'))}</span>` : ''}${selected ? `<span class="crt-tag crt-tag-ok">${escapeHtml(t('settings.runtime.local.selected'))}</span>` : ''}</h4>
+    <p class="muted">${escapeHtml(runtimePackDescription(pack))}</p>
+    <dl class="runtime-pack-meta">
+      <dt>${escapeHtml(t('settings.runtime.local.size'))}</dt><dd>${escapeHtml(formatByteSize(pack.estimatedDownloadBytes))}</dd>
+      <dt>${escapeHtml(t('settings.runtime.local.memory'))}</dt><dd>${escapeHtml(memoryText)}</dd>
+      <dt>${escapeHtml(t('settings.runtime.local.state'))}</dt><dd><span class="crt-tag ${stateClass}">${escapeHtml(runtimePackStateLabel(stateName))}</span>${pack.installedBytes ? ` · ${escapeHtml(formatByteSize(pack.installedBytes))}` : ''}</dd>
+    </dl>
+    ${download?.error?.code ? `<p class="crt-warn"><code>${escapeHtml(download.error.code)}</code></p>` : ''}
+    ${progressHtml}
+    <div class="runtime-pack-actions">${actions.join('')}</div>
+  </article>`;
+}
+
+function runtimeLocalModelsHtml() {
+  const models = state.runtime.models;
+  const error = state.runtime.errors.models;
+  if (!models) {
+    return settingsSectionHtml({
+      id: 'runtime-local-models',
+      title: t('settings.runtime.local.title'),
+      desc: t('settings.runtime.local.desc'),
+      body: `<p class="muted">${escapeHtml(error ? t('runtime.modelUnavailable', { message: error }) : t('runtime.loading'))}</p>`,
+    });
+  }
+  const order = { default: 0, quality: 1, light: 2 };
+  const packs = [...(models.packs ?? [])].sort((a, b) => (order[a.tier] ?? 9) - (order[b.tier] ?? 9));
+  return settingsSectionHtml({
+    id: 'runtime-local-models',
+    title: t('settings.runtime.local.title'),
+    desc: t('settings.runtime.local.desc'),
+    chip: `<span class="crt-tag">${escapeHtml(String(packs.length))}</span>`,
+    body: packs.length > 0
+      ? `<div class="runtime-pack-grid">${packs.map(runtimePackCard).join('')}</div>`
+      : `<p class="muted">${escapeHtml(t('settings.runtime.local.empty'))}</p>`,
+  });
+}
+
+function runtimeApiSettingsHtml() {
+  const status = state.runtime.status;
+  const credential = status?.model?.credential;
+  const configuredSource = runtimeModelSourceOf(status, currentConfigFile());
+  const baseUrl = runtimeDraftValue('runtime.model.api.baseUrl', '');
+  const model = runtimeDraftValue('runtime.model.api.model', '');
+  const keyRefRaw = runtimeDraftValue('runtime.model.api.keyRef', '');
+  const keyRefHasDraft = Object.prototype.hasOwnProperty.call(state.runtimeDraft, 'runtime.model.api.keyRef');
+  const keyRef = keyRefHasDraft ? keyRefRaw : runtimeKeyRefDisplay(runtimeConfigValue('runtime.model.api.keyRef', ''));
+  const timeoutMs = runtimeDraftValue('runtime.model.api.timeoutMs', 10000);
+  const allowRemote = runtimeDraftValue('runtime.model.api.allowRemote', false) === true;
+  const disabled = !state.features.writes || MOCK;
+  const pending = configuredSource !== 'api' && runtimeConfigValue('runtime.model.source', 'heuristic') === 'api';
+  return settingsSectionHtml({
+    id: 'runtime-api-settings',
+    title: t('settings.runtime.api.title'),
+    desc: t('settings.runtime.api.desc'),
+    chip: `<span class="crt-tag ${credential?.configured ? 'crt-tag-ok' : ''}">${escapeHtml(credential?.configured ? t('settings.runtime.api.credentialConfigured', { source: credential.source ?? '—' }) : t('settings.runtime.api.credentialMissing'))}</span>`,
+    body: `<div class="runtime-api-form">
+      ${runtimeControlRow('runtime.model.api.baseUrl', runtimeTextControl('runtime.model.api.baseUrl', baseUrl, { placeholder: 'https://api.example.com/v1', disabled }))}
+      ${runtimeControlRow('runtime.model.api.model', runtimeTextControl('runtime.model.api.model', model, { placeholder: 'gpt-4.1-mini', disabled }))}
+      ${runtimeControlRow('runtime.model.api.keyRef', runtimeTextControl('runtime.model.api.keyRef', keyRef, { placeholder: 'env:MEBULAR_RUNTIME_MODEL_API_KEY', disabled }))}
+      <div class="runtime-api-row">
+        ${runtimeControlRow('runtime.model.api.timeoutMs', runtimeNumberControl('runtime.model.api.timeoutMs', timeoutMs, { min: 1, step: 500, autosave: false, disabled }))}
+      </div>
+      <label class="runtime-internal-toggle"><input type="checkbox" data-rt-path="runtime.model.api.allowRemote" data-rt-api-allow-remote ${allowRemote ? 'checked' : ''} ${disabled ? 'disabled' : ''}> ${escapeHtml(t('settings.runtime.api.allowRemote'))}</label>
+      <p class="runtime-api-warn">⚠ ${escapeHtml(t('settings.runtime.api.allowRemoteWarn'))}</p>
+      ${state.runtime.formError ? `<p class="crt-warn" role="alert">${escapeHtml(state.runtime.formError)}</p>` : ''}
+      <div class="runtime-api-actions">
+        <button class="btn btn-crt" type="button" data-rt-api-save ${disabled ? 'disabled' : ''}>${escapeHtml(t('settings.runtime.api.save'))}</button>
+        ${pending ? `<span class="muted">${escapeHtml(t('settings.runtime.pendingRestart'))}</span>` : ''}
+      </div>
+      <p class="settings-note muted">${escapeHtml(t('settings.runtime.api.restartNote'))}</p>
+    </div>`,
+  });
+}
+
+function runtimeAdvancedSettingsHtml() {
+  const capture = runtimeConfigValue('runtime.capture', 'off');
+  const trace = runtimeConfigValue('runtime.trace', 'local');
+  const rawDays = runtimeDraftValue('runtime.retention.rawDays', 7);
+  const traceDays = runtimeDraftValue('runtime.retention.traceDays', 7);
+  const checkpointDays = runtimeDraftValue('runtime.retention.checkpointDays', 30);
+  const maxContextTokens = runtimeDraftValue('runtime.limits.maxContextTokens', 12000);
+  const checkpointSync = runtimeConfigValue('runtime.checkpoint.sync', 'local');
+  const selfSync = runtimeConfigValue('runtime.self.sync', 'cloud');
+  const atRest = state.settings?.encryption?.atRest === true;
+  const disabled = !state.features.writes || MOCK;
+  return `<div class="runtime-advanced-fields">
+    ${runtimeControlRow('runtime.capture', runtimeSelectControl('runtime.capture', capture, [
+      ['off', t('settings.runtime.rawOff')],
+      ['local', t('settings.runtime.rawLocal')],
+    ], { disabled }))}
+    ${capture === 'local' && !atRest ? `<p class="cfg-help cfg-warn">⚠ ${escapeHtml(t('settings.runtime.advanced.rawUnencrypted'))}</p>` : ''}
+    ${runtimeControlRow('runtime.trace', runtimeSelectControl('runtime.trace', trace, [
+      ['off', t('settings.runtime.rawOff')],
+      ['local', t('settings.runtime.rawLocal')],
+    ], { disabled }))}
+    ${runtimeControlRow('runtime.retention.rawDays', runtimeNumberControl('runtime.retention.rawDays', rawDays, { min: 0, disabled }))}
+    ${runtimeControlRow('runtime.retention.traceDays', runtimeNumberControl('runtime.retention.traceDays', traceDays, { min: 0, disabled }))}
+    ${runtimeControlRow('runtime.retention.checkpointDays', runtimeNumberControl('runtime.retention.checkpointDays', checkpointDays, { min: 0, disabled }))}
+    ${runtimeControlRow('runtime.limits.maxContextTokens', runtimeNumberControl('runtime.limits.maxContextTokens', maxContextTokens, { min: 1, step: 1000, disabled }))}
+    ${runtimeControlRow('runtime.checkpoint.sync', runtimeSelectControl('runtime.checkpoint.sync', checkpointSync, [
+      ['local', t('settings.runtime.advanced.syncLocal')],
+      ['cloud', t('settings.runtime.advanced.syncCloud')],
+    ], { disabled }))}
+    ${runtimeControlRow('runtime.self.sync', runtimeSelectControl('runtime.self.sync', selfSync, [
+      ['local', t('settings.runtime.advanced.syncLocal')],
+      ['cloud', t('settings.runtime.advanced.syncCloud')],
+    ], { disabled }))}
+    <p class="settings-note muted">${escapeHtml(t('settings.runtime.advanced.note'))}</p>
+  </div>`;
+}
+
+function renderRuntimeSettings() {
+  const status = state.runtime.status;
+  const statusError = state.runtime.errors.status;
+  return `
+    ${!status && statusError ? `<p class="crt-warn" role="alert">${escapeHtml(t('settings.runtime.error', { message: statusError }))}</p>` : ''}
+    ${!status && !statusError ? `<p class="muted">${escapeHtml(t('settings.runtime.loading'))}</p>` : ''}
+    ${runtimeModeSettingsHtml()}
+    ${runtimeModelSettingsHtml()}
+    ${runtimeLocalModelsHtml()}
+    ${runtimeApiSettingsHtml()}
+    <details class="settings-fold" id="runtime-advanced-fold" data-settings-fold="runtime-advanced">
+      <summary>${escapeHtml(foldLabel('runtime-advanced'))}</summary>
+      ${runtimeAdvancedSettingsHtml()}
+    </details>
+    <p class="settings-note muted">${escapeHtml(t('settings.runtime.scope.desc'))}</p>
+  `;
+}
+
 /**
  * P3：锁定态设置页 = 排错入口（不请求 admin 数据面，不白屏）。
  * 给出状态真值 + 两个入口；可复制诊断信息给支持人员。
@@ -1550,6 +1843,22 @@ function settingsSignature(activeTab) {
     state.cloudsError ?? null,
     state.cloudRename?.id ?? null,
     state.cloudRenameError ?? '',
+    state.runtime ? [
+      state.runtime.status?.mode ?? null,
+      state.runtime.status?.model?.configured ?? null,
+      state.runtime.status?.model?.active ?? null,
+      state.runtime.status?.model?.degraded ?? null,
+      state.runtime.status?.model?.credential?.configured ?? null,
+      state.runtime.status?.model?.credential?.source ?? null,
+      state.runtime.status?.counts ?? null,
+      state.runtime.status?.warnings ?? null,
+      state.runtime.models?.packs?.map((pack) => [pack.packId, pack.state, pack.selected, pack.installed, pack.download?.downloadedBytes ?? 0, pack.download?.totalBytes ?? 0, pack.download?.error?.code ?? null]) ?? null,
+      state.runtime.errors ?? null,
+      state.runtime.formError ?? '',
+      state.runtime.modelFocus ?? null,
+      state.runtime.timelineFilter ?? null,
+      state.runtime.includeInternal ?? null,
+    ] : null,
     // AI 助手专区依赖：只取稳定投影（整对象序列化会因服务端易变字段导致每 3s 重建）
     (state.clients ?? null) && (state.clients ?? []).map((c) => [c.id, Boolean(c.installed), Boolean(c.connected), c.state ?? null]),
     state.service ? [Boolean(state.service.registered), Boolean(state.service.running)] : null,
@@ -1582,12 +1891,19 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     renderLockedSettings(body);
     return;
   }
+  if (activeTab === 'runtime' && !state.runtime.loading && Date.now() - state.runtime.loadedAt > RUNTIME_REFRESH_MS) {
+    void ensureRuntimeData({ force: true }).then(() => {
+      lastSettingsSignature = null;
+      if (!$('#settings').hidden && (state.settingsTab ?? 'common') === 'runtime') renderSettings('runtime');
+    });
+  }
   // 轮询时内容未变则跳过重建，避免原生 <select> 弹层/焦点/选择被销毁
   const signature = settingsSignature(activeTab);
   if (signature === lastSettingsSignature && body.childElementCount > 0) return;
   lastSettingsSignature = signature;
   const prevActive = document.activeElement;
   const prevPath = prevActive?.dataset?.cfgPath ?? null;
+  const prevRtPath = prevActive?.dataset?.rtPath ?? null;
   const prevStart = prevActive?.selectionStart ?? null;
   const prevEnd = prevActive?.selectionEnd ?? null;
   // 轮 C/U-3：只有提示下划线以下的内容滚动；重建时保留同一 Tab 的滚动位与折叠展开态
@@ -1615,6 +1931,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
           ${panel('common', `<section class="settings-section" data-settings-common-status><h3>${escapeHtml(t('settings.mock.commonTitle'))} <span class="badge badge-muted">${escapeHtml(t('settings.common.readonly'))}</span></h3><p class="muted">${escapeHtml(t('settings.mock.commonNote'))}</p></section>`)}
           ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
           ${panel('assistants', `<p class="muted">${escapeHtml(t('settings.mock.assistants'))}</p>`)}
+          ${panel('runtime', renderRuntimeSettings())}
           ${panel('mcp', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
           ${panel('advanced', `<p class="muted">${escapeHtml(t('settings.mock.config'))}</p>`)}
         </div>
@@ -1653,6 +1970,7 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
     `)}
     ${panel('security', `<section id="settings-security-slot" class="settings-slot" data-settings-slot="security" data-security-level="${escapeHtml(state.security?.level ?? 'low')}" tabindex="-1">${securityCardHtml()}</section>`)}
     ${panel('assistants', `<div id="assistants-panel">${assistantsPanelHtml({ clients: state.clients, ui: { ...state, addForm: state.addForm ? assistantAddFormHtml(state.addForm) : '' } })}</div>`)}
+    ${panel('runtime', renderRuntimeSettings())}
     ${panel('mcp', `
       ${renderMcpSections()}
       <details class="settings-fold" id="mcp-danger-fold" data-settings-fold="mcp-danger">
@@ -1685,6 +2003,15 @@ function renderSettings(activeTab = state.settingsTab ?? 'common') {
   enhanceSelects(body);
   if (prevPath) {
     const el = body.querySelector(`[data-cfg-path="${CSS.escape(prevPath)}"]`);
+    if (el && typeof el.focus === 'function') {
+      el.focus();
+      if (prevStart !== null && typeof el.setSelectionRange === 'function' && el.type === 'text') {
+        try { el.setSelectionRange(prevStart, prevEnd ?? prevStart); } catch { /* 忽略 */ }
+      }
+    }
+  }
+  if (prevRtPath) {
+    const el = body.querySelector(`[data-rt-path="${CSS.escape(prevRtPath)}"]`);
     if (el && typeof el.focus === 'function') {
       el.focus();
       if (prevStart !== null && typeof el.setSelectionRange === 'function' && el.type === 'text') {
@@ -3182,6 +3509,631 @@ function renderMemories() {
   }).join('');
 }
 
+// ---------- 0.3 · 记忆运行时：状态 / 治理 / 模型 ----------
+// 数据面：GET /runtime/v1/status、/runtime/v1/traces、/admin/api/memories?includeInternal=1、
+// /admin/api/models*；写面：POST /runtime/v1/mode、/admin/api/models/<action>、/admin/api/config（runtime 段）。
+
+const RUNTIME_REFRESH_MS = 8000;
+
+function runtimeIsVisible() {
+  return state.view === 'runtime'
+    || (!$('#settings')?.hidden && state.settingsTab === 'runtime');
+}
+
+function runtimeConfigValue(path, fallback = null) {
+  const value = cfgGet(currentConfigFile(), path);
+  return value === undefined || value === null ? fallback : value;
+}
+
+function runtimeModeLabel(mode) {
+  return mode === 'immersive' ? t('runtime.mode.immersive') : t('runtime.mode.mcp');
+}
+
+function runtimeSourceLabel(source) {
+  const key = `runtime.source.${source}`;
+  return t.has(key) ? t(key) : String(source ?? '—');
+}
+
+function runtimeReasonText(reason) {
+  if (!reason) return '';
+  const key = RUNTIME_MODEL_REASON_KEYS[reason];
+  return key ? t(key) : String(reason);
+}
+
+function runtimeWarningText(code) {
+  const key = RUNTIME_WARNING_KEYS[code];
+  return key ? t(key) : String(code);
+}
+
+function runtimePackStateLabel(state) {
+  return t(runtimePackStateKey(state));
+}
+
+function runtimePackLabel(pack) {
+  const size = pack?.tier === 'quality' ? '27B' : pack?.tier === 'light' ? '4B' : '9B';
+  const key = `settings.runtime.local.tier.${pack?.tier ?? 'default'}`;
+  return `Qwen ${size}${t.has(key) ? ` · ${t(key)}` : ''}`;
+}
+
+function runtimePackDescription(pack) {
+  const key = `settings.runtime.local.desc.${pack?.tier ?? 'default'}`;
+  return t.has(key) ? t(key) : '';
+}
+
+function runtimeWarnings(status) {
+  const list = [
+    ...(Array.isArray(status?.warnings) ? status.warnings : []),
+    ...(Array.isArray(status?.model?.warnings) ? status.model.warnings : []),
+  ];
+  return [...new Set(list.filter((code) => typeof code === 'string' && code.length > 0))];
+}
+
+function runtimeConfigDiffersFromStatus(status) {
+  if (!status) return false;
+  const config = currentConfigFile();
+  const source = cfgGet(config, 'runtime.model.source');
+  if (source !== undefined && source !== status.model?.configured) return true;
+  const capture = cfgGet(config, 'runtime.capture');
+  if (capture !== undefined && capture !== status.capabilities?.rawCapture) return true;
+  const trace = cfgGet(config, 'runtime.trace');
+  if (trace !== undefined && trace !== status.capabilities?.trace) return true;
+  return false;
+}
+
+/** 仅在相关视图/设置页可见时加载；force 用于动作后立即刷新。 */
+async function ensureRuntimeData({ force = false } = {}) {
+  if (state.locked) return;
+  if (MOCK) {
+    const mock = mockRuntimeData(Date.now());
+    state.runtime.status = mock.status;
+    state.runtime.models = mock.models;
+    state.runtime.traces = mock.traces;
+    state.runtime.memories = mock.memories;
+    state.runtime.errors = {};
+    state.runtime.loadedAt = Date.now();
+    return;
+  }
+  if (!runtimeIsVisible() && !force) return;
+  if (state.runtime.loading) return;
+  if (!force && Date.now() - state.runtime.loadedAt < RUNTIME_REFRESH_MS) return;
+
+  state.runtime.loading = true;
+  const wantTimeline = state.view === 'runtime';
+  const keys = ['status', 'models', ...(wantTimeline ? ['traces', 'memories'] : [])];
+  const requests = keys.map((key) => {
+    if (key === 'status') return api('/runtime/v1/status');
+    if (key === 'models') return api('/admin/api/models');
+    if (key === 'traces') return api('/runtime/v1/traces?limit=20');
+    return api('/admin/api/memories?limit=200&includeInternal=1');
+  });
+  const results = await Promise.allSettled(requests);
+  const errors = {};
+  results.forEach((result, index) => {
+    const key = keys[index];
+    if (result.status !== 'fulfilled') {
+      errors[key] = localizeError(result.reason, 'errors.unknown');
+      return;
+    }
+    if (key === 'status') state.runtime.status = result.value?.data ?? result.value;
+    else if (key === 'models') state.runtime.models = result.value;
+    else if (key === 'traces') state.runtime.traces = result.value?.data?.traces ?? [];
+    else if (key === 'memories') state.runtime.memories = result.value;
+  });
+  state.runtime.errors = errors;
+  state.runtime.loading = false;
+  state.runtime.loadedAt = Date.now();
+}
+
+const RUNTIME_NUMBER_PATHS = new Set([
+  'runtime.retention.rawDays',
+  'runtime.retention.traceDays',
+  'runtime.retention.checkpointDays',
+  'runtime.limits.maxContextTokens',
+  'runtime.model.api.timeoutMs',
+]);
+
+async function saveRuntimeField(path, raw) {
+  if (!path) return;
+  let value;
+  if (RUNTIME_NUMBER_PATHS.has(path)) {
+    const number = Number(raw);
+    value = raw === '' || raw === null || !Number.isFinite(number) ? null : Math.round(number);
+  } else if (typeof raw === 'boolean') {
+    value = raw;
+  } else {
+    value = String(raw ?? '');
+  }
+  const patch = {};
+  cfgSet(patch, path, value);
+  delete state.runtimeDraft[path];
+  await saveRuntimePatch(patch, 'settings.runtime.advanced.saved');
+}
+
+async function saveRuntimeApiSettings() {
+  const baseUrl = String(runtimeDraftValue('runtime.model.api.baseUrl', '') ?? '').trim();
+  const model = String(runtimeDraftValue('runtime.model.api.model', '') ?? '').trim();
+  const keyRefRaw = String(runtimeDraftValue('runtime.model.api.keyRef', '') ?? '').trim();
+  // 只接受 env/keychain/file 引用；旧配置里的非引用值不写回、按清除处理。
+  const keyRef = keyRefRaw === '' || /^(env|keychain|file):/.test(keyRefRaw) ? keyRefRaw : '';
+  const allowRemote = document.querySelector('[data-rt-api-allow-remote]')?.checked === true;
+  const timeoutRaw = runtimeDraftValue('runtime.model.api.timeoutMs', 10000);
+  const timeoutMs = Number(timeoutRaw);
+  if (!baseUrl || !model) {
+    state.runtime.formError = t('settings.runtime.api.needEndpoint');
+    lastSettingsSignature = null;
+    renderSettings('runtime');
+    return;
+  }
+  const loopback = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(\/|$)/i.test(baseUrl);
+  if (!/^https:\/\//i.test(baseUrl) && !loopback) {
+    state.runtime.formError = t('settings.runtime.api.invalidUrl');
+    lastSettingsSignature = null;
+    renderSettings('runtime');
+    return;
+  }
+  state.runtime.formError = '';
+  const patch = {
+    runtime: {
+      model: {
+        source: 'api',
+        api: {
+          baseUrl,
+          model,
+          keyRef,
+          allowRemote,
+          timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.round(timeoutMs) : 10000,
+        },
+      },
+    },
+  };
+  const saved = await saveRuntimePatch(patch, 'settings.runtime.api.saved');
+  if (saved) {
+    for (const path of IA_RUNTIME_API_FIELDS) delete state.runtimeDraft[path];
+  }
+}
+
+async function saveRuntimePatch(patch, successKey) {  if (MOCK) {
+    showToast(t('common.mockReadOnly'));
+    return false;
+  }
+  if (!state.features.writes) {
+    showToast(t('settings.runtime.readonly'));
+    return false;
+  }
+  try {
+    const res = await submitConfigPatch(patch);
+    if (res?.config) {
+      state.rawConfig = { path: res.path, exists: true, parseError: null, config: res.config };
+    }
+    state.runtime.loadedAt = 0;
+    showToast(t(successKey));
+    await ensureRuntimeData({ force: true });
+    await refresh();
+    return true;
+  } catch (error) {
+    if (!error?.uiHandled) {
+      showToast(t('settings.runtime.advanced.saveFailed', { message: localizeError(error, 'errors.unknown') }));
+    }
+    return false;
+  } finally {
+    lastSettingsSignature = null;
+    if (!$('#settings')?.hidden) renderSettings(state.settingsTab ?? 'common');
+  }
+}
+
+async function switchRuntimeMode(mode) {
+  if (mode !== 'mcp' && mode !== 'immersive') return;
+  const current = runtimeModeOf(state.runtime.status, currentConfigFile());
+  if (mode === current) return;
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  const ok = await confirmModal({
+    title: t('runtime.mode.confirmTitle'),
+    body: t('runtime.mode.confirmBody', { from: runtimeModeLabel(current), to: runtimeModeLabel(mode) }),
+    confirmLabel: t('runtime.mode.confirm'),
+  });
+  if (!ok) return;
+  try {
+    await api('/runtime/v1/mode', { method: 'POST', body: { mode } });
+    if (state.runtime.status) state.runtime.status.mode = mode;
+    state.runtime.loadedAt = 0;
+    showToast(t('runtime.mode.switched', { mode: runtimeModeLabel(mode) }));
+    await ensureRuntimeData({ force: true });
+    await refresh();
+  } catch (error) {
+    showToast(t('runtime.mode.failed', { message: localizeError(error, 'errors.unknown') }));
+  }
+}
+
+async function selectRuntimeModelSource(source) {
+  if (!['heuristic', 'local', 'api'].includes(source)) return;
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  if (source === 'local') {
+    const packs = state.runtime.models?.packs ?? [];
+    const selectedPack = packs.find((entry) => entry.selected && entry.installed);
+    if (!selectedPack) {
+      const installed = packs.find((entry) => entry.installed);
+      if (installed) {
+        await runtimeModelAction('select', installed.packId);
+        return;
+      }
+      state.runtime.modelFocus = 'local';
+      showToast(t('settings.runtime.model.chooseLocalFirst'));
+      lastSettingsSignature = null;
+      renderSettings('runtime');
+      document.getElementById('runtime-local-models')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      return;
+    }
+  }
+  if (source === 'api') {
+    state.runtime.modelFocus = 'api';
+    lastSettingsSignature = null;
+    renderSettings('runtime');
+    document.getElementById('runtime-api-settings')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    return;
+  }
+  state.runtime.modelFocus = source;
+  await saveRuntimePatch({ runtime: { model: { source } } }, 'settings.runtime.model.sourceSaved');
+}
+
+async function runtimeModelAction(action, packId) {
+  if (!action || !packId) return;
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  if (action === 'uninstall' || action === 'remove') {
+    const ok = await confirmModal({
+      title: t('settings.runtime.local.uninstallTitle'),
+      body: t('settings.runtime.local.uninstallBody', { pack: packId }),
+      confirmLabel: t('settings.runtime.local.uninstall'),
+    });
+    if (!ok) return;
+  }
+  try {
+    await api(`/admin/api/models/${action}`, { method: 'POST', body: { pack: packId } });
+    const messageKey = action === 'download' || action === 'resume'
+      ? (action === 'download' ? 'settings.runtime.local.done' : 'settings.runtime.local.resumed')
+      : action === 'pause' ? 'settings.runtime.local.paused'
+        : action === 'cancel' ? 'settings.runtime.local.cancelled'
+          : action === 'select' ? 'settings.runtime.local.activated'
+            : 'settings.runtime.local.uninstalled';
+    showToast(t(messageKey));
+    state.runtime.loadedAt = 0;
+    await ensureRuntimeData({ force: true });
+    await refresh();
+  } catch (error) {
+    showToast(t('settings.runtime.local.failed', { message: localizeError(error, 'errors.unknown') }));
+  }
+}
+
+async function runtimeTraceFeedback(traceId, useful) {
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  const status = state.runtime.status;
+  if (status?.mode !== 'immersive') { showToast(t('runtime.trace.feedbackMode')); return; }
+  try {
+    await api(`/runtime/v1/recall/${encodeURIComponent(traceId)}/feedback`, {
+      method: 'POST',
+      body: { useful },
+    });
+    const trace = (state.runtime.traces ?? []).find((entry) => entry.id === traceId);
+    if (trace) trace.feedback = { useful, at: Date.now() };
+    showToast(t(useful ? 'runtime.trace.feedbackUseful' : 'runtime.trace.feedbackNotUseful'));
+    renderRuntime();
+  } catch (error) {
+    showToast(t('runtime.trace.feedbackFailed', { message: localizeError(error, 'errors.unknown') }));
+  }
+}
+
+async function runtimeOpenObject(id) {
+  if (!id) return;
+  if (state.runtime.objectDetail?.id === id) {
+    state.runtime.objectDetail = null;
+    renderRuntime();
+    return;
+  }
+  state.runtime.objectDetail = { id, loading: true };
+  renderRuntime();
+  try {
+    const res = await api(`/runtime/v1/objects/${encodeURIComponent(id)}?includeContent=true`);
+    state.runtime.objectDetail = { id, object: res?.data?.object ?? null, error: null };
+  } catch (error) {
+    state.runtime.objectDetail = { id, object: null, error: localizeError(error, 'errors.unknown') };
+  }
+  renderRuntime();
+}
+
+async function runtimeDeleteCheckpoint(id, threadId, agentId) {
+  if (!threadId) return;
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  const ok = await confirmModal({
+    title: t('runtime.timeline.deleteCheckpoint'),
+    body: t('runtime.timeline.deleteCheckpointBody', { thread: threadId }),
+    confirmLabel: t('runtime.timeline.deleteCheckpoint'),
+  });
+  if (!ok) return;
+  try {
+    const query = agentId ? `?agentId=${encodeURIComponent(agentId)}` : '';
+    await api(`/runtime/v1/checkpoints/${encodeURIComponent(threadId)}${query}`, { method: 'DELETE' });
+    state.runtime.objectDetail = null;
+    showToast(t('runtime.timeline.checkpointDeleted'));
+    state.runtime.loadedAt = 0;
+    await ensureRuntimeData({ force: true });
+    await refresh();
+  } catch (error) {
+    showToast(t('runtime.timeline.actionFailed', { message: localizeError(error, 'errors.unknown') }));
+  }
+}
+
+async function runtimeMemoryAction(id, action) {
+  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
+  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  if (action === 'delete') {
+    const ok = await confirmModal({
+      title: t('memories.delete.title'),
+      body: t('memories.delete.body', { id }),
+      confirmLabel: t('memories.action.delete'),
+    });
+    if (!ok) return;
+  }
+  try {
+    await api(`/admin/api/memories/${encodeURIComponent(id)}/${action}`, { method: 'POST', body: {} });
+    showToast(action === 'delete'
+      ? t('memories.toast.deleted', { id })
+      : action === 'archive' ? t('memories.toast.archived', { id }) : t('memories.toast.unarchived', { id }));
+    state.runtime.loadedAt = 0;
+    await ensureRuntimeData({ force: true });
+    await refresh();
+  } catch (error) {
+    showToast(t('runtime.timeline.actionFailed', { message: localizeError(error, 'errors.unknown') }));
+  }
+}
+
+function runtimeStatusCard(title, chip, body) {
+  return `<section class="runtime-card crt-surface">
+    <div class="runtime-card-head"><h3>${escapeHtml(title)}</h3>${chip ? `<span class="crt-tag">${escapeHtml(chip)}</span>` : ''}</div>
+    ${body}
+  </section>`;
+}
+
+function runtimeModelWarningRows(status) {
+  const codes = runtimeWarnings(status);
+  if (codes.length === 0) return '';
+  return `<ul class="runtime-warnings" data-runtime-warnings>${codes.map((code) => `<li>${escapeHtml(runtimeWarningText(code))}</li>`).join('')}</ul>`;
+}
+
+function renderRuntimeStatus() {
+  const status = state.runtime.status;
+  const error = state.runtime.errors.status;
+  if (!status) {
+    if (error) return `<section class="runtime-card crt-surface"><p class="crt-warn">${escapeHtml(t('runtime.error', { message: error }))}</p></section>`;
+    return `<section class="runtime-card crt-surface"><p class="muted">${escapeHtml(t('runtime.loading'))}</p></section>`;
+  }
+  const mode = runtimeModeOf(status, currentConfigFile());
+  const model = status.model ?? {};
+  const configured = model.configured ?? runtimeModelSourceOf(status, currentConfigFile());
+  const active = model.active ?? configured;
+  const modeDisabled = !state.features.writes || MOCK;
+  const modeButtons = ['mcp', 'immersive'].map((value) => `<button class="btn btn-small btn-crt" type="button" data-rt-mode="${value}" aria-pressed="${value === mode}" ${modeDisabled ? 'disabled' : ''}>${escapeHtml(runtimeModeLabel(value))}</button>`).join('');
+  const capture = status.capabilities?.rawCapture ?? 'off';
+  const trace = status.capabilities?.trace ?? 'local';
+  const checkpointSync = runtimeConfigValue('runtime.checkpoint.sync', 'local');
+  const selfSync = runtimeConfigValue('runtime.self.sync', 'cloud');
+  const canToggle = state.features.writes && !MOCK;
+  const modelRows = [
+    `${escapeHtml(t('runtime.model.configured'))}: ${escapeHtml(runtimeSourceLabel(configured))}`,
+    `${escapeHtml(t('runtime.model.active'))}: ${escapeHtml(runtimeSourceLabel(active))}`,
+  ].join(' · ');
+  return `
+    ${runtimeStatusCard(t('runtime.mode.title'), runtimeModeLabel(mode), `
+      <div class="runtime-mode-actions">${modeButtons}</div>
+      <p class="muted">${escapeHtml(t('settings.runtime.access.switchHint'))}</p>
+    `)}
+    ${runtimeStatusCard(t('runtime.model.title'), model.degraded ? t('runtime.model.degraded') : runtimeSourceLabel(configured), `
+      <p>${modelRows}</p>
+      ${model.reason ? `<p class="crt-warn">${escapeHtml(runtimeReasonText(model.reason))}</p>` : ''}
+      <p class="muted">${escapeHtml(t('runtime.model.credential'))}: ${escapeHtml(model.credential?.configured ? t('settings.runtime.api.credentialConfigured', { source: model.credential?.source ?? '—' }) : t('settings.runtime.api.credentialMissing'))}</p>
+      ${runtimeModelWarningRows(status)}
+    `)}
+    ${runtimeStatusCard(t('runtime.counts.title'), null, `
+      <dl class="runtime-kv">
+        <dt>${escapeHtml(t('runtime.counts.memoryRecords'))}</dt><dd>${escapeHtml(String(status.counts?.memoryRecords ?? 0))}</dd>
+        <dt>${escapeHtml(t('runtime.counts.compacts'))}</dt><dd>${escapeHtml(String(status.counts?.compacts ?? 0))}</dd>
+        <dt>${escapeHtml(t('runtime.counts.checkpoints'))}</dt><dd>${escapeHtml(String(status.counts?.checkpoints ?? 0))}</dd>
+        <dt>${escapeHtml(t('runtime.counts.selfRecords'))}</dt><dd>${escapeHtml(String(status.counts?.selfRecords ?? 0))}</dd>
+        <dt>${escapeHtml(t('runtime.counts.localRawChunks'))}</dt><dd>${escapeHtml(String(status.counts?.localRawChunks ?? 0))}</dd>
+        <dt>${escapeHtml(t('runtime.counts.localTraces'))}</dt><dd>${escapeHtml(String(status.counts?.localTraces ?? 0))}</dd>
+      </dl>
+    `)}
+    ${runtimeStatusCard(t('runtime.sync.title'), status.sync?.running ? t('runtime.sync.running') : t('runtime.sync.stopped'), `
+      <dl class="runtime-kv">
+        <dt>${escapeHtml(t('runtime.sync.pending'))}</dt><dd>${escapeHtml(String(status.sync?.pendingEvents ?? 0))}</dd>
+        <dt>${escapeHtml(t('runtime.sync.namespaces'))}</dt><dd>${escapeHtml((status.sync?.namespaces ?? []).join(', ') || '—')}</dd>
+      </dl>
+    `)}
+    ${runtimeStatusCard(t('runtime.raw.title'), null, `
+      <dl class="runtime-kv">
+        <dt>${escapeHtml(t('runtime.raw.capture'))}</dt><dd>${escapeHtml(capture === 'local' ? t('runtime.raw.captureLocal') : t('runtime.raw.captureOff'))}</dd>
+        <dt>${escapeHtml(t('runtime.raw.trace'))}</dt><dd>${escapeHtml(trace === 'local' ? t('runtime.raw.traceLocal') : t('runtime.raw.traceOff'))}</dd>
+        <dt>${escapeHtml(t('runtime.raw.checkpoint'))}</dt><dd>${escapeHtml(checkpointSync === 'cloud' ? t('runtime.raw.cloud') : t('runtime.raw.localOnly'))}</dd>
+        <dt>${escapeHtml(t('runtime.raw.self'))}</dt><dd>${escapeHtml(selfSync === 'cloud' ? t('runtime.raw.cloud') : t('runtime.raw.localOnly'))}</dd>
+      </dl>
+      <div class="runtime-mode-actions">
+        <button class="btn btn-small btn-crt" type="button" data-rt-capture="${capture === 'local' ? 'off' : 'local'}" ${canToggle ? '' : 'disabled'}>${escapeHtml(capture === 'local' ? t('runtime.raw.pauseCapture') : t('runtime.raw.resumeCapture'))}</button>
+        <button class="btn btn-small btn-crt" type="button" data-rt-trace-mode="${trace === 'local' ? 'off' : 'local'}" ${canToggle ? '' : 'disabled'}>${escapeHtml(trace === 'local' ? t('runtime.raw.pauseTrace') : t('runtime.raw.resumeTrace'))}</button>
+      </div>
+    `)}
+    ${runtimeConfigDiffersFromStatus(status) ? `<p class="runtime-pending">⚠ ${escapeHtml(t('settings.runtime.pendingRestart'))}</p>` : ''}
+  `;
+}
+
+function runtimeTimelineControlsHtml() {
+  const includeInternal = state.runtime.includeInternal === true;
+  const filter = state.runtime.timelineFilter;
+  const filters = [
+    ['all', 'runtime.timeline.all'],
+    ['memory', 'runtime.timeline.memory'],
+    ['compact', 'runtime.timeline.compact'],
+    ['checkpoint', 'runtime.timeline.checkpoint'],
+    ['self', 'runtime.timeline.self'],
+  ];
+  return `${filters.map(([value, key]) => {
+    const disabled = !includeInternal && value !== 'all' && value !== 'memory';
+    return `<button class="btn btn-small btn-crt" type="button" data-rt-filter="${value}" aria-pressed="${filter === value}" ${disabled ? 'disabled' : ''}>${escapeHtml(t(key))}</button>`;
+  }).join('')}
+  <label class="runtime-internal-toggle"><input type="checkbox" data-rt-internal-toggle ${includeInternal ? 'checked' : ''}> ${escapeHtml(t('runtime.timeline.internalToggle'))}</label>
+  <p class="runtime-internal-hint muted">${escapeHtml(t('runtime.timeline.internalHint'))}</p>`;
+}
+
+function runtimeObjectDetailHtml(detail) {
+  if (!detail) return '';
+  if (detail.loading) return `<p class="runtime-detail muted">${escapeHtml(t('runtime.timeline.loading'))}</p>`;
+  if (detail.error) return `<p class="runtime-detail crt-warn">${escapeHtml(t('runtime.timeline.detailError', { message: detail.error }))}</p>`;
+  const object = detail.object;
+  if (!object) return `<p class="runtime-detail muted">${escapeHtml(t('runtime.timeline.empty'))}</p>`;
+  const content = object.content && typeof object.content === 'object' ? object.content : {};
+  const rows = [];
+  if (object.kind === 'compact' || object.type === 'compact') {
+    rows.push([t('runtime.timeline.compact'), String(content.summary ?? '—')]);
+  } else if (object.kind === 'context_checkpoint' || object.type === 'context_checkpoint') {
+    rows.push([t('runtime.counts.checkpoints'), String(content.threadId ?? '—')]);
+    rows.push(['revision', String(content.revision ?? '—')]);
+    if (content.summary) rows.push(['summary', String(content.summary)]);
+  } else if (object.kind === 'self_record' || object.type === 'self_record') {
+    rows.push([t('runtime.counts.selfRecords'), String(content.agentId ?? '—')]);
+    rows.push(['revision', String(content.revision ?? '—')]);
+    if (Array.isArray(content.goals) && content.goals.length > 0) rows.push(['goals', content.goals.join(' · ')]);
+    if (Array.isArray(content.traits) && content.traits.length > 0) rows.push(['traits', content.traits.join(' · ')]);
+  } else {
+    rows.push(['type', String(object.type ?? '—')]);
+  }
+  const threadId = content.threadId;
+  const agentId = content.agentId;
+  const canDeleteCheckpoint = (object.kind === 'context_checkpoint' || object.type === 'context_checkpoint')
+    && typeof threadId === 'string' && threadId.length > 0;
+  return `<div class="runtime-detail" data-runtime-object="${escapeHtml(object.id)}">
+    <dl class="runtime-kv">${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>
+    ${object.internal ? `<p class="muted">${escapeHtml(t('runtime.timeline.internalBadge'))} · ${escapeHtml(String(object.namespace ?? '—'))}</p>` : ''}
+    ${canDeleteCheckpoint ? `<button class="btn btn-small btn-crt btn-crt-danger" type="button" data-rt-checkpoint-delete="${escapeHtml(object.id)}" data-rt-thread="${escapeHtml(threadId)}" data-rt-agent="${escapeHtml(agentId ?? '')}">${escapeHtml(t('runtime.timeline.deleteCheckpoint'))}</button>` : ''}
+  </div>`;
+}
+
+function renderRuntimeTimeline() {
+  const list = $('#runtime-timeline');
+  const controls = $('#runtime-timeline-controls');
+  if (!list) return;
+  if (controls) controls.innerHTML = runtimeTimelineControlsHtml();
+  const data = state.runtime.memories;
+  const error = state.runtime.errors.memories;
+  if (!data) {
+    list.innerHTML = `<p class="muted">${escapeHtml(error ? t('runtime.timeline.error', { message: error }) : t('runtime.timeline.loading'))}</p>`;
+    return;
+  }
+  const rows = filterRuntimeTimeline(data.memories, {
+    filter: state.runtime.timelineFilter,
+    includeInternal: state.runtime.includeInternal,
+  });
+  if (rows.length === 0) {
+    list.innerHTML = `<p class="muted">${escapeHtml(t('runtime.timeline.empty'))}</p>`;
+    return;
+  }
+  list.innerHTML = rows.map((memory) => {
+    const kind = runtimeTimelineKind(memory);
+    const internal = kind !== 'memory';
+    const badges = [
+      memory.archived ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('memories.badge.archived'))}</span>` : '',
+      memory.deleted ? `<span class="crt-tag crt-tag-error">${escapeHtml(t('memories.badge.deleted'))}</span>` : '',
+      internal ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('runtime.timeline.internalBadge'))}</span>` : '',
+    ].filter(Boolean).join(' ');
+    const open = state.runtime.objectDetail?.id === memory.id;
+    const writable = state.features.writes && !MOCK;
+    const actions = internal
+      ? `<button class="btn btn-small btn-crt" type="button" data-rt-object="${escapeHtml(memory.id)}">${escapeHtml(open ? t('runtime.timeline.hide') : t('runtime.timeline.view'))}</button>`
+      : writable
+        ? [
+          `<button class="btn btn-small btn-crt" type="button" data-rt-mem-action="${memory.archived ? 'unarchive' : 'archive'}" data-rt-mem-id="${escapeHtml(memory.id)}">${escapeHtml(memory.archived ? t('memories.action.unarchive') : t('memories.action.archive'))}</button>`,
+          `<button class="btn btn-small btn-crt" type="button" data-rt-mem-action="delete" data-rt-mem-id="${escapeHtml(memory.id)}">${escapeHtml(t('memories.action.delete'))}</button>`,
+        ].join(' ')
+        : '';
+    return `<article class="mem-row runtime-timeline-row crt-surface" data-rt-mem-row="${escapeHtml(memory.id)}" data-rt-kind="${escapeHtml(kind)}">
+      <div class="mem-main">
+        <div class="mem-head">
+          <span class="crt-tag">${escapeHtml(t(`runtime.timeline.${kind}`))}</span>
+          <span class="crt-tag">${escapeHtml(String(memory.namespace ?? 'default'))}</span>
+          ${badges}
+          <code class="mem-id">${escapeHtml(memory.id)}</code>
+        </div>
+        <p class="mem-preview">${escapeHtml(memory.preview || t('memories.emptyPreview'))}</p>
+        <p class="muted mem-meta">${escapeHtml(t('memories.meta.created', { time: formatTime(memory.createdAt) }))}</p>
+        ${open ? runtimeObjectDetailHtml(state.runtime.objectDetail) : ''}
+      </div>
+      <div class="mem-actions">${actions}</div>
+    </article>`;
+  }).join('');
+}
+
+function renderRuntimeTraces() {
+  const list = $('#runtime-traces');
+  if (!list) return;
+  const data = state.runtime.traces;
+  const error = state.runtime.errors.traces;
+  if (!data) {
+    list.innerHTML = `<p class="muted">${escapeHtml(error ? t('runtime.trace.error', { message: error }) : t('runtime.loading'))}</p>`;
+    return;
+  }
+  if (data.length === 0) {
+    list.innerHTML = `<p class="muted">${escapeHtml(t('runtime.trace.empty'))}</p>`;
+    return;
+  }
+  const mode = state.runtime.status?.mode ?? 'mcp';
+  const canFeedback = state.features.writes && !MOCK && mode === 'immersive';
+  list.innerHTML = data.map((trace) => {
+    const open = state.runtime.traceOpen?.[trace.id] === true;
+    const feedback = trace.feedback;
+    const hits = Array.isArray(trace.hits) ? trace.hits : [];
+    const hitHtml = open ? `<ul class="runtime-trace-hits">${hits.length > 0 ? hits.map((hit) => {
+      const score = typeof hit.score === 'number' ? hit.score.toFixed(2) : '—';
+      return `<li>${escapeHtml(t('runtime.trace.hit', { rank: hit.rank ?? '—', type: hit.type ?? '—', score }))} <code>${escapeHtml(hit.id ?? '')}</code></li>`;
+    }).join('') : `<li>${escapeHtml(t('runtime.trace.noHits'))}</li>`}</ul>` : '';
+    const model = trace.model?.query ?? trace.model?.embedding ?? '—';
+    return `<article class="mem-row runtime-trace-row crt-surface" data-rt-trace-row="${escapeHtml(trace.id)}">
+      <div class="mem-main">
+        <div class="mem-head">
+          <span class="crt-tag">${escapeHtml(formatTime(trace.at))}</span>
+          ${trace.degraded ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('runtime.trace.degraded'))}</span>` : ''}
+          ${feedback ? `<span class="crt-tag ${feedback.useful ? 'crt-tag-ok' : 'crt-tag-error'}">${escapeHtml(t(feedback.useful ? 'runtime.trace.feedbackUseful' : 'runtime.trace.feedbackNotUseful'))}</span>` : ''}
+          <code class="mem-id">${escapeHtml(trace.id)}</code>
+        </div>
+        <p class="mem-preview">${escapeHtml(trace.queryPreview || t('runtime.trace.noQuery'))}</p>
+        <p class="muted mem-meta">${escapeHtml(t('runtime.trace.took', { ms: trace.tookMs ?? 0 }))} · ${escapeHtml(t('runtime.trace.hits', { count: hits.length }))} · ${escapeHtml(t('runtime.trace.model', { model }))}</p>
+        ${open ? `<p class="muted mem-meta">${escapeHtml(t('runtime.trace.namespaces', { namespaces: (trace.namespaces ?? []).join(', ') || '—' }))}</p>` : ''}
+        ${hitHtml}
+        <div class="runtime-trace-actions">
+          <button class="btn btn-small btn-crt" type="button" data-rt-trace="${escapeHtml(trace.id)}">${escapeHtml(open ? t('runtime.timeline.hide') : t('runtime.trace.why'))}</button>
+          <button class="btn btn-small btn-crt" type="button" data-rt-trace-useful="${escapeHtml(trace.id)}" data-useful="true" ${canFeedback ? '' : 'disabled'} title="${escapeHtml(canFeedback ? '' : t('runtime.trace.feedbackMode'))}">${escapeHtml(t('runtime.trace.useful'))}</button>
+          <button class="btn btn-small btn-crt" type="button" data-rt-trace-useful="${escapeHtml(trace.id)}" data-useful="false" ${canFeedback ? '' : 'disabled'} title="${escapeHtml(canFeedback ? '' : t('runtime.trace.feedbackMode'))}">${escapeHtml(t('runtime.trace.notUseful'))}</button>
+        </div>
+      </div>
+    </article>`;
+  }).join('');
+}
+
+function renderRuntime() {
+  if (state.view !== 'runtime') return;
+  const root = $('#runtime-status');
+  if (!root) return;
+  const badge = $('#runtime-head-mode');
+  const status = state.runtime.status;
+  if (badge) {
+    badge.hidden = !status;
+    badge.textContent = status ? runtimeModeLabel(runtimeModeOf(status, currentConfigFile())) : '';
+  }
+  root.innerHTML = renderRuntimeStatus();
+  renderRuntimeTimeline();
+  renderRuntimeTraces();
+}
+
 // ---------- H-1/UX-2：设置 · AI 助手专区（单列表）+ 首屏只读叠加层 ----------
 // 连接页已收编进「设置 · AI 助手」（?view=connect 为别名重定向）；构建器见 assistants.js。
 
@@ -4327,6 +5279,7 @@ function setView(view) {
   $('#domains-view').hidden = view !== 'domains';
   $('#audit-view').hidden = view !== 'audit';
   $('#memories-view').hidden = view !== 'memories';
+  $('#runtime-view').hidden = view !== 'runtime';
   $('#stage').style.visibility = view === 'map' ? 'visible' : 'hidden';
   // 走查修复：顶部「守护」气泡 /「需要注意」卡只属星图——切出视图即时隐藏
   //（此前仅在 3s 轮询里更新，切走后要滞留最多一个轮询周期才消失）
@@ -4335,6 +5288,9 @@ function setView(view) {
   if (asideEl) asideEl.classList.toggle('is-open', view === 'map' && Boolean(state.selected));
   // 设备卡空壳处理：面板视图（记忆共享/审计/记忆）整体隐藏右栏，窄屏不再占底部一行
   document.querySelector('.layout')?.classList.toggle('is-panel-view', view !== 'map');
+  if (view === 'runtime') {
+    void ensureRuntimeData({ force: true }).then(() => renderRuntime());
+  }
   syncStageActivity();
 }
 
@@ -4384,6 +5340,64 @@ $('#memories-list')?.addEventListener('click', (event) => {
   const button = event.target.closest('[data-mem-action]');
   if (!button) return;
   void memAction(button.dataset.memId, button.dataset.memAction);
+});
+
+// 0.3 · 记忆运行时视图：模式/模型、时间线、对象详情、召回轨迹反馈
+$('#runtime-refresh')?.addEventListener('click', () => {
+  void (async () => {
+    state.runtime.loadedAt = 0;
+    await ensureRuntimeData({ force: true });
+    renderRuntime();
+  })();
+});
+$('#runtime-view')?.addEventListener('click', (event) => {
+  const mode = event.target.closest('[data-rt-mode]');
+  if (mode) { void switchRuntimeMode(mode.dataset.rtMode); return; }
+  const capture = event.target.closest('[data-rt-capture]');
+  if (capture) {
+    const next = capture.dataset.rtCapture;
+    void saveRuntimePatch({ runtime: { capture: next } }, 'settings.runtime.advanced.saved');
+    return;
+  }
+  const traceMode = event.target.closest('[data-rt-trace-mode]');
+  if (traceMode) {
+    const next = traceMode.dataset.rtTraceMode;
+    void saveRuntimePatch({ runtime: { trace: next } }, 'settings.runtime.advanced.saved');
+    return;
+  }
+  const filter = event.target.closest('[data-rt-filter]');
+  if (filter) {
+    state.runtime.timelineFilter = filter.dataset.rtFilter;
+    renderRuntimeTimeline();
+    return;
+  }
+  const object = event.target.closest('[data-rt-object]');
+  if (object) { void runtimeOpenObject(object.dataset.rtObject); return; }
+  const memActionButton = event.target.closest('[data-rt-mem-action]');
+  if (memActionButton) { void runtimeMemoryAction(memActionButton.dataset.rtMemId, memActionButton.dataset.rtMemAction); return; }
+  const checkpointDelete = event.target.closest('[data-rt-checkpoint-delete]');
+  if (checkpointDelete) {
+    void runtimeDeleteCheckpoint(checkpointDelete.dataset.rtCheckpointDelete, checkpointDelete.dataset.rtThread, checkpointDelete.dataset.rtAgent);
+    return;
+  }
+  const traceToggle = event.target.closest('[data-rt-trace]');
+  if (traceToggle) {
+    const id = traceToggle.dataset.rtTrace;
+    state.runtime.traceOpen[id] = !state.runtime.traceOpen[id];
+    renderRuntimeTraces();
+    return;
+  }
+  const feedback = event.target.closest('[data-rt-trace-useful]');
+  if (feedback) {
+    void runtimeTraceFeedback(feedback.dataset.rtTraceUseful, feedback.dataset.useful === 'true');
+  }
+});
+$('#runtime-view')?.addEventListener('change', (event) => {
+  const internal = event.target.closest('[data-rt-internal-toggle]');
+  if (!internal) return;
+  state.runtime.includeInternal = internal.checked === true;
+  state.runtime.timelineFilter = state.runtime.includeInternal ? 'all' : 'memory';
+  renderRuntimeTimeline();
 });
 
 // UX-2「需要注意」浮卡：点击直达处理位（助手 → 设置·AI 助手；对端 → 设备卡）
@@ -4670,10 +5684,43 @@ $('#cloud-switch-close')?.addEventListener('click', () => { $('#cloud-switch').h
 $('#settings-close').addEventListener('click', () => {
   $('#settings').hidden = true;
 });
+// 运行时设置草稿：文本/数字在输入时只更新 state（轮询重绘不丢焦点），
+// 下拉/勾选 change 即保存；API 表单由「保存 API 设置」统一写入。
+$('#settings-body').addEventListener('input', (event) => {
+  const el = event.target.closest('[data-rt-path]');
+  if (!el) return;
+  state.runtimeDraft[el.dataset.rtPath] = el.type === 'checkbox' ? el.checked : el.value;
+});
+$('#settings-body').addEventListener('change', (event) => {
+  const el = event.target.closest('[data-rt-path][data-rt-autosave]');
+  if (!el) return;
+  void saveRuntimeField(el.dataset.rtPath, el.type === 'checkbox' ? el.checked : el.value);
+});
 // Tab 切换 + AI 助手专区动作（事件委托：renderSettings 会整体替换 body）
 $('#settings-body').addEventListener('click', (event) => {
   const tab = event.target.closest('[data-settings-tab]');
-  if (tab) { renderSettings(tab.dataset.settingsTab); return; }
+  if (tab) {
+    const next = tab.dataset.settingsTab;
+    if (next !== 'runtime') {
+      state.runtimeDraft = {};
+      state.runtime.formError = '';
+    }
+    renderSettings(next);
+    if (next === 'runtime') {
+      void ensureRuntimeData({ force: true }).then(() => {
+        lastSettingsSignature = null;
+        if (!$('#settings').hidden && (state.settingsTab ?? 'common') === 'runtime') renderSettings('runtime');
+      });
+    }
+    return;
+  }
+  const runtimeModeButton = event.target.closest('[data-rt-mode]');
+  if (runtimeModeButton) { void switchRuntimeMode(runtimeModeButton.dataset.rtMode); return; }
+  const runtimeSourceButton = event.target.closest('[data-rt-model-source]');
+  if (runtimeSourceButton) { void selectRuntimeModelSource(runtimeSourceButton.dataset.rtModelSource); return; }
+  const runtimePackButton = event.target.closest('[data-rt-pack-action]');
+  if (runtimePackButton) { void runtimeModelAction(runtimePackButton.dataset.rtPackAction, runtimePackButton.dataset.rtPack); return; }
+  if (event.target.closest('[data-rt-api-save]')) { void saveRuntimeApiSettings(); return; }
   // UX-2：附加导航「关于本机」→ 打开既有 about 弹层
   const extra = event.target.closest('[data-settings-extra]');
   if (extra) { $('#about').hidden = false; renderAbout(); return; }
@@ -5936,6 +6983,60 @@ function mockSecurity(now) {
     }],
     recentApprovals: [],
     rejections: [{ eventId: 'e-sec-reject-1', reason: 'missing-proof' }],
+  };
+}
+
+function mockRuntimeData(now) {
+  const gib = 1024 ** 3;
+  return {
+    status: {
+      version: '0.3.0',
+      initialized: true,
+      mode: 'mcp',
+      identity: { cloudId: 'cl_mock', userId: 'u_mock', profileId: 'default', deviceId: 'device-A', hostId: 'h_mock', agentId: 'opencode' },
+      capabilities: { mcpTools: true, ingest: true, recall: true, context: true, checkpoint: true, compact: true, rawCapture: 'off', trace: 'local', modelSources: ['heuristic', 'host', 'local'] },
+      model: { configured: 'heuristic', active: 'heuristic', degraded: false, reason: null, credential: { configured: false, source: null }, warnings: [] },
+      counts: { memoryRecords: 3, compacts: 1, checkpoints: 1, selfRecords: 1, localRawChunks: 0, localTraces: 1 },
+      sync: { running: true, pendingEvents: 0, namespaces: ['notes', 'work'] },
+      limits: { maxChunkBytes: 262144, maxContextTokens: 12000, maxRecall: 50 },
+      warnings: [],
+    },
+    models: {
+      ok: true,
+      selectedPack: 'qwen3.5-9b-instruct-q4_k_m',
+      effectivePack: 'qwen3.5-9b-instruct-q4_k_m',
+      packs: [
+        { packId: 'qwen3.5-9b-instruct-q4_k_m', tier: 'default', default: true, state: 'installed', installed: true, selected: true, estimatedDownloadBytes: 6_300_000_000, installedBytes: 6_300_000_000, requirements: { minMemoryBytes: 16 * gib, recommendedMemoryBytes: 24 * gib } },
+        { packId: 'qwen3.5-27b-instruct-q4_k_m', tier: 'quality', default: false, state: 'not_installed', installed: false, selected: false, estimatedDownloadBytes: 17_600_000_000, requirements: { minMemoryBytes: 40 * gib, recommendedMemoryBytes: 64 * gib } },
+        { packId: 'qwen3.5-4b-instruct-q4_k_m', tier: 'light', default: false, state: 'paused', installed: false, selected: false, estimatedDownloadBytes: 2_900_000_000, requirements: { minMemoryBytes: 8 * gib, recommendedMemoryBytes: 12 * gib }, download: { state: 'paused', downloadedBytes: 1_200_000_000, totalBytes: 2_900_000_000 } },
+      ],
+      warnings: [],
+    },
+    traces: [{
+      id: 'tr_mock000000000000000000001',
+      cloudId: 'cl_mock',
+      agentId: 'opencode',
+      at: now - 60_000,
+      queryPreview: '演示召回：主题偏好',
+      namespaces: ['notes'],
+      hits: [
+        { id: '01MOCKMEMORY000000000000001', type: 'fact', score: 0.91, rank: 1 },
+        { id: '01MOCKMEMORY000000000000003', type: 'fact', score: 0.74, rank: 2 },
+      ],
+      model: { query: 'heuristic' },
+      tookMs: 12,
+      degraded: false,
+    }],
+    memories: {
+      total: 5,
+      memories: [
+        { id: '01MOCKMEMORY000000000000001', type: 'fact', namespace: 'notes', preview: '演示记忆：偏好深色主题', createdAt: now - 240_000, archived: false, deleted: false },
+        { id: '01MOCKMEMORY000000000000003', type: 'episode', namespace: 'default', preview: '演示对话情节', createdAt: now - 360_000, archived: false, deleted: false },
+        { id: '01MOCKCOMPACT00000000000001', type: 'compact', namespace: 'notes', preview: '摘要：两条偏好的合并视图', createdAt: now - 180_000, archived: false, deleted: false },
+        { id: '01MOCKCHECKPOINT000000000001', type: 'context_checkpoint', namespace: '__checkpoint__', preview: '任务 checkpoint · revision 3', createdAt: now - 120_000, archived: false, deleted: false },
+        { id: '01MOCKSELF00000000000000001', type: 'self_record', namespace: '__self__', preview: 'OpenCode 的自我记录', createdAt: now - 90_000, archived: false, deleted: false },
+      ],
+    },
   };
 }
 

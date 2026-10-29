@@ -1630,17 +1630,42 @@ try {
       '草稿机制已退场');
     const tabIds = ia.IA_TABS.map((tab) => tab.id).join(',');
     const tabLabels = ia.IA_TABS.map((tab) => tab.label).join(',');
-    check('E1 IA Tab 结构（常用/安全/AI 助手/MCP 接入/高级；诊断并入高级）与「关于本机」入口齐备',
-      tabIds === 'common,security,assistants,mcp,advanced' && tabLabels === '常用,安全,AI 助手,MCP 接入,高级'
+    check('E1 IA Tab 结构（常用/安全/AI 助手/记忆运行时/MCP 接入/高级；诊断并入高级）与「关于本机」入口齐备',
+      tabIds === 'common,security,assistants,runtime,mcp,advanced' && tabLabels === '常用,安全,AI 助手,记忆运行时,MCP 接入,高级'
         && (ia.IA_SETTINGS_EXTRA ?? []).some((item) => item.id === 'about' && item.opens === 'about-modal')
         && htmlSrc.includes('id="self-badge"') && htmlSrc.includes('id="about"') && htmlSrc.includes('关于本机')
         && consoleSrc2.includes('data-settings-tab') && consoleSrc2.includes('IA_ADVANCED_SECTIONS') && consoleSrc2.includes('IA_MCP_SECTIONS')
         && consoleSrc2.includes('IA_FIELD_COPY') && consoleSrc2.includes('IA_SECURITY_SECTIONS')
         && consoleSrc2.includes('assistantsPanelHtml') && consoleSrc2.includes("panel('assistants'") && consoleSrc2.includes("panel('mcp'")
+        && consoleSrc2.includes("panel('runtime'") && consoleSrc2.includes('renderRuntimeSettings')
         && ia.IA_ADVANCED_ACTIONS.length === 0
         && !consoleSrc2.includes('declare-issuer') && !consoleSrc2.includes('declareIssuer')
         && !htmlSrc.includes('declare-issuer'),
       `tabs=${tabIds} labels=${tabLabels}`);
+    const runtimeFieldsMapped = ia.IA_RUNTIME_FIELDS.every((path) => ia.IA_MIGRATION[path] === 'runtime');
+    const memQueryBlock = consoleSrc2.match(/function memQuery\(\) \{[\s\S]*?\n\}/)?.[0] ?? '';
+    const modelCardBlock = consoleSrc2.slice(
+      consoleSrc2.indexOf('function runtimePackCard('),
+      consoleSrc2.indexOf('function runtimeLocalModelsHtml('),
+    );
+    check('0.3 记忆运行时：两轴设置 + 内部过滤 + 状态/模型/轨迹数据面',
+      ia.IA_RUNTIME_MODEL_SOURCES.join(',') === 'heuristic,local,api'
+        && ia.IA_RUNTIME_MODES.join(',') === 'mcp,immersive'
+        && runtimeFieldsMapped
+        && consoleSrc2.includes("api('/runtime/v1/status')")
+        && consoleSrc2.includes("api('/runtime/v1/mode'")
+        && consoleSrc2.includes("api('/admin/api/models')")
+        && consoleSrc2.includes('/runtime/v1/recall/')
+        && consoleSrc2.includes('includeInternal=1')
+        && memQueryBlock.length > 0 && !memQueryBlock.includes('includeInternal')
+        && htmlSrc.includes('id="runtime-view"') && htmlSrc.includes('id="runtime-timeline"') && htmlSrc.includes('id="runtime-traces"'),
+      `runtimeFields=${ia.IA_RUNTIME_FIELDS.length} memQueryInternal=${memQueryBlock.includes('includeInternal')}`);
+    check('0.3 本地模型卡只显示体积/内存/状态（不暴露量化/上下文/线程/端口）',
+      modelCardBlock.length > 0
+        && !/quantization|contextLength|threads|\bport\b/.test(modelCardBlock)
+        && modelCardBlock.includes('settings.runtime.local.size')
+        && modelCardBlock.includes('settings.runtime.local.memory'),
+      `chars=${modelCardBlock.length}`);
     // A：编辑器字段改由服务端 schema 驱动（不再在控制台重复声明）；C：一键重启接线
     check('A 编辑器由单一真源驱动（configSchema）且不再内置字段表',
       consoleSrc2.includes('configSchema') && consoleSrc2.includes('rebuildConfigFields')
@@ -1746,12 +1771,12 @@ try {
 
     const iaFolds = (await import('../settings-ia.js')).IA_SETTINGS_FOLDS;
     const foldIds = iaFolds.map((fold) => fold.id);
-    const renderedFolds = ['mcp-danger', 'diagnostics', 'about-runtime'].filter((id) => jsSrc.includes(`data-settings-fold="${id}"`));
+    const renderedFolds = ['mcp-danger', 'diagnostics', 'about-runtime', 'runtime-advanced'].filter((id) => jsSrc.includes(`data-settings-fold="${id}"`));
     check('U-1 折叠白名单：≤5 且设置/关于只渲染白名单内类型（邀请无详情）',
-      iaFolds.length <= 5 && renderedFolds.length === 3
+      iaFolds.length <= 5 && renderedFolds.length === 4
         && !jsSrc.includes('cfg-more') && !jsSrc.includes('task-card-more') && !jsSrc.includes('page-more')
         && !/<details/.test(jsSrc.slice(jsSrc.indexOf('function renderCfgField'), jsSrc.indexOf('function fieldOf')))
-        && foldIds.every((id) => ['mcp-danger', 'diagnostics', 'about-runtime', 'assistants'].includes(id)),
+        && foldIds.every((id) => ['mcp-danger', 'diagnostics', 'about-runtime', 'runtime-advanced', 'assistants'].includes(id)),
       `folds=${JSON.stringify(foldIds)} rendered=${JSON.stringify(renderedFolds)}`);
 
     const codeOnly = jsSrc.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').map((line) => line.replace(/\/\/.*$/, '')).join('\n');

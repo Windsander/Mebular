@@ -29,9 +29,25 @@ await mkdir(cloudRoot, { recursive: true });
 await mkdir(fakeBin, { recursive: true });
 
 // 确定性的 opencode 替身：--version 与 mcp list 都成功（不依赖本机是否装了 opencode）。
-const fakeOpencode = join(fakeBin, 'opencode');
-await writeFile(fakeOpencode, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "9.9.9"; exit 0; fi\nif [ "$1" = "mcp" ]; then echo "mebular http://127.0.0.1:7331/mcp"; exit 0; fi\nexit 0\n', 'utf-8');
-await chmod(fakeOpencode, 0o755);
+if (process.platform === 'win32') {
+  // Windows：PATH 解析要 .cmd（无扩展名的 POSIX shebang 脚本无法执行）。
+  const pathext = (process.env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean);
+  if (!pathext.some((ext) => ext.toUpperCase() === '.CMD')) pathext.push('.CMD');
+  process.env.PATHEXT = pathext.join(';');
+  const fakeOpencodeCmd = join(fakeBin, 'opencode.cmd');
+  await writeFile(fakeOpencodeCmd, [
+    '@echo off',
+    'if "%1"=="--version" echo 9.9.9',
+    'if "%1"=="mcp" echo mebular http://127.0.0.1:7331/mcp',
+    'exit /b 0',
+    '',
+  ].join('\r\n'), 'utf-8');
+} else {
+  // POSIX：保留原有 shell 替身。
+  const fakeOpencode = join(fakeBin, 'opencode');
+  await writeFile(fakeOpencode, '#!/bin/sh\nif [ "$1" = "--version" ]; then echo "9.9.9"; exit 0; fi\nif [ "$1" = "mcp" ]; then echo "mebular http://127.0.0.1:7331/mcp"; exit 0; fi\nexit 0\n', 'utf-8');
+  await chmod(fakeOpencode, 0o755);
+}
 
 process.env.MEBULAR_HOME = home;
 process.env.MEBULAR_USER_HOME = userHome;

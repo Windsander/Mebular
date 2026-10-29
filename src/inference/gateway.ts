@@ -6,6 +6,8 @@
 // 能力：JSON schema 请求 + 本地结构校验、单次请求超时、429/5xx/网络重试一次、
 // 5 次/60s 熔断、失败回退 heuristic。
 
+import { normalizeChatBaseUrl } from './url.js';
+
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
@@ -340,20 +342,13 @@ export class ChatCompletionGateway {
   private openUntil = 0;
 
   constructor(options: ChatGatewayOptions) {
-    let parsed: URL;
-    try {
-      parsed = new URL(options.baseUrl);
-    } catch {
+    const normalized = normalizeChatBaseUrl(options.baseUrl);
+    if (!normalized.ok) {
       throw new GatewayError({
         code: 'network',
-        message: 'baseUrl must be a valid URL',
-        retryable: false,
-      });
-    }
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      throw new GatewayError({
-        code: 'network',
-        message: 'baseUrl must use http or https',
+        message: normalized.reason === 'base_url_required'
+          ? 'baseUrl is required'
+          : 'baseUrl is not an allowed OpenAI-compatible endpoint',
         retryable: false,
       });
     }
@@ -364,7 +359,7 @@ export class ChatCompletionGateway {
         retryable: false,
       });
     }
-    this.baseUrl = options.baseUrl.replace(/\/+$/, '');
+    this.baseUrl = normalized.url;
     this.model = options.model;
     this.apiKey = options.apiKey;
     this.timeoutMs = Math.max(1, options.timeoutMs ?? 10_000);

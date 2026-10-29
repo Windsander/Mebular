@@ -14,6 +14,7 @@
 //     heuristic，本层不会尝试第二个供应商；
 //   - 模型输出是不可信数据：只做 JSON schema 校验并返回候选，不执行、不写图。
 
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
@@ -28,6 +29,7 @@ import {
 } from '../inference/gateway.js';
 import { LlamaServerEngine, type LlamaServerEngineOptions } from '../inference/engine.js';
 import { parseModelManifest, type EngineStatus } from '../inference/types.js';
+import { normalizeChatBaseUrl } from '../inference/url.js';
 import type { RuntimeModelSettings } from './config.js';
 
 const DEFAULT_LOCAL_TIMEOUT_MS = 30_000;
@@ -154,6 +156,18 @@ export interface RuntimeModelGateway {
   isCircuitOpen(nowMs?: number): boolean;
 }
 
+export interface RuntimeKeychainCommand {
+  stdout: string;
+  stderr?: string;
+}
+
+/** 测试注入点：生产默认调用 macOS `security`；不经过 shell。 */
+export type RuntimeKeychainExec = (
+  file: string,
+  args: string[],
+  options: { timeoutMs: number },
+) => Promise<RuntimeKeychainCommand>;
+
 export interface RuntimeModelRuntimeOptions {
   /** `<home>/runtime`；本地模型默认在 `<runtimeDir>/models/<pack>`。 */
   runtimeDir?: string;
@@ -167,6 +181,11 @@ export interface RuntimeModelRuntimeOptions {
   createEngine?: (options: LlamaServerEngineOptions) => RuntimeModelEngine;
   localTimeoutMs?: number;
   localStartupTimeoutMs?: number;
+  /** 系统钥匙串读取器；默认只在 macOS 调用 `security`。 */
+  keychainExec?: RuntimeKeychainExec;
+  keychainTimeoutMs?: number;
+  /** 测试注入平台；生产取 process.platform。 */
+  platform?: NodeJS.Platform;
 }
 
 interface CredentialResult {
@@ -351,19 +370,59 @@ function sha256(value: string): string {
   return createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
-function allowedBaseUrl(value: string | null): boolean {
-  if (!value) return false;
-  try {
-    const url = new URL(value);
-    if (url.protocol === 'https:') return true;
-    if (url.protocol !== 'http:') return false;
-    return url.hostname === '127.0.0.1'
-      || url.hostname === '::1'
-      || url.hostname === '[::1]'
-      || url.hostname === 'localhost';
-  } catch {
-    return false;
+function defaultKeychainExec(
+  file: string,
+  args: string[],
+  options: { timeoutMs: number },
+): Promise<RuntimeKeychainCommand> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    execFile(
+      file,
+      args,
+      {
+        encoding: 'utf8',
+        timeout: options.timeoutMs,
+        maxBuffer: 64 * 1024,
+        windowsHide: true,
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          const wrapped = error as NodeJS.ErrnoException & { stderr?: string };
+          wrapped.stderr = stderr;
+          rejectPromise(wrapped);
+          return;
+        }
+        resolvePromise({ stdout, stderr });
+      },
+    );
+  });
+}
+
+interface KeychainReference {
+  service: string;
+  account?: string;
+}
+
+/** `keychain:<service>` 或 `keychain:<service>/<account>`；拒绝空白/控制字符/选项注入。 */
+function parseKeychainRef(value: string): KeychainReference | null {
+  const raw = value.slice('keychain:'.length).trim();
+  if (raw.length === 0 || raw.length > 256 || /[\u0000-\u001f\u007f]/.test(raw)) return null;
+  const slash = raw.indexOf('/');
+  const service = (slash === -1 ? raw : raw.slice(0, slash)).trim();
+  const account = slash === -1 ? '' : raw.slice(slash + 1).trim();
+  if (!/^[A-Za-z0-9._:@-]+$/.test(service) || service.startsWith('-')) return null;
+  if (account.length > 0 && (!/^[A-Za-z0-9._:@-]+$/.test(account) || account.startsWith('-'))) {
+    return null;
   }
+  return { service, ...(account.length > 0 ? { account } : {}) };
+}
+
+function keychainItemMissing(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const code = (error as { code?: unknown }).code;
+  if (code === 44 || code === '44') return true;
+  const stderr = (error as { stderr?: unknown }).stderr;
+  return typeof stderr === 'string' && /could not be found|item not found/i.test(stderr);
 }
 
 function gatewayWarning(failure: GatewayFailure): string {
@@ -418,6 +477,9 @@ class ManagedRuntimeModelRuntime implements RuntimeModelRuntime {
   private readonly createEngine: (options: LlamaServerEngineOptions) => RuntimeModelEngine;
   private readonly localTimeoutMs: number;
   private readonly localStartupTimeoutMs: number;
+  private readonly keychainExec: RuntimeKeychainExec;
+  private readonly keychainTimeoutMs: number;
+  private readonly platform: NodeJS.Platform;
   private readonly localEngines = new Map<string, RuntimeModelEngine>();
   private apiGateway: { cacheKey: string; gateway: RuntimeModelGateway } | null = null;
 
@@ -433,6 +495,9 @@ class ManagedRuntimeModelRuntime implements RuntimeModelRuntime {
     this.createEngine = options.createEngine ?? ((engineOptions) => new LlamaServerEngine(engineOptions));
     this.localTimeoutMs = Math.max(1, options.localTimeoutMs ?? DEFAULT_LOCAL_TIMEOUT_MS);
     this.localStartupTimeoutMs = Math.max(1, options.localStartupTimeoutMs ?? DEFAULT_LOCAL_STARTUP_TIMEOUT_MS);
+    this.keychainExec = options.keychainExec ?? defaultKeychainExec;
+    this.keychainTimeoutMs = Math.max(1, options.keychainTimeoutMs ?? 3_000);
+    this.platform = options.platform ?? process.platform;
   }
 
   async probe(): Promise<RuntimeModelProbe> {
@@ -753,10 +818,12 @@ class ManagedRuntimeModelRuntime implements RuntimeModelRuntime {
   }
 
   private apiGatewayFor(apiKey: string): RuntimeModelGateway {
-    const cacheKey = `${this.settings.api.baseUrl ?? ''}\u0000${this.settings.api.model ?? ''}\u0000${sha256(apiKey)}`;
+    const normalized = normalizeChatBaseUrl(this.settings.api.baseUrl);
+    const baseUrl = normalized.ok ? normalized.url : '';
+    const cacheKey = `${baseUrl}\u0000${this.settings.api.model ?? ''}\u0000${sha256(apiKey)}`;
     if (this.apiGateway?.cacheKey === cacheKey) return this.apiGateway.gateway;
     const gateway = this.createGateway({
-      baseUrl: this.settings.api.baseUrl ?? '',
+      baseUrl,
       model: this.settings.api.model ?? '',
       apiKey,
       timeoutMs: this.settings.api.timeoutMs,
@@ -810,6 +877,7 @@ class ManagedRuntimeModelRuntime implements RuntimeModelRuntime {
 
   private async probeApi(): Promise<RuntimeModelApiProbe> {
     const baseUrl = this.settings.api.baseUrl;
+    const normalizedBaseUrl = normalizeChatBaseUrl(baseUrl);
     const model = this.settings.api.model;
     const configured = Boolean(baseUrl && model);
     const credential = await this.resolveCredential();
@@ -828,7 +896,7 @@ class ManagedRuntimeModelRuntime implements RuntimeModelRuntime {
     if (!configured) {
       reason = baseUrl || model ? 'api_incomplete' : 'api_not_configured';
       if (baseUrl || model) warnings.push('model_api_incomplete');
-    } else if (!allowedBaseUrl(baseUrl)) {
+    } else if (!normalizedBaseUrl.ok) {
       reason = 'invalid_base_url';
       warnings.push('model_api_insecure_url');
     } else if (!allowRemote) {
@@ -898,11 +966,7 @@ class ManagedRuntimeModelRuntime implements RuntimeModelRuntime {
         return this.readKeyFile(resolve(base, relative), 'file');
       }
       if (ref.startsWith('keychain:')) {
-        return {
-          status: { configured: false, source: 'keychain' },
-          reason: 'credential_unsupported',
-          warnings: ['model_credential_unsupported'],
-        };
+        return this.readKeychain(ref);
       }
       return {
         status: { configured: false, source: null },
@@ -918,7 +982,8 @@ class ManagedRuntimeModelRuntime implements RuntimeModelRuntime {
     const base = this.homeDir ?? (this.runtimeDir ? dirname(this.runtimeDir) : null);
     if (base) {
       const fromFile = await this.readKeyFile(join(base, 'secrets', 'runtime-model.key'), 'file', true);
-      if (fromFile.status.configured) return fromFile;
+      // 文件不存在时保持 quiet；文件存在但权限/读取失败要显式报告，不能伪装成 missing。
+      if (fromFile.status.configured || fromFile.reason !== 'credential_missing') return fromFile;
     }
     return {
       status: { configured: false, source: null },
@@ -927,12 +992,63 @@ class ManagedRuntimeModelRuntime implements RuntimeModelRuntime {
     };
   }
 
+  private async readKeychain(ref: string): Promise<CredentialResult> {
+    const parsed = parseKeychainRef(ref);
+    if (!parsed) {
+      return {
+        status: { configured: false, source: 'keychain' },
+        reason: 'credential_invalid_ref',
+        warnings: ['model_credential_invalid_ref'],
+      };
+    }
+    if (this.platform !== 'darwin') {
+      // Windows Credential Manager / libsecret 没有无依赖的统一读取方式；
+      // 明确返回 unsupported，不伪造成功，也不静默改用其他来源。
+      return {
+        status: { configured: false, source: 'keychain' },
+        reason: 'credential_unsupported',
+        warnings: ['model_credential_unsupported'],
+      };
+    }
+
+    const args = ['find-generic-password', '-s', parsed.service, '-w'];
+    if (parsed.account) args.push('-a', parsed.account);
+    try {
+      const result = await this.keychainExec('security', args, { timeoutMs: this.keychainTimeoutMs });
+      const value = result.stdout.trim();
+      if (!value) {
+        return {
+          status: { configured: false, source: 'keychain' },
+          reason: 'credential_missing',
+          warnings: ['model_credential_missing'],
+        };
+      }
+      return { status: { configured: true, source: 'keychain' }, key: value, warnings: [] };
+    } catch (error) {
+      return {
+        status: { configured: false, source: 'keychain' },
+        reason: keychainItemMissing(error) ? 'credential_missing' : 'credential_unreadable',
+        warnings: [keychainItemMissing(error) ? 'model_credential_missing' : 'model_credential_unreadable'],
+      };
+    }
+  }
+
   private async readKeyFile(
     path: string,
     source: 'file',
     quiet = false,
   ): Promise<CredentialResult> {
     try {
+      const info = await stat(path);
+      if (this.platform !== 'win32' && (info.mode & 0o077) !== 0) {
+        // POSIX: 组/其他用户可读即拒绝使用，避免密钥被同机其他用户读取。
+        // Windows ACL 无法用 st_mode 表达，退化为不检查（不伪造已校验）。
+        return {
+          status: { configured: false, source },
+          reason: 'credential_insecure_permissions',
+          warnings: ['model_credential_insecure_permissions'],
+        };
+      }
       const value = (await readFile(path, 'utf8')).trim();
       if (!value) {
         return {

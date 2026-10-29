@@ -3,6 +3,7 @@
 // 旧 config.json 没有 `runtime` 时全部取默认；这里只做归一化，不写盘。
 // 默认值：mode=mcp、capture=off、trace=local、checkpoint=local、self=cloud。
 
+import { normalizeChatBaseUrl } from '../inference/url.js';
 import {
   RUNTIME_CAPTURE_MODES,
   RUNTIME_MODEL_SOURCES,
@@ -101,6 +102,14 @@ function stringOrNull(value: unknown): string | null {
   return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
 }
 
+/** 合法 endpoint 规范到 /v1；非法值原样保留，交给 probe 给出结构化拒绝原因。 */
+function baseUrlOrNull(value: unknown): string | null {
+  const raw = stringOrNull(value);
+  if (!raw) return null;
+  const normalized = normalizeChatBaseUrl(raw);
+  return normalized.ok ? normalized.url : raw;
+}
+
 /**
  * 归一化 `runtime` 配置组；非法/缺失值回落到默认，不抛错（旧配置可直接启动）。
  */
@@ -132,7 +141,7 @@ export function normalizeRuntimeSettings(raw: unknown): RuntimeSettings {
         threads: intOf(local.threads, defaults.model.local.threads, 1),
       },
       api: {
-        baseUrl: stringOrNull(api.baseUrl),
+        baseUrl: baseUrlOrNull(api.baseUrl),
         model: stringOrNull(api.model),
         keyRef: stringOrNull(api.keyRef),
         allowRemote: boolOf(api.allowRemote, defaults.model.api.allowRemote),

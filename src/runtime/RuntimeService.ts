@@ -48,6 +48,7 @@ import {
   type RuntimeModelRuntime,
   type RuntimeModelSummaryResult,
 } from './model.js';
+import { normalizeChatBaseUrl } from '../inference/url.js';
 import { normalizeRuntimeSettings, type RuntimeSettings } from './config.js';
 import {
   RUNTIME_MODES,
@@ -2509,7 +2510,11 @@ export class RuntimeService {
   private capabilities(): RuntimeCapabilitiesStatus {
     const modelSources: RuntimeModelSource[] = ['heuristic', 'host'];
     if (this.settings.model.local.pack || this.settings.model.local.path) modelSources.push('local');
-    if (this.settings.model.api.allowRemote && this.settings.model.api.baseUrl && this.settings.model.api.model) {
+    if (
+      this.settings.model.api.allowRemote
+      && this.settings.model.api.model
+      && normalizeChatBaseUrl(this.settings.model.api.baseUrl).ok
+    ) {
       modelSources.push('api');
     }
     return {

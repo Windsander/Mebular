@@ -90,6 +90,8 @@ export {
   type RuntimeModelEngineConnection,
   type RuntimeModelExtractionRequest,
   type RuntimeModelExtractionResult,
+  type RuntimeKeychainCommand,
+  type RuntimeKeychainExec,
   type RuntimeModelGateway,
   type RuntimeModelLocalProbe,
   type RuntimeModelProbe,

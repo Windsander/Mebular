@@ -9,3 +9,4 @@ export * from './detect.js';
 export * from './store.js';
 export * from './engine.js';
 export * from './gateway.js';
+export * from './url.js';

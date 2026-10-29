@@ -241,3 +241,67 @@ jobs:
         run: |
           rm -rf "$E2E_ROOT" "$E2E_LOG"
           rmdir "$(dirname "$E2E_ROOT")" 2>/dev/null || true
+
+  memory-runtime:
+    name: dsh-memory-runtime-e2e
+    runs-on: ubuntu-latest
+    # Separate, smaller job: fake Runtime only, no Chrome/CDP. Keeps the
+    # existing real-DSH matrix untouched while still gating plugin changes.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Prepare pnpm
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --global pnpm@12.15.0 --no-audit --no-fund
+          INSTALLED="$(pnpm --version)"
+          if [ "$INSTALLED" != "12.15.0" ]; then
+            echo "::error::pnpm version mismatch: expected 12.15.0, got $INSTALLED"
+            exit 1
+          fi
+          pnpm --version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify DSH version SSOT
+        shell: bash
+        run: |
+          set -euo pipefail
+          CURRENT="$(node -p "require('./tests/dsh/e2e/versions.json').current")"
+          if [ -z "$CURRENT" ]; then
+            echo "::error::tests/dsh/e2e/versions.json current 为空"
+            exit 1
+          fi
+          echo "DSH_VERSION=$CURRENT" >> "$GITHUB_ENV"
+
+      - name: Run DSH memory runtime E2E
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+        run: |
+          set -euo pipefail
+          npm run verify:dsh:memory-runtime -- \
+            --dsh-version "$DSH_VERSION"
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-memory-runtime-e2e-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/mebular-memory-runtime-e2e-*
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,41 @@
+{
+  "name": "@mebular/opencode-plugin",
+  "version": "0.3.0",
+  "description": "Opt-in OpenCode V2 server plugin for Mebular Memory Runtime (OpenChamber)",
+  "license": "MIT",
+  "author": {
+    "name": "Sobert Li (Windsander)",
+    "email": "Windsander@users.noreply.github.com",
+    "url": "https://github.com/Windsander"
+  },
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "openchamber",
+    "mebular",
+    "memory-runtime",
+    "agent-memory"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Windsander/Mebular.git",
+    "directory": "packages/opencode-plugin"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

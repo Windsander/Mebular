@@ -5,7 +5,13 @@
 //
 // 用法：
 //   node scripts/install.mjs                 # 探测并安装到 cwd 的 .agents/skills、.dsh/skills（及存在的 .opencode/skills）
-//   node scripts/install.mjs --global        # 另装到 ~/.agents/skills；OpenCode/OpenChamber 已存在时也装 ~/.config/opencode/skills
+//   node scripts/install.mjs --global        # 另装到**已检测到**客户端的全局 Skill 目录：
+//                                            #   OpenCode/OpenChamber ~/.config/opencode/skills
+//                                            #   Hermes ~/.hermes/skills
+//                                            #   Claude Code ~/.claude/skills
+//                                            #   Cursor ~/.cursor/skills
+//                                            #   DSH ~/.agents/skills（检测到 ~/.dsh、~/.agents 或 cwd/.dsh）
+//                                            # 未检测到的客户端不创建目录（Claude Desktop 无文件夹式目录）
 //   node scripts/install.mjs --target <dir>  # 只装到指定目录（测试/自定义用）
 //   node scripts/install.mjs --force         # 覆盖用户改过的 Skill（默认保留）
 //
@@ -44,6 +50,31 @@ function parseFlags(argv) {
 const flags = parseFlags(process.argv.slice(2));
 const force = flags.force === true || flags.force === 'true';
 const cwd = process.cwd();
+const home = homedir();
+
+/**
+ * 已检测到客户端的全局 Skill 目录（路径契约与 `packages/mcp/src/clients.mjs` 一致）。
+ * 只看目录/配置文件是否存在；未检测到的客户端一律不创建目录。
+ */
+function detectedGlobalSkillDirs() {
+  const dirs = [];
+  // OpenChamber / OpenCode 共用 global 配置与 Skill 目录，只加入一次。
+  const opencodeDir = join(home, '.config', 'opencode');
+  if (existsSync(join(opencodeDir, 'opencode.json')) || existsSync(opencodeDir)) {
+    dirs.push(join(opencodeDir, 'skills'));
+  }
+  if (existsSync(join(home, '.hermes'))) dirs.push(join(home, '.hermes', 'skills'));
+  if (existsSync(join(home, '.claude')) || existsSync(join(home, '.claude.json'))) {
+    dirs.push(join(home, '.claude', 'skills'));
+  }
+  if (existsSync(join(home, '.cursor'))) dirs.push(join(home, '.cursor', 'skills'));
+  // DSH：全局目录是 ~/.agents/skills；DSH_HOME（~/.dsh）、~/.agents 或当前项目的 .dsh 都是检测信号。
+  if (existsSync(join(home, '.dsh')) || existsSync(join(home, '.agents')) || existsSync(join(cwd, '.dsh'))) {
+    dirs.push(join(home, '.agents', 'skills'));
+  }
+  return dirs;
+}
+
 const targets = [];
 if (typeof flags.target === 'string') {
   targets.push(flags.target);
@@ -51,17 +82,12 @@ if (typeof flags.target === 'string') {
   targets.push(join(cwd, '.agents', 'skills'));
   targets.push(join(cwd, '.dsh', 'skills'));
   if (existsSync(join(cwd, '.opencode'))) targets.push(join(cwd, '.opencode', 'skills'));
-  if (flags.global === true) {
-    targets.push(join(homedir(), '.agents', 'skills'));
-    // OpenChamber / OpenCode 共用 global 配置；只有客户端已存在时才写它的 Skill 目录。
-    const opencodeDir = join(homedir(), '.config', 'opencode');
-    if (existsSync(join(opencodeDir, 'opencode.json')) || existsSync(opencodeDir)) {
-      targets.push(join(opencodeDir, 'skills'));
-    }
-  }
+  if (flags.global === true) targets.push(...detectedGlobalSkillDirs());
 }
 
-if (targets.length === 0) {
+// 去重：同一目录（如 OpenChamber/OpenCode 共享的全局目录）只安装一次。
+const uniqueTargets = [...new Set(targets)];
+if (uniqueTargets.length === 0) {
   console.error('没有可安装的目标目录');
   process.exit(1);
 }
@@ -245,7 +271,7 @@ async function fallbackInstall(target, force = false) {
 
 const installed = [];
 let failed = false;
-for (const target of targets) {
+for (const target of uniqueTargets) {
   try {
     const result = shared?.installSkillsToDir
       ? await shared.installSkillsToDir(target, { skillRoot: pkgRoot, force })

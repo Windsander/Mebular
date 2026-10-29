@@ -30,6 +30,10 @@ import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/p
 import { homedir } from 'node:os';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 
+import { createMemoryRuntimeAdapter, resolveMemoryRuntimeConfig } from './memory-runtime.js';
+
+export { createMemoryRuntimeAdapter, resolveMemoryRuntimeConfig };
+
 export const name = '@mebular/dsh-plugin';
 
 export const EMBED_INFO_PATH = '/mebular/embed-info';
@@ -5548,6 +5552,24 @@ export function apply(ctx, config = {}, options = {}) {
   const agentStatus = createAgentStatus({
     log: (level, message) => log(level, message),
   });
+
+  // Memory Runtime is opt-in and has no effect when disabled: it registers no
+  // listeners, starts no timers and never fetches. It follows the same resolved
+  // daemon URL and lifecycle snapshot as the MCP bridge.
+  const memoryRuntimeConfig = resolveMemoryRuntimeConfig(raw.memoryRuntime, {
+    warn: (message) => log('warn', message),
+  });
+  const memoryRuntime = createMemoryRuntimeAdapter({
+    ctx,
+    config: memoryRuntimeConfig,
+    daemonUrl: resolved.daemonUrl,
+    fetchImpl: opts.fetchImpl,
+    now: opts.now,
+    homeDir: memoryRuntimeConfig.enabled ? (opts.userHome ?? homedir()) : undefined,
+    setTimeoutFn: opts.setTimeoutFn,
+    clearTimeoutFn: opts.clearTimeoutFn,
+    log: (level, message) => log(level, message),
+  });
   // Cordis rejects `ctx.systemPrompt` access without this inject, even though
   // the service is loaded by the profile. A profile without the service never
   // runs the callback, so the section is skipped without affecting activation.
@@ -5582,6 +5604,7 @@ export function apply(ctx, config = {}, options = {}) {
     log: (level, message) => log(level, message),
     onSnapshot: (snapshot) => {
       agentStatus.update(snapshot);
+      memoryRuntime.updateSnapshot(snapshot);
     },
     mount: (daemonUrl) => mountMcp(ctx, daemonUrl, {
       // Success is logged once by mountMcp; failures are logged by the
@@ -5601,6 +5624,11 @@ export function apply(ctx, config = {}, options = {}) {
         // stay untouched; `mebular runtime service uninstall` is the explicit
         // removal action.
         agentStatus.dispose();
+        const memoryRuntimeDisposal = Promise.resolve()
+          .then(() => memoryRuntime.dispose())
+          .catch((error) => {
+            log('warn', `memory runtime dispose failed (${safeErrorCode(error)})`);
+          });
         const bridgeDisposal = Promise.resolve()
           .then(() => bridge.dispose())
           .catch(() => {});
@@ -5621,7 +5649,7 @@ export function apply(ctx, config = {}, options = {}) {
           .catch((error) => {
             log('warn', `upgrade dispose failed (${safeErrorCode(error)})`);
           });
-        return Promise.all([bridgeDisposal, lifecycleDisposal, installDisposal, upgradeDisposal]);
+        return Promise.all([bridgeDisposal, memoryRuntimeDisposal, lifecycleDisposal, installDisposal, upgradeDisposal]);
       },
       '@mebular/dsh-plugin: daemon lifecycle, agent status, and MCP bridge',
     );

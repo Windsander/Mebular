@@ -79,6 +79,36 @@ dsh plugin --profile web remove @mebular/dsh-plugin
 
 </details>
 
+## Memory Runtime (opt-in)
+
+Starting with 0.3.0 the host plugin can bridge `/runtime/v1` alongside the existing MCP bridge. It is **off by default**: when disabled it registers no listeners, starts no timer and performs no request, so attach/managed/panel/MCP behaviour is unchanged.
+
+```yaml
+- id: mebular
+  name: '@mebular/dsh-plugin'
+  config:
+    lifecycle: attach
+    panel: true
+    memoryRuntime:
+      enabled: true
+      # Optional: these default to true; maintenance defaults to false.
+      recall: true
+      ingest: true
+      checkpoints: true
+      hideMemoryTools: true
+      maintenance: false
+      # Governance allowlist (these memory_* tools stay visible); task_* is always kept.
+      governanceTools: []
+      # Memory-butler presets/session ids are exempt from tool masking.
+      memoryAgentPresets: ['mebular-memory']
+```
+
+- `recall`: calls `POST /runtime/v1/recall` only on the first step of a new human turn. No hits, timeout or failure passes through unchanged; a hit injects one UserMessage with `source.kind='mebular-memory'`, deduped by surface + session query.
+- `ingest`: batches user/assistant/tool events to `POST /runtime/v1/ingest`, skips the fork/resume inherited prefix, dedupes by `(sessionId, seq)`, uses a bounded queue and never blocks the loop.
+- `checkpoints`: folds `compaction/start → summary → replacement → end` into a ContextCheckpoint and `PUT /runtime/v1/checkpoints/:threadId`; a failure or interruption is never reported as committed.
+- `hideMemoryTools`: dynamically hides currently visible `mcp__mebular__memory_*` from ordinary agents, keeps `task_*` and `governanceTools`, and replays through `agent.ctx.tools.restrict` + `tools/change` without hardcoding unknown names.
+- `maintenance`: on idle, asks the current session model for candidates and submits them to `POST /runtime/v1/ingest` (`extractor='host'`); no tools, capped maxTokens, timeout, silent failure and no direct graph write.
+
 ## MCP tools
 
 DSH reaches the same daemon at `/mcp` through the official MCP client; tools appear as `mcp__mebular__*`.

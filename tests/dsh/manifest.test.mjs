@@ -15,6 +15,7 @@ const pkg = JSON.parse(read('package.json'));
 const patch = read('cordis.patch.yml');
 const host = read('index.js');
 const client = read('client.js');
+const memoryRuntime = read('memory-runtime.js');
 
 describe('P2 @mebular/dsh-plugin manifest：DSH bundle 形状', () => {
   it('package.json 标识、入口与 exports 完整', () => {
@@ -122,7 +123,7 @@ describe('P5 @mebular/dsh-plugin manifest：cordis.patch.yml', () => {
 describe('P2 @mebular/dsh-plugin manifest：静态导入边界', () => {
   it('host/client 不静态 import 任何 @mebular/* 或 @deepseek-ai/* 模块', () => {
     const importSpecifiers = new Set();
-    for (const source of [host, client]) {
+    for (const source of [host, client, memoryRuntime]) {
       for (const match of source.matchAll(/(?:^|\n)\s*import\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]/g)) {
         importSpecifiers.add(match[1]);
       }
@@ -140,13 +141,18 @@ describe('P2 @mebular/dsh-plugin manifest：静态导入边界', () => {
     expect(dynamic).toEqual(['@deepseek-ai/dsh-mcp-client']);
   });
 
-  it('client 只 require react；host 只用 node: 内置与全局能力', () => {
+  it('client 只 require react；host 只用 node: 内置与本地 runtime 模块', () => {
     const requires = [...client.matchAll(/require\(\s*['"]([^'"]+)['"]\s*\)/g)].map((match) => match[1]);
     expect(requires).toEqual(['react']);
     const hostImports = [...host.matchAll(/(?:^|\n)\s*import\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]/g)]
       .map((match) => match[1]);
     expect(hostImports.length).toBeGreaterThan(0);
-    expect(hostImports.every((specifier) => specifier.startsWith('node:'))).toBe(true);
+    expect(hostImports.every((specifier) => specifier.startsWith('node:') || specifier === './memory-runtime.js')).toBe(true);
     expect(host).not.toMatch(/\brequire\(/);
+
+    const runtimeImports = [...memoryRuntime.matchAll(/(?:^|\n)\s*import\s+(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]/g)]
+      .map((match) => match[1]);
+    expect(runtimeImports.length).toBeGreaterThan(0);
+    expect(runtimeImports.every((specifier) => specifier.startsWith('node:'))).toBe(true);
   });
 });

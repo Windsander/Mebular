@@ -78,6 +78,36 @@ dsh plugin --profile web remove @mebular/dsh-plugin
 
 </details>
 
+## Memory Runtime（可选）
+
+0.3.0 起，host 插件可以在现有 MCP bridge 之外接入 `/runtime/v1`。该能力**默认关闭**；关闭时不注册监听器、不启动定时器、不发任何请求，attach/managed/panel/MCP 行为不变。
+
+```yaml
+- id: mebular
+  name: '@mebular/dsh-plugin'
+  config:
+    lifecycle: attach
+    panel: true
+    memoryRuntime:
+      enabled: true
+      # 可选：默认全部开启；maintenance 默认关闭
+      recall: true
+      ingest: true
+      checkpoints: true
+      hideMemoryTools: true
+      maintenance: false
+      # 治理白名单（这些 memory_* 不隐藏）；task_* 始终保留
+      governanceTools: []
+      # 记忆管家 agent 的 preset / session id（例外，不隐藏 memory_*）
+      memoryAgentPresets: ['mebular-memory']
+```
+
+- `recall`：仅在新人类 turn 首步调用 `POST /runtime/v1/recall`，无命中/超时/失败原样放行；命中时注入一条 `source.kind='mebular-memory'` 的 UserMessage，并按 surface + session query 去重。
+- `ingest`：批量把 user/assistant/tool 事件送到 `POST /runtime/v1/ingest`；跳过 fork/resume 的 inherited prefix，按 `(sessionId, seq)` 去重，队列有界，不阻塞 loop。
+- `checkpoints`：把 `compaction/start → summary → replacement → end` 折叠为 ContextCheckpoint 并 `PUT /runtime/v1/checkpoints/:threadId`；失败或中断不会标记为 committed。
+- `hideMemoryTools`：普通 Agent 动态隐藏当前可见的 `mcp__mebular__memory_*`，保留 `task_*` 与 `governanceTools`；通过 `agent.ctx.tools.restrict` + `tools/change` 重放，不硬编码工具名。
+- `maintenance`：在 Agent idle 时用当前会话模型整理候选，经 `POST /runtime/v1/ingest`（`extractor='host'`）交给 Mebular；无 tools、有 maxTokens 上限与超时，失败静默，不直接写图。
+
 ## MCP 工具
 
 DSH 通过官方 MCP client 连接同一个 daemon 的 `/mcp`；工具在 DSH 里显示为 `mcp__mebular__*`。

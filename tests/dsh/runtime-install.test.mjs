@@ -1184,6 +1184,10 @@ describe('Phase 4b fixed npm command and classifier', () => {
   it('derives the pinned runtime version from its own package.json', async () => {
     const dir = await tempRoot('dsh-dynamic-version-');
     await writeFile(join(dir, 'index.js'), await readFile(join(PLUGIN_DIR, 'index.js'), 'utf-8'));
+    await writeFile(
+      join(dir, 'memory-runtime.js'),
+      await readFile(join(PLUGIN_DIR, 'memory-runtime.js'), 'utf-8'),
+    );
     await writeFile(join(dir, 'package.json'), JSON.stringify({
       name: '@mebular/dsh-plugin',
       version: '1.2.3',

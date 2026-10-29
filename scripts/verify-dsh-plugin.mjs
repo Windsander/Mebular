@@ -101,6 +101,7 @@ check(
 
 const expectedFiles = [
   'index.js',
+  'memory-runtime.js',
   'client.js',
   'cordis.patch.yml',
   'locale',
@@ -257,6 +258,8 @@ check(
 );
 check('index.js exports agentStatusText()', typeof pluginModule.agentStatusText === 'function');
 check('index.js exports createAgentStatus()', typeof pluginModule.createAgentStatus === 'function');
+check('index.js exports createMemoryRuntimeAdapter()', typeof pluginModule.createMemoryRuntimeAdapter === 'function');
+check('index.js exports resolveMemoryRuntimeConfig()', typeof pluginModule.resolveMemoryRuntimeConfig === 'function');
 
 // ---------------------------------------------------------------------------
 // Imports: public HTTP only, no workspace coupling
@@ -332,9 +335,17 @@ check('host notifies system-prompt/change', hostSource.includes("'system-prompt/
 check('host adds no mebular_status MCP tool', !hostSource.includes('mebular_status'));
 const staticHostImports = [...hostSource.matchAll(staticImportPattern)].map((match) => match[1]);
 check(
-  'host static imports are Node builtins only',
-  staticHostImports.length > 0 && staticHostImports.every((specifier) => specifier.startsWith('node:')),
+  'host static imports are Node builtins plus the local runtime module',
+  staticHostImports.length > 0
+    && staticHostImports.every((specifier) => specifier.startsWith('node:') || specifier === './memory-runtime.js'),
   staticHostImports.join(', '),
+);
+const runtimeSource = readFileSync(join(pkgDir, 'memory-runtime.js'), 'utf8');
+const staticRuntimeImports = [...runtimeSource.matchAll(staticImportPattern)].map((match) => match[1]);
+check(
+  'memory-runtime static imports are Node builtins only',
+  staticRuntimeImports.length > 0 && staticRuntimeImports.every((specifier) => specifier.startsWith('node:')),
+  staticRuntimeImports.join(', '),
 );
 const dynamicHostImports = [...hostSource.matchAll(/await import\(\s*['"]([^'"]+)['"]\s*\)/g)]
   .map((match) => match[1]);
@@ -438,6 +449,7 @@ check('README documents uninstall', readme.includes('dsh plugin --profile web re
 const requiredArtifacts = [
   'package.json',
   'index.js',
+  'memory-runtime.js',
   'client.js',
   'cordis.patch.yml',
   'locale/en.json',

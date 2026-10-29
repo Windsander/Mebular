@@ -19,6 +19,7 @@ import { attachFleetEvents, resolveFleetNamespace } from './fleet-events.mjs';
 import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 import { configPath } from './config.mjs';
 import { createServiceFacade } from './service-facade.mjs';
+import { buildRuntimeService, createRuntimeHttpHandler, isRuntimePath } from './runtime-memory.mjs';
 import { APP_VERSION } from './version.mjs';
 import { resolveStaticAssetRoots } from './asset-roots.mjs';
 
@@ -955,6 +956,44 @@ export async function startHttpServer({
   // 热初始化后同一会话内的 tools/call 直接转发到真实 MemoryService（不重连、不重新 initialize）。
   const runtimeReady = () => phase === 'READY' && Boolean(service);
   const serviceFacade = createServiceFacade({ getService: () => service, isReady: runtimeReady });
+
+  // 0.3 Runtime：设备级服务层（G0/G1 只读 status + mode 切换）。
+  // app 热初始化后切换实例；本地 Raw/Trace 固定落在 <home>/runtime。
+  let runtimeService = null;
+  let runtimeServiceApp = null;
+  const getRuntimeService = () => {
+    if (!app) return null;
+    if (runtimeServiceApp !== app) {
+      runtimeService = buildRuntimeService({
+        app,
+        config,
+        home,
+        version: APP_VERSION,
+        hostKey: homeKey(home),
+        profileId: cloudId,
+      });
+      runtimeServiceApp = app;
+    }
+    return runtimeService;
+  };
+  const runtimeHttpHandler = createRuntimeHttpHandler({
+    getService: getRuntimeService,
+    getConfig: () => config,
+    onModeChanged: (mode) => {
+      const next = config && typeof config === 'object' ? config : {};
+      const current = next.runtime && typeof next.runtime === 'object' && !Array.isArray(next.runtime)
+        ? next.runtime
+        : {};
+      next.runtime = { ...current, mode };
+      config = next;
+    },
+    home,
+    authenticate,
+    sendJson,
+    origin: () => origin,
+    csrfValid,
+  });
+
   const mcpSessions = new Map(); // sessionId → { transport, server }
   async function transportFor(sessionId) {
     if (sessionId) return mcpSessions.get(sessionId)?.transport ?? null;
@@ -2982,6 +3021,10 @@ export async function startHttpServer({
         if (req.method !== 'GET') return sendJson(res, 405, { error: 'method_not_allowed' });
         res.setHeader('cache-control', 'no-store');
         return sendJson(res, 200, buildEmbedInfo({ origin, loopback: isLoopback }));
+      }
+      // 0.3 Runtime API：与 /mcp 同端口、同 bearer/OAuth/scope；未初始化时返回 503。
+      if (isRuntimePath(path)) {
+        return runtimeHttpHandler({ req, res, url, body });
       }
       if (auth === 'oauth') {
         if (path === '/.well-known/oauth-protected-resource' && req.method === 'GET') {

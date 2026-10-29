@@ -1,0 +1,70 @@
+// Runtime 模块入口（0.3.0）
+//
+// 图内对象复用 MemoryRecord；本地 Raw/Trace 独立存储。
+// RuntimeService 是服务层，不替代 MemoryService。
+
+export * from './types.js';
+export {
+  isRuntimeInternalNode,
+  isRuntimeInternalNodeType,
+  isRuntimeReservedNamespace,
+  readRuntimeMetadata,
+  filterRuntimeInternalNodes,
+} from './internal.js';
+export {
+  createCompactNode,
+  createContextCheckpointNode,
+  createRuntimeObjectNode,
+  createSelfRecordNode,
+  runtimeNodeTags,
+  toRuntimeNodeMetadata,
+  toRuntimeObjectView,
+  type CreateRuntimeObjectInput,
+  type RuntimeObjectView,
+} from './graph.js';
+export {
+  RuntimeLocalStore,
+  RuntimeLocalStoreError,
+  sha256Hex,
+  newRawChunkId,
+  newRecallTraceId,
+  type RawChunkFilter,
+  type RawChunkWriteResult,
+  type RecallTraceFilter,
+  type RuntimeLocalCleanupResult,
+  type RuntimeLocalStoreErrorCode,
+  type RuntimeLocalStoreOptions,
+  type RuntimeLocalStoreStats,
+} from './local-store.js';
+export {
+  defaultRuntimeSettings,
+  normalizeRuntimeSettings,
+  type RuntimeLimitsSettings,
+  type RuntimeModelSettings,
+  type RuntimeRetentionSettings,
+  type RuntimeSettings,
+} from './config.js';
+export {
+  RuntimeModeError,
+  RuntimeNotImplementedError,
+  RuntimeService,
+  type RuntimeCapabilitiesStatus,
+  type RuntimeCheckpointResult,
+  type RuntimeContextBlock,
+  type RuntimeContextRequest,
+  type RuntimeContextResult,
+  type RuntimeCounts,
+  type RuntimeIdentityStatus,
+  type RuntimeIngestRequest,
+  type RuntimeIngestResult,
+  type RuntimeModeChange,
+  type RuntimeModelStatus,
+  type RuntimeObjectResult,
+  type RuntimeRecallRequest,
+  type RuntimeRecallResult,
+  type RuntimeSelfResult,
+  type RuntimeServiceHost,
+  type RuntimeServiceOptions,
+  type RuntimeStatus,
+  type RuntimeSyncStatus,
+} from './RuntimeService.js';

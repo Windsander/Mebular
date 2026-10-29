@@ -2,6 +2,7 @@
 
 export * from './types/index.js';
 export * from './errors.js';
+export * from './runtime/index.js';
 export {
   IdentityManager,
   type DeviceIdentity,

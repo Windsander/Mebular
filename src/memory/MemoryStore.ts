@@ -8,6 +8,7 @@ import type { GraphStore } from '../core/GraphStore.js';
 import type { Node, NodeFilter } from '../types/index.js';
 import type { NamespaceFilter } from '../core/namespace.js';
 import { ValidationError } from '../errors.js';
+import { isRuntimeInternalNode } from '../runtime/internal.js';
 import type { VectorIndex } from './VectorIndex.js';
 import { nodeMatchesKeyword } from './text.js';
 import {
@@ -43,6 +44,11 @@ export interface MemoryListFilter {
   includeArchived?: boolean;
   /** 单分区或分区列表；缺省不过滤 */
   namespace?: NamespaceFilter;
+  /**
+   * Runtime 内部对象（compact/context_checkpoint/self_record/保留域）默认排除。
+   * 仅 Runtime 管理面/调试面显式 true；普通记忆查询不得开启。
+   */
+  includeInternal?: boolean;
   limit?: number;
 }
 
@@ -238,6 +244,10 @@ export class MemoryStore {
       if (!filter.includeDeleted && node.deletedAt) {
         return false;
       }
+      // Runtime 内部对象默认不可见（类型 + metadata.runtime.internal + 保留域三重判定）
+      if (!filter.includeInternal && isRuntimeInternalNode(node)) {
+        return false;
+      }
       // G-ML-1：归档默认不参与召回（显式 includeArchived 才可见）；墓碑与归档相互独立
       if (!filter.includeArchived && isArchived(node)) {
         return false;
@@ -307,7 +317,7 @@ export class MemoryStore {
   async vectorQuery(
     text: string,
     k = 10,
-    options: { includeArchived?: boolean } = {},
+    options: { includeArchived?: boolean; includeInternal?: boolean } = {},
   ): Promise<Array<{ node: Node; score: number }>> {
     if (!this.vectorIndex) {
       return [];
@@ -317,11 +327,13 @@ export class MemoryStore {
     const results: Array<{ node: Node; score: number }> = [];
     for (const hit of hits) {
       const node = await this.graph.getNode(hit.nodeId);
+      const internalHidden = node !== null && options.includeInternal !== true && isRuntimeInternalNode(node);
       // G-ML-1：归档节点默认可留在索引里（可逆），但**默认不出现在召回结果**中
-      if (node && !node.deletedAt && (options.includeArchived === true || !isArchived(node))) {
+      if (node && !node.deletedAt && !internalHidden
+        && (options.includeArchived === true || !isArchived(node))) {
         results.push({ node, score: hit.score });
       } else if (node && !node.deletedAt) {
-        continue; // 归档但被过滤：保留索引条目（解除归档即可再召回）
+        continue; // 归档/内部对象被过滤：保留索引条目，不进入结果
       } else {
         // 墓碑/缺失节点：从索引移除，避免陈旧向量驻留（G2-R）
         await this.vectorIndex.remove(hit.nodeId);
@@ -405,7 +417,7 @@ export class MemoryStore {
     const node = await this.graph.getNode(id);
     // 排除墓碑：与 listByType 默认（includeDeleted=false）行为一致（Phase 6.1 修复）
     // G-ML-1：归档同样默认不可取（显式列表路径可用 includeArchived 查看）
-    if (!node || node.type !== type || node.deletedAt || isArchived(node)) {
+    if (!node || node.type !== type || node.deletedAt || isArchived(node) || isRuntimeInternalNode(node)) {
       return null;
     }
     return node as T;

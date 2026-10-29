@@ -7,6 +7,7 @@ import type { Mebular } from '../mebular.js';
 import { MemoryStore, isArchived } from './MemoryStore.js';
 import { EdgeTypes, type EpisodeNode, type FactNode, type SkillNode } from './types.js';
 import type { VectorIndex } from './VectorIndex.js';
+import { isRuntimeInternalNode } from '../runtime/internal.js';
 import { ValidationError, ErrorCodes, MebularError, SyncError } from '../errors.js';
 import type { Node, TraverseOptions, TraverseResult } from '../types/index.js';
 import { matchesNamespace } from '../core/namespace.js';
@@ -53,6 +54,8 @@ export interface LifecycleOptions {
 export interface DeleteResult {
   deleted: string[];
   notFound: string[];
+  /** Runtime 内部对象默认拒绝普通删除（需 Runtime admin 端点） */
+  internal?: string[];
 }
 
 /** G-ML-1 归档结果（`metadata.archivedAt` 标记，可逆；随 `node_updated` 事件同步传播）。 */
@@ -62,6 +65,8 @@ export interface ArchiveResult {
   notFound: string[];
   /** 墓碑节点：不可归档（删除不可逆于归档语义） */
   skipped: string[];
+  /** Runtime 内部对象默认拒绝普通归档/解除归档 */
+  internal?: string[];
 }
 
 export interface MemoryStatus {
@@ -202,7 +207,7 @@ export class MemoryService {
       nodes = collected.map((node) => ({ node }));
     }
 
-    let filtered = nodes.filter(({ node }) => this.passFilters(node, query));
+    let filtered = nodes.filter(({ node }) => this.passFilters(node, query) && !isRuntimeInternalNode(node));
     if (query.types?.includes('preference')) {
       filtered = filtered.filter(({ node }) =>
         node.type !== 'fact' || (node.tags ?? []).includes(PREFERENCE_TAG));
@@ -240,6 +245,15 @@ export class MemoryService {
         const traversal = await this.mebular.graph.traverse(hit.id, { maxDepth: 1 });
         for (const edge of traversal.visitedEdges) {
           if (seenEdges.has(edge.id)) continue;
+          const [sourceNode, targetNode] = await Promise.all([
+            this.mebular.graph.getNode(edge.source),
+            this.mebular.graph.getNode(edge.target),
+          ]);
+          // 防御性过滤：内部对象不得经关系端点泄漏给普通 search。
+          if ((sourceNode && isRuntimeInternalNode(sourceNode))
+            || (targetNode && isRuntimeInternalNode(targetNode))) {
+            continue;
+          }
           seenEdges.add(edge.id);
           relations.push({
             sourceId: edge.source,
@@ -347,11 +361,19 @@ export class MemoryService {
   async delete(ids: string[]): Promise<DeleteResult> {
     const deleted: string[] = [];
     const notFound: string[] = [];
+    const internal: string[] = [];
     for (const id of ids) {
+      const node = await this.mebular.graph.getNode(id);
+      if (node && isRuntimeInternalNode(node)) {
+        internal.push(id);
+        continue;
+      }
       const ok = await this.mebular.graph.deleteNode(id);
       (ok ? deleted : notFound).push(id);
     }
-    return { deleted, notFound };
+    return internal.length > 0
+      ? { deleted, notFound, internal }
+      : { deleted, notFound };
   }
 
   /**
@@ -365,9 +387,11 @@ export class MemoryService {
     const unarchivedIds: string[] = [];
     const notFound: string[] = [];
     const skipped: string[] = [];
+    const internal: string[] = [];
     for (const id of ids) {
       const node = await this.mebular.graph.getNode(id);
       if (!node) { notFound.push(id); continue; }
+      if (isRuntimeInternalNode(node)) { internal.push(id); continue; }
       if (node.deletedAt) { skipped.push(id); continue; }
       const raw = (node.metadata ?? {}) as Record<string, unknown>;
       const { archivedAt: _drop, ...rest } = raw;
@@ -378,22 +402,30 @@ export class MemoryService {
     if (archivedIds.length > 0 || unarchivedIds.length > 0) {
       this.memory.markVectorIndexStale();
     }
-    return { archived: archivedIds, unarchived: unarchivedIds, notFound, skipped };
+    return internal.length > 0
+      ? { archived: archivedIds, unarchived: unarchivedIds, notFound, skipped, internal }
+      : { archived: archivedIds, unarchived: unarchivedIds, notFound, skipped };
   }
 
   // ---------- 图 / 导入 / 状态 / 同步 ----------
 
   async graph(startId: string, options?: TraverseOptions & LifecycleOptions): Promise<TraverseResult> {
     const includeArchived = options?.includeArchived === true;
+    const start = await this.mebular.graph.getNode(startId);
+    // 内部对象不是公共记忆图的一部分；从内部 id 起遍历直接拒绝（不返回部分图）。
+    if (start && isRuntimeInternalNode(start)) {
+      throw new MebularError('内部对象不可通过记忆图访问', 'INTERNAL_OBJECT');
+    }
     const result = await this.mebular.graph.traverse(startId, options);
-    if (includeArchived) return result;
     // G-ML-1：归档默认不参与遍历（节点与边按端点过滤；起点的归档由 core 侧决定）
-    const keep = (node: Node): boolean => !isArchived(node);
+    // Runtime：内部对象无论 includeArchived 与否都不可见。
+    const keep = (node: Node): boolean =>
+      !isRuntimeInternalNode(node) && (includeArchived || !isArchived(node));
     const keptIds = new Set(result.visitedNodes.filter(keep).map((n) => n.id));
     return {
       ...result,
       visitedNodes: result.visitedNodes.filter(keep),
-      // G-ML-1r：**两端都在可见集**才保留边——否则归档节点 id 会经端点泄漏
+      // G-ML-1r：**两端都在可见集**才保留边——否则归档/内部节点 id 会经端点泄漏
       visitedEdges: result.visitedEdges.filter((e) => keptIds.has(e.source) && keptIds.has(e.target)),
     };
   }

@@ -404,6 +404,24 @@ export async function startServeServer(options = {}) {
           }
         })
         .catch((error) => console.error(`SKILL_ENSURE_FAILED ${error?.code ?? 'ERROR'}`));
+      // 自动自愈（主路径）：实际端口已确定 → 只把已存在的本机 loopback Mebular HTTP 条目
+      // 幂等更新到当前 /mcp；不 force Skill、不创建新客户端配置、不改远端自定义 URL。
+      void import('./clients.mjs')
+        .then(({ reconcileClientEndpoints, assistantUserHome, daemonMcpUrl }) => {
+          const reconcileHost = httpServer.host === '0.0.0.0' || httpServer.host === '::' ? '127.0.0.1' : httpServer.host;
+          return reconcileClientEndpoints({
+            home,
+            userHome: assistantUserHome(),
+            cwd: process.cwd(),
+            mcpUrl: daemonMcpUrl({ host: `${reconcileHost}:${httpServer.port}`, encrypted: serverTls }),
+          });
+        })
+        .then((result) => {
+          if (result?.summary?.failed > 0) {
+            console.error(`CLIENT_ENDPOINT_RECONCILE_PARTIAL ${result.summary.failed} client(s)`);
+          }
+        })
+        .catch((error) => console.error(`CLIENT_ENDPOINT_RECONCILE_FAILED ${error?.code ?? 'ERROR'}`));
     }
 
     const shutdown = async () => {

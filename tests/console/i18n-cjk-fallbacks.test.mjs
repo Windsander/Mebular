@@ -133,6 +133,8 @@ describe('英文界面 · 代码兜底中文清理', () => {
       projectAssistantStatus({ state: 'connected' }, {}),
       projectAssistantStatus({ state: 'detect-failed' }, {}),
       projectAssistantStatus({ state: 'stale' }, {}),
+      projectAssistantStatus({ state: 'stale', staleUrl: true }, {}),
+      projectAssistantStatus({ state: 'needs-confirmation' }, {}),
       projectAssistantStatus({ needsManual: true }, {}),
       projectAssistantStatus({ state: 'not-installed' }, {}),
       projectAssistantStatus({ state: 'not-connected' }, {}),

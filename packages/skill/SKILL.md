@@ -51,11 +51,12 @@ Mebular 是一个本地优先的分布式图记忆层。通过 MCP 工具读写�
 
 **会话里没有 Mebular 工具时的第一步**（每次会话）：
 
-1. 确认守护在跑：`MEBULAR_HOME=~/.mebular mebular status` → `storeLock` 非 null（未跑则先拉起，见 [`SETUP.md`](./SETUP.md) §0.3）。
-   **home 不存在时**先按 SETUP §3/§5（建新/加入），**不要跑 `status`**（它会在默认 home 自举身份材料，见 §0.2）。
-2. 生成当前客户端的接入片段：`mebular print-config --client <opencode|claude|cursor|dsh|generic>`
+1. **先看 App/守护是否已在跑**：读 `HOME_DIR="${MEBULAR_HOME:-$HOME/.mebular}"` 下的 `runtime.json`，用其中的 `host`/`port` 请求 `/healthz`；200 → 已在跑，直接接入，**不要因为 `command -v mebular` 失败就再装一套 CLI**。
+2. **home 不存在时**先按 SETUP §3/§5（从 App 主界面新建/加入），**不要跑 `status`**（它会在默认 home 自举身份材料，见 §0.2）。
+3. 没有 runtime/healthz 且 home 已存在：CLI 可用 → `MEBULAR_HOME="$HOME_DIR" mebular status` 看 `storeLock`；未跑按 [`SETUP.md`](./SETUP.md) §0.3 拉起。没有 CLI → 按 SETUP §2 安装。
+4. 生成当前客户端的接入片段：`mebular print-config --client <opencode|claude|cursor|dsh|generic>`
    （远程形态追加 `--url https://<host>/mcp`），合入客户端 MCP 配置（先备份）并**重载客户端**。
-3. 用 `memory_status` 验证工具面可用；失败排查见 [`SETUP.md`](./SETUP.md) §0.4。
+5. 用 `memory_status` 验证工具面可用；失败排查见 [`SETUP.md`](./SETUP.md) §0.4。
 
 完整剧本（幂等判定 / 拉起 / 接入 / 红线）见 [`SETUP.md`](./SETUP.md) §0「会话内接入」。
 

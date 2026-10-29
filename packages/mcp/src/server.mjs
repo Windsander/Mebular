@@ -1,4 +1,4 @@
-// MCP server 装配（G6.2 + R1）：stdio 传输 + **27 工具**（记忆 11 + 任务 16）+ memory_policy prompt。
+// MCP server 装配（G6.2 + R1）：stdio 传输 + **29 工具**（记忆 13 + 任务 16）+ memory_policy prompt。
 // 全部委托 MemoryService（D33 单一实现）。
 
 import { McpServer } from '@modelcontextprotocol/server';
@@ -26,8 +26,15 @@ const MEMORY_POLICY = `# Mebular 记忆使用规约（memory_policy）
 5. 隐私：不要写入密钥、口令、完整身份证件等高敏感信息。
 6. 无结果别编：召回为空就如实说明，不要臆造记忆。`;
 
+/** MCP initialize 返回的全局行为说明（不替代 memory_policy prompt）。 */
+export const MCP_INSTRUCTIONS = `Mebular 是本地优先的图式记忆与任务协作层。
+1. 先查后写：写入记忆前先用 memory_query/memory_search 查重；只写可复用的稳定事实/偏好，不要把一次会话的过程产物当跨设备记忆。
+2. 任务派发前先 task_targets 确认可派对象，再 task_submit；非幂等/失败重试的语义以工具描述为准。
+3. 工具描述首行的「何时用」是首选路由信号；优先按它选择工具。`;
+
 export function buildServer(service, options = {}) {
-  const server = new McpServer({ name: 'mebular', version: APP_VERSION });
+  // McpServer(serverInfo, options)：instructions 必须放在第二参数，initialize/discover 才会下发。
+  const server = new McpServer({ name: 'mebular', version: APP_VERSION }, { instructions: MCP_INSTRUCTIONS });
   registerTools(server, service, options);
   server.registerPrompt(
     'memory_policy',

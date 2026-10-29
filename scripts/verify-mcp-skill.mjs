@@ -150,17 +150,32 @@ try {
     check('SETUP §3 status 不再用不存在的 --home 参数（改注 MEBULAR_HOME）',
       !/mebular status --home/.test(setup) && setup.includes('MEBULAR_HOME=<dir> mebular status'));
 
+    // ---------- App 运行态兜底：runtime.json + /healthz 优先于 CLI 探测 ----------
+    const s01ForRuntime = setup.slice(setup.indexOf('**0.1 幂等'), setup.indexOf('**0.2 无 home'));
+    const s01Blocks = [...s01ForRuntime.matchAll(/```bash\n([\s\S]*?)```/g)].map((m) => m[1]);
+    const runtimeBlock = s01Blocks.find((block) => block.includes('runtime.json')) ?? '';
+    const statusBlock = s01Blocks.find((block) => block.includes('config.json')) ?? '';
+    check('SETUP §0.1 先用 runtime.json + /healthz 判定 App/守护运行态（不依赖 CLI）',
+      runtimeBlock.includes('runtime.json') && runtimeBlock.includes('/healthz')
+        && runtimeBlock.includes('command -v mebular') === false
+        && /已在跑/.test(s01ForRuntime) && /不要安装第二套/.test(s01ForRuntime)
+        && setup.includes('失败不是安装理由'),
+      'runtime.json + healthz = 已在跑，直接用');
+    check('SETUP §0.1 保留 CLI 可用性分支：没有 runtime/healthz 且没有 CLI 才按 §2 安装',
+      s01ForRuntime.includes('CLI 可用性分支')
+        && statusBlock.includes('command -v mebular')
+        && /没有 runtime\/healthz 且没有 CLI → 按 §2 安装 CLI/.test(statusBlock),
+      'CLI 分支 + §2 兜底');
+
     // ---------- 修复轮 A/B/C（评审 3 处必改）----------
     // A（高）：§0.1 的 `mebular status` 必须在「home 存在」守卫内（无 home 照抄不得自举身份）
-    const s01 = setup.slice(setup.indexOf('**0.1 幂等'), setup.indexOf('**0.2 无 home'));
-    const s01Block = (s01.match(/```bash\n([\s\S]*?)```/) ?? [])[1] ?? '';
     check('A §0.1 的 `mebular status` 处于「home 存在」守卫内（if [ -f …config.json ] … then … else … fi）',
-      /if \[ -f "\$HOME_DIR\/config\.json" \]; then/.test(s01Block)
-        && /then[\s\S]*?mebular status[\s\S]*?else[\s\S]*?fi/.test(s01Block)
-        && (s01Block.match(/mebular status/g) ?? []).length === 1,
-      s01Block.includes('mebular status') ? '守卫内唯一一处 status' : '缺少 status');
+      /if \[ -f "\$HOME_DIR\/config\.json" \]; then/.test(statusBlock)
+        && /then[\s\S]*?mebular status[\s\S]*?else[\s\S]*?fi/.test(statusBlock)
+        && (statusBlock.match(/mebular status/g) ?? []).length === 1,
+      statusBlock.includes('mebular status') ? '守卫内唯一一处 status' : '缺少 status');
     check('A §0.1 守卫的 else 分支明确「无 home → §3/§5」且**不跑** status',
-      /else[\s\S]*?无 home → §3 建新 \/ §5 加入/.test(s01Block) && /不要在这里跑 status/.test(s01Block));
+      /else[\s\S]*?无 home → §3 建新 \/ §5 加入/.test(statusBlock) && /不要在这里跑 status/.test(statusBlock));
 
     // B（中）：§0.4 判据不得把 storeLock 列为 memory_status 的返回项，且须注明它来自 CLI status
     const s04 = setup.slice(setup.indexOf('**0.4 接入当前客户端'), setup.indexOf('**0.5 红线'));
@@ -194,6 +209,9 @@ try {
     // D（随行）：SKILL.md 接入第 1 步同样防滥用
     check('D SKILL.md 接入第 1 步注明「home 不存在时先按 SETUP §3/§5，不要跑 status」',
       /home 不存在时\*\*先按 SETUP §3\/§5/.test(skill) && /不要跑 `status`/.test(skill));
+    check('SKILL.md 接入第 1 步先查 runtime.json + /healthz（不把 App 运行态误判成未安装）',
+      /runtime\.json/.test(skill) && /\/healthz/.test(skill)
+        && /不要因为 `command -v mebular` 失败/.test(skill));
 
     // §0 与 SKILL 的互相引用
     check('SKILL.md 接入节含 print-config 与「会话里没有 Mebular 工具时的第一步」',

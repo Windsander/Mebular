@@ -32,16 +32,8 @@ if [ -f "$RUNTIME_FILE" ]; then
     echo "Mebular 已在跑（http://$HOST:$PORT），直接用；跳过 §2 CLI 安装，进入 §0.4 接入"
   fi
 fi
-```
 
-判定「守护已在跑」：`runtime.json` 存在且 `/healthz` 返回 200（App 内置 runtime、常驻服务、前台 `serve` 都写同一文件）→
-`RUNNING=1`，**直接使用**本机已有实例，不要重复 `install` 或再起 `serve`。**已在跑时，`command -v mebular` 失败不是安装理由。**
-
-**CLI 可用性分支**（只在 `RUNNING=0` 时执行；已在跑时跳过 §2）：
-
-```bash
-RUNNING="${RUNNING:-0}"
-HOME_DIR="${MEBULAR_HOME:-$HOME/.mebular}"
+# CLI 可用性分支：与上面的 RUNNING 在**同一 shell 块**内；RUNNING=1 时绝不进入 §2。
 if [ "$RUNNING" -eq 0 ]; then
   if command -v mebular >/dev/null 2>&1; then
     # 幂等判定**只在 home 已存在时**执行 status（无 home 时它会在默认 home 自举身份材料，见 0.2）
@@ -57,6 +49,10 @@ else
   echo "RUNNING=1：已在跑，跳过 CLI 安装/拉起，直接进入 §0.4 接入"
 fi
 ```
+
+判定「守护已在跑」：`runtime.json` 存在且 `/healthz` 返回 200（App 内置 runtime、常驻服务、前台 `serve` 都写同一文件）→
+`RUNNING=1`，**直接使用**本机已有实例，不要重复 `install` 或再起 `serve`。**已在跑时，`command -v mebular` 失败不是安装理由；
+上面的 CLI 分支在 `RUNNING=1` 时不会执行，直接进入 §0.4 接入。**
 
 判定 `status` 输出里 **`storeLock` 非 null**（形如 `{"pid":…,"startedAt":…,"storagePath":…}`）→
 **直接使用**本机已有实例，不要重复 `install` 或再起 `serve`。

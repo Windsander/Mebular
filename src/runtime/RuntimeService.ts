@@ -2872,5 +2872,3 @@ function isSelfRecord(value: unknown): value is SelfRecord {
     && Array.isArray(value.capabilities)
     && Array.isArray(value.boundaries);
 }
-
-

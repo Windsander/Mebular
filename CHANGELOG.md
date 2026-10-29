@@ -24,6 +24,7 @@ ship as `0.2.4`; no runtime protocol or data-format changes are included.
 
 - **Skill as a deployment artifact** — `connectClient`, App initialization, daemon startup, `mebular init`, and the `fleet --daemon` service path now ensure `mebular-memory` and `mebular-tasks` for detected clients. Installs include the `mcp/` fragments and a managed manifest.
 - **Settings · Common “Auto repair”** — one-click, confirmed repair of detected assistant MCP entries and Skills. Failures are reported per client with redacted, expandable details.
+- **All folder-based Agent targets** — OpenChamber/OpenCode, Hermes, Claude Code, Cursor and DeepSeek Harness each get their own detected global Skill directory; Claude Desktop remains a zip/UI upload flow.
 - **Agent routing hints** — all 29 MCP tools now start their descriptions with “何时用”, and the MCP server publishes global `instructions` for routing and memory/task discipline.
 - **SETUP runtime detection** — the agent playbook recognizes `runtime.json` + `/healthz` first, so an App runtime without a PATH CLI is not treated as uninstalled.
 
@@ -41,9 +42,8 @@ ship as `0.2.4`; no runtime protocol or data-format changes are included.
 ### Verified
 
 - PR #288 required checks: 8/8 passed, including Windows, build/test/lint, desktop smoke, WAN NAT, semantic recall, and real DSH E2E minimum/latest/Node 22.
-- Local gates: full Jest (excluding the known local 0.2.2 App port conflict), `verify:console`, `verify:mcp:skill`, `verify:onboarding`, `verify:daemon`, `check:i18n`, and `check:surface-parity`.
-- Packaging dry-run [run 40813530946](https://github.com/Windsander/Mebular/actions/runs/40813530946) passed: verify + 6 tarballs, macOS/Windows/Linux installers, and real DSH E2E minimum/latest/Node 22 minimum.
-- Packaged 0.2.4 runtime smoke in a temporary HOME installed `mebular-memory` and `mebular-tasks` successfully; the real user HOME was not modified.
+- PR #290 required checks: 8/8 passed; target matrix covers OpenChamber/OpenCode, Hermes, Claude Code, Cursor and DSH.
+- Local gates for the target matrix: `verify:mcp:skill`, `check:docs`, `check:i18n`, and the target-matrix Jest suites.
 
 ## [v0.2.3] - 2026-10-28
 

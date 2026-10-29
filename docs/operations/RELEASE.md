@@ -252,6 +252,20 @@ node apps/desktop/scripts/smoke-runtime.mjs --runtime "apps/desktop/dist/<unpack
 > 本机只能可靠构建当前平台。macOS Universal 必须在 macOS 上构建；Windows NSIS 在
 > Windows 上构建；Linux AppImage/deb 在 Linux 上构建。三平台由 CI matrix 负责。
 
+### 3.3 Agent adoption E2E gate
+
+发布前必须在真实客户端上验证 Agent **发现并使用** Mebular，而不仅是 Skill 文件存在。
+完整步骤、客户端矩阵和证据要求见 [`AGENT_ADOPTION_E2E.md`](AGENT_ADOPTION_E2E.md)。
+
+最低门禁：
+
+- [ ] OpenChamber/OpenCode：自动安装 Skill → 新会话实际调用 `memory_write` → 新会话
+      `memory_query` 召回 → 自动修复后仍可召回。
+- [ ] DSH：真实 DSH E2E 通过，并确认 `~/.agents/skills` 下的两个 Skill 可被加载/调用。
+- [ ] Hermes / Claude Code / Cursor / Claude Desktop：按本机可用客户端记录 smoke；
+      Claude Desktop 走 zip/UI，不声称文件夹自动安装。
+- [ ] 未跑客户端明确记录为 skipped，不能用“模型回答看起来正确”替代工具调用证据。
+
 ## 4. Packaging dry-run
 
 `workflow_dispatch` 跑 `verify` + `dsh-e2e` + 三平台 desktop matrix，上传 artifacts；**不**运行

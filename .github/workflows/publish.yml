@@ -13,6 +13,10 @@ name: Publish
 #
 # workflow_dispatch 是 packaging dry-run：跑 verify + dsh-e2e + desktop matrix 并上传 artifacts，
 # publish / publish-dsh / visibility / release 全部跳过；TAG 从根 package.json 版本生成。
+#
+# 签名开关：release 分支看仓库变量 SIGN_DESKTOP_RELEASE=true；workflow_dispatch 看输入 sign。
+# 签名构建走 electron-builder.signed.cjs，并在上传前校验签名；dry-run 勾选 sign 只构建不发布。
+# secret 清单与证书申请见 docs/operations/SIGNING.md。
 run-name: Publish ${{ github.ref_name }} · ${{ github.event_name == 'push' && 'release' || 'dry-run (no publish)' }}
 
 on:
@@ -20,6 +24,11 @@ on:
     branches:
       - 'release/v*'
   workflow_dispatch:
+    inputs:
+      sign:
+        description: 'dry-run 也执行签名（需先配置签名 secrets；仍不会发布 npm / Release）'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -39,6 +48,7 @@ jobs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
       mode: ${{ steps.version.outputs.mode }}
+      sign: ${{ steps.sign.outputs.sign }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -89,6 +99,28 @@ jobs:
             echo "::notice title=Packaging dry-run::$TAG · 只构建三平台安装包并上传 artifacts；不发布 npm、不创建 GitHub Release。"
           else
             echo "::notice title=Release::$TAG · 安装包全部通过后发布 npm，六包可见后上传 GitHub Release 资产。"
+          fi
+
+      - name: Resolve signing mode
+        id: sign
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REPO_SIGN: ${{ vars.SIGN_DESKTOP_RELEASE }}
+          DISPATCH_SIGN: ${{ github.event.inputs.sign }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "push" ]; then
+            SIGN="$REPO_SIGN"
+          else
+            SIGN="$DISPATCH_SIGN"
+          fi
+          if [ "$SIGN" = "true" ]; then
+            echo "sign=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Signing::本次构建执行签名（dry-run 不会发布 npm / Release）"
+          else
+            echo "sign=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Signing::本次构建为 unsigned"
           fi
 
       - name: Verify version SSOT (branch / 6 manifests / locks / MCP / CHANGELOG)
@@ -220,7 +252,9 @@ jobs:
     permissions:
       contents: read
     env:
-      # v0.1.2 明确 unsigned：即使 runner 钥匙串里有证书也不自动发现。
+      # 默认 unsigned；verify job 根据 SIGN_DESKTOP_RELEASE / workflow_dispatch.sign 决定是否签名。
+      # 签名配置/secret 清单见 docs/operations/SIGNING.md。
+      # 证书与公证 secret 只在签名相关步骤注入，不暴露给 npm ci / test 步骤。
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - name: Checkout
@@ -256,8 +290,63 @@ jobs:
       - name: Runtime smoke (tarball install)
         run: npm --prefix apps/desktop run smoke:runtime
 
-      - name: Build macOS universal DMG (unsigned)
+      # App Store Connect API Key：secret 存 .p8 内容，这里落成文件再把路径交给 notarytool。
+      - name: Prepare App Store Connect API key (signed builds)
+        if: needs.verify.outputs.sign == 'true'
+        shell: bash
+        env:
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APPLE_API_KEY_P8:-}" ]; then
+            echo "未配置 APPLE_API_KEY_P8：若使用 Apple ID + 专用密码公证，可忽略这一步"
+            exit 0
+          fi
+          if [ -z "${APPLE_API_KEY_ID:-}" ] || [ -z "${APPLE_API_ISSUER:-}" ]; then
+            echo "::error::APPLE_API_KEY_P8 已配置，但缺少 APPLE_API_KEY_ID / APPLE_API_ISSUER"
+            exit 1
+          fi
+          KEY="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_KEY_P8" > "$KEY"
+          chmod 600 "$KEY"
+          echo "APPLE_API_KEY=$KEY" >> "$GITHUB_ENV"
+          echo "已写入 App Store Connect API Key：$KEY"
+
+      - name: Check macOS signing environment (signed builds)
+        if: needs.verify.outputs.sign == 'true'
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MEBULAR_MAC_IDENTITY: ${{ secrets.MAC_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: node apps/desktop/scripts/check-signing-env.mjs --platform mac
+
+      - name: Build macOS universal DMG (signed)
+        if: needs.verify.outputs.sign == 'true'
+        env:
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          MEBULAR_MAC_IDENTITY: ${{ secrets.MAC_IDENTITY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm --prefix apps/desktop run dist:mac:signed
+
+      - name: Build macOS universal DMG (unsigned dry-run)
+        if: needs.verify.outputs.sign != 'true'
         run: npm --prefix apps/desktop run dist:mac
+
+      - name: Verify macOS signature + notarization (signed builds)
+        if: needs.verify.outputs.sign == 'true'
+        run: node apps/desktop/scripts/verify-signature.mjs --platform mac
 
       - name: Packaged runtime smoke (Mebular.app resources)
         shell: bash
@@ -285,10 +374,12 @@ jobs:
     name: desktop Windows NSIS x64
     needs: verify
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: read
     env:
+      # 默认 unsigned；verify job 根据 SIGN_DESKTOP_RELEASE / workflow_dispatch.sign 决定是否签名。
+      # 签名 secret 只在预检与签名构建步骤注入。
       CSC_IDENTITY_AUTO_DISCOVERY: 'false'
     steps:
       - name: Checkout
@@ -324,8 +415,39 @@ jobs:
       - name: Runtime smoke (tarball install)
         run: npm --prefix apps/desktop run smoke:runtime
 
-      - name: Build Windows NSIS x64 (unsigned)
+      - name: Check Windows signing environment (signed builds)
+        if: needs.verify.outputs.sign == 'true'
+        env:
+          MEBULAR_WIN_PUBLISHER: ${{ secrets.WIN_PUBLISHER }}
+          MEBULAR_WIN_ENDPOINT: ${{ secrets.WIN_ENDPOINT }}
+          MEBULAR_WIN_CERT_PROFILE: ${{ secrets.WIN_CERT_PROFILE }}
+          MEBULAR_WIN_SIGN_ACCOUNT: ${{ secrets.WIN_SIGN_ACCOUNT }}
+          MEBULAR_WIN_SIGN_HOOK: ${{ secrets.WIN_SIGN_HOOK }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: node apps/desktop/scripts/check-signing-env.mjs --platform win
+
+      - name: Build Windows NSIS x64 (signed)
+        if: needs.verify.outputs.sign == 'true'
+        env:
+          MEBULAR_WIN_PUBLISHER: ${{ secrets.WIN_PUBLISHER }}
+          MEBULAR_WIN_ENDPOINT: ${{ secrets.WIN_ENDPOINT }}
+          MEBULAR_WIN_CERT_PROFILE: ${{ secrets.WIN_CERT_PROFILE }}
+          MEBULAR_WIN_SIGN_ACCOUNT: ${{ secrets.WIN_SIGN_ACCOUNT }}
+          MEBULAR_WIN_SIGN_HOOK: ${{ secrets.WIN_SIGN_HOOK }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+        run: npm --prefix apps/desktop run dist:win:signed
+
+      - name: Build Windows NSIS x64 (unsigned dry-run)
+        if: needs.verify.outputs.sign != 'true'
         run: npm --prefix apps/desktop run dist:win
+
+      - name: Verify Windows Authenticode signature (signed builds)
+        if: needs.verify.outputs.sign == 'true'
+        run: node apps/desktop/scripts/verify-signature.mjs --platform win
 
       - name: Packaged runtime smoke (win-unpacked resources)
         shell: pwsh

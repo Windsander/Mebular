@@ -1,8 +1,9 @@
 # Mebular 桌面 App（apps/desktop）
 
-> v0.2.4：**壳 + 守护托管 + 内嵌控制台 + 发布 tarball 运行时 + 三平台 unsigned 安装包**。
-> 安装包 runtime 来自与 npm 发布同一批 verify tarball；签名、公证与自动更新留到后续版本。
-> 发布操作见 [`docs/operations/DESKTOP_RELEASE.md`](../../docs/operations/DESKTOP_RELEASE.md)。
+> v0.2.4：**壳 + 守护托管 + 内嵌控制台 + 发布 tarball 运行时 + 三平台安装包（默认 unsigned）**。
+> 安装包 runtime 来自与 npm 发布同一批 verify tarball；签名/公证通道已接好
+> （[`SIGNING.md`](../../docs/operations/SIGNING.md)），自动更新留到后续版本。
+> 发布操作见 [`DESKTOP_RELEASE.md`](../../docs/operations/DESKTOP_RELEASE.md)。
 
 ## 这是什么
 
@@ -32,7 +33,7 @@ npm run dev -- --home ~/.mebular --port 7331   # 透传参数（可选）
 npm run smoke                     # 无 GUI 有界冒烟（CI 用）
 ```
 
-## 安装包（v0.2.4，unsigned）
+## 安装包（v0.2.4，默认 unsigned；可切换签名）
 
 安装包里的 Mebular 运行时**不来自仓库源码目录**，而是先用 `npm pack` 产出五个发布
 tarball，再由 `prepare-runtime` 一次性 `npm install --omit=dev --ignore-scripts` 到
@@ -54,9 +55,15 @@ npm --prefix apps/desktop run smoke:runtime     # 从 runtime 起 serve，校验
 npm --prefix apps/desktop run dist:dir          # runtime → prepare-build → electron-builder --dir
 
 # 三平台 target（本机只构建当前平台；正式三平台由 CI matrix 构建）
-npm --prefix apps/desktop run dist:mac          # DMG（universal）
-npm --prefix apps/desktop run dist:win          # NSIS（x64）
+npm --prefix apps/desktop run dist:mac          # DMG（universal，unsigned）
+npm --prefix apps/desktop run dist:win          # NSIS（x64，unsigned）
 npm --prefix apps/desktop run dist:linux        # AppImage + deb（x64）
+
+# 签名构建（需要证书/公证凭据，见 docs/operations/SIGNING.md）
+npm --prefix apps/desktop run dist:mac:signed
+npm --prefix apps/desktop run dist:win:signed
+npm --prefix apps/desktop run verify:signature -- --platform mac
+npm --prefix apps/desktop run verify:signature -- --platform win
 ```
 
 发布资产名：
@@ -75,10 +82,11 @@ node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/win-unpa
 node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/linux-unpacked/resources
 ```
 
-> v0.2.4 产物**未签名、未公证**：macOS Gatekeeper 要求右键 → 打开（或系统设置 → 隐私与
+> 默认产物**未签名、未公证**：macOS Gatekeeper 要求右键 → 打开（或系统设置 → 隐私与
 > 安全性 → 仍要打开），Windows SmartScreen 要求「更多信息 → 仍要运行」。发布前先用
-> Release 的 `SHA256SUMS.txt` 校验。签名、公证与自动更新留到后续版本；完整说明见
-> [`docs/operations/DESKTOP_RELEASE.md`](../../docs/operations/DESKTOP_RELEASE.md)。
+> Release 的 `SHA256SUMS.txt` 校验。启用签名（`dist:*:signed` 或
+> `SIGN_DESKTOP_RELEASE=true`）后这些绕过步骤不再需要；证书申请、CI secrets 与校验见
+> [`SIGNING.md`](../../docs/operations/SIGNING.md)。自动更新留到后续版本。
 
 ## 守护托管（两条路径，默认优先服务）
 

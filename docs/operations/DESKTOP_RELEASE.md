@@ -12,11 +12,13 @@
 | Linux | AppImage | x64 | `Mebular-0.2.4-x86_64.AppImage` |
 | Linux | deb | x64 | `Mebular-0.2.4-amd64.deb` |
 
-- 全部为 **unsigned** 发布；不做代码签名、公证或自动更新。
+- 默认仍为 **unsigned** 发布；正式 release 可通过仓库变量 `SIGN_DESKTOP_RELEASE=true`
+  切换到签名/公证构建（见 [`SIGNING.md`](SIGNING.md)）。
 - 每个安装包都自带 Electron 和一份完整的 Mebular runtime，**不需要本机 Node.js**，也不依赖
   仓库源码目录。
 - GitHub Release 同时提供 `SHA256SUMS.txt`，覆盖上面 4 个安装包。
-- 签名、公证、Windows Authenticode 与自动更新留到后续版本（见第 6 节）。
+- 签名、公证、Windows Authenticode 的工程接入已完成，证书与 secrets 到位即可启用；
+  自动更新仍留到后续版本（见第 6 节）。
 
 ## 1. runtime 架构
 
@@ -136,9 +138,15 @@ node apps/desktop/scripts/smoke-runtime.mjs \
 
 ```bash
 npm --prefix apps/desktop run dist:dir     # 当前平台，解包目录，用于本地验收
-npm --prefix apps/desktop run dist:mac     # macOS Universal DMG
-npm --prefix apps/desktop run dist:win     # Windows NSIS x64
+npm --prefix apps/desktop run dist:mac     # macOS Universal DMG（unsigned）
+npm --prefix apps/desktop run dist:win     # Windows NSIS x64（unsigned）
 npm --prefix apps/desktop run dist:linux   # Linux AppImage + deb x64
+
+# 签名发布（需要证书与公证凭据；见 SIGNING.md）
+npm --prefix apps/desktop run dist:mac:signed
+npm --prefix apps/desktop run dist:win:signed
+node apps/desktop/scripts/verify-signature.mjs --platform mac
+node apps/desktop/scripts/verify-signature.mjs --platform win
 ```
 
 每个 `dist:*` 都会重新执行 `prepare-runtime` 和 `prepare-build`，再调用 electron-builder。
@@ -174,10 +182,11 @@ electron-builder 的 `artifactName` 固定为：
 
 dry-run 不会生成这个文件；它只在正式 `release` job 创建 GitHub Release 时产生。
 
-## 4. unsigned 安装体验
+## 4. unsigned 安装体验（默认）
 
-v0.2.4 没有 Apple Developer ID、公证或 Windows 代码签名证书。用户会看到系统安全提示，
-这是预期行为，不是安装包损坏。
+默认产物没有 Apple Developer ID、公证或 Windows 代码签名证书。用户会看到系统安全提示，
+这是预期行为，不是安装包损坏。启用签名（`SIGN_DESKTOP_RELEASE=true`）后，下面的绕过步骤
+不再需要；签名与公证的接入见 [`SIGNING.md`](SIGNING.md)。
 
 ### 4.1 先校验
 
@@ -225,6 +234,7 @@ AppImage 需要 FUSE；没有 FUSE 时可使用 `--appimage-extract-and-run`。d
 | verify（6 tarballs） | ✅ | ✅ |
 | preflight（npm whoami） | ❌ | ✅ |
 | desktop matrix（三平台） | ✅ | ✅ |
+| 签名 / 公证（可选） | 勾选 `sign` 时 ✅ | 仓库变量 `SIGN_DESKTOP_RELEASE=true` 时 ✅ |
 | npm publish（5 + 1） | ❌ | ✅ |
 | npm visibility gate（6 包 + latest） | ❌ | ✅ |
 | GitHub Release + 资产 | ❌ | ✅ |
@@ -257,19 +267,22 @@ node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/win-unpa
 node apps/desktop/scripts/smoke-runtime.mjs --runtime apps/desktop/dist/linux-unpacked/resources
 ```
 
-## 6. 签名、公证与自动更新（后续）
+## 6. 签名、公证与自动更新
 
-v0.2.4 明确不签名。后续版本的建议顺序：
+签名通道已接好，证书申请、GitHub secrets、签名后校验与包管理器上架见
+[`SIGNING.md`](SIGNING.md)。
 
-1. **macOS**：申请 Developer ID Application 证书；在 CI 注入 `CSC_LINK` /
-   `CSC_KEY_PASSWORD`，移除 `electron-builder.yml` 的 `identity: null`；用
-   `notarytool` 公证 DMG 并 staple；验证 `spctl -a -vv` 与
-   `codesign --verify --deep --strict`。
-2. **Windows**：使用 Authenticode 证书（或云签名服务）签 NSIS 安装包与可执行文件；在 CI
-   注入 `CSC_LINK` / `CSC_KEY_PASSWORD`；验证 `signtool verify /pa`。
-3. **自动更新**：单独设计更新源、签名校验、回滚与灰度；不要和首次签名混在同一次发布里。
-4. **文档**：签名落地后更新本文件、`CHANGELOG.md` 与 Release notes，删除 unsigned 绕过
-   步骤；在证书与 CI 验证完成前，不要对外写「已签名 / 已公证」。
+- **默认 unsigned**：`electron-builder.yml` 的 `identity: null` 保持不变，本地 `dist:*` 不会
+  因为钥匙串里有证书而意外签名。
+- **签名构建**：`dist:mac:signed` / `dist:win:signed` 使用
+  `electron-builder.signed.cjs`，开启 `forceCodeSigning`，并在构建后跑
+  `verify-signature.mjs`；证书/公证失败即 job 失败。
+- **macOS**：Developer ID Application + hardened runtime + entitlements + `notarytool`，
+  公证后 staple；CI 用 `verify-signature.mjs` 校验 `codesign` / `spctl` / `stapler`。
+- **Windows**：Azure Artifact Signing（`azureSignOptions`）或自定义
+  `MEBULAR_WIN_SIGN_HOOK`；CI 用 `Get-AuthenticodeSignature` 校验。
+- **自动更新**：仍是后续独立设计（更新源、签名校验、回滚、灰度），不要和首次签名混在
+  同一次发布里。
 
 当前 `electron-builder.yml` 仍设置 `publish: null`，安装包不会自行上传或检查更新；发布资产
 完全由 `publish.yml` 的 `release` job 管理。
@@ -282,7 +295,9 @@ v0.2.4 明确不签名。后续版本的建议顺序：
 | `找到多个 ... tarball，无法确定使用哪一个` | `release-pack` 混入了旧版本；清空后重新 pack。 |
 | `apps/desktop/package.json 版本 ... 不一致` | 桌面版本未随 lockstep 更新；跑 `bump_version.sh` 或手工同步后重试。 |
 | `runtime 缺少必需文件` | 根包 `files` 或构建产物不完整；先 `npm run build`，再重新 pack。 |
-| `dist:mac` 失败并提示架构 / 证书 | Universal 只能在 macOS 构建；`identity: null` 下不应要求证书。 |
+| `dist:mac` 失败并提示架构 / 证书 | Universal 只能在 macOS 构建；`dist:mac` 是 unsigned，签名请用 `dist:mac:signed` 并配好证书。 |
+| `缺少 MEBULAR_MAC_IDENTITY` / 公证凭据 | 按 [`SIGNING.md`](SIGNING.md) 配置 secrets；CI 在构建前会预检并一次列出所有缺失项。 |
+| `spctl` 显示 `Unnotarized Developer ID` | 公证失败或未 staple；查 `notarytool log`，不要继续发版。 |
 | packaged smoke 找不到 `Resources` | 查看 `apps/desktop/dist/` 实际目录；不同 electron-builder 版本的解包目录名可能不同。 |
 | macOS 提示「已损坏，无法打开」 | 这通常是 Gatekeeper 对未签名包的处理；按 4.2 右键打开，并先确认 checksum。不要关闭全局安全策略。 |
 | Windows 安装被 SmartScreen 拦截 | 按 4.3「更多信息 → 仍要运行」；企业环境可能另有策略，需管理员放行。 |
@@ -291,6 +306,7 @@ v0.2.4 明确不签名。后续版本的建议顺序：
 ## 8. 相关文档
 
 - 发布总流程：[`RELEASE.md`](RELEASE.md)
+- 签名与包管理器分发：[`SIGNING.md`](SIGNING.md)
 - 桌面开发与守护托管：[`apps/desktop/README.md`](../../apps/desktop/README.md)
 - 架构与交付面：[`docs/architecture/ARCHITECT.md`](../architecture/ARCHITECT.md)
 - 已知限制：[`docs/limitations/LIMITATIONS.md`](../limitations/LIMITATIONS.md)

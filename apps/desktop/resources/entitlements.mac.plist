@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Developer ID 直装（非 Mac App Store）的 hardened runtime entitlements。
+
+    allow-jit / allow-unsigned-executable-memory：Electron 的 V8 需要。
+    disable-library-validation：应用允许从 <resources>/node_modules 加载第三方运行时；
+    其中若有未与主程序同一 Team ID 签名的 .node 原生模块，开启 library validation 会直接
+    导致进程启动失败。Mebular 的 runtime 由 npm 安装、可独立升级，因此这里显式关闭校验。
+  -->
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

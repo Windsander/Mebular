@@ -452,6 +452,9 @@ describe('CL-09 · switch.intent.json 崩溃恢复', () => {
       fetchImpl: makeFetcher({ root, defaultHome, p2Home, running }),
       spawnFn: () => { throw new Error('old is healthy; should not start'); },
       service: noService(), serviceHome: '/os-home', pidAlive: () => false,
+      // 目标不健康必须快速回旧；不要等默认约 3s 的 target probe 与 Jest 5s 总超时踩线。
+      verifyTimeoutMs: 50,
+      verifyIntervalMs: 5,
     });
     expect(result).toMatchObject({ recovered: true, status: 'rolled_back', current: 'default', home: defaultHome });
     expect((await profiles.readRegistry(root)).registry.current).toBe('default');

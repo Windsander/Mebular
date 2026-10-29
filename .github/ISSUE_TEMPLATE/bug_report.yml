@@ -1,0 +1,86 @@
+name: 🐞 Bug report / Bug 反馈
+description: Report a reproducible problem / 反馈一个可复现的问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Mebular. Please use English or Chinese, whichever is clearer for you.
+        感谢反馈！可使用中文或英文。安全漏洞请使用右侧的私密报告入口，不要在公开 Issue 中披露。
+
+  - type: input
+    id: version
+    attributes:
+      label: Mebular version / Mebular 版本
+      description: Release, commit SHA, or local branch / 发布版本、commit SHA 或本地分支
+      placeholder: "v0.2.3 or 04f39ff"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component / 受影响组件
+      options:
+        - Memory / MCP
+        - Sync / P2P
+        - Tasks / Fleet
+        - Console
+        - Desktop
+        - Documentation / 文档
+        - Other / 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: current_behavior
+    attributes:
+      label: Current behavior / 当前行为
+      description: What actually happened? / 实际发生了什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior / 预期行为
+      description: What did you expect instead? / 你原本预期什么结果？
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce / 复现步骤
+      description: Provide the smallest reliable reproduction you can / 请尽量提供最小且稳定的复现步骤
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment / 运行环境
+      description: OS, Node.js version, client/device, and relevant configuration / 操作系统、Node.js 版本、客户端/设备及关键配置
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots / 日志或截图
+      description: Redact tokens, keys, private memory, and personal data / 请移除令牌、密钥、私密记忆和个人数据
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting / 提交前确认
+      options:
+        - label: I searched existing Issues and Discussions / 我已搜索现有 Issue 和 Discussion
+          required: true
+        - label: This report contains no secrets or unredacted private data / 本反馈不含密钥或未脱敏的私密数据
+          required: true

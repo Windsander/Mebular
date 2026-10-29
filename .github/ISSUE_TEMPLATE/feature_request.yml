@@ -1,0 +1,64 @@
+name: ✨ Feature request / 功能建议
+description: Propose a concrete improvement / 提议一项明确的改进
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please describe the problem before the solution. Early or exploratory ideas are also welcome in Discussions → Ideas.
+        请先说明要解决的问题，再描述方案；早期或探索性想法也欢迎发到 Discussions 的 Ideas 分类。
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area / 涉及领域
+      options:
+        - Memory / MCP
+        - Sync / P2P
+        - Tasks / Fleet
+        - Console
+        - Desktop
+        - Documentation / 文档
+        - Developer experience / 开发体验
+        - Other / 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and use case / 问题与使用场景
+      description: What are you trying to accomplish, and what is blocking it? / 你想完成什么？目前遇到了什么阻碍？
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change / 建议方案
+      description: Describe the behavior you would like to see / 请描述希望看到的行为或能力
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered / 已考虑的替代方案
+      description: Other approaches, workarounds, or reasons not to add this / 其他做法、临时方案，或不应加入该能力的理由
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: Compatibility, privacy, or migration impact / 兼容性、隐私或迁移影响
+      description: Note any API, stored-data, permission, security, or cross-device impact / 请说明 API、存量数据、权限、安全或跨设备影响；没有可写“无”
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting / 提交前确认
+      options:
+        - label: I searched existing Issues and Discussions / 我已搜索现有 Issue 和 Discussion
+          required: true
+        - label: I understand that API and feature decisions may require discussion before a PR / 我理解 API 与功能决策可能需要先讨论再提交 PR
+          required: true

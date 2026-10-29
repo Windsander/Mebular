@@ -1,7 +1,8 @@
 # Mebular 桌面 App · 打包配置
 #
 # R1：安装包运行时来自发布 tarball（apps/desktop/runtime，由 prepare-runtime 安装），
-# 不再复制仓库 dist / packages 源码。签名、公证、自动更新留给 R2/R6。
+# 不再复制仓库 dist / packages 源码。签名通道见 electron-builder.signed.cjs，
+# 自动更新留给 R6。
 appId: com.mebular.desktop
 productName: Mebular
 copyright: Copyright © 2026 Sobert Li (Windsander)
@@ -28,8 +29,9 @@ mac:
   target: [dmg]
   category: public.app-category.productivity
   artifactName: Mebular-${version}-${arch}.${ext}
-  # R1 明确不签名（即使本机钥匙串里有 Apple Development 证书也不自动发现）；
-  # R2 接入 CSC_LINK / APPLE_* 时移除此项并做条件签名。
+  # 默认 unsigned：即使本机钥匙串里有 Apple Development 证书也不自动发现。
+  # 签名发布走 electron-builder.signed.cjs（显式 identity + entitlements + notarize），
+  # 不要直接改这里，避免本地 dist:* 意外签名。
   identity: null
 win:
   target: [nsis]
@@ -45,5 +47,5 @@ linux:
   # .desktop 文件名对齐 package.json desktopName（Electron app_id / WM_CLASS）。
   syncDesktopName: true
   artifactName: Mebular-${version}-${arch}.${ext}
-# R1 不做：签名/公证/发布/自动更新（R2/R6 处理）
+# 发布/自动更新不在打包配置里做（R6）；签名发布见 electron-builder.signed.cjs。
 publish: null

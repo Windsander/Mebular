@@ -24,7 +24,10 @@
     "dist:dir": "node scripts/prepare-runtime.mjs && node scripts/prepare-build.mjs && electron-builder --config electron-builder.yml --dir --publish never",
     "dist:mac": "node scripts/prepare-runtime.mjs && node scripts/prepare-build.mjs && electron-builder --config electron-builder.yml --mac --universal --publish never",
     "dist:win": "node scripts/prepare-runtime.mjs && node scripts/prepare-build.mjs && electron-builder --config electron-builder.yml --win --x64 --publish never",
-    "dist:linux": "node scripts/prepare-runtime.mjs && node scripts/prepare-build.mjs && electron-builder --config electron-builder.yml --linux --x64 --publish never"
+    "dist:linux": "node scripts/prepare-runtime.mjs && node scripts/prepare-build.mjs && electron-builder --config electron-builder.yml --linux --x64 --publish never",
+    "dist:mac:signed": "node scripts/check-signing-env.mjs --platform mac && node scripts/prepare-runtime.mjs && node scripts/prepare-build.mjs && electron-builder --config electron-builder.signed.cjs --mac --universal --publish never",
+    "dist:win:signed": "node scripts/check-signing-env.mjs --platform win && node scripts/prepare-runtime.mjs && node scripts/prepare-build.mjs && electron-builder --config electron-builder.signed.cjs --win --x64 --publish never",
+    "verify:signature": "node scripts/verify-signature.mjs"
   },
   "devDependencies": {
     "electron": "42.11.18",

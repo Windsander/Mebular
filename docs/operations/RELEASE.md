@@ -6,7 +6,8 @@
 当前发布线 v0.2.4：
 
 - 6 个 npm 包统一为 `0.2.4`（单版本 umbrella：`core` / `service` / `skill` / `mcp` / `fleet` / `dsh-plugin`）；
-- macOS Universal DMG、Windows NSIS x64、Linux AppImage + deb x64（unsigned）；
+- macOS Universal DMG、Windows NSIS x64、Linux AppImage + deb x64（默认 unsigned；
+  正式 release 可通过 `SIGN_DESKTOP_RELEASE=true` 启用签名）；
 - `SHA256SUMS.txt`（仅 GitHub Release 资产生成）。
 
 从 v0.2.0 起，`@mebular/dsh-plugin` 仍由独立 npm job 发布，但版本号随统一 release train bump，
@@ -51,6 +52,10 @@
 | `Mebular-<version>-x86_64.AppImage` | `desktop-linux` | Linux x64，unsigned |
 | `Mebular-<version>-amd64.deb` | `desktop-linux` | Debian/Ubuntu x64，unsigned |
 | `SHA256SUMS.txt` | `release` job | 只覆盖 4 个安装包，按文件名排序 |
+
+> 默认 unsigned；设置仓库变量 `SIGN_DESKTOP_RELEASE=true` 后，正式 release 的 macOS /
+> Windows job 走签名/公证配置。证书申请、secrets 与签名后校验见
+> [`SIGNING.md`](SIGNING.md)。
 
 ## 1. 一次性前置清单
 
@@ -411,8 +416,9 @@ Get-Content SHA256SUMS.txt | ForEach-Object {
 - 文件名与第 0.1 节一致；没有额外平台包或调试产物；
 - macOS 打开 DMG 后能启动；Windows NSIS 能安装并启动；Linux AppImage 可执行，deb 可安装；
 - 首次启动能进入锁定控制台，`/healthz` 正常；
-- 全部为 **unsigned** 发布：macOS Gatekeeper 与 Windows SmartScreen 会拦截，按 Release
-  notes 的绕过步骤操作。签名、公证与自动更新不在 v0.2.4 范围。
+- 默认 **unsigned**：macOS Gatekeeper 与 Windows SmartScreen 会拦截，按 Release notes 的
+  绕过步骤操作。启用 `SIGN_DESKTOP_RELEASE=true` 后走签名/公证构建，绕过步骤不再需要；
+  接入方式见 [`SIGNING.md`](SIGNING.md)。自动更新不在当前范围。
 
 安装包内的 runtime 结构、本地打包与签名后续见
 [`DESKTOP_RELEASE.md`](DESKTOP_RELEASE.md)。
@@ -570,12 +576,12 @@ git push -u origin release/v0.1.0
    第二套控制台；daemon 地址由 host 按 `daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331`
    在运行时发现，MCP client 也由 host 动态挂载。`@mebular/dsh-plugin` 独立版本 `0.1.0`，
    不进入五包 lockstep。
-8. **桌面安装包**：macOS Universal DMG、Windows NSIS x64、Linux AppImage + deb x64；全部
-   unsigned，首次打开按 Gatekeeper / SmartScreen 步骤绕过；安装前先核对 `SHA256SUMS.txt`。
-   安装包 runtime 来自同一批 verify tarball，自带 Electron，不需要本机 Node.js。
+8. **桌面安装包**：macOS Universal DMG、Windows NSIS x64、Linux AppImage + deb x64；默认
+   unsigned，首次打开按 Gatekeeper / SmartScreen 步骤绕过；启用签名后不再需要。安装前先核对
+   `SHA256SUMS.txt`。安装包 runtime 来自同一批 verify tarball，自带 Electron，不需要本机 Node.js。
 
 不要把「自动重启」「去写入初始设置」写回发布说明，也不要把 `@mebular/mcp` 说成自带 `fleet`，
-或把 unsigned 安装包写成已签名。
+或把 unsigned 安装包写成已签名；只有 `verify-signature` 通过后才能对外写「已签名 / 已公证」。
 
 ## 10. 发布前验证记录
 
@@ -610,8 +616,9 @@ git push -u origin release/v0.1.0
 
 ### 10.1 已知问题（不阻塞 0.1.0）
 
-- **桌面安装包为 unsigned 首发**：macOS 未签名 / 未公证，Windows 未签名；Gatekeeper 与
-  SmartScreen 会提示，按 Release notes 绕过。签名、公证与自动更新留到后续版本。
+- **桌面安装包默认 unsigned**：macOS 未签名 / 未公证，Windows 未签名；Gatekeeper 与
+  SmartScreen 会提示，按 Release notes 绕过。签名/公证通道已接好（[`SIGNING.md`](SIGNING.md)），
+  配置证书与 secrets 后启用；自动更新仍留到后续版本。
 - `mebular init` 的“下一步”提示仍使用仓库相对路径（`node packages/.../mebular.mjs`），对
   `npm install -g` 用户不适用；当前 README / QUICKSTART 的首次运行已改为 `mebular serve` +
   锁定控制台，不再依赖该提示。

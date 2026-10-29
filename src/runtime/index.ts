@@ -82,6 +82,25 @@ export {
   type RuntimeSyncStatus,
 } from './RuntimeService.js';
 export {
+  RUNTIME_CANDIDATE_SCHEMA,
+  createRuntimeModelRuntime,
+  type RuntimeModelApiProbe,
+  type RuntimeModelCredentialStatus,
+  type RuntimeModelEngine,
+  type RuntimeModelEngineConnection,
+  type RuntimeModelExtractionRequest,
+  type RuntimeModelExtractionResult,
+  type RuntimeModelGateway,
+  type RuntimeModelLocalProbe,
+  type RuntimeModelProbe,
+  type RuntimeModelQueryPlanRequest,
+  type RuntimeModelQueryPlanResult,
+  type RuntimeModelRuntime,
+  type RuntimeModelRuntimeOptions,
+  type RuntimeModelSummaryRequest,
+  type RuntimeModelSummaryResult,
+} from './model.js';
+export {
   RuntimeCheckpointStore,
   RuntimeStateStore,
   readJsonFile,

@@ -355,6 +355,9 @@ export function createRuntimeHttpHandler({
         if (!payload) return true;
         const result = await service.ingest(payload);
         const status = result?.extraction?.status === 'pending' ? 202 : 200;
+        res.setHeader('x-mebular-degraded', String(
+          result?.degraded === true || result?.extraction?.degraded === true,
+        ));
         rememberIdempotent(key, result, result?.warnings ?? [], status);
         return sendOk(result, result?.warnings ?? [], status);
       }
@@ -380,6 +383,7 @@ export function createRuntimeHttpHandler({
             return sendError(400, 'invalid_request', '需要 { candidates: CandidateRecord[] }');
           }
           const result = await service.completeExtraction(id, payload.candidates);
+          res.setHeader('x-mebular-degraded', String(result?.degraded === true));
           rememberIdempotent(key, result, result.warnings ?? []);
           return sendOk(result, result.warnings ?? []);
         }
@@ -455,6 +459,7 @@ export function createRuntimeHttpHandler({
         const payload = requireBodyObject();
         if (!payload) return true;
         const result = await service.compact(payload);
+        res.setHeader('x-mebular-degraded', String(result?.degraded === true));
         rememberIdempotent(key, result, result?.warnings ?? []);
         return sendOk(result, result?.warnings ?? []);
       }

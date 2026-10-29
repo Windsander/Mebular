@@ -12,7 +12,8 @@
 //   - self（默认云节点，按 revision/updatedAt/id 取最大）
 //   - trace / feedback（本地 JSONL，环形保留）
 //
-// 所有模型来源均为 heuristic；不联网、不调用宿主模型。
+// 模型来源：默认 heuristic；local/api 由 model.ts 通过 inference 原语接入，
+// host 只接受宿主提交的候选；任何模型失败都回退 heuristic，不自动换供应商。
 
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -39,6 +40,14 @@ import {
 } from './local-store.js';
 import { RuntimeCheckpointStore, RuntimeStateStore } from './state-store.js';
 import { createCompactNode, createContextCheckpointNode, createSelfRecordNode, toRuntimeObjectView } from './graph.js';
+import {
+  createRuntimeModelRuntime,
+  type RuntimeModelExtractionResult,
+  type RuntimeModelProbe,
+  type RuntimeModelQueryPlanResult,
+  type RuntimeModelRuntime,
+  type RuntimeModelSummaryResult,
+} from './model.js';
 import { normalizeRuntimeSettings, type RuntimeSettings } from './config.js';
 import {
   RUNTIME_MODES,
@@ -104,6 +113,8 @@ export interface RuntimeServiceOptions {
   checkpointStore?: RuntimeCheckpointStore;
   stateStore?: RuntimeStateStore;
   memoryService?: MemoryService;
+  /** 可选：模型源实现（测试/宿主可注入；缺省按 runtime.model.* 构造）。 */
+  modelRuntime?: RuntimeModelRuntime;
   /** 可选：模式切换后的持久化钩子（HTTP 路由默认用原子写 config.json） */
   persistMode?: (mode: RuntimeMode) => Promise<void> | void;
 }
@@ -135,6 +146,8 @@ export interface RuntimeModelStatus {
   degraded: boolean;
   reason: string | null;
   credential: { configured: boolean; source: 'env' | 'keychain' | 'file' | null };
+  /** 面向用户/诊断的模型 warning 码；不含密钥、endpoint 响应体或 raw 文本。 */
+  warnings: string[];
 }
 
 export interface RuntimeCounts {
@@ -204,6 +217,8 @@ export interface RuntimeExtractionView {
   model?: string;
   records: RuntimeIngestRecord[];
   warnings: string[];
+  /** 模型失败/未配置而回退 heuristic 时为 true；pending 不是 degraded。 */
+  degraded: boolean;
   expiresAt?: number;
 }
 
@@ -213,6 +228,8 @@ export interface RuntimeIngestResult {
   records: RuntimeIngestRecord[];
   extraction: RuntimeExtractionView;
   duplicate: boolean;
+  /** 顶层便捷标记；与 extraction.degraded 一致。 */
+  degraded: boolean;
   warnings: string[];
 }
 
@@ -314,6 +331,8 @@ export interface RuntimeCompactResult {
   tokenCount: number;
   stale: boolean;
   duplicate?: boolean;
+  /** 模型摘要失败而使用确定性回退时为 true。 */
+  degraded: boolean;
   warnings: string[];
 }
 
@@ -387,6 +406,7 @@ interface StoredExtraction {
   model?: string;
   records: RuntimeIngestRecord[];
   warnings: string[];
+  degraded?: boolean;
   expiresAt: number;
   createdAt: number;
   agentId: string;
@@ -406,6 +426,7 @@ interface CandidateContext {
   source: 'host' | 'runtime';
   extractor: RuntimeExtractor;
   model?: string;
+  degraded?: boolean;
   messageIds: string[];
 }
 
@@ -427,6 +448,7 @@ export class RuntimeService {
   private readonly localStore: RuntimeLocalStore | null;
   private readonly stateStore: RuntimeStateStore | null;
   private readonly checkpointStore: RuntimeCheckpointStore | null;
+  private readonly models: RuntimeModelRuntime;
   private readonly memory: MemoryService;
   private readonly version: string;
   private readonly cloudId: string | null;
@@ -440,6 +462,15 @@ export class RuntimeService {
 
   private idempotency: Map<string, IdempotencyEntry> | null = null;
   private extractions: Map<string, StoredExtraction> | null = null;
+  /** host 候选是否已由宿主自然提交过；仅用于 status 的 configured host 判定。 */
+  private hostCandidatesSeen = false;
+  /** 最近一次模型失败；用于 status 的 active/degraded，不影响 raw 或已写记录。 */
+  private modelFailure: {
+    source: 'local' | 'api';
+    reason: string;
+    warnings: string[];
+    at: number;
+  } | null = null;
   private readonly tails: Record<'ingest' | 'checkpoint' | 'self' | 'compact', Promise<void>> = {
     ingest: Promise.resolve(),
     checkpoint: Promise.resolve(),
@@ -461,6 +492,10 @@ export class RuntimeService {
     this.memory = options.memoryService
       ?? host.memoryService
       ?? new MemoryService(host as unknown as import('../mebular.js').Mebular);
+    this.models = options.modelRuntime ?? createRuntimeModelRuntime(this.settings.model, {
+      ...(options.runtimeDir ? { runtimeDir: options.runtimeDir } : {}),
+      ...(options.now ? { now: options.now } : {}),
+    });
 
     this.localStore = options.localStore ?? (options.runtimeDir
       ? new RuntimeLocalStore({
@@ -546,6 +581,7 @@ export class RuntimeService {
       await this.localStore.cleanupIfDue().catch(() => null);
     }
     const { counts, initialized, namespaces, pendingEvents } = await this.collectStatusFacts();
+    const model = await this.modelStatus();
     return {
       version: this.version,
       initialized,
@@ -559,7 +595,7 @@ export class RuntimeService {
         agentId: this.agentId,
       },
       capabilities: this.capabilities(),
-      model: this.modelStatus(),
+      model,
       counts,
       sync: {
         running: this.host.node?.isRunning() ?? false,
@@ -567,8 +603,13 @@ export class RuntimeService {
         namespaces,
       },
       limits: { ...this.settings.limits },
-      warnings: this.warnings(),
+      warnings: this.warnings(model),
     };
+  }
+
+  /** 停止本地模型子进程；不删除任何记忆或本地对象。 */
+  async dispose(): Promise<void> {
+    await this.models.dispose();
   }
 
   async localStats(): Promise<{ rawChunks: number; traces: number } | null> {
@@ -592,7 +633,12 @@ export class RuntimeService {
       const idempotencyKey = requestId ? `ingest:${this.cloudKey()}:${requestId}` : null;
       const cached = await this.idempotencyGet(idempotencyKey);
       if (cached) {
-        return { ...(cached as RuntimeIngestResult), duplicate: true };
+        const previous = cached as RuntimeIngestResult;
+        return {
+          ...previous,
+          duplicate: true,
+          degraded: previous.degraded === true || previous.extraction?.degraded === true,
+        };
       }
 
       const agentId = requireAgentId(input.agentId ?? this.agentId);
@@ -653,21 +699,29 @@ export class RuntimeService {
         });
       }
 
-      const requestedExtractor = normalizeExtractor(input.extractor, this.settings.model.source);
+      const requestedExtractor = normalizeExtractor(input.extractor);
+      const configuredSource = this.settings.model.source;
+      const allowRemote = input.allowRemote === true;
       const messageIds = chunks
         .map((chunk) => chunk.messageId)
         .filter((value): value is string => typeof value === 'string');
       let extractor: RuntimeExtractor = 'heuristic';
       let candidates = candidateCheck.candidates;
       let model: string | undefined;
+      let degraded = false;
 
       const extractionId = `ext_${ulid()}`;
       const expiresAt = this.now() + IDEMPOTENCY_TTL_MS;
+      const hostPending = candidates.length === 0
+        && (requestedExtractor === 'host'
+          || requestedExtractor === 'user'
+          || (requestedExtractor === 'auto' && configuredSource === 'host'));
 
       if (candidates.length > 0) {
         extractor = 'host';
         model = 'host-provided';
-      } else if (requestedExtractor === 'host' || requestedExtractor === 'user') {
+        this.hostCandidatesSeen = true;
+      } else if (hostPending) {
         extractor = 'host';
         const extraction: StoredExtraction = {
           id: extractionId,
@@ -675,6 +729,7 @@ export class RuntimeService {
           extractor,
           records: [],
           warnings,
+          degraded: false,
           expiresAt,
           createdAt: this.now(),
           agentId,
@@ -688,21 +743,98 @@ export class RuntimeService {
           records: [],
           extraction: this.extractionView(extraction),
           duplicate: false,
+          degraded: false,
           warnings,
         };
         await this.idempotencyPut(idempotencyKey, result);
         return result;
-      } else if (requestedExtractor === 'local' || requestedExtractor === 'api') {
-        warnings.push('model_unavailable');
-        extractor = 'heuristic';
       } else {
-        extractor = 'heuristic';
-      }
+        const selection = await this.selectExtractionSource(requestedExtractor, allowRemote);
+        warnings.push(...selection.warnings);
+        degraded = selection.degraded;
 
-      if (candidates.length === 0) {
-        const heuristic = heuristicCandidates(chunks, namespace);
-        candidates = heuristic.candidates;
-        warnings.push(...heuristic.warnings);
+        let modelEmptySuccess = false;
+        if (selection.source === 'local' || selection.source === 'api') {
+          let outcome: RuntimeModelExtractionResult;
+          try {
+            outcome = await this.models.extractCandidates({
+              source: selection.source,
+              chunks: chunks.map((chunk) => ({
+                text: chunk.text,
+                ...(chunk.role ? { role: chunk.role } : {}),
+                ...(chunk.messageId ? { messageId: chunk.messageId } : {}),
+                ...(chunk.at ? { at: chunk.at } : {}),
+              })),
+              namespace,
+              agentId,
+              ...(threadId ? { threadId } : {}),
+              allowRemote,
+            });
+          } catch {
+            // 模型层异常不能导致 raw 丢失或请求失败：统一回退 heuristic。
+            outcome = {
+              ok: false,
+              candidates: [],
+              extractor: selection.source,
+              degraded: true,
+              reason: 'model_unavailable',
+              warnings: ['model_unavailable'],
+              latencyMs: 0,
+            };
+          }
+
+          if (outcome.ok) {
+            let modelCandidates: { candidates: CandidateRecord[]; warnings: string[] } | null = null;
+            try {
+              modelCandidates = this.validateCandidates(outcome.candidates, namespace);
+            } catch {
+              // 模型输出是 untrusted；保留域/非法形状不得让 ingest 抛错或写图。
+              warnings.push('model_invalid_candidates', 'model_unavailable');
+              degraded = true;
+              this.noteModelFailure(selection.source, 'model_invalid_candidates', [
+                'model_invalid_candidates',
+                'model_unavailable',
+              ]);
+            }
+            if (modelCandidates) {
+              warnings.push(...modelCandidates.warnings);
+              if (outcome.candidates.length > 0 && modelCandidates.candidates.length === 0) {
+                warnings.push('model_invalid_candidates', 'model_unavailable');
+                degraded = true;
+                this.noteModelFailure(selection.source, 'model_invalid_candidates', [
+                  'model_invalid_candidates',
+                  'model_unavailable',
+                ]);
+              } else {
+                candidates = modelCandidates.candidates;
+                extractor = selection.source;
+                model = outcome.model;
+                degraded = outcome.degraded;
+                warnings.push(...outcome.warnings);
+                modelEmptySuccess = candidates.length === 0;
+                if (modelEmptySuccess) warnings.push('no_extractable_memory');
+                this.clearModelFailure();
+              }
+            }
+          } else {
+            degraded = true;
+            warnings.push(...outcome.warnings);
+            if (outcome.reason && !warnings.includes(outcome.reason)) warnings.push(outcome.reason);
+            this.noteModelFailure(
+              selection.source,
+              outcome.reason ?? 'model_unavailable',
+              outcome.warnings.length > 0 ? outcome.warnings : ['model_unavailable'],
+            );
+          }
+        }
+
+        if (!modelEmptySuccess && extractor !== 'local' && extractor !== 'api') {
+          const heuristic = heuristicCandidates(chunks, namespace);
+          candidates = heuristic.candidates;
+          warnings.push(...heuristic.warnings);
+          extractor = 'heuristic';
+          model = undefined;
+        }
       }
 
       const context: CandidateContext = {
@@ -712,6 +844,7 @@ export class RuntimeService {
         source: extractor === 'host' ? 'host' : 'runtime',
         extractor,
         ...(model ? { model } : {}),
+        ...(degraded ? { degraded } : {}),
         messageIds,
       };
 
@@ -725,9 +858,10 @@ export class RuntimeService {
         id: extractionId,
         status,
         extractor,
-        ...(extractor === 'host' ? { model: 'host-provided' } : {}),
+        ...(model ? { model } : {}),
         records: written.records,
         warnings,
+        degraded,
         expiresAt,
         createdAt: this.now(),
         agentId,
@@ -742,6 +876,7 @@ export class RuntimeService {
         records: written.records,
         extraction: this.extractionView(extraction),
         duplicate: false,
+        degraded,
         warnings,
       };
       await this.idempotencyPut(idempotencyKey, result);
@@ -798,6 +933,7 @@ export class RuntimeService {
       model: 'host-provided',
       messageIds: [],
     });
+    this.hostCandidatesSeen = true;
     const updated: StoredExtraction = {
       ...extraction,
       status: 'completed',
@@ -805,6 +941,7 @@ export class RuntimeService {
       model: 'host-provided',
       records: written.records,
       warnings: [...checked.warnings, ...written.warnings],
+      degraded: false,
     };
     this.extractions?.set(id, updated);
     await this.persistExtractions();
@@ -877,6 +1014,49 @@ export class RuntimeService {
     ));
     const warnings: string[] = [];
     const blocks: RuntimeContextBlock[] = [];
+    let degraded = false;
+    let queryForRecall = query;
+    let queryModel = 'heuristic';
+
+    // 查询规划是可选的：模型失败只记录 warning，实际召回仍用原始 query。
+    if (query) {
+      const selection = await this.selectOptionalModelSource(this.settings.model.api.allowRemote);
+      warnings.push(...selection.warnings);
+      degraded = selection.degraded;
+      if (selection.source) {
+        let plan: RuntimeModelQueryPlanResult;
+        try {
+          plan = await this.models.planQuery({
+            source: selection.source,
+            query,
+            allowRemote: this.settings.model.api.allowRemote,
+          });
+        } catch {
+          plan = {
+            ok: false,
+            degraded: true,
+            reason: 'model_unavailable',
+            warnings: ['model_unavailable'],
+            latencyMs: 0,
+          };
+        }
+        if (plan.ok && plan.query) {
+          queryForRecall = plan.query;
+          queryModel = selection.source;
+          this.clearModelFailure();
+        } else {
+          degraded = true;
+          warnings.push(...plan.warnings);
+          if (plan.reason && !warnings.includes(plan.reason)) warnings.push(plan.reason);
+          warnings.push('query_plan_fallback_heuristic');
+          this.noteModelFailure(
+            selection.source,
+            plan.reason ?? 'model_unavailable',
+            plan.warnings.length > 0 ? plan.warnings : ['model_unavailable'],
+          );
+        }
+      }
+    }
 
     if (input.includeSelf === true) {
       const self = (await this.getSelf(agentId)).self;
@@ -934,7 +1114,7 @@ export class RuntimeService {
     }
 
     const memoryResult = await this.queryRecords({
-      query,
+      query: queryForRecall,
       types: [],
       namespaces,
       limit: this.settings.limits.maxRecall,
@@ -964,19 +1144,20 @@ export class RuntimeService {
       namespaces,
       records: memoryResult.records,
       tookMs: memoryResult.tookMs,
-      degraded: memoryResult.degraded,
-      model: { query: 'heuristic', extractor: 'context' },
+      degraded: memoryResult.degraded || degraded,
+      model: { query: queryModel, extractor: 'context' },
     });
 
     const estimatedTokens = fitted.blocks.reduce((sum, block) => sum + block.tokens, 0);
-    const degraded = memoryResult.degraded
+    const finalDegraded = degraded
+      || memoryResult.degraded
       || warnings.some((warning) => warning.endsWith('_unavailable'));
     return {
       blocks: fitted.blocks,
       estimatedTokens,
       truncated: fitted.truncated,
       ...(traceId ? { traceId } : {}),
-      degraded,
+      degraded: finalDegraded,
       warnings,
       notice: CONTEXT_NOTICE,
     };
@@ -1346,6 +1527,192 @@ export class RuntimeService {
     return chunks;
   }
 
+  /**
+   * 解析本次 ingest 的实际来源。auto 顺序遵循契约 D12：
+   * host 候选（调用方已给出时）→ local 已装 → api 已允许 → heuristic。
+   *
+   * 关键安全语义：local 已配置但不可用时直接回退 heuristic，不再尝试 api；
+   * 任何模型失败都不会隐式切到第三方供应商。
+   */
+  private async selectExtractionSource(
+    requested: ReturnType<typeof normalizeExtractor>,
+    allowRemote: boolean,
+  ): Promise<{
+    source: 'heuristic' | 'local' | 'api';
+    warnings: string[];
+    degraded: boolean;
+    reason?: string;
+  }> {
+    if (requested === 'local') return { source: 'local', warnings: [], degraded: false };
+    if (requested === 'api') return { source: 'api', warnings: [], degraded: false };
+    if (requested !== 'auto') return { source: 'heuristic', warnings: [], degraded: false };
+
+    let probe: RuntimeModelProbe;
+    try {
+      probe = await this.models.probe();
+    } catch {
+      return {
+        source: 'heuristic',
+        warnings: ['model_unavailable'],
+        degraded: true,
+        reason: 'model_unavailable',
+      };
+    }
+
+    const configured = this.settings.model.source;
+    if (configured === 'heuristic' || configured === 'host') {
+      return { source: 'heuristic', warnings: [], degraded: false };
+    }
+    if (configured === 'local') {
+      if (probe.local.available) {
+        return {
+          source: 'local',
+          warnings: probe.local.warnings,
+          degraded: false,
+        };
+      }
+      return {
+        source: 'heuristic',
+        warnings: [...probe.local.warnings, 'model_unavailable'],
+        degraded: true,
+        reason: probe.local.reason ?? 'model_unavailable',
+      };
+    }
+    if (configured === 'api') {
+      if (probe.api.available && allowRemote) {
+        return { source: 'api', warnings: probe.api.warnings, degraded: false };
+      }
+      return {
+        source: 'heuristic',
+        warnings: [
+          ...probe.api.warnings,
+          ...(probe.api.available ? ['remote_not_allowed'] : []),
+          'model_unavailable',
+        ],
+        degraded: true,
+        reason: probe.api.available ? 'remote_not_allowed' : (probe.api.reason ?? 'model_unavailable'),
+      };
+    }
+
+    // configured === 'auto'
+    if (probe.local.available) {
+      return { source: 'local', warnings: probe.local.warnings, degraded: false };
+    }
+    if (probe.local.configured) {
+      // local 已配置但不可用：按“local 失败”处理，绝不自动切到第三方。
+      return {
+        source: 'heuristic',
+        warnings: [...probe.local.warnings, 'model_unavailable'],
+        degraded: true,
+        reason: probe.local.reason ?? 'model_unavailable',
+      };
+    }
+    if (probe.api.available && allowRemote) {
+      return { source: 'api', warnings: probe.api.warnings, degraded: false };
+    }
+    if (probe.api.configured) {
+      return {
+        source: 'heuristic',
+        warnings: [
+          ...probe.api.warnings,
+          ...(probe.api.available ? ['remote_not_allowed'] : []),
+          'model_unavailable',
+        ],
+        degraded: true,
+        reason: probe.api.available ? 'remote_not_allowed' : (probe.api.reason ?? 'model_unavailable'),
+      };
+    }
+    return { source: 'heuristic', warnings: [], degraded: false };
+  }
+
+  /**
+   * 可选模型能力（compact 摘要 / context 查询规划）的来源选择。
+   * 不可用时返回 null 并由调用方使用确定性 heuristic；绝不因失败改走另一个供应商。
+   */
+  private async selectOptionalModelSource(allowRemote: boolean): Promise<{
+    source: 'local' | 'api' | null;
+    warnings: string[];
+    degraded: boolean;
+    reason?: string;
+  }> {
+    // 轻量 MCP 模式不调用任何模型；模型只服务于 immersive 的 ingest/compact/context。
+    if (this.mode !== 'immersive') return { source: null, warnings: [], degraded: false };
+    const configured = this.settings.model.source;
+    if (configured === 'heuristic' || configured === 'host') {
+      return { source: null, warnings: [], degraded: false };
+    }
+    let probe: RuntimeModelProbe;
+    try {
+      probe = await this.models.probe();
+    } catch {
+      return {
+        source: null,
+        warnings: ['model_unavailable'],
+        degraded: true,
+        reason: 'model_unavailable',
+      };
+    }
+    if (configured === 'local') {
+      if (probe.local.available) return { source: 'local', warnings: probe.local.warnings, degraded: false };
+      return {
+        source: null,
+        warnings: [...probe.local.warnings, 'model_unavailable'],
+        degraded: true,
+        reason: probe.local.reason ?? 'model_unavailable',
+      };
+    }
+    if (configured === 'api') {
+      if (probe.api.available && allowRemote) return { source: 'api', warnings: probe.api.warnings, degraded: false };
+      return {
+        source: null,
+        warnings: [
+          ...probe.api.warnings,
+          ...(probe.api.available ? ['remote_not_allowed'] : []),
+          'model_unavailable',
+        ],
+        degraded: true,
+        reason: probe.api.available ? 'remote_not_allowed' : (probe.api.reason ?? 'model_unavailable'),
+      };
+    }
+    // auto：local 已装 → api 已允许 → heuristic；local 已配置但失败不切 api。
+    if (probe.local.available) return { source: 'local', warnings: probe.local.warnings, degraded: false };
+    if (probe.local.configured) {
+      return {
+        source: null,
+        warnings: [...probe.local.warnings, 'model_unavailable'],
+        degraded: true,
+        reason: probe.local.reason ?? 'model_unavailable',
+      };
+    }
+    if (probe.api.available && allowRemote) return { source: 'api', warnings: probe.api.warnings, degraded: false };
+    if (probe.api.configured) {
+      return {
+        source: null,
+        warnings: [
+          ...probe.api.warnings,
+          ...(probe.api.available ? ['remote_not_allowed'] : []),
+          'model_unavailable',
+        ],
+        degraded: true,
+        reason: probe.api.available ? 'remote_not_allowed' : (probe.api.reason ?? 'model_unavailable'),
+      };
+    }
+    return { source: null, warnings: [], degraded: false };
+  }
+
+  private noteModelFailure(source: 'local' | 'api', reason: string, warnings: string[]): void {
+    this.modelFailure = {
+      source,
+      reason,
+      warnings: [...warnings],
+      at: this.now(),
+    };
+  }
+
+  private clearModelFailure(): void {
+    this.modelFailure = null;
+  }
+
   private validateCandidates(
     raw: unknown[],
     defaultNamespace: string,
@@ -1494,6 +1861,7 @@ export class RuntimeService {
         source: context.source,
         extractor: context.extractor,
         ...(context.model ? { model: context.model } : {}),
+        ...(context.degraded ? { degraded: true } : {}),
         at: this.now(),
         deviceId: this.host.deviceId,
         ...(context.messageIds.length > 0 ? { messageIds: [...context.messageIds] } : {}),
@@ -1536,6 +1904,7 @@ export class RuntimeService {
       ...(extraction.model ? { model: extraction.model } : {}),
       records: extraction.records.map((record) => ({ ...record })),
       warnings: [...extraction.warnings],
+      degraded: extraction.degraded === true,
       expiresAt: extraction.expiresAt,
     };
   }
@@ -1856,6 +2225,7 @@ export class RuntimeService {
         sourceIds: [],
         tokenCount: 0,
         stale: false,
+        degraded: false,
         warnings: ['no_source_records'],
       };
     }
@@ -1869,6 +2239,7 @@ export class RuntimeService {
         sourceIds,
         tokenCount: 0,
         stale: false,
+        degraded: false,
         warnings: [],
       };
     }
@@ -1882,13 +2253,62 @@ export class RuntimeService {
         tokenCount: compactContentOf(existing)?.tokenCount ?? 0,
         stale: await this.isCompactStale(existing, compactContentOf(existing)!),
         duplicate: true,
+        degraded: false,
         warnings: [],
       };
     }
 
     const lines = nodes.map((node) => renderCompactLine(node));
     const unique = strategy === 'dedupe' ? [...new Set(lines)] : lines;
-    const summary = unique.join('\n');
+    let summary = unique.join('\n');
+    let compactModel: Compact['model'] = { extractor: 'heuristic', version: this.version };
+    const compactWarnings: string[] = [];
+    let degraded = false;
+
+    // 摘要可选：模型失败/未配置时保留确定性逐条摘要，不影响源记录。
+    if (strategy === 'summary') {
+      const selection = await this.selectOptionalModelSource(this.settings.model.api.allowRemote);
+      compactWarnings.push(...selection.warnings);
+      degraded = selection.degraded;
+      if (selection.source) {
+        let result: RuntimeModelSummaryResult;
+        try {
+          result = await this.models.summarize({
+            source: selection.source,
+            text: summary,
+            allowRemote: this.settings.model.api.allowRemote,
+          });
+        } catch {
+          result = {
+            ok: false,
+            degraded: true,
+            reason: 'model_unavailable',
+            warnings: ['model_unavailable'],
+            latencyMs: 0,
+          };
+        }
+        if (result.ok && result.summary) {
+          summary = result.summary;
+          compactModel = {
+            extractor: selection.source,
+            ...(result.model ? { model: result.model } : {}),
+            version: this.version,
+          };
+          this.clearModelFailure();
+        } else {
+          degraded = true;
+          compactWarnings.push(...result.warnings);
+          if (result.reason && !compactWarnings.includes(result.reason)) compactWarnings.push(result.reason);
+          compactWarnings.push('compact_fallback_heuristic');
+          this.noteModelFailure(
+            selection.source,
+            result.reason ?? 'model_unavailable',
+            result.warnings.length > 0 ? result.warnings : ['model_unavailable'],
+          );
+        }
+      }
+    }
+
     const tokenCount = estimateTokens(summary);
     const compact: Compact = {
       schema: 1,
@@ -1896,7 +2316,7 @@ export class RuntimeService {
       sourceIds,
       sourceHashes,
       strategy,
-      model: { extractor: 'heuristic', version: '0.3.0' },
+      model: compactModel,
       tokenCount,
       stale: false,
     };
@@ -1908,7 +2328,12 @@ export class RuntimeService {
       namespace,
       visibility: 'user',
       sync: 'cloud',
-      provenance: { source: 'runtime', extractor: 'heuristic', at: this.now() },
+      provenance: {
+        source: 'runtime',
+        extractor: compactModel.extractor as RuntimeExtractor,
+        ...(compactModel.model ? { model: compactModel.model } : {}),
+        at: this.now(),
+      },
     }), { namespace });
 
     return {
@@ -1917,7 +2342,8 @@ export class RuntimeService {
       sourceIds,
       tokenCount,
       stale: false,
-      warnings: [],
+      degraded,
+      warnings: compactWarnings,
     };
   }
 
@@ -1959,7 +2385,13 @@ export class RuntimeService {
     namespace: string;
     visibility: 'user' | 'task' | 'agent-self';
     sync: RuntimeSyncMode;
-    provenance: { source: 'runtime'; extractor: RuntimeExtractor; at: number };
+    provenance: {
+      source: 'runtime';
+      extractor: RuntimeExtractor;
+      model?: string;
+      degraded?: boolean;
+      at: number;
+    };
   }) {
     return {
       schema: 1 as const,
@@ -2093,24 +2525,98 @@ export class RuntimeService {
     };
   }
 
-  private modelStatus(): RuntimeModelStatus {
+  private async modelStatus(): Promise<RuntimeModelStatus> {
     const configured = this.settings.model.source;
-    const active: RuntimeModelSource = 'heuristic';
     const keyRef = this.settings.model.api.keyRef;
-    const reason = configured === 'heuristic'
-      ? null
-      : configured === 'host'
-        ? 'host_candidates_missing'
-        : 'model_unavailable';
+    let probe: RuntimeModelProbe | null = null;
+    try {
+      probe = await this.models.probe();
+    } catch {
+      probe = null;
+    }
+    const credential = probe?.api.credential ?? {
+      configured: keyRef !== null,
+      source: credentialSource(keyRef),
+    };
+
+    let active: RuntimeModelSource = 'heuristic';
+    let degraded = false;
+    let reason: string | null = null;
+    let warnings: string[] = [];
+
+    if (configured === 'host') {
+      if (this.hostCandidatesSeen) {
+        active = 'host';
+      } else {
+        degraded = true;
+        reason = 'host_candidates_missing';
+        warnings = ['host_candidates_missing'];
+      }
+    } else if (configured === 'local') {
+      if (probe?.local.available) {
+        active = 'local';
+        warnings = probe.local.warnings;
+      } else {
+        degraded = true;
+        reason = probe?.local.reason ?? 'model_unavailable';
+        warnings = uniqueWarnings([...(probe?.local.warnings ?? []), 'model_unavailable']);
+      }
+    } else if (configured === 'api') {
+      if (probe?.api.available) {
+        active = 'api';
+        warnings = probe.api.warnings;
+      } else {
+        degraded = true;
+        reason = probe?.api.reason ?? 'model_unavailable';
+        warnings = uniqueWarnings([...(probe?.api.warnings ?? []), 'model_unavailable']);
+      }
+    } else if (configured === 'auto') {
+      // auto 的 host 优先级只在单次请求带 candidates 时生效；status 展示
+      // 不依赖“曾经提交过一次”的粘滞状态。
+      if (probe?.local.available) {
+        active = 'local';
+        warnings = probe.local.warnings;
+      } else if (probe?.local.configured) {
+        degraded = true;
+        reason = probe.local.reason ?? 'model_unavailable';
+        warnings = uniqueWarnings([...probe.local.warnings, 'model_unavailable']);
+      } else if (probe?.api.available) {
+        active = 'api';
+        warnings = probe.api.warnings;
+      } else if (probe?.api.configured) {
+        degraded = true;
+        reason = probe.api.reason ?? 'model_unavailable';
+        warnings = uniqueWarnings([...probe.api.warnings, 'model_unavailable']);
+      }
+    }
+
+    if (this.modelFailure && (configured === 'local' || configured === 'api' || configured === 'auto')) {
+      const failure = this.modelFailure;
+      const applies = configured === failure.source
+        || (configured === 'auto' && (
+          failure.source === 'local'
+            ? Boolean(probe?.local.available || probe?.local.configured)
+            : !probe?.local.configured && Boolean(probe?.api.available || probe?.api.configured)
+        ));
+      if (applies) {
+        active = 'heuristic';
+        degraded = true;
+        reason = failure.reason;
+        warnings = uniqueWarnings([
+          ...warnings,
+          ...failure.warnings,
+          'model_unavailable',
+        ]);
+      }
+    }
+
     return {
       configured,
       active,
-      degraded: configured !== 'heuristic',
+      degraded,
       reason,
-      credential: {
-        configured: keyRef !== null,
-        source: credentialSource(keyRef),
-      },
+      credential,
+      warnings: uniqueWarnings(warnings),
     };
   }
 
@@ -2130,7 +2636,7 @@ export class RuntimeService {
     };
   }
 
-  private warnings(): string[] {
+  private warnings(model?: RuntimeModelStatus): string[] {
     const warnings: string[] = [];
     if (this.settings.capture === 'local' && this.host.atRestEncryption !== true) {
       warnings.push('rawCaptureUnencrypted');
@@ -2138,7 +2644,10 @@ export class RuntimeService {
     if (!this.cloudId) warnings.push('cloud_identity_unavailable');
     if (this.settings.capture === 'local' && !this.localStore) warnings.push('raw_storage_unavailable');
     if (this.settings.trace === 'local' && !this.localStore) warnings.push('trace_storage_unavailable');
-    if (this.settings.model.source !== 'heuristic') warnings.push('runtime_model_degraded');
+    if (model?.degraded) warnings.push('runtime_model_degraded');
+    for (const warning of model?.warnings ?? []) {
+      if (!warnings.includes(warning)) warnings.push(warning);
+    }
     return warnings;
   }
 
@@ -2190,6 +2699,10 @@ function identityDigest(host: RuntimeServiceHost): string | null {
 
 function deriveHostId(deviceId: string, homeKey: string): string {
   return `h_${createHash('sha256').update(`${deviceId}\0${homeKey}`, 'utf8').digest('hex').slice(0, 16)}`;
+}
+
+function uniqueWarnings(values: Iterable<string>): string[] {
+  return [...new Set(values)];
 }
 
 function credentialSource(keyRef: string | null): 'env' | 'keychain' | 'file' | null {
@@ -2379,7 +2892,7 @@ function checkpointSync(value: unknown, fallback: RuntimeCheckpointSync): Runtim
   return enumValue(value, ['local', 'cloud'] as const, 'sync');
 }
 
-function normalizeExtractor(value: unknown, _configured: RuntimeModelSource): RuntimeExtractor | RuntimeModelSource | 'auto' {
+function normalizeExtractor(value: unknown): RuntimeExtractor | RuntimeModelSource | 'auto' {
   if (value === undefined || value === null) return 'auto';
   if (value === 'auto' || value === 'user') return value;
   return enumValue(value, ['heuristic', 'local', 'host', 'api'] as const, 'extractor');

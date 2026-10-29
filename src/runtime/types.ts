@@ -80,6 +80,8 @@ export interface RuntimeEnvelope {
     extractor: RuntimeExtractor;
     model?: string;
     version?: string;
+    /** 模型失败/未配置而回退 heuristic 时标记；仅说明来源，不可据此重放模型。 */
+    degraded?: boolean;
     at: number;
     deviceId?: string;
     messageIds?: string[];

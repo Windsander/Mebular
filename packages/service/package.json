@@ -1,6 +1,6 @@
 {
   "name": "@mebular/service",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Mebular 常驻组件服务化：平台单元生成（launchd/systemd/Task Scheduler）+ install/uninstall/status/logs + 进程心跳",
   "license": "MIT",
   "author": {

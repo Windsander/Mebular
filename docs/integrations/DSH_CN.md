@@ -11,6 +11,10 @@
 daemon、一个 `mebular-serve`、一个当前 profile/home、一份数据。Plugin 默认只
 `attach`；只有用户显式选择 `managed`/`auto` 或点击面板安装时，才会启动/安装 runtime。
 
+0.3.0 在 MCP 之外增加可选的 Memory Runtime bridge。它默认关闭，因此现有
+attach/managed/panel/MCP 行为在显式 opt-in 前完全不变。见下文
+[Memory Runtime（可选）](#memory-runtime可选)。
+
 ## 两个入口，一个 runtime
 
 | 面 | 职责 |
@@ -26,7 +30,7 @@ supervisor 的 `runtime resolve`/`supervise` 和 daemon HTTP 端点工作。
 从 npm 安装到 DSH 的 Web profile：
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.2.4
+dsh plugin --profile web add @mebular/dsh-plugin@0.3.0
 ```
 
 开发时从工作树安装：
@@ -119,6 +123,67 @@ daemon child。service/外部 daemon 不会被插件停止。
 
 非法值会回退安全默认并写 warning，不会让 DSH 激活失败。
 
+## Memory Runtime（可选）
+
+0.3.0 可以在 MCP 之外接入 Mebular Memory Runtime。两层，同一个守护：
+
+| 层 | 默认 | 做什么 |
+| --- | --- | --- |
+| **MCP** | daemon 健康时开启 | 官方 client 挂载 `mcp__mebular__*`；29 个工具不变 |
+| **Memory Runtime** | 关闭 | `/runtime/v1` 召回、ingest、压缩检查点、可选宿主任维护 |
+
+`memoryRuntime` 缺失或 `enabled: false` 时，适配器不注册监听器、不启动定时器、不发任何
+`/runtime/v1` 请求。attach、managed 生命周期、面板和 MCP 行为完全不变。
+
+```yaml
+- id: mebular
+  name: '@mebular/dsh-plugin'
+  config:
+    lifecycle: attach
+    panel: true
+    memoryRuntime:
+      enabled: true
+      # 可选；以下默认开启，maintenance 默认关闭
+      recall: true
+      ingest: true
+      checkpoints: true
+      hideMemoryTools: true
+      maintenance: false
+      # 治理白名单；task_* 始终保留
+      governanceTools: []
+      memoryAgentPresets: ['mebular-memory']
+      auth: auto                 # auto | bearer | none
+      tokenEnv: MEBULAR_RUNTIME_TOKEN
+      # token: '...'
+```
+
+- **模式：** Mebular 的设备模式仍决定写端点是否可用。轻量 `mcp` 保留 Runtime 读路径；
+  沉浸式 `immersive` 才启用 ingest、压缩和检查点。DSH 不会自行切换 Mebular 模式。
+- **召回：** 仅在新人类 turn 首步调用 `POST /runtime/v1/recall`。无命中、超时或失败原样
+  放行；命中时注入一条 `source.kind='mebular-memory'` 的 UserMessage，按 surface 和 query
+  去重。
+- **Ingest：** 把 user/assistant/tool 事件批量送到 `POST /runtime/v1/ingest`；跳过
+  fork/resume 的 inherited prefix，按 `(sessionId, seq)` 去重，队列有界。网络错误与
+  429/5xx 默认最多重试两次，复用同一个 `requestId` 与 `Idempotency-Key`；失败进入状态，
+  不重复入队。
+- **认证：** `auto` 在设置 `token` 或 `tokenEnv` 时发送 `Authorization: Bearer`，否则不
+  发 header，因此回环 `auth=none` 可以直接用。`bearer` 强制发送，`none` 永不发送。token
+  不会进入日志或 `getState()`；401/403 会变成 warning，不会静默通过。
+- **检查点：** 把 `compaction/start → summary → replacement → end` 折叠成
+  ContextCheckpoint，并 `PUT` 到 `/runtime/v1/checkpoints/:threadId`。失败或中断不会被
+  报告为已提交。Raw 采集遵循 Runtime 设置；maintenance 不发送 raw chunks。
+- **工具面：** MCP 仍是 29 个工具，没有 `runtime_*` MCP 工具。`hideMemoryTools` 只对普通
+  Agent 隐藏当前可见的 `mcp__mebular__memory_*`；`task_*` 和治理白名单保留。适配器本身只
+  走 HTTP，不注册记忆工具。
+- **模型：** DSH 不运行、也不配置本地 Qwen 或第三方 API；请在 Mebular 控制台选择。DSH
+  只有通过 `maintenance.enabled` 才能提供当前会话模型：idle 时向该模型要候选，再以
+  `extractor='host'` 提交。它不读 DSH 凭据，不把宿主模型当成 Mebular API 调用。
+  maintenance 关闭时，DSH 不提供宿主候选：如果 Runtime 配置为 `host`，这些 ingest 会保持
+  pending，直到候选被补上；否则按配置的 local、API 或 heuristic 来源处理。任何来源都不会
+  静默调用另一个模型。
+
+数据边界与模型回退规则见 [Memory Runtime 指南](../design/0.3.0-memory-runtime_CN.md)。
+
 ## 状态与面板
 
 `GET /mebular/embed-info` 只接受 loopback，返回非敏感状态。v0.2.0 新增了
@@ -134,9 +199,9 @@ daemon child。service/外部 daemon 不会被插件停止。
   "runtimeMode": "reused",
   "managed": false,
   "panel": true,
-  "version": "0.2.4",
+  "version": "0.3.0",
   "profile": { "id": "default", "name": "我的忆云" },
-  "provider": { "kind": "app", "source": "registry", "version": "0.2.4" },
+  "provider": { "kind": "app", "source": "registry", "version": "0.3.0" },
   "service": { "registered": false, "running": false, "foreign": false },
   "downloadRequired": false,
   "install": { "state": "idle", "allowed": true },
@@ -232,11 +297,11 @@ npm run verify:runtime:coexistence
 
 ## 发布与版本
 
-- 版本：`0.2.4`，随统一 Mebular v0.2.4 release train（六个 npm 包同版本）
-- npm：`@mebular/dsh-plugin@0.2.4`
+- 版本：`0.3.0`，随统一 Mebular v0.3.0 release train（六个 npm 包同版本）
+- npm：`@mebular/dsh-plugin@0.3.0`
 - 插件是独立适配器：代码隔离在 `packages/dsh-plugin`，由独立 npm job 发布；插件运行时从
   自己的 `package.json` 读取 pinned runtime 版本，发布 bump 不需要改插件源码。
-- 发布先 `@mebular/core@0.2.4`，再 `@mebular/dsh-plugin@0.2.4`；详见
+- 发布先 `@mebular/core@0.3.0`，再 `@mebular/dsh-plugin@0.3.0`；详见
   [发布 SOP](../operations/RELEASE.md)。
 - 插件已收录于
   [awesome-dsh-plugin](https://awesome-dsh-plugin.com/zh/p/Windsander/Mebular--packages-dsh-plugin/)

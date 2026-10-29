@@ -13,6 +13,10 @@ local Mebular runtime**: one daemon, one `mebular-serve`, one active
 profile/home and one data root. The Plugin defaults to `attach`; only an
 explicit `managed`/`auto` choice or a panel install starts/installs the runtime.
 
+0.3.0 adds an optional Memory Runtime bridge next to MCP. It is off by default,
+so existing attach/managed/panel/MCP behaviour is unchanged until you opt in.
+See [Memory Runtime (opt-in)](#memory-runtime-opt-in) below.
+
 ## Two entries, one runtime
 
 | Surface | Responsibility |
@@ -29,7 +33,7 @@ resolve`/`supervise`) and daemon HTTP endpoints.
 Install from npm into the DSH web profile:
 
 ```bash
-dsh plugin --profile web add @mebular/dsh-plugin@0.2.4
+dsh plugin --profile web add @mebular/dsh-plugin@0.3.0
 ```
 
 For development:
@@ -133,6 +137,75 @@ Full config:
 
 Invalid values fall back safely with a warning; activation does not fail.
 
+## Memory Runtime (opt-in)
+
+0.3.0 can bridge the Mebular Memory Runtime alongside MCP. Two layers, one daemon:
+
+| Layer | Default | What it does |
+| --- | --- | --- |
+| **MCP** | On when the daemon is up | The official client mounts `mcp__mebular__*`; 29 tools unchanged |
+| **Memory Runtime** | Off | `/runtime/v1` recall, ingest, compaction checkpoints, optional host maintenance |
+
+With `memoryRuntime` absent or `enabled: false`, the adapter registers no listener,
+starts no timer and sends no `/runtime/v1` request. Attach, managed lifecycle, panel and
+MCP keep their exact behaviour.
+
+```yaml
+- id: mebular
+  name: '@mebular/dsh-plugin'
+  config:
+    lifecycle: attach
+    panel: true
+    memoryRuntime:
+      enabled: true
+      # Optional; these default to true, maintenance defaults to false.
+      recall: true
+      ingest: true
+      checkpoints: true
+      hideMemoryTools: true
+      maintenance: false
+      # Governance allowlist; task_* is always kept.
+      governanceTools: []
+      memoryAgentPresets: ['mebular-memory']
+      auth: auto                 # auto | bearer | none
+      tokenEnv: MEBULAR_RUNTIME_TOKEN
+      # token: '...'
+```
+
+- **Modes:** the Mebular device mode still decides whether write endpoints are active.
+  Lightweight `mcp` keeps the runtime read paths; immersive `immersive` enables ingest,
+  compaction and checkpoints. DSH does not switch the Mebular mode by itself.
+- **Recall:** on the first step of a new human turn, calls `POST /runtime/v1/recall`.
+  No hit, timeout or failure passes through unchanged; a hit injects one
+  `source.kind='mebular-memory'` UserMessage, deduplicated by surface and query.
+- **Ingest:** batches user/assistant/tool events to `POST /runtime/v1/ingest`, skips the
+  fork/resume inherited prefix, dedupes by `(sessionId, seq)`, and uses a bounded queue.
+  Network errors and 429/5xx retry at most twice by default, reusing one `requestId` and
+  `Idempotency-Key`; failures are surfaced in status instead of being re-enqueued.
+- **Auth:** `auto` sends `Authorization: Bearer` when `token` or `tokenEnv` is set and
+  sends no header otherwise, so a loopback `auth=none` runtime works unchanged.
+  `bearer` forces the header, `none` never sends it. The token is never logged or put in
+  `getState()`; a 401/403 becomes a warning, not a silent pass.
+- **Checkpoints:** folds `compaction/start → summary → replacement → end` into a
+  ContextCheckpoint and `PUT`s it to `/runtime/v1/checkpoints/:threadId`. A failure or
+  interruption is never reported as committed. Raw capture follows the Runtime setting;
+  maintenance sends no raw chunks.
+- **Tool surface:** MCP stays at 29 tools. There are no `runtime_*` MCP tools.
+  `hideMemoryTools` only hides currently visible `mcp__mebular__memory_*` from ordinary
+  agents; `task_*` and the governance allowlist remain. The adapter itself only talks
+  HTTP and registers no memory tools.
+- **Model:** DSH does not run or configure local Qwen or a third-party API; choose those
+  in Mebular Console. DSH can supply its current session model only through
+  `maintenance.enabled`: on idle it asks that model for candidates, then submits them
+  with `extractor='host'`. It never reads DSH credentials and never calls the model as a
+  Mebular API. With maintenance off, DSH supplies no host candidates: if the Runtime is
+  configured for `host`, those ingests stay pending until candidates are supplied;
+  otherwise the configured local, API or heuristic source applies. No source silently
+  calls another model.
+
+See the [Memory Runtime guide](../design/0.3.0-memory-runtime.md) for the data boundaries
+and model fallback rules.
+
 ## Status and panel
 
 `GET /mebular/embed-info` is loopback-only and returns non-sensitive state.
@@ -149,9 +222,9 @@ iframe share this state.
   "runtimeMode": "reused",
   "managed": false,
   "panel": true,
-  "version": "0.2.4",
+  "version": "0.3.0",
   "profile": { "id": "default", "name": "My Cloud" },
-  "provider": { "kind": "app", "source": "registry", "version": "0.2.4" },
+  "provider": { "kind": "app", "source": "registry", "version": "0.3.0" },
   "service": { "registered": false, "running": false, "foreign": false },
   "downloadRequired": false,
   "install": { "state": "idle", "allowed": true },
@@ -260,13 +333,13 @@ single daemon, service, update locks and upgrade rollback are covered by CI and
 
 ## Release and version
 
-- Version: `0.2.4`, on the unified Mebular v0.2.4 release train (all six npm
+- Version: `0.3.0`, on the unified Mebular v0.3.0 release train (all six npm
   packages share the same version).
-- npm: `@mebular/dsh-plugin@0.2.4`.
+- npm: `@mebular/dsh-plugin@0.3.0`.
 - The Plugin is an isolated adapter in `packages/dsh-plugin`, published by its
   own npm job. It reads the pinned runtime version from its own `package.json`,
   so a release bump needs no Plugin source edit.
-- Publish `@mebular/core@0.2.4` before `@mebular/dsh-plugin@0.2.4`; see
+- Publish `@mebular/core@0.3.0` before `@mebular/dsh-plugin@0.3.0`; see
   [Release SOP](../operations/RELEASE.md).
 - Listed in the `memory` category of
   [awesome-dsh-plugin](https://awesome-dsh-plugin.com/p/Windsander/Mebular--packages-dsh-plugin/).

@@ -508,6 +508,9 @@ describe('request-only context block', () => {
       { id: 'a1', role: 'assistant', content: [{ type: 'text', text: 'two' }] },
       { id: 'u2', type: 'user', text: 'three' },
     ])).toMatchObject({ id: 'u2', text: 'three' });
+    expect(extractLastUserTurn([
+      { id: 'u3', role: 'user', content: JSON.stringify([{ type: 'text', text: '  quoted content  ' }]) },
+    ])).toMatchObject({ id: 'u3', text: 'quoted content' });
     expect(extractLastUserTurn([])).toBeNull();
   });
 });

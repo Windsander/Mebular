@@ -356,25 +356,53 @@ export function resolvePluginConfig(input, options = {}) {
   };
 }
 
-function messageText(message) {
-  if (typeof message === 'string') return message.trim();
-  if (!isObject(message)) return '';
-  const direct = asText(message.text);
-  if (direct) return direct;
-  const payload = asText(message.payload?.text);
-  if (payload) return payload;
-  if (typeof message.content === 'string') return message.content.trim();
-  const parts = Array.isArray(message.content)
-    ? message.content
-    : Array.isArray(message.parts)
-      ? message.parts
-      : [];
-  const texts = [];
-  for (const part of parts) {
-    if (!isObject(part)) continue;
-    if (part.type === 'text' && asText(part.text)) texts.push(asText(part.text));
+/**
+ * OpenCode can hand a plugin message content either as structured parts or as
+ * a JSON-encoded string of those parts. Unwrap the latter before it becomes a
+ * runtime query or raw chunk; keeping the quotes makes keyword recall and
+ * preference extraction miss ordinary text.
+ */
+function textFromContentValue(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+      try {
+        return textFromContentValue(JSON.parse(trimmed));
+      } catch {
+        // Not JSON: treat it as ordinary text.
+      }
+    }
+    return trimmed;
   }
-  return texts.join('\n').trim();
+  if (Array.isArray(value)) {
+    const texts = [];
+    for (const part of value) {
+      if (typeof part === 'string') {
+        const text = part.trim();
+        if (text) texts.push(text);
+      } else if (isObject(part) && part.type === 'text' && asText(part.text)) {
+        texts.push(asText(part.text));
+      }
+    }
+    return texts.join('\n').trim();
+  }
+  if (isObject(value)) {
+    const direct = asText(value.text);
+    if (direct) return direct;
+    return textFromContentValue(value.content ?? value.parts);
+  }
+  return '';
+}
+
+function messageText(message) {
+  if (typeof message === 'string') return textFromContentValue(message);
+  if (!isObject(message)) return '';
+  const direct = textFromContentValue(message.text);
+  if (direct) return direct;
+  const payload = textFromContentValue(message.payload?.text);
+  if (payload) return payload;
+  if (message.content !== undefined) return textFromContentValue(message.content);
+  return textFromContentValue(message.parts);
 }
 
 export function extractLastUserTurn(messages) {

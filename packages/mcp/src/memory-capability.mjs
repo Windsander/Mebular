@@ -526,9 +526,13 @@ function normalizeWriteContent(kind, raw, index) {
         tags: ['preference'],
       };
     case 'observation':
+      // 与公共 memory_write 一致：observation 是 episode（episodeType=observation），不是 fact。
       return {
-        nodeType: 'fact',
-        content: { content: nonEmptyString(raw.content, 'content.content', index) },
+        nodeType: 'episode',
+        content: {
+          episodeType: 'observation',
+          content: nonEmptyString(raw.content, 'content.content', index),
+        },
         tags: [],
       };
     case 'episode': {
@@ -685,9 +689,14 @@ function ownerMismatchError(index, domain, expected, actual) {
 }
 
 function contentHashFor(kind, content, validFrom) {
+  // observation 的节点正文已从 fact {content} 迁到 episode {episodeType, content}；
+  // hash 仍只取语义正文，保证升级前后同一 observation 仍按内容去重。
+  const hashContent = kind === 'observation' && isObject(content)
+    ? { content: content.content }
+    : content;
   return `sha256:${sha256Hex(canonicalJson({
     kind,
-    content,
+    content: hashContent,
     ...(validFrom !== undefined ? { validFrom } : {}),
   }))}`;
 }
@@ -929,9 +938,10 @@ function serviceTypesFor(types, { search = false } = {}) {
       if (search || types.includes('fact')) out.add('fact');
       else out.add('preference');
     } else if (type === 'observation') {
-      // 新写入的 observation 是 fact 节点；0.2 的 observation 是 episode 节点。
-      out.add('fact');
+      // 新写入的 observation 与公共 memory_write 一致：episode（episodeType=observation）。
+      // 同时查 fact，兼容升级前 capability 写入的 legacy fact observation（按 metadata.kind 过滤）。
       out.add('episode');
+      out.add('fact');
     } else if (type === 'episode') {
       out.add('episode');
     } else {
@@ -1870,27 +1880,14 @@ export function createMemoryCapabilityHandler({
       };
     }
 
-    async function indexMemoryNode(appValue, node) {
-      try {
-        const index = appValue?.semanticVectorIndex;
-        if (index && typeof index.index === 'function') {
-          await index.index(node);
-        }
-        return true;
-      } catch {
-        return false;
-      }
-    }
-
     async function performWriteItem(appValue, item) {
-      if (!appValue?.graph?.createNode) {
+      if (!appValue?.graph?.getNode) {
         throw new CapabilityError(503, 'capability_unavailable', '图存储不可用', undefined, true);
       }
-      const created = await appValue.graph.createNode(item.nodeType, item.content, undefined, {
-        validFrom: item.validFrom,
-        validTo: item.validTo,
-        namespace: item.domain,
-      });
+      const currentService = service();
+      if (typeof currentService.writeRecords !== 'function') {
+        throw new CapabilityError(503, 'capability_unavailable', '记忆服务不支持统一写入', undefined, true);
+      }
       const metadata = {
         kind: item.kind,
         provenance: item.provenance,
@@ -1898,29 +1895,31 @@ export function createMemoryCapabilityHandler({
         ...(item.contentHashIncludesValidFrom ? { contentHashValidFrom: item.validFrom } : {}),
         ...(item.clientItemId !== undefined ? { clientItemId: item.clientItemId } : {}),
       };
-      const updated = await appValue.graph.updateNode(created.id, { metadata });
-      if (!updated) throw new CapabilityError(503, 'capability_unavailable', '节点写入后读取失败', undefined, true);
-      let node = updated;
-      for (const tag of item.tags) {
-        node = (await appValue.graph.addTag(node.id, tag)) ?? node;
+      const [stored] = await currentService.writeRecords([{
+        kind: item.kind,
+        content: item.content,
+        namespace: item.domain,
+        tags: item.tags,
+        validFrom: item.validFrom,
+        validTo: item.validTo,
+        relatedTo: item.relatedTo,
+        metadata,
+      }], { tolerateVectorIndexFailure: true });
+      if (!stored?.node) {
+        throw new CapabilityError(503, 'capability_unavailable', '节点写入后读取失败', undefined, true);
       }
       const warnings = [];
-      if (!(await indexMemoryNode(appValue, node))) {
+      if (!stored.vectorIndexed) {
         warnings.push({ code: 'vector_index_unavailable', message: '向量索引更新失败；图数据已写入' });
       }
-      for (const targetId of item.relatedTo) {
-        const target = await appValue.graph.getNode(targetId);
-        if (!target || target.deletedAt || isInternalNode(target)) {
-          warnings.push({
-            code: 'related_to_skipped',
-            id: targetId,
-            message: 'relatedTo 目标不存在、已删除或为内部对象，已跳过',
-          });
-          continue;
-        }
-        await appValue.graph.createEdge(node.id, targetId, 'related_to');
+      for (const targetId of stored.skippedRelatedTo ?? []) {
+        warnings.push({
+          code: 'related_to_skipped',
+          id: targetId,
+          message: 'relatedTo 目标不存在、已删除或为内部对象，已跳过',
+        });
       }
-      return { node, warnings };
+      return { node: stored.node, warnings };
     }
 
     async function handleWrite(payload, actor) {
@@ -2138,26 +2137,26 @@ export function createMemoryCapabilityHandler({
       let failed = 0;
       for (const plan of plans) {
         try {
+          const currentService = service();
+          if (typeof currentService.updateRecord !== 'function') {
+            throw new CapabilityError(503, 'capability_unavailable', '记忆服务不支持统一更新', undefined, true);
+          }
           const metadata = {
             ...(plan.metadata ?? (isObject(plan.node.metadata) ? plan.node.metadata : {})),
             ...(plan.contentHash !== undefined ? { contentHash: plan.contentHash } : {}),
             updatedBy: { actorType: actor.type, actorId: plan.actorId, at: now() },
           };
-          let node = await appValue.graph.updateNode(plan.id, {
+          const updatedRecord = await currentService.updateRecord({
+            id: plan.id,
             ...(plan.content !== undefined ? { content: plan.content } : {}),
+            ...(plan.tags !== undefined ? { tags: plan.tags } : {}),
             metadata,
-          });
-          if (!node) throw new CapabilityError(404, 'not_found', '节点不存在', { id: plan.id });
-          if (plan.tags !== undefined) {
-            const currentTags = Array.isArray(plan.node.tags) ? plan.node.tags : [];
-            for (const tag of currentTags) {
-              if (!plan.tags.includes(tag)) node = (await appValue.graph.removeTag(plan.id, tag)) ?? node;
-            }
-            for (const tag of plan.tags) {
-              if (!currentTags.includes(tag)) node = (await appValue.graph.addTag(plan.id, tag)) ?? node;
-            }
+          }, { tolerateVectorIndexFailure: true });
+          if (!updatedRecord?.node) {
+            throw new CapabilityError(404, 'not_found', '节点不存在', { id: plan.id });
           }
-          if (!(await indexMemoryNode(appValue, node))) {
+          const node = updatedRecord.node;
+          if (!updatedRecord.vectorIndexed) {
             warnings.push({ code: 'vector_index_unavailable', message: '向量索引更新失败；图数据已更新' });
           }
           updated += 1;

@@ -5,7 +5,14 @@
 
 import type { Mebular } from '../mebular.js';
 import { MemoryStore, isArchived } from './MemoryStore.js';
-import { EdgeTypes, type EpisodeNode, type FactNode, type SkillNode } from './types.js';
+import {
+  EdgeTypes,
+  type EntityType,
+  type EpisodeNode,
+  type EpisodeType,
+  type FactNode,
+  type SkillNode,
+} from './types.js';
 import type { VectorIndex } from './VectorIndex.js';
 import { isInternalNode } from './visibility.js';
 import { ValidationError, ErrorCodes, MebularError, SyncError } from '../errors.js';
@@ -40,6 +47,72 @@ export interface MemoryServiceOptions {
   vectorIndex?: VectorIndex;
   /** 同步等待超时（ms，缺省 30s） */
   syncTimeoutMs?: number;
+}
+
+/** 统一 MemoryRecord 语义类型（observation 始终落为 episode）。 */
+export type StructuredMemoryKind = 'fact' | 'preference' | 'episode' | 'observation' | 'skill' | 'entity';
+
+/**
+ * 结构化记忆写入输入（MemoryService 的统一落库形状）。
+ *
+ * 公共 `memory_write` 与内部 capability `/write` 各自保留自己的 API 形状，
+ * 但最终都构造本结构并交给 `MemoryService.writeRecords`；不允许再有第二条
+ * 直接 `GraphStore.createNode` 的普通 MemoryRecord 写入路径。
+ *
+ * - fact/preference：content 使用 subject/predicate/object（preference 也兼容
+ *   entity/preferenceType/value，由服务归一化），preference 自动带 `preference` 标签；
+ * - episode/observation：content 需有 content 正文；observation 强制 episodeType=observation；
+ * - skill/entity：content 使用对应的结构化字段。
+ */
+export interface StructuredMemoryRecord {
+  kind: StructuredMemoryKind;
+  content: Record<string, unknown>;
+  namespace?: string;
+  tags?: string[];
+  labels?: string[];
+  validFrom?: number;
+  validTo?: number;
+  /** fact/preference：优先于 content.confidence */
+  confidence?: number;
+  /** fact/preference：优先于 content.source */
+  source?: string;
+  /** 只链接已存在、未删除且非内部的节点 */
+  relatedTo?: string[];
+  /** 节点创建后合并的 metadata（kind/provenance/contentHash/clientItemId 等） */
+  metadata?: Record<string, unknown>;
+}
+
+export interface WriteRecordsOptions {
+  /**
+   * 向量索引刷新失败时不回滚图写入，仅在结果里标记 vectorIndexed=false。
+   * 公共工具保持默认（失败即报错）；capability 用 true 保留 warning 语义。
+   */
+  tolerateVectorIndexFailure?: boolean;
+}
+
+/** 统一写入结果；`node` 供 capability 构造响应，`type` 是实际节点类型。 */
+export interface StoredStructuredMemory {
+  id: string;
+  type: Node['type'];
+  kind: StructuredMemoryKind;
+  createdAt: number;
+  node: Node;
+  /** relatedTo 目标不存在、已删除或为内部对象而未创建边 */
+  skippedRelatedTo: string[];
+  /** 配置了向量索引时是否刷新成功；未配置索引视为 true */
+  vectorIndexed: boolean;
+}
+
+export interface UpdateMemoryRecordInput {
+  id: string;
+  content?: Record<string, unknown>;
+  tags?: string[];
+  metadata?: Record<string, unknown>;
+}
+
+export interface UpdatedMemoryRecord {
+  node: Node;
+  vectorIndexed: boolean;
 }
 
 /**
@@ -122,7 +195,7 @@ export class MemoryService {
 
   // ---------- 写入 ----------
 
-  /** 批量写入（MCP 层钳制 batch ≤ 100） */
+  /** 批量写入（MCP 层钳制 batch ≤ 100；公共工具的唯一写入入口） */
   async write(items: MemoryInput[]): Promise<StoredMemory[]> {
     const stored: StoredMemory[] = [];
     for (const item of items) {
@@ -131,41 +204,106 @@ export class MemoryService {
     return stored;
   }
 
-  /** 结构化抽取结果落图（provider 薄壳的使用路径） */
-  async storeExtraction(result: ExtractionResult): Promise<StoredMemory[]> {
-    const stored: StoredMemory[] = [];
-    for (const fact of result.facts) {
-      const node = await this.memory.addFact(fact);
-      stored.push({ id: node.id, type: 'fact', createdAt: node.createdAt });
-    }
-    for (const episode of result.episodes) {
-      const node = await this.memory.addEpisode(episode);
-      stored.push({ id: node.id, type: 'episode', createdAt: node.createdAt });
-    }
-    for (const skill of result.skills) {
-      const node = await this.memory.addSkill(skill);
-      stored.push({ id: node.id, type: 'skill', createdAt: node.createdAt });
-    }
-    for (const preference of result.preferences) {
-      const node = await this.memory.addFact({
-        subject: preference.entity,
-        predicate: preference.preferenceType,
-        object: preference.value,
-        confidence: preference.confidence,
-        source: preference.source,
-        tags: [PREFERENCE_TAG],
-      });
-      stored.push({ id: node.id, type: 'preference', createdAt: node.createdAt });
-    }
-    for (const observation of result.observations) {
-      const node = await this.memory.addEpisode({
-        episodeType: 'observation',
-        content: observation.content,
-        tags: observation.tags,
-      });
-      stored.push({ id: node.id, type: 'observation', createdAt: node.createdAt });
+  /**
+   * 统一 MemoryRecord 落库（公共 `memory_write` / capability `/write` / 抽取结果共用）。
+   *
+   * 只通过 MemoryStore 的类型化写入方法落图；metadata 在节点创建后合并，
+   * relatedTo 由服务统一跳过缺失/墓碑/内部对象，最后统一刷新向量索引。
+   */
+  async writeRecords(
+    records: StructuredMemoryRecord[],
+    options: WriteRecordsOptions = {},
+  ): Promise<StoredStructuredMemory[]> {
+    const stored: StoredStructuredMemory[] = [];
+    for (const record of records) {
+      stored.push(await this.writeRecord(record, options));
     }
     return stored;
+  }
+
+  /** 结构化抽取结果落图（provider 薄壳的使用路径；复用 writeRecords） */
+  async storeExtraction(result: ExtractionResult): Promise<StoredMemory[]> {
+    const records: StructuredMemoryRecord[] = [];
+    for (const fact of result.facts) {
+      records.push({
+        kind: 'fact',
+        content: {
+          subject: fact.subject,
+          predicate: fact.predicate,
+          object: fact.object,
+          ...(fact.confidence !== undefined ? { confidence: fact.confidence } : {}),
+          ...(fact.source !== undefined ? { source: fact.source } : {}),
+        },
+        ...(fact.validFrom !== undefined ? { validFrom: fact.validFrom } : {}),
+        ...(fact.validTo !== undefined ? { validTo: fact.validTo } : {}),
+        ...(fact.tags !== undefined ? { tags: fact.tags } : {}),
+        ...(fact.labels !== undefined ? { labels: fact.labels } : {}),
+        ...(fact.namespace !== undefined ? { namespace: fact.namespace } : {}),
+      });
+    }
+    for (const episode of result.episodes) {
+      records.push({
+        kind: 'episode',
+        content: {
+          episodeType: episode.episodeType,
+          content: episode.content,
+          ...(episode.title !== undefined ? { title: episode.title } : {}),
+          ...(episode.contentHash !== undefined ? { contentHash: episode.contentHash } : {}),
+          ...(episode.startTime !== undefined ? { startTime: episode.startTime } : {}),
+          ...(episode.endTime !== undefined ? { endTime: episode.endTime } : {}),
+          ...(episode.context !== undefined ? { context: episode.context } : {}),
+        },
+        ...(episode.validFrom !== undefined ? { validFrom: episode.validFrom } : {}),
+        ...(episode.validTo !== undefined ? { validTo: episode.validTo } : {}),
+        ...(episode.tags !== undefined ? { tags: episode.tags } : {}),
+        ...(episode.labels !== undefined ? { labels: episode.labels } : {}),
+        ...(episode.namespace !== undefined ? { namespace: episode.namespace } : {}),
+      });
+    }
+    for (const skill of result.skills) {
+      records.push({
+        kind: 'skill',
+        content: {
+          name: skill.name,
+          description: skill.description,
+          category: skill.category,
+          ...(skill.steps !== undefined ? { steps: skill.steps } : {}),
+          ...(skill.commands !== undefined ? { commands: skill.commands } : {}),
+          ...(skill.toolReferences !== undefined ? { toolReferences: skill.toolReferences } : {}),
+          ...(skill.prerequisites !== undefined ? { prerequisites: skill.prerequisites } : {}),
+          ...(skill.relatedEntities !== undefined ? { relatedEntities: skill.relatedEntities } : {}),
+        },
+        ...(skill.validFrom !== undefined ? { validFrom: skill.validFrom } : {}),
+        ...(skill.validTo !== undefined ? { validTo: skill.validTo } : {}),
+        ...(skill.tags !== undefined ? { tags: skill.tags } : {}),
+        ...(skill.labels !== undefined ? { labels: skill.labels } : {}),
+        ...(skill.namespace !== undefined ? { namespace: skill.namespace } : {}),
+      });
+    }
+    for (const preference of result.preferences) {
+      records.push({
+        kind: 'preference',
+        content: {
+          subject: preference.entity,
+          predicate: preference.preferenceType,
+          object: preference.value,
+          ...(preference.confidence !== undefined ? { confidence: preference.confidence } : {}),
+          ...(preference.source !== undefined ? { source: preference.source } : {}),
+        },
+      });
+    }
+    for (const observation of result.observations) {
+      records.push({
+        kind: 'observation',
+        content: { content: observation.content },
+        ...(observation.tags !== undefined ? { tags: observation.tags } : {}),
+      });
+    }
+    return (await this.writeRecords(records)).map((stored) => ({
+      id: stored.id,
+      type: stored.kind,
+      createdAt: stored.createdAt,
+    }));
   }
 
   // ---------- 检索 ----------
@@ -496,76 +634,266 @@ export class MemoryService {
 
   // ---------- 内部 ----------
 
+  /** 公共 `memory_write` 形状 → 统一 MemoryRecord；语义保持不变。 */
   private async writeOne(input: MemoryInput): Promise<StoredMemory> {
     const tags = input.metadata?.tags;
     const validTo = input.metadata?.expiresAt;
     const validFrom = validTo !== undefined ? Math.min(Date.now(), validTo) : undefined;
+    const namespace = input.metadata?.namespace;
+    const relatedTo = input.metadata?.relatedTo;
+    const temporal = { ...(validFrom !== undefined ? { validFrom } : {}), ...(validTo !== undefined ? { validTo } : {}) };
 
-    let node: Node;
+    let record: StructuredMemoryRecord;
     switch (input.type) {
       case 'fact':
-        node = await this.memory.addFact({
-          subject: this.userId,
-          predicate: 'note',
-          object: input.content,
+        record = {
+          kind: 'fact',
+          content: { subject: this.userId, predicate: 'note', object: input.content },
           confidence: input.metadata?.confidence,
           source: input.metadata?.source,
-          validFrom,
-          validTo,
-          tags,
-          namespace: input.metadata?.namespace,
-        });
+          ...temporal,
+          ...(tags !== undefined ? { tags } : {}),
+          ...(namespace !== undefined ? { namespace } : {}),
+          ...(relatedTo !== undefined ? { relatedTo } : {}),
+        };
         break;
       case 'preference':
-        node = await this.memory.addFact({
-          subject: this.userId,
-          predicate: input.metadata?.preferenceType ?? 'general',
-          object: input.content,
+        record = {
+          kind: 'preference',
+          content: {
+            subject: this.userId,
+            predicate: input.metadata?.preferenceType ?? 'general',
+            object: input.content,
+          },
           confidence: input.metadata?.confidence,
           source: input.metadata?.source,
-          validFrom,
-          validTo,
-          tags: [...(tags ?? []), PREFERENCE_TAG],
-          namespace: input.metadata?.namespace,
-        });
+          ...temporal,
+          ...(tags !== undefined ? { tags } : {}),
+          ...(namespace !== undefined ? { namespace } : {}),
+          ...(relatedTo !== undefined ? { relatedTo } : {}),
+        };
         break;
       case 'episode':
-        node = await this.memory.addEpisode({
-          episodeType: input.metadata?.episodeType ?? 'other',
-          content: input.content,
-          tags,
-          namespace: input.metadata?.namespace,
-        });
+        record = {
+          kind: 'episode',
+          content: {
+            episodeType: input.metadata?.episodeType ?? 'other',
+            content: input.content,
+          },
+          ...(tags !== undefined ? { tags } : {}),
+          ...(namespace !== undefined ? { namespace } : {}),
+          ...(relatedTo !== undefined ? { relatedTo } : {}),
+        };
         break;
       case 'observation':
-        node = await this.memory.addEpisode({
-          episodeType: 'observation',
-          content: input.content,
-          tags,
-          namespace: input.metadata?.namespace,
-        });
+        record = {
+          kind: 'observation',
+          content: { content: input.content },
+          ...(tags !== undefined ? { tags } : {}),
+          ...(namespace !== undefined ? { namespace } : {}),
+          ...(relatedTo !== undefined ? { relatedTo } : {}),
+        };
         break;
       case 'skill':
-        node = await this.memory.addSkill({
-          name: input.metadata?.name ?? firstLine(input.content),
-          description: input.content,
-          category: input.metadata?.category ?? 'general',
-          tags,
-          namespace: input.metadata?.namespace,
-        });
+        record = {
+          kind: 'skill',
+          content: {
+            name: input.metadata?.name ?? firstLine(input.content),
+            description: input.content,
+            category: input.metadata?.category ?? 'general',
+          },
+          ...(tags !== undefined ? { tags } : {}),
+          ...(namespace !== undefined ? { namespace } : {}),
+          ...(relatedTo !== undefined ? { relatedTo } : {}),
+        };
         break;
       default:
         throw new ValidationError(`Unknown memory type: ${input.type as string}`);
     }
 
-    // relatedTo：只链接已存在的目标节点（诚实失败，不造悬空边）
-    for (const targetId of input.metadata?.relatedTo ?? []) {
-      if (await this.mebular.graph.getNode(targetId)) {
-        await this.mebular.graph.createEdge(node.id, targetId, EdgeTypes.RELATED_TO);
+    const [stored] = await this.writeRecords([record]);
+    if (!stored) {
+      throw new ValidationError('记忆写入未返回结果', { type: input.type });
+    }
+    return { id: stored.id, type: input.type, createdAt: stored.createdAt };
+  }
+
+  private async writeRecord(
+    record: StructuredMemoryRecord,
+    options: WriteRecordsOptions,
+  ): Promise<StoredStructuredMemory> {
+    if (!isRecord(record.content)) {
+      throw new ValidationError('content 必须是对象', { kind: record.kind });
+    }
+    if (record.validFrom !== undefined && record.validTo !== undefined && record.validTo < record.validFrom) {
+      throw new ValidationError('validTo 早于 validFrom', {
+        validFrom: record.validFrom,
+        validTo: record.validTo,
+      });
+    }
+    const content = record.content;
+    const tags = record.tags !== undefined ? uniqueStrings(record.tags) : undefined;
+    const common = {
+      ...(tags !== undefined && tags.length > 0 ? { tags } : {}),
+      ...(record.labels !== undefined && record.labels.length > 0 ? { labels: record.labels } : {}),
+      ...(record.namespace !== undefined ? { namespace: record.namespace } : {}),
+      ...(record.validFrom !== undefined ? { validFrom: record.validFrom } : {}),
+      ...(record.validTo !== undefined ? { validTo: record.validTo } : {}),
+    };
+
+    let node: Node;
+    switch (record.kind) {
+      case 'fact':
+      case 'preference': {
+        const fact = factContentFrom(content);
+        const confidence = record.confidence ?? numberValue(content.confidence);
+        const source = record.source ?? stringValue(content.source);
+        node = await this.memory.addFact({
+          ...fact,
+          ...(confidence !== undefined ? { confidence } : {}),
+          ...(source !== undefined ? { source } : {}),
+          ...common,
+          ...(record.kind === 'preference'
+            ? { tags: uniqueStrings([...(tags ?? []), PREFERENCE_TAG]) }
+            : {}),
+        }, { deferVectorIndex: true });
+        break;
       }
+      case 'episode':
+      case 'observation': {
+        const episodeType = record.kind === 'observation'
+          ? 'observation'
+          : ((stringValue(content.episodeType) ?? 'other') as EpisodeType);
+        const title = stringValue(content.title);
+        const contentHash = stringValue(content.contentHash);
+        const startTime = numberValue(content.startTime);
+        const endTime = numberValue(content.endTime);
+        const context = stringValue(content.context);
+        node = await this.memory.addEpisode({
+          episodeType,
+          content: stringValue(content.content) ?? '',
+          ...(title !== undefined ? { title } : {}),
+          ...(contentHash !== undefined ? { contentHash } : {}),
+          ...(startTime !== undefined ? { startTime } : {}),
+          ...(endTime !== undefined ? { endTime } : {}),
+          ...(context !== undefined ? { context } : {}),
+          ...common,
+        }, { deferVectorIndex: true });
+        break;
+      }
+      case 'skill': {
+        const description = stringValue(content.description) ?? '';
+        const name = stringValue(content.name) ?? firstLine(description);
+        const category = stringValue(content.category) ?? 'general';
+        const steps = optionalStringArray(content.steps);
+        const commands = optionalStringArray(content.commands);
+        const toolReferences = optionalStringArray(content.toolReferences);
+        const prerequisites = optionalStringArray(content.prerequisites);
+        const relatedEntities = optionalStringArray(content.relatedEntities);
+        node = await this.memory.addSkill({
+          name,
+          description,
+          category,
+          ...(steps !== undefined ? { steps } : {}),
+          ...(commands !== undefined ? { commands } : {}),
+          ...(toolReferences !== undefined ? { toolReferences } : {}),
+          ...(prerequisites !== undefined ? { prerequisites } : {}),
+          ...(relatedEntities !== undefined ? { relatedEntities } : {}),
+          ...common,
+        }, { deferVectorIndex: true });
+        break;
+      }
+      case 'entity': {
+        const description = stringValue(content.description);
+        node = await this.memory.addEntity({
+          entityType: (stringValue(content.entityType) ?? '') as EntityType,
+          name: stringValue(content.name) ?? '',
+          ...(description !== undefined ? { description } : {}),
+          ...(isRecord(content.properties) ? { properties: content.properties } : {}),
+          ...common,
+        }, { deferVectorIndex: true });
+        break;
+      }
+      default:
+        throw new ValidationError(`Unknown memory kind: ${record.kind as string}`);
     }
 
-    return { id: node.id, type: input.type, createdAt: node.createdAt };
+    if (record.metadata !== undefined && Object.keys(record.metadata).length > 0) {
+      node = await this.memory.mergeMetadata(node.id, record.metadata, { deferVectorIndex: true });
+    }
+    const skippedRelatedTo = await this.linkRelatedTo(node.id, record.relatedTo);
+    const vectorIndexed = await this.memory.indexNode(node.id, {
+      tolerateFailure: options.tolerateVectorIndexFailure === true,
+    });
+
+    return {
+      id: node.id,
+      type: node.type,
+      kind: record.kind,
+      createdAt: node.createdAt,
+      node,
+      skippedRelatedTo,
+      vectorIndexed,
+    };
+  }
+
+  /** relatedTo：只链接已存在、未删除且非内部的节点；返回被跳过目标。 */
+  private async linkRelatedTo(sourceId: string, relatedTo?: string[]): Promise<string[]> {
+    const skipped: string[] = [];
+    const seen = new Set<string>();
+    for (const targetId of relatedTo ?? []) {
+      if (seen.has(targetId)) continue;
+      seen.add(targetId);
+      const target = await this.mebular.graph.getNode(targetId);
+      if (!target || target.deletedAt || isInternalNode(target)) {
+        skipped.push(targetId);
+        continue;
+      }
+      await this.mebular.graph.createEdge(sourceId, targetId, EdgeTypes.RELATED_TO);
+    }
+    return skipped;
+  }
+
+  /**
+   * 更新普通 MemoryRecord（capability `/update` 统一入口）。
+   * 内部对象仍必须走内部对象接口；标签按差量同步；向量索引统一刷新。
+   */
+  async updateRecord(
+    input: UpdateMemoryRecordInput,
+    options: WriteRecordsOptions = {},
+  ): Promise<UpdatedMemoryRecord | null> {
+    const existing = await this.mebular.graph.getNode(input.id);
+    if (!existing) return null;
+    if (isInternalNode(existing)) {
+      throw new MebularError('内部对象必须通过内部对象接口更新', 'INTERNAL_OBJECT');
+    }
+    const metadata = input.metadata !== undefined
+      ? { ...(existing.metadata ?? {}), ...input.metadata }
+      : undefined;
+    let node = await this.mebular.graph.updateNode(input.id, {
+      ...(input.content !== undefined ? { content: input.content } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
+    });
+    if (!node) return null;
+    if (input.tags !== undefined) {
+      const currentTags = existing.tags ?? [];
+      const nextTags = uniqueStrings(input.tags);
+      for (const tag of currentTags) {
+        if (!nextTags.includes(tag)) {
+          node = (await this.mebular.graph.removeTag(input.id, tag)) ?? node;
+        }
+      }
+      for (const tag of nextTags) {
+        if (!currentTags.includes(tag)) {
+          node = (await this.mebular.graph.addTag(input.id, tag)) ?? node;
+        }
+      }
+    }
+    const vectorIndexed = await this.memory.indexNode(input.id, {
+      tolerateFailure: options.tolerateVectorIndexFailure === true,
+    });
+    node = (await this.mebular.graph.getNode(input.id)) ?? node;
+    return { node, vectorIndexed };
   }
 
   private passFilters(node: Node, query: MemoryQuery): boolean {
@@ -596,6 +924,42 @@ export class MemoryService {
     }
     return true;
   }
+}
+
+// ---------- 写入归一化辅助 ----------
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function optionalStringArray(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((entry): entry is string => typeof entry === 'string');
+}
+
+/** fact/preference 两种外部形状 → 统一三元组（preference 允许 entity/preferenceType/value）。 */
+function factContentFrom(content: Record<string, unknown>): {
+  subject: string;
+  predicate: string;
+  object: string;
+} {
+  return {
+    subject: stringValue(content.subject) ?? stringValue(content.entity) ?? '',
+    predicate: stringValue(content.predicate) ?? stringValue(content.preferenceType) ?? '',
+    object: stringValue(content.object) ?? stringValue(content.value) ?? '',
+  };
 }
 
 // ---------- 映射（与既有 provider 输出保持同形） ----------

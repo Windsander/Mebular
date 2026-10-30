@@ -32,6 +32,16 @@ import {
   type SkillNode,
 } from './types.js';
 
+/**
+ * 写入收尾选项（MemoryService 统一写入路径使用）。
+ *
+ * `deferVectorIndex`：先落图/元数据/标签，等调用方合并完 metadata 与 relatedTo 后
+ * 再统一刷新一次向量索引，避免同一节点被重复索引。
+ */
+export interface MemoryWriteOptions {
+  deferVectorIndex?: boolean;
+}
+
 export interface MemoryListFilter {
   tags?: string[];
   createdAfter?: number;
@@ -81,7 +91,7 @@ export class MemoryStore {
 
   // ---------- 写入 ----------
 
-  async addEntity(input: EntityInput): Promise<EntityNode> {
+  async addEntity(input: EntityInput, options: MemoryWriteOptions = {}): Promise<EntityNode> {
     requireNonEmpty(input.name, 'entity.name');
     if (!ENTITY_TYPES.includes(input.entityType)) {
       throw new ValidationError(`非法 entityType：${input.entityType}`, { entityType: input.entityType });
@@ -93,6 +103,8 @@ export class MemoryStore {
     if (input.description !== undefined) content.description = input.description;
     if (input.properties !== undefined) content.properties = input.properties;
     const node = await this.graph.createNode('entity', content, input.labels, {
+      ...(input.validFrom !== undefined ? { validFrom: input.validFrom } : {}),
+      ...(input.validTo !== undefined ? { validTo: input.validTo } : {}),
       ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
     });
     if (input.tags?.length) {
@@ -100,10 +112,10 @@ export class MemoryStore {
         await this.graph.addTag(node.id, tag);
       }
     }
-    return this.finishWrite<EntityNode>(node.id);
+    return this.finishWrite<EntityNode>(node.id, options);
   }
 
-  async addFact(input: FactInput): Promise<FactNode> {
+  async addFact(input: FactInput, options: MemoryWriteOptions = {}): Promise<FactNode> {
     requireNonEmpty(input.subject, 'fact.subject');
     requireNonEmpty(input.predicate, 'fact.predicate');
     requireNonEmpty(input.object, 'fact.object');
@@ -134,10 +146,10 @@ export class MemoryStore {
         await this.graph.addTag(node.id, tag);
       }
     }
-    return this.finishWrite<FactNode>(node.id);
+    return this.finishWrite<FactNode>(node.id, options);
   }
 
-  async addEpisode(input: EpisodeInput): Promise<EpisodeNode> {
+  async addEpisode(input: EpisodeInput, options: MemoryWriteOptions = {}): Promise<EpisodeNode> {
     requireNonEmpty(input.content, 'episode.content');
     if (!EPISODE_TYPES.includes(input.episodeType)) {
       throw new ValidationError(`非法 episodeType：${input.episodeType}`, { episodeType: input.episodeType });
@@ -152,6 +164,8 @@ export class MemoryStore {
     if (input.endTime !== undefined) content.endTime = input.endTime;
     if (input.context !== undefined) content.context = input.context;
     const node = await this.graph.createNode('episode', content, input.labels, {
+      ...(input.validFrom !== undefined ? { validFrom: input.validFrom } : {}),
+      ...(input.validTo !== undefined ? { validTo: input.validTo } : {}),
       ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
     });
     if (input.tags?.length) {
@@ -159,10 +173,10 @@ export class MemoryStore {
         await this.graph.addTag(node.id, tag);
       }
     }
-    return this.finishWrite<EpisodeNode>(node.id);
+    return this.finishWrite<EpisodeNode>(node.id, options);
   }
 
-  async addSkill(input: SkillInput): Promise<SkillNode> {
+  async addSkill(input: SkillInput, options: MemoryWriteOptions = {}): Promise<SkillNode> {
     requireNonEmpty(input.name, 'skill.name');
     requireNonEmpty(input.description, 'skill.description');
     requireNonEmpty(input.category, 'skill.category');
@@ -177,6 +191,8 @@ export class MemoryStore {
     if (input.prerequisites !== undefined) content.prerequisites = input.prerequisites;
     if (input.relatedEntities !== undefined) content.relatedEntities = input.relatedEntities;
     const node = await this.graph.createNode('skill', content, input.labels, {
+      ...(input.validFrom !== undefined ? { validFrom: input.validFrom } : {}),
+      ...(input.validTo !== undefined ? { validTo: input.validTo } : {}),
       ...(input.namespace !== undefined ? { namespace: input.namespace } : {}),
     });
     if (input.tags?.length) {
@@ -184,7 +200,7 @@ export class MemoryStore {
         await this.graph.addTag(node.id, tag);
       }
     }
-    return this.finishWrite<SkillNode>(node.id);
+    return this.finishWrite<SkillNode>(node.id, options);
   }
 
   async addMeta(input: MetaInput): Promise<MetaNode> {
@@ -203,6 +219,48 @@ export class MemoryStore {
       }
     }
     return this.finishWrite<MetaNode>(node.id);
+  }
+
+  /**
+   * 合并节点 metadata（写入服务在节点创建后附加 kind/provenance/contentHash 等）。
+   * 走 GraphStore.updateNode → `node_updated` 事件；默认同时刷新向量索引，可按需延后。
+   */
+  async mergeMetadata(
+    id: string,
+    metadata: Record<string, unknown>,
+    options: MemoryWriteOptions = {},
+  ): Promise<Node> {
+    const existing = await this.graph.getNode(id);
+    if (!existing) {
+      throw new ValidationError('节点写入后读取失败', { id });
+    }
+    const merged = { ...(existing.metadata ?? {}), ...metadata };
+    await this.graph.updateNode(id, { metadata: merged });
+    return this.finishWrite<Node>(id, options);
+  }
+
+  /**
+   * 刷新单个节点的向量索引；返回是否索引成功。
+   * `tolerateFailure=true` 时向量索引失败不抛出（图数据已写入），并标记索引待重建。
+   */
+  async indexNode(id: string, { tolerateFailure = false } = {}): Promise<boolean> {
+    const node = await this.graph.getNode(id);
+    if (!node) {
+      throw new ValidationError('节点写入后读取失败', { id });
+    }
+    if (!this.vectorIndex) {
+      return true;
+    }
+    try {
+      await this.vectorIndex.index(node);
+      return true;
+    } catch (error) {
+      this.vectorIndexStale = true;
+      if (tolerateFailure) {
+        return false;
+      }
+      throw error;
+    }
   }
 
   // ---------- 查询 ----------
@@ -424,13 +482,13 @@ export class MemoryStore {
   }
 
   /** 写入收尾：读回节点、（配置后）更新向量索引 */
-  private async finishWrite<T extends Node>(id: string): Promise<T> {
+  private async finishWrite<T extends Node>(id: string, options: MemoryWriteOptions = {}): Promise<T> {
     const node = await this.graph.getNode(id);
     if (!node) {
       throw new ValidationError('节点写入后读取失败');
     }
-    if (this.vectorIndex) {
-      await this.vectorIndex.index(node);
+    if (!options.deferVectorIndex) {
+      await this.indexNode(id);
     }
     return node as T;
   }

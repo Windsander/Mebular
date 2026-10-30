@@ -2,13 +2,14 @@
 // 真实 Mebular + MemoryService + 沙箱 home；不启网络/模型。
 import { describe, it, expect, beforeAll, afterAll } from '@jest/globals';
 import http from 'node:http';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { IdentityManager, Mebular, MemoryService } from '@mebular/core';
 import { startHttpServer } from '../../packages/mcp/src/serve.mjs';
 import { readCapabilityToken } from '../../packages/mcp/src/memory-runtime-token.mjs';
-import { TOOL_NAMES } from '../../packages/mcp/src/tools.mjs';
+import { TOOL_NAMES, TOOL_SPECS } from '../../packages/mcp/src/tools.mjs';
 
 let home;
 let cloudRoot;
@@ -202,7 +203,7 @@ describe('POST /write', () => {
     expect(record.provenance.deviceId).toBe('device-w2b');
   });
 
-  it('批量写入：顺序一致、计数正确；observation 落为 fact 语义', async () => {
+  it('批量写入：顺序一致、计数正确；observation 落为 episode 语义', async () => {
     const marker = unique('batch-observation');
     const res = await post(capability('/write'), writeBody([
       {
@@ -225,8 +226,10 @@ describe('POST /write', () => {
     expect(res.body.data.partial).toBe(false);
     expect(res.body.data.results.map((entry) => entry.status)).toEqual(['created', 'created']);
     const observation = res.body.data.results[0];
+    expect(observation.type).toBe('episode');
     const node = await app.graph.getNode(observation.id);
-    expect(node.type).toBe('fact');
+    expect(node.type).toBe('episode');
+    expect(node.content).toMatchObject({ episodeType: 'observation', content: marker });
     expect(node.metadata.kind).toBe('observation');
 
     const query = await post(capability('/query'), {
@@ -237,6 +240,7 @@ describe('POST /write', () => {
     expect(query.status).toBe(200);
     expect(query.body.data.records.map((entry) => entry.id)).toContain(observation.id);
     expect(query.body.data.records.every((entry) => entry.kind === 'observation')).toBe(true);
+    expect(query.body.data.records.find((entry) => entry.id === observation.id)?.type).toBe('episode');
     expect(query.body.data.records.find((entry) => entry.id === observation.id)?.text).toBe(marker);
   });
 
@@ -442,6 +446,220 @@ describe('POST /write', () => {
   });
 });
 
+describe('统一 MemoryRecord 写路径', () => {
+  const publicWrite = TOOL_SPECS.find((spec) => spec.name === 'memory_write');
+
+  async function writeViaPublic(items) {
+    expect(publicWrite).toBeDefined();
+    const result = await publicWrite.handler(service, { items });
+    expect(result.isError).toBeUndefined();
+    return result.structuredContent.stored;
+  }
+
+  async function nodeCreatedEvent(id) {
+    const events = await app.eventLog.listEvents();
+    return events.find((event) => event.type === 'node_created' && event.data?.node?.id === id);
+  }
+
+  it('同一 observation：公共 memory_write 与 capability /write 都落为 episode(observation)', async () => {
+    const marker = unique('parity-observation');
+    const tags = ['parity-observation-tag'];
+    const publicStored = await writeViaPublic([{
+      type: 'observation',
+      content: marker,
+      metadata: { tags, namespace: 'default' },
+    }]);
+    const capabilityWrite = await writeOne({
+      domain: 'default',
+      kind: 'observation',
+      content: { content: marker },
+      tags,
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    });
+    const capabilityResult = capabilityWrite.body.data.results[0];
+
+    expect(publicStored[0]).toMatchObject({ type: 'observation' });
+    expect(capabilityResult).toMatchObject({ type: 'episode', kind: 'observation' });
+
+    const publicNode = await app.graph.getNode(publicStored[0].id);
+    const capabilityNode = await app.graph.getNode(capabilityResult.id);
+    for (const node of [publicNode, capabilityNode]) {
+      expect(node.type).toBe('episode');
+      expect(node.content).toEqual({ episodeType: 'observation', content: marker });
+      expect(node.tags).toEqual(expect.arrayContaining(tags));
+      expect(node.namespace).toBe('default');
+      expect(node.metadata?.internal).toBeUndefined();
+      expect(node.deletedAt).toBeUndefined();
+    }
+
+    // 默认可见性：普通检索与 capability 语义查询都能召回（不需要 includeInternal）。
+    const found = await service.search({ query: marker });
+    expect(found.memories.map((memory) => memory.id).sort())
+      .toEqual([publicNode.id, capabilityNode.id].sort());
+    const capabilityQuery = await post(capability('/query'), {
+      actor: agent,
+      query: marker,
+      types: ['observation'],
+      domains: ['default'],
+    }, { token });
+    expect(capabilityQuery.status).toBe(200);
+    expect(capabilityQuery.body.data.records.map((record) => record.id))
+      .toEqual(expect.arrayContaining([publicNode.id, capabilityNode.id]));
+    expect(capabilityQuery.body.data.records.every((record) => record.kind === 'observation')).toBe(true);
+
+    // 同步参与：两者都经 GraphStore 产生 node_created 事件（同一事件日志/同步源）。
+    for (const node of [publicNode, capabilityNode]) {
+      const event = await nodeCreatedEvent(node.id);
+      expect(event).toBeDefined();
+      expect(event.namespace).toBe('default');
+      expect(event.author).toBe(app.deviceId);
+    }
+  });
+
+  it('legacy fact observation 仍可读，并与新 episode observation 按内容去重', async () => {
+    const marker = unique('legacy-observation');
+    const legacy = await app.graph.createNode('fact', { content: marker }, undefined, { namespace: 'default' });
+    const contentHash = `sha256:${createHash('sha256')
+      .update(JSON.stringify({ content: { content: marker }, kind: 'observation' }))
+      .digest('hex')}`;
+    await app.graph.updateNode(legacy.id, {
+      metadata: { kind: 'observation', contentHash },
+    });
+
+    const query = await post(capability('/query'), {
+      actor: agent,
+      query: marker,
+      types: ['observation'],
+      domains: ['default'],
+    }, { token });
+    expect(query.status).toBe(200);
+    expect(query.body.data.records.map((record) => record.id)).toContain(legacy.id);
+    expect(query.body.data.records.find((record) => record.id === legacy.id)).toMatchObject({
+      type: 'fact',
+      kind: 'observation',
+      text: marker,
+    });
+
+    const res = await writeOne({
+      domain: 'default',
+      kind: 'observation',
+      content: { content: marker },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    });
+    expect(res.body.data.created).toBe(0);
+    expect(res.body.data.duplicates).toBe(1);
+    expect(res.body.data.results[0]).toMatchObject({ status: 'duplicate', id: legacy.id });
+  });
+
+  it('同一 preference：公共工具与 capability 都是 fact + preference 标签、同一三元组', async () => {
+    const value = unique('parity-preference');
+    const tags = ['parity-preference-tag'];
+    const publicStored = await writeViaPublic([{
+      type: 'preference',
+      content: value,
+      metadata: { preferenceType: 'theme', tags, namespace: 'default' },
+    }]);
+    const capability = await writeOne({
+      domain: 'default',
+      kind: 'preference',
+      content: { entity: 'user', preferenceType: 'theme', value },
+      tags,
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    });
+    const capabilityResult = capability.body.data.results[0];
+
+    const publicNode = await app.graph.getNode(publicStored[0].id);
+    const capabilityNode = await app.graph.getNode(capabilityResult.id);
+    expect(publicStored[0].type).toBe('preference');
+    expect(capabilityResult).toMatchObject({ type: 'fact', kind: 'preference' });
+    for (const node of [publicNode, capabilityNode]) {
+      expect(node.type).toBe('fact');
+      expect(node.content).toMatchObject({ subject: 'user', predicate: 'theme', object: value });
+      expect(node.tags).toEqual(expect.arrayContaining(['preference', ...tags]));
+      expect(node.namespace).toBe('default');
+      expect(node.metadata?.internal).toBeUndefined();
+    }
+
+    const preferences = await service.query({
+      types: ['preference'],
+      filters: { namespace: 'default' },
+    });
+    expect(preferences.memories.map((memory) => memory.id))
+      .toEqual(expect.arrayContaining([publicNode.id, capabilityNode.id]));
+  });
+
+  it('fact 结构化字段保留；公共 fact 仍是 userId/note/content 形状', async () => {
+    const object = unique('parity-fact');
+    const capability = await writeOne({
+      domain: 'default',
+      kind: 'fact',
+      content: {
+        subject: 'service',
+        predicate: 'port',
+        object,
+        confidence: 0.66,
+        source: 'host-doc',
+      },
+      tags: ['parity-fact-tag'],
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    });
+    const capabilityNode = await app.graph.getNode(capability.body.data.results[0].id);
+    expect(capabilityNode.type).toBe('fact');
+    expect(capabilityNode.content).toEqual({
+      subject: 'service',
+      predicate: 'port',
+      object,
+      confidence: 0.66,
+      source: 'host-doc',
+    });
+    expect(capabilityNode.tags).toContain('parity-fact-tag');
+
+    const publicMarker = unique('parity-public-fact');
+    const publicStored = await writeViaPublic([{
+      type: 'fact',
+      content: publicMarker,
+      metadata: { namespace: 'default' },
+    }]);
+    const publicNode = await app.graph.getNode(publicStored[0].id);
+    expect(publicNode.type).toBe('fact');
+    expect(publicNode.content).toMatchObject({ subject: 'user', predicate: 'note', object: publicMarker });
+  });
+
+  it('relatedTo 统一由写入服务处理；内部对象与缺失目标不建边', async () => {
+    const targetMarker = unique('related-target');
+    const targetStored = await writeViaPublic([{
+      type: 'fact',
+      content: targetMarker,
+      metadata: { namespace: 'default' },
+    }]);
+    const targetId = targetStored[0].id;
+    const internal = await app.graph.createNode('compact', { summary: unique('related-internal') }, undefined, {
+      namespace: 'default',
+    });
+    await app.graph.updateNode(internal.id, {
+      metadata: { internal: true, internalObject: { schema: 1, kind: 'compact' } },
+    });
+    const missingId = '01JDOESNOTEXIST0000000000000';
+
+    const res = await writeOne({
+      domain: 'default',
+      kind: 'observation',
+      content: { content: unique('related-source') },
+      relatedTo: [targetId, internal.id, missingId],
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    });
+    const id = res.body.data.results[0].id;
+    const edges = await app.graph.listEdges({ source: id });
+    expect(edges.map((edge) => edge.target)).toEqual([targetId]);
+    expect(res.body.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'related_to_skipped', id: internal.id }),
+      expect.objectContaining({ code: 'related_to_skipped', id: missingId }),
+    ]));
+    expect(await app.graph.listEdges({ source: targetId })).toEqual([]);
+    expect(await app.graph.listEdges({ target: internal.id })).toEqual([]);
+  });
+});
+
 describe('写权限矩阵', () => {
   const item = (domain, extra = {}) => ({
     domain,
@@ -615,6 +833,38 @@ describe('POST /update', () => {
     const node = await app.graph.getNode(id);
     expect(node.content).toMatchObject({ subject: 'user', predicate: 'theme', object: 'light' });
     expect(node.tags).toContain('preference');
+  });
+
+  it('observation 更新后仍是 episode(observation)；正文与 kind 保持', async () => {
+    const marker = unique('update-observation');
+    const created = await writeOne({
+      domain: 'default',
+      kind: 'observation',
+      content: { content: marker },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    });
+    const id = created.body.data.results[0].id;
+    const updatedText = `${marker}-updated`;
+    const res = await post(capability('/update'), {
+      actor: { type: 'user' },
+      items: [{ id, patch: { content: { content: updatedText } } }],
+    }, { token });
+    expect(res.status).toBe(200);
+    const node = await app.graph.getNode(id);
+    expect(node.type).toBe('episode');
+    expect(node.content).toMatchObject({ episodeType: 'observation', content: updatedText });
+    expect(node.metadata.kind).toBe('observation');
+    const query = await post(capability('/query'), {
+      actor: agent,
+      query: updatedText,
+      types: ['observation'],
+      domains: ['default'],
+    }, { token });
+    expect(query.body.data.records.find((record) => record.id === id)).toMatchObject({
+      type: 'episode',
+      kind: 'observation',
+      text: updatedText,
+    });
   });
 
   it('受保护字段与非法 patch 被拒绝（422），时间字段给出明确限制', async () => {

@@ -200,6 +200,7 @@ describe('0.3 共享记忆：真实 sidecar + capability + 设备同步', () => 
       }],
     }), 'agent observation ingest');
     expect(obsIngest.records[0].domain).toBe('agent:hermes');
+    expect(obsIngest.records[0].type).toBe('episode');
 
     const defaultIngest = assertOk(await a.sidecar.ingest({
       requestId: `req_default_${RUN}`,
@@ -251,13 +252,17 @@ describe('0.3 共享记忆：真实 sidecar + capability + 设备同步', () => 
     }), 'agent query');
     expect(agentRecords.records).toHaveLength(1);
     expect(agentRecords.records[0]).toMatchObject({
+      type: 'episode',
       domain: 'agent:hermes',
       ownerType: 'agent',
       ownerId: 'hermes',
       kind: 'observation',
     });
-    // 观察正文保留在 content 与 text；domain/owner 不冒充 user。
-    expect(agentRecords.records[0].content).toEqual({ content: `${obsMarker} 端口是 7731` });
+    // 观察与公共 memory_write 一致，落为 episode(observation)；正文保留在 content 与 text。
+    expect(agentRecords.records[0].content).toMatchObject({
+      episodeType: 'observation',
+      content: `${obsMarker} 端口是 7731`,
+    });
     expect(agentRecords.records[0].text).toBe(`${obsMarker} 端口是 7731`);
     expect(agentRecords.records[0].provenance).toMatchObject({
       agentId: 'hermes',

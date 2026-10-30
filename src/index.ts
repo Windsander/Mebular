@@ -125,6 +125,12 @@ export {
   type MemoryStatus,
   type ImportInput,
   type ImportResult,
+  type StructuredMemoryKind,
+  type StructuredMemoryRecord,
+  type WriteRecordsOptions,
+  type StoredStructuredMemory,
+  type UpdateMemoryRecordInput,
+  type UpdatedMemoryRecord,
 } from './memory/MemoryService.js';
 export { computeStateHash, computeStateHashByNamespace, isEvidenceNode } from './core/stateHash.js';
 export * from './hermes/index.js';

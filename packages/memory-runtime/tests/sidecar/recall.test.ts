@@ -586,6 +586,40 @@ describe('RecallService', () => {
     });
   });
 
+  it('validTo 等于 now 即视为已结束：默认不注入，includeHistory 保留历史', async () => {
+    const { service } = await setup({
+      records: [record({
+        id: '01JPORTCLOSED',
+        type: 'fact',
+        kind: 'fact',
+        domain: 'agent:opencode',
+        content: { subject: 'mebular', predicate: 'localPort', object: '7332', confidence: 0.9 },
+        text: 'mebular localPort 7332',
+        validTo: NOW,
+      })],
+    });
+    const silent = await service.handleRecall({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: 'mebular 本地端口是多少？',
+    });
+    expect(silent.data.fragments).toEqual([]);
+    expect(silent.data.silenceReason).toBe('only_stale');
+
+    const history = await service.handleRecall({
+      agentId: 'opencode',
+      threadId: 'th_recall',
+      query: 'mebular 本地端口是多少？',
+      includeHistory: true,
+      anchor: 'closed-history',
+    });
+    expect(history.data.fragments).toHaveLength(1);
+    expect(history.data.fragments[0]).toMatchObject({
+      kind: 'fact',
+      stale: true,
+    });
+  });
+
   it('冲突事实成组展开、相邻呈现，不静默选边', async () => {
     const { service } = await setup({
       records: [

@@ -875,7 +875,7 @@ describe('POST /update', () => {
       { metadata: { ownerType: 'user' } },
       { metadata: { archivedAt: 1 } },
       { domain: 'user' },
-      { validTo: Date.now() + 1000 },
+      { validFrom: 1 },
     ]) {
       const res = await post(capability('/update'), {
         actor: agent,
@@ -957,6 +957,268 @@ describe('POST /update', () => {
       items: [{ id: hermesId, patch: { content: { content: 'governed' } } }],
     }, { token });
     expect(governed.status).toBe(200);
+  });
+});
+
+describe('记录级修正（supersedes / validTo）', () => {
+  async function createPortFact(object, extra = {}) {
+    const subject = `project-${unique('port')}`;
+    const res = await writeOne({
+      clientItemId: unique('port_fact'),
+      domain: 'agent:opencode',
+      kind: 'fact',
+      content: { subject, predicate: 'localPort', object },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+      ...extra,
+    });
+    return { id: res.body.data.results[0].id, subject };
+  }
+
+  it('/write supersedes：旧 fact validTo=新 validFrom，保留内容/详情，默认 query 不再返回', async () => {
+    const old = await createPortFact('7332');
+    const detail = await post(capability('/detail'), {
+      actor: agent,
+      op: 'write',
+      items: [{
+        clientItemId: unique('port_detail'),
+        domain: 'agent:opencode',
+        detailKind: 'raw_chunk',
+        threadId: 'th_supersede',
+        recordIds: [old.id],
+        role: 'user',
+        text: '项目端口是 7332',
+        retentionClass: 'conversation',
+        expiresAt: 0,
+        provenance: { source: 'runtime', extractor: 'heuristic' },
+      }],
+    }, { token });
+    expect(detail.status).toBe(200);
+    const detailId = detail.body.data.results[0].id;
+
+    const clientItemId = unique('port_correction');
+    const corrected = await post(capability('/write'), writeBody([{
+      clientItemId,
+      domain: 'agent:opencode',
+      kind: 'fact',
+      content: { subject: old.subject, predicate: 'localPort', object: '7331' },
+      supersedes: [old.id],
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    }]), { token });
+    expect(corrected.status).toBe(200);
+    expect(corrected.body.data.results[0]).toMatchObject({
+      status: 'created',
+      domain: 'agent:opencode',
+      superseded: [old.id],
+    });
+    const newId = corrected.body.data.results[0].id;
+    const oldNode = await app.graph.getNode(old.id);
+    const newNode = await app.graph.getNode(newId);
+    expect(oldNode.deletedAt).toBeUndefined();
+    expect(oldNode.content).toMatchObject({ subject: old.subject, predicate: 'localPort', object: '7332' });
+    expect(oldNode.validTo).toBe(newNode.validFrom);
+    expect(oldNode.metadata.supersededBy).toBe(newId);
+    expect(oldNode.metadata.supersededAt).toBeGreaterThan(0);
+    const edges = await app.graph.listEdges({ source: newId, target: old.id, relation: 'supersedes' });
+    expect(edges).toHaveLength(1);
+
+    const current = await post(capability('/query'), {
+      actor: agent,
+      query: '7332',
+      domains: ['agent:opencode'],
+    }, { token });
+    expect(current.body.data.records.some((record) => record.id === old.id)).toBe(false);
+
+    const history = await post(capability('/query'), {
+      actor: agent,
+      query: '7332',
+      domains: ['agent:opencode'],
+      includeHistory: true,
+    }, { token });
+    const historical = history.body.data.records.find((record) => record.id === old.id);
+    expect(historical).toMatchObject({ validTo: newNode.validFrom, supersededBy: newId });
+    expect(historical.content).toMatchObject({ object: '7332' });
+
+    const detailAfter = await post(capability('/detail'), {
+      actor: agent,
+      op: 'get',
+      id: detailId,
+      includeText: true,
+    }, { token });
+    expect(detailAfter.status).toBe(200);
+    expect(detailAfter.body.data.detail.text).toContain('7332');
+
+    const newest = await post(capability('/query'), {
+      actor: agent,
+      query: '7331',
+      domains: ['agent:opencode'],
+    }, { token });
+    expect(newest.body.data.records.some((record) => record.id === newId)).toBe(true);
+  });
+
+  it('supersedes 幂等：同一 clientItemId 重放返回 duplicate，旧 validTo 不回退/不重开', async () => {
+    const old = await createPortFact('7332');
+    const item = {
+      clientItemId: unique('port_idempotent'),
+      domain: 'agent:opencode',
+      kind: 'fact',
+      content: { subject: old.subject, predicate: 'localPort', object: '7331' },
+      supersedes: [old.id],
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    };
+    const first = await post(capability('/write'), writeBody([item]), { token });
+    expect(first.body.data.results[0].status).toBe('created');
+    const oldAfterFirst = await app.graph.getNode(old.id);
+    const replay = await post(capability('/write'), writeBody([item]), { token });
+    expect(replay.status).toBe(200);
+    expect(replay.body.data.results[0].status).toBe('duplicate');
+    expect(replay.body.data.results[0].id).toBe(first.body.data.results[0].id);
+    expect(replay.body.data.results[0].superseded).toEqual([old.id]);
+    const oldAfterReplay = await app.graph.getNode(old.id);
+    expect(oldAfterReplay.validTo).toBe(oldAfterFirst.validTo);
+    expect(oldAfterReplay.deletedAt).toBeUndefined();
+  });
+
+  it('supersedes 结构化校验：跨域/内部对象/不同键/同值/无权限全部拒绝且不写新记录', async () => {
+    const old = await createPortFact('7332');
+    const base = {
+      kind: 'fact',
+      content: { subject: old.subject, predicate: 'localPort', object: '7331' },
+      provenance: { source: 'runtime', extractor: 'heuristic' },
+    };
+    const cross = await post(capability('/write'), writeBody([{
+      ...base,
+      clientItemId: unique('cross'),
+      domain: 'default',
+      supersedes: [old.id],
+    }]), { token });
+    expect(cross.status).toBe(422);
+    expect(cross.body.error.details.supersedesCode).toBe('domain_mismatch');
+
+    const internal = await app.graph.createNode('compact', { summary: 'internal' }, undefined, { namespace: 'agent:opencode' });
+    await app.graph.updateNode(internal.id, {
+      metadata: { internal: true, internalObject: { schema: 1, kind: 'compact' } },
+    });
+    const internalRes = await post(capability('/write'), writeBody([{
+      ...base,
+      clientItemId: unique('internal'),
+      domain: 'agent:opencode',
+      supersedes: [internal.id],
+    }]), { token });
+    expect(internalRes.status).toBe(422);
+    expect(internalRes.body.error.details.supersedesCode).toBe('internal_object');
+
+    const keyMismatch = await post(capability('/write'), writeBody([{
+      ...base,
+      clientItemId: unique('key'),
+      domain: 'agent:opencode',
+      content: { subject: `${old.subject}-other`, predicate: 'localPort', object: '7331' },
+      supersedes: [old.id],
+    }]), { token });
+    expect(keyMismatch.status).toBe(422);
+    expect(keyMismatch.body.error.details.supersedesCode).toBe('key_mismatch');
+
+    const sameObject = await post(capability('/write'), writeBody([{
+      ...base,
+      clientItemId: unique('same'),
+      domain: 'agent:opencode',
+      content: { subject: old.subject, predicate: 'localPort', object: '7332' },
+      supersedes: [old.id],
+    }]), { token });
+    expect(sameObject.status).toBe(422);
+    expect(sameObject.body.error.details.supersedesCode).toBe('same_object');
+
+    const userOld = await post(capability('/write'), {
+      actor: { type: 'agent', agentId: 'hermes' },
+      items: [{
+        clientItemId: unique('user_old'),
+        domain: 'user',
+        kind: 'fact',
+        content: { subject: 'user', predicate: 'theme', object: 'dark' },
+        provenance: { source: 'runtime', extractor: 'heuristic', confirmation: 'explicit' },
+      }],
+    }, { token });
+    const forbidden = await post(capability('/write'), writeBody([{
+      clientItemId: unique('forbidden'),
+      domain: 'user',
+      kind: 'fact',
+      content: { subject: 'user', predicate: 'theme', object: 'light' },
+      supersedes: [userOld.body.data.results[0].id],
+      provenance: { source: 'runtime', extractor: 'heuristic', confirmation: 'explicit' },
+    }]), { token });
+    expect(forbidden.status).toBe(403);
+    expect(forbidden.body.error.code).toBe('forbidden_scope');
+
+    // 同一 Agent 在自己可写的 user 域写入的旧事实可以修正（writer/域/权限三者一致）。
+    const ownUserOld = await post(capability('/write'), writeBody([{
+      clientItemId: unique('own_user_old'),
+      domain: 'user',
+      kind: 'fact',
+      content: { subject: 'user', predicate: 'editorTheme', object: 'dark' },
+      provenance: { source: 'runtime', extractor: 'heuristic', confirmation: 'explicit' },
+    }]), { token });
+    const ownUserOldId = ownUserOld.body.data.results[0].id;
+    const ownUserNew = await post(capability('/write'), writeBody([{
+      clientItemId: unique('own_user_new'),
+      domain: 'user',
+      kind: 'fact',
+      content: { subject: 'user', predicate: 'editorTheme', object: 'light' },
+      supersedes: [ownUserOldId],
+      provenance: { source: 'runtime', extractor: 'heuristic', confirmation: 'explicit' },
+    }]), { token });
+    expect(ownUserNew.status).toBe(200);
+    expect(ownUserNew.body.data.results[0]).toMatchObject({ status: 'created', superseded: [ownUserOldId] });
+    expect((await app.graph.getNode(ownUserOldId)).validTo).toBe(
+      (await app.graph.getNode(ownUserNew.body.data.results[0].id)).validFrom,
+    );
+
+    const currentNode = await app.graph.getNode(old.id);
+    expect(currentNode.validTo).toBe(9999999999999);
+  });
+
+  it('/update validTo：受控结束 fact；默认 query 排除，includeHistory 与管理面仍可见', async () => {
+    const fact = await createPortFact('7332');
+    const closedAt = Date.now();
+    const res = await post(capability('/update'), {
+      actor: agent,
+      items: [{ id: fact.id, patch: { validTo: closedAt } }],
+    }, { token });
+    expect(res.status).toBe(200);
+    expect(res.body.data.results[0]).toMatchObject({ status: 'updated', validTo: closedAt });
+    const node = await app.graph.getNode(fact.id);
+    expect(node.validTo).toBe(closedAt);
+    expect(node.content.object).toBe('7332');
+    const idempotent = await post(capability('/update'), {
+      actor: agent,
+      items: [{ id: fact.id, patch: { validTo: closedAt } }],
+    }, { token });
+    expect(idempotent.status).toBe(200);
+    expect(idempotent.body.data.results[0]).toMatchObject({ status: 'updated', validTo: closedAt });
+
+    const current = await post(capability('/query'), {
+      actor: agent,
+      query: '7332',
+      domains: ['agent:opencode'],
+    }, { token });
+    expect(current.body.data.records.some((record) => record.id === fact.id)).toBe(false);
+    const history = await post(capability('/query'), {
+      actor: agent,
+      query: '7332',
+      domains: ['agent:opencode'],
+      includeHistory: true,
+    }, { token });
+    expect(history.body.data.records.some((record) => record.id === fact.id)).toBe(true);
+
+    const managed = await service.listRecords({ includeHistory: true, namespace: 'agent:opencode' });
+    expect(managed.nodes.some((entry) => entry.id === fact.id)).toBe(true);
+    const currentOnly = await service.listRecords({ includeHistory: false, namespace: 'agent:opencode' });
+    expect(currentOnly.nodes.some((entry) => entry.id === fact.id)).toBe(false);
+
+    const reopen = await post(capability('/update'), {
+      actor: agent,
+      items: [{ id: fact.id, patch: { validTo: Date.now() + 60_000 } }],
+    }, { token });
+    expect(reopen.status).toBe(409);
+    expect(reopen.body.error.code).toBe('temporal_conflict');
   });
 });
 

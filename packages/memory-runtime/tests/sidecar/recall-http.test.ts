@@ -329,6 +329,78 @@ describe('sidecar recall/context HTTP', () => {
     expect(JSON.stringify(deleted.body)).not.toContain(text);
   });
 
+  it('/recall/:recallId/expand 优先 user raw chunk，不混入 assistant raw chunk', async () => {
+    const { server, fake } = await setup();
+    const userText = '我原话：以后默认用深色主题。';
+    const assistantText = 'FAKE_ASSISTANT_REPLY\n\n以后默认用深色主题，记住。';
+    fake.setRecords([{
+      ...preference(),
+      id: '01JROLEQUOTE1',
+      type: 'episode',
+      kind: 'episode',
+      content: { episodeType: 'conversation', title: '原话', content: userText },
+      text: userText,
+      provenance: {
+        ...preference().provenance,
+        detailIds: ['01JROLEASSIST1', '01JROLEUSER01'],
+      },
+    }]);
+    fake.details.push({
+      id: '01JROLEASSIST1',
+      detailKind: 'raw_chunk',
+      domain: 'user',
+      recordIds: ['01JROLEQUOTE1'],
+      role: 'assistant',
+      text: assistantText,
+      messageId: 'm_assistant_detail',
+      chunkIndex: 0,
+      provenance: { source: 'runtime', deviceId: 'device-a', agentId: 'dsh' },
+      createdAt: NOW - 60_000,
+    }, {
+      id: '01JROLEUSER01',
+      detailKind: 'raw_chunk',
+      domain: 'user',
+      recordIds: ['01JROLEQUOTE1'],
+      role: 'user',
+      text: userText,
+      messageId: 'm_user_detail',
+      chunkIndex: 1,
+      provenance: { source: 'runtime', deviceId: 'device-a', agentId: 'dsh' },
+      createdAt: NOW - 59_000,
+    });
+
+    const recall = await post(`${server.url}/recall`, {
+      agentId: 'opencode',
+      threadId: 'th_http_recall',
+      query: '我原话怎么说的？',
+    });
+    expect(recall.status).toBe(200);
+    const fragment = recall.body.data.fragments[0];
+    expect(fragment.detailIds).toEqual(['01JROLEASSIST1', '01JROLEUSER01']);
+
+    const expand = await post(`${server.url}/recall/${recall.body.data.recallId}/expand`, {
+      agentId: 'opencode',
+      threadId: 'th_http_recall',
+      fragmentId: fragment.id,
+    });
+    expect(expand.status).toBe(200);
+    expect(expand.body.data.detail).toMatchObject({
+      text: userText,
+      format: 'verbatim',
+      availability: expect.arrayContaining(['available']),
+      owner: { role: 'user', domain: 'user' },
+      provenance: { source: 'runtime', threadId: 'th_http_recall' },
+      source: 'capability',
+      stale: false,
+    });
+    expect(expand.body.data.detail.text).not.toContain('FAKE_ASSISTANT_REPLY');
+    expect(expand.body.data.detail.citations).toEqual([{
+      id: '01JROLEUSER01',
+      type: 'detail_record',
+      domain: 'user',
+    }]);
+  });
+
   it('/status 反映 staging/detail cache/outbox 与 detail 配额，不含 token', async () => {
     const { server, runtime } = await setup();
     await runtime.local.store.putStagingChunk('cl_test', {

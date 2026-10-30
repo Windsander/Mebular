@@ -152,6 +152,26 @@ export interface UpdateMemoryRecordInput {
   content?: Record<string, unknown>;
   tags?: string[];
   metadata?: Record<string, unknown>;
+  /**
+   * 受控修正：只允许结束 fact 的有效期（validTo）；普通字段更新仍保持时间不可变。
+   * capability `/update` 与 `/write supersedes` 使用同一入口。
+   */
+  validTo?: number;
+}
+
+export interface SupersedeRecordsOptions {
+  /** 旧事实结束时间；通常等于新事实 validFrom/now。 */
+  validTo: number;
+  /** 新事实 id；写入 `supersedes` 边与 metadata.by。 */
+  supersededBy: string;
+  now?: number;
+}
+
+export interface SupersedeRecordsResult {
+  /** 实际结束或已是结束状态的旧事实。 */
+  superseded: string[];
+  /** 缺失、墓碑、内部对象或非 fact 的跳过项。 */
+  skipped: string[];
 }
 
 export interface UpdatedMemoryRecord {
@@ -198,6 +218,11 @@ export interface MemoryRecordListOptions {
   includeDeleted?: boolean;
   includeArchived?: boolean;
   includeInternal?: boolean;
+  /**
+   * 管理面默认保留历史（包含 `validTo <= now` 的已修正事实），便于 Console/审计查看；
+   * 传 false 时只返回当前有效事实。公共 query/recall 默认排除历史，需显式 includeHistory。
+   */
+  includeHistory?: boolean;
   namespace?: NamespaceFilter;
   /** 截断过滤后的列表；`total` 仍是过滤后的完整计数。 */
   limit?: number;
@@ -305,6 +330,7 @@ export type ImportInput = AdapterSource;
 export type ImportResult = AdapterImportReport;
 
 const PREFERENCE_TAG = 'preference';
+const OPEN_VALID_TO = 9999999999999;
 const MEMORY_NODE_TYPES = new Set<Node['type']>(['entity', 'fact', 'episode', 'skill', 'meta']);
 const THREAD_ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const DETAIL_PROTECTED_METADATA_KEYS = new Set([
@@ -530,7 +556,9 @@ export class MemoryService {
     const filtered = nodes.filter(({ node }) =>
       this.passFilters(node, query)
       && !isInternalNode(node)
-      && matchesMemoryTypes(node, query.types));
+      && matchesMemoryTypes(node, query.types)
+      // 修正后旧事实保留为历史证据，但默认不再作为“当前事实”召回。
+      && (query.includeHistory === true || isCurrentlyValidFact(node, Date.now())));
 
     const totalMatches = filtered.length;
     const offset = query.offset ?? 0;
@@ -548,6 +576,7 @@ export class MemoryService {
   async search(query: SearchQuery & LifecycleOptions & ReadScopeOptions): Promise<SearchResult> {
     const startedAt = Date.now();
     const includeArchived = query.includeArchived === true;
+    const includeHistory = query.includeHistory === true;
     const namespace = query.domains ?? query.filters?.namespace;
     const hits = await this.memory.search(query.query, {
       types: expandMemoryTypes(query.types),
@@ -557,7 +586,9 @@ export class MemoryService {
       namespace,
       includeArchived,
     });
-    const filtered = hits.filter((node) => matchesMemoryTypes(node, query.types));
+    const filtered = hits.filter((node) =>
+      matchesMemoryTypes(node, query.types)
+      && (includeHistory || isCurrentlyValidFact(node, Date.now())));
     const limited = query.limit !== undefined ? filtered.slice(0, query.limit) : filtered;
 
     const relations: Relation[] = [];
@@ -576,7 +607,10 @@ export class MemoryService {
           ]);
           // 防御性过滤：内部/归档对象不得经关系端点泄漏给普通 search。
           const visible = (node: Node | null): boolean =>
-            Boolean(node) && !isInternalNode(node) && (includeArchived || !isArchived(node));
+            Boolean(node)
+            && !isInternalNode(node)
+            && (includeArchived || !isArchived(node))
+            && (includeHistory || isCurrentlyValidFact(node, Date.now()));
           if (!visible(sourceNode) || !visible(targetNode)) {
             continue;
           }
@@ -608,10 +642,13 @@ export class MemoryService {
    */
   async listRecords(options: MemoryRecordListOptions = {}): Promise<MemoryRecordList> {
     const nodes = await this.allStorageNodes();
+    const includeHistory = options.includeHistory !== false;
+    const now = Date.now();
     const filtered = nodes.filter((node) => {
       if (!options.includeDeleted && node.deletedAt) return false;
       if (!options.includeArchived && isArchived(node)) return false;
       if (!options.includeInternal && isInternalNode(node)) return false;
+      if (!includeHistory && !isCurrentlyValidFact(node, now)) return false;
       if (options.namespace !== undefined && !matchesNamespace(node.namespace, options.namespace)) {
         return false;
       }
@@ -1433,6 +1470,9 @@ export class MemoryService {
   /**
    * 更新普通 MemoryRecord（capability `/update` 统一入口）。
    * 内部对象仍必须走内部对象接口；标签按差量同步；向量索引统一刷新。
+   *
+   * `validTo` 是受控修正字段：只允许 fact，且只能结束/缩短有效期，不能把已结束的
+   * 事实重新打开；写入仍经 GraphStore 事件日志，不绕过同步。
    */
   async updateRecord(
     input: UpdateMemoryRecordInput,
@@ -1443,14 +1483,46 @@ export class MemoryService {
     if (isInternalNode(existing)) {
       throw new MebularError('内部对象必须通过内部对象接口更新', 'INTERNAL_OBJECT');
     }
+    if (input.validTo !== undefined) {
+      if (typeof input.validTo !== 'number' || !Number.isFinite(input.validTo)) {
+        throw new ValidationError('validTo 必须是有限数字', { id: input.id, validTo: input.validTo });
+      }
+      if (existing.type !== 'fact') {
+        throw new ValidationError('validTo 仅适用于 fact 记录', {
+          id: input.id,
+          type: existing.type,
+          code: 'temporal_update_unsupported',
+        });
+      }
+      const validFrom = existing.validFrom ?? 0;
+      if (input.validTo < validFrom) {
+        throw new ValidationError('validTo 早于 validFrom', {
+          id: input.id,
+          validFrom,
+          validTo: input.validTo,
+        });
+      }
+      const currentValidTo = existing.validTo ?? OPEN_VALID_TO;
+      if (currentValidTo <= Date.now() && input.validTo > currentValidTo) {
+        throw new ValidationError('已结束的事实不能重新打开', {
+          id: input.id,
+          code: 'temporal_resurrection',
+          validTo: currentValidTo,
+        });
+      }
+    }
     const metadata = input.metadata !== undefined
       ? { ...(existing.metadata ?? {}), ...input.metadata }
       : undefined;
-    let node = await this.mebular.graph.updateNode(input.id, {
-      ...(input.content !== undefined ? { content: input.content } : {}),
-      ...(metadata !== undefined ? { metadata } : {}),
-    });
-    if (!node) return null;
+    let node = existing;
+    if (input.content !== undefined || metadata !== undefined) {
+      const updated = await this.mebular.graph.updateNode(input.id, {
+        ...(input.content !== undefined ? { content: input.content } : {}),
+        ...(metadata !== undefined ? { metadata } : {}),
+      });
+      if (!updated) return null;
+      node = updated;
+    }
     if (input.tags !== undefined) {
       const currentTags = existing.tags ?? [];
       const nextTags = uniqueStrings(input.tags);
@@ -1465,11 +1537,73 @@ export class MemoryService {
         }
       }
     }
+    if (input.validTo !== undefined && input.validTo !== existing.validTo) {
+      node = await this.memory.updateFactValidity(input.id, input.validTo);
+    }
     const vectorIndexed = await this.memory.indexNode(input.id, {
       tolerateFailure: options.tolerateVectorIndexFailure === true,
     });
     node = (await this.mebular.graph.getNode(input.id)) ?? node;
     return { node, vectorIndexed };
+  }
+
+  /**
+   * 记录级修正：结束旧 fact 的 `validTo`，并写 `supersedes` 边。
+   * 旧记录、详情、墓碑语义都保留；默认 query/recall 不再把它当当前事实。
+   */
+  async supersedeRecords(
+    ids: string[],
+    options: SupersedeRecordsOptions,
+  ): Promise<SupersedeRecordsResult> {
+    const result: SupersedeRecordsResult = { superseded: [], skipped: [] };
+    if (!Array.isArray(ids) || ids.length === 0) return result;
+    if (typeof options.validTo !== 'number' || !Number.isFinite(options.validTo)) {
+      throw new ValidationError('validTo 必须是有限数字', { validTo: options.validTo });
+    }
+    const now = options.now ?? Date.now();
+    const newRecord = await this.mebular.graph.getNode(options.supersededBy);
+    for (const id of [...new Set(ids)]) {
+      const node = await this.mebular.graph.getNode(id);
+      if (!node || node.deletedAt || isInternalNode(node) || node.type !== 'fact') {
+        result.skipped.push(id);
+        continue;
+      }
+      const currentValidTo = node.validTo ?? OPEN_VALID_TO;
+      const target = Math.min(currentValidTo, options.validTo);
+      if (target < (node.validFrom ?? 0)) {
+        result.skipped.push(id);
+        continue;
+      }
+      const metadata = node.metadata ?? {};
+      const alreadyMarked = metadata.supersededBy === options.supersededBy;
+      if (currentValidTo > target || !alreadyMarked) {
+        await this.updateRecord({
+          id,
+          validTo: target,
+          metadata: {
+            supersededBy: options.supersededBy,
+            supersededAt: typeof metadata.supersededAt === 'number' ? metadata.supersededAt : now,
+          },
+        }, { tolerateVectorIndexFailure: true });
+      }
+      if (newRecord) {
+        await this.ensureSupersedesEdge(options.supersededBy, id);
+      }
+      result.superseded.push(id);
+    }
+    return result;
+  }
+
+  /** `SUPERSEDES` 边（new → old）；幂等，随现有边事件同步。 */
+  private async ensureSupersedesEdge(sourceId: string, targetId: string): Promise<void> {
+    const existing = await this.mebular.graph.listEdges({
+      source: sourceId,
+      target: targetId,
+      relation: EdgeTypes.SUPERSEDES,
+      limit: 1,
+    });
+    if (existing.length > 0) return;
+    await this.mebular.graph.createEdge(sourceId, targetId, EdgeTypes.SUPERSEDES);
   }
 
   private async validateDetailWrite(
@@ -1942,6 +2076,17 @@ export class MemoryService {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * fact 是否仍是当前事实：`validFrom <= now < validTo`。
+ * 只约束 fact（episode 的 validFrom/validTo 表示发生时间窗，不用于过期过滤）。
+ */
+function isCurrentlyValidFact(node: Node | null | undefined, now: number): boolean {
+  if (!node) return false;
+  if (node.type !== 'fact') return true;
+  if ((node.validFrom ?? 0) > now) return false;
+  return (node.validTo ?? OPEN_VALID_TO) > now;
 }
 
 function stringValue(value: unknown): string | undefined {

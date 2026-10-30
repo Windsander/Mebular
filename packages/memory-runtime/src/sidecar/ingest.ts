@@ -103,6 +103,8 @@ export interface IngestRecordView {
   domain: string;
   status?: string;
   duplicate?: boolean;
+  /** 本次写入替代的旧事实 id（记录级修正）。 */
+  superseded?: string[];
 }
 
 export interface IngestDetailView {
@@ -255,6 +257,57 @@ interface CandidateContext {
   extractor: IngestExtractorKind;
   model: string | null;
   source: 'runtime' | 'host';
+}
+
+interface FactIdentity {
+  subject: string;
+  predicate: string;
+  object: string;
+}
+
+/** 候选/记录的统一同键三元组（preference 兼容 entity/preferenceType/value 形状）。 */
+function factIdentityOf(content: unknown, kind: string): FactIdentity | null {
+  if (!isObject(content) || (kind !== 'fact' && kind !== 'preference')) return null;
+  const subject = typeof content.subject === 'string'
+    ? content.subject
+    : typeof content.entity === 'string' ? content.entity : null;
+  const predicate = typeof content.predicate === 'string'
+    ? content.predicate
+    : typeof content.preferenceType === 'string' ? content.preferenceType : null;
+  const object = typeof content.object === 'string'
+    ? content.object
+    : typeof content.value === 'string' ? content.value : null;
+  if (subject === null || predicate === null || object === null) return null;
+  return { subject, predicate, object };
+}
+
+function factIdentityOfRecord(record: Record<string, unknown>): FactIdentity | null {
+  const kind = typeof record.kind === 'string' ? record.kind : (record.type === 'fact' ? 'fact' : '');
+  if (kind !== 'fact' && kind !== 'preference' && record.type !== 'fact') return null;
+  return factIdentityOf(record.content, kind === 'preference' ? 'preference' : 'fact');
+}
+
+/** fact 是否仍为当前事实；缺失/0/null 视为开放窗口。 */
+function recordIsCurrent(record: Record<string, unknown>, now: number): boolean {
+  if (record.deletedAt !== undefined && record.deletedAt !== null) return false;
+  const validFrom = typeof record.validFrom === 'number' ? record.validFrom : null;
+  if (validFrom !== null && validFrom > now) return false;
+  const validTo = typeof record.validTo === 'number' ? record.validTo : null;
+  return validTo === null || validTo === 0 || validTo > now;
+}
+
+/**
+ * 本地预筛：明显由其他 Agent / user / system 写入的旧记录不自动附加 supersedes，
+ * 避免 capability 因权限拒绝整个新事实写入；最终权限仍由 capability 强制。
+ * provenance 缺失时交给 capability 判定。
+ */
+function mayAutoSupersede(record: Record<string, unknown>, agentId: string): boolean {
+  const provenance = isObject(record.provenance) ? record.provenance : {};
+  const writerType = typeof provenance.writerType === 'string' ? provenance.writerType : null;
+  const writerId = typeof provenance.writerId === 'string' ? provenance.writerId : null;
+  if (writerType === 'user' || writerType === 'system') return false;
+  if (writerType === 'agent' && writerId !== null && writerId !== agentId) return false;
+  return true;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -968,6 +1021,119 @@ export class IngestService {
     }
   }
 
+  /**
+   * 修正检测：同域、同 subject/predicate、不同 object 的新事实，若旧键只有一个当前值，
+   * 则把旧记录作为被替代候选；多值（可能是多个合法事实）不自动替代。
+   *
+   * 只通过 capability `/query` 读取旧记录，不直接访问 core/fleet，也不在本地建第二套索引。
+   */
+  private async resolveSupersedes(
+    candidates: RoutedCandidate[],
+    context: CandidateContext,
+    warnings: string[],
+  ): Promise<Map<number, string[]>> {
+    const result = new Map<number, string[]>();
+    const client = this.client;
+    if (!client || candidates.length === 0) return result;
+
+    interface Group {
+      domain: string;
+      identity: FactIdentity;
+      indexes: number[];
+      objects: Set<string>;
+      candidateValidFrom: number;
+    }
+    const groups = new Map<string, Group>();
+    for (let index = 0; index < candidates.length; index += 1) {
+      const candidate = candidates[index]!;
+      const identity = factIdentityOf(candidate.content, candidate.kind);
+      if (!identity) continue;
+      const key = `${candidate.domain}\u0000${identity.subject}\u0000${identity.predicate}`;
+      const group = groups.get(key) ?? {
+        domain: candidate.domain,
+        identity,
+        indexes: [],
+        objects: new Set<string>(),
+        candidateValidFrom: candidate.validFrom ?? this.now(),
+      };
+      group.indexes.push(index);
+      group.objects.add(identity.object);
+      groups.set(key, group);
+    }
+
+    const now = this.now();
+    for (const group of groups.values()) {
+      if (group.objects.size > 1) {
+        // 同一批候选出现多个 object：可能是多个合法事实，不自动择一替代。
+        appendWarnings(warnings, ['supersede_ambiguous_candidates']);
+        continue;
+      }
+      const candidateObject = group.identity.object;
+      const query = `${group.identity.subject} ${group.identity.predicate}`.trim().slice(0, 2000);
+      if (query.length === 0) continue;
+      let records: Record<string, unknown>[];
+      try {
+        const response = await client.query<Record<string, unknown>>({
+          actor: { type: 'agent', agentId: context.agentId },
+          query,
+          types: ['fact', 'preference'],
+          domains: [group.domain],
+          filters: { entity: group.identity.subject },
+          limit: 50,
+          offset: 0,
+          includeHistory: false,
+        });
+        records = Array.isArray(response.data?.records)
+          ? response.data.records.filter(isObject)
+          : [];
+      } catch {
+        appendWarnings(warnings, ['supersede_lookup_failed']);
+        continue;
+      }
+
+      const active: Array<{ id: string; object: string }> = [];
+      for (const record of records) {
+        if (typeof record.id !== 'string' || record.id.length === 0) continue;
+        if (typeof record.domain === 'string' && record.domain !== group.domain) continue;
+        if (!recordIsCurrent(record, now)) continue;
+        if (!mayAutoSupersede(record, context.agentId)) continue;
+        const recordValidFrom = typeof record.validFrom === 'number' ? record.validFrom : 0;
+        // 后写的旧时间事实（回填）不能反向替代更晚的当前值。
+        if (group.candidateValidFrom < recordValidFrom) continue;
+        const identity = factIdentityOfRecord(record);
+        if (!identity) continue;
+        if (identity.subject !== group.identity.subject || identity.predicate !== group.identity.predicate) continue;
+        active.push({ id: record.id, object: identity.object });
+      }
+      if (active.length === 0) continue;
+
+      const objects = new Set(active.map((entry) => entry.object));
+      let targets: string[] = [];
+      if (objects.size === 1 && !objects.has(candidateObject)) {
+        // 唯一旧值 → 新值视为明确修正。
+        targets = active.map((entry) => entry.id);
+      } else if (objects.has(candidateObject)) {
+        // 新值已存在（写入重试）：只关闭唯一一个不同的旧值。
+        const others = [...objects].filter((object) => object !== candidateObject);
+        if (others.length === 1) {
+          targets = active
+            .filter((entry) => entry.object === others[0])
+            .map((entry) => entry.id);
+        } else if (others.length > 1) {
+          appendWarnings(warnings, ['supersede_ambiguous_existing_values']);
+        }
+      } else {
+        // 同键已有多个不同当前值：不自动选边。
+        appendWarnings(warnings, ['supersede_ambiguous_existing_values']);
+      }
+      const uniqueTargets = [...new Set(targets)].slice(0, 16);
+      if (uniqueTargets.length === 0) continue;
+      for (const index of group.indexes) result.set(index, uniqueTargets);
+      appendWarnings(warnings, ['supersede_detected']);
+    }
+    return result;
+  }
+
   private cloudKey(): string {
     return this.identity.cloudId ?? 'cl_local';
   }
@@ -1421,6 +1587,12 @@ export class IngestService {
         messageIds: [],
       },
     }));
+    const warnings: string[] = [];
+    const supersedes = await this.resolveSupersedes(candidates, context, warnings);
+    for (const [index, ids] of supersedes) {
+      const item = items[index];
+      if (item && ids.length > 0) item.supersedes = ids;
+    }
     const actor = {
       type: 'agent' as const,
       agentId: context.agentId,
@@ -1435,7 +1607,7 @@ export class IngestService {
         records: [],
         queued: true,
         degraded: true,
-        warnings: ['capability_unavailable', 'queued_outbox'],
+        warnings: [...warnings, 'capability_unavailable', 'queued_outbox'],
         status: 'pending',
       };
     }
@@ -1448,7 +1620,6 @@ export class IngestService {
       const data = isObject(response.data) ? response.data : {};
       const results = Array.isArray(data.results) ? data.results : [];
       const records: IngestRecordView[] = [];
-      const warnings: string[] = [];
       const failedRetryable: CapabilityWriteItem[] = [];
       for (const result of results) {
         if (!isObject(result)) continue;
@@ -1463,6 +1634,9 @@ export class IngestService {
             domain,
             status,
             ...(status === 'duplicate' ? { duplicate: true } : {}),
+            ...(Array.isArray(result.superseded)
+              ? { superseded: result.superseded.filter((id: unknown) => typeof id === 'string') }
+              : {}),
           });
           continue;
         }
@@ -1499,7 +1673,7 @@ export class IngestService {
           records: [],
           queued: true,
           degraded: true,
-          warnings: ['capability_unavailable', 'queued_outbox'],
+          warnings: [...warnings, 'capability_unavailable', 'queued_outbox'],
           status: 'pending',
         };
       }
@@ -1509,7 +1683,7 @@ export class IngestService {
         records: [],
         queued: false,
         degraded: true,
-        warnings: [`candidate_write_failed:${code}`],
+        warnings: [...warnings, `candidate_write_failed:${code}`],
         status: 'failed',
       };
     }

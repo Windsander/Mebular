@@ -873,7 +873,7 @@ function isStale(record: Record<string, unknown>, kind: string, now: number): bo
   if (record.stale === true || contentOf(record).stale === true) return true;
   if (record.deletedAt !== undefined && record.deletedAt !== null) return true;
   const validTo = asNumber(record.validTo) ?? asNumber(contentOf(record).validTo);
-  if (validTo !== null && validTo > 0 && validTo < now) return true;
+  if (validTo !== null && validTo > 0 && validTo <= now) return true;
   if (kind === 'compact' && asNumber(record.updatedAt) === null) return false;
   return false;
 }
@@ -1335,7 +1335,11 @@ export class RecallService {
       };
     }
 
-    const fetched = await this.fetchDetails(detailIds, agentId, warnings, maxBytes);
+    // A fragment may cite a user turn and the assistant reply with it. The
+    // detail endpoint must answer with the user's own words when available;
+    // assistant raw chunks are only an honest fallback when no user chunk is
+    // linked or still available.
+    const fetched = await this.fetchDetails(detailIds, agentId, warnings, maxBytes, { preferRole: 'user' });
     if (fetched.text.length === 0) {
       const warning = `detail_${fetched.availability[0] ?? 'pending_sync'}`;
       pushWarning(warnings, warning);
@@ -2370,6 +2374,8 @@ export class RecallService {
       if (!['fact', 'preference', 'episode', 'observation', 'skill', 'entity', 'compact'].includes(kind)) continue;
       if (isArchived(record)) continue;
       if (record.deletedAt !== undefined && record.deletedAt !== null) continue;
+      const metadata = isObject(record.metadata) ? record.metadata : {};
+      if (!request.includeHistory && typeof metadata.supersededBy === 'string') continue;
       const domain = String(record.domain);
       if (domain.startsWith('__') || domain === 'system') continue;
 
@@ -2747,6 +2753,7 @@ export class RecallService {
     agentId: string,
     warnings: string[],
     maxBytes = 8192,
+    options: { preferRole?: 'user' | 'assistant' | 'system' | 'tool' } = {},
   ): Promise<{
     text: string;
     detailIds: string[];
@@ -2755,13 +2762,23 @@ export class RecallService {
     stale: boolean;
     truncated: boolean;
   }> {
+    interface FetchedDetail {
+      id: string;
+      role: string;
+      text: string;
+      truncated: boolean;
+      redacted: boolean;
+    }
     const actor = { type: 'agent' as const, agentId };
-    const texts: string[] = [];
-    const used: string[] = [];
+    const collected: FetchedDetail[] = [];
     const availability: string[] = [];
-    let redactedOnly = false;
     let networkFailure = false;
-    let truncated = false;
+    const preferRole = options.preferRole;
+    const select = (items: FetchedDetail[]): FetchedDetail[] => {
+      if (preferRole === undefined) return items;
+      const preferred = items.filter((item) => item.role === preferRole);
+      return preferred.length > 0 ? preferred : items;
+    };
 
     for (const id of ids.slice(0, 3)) {
       if (!this.client) {
@@ -2794,10 +2811,13 @@ export class RecallService {
           continue;
         }
         if (typeof record.text === 'string' && record.text.length > 0) {
-          texts.push(record.text);
-          used.push(id);
-          if (record.truncated === true) truncated = true;
-          if (record.redacted === true) redactedOnly = true;
+          collected.push({
+            id,
+            role: typeof record.role === 'string' ? record.role : '',
+            text: record.text,
+            truncated: record.truncated === true,
+            redacted: record.redacted === true,
+          });
           for (const value of declared) {
             if (!availability.includes(value)) availability.push(value);
           }
@@ -2816,42 +2836,48 @@ export class RecallService {
       }
     }
 
-    if (texts.length > 0) {
+    const selected = select(collected);
+    if (selected.length > 0) {
       return {
-        text: texts.join('\n\n'),
-        detailIds: used,
+        text: selected.map((item) => item.text).join('\n\n'),
+        detailIds: selected.map((item) => item.id),
         availability: dedupe([
           'available',
-          ...(redactedOnly ? ['redacted_only'] : []),
+          ...(selected.some((item) => item.redacted) ? ['redacted_only'] : []),
           ...availability,
         ]),
         source: 'capability',
         stale: false,
-        truncated,
+        truncated: selected.some((item) => item.truncated),
       };
     }
 
     // 只有网络/能力不可用时才读只读 cache；过期/删除/未订阅不用缓存冒充原文。
     if (networkFailure || availability.includes('pending_sync') || availability.includes('unavailable')) {
-      const cachedTexts: string[] = [];
-      const cachedIds: string[] = [];
+      const cachedItems: FetchedDetail[] = [];
       for (const id of ids.slice(0, 3)) {
         const cached = await this.local.getCachedDetail<{ detail?: CapabilityDetailRecord }>(id);
-        const text = cached?.detail?.text;
-        if (typeof text === 'string' && text.length > 0) {
-          cachedTexts.push(text);
-          cachedIds.push(id);
+        const detail = cached?.detail;
+        if (typeof detail?.text === 'string' && detail.text.length > 0) {
+          cachedItems.push({
+            id,
+            role: typeof detail.role === 'string' ? detail.role : '',
+            text: detail.text,
+            truncated: detail.truncated === true,
+            redacted: detail.redacted === true,
+          });
         }
       }
-      if (cachedTexts.length > 0) {
+      const selectedCached = select(cachedItems);
+      if (selectedCached.length > 0) {
         pushWarning(warnings, 'detail_from_cache');
         return {
-          text: cachedTexts.join('\n\n'),
-          detailIds: cachedIds,
+          text: selectedCached.map((item) => item.text).join('\n\n'),
+          detailIds: selectedCached.map((item) => item.id),
           availability: ['available'],
           source: 'cache',
           stale: true,
-          truncated: false,
+          truncated: selectedCached.some((item) => item.truncated),
         };
       }
     }

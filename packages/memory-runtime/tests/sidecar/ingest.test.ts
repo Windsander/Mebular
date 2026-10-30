@@ -490,4 +490,106 @@ describe('IngestService settlements', () => {
     });
     expect(fake.writeRequests).toHaveLength(1);
   });
+
+  it('同键新值：通过 capability 查询旧记录并带 supersedes 写入；多值歧义不自动替代', async () => {
+    const { service, fake } = await setup();
+    const now = Date.now();
+    fake.setRecords([{
+      id: '01OLD7332',
+      type: 'fact',
+      kind: 'fact',
+      domain: 'agent:opencode',
+      content: { subject: 'mebular', predicate: 'localPort', object: '7332' },
+      text: 'mebular localPort 7332',
+      validFrom: now - 60_000,
+      validTo: null,
+      provenance: { source: 'runtime', writerId: 'opencode' },
+    }]);
+
+    const first = await service.ingest({
+      requestId: 'req_supersede_1',
+      agentId: 'opencode',
+      threadId: 'th_port',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '不是 7332，是 7331', messageId: 'm_port_1' }],
+      candidates: [{
+        kind: 'fact',
+        domain: 'agent:opencode',
+        content: { subject: 'mebular', predicate: 'localPort', object: '7331' },
+        confirmation: 'explicit',
+      }],
+    });
+
+    expect(first.status).toBe(200);
+    expect(first.data.warnings).toEqual(expect.arrayContaining(['supersede_detected']));
+    expect(fake.requests.some((request) => request.path.endsWith('/query'))).toBe(true);
+    expect(fake.writeRequests).toHaveLength(1);
+    const writeItems = fake.writeRequests[0]!.body.items as any[];
+    expect(writeItems[0].supersedes).toEqual(['01OLD7332']);
+
+    // 同键已有两个不同当前值：可能是多个合法事实，不自动选边。
+    fake.setRecords([
+      {
+        id: '01OLDA',
+        type: 'fact',
+        kind: 'fact',
+        domain: 'agent:opencode',
+        content: { subject: 'project', predicate: 'owner', object: 'alice' },
+        validFrom: now - 60_000,
+        validTo: null,
+      },
+      {
+        id: '01OLDB',
+        type: 'fact',
+        kind: 'fact',
+        domain: 'agent:opencode',
+        content: { subject: 'project', predicate: 'owner', object: 'bob' },
+        validFrom: now - 60_000,
+        validTo: null,
+      },
+    ]);
+    await service.ingest({
+      requestId: 'req_supersede_ambiguous',
+      agentId: 'opencode',
+      threadId: 'th_owner',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '项目负责人是 carol', messageId: 'm_owner_1' }],
+      candidates: [{
+        kind: 'fact',
+        domain: 'agent:opencode',
+        content: { subject: 'project', predicate: 'owner', object: 'carol' },
+        confirmation: 'explicit',
+      }],
+    });
+    expect(fake.writeRequests).toHaveLength(2);
+    const ambiguousItems = fake.writeRequests[1]!.body.items as any[];
+    expect(ambiguousItems[0].supersedes).toBeUndefined();
+
+    // 同 object 不是修正，不 supersede。
+    fake.setRecords([{
+      id: '01SAME',
+      type: 'fact',
+      kind: 'fact',
+      domain: 'agent:opencode',
+      content: { subject: 'project', predicate: 'mode', object: 'dark' },
+      validFrom: now - 60_000,
+      validTo: null,
+    }]);
+    await service.ingest({
+      requestId: 'req_supersede_same',
+      agentId: 'opencode',
+      threadId: 'th_mode',
+      extractor: 'host',
+      chunks: [{ role: 'user', text: '项目模式是 dark', messageId: 'm_mode_1' }],
+      candidates: [{
+        kind: 'fact',
+        domain: 'agent:opencode',
+        content: { subject: 'project', predicate: 'mode', object: 'dark' },
+        confirmation: 'explicit',
+      }],
+    });
+    expect(fake.writeRequests).toHaveLength(3);
+    const sameItems = fake.writeRequests[2]!.body.items as any[];
+    expect(sameItems[0].supersedes).toBeUndefined();
+  });
 });

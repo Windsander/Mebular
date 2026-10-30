@@ -329,6 +329,37 @@ export class MemoryStore {
       .map((node) => node as FactNode);
   }
 
+  /**
+   * 受控结束 fact 的有效期（修正/替代路径；普通 updateNode 保持时间字段不可变）。
+   * 只允许缩短窗口，不允许把已结束的事实重新打开。
+   */
+  async updateFactValidity(id: string, validTo: number): Promise<FactNode> {
+    const existing = await this.graph.getNode(id);
+    if (!existing || existing.type !== 'fact' || existing.deletedAt || isInternalNode(existing)) {
+      throw new ValidationError('事实记录不存在或不可更新', { id });
+    }
+    if (typeof validTo !== 'number' || !Number.isFinite(validTo)) {
+      throw new ValidationError('validTo 必须是有限数字', { id, validTo });
+    }
+    const validFrom = existing.validFrom ?? 0;
+    if (validTo < validFrom) {
+      throw new ValidationError('validTo 早于 validFrom', { id, validFrom, validTo });
+    }
+    const currentValidTo = existing.validTo ?? 9999999999999;
+    if (currentValidTo <= Date.now() && validTo > currentValidTo) {
+      throw new ValidationError('已结束的事实不能重新打开', {
+        id,
+        code: 'temporal_resurrection',
+        validTo: currentValidTo,
+      });
+    }
+    const node = await this.graph.updateNodeValidity(id, validTo);
+    if (!node) {
+      throw new ValidationError('事实记录更新时间有效性失败', { id });
+    }
+    return node as FactNode;
+  }
+
   // ---------- 检索 ----------
 
   /**

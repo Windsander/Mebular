@@ -90,6 +90,7 @@ const MAX_CHECKPOINT_ID_CHARS = 128;
 const MAX_CHECKPOINT_URL_BYTES = 2 * 1024;
 const DEFAULT_CHECKPOINT_LEASE_MS = 60_000;
 const MAX_RELATED = 32;
+const MAX_SUPERSEDES = 16;
 const MAX_MESSAGE_IDS = 64;
 const MAX_JSON_FIELD_BYTES = 16 * 1024;
 const OPEN_VALID_TO = 9999999999999;
@@ -131,6 +132,8 @@ const PROTECTED_METADATA_KEYS = new Set([
   'contentHashValidFrom',
   'clientItemId',
   'updatedBy',
+  'supersededBy',
+  'supersededAt',
 ]);
 const PATCH_KEYS = new Set(['content', 'tags', 'validFrom', 'validTo', 'metadata']);
 
@@ -159,6 +162,7 @@ export const CAPABILITY_LIMITS = Object.freeze({
   maxDetailGetBytes: MAX_DETAIL_GET_BYTES,
   maxDetailListLimit: MAX_DETAIL_LIST_LIMIT,
   maxDetailDomains: MAX_DETAIL_DOMAINS,
+  maxSupersedes: MAX_SUPERSEDES,
   detailDomainQuotaBytes: DEFAULT_DETAIL_QUOTA_LIMITS.domainBytes,
   detailCloudQuotaBytes: DEFAULT_DETAIL_QUOTA_LIMITS.cloudBytes,
   detailThreadQuotaBytes: DEFAULT_DETAIL_QUOTA_LIMITS.threadBytes,
@@ -391,6 +395,28 @@ function normalizeRelatedTo(value, index) {
   return related;
 }
 
+function normalizeSupersedes(value, index) {
+  if (value === undefined || value === null) return [];
+  const ids = stringArray(value, 'supersedes', index, { maxItems: MAX_SUPERSEDES, maxChars: 128 }) ?? [];
+  return ids;
+}
+
+/** fact/preference 内容 → 同键判定用三元组（preference 兼容 entity/preferenceType/value）。 */
+function factTriple(content) {
+  if (!isObject(content)) return null;
+  const subject = typeof content.subject === 'string'
+    ? content.subject
+    : typeof content.entity === 'string' ? content.entity : null;
+  const predicate = typeof content.predicate === 'string'
+    ? content.predicate
+    : typeof content.preferenceType === 'string' ? content.preferenceType : null;
+  const object = typeof content.object === 'string'
+    ? content.object
+    : typeof content.value === 'string' ? content.value : null;
+  if (subject === null || predicate === null || object === null) return null;
+  return { subject, predicate, object };
+}
+
 function normalizeMessageIds(value, field, index) {
   return stringArray(value, field, index, { maxItems: MAX_MESSAGE_IDS, maxChars: 256 }) ?? [];
 }
@@ -537,6 +563,19 @@ function canGovernNode(actor, node) {
 /** 更新：agent 只能更新自己域内、自己写入的记录。 */
 function canUpdateNode(actor, node) {
   return canGovernNode(actor, node);
+}
+
+/**
+ * 修正/替代权限：常规更新权限之外，Agent 可替代自己在可写域（如 user/default）
+ * 写入的旧事实；不能替代其他 Agent 或 user/system 写入的记录。
+ */
+function canSupersedeNode(actor, node, domain) {
+  if (canUpdateNode(actor, node)) return true;
+  if (actor.type !== 'agent' || domain === 'system') return false;
+  const provenance = isObject(node?.metadata?.provenance) ? node.metadata.provenance : {};
+  if (provenance.writerType !== 'agent' || provenance.writerId !== actor.agentId) return false;
+  if (domain === 'user' && provenance.confirmation !== 'explicit') return false;
+  return true;
 }
 
 function factExtras(raw, index) {
@@ -773,7 +812,7 @@ async function buildDedupeIndex(app) {
   return index;
 }
 
-function recordWriteResult(status, node, item, owner) {
+function recordWriteResult(status, node, item, owner, superseded = []) {
   return {
     ...(item.clientItemId !== undefined ? { clientItemId: item.clientItemId } : {}),
     status,
@@ -784,6 +823,7 @@ function recordWriteResult(status, node, item, owner) {
     ownerType: owner.ownerType,
     ownerId: owner.ownerId,
     ...(status === 'duplicate' ? { duplicate: true } : {}),
+    ...(superseded.length > 0 ? { superseded } : {}),
   };
 }
 
@@ -1273,6 +1313,8 @@ function recordView(memory, node, { userId = 'user', withScore = false, detailAv
     tags,
     validFrom: node?.validFrom ?? memory?.metadata?.validFrom ?? null,
     validTo: normalizeValidTo(node?.validTo ?? memory?.metadata?.validTo),
+    ...(typeof metadata.supersededBy === 'string' ? { supersededBy: metadata.supersededBy } : {}),
+    ...(typeof metadata.supersededAt === 'number' ? { supersededAt: metadata.supersededAt } : {}),
     createdAt: node?.createdAt ?? memory?.metadata?.createdAt ?? null,
     updatedAt: node?.updatedAt ?? node?.createdAt ?? memory?.metadata?.createdAt ?? null,
     // 详情是否存在是派生状态：新运行时批量查 DetailRecord；旧运行时保留 metadata 兼容。
@@ -1734,6 +1776,8 @@ function versionPayload() {
       provenance: true,
       batchWrite: true,
       idempotency: true,
+      supersedes: true,
+      temporalUpdates: ['validTo'],
       internalObjects: [...INTERNAL_OBJECT_KINDS],
       details: true,
       detailKinds: [...DETAIL_KINDS],
@@ -2123,7 +2167,100 @@ export function createMemoryCapabilityHandler({
 
     // ---------- /write ----------
 
-    function validateWriteItem(raw, index, requestThreadId, actor) {
+    /**
+     * 校验记录级修正：旧事实必须同域、同 subject/predicate、不同 object、非内部对象，
+     * 且当前 actor 对旧记录有更新权限。已删除的旧记录跳过（幂等重放不阻塞新值）。
+     */
+    async function validateSupersedes({
+      ids,
+      appValue,
+      actor,
+      domain,
+      kind,
+      content,
+      validFrom,
+      index,
+    }) {
+      if (ids.length === 0) return { ids: [], warnings: [] };
+      if (kind !== 'fact' && kind !== 'preference') {
+        throw validationError(index, 'supersedes', 'supersedes 仅适用于 fact/preference');
+      }
+      const incoming = factTriple(content);
+      if (!incoming) throw validationError(index, 'supersedes', '新记录缺少 subject/predicate/object');
+      const effective = [];
+      const warnings = [];
+      for (const id of ids) {
+        const node = await appValue.graph.getNode(id);
+        if (!node) {
+          throw validationError(index, 'supersedes', 'supersedes 指向的记录不存在', {
+            id,
+            supersedesCode: 'not_found',
+          });
+        }
+        if (node.deletedAt) {
+          warnings.push({
+            code: 'supersedes_skipped_deleted',
+            id,
+            message: '旧记录已删除，跳过替代',
+          });
+          continue;
+        }
+        if (isInternalNode(node)) {
+          throw validationError(index, 'supersedes', '不能 supersede 内部对象', {
+            id,
+            supersedesCode: 'internal_object',
+          });
+        }
+        if (domainOfNamespace(node.namespace) !== domain) {
+          throw validationError(index, 'supersedes', 'supersedes 必须与新记录同域', {
+            id,
+            domain,
+            recordDomain: domainOfNamespace(node.namespace),
+            supersedesCode: 'domain_mismatch',
+          });
+        }
+        if (node.type !== 'fact') {
+          throw validationError(index, 'supersedes', '只能 supersede fact 记录', {
+            id,
+            type: node.type,
+            supersedesCode: 'kind_mismatch',
+          });
+        }
+        const previous = factTriple(node.content);
+        if (!previous || previous.subject !== incoming.subject || previous.predicate !== incoming.predicate) {
+          throw validationError(index, 'supersedes', 'supersedes 必须同 subject/predicate', {
+            id,
+            supersedesCode: 'key_mismatch',
+          });
+        }
+        if (previous.object === incoming.object) {
+          throw validationError(index, 'supersedes', '新旧记录 object 相同，无需替代', {
+            id,
+            supersedesCode: 'same_object',
+          });
+        }
+        if (!canSupersedeNode(actor, node, domain)) {
+          throw new CapabilityError(403, 'forbidden_scope', '当前 actor 不能替代该记录', {
+            index,
+            id,
+            domain,
+            supersedesCode: 'forbidden',
+          });
+        }
+        if (typeof node.validFrom === 'number' && node.validFrom > validFrom) {
+          throw validationError(index, 'supersedes', '旧记录 validFrom 晚于新记录', {
+            id,
+            validFrom,
+            recordValidFrom: node.validFrom,
+            supersedesCode: 'valid_from_mismatch',
+          });
+        }
+        effective.push(id);
+      }
+      return { ids: effective, warnings };
+    }
+
+    async function validateWriteItem(raw, index, requestThreadId, actor, appValue) {
       if (!isObject(raw)) throw validationError(index, 'item', 'item 必须是对象');
       if (!hasValue(raw.domain) || (typeof raw.domain === 'string' && raw.domain.trim() === '')) {
         throw validationError(index, 'domain', 'item.domain 必填');
@@ -2150,6 +2287,7 @@ export function createMemoryCapabilityHandler({
       // `preference` 是 preference 的保留语义标签；其他 kind 不得借它冒充偏好。
       if (raw.kind !== 'preference') tags = tags.filter((tag) => tag !== 'preference');
       const relatedTo = normalizeRelatedTo(raw.relatedTo, index);
+      const supersedes = normalizeSupersedes(raw.supersedes, index);
       const validFrom = raw.validFrom === undefined || raw.validFrom === null
         ? now()
         : optionalNumber(raw.validFrom, 'validFrom', index);
@@ -2160,6 +2298,16 @@ export function createMemoryCapabilityHandler({
 
       const provenanceInput = parseProvenanceInput(raw.provenance, index);
       assertDomainWrite(actor, domain, provenanceInput, requestThreadId);
+      const supersedeCheck = await validateSupersedes({
+        ids: supersedes,
+        appValue,
+        actor,
+        domain,
+        kind: raw.kind,
+        content: normalized.content,
+        validFrom,
+        index,
+      });
       const identity = identitySnapshot();
       const provenance = buildWriteProvenance({
         input: provenanceInput,
@@ -2203,6 +2351,8 @@ export function createMemoryCapabilityHandler({
         relatedTo,
         validFrom,
         validTo,
+        ...(supersedeCheck.ids.length > 0 ? { supersedes: supersedeCheck.ids } : {}),
+        supersedeWarnings: supersedeCheck.warnings,
         provenance,
         ...(clientItemId !== undefined ? { clientItemId } : {}),
         contentHash,
@@ -2252,6 +2402,21 @@ export function createMemoryCapabilityHandler({
       return { node: stored.node, warnings };
     }
 
+    async function applyWriteSupersedes(item, newNode) {
+      if (!Array.isArray(item.supersedes) || item.supersedes.length === 0) {
+        return { superseded: [], skipped: [] };
+      }
+      const currentService = service();
+      if (typeof currentService.supersedeRecords !== 'function') {
+        throw new CapabilityError(503, 'capability_unavailable', '记忆服务不支持记录替代', undefined, true);
+      }
+      return currentService.supersedeRecords(item.supersedes, {
+        validTo: typeof newNode.validFrom === 'number' ? newNode.validFrom : item.validFrom,
+        supersededBy: newNode.id,
+        now: now(),
+      });
+    }
+
     async function handleWrite(payload, actor) {
       const items = payload.items;
       if (!Array.isArray(items) || items.length === 0) {
@@ -2271,7 +2436,7 @@ export function createMemoryCapabilityHandler({
       // 校验原子：先全部校验，再逐项落库。
       const validated = [];
       for (let index = 0; index < items.length; index += 1) {
-        validated.push(validateWriteItem(items[index], index, requestThreadId, actor));
+        validated.push(await validateWriteItem(items[index], index, requestThreadId, actor, appValue));
       }
       const dedupe = await buildDedupeIndex(appValue);
       const results = [];
@@ -2280,21 +2445,51 @@ export function createMemoryCapabilityHandler({
       let duplicates = 0;
       let failed = 0;
       for (const item of validated) {
+        warnings.push(...(item.supersedeWarnings ?? []));
         const existing = (item.clientItemId !== undefined
           ? dedupe.client.get(dedupeKey('client', item.domain, item.clientItemId))
           : undefined)
           ?? dedupe.hash.get(dedupeKey('hash', item.domain, item.contentHash));
         if (existing) {
-          duplicates += 1;
-          results.push(recordWriteResult('duplicate', existing, item, item.owner));
+          try {
+            const replaced = await applyWriteSupersedes(item, existing);
+            duplicates += 1;
+            results.push(recordWriteResult('duplicate', existing, item, item.owner, replaced.superseded));
+            for (const id of replaced.skipped) {
+              warnings.push({
+                code: 'supersedes_skipped',
+                id,
+                message: '旧记录已删除、非 fact 或与当前记录不匹配，已跳过替代',
+              });
+            }
+          } catch (error) {
+            failed += 1;
+            results.push({
+              ...(item.clientItemId !== undefined ? { clientItemId: item.clientItemId } : {}),
+              status: 'failed',
+              id: existing.id,
+              kind: item.kind,
+              domain: item.domain,
+              code: error instanceof CapabilityError ? error.code : 'supersede_failed',
+              retryable: true,
+            });
+          }
           continue;
         }
         try {
           const written = await performWriteItem(appValue, item);
           warnings.push(...written.warnings);
           const node = written.node;
+          const replaced = await applyWriteSupersedes(item, node);
+          for (const id of replaced.skipped) {
+            warnings.push({
+              code: 'supersedes_skipped',
+              id,
+              message: '旧记录已删除、非 fact 或与当前记录不匹配，已跳过替代',
+            });
+          }
           created += 1;
-          results.push(recordWriteResult('created', node, item, item.owner));
+          results.push(recordWriteResult('created', node, item, item.owner, replaced.superseded));
           if (item.clientItemId !== undefined) {
             dedupe.client.set(dedupeKey('client', item.domain, item.clientItemId), node);
           }
@@ -2435,18 +2630,37 @@ export function createMemoryCapabilityHandler({
           }
           metadata = { ...(isObject(node.metadata) ? node.metadata : {}), ...jsonClone(patch.metadata) };
         }
-        // GraphStore.updateNode 保留 validFrom/validTo（不可变）；显式变更给结构化错误。
+        // validFrom 仍不可变；validTo 仅允许受控缩短/结束 fact 的有效窗口（修正/替代路径）。
         if (patch.validFrom !== undefined && patch.validFrom !== node.validFrom) {
           throw validationError(index, 'patch.validFrom', 'validFrom 暂不支持更新', {
             code: 'temporal_update_unsupported',
           });
         }
-        if (patch.validTo !== undefined && patch.validTo !== node.validTo) {
-          throw validationError(index, 'patch.validTo', 'validTo 暂不支持更新', {
-            code: 'temporal_update_unsupported',
-          });
+        let validTo;
+        if (patch.validTo !== undefined) {
+          if (typeof patch.validTo !== 'number' || !Number.isFinite(patch.validTo)) {
+            throw validationError(index, 'patch.validTo', 'validTo 必须是有限数字');
+          }
+          if (node.type !== 'fact') {
+            throw validationError(index, 'patch.validTo', 'validTo 仅适用于 fact 记录', {
+              code: 'temporal_update_unsupported',
+            });
+          }
+          if (patch.validTo < (node.validFrom ?? 0)) {
+            throw validationError(index, 'patch.validTo', 'validTo 必须不早于 validFrom');
+          }
+          const currentValidTo = node.validTo ?? OPEN_VALID_TO;
+          if (currentValidTo <= now() && patch.validTo > currentValidTo) {
+            throw new CapabilityError(409, 'temporal_conflict', '已结束的事实不能重新打开', {
+              index,
+              id: raw.id,
+              currentValidTo,
+            });
+          }
+          // 相同值也按幂等 no-op 接受；Service 会跳过实际写入。
+          validTo = patch.validTo;
         }
-        if (content === undefined && tags === undefined && metadata === undefined) {
+        if (content === undefined && tags === undefined && metadata === undefined && validTo === undefined) {
           throw validationError(index, 'patch', 'patch 没有可更新字段');
         }
         plans.push({
@@ -2457,6 +2671,7 @@ export function createMemoryCapabilityHandler({
           tags,
           metadata,
           contentHash,
+          ...(validTo !== undefined ? { validTo } : {}),
           actorId: actor.type === 'agent' ? actor.agentId : actor.type === 'user' ? identity.userId : 'system',
         });
       }
@@ -2481,6 +2696,7 @@ export function createMemoryCapabilityHandler({
             ...(plan.content !== undefined ? { content: plan.content } : {}),
             ...(plan.tags !== undefined ? { tags: plan.tags } : {}),
             metadata,
+            ...(plan.validTo !== undefined ? { validTo: plan.validTo } : {}),
           }, { tolerateVectorIndexFailure: true });
           if (!updatedRecord?.node) {
             throw new CapabilityError(404, 'not_found', '节点不存在', { id: plan.id });
@@ -2499,6 +2715,7 @@ export function createMemoryCapabilityHandler({
             ownerType: owner.ownerType,
             ownerId: owner.ownerId,
             updatedAt: node.updatedAt,
+            validTo: normalizeValidTo(node.validTo),
           });
         } catch (error) {
           failed += 1;
@@ -4159,6 +4376,7 @@ export function createMemoryCapabilityHandler({
           query: payload.query,
           types,
           limit,
+          ...(payload.includeHistory !== undefined ? { includeHistory: payload.includeHistory === true } : {}),
           ...(payload.includeRelations !== undefined ? { includeRelations: payload.includeRelations === true } : {}),
           ...(payload.includeArchived !== undefined ? { includeArchived: payload.includeArchived === true } : {}),
           filters: { ...(filters ?? {}), namespace: resolved.domains },

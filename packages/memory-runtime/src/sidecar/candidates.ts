@@ -591,6 +591,8 @@ export interface CapabilityWriteItem {
   relatedTo?: string[];
   validFrom?: number;
   validTo?: number;
+  /** 记录级修正：同域、同 subject/predicate 的旧事实 id。 */
+  supersedes?: string[];
   provenance: WriteProvenance;
 }
 

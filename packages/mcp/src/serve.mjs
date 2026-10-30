@@ -20,6 +20,11 @@ import { READ_ROUTES, buildHandoffPlan } from './admin.mjs';
 import { configPath } from './config.mjs';
 import { createServiceFacade } from './service-facade.mjs';
 import { buildRuntimeService, createRuntimeHttpHandler, isRuntimePath } from './runtime-memory.mjs';
+import {
+  createMemoryCapabilityHandler,
+  isMemoryCapabilityPath,
+  isMemoryRuntimeEnabled,
+} from './memory-capability.mjs';
 import { APP_VERSION } from './version.mjs';
 import { resolveStaticAssetRoots } from './asset-roots.mjs';
 
@@ -1041,6 +1046,28 @@ export async function startHttpServer({
     sendJson,
     origin: () => origin,
     csrfValid,
+  });
+
+  // 0.3 Memory Capability API：只读内部接口 `/internal/memory/v1`。
+  // 只有 memoryRuntime.enabled=true 时挂载/生成 token；轻量模式零目录/文件/进程副作用。
+  // W2a 只接读端点；写端点由 W2b 补齐（当前返回 501 not_implemented）。
+  const memoryCapability = createMemoryCapabilityHandler({
+    home,
+    getConfig: () => config,
+    getService: () => service,
+    getApp: () => app,
+    getIdentity: () => ({
+      // /healthz 的 cloudId 是既有 profile 语义；capability 的稳定 cloudTrustId 暂不可得。
+      cloudId: null,
+      cloudTrustId: null,
+      profileId: cloudId,
+      userId: 'user',
+      deviceId: app?.deviceId ?? null,
+    }),
+    ttlMs: (() => {
+      const raw = Number(process.env.MEBULAR_CAPABILITY_TOKEN_TTL_MS ?? '');
+      return Number.isFinite(raw) && raw > 0 ? raw : undefined;
+    })(),
   });
 
   // 模型选择/卸载后让 RuntimeService 重新读取 runtime.model.local；旧引擎由 dispose 停止。
@@ -2533,6 +2560,19 @@ export async function startHttpServer({
       const backup = existsSync(`${cfgFile}.bak`) ? `${cfgFile}.bak` : null;
       const base = { ok: true, applied: changedPaths, backup, path: cfgFile, config: merged };
 
+      // memoryRuntime.enabled 是热开关：同步内存配置并立即生成/撤销 capability token。
+      if (changedPaths.some((changed) => changed === 'memoryRuntime' || changed.startsWith('memoryRuntime.'))) {
+        if (merged?.memoryRuntime === undefined) {
+          const next = { ...(config ?? {}) };
+          delete next.memoryRuntime;
+          config = next;
+        } else {
+          config = { ...(config ?? {}), memoryRuntime: merged.memoryRuntime };
+        }
+        if (isMemoryRuntimeEnabled(config)) await memoryCapability.prepare();
+        else await memoryCapability.revoke();
+      }
+
       // G1：全部即时生效项 → 不重启，就地生效（前端随即刷新 effective）
       if (restartPaths.length === 0) {
         return sendJson(res, 200, { ...base, restartRequired: false, effectiveImmediately: true, restart: { mode: 'none' }, immediatePaths });
@@ -3127,7 +3167,12 @@ export async function startHttpServer({
         res.setHeader('cache-control', 'no-store');
         return sendJson(res, 200, buildEmbedInfo({ origin, loopback: isLoopback }));
       }
-      // 0.3 Runtime API：与 /mcp 同端口、同 bearer/OAuth/scope；未初始化时返回 503。
+      // 0.3 Memory Capability API（内部）：loopback + capability token，独立于 /mcp 鉴权。
+      // 轻量模式（memoryRuntime.enabled=false）返回 404 capability_disabled，不创建 token/目录。
+      if (isMemoryCapabilityPath(path)) {
+        return memoryCapability({ req, res, url, body });
+      }
+      // 0.3 Runtime API（原型，保留）：与 /mcp 同端口、同 bearer/OAuth/scope；未初始化时返回 503。
       if (isRuntimePath(path)) {
         return runtimeHttpHandler({ req, res, url, body });
       }
@@ -3638,6 +3683,9 @@ export async function startHttpServer({
     ? await acquireActiveLock({ root: cloud.root, home, profileId: cloudId })
     : null;
 
+  // capability token 在监听前生成（sidecar 首次握手可读）；监听失败由下方 catch 撤销。
+  if (isMemoryRuntimeEnabled(config)) await memoryCapability.prepare();
+
   let server;
   try {
     if (tls) {
@@ -3650,6 +3698,7 @@ export async function startHttpServer({
       server.listen(port, host, () => resolve());
     });
   } catch (error) {
+    await memoryCapability.dispose().catch(() => undefined);
     await activeLock?.release?.().catch(() => undefined);
     throw error;
   }
@@ -3722,6 +3771,8 @@ export async function startHttpServer({
           .then(({ disposeInferenceManager }) => disposeInferenceManager(home))
           .catch(() => undefined);
         // 6) 保留最新 main 的生命周期收尾：root 单活锁 + 热初始化上下文（app/join/广播）。
+        //    capability token 文件随进程撤销，旧 sidecar 下次请求 401。
+        await memoryCapability.dispose().catch(() => undefined);
         await activeLock?.release?.().catch(() => undefined);
         await onClose?.().catch(() => undefined);
       }

@@ -587,6 +587,13 @@ export const CONFIG_SCHEMA = [
     effective: (s) => (s?.mcp?.tls === true ? 'on' : 'off'),
     reason: (ctx) => (ctx.settings?.mcp?.tls ? '已生效：TLS 实际启用' : '未启用：明文 HTTP（仅回环安全）'),
   },
+  // ------------------------------------------------------------------ Memory Runtime（device-local；0.3 默认关闭 = 轻量 MCP）
+  // 只承载 MCP 侧生命周期开关；sidecar 自己的设置放 <home>/memory-runtime/config.json。
+  // 热生效（requiresRestart:false）：切换会动态生成/撤销 capability token。
+  { path: 'memoryRuntime.enabled', read: (c) => c?.memoryRuntime?.enabled === true, kind: 'bool', exposure: 'internal', writable: true, requiresRestart: false, default: false, ui: { group: '记忆运行时', type: 'bool', label: '启用记忆运行时（sidecar）' }, effective: (s) => s?.memoryRuntime?.enabled === true },
+  { path: 'memoryRuntime.command', read: (c) => c?.memoryRuntime?.command ?? null, kind: 'string', spec: { nonEmpty: true, empty: 'delete' }, exposure: 'internal', writable: true, requiresRestart: false, default: null, ui: { group: '记忆运行时', type: 'text', label: 'sidecar 可执行文件' }, effective: (s) => s?.memoryRuntime?.command ?? null },
+  { path: 'memoryRuntime.startTimeoutMs', read: (c) => c?.memoryRuntime?.startTimeoutMs ?? 5000, kind: 'int', spec: { min: 100, nullable: true }, exposure: 'internal', writable: true, requiresRestart: false, default: 5000, ui: { group: '记忆运行时', type: 'number', label: 'sidecar 启动超时（ms）' }, effective: (s) => s?.memoryRuntime?.startTimeoutMs ?? 5000 },
+
   // ------------------------------------------------------------------ Runtime（device-local；0.3 默认 mcp/off）
   // 设备级配置，不进入共享记忆。API 可写（internal + writable），控制台 GUI 暂不渲染；
   // 全部热生效（requiresRestart:false），模式切换不迁移任何节点。

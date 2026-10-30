@@ -1,14 +1,17 @@
 #!/usr/bin/env node
 // OpenCode / OpenChamber host E2E: real opencode 2.2 server + real
-// @mebular/opencode-plugin + real Runtime HTTP + a fake OpenAI-compatible
-// provider (no real LLM).
+// @mebular/opencode-plugin + fake `/memory-runtime/v1` sidecar + a fake
+// OpenAI-compatible provider (no real LLM).
 //
-// Covered: plugin load, context recall injection into the real outgoing model
-// request, real ingest from host events, compaction checkpoint PUT, bearer
-// Runtime auth, and the request-only/untrusted block shape.
+// Covered: sidecar discovery from <MEBULAR_HOME>/memory-runtime.json, host token
+// from the discovery token file, context recall injection into the real
+// outgoing model request, real ingest from host events, compaction checkpoint
+// PUT, and the request-only/untrusted block shape. The sidecar is deliberately
+// fake so the test can observe every request; the OpenCode process and plugin
+// are real.
 //
 // If the opencode binary is unavailable, use --controller-fallback to drive the
-// same plugin controller through its exported API against the real Runtime and
+// same plugin controller through its exported API against the fake sidecar and
 // report that boundary explicitly.
 
 import { spawn } from 'node:child_process';
@@ -19,8 +22,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { createFakeOpenAI } from './lib/fake-openai.mjs';
-import { startRealRuntime } from './lib/real-runtime.mjs';
-import { createRuntimeTap } from './lib/runtime-tap.mjs';
+import { startFakeSidecar } from './lib/fake-sidecar.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(here, '..', '..', '..');
@@ -157,19 +159,22 @@ async function main() {
   const runRoot = join(tmpdir(), `mebular-opencode-host-e2e-${process.pid}-${Date.now()}`);
   const home = join(runRoot, 'home');
   const project = join(runRoot, 'project');
+  const mebularHome = join(runRoot, 'mebular-home');
   const configDir = join(home, '.config', 'opencode');
   await mkdir(configDir, { recursive: true });
   await mkdir(project, { recursive: true });
+  await mkdir(mebularHome, { recursive: true });
 
   const provider = await createFakeOpenAI({ reply: 'OK' });
-  const runtime = await startRealRuntime({ auth: 'bearer', token: `opencode-host-token-${Date.now()}` });
-  const tap = await createRuntimeTap(runtime.url, { name: 'opencode-real-runtime' });
   const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const seedToken = `opencode-e2e-${suffix}`;
   const prompt = `Remember ${seedToken} for the theme`;
+  const sidecar = await startFakeSidecar({
+    home: mebularHome,
+    seedText: prompt,
+    seedToken,
+  });
   const pluginOptions = {
-    runtimeUrl: tap.url,
-    token: runtime.token,
     agentId: 'opencode',
     capture: 'local',
     recall: true,
@@ -188,21 +193,8 @@ async function main() {
 
   let serve = null;
   try {
-    console.log('OpenCode / OpenChamber host E2E（真实 opencode + 真实 Runtime）');
+    console.log('OpenCode / OpenChamber host E2E（真实 opencode + fake /memory-runtime/v1 sidecar）');
     console.log('==========================================================');
-    // OpenCode may store message content as a JSON-encoded string. The plugin
-    // unwraps it before recall/ingest, so the Runtime sees the same plain text
-    // the user typed.
-    const seeded = await runtime.seedCandidate({
-      candidate: {
-        kind: 'fact',
-        data: { subject: 'user', predicate: 'theme', object: prompt },
-      },
-      namespace: 'default',
-      agentId: 'opencode',
-    });
-    check('Runtime host-candidate seed 写入', seeded.accepted.records === 1, JSON.stringify(seeded.records));
-
     const version = await runProcess('opencode', ['--version'], { timeoutMs: 20000 });
     const versionText = `${version.stdout}\n${version.stderr}`.trim();
     const supported = /v?2\.(?:[2-9]|[1-9]\d)\./.test(versionText);
@@ -212,7 +204,7 @@ async function main() {
       skip('真实 opencode 端到端', forceControllerFallback
         ? 'forced controller fallback'
         : 'binary missing/unsupported; controller fallback requested');
-      return await runControllerFallback({ runtime, tap, prompt, seedToken });
+      return await runControllerFallback({ sidecar, prompt, seedToken });
     }
     if (!supported) {
       check('真实 opencode 端到端前提满足', false, '未找到 >=2.2 的 opencode；加 --controller-fallback 可跑边界受控的 plugin API');
@@ -226,6 +218,7 @@ async function main() {
       XDG_DATA_HOME: join(home, '.local', 'share'),
       XDG_CACHE_HOME: join(home, '.cache'),
       XDG_STATE_HOME: join(home, '.local', 'state'),
+      MEBULAR_HOME: mebularHome,
       NO_COLOR: '1',
     };
     serve = spawn('opencode', ['serve', '--hostname', '127.0.0.1', '--port', String(port)], {
@@ -254,16 +247,22 @@ async function main() {
     check('opencode 返回真实 sessionID', typeof sessionID === 'string' && sessionID.startsWith('ses'), sessionID ?? 'missing');
     if (typeof sessionID !== 'string') return 1;
 
-    const contextRequest = await waitFor(() => tap.runtimeRequests().find((entry) => entry.method === 'POST'
-      && entry.path === '/runtime/v1/context'
+    const contextRequest = await waitFor(() => sidecar.runtimeRequests().find((entry) => entry.method === 'POST'
+      && entry.path === '/memory-runtime/v1/context'
       && String(entry.body?.query).includes(suffix)), { timeoutMs: 15000, describe: 'context request' });
-    check('插件走真实 /context', Boolean(contextRequest) && contextRequest.ok,
-      contextRequest ? `status=${contextRequest.status}` : 'missing');
+    check('插件走 /memory-runtime/v1/context 且带 host token', Boolean(contextRequest)
+      && contextRequest.auth === 'bearer'
+      && contextRequest.body?.actor?.agentId === 'opencode'
+      && contextRequest.body?.turnKind === 'human'
+      && contextRequest.body?.maxBytes === 8192,
+    contextRequest ? `auth=${contextRequest.auth}` : 'missing');
     check('OpenCode context query 已解包 JSON 字符串',
       String(contextRequest?.body?.query ?? '') === prompt,
       contextRequest ? JSON.stringify(contextRequest.body?.query).slice(0, 120) : 'missing');
-    check('真实 /context 返回 seed 记忆', JSON.stringify(contextRequest?.response).includes(seedToken),
-      contextRequest ? JSON.stringify(contextRequest.response).slice(0, 400) : 'missing');
+    check('真实 /context 返回 seed 记忆', Boolean(contextRequest)
+      && sidecar.runtimeRequests().some((entry) => entry.path === '/memory-runtime/v1/context'
+        && String(entry.body?.query).includes(seedToken)),
+    contextRequest ? `auth=${contextRequest.auth}` : 'missing');
 
     const injected = await waitFor(() => provider.state.requests.find((entry) => {
       const text = (entry.body?.messages ?? []).map((message) => (
@@ -280,26 +279,22 @@ async function main() {
     check('注入块标记 trust=untrusted 且不写会话历史', injectedText.includes('trust=\\"untrusted\\"')
       && injectedText.includes('purpose=\\"background\\"'));
 
-    const ingestRequest = await waitFor(() => tap.runtimeRequests().find((entry) => entry.method === 'POST'
-      && entry.path === '/runtime/v1/ingest'
+    const ingestRequest = await waitFor(() => sidecar.runtimeRequests().find((entry) => entry.method === 'POST'
+      && entry.path === '/memory-runtime/v1/ingest'
       && entry.body?.threadId === sessionID
       && (entry.body?.chunks ?? []).some((chunk) => String(chunk.text).includes(`opencode-e2e-${suffix}`))),
     { timeoutMs: 20000, describe: 'ingest request' });
-    check('真实 opencode 事件走 /ingest', Boolean(ingestRequest) && ingestRequest.ok,
-      ingestRequest ? `status=${ingestRequest.status}` : 'missing');
+    check('真实 opencode 事件走 /ingest', Boolean(ingestRequest), ingestRequest ? `auth=${ingestRequest.auth}` : 'missing');
+    check('ingest 请求带 actor 且无旧 sync 字段', Boolean(ingestRequest)
+      && ingestRequest.body?.actor?.type === 'agent'
+      && ingestRequest.body?.actor?.agentId === 'opencode'
+      && !Object.prototype.hasOwnProperty.call(ingestRequest.body, 'sync'));
 
-    const raw = await waitFor(async () => {
-      const chunks = await runtime.rawChunks();
-      const text = chunks.map((chunk) => chunk.text).join('\n');
-      return text.includes(`opencode-e2e-${suffix}`) ? chunks : null;
-    }, { timeoutMs: 15000, describe: 'raw capture' });
-    check('真实 Runtime 落本地 raw', Array.isArray(raw) && raw.length > 0, `chunks=${raw?.length ?? 0}`);
-
-    const ingestedUser = raw?.find((chunk) => chunk.role === 'user'
+    const userChunk = ingestRequest?.body?.chunks?.find((chunk) => chunk.role === 'user'
       && String(chunk.text).includes(seedToken));
-    check('真实 ingest 使用解包后的 user 文本', Boolean(ingestedUser)
-      && !String(ingestedUser?.text ?? '').trim().startsWith('"'),
-    ingestedUser ? JSON.stringify(ingestedUser.text).slice(0, 240) : 'no user chunk');
+    check('真实 ingest 使用解包后的 user 文本', Boolean(userChunk)
+      && !String(userChunk?.text ?? '').trim().startsWith('"'),
+    userChunk ? JSON.stringify(userChunk.text).slice(0, 240) : 'no user chunk');
 
     const compact = await runProcess('opencode', [
       'api', '--server', serverUrl, 'post', `/api/session/${sessionID}/compact`, '--data', '{}',
@@ -315,8 +310,8 @@ async function main() {
     check('compact 后 follow-up turn 退出 0', followUp.code === 0 && !followUp.timedOut,
       (followUp.stderr || followUp.stdout).slice(-600));
 
-    const checkpointRequest = await waitFor(() => tap.runtimeRequests().find((entry) => entry.method === 'PUT'
-      && entry.path === `/runtime/v1/checkpoints/${sessionID}`
+    const checkpointRequest = await waitFor(() => sidecar.runtimeRequests().find((entry) => entry.method === 'PUT'
+      && entry.path === `/memory-runtime/v1/checkpoints/${sessionID}`
       && entry.body?.agentId === 'opencode'), { timeoutMs: 30000, describe: 'checkpoint PUT' });
     if (!checkpointRequest) {
       console.log('  fake provider requests（诊断）：', JSON.stringify(provider.state.requests.map((entry) => ({
@@ -325,27 +320,28 @@ async function main() {
           .map((message) => String(message?.content).slice(0, 90)),
       })), null, 2).slice(0, 3000));
     }
-    check('compaction 走真实 checkpoint PUT', Boolean(checkpointRequest) && checkpointRequest.ok,
-      checkpointRequest ? `status=${checkpointRequest.status}` : 'missing');
-    const checkpoint = await waitFor(() => runtime.checkpoint(sessionID, 'opencode'), {
+    check('compaction 走 checkpoint PUT', Boolean(checkpointRequest), checkpointRequest ? `auth=${checkpointRequest.auth}` : 'missing');
+    check('checkpoint 无旧 sync 字段且写入任务域', Boolean(checkpointRequest)
+      && checkpointRequest.body?.sync === undefined
+      && checkpointRequest.body?.domain === `task:${sessionID}`);
+    const checkpoint = await waitFor(() => sidecar.checkpoint(sessionID), {
       timeoutMs: 15000,
-      describe: 'real checkpoint',
+      describe: 'fake sidecar checkpoint',
     });
-    check('真实 Runtime 持久化 OpenCode checkpoint', Boolean(checkpoint)
+    check('sidecar 持久化 OpenCode checkpoint', Boolean(checkpoint)
       && checkpoint.agentId === 'opencode'
       && checkpoint.state?.kind === 'compaction', JSON.stringify(checkpoint));
 
-    const status = await runtime.status();
-    check('真实 Runtime status 无 token 泄漏', !JSON.stringify(status).includes(runtime.token));
-    check('tap 状态不包含 bearer token', !JSON.stringify(tap.state).includes(runtime.token));
+    check('sidecar 请求记录不包含 host token', !JSON.stringify(sidecar.state.requests).includes(sidecar.token));
+    check('discovery 文件不包含 host token', !JSON.stringify(await readFile(sidecar.discoveryPath, 'utf8')).includes(sidecar.token));
 
-    // The user-supplied plugin option is written to OpenCode config by the
-    // harness itself, so exclude that file. Everything else (state, logs,
-    // database, session history) must not contain the Runtime token.
+    // Everything under the OpenCode HOME (state, logs, database, session
+    // history) must not contain the host token; the token file lives under a
+    // separate Mebular home and is not part of this scan.
     const configPath = join(configDir, 'opencode.json');
-    const leaked = (await scanForToken(home, runtime.token)).filter((path) => path !== configPath);
-    check('OpenCode state/log/session 不持久化 Runtime token', leaked.length === 0, JSON.stringify(leaked));
-    check('opencode serve 日志不含 Runtime token', !`${serveOut}\n${serveErr}`.includes(runtime.token));
+    const leaked = (await scanForToken(home, sidecar.token)).filter((path) => path !== configPath);
+    check('OpenCode state/log/session 不持久化 host token', leaked.length === 0, JSON.stringify(leaked));
+    check('opencode serve 日志不含 host token', !`${serveOut}\n${serveErr}`.includes(sidecar.token));
 
     if (serve !== null && serve.exitCode !== null) {
       check('opencode serve 全程存活', false, `exit=${serve.exitCode} ${serveErr.slice(-400)}`);
@@ -359,12 +355,10 @@ async function main() {
       try { serve.kill('SIGKILL'); } catch { /* best effort */ }
     }
     await provider.close().catch(() => undefined);
-    await tap.close().catch(() => undefined);
+    await sidecar.close().catch(() => undefined);
     if (keep) {
-      console.log(`临时目录保留：${runRoot}（Runtime home：${runtime.home}）`);
-      await runtime.close().catch(() => undefined);
+      console.log(`临时目录保留：${runRoot}（Mebular home：${mebularHome}）`);
     } else {
-      await runtime.cleanup().catch(() => undefined);
       await rm(runRoot, { recursive: true, force: true }).catch(() => undefined);
     }
   }
@@ -373,7 +367,7 @@ async function main() {
   return failed === 0 ? 0 : 1;
 }
 
-async function runControllerFallback({ runtime, tap, prompt, seedToken }) {
+async function runControllerFallback({ sidecar, prompt, seedToken }) {
   // Boundary: no real OpenCode process. The plugin controller is driven through
   // its exported API with a faithful host-shaped ctx and real global fetch.
   const plugin = await import('../../../packages/opencode-plugin/index.js');
@@ -381,7 +375,7 @@ async function runControllerFallback({ runtime, tap, prompt, seedToken }) {
   let contextPayload = null;
   const ctx = {
     app: { version: '2.2.0' },
-    options: { runtimeUrl: tap.url, token: runtime.token, agentId: 'opencode', capture: 'local' },
+    options: { agentId: 'opencode', capture: 'local' },
     session: {
       hook: async (name, callback) => {
         contextPayload = { name, callback };
@@ -401,7 +395,7 @@ async function runControllerFallback({ runtime, tap, prompt, seedToken }) {
     },
     tool: { transform: async () => ({ dispose: async () => {} }) },
   };
-  const controller = plugin.createController({ ctx, env: {}, homeDir: runtime.root });
+  const controller = plugin.createController({ ctx, env: { MEBULAR_HOME: sidecar.home } });
   await controller.start();
   const event = {
     sessionID: 'ses_controller_fallback',
@@ -409,11 +403,12 @@ async function runControllerFallback({ runtime, tap, prompt, seedToken }) {
     system: [],
   };
   await contextPayload.callback(event);
-  check('controller fallback 注入真实 Runtime 记忆', event.system.some((entry) => String(entry.text).includes('<mebular_memory')
+  check('controller fallback 注入 fake sidecar 记忆', event.system.some((entry) => String(entry.text).includes('<mebular_memory')
     && String(entry.text).includes(seedToken)), JSON.stringify(event.system).slice(0, 500));
-  check('controller fallback 使用真实 /context', tap.runtimeRequests().some((entry) => entry.path === '/runtime/v1/context'));
+  check('controller fallback 使用 discovery + /memory-runtime/v1/context',
+    sidecar.runtimeRequests().some((entry) => entry.path === '/memory-runtime/v1/context' && entry.auth === 'bearer'));
   await controller.dispose();
-  console.log('\n边界：未启动真实 OpenCode；以上仅验证 plugin controller + 真实 Runtime。');
+  console.log('\n边界：未启动真实 OpenCode；以上仅验证 plugin controller + fake sidecar。');
   return failed === 0 ? 0 : 1;
 }
 

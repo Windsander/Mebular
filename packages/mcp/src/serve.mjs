@@ -25,6 +25,10 @@ import {
   isMemoryCapabilityPath,
   isMemoryRuntimeEnabled,
 } from './memory-capability.mjs';
+import {
+  MemoryRuntimeSupervisor,
+  disabledMemoryRuntimeStatus,
+} from './memory-runtime-supervisor.mjs';
 import { APP_VERSION } from './version.mjs';
 import { resolveStaticAssetRoots } from './asset-roots.mjs';
 
@@ -878,6 +882,9 @@ export async function startHttpServer({
   initializeRuntime = null,
   // 关闭钩子：热初始化后由 server.mjs 关闭 app / join / 广播计时器（HTTP server 本身由本函数关闭）
   onClose = null,
+  // Memory Runtime sidecar 生命周期：只在 MCP daemon（HTTP 模式）启用。
+  // 测试可直接关掉；生产入口 server.mjs 显式传 true。
+  manageMemoryRuntime = true,
 }) {
   // P1：生命周期状态。所有路由共用**可变**上下文；create/join 成功后就地切换，不重启进程 / 端口。
   let app = initialApp;
@@ -1069,6 +1076,20 @@ export async function startHttpServer({
       return Number.isFinite(raw) && raw > 0 ? raw : undefined;
     })(),
   });
+
+  // 0.3 Memory Runtime sidecar 生命周期适配：只 spawn/health/stop，不 import sidecar 业务。
+  // 轻量模式（enabled=false）不会创建目录/token/进程/端口；自动启动在 listen 后异步进行，
+  // 不阻塞 MCP READY/29 工具。关闭时只停止本进程启动的 sidecar（attach 的不动）。
+  const memoryRuntimeSupervisor = manageMemoryRuntime
+    ? new MemoryRuntimeSupervisor({
+      home,
+      config: () => config,
+      env: process.env,
+      profileId: () => cloudId,
+      cloudId: () => null,
+      mcpUrl: () => origin,
+    })
+    : null;
 
   // 模型选择/卸载后让 RuntimeService 重新读取 runtime.model.local；旧引擎由 dispose 停止。
   const refreshInferenceRuntime = async () => {
@@ -1345,6 +1366,10 @@ export async function startHttpServer({
     }
     if (path === '/admin/api/overview') {
       payload.features = { writes: Boolean(writesEnabled) };
+      // 只读状态；不包含 token/tokenFile。禁用/未安装/失败都明确呈现，失败开放。
+      payload.memoryRuntime = memoryRuntimeSupervisor
+        ? await memoryRuntimeSupervisor.status().catch(() => memoryRuntimeSupervisor.snapshot())
+        : disabledMemoryRuntimeStatus();
     }
     return sendJson(res, 200, payload);
   }
@@ -2560,7 +2585,8 @@ export async function startHttpServer({
       const backup = existsSync(`${cfgFile}.bak`) ? `${cfgFile}.bak` : null;
       const base = { ok: true, applied: changedPaths, backup, path: cfgFile, config: merged };
 
-      // memoryRuntime.enabled 是热开关：同步内存配置并立即生成/撤销 capability token。
+      // memoryRuntime.enabled 是热开关：同步内存配置，立即生成/撤销 capability token，
+      // 并启动/停止 sidecar（sidecar 失败不影响配置写入与 MCP 本身）。
       if (changedPaths.some((changed) => changed === 'memoryRuntime' || changed.startsWith('memoryRuntime.'))) {
         if (merged?.memoryRuntime === undefined) {
           const next = { ...(config ?? {}) };
@@ -2569,8 +2595,21 @@ export async function startHttpServer({
         } else {
           config = { ...(config ?? {}), memoryRuntime: merged.memoryRuntime };
         }
-        if (isMemoryRuntimeEnabled(config)) await memoryCapability.prepare();
-        else await memoryCapability.revoke();
+        if (isMemoryRuntimeEnabled(config)) {
+          await memoryCapability.prepare();
+          if (memoryRuntimeSupervisor) {
+            const commandChanged = changedPaths.some((changed) => changed === 'memoryRuntime.command'
+              || changed === 'memoryRuntime.startTimeoutMs');
+            if (commandChanged) {
+              void memoryRuntimeSupervisor.restart({ includeAttached: true, force: false }).catch(() => undefined);
+            } else {
+              void memoryRuntimeSupervisor.start().catch(() => undefined);
+            }
+          }
+        } else {
+          await memoryRuntimeSupervisor?.stop({ includeAttached: false }).catch(() => undefined);
+          await memoryCapability.revoke();
+        }
       }
 
       // G1：全部即时生效项 → 不重启，就地生效（前端随即刷新 effective）
@@ -3172,8 +3211,9 @@ export async function startHttpServer({
       if (isMemoryCapabilityPath(path)) {
         return memoryCapability({ req, res, url, body });
       }
-      // 0.3 Runtime API（原型，保留）：与 /mcp 同端口、同 bearer/OAuth/scope；未初始化时返回 503。
+      // 0.3 原型 /runtime/v1（保留但 deprecated）：新宿主必须使用 sidecar 的 /memory-runtime/v1。
       if (isRuntimePath(path)) {
+        res.setHeader('x-mebular-deprecated', '/runtime/v1; use /memory-runtime/v1');
         return runtimeHttpHandler({ req, res, url, body });
       }
       if (auth === 'oauth') {
@@ -3717,6 +3757,12 @@ export async function startHttpServer({
   }).catch((error) => {
     console.error(`RUNTIME_FILE_WRITE_FAILED ${error?.code ?? 'ERROR'}`);
   });
+  // MCP 已就绪后再异步拉起 sidecar：失败只影响沉浸式记忆，不阻塞 READY/29 工具。
+  if (memoryRuntimeSupervisor && isMemoryRuntimeEnabled(config)) {
+    void memoryRuntimeSupervisor.start().catch((error) => {
+      console.error(`MEMORY_RUNTIME_START_FAILED ${error?.code ?? 'ERROR'}`);
+    });
+  }
   let closePromise = null;
   const close = () => {
     if (closePromise) return closePromise;
@@ -3771,7 +3817,8 @@ export async function startHttpServer({
           .then(({ disposeInferenceManager }) => disposeInferenceManager(home))
           .catch(() => undefined);
         // 6) 保留最新 main 的生命周期收尾：root 单活锁 + 热初始化上下文（app/join/广播）。
-        //    capability token 文件随进程撤销，旧 sidecar 下次请求 401。
+        //    先停止本进程启动的 sidecar（attach 的不动），再撤销 capability token。
+        await memoryRuntimeSupervisor?.dispose().catch(() => undefined);
         await memoryCapability.dispose().catch(() => undefined);
         await activeLock?.release?.().catch(() => undefined);
         await onClose?.().catch(() => undefined);

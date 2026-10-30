@@ -6,7 +6,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { homeDir } from '../src/home.mjs';
 import { serviceBuildSha } from '../src/build-sha.mjs';
@@ -1784,6 +1784,110 @@ async function runRuntimeUpgrade(flags) {
   printRuntimeJson(result, result.ok ? 0 : 2);
 }
 
+// ---------- Memory Runtime sidecar（`mebular memory-runtime ...`） ----------
+//
+// 与 `mebular runtime ...`（MCP daemon）严格分离：这里只管理 `mebular-memory-runtime serve`。
+// 输出稳定 JSON，不返回 host token / capability token / tokenFile。
+
+async function readMemoryRuntimeConfig(home) {
+  try {
+    const file = process.env.MEBULAR_CONFIG ?? join(home, 'config.json');
+    return JSON.parse(await readFile(file, 'utf-8'));
+  } catch {
+    return {};
+  }
+}
+
+function memoryRuntimeHome(flags) {
+  const explicit = typeof flags.home === 'string' && flags.home.length > 0 ? flags.home : null;
+  return explicit ? resolve(explicit) : resolve(homeDir());
+}
+
+function memoryRuntimeTimeout(flags) {
+  if (flags.timeout === undefined) return 5000;
+  const value = Number(flags.timeout);
+  if (!Number.isInteger(value) || value < 0 || value > 120_000) {
+    const error = new Error('--timeout 必须是 0–120000 的整数（毫秒）');
+    error.code = 'USAGE';
+    throw error;
+  }
+  return value;
+}
+
+function printMemoryRuntime(value, exitCode = 0) {
+  console.log(JSON.stringify(value, null, 2));
+  process.exit(exitCode);
+}
+
+async function runMemoryRuntime(action, flags) {
+  const usage = '用法：mebular memory-runtime <status|start|stop|restart> [--json] [--home DIR] [--timeout MS]';
+  try {
+    if (!['status', 'start', 'stop', 'restart'].includes(action)) {
+      const error = new Error(usage);
+      error.code = 'USAGE';
+      throw error;
+    }
+    const home = memoryRuntimeHome(flags);
+    const config = await readMemoryRuntimeConfig(home);
+    const timeoutMs = memoryRuntimeTimeout(flags);
+    const {
+      MemoryRuntimeSupervisor,
+      inspectMemoryRuntimeStatus,
+      memoryRuntimeStatusExitCode,
+    } = await import('../src/memory-runtime-supervisor.mjs');
+
+    if (action === 'status') {
+      const status = await inspectMemoryRuntimeStatus({ home, config, env: process.env });
+      printMemoryRuntime({
+        ok: true,
+        kind: 'memory-runtime',
+        action,
+        ...status,
+      }, 0);
+      return;
+    }
+
+    const supervisor = new MemoryRuntimeSupervisor({
+      home,
+      config,
+      env: process.env,
+    });
+
+    if (action === 'stop') {
+      const status = await supervisor.stop({ includeAttached: true, timeoutMs });
+      printMemoryRuntime({
+        ok: true,
+        kind: 'memory-runtime',
+        action,
+        ...status,
+      }, 0);
+      return;
+    }
+
+    const status = action === 'restart'
+      ? await supervisor.restart({ includeAttached: true, timeoutMs, manual: true })
+      : await supervisor.start({ force: true, manual: true });
+    const ok = status.state === 'ready' || status.state === 'degraded';
+    printMemoryRuntime({
+      ok,
+      kind: 'memory-runtime',
+      action,
+      ...status,
+    }, ok ? 0 : memoryRuntimeStatusExitCode(status));
+  } catch (error) {
+    const code = error?.code === 'USAGE' ? 'usage' : (error?.code ?? 'error');
+    printMemoryRuntime({
+      ok: false,
+      kind: 'memory-runtime',
+      action: action ?? null,
+      error: {
+        code,
+        message: error?.message ?? String(error),
+      },
+    }, code === 'usage' ? 2 : 1);
+  }
+}
+
 async function runRuntime(action, args, flags) {
   try {
     if (action === 'provider') {
@@ -1951,6 +2055,10 @@ async function main() {
       await runRuntime(argv[1], argv.slice(2), flags);
       return;
     }
+    case 'memory-runtime': {
+      await runMemoryRuntime(argv[1], flags);
+      return;
+    }
     case 'models': {
       await runModels(argv.slice(1), flags);
       return;
@@ -1983,6 +2091,7 @@ async function main() {
           '  runtime current show|set|clear [--version V --runtime-path P --cli C --provider shared --owner O --installed-at ISO]  current 指针（非敏感）',
           '  runtime service install|uninstall|restart|status [--json]  共享 mebular-serve 所有权/生命周期',
           '  runtime provider list|add|remove [--kind app|cli|shared --path P --version V --capabilities a,b --id ID]  runtime provider 注册表',
+          '  memory-runtime status|start|stop|restart [--json] [--home DIR]   记忆运行时 sidecar（独立于 MCP daemon runtime）',
           '  models list|status|install|import|select|remove|start|stop|test [--json] [--pack P] [--manifest FILE] [--mirror URL]  本地 Qwen 模型（设备级，不同步）',
           '  token grant|list|revoke [--scope a,b] [--id x] [--tokens-file p]   bearer 令牌管理',
           '  token client add|list|remove [--redirect uri] [--scope a,b] [--id x]   OAuth 客户端预注册',

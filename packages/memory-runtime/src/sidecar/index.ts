@@ -5,6 +5,7 @@
 
 export * from './config.js';
 export * from './discovery.js';
+export * from './start-lock.js';
 export * from './token.js';
 export * from './capability-client.js';
 export * from './server.js';

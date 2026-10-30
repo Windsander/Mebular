@@ -61,6 +61,15 @@ import {
   readCapabilityToken,
   removeHostTokenIfMatches,
 } from './token.js';
+import {
+  StartLockError,
+  acquireStartLock,
+  isStartLockStale,
+  readStartLock,
+  releaseStartLock,
+  updateStartLock,
+  type StartLockRecord,
+} from './start-lock.js';
 
 export type SidecarStartupErrorCode =
   | 'invalid_request'
@@ -76,6 +85,8 @@ export type SidecarStartupErrorCode =
   | 'capability_disabled'
   | 'version_incompatible'
   | 'storage_unavailable'
+  | 'already_running'
+  | 'lock_conflict'
   | 'internal';
 
 export class SidecarStartupError extends Error {
@@ -133,6 +144,7 @@ export interface SidecarStatusResult {
   apiVersion: number;
   capabilityApiVersion: number;
   discovery: SidecarDiscovery | null;
+  lock: (StartLockRecord & { stale: boolean }) | null;
 }
 
 export interface SidecarVersionResult {
@@ -181,6 +193,9 @@ function startupFromConfigError(error: SidecarConfigError): SidecarStartupError 
 
 function startupFromUnknown(error: unknown): SidecarStartupError {
   if (error instanceof SidecarStartupError) return error;
+  if (error instanceof StartLockError) {
+    return new SidecarStartupError(error.code, error.exitCode, error.message);
+  }
   if (error instanceof SidecarConfigError) return startupFromConfigError(error);
   if (error instanceof TokenError) {
     return error.code === 'token_permissions_insecure'
@@ -287,8 +302,8 @@ function mergeIdentity(
   };
 }
 
-/** 启动 sidecar；返回可停止的 handle（CLI 与测试共用）。 */
-export async function startSidecar(options: StartSidecarOptions = {}): Promise<SidecarHandle> {
+/** 启动 sidecar 进程主体；外层 wrapper 负责 start.lock 的获取/释放。 */
+async function startSidecarProcess(options: StartSidecarOptions = {}): Promise<SidecarHandle> {
   const env = options.env ?? process.env;
   const now = options.now ?? Date.now;
   const startedAt = options.startedAt ?? now();
@@ -571,6 +586,65 @@ export async function startSidecar(options: StartSidecarOptions = {}): Promise<S
   };
 }
 
+/**
+ * 启动 sidecar；返回可停止的 handle（CLI、supervisor 与测试共用）。
+ *
+ * 单实例（contract §2.2）：先获取 `<dataDir>/start.lock`；已有存活实例时抛
+ * `already_running`（exitCode 7），profile/忆云不匹配时抛 `lock_conflict`（exitCode 7）。
+ * 陈旧锁自动清理后接管。停止时释放锁；SIGTERM/SIGINT 由 CLI main 触发同一条 stop 路径。
+ */
+export async function startSidecar(options: StartSidecarOptions = {}): Promise<SidecarHandle> {
+  const env = options.env ?? process.env;
+  let paths: SidecarPaths;
+  try {
+    paths = resolveSidecarPaths({ home: options.home, dataDir: options.dataDir, env });
+  } catch (error) {
+    throw startupFromUnknown(error);
+  }
+  const startedAt = options.startedAt ?? (options.now ?? Date.now)();
+
+  try {
+    await acquireStartLock({
+      path: paths.startLockPath,
+      pid: process.pid,
+      startedAt,
+      now: startedAt,
+      command: 'serve',
+      expectedCloudId: options.identity?.cloudId ?? null,
+      expectedProfileId: options.identity?.profileId ?? null,
+    });
+  } catch (error) {
+    throw startupFromUnknown(error);
+  }
+
+  let handle: SidecarHandle;
+  try {
+    handle = await startSidecarProcess(options);
+  } catch (error) {
+    await releaseStartLock(paths.startLockPath, { pid: process.pid }).catch(() => false);
+    throw error;
+  }
+
+  await updateStartLock(paths.startLockPath, {
+    pid: process.pid,
+    patch: {
+      port: handle.discovery.port,
+      cloudId: handle.discovery.cloudId,
+      profileId: handle.discovery.profileId,
+    },
+  }).catch(() => false);
+
+  const processStop = handle.stop;
+  handle.stop = async (): Promise<void> => {
+    try {
+      await processStop();
+    } finally {
+      await releaseStartLock(paths.startLockPath, { pid: process.pid }).catch(() => false);
+    }
+  };
+  return handle;
+}
+
 /** 只读 status：读取 discovery，不返回 token。 */
 export async function getSidecarStatus({
   home,
@@ -584,6 +658,10 @@ export async function getSidecarStatus({
   now?: number;
 } = {}): Promise<SidecarStatusResult> {
   const paths = resolveSidecarPaths({ home, dataDir, env });
+  const lock = await readStartLock(paths.startLockPath);
+  const lockView = lock === null
+    ? null
+    : { ...lock, stale: isStartLockStale(lock, { now, pidAlive: isProcessAlive }) };
   const discovery = await readDiscovery(paths.discoveryPath);
   if (!discovery) {
     return {
@@ -596,6 +674,7 @@ export async function getSidecarStatus({
       apiVersion: SIDECAR_API_VERSION,
       capabilityApiVersion: SIDECAR_CAPABILITY_API_VERSION,
       discovery: null,
+      lock: lockView,
     };
   }
   const alive = isProcessAlive(discovery.pid);
@@ -610,6 +689,7 @@ export async function getSidecarStatus({
     apiVersion: discovery.apiVersion,
     capabilityApiVersion: discovery.capabilityApiVersion,
     discovery,
+    lock: lockView,
   };
 }
 

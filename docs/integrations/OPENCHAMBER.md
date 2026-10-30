@@ -7,7 +7,7 @@ OpenChamber is an OpenCode-based desktop host. Mebular supports it in two layers
 | Layer | What you get | Default |
 |---|---|---|
 | **MCP** | The official 29-tool Mebular server in OpenCode's global config | Available when configured |
-| **Memory Runtime** (`@mebular/opencode-plugin`) | Request-only recall, event ingest, compaction checkpoints, optional current-model extraction | Off; explicit opt-in |
+| **Memory Runtime** (`@mebular/opencode-plugin`) | Request-only recall, event ingest, compaction checkpoints, optional current-model extraction | Follows the sidecar discovery mode; no host-level enable/capture |
 
 OpenChamber reuses OpenCode's global configuration. Mebular writes only the
 `mcp.servers.mebular` entry. It never writes OpenChamber's private
@@ -185,7 +185,7 @@ Common options:
 | `agentId` | `opencode` | Logical agent ID |
 | `namespace` / `namespaces` | — | Legacy recall-domain aliases; `namespace` is read-only compatibility |
 | `domains` | — | v2 memory domains such as `user` / `agent:opencode`; omitted lets the sidecar choose |
-| `capture` | `off` | `off` or `local`; local asks the sidecar to keep RawChunks on this device |
+| ~~`capture`~~ | — | Removed in 0.3.0: legacy value is ignored; the sidecar mode owns collection |
 | `recall` / `ingest` / `checkpoints` | `true` | Enable each path |
 | `modelSource` | `heuristic` | `heuristic`, or `host`/`current` for `ctx.session.generate` |
 | `hideMemoryTools` | `true` | Remove `mebular_*` tools from ordinary agents |
@@ -196,13 +196,13 @@ Common options:
 | `recallTimeoutMs` | `800` | Context timeout; failure/timeout injects nothing |
 | `maxContextBytes` | `8192` | Hard cap for the injected block |
 | `maxChunkBytes` | `16384` | Per-chunk ingest limit |
-| `maxCaptureMessages` | `12` | Recent session messages inspected per capture |
+| `maxCaptureMessages` | `12` | Recent session messages inspected when reading host context |
 | `hostExtractTimeoutMs` | `15000` | Background `session.generate` timeout |
 
 Environment variables: `MEBULAR_MEMORY_RUNTIME_URL`, `MEBULAR_MEMORY_RUNTIME_TOKEN`,
 `MEBULAR_MEMORY_RUNTIME_AGENT_ID`, `MEBULAR_MEMORY_RUNTIME_NAMESPACE`,
-`MEBULAR_MEMORY_RUNTIME_DOMAIN`, `MEBULAR_MEMORY_RUNTIME_MODEL`,
-`MEBULAR_MEMORY_RUNTIME_CAPTURE`, and `MEBULAR_OPENCODE_PLUGIN_CONFIG`.
+`MEBULAR_MEMORY_RUNTIME_DOMAIN`, `MEBULAR_MEMORY_RUNTIME_MODEL`, and
+`MEBULAR_OPENCODE_PLUGIN_CONFIG`. Legacy `MEBULAR_MEMORY_RUNTIME_CAPTURE` is ignored.
 
 The plugin config file defaults to `$MEBULAR_HOME/opencode-plugin.json` and may contain a
 `{ "memoryRuntime": { ... } }` object or flat keys. It never reads Mebular's `config.json`,

@@ -71,10 +71,7 @@ Token 优先级：`MEBULAR_MEMORY_RUNTIME_TOKEN` > Hermes secret scope > discove
   "runtime_url": "http://127.0.0.1:7341",
   "agent_id": "hermes",
   "domain": "",
-  "capture": "local",
   "extractor": "heuristic",
-  "sync_enabled": true,
-  "archive_enabled": true,
   "recall_limit": 8,
   "recall_token_budget": 2000,
   "recall_timeout": 1.5,
@@ -87,10 +84,8 @@ Token 优先级：`MEBULAR_MEMORY_RUNTIME_TOKEN` > Hermes secret scope > discove
 
 - `runtime_url` 是 sidecar base URL（例如 `http://127.0.0.1:7341` 或带 `/memory-runtime/v1`；插件会归一化）。为空时读 `<MEBULAR_MEMORY_RUNTIME_HOME|MEBULAR_HOME>/memory-runtime.json` 的 `url` / `tokenFile`；不会联网探测，也不读 `runtime.json`。
 - `domain` 为空表示由 sidecar 按默认域处理；以 `__` 开头的保留域会被拒绝。旧配置键 `namespace` 仅作为只读别名，请求只发 `domain`。
-- `capture`: `local`（默认，sidecar 本机保留 RawChunk）或 `off`。
+- 没有 `capture` / `enabled` / `sync_enabled` / `archive_enabled` 开关：插件读取 discovery 的 `mode` / `state` / `capabilities`，沉浸式时自动 prefetch / sync_turn / checkpoint；轻量 MCP（无 discovery）时不发请求。旧字段会被忽略并 warning。
 - `extractor`: `heuristic`（默认、无网络）、`local`、`auto`。本插件始终发 `allowRemote=false`，所以不提供 `api`；`host` 抽取由可选 companion 提供（普通 sync 没有 candidates 会得到 `202 pending`）。
-- `sync_enabled`: 是否在每轮 `sync_turn` 发送。
-- `archive_enabled`: 是否在压缩前 / 会话结束时发送边界快照。
 - `checkpoint_timeout`: `on_pre_compress` 的 checkpoint HTTP 超时（秒）。
 
 环境变量：
@@ -103,10 +98,7 @@ Token 优先级：`MEBULAR_MEMORY_RUNTIME_TOKEN` > Hermes secret scope > discove
 | `MEBULAR_HOME` | 未设置 `MEBULAR_MEMORY_RUNTIME_HOME` 时用于定位 discovery / `profiles.json` |
 | `MEBULAR_MEMORY_DOMAIN` | 记忆 domain（旧 `MEBULAR_RUNTIME_NAMESPACE` 仅兼容读取） |
 | `MEBULAR_MEMORY_AGENT_ID` | 逻辑 Agent id，默认 `hermes` |
-| `MEBULAR_MEMORY_CAPTURE` | `local` / `off` |
 | `MEBULAR_MEMORY_EXTRACTOR` | `heuristic` / `local` / `auto` |
-| `MEBULAR_MEMORY_SYNC` | `1` / `0` |
-| `MEBULAR_MEMORY_ARCHIVE` | `1` / `0` |
 | `MEBULAR_MEMORY_RECALL_LIMIT` | 召回片段上限 |
 | `MEBULAR_MEMORY_RECALL_TIMEOUT` | 召回 HTTP 超时（秒） |
 | `MEBULAR_MEMORY_INGEST_TIMEOUT` | 写入 HTTP 超时（秒） |

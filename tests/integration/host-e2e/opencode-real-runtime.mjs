@@ -241,7 +241,6 @@ async function main() {
   // Port 0 avoids colliding with a developer's sidecar or another suite.
   await writeFile(join(mebularHome, 'memory-runtime', 'config.json'), JSON.stringify({
     schema: 1,
-    capture: 'local',
     trace: 'local',
     model: { source: 'heuristic' },
     http: { host: '127.0.0.1', port: 0 },
@@ -261,7 +260,6 @@ async function main() {
   const prompt = `以后默认用 ${seedToken} 主题`;
   const pluginOptions = {
     agentId: 'opencode',
-    capture: 'local',
     recall: true,
     ingest: true,
     checkpoints: true,
@@ -383,21 +381,23 @@ async function main() {
     check('真实 opencode 事件走 sidecar /ingest', Boolean(ingestStatus)
       && (ingestStatus?.counts?.ingested ?? 0) >= 1,
     JSON.stringify(ingestStatus?.counts));
-    const rawFound = await waitFor(async () => {
-      const entries = await runtime.sidecarRawEntries();
-      return entries.some((chunk) => chunk.role === 'user' && String(chunk.text).includes(seedToken)) ? entries : null;
-    }, { timeoutMs: 20000, describe: 'sidecar ingest raw' });
-    check('真实 sidecar raw 含 OpenCode user 文本', Array.isArray(rawFound)
-      && rawFound.some((chunk) => chunk.role === 'user' && String(chunk.text).includes(seedToken)),
-    JSON.stringify(rawFound?.map((chunk) => `${chunk.role}:${String(chunk.text).slice(0, 60)}`)));
-    const userChunk = rawFound?.find((chunk) => chunk.role === 'user'
-      && String(chunk.text).includes(seedToken));
-    check('真实 ingest 使用解包后的 user 文本', Boolean(userChunk)
-      && !String(userChunk?.text ?? '').trim().startsWith('"'),
-    userChunk ? JSON.stringify(userChunk.text).slice(0, 240) : 'no user chunk');
-    check('真实 sidecar raw 含 assistant 文本',
-      Array.isArray(rawFound) && rawFound.some((chunk) => chunk.role === 'assistant'),
-      JSON.stringify(rawFound?.map((chunk) => chunk.role)));
+    const details = await waitFor(async () => {
+      const entries = await runtime.resolveDetails({
+        agentId: 'opencode',
+        domains: ['default', 'user', 'agent:opencode', `task:${sessionID}`],
+      }).catch(() => []);
+      return entries.some((detail) => String(detail.text ?? '').includes(seedToken)) ? entries : null;
+    }, { timeoutMs: 20000, describe: 'capability detail records' });
+    const detailText = (details ?? []).map((detail) => String(detail.text ?? '')).join('\n');
+    check('真实 capability 已沉降 OpenCode user 详情', Boolean(details)
+      && detailText.includes(seedToken),
+    JSON.stringify((details ?? []).map((detail) => `${detail.domain}:${String(detail.text ?? '').slice(0, 60)}`)));
+    check('真实 ingest 使用解包后的 user 文本', Boolean(details)
+      && !(details ?? []).some((detail) => String(detail.text ?? '').trim().startsWith('"')), 'quoted detail found');
+    check('真实 capability 详情含 assistant 文本',
+      (details ?? []).some((detail) => String(detail.role ?? '') === 'assistant'
+        || String(detail.text ?? '').includes('OK')),
+      JSON.stringify((details ?? []).map((detail) => detail.role)));
 
     const settledRecord = await waitFor(async () => {
       const result = await runtime.recall(seedToken, {
@@ -462,10 +462,13 @@ async function main() {
     };
     check('OpenChamber 原生 memory.json 未被改写', nativeAfter.memory === nativeBefore.memory);
     check('OpenChamber 原生 settings.json 未被改写', nativeAfter.settings === nativeBefore.settings);
-    const sidecarRawText = (await runtime.sidecarRawChunks()).join('\n');
+    const sidecarDetailText = (await runtime.resolveDetails({
+      agentId: 'opencode',
+      domains: ['default', 'user', 'agent:opencode'],
+    })).map((entry) => String(entry.text ?? '')).join('\n');
     const sidecarTraceText = JSON.stringify(await runtime.sidecarTraces());
-    check('原生 memory 内容未进入 sidecar raw/trace',
-      !sidecarRawText.includes(nativeSentinel) && !sidecarTraceText.includes(nativeSentinel));
+    check('原生 memory 内容未进入 sidecar 详情/trace',
+      !sidecarDetailText.includes(nativeSentinel) && !sidecarTraceText.includes(nativeSentinel));
     const nativeRecall = await runtime.recall(nativeSentinel, {
       agentId: 'opencode',
       namespaces: ['default', 'agent:opencode', 'user'],
@@ -509,7 +512,7 @@ async function runControllerFallback({ runtime, prompt, seedToken }) {
   let contextPayload = null;
   const ctx = {
     app: { version: '2.2.0' },
-    options: { agentId: 'opencode', capture: 'local' },
+    options: { agentId: 'opencode' },
     session: {
       hook: async (name, callback) => {
         contextPayload = { name, callback };

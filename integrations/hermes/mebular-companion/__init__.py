@@ -306,6 +306,7 @@ def _discover_runtime() -> Dict[str, str]:
             "source": str(_hermes_home() / "mebular-companion.json"),
             "reason": "" if url else "runtime_insecure_url",
             "token_file": _token_file_for_base(url),
+            "mode": "",
         }
     env_url = os.environ.get("MEBULAR_MEMORY_RUNTIME_URL", "").strip()
     if env_url:
@@ -315,6 +316,7 @@ def _discover_runtime() -> Dict[str, str]:
             "source": "MEBULAR_MEMORY_RUNTIME_URL",
             "reason": "" if url else "runtime_insecure_url",
             "token_file": _token_file_for_base(url),
+            "mode": "",
         }
     last_reason = "runtime_not_discovered"
     for home in _candidate_mebular_homes():
@@ -328,6 +330,10 @@ def _discover_runtime() -> Dict[str, str]:
         state = str(record.get("state") or "").strip().lower()
         if state not in {"ready", "degraded"}:
             last_reason = "runtime_not_ready"
+            continue
+        mode = str(record.get("mode") or "").strip().lower()
+        if mode and mode not in {"immersive", "ready", "active"}:
+            last_reason = "runtime_mode_mcp"
             continue
         updated_at = record.get("updatedAt")
         if isinstance(updated_at, (int, float)) and not isinstance(updated_at, bool):
@@ -362,8 +368,9 @@ def _discover_runtime() -> Dict[str, str]:
             "source": str(path),
             "reason": "",
             "token_file": str(token_path),
+            "mode": mode,
         }
-    return {"url": "", "source": "", "reason": last_reason, "token_file": ""}
+    return {"url": "", "source": "", "reason": last_reason, "token_file": "", "mode": ""}
 
 
 def _read_token_file(path: Path) -> str:
@@ -704,7 +711,6 @@ class MebularCompanion:
             "actor": {"type": "agent", "agentId": agent_id},
             "threadId": _thread_id(session_id),
             "source": "host",
-            "capture": "off",
             "allowRemote": False,
             "extractor": "host",
             "chunks": [],

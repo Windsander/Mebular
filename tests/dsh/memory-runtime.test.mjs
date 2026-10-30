@@ -181,10 +181,10 @@ afterEach(async () => {
  */
 function adapterFor(options, behavior = {}) {
   const ctx = options.ctx ?? fakeContext();
-  const config = options.config;
-  const withUrl = behavior.discovery === true || config?.enabled !== true
-    ? config
-    : { url: BASE, ...config };
+  const config = options.config ?? {};
+  // Unit tests use an explicit troubleshoot URL unless they opt into a
+  // discovery home. The production path has no host-level enabled switch.
+  const withUrl = behavior.discovery === true ? config : { url: BASE, ...config };
   const adapter = createMemoryRuntimeAdapter({
     ...options,
     config: withUrl,
@@ -245,14 +245,14 @@ function preStepPayload({ agent = makeAgent(), text = 'what theme should we use?
   };
 }
 
-describe('@mebular/dsh-plugin memory runtime：配置与默认关闭', () => {
-  it('默认关闭；关闭时不注册监听器、不产生 fetch', async () => {
+describe('@mebular/dsh-plugin memory runtime：配置与自动模式', () => {
+  it('没有 host 级 enabled/capture；无 discovery 时不发请求', async () => {
     const config = resolveMemoryRuntimeConfig({});
-    expect(config.enabled).toBe(false);
-    expect(config.recall).toBe(false);
-    expect(config.ingest).toBe(false);
-    expect(config.checkpoints).toBe(false);
-    expect(config.hideMemoryTools).toBe(false);
+    expect(config).not.toHaveProperty('enabled');
+    expect(config.recall).toBe(true);
+    expect(config.ingest).toBe(true);
+    expect(config.checkpoints).toBe(true);
+    expect(config.hideMemoryTools).toBe(true);
     expect(config.maintenance.enabled).toBe(false);
     expect(config.url).toBeNull();
     expect(config.tokenFile).toBeNull();
@@ -262,26 +262,37 @@ describe('@mebular/dsh-plugin memory runtime：配置与默认关闭', () => {
     const fetch = installFetch(() => {
       throw new Error('must not fetch');
     });
-    const adapter = createMemoryRuntimeAdapter({ ctx, config: {}, fetchImpl: fetch.fetchImpl });
+    const adapter = createMemoryRuntimeAdapter({
+      ctx,
+      config: {},
+      homeDir: NO_HOME,
+      env: {},
+      fetchImpl: fetch.fetchImpl,
+    });
     cleanups.push(() => adapter.dispose());
-    expect(ctx.listeners.size).toBe(0);
     await adapter.flush();
     expect(fetch.calls).toHaveLength(0);
     expect(adapter.getState()).toMatchObject({
       enabled: false,
-      runtime: { reason: 'disabled', tokenConfigured: false },
+      runtime: { reason: 'runtime_not_discovered', tokenConfigured: false },
     });
   });
 
-  it('enabled=true 打开召回/摄取/checkpoint/工具遮蔽，maintenance 仍需显式开启', () => {
-    const config = resolveMemoryRuntimeConfig({ enabled: true });
-    expect(config.enabled).toBe(true);
-    expect(config.recall).toBe(true);
-    expect(config.ingest).toBe(true);
-    expect(config.checkpoints).toBe(true);
-    expect(config.hideMemoryTools).toBe(true);
+  it('旧 enabled/capture 字段忽略并 warning，不控制行为', () => {
+    const warnings = [];
+    const config = resolveMemoryRuntimeConfig(
+      { enabled: false, capture: 'off', ingest: false, checkpoints: false },
+      { warn: (message) => warnings.push(message) },
+    );
+    expect(config).not.toHaveProperty('enabled');
+    expect(config).not.toHaveProperty('capture');
+    expect(config.ingest).toBe(false);
+    expect(config.checkpoints).toBe(false);
     expect(config.maintenance.enabled).toBe(false);
-    expect(resolveMemoryRuntimeConfig({ enabled: true, maintenance: true }).maintenance.enabled).toBe(true);
+    expect(warnings.some((message) => message.includes('memoryRuntime.enabled'))).toBe(true);
+    expect(warnings.some((message) => message.includes('memoryRuntime.capture'))).toBe(true);
+    expect(resolveMemoryRuntimeConfig(false).ingest).toBe(true);
+    expect(resolveMemoryRuntimeConfig({ maintenance: true }).maintenance.enabled).toBe(true);
   });
 
   it('配置接受 sidecar url/tokenFile/domains，不产生 sync 字段', () => {
@@ -300,7 +311,7 @@ describe('@mebular/dsh-plugin memory runtime：配置与默认关闭', () => {
     expect(config).not.toHaveProperty('namespaces');
   });
 
-  it('apply 默认不注册 runtime 监听；显式开启后才注册', async () => {
+  it('apply 自动注册监听（模式由 discovery 决定）；可显式关闭单个诊断特性', async () => {
     function applyHarness(memoryRuntime) {
       const listeners = new Map();
       const disposers = [];
@@ -325,6 +336,7 @@ describe('@mebular/dsh-plugin memory runtime：配置与默认关闭', () => {
         installManager: { start() {}, getState() { return null; }, dispose() {} },
         upgradeManager: { start() {}, getState() { return null; }, dispose() {} },
         fetchImpl: installFetch(() => jsonOk({})).fetchImpl,
+        env: { MEBULAR_HOME: NO_HOME },
         bridgeIntervalMs: 100_000,
         setIntervalFn: (callback) => ({ callback, unref() {} }),
         clearIntervalFn: () => {},
@@ -344,11 +356,13 @@ describe('@mebular/dsh-plugin memory runtime：配置与默认关闭', () => {
       };
     }
 
-    const off = applyHarness(undefined);
-    expect(off.listeners.size).toBe(0);
-    await off.dispose();
+    const auto = applyHarness(undefined);
+    expect(auto.listeners.has('agent/pre-step')).toBe(true);
+    expect(auto.listeners.has('agent/created')).toBe(true);
+    await auto.dispose();
+    expect(auto.listeners.size).toBe(0);
 
-    const on = applyHarness({ enabled: true, ingest: false, checkpoints: false, hideMemoryTools: false });
+    const on = applyHarness({ ingest: false, checkpoints: false, hideMemoryTools: false });
     expect(on.listeners.has('agent/pre-step')).toBe(true);
     expect(on.listeners.has('session/event')).toBe(false);
     await on.dispose();
@@ -1295,9 +1309,9 @@ describe('@mebular/dsh-plugin memory runtime：后台当前模型整理', () => 
     expect(ingest.body).toMatchObject({
       source: 'host',
       extractor: 'host',
-      capture: 'off',
       chunks: [],
     });
+    expect(ingest.body).not.toHaveProperty('capture');
     expect(ingest.body).not.toHaveProperty('sync');
     expect(ingest.body.candidates).toEqual([{
       kind: 'fact',
@@ -1517,7 +1531,7 @@ describe('@mebular/dsh-plugin memory runtime：HTTP 认证与重试', () => {
     expect(config.auth).toBe('auto');
     expect(config.tokenEnv).toBe('MEBULAR_MEMORY_RUNTIME_TOKEN');
     expect(config.token).toBeNull();
-    expect(warnings).toHaveLength(3);
+    expect(warnings).toHaveLength(4);
 
     const ctx = fakeContext();
     const fetch = installFetch(() => jsonOk({}));
@@ -1672,8 +1686,93 @@ describe('@mebular/dsh-plugin memory runtime：ingest 有界重试', () => {
     emitOne(ctx);
     await adapter.flush();
     expect(fetch.calls).toHaveLength(0);
-    expect(adapter.getState().ingest.failed).toBe(1);
+    expect(adapter.getState().ingest.failed).toBe(0);
+    expect(adapter.getState().ingest.skipped).toBeGreaterThanOrEqual(1);
     expect(adapter.getState().runtime.reason).toBe('runtime_not_discovered');
+  });
+});
+
+describe('@mebular/dsh-plugin memory runtime：自动模式跟随与详情', () => {
+  it('discovery mode=mcp 时不发请求，也不隐藏工具', async () => {
+    const { home } = await makeHome({ mode: 'mcp' });
+    const fetch = installFetch(() => jsonOk(contextData()));
+    const ctx = fakeContext();
+    const adapter = createMemoryRuntimeAdapter({
+      ctx,
+      config: {},
+      homeDir: home,
+      env: {},
+      fetchImpl: fetch.fetchImpl,
+    });
+    cleanups.push(() => adapter.dispose());
+    const { payload, messages, fallback } = preStepPayload({ text: 'light mode' });
+    const decision = await waterfall(ctx, 'agent/pre-step', payload, fallback);
+    expect(decision.messages).toBe(messages);
+    expect(fetch.calls).toHaveLength(0);
+    expect(adapter.getState()).toMatchObject({
+      enabled: false,
+      runtime: { reason: 'runtime_mode_mcp', mode: null },
+    });
+  });
+
+  it('blocks[].detail 渲染为不可信详情，不读本机 raw', () => {
+    const message = buildContextMessage({
+      recallId: 'rr_detail',
+      fragments: [],
+      blocks: [{
+        kind: 'fragment',
+        content: 'user prefers dark theme',
+        detail: { text: '我默认用深色主题。', format: 'verbatim' },
+        citations: [{ id: 'det_1', type: 'detail_record' }],
+      }],
+    });
+    expect(message).not.toBeNull();
+    expect(message.content[0].text).toContain('user prefers dark theme');
+    expect(message.content[0].text).toContain('detail (verbatim): 我默认用深色主题。');
+    expect(message.content[0].text).toContain('trust="untrusted"');
+  });
+
+  it('expandRecall 只展开本次召回的 fragment，走 sidecar /recall/:id/expand', async () => {
+    const ctx = fakeContext();
+    const fetch = installFetch((call) => {
+      if (call.url.endsWith('/context')) {
+        return jsonOk(contextData({ recallId: 'rr_expand' }));
+      }
+      return jsonOk({
+        recallId: 'rr_expand',
+        fragmentId: 'mf_1',
+        detail: {
+          id: 'det_1',
+          kind: 'detail_record',
+          detailKind: 'raw_chunk',
+          format: 'verbatim',
+          text: '我默认用深色主题。',
+          citations: [{ id: 'det_1', type: 'detail_record', domain: 'user' }],
+          availability: ['available'],
+        },
+        degraded: false,
+        warnings: [],
+      });
+    });
+    const { adapter } = adapterFor({ ctx, config: {}, fetchImpl: fetch.fetchImpl });
+    const { payload, fallback } = preStepPayload();
+    await waterfall(ctx, 'agent/pre-step', payload, fallback);
+    const expanded = await adapter.expandRecall({
+      recallId: 'rr_expand',
+      fragmentId: 'mf_1',
+      maxBytes: 2048,
+    });
+    expect(expanded.ok).toBe(true);
+    expect(expanded.detail?.text).toBe('我默认用深色主题。');
+    expect(fetch.calls.at(-1).url).toBe(`${BASE}/recall/rr_expand/expand`);
+    expect(fetch.calls.at(-1).body).toMatchObject({
+      agentId: 'dsh',
+      fragmentId: 'mf_1',
+      maxBytes: 2048,
+    });
+    const missing = await adapter.expandRecall({ recallId: 'rr_expand', fragmentId: 'mf_other' });
+    expect(missing.ok).toBe(false);
+    expect(missing.code).toBe('fragment_not_found');
   });
 });
 

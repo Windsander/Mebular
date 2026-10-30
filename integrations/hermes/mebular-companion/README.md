@@ -68,7 +68,6 @@ URL 优先级：`runtime_url` > `MEBULAR_MEMORY_RUNTIME_URL` > `<home>/memory-ru
   "threadId": "s1",
   "domain": "",
   "source": "host",
-  "capture": "off",
   "allowRemote": false,
   "extractor": "host",
   "chunks": [],
@@ -76,7 +75,7 @@ URL 优先级：`runtime_url` > `MEBULAR_MEMORY_RUNTIME_URL` > `<home>/memory-ru
 }
 ```
 
-`capture=off`：原始对话已由核心 provider 的 `sync_turn` 归档，companion 不重复存 raw。没有 `sync` 字段；checkpoint 始终经 sidecar→MCP 上云。
+原始对话已由核心 provider 的 `sync_turn` 归档，companion 不重复存整段 raw。请求没有 `capture` / `sync` 字段；详情与 checkpoint 始终经 sidecar→MCP 上云。
 
 5. 返回 `None`，不向当前 user message 注入任何内容；召回仍由核心 provider 的 `prefetch` 负责。
 

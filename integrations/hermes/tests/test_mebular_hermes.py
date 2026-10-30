@@ -225,7 +225,8 @@ class _Handler(BaseHTTPRequestHandler):
                 self._error(404, "not_found", "context route missing")
                 return
             blocks = [
-                {"kind": "fragment", "content": text, "trust": "untrusted"}
+                (dict(text) if isinstance(text, dict) else
+                 {"kind": "fragment", "content": text, "trust": "untrusted"})
                 for text in fake.context_blocks
             ]
             self._send(200, self._envelope({
@@ -266,6 +267,13 @@ class _Handler(BaseHTTPRequestHandler):
                 "timing": {"cueMs": 1, "fuzzyMs": 1, "expandMs": 1,
                            "assembleMs": 1, "totalMs": 4},
             }))
+            return
+        if parsed.path.startswith(f"{API}/recall/") and parsed.path.endswith("/expand"):
+            fake.expand_requests.append(body)
+            if fake.mode == "error":
+                self._error(503, "runtime_not_ready")
+                return
+            self._send(200, self._envelope(fake.expand_response))
             return
         if parsed.path == f"{API}/ingest":
             fake.ingests.append(body)
@@ -322,6 +330,8 @@ class FakeSidecar:
         self.checkpoint_revision = 1
         self.checkpoint_conflict = False
         self.ingest_duplicates: List[bool] = []
+        self.expand_requests: List[Dict[str, Any]] = []
+        self.expand_response: Dict[str, Any] = {"detail": None}
         self.legacy_requests: List[str] = []
         self.seen: set[str] = set()
 
@@ -363,6 +373,8 @@ class FakeSidecar:
         self.checkpoint_revision = 1
         self.checkpoint_conflict = False
         self.ingest_duplicates.clear()
+        self.expand_requests.clear()
+        self.expand_response = {"detail": None}
         self.legacy_requests.clear()
         self.seen.clear()
 
@@ -399,7 +411,6 @@ class BaseCase(unittest.TestCase):
             "MEBULAR_RUNTIME_NAMESPACE",
             "MEBULAR_MEMORY_DOMAIN",
             "MEBULAR_MEMORY_AGENT_ID",
-            "MEBULAR_MEMORY_CAPTURE",
             "MEBULAR_MEMORY_EXTRACTOR",
             "MEBULAR_MEMORY_SYNC",
             "MEBULAR_MEMORY_ARCHIVE",
@@ -573,6 +584,45 @@ class DiscoveryTests(BaseCase):
             self.assertFalse(provider.is_available())
             self.assertEqual(provider.unavailable_reason(), "runtime_insecure_url")
 
+    def test_light_mode_and_missing_discovery_make_no_request(self) -> None:
+        server = self.fake_server()
+        self.write_discovery(server, mode="mcp")
+        provider = memory_plugin.MebularMemoryProvider()
+        provider.initialize("s1", hermes_home=str(self.hermes_home))
+        self.providers.append(provider)
+        self.assertFalse(provider.is_available())
+        self.assertEqual(provider.prefetch("hello"), "")
+        provider.sync_turn("hello", "hi", session_id="s1")
+        provider.on_pre_compress([
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ])
+        self.assertEqual(server.requests, [])
+
+        (self.mebular_home / "memory-runtime.json").unlink()
+        missing = memory_plugin.MebularMemoryProvider()
+        missing.initialize("s1", hermes_home=str(self.hermes_home))
+        self.providers.append(missing)
+        self.assertEqual(missing.prefetch("hello"), "")
+        missing.sync_turn("hello", "hi", session_id="s1")
+        self.assertEqual(server.requests, [])
+
+    def test_context_capability_false_disables_recall_only(self) -> None:
+        server = self.fake_server()
+        provider = self.make_provider(
+            server,
+            discovery=True,
+            discovery_extra={
+                "capabilities": {"ingest": True, "recall": False, "context": False,
+                                 "checkpoint": True},
+            },
+        )
+        self.assertEqual(provider.prefetch("hello"), "")
+        self.assertEqual(server.requests, [])
+        provider.sync_turn("remember the dark theme", "noted", session_id="s1")
+        self.assertTrue(provider.flush(timeout=2.0))
+        self.assertTrue(any(entry["path"] == f"{API}/ingest" for entry in server.requests))
+
 
 class TokenTests(BaseCase):
     def test_token_file_is_used_and_insecure_file_is_ignored(self) -> None:
@@ -640,6 +690,51 @@ class ProviderTests(BaseCase):
         self.assertIsNotNone(status)
         self.assertEqual(status.count, 1)
         self.assertFalse(server.legacy_requests)
+
+    def test_context_detail_block_and_expand_use_sidecar(self) -> None:
+        server = self.fake_server()
+        server.context_blocks = [{
+            "kind": "fragment",
+            "content": "[F1] kind=fact owner=user domain=user\ngist: User prefers dark theme",
+            "detail": {"text": "我默认用深色主题。", "format": "verbatim"},
+        }]
+        server.expand_response = {
+            "recallId": "rr_test",
+            "fragmentId": "mf_1",
+            "detail": {
+                "id": "det_1",
+                "kind": "detail_record",
+                "detailKind": "raw_chunk",
+                "format": "verbatim",
+                "text": "我默认用深色主题。",
+                "availability": ["available"],
+            },
+            "degraded": False,
+            "warnings": [],
+        }
+        provider = self.make_provider(server)
+        output = provider.prefetch("我原话怎么说的？")
+        self.assertIn("detail: 我默认用深色主题。", output)
+        expanded = provider.expand_detail("rr_test", "mf_1", max_bytes=1024)
+        self.assertTrue(expanded["ok"])
+        self.assertEqual(expanded["detail"]["text"], "我默认用深色主题。")
+        self.assertEqual(server.expand_requests[-1]["fragmentId"], "mf_1")
+        self.assertFalse(any(entry["path"].endswith("/detail")
+                             for entry in server.requests))
+
+    def test_legacy_capture_and_enable_fields_do_not_control_behaviour(self) -> None:
+        server = self.fake_server()
+        self.write_discovery(server)
+        self.write_memory_config(
+            server, capture="off", enabled=False, sync_enabled=False,
+            archive_enabled=False,
+        )
+        provider = self.make_provider(server)
+        provider.sync_turn("remember this", "noted", session_id="s1")
+        self.assertTrue(provider.flush(timeout=2.0))
+        ingest = [entry for entry in server.requests if entry["path"] == f"{API}/ingest"]
+        self.assertTrue(ingest)
+        self.assertNotIn("capture", ingest[-1]["body"])
 
     def test_prefetch_empty(self) -> None:
         server = self.fake_server()
@@ -714,7 +809,7 @@ class ProviderTests(BaseCase):
         self.assertTrue(body["requestId"].startswith("hermes_turn_"))
         self.assertEqual(body["threadId"], "s1")
         self.assertEqual(body["source"], "host")
-        self.assertEqual(body["capture"], "local")
+        self.assertNotIn("capture", body)
         self.assertFalse(body["allowRemote"])
         self.assertEqual(body["actor"], {"type": "agent", "agentId": "hermes"})
         self.assertNotIn("sync", body)
@@ -761,7 +856,7 @@ class ProviderTests(BaseCase):
         self.assertTrue(provider.flush(timeout=2.0))
         first = server.ingests[0]
         self.assertTrue(first["requestId"].startswith("hermes_compress"))
-        self.assertEqual(first["capture"], "local")
+        self.assertNotIn("capture", first)
         archived = "\n".join(c["text"] for c in first["chunks"])
         self.assertIn("remember this", archived)
         self.assertNotIn("secret host prompt", archived)
@@ -1016,7 +1111,7 @@ class CompanionTests(BaseCase):
         body = server.ingests[0]
         self.assertEqual(server.paths()[-1], f"{API}/ingest")
         self.assertEqual(body["extractor"], "host")
-        self.assertEqual(body["capture"], "off")
+        self.assertNotIn("capture", body)
         self.assertEqual(body["chunks"], [])
         self.assertEqual(body["actor"], {"type": "agent", "agentId": "hermes"})
         self.assertTrue(body["requestId"].startswith("hermes_comp_"))

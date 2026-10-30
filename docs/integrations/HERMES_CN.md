@@ -7,7 +7,7 @@ Hermes 可以通过两层接入 Mebular，两层可以同时使用：
 | 层 | Hermes 得到什么 | 默认 |
 |---|---|---|
 | **MCP** | 官方 Mebular MCP server：显式的 `memory_*` 与 `task_*` 工具 | 配置后可用 |
-| **Memory Runtime**（`MemoryProvider`） | 每轮自动召回、轮次/压缩 ingest、state-only 检查点、会话边界归档 | 关闭；显式 opt-in |
+| **Memory Runtime**（`MemoryProvider`） | 每轮自动召回、轮次/压缩 ingest、state-only 检查点、会话边界归档 | 自动跟随 sidecar discovery 模式；无逐宿主 enable/capture |
 
 Provider 位于 [`integrations/hermes/mebular-memory`](../../integrations/hermes/mebular-memory/)；
 可选 companion 位于
@@ -158,10 +158,7 @@ Provider 的普通配置优先读环境变量，再读 `$HERMES_HOME/mebular-mem
 | `runtime_url` | 自动发现 | Memory Runtime sidecar 根地址，例如 `http://127.0.0.1:7341` 或 `http://127.0.0.1:7341/memory-runtime/v1` |
 | `agent_id` | `hermes` | 稳定的逻辑 Agent ID；对应 `agent:hermes` |
 | `domain` | 空 | 可选的写入域；留空由 sidecar 分类。请求不再发送单独的 `namespace` |
-| `capture` | `local` | 让 sidecar 在本机保留 RawChunk；`off` 关闭 |
 | `extractor` | `heuristic` | `heuristic`、`local` 或 `auto`；本 provider 不使用远端 `api` 抽取 |
-| `sync_enabled` | `true` | 是否在每轮发送 |
-| `archive_enabled` | `true` | 是否发送压缩前/会话结束快照 |
 | `recall_limit` | `8` | 召回片段上限（provider 实际把请求上限压到 3 个片段） |
 | `recall_token_budget` | `2000` | 召回上下文 token 预算 |
 | `recall_timeout` | `1.5` | 召回超时（秒） |
@@ -172,9 +169,8 @@ Provider 的普通配置优先读环境变量，再读 `$HERMES_HOME/mebular-mem
 
 环境变量：`MEBULAR_MEMORY_RUNTIME_URL`、`MEBULAR_MEMORY_RUNTIME_TOKEN`、
 `MEBULAR_MEMORY_RUNTIME_HOME`、`MEBULAR_HOME`、`MEBULAR_MEMORY_AGENT_ID`、
-`MEBULAR_MEMORY_DOMAIN`、`MEBULAR_MEMORY_CAPTURE`、`MEBULAR_MEMORY_EXTRACTOR`、
-`MEBULAR_MEMORY_SYNC`、`MEBULAR_MEMORY_ARCHIVE`、`MEBULAR_MEMORY_RECALL_LIMIT`、
-`MEBULAR_MEMORY_RECALL_TIMEOUT`、`MEBULAR_MEMORY_INGEST_TIMEOUT`、
+`MEBULAR_MEMORY_DOMAIN`、`MEBULAR_MEMORY_EXTRACTOR`、
+`MEBULAR_MEMORY_RECALL_LIMIT`、`MEBULAR_MEMORY_RECALL_TIMEOUT`、`MEBULAR_MEMORY_INGEST_TIMEOUT`、
 `MEBULAR_MEMORY_CHECKPOINT_TIMEOUT`、`MEBULAR_MEMORY_QUEUE_LIMIT`。
 
 完整键位与环境变量见
@@ -186,8 +182,8 @@ Provider 的普通配置优先读环境变量，再读 `$HERMES_HOME/mebular-mem
   的 `tool_calls` 与 `role=tool` 结果会展开为文本；system 消息和二进制/多模态载荷被跳过。
 - `on_pre_compress` / `on_session_end` 发送有界对话快照（最多 100 chunks / 约 1.7MB，
   超出时保留最近证据）。
-- ingest 请求带 `agentId`、`threadId`、`source=host`、`capture`、`extractor`、`chunks`
-  和可选的 `domain`，不发送 `namespace` 或 `sync`。
+- ingest 请求带 `agentId`、`threadId`、`source=host`、`extractor`、`chunks` 和可选的
+  `domain`，不发送 `namespace`、`capture` 或 `sync`；采集与详情沉降由 sidecar 模式负责。
 - 同一内容的 `requestId` 稳定；sidecar 对重试幂等去重，并可能返回 `duplicate=true`。
 
 检查点保持如实：
@@ -230,7 +226,7 @@ pending，在 provider 存活期间重试；它不会被报告为已提交，也
 - **没有强制迁移。** 0.2 的记录保留原 ID、namespace、tag 和事件。旧的 `default`
   namespace 原样保留，按第三类/Other 兜底解释（`domain=default`），不会改写成 `user`。
 - MCP 只保留生命周期键（`memoryRuntime.enabled`、`memoryRuntime.command`、
-  `memoryRuntime.startTimeoutMs`）。capture、模型、trace、retention 属于
+  `memoryRuntime.startTimeoutMs`）。详情/staging、模型、trace、retention 属于
   `<home>/memory-runtime/config.json`，不再放在 MCP 的 `runtime.*` 键下。
 - 检查点和 SelfRecord 不再有本地/云端二选一。没有 `sync=cloud`、`checkpoint.sync` 或
   `self.sync`；所有持久对象都经 MCP 写入，并由现有云端同步传播。

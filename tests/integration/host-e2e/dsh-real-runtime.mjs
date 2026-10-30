@@ -9,9 +9,10 @@
 // sidecar and no legacy `/runtime/v1` host path are used.
 //
 // Covered scenarios:
-//   enabled-discovery  discovery URL + tokenFile pointed at by a real discovery
-//   enabled-token      explicit sidecar URL through an observability tap
-//   disabled           memoryRuntime:false + zero sidecar requests
+//   auto-discovery  no memoryRuntime config; real discovery + host token; tap
+//                   observes requests without configuring the host
+//   no-discovery    light MCP: no sidecar, no discovery, zero sidecar requests
+//   fail-open       discovery points at a down sidecar; the turn still completes
 //
 // Token-file: the real sidecar writes `{version,token,...}` to `host-token`
 // and the DSH adapter reads that JSON record directly. The harness does not
@@ -19,7 +20,7 @@
 //
 // Usage:
 //   node tests/integration/host-e2e/dsh-real-runtime.mjs
-//   node tests/integration/host-e2e/dsh-real-runtime.mjs --scenario enabled-discovery
+//   node tests/integration/host-e2e/dsh-real-runtime.mjs --scenario auto-discovery
 //   node tests/integration/host-e2e/dsh-real-runtime.mjs --dsh-version 0.2.1-rc.2 --keep
 
 import { execFileSync } from 'node:child_process';
@@ -114,31 +115,20 @@ function parseArgs(argv) {
       throw new Error(`未知参数：${arg}`);
     }
   }
-  if (options.scenarios.length === 0) options.scenarios = ['enabled-discovery', 'enabled-token', 'disabled'];
+  if (options.scenarios.length === 0) options.scenarios = ['auto-discovery', 'no-discovery', 'fail-open'];
   for (const name of options.scenarios) {
-    if (!['enabled-discovery', 'enabled-token', 'disabled'].includes(name)) {
+    if (!['auto-discovery', 'no-discovery', 'fail-open'].includes(name)) {
       throw new Error(`未知场景 ${name}`);
     }
   }
   return options;
 }
 
-function memoryPatch({ daemonUrl, mode, runtimeUrl }) {
-  if (mode === 'disabled') {
-    return [
-      '# DSH memory runtime E2E: real MCP daemon + real sidecar, feature disabled.',
-      '- id: mebular',
-      "  name: '@mebular/dsh-plugin'",
-      '  config:',
-      '    lifecycle: attach',
-      '    panel: false',
-      `    daemonUrl: ${JSON.stringify(daemonUrl)}`,
-      '    memoryRuntime: false',
-      '',
-    ].join('\n');
-  }
+function memoryPatch({ daemonUrl, mode }) {
+  // No per-host memoryRuntime enabled/capture/url configuration: discovery and
+  // the sidecar mode own all of it. The timing knobs are test-only.
   return [
-    `# DSH memory runtime E2E: real sidecar (${mode}).`,
+    `# DSH memory runtime E2E: automatic mode following (${mode}).`,
     '- id: mebular',
     "  name: '@mebular/dsh-plugin'",
     '  config:',
@@ -146,16 +136,9 @@ function memoryPatch({ daemonUrl, mode, runtimeUrl }) {
     '    panel: false',
     `    daemonUrl: ${JSON.stringify(daemonUrl)}`,
     '    memoryRuntime:',
-    '      enabled: true',
-    '      recall: true',
-    '      ingest: true',
-    '      checkpoints: true',
-    '      hideMemoryTools: true',
-    '      auth: auto',
     '      ingestFlushMs: 0',
     '      ingestRetryBaseMs: 50',
     '      ingestRetries: 2',
-    ...(runtimeUrl ? [`      url: ${JSON.stringify(runtimeUrl)}`] : []),
     '',
   ].join('\n');
 }
@@ -174,7 +157,6 @@ async function startSidecar(runtimeRoot) {
   await mkdir(join(home, 'memory-runtime'), { recursive: true });
   await writeFile(join(home, 'memory-runtime', 'config.json'), JSON.stringify({
     schema: 1,
-    capture: 'local',
     trace: 'local',
     model: { source: 'heuristic' },
     // Port 0 avoids colliding with a developer's sidecar or another suite.
@@ -189,6 +171,37 @@ async function startSidecar(runtimeRoot) {
   });
   const discovery = await runtime.waitForSidecar();
   return { runtime, discovery };
+}
+
+async function startRuntimeOnly(runtimeRoot) {
+  const runtime = await startRealRuntime({
+    auth: 'none',
+    root: runtimeRoot,
+    memoryRuntime: { enabled: false },
+    manageMemoryRuntime: false,
+  });
+  return { runtime, discovery: null };
+}
+
+/** Point the discovery file at the tap so a production discovery path is observed. */
+async function redirectDiscoveryToTap(runtime, discovery, tap) {
+  const path = join(runtime.home, 'memory-runtime.json');
+  const record = JSON.parse(await readFile(path, 'utf8'));
+  record.url = `${tap.url}${SIDECAR_API}`;
+  record.healthUrl = `${tap.url}${SIDECAR_API}/health`;
+  record.updatedAt = Date.now();
+  await writeFile(path, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 });
+  return { ...discovery, url: record.url, healthUrl: record.healthUrl };
+}
+
+/** Keep a valid discovery document but make every request fail. */
+async function breakDiscoveryUrl(runtime) {
+  const path = join(runtime.home, 'memory-runtime.json');
+  const record = JSON.parse(await readFile(path, 'utf8'));
+  record.url = `http://127.0.0.1:1${SIDECAR_API}`;
+  record.healthUrl = `http://127.0.0.1:1${SIDECAR_API}/health`;
+  record.updatedAt = Date.now();
+  await writeFile(path, JSON.stringify(record, null, 2), { encoding: 'utf8', mode: 0o600 });
 }
 
 function tapRequests(tap) {
@@ -245,19 +258,22 @@ async function assertTokenFile(discovery, hostToken) {
   check('真实 host token 可访问 /status', ok.status === 200 && ok.data != null, `status=${ok.status}`);
 }
 
-async function assertEnabled({ mode, runtime, tap, probe, seedToken, hostToken }) {
+async function assertEnabled({ runtime, tap, probe, seedToken, detailText, hostToken }) {
   check('pre-step 首次注入 recall', probe.preStep?.injected === true, JSON.stringify(probe.preStep));
   check('注入来源为 mebular-memory（不是 source.kind=user）',
     probe.preStep?.injectedSource === 'mebular-memory', String(probe.preStep?.injectedSource));
   check('同 turn/surface/query 第二次不重复注入',
     probe.preStep?.secondMessageCount === 1, JSON.stringify(probe.preStep));
-  // The synthetic probe reuses the same user message id for the second turn.
-  // A real DSH turn gets a new id; the real sidecar correctly treats a reused
-  // turnId as duplicate_turn and stays silent. The adapter nevertheless made a
-  // fresh request because its anchor includes the turn number.
-  check('新 turn 请求到达 sidecar（同一 messageId 被 sidecar duplicate_turn 去重）',
-    probe.preStep?.nextTurnMessageCount === 1 && probe.preStep?.nextTurnInjected === false,
-    JSON.stringify(probe.preStep));
+  check('第二轮（新 message id）再次召回并注入',
+    probe.preStep?.nextTurnInjected === true, JSON.stringify(probe.preStep));
+  check('详情追问注入 sidecar detail block',
+    probe.preStep?.detailInjected === true
+    && probe.preStep?.detailSource === 'mebular-memory'
+    && String(probe.preStep?.detailText ?? '').includes(detailText),
+    JSON.stringify({ injected: probe.preStep?.detailInjected, text: probe.preStep?.detailText?.slice?.(0, 300) }));
+  check('无命中话题保持沉默，不注入空块',
+    probe.preStep?.silenceInjected === false,
+    JSON.stringify({ injected: probe.preStep?.silenceInjected }));
 
   check('工具初始遮蔽 memory_*', Array.isArray(probe.tools?.initialDeny)
     && probe.tools.initialDeny.includes('mcp__mebular__memory_query')
@@ -287,24 +303,29 @@ async function assertEnabled({ mode, runtime, tap, probe, seedToken, hostToken }
     && traces.some((trace) => String(trace.queryPreview ?? '').includes('memory e2e query')),
     JSON.stringify(traces.map((trace) => trace.queryPreview)));
 
-  const rawFound = await waitFor(async () => {
-    const texts = await runtime.sidecarRawChunks();
-    const text = texts.join('\n');
-    return text.includes('memory e2e ingest') && text.includes('memory e2e assistant');
-  }, { describe: 'real sidecar raw chunks' });
-  const rawEntries = await runtime.sidecarRawEntries();
-  const rawText = rawEntries.map((chunk) => chunk.text).join('\n');
-  check('真实 sidecar 本地 raw 含 DSH ingest 内容', rawFound
-    && rawText.includes('memory e2e ingest')
-    && rawText.includes('memory e2e assistant'),
-  `chunks=${rawEntries.length}`);
-  check('重复 session 事件只入队一次（raw user 只出现一次）',
-    rawEntries.filter((chunk) => chunk.role === 'user' && chunk.text === 'memory e2e ingest').length === 1,
-    JSON.stringify(rawEntries.map((chunk) => `${chunk.role}:${chunk.text}`)));
-  check('DSH raw 只带 DSH thread（过程数据只在本地）',
-    rawEntries.length >= 2
-    && rawEntries.every((chunk) => String(chunk.threadId) === THREAD_ID),
-    JSON.stringify(rawEntries.map((chunk) => chunk.threadId)));
+  // Detail is the authoritative, domain-shared object. The adapter must be
+  // able to render it from the sidecar response without any local raw copy.
+  const detailsResult = await waitForValue(async () => {
+    const values = await runtime.resolveDetails({
+      agentId: 'dsh',
+      domains: ['default', 'user', 'agent:dsh'],
+    }).catch(() => []);
+    return values.length > 0 ? values : null;
+  }, (value) => value !== null, { describe: 'real capability detail records' });
+  const details = detailsResult.value ?? [];
+  const detailBlob = details.map((entry) => `${entry.domain}:${entry.text ?? ''}`).join('\n');
+  check('真实 capability 可读取域内详情（非本机 raw）',
+    details.some((entry) => String(entry.text ?? '').includes(detailText)),
+    detailBlob.slice(0, 500));
+  check('详情带同域 citation 与可用性', details.every((entry) => Array.isArray(entry.availability)
+    && entry.availability.includes('available')
+    && Array.isArray(entry.recordIds)
+    && entry.recordIds.length > 0),
+  JSON.stringify(details.map((entry) => ({
+    domain: entry.domain,
+    availability: entry.availability,
+    recordIds: entry.recordIds,
+  }))));
 
   const stored = await waitFor(async () => {
     const checkpoint = await runtime.sidecarCheckpoint(THREAD_ID, 'dsh').catch(() => null);
@@ -329,52 +350,54 @@ async function assertEnabled({ mode, runtime, tap, probe, seedToken, hostToken }
     JSON.stringify(legacy.body).slice(0, 300));
 
   const requests = sidecarRequestsFromTap(tap);
-  if (mode === 'enabled-token') {
-    check('显式 sidecar URL 收到请求', requests.length > 0, `count=${requests.length}`);
-    check('显式 URL 请求全部认证为 bearer',
-      requests.every((request) => request.auth === 'bearer'),
-      JSON.stringify(requests.slice(0, 8).map((request) => `${request.path}:${request.auth}`)));
-    check('显式 URL 请求未被真实 sidecar 拒绝',
-      requests.every((request) => request.ok),
-      JSON.stringify(requests.filter((request) => !request.ok).map((request) => `${request.path}:${request.status}`)));
+  check('自动 discovery 收到请求（host 未配置 URL）', requests.length > 0, `count=${requests.length}`);
+  check('自动 discovery 请求全部认证为 bearer',
+    requests.every((request) => request.auth === 'bearer'),
+    JSON.stringify(requests.slice(0, 8).map((request) => `${request.path}:${request.auth}`)));
+  check('自动 discovery 请求未被真实 sidecar 拒绝',
+    requests.every((request) => request.ok),
+    JSON.stringify(requests.filter((request) => !request.ok).map((request) => `${request.path}:${request.status}`)));
 
-    const contexts = requests.filter((request) => request.method === 'POST'
-      && request.path === `${SIDECAR_API}/context`);
-    check('pre-step recall 走真实 /memory-runtime/v1/context', contexts.length === 2,
-      `count=${contexts.length}`);
-    check('context 请求带 DSH agent 与 human turn',
-      contexts.every((request) => request.body?.agentId === 'dsh'
-        && request.body?.turnKind === 'human'
-        && typeof request.body?.query === 'string'),
-      JSON.stringify(contexts.map((request) => request.body)));
-    check('context 响应包含 seed 记忆',
-      contexts.some((request) => JSON.stringify(request.response).includes(seedToken)),
-      JSON.stringify(contexts.map((request) => request.status)));
+  const contexts = requests.filter((request) => request.method === 'POST'
+    && request.path === `${SIDECAR_API}/context`);
+  check('pre-step recall 走真实 /memory-runtime/v1/context', contexts.length >= 4,
+    `count=${contexts.length}`);
+  check('context 请求带 DSH agent 与 human turn',
+    contexts.every((request) => request.body?.agentId === 'dsh'
+      && request.body?.turnKind === 'human'
+      && typeof request.body?.query === 'string'),
+    JSON.stringify(contexts.map((request) => request.body?.query)));
+  check('context 响应包含 seed 记忆',
+    contexts.some((request) => JSON.stringify(request.response).includes(seedToken)),
+    JSON.stringify(contexts.map((request) => request.status)));
 
-    const ingests = requests.filter((request) => request.method === 'POST'
-      && request.path === `${SIDECAR_API}/ingest`);
-    const ingestText = ingests.map((request) => (request.body?.chunks ?? []).map((chunk) => chunk.text).join('\n')).join('\n');
-    check('真实 ingest 包含 user 与 assistant 文本',
-      ingests.length > 0 && ingestText.includes('memory e2e ingest') && ingestText.includes('memory e2e assistant'),
-      `count=${ingests.length}`);
-    check('ingest 复用 requestId（Idempotency-Key === body.requestId）',
-      ingests.length > 0
-      && ingests.every((request) => request.idempotencyKey === request.body?.requestId),
-      ingests.map((request) => request.idempotencyKey ?? 'missing').join(','));
+  const ingests = requests.filter((request) => request.method === 'POST'
+    && request.path === `${SIDECAR_API}/ingest`);
+  const ingestText = ingests.map((request) => (request.body?.chunks ?? []).map((chunk) => chunk.text).join('\n')).join('\n');
+  check('第一轮真实 ingest 包含 user 与 assistant 文本',
+    ingests.length > 0 && ingestText.includes('memory e2e ingest') && ingestText.includes('memory e2e assistant'),
+    `count=${ingests.length}`);
+  check('ingest 复用 requestId（Idempotency-Key === body.requestId）',
+    ingests.length > 0
+    && ingests.every((request) => request.idempotencyKey === request.body?.requestId),
+    ingests.map((request) => request.idempotencyKey ?? 'missing').join(','));
 
-    const checkpoints = requests.filter((request) => request.method === 'PUT'
-      && request.path === `${SIDECAR_API}/checkpoints/${THREAD_ID}`);
-    check('compaction checkpoint 走真实 PUT', checkpoints.length > 0
-      && checkpoints.every((request) => request.ok)
-      && checkpoints.at(-1)?.body?.state?.compactionId === 'memory-e2e-compaction'
-      && checkpoints.at(-1)?.body?.sync === undefined,
-    JSON.stringify(checkpoints.map((request) => request.status)));
-    check('sidecar 路径全部为 /memory-runtime/v1',
-      requests.every((request) => String(request.path).startsWith(SIDECAR_API)),
-      JSON.stringify(requests.map((request) => request.path)));
-  } else {
-    check('discovery 场景不经过显式 URL tap', requests.length === 0, `count=${requests.length}`);
-  }
+  const checkpoints = requests.filter((request) => request.method === 'PUT'
+    && request.path === `${SIDECAR_API}/checkpoints/${THREAD_ID}`);
+  check('compaction checkpoint 走真实 PUT', checkpoints.length > 0
+    && checkpoints.every((request) => request.ok)
+    && checkpoints.at(-1)?.body?.state?.compactionId === 'memory-e2e-compaction'
+    && checkpoints.at(-1)?.body?.sync === undefined,
+  JSON.stringify(checkpoints.map((request) => request.status)));
+  check('sidecar 路径全部为 /memory-runtime/v1',
+    requests.every((request) => String(request.path).startsWith(SIDECAR_API)),
+    JSON.stringify(requests.map((request) => request.path)));
+  const captured = requests.filter((request) => (
+    Object.prototype.hasOwnProperty.call(request.body ?? {}, 'capture')
+    || Object.prototype.hasOwnProperty.call(request.body ?? {}, 'rawCapture')
+  ));
+  check('所有 DSH 请求都不带 capture/rawCapture 字段', captured.length === 0,
+    JSON.stringify(captured.map((request) => request.path)));
 }
 
 async function waitForStatus(runtime, predicate, { timeoutMs = 15000 } = {}) {
@@ -389,26 +412,46 @@ async function waitForStatus(runtime, predicate, { timeoutMs = 15000 } = {}) {
 async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginTarball, probeTarball, options }) {
   console.log(`\n▶ ${mode}`);
   const runtimeRoot = join(root, `runtime-${mode}-${Date.now()}`);
-  const { runtime, discovery } = await startSidecar(runtimeRoot);
-  const hostToken = sidecarTokenFromFile(await readFile(discovery.tokenFile, 'utf8'));
+  const withSidecar = mode !== 'no-discovery';
+  const { runtime, discovery } = withSidecar
+    ? await startSidecar(runtimeRoot)
+    : await startRuntimeOnly(runtimeRoot);
+  const hostToken = discovery === null
+    ? ''
+    : sidecarTokenFromFile(await readFile(discovery.tokenFile, 'utf8'));
   // The tap forwards the full `/memory-runtime/v1/...` path, so its target is
   // the sidecar origin rather than the discovery base URL (which already
   // contains that prefix).
-  const tap = await createRuntimeTap(new URL(discovery.url).origin, { name: `dsh-sidecar-${mode}` });
+  const tap = discovery === null
+    ? null
+    : await createRuntimeTap(new URL(discovery.url).origin, { name: `dsh-sidecar-${mode}` });
   let world = null;
   try {
-    assertDiscovery(discovery, hostToken);
-    await assertTokenFile(discovery, hostToken);
-
     const suffix = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
     const seedToken = `dsh-real-seed-${suffix}`;
-    const seed = await runtime.seedMemory({
-      text: `My memory e2e query is ${seedToken}`,
-      namespace: 'default',
-      agentId: 'dsh',
-    });
-    requireCheck('真实 MCP capability 写入 heuristic seed', seed.accepted.records === 1,
-      JSON.stringify(seed.records));
+    const detailToken = `dsh-real-detail-${suffix}`;
+    const detailText = `我默认用深色主题 ${detailToken}`;
+
+    if (discovery !== null) {
+      assertDiscovery(discovery, hostToken);
+      await assertTokenFile(discovery, hostToken);
+      const seed = await runtime.seedMemoryWithDetail({
+        text: `原话 ${seedToken} My memory e2e query is ${seedToken}`,
+        detailText,
+        namespace: 'default',
+        agentId: 'dsh',
+      });
+      requireCheck('真实 MCP capability 写入记录与详情', seed.accepted.records === 1
+        && typeof seed.recordId === 'string'
+        && typeof seed.detailId === 'string',
+      JSON.stringify({ records: seed.records, detailId: seed.detailId }));
+      if (mode === 'auto-discovery' && tap !== null) {
+        await redirectDiscoveryToTap(runtime, discovery, tap);
+      }
+      if (mode === 'fail-open') {
+        await breakDiscoveryUrl(runtime);
+      }
+    }
 
     world = await createWorld({
       name: `real-sidecar-${mode}`,
@@ -421,11 +464,8 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
       probeTarball,
     });
     const resultPath = join(world.state.artifactsDir, 'memory-runtime-probe.json');
-    const runtimeUrl = mode === 'enabled-token' || mode === 'disabled'
-      ? `${tap.url}${SIDECAR_API}`
-      : '';
     const bundles = await world.installProfile({
-      patch: memoryPatch({ daemonUrl: runtime.url, mode, runtimeUrl }),
+      patch: memoryPatch({ daemonUrl: runtime.url, mode }),
     });
     requireCheck('profile 包含插件与 probe', bundles.includes('@mebular/dsh-plugin')
       && bundles.includes('@mebular/dsh-memory-runtime-probe'), JSON.stringify(bundles));
@@ -434,11 +474,13 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
       probeExpect: null,
       env: {
         MEMORY_E2E_OUT: resultPath,
+        MEMORY_E2E_DETAIL_QUERY: `原话 ${seedToken}`,
+        MEMORY_E2E_SILENT_QUERY: `tomorrow weather small talk ${suffix}`,
         // The real sidecar lives under the Runtime home; keep the plugin's
-        // discovery and token lookup pointed there.
+        // discovery and token lookup pointed there. No host URL/token config.
         MEBULAR_HOME: runtime.home,
         MEBULAR_MEMORY_RUNTIME_HOME: runtime.home,
-        MEBULAR_MEMORY_RUNTIME_URL: runtimeUrl,
+        MEBULAR_MEMORY_RUNTIME_URL: '',
         MEBULAR_RUNTIME_URL: '',
         MEBULAR_RUNTIME_TOKEN: '',
       },
@@ -454,40 +496,36 @@ async function runScenario({ mode, root, dshBin, dshInstall, dshVersion, pluginT
     requireCheck('probe 完成', probeResult.ok && probe?.done === true && !probe?.error,
       probe?.error ?? tail(JSON.stringify(probe ?? null), 500));
 
-    if (mode === 'disabled') {
-      check('关闭态不注入 recall', probe.preStep?.injected === false, JSON.stringify(probe.preStep));
-      check('关闭态不遮蔽工具', probe.tools?.initialDeny === null, JSON.stringify(probe.tools));
-      const disabledStatus = await waitFor(async () => {
-        const value = await runtime.sidecarStatus().catch(() => null);
-        return value !== null
-          && (value.counts?.contexts ?? 0) === 0
-          && (value.counts?.ingested ?? 0) === 0
-          && (value.counts?.checkpoints ?? 0) === 0;
-      }, { timeoutMs: 5000, describe: 'zero sidecar requests' });
-      const finalStatus = await runtime.sidecarStatus();
-      check('关闭态零 sidecar 请求', disabledStatus
-        && (finalStatus?.counts?.contexts ?? 0) === 0
-        && (finalStatus?.counts?.ingested ?? 0) === 0
-        && (finalStatus?.counts?.checkpoints ?? 0) === 0,
-      JSON.stringify(finalStatus?.counts));
-      check('关闭态没有绕过 tap 的 sidecar 请求', sidecarRequestsFromTap(tap).length === 0,
-        `count=${sidecarRequestsFromTap(tap).length}`);
+    if (mode === 'auto-discovery') {
+      await assertEnabled({ runtime, tap, probe, seedToken, detailText, hostToken });
+    } else if (mode === 'no-discovery') {
+      check('轻量/无 discovery 不注入 recall', probe.preStep?.injected === false, JSON.stringify(probe.preStep));
+      check('轻量/无 discovery 不遮蔽工具', probe.tools?.initialDeny === null, JSON.stringify(probe.tools));
+      check('轻量/无 discovery 不产生 context/ingest/checkpoint 请求',
+        tap === null && discovery === null, 'no sidecar was started');
       const legacy = await runtime.legacyRuntimeStatus();
-      check('关闭态旧 /runtime/v1 已移除（404）',
+      check('轻量态旧 /runtime/v1 已移除（404）',
         legacy.status === 404 && legacy.deprecatedHeader === null,
         `status=${legacy.status} deprecated=${legacy.deprecatedHeader ?? 'none'}`);
     } else {
-      await assertEnabled({ mode, runtime, tap, probe, seedToken, hostToken });
+      check('sidecar 不可达时仍完成对话（失败开放）', probeResult.ok && probe?.done === true,
+        JSON.stringify(probe.preStep));
+      check('sidecar 不可达时不注入记忆', probe.preStep?.injected === false, JSON.stringify(probe.preStep));
+      check('sidecar 不可达时不抛错、不阻塞', probe?.error === null, String(probe?.error));
     }
 
     const artifacts = await world.collectArtifacts(`dsh-real-runtime-${mode}`).catch(() => null);
     check('artifacts 已脱敏（无敏感片段）', artifacts !== null && artifacts.leaks.length === 0,
       artifacts === null ? 'collect failed' : JSON.stringify(artifacts.leaks));
-    check('tap 状态不包含 host token', !JSON.stringify(tap.state).includes(hostToken));
-    check('Memory capability status 不含 host token', !JSON.stringify(await runtime.status()).includes(hostToken));
+    if (tap !== null) {
+      check('tap 状态不包含 host token', !JSON.stringify(tap.state).includes(hostToken));
+    }
+    if (discovery !== null && mode !== 'fail-open') {
+      check('Memory capability status 不含 host token', !JSON.stringify(await runtime.status()).includes(hostToken));
+    }
     console.log(`  artifacts：${world.state.artifactsDir}`);
   } finally {
-    await tap.close().catch(() => undefined);
+    await tap?.close().catch(() => undefined);
     if (world !== null) {
       await world.cleanup({ keep: options.keep || failed > 0 }).catch(() => undefined);
     }

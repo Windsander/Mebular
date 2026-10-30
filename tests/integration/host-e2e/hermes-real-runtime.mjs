@@ -107,29 +107,6 @@ async function scanForToken(dir, token) {
   return hits;
 }
 
-function parseJsonLines(text) {
-  const out = [];
-  for (const line of text.split('\n')) {
-    if (line.trim().length === 0) continue;
-    try {
-      out.push(JSON.parse(line));
-    } catch {
-      // Ignore a torn line, matching the local store's own recovery rule.
-    }
-  }
-  return out;
-}
-
-async function sidecarRawChunks(home) {
-  try {
-    const text = await readFile(join(home, 'memory-runtime', 'raw', 'chunks.jsonl'), 'utf8');
-    return parseJsonLines(text).map((entry) => entry.chunk?.text).filter((textValue) => typeof textValue === 'string');
-  } catch (error) {
-    if (error?.code === 'ENOENT') return [];
-    throw error;
-  }
-}
-
 async function sidecarStatus(discovery, home) {
   const tokenRecord = await readJson(join(home, 'memory-runtime', 'host-token'));
   const token = typeof tokenRecord?.token === 'string' ? tokenRecord.token : '';
@@ -203,7 +180,6 @@ async function main() {
 
     await writeFile(join(hermesHome, 'mebular-memory.json'), JSON.stringify({
       agent_id: 'hermes',
-      capture: 'local',
       extractor: 'heuristic',
       recall_timeout: 3,
       ingest_timeout: 3,
@@ -275,12 +251,25 @@ async function main() {
     check('sidecar outbox 已清空', (statusResult.data?.outbox?.items ?? 0) === 0,
       JSON.stringify(statusResult.data?.outbox));
 
-    const rawTexts = await sidecarRawChunks(runtime.home);
-    const rawText = rawTexts.join('\n');
-    check('sidecar 本地 raw 含 sync_turn 内容', rawText.includes(turnUser));
-    check('sidecar 本地 raw 含压缩前归档', rawText.includes(compressUser));
-    check('sidecar 本地 raw 不含 host system prompt', !rawText.includes(secretSystemPrompt));
-    check('sidecar 本地 raw 含 s2 内容', rawText.includes(nextTurnUser));
+    const details = await waitFor(async () => {
+      const values = await runtime.resolveDetails({
+        agentId: 'hermes',
+        domains: ['default', 'user', 'agent:hermes', 'task:hermes-s1', 'task:hermes-s2'],
+      }).catch(() => []);
+      return values.length > 0 ? values : null;
+    }, { timeoutMs: 20000, describe: 'capability detail records' });
+    const detailText = (details ?? []).map((entry) => String(entry.text ?? '')).join('\n');
+    check('capability 已沉降 Hermes 详情（域内共享）', Boolean(details)
+      && detailText.includes(turnUser), `details=${details?.length ?? 0}`);
+    const stagingText = (await runtime.sidecarStagingChunks()).join('\n');
+    check('压缩前归档进入详情或 staging（无记录时只留 staging）',
+      detailText.includes(compressUser) || stagingText.includes(compressUser));
+    check('详情与 staging 不含 host system prompt',
+      !detailText.includes(secretSystemPrompt) && !stagingText.includes(secretSystemPrompt));
+    check('capability 详情含 s2 内容', detailText.includes(nextTurnUser));
+    check('Hermes 详情带域与 citation', (details ?? []).every((entry) => typeof entry.domain === 'string'
+      && Array.isArray(entry.availability)
+      && entry.availability.includes('available')), JSON.stringify(details?.map((entry) => entry.domain)));
 
     const recalled = await runtime.recall(`hermes-turn-${suffix}`, {
       agentId: 'hermes',

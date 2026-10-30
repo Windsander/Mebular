@@ -5,10 +5,13 @@
 // the Mebular home directory. It only reads the sidecar discovery file/token
 // file and speaks HTTP to `/memory-runtime/v1`.
 //
-// The adapter is opt-in. With `memoryRuntime` absent or false it registers no
-// listeners, starts no timer, reads no discovery file and performs no fetch, so
-// the existing panel, attach/managed lifecycle and MCP bridge keep their exact
-// behaviour. The MCP daemon `daemonUrl` is never used as the sidecar URL.
+// The adapter follows the Mebular device mode instead of keeping a host-level
+// on/off switch. It reads `<home>/memory-runtime.json` (`mode`, `state`,
+// `capabilities`) and only sends requests when the sidecar is discoverable and
+// immersive. In light MCP mode there is no discovery file, so no sidecar
+// request is made; a small unref'd discovery poll lets a later immersive switch
+// be followed without restarting DSH. The MCP daemon `daemonUrl` is never used
+// as the sidecar URL.
 
 import { createHash, randomUUID } from 'node:crypto';
 import { readFile, stat } from 'node:fs/promises';
@@ -26,6 +29,9 @@ export const MEMORY_TOOL_PREFIX = 'mcp__mebular__memory_';
 export const TASK_TOOL_PREFIX = 'mcp__mebular__task_';
 
 const CANDIDATE_KINDS = new Set(['fact', 'preference', 'episode', 'skill', 'observation']);
+/** Sidecar modes that keep automatic ingest/recall/checkpoint enabled. */
+const DISCOVERY_ACTIVE_MODES = new Set(['immersive', 'ready', 'active']);
+const EXPAND_RECALL_TTL_MS = 10 * 60_000;
 const COMPACTION_TYPES = new Set([
   'compaction/start',
   'compaction/summary',
@@ -33,7 +39,6 @@ const COMPACTION_TYPES = new Set([
 ]);
 
 const DEFAULT_CONFIG = Object.freeze({
-  enabled: false,
   recall: true,
   ingest: true,
   checkpoints: true,
@@ -215,27 +220,35 @@ export function redactMemoryText(value, options = {}) {
 }
 
 /**
- * Resolve the opt-in memory runtime configuration. Invalid values fall back
- * to safe defaults; the caller may collect warnings. Without an explicit
- * `memoryRuntime: true` (or `memoryRuntime.enabled: true`) every feature is
- * disabled, which is the default.
+ * Resolve the memory runtime troubleshooting configuration. The adapter has no
+ * product-level `enabled` or `capture` switch: the sidecar discovery document
+ * owns the device mode. Legacy `memoryRuntime.enabled`, `capture`, `rawCapture`
+ * and `localCapture` fields are ignored with a warning and never control
+ * behaviour. Feature toggles remain available for explicit diagnostics/tests,
+ * but default to on.
  *
  * @param {unknown} input
  * @param {{ warn?: (message: string) => void }} [options]
  */
 export function resolveMemoryRuntimeConfig(input = {}, options = {}) {
-  const raw = input === true ? { enabled: true } : isObject(input) ? input : {};
+  const raw = isObject(input) ? input : {};
   const warn = typeof options?.warn === 'function' ? options.warn : () => {};
-  const enabled = input === true || raw.enabled === true;
+  if (input === true || input === false) {
+    warn('memoryRuntime boolean is ignored; the sidecar discovery mode owns memory runtime behaviour');
+  }
+  for (const key of ['enabled', 'capture', 'rawCapture', 'localCapture']) {
+    if (Object.prototype.hasOwnProperty.call(raw, key)) {
+      warn(`memoryRuntime.${key} is ignored; the sidecar discovery mode owns memory runtime behaviour`);
+    }
+  }
   const maintenanceRaw = raw.maintenance === true
     ? { enabled: true }
     : isObject(raw.maintenance)
       ? raw.maintenance
       : {};
   const toolRaw = isObject(raw.tools) ? raw.tools : {};
-  const maintenanceEnabled = enabled && (raw.maintenance === true || maintenanceRaw.enabled === true);
-  const hideMemoryTools = enabled
-    && toolRaw.enabled !== false
+  const maintenanceEnabled = raw.maintenance === true || maintenanceRaw.enabled === true;
+  const hideMemoryTools = toolRaw.enabled !== false
     && raw.hideMemoryTools !== false;
 
   let agentId = asText(raw.agentId) || DEFAULT_CONFIG.agentId;
@@ -288,10 +301,9 @@ export function resolveMemoryRuntimeConfig(input = {}, options = {}) {
   }
 
   return {
-    enabled,
-    recall: enabled && raw.recall !== false,
-    ingest: enabled && raw.ingest !== false,
-    checkpoints: enabled && raw.checkpoints !== false,
+    recall: raw.recall !== false,
+    ingest: raw.ingest !== false,
+    checkpoints: raw.checkpoints !== false,
     hideMemoryTools,
     agentId,
     url: url.length > 0 ? url : null,
@@ -441,6 +453,25 @@ export function escapeMemoryText(value) {
     .replace(/<instruction/giu, '&lt;instruction');
 }
 
+/**
+ * Read the sidecar's detail block in either the structured
+ * `{text, format}` shape or the legacy string shape. The adapter never reads a
+ * local raw copy; this is only the detail the sidecar already authorized.
+ *
+ * @param {unknown} value
+ * @returns {{ text: string, format: string }}
+ */
+function detailTextOf(value) {
+  if (typeof value === 'string') {
+    const text = value.trim();
+    return { text, format: 'verbatim' };
+  }
+  if (!isObject(value)) return { text: '', format: 'verbatim' };
+  const text = typeof value.text === 'string' ? value.text.trim() : '';
+  const format = typeof value.format === 'string' && value.format.length > 0 ? value.format : 'verbatim';
+  return { text, format };
+}
+
 function memoryBlock(body, options = {}) {
   const content = Array.isArray(body) ? body.join('\n').trim() : String(body ?? '').trim();
   if (content.length === 0) return null;
@@ -550,8 +581,12 @@ export function buildContextMessage(data, config = {}) {
       lines.push(
         `[B${index}] kind=${escapeMemoryText(kind).slice(0, 64)}${tokens}${citations.length > 0 ? ` citation=${escapeMemoryText(citations)}` : ''}`,
         escapeMemoryText(content),
-        '',
       );
+      const blockDetail = detailTextOf(block.detail);
+      if (blockDetail.text.length > 0) {
+        lines.push(`detail (${escapeMemoryText(blockDetail.format)}): ${escapeMemoryText(blockDetail.text)}`);
+      }
+      lines.push('');
       if (index >= 16) break;
     }
   } else if (Array.isArray(data.fragments) && data.fragments.length > 0) {
@@ -574,8 +609,9 @@ export function buildContextMessage(data, config = {}) {
         `[F${index}] kind=${escapeMemoryText(fragment.kind).slice(0, 64)} owner=${escapeMemoryText(owner.owner)} domain=${escapeMemoryText(owner.domain)} confidence=${formatConfidence(fragment.confidence)} time=${formatMemoryTime(fragment.time)} citation=${escapeMemoryText(citations)}${agent}${stale}`,
         `gist: ${escapeMemoryText(gist)}`,
       );
-      if (typeof fragment.detail === 'string' && fragment.detail.trim().length > 0) {
-        lines.push(`detail: ${escapeMemoryText(fragment.detail)}`);
+      const fragmentDetail = detailTextOf(fragment.detail);
+      if (fragmentDetail.text.length > 0) {
+        lines.push(`detail (${escapeMemoryText(fragmentDetail.format)}): ${escapeMemoryText(fragmentDetail.text)}`);
       }
       lines.push('');
       if (index >= 8) break;
@@ -692,12 +728,19 @@ function validateDiscovery(document, now) {
   }
   const url = normalizeRuntimeBaseUrl(document.url);
   if (url.length === 0) return { value: null, reason: 'runtime_discovery_invalid' };
+  const mode = typeof document.mode === 'string' ? document.mode.trim().toLowerCase() : null;
+  if (mode !== null && !DISCOVERY_ACTIVE_MODES.has(mode)) {
+    return { value: null, reason: 'runtime_mode_mcp' };
+  }
+  const capabilities = isObject(document.capabilities) ? document.capabilities : {};
   return {
     value: {
       url,
       apiVersion: apiVersion ?? 1,
       state: document.state,
       degraded: document.degraded === true || document.state === 'degraded',
+      mode,
+      capabilities,
       tokenFile: typeof document.tokenFile === 'string' && document.tokenFile.length > 0
         ? document.tokenFile
         : null,
@@ -1215,10 +1258,11 @@ export function createMemoryRuntimeAdapter(options = {}) {
   const homeDir = asText(opts.homeDir);
   const env = isObject(opts.env) ? opts.env : process.env;
 
-  if (!config.enabled || ctx === null) {
+  if (ctx === null) {
     return {
       enabled: false,
       attach: () => {},
+      expandRecall: async () => ({ ok: false, code: 'ctx_unavailable', detail: null }),
       updateSnapshot: () => {},
       flush: async () => {},
       dispose: async () => {},
@@ -1233,8 +1277,9 @@ export function createMemoryRuntimeAdapter(options = {}) {
           source: null,
           apiVersion: null,
           state: null,
+          mode: null,
           degraded: false,
-          reason: 'disabled',
+          reason: 'ctx_unavailable',
           tokenConfigured: false,
           tokenSource: 'none',
         },
@@ -1270,6 +1315,8 @@ export function createMemoryRuntimeAdapter(options = {}) {
   let discoveryCache = null;
   let discoveryReadAt = -Infinity;
   let discoveryPromise = null;
+  let discoveryTimer = null;
+  let lastActivationKey = null;
   let homePromise = null;
   let lastToken = { token: '', source: 'none', at: 0 };
   let lastEndpoint = {
@@ -1277,6 +1324,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
     source: staticSource,
     apiVersion: null,
     state: null,
+    mode: null,
     degraded: false,
     reason: invalidStaticUrl ? 'runtime_invalid_url' : staticUrl === null ? 'runtime_not_discovered' : null,
   };
@@ -1295,6 +1343,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
     maintenance: { attempts: 0, sent: 0, failures: 0, skipped: 0 },
   };
   const anchors = new Map();
+  const recalls = new Map();
   const trackers = new Map();
   const compactions = new Map();
   const listeners = [];
@@ -1322,6 +1371,101 @@ export function createMemoryRuntimeAdapter(options = {}) {
       homePromise = resolveRuntimeHome(homeDir, env).catch(() => homeDir || join(homedir(), '.mebular'));
     }
     return homePromise;
+  }
+
+  function capabilityEnabled(capabilities, key) {
+    if (!isObject(capabilities)) return true;
+    return capabilities[key] !== false;
+  }
+
+  /**
+   * Whether the sidecar discovery currently allows one feature. Explicit URL
+   * overrides are troubleshooting only and keep their historical behaviour; a
+   * discovery-driven adapter must be in an immersive state and advertise the
+   * feature.
+   */
+  function runtimeAllows(feature) {
+    if (staticUrl !== null) return true;
+    const value = discoveryCache?.value ?? null;
+    if (value === null) return false;
+    if (value.mode !== null && !DISCOVERY_ACTIVE_MODES.has(value.mode)) return false;
+    if (feature === 'recall') {
+      return capabilityEnabled(value.capabilities, 'context')
+        && capabilityEnabled(value.capabilities, 'recall');
+    }
+    if (feature === 'ingest') return capabilityEnabled(value.capabilities, 'ingest');
+    if (feature === 'checkpoint') return capabilityEnabled(value.capabilities, 'checkpoint');
+    return true;
+  }
+
+  function runtimeActive() {
+    return runtimeAllows('recall') || runtimeAllows('ingest') || runtimeAllows('checkpoint');
+  }
+
+  function noteActivation() {
+    const value = discoveryCache?.value ?? null;
+    const key = [
+      staticUrl !== null ? 'static' : 'discovery',
+      runtimeAllows('recall') ? 'r' : '-',
+      runtimeAllows('ingest') ? 'i' : '-',
+      runtimeAllows('checkpoint') ? 'c' : '-',
+      value?.mode ?? '-',
+      value?.state ?? '-',
+    ].join(':');
+    if (key === lastActivationKey) return;
+    lastActivationKey = key;
+    refreshTrackedTools();
+    if (runtimeActive()) {
+      ingestQueue?.schedule(0);
+      checkpointQueue?.schedule();
+    }
+  }
+
+  async function ensureRuntime() {
+    if (disposed) return false;
+    if (staticUrl !== null) return true;
+    const discovery = await loadDiscovery();
+    if (discovery.value === null) {
+      lastEndpoint = {
+        url: '',
+        source: null,
+        apiVersion: null,
+        state: null,
+        mode: null,
+        degraded: false,
+        reason: discovery.reason,
+      };
+    } else {
+      lastEndpoint = {
+        url: discovery.value.url,
+        source: 'discovery',
+        apiVersion: discovery.value.apiVersion,
+        state: discovery.value.state,
+        mode: discovery.value.mode,
+        degraded: discovery.value.degraded,
+        reason: null,
+      };
+    }
+    noteActivation();
+    return runtimeActive();
+  }
+
+  function scheduleDiscoveryPoll() {
+    if (disposed || closing || staticUrl !== null || discoveryTimer !== null) return;
+    const interval = Math.max(250, config.discoveryRetryMs);
+    discoveryTimer = setTimeoutFn(() => {
+      discoveryTimer = null;
+      if (disposed || closing) return;
+      void loadDiscovery(true)
+        .then(() => {
+          noteActivation();
+          scheduleDiscoveryPoll();
+        })
+        .catch(() => {
+          scheduleDiscoveryPoll();
+        });
+    }, interval);
+    discoveryTimer?.unref?.();
   }
 
   async function loadDiscovery(force = false) {
@@ -1363,6 +1507,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         source: null,
         apiVersion: null,
         state: null,
+        mode: null,
         degraded: false,
         reason: 'runtime_invalid_url',
       };
@@ -1384,6 +1529,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         source: null,
         apiVersion: null,
         state: null,
+        mode: null,
         degraded: false,
         reason: discovery.reason,
       };
@@ -1394,6 +1540,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
       source: 'discovery',
       apiVersion: discovery.value.apiVersion,
       state: discovery.value.state,
+      mode: discovery.value.mode,
       degraded: discovery.value.degraded,
       reason: null,
     };
@@ -1634,9 +1781,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
   async function recallInjection(payload) {
     // Do not gate recall on the MCP lifecycle snapshot: the first health probe
     // can transiently report down while DSH is starting, and that must not
-    // silently remove memory from the first human turn. A request to a sidecar
-    // that is really down fails fast and is bounded by recallTimeoutMs.
+    // silently remove memory from the first human turn. The sidecar discovery
+    // file owns the mode; in light MCP mode it is absent and no HTTP is made.
     if (!config.recall || disposed || closing) return null;
+    if (!(await ensureRuntime()) || !runtimeAllows('recall')) {
+      stats.recall.skipped += 1;
+      return null;
+    }
     const agent = payload?.agent;
     if (!agent || isMemoryAgent(agent, config)) {
       stats.recall.skipped += 1;
@@ -1704,8 +1855,86 @@ export function createMemoryRuntimeAdapter(options = {}) {
       stats.recall.empty += 1;
       return null;
     }
+    rememberRecall(result.data);
     stats.recall.hits += 1;
     return message;
+  }
+
+  function rememberRecall(data) {
+    if (!isObject(data) || typeof data.recallId !== 'string' || data.recallId.length === 0) return;
+    const at = now();
+    recalls.set(data.recallId, {
+      at,
+      threadId: typeof data.threadId === 'string' ? data.threadId : null,
+      fragments: Array.isArray(data.fragments)
+        ? data.fragments.map((fragment) => ({
+          id: typeof fragment?.id === 'string' ? fragment.id : '',
+          detailIds: Array.isArray(fragment?.detailIds) ? fragment.detailIds.filter((id) => typeof id === 'string') : [],
+        })).filter((fragment) => fragment.id.length > 0)
+        : [],
+    });
+    while (recalls.size > 64) recalls.delete(recalls.keys().next().value);
+    for (const [key, entry] of recalls) {
+      if (at - entry.at > EXPAND_RECALL_TTL_MS) recalls.delete(key);
+      else break;
+    }
+  }
+
+  /**
+   * Expand one fragment through the sidecar. Hosts must never call the internal
+   * capability `/detail` endpoint or read a local raw store; the sidecar owns
+   * domain checks, detail availability and citations.
+   *
+   * @param {{
+   *   recallId: string,
+   *   fragmentId: string,
+   *   threadId?: string,
+   *   detailKinds?: string[],
+   *   maxBytes?: number,
+   * }} request
+   */
+  async function expandRecall(request = {}) {
+    const recallId = asText(request.recallId);
+    const fragmentId = asText(request.fragmentId);
+    if (recallId.length === 0 || fragmentId.length === 0) {
+      return { ok: false, code: 'invalid_request', detail: null };
+    }
+    const known = recalls.get(recallId);
+    if (known === undefined || now() - known.at > EXPAND_RECALL_TTL_MS) {
+      return { ok: false, code: 'recall_expired', detail: null };
+    }
+    const fragment = known.fragments.find((entry) => entry.id === fragmentId);
+    if (fragment === undefined) {
+      return { ok: false, code: 'fragment_not_found', detail: null };
+    }
+    if (!(await ensureRuntime()) || !runtimeAllows('recall')) {
+      return { ok: false, code: 'runtime_unavailable', detail: null };
+    }
+    const body = {
+      agentId: config.agentId,
+      ...(known.threadId !== null || typeof request.threadId === 'string'
+        ? { threadId: asText(request.threadId) || known.threadId }
+        : {}),
+      fragmentId,
+      ...(Array.isArray(request.detailKinds) && request.detailKinds.length > 0
+        ? { detailKinds: uniqueStrings(request.detailKinds, 8) }
+        : {}),
+      maxBytes: asInt(request.maxBytes, 4096, 256, 8192),
+    };
+    const path = `/recall/${encodeURIComponent(recallId)}/expand`;
+    const result = await runtimeRequest(path, body, { timeoutMs: config.recallTimeoutMs });
+    if (!result.ok) {
+      stats.recall.failures += 1;
+      return { ok: false, code: result.code ?? 'runtime_error', detail: null };
+    }
+    return {
+      ok: true,
+      recallId,
+      fragmentId,
+      detail: isObject(result.data?.detail) ? result.data.detail : null,
+      degraded: result.data?.degraded === true,
+      warnings: Array.isArray(result.data?.warnings) ? result.data.warnings : [],
+    };
   }
 
   async function onPreStep(payload, next) {
@@ -1724,7 +1953,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
     max: config.maxQueue,
     batchSize: config.ingestBatchSize,
     flushMs: config.ingestFlushMs,
-    isReady: () => !disposed,
+    isReady: () => !disposed && runtimeAllows('ingest'),
     stats: stats.ingest,
     dedupeLimit: config.dedupeCacheSize,
     setTimeoutFn,
@@ -1803,6 +2032,12 @@ export function createMemoryRuntimeAdapter(options = {}) {
     clearTimeoutFn,
     handler: async (state) => {
       if (disposed) return;
+      if (!(await ensureRuntime()) || !runtimeAllows('checkpoint')) {
+        state.committed = false;
+        state.failed = true;
+        stats.checkpoints.failed += 1;
+        return;
+      }
       if (!state.summary || state.summary.text.trim().length === 0 || !state.replacement) {
         state.failed = true;
         stats.checkpoints.incomplete += 1;
@@ -1949,6 +2184,13 @@ export function createMemoryRuntimeAdapter(options = {}) {
       return;
     }
     if (!config.ingest) return;
+    if (!runtimeAllows('ingest')) {
+      // Light MCP / no discovery: never queue evidence that would be replayed
+      // after a later mode switch.
+      stats.ingest.skipped += 1;
+      void ensureRuntime();
+      return;
+    }
     const chunk = eventChunk(session, event, config, homeDir);
     if (chunk === null) {
       stats.ingest.skipped += 1;
@@ -1994,6 +2236,17 @@ export function createMemoryRuntimeAdapter(options = {}) {
 
   function applyToolRestriction(agent, tracker) {
     if (disposed || !config.hideMemoryTools || isMemoryAgent(agent, config)) return;
+    // Light MCP keeps the 0.2 tool surface. Tool masking follows the sidecar
+    // mode exactly like recall/ingest, so a later mode change lifts or restores
+    // it without a host restart.
+    if (!runtimeActive()) {
+      if (applyDenyList(agent, tracker, [])) {
+        tracker.toolDenyKey = '';
+        tracker.knownTools = [];
+        stats.tools.currentDenied = 0;
+      }
+      return;
+    }
     let rootTools = null;
     try {
       rootTools = ctx.tools ?? null;
@@ -2243,7 +2496,6 @@ export function createMemoryRuntimeAdapter(options = {}) {
             threadId: safeThreadId(session?.id),
             source: 'host',
             extractor: 'host',
-            capture: 'off',
             chunks: [],
             candidates,
             ...(config.domain === null ? {} : { domain: config.domain }),
@@ -2330,6 +2582,20 @@ export function createMemoryRuntimeAdapter(options = {}) {
     if (config.hideMemoryTools || config.maintenance.enabled) add('agent/disposed', onAgentDisposed);
     if (config.hideMemoryTools) add('tools/change', onToolsChange);
     if (config.maintenance.enabled) add('agent/status', onAgentStatus);
+    if (staticUrl !== null) {
+      noteActivation();
+      return;
+    }
+    // Start with the discovery file so the first human turn can recall without
+    // waiting for the poll, then keep following mode changes.
+    void loadDiscovery(true)
+      .then(() => {
+        noteActivation();
+        scheduleDiscoveryPoll();
+      })
+      .catch(() => {
+        scheduleDiscoveryPoll();
+      });
   }
 
   function updateSnapshot(snapshot) {
@@ -2380,6 +2646,10 @@ export function createMemoryRuntimeAdapter(options = {}) {
     // now keeps unload bounded; an already in-flight request still gets to
     // finish before activeRequests is aborted.
     closing = true;
+    if (discoveryTimer !== null) {
+      clearTimeoutFn(discoveryTimer);
+      discoveryTimer = null;
+    }
     try {
       retryAbort?.abort();
     } catch {
@@ -2441,26 +2711,31 @@ export function createMemoryRuntimeAdapter(options = {}) {
       .finally(() => {
         disposed = true;
         anchors.clear();
+        recalls.clear();
         compactions.clear();
       });
     return disposal;
   }
 
   const adapter = {
-    enabled: true,
+    get enabled() {
+      return runtimeActive();
+    },
     attach,
+    expandRecall,
     updateSnapshot,
     flush,
     dispose,
     getState: () => ({
-      enabled: config.enabled,
+      enabled: runtimeActive(),
       disposed,
       ready,
+      mode: lastEndpoint.mode,
       features: {
-        recall: config.recall,
-        ingest: config.ingest,
-        checkpoints: config.checkpoints,
-        hideMemoryTools: config.hideMemoryTools,
+        recall: config.recall && runtimeAllows('recall'),
+        ingest: config.ingest && runtimeAllows('ingest'),
+        checkpoints: config.checkpoints && runtimeAllows('checkpoint'),
+        hideMemoryTools: config.hideMemoryTools && runtimeActive(),
         maintenance: config.maintenance.enabled,
       },
       runtime: {
@@ -2469,6 +2744,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         source: lastEndpoint.source,
         apiVersion: lastEndpoint.apiVersion,
         state: lastEndpoint.state,
+        mode: lastEndpoint.mode,
         degraded: lastEndpoint.degraded,
         reason: lastEndpoint.reason,
         tokenConfigured: lastToken.token.length > 0,

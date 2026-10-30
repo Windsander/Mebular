@@ -616,6 +616,7 @@ describe('ingest and compaction', () => {
     expect(ingestCalls[0].body.chunks.map((chunk) => chunk.role)).toEqual(['user', 'assistant']);
     expect(ingestCalls[0].body.requestId).toMatch(/^opc_[0-9a-f]{48}$/);
     expect(ingestCalls[0].headers['idempotency-key']).toBe(ingestCalls[0].body.requestId);
+    expect(ingestCalls[0].body).not.toHaveProperty('capture');
 
     await controller.handleEvent({
       type: 'session.text.ended',
@@ -844,6 +845,59 @@ describe('current model extraction (host/current)', () => {
 });
 
 describe('sidecar discovery and host authentication', () => {
+  it('ignores legacy enabled/capture fields and warns', () => {
+    const config = resolvePluginConfig({
+      runtimeUrl: BASE,
+      enabled: false,
+      capture: 'off',
+      ingest: false,
+    }, { env: {} });
+    expect(config).not.toHaveProperty('enabled');
+    expect(config).not.toHaveProperty('capture');
+    expect(config.ingest).toBe(false);
+    expect(config.warnings).toContain('legacy_enabled_ignored');
+    expect(config.warnings).toContain('legacy_capture_ignored');
+  });
+
+  it('follows discovery appearing after startup without a host-level enabled switch', async () => {
+    const home = await tempDir();
+    const fetchImpl = createFetch({ '/context': HIT });
+    const { ctx, calls } = makeCtx();
+    const controller = createController({
+      ctx,
+      config: { bufferIdleMs: 60000 },
+      fetchImpl,
+      env: {},
+      homeDir: home,
+    });
+    await controller.start();
+    expect(controller.getStatus().enabled).toBe(false);
+    expect(controller.getStatus().reason).toBe('runtime_not_discovered');
+    expect(fetchImpl.calls).toHaveLength(0);
+    expect(calls.hooks).toHaveLength(0);
+
+    await writeDiscovery(home);
+    const event = hookEvent(userMessages());
+    await controller.handleContext(event);
+    expect(event.system).toHaveLength(1);
+    expect(controller.getStatus().enabled).toBe(true);
+    expect(fetchImpl.callsFor('/context')).toHaveLength(1);
+    await controller.dispose();
+  });
+
+  it('does not fetch when discovery is absent (light MCP)', async () => {
+    const home = await tempDir();
+    const fetchImpl = createFetch();
+    const { ctx } = makeCtx();
+    const controller = createController({ ctx, config: {}, fetchImpl, env: {}, homeDir: home });
+    await controller.start();
+    await controller.handleContext(hookEvent(userMessages()));
+    expect(fetchImpl.calls).toHaveLength(0);
+    expect(controller.getStatus().enabled).toBe(false);
+    expect(controller.getStatus().reason).toBe('runtime_not_discovered');
+    await controller.dispose();
+  });
+
   it('discovers URL and host token from <home>/memory-runtime.json', async () => {
     const home = await tempDir();
     await writeDiscovery(home);
@@ -1094,6 +1148,53 @@ describe('fragmented context contract', () => {
     await controller.handleContext(second);
     const secondBody = fetchImpl.callsFor('/context')[1].body;
     expect(secondBody.alreadyInjectedIds).toContain('mf_01JTEST');
+  });
+
+  it('renders a sidecar detail block without reading local raw', async () => {
+    const fetchImpl = createFetch({
+      '/context': {
+        blocks: [{
+          kind: 'fragment',
+          content: 'user prefers a dark theme',
+          detail: { text: '我默认用深色主题。', format: 'verbatim' },
+          citations: [{ id: 'det_1', type: 'detail_record' }],
+        }],
+        recallId: 'rr_detail',
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    const event = hookEvent(userMessages('我原话怎么说的？'));
+    await controller.handleContext(event);
+    expect(event.system).toHaveLength(1);
+    expect(event.system[0].text).toContain('detail: 我默认用深色主题。');
+    expect(event.system[0].text).toContain('trust="untrusted"');
+  });
+
+  it('expands a recalled fragment through the sidecar, not capability /detail', async () => {
+    const fetchImpl = createFetch({
+      '/context': {
+        blocks: [{ kind: 'fragment', content: 'user prefers a dark theme' }],
+        recallId: 'rr_expand',
+        fragments: [{ id: 'mf_1', kind: 'fact', gist: 'user prefers a dark theme' }],
+      },
+      'POST /recall/rr_expand/expand': {
+        recallId: 'rr_expand',
+        fragmentId: 'mf_1',
+        detail: { id: 'det_1', text: '我默认用深色主题。', availability: ['available'] },
+        degraded: false,
+        warnings: [],
+      },
+    });
+    const { controller } = controllerWith({ fetchImpl });
+    await controller.handleContext(hookEvent(userMessages()));
+    const expanded = await controller.expandDetail('rr_expand', 'mf_1', { maxBytes: 2048 });
+    expect(expanded.ok).toBe(true);
+    expect(expanded.detail?.text).toBe('我默认用深色主题。');
+    expect(fetchImpl.callsFor('/recall/rr_expand/expand')).toHaveLength(1);
+    expect(fetchImpl.calls.some((call) => call.path === '/detail')).toBe(false);
+    const missing = await controller.expandDetail('rr_expand', 'mf_other');
+    expect(missing.ok).toBe(false);
+    expect(missing.code).toBe('fragment_not_found');
   });
 
   it('escapes closing tags and nested system/instruction tags', () => {

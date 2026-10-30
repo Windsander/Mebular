@@ -5553,9 +5553,10 @@ export function apply(ctx, config = {}, options = {}) {
     log: (level, message) => log(level, message),
   });
 
-  // Memory Runtime is a separate sidecar and is opt-in. When disabled it has no
-  // effect: no listeners, no timer, no discovery read and no fetch. It never
-  // reuses the MCP daemon URL; the adapter resolves `memoryRuntime.url` >
+  // Memory Runtime is a separate sidecar. The adapter follows the sidecar
+  // discovery mode; there is no per-host enabled/capture switch. With no
+  // discovery file (light MCP) it performs no sidecar HTTP. It never reuses the
+  // MCP daemon URL; it resolves `memoryRuntime.url` >
   // MEBULAR_MEMORY_RUNTIME_URL > `<home>/memory-runtime.json`.
   const memoryRuntimeConfig = resolveMemoryRuntimeConfig(raw.memoryRuntime, {
     warn: (message) => log('warn', message),
@@ -5566,9 +5567,7 @@ export function apply(ctx, config = {}, options = {}) {
     fetchImpl: opts.fetchImpl,
     now: opts.now,
     env: opts.env,
-    homeDir: memoryRuntimeConfig.enabled
-      ? runtimeCloudRoot({ env: opts.env, userHome: opts.userHome })
-      : undefined,
+    homeDir: runtimeCloudRoot({ env: opts.env, userHome: opts.userHome }),
     setTimeoutFn: opts.setTimeoutFn,
     clearTimeoutFn: opts.clearTimeoutFn,
     log: (level, message) => log(level, message),

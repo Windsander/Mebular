@@ -7,7 +7,7 @@ OpenChamber 是基于 OpenCode 的桌面宿主。Mebular 通过两层接入：
 | 层 | 得到什么 | 默认 |
 |---|---|---|
 | **MCP** | OpenCode global 配置里的官方 29 工具 Mebular server | 配置后可用 |
-| **Memory Runtime**（`@mebular/opencode-plugin`） | request-only 召回、事件 ingest、压缩检查点、可选当前模型抽取 | 关闭；显式 opt-in |
+| **Memory Runtime**（`@mebular/opencode-plugin`） | request-only 召回、事件 ingest、压缩检查点、可选当前模型抽取 | 自动跟随 sidecar discovery 模式；无逐宿主 enable/capture |
 
 OpenChamber 复用 OpenCode 的 global 配置。Mebular 只写 `mcp.servers.mebular`，永不写
 OpenChamber 私有的 `opencode.managed.json` 或 `run/instances` 下的实例副本。
@@ -170,7 +170,7 @@ Token 是 sidecar 的 **host token**，不是 MCP capability token。POSIX 下 t
 | `agentId` | `opencode` | 逻辑 Agent ID |
 | `namespace` / `namespaces` | — | 旧召回域别名；`namespace` 仅只读兼容 |
 | `domains` | — | v2 记忆域（如 `user` / `agent:opencode`）；缺省由 sidecar 决定 |
-| `capture` | `off` | `off` / `local`；local 让 sidecar 在本机保留 RawChunk |
+| ~~`capture`~~ | — | 0.3.0 已删除；旧值忽略，采集由 sidecar 模式负责 |
 | `recall` / `ingest` / `checkpoints` | `true` | 是否启用各路径 |
 | `modelSource` | `heuristic` | `heuristic`，或 `host`/`current` 使用 `ctx.session.generate` |
 | `hideMemoryTools` | `true` | 对普通 Agent 删除 `mebular_*` 工具 |
@@ -187,7 +187,7 @@ Token 是 sidecar 的 **host token**，不是 MCP capability token。POSIX 下 t
 环境变量：`MEBULAR_MEMORY_RUNTIME_URL`、`MEBULAR_MEMORY_RUNTIME_TOKEN`、
 `MEBULAR_MEMORY_RUNTIME_AGENT_ID`、`MEBULAR_MEMORY_RUNTIME_NAMESPACE`、
 `MEBULAR_MEMORY_RUNTIME_DOMAIN`、`MEBULAR_MEMORY_RUNTIME_MODEL`、
-`MEBULAR_MEMORY_RUNTIME_CAPTURE`、`MEBULAR_OPENCODE_PLUGIN_CONFIG`。
+`MEBULAR_OPENCODE_PLUGIN_CONFIG`。旧 `MEBULAR_MEMORY_RUNTIME_CAPTURE` 忽略。
 
 插件配置文件默认是 `$MEBULAR_HOME/opencode-plugin.json`，可写
 `{ "memoryRuntime": { ... } }` 或平铺键；它不读取 Mebular 的 `config.json`、OpenChamber
@@ -217,7 +217,7 @@ OpenCode 不会把模型凭据交给插件，插件也不会索取。选择 `hos
 - **没有强制迁移。** 0.2 的记录保留原 ID、namespace、tag 和事件。旧的 `default`
   namespace 原样保留，按第三类/Other 兜底解释（`domain=default`），不会改写成 `user`。
 - MCP 只保留生命周期键（`memoryRuntime.enabled`、`memoryRuntime.command`、
-  `memoryRuntime.startTimeoutMs`）。capture、模型、trace、retention 属于
+  `memoryRuntime.startTimeoutMs`）。详情/staging、模型、trace、retention 属于
   `<home>/memory-runtime/config.json`，不再放在 MCP 的 `runtime.*` 键下。
 - 检查点和 SelfRecord 没有本地/云端二选一。没有 `sync=cloud`、`checkpoint.sync` 或
   `self.sync`；所有持久对象都经 MCP 写入，并由现有云端同步传播。

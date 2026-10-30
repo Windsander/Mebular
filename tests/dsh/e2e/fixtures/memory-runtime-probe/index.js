@@ -141,25 +141,53 @@ export function apply(ctx, config = {}) {
     await sleep(100);
     state.tools.replayedDeny = denies.at(-1) ?? null;
 
-    const messages = [humanMessage('memory e2e query', 'memory-e2e-human-1')];
-    const next = async () => ({ kind: 'enter', messages });
-    const payload = {
-      agent,
-      messages,
-      turn: 1,
-      step: 1,
-      signal: new AbortController().signal,
+    const env = process.env;
+    const detailQuery = typeof env.MEMORY_E2E_DETAIL_QUERY === 'string' && env.MEMORY_E2E_DETAIL_QUERY.length > 0
+      ? env.MEMORY_E2E_DETAIL_QUERY
+      : '我原话怎么说的？';
+    const silentQuery = typeof env.MEMORY_E2E_SILENT_QUERY === 'string' && env.MEMORY_E2E_SILENT_QUERY.length > 0
+      ? env.MEMORY_E2E_SILENT_QUERY
+      : 'tomorrow weather small talk';
+    const step = (text, id, turn) => {
+      const stepMessages = [humanMessage(text, id)];
+      return {
+        payload: {
+          agent,
+          messages: stepMessages,
+          turn,
+          step: 1,
+          signal: new AbortController().signal,
+        },
+        fallback: async () => ({ kind: 'enter', messages: stepMessages }),
+      };
     };
-    const first = await waterfall('agent/pre-step', payload, next);
-    const second = await waterfall('agent/pre-step', payload, next);
-    const nextTurn = await waterfall('agent/pre-step', { ...payload, turn: 2 }, next);
+    const textOf = (decision) => {
+      const last = decision?.messages?.at(-1);
+      if (!last || !Array.isArray(last.content)) return '';
+      return last.content.map((part) => (typeof part?.text === 'string' ? part.text : '')).join('\n');
+    };
+
+    const firstStep = step('memory e2e query', 'memory-e2e-human-1', 1);
+    const first = await waterfall('agent/pre-step', firstStep.payload, firstStep.fallback);
+    const second = await waterfall('agent/pre-step', firstStep.payload, firstStep.fallback);
+    const nextStep = step('memory e2e query', 'memory-e2e-human-2', 2);
+    const nextTurn = await waterfall('agent/pre-step', nextStep.payload, nextStep.fallback);
+    const detailStep = step(detailQuery, 'memory-e2e-human-3', 3);
+    const detailTurn = await waterfall('agent/pre-step', detailStep.payload, detailStep.fallback);
+    const silenceStep = step(silentQuery, 'memory-e2e-human-4', 4);
+    const silenceTurn = await waterfall('agent/pre-step', silenceStep.payload, silenceStep.fallback);
     state.preStep = {
       firstMessageCount: Array.isArray(first?.messages) ? first.messages.length : null,
-      injected: Array.isArray(first?.messages) && first.messages.length > messages.length,
+      injected: Array.isArray(first?.messages) && first.messages.length > 1,
       injectedSource: first?.messages?.at(-1)?.source?.kind ?? null,
       secondMessageCount: Array.isArray(second?.messages) ? second.messages.length : null,
       nextTurnMessageCount: Array.isArray(nextTurn?.messages) ? nextTurn.messages.length : null,
-      nextTurnInjected: Array.isArray(nextTurn?.messages) && nextTurn.messages.length > messages.length,
+      nextTurnInjected: Array.isArray(nextTurn?.messages) && nextTurn.messages.length > 1,
+      detailInjected: Array.isArray(detailTurn?.messages) && detailTurn.messages.length > 1,
+      detailSource: detailTurn?.messages?.at(-1)?.source?.kind ?? null,
+      detailText: textOf(detailTurn),
+      silenceInjected: Array.isArray(silenceTurn?.messages) && silenceTurn.messages.length > 1,
+      silenceText: textOf(silenceTurn),
     };
 
     const userEvent = sessionEvent('user/message', 1, humanMessage('memory e2e ingest', 'memory-e2e-user-1'));
@@ -171,7 +199,18 @@ export function apply(ctx, config = {}) {
         content: [{ type: 'text', text: 'memory e2e assistant' }],
       },
     }));
-    state.session = { emitted: 3 };
+    emit('session/event', session, sessionEvent(
+      'user/message',
+      3,
+      humanMessage('memory e2e second turn', 'memory-e2e-user-2'),
+    ));
+    emit('session/event', session, sessionEvent('assistant/message', 4, {
+      message: {
+        role: 'assistant',
+        content: [{ type: 'text', text: 'memory e2e second assistant' }],
+      },
+    }));
+    state.session = { emitted: 5 };
 
     for (const event of [
       sessionEvent('compaction/start', 10, { compactionId: 'memory-e2e-compaction', turn: 1 }),

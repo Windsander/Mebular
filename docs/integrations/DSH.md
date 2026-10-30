@@ -137,7 +137,7 @@ Full config:
 
 Invalid values fall back safely with a warning; activation does not fail.
 
-## Memory Runtime (opt-in)
+## Memory Runtime (automatic mode following)
 
 0.3.0 can attach the independent Memory Runtime sidecar next to MCP. They are two layers
 and two processes:
@@ -145,15 +145,19 @@ and two processes:
 | Layer | Default | What it does |
 | --- | --- | --- |
 | **MCP** | On when the daemon is up | The official client mounts `mcp__mebular__*`; 29 tools unchanged |
-| **Memory Runtime sidecar** | Off | `/memory-runtime/v1` context, ingest, compaction checkpoints, optional host maintenance |
+| **Memory Runtime sidecar** | Follows the Mebular mode | `/memory-runtime/v1` context, ingest, compaction checkpoints, optional host maintenance |
 
 The sidecar is **not** the MCP daemon runtime. DSH never reuses `daemonUrl`, the MCP
 `runtime.json` or port 7331 as the sidecar address, and never blindly connects to 7341.
-With `memoryRuntime` absent or `enabled: false`, the adapter registers no listener,
-starts no timer, reads no discovery file and sends no request. Attach, managed lifecycle,
-panel and MCP keep their exact behaviour.
+The adapter reads `<home>/memory-runtime.json` (`mode` / `state` / `capabilities`). In
+light MCP there is no discovery file, so it sends no sidecar request and keeps the 0.2
+tool surface. There is **no per-host `memoryRuntime.enabled` or `capture` switch**;
+legacy values are ignored with a warning.
 
-### Enable the sidecar and the adapter
+### Switch the device mode
+
+The only product switch is the Mebular memory mode (`轻量 MCP` / `沉浸式`). The host
+adapter follows the resulting sidecar discovery automatically.
 
 1. Enable the MCP setting `memoryRuntime.enabled` (Console memory-runtime switch, or
    `<home>/config.json`):
@@ -178,9 +182,8 @@ panel and MCP keep their exact behaviour.
    mebular memory-runtime status --json
    ```
 
-3. Opt the DSH plugin in. This `memoryRuntime` group is **DSH plugin configuration**, not
-   the MCP setting; both switches are independent and both must be on for the immersive
-   path:
+3. No host opt-in is required. The `memoryRuntime` group below is only for explicit
+   troubleshooting/tests; omit it for normal use:
 
    ```yaml
    - id: mebular
@@ -189,8 +192,7 @@ panel and MCP keep their exact behaviour.
        lifecycle: attach
        panel: true
        memoryRuntime:
-         enabled: true
-         # Optional; these default to true, maintenance defaults to false.
+         # Optional diagnostic overrides; default to true, maintenance defaults to false.
          recall: true
          ingest: true
          checkpoints: true
@@ -209,8 +211,8 @@ panel and MCP keep their exact behaviour.
 - **Discovery:** `memoryRuntime.url` > `MEBULAR_MEMORY_RUNTIME_URL` >
   `<home>/memory-runtime.json`. `<home>` follows `MEBULAR_HOME`, otherwise
   `MEBULAR_CLOUD_ROOT`, then the current profile. Discovery must be `ready`/`degraded`,
-  with a heartbeat no older than 15 s and `apiVersion=1`; otherwise the immersive path
-  stays disabled with a reason.
+  `mode` not `mcp`, with a heartbeat no older than 15 s and `apiVersion=1`; otherwise
+  the immersive path stays disabled with a reason and no request is sent.
 - **Auth:** `memoryRuntime.token` > the env var named by `tokenEnv` (default
   `MEBULAR_MEMORY_RUNTIME_TOKEN`) > `memoryRuntime.tokenFile` > discovery `tokenFile` >
   `<home>/memory-runtime/host-token`. This is the sidecar **host token**, not the MCP
@@ -273,7 +275,7 @@ and model fallback rules.
   old `default` namespace is preserved as the third/Other fallback (`domain=default`); it
   is not rewritten to `user`.
 - MCP keeps only lifecycle keys (`memoryRuntime.enabled`, `memoryRuntime.command`,
-  `memoryRuntime.startTimeoutMs`). Capture, model, trace and retention settings belong to
+  `memoryRuntime.startTimeoutMs`). Detail/staging, model, trace and retention settings belong to
   `<home>/memory-runtime/config.json`, not to MCP `runtime.*` keys.
 - Checkpoints and SelfRecords have no local/cloud switch. There is no `sync=cloud`,
   `checkpoint.sync` or `self.sync`; all durable objects go through MCP and existing cloud
@@ -283,14 +285,15 @@ and model fallback rules.
   while MCP and the DSH panel keep working.
 - Prototype data under `<home>/runtime/` is not read or migrated. Do not delete
   `<cloudRoot>/runtime/`; that is the MCP daemon install root, not sidecar data.
-- To turn the sidecar off, set the MCP `memoryRuntime.enabled=false` (or
-  `mebular memory-runtime stop`) and/or set the DSH group `enabled:false`. The sidecar
-  stops; 29 MCP tools and settled memories remain. `<home>/memory-runtime/` may be kept or
-  deleted; deleting it does not delete settled memories.
+- To turn the sidecar off, switch the Mebular memory mode back to light MCP (or run
+  `mebular memory-runtime stop`). The adapter sees discovery disappear and stops
+  ingest/recall/checkpoint without host configuration; 29 MCP tools and settled memories
+  remain. `<home>/memory-runtime/` may be kept or deleted; deleting it does not delete
+  settled memories.
 
 ## Lightweight MCP is unchanged
 
-With no sidecar and no DSH `memoryRuntime` group, DSH is exactly the 0.2 experience: the
+With no sidecar/discovery, DSH is exactly the 0.2 experience: the
 same 29 `mcp__mebular__*` tools, the same attach/managed lifecycle, panel and Console.
 There is no `mebular-memory-runtime` process, no new `<home>/memory-runtime/` directory
 or files, no `memory-runtime.json`, no host token and no port 7341 listener. If the

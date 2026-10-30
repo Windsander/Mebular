@@ -58,6 +58,7 @@ export const EVENT_TYPES = Object.freeze([
 const CANDIDATE_KINDS = new Set(['fact', 'preference', 'episode', 'skill', 'observation']);
 const CONTEXT_KINDS = new Set(['self', 'checkpoint', 'compact', 'memory', 'fragment']);
 const MAX_CANDIDATES = 20;
+const DISCOVERY_ACTIVE_MODES = new Set(['immersive', 'ready', 'active']);
 const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 const NATIVE_MEMORY_TOOL_RE = /^(?:openchamber|opencode|host)[._:-]?memory(?:[._:-]|$)/i;
 const SECRET_REDACTION_RULES = Object.freeze([
@@ -83,14 +84,12 @@ Rules:
 - No prose, no code fences.`;
 
 const DEFAULT_CONFIG = Object.freeze({
-  enabled: true,
   runtimeUrl: '',
   token: '',
   agentId: DEFAULT_AGENT_ID,
   namespace: null,
   namespaces: Object.freeze([]),
   domains: Object.freeze([]),
-  capture: 'off',
   recall: true,
   ingest: true,
   checkpoints: true,
@@ -297,6 +296,10 @@ export function readRuntimeDiscovery(path, options = {}) {
       reason: parsed.state === 'starting' ? 'runtime_starting' : 'sidecar_unavailable',
     };
   }
+  const mode = asText(parsed.mode).toLowerCase() || null;
+  if (mode !== null && !DISCOVERY_ACTIVE_MODES.has(mode)) {
+    return { value: null, reason: 'runtime_mode_mcp' };
+  }
   if (parsed.apiVersion !== RUNTIME_API_VERSION) {
     return { value: null, reason: 'runtime_api_unsupported' };
   }
@@ -305,6 +308,7 @@ export function readRuntimeDiscovery(path, options = {}) {
   return {
     value: {
       ...parsed,
+      mode,
       url: normalized.url,
       healthUrl: typeof parsed.healthUrl === 'string' ? parsed.healthUrl : `${normalized.url}/health`,
     },
@@ -446,7 +450,6 @@ function envConfig(env) {
   if (asText(env?.MEBULAR_MEMORY_RUNTIME_NAMESPACE)) out.namespace = asText(env.MEBULAR_MEMORY_RUNTIME_NAMESPACE);
   if (asText(env?.MEBULAR_MEMORY_RUNTIME_DOMAIN)) out.domain = asText(env.MEBULAR_MEMORY_RUNTIME_DOMAIN);
   if (asText(env?.MEBULAR_MEMORY_RUNTIME_MODEL)) out.modelSource = asText(env.MEBULAR_MEMORY_RUNTIME_MODEL);
-  if (asText(env?.MEBULAR_MEMORY_RUNTIME_CAPTURE)) out.capture = asText(env.MEBULAR_MEMORY_RUNTIME_CAPTURE);
   return out;
 }
 
@@ -488,6 +491,9 @@ export function resolvePluginConfig(input, options = {}) {
   const fromEnv = envConfig(env);
   const warnings = [];
   if (fromFile.warning) warnings.push(fromFile.warning);
+  if (asText(env?.MEBULAR_MEMORY_RUNTIME_CAPTURE)) {
+    warnings.push('legacy_capture_env_ignored');
+  }
 
   const discoveryPath = join(home, DISCOVERY_FILE_NAME);
   const discoveryResult = readRuntimeDiscovery(discoveryPath, { now: options.now });
@@ -542,6 +548,12 @@ export function resolvePluginConfig(input, options = {}) {
   }
 
   const merged = { ...DEFAULT_CONFIG, ...fileValue, ...fromEnv, ...optionsValue };
+  for (const key of ['enabled', 'capture', 'rawCapture', 'localCapture']) {
+    if (Object.prototype.hasOwnProperty.call(fileValue, key)
+      || Object.prototype.hasOwnProperty.call(optionsValue, key)) {
+      warnings.push(`legacy_${key}_ignored`);
+    }
+  }
   let agentId = safeAgentId(merged.agentId);
   if (!agentId) {
     warnings.push('agent_id_invalid');
@@ -574,8 +586,8 @@ export function resolvePluginConfig(input, options = {}) {
   ], 32);
 
   return {
-    enabled: asBool(merged.enabled, true),
     runtimeUrl,
+    runtimeUrlExplicit: explicitUrl.length > 0,
     urlReason,
     token,
     tokenSource,
@@ -586,7 +598,6 @@ export function resolvePluginConfig(input, options = {}) {
     namespace: safeNamespace,
     namespaces,
     domains,
-    capture: merged.capture === 'local' ? 'local' : 'off',
     recall: asBool(merged.recall, true),
     ingest: asBool(merged.ingest, true),
     checkpoints: asBool(merged.checkpoints, true),
@@ -705,11 +716,11 @@ function escapeDelimiter(text) {
 
 function contextBlockText(block) {
   const content = asText(block.content);
-  if (content) return content;
+  const detail = asText(block.detail?.text) || asText(block.detail);
+  if (content) return detail ? `${content}\ndetail: ${detail}` : content;
   const gist = asText(block.gist);
   if (!gist) return '';
-  const detail = asText(block.detail?.text) || asText(block.detail);
-  return detail ? `${gist}\n${detail}` : gist;
+  return detail ? `${gist}\ndetail: ${detail}` : gist;
 }
 
 /**
@@ -978,6 +989,7 @@ export function createController(dependencies = {}) {
   const buffers = new Map();
   const toolCalls = new Map();
   const contextReads = new Map();
+  const recalls = new Map();
   const inflight = new Set();
   const stats = {
     context: { attempts: 0, hits: 0, empty: 0, failures: 0, timeouts: 0, deduped: 0, injected: 0, truncated: 0, cooldown: 0 },
@@ -989,8 +1001,7 @@ export function createController(dependencies = {}) {
   };
 
   let disabledReason = null;
-  if (!config.enabled) disabledReason = 'disabled_by_config';
-  else if (capabilities.version.length === 0) disabledReason = 'opencode_version_missing';
+  if (capabilities.version.length === 0) disabledReason = 'opencode_version_missing';
   else if (!capabilities.versionSupported) disabledReason = 'opencode_version_unsupported';
   else if (!capabilities.hook) disabledReason = 'context_hook_missing';
   else if (config.tokenError === 'token_file_insecure') disabledReason = 'token_file_insecure';
@@ -1004,6 +1015,10 @@ export function createController(dependencies = {}) {
   let checkpointAllowed = enabled && config.checkpoints;
   let writesDisabled = false;
   let recallCooldownUntil = 0;
+  let discoveryTimer = null;
+  let discoveryCheckedAt = -Infinity;
+  let probed = false;
+  let hookRegistered = false;
   const runtimeState = {
     checked: false,
     apiVersion: null,
@@ -1032,6 +1047,126 @@ export function createController(dependencies = {}) {
 
   function runtimeUrl(path) {
     return `${config.runtimeUrl}${path}`;
+  }
+
+  /**
+   * Follow `<home>/memory-runtime.json` without a host-level enable switch.
+   * Explicit troubleshooting URLs still win; otherwise a missing discovery file
+   * means light MCP and no HTTP.
+   */
+  function refreshDiscovery(force = false) {
+    if (closed) return false;
+    if (!capabilities.version || !capabilities.versionSupported || !capabilities.hook) return false;
+    if (config.tokenError === 'token_file_insecure') return false;
+    if (config.runtimeUrlExplicit && config.runtimeUrl) return true;
+    if (!force && now() - discoveryCheckedAt < 5000) return Boolean(config.runtimeUrl);
+    discoveryCheckedAt = now();
+    const result = readRuntimeDiscovery(config.discoveryPath, { now: now() });
+    const discovery = result.value;
+    if (!discovery) {
+      if (!config.runtimeUrlExplicit) {
+        config.runtimeUrl = '';
+        runtimeState.discovered = false;
+        runtimeState.state = result.reason;
+        if (disabledReason === null || disabledReason === 'runtime_not_discovered') {
+          disabledReason = result.reason || 'runtime_not_discovered';
+        }
+        enabled = false;
+        recallAllowed = false;
+        ingestAllowed = false;
+        checkpointAllowed = false;
+        hostAvailable = false;
+        if (typeof status === 'object' && status !== null) {
+          status.enabled = false;
+          status.reason = disabledReason;
+        }
+      }
+      return false;
+    }
+    config.runtimeUrl = discovery.url;
+    config.discoveryFound = true;
+    config.discoveryError = null;
+    config.discoveryState = discovery.state;
+    config.discoveryDegraded = discovery.degraded === true;
+    config.runtimeVersion = discovery.runtimeVersion ?? config.runtimeVersion;
+    const tokenFile = asText(discovery.tokenFile) || config.tokenFile;
+    if (tokenFile) {
+      config.tokenFile = tokenFile;
+      if (tokenState.source === null || tokenState.source === 'tokenFile') {
+        tokenState.file = tokenFile;
+        const read = readHostTokenFile(tokenFile);
+        if (read.token) {
+          tokenState.value = read.token;
+          tokenState.source = 'tokenFile';
+          tokenState.readAt = now();
+        }
+      }
+    }
+    runtimeState.discovered = true;
+    runtimeState.state = discovery.state;
+    runtimeState.degraded = discovery.degraded === true;
+    runtimeState.mode = discovery.mode ?? null;
+    if (!enabled) {
+      disabledReason = null;
+      enabled = true;
+      recallAllowed = config.recall;
+      ingestAllowed = config.ingest;
+      checkpointAllowed = config.checkpoints;
+      hostAvailable = config.modelSource === 'host' && capabilities.generate;
+      if (typeof status === 'object' && status !== null) {
+        status.enabled = true;
+        status.reason = null;
+      }
+      probed = false;
+    }
+    return true;
+  }
+
+  async function ensureRuntime(force = false) {
+    if (closed) return false;
+    if (!refreshDiscovery(force)) return false;
+    if (!probed && started) {
+      const ok = await probeRuntime();
+      probed = ok;
+      if (!ok) return false;
+    }
+    return enabled && !closed;
+  }
+
+  async function ensureContextHook() {
+    if (hookRegistered || closed) return;
+    if (!capabilities.version || !capabilities.versionSupported || !capabilities.hook) return;
+    try {
+      const registration = await ctx.session.hook('context', (event) => handleContext(event));
+      if (registration?.dispose) registrations.push(registration);
+      hookRegistered = true;
+    } catch {
+      disableRuntime('context_hook_registration_failed');
+    }
+  }
+
+  function scheduleDiscoveryPoll() {
+    if (closed || discoveryTimer !== null) return;
+    if (config.runtimeUrlExplicit && config.runtimeUrl) return;
+    discoveryTimer = setTimeoutFn(() => {
+      discoveryTimer = null;
+      if (closed) return;
+      const active = refreshDiscovery(true);
+      if (active && !probed) {
+        void probeRuntime().then((ok) => {
+          probed = ok;
+          if (ok) {
+            void ensureContextHook();
+            startEventLoop();
+          }
+        }).catch(() => {});
+      } else if (active && enabled) {
+        void ensureContextHook();
+        startEventLoop();
+      }
+      scheduleDiscoveryPoll();
+    }, 5000);
+    discoveryTimer?.unref?.();
   }
 
   function refreshToken(force = false) {
@@ -1222,6 +1357,13 @@ export function createController(dependencies = {}) {
     runtimeState.state = statusResult.data?.state ?? runtimeState.state;
     runtimeState.degraded = statusResult.data?.degraded === true || statusResult.degraded;
     runtimeState.capabilities = isObject(statusResult.data?.capabilities) ? statusResult.data.capabilities : {};
+    const mode = asText(runtimeState.mode).toLowerCase();
+    if (mode.length > 0 && !DISCOVERY_ACTIVE_MODES.has(mode)) {
+      // The device is in light MCP. Stop automatic traffic rather than
+      // pretending a host-level switch can turn capture back on.
+      disableRuntime('runtime_mode_mcp');
+      return false;
+    }
 
     // `/status` is the required readiness handshake; `/version` is the
     // authoritative capability list on sidecars that keep status minimal.
@@ -1431,6 +1573,16 @@ export function createController(dependencies = {}) {
       metadata: { source: 'mebular', trust: 'untrusted', requestOnly: true },
     });
     rememberInjected(threadId, result.data, blocks);
+    if (asText(result.data?.recallId)) {
+      recalls.set(asText(result.data.recallId), {
+        at: now(),
+        threadId,
+        fragments: Array.isArray(result.data.fragments)
+          ? result.data.fragments.map((fragment) => asText(fragment?.id)).filter(Boolean)
+          : [],
+      });
+      while (recalls.size > 64) recalls.delete(recalls.keys().next().value);
+    }
     stats.context.hits += 1;
     stats.context.injected += 1;
     if (result.data?.truncated || text.includes('[truncated]')) stats.context.truncated += 1;
@@ -1439,6 +1591,7 @@ export function createController(dependencies = {}) {
   async function handleContext(event) {
     if (closed) return;
     try {
+      if (!(await ensureRuntime(!enabled))) return;
       applyToolMask(event);
       const turn = extractLastUserTurn(event?.messages);
       if (turn) bufferChunk(event?.sessionID, 'user', turn.text, turn.id);
@@ -1468,6 +1621,7 @@ export function createController(dependencies = {}) {
 
   function bufferChunk(sessionID, role, text, messageId) {
     if (!ingestAllowed || writesDisabled || closed) return false;
+    if (!refreshDiscovery(false)) return false;
     const session = safeThreadId(sessionID);
     const content = asText(text);
     if (!session || content.length === 0) return false;
@@ -1608,6 +1762,7 @@ export function createController(dependencies = {}) {
     if (!ingestAllowed || writesDisabled || closed || !session || chunks.length === 0) {
       return { ok: false, code: 'ingest_disabled' };
     }
+    if (!refreshDiscovery(false)) return { ok: false, code: 'runtime_not_discovered' };
     const extractor = options.extractor === 'host' ? 'host' : 'heuristic';
     const candidates = Array.isArray(options.candidates) ? options.candidates : [];
     const body = {
@@ -1616,7 +1771,6 @@ export function createController(dependencies = {}) {
       agentId: config.agentId,
       threadId: session,
       source: 'host',
-      capture: config.capture,
       allowRemote: false,
       extractor,
       chunks: wireChunks(chunks),
@@ -1797,6 +1951,43 @@ export function createController(dependencies = {}) {
     return result.data?.checkpoint ?? true;
   }
 
+  /**
+   * Expand a fragment that appeared in this thread's recent /context response.
+   * The sidecar authorizes the domain and returns verbatim detail or an honest
+   * availability reason; this plugin never reads a local raw file.
+   */
+  async function expandDetail(recallId, fragmentId, options = {}) {
+    const id = asText(recallId);
+    const fragment = asText(fragmentId);
+    if (!id || !fragment) return { ok: false, code: 'invalid_request', detail: null };
+    const known = recalls.get(id);
+    if (!known || now() - known.at > 10 * 60_000) {
+      return { ok: false, code: 'recall_expired', detail: null };
+    }
+    if (!known.fragments.includes(fragment)) {
+      return { ok: false, code: 'fragment_not_found', detail: null };
+    }
+    if (!(await ensureRuntime())) return { ok: false, code: 'runtime_unavailable', detail: null };
+    const result = await requestJson(`/recall/${encodeURIComponent(id)}/expand`, {
+      agentId: config.agentId,
+      ...(known.threadId ? { threadId: known.threadId } : {}),
+      fragmentId: fragment,
+      ...(Array.isArray(options.detailKinds) && options.detailKinds.length > 0
+        ? { detailKinds: uniqueStrings(options.detailKinds, 8) }
+        : {}),
+      maxBytes: asInt(options.maxBytes, 4096, 256, 8192),
+    }, { timeoutMs: config.recallTimeoutMs });
+    if (!result.ok) return { ok: false, code: result.code ?? 'runtime_error', detail: null };
+    return {
+      ok: true,
+      recallId: id,
+      fragmentId: fragment,
+      detail: isObject(result.data?.detail) ? result.data.detail : null,
+      degraded: result.data?.degraded === true,
+      warnings: Array.isArray(result.data?.warnings) ? result.data.warnings : [],
+    };
+  }
+
   async function handleCompaction(event) {
     const data = isObject(event?.data) ? event.data : {};
     const sessionID = safeThreadId(data.sessionID ?? event?.sessionID);
@@ -1925,21 +2116,21 @@ export function createController(dependencies = {}) {
     if (started) return;
     started = true;
     await registerStatusTool();
-    if (enabled) await probeRuntime();
-    if (enabled) {
-      try {
-        const registration = await ctx.session.hook('context', (event) => handleContext(event));
-        if (registration?.dispose) registrations.push(registration);
-      } catch {
-        disableRuntime('context_hook_registration_failed');
-      }
+    const active = await ensureRuntime();
+    if (active) {
+      await ensureContextHook();
+      if ((ingestAllowed || checkpointAllowed) && capabilities.events) startEventLoop();
     }
-    if (enabled && (ingestAllowed || checkpointAllowed) && capabilities.events) startEventLoop();
+    if (!config.runtimeUrlExplicit) scheduleDiscoveryPoll();
   }
 
   async function dispose() {
     if (closed) return;
     closed = true;
+    if (discoveryTimer !== null) {
+      clearTimeoutFn(discoveryTimer);
+      discoveryTimer = null;
+    }
     try {
       eventAbort?.abort();
     } catch {
@@ -2045,6 +2236,7 @@ export function createController(dependencies = {}) {
     start,
     handleContext,
     handleEvent,
+    expandDetail,
     captureSessionContext,
     finalizeSession,
     flush: whenIdle,

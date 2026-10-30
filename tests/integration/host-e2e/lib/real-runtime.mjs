@@ -250,6 +250,97 @@ export async function startRealRuntime(options = {}) {
     };
   }
 
+  async function detailRequest(payload) {
+    const result = await requestCapability('/detail', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    });
+    if (result.status !== 200 || result.body?.ok !== true) {
+      throw new Error(`capability detail failed: ${result.status} ${JSON.stringify(result.body)}`);
+    }
+    return result.data;
+  }
+
+  /** Write a record plus one linked detail record (domain-shared, not local raw). */
+  async function seedMemoryWithDetail({
+    text,
+    detailText,
+    namespace = 'default',
+    agentId = 'host-e2e',
+    threadId = 'th_host_e2e_seed',
+    role = 'user',
+  }) {
+    const seed = await seedMemory({ text, namespace, agentId, threadId });
+    const recordId = seed.records.find((record) => typeof record?.id === 'string')?.id;
+    if (!recordId) throw new Error('seed record id missing');
+    const detail = await detailRequest({
+      actor: { type: 'agent', agentId },
+      op: 'write',
+      items: [{
+        clientItemId: `detail-${randomUUID()}`,
+        domain: namespace,
+        detailKind: 'raw_chunk',
+        threadId,
+        recordIds: [recordId],
+        role,
+        text: detailText ?? text,
+        mime: 'text/plain',
+        retentionClass: 'conversation',
+        expiresAt: 0,
+        provenance: { source: 'runtime', extractor: 'host', threadId, messageIds: [] },
+      }],
+    });
+    const detailId = detail.results?.find((item) => typeof item?.id === 'string')?.id ?? null;
+    return { ...seed, recordId, detailId };
+  }
+
+  async function listDetails({
+    domains = ['default', 'user'],
+    recordIds,
+    threadId,
+    includeText = false,
+    detailKinds = ['raw_chunk'],
+    limit = 20,
+    agentId = 'host-e2e',
+  } = {}) {
+    return detailRequest({
+      actor: { type: 'agent', agentId },
+      op: 'list',
+      domains,
+      ...(Array.isArray(recordIds) && recordIds.length > 0 ? { recordIds } : {}),
+      ...(threadId ? { threadId } : {}),
+      detailKinds,
+      limit,
+      offset: 0,
+      includeText,
+    });
+  }
+
+  async function getDetail(id, { agentId = 'host-e2e', maxBytes = 8192 } = {}) {
+    return detailRequest({
+      actor: { type: 'agent', agentId },
+      op: 'get',
+      id,
+      includeText: true,
+      maxBytes,
+    });
+  }
+
+  async function resolveDetails({ agentId = 'host-e2e', domains = ['default', 'user', 'agent:opencode', 'agent:hermes'], recordIds, threadId } = {}) {
+    const listed = await listDetails({ agentId, domains, recordIds, threadId });
+    const details = [];
+    for (const item of Array.isArray(listed.details) ? listed.details : []) {
+      if (typeof item?.id !== 'string') continue;
+      try {
+        const got = await getDetail(item.id, { agentId });
+        if (got.detail) details.push(got.detail);
+      } catch {
+        // Availability is asserted through the list when get is denied.
+      }
+    }
+    return details;
+  }
+
   async function recall(query, { agentId = 'host-e2e', namespaces = ['default'], threadId = 'th_host_e2e_recall' } = {}) {
     const result = await requestCapability('/query', {
       method: 'POST',
@@ -343,13 +434,13 @@ export async function startRealRuntime(options = {}) {
     return result.data?.checkpoint ?? null;
   }
 
-  async function sidecarRawEntries() {
-    const entries = await readSidecarJsonLines(home, join('memory-runtime', 'raw', 'chunks.jsonl'));
+  async function sidecarStagingEntries() {
+    const entries = await readSidecarJsonLines(home, join('memory-runtime', 'staging', 'chunks.jsonl'));
     return entries.map((entry) => entry.chunk).filter(Boolean);
   }
 
-  async function sidecarRawChunks() {
-    return (await sidecarRawEntries())
+  async function sidecarStagingChunks() {
+    return (await sidecarStagingEntries())
       .map((chunk) => chunk.text)
       .filter((textValue) => typeof textValue === 'string');
   }
@@ -367,6 +458,10 @@ export async function startRealRuntime(options = {}) {
     token,
     status,
     seedMemory,
+    seedMemoryWithDetail,
+    listDetails,
+    getDetail,
+    resolveDetails,
     recall,
     checkpoint,
     legacyRuntimeStatus,
@@ -374,8 +469,8 @@ export async function startRealRuntime(options = {}) {
     waitForSidecar: (options) => waitForSidecar(home, options),
     sidecarStatus,
     sidecarCheckpoint,
-    sidecarRawEntries,
-    sidecarRawChunks,
+    sidecarStagingEntries,
+    sidecarStagingChunks,
     sidecarTraces,
     close,
     async cleanup() {

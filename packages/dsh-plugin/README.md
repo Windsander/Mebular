@@ -78,9 +78,11 @@ dsh plugin --profile web remove @mebular/dsh-plugin
 
 </details>
 
-## Memory Runtime（可选）
+## Memory Runtime（自动跟随模式）
 
-0.3.0 起，host 插件可以在现有 MCP bridge 之外接入独立的 Memory Runtime sidecar（`/memory-runtime/v1`）。该能力**默认关闭**；关闭时不注册监听器、不读取发现文件、不启动定时器、不发任何请求，attach/managed/panel/MCP 行为不变。sidecar 与 MCP daemon 是两个进程：插件不会把 MCP 的 `daemonUrl` 当作 sidecar，也不猜端口。
+0.3.0 起，host 插件在现有 MCP bridge 之外接入独立的 Memory Runtime sidecar（`/memory-runtime/v1`）。**没有逐宿主 `memoryRuntime.enabled` / `capture` 开关**：插件读取 `<home>/memory-runtime.json` 的 `mode` / `state` / `capabilities`，沉浸式时自动 ingest / recall / checkpoint；轻量 MCP（没有 discovery）时不发任何 sidecar 请求，工具面保持 0.2 行为。sidecar 与 MCP daemon 是两个进程：插件不会把 MCP 的 `daemonUrl` 当作 sidecar，也不猜端口。
+
+`memoryRuntime` 只剩排障与测试用的显式覆盖；不是用户必须完成的配置：
 
 ```yaml
 - id: mebular
@@ -89,12 +91,11 @@ dsh plugin --profile web remove @mebular/dsh-plugin
     lifecycle: attach
     panel: true
     memoryRuntime:
-      enabled: true
-      # 可选：显式 sidecar base URL；缺省按 env / <home>/memory-runtime.json 发现
+      # 可选排障：显式 sidecar base URL；缺省按 env / <home>/memory-runtime.json 发现
       # url: 'http://127.0.0.1:7341/memory-runtime/v1'
-      # 可选：host token；缺省按 tokenFile / env / 发现文件 tokenFile 读取
+      # 可选排障：host token；缺省按 tokenFile / env / 发现文件 tokenFile 读取
       # tokenFile: '~/.mebular/memory-runtime/host-token'
-      # 可选：默认全部开启；maintenance 默认关闭
+      # 诊断特性开关，默认全部开启；maintenance 默认关闭
       recall: true
       ingest: true
       checkpoints: true
@@ -113,7 +114,8 @@ dsh plugin --profile web remove @mebular/dsh-plugin
       # token: '...'
 ```
 
-- 发现：`memoryRuntime.url` > `MEBULAR_MEMORY_RUNTIME_URL` > `<home>/memory-runtime.json`（`state=ready|degraded`、心跳 ≤15s、`apiVersion=1`）。没有可用发现时禁用沉浸式并保持失败开放；不盲连 7341/7331。
+- 旧 `enabled: false` / `capture` 字段会被忽略并 warning，不再控制行为；模式只在 Mebular 设置里切换。
+- 发现：`memoryRuntime.url` > `MEBULAR_MEMORY_RUNTIME_URL` > `<home>/memory-runtime.json`（`state=ready|degraded`、心跳 ≤15s、`apiVersion=1`、`mode` 不是 `mcp`）。没有可用发现时保持失败开放；不盲连 7341/7331。
 - token：`memoryRuntime.token` > `MEBULAR_MEMORY_RUNTIME_TOKEN` > `memoryRuntime.tokenFile` > 发现文件 `tokenFile` > `<home>/memory-runtime/host-token`。POSIX 下 token 文件必须 `0600`；token 不会进入 URL、日志、错误或 `getState()`。
 - `recall`：仅在新人类 turn 首步调用 `POST /memory-runtime/v1/context`（旧 sidecar 无该端点时显式回退 `/recall`），无命中/超时/失败原样放行；命中时注入一条 `role='user'` + `source.kind='mebular-memory'` 的 context injection（DSH 不会把它渲染成用户气泡；绝不使用 `source.kind='user'`），并按 surface + session query + turn 去重。注入块 ≤8 KiB，内容按不可信背景数据转义。
 - `ingest`：批量把 user/assistant/tool 事件送到 `POST /memory-runtime/v1/ingest`；跳过 fork/resume 的 inherited prefix 与插件自己的召回注入，按 `(sessionId, seq)` 去重，队列有界，不阻塞 loop。网络错误、超时、429/5xx 默认最多重试 2 次（指数退避，`ingestRetries` / `ingestRetryBaseMs` 可调；dispose 会取消退避）；重试复用同一个 `requestId` 与 `Idempotency-Key`，失败写入 warning/status，不重复入队。

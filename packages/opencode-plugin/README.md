@@ -1,6 +1,6 @@
 # @mebular/opencode-plugin
 
-Mebular Memory Runtime 的 OpenCode V2 服务端插件（OpenChamber 使用），**opt-in**。
+Mebular Memory Runtime 的 OpenCode V2 服务端插件（OpenChamber 使用），**自动跟随 sidecar discovery 模式**；没有逐宿主 `enabled` / `capture` 开关。
 
 它是 HTTP 薄客户端：只访问 sidecar 的 `/memory-runtime/v1`，不依赖
 `@mebular/core`，不读写 Mebular 原生 memory，不碰 OpenChamber 的
@@ -56,7 +56,7 @@ token 文件必须为 `0600`，组/其他可读会被拒绝（`token_file_insecu
 
 | 来源 | 键 |
 |---|---|
-| 环境变量 | `MEBULAR_MEMORY_RUNTIME_URL`、`MEBULAR_MEMORY_RUNTIME_TOKEN`、`MEBULAR_MEMORY_RUNTIME_AGENT_ID`、`MEBULAR_MEMORY_RUNTIME_NAMESPACE`、`MEBULAR_MEMORY_RUNTIME_DOMAIN`、`MEBULAR_MEMORY_RUNTIME_MODEL`、`MEBULAR_MEMORY_RUNTIME_CAPTURE` |
+| 环境变量 | `MEBULAR_MEMORY_RUNTIME_URL`、`MEBULAR_MEMORY_RUNTIME_TOKEN`、`MEBULAR_MEMORY_RUNTIME_AGENT_ID`、`MEBULAR_MEMORY_RUNTIME_NAMESPACE`、`MEBULAR_MEMORY_RUNTIME_DOMAIN`、`MEBULAR_MEMORY_RUNTIME_MODEL` |
 | 配置文件 | `$MEBULAR_OPENCODE_PLUGIN_CONFIG`，缺省 `$MEBULAR_HOME/opencode-plugin.json`（`MEBULAR_HOME` 缺省 `~/.mebular`；`MEBULAR_MEMORY_RUNTIME_HOME` 指向 `<home>/memory-runtime` 时也可推导 home） |
 
 配置文件是**插件专用**的 JSON，可写 `{ "memoryRuntime": { ... } }` 或平铺；
@@ -67,7 +67,6 @@ token 文件必须为 `0600`，组/其他可读会被拒绝（`token_file_insecu
   "runtimeUrl": "http://127.0.0.1:7341",
   "token": "optional-bearer-token",
   "agentId": "opencode",
-  "capture": "off",
   "modelSource": "heuristic"
 }
 ```
@@ -80,14 +79,13 @@ base；旧 `/runtime/v1` 路径会被拒绝（`runtime_url_legacy`）。非 loop
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `enabled` | `true` | 显式关闭插件 |
-| `runtimeUrl` | — | sidecar 根地址或 `/memory-runtime/v1` base；缺省走环境/配置/发现 |
+| `runtimeUrl` | — | 排障覆盖：sidecar 根地址或 `/memory-runtime/v1` base；缺省走环境/配置/发现 |
+| `enabled` / `capture` | — | 旧字段；忽略并 warning，不控制行为 |
 | `token` | — | Host bearer token；只用于 `Authorization`，不进入状态/日志 |
 | `tokenFile` | — | 显式 host token 文件；缺省用发现文件 `tokenFile` 或 `<home>/memory-runtime/host-token` |
 | `agentId` | `opencode` | Runtime `agentId` |
 | `namespace` / `namespaces` | — | 兼容 v1 的召回域别名；不得是 `__*` 保留域 |
 | `domains` | — | v2 记忆域（如 `user` / `agent:opencode`）；缺省由 sidecar 决定 |
-| `capture` | `off` | `off` / `local`；默认不保留 raw |
 | `recall` | `true` | 是否在 context hook 召回 |
 | `ingest` | `true` | 是否捕获事件并 ingest |
 | `checkpoints` | `true` | compaction 后是否登记 checkpoint |

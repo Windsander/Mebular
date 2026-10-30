@@ -13,8 +13,8 @@ Design rules
 * No tools are exposed (``get_tool_schemas() == []``).  Mebular's MCP server
   remains the explicit governance surface (writes, search, admin, skills).
 * Recall goes to ``POST /memory-runtime/v1/context`` (falling back to
-  ``/recall`` for older sidecars); turn/archive capture goes to
-  ``POST /memory-runtime/v1/ingest`` and pre-compression checkpoints go to
+  ``/recall`` for older sidecars); completed turns, archives and tool results
+  go to ``POST /memory-runtime/v1/ingest`` and pre-compression checkpoints go to
   ``PUT /memory-runtime/v1/checkpoints/:threadId`` on the independent Memory
   Runtime sidecar.  No Mebular TypeScript code is imported and no host LLM
   credential is read.
@@ -94,7 +94,10 @@ _INTERNAL_TYPES = frozenset(
 _RESERVED_NAMESPACE_PREFIX = "__"
 _AGENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 _THREAD_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-_CHOICE_CAPTURE = ("off", "local")
+# Sidecar modes that keep automatic ingest/recall/checkpoint enabled. A
+# missing mode is accepted for sidecars written before `mode` was added to the
+# discovery contract.
+_DISCOVERY_ACTIVE_MODES = frozenset({"immersive", "ready", "active"})
 # The provider always sends allowRemote=false, so api extraction is not a
 # usable choice here; host extraction belongs to the optional companion.
 _CHOICE_EXTRACTOR = ("heuristic", "local", "auto")
@@ -159,10 +162,7 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     "runtime_url": "",
     "agent_id": DEFAULT_AGENT_ID,
     "domain": "",
-    "capture": "local",
     "extractor": "heuristic",
-    "sync_enabled": True,
-    "archive_enabled": True,
     "recall_limit": 8,
     "recall_token_budget": 2000,
     "recall_timeout": 1.5,
@@ -473,20 +473,6 @@ def _atomic_write_json(path: Path, value: Dict[str, Any]) -> None:
         pass
 
 
-def _coerce_bool(value: Any, default: bool) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in {"1", "true", "yes", "on"}:
-            return True
-        if lowered in {"0", "false", "no", "off"}:
-            return False
-    return default
-
-
 def _coerce_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
     try:
         number = int(value)
@@ -517,6 +503,7 @@ def _valid_namespace(value: Any) -> str:
 
 def _load_plugin_config(hermes_home: Optional[Path]) -> Dict[str, Any]:
     config = dict(_DEFAULT_CONFIG)
+    raw: Dict[str, Any] = {}
     if hermes_home is not None:
         raw = _read_json(hermes_home / "mebular-memory.json")
         for key in _PERSISTED_KEYS:
@@ -527,15 +514,27 @@ def _load_plugin_config(hermes_home: Optional[Path]) -> Dict[str, Any]:
         if "domain" not in raw and "namespace" in raw:
             config["domain"] = raw.get("namespace")
 
+    for legacy_key in ("capture", "rawCapture", "localCapture", "enabled",
+                       "sync_enabled", "archive_enabled"):
+        if legacy_key in raw:
+            logger.warning(
+                "Mebular memory: legacy config %s is ignored; the sidecar discovery mode owns behaviour",
+                legacy_key,
+            )
+    for legacy_env in ("MEBULAR_MEMORY_CAPTURE", "MEBULAR_MEMORY_SYNC",
+                       "MEBULAR_MEMORY_ARCHIVE"):
+        if os.environ.get(legacy_env, "").strip():
+            logger.warning(
+                "Mebular memory: legacy env %s is ignored; the sidecar discovery mode owns behaviour",
+                legacy_env,
+            )
+
     env = os.environ
     overrides = {
         "runtime_url": env.get("MEBULAR_MEMORY_RUNTIME_URL"),
         "agent_id": env.get("MEBULAR_MEMORY_AGENT_ID"),
         "domain": env.get("MEBULAR_MEMORY_DOMAIN") or env.get("MEBULAR_RUNTIME_NAMESPACE"),
-        "capture": env.get("MEBULAR_MEMORY_CAPTURE"),
         "extractor": env.get("MEBULAR_MEMORY_EXTRACTOR"),
-        "sync_enabled": env.get("MEBULAR_MEMORY_SYNC"),
-        "archive_enabled": env.get("MEBULAR_MEMORY_ARCHIVE"),
         "recall_limit": env.get("MEBULAR_MEMORY_RECALL_LIMIT"),
         "recall_timeout": env.get("MEBULAR_MEMORY_RECALL_TIMEOUT"),
         "ingest_timeout": env.get("MEBULAR_MEMORY_INGEST_TIMEOUT"),
@@ -549,12 +548,8 @@ def _load_plugin_config(hermes_home: Optional[Path]) -> Dict[str, Any]:
     config["runtime_url"] = _normalise_url(config.get("runtime_url"))
     config["agent_id"] = _valid_agent_id(config.get("agent_id"))
     config["domain"] = _valid_namespace(config.get("domain"))
-    capture = str(config.get("capture") or "local").strip().lower()
-    config["capture"] = capture if capture in _CHOICE_CAPTURE else "local"
     extractor = str(config.get("extractor") or "heuristic").strip().lower()
     config["extractor"] = extractor if extractor in _CHOICE_EXTRACTOR else "heuristic"
-    config["sync_enabled"] = _coerce_bool(config.get("sync_enabled"), True)
-    config["archive_enabled"] = _coerce_bool(config.get("archive_enabled"), True)
     config["recall_limit"] = _coerce_int(config.get("recall_limit"), 8, minimum=1, maximum=50)
     config["recall_token_budget"] = _coerce_int(
         config.get("recall_token_budget"), 2000, minimum=200, maximum=12000
@@ -718,8 +713,16 @@ def _pid_alive(pid: Any) -> bool:
         return False
 
 
-def _discovery_error(code: str, source: str = "") -> Dict[str, str]:
-    return {"url": "", "source": source, "reason": code, "token_file": "", "token_source": ""}
+def _discovery_error(code: str, source: str = "") -> Dict[str, Any]:
+    return {
+        "url": "",
+        "source": source,
+        "reason": code,
+        "token_file": "",
+        "token_source": "",
+        "mode": "",
+        "capabilities": {},
+    }
 
 
 def _token_file_for_base(base: str) -> str:
@@ -744,7 +747,7 @@ def _token_file_for_base(base: str) -> str:
     return ""
 
 
-def _discover_runtime(hermes_home: Optional[Path] = None) -> Dict[str, str]:
+def _discover_runtime(hermes_home: Optional[Path] = None) -> Dict[str, Any]:
     """Read sidecar discovery only.  No network, no token, no host identity.
 
     Order:
@@ -767,6 +770,8 @@ def _discover_runtime(hermes_home: Optional[Path] = None) -> Dict[str, str]:
             "reason": "",
             "token_file": _token_file_for_base(url),
             "token_source": "discovery",
+            "mode": "",
+            "capabilities": {},
         }
 
     env_url = os.environ.get("MEBULAR_MEMORY_RUNTIME_URL", "").strip()
@@ -780,6 +785,8 @@ def _discover_runtime(hermes_home: Optional[Path] = None) -> Dict[str, str]:
             "reason": "",
             "token_file": _token_file_for_base(url),
             "token_source": "discovery",
+            "mode": "",
+            "capabilities": {},
         }
 
     last_reason = "runtime_not_discovered"
@@ -795,6 +802,13 @@ def _discover_runtime(hermes_home: Optional[Path] = None) -> Dict[str, str]:
         if state not in {"ready", "degraded"}:
             last_reason = "runtime_not_ready"
             continue
+        mode = str(record.get("mode") or "").strip().lower()
+        if mode and mode not in _DISCOVERY_ACTIVE_MODES:
+            last_reason = "runtime_mode_mcp"
+            continue
+        capabilities = record.get("capabilities")
+        if not isinstance(capabilities, dict):
+            capabilities = {}
         updated_at = record.get("updatedAt")
         if isinstance(updated_at, (int, float)) and not isinstance(updated_at, bool):
             if _now_ms() - int(updated_at) > DISCOVERY_STALE_MS:
@@ -825,6 +839,8 @@ def _discover_runtime(hermes_home: Optional[Path] = None) -> Dict[str, str]:
             "reason": "",
             "token_file": str(token_path),
             "token_source": "discovery",
+            "mode": mode,
+            "capabilities": dict(capabilities),
         }
 
     return _discovery_error(last_reason)
@@ -1101,12 +1117,12 @@ class MebularMemoryProvider(MemoryProvider):
         self._archive_flush_timeout = 1.5
         self._checkpoint_timeout = 2.5
         self._sync_max_attempts = 12
-        self._sync_enabled = True
-        self._archive_enabled = True
-        self._capture = "local"
         self._extractor = "heuristic"
         self._recall_limit = 8
         self._recall_token_budget = 2000
+        self._mode = ""
+        self._capabilities: Dict[str, Any] = {}
+        self._discovery_checked_at = 0.0
 
         self._lock = threading.RLock()
         self._send_lock = threading.Lock()
@@ -1172,9 +1188,6 @@ class MebularMemoryProvider(MemoryProvider):
         self._archive_flush_timeout = float(self._config["archive_flush_timeout"])
         self._checkpoint_timeout = float(self._config["checkpoint_timeout"])
         self._sync_max_attempts = int(self._config["sync_max_attempts"])
-        self._sync_enabled = bool(self._config["sync_enabled"])
-        self._archive_enabled = bool(self._config["archive_enabled"])
-        self._capture = str(self._config["capture"])
         self._extractor = str(self._config["extractor"])
         self._recall_limit = int(self._config["recall_limit"])
         self._recall_token_budget = int(self._config["recall_token_budget"])
@@ -1183,6 +1196,9 @@ class MebularMemoryProvider(MemoryProvider):
         discovery = _discover_runtime(self._hermes_home)
         self._base_url = discovery["url"]
         self._base_url_source = discovery["source"]
+        self._mode = str(discovery.get("mode") or "")
+        self._capabilities = dict(discovery.get("capabilities") or {})
+        self._discovery_checked_at = time.monotonic()
         token_file = discovery.get("token_file") or ""
         if token_file:
             self._token_file = Path(token_file)
@@ -1265,7 +1281,8 @@ class MebularMemoryProvider(MemoryProvider):
     # ------------------------------------------------------------------
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        if not self._ready() or not isinstance(query, str) or not query.strip():
+        if (not self._ready() or not self._capability_enabled("context")
+                or not isinstance(query, str) or not query.strip()):
             return ""
         try:
             sid = str(session_id or self._session_id)
@@ -1294,7 +1311,8 @@ class MebularMemoryProvider(MemoryProvider):
             return ""
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
-        if not self._ready() or not isinstance(query, str) or not query.strip():
+        if (not self._ready() or not self._capability_enabled("context")
+                or not isinstance(query, str) or not query.strip()):
             return
         try:
             sid = str(session_id or self._session_id)
@@ -1529,7 +1547,15 @@ class MebularMemoryProvider(MemoryProvider):
             content = block.get("content")
             if not isinstance(content, str) or not content.strip():
                 continue
-            parts.append(content.strip())
+            detail = block.get("detail")
+            detail_text = ""
+            if isinstance(detail, dict) and isinstance(detail.get("text"), str):
+                detail_text = re.sub(r"\s+", " ", detail["text"]).strip()[:2048]
+            elif isinstance(detail, str):
+                detail_text = re.sub(r"\s+", " ", detail).strip()[:2048]
+            parts.append(
+                f"{content.strip()}\n" + (f"detail: {detail_text}" if detail_text else "")
+            )
             if len(parts) >= 5:
                 break
         if not parts:
@@ -1625,6 +1651,45 @@ class MebularMemoryProvider(MemoryProvider):
             return ""
         return cls._wrap_injection("\n\n".join(lines), "")
 
+    def expand_detail(self, recall_id: str, fragment_id: str, *,
+                      detail_kinds: Optional[List[str]] = None,
+                      max_bytes: int = 4096) -> Dict[str, Any]:
+        """Expand one recalled fragment through the sidecar.
+
+        Detail is domain-authorized by the sidecar; the provider never reads a
+        local raw store or calls the internal capability endpoint directly.
+        """
+        recall = str(recall_id or "").strip()
+        fragment = str(fragment_id or "").strip()
+        if not recall or not fragment:
+            return {"ok": False, "code": "invalid_request", "detail": None}
+        if not self._ready() or not self._capability_enabled("context"):
+            return {"ok": False, "code": "runtime_unavailable", "detail": None}
+        payload: Dict[str, Any] = {
+            "agentId": self._agent_id,
+            "fragmentId": fragment,
+            "maxBytes": max(256, min(8192, int(max_bytes))),
+        }
+        if detail_kinds:
+            payload["detailKinds"] = [str(item) for item in detail_kinds[:8]]
+        try:
+            data = self._post_with_auth_retry(
+                f"/recall/{urlparse.quote(recall, safe=':-._')}/expand",
+                payload,
+                timeout=self._recall_timeout,
+            )
+        except _RuntimeError as error:
+            return {"ok": False, "code": error.code, "detail": None}
+        detail = data.get("detail")
+        return {
+            "ok": True,
+            "recallId": recall,
+            "fragmentId": fragment,
+            "detail": detail if isinstance(detail, dict) else None,
+            "degraded": bool(data.get("degraded")),
+            "warnings": data.get("warnings") if isinstance(data.get("warnings"), list) else [],
+        }
+
     # ------------------------------------------------------------------
     # Write path
     # ------------------------------------------------------------------
@@ -1638,7 +1703,8 @@ class MebularMemoryProvider(MemoryProvider):
         messages: Optional[List[Dict[str, Any]]] = None,
         turn_author: Optional[Dict[str, Any]] = None,
     ) -> None:
-        if not self._ready() or not self._sync_enabled or not self._writes_enabled:
+        if (not self._ready() or not self._writes_enabled
+                or not self._capability_enabled("ingest")):
             return
         try:
             self._sync_turn_impl(
@@ -1700,7 +1766,6 @@ class MebularMemoryProvider(MemoryProvider):
             sid,
             chunks,
             extractor=self._extractor,
-            capture=self._capture,
         )
         with self._lock:
             self._last_sync_payload = payload
@@ -1718,14 +1783,16 @@ class MebularMemoryProvider(MemoryProvider):
             self._archive(messages, label="compress")
             if self._spool is not None and self._client is not None:
                 self.flush(timeout=self._archive_flush_timeout)
-            if self._ready() and self._writes_enabled:
+            if (self._ready() and self._writes_enabled
+                    and self._capability_enabled("checkpoint")):
                 self._submit_checkpoint(messages, kind="pre_compress")
         except Exception as error:
             logger.debug("Mebular pre-compress archive skipped: %s", type(error).__name__)
         return ""
 
     def on_session_end(self, messages: List[Dict[str, Any]], **kwargs: Any) -> None:
-        if not self._ready() or not self._archive_enabled or not self._writes_enabled:
+        if (not self._ready() or not self._writes_enabled
+                or not self._capability_enabled("ingest")):
             return
         try:
             self._archive(messages, label="session-end")
@@ -1937,7 +2004,8 @@ class MebularMemoryProvider(MemoryProvider):
     # ------------------------------------------------------------------
 
     def _archive(self, messages: Any, *, label: str) -> None:
-        if not self._ready() or not self._archive_enabled or not self._writes_enabled:
+        if (not self._ready() or not self._writes_enabled
+                or not self._capability_enabled("ingest")):
             return
         if not isinstance(messages, (list, tuple)) or not messages:
             return
@@ -1959,7 +2027,6 @@ class MebularMemoryProvider(MemoryProvider):
                 sid,
                 chunks,
                 extractor=self._extractor,
-                capture=self._capture,
             )
         )
 
@@ -1970,7 +2037,6 @@ class MebularMemoryProvider(MemoryProvider):
         chunks: List[Dict[str, Any]],
         *,
         extractor: str,
-        capture: str,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "requestId": request_id,
@@ -1978,7 +2044,6 @@ class MebularMemoryProvider(MemoryProvider):
             "actor": {"type": "agent", "agentId": self._agent_id},
             "threadId": self._thread_id(sid),
             "source": "host",
-            "capture": capture if capture in _CHOICE_CAPTURE else "local",
             "allowRemote": False,
             "extractor": extractor if extractor in _CHOICE_EXTRACTOR else "heuristic",
             "chunks": chunks,
@@ -2174,8 +2239,50 @@ class MebularMemoryProvider(MemoryProvider):
         with self._lock:
             return len(self._pending_checkpoints)
 
+    def _capability_enabled(self, name: str) -> bool:
+        value = self._capabilities.get(name)
+        return value is not False
+
+    def _ensure_runtime(self, *, force: bool = False) -> None:
+        """Follow sidecar discovery without a host-level enable switch.
+
+        A missing discovery file means light MCP: the client is dropped and no
+        HTTP is made. Re-checking is throttled so a per-turn hook never becomes
+        a busy loop.
+        """
+        if not self._initialized or self._shutdown:
+            return
+        current = time.monotonic()
+        if not force and current - self._discovery_checked_at < 5.0:
+            return
+        self._discovery_checked_at = current
+        discovery = _discover_runtime(self._hermes_home)
+        url = str(discovery.get("url") or "")
+        if not url:
+            self._base_url = ""
+            self._base_url_source = str(discovery.get("source") or "")
+            self._mode = ""
+            self._capabilities = {}
+            self._client = None
+            return
+        changed = url != self._base_url
+        self._base_url = url
+        self._base_url_source = str(discovery.get("source") or "")
+        self._mode = str(discovery.get("mode") or "")
+        self._capabilities = dict(discovery.get("capabilities") or {})
+        token_file = str(discovery.get("token_file") or "")
+        if token_file:
+            self._token_file = Path(token_file)
+        if changed or self._client is None:
+            self._token, self._token_source = _token_from_sources(self._token_file)
+            self._token_loaded_at = time.monotonic()
+            self._client = _RuntimeClient(self._base_url, self._token)
+
     def _ready(self) -> bool:
-        return bool(self._initialized and self._client is not None and not self._shutdown)
+        if not self._initialized or self._shutdown:
+            return False
+        self._ensure_runtime()
+        return self._client is not None
 
     # ------------------------------------------------------------------
     # Setup / diagnostics
@@ -2201,28 +2308,10 @@ class MebularMemoryProvider(MemoryProvider):
                 "default": "",
             },
             {
-                "key": "capture",
-                "description": "Raw capture policy for ingest",
-                "default": "local",
-                "choices": ["local", "off"],
-            },
-            {
                 "key": "extractor",
                 "description": "Runtime extraction source (heuristic is local and always available)",
                 "default": "heuristic",
                 "choices": ["heuristic", "local", "auto"],
-            },
-            {
-                "key": "sync_enabled",
-                "description": "Send completed turns to the sidecar",
-                "default": "true",
-                "choices": ["true", "false"],
-            },
-            {
-                "key": "archive_enabled",
-                "description": "Archive transcripts before compression and at session end",
-                "default": "true",
-                "choices": ["true", "false"],
             },
             {
                 "key": "recall_limit",
@@ -2269,10 +2358,9 @@ class MebularMemoryProvider(MemoryProvider):
             "discovery": source_label,
             "agent_id": self._agent_id,
             "domain": self._domain or "default",
-            "capture": self._capture,
+            "mode": self._mode or "immersive",
+            "capabilities": dict(self._capabilities),
             "extractor": self._extractor,
-            "sync": self._sync_enabled,
-            "archive": self._archive_enabled,
             "tokenConfigured": token_configured,
             "tokenSource": token_source,
             "features": {

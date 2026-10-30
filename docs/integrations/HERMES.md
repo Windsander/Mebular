@@ -7,7 +7,7 @@ Hermes can use Mebular in two layers, and they can run together:
 | Layer | What Hermes gets | Default |
 |---|---|---|
 | **MCP** | The official Mebular MCP server: explicit `memory_*` and `task_*` tools | Available when configured |
-| **Memory Runtime** (`MemoryProvider`) | Automatic recall before a turn, turn/compaction ingest, state-only checkpoints, session-boundary archive | Off; explicit opt-in |
+| **Memory Runtime** (`MemoryProvider`) | Automatic recall before a turn, turn/compaction ingest, state-only checkpoints, session-boundary archive | Follows the sidecar discovery mode; no host-level enable/capture |
 
 The provider lives in [`integrations/hermes/mebular-memory`](../../integrations/hermes/mebular-memory/).
 The optional companion lives in
@@ -165,10 +165,7 @@ over the environment, as listed above. Common settings:
 | `runtime_url` | discovered | Memory Runtime sidecar base URL, for example `http://127.0.0.1:7341` or `http://127.0.0.1:7341/memory-runtime/v1` |
 | `agent_id` | `hermes` | Stable logical agent ID; it becomes `agent:hermes` |
 | `domain` | empty | Optional write domain; empty lets the sidecar classify it. There is no separate `namespace` in requests |
-| `capture` | `local` | Ask the sidecar to keep RawChunks on this device; `off` disables local raw |
 | `extractor` | `heuristic` | `heuristic`, `local` or `auto`; this provider does not use remote `api` extraction |
-| `sync_enabled` | `true` | Send completed turns |
-| `archive_enabled` | `true` | Send pre-compression/session-end snapshots |
 | `recall_limit` | `8` | Maximum recalled fragments (the provider caps the request at 3 fragments) |
 | `recall_token_budget` | `2000` | Context token budget for recall |
 | `recall_timeout` | `1.5` | Seconds before a recall is skipped |
@@ -179,9 +176,8 @@ over the environment, as listed above. Common settings:
 
 Environment variables: `MEBULAR_MEMORY_RUNTIME_URL`, `MEBULAR_MEMORY_RUNTIME_TOKEN`,
 `MEBULAR_MEMORY_RUNTIME_HOME`, `MEBULAR_HOME`, `MEBULAR_MEMORY_AGENT_ID`,
-`MEBULAR_MEMORY_DOMAIN`, `MEBULAR_MEMORY_CAPTURE`, `MEBULAR_MEMORY_EXTRACTOR`,
-`MEBULAR_MEMORY_SYNC`, `MEBULAR_MEMORY_ARCHIVE`, `MEBULAR_MEMORY_RECALL_LIMIT`,
-`MEBULAR_MEMORY_RECALL_TIMEOUT`, `MEBULAR_MEMORY_INGEST_TIMEOUT`,
+`MEBULAR_MEMORY_DOMAIN`, `MEBULAR_MEMORY_EXTRACTOR`,
+`MEBULAR_MEMORY_RECALL_LIMIT`, `MEBULAR_MEMORY_RECALL_TIMEOUT`, `MEBULAR_MEMORY_INGEST_TIMEOUT`,
 `MEBULAR_MEMORY_CHECKPOINT_TIMEOUT`, `MEBULAR_MEMORY_QUEUE_LIMIT`.
 
 The full key and environment-variable list is in
@@ -194,8 +190,9 @@ The full key and environment-variable list is in
   system messages and binary/multimodal payloads are skipped.
 - `on_pre_compress` / `on_session_end` send a bounded conversation snapshot (at most 100
   chunks / about 1.7 MB; the most recent evidence is kept).
-- Ingest requests carry `agentId`, `threadId`, `source=host`, `capture`, `extractor`,
-  `chunks` and an optional `domain`. They do not send `namespace` or `sync`.
+- Ingest requests carry `agentId`, `threadId`, `source=host`, `extractor`, `chunks` and
+  an optional `domain`. They do not send `namespace`, `capture` or `sync`; the sidecar
+  mode owns collection and detail settlement.
 - The provider's `requestId` is stable for the same content; the sidecar de-duplicates
   retries and can return `duplicate=true`.
 

@@ -123,21 +123,24 @@ daemon child。service/外部 daemon 不会被插件停止。
 
 非法值会回退安全默认并写 warning，不会让 DSH 激活失败。
 
-## Memory Runtime（可选）
+## Memory Runtime（自动跟随模式）
 
 0.3.0 可以在 MCP 之外接入独立的 Memory Runtime sidecar。两层、两个进程：
 
 | 层 | 默认 | 做什么 |
 | --- | --- | --- |
 | **MCP** | daemon 健康时开启 | 官方 client 挂载 `mcp__mebular__*`；29 个工具不变 |
-| **Memory Runtime sidecar** | 关闭 | `/memory-runtime/v1` 上下文、ingest、压缩检查点、可选宿主任维护 |
+| **Memory Runtime sidecar** | 跟随 Mebular 模式 | `/memory-runtime/v1` 上下文、ingest、压缩检查点、可选宿主任维护 |
 
 sidecar **不是** MCP daemon runtime。DSH 绝不把 `daemonUrl`、MCP 的 `runtime.json` 或 7331
-端口当作 sidecar，也不盲连 7341。`memoryRuntime` 缺失或 `enabled: false` 时，适配器不注册
-监听器、不启动定时器、不读发现文件、不发任何请求；attach、managed 生命周期、面板和 MCP
-行为完全不变。
+端口当作 sidecar，也不盲连 7341。适配器读取 `<home>/memory-runtime.json` 的 `mode` /
+`state` / `capabilities`；轻量 MCP 没有 discovery 时不发 sidecar 请求，工具面保持 0.2。
+**没有逐宿主 `memoryRuntime.enabled` / `capture` 开关**；旧字段忽略并 warning。
 
-### 启用 sidecar 与适配器
+### 切换设备模式
+
+唯一的产品开关是 Mebular 的记忆模式（`轻量 MCP` / `沉浸式`）。host 适配器自动跟随由此产生的
+sidecar discovery，不需要逐宿主开启。
 
 1. 打开 MCP 设置 `memoryRuntime.enabled`（控制台的记忆运行时开关，或
    `<home>/config.json`）：
@@ -161,8 +164,7 @@ sidecar **不是** MCP daemon runtime。DSH 绝不把 `daemonUrl`、MCP 的 `run
    mebular memory-runtime status --json
    ```
 
-3. 再打开 DSH 插件配置。这个 `memoryRuntime` 组是 **DSH 插件配置**，不是 MCP 设置；
-   两个开关彼此独立，沉浸式路径需要两者都开启：
+3. 不需要再打开 DSH 插件开关。下面的 `memoryRuntime` 组只用于显式排障/测试；正常使用可省略：
 
    ```yaml
    - id: mebular
@@ -171,8 +173,7 @@ sidecar **不是** MCP daemon runtime。DSH 绝不把 `daemonUrl`、MCP 的 `run
        lifecycle: attach
        panel: true
        memoryRuntime:
-         enabled: true
-         # 可选；以下默认开启，maintenance 默认关闭
+         # 可选排障覆盖；以下默认开启，maintenance 默认关闭
          recall: true
          ingest: true
          checkpoints: true
@@ -190,8 +191,8 @@ sidecar **不是** MCP daemon runtime。DSH 绝不把 `daemonUrl`、MCP 的 `run
 
 - **发现：** `memoryRuntime.url` > `MEBULAR_MEMORY_RUNTIME_URL` >
   `<home>/memory-runtime.json`。`<home>` 依次取 `MEBULAR_HOME`、`MEBULAR_CLOUD_ROOT`、
-  当前 profile。发现文件必须是 `ready`/`degraded`、心跳不超过 15 秒、`apiVersion=1`；
-  否则沉浸式路径带原因禁用。
+  当前 profile。发现文件必须是 `ready`/`degraded`、`mode` 不是 `mcp`、心跳不超过 15 秒、
+  `apiVersion=1`；否则沉浸式路径带原因禁用且不发请求。
 - **认证：** `memoryRuntime.token` > `tokenEnv` 指定的环境变量（默认
   `MEBULAR_MEMORY_RUNTIME_TOKEN`）> `memoryRuntime.tokenFile` > 发现 `tokenFile` >
   `<home>/memory-runtime/host-token`。这是 sidecar 的 **host token**，不是 MCP capability
@@ -242,7 +243,7 @@ sidecar **不是** MCP daemon runtime。DSH 绝不把 `daemonUrl`、MCP 的 `run
 - **没有强制迁移。** 0.2 的记录保留原 ID、namespace、tag 和事件。旧的 `default`
   namespace 原样保留，按第三类/Other 兜底解释（`domain=default`），不会改写成 `user`。
 - MCP 只保留生命周期键（`memoryRuntime.enabled`、`memoryRuntime.command`、
-  `memoryRuntime.startTimeoutMs`）。capture、模型、trace、retention 属于
+  `memoryRuntime.startTimeoutMs`）。详情/staging、模型、trace、retention 属于
   `<home>/memory-runtime/config.json`，不再放在 MCP 的 `runtime.*` 键下。
 - 检查点和 SelfRecord 没有本地/云端二选一。没有 `sync=cloud`、`checkpoint.sync` 或
   `self.sync`；所有持久对象都经 MCP 写入，并由现有云端同步传播。
@@ -251,14 +252,15 @@ sidecar **不是** MCP daemon runtime。DSH 绝不把 `daemonUrl`、MCP 的 `run
   面板继续可用。
 - 原型写到 `<home>/runtime/` 的本地数据不会被读取或迁移。不要删除
   `<cloudRoot>/runtime/`；那是 MCP daemon 的安装根，不是 sidecar 数据。
-- 要关闭 sidecar，设置 MCP `memoryRuntime.enabled=false`（或
-  `mebular memory-runtime stop`），和/或把 DSH 组设为 `enabled:false`。sidecar 停止，
+- 要关闭 sidecar，把 Mebular 记忆模式切回轻量 MCP（或
+  `mebular memory-runtime stop`）。适配器看到 discovery 消失即停止
+  ingest/recall/checkpoint，不需要改宿主配置。sidecar 停止，
   29 个 MCP 工具和已沉降记忆保留。`<home>/memory-runtime/` 可保留或删除；删除它不会
   删除已沉降记忆。
 
 ## 轻量 MCP 保持不变
 
-没有 sidecar、也没有 DSH `memoryRuntime` 组时，DSH 就是完整的 0.2 体验：同样的 29 个
+没有 sidecar/discovery 时，DSH 就是完整的 0.2 体验：同样的 29 个
 `mcp__mebular__*` 工具，同样的 attach/managed 生命周期、面板和 Console。没有
 `mebular-memory-runtime` 进程，不新建 `<home>/memory-runtime/` 目录或文件，不生成
 `memory-runtime.json`、host token，不监听 7341 端口。如果目录是之前沉浸式留下的，轻量

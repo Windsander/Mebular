@@ -50,7 +50,7 @@ hermes memory status
 - `sync_turn` 发最近一轮 user / assistant / tool 文本到 `/memory-runtime/v1/ingest`；`on_pre_compress` / `on_session_end` 发对话快照（跳过 system；最多 100 chunks / 约 1.7MB 文本）。
 - `on_pre_compress` 另发 state-only checkpoint 到 `/memory-runtime/v1/checkpoints/:threadId`；Hermes API 没有 summary，所以 `summary:null`，不编造。
 - 图片/音频/文件不发送，只发占位标记；tool calls 展开为文本，tool 结果作为 `role=tool` chunk。
-- 默认 `capture=local`：RawChunk 留在 sidecar 本机；如果 sidecar URL 不是回环，文本会离开本机，需自行评估。
+- 没有 `capture` 开关：详情由 sidecar 按域写入图/事件/同步；本机只保留 staging/cache/outbox，不是权威副本。
 - 不导入 `MEMORY.md` / `USER.md`，不实现 `on_memory_write`，不双写。
 - 只读 sidecar host token（`MEBULAR_MEMORY_RUNTIME_TOKEN` 或发现文件 `tokenFile`）；不读宿主 LLM token / cookie / endpoint，也不读 MCP capability token。
 

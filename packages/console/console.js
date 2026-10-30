@@ -9,7 +9,7 @@
 import { StarStage, namespaceColor, shortId, buildHoverRoutes, buildNetworkScene, normalizeFleetEvent, resolveTaskNamespace, summarizeHoverRoutes } from './starfield.js';
 import { initialViewFromSearch } from './deep-link.js';
 import { createWizardState, wizardReduce, WIZARD_STEPS } from './wizard.js';
-import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, IA_RUNTIME_API_FIELDS, IA_RUNTIME_FIELD_COPY, filterRuntimeTimeline, runtimeTimelineKind, runtimeModeOf, runtimeModelSourceOf, runtimePackStateKey, runtimePackProgress, formatByteSize, RUNTIME_WARNING_KEYS, RUNTIME_MODEL_REASON_KEYS } from './settings-ia.js';
+import { IA_TABS, IA_ADVANCED_SECTIONS, IA_MCP_SECTIONS, IA_FIELD_COPY, IA_SETTINGS_EXTRA, IA_SETTINGS_FOLDS, IA_SECURITY_SECTIONS, IA_MCP_DANGER_LINE_KEYS, INVITE_TTL_OPTIONS, INVITE_TTL_DEFAULT_MS, SECURITY_LEVEL_LABEL, SECURITY_LEVEL_TITLE_KEY, SECURITY_LEVEL_NOTE_KEY, SECURITY_BOUNDARY_KEY, SCHEMA_CONFIGURED_VALUE, localizeSchemaReason, refreshCsrfToken, withCsrfRetry, filterRuntimeTimeline, runtimeTimelineKind, memoryRuntimeEnabledOf, runtimeSidecarStateKey, runtimePackStateKey, runtimePackProgress, formatByteSize } from './settings-ia.js';
 import { assistantsPanelHtml, serviceRowHtml, wizardRowHtml, repairRowHtml, statusPillHtml, attentionItems, assistantAddFormHtml } from './assistants.js';
 import { reconcileAssistantUi } from './assistant-status.js';
 import { createConsoleHost, markEmbeddedDocument } from './host.js';
@@ -60,6 +60,8 @@ const state = {
     status: null,
     models: null,
     traces: null,
+    traceMeta: null,
+    traceDetails: {},
     memories: null,
     errors: {},
     loading: false,
@@ -68,10 +70,7 @@ const state = {
     includeInternal: false,
     traceOpen: {},
     objectDetail: null,
-    formError: '',
-    modelFocus: null,
   },
-  runtimeDraft: {},
   settings: null,
   // E2-A2：忆云列表/卡片与加入弹层（clouds 端点旧守护可能没有 → 卡片显示升级提示）
   clouds: null,
@@ -1510,105 +1509,91 @@ function renderMcpSections() {
   }).join('');
 }
 
-// ---------- 0.3 · 设置 · 记忆运行时（两条主轴 + 高级折叠） ----------
+// ---------- 0.3 · 设置 · 记忆运行时（单开关 + sidecar 状态 + 模型） ----------
 
-function runtimeFieldCopy(path) {
-  const copy = IA_RUNTIME_FIELD_COPY[path] ?? {};
-  return {
-    label: copy.labelKey ? t(copy.labelKey) : path,
-    help: copy.helpKey ? t(copy.helpKey) : '',
-    warn: copy.warnKey ? t(copy.warnKey) : '',
-  };
+function runtimeStatusStateLabel(status) {
+  if (!status) return t('runtime.loadingShort');
+  if (status.enabled === false) return t('runtime.sidecar.state.disabled');
+  return t(runtimeSidecarStateKey(status.state));
 }
 
-function runtimeDraftValue(path, fallback) {
-  return Object.prototype.hasOwnProperty.call(state.runtimeDraft, path)
-    ? state.runtimeDraft[path]
-    : runtimeConfigValue(path, fallback);
+function runtimeStatusErrorText(status) {
+  const error = status?.error;
+  if (!error) return '';
+  return error.message || error.code || String(error);
 }
 
-/** keyRef 是引用而非密钥；非 env/keychain/file 的旧值不在界面回显。 */
-function runtimeKeyRefDisplay(value) {
-  const text = String(value ?? '').trim();
-  if (!text) return '';
-  return /^(env|keychain|file):/.test(text) ? text : t('settings.runtime.api.keyRefMasked');
+function runtimeSidecarFactsHtml(status) {
+  if (!status) return `<p class="muted">${escapeHtml(t('runtime.loading'))}</p>`;
+  const error = runtimeStatusErrorText(status);
+  const stateLabel = runtimeStatusStateLabel(status);
+  return `<dl class="runtime-kv" data-rt-sidecar-status>
+    <dt>${escapeHtml(t('runtime.sidecar.enabled'))}</dt><dd>${escapeHtml(status.enabled ? t('runtime.sidecar.on') : t('runtime.sidecar.off'))}</dd>
+    <dt>${escapeHtml(t('runtime.sidecar.state'))}</dt><dd><span class="crt-tag ${status.state === 'ready' ? 'crt-tag-ok' : status.degraded || status.state === 'failed' ? 'crt-tag-warn' : ''}">${escapeHtml(stateLabel)}</span></dd>
+    <dt>${escapeHtml(t('runtime.sidecar.pid'))}</dt><dd>${escapeHtml(status.pid ?? '—')}</dd>
+    <dt>${escapeHtml(t('runtime.sidecar.version'))}</dt><dd>${escapeHtml(status.runtimeVersion ?? '—')}</dd>
+    <dt>${escapeHtml(t('runtime.sidecar.degraded'))}</dt><dd>${escapeHtml(status.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo'))}</dd>
+    <dt>${escapeHtml(t('runtime.sidecar.error'))}</dt><dd>${error ? escapeHtml(error) : '—'}</dd>
+  </dl>`;
 }
 
-function runtimeControlRow(path, control) {
-  const copy = runtimeFieldCopy(path);
-  const id = `rt-${path.replace(/\./g, '-')}`;
-  return `<div class="cfg-row">
-    <label class="cfg-label" for="${id}">${escapeHtml(copy.label)}</label>
-    <div class="cfg-control">
-      ${control.replace('__ID__', id)}
-      ${copy.help ? `<p class="cfg-help muted">${escapeHtml(copy.help)}</p>` : ''}
-      ${copy.warn ? `<p class="cfg-help cfg-warn">⚠ ${escapeHtml(copy.warn)}</p>` : ''}
-    </div>
-  </div>`;
-}
-
-function runtimeSelectControl(path, value, options, { autosave = true, disabled = false } = {}) {
-  return `<select class="crt-input" id="__ID__" data-rt-path="${escapeHtml(path)}"${autosave ? ' data-rt-autosave="1"' : ''}${disabled ? ' disabled' : ''}>`
-    + options.map(([optionValue, label]) => `<option value="${escapeHtml(optionValue)}" ${optionValue === value ? 'selected' : ''}>${escapeHtml(label)}</option>`).join('')
-    + '</select>';
-}
-
-function runtimeNumberControl(path, value, { min = 0, step = 1, autosave = true, disabled = false } = {}) {
-  return `<input class="crt-input cfg-input" id="__ID__" type="number" min="${min}" step="${step}" value="${escapeHtml(String(value ?? ''))}" data-rt-path="${escapeHtml(path)}"${autosave ? ' data-rt-autosave="1"' : ''}${disabled ? ' disabled' : ''}>`;
-}
-
-function runtimeTextControl(path, value, { placeholder = '', autosave = false, disabled = false } = {}) {
-  return `<input class="crt-input cfg-input" id="__ID__" type="text" value="${escapeHtml(String(value ?? ''))}" placeholder="${escapeHtml(placeholder)}" data-rt-path="${escapeHtml(path)}"${autosave ? ' data-rt-autosave="1"' : ''}${disabled ? ' disabled' : ''}>`;
+function runtimeSidecarDetailsHtml(status) {
+  if (!status) return '';
+  const rows = [
+    [t('runtime.sidecar.available'), status.available ? t('runtime.sidecar.on') : t('runtime.sidecar.off')],
+    [t('runtime.sidecar.managed'), status.managed ? t('runtime.sidecar.on') : t('runtime.sidecar.off')],
+    [t('runtime.sidecar.attached'), status.attached ? t('runtime.sidecar.on') : t('runtime.sidecar.off')],
+    [t('runtime.sidecar.commandSource'), status.commandSource ?? '—'],
+    [t('runtime.sidecar.restarts'), String(status.restarts ?? 0)],
+    [t('runtime.sidecar.reason'), status.reason ?? '—'],
+  ];
+  return `<dl class="runtime-kv">${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd>`).join('')}</dl>`;
 }
 
 function runtimeModeSettingsHtml() {
-  const mode = runtimeModeOf(state.runtime.status, currentConfigFile());
+  const status = state.runtime.status;
+  const enabled = memoryRuntimeEnabledOf(status, currentConfigFile());
   const disabled = !state.features.writes || MOCK;
-  const button = (value, label, desc) => `<button class="runtime-model-card crt-surface" type="button" data-rt-mode="${value}" aria-pressed="${mode === value}" ${disabled ? 'disabled' : ''}>
-    <span class="runtime-model-name">${escapeHtml(label)} ${mode === value ? `<span class="crt-tag">${escapeHtml(t('settings.runtime.access.current', { mode: label }))}</span>` : ''}</span>
-    <span class="runtime-model-desc">${escapeHtml(desc)}</span>
-  </button>`;
   return settingsSectionHtml({
     id: 'runtime-access',
     title: t('settings.runtime.access.title'),
     desc: t('settings.runtime.access.desc'),
-    chip: `<span class="crt-tag">${escapeHtml(t('settings.runtime.access.current', { mode: runtimeModeLabel(mode) }))}</span>`,
-    body: `<div class="runtime-model-grid">${button('mcp', t('settings.runtime.access.mcp'), t('settings.runtime.access.mcpDesc'))}${button('immersive', t('settings.runtime.access.immersive'), t('settings.runtime.access.immersiveDesc'))}</div>
-      <p class="settings-section-foot muted">${escapeHtml(t('settings.runtime.access.switchHint'))}</p>`,
+    chip: `<span class="crt-tag ${enabled ? 'crt-tag-ok' : ''}" data-rt-enabled-chip>${escapeHtml(enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'))}</span>`,
+    body: `<label class="runtime-switch-row crt-surface">
+      <span class="runtime-switch-copy">
+        <span class="runtime-model-name">${escapeHtml(t('settings.runtime.access.enabled'))}</span>
+        <span class="runtime-model-desc">${escapeHtml(t('settings.runtime.access.enabledDesc'))}</span>
+      </span>
+      <input type="checkbox" data-rt-enabled ${enabled ? 'checked' : ''} ${disabled ? 'disabled' : ''}>
+    </label>
+    <div class="runtime-sidecar-block">
+      <h4>${escapeHtml(t('runtime.sidecar.title'))}</h4>
+      ${runtimeSidecarFactsHtml(status)}
+    </div>
+    <p class="settings-section-foot muted">${escapeHtml(enabled ? t('settings.runtime.access.onHint') : t('settings.runtime.access.offHint'))}</p>`,
   });
 }
 
 function runtimeModelSettingsHtml() {
-  const status = state.runtime.status;
   const models = state.runtime.models;
-  const configured = runtimeModelSourceOf(status, currentConfigFile());
-  const active = status?.model?.active ?? configured;
   const selectedPack = (models?.packs ?? []).find((pack) => pack.selected) ?? null;
-  const credential = status?.model?.credential;
-  const disabled = !state.features.writes || MOCK;
-  const option = (source, label, desc, meta) => `<button class="runtime-model-card crt-surface" type="button" data-rt-model-source="${source}" aria-pressed="${configured === source}" ${disabled ? 'disabled' : ''}>
-    <span class="runtime-model-name">${escapeHtml(label)} ${configured === source ? `<span class="crt-tag">${escapeHtml(t('settings.runtime.model.current', { source: label }))}</span>` : ''}</span>
-    <span class="runtime-model-desc">${escapeHtml(desc)}</span>
-    ${meta ? `<span class="runtime-model-state">${escapeHtml(meta)}</span>` : ''}
-  </button>`;
-  const hostActive = configured === 'host';
   return settingsSectionHtml({
     id: 'runtime-model',
     title: t('settings.runtime.model.title'),
     desc: t('settings.runtime.model.desc'),
-    chip: status?.model?.degraded ? `<span class="crt-tag crt-tag-warn">${escapeHtml(t('runtime.model.degraded'))}</span>` : '',
-    body: `<div class="runtime-model-grid">
-      ${option('heuristic', t('settings.runtime.model.heuristic'), t('settings.runtime.model.heuristicDesc'), t('runtime.source.heuristic'))}
-      ${option('local', t('settings.runtime.model.local'), t('settings.runtime.model.localDesc'), selectedPack ? t('settings.runtime.model.selectedPack', { pack: runtimePackLabel(selectedPack) }) : t('settings.runtime.model.noPack'))}
-      ${option('api', t('settings.runtime.model.api'), t('settings.runtime.model.apiDesc'), credential?.configured ? t('settings.runtime.api.credentialConfigured', { source: credential.source ?? '—' }) : t('settings.runtime.api.credentialMissing'))}
-    </div>
-    <div class="runtime-host-model" data-rt-host-model>
-      <div class="runtime-host-title"><span>${escapeHtml(t('settings.runtime.model.host'))}</span><span class="crt-tag">${escapeHtml(t('settings.runtime.model.hostManaged'))}</span>${hostActive ? `<span class="crt-tag crt-tag-ok">${escapeHtml(t('settings.runtime.model.current', { source: t('settings.runtime.model.host') }))}</span>` : ''}</div>
+    chip: selectedPack ? `<span class="crt-tag">${escapeHtml(t('settings.runtime.model.localSelected'))}</span>` : '',
+    body: `<div class="runtime-host-model" data-rt-host-model>
+      <div class="runtime-host-title"><span>${escapeHtml(t('settings.runtime.model.host'))}</span><span class="crt-tag">${escapeHtml(t('settings.runtime.model.hostManaged'))}</span></div>
       <p class="muted">${escapeHtml(t('settings.runtime.model.hostDesc'))}</p>
     </div>
-    ${status?.model?.degraded ? `<p class="crt-warn">${escapeHtml(t('settings.runtime.model.degraded', { reason: runtimeReasonText(status.model.reason) || t('runtime.model.reason.unknown') }))}</p>` : ''}
-    <p class="muted">${escapeHtml(t('settings.runtime.model.active', { source: runtimeSourceLabel(active) }))}</p>
-    ${runtimeConfigDiffersFromStatus(status) ? `<p class="cfg-help cfg-warn">⚠ ${escapeHtml(t('settings.runtime.pendingRestart'))}</p>` : ''}`,
+    <div class="runtime-host-model" data-rt-local-model>
+      <div class="runtime-host-title"><span>${escapeHtml(t('settings.runtime.model.local'))}</span><span class="crt-tag">${escapeHtml(t('settings.runtime.model.localManaged'))}</span></div>
+      <p class="muted">${escapeHtml(selectedPack
+        ? t('settings.runtime.model.localCurrent', { pack: runtimePackLabel(selectedPack) })
+        : t('settings.runtime.model.noPack'))}</p>
+      <p class="muted">${escapeHtml(t('settings.runtime.model.localDesc'))}</p>
+    </div>
+    <p class="muted">${escapeHtml(t('settings.runtime.model.activeHost'))}</p>`,
   });
 }
 
@@ -1691,80 +1676,6 @@ function runtimeLocalModelsHtml() {
   });
 }
 
-function runtimeApiSettingsHtml() {
-  const status = state.runtime.status;
-  const credential = status?.model?.credential;
-  const configuredSource = runtimeModelSourceOf(status, currentConfigFile());
-  const baseUrl = runtimeDraftValue('runtime.model.api.baseUrl', '');
-  const model = runtimeDraftValue('runtime.model.api.model', '');
-  const keyRefRaw = runtimeDraftValue('runtime.model.api.keyRef', '');
-  const keyRefHasDraft = Object.prototype.hasOwnProperty.call(state.runtimeDraft, 'runtime.model.api.keyRef');
-  const keyRef = keyRefHasDraft ? keyRefRaw : runtimeKeyRefDisplay(runtimeConfigValue('runtime.model.api.keyRef', ''));
-  const timeoutMs = runtimeDraftValue('runtime.model.api.timeoutMs', 10000);
-  const allowRemote = runtimeDraftValue('runtime.model.api.allowRemote', false) === true;
-  const disabled = !state.features.writes || MOCK;
-  const pending = configuredSource !== 'api' && runtimeConfigValue('runtime.model.source', 'heuristic') === 'api';
-  return settingsSectionHtml({
-    id: 'runtime-api-settings',
-    title: t('settings.runtime.api.title'),
-    desc: t('settings.runtime.api.desc'),
-    chip: `<span class="crt-tag ${credential?.configured ? 'crt-tag-ok' : ''}">${escapeHtml(credential?.configured ? t('settings.runtime.api.credentialConfigured', { source: credential.source ?? '—' }) : t('settings.runtime.api.credentialMissing'))}</span>`,
-    body: `<div class="runtime-api-form">
-      ${runtimeControlRow('runtime.model.api.baseUrl', runtimeTextControl('runtime.model.api.baseUrl', baseUrl, { placeholder: 'https://api.example.com/v1', disabled }))}
-      ${runtimeControlRow('runtime.model.api.model', runtimeTextControl('runtime.model.api.model', model, { placeholder: 'gpt-4.1-mini', disabled }))}
-      ${runtimeControlRow('runtime.model.api.keyRef', runtimeTextControl('runtime.model.api.keyRef', keyRef, { placeholder: 'env:MEBULAR_RUNTIME_MODEL_API_KEY', disabled }))}
-      <div class="runtime-api-row">
-        ${runtimeControlRow('runtime.model.api.timeoutMs', runtimeNumberControl('runtime.model.api.timeoutMs', timeoutMs, { min: 1, step: 500, autosave: false, disabled }))}
-      </div>
-      <label class="runtime-internal-toggle"><input type="checkbox" data-rt-path="runtime.model.api.allowRemote" data-rt-api-allow-remote ${allowRemote ? 'checked' : ''} ${disabled ? 'disabled' : ''}> ${escapeHtml(t('settings.runtime.api.allowRemote'))}</label>
-      <p class="runtime-api-warn">⚠ ${escapeHtml(t('settings.runtime.api.allowRemoteWarn'))}</p>
-      ${state.runtime.formError ? `<p class="crt-warn" role="alert">${escapeHtml(state.runtime.formError)}</p>` : ''}
-      <div class="runtime-api-actions">
-        <button class="btn btn-crt" type="button" data-rt-api-save ${disabled ? 'disabled' : ''}>${escapeHtml(t('settings.runtime.api.save'))}</button>
-        ${pending ? `<span class="muted">${escapeHtml(t('settings.runtime.pendingRestart'))}</span>` : ''}
-      </div>
-      <p class="settings-note muted">${escapeHtml(t('settings.runtime.api.restartNote'))}</p>
-    </div>`,
-  });
-}
-
-function runtimeAdvancedSettingsHtml() {
-  const capture = runtimeConfigValue('runtime.capture', 'off');
-  const trace = runtimeConfigValue('runtime.trace', 'local');
-  const rawDays = runtimeDraftValue('runtime.retention.rawDays', 7);
-  const traceDays = runtimeDraftValue('runtime.retention.traceDays', 7);
-  const checkpointDays = runtimeDraftValue('runtime.retention.checkpointDays', 30);
-  const maxContextTokens = runtimeDraftValue('runtime.limits.maxContextTokens', 12000);
-  const checkpointSync = runtimeConfigValue('runtime.checkpoint.sync', 'local');
-  const selfSync = runtimeConfigValue('runtime.self.sync', 'cloud');
-  const atRest = state.settings?.encryption?.atRest === true;
-  const disabled = !state.features.writes || MOCK;
-  return `<div class="runtime-advanced-fields">
-    ${runtimeControlRow('runtime.capture', runtimeSelectControl('runtime.capture', capture, [
-      ['off', t('settings.runtime.rawOff')],
-      ['local', t('settings.runtime.rawLocal')],
-    ], { disabled }))}
-    ${capture === 'local' && !atRest ? `<p class="cfg-help cfg-warn">⚠ ${escapeHtml(t('settings.runtime.advanced.rawUnencrypted'))}</p>` : ''}
-    ${runtimeControlRow('runtime.trace', runtimeSelectControl('runtime.trace', trace, [
-      ['off', t('settings.runtime.rawOff')],
-      ['local', t('settings.runtime.rawLocal')],
-    ], { disabled }))}
-    ${runtimeControlRow('runtime.retention.rawDays', runtimeNumberControl('runtime.retention.rawDays', rawDays, { min: 0, disabled }))}
-    ${runtimeControlRow('runtime.retention.traceDays', runtimeNumberControl('runtime.retention.traceDays', traceDays, { min: 0, disabled }))}
-    ${runtimeControlRow('runtime.retention.checkpointDays', runtimeNumberControl('runtime.retention.checkpointDays', checkpointDays, { min: 0, disabled }))}
-    ${runtimeControlRow('runtime.limits.maxContextTokens', runtimeNumberControl('runtime.limits.maxContextTokens', maxContextTokens, { min: 1, step: 1000, disabled }))}
-    ${runtimeControlRow('runtime.checkpoint.sync', runtimeSelectControl('runtime.checkpoint.sync', checkpointSync, [
-      ['local', t('settings.runtime.advanced.syncLocal')],
-      ['cloud', t('settings.runtime.advanced.syncCloud')],
-    ], { disabled }))}
-    ${runtimeControlRow('runtime.self.sync', runtimeSelectControl('runtime.self.sync', selfSync, [
-      ['local', t('settings.runtime.advanced.syncLocal')],
-      ['cloud', t('settings.runtime.advanced.syncCloud')],
-    ], { disabled }))}
-    <p class="settings-note muted">${escapeHtml(t('settings.runtime.advanced.note'))}</p>
-  </div>`;
-}
-
 function renderRuntimeSettings() {
   const status = state.runtime.status;
   const statusError = state.runtime.errors.status;
@@ -1774,10 +1685,12 @@ function renderRuntimeSettings() {
     ${runtimeModeSettingsHtml()}
     ${runtimeModelSettingsHtml()}
     ${runtimeLocalModelsHtml()}
-    ${runtimeApiSettingsHtml()}
     <details class="settings-fold" id="runtime-advanced-fold" data-settings-fold="runtime-advanced">
       <summary>${escapeHtml(foldLabel('runtime-advanced'))}</summary>
-      ${runtimeAdvancedSettingsHtml()}
+      <div class="runtime-advanced-fields">
+        ${runtimeSidecarDetailsHtml(status)}
+        <p class="settings-note muted">${escapeHtml(t('settings.runtime.sidecar.advancedNote'))}</p>
+      </div>
     </details>
     <p class="settings-note muted">${escapeHtml(t('settings.runtime.scope.desc'))}</p>
   `;
@@ -1844,18 +1757,16 @@ function settingsSignature(activeTab) {
     state.cloudRename?.id ?? null,
     state.cloudRenameError ?? '',
     state.runtime ? [
-      state.runtime.status?.mode ?? null,
-      state.runtime.status?.model?.configured ?? null,
-      state.runtime.status?.model?.active ?? null,
-      state.runtime.status?.model?.degraded ?? null,
-      state.runtime.status?.model?.credential?.configured ?? null,
-      state.runtime.status?.model?.credential?.source ?? null,
-      state.runtime.status?.counts ?? null,
-      state.runtime.status?.warnings ?? null,
+      state.runtime.status?.enabled ?? null,
+      state.runtime.status?.state ?? null,
+      state.runtime.status?.available ?? null,
+      state.runtime.status?.pid ?? null,
+      state.runtime.status?.runtimeVersion ?? null,
+      state.runtime.status?.degraded ?? null,
+      state.runtime.status?.error?.code ?? null,
       state.runtime.models?.packs?.map((pack) => [pack.packId, pack.state, pack.selected, pack.installed, pack.download?.downloadedBytes ?? 0, pack.download?.totalBytes ?? 0, pack.download?.error?.code ?? null]) ?? null,
+      state.runtime.traceMeta ?? null,
       state.runtime.errors ?? null,
-      state.runtime.formError ?? '',
-      state.runtime.modelFocus ?? null,
       state.runtime.timelineFilter ?? null,
       state.runtime.includeInternal ?? null,
     ] : null,
@@ -3510,39 +3421,16 @@ function renderMemories() {
 }
 
 // ---------- 0.3 · 记忆运行时：状态 / 治理 / 模型 ----------
-// 数据面：GET /runtime/v1/status、/runtime/v1/traces、/admin/api/memories?includeInternal=1、
-// /admin/api/models*；写面：POST /runtime/v1/mode、/admin/api/models/<action>、/admin/api/config（runtime 段）。
+// 数据面：GET /admin/api/memory-runtime/status|traces、/admin/api/memories、/admin/api/models；
+// 写面：POST /admin/api/config（memoryRuntime.enabled）、/admin/api/memory-runtime/feedback、
+// /admin/api/models/<action>、/admin/api/memories/<id>/(archive|unarchive|delete)。
+// 浏览器不接触 sidecar host token；sidecar 不可用时状态/轨迹失败开放为 disabled/未就绪。
 
 const RUNTIME_REFRESH_MS = 8000;
 
 function runtimeIsVisible() {
   return state.view === 'runtime'
     || (!$('#settings')?.hidden && state.settingsTab === 'runtime');
-}
-
-function runtimeConfigValue(path, fallback = null) {
-  const value = cfgGet(currentConfigFile(), path);
-  return value === undefined || value === null ? fallback : value;
-}
-
-function runtimeModeLabel(mode) {
-  return mode === 'immersive' ? t('runtime.mode.immersive') : t('runtime.mode.mcp');
-}
-
-function runtimeSourceLabel(source) {
-  const key = `runtime.source.${source}`;
-  return t.has(key) ? t(key) : String(source ?? '—');
-}
-
-function runtimeReasonText(reason) {
-  if (!reason) return '';
-  const key = RUNTIME_MODEL_REASON_KEYS[reason];
-  return key ? t(key) : String(reason);
-}
-
-function runtimeWarningText(code) {
-  const key = RUNTIME_WARNING_KEYS[code];
-  return key ? t(key) : String(code);
 }
 
 function runtimePackStateLabel(state) {
@@ -3560,24 +3448,8 @@ function runtimePackDescription(pack) {
   return t.has(key) ? t(key) : '';
 }
 
-function runtimeWarnings(status) {
-  const list = [
-    ...(Array.isArray(status?.warnings) ? status.warnings : []),
-    ...(Array.isArray(status?.model?.warnings) ? status.model.warnings : []),
-  ];
-  return [...new Set(list.filter((code) => typeof code === 'string' && code.length > 0))];
-}
-
-function runtimeConfigDiffersFromStatus(status) {
-  if (!status) return false;
-  const config = currentConfigFile();
-  const source = cfgGet(config, 'runtime.model.source');
-  if (source !== undefined && source !== status.model?.configured) return true;
-  const capture = cfgGet(config, 'runtime.capture');
-  if (capture !== undefined && capture !== status.capabilities?.rawCapture) return true;
-  const trace = cfgGet(config, 'runtime.trace');
-  if (trace !== undefined && trace !== status.capabilities?.trace) return true;
-  return false;
+function runtimeSidecarReady(status = state.runtime.status) {
+  return status?.enabled === true && ['ready', 'degraded'].includes(status?.state);
 }
 
 /** 仅在相关视图/设置页可见时加载；force 用于动作后立即刷新。 */
@@ -3588,6 +3460,7 @@ async function ensureRuntimeData({ force = false } = {}) {
     state.runtime.status = mock.status;
     state.runtime.models = mock.models;
     state.runtime.traces = mock.traces;
+    state.runtime.traceMeta = { available: true, disabled: false, state: 'ready' };
     state.runtime.memories = mock.memories;
     state.runtime.errors = {};
     state.runtime.loadedAt = Date.now();
@@ -3601,10 +3474,11 @@ async function ensureRuntimeData({ force = false } = {}) {
   const wantTimeline = state.view === 'runtime';
   const keys = ['status', 'models', ...(wantTimeline ? ['traces', 'memories'] : [])];
   const requests = keys.map((key) => {
-    if (key === 'status') return api('/runtime/v1/status');
+    if (key === 'status') return api('/admin/api/memory-runtime/status');
     if (key === 'models') return api('/admin/api/models');
-    if (key === 'traces') return api('/runtime/v1/traces?limit=20');
-    return api('/admin/api/memories?limit=200&includeInternal=1');
+    if (key === 'traces') return api('/admin/api/memory-runtime/traces?limit=20');
+    const internal = state.runtime.includeInternal === true ? '&includeInternal=1' : '';
+    return api(`/admin/api/memories?limit=200${internal}`);
   });
   const results = await Promise.allSettled(requests);
   const errors = {};
@@ -3614,85 +3488,26 @@ async function ensureRuntimeData({ force = false } = {}) {
       errors[key] = localizeError(result.reason, 'errors.unknown');
       return;
     }
-    if (key === 'status') state.runtime.status = result.value?.data ?? result.value;
+    if (key === 'status') state.runtime.status = result.value;
     else if (key === 'models') state.runtime.models = result.value;
-    else if (key === 'traces') state.runtime.traces = result.value?.data?.traces ?? [];
-    else if (key === 'memories') state.runtime.memories = result.value;
+    else if (key === 'traces') {
+      state.runtime.traces = Array.isArray(result.value?.traces) ? result.value.traces : [];
+      state.runtime.traceMeta = {
+        available: result.value?.available === true,
+        disabled: result.value?.disabled === true,
+        state: result.value?.state ?? null,
+        reason: result.value?.reason ?? null,
+        error: result.value?.error ?? null,
+      };
+    } else if (key === 'memories') state.runtime.memories = result.value;
   });
   state.runtime.errors = errors;
   state.runtime.loading = false;
   state.runtime.loadedAt = Date.now();
 }
 
-const RUNTIME_NUMBER_PATHS = new Set([
-  'runtime.retention.rawDays',
-  'runtime.retention.traceDays',
-  'runtime.retention.checkpointDays',
-  'runtime.limits.maxContextTokens',
-  'runtime.model.api.timeoutMs',
-]);
-
-async function saveRuntimeField(path, raw) {
-  if (!path) return;
-  let value;
-  if (RUNTIME_NUMBER_PATHS.has(path)) {
-    const number = Number(raw);
-    value = raw === '' || raw === null || !Number.isFinite(number) ? null : Math.round(number);
-  } else if (typeof raw === 'boolean') {
-    value = raw;
-  } else {
-    value = String(raw ?? '');
-  }
-  const patch = {};
-  cfgSet(patch, path, value);
-  delete state.runtimeDraft[path];
-  await saveRuntimePatch(patch, 'settings.runtime.advanced.saved');
-}
-
-async function saveRuntimeApiSettings() {
-  const baseUrl = String(runtimeDraftValue('runtime.model.api.baseUrl', '') ?? '').trim();
-  const model = String(runtimeDraftValue('runtime.model.api.model', '') ?? '').trim();
-  const keyRefRaw = String(runtimeDraftValue('runtime.model.api.keyRef', '') ?? '').trim();
-  // 只接受 env/keychain/file 引用；旧配置里的非引用值不写回、按清除处理。
-  const keyRef = keyRefRaw === '' || /^(env|keychain|file):/.test(keyRefRaw) ? keyRefRaw : '';
-  const allowRemote = document.querySelector('[data-rt-api-allow-remote]')?.checked === true;
-  const timeoutRaw = runtimeDraftValue('runtime.model.api.timeoutMs', 10000);
-  const timeoutMs = Number(timeoutRaw);
-  if (!baseUrl || !model) {
-    state.runtime.formError = t('settings.runtime.api.needEndpoint');
-    lastSettingsSignature = null;
-    renderSettings('runtime');
-    return;
-  }
-  const loopback = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(\/|$)/i.test(baseUrl);
-  if (!/^https:\/\//i.test(baseUrl) && !loopback) {
-    state.runtime.formError = t('settings.runtime.api.invalidUrl');
-    lastSettingsSignature = null;
-    renderSettings('runtime');
-    return;
-  }
-  state.runtime.formError = '';
-  const patch = {
-    runtime: {
-      model: {
-        source: 'api',
-        api: {
-          baseUrl,
-          model,
-          keyRef,
-          allowRemote,
-          timeoutMs: Number.isFinite(timeoutMs) && timeoutMs > 0 ? Math.round(timeoutMs) : 10000,
-        },
-      },
-    },
-  };
-  const saved = await saveRuntimePatch(patch, 'settings.runtime.api.saved');
-  if (saved) {
-    for (const path of IA_RUNTIME_API_FIELDS) delete state.runtimeDraft[path];
-  }
-}
-
-async function saveRuntimePatch(patch, successKey) {  if (MOCK) {
+async function saveRuntimePatch(patch, successKey) {
+  if (MOCK) {
     showToast(t('common.mockReadOnly'));
     return false;
   }
@@ -3712,7 +3527,7 @@ async function saveRuntimePatch(patch, successKey) {  if (MOCK) {
     return true;
   } catch (error) {
     if (!error?.uiHandled) {
-      showToast(t('settings.runtime.advanced.saveFailed', { message: localizeError(error, 'errors.unknown') }));
+      showToast(t('settings.runtime.saveFailed', { message: localizeError(error, 'errors.unknown') }));
     }
     return false;
   } finally {
@@ -3721,60 +3536,28 @@ async function saveRuntimePatch(patch, successKey) {  if (MOCK) {
   }
 }
 
-async function switchRuntimeMode(mode) {
-  if (mode !== 'mcp' && mode !== 'immersive') return;
-  const current = runtimeModeOf(state.runtime.status, currentConfigFile());
-  if (mode === current) return;
+async function setMemoryRuntimeEnabled(enabled) {
   if (MOCK) { showToast(t('common.mockReadOnly')); return; }
   if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
+  const current = memoryRuntimeEnabledOf(state.runtime.status, currentConfigFile());
+  if (current === enabled) return;
   const ok = await confirmModal({
-    title: t('runtime.mode.confirmTitle'),
-    body: t('runtime.mode.confirmBody', { from: runtimeModeLabel(current), to: runtimeModeLabel(mode) }),
-    confirmLabel: t('runtime.mode.confirm'),
+    title: t(enabled ? 'runtime.enable.confirmTitle' : 'runtime.disable.confirmTitle'),
+    body: t(enabled ? 'runtime.enable.confirmBody' : 'runtime.disable.confirmBody'),
+    confirmLabel: t(enabled ? 'runtime.enable.confirm' : 'runtime.disable.confirm'),
   });
   if (!ok) return;
-  try {
-    await api('/runtime/v1/mode', { method: 'POST', body: { mode } });
-    if (state.runtime.status) state.runtime.status.mode = mode;
-    state.runtime.loadedAt = 0;
-    showToast(t('runtime.mode.switched', { mode: runtimeModeLabel(mode) }));
-    await ensureRuntimeData({ force: true });
-    await refresh();
-  } catch (error) {
-    showToast(t('runtime.mode.failed', { message: localizeError(error, 'errors.unknown') }));
-  }
-}
-
-async function selectRuntimeModelSource(source) {
-  if (!['heuristic', 'local', 'api'].includes(source)) return;
-  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
-  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
-  if (source === 'local') {
-    const packs = state.runtime.models?.packs ?? [];
-    const selectedPack = packs.find((entry) => entry.selected && entry.installed);
-    if (!selectedPack) {
-      const installed = packs.find((entry) => entry.installed);
-      if (installed) {
-        await runtimeModelAction('select', installed.packId);
-        return;
-      }
-      state.runtime.modelFocus = 'local';
-      showToast(t('settings.runtime.model.chooseLocalFirst'));
-      lastSettingsSignature = null;
-      renderSettings('runtime');
-      document.getElementById('runtime-local-models')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
-      return;
+  const saved = await saveRuntimePatch({ memoryRuntime: { enabled } }, enabled ? 'runtime.enable.on' : 'runtime.disable.off');
+  if (saved && state.runtime.status) {
+    state.runtime.status.enabled = enabled;
+    if (!enabled) {
+      state.runtime.status.state = 'stopped';
+      state.runtime.status.available = false;
+      state.runtime.status.degraded = false;
+      state.runtime.status.pid = null;
     }
+    renderRuntime();
   }
-  if (source === 'api') {
-    state.runtime.modelFocus = 'api';
-    lastSettingsSignature = null;
-    renderSettings('runtime');
-    document.getElementById('runtime-api-settings')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
-    return;
-  }
-  state.runtime.modelFocus = source;
-  await saveRuntimePatch({ runtime: { model: { source } } }, 'settings.runtime.model.sourceSaved');
 }
 
 async function runtimeModelAction(action, packId) {
@@ -3809,15 +3592,16 @@ async function runtimeModelAction(action, packId) {
 async function runtimeTraceFeedback(traceId, useful) {
   if (MOCK) { showToast(t('common.mockReadOnly')); return; }
   if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
-  const status = state.runtime.status;
-  if (status?.mode !== 'immersive') { showToast(t('runtime.trace.feedbackMode')); return; }
+  if (!runtimeSidecarReady()) { showToast(t('runtime.trace.feedbackMode')); return; }
   try {
-    await api(`/runtime/v1/recall/${encodeURIComponent(traceId)}/feedback`, {
+    await api('/admin/api/memory-runtime/feedback', {
       method: 'POST',
-      body: { useful },
+      body: { traceId, useful },
     });
     const trace = (state.runtime.traces ?? []).find((entry) => entry.id === traceId);
     if (trace) trace.feedback = { useful, at: Date.now() };
+    const detail = state.runtime.traceDetails?.[traceId]?.trace;
+    if (detail) detail.feedback = { useful, at: Date.now() };
     showToast(t(useful ? 'runtime.trace.feedbackUseful' : 'runtime.trace.feedbackNotUseful'));
     renderRuntime();
   } catch (error) {
@@ -3825,45 +3609,38 @@ async function runtimeTraceFeedback(traceId, useful) {
   }
 }
 
-async function runtimeOpenObject(id) {
+async function loadRuntimeTrace(id) {
   if (!id) return;
-  if (state.runtime.objectDetail?.id === id) {
-    state.runtime.objectDetail = null;
-    renderRuntime();
+  if (state.runtime.traceDetails?.[id]?.loading) return;
+  state.runtime.traceDetails = state.runtime.traceDetails ?? {};
+  state.runtime.traceDetails[id] = { loading: true, trace: null, error: null };
+  renderRuntimeTraces();
+  if (MOCK) {
+    const trace = (state.runtime.traces ?? []).find((entry) => entry.id === id) ?? null;
+    state.runtime.traceDetails[id] = { loading: false, trace, error: trace ? null : t('runtime.trace.detailUnavailable') };
+    renderRuntimeTraces();
     return;
   }
-  state.runtime.objectDetail = { id, loading: true };
-  renderRuntime();
   try {
-    const res = await api(`/runtime/v1/objects/${encodeURIComponent(id)}?includeContent=true`);
-    state.runtime.objectDetail = { id, object: res?.data?.object ?? null, error: null };
+    const res = await api(`/admin/api/memory-runtime/traces/${encodeURIComponent(id)}`);
+    state.runtime.traceDetails[id] = {
+      loading: false,
+      trace: res?.trace ?? null,
+      error: res?.ok === false ? (res?.error?.message ?? res?.error?.code ?? t('runtime.trace.detailUnavailable')) : null,
+    };
   } catch (error) {
-    state.runtime.objectDetail = { id, object: null, error: localizeError(error, 'errors.unknown') };
+    state.runtime.traceDetails[id] = {
+      loading: false,
+      trace: null,
+      error: localizeError(error, 'errors.unknown'),
+    };
   }
-  renderRuntime();
+  renderRuntimeTraces();
 }
 
-async function runtimeDeleteCheckpoint(id, threadId, agentId) {
-  if (!threadId) return;
-  if (MOCK) { showToast(t('common.mockReadOnly')); return; }
-  if (!state.features.writes) { showToast(t('settings.runtime.readonly')); return; }
-  const ok = await confirmModal({
-    title: t('runtime.timeline.deleteCheckpoint'),
-    body: t('runtime.timeline.deleteCheckpointBody', { thread: threadId }),
-    confirmLabel: t('runtime.timeline.deleteCheckpoint'),
-  });
-  if (!ok) return;
-  try {
-    const query = agentId ? `?agentId=${encodeURIComponent(agentId)}` : '';
-    await api(`/runtime/v1/checkpoints/${encodeURIComponent(threadId)}${query}`, { method: 'DELETE' });
-    state.runtime.objectDetail = null;
-    showToast(t('runtime.timeline.checkpointDeleted'));
-    state.runtime.loadedAt = 0;
-    await ensureRuntimeData({ force: true });
-    await refresh();
-  } catch (error) {
-    showToast(t('runtime.timeline.actionFailed', { message: localizeError(error, 'errors.unknown') }));
-  }
+function toggleRuntimeObject(id) {
+  state.runtime.objectDetail = state.runtime.objectDetail?.id === id ? null : { id };
+  renderRuntimeTimeline();
 }
 
 async function runtimeMemoryAction(id, action) {
@@ -3897,12 +3674,6 @@ function runtimeStatusCard(title, chip, body) {
   </section>`;
 }
 
-function runtimeModelWarningRows(status) {
-  const codes = runtimeWarnings(status);
-  if (codes.length === 0) return '';
-  return `<ul class="runtime-warnings" data-runtime-warnings>${codes.map((code) => `<li>${escapeHtml(runtimeWarningText(code))}</li>`).join('')}</ul>`;
-}
-
 function renderRuntimeStatus() {
   const status = state.runtime.status;
   const error = state.runtime.errors.status;
@@ -3910,67 +3681,51 @@ function renderRuntimeStatus() {
     if (error) return `<section class="runtime-card crt-surface"><p class="crt-warn">${escapeHtml(t('runtime.error', { message: error }))}</p></section>`;
     return `<section class="runtime-card crt-surface"><p class="muted">${escapeHtml(t('runtime.loading'))}</p></section>`;
   }
-  const mode = runtimeModeOf(status, currentConfigFile());
-  const model = status.model ?? {};
-  const configured = model.configured ?? runtimeModelSourceOf(status, currentConfigFile());
-  const active = model.active ?? configured;
-  const modeDisabled = !state.features.writes || MOCK;
-  const modeButtons = ['mcp', 'immersive'].map((value) => `<button class="btn btn-small btn-crt" type="button" data-rt-mode="${value}" aria-pressed="${value === mode}" ${modeDisabled ? 'disabled' : ''}>${escapeHtml(runtimeModeLabel(value))}</button>`).join('');
-  const capture = status.capabilities?.rawCapture ?? 'off';
-  const trace = status.capabilities?.trace ?? 'local';
-  const checkpointSync = runtimeConfigValue('runtime.checkpoint.sync', 'local');
-  const selfSync = runtimeConfigValue('runtime.self.sync', 'cloud');
-  const canToggle = state.features.writes && !MOCK;
-  const modelRows = [
-    `${escapeHtml(t('runtime.model.configured'))}: ${escapeHtml(runtimeSourceLabel(configured))}`,
-    `${escapeHtml(t('runtime.model.active'))}: ${escapeHtml(runtimeSourceLabel(active))}`,
-  ].join(' · ');
+  const enabled = memoryRuntimeEnabledOf(status, currentConfigFile());
+  const toggleDisabled = !state.features.writes || MOCK;
+  const stateLabel = runtimeStatusStateLabel(status);
+  const statusError = runtimeStatusErrorText(status);
+  const selectedPack = (state.runtime.models?.packs ?? []).find((pack) => pack.selected) ?? null;
+  const stateTone = status.state === 'ready' ? 'crt-tag-ok' : status.degraded || status.state === 'failed' ? 'crt-tag-warn' : '';
   return `
-    ${runtimeStatusCard(t('runtime.mode.title'), runtimeModeLabel(mode), `
-      <div class="runtime-mode-actions">${modeButtons}</div>
-      <p class="muted">${escapeHtml(t('settings.runtime.access.switchHint'))}</p>
+    ${runtimeStatusCard(t('runtime.access.title'), enabled ? t('runtime.sidecar.immersive') : t('runtime.sidecar.lightweight'), `
+      <label class="runtime-switch-row crt-surface">
+        <span class="runtime-switch-copy">
+          <span class="runtime-model-name">${escapeHtml(t('runtime.access.toggle'))}</span>
+          <span class="runtime-model-desc">${escapeHtml(t('runtime.access.toggleDesc'))}</span>
+        </span>
+        <input type="checkbox" data-rt-enabled ${enabled ? 'checked' : ''} ${toggleDisabled ? 'disabled' : ''}>
+      </label>
+      <p class="muted">${escapeHtml(enabled ? t('runtime.access.onHint') : t('runtime.access.offHint'))}</p>
     `)}
-    ${runtimeStatusCard(t('runtime.model.title'), model.degraded ? t('runtime.model.degraded') : runtimeSourceLabel(configured), `
-      <p>${modelRows}</p>
-      ${model.reason ? `<p class="crt-warn">${escapeHtml(runtimeReasonText(model.reason))}</p>` : ''}
-      <p class="muted">${escapeHtml(t('runtime.model.credential'))}: ${escapeHtml(model.credential?.configured ? t('settings.runtime.api.credentialConfigured', { source: model.credential?.source ?? '—' }) : t('settings.runtime.api.credentialMissing'))}</p>
-      ${runtimeModelWarningRows(status)}
-    `)}
-    ${runtimeStatusCard(t('runtime.counts.title'), null, `
-      <dl class="runtime-kv">
-        <dt>${escapeHtml(t('runtime.counts.memoryRecords'))}</dt><dd>${escapeHtml(String(status.counts?.memoryRecords ?? 0))}</dd>
-        <dt>${escapeHtml(t('runtime.counts.compacts'))}</dt><dd>${escapeHtml(String(status.counts?.compacts ?? 0))}</dd>
-        <dt>${escapeHtml(t('runtime.counts.checkpoints'))}</dt><dd>${escapeHtml(String(status.counts?.checkpoints ?? 0))}</dd>
-        <dt>${escapeHtml(t('runtime.counts.selfRecords'))}</dt><dd>${escapeHtml(String(status.counts?.selfRecords ?? 0))}</dd>
-        <dt>${escapeHtml(t('runtime.counts.localRawChunks'))}</dt><dd>${escapeHtml(String(status.counts?.localRawChunks ?? 0))}</dd>
-        <dt>${escapeHtml(t('runtime.counts.localTraces'))}</dt><dd>${escapeHtml(String(status.counts?.localTraces ?? 0))}</dd>
+    ${runtimeStatusCard(t('runtime.sidecar.title'), stateLabel, `
+      <dl class="runtime-kv" data-rt-sidecar-status>
+        <dt>${escapeHtml(t('runtime.sidecar.enabled'))}</dt><dd>${escapeHtml(enabled ? t('runtime.sidecar.on') : t('runtime.sidecar.off'))}</dd>
+        <dt>${escapeHtml(t('runtime.sidecar.state'))}</dt><dd><span class="crt-tag ${stateTone}">${escapeHtml(stateLabel)}</span></dd>
+        <dt>${escapeHtml(t('runtime.sidecar.pid'))}</dt><dd>${escapeHtml(status.pid ?? '—')}</dd>
+        <dt>${escapeHtml(t('runtime.sidecar.version'))}</dt><dd>${escapeHtml(status.runtimeVersion ?? '—')}</dd>
+        <dt>${escapeHtml(t('runtime.sidecar.degraded'))}</dt><dd>${escapeHtml(status.degraded ? t('runtime.sidecar.degradedYes') : t('runtime.sidecar.degradedNo'))}</dd>
+        <dt>${escapeHtml(t('runtime.sidecar.error'))}</dt><dd>${statusError ? escapeHtml(statusError) : '—'}</dd>
       </dl>
+      ${!status.available && enabled ? `<p class="runtime-pending">${escapeHtml(t('runtime.sidecar.notReady'))}</p>` : ''}
     `)}
-    ${runtimeStatusCard(t('runtime.sync.title'), status.sync?.running ? t('runtime.sync.running') : t('runtime.sync.stopped'), `
-      <dl class="runtime-kv">
-        <dt>${escapeHtml(t('runtime.sync.pending'))}</dt><dd>${escapeHtml(String(status.sync?.pendingEvents ?? 0))}</dd>
-        <dt>${escapeHtml(t('runtime.sync.namespaces'))}</dt><dd>${escapeHtml((status.sync?.namespaces ?? []).join(', ') || '—')}</dd>
-      </dl>
-    `)}
-    ${runtimeStatusCard(t('runtime.raw.title'), null, `
-      <dl class="runtime-kv">
-        <dt>${escapeHtml(t('runtime.raw.capture'))}</dt><dd>${escapeHtml(capture === 'local' ? t('runtime.raw.captureLocal') : t('runtime.raw.captureOff'))}</dd>
-        <dt>${escapeHtml(t('runtime.raw.trace'))}</dt><dd>${escapeHtml(trace === 'local' ? t('runtime.raw.traceLocal') : t('runtime.raw.traceOff'))}</dd>
-        <dt>${escapeHtml(t('runtime.raw.checkpoint'))}</dt><dd>${escapeHtml(checkpointSync === 'cloud' ? t('runtime.raw.cloud') : t('runtime.raw.localOnly'))}</dd>
-        <dt>${escapeHtml(t('runtime.raw.self'))}</dt><dd>${escapeHtml(selfSync === 'cloud' ? t('runtime.raw.cloud') : t('runtime.raw.localOnly'))}</dd>
-      </dl>
-      <div class="runtime-mode-actions">
-        <button class="btn btn-small btn-crt" type="button" data-rt-capture="${capture === 'local' ? 'off' : 'local'}" ${canToggle ? '' : 'disabled'}>${escapeHtml(capture === 'local' ? t('runtime.raw.pauseCapture') : t('runtime.raw.resumeCapture'))}</button>
-        <button class="btn btn-small btn-crt" type="button" data-rt-trace-mode="${trace === 'local' ? 'off' : 'local'}" ${canToggle ? '' : 'disabled'}>${escapeHtml(trace === 'local' ? t('runtime.raw.pauseTrace') : t('runtime.raw.resumeTrace'))}</button>
+    ${runtimeStatusCard(t('runtime.model.title'), t('runtime.model.hostManaged'), `
+      <div class="runtime-host-model" data-rt-host-model>
+        <div class="runtime-host-title"><span>${escapeHtml(t('settings.runtime.model.host'))}</span><span class="crt-tag">${escapeHtml(t('settings.runtime.model.hostManaged'))}</span></div>
+        <p class="muted">${escapeHtml(t('settings.runtime.model.hostDesc'))}</p>
       </div>
+      <p class="muted">${escapeHtml(selectedPack
+        ? t('runtime.model.localSelected', { pack: runtimePackLabel(selectedPack) })
+        : t('runtime.model.localNone'))}</p>
+      <p class="muted">${escapeHtml(t('runtime.model.localManaged'))}</p>
     `)}
-    ${runtimeConfigDiffersFromStatus(status) ? `<p class="runtime-pending">⚠ ${escapeHtml(t('settings.runtime.pendingRestart'))}</p>` : ''}
   `;
 }
 
 function runtimeTimelineControlsHtml() {
   const includeInternal = state.runtime.includeInternal === true;
   const filter = state.runtime.timelineFilter;
+  const canInternal = state.features.writes && !MOCK;
   const filters = [
     ['all', 'runtime.timeline.all'],
     ['memory', 'runtime.timeline.memory'],
@@ -3980,42 +3735,27 @@ function runtimeTimelineControlsHtml() {
   ];
   return `${filters.map(([value, key]) => {
     const disabled = !includeInternal && value !== 'all' && value !== 'memory';
-    return `<button class="btn btn-small btn-crt" type="button" data-rt-filter="${value}" aria-pressed="${filter === value}" ${disabled ? 'disabled' : ''}>${escapeHtml(t(key))}</button>`;
+    return `<button class="btn btn-small btn-crt" type="button" data-rt-filter="${value}" aria-pressed="${filter === value}" ${disabled || !canInternal ? 'disabled' : ''}>${escapeHtml(t(key))}</button>`;
   }).join('')}
-  <label class="runtime-internal-toggle"><input type="checkbox" data-rt-internal-toggle ${includeInternal ? 'checked' : ''}> ${escapeHtml(t('runtime.timeline.internalToggle'))}</label>
+  <label class="runtime-internal-toggle"><input type="checkbox" data-rt-internal-toggle ${includeInternal ? 'checked' : ''} ${canInternal ? '' : 'disabled'}> ${escapeHtml(t('runtime.timeline.internalToggle'))}</label>
   <p class="runtime-internal-hint muted">${escapeHtml(t('runtime.timeline.internalHint'))}</p>`;
 }
 
-function runtimeObjectDetailHtml(detail) {
-  if (!detail) return '';
-  if (detail.loading) return `<p class="runtime-detail muted">${escapeHtml(t('runtime.timeline.loading'))}</p>`;
-  if (detail.error) return `<p class="runtime-detail crt-warn">${escapeHtml(t('runtime.timeline.detailError', { message: detail.error }))}</p>`;
-  const object = detail.object;
-  if (!object) return `<p class="runtime-detail muted">${escapeHtml(t('runtime.timeline.empty'))}</p>`;
-  const content = object.content && typeof object.content === 'object' ? object.content : {};
-  const rows = [];
-  if (object.kind === 'compact' || object.type === 'compact') {
-    rows.push([t('runtime.timeline.compact'), String(content.summary ?? '—')]);
-  } else if (object.kind === 'context_checkpoint' || object.type === 'context_checkpoint') {
-    rows.push([t('runtime.counts.checkpoints'), String(content.threadId ?? '—')]);
-    rows.push(['revision', String(content.revision ?? '—')]);
-    if (content.summary) rows.push(['summary', String(content.summary)]);
-  } else if (object.kind === 'self_record' || object.type === 'self_record') {
-    rows.push([t('runtime.counts.selfRecords'), String(content.agentId ?? '—')]);
-    rows.push(['revision', String(content.revision ?? '—')]);
-    if (Array.isArray(content.goals) && content.goals.length > 0) rows.push(['goals', content.goals.join(' · ')]);
-    if (Array.isArray(content.traits) && content.traits.length > 0) rows.push(['traits', content.traits.join(' · ')]);
-  } else {
-    rows.push(['type', String(object.type ?? '—')]);
+function runtimeObjectDetailHtml(memory) {
+  if (!memory) return '';
+  const rows = [
+    [t('runtime.timeline.type'), String(memory.type ?? '—')],
+    [t('runtime.timeline.namespace'), String(memory.namespace ?? 'default')],
+    [t('runtime.timeline.created'), formatTime(memory.createdAt)],
+    [t('runtime.timeline.updated'), formatTime(memory.updatedAt)],
+  ];
+  if (Array.isArray(memory.tags) && memory.tags.length > 0) {
+    rows.push([t('runtime.timeline.tags'), memory.tags.join(' · ')]);
   }
-  const threadId = content.threadId;
-  const agentId = content.agentId;
-  const canDeleteCheckpoint = (object.kind === 'context_checkpoint' || object.type === 'context_checkpoint')
-    && typeof threadId === 'string' && threadId.length > 0;
-  return `<div class="runtime-detail" data-runtime-object="${escapeHtml(object.id)}">
+  return `<div class="runtime-detail" data-runtime-object="${escapeHtml(memory.id)}">
     <dl class="runtime-kv">${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>
-    ${object.internal ? `<p class="muted">${escapeHtml(t('runtime.timeline.internalBadge'))} · ${escapeHtml(String(object.namespace ?? '—'))}</p>` : ''}
-    ${canDeleteCheckpoint ? `<button class="btn btn-small btn-crt btn-crt-danger" type="button" data-rt-checkpoint-delete="${escapeHtml(object.id)}" data-rt-thread="${escapeHtml(threadId)}" data-rt-agent="${escapeHtml(agentId ?? '')}">${escapeHtml(t('runtime.timeline.deleteCheckpoint'))}</button>` : ''}
+    <p class="mem-preview">${escapeHtml(memory.preview || t('memories.emptyPreview'))}</p>
+    ${runtimeTimelineKind(memory) !== 'memory' ? `<p class="muted">${escapeHtml(t('runtime.timeline.internalBadge'))} · ${escapeHtml(String(memory.namespace ?? '—'))}</p>` : ''}
   </div>`;
 }
 
@@ -4048,14 +3788,13 @@ function renderRuntimeTimeline() {
     ].filter(Boolean).join(' ');
     const open = state.runtime.objectDetail?.id === memory.id;
     const writable = state.features.writes && !MOCK;
-    const actions = internal
-      ? `<button class="btn btn-small btn-crt" type="button" data-rt-object="${escapeHtml(memory.id)}">${escapeHtml(open ? t('runtime.timeline.hide') : t('runtime.timeline.view'))}</button>`
-      : writable
-        ? [
-          `<button class="btn btn-small btn-crt" type="button" data-rt-mem-action="${memory.archived ? 'unarchive' : 'archive'}" data-rt-mem-id="${escapeHtml(memory.id)}">${escapeHtml(memory.archived ? t('memories.action.unarchive') : t('memories.action.archive'))}</button>`,
-          `<button class="btn btn-small btn-crt" type="button" data-rt-mem-action="delete" data-rt-mem-id="${escapeHtml(memory.id)}">${escapeHtml(t('memories.action.delete'))}</button>`,
-        ].join(' ')
-        : '';
+    const actions = [
+      `<button class="btn btn-small btn-crt" type="button" data-rt-object="${escapeHtml(memory.id)}">${escapeHtml(open ? t('runtime.timeline.hide') : t('runtime.timeline.view'))}</button>`,
+      ...(writable ? [
+        `<button class="btn btn-small btn-crt" type="button" data-rt-mem-action="${memory.archived ? 'unarchive' : 'archive'}" data-rt-mem-id="${escapeHtml(memory.id)}">${escapeHtml(memory.archived ? t('memories.action.unarchive') : t('memories.action.archive'))}</button>`,
+        `<button class="btn btn-small btn-crt" type="button" data-rt-mem-action="delete" data-rt-mem-id="${escapeHtml(memory.id)}">${escapeHtml(t('memories.action.delete'))}</button>`,
+      ] : []),
+    ].join(' ');
     return `<article class="mem-row runtime-timeline-row crt-surface" data-rt-mem-row="${escapeHtml(memory.id)}" data-rt-kind="${escapeHtml(kind)}">
       <div class="mem-main">
         <div class="mem-head">
@@ -4066,11 +3805,103 @@ function renderRuntimeTimeline() {
         </div>
         <p class="mem-preview">${escapeHtml(memory.preview || t('memories.emptyPreview'))}</p>
         <p class="muted mem-meta">${escapeHtml(t('memories.meta.created', { time: formatTime(memory.createdAt) }))}</p>
-        ${open ? runtimeObjectDetailHtml(state.runtime.objectDetail) : ''}
+        ${open ? runtimeObjectDetailHtml(memory) : ''}
       </div>
       <div class="mem-actions">${actions}</div>
     </article>`;
   }).join('');
+}
+
+function runtimeTraceCitationIds(entry) {
+  const list = Array.isArray(entry?.citations) ? entry.citations : [];
+  return list
+    .map((citation) => (typeof citation === 'string' ? citation : citation?.id))
+    .filter((id) => typeof id === 'string' && id.length > 0);
+}
+
+function runtimeTraceOwnerText(entry) {
+  const owner = entry?.owner;
+  if (!owner || typeof owner !== 'object') return '';
+  return [
+    owner.role ?? owner.ownerType,
+    owner.ownerId ?? owner.agentId,
+    owner.agentName,
+    owner.domain,
+  ].filter((part) => typeof part === 'string' && part.length > 0).join(' · ');
+}
+
+function runtimeTraceProvenanceText(entry) {
+  const source = entry?.provenance;
+  if (!source || typeof source !== 'object') return '';
+  return [
+    source.source,
+    source.writerType,
+    source.extractor,
+    source.model,
+    source.hostId,
+    source.threadId,
+  ].filter((part) => typeof part === 'string' && part.length > 0).join(' · ');
+}
+
+function runtimeTraceDetailHtml(trace, detail) {
+  if (!detail) return '';
+  if (detail.loading) return `<p class="runtime-detail muted">${escapeHtml(t('runtime.trace.detailLoading'))}</p>`;
+  if (detail.error) return `<p class="runtime-detail crt-warn">${escapeHtml(t('runtime.trace.detailError', { message: detail.error }))}</p>`;
+  const data = detail.trace ?? trace;
+  if (!data) return `<p class="runtime-detail muted">${escapeHtml(t('runtime.trace.detailUnavailable'))}</p>`;
+  const hits = Array.isArray(data.hits) ? data.hits : [];
+  const candidates = Array.isArray(data.candidates) ? data.candidates : [];
+  const injected = Array.isArray(data.injected) ? data.injected : [];
+  const cue = data.cue && typeof data.cue === 'object' ? data.cue : {};
+  const reasons = [];
+  const topics = Array.isArray(cue.topics) ? cue.topics.filter((topic) => typeof topic === 'string') : [];
+  if (topics.length > 0) reasons.push(t('runtime.trace.reasonTopics', { topics: topics.join(' · ') }));
+  const entities = Array.isArray(cue.entities) ? cue.entities.map((entity) => entity?.name).filter(Boolean) : [];
+  if (entities.length > 0) reasons.push(t('runtime.trace.reasonEntities', { entities: entities.join(' · ') }));
+  for (const expansion of Array.isArray(data.expansions) ? data.expansions : []) {
+    if (typeof expansion?.reason === 'string' && expansion.reason.length > 0) {
+      reasons.push(t('runtime.trace.reasonExpansion', { reason: expansion.reason, id: expansion.sourceId ?? '—' }));
+    }
+  }
+  if (typeof data.silenceReason === 'string' && data.silenceReason.length > 0) {
+    reasons.push(t('runtime.trace.reasonSilence', { reason: data.silenceReason }));
+  }
+  const citations = new Set([
+    ...runtimeTraceCitationIds(data),
+    ...injected.flatMap(runtimeTraceCitationIds),
+    ...candidates.flatMap(runtimeTraceCitationIds),
+  ]);
+  const contextRows = [];
+  for (const entry of [...injected, ...candidates]) {
+    if (!entry || typeof entry !== 'object') continue;
+    const score = typeof entry.score === 'number' ? entry.score.toFixed(2) : null;
+    const confidence = typeof entry.confidence === 'number' ? entry.confidence.toFixed(2) : score;
+    const domain = entry.domain ?? entry.owner?.domain ?? '—';
+    const owner = runtimeTraceOwnerText(entry) || '—';
+    const provenance = runtimeTraceProvenanceText(entry) || '—';
+    const cited = runtimeTraceCitationIds(entry);
+    const key = entry.fragmentId ?? entry.sourceId ?? entry.id ?? '—';
+    contextRows.push(`<li class="runtime-trace-context" data-rt-trace-context>
+      <code>${escapeHtml(String(key))}</code>
+      <span>${escapeHtml(t('runtime.trace.confidence', { confidence: confidence ?? '—' }))}</span>
+      <span>${escapeHtml(t('runtime.trace.domain', { domain: String(domain) }))}</span>
+      <span>${escapeHtml(t('runtime.trace.owner', { owner }))}</span>
+      <span>${escapeHtml(t('runtime.trace.provenance', { provenance }))}</span>
+      ${cited.length > 0 ? `<span>${escapeHtml(t('runtime.trace.citations', { citations: cited.join(' · ') }))}</span>` : ''}
+    </li>`);
+  }
+  const hitHtml = hits.length > 0
+    ? `<ul class="runtime-trace-hits">${hits.map((hit) => {
+      const score = typeof hit.score === 'number' ? hit.score.toFixed(2) : '—';
+      return `<li>${escapeHtml(t('runtime.trace.hit', { rank: hit.rank ?? '—', type: hit.type ?? '—', score }))} <code>${escapeHtml(hit.id ?? '')}</code></li>`;
+    }).join('')}</ul>`
+    : `<p class="muted">${escapeHtml(t('runtime.trace.noHits'))}</p>`;
+  return `<div class="runtime-detail runtime-trace-detail" data-runtime-trace="${escapeHtml(data.id ?? trace.id)}">
+    ${reasons.length > 0 ? `<ul class="runtime-trace-why">${reasons.map((reason) => `<li>${escapeHtml(reason)}</li>`).join('')}</ul>` : ''}
+    ${hitHtml}
+    ${citations.size > 0 ? `<p class="mem-preview">${escapeHtml(t('runtime.trace.citations', { citations: [...citations].join(' · ') }))}</p>` : ''}
+    ${contextRows.length > 0 ? `<ul class="runtime-trace-context-list">${contextRows.join('')}</ul>` : ''}
+  </div>`;
 }
 
 function renderRuntimeTraces() {
@@ -4078,6 +3909,15 @@ function renderRuntimeTraces() {
   if (!list) return;
   const data = state.runtime.traces;
   const error = state.runtime.errors.traces;
+  const meta = state.runtime.traceMeta;
+  if (meta?.disabled) {
+    list.innerHTML = `<p class="muted" data-rt-traces-disabled>${escapeHtml(t('runtime.trace.disabled'))}</p>`;
+    return;
+  }
+  if (meta && meta.available === false) {
+    list.innerHTML = `<p class="muted" data-rt-traces-unavailable>${escapeHtml(t('runtime.trace.unavailable', { state: t(runtimeSidecarStateKey(meta.state)) }))}</p>`;
+    return;
+  }
   if (!data) {
     list.innerHTML = `<p class="muted">${escapeHtml(error ? t('runtime.trace.error', { message: error }) : t('runtime.loading'))}</p>`;
     return;
@@ -4086,17 +3926,17 @@ function renderRuntimeTraces() {
     list.innerHTML = `<p class="muted">${escapeHtml(t('runtime.trace.empty'))}</p>`;
     return;
   }
-  const mode = state.runtime.status?.mode ?? 'mcp';
-  const canFeedback = state.features.writes && !MOCK && mode === 'immersive';
+  const canFeedback = state.features.writes && !MOCK && runtimeSidecarReady();
   list.innerHTML = data.map((trace) => {
     const open = state.runtime.traceOpen?.[trace.id] === true;
-    const feedback = trace.feedback;
-    const hits = Array.isArray(trace.hits) ? trace.hits : [];
-    const hitHtml = open ? `<ul class="runtime-trace-hits">${hits.length > 0 ? hits.map((hit) => {
-      const score = typeof hit.score === 'number' ? hit.score.toFixed(2) : '—';
-      return `<li>${escapeHtml(t('runtime.trace.hit', { rank: hit.rank ?? '—', type: hit.type ?? '—', score }))} <code>${escapeHtml(hit.id ?? '')}</code></li>`;
-    }).join('') : `<li>${escapeHtml(t('runtime.trace.noHits'))}</li>`}</ul>` : '';
-    const model = trace.model?.query ?? trace.model?.embedding ?? '—';
+    const detail = state.runtime.traceDetails?.[trace.id];
+    const feedback = detail?.trace?.feedback ?? trace.feedback;
+    const counts = trace.counts ?? {};
+    const candidateCount = Number.isInteger(counts.candidates) ? counts.candidates : 0;
+    const injectedCount = Number.isInteger(counts.injected) ? counts.injected : 0;
+    const tookMs = trace.timing?.totalMs ?? trace.tookMs ?? 0;
+    const model = trace.model?.query ?? trace.model?.embedding ?? trace.model?.extractor ?? '—';
+    const domains = Array.isArray(trace.domains) ? trace.domains : Array.isArray(trace.namespaces) ? trace.namespaces : [];
     return `<article class="mem-row runtime-trace-row crt-surface" data-rt-trace-row="${escapeHtml(trace.id)}">
       <div class="mem-main">
         <div class="mem-head">
@@ -4106,9 +3946,9 @@ function renderRuntimeTraces() {
           <code class="mem-id">${escapeHtml(trace.id)}</code>
         </div>
         <p class="mem-preview">${escapeHtml(trace.queryPreview || t('runtime.trace.noQuery'))}</p>
-        <p class="muted mem-meta">${escapeHtml(t('runtime.trace.took', { ms: trace.tookMs ?? 0 }))} · ${escapeHtml(t('runtime.trace.hits', { count: hits.length }))} · ${escapeHtml(t('runtime.trace.model', { model }))}</p>
-        ${open ? `<p class="muted mem-meta">${escapeHtml(t('runtime.trace.namespaces', { namespaces: (trace.namespaces ?? []).join(', ') || '—' }))}</p>` : ''}
-        ${hitHtml}
+        <p class="muted mem-meta">${escapeHtml(t('runtime.trace.took', { ms: tookMs }))} · ${escapeHtml(t('runtime.trace.hits', { count: candidateCount }))} · ${escapeHtml(t('runtime.trace.injected', { count: injectedCount }))} · ${escapeHtml(t('runtime.trace.model', { model }))}</p>
+        ${domains.length > 0 ? `<p class="muted mem-meta">${escapeHtml(t('runtime.trace.domains', { domains: domains.join(', ') }))}</p>` : ''}
+        ${open ? runtimeTraceDetailHtml(trace, detail) : ''}
         <div class="runtime-trace-actions">
           <button class="btn btn-small btn-crt" type="button" data-rt-trace="${escapeHtml(trace.id)}">${escapeHtml(open ? t('runtime.timeline.hide') : t('runtime.trace.why'))}</button>
           <button class="btn btn-small btn-crt" type="button" data-rt-trace-useful="${escapeHtml(trace.id)}" data-useful="true" ${canFeedback ? '' : 'disabled'} title="${escapeHtml(canFeedback ? '' : t('runtime.trace.feedbackMode'))}">${escapeHtml(t('runtime.trace.useful'))}</button>
@@ -4127,7 +3967,8 @@ function renderRuntime() {
   const status = state.runtime.status;
   if (badge) {
     badge.hidden = !status;
-    badge.textContent = status ? runtimeModeLabel(runtimeModeOf(status, currentConfigFile())) : '';
+    const enabled = status ? memoryRuntimeEnabledOf(status, currentConfigFile()) : false;
+    badge.textContent = status ? t(enabled ? 'runtime.sidecar.immersive' : 'runtime.sidecar.lightweight') : '';
   }
   root.innerHTML = renderRuntimeStatus();
   renderRuntimeTimeline();
@@ -5342,7 +5183,7 @@ $('#memories-list')?.addEventListener('click', (event) => {
   void memAction(button.dataset.memId, button.dataset.memAction);
 });
 
-// 0.3 · 记忆运行时视图：模式/模型、时间线、对象详情、召回轨迹反馈
+// 0.3 · 记忆运行时视图：启用开关、时间线、轨迹详情、反馈
 $('#runtime-refresh')?.addEventListener('click', () => {
   void (async () => {
     state.runtime.loadedAt = 0;
@@ -5351,20 +5192,6 @@ $('#runtime-refresh')?.addEventListener('click', () => {
   })();
 });
 $('#runtime-view')?.addEventListener('click', (event) => {
-  const mode = event.target.closest('[data-rt-mode]');
-  if (mode) { void switchRuntimeMode(mode.dataset.rtMode); return; }
-  const capture = event.target.closest('[data-rt-capture]');
-  if (capture) {
-    const next = capture.dataset.rtCapture;
-    void saveRuntimePatch({ runtime: { capture: next } }, 'settings.runtime.advanced.saved');
-    return;
-  }
-  const traceMode = event.target.closest('[data-rt-trace-mode]');
-  if (traceMode) {
-    const next = traceMode.dataset.rtTraceMode;
-    void saveRuntimePatch({ runtime: { trace: next } }, 'settings.runtime.advanced.saved');
-    return;
-  }
   const filter = event.target.closest('[data-rt-filter]');
   if (filter) {
     state.runtime.timelineFilter = filter.dataset.rtFilter;
@@ -5372,19 +5199,15 @@ $('#runtime-view')?.addEventListener('click', (event) => {
     return;
   }
   const object = event.target.closest('[data-rt-object]');
-  if (object) { void runtimeOpenObject(object.dataset.rtObject); return; }
+  if (object) { toggleRuntimeObject(object.dataset.rtObject); return; }
   const memActionButton = event.target.closest('[data-rt-mem-action]');
   if (memActionButton) { void runtimeMemoryAction(memActionButton.dataset.rtMemId, memActionButton.dataset.rtMemAction); return; }
-  const checkpointDelete = event.target.closest('[data-rt-checkpoint-delete]');
-  if (checkpointDelete) {
-    void runtimeDeleteCheckpoint(checkpointDelete.dataset.rtCheckpointDelete, checkpointDelete.dataset.rtThread, checkpointDelete.dataset.rtAgent);
-    return;
-  }
   const traceToggle = event.target.closest('[data-rt-trace]');
   if (traceToggle) {
     const id = traceToggle.dataset.rtTrace;
     state.runtime.traceOpen[id] = !state.runtime.traceOpen[id];
-    renderRuntimeTraces();
+    if (state.runtime.traceOpen[id] && !state.runtime.traceDetails?.[id]) void loadRuntimeTrace(id);
+    else renderRuntimeTraces();
     return;
   }
   const feedback = event.target.closest('[data-rt-trace-useful]');
@@ -5393,11 +5216,20 @@ $('#runtime-view')?.addEventListener('click', (event) => {
   }
 });
 $('#runtime-view')?.addEventListener('change', (event) => {
+  const enabled = event.target.closest('[data-rt-enabled]');
+  if (enabled) {
+    void setMemoryRuntimeEnabled(enabled.checked === true);
+    return;
+  }
   const internal = event.target.closest('[data-rt-internal-toggle]');
   if (!internal) return;
   state.runtime.includeInternal = internal.checked === true;
   state.runtime.timelineFilter = state.runtime.includeInternal ? 'all' : 'memory';
-  renderRuntimeTimeline();
+  state.runtime.loadedAt = 0;
+  void (async () => {
+    await ensureRuntimeData({ force: true });
+    renderRuntime();
+  })();
 });
 
 // UX-2「需要注意」浮卡：点击直达处理位（助手 → 设置·AI 助手；对端 → 设备卡）
@@ -5684,27 +5516,17 @@ $('#cloud-switch-close')?.addEventListener('click', () => { $('#cloud-switch').h
 $('#settings-close').addEventListener('click', () => {
   $('#settings').hidden = true;
 });
-// 运行时设置草稿：文本/数字在输入时只更新 state（轮询重绘不丢焦点），
-// 下拉/勾选 change 即保存；API 表单由「保存 API 设置」统一写入。
-$('#settings-body').addEventListener('input', (event) => {
-  const el = event.target.closest('[data-rt-path]');
-  if (!el) return;
-  state.runtimeDraft[el.dataset.rtPath] = el.type === 'checkbox' ? el.checked : el.value;
-});
+// 记忆运行时：开关 change 即保存（服务端热生效）；不再有 runtime.* 草稿字段。
 $('#settings-body').addEventListener('change', (event) => {
-  const el = event.target.closest('[data-rt-path][data-rt-autosave]');
-  if (!el) return;
-  void saveRuntimeField(el.dataset.rtPath, el.type === 'checkbox' ? el.checked : el.value);
+  const enabled = event.target.closest('[data-rt-enabled]');
+  if (!enabled) return;
+  void setMemoryRuntimeEnabled(enabled.checked === true);
 });
 // Tab 切换 + AI 助手专区动作（事件委托：renderSettings 会整体替换 body）
 $('#settings-body').addEventListener('click', (event) => {
   const tab = event.target.closest('[data-settings-tab]');
   if (tab) {
     const next = tab.dataset.settingsTab;
-    if (next !== 'runtime') {
-      state.runtimeDraft = {};
-      state.runtime.formError = '';
-    }
     renderSettings(next);
     if (next === 'runtime') {
       void ensureRuntimeData({ force: true }).then(() => {
@@ -5714,13 +5536,8 @@ $('#settings-body').addEventListener('click', (event) => {
     }
     return;
   }
-  const runtimeModeButton = event.target.closest('[data-rt-mode]');
-  if (runtimeModeButton) { void switchRuntimeMode(runtimeModeButton.dataset.rtMode); return; }
-  const runtimeSourceButton = event.target.closest('[data-rt-model-source]');
-  if (runtimeSourceButton) { void selectRuntimeModelSource(runtimeSourceButton.dataset.rtModelSource); return; }
   const runtimePackButton = event.target.closest('[data-rt-pack-action]');
   if (runtimePackButton) { void runtimeModelAction(runtimePackButton.dataset.rtPackAction, runtimePackButton.dataset.rtPack); return; }
-  if (event.target.closest('[data-rt-api-save]')) { void saveRuntimeApiSettings(); return; }
   // UX-2：附加导航「关于本机」→ 打开既有 about 弹层
   const extra = event.target.closest('[data-settings-extra]');
   if (extra) { $('#about').hidden = false; renderAbout(); return; }
@@ -6990,16 +6807,25 @@ function mockRuntimeData(now) {
   const gib = 1024 ** 3;
   return {
     status: {
-      version: '0.3.0',
-      initialized: true,
-      mode: 'mcp',
-      identity: { cloudId: 'cl_mock', userId: 'u_mock', profileId: 'default', deviceId: 'device-A', hostId: 'h_mock', agentId: 'opencode' },
-      capabilities: { mcpTools: true, ingest: true, recall: true, context: true, checkpoint: true, compact: true, rawCapture: 'off', trace: 'local', modelSources: ['heuristic', 'host', 'local'] },
-      model: { configured: 'heuristic', active: 'heuristic', degraded: false, reason: null, credential: { configured: false, source: null }, warnings: [] },
-      counts: { memoryRecords: 3, compacts: 1, checkpoints: 1, selfRecords: 1, localRawChunks: 0, localTraces: 1 },
-      sync: { running: true, pendingEvents: 0, namespaces: ['notes', 'work'] },
-      limits: { maxChunkBytes: 262144, maxContextTokens: 12000, maxRecall: 50 },
-      warnings: [],
+      enabled: false,
+      state: 'stopped',
+      available: false,
+      degraded: false,
+      managed: false,
+      attached: false,
+      pid: null,
+      url: null,
+      runtimeVersion: null,
+      apiVersion: null,
+      capabilityApiVersion: null,
+      commandSource: null,
+      installed: false,
+      startedAt: null,
+      lastOkAt: null,
+      restarts: 0,
+      reason: 'disabled',
+      error: null,
+      lock: null,
     },
     models: {
       ok: true,
@@ -7014,18 +6840,35 @@ function mockRuntimeData(now) {
     },
     traces: [{
       id: 'tr_mock000000000000000000001',
-      cloudId: 'cl_mock',
-      agentId: 'opencode',
+      recallId: 'rr_mock000000000000000000001',
+      schema: 2,
       at: now - 60_000,
+      agentId: 'opencode',
+      threadId: 'th_mock',
       queryPreview: '演示召回：主题偏好',
+      domains: ['notes'],
       namespaces: ['notes'],
+      silenceReason: null,
+      counts: { candidates: 2, expansions: 1, injected: 2, tokens: 24 },
+      timing: { totalMs: 12 },
+      tookMs: 12,
+      degraded: false,
+      feedback: null,
       hits: [
         { id: '01MOCKMEMORY000000000000001', type: 'fact', score: 0.91, rank: 1 },
         { id: '01MOCKMEMORY000000000000003', type: 'fact', score: 0.74, rank: 2 },
       ],
+      cue: { topics: ['主题偏好'], entities: [{ name: 'Mebular', type: 'product' }] },
+      candidates: [
+        { id: '01MOCKMEMORY000000000000001', type: 'fact', domain: 'user', score: 0.91, confidence: 0.91, rank: 1, owner: { role: 'user', ownerId: 'u_mock', domain: 'user' }, provenance: { source: 'runtime', extractor: 'heuristic', hostId: 'h_mock' }, citations: ['01MOCKMEMORY000000000000001'] },
+        { id: '01MOCKMEMORY000000000000003', type: 'fact', domain: 'default', score: 0.74, confidence: 0.74, rank: 2, owner: { role: 'other', ownerId: 'default', domain: 'default' }, provenance: { source: 'runtime', extractor: 'heuristic', hostId: 'h_mock' }, citations: ['01MOCKMEMORY000000000000003'] },
+      ],
+      expansions: [{ sourceId: '01MOCKMEMORY000000000000001', reason: 'exact_value', status: 'ok' }],
+      injected: [
+        { fragmentId: 'mf_mock_1', sourceId: '01MOCKMEMORY000000000000001', layer: 'detail', tokens: 12, citations: ['01MOCKMEMORY000000000000001'], confidence: 0.91, owner: { role: 'user', ownerId: 'u_mock', domain: 'user' }, provenance: { source: 'runtime', extractor: 'heuristic', hostId: 'h_mock' } },
+        { fragmentId: 'mf_mock_2', sourceId: '01MOCKMEMORY000000000000003', layer: 'fuzzy', tokens: 12, citations: ['01MOCKMEMORY000000000000003'], confidence: 0.74, owner: { role: 'other', ownerId: 'default', domain: 'default' }, provenance: { source: 'runtime', extractor: 'heuristic', hostId: 'h_mock' } },
+      ],
       model: { query: 'heuristic' },
-      tookMs: 12,
-      degraded: false,
     }],
     memories: {
       total: 5,

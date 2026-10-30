@@ -23,6 +23,7 @@ import net from 'node:net';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const bin = join(__dirname, '..', '..', 'mcp', 'bin', 'mebular.mjs');
+const fakeSidecar = join(__dirname, '..', '..', '..', 'tests', 'mcp', 'fixtures', 'memory-runtime-fake-sidecar.mjs');
 
 let passed = 0;
 let failed = 0;
@@ -180,6 +181,7 @@ async function seedHome(home) {
     sync: { autoSync: true, pushOnWrite: true, antiEntropy: { enabled: false }, namespaces: ['notes', 'work'] },
     mcp: { http: { host: '127.0.0.1', port: 0, auth: 'none', tls: false } },
     joinService: { enabled: true, bind: '0.0.0.0', port: joinServicePort },
+    memoryRuntime: { enabled: true, command: fakeSidecar, startTimeoutMs: 3000 },
   }, null, 2), 'utf-8');
   {
     const app = new Mebular({
@@ -281,23 +283,53 @@ async function seedHome(home) {
       boundaries: [],
       updatedAt: now,
     }, runtimeEnvelope('self_record'));
-    await mkdir(join(home, 'runtime'), { recursive: true, mode: 0o700 });
-    await writeFile(join(home, 'runtime', 'traces.jsonl'), `${JSON.stringify({
-      schema: 1,
+    const trace = {
+      schema: 2,
       id: 'tr_ui_runtime_0001',
-      cloudId: 'cl_ui',
+      recallId: 'rr_ui_runtime_0001',
       agentId: 'opencode',
-      hostId: 'h_ui',
       threadId: 'th_ui_runtime',
       at: now - 60_000,
       queryHash: 'ui-trace-hash',
       queryPreview: 'UI 召回：主题偏好',
+      domains: ['notes'],
       namespaces: ['notes'],
-      hits: [{ id: 'ui-hit-1', type: 'fact', score: 0.91, rank: 1 }],
-      model: { query: 'heuristic' },
+      silenceReason: null,
+      counts: { candidates: 1, expansions: 1, injected: 1, tokens: 12 },
+      timing: { totalMs: 9 },
       tookMs: 9,
       degraded: false,
-    })}\n`, { encoding: 'utf-8', mode: 0o600 });
+      feedback: null,
+      model: { query: 'heuristic' },
+    };
+    const traceDetail = {
+      ...trace,
+      hits: [{ id: 'ui-hit-1', type: 'fact', score: 0.91, rank: 1 }],
+      cue: { topics: ['主题偏好'], entities: [{ name: 'Mebular', type: 'product' }] },
+      candidates: [{
+        id: 'ui-hit-1',
+        type: 'fact',
+        domain: 'agent:opencode',
+        owner: { role: 'agent', ownerId: 'opencode', domain: 'agent:opencode', agentName: 'OpenCode' },
+        provenance: { source: 'runtime', writerType: 'agent', extractor: 'heuristic', hostId: 'h_ui', threadId: 'th_ui_runtime' },
+        confidence: 0.91,
+        score: 0.91,
+        rank: 1,
+      }],
+      expansions: [{ sourceId: 'ui-hit-1', reason: 'exact_value', status: 'ok' }],
+      injected: [{
+        fragmentId: 'mf_ui_1',
+        sourceId: 'ui-hit-1',
+        layer: 'detail',
+        tokens: 12,
+        citations: ['ui-hit-1'],
+        confidence: 0.91,
+        owner: { role: 'agent', ownerId: 'opencode', domain: 'agent:opencode', agentName: 'OpenCode' },
+        provenance: { source: 'runtime', writerType: 'agent', extractor: 'heuristic', hostId: 'h_ui', threadId: 'th_ui_runtime' },
+      }],
+    };
+    await writeFile(join(home, 'ui-memory-runtime-traces.json'), `${JSON.stringify([trace])}\n`, { encoding: 'utf-8', mode: 0o600 });
+    await writeFile(join(home, 'ui-memory-runtime-trace-detail.json'), `${JSON.stringify(traceDetail)}\n`, { encoding: 'utf-8', mode: 0o600 });
     await app.shutdown();
   }
   // UX-2 收口联调用料（全在沙箱 home 内）：
@@ -333,7 +365,14 @@ async function seedHome(home) {
 function spawnServe(home, port) {
   const proc = spawn(process.execPath, [bin, 'serve', '--port', String(port)], {
     // E2-A2：显式 CLOUD_ROOT 让临时 home 具备忆云注册表（否则自定义 home 会按设计关闭忆云管理）。
-    env: { ...process.env, MEBULAR_HOME: home, MEBULAR_USER_HOME: home, MEBULAR_CLOUD_ROOT: home },
+    env: {
+      ...process.env,
+      MEBULAR_HOME: home,
+      MEBULAR_USER_HOME: home,
+      MEBULAR_CLOUD_ROOT: home,
+      FAKE_SIDECAR_TRACES_FILE: join(home, 'ui-memory-runtime-traces.json'),
+      FAKE_SIDECAR_TRACE_DETAIL_FILE: join(home, 'ui-memory-runtime-trace-detail.json'),
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';
@@ -696,17 +735,25 @@ async function main() {
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('从记忆视图切回星图', await waitFor('document.querySelector("#memories-view")?.hidden === true'));
 
-    // 0.3 · 记忆运行时：状态 / 内部对象过滤 / 轨迹 / 模式切换（不迁移数据）
+    // 0.3 · 记忆运行时：sidecar 状态 / 内部对象过滤 / 轨迹 / 反馈 / 单开关（全部经 admin 代理）
     await evalJs('document.querySelector("#view-nav li:nth-of-type(5) button").click()');
     check('切换到运行时视图（#runtime-view 可见）', await waitFor('document.querySelector("#runtime-view")?.hidden === false'));
-    check('运行时状态卡：模式/模型/计数/同步/数据范围 + 本机视角说明',
+    check('运行时状态卡：启用开关 + sidecar 健康 + 模型（宿主管理 / 本地由 Mebular 管理）',
       await waitFor(`(() => {
         const v = document.querySelector('#runtime-view');
         const s = document.querySelector('#runtime-status');
-        return Boolean(v) && Boolean(s) && /接入方式/.test(s.textContent) && /记忆模型/.test(s.textContent)
-          && /记忆计数/.test(s.textContent) && /同步/.test(s.textContent) && /数据范围/.test(s.textContent)
-          && /Raw/.test(s.textContent) && /本机视角/.test(v.textContent);
-      })()`, 20000));
+        return Boolean(v) && Boolean(s) && /接入方式/.test(s.textContent) && /Sidecar 健康/.test(s.textContent)
+          && /记忆模型/.test(s.textContent) && /宿主管理/.test(s.textContent)
+          && /由 Mebular 管理/.test(s.textContent) && /PID/.test(s.textContent) && /版本/.test(s.textContent)
+          && Boolean(s.querySelector('[data-rt-enabled]')) && /本机视角/.test(v.textContent);
+      })()`, 30000));
+    check('sidecar 由 MCP 自动启动并显示就绪（无 token 泄漏）',
+      await waitFor(`(() => {
+        const s = document.querySelector('#runtime-status [data-rt-sidecar-status]');
+        const head = document.querySelector('#runtime-head-mode');
+        return Boolean(s) && /就绪/.test(s.textContent) && /沉浸式 sidecar/.test(head?.textContent ?? '')
+          && !/Bearer|host-token|tokenFile/.test(document.querySelector('#runtime-view')?.textContent ?? '');
+      })()`, 30000));
     check('运行时时间线默认只显示普通记录（compact/checkpoint/self 隐藏）',
       await waitFor(`(() => {
         const list = document.querySelector('#runtime-timeline');
@@ -738,62 +785,85 @@ async function main() {
           && /内部 · 管理员/.test(document.querySelector('#runtime-timeline')?.textContent ?? '');
       })()`, 20000));
     await evalJs('document.querySelector("#runtime-timeline [data-rt-object]").click()');
-    check('内部对象可查看（compact 摘要，仅管理员视图）',
+    check('内部对象可查看（compact 类型/域，仅管理员视图）',
       await waitFor(`(() => {
         const d = document.querySelector('#runtime-timeline .runtime-detail');
-        return Boolean(d) && /UI 运行时摘要/.test(d.textContent) && /内部 · 管理员/.test(d.textContent);
+        return Boolean(d) && d.hasAttribute('data-runtime-object') && /compact/.test(d.textContent)
+          && /内部 · 管理员/.test(d.textContent);
       })()`, 20000));
     await evalJs('document.querySelector("#runtime-timeline [data-rt-object]").click()');
-    check('召回轨迹可见，「为什么想起」展开命中与分数',
+    check('召回轨迹可见（经 /admin/api/memory-runtime/traces 代理）',
       await waitFor(`(() => {
         const list = document.querySelector('#runtime-traces');
         return Boolean(list) && /UI 召回/.test(list.textContent) && Boolean(list.querySelector('[data-rt-trace]'));
-      })()`, 20000));
+      })()`, 30000));
     await evalJs('document.querySelector("#runtime-traces [data-rt-trace]").click()');
-    check('轨迹命中明细：fact / 分数 / 模型',
+    check('轨迹详情：命中 + citations / confidence / domain / owner / provenance',
       await waitFor(`(() => {
-        const hits = document.querySelector('#runtime-traces .runtime-trace-hits');
-        return Boolean(hits) && /fact/.test(hits.textContent) && /0.91/.test(hits.textContent);
-      })()`, 20000));
-    check('轻量 MCP 模式下反馈按钮禁用（不伪造成可写）',
-      await evalJs('(() => { const b = document.querySelector("#runtime-traces [data-rt-trace-useful]"); return Boolean(b) && b.disabled === true; })()'));
+        const d = document.querySelector('#runtime-traces .runtime-trace-detail');
+        if (!d) return false;
+        const text = d.textContent;
+        return /fact/.test(text) && /0.91/.test(text) && /citations/.test(text) && /confidence/.test(text)
+          && /domain/.test(text) && /owner/.test(text) && /provenance/.test(text) && /agent:opencode/.test(text);
+      })()`, 30000));
+    check('sidecar ready 时反馈按钮可用',
+      await evalJs('(() => { const b = document.querySelector("#runtime-traces [data-rt-trace-useful]"); return Boolean(b) && b.disabled === false; })()'));
+    await evalJs('document.querySelector("#runtime-traces [data-rt-trace-useful]").click()');
+    check('反馈经 admin 代理写入并即时显示',
+      await waitFor('(() => { const list = document.querySelector("#runtime-traces"); return Boolean(list) && /已标记有用/.test(list.textContent); })()', 30000));
     await evalJs('document.querySelector("[data-rt-filter=memory]").click()');
-    const beforeModeSwitch = await evalJs('document.querySelectorAll("#runtime-timeline .mem-row[data-rt-kind=memory]").length');
-    await evalJs('document.querySelector("#runtime-status [data-rt-mode=immersive]").click()');
-    check('切换接入方式走品牌确认（不迁移、不删除）',
-      await waitFor('document.querySelector("#modal")?.hidden === false && /不迁移|不删除/.test(document.querySelector("#modal-body")?.textContent ?? "")'));
+    const beforeToggle = await evalJs('document.querySelectorAll("#runtime-timeline .mem-row[data-rt-kind=memory]").length');
+    await evalJs('document.querySelector("#runtime-status [data-rt-enabled]").click()');
+    check('关闭记忆运行时走品牌确认（不迁移、不删除）',
+      await waitFor('document.querySelector("#modal")?.hidden === false && /停止|不迁移|不删除/.test(document.querySelector("#modal-body")?.textContent ?? "")'));
     await evalJs('document.querySelector("#modal-confirm").click()');
-    check('切换到沉浸式 Runtime：当前模式即时更新',
-      await waitFor('document.querySelector("#runtime-head-mode")?.textContent === "沉浸式 Runtime"', 20000));
-    check('模式切换不迁移数据：普通记录数量不变',
-      beforeModeSwitch >= 1 && await evalJs('document.querySelectorAll("#runtime-timeline .mem-row[data-rt-kind=memory]").length') === beforeModeSwitch);
-    check('沉浸式下反馈按钮可用（写入口已打开）',
-      await waitFor('(() => { const b = document.querySelector("#runtime-traces [data-rt-trace-useful]"); return Boolean(b) && b.disabled === false; })()', 20000));
-    await evalJs('document.querySelector("#runtime-status [data-rt-mode=mcp]").click()');
+    check('关闭后回到轻量 MCP，轨迹显示未启用（不是 501/错误弹窗）',
+      await waitFor(`(() => {
+        const head = document.querySelector('#runtime-head-mode')?.textContent ?? '';
+        const traces = document.querySelector('#runtime-traces')?.textContent ?? '';
+        return /轻量 MCP/.test(head) && /记忆运行时未启用/.test(traces);
+      })()`, 30000));
+    check('开关不迁移数据：普通记录数量不变',
+      beforeToggle >= 1 && await evalJs('document.querySelectorAll("#runtime-timeline .mem-row[data-rt-kind=memory]").length') === beforeToggle);
+    await evalJs('document.querySelector("#runtime-status [data-rt-enabled]").click()');
     await waitFor('document.querySelector("#modal")?.hidden === false');
     await evalJs('document.querySelector("#modal-confirm").click()');
-    check('切回轻量 MCP（随时可回退）',
-      await waitFor('document.querySelector("#runtime-head-mode")?.textContent === "轻量 MCP"', 20000));
+    check('重新启用后 sidecar 就绪、反馈恢复可用（失败开放）',
+      await waitFor(`(() => {
+        const head = document.querySelector('#runtime-head-mode')?.textContent ?? '';
+        const b = document.querySelector('#runtime-traces [data-rt-trace-useful]');
+        return /沉浸式 sidecar/.test(head) && Boolean(b) && b.disabled === false;
+      })()`, 30000));
     await evalJs('document.querySelector("#view-nav li:nth-of-type(1) button").click()');
     check('从运行时视图切回星图', await waitFor('document.querySelector("#runtime-view")?.hidden === true'));
 
     // H-1/UX-2：设置 · AI 助手专区（连接页已收编进设置；单列表 + 行内闭环）
     await evalJs('document.querySelector("#open-settings").click()');
     check('设置弹层打开', await waitFor('document.querySelector("#settings")?.hidden === false'));
-    // 0.3 · 设置 · 记忆运行时：两轴 + 复杂项收进高级
+    // 0.3 · 设置 · 记忆运行时：单开关 + sidecar 健康 + 本地模型；旧 runtime.* 字段不再出现
     await evalJs('document.querySelector("[data-settings-tab=runtime]").click()');
-    check('设置·记忆运行时：接入方式 / 记忆模型 / 本地精选 / 第三方 API',
+    check('设置·记忆运行时：单开关 / sidecar 健康 / 宿主管理 / 本地模型',
       await waitFor(`(() => {
         const p = document.querySelector('#settings-panel-runtime');
         if (!p || p.hidden) return false;
-        return /接入方式/.test(p.textContent) && /记忆模型/.test(p.textContent)
-          && /本地精选模型/.test(p.textContent) && /第三方 API/.test(p.textContent)
+        const toggle = p.querySelector('[data-rt-enabled]');
+        return /记忆运行时/.test(p.textContent) && /Sidecar 健康/.test(p.textContent)
+          && /宿主管理/.test(p.textContent) && /由 Mebular 管理/.test(p.textContent)
+          && Boolean(toggle) && toggle.checked === true
           && p.querySelectorAll('.runtime-pack').length >= 3
-          && Boolean(p.querySelector('[data-rt-model-source=heuristic]'))
-          && Boolean(p.querySelector('[data-rt-model-source=local]'))
-          && Boolean(p.querySelector('[data-rt-model-source=api]'));
-      })()`, 20000));
-    check('模型轴：当前对话模型显示为宿主管理（不伪造全局开关）',
+          && p.querySelectorAll('[data-rt-path]').length === 0
+          && !/第三方 API/.test(p.textContent);
+      })()`, 30000));
+    check('sidecar 状态：enabled/state/pid/version/degraded/error（无 token 明文）',
+      await evalJs(`(() => {
+        const s = document.querySelector('#settings-panel-runtime [data-rt-sidecar-status]');
+        if (!s) return false;
+        const text = s.textContent;
+        return /已启用/.test(text) && /状态/.test(text) && /就绪/.test(text) && /PID/.test(text)
+          && /版本/.test(text) && /降级/.test(text) && /错误/.test(text)
+          && !/Bearer\\s+[A-Za-z0-9_-]{16,}/.test(text);
+      })()`));
+    check('模型区：当前对话模型显示为宿主管理（不伪造全局开关）',
       await evalJs(`(() => {
         const host = document.querySelector('#settings-panel-runtime [data-rt-host-model]');
         return Boolean(host) && /宿主管理/.test(host.textContent)
@@ -808,23 +878,14 @@ async function main() {
           && !/Q4_K_M|量化|线程|端口/.test(text);
       })()`));
     await evalJs('(() => { const d = document.querySelector("#runtime-advanced-fold"); if (d) d.open = true; })()');
-    check('高级折叠：capture / trace / retention / context budget / checkpoint/self sync',
+    check('Sidecar 诊断折叠：只读状态与托管信息，不再渲染旧 runtime.* 字段',
       await evalJs(`(() => {
         const p = document.querySelector('#runtime-advanced-fold');
         if (!p) return false;
-        const paths = [...p.querySelectorAll('[data-rt-path]')].map((el) => el.dataset.rtPath);
-        return ['runtime.capture', 'runtime.trace', 'runtime.retention.rawDays', 'runtime.retention.traceDays',
-          'runtime.retention.checkpointDays', 'runtime.limits.maxContextTokens',
-          'runtime.checkpoint.sync', 'runtime.self.sync'].every((path) => paths.includes(path));
-      })()`));
-    check('第三方 API 高级：endpoint/model/keyRef + allowRemote 警告 + 超时',
-      await evalJs(`(() => {
-        const p = document.querySelector('#settings-panel-runtime');
-        const text = p?.textContent ?? '';
-        return Boolean(p.querySelector('[data-rt-api-save]'))
-          && Boolean(p.querySelector('[data-rt-api-allow-remote]'))
-          && /Endpoint/.test(text) && /模型名/.test(text) && /密钥引用/.test(text)
-          && /记忆文本会发送到该 endpoint/.test(text) && /超时/.test(text);
+        const text = p.textContent;
+        return /Sidecar 诊断/.test(p.querySelector('summary')?.textContent ?? '')
+          && /由 MCP 托管/.test(text) && /命令来源/.test(text) && /重启次数/.test(text)
+          && p.querySelectorAll('[data-rt-path]').length === 0;
       })()`));
     await evalJs('document.querySelector("[data-settings-tab=assistants]").click()');
     // U-3 症状①：背板/设置框不滚，只有页签下的 .settings-scroll 滚动；页面滚动锁定
@@ -3014,7 +3075,7 @@ async function main() {
         service: /Resident/.test(full.common),
         securitySections: /Security level/.test(full.security) && /Authenticator seed/.test(full.security) && /Recovery code/.test(full.security),
         assistants: /Add assistant/.test(full.assistants),
-        runtime: /Access mode/.test(full.runtime) && /Memory model/.test(full.runtime) && /Third-party API/.test(full.runtime),
+        runtime: /Memory runtime/.test(full.runtime) && /Enable immersive/.test(full.runtime) && /Memory model/.test(full.runtime) && /Host-managed/.test(full.runtime) && !/Third-party API/.test(full.runtime),
         mcp: /Connection/.test(full.mcp) && /TLS/.test(full.mcp) && /Risks and recovery/.test(full.mcp),
         advanced: /Resident service/.test(full.advanced) && /Network/.test(full.advanced) && /Automation/.test(full.advanced) && /Diagnostics and recovery/.test(full.advanced),
         diagnostics: /Version and service status/.test(diag) && /Recovery guide/.test(diag) && /Full configuration/.test(diag),
@@ -3025,7 +3086,7 @@ async function main() {
     const settingsPanels = await evalJs(settingsPanelsProbe);
     check('i18n 设置深度页英文：六个页签 + 通用/安全/AI 助手/运行时/MCP/高级 段落文案全英文',
       settingsPanels.lang === 'en-US'
-        && settingsPanels.tabs.join(',') === 'General,Security,Assistants,Runtime,MCP,Advanced'
+        && settingsPanels.tabs.join(',') === 'General,Security,Assistants,Memory,MCP,Advanced'
         && settingsPanels.extra === 'About device'
         && Object.values(settingsPanels.has).every(Boolean)
         && settingsPanels.cjk.security === false,

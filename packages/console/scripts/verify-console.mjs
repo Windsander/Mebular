@@ -1648,15 +1648,16 @@ try {
       consoleSrc2.indexOf('function runtimePackCard('),
       consoleSrc2.indexOf('function runtimeLocalModelsHtml('),
     );
-    check('0.3 记忆运行时：两轴设置 + 内部过滤 + 状态/模型/轨迹数据面',
-      ia.IA_RUNTIME_MODEL_SOURCES.join(',') === 'heuristic,local,api'
-        && ia.IA_RUNTIME_MODES.join(',') === 'mcp,immersive'
+    check('0.3 记忆运行时：memoryRuntime.enabled 单开关 + sidecar 状态/模型/轨迹代理',
+      ia.IA_RUNTIME_CONTROL_PATHS.join(',') === 'memoryRuntime.enabled'
         && runtimeFieldsMapped
-        && consoleSrc2.includes("api('/runtime/v1/status')")
-        && consoleSrc2.includes("api('/runtime/v1/mode'")
+        && consoleSrc2.includes("api('/admin/api/memory-runtime/status')")
+        && consoleSrc2.includes("api('/admin/api/memory-runtime/traces?limit=20')")
+        && consoleSrc2.includes("api('/admin/api/memory-runtime/feedback'")
+        && consoleSrc2.includes("api(`/admin/api/memory-runtime/traces/${encodeURIComponent(id)}`)")
         && consoleSrc2.includes("api('/admin/api/models')")
-        && consoleSrc2.includes('/runtime/v1/recall/')
         && consoleSrc2.includes('includeInternal=1')
+        && !consoleSrc2.includes('/runtime/v1')
         && memQueryBlock.length > 0 && !memQueryBlock.includes('includeInternal')
         && htmlSrc.includes('id="runtime-view"') && htmlSrc.includes('id="runtime-timeline"') && htmlSrc.includes('id="runtime-traces"'),
       `runtimeFields=${ia.IA_RUNTIME_FIELDS.length} memQueryInternal=${memQueryBlock.includes('includeInternal')}`);

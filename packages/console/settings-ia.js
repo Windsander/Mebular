@@ -227,92 +227,32 @@ export const IA_ADVANCED_FIELDS = IA_ADVANCED_SECTIONS.flatMap((section) => sect
 export const IA_MCP_FIELDS = IA_MCP_SECTIONS.flatMap((section) => section.fields);
 
 /**
- * 0.3 记忆运行时：用户只面对两条轴（接入方式 / 记忆模型），其余收进高级。
- * 这些 path 仍走 config.json 的 runtime 段（internal writable）；不是 schema 编辑器面，
- * 因此不进入 IA_EDITOR_PATHS，也不改变既有设置 IA 的 schema↔IA 防漂移集合。
+ * 0.3 记忆运行时：用户只面对一个开关（memoryRuntime.enabled），默认关闭；
+ * 模型区继续走 /admin/api/models，但本地模型由 Mebular 管理，当前对话模型由宿主管理。
+ * 旧模式的字段不再属于 Console 设置面。
  */
-export const IA_RUNTIME_MODES = ['mcp', 'immersive'];
-export const IA_RUNTIME_MODEL_SOURCES = ['heuristic', 'local', 'api'];
-export const IA_RUNTIME_API_FIELDS = [
-  'runtime.model.api.baseUrl',
-  'runtime.model.api.model',
-  'runtime.model.api.keyRef',
-  'runtime.model.api.allowRemote',
-  'runtime.model.api.timeoutMs',
-];
-export const IA_RUNTIME_ADVANCED_FIELDS = [
-  'runtime.capture',
-  'runtime.trace',
-  'runtime.retention.rawDays',
-  'runtime.retention.traceDays',
-  'runtime.retention.checkpointDays',
-  'runtime.limits.maxContextTokens',
-  'runtime.checkpoint.sync',
-  'runtime.self.sync',
-];
-export const IA_RUNTIME_FIELDS = [
-  ...IA_RUNTIME_API_FIELDS,
-  ...IA_RUNTIME_ADVANCED_FIELDS,
-];
-/** 由动作按钮写入、但不出现在字段编辑器里的 runtime path。 */
-export const IA_RUNTIME_CONTROL_PATHS = ['runtime.mode', 'runtime.model.source'];
+export const IA_RUNTIME_CONTROL_PATHS = ['memoryRuntime.enabled'];
+export const IA_RUNTIME_FIELDS = [];
+/** Runtime 字段文案（当前没有由 schema 编辑器渲染的 runtime 字段）。 */
+export const IA_RUNTIME_FIELD_COPY = {};
 
-/** Runtime 字段文案（runtime 段仍是 internal writable；这里只提供 Console 展示文案）。 */
-export const IA_RUNTIME_FIELD_COPY = {
-  'runtime.model.api.baseUrl': {
-    labelKey: 'settings.runtime.api.baseUrl',
-    helpKey: 'settings.runtime.api.baseUrlHelp',
-  },
-  'runtime.model.api.model': {
-    labelKey: 'settings.runtime.api.model',
-    helpKey: 'settings.runtime.api.modelHelp',
-  },
-  'runtime.model.api.keyRef': {
-    labelKey: 'settings.runtime.api.keyRef',
-    helpKey: 'settings.runtime.api.keyRefHelp',
-  },
-  'runtime.model.api.allowRemote': {
-    labelKey: 'settings.runtime.api.allowRemote',
-    helpKey: 'settings.runtime.api.allowRemoteHelp',
-    warnKey: 'settings.runtime.api.allowRemoteWarn',
-  },
-  'runtime.model.api.timeoutMs': {
-    labelKey: 'settings.runtime.api.timeout',
-    helpKey: 'settings.runtime.api.timeoutHelp',
-  },
-  'runtime.capture': {
-    labelKey: 'settings.runtime.advanced.capture.label',
-    helpKey: 'settings.runtime.advanced.capture.help',
-  },
-  'runtime.trace': {
-    labelKey: 'settings.runtime.advanced.trace.label',
-    helpKey: 'settings.runtime.advanced.trace.help',
-  },
-  'runtime.retention.rawDays': {
-    labelKey: 'settings.runtime.advanced.rawDays.label',
-    helpKey: 'settings.runtime.advanced.rawDays.help',
-  },
-  'runtime.retention.traceDays': {
-    labelKey: 'settings.runtime.advanced.traceDays.label',
-    helpKey: 'settings.runtime.advanced.traceDays.help',
-  },
-  'runtime.retention.checkpointDays': {
-    labelKey: 'settings.runtime.advanced.checkpointDays.label',
-    helpKey: 'settings.runtime.advanced.checkpointDays.help',
-  },
-  'runtime.limits.maxContextTokens': {
-    labelKey: 'settings.runtime.advanced.maxContextTokens.label',
-    helpKey: 'settings.runtime.advanced.maxContextTokens.help',
-  },
-  'runtime.checkpoint.sync': {
-    labelKey: 'settings.runtime.advanced.checkpointSync.label',
-    helpKey: 'settings.runtime.advanced.checkpointSync.help',
-  },
-  'runtime.self.sync': {
-    labelKey: 'settings.runtime.advanced.selfSync.label',
-    helpKey: 'settings.runtime.advanced.selfSync.help',
-  },
-};
+/** sidecar 生命周期状态 → Console 文案 key（未知状态按 stopped 展示，不暴露原始码）。 */
+export const RUNTIME_SIDECAR_STATES = Object.freeze([
+  'disabled', 'not_installed', 'stopped', 'starting', 'ready', 'degraded', 'stopping', 'failed',
+]);
+
+export function runtimeSidecarStateKey(state) {
+  const value = String(state ?? '');
+  return RUNTIME_SIDECAR_STATES.includes(value)
+    ? `runtime.sidecar.state.${value}`
+    : 'runtime.sidecar.state.stopped';
+}
+
+/** memoryRuntime.enabled：状态优先（服务端热生效后的真值），配置兜底，默认关闭。 */
+export function memoryRuntimeEnabledOf(status, config) {
+  if (typeof status?.enabled === 'boolean') return status.enabled;
+  return config?.memoryRuntime?.enabled === true;
+}
 
 /**
  * 只读面（status-only）：值由运行时 / 自动推导（relay 池、LAN 发现、桥、打洞、广播、join、TLS、）。
@@ -526,7 +466,7 @@ export function formatByteSize(bytes) {
   return `${rounded} ${units[index]}`;
 }
 
-/** 内部对象三重判定（与 admin.mjs / core internal.ts 同义；用于 Console 时间线过滤）。 */
+/** 内部对象判定（与 core 通用可见性 + 0.3 内部类型同义；用于 Console 时间线过滤）。 */
 export const RUNTIME_INTERNAL_NODE_TYPES = Object.freeze([
   'compact', 'context_checkpoint', 'self_record', 'raw_chunk', 'recall_trace',
 ]);
@@ -537,6 +477,8 @@ export function isInternalRuntimeMemory(memory) {
   if (!memory) return false;
   if (RUNTIME_INTERNAL_TYPE_SET.has(memory.type)) return true;
   if (memory.internal === true) return true;
+  if (memory.metadata?.internal === true) return true;
+  // 0.3 原型数据兼容：发布版不再写入 metadata.runtime.internal。
   if (memory.metadata?.runtime?.internal === true) return true;
   return typeof memory.namespace === 'string'
     && memory.namespace.startsWith('__')
@@ -562,46 +504,6 @@ export function filterRuntimeTimeline(memories, { filter = 'memory', includeInte
     return kind === filter;
   });
 }
-
-/** 当前模式：运行时状态优先，其次本机配置，最后默认 mcp。 */
-export function runtimeModeOf(status, config) {
-  const raw = status?.mode ?? config?.runtime?.mode;
-  return raw === 'immersive' ? 'immersive' : 'mcp';
-}
-
-/** 当前记忆模型来源：运行时 configured 优先，其次本机配置；host/auto 保留为状态值。 */
-export function runtimeModelSourceOf(status, config) {
-  const raw = status?.model?.configured ?? config?.runtime?.model?.source;
-  return ['heuristic', 'local', 'host', 'api', 'auto'].includes(raw) ? raw : 'heuristic';
-}
-
-/** 运行时 warning 码 → 文案 key（已知码）；未知码由调用方原样展示。 */
-export const RUNTIME_WARNING_KEYS = Object.freeze({
-  rawCaptureUnencrypted: 'runtime.warning.rawCaptureUnencrypted',
-  cloud_identity_unavailable: 'runtime.warning.cloudIdentityUnavailable',
-  raw_storage_unavailable: 'runtime.warning.rawStorageUnavailable',
-  trace_storage_unavailable: 'runtime.warning.traceStorageUnavailable',
-  runtime_model_degraded: 'runtime.warning.modelDegraded',
-  host_candidates_missing: 'runtime.warning.hostCandidatesMissing',
-  model_unavailable: 'runtime.warning.modelUnavailable',
-  model_invalid_candidates: 'runtime.warning.modelInvalidCandidates',
-  no_extractable_memory: 'runtime.warning.noExtractableMemory',
-  selected_pack_not_installed: 'runtime.warning.selectedPackNotInstalled',
-  selected_pack_corrupt: 'runtime.warning.selectedPackCorrupt',
-  selected_pack_unknown: 'runtime.warning.selectedPackUnknown',
-  config_pack_overrides_selection: 'runtime.warning.configPackOverridesSelection',
-  runtime_source_not_local: 'runtime.warning.sourceNotLocal',
-  hardware_detection_failed: 'runtime.warning.hardwareDetectionFailed',
-  model_recommendation_failed: 'runtime.warning.modelRecommendationFailed',
-});
-
-/** 模型降级原因码 → 文案 key（未知原因原样返回）。 */
-export const RUNTIME_MODEL_REASON_KEYS = Object.freeze({
-  host_candidates_missing: 'runtime.model.reason.hostCandidatesMissing',
-  model_unavailable: 'runtime.model.reason.modelUnavailable',
-  model_invalid_candidates: 'runtime.model.reason.modelInvalidCandidates',
-  remote_not_allowed: 'runtime.model.reason.remoteNotAllowed',
-});
 
 // ---------- U-1 · CSRF 403 自愈（与 IA 同处共享纯逻辑模块：无 DOM、零依赖） ----------
 // 长开页面 / 守护重启后旧 token 失效时，重取一次 /console/ 的 token（响应头 + cookie），

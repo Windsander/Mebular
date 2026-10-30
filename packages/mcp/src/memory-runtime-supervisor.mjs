@@ -277,6 +277,48 @@ function redact(text, secrets) {
   return out.slice(-1000);
 }
 
+const PROXY_SECRET_KEYS = new Set([
+  'authorization',
+  'cookie',
+  'token',
+  'tokenfile',
+  'hosttoken',
+  'host_token',
+  'capabilitytoken',
+  'capability_token',
+  'password',
+  'secret',
+]);
+
+/**
+ * 管理面代理只返回 sidecar 的公开视图：递归去掉令牌类字段，并把已知密钥从字符串里抹掉。
+ * sidecar 本身不应返回这些字段；这里多做一层，避免未来回归把 host token 带到浏览器。
+ */
+function scrubProxyValue(value, secrets) {
+  if (Array.isArray(value)) return value.map((entry) => scrubProxyValue(entry, secrets));
+  if (isObject(value)) {
+    const out = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (PROXY_SECRET_KEYS.has(String(key).toLowerCase())) continue;
+      out[key] = scrubProxyValue(entry, secrets);
+    }
+    return out;
+  }
+  if (typeof value === 'string') {
+    let text = value;
+    for (const secret of secrets) {
+      if (typeof secret === 'string' && secret.length > 0) text = text.split(secret).join('[redacted]');
+    }
+    return text;
+  }
+  return value;
+}
+
+function proxyErrorMessage(body, fallback) {
+  const message = body?.error?.message ?? body?.message;
+  return typeof message === 'string' && message.length > 0 ? message : fallback;
+}
+
 /**
  * Memory Runtime sidecar supervisor。
  *
@@ -641,6 +683,279 @@ export class MemoryRuntimeSupervisor {
       this.#setState({ error: publicError('status_failed', '无法读取 sidecar 状态') });
     }
     return this.snapshot();
+  }
+
+  /**
+   * Console 只读代理：服务端读取 host token，浏览器只拿到脱敏后的 sidecar 视图。
+   * 轻量模式/未就绪时返回明确状态，不启动进程、不创建 token。
+   */
+  async readTraces({ limit = 20 } = {}) {
+    const requested = Number(limit);
+    const safeLimit = Number.isFinite(requested) ? Math.min(Math.max(Math.trunc(requested), 1), 100) : 20;
+    const result = await this.#proxyHostApi(`traces?limit=${safeLimit}`);
+    if (!result.available) {
+      return {
+        ok: !result.error,
+        enabled: result.enabled,
+        available: false,
+        disabled: result.disabled === true,
+        state: result.state,
+        reason: result.reason ?? null,
+        error: result.error ?? null,
+        traces: [],
+        total: 0,
+        degraded: result.state === 'degraded',
+        warnings: [],
+      };
+    }
+    const data = result.body?.data ?? result.body ?? {};
+    const traces = Array.isArray(data.traces) ? data.traces : [];
+    if (!result.ok) {
+      return {
+        ok: false,
+        enabled: true,
+        available: true,
+        disabled: false,
+        state: result.state,
+        error: publicError(
+          data?.error?.code ?? result.body?.error?.code ?? 'sidecar_request_failed',
+          proxyErrorMessage(data, proxyErrorMessage(result.body, '读取召回轨迹失败')),
+        ),
+        traces: [],
+        total: 0,
+        degraded: true,
+        warnings: [],
+      };
+    }
+    return {
+      ok: true,
+      enabled: true,
+      available: true,
+      disabled: false,
+      state: result.state,
+      degraded: data.degraded === true || result.body?.degraded === true,
+      traces,
+      total: Number.isInteger(data.total) ? data.total : traces.length,
+      warnings: Array.isArray(result.body?.warnings) ? result.body.warnings : [],
+    };
+  }
+
+  async readTrace(id) {
+    const traceId = typeof id === 'string' ? id.trim() : '';
+    if (!/^tr_[A-Za-z0-9._:-]{1,128}$/.test(traceId)) {
+      return {
+        ok: false,
+        enabled: this.isEnabled(),
+        available: false,
+        disabled: !this.isEnabled(),
+        state: this.statusState.state,
+        trace: null,
+        error: publicError('invalid_trace_id', 'trace id 格式非法'),
+      };
+    }
+    const result = await this.#proxyHostApi(`traces/${encodeURIComponent(traceId)}`);
+    if (!result.available) {
+      return {
+        ok: !result.error,
+        enabled: result.enabled,
+        available: false,
+        disabled: result.disabled === true,
+        state: result.state,
+        reason: result.reason ?? null,
+        error: result.error ?? null,
+        trace: null,
+      };
+    }
+    const data = result.body?.data ?? result.body ?? null;
+    if (!result.ok || !data) {
+      return {
+        ok: false,
+        enabled: true,
+        available: true,
+        disabled: false,
+        state: result.state,
+        trace: null,
+        error: publicError(
+          data?.error?.code ?? result.body?.error?.code ?? (result.statusCode === 404 ? 'trace_not_found' : 'sidecar_request_failed'),
+          proxyErrorMessage(data, proxyErrorMessage(result.body, '读取召回轨迹详情失败')),
+        ),
+      };
+    }
+    return {
+      ok: true,
+      enabled: true,
+      available: true,
+      disabled: false,
+      state: result.state,
+      trace: data,
+      degraded: result.body?.degraded === true,
+    };
+  }
+
+  async submitRecallFeedback(traceId, feedback) {
+    const id = typeof traceId === 'string' ? traceId.trim() : '';
+    if (!/^tr_[A-Za-z0-9._:-]{1,128}$/.test(id)) {
+      return { statusCode: 400, body: { ok: false, error: 'invalid_trace_id', message: 'trace id 格式非法' } };
+    }
+    if (!isObject(feedback) || typeof feedback.useful !== 'boolean') {
+      return { statusCode: 400, body: { ok: false, error: 'invalid_feedback', message: 'feedback.useful 必须是布尔值' } };
+    }
+    const body = {
+      useful: feedback.useful,
+      ...(typeof feedback.reason === 'string' && feedback.reason.length > 0
+        ? { reason: feedback.reason.slice(0, 200) }
+        : {}),
+    };
+    const result = await this.#proxyHostApi(`recall/${encodeURIComponent(id)}/feedback`, { method: 'POST', body });
+    if (!result.available) {
+      return {
+        statusCode: result.disabled === true ? 409 : 503,
+        body: {
+          ok: false,
+          error: result.disabled === true ? 'memory_runtime_disabled' : 'sidecar_unavailable',
+          enabled: result.enabled,
+          state: result.state,
+          message: result.disabled === true
+            ? '记忆运行时未启用'
+            : 'Memory Runtime sidecar 未就绪',
+          ...(result.error ? { details: result.error } : {}),
+        },
+      };
+    }
+    const data = result.body?.data ?? result.body ?? null;
+    if (!result.ok) {
+      return {
+        statusCode: result.statusCode ?? 502,
+        body: {
+          ok: false,
+          error: data?.error?.code ?? result.body?.error?.code ?? 'feedback_failed',
+          message: proxyErrorMessage(data, proxyErrorMessage(result.body, '召回反馈失败')),
+        },
+      };
+    }
+    return { statusCode: 200, body: result.body ?? { ok: true, data } };
+  }
+
+  async #resolveHostToken(discovery) {
+    if (this.child && discovery?.pid === this.child.pid && typeof this.childToken === 'string') {
+      return this.childToken;
+    }
+    const fromEnv = stringOrNull(this.env?.MEBULAR_MEMORY_RUNTIME_TOKEN);
+    if (fromEnv) return fromEnv;
+    if (typeof discovery?.tokenFile !== 'string' || discovery.tokenFile.length === 0) return null;
+    // 只读当前 home 的 sidecar token；discovery 路径不匹配时拒绝读取。
+    if (resolve(dirname(discovery.tokenFile)) !== this.paths.dataDir) return null;
+    try {
+      const token = (await readFile(discovery.tokenFile, 'utf-8')).trim();
+      return token.length > 0 ? token : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async #proxyHostApi(pathname, { method = 'GET', body = null, timeoutMs = 2500 } = {}) {
+    await this.status().catch(() => undefined);
+    if (!this.isEnabled()) {
+      return {
+        enabled: false,
+        available: false,
+        disabled: true,
+        state: 'stopped',
+        reason: 'disabled',
+        error: null,
+      };
+    }
+    if (!['ready', 'degraded'].includes(this.statusState.state) || typeof this.statusState.url !== 'string') {
+      return {
+        enabled: true,
+        available: false,
+        disabled: false,
+        state: this.statusState.state,
+        reason: this.statusState.reason ?? null,
+        error: this.statusState.error ?? publicError('sidecar_unavailable', 'Memory Runtime sidecar 未就绪'),
+      };
+    }
+    const discovery = await readDiscovery(this.paths.discoveryPath);
+    if (!discovery) {
+      return {
+        enabled: true,
+        available: false,
+        disabled: false,
+        state: this.statusState.state,
+        reason: null,
+        error: publicError('discovery_missing', 'sidecar discovery 缺失'),
+      };
+    }
+    const token = await this.#resolveHostToken(discovery);
+    if (!token) {
+      return {
+        enabled: true,
+        available: false,
+        disabled: false,
+        state: this.statusState.state,
+        reason: null,
+        error: publicError('host_token_missing', '无法读取 sidecar host token'),
+      };
+    }
+    if (!this.fetchImpl) {
+      return {
+        enabled: true,
+        available: false,
+        disabled: false,
+        state: this.statusState.state,
+        reason: null,
+        error: publicError('fetch_unavailable', '当前运行环境不支持 HTTP 代理'),
+      };
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
+    timer.unref?.();
+    try {
+      const base = discovery.url.replace(/\/+$/, '');
+      const url = new URL(`${base}/${String(pathname).replace(/^\/+/, '')}`);
+      const headers = {
+        accept: 'application/json',
+        authorization: `Bearer ${token}`,
+      };
+      const init = { method, headers, signal: controller.signal };
+      if (body !== null && body !== undefined) {
+        headers['content-type'] = 'application/json';
+        init.body = JSON.stringify(body);
+      }
+      const response = await this.fetchImpl(url.toString(), init);
+      const text = await response.text().catch(() => '');
+      let parsed = null;
+      try {
+        parsed = text.length > 0 ? JSON.parse(text) : null;
+      } catch {
+        parsed = null;
+      }
+      const scrubbed = scrubProxyValue(parsed, [token, this.childToken]);
+      return {
+        enabled: true,
+        available: true,
+        disabled: false,
+        state: this.statusState.state,
+        statusCode: response.status,
+        ok: response.ok === true,
+        body: scrubbed,
+        ...(parsed === null && text.length > 0 ? { message: redact(text, [token]) } : {}),
+      };
+    } catch (error) {
+      return {
+        enabled: true,
+        available: false,
+        disabled: false,
+        state: this.statusState.state,
+        reason: null,
+        error: publicError(
+          error?.name === 'AbortError' ? 'sidecar_timeout' : 'sidecar_unreachable',
+          error?.name === 'AbortError' ? 'sidecar 请求超时' : '无法连接 Memory Runtime sidecar',
+        ),
+      };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   #resolveCommand() {

@@ -1320,7 +1320,11 @@ export async function startHttpServer({
 
   async function handleAdminRead(req, res, path, url) {
     const builder = READ_ROUTES[path];
-    if (!builder) return false;
+    const memoryRuntimeTrace = /^\/admin\/api\/memory-runtime\/traces\/([^/]+)$/.exec(path);
+    const memoryRuntimeRead = path === '/admin/api/memory-runtime/status'
+      || path === '/admin/api/memory-runtime/traces'
+      || memoryRuntimeTrace !== null;
+    if (!builder && !memoryRuntimeRead) return false;
     // P2：助手列表只读本机配置，UNINITIALIZED 也开放；其余 admin 读数据面仍需 READY。
     if ((!app || !service) && path !== '/admin/api/clients') {
       return sendJson(res, 503, { error: 'console_unavailable', message: 'Mebular 尚未初始化' });
@@ -1330,6 +1334,47 @@ export async function startHttpServer({
       res.statusCode = check.status;
       if (check.challenge) res.setHeader('www-authenticate', check.challenge);
       return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
+    }
+    if (memoryRuntimeRead) {
+      // 只读薄代理：浏览器不接触 sidecar host token；轻量模式返回明确 disabled/stopped。
+      if (path === '/admin/api/memory-runtime/status') {
+        const status = memoryRuntimeSupervisor
+          ? await memoryRuntimeSupervisor.status().catch(() => memoryRuntimeSupervisor.snapshot())
+          : disabledMemoryRuntimeStatus();
+        return sendJson(res, 200, status);
+      }
+      if (!memoryRuntimeSupervisor) {
+        if (memoryRuntimeTrace) {
+          return sendJson(res, 200, {
+            ok: true,
+            enabled: false,
+            available: false,
+            disabled: true,
+            state: 'stopped',
+            reason: 'disabled',
+            trace: null,
+            error: null,
+          });
+        }
+        return sendJson(res, 200, {
+          ok: true,
+          enabled: false,
+          available: false,
+          disabled: true,
+          state: 'stopped',
+          reason: 'disabled',
+          traces: [],
+          total: 0,
+          degraded: false,
+          warnings: [],
+        });
+      }
+      if (memoryRuntimeTrace) {
+        const trace = await memoryRuntimeSupervisor.readTrace(decodeURIComponent(memoryRuntimeTrace[1]));
+        return sendJson(res, 200, trace);
+      }
+      const traces = await memoryRuntimeSupervisor.readTraces({ limit: url.searchParams.get('limit') ?? 20 });
+      return sendJson(res, 200, traces);
     }
     // 内部对象只在管理面显式调试时可见；includeInternal 不能由普通读 token 打开。
     if (path === '/admin/api/memories') {
@@ -1525,6 +1570,8 @@ export async function startHttpServer({
     /^\/admin\/api\/assistants\/([^/]+)\/remove$/,
     // 0.3 本地模型：设备级 store；同走 Origin + CSRF + memory.admin。
     /^\/admin\/api\/(?:models|inference)\/(select|download|pause|resume|cancel|import|uninstall|remove|start|stop|test)$/,
+    // 0.3 记忆运行时：召回反馈经 MCP 薄代理转发 sidecar；host token 不出服务端。
+    /^\/admin\/api\/memory-runtime\/feedback$/,
   ];
 
   // P2：UNINITIALIZED 仅开放本机助手配置所需的读写动作（列表 / 预览 / 接入 / 验证 / 重探）。
@@ -2074,6 +2121,28 @@ export async function startHttpServer({
 
     // 自动修复：客户端接入修复，**不**经 securityWriteGate（不写记忆/安全状态）。
     if (path === '/admin/api/repair') return handleRepair(req, res);
+
+    // 0.3 记忆运行时：召回反馈经 MCP 薄代理转发 sidecar（host token 只在服务端使用）。
+    if (path === '/admin/api/memory-runtime/feedback') {
+      const input = parseJsonBody(body);
+      if (!input) {
+        return sendJson(res, 400, { ok: false, error: 'bad_request', message: '需要 JSON 请求体' });
+      }
+      const traceId = typeof input.traceId === 'string' ? input.traceId : '';
+      const result = memoryRuntimeSupervisor
+        ? await memoryRuntimeSupervisor.submitRecallFeedback(traceId, input)
+        : {
+            statusCode: 409,
+            body: {
+              ok: false,
+              error: 'memory_runtime_disabled',
+              enabled: false,
+              state: 'stopped',
+              message: '记忆运行时未启用',
+            },
+          };
+      return sendJson(res, result.statusCode, result.body);
+    }
 
     // 0.3 本地模型：设备级 store，不经 securityWriteGate（不写记忆/安全状态）。
     const modelAction = path.match(/^\/admin\/api\/(?:models|inference)\/([^/]+)$/);
@@ -3582,7 +3651,12 @@ export async function startHttpServer({
           const out = await buildHandoffPlan({ app }, decodeURIComponent(planMatch[1]), successor);
           return sendJson(res, out.status, out.body);
         }
-        if (req.method === 'GET' && READ_ROUTES[path]) return handleAdminRead(req, res, path, url);
+        if (req.method === 'GET' && (READ_ROUTES[path]
+          || path === '/admin/api/memory-runtime/status'
+          || path === '/admin/api/memory-runtime/traces'
+          || /^\/admin\/api\/memory-runtime\/traces\/[^/]+$/.test(path))) {
+          return handleAdminRead(req, res, path, url);
+        }
         // 写端点路径：任何方法都交给 handleAdminWrite（非 POST/PUT/PATCH → 405；Origin/CSRF/scope 同处校验）
         if (WRITE_PATTERNS.some((re) => re.test(path))) {
           const done = await handleAdminWrite(req, res, path, body);

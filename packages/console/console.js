@@ -4235,6 +4235,14 @@ async function assistantSubmitForm() {
     if (!res?.ok) { state.addForm = { ...(state.addForm ?? {}), error: localizeReasonText(res?.reason, 'errors.unknown') || t('assistants.registerFailed') }; rerenderAssistants(); return; }
     state.addForm = null;
     await refresh();
+    // 保存后立即重取一次 clients，避免单飞 refresh 复用到写前响应而短暂丢行。
+    refreshSeq += 1;
+    try {
+      const clientsView = await api('/admin/api/clients');
+      if (Array.isArray(clientsView?.clients)) state.clients = clientsView.clients;
+    } catch {
+      // 即时刷新失败时保留当前列表；后续轮询会收敛。
+    }
     if ($('#settings') && !$('#settings').hidden) { lastSettingsSignature = null; renderSettings('assistants'); }
   } catch (error) {
     state.addForm = { ...(state.addForm ?? {}), error: t('assistants.form.failed', { message: localizeError(error, 'errors.unknown') }) };

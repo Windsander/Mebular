@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# 一键同步版本号（lockstep：6 个可发布包共用同一版本）。
+# 一键同步版本号（lockstep：7 个可发布包共用同一版本；dsh-plugin 仍走独立发布 job）。
 #
 #   bash scripts/bump_version.sh v0.2.0
 #
 # 具体改写逻辑在 scripts/bump-version.mjs（可被测试直接 import）：
-#   1. package.json × 6（root @mebular/core + fleet / mcp / service / skill / dsh-plugin）；
+#   1. package.json × 7（root @mebular/core + fleet / mcp / memory-runtime / service / skill / dsh-plugin）；
 #   2. 这些 manifest 中“已是版本号区间”的内部 @mebular/* 依赖 -> ^<new version>；
 #   3. 根 package-lock.json 与 apps/desktop/package-lock.json；
 #   4. apps/desktop/src/main/daemon.mjs 的 APP_VERSION；

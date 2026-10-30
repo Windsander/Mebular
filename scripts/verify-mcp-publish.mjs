@@ -154,7 +154,9 @@ try {
     { cwd: work, stdio: ['ignore', 'ignore', 'inherit'], env: process.env },
   );
   const installedCore = JSON.parse(await readFile(join(work, 'node_modules', '@mebular', 'core', 'package.json'), 'utf-8'));
+  const installedMemoryRuntime = JSON.parse(await readFile(join(work, 'node_modules', '@mebular', 'memory-runtime', 'package.json'), 'utf-8'));
   check(`tarball 安裝：@mebular/core@${version}`, installedCore.version === version, installedCore.version);
+  check(`tarball 安裝：@mebular/memory-runtime@${version}`, installedMemoryRuntime.version === version, installedMemoryRuntime.version);
   check(
     'tarball 安裝：六包齊備',
     ['core', 'service', 'fleet', 'mcp', 'memory-runtime', 'skill'].every((name) => existsSync(join(work, 'node_modules', '@mebular', name))),
@@ -166,7 +168,22 @@ try {
   check('tarball 安裝：fleet QR 可渲染 SVG', Boolean(installedQr?.value.startsWith('<svg')));
 
   const bin = join(work, 'node_modules', '.bin', 'mebular');
+  const memoryRuntimeBin = join(work, 'node_modules', '.bin', 'mebular-memory-runtime');
   const env = { ...process.env, MEBULAR_HOME: home, MEBULAR_STORAGE_PATH: join(home, 'store.jsonl'), MEBULAR_DEVICE_ID: 'device-publish-smoke' };
+
+  const memoryRuntimeHelp = execFileSync(process.execPath, [memoryRuntimeBin, '--help'], { cwd: work, encoding: 'utf-8', env });
+  check(
+    '安裝後 mebular-memory-runtime --help',
+    memoryRuntimeHelp.includes('mebular-memory-runtime serve') && memoryRuntimeHelp.includes('/memory-runtime/v1'),
+  );
+  const memoryRuntimeVersion = JSON.parse(
+    execFileSync(process.execPath, [memoryRuntimeBin, 'version'], { cwd: work, encoding: 'utf-8', env }),
+  );
+  check(
+    '安裝後 mebular-memory-runtime version',
+    memoryRuntimeVersion?.ok === true && /^\d+\.\d+\.\d+/.test(String(memoryRuntimeVersion?.runtimeVersion)),
+    `runtimeVersion=${memoryRuntimeVersion?.runtimeVersion}`,
+  );
 
   const statusOut = JSON.parse(execFileSync(process.execPath, [bin, 'status'], { cwd: work, encoding: 'utf-8', env }));
   check('安裝後 mebular status', /^[0-9a-f]{64}$/.test(statusOut.stateHash ?? ''), `deviceId=${statusOut.deviceId}`);

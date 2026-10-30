@@ -5,8 +5,9 @@
 //   node scripts/verify-release-version.mjs --version 0.2.0 --tag v0.2.0
 //
 // 校验：
-//   - 6 个 package manifest（core / fleet / mcp / service / skill / dsh-plugin）；
-//   - 根 package-lock 与 6 个 workspace 条目；
+//   - 7 个 package manifest（core / fleet / mcp / memory-runtime / service / skill / dsh-plugin）；
+//   - 根 package-lock 与 7 个 workspace 条目；
+//   - memory-runtime 的 @mebular/core 依赖可由 prepack 改写为版本区间（tarball 可安装）；
 //   - apps/desktop package.json / package-lock / APP_VERSION；
 //   - packages/mcp/src/version.mjs，以及 MCP 其它版本使用点不再手写版本号；
 //   - CHANGELOG.md 含 `## [vX.Y.Z]` 章节。
@@ -40,7 +41,7 @@ export function verifyReleaseVersion({ root = SCRIPT_ROOT, version, tag = `v${ve
     return { ok: false, version, tag: releaseTag, checks };
   }
 
-  // ---- 6 个可发布包 manifest ----
+  // ---- 7 个可发布包 manifest ----
   for (const target of RELEASE_PACKAGES) {
     safe(`${target.name} manifest`, () => {
       const file = join(root, target.rel, 'package.json');
@@ -53,6 +54,26 @@ export function verifyReleaseVersion({ root = SCRIPT_ROOT, version, tag = `v${ve
       add(`${target.name} version`, pkg.version === version, `${pkg.version} != ${version}`);
     });
   }
+
+  // ---- memory-runtime 发布依赖：源码可用 file: 链接，tarball 内必须是版本区间 ----
+  safe('@mebular/memory-runtime 发布依赖', () => {
+    const file = join(root, 'packages/memory-runtime/package.json');
+    if (!existsSync(file)) {
+      add('@mebular/memory-runtime 发布依赖', false, 'packages/memory-runtime/package.json 不存在');
+      return;
+    }
+    const pkg = readJson(file);
+    const coreSpec = String(pkg.dependencies?.['@mebular/core'] ?? '');
+    const isRange = /^\^?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(coreSpec);
+    const rewritesForPack =
+      /publish-manifest\.mjs\s+set/.test(pkg.scripts?.prepack ?? '')
+      && /publish-manifest\.mjs\s+restore/.test(pkg.scripts?.postpack ?? '');
+    add(
+      '@mebular/memory-runtime 的 @mebular/core 可随 tarball 安装',
+      isRange || (coreSpec === 'file:../..' && rewritesForPack),
+      `${coreSpec || '缺少依赖'}（需为版本区间，或 file:../.. + prepack/postpack 改写）`,
+    );
+  });
 
   // ---- 根 lockfile 与 workspace 条目 ----
   safe('package-lock.json', () => {

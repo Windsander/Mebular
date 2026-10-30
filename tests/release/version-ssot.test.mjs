@@ -30,6 +30,14 @@ function buildFixture() {
   const packages = {
     'packages/fleet': { name: '@mebular/fleet', deps: { '@mebular/core': 'file:../..', '@mebular/service': '^0.1.1' } },
     'packages/mcp': { name: '@mebular/mcp', deps: { '@mebular/core': 'file:../..' } },
+    'packages/memory-runtime': {
+      name: '@mebular/memory-runtime',
+      deps: { '@mebular/core': 'file:../..' },
+      scripts: {
+        prepack: 'node ../../scripts/publish-manifest.mjs set',
+        postpack: 'node ../../scripts/publish-manifest.mjs restore',
+      },
+    },
     'packages/service': { name: '@mebular/service' },
     'packages/skill': { name: '@mebular/skill' },
     'packages/dsh-plugin': { name: '@mebular/dsh-plugin' },
@@ -49,6 +57,7 @@ function buildFixture() {
       name: pkg.name,
       version: '0.1.1',
       ...(pkg.deps ? { dependencies: pkg.deps } : {}),
+      ...(pkg.scripts ? { scripts: pkg.scripts } : {}),
     });
     lockPackages[rel] = { name: pkg.name, version: '0.1.1' };
   }
@@ -125,12 +134,12 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
-describe('bump-version：六包 + MCP 版本源', () => {
-  it('同步 6 个 manifest、两个 lock、桌面 APP_VERSION、MCP version.mjs 与 CHANGELOG', () => {
+describe('bump-version：七包 + MCP 版本源', () => {
+  it('同步 7 个 manifest、两个 lock、桌面 APP_VERSION、MCP version.mjs 与 CHANGELOG', () => {
     const root = buildFixture();
     const result = bumpVersion({ root, version: '0.2.0', tag: 'v0.2.0', date: '2026-10-26' });
 
-    for (const rel of ['', 'packages/fleet', 'packages/mcp', 'packages/service', 'packages/skill', 'packages/dsh-plugin']) {
+    for (const rel of ['', 'packages/fleet', 'packages/mcp', 'packages/memory-runtime', 'packages/service', 'packages/skill', 'packages/dsh-plugin']) {
       expect(readVersion(root, rel)).toBe('0.2.0');
     }
     const rootLock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8'));
@@ -138,6 +147,7 @@ describe('bump-version：六包 + MCP 版本源', () => {
     expect(rootLock.packages[''].version).toBe('0.2.0');
     expect(rootLock.packages['packages/dsh-plugin'].version).toBe('0.2.0');
     expect(rootLock.packages['packages/fleet'].version).toBe('0.2.0');
+    expect(rootLock.packages['packages/memory-runtime'].version).toBe('0.2.0');
 
     const desktopLock = JSON.parse(readFileSync(join(root, 'apps/desktop/package-lock.json'), 'utf8'));
     expect(desktopLock.version).toBe('0.2.0');
@@ -196,6 +206,21 @@ describe('verify-release-version：通过/失败定位', () => {
     const result = verifyReleaseVersion({ root, version: '0.2.0', tag: 'v0.2.0' });
     expect(result.ok).toBe(false);
     expect(result.checks.find((check) => check.label === '@mebular/dsh-plugin version')?.ok).toBe(false);
+  });
+
+  it('memory-runtime 的 @mebular/core 无法随 tarball 安装时报错', () => {
+    const root = buildFixture();
+    bumpVersion({ root, version: '0.2.0', tag: 'v0.2.0', date: '2026-10-26' });
+    writeJson(root, 'packages/memory-runtime/package.json', {
+      name: '@mebular/memory-runtime',
+      version: '0.2.0',
+      dependencies: { '@mebular/core': 'workspace:*' },
+    });
+    const result = verifyReleaseVersion({ root, version: '0.2.0', tag: 'v0.2.0' });
+    expect(result.ok).toBe(false);
+    expect(
+      result.checks.find((check) => check.label === '@mebular/memory-runtime 的 @mebular/core 可随 tarball 安装')?.ok,
+    ).toBe(false);
   });
 
   it('真实仓库当前版本通过 SSOT 校验', () => {

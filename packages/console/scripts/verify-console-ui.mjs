@@ -839,6 +839,13 @@ async function main() {
           && /版本/.test(text) && /降级/.test(text) && /错误/.test(text)
           && !/PID/.test(text) && !/Bearer\\s+[A-Za-z0-9_-]{16,}/.test(text);
       })()`));
+    check('设置·记忆运行时：普通 UI 无 capture/本机采集/host/token 配置词',
+      await evalJs(`(() => {
+        const p = document.querySelector('#settings-panel-runtime');
+        if (!p || p.hidden) return false;
+        return !/capture|本机采集|host|token|逐宿主/i.test(p.textContent);
+      })()`));
+    await capture('c6-settings-runtime.jpg');
     // 轻量模式：模型状态卡消失，高级模型来源禁用并说明。
     await evalJs('document.querySelector("[data-rt-mode=lightweight]").click()');
     check('切回轻量 MCP 走品牌确认（不迁移、不删除）',
@@ -891,8 +898,9 @@ async function main() {
         return values.join(',') === 'heuristic,local,host,api,auto'
           && s.value === 'heuristic'
           && /模型来源/.test(section.textContent) && /立即应用|下次启动/.test(section.textContent)
-          && !/endpoint|keyRef|api key|token|Raw|模型路径/i.test(section.textContent);
+          && !/endpoint|keyRef|api key|token|Raw|模型路径|capture|host/i.test(section.textContent);
       })()`, 30000));
+    await capture('c6-settings-advanced.jpg');
     await evalJs(`(() => {
       const s = document.querySelector('#rt-model-source');
       s.value = 'auto';

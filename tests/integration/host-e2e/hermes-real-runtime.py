@@ -113,6 +113,10 @@ def main() -> int:
 
     result["prefetch"] = provider.prefetch(config["query"])
     result["prefetchSecond"] = provider.prefetch(config["query"])
+    if config.get("detail_query"):
+        result["detailPrefetch"] = provider.prefetch(config["detail_query"])
+    if config.get("checkpoint_query"):
+        result["checkpointPrefetch"] = provider.prefetch(config["checkpoint_query"])
 
     messages = [
         {"role": "user", "content": config["turn_user"]},
@@ -132,10 +136,16 @@ def main() -> int:
         {"role": "user", "content": config["compress_user"]},
         {"role": "assistant", "content": config["compress_assistant"]},
     ]
-    result["preCompressReturn"] = provider.on_pre_compress(archive_messages)
-    result["compressFlushed"] = bool(provider.flush(timeout=8.0))
-    result["compressPending"] = int(provider.pending())
-    result["checkpointPending"] = int(provider.checkpoint_pending())
+    if config.get("skip_pre_compress") is True:
+        result["preCompressReturn"] = ""
+        result["compressFlushed"] = True
+        result["compressPending"] = int(provider.pending())
+        result["checkpointPending"] = int(provider.checkpoint_pending())
+    else:
+        result["preCompressReturn"] = provider.on_pre_compress(archive_messages)
+        result["compressFlushed"] = bool(provider.flush(timeout=8.0))
+        result["compressPending"] = int(provider.pending())
+        result["checkpointPending"] = int(provider.checkpoint_pending())
 
     provider.on_session_switch(config["next_session_id"], reset=True)
     provider.sync_turn(

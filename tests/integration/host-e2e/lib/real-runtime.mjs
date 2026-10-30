@@ -121,6 +121,12 @@ async function readSidecarJsonLines(home, relativePath) {
  *   root?: string | null,
  *   memoryRuntime?: { enabled?: boolean } | null,
  *   manageMemoryRuntime?: boolean,
+ *   writesEnabled?: boolean,
+ *   master?: { publicKey: CryptoKey, privateKey: CryptoKey },
+ *   deviceId?: string,
+ *   deviceName?: string,
+ *   network?: Record<string, unknown> | null,
+ *   sync?: Record<string, unknown> | null,
  * }} [options]
  */
 export async function startRealRuntime(options = {}) {
@@ -136,16 +142,22 @@ export async function startRealRuntime(options = {}) {
   await mkdir(home, { recursive: true });
   await mkdir(cloudRoot, { recursive: true });
 
-  const master = await new IdentityManager().generateUserMasterKey();
+  const master = options.master ?? await new IdentityManager().generateUserMasterKey();
+  const deviceId = typeof options.deviceId === 'string' && options.deviceId.length > 0
+    ? options.deviceId
+    : `device-host-e2e-${process.pid}-${randomUUID().slice(0, 8)}`;
   const app = new Mebular({
     storagePath: join(home, 'device.jsonl'),
-    deviceId: `device-host-e2e-${process.pid}`,
+    deviceId,
+    ...(typeof options.deviceName === 'string' && options.deviceName.length > 0
+      ? { deviceName: options.deviceName }
+      : {}),
     encryption: {
       userMasterKey: master.publicKey,
       userMasterPrivateKey: master.privateKey,
     },
-    network: { enabled: false },
-    sync: { autoSync: false },
+    network: options.network ?? { enabled: false },
+    sync: { autoSync: false, ...(options.sync ?? {}) },
   });
   await app.initialize();
 
@@ -175,6 +187,7 @@ export async function startRealRuntime(options = {}) {
     port: 0,
     auth,
     manageMemoryRuntime,
+    ...(options.writesEnabled === true ? { writesEnabled: true } : {}),
     ...(tokensFile ? { tokensFile } : {}),
   });
   const url = `http://127.0.0.1:${server.port}`;
@@ -214,7 +227,19 @@ export async function startRealRuntime(options = {}) {
     return result.data;
   }
 
-  async function seedMemory({ text, namespace = 'default', agentId = 'host-e2e', threadId = 'th_host_e2e_seed' }) {
+  async function seedMemory({
+    text,
+    namespace = 'default',
+    agentId = 'host-e2e',
+    threadId = 'th_host_e2e_seed',
+    confirmation = null,
+    kind = 'episode',
+    content = undefined,
+    supersedes = [],
+  }) {
+    if (kind === 'fact' && (!content || typeof content !== 'object')) {
+      throw new Error('fact seed requires explicit content { subject, predicate, object }');
+    }
     const result = await requestCapability('/write', {
       method: 'POST',
       body: JSON.stringify({
@@ -223,14 +248,16 @@ export async function startRealRuntime(options = {}) {
         items: [{
           clientItemId: `seed-${randomUUID()}`,
           domain: namespace,
-          // Episode/observation keeps the exact seed text as the record gist
-          // (fact rendering would prepend subject/predicate).
-          kind: 'episode',
-          content: { episodeType: 'observation', content: text },
+          // Default episode/observation keeps the exact seed text as the record
+          // gist. Callers that exercise fact semantics pass kind/content.
+          kind,
+          content: content ?? { episodeType: 'observation', content: text },
+          ...(Array.isArray(supersedes) && supersedes.length > 0 ? { supersedes } : {}),
           provenance: {
             source: 'mcp',
             extractor: 'heuristic',
             ...(threadId ? { threadId } : {}),
+            ...(confirmation ? { confirmation } : {}),
           },
         }],
       }),
@@ -269,8 +296,12 @@ export async function startRealRuntime(options = {}) {
     agentId = 'host-e2e',
     threadId = 'th_host_e2e_seed',
     role = 'user',
+    confirmation = null,
+    kind = 'episode',
+    content = undefined,
+    supersedes = [],
   }) {
-    const seed = await seedMemory({ text, namespace, agentId, threadId });
+    const seed = await seedMemory({ text, namespace, agentId, threadId, confirmation, kind, content, supersedes });
     const recordId = seed.records.find((record) => typeof record?.id === 'string')?.id;
     if (!recordId) throw new Error('seed record id missing');
     const detail = await detailRequest({
@@ -287,13 +318,107 @@ export async function startRealRuntime(options = {}) {
         mime: 'text/plain',
         retentionClass: 'conversation',
         expiresAt: 0,
-        provenance: { source: 'runtime', extractor: 'host', threadId, messageIds: [] },
+        provenance: {
+          source: 'runtime',
+          extractor: 'host',
+          threadId,
+          messageIds: [],
+          ...(confirmation ? { confirmation } : {}),
+        },
       }],
     });
     const detailId = detail.results?.find((item) => typeof item?.id === 'string')?.id ?? null;
     return { ...seed, recordId, detailId };
   }
 
+  /** Write one structured fact through the real capability API. */
+  async function writeFact({
+    subject,
+    predicate,
+    object,
+    namespace = 'default',
+    agentId = 'host-e2e',
+    threadId = 'th_host_e2e_fact',
+    confidence = 0.9,
+  }) {
+    const result = await requestCapability('/write', {
+      method: 'POST',
+      body: JSON.stringify({
+        actor: { type: 'agent', agentId },
+        ...(threadId ? { threadId } : {}),
+        items: [{
+          clientItemId: `fact-${randomUUID()}`,
+          domain: namespace,
+          kind: 'fact',
+          content: { subject, predicate, object, confidence },
+          provenance: {
+            source: 'mcp',
+            extractor: 'heuristic',
+            ...(threadId ? { threadId } : {}),
+          },
+        }],
+      }),
+    });
+    if (result.status !== 200 || result.body?.ok !== true) {
+      throw new Error(`fact write failed: ${result.status} ${JSON.stringify(result.body)}`);
+    }
+    const recordId = result.data?.results?.find((item) => typeof item?.id === 'string')?.id ?? null;
+    return { recordId, data: result.data };
+  }
+
+  /** Update one MemoryRecord through the real capability API. */
+  async function updateMemory({ id, patch, agentId = 'host-e2e' }) {
+    const result = await requestCapability('/update', {
+      method: 'POST',
+      body: JSON.stringify({
+        actor: { type: 'agent', agentId },
+        items: [{ id, patch }],
+      }),
+    });
+    if (result.status !== 200 || result.body?.ok !== true) {
+      throw new Error(`update failed: ${result.status} ${JSON.stringify(result.body)}`);
+    }
+    return result.data;
+  }
+
+  /** Delete records through the real capability API (tombstones + detail cascade). */
+  async function deleteMemory(ids, { agentId = 'host-e2e' } = {}) {
+    const result = await requestCapability('/delete', {
+      method: 'POST',
+      body: JSON.stringify({
+        actor: { type: 'agent', agentId },
+        ids,
+      }),
+    });
+    if (result.status !== 200 || result.body?.ok !== true) {
+      throw new Error(`delete failed: ${result.status} ${JSON.stringify(result.body)}`);
+    }
+    return result.data;
+  }
+
+  /** Expand one sidecar recall trace through the real `/recall/:id/expand` endpoint. */
+  async function sidecarExpand(recallId, { fragmentId, agentId = 'host-e2e', format = 'verbatim' } = {}) {
+    const discovery = await sidecarDiscovery();
+    if (discovery === null) throw new Error('sidecar discovery missing');
+    return requestSidecar(discovery, `/recall/${encodeURIComponent(recallId)}/expand`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ agentId, fragmentId, format }),
+    });
+  }
+
+  /** Raw `/context` request against the real sidecar. */
+  async function sidecarContext(payload) {
+    const discovery = await sidecarDiscovery();
+    if (discovery === null) throw new Error('sidecar discovery missing');
+    return requestSidecar(discovery, '/context', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /** List detail records through the real capability API. */
   async function listDetails({
     domains = ['default', 'user'],
     recordIds,
@@ -341,7 +466,12 @@ export async function startRealRuntime(options = {}) {
     return details;
   }
 
-  async function recall(query, { agentId = 'host-e2e', namespaces = ['default'], threadId = 'th_host_e2e_recall' } = {}) {
+  async function recall(query, {
+    agentId = 'host-e2e',
+    namespaces = ['default'],
+    threadId = 'th_host_e2e_recall',
+    includeHistory = false,
+  } = {}) {
     const result = await requestCapability('/query', {
       method: 'POST',
       body: JSON.stringify({
@@ -349,6 +479,7 @@ export async function startRealRuntime(options = {}) {
         query,
         domains: namespaces,
         ...(threadId ? { threadId } : {}),
+        ...(includeHistory ? { includeHistory: true } : {}),
         limit: 20,
       }),
     });
@@ -454,11 +585,18 @@ export async function startRealRuntime(options = {}) {
     root,
     home,
     cloudRoot,
+    app,
+    master,
+    deviceId,
     auth,
     token,
     status,
+    requestCapability,
     seedMemory,
     seedMemoryWithDetail,
+    writeFact,
+    updateMemory,
+    deleteMemory,
     listDetails,
     getDetail,
     resolveDetails,
@@ -469,6 +607,8 @@ export async function startRealRuntime(options = {}) {
     waitForSidecar: (options) => waitForSidecar(home, options),
     sidecarStatus,
     sidecarCheckpoint,
+    sidecarExpand,
+    sidecarContext,
     sidecarStagingEntries,
     sidecarStagingChunks,
     sidecarTraces,

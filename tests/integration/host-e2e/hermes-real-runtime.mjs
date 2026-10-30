@@ -151,7 +151,11 @@ async function main() {
   const query = `hermes-prefetch-${suffix}`;
   const turnUser = `以后默认用 hermes-turn-${suffix} 主题`;
   const compressUser = `hermes-compress-${suffix} 这段对话在压缩前归档`;
-  const nextTurnUser = `以后默认用 hermes-s2-${suffix} 主题`;
+  // Use a different preference type from `turnUser`: two "default use X"
+  // statements are the same fact key, so the second would legitimately
+  // supersede the first (C6c). This fixture asserts both sync_turn records stay
+  // current, so the second marker is a `like` preference instead.
+  const nextTurnUser = `我喜欢 hermes-s2-${suffix} 主题`;
   const secretSystemPrompt = `SECRET HOST PROMPT ${suffix} do not archive`;
 
   try {

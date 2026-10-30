@@ -26,6 +26,31 @@ node tests/integration/host-e2e/opencode-real-runtime.mjs
 node tests/integration/host-e2e/dsh-real-runtime.mjs
 ```
 
+## 沉浸式用户旅程（C6）
+
+`immersive-journey.mjs` 串起同一用户主公钥下的两台真实设备：
+
+```bash
+node tests/integration/host-e2e/immersive-journey.mjs
+# 等价：npm run verify:immersive-journey
+```
+
+| 设备 | 真实部分 | 覆盖 |
+|---|---|---|
+| A | 真实 DSH Web + Chrome/CDP + 真实 `@mebular/dsh-plugin` + 真实 sidecar/capability + 确定性测试 LLM（无外部模型） | 轻量模式零 sidecar 请求；admin 热开关后 DSH 不重启自动跟随（实测 <5s）；第一轮 ingest 写 `user` 域记录+详情；第二轮 source-tagged gist 注入；详情 verbatim + `/recall/:id/expand` + `/detail get`；无命中沉默；`memory_*` 工具隐藏；sidecar 不可达失败开放；截图/DOM/请求载荷证据 |
+| B | 真实 Hermes `MemoryProvider` + 真实 sidecar/capability；真实 P2PNode/SyncManager 同步 | 设备 B 展开设备 A 的 `user` 域详情；Hermes 读取 DSH 结构化 checkpoint 并继续任务；原生 `MEMORY.md` 不变 |
+| B | 真实 `opencode serve/run` + 真实 `@mebular/opencode-plugin` + fake OpenAI-compatible provider | 旧 fact 召回；同键新 fact 显式 `supersedes` 后只召回新值；旧记录 `validTo`/历史详情保留；删除墓碑+详情级联；下一轮不再召回；OpenChamber 原生 `memory.json`/`settings.json` hash 不变 |
+
+证据默认写入 `docs/quality/0.3.0-immersive-ui/`（`MEBULAR_EVIDENCE_DIR` 可覆盖），包括 DSH `dsh-*.png/html/txt`、`dsh-llm-requests.json`、`dsh-session-history.txt`、Hermes/OpenCode 结果与 Console 截图。
+
+本次结果（2026-10-31，macOS arm64，Node 26.7.0，DSH 0.2.1-rc.2，OpenCode 2.2.0）：
+
+```text
+沉浸式旅程：84 passed, 0 failed, 0 defects（exit 0）
+```
+
+剩余 DSH durable `session.v4.jsonl` source-tagged 快照是 DSH 0.2.1-rc.2 的平台限制，不是产品缺陷；详见 `docs/quality/0.3.0-immersive-journey.md`。
+
 DSH 场景（默认全部）：
 
 ```bash

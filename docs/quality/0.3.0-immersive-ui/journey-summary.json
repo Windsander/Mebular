@@ -1,0 +1,46 @@
+{
+  "startedAt": "2026-10-30T17:49:53.188Z",
+  "finishedAt": "2026-10-30T17:50:29.417Z",
+  "passed": 84,
+  "failed": 0,
+  "defects": [],
+  "devices": {
+    "a": {
+      "deviceId": "device-a-1793382593188-27c53b",
+      "home": "<temp>/device-a"
+    },
+    "b": {
+      "deviceId": "device-b-1793382593188-27c53b",
+      "home": "<temp>/device-b"
+    }
+  },
+  "dsh": {
+    "thread": "dsh_memory-e2e-session",
+    "detailId": "01M66YY3HW9XMH8M0Z2HM6HE1Q",
+    "domain": "user"
+  },
+  "opencode": {
+    "old": {
+      "recordId": "01M66YYCQJPZ9REQ73J3T74F0B",
+      "detailId": "01M66YYCQM0GZP1XYJ1YFSC3H7"
+    },
+    "new": {
+      "recordId": "01M66YYDH0PWF68VSJY0N96AHC",
+      "detailId": "01M66YYDH9JJ6EVTNPAZ3Q2F0C"
+    },
+    "supersede": {
+      "validTo": 1793382626847,
+      "supersededBy": "01M66YYDH0PWF68VSJY0N96AHC"
+    }
+  },
+  "sync": {
+    "namespaces": [
+      "default",
+      "user",
+      "agent:dsh",
+      "agent:hermes",
+      "agent:opencode",
+      "task:dsh_memory-e2e-session"
+    ]
+  }
+}

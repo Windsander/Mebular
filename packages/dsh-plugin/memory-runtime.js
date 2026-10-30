@@ -758,6 +758,132 @@ function recallMessage(text) {
   };
 }
 
+function isMemoryMessage(value) {
+  return isObject(value) && isObject(value.source) && value.source.kind === MEMORY_MESSAGE_SOURCE;
+}
+
+/**
+ * Remove every earlier memory injection from a proposed step batch. The batch
+ * can contain a sourced memory message when a previous adapter version let the
+ * host claim one from the inbox; session-derived history is handled separately
+ * by replacing the old memory surface node.
+ *
+ * @param {unknown} messages
+ * @returns {Array<Record<string, unknown>> | unknown}
+ */
+export function stripMemoryMessages(messages) {
+  if (!Array.isArray(messages)) return messages;
+  const filtered = messages.filter((message) => !isMemoryMessage(message));
+  return filtered.length === messages.length ? messages : filtered;
+}
+
+function stampMemoryMessage(message, turn, step) {
+  if (!isObject(message)) return message;
+  const source = isObject(message.source) ? { ...message.source } : { kind: MEMORY_MESSAGE_SOURCE };
+  if (Number.isInteger(turn)) source.turn = turn;
+  if (Number.isInteger(step)) source.step = step;
+  return { ...message, source };
+}
+
+function memorySurfaceNodes(session) {
+  if (!isObject(session)
+    || typeof session.snapshotEvents !== 'function'
+    || !Array.isArray(session.surface?.nodes)) {
+    return [];
+  }
+  let events = [];
+  try {
+    events = session.snapshotEvents();
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(events)) return [];
+  const current = new Set(session.surface.nodes);
+  const nodes = [];
+  for (const event of events) {
+    if (!isObject(event) || !current.has(event.seq)) continue;
+    if (event.type !== 'user/message' || !isMemoryMessage(event.data)) continue;
+    nodes.push({
+      seq: event.seq,
+      turn: Number.isInteger(event.data?.source?.turn) ? event.data.source.turn : null,
+    });
+  }
+  return nodes;
+}
+
+function canManageMemorySurface(session) {
+  return isObject(session)
+    && typeof session.append === 'function'
+    && typeof session.snapshotEvents === 'function'
+    && Array.isArray(session.surface?.nodes);
+}
+
+function emptySurfaceMessage() {
+  return {
+    id: randomUUID(),
+    role: 'system',
+    content: [],
+    source: { kind: 'system-prompt' },
+  };
+}
+
+function emptySurfaceReplace(session, node, turn, step) {
+  session.append('system/message', {
+    turn: Number.isInteger(turn) ? turn : 0,
+    step: Number.isInteger(step) ? step : 0,
+    message: emptySurfaceMessage(),
+  }, {
+    surfaceOp: { op: 'replace', startSeq: node.seq, endSeq: node.seq },
+    sourceEventSeqs: [node.seq],
+  });
+}
+
+/**
+ * Keep at most one live memory node in the model-visible session surface.
+ *
+ * DSH 0.2.x has no non-persistent model-context channel: every model-visible
+ * message is logged. A source-tagged user message is therefore durable in
+ * `session.v4.jsonl`, but this projection keeps it out of user-visible history
+ * and replaces/shadows earlier memory nodes so later model requests do not
+ * accumulate stale injections. A no-hit turn replaces the previous node with
+ * an empty system message, which DSH omits from derived model history.
+ *
+ * @returns {boolean} whether this adapter managed the session surface
+ */
+export function applyMemorySurface(session, injection, turn, step) {
+  if (!canManageMemorySurface(session)) return false;
+  const nodes = memorySurfaceNodes(session);
+  if (injection === null) {
+    let removed = false;
+    let keptCurrent = false;
+    for (const node of nodes) {
+      if (Number.isInteger(turn) && node.turn === turn) {
+        keptCurrent = true;
+        continue;
+      }
+      emptySurfaceReplace(session, node, turn, step);
+      removed = true;
+    }
+    return removed || keptCurrent;
+  }
+  let placed = false;
+  for (const node of nodes) {
+    if (!placed) {
+      session.append('user/message', injection, {
+        surfaceOp: { op: 'replace', startSeq: node.seq, endSeq: node.seq },
+        sourceEventSeqs: [node.seq],
+      });
+      placed = true;
+    } else {
+      emptySurfaceReplace(session, node, turn, step);
+    }
+  }
+  if (!placed) {
+    session.append('user/message', injection, { surfaceOp: 'append' });
+  }
+  return true;
+}
+
 /**
  * Build the source-tagged context message injected at the first step of a
  * human turn. `source.kind='mebular-memory'` is the DSH context-injection
@@ -1555,6 +1681,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
   let disposal = null;
   let toolRefreshScheduled = false;
   let toolRefreshPromise = null;
+  let toolSurfacePromise = null;
   let suppressToolsChange = false;
   let lastWarning = null;
   let discoveryCache = null;
@@ -2183,14 +2310,34 @@ export function createMemoryRuntimeAdapter(options = {}) {
   }
 
   async function onPreStep(payload, next) {
-    const decision = await next();
-    if (closing || disposed || !config.recall || payload?.step !== 1 || decision?.kind !== 'enter') return decision;
-    if (!Array.isArray(decision.messages)) return decision;
+    if (payload?.step === 1 && config.hideMemoryTools && isObject(payload.agent)) {
+      // Cover agents created before this adapter attached, and make a mode
+      // switch visible to the same session even when no tools/change lands.
+      trackAgent(payload.agent);
+      await refreshToolSurface(true);
+    }
+    const proposed = await next();
+    if (!isObject(proposed) || proposed.kind !== 'enter' || !Array.isArray(proposed.messages)) {
+      return proposed;
+    }
+    const messages = stripMemoryMessages(proposed.messages);
+    const decision = messages === proposed.messages ? proposed : { ...proposed, messages };
+    if (closing || disposed || !config.recall || payload?.step !== 1) return decision;
     const injection = await recallInjection(payload);
-    if (injection === null) return decision;
+    const turn = Number.isInteger(payload?.turn) ? payload.turn : null;
+    const stamped = injection === null ? null : stampMemoryMessage(injection, turn, payload?.step);
+    try {
+      if (applyMemorySurface(payload?.agent?.session, stamped, turn, payload?.step)) {
+        return decision;
+      }
+    } catch {
+      // A session that rejects surface ownership falls back to the legacy
+      // request-batch injection below instead of breaking the turn.
+    }
+    if (stamped === null) return decision;
     return {
       ...decision,
-      messages: [...decision.messages, injection],
+      messages: [...decision.messages, stamped],
     };
   }
 
@@ -2568,6 +2715,33 @@ export function createMemoryRuntimeAdapter(options = {}) {
     }
   }
 
+  /**
+   * Re-read the discovery mode and reapply the current session's tool surface.
+   * `tools/change` can fire before the discovery poll observes a hot switch (for
+   * example while the MCP client registers `memory_*`), so a replay must not
+   * trust the previous discovery cache. The same path lifts the deny list when
+   * immersive mode is turned off.
+   */
+  function refreshToolSurface(forceDiscovery = false) {
+    if (disposed || !config.hideMemoryTools) return Promise.resolve();
+    if (toolSurfacePromise !== null) return toolSurfacePromise;
+    toolSurfacePromise = (async () => {
+      if (forceDiscovery && staticUrl === null) {
+        try {
+          await loadDiscovery(true);
+        } catch {
+          // Discovery failure keeps the existing tracked surface; recall/ingest
+          // already fail open on their own path.
+        }
+      }
+      noteActivation();
+      refreshTrackedTools();
+    })().finally(() => {
+      toolSurfacePromise = null;
+    });
+    return toolSurfacePromise;
+  }
+
   function scheduleToolRefresh() {
     if (disposed || toolRefreshScheduled) return;
     toolRefreshScheduled = true;
@@ -2846,6 +3020,10 @@ export function createMemoryRuntimeAdapter(options = {}) {
 
   function onToolsChange() {
     if (!config.hideMemoryTools || suppressToolsChange) return;
+    // A live tool registry change is also the earliest reliable signal that the
+    // MCP server finished registering `memory_*`; force discovery so a mode
+    // switch that happened since the last poll applies to this agent now.
+    void refreshToolSurface(true).catch(() => {});
     scheduleToolRefresh();
   }
 
@@ -2859,7 +3037,7 @@ export function createMemoryRuntimeAdapter(options = {}) {
         // An older DSH host without this event must not fail activation.
       }
     };
-    if (config.recall) add('agent/pre-step', onPreStep);
+    if (config.recall || config.hideMemoryTools) add('agent/pre-step', onPreStep);
     if (config.ingest || config.checkpoints) add('session/event', onSessionEvent);
     if (config.hideMemoryTools || config.maintenance.enabled) add('agent/created', onAgentCreated);
     if (config.hideMemoryTools || config.maintenance.enabled) add('agent/disposed', onAgentDisposed);
@@ -2900,6 +3078,9 @@ export function createMemoryRuntimeAdapter(options = {}) {
   }
 
   async function flush() {
+    if (toolSurfacePromise !== null) {
+      await Promise.race([toolSurfacePromise.catch(() => {}), delay(1000, setTimeoutFn)]);
+    }
     if (toolRefreshPromise !== null) {
       await Promise.race([toolRefreshPromise, delay(1000, setTimeoutFn)]);
     }

@@ -201,10 +201,15 @@ sidecar discovery，不需要逐宿主开启。
   不会进入日志、URL、错误或 `getState()`。
 - **召回：** 只在 `agent/pre-step` 的 `step===1` 且 `decision.kind==='enter'`、且是新的
   人类 turn 时触发。调用 `POST /memory-runtime/v1/context`，只有旧 sidecar 明确返回
-  404/405 时才回落到 `/recall`。命中时追加**一条 request-scoped 上下文消息**：
-  `role:'user'` + `source.kind='mebular-memory'`；DSH 会把它渲染为 context injection，
-  不是用户气泡。绝不使用 `source.kind='user'`，不伪造新的人类 turn，不写会话历史；按
-  `(agentId, surface, query, turn)` 去重 30 分钟。无命中、超时或失败时原样返回 decision。
+  404/405 时才回落到 `/recall`。命中时只保留**一条当前 source-tagged 上下文消息**：
+  `role:'user'` + `source.kind='mebular-memory'`；它不是用户气泡，也不进入用户可见历史。
+  绝不使用 `source.kind='user'`，不伪造新的人类 turn；按
+  `(agentId, surface, query, turn)` 去重 30 分钟。适配器每个 human turn 先从 propose batch
+  剔除所有历史 `mebular-memory` 消息，再用 session surface replacement 把上一轮 memory
+  节点替换为当前命中；无命中/超时/失败时移除上一轮节点（空 system 节点不投影为模型消息），
+  原样返回 decision。普通 user/assistant/tool 消息不修改。
+  **平台限制：** DSH 0.2.1-rc.2 没有非持久模型上下文通道，durable `session.v4.jsonl` 会留下
+  source-tagged 快照；这是平台行为，不是普通用户消息，也不意味着旧块会留在下一轮模型请求。
 - **Ingest：** 监听 live own `session/event`，把 user/assistant/tool 事件批量送到
   `POST /memory-runtime/v1/ingest`；跳过 fork/resume 的 inherited prefix 和适配器自己的
   注入。队列有界（256），按 16 条/250ms 批处理；网络错误、超时、429、5xx 默认最多重试
@@ -227,9 +232,11 @@ sidecar discovery，不需要逐宿主开启。
 
 ### 真实边界
 
-- 召回块是 source-tagged 上下文消息，不是伪造的用户 turn。如果未来 DSH preview 改变这个
-  通道，适配器应带 `injection_channel_unsupported` 禁用注入，而不是回退到
-  `source.kind='user'`。
+- 召回块是 source-tagged 上下文消息，不是伪造的用户 turn，也不是用户可见历史。DSH
+  durable session log 会留下 source-tagged 快照（平台没有非持久模型通道）；每轮由适配器
+  过滤/替换，无命中不进入下一轮模型请求。如果未来 DSH preview 提供非持久通道，适配器应
+  优先迁移；如果通道语义再次变化导致无法保证上述边界，应带 `injection_channel_unsupported`
+  禁用注入，而不是回退到 `source.kind='user'`。
 - DSH 只保证它实际发出的 compaction 事件；适配器不编造 summary。被中断的压缩不是已提交
   的 checkpoint。
 - DSH 不暴露自己的 LLM 凭据，本适配器也不读取它们。

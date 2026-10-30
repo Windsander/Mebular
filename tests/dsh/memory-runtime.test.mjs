@@ -158,6 +158,68 @@ function humanMessage(text) {
   };
 }
 
+function memoryMessage(id, text, turn = 1, step = 1) {
+  return {
+    id,
+    role: 'user',
+    content: [{ type: 'text', text }],
+    source: { kind: MEMORY_MESSAGE_SOURCE, turn, step },
+  };
+}
+
+function makeSurfaceSession({ id = 's1', seedEvents = [] } = {}) {
+  const events = [];
+  const nodes = [];
+  const append = (type, data, options = {}) => {
+    const seq = events.length;
+    events.push({ type, seq, time: seq, data: structuredClone(data) });
+    const op = options.surfaceOp;
+    if (op === 'append') {
+      nodes.push(seq);
+    } else if (op && op.op === 'replace') {
+      const start = nodes.indexOf(op.startSeq);
+      const end = nodes.indexOf(op.endSeq);
+      if (start < 0 || end < start) throw new Error('invalid surface replace');
+      nodes.splice(start, end - start + 1);
+      nodes.push(seq);
+    }
+    return events[seq];
+  };
+  for (const entry of seedEvents) append(entry.type, entry.data, { surfaceOp: 'append' });
+  const session = {
+    id,
+    inheritedEventCount: 0,
+    firstLiveSeq: 0,
+    header: {},
+    surface: { nodes, contentGeneration: 0 },
+    get seq() {
+      return events.length;
+    },
+    ownEvents: () => events,
+    snapshotEvents: () => events,
+    isOwnSeq: () => true,
+    append,
+  };
+  return { session, events, nodes, append };
+}
+
+function surfaceModelMessages(surface) {
+  const current = new Set(surface.session.surface.nodes);
+  const messages = [];
+  for (const event of surface.events) {
+    if (!current.has(event.seq)) continue;
+    if (event.type === 'user/message') messages.push(event.data);
+    else if ((event.type === 'system/message' || event.type === 'developer/message') && event.data?.message) {
+      messages.push(event.data.message);
+    } else if (event.type === 'assistant/message' && event.data?.message) messages.push(event.data.message);
+  }
+  return messages.filter((message) => !(message.role === 'system' && message.content.length === 0));
+}
+
+function surfaceMemoryMessages(surface) {
+  return surfaceModelMessages(surface).filter((message) => message.source?.kind === MEMORY_MESSAGE_SOURCE);
+}
+
 function event(type, seq, data, time = seq) {
   return { type, seq, time, data };
 }
@@ -228,6 +290,12 @@ async function makeHome(discovery = {}, token = null) {
   };
   await writeFile(join(home, 'memory-runtime.json'), `${JSON.stringify(document, null, 2)}\n`, 'utf8');
   return { home, tokenFile, document };
+}
+
+async function setDiscovery(home, document, patch) {
+  const next = { ...document, ...patch, updatedAt: Date.now() };
+  await writeFile(join(home, 'memory-runtime.json'), `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+  return next;
 }
 
 function preStepPayload({ agent = makeAgent(), text = 'what theme should we use?', turn = 1, step = 1 } = {}) {
@@ -828,6 +896,119 @@ describe('@mebular/dsh-plugin memory runtime：context 召回注入', () => {
     expect(decision.messages).toBe(messages);
     expect(fetch.calls).toHaveLength(0);
   });
+
+  it('有旧注入 + no_hits：从本次批次和 live model surface 都移除旧块', async () => {
+    const ctx = fakeContext();
+    const fetch = installFetch(() => jsonOk({ fragments: [], blocks: [], silenceReason: 'no_hits' }));
+    const surface = makeSurfaceSession({
+      seedEvents: [
+        {
+          type: 'system/message',
+          data: {
+            turn: 0,
+            step: 0,
+            message: { id: 'sys-1', role: 'system', content: [{ type: 'text', text: 'system' }], source: { kind: 'system-prompt' } },
+          },
+        },
+        { type: 'user/message', data: humanMessage('previous question') },
+        {
+          type: 'assistant/message',
+          data: {
+            turn: 1,
+            step: 1,
+            message: { id: 'assistant-1', role: 'assistant', content: [{ type: 'text', text: 'previous answer' }], source: { kind: 'model' } },
+          },
+        },
+        {
+          type: 'user/message',
+          data: memoryMessage('old-memory', '<mebular_memory>old stale gist</mebular_memory>', 1, 1),
+        },
+      ],
+    });
+    const agent = makeAgent({ session: surface.session });
+    adapterFor({
+      ctx,
+      config: { enabled: true, ingest: false, checkpoints: false, hideMemoryTools: false },
+      fetchImpl: fetch.fetchImpl,
+    });
+
+    const turn = preStepPayload({ agent, text: 'tomorrow weather?', turn: 2 });
+    const oldMemory = memoryMessage('payload-old-memory', '<mebular_memory>payload old</mebular_memory>', 1, 1);
+    turn.payload.messages = [oldMemory, humanMessage('tomorrow weather?')];
+    turn.fallback = async () => ({ kind: 'enter', messages: [oldMemory, humanMessage('tomorrow weather?')] });
+    const decision = await waterfall(ctx, 'agent/pre-step', turn.payload, turn.fallback);
+
+    expect(decision.messages).toHaveLength(1);
+    expect(decision.messages[0].source.kind).toBe('user');
+    const requestMessages = surfaceModelMessages(surface);
+    expect(requestMessages.some((message) => message.source?.kind === MEMORY_MESSAGE_SOURCE)).toBe(false);
+    expect(requestMessages.some((message) => message.id === 'assistant-1')).toBe(true);
+    expect(surfaceMemoryMessages(surface)).toHaveLength(0);
+    expect(fetch.calls).toHaveLength(1);
+  });
+
+  it('有命中：live model surface 恰好一条当前注入，批次本身不再追加', async () => {
+    const ctx = fakeContext();
+    const fetch = installFetch(() => jsonOk(contextData({
+      blocks: [{ kind: 'fragment', content: 'current preference: dark theme', citations: [{ id: 'm1' }] }],
+      fragments: [],
+    })));
+    const surface = makeSurfaceSession({
+      seedEvents: [
+        { type: 'user/message', data: humanMessage('previous question') },
+        { type: 'user/message', data: memoryMessage('old-memory', '<mebular_memory>old gist</mebular_memory>', 1, 1) },
+      ],
+    });
+    const agent = makeAgent({ session: surface.session });
+    adapterFor({
+      ctx,
+      config: { enabled: true, ingest: false, checkpoints: false, hideMemoryTools: false },
+      fetchImpl: fetch.fetchImpl,
+    });
+
+    const turn = preStepPayload({ agent, text: 'what theme?', turn: 2 });
+    const decision = await waterfall(ctx, 'agent/pre-step', turn.payload, turn.fallback);
+
+    expect(decision.messages).toHaveLength(1);
+    expect(decision.messages.some((message) => message.source?.kind === MEMORY_MESSAGE_SOURCE)).toBe(false);
+    const memory = surfaceMemoryMessages(surface);
+    expect(memory).toHaveLength(1);
+    expect(memory[0].source).toMatchObject({ kind: MEMORY_MESSAGE_SOURCE, turn: 2, step: 1 });
+    expect(memory[0].content[0].text).toContain('current preference: dark theme');
+    expect(memory[0].content[0].text).not.toContain('old gist');
+  });
+
+  it('连续两轮命中不累积：上一轮注入节点被当前轮替换', async () => {
+    const ctx = fakeContext();
+    let call = 0;
+    const fetch = installFetch(() => {
+      call += 1;
+      return jsonOk(contextData({
+        blocks: [{ kind: 'fragment', content: call === 1 ? 'first memory' : 'second memory', citations: [{ id: 'm1' }] }],
+        fragments: [],
+      }));
+    });
+    const surface = makeSurfaceSession();
+    const agent = makeAgent({ session: surface.session });
+    adapterFor({
+      ctx,
+      config: { enabled: true, ingest: false, checkpoints: false, hideMemoryTools: false },
+      fetchImpl: fetch.fetchImpl,
+    });
+
+    const first = preStepPayload({ agent, text: 'first question', turn: 1 });
+    await waterfall(ctx, 'agent/pre-step', first.payload, first.fallback);
+    expect(surfaceMemoryMessages(surface)).toHaveLength(1);
+    expect(surfaceMemoryMessages(surface)[0].content[0].text).toContain('first memory');
+
+    const second = preStepPayload({ agent, text: 'second question', turn: 2 });
+    await waterfall(ctx, 'agent/pre-step', second.payload, second.fallback);
+    const memory = surfaceMemoryMessages(surface);
+    expect(memory).toHaveLength(1);
+    expect(memory[0].content[0].text).toContain('second memory');
+    expect(memory[0].content[0].text).not.toContain('first memory');
+    expect(surfaceModelMessages(surface).some((message) => message.content?.[0]?.text?.includes('first memory'))).toBe(false);
+  });
 });
 
 describe('@mebular/dsh-plugin memory runtime：session/event 摄取', () => {
@@ -1275,6 +1456,50 @@ describe('@mebular/dsh-plugin memory runtime：工具遮蔽', () => {
     ctx.tools = cleanTools.root;
     handlerFor(ctx, 'agent/created')({ agent: makeAgent({ id: 'a2', tools: cleanTools.scoped }) });
     expect(cleanTools.restrictions).toHaveLength(0);
+  });
+
+  it('同会话热切换：tools/change 重读 discovery，立即隐藏并恢复现有 agent 的 memory_*', async () => {
+    const { home, document } = await makeHome({ mode: 'mcp' });
+    const ctx = fakeContext();
+    const tools = fakeTools([
+      'mcp__mebular__memory_query',
+      'mcp__mebular__memory_write',
+      'mcp__mebular__task_list',
+      'mcp__other__tool',
+    ]);
+    const agent = makeAgent({ tools: tools.scoped });
+    ctx.tools = tools.root;
+    const { adapter } = adapterFor({
+      ctx,
+      config: {
+        recall: false,
+        ingest: false,
+        checkpoints: false,
+        hideMemoryTools: true,
+      },
+      homeDir: home,
+      env: {},
+      fetchImpl: installFetch(() => jsonOk({})).fetchImpl,
+    }, { discovery: true });
+    await adapter.flush();
+
+    handlerFor(ctx, 'agent/created')({ agent });
+    expect(tools.denied).toEqual([]);
+
+    await setDiscovery(home, document, { mode: 'immersive' });
+    handlerFor(ctx, 'tools/change')();
+    await adapter.flush();
+    expect(tools.denied).toEqual([
+      'mcp__mebular__memory_query',
+      'mcp__mebular__memory_write',
+    ]);
+    expect(tools.denied).not.toContain('mcp__mebular__task_list');
+    expect(tools.denied).not.toContain('mcp__other__tool');
+
+    await setDiscovery(home, document, { mode: 'mcp' });
+    handlerFor(ctx, 'tools/change')();
+    await adapter.flush();
+    expect(tools.denied).toEqual([]);
   });
 });
 

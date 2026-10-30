@@ -8,7 +8,7 @@
 // No model is started. The probe only emits/awaits events on a fake agent and
 // writes an observation document; assertions happen in the harness.
 
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 export const name = '@mebular/dsh-memory-runtime-probe';
@@ -60,6 +60,10 @@ export function apply(ctx, config = {}) {
   const timeoutMs = Number.isFinite(config?.timeoutMs) && config.timeoutMs > 0
     ? config.timeoutMs
     : DEFAULT_TIMEOUT_MS;
+  const startFile = typeof process.env.MEMORY_E2E_START_FILE === 'string'
+    && process.env.MEMORY_E2E_START_FILE.length > 0
+    ? process.env.MEMORY_E2E_START_FILE
+    : null;
   const startedAt = new Date().toISOString();
   const state = {
     pid: process.pid,
@@ -108,7 +112,10 @@ export function apply(ctx, config = {}) {
 
   async function run() {
     await sleep(750);
-    if (stopped) return;
+    if (startFile !== null) {
+      while (!stopped && !existsSync(startFile)) await sleep(100);
+      if (stopped) return;
+    }
     const session = fakeSession();
     const toolNames = [
       'mcp__mebular__memory_query',

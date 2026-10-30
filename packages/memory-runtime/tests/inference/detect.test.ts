@@ -8,7 +8,7 @@ import {
   recommendModel,
   type ExecLike,
   type HardwareOsApi,
-} from '../../src/inference/index.js';
+} from '../../src/index.js';
 import { makeHardware } from './helpers.js';
 
 const GIB = 1024 ** 3;

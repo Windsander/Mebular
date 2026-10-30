@@ -1,16 +1,17 @@
 // Runtime 内部对象默认排除：不改变 0.2 的 query/history/profile/skills/graph 结果。
 //
-// 覆盖三重判定（类型 / metadata.runtime.internal / 保留 namespace），以及
-// MemoryStore 的 includeInternal 显式调试开关。
+// 覆盖 core 通用判定（metadata.internal / 保留 namespace）、原型自身判定
+// （Runtime 内部类型 / metadata.runtime.internal），以及 MemoryStore 的
+// includeInternal 显式调试开关。
 
 import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Mebular } from '../../src/mebular.js';
-import { IdentityManager } from '../../src/crypto/IdentityManager.js';
-import { MemoryService } from '../../src/memory/MemoryService.js';
-import { MemoryStore } from '../../src/memory/MemoryStore.js';
+import { Mebular } from '@mebular/core';
+import { IdentityManager } from '@mebular/core';
+import { MemoryService } from '@mebular/core';
+import { MemoryStore } from '@mebular/core';
 import {
   createCompactNode,
   createContextCheckpointNode,
@@ -22,8 +23,8 @@ import {
   type ContextCheckpoint,
   type RuntimeEnvelope,
   type SelfRecord,
-} from '../../src/runtime/index.js';
-import type { Node } from '../../src/types/index.js';
+} from '../../src/index.js';
+import type { Node } from '@mebular/core';
 
 describe('Runtime 内部对象过滤', () => {
   let dir: string;
@@ -142,12 +143,12 @@ describe('Runtime 内部对象过滤', () => {
     await createContextCheckpointNode(app.graph, checkpoint(), envelope('context_checkpoint', '__checkpoint__'));
     await createSelfRecordNode(app.graph, self(), envelope('self_record', '__self__'));
 
-    // 防御性：有人绕过 Runtime 直接写入普通 fact / episode / skill，但带内部判别键。
+    // 防御性：有人绕过 Runtime 直接写入普通 fact / episode / skill，但带通用内部判别键。
     const hiddenFact = await app.graph.createNode('fact', {
       subject: 'user', predicate: 'note', object: '内部事实',
     });
     await app.graph.updateNode(hiddenFact.id, {
-      metadata: { runtime: { schema: 1, kind: 'memory_record', internal: true } },
+      metadata: { internal: true, runtime: { schema: 1, kind: 'memory_record', internal: true } },
     });
     await app.graph.addTag(hiddenFact.id, 'preference');
 
@@ -155,14 +156,14 @@ describe('Runtime 内部对象过滤', () => {
       episodeType: 'conversation', content: '内部会话内容',
     });
     await app.graph.updateNode(hiddenEpisode.id, {
-      metadata: { runtime: { schema: 1, kind: 'memory_record', internal: true } },
+      metadata: { internal: true, runtime: { schema: 1, kind: 'memory_record', internal: true } },
     });
 
     const hiddenSkill = await app.graph.createNode('skill', {
       name: '内部技能', description: '内部技能描述', category: 'ops',
     });
     await app.graph.updateNode(hiddenSkill.id, {
-      metadata: { runtime: { schema: 1, kind: 'memory_record', internal: true } },
+      metadata: { internal: true, runtime: { schema: 1, kind: 'memory_record', internal: true } },
     });
 
     const all = await service.query({});
@@ -198,6 +199,8 @@ describe('Runtime 内部对象过滤', () => {
     const { app, service } = await makeService();
     const [fact] = await service.write([{ type: 'fact', content: '公开图起点' }]);
     const compactNode = await createCompactNode(app.graph, compact(), envelope('compact'), { namespace: 'default' });
+    // 原型内部对象必须写通用标记，core 才能在不认识类型名的情况下过滤。
+    expect(compactNode.metadata?.internal).toBe(true);
     const selfNode = await createSelfRecordNode(app.graph, self(), envelope('self_record', '__self__'));
     await app.graph.createEdge(fact!.id, compactNode.id, 'related_to');
     await app.graph.createEdge(fact!.id, selfNode.id, 'related_to');

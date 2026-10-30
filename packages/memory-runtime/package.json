@@ -1,0 +1,39 @@
+{
+  "name": "@mebular/memory-runtime",
+  "version": "0.3.0",
+  "description": "Mebular Memory Runtime（0.3.0 原型包）：本地 Raw/Trace、候选抽取、召回、上下文与模型编排",
+  "license": "MIT",
+  "author": {
+    "name": "Sobert Li (Windsander)",
+    "email": "Windsander@users.noreply.github.com",
+    "url": "https://github.com/Windsander"
+  },
+  "private": false,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "dist"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "prepack": "node ../../scripts/publish-manifest.mjs set",
+    "postpack": "node ../../scripts/publish-manifest.mjs restore"
+  },
+  "dependencies": {
+    "@mebular/core": "file:../..",
+    "ulid": "^3.0.2"
+  }
+}

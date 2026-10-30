@@ -9,7 +9,7 @@ import {
   normalizeRuntimeSettings,
   type RuntimeKeychainExec,
   type RuntimeModelRuntime,
-} from '../../src/runtime/index.js';
+} from '../../src/index.js';
 import type { ChatFetch, ChatFetchResponse } from '../../src/inference/gateway.js';
 
 const SECRET = 'sk-keychain-or-file-secret-never-log';

@@ -15,22 +15,16 @@ import { dirname, isAbsolute, join, resolve } from 'node:path';
 
 let core = {};
 try {
-  core = await import('@mebular/core');
+  // 0.3.0 W1：本地模型原语随 memory-runtime 包迁出 @mebular/core。
+  core = await import('@mebular/memory-runtime');
 } catch {
-  // 源码工作树/旧安装：回退到本包 dist。
+  // 源码工作树/旧安装：回退到包内 dist。
 }
 if (typeof core.ModelStore !== 'function') {
   try {
-    core = await import(new URL('../../../dist/index.js', import.meta.url).href);
+    core = await import(new URL('../../memory-runtime/dist/index.js', import.meta.url).href);
   } catch {
-    // 继续尝试 inference 子入口。
-  }
-}
-if (typeof core.ModelStore !== 'function') {
-  try {
-    core = await import(new URL('../../../dist/inference/index.js', import.meta.url).href);
-  } catch {
-    // 保留 core 空对象；调用方会得到结构化 inference_unavailable。
+    // 保留空对象；调用方会得到结构化 inference_unavailable。
   }
 }
 
@@ -69,7 +63,7 @@ export class InferenceError extends Error {
 
 export function inferenceCore() {
   if (typeof core.ModelStore !== 'function') {
-    throw new InferenceError('inference_unavailable', '本地模型原语不可用：请先构建 @mebular/core', {
+    throw new InferenceError('inference_unavailable', '本地模型原语不可用：请先构建 @mebular/memory-runtime', {
       status: 503,
       details: { hint: 'npm run build' },
     });

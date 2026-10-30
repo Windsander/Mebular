@@ -11,6 +11,7 @@
     "baseUrl": ".",
     "paths": {
       "@mebular/core": ["src/index.ts"],
+      "@mebular/memory-runtime": ["packages/memory-runtime/src/index.ts"],
       "@mebular/service": ["packages/service/src/index.ts"]
     }
   }

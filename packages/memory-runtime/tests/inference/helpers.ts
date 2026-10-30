@@ -8,7 +8,7 @@ import type {
   ModelManifest,
   ModelFile,
   HardwareProfile,
-} from '../../src/inference/index.js';
+} from '../../src/index.js';
 
 export function sha256(data: string | Uint8Array): string {
   return createHash('sha256').update(data).digest('hex');

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // G6.5 發布驗證（E1）
 //
-// 1) 對五個可發布套件（@mebular/core / service / fleet / mcp / skill）npm pack；
+// 1) 對可發布套件（@mebular/core / service / fleet / mcp / skill / memory-runtime）npm pack；
 //    檢驗 tarball 內容，且 mcp/fleet 內的 `@mebular/*` 已於 prepack 由 `file:` 改寫為
 //    `^<根 package.json version>`，pack 後本地依賴已還原、備份已清除。
 // 2) 用產出的 tarball 在乾淨目錄安裝；以安裝後的 `mebular status`、`mebular mcp`
@@ -26,6 +26,7 @@ const range = `^${version}`;
 const serviceDir = join(rootDir, 'packages', 'service');
 const fleetDir = join(rootDir, 'packages', 'fleet');
 const mcpDir = join(rootDir, 'packages', 'mcp');
+const memoryRuntimeDir = join(rootDir, 'packages', 'memory-runtime');
 const skillDir = join(rootDir, 'packages', 'skill');
 const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
 
@@ -62,24 +63,28 @@ const home = join(app, 'home');
 let client = null;
 
 try {
-  // ---------- npm pack（五包） ----------
+  // ---------- npm pack（六包） ----------
   const core = pack(rootDir, work);
   const service = pack(serviceDir, work);
   const fleet = pack(fleetDir, work);
   const mcp = pack(mcpDir, work);
+  const memoryRuntime = pack(memoryRuntimeDir, work);
   const skill = pack(skillDir, work);
   check(
-    '五包 npm pack',
+    '六包 npm pack',
     true,
-    [core.meta.name, service.meta.name, fleet.meta.name, mcp.meta.name, skill.meta.name].join(' / '),
+    [core.meta.name, service.meta.name, fleet.meta.name, mcp.meta.name, memoryRuntime.meta.name, skill.meta.name].join(' / '),
   );
 
   // D41：packed manifest 內的內部依賴均為版本號引用
   const mcpManifest = manifestOf(mcp.file);
   const fleetManifest = manifestOf(fleet.file);
+  const memoryRuntimeManifest = manifestOf(memoryRuntime.file);
   const coreManifestForDeps = manifestOf(core.file);
   check(`mcp tarball 依賴 @mebular/core=${range}`, mcpManifest.dependencies?.['@mebular/core'] === range, mcpManifest.dependencies?.['@mebular/core']);
   check(`mcp tarball 依賴 @mebular/fleet=${range}`, mcpManifest.dependencies?.['@mebular/fleet'] === range, mcpManifest.dependencies?.['@mebular/fleet']);
+  check(`mcp tarball 依賴 @mebular/memory-runtime=${range}`, mcpManifest.dependencies?.['@mebular/memory-runtime'] === range, mcpManifest.dependencies?.['@mebular/memory-runtime']);
+  check(`memory-runtime tarball 依賴 @mebular/core=${range}`, memoryRuntimeManifest.dependencies?.['@mebular/core'] === range, memoryRuntimeManifest.dependencies?.['@mebular/core']);
   check(`fleet tarball 依賴 @mebular/core=${range}`, fleetManifest.dependencies?.['@mebular/core'] === range, fleetManifest.dependencies?.['@mebular/core']);
   check(`fleet tarball 依賴 @mebular/service=${range}`, fleetManifest.dependencies?.['@mebular/service'] === range, fleetManifest.dependencies?.['@mebular/service']);
   check('fleet tarball 依賴 qrcode-generator=2.0.4', fleetManifest.dependencies?.['qrcode-generator'] === '2.0.4', fleetManifest.dependencies?.['qrcode-generator']);
@@ -87,17 +92,23 @@ try {
   const leaks = [
     ...Object.values(mcpManifest.dependencies ?? {}),
     ...Object.values(fleetManifest.dependencies ?? {}),
+    ...Object.values(memoryRuntimeManifest.dependencies ?? {}),
   ].filter((spec) => typeof spec === 'string' && (spec.startsWith('file:') || spec.startsWith('workspace:')));
   check('tarball 無 file:/workspace: 洩漏', leaks.length === 0, leaks.join(', '));
 
   // 本地 manifest 已還原
   const mcpLocal = JSON.parse(await readFile(join(mcpDir, 'package.json'), 'utf-8'));
   const fleetLocal = JSON.parse(await readFile(join(fleetDir, 'package.json'), 'utf-8'));
+  const memoryRuntimeLocal = JSON.parse(await readFile(join(memoryRuntimeDir, 'package.json'), 'utf-8'));
   check('pack 後 mcp 本地依賴還原為 file:../..', mcpLocal.dependencies?.['@mebular/core'] === 'file:../..', mcpLocal.dependencies?.['@mebular/core']);
+  check('pack 後 mcp 本地 memory-runtime 還原為 file:../memory-runtime', mcpLocal.dependencies?.['@mebular/memory-runtime'] === 'file:../memory-runtime', mcpLocal.dependencies?.['@mebular/memory-runtime']);
   check('pack 後 fleet 本地依賴還原為 file:../..', fleetLocal.dependencies?.['@mebular/core'] === 'file:../..', fleetLocal.dependencies?.['@mebular/core']);
+  check('pack 後 memory-runtime 本地依賴還原為 file:../..', memoryRuntimeLocal.dependencies?.['@mebular/core'] === 'file:../..', memoryRuntimeLocal.dependencies?.['@mebular/core']);
   check(
     'pack 備份已清除',
-    !existsSync(join(mcpDir, 'package.json.packbak')) && !existsSync(join(fleetDir, 'package.json.packbak')),
+    !existsSync(join(mcpDir, 'package.json.packbak'))
+      && !existsSync(join(fleetDir, 'package.json.packbak'))
+      && !existsSync(join(memoryRuntimeDir, 'package.json.packbak')),
   );
 
   // tarball 內容
@@ -105,6 +116,7 @@ try {
   const serviceFiles = listTarball(service.file);
   const fleetFiles = listTarball(fleet.file);
   const mcpFiles = listTarball(mcp.file);
+  const memoryRuntimeFiles = listTarball(memoryRuntime.file);
   const skillFiles = listTarball(skill.file);
   check('core tarball 含 dist/index.js', coreFiles.includes('package/dist/index.js'));
   check('core tarball 含 package.json', coreFiles.includes('package/package.json'));
@@ -115,6 +127,7 @@ try {
   check('service tarball 含 dist/cli.js', serviceFiles.includes('package/dist/cli.js'));
   check('fleet tarball 含 dist/cli.js/protocol', fleetFiles.includes('package/dist/cli.js') && fleetFiles.includes('package/protocol/state-machine.json'));
   check('mcp tarball 含 bin/src', mcpFiles.includes('package/bin/mebular.mjs') && mcpFiles.includes('package/src/server.mjs'));
+  check('memory-runtime tarball 含 dist/index.js', memoryRuntimeFiles.includes('package/dist/index.js') && memoryRuntimeFiles.includes('package/package.json'));
   check(
     'skill tarball 含 SKILL/MEMORY_POLICY/install/mcp',
     ['package/SKILL.md', 'package/MEMORY_POLICY.md', 'package/scripts/install.mjs', 'package/mcp/opencode.json'].every((f) => skillFiles.includes(f)),
@@ -131,6 +144,7 @@ try {
       service.file,
       fleet.file,
       mcp.file,
+      memoryRuntime.file,
       skill.file,
       '--omit=optional',
       '--no-audit',
@@ -142,8 +156,8 @@ try {
   const installedCore = JSON.parse(await readFile(join(work, 'node_modules', '@mebular', 'core', 'package.json'), 'utf-8'));
   check(`tarball 安裝：@mebular/core@${version}`, installedCore.version === version, installedCore.version);
   check(
-    'tarball 安裝：五包齊備',
-    ['core', 'service', 'fleet', 'mcp', 'skill'].every((name) => existsSync(join(work, 'node_modules', '@mebular', name))),
+    'tarball 安裝：六包齊備',
+    ['core', 'service', 'fleet', 'mcp', 'memory-runtime', 'skill'].every((name) => existsSync(join(work, 'node_modules', '@mebular', name))),
   );
   const installedEncoder = JSON.parse(await readFile(join(work, 'node_modules', 'qrcode-generator', 'package.json'), 'utf-8'));
   check('tarball 安裝：qrcode-generator@2.0.4 由 registry 解析', installedEncoder.version === '2.0.4', installedEncoder.version);
@@ -191,9 +205,10 @@ try {
   const coreManifest = manifestOf(core.file);
   check('F-INST-1 根 tarball 含雙 CLI 與其運行時',
     ['package/dist/index.js', 'package/packages/mcp/bin/mebular.mjs', 'package/packages/mcp/src/home.mjs',
-      'package/packages/console/index.html', 'package/packages/fleet/dist/cli.js', 'package/packages/service/dist/index.js']
+      'package/packages/console/index.html', 'package/packages/fleet/dist/cli.js', 'package/packages/service/dist/index.js',
+      'package/packages/memory-runtime/dist/index.js']
       .every((f) => coreFiles.includes(f)),
-    'mcp/bin + console + fleet/service dist');
+    'mcp/bin + console + fleet/service/memory-runtime dist');
   check('G-H1 根 tarball 含 Skill 源（packages/skill/SKILL.md，供「安装 Skill」用）',
     coreFiles.includes('package/packages/skill/SKILL.md') && coreFiles.includes('package/packages/skill/tasks/SKILL.md'),
     'packages/skill/SKILL.md + tasks/SKILL.md');

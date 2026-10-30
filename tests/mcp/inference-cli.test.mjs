@@ -13,7 +13,7 @@ import {
   putManifest,
   tempDir,
   writeImportPack,
-} from '../inference/mcp-helpers.mjs';
+} from '../../packages/memory-runtime/tests/inference/mcp-helpers.mjs';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
 const CLI = join(ROOT, 'packages', 'mcp', 'bin', 'mebular.mjs');

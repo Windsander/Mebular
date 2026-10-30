@@ -9,7 +9,7 @@ import {
   createNodeModelStoreFs,
   type ModelStoreFetch,
   type ModelStoreFs,
-} from '../../src/inference/index.js';
+} from '../../src/index.js';
 import {
   bytesBody,
   failingBody,

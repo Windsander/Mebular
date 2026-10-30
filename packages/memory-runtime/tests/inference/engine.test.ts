@@ -7,7 +7,7 @@ import {
   LlamaServerEngine,
   type ChildProcessLike,
   type SpawnLike,
-} from '../../src/inference/index.js';
+} from '../../src/index.js';
 
 class FakeChild extends EventEmitter {
   pid = 4242;

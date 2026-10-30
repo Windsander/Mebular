@@ -4,9 +4,7 @@
 // type 使用冻结的内部类型，`metadata.runtime` 是唯一判别键，tag 使用保留前缀。
 // 不创建从用户记录到内部对象的边；来源关系只写在 content.sourceIds / recordIds。
 
-import type { GraphStore } from '../core/GraphStore.js';
-import { ValidationError } from '../errors.js';
-import type { Node } from '../types/index.js';
+import { ValidationError, type GraphStore, type Node } from '@mebular/core';
 import { isRuntimeInternalNode, readRuntimeMetadata } from './internal.js';
 import {
   RUNTIME_METADATA_KEY,
@@ -75,6 +73,9 @@ export async function createRuntimeObjectNode(
   const withMetadata = await graph.updateNode(created.id, {
     metadata: {
       ...existingMetadata,
+      // 通用判别键：core 只依赖 metadata.internal，不认识 runtime 类型名。
+      internal: true,
+      // 原型仍保留 metadata.runtime 供 RuntimeService/管理面读取细节。
       [RUNTIME_METADATA_KEY]: toRuntimeNodeMetadata(input.envelope),
     },
   });

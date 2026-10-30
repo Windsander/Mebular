@@ -12,7 +12,7 @@ import {
   sha256Hex,
   type RawChunk,
   type RecallTrace,
-} from '../../src/runtime/index.js';
+} from '../../src/index.js';
 
 describe('RuntimeLocalStore', () => {
   let dir: string;

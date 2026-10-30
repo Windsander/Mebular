@@ -18,14 +18,18 @@
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 import { ulid } from 'ulid';
-import type { GraphStore } from '../core/GraphStore.js';
-import type { IdentityManager } from '../crypto/IdentityManager.js';
-import { normalizeNamespace } from '../core/namespace.js';
-import { MemoryService } from '../memory/MemoryService.js';
-import { EdgeTypes } from '../memory/types.js';
-import type { ExtractionResult } from '../hermes/types.js';
-import type { SyncManager } from '../sync/syncmgr/SyncManager.js';
-import type { Node } from '../types/index.js';
+import {
+  EdgeTypes,
+  MemoryService,
+  normalizeNamespace,
+  type ExtractionResult,
+  type GraphStore,
+  type IdentityManager,
+  type Mebular,
+  type Memory,
+  type Node,
+  type SyncManager,
+} from '@mebular/core';
 import {
   isRuntimeInternalNode,
   isRuntimeReservedNamespace,
@@ -492,7 +496,7 @@ export class RuntimeService {
     this.agentId = options.agentId ?? 'mebular';
     this.memory = options.memoryService
       ?? host.memoryService
-      ?? new MemoryService(host as unknown as import('../mebular.js').Mebular);
+      ?? new MemoryService(host as unknown as Mebular);
     this.models = options.modelRuntime ?? createRuntimeModelRuntime(this.settings.model, {
       ...(options.runtimeDir ? { runtimeDir: options.runtimeDir } : {}),
       ...(options.now ? { now: options.now } : {}),
@@ -3195,7 +3199,7 @@ function heuristicEpisode(text: string, namespace: string, chunk: RawChunk): Can
 }
 
 function memoryToRecordView(
-  memory: import('../hermes/types.js').Memory,
+  memory: Memory,
   node: Node | null,
 ): MemoryRecordView {
   const content = node?.content;

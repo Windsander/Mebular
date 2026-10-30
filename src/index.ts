@@ -2,9 +2,6 @@
 
 export * from './types/index.js';
 export * from './errors.js';
-export * from './runtime/index.js';
-// 本地模型后端原语（0.3.0）：catalog / hardware / store / engine / gateway。
-export * from './inference/index.js';
 export {
   IdentityManager,
   type DeviceIdentity,

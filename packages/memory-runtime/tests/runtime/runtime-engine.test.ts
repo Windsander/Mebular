@@ -4,11 +4,11 @@ import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Mebular } from '../../src/mebular.js';
-import { IdentityManager } from '../../src/crypto/IdentityManager.js';
-import { MemoryService } from '../../src/memory/MemoryService.js';
-import { RuntimeService } from '../../src/runtime/index.js';
-import type { CandidateRecord } from '../../src/runtime/index.js';
+import { Mebular } from '@mebular/core';
+import { IdentityManager } from '@mebular/core';
+import { MemoryService } from '@mebular/core';
+import { RuntimeService } from '../../src/index.js';
+import type { CandidateRecord } from '../../src/index.js';
 
 describe('RuntimeService 完整引擎', () => {
   let dir: string;
@@ -559,12 +559,13 @@ describe('RuntimeService 完整引擎', () => {
       localTraces: 1,
     });
     const memoryStatus = await memory.status();
-    // 本地 checkpoint 不进图；图内计数只含云 checkpoint。本地计数在
-    // /runtime/v1/status.counts.checkpoints。
-    expect(memoryStatus.runtime).toEqual({
+    // core 不再暴露 runtime 专用计数；图内/本地计数由 RuntimeService.status()
+    // （原型 /runtime/v1/status）提供。
+    expect(memoryStatus).not.toHaveProperty('runtime');
+    expect(status.counts).toMatchObject({
       memoryRecords: 1,
       compacts: 1,
-      checkpoints: 0,
+      checkpoints: 1,
       selfRecords: 1,
     });
     expect(status.warnings).toContain('rawCaptureUnencrypted');

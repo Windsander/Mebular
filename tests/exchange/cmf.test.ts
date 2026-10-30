@@ -227,6 +227,8 @@ describe('CMF Runtime 内部对象过滤', () => {
     const compact = await graph.createNode('compact', { summary: '内部摘要' }, undefined, {
       namespace: 'notes',
     });
+    // core 只依赖通用标记；节点类型本身不再被解释为内部对象。
+    await graph.updateNode(compact.id, { metadata: { internal: true } });
 
     const doc = await exportGraphToCmf(graph);
     expect(doc.nodes.map((node) => node.id)).toContain(fact.id);

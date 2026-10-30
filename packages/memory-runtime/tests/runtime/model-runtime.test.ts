@@ -4,9 +4,9 @@ import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Mebular } from '../../src/mebular.js';
-import { IdentityManager } from '../../src/crypto/IdentityManager.js';
-import { MemoryService } from '../../src/memory/MemoryService.js';
+import { Mebular } from '@mebular/core';
+import { IdentityManager } from '@mebular/core';
+import { MemoryService } from '@mebular/core';
 import {
   RuntimeService,
   createRuntimeModelRuntime,
@@ -16,7 +16,7 @@ import {
   type RuntimeModelQueryPlanResult,
   type RuntimeModelRuntime,
   type RuntimeModelSummaryResult,
-} from '../../src/runtime/index.js';
+} from '../../src/index.js';
 import type { ChatFetch, ChatFetchResponse } from '../../src/inference/gateway.js';
 
 const SECRET = 'sk-integration-secret-never-log';

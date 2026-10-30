@@ -27,6 +27,7 @@ const INTERNAL = {
   '@mebular/core': '.',
   '@mebular/fleet': 'packages/fleet',
   '@mebular/mcp': 'packages/mcp',
+  '@mebular/memory-runtime': 'packages/memory-runtime',
   '@mebular/service': 'packages/service',
   '@mebular/skill': 'packages/skill',
 };

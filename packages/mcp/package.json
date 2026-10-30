@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "@mebular/core": "file:../..",
+    "@mebular/memory-runtime": "file:../memory-runtime",
     "@modelcontextprotocol/server": "^2.3.1",
     "zod": "^4.6.7",
     "@mebular/fleet": "file:../fleet"

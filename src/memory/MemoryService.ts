@@ -7,7 +7,7 @@ import type { Mebular } from '../mebular.js';
 import { MemoryStore, isArchived } from './MemoryStore.js';
 import { EdgeTypes, type EpisodeNode, type FactNode, type SkillNode } from './types.js';
 import type { VectorIndex } from './VectorIndex.js';
-import { isRuntimeInternalNode, readRuntimeMetadata } from '../runtime/internal.js';
+import { isInternalNode } from './visibility.js';
 import { ValidationError, ErrorCodes, MebularError, SyncError } from '../errors.js';
 import type { Node, TraverseOptions, TraverseResult } from '../types/index.js';
 import { matchesNamespace } from '../core/namespace.js';
@@ -54,7 +54,7 @@ export interface LifecycleOptions {
 export interface DeleteResult {
   deleted: string[];
   notFound: string[];
-  /** Runtime 内部对象默认拒绝普通删除（需 Runtime admin 端点） */
+  /** 内部对象默认拒绝普通删除（需管理端点） */
   internal?: string[];
 }
 
@@ -65,7 +65,7 @@ export interface ArchiveResult {
   notFound: string[];
   /** 墓碑节点：不可归档（删除不可逆于归档语义） */
   skipped: string[];
-  /** Runtime 内部对象默认拒绝普通归档/解除归档 */
+  /** 内部对象默认拒绝普通归档/解除归档 */
   internal?: string[];
 }
 
@@ -90,16 +90,6 @@ export interface MemoryStatus {
     enabled: boolean;
     discovery: { running: boolean; disabled: boolean; reason: string | null };
   } | null;
-  /**
-   * 0.3 Runtime 对象的图内计数（只增字段；本地 Raw/Trace 不在图中，
-   * 由 `/runtime/v1/status` 提供）。
-   */
-  runtime: {
-    memoryRecords: number;
-    compacts: number;
-    checkpoints: number;
-    selfRecords: number;
-  };
 }
 
 export type ImportInput = AdapterSource;
@@ -217,7 +207,7 @@ export class MemoryService {
       nodes = collected.map((node) => ({ node }));
     }
 
-    let filtered = nodes.filter(({ node }) => this.passFilters(node, query) && !isRuntimeInternalNode(node));
+    let filtered = nodes.filter(({ node }) => this.passFilters(node, query) && !isInternalNode(node));
     if (query.types?.includes('preference')) {
       filtered = filtered.filter(({ node }) =>
         node.type !== 'fact' || (node.tags ?? []).includes(PREFERENCE_TAG));
@@ -260,8 +250,8 @@ export class MemoryService {
             this.mebular.graph.getNode(edge.target),
           ]);
           // 防御性过滤：内部对象不得经关系端点泄漏给普通 search。
-          if ((sourceNode && isRuntimeInternalNode(sourceNode))
-            || (targetNode && isRuntimeInternalNode(targetNode))) {
+          if ((sourceNode && isInternalNode(sourceNode))
+            || (targetNode && isInternalNode(targetNode))) {
             continue;
           }
           seenEdges.add(edge.id);
@@ -374,7 +364,7 @@ export class MemoryService {
     const internal: string[] = [];
     for (const id of ids) {
       const node = await this.mebular.graph.getNode(id);
-      if (node && isRuntimeInternalNode(node)) {
+      if (node && isInternalNode(node)) {
         internal.push(id);
         continue;
       }
@@ -401,7 +391,7 @@ export class MemoryService {
     for (const id of ids) {
       const node = await this.mebular.graph.getNode(id);
       if (!node) { notFound.push(id); continue; }
-      if (isRuntimeInternalNode(node)) { internal.push(id); continue; }
+      if (isInternalNode(node)) { internal.push(id); continue; }
       if (node.deletedAt) { skipped.push(id); continue; }
       const raw = (node.metadata ?? {}) as Record<string, unknown>;
       const { archivedAt: _drop, ...rest } = raw;
@@ -423,14 +413,14 @@ export class MemoryService {
     const includeArchived = options?.includeArchived === true;
     const start = await this.mebular.graph.getNode(startId);
     // 内部对象不是公共记忆图的一部分；从内部 id 起遍历直接拒绝（不返回部分图）。
-    if (start && isRuntimeInternalNode(start)) {
+    if (start && isInternalNode(start)) {
       throw new MebularError('内部对象不可通过记忆图访问', 'INTERNAL_OBJECT');
     }
     const result = await this.mebular.graph.traverse(startId, options);
     // G-ML-1：归档默认不参与遍历（节点与边按端点过滤；起点的归档由 core 侧决定）
-    // Runtime：内部对象无论 includeArchived 与否都不可见。
+    // 内部对象无论 includeArchived 与否都不可见。
     const keep = (node: Node): boolean =>
-      !isRuntimeInternalNode(node) && (includeArchived || !isArchived(node));
+      !isInternalNode(node) && (includeArchived || !isArchived(node));
     const keptIds = new Set(result.visitedNodes.filter(keep).map((n) => n.id));
     return {
       ...result,
@@ -457,14 +447,6 @@ export class MemoryService {
     } catch {
       // 门面未初始化时 sync 不可访问
     }
-    const runtime = { memoryRecords: 0, compacts: 0, checkpoints: 0, selfRecords: 0 };
-    for (const item of nodes) {
-      const kind = readRuntimeMetadata(item)?.kind;
-      if (kind === 'memory_record') runtime.memoryRecords += 1;
-      else if (kind === 'compact') runtime.compacts += 1;
-      else if (kind === 'context_checkpoint') runtime.checkpoints += 1;
-      else if (kind === 'self_record') runtime.selfRecords += 1;
-    }
     return {
       deviceId: this.mebular.deviceId,
       peerId: node?.peerId.id ?? null,
@@ -478,7 +460,6 @@ export class MemoryService {
       atRest: this.mebular.atRestEncryption,
       semantic: this.mebular.semanticVectorIndex !== null,
       pendingEventCount,
-      runtime,
       // F-NET-1（B）：发现层禁用时暴露「已禁用 + 原因」，其余传输不受影响
       lan: lanStatus
         ? {

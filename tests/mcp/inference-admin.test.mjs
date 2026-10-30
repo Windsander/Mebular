@@ -15,7 +15,7 @@ import {
   putManifest,
   tempDir,
   writeImportPack,
-} from '../inference/mcp-helpers.mjs';
+} from '../../packages/memory-runtime/tests/inference/mcp-helpers.mjs';
 
 const tempDirs = [];
 

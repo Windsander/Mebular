@@ -7,7 +7,7 @@ import {
   type ChatFetch,
   type ChatFetchResponse,
   type ChatJsonRequest,
-} from '../../src/inference/index.js';
+} from '../../src/index.js';
 import { headerMap } from './helpers.js';
 
 const schema = {

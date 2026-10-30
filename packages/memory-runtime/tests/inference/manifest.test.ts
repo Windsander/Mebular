@@ -12,7 +12,7 @@ import {
   parseModelManifest,
   resolveModelManifest,
   validateModelManifest,
-} from '../../src/inference/index.js';
+} from '../../src/index.js';
 import { makeManifest } from './helpers.js';
 
 describe('ModelManifest 校验', () => {

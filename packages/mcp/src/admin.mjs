@@ -32,14 +32,17 @@ import {
 
 export const POLICY_NS = POLICY_NAMESPACE;
 
-// Runtime 内部对象判定（与 src/runtime/internal.ts 同义）。
-// 这里不 import 新导出的 helper：管理 API 也会被旧版 @mebular/core 的宿主进程加载。
+// 内部对象判定（core 通用标记 + 原型兼容信号）。
+// core 只依赖 `metadata.internal` 与保留 namespace；这里额外保留旧的
+// `metadata.runtime.internal` / 内部类型名，兼容 0.3 原型数据。
+// 管理 API 也会被旧版 @mebular/core 的宿主进程加载，因此不 import core helper。
 const RUNTIME_INTERNAL_TYPES = new Set([
   'compact', 'context_checkpoint', 'self_record', 'raw_chunk', 'recall_trace',
 ]);
 
 export function isRuntimeInternalObject(node) {
   if (!node) return false;
+  if (node.metadata?.internal === true) return true;
   if (RUNTIME_INTERNAL_TYPES.has(node.type)) return true;
   if (node.metadata?.runtime?.internal === true) return true;
   return typeof node.namespace === 'string'

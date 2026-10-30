@@ -21,6 +21,9 @@
     "packages/mcp/bin",
     "packages/mcp/src",
     "packages/mcp/package.json",
+    "packages/memory-runtime/src",
+    "packages/memory-runtime/dist",
+    "packages/memory-runtime/package.json",
     "packages/console",
     "packages/fleet/dist",
     "packages/fleet/protocol",
@@ -63,8 +66,9 @@
     }
   },
   "scripts": {
-    "build": "node scripts/clean-dist.mjs && tsc && tsc -p packages/service/tsconfig.json && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs && node scripts/chmod-bins.mjs",
+    "build": "node scripts/check-architecture.mjs && node scripts/clean-dist.mjs && tsc && tsc -p packages/memory-runtime/tsconfig.json && tsc -p packages/service/tsconfig.json && tsc -p packages/fleet/tsconfig.json && node scripts/gen-fleet-version.mjs && node scripts/chmod-bins.mjs",
     "build:fleet": "tsc -p packages/fleet/tsconfig.json",
+    "build:memory-runtime": "tsc -p packages/memory-runtime/tsconfig.json",
     "build:service": "tsc -p packages/service/tsconfig.json",
     "prepare": "node scripts/prepare-install.mjs",
     "build:watch": "tsc --watch",
@@ -72,6 +76,7 @@
     "test:coverage": "node --experimental-vm-modules node_modules/jest/bin/jest.js --coverage",
     "test:watch": "node --experimental-vm-modules node_modules/jest/bin/jest.js --watch",
     "lint": "eslint src tests tests-semantic scripts packages apps/desktop --ext .ts,.mjs",
+    "check:architecture": "node scripts/check-architecture.mjs",
     "check:cleanliness": "node scripts/check-cleanliness.mjs",
     "check:surface-parity": "node scripts/check-surface-parity.mjs",
     "check:i18n": "node scripts/check-i18n.mjs",
@@ -218,6 +223,7 @@
       "^src/(.*)\\.js$": "<rootDir>/src/$1.ts",
       "^tests/(.*)\\.js$": "<rootDir>/tests/$1.ts",
       "^@mebular/core$": "<rootDir>/src/index.ts",
+      "^@mebular/memory-runtime$": "<rootDir>/packages/memory-runtime/src/index.ts",
       "^@mebular/service$": "<rootDir>/packages/service/src/index.ts",
       "^(\\.{1,2}/.*)\\.js$": "$1"
     },
@@ -230,6 +236,8 @@
       "!src/**/*.d.ts",
       "packages/fleet/src/**/*.ts",
       "!packages/fleet/src/**/*.d.ts",
+      "packages/memory-runtime/src/**/*.ts",
+      "!packages/memory-runtime/src/**/*.d.ts",
       "packages/service/src/**/*.ts",
       "!packages/service/src/**/*.d.ts"
     ],

@@ -4,7 +4,7 @@ import { describe, expect, it } from '@jest/globals';
 import {
   createRuntimeModelRuntime,
   normalizeRuntimeSettings,
-} from '../../src/runtime/index.js';
+} from '../../src/index.js';
 import type { ChatFetch, ChatFetchResponse } from '../../src/inference/gateway.js';
 
 function settings(baseUrl: string) {

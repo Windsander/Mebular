@@ -5,9 +5,9 @@ import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Mebular } from '../../src/mebular.js';
-import { IdentityManager } from '../../src/crypto/IdentityManager.js';
-import { MemoryService } from '../../src/memory/MemoryService.js';
+import { Mebular } from '@mebular/core';
+import { IdentityManager } from '@mebular/core';
+import { MemoryService } from '@mebular/core';
 import {
   RuntimeModeError,
   RuntimeService,
@@ -17,7 +17,7 @@ import {
   type Compact,
   type RuntimeEnvelope,
   type RuntimeMode,
-} from '../../src/runtime/index.js';
+} from '../../src/index.js';
 
 describe('RuntimeService (G0/G1)', () => {
   let dir: string;

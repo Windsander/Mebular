@@ -3,7 +3,7 @@
 
 import { describe, it, expect, afterEach } from '@jest/globals';
 import { join } from 'node:path';
-import { createRuntimeModelRuntime, normalizeRuntimeSettings } from '../../src/runtime/index.js';
+import { createRuntimeModelRuntime, normalizeRuntimeSettings } from '@mebular/memory-runtime';
 import { createInferenceManager } from '../../packages/mcp/src/inference-admin.mjs';
 import { readDeviceConfig } from '../../packages/mcp/src/inference-store.mjs';
 import {
@@ -12,7 +12,7 @@ import {
   makeManifest,
   tempDir,
   writeImportPack,
-} from '../inference/mcp-helpers.mjs';
+} from '../../packages/memory-runtime/tests/inference/mcp-helpers.mjs';
 
 const tempDirs = [];
 

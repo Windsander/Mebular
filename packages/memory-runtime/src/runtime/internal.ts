@@ -1,11 +1,13 @@
-// Runtime 内部对象判定（contract §2.7）
+// Memory Runtime 原型内部对象判定（0.3.0 W1）
 //
-// 三重判定：节点类型 + metadata.runtime.internal + 保留 namespace（`__*`，
-// 但 `__policy__` 属于既有策略语义，不算 Runtime 内部对象）。
-// MemoryStore / MemoryService 默认调用这里做防御性过滤；即使有人绕过
-// Runtime 直接向图写入 compact 节点，普通记忆查询也不会泄漏。
+// 本模块只属于 @mebular/memory-runtime；core 不认识这里的具体类型名，只使用
+// 自己的通用判定（metadata.internal + 保留 namespace）。
+//
+// 原型判定：通用 metadata.internal + 节点类型 + metadata.runtime.internal
+// + 保留 namespace（`__*`，但 `__policy__` 属于既有策略语义）。
+// 这层额外判定用于 RuntimeService 的读路径与管理面，防止原型旧数据泄漏。
 
-import type { Node } from '../types/index.js';
+import type { Node } from '@mebular/core';
 import {
   RUNTIME_INTERNAL_NODE_TYPES,
   RUNTIME_METADATA_KEY,
@@ -32,6 +34,8 @@ export function isRuntimeInternalNode(node: InternalCheckNode | null | undefined
   if (typeof type === 'string' && (RUNTIME_INTERNAL_NODE_TYPES as readonly string[]).includes(type)) {
     return true;
   }
+  // 0.3 通用判别键：core（MemoryStore/MemoryService/CMF）只认 metadata.internal。
+  if (node.metadata?.internal === true) return true;
   const runtime = readRuntimeMetadata(node);
   if (runtime?.internal === true) return true;
   const namespace = node.namespace;

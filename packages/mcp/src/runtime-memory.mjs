@@ -1,4 +1,9 @@
-// /runtime/v1 HTTP API（0.3.0 contract §6）
+// /runtime/v1 HTTP API（0.3.0 原型）
+//
+// @deprecated 该路由是 0.3 原型面，发布前会删除；目标宿主 API 是
+// `/memory-runtime/v1`（由独立 @mebular/memory-runtime sidecar 提供）。
+// W1 只做包边界拆分：RuntimeService 已迁到 @mebular/memory-runtime，
+// 这里暂时保留原型路由，不实现新的 /internal/memory/v1 capability API。
 //
 // 与 /mcp 同端口、同 bearer/OAuth + scope：
 //   GET    /status                       memory.read
@@ -32,32 +37,33 @@ import { copyFile, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { configPath } from './config.mjs';
 
-// 开发/工作树里 `@mebular/core` 可能经 node_modules 指向旧包；优先使用包内
-// 当前构建产物，保证 RuntimeService 与源码同版本（发布包里二者等价）。
-async function loadCoreRuntime() {
+// 优先按包名解析（workspace / 独立安装）；根 @mebular/core tarball 里
+// packages/mcp 与 packages/memory-runtime 是同级目录，包名可能未安装，
+// 此时回退到同级 dist。发布后的 @mebular/mcp 仍通过 package dependency 解析。
+async function loadMemoryRuntime() {
   try {
-    const core = await import('@mebular/core');
-    if (typeof core.RuntimeService === 'function') {
-      return { RuntimeService: core.RuntimeService, RuntimeModeError: core.RuntimeModeError };
-    }
+    const mod = await import('@mebular/memory-runtime');
+    if (typeof mod.RuntimeService === 'function') return mod;
   } catch {
-    // 回退到本包 dist
+    // 回退到同级 memory-runtime dist
   }
-  const fallback = await import(new URL('../../../dist/index.js', import.meta.url).href);
-  return { RuntimeService: fallback.RuntimeService, RuntimeModeError: fallback.RuntimeModeError };
+  return import(new URL('../../memory-runtime/dist/index.js', import.meta.url).href);
 }
 
-const { RuntimeService, RuntimeModeError } = await loadCoreRuntime();
+const { RuntimeModeError, RuntimeService } = await loadMemoryRuntime();
 
+/** @deprecated 原型路径；目标路径是 `/memory-runtime/v1`。 */
 export const RUNTIME_API_PREFIX = '/runtime/v1';
 const MAX_RUNTIME_BODY_BYTES = 2 * 1024 * 1024;
 
+/** @deprecated 原型路径；目标路径是 `/memory-runtime/v1`。 */
 export function isRuntimePath(path) {
   return path === RUNTIME_API_PREFIX || path.startsWith(`${RUNTIME_API_PREFIX}/`);
 }
 
 /**
  * 构造 RuntimeService。runtimeDir 固定为 `<home>/runtime`，本地 Raw/Trace 不进入图。
+ * @deprecated 原型组装；W3 改为 sidecar 生命周期与 capability client。
  * @param {{ app: object, config?: object, home: string, version?: string, hostKey?: string, profileId?: string|null }} options
  */
 export function buildRuntimeService({ app, config = {}, home, version, hostKey, profileId = null }) {
@@ -73,6 +79,7 @@ export function buildRuntimeService({ app, config = {}, home, version, hostKey, 
 /**
  * 原子持久化 `runtime.mode`（保留配置其余字段；写前备份 .bak）。
  * 独立于 RuntimeService，便于测试与后续 CLI/Console 复用。
+ * @deprecated 原型配置面；目标模式由 MCP `memoryRuntime.*` 与 sidecar 配置承载。
  */
 export async function persistRuntimeMode({ home, mode, configFile = null }) {
   const file = configFile ?? configPath(home);
@@ -142,6 +149,7 @@ function querySync(url) {
 }
 
 /**
+ * @deprecated 原型路由；目标为独立 sidecar 的 `/memory-runtime/v1`。
  * @param {{
  *   getService: () => RuntimeService|null,
  *   getConfig?: () => object,

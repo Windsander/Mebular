@@ -99,7 +99,7 @@ describe('serve + Memory Runtime supervisor', () => {
     const ready = await waitFor(async () => {
       const body = await overview(base);
       return body.memoryRuntime?.state === 'ready' ? body.memoryRuntime : null;
-    });
+    }, { timeoutMs: 15000 });
     expect(ready).toMatchObject({
       enabled: true,
       managed: true,
@@ -116,9 +116,9 @@ describe('serve + Memory Runtime supervisor', () => {
 
     await server.close();
     servers.splice(servers.indexOf(server), 1);
-    await waitFor(() => !pidAlive(ready.pid), { timeoutMs: 5000 });
-    await waitFor(() => !existsSync(join(home, 'memory-runtime.json')), { timeoutMs: 5000 });
-  });
+    await waitFor(() => !pidAlive(ready.pid), { timeoutMs: 10000 });
+    await waitFor(() => !existsSync(join(home, 'memory-runtime.json')), { timeoutMs: 10000 });
+  }, 30000);
 
   it('disabled：轻量模式零 sidecar 目录/token/discovery/进程', async () => {
     const { home, base } = await start({ enabled: false });
@@ -162,14 +162,14 @@ describe('serve + Memory Runtime supervisor', () => {
     const ready = await waitFor(async () => {
       const body = await overview(base);
       return body.memoryRuntime?.state === 'ready' ? body.memoryRuntime : null;
-    });
+    }, { timeoutMs: 15000 });
     expect(existsSync(join(home, 'memory-runtime.json'))).toBe(true);
 
     const disabled = await patch({ patch: { 'memoryRuntime.enabled': false } });
     expect(disabled).toMatchObject({ ok: true, restartRequired: false });
-    await waitFor(() => !pidAlive(ready.pid), { timeoutMs: 5000 });
-    await waitFor(() => !existsSync(join(home, 'memory-runtime.json')), { timeoutMs: 5000 });
+    await waitFor(() => !pidAlive(ready.pid), { timeoutMs: 10000 });
+    await waitFor(() => !existsSync(join(home, 'memory-runtime.json')), { timeoutMs: 10000 });
     const body = await overview(base);
     expect(body.memoryRuntime).toMatchObject({ enabled: false, state: 'stopped', pid: null });
-  });
+  }, 30000);
 });

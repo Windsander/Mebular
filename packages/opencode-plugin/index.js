@@ -365,7 +365,10 @@ export function resolvePluginConfig(input, options = {}) {
 function textFromContentValue(value) {
   if (typeof value === 'string') {
     const trimmed = value.trim();
-    if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    // OpenCode may hand a plugin a JSON-encoded string, not just a JSON
+    // array/object. `JSON.stringify('hello')` is `"hello"`; unwrap that too so
+    // recall and ingest never see the transport quotes as part of the text.
+    if (trimmed.startsWith('[') || trimmed.startsWith('{') || trimmed.startsWith('"')) {
       try {
         return textFromContentValue(JSON.parse(trimmed));
       } catch {
@@ -378,16 +381,17 @@ function textFromContentValue(value) {
     const texts = [];
     for (const part of value) {
       if (typeof part === 'string') {
-        const text = part.trim();
+        const text = textFromContentValue(part);
         if (text) texts.push(text);
-      } else if (isObject(part) && part.type === 'text' && asText(part.text)) {
-        texts.push(asText(part.text));
+      } else if (isObject(part) && part.type === 'text') {
+        const text = textFromContentValue(part.text);
+        if (text) texts.push(text);
       }
     }
     return texts.join('\n').trim();
   }
   if (isObject(value)) {
-    const direct = asText(value.text);
+    const direct = textFromContentValue(value.text);
     if (direct) return direct;
     return textFromContentValue(value.content ?? value.parts);
   }

@@ -217,3 +217,22 @@ describe('CMF 节点指纹', () => {
     expect(a).not.toBe(b);
   });
 });
+
+describe('CMF Runtime 内部对象过滤', () => {
+  it('默认导出排除 compact/checkpoint/self；显式 includeInternal 才包含', async () => {
+    const { memory, graph } = freshMemory('device-src');
+    const fact = await memory.addFact({
+      subject: 'Mebular', predicate: 'writtenIn', object: 'TypeScript',
+    });
+    const compact = await graph.createNode('compact', { summary: '内部摘要' }, undefined, {
+      namespace: 'notes',
+    });
+
+    const doc = await exportGraphToCmf(graph);
+    expect(doc.nodes.map((node) => node.id)).toContain(fact.id);
+    expect(doc.nodes.map((node) => node.id)).not.toContain(compact.id);
+
+    const all = await exportGraphToCmf(graph, { includeInternal: true });
+    expect(all.nodes.map((node) => node.id)).toContain(compact.id);
+  });
+});

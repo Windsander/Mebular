@@ -132,7 +132,13 @@ describe('C1 拨号策略', () => {
 
       // 退避到期前补上可用候选：重试应自动成功并清空退避
       await book.upsert(target.id, [good], 'learned');
-      await new Promise((resolve) => setTimeout(resolve, 80));
+      // 固定 sleep 会在完整测试套件的负载下偶发不足；轮询到重拨完成，
+      // 仍保留 2s 上限，避免把真实回归拖成超时。
+      const deadline = Date.now() + 2000;
+      while (Date.now() < deadline
+        && (plan.dials.length < 2 || manager.getBackoff(target) !== null)) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
       // 重试时新加入的 good 候选（更晚 addedAt）优先于旧 bad → 直接成功
       expect(plan.dials).toEqual([bad, good]);
       expect(manager.getBackoff(target)).toBeNull();

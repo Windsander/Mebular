@@ -26,12 +26,11 @@ node tests/integration/host-e2e/dsh-real-runtime.mjs
 | Hermes | 真实 `integrations/hermes/mebular-memory/__init__.py`、真实 Hermes `MemoryProvider` 方法、真实 Runtime HTTP | `prefetch`、`sync_turn`、`on_pre_compress`、`on_session_switch`、队列 flush/shutdown、durable spool、bearer、system prompt 不归档、profile 不持久化 token、heuristic 记录可召回 | 本机未安装 Hermes gateway，使用仓库测试同款 `agent.memory_provider` stub；不启动真实 Hermes 进程/LLM，不验证原生 `MEMORY.md` / `USER.md` 双写（插件显式不双写），不验证 Hermes 多 profile 进程隔离 |
 | OpenCode / OpenChamber | 真实 `opencode v2.2.0` `serve` + `run`、真实 `@mebular/opencode-plugin`（由 OpenCode 按 `opencode.json` 加载）、真实 Runtime HTTP、fake OpenAI-compatible provider（不跑真实 LLM） | 插件真实加载、`context` hook 召回并注入真实 outgoing model request、request-only `<mebular_memory trust="untrusted">` 块、host 事件走真实 `/ingest` + 本地 raw、compaction 后真实 checkpoint PUT 并持久化、bearer、token 不进入 OpenCode state/log/session | 不跑真实模型；fake provider 必须返回 OpenCode 的完整 summary 模板；不验证 OpenChamber Desktop UI、真实 MCP 工具调用、用户真实 `~/.config/opencode`；若 opencode 不可用，`--controller-fallback` 只验证 plugin controller + 真实 Runtime（会明确打印边界） |
 
-## 已知契约差异 / 缺陷证据
+## 已知差异 / 边界
 
-1. **OpenCode 的 context query 带 JSON 引号。** OpenCode 2.2 通过 `session.context` / `context` hook 给出的 message content 是 JSON 字符串形态（例如 `"\"Remember ...\""`）。插件把该字符串原样作为 `/runtime/v1/context` 的 `query`；Runtime 的关键词基线是整串子串匹配，所以普通未加引号的记忆不会命中。`opencode-real-runtime.mjs` 用 host candidate 写入同样的带引号文本，才能让真实 `/context` 返回 block；测试里有一条 `OpenCode context query 保留 JSON 引号（已记录契约差异）` 专门记录这个行为。建议插件在 `messageText` / `extractLastUserTurn` 解包 JSON 字符串，或 Runtime 对 query 做 tokenize/去引号。这不是本次测试改实现解决的问题。
-2. **OpenCode ingest 保留引号，heuristic 锚定句式不命中。** 同一 JSON 字符串形态被插件送入 `/ingest`，raw 捕获正常，但 `^以后默认用…` 这类 heuristic 规则不会匹配（文本以 `"` 开头）。因此本 suite 不把“OpenCode ingest 必须产生 MemoryRecord”作为通过条件；它断言真实 ingest/raw 路径。这个差异和上一条同源。
-3. **DSH check `ingest 复用 requestId`** 只断言 adapter 的 `Idempotency-Key` 与 body `requestId` 一致；真实 Runtime 的 `duplicate` 语义由 `tests/runtime` 覆盖，本 suite 不注入失败/重试（fake E2E 仍覆盖三次重试）。
-4. **`GET /runtime/v1/status.version` 当前返回 `0.2.4`**（仓库 `package.json` / `APP_VERSION`），而契约草案示例为 `0.3.0`。本 suite 不把它作为宿主适配断言；如果 0.3.0 发布时统一 bump 版本号，这属于发布步骤，不是 adapter 缺陷。临时 home 没有 profiles registry 时 `identity.profileId` 为 `null`，与“本机注册表”语义一致。
+1. **OpenCode 的 JSON 字符串已解包。** OpenCode 2.2 通过 `session.context` / `context` hook 给出的 message content 可能是 JSON 字符串形态；`@mebular/opencode-plugin` 现在会递归解包后再作为 `/runtime/v1/context` 的 `query` 和 `/ingest` 的文本。`opencode-real-runtime.mjs` 断言 query 与 raw 都是用户原始文本，不再依赖带引号的 seed。
+2. **DSH check `ingest 复用 requestId`** 只断言 adapter 的 `Idempotency-Key` 与 body `requestId` 一致；真实 Runtime 的 `duplicate` 语义由 `tests/runtime` 覆盖，本 suite 不注入失败/重试（fake E2E 仍覆盖三次重试）。
+3. **`GET /runtime/v1/status.version` 在 0.3.0 下返回 `0.3.0`。** 本 suite 不把它作为宿主适配断言；临时 home 没有 profiles registry 时 `identity.profileId` 为 `null`，与“本机注册表”语义一致。
 
 ## 结果（本机 2026-10-29）
 

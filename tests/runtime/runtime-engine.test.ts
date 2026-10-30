@@ -558,6 +558,15 @@ describe('RuntimeService 完整引擎', () => {
       localRawChunks: 1,
       localTraces: 1,
     });
+    const memoryStatus = await memory.status();
+    // 本地 checkpoint 不进图；图内计数只含云 checkpoint。本地计数在
+    // /runtime/v1/status.counts.checkpoints。
+    expect(memoryStatus.runtime).toEqual({
+      memoryRecords: 1,
+      compacts: 1,
+      checkpoints: 0,
+      selfRecords: 1,
+    });
     expect(status.warnings).toContain('rawCaptureUnencrypted');
     expect(JSON.stringify(status)).not.toContain('sk-secret');
 

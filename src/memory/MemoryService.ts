@@ -7,7 +7,7 @@ import type { Mebular } from '../mebular.js';
 import { MemoryStore, isArchived } from './MemoryStore.js';
 import { EdgeTypes, type EpisodeNode, type FactNode, type SkillNode } from './types.js';
 import type { VectorIndex } from './VectorIndex.js';
-import { isRuntimeInternalNode } from '../runtime/internal.js';
+import { isRuntimeInternalNode, readRuntimeMetadata } from '../runtime/internal.js';
 import { ValidationError, ErrorCodes, MebularError, SyncError } from '../errors.js';
 import type { Node, TraverseOptions, TraverseResult } from '../types/index.js';
 import { matchesNamespace } from '../core/namespace.js';
@@ -90,6 +90,16 @@ export interface MemoryStatus {
     enabled: boolean;
     discovery: { running: boolean; disabled: boolean; reason: string | null };
   } | null;
+  /**
+   * 0.3 Runtime 对象的图内计数（只增字段；本地 Raw/Trace 不在图中，
+   * 由 `/runtime/v1/status` 提供）。
+   */
+  runtime: {
+    memoryRecords: number;
+    compacts: number;
+    checkpoints: number;
+    selfRecords: number;
+  };
 }
 
 export type ImportInput = AdapterSource;
@@ -447,6 +457,14 @@ export class MemoryService {
     } catch {
       // 门面未初始化时 sync 不可访问
     }
+    const runtime = { memoryRecords: 0, compacts: 0, checkpoints: 0, selfRecords: 0 };
+    for (const item of nodes) {
+      const kind = readRuntimeMetadata(item)?.kind;
+      if (kind === 'memory_record') runtime.memoryRecords += 1;
+      else if (kind === 'compact') runtime.compacts += 1;
+      else if (kind === 'context_checkpoint') runtime.checkpoints += 1;
+      else if (kind === 'self_record') runtime.selfRecords += 1;
+    }
     return {
       deviceId: this.mebular.deviceId,
       peerId: node?.peerId.id ?? null,
@@ -460,6 +478,7 @@ export class MemoryService {
       atRest: this.mebular.atRestEncryption,
       semantic: this.mebular.semanticVectorIndex !== null,
       pendingEventCount,
+      runtime,
       // F-NET-1（B）：发现层禁用时暴露「已禁用 + 原因」，其余传输不受影响
       lan: lanStatus
         ? {

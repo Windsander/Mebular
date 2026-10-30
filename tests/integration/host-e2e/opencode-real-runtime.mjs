@@ -190,14 +190,13 @@ async function main() {
   try {
     console.log('OpenCode / OpenChamber host E2E（真实 opencode + 真实 Runtime）');
     console.log('==========================================================');
-    // OpenCode stores message content as a JSON-quoted string; the plugin sends
-    // it verbatim as the recall query. Seed a host candidate whose object is the
-    // same quoted text so the real Runtime's substring baseline can match it.
-    // This also documents the discrepancy for the report; see README.
+    // OpenCode may store message content as a JSON-encoded string. The plugin
+    // unwraps it before recall/ingest, so the Runtime sees the same plain text
+    // the user typed.
     const seeded = await runtime.seedCandidate({
       candidate: {
         kind: 'fact',
-        data: { subject: 'user', predicate: 'theme', object: JSON.stringify(prompt) },
+        data: { subject: 'user', predicate: 'theme', object: prompt },
       },
       namespace: 'default',
       agentId: 'opencode',
@@ -260,14 +259,9 @@ async function main() {
       && String(entry.body?.query).includes(suffix)), { timeoutMs: 15000, describe: 'context request' });
     check('插件走真实 /context', Boolean(contextRequest) && contextRequest.ok,
       contextRequest ? `status=${contextRequest.status}` : 'missing');
-    // Contract observation: OpenCode's context hook receives message content as
-    // a JSON-quoted string (e.g. "\"hello\""), and the plugin forwards it as the
-    // recall query. The Runtime keyword baseline is a whole-string substring
-    // match, so a normal unquoted memory does not match. The harness seeds a
-    // host candidate containing the same quoted text to exercise the path.
-    check('OpenCode context query 保留 JSON 引号（已记录契约差异）',
-      String(contextRequest?.body?.query ?? '').startsWith('"'),
-      contextRequest ? String(contextRequest.body?.query).slice(0, 120) : 'missing');
+    check('OpenCode context query 已解包 JSON 字符串',
+      String(contextRequest?.body?.query ?? '') === prompt,
+      contextRequest ? JSON.stringify(contextRequest.body?.query).slice(0, 120) : 'missing');
     check('真实 /context 返回 seed 记忆', JSON.stringify(contextRequest?.response).includes(seedToken),
       contextRequest ? JSON.stringify(contextRequest.response).slice(0, 400) : 'missing');
 
@@ -301,14 +295,11 @@ async function main() {
     }, { timeoutMs: 15000, describe: 'raw capture' });
     check('真实 Runtime 落本地 raw', Array.isArray(raw) && raw.length > 0, `chunks=${raw?.length ?? 0}`);
 
-    // Observation, not a pass/fail contract: OpenCode's session.context returns
-    // message content as a JSON-quoted string. The plugin sends it unchanged, so
-    // heuristic anchored patterns such as “以后默认用…” do not match. The raw
-    // capture and HTTP path still work; context recall is covered by the seed.
-    const ingestedQuote = raw?.find((chunk) => chunk.role === 'user'
-      && String(chunk.text).includes(seedToken) && String(chunk.text).trim().startsWith('"'));
-    check('真实 ingest 保留 OpenCode 原始 user 文本', Boolean(ingestedQuote),
-      ingestedQuote ? JSON.stringify(ingestedQuote.text).slice(0, 240) : 'no quoted user chunk');
+    const ingestedUser = raw?.find((chunk) => chunk.role === 'user'
+      && String(chunk.text).includes(seedToken));
+    check('真实 ingest 使用解包后的 user 文本', Boolean(ingestedUser)
+      && !String(ingestedUser?.text ?? '').trim().startsWith('"'),
+    ingestedUser ? JSON.stringify(ingestedUser.text).slice(0, 240) : 'no user chunk');
 
     const compact = await runProcess('opencode', [
       'api', '--server', serverUrl, 'post', `/api/session/${sessionID}/compact`, '--data', '{}',

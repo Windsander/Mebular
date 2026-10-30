@@ -511,6 +511,12 @@ describe('request-only context block', () => {
     expect(extractLastUserTurn([
       { id: 'u3', role: 'user', content: JSON.stringify([{ type: 'text', text: '  quoted content  ' }]) },
     ])).toMatchObject({ id: 'u3', text: 'quoted content' });
+    expect(extractLastUserTurn([
+      { id: 'u4', role: 'user', content: JSON.stringify('  json string content  ') },
+    ])).toMatchObject({ id: 'u4', text: 'json string content' });
+    expect(extractLastUserTurn([
+      { id: 'u5', role: 'user', content: JSON.stringify([{ type: 'text', text: JSON.stringify('nested string') }]) },
+    ])).toMatchObject({ id: 'u5', text: 'nested string' });
     expect(extractLastUserTurn([])).toBeNull();
   });
 });

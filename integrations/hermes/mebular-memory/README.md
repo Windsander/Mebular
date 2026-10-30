@@ -159,7 +159,7 @@ rm -rf "${HERMES_HOME:-$HOME/.hermes}/plugins/mebular"
 
 ## 已知限制
 
-- 依赖尚未合并的 Runtime `/runtime/v1` 端点；端点未实现时 recall 返回空、ingest 留在 spool，不影响 Hermes 主流程。
+- 依赖 Mebular 0.3.0 的 Runtime `/runtime/v1` 端点；daemon 未启动或端点不可用时 recall 返回空、ingest 留在 spool，不影响 Hermes 主流程。
 - `prefetch` 首次同步召回最多等待 `recall_timeout`（默认 1.5s）；用 `queue_prefetch` 预热后通常无等待。
 - Hermes `MemoryProvider` 不暴露当前模型；本插件不伪造，`extractor=host` 的候选抽取由可选 companion 插件负责。
 - 队列是单进程文件 spool，不是跨进程锁；不要在同一 `HERMES_HOME` 跑两个 Hermes 写者（Hermes 本身也不建议）。

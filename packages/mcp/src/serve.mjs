@@ -1283,6 +1283,21 @@ export async function startHttpServer({
       if (check.challenge) res.setHeader('www-authenticate', check.challenge);
       return sendJson(res, check.status, { error: 'unauthorized', message: check.message });
     }
+    // 内部对象只在管理面显式调试时可见；includeInternal 不能由普通读 token 打开。
+    if (path === '/admin/api/memories') {
+      const includeInternal = url.searchParams.get('includeInternal');
+      if (includeInternal === '1' || includeInternal === 'true') {
+        const adminCheck = await authenticate(req, Buffer.alloc(0), 'memory.admin');
+        if (!adminCheck.ok) {
+          res.statusCode = adminCheck.status;
+          if (adminCheck.challenge) res.setHeader('www-authenticate', adminCheck.challenge);
+          return sendJson(res, adminCheck.status, {
+            error: 'forbidden',
+            message: 'includeInternal 需要 memory.admin scope',
+          });
+        }
+      }
+    }
     // 注意：CSRF token 只在 /console/ 页面加载时签发。若在 overview 轮询里重新签发，
     // cookie 会被每次轮询改写，与并发的写请求竞争（读 cookie 后、发出写之前又来一次
     // overview）→ header 与 cookie 不一致而 403。token 12h 有效，页面加载签发一次即可。

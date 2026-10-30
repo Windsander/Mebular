@@ -125,7 +125,9 @@ describe('IngestService settlements', () => {
     await service.ingest(preferenceRequest({ capture: 'local' }));
 
     const rawPath = join(home, 'memory-runtime', 'raw', 'chunks.jsonl');
-    expect((await stat(rawPath)).mode & 0o777).toBe(0o600);
+    if (process.platform !== 'win32') {
+      expect((await stat(rawPath)).mode & 0o777).toBe(0o600);
+    }
     expect((await local.stats()).rawChunks).toBe(1);
   });
 

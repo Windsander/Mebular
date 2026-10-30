@@ -1,13 +1,14 @@
-// Test-only Mebular Runtime stand-in.
+// Test-only Mebular Memory Runtime sidecar stand-in.
 //
-// It implements just enough of the shared daemon surface for the DSH memory
-// runtime adapter and the real DSH E2E harness:
-//   GET  /healthz
-//   GET  /app/embed/info
-//   POST /runtime/v1/recall
-//   POST /runtime/v1/ingest
-//   PUT  /runtime/v1/checkpoints/:threadId
-//   GET  /runtime/v1/status
+// It implements just enough of the `/memory-runtime/v1` host surface for the
+// DSH memory runtime adapter and the real DSH E2E harness:
+//   GET  /health
+//   GET  /status
+//   POST /context
+//   POST /recall
+//   POST /ingest
+//   PUT  /checkpoints/:threadId
+//   GET  /app/embed/info (MCP daemon surface, kept for the bridge)
 //
 // It never calls a model, never touches the Mebular home directory and never
 // stores the raw bearer token. Tests assert on `state.requests`, which only
@@ -67,12 +68,13 @@ function failure(requestId, code, message, retryable = false) {
 }
 
 /**
- * Start a fake Runtime on an ephemeral loopback port.
+ * Start a fake Memory Runtime sidecar on an ephemeral loopback port.
  *
  * @param {{
  *   auth?: 'none' | 'bearer',
  *   token?: string,
  *   records?: Array<Record<string, unknown>>,
+ *   fragments?: Array<Record<string, unknown>>,
  *   recallDelayMs?: number,
  *   ingestFailTimes?: number,
  *   ingestFailureStatus?: number,
@@ -90,12 +92,14 @@ export async function createFakeRuntime(options = {}) {
     authMode,
     requests: [],
     recalls: [],
+    contexts: [],
     ingests: [],
     checkpoints: [],
     ingestAttempts: 0,
     ingestFailureCount: 0,
     ingestDuplicates: 0,
     recallCount: 0,
+    contextCount: 0,
     unauthorized: 0,
     maxBodyBytes: MAX_BODY_BYTES,
   };
@@ -170,6 +174,18 @@ export async function createFakeRuntime(options = {}) {
       sendJson(res, 200, state, requestId);
       return;
     }
+    if (path === '/health') {
+      sendJson(res, 200, {
+        ok: true,
+        ready: true,
+        state: 'ready',
+        runtimeVersion: '0.3.0-fake-runtime',
+        apiVersion: 1,
+        capabilityApiVersion: 1,
+        degraded: false,
+      }, requestId);
+      return;
+    }
     if (path === '/app/embed/info') {
       const origin = `http://127.0.0.1:${server.address().port}`;
       sendJson(res, 200, {
@@ -188,29 +204,76 @@ export async function createFakeRuntime(options = {}) {
       sendJson(res, 404, failure(requestId, 'not_found', 'fake runtime has no MCP endpoint'), requestId);
       return;
     }
-    if (!path.startsWith('/runtime/v1')) {
+    if (!path.startsWith('/memory-runtime/v1')) {
       sendJson(res, 404, failure(requestId, 'not_found', 'unknown path'), requestId);
       return;
     }
     if (!authorize(req, res, requestId)) return;
 
-    if (path === '/runtime/v1/status' && req.method === 'GET') {
-      sendJson(res, 200, envelope(requestId, { mode: 'runtime', auth: authMode }), requestId);
+    if (path === '/memory-runtime/v1/status' && req.method === 'GET') {
+      sendJson(res, 200, envelope(requestId, { mode: 'immersive', apiVersion: 1, auth: { mode: authMode } }), requestId);
       return;
     }
 
-    if (path === '/runtime/v1/recall' && req.method === 'POST') {
+    if (path === '/memory-runtime/v1/context' && req.method === 'POST') {
+      state.contextCount += 1;
+      if (Number.isFinite(opts.recallDelayMs) && opts.recallDelayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, opts.recallDelayMs));
+      }
+      const records = Array.isArray(opts.records) ? opts.records : [];
+      const fragments = Array.isArray(opts.fragments)
+        ? opts.fragments
+        : records.map((record, index) => ({
+          id: `mf_${record?.id ?? index}`,
+          kind: record?.type ?? 'fact',
+          gist: typeof record?.content === 'string' ? record.content : '',
+          owner: { role: 'agent', domain: 'agent:dsh', agentId: 'dsh', agentName: 'DSH' },
+          confidence: 0.9,
+          time: { at: Date.now(), precision: 'exact' },
+          citations: [{ id: record?.id ?? `record-${index}`, type: record?.type ?? 'fact' }],
+          hasDetail: false,
+          trust: 'untrusted',
+        }));
+      state.contexts.push({
+        requestId,
+        query: body?.query ?? null,
+        agentId: body?.agentId ?? null,
+        threadId: body?.threadId ?? null,
+        turnId: body?.turnId ?? null,
+        turnKind: body?.turnKind ?? null,
+        domains: Array.isArray(body?.domains) ? body.domains : [],
+        maxFragments: body?.maxFragments ?? null,
+        maxBytes: body?.maxBytes ?? null,
+        tokenBudget: body?.tokenBudget ?? null,
+        count: fragments.length,
+      });
+      sendJson(res, 200, envelope(requestId, {
+        recallId: `rr_fake_${state.contextCount}`,
+        fragments,
+        blocks: fragments.length === 0 ? [] : [{
+          kind: 'fragment',
+          content: fragments.map((fragment) => fragment.gist).filter(Boolean).join('\n'),
+          citations: fragments.flatMap((fragment) => fragment.citations ?? []),
+          trust: 'untrusted',
+        }],
+        records,
+        traceId: `tr_fake_${state.contextCount}`,
+      }), requestId);
+      return;
+    }
+
+    if (path === '/memory-runtime/v1/recall' && req.method === 'POST') {
       state.recallCount += 1;
       if (Number.isFinite(opts.recallDelayMs) && opts.recallDelayMs > 0) {
         await new Promise((resolve) => setTimeout(resolve, opts.recallDelayMs));
       }
       const records = Array.isArray(opts.records) ? opts.records : [];
       state.recalls.push({ requestId, query: body?.query ?? null, count: records.length });
-      sendJson(res, 200, envelope(requestId, { records }), requestId);
+      sendJson(res, 200, envelope(requestId, { records, fragments: [], blocks: [] }), requestId);
       return;
     }
 
-    if (path === '/runtime/v1/ingest' && req.method === 'POST') {
+    if (path === '/memory-runtime/v1/ingest' && req.method === 'POST') {
       const key = record.idempotencyKey ?? body?.requestId ?? requestId;
       const replay = idempotentIngest.get(key);
       if (replay !== undefined) {
@@ -255,12 +318,14 @@ export async function createFakeRuntime(options = {}) {
           : [],
         threadId: body?.threadId ?? null,
         agentId: body?.agentId ?? null,
+        domain: body?.domain ?? null,
+        hasSync: Object.prototype.hasOwnProperty.call(body ?? {}, 'sync'),
       });
       sendJson(res, 200, response, requestId);
       return;
     }
 
-    const checkpointMatch = path.match(/^\/runtime\/v1\/checkpoints\/([^/]+)$/);
+    const checkpointMatch = path.match(/^\/memory-runtime\/v1\/checkpoints\/([^/]+)$/);
     if (checkpointMatch && req.method === 'PUT') {
       const key = record.idempotencyKey ?? body?.requestId ?? requestId;
       const replay = idempotentCheckpoint.get(key);
@@ -283,13 +348,15 @@ export async function createFakeRuntime(options = {}) {
         threadId: decodeURIComponent(checkpointMatch[1]),
         compactionId: body?.state?.compactionId ?? null,
         summary: typeof body?.summary === 'string' ? body.summary : null,
+        domain: body?.domain ?? null,
+        hasSync: Object.prototype.hasOwnProperty.call(body ?? {}, 'sync'),
         committed: true,
       });
       sendJson(res, 200, response, requestId);
       return;
     }
 
-    sendJson(res, 404, failure(requestId, 'not_found', 'unknown runtime path'), requestId);
+    sendJson(res, 404, failure(requestId, 'not_found', 'unknown memory runtime path'), requestId);
   });
 
   await new Promise((resolve, reject) => {
@@ -301,6 +368,7 @@ export async function createFakeRuntime(options = {}) {
 
   return {
     url,
+    sidecarUrl: `${url}/memory-runtime/v1`,
     state,
     close: async () => {
       await new Promise((resolve) => server.close(() => resolve()));
@@ -308,12 +376,14 @@ export async function createFakeRuntime(options = {}) {
     reset: () => {
       state.requests.length = 0;
       state.recalls.length = 0;
+      state.contexts.length = 0;
       state.ingests.length = 0;
       state.checkpoints.length = 0;
       state.ingestAttempts = 0;
       state.ingestFailureCount = 0;
       state.ingestDuplicates = 0;
       state.recallCount = 0;
+      state.contextCount = 0;
       state.unauthorized = 0;
       idempotentIngest.clear();
       idempotentCheckpoint.clear();

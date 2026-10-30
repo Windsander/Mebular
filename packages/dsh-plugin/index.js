@@ -5553,20 +5553,22 @@ export function apply(ctx, config = {}, options = {}) {
     log: (level, message) => log(level, message),
   });
 
-  // Memory Runtime is opt-in and has no effect when disabled: it registers no
-  // listeners, starts no timers and never fetches. It follows the same resolved
-  // daemon URL and lifecycle snapshot as the MCP bridge.
+  // Memory Runtime is a separate sidecar and is opt-in. When disabled it has no
+  // effect: no listeners, no timer, no discovery read and no fetch. It never
+  // reuses the MCP daemon URL; the adapter resolves `memoryRuntime.url` >
+  // MEBULAR_MEMORY_RUNTIME_URL > `<home>/memory-runtime.json`.
   const memoryRuntimeConfig = resolveMemoryRuntimeConfig(raw.memoryRuntime, {
     warn: (message) => log('warn', message),
   });
   const memoryRuntime = createMemoryRuntimeAdapter({
     ctx,
     config: memoryRuntimeConfig,
-    daemonUrl: resolved.daemonUrl,
     fetchImpl: opts.fetchImpl,
     now: opts.now,
     env: opts.env,
-    homeDir: memoryRuntimeConfig.enabled ? (opts.userHome ?? homedir()) : undefined,
+    homeDir: memoryRuntimeConfig.enabled
+      ? runtimeCloudRoot({ env: opts.env, userHome: opts.userHome })
+      : undefined,
     setTimeoutFn: opts.setTimeoutFn,
     clearTimeoutFn: opts.clearTimeoutFn,
     log: (level, message) => log(level, message),

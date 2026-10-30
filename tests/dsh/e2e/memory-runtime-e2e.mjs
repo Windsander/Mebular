@@ -13,7 +13,7 @@
  *   - compaction checkpoint PUT;
  *   - ingest retry with one requestId/idempotency-key and duplicate-event dedupe;
  *   - bearer authentication (valid token, no token leak in the fake state);
- *   - disabled memoryRuntime: zero /runtime/v1 requests and no injection.
+ *   - disabled memoryRuntime: zero /memory-runtime/v1 requests and no injection.
  *
  * Usage:
  *   node tests/dsh/e2e/memory-runtime-e2e.mjs [--scenario enabled|disabled]
@@ -93,24 +93,29 @@ function parseArgs(argv) {
   return options;
 }
 
-function memoryPatch({ daemonUrl, enabled, token }) {
+function memoryPatch({ daemonUrl, sidecarUrl, enabled, token }) {
   const runtime = enabled
     ? [
       '    memoryRuntime:',
       '      enabled: true',
+      `      url: ${JSON.stringify(sidecarUrl)}`,
       '      recall: true',
       '      ingest: true',
       '      checkpoints: true',
       '      hideMemoryTools: true',
       '      auth: bearer',
       `      token: ${JSON.stringify(token)}`,
+      '      domains:',
+      '        - user',
+      '        - agent:dsh',
+      '        - default',
       '      ingestFlushMs: 0',
       '      ingestRetryBaseMs: 5',
       '      ingestRetries: 2',
     ]
     : ['    memoryRuntime: false'];
   return [
-    '# Memory runtime E2E: attach to the fake Runtime, no panel/browser.',
+    '# Memory runtime E2E: attach to the fake sidecar, no panel/browser.',
     '- id: mebular',
     "  name: '@mebular/dsh-plugin'",
     '  config:',
@@ -123,7 +128,7 @@ function memoryPatch({ daemonUrl, enabled, token }) {
 }
 
 function runtimeRequests(state) {
-  return (state?.requests ?? []).filter((request) => String(request.path).startsWith('/runtime/v1'));
+  return (state?.requests ?? []).filter((request) => String(request.path).startsWith('/memory-runtime/v1'));
 }
 
 function findIngestAttempts(state, requestId) {
@@ -184,11 +189,12 @@ async function assertScenario({ name, world, runtime, probe }) {
     JSON.stringify(runtimeOnly.map((request) => `${request.path}:${request.auth}`)));
     check('fake Runtime 未记录 401', (server.unauthorized ?? 0) === 0, String(server.unauthorized ?? 'missing'));
 
-    const recalls = runtimeOnly.filter((request) => request.path === '/runtime/v1/recall');
-    check('recall 请求只发生两次（去重生效）', recalls.length === 2, `count=${recalls.length}`);
+    const recalls = runtimeOnly.filter((request) => request.path === '/memory-runtime/v1/context');
+    check('context 请求只发生两次（去重生效）', recalls.length === 2, `count=${recalls.length}`);
 
     const accepted = (server.ingests ?? []).find((entry) => entry.duplicate === false);
     requireCheck('ingest 至少一次成功', accepted !== undefined, JSON.stringify(server.ingests ?? []));
+    check('ingest 请求不带 legacy sync', accepted?.hasSync !== true, JSON.stringify(accepted));
     const attempts = findIngestAttempts(server, accepted.requestId);
     check('重试复用同一 requestId', attempts.length === 3 && attempts.every((entry) => entry.key === accepted.key), `attempts=${attempts.length}`);
     check('重复 session 事件只入队一次', JSON.stringify(accepted.messageIds) === JSON.stringify([
@@ -199,12 +205,14 @@ async function assertScenario({ name, world, runtime, probe }) {
     const committed = (server.checkpoints ?? []).find((entry) => entry.committed === true);
     check('compaction checkpoint 已提交', committed?.compactionId === 'memory-e2e-compaction'
       && committed?.summary === 'memory e2e compacted summary', JSON.stringify(committed));
+    check('checkpoint 写入 task 域且不带 sync', committed?.domain === 'task:dsh_memory-e2e-session'
+      && committed?.hasSync !== true, JSON.stringify(committed));
 
     check('fake Runtime state 不含 bearer token', !JSON.stringify(server).includes(runtime.token), 'token redacted');
   } else {
     check('关闭态不注入 recall', probe.preStep?.injected === false, JSON.stringify(probe.preStep));
     check('关闭态不遮蔽工具', probe.tools?.initialDeny === null, JSON.stringify(probe.tools));
-    check('关闭态没有 /runtime/v1 请求', runtimeRequests(server).length === 0, `count=${runtimeRequests(server).length}`);
+    check('关闭态没有 /memory-runtime/v1 请求', runtimeRequests(server).length === 0, `count=${runtimeRequests(server).length}`);
   }
 
   const artifacts = await world.collectArtifacts(`memory-runtime-${name}`).catch(() => null);
@@ -285,7 +293,12 @@ async function main() {
       const resultPath = join(world.state.artifactsDir, 'memory-runtime-probe.json');
       try {
         const bundles = await world.installProfile({
-          patch: memoryPatch({ daemonUrl: runtime.url, enabled: scenario === 'enabled', token }),
+          patch: memoryPatch({
+            daemonUrl: runtime.url,
+            sidecarUrl: runtime.sidecarUrl,
+            enabled: scenario === 'enabled',
+            token,
+          }),
         });
         requireCheck('profile 包含插件与 probe', bundles.includes('@mebular/dsh-plugin')
           && bundles.includes('@mebular/dsh-memory-runtime-probe'), JSON.stringify(bundles));

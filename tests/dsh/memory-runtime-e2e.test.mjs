@@ -5,6 +5,9 @@
 
 import { Context } from '@deepseek-ai/cordis';
 import { afterEach, describe, expect, it } from '@jest/globals';
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { apply } from '../../packages/dsh-plugin/index.js';
 import { MEMORY_MESSAGE_SOURCE } from '../../packages/dsh-plugin/memory-runtime.js';
@@ -68,10 +71,13 @@ async function waitFor(predicate, { timeoutMs = 5000, intervalMs = 20, label = '
 
 async function startPlugin(runtime, memoryRuntime, extraOptions = {}) {
   const ctx = new Context();
+  const memoryRuntimeConfig = memoryRuntime === undefined || memoryRuntime === false
+    ? memoryRuntime
+    : { url: runtime.sidecarUrl, ...memoryRuntime };
   const config = {
     panel: false,
     daemonUrl: runtime.url,
-    ...(memoryRuntime === undefined ? {} : { memoryRuntime }),
+    ...(memoryRuntime === undefined ? {} : { memoryRuntime: memoryRuntimeConfig }),
   };
   const fiber = ctx.plugin({
     name: '@mebular/dsh-plugin',
@@ -100,7 +106,7 @@ async function fakeRuntime(options) {
 }
 
 function runtimeRequests(runtime) {
-  return runtime.state.requests.filter((request) => request.path.startsWith('/runtime/v1'));
+  return runtime.state.requests.filter((request) => request.path.startsWith('/memory-runtime/v1'));
 }
 
 describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime）', () => {
@@ -132,19 +138,19 @@ describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime�
     expect(first.messages).toHaveLength(2);
     expect(first.messages[1].source.kind).toBe(MEMORY_MESSAGE_SOURCE);
     expect(first.messages[1].content[0].text).toContain('user prefers dark theme');
-    expect(runtime.state.recallCount).toBe(1);
+    expect(runtime.state.contextCount).toBe(1);
 
     const second = await ctx.waterfall('agent/pre-step', payload, fallback);
     expect(second.messages).toBe(messages);
-    expect(runtime.state.recallCount).toBe(1);
+    expect(runtime.state.contextCount).toBe(1);
 
     const nextTurn = await ctx.waterfall('agent/pre-step', { ...payload, turn: 2 }, fallback);
     expect(nextTurn.messages).toHaveLength(2);
-    expect(runtime.state.recallCount).toBe(2);
+    expect(runtime.state.contextCount).toBe(2);
 
     expect(runtimeRequests(runtime).map((request) => request.path)).toEqual([
-      '/runtime/v1/recall',
-      '/runtime/v1/recall',
+      '/memory-runtime/v1/context',
+      '/memory-runtime/v1/context',
     ]);
   });
 
@@ -234,7 +240,7 @@ describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime�
     expect(checkpoint.compactionId).toBe('c1');
     expect(checkpoint.summary).toBe('the compacted summary');
     expect(runtime.state.requests.some((request) => (
-      request.method === 'PUT' && request.path === '/runtime/v1/checkpoints/dsh_s1'
+      request.method === 'PUT' && request.path === '/memory-runtime/v1/checkpoints/dsh_s1'
     ))).toBe(true);
   });
 
@@ -265,7 +271,7 @@ describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime�
     expect(accepted.messageIds).toEqual(['s1:3']);
 
     // Replaying the exact accepted key must not ingest a second time.
-    const replay = await fetch(`${runtime.url}/runtime/v1/ingest`, {
+    const replay = await fetch(`${runtime.url}/memory-runtime/v1/ingest`, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -294,11 +300,11 @@ describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime�
     await waitFor(() => runtime.state.ingests.length > 0, { label: 'authorized ingest' });
 
     expect(runtime.state.unauthorized).toBe(0);
-    const ingest = runtimeRequests(runtime).find((request) => request.path === '/runtime/v1/ingest');
+    const ingest = runtimeRequests(runtime).find((request) => request.path === '/memory-runtime/v1/ingest');
     expect(ingest.auth).toBe('bearer');
     expect(ingest.authorized).toBe(true);
 
-    // No memoryRuntime: no /runtime/v1 call and no pre-step injection.
+    // No memoryRuntime: no /memory-runtime/v1 call and no pre-step injection.
     const offRuntime = await fakeRuntime();
     const off = await startPlugin(offRuntime, undefined);
     const messages = [humanMessage('disabled')];
@@ -312,6 +318,68 @@ describe('@mebular/dsh-plugin memory runtime E2E（真实 Cordis + fake Runtime�
     expect(decision.messages).toBe(messages);
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(runtimeRequests(offRuntime)).toHaveLength(0);
+  });
+
+  it('从 <home>/memory-runtime.json 发现 sidecar，并读取 tokenFile', async () => {
+    const runtime = await fakeRuntime({
+      auth: 'bearer',
+      token: 'discovery-e2e-token',
+      records: [{ id: 'm1', type: 'fact', content: 'discovery injected fact', why: 'e2e' }],
+    });
+    const home = await mkdtemp(join(tmpdir(), 'mebular-dsh-memory-runtime-home-'));
+    cleanups.push(() => rm(home, { recursive: true, force: true }));
+    const mebularHome = join(home, '.mebular');
+    const tokenFile = join(home, 'memory-runtime', 'host-token');
+    await mkdir(join(home, 'memory-runtime'), { recursive: true });
+    await mkdir(mebularHome, { recursive: true });
+    await writeFile(tokenFile, 'discovery-e2e-token', 'utf8');
+    await chmod(tokenFile, 0o600);
+    await writeFile(join(mebularHome, 'memory-runtime.json'), `${JSON.stringify({
+      schema: 1,
+      kind: 'mebular-memory-runtime',
+      pid: process.pid,
+      host: '127.0.0.1',
+      port: 0,
+      url: runtime.sidecarUrl,
+      healthUrl: `${runtime.sidecarUrl}/health`,
+      profileId: 'default',
+      runtimeVersion: '0.3.0',
+      apiVersion: 1,
+      capabilityApiVersion: 1,
+      state: 'ready',
+      degraded: false,
+      tokenFile,
+      capabilities: { ingest: true, recall: true, context: true, checkpoint: true },
+      startedAt: Date.now() - 1000,
+      updatedAt: Date.now(),
+    })}\n`, 'utf8');
+
+    const { ctx } = await startPlugin(runtime, {
+      enabled: true,
+      url: null,
+      ingest: false,
+      checkpoints: false,
+      hideMemoryTools: false,
+      auth: 'auto',
+    }, { userHome: home, env: {} });
+
+    const session = makeSession({ surface: { nodes: [1, 2], contentGeneration: 0 } });
+    const agent = makeAgent({ session });
+    const messages = [humanMessage('what theme should we use?')];
+    const decision = await ctx.waterfall('agent/pre-step', {
+      agent,
+      messages,
+      turn: 1,
+      step: 1,
+      signal: new AbortController().signal,
+    }, async () => ({ kind: 'enter', messages }));
+
+    expect(decision.messages).toHaveLength(2);
+    expect(decision.messages[1].source.kind).toBe(MEMORY_MESSAGE_SOURCE);
+    const request = runtime.state.requests.find((entry) => entry.path === '/memory-runtime/v1/context');
+    expect(request).toBeDefined();
+    expect(request.auth).toBe('bearer');
+    expect(request.authorized).toBe(true);
   });
 
   it('dispose 前把已排队 ingest flush 出去', async () => {

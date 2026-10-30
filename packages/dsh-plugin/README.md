@@ -80,7 +80,7 @@ dsh plugin --profile web remove @mebular/dsh-plugin
 
 ## Memory Runtime（可选）
 
-0.3.0 起，host 插件可以在现有 MCP bridge 之外接入 `/runtime/v1`。该能力**默认关闭**；关闭时不注册监听器、不启动定时器、不发任何请求，attach/managed/panel/MCP 行为不变。
+0.3.0 起，host 插件可以在现有 MCP bridge 之外接入独立的 Memory Runtime sidecar（`/memory-runtime/v1`）。该能力**默认关闭**；关闭时不注册监听器、不读取发现文件、不启动定时器、不发任何请求，attach/managed/panel/MCP 行为不变。sidecar 与 MCP daemon 是两个进程：插件不会把 MCP 的 `daemonUrl` 当作 sidecar，也不猜端口。
 
 ```yaml
 - id: mebular
@@ -90,29 +90,37 @@ dsh plugin --profile web remove @mebular/dsh-plugin
     panel: true
     memoryRuntime:
       enabled: true
+      # 可选：显式 sidecar base URL；缺省按 env / <home>/memory-runtime.json 发现
+      # url: 'http://127.0.0.1:7341/memory-runtime/v1'
+      # 可选：host token；缺省按 tokenFile / env / 发现文件 tokenFile 读取
+      # tokenFile: '~/.mebular/memory-runtime/host-token'
       # 可选：默认全部开启；maintenance 默认关闭
       recall: true
       ingest: true
       checkpoints: true
       hideMemoryTools: true
       maintenance: false
+      # 记忆域提示（缺省由 sidecar 决定）
+      domains: ['user', 'agent:dsh', 'default']
       # 治理白名单（这些 memory_* 不隐藏）；task_* 始终保留
       governanceTools: []
       # 记忆管家 agent 的 preset / session id（例外，不隐藏 memory_*）
       memoryAgentPresets: ['mebular-memory']
-      # Runtime HTTP 认证：auto（默认，有 token 时 bearer）/ bearer / none
+      # sidecar Host API 认证：auto（默认，有 token 时 bearer）/ bearer / none
       auth: auto
-      # 直接配置 token，或从环境变量读取（默认 MEBULAR_RUNTIME_TOKEN）
-      tokenEnv: MEBULAR_RUNTIME_TOKEN
+      # host token 环境变量（默认 MEBULAR_MEMORY_RUNTIME_TOKEN）
+      tokenEnv: MEBULAR_MEMORY_RUNTIME_TOKEN
       # token: '...'
 ```
 
-- `recall`：仅在新人类 turn 首步调用 `POST /runtime/v1/recall`，无命中/超时/失败原样放行；命中时注入一条 `source.kind='mebular-memory'` 的 UserMessage，并按 surface + session query 去重。
-- `ingest`：批量把 user/assistant/tool 事件送到 `POST /runtime/v1/ingest`；跳过 fork/resume 的 inherited prefix，按 `(sessionId, seq)` 去重，队列有界，不阻塞 loop。网络错误、超时、429/5xx 默认最多重试 2 次（指数退避，`ingestRetries` / `ingestRetryBaseMs` 可调；dispose 会取消退避）；重试复用同一个 `requestId` 与 `Idempotency-Key`，失败写入 warning/status，不重复入队。
-- `auth`：`auto`（默认）在存在 `memoryRuntime.token` 或 `tokenEnv`（默认 `MEBULAR_RUNTIME_TOKEN`）时发送 `Authorization: Bearer`；没有 token 时不发送，兼容 Runtime `auth=none`。`bearer` 强制 bearer，`none` 永不发送。token 不会进入日志、错误或 `getState()`；bearer 下 401/403 会记录 warning 与 `auth`/`ingest.lastError` 状态，不会静默通过。
-- `checkpoints`：把 `compaction/start → summary → replacement → end` 折叠为 ContextCheckpoint 并 `PUT /runtime/v1/checkpoints/:threadId`；失败或中断不会标记为 committed。
+- 发现：`memoryRuntime.url` > `MEBULAR_MEMORY_RUNTIME_URL` > `<home>/memory-runtime.json`（`state=ready|degraded`、心跳 ≤15s、`apiVersion=1`）。没有可用发现时禁用沉浸式并保持失败开放；不盲连 7341/7331。
+- token：`memoryRuntime.token` > `MEBULAR_MEMORY_RUNTIME_TOKEN` > `memoryRuntime.tokenFile` > 发现文件 `tokenFile` > `<home>/memory-runtime/host-token`。POSIX 下 token 文件必须 `0600`；token 不会进入 URL、日志、错误或 `getState()`。
+- `recall`：仅在新人类 turn 首步调用 `POST /memory-runtime/v1/context`（旧 sidecar 无该端点时显式回退 `/recall`），无命中/超时/失败原样放行；命中时注入一条 `role='user'` + `source.kind='mebular-memory'` 的 context injection（DSH 不会把它渲染成用户气泡；绝不使用 `source.kind='user'`），并按 surface + session query + turn 去重。注入块 ≤8 KiB，内容按不可信背景数据转义。
+- `ingest`：批量把 user/assistant/tool 事件送到 `POST /memory-runtime/v1/ingest`；跳过 fork/resume 的 inherited prefix 与插件自己的召回注入，按 `(sessionId, seq)` 去重，队列有界，不阻塞 loop。网络错误、超时、429/5xx 默认最多重试 2 次（指数退避，`ingestRetries` / `ingestRetryBaseMs` 可调；dispose 会取消退避）；重试复用同一个 `requestId` 与 `Idempotency-Key`，失败写入 warning/status，不重复入队。
+- `auth`：`auto`（默认）在存在 token 时发送 `Authorization: Bearer`；`bearer` 强制 bearer，`none` 永不发送。401 会刷新一次 token 缓存后重试一次，仍失败则失败开放并记录 warning/status。
+- `checkpoints`：把 `compaction/start → summary → replacement → end` 折叠为 ContextCheckpoint 并 `PUT /memory-runtime/v1/checkpoints/:threadId`（`domain=task:<threadId>`，不发送 legacy `sync`）；失败或中断不会标记为 committed。
 - `hideMemoryTools`：普通 Agent 动态隐藏当前可见的 `mcp__mebular__memory_*`，保留 `task_*` 与 `governanceTools`；通过 `agent.ctx.tools.restrict` + `tools/change` 重放，不硬编码工具名。
-- `maintenance`：在 Agent idle 时用当前会话模型整理候选，经 `POST /runtime/v1/ingest`（`extractor='host'`）交给 Mebular；无 tools、有 maxTokens 上限与超时，失败静默，不直接写图。
+- `maintenance`：默认关闭；开启后在 Agent idle 时用当前会话模型整理候选，经 `POST /memory-runtime/v1/ingest`（`extractor='host'`）交给 sidecar；无 tools、有 maxTokens 上限与超时，失败静默，不直接写图。
 
 ## MCP 工具
 
@@ -143,7 +151,8 @@ DSH 通过官方 MCP client 连接同一个 daemon 的 `/mcp`；工具在 DSH �
 | --- | --- |
 | 共享 runtime 可用 | 优先使用共享 runtime resolve（App / CLI / shared provider + 动态 URL） |
 | 没有共享 CLI 的旧环境 | `daemonUrl > MEBULAR_HTTP_PORT > runtime.json > 7331` |
-| `MEBULAR_HOME` | 只用于定位 `runtime.json` |
+| Memory Runtime sidecar | `memoryRuntime.url > MEBULAR_MEMORY_RUNTIME_URL > <home>/memory-runtime.json`（不猜端口） |
+| `MEBULAR_HOME` | 用于定位 MCP daemon 的 `runtime.json` 与 sidecar 的 `memory-runtime.json` |
 | Mebular App | 继续独立运行；插件只连接同一个 daemon |
 
 </details>

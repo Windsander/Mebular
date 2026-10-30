@@ -261,6 +261,36 @@ check('index.js exports createAgentStatus()', typeof pluginModule.createAgentSta
 check('index.js exports createMemoryRuntimeAdapter()', typeof pluginModule.createMemoryRuntimeAdapter === 'function');
 check('index.js exports resolveMemoryRuntimeConfig()', typeof pluginModule.resolveMemoryRuntimeConfig === 'function');
 
+let memoryRuntimeModule = {};
+try {
+  memoryRuntimeModule = await import(pathToFileURL(join(pkgDir, 'memory-runtime.js')).href);
+} catch (error) {
+  check('memory-runtime.js imports cleanly', false, error.message);
+}
+check(
+  'memory-runtime base path is /memory-runtime/v1',
+  memoryRuntimeModule.MEMORY_RUNTIME_PATH === '/memory-runtime/v1',
+  String(memoryRuntimeModule.MEMORY_RUNTIME_PATH),
+);
+check(
+  'memory-runtime exports buildContextMessage()',
+  typeof memoryRuntimeModule.buildContextMessage === 'function',
+);
+check(
+  'memory-runtime exports buildRecallMessage()',
+  typeof memoryRuntimeModule.buildRecallMessage === 'function',
+);
+check(
+  'memory-runtime uses the sidecar host token env',
+  memoryRuntimeModule.MEMORY_RUNTIME_TOKEN_ENV === 'MEBULAR_MEMORY_RUNTIME_TOKEN',
+  String(memoryRuntimeModule.MEMORY_RUNTIME_TOKEN_ENV),
+);
+check(
+  'memory-runtime discovery file is memory-runtime.json',
+  memoryRuntimeModule.MEMORY_RUNTIME_DISCOVERY === 'memory-runtime.json',
+  String(memoryRuntimeModule.MEMORY_RUNTIME_DISCOVERY),
+);
+
 // ---------------------------------------------------------------------------
 // Imports: public HTTP only, no workspace coupling
 // ---------------------------------------------------------------------------
@@ -346,6 +376,22 @@ check(
   'memory-runtime static imports are Node builtins only',
   staticRuntimeImports.length > 0 && staticRuntimeImports.every((specifier) => specifier.startsWith('node:')),
   staticRuntimeImports.join(', '),
+);
+check(
+  'memory-runtime has no legacy /runtime/v1 path',
+  !runtimeSource.includes("'/runtime/v1'") && !runtimeSource.includes('"/runtime/v1"'),
+);
+check(
+  'memory-runtime reads the sidecar discovery file',
+  runtimeSource.includes('memory-runtime.json') && runtimeSource.includes('MEBULAR_MEMORY_RUNTIME_URL'),
+);
+check(
+  'memory-runtime refuses guessed sidecar ports',
+  !/7331|7341/.test(runtimeSource),
+);
+check(
+  'host never passes the MCP daemon URL to the sidecar adapter',
+  !/createMemoryRuntimeAdapter\(\{[\s\S]{0,500}?daemonUrl\s*:/.test(hostSource),
 );
 const dynamicHostImports = [...hostSource.matchAll(/await import\(\s*['"]([^'"]+)['"]\s*\)/g)]
   .map((match) => match[1]);
@@ -437,6 +483,13 @@ check('README documents the shared Console', /共享.*Console|Console.*同一/.t
 check('README documents app independence', /App.*(继续|独立)|Mebular daemon.*(继续|独立)/.test(readme));
 check('README documents default port 7331', readme.includes('7331'));
 check('README documents runtime discovery', readme.includes('runtime.json'));
+check('README documents the sidecar base path', readme.includes('/memory-runtime/v1'));
+check('README documents memory-runtime.json discovery', readme.includes('memory-runtime.json'));
+check('README documents MEBULAR_MEMORY_RUNTIME_URL', readme.includes('MEBULAR_MEMORY_RUNTIME_URL'));
+check('README documents MEBULAR_MEMORY_RUNTIME_TOKEN', readme.includes('MEBULAR_MEMORY_RUNTIME_TOKEN'));
+check('README documents the host token file', readme.includes('tokenFile'));
+check('README documents the source-tagged context injection', readme.includes("source.kind='mebular-memory'"));
+check('README does not use the legacy /runtime/v1 path', !readme.includes('/runtime/v1'));
 check('README documents MEBULAR_HTTP_PORT', readme.includes('MEBULAR_HTTP_PORT'));
 check('README documents attach and managed', /attach/.test(readme) && /managed/.test(readme));
 check('README documents panel:false', /panel\s*:\s*false|panel:false/.test(readme));

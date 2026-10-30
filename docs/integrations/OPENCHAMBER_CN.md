@@ -1,6 +1,6 @@
 # 在 OpenChamber / OpenCode 中使用 Mebular
 
-[English](OPENCHAMBER.md) · [返回文档索引](../README.md) · [Memory Runtime 指南](../design/0.3.0-memory-runtime_CN.md)
+[English](OPENCHAMBER.md) · [返回文档索引](../README.md) · [Memory Runtime 指南](../guides/MEMORY_RUNTIME_CN.md)
 
 OpenChamber 是基于 OpenCode 的桌面宿主。Mebular 通过两层接入：
 
@@ -238,5 +238,5 @@ OpenCode 不会把模型凭据交给插件，插件也不会索取。选择 `hos
 ## 更多细节
 
 - [插件 README](../../packages/opencode-plugin/README.md)
-- [Memory Runtime 指南](../design/0.3.0-memory-runtime_CN.md)
+- [Memory Runtime 指南](../guides/MEMORY_RUNTIME_CN.md)
 - [DSH 集成](DSH_CN.md) · [Hermes 集成](HERMES_CN.md)

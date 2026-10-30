@@ -37,11 +37,13 @@ Memory and tasks stay on your devices; devices sync directly.
 
 > **New in 0.3 — memory as a runtime, not just tools.** Mebular can now handle recall,
 > extraction, compaction and checkpoints for a host while keeping the same shared graph.
-> Choose lightweight MCP or opt into the immersive runtime; use built-in rules, a local
-> Qwen, the host's current model, or a third-party API. Nothing is captured or sent to a
-> model until you enable it.
+> It runs as an independent `@mebular/memory-runtime` sidecar, reaches the graph only
+> through the MCP capability API, and remains off by default. Choose lightweight MCP or
+> opt into the immersive Memory Runtime; use built-in rules, a local Qwen, the host's
+> current model, or a third-party API. Nothing is captured or sent to a model until you
+> enable it.
 >
-> [Memory Runtime guide](docs/design/0.3.0-memory-runtime.md) · [DSH](docs/integrations/DSH.md) · [Hermes](docs/integrations/HERMES.md) · [OpenChamber](docs/integrations/OPENCHAMBER.md)
+> [Memory Runtime guide](docs/guides/MEMORY_RUNTIME.md) · [DSH](docs/integrations/DSH.md) · [Hermes](docs/integrations/HERMES.md) · [OpenChamber](docs/integrations/OPENCHAMBER.md)
 
 ## Get started
 

@@ -1,6 +1,6 @@
 # Mebular in Hermes Agent
 
-[中文](HERMES_CN.md) · [Documentation index](../README.md) · [Memory Runtime guide](../design/0.3.0-memory-runtime.md)
+[中文](HERMES_CN.md) · [Documentation index](../README.md) · [Memory Runtime guide](../guides/MEMORY_RUNTIME.md)
 
 Hermes can use Mebular in two layers, and they can run together:
 
@@ -284,4 +284,4 @@ provider. Disabling or removing the provider does not delete `MEMORY.md` / `USER
 - [Provider README](../../integrations/hermes/mebular-memory/README.md)
 - [Companion README](../../integrations/hermes/mebular-companion/README.md)
 - [Hermes directory overview](../../integrations/hermes/README.md)
-- [Memory Runtime guide](../design/0.3.0-memory-runtime.md)
+- [Memory Runtime guide](../guides/MEMORY_RUNTIME.md)

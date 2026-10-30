@@ -29,7 +29,7 @@ Mebular 是一套**本地优先的跨设备记忆与任务协作层**。它不�
 | **控制面** | 装配并守护唯一实例；暴露 HTTP / MCP / admin / console / join | `packages/mcp/src/serve.mjs`、`server.mjs`、`provision.mjs`、`admin.mjs` | 不实现记忆业务；业务一律委托领域面 |
 | **领域面** | 记忆、图、事件、任务、同步、信任与策略 | `src/mebular.ts`、`src/memory/*`、`src/sync/*`、`packages/fleet/src/*` | 不依赖具体 UI、不直接绑定某个传输 |
 | **基础面** | 可替换的落盘、密码学、网络和系统能力 | `src/storage/*`、`src/crypto/*`、`src/p2p/*`、`packages/service/*`、`src/exchange/*` | 不决定产品语义；通过接口被领域面使用 |
-| **交付面** | 包、桌面壳、Skill、文档与流水线 | 6 个 npm 包（5 lockstep + 1 独立插件）、`apps/desktop`、`packages/skill`、`.github/workflows` | 不改变运行时协议；只负责分发和验证 |
+| **交付面** | 包、桌面壳、Skill、文档与流水线 | 7 个 npm 包（6 lockstep + 1 独立插件）、`apps/desktop`、`packages/skill`、`.github/workflows` | 不改变运行时协议；只负责分发和验证 |
 
 ### 2.1 入口面
 
@@ -91,8 +91,11 @@ UNINITIALIZED ── create/join ──▶ INITIALIZING ──▶ READY
 
 ### 2.5 交付面
 
-- 6 个 npm 包统一为同一发布版本：`@mebular/core`、`@mebular/service`、`@mebular/fleet`、
-  `@mebular/mcp`、`@mebular/skill`、`@mebular/dsh-plugin`；根包提供 `mebular` + `fleet` 双 bin。
+- 7 个 npm 包统一为同一发布版本：`@mebular/core`、`@mebular/service`、`@mebular/fleet`、
+  `@mebular/mcp`、`@mebular/skill`、`@mebular/memory-runtime`、`@mebular/dsh-plugin`；
+  前六个为 lockstep，`@mebular/dsh-plugin` 由独立 npm job 发布；根包提供 `mebular` + `fleet` 双 bin。
+- `@mebular/memory-runtime` 是独立 sidecar 包，提供 `mebular-memory-runtime`，不依赖 core；
+  它和 MCP daemon 是两个进程，通过 `/memory-runtime/v1` 与 `/internal/memory/v1` 协作。
 - `@mebular/dsh-plugin` 代码隔离在 `packages/dsh-plugin`，由独立 npm job 发布，但版本随统一
   release train；不存在 DSH-only release。
 - `packages/console` 与 `apps/desktop` 为 private 工作包，不单独发布；控制台随根包/守护分发。

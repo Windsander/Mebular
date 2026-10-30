@@ -1,6 +1,6 @@
 # 在 Hermes Agent 中使用 Mebular
 
-[English](HERMES.md) · [返回文档索引](../README.md) · [Memory Runtime 指南](../design/0.3.0-memory-runtime_CN.md)
+[English](HERMES.md) · [返回文档索引](../README.md) · [Memory Runtime 指南](../guides/MEMORY_RUNTIME_CN.md)
 
 Hermes 可以通过两层接入 Mebular，两层可以同时使用：
 
@@ -262,4 +262,4 @@ MCP 配置与 Mebular 数据是分开的，卸载 provider 不会删除它们；
 - [Provider README](../../integrations/hermes/mebular-memory/README.md)
 - [Companion README](../../integrations/hermes/mebular-companion/README.md)
 - [Hermes 目录说明](../../integrations/hermes/README.md)
-- [Memory Runtime 指南](../design/0.3.0-memory-runtime_CN.md)
+- [Memory Runtime 指南](../guides/MEMORY_RUNTIME_CN.md)

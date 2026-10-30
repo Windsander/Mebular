@@ -23,11 +23,12 @@
 安装包里的业务代码不是从仓库 `packages/*` 复制的，而是从**发布的 npm tarball** 安装出来的：
 
 ```text
-release tarballs（verify 产出，6 个）
+release tarballs（verify 产出，7 个）
   mebular-core-<version>.tgz
   mebular-fleet-<version>.tgz
   mebular-service-<version>.tgz
   mebular-mcp-<version>.tgz
+  mebular-memory-runtime-<version>.tgz
   mebular-skill-<version>.tgz
   mebular-dsh-plugin-<version>.tgz   # 只用于 npm，不进入桌面 runtime
         │
@@ -41,6 +42,7 @@ apps/desktop/runtime/node_modules/
   @mebular/fleet
   @mebular/service
   @mebular/mcp
+  @mebular/memory-runtime
   @mebular/skill
   + 第三方生产依赖
         │
@@ -59,7 +61,7 @@ apps/desktop/runtime/node_modules/
   `packages/mcp/bin/mebular.mjs`。
 - `@mebular/core` 的 tarball 内含 `packages/mcp`、`packages/console`、`packages/fleet`、
   `packages/service` 和 `locales/`，因此打包态不需要再复制这些仓库目录。
-- `prepare-runtime.mjs` 会校验 5 个包版本都等于根 `package.json`，并断言 CLI、Console、
+- `prepare-runtime.mjs` 会校验 6 个包版本都等于根 `package.json`，并断言 CLI、Console、
   locales、Skill 等关键文件存在；任一缺失直接失败，不会产出「看似成功但跑不起来」的包。
 - `--ignore-scripts` 避免执行发布包的安装钩子；第三方生产依赖仍从 npm registry 解析。
 - 因此安装包与 npm 发布消费的是**同一批 verify tarball**，但仍需要网络安装第三方依赖；
@@ -87,13 +89,13 @@ rm -rf release-pack
 mkdir -p release-pack
 ROOT="$PWD"
 npm pack --pack-destination "$ROOT/release-pack"
-for p in packages/fleet packages/service packages/mcp packages/skill packages/dsh-plugin; do
+for p in packages/fleet packages/service packages/mcp packages/memory-runtime packages/skill packages/dsh-plugin; do
   (cd "$p" && npm pack --pack-destination "$ROOT/release-pack")
 done
 ls -lh release-pack
 ```
 
-应得到 6 个 `.tgz`。`prepare-runtime` 只使用前 5 个；DSH 插件 tarball 供 npm 发布。
+应得到 7 个 `.tgz`。`prepare-runtime` 只使用前 6 个；DSH 插件 tarball 供 npm 发布。
 
 ### 2.3 安装 runtime
 
@@ -107,10 +109,10 @@ node apps/desktop/scripts/prepare-runtime.mjs \
   --out apps/desktop/runtime
 ```
 
-脚本会先确认 5 个 tarball 都在，再清空输出目录；失败时保留上一份产物便于排查。它会检查：
+脚本会先确认 6 个 tarball 都在，再清空输出目录；失败时保留上一份产物便于排查。它会检查：
 
 - 根 `package.json`、`apps/desktop/package.json`、`daemon.mjs` 的 `APP_VERSION` 三者一致；
-- 5 个 `@mebular/*` 安装版本一致；
+- 6 个 `@mebular/*` 安装版本一致；
 - `@mebular/core` 内含 MCP CLI、Console、`locales/manifest.json`；
 - `@mebular/service`、`@mebular/fleet` 的构建产物存在；
 - `@mebular/skill/SKILL.md` 存在。
@@ -233,13 +235,13 @@ AppImage 需要 FUSE；没有 FUSE 时可使用 `--appimage-extract-and-run`。d
 
 dry-run 的 artifacts：
 
-- `release-tarballs`：6 个 `.tgz`，保留 7 天；
+- `release-tarballs`：7 个 `.tgz`，保留 7 天；
 - `desktop-macos`：DMG；
 - `desktop-windows`：NSIS `.exe`；
 - `desktop-linux`：AppImage + deb。
 
 正式流水线中，`publish` / `publish-dsh` 依赖三个 desktop job 全部成功，因此**安装包没全绿
-就不会发 npm**。`visibility` job 再确认六包均可 `npm view` 且 `dist-tags.latest` 指向本次
+就不会发 npm**。`visibility` job 再确认七包均可 `npm view` 且 `dist-tags.latest` 指向本次
 版本；只有它通过后，`release` job 才下载三平台 artifacts，校验每种扩展名恰好 1 个，生成
 `SHA256SUMS.txt`，创建/更新 GitHub Release 并 `--clobber` 上传。
 
@@ -278,7 +280,7 @@ v0.2.4 明确不签名。后续版本的建议顺序：
 
 | 现象 | 处理 |
 | --- | --- |
-| `缺少 @mebular/core 的发布 tarball` | 先在仓库根 `npm pack` 5 个包到 `release-pack`；确认文件名版本与根 `package.json` 一致。 |
+| `缺少 @mebular/core 的发布 tarball` | 先在仓库根 `npm pack` 6 个 lockstep 包到 `release-pack`；确认文件名版本与根 `package.json` 一致。 |
 | `找到多个 ... tarball，无法确定使用哪一个` | `release-pack` 混入了旧版本；清空后重新 pack。 |
 | `apps/desktop/package.json 版本 ... 不一致` | 桌面版本未随 lockstep 更新；跑 `bump_version.sh` 或手工同步后重试。 |
 | `runtime 缺少必需文件` | 根包 `files` 或构建产物不完整；先 `npm run build`，再重新 pack。 |

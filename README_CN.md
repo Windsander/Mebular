@@ -36,11 +36,12 @@
 </p>
 
 > **0.3 新能力——记忆是一层运行时，不只是工具。** Mebular 现在可以替宿主完成召回、
-> 抽取、压缩和检查点，同时继续共用同一张图。选择轻量 MCP，或显式开启沉浸式 Runtime；
-> 模型可以用内置规则、本地 Qwen、宿主当前模型或第三方 API。未开启前不会采集内容，
-> 也不会把内容发给模型。
+> 抽取、压缩和检查点，同时继续共用同一张图。它作为独立的 `@mebular/memory-runtime`
+> sidecar 运行，只通过 MCP capability API 接触图，并且默认关闭。选择轻量 MCP，或显式
+> 开启沉浸式 Memory Runtime sidecar；模型可以用内置规则、本地 Qwen、宿主当前模型或
+> 第三方 API。未开启前不会采集内容，也不会把内容发给模型。
 >
-> [Memory Runtime 指南](docs/design/0.3.0-memory-runtime_CN.md) · [DSH](docs/integrations/DSH_CN.md) · [Hermes](docs/integrations/HERMES_CN.md) · [OpenChamber](docs/integrations/OPENCHAMBER_CN.md)
+> [Memory Runtime 指南](docs/guides/MEMORY_RUNTIME_CN.md) · [DSH](docs/integrations/DSH_CN.md) · [Hermes](docs/integrations/HERMES_CN.md) · [OpenChamber](docs/integrations/OPENCHAMBER_CN.md)
 
 ## 开始使用
 

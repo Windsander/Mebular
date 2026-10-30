@@ -34,7 +34,7 @@ The MCP surface stays compatible at 29 tools; every runtime capability is opt-in
 - **DSH Memory Runtime bridge** — opt-in `memoryRuntime` with recall on the first step of a new human turn, batched event ingest with retries and idempotency, compaction checkpoints, optional tool hiding with a governance allowlist, and optional idle maintenance using the current DSH session model. When disabled it registers no listener, timer or request.
 - **Hermes MemoryProvider and companion** — `integrations/hermes/mebular-memory` adds automatic recall and turn/compaction ingest to Hermes while leaving built-in `MEMORY.md`/`USER.md` active and untouched. The optional `mebular-companion` uses Hermes `ctx.llm` to submit host candidates, separately from the single external-provider slot.
 - **OpenChamber / OpenCode integration** — Mebular's MCP path writes only the shared OpenCode `mcp.servers.mebular` entry and never OpenChamber's managed config. The opt-in `@mebular/opencode-plugin` adds request-only `<mebular_memory trust="untrusted">` recall, event ingest and compaction checkpoints for OpenCode >= 2.2; OpenChamber native memory is detected read-only and is never imported, replaced or dual-written.
-- **Documentation** — new English/Chinese [Memory Runtime guide](docs/design/0.3.0-memory-runtime.md), Hermes and OpenChamber integration guides, and an updated DSH guide covering modes, model sources, tool surface and boundaries.
+- **Documentation** — new English/Chinese [Memory Runtime guide](docs/guides/MEMORY_RUNTIME.md) covering modes, model sources, sidecar discovery, local data, privacy, troubleshooting and the 0.2 upgrade path; Hermes and OpenChamber integration guides, and an updated DSH guide covering modes, model sources, tool surface and boundaries.
 
 ### Changed
 
@@ -52,13 +52,20 @@ The MCP surface stays compatible at 29 tools; every runtime capability is opt-in
 - **DSH runtime auth and delivery** — bearer 401/403 and retryable ingest failures are surfaced as warning/status instead of being silently dropped; retries reuse one `requestId`/`Idempotency-Key`, and dispose cancels pending backoff.
 - **Internal-object leakage** — runtime nodes are defensively excluded from default memory queries, history, profile, skills, graph and Console lists even if they are written directly to the graph.
 
+### Verification
+
+- **Acceptance report** — [0.3.0 Memory Runtime acceptance report](docs/quality/0.3.0-memory-runtime-acceptance.md) records recall quality, security and performance for a real sidecar with a fake capability: heuristic only, no model, no external network. The matrix covers gist-only broad recall, detail expansion, conflicts, cross-device raw degradation, silence, budgets, security boundaries and bounded resources.
+- **Three-host E2E** — real DSH, Hermes and OpenChamber/OpenCode adapters run against a real `/memory-runtime/v1`, real capability API and real graph with temporary homes, heuristic extraction and no real LLM. The recorded run is 113/113 DSH, 35/35 Hermes and 38/38 OpenCode checks; see [`tests/integration/host-e2e/README.md`](tests/integration/host-e2e/README.md) for covered paths and explicit boundaries.
+- **Sidecar and host suites** — sidecar, inference, Console, DSH, Hermes and OpenChamber coverage lives in `packages/memory-runtime/tests`, `tests/mcp`, `tests/console`, `tests/dsh`, `tests/opencode-plugin` and `tests/integration/host-e2e`.
+- **Seven-package release train** — six lockstep packages (`core`, `service`, `skill`, `mcp`, `fleet`, `memory-runtime`) plus the isolated `dsh-plugin` job share `0.3.0`; verify produces seven tarballs, and the visibility gate checks all seven packages and `dist-tags.latest`.
+- **Docs** — `npm run check:docs`, `npm run check:i18n` and `npm run check:cleanliness` pass.
+
 ### Notes
 
 - **No migration** — 0.2 nodes, events, namespaces, tags and IDs are read as legacy data and are not rewritten. Runtime nodes are ordinary nodes; older peers can store them but do not show them in default queries.
 - **Rollback** — returning to 0.2 keeps the graph and data intact. Internal nodes remain stored but hidden, and local `<home>/memory-runtime/` files are ignored by older code.
 - **Scope limits** — 0.3 remains one cloud and one user. `agentId` is an assertion, not authentication; SelfRecord/Checkpoint isolation is logical, not cryptographic; `memory.read` is cloud-wide and namespace ACLs are not included. Deletion remains cooperative, so an already-synced copy on an offline peer may survive until reconnect.
 - **No bundled model** — local Qwen packs are explicit downloads with their own licenses. No model, API key or cloud raw data is shipped or enabled by default.
-- **Verification** — `npm run check:docs`, `npm run check:i18n` and `npm run check:cleanliness` pass. Sidecar, inference, Console, DSH, Hermes and OpenChamber coverage lives in `packages/memory-runtime/tests`, `tests/mcp`, `tests/console`, `tests/dsh`, `tests/opencode-plugin` and `tests/integration/host-e2e`; the host suites run against a real `/memory-runtime/v1` with temporary homes.
 
 ## [v0.2.4] - 2026-10-29
 

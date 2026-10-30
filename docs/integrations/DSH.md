@@ -264,7 +264,7 @@ panel and MCP keep their exact behaviour.
 - DSH has no durable spool for ingest or checkpoints. Only the Hermes provider has a
   durable `queue.jsonl`; DSH failures are bounded and visible in status.
 
-See the [Memory Runtime guide](../design/0.3.0-memory-runtime.md) for the data boundaries
+See the [Memory Runtime guide](../guides/MEMORY_RUNTIME.md) for the data boundaries
 and model fallback rules.
 
 ## Upgrade from 0.2 / old prototype
@@ -423,8 +423,8 @@ single daemon, service, update locks and upgrade rollback are covered by CI and
 
 ## Release and version
 
-- Version: `0.3.0`, on the unified Mebular v0.3.0 release train (all six npm
-  packages share the same version).
+- Version: `0.3.0`, on the unified Mebular v0.3.0 release train (six lockstep npm
+  packages plus the isolated `dsh-plugin` share the same version).
 - npm: `@mebular/dsh-plugin@0.3.0`.
 - The Plugin is an isolated adapter in `packages/dsh-plugin`, published by its
   own npm job. It reads the pinned runtime version from its own `package.json`,

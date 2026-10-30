@@ -1,6 +1,6 @@
 # Mebular in OpenChamber / OpenCode
 
-[中文](OPENCHAMBER_CN.md) · [Documentation index](../README.md) · [Memory Runtime guide](../design/0.3.0-memory-runtime.md)
+[中文](OPENCHAMBER_CN.md) · [Documentation index](../README.md) · [Memory Runtime guide](../guides/MEMORY_RUNTIME.md)
 
 OpenChamber is an OpenCode-based desktop host. Mebular supports it in two layers:
 
@@ -261,5 +261,5 @@ you also want to stop using Mebular in this host.
 ## More detail
 
 - [Plugin README](../../packages/opencode-plugin/README.md)
-- [Memory Runtime guide](../design/0.3.0-memory-runtime.md)
+- [Memory Runtime guide](../guides/MEMORY_RUNTIME.md)
 - [DSH integration](DSH.md) · [Hermes integration](HERMES.md)

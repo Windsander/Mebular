@@ -23,6 +23,11 @@ export function normalizeNamespace(value?: string | null): string {
   return trimmed === '' ? DEFAULT_NAMESPACE : trimmed;
 }
 
+/** namespace → 记忆域（capability 的 domain 视图）；缺失/空白按 default。 */
+export function domainOfNamespace(value?: string | null): string {
+  return normalizeNamespace(value);
+}
+
 /** 归一化 namespace 列表：去空白、去重；空/缺失返回空数组 */
 export function normalizeNamespaceList(values?: readonly string[] | null): string[] {
   if (!values || values.length === 0) return [];

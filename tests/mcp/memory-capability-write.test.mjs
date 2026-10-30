@@ -1516,6 +1516,13 @@ describe('GET/POST /sync', () => {
     const calls = [];
     const fakeService = {
       status: async () => ({ running: true, pendingEventCount: 4, deviceId: 'device-sync' }),
+      syncStatus: async () => ({
+        running: true,
+        pendingEventCount: 4,
+        lastSyncAt: 123,
+        isSyncing: false,
+        peerId: null,
+      }),
       sync: async (peerId, address) => {
         calls.push({ peerId, address });
         return {

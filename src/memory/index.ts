@@ -15,6 +15,12 @@ export {
 } from './transformers.js';
 export { nodeSearchText, nodeMatchesKeyword } from './text.js';
 export {
+  DEFAULT_MEMORY_NODE_TYPES,
+  expandMemoryTypes,
+  matchesMemoryTypes,
+  semanticKindOf,
+} from './semantics.js';
+export {
   EdgeTypes,
   ENTITY_TYPES,
   EPISODE_TYPES,

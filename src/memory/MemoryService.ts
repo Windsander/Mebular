@@ -16,12 +16,13 @@ import {
 import type { VectorIndex } from './VectorIndex.js';
 import { isInternalNode } from './visibility.js';
 import { ValidationError, ErrorCodes, MebularError, SyncError } from '../errors.js';
-import type { Node, TraverseOptions, TraverseResult } from '../types/index.js';
-import { matchesNamespace } from '../core/namespace.js';
+import type { Edge, Node, TraverseOptions, TraverseResult } from '../types/index.js';
+import { domainOfNamespace, matchesNamespace } from '../core/namespace.js';
 import { computeStateHash, computeStateHashByNamespace } from '../core/stateHash.js';
 import { createBuiltinAdapterRegistry } from '../exchange/index.js';
 import type { AdapterImportReport, AdapterSource } from '../exchange/adapter.js';
 import type { SyncResult } from '../sync/syncmgr/SyncManager.js';
+import { expandMemoryTypes, matchesMemoryTypes } from './semantics.js';
 import type {
   ConversationFilters,
   ConversationHistory,
@@ -123,6 +124,47 @@ export interface LifecycleOptions {
   includeArchived?: boolean;
 }
 
+/**
+ * 授权域读选项：适配器（capability）只负责确定“可读哪些域”，
+ * 具体 namespace/域过滤、分页与内部/归档过滤由 MemoryService 执行。
+ */
+export interface ReadScopeOptions {
+  /** 单域或域列表；缺省不过滤（公共工具全局读）。 */
+  domains?: string[];
+}
+
+/** 按域统计（capability /status、/namespaces 与公共 memory_status 共用）。 */
+export interface MemoryDomainStats {
+  domain: string;
+  count: number;
+  memoryRecords: number;
+  internalObjects: number;
+  internalKinds: Record<string, number>;
+  lastUpdatedAt: number;
+}
+
+export interface MemoryStats {
+  nodeCount: number;
+  edgeCount: number;
+  counts: {
+    nodes: number;
+    memoryRecords: number;
+    compacts: number;
+    checkpoints: number;
+    selfRecords: number;
+  };
+  domains: MemoryDomainStats[];
+}
+
+/** 统一同步状态（公共 memory_status、capability /status 与 /sync GET 共用）。 */
+export interface MemorySyncStatus {
+  running: boolean;
+  pendingEventCount: number;
+  lastSyncAt: number | null;
+  isSyncing: boolean;
+  peerId: string | null;
+}
+
 /** G-ML-1 删除结果（墓碑；随 `node_deleted` 事件同步传播）。 */
 export interface DeleteResult {
   deleted: string[];
@@ -169,6 +211,7 @@ export type ImportInput = AdapterSource;
 export type ImportResult = AdapterImportReport;
 
 const PREFERENCE_TAG = 'preference';
+const MEMORY_NODE_TYPES = new Set<Node['type']>(['entity', 'fact', 'episode', 'skill', 'meta']);
 
 export class MemoryService {
   private readonly mebular: Mebular;
@@ -308,20 +351,22 @@ export class MemoryService {
 
   // ---------- 检索 ----------
 
-  async query(query: MemoryQuery & LifecycleOptions): Promise<RetrievalResult> {
+  async query(query: MemoryQuery & LifecycleOptions & ReadScopeOptions): Promise<RetrievalResult> {
     const startedAt = Date.now();
-    const candidateTypes = expandTypes(query.types);
+    const candidateTypes = expandMemoryTypes(query.types);
     const includeArchived = query.includeArchived === true;
+    const namespace = query.domains ?? query.filters?.namespace;
 
     let nodes: Array<{ node: Node; relevance?: number }>;
 
-    const namespace = query.filters?.namespace;
-    const inNamespace = (node: Node): boolean => matchesNamespace(node.namespace, namespace);
-
     if (query.query && this.memory.hasVectorIndex()) {
-      const hits = await this.memory.vectorQuery(query.query, query.limit ?? 10, { includeArchived });
+      const requested = query.limit ?? 10;
+      const requestedOffset = query.offset ?? 0;
+      // 语义过滤可能剔除部分向量命中；适度多取，最终分页仍统一在本方法执行。
+      const fetchLimit = Math.min(200, Math.max(requested + requestedOffset, requested * 4));
+      const hits = await this.memory.vectorQuery(query.query, fetchLimit, { includeArchived });
       const vectorNodes = hits
-        .filter(({ node }) => candidateTypes.includes(node.type) && inNamespace(node))
+        .filter(({ node }) => candidateTypes.includes(node.type) && matchesNamespace(node.namespace, namespace))
         .map(({ node, score }) => ({ node, relevance: score }));
       if (vectorNodes.length > 0) {
         nodes = vectorNodes;
@@ -345,11 +390,10 @@ export class MemoryService {
       nodes = collected.map((node) => ({ node }));
     }
 
-    let filtered = nodes.filter(({ node }) => this.passFilters(node, query) && !isInternalNode(node));
-    if (query.types?.includes('preference')) {
-      filtered = filtered.filter(({ node }) =>
-        node.type !== 'fact' || (node.tags ?? []).includes(PREFERENCE_TAG));
-    }
+    const filtered = nodes.filter(({ node }) =>
+      this.passFilters(node, query)
+      && !isInternalNode(node)
+      && matchesMemoryTypes(node, query.types));
 
     const totalMatches = filtered.length;
     const offset = query.offset ?? 0;
@@ -364,32 +408,39 @@ export class MemoryService {
     };
   }
 
-  async search(query: SearchQuery & LifecycleOptions): Promise<SearchResult> {
+  async search(query: SearchQuery & LifecycleOptions & ReadScopeOptions): Promise<SearchResult> {
     const startedAt = Date.now();
+    const includeArchived = query.includeArchived === true;
+    const namespace = query.domains ?? query.filters?.namespace;
     const hits = await this.memory.search(query.query, {
-      types: query.types,
+      types: expandMemoryTypes(query.types),
       tags: query.filters?.tags,
       createdAfter: query.filters?.createdAfter,
       createdBefore: query.filters?.createdBefore,
-      namespace: query.filters?.namespace,
-      includeArchived: query.includeArchived === true,
+      namespace,
+      includeArchived,
     });
-    const limited = query.limit !== undefined ? hits.slice(0, query.limit) : hits;
+    const filtered = hits.filter((node) => matchesMemoryTypes(node, query.types));
+    const limited = query.limit !== undefined ? filtered.slice(0, query.limit) : filtered;
 
     const relations: Relation[] = [];
     if (query.includeRelations) {
       const seenEdges = new Set<string>();
       for (const hit of limited) {
-        const traversal = await this.mebular.graph.traverse(hit.id, { maxDepth: 1 });
+        const traversal = await this.mebular.graph.traverse(hit.id, {
+          maxDepth: 1,
+          ...(namespace !== undefined ? { namespace } : {}),
+        });
         for (const edge of traversal.visitedEdges) {
           if (seenEdges.has(edge.id)) continue;
           const [sourceNode, targetNode] = await Promise.all([
             this.mebular.graph.getNode(edge.source),
             this.mebular.graph.getNode(edge.target),
           ]);
-          // 防御性过滤：内部对象不得经关系端点泄漏给普通 search。
-          if ((sourceNode && isInternalNode(sourceNode))
-            || (targetNode && isInternalNode(targetNode))) {
+          // 防御性过滤：内部/归档对象不得经关系端点泄漏给普通 search。
+          const visible = (node: Node | null): boolean =>
+            Boolean(node) && !isInternalNode(node) && (includeArchived || !isArchived(node));
+          if (!visible(sourceNode) || !visible(targetNode)) {
             continue;
           }
           seenEdges.add(edge.id);
@@ -412,16 +463,22 @@ export class MemoryService {
 
   // ---------- 画像 / 技能 / 历史 ----------
 
-  async profile(options: LifecycleOptions = {}): Promise<UserProfile> {
+  async profile(options: LifecycleOptions & ReadScopeOptions = {}): Promise<UserProfile> {
     const includeArchived = options.includeArchived === true;
-    const entities = await this.memory.listByType('entity', { includeArchived });
+    const namespace = options.domains;
+    const entities = await this.memory.listByType('entity', {
+      includeArchived,
+      ...(namespace !== undefined ? { namespace } : {}),
+    });
     const userEntity = entities.find(
       (node) => (node.content as { entityType?: string }).entityType === 'user'
         && (node.content as { name?: string }).name === this.userId,
     );
 
-    const preferenceFacts = (await this.memory.listActiveFacts({ includeArchived }))
-      .filter((fact) => (fact.tags ?? []).includes(PREFERENCE_TAG));
+    const preferenceFacts = (await this.memory.listActiveFacts({
+      includeArchived,
+      ...(namespace !== undefined ? { namespace } : {}),
+    })).filter((fact) => (fact.tags ?? []).includes(PREFERENCE_TAG));
 
     const preferences: Preference[] = preferenceFacts.map((fact) => ({
       id: fact.id,
@@ -440,8 +497,23 @@ export class MemoryService {
     };
   }
 
-  async skills(filter?: SkillFilter & LifecycleOptions): Promise<Skill[]> {
-    let nodes = await this.memory.listByType('skill', { tags: filter?.tags, includeArchived: filter?.includeArchived === true });
+  async skills(filter?: SkillFilter & LifecycleOptions & ReadScopeOptions & { limit?: number }): Promise<Skill[]> {
+    return (await this.skillPage(filter)).skills;
+  }
+
+  /**
+   * 技能列表 + 过滤后总数（capability /skills 需要 total；公共工具只取 skills）。
+   * 域、归档、内部对象、分类/关键词与分页都在这里统一执行。
+   */
+  async skillPage(
+    filter?: SkillFilter & LifecycleOptions & ReadScopeOptions & { limit?: number },
+  ): Promise<{ skills: Skill[]; total: number }> {
+    const namespace = filter?.domains;
+    let nodes = await this.memory.listByType('skill', {
+      tags: filter?.tags,
+      includeArchived: filter?.includeArchived === true,
+      ...(namespace !== undefined ? { namespace } : {}),
+    });
     if (filter?.category) {
       nodes = nodes.filter((node) => (node.content as { category?: string }).category === filter.category);
     }
@@ -453,12 +525,17 @@ export class MemoryService {
           || content.description?.toLowerCase().includes(needle);
       });
     }
-    return nodes.map((node) => toSpecSkill(node as SkillNode));
+    const total = nodes.length;
+    const limited = filter?.limit !== undefined ? nodes.slice(0, filter.limit) : nodes;
+    return { skills: limited.map((node) => toSpecSkill(node as SkillNode)), total };
   }
 
-  async history(filters: ConversationFilters & LifecycleOptions): Promise<ConversationHistory> {
+  async history(filters: ConversationFilters & LifecycleOptions & ReadScopeOptions): Promise<ConversationHistory> {
     let episodes = (await this.memory.listByType('episode', { includeArchived: filters.includeArchived === true })) as EpisodeNode[];
     episodes = episodes.filter((episode) => episode.content.episodeType === 'conversation');
+    if (filters.domains !== undefined) {
+      episodes = episodes.filter((episode) => matchesNamespace(episode.namespace, filters.domains));
+    }
 
     if (filters.sessionIds?.length) {
       episodes = episodes.filter((episode) =>
@@ -547,14 +624,21 @@ export class MemoryService {
 
   // ---------- 图 / 导入 / 状态 / 同步 ----------
 
-  async graph(startId: string, options?: TraverseOptions & LifecycleOptions): Promise<TraverseResult> {
+  async graph(
+    startId: string,
+    options?: TraverseOptions & LifecycleOptions & ReadScopeOptions,
+  ): Promise<TraverseResult> {
     const includeArchived = options?.includeArchived === true;
+    const namespace = options?.namespace ?? options?.domains;
     const start = await this.mebular.graph.getNode(startId);
     // 内部对象不是公共记忆图的一部分；从内部 id 起遍历直接拒绝（不返回部分图）。
     if (start && isInternalNode(start)) {
       throw new MebularError('内部对象不可通过记忆图访问', 'INTERNAL_OBJECT');
     }
-    const result = await this.mebular.graph.traverse(startId, options);
+    const result = await this.mebular.graph.traverse(startId, {
+      ...options,
+      ...(namespace !== undefined ? { namespace } : {}),
+    });
     // G-ML-1：归档默认不参与遍历（节点与边按端点过滤；起点的归档由 core 侧决定）
     // 内部对象无论 includeArchived 与否都不可见。
     const keep = (node: Node): boolean =>
@@ -573,22 +657,97 @@ export class MemoryService {
     return registry.import(input, this.memory);
   }
 
-  async status(): Promise<MemoryStatus> {
-    const nodes = await this.mebular.storage.listNodes();
-    const edges = await this.mebular.storage.listEdges();
+  /**
+   * 统一状态/域统计（公共 `memory_status`、capability `/status` `/namespaces` 共用）。
+   * 只读取一次图快照；不按域/类型复制第二套统计规则。
+   */
+  async stats(): Promise<MemoryStats> {
+    const { nodes, edges } = await this.snapshot();
+    const domains = new Map<string, MemoryDomainStats>();
+    for (const node of nodes) {
+      const domain = domainOfNamespace(node.namespace);
+      // `__policy__` 与其他 `__*` 保留域不是记忆域；capability 不读写。
+      if (domain.startsWith('__')) continue;
+      let entry = domains.get(domain);
+      if (!entry) {
+        entry = {
+          domain,
+          count: 0,
+          memoryRecords: 0,
+          internalObjects: 0,
+          internalKinds: {},
+          lastUpdatedAt: 0,
+        };
+        domains.set(domain, entry);
+      }
+      entry.count += 1;
+      if (isInternalNode(node)) {
+        entry.internalObjects += 1;
+        const kind = internalObjectKindOf(node);
+        if (kind) entry.internalKinds[kind] = (entry.internalKinds[kind] ?? 0) + 1;
+      } else if (MEMORY_NODE_TYPES.has(node.type)) {
+        entry.memoryRecords += 1;
+      }
+      entry.lastUpdatedAt = Math.max(
+        entry.lastUpdatedAt,
+        typeof node.updatedAt === 'number' ? node.updatedAt : 0,
+      );
+    }
+    const list = [...domains.values()];
+    const counts = {
+      nodes: 0,
+      memoryRecords: 0,
+      compacts: 0,
+      checkpoints: 0,
+      selfRecords: 0,
+    };
+    for (const entry of list) {
+      counts.nodes += entry.count;
+      counts.memoryRecords += entry.memoryRecords;
+      counts.compacts += entry.internalKinds.compact ?? 0;
+      counts.checkpoints += entry.internalKinds.context_checkpoint ?? 0;
+      counts.selfRecords += entry.internalKinds.self_record ?? 0;
+    }
+    return {
+      nodeCount: nodes.length,
+      edgeCount: edges.length,
+      counts,
+      domains: list,
+    };
+  }
+
+  /** 统一同步状态（状态、capability /status 与 /sync GET 共用）。 */
+  async syncStatus(): Promise<MemorySyncStatus> {
     const node = this.mebular.node;
-    const lanStatus = node?.getLanStatus?.();
     let pendingEventCount = 0;
+    let lastSyncAt: number | null = null;
+    let isSyncing = false;
     try {
       const syncStatus = await this.mebular.sync.getSyncStatus();
       pendingEventCount = syncStatus.pendingCount;
+      lastSyncAt = typeof syncStatus.lastSyncAt === 'number' ? syncStatus.lastSyncAt : null;
+      isSyncing = syncStatus.isSyncing === true;
     } catch {
       // 门面未初始化时 sync 不可访问
     }
     return {
+      running: node?.isRunning() ?? false,
+      pendingEventCount,
+      lastSyncAt,
+      isSyncing,
+      peerId: node?.peerId.id ?? null,
+    };
+  }
+
+  async status(): Promise<MemoryStatus> {
+    const { nodes, edges } = await this.snapshot();
+    const node = this.mebular.node;
+    const lanStatus = node?.getLanStatus?.();
+    const syncStatus = await this.syncStatus();
+    return {
       deviceId: this.mebular.deviceId,
       peerId: node?.peerId.id ?? null,
-      running: node?.isRunning() ?? false,
+      running: syncStatus.running,
       listenAddrs: node?.getLocalMultiaddrs() ?? [],
       relays: this.mebular.relayServers,
       nodeCount: nodes.length,
@@ -597,7 +756,7 @@ export class MemoryService {
       stateHashByNamespace: computeStateHashByNamespace(nodes, edges),
       atRest: this.mebular.atRestEncryption,
       semantic: this.mebular.semanticVectorIndex !== null,
-      pendingEventCount,
+      pendingEventCount: syncStatus.pendingEventCount,
       // F-NET-1（B）：发现层禁用时暴露「已禁用 + 原因」，其余传输不受影响
       lan: lanStatus
         ? {
@@ -896,6 +1055,14 @@ export class MemoryService {
     return { node, vectorIndexed };
   }
 
+  private async snapshot(): Promise<{ nodes: Node[]; edges: Edge[] }> {
+    const [nodes, edges] = await Promise.all([
+      this.mebular.storage.listNodes(),
+      this.mebular.storage.listEdges(),
+    ]);
+    return { nodes, edges };
+  }
+
   private passFilters(node: Node, query: MemoryQuery): boolean {
     const filters = query.filters;
     if (!filters) return true;
@@ -964,17 +1131,13 @@ function factContentFrom(content: Record<string, unknown>): {
 
 // ---------- 映射（与既有 provider 输出保持同形） ----------
 
-function expandTypes(types?: MemoryQuery['types']): string[] {
-  if (!types) {
-    return ['entity', 'fact', 'episode', 'skill', 'meta'];
+function internalObjectKindOf(node: Node): string | null {
+  const metadata = node.metadata?.internalObject;
+  if (metadata && typeof metadata === 'object' && !Array.isArray(metadata)) {
+    const kind = (metadata as { kind?: unknown }).kind;
+    if (typeof kind === 'string' && kind.length > 0) return kind;
   }
-  const expanded = new Set<string>();
-  for (const type of types) {
-    if (type === 'preference') expanded.add('fact');
-    else if (type === 'observation') expanded.add('episode');
-    else expanded.add(type);
-  }
-  return [...expanded];
+  return node.type ?? null;
 }
 
 function toMemory(node: Node, relevance?: number): Memory {

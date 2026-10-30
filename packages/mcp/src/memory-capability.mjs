@@ -12,9 +12,11 @@
 //   GET/POST /sync
 //
 // 约束：
-// - 只调用 MemoryService / Mebular 公共方法（graph 节点方法）；不直接打开
-//   GraphStore 文件、不 append 事件、不新增事件类型或同步协议。
-// - 域过滤是 MemoryService 结果之上的后置过滤；不修改公共工具默认行为。
+// - 只调用 MemoryService / Mebular 公共方法；不直接打开 GraphStore 文件、不 append
+//   事件、不新增事件类型或同步协议。普通 MemoryRecord 的读写只经 MemoryService；
+//   只有 internal-object（compact/self_record/context_checkpoint）允许直接 GraphStore 写入。
+// - 读取（query/search/history/profile/skills/graph）、状态/域统计与同步状态都由
+//   MemoryService 统一执行；capability 只负责授权域、owner/provenance 投影与响应信封。
 // - 内部对象（metadata.internal / __*）默认不返回；graph 不遍历内部对象。
 // - capability token 不进入日志、status、错误详情；响应使用统一信封。
 // - 本模块不 import @mebular/memory-runtime 的业务实现。
@@ -22,12 +24,15 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { chmod, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { domainOfNamespace, semanticKindOf } from '@mebular/core';
 import {
   ensureCapabilityToken,
   removeCapabilityToken,
   verifyCapabilityToken,
 } from './memory-runtime-token.mjs';
 import { APP_VERSION } from './version.mjs';
+
+export { domainOfNamespace };
 
 export const CAPABILITY_API_PREFIX = '/internal/memory/v1';
 export const CAPABILITY_API_VERSION = 1;
@@ -64,7 +69,6 @@ const IDEMPOTENCY_KEY_RE = /^[A-Za-z0-9._:-]{1,200}$/;
 const CLIENT_ITEM_ID_RE = /^[A-Za-z0-9._:-]{1,128}$/;
 
 const RESERVED_DOMAINS = new Set(['user', 'default', 'shared', 'system']);
-const MEMORY_TYPES = new Set(['entity', 'fact', 'episode', 'skill', 'meta']);
 const ALLOWED_TYPES = new Set(['fact', 'preference', 'episode', 'observation', 'skill', 'entity', 'meta']);
 const DEFAULT_TYPES = ['fact', 'preference', 'episode', 'observation', 'skill', 'entity'];
 const WRITE_ENDPOINTS = new Set(['write', 'update', 'delete', 'archive', 'internal-object', 'sync']);
@@ -216,13 +220,6 @@ export function normalizeDomain(value) {
   // 0.2 任意 namespace = Other 显式域；保留原值，不迁移、不改名。
   if (/[\u0000-\u001f\u007f/\\]/.test(domain)) return null;
   return domain;
-}
-
-/** 节点 namespace → domain；缺失/空白按 default。 */
-export function domainOfNamespace(namespace) {
-  if (typeof namespace !== 'string') return 'default';
-  const trimmed = namespace.trim();
-  return trimmed === '' ? 'default' : trimmed;
 }
 
 /** 域 → 归属（服务端推导，客户端不能伪造）。 */
@@ -923,51 +920,6 @@ function parseTypes(value) {
   return out;
 }
 
-/**
- * capability 的语义类型（preference/observation）→ MemoryService 的节点类型。
- * MemoryService 对 preference 有额外过滤，对 observation 只做 episode 展开；
- * 因此这里映射后，再由 capability 按语义类型做后置过滤。
- */
-function serviceTypesFor(types, { search = false } = {}) {
-  const out = new Set();
-  for (const type of types) {
-    if (type === 'fact') {
-      out.add('fact');
-    } else if (type === 'preference') {
-      // search 的 MemoryStore 不认 preference；query 在“只要 preference”时可利用其原生过滤。
-      if (search || types.includes('fact')) out.add('fact');
-      else out.add('preference');
-    } else if (type === 'observation') {
-      // 新写入的 observation 与公共 memory_write 一致：episode（episodeType=observation）。
-      // 同时查 fact，兼容升级前 capability 写入的 legacy fact observation（按 metadata.kind 过滤）。
-      out.add('episode');
-      out.add('fact');
-    } else if (type === 'episode') {
-      out.add('episode');
-    } else {
-      out.add(type);
-    }
-  }
-  return [...out];
-}
-
-function isNarrowSemanticFilter(types) {
-  return (types.includes('preference') && !types.includes('fact'))
-    || (types.includes('observation') && !types.includes('episode'));
-}
-
-function matchesRequestedTypes(record, types) {
-  if (record.type === 'fact') {
-    return types.includes('fact')
-      || (types.includes('preference') && record.kind === 'preference')
-      || (types.includes('observation') && record.kind === 'observation');
-  }
-  if (record.type === 'episode') {
-    return types.includes('episode') || (types.includes('observation') && record.kind === 'observation');
-  }
-  return types.includes(record.type);
-}
-
 function parseFilters(value) {
   if (!hasValue(value)) return undefined;
   if (!isObject(value)) throw new CapabilityError(400, 'invalid_request', 'filters 必须是对象');
@@ -1045,7 +997,7 @@ async function listAllNodes(app) {
   return [];
 }
 
-async function knownDomainsFor(app, _config, actor, threadId) {
+async function knownDomainsFor(app, _config, actor, threadId, currentService = null) {
   const known = new Set(['user', 'default', 'shared', 'system']);
   if (actor?.type === 'agent') known.add(`agent:${actor.agentId}`);
   if (threadId) known.add(`task:${threadId}`);
@@ -1058,11 +1010,18 @@ async function knownDomainsFor(app, _config, actor, threadId) {
       return known;
     }
   } catch {
-    // fall through to storage scan
+    // fall through to unified stats
   }
-  for (const node of await listAllNodes(app)) {
-    const domain = normalizeDomain(domainOfNamespace(node.namespace));
-    if (domain) known.add(domain);
+  try {
+    if (currentService && typeof currentService.stats === 'function') {
+      const stats = await currentService.stats();
+      for (const entry of Array.isArray(stats?.domains) ? stats.domains : []) {
+        const domain = normalizeDomain(entry?.domain);
+        if (domain) known.add(domain);
+      }
+    }
+  } catch {
+    // 统计不可用时只保留内建域；不另造第二套扫描。
   }
   return known;
 }
@@ -1082,6 +1041,7 @@ async function resolveDomains({
   strictDomains,
   app,
   config,
+  service,
 }) {
   if (hasValue(requested) && !Array.isArray(requested)) {
     throw new CapabilityError(400, 'invalid_request', 'domains 必须是字符串数组');
@@ -1101,7 +1061,7 @@ async function resolveDomains({
     : defaultDomainsFor(endpoint, actor, threadId);
 
   const known = explicit
-    ? await knownDomainsFor(app, config, actor, threadId)
+    ? await knownDomainsFor(app, config, actor, threadId, service)
     : null;
   const allowed = [];
   const warnings = [];
@@ -1171,15 +1131,13 @@ function normalizeValidTo(value) {
 }
 
 function kindOf(node, memory) {
-  const content = isObject(node?.content) ? node.content : {};
-  const metadata = isObject(node?.metadata) ? node.metadata : {};
-  if (typeof metadata.kind === 'string' && ALLOWED_TYPES.has(metadata.kind)) return metadata.kind;
-  if (typeof content.kind === 'string' && ALLOWED_TYPES.has(content.kind)) return content.kind;
-  const type = node?.type ?? memory?.type;
-  const tags = Array.isArray(node?.tags) ? node.tags : Array.isArray(memory?.metadata?.tags) ? memory.metadata.tags : [];
-  if (type === 'fact' && tags.includes('preference')) return 'preference';
-  if (type === 'episode' && content.episodeType === 'observation') return 'observation';
-  return type ?? 'unknown';
+  if (node) return semanticKindOf(node);
+  return semanticKindOf({
+    type: memory?.type ?? 'unknown',
+    content: {},
+    tags: Array.isArray(memory?.metadata?.tags) ? memory.metadata.tags : [],
+    metadata: {},
+  });
 }
 
 function renderNodeText(node) {
@@ -1259,20 +1217,6 @@ async function loadNode(app, id, cache) {
   }
   cache.set(id, node);
   return node;
-}
-
-function mapRelations(relations, nodeVisible) {
-  const out = [];
-  for (const relation of Array.isArray(relations) ? relations : []) {
-    if (!nodeVisible(relation?.sourceId) || !nodeVisible(relation?.targetId)) continue;
-    out.push({
-      sourceId: relation.sourceId,
-      targetId: relation.targetId,
-      edgeType: relation.edgeType,
-      ...(typeof relation.reason === 'string' ? { reason: relation.reason } : {}),
-    });
-  }
-  return out;
 }
 
 function internalObjectKind(node) {
@@ -1421,30 +1365,6 @@ function timeoutAfter(promise, ms, message) {
     if (typeof timer.unref === 'function') timer.unref();
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
-
-function domainStats(nodes) {
-  const stats = new Map();
-  for (const node of nodes) {
-    const domain = domainOfNamespace(node.namespace);
-    // `__policy__` 与其他 `__*` 保留域不是记忆域；capability 不读写。
-    if (domain.startsWith('__')) continue;
-    let entry = stats.get(domain);
-    if (!entry) {
-      entry = { domain, count: 0, memoryRecords: 0, internalObjects: 0, lastUpdatedAt: 0, internalKinds: {} };
-      stats.set(domain, entry);
-    }
-    entry.count += 1;
-    if (isInternalNode(node)) {
-      entry.internalObjects += 1;
-      const kind = internalObjectKind(node);
-      if (kind) entry.internalKinds[kind] = (entry.internalKinds[kind] ?? 0) + 1;
-    } else if (MEMORY_TYPES.has(node.type)) {
-      entry.memoryRecords += 1;
-    }
-    entry.lastUpdatedAt = Math.max(entry.lastUpdatedAt, typeof node.updatedAt === 'number' ? node.updatedAt : 0);
-  }
-  return stats;
 }
 
 function versionPayload() {
@@ -1640,6 +1560,51 @@ export function createMemoryCapabilityHandler({
     };
 
     const app = () => getApp?.() ?? null;
+
+    /**
+     * 状态/域统计唯一来源：MemoryService.stats()。
+     * 兼容测试/旧运行时没有 stats 的情况时只回落到 status 计数，绝不扫描图另造统计。
+     */
+    async function statsFor(currentService) {
+      if (currentService && typeof currentService.stats === 'function') {
+        return await currentService.stats();
+      }
+      const status = currentService && typeof currentService.status === 'function'
+        ? await currentService.status()
+        : null;
+      const nodes = typeof status?.nodeCount === 'number' ? status.nodeCount : 0;
+      return {
+        nodeCount: nodes,
+        edgeCount: typeof status?.edgeCount === 'number' ? status.edgeCount : 0,
+        counts: {
+          nodes,
+          memoryRecords: 0,
+          compacts: 0,
+          checkpoints: 0,
+          selfRecords: 0,
+        },
+        domains: [],
+      };
+    }
+
+    /**
+     * 同步状态唯一来源：MemoryService.syncStatus()。
+     * 兼容旧运行时只回落到 status 的同一组字段，不读 app.sync 另造一份。
+     */
+    async function syncStatusFor(currentService) {
+      if (currentService && typeof currentService.syncStatus === 'function') {
+        return await currentService.syncStatus();
+      }
+      const status = currentService && typeof currentService.status === 'function'
+        ? await currentService.status()
+        : null;
+      return {
+        running: status?.running === true,
+        pendingEventCount: typeof status?.pendingEventCount === 'number' ? status.pendingEventCount : 0,
+        lastSyncAt: typeof status?.lastSyncAt === 'number' ? status.lastSyncAt : null,
+        isSyncing: status?.isSyncing === true,
+      };
+    }
 
     const requireObjectBody = () => {
       if (!body || body.length === 0) {
@@ -2339,8 +2304,8 @@ export function createMemoryCapabilityHandler({
         && internalObjectMetadata(node).identityKey === identityKey) ?? null;
     }
 
-    async function handleCompactObject(payload, actor) {
-      const op = payload.op;
+    // [internal-object-write] 内部对象允许直接 GraphStore 写入；普通 MemoryRecord 禁止。
+    async function handleCompactObject(payload, actor) {      const op = payload.op;
       if (!['upsert', 'get', 'list', 'delete'].includes(op)) {
         throw new CapabilityError(400, 'internal_kind_invalid', 'compact op 必须是 upsert/get/list/delete');
       }
@@ -2837,6 +2802,7 @@ export function createMemoryCapabilityHandler({
       };
     }
 
+    // [/internal-object-write]
     async function handleInternalObject(payload, actor) {
       if (payload.sync !== undefined || payload['self.sync'] !== undefined || payload['checkpoint.sync'] !== undefined) {
         throw new CapabilityError(400, 'legacy_sync_unsupported', '不再支持 sync/self.sync/checkpoint.sync 字段');
@@ -2854,25 +2820,15 @@ export function createMemoryCapabilityHandler({
 
     async function syncStatusData() {
       const currentService = service();
-      const status = typeof currentService.status === 'function' ? await currentService.status() : null;
-      let syncStatus = null;
-      try {
-        syncStatus = await app()?.sync?.getSyncStatus?.();
-      } catch {
-        syncStatus = null;
-      }
-      const running = status?.running === true;
+      const syncStatus = await syncStatusFor(currentService);
+      const running = syncStatus.running === true;
       return {
         running,
-        pendingEvents: typeof status?.pendingEventCount === 'number'
-          ? status.pendingEventCount
-          : typeof syncStatus?.pendingCount === 'number'
-            ? syncStatus.pendingCount
-            : 0,
+        pendingEvents: typeof syncStatus.pendingEventCount === 'number' ? syncStatus.pendingEventCount : 0,
         peers: [],
         subscriptions: subscriptionView(getConfig()),
-        lastSyncAt: typeof syncStatus?.lastSyncAt === 'number' ? syncStatus.lastSyncAt : null,
-        isSyncing: syncStatus?.isSyncing === true,
+        lastSyncAt: typeof syncStatus.lastSyncAt === 'number' ? syncStatus.lastSyncAt : null,
+        isSyncing: syncStatus.isSyncing === true,
         degraded: !running,
         warnings: running
           ? []
@@ -2895,8 +2851,8 @@ export function createMemoryCapabilityHandler({
       if (typeof currentService.sync !== 'function') {
         throw new CapabilityError(503, 'sync_unavailable', '当前 MemoryService 不提供同步触发', undefined, true);
       }
-      const status = typeof currentService.status === 'function' ? await currentService.status() : null;
-      if (status?.running !== true) {
+      const syncStatus = await syncStatusFor(currentService);
+      if (syncStatus.running !== true) {
         throw new CapabilityError(503, 'sync_unavailable', '同步网络未启用', { reason: 'network_not_running' }, true);
       }
       if (payload.peerId !== undefined && (typeof payload.peerId !== 'string' || payload.peerId.length === 0)) {
@@ -3027,60 +2983,31 @@ export function createMemoryCapabilityHandler({
         if (!isGet) throw new CapabilityError(405, 'method_not_allowed', 'status 仅接受 GET');
         const actor = parseActor(actorFromQuery(url));
         const includeCounts = url?.searchParams?.get('includeCounts') !== 'false';
-        const nodes = await listAllNodes(app());
-        const stats = domainStats(nodes);
-        const counts = {
-          nodes: 0,
-          memoryRecords: 0,
-          compacts: 0,
-          checkpoints: 0,
-          selfRecords: 0,
-        };
-        for (const entry of stats.values()) {
-          counts.nodes += entry.count;
-          counts.memoryRecords += entry.memoryRecords;
-          counts.compacts += entry.internalKinds.compact ?? 0;
-          counts.checkpoints += entry.internalKinds.context_checkpoint ?? 0;
-          counts.selfRecords += entry.internalKinds.self_record ?? 0;
-        }
-        let status = null;
         const currentService = getService?.() ?? null;
-        try {
-          if (currentService && typeof currentService.status === 'function') status = await currentService.status();
-        } catch {
-          status = null;
-        }
-        let syncStatus = null;
-        try {
-          syncStatus = await app()?.sync?.getSyncStatus?.();
-        } catch {
-          syncStatus = null;
-        }
-        if (nodes.length === 0 && typeof status?.nodeCount === 'number') {
-          counts.nodes = status.nodeCount;
-        }
+        const stats = await statsFor(currentService);
+        const syncStatus = await syncStatusFor(currentService);
         const identity = identitySnapshot();
         const data = {
           initialized: Boolean(currentService)
             && (typeof app()?.isInitialized === 'function' ? app().isInitialized() : Boolean(app())),
           identity: {
             ...identity,
-            deviceId: identity.deviceId ?? status?.deviceId ?? app()?.deviceId ?? null,
+            deviceId: identity.deviceId ?? app()?.deviceId ?? null,
             userId: identity.userId ?? 'user',
           },
-          counts: includeCounts ? counts : null,
+          counts: includeCounts ? stats.counts : null,
           domains: includeCounts
-            ? [...stats.values()].map((entry) => ({
+            ? stats.domains.map((entry) => ({
               domain: entry.domain,
               ownerType: deriveOwner(entry.domain, { userId: identity.userId }).ownerType,
               count: entry.count,
             }))
             : [],
           sync: {
-            running: status?.running === true,
-            pendingEvents: typeof status?.pendingEventCount === 'number' ? status.pendingEventCount : 0,
+            running: syncStatus.running === true,
+            pendingEvents: typeof syncStatus.pendingEventCount === 'number' ? syncStatus.pendingEventCount : 0,
             subscriptions: subscriptionView(getConfig()),
-            lastSyncAt: typeof syncStatus?.lastSyncAt === 'number' ? syncStatus.lastSyncAt : null,
+            lastSyncAt: typeof syncStatus.lastSyncAt === 'number' ? syncStatus.lastSyncAt : null,
           },
           limits: {
             maxBodyBytes: CAPABILITY_LIMITS.maxBodyBytes,
@@ -3096,11 +3023,11 @@ export function createMemoryCapabilityHandler({
         if (!isGet) throw new CapabilityError(405, 'method_not_allowed', 'namespaces 仅接受 GET');
         const actor = parseActor(actorFromQuery(url));
         const includeCounts = url?.searchParams?.get('includeCounts') !== 'false';
-        const nodes = await listAllNodes(app());
-        const stats = domainStats(nodes);
+        const currentService = getService?.() ?? null;
+        const stats = await statsFor(currentService);
         const identity = identitySnapshot();
         const subscriptions = subscriptionView(getConfig());
-        const domains = [...stats.values()].map((entry) => {
+        const domains = stats.domains.map((entry) => {
           const owner = deriveOwner(entry.domain, { userId: identity.userId });
           return {
             domain: entry.domain,
@@ -3143,6 +3070,7 @@ export function createMemoryCapabilityHandler({
         if (typeof payload.query === 'string' && Buffer.byteLength(payload.query, 'utf-8') > MAX_QUERY_BYTES) {
           throw new CapabilityError(413, 'payload_too_large', 'query 文本超过 8 KiB');
         }
+        const currentService = service();
         const resolved = await resolveDomains({
           requested: payload.domains,
           endpoint: 'query',
@@ -3151,6 +3079,7 @@ export function createMemoryCapabilityHandler({
           strictDomains: payload.strictDomains === true,
           app: app(),
           config: getConfig(),
+          service: currentService,
         });
         const limit = clampLimit(payload.limit);
         const offset = clampOffset(payload.offset);
@@ -3167,43 +3096,32 @@ export function createMemoryCapabilityHandler({
           }, resolved.warnings);
         }
         const filters = parseFilters(payload.filters);
-        const narrow = isNarrowSemanticFilter(types);
-        const fetchLimit = narrow ? Math.min(offset + limit + MAX_LIMIT, 200) : limit;
-        const result = await service().query({
+        const result = await currentService.query({
           ...(typeof payload.query === 'string' && payload.query.length > 0 ? { query: payload.query } : {}),
-          types: serviceTypesFor(types),
-          limit: fetchLimit,
-          offset: narrow ? 0 : offset,
+          types,
+          limit,
+          offset,
           ...(payload.includeHistory !== undefined ? { includeHistory: payload.includeHistory === true } : {}),
           ...(payload.includeArchived !== undefined ? { includeArchived: payload.includeArchived === true } : {}),
           filters: { ...(filters ?? {}), namespace: resolved.domains },
         });
         const cache = new Map();
-        const domainSet = new Set(resolved.domains);
         const loaded = await Promise.all((result?.memories ?? []).map(async (memory) => ({
           memory,
           node: await loadNode(app(), memory.id, cache),
         })));
-        const mapped = loaded
-          .filter(({ memory, node }) => !isInternalNode(node)
-            && domainSet.has(domainOfNamespace(node?.namespace ?? memory?.metadata?.namespace)))
-          .map(({ memory, node }) => recordView(memory, node, {
-            userId: identitySnapshot().userId,
-            withScore: true,
-          }));
-        const records = mapped.filter((record) => matchesRequestedTypes(record, types));
-        const page = narrow ? records.slice(offset, offset + limit) : records;
-        const total = narrow
-          ? records.length
-          : typeof result?.totalMatches === 'number'
-            ? result.totalMatches
-            : records.length;
+        // 选择/过滤/分页已全部由 MemoryService 完成；这里只做 owner/provenance 投影。
+        const records = loaded.map(({ memory, node }) => recordView(memory, node, {
+          userId: identitySnapshot().userId,
+          withScore: true,
+        }));
+        const total = typeof result?.totalMatches === 'number' ? result.totalMatches : records.length;
         return sendOk({
-          records: page,
+          records,
           total,
           offset,
           limit,
-          hasMore: offset + page.length < total,
+          hasMore: offset + records.length < total,
           tookMs: typeof result?.queryTimeMs === 'number' ? result.queryTimeMs : 0,
           usedDomains: resolved.domains,
         }, resolved.warnings);
@@ -3220,6 +3138,7 @@ export function createMemoryCapabilityHandler({
         if (Buffer.byteLength(payload.query, 'utf-8') > MAX_QUERY_BYTES) {
           throw new CapabilityError(413, 'payload_too_large', 'query 文本超过 8 KiB');
         }
+        const currentService = service();
         const resolved = await resolveDomains({
           requested: payload.domains,
           endpoint: 'search',
@@ -3228,6 +3147,7 @@ export function createMemoryCapabilityHandler({
           strictDomains: payload.strictDomains === true,
           app: app(),
           config: getConfig(),
+          service: currentService,
         });
         const limit = clampLimit(payload.limit);
         const types = parseTypes(payload.types ?? undefined);
@@ -3235,56 +3155,35 @@ export function createMemoryCapabilityHandler({
           return sendOk({ records: [], relations: [], total: 0, tookMs: 0 }, resolved.warnings);
         }
         const filters = parseFilters(payload.filters);
-        const narrow = isNarrowSemanticFilter(types);
-        const result = await service().search({
+        const result = await currentService.search({
           query: payload.query,
-          types: serviceTypesFor(types, { search: true }),
-          limit: narrow ? MAX_LIMIT : limit,
+          types,
+          limit,
           ...(payload.includeRelations !== undefined ? { includeRelations: payload.includeRelations === true } : {}),
           ...(payload.includeArchived !== undefined ? { includeArchived: payload.includeArchived === true } : {}),
           filters: { ...(filters ?? {}), namespace: resolved.domains },
         });
         const cache = new Map();
-        const domainSet = new Set(resolved.domains);
         const loaded = await Promise.all((result?.memories ?? []).map(async (memory) => ({
           memory,
           node: await loadNode(app(), memory.id, cache),
         })));
-        const mapped = loaded
-          .filter(({ memory, node }) => !isInternalNode(node)
-            && domainSet.has(domainOfNamespace(node?.namespace ?? memory?.metadata?.namespace)))
-          .map(({ memory, node }) => recordView(memory, node, {
-            userId: identitySnapshot().userId,
-            withScore: true,
-          }));
-        const records = mapped
-          .filter((record) => matchesRequestedTypes(record, types))
-          .slice(0, limit);
-        const visible = new Set(records.map((record) => record.id));
-        const nodeVisible = (id) => {
-          if (typeof id !== 'string' || !visible.has(id)) {
-            // 关系端点可能不在命中集：用缓存补读并判断域/内部对象。
-            const node = cache.get(id);
-            if (!node) return false;
-            if (isInternalNode(node)) return false;
-            return domainSet.has(domainOfNamespace(node.namespace));
-          }
-          return true;
-        };
-        // 关系端点未必命中 records；先补读再过滤。
-        for (const relation of Array.isArray(result?.relations) ? result.relations : []) {
-          await loadNode(app(), relation?.sourceId, cache);
-          await loadNode(app(), relation?.targetId, cache);
-        }
+        // 选择/过滤/域关系过滤/分页已全部由 MemoryService 完成。
+        const records = loaded.map(({ memory, node }) => recordView(memory, node, {
+          userId: identitySnapshot().userId,
+          withScore: true,
+        }));
+        const relations = payload.includeRelations === true
+          ? (Array.isArray(result?.relations) ? result.relations : []).map((relation) => ({
+            sourceId: relation.sourceId,
+            targetId: relation.targetId,
+            edgeType: relation.edgeType,
+            ...(typeof relation.reason === 'string' ? { reason: relation.reason } : {}),
+          }))
+          : [];
         return sendOk({
           records,
-          relations: payload.includeRelations === true
-            ? mapRelations(
-              (Array.isArray(result?.relations) ? result.relations : [])
-                .filter((relation) => visible.has(relation?.sourceId) || visible.has(relation?.targetId)),
-              nodeVisible,
-            )
-            : [],
+          relations,
           total: records.length,
           tookMs: typeof result?.queryTimeMs === 'number' ? result.queryTimeMs : 0,
           usedDomains: resolved.domains,
@@ -3296,6 +3195,7 @@ export function createMemoryCapabilityHandler({
         const payload = requireObjectBody();
         const actor = parseActor(payload.actor);
         const threadId = parseThreadId(payload.threadId);
+        const currentService = service();
         const resolved = await resolveDomains({
           requested: payload.domains,
           endpoint: 'history',
@@ -3304,31 +3204,33 @@ export function createMemoryCapabilityHandler({
           strictDomains: payload.strictDomains === true,
           app: app(),
           config: getConfig(),
+          service: currentService,
         });
         const limit = clampLimit(payload.limit);
         const offset = clampOffset(payload.offset);
         if (resolved.domains.length === 0) {
           return sendOk({ episodes: [], total: 0, offset, limit, hasMore: false }, resolved.warnings);
         }
-        const result = await service().history({
+        const result = await currentService.history({
           ...(Array.isArray(payload.sessionIds) ? { sessionIds: payload.sessionIds.filter((id) => typeof id === 'string') } : {}),
           ...(typeof payload.startTime === 'number' ? { startTime: payload.startTime } : {}),
           ...(typeof payload.endTime === 'number' ? { endTime: payload.endTime } : {}),
           ...(typeof payload.topic === 'string' && payload.topic.length > 0 ? { topic: payload.topic } : {}),
           ...(payload.includeArchived !== undefined ? { includeArchived: payload.includeArchived === true } : {}),
+          domains: resolved.domains,
+          limit,
+          offset,
         });
-        const domainSet = new Set(resolved.domains);
+        // 域过滤、会话/时间/主题过滤、排序与分页均由 MemoryService.history 统一执行。
         const episodes = (result?.episodes ?? [])
-          .filter((node) => !isInternalNode(node) && domainSet.has(domainOfNamespace(node.namespace)))
           .map((node) => nodeView(node, { userId: identitySnapshot().userId }));
-        const total = episodes.length;
-        const page = episodes.slice(offset, offset + limit);
+        const total = typeof result?.totalCount === 'number' ? result.totalCount : episodes.length;
         return sendOk({
-          episodes: page,
+          episodes,
           total,
           offset,
           limit,
-          hasMore: offset + page.length < total,
+          hasMore: offset + episodes.length < total,
         }, resolved.warnings);
       }
 
@@ -3336,6 +3238,7 @@ export function createMemoryCapabilityHandler({
         if (!isPost) throw new CapabilityError(405, 'method_not_allowed', 'skills 仅接受 POST');
         const payload = requireObjectBody();
         const actor = parseActor(payload.actor);
+        const currentService = service();
         const resolved = await resolveDomains({
           requested: payload.domains,
           endpoint: 'skills',
@@ -3344,28 +3247,37 @@ export function createMemoryCapabilityHandler({
           strictDomains: payload.strictDomains === true,
           app: app(),
           config: getConfig(),
+          service: currentService,
         });
         const limit = clampLimit(payload.limit, MAX_LIMIT);
         if (resolved.domains.length === 0) {
           return sendOk({ skills: [], total: 0 }, resolved.warnings);
         }
-        const skills = await service().skills({
+        const skillFilter = {
           ...(typeof payload.category === 'string' && payload.category.length > 0 ? { category: payload.category } : {}),
           ...(typeof payload.search === 'string' && payload.search.length > 0 ? { search: payload.search } : {}),
           ...(Array.isArray(payload.tags) ? { tags: payload.tags.filter((tag) => typeof tag === 'string') } : {}),
           ...(payload.includeArchived !== undefined ? { includeArchived: payload.includeArchived === true } : {}),
-        });
-        const domainSet = new Set(resolved.domains);
+          domains: resolved.domains,
+          limit,
+        };
+        let page;
+        if (typeof currentService.skillPage === 'function') {
+          page = await currentService.skillPage(skillFilter);
+        } else {
+          // 兼容旧运行时：仍由 MemoryService 选技能；适配器只做分页兜底。
+          const all = await currentService.skills(skillFilter);
+          page = { skills: all.slice(0, limit), total: all.length };
+        }
         const cache = new Map();
-        const filtered = [];
-        for (const skill of Array.isArray(skills) ? skills : []) {
+        const skills = [];
+        for (const skill of Array.isArray(page?.skills) ? page.skills : []) {
           const node = await loadNode(app(), skill?.id, cache);
-          if (!node || isInternalNode(node)) continue;
-          const domain = domainOfNamespace(node.namespace);
-          if (!domainSet.has(domain)) continue;
+          if (!node) continue;
+          const domain = domainOfNamespace(node?.namespace);
           const owner = deriveOwner(domain, { userId: identitySnapshot().userId });
-          const metadata = isObject(node.metadata) ? node.metadata : {};
-          filtered.push({
+          const metadata = isObject(node?.metadata) ? node.metadata : {};
+          skills.push({
             ...skill,
             kind: 'skill',
             domain,
@@ -3378,8 +3290,8 @@ export function createMemoryCapabilityHandler({
           });
         }
         return sendOk({
-          skills: filtered.slice(0, limit),
-          total: filtered.length,
+          skills,
+          total: typeof page?.total === 'number' ? page.total : skills.length,
           usedDomains: resolved.domains,
         }, resolved.warnings);
       }
@@ -3388,7 +3300,8 @@ export function createMemoryCapabilityHandler({
         if (!isPost) throw new CapabilityError(405, 'method_not_allowed', 'profile 仅接受 POST');
         const payload = requireObjectBody();
         const actor = parseActor(payload.actor);
-        const known = await knownDomainsFor(app(), getConfig(), actor, null);
+        const currentService = service();
+        const known = await knownDomainsFor(app(), getConfig(), actor, null, currentService);
         let allowedDomains;
         let profileWarnings = [];
         if (hasValue(payload.domains) && !Array.isArray(payload.domains)) {
@@ -3403,6 +3316,7 @@ export function createMemoryCapabilityHandler({
             strictDomains: payload.strictDomains === true,
             app: app(),
             config: getConfig(),
+            service: currentService,
           });
           allowedDomains = new Set(resolved.domains.filter((domain) => !domain.startsWith('agent:')
             && !domain.startsWith('task:')
@@ -3423,18 +3337,19 @@ export function createMemoryCapabilityHandler({
               && !domain.startsWith('task:')
               && domain !== 'system'));
         }
-        const profile = await service().profile({
+        // 域过滤由 MemoryService.profile({domains}) 执行；这里只做 owner/provenance/legacy 投影。
+        const profile = await currentService.profile({
           ...(payload.includeArchived !== undefined ? { includeArchived: payload.includeArchived === true } : {}),
+          domains: [...allowedDomains],
         });
         const cache = new Map();
         const preferences = [];
         let legacyCount = 0;
         for (const preference of Array.isArray(profile?.preferences) ? profile.preferences : []) {
           const node = await loadNode(app(), preference?.id, cache);
-          if (!node || isInternalNode(node)) continue;
-          const domain = domainOfNamespace(node.namespace);
-          if (!allowedDomains.has(domain)) continue;
-          const metadata = isObject(node.metadata) ? node.metadata : {};
+          if (!node) continue;
+          const domain = domainOfNamespace(node?.namespace);
+          const metadata = isObject(node?.metadata) ? node.metadata : {};
           const legacy = !isObject(metadata.provenance);
           if (legacy) legacyCount += 1;
           preferences.push({
@@ -3477,6 +3392,7 @@ export function createMemoryCapabilityHandler({
           throw new CapabilityError(404, 'internal_object', '内部对象不可通过记忆图访问');
         }
 
+        const currentService = service();
         let resolved;
         if (Array.isArray(payload.domains) && payload.domains.length > 0) {
           resolved = await resolveDomains({
@@ -3487,6 +3403,7 @@ export function createMemoryCapabilityHandler({
             strictDomains: payload.strictDomains === true,
             app: app(),
             config: getConfig(),
+            service: currentService,
           });
         } else {
           if (hasValue(payload.domains) && !Array.isArray(payload.domains)) {
@@ -3500,6 +3417,7 @@ export function createMemoryCapabilityHandler({
             strictDomains: payload.strictDomains === true,
             app: app(),
             config: getConfig(),
+            service: currentService,
           });
           if (!resolved.domains.includes(startDomain)) resolved.domains.push(startDomain);
         }
@@ -3512,14 +3430,14 @@ export function createMemoryCapabilityHandler({
 
         let result;
         try {
-          result = await service().graph(payload.startId, {
+          result = await currentService.graph(payload.startId, {
             direction: payload.direction === 'incoming' || payload.direction === 'outgoing' ? payload.direction : 'both',
             maxDepth: clampDepth(payload.maxDepth),
             ...(Array.isArray(payload.edgeTypes)
               ? { edgeTypes: payload.edgeTypes.filter((type) => typeof type === 'string') }
               : {}),
             ...(payload.includeArchived !== undefined ? { includeArchived: payload.includeArchived === true } : {}),
-            namespace: resolved.domains,
+            domains: resolved.domains,
           });
         } catch (error) {
           if (error?.code === 'INTERNAL_OBJECT') {
@@ -3528,15 +3446,12 @@ export function createMemoryCapabilityHandler({
           throw error;
         }
 
-        const domainSet = new Set(resolved.domains);
-        const visibleNodes = (result?.visitedNodes ?? [])
-          .filter((node) => !isInternalNode(node) && domainSet.has(domainOfNamespace(node.namespace)));
-        const kept = new Set(visibleNodes.map((node) => node.id));
+        // 深度/方向/边类型、域、内部与归档过滤均已由 MemoryService.graph 执行。
+        const visibleNodes = result?.visitedNodes ?? [];
         const nodes = visibleNodes
           .filter((node) => node.id !== payload.startId)
           .map((node) => nodeView(node, { userId: identitySnapshot().userId }));
         const edges = (result?.visitedEdges ?? [])
-          .filter((edge) => kept.has(edge.source) && kept.has(edge.target))
           .map((edge) => ({
             id: edge.id,
             source: edge.source,

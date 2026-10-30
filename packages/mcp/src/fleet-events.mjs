@@ -9,7 +9,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-/** 任务事件节点的类型（`MebularTaskEventStore` 默认值）。 */
+/** 任务事件节点的类型（fleet 任务事件存储的默认值）。 */
 export const TASK_EVENT_NODE_TYPE = 'task_event';
 
 /** 任务域默认 namespace（`fleet.config.json` 缺省 / 缺文件）。 */

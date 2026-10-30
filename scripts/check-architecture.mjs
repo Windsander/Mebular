@@ -169,6 +169,85 @@ async function checkSidecar(errors) {
 
 const LEGACY_RUNTIME_PATH = '/runtime/v1';
 
+const CAPABILITY_FILE = join(ROOT, 'packages', 'mcp', 'src', 'memory-capability.mjs');
+
+/**
+ * W10d 守卫：普通 MemoryRecord 的 capability 路径只能委托 MemoryService。
+ * 只有 `internal-object` 区段（compact/self_record/context_checkpoint）允许直接
+ * GraphStore 写入；区域由源码标记显式圈定。
+ */
+async function checkMemoryCapabilityWritePath(errors) {
+  const text = await readFile(CAPABILITY_FILE, 'utf-8');
+  const start = text.indexOf('[internal-object-write]');
+  const end = text.indexOf('[/internal-object-write]');
+  if (start === -1 || end === -1 || end <= start) {
+    errors.push('packages/mcp/src/memory-capability.mjs 缺少 internal-object 写入区段标记');
+    return;
+  }
+  const pattern = /\.graph\.(createNode|updateNode|deleteNode)\s*\(/g;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index >= start && match.index < end) continue;
+    const line = text.slice(0, match.index).split('\n').length;
+    errors.push(
+      `packages/mcp/src/memory-capability.mjs:${line} 普通 MemoryRecord 路径不得直接 GraphStore.${match[1]}`,
+    );
+  }
+  if (!text.includes('currentService.writeRecords(')) {
+    errors.push('packages/mcp/src/memory-capability.mjs 的 /write 必须委托 MemoryService.writeRecords');
+  }
+  if (!text.includes('currentService.updateRecord(')) {
+    errors.push('packages/mcp/src/memory-capability.mjs 的 /update 必须委托 MemoryService.updateRecord');
+  }
+}
+
+/**
+ * W10c 守卫：任务 handler 只有 @mebular/fleet 一份。
+ * - MCP 只能适配 fleet 根入口的 TASK_TOOLS，不得 import fleet 内部 store/runtime；
+ * - sidecar 本次不暴露任务，不得 import fleet；
+ * - TASK_TOOLS 定义全仓唯一，且必须在 packages/fleet/src/surface.ts。
+ */
+async function checkTaskSurface(errors) {
+  const sources = [
+    ...await listSourceFiles(join(ROOT, 'packages', 'mcp', 'src')),
+    ...await listSourceFiles(SIDECAR_SRC),
+  ];
+  for (const file of sources) {
+    const text = await readFile(file, 'utf-8');
+    const relFile = relativeId(ROOT, file);
+    const sidecar = file.startsWith(SIDECAR_SRC);
+    for (const spec of importSpecifiers(text)) {
+      if (sidecar && (spec === '@mebular/fleet' || spec.startsWith('@mebular/fleet/') || /(^|\/)fleet(\/|$)/.test(spec))) {
+        errors.push(`${relFile} 的 sidecar 不得 import fleet：${spec}（任务端点本次不实现）`);
+        continue;
+      }
+      if (!sidecar && (spec.includes('packages/fleet/src') || /fleet\/(?:dist|src)\/(?:store|runtime|collab|protocol)(\/|\.|$)/.test(spec))) {
+        errors.push(`${relFile} 不得 import fleet 内部 store/runtime：${spec}（只允许 TASK_TOOLS 根入口）`);
+      }
+    }
+    if (!sidecar && /MebularTaskEventStore|reduceTaskEvents|FleetNode/.test(text)) {
+      errors.push(`${relFile} 不得复制/直接使用 fleet 任务实现（只允许 TASK_TOOLS 适配）`);
+    }
+  }
+
+  const taskToolSources = [
+    ...await listSourceFiles(join(ROOT, 'packages', 'fleet', 'src')),
+    ...await listSourceFiles(join(ROOT, 'packages', 'mcp', 'src')),
+    ...await listSourceFiles(SIDECAR_SRC),
+  ];
+  const definitions = [];
+  for (const file of taskToolSources) {
+    const text = await readFile(file, 'utf-8');
+    if (/export const TASK_TOOLS\b/.test(text)) definitions.push(relativeId(ROOT, file));
+  }
+  if (definitions.length !== 1 || definitions[0] !== 'packages/fleet/src/surface.ts') {
+    errors.push(`TASK_TOOLS 定义必须全仓唯一且在 packages/fleet/src/surface.ts：${definitions.join(', ') || 'none'}`);
+  }
+  const adapter = await readFile(join(ROOT, 'packages', 'mcp', 'src', 'task-tools.mjs'), 'utf-8');
+  if (!adapter.includes('tool.handler(')) {
+    errors.push('packages/mcp/src/task-tools.mjs 必须直接调用 fleet TASK_TOOLS 的 handler');
+  }
+}
+
 /**
  * A8：产品源码不得再提供 0.3 原型 `/runtime/v1`。
  * 只扫产品目录；docs/design、tests、验证脚本和构建产物不在范围内。
@@ -194,6 +273,8 @@ export async function checkArchitecture() {
   await checkCore(errors);
   await checkRuntime(errors);
   await checkSidecar(errors);
+  await checkMemoryCapabilityWritePath(errors);
+  await checkTaskSurface(errors);
   await checkLegacyRuntimePath(errors);
   return errors;
 }

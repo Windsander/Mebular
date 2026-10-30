@@ -103,6 +103,7 @@ export {
   DEFAULT_NAMESPACE,
   normalizeNamespace,
   normalizeNamespaceList,
+  domainOfNamespace,
   matchesNamespace,
   intersectNamespaceAllowLists,
   subscriptionToAllowList,
@@ -131,6 +132,11 @@ export {
   type StoredStructuredMemory,
   type UpdateMemoryRecordInput,
   type UpdatedMemoryRecord,
+  type LifecycleOptions,
+  type ReadScopeOptions,
+  type MemoryDomainStats,
+  type MemoryStats,
+  type MemorySyncStatus,
 } from './memory/MemoryService.js';
 export { computeStateHash, computeStateHashByNamespace, isEvidenceNode } from './core/stateHash.js';
 export * from './hermes/index.js';

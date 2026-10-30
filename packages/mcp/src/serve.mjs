@@ -3634,8 +3634,10 @@ export async function startHttpServer({
           });
         }
         if (path === '/app/namespaces' && req.method === 'GET') {
-          const nodes = await app.graph.listNodes({});
-          const namespaces = [...new Set(nodes.map((n) => n.namespace ?? 'default'))].sort();
+          const stats = service && typeof service.stats === 'function' ? await service.stats() : null;
+          const namespaces = stats
+            ? stats.domains.map((entry) => entry.domain).sort()
+            : (await app.getNamespaceDirectory()).sort();
           return sendJson(res, 200, { ok: true, namespaces, count: namespaces.length });
         }
         if (path === '/app/nodes' && req.method === 'POST') {

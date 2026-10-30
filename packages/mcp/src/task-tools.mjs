@@ -17,11 +17,17 @@ export const TASK_TOOL_SCOPES = Object.fromEntries(
   TASK_TOOLS.map((tool) => [tool.name, tool.scope]),
 );
 
+/** 任务工具在 MCP 无稳定 Agent 身份时的显式默认 actor（与 fleet CLI 缺省一致）。 */
+export const DEFAULT_TASK_AGENT = 'board';
+
 /**
  * 任务工具规格：与记忆面同形（name/title/description/inputSchema/handler(service,args,context)）。
  *
  * `context.home`：工具上下文目录（默认 homeDir()）。
  * `context.mebular`：运行中 daemon 的 live app（缺省 = 离线新建）。
+ * `context.agent`：可选的稳定 Agent 身份（宿主注入时使用）；MCP 协议本身没有
+ * Agent 身份，因此缺省 **显式** 为 `board`，不允许隐式分叉。fleet CLI 的
+ * `--agent` 是同一 handler 的显式操作者覆盖，缺省同样是 `board`。
  */
 export const TASK_TOOL_SPECS = TASK_TOOLS.map((tool) => ({
   name: tool.name,
@@ -31,9 +37,12 @@ export const TASK_TOOL_SPECS = TASK_TOOLS.map((tool) => ({
   surface: 'task',
   handler: async (_service, args, context = {}) => {
     try {
+      const agent = typeof context.agent === 'string' && context.agent.trim() !== ''
+        ? context.agent
+        : DEFAULT_TASK_AGENT;
       const result = await tool.handler(args ?? {}, {
         dir: context.home ?? homeDir(),
-        agent: 'board',
+        agent,
         ...(context.mebular ? { mebular: context.mebular } : {}),
       });
       return json(result);

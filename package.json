@@ -23,6 +23,7 @@
     "packages/mcp/package.json",
     "packages/memory-runtime/src",
     "packages/memory-runtime/dist",
+    "packages/memory-runtime/bin",
     "packages/memory-runtime/package.json",
     "packages/console",
     "packages/fleet/dist",

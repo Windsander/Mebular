@@ -10,15 +10,23 @@
   },
   "private": false,
   "type": "module",
+  "bin": {
+    "mebular-memory-runtime": "./bin/mebular-memory-runtime.mjs"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./sidecar": {
+      "types": "./dist/sidecar/index.d.ts",
+      "import": "./dist/sidecar/index.js"
     }
   },
   "files": [
+    "bin",
     "src",
     "dist"
   ],
@@ -29,6 +37,7 @@
     "access": "public"
   },
   "scripts": {
+    "build": "tsc -p tsconfig.json",
     "prepack": "node ../../scripts/publish-manifest.mjs set",
     "postpack": "node ../../scripts/publish-manifest.mjs restore"
   },

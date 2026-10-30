@@ -1167,6 +1167,21 @@ export class MemoryRuntimeSupervisor {
       if (this.child === lateChild) this.child = null;
     }
 
+    // Windows 的 SIGTERM 是强制终止，sidecar 可能来不及清理 discovery/lock。
+    // 只清理确实属于本 supervisor 已停止子进程的残留，不碰 attach 实例。
+    const stoppedPids = new Set([child?.pid, lateChild?.pid].filter((pid) => Number.isInteger(pid)));
+    for (const pid of stoppedPids) {
+      if (pidAlive(pid)) continue;
+      const discovery = await readDiscovery(this.paths.discoveryPath);
+      if (discovery?.pid === pid) {
+        await unlink(this.paths.discoveryPath).catch(() => undefined);
+      }
+      const lock = await this.#readLockView();
+      if (lock?.pid === pid) {
+        await unlink(this.paths.lockPath).catch(() => undefined);
+      }
+    }
+
     if (includeAttached) {
       await this.#readLockView();
       const discovery = await readDiscovery(this.paths.discoveryPath);
